@@ -341,6 +341,8 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"abs",        "matlab_abs_m",      1, "p"},
       {"inv",        "matlab_inv",        1, "p"},
       {"det",        "matlab_det",        0, "p"},
+      {"svd",        "matlab_svd",        1, "p"},
+      {"eig",        "matlab_eig",        1, "p"},
     };
 
     const Spec *S = nullptr;

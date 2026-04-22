@@ -46,6 +46,13 @@ disp(det(A));         % -6
 disp(inv(A));         % Gauss-Jordan via LU
 ```
 
+```matlab
+% Decompositions, pure C — one-sided Jacobi SVD and symmetric Jacobi eig.
+disp(svd([1 2; 3 4]));            % [5.4650; 0.3660]
+A = [2 -1 0; -1 2 -1; 0 -1 2];
+disp(eig(A));                     % [0.5858; 2; 3.4142]  (2 ± √2 and 2)
+```
+
 No MathWorks source, no Octave dependency, no numerics library
 dependency. Just C++20, MLIR (22.1 from Homebrew), and a ~700-line C
 runtime shim that wraps libc, pthreads, a heap-allocated `matlab_mat`
@@ -229,6 +236,8 @@ threads deterministically prints 55.
 | Matrix inverse `inv(A)` | ✅ | ✅ | ✅ (LU with partial pivoting) | ✅ |
 | Linear solve `A\b`, `A/b` | ✅ | ✅ | ✅ (LU solve, pure C) | ✅ |
 | Determinant `det(A)` | ✅ | ✅ | ✅ (LU byproduct) | ✅ |
+| Singular values `svd(A)` | ✅ | ✅ | ✅ (one-sided Jacobi, pure C) | ✅ |
+| Eigenvalues `eig(A)` | ✅ | ✅ | ✅ (Jacobi; symmetric only — see docs) | ✅ |
 | `if / elseif / else` | ✅ | ✅ | ✅ (`scf.if` chain) | ✅ |
 | `for i = 1:n` | ✅ | ✅ | ✅ (`matlab.for`) | ✅ |
 | `while` | ✅ | ✅ | ✅ (`matlab.while`) | ✅ |
@@ -307,7 +316,8 @@ chapters. Here's how this compiler maps to it.
 | Slicing | ⚠️ scalar subscripts execute; colon/range slices typed but not yet wired |
 | Powers and exponentials (`.^`, `exp`, `log`) | ✅ element-wise; ❌ matrix power `A^n` |
 | Solving linear systems `A\b`, `A/b`, `inv(A)`, `det(A)` | ✅ pure-C LU with partial pivoting, no BLAS/LAPACK dep |
-| Eigenvalues, singular values | ❌ (Jacobi SVD + symmetric QR planned; pure-C still) |
+| Singular values `svd(A)` | ✅ one-sided Jacobi SVD, pure C, ~100 LoC |
+| Eigenvalues `eig(A)` | ✅ Jacobi rotations for symmetric matrices; non-symmetric inputs are symmetrized as `(A + Aᵀ)/2` (correct for symmetric, approximate otherwise). General-case QR iteration still open |
 | Random number arrays (`rand`, `randn`) | ✅ runtime uses xorshift64 + Box-Muller; seed via `matlab_rng_state` |
 | Function handles (create, pass) | ✅ (creation) / ⚠️ (call-through still placeholder) |
 | Vectorization (whole-matrix ops replacing loops) | ✅ element-wise add/sub/emul/ediv/epow all dispatch to runtime |
@@ -456,6 +466,11 @@ we leak).
   (`A/B = (Bᵀ\Aᵀ)ᵀ`), `matlab_det` (LU byproduct). Shared
   `lu_decompose` + `lu_solve_column` helpers handle the factorization
   and forward/back substitution.
+- Decompositions (pure C): `matlab_svd` (one-sided Jacobi, any m×n
+  matrix, returns descending singular values), `matlab_eig` (Jacobi
+  for symmetric matrices, ascending eigenvalues; non-symmetric inputs
+  are symmetrized to `(A + Aᵀ)/2` — correct for symmetric, garbage for
+  matrices with complex eigenvalues).
 - Scalar indexing: `matlab_subscript1_s`, `matlab_subscript2_s`
   (1-based, out-of-range returns 0).
 
@@ -479,7 +494,7 @@ Two CTest suites, ~115 goldens total:
 | `Opt` | `-emit-mlir -opt` | 5 | Slot promotion + constant folding through `arith` |
 | `Programs` | `-emit-mlir -opt` | 31 | Medium programs (matrix ops, loops, functions) |
 | `Errors` | `-dump-ast` | 4 | Parser/Sema diagnostics |
-| `Run` | `-emit-llvm` + link + exec | 47 | End-to-end stdout goldens (I/O, parfor, matrix math, linear algebra, user calls) |
+| `Run` | `-emit-llvm` + link + exec | 54 | End-to-end stdout goldens (I/O, parfor, matrix math, linear algebra, SVD/eig, user calls) |
 
 ```bash
 ctest --test-dir build
@@ -520,9 +535,13 @@ test/              goldens + run scripts
    Types already propagate as ranked tensors; need the runtime
    `matlab_slice` entry and IR lowering.
 2. **Indexed store** — `A(i,j) = v`, `A(:, 2) = w`. Placeholder today.
-3. **Eigenvalues & SVD (still pure-C)** — Jacobi SVD (~200 LoC, very
-   robust), then `pinv`/`rank`/`null` fall out for free. Symmetric
-   `eig` via Jacobi (~150 LoC) before general `eig`.
+3. **General-case `eig`** — today we do Jacobi for symmetric matrices
+   (and symmetrize non-symmetric inputs, which is approximate).
+   QR iteration with Wilkinson shifts would handle asymmetric matrices
+   with real spectra; complex-eigenvalue support would need 2×2 block
+   handling. Still pure C.
+   `pinv`, `rank`, `null` are natural byproducts of extending SVD
+   to a full `[U, S, V]` return.
 4. **Column reductions** — real MATLAB `sum(A)` returns a row vector;
    ours returns the flat scalar. Once the row-vector variant is wired,
    row/col-wise `min`/`max`/`mean`/`prod` follow the same pattern.

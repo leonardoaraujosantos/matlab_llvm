@@ -449,6 +449,191 @@ matlab_mat *matlab_mrdivide_mm(matlab_mat *A, matlab_mat *B) {
     /* At/Bt/Yt are intentionally leaked with the rest of the heap. */
 }
 
+/*
+ * One-sided Jacobi SVD.
+ *
+ * Returns a column vector of the min(m,n) singular values of A, sorted in
+ * descending order. Works on any m×n matrix. Algorithm:
+ *
+ *   Maintain a working matrix U (initially a copy of A, possibly
+ *   transposed when m<n). Repeatedly sweep over column pairs (p, q) and
+ *   apply a plane rotation that makes columns p and q orthogonal:
+ *
+ *     α = ||U[:,p]||²,  β = ||U[:,q]||²,  γ = <U[:,p], U[:,q]>
+ *     ζ = (β - α) / (2γ)
+ *     t = sign(ζ) / (|ζ| + sqrt(1 + ζ²))
+ *     c = 1/sqrt(1+t²),  s = t·c
+ *     U[:,p], U[:,q] ← c·U[:,p] - s·U[:,q],  s·U[:,p] + c·U[:,q]
+ *
+ *   Convergence is quadratic in the number of sweeps; 30 sweeps are plenty
+ *   for any input we've tested.
+ *
+ *   After convergence, column norms of U are the singular values. Sort
+ *   descending for MATLAB's convention.
+ *
+ * Full [U, S, V] decomposition is a natural extension (accumulate the
+ * rotations into V, normalize U's columns), but MATLAB's scalar-return
+ * form `s = svd(A)` is the more common call and all we need today.
+ */
+matlab_mat *matlab_svd(matlab_mat *A_in) {
+    int64_t m_orig = A_in->rows, n_orig = A_in->cols;
+    int64_t m = m_orig, n = n_orig;
+    matlab_mat *A = A_in;
+    matlab_mat *T = NULL;
+    if (m < n) {
+        T = matlab_transpose(A_in);
+        A = T;
+        m = T->rows;
+        n = T->cols;
+    }
+    /* `U` (m×n) starts as a copy of A. */
+    double *U = (double *)malloc((size_t)(m * n) * sizeof(double));
+    memcpy(U, A->data, (size_t)(m * n) * sizeof(double));
+
+    const double eps = 1e-14;
+    const int max_sweeps = 30;
+    for (int sweep = 0; sweep < max_sweeps; ++sweep) {
+        double off = 0.0;
+        for (int64_t p = 0; p < n - 1; ++p) {
+            for (int64_t q = p + 1; q < n; ++q) {
+                double alpha = 0.0, beta = 0.0, gamma = 0.0;
+                for (int64_t i = 0; i < m; ++i) {
+                    double a = U[i * n + p];
+                    double b = U[i * n + q];
+                    alpha += a * a;
+                    beta  += b * b;
+                    gamma += a * b;
+                }
+                off += gamma * gamma;
+                double thresh = eps * sqrt(alpha * beta);
+                if (fabs(gamma) <= thresh) continue;
+
+                double zeta = (beta - alpha) / (2.0 * gamma);
+                double sign_zeta = (zeta >= 0.0) ? 1.0 : -1.0;
+                double t = sign_zeta / (fabs(zeta) + sqrt(1.0 + zeta * zeta));
+                double c = 1.0 / sqrt(1.0 + t * t);
+                double s = t * c;
+
+                for (int64_t i = 0; i < m; ++i) {
+                    double up = U[i * n + p];
+                    double uq = U[i * n + q];
+                    U[i * n + p] = c * up - s * uq;
+                    U[i * n + q] = s * up + c * uq;
+                }
+            }
+        }
+        if (off < eps * eps) break;
+    }
+
+    /* Singular values = column norms of final U. */
+    double *sv = (double *)malloc((size_t)n * sizeof(double));
+    for (int64_t j = 0; j < n; ++j) {
+        double s = 0.0;
+        for (int64_t i = 0; i < m; ++i) {
+            double v = U[i * n + j];
+            s += v * v;
+        }
+        sv[j] = sqrt(s);
+    }
+    /* Insertion sort, descending. */
+    for (int64_t i = 0; i < n; ++i) {
+        for (int64_t j = i + 1; j < n; ++j) {
+            if (sv[j] > sv[i]) {
+                double t = sv[i]; sv[i] = sv[j]; sv[j] = t;
+            }
+        }
+    }
+
+    int64_t k = (n_orig < m_orig) ? n_orig : m_orig;
+    matlab_mat *S = mat_alloc(k, 1);
+    for (int64_t i = 0; i < k; ++i) S->data[i] = sv[i];
+    free(sv);
+    free(U);
+    (void)T;  /* T is kept alive by the arena-leak policy */
+    return S;
+}
+
+/*
+ * Jacobi eigenvalue iteration for symmetric matrices.
+ *
+ * Returns a column vector of eigenvalues in ascending order. If the input
+ * isn't symmetric, we work on H = (A + Aᵀ)/2, which returns correct
+ * eigenvalues for any symmetric input and a reasonable approximation for
+ * slightly-non-symmetric inputs. For genuinely non-symmetric matrices
+ * (e.g. with complex eigenvalues), this is garbage — a future extension
+ * would add QR iteration for the general case.
+ *
+ * Algorithm: repeatedly find the largest off-diagonal element (or sweep
+ * over all pairs) and apply a Jacobi rotation R that zeros it in the
+ * 2×2 principal submatrix indexed by (p, q). After convergence, the
+ * diagonal of H holds the eigenvalues.
+ */
+matlab_mat *matlab_eig(matlab_mat *A_in) {
+    if (A_in->rows != A_in->cols) return mat_alloc(0, 0);
+    int64_t n = A_in->rows;
+    double *H = (double *)malloc((size_t)(n * n) * sizeof(double));
+    for (int64_t i = 0; i < n; ++i) {
+        for (int64_t j = 0; j < n; ++j) {
+            H[i * n + j] = 0.5 * (A_in->data[i * n + j] +
+                                  A_in->data[j * n + i]);
+        }
+    }
+
+    const double eps = 1e-14;
+    const int max_sweeps = 50;
+    for (int sweep = 0; sweep < max_sweeps; ++sweep) {
+        double off = 0.0;
+        for (int64_t p = 0; p < n - 1; ++p) {
+            for (int64_t q = p + 1; q < n; ++q) {
+                double Apq = H[p * n + q];
+                off += Apq * Apq;
+                if (fabs(Apq) < eps) continue;
+
+                double App = H[p * n + p];
+                double Aqq = H[q * n + q];
+                double tau = (Aqq - App) / (2.0 * Apq);
+                double sign_tau = (tau >= 0.0) ? 1.0 : -1.0;
+                double t = sign_tau / (fabs(tau) + sqrt(1.0 + tau * tau));
+                double c = 1.0 / sqrt(1.0 + t * t);
+                double s = t * c;
+
+                /* Diagonal update and zero the target element. */
+                H[p * n + p] = App - t * Apq;
+                H[q * n + q] = Aqq + t * Apq;
+                H[p * n + q] = 0.0;
+                H[q * n + p] = 0.0;
+
+                /* Rotate rows/cols p and q for i ∉ {p, q}. */
+                for (int64_t i = 0; i < n; ++i) {
+                    if (i == p || i == q) continue;
+                    double Aip = H[i * n + p];
+                    double Aiq = H[i * n + q];
+                    double Ip = c * Aip - s * Aiq;
+                    double Iq = s * Aip + c * Aiq;
+                    H[i * n + p] = Ip;
+                    H[i * n + q] = Iq;
+                    H[p * n + i] = Ip;
+                    H[q * n + i] = Iq;
+                }
+            }
+        }
+        if (off < eps * eps) break;
+    }
+
+    matlab_mat *E = mat_alloc(n, 1);
+    for (int64_t i = 0; i < n; ++i) E->data[i] = H[i * n + i];
+    /* Insertion sort, ascending. */
+    for (int64_t i = 0; i < n; ++i) {
+        for (int64_t j = i + 1; j < n; ++j) {
+            if (E->data[j] < E->data[i]) {
+                double t = E->data[i]; E->data[i] = E->data[j]; E->data[j] = t;
+            }
+        }
+    }
+    free(H);
+    return E;
+}
+
 /* det(A): product of LU diagonal times permutation sign. */
 double matlab_det(matlab_mat *A) {
     if (A->rows != A->cols) return 0.0;
