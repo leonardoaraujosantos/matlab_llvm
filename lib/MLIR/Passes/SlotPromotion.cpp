@@ -80,7 +80,15 @@ void promoteBlock(mlir::Block &BB, bool &Changed) {
   // Walk the block in order, maintaining the latest stored Value per slot.
   llvm::DenseMap<mlir::Value, mlir::Value> Current;
 
-  llvm::SmallVector<mlir::Operation *, 32> ToErase;
+  // Loads we've SSA-replaced — safe to erase unconditionally since their
+  // results now have no users.
+  llvm::SmallVector<mlir::Operation *, 32> LoadsToErase;
+  // Stores keyed by their slot's defining op. We only erase these once the
+  // slot is confirmed fully promoted — a mid-block type-mismatched load
+  // demotes the slot, and in that case the surviving load needs the store
+  // to keep providing its value.
+  llvm::DenseMap<mlir::Operation *,
+                 llvm::SmallVector<mlir::Operation *, 4>> StoresPerSlot;
 
   for (mlir::Operation &Op : llvm::make_early_inc_range(BB)) {
     if (isMatlabOp(&Op, "matlab.store")) {
@@ -89,7 +97,7 @@ void promoteBlock(mlir::Block &BB, bool &Changed) {
       if (auto *Def = Slot.getDefiningOp();
           Def && Promotable.count(Def)) {
         Current[Slot] = Val;
-        ToErase.push_back(&Op);
+        StoresPerSlot[Def].push_back(&Op);
       }
       continue;
     }
@@ -103,24 +111,27 @@ void promoteBlock(mlir::Block &BB, bool &Changed) {
           // Only replace if the value type matches the load result type.
           if (V.getType() == Op.getResult(0).getType()) {
             Op.getResult(0).replaceAllUsesWith(V);
-            ToErase.push_back(&Op);
+            LoadsToErase.push_back(&Op);
             continue;
           }
         }
         // Load with no prior store (undef use) or mismatched type — don't
-        // promote this slot.
+        // promote this slot. The staged stores for this slot will NOT be
+        // erased, so the surviving load keeps reading the right value.
         Promotable.erase(Def);
         Current.erase(Slot);
       }
       continue;
     }
-    // Any other op that happens to name the slot would have already been
-    // rejected by isLocalSlot. No further bookkeeping needed.
   }
 
-  // Erase replaced loads and stores, then the allocs themselves.
-  for (mlir::Operation *Op : ToErase) Op->erase();
+  // Erase replaced loads (their results have no users after RAUW).
+  for (mlir::Operation *Op : LoadsToErase) Op->erase();
+  // For slots that stayed promotable, erase staged stores and the alloc.
   for (mlir::Operation *Alloc : Promotable) {
+    auto It = StoresPerSlot.find(Alloc);
+    if (It != StoresPerSlot.end())
+      for (mlir::Operation *S : It->second) S->erase();
     if (Alloc->getResult(0).use_empty()) {
       Alloc->erase();
       Changed = true;
