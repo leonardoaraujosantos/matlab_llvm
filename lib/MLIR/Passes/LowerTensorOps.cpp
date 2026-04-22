@@ -128,6 +128,11 @@ private:
   // Scalar subscripting of a matrix pointer: A(i,j), A(i).
   bool rewriteSubscript();
 
+  // --- Indexed store: A(rows, cols) = V, A(idx) = V. The lowering front-end
+  // emits these as matlab.call_builtin @__subscript_store(A, i, j, ..., V).
+  // Operand count and types drive dispatch to matlab_slice_store{1,2}[_scalar].
+  bool rewriteSubscriptStore();
+
   // Try to gather a contiguous row-major element list from a
   // `matlab.concat_col(concat_row(...), concat_row(...), ...)` chain.
   // Returns (rows, cols, elements) if all leaves are f64 values.
@@ -727,6 +732,90 @@ bool TensorLowering::rewriteSubscript() {
   return Changed;
 }
 
+bool TensorLowering::rewriteSubscriptStore() {
+  /* The frontend emits A(i, ..., k) = V as
+   *   matlab.call_builtin @__subscript_store(%A, %i, ..., %k, %V)
+   * Operand 0 is the base matrix; operands 1..N-1 are indices; operand N-1
+   * is the RHS value. Dispatch to matlab_slice_store{1,2}[_scalar] based
+   * on index count and RHS type. */
+  SmallVector<Operation *> Stores;
+  Mod.walk([&](Operation *Op) {
+    if (!isMatlabOp(Op, "matlab.call_builtin")) return;
+    auto CA = Op->getAttrOfType<StringAttr>("callee");
+    if (CA && CA.getValue() == "__subscript_store") Stores.push_back(Op);
+  });
+
+  bool Changed = false;
+  for (Operation *Op : Stores) {
+    unsigned N = Op->getNumOperands();
+    /* Need base + at least one index + RHS => N >= 3. */
+    if (N < 3) continue;
+    Value Base = Op->getOperand(0);
+    Value Rhs  = Op->getOperand(N - 1);
+    unsigned NIdx = N - 2;
+    /* Only 1-D and 2-D indexing wired up. */
+    if (NIdx < 1 || NIdx > 2) continue;
+    if (Base.getType() != PtrTy) continue;
+
+    B.setInsertionPoint(Op);
+
+    /* Wrap each index as ptr. */
+    auto wrap = [&](Value V) -> Value {
+      if (V.getType() == PtrTy) return V;
+      if (V.getType() == F64) {
+        auto Fn = rt("matlab_mat_from_scalar", PtrTy, {F64});
+        auto NC = LLVM::CallOp::create(B, Op->getLoc(), Fn, ValueRange{V});
+        return NC.getResult();
+      }
+      return Value{};
+    };
+
+    Value I1 = wrap(Op->getOperand(1));
+    if (!I1) continue;
+    Value I2 = (NIdx == 2) ? wrap(Op->getOperand(2)) : Value{};
+    if (NIdx == 2 && !I2) continue;
+
+    bool RhsScalar = (Rhs.getType() == F64);
+    bool RhsPtr    = (Rhs.getType() == PtrTy);
+    if (!RhsScalar && !RhsPtr) continue;
+
+    if (NIdx == 2) {
+      if (RhsScalar) {
+        auto Fn = rt("matlab_slice_store2_scalar", VoidTy,
+                     {PtrTy, PtrTy, PtrTy, F64});
+        LLVM::CallOp::create(B, Op->getLoc(), Fn,
+                              ValueRange{Base, I1, I2, Rhs});
+      } else {
+        auto Fn = rt("matlab_slice_store2", VoidTy,
+                     {PtrTy, PtrTy, PtrTy, PtrTy});
+        LLVM::CallOp::create(B, Op->getLoc(), Fn,
+                              ValueRange{Base, I1, I2, Rhs});
+      }
+    } else {
+      if (RhsScalar) {
+        auto Fn = rt("matlab_slice_store1_scalar", VoidTy,
+                     {PtrTy, PtrTy, F64});
+        LLVM::CallOp::create(B, Op->getLoc(), Fn,
+                              ValueRange{Base, I1, Rhs});
+      } else {
+        auto Fn = rt("matlab_slice_store1", VoidTy,
+                     {PtrTy, PtrTy, PtrTy});
+        LLVM::CallOp::create(B, Op->getLoc(), Fn,
+                              ValueRange{Base, I1, Rhs});
+      }
+    }
+
+    /* The placeholder call produced a none-typed result that nobody reads,
+     * but we still need to RAUW any (impossible) consumers before erasing. */
+    for (auto R : Op->getResults()) {
+      (void)R;
+    }
+    Op->erase();
+    Changed = true;
+  }
+  return Changed;
+}
+
 bool TensorLowering::rewriteDispMatrix() {
   SmallVector<Operation *> Disps;
   Mod.walk([&](Operation *Op) {
@@ -762,6 +851,7 @@ bool TensorLowering::run() {
     Changed |= rewriteUnaryNeg();
     Changed |= rewriteRange();
     Changed |= rewriteSubscript();
+    Changed |= rewriteSubscriptStore();
     Changed |= rewriteDispMatrix();
     if (!Changed) break;
     AnyChanged = true;

@@ -594,8 +594,20 @@ void Lowerer::lowerLValueStore(const Expr &LHS, mlir::Value Rhs) {
   case NodeKind::CallOrIndex: {
     auto &C = static_cast<const CallOrIndex &>(LHS);
     llvm::SmallVector<mlir::Value, 4> Os;
-    if (C.Callee) Os.push_back(lowerExpr(*C.Callee));
-    for (const Expr *A : C.Args) if (A) Os.push_back(lowerExpr(*A));
+    mlir::Value Base;
+    if (C.Callee) {
+      Base = lowerExpr(*C.Callee);
+      Os.push_back(Base);
+    }
+    // Push subscript context so any `end` inside an index expression
+    // resolves to size(Base, dim).
+    for (size_t a = 0; a < C.Args.size(); ++a) {
+      const Expr *Arg = C.Args[a];
+      if (!Arg) continue;
+      if (Base) SubscriptCtx.push_back({Base, (int64_t)(a + 1)});
+      Os.push_back(lowerExpr(*Arg));
+      if (Base) SubscriptCtx.pop_back();
+    }
     if (Rhs) Os.push_back(Rhs);
     mlir::NamedAttribute Cal(
         mlir::StringAttr::get(&MCtx, "callee"),
