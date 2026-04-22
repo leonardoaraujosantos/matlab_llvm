@@ -159,11 +159,23 @@ int main(int Argc, char **Argv) {
         // direct block argument (f64) into disp/fprintf rather than via an
         // outer slot that would still be `none`-typed at LowerIO time.
         mlirgen::runOutlineParfor(M);
-        // After the parfor pass redirects slot loads to the block-arg
-        // value, previously-`none`-typed operands of matlab.matmul/add/etc.
-        // inside the outlined body become f64. Re-run scalar-to-arith so
-        // those newly-matchable ops collapse to arith.mulf / addf / etc.
-        mlirgen::runLowerScalarsToArith(M);
+        // Iterate scalar-to-arith + user-call lowering to a fixpoint so
+        // type refinement propagates across chained user calls. Each
+        // iteration: LowerScalarsToArith folds scalar ops that became
+        // matchable after previous arg/result retyping; LowerUserCalls
+        // refines func.func signatures from call-site types and converts
+        // matlab.call -> func.call only where operand types now match.
+        // Bounded iteration count protects against pathological loops.
+        for (int Iter = 0; Iter < 8; ++Iter) {
+          bool A = mlirgen::runLowerScalarsToArith(M);
+          bool B = mlirgen::runLowerUserCalls(M);
+          if (!A && !B) break;
+        }
+        // After user-call refinement, any surviving matlab.alloc whose
+        // result type is now a scalar primitive can be promoted to
+        // llvm.alloca. This catches function-body locals that weren't
+        // promoted by SlotPromotion (because they're used across blocks).
+        mlirgen::runLowerScalarSlots(M);
         mlirgen::runLowerIO(M);
         std::string LL = mlirgen::lowerToLLVMIR(M);
         if (LL.empty()) return 1;

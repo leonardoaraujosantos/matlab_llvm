@@ -94,6 +94,8 @@ if(MATLAB_LLVM_WITH_MLIR)
     lib/MLIR/Passes/LowerScalarsToArith.cpp
     lib/MLIR/Passes/LowerIO.cpp
     lib/MLIR/Passes/LowerParfor.cpp
+    lib/MLIR/Passes/LowerUserCalls.cpp
+    lib/MLIR/Passes/LowerScalarSlots.cpp
     lib/MLIR/Passes/LowerToLLVMIR.cpp
   )
   target_link_libraries(MatlabMLIR

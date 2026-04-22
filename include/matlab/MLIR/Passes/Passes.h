@@ -38,6 +38,29 @@ bool runLowerScalarsToArith(mlir::ModuleOp M);
 /// module is directly linkable into an executable.
 bool runLowerIO(mlir::ModuleOp M);
 
+/// Convert every surviving `matlab.alloc` whose result type is a scalar
+/// primitive (f32/f64/integer) into an `llvm.alloca`, rewriting all loads
+/// and stores accordingly. Slot allocs with a `none` or non-scalar result
+/// (cell/struct/tensor) are left for later phases. Must run after
+/// SlotPromotion (which erases intra-block slots) and after type
+/// refinement of user-defined functions.
+bool runLowerScalarSlots(mlir::ModuleOp M);
+
+/// Lowers user-defined function calls: walks every matlab.call @fname(args)
+/// in the module, and (a) retypes the target func.func's signature + entry
+/// block arguments to match the call-site argument types when the original
+/// signature was `none`-typed (single-site monomorphization), (b) rewrites
+/// the matlab.call into a func.call with the refined types. Calls to
+/// functions that the module doesn't declare are left in place.
+///
+/// Also updates the function's result types by inspecting its func.return
+/// operand types, so user-defined functions return concrete values rather
+/// than `none`. Callers that consumed the old `none` result have their uses
+/// rewritten to the new typed value; consumers that can't accept the new
+/// type (unlikely in our pipeline — the main consumers are matlab.*
+/// unregistered ops that don't type-check) would error at verify time.
+bool runLowerUserCalls(mlir::ModuleOp M);
+
 /// Outlines each matlab.parfor body into a private func.func and replaces
 /// the parfor op with an llvm.call to matlab_parfor_dispatch, which spawns
 /// one pthread per iteration. v1 supports bodies that only reference the
