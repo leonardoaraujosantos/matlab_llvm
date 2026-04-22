@@ -252,8 +252,12 @@ threads deterministically prints 55.
 | User-defined function calls — chained / recursive | ✅ | ✅ | ✅ | ✅ |
 | **`parfor i = 1:N`** (one pthread per iteration) | ✅ | ✅ | ✅ (outlined body) | ✅ |
 | **`parfor` with `x = x + rhs` reductions** | ✅ | ✅ | ✅ (atomic add) | ✅ |
-| Anonymous functions `@(x) x^2` | ✅ | ✅ | ⚠️ created but not called | — |
-| Function handles `@name` | ✅ | ✅ | ⚠️ created but not called | — |
+| Anonymous functions `@(x) x^2` | ✅ | ✅ | ✅ outlined to `llvm.func` | ✅ |
+| Calls through handles `f(x)` | ✅ | ✅ | ✅ `matlab.call_indirect` → LLVM function pointer | ✅ |
+| Function handles `@name` | ✅ | ✅ | ⚠️ handle creates ptr; direct call works via indirect path | ✅ |
+| Logical indexing `A(A > 0)` | ✅ | ✅ | ✅ (masked slice) | ✅ |
+| Empty matrix `A = []` / deallocate | ✅ | ✅ | ✅ (`matlab_empty_mat`) | ✅ |
+| Matrix comparisons `A > B`, `A == s` etc. | ✅ | ✅ | ✅ (returns 0/1 matrix) | ✅ |
 | `global`, `persistent` | ✅ (parsed) | ⚠️ | ❌ | — |
 | `try / catch` | ✅ | ✅ | ⚠️ catch dropped | — |
 | `classdef` (OOP) | ❌ | ❌ | ❌ | — |
@@ -498,7 +502,7 @@ Two CTest suites, ~115 goldens total:
 | `Opt` | `-emit-mlir -opt` | 5 | Slot promotion + constant folding through `arith` |
 | `Programs` | `-emit-mlir -opt` | 31 | Medium programs (matrix ops, loops, functions) |
 | `Errors` | `-dump-ast` | 4 | Parser/Sema diagnostics |
-| `Run` | `-emit-llvm` + link + exec | 67 | End-to-end stdout goldens (I/O, parfor, matrix math, linear algebra, SVD/eig, reductions, slicing, user calls) |
+| `Run` | `-emit-llvm` + link + exec | 70 | End-to-end stdout goldens — I/O, parfor, matrix math, linear algebra, SVD/eig, reductions, slicing, indexed store, logical indexing, anon calls, user calls |
 
 ```bash
 ctest --test-dir build
@@ -535,20 +539,24 @@ test/              goldens + run scripts
 
 ## Roadmap, ordered by what unblocks the most programs
 
-1. **Anonymous function calls** — the handle is created today; wire
-   `matlab.call_indirect` to an LLVM function pointer call.
-2. **General-case `eig`** — today we do Jacobi for symmetric matrices
+1. **General-case `eig`** — today we do Jacobi for symmetric matrices
    (and symmetrize non-symmetric inputs, which is approximate).
    QR iteration with Wilkinson shifts would handle asymmetric matrices
    with real spectra; complex-eigenvalue support would need 2×2 block
    handling. Still pure C.
    `pinv`, `rank`, `null` are natural byproducts of extending SVD
    to a full `[U, S, V]` return.
-3. **Logical indexing** `A(A > 0)` — mask-based subscript via a new
-   `matlab_logical_mask` runtime entry.
-4. **Row deletion** `A(2, :) = []` — runtime entries (`matlab_erase_rows`,
-   `matlab_erase_cols`) are ready; need the frontend to detect the
-   `= []` pattern and route to them.
+2. **Row deletion** `A(2, :) = []` — runtime entries
+   (`matlab_erase_rows`, `matlab_erase_cols`) are ready; need the
+   frontend to detect the `= []` pattern and route to them.
+3. **`clear A`** — partially wired (frontend lowers it, but intra-block
+   slot promotion can erase the store before a following read). Needs
+   either a sentinel op that survives promotion or explicit volatile
+   stores.
+4. **Anon-function captures** — today an anon with no captures outlines
+   cleanly. Capturing outer values would need a closure struct passed
+   alongside the function pointer (similar to parfor's reduction state
+   plumbing).
 5. **`classdef`**, cells, structs with a proper boxed-value layout.
 6. **Multi-callsite polymorphism** — today a function called from two
    sites with different concrete types stays `none`. Template-style
