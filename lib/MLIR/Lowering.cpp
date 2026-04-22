@@ -747,15 +747,19 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
   }
   case NodeKind::MatrixLiteral: {
     auto &M = static_cast<const MatrixLiteral &>(E);
+    bool SingleRow = M.Rows.size() == 1;
     llvm::SmallVector<mlir::Value, 4> Rows;
     for (auto &R : M.Rows) {
       llvm::SmallVector<mlir::Value, 4> Cs;
       for (const Expr *C : R) if (C) Cs.push_back(lowerExpr(*C));
-      mlir::Value Row = emitUnreg("matlab.concat_row", Cs,
-                                  mlir::NoneType::get(&MCtx), L);
+      // For a single-row literal the concat_row *is* the matrix result, so
+      // give it the sema-inferred type. Multi-row literals feed concat_col
+      // and the row type stays opaque.
+      mlir::Type RowTy = SingleRow ? RT : mlir::NoneType::get(&MCtx);
+      mlir::Value Row = emitUnreg("matlab.concat_row", Cs, RowTy, L);
       Rows.push_back(Row);
     }
-    if (Rows.size() == 1) return Rows.front();
+    if (SingleRow) return Rows.front();
     return emitUnreg("matlab.concat_col", Rows, RT, L);
   }
   case NodeKind::CellLiteral: {

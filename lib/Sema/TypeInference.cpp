@@ -399,11 +399,46 @@ const Type *TypeInference::visitPostfix(PostfixOpExpr &P, Env &Env) {
   return TC.arrayOf(A.Elt, Shape::unknown());
 }
 
+// Try to constant-fold an expression tree into an int64_t. Returns nullopt
+// if any leaf isn't a plain integer literal (possibly behind a unary +/-).
+static std::optional<int64_t> foldIntExpr(const Expr *E) {
+  if (!E) return std::nullopt;
+  if (auto *L = dynamic_cast<const IntegerLiteral *>(E)) {
+    try { return std::stoll(std::string(L->Text)); }
+    catch (...) { return std::nullopt; }
+  }
+  if (auto *U = dynamic_cast<const UnaryOpExpr *>(E)) {
+    auto V = foldIntExpr(U->Operand);
+    if (!V) return std::nullopt;
+    if (U->Op == UnOp::Minus) return -*V;
+    if (U->Op == UnOp::Plus)  return  *V;
+    return std::nullopt;
+  }
+  return std::nullopt;
+}
+
 const Type *TypeInference::visitRange(RangeExpr &R, Env &Env) {
   if (R.Start) visit(*R.Start, Env);
   if (R.Step)  visit(*R.Step,  Env);
   if (R.End)   visit(*R.End,   Env);
-  // a:b produces a row vector of doubles (dynamic length unless we can fold).
+
+  // Try to fold the length. MATLAB range length = floor((end-start)/step)+1,
+  // with step defaulting to 1, and 0 elements if the sign of (end-start)
+  // doesn't match step.
+  auto FS = foldIntExpr(R.Start);
+  auto FE = foldIntExpr(R.End);
+  int64_t Step = 1;
+  if (R.Step) {
+    if (auto S = foldIntExpr(R.Step)) Step = *S;
+    else return TC.arrayOf(Dtype::Double, Shape::vector(-1));
+  }
+  if (FS && FE && Step != 0) {
+    int64_t Diff = *FE - *FS;
+    int64_t Len = (Step > 0 && Diff < 0) || (Step < 0 && Diff > 0)
+                    ? 0
+                    : Diff / Step + 1;
+    return TC.arrayOf(Dtype::Double, Shape::vector(Len));
+  }
   return TC.arrayOf(Dtype::Double, Shape::vector(-1));
 }
 
@@ -592,20 +627,67 @@ const Type *TypeInference::visitCallOrIndex(CallOrIndex &C, Env &Env) {
   for (Expr *A : C.Args) if (A) visit(*A, Env);
   if (C.Callee && C.Callee->Ty) {
     if (C.Callee->Ty->K == Type::Kind::Array) {
-      auto &A = static_cast<const ArrayType &>(*C.Callee->Ty);
-      // Approximation: scalar indices -> scalar element; otherwise unknown
-      // shape of the same element type.
-      bool AllScalar = true;
-      for (Expr *Arg : C.Args) {
-        if (!Arg || !Arg->Ty || Arg->Ty->K != Type::Kind::Array) {
-          AllScalar = false;
-          break;
+      auto &Arr = static_cast<const ArrayType &>(*C.Callee->Ty);
+
+      // Classify each index: scalar / range-of-known-length / colon-all /
+      // unknown-vector. Returns (length, known). `length == -1, known=true`
+      // means "use the callee's dim as-is" (colon).
+      auto classifyIdx = [&](const Expr *A) -> std::pair<int64_t, bool> {
+        if (!A) return {-1, false};
+        if (A->Kind == NodeKind::ColonExpr) return {-1, true};
+        if (auto *R = dynamic_cast<const RangeExpr *>(A)) {
+          if (R->Ty && R->Ty->K == Type::Kind::Array) {
+            auto &RT = static_cast<const ArrayType &>(*R->Ty);
+            if (RT.S.K == Shape::Rank::Vector && !RT.S.Dims.empty() &&
+                RT.S.Dims[0] >= 0)
+              return {RT.S.Dims[0], true};
+          }
+          return {-1, false};
         }
-        auto &AT = static_cast<const ArrayType &>(*Arg->Ty);
-        if (AT.S.K != Shape::Rank::Scalar) { AllScalar = false; break; }
+        if (!A->Ty || A->Ty->K != Type::Kind::Array) return {-1, false};
+        auto &AT = static_cast<const ArrayType &>(*A->Ty);
+        if (AT.S.K == Shape::Rank::Scalar) return {1, true};
+        if (AT.S.K == Shape::Rank::Vector && !AT.S.Dims.empty() &&
+            AT.S.Dims[0] >= 0)
+          return {AT.S.Dims[0], true};
+        return {-1, false};
+      };
+
+      // All scalar indices collapse to a scalar element.
+      bool AllScalar = true;
+      for (const Expr *Arg : C.Args) {
+        auto [L, Known] = classifyIdx(Arg);
+        if (!(Known && L == 1)) { AllScalar = false; break; }
       }
-      if (AllScalar) return TC.scalar(A.Elt);
-      return TC.arrayOf(A.Elt, Shape::unknown());
+      if (AllScalar) return TC.scalar(Arr.Elt);
+
+      // Try to recover a ranked result when we're doing 2D subscripting and
+      // each index's output length is known (either folded or a colon whose
+      // length is the matching callee dim).
+      if (C.Args.size() == 2 && Arr.S.K == Shape::Rank::Matrix &&
+          Arr.S.Dims.size() == 2) {
+        auto [L0, K0] = classifyIdx(C.Args[0]);
+        auto [L1, K1] = classifyIdx(C.Args[1]);
+        if (K0 && K1) {
+          int64_t R = (L0 < 0) ? Arr.S.Dims[0] : L0;
+          int64_t Co = (L1 < 0) ? Arr.S.Dims[1] : L1;
+          if (R == 1 && Co >= 0)
+            return TC.arrayOf(Arr.Elt, Shape::vector(Co));
+          if (Co == 1 && R >= 0)
+            return TC.arrayOf(Arr.Elt, Shape::matrix(R, 1));
+          if (R >= 0 && Co >= 0)
+            return TC.arrayOf(Arr.Elt, Shape::matrix(R, Co));
+        }
+      }
+      // One-arg indexing of a vector: return a vector of the index length.
+      if (C.Args.size() == 1 && Arr.S.K == Shape::Rank::Vector) {
+        auto [L, K] = classifyIdx(C.Args[0]);
+        if (K) {
+          if (L < 0 && !Arr.S.Dims.empty()) L = Arr.S.Dims[0];
+          if (L >= 0) return TC.arrayOf(Arr.Elt, Shape::vector(L));
+        }
+      }
+      return TC.arrayOf(Arr.Elt, Shape::unknown());
     }
     if (C.Callee->Ty->K == Type::Kind::StringArray) {
       return TC.stringScalar();

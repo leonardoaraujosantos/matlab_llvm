@@ -146,8 +146,79 @@ LogicalResult rewriteDispCall(Operation *Call, OpBuilder &B,
     return success();
   }
 
-  // Unhandled type — leave the op in place.
-  return failure();
+  // tensor<NxF64> (vector) / tensor<MxNxF64> (matrix) literal arguments:
+  // walk the matlab.concat_* chain back to scalar defining ops, stack-alloc
+  // a contiguous row-major buffer, fill it, and call the appropriate runtime
+  // entry point.
+  auto rankedTy = mlir::dyn_cast<RankedTensorType>(Arg.getType());
+  if (!rankedTy || rankedTy.getElementType() != F64 ||
+      !rankedTy.hasStaticShape()) return failure();
+
+  auto Shape = rankedTy.getShape();
+  int64_t Rows, Cols;
+  llvm::SmallVector<Value, 16> Elements; // row-major
+
+  Operation *Def = Arg.getDefiningOp();
+  if (!Def) return failure();
+
+  if (Shape.size() == 1) {
+    // Row vector: the producer should be a matlab.concat_row.
+    Rows = 1;
+    Cols = Shape[0];
+    if (!isMatlabOp(Def, "matlab.concat_row")) return failure();
+    if ((int64_t)Def->getNumOperands() != Cols) return failure();
+    for (Value V : Def->getOperands()) {
+      if (V.getType() != F64) return failure();
+      Elements.push_back(V);
+    }
+  } else if (Shape.size() == 2) {
+    Rows = Shape[0];
+    Cols = Shape[1];
+    if (!isMatlabOp(Def, "matlab.concat_col")) return failure();
+    if ((int64_t)Def->getNumOperands() != Rows) return failure();
+    for (Value RowV : Def->getOperands()) {
+      Operation *Row = RowV.getDefiningOp();
+      if (!isMatlabOp(Row, "matlab.concat_row")) return failure();
+      if ((int64_t)Row->getNumOperands() != Cols) return failure();
+      for (Value E : Row->getOperands()) {
+        if (E.getType() != F64) return failure();
+        Elements.push_back(E);
+      }
+    }
+  } else {
+    return failure();
+  }
+
+  // Stack-allocate Rows*Cols doubles, then GEP + store each element.
+  auto Loc = Call->getLoc();
+  Value One = LLVM::ConstantOp::create(
+      B, Loc, I64, B.getI64IntegerAttr(1));
+  auto ArrayTy = LLVM::LLVMArrayType::get(F64, (unsigned)(Rows * Cols));
+  Value BufPtr = LLVM::AllocaOp::create(
+      B, Loc, PtrTy, ArrayTy, One, /*alignment=*/0);
+  for (int64_t k = 0; k < Rows * Cols; ++k) {
+    Value Idx = LLVM::ConstantOp::create(
+        B, Loc, I64, B.getI64IntegerAttr(k));
+    Value ElemPtr = LLVM::GEPOp::create(
+        B, Loc, PtrTy, F64, BufPtr, ValueRange{Idx});
+    LLVM::StoreOp::create(B, Loc, Elements[k], ElemPtr);
+  }
+
+  if (Shape.size() == 1) {
+    auto Fn = getOrInsertRuntimeFunc(B, M, "matlab_disp_vec_f64",
+                                     VoidTy, {PtrTy, I64});
+    Value NV = LLVM::ConstantOp::create(B, Loc, I64, B.getI64IntegerAttr(Cols));
+    LLVM::CallOp::create(B, Loc, Fn, ValueRange{BufPtr, NV});
+  } else {
+    auto Fn = getOrInsertRuntimeFunc(B, M, "matlab_disp_mat_f64",
+                                     VoidTy, {PtrTy, I64, I64});
+    Value MV = LLVM::ConstantOp::create(B, Loc, I64, B.getI64IntegerAttr(Rows));
+    Value NV = LLVM::ConstantOp::create(B, Loc, I64, B.getI64IntegerAttr(Cols));
+    LLVM::CallOp::create(B, Loc, Fn, ValueRange{BufPtr, MV, NV});
+  }
+
+  Call->erase();
+  return success();
 }
 
 LogicalResult rewriteFprintfCall(Operation *Call, OpBuilder &B,
@@ -243,13 +314,21 @@ bool runLowerIO(ModuleOp M) {
     }
   }
 
-  // Collect matlab.const_char ops that have no more uses after the rewrites.
-  llvm::SmallVector<Operation *, 16> DeadCharConsts;
-  M.walk([&](Operation *Op) {
-    if (isMatlabOp(Op, "matlab.const_char") && Op->use_empty())
-      DeadCharConsts.push_back(Op);
-  });
-  for (Operation *Op : DeadCharConsts) { Op->erase(); Changed = true; }
+  // Iteratively erase matlab.const_char / matlab.concat_* ops that became
+  // dead once their disp consumers were rewritten. We loop because erasing a
+  // concat_col makes its concat_row operands dead in the next sweep.
+  for (;;) {
+    llvm::SmallVector<Operation *, 16> Dead;
+    M.walk([&](Operation *Op) {
+      if ((isMatlabOp(Op, "matlab.const_char") ||
+           isMatlabOp(Op, "matlab.concat_row") ||
+           isMatlabOp(Op, "matlab.concat_col")) &&
+          Op->use_empty())
+        Dead.push_back(Op);
+    });
+    if (Dead.empty()) break;
+    for (Operation *Op : Dead) { Op->erase(); Changed = true; }
+  }
 
   renameScriptToMain(M);
   return Changed;

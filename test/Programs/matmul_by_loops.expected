@@ -28,19 +28,19 @@ module {
     %14 = "matlab.concat_row"(%cst, %cst) : (f64, f64) -> none
     %15 = "matlab.concat_col"(%13, %14) : (none, none) -> tensor<2x2xf64>
     "matlab.store"(%15, %4) : (tensor<2x2xf64>, tensor<2x2xf64>) -> ()
-    %16 = "matlab.range"(%cst_7, %cst_6) {has_step = false} : (f64, f64) -> tensor<?xf64>
+    %16 = "matlab.range"(%cst_7, %cst_6) {has_step = false} : (f64, f64) -> tensor<2xf64>
     "matlab.for"(%16) ({
     ^bb0(%arg0: f64):
       %cst_8 = arith.constant 1.000000e+00 : f64
       %cst_9 = arith.constant 2.000000e+00 : f64
-      %17 = "matlab.range"(%cst_8, %cst_9) {has_step = false} : (f64, f64) -> tensor<?xf64>
+      %17 = "matlab.range"(%cst_8, %cst_9) {has_step = false} : (f64, f64) -> tensor<2xf64>
       "matlab.for"(%17) ({
       ^bb0(%arg1: f64):
         %cst_10 = arith.constant 2.000000e+00 : f64
         %cst_11 = arith.constant 1.000000e+00 : f64
         %cst_12 = arith.constant 0.000000e+00 : f64
         "matlab.store"(%cst_12, %3) : (f64, f64) -> ()
-        %18 = "matlab.range"(%cst_11, %cst_10) {has_step = false} : (f64, f64) -> tensor<?xf64>
+        %18 = "matlab.range"(%cst_11, %cst_10) {has_step = false} : (f64, f64) -> tensor<2xf64>
         "matlab.for"(%18) ({
         ^bb0(%arg2: f64):
           %24 = "matlab.load"(%3) : (f64) -> f64
@@ -56,16 +56,16 @@ module {
           %34 = "matlab.add"(%24, %33) : (f64, tensor<*xf64>) -> tensor<*xf64>
           "matlab.store"(%34, %3) : (tensor<*xf64>, f64) -> ()
           "matlab.yield"() : () -> ()
-        }) {var = "k"} : (tensor<?xf64>) -> ()
+        }) {var = "k"} : (tensor<2xf64>) -> ()
         %19 = "matlab.load"(%3) : (f64) -> f64
         %20 = "matlab.load"(%4) : (tensor<2x2xf64>) -> tensor<2x2xf64>
         %21 = "matlab.load"(%2) : (none) -> none
         %22 = "matlab.load"(%0) : (none) -> none
         %23 = "matlab.call_builtin"(%20, %21, %22, %19) {callee = "__subscript_store"} : (tensor<2x2xf64>, none, none, f64) -> none
         "matlab.yield"() : () -> ()
-      }) {var = "j"} : (tensor<?xf64>) -> ()
+      }) {var = "j"} : (tensor<2xf64>) -> ()
       "matlab.yield"() : () -> ()
-    }) {var = "i"} : (tensor<?xf64>) -> ()
+    }) {var = "i"} : (tensor<2xf64>) -> ()
     return
   }
 }

@@ -3,20 +3,14 @@ module {
     %cst = arith.constant 6.000000e+00 : f64
     %cst_0 = arith.constant 5.000000e+00 : f64
     %cst_1 = arith.constant 4.000000e+00 : f64
-    %cst_2 = arith.constant 3.000000e+00 : f64
+    %cst_2 = arith.constant 1.000000e+00 : f64
     %cst_3 = arith.constant 2.000000e+00 : f64
-    %cst_4 = arith.constant 1.000000e+00 : f64
-    %0 = "matlab.alloc"() {name = "b"} : () -> tensor<3xf64>
-    %1 = "matlab.alloc"() {name = "a"} : () -> tensor<3xf64>
-    %2 = "matlab.concat_row"(%cst_4, %cst_3, %cst_2) : (f64, f64, f64) -> none
-    %3 = "matlab.concat_row"(%cst_1, %cst_0, %cst) : (f64, f64, f64) -> none
-    %4 = "matlab.load"(%1) : (tensor<3xf64>) -> tensor<3xf64>
-    %5 = "matlab.load"(%0) : (tensor<3xf64>) -> tensor<3xf64>
-    %6 = "matlab.emul"(%4, %5) : (tensor<3xf64>, tensor<3xf64>) -> tensor<3xf64>
-    %7 = "matlab.load"(%1) : (tensor<3xf64>) -> tensor<3xf64>
-    %8 = "matlab.epow"(%7, %cst_3) : (tensor<3xf64>, f64) -> tensor<3xf64>
-    %9 = "matlab.load"(%1) : (tensor<3xf64>) -> tensor<3xf64>
-    %10 = "matlab.ediv"(%9, %cst_3) : (tensor<3xf64>, f64) -> tensor<3xf64>
+    %cst_4 = arith.constant 3.000000e+00 : f64
+    %0 = "matlab.concat_row"(%cst_2, %cst_3, %cst_4) : (f64, f64, f64) -> tensor<3xf64>
+    %1 = "matlab.concat_row"(%cst_1, %cst_0, %cst) : (f64, f64, f64) -> tensor<3xf64>
+    %2 = "matlab.emul"(%0, %1) : (tensor<3xf64>, tensor<3xf64>) -> tensor<3xf64>
+    %3 = "matlab.epow"(%0, %cst_3) : (tensor<3xf64>, f64) -> tensor<3xf64>
+    %4 = "matlab.ediv"(%0, %cst_3) : (tensor<3xf64>, f64) -> tensor<3xf64>
     return
   }
 }

@@ -12,7 +12,7 @@ module {
     %3 = "matlab.concat_row"(%cst_0) : (f64) -> none
     %4 = "matlab.concat_row"(%cst) : (f64) -> none
     %5 = "matlab.concat_col"(%3, %4) : (none, none) -> tensor<2x1xf64>
-    %6 = "matlab.concat_row"(%2, %5) : (tensor<2x2xf64>, tensor<2x1xf64>) -> none
+    %6 = "matlab.concat_row"(%2, %5) : (tensor<2x2xf64>, tensor<2x1xf64>) -> tensor<*xf64>
     return
   }
 }

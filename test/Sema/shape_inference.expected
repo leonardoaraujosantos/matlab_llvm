@@ -66,8 +66,8 @@ TranslationUnit
             FPLit 2.0 [double]
       AssignStmt suppressed
         LHS
-          Name I (var) [double:vec[-1]]
+          Name I (var) [double:vec[5]]
         RHS
-          Range [double:vec[-1]]
+          Range [double:vec[5]]
             IntLit 1 [double]
             IntLit 5 [double]

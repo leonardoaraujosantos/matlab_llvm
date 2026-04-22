@@ -21,6 +21,25 @@ void matlab_disp_f64(double v) {
     printf("%g\n", v);
 }
 
+/* disp(row_vector) — prints the elements on one line. */
+void matlab_disp_vec_f64(const double *data, int64_t n) {
+    if (n < 0) n = 0;
+    for (int64_t i = 0; i < n; ++i)
+        printf("   %7g", data[i]);
+    putchar('\n');
+}
+
+/* disp(matrix) — prints each row on its own line. Data is row-major. */
+void matlab_disp_mat_f64(const double *data, int64_t m, int64_t n) {
+    if (m < 0) m = 0;
+    if (n < 0) n = 0;
+    for (int64_t i = 0; i < m; ++i) {
+        for (int64_t j = 0; j < n; ++j)
+            printf("   %7g", data[i * n + j]);
+        putchar('\n');
+    }
+}
+
 /* Copy `n` bytes of `src` into `dst`, expanding MATLAB's printf-style escape
  * sequences (\n, \t, \r, \\, \', \", \0). MATLAB's fprintf is documented to
  * interpret these sequences inside the format string even when the format

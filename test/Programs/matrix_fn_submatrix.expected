@@ -19,9 +19,9 @@ module {
   func.func @upper_left_2x2(%arg0: none) -> none {
     %cst = arith.constant 1.000000e+00 : f64
     %cst_0 = arith.constant 2.000000e+00 : f64
-    %0 = "matlab.range"(%cst, %cst_0) {has_step = false} : (f64, f64) -> tensor<?xf64>
-    %1 = "matlab.range"(%cst, %cst_0) {has_step = false} : (f64, f64) -> tensor<?xf64>
-    %2 = "matlab.subscript"(%arg0, %0, %1) {nindices = 2 : i64} : (none, tensor<?xf64>, tensor<?xf64>) -> none
+    %0 = "matlab.range"(%cst, %cst_0) {has_step = false} : (f64, f64) -> tensor<2xf64>
+    %1 = "matlab.range"(%cst, %cst_0) {has_step = false} : (f64, f64) -> tensor<2xf64>
+    %2 = "matlab.subscript"(%arg0, %0, %1) {nindices = 2 : i64} : (none, tensor<2xf64>, tensor<2xf64>) -> none
     return %2 : none
   }
 }

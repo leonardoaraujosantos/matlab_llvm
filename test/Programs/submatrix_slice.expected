@@ -13,18 +13,18 @@ module {
     %1 = "matlab.concat_row"(%cst_4, %cst_3, %cst_2) : (f64, f64, f64) -> none
     %2 = "matlab.concat_row"(%cst_1, %cst_0, %cst) : (f64, f64, f64) -> none
     %3 = "matlab.concat_col"(%0, %1, %2) : (none, none, none) -> tensor<3x3xf64>
-    %4 = "matlab.range"(%cst_5, %cst_6) {has_step = false} : (f64, f64) -> tensor<?xf64>
-    %5 = "matlab.range"(%cst_5, %cst_6) {has_step = false} : (f64, f64) -> tensor<?xf64>
-    %6 = "matlab.subscript"(%3, %4, %5) {nindices = 2 : i64} : (tensor<3x3xf64>, tensor<?xf64>, tensor<?xf64>) -> tensor<*xf64>
-    %7 = "matlab.range"(%cst_6, %cst_7) {has_step = false} : (f64, f64) -> tensor<?xf64>
-    %8 = "matlab.range"(%cst_6, %cst_7) {has_step = false} : (f64, f64) -> tensor<?xf64>
-    %9 = "matlab.subscript"(%3, %7, %8) {nindices = 2 : i64} : (tensor<3x3xf64>, tensor<?xf64>, tensor<?xf64>) -> tensor<*xf64>
+    %4 = "matlab.range"(%cst_5, %cst_6) {has_step = false} : (f64, f64) -> tensor<2xf64>
+    %5 = "matlab.range"(%cst_5, %cst_6) {has_step = false} : (f64, f64) -> tensor<2xf64>
+    %6 = "matlab.subscript"(%3, %4, %5) {nindices = 2 : i64} : (tensor<3x3xf64>, tensor<2xf64>, tensor<2xf64>) -> tensor<2x2xf64>
+    %7 = "matlab.range"(%cst_6, %cst_7) {has_step = false} : (f64, f64) -> tensor<2xf64>
+    %8 = "matlab.range"(%cst_6, %cst_7) {has_step = false} : (f64, f64) -> tensor<2xf64>
+    %9 = "matlab.subscript"(%3, %7, %8) {nindices = 2 : i64} : (tensor<3x3xf64>, tensor<2xf64>, tensor<2xf64>) -> tensor<2x2xf64>
     %10 = "matlab.colon"() : () -> none
-    %11 = "matlab.range"(%cst_6, %cst_7) {has_step = false} : (f64, f64) -> tensor<?xf64>
-    %12 = "matlab.subscript"(%3, %10, %11) {nindices = 2 : i64} : (tensor<3x3xf64>, none, tensor<?xf64>) -> tensor<*xf64>
-    %13 = "matlab.range"(%cst_6, %cst_7) {has_step = false} : (f64, f64) -> tensor<?xf64>
+    %11 = "matlab.range"(%cst_6, %cst_7) {has_step = false} : (f64, f64) -> tensor<2xf64>
+    %12 = "matlab.subscript"(%3, %10, %11) {nindices = 2 : i64} : (tensor<3x3xf64>, none, tensor<2xf64>) -> tensor<3x2xf64>
+    %13 = "matlab.range"(%cst_6, %cst_7) {has_step = false} : (f64, f64) -> tensor<2xf64>
     %14 = "matlab.colon"() : () -> none
-    %15 = "matlab.subscript"(%3, %13, %14) {nindices = 2 : i64} : (tensor<3x3xf64>, tensor<?xf64>, none) -> tensor<*xf64>
+    %15 = "matlab.subscript"(%3, %13, %14) {nindices = 2 : i64} : (tensor<3x3xf64>, tensor<2xf64>, none) -> tensor<2x3xf64>
     return
   }
 }

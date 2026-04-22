@@ -7,8 +7,8 @@ module {
     %4 = "matlab.const_int"() {value = 10 : i64} : () -> f64
     %5 = "matlab.const_int"() {value = 20 : i64} : () -> f64
     %6 = "matlab.const_int"() {value = 30 : i64} : () -> f64
-    %7 = "matlab.concat_row"(%4, %5, %6) : (f64, f64, f64) -> none
-    "matlab.store"(%7, %3) : (none, tensor<3xf64>) -> ()
+    %7 = "matlab.concat_row"(%4, %5, %6) : (f64, f64, f64) -> tensor<3xf64>
+    "matlab.store"(%7, %3) : (tensor<3xf64>, tensor<3xf64>) -> ()
     %8 = "matlab.load"(%3) : (tensor<3xf64>) -> tensor<3xf64>
     %9 = "matlab.const_int"() {value = 2 : i64} : () -> f64
     %10 = "matlab.subscript"(%8, %9) {nindices = 1 : i64} : (tensor<3xf64>, f64) -> f64
