@@ -35,10 +35,23 @@ B = (A + 10) .* 2;    % element-wise broadcast: (A + 10) .* 2
 disp(B);
 ```
 
-No MathWorks source, no Octave dependency. Just C++20, MLIR (22.1 from
-Homebrew), and a ~500-line C runtime shim that wraps `libc`, `pthreads`,
-a heap-allocated `matlab_mat` descriptor, and a global mutex for stdout
-and reductions.
+```matlab
+% Linear algebra, pure C — no BLAS, no LAPACK.
+A = [4 3; 6 3];
+b = [7; 9];
+x = A \ b;            % LU with partial pivoting → x = [1; 1]
+disp(x);
+disp(A * x);          % = b, roundtrip
+disp(det(A));         % -6
+disp(inv(A));         % Gauss-Jordan via LU
+```
+
+No MathWorks source, no Octave dependency, no numerics library
+dependency. Just C++20, MLIR (22.1 from Homebrew), and a ~700-line C
+runtime shim that wraps libc, pthreads, a heap-allocated `matlab_mat`
+descriptor, and a global mutex for stdout and reductions. The entire
+runtime — including matmul, inverse, solve, determinant — is
+transpilable as a single self-contained file.
 
 ## Pipeline
 
@@ -212,8 +225,10 @@ threads deterministically prints 55.
 | Shape ops (`transpose`, `diag`, `reshape`, `repmat`) | ✅ | ✅ | ✅ | ✅ |
 | Reductions (`sum` over whole matrix) | ✅ | ✅ | ✅ | ✅ |
 | Element-wise math (`exp`, `log`, `sin`, `cos`, `tan`, `sqrt`, `abs`) | ✅ | ✅ | ✅ | ✅ |
-| Matrix multiplication `A * B` (non-scalar operands) | ✅ | ✅ (shape) | ❌ no BLAS | — |
-| Linear system solves `A\b`, `A/b` | ✅ | ⚠️ | ❌ no BLAS | — |
+| Matrix multiplication `A * B` (non-scalar operands) | ✅ | ✅ | ✅ (pure-C O(N³)) | ✅ |
+| Matrix inverse `inv(A)` | ✅ | ✅ | ✅ (LU with partial pivoting) | ✅ |
+| Linear solve `A\b`, `A/b` | ✅ | ✅ | ✅ (LU solve, pure C) | ✅ |
+| Determinant `det(A)` | ✅ | ✅ | ✅ (LU byproduct) | ✅ |
 | `if / elseif / else` | ✅ | ✅ | ✅ (`scf.if` chain) | ✅ |
 | `for i = 1:n` | ✅ | ✅ | ✅ (`matlab.for`) | ✅ |
 | `while` | ✅ | ✅ | ✅ (`matlab.while`) | ✅ |
@@ -275,7 +290,7 @@ chapters. Here's how this compiler maps to it.
 | Magic Squares / `magic`, `sum`, `transpose`, `diag` | ✅ all four execute end-to-end; `magic` uses Siamese for odd n, simple fill for even |
 | Removing rows/columns (`A(2,:) = []`) | ❌ |
 | Reshaping / rearranging (`reshape`, `repmat`) | ✅ execute end-to-end |
-| Array vs matrix operations (`.*` vs `*`) | ✅ distinguished in IR; scalar×matrix lowers to element-wise; matrix×matrix still needs BLAS |
+| Array vs matrix operations (`.*` vs `*`) | ✅ both paths execute: scalar×matrix → element-wise; matrix×matrix → pure-C O(N³) matmul |
 | Find array elements | ❌ |
 | Multidimensional arrays (>2 dims) | ⚠️ Sema models `NDArray` rank but lowering assumes ≤2D |
 | Text / character arrays | ✅ char array; ⚠️ string-type (double-quoted) partial |
@@ -291,8 +306,8 @@ chapters. Here's how this compiler maps to it.
 | Matrix environment, construction | ✅ literals, `zeros`, `ones`, `eye`, `magic`, `diag`, `reshape`, `repmat` all execute |
 | Slicing | ⚠️ scalar subscripts execute; colon/range slices typed but not yet wired |
 | Powers and exponentials (`.^`, `exp`, `log`) | ✅ element-wise; ❌ matrix power `A^n` |
-| Solving linear systems `A\b`, `A/b` | ❌ no BLAS/LAPACK (explicitly deferred) |
-| Eigenvalues, singular values | ❌ |
+| Solving linear systems `A\b`, `A/b`, `inv(A)`, `det(A)` | ✅ pure-C LU with partial pivoting, no BLAS/LAPACK dep |
+| Eigenvalues, singular values | ❌ (Jacobi SVD + symmetric QR planned; pure-C still) |
 | Random number arrays (`rand`, `randn`) | ✅ runtime uses xorshift64 + Box-Muller; seed via `matlab_rng_state` |
 | Function handles (create, pass) | ✅ (creation) / ⚠️ (call-through still placeholder) |
 | Vectorization (whole-matrix ops replacing loops) | ✅ element-wise add/sub/emul/ediv/epow all dispatch to runtime |
@@ -402,7 +417,15 @@ Noteworthy passes:
 
 ### 6. Runtime (`runtime/matlab_runtime.c`)
 
-~500 lines of C. Entries wired today:
+**Design note: library-agnostic, single-file C.** The runtime has no
+external dependencies beyond libc and pthreads — no BLAS, no LAPACK,
+no FFTW. This is deliberate: the IR + runtime are intended to be
+transpilable to other languages, so every op needs a self-contained
+implementation that doesn't pull in a platform-specific numerics
+vendor. The tradeoff is performance (a naive O(N³) matmul is ~10–100×
+slower than OpenBLAS for large matrices), not correctness.
+
+~700 lines of C. Entries wired today:
 
 **I/O**
 
@@ -427,6 +450,12 @@ we leak).
   (matrix×matrix, matrix×scalar, scalar×matrix).
 - Element-wise unary: `matlab_{neg,exp,log,sin,cos,tan,sqrt,abs}_m`
   plus scalar `_s` variants.
+- Linear algebra (pure C, no BLAS): `matlab_matmul_mm` (triple-loop
+  O(N³)), `matlab_inv` (Gauss-Jordan via LU), `matlab_mldivide_mm`
+  (`A\B` via LU with partial pivoting), `matlab_mrdivide_mm`
+  (`A/B = (Bᵀ\Aᵀ)ᵀ`), `matlab_det` (LU byproduct). Shared
+  `lu_decompose` + `lu_solve_column` helpers handle the factorization
+  and forward/back substitution.
 - Scalar indexing: `matlab_subscript1_s`, `matlab_subscript2_s`
   (1-based, out-of-range returns 0).
 
@@ -450,7 +479,7 @@ Two CTest suites, ~115 goldens total:
 | `Opt` | `-emit-mlir -opt` | 5 | Slot promotion + constant folding through `arith` |
 | `Programs` | `-emit-mlir -opt` | 31 | Medium programs (matrix ops, loops, functions) |
 | `Errors` | `-dump-ast` | 4 | Parser/Sema diagnostics |
-| `Run` | `-emit-llvm` + link + exec | 40 | End-to-end stdout goldens (I/O, parfor, matrix math, user calls) |
+| `Run` | `-emit-llvm` + link + exec | 47 | End-to-end stdout goldens (I/O, parfor, matrix math, linear algebra, user calls) |
 
 ```bash
 ctest --test-dir build
@@ -491,8 +520,9 @@ test/              goldens + run scripts
    Types already propagate as ranked tensors; need the runtime
    `matlab_slice` entry and IR lowering.
 2. **Indexed store** — `A(i,j) = v`, `A(:, 2) = w`. Placeholder today.
-3. **Matrix ops via BLAS** — actual `A * B` (non-scalar operands),
-   `A \ b` linear solves, `eig`, `svd`, `inv`. User asked to defer.
+3. **Eigenvalues & SVD (still pure-C)** — Jacobi SVD (~200 LoC, very
+   robust), then `pinv`/`rank`/`null` fall out for free. Symmetric
+   `eig` via Jacobi (~150 LoC) before general `eig`.
 4. **Column reductions** — real MATLAB `sum(A)` returns a row vector;
    ours returns the flat scalar. Once the row-vector variant is wired,
    row/col-wise `min`/`max`/`mean`/`prod` follow the same pattern.
@@ -503,8 +533,11 @@ test/              goldens + run scripts
 8. **Multi-callsite polymorphism** — today a function called from two
    sites with different concrete types stays `none`. Template-style
    specialization per call signature would unblock this.
-9. **REPL / Live Scripts** — out of scope for now.
-10. **Plotting** — out of scope; would need a plotting backend.
+9. **Optional `-DMATLAB_USE_BLAS`** — link CBLAS as an opt-in fast
+   path for matmul / LU. The default pure-C path stays intact so the
+   runtime remains single-file and transpilable.
+10. **REPL / Live Scripts** — out of scope for now.
+11. **Plotting** — out of scope; would need a plotting backend.
 
 ## Non-goals (for now)
 

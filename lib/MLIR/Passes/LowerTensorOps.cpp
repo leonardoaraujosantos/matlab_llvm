@@ -339,6 +339,8 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"tan",        "matlab_tan_m",      1, "p"},
       {"sqrt",       "matlab_sqrt_m",     1, "p"},
       {"abs",        "matlab_abs_m",      1, "p"},
+      {"inv",        "matlab_inv",        1, "p"},
+      {"det",        "matlab_det",        0, "p"},
     };
 
     const Spec *S = nullptr;
@@ -397,64 +399,98 @@ bool TensorLowering::rewriteBuiltinCalls() {
 }
 
 //===----------------------------------------------------------------------===//
-// Binary element-wise: matlab.{add,sub,emul,ediv,epow} with tensor args.
-// matlab.matmul on scalars was already handled by LowerScalarsToArith; on
-// tensors we leave it alone (user asked for no BLAS yet).
+// Binary ops with tensor arguments.
+//
+//   matlab.{add,sub,emul,ediv,epow}  — always element-wise (mm/ms/sm).
+//   matlab.matmul  — matrix×matrix => matlab_matmul_mm (pure-C naive loop).
+//                   scalar×matrix / matrix×scalar => element-wise emul.
+//   matlab.matdiv  — A/B (mm) => matlab_mrdivide_mm (pure-C LU solve).
+//                   A/s, s/A => element-wise ediv.
+//   matlab.matldiv — A\B (mm) => matlab_mldivide_mm (pure-C LU solve).
+//                   scalar mixes are rare in user code; we leave them
+//                   untouched and the conversion pipeline will surface
+//                   any that appear.
 //===----------------------------------------------------------------------===//
 
 bool TensorLowering::rewriteBinaryOps() {
-  struct Spec { StringRef MLName; StringRef Base; };
-  static const Spec Specs[] = {
-    {"matlab.add",    "add"},
-    {"matlab.sub",    "sub"},
-    {"matlab.emul",   "emul"},
-    {"matlab.ediv",   "ediv"},
-    {"matlab.epow",   "epow"},
-    // Scalar * matrix (and matrix * scalar) in MATLAB degenerates to
-    // element-wise multiply. Full matrix-matrix multiplication would need a
-    // BLAS path we're not building yet; scalar cases still route through
-    // the emul runtime, which handles ms/sm variants.
-    {"matlab.matmul", "emul"},
-    {"matlab.matdiv", "ediv"},
+  // Element-wise base names keyed by op name.
+  struct ElemSpec { StringRef MLName; StringRef Base; };
+  static const ElemSpec ElemSpecs[] = {
+    {"matlab.add",  "add"},
+    {"matlab.sub",  "sub"},
+    {"matlab.emul", "emul"},
+    {"matlab.ediv", "ediv"},
+    {"matlab.epow", "epow"},
   };
 
   SmallVector<Operation *> Binaries;
   Mod.walk([&](Operation *Op) {
     if (Op->getNumOperands() != 2) return;
-    for (auto &S : Specs) if (isMatlabOp(Op, S.MLName)) { Binaries.push_back(Op); return; }
+    StringRef N = Op->getName().getStringRef();
+    if (N == "matlab.matmul" || N == "matlab.matdiv" ||
+        N == "matlab.matldiv") {
+      Binaries.push_back(Op); return;
+    }
+    for (auto &S : ElemSpecs)
+      if (isMatlabOp(Op, S.MLName)) { Binaries.push_back(Op); return; }
   });
 
   bool Changed = false;
   for (Operation *Op : Binaries) {
     StringRef ML = Op->getName().getStringRef();
-    const Spec *S = nullptr;
-    for (auto &E : Specs) if (E.MLName == ML) { S = &E; break; }
-    if (!S) continue;
-
     Value A = Op->getOperand(0), BVal = Op->getOperand(1);
     Type AT = A.getType(), BT = BVal.getType();
     bool AP = AT == PtrTy, BP = BT == PtrTy;
     bool AF = AT == F64,    BF = BT == F64;
-    if (!AP && !BP) continue; // handled by scalar-to-arith already
+    if (!AP && !BP) continue; // scalar-only — LowerScalarsToArith handled it
 
     B.setInsertionPoint(Op);
     LLVM::LLVMFuncOp Fn;
     SmallVector<Value, 2> Args;
-    if (AP && BP) {
-      Fn = rt(("matlab_" + S->Base + "_mm").str(), PtrTy, {PtrTy, PtrTy});
-      Args = {A, BVal};
-    } else if (AP && BF) {
-      Fn = rt(("matlab_" + S->Base + "_ms").str(), PtrTy, {PtrTy, F64});
-      Args = {A, BVal};
-    } else if (AF && BP) {
-      // Scalar-on-the-left: use dedicated sm variant where it matters
-      // (sub/ediv/epow are non-commutative). For add/emul, sm ≡ ms, but we
-      // still emit sm for clarity.
-      Fn = rt(("matlab_" + S->Base + "_sm").str(), PtrTy, {F64, PtrTy});
-      Args = {A, BVal};
+
+    auto emitElem = [&](StringRef Base) {
+      if (AP && BP) {
+        Fn = rt(("matlab_" + Base + "_mm").str(), PtrTy, {PtrTy, PtrTy});
+        Args = {A, BVal};
+      } else if (AP && BF) {
+        Fn = rt(("matlab_" + Base + "_ms").str(), PtrTy, {PtrTy, F64});
+        Args = {A, BVal};
+      } else if (AF && BP) {
+        Fn = rt(("matlab_" + Base + "_sm").str(), PtrTy, {F64, PtrTy});
+        Args = {A, BVal};
+      }
+    };
+
+    if (ML == "matlab.matmul") {
+      if (AP && BP) {
+        Fn = rt("matlab_matmul_mm", PtrTy, {PtrTy, PtrTy});
+        Args = {A, BVal};
+      } else {
+        emitElem("emul"); // scalar * matrix broadcast
+      }
+    } else if (ML == "matlab.matdiv") {
+      if (AP && BP) {
+        Fn = rt("matlab_mrdivide_mm", PtrTy, {PtrTy, PtrTy});
+        Args = {A, BVal};
+      } else {
+        emitElem("ediv");
+      }
+    } else if (ML == "matlab.matldiv") {
+      if (AP && BP) {
+        Fn = rt("matlab_mldivide_mm", PtrTy, {PtrTy, PtrTy});
+        Args = {A, BVal};
+      } else {
+        continue; // uncommon; don't rewrite
+      }
     } else {
-      continue;
+      // Element-wise ops from ElemSpecs.
+      StringRef Base;
+      for (auto &E : ElemSpecs) if (E.MLName == ML) { Base = E.Base; break; }
+      if (Base.empty()) continue;
+      emitElem(Base);
     }
+
+    if (!Fn) continue;
     auto NC = LLVM::CallOp::create(B, Op->getLoc(), Fn, Args);
     Op->getResult(0).replaceAllUsesWith(NC.getResult());
     Op->erase();

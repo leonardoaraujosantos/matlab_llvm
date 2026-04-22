@@ -292,6 +292,182 @@ matlab_mat *matlab_randn(double m, double n) {
     return A;
 }
 
+/*---------- Linear algebra (pure C, no BLAS) ------------------------------
+ *
+ * These routines are intentionally library-agnostic: no dependency on
+ * BLAS / LAPACK. Performance is a naive O(N^3) for matmul and LU, which is
+ * fine for teaching-scale inputs (few hundred rows) and keeps the runtime
+ * a single, transpilable C file.
+ *
+ * Numerical robustness:
+ *   - LU factorization uses partial row pivoting, standard and stable for
+ *     well-conditioned inputs.
+ *   - We don't do row scaling or iterative refinement. Inputs near
+ *     singular may produce inaccurate results; we detect exact singularity
+ *     (pivot magnitude below 1e-300) and return a zero-sized result.
+ *
+ *--------------------------------------------------------------------------*/
+
+/* Forward decl used by mrdivide (defined in the shape-ops section below). */
+matlab_mat *matlab_transpose(matlab_mat *A);
+
+/* C = A * B. Returns a 0x0 matrix if dimensions don't match. */
+matlab_mat *matlab_matmul_mm(matlab_mat *A, matlab_mat *B) {
+    if (A->cols != B->rows) return mat_alloc(0, 0);
+    int64_t m = A->rows, k = A->cols, n = B->cols;
+    matlab_mat *C = mat_alloc(m, n);
+    for (int64_t i = 0; i < m; ++i) {
+        for (int64_t j = 0; j < n; ++j) {
+            double s = 0.0;
+            for (int64_t t = 0; t < k; ++t)
+                s += A->data[i * k + t] * B->data[t * n + j];
+            C->data[i * n + j] = s;
+        }
+    }
+    return C;
+}
+
+/*
+ * In-place LU factorization with partial pivoting.
+ *
+ * On entry:  `A` is n*n, row-major.
+ * On exit:   A is overwritten with L (unit diagonal, stored strictly
+ *            below diag) and U (stored on and above diag). `piv[i]` is
+ *            the original row index that ended up in row i. `sign` holds
+ *            the permutation sign (+1 / -1) for det().
+ * Returns 0 on success, -1 on (detected) singularity.
+ */
+static int lu_decompose(double *A, int64_t n, int64_t *piv, int *sign) {
+    *sign = 1;
+    for (int64_t i = 0; i < n; ++i) piv[i] = i;
+    for (int64_t k = 0; k < n; ++k) {
+        /* find pivot row */
+        int64_t p = k;
+        double best = fabs(A[k * n + k]);
+        for (int64_t i = k + 1; i < n; ++i) {
+            double v = fabs(A[i * n + k]);
+            if (v > best) { best = v; p = i; }
+        }
+        if (best < 1e-300) return -1;
+        if (p != k) {
+            for (int64_t j = 0; j < n; ++j) {
+                double t = A[k * n + j];
+                A[k * n + j] = A[p * n + j];
+                A[p * n + j] = t;
+            }
+            int64_t tp = piv[k]; piv[k] = piv[p]; piv[p] = tp;
+            *sign = -*sign;
+        }
+        /* eliminate */
+        double pivot = A[k * n + k];
+        for (int64_t i = k + 1; i < n; ++i) {
+            double f = A[i * n + k] / pivot;
+            A[i * n + k] = f;  /* L[i,k] stored below diag */
+            for (int64_t j = k + 1; j < n; ++j)
+                A[i * n + j] -= f * A[k * n + j];
+        }
+    }
+    return 0;
+}
+
+/*
+ * Solve L*y = P*b then U*x = y, given the in-place LU from lu_decompose.
+ * `b` is overwritten with the solution x.
+ */
+static void lu_solve_column(const double *LU, int64_t n, const int64_t *piv,
+                            const double *rhs, double *x) {
+    /* apply permutation: y = P * rhs */
+    for (int64_t i = 0; i < n; ++i) x[i] = rhs[piv[i]];
+    /* forward substitution for L (unit diagonal) */
+    for (int64_t i = 0; i < n; ++i)
+        for (int64_t j = 0; j < i; ++j)
+            x[i] -= LU[i * n + j] * x[j];
+    /* back substitution for U */
+    for (int64_t i = n - 1; i >= 0; --i) {
+        double s = x[i];
+        for (int64_t j = i + 1; j < n; ++j)
+            s -= LU[i * n + j] * x[j];
+        x[i] = s / LU[i * n + i];
+    }
+}
+
+/* inv(A): Gauss-Jordan via LU, solving A*X = I column by column. */
+matlab_mat *matlab_inv(matlab_mat *A) {
+    if (A->rows != A->cols) return mat_alloc(0, 0);
+    int64_t n = A->rows;
+    double *LU = (double *)malloc((size_t)(n * n) * sizeof(double));
+    memcpy(LU, A->data, (size_t)(n * n) * sizeof(double));
+    int64_t *piv = (int64_t *)malloc((size_t)n * sizeof(int64_t));
+    int sign;
+    if (lu_decompose(LU, n, piv, &sign) != 0) {
+        free(LU); free(piv);
+        return mat_alloc(0, 0);
+    }
+    matlab_mat *X = mat_alloc(n, n);
+    double *rhs = (double *)malloc((size_t)n * sizeof(double));
+    double *col = (double *)malloc((size_t)n * sizeof(double));
+    for (int64_t c = 0; c < n; ++c) {
+        for (int64_t i = 0; i < n; ++i) rhs[i] = (i == c) ? 1.0 : 0.0;
+        lu_solve_column(LU, n, piv, rhs, col);
+        for (int64_t i = 0; i < n; ++i) X->data[i * n + c] = col[i];
+    }
+    free(rhs); free(col); free(piv); free(LU);
+    return X;
+}
+
+/* A \ B: solve A*X = B (MATLAB left divide). B may have multiple columns. */
+matlab_mat *matlab_mldivide_mm(matlab_mat *A, matlab_mat *B) {
+    if (A->rows != A->cols || A->rows != B->rows) return mat_alloc(0, 0);
+    int64_t n = A->rows;
+    int64_t k = B->cols;
+    double *LU = (double *)malloc((size_t)(n * n) * sizeof(double));
+    memcpy(LU, A->data, (size_t)(n * n) * sizeof(double));
+    int64_t *piv = (int64_t *)malloc((size_t)n * sizeof(int64_t));
+    int sign;
+    if (lu_decompose(LU, n, piv, &sign) != 0) {
+        free(LU); free(piv);
+        return mat_alloc(0, 0);
+    }
+    matlab_mat *X = mat_alloc(n, k);
+    double *rhs = (double *)malloc((size_t)n * sizeof(double));
+    double *col = (double *)malloc((size_t)n * sizeof(double));
+    for (int64_t c = 0; c < k; ++c) {
+        for (int64_t i = 0; i < n; ++i) rhs[i] = B->data[i * k + c];
+        lu_solve_column(LU, n, piv, rhs, col);
+        for (int64_t i = 0; i < n; ++i) X->data[i * k + c] = col[i];
+    }
+    free(rhs); free(col); free(piv); free(LU);
+    return X;
+}
+
+/* A / B = (B' \ A')'. Built on top of mldivide + transpose. */
+matlab_mat *matlab_mrdivide_mm(matlab_mat *A, matlab_mat *B) {
+    matlab_mat *At = matlab_transpose(A);
+    matlab_mat *Bt = matlab_transpose(B);
+    matlab_mat *Yt = matlab_mldivide_mm(Bt, At);
+    return matlab_transpose(Yt);
+    /* At/Bt/Yt are intentionally leaked with the rest of the heap. */
+}
+
+/* det(A): product of LU diagonal times permutation sign. */
+double matlab_det(matlab_mat *A) {
+    if (A->rows != A->cols) return 0.0;
+    int64_t n = A->rows;
+    double *LU = (double *)malloc((size_t)(n * n) * sizeof(double));
+    memcpy(LU, A->data, (size_t)(n * n) * sizeof(double));
+    int64_t *piv = (int64_t *)malloc((size_t)n * sizeof(int64_t));
+    int sign;
+    double d;
+    if (lu_decompose(LU, n, piv, &sign) != 0) {
+        d = 0.0;
+    } else {
+        d = (double)sign;
+        for (int64_t i = 0; i < n; ++i) d *= LU[i * n + i];
+    }
+    free(LU); free(piv);
+    return d;
+}
+
 /*---------- Shape operations ----------------------------------------------*/
 
 matlab_mat *matlab_transpose(matlab_mat *A) {
