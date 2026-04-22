@@ -26,9 +26,19 @@ function y = fact(n)
 end
 ```
 
+```matlab
+A = magic(5);
+disp(A);              % full 5×5 magic square
+disp(sum(A));         % 325 = 1 + 2 + ... + 25
+disp(A');             % transpose (routed to matlab_transpose)
+B = (A + 10) .* 2;    % element-wise broadcast: (A + 10) .* 2
+disp(B);
+```
+
 No MathWorks source, no Octave dependency. Just C++20, MLIR (22.1 from
-Homebrew), and a ~170-line C runtime shim that wraps `libc`, `pthreads`,
-and a global mutex for stdout + reductions.
+Homebrew), and a ~500-line C runtime shim that wraps `libc`, `pthreads`,
+a heap-allocated `matlab_mat` descriptor, and a global mutex for stdout
+and reductions.
 
 ## Pipeline
 
@@ -40,7 +50,7 @@ flowchart LR
   ast --> sema["Sema<br/>(scope tree,<br/>type lattice,<br/>fixpoint inference)"]
   sema --> mir["MIR<br/>(in-house SSA,<br/>zero-dep,<br/>reference/diagnostic IR)"]
   sema --> mlir["MLIR<br/>(matlab + func + scf +<br/>arith + tensor + llvm<br/>dialects)"]
-  mlir --> passes["MLIR passes<br/>(slot promotion,<br/>scalar→arith,<br/>outline parfor,<br/>lower user calls,<br/>lower I/O,<br/>scalar slots→alloca)"]
+  mlir --> passes["MLIR passes<br/>(slot promotion,<br/>scalar→arith,<br/>outline parfor,<br/>lower user calls,<br/>lower tensor ops,<br/>lower I/O,<br/>scalar slots→alloca)"]
   passes --> llvmir["LLVM IR"]
   llvmir --> exe["executable<br/>(clang + matlab_runtime.c)"]
 ```
@@ -123,6 +133,7 @@ flowchart TD
     subgraph Passes["Passes"]
       SP[SlotPromotion]
       LSA[LowerScalarsToArith]
+      LTO[LowerTensorOps]
       LUC[LowerUserCalls]
       LPF[OutlineParfor]
       LIO[LowerIO]
@@ -134,7 +145,7 @@ flowchart TD
 
   subgraph RT["runtime/"]
     direction LR
-    Shim["matlab_runtime.c<br/>disp, fprintf, parfor,<br/>reduce_add_f64"]
+    Shim["matlab_runtime.c<br/>disp / fprintf / parfor /<br/>matlab_mat descriptor /<br/>zeros ones eye magic rand /<br/>transpose diag reshape repmat sum /<br/>element-wise arith + unary math"]
     Build["build_and_run.sh"]
   end
 
@@ -190,12 +201,19 @@ threads deterministically prints 55.
 | String/char literals (`"..."` and `'...'`) | ✅ | ✅ | ✅ (char only) | ✅ |
 | Variables, assignment | ✅ | ✅ | ✅ | ✅ |
 | Arithmetic / comparison / logical operators | ✅ | ✅ | ✅ (scalar) | ✅ |
-| Element-wise operators (`.*` `./` `.^` etc) | ✅ | ✅ | ⚠️ typed only | — |
-| Matrix literal construction `[1 2; 3 4]` | ✅ | ✅ | ✅ (literal disp) | ✅ |
-| Ranges `a:b`, `a:s:b` | ✅ | ✅ (folded lengths) | ✅ | ✅ |
-| Transpose `'`, `.'` | ✅ | ✅ (shape flip) | ⚠️ not lowered | — |
-| Indexing `A(i,j)`, `A(:,2)`, `A(1:2, 2:3)` | ✅ | ✅ (ranked shapes) | ⚠️ not lowered | — |
+| Element-wise operators (`.*` `./` `.^` etc) | ✅ | ✅ | ✅ (mm/ms/sm) | ✅ |
+| Matrix literal construction `[1 2; 3 4]` | ✅ | ✅ | ✅ (any size) | ✅ |
+| Ranges `a:b`, `a:s:b` | ✅ | ✅ (folded lengths) | ✅ | ✅ (matrix `ptr`) |
+| Transpose `'`, `.'` | ✅ | ✅ (shape flip) | ✅ | ✅ |
+| Scalar indexing `A(i)`, `A(i,j)` | ✅ | ✅ | ✅ | ✅ |
+| Range/colon subscripts `A(:,2)`, `A(1:2, 2:3)` | ✅ | ✅ (ranked shapes) | ⚠️ not lowered | — |
 | Indexed store `A(i,j) = v` | ✅ | ✅ | ⚠️ not lowered | — |
+| Matrix constructors (`zeros`, `ones`, `eye`, `magic`, `rand`, `randn`) | ✅ | ✅ | ✅ | ✅ |
+| Shape ops (`transpose`, `diag`, `reshape`, `repmat`) | ✅ | ✅ | ✅ | ✅ |
+| Reductions (`sum` over whole matrix) | ✅ | ✅ | ✅ | ✅ |
+| Element-wise math (`exp`, `log`, `sin`, `cos`, `tan`, `sqrt`, `abs`) | ✅ | ✅ | ✅ | ✅ |
+| Matrix multiplication `A * B` (non-scalar operands) | ✅ | ✅ (shape) | ❌ no BLAS | — |
+| Linear system solves `A\b`, `A/b` | ✅ | ⚠️ | ❌ no BLAS | — |
 | `if / elseif / else` | ✅ | ✅ | ✅ (`scf.if` chain) | ✅ |
 | `for i = 1:n` | ✅ | ✅ | ✅ (`matlab.for`) | ✅ |
 | `while` | ✅ | ✅ | ✅ (`matlab.while`) | ✅ |
@@ -222,9 +240,10 @@ Legend: ✅ works · ⚠️ partial · ❌ not implemented · — not applicable
 |---|:-:|---|
 | `disp('string literal')` | ✅ | |
 | `disp(scalar)` | ✅ | Formats with `%g` |
-| `disp(row_vector)` | ✅ | Literal or literal-through-concat |
-| `disp(matrix)` | ✅ | Literal matrices of any size (1×1 up) |
-| `disp(A')`, `disp(A(i,:))`, `disp(A+B)` | ❌ | Need a tensor descriptor ABI |
+| `disp(row_vector)` | ✅ | |
+| `disp(matrix)` | ✅ | Works on any computed matrix (`disp(A')`, `disp(A+B)`, `disp(magic(5))`, etc.) |
+| `disp(A(i,j))` scalar subscript | ✅ | 1-based, OOB returns 0 |
+| `disp(A(:,2))`, `disp(A(1:2,1:2))` sliced views | ❌ | Still need runtime slicing |
 | `fprintf('fmt\n')` | ✅ | Escape sequences expanded at runtime |
 | `fprintf('fmt %f\n', x)` | ✅ | Single f64 arg |
 | `fprintf(...)` with multiple args | ❌ | Variadic ABI not wired |
@@ -240,8 +259,8 @@ chapters. Here's how this compiler maps to it.
 | Primer section | Status |
 |---|:-:|
 | Desktop Basics (REPL, editor, help) | ❌ — batch-compiler only, no REPL |
-| Matrices and Arrays (construction) | ✅ literal 2-D, ⚠️ higher-dim |
-| Array Indexing (`A(i,j)`, `A(:,2)`, `A(end)`) | ✅ parses and infers shape; ⚠️ runtime indexing not wired |
+| Matrices and Arrays (construction) | ✅ literal 2-D + `zeros/ones/eye/magic/rand/randn`; ⚠️ higher-dim |
+| Array Indexing (`A(i,j)`, `A(:,2)`, `A(end)`) | ✅ scalar indexing executes; ⚠️ colon/range slices typed but not yet lowered to runtime |
 | Workspace Variables | ✅ scalar/array slot model |
 | Text and Characters (strings vs chars) | ⚠️ parses both, runtime only handles `'…'` |
 | Calling Functions (builtins like `sin`, `zeros`) | ✅ Sema registry of ~60 builtins, runtime subset wired |
@@ -253,10 +272,10 @@ chapters. Here's how this compiler maps to it.
 
 | Primer section | Status |
 |---|:-:|
-| Magic Squares / `magic`, `sum`, `transpose`, `diag` | ⚠️ `sum`/`diag` infer type only; no runtime |
+| Magic Squares / `magic`, `sum`, `transpose`, `diag` | ✅ all four execute end-to-end; `magic` uses Siamese for odd n, simple fill for even |
 | Removing rows/columns (`A(2,:) = []`) | ❌ |
-| Reshaping / rearranging (`reshape`, `repmat`) | ⚠️ Sema-typed, no runtime |
-| Array vs matrix operations (`.*` vs `*`) | ✅ distinguished in IR, scalar lowering only |
+| Reshaping / rearranging (`reshape`, `repmat`) | ✅ execute end-to-end |
+| Array vs matrix operations (`.*` vs `*`) | ✅ distinguished in IR; scalar×matrix lowers to element-wise; matrix×matrix still needs BLAS |
 | Find array elements | ❌ |
 | Multidimensional arrays (>2 dims) | ⚠️ Sema models `NDArray` rank but lowering assumes ≤2D |
 | Text / character arrays | ✅ char array; ⚠️ string-type (double-quoted) partial |
@@ -269,12 +288,14 @@ chapters. Here's how this compiler maps to it.
 
 | Primer section | Status |
 |---|:-:|
-| Matrix environment, slicing | ✅ parsing + shape inference; ❌ runtime |
-| Powers and exponentials | ⚠️ scalar only; matrix power `^` not lowered |
-| Solving linear systems `A\b`, `A/b` | ⚠️ Sema types it; no BLAS/LAPACK wiring |
+| Matrix environment, construction | ✅ literals, `zeros`, `ones`, `eye`, `magic`, `diag`, `reshape`, `repmat` all execute |
+| Slicing | ⚠️ scalar subscripts execute; colon/range slices typed but not yet wired |
+| Powers and exponentials (`.^`, `exp`, `log`) | ✅ element-wise; ❌ matrix power `A^n` |
+| Solving linear systems `A\b`, `A/b` | ❌ no BLAS/LAPACK (explicitly deferred) |
 | Eigenvalues, singular values | ❌ |
-| Random number arrays (`rand`, `randn`) | ⚠️ Sema types; no runtime |
+| Random number arrays (`rand`, `randn`) | ✅ runtime uses xorshift64 + Box-Muller; seed via `matlab_rng_state` |
 | Function handles (create, pass) | ✅ (creation) / ⚠️ (call-through still placeholder) |
+| Vectorization (whole-matrix ops replacing loops) | ✅ element-wise add/sub/emul/ediv/epow all dispatch to runtime |
 
 ### Chapter 4 — Graphics
 
@@ -288,8 +309,8 @@ chapters. Here's how this compiler maps to it.
 | `switch / case / otherwise` | ✅ |
 | `for / while / continue / break` | ✅ |
 | `return` | ✅ |
-| Vectorization | ⚠️ preserved in IR, not exploited by codegen |
-| Preallocation (`zeros(n,n)`) | ⚠️ Sema types it; runtime gives empty disp |
+| Vectorization | ✅ whole-matrix ops execute; codegen still doesn't auto-vectorize loops |
+| Preallocation (`zeros(n,n)`) | ✅ runtime allocates and zeros |
 | Scripts | ✅ lowered to `@main` |
 | Functions (named) | ✅ |
 | Local / nested / private / anonymous functions | ✅ named + nested parsed; anonymous: created, ❌ called |
@@ -349,7 +370,8 @@ flowchart TD
   SlotProm --> ToArith[LowerScalarsToArith<br/>matlab.add/mul → arith.addf/mulf]
   ToArith --> OutlinePF[OutlineParfor<br/>→ llvm.func + dispatcher]
   OutlinePF --> UserCalls[LowerUserCalls<br/>monomorphize signatures<br/>matlab.call → func.call]
-  UserCalls --> ScalarSlots[LowerScalarSlots<br/>matlab.alloc → llvm.alloca]
+  UserCalls --> TensorOps[LowerTensorOps<br/>matrix ops → runtime calls<br/>tensor&lt;MxN&gt; → !llvm.ptr]
+  TensorOps --> ScalarSlots[LowerScalarSlots<br/>matlab.alloc → llvm.alloca]
   ScalarSlots --> IO[LowerIO<br/>const_char → llvm.global<br/>disp/fprintf → llvm.call]
   IO --> ConvertPipeline["MLIR conversion pipeline<br/>(scf→cf, arith→llvm,<br/>func→llvm)"]
   ConvertPipeline --> LLVMIR[LLVM IR]
@@ -367,30 +389,56 @@ Noteworthy passes:
   forward-propagates concrete types through unregistered `matlab.*`
   ops, infers return types from `func.return`, re-emits stale
   `func.call`s. Handles chained and recursive calls.
+- **`LowerTensorOps`** (`LowerTensorOps.cpp`) — every tensor-typed
+  `matlab.*` op becomes an `llvm.call` against the matrix runtime.
+  Literal `[...]` matrices materialize as a stack array of doubles
+  handed to `matlab_mat_from_buf`; matrix slots become `llvm.alloca`
+  of `!llvm.ptr`; `disp(matrix)` routes to `matlab_disp_mat`.
 - **`LowerIO`** (`LowerIO.cpp`) — `matlab.const_char` → global string,
-  `disp`/`fprintf` → `llvm.call` to the runtime, `disp(tensor<MxNxf64>)`
-  via a literal-matrix-walk + stack alloca of doubles.
+  `disp`/`fprintf` → `llvm.call` to the runtime.
 - **`LowerScalarSlots`** (`LowerScalarSlots.cpp`) — post-refinement
   pass that converts surviving scalar `matlab.alloc` into `llvm.alloca`
   with matching `llvm.load`/`llvm.store`.
 
 ### 6. Runtime (`runtime/matlab_runtime.c`)
 
-~170 lines of C. Entries wired today:
+~500 lines of C. Entries wired today:
+
+**I/O**
 
 - `matlab_disp_str`, `matlab_disp_f64`, `matlab_disp_vec_f64`,
-  `matlab_disp_mat_f64`
-- `matlab_fprintf_str`, `matlab_fprintf_f64` (with escape-sequence
-  expansion for `\n\t\r\\\'\"\0`)
+  `matlab_disp_mat_f64`, `matlab_disp_mat` (descriptor variant)
+- `matlab_fprintf_str`, `matlab_fprintf_f64` (escape-sequence expansion
+  for `\n\t\r\\\'\"\0`)
+
+**Matrix descriptor + math** (`matlab_mat = { data, rows, cols }`, heap-
+allocated, passed around as `!llvm.ptr`; program lifetimes are short, so
+we leak).
+
+- Constructors: `matlab_zeros`, `matlab_ones`, `matlab_eye`,
+  `matlab_magic` (Siamese for odd `n`, simple fill for even),
+  `matlab_rand` (xorshift64), `matlab_randn` (Box-Muller),
+  `matlab_range` (for `a:b` / `a:step:b`), `matlab_mat_from_buf` (for
+  literal `[...]`).
+- Shape: `matlab_transpose`, `matlab_diag`, `matlab_reshape`,
+  `matlab_repmat`.
+- Reduction: `matlab_sum` (total over all elements).
+- Element-wise binary: `matlab_{add,sub,emul,ediv,epow}_{mm,ms,sm}`
+  (matrix×matrix, matrix×scalar, scalar×matrix).
+- Element-wise unary: `matlab_{neg,exp,log,sin,cos,tan,sqrt,abs}_m`
+  plus scalar `_s` variants.
+- Scalar indexing: `matlab_subscript1_s`, `matlab_subscript2_s`
+  (1-based, out-of-range returns 0).
+
+**Concurrency**
+
 - `matlab_parfor_dispatch` (pthread fan-out + join)
 - `matlab_reduce_add_f64` (mutex-guarded atomic add)
-
-Mutex-serialized across all I/O so parfor output doesn't interleave
-mid-line.
+- Global I/O mutex so parfor output doesn't interleave mid-line.
 
 ## Testing
 
-Two CTest suites, ~100 goldens total:
+Two CTest suites, ~115 goldens total:
 
 | Suite | Driver flag | Tests | What it checks |
 |---|---|:-:|---|
@@ -402,7 +450,7 @@ Two CTest suites, ~100 goldens total:
 | `Opt` | `-emit-mlir -opt` | 5 | Slot promotion + constant folding through `arith` |
 | `Programs` | `-emit-mlir -opt` | 31 | Medium programs (matrix ops, loops, functions) |
 | `Errors` | `-dump-ast` | 4 | Parser/Sema diagnostics |
-| `Run` | `-emit-llvm` + link + exec | 25 | End-to-end stdout goldens (supports `.sorted` for parfor) |
+| `Run` | `-emit-llvm` + link + exec | 40 | End-to-end stdout goldens (I/O, parfor, matrix math, user calls) |
 
 ```bash
 ctest --test-dir build
@@ -439,23 +487,24 @@ test/              goldens + run scripts
 
 ## Roadmap, ordered by what unblocks the most programs
 
-1. **Array runtime descriptor ABI** — `{ptr, rank, dims[]}` — unblocks
-   `disp(A')`, `disp(A+B)`, `disp(A(i,:))`, and essentially every
-   program that computes then prints.
-2. **Subscript lowering** — `matlab.subscript` → `tensor.extract_slice`
-   or a runtime helper; enables runtime indexing and indexed store.
-3. **Matrix ops via BLAS** — `matlab.matmul` → `linalg.matmul` → cblas;
-   `transpose` → `linalg.transpose`.
-4. **Anonymous function calls** — the handle is created today; wire
+1. **Sliced subscript runtime** — `A(:,2)`, `A(1:2, 2:3)`, `A(end,:)`.
+   Types already propagate as ranked tensors; need the runtime
+   `matlab_slice` entry and IR lowering.
+2. **Indexed store** — `A(i,j) = v`, `A(:, 2) = w`. Placeholder today.
+3. **Matrix ops via BLAS** — actual `A * B` (non-scalar operands),
+   `A \ b` linear solves, `eig`, `svd`, `inv`. User asked to defer.
+4. **Column reductions** — real MATLAB `sum(A)` returns a row vector;
+   ours returns the flat scalar. Once the row-vector variant is wired,
+   row/col-wise `min`/`max`/`mean`/`prod` follow the same pattern.
+5. **Anonymous function calls** — the handle is created today; wire
    `matlab.call_indirect` to an LLVM function pointer call.
-5. **String concatenation, `input` at runtime**, multi-arg `fprintf`.
-6. **`classdef`**, cells, structs with a proper boxed-value layout.
-7. **Multi-callsite polymorphism** — today a function called from two
+6. **Multi-arg `fprintf`, `input` at runtime**, string concatenation.
+7. **`classdef`**, cells, structs with a proper boxed-value layout.
+8. **Multi-callsite polymorphism** — today a function called from two
    sites with different concrete types stays `none`. Template-style
    specialization per call signature would unblock this.
-8. **REPL / Live Scripts** — out of scope for now.
-9. **Plotting** — out of scope; would need a plotting backend (SDL2,
-   gnuplot pipe, etc).
+9. **REPL / Live Scripts** — out of scope for now.
+10. **Plotting** — out of scope; would need a plotting backend.
 
 ## Non-goals (for now)
 

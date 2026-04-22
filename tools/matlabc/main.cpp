@@ -171,6 +171,12 @@ int main(int Argc, char **Argv) {
           bool B = mlirgen::runLowerUserCalls(M);
           if (!A && !B) break;
         }
+        // Lower every tensor-producing matlab.* op to a runtime call
+        // against the matrix runtime (matlab_zeros / matlab_add_mm /
+        // matlab_transpose / ...). After this runs, matrix values in the
+        // IR are !llvm.ptr to heap-allocated matlab_mat descriptors, and
+        // disp on a matrix ptr routes to matlab_disp_mat.
+        mlirgen::runLowerTensorOps(M);
         // After user-call refinement, any surviving matlab.alloc whose
         // result type is now a scalar primitive can be promoted to
         // llvm.alloca. This catches function-body locals that weren't

@@ -46,6 +46,16 @@ bool runLowerIO(mlir::ModuleOp M);
 /// refinement of user-defined functions.
 bool runLowerScalarSlots(mlir::ModuleOp M);
 
+/// Lowers every tensor-producing / tensor-consuming matlab.* op to an
+/// llvm.call against the matrix runtime (matlab_zeros, matlab_add_mm,
+/// matlab_transpose, matlab_disp_mat, ...). Tensor SSA values become
+/// !llvm.ptr (pointer to a heap-allocated matlab_mat descriptor).
+///
+/// Also rewrites matlab.alloc whose result is a tensor type into
+/// llvm.alloca of !llvm.ptr, with matlab.load/store converted accordingly,
+/// so matrix-typed variables behave as pointer slots.
+bool runLowerTensorOps(mlir::ModuleOp M);
+
 /// Lowers user-defined function calls: walks every matlab.call @fname(args)
 /// in the module, and (a) retypes the target func.func's signature + entry
 /// block arguments to match the call-site argument types when the original

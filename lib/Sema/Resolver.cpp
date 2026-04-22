@@ -20,7 +20,7 @@ void Resolver::registerBuiltins() {
   // Minimal initial registry. Type inference will special-case some of these
   // to produce concrete shape/dtype results.
   for (const char *N : {
-    "zeros", "ones", "eye", "rand", "randn",
+    "zeros", "ones", "eye", "rand", "randn", "magic", "diag",
     "size", "length", "numel", "ndims",
     "reshape", "repmat", "linspace",
     "abs", "sqrt", "exp", "log", "sin", "cos", "tan",

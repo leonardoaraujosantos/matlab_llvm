@@ -615,6 +615,17 @@ const Type *TypeInference::visitBuiltinCall(std::string_view Name,
     return constructorOf(Dtype::Double);
   if (Name == "true" || Name == "false")
     return constructorOf(Dtype::Logical);
+  if (Name == "magic") {
+    // magic(n) -> n×n matrix of double.
+    int64_t N = Args.size() == 1 ? foldInt(Args[0]) : -1;
+    return TC.arrayOf(Dtype::Double,
+                      N > 0 ? Shape::matrix(N, N) : Shape::unknown());
+  }
+  if (Name == "diag") {
+    // diag(vec_of_len_n) -> n×n matrix; diag(matrix) -> column vector of
+    // length min(m,n). Without richer shape info we report dynamic.
+    return TC.arrayOf(Dtype::Double, Shape::unknown());
+  }
 
   if (Name == "size") {
     // size(A) -> row vector of length ndims(A); size(A,k) -> scalar double
