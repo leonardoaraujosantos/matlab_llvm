@@ -155,23 +155,23 @@ iteration and joins them at the end.
 ```mermaid
 sequenceDiagram
     autonumber
-    participant Main as main()
-    participant RT as matlab_parfor_dispatch
-    participant W1 as body worker #1
-    participant W2 as body worker #2
-    participant Wn as body worker #N
-    Note over Main: parfor i = 1:N<br/>body(i, state) = ...
-    Main->>RT: dispatch(1, 1, N, &body, &state)
+    participant Main
+    participant Disp as matlab_parfor_dispatch
+    participant W1 as worker 1
+    participant W2 as worker 2
+    participant Wn as worker N
+    Note over Main: parfor i = 1 to N<br/>body outlined as llvm.func
+    Main->>Disp: start, step, end, body, state
     par
-        RT->>W1: pthread_create(body, i=1)
-        RT->>W2: pthread_create(body, i=2)
-        RT->>Wn: pthread_create(body, i=N)
+        Disp->>W1: pthread_create, iv = 1
+        Disp->>W2: pthread_create, iv = 2
+        Disp->>Wn: pthread_create, iv = N
     end
-    W1-->>RT: pthread_exit
-    W2-->>RT: pthread_exit
-    Wn-->>RT: pthread_exit
-    RT->>Main: return
-    Note over Main: all reductions complete;<br/>disp(x) now sees final value
+    W1-->>Disp: pthread_exit
+    W2-->>Disp: pthread_exit
+    Wn-->>Disp: pthread_exit
+    Disp->>Main: return
+    Note over Main: all reductions joined<br/>final disp reads final value
 ```
 
 **Reductions** use a mutex-protected atomic-add entry
