@@ -601,40 +601,129 @@ bool TensorLowering::rewriteRange() {
   return Changed;
 }
 
+// Helper: does this value represent the colon sentinel (matlab.colon) or a
+// null ptr already? Used while wrapping indices for the slice runtime.
+static bool isColonSentinel(Value V) {
+  Operation *D = V.getDefiningOp();
+  if (!D) return false;
+  if (D->getName().getStringRef() == "matlab.colon") return true;
+  if (isa<LLVM::ZeroOp>(D)) return true;
+  return false;
+}
+
 bool TensorLowering::rewriteSubscript() {
+  // First, rewrite any matlab.end(base, dim) -> matlab_end_of_dim call and
+  // matlab.colon -> llvm.mlir.zero. These need to happen before we try to
+  // classify subscript operand types. (Bare-operand matlab.end without a
+  // subscript context is left for later passes to reject cleanly.)
+  SmallVector<Operation *> Ends, Colons;
+  Mod.walk([&](Operation *Op) {
+    if (isMatlabOp(Op, "matlab.end") && Op->getNumOperands() == 2 &&
+        Op->getOperand(0).getType() == PtrTy &&
+        Op->getOperand(1).getType() == F64 &&
+        Op->getNumResults() == 1 &&
+        Op->getResult(0).getType() == F64)
+      Ends.push_back(Op);
+    else if (isMatlabOp(Op, "matlab.colon"))
+      Colons.push_back(Op);
+  });
+
+  bool Changed = false;
+  for (Operation *Op : Ends) {
+    B.setInsertionPoint(Op);
+    auto Fn = rt("matlab_end_of_dim", F64, {PtrTy, F64});
+    auto NC = LLVM::CallOp::create(B, Op->getLoc(), Fn,
+                                    ValueRange{Op->getOperand(0),
+                                               Op->getOperand(1)});
+    Op->getResult(0).replaceAllUsesWith(NC.getResult());
+    Op->erase();
+    Changed = true;
+  }
+  for (Operation *Op : Colons) {
+    B.setInsertionPoint(Op);
+    Value Null = LLVM::ZeroOp::create(B, Op->getLoc(), PtrTy);
+    Op->getResult(0).replaceAllUsesWith(Null);
+    Op->erase();
+    Changed = true;
+  }
+
+  // Now rewrite the subscript ops themselves.
   SmallVector<Operation *> Subs;
   Mod.walk([&](Operation *Op) {
     if (isMatlabOp(Op, "matlab.subscript")) Subs.push_back(Op);
   });
-  bool Changed = false;
   for (Operation *Op : Subs) {
-    // Require ptr as base and f64 indices; scalar result.
     unsigned N = Op->getNumOperands();
     if (N < 2 || N > 3) continue;
     if (Op->getOperand(0).getType() != PtrTy) continue;
-    for (unsigned i = 1; i < N; ++i)
-      if (Op->getOperand(i).getType() != F64) { N = 0; break; }
-    if (N == 0) continue;
-    if (Op->getNumResults() != 1 || Op->getResult(0).getType() != F64)
-      continue;
+
+    // Classify each index.
+    bool AllScalar = true;
+    for (unsigned i = 1; i < N; ++i) {
+      Type T = Op->getOperand(i).getType();
+      if (T != F64) { AllScalar = false; break; }
+    }
+
     B.setInsertionPoint(Op);
+    Value Base = Op->getOperand(0);
+
+    // All scalar + scalar f64 result => fast path, per-element access.
+    if (AllScalar && Op->getNumResults() == 1 &&
+        Op->getResult(0).getType() == F64) {
+      if (N == 3) {
+        auto Fn = rt("matlab_subscript2_s", F64, {PtrTy, F64, F64});
+        auto NC = LLVM::CallOp::create(B, Op->getLoc(), Fn,
+                                        ValueRange{Base, Op->getOperand(1),
+                                                   Op->getOperand(2)});
+        Op->getResult(0).replaceAllUsesWith(NC.getResult());
+      } else {
+        auto Fn = rt("matlab_subscript1_s", F64, {PtrTy, F64});
+        auto NC = LLVM::CallOp::create(B, Op->getLoc(), Fn,
+                                        ValueRange{Base, Op->getOperand(1)});
+        Op->getResult(0).replaceAllUsesWith(NC.getResult());
+      }
+      Op->erase();
+      Changed = true;
+      continue;
+    }
+
+    // Slow path: any non-scalar index -> matlab_slice{1,2}.
+    // Each index needs to reach the runtime as a ptr (row-vector of 1-based
+    // indices) or null (colon). Convert:
+    //   - f64 scalar  -> matlab_mat_from_scalar(x) : ptr
+    //   - ptr         -> use as-is (range, index vector, or null sentinel)
+    auto wrap = [&](Value V) -> Value {
+      if (V.getType() == PtrTy) return V;
+      if (V.getType() == F64) {
+        auto Fn = rt("matlab_mat_from_scalar", PtrTy, {F64});
+        auto NC = LLVM::CallOp::create(B, Op->getLoc(), Fn, ValueRange{V});
+        return NC.getResult();
+      }
+      /* Any other type means an operand we can't handle here — caller
+       * will notice we didn't rewrite this subscript. */
+      return Value{};
+    };
+
     if (N == 3) {
-      auto Fn = rt("matlab_subscript2_s", F64, {PtrTy, F64, F64});
+      Value R = wrap(Op->getOperand(1));
+      Value C = wrap(Op->getOperand(2));
+      if (!R || !C) continue;
+      auto Fn = rt("matlab_slice2", PtrTy, {PtrTy, PtrTy, PtrTy});
       auto NC = LLVM::CallOp::create(B, Op->getLoc(), Fn,
-                                      ValueRange{Op->getOperand(0),
-                                                 Op->getOperand(1),
-                                                 Op->getOperand(2)});
+                                      ValueRange{Base, R, C});
       Op->getResult(0).replaceAllUsesWith(NC.getResult());
     } else {
-      auto Fn = rt("matlab_subscript1_s", F64, {PtrTy, F64});
+      Value I = wrap(Op->getOperand(1));
+      if (!I) continue;
+      auto Fn = rt("matlab_slice1", PtrTy, {PtrTy, PtrTy});
       auto NC = LLVM::CallOp::create(B, Op->getLoc(), Fn,
-                                      ValueRange{Op->getOperand(0),
-                                                 Op->getOperand(1)});
+                                      ValueRange{Base, I});
       Op->getResult(0).replaceAllUsesWith(NC.getResult());
     }
     Op->erase();
     Changed = true;
   }
+  (void)isColonSentinel;  // currently unused — kept for future expansion
   return Changed;
 }
 

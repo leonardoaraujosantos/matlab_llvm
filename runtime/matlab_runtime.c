@@ -813,6 +813,125 @@ double matlab_end_of_dim(matlab_mat *A, double dim) {
     return matlab_size_dim(A, dim);
 }
 
+/*---------- Slicing ------------------------------------------------------
+ *
+ * `rows` and `cols` are matlab_mat row vectors (or single-element 1×1) of
+ * 1-based integer indices. A NULL pointer means "colon" — take all indices
+ * along that dimension.
+ *
+ *--------------------------------------------------------------------------*/
+
+/* Wrap a scalar double as a 1×1 matrix. Used by the subscript lowering
+ * when one index is scalar and another is a range/colon. */
+matlab_mat *matlab_mat_from_scalar(double x) {
+    matlab_mat *M = mat_alloc(1, 1);
+    M->data[0] = x;
+    return M;
+}
+
+/* A(rows, cols): rank-2 slice. Result dims are the lengths of rows/cols
+ * (or the base's dim if the corresponding index is NULL/colon). 1-based
+ * indexing; out-of-range indices leave 0 in the output cell. */
+matlab_mat *matlab_slice2(matlab_mat *A, matlab_mat *rows, matlab_mat *cols) {
+    int64_t R = rows ? rows->rows * rows->cols : A->rows;
+    int64_t C = cols ? cols->rows * cols->cols : A->cols;
+    matlab_mat *Y = mat_alloc(R, C);
+    for (int64_t i = 0; i < R; ++i) {
+        int64_t ri = rows ? ((int64_t)rows->data[i] - 1) : i;
+        if (ri < 0 || ri >= A->rows) continue;
+        for (int64_t j = 0; j < C; ++j) {
+            int64_t cj = cols ? ((int64_t)cols->data[j] - 1) : j;
+            if (cj < 0 || cj >= A->cols) continue;
+            Y->data[i * C + j] = A->data[ri * A->cols + cj];
+        }
+    }
+    return Y;
+}
+
+/* A(idx): linear indexing. MATLAB uses column-major order — A(k) walks
+ * down column 1, then column 2, etc. Result shape tracks the index shape. */
+matlab_mat *matlab_slice1(matlab_mat *A, matlab_mat *idx) {
+    int64_t N = idx ? idx->rows * idx->cols : A->rows * A->cols;
+    int64_t m = A->rows, n = A->cols;
+    int64_t outR = idx ? idx->rows : 1;
+    int64_t outC = idx ? idx->cols : N;
+    if (outR * outC != N) { outR = 1; outC = N; }
+    matlab_mat *Y = mat_alloc(outR, outC);
+    for (int64_t k = 0; k < N; ++k) {
+        int64_t lin = idx ? ((int64_t)idx->data[k] - 1) : k;
+        if (lin < 0 || lin >= m * n) continue;
+        int64_t col = lin / m;
+        int64_t row = lin - col * m;
+        Y->data[k] = A->data[row * n + col];
+    }
+    return Y;
+}
+
+/* A(rows, cols) = V. Scalar V is broadcast. NULL rows/cols = colon. */
+void matlab_slice_store2(matlab_mat *A, matlab_mat *rows, matlab_mat *cols,
+                         matlab_mat *V) {
+    int64_t R = rows ? rows->rows * rows->cols : A->rows;
+    int64_t C = cols ? cols->rows * cols->cols : A->cols;
+    int bcast = (V->rows == 1 && V->cols == 1);
+    for (int64_t i = 0; i < R; ++i) {
+        int64_t ri = rows ? ((int64_t)rows->data[i] - 1) : i;
+        if (ri < 0 || ri >= A->rows) continue;
+        for (int64_t j = 0; j < C; ++j) {
+            int64_t cj = cols ? ((int64_t)cols->data[j] - 1) : j;
+            if (cj < 0 || cj >= A->cols) continue;
+            double v;
+            if (bcast) v = V->data[0];
+            else if (V->rows == R && V->cols == C) v = V->data[i * C + j];
+            else continue;
+            A->data[ri * A->cols + cj] = v;
+        }
+    }
+}
+
+void matlab_slice_store2_scalar(matlab_mat *A, matlab_mat *rows,
+                                matlab_mat *cols, double v) {
+    int64_t R = rows ? rows->rows * rows->cols : A->rows;
+    int64_t C = cols ? cols->rows * cols->cols : A->cols;
+    for (int64_t i = 0; i < R; ++i) {
+        int64_t ri = rows ? ((int64_t)rows->data[i] - 1) : i;
+        if (ri < 0 || ri >= A->rows) continue;
+        for (int64_t j = 0; j < C; ++j) {
+            int64_t cj = cols ? ((int64_t)cols->data[j] - 1) : j;
+            if (cj < 0 || cj >= A->cols) continue;
+            A->data[ri * A->cols + cj] = v;
+        }
+    }
+}
+
+void matlab_slice_store1(matlab_mat *A, matlab_mat *idx, matlab_mat *V) {
+    int64_t N = idx ? idx->rows * idx->cols : A->rows * A->cols;
+    int64_t m = A->rows, n = A->cols;
+    int bcast = (V->rows == 1 && V->cols == 1);
+    for (int64_t k = 0; k < N; ++k) {
+        int64_t lin = idx ? ((int64_t)idx->data[k] - 1) : k;
+        if (lin < 0 || lin >= m * n) continue;
+        int64_t col = lin / m;
+        int64_t row = lin - col * m;
+        double v;
+        if (bcast) v = V->data[0];
+        else if (k < V->rows * V->cols) v = V->data[k];
+        else continue;
+        A->data[row * n + col] = v;
+    }
+}
+
+void matlab_slice_store1_scalar(matlab_mat *A, matlab_mat *idx, double v) {
+    int64_t N = idx ? idx->rows * idx->cols : A->rows * A->cols;
+    int64_t m = A->rows, n = A->cols;
+    for (int64_t k = 0; k < N; ++k) {
+        int64_t lin = idx ? ((int64_t)idx->data[k] - 1) : k;
+        if (lin < 0 || lin >= m * n) continue;
+        int64_t col = lin / m;
+        int64_t row = lin - col * m;
+        A->data[row * n + col] = v;
+    }
+}
+
 /*---------- Predicates ---------------------------------------------------*/
 
 double matlab_isempty(matlab_mat *A) {

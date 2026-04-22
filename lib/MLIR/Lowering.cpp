@@ -80,6 +80,15 @@ private:
   // Per-function: binding -> slot (Value result of matlab.alloc).
   std::unordered_map<Binding *, mlir::Value> Slots;
 
+  // Stack of (base, dim) contexts for `end` resolution inside subscripts.
+  // Each entry represents the subscript arg currently being lowered:
+  //   base = the matrix being indexed (already-lowered SSA value)
+  //   dim  = 1-based position of this arg in the subscript.
+  // When an EndExpr is lowered, the top of the stack provides operands for
+  // the emitted matlab.end op so the tensor-ops pass can rewrite it to a
+  // runtime matlab_end_of_dim call.
+  std::vector<std::pair<mlir::Value, int64_t>> SubscriptCtx;
+
   //--- location / type helpers
   mlir::Location loc(SourceLocation L) const;
   mlir::Location loc(SourceRange R) const { return loc(R.Begin); }
@@ -661,8 +670,24 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
     auto &N = static_cast<const NameExpr &>(E);
     return loadBinding(N.Ref, E.Ty ? E.Ty : TC.any(), L);
   }
-  case NodeKind::EndExpr:
+  case NodeKind::EndExpr: {
+    // If we're inside a subscript arg, emit matlab.end with (base, dim)
+    // operands so LowerTensorOps can rewrite it to matlab_end_of_dim.
+    // Otherwise fall back to the zero-operand form — it won't survive
+    // later passes, but the parser already errors on end-outside-indexing
+    // so this path is really only reachable for weird IR.
+    if (!SubscriptCtx.empty()) {
+      auto [Base, Dim] = SubscriptCtx.back();
+      mlir::NamedAttribute VA(
+          mlir::StringAttr::get(&MCtx, "value"),
+          mlir::FloatAttr::get(mlir::Float64Type::get(&MCtx),
+                                (double)Dim));
+      mlir::Value DimV = emitUnreg("matlab.const_float", {},
+                                   mlir::Float64Type::get(&MCtx), L, {VA});
+      return emitUnreg("matlab.end", {Base, DimV}, RT, L);
+    }
     return emitUnreg("matlab.end", {}, RT, L);
+  }
   case NodeKind::ColonExpr:
     return emitUnreg("matlab.colon", {}, RT, L);
   case NodeKind::BinaryOp: {
@@ -716,7 +741,16 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
     mlir::Value Arr = C.Callee ? lowerExpr(*C.Callee) : mlir::Value{};
     llvm::SmallVector<mlir::Value, 4> Idx;
     Idx.push_back(Arr);
-    for (const Expr *A : C.Args) if (A) Idx.push_back(lowerExpr(*A));
+    // Lower each arg with subscript context pushed so any EndExpr inside
+    // resolves to size(Arr, thisDim). Context is per-arg so that sibling
+    // args don't leak each other's dim.
+    for (size_t a = 0; a < C.Args.size(); ++a) {
+      const Expr *Arg = C.Args[a];
+      if (!Arg) continue;
+      SubscriptCtx.push_back({Arr, (int64_t)(a + 1)});
+      Idx.push_back(lowerExpr(*Arg));
+      SubscriptCtx.pop_back();
+    }
     mlir::NamedAttribute NA(
         mlir::StringAttr::get(&MCtx, "nindices"),
         mlir::IntegerAttr::get(mlir::IntegerType::get(&MCtx, 64),
