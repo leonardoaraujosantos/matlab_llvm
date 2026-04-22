@@ -1,0 +1,12 @@
+module {
+  func.func @script() {
+    %cst = arith.constant 2.000000e+00 : f64
+    %cst_0 = arith.constant 5.000000e-01 : f64
+    %cst_1 = arith.constant 0.000000e+00 : f64
+    %cst_2 = arith.constant 1.000000e+00 : f64
+    %cst_3 = arith.constant 5.000000e+00 : f64
+    %0 = "matlab.range"(%cst_2, %cst_3) {has_step = false} : (f64, f64) -> tensor<?xf64>
+    %1 = "matlab.range"(%cst_1, %cst_0, %cst) {has_step = true} : (f64, f64, f64) -> tensor<?xf64>
+    return
+  }
+}

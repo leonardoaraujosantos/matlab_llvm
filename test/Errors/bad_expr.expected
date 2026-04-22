@@ -1,0 +1,15 @@
+TranslationUnit
+  Script
+    Block
+      AssignStmt
+        LHS
+          NameExpr a
+        RHS
+          BinaryOp +
+            IntegerLiteral 1
+            NameExpr <error>
+      ExprStmt suppressed
+        IntegerLiteral 2
+Errors/bad_expr.m:1:9: error: unexpected '*' in expression
+  a = 1 + * 2;
+          ^

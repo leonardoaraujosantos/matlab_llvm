@@ -1,0 +1,13 @@
+TranslationUnit
+  Script
+    Block
+      AssignStmt suppressed
+        LHS
+          BinaryOp +
+            IntegerLiteral 1
+            IntegerLiteral 2
+        RHS
+          IntegerLiteral 3
+Errors/bad_lvalue.m:1:2: error: expression is not assignable
+  (1 + 2) = 3;
+   ^

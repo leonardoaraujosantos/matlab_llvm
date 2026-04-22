@@ -1,0 +1,22 @@
+module {
+  func.func @script() {
+    %0 = "matlab.alloc"() {name = "x"} : () -> none
+    %1 = "matlab.const_char"() {value = "Enter a number (0 to stop): "} : () -> tensor<1x28xi8>
+    %2 = "matlab.call_builtin"(%1) {callee = "input"} : (tensor<1x28xi8>) -> none
+    "matlab.store"(%2, %0) : (none, none) -> ()
+    "matlab.while"() ({
+      %cst = arith.constant 0.000000e+00 : f64
+      %3 = "matlab.load"(%0) : (none) -> none
+      %4 = "matlab.ne"(%3, %cst) : (none, f64) -> i1
+      "matlab.yield"(%4) : (i1) -> ()
+    }, {
+      %3 = "matlab.load"(%0) : (none) -> none
+      %4 = "matlab.call_builtin"(%3) {callee = "disp"} : (none) -> none
+      %5 = "matlab.const_char"() {value = "Enter a number (0 to stop): "} : () -> tensor<1x28xi8>
+      %6 = "matlab.call_builtin"(%5) {callee = "input"} : (tensor<1x28xi8>) -> none
+      "matlab.store"(%6, %0) : (none, none) -> ()
+      "matlab.yield"() : () -> ()
+    }) : () -> ()
+    return
+  }
+}

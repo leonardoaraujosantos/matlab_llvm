@@ -1,0 +1,14 @@
+TranslationUnit
+  Script
+    Block
+      AssignStmt suppressed
+        LHS
+          NameExpr A
+        RHS
+          MatrixLiteral rows=2
+            Row 0
+              IntegerLiteral 1
+              IntegerLiteral 2
+            Row 1
+              IntegerLiteral 3
+              IntegerLiteral 4

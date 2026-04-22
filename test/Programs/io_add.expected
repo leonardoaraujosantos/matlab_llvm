@@ -1,0 +1,11 @@
+module {
+  func.func @script() {
+    %0 = "matlab.const_char"() {value = "First: "} : () -> tensor<1x7xi8>
+    %1 = "matlab.call_builtin"(%0) {callee = "input"} : (tensor<1x7xi8>) -> none
+    %2 = "matlab.const_char"() {value = "Second: "} : () -> tensor<1x8xi8>
+    %3 = "matlab.call_builtin"(%2) {callee = "input"} : (tensor<1x8xi8>) -> none
+    %4 = "matlab.add"(%1, %3) : (none, none) -> none
+    %5 = "matlab.call_builtin"(%4) {callee = "disp"} : (none) -> none
+    return
+  }
+}

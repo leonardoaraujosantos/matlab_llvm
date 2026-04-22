@@ -1,0 +1,18 @@
+TranslationUnit
+  Function bad in=(x) out=(y)
+    Block
+      IfStmt
+        Cond
+          BinaryOp >
+            NameExpr x
+            IntegerLiteral 0
+        Then
+          Block
+            AssignStmt suppressed
+              LHS
+                NameExpr y
+              RHS
+                NameExpr x
+Errors/missing_end.m:4:1: error: expected 'end' to close 'if', found ''
+  
+  ^

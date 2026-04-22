@@ -1,0 +1,25 @@
+module {
+  func.func @classify(%arg0: none) -> f64 {
+    %cst = arith.constant 1.000000e+00 : f64
+    %cst_0 = arith.constant -1.000000e+00 : f64
+    %cst_1 = arith.constant 0.000000e+00 : f64
+    %0 = "matlab.alloc"() {name = "x"} : () -> none
+    "matlab.store"(%arg0, %0) : (none, none) -> ()
+    %1 = "matlab.alloc"() {name = "y"} : () -> f64
+    %2 = "matlab.load"(%0) : (none) -> none
+    %3 = "matlab.lt"(%2, %cst_1) : (none, f64) -> i1
+    scf.if %3 {
+      "matlab.store"(%cst_0, %1) : (f64, f64) -> ()
+    } else {
+      %5 = "matlab.load"(%0) : (none) -> none
+      %6 = "matlab.eq"(%5, %cst_1) : (none, f64) -> i1
+      scf.if %6 {
+        "matlab.store"(%cst_1, %1) : (f64, f64) -> ()
+      } else {
+        "matlab.store"(%cst, %1) : (f64, f64) -> ()
+      }
+    }
+    %4 = "matlab.load"(%1) : (f64) -> f64
+    return %4 : f64
+  }
+}

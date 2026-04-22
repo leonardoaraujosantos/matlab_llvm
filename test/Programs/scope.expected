@@ -1,0 +1,23 @@
+module {
+  func.func @testscope(%arg0: none) -> none {
+    %cst = arith.constant 1.000000e+02 : f64
+    %cst_0 = arith.constant 5.000000e+00 : f64
+    %cst_1 = arith.constant 1.000000e+00 : f64
+    %0 = "matlab.alloc"() {name = "x"} : () -> none
+    "matlab.store"(%arg0, %0) : (none, none) -> ()
+    %1 = "matlab.alloc"() {name = "y"} : () -> none
+    %2 = "matlab.load"(%0) : (none) -> none
+    %3 = "matlab.add"(%2, %cst_1) : (none, f64) -> none
+    "matlab.store"(%3, %1) : (none, none) -> ()
+    %4 = "matlab.load"(%1) : (none) -> none
+    %5 = "matlab.gt"(%4, %cst_0) : (none, f64) -> i1
+    scf.if %5 {
+      "matlab.store"(%cst, %0) : (f64, none) -> ()
+      %7 = "matlab.load"(%0) : (none) -> f64
+      "matlab.store"(%7, %1) : (f64, none) -> ()
+    } else {
+    }
+    %6 = "matlab.load"(%1) : (none) -> none
+    return %6 : none
+  }
+}

@@ -1,0 +1,14 @@
+module {
+  func.func @script() {
+    %cst = arith.constant 9.900000e+01 : f64
+    %cst_0 = arith.constant 4.000000e+00 : f64
+    %cst_1 = arith.constant 3.000000e+00 : f64
+    %cst_2 = arith.constant 1.000000e+00 : f64
+    %cst_3 = arith.constant 2.000000e+00 : f64
+    %0 = "matlab.concat_row"(%cst_2, %cst_3) : (f64, f64) -> none
+    %1 = "matlab.concat_row"(%cst_1, %cst_0) : (f64, f64) -> none
+    %2 = "matlab.concat_col"(%0, %1) : (none, none) -> tensor<2x2xf64>
+    %3 = "matlab.call_builtin"(%2, %cst_2, %cst_3, %cst) {callee = "__subscript_store"} : (tensor<2x2xf64>, f64, f64, f64) -> none
+    return
+  }
+}

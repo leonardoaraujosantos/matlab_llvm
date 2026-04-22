@@ -1,0 +1,16 @@
+module {
+  func.func @script() {
+    %cst = arith.constant 5.000000e+00 : f64
+    %0 = "matlab.alloc"() {name = "x"} : () -> none
+    %1 = "matlab.make_anon"() ({
+      %cst_0 = arith.constant 1.000000e+00 : f64
+      %3 = "matlab.load"(%0) : (none) -> none
+      %4 = "matlab.load"(%0) : (none) -> none
+      %5 = "matlab.matmul"(%3, %4) : (none, none) -> none
+      %6 = "matlab.add"(%5, %cst_0) : (none, f64) -> none
+      "matlab.yield"(%6) : (none) -> ()
+    }) {params = "x"} : () -> none
+    %2 = "matlab.subscript"(%1, %cst) {nindices = 1 : i64} : (none, f64) -> none
+    return
+  }
+}

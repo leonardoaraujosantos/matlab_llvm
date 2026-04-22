@@ -53,6 +53,7 @@ run_suite MIR      -emit-mir
 run_suite MLIR     -emit-mlir
 run_suite Opt      "-emit-mlir -opt"
 run_suite Programs "-emit-mlir -opt"
+run_suite Errors   -dump-ast
 
 echo "----"
 echo "passed: $pass    failed: $fail"

@@ -1,0 +1,7 @@
+module {
+  func.func @script() {
+    %0 = "matlab.const_char"() {value = "Hello, world!"} : () -> tensor<1x13xi8>
+    %1 = "matlab.call_builtin"(%0) {callee = "disp"} : (tensor<1x13xi8>) -> none
+    return
+  }
+}

@@ -1,0 +1,6 @@
+module {
+  func.func @square(%arg0: none) -> none {
+    %0 = "matlab.matmul"(%arg0, %arg0) : (none, none) -> none
+    return %0 : none
+  }
+}
