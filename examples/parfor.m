@@ -46,7 +46,7 @@ disp(total);
 % lines across threads is not fixed, but each iteration fires exactly
 % once.
 disp('per-iteration messages (order may vary across threads):');
-parfor i = 1:3
+parfor i = 1:10
     greet(i);
 end
 

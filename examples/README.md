@@ -20,6 +20,7 @@ just compile examples/<name>.m /tmp/<name> && /tmp/<name>
 | `for_loop.m`      | Vectorised substitutes for loops (outer product, `sum`)          |
 | `factorial.m`     | Single-recursion user function (`if/else`, `*`, `-`)             |
 | `parfor.m`        | `parfor` reductions (single/multi/step) + calls to user helpers  |
+| `func_handles.m`  | `@sin` / `@sqrt` / `@abs` / `@exp` handles via indirect call     |
 
 ## Current limitations the examples work around
 

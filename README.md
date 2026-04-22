@@ -263,7 +263,7 @@ threads deterministically prints 55.
 | **`parfor` with `x = x + rhs` reductions** | ✅ | ✅ | ✅ (atomic add) | ✅ |
 | Anonymous functions `@(x) x^2` | ✅ | ✅ | ✅ outlined to `llvm.func` | ✅ |
 | Calls through handles `f(x)` | ✅ | ✅ | ✅ `matlab.call_indirect` → LLVM function pointer | ✅ |
-| Function handles `@name` | ✅ | ✅ | ⚠️ handle creates ptr; direct call works via indirect path | ✅ |
+| Function handles `@name` | ✅ | ✅ | ✅ scalar math entries only (`@sin`/`@cos`/… → `matlab_*_s`) | ✅ |
 | Logical indexing `A(A > 0)` | ✅ | ✅ | ✅ (masked slice) | ✅ |
 | Empty matrix `A = []` / deallocate | ✅ | ✅ | ✅ (`matlab_empty_mat`) | ✅ |
 | Matrix comparisons `A > B`, `A == s` etc. | ✅ | ✅ | ✅ (returns 0/1 matrix) | ✅ |

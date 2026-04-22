@@ -260,15 +260,87 @@ bool outlineAnon(Operation *Anon, unsigned Id) {
   return true;
 }
 
+/* Rewrite matlab.make_handle {callee = "<name>"} into an llvm.mlir.addressof
+ * of the runtime's scalar entry for <name> (matlab_<name>_s). The downstream
+ * call_indirect rewrite then lowers `f(x)` calls through that pointer into a
+ * plain llvm.call. Only the scalar-signature builtins that exist in the
+ * runtime are handled; anything else is left alone and will surface as a
+ * verifier/translate error, which is preferable to silently wrong code. */
+bool rewriteMakeHandle(ModuleOp M) {
+  static const llvm::StringMap<StringRef> ScalarRt = {
+    {"sin",  "matlab_sin_s"},  {"cos",  "matlab_cos_s"},
+    {"tan",  "matlab_tan_s"},  {"exp",  "matlab_exp_s"},
+    {"log",  "matlab_log_s"},  {"sqrt", "matlab_sqrt_s"},
+    {"abs",  "matlab_abs_s"},
+  };
+  MLIRContext *Ctx = M.getContext();
+  auto F64 = Float64Type::get(Ctx);
+  auto PtrTy = LLVM::LLVMPointerType::get(Ctx);
+  OpBuilder B(Ctx);
+  bool Changed = false;
+
+  SmallVector<Operation *> Handles;
+  M.walk([&](Operation *Op) {
+    if (isMatlabOp(Op, "matlab.make_handle")) Handles.push_back(Op);
+  });
+  for (Operation *H : Handles) {
+    auto Attr = H->getAttrOfType<StringAttr>("callee");
+    if (!Attr) continue;
+    auto It = ScalarRt.find(Attr.getValue());
+    if (It == ScalarRt.end()) continue;
+
+    /* Declare the runtime function if missing. Signature: (f64) -> f64. */
+    StringRef RtName = It->second;
+    LLVM::LLVMFuncOp Fn = M.lookupSymbol<LLVM::LLVMFuncOp>(RtName);
+    if (!Fn) {
+      OpBuilder::InsertionGuard G(B);
+      B.setInsertionPointToStart(M.getBody());
+      auto Ty = LLVM::LLVMFunctionType::get(F64, {F64});
+      Fn = LLVM::LLVMFuncOp::create(B, H->getLoc(), RtName, Ty);
+      Fn.setLinkage(LLVM::Linkage::External);
+    }
+
+    B.setInsertionPoint(H);
+    Value Addr = LLVM::AddressOfOp::create(B, H->getLoc(), PtrTy, RtName);
+    H->getResult(0).replaceAllUsesWith(Addr);
+
+    /* Rewrite each matlab.call_indirect whose callee is this handle into
+     * an llvm.call of matlab_<name>_s with the single f64 arg. */
+    SmallVector<Operation *> Calls;
+    for (Operation *User : Addr.getUsers()) {
+      if (isMatlabOp(User, "matlab.call_indirect") &&
+          User->getNumOperands() >= 1 && User->getOperand(0) == Addr)
+        Calls.push_back(User);
+    }
+    for (Operation *Call : Calls) {
+      if (Call->getNumOperands() != 2) continue;  /* handle + 1 arg */
+      Value Arg = Call->getOperand(1);
+      if (Arg.getType() != F64) continue;
+      B.setInsertionPoint(Call);
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                      ValueRange{Arg});
+      if (Call->getNumResults() >= 1 && NC->getNumResults() >= 1)
+        Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase();
+    }
+    H->erase();
+    Changed = true;
+  }
+  return Changed;
+}
+
 } // namespace
 
 bool runLowerAnonCalls(ModuleOp M) {
+  /* make_handle first so @sin-style handles resolve to addressof before the
+   * anon outliner inspects call_indirect sites. */
+  bool Changed = rewriteMakeHandle(M);
+
   SmallVector<Operation *> Anons;
   M.walk([&](Operation *Op) {
     if (isMatlabOp(Op, "matlab.make_anon")) Anons.push_back(Op);
   });
   unsigned Id = 0;
-  bool Changed = false;
   for (Operation *A : Anons)
     if (outlineAnon(A, Id++)) Changed = true;
   return Changed;
