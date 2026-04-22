@@ -56,6 +56,13 @@ bool runLowerScalarSlots(mlir::ModuleOp M);
 /// so matrix-typed variables behave as pointer slots.
 bool runLowerTensorOps(mlir::ModuleOp M);
 
+/// Outlines each matlab.make_anon body into an llvm.func, replaces the
+/// make_anon op with an llvm.mlir.addressof, and rewrites every
+/// matlab.call_indirect through that handle into an llvm.call through a
+/// function pointer. v1 scope: scalar f64 params, no captures of outer
+/// values (anything more complex causes the pass to bail cleanly).
+bool runLowerAnonCalls(mlir::ModuleOp M);
+
 /// Lowers user-defined function calls: walks every matlab.call @fname(args)
 /// in the module, and (a) retypes the target func.func's signature + entry
 /// block arguments to match the call-site argument types when the original

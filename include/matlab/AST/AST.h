@@ -274,6 +274,10 @@ class AnonFunction : public Expr {
 public:
   std::vector<std::string_view> Params;
   Expr *Body = nullptr;
+
+  /* Populated by the resolver: one Binding per param, in order. */
+  std::vector<Binding *> ParamRefs;
+
   AnonFunction() : Expr(NodeKind::AnonFunction) {}
 };
 

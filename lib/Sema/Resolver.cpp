@@ -27,7 +27,7 @@ void Resolver::registerBuiltins() {
     "min", "max", "sum", "prod", "mean",
     "mtimes", "mldivide", "mrdivide",
     "transpose", "ctranspose",
-    "disp", "fprintf", "sprintf", "error", "warning", "input",
+    "disp", "fprintf", "sprintf", "error", "warning", "input", "clear",
     "keyboard", "pause", "tic", "toc",
     "isempty", "isequal", "find",
     "true", "false",
@@ -440,9 +440,11 @@ void Resolver::resolveExpr(Expr &E, Scope *S) {
   case NodeKind::AnonFunction: {
     auto &A = static_cast<AnonFunction &>(E);
     Scope *Inner = Sema.newScope(S, "<anon>");
+    A.ParamRefs.clear();
     for (auto P : A.Params) {
       Binding *B = Sema.newBinding();
-      Inner->declare(P, BindingKind::Param, B);
+      Binding *D = Inner->declare(P, BindingKind::Param, B);
+      A.ParamRefs.push_back(D);
     }
     if (A.Body) resolveExpr(*A.Body, Inner);
     break;

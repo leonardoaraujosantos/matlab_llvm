@@ -159,6 +159,10 @@ int main(int Argc, char **Argv) {
         // direct block argument (f64) into disp/fprintf rather than via an
         // outer slot that would still be `none`-typed at LowerIO time.
         mlirgen::runOutlineParfor(M);
+        // Outline anonymous-function bodies into llvm.funcs so their
+        // handles become plain function pointers and call_indirect sites
+        // collapse to direct llvm.calls.
+        mlirgen::runLowerAnonCalls(M);
         // Iterate scalar-to-arith + user-call lowering to a fixpoint so
         // type refinement propagates across chained user calls. Each
         // iteration: LowerScalarsToArith folds scalar ops that became

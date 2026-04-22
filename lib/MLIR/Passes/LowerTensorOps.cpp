@@ -270,6 +270,18 @@ bool TensorLowering::rewriteLiterals() {
 
   bool Changed = false;
   for (Operation *Op : Roots) {
+    /* Zero-operand concat is an empty literal [] — route to the runtime
+     * empty-matrix constructor so downstream disp/isempty/etc. see a
+     * real 0×0 matlab_mat*. */
+    if (Op->getNumOperands() == 0) {
+      B.setInsertionPoint(Op);
+      auto Fn = rt("matlab_empty_mat", PtrTy, {});
+      auto NC = LLVM::CallOp::create(B, Op->getLoc(), Fn, ValueRange{});
+      Op->getResult(0).replaceAllUsesWith(NC.getResult());
+      Op->erase();
+      Changed = true;
+      continue;
+    }
     int64_t Rows = 0, Cols = 0;
     SmallVector<Value, 16> Elts;
     if (!gatherLiteralElements(Op, Rows, Cols, Elts)) continue;
@@ -360,6 +372,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"isequal",    "matlab_isequal",    0, "pp"},
       {"size",       "matlab_size_dim",   0, "pf"},   /* size(A, dim) */
       {"find",       "matlab_find",       1, "p"},
+      {"matlab_empty_mat", "matlab_empty_mat", 1, ""},
     };
 
     // Pick the first entry with both a name match AND an arity match, so
@@ -451,6 +464,14 @@ bool TensorLowering::rewriteBinaryOps() {
     {"matlab.emul", "emul"},
     {"matlab.ediv", "ediv"},
     {"matlab.epow", "epow"},
+    /* Comparisons: the runtime returns 0.0/1.0 matrices so logical
+     * indexing A(A > 0) and similar patterns feed the same slice path. */
+    {"matlab.gt",   "gt"},
+    {"matlab.ge",   "ge"},
+    {"matlab.lt",   "lt"},
+    {"matlab.le",   "le"},
+    {"matlab.eq",   "eq"},
+    {"matlab.ne",   "ne"},
   };
 
   SmallVector<Operation *> Binaries;

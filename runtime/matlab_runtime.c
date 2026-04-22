@@ -849,10 +849,28 @@ matlab_mat *matlab_slice2(matlab_mat *A, matlab_mat *rows, matlab_mat *cols) {
 }
 
 /* A(idx): linear indexing. MATLAB uses column-major order — A(k) walks
- * down column 1, then column 2, etc. Result shape tracks the index shape. */
+ * down column 1, then column 2, etc. Result shape tracks the index shape.
+ *
+ * Logical indexing: when `idx` has the same shape as `A` (and A isn't a
+ * 1x1 scalar) we interpret idx as a mask — pick elements where idx!=0,
+ * walked in column-major order, return as a column vector. This is what
+ * makes `A(A > 0)` work naturally. */
 matlab_mat *matlab_slice1(matlab_mat *A, matlab_mat *idx) {
-    int64_t N = idx ? idx->rows * idx->cols : A->rows * A->cols;
     int64_t m = A->rows, n = A->cols;
+    if (idx && idx->rows == m && idx->cols == n && (m > 1 || n > 1)) {
+        int64_t count = 0;
+        for (int64_t j = 0; j < n; ++j)
+            for (int64_t i = 0; i < m; ++i)
+                if (idx->data[i * n + j] != 0.0) ++count;
+        matlab_mat *Y = mat_alloc(count, 1);
+        int64_t w = 0;
+        for (int64_t j = 0; j < n; ++j)
+            for (int64_t i = 0; i < m; ++i)
+                if (idx->data[i * n + j] != 0.0)
+                    Y->data[w++] = A->data[i * n + j];
+        return Y;
+    }
+    int64_t N = idx ? idx->rows * idx->cols : m * n;
     int64_t outR = idx ? idx->rows : 1;
     int64_t outC = idx ? idx->cols : N;
     if (outR * outC != N) { outR = 1; outC = N; }
@@ -865,6 +883,15 @@ matlab_mat *matlab_slice1(matlab_mat *A, matlab_mat *idx) {
         Y->data[k] = A->data[row * n + col];
     }
     return Y;
+}
+
+/* Empty 0×0 matrix. Used for `A = []` deallocation / `clear A`. */
+matlab_mat *matlab_empty_mat(void) {
+    matlab_mat *M = (matlab_mat *)calloc(1, sizeof(matlab_mat));
+    M->rows = 0;
+    M->cols = 0;
+    M->data = NULL;
+    return M;
 }
 
 /* A(rows, cols) = V. Scalar V is broadcast. NULL rows/cols = colon. */
@@ -1140,6 +1167,44 @@ BINARY_SM(sub,  s - A->data[k])
 BINARY_SM(emul, s * A->data[k])
 BINARY_SM(ediv, s / A->data[k])
 BINARY_SM(epow, pow(s, A->data[k]))
+
+/* Element-wise comparisons, returning 0.0/1.0 matrices so they feed
+ * cleanly into logical indexing (A(A > 0), etc.). */
+#define CMP_MM(name, op) \
+    matlab_mat *matlab_##name##_mm(matlab_mat *A, matlab_mat *B) { \
+        int64_t m = A->rows, n = A->cols; \
+        matlab_mat *C = mat_alloc(m, n); \
+        for (int64_t k = 0; k < m * n; ++k) \
+            C->data[k] = (A->data[k] op B->data[k]) ? 1.0 : 0.0; \
+        return C; \
+    }
+#define CMP_MS(name, op) \
+    matlab_mat *matlab_##name##_ms(matlab_mat *A, double s) { \
+        int64_t m = A->rows, n = A->cols; \
+        matlab_mat *C = mat_alloc(m, n); \
+        for (int64_t k = 0; k < m * n; ++k) \
+            C->data[k] = (A->data[k] op s) ? 1.0 : 0.0; \
+        return C; \
+    }
+#define CMP_SM(name, op) \
+    matlab_mat *matlab_##name##_sm(double s, matlab_mat *A) { \
+        int64_t m = A->rows, n = A->cols; \
+        matlab_mat *C = mat_alloc(m, n); \
+        for (int64_t k = 0; k < m * n; ++k) \
+            C->data[k] = (s op A->data[k]) ? 1.0 : 0.0; \
+        return C; \
+    }
+
+CMP_MM(gt, >)  CMP_MS(gt, >)  CMP_SM(gt, >)
+CMP_MM(ge, >=) CMP_MS(ge, >=) CMP_SM(ge, >=)
+CMP_MM(lt, <)  CMP_MS(lt, <)  CMP_SM(lt, <)
+CMP_MM(le, <=) CMP_MS(le, <=) CMP_SM(le, <=)
+CMP_MM(eq, ==) CMP_MS(eq, ==) CMP_SM(eq, ==)
+CMP_MM(ne, !=) CMP_MS(ne, !=) CMP_SM(ne, !=)
+
+#undef CMP_MM
+#undef CMP_MS
+#undef CMP_SM
 
 #undef BINARY_MM
 #undef BINARY_MS

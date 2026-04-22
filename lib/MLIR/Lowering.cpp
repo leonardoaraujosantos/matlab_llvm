@@ -80,6 +80,12 @@ private:
   // Per-function: binding -> slot (Value result of matlab.alloc).
   std::unordered_map<Binding *, mlir::Value> Slots;
 
+  // Bindings known to hold function handles. Populated when we see an
+  // assignment whose RHS is an AnonFunction / FuncHandle. Used at
+  // CallOrIndex lowering time to emit matlab.call_indirect instead of
+  // matlab.subscript for `f(x)` where f is a handle variable.
+  std::unordered_map<Binding *, bool> HandleBindings;
+
   // Stack of (base, dim) contexts for `end` resolution inside subscripts.
   // Each entry represents the subscript arg currently being lowered:
   //   base = the matrix being indexed (already-lowered SSA value)
@@ -279,7 +285,16 @@ mlir::Value Lowerer::loadBinding(Binding *Bnd, const Type *ValTy,
     mlir::Value S = getOrCreateSlot(Bnd, ValTy, Bnd->Name, L);
     return emitLoad(S, mirTy(ValTy), L);
   }
-  return emitLoad(It->second, mirTy(ValTy), L);
+  // Prefer the slot's own type when it's more concrete than what Sema
+  // inferred (Sema falls back to `any`/NoneType for values it can't
+  // specialize; the slot may have been created with a concrete scalar
+  // type, e.g. the f64 spill slot of an anon function's block arg).
+  mlir::Type LoadTy = mirTy(ValTy);
+  mlir::Type SlotTy = It->second.getType();
+  if (mlir::isa<mlir::NoneType>(LoadTy) &&
+      !mlir::isa<mlir::NoneType>(SlotTy))
+    LoadTy = SlotTy;
+  return emitLoad(It->second, LoadTy, L);
 }
 
 //===----------------------------------------------------------------------===//
@@ -399,7 +414,18 @@ void Lowerer::lowerStmt(const Stmt &St) {
   }
   case NodeKind::AssignStmt: {
     auto &A = static_cast<const AssignStmt &>(St);
+    /* If RHS is an anonymous function or a function handle, tag the LHS
+     * binding so later reads through it call the handle rather than
+     * trying to subscript a matrix. */
+    bool RhsIsHandle = A.RHS && (A.RHS->Kind == NodeKind::AnonFunction ||
+                                 A.RHS->Kind == NodeKind::FuncHandle);
     mlir::Value Rhs = A.RHS ? lowerExpr(*A.RHS) : mlir::Value{};
+    if (RhsIsHandle) {
+      for (const Expr *L : A.LHS) {
+        if (auto *N = dynamic_cast<const NameExpr *>(L))
+          if (N->Ref) HandleBindings[N->Ref] = true;
+      }
+    }
     for (const Expr *L : A.LHS) if (L) lowerLValueStore(*L, Rhs);
     return;
   }
@@ -556,6 +582,38 @@ void Lowerer::lowerStmt(const Stmt &St) {
     return;
   case NodeKind::CommandStmt: {
     auto &C = static_cast<const CommandStmt &>(St);
+    /* `clear A B C` maps each named variable's slot to an empty matrix.
+     * We resolve each arg to a binding by name inside the current scope
+     * (walking SlotMap for an entry with that name). Unmatched args are
+     * silently ignored, matching MATLAB's behavior when clearing an
+     * undefined name.
+     *
+     * `clear` with no args clears all variables in the current scope. */
+    if (C.Name == "clear") {
+      mlir::NamedAttribute NameAttr(
+          mlir::StringAttr::get(&MCtx, "callee"),
+          mlir::StringAttr::get(&MCtx, "matlab_empty_mat"));
+      auto emitClearSlot = [&](mlir::Value Slot) {
+        /* Call matlab_empty_mat(), store its result into the slot. We
+         * emit as matlab.call_builtin so the tensor-ops pass picks it
+         * up and converts it to a real llvm.call in due course. */
+        auto PtrT = mlir::NoneType::get(&MCtx);  /* will be retyped */
+        mlir::Value Empty = emitUnreg("matlab.call_builtin", {},
+                                       PtrT, loc(C.Range), {NameAttr});
+        emitStore(Empty, Slot, loc(C.Range));
+      };
+      if (C.Args.empty()) {
+        for (auto &P : Slots) emitClearSlot(P.second);
+      } else {
+        for (auto &A : C.Args) {
+          for (auto &P : Slots) {
+            if (P.first->Name == A) { emitClearSlot(P.second); break; }
+          }
+        }
+      }
+      return;
+    }
+
     llvm::SmallVector<mlir::Value, 4> Args;
     for (auto &A : C.Args) {
       mlir::NamedAttribute VA(
@@ -750,6 +808,13 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
       return emitUnreg("matlab.call_indirect", Os, RT, L);
     }
     // Index
+    // Detect the "call through a handle" case: if the callee is a NameExpr
+    // whose binding was assigned from @(x)... / @name, emit a
+    // matlab.call_indirect instead of a matlab.subscript.
+    bool IsHandleCall = false;
+    if (auto *NE = dynamic_cast<const NameExpr *>(C.Callee))
+      if (NE->Ref && HandleBindings.count(NE->Ref)) IsHandleCall = true;
+
     mlir::Value Arr = C.Callee ? lowerExpr(*C.Callee) : mlir::Value{};
     llvm::SmallVector<mlir::Value, 4> Idx;
     Idx.push_back(Arr);
@@ -759,10 +824,13 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
     for (size_t a = 0; a < C.Args.size(); ++a) {
       const Expr *Arg = C.Args[a];
       if (!Arg) continue;
-      SubscriptCtx.push_back({Arr, (int64_t)(a + 1)});
+      if (!IsHandleCall)
+        SubscriptCtx.push_back({Arr, (int64_t)(a + 1)});
       Idx.push_back(lowerExpr(*Arg));
-      SubscriptCtx.pop_back();
+      if (!IsHandleCall) SubscriptCtx.pop_back();
     }
+    if (IsHandleCall)
+      return emitUnreg("matlab.call_indirect", Idx, RT, L);
     mlir::NamedAttribute NA(
         mlir::StringAttr::get(&MCtx, "nindices"),
         mlir::IntegerAttr::get(mlir::IntegerType::get(&MCtx, 64),
@@ -832,15 +900,36 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
         mlir::StringAttr::get(&MCtx, "params"),
         mlir::StringAttr::get(&MCtx, Joined));
     mlir::OpBuilder::InsertionGuard G(B);
+    /* One f64 block argument per parameter. v1 assumes scalar params. */
+    auto F64Ty = mlir::Float64Type::get(&MCtx);
+    llvm::SmallVector<mlir::Type> ArgTys(A.Params.size(), F64Ty);
+    llvm::SmallVector<mlir::Location> ArgLocs(A.Params.size(), L);
     mlir::Operation *Op = emitUnregOp("matlab.make_anon", {}, {RT}, L, {PA},
                                       /*NumRegions=*/1);
     mlir::Block *Body = B.createBlock(&Op->getRegion(0),
-                                      Op->getRegion(0).end(), {}, {});
+                                      Op->getRegion(0).end(),
+                                      ArgTys, ArgLocs);
     B.setInsertionPointToEnd(Body);
+
+    /* Create a slot per param inside the body and store its block arg.
+     * Save/restore the outer SlotMap so captures of outer slots — which
+     * we don't yet support — are detected cleanly later. */
+    auto Saved = Slots;
+    Slots.clear();
+    for (size_t i = 0; i < A.ParamRefs.size(); ++i) {
+      Binding *Bnd = A.ParamRefs[i];
+      if (!Bnd) continue;
+      mlir::Value Slot = emitAlloc(TC.scalar(Dtype::Double), Bnd->Name, L);
+      Slots[Bnd] = Slot;
+      emitStore(Body->getArgument(i), Slot, L);
+    }
+
     mlir::Value V = A.Body ? lowerExpr(*A.Body) : mlir::Value{};
     llvm::SmallVector<mlir::Value, 1> Ys;
     if (V) Ys.push_back(V);
     emitUnregOp("matlab.yield", Ys, {}, L);
+
+    Slots = std::move(Saved);
     return Op->getResult(0);
   }
   case NodeKind::FuncHandle: {
