@@ -1,0 +1,112 @@
+TranslationUnit
+  Function f in=(x, n) out=(y)
+    Block
+      IfStmt
+        Cond
+          BinaryOp >
+            NameExpr x
+            IntegerLiteral 0
+        Then
+          Block
+            AssignStmt suppressed
+              LHS
+                NameExpr y
+              RHS
+                NameExpr x
+        ElseIf
+          BinaryOp <
+            NameExpr x
+            IntegerLiteral 0
+          Block
+            AssignStmt suppressed
+              LHS
+                NameExpr y
+              RHS
+                UnaryOp -
+                  NameExpr x
+        Else
+          Block
+            AssignStmt suppressed
+              LHS
+                NameExpr y
+              RHS
+                IntegerLiteral 0
+      ForStmt i
+        Iter
+          RangeExpr
+            IntegerLiteral 1
+            NameExpr n
+        Block
+          AssignStmt suppressed
+            LHS
+              NameExpr y
+            RHS
+              BinaryOp +
+                NameExpr y
+                NameExpr i
+      WhileStmt
+        Cond
+          BinaryOp >
+            NameExpr y
+            IntegerLiteral 100
+        Block
+          AssignStmt suppressed
+            LHS
+              NameExpr y
+            RHS
+              BinaryOp /
+                NameExpr y
+                IntegerLiteral 2
+      SwitchStmt
+        Disc
+          CallOrIndex
+            NameExpr mod
+            NameExpr y
+            IntegerLiteral 3
+        Case
+          IntegerLiteral 0
+          Block
+            AssignStmt suppressed
+              LHS
+                NameExpr y
+              RHS
+                BinaryOp +
+                  NameExpr y
+                  IntegerLiteral 1
+        Case
+          CellLiteral rows=1
+            Row 0
+              IntegerLiteral 1
+              IntegerLiteral 2
+          Block
+            AssignStmt suppressed
+              LHS
+                NameExpr y
+              RHS
+                BinaryOp -
+                  NameExpr y
+                  IntegerLiteral 1
+        Otherwise
+          Block
+            AssignStmt suppressed
+              LHS
+                NameExpr y
+              RHS
+                IntegerLiteral 0
+      TryStmt catch-as err
+        Block
+          AssignStmt suppressed
+            LHS
+              NameExpr y
+            RHS
+              CallOrIndex
+                NameExpr sqrt
+                NameExpr y
+        Catch
+          Block
+            AssignStmt suppressed
+              LHS
+                NameExpr y
+              RHS
+                UnaryOp -
+                  IntegerLiteral 1

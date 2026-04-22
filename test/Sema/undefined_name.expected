@@ -1,0 +1,16 @@
+TranslationUnit
+  Function f
+    Inputs: x[any]
+    Outputs: y[any]
+    Locals:
+    Block
+      AssignStmt suppressed
+        LHS
+          Name y (output) [any]
+        RHS
+          BinOp + [any]
+            Name x (param) [any]
+            Name undefined_thing (?) [any]
+Sema/undefined_name.m:2:13: error: undefined name 'undefined_thing'
+      y = x + undefined_thing;
+              ^

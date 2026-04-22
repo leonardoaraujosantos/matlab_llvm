@@ -1,0 +1,27 @@
+module {
+  func.func @demo(%arg0: none) -> f64 {
+    %0 = "matlab.alloc"() {name = "x"} : () -> none
+    "matlab.store"(%arg0, %0) : (none, none) -> ()
+    %1 = "matlab.alloc"() {name = "n"} : () -> f64
+    %2 = "matlab.const_int"() {value = 0 : i64} : () -> f64
+    "matlab.store"(%2, %1) : (f64, f64) -> ()
+    "matlab.while"() ({
+      %4 = "matlab.load"(%0) : (none) -> none
+      %5 = "matlab.const_int"() {value = 1 : i64} : () -> f64
+      %6 = "matlab.gt"(%4, %5) : (none, f64) -> i1
+      "matlab.yield"(%6) : (i1) -> ()
+    }, {
+      %4 = "matlab.load"(%0) : (none) -> none
+      %5 = "matlab.const_int"() {value = 2 : i64} : () -> f64
+      %6 = "matlab.matdiv"(%4, %5) : (none, f64) -> none
+      "matlab.store"(%6, %0) : (none, none) -> ()
+      %7 = "matlab.load"(%1) : (f64) -> f64
+      %8 = "matlab.const_int"() {value = 1 : i64} : () -> f64
+      %9 = "matlab.add"(%7, %8) : (f64, f64) -> f64
+      "matlab.store"(%9, %1) : (f64, f64) -> ()
+      "matlab.yield"() : () -> ()
+    }) : () -> ()
+    %3 = "matlab.load"(%1) : (f64) -> f64
+    return %3 : f64
+  }
+}

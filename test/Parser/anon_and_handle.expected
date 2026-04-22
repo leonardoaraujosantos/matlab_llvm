@@ -1,0 +1,39 @@
+TranslationUnit
+  Script
+    Block
+      AssignStmt suppressed
+        LHS
+          NameExpr f
+        RHS
+          AnonFunction params=(x)
+            BinaryOp +
+              BinaryOp ^
+                NameExpr x
+                IntegerLiteral 2
+              IntegerLiteral 1
+      AssignStmt suppressed
+        LHS
+          NameExpr g
+        RHS
+          AnonFunction params=(x, y)
+            BinaryOp +
+              NameExpr x
+              NameExpr y
+      AssignStmt suppressed
+        LHS
+          NameExpr h
+        RHS
+          FuncHandle @sin
+      AssignStmt suppressed
+        LHS
+          NameExpr result
+        RHS
+          CallOrIndex
+            NameExpr arrayfun
+            AnonFunction params=(n)
+              BinaryOp *
+                NameExpr n
+                NameExpr n
+            RangeExpr
+              IntegerLiteral 1
+              IntegerLiteral 10

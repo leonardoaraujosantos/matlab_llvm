@@ -1,0 +1,45 @@
+TranslationUnit
+  Function demo
+    Inputs: x[any] y[any]
+    Outputs: r[logical]
+    Locals: a[logical] b[logical] c[logical] d[logical] e[logical]
+    Block
+      AssignStmt suppressed
+        LHS
+          Name a (var) [logical]
+        RHS
+          BinOp > [logical]
+            Name x (param) [any]
+            Name y (param) [any]
+      AssignStmt suppressed
+        LHS
+          Name b (var) [logical]
+        RHS
+          BinOp == [logical]
+            Name x (param) [any]
+            Name y (param) [any]
+      AssignStmt suppressed
+        LHS
+          Name c (var) [logical]
+        RHS
+          UnaryOp ~ [logical]
+            Name a (var) [logical]
+      AssignStmt suppressed
+        LHS
+          Name d (var) [logical]
+        RHS
+          BinOp && [logical]
+            Name a (var) [logical]
+            Name b (var) [logical]
+      AssignStmt suppressed
+        LHS
+          Name e (var) [logical]
+        RHS
+          BinOp & [logical]
+            Name a (var) [logical]
+            Name b (var) [logical]
+      AssignStmt suppressed
+        LHS
+          Name r (output) [logical]
+        RHS
+          Name a (var) [logical]

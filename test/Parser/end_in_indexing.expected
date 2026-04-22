@@ -1,0 +1,48 @@
+TranslationUnit
+  Script
+    Block
+      AssignStmt suppressed
+        LHS
+          NameExpr x
+        RHS
+          CallOrIndex
+            NameExpr a
+            EndExpr
+      AssignStmt suppressed
+        LHS
+          NameExpr y
+        RHS
+          CallOrIndex
+            NameExpr a
+            RangeExpr
+              IntegerLiteral 1
+              EndExpr
+      AssignStmt suppressed
+        LHS
+          NameExpr z
+        RHS
+          CallOrIndex
+            NameExpr a
+            BinaryOp -
+              EndExpr
+              IntegerLiteral 1
+            EndExpr
+      AssignStmt suppressed
+        LHS
+          NameExpr w
+        RHS
+          CallOrIndex
+            NameExpr a
+            RangeExpr
+              BinaryOp -
+                EndExpr
+                IntegerLiteral 1
+              EndExpr
+      AssignStmt suppressed
+        LHS
+          NameExpr m
+        RHS
+          CallOrIndex
+            NameExpr M
+            EndExpr
+            ColonExpr

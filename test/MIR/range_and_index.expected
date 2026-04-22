@@ -1,0 +1,30 @@
+matlab.module() {
+  matlab.func @script() {name = @script, num_inputs = 0, num_outputs = 0} {
+    %0 = matlab.const_int() {value = 1} : double
+    %1 = matlab.const_int() {value = 5} : double
+    %2 = matlab.range(%0, %1) {has_step = false} : double:vec[-1]
+    %3 = matlab.alloc() {name = @v} : double:vec[-1]
+    matlab.store(%2, %3)
+    %4 = matlab.const_int() {value = 1} : double
+    %5 = matlab.const_int() {value = 2} : double
+    %6 = matlab.const_int() {value = 10} : double
+    %7 = matlab.range(%4, %5, %6) {has_step = true} : double:vec[-1]
+    %8 = matlab.alloc() {name = @w} : double:vec[-1]
+    matlab.store(%7, %8)
+    %9 = matlab.load(%3) : double:vec[-1]
+    %10 = matlab.end() : double
+    %11 = matlab.subscript(%9, %10) {nindices = 1} : double
+    %12 = matlab.alloc() {name = @x} : double
+    matlab.store(%11, %12)
+    %13 = matlab.load(%3) : double:vec[-1]
+    %14 = matlab.const_int() {value = 2} : double
+    %15 = matlab.end() : double
+    %16 = matlab.const_int() {value = 1} : double
+    %17 = matlab.sub(%15, %16) : double
+    %18 = matlab.range(%14, %17) {has_step = false} : double:vec[-1]
+    %19 = matlab.subscript(%13, %18) {nindices = 1} : double:?
+    %20 = matlab.alloc() {name = @y} : double:?
+    matlab.store(%19, %20)
+    matlab.return()
+  }
+}

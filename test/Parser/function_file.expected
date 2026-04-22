@@ -1,0 +1,28 @@
+TranslationUnit
+  Function outer in=(x) out=(y, z)
+    Block
+      AssignStmt suppressed
+        LHS
+          NameExpr y
+        RHS
+          BinaryOp +
+            CallOrIndex
+              NameExpr inner
+              NameExpr x
+            IntegerLiteral 1
+      AssignStmt suppressed
+        LHS
+          NameExpr z
+        RHS
+          BinaryOp *
+            NameExpr x
+            IntegerLiteral 2
+  Function inner in=(v) out=(r)
+    Block
+      AssignStmt suppressed
+        LHS
+          NameExpr r
+        RHS
+          BinaryOp *
+            NameExpr v
+            NameExpr v

@@ -1,0 +1,24 @@
+TranslationUnit
+  Function demo
+    Inputs: n[any]
+    Outputs: total[any]
+    Locals: i[?]
+    Block
+      AssignStmt suppressed
+        LHS
+          Name total (output) [double]
+        RHS
+          IntLit 0 [double]
+      ForStmt i
+        Iter
+          Range [double:vec[-1]]
+            IntLit 1 [double]
+            Name n (param) [any]
+        Block
+          AssignStmt suppressed
+            LHS
+              Name total (output) [any]
+            RHS
+              BinOp + [any]
+                Name total (output) [any]
+                Name i (var) [any]

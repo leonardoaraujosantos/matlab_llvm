@@ -1,0 +1,24 @@
+module {
+  func.func @script() {
+    %0 = "matlab.alloc"() {name = "c"} : () -> tensor<3x3xf64>
+    %1 = "matlab.alloc"() {name = "b"} : () -> f64
+    %2 = "matlab.alloc"() {name = "a"} : () -> f64
+    %3 = "matlab.alloc"() {name = "x"} : () -> tensor<3xf64>
+    %4 = "matlab.const_int"() {value = 10 : i64} : () -> f64
+    %5 = "matlab.const_int"() {value = 20 : i64} : () -> f64
+    %6 = "matlab.const_int"() {value = 30 : i64} : () -> f64
+    %7 = "matlab.concat_row"(%4, %5, %6) : (f64, f64, f64) -> none
+    "matlab.store"(%7, %3) : (none, tensor<3xf64>) -> ()
+    %8 = "matlab.load"(%3) : (tensor<3xf64>) -> tensor<3xf64>
+    %9 = "matlab.const_int"() {value = 2 : i64} : () -> f64
+    %10 = "matlab.subscript"(%8, %9) {nindices = 1 : i64} : (tensor<3xf64>, f64) -> f64
+    "matlab.store"(%10, %2) : (f64, f64) -> ()
+    %11 = "matlab.const_float"() {value = 5.000000e-01 : f64} : () -> f64
+    %12 = "matlab.call_builtin"(%11) {callee = "sin"} : (f64) -> f64
+    "matlab.store"(%12, %1) : (f64, f64) -> ()
+    %13 = "matlab.const_int"() {value = 3 : i64} : () -> f64
+    %14 = "matlab.call_builtin"(%13) {callee = "zeros"} : (f64) -> tensor<3x3xf64>
+    "matlab.store"(%14, %0) : (tensor<3x3xf64>, tensor<3x3xf64>) -> ()
+    return
+  }
+}

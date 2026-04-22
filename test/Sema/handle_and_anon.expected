@@ -1,0 +1,26 @@
+TranslationUnit
+  Script
+    Block
+      AssignStmt suppressed
+        LHS
+          Name f (var) [@handle]
+        RHS
+          Handle @sin (builtin) [@handle]
+      AssignStmt suppressed
+        LHS
+          Name g (var) [@handle]
+        RHS
+          AnonFn params=(x) [@handle]
+            BinOp + [any]
+              BinOp .^ [any]
+                Name x (param) [any]
+                IntLit 2 [double]
+              IntLit 1 [double]
+      AssignStmt suppressed
+        LHS
+          Name h (var) [@handle]
+        RHS
+          AnonFn params=(a, b) [@handle]
+            BinOp * [any]
+              Name a (param) [any]
+              Name b (param) [any]

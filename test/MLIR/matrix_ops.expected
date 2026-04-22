@@ -1,0 +1,40 @@
+module {
+  func.func @script() {
+    %0 = "matlab.alloc"() {name = "F"} : () -> tensor<2x3xf64>
+    %1 = "matlab.alloc"() {name = "E"} : () -> tensor<2x3xf64>
+    %2 = "matlab.alloc"() {name = "D"} : () -> tensor<4x3xf64>
+    %3 = "matlab.alloc"() {name = "C"} : () -> tensor<3x2xf64>
+    %4 = "matlab.alloc"() {name = "B"} : () -> tensor<4x2xf64>
+    %5 = "matlab.alloc"() {name = "A"} : () -> tensor<3x4xf64>
+    %6 = "matlab.const_int"() {value = 3 : i64} : () -> f64
+    %7 = "matlab.const_int"() {value = 4 : i64} : () -> f64
+    %8 = "matlab.call_builtin"(%6, %7) {callee = "zeros"} : (f64, f64) -> tensor<3x4xf64>
+    "matlab.store"(%8, %5) : (tensor<3x4xf64>, tensor<3x4xf64>) -> ()
+    %9 = "matlab.const_int"() {value = 4 : i64} : () -> f64
+    %10 = "matlab.const_int"() {value = 2 : i64} : () -> f64
+    %11 = "matlab.call_builtin"(%9, %10) {callee = "ones"} : (f64, f64) -> tensor<4x2xf64>
+    "matlab.store"(%11, %4) : (tensor<4x2xf64>, tensor<4x2xf64>) -> ()
+    %12 = "matlab.load"(%5) : (tensor<3x4xf64>) -> tensor<3x4xf64>
+    %13 = "matlab.load"(%4) : (tensor<4x2xf64>) -> tensor<4x2xf64>
+    %14 = "matlab.matmul"(%12, %13) : (tensor<3x4xf64>, tensor<4x2xf64>) -> tensor<3x2xf64>
+    "matlab.store"(%14, %3) : (tensor<3x2xf64>, tensor<3x2xf64>) -> ()
+    %15 = "matlab.load"(%5) : (tensor<3x4xf64>) -> tensor<3x4xf64>
+    %16 = "matlab.ctranspose"(%15) : (tensor<3x4xf64>) -> tensor<4x3xf64>
+    "matlab.store"(%16, %2) : (tensor<4x3xf64>, tensor<4x3xf64>) -> ()
+    %17 = "matlab.const_int"() {value = 1 : i64} : () -> f64
+    %18 = "matlab.const_int"() {value = 2 : i64} : () -> f64
+    %19 = "matlab.const_int"() {value = 3 : i64} : () -> f64
+    %20 = "matlab.concat_row"(%17, %18, %19) : (f64, f64, f64) -> none
+    %21 = "matlab.const_int"() {value = 4 : i64} : () -> f64
+    %22 = "matlab.const_int"() {value = 5 : i64} : () -> f64
+    %23 = "matlab.const_int"() {value = 6 : i64} : () -> f64
+    %24 = "matlab.concat_row"(%21, %22, %23) : (f64, f64, f64) -> none
+    %25 = "matlab.concat_col"(%20, %24) : (none, none) -> tensor<2x3xf64>
+    "matlab.store"(%25, %1) : (tensor<2x3xf64>, tensor<2x3xf64>) -> ()
+    %26 = "matlab.load"(%1) : (tensor<2x3xf64>) -> tensor<2x3xf64>
+    %27 = "matlab.const_int"() {value = 2 : i64} : () -> f64
+    %28 = "matlab.emul"(%26, %27) : (tensor<2x3xf64>, f64) -> tensor<2x3xf64>
+    "matlab.store"(%28, %0) : (tensor<2x3xf64>, tensor<2x3xf64>) -> ()
+    return
+  }
+}

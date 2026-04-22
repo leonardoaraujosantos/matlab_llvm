@@ -1,0 +1,73 @@
+TranslationUnit
+  Script
+    Block
+      AssignStmt suppressed
+        LHS
+          Name A (var) [double:mat[3,4]]
+        RHS
+          Call [double:mat[3,4]]
+            Name zeros (builtin) [@handle]
+            IntLit 3 [double]
+            IntLit 4 [double]
+      AssignStmt suppressed
+        LHS
+          Name B (var) [double:mat[4,5]]
+        RHS
+          Call [double:mat[4,5]]
+            Name ones (builtin) [@handle]
+            IntLit 4 [double]
+            IntLit 5 [double]
+      AssignStmt suppressed
+        LHS
+          Name C (var) [double:mat[3,5]]
+        RHS
+          BinOp * [double:mat[3,5]]
+            Name A (var) [double:mat[3,4]]
+            Name B (var) [double:mat[4,5]]
+      AssignStmt suppressed
+        LHS
+          Name D (var) [double:mat[4,3]]
+        RHS
+          Postfix ' [double:mat[4,3]]
+            Name A (var) [double:mat[3,4]]
+      AssignStmt suppressed
+        LHS
+          Name E (var) [double:vec[3]]
+        RHS
+          MatrixLit rows=1 [double:vec[3]]
+            Row 0
+              IntLit 1 [double]
+              IntLit 2 [double]
+              IntLit 3 [double]
+      AssignStmt suppressed
+        LHS
+          Name F (var) [double:mat[3,1]]
+        RHS
+          MatrixLit rows=3 [double:mat[3,1]]
+            Row 0
+              IntLit 1 [double]
+            Row 1
+              IntLit 2 [double]
+            Row 2
+              IntLit 3 [double]
+      AssignStmt suppressed
+        LHS
+          Name G (var) [double:vec[3]]
+        RHS
+          BinOp + [double:vec[3]]
+            Name E (var) [double:vec[3]]
+            IntLit 1 [double]
+      AssignStmt suppressed
+        LHS
+          Name H (var) [double:mat[3,4]]
+        RHS
+          BinOp + [double:mat[3,4]]
+            Name A (var) [double:mat[3,4]]
+            FPLit 2.0 [double]
+      AssignStmt suppressed
+        LHS
+          Name I (var) [double:vec[-1]]
+        RHS
+          Range [double:vec[-1]]
+            IntLit 1 [double]
+            IntLit 5 [double]

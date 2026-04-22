@@ -1,0 +1,85 @@
+TranslationUnit
+  Script
+    Block
+      AssignStmt suppressed
+        LHS
+          NameExpr a
+        RHS
+          BinaryOp +
+            IntegerLiteral 1
+            BinaryOp *
+              IntegerLiteral 2
+              IntegerLiteral 3
+      AssignStmt suppressed
+        LHS
+          NameExpr b
+        RHS
+          BinaryOp *
+            BinaryOp +
+              IntegerLiteral 1
+              IntegerLiteral 2
+            IntegerLiteral 3
+      AssignStmt suppressed
+        LHS
+          NameExpr c
+        RHS
+          BinaryOp ^
+            IntegerLiteral 2
+            BinaryOp ^
+              IntegerLiteral 3
+              IntegerLiteral 2
+      AssignStmt suppressed
+        LHS
+          NameExpr d
+        RHS
+          BinaryOp +
+            UnaryOp -
+              NameExpr x
+            NameExpr y
+      AssignStmt suppressed
+        LHS
+          NameExpr e
+        RHS
+          BinaryOp |
+            BinaryOp &
+              UnaryOp ~
+                NameExpr a
+              NameExpr b
+            NameExpr c
+      AssignStmt suppressed
+        LHS
+          NameExpr f
+        RHS
+          BinaryOp ||
+            BinaryOp &&
+              NameExpr a
+              NameExpr b
+            NameExpr c
+      AssignStmt suppressed
+        LHS
+          NameExpr g
+        RHS
+          BinaryOp ==
+            NameExpr a
+            NameExpr b
+      AssignStmt suppressed
+        LHS
+          NameExpr h
+        RHS
+          BinaryOp ~=
+            NameExpr a
+            NameExpr b
+      AssignStmt suppressed
+        LHS
+          NameExpr i
+        RHS
+          FieldAccess .c
+            FieldAccess .b
+              NameExpr a
+      AssignStmt suppressed
+        LHS
+          NameExpr j
+        RHS
+          DynamicField
+            NameExpr s
+            NameExpr fieldname

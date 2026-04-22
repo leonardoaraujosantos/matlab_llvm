@@ -1,0 +1,33 @@
+matlab.module() {
+  matlab.func @demo(%0: any) {name = @demo, num_inputs = 1, num_outputs = 1} {
+    %1 = matlab.alloc() {name = @x} : any
+    matlab.store(%0, %1)
+    %2 = matlab.alloc() {name = @y} : any
+    %3 = matlab.load(%1) : any
+    %4 = matlab.const_int() {value = 0} : double
+    %5 = matlab.gt(%3, %4) : logical
+    scf.if(%5) {
+      %6 = matlab.load(%1) : any
+      %7 = matlab.const_int() {value = 2} : double
+      %8 = matlab.matmul(%6, %7) : any
+      matlab.store(%8, %2)
+      scf.yield()
+    } {
+      %9 = matlab.load(%1) : any
+      %10 = matlab.const_int() {value = 0} : double
+      %11 = matlab.eq(%9, %10) : logical
+      scf.if(%11) {
+        %12 = matlab.const_int() {value = 1} : double
+        matlab.store(%12, %2)
+        scf.yield()
+      } {
+        %13 = matlab.load(%1) : any
+        %14 = matlab.neg(%13) : any
+        matlab.store(%14, %2)
+        scf.yield()
+      }
+    }
+    %15 = matlab.load(%2) : any
+    matlab.return(%15)
+  }
+}

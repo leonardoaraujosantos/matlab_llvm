@@ -1,0 +1,27 @@
+matlab.module() {
+  matlab.func @script() {name = @script, num_inputs = 0, num_outputs = 0} {
+    %0 = matlab.const_int() {value = 42} : double
+    %1 = matlab.alloc() {name = @a} : double
+    matlab.store(%0, %1)
+    %2 = matlab.const_float() {value = 3.14} : double
+    %3 = matlab.alloc() {name = @b} : double
+    matlab.store(%2, %3)
+    %4 = matlab.load(%1) : double
+    %5 = matlab.load(%3) : double
+    %6 = matlab.const_int() {value = 2} : double
+    %7 = matlab.matmul(%5, %6) : double
+    %8 = matlab.add(%4, %7) : double
+    %9 = matlab.alloc() {name = @c} : double
+    matlab.store(%8, %9)
+    %10 = matlab.load(%1) : double
+    %11 = matlab.load(%3) : double
+    %12 = matlab.sub(%10, %11) : double
+    %13 = matlab.alloc() {name = @d} : double
+    matlab.store(%12, %13)
+    %14 = matlab.load(%1) : double
+    %15 = matlab.neg(%14) : double
+    %16 = matlab.alloc() {name = @e} : double
+    matlab.store(%15, %16)
+    matlab.return()
+  }
+}

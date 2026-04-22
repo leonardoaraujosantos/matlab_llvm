@@ -1,0 +1,27 @@
+module {
+  func.func @script() {
+    %0 = "matlab.alloc"() {name = "e"} : () -> f64
+    %1 = "matlab.alloc"() {name = "d"} : () -> f64
+    %2 = "matlab.alloc"() {name = "c"} : () -> f64
+    %3 = "matlab.alloc"() {name = "b"} : () -> f64
+    %4 = "matlab.alloc"() {name = "a"} : () -> f64
+    %5 = "matlab.const_int"() {value = 42 : i64} : () -> f64
+    "matlab.store"(%5, %4) : (f64, f64) -> ()
+    %6 = "matlab.const_float"() {value = 3.140000e+00 : f64} : () -> f64
+    "matlab.store"(%6, %3) : (f64, f64) -> ()
+    %7 = "matlab.load"(%4) : (f64) -> f64
+    %8 = "matlab.load"(%3) : (f64) -> f64
+    %9 = "matlab.const_int"() {value = 2 : i64} : () -> f64
+    %10 = "matlab.matmul"(%8, %9) : (f64, f64) -> f64
+    %11 = "matlab.add"(%7, %10) : (f64, f64) -> f64
+    "matlab.store"(%11, %2) : (f64, f64) -> ()
+    %12 = "matlab.load"(%4) : (f64) -> f64
+    %13 = "matlab.load"(%3) : (f64) -> f64
+    %14 = "matlab.sub"(%12, %13) : (f64, f64) -> f64
+    "matlab.store"(%14, %1) : (f64, f64) -> ()
+    %15 = "matlab.load"(%4) : (f64) -> f64
+    %16 = "matlab.neg"(%15) : (f64) -> f64
+    "matlab.store"(%16, %0) : (f64, f64) -> ()
+    return
+  }
+}

@@ -1,0 +1,27 @@
+TranslationUnit
+  Function demo
+    Inputs: flag[any]
+    Outputs: y[double:?]
+    Locals:
+    Block
+      IfStmt
+        Cond
+          Name flag (param) [any]
+        Then
+          Block
+            AssignStmt suppressed
+              LHS
+                Name y (output) [double]
+              RHS
+                FPLit 1.0 [double]
+        Else
+          Block
+            AssignStmt suppressed
+              LHS
+                Name y (output) [double:vec[3]]
+              RHS
+                MatrixLit rows=1 [double:vec[3]]
+                  Row 0
+                    IntLit 1 [double]
+                    IntLit 2 [double]
+                    IntLit 3 [double]

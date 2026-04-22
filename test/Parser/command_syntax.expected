@@ -1,0 +1,15 @@
+TranslationUnit
+  Script
+    Block
+      CommandStmt disp 'hello'
+      CommandStmt clear 'all'
+      CommandStmt format 'long'
+      AssignStmt suppressed
+        LHS
+          NameExpr x
+        RHS
+          IntegerLiteral 1
+      ExprStmt
+        CallOrIndex
+          NameExpr disp
+          NameExpr x

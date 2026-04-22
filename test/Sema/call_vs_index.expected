@@ -1,0 +1,48 @@
+TranslationUnit
+  Function demo
+    Inputs:
+    Outputs: r[double]
+    Locals: a[double] b[double] c[double:mat[3,3]] x[double:vec[3]]
+    Block
+      AssignStmt suppressed
+        LHS
+          Name x (var) [double:vec[3]]
+        RHS
+          MatrixLit rows=1 [double:vec[3]]
+            Row 0
+              IntLit 10 [double]
+              IntLit 20 [double]
+              IntLit 30 [double]
+      AssignStmt suppressed
+        LHS
+          Name a (var) [double]
+        RHS
+          Index [double]
+            Name x (var) [double:vec[3]]
+            IntLit 2 [double]
+      AssignStmt suppressed
+        LHS
+          Name b (var) [double]
+        RHS
+          Call [double]
+            Name sin (builtin) [@handle]
+            FPLit 0.5 [double]
+      AssignStmt suppressed
+        LHS
+          Name c (var) [double:mat[3,3]]
+        RHS
+          Call [double:mat[3,3]]
+            Name zeros (builtin) [@handle]
+            IntLit 3 [double]
+      AssignStmt suppressed
+        LHS
+          Name r (output) [double]
+        RHS
+          BinOp + [double]
+            BinOp + [double]
+              Name a (var) [double]
+              Name b (var) [double]
+            Index [double]
+              Name c (var) [double:mat[3,3]]
+              IntLit 1 [double]
+              IntLit 1 [double]

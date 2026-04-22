@@ -1,0 +1,53 @@
+TranslationUnit
+  Script
+    Block
+      AssignStmt suppressed
+        LHS
+          Name a (var) [double]
+        RHS
+          IntLit 42 [double]
+      AssignStmt suppressed
+        LHS
+          Name b (var) [double]
+        RHS
+          FPLit 3.14 [double]
+      AssignStmt suppressed
+        LHS
+          Name c (var) [complex]
+        RHS
+          ImagLit 2i [complex]
+      AssignStmt suppressed
+        LHS
+          Name d (var) [string]
+        RHS
+          StrLit "hello" [string]
+      AssignStmt suppressed
+        LHS
+          Name e (var) [char:mat[1,2]]
+        RHS
+          CharLit 'hi' [char:mat[1,2]]
+      AssignStmt suppressed
+        LHS
+          Name f (var) [double:vec[3]]
+        RHS
+          MatrixLit rows=1 [double:vec[3]]
+            Row 0
+              FPLit 1.0 [double]
+              FPLit 2.0 [double]
+              FPLit 3.0 [double]
+      AssignStmt suppressed
+        LHS
+          Name g (var) [double:mat[2,2]]
+        RHS
+          MatrixLit rows=2 [double:mat[2,2]]
+            Row 0
+              IntLit 1 [double]
+              IntLit 2 [double]
+            Row 1
+              IntLit 3 [double]
+              IntLit 4 [double]
+      AssignStmt suppressed
+        LHS
+          Name h (var) [@handle]
+        RHS
+          Name true (builtin) [@handle]

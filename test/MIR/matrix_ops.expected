@@ -1,0 +1,40 @@
+matlab.module() {
+  matlab.func @script() {name = @script, num_inputs = 0, num_outputs = 0} {
+    %0 = matlab.const_int() {value = 3} : double
+    %1 = matlab.const_int() {value = 4} : double
+    %2 = matlab.call_builtin(%0, %1) {callee = @zeros} : double:mat[3,4]
+    %3 = matlab.alloc() {name = @A} : double:mat[3,4]
+    matlab.store(%2, %3)
+    %4 = matlab.const_int() {value = 4} : double
+    %5 = matlab.const_int() {value = 2} : double
+    %6 = matlab.call_builtin(%4, %5) {callee = @ones} : double:mat[4,2]
+    %7 = matlab.alloc() {name = @B} : double:mat[4,2]
+    matlab.store(%6, %7)
+    %8 = matlab.load(%3) : double:mat[3,4]
+    %9 = matlab.load(%7) : double:mat[4,2]
+    %10 = matlab.matmul(%8, %9) : double:mat[3,2]
+    %11 = matlab.alloc() {name = @C} : double:mat[3,2]
+    matlab.store(%10, %11)
+    %12 = matlab.load(%3) : double:mat[3,4]
+    %13 = matlab.ctranspose(%12) : double:mat[4,3]
+    %14 = matlab.alloc() {name = @D} : double:mat[4,3]
+    matlab.store(%13, %14)
+    %15 = matlab.const_int() {value = 1} : double
+    %16 = matlab.const_int() {value = 2} : double
+    %17 = matlab.const_int() {value = 3} : double
+    %18 = matlab.concat_row(%15, %16, %17) : any
+    %19 = matlab.const_int() {value = 4} : double
+    %20 = matlab.const_int() {value = 5} : double
+    %21 = matlab.const_int() {value = 6} : double
+    %22 = matlab.concat_row(%19, %20, %21) : any
+    %23 = matlab.concat_col(%18, %22) : double:mat[2,3]
+    %24 = matlab.alloc() {name = @E} : double:mat[2,3]
+    matlab.store(%23, %24)
+    %25 = matlab.load(%24) : double:mat[2,3]
+    %26 = matlab.const_int() {value = 2} : double
+    %27 = matlab.emul(%25, %26) : double:mat[2,3]
+    %28 = matlab.alloc() {name = @F} : double:mat[2,3]
+    matlab.store(%27, %28)
+    matlab.return()
+  }
+}

@@ -1,0 +1,24 @@
+matlab.module() {
+  matlab.func @script() {name = @script, num_inputs = 0, num_outputs = 0} {
+    %0 = matlab.const_int() {value = 10} : double
+    %1 = matlab.const_int() {value = 20} : double
+    %2 = matlab.const_int() {value = 30} : double
+    %3 = matlab.concat_row(%0, %1, %2) : any
+    %4 = matlab.alloc() {name = @x} : double:vec[3]
+    matlab.store(%3, %4)
+    %5 = matlab.load(%4) : double:vec[3]
+    %6 = matlab.const_int() {value = 2} : double
+    %7 = matlab.subscript(%5, %6) {nindices = 1} : double
+    %8 = matlab.alloc() {name = @a} : double
+    matlab.store(%7, %8)
+    %9 = matlab.const_float() {value = 0.5} : double
+    %10 = matlab.call_builtin(%9) {callee = @sin} : double
+    %11 = matlab.alloc() {name = @b} : double
+    matlab.store(%10, %11)
+    %12 = matlab.const_int() {value = 3} : double
+    %13 = matlab.call_builtin(%12) {callee = @zeros} : double:mat[3,3]
+    %14 = matlab.alloc() {name = @c} : double:mat[3,3]
+    matlab.store(%13, %14)
+    matlab.return()
+  }
+}

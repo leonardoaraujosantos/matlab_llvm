@@ -1,0 +1,21 @@
+module {
+  func.func @demo(%arg0: none) -> none {
+    %cst = arith.constant 1.000000e+00 : f64
+    %cst_0 = arith.constant 0.000000e+00 : f64
+    %0 = "matlab.alloc"() {name = "total"} : () -> none
+    %1 = "matlab.alloc"() {name = "i"} : () -> none
+    "matlab.store"(%cst_0, %0) : (f64, none) -> ()
+    %2 = "matlab.range"(%cst, %arg0) {has_step = false} : (f64, none) -> tensor<?xf64>
+    "matlab.for"(%2) ({
+    ^bb0(%arg1: f64):
+      "matlab.store"(%arg1, %1) : (f64, none) -> ()
+      %4 = "matlab.load"(%0) : (none) -> none
+      %5 = "matlab.load"(%1) : (none) -> none
+      %6 = "matlab.add"(%4, %5) : (none, none) -> none
+      "matlab.store"(%6, %0) : (none, none) -> ()
+      "matlab.yield"() : () -> ()
+    }) {var = "i"} : (tensor<?xf64>) -> ()
+    %3 = "matlab.load"(%0) : (none) -> none
+    return %3 : none
+  }
+}

@@ -1,0 +1,30 @@
+module {
+  func.func @demo(%arg0: none) -> none {
+    %0 = "matlab.alloc"() {name = "x"} : () -> none
+    "matlab.store"(%arg0, %0) : (none, none) -> ()
+    %1 = "matlab.alloc"() {name = "y"} : () -> none
+    %2 = "matlab.load"(%0) : (none) -> none
+    %3 = "matlab.const_int"() {value = 0 : i64} : () -> f64
+    %4 = "matlab.gt"(%2, %3) : (none, f64) -> i1
+    scf.if %4 {
+      %6 = "matlab.load"(%0) : (none) -> none
+      %7 = "matlab.const_int"() {value = 2 : i64} : () -> f64
+      %8 = "matlab.matmul"(%6, %7) : (none, f64) -> none
+      "matlab.store"(%8, %1) : (none, none) -> ()
+    } else {
+      %6 = "matlab.load"(%0) : (none) -> none
+      %7 = "matlab.const_int"() {value = 0 : i64} : () -> f64
+      %8 = "matlab.eq"(%6, %7) : (none, f64) -> i1
+      scf.if %8 {
+        %9 = "matlab.const_int"() {value = 1 : i64} : () -> f64
+        "matlab.store"(%9, %1) : (f64, none) -> ()
+      } else {
+        %9 = "matlab.load"(%0) : (none) -> none
+        %10 = "matlab.neg"(%9) : (none) -> none
+        "matlab.store"(%10, %1) : (none, none) -> ()
+      }
+    }
+    %5 = "matlab.load"(%1) : (none) -> none
+    return %5 : none
+  }
+}

@@ -1,0 +1,10 @@
+a = 1 + 2 * 3;
+b = (1 + 2) * 3;
+c = 2 ^ 3 ^ 2;
+d = -x + y;
+e = ~a & b | c;
+f = a && b || c;
+g = a == b;
+h = a ~= b;
+i = a.b.c;
+j = s.(fieldname);

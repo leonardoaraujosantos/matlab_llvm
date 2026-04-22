@@ -1,0 +1,25 @@
+TranslationUnit
+  Script
+    Block
+      AssignStmt suppressed
+        LHS
+          NameExpr a
+          NameExpr b
+        RHS
+          CallOrIndex
+            NameExpr size
+            NameExpr X
+      AssignStmt suppressed
+        LHS
+          NameExpr u
+          NameExpr s
+          NameExpr v
+        RHS
+          CallOrIndex
+            NameExpr svd
+            NameExpr A
+      AssignStmt suppressed
+        LHS
+          NameExpr x
+        RHS
+          IntegerLiteral 1

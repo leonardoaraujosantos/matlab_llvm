@@ -1,0 +1,6 @@
+module {
+  func.func @demo() -> f64 {
+    %cst = arith.constant -3.140000e+00 : f64
+    return %cst : f64
+  }
+}

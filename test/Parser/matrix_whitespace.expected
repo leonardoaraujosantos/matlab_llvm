@@ -1,0 +1,76 @@
+TranslationUnit
+  Script
+    Block
+      AssignStmt suppressed
+        LHS
+          NameExpr a
+        RHS
+          MatrixLiteral rows=1
+            Row 0
+              IntegerLiteral 1
+              UnaryOp -
+                IntegerLiteral 2
+              IntegerLiteral 3
+      AssignStmt suppressed
+        LHS
+          NameExpr b
+        RHS
+          MatrixLiteral rows=1
+            Row 0
+              BinaryOp -
+                IntegerLiteral 1
+                IntegerLiteral 2
+              IntegerLiteral 3
+      AssignStmt suppressed
+        LHS
+          NameExpr c
+        RHS
+          MatrixLiteral rows=1
+            Row 0
+              IntegerLiteral 1
+              UnaryOp +
+                IntegerLiteral 2
+      AssignStmt suppressed
+        LHS
+          NameExpr d
+        RHS
+          MatrixLiteral rows=1
+            Row 0
+              IntegerLiteral 1
+              UnaryOp -
+                IntegerLiteral 2
+              IntegerLiteral 3
+      AssignStmt suppressed
+        LHS
+          NameExpr e
+        RHS
+          MatrixLiteral rows=2
+            Row 0
+              IntegerLiteral 1
+              IntegerLiteral 2
+            Row 1
+              IntegerLiteral 3
+              IntegerLiteral 4
+      AssignStmt suppressed
+        LHS
+          NameExpr f
+        RHS
+          CellLiteral rows=1
+            Row 0
+              IntegerLiteral 1
+              CharLiteral 'two'
+              MatrixLiteral rows=1
+                Row 0
+                  IntegerLiteral 3
+                  IntegerLiteral 4
+      AssignStmt suppressed
+        LHS
+          NameExpr g
+        RHS
+          MatrixLiteral rows=2
+            Row 0
+              NameExpr a
+              NameExpr b
+            Row 1
+              NameExpr c
+              NameExpr d

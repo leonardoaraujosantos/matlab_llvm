@@ -1,0 +1,19 @@
+matlab.module() {
+  matlab.func @demo(%0: any) {name = @demo, num_inputs = 1, num_outputs = 2} {
+    %1 = matlab.alloc() {name = @x} : any
+    matlab.store(%0, %1)
+    %2 = matlab.alloc() {name = @y} : any
+    %3 = matlab.alloc() {name = @z} : any
+    %4 = matlab.load(%1) : any
+    %5 = matlab.const_int() {value = 2} : double
+    %6 = matlab.matmul(%4, %5) : any
+    matlab.store(%6, %2)
+    %7 = matlab.load(%1) : any
+    %8 = matlab.const_int() {value = 1} : double
+    %9 = matlab.add(%7, %8) : any
+    matlab.store(%9, %3)
+    %10 = matlab.load(%2) : any
+    %11 = matlab.load(%3) : any
+    matlab.return(%10, %11)
+  }
+}

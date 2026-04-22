@@ -1,0 +1,102 @@
+// X-macro for MATLAB token kinds.
+//
+//   TOK(Name, Spelling)  - generic token (Spelling is a display name)
+//   KW(Name, Spelling)   - keyword (Spelling is the exact source form)
+//   PUNC(Name, Spelling) - punctuation/operator (Spelling is the exact source)
+//
+// Clients define any subset they need and leave the rest empty.
+
+#ifndef TOK
+#define TOK(Name, Spelling)
+#endif
+#ifndef KW
+#define KW(Name, Spelling) TOK(kw_##Name, Spelling)
+#endif
+#ifndef PUNC
+#define PUNC(Name, Spelling) TOK(Name, Spelling)
+#endif
+
+// Meta
+TOK(unknown,         "<unknown>")
+TOK(eof,             "<eof>")
+TOK(newline,         "<newline>")
+TOK(comment,         "<comment>")
+TOK(ellipsis,        "...")
+
+// Literals / identifiers
+TOK(identifier,      "<identifier>")
+TOK(integer_literal, "<integer>")
+TOK(float_literal,   "<float>")
+TOK(imag_literal,    "<imag>")     // trailing i or j (e.g. 3i, 2.5j)
+TOK(string_literal,  "<string>")   // "double-quoted"
+TOK(char_literal,    "<char>")     // 'single-quoted'
+
+// Keywords (MATLAB reserved words)
+KW(if,         "if")
+KW(elseif,     "elseif")
+KW(else,       "else")
+KW(end,        "end")
+KW(for,        "for")
+KW(while,      "while")
+KW(break,      "break")
+KW(continue,   "continue")
+KW(return,     "return")
+KW(function,   "function")
+KW(switch,     "switch")
+KW(case,       "case")
+KW(otherwise,  "otherwise")
+KW(try,        "try")
+KW(catch,      "catch")
+KW(global,     "global")
+KW(persistent, "persistent")
+KW(classdef,   "classdef")
+KW(properties, "properties")
+KW(methods,    "methods")
+KW(events,     "events")
+KW(enumeration,"enumeration")
+KW(parfor,     "parfor")
+KW(spmd,       "spmd")
+KW(import,     "import")
+
+// Operators / punctuation
+PUNC(plus,            "+")
+PUNC(minus,           "-")
+PUNC(star,            "*")
+PUNC(slash,           "/")
+PUNC(backslash,       "\\")
+PUNC(caret,           "^")
+PUNC(dot_star,        ".*")
+PUNC(dot_slash,       "./")
+PUNC(dot_backslash,   ".\\")
+PUNC(dot_caret,       ".^")
+PUNC(apostrophe,      "'")         // transpose (ctranspose)
+PUNC(dot_apostrophe,  ".'")        // non-conjugate transpose
+PUNC(equal,           "=")
+PUNC(eq_eq,           "==")
+PUNC(bang_eq,         "~=")
+PUNC(less,            "<")
+PUNC(less_eq,         "<=")
+PUNC(greater,         ">")
+PUNC(greater_eq,      ">=")
+PUNC(amp,             "&")
+PUNC(amp_amp,         "&&")
+PUNC(pipe,            "|")
+PUNC(pipe_pipe,       "||")
+PUNC(tilde,           "~")
+PUNC(at,              "@")
+PUNC(l_paren,         "(")
+PUNC(r_paren,         ")")
+PUNC(l_square,        "[")
+PUNC(r_square,        "]")
+PUNC(l_brace,         "{")
+PUNC(r_brace,         "}")
+PUNC(comma,           ",")
+PUNC(semi,            ";")
+PUNC(colon,           ":")
+PUNC(dot,             ".")
+PUNC(question,        "?")
+PUNC(quest_dot,       "?.")        // reserved, unused (placeholder)
+
+#undef PUNC
+#undef KW
+#undef TOK
