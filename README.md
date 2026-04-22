@@ -127,6 +127,15 @@ build/matlabc -emit-llvm foo.m > foo.ll
 clang foo.ll runtime/matlab_runtime.c -o foo
 ```
 
+A gallery of small programs that exercise different corners of the
+language lives in [`examples/`](examples/). Every file there is expected
+to compile end-to-end and run under the current compiler:
+
+```bash
+just examples              # builds and runs all of examples/*.m
+just compile examples/matrix_mult.m /tmp/matmul && /tmp/matmul
+```
+
 ## Architecture
 
 ```mermaid
@@ -549,23 +558,27 @@ test/              goldens + run scripts
 2. **Row deletion** `A(2, :) = []` — runtime entries
    (`matlab_erase_rows`, `matlab_erase_cols`) are ready; need the
    frontend to detect the `= []` pattern and route to them.
-3. **`clear A`** — partially wired (frontend lowers it, but intra-block
-   slot promotion can erase the store before a following read). Needs
-   either a sentinel op that survives promotion or explicit volatile
-   stores.
+3. **Sequential `for` / `while` lowering** — `matlab.parfor` lowers to
+   a runtime-backed thread pool, but the sequential variants are still
+   emitted and left for a pass that never runs. Needs either an scf.for
+   conversion or a simple runtime-less unroll for constant trip counts.
 4. **Anon-function captures** — today an anon with no captures outlines
    cleanly. Capturing outer values would need a closure struct passed
    alongside the function pointer (similar to parfor's reduction state
    plumbing).
-5. **`classdef`**, cells, structs with a proper boxed-value layout.
-6. **Multi-callsite polymorphism** — today a function called from two
+5. **Multi-recursion user calls** — `fib(n-1) + fib(n-2)` in a single
+   expression currently falls through LowerUserCalls' pattern and leaves
+   `func.func` ops un-lowered. Works fine with a single recursive call
+   (`fact`).
+6. **`classdef`**, cells, structs with a proper boxed-value layout.
+7. **Multi-callsite polymorphism** — today a function called from two
    sites with different concrete types stays `none`. Template-style
    specialization per call signature would unblock this.
-7. **Optional `-DMATLAB_USE_BLAS`** — link CBLAS as an opt-in fast
+8. **Optional `-DMATLAB_USE_BLAS`** — link CBLAS as an opt-in fast
    path for matmul / LU. The default pure-C path stays intact so the
    runtime remains single-file and transpilable.
-8. **REPL / Live Scripts** — out of scope for now.
-9. **Plotting** — out of scope; would need a plotting backend.
+9. **REPL / Live Scripts** — out of scope for now.
+10. **Plotting** — out of scope; would need a plotting backend.
 
 ## Non-goals (for now)
 

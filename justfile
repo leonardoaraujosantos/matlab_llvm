@@ -52,6 +52,19 @@ update-goldens: build
 compile FILE OUT="":
     ./runtime/build_and_run.sh {{FILE}} {{OUT}}
 
+# Build and run every program in examples/. Stops at the first failure.
+examples: build
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for f in examples/*.m; do
+        name=$(basename "$f" .m)
+        out="/tmp/ex_$name"
+        echo "=== $name ==="
+        ./runtime/build_and_run.sh "$f" "$out" >/dev/null
+        "$out"
+        echo
+    done
+
 # Show the token stream for a .m file.
 tokens FILE: build
     ./{{BUILD_DIR}}/matlabc -dump-tokens {{FILE}}
