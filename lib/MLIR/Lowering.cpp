@@ -24,6 +24,7 @@
 #include <ostream>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace matlab {
 namespace mlirgen {
@@ -55,6 +56,73 @@ double foldFloat(const Expr *E) {
   return 0.0;
 }
 
+/* Walk an anon function body collecting NameExpr bindings that refer to
+ * values defined OUTSIDE the anon — i.e. captures. Params are filtered
+ * out (they resolve against the block args), and so are builtins and
+ * user functions (which don't need a capture slot; their call lowering
+ * routes through the @name path or a direct call).
+ *
+ * Out is populated with bindings in first-seen order; Seen deduplicates
+ * across multiple references to the same capture. Unknown expression
+ * kinds simply aren't recursed into — a capture hiding inside an
+ * unrecognised expr will still be lowered as a fresh lazy slot at the
+ * read site, which loses the value but doesn't crash. */
+void collectCaptures(const Expr *E,
+                     const std::vector<Binding *> &Params,
+                     std::vector<Binding *> &Out,
+                     std::unordered_set<Binding *> &Seen) {
+  if (!E) return;
+  switch (E->Kind) {
+  case NodeKind::NameExpr: {
+    auto *N = static_cast<const NameExpr *>(E);
+    if (!N->Ref) return;
+    for (Binding *P : Params) if (P == N->Ref) return;
+    if (N->Ref->Kind == BindingKind::Builtin ||
+        N->Ref->Kind == BindingKind::Function) return;
+    if (!Seen.insert(N->Ref).second) return;
+    Out.push_back(N->Ref);
+    return;
+  }
+  case NodeKind::BinaryOp: {
+    auto *B = static_cast<const BinaryOpExpr *>(E);
+    collectCaptures(B->LHS, Params, Out, Seen);
+    collectCaptures(B->RHS, Params, Out, Seen);
+    return;
+  }
+  case NodeKind::UnaryOp: {
+    auto *U = static_cast<const UnaryOpExpr *>(E);
+    collectCaptures(U->Operand, Params, Out, Seen);
+    return;
+  }
+  case NodeKind::PostfixOp: {
+    auto *P = static_cast<const PostfixOpExpr *>(E);
+    collectCaptures(P->Operand, Params, Out, Seen);
+    return;
+  }
+  case NodeKind::RangeExpr: {
+    auto *R = static_cast<const RangeExpr *>(E);
+    collectCaptures(R->Start, Params, Out, Seen);
+    collectCaptures(R->Step,  Params, Out, Seen);
+    collectCaptures(R->End,   Params, Out, Seen);
+    return;
+  }
+  case NodeKind::CallOrIndex: {
+    auto *C = static_cast<const CallOrIndex *>(E);
+    collectCaptures(C->Callee, Params, Out, Seen);
+    for (const Expr *A : C->Args) collectCaptures(A, Params, Out, Seen);
+    return;
+  }
+  case NodeKind::MatrixLiteral: {
+    auto *M = static_cast<const MatrixLiteral *>(E);
+    for (auto &Row : M->Rows)
+      for (const Expr *A : Row) collectCaptures(A, Params, Out, Seen);
+    return;
+  }
+  default:
+    return;
+  }
+}
+
 //===----------------------------------------------------------------------===//
 // Lowerer
 //===----------------------------------------------------------------------===//
@@ -84,7 +152,18 @@ private:
   // assignment whose RHS is an AnonFunction / FuncHandle. Used at
   // CallOrIndex lowering time to emit matlab.call_indirect instead of
   // matlab.subscript for `f(x)` where f is a handle variable.
-  std::unordered_map<Binding *, bool> HandleBindings;
+  //
+  // The vector is the list of capture SPILL SLOTS (in the outer function)
+  // that must be loaded and prepended to each call_indirect's argument
+  // list — so that @(x) x + k calls still see the value k had at @ time.
+  // Empty vector = no captures (plain @name handles or capture-free anons).
+  std::unordered_map<Binding *, std::vector<mlir::Value>> HandleBindings;
+
+  // Side map populated inside the AnonFunction lowering so the enclosing
+  // AssignStmt can link the resulting capture slot list to the LHS binding.
+  // Keyed by the AnonFunction AST node; cleared after use.
+  std::unordered_map<const AnonFunction *,
+                     std::vector<mlir::Value>> PendingCaptures;
 
   // Stack of (base, dim) contexts for `end` resolution inside subscripts.
   // Each entry represents the subscript arg currently being lowered:
@@ -421,9 +500,20 @@ void Lowerer::lowerStmt(const Stmt &St) {
                                  A.RHS->Kind == NodeKind::FuncHandle);
     mlir::Value Rhs = A.RHS ? lowerExpr(*A.RHS) : mlir::Value{};
     if (RhsIsHandle) {
+      /* Pick up capture spill slots left by the AnonFunction lowering
+       * (empty vector for @name and capture-free anons). */
+      std::vector<mlir::Value> Caps;
+      if (A.RHS->Kind == NodeKind::AnonFunction) {
+        auto *AF = static_cast<const AnonFunction *>(A.RHS);
+        auto It = PendingCaptures.find(AF);
+        if (It != PendingCaptures.end()) {
+          Caps = std::move(It->second);
+          PendingCaptures.erase(It);
+        }
+      }
       for (const Expr *L : A.LHS) {
         if (auto *N = dynamic_cast<const NameExpr *>(L))
-          if (N->Ref) HandleBindings[N->Ref] = true;
+          if (N->Ref) HandleBindings[N->Ref] = Caps;
       }
     }
     for (const Expr *L : A.LHS) if (L) lowerLValueStore(*L, Rhs);
@@ -812,12 +902,28 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
     // whose binding was assigned from @(x)... / @name, emit a
     // matlab.call_indirect instead of a matlab.subscript.
     bool IsHandleCall = false;
+    const std::vector<mlir::Value> *CapSlots = nullptr;
     if (auto *NE = dynamic_cast<const NameExpr *>(C.Callee))
-      if (NE->Ref && HandleBindings.count(NE->Ref)) IsHandleCall = true;
+      if (NE->Ref) {
+        auto It = HandleBindings.find(NE->Ref);
+        if (It != HandleBindings.end()) {
+          IsHandleCall = true;
+          CapSlots = &It->second;
+        }
+      }
 
     mlir::Value Arr = C.Callee ? lowerExpr(*C.Callee) : mlir::Value{};
     llvm::SmallVector<mlir::Value, 4> Idx;
     Idx.push_back(Arr);
+    /* For an anon call with captures, the outlined function's signature
+     * is (captures..., explicit_args...). We load each capture spill
+     * slot (captured-at-@-time value) and prepend them to the arg list
+     * before the user-written arguments. */
+    if (IsHandleCall && CapSlots) {
+      auto F64Ty = mlir::Float64Type::get(&MCtx);
+      for (mlir::Value Spill : *CapSlots)
+        Idx.push_back(emitLoad(Spill, F64Ty, L));
+    }
     // Lower each arg with subscript context pushed so any EndExpr inside
     // resolves to size(Arr, thisDim). Context is per-arg so that sibling
     // args don't leak each other's dim.
@@ -899,29 +1005,65 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
     mlir::NamedAttribute PA(
         mlir::StringAttr::get(&MCtx, "params"),
         mlir::StringAttr::get(&MCtx, Joined));
-    mlir::OpBuilder::InsertionGuard G(B);
-    /* One f64 block argument per parameter. v1 assumes scalar params. */
+
+    /* Detect captures: free variables in the body that aren't params,
+     * builtins, or user functions. These become additional leading
+     * block args + matlab.make_anon operands so each call_indirect can
+     * thread the captured values through to the outlined llvm.func. */
+    std::vector<Binding *> Captures;
+    std::unordered_set<Binding *> Seen;
+    if (A.Body) collectCaptures(A.Body, A.ParamRefs, Captures, Seen);
+
     auto F64Ty = mlir::Float64Type::get(&MCtx);
-    llvm::SmallVector<mlir::Type> ArgTys(A.Params.size(), F64Ty);
-    llvm::SmallVector<mlir::Location> ArgLocs(A.Params.size(), L);
-    mlir::Operation *Op = emitUnregOp("matlab.make_anon", {}, {RT}, L, {PA},
-                                      /*NumRegions=*/1);
+
+    /* Materialize each capture at the @-site: load the outer slot now
+     * and stash the value into a fresh spill slot in the outer function.
+     * We both (a) pass the just-loaded value as a make_anon operand, and
+     * (b) remember the spill slot on PendingCaptures so call sites can
+     * re-load the captured-at-@-time value. */
+    llvm::SmallVector<mlir::Value, 4> CaptureVals;
+    std::vector<mlir::Value> CaptureSpills;
+    for (Binding *Bnd : Captures) {
+      mlir::Value OuterSlot = getOrCreateSlot(Bnd, TC.scalar(Dtype::Double),
+                                              Bnd->Name, L);
+      mlir::Value Cur = emitLoad(OuterSlot, F64Ty, L);
+      mlir::Value SpillSlot = emitAlloc(TC.scalar(Dtype::Double),
+                                        Bnd->Name, L);
+      emitStore(Cur, SpillSlot, L);
+      CaptureVals.push_back(Cur);
+      CaptureSpills.push_back(SpillSlot);
+    }
+    PendingCaptures[&A] = CaptureSpills;
+
+    mlir::OpBuilder::InsertionGuard G(B);
+    /* Block args: [captures..., params...] — all f64. */
+    llvm::SmallVector<mlir::Type> ArgTys(Captures.size() + A.Params.size(),
+                                         F64Ty);
+    llvm::SmallVector<mlir::Location> ArgLocs(Captures.size() +
+                                              A.Params.size(), L);
+    mlir::Operation *Op = emitUnregOp("matlab.make_anon", CaptureVals, {RT},
+                                      L, {PA}, /*NumRegions=*/1);
     mlir::Block *Body = B.createBlock(&Op->getRegion(0),
                                       Op->getRegion(0).end(),
                                       ArgTys, ArgLocs);
     B.setInsertionPointToEnd(Body);
 
-    /* Create a slot per param inside the body and store its block arg.
-     * Save/restore the outer SlotMap so captures of outer slots — which
-     * we don't yet support — are detected cleanly later. */
+    /* Swap in a fresh Slots map for the body. Captures AND params both
+     * get inner spill slots whose type is the block arg's type. */
     auto Saved = Slots;
     Slots.clear();
+    for (size_t i = 0; i < Captures.size(); ++i) {
+      mlir::Value Slot = emitAlloc(TC.scalar(Dtype::Double),
+                                   Captures[i]->Name, L);
+      Slots[Captures[i]] = Slot;
+      emitStore(Body->getArgument(i), Slot, L);
+    }
     for (size_t i = 0; i < A.ParamRefs.size(); ++i) {
       Binding *Bnd = A.ParamRefs[i];
       if (!Bnd) continue;
       mlir::Value Slot = emitAlloc(TC.scalar(Dtype::Double), Bnd->Name, L);
       Slots[Bnd] = Slot;
-      emitStore(Body->getArgument(i), Slot, L);
+      emitStore(Body->getArgument(Captures.size() + i), Slot, L);
     }
 
     mlir::Value V = A.Body ? lowerExpr(*A.Body) : mlir::Value{};

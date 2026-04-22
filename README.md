@@ -262,6 +262,7 @@ threads deterministically prints 55.
 | **`parfor i = 1:N`** (one pthread per iteration) | ✅ | ✅ | ✅ (outlined body) | ✅ |
 | **`parfor` with `x = x + rhs` reductions** | ✅ | ✅ | ✅ (atomic add) | ✅ |
 | Anonymous functions `@(x) x^2` | ✅ | ✅ | ✅ outlined to `llvm.func` | ✅ |
+| Anon captures `k = 5; @(x) x + k` | ✅ | ✅ | ✅ by-value at @-time, scalar captures | ✅ |
 | Calls through handles `f(x)` | ✅ | ✅ | ✅ `matlab.call_indirect` → LLVM function pointer | ✅ |
 | Function handles `@name` | ✅ | ✅ | ✅ scalar math entries only (`@sin`/`@cos`/… → `matlab_*_s`) | ✅ |
 | Logical indexing `A(A > 0)` | ✅ | ✅ | ✅ (masked slice) | ✅ |
@@ -562,10 +563,10 @@ test/              goldens + run scripts
    a runtime-backed thread pool, but the sequential variants are still
    emitted and left for a pass that never runs. Needs either an scf.for
    conversion or a simple runtime-less unroll for constant trip counts.
-4. **Anon-function captures** — today an anon with no captures outlines
-   cleanly. Capturing outer values would need a closure struct passed
-   alongside the function pointer (similar to parfor's reduction state
-   plumbing).
+4. **Non-scalar anon captures** — today scalar (f64) captures work by
+   spilling the value at @-time and threading it through call_indirect
+   as a leading argument. Matrix captures would need pointer captures
+   + reference-count discipline (or a deep copy at @-time).
 5. **Multi-recursion user calls** — `fib(n-1) + fib(n-2)` in a single
    expression currently falls through LowerUserCalls' pattern and leaves
    `func.func` ops un-lowered. Works fine with a single recursive call
