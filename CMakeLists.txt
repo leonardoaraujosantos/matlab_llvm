@@ -92,13 +92,20 @@ if(MATLAB_LLVM_WITH_MLIR)
     lib/MLIR/Dialect/MatlabDialect.cpp
     lib/MLIR/Passes/SlotPromotion.cpp
     lib/MLIR/Passes/LowerScalarsToArith.cpp
+    lib/MLIR/Passes/LowerIO.cpp
+    lib/MLIR/Passes/LowerToLLVMIR.cpp
   )
   target_link_libraries(MatlabMLIR
     PUBLIC  MatlabSema MatlabAST MatlabBasic
     PRIVATE MLIRIR MLIRFuncDialect MLIRArithDialect MLIRSCFDialect
             MLIRTensorDialect MLIRMemRefDialect MLIRControlFlowDialect
-            MLIRSupport MLIRParser MLIRAsmParser MLIRTransforms
-            MLIRTransformUtils MLIRPass MLIRAnalysis MLIRRewrite)
+            MLIRLLVMDialect MLIRSupport MLIRParser MLIRAsmParser
+            MLIRTransforms MLIRTransformUtils MLIRPass MLIRAnalysis
+            MLIRRewrite
+            MLIRArithToLLVM MLIRControlFlowToLLVM MLIRFuncToLLVM
+            MLIRSCFToControlFlow MLIRReconcileUnrealizedCasts
+            MLIRBuiltinToLLVMIRTranslation MLIRLLVMToLLVMIRTranslation
+            MLIRTargetLLVMIRExport)
   target_compile_definitions(MatlabMLIR PUBLIC MATLAB_LLVM_WITH_MLIR=1)
 endif()
 
@@ -116,3 +123,10 @@ add_test(
   COMMAND ${CMAKE_SOURCE_DIR}/test/run_tests.sh $<TARGET_FILE:matlabc>
   WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test
 )
+if(MATLAB_LLVM_WITH_MLIR)
+  add_test(
+    NAME run-tests
+    COMMAND ${CMAKE_SOURCE_DIR}/test/Run/run_tests.sh $<TARGET_FILE:matlabc>
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Run
+  )
+endif()

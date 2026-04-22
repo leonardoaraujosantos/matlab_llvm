@@ -28,7 +28,8 @@ using namespace matlab;
 
 namespace {
 struct Options {
-  enum class Mode { DumpTokens, DumpAST, EmitSema, EmitMIR, EmitMLIR, Check };
+  enum class Mode { DumpTokens, DumpAST, EmitSema, EmitMIR, EmitMLIR,
+                    EmitLLVM, Check };
   Mode Mode = Mode::Check;
   bool Opt = false;
   std::string InputPath;
@@ -49,6 +50,7 @@ bool parseArgs(int Argc, char **Argv, Options &Opts, const char *&Prog) {
     else if (A == "-emit-sema") Opts.Mode = Options::Mode::EmitSema;
     else if (A == "-emit-mir") Opts.Mode = Options::Mode::EmitMIR;
     else if (A == "-emit-mlir") Opts.Mode = Options::Mode::EmitMLIR;
+    else if (A == "-emit-llvm") Opts.Mode = Options::Mode::EmitLLVM;
     else if (A == "-opt" || A == "-O") Opts.Opt = true;
     else if (A == "-h" || A == "--help") return false;
     else if (!A.empty() && A[0] == '-') {
@@ -132,7 +134,8 @@ int main(int Argc, char **Argv) {
   }
 
 #if MATLAB_LLVM_WITH_MLIR
-  if (Opts.Mode == Options::Mode::EmitMLIR) {
+  if (Opts.Mode == Options::Mode::EmitMLIR ||
+      Opts.Mode == Options::Mode::EmitLLVM) {
     mlirgen::Context MCtx;
     if (TU) {
       auto M = mlirgen::lowerToMLIR(MCtx, TC, Diag, *TU);
@@ -140,16 +143,25 @@ int main(int Argc, char **Argv) {
         std::cerr << "error: MLIR verification failed after lowering\n";
         return 1;
       }
-      if (Opts.Opt) {
+      // Opt/Run paths always clean up slots and scalars.
+      bool WantClean = Opts.Opt || Opts.Mode == Options::Mode::EmitLLVM;
+      if (WantClean) {
         mlirgen::runSlotPromotion(M);
         mlirgen::runLowerScalarsToArith(M);
-        mlirgen::runSlotPromotion(M); // second sweep in case lowering unblocks
+        mlirgen::runSlotPromotion(M);
         if (mlir::failed(mlir::verify(M))) {
           std::cerr << "error: MLIR verification failed after passes\n";
           return 1;
         }
       }
-      mlirgen::printModule(std::cout, M);
+      if (Opts.Mode == Options::Mode::EmitLLVM) {
+        mlirgen::runLowerIO(M);
+        std::string LL = mlirgen::lowerToLLVMIR(M);
+        if (LL.empty()) return 1;
+        std::cout << LL;
+      } else {
+        mlirgen::printModule(std::cout, M);
+      }
     }
     Diag.printAll();
     return Diag.hasErrors() ? 1 : 0;
