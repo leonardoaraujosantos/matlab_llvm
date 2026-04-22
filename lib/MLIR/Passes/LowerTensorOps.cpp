@@ -359,6 +359,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"eig",        "matlab_eig",        1, "p"},
       {"isequal",    "matlab_isequal",    0, "pp"},
       {"size",       "matlab_size_dim",   0, "pf"},   /* size(A, dim) */
+      {"find",       "matlab_find",       1, "p"},
     };
 
     // Pick the first entry with both a name match AND an arity match, so

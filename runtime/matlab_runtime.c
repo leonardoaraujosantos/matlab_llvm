@@ -932,6 +932,118 @@ void matlab_slice_store1_scalar(matlab_mat *A, matlab_mat *idx, double v) {
     }
 }
 
+/* find(A): column vector of linear (column-major, 1-based) indices of
+ * non-zero elements. Very common MATLAB idiom: `find(A > 0)` gives you
+ * the indices where a condition holds. */
+matlab_mat *matlab_find(matlab_mat *A) {
+    int64_t m = A->rows, n = A->cols;
+    int64_t count = 0;
+    for (int64_t j = 0; j < n; ++j)
+        for (int64_t i = 0; i < m; ++i)
+            if (A->data[i * n + j] != 0.0) ++count;
+    matlab_mat *Y = mat_alloc(count, 1);
+    int64_t k = 0;
+    for (int64_t j = 0; j < n; ++j) {
+        for (int64_t i = 0; i < m; ++i) {
+            if (A->data[i * n + j] != 0.0) {
+                Y->data[k++] = (double)(j * m + i + 1);
+            }
+        }
+    }
+    return Y;
+}
+
+/* A(rows, :) = [] / A(:, cols) = [] semantics, exposed as runtime helpers
+ * that a future pass can call when the frontend lowers the empty-matrix
+ * assignment. */
+matlab_mat *matlab_erase_rows(matlab_mat *A, matlab_mat *rows) {
+    int64_t m = A->rows, n = A->cols;
+    int64_t r = rows ? rows->rows * rows->cols : 0;
+    char *kill = (char *)calloc((size_t)m, 1);
+    for (int64_t k = 0; k < r; ++k) {
+        int64_t ri = (int64_t)rows->data[k] - 1;
+        if (ri >= 0 && ri < m) kill[ri] = 1;
+    }
+    int64_t keep = 0;
+    for (int64_t i = 0; i < m; ++i) if (!kill[i]) ++keep;
+    matlab_mat *Y = mat_alloc(keep, n);
+    int64_t w = 0;
+    for (int64_t i = 0; i < m; ++i) {
+        if (kill[i]) continue;
+        for (int64_t j = 0; j < n; ++j) Y->data[w * n + j] = A->data[i * n + j];
+        ++w;
+    }
+    free(kill);
+    return Y;
+}
+
+matlab_mat *matlab_erase_cols(matlab_mat *A, matlab_mat *cols) {
+    int64_t m = A->rows, n = A->cols;
+    int64_t c = cols ? cols->rows * cols->cols : 0;
+    char *kill = (char *)calloc((size_t)n, 1);
+    for (int64_t k = 0; k < c; ++k) {
+        int64_t cj = (int64_t)cols->data[k] - 1;
+        if (cj >= 0 && cj < n) kill[cj] = 1;
+    }
+    int64_t keep = 0;
+    for (int64_t j = 0; j < n; ++j) if (!kill[j]) ++keep;
+    matlab_mat *Y = mat_alloc(m, keep);
+    for (int64_t i = 0; i < m; ++i) {
+        int64_t w = 0;
+        for (int64_t j = 0; j < n; ++j) {
+            if (kill[j]) continue;
+            Y->data[i * keep + w++] = A->data[i * n + j];
+        }
+    }
+    free(kill);
+    return Y;
+}
+
+/* Multi-arg fprintf variants for 2, 3, 4 f64 trailing args. LowerTensorOps
+ * picks the matching symbol based on the call arity. Variadic C is too
+ * ABI-fragile across targets; per-arity entries are the cleanest path. */
+void matlab_fprintf_f64_2(const char *fmt, int64_t n, double a, double b) {
+    if (n < 0) n = 0;
+    if (n > 1023) n = 1023;
+    char buf[1024];
+    int64_t len = expand_escapes(buf, fmt, n);
+    buf[len] = '\0';
+    printf(buf, a, b);
+}
+
+void matlab_fprintf_f64_3(const char *fmt, int64_t n,
+                          double a, double b, double c) {
+    if (n < 0) n = 0;
+    if (n > 1023) n = 1023;
+    char buf[1024];
+    int64_t len = expand_escapes(buf, fmt, n);
+    buf[len] = '\0';
+    printf(buf, a, b, c);
+}
+
+void matlab_fprintf_f64_4(const char *fmt, int64_t n,
+                          double a, double b, double c, double d) {
+    if (n < 0) n = 0;
+    if (n > 1023) n = 1023;
+    char buf[1024];
+    int64_t len = expand_escapes(buf, fmt, n);
+    buf[len] = '\0';
+    printf(buf, a, b, c, d);
+}
+
+/* input(prompt): numeric-only subset. Prompt goes to stdout, read a double
+ * from stdin, return it. Real MATLAB's input evals an arbitrary expression
+ * and the 's' mode returns a string — both out of scope for now. */
+double matlab_input_num(const char *prompt, int64_t plen) {
+    if (plen > 0) {
+        fwrite(prompt, 1, (size_t)plen, stdout);
+        fflush(stdout);
+    }
+    double v = 0.0;
+    if (scanf("%lf", &v) != 1) v = 0.0;
+    return v;
+}
+
 /*---------- Predicates ---------------------------------------------------*/
 
 double matlab_isempty(matlab_mat *A) {

@@ -226,11 +226,15 @@ threads deterministically prints 55.
 | Ranges `a:b`, `a:s:b` | ✅ | ✅ (folded lengths) | ✅ | ✅ (matrix `ptr`) |
 | Transpose `'`, `.'` | ✅ | ✅ (shape flip) | ✅ | ✅ |
 | Scalar indexing `A(i)`, `A(i,j)` | ✅ | ✅ | ✅ | ✅ |
-| Range/colon subscripts `A(:,2)`, `A(1:2, 2:3)` | ✅ | ✅ (ranked shapes) | ⚠️ not lowered | — |
-| Indexed store `A(i,j) = v` | ✅ | ✅ | ⚠️ not lowered | — |
+| Range/colon subscripts `A(:,2)`, `A(1:2, 2:3)`, `A(end,:)` | ✅ | ✅ (ranked shapes) | ✅ | ✅ |
+| Indexed store `A(i,j) = v`, `A(:,j) = w`, `A(1:2, 2:3) = M` | ✅ | ✅ | ✅ | ✅ |
 | Matrix constructors (`zeros`, `ones`, `eye`, `magic`, `rand`, `randn`) | ✅ | ✅ | ✅ | ✅ |
 | Shape ops (`transpose`, `diag`, `reshape`, `repmat`) | ✅ | ✅ | ✅ | ✅ |
-| Reductions (`sum` over whole matrix) | ✅ | ✅ | ✅ | ✅ |
+| Column reductions (`sum`, `prod`, `mean`, `min`, `max`) | ✅ | ✅ | ✅ | ✅ |
+| Shape queries (`size`, `length`, `numel`, `ndims`) | ✅ | ✅ | ✅ | ✅ |
+| Predicates (`isempty`, `isequal`) | ✅ | ✅ | ✅ | ✅ |
+| `find` (non-zero indices) | ✅ | ✅ | ✅ | ✅ |
+| Matrix power `A^n` (integer exponent, via repeated matmul) | ✅ | ✅ | ✅ | ✅ |
 | Element-wise math (`exp`, `log`, `sin`, `cos`, `tan`, `sqrt`, `abs`) | ✅ | ✅ | ✅ | ✅ |
 | Matrix multiplication `A * B` (non-scalar operands) | ✅ | ✅ | ✅ (pure-C O(N³)) | ✅ |
 | Matrix inverse `inv(A)` | ✅ | ✅ | ✅ (LU with partial pivoting) | ✅ |
@@ -270,8 +274,8 @@ Legend: ✅ works · ⚠️ partial · ❌ not implemented · — not applicable
 | `disp(A(:,2))`, `disp(A(1:2,1:2))` sliced views | ❌ | Still need runtime slicing |
 | `fprintf('fmt\n')` | ✅ | Escape sequences expanded at runtime |
 | `fprintf('fmt %f\n', x)` | ✅ | Single f64 arg |
-| `fprintf(...)` with multiple args | ❌ | Variadic ABI not wired |
-| `input(prompt)` | ⚠️ | Parsed and resolved, not linked to a runtime entry |
+| `fprintf('fmt %g %g\n', a, b)` and up to 4 f64 args | ✅ | Per-arity runtime entries (matlab_fprintf_f64_{2,3,4}) |
+| `input(prompt)` | ✅ | Numeric variant: prompt + scanf of a double |
 
 ## MATLAB Primer coverage
 
@@ -297,10 +301,10 @@ chapters. Here's how this compiler maps to it.
 | Primer section | Status |
 |---|:-:|
 | Magic Squares / `magic`, `sum`, `transpose`, `diag` | ✅ all four execute end-to-end; `magic` uses Siamese for odd n, simple fill for even |
-| Removing rows/columns (`A(2,:) = []`) | ❌ |
+| Removing rows/columns (`A(2,:) = []`) | ⚠️ runtime entries ready (`matlab_erase_rows`/`_cols`); frontend doesn't yet lower empty-RHS stores |
 | Reshaping / rearranging (`reshape`, `repmat`) | ✅ execute end-to-end |
 | Array vs matrix operations (`.*` vs `*`) | ✅ both paths execute: scalar×matrix → element-wise; matrix×matrix → pure-C O(N³) matmul |
-| Find array elements | ❌ |
+| Find array elements (`find`) | ✅ |
 | Multidimensional arrays (>2 dims) | ⚠️ Sema models `NDArray` rank but lowering assumes ≤2D |
 | Text / character arrays | ✅ char array; ⚠️ string-type (double-quoted) partial |
 | Tables | ❌ |
@@ -313,8 +317,8 @@ chapters. Here's how this compiler maps to it.
 | Primer section | Status |
 |---|:-:|
 | Matrix environment, construction | ✅ literals, `zeros`, `ones`, `eye`, `magic`, `diag`, `reshape`, `repmat` all execute |
-| Slicing | ⚠️ scalar subscripts execute; colon/range slices typed but not yet wired |
-| Powers and exponentials (`.^`, `exp`, `log`) | ✅ element-wise; ❌ matrix power `A^n` |
+| Slicing | ✅ `A(:,j)`, `A(i,:)`, `A(1:2, 2:3)`, `A(end,:)`, `A(end-1, end-1)` all execute |
+| Powers and exponentials (`.^`, `exp`, `log`, `A^n`) | ✅ element-wise plus integer matrix power via repeated matmul |
 | Solving linear systems `A\b`, `A/b`, `inv(A)`, `det(A)` | ✅ pure-C LU with partial pivoting, no BLAS/LAPACK dep |
 | Singular values `svd(A)` | ✅ one-sided Jacobi SVD, pure C, ~100 LoC |
 | Eigenvalues `eig(A)` | ✅ Jacobi rotations for symmetric matrices; non-symmetric inputs are symmetrized as `(A + Aᵀ)/2` (correct for symmetric, approximate otherwise). General-case QR iteration still open |
@@ -494,7 +498,7 @@ Two CTest suites, ~115 goldens total:
 | `Opt` | `-emit-mlir -opt` | 5 | Slot promotion + constant folding through `arith` |
 | `Programs` | `-emit-mlir -opt` | 31 | Medium programs (matrix ops, loops, functions) |
 | `Errors` | `-dump-ast` | 4 | Parser/Sema diagnostics |
-| `Run` | `-emit-llvm` + link + exec | 54 | End-to-end stdout goldens (I/O, parfor, matrix math, linear algebra, SVD/eig, user calls) |
+| `Run` | `-emit-llvm` + link + exec | 67 | End-to-end stdout goldens (I/O, parfor, matrix math, linear algebra, SVD/eig, reductions, slicing, user calls) |
 
 ```bash
 ctest --test-dir build
@@ -531,32 +535,29 @@ test/              goldens + run scripts
 
 ## Roadmap, ordered by what unblocks the most programs
 
-1. **Sliced subscript runtime** — `A(:,2)`, `A(1:2, 2:3)`, `A(end,:)`.
-   Types already propagate as ranked tensors; need the runtime
-   `matlab_slice` entry and IR lowering.
-2. **Indexed store** — `A(i,j) = v`, `A(:, 2) = w`. Placeholder today.
-3. **General-case `eig`** — today we do Jacobi for symmetric matrices
+1. **Anonymous function calls** — the handle is created today; wire
+   `matlab.call_indirect` to an LLVM function pointer call.
+2. **General-case `eig`** — today we do Jacobi for symmetric matrices
    (and symmetrize non-symmetric inputs, which is approximate).
    QR iteration with Wilkinson shifts would handle asymmetric matrices
    with real spectra; complex-eigenvalue support would need 2×2 block
    handling. Still pure C.
    `pinv`, `rank`, `null` are natural byproducts of extending SVD
    to a full `[U, S, V]` return.
-4. **Column reductions** — real MATLAB `sum(A)` returns a row vector;
-   ours returns the flat scalar. Once the row-vector variant is wired,
-   row/col-wise `min`/`max`/`mean`/`prod` follow the same pattern.
-5. **Anonymous function calls** — the handle is created today; wire
-   `matlab.call_indirect` to an LLVM function pointer call.
-6. **Multi-arg `fprintf`, `input` at runtime**, string concatenation.
-7. **`classdef`**, cells, structs with a proper boxed-value layout.
-8. **Multi-callsite polymorphism** — today a function called from two
+3. **Logical indexing** `A(A > 0)` — mask-based subscript via a new
+   `matlab_logical_mask` runtime entry.
+4. **Row deletion** `A(2, :) = []` — runtime entries (`matlab_erase_rows`,
+   `matlab_erase_cols`) are ready; need the frontend to detect the
+   `= []` pattern and route to them.
+5. **`classdef`**, cells, structs with a proper boxed-value layout.
+6. **Multi-callsite polymorphism** — today a function called from two
    sites with different concrete types stays `none`. Template-style
    specialization per call signature would unblock this.
-9. **Optional `-DMATLAB_USE_BLAS`** — link CBLAS as an opt-in fast
+7. **Optional `-DMATLAB_USE_BLAS`** — link CBLAS as an opt-in fast
    path for matmul / LU. The default pure-C path stays intact so the
    runtime remains single-file and transpilable.
-10. **REPL / Live Scripts** — out of scope for now.
-11. **Plotting** — out of scope; would need a plotting backend.
+8. **REPL / Live Scripts** — out of scope for now.
+9. **Plotting** — out of scope; would need a plotting backend.
 
 ## Non-goals (for now)
 

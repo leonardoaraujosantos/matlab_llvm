@@ -223,8 +223,8 @@ LogicalResult rewriteDispCall(Operation *Call, OpBuilder &B,
 
 LogicalResult rewriteFprintfCall(Operation *Call, OpBuilder &B,
                                  StringGlobals &Strings) {
-  if (Call->getNumOperands() < 1 || Call->getNumOperands() > 2)
-    return failure();
+  unsigned NOps = Call->getNumOperands();
+  if (NOps < 1 || NOps > 5) return failure();
 
   MLIRContext *Ctx = B.getContext();
   auto I64 = IntegerType::get(Ctx, 64);
@@ -236,26 +236,31 @@ LogicalResult rewriteFprintfCall(Operation *Call, OpBuilder &B,
   if (!FmtPair) return failure();
   auto [FmtPtr, FmtLen] = *FmtPair;
 
+  /* All extra args must be f64 for now — matching matlab_fprintf_f64_* . */
+  for (unsigned i = 1; i < NOps; ++i)
+    if (Call->getOperand(i).getType() != F64) return failure();
+
   B.setInsertionPoint(Call);
   ModuleOp M = Call->getParentOfType<ModuleOp>();
   Value FmtLenV = LLVM::ConstantOp::create(
       B, Call->getLoc(), I64, B.getI64IntegerAttr(FmtLen));
 
-  if (Call->getNumOperands() == 1) {
-    auto Fn = getOrInsertRuntimeFunc(B, M, "matlab_fprintf_str", VoidTy,
-                                     {PtrTy, I64});
-    LLVM::CallOp::create(B, Call->getLoc(), Fn,
-                         ValueRange{FmtPtr, FmtLenV});
-    Call->erase();
-    return success();
+  SmallVector<Value, 6> Args{FmtPtr, FmtLenV};
+  for (unsigned i = 1; i < NOps; ++i) Args.push_back(Call->getOperand(i));
+
+  /* Pick the matching runtime symbol by arity. */
+  StringRef Name;
+  SmallVector<Type, 6> Sig{PtrTy, I64};
+  switch (NOps) {
+    case 1: Name = "matlab_fprintf_str";  break;
+    case 2: Name = "matlab_fprintf_f64";   Sig.push_back(F64); break;
+    case 3: Name = "matlab_fprintf_f64_2"; Sig.append({F64, F64}); break;
+    case 4: Name = "matlab_fprintf_f64_3"; Sig.append({F64, F64, F64}); break;
+    case 5: Name = "matlab_fprintf_f64_4"; Sig.append({F64, F64, F64, F64}); break;
+    default: return failure();
   }
-  // Two operands: format + one f64 value.
-  Value Num = Call->getOperand(1);
-  if (Num.getType() != F64) return failure();
-  auto Fn = getOrInsertRuntimeFunc(B, M, "matlab_fprintf_f64", VoidTy,
-                                   {PtrTy, I64, F64});
-  LLVM::CallOp::create(B, Call->getLoc(), Fn,
-                       ValueRange{FmtPtr, FmtLenV, Num});
+  auto Fn = getOrInsertRuntimeFunc(B, M, Name, VoidTy, Sig);
+  LLVM::CallOp::create(B, Call->getLoc(), Fn, Args);
   Call->erase();
   return success();
 }
@@ -315,7 +320,8 @@ bool runLowerIO(ModuleOp M) {
       auto Callee = Op->getAttrOfType<StringAttr>("callee");
       if (!Callee) return;
       if (Callee.getValue() == "disp" ||
-          Callee.getValue() == "fprintf") {
+          Callee.getValue() == "fprintf" ||
+          Callee.getValue() == "input") {
         ToRewrite.push_back(Op);
       }
     }
@@ -328,6 +334,26 @@ bool runLowerIO(ModuleOp M) {
       if (succeeded(rewriteDispCall(Op, B, Strings))) Changed = true;
     } else if (Callee.getValue() == "fprintf") {
       if (succeeded(rewriteFprintfCall(Op, B, Strings))) Changed = true;
+    } else if (Callee.getValue() == "input") {
+      /* input(prompt) numeric variant. Prompt must be a char literal. */
+      if (Op->getNumOperands() != 1) continue;
+      auto Pair = materializeStringArg(Op->getOperand(0), B, Strings);
+      if (!Pair) continue;
+      auto [Ptr, Len] = *Pair;
+      MLIRContext *Ctx = B.getContext();
+      auto I64 = IntegerType::get(Ctx, 64);
+      auto F64 = Float64Type::get(Ctx);
+      auto PtrTy = LLVM::LLVMPointerType::get(Ctx);
+      B.setInsertionPoint(Op);
+      Value LenV = LLVM::ConstantOp::create(B, Op->getLoc(), I64,
+                                             B.getI64IntegerAttr(Len));
+      auto Fn = getOrInsertRuntimeFunc(B, M, "matlab_input_num", F64,
+                                       {PtrTy, I64});
+      auto NC = LLVM::CallOp::create(B, Op->getLoc(), Fn,
+                                      ValueRange{Ptr, LenV});
+      Op->getResult(0).replaceAllUsesWith(NC.getResult());
+      Op->erase();
+      Changed = true;
     }
   }
 
