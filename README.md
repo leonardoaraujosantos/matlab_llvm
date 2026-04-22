@@ -70,7 +70,7 @@ flowchart LR
   ast --> sema["Sema<br/>(scope tree,<br/>type lattice,<br/>fixpoint inference)"]
   sema --> mir["MIR<br/>(in-house SSA,<br/>zero-dep,<br/>reference/diagnostic IR)"]
   sema --> mlir["MLIR<br/>(matlab + func + scf +<br/>arith + tensor + llvm<br/>dialects)"]
-  mlir --> passes["MLIR passes<br/>(slot promotion,<br/>scalar→arith,<br/>outline parfor,<br/>lower user calls,<br/>lower tensor ops,<br/>lower I/O,<br/>scalar slots→alloca)"]
+  mlir --> passes["MLIR passes<br/>(slot promotion,<br/>scalar→arith,<br/>outline parfor,<br/>lower user calls,<br/>lower anon calls,<br/>lower tensor ops,<br/>lower I/O,<br/>scalar slots→alloca)"]
   passes --> llvmir["LLVM IR"]
   llvmir --> exe["executable<br/>(clang + matlab_runtime.c)"]
 ```
@@ -90,6 +90,17 @@ Prerequisites:
 cmake -S . -B build -G Ninja
 cmake --build build
 ctest --test-dir build --output-on-failure
+```
+
+Or via [just](https://github.com/casey/just) (recipes in `justfile`):
+
+```bash
+just build               # configure + ninja
+just test                # run all ctest suites
+just compile FILE OUT    # produce a native executable from FILE.m
+just examples            # build and run every examples/*.m
+just mlir FILE           # dump the MLIR module for inspection
+just --list              # full recipe list
 ```
 
 Frontend-only build (skips MLIR, builds the lexer/parser/AST/Sema/MIR
@@ -165,6 +176,7 @@ flowchart TD
       LTO[LowerTensorOps]
       LUC[LowerUserCalls]
       LPF[OutlineParfor]
+      LAC[LowerAnonCalls]
       LIO[LowerIO]
       LSS[LowerScalarSlots]
       LTL[LowerToLLVMIR]
@@ -252,8 +264,8 @@ threads deterministically prints 55.
 | Singular values `svd(A)` | ✅ | ✅ | ✅ (one-sided Jacobi, pure C) | ✅ |
 | Eigenvalues `eig(A)` | ✅ | ✅ | ✅ (Jacobi; symmetric only — see docs) | ✅ |
 | `if / elseif / else` | ✅ | ✅ | ✅ (`scf.if` chain) | ✅ |
-| `for i = 1:n` | ✅ | ✅ | ✅ (`matlab.for`) | ✅ |
-| `while` | ✅ | ✅ | ✅ (`matlab.while`) | ✅ |
+| `for i = 1:n` (sequential) | ✅ | ✅ | ⚠️ emits `matlab.for`; no lowering to LLVM yet — use `parfor` or vectorise | — |
+| `while` (sequential) | ✅ | ✅ | ⚠️ emits `matlab.while`; no lowering to LLVM yet | — |
 | `switch / case / otherwise` | ✅ | ✅ | ✅ (lowers to if-chain) | ✅ |
 | `break`, `continue`, `return` | ✅ | ✅ | ✅ | ✅ |
 | `function y = f(x)` definitions (incl. multi-return) | ✅ | ✅ | ✅ | ✅ |
@@ -285,7 +297,7 @@ Legend: ✅ works · ⚠️ partial · ❌ not implemented · — not applicable
 | `disp(row_vector)` | ✅ | |
 | `disp(matrix)` | ✅ | Works on any computed matrix (`disp(A')`, `disp(A+B)`, `disp(magic(5))`, etc.) |
 | `disp(A(i,j))` scalar subscript | ✅ | 1-based, OOB returns 0 |
-| `disp(A(:,2))`, `disp(A(1:2,1:2))` sliced views | ❌ | Still need runtime slicing |
+| `disp(A(:,2))`, `disp(A(1:2,1:2))` sliced views | ✅ | `matlab_slice1`/`matlab_slice2` in the runtime |
 | `fprintf('fmt\n')` | ✅ | Escape sequences expanded at runtime |
 | `fprintf('fmt %f\n', x)` | ✅ | Single f64 arg |
 | `fprintf('fmt %g %g\n', a, b)` and up to 4 f64 args | ✅ | Per-arity runtime entries (matlab_fprintf_f64_{2,3,4}) |
@@ -302,7 +314,7 @@ chapters. Here's how this compiler maps to it.
 |---|:-:|
 | Desktop Basics (REPL, editor, help) | ❌ — batch-compiler only, no REPL |
 | Matrices and Arrays (construction) | ✅ literal 2-D + `zeros/ones/eye/magic/rand/randn`; ⚠️ higher-dim |
-| Array Indexing (`A(i,j)`, `A(:,2)`, `A(end)`) | ✅ scalar indexing executes; ⚠️ colon/range slices typed but not yet lowered to runtime |
+| Array Indexing (`A(i,j)`, `A(:,2)`, `A(end)`) | ✅ scalar and colon/range/`end` slicing all execute end-to-end |
 | Workspace Variables | ✅ scalar/array slot model |
 | Text and Characters (strings vs chars) | ⚠️ parses both, runtime only handles `'…'` |
 | Calling Functions (builtins like `sin`, `zeros`) | ✅ Sema registry of ~60 builtins, runtime subset wired |
@@ -337,7 +349,7 @@ chapters. Here's how this compiler maps to it.
 | Singular values `svd(A)` | ✅ one-sided Jacobi SVD, pure C, ~100 LoC |
 | Eigenvalues `eig(A)` | ✅ Jacobi rotations for symmetric matrices; non-symmetric inputs are symmetrized as `(A + Aᵀ)/2` (correct for symmetric, approximate otherwise). General-case QR iteration still open |
 | Random number arrays (`rand`, `randn`) | ✅ runtime uses xorshift64 + Box-Muller; seed via `matlab_rng_state` |
-| Function handles (create, pass) | ✅ (creation) / ⚠️ (call-through still placeholder) |
+| Function handles (create, pass, call) | ✅ `@(x) ...` with scalar captures + `@sin`-style handles both execute |
 | Vectorization (whole-matrix ops replacing loops) | ✅ element-wise add/sub/emul/ediv/epow all dispatch to runtime |
 
 ### Chapter 4 — Graphics
@@ -350,13 +362,13 @@ chapters. Here's how this compiler maps to it.
 |---|:-:|
 | `if / elseif / else` | ✅ |
 | `switch / case / otherwise` | ✅ |
-| `for / while / continue / break` | ✅ |
+| `for / while / continue / break` | ⚠️ `parfor` runs; sequential `for`/`while` are parsed + sema'd but not yet lowered to LLVM |
 | `return` | ✅ |
 | Vectorization | ✅ whole-matrix ops execute; codegen still doesn't auto-vectorize loops |
 | Preallocation (`zeros(n,n)`) | ✅ runtime allocates and zeros |
 | Scripts | ✅ lowered to `@main` |
 | Functions (named) | ✅ |
-| Local / nested / private / anonymous functions | ✅ named + nested parsed; anonymous: created, ❌ called |
+| Local / nested / private / anonymous functions | ✅ named + nested parsed; anonymous created + called (scalar captures supported) |
 | Global variables | ⚠️ parsed, not materialized |
 | Command vs function syntax | ✅ disambiguated at parse time |
 
@@ -432,6 +444,14 @@ Noteworthy passes:
   forward-propagates concrete types through unregistered `matlab.*`
   ops, infers return types from `func.return`, re-emits stale
   `func.call`s. Handles chained and recursive calls.
+- **`LowerAnonCalls`** (`LowerAnonCalls.cpp`) — outlines each
+  `matlab.make_anon` region into a private `llvm.func @__anon_N`
+  taking `(captures..., params...)` as f64 arguments, replaces the
+  op with `llvm.mlir.addressof @__anon_N`, and rewrites matching
+  `matlab.call_indirect` sites into `llvm.call`-through-pointer.
+  A pre-step also resolves `matlab.make_handle {callee="sin"}`-style
+  ops to `addressof @matlab_sin_s` for the scalar math runtime
+  entries (`sin`, `cos`, `tan`, `exp`, `log`, `sqrt`, `abs`).
 - **`LowerTensorOps`** (`LowerTensorOps.cpp`) — every tensor-typed
   `matlab.*` op becomes an `llvm.call` against the matrix runtime.
   Literal `[...]` matrices materialize as a stack array of doubles
@@ -500,7 +520,7 @@ we leak).
 
 ## Testing
 
-Two CTest suites, ~115 goldens total:
+Two CTest suites, ~150 goldens total:
 
 | Suite | Driver flag | Tests | What it checks |
 |---|---|:-:|---|
@@ -512,7 +532,7 @@ Two CTest suites, ~115 goldens total:
 | `Opt` | `-emit-mlir -opt` | 5 | Slot promotion + constant folding through `arith` |
 | `Programs` | `-emit-mlir -opt` | 31 | Medium programs (matrix ops, loops, functions) |
 | `Errors` | `-dump-ast` | 4 | Parser/Sema diagnostics |
-| `Run` | `-emit-llvm` + link + exec | 70 | End-to-end stdout goldens — I/O, parfor, matrix math, linear algebra, SVD/eig, reductions, slicing, indexed store, logical indexing, anon calls, user calls |
+| `Run` | `-emit-llvm` + link + exec | 73 | End-to-end stdout goldens — I/O, parfor, matrix math, linear algebra, SVD/eig, reductions, slicing, indexed store, logical indexing, anon calls (+ captures), `@name` handles, `clear`, user calls |
 
 ```bash
 ctest --test-dir build
@@ -545,6 +565,8 @@ lib/               implementations mirror include/
 tools/matlabc/     driver (main.cpp, all CLI flags wired here)
 runtime/           C runtime + build_and_run.sh
 test/              goldens + run scripts
+examples/          gallery of small end-to-end programs (see examples/README.md)
+justfile           task runner: build / test / compile / mlir / examples / ...
 ```
 
 ## Roadmap, ordered by what unblocks the most programs
