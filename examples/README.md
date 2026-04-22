@@ -19,6 +19,7 @@ just compile examples/<name>.m /tmp/<name> && /tmp/<name>
 | `stats.m`         | `numel`, `sum`, `mean`, `min`, `max`, `sqrt` of `sum(x.*x)`      |
 | `for_loop.m`      | Vectorised substitutes for loops (outer product, `sum`)          |
 | `factorial.m`     | Single-recursion user function (`if/else`, `*`, `-`)             |
+| `parfor.m`        | `parfor` reductions (single/multi/step) + calls to user helpers  |
 
 ## Current limitations the examples work around
 
