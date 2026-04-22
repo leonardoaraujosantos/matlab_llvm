@@ -102,27 +102,27 @@ void matlab_fprintf_str(const char *fmt, int64_t n) {
 
 /*
  * parfor dispatcher: spawns one pthread per iteration of start:step:end.
- * `body` is called as body(iv) for each iteration. Iterations run
- * concurrently; the dispatcher blocks until all threads finish (join).
- *
- * v1 limitation: the body is a pure (f64 iv) -> () function — no captured
- * state. State/capture support will arrive when we wire up a struct ABI.
+ * `body(iv, state)` is called for each iteration. `state` is an opaque
+ * pointer the compiler uses to pass captured values (today: a packed array
+ * of pointers to reduction variables). Iterations run concurrently; the
+ * dispatcher blocks until all threads finish (join).
  */
-typedef void (*matlab_parfor_body_t)(double iv);
+typedef void (*matlab_parfor_body_t)(double iv, void *state);
 
 struct matlab_parfor_arg {
     matlab_parfor_body_t body;
     double iv;
+    void *state;
 };
 
 static void *matlab_parfor_worker(void *p) {
     struct matlab_parfor_arg *a = (struct matlab_parfor_arg *)p;
-    a->body(a->iv);
+    a->body(a->iv, a->state);
     return NULL;
 }
 
 void matlab_parfor_dispatch(double start, double step, double end,
-                            matlab_parfor_body_t body) {
+                            matlab_parfor_body_t body, void *state) {
     if (!body) return;
     if (step == 0.0) return;
     /* Count iterations using MATLAB's range length formula. */
@@ -139,6 +139,7 @@ void matlab_parfor_dispatch(double start, double step, double end,
     for (int64_t i = 0; i < n; ++i) {
         args[i].body = body;
         args[i].iv = start + (double)i * step;
+        args[i].state = state;
         pthread_create(&threads[i], NULL, matlab_parfor_worker, &args[i]);
     }
     for (int64_t i = 0; i < n; ++i) {
@@ -146,4 +147,17 @@ void matlab_parfor_dispatch(double start, double step, double end,
     }
     free(threads);
     free(args);
+}
+
+/*
+ * Mutex-protected floating-point add used for parfor reductions on f64
+ * scalars. `*ptr += delta`, atomic w.r.t. other callers of this function
+ * across threads. Not fast (global lock) but deterministic and correct.
+ */
+static pthread_mutex_t matlab_reduction_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+void matlab_reduce_add_f64(double *ptr, double delta) {
+    pthread_mutex_lock(&matlab_reduction_mutex);
+    *ptr += delta;
+    pthread_mutex_unlock(&matlab_reduction_mutex);
 }

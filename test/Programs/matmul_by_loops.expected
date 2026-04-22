@@ -9,9 +9,9 @@ module {
     %cst_5 = arith.constant 3.000000e+00 : f64
     %cst_6 = arith.constant 2.000000e+00 : f64
     %cst_7 = arith.constant 1.000000e+00 : f64
-    %0 = "matlab.alloc"() {name = "j"} : () -> none
-    %1 = "matlab.alloc"() {name = "k"} : () -> none
-    %2 = "matlab.alloc"() {name = "i"} : () -> none
+    %0 = "matlab.alloc"() {name = "j"} : () -> f64
+    %1 = "matlab.alloc"() {name = "k"} : () -> f64
+    %2 = "matlab.alloc"() {name = "i"} : () -> f64
     %3 = "matlab.alloc"() {name = "sumv"} : () -> f64
     %4 = "matlab.alloc"() {name = "C"} : () -> tensor<2x2xf64>
     %5 = "matlab.alloc"() {name = "B"} : () -> tensor<2x2xf64>
@@ -45,23 +45,23 @@ module {
         ^bb0(%arg2: f64):
           %24 = "matlab.load"(%3) : (f64) -> f64
           %25 = "matlab.load"(%6) : (tensor<2x2xf64>) -> tensor<2x2xf64>
-          %26 = "matlab.load"(%2) : (none) -> none
-          %27 = "matlab.load"(%1) : (none) -> none
-          %28 = "matlab.subscript"(%25, %26, %27) {nindices = 2 : i64} : (tensor<2x2xf64>, none, none) -> tensor<*xf64>
+          %26 = "matlab.load"(%2) : (f64) -> f64
+          %27 = "matlab.load"(%1) : (f64) -> f64
+          %28 = "matlab.subscript"(%25, %26, %27) {nindices = 2 : i64} : (tensor<2x2xf64>, f64, f64) -> f64
           %29 = "matlab.load"(%5) : (tensor<2x2xf64>) -> tensor<2x2xf64>
-          %30 = "matlab.load"(%1) : (none) -> none
-          %31 = "matlab.load"(%0) : (none) -> none
-          %32 = "matlab.subscript"(%29, %30, %31) {nindices = 2 : i64} : (tensor<2x2xf64>, none, none) -> tensor<*xf64>
-          %33 = "matlab.matmul"(%28, %32) : (tensor<*xf64>, tensor<*xf64>) -> tensor<*xf64>
-          %34 = "matlab.add"(%24, %33) : (f64, tensor<*xf64>) -> tensor<*xf64>
-          "matlab.store"(%34, %3) : (tensor<*xf64>, f64) -> ()
+          %30 = "matlab.load"(%1) : (f64) -> f64
+          %31 = "matlab.load"(%0) : (f64) -> f64
+          %32 = "matlab.subscript"(%29, %30, %31) {nindices = 2 : i64} : (tensor<2x2xf64>, f64, f64) -> f64
+          %33 = arith.mulf %28, %32 : f64
+          %34 = arith.addf %24, %33 : f64
+          "matlab.store"(%34, %3) : (f64, f64) -> ()
           "matlab.yield"() : () -> ()
         }) {var = "k"} : (tensor<2xf64>) -> ()
         %19 = "matlab.load"(%3) : (f64) -> f64
         %20 = "matlab.load"(%4) : (tensor<2x2xf64>) -> tensor<2x2xf64>
-        %21 = "matlab.load"(%2) : (none) -> none
-        %22 = "matlab.load"(%0) : (none) -> none
-        %23 = "matlab.call_builtin"(%20, %21, %22, %19) {callee = "__subscript_store"} : (tensor<2x2xf64>, none, none, f64) -> none
+        %21 = "matlab.load"(%2) : (f64) -> f64
+        %22 = "matlab.load"(%0) : (f64) -> f64
+        %23 = "matlab.call_builtin"(%20, %21, %22, %19) {callee = "__subscript_store"} : (tensor<2x2xf64>, f64, f64, f64) -> none
         "matlab.yield"() : () -> ()
       }) {var = "j"} : (tensor<2xf64>) -> ()
       "matlab.yield"() : () -> ()

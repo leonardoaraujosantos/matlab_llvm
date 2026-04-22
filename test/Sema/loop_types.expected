@@ -1,8 +1,8 @@
 TranslationUnit
   Function demo
     Inputs: n[any]
-    Outputs: total[any]
-    Locals: i[?]
+    Outputs: total[double]
+    Locals: i[double]
     Block
       AssignStmt suppressed
         LHS
@@ -17,8 +17,8 @@ TranslationUnit
         Block
           AssignStmt suppressed
             LHS
-              Name total (output) [any]
+              Name total (output) [double]
             RHS
-              BinOp + [any]
-                Name total (output) [any]
-                Name i (var) [any]
+              BinOp + [double]
+                Name total (output) [double]
+                Name i (var) [double]

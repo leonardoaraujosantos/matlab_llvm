@@ -141,9 +141,86 @@ TypeInference::Env TypeInference::visitStmt(Stmt &St, Env In) {
       VarT = TC.scalar(A.Elt);
     }
     Binding *VarB = nullptr;
-    // Find the binding for F.Var in the environment by name.
+    // First try the current env.
     for (auto &[B, _] : In) {
       if (B->Name == F.Var) { VarB = B; break; }
+    }
+    // Otherwise, walk the body AST for any NameExpr that the resolver has
+    // already bound for this loop variable — it's a side-door into Sema's
+    // binding table that doesn't require threading a scope pointer down.
+    if (!VarB && F.Body) {
+      std::function<void(const ::matlab::Block &)> walkBlock;
+      std::function<void(const Stmt &)>            walkStmt;
+      std::function<void(const Expr &)>            walkExpr;
+      walkExpr = [&](const Expr &E) {
+        if (VarB) return;
+        if (E.Kind == NodeKind::NameExpr) {
+          auto &N = static_cast<const NameExpr &>(E);
+          if (N.Name == F.Var && N.Ref) VarB = N.Ref;
+          return;
+        }
+        for (unsigned i = 0; i < 8 && !VarB; ++i) (void)i; // dummy to keep tidy
+        switch (E.Kind) {
+        case NodeKind::BinaryOp: {
+          auto &B = static_cast<const BinaryOpExpr &>(E);
+          if (B.LHS) walkExpr(*B.LHS);
+          if (B.RHS) walkExpr(*B.RHS);
+          break;
+        }
+        case NodeKind::UnaryOp:
+          if (auto *U = static_cast<const UnaryOpExpr &>(E).Operand) walkExpr(*U);
+          break;
+        case NodeKind::PostfixOp:
+          if (auto *U = static_cast<const PostfixOpExpr &>(E).Operand) walkExpr(*U);
+          break;
+        case NodeKind::CallOrIndex: {
+          auto &C = static_cast<const CallOrIndex &>(E);
+          if (C.Callee) walkExpr(*C.Callee);
+          for (auto *A : C.Args) if (A) walkExpr(*A);
+          break;
+        }
+        case NodeKind::RangeExpr: {
+          auto &R = static_cast<const RangeExpr &>(E);
+          if (R.Start) walkExpr(*R.Start);
+          if (R.Step)  walkExpr(*R.Step);
+          if (R.End)   walkExpr(*R.End);
+          break;
+        }
+        default: break;
+        }
+      };
+      walkStmt = [&](const Stmt &S) {
+        if (VarB) return;
+        if (S.Kind == NodeKind::ExprStmt) {
+          auto &E = static_cast<const ExprStmt &>(S);
+          if (E.E) walkExpr(*E.E);
+        } else if (S.Kind == NodeKind::AssignStmt) {
+          auto &A = static_cast<const AssignStmt &>(S);
+          for (auto *L : A.LHS) if (L) walkExpr(*L);
+          if (A.RHS) walkExpr(*A.RHS);
+        } else if (S.Kind == NodeKind::IfStmt) {
+          auto &I = static_cast<const IfStmt &>(S);
+          if (I.Cond) walkExpr(*I.Cond);
+          if (I.Then) walkBlock(*I.Then);
+          for (auto &EI : I.Elseifs) {
+            if (EI.Cond) walkExpr(*EI.Cond);
+            if (EI.Body) walkBlock(*EI.Body);
+          }
+          if (I.Else) walkBlock(*I.Else);
+        } else if (S.Kind == NodeKind::ForStmt) {
+          auto &FS = static_cast<const ForStmt &>(S);
+          if (FS.Iter) walkExpr(*FS.Iter);
+          if (FS.Body) walkBlock(*FS.Body);
+        } else if (S.Kind == NodeKind::WhileStmt) {
+          auto &W = static_cast<const WhileStmt &>(S);
+          if (W.Cond) walkExpr(*W.Cond);
+          if (W.Body) walkBlock(*W.Body);
+        }
+      };
+      walkBlock = [&](const ::matlab::Block &B) {
+        for (auto *S : B.Stmts) { if (!VarB && S) walkStmt(*S); }
+      };
+      walkBlock(*F.Body);
     }
     if (VarB) In[VarB] = VarT;
     // Fixpoint over loop body.

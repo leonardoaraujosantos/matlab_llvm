@@ -167,18 +167,86 @@ bool outlineParfor(Operation *Parfor, unsigned Id) {
     for (Operation *L : DeadLoads) L->erase();
   }
 
-  // Capture analysis: collect values used inside the body that are defined
-  // outside. For each, the defining op must be cloneable; otherwise we bail.
+  // --- Reduction detection -------------------------------------------------
+  // Find patterns of the form
+  //     %v   = matlab.load(%slot)                          // slot is outer
+  //     %sum = matlab.add(%v, %rhs)  (or matlab.add(%rhs, %v))
+  //            matlab.store(%sum, %slot)
+  // where %rhs is safe to evaluate per-iteration (doesn't transitively load
+  // from %slot itself). Each such %slot becomes a "reduction variable" that
+  // the body contributes to via mutex-protected matlab_reduce_add_f64 calls.
+  struct Reduction {
+    Operation *AllocOp;   // outer matlab.alloc — the slot
+    Operation *LoadOp;    // matlab.load in body
+    Operation *AddOp;     // matlab.add in body
+    Operation *StoreOp;   // matlab.store in body
+    Value Rhs;            // the non-load addend
+  };
+  llvm::SmallVector<Reduction> Reductions;
+  llvm::DenseSet<Operation *> ReductionBodyOps;
+  {
+    for (Operation &Op : BodyBlock) {
+      if (!isMatlabOp(&Op, "matlab.store") || Op.getNumOperands() != 2)
+        continue;
+      Value Stored = Op.getOperand(0);
+      Value Slot   = Op.getOperand(1);
+      Operation *AddOp = Stored.getDefiningOp();
+      bool IsAdd = AddOp && (isMatlabOp(AddOp, "matlab.add") ||
+                             isa<arith::AddFOp>(AddOp) ||
+                             isa<arith::AddIOp>(AddOp));
+      if (!IsAdd || AddOp->getNumOperands() != 2)
+        continue;
+      Value A = AddOp->getOperand(0), BV = AddOp->getOperand(1);
+      Operation *LoadOp = nullptr; Value Rhs;
+      auto tryMatch = [&](Value MaybeLoad, Value MaybeRhs) {
+        Operation *L = MaybeLoad.getDefiningOp();
+        if (isMatlabOp(L, "matlab.load") && L->getOperand(0) == Slot) {
+          LoadOp = L; Rhs = MaybeRhs;
+        }
+      };
+      tryMatch(A, BV);
+      if (!LoadOp) tryMatch(BV, A);
+      if (!LoadOp) continue;
+      Operation *AllocOp = Slot.getDefiningOp();
+      if (!isMatlabOp(AllocOp, "matlab.alloc")) continue;
+      if (AllocOp->getBlock() == &BodyBlock) continue;  // must be outer
+      // Reject if %rhs depends on %v (then it's not a reduction).
+      llvm::DenseSet<Operation *> Seen;
+      std::function<bool(Value)> DependsOnLoad = [&](Value V) -> bool {
+        if (V == LoadOp->getResult(0)) return true;
+        Operation *D = V.getDefiningOp();
+        if (!D || !Seen.insert(D).second) return false;
+        for (Value Op : D->getOperands())
+          if (DependsOnLoad(Op)) return true;
+        return false;
+      };
+      if (DependsOnLoad(Rhs)) continue;
+      Reductions.push_back({AllocOp, LoadOp, AddOp, &Op, Rhs});
+      ReductionBodyOps.insert(LoadOp);
+      ReductionBodyOps.insert(AddOp);
+      ReductionBodyOps.insert(&Op);
+    }
+  }
+
+  // --- Capture analysis (now excluding reduction chains) ------------------
   llvm::DenseSet<Value> DefinedInside;
   DefinedInside.insert(IV);
   for (Operation &Op : BodyBlock) {
     for (Value R : Op.getResults()) DefinedInside.insert(R);
   }
+  // The reduction slot values are consumed by the reduction chain itself;
+  // their replacement (a ptr loaded from state) will be created later. For
+  // the purpose of capture analysis they are allowed.
+  llvm::DenseSet<Value> ReductionSlots;
+  for (auto &R : Reductions) ReductionSlots.insert(R.AllocOp->getResult(0));
+
   llvm::SmallVector<Operation *> ExternsToClone;
   llvm::DenseSet<Operation *> ExternSet;
   for (Operation &Op : BodyBlock) {
+    if (ReductionBodyOps.count(&Op)) continue; // will be replaced
     for (Value Operand : Op.getOperands()) {
       if (DefinedInside.count(Operand)) continue;
+      if (ReductionSlots.count(Operand)) continue;
       Operation *Def = Operand.getDefiningOp();
       if (!Def) {
         std::cerr << "parfor: body captures a block argument from outside — "
@@ -194,45 +262,131 @@ bool outlineParfor(Operation *Parfor, unsigned Id) {
     }
   }
 
-  // Create the outlined function as an llvm.func so llvm.mlir.addressof
-  // can reference it directly. The body still contains arith.* and llvm.call
-  // ops; the final conversion-to-LLVM pipeline handles the rest.
+  // --- Create outlined function ------------------------------------------
+  // Signature: (f64 iv, ptr state). `state` points to a packed array of
+  // reduction-variable pointers (or null if there are no reductions).
   std::string Name = ("__parfor_body_" + llvm::Twine(Id)).str();
   B.setInsertionPointToEnd(Module.getBody());
-  auto FnTy = LLVM::LLVMFunctionType::get(VoidTy, {F64});
+  auto FnTy = LLVM::LLVMFunctionType::get(VoidTy, {F64, PtrTy});
   auto Fn = LLVM::LLVMFuncOp::create(B, Loc, Name, FnTy);
   Fn.setLinkage(LLVM::Linkage::Internal);
   Block *Entry = Fn.addEntryBlock(B);
-
-  // Clone body ops into the entry block.
-  IRMapping Mapping;
-  Mapping.map(IV, Entry->getArgument(0));
+  Value InnerIV = Entry->getArgument(0);
+  Value State   = Entry->getArgument(1);
 
   B.setInsertionPointToEnd(Entry);
-  // Clone externals first so their results are available when body ops refer
-  // to them. Any external captured by more than one body op is cloned once.
+
+  // Load each reduction pointer from state[k]. state is a `ptr` pointing to
+  // an array of `ptr`. For k-th reduction: `gep ptr, [k]`, then `load ptr`.
+  auto ArrayOfPtr = LLVM::LLVMArrayType::get(
+      PtrTy, static_cast<unsigned>(Reductions.size()));
+  llvm::SmallVector<Value> InnerRedPtrs(Reductions.size());
+  for (size_t k = 0; k < Reductions.size(); ++k) {
+    Value IdxK = LLVM::ConstantOp::create(
+        B, Loc, IntegerType::get(Ctx, 64), B.getI64IntegerAttr((int64_t)k));
+    Value Gep = LLVM::GEPOp::create(B, Loc, PtrTy, PtrTy, State,
+                                    ValueRange{IdxK});
+    InnerRedPtrs[k] = LLVM::LoadOp::create(B, Loc, PtrTy, Gep);
+  }
+
+  // Clone externals first so their results are available.
+  IRMapping Mapping;
+  Mapping.map(IV, InnerIV);
   for (Operation *Ext : ExternsToClone) B.clone(*Ext, Mapping);
 
-  // Clone every op except the region's terminator (matlab.yield).
+  // Clone the body. For reduction ops, insert a runtime reduce call using
+  // the slot pointer from state. Everything else clones normally.
+  auto Reduce = getOrInsertRTDecl(B, Module, "matlab_reduce_add_f64", VoidTy,
+                                  {PtrTy, F64});
   for (Operation &Op : BodyBlock) {
     if (isMatlabOp(&Op, "matlab.yield")) continue;
+    if (ReductionBodyOps.count(&Op)) {
+      if (isMatlabOp(&Op, "matlab.store")) {
+        // This is the store terminator of a reduction — emit the call here.
+        for (size_t k = 0; k < Reductions.size(); ++k) {
+          if (Reductions[k].StoreOp != &Op) continue;
+          // Resolve Rhs in the cloned context.
+          Value ClonedRhs = Mapping.lookupOrDefault(Reductions[k].Rhs);
+          LLVM::CallOp::create(B, Loc, Reduce,
+                               ValueRange{InnerRedPtrs[k], ClonedRhs});
+          break;
+        }
+      }
+      // Skip cloning load/add/store — they're replaced by the call above.
+      continue;
+    }
     B.clone(Op, Mapping);
   }
   LLVM::ReturnOp::create(B, Loc, ValueRange{});
 
-  // Replace the parfor with: default step if missing, take addressof outlined
-  // fn, call matlab_parfor_dispatch(start, step, end, bodyPtr).
+  // --- Convert reduction slots to llvm.alloca / llvm.load/store ----------
+  // For each reduction var, the outer matlab.alloc becomes an llvm.alloca
+  // of f64 and every external (non-body) load/store on it becomes
+  // llvm.load / llvm.store. The reduction chain inside the body was removed
+  // above, so the only remaining uses are outside the parfor.
+  for (auto &R : Reductions) {
+    Operation *Alloc = R.AllocOp;
+    // Put the alloca where the matlab.alloc was.
+    B.setInsertionPoint(Alloc);
+    Value One = LLVM::ConstantOp::create(
+        B, Alloc->getLoc(), IntegerType::get(Ctx, 64),
+        B.getI64IntegerAttr(1));
+    Value NewPtr = LLVM::AllocaOp::create(
+        B, Alloc->getLoc(), PtrTy, F64, One, /*alignment=*/0);
+
+    // Rewrite all remaining uses of the old slot value.
+    Value OldSlot = Alloc->getResult(0);
+    llvm::SmallVector<Operation *, 4> UsersToErase;
+    for (OpOperand &Use : llvm::make_early_inc_range(OldSlot.getUses())) {
+      Operation *U = Use.getOwner();
+      if (isMatlabOp(U, "matlab.load") && U->getNumOperands() == 1) {
+        B.setInsertionPoint(U);
+        Value V = LLVM::LoadOp::create(B, U->getLoc(), F64, NewPtr);
+        U->getResult(0).replaceAllUsesWith(V);
+        UsersToErase.push_back(U);
+      } else if (isMatlabOp(U, "matlab.store") && U->getNumOperands() == 2 &&
+                 U->getOperand(1) == OldSlot) {
+        B.setInsertionPoint(U);
+        LLVM::StoreOp::create(B, U->getLoc(), U->getOperand(0), NewPtr);
+        UsersToErase.push_back(U);
+      }
+    }
+    for (Operation *U : UsersToErase) U->erase();
+    Alloc->erase();
+    // Point the Reduction record at the new ptr def for state building.
+    R.AllocOp = NewPtr.getDefiningOp();
+  }
+
+  // --- Replace the parfor op --------------------------------------------
   B.setInsertionPoint(Parfor);
   Value StepV = Step ? Step
                      : static_cast<Value>(arith::ConstantOp::create(
                            B, Loc, F64, B.getF64FloatAttr(1.0)));
-
   Value FnPtr = LLVM::AddressOfOp::create(B, Loc, PtrTy, Fn.getName());
+
+  // Build the state array on the stack and store each reduction pointer.
+  Value StateArg;
+  if (Reductions.empty()) {
+    StateArg = LLVM::ZeroOp::create(B, Loc, PtrTy);
+  } else {
+    Value One = LLVM::ConstantOp::create(
+        B, Loc, IntegerType::get(Ctx, 64), B.getI64IntegerAttr(1));
+    StateArg = LLVM::AllocaOp::create(B, Loc, PtrTy, ArrayOfPtr, One,
+                                      /*alignment=*/0);
+    for (size_t k = 0; k < Reductions.size(); ++k) {
+      Value IdxK = LLVM::ConstantOp::create(
+          B, Loc, IntegerType::get(Ctx, 64), B.getI64IntegerAttr((int64_t)k));
+      Value Gep = LLVM::GEPOp::create(B, Loc, PtrTy, PtrTy, StateArg,
+                                      ValueRange{IdxK});
+      LLVM::StoreOp::create(B, Loc, Reductions[k].AllocOp->getResult(0), Gep);
+    }
+  }
+
   auto Dispatch = getOrInsertRTDecl(
       B, Module, "matlab_parfor_dispatch", VoidTy,
-      {F64, F64, F64, PtrTy});
+      {F64, F64, F64, PtrTy, PtrTy});
   LLVM::CallOp::create(B, Loc, Dispatch,
-                       ValueRange{Start, StepV, End, FnPtr});
+                       ValueRange{Start, StepV, End, FnPtr, StateArg});
 
   Parfor->erase();
   // If the matlab.range result is now unused, drop it to keep the IR tidy.

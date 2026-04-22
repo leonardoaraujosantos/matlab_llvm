@@ -1,24 +1,24 @@
 module {
-  func.func @demo(%arg0: none) -> none {
+  func.func @demo(%arg0: none) -> f64 {
     %0 = "matlab.alloc"() {name = "n"} : () -> none
     "matlab.store"(%arg0, %0) : (none, none) -> ()
-    %1 = "matlab.alloc"() {name = "total"} : () -> none
-    %2 = "matlab.alloc"() {name = "i"} : () -> none
+    %1 = "matlab.alloc"() {name = "total"} : () -> f64
+    %2 = "matlab.alloc"() {name = "i"} : () -> f64
     %3 = "matlab.const_int"() {value = 0 : i64} : () -> f64
-    "matlab.store"(%3, %1) : (f64, none) -> ()
+    "matlab.store"(%3, %1) : (f64, f64) -> ()
     %4 = "matlab.const_int"() {value = 1 : i64} : () -> f64
     %5 = "matlab.load"(%0) : (none) -> none
     %6 = "matlab.range"(%4, %5) {has_step = false} : (f64, none) -> tensor<?xf64>
     "matlab.for"(%6) ({
     ^bb0(%arg1: f64):
-      "matlab.store"(%arg1, %2) : (f64, none) -> ()
-      %8 = "matlab.load"(%1) : (none) -> none
-      %9 = "matlab.load"(%2) : (none) -> none
-      %10 = "matlab.add"(%8, %9) : (none, none) -> none
-      "matlab.store"(%10, %1) : (none, none) -> ()
+      "matlab.store"(%arg1, %2) : (f64, f64) -> ()
+      %8 = "matlab.load"(%1) : (f64) -> f64
+      %9 = "matlab.load"(%2) : (f64) -> f64
+      %10 = "matlab.add"(%8, %9) : (f64, f64) -> f64
+      "matlab.store"(%10, %1) : (f64, f64) -> ()
       "matlab.yield"() : () -> ()
     }) {var = "i"} : (tensor<?xf64>) -> ()
-    %7 = "matlab.load"(%1) : (none) -> none
-    return %7 : none
+    %7 = "matlab.load"(%1) : (f64) -> f64
+    return %7 : f64
   }
 }

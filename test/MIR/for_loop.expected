@@ -2,8 +2,8 @@ matlab.module() {
   matlab.func @demo(%0: any) {name = @demo, num_inputs = 1, num_outputs = 1} {
     %1 = matlab.alloc() {name = @n} : any
     matlab.store(%0, %1)
-    %2 = matlab.alloc() {name = @total} : any
-    %3 = matlab.alloc() {name = @i} : any
+    %2 = matlab.alloc() {name = @total} : double
+    %3 = matlab.alloc() {name = @i} : double
     %4 = matlab.const_int() {value = 0} : double
     matlab.store(%4, %2)
     %5 = matlab.const_int() {value = 1} : double
@@ -12,13 +12,13 @@ matlab.module() {
     scf.for(%7) {var = @i} {
       ^bb2(%8: double):
       matlab.store(%8, %3)
-      %9 = matlab.load(%2) : any
-      %10 = matlab.load(%3) : any
-      %11 = matlab.add(%9, %10) : any
+      %9 = matlab.load(%2) : double
+      %10 = matlab.load(%3) : double
+      %11 = matlab.add(%9, %10) : double
       matlab.store(%11, %2)
       scf.yield()
     }
-    %12 = matlab.load(%2) : any
+    %12 = matlab.load(%2) : double
     matlab.return(%12)
   }
 }

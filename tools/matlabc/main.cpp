@@ -159,6 +159,11 @@ int main(int Argc, char **Argv) {
         // direct block argument (f64) into disp/fprintf rather than via an
         // outer slot that would still be `none`-typed at LowerIO time.
         mlirgen::runOutlineParfor(M);
+        // After the parfor pass redirects slot loads to the block-arg
+        // value, previously-`none`-typed operands of matlab.matmul/add/etc.
+        // inside the outlined body become f64. Re-run scalar-to-arith so
+        // those newly-matchable ops collapse to arith.mulf / addf / etc.
+        mlirgen::runLowerScalarsToArith(M);
         mlirgen::runLowerIO(M);
         std::string LL = mlirgen::lowerToLLVMIR(M);
         if (LL.empty()) return 1;
