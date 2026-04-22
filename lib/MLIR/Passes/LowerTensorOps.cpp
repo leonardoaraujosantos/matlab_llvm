@@ -326,7 +326,16 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"magic",      "matlab_magic",      1, "f"},
       {"rand",       "matlab_rand",       1, "ff"},
       {"randn",      "matlab_randn",      1, "ff"},
-      {"sum",        "matlab_sum",        0, "p"},
+      {"sum",        "matlab_sum",        1, "p"},
+      {"prod",       "matlab_prod",       1, "p"},
+      {"mean",       "matlab_mean",       1, "p"},
+      {"min",        "matlab_min",        1, "p"},
+      {"max",        "matlab_max",        1, "p"},
+      {"size",       "matlab_size",       1, "p"},
+      {"length",     "matlab_length",     0, "p"},
+      {"numel",      "matlab_numel",      0, "p"},
+      {"ndims",      "matlab_ndims",      0, "p"},
+      {"isempty",    "matlab_isempty",    0, "p"},
       {"transpose",  "matlab_transpose",  1, "p"},
       {"ctranspose", "matlab_transpose",  1, "p"},
       {"diag",       "matlab_diag",       1, "p"},
@@ -343,10 +352,23 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"det",        "matlab_det",        0, "p"},
       {"svd",        "matlab_svd",        1, "p"},
       {"eig",        "matlab_eig",        1, "p"},
+      {"isequal",    "matlab_isequal",    0, "pp"},
+      {"size",       "matlab_size_dim",   0, "pf"},   /* size(A, dim) */
     };
 
+    // Pick the first entry with both a name match AND an arity match, so
+    // overloaded builtins (e.g. size(A) vs size(A, dim)) route correctly.
     const Spec *S = nullptr;
-    for (auto &E : Table) if (E.MLName == Name) { S = &E; break; }
+    unsigned NOps = Call->getNumOperands();
+    for (auto &E : Table) {
+      if (E.MLName != Name) continue;
+      if (E.ArgKinds.size() == NOps) { S = &E; break; }
+    }
+    /* Fallback: first name-match regardless of arity — keeps older single-
+     * entry builtins working even when the call-site arity happens to
+     * differ from our spec. The arity check inside the match logic below
+     * will still reject mismatches safely. */
+    if (!S) for (auto &E : Table) if (E.MLName == Name) { S = &E; break; }
     if (!S) {
       // Scalar variants of exp/log/sin/cos/tan/sqrt/abs when the arg is f64
       // already. Fall through to scalar-path below.

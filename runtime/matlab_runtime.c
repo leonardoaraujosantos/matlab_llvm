@@ -714,16 +714,156 @@ matlab_mat *matlab_repmat(matlab_mat *A, double m, double n) {
 }
 
 /*---------- Reductions ----------------------------------------------------
- * matlab_sum: flat sum of all elements → scalar. Real MATLAB defaults to
- * column sums for matrices, returning a row vector; we pick the simpler
- * "sum everything" overload for the demo.
+ *
+ * MATLAB's rule for sum/min/max/mean/prod on a plain `A`:
+ *   - If A is a row or column vector → reduce to a scalar (1×1 matrix).
+ *   - Otherwise → column-wise reduction, result is a 1×N row vector.
+ *
  *--------------------------------------------------------------------------*/
 
-double matlab_sum(matlab_mat *A) {
-    double s = 0.0;
-    int64_t total = A->rows * A->cols;
-    for (int64_t k = 0; k < total; ++k) s += A->data[k];
-    return s;
+/* If A is a vector, reduce the flat sequence into a 1×1. Otherwise apply
+ * `col_init` to each column and fold with `op`. The init lambdas and
+ * ops are passed as macros so the resulting code inlines cleanly. */
+#define COLWISE_REDUCE(NAME, INIT_EXPR, UPDATE_EXPR, FINALIZE_EXPR)       \
+    matlab_mat *matlab_##NAME(matlab_mat *A) {                            \
+        int64_t m = A->rows, n = A->cols;                                 \
+        if (m <= 1 || n == 1) {                                           \
+            int64_t total = m * n;                                        \
+            double acc = INIT_EXPR;                                       \
+            for (int64_t k = 0; k < total; ++k) {                         \
+                double x = A->data[k];                                    \
+                acc = UPDATE_EXPR;                                        \
+            }                                                             \
+            double result = FINALIZE_EXPR;                                \
+            matlab_mat *R = mat_alloc(1, 1);                              \
+            R->data[0] = total > 0 ? result : 0.0;                        \
+            return R;                                                     \
+        }                                                                 \
+        matlab_mat *R = mat_alloc(1, n);                                  \
+        for (int64_t j = 0; j < n; ++j) {                                 \
+            double acc = INIT_EXPR;                                       \
+            int64_t total = m;                                            \
+            for (int64_t i = 0; i < m; ++i) {                             \
+                double x = A->data[i * n + j];                            \
+                acc = UPDATE_EXPR;                                        \
+            }                                                             \
+            R->data[j] = FINALIZE_EXPR;                                   \
+        }                                                                 \
+        return R;                                                         \
+    }
+
+COLWISE_REDUCE(sum,  0.0,       acc + x,                    acc)
+COLWISE_REDUCE(prod, 1.0,       acc * x,                    acc)
+COLWISE_REDUCE(mean, 0.0,       acc + x,                    acc / (double)total)
+COLWISE_REDUCE(min,  INFINITY,  (x < acc ? x : acc),        acc)
+COLWISE_REDUCE(max, -INFINITY,  (x > acc ? x : acc),        acc)
+
+#undef COLWISE_REDUCE
+
+/* Element-wise min/max of two matrices with the usual broadcast. */
+matlab_mat *matlab_min_mm(matlab_mat *A, matlab_mat *B) {
+    int64_t m = A->rows, n = A->cols;
+    matlab_mat *C = mat_alloc(m, n);
+    for (int64_t k = 0; k < m * n; ++k) {
+        double a = A->data[k], b = B->data[k];
+        C->data[k] = a < b ? a : b;
+    }
+    return C;
+}
+matlab_mat *matlab_max_mm(matlab_mat *A, matlab_mat *B) {
+    int64_t m = A->rows, n = A->cols;
+    matlab_mat *C = mat_alloc(m, n);
+    for (int64_t k = 0; k < m * n; ++k) {
+        double a = A->data[k], b = B->data[k];
+        C->data[k] = a > b ? a : b;
+    }
+    return C;
+}
+
+/*---------- Shape queries ------------------------------------------------*/
+
+/* size(A) -> 1×2 row vector [rows cols]. */
+matlab_mat *matlab_size(matlab_mat *A) {
+    matlab_mat *R = mat_alloc(1, 2);
+    R->data[0] = (double)A->rows;
+    R->data[1] = (double)A->cols;
+    return R;
+}
+
+/* size(A, dim). dim is 1-based; 1=rows, 2=cols; any other dim returns 1. */
+double matlab_size_dim(matlab_mat *A, double dim) {
+    int64_t d = (int64_t)dim;
+    if (d == 1) return (double)A->rows;
+    if (d == 2) return (double)A->cols;
+    return 1.0;
+}
+
+double matlab_length(matlab_mat *A) {
+    if (A->rows == 0 || A->cols == 0) return 0.0;
+    return (double)(A->rows > A->cols ? A->rows : A->cols);
+}
+
+double matlab_numel(matlab_mat *A)  { return (double)(A->rows * A->cols); }
+double matlab_ndims(matlab_mat *A)  { (void)A; return 2.0; }
+
+/* end-of-dim for use inside subscript expressions: `end` in A(..., end, ...)
+ * resolves to size(A, dim) where `dim` is the 1-based position of the
+ * argument in the subscript. */
+double matlab_end_of_dim(matlab_mat *A, double dim) {
+    return matlab_size_dim(A, dim);
+}
+
+/*---------- Predicates ---------------------------------------------------*/
+
+double matlab_isempty(matlab_mat *A) {
+    return (A->rows == 0 || A->cols == 0) ? 1.0 : 0.0;
+}
+
+double matlab_isequal(matlab_mat *A, matlab_mat *B) {
+    if (A->rows != B->rows || A->cols != B->cols) return 0.0;
+    int64_t n = A->rows * A->cols;
+    for (int64_t k = 0; k < n; ++k)
+        if (A->data[k] != B->data[k]) return 0.0;
+    return 1.0;
+}
+
+/*---------- Matrix power -------------------------------------------------
+ * matlab_matpow(A, n) = A^n for integer n. Uses repeated multiplication,
+ * with inv(A) for negative n. Non-integer n falls back to A * A scaled
+ * appropriately (not a true matrix function — for teaching scale, document
+ * the limitation).
+ *-------------------------------------------------------------------------*/
+
+matlab_mat *matlab_matpow(matlab_mat *A, double n) {
+    if (A->rows != A->cols) return mat_alloc(0, 0);
+    int64_t ni = (int64_t)n;
+    if ((double)ni != n) {
+        /* Non-integer — return element-wise power as a degraded fallback.
+         * Real matrix power for non-integer exponents requires eigen-
+         * decomposition which we don't surface in runtime form yet. */
+        int64_t total = A->rows * A->cols;
+        matlab_mat *C = mat_alloc(A->rows, A->cols);
+        for (int64_t k = 0; k < total; ++k) C->data[k] = pow(A->data[k], n);
+        return C;
+    }
+    matlab_mat *base = A;
+    matlab_mat *freeable_base = NULL;
+    if (ni < 0) {
+        freeable_base = matlab_inv(A);
+        base = freeable_base;
+        ni = -ni;
+    }
+    int64_t N = A->rows;
+    /* Start with identity of the right size. */
+    matlab_mat *acc = matlab_eye((double)N, (double)N);
+    matlab_mat *p = base;  /* current power of base */
+    while (ni > 0) {
+        if (ni & 1) acc = matlab_matmul_mm(acc, p);
+        ni >>= 1;
+        if (ni > 0) p = matlab_matmul_mm(p, p);
+    }
+    (void)freeable_base;
+    return acc;
 }
 
 /*---------- Element-wise arithmetic --------------------------------------*/
