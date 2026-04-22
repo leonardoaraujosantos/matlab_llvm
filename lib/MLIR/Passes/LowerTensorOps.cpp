@@ -155,41 +155,50 @@ bool TensorLowering::retypeMatrixSlots() {
 
   bool Changed = false;
   for (Operation *Alloc : Allocs) {
+    /* Only retype when every user is load/store AND every store's value
+     * is already ptr-typed. A partial retype (rewriting loads but not
+     * stores, or vice versa) would split the slot between old matlab.alloc
+     * and new llvm.alloca, desynchronizing loads from subsequent stores.
+     * We'd rather wait another iteration until the literal rewrite and
+     * builtin rewrite have produced ptr-typed values everywhere. */
+    bool AllCanRetype = true;
+    for (OpOperand &Use : Alloc->getResult(0).getUses()) {
+      Operation *U = Use.getOwner();
+      if (isMatlabOp(U, "matlab.load") && U->getNumOperands() == 1) continue;
+      if (isMatlabOp(U, "matlab.store") && U->getNumOperands() == 2 &&
+          U->getOperand(1) == Alloc->getResult(0)) {
+        if (U->getOperand(0).getType() != PtrTy) {
+          AllCanRetype = false; break;
+        }
+        continue;
+      }
+      AllCanRetype = false; break;
+    }
+    if (!AllCanRetype) continue;
+
     B.setInsertionPoint(Alloc);
     Value One = LLVM::ConstantOp::create(
         B, Alloc->getLoc(), I64, B.getI64IntegerAttr(1));
-    // Slot element type is `ptr` (we store a matlab_mat pointer in the slot).
     Value NewSlot = LLVM::AllocaOp::create(B, Alloc->getLoc(), PtrTy, PtrTy,
                                             One, /*alignment=*/0);
 
-    // Rewrite users.
     SmallVector<Operation *> ToErase;
     for (OpOperand &Use : Alloc->getResult(0).getUses()) {
       Operation *U = Use.getOwner();
-      if (isMatlabOp(U, "matlab.load") && U->getNumOperands() == 1) {
+      if (isMatlabOp(U, "matlab.load")) {
         B.setInsertionPoint(U);
         Value Val = LLVM::LoadOp::create(B, U->getLoc(), PtrTy, NewSlot);
         U->getResult(0).replaceAllUsesWith(Val);
         ToErase.push_back(U);
-      } else if (isMatlabOp(U, "matlab.store") && U->getNumOperands() == 2 &&
-                 U->getOperand(1) == Alloc->getResult(0)) {
-        Value V = U->getOperand(0);
-        // The stored value may still be tensor-typed at this point (another
-        // producer hasn't been rewritten yet); leave a placeholder that
-        // later iteration will clean up. Skip store if its value isn't ptr.
-        if (V.getType() != PtrTy) continue;
+      } else if (isMatlabOp(U, "matlab.store")) {
         B.setInsertionPoint(U);
-        LLVM::StoreOp::create(B, U->getLoc(), V, NewSlot);
+        LLVM::StoreOp::create(B, U->getLoc(), U->getOperand(0), NewSlot);
         ToErase.push_back(U);
       }
     }
     for (Operation *U : ToErase) U->erase();
-    // If any uses remain (unrewritten stores with tensor-typed values),
-    // leave the alloc in place for another iteration.
-    if (Alloc->getResult(0).use_empty()) {
-      Alloc->erase();
-      Changed = true;
-    }
+    Alloc->erase();
+    Changed = true;
   }
   return Changed;
 }
