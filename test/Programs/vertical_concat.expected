@@ -1,0 +1,20 @@
+module {
+  func.func @script() {
+    %cst = arith.constant 6.000000e+00 : f64
+    %cst_0 = arith.constant 5.000000e+00 : f64
+    %cst_1 = arith.constant 4.000000e+00 : f64
+    %cst_2 = arith.constant 3.000000e+00 : f64
+    %cst_3 = arith.constant 2.000000e+00 : f64
+    %cst_4 = arith.constant 1.000000e+00 : f64
+    %0 = "matlab.alloc"() {name = "Y"} : () -> tensor<3xf64>
+    %1 = "matlab.alloc"() {name = "X"} : () -> tensor<3xf64>
+    %2 = "matlab.concat_row"(%cst_4, %cst_3, %cst_2) : (f64, f64, f64) -> none
+    %3 = "matlab.concat_row"(%cst_1, %cst_0, %cst) : (f64, f64, f64) -> none
+    %4 = "matlab.load"(%1) : (tensor<3xf64>) -> tensor<3xf64>
+    %5 = "matlab.concat_row"(%4) : (tensor<3xf64>) -> none
+    %6 = "matlab.load"(%0) : (tensor<3xf64>) -> tensor<3xf64>
+    %7 = "matlab.concat_row"(%6) : (tensor<3xf64>) -> none
+    %8 = "matlab.concat_col"(%5, %7) : (none, none) -> tensor<*xf64>
+    return
+  }
+}

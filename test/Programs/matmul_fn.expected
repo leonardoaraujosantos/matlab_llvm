@@ -1,0 +1,24 @@
+module {
+  func.func @script() {
+    %cst = arith.constant 8.000000e+00 : f64
+    %cst_0 = arith.constant 7.000000e+00 : f64
+    %cst_1 = arith.constant 6.000000e+00 : f64
+    %cst_2 = arith.constant 5.000000e+00 : f64
+    %cst_3 = arith.constant 4.000000e+00 : f64
+    %cst_4 = arith.constant 3.000000e+00 : f64
+    %cst_5 = arith.constant 1.000000e+00 : f64
+    %cst_6 = arith.constant 2.000000e+00 : f64
+    %0 = "matlab.concat_row"(%cst_5, %cst_6) : (f64, f64) -> none
+    %1 = "matlab.concat_row"(%cst_4, %cst_3) : (f64, f64) -> none
+    %2 = "matlab.concat_col"(%0, %1) : (none, none) -> tensor<2x2xf64>
+    %3 = "matlab.concat_row"(%cst_2, %cst_1) : (f64, f64) -> none
+    %4 = "matlab.concat_row"(%cst_0, %cst) : (f64, f64) -> none
+    %5 = "matlab.concat_col"(%3, %4) : (none, none) -> tensor<2x2xf64>
+    %6 = "matlab.call"(%2, %5) {callee = "mult2x2"} : (tensor<2x2xf64>, tensor<2x2xf64>) -> none
+    return
+  }
+  func.func @mult2x2(%arg0: none, %arg1: none) -> none {
+    %0 = "matlab.matmul"(%arg0, %arg1) : (none, none) -> none
+    return %0 : none
+  }
+}

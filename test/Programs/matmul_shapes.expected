@@ -1,0 +1,25 @@
+module {
+  func.func @script() {
+    %cst = arith.constant 1.200000e+01 : f64
+    %cst_0 = arith.constant 1.100000e+01 : f64
+    %cst_1 = arith.constant 1.000000e+01 : f64
+    %cst_2 = arith.constant 9.000000e+00 : f64
+    %cst_3 = arith.constant 8.000000e+00 : f64
+    %cst_4 = arith.constant 7.000000e+00 : f64
+    %cst_5 = arith.constant 6.000000e+00 : f64
+    %cst_6 = arith.constant 5.000000e+00 : f64
+    %cst_7 = arith.constant 4.000000e+00 : f64
+    %cst_8 = arith.constant 1.000000e+00 : f64
+    %cst_9 = arith.constant 2.000000e+00 : f64
+    %cst_10 = arith.constant 3.000000e+00 : f64
+    %0 = "matlab.concat_row"(%cst_8, %cst_9, %cst_10) : (f64, f64, f64) -> none
+    %1 = "matlab.concat_row"(%cst_7, %cst_6, %cst_5) : (f64, f64, f64) -> none
+    %2 = "matlab.concat_col"(%0, %1) : (none, none) -> tensor<2x3xf64>
+    %3 = "matlab.concat_row"(%cst_4, %cst_3) : (f64, f64) -> none
+    %4 = "matlab.concat_row"(%cst_2, %cst_1) : (f64, f64) -> none
+    %5 = "matlab.concat_row"(%cst_0, %cst) : (f64, f64) -> none
+    %6 = "matlab.concat_col"(%3, %4, %5) : (none, none, none) -> tensor<3x2xf64>
+    %7 = "matlab.matmul"(%2, %6) : (tensor<2x3xf64>, tensor<3x2xf64>) -> tensor<2x2xf64>
+    return
+  }
+}
