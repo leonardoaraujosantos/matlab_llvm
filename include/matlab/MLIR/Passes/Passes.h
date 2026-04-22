@@ -38,6 +38,15 @@ bool runLowerScalarsToArith(mlir::ModuleOp M);
 /// module is directly linkable into an executable.
 bool runLowerIO(mlir::ModuleOp M);
 
+/// Outlines each matlab.parfor body into a private func.func and replaces
+/// the parfor op with an llvm.call to matlab_parfor_dispatch, which spawns
+/// one pthread per iteration. v1 supports bodies that only reference the
+/// induction variable, arith constants and module-level symbols
+/// (llvm.mlir.global, llvm.mlir.addressof). Returns the number of outlined
+/// parfor loops; loops that can't be outlined are left in place so the
+/// later LLVM conversion surfaces them.
+unsigned runOutlineParfor(mlir::ModuleOp M);
+
 /// Convert the whole module down to the LLVM dialect and translate to an
 /// LLVM IR textual module. Returns empty string on failure.
 std::string lowerToLLVMIR(mlir::ModuleOp M);

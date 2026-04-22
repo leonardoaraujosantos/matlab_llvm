@@ -155,6 +155,10 @@ int main(int Argc, char **Argv) {
         }
       }
       if (Opts.Mode == Options::Mode::EmitLLVM) {
+        // Outline parfor first — that way the induction variable flows as a
+        // direct block argument (f64) into disp/fprintf rather than via an
+        // outer slot that would still be `none`-typed at LowerIO time.
+        mlirgen::runOutlineParfor(M);
         mlirgen::runLowerIO(M);
         std::string LL = mlirgen::lowerToLLVMIR(M);
         if (LL.empty()) return 1;

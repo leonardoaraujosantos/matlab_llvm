@@ -43,7 +43,18 @@ for m in "$TESTDIR"/*.m; do
     fail=$((fail+1))
     rm -f "$tmpll" "$tmpbin"; continue
   }
-  if diff -u "$exp" <(printf '%s\n' "$got") >/dev/null; then
+  # If a .sorted file exists alongside the .m, compare against the expected
+  # output after sorting both sides (useful for parfor where iteration
+  # order is nondeterministic).
+  if [[ -e "${m%.m}.sorted" ]]; then
+    if diff -u <(sort "$exp") <(printf '%s\n' "$got" | sort) >/dev/null; then
+      pass=$((pass+1))
+    else
+      fail=$((fail+1))
+      echo "FAIL $base: stdout mismatch (sorted)"
+      diff -u <(sort "$exp") <(printf '%s\n' "$got" | sort) | sed 's/^/  /'
+    fi
+  elif diff -u "$exp" <(printf '%s\n' "$got") >/dev/null; then
     pass=$((pass+1))
   else
     fail=$((fail+1))
