@@ -1,0 +1,22 @@
+module {
+  func.func @fact(%arg0: none) -> none {
+    %cst = arith.constant 1.000000e+00 : f64
+    %0 = "matlab.alloc"() {name = "n"} : () -> none
+    "matlab.store"(%arg0, %0) : (none, none) -> ()
+    %1 = "matlab.alloc"() {name = "y"} : () -> none
+    %2 = "matlab.load"(%0) : (none) -> none
+    %3 = "matlab.le"(%2, %cst) : (none, f64) -> i1
+    scf.if %3 {
+      "matlab.store"(%cst, %1) : (f64, none) -> ()
+    } else {
+      %5 = "matlab.load"(%0) : (none) -> none
+      %6 = "matlab.load"(%0) : (none) -> none
+      %7 = "matlab.sub"(%6, %cst) : (none, f64) -> none
+      %8 = "matlab.call"(%7) {callee = "fact"} : (none) -> none
+      %9 = "matlab.matmul"(%5, %8) : (none, none) -> none
+      "matlab.store"(%9, %1) : (none, none) -> ()
+    }
+    %4 = "matlab.load"(%1) : (none) -> none
+    return %4 : none
+  }
+}

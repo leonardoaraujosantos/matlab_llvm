@@ -46,12 +46,13 @@ run_suite() {
   done
 }
 
-run_suite Lexer  -dump-tokens
-run_suite Parser -dump-ast
-run_suite Sema   -emit-sema
-run_suite MIR    -emit-mir
-run_suite MLIR   -emit-mlir
-run_suite Opt    "-emit-mlir -opt"
+run_suite Lexer    -dump-tokens
+run_suite Parser   -dump-ast
+run_suite Sema     -emit-sema
+run_suite MIR      -emit-mir
+run_suite MLIR     -emit-mlir
+run_suite Opt      "-emit-mlir -opt"
+run_suite Programs "-emit-mlir -opt"
 
 echo "----"
 echo "passed: $pass    failed: $fail"
