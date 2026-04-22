@@ -292,6 +292,23 @@ bool runLowerIO(ModuleOp M) {
   OpBuilder B(M.getContext());
   StringGlobals Strings(M, B);
 
+  // Canonicalize single-operand matlab.concat_row whose result type matches
+  // the operand type — these come from degenerate 1x1 matrix literals like
+  // `[7]` and just pass the value through. Fold them away so subsequent
+  // lowering (and the dead-code sweep) sees the scalar directly.
+  {
+    llvm::SmallVector<Operation *, 8> Trivial;
+    M.walk([&](Operation *Op) {
+      if (isMatlabOp(Op, "matlab.concat_row") && Op->getNumOperands() == 1 &&
+          Op->getResult(0).getType() == Op->getOperand(0).getType())
+        Trivial.push_back(Op);
+    });
+    for (Operation *Op : Trivial) {
+      Op->getResult(0).replaceAllUsesWith(Op->getOperand(0));
+      Op->erase();
+    }
+  }
+
   llvm::SmallVector<Operation *, 16> ToRewrite;
   M.walk([&](Operation *Op) {
     if (isMatlabOp(Op, "matlab.call_builtin")) {
