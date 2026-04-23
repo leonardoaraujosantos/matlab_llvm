@@ -996,8 +996,22 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
     return;
   }
   if (auto L = mlir::dyn_cast<mlir::LLVM::LoadOp>(Op)) {
+    // If the address is a named alloca, derive the load local's name from
+    // the slot's MATLAB name (e.g. loading `color_slot` -> `color_v`).
+    // Otherwise fall through to the default v<N> scheme. Only kicks in
+    // when the load wasn't inlined (multi-use, such as a switch
+    // discriminant referenced by each case).
+    std::string N;
+    if (auto *AddrDef = L.getAddr().getDefiningOp()) {
+      if (auto A = mlir::dyn_cast<mlir::LLVM::AllocaOp>(AddrDef)) {
+        if (auto NA = A->getAttrOfType<mlir::StringAttr>("matlab.name")) {
+          N = uniqueName(NA.getValue().str() + "_v");
+          Names[L.getResult()] = N;
+        }
+      }
+    }
+    if (N.empty()) N = this->name(L.getResult());
     indent(Indent);
-    std::string N = this->name(L.getResult());
     std::string ResTy = cTypeOfValue(L.getResult());
     OS << ResTy << " " << N << " = *(" << ResTy << "*)"
        << this->exprFor(L.getAddr()) << ";\n";
