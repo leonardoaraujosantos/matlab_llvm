@@ -272,6 +272,10 @@ private:
    * entries instead of the generic struct-get path, since the error
    * info lives outside a real matlab_struct. */
   std::unordered_set<Binding *> CatchBindings;
+  /* Bindings assigned from a CellLiteral — tracked so calls like
+   * numel(C) / length(C) / iscell(C) can dispatch to the matlab_cell_*
+   * runtime entries instead of the matrix path. */
+  std::unordered_set<Binding *> CellBindings;
   std::string CurFnName;
   /* Declared arity of the currently-lowered function — used to fold
    * references to the `nargin` / `nargout` builtins into compile-time
@@ -794,6 +798,11 @@ void Lowerer::lowerStmt(const Stmt &St) {
      * trying to subscript a matrix. */
     bool RhsIsHandle = A.RHS && (A.RHS->Kind == NodeKind::AnonFunction ||
                                  A.RHS->Kind == NodeKind::FuncHandle);
+    /* Track cell-typed bindings so downstream numel/length/iscell
+     * calls can route to the matlab_cell_* runtime. Both bare
+     * CellLiteral and calls to known cell-producing builtins qualify;
+     * for v1 we cover the literal case. */
+    bool RhsIsCellLit = A.RHS && A.RHS->Kind == NodeKind::CellLiteral;
 
     /* Multi-return call: [V, D] = eig(A). If the LHS arity is > 1 and
      * the RHS is a call to a builtin that has a multi-return variant,
@@ -847,6 +856,11 @@ void Lowerer::lowerStmt(const Stmt &St) {
         if (auto *N = dynamic_cast<const NameExpr *>(L))
           if (N->Ref) HandleBindings[N->Ref] = Caps;
       }
+    }
+    if (RhsIsCellLit) {
+      for (const Expr *L : A.LHS)
+        if (auto *N = dynamic_cast<const NameExpr *>(L))
+          if (N->Ref) CellBindings.insert(N->Ref);
     }
     for (const Expr *L : A.LHS) if (L) lowerLValueStore(*L, Rhs);
     /* Implicit display: MATLAB prints the result of a statement that
@@ -1462,6 +1476,30 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
           Val = 1.0;
         return mlir::arith::ConstantOp::create(
             B, L, F64, mlir::FloatAttr::get(F64, Val));
+      }
+      /* iscell(x): compile-time fold. */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          N->Name == "iscell" && C.Args.size() == 1) {
+        auto *ArgN = dynamic_cast<const NameExpr *>(C.Args[0]);
+        auto F64 = mlir::Float64Type::get(&MCtx);
+        double Val = 0.0;
+        if (ArgN && ArgN->Ref && CellBindings.count(ArgN->Ref)) Val = 1.0;
+        return mlir::arith::ConstantOp::create(
+            B, L, F64, mlir::FloatAttr::get(F64, Val));
+      }
+      /* numel(C) / length(C) on a known cell -> matlab_cell_numel. */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          (N->Name == "numel" || N->Name == "length") &&
+          C.Args.size() == 1) {
+        if (auto *ArgN = dynamic_cast<const NameExpr *>(C.Args[0]))
+          if (ArgN->Ref && CellBindings.count(ArgN->Ref)) {
+            auto F64 = mlir::Float64Type::get(&MCtx);
+            mlir::Value Arg = lowerExpr(*C.Args[0]);
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_cell_numel"));
+            return emitUnreg("matlab.call_builtin", {Arg}, F64, L, {Cal});
+          }
       }
       llvm::SmallVector<mlir::Value, 4> Args;
       for (const Expr *A : C.Args) if (A) Args.push_back(lowerExpr(*A));
