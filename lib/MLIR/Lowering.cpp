@@ -991,11 +991,12 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
     /* For an anon call with captures, the outlined function's signature
      * is (captures..., explicit_args...). We load each capture spill
      * slot (captured-at-@-time value) and prepend them to the arg list
-     * before the user-written arguments. */
+     * before the user-written arguments. The slot's own type gives the
+     * load type — handles both scalar (f64) and matrix-pointer captures
+     * (matlab.alloc of a tensor type lowers to a ptr-typed slot later). */
     if (IsHandleCall && CapSlots) {
-      auto F64Ty = mlir::Float64Type::get(&MCtx);
       for (mlir::Value Spill : *CapSlots)
-        Idx.push_back(emitLoad(Spill, F64Ty, L));
+        Idx.push_back(emitLoad(Spill, Spill.getType(), L));
     }
     // Lower each arg with subscript context pushed so any EndExpr inside
     // resolves to size(Arr, thisDim). Context is per-arg so that sibling
@@ -1089,29 +1090,51 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
 
     auto F64Ty = mlir::Float64Type::get(&MCtx);
 
-    /* Materialize each capture at the @-site: load the outer slot now
-     * and stash the value into a fresh spill slot in the outer function.
-     * We both (a) pass the just-loaded value as a make_anon operand, and
-     * (b) remember the spill slot on PendingCaptures so call sites can
-     * re-load the captured-at-@-time value. */
+    /* Materialize each capture at the @-site. Capture element type comes
+     * from the binding's Sema-inferred type: scalar -> f64, tensor ->
+     * ptr (via the slot's tensor type which LowerTensorOps later
+     * retypes). The outer slot load, the spill slot, the make_anon
+     * operand and the corresponding anon-region block argument all
+     * share this capture type. */
     llvm::SmallVector<mlir::Value, 4> CaptureVals;
+    llvm::SmallVector<mlir::Type, 4>  CaptureTys;
     std::vector<mlir::Value> CaptureSpills;
     for (Binding *Bnd : Captures) {
-      mlir::Value OuterSlot = getOrCreateSlot(Bnd, TC.scalar(Dtype::Double),
-                                              Bnd->Name, L);
-      mlir::Value Cur = emitLoad(OuterSlot, F64Ty, L);
-      mlir::Value SpillSlot = emitAlloc(TC.scalar(Dtype::Double),
-                                        Bnd->Name, L);
+      const Type *BTy = Bnd->InferredType ? Bnd->InferredType
+                                          : TC.scalar(Dtype::Double);
+      /* Prefer the outer slot's concrete MLIR type: Sema-level
+       * InferredType is often still `any` for script-scope matrix
+       * assignments even though the slot was allocated with a real
+       * tensor type by the matrix-literal store earlier. */
+      mlir::Value OuterSlot = getOrCreateSlot(Bnd, BTy, Bnd->Name, L);
+      mlir::Type MTy = OuterSlot.getType();
+      if (mlir::isa<mlir::NoneType>(MTy)) MTy = F64Ty;
+      mlir::Value Cur = emitLoad(OuterSlot, MTy, L);
+      /* Spill slot mirrors the outer slot's type so call-site reloads
+       * see the same shape. */
+      mlir::Value SpillSlot;
+      if (MTy == F64Ty) {
+        SpillSlot = emitAlloc(TC.scalar(Dtype::Double), Bnd->Name, L);
+      } else {
+        /* Emit a raw matlab.alloc with the concrete MLIR type; other
+         * paths can't synthesize the Sema Type* for arbitrary tensors. */
+        mlir::NamedAttribute NA(
+            mlir::StringAttr::get(&MCtx, "name"),
+            mlir::FlatSymbolRefAttr::get(&MCtx, std::string(Bnd->Name)));
+        SpillSlot = emitUnreg("matlab.alloc", {}, MTy, L, {NA});
+      }
       emitStore(Cur, SpillSlot, L);
       CaptureVals.push_back(Cur);
+      CaptureTys.push_back(MTy);
       CaptureSpills.push_back(SpillSlot);
     }
     PendingCaptures[&A] = CaptureSpills;
 
     mlir::OpBuilder::InsertionGuard G(B);
-    /* Block args: [captures..., params...] — all f64. */
-    llvm::SmallVector<mlir::Type> ArgTys(Captures.size() + A.Params.size(),
-                                         F64Ty);
+    /* Block args: [captures (typed per capture)..., params (f64)...]. */
+    llvm::SmallVector<mlir::Type> ArgTys;
+    ArgTys.append(CaptureTys.begin(), CaptureTys.end());
+    for (size_t i = 0; i < A.Params.size(); ++i) ArgTys.push_back(F64Ty);
     llvm::SmallVector<mlir::Location> ArgLocs(Captures.size() +
                                               A.Params.size(), L);
     mlir::Operation *Op = emitUnregOp("matlab.make_anon", CaptureVals, {RT},
@@ -1122,12 +1145,23 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
     B.setInsertionPointToEnd(Body);
 
     /* Swap in a fresh Slots map for the body. Captures AND params both
-     * get inner spill slots whose type is the block arg's type. */
+     * get inner spill slots whose type is the block arg's type.
+     * Captures reuse the block arg's type (tensor or f64); params are
+     * f64 (scalar-only for v1). */
     auto Saved = Slots;
     Slots.clear();
     for (size_t i = 0; i < Captures.size(); ++i) {
-      mlir::Value Slot = emitAlloc(TC.scalar(Dtype::Double),
-                                   Captures[i]->Name, L);
+      mlir::Type MTy = Body->getArgument(i).getType();
+      mlir::Value Slot;
+      if (MTy == F64Ty) {
+        Slot = emitAlloc(TC.scalar(Dtype::Double), Captures[i]->Name, L);
+      } else {
+        mlir::NamedAttribute NA(
+            mlir::StringAttr::get(&MCtx, "name"),
+            mlir::FlatSymbolRefAttr::get(
+                &MCtx, std::string(Captures[i]->Name)));
+        Slot = emitUnreg("matlab.alloc", {}, MTy, L, {NA});
+      }
       Slots[Captures[i]] = Slot;
       emitStore(Body->getArgument(i), Slot, L);
     }

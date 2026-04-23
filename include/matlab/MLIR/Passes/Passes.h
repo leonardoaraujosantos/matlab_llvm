@@ -63,6 +63,13 @@ bool runLowerTensorOps(mlir::ModuleOp M);
 /// values (anything more complex causes the pass to bail cleanly).
 bool runLowerAnonCalls(mlir::ModuleOp M);
 
+/// Second-chance rewrite of matlab.call_indirect ops whose callee is an
+/// llvm.mlir.addressof of a previously-outlined llvm.func. Intended to run
+/// AFTER LowerTensorOps has retyped matrix operands (tensor -> ptr) so
+/// that a call site with matrix captures can finally match its outlined
+/// function's (ptr, f64, ...) signature.
+bool runLowerAnonCallsPost(mlir::ModuleOp M);
+
 /// Lowers user-defined function calls: walks every matlab.call @fname(args)
 /// in the module, and (a) retypes the target func.func's signature + entry
 /// block arguments to match the call-site argument types when the original

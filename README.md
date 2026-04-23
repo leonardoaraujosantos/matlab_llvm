@@ -305,7 +305,7 @@ threads deterministically prints 55.
 | **`parfor i = 1:N`** (one pthread per iteration) | ✅ | ✅ | ✅ (outlined body) | ✅ |
 | **`parfor` with `x = x + rhs` reductions** | ✅ | ✅ | ✅ (atomic add) | ✅ |
 | Anonymous functions `@(x) x^2` | ✅ | ✅ | ✅ outlined to `llvm.func` | ✅ |
-| Anon captures `k = 5; @(x) x + k` | ✅ | ✅ | ✅ by-value at @-time, scalar captures | ✅ |
+| Anon captures `k = 5; @(x) x + k` | ✅ | ✅ | ✅ by-value at @-time, scalar + matrix captures (scalar params only) | ✅ |
 | Calls through handles `f(x)` | ✅ | ✅ | ✅ `matlab.call_indirect` → LLVM function pointer | ✅ |
 | Function handles `@name` | ✅ | ✅ | ✅ scalar math entries (`@sin`/`@cos`/…) + user functions (`@mySq`) via compile-time folding | ✅ |
 | Logical indexing `A(A > 0)` | ✅ | ✅ | ✅ (masked slice) | ✅ |
@@ -638,10 +638,11 @@ justfile           task runner: build / test / compile / mlir / examples / ...
 5. **Multi-callsite polymorphism** — today a function called from two
    sites with different concrete types stays `none`. Template-style
    specialization per call signature would unblock this.
-6. **Non-scalar anon captures** — today scalar (f64) captures work by
-   spilling the value at @-time and threading it through call_indirect
-   as a leading argument. Matrix captures would need pointer captures
-   + reference-count discipline (or a deep copy at @-time).
+6. **Matrix-typed anon params** — scalar and matrix captures work, but
+   anon params are still hard-coded f64. `@(x) A * x` with a vector
+   `x` needs call-site-driven param-type inference (inspect the
+   call_indirect operand types, retype the outlined function's entry
+   block, rerun LowerTensorOps on its body).
 7. **General-case `eig`** — today we do Jacobi for symmetric matrices
    (and symmetrize non-symmetric inputs, which is approximate).
    QR iteration with Wilkinson shifts would handle asymmetric matrices

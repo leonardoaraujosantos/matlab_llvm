@@ -62,13 +62,19 @@ bool isMatlabOp(Operation *Op, StringRef Name) {
  * / matmul / add / etc. can all be retyped to f64. */
 void propagateScalarTypesInLLVMFunc(LLVM::LLVMFuncOp Fn) {
   auto F64 = Float64Type::get(Fn.getContext());
+  auto PtrTy = LLVM::LLVMPointerType::get(Fn.getContext());
+  auto isPtrLike = [&](Type T) {
+    return T == PtrTy || mlir::isa<RankedTensorType>(T) ||
+           mlir::isa<UnrankedTensorType>(T);
+  };
   bool Changed = true;
   while (Changed) {
     Changed = false;
     Fn.walk([&](Operation *Op) {
       StringRef N = Op->getName().getStringRef();
       auto canRefine = [&](Type Cur, Type Proposed) {
-        return mlir::isa<NoneType>(Cur) && Proposed == F64;
+        return mlir::isa<NoneType>(Cur) && (Proposed == F64 ||
+                                            isPtrLike(Proposed));
       };
       if ((N == "matlab.matmul" || N == "matlab.matdiv" ||
            N == "matlab.add"    || N == "matlab.sub"   ||
@@ -77,9 +83,16 @@ void propagateScalarTypesInLLVMFunc(LLVM::LLVMFuncOp Fn) {
         Type A = Op->getOperand(0).getType();
         Type B = Op->getOperand(1).getType();
         Type R = Op->getResult(0).getType();
+        /* Mixed scalar×matrix or matrix×scalar: result shape follows
+         * the non-scalar operand. Pure scalar×scalar yields f64. */
         Type Concrete;
-        if (A == F64) Concrete = A;
-        else if (B == F64) Concrete = B;
+        if (isPtrLike(A) || isPtrLike(B)) {
+          Concrete = isPtrLike(A) ? A : B;
+        } else if (A == F64) {
+          Concrete = A;
+        } else if (B == F64) {
+          Concrete = B;
+        }
         if (Concrete && canRefine(R, Concrete)) {
           Op->getResult(0).setType(Concrete);
           Changed = true;
@@ -89,7 +102,8 @@ void propagateScalarTypesInLLVMFunc(LLVM::LLVMFuncOp Fn) {
           Op->getNumResults() == 1) {
         Type SlotTy = Op->getOperand(0).getType();
         Type R      = Op->getResult(0).getType();
-        if (SlotTy == F64 && canRefine(R, SlotTy)) {
+        if ((SlotTy == F64 || isPtrLike(SlotTy)) &&
+            canRefine(R, SlotTy)) {
           Op->getResult(0).setType(SlotTy);
           Changed = true;
         }
@@ -110,11 +124,26 @@ bool outlineAnon(Operation *Anon, unsigned Id) {
   if (!Body.hasOneBlock()) return false;
   Block &BodyBlock = Body.front();
 
-  /* Accept only f64 block args (scalar params) for v1. */
+  /* Accept f64 (scalar params/captures) and ptr (matrix captures) block
+   * args. Tensor-typed block args get retyped to ptr first — by this
+   * point LowerTensorOps hasn't run yet, so matrix captures arrive as
+   * tensor<...xf64>. We rewrite those to ptr on the block arg and on
+   * all uses as a ptr-typed load. */
   llvm::SmallVector<Type> ArgTys;
   for (BlockArgument A : BodyBlock.getArguments()) {
-    if (A.getType() != F64) return false;
-    ArgTys.push_back(A.getType());
+    Type T = A.getType();
+    if (T == F64) {
+      ArgTys.push_back(T);
+      continue;
+    }
+    if (mlir::isa<RankedTensorType>(T) ||
+        mlir::isa<UnrankedTensorType>(T)) {
+      A.setType(PtrTy);
+      ArgTys.push_back(PtrTy);
+      continue;
+    }
+    if (T == PtrTy) { ArgTys.push_back(T); continue; }
+    return false;
   }
 
   /* Find the terminator. Must be matlab.yield with at most one operand. */
@@ -189,11 +218,20 @@ bool outlineAnon(Operation *Anon, unsigned Id) {
       std::cerr << "anon: body yields `none` — unsupported\n";
       return false;
     }
-    if (Mapped.getType() != FnType.getReturnType()) {
-      auto NewType = LLVM::LLVMFunctionType::get(Mapped.getType(), ArgTys);
+    /* If the yield value is still tensor-typed (a matrix anon), the
+     * runtime ABI passes matrices as !llvm.ptr; LowerTensorOps will
+     * retype the producer ops afterwards. Pre-commit the signature to
+     * ptr so the post-LowerTensorOps llvm.return types agree. */
+    Type RetTy = Mapped.getType();
+    if (mlir::isa<RankedTensorType>(RetTy) ||
+        mlir::isa<UnrankedTensorType>(RetTy))
+      RetTy = PtrTy;
+    if (RetTy != FnType.getReturnType()) {
+      auto NewType = LLVM::LLVMFunctionType::get(RetTy, ArgTys);
       Fn.setFunctionType(NewType);
       FnType = NewType;
-      ResultTys[0] = Mapped.getType();
+      ResultTys.clear();
+      ResultTys.push_back(RetTy);
     }
     LLVM::ReturnOp::create(B, Anon->getLoc(), ValueRange{Mapped});
   } else {
@@ -426,6 +464,81 @@ bool rewriteUserCallIndirect(ModuleOp M) {
 }
 
 } // namespace
+
+/* Second-chance rewrite for matlab.call_indirect ops that survived the
+ * first LowerAnonCalls run because their operand types hadn't yet been
+ * retyped from tensor to ptr. By the time LowerTensorOps has run, the
+ * operands at the call site are ptr and can match the outlined
+ * llvm.func's signature. We don't walk through slot indirection here —
+ * if the user stored the handle in a slot, LowerAnonCalls's first run
+ * already folded those paths before outlining. */
+bool runLowerAnonCallsPost(ModuleOp M) {
+  MLIRContext *Ctx = M.getContext();
+  OpBuilder B(Ctx);
+  SmallVector<Operation *> Calls;
+  M.walk([&](Operation *Op) {
+    if (isMatlabOp(Op, "matlab.call_indirect")) Calls.push_back(Op);
+  });
+  bool Changed = false;
+  for (Operation *Call : Calls) {
+    if (Call->getNumOperands() < 1) continue;
+    /* Trace the callee operand back to an llvm.mlir.addressof (possibly
+     * through a load from a slot whose sole store is the addressof). */
+    Value Callee = Call->getOperand(0);
+    Operation *Def = Callee.getDefiningOp();
+    StringRef FnName;
+    if (auto Addr = dyn_cast_or_null<LLVM::AddressOfOp>(Def)) {
+      FnName = Addr.getGlobalName();
+    } else if (Def && Def->getName().getStringRef() == "llvm.load") {
+      Value Slot = Def->getOperand(0);
+      for (OpOperand &Use : Slot.getUses()) {
+        Operation *U = Use.getOwner();
+        if (U->getName().getStringRef() != "llvm.store") continue;
+        if (U->getNumOperands() != 2 || U->getOperand(1) != Slot) continue;
+        if (auto Addr = dyn_cast_or_null<LLVM::AddressOfOp>(
+                U->getOperand(0).getDefiningOp())) {
+          if (FnName.empty()) FnName = Addr.getGlobalName();
+          else if (FnName != Addr.getGlobalName()) { FnName = {}; break; }
+        } else {
+          FnName = {}; break;
+        }
+      }
+    }
+    if (FnName.empty()) continue;
+    auto Fn = M.lookupSymbol<LLVM::LLVMFuncOp>(FnName);
+    if (!Fn) continue;
+    auto FnType = Fn.getFunctionType();
+    if (Call->getNumOperands() - 1 != FnType.getNumParams()) continue;
+    bool OK = true;
+    SmallVector<Value> Args;
+    for (unsigned i = 0; i < FnType.getNumParams(); ++i) {
+      Value V = Call->getOperand(i + 1);
+      if (V.getType() != FnType.getParamType(i)) { OK = false; break; }
+      Args.push_back(V);
+    }
+    if (!OK) continue;
+
+    B.setInsertionPoint(Call);
+    OperationState State(Call->getLoc(), "llvm.call");
+    SmallVector<Value> Ops;
+    Ops.push_back(Callee);
+    for (auto V : Args) Ops.push_back(V);
+    State.addOperands(Ops);
+    if (!mlir::isa<LLVM::LLVMVoidType>(FnType.getReturnType()))
+      State.addTypes({FnType.getReturnType()});
+    State.addAttribute("op_bundle_sizes",
+                       DenseI32ArrayAttr::get(Ctx, {}));
+    State.addAttribute("operandSegmentSizes",
+                       DenseI32ArrayAttr::get(Ctx,
+                           {static_cast<int32_t>(Ops.size()), 0}));
+    Operation *NewCall = B.create(State);
+    if (Call->getNumResults() >= 1 && NewCall->getNumResults() >= 1)
+      Call->getResult(0).replaceAllUsesWith(NewCall->getResult(0));
+    Call->erase();
+    Changed = true;
+  }
+  return Changed;
+}
 
 bool runLowerAnonCalls(ModuleOp M) {
   /* User-function handles (`f = @sq; f(3)`) — rewrite to direct

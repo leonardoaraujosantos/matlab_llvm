@@ -187,6 +187,16 @@ int main(int Argc, char **Argv) {
         // IR are !llvm.ptr to heap-allocated matlab_mat descriptors, and
         // disp on a matrix ptr routes to matlab_disp_mat.
         mlirgen::runLowerTensorOps(M);
+        // Second-chance anon call rewrite: any matlab.call_indirect that
+        // survived the first LowerAnonCalls because its matrix operands
+        // were still tensor-typed can now match the outlined function's
+        // (ptr, ...) signature after LowerTensorOps retyped the slots.
+        if (mlirgen::runLowerAnonCallsPost(M)) {
+          // The newly-lowered llvm.call producing a ptr may now be the
+          // operand of an un-lowered matlab.call_builtin @disp (etc.).
+          // Re-run LowerTensorOps so disp(ptr) routes to matlab_disp_mat.
+          mlirgen::runLowerTensorOps(M);
+        }
         // After user-call refinement, any surviving matlab.alloc whose
         // result type is now a scalar primitive can be promoted to
         // llvm.alloca. This catches function-body locals that weren't

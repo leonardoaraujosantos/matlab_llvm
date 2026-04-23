@@ -22,3 +22,17 @@ disp('g(10) ='); disp(g(10));
 k = 100;
 disp('after k = 100, f(0) still yields:');
 disp(f(0));
+
+% Matrix capture: A is captured by pointer at @-time.
+A = [1 2 3; 4 5 6; 7 8 9];
+diagi = @(i) A(i, i);
+disp('diagonal of A via matrix-capturing handle:');
+disp(diagi(1));
+disp(diagi(2));
+disp(diagi(3));
+
+% Matrix capture driving a matrix result.
+M = [1 2; 3 4];
+scaled = @(s) M * s;
+disp('M scaled by 3:');
+disp(scaled(3));
