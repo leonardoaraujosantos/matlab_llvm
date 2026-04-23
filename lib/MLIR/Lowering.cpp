@@ -688,6 +688,24 @@ void Lowerer::lowerFunction(const Function &F, mlir::ModuleOp M,
    * a valid identifier in C / C++ output. */
   for (char &ch : FnName) if (ch == '.') ch = '_';
   auto Fn = mlir::func::FuncOp::create(loc(F.Range), FnName, FnTy);
+  /* Attach class-method metadata so the C++ emitter can reconstruct
+   * idiomatic class{...}; blocks. These attributes are discardable
+   * from a verifier perspective and ignored by the plain C backend. */
+  if (Owner) {
+    Fn->setAttr("matlab.class_name",
+                mlir::StringAttr::get(&MCtx, std::string(Owner->Name)));
+    llvm::StringRef Kind = IsCtor ? "ctor"
+                          : IsStatic ? "static"
+                          : "method";
+    Fn->setAttr("matlab.method_kind",
+                mlir::StringAttr::get(&MCtx, Kind));
+    Fn->setAttr("matlab.method_name",
+                mlir::StringAttr::get(&MCtx, std::string(F.Name)));
+    if (Owner->Super)
+      Fn->setAttr("matlab.class_super",
+                  mlir::StringAttr::get(&MCtx,
+                                         std::string(Owner->Super->Name)));
+  }
   // Attach the MATLAB parameter name to each func arg as a discardable
   // attribute so downstream backends (EmitC) can print readable
   // signatures like `fact(double n)` instead of `fact(double v15)`.

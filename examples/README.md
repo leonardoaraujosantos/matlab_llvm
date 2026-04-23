@@ -23,6 +23,7 @@ just compile examples/<name>.m /tmp/<name> && /tmp/<name>
 | `parfor.m`        | `parfor` reductions (single/multi/step) + calls to user helpers  |
 | `func_handles.m`  | `@sin` / `@sqrt` / `@abs` / `@exp` handles via indirect call     |
 | `anon_capture.m`  | `@(x) x + k` — by-value captures of outer scalar variables       |
+| `bank_account.m`  | `classdef` with `properties` / `methods` / `Dependent` / `< handle`-style inheritance / operator overloading (`eq`) |
 
 ## Current limitations the examples work around
 

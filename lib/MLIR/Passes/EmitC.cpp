@@ -601,6 +601,164 @@ bool Emitter::run(mlir::ModuleOp M) {
   }
   OS << "\n";
 
+  /* Pass 2b (C++ only): reconstruct idiomatic class { ... }; blocks
+   * from the class-method metadata the frontend stamped on each
+   * func.func. The blocks are inline trampolines around the flat
+   * ClassName__method functions — the class body itself holds a
+   * single void* (matlab_obj*) and dispatches all methods through
+   * the corresponding flat function. Users who want proper OOP
+   * syntax in their handwritten glue code can then write
+   * `c = a + b;` with full type-checking, without us needing to
+   * rewrite the emitted main() body to match. */
+  if (Cpp) {
+    struct MethodInfo {
+      std::string Mangled;  // flat function name
+      std::string Name;     // user-visible method name
+      std::string Kind;     // "ctor" / "method" / "static"
+      mlir::func::FuncOp Fn;
+    };
+    std::unordered_map<std::string, std::vector<MethodInfo>> ByClass;
+    std::unordered_map<std::string, std::string> SuperOf;
+    std::vector<std::string> ClassOrder;
+    for (auto &Op : M.getBody()->getOperations()) {
+      auto F = mlir::dyn_cast<mlir::func::FuncOp>(Op);
+      if (!F) continue;
+      auto ClsA = F->getAttrOfType<mlir::StringAttr>("matlab.class_name");
+      auto NameA = F->getAttrOfType<mlir::StringAttr>("matlab.method_name");
+      auto KindA = F->getAttrOfType<mlir::StringAttr>("matlab.method_kind");
+      if (!ClsA || !NameA || !KindA) continue;
+      std::string Cls = ClsA.getValue().str();
+      if (!ByClass.count(Cls)) ClassOrder.push_back(Cls);
+      MethodInfo MI{F.getSymName().str(), NameA.getValue().str(),
+                    KindA.getValue().str(), F};
+      ByClass[Cls].push_back(std::move(MI));
+      if (auto SA = F->getAttrOfType<mlir::StringAttr>("matlab.class_super"))
+        SuperOf[Cls] = SA.getValue().str();
+    }
+
+    auto opNameFor = [](llvm::StringRef N) -> llvm::StringRef {
+      if (N == "plus")     return "operator+";
+      if (N == "minus")    return "operator-";
+      if (N == "mtimes")   return "operator*";
+      if (N == "times")    return "operator*";
+      if (N == "mrdivide") return "operator/";
+      if (N == "rdivide")  return "operator/";
+      if (N == "eq")       return "operator==";
+      if (N == "ne")       return "operator!=";
+      if (N == "lt")       return "operator<";
+      if (N == "le")       return "operator<=";
+      if (N == "gt")       return "operator>";
+      if (N == "ge")       return "operator>=";
+      return llvm::StringRef();
+    };
+
+    if (!ClassOrder.empty()) {
+      OS << "// User-defined classes (wrappers over the flat ClassName__method "
+            "functions).\n";
+      for (const auto &Cls : ClassOrder) {
+        OS << "class " << Cls;
+        if (SuperOf.count(Cls)) OS << " : public " << SuperOf[Cls];
+        OS << " {\npublic:\n";
+        OS << "  void *_impl;\n";
+        OS << "  explicit " << Cls << "(void *impl = nullptr) : _impl(impl) {}\n";
+        for (auto &MI : ByClass[Cls]) {
+          auto FT = MI.Fn.getFunctionType();
+          if (MI.Kind == "ctor") {
+            /* User-defined constructor: mirrors the flat ctor
+             * signature, delegates to it for _impl. */
+            OS << "  " << Cls << "(";
+            for (unsigned i = 0; i < FT.getNumInputs(); ++i) {
+              if (i) OS << ", ";
+              OS << cTypeOf(FT.getInput(i)) << " a" << i;
+            }
+            OS << ") : _impl(" << MI.Mangled << "(";
+            for (unsigned i = 0; i < FT.getNumInputs(); ++i) {
+              if (i) OS << ", ";
+              OS << "a" << i;
+            }
+            OS << ")) {}\n";
+            continue;
+          }
+          if (MI.Kind == "static") {
+            std::string RetTy = FT.getNumResults() == 0
+                ? std::string("void")
+                : cTypeOf(FT.getResult(0));
+            OS << "  static " << RetTy << " " << MI.Name << "(";
+            for (unsigned i = 0; i < FT.getNumInputs(); ++i) {
+              if (i) OS << ", ";
+              OS << cTypeOf(FT.getInput(i)) << " a" << i;
+            }
+            OS << ") { "
+               << (FT.getNumResults() == 0 ? "" : "return ")
+               << MI.Mangled << "(";
+            for (unsigned i = 0; i < FT.getNumInputs(); ++i) {
+              if (i) OS << ", ";
+              OS << "a" << i;
+            }
+            OS << "); }\n";
+            continue;
+          }
+          /* Instance method. First param is the receiver (_impl);
+           * emit a member function taking the remaining inputs. */
+          if (FT.getNumInputs() < 1) continue;
+          llvm::StringRef OpName = opNameFor(MI.Name);
+          /* Sanitise dots in the method name (get.Area -> get_Area)
+           * so the emitted identifier is valid C++. */
+          std::string SafeName = MI.Name;
+          for (char &c : SafeName) if (c == '.') c = '_';
+          std::string Target = OpName.empty() ? SafeName : OpName.str();
+          std::string RetTyS = FT.getNumResults() == 0
+              ? std::string("void")
+              : cTypeOf(FT.getResult(0));
+          /* Wrap a ptr-typed result back into the same class for
+           * operator overloads — so `a + b` reads as a Vec2 at the
+           * use site rather than a naked void*. */
+          bool WrapResult = (!OpName.empty() &&
+                              FT.getNumResults() == 1 &&
+                              RetTyS == std::string("void*") &&
+                              OpName != "operator==" &&
+                              OpName != "operator!=" &&
+                              OpName != "operator<" &&
+                              OpName != "operator<=" &&
+                              OpName != "operator>" &&
+                              OpName != "operator>=");
+          std::string EffRetTy = WrapResult ? Cls : RetTyS;
+          OS << "  " << EffRetTy << " " << Target << "(";
+          for (unsigned i = 1; i < FT.getNumInputs(); ++i) {
+            if (i > 1) OS << ", ";
+            mlir::Type T = FT.getInput(i);
+            bool SecondIsSameClass = (!OpName.empty() && i == 1 &&
+                                       cTypeOf(T) == std::string("void*"));
+            if (SecondIsSameClass)
+              OS << "const " << Cls << " &a" << i;
+            else
+              OS << cTypeOf(T) << " a" << i;
+          }
+          OS << ")";
+          OS << " { ";
+          if (FT.getNumResults() > 0) {
+            if (WrapResult) OS << "return " << Cls << "(";
+            else             OS << "return ";
+          }
+          OS << MI.Mangled << "(_impl";
+          for (unsigned i = 1; i < FT.getNumInputs(); ++i) {
+            OS << ", ";
+            mlir::Type T = FT.getInput(i);
+            bool SecondIsSameClass = (!OpName.empty() && i == 1 &&
+                                       cTypeOf(T) == std::string("void*"));
+            if (SecondIsSameClass) OS << "a" << i << "._impl";
+            else                    OS << "a" << i;
+          }
+          OS << ")";
+          if (WrapResult) OS << ")";
+          OS << "; }\n";
+        }
+        OS << "};\n";
+      }
+      OS << "\n";
+    }
+  }
+
   // Pass 3: emit function bodies.
   for (auto &Op : M.getBody()->getOperations()) {
     if (Failed) break;
