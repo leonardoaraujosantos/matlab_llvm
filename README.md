@@ -315,7 +315,8 @@ threads deterministically prints 55.
 | Matrix comparisons `A > B`, `A == s` etc. | ✅ | ✅ | ✅ (returns 0/1 matrix) | ✅ |
 | `global`, `persistent` | ✅ | ✅ | ✅ scalar (f64) via runtime-backed slot table; globals shared by name, persistents namespaced per function | ✅ |
 | `try / catch` | ✅ | ✅ | ✅ runs try body; catch body runs when `error()` set the runtime error flag (no stack unwinding) | ✅ |
-| Structs `s.x = v`, `s.x` read, `s.(name)` dynamic read | ✅ | ✅ | ✅ runtime-backed `matlab_struct` with per-field f64/matrix kinds | ✅ |
+| Structs `s.x = v`, `s.x` read, `s.a.b` nested, `s.(name)` dynamic | ✅ | ✅ | ✅ runtime-backed `matlab_struct` with f64/matrix/nested-struct field kinds | ✅ |
+| `isstruct(x)` / `isfield(s, 'x')` | ✅ | ✅ | ✅ `isstruct` compile-time fold; `isfield` routes to `matlab_struct_has_field` | ✅ |
 | `classdef` (OOP) | ❌ | ❌ | ❌ | — |
 | Cells `{...}` | ✅ (parsed) | ⚠️ partial | ❌ | — |
 | Command syntax (`disp hello` → `disp('hello')`) | ✅ | ✅ | ✅ | — |
@@ -646,12 +647,12 @@ programs.
 
 ### Heterogeneous data — the biggest user-facing gap
 
-1. **Nested structs and struct arrays** — scalar `s.x`, `s.x = v`,
-   field update, `s.(name)` with a literal name, and matrix-valued
-   fields all execute today. Missing: nested (`s.inner.x`), struct
-   arrays (`s(1).x`, `s(2).x`), `fieldnames(s)`, `rmfield(s, 'x')`,
-   `isstruct`, and runtime-varying `s.(expr)` where `expr` isn't a
-   literal.
+1. **Struct arrays + `fieldnames` / `rmfield`** — scalar `s.x`,
+   nested `s.a.b`, field update, literal-name `s.(name)`, matrix
+   fields, and `isstruct` / `isfield` all execute today. Missing:
+   struct arrays (`s(1).x`, `s(2).x`), `fieldnames(s)` (returns a
+   cell of char arrays, blocked on cells), `rmfield(s, 'x')`, and
+   runtime-varying `s.(expr)` where `expr` isn't a literal.
 2. **Cells `{…}` / `C{i,j}`** — parsed, typed as `cell`, no runtime.
    Needs a tagged-value container (`matlab_cell` with per-slot dtype
    tag) so heterogeneous collections work.

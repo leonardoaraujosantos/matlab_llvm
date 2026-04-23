@@ -33,7 +33,7 @@ void Resolver::registerBuiltins() {
     "true", "false",
     "mod", "rem", "floor", "ceil", "round", "fix",
     "double", "single", "int32", "int64", "logical", "char",
-    "struct", "cell", "fieldnames",
+    "struct", "cell", "fieldnames", "isstruct", "isfield",
     "svd", "eig", "inv", "pinv", "det", "rank",
     "arrayfun", "cellfun",
     "nargin", "nargout", "varargin", "varargout",

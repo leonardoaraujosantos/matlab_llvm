@@ -383,6 +383,61 @@ bool TensorLowering::rewriteBuiltinCalls() {
       return Addr;
     };
 
+    /* isfield(s, 'name') — route to matlab_struct_has_field. */
+    if (Name == "isfield" && Call->getNumOperands() == 2 &&
+        Call->getNumResults() == 1 &&
+        Call->getOperand(0).getType() == PtrTy) {
+      Value NameV = Call->getOperand(1);
+      int64_t Len = 0;
+      auto fieldNameAddr0 = [&](Value N, int64_t &L) -> Value {
+        Operation *Def = N.getDefiningOp();
+        if (!isMatlabOp(Def, "matlab.const_char")) return Value{};
+        auto VA = Def->getAttrOfType<StringAttr>("value");
+        if (!VA) return Value{};
+        StringRef Text = VA.getValue();
+        L = (int64_t)Text.size();
+        LLVM::GlobalOp Found;
+        for (auto G : Mod.getOps<LLVM::GlobalOp>()) {
+          if (!G.getConstant()) continue;
+          auto Attr = mlir::dyn_cast_or_null<StringAttr>(G.getValueAttr());
+          if (Attr && Attr.getValue() == Text) { Found = G; break; }
+        }
+        if (!Found) {
+          OpBuilder::InsertionGuard G(B);
+          B.setInsertionPointToStart(Mod.getBody());
+          auto ArrayTy = LLVM::LLVMArrayType::get(
+              IntegerType::get(Ctx, 8),
+              static_cast<unsigned>(Text.size()));
+          unsigned N = 0;
+          std::string SymName;
+          do { SymName = ("__matlab_str_f" + std::to_string(N++)); }
+          while (Mod.lookupSymbol(SymName));
+          Found = LLVM::GlobalOp::create(
+              B, Mod.getLoc(), ArrayTy, /*isConstant=*/true,
+              LLVM::Linkage::Internal, SymName,
+              StringAttr::get(Ctx, Text));
+        }
+        B.setInsertionPoint(Def);
+        Value Addr = LLVM::AddressOfOp::create(
+            B, Def->getLoc(), PtrTy, Found.getSymName());
+        Def->getResult(0).replaceAllUsesWith(Addr);
+        return Addr;
+      };
+      Value Ptr = fieldNameAddr0(NameV, Len);
+      if (!Ptr) continue;
+      B.setInsertionPoint(Call);
+      Value LenV = LLVM::ConstantOp::create(
+          B, Call->getLoc(), I64, B.getI64IntegerAttr(Len));
+      auto Fn = rt("matlab_struct_has_field", F64, {PtrTy, PtrTy, I64});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                      ValueRange{Call->getOperand(0),
+                                                 Ptr, LenV});
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+
     /* Error-flag accessors: matlab_set_error / matlab_check_error /
      * matlab_clear_error. Used by try/catch and by the `error()`
      * builtin itself. */
@@ -467,6 +522,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
     }
     if ((Name == "matlab_struct_get_f64" ||
          Name == "matlab_struct_get_mat" ||
+         Name == "matlab_struct_get_child_struct" ||
          Name == "matlab_struct_has_field") &&
         Call->getNumOperands() == 2 && Call->getNumResults() == 1) {
       Value Base = Call->getOperand(0);
@@ -475,8 +531,9 @@ bool TensorLowering::rewriteBuiltinCalls() {
       int64_t Len = 0;
       Value Ptr = fieldNameAddr(NameV, Len);
       if (!Ptr) continue;
-      bool IsMat = Name == "matlab_struct_get_mat";
-      Type Ret = IsMat ? (Type)PtrTy : (Type)F64;
+      bool IsPtr = Name == "matlab_struct_get_mat" ||
+                   Name == "matlab_struct_get_child_struct";
+      Type Ret = IsPtr ? (Type)PtrTy : (Type)F64;
       B.setInsertionPoint(Call);
       Value LenV = LLVM::ConstantOp::create(
           B, Call->getLoc(), I64, B.getI64IntegerAttr(Len));

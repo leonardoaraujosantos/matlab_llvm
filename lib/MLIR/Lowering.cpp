@@ -257,6 +257,12 @@ private:
   mlir::Value ensureStructSlot(Binding *Bnd, std::string_view Name,
                                 mlir::Location L);
   mlir::Value emitFieldNameChar(std::string_view Name, mlir::Location L);
+  /* Resolve a struct-valued base expression to a ptr-typed struct
+   * pointer. Handles NameExpr (via ensureStructSlot + load) and
+   * chained FieldAccess (via matlab_struct_get_child_struct so
+   * intermediate struct fields auto-allocate for s.a.b = v). Returns
+   * a null Value when the base isn't resolvable to a struct. */
+  mlir::Value resolveStructBase(const Expr *E, mlir::Location L);
   /* Bindings that have been initialised to a fresh matlab_struct_new().
    * Tracked per-Binding so a function with multiple FieldAccess sites
    * only initialises once. */
@@ -448,6 +454,28 @@ mlir::Value Lowerer::ensureStructSlot(Binding *Bnd, std::string_view Name,
     emitStore(NewPtr, Slot, L);
   }
   return Slot;
+}
+
+mlir::Value Lowerer::resolveStructBase(const Expr *E, mlir::Location L) {
+  if (!E) return {};
+  if (auto *N = dynamic_cast<const NameExpr *>(E)) {
+    if (!N->Ref) return {};
+    mlir::Value Slot = ensureStructSlot(N->Ref, N->Name, L);
+    auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+    return emitLoad(Slot, PtrTy, L);
+  }
+  if (auto *F = dynamic_cast<const FieldAccess *>(E)) {
+    mlir::Value Parent = resolveStructBase(F->Base, L);
+    if (!Parent) return {};
+    auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+    mlir::Value NameV = emitFieldNameChar(F->Field, L);
+    mlir::NamedAttribute Cal(
+        mlir::StringAttr::get(&MCtx, "callee"),
+        mlir::StringAttr::get(&MCtx, "matlab_struct_get_child_struct"));
+    return emitUnreg("matlab.call_builtin", {Parent, NameV},
+                     PtrTy, L, {Cal});
+  }
+  return {};
 }
 
 mlir::Value Lowerer::emitFieldNameChar(std::string_view Name,
@@ -1228,14 +1256,15 @@ void Lowerer::lowerLValueStore(const Expr &LHS, mlir::Value Rhs) {
     return;
   }
   case NodeKind::FieldAccess: {
-    /* s.x = Rhs  -->  ensure s has a matlab_struct; call
-     *                 matlab_struct_set_{f64|mat}(s_ptr, "x", Rhs). */
+    /* s.x = Rhs  OR  s.a.b = Rhs. For the nested case the base is
+     * itself a FieldAccess; resolveStructBase walks the chain,
+     * auto-allocating intermediate struct fields via
+     * matlab_struct_get_child_struct so 's.a.b = v' works even when
+     * s.a didn't exist yet. */
     auto &F = static_cast<const FieldAccess &>(LHS);
-    auto *BN = dynamic_cast<const NameExpr *>(F.Base);
-    if (!BN || !BN->Ref) return;
-    mlir::Value Slot = ensureStructSlot(BN->Ref, BN->Name, loc(F.Range));
+    mlir::Value SPtr = resolveStructBase(F.Base, loc(F.Range));
+    if (!SPtr) return;
     auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
-    mlir::Value SPtr = emitLoad(Slot, PtrTy, loc(F.Range));
     mlir::Value NameV = emitFieldNameChar(F.Field, loc(F.Range));
     llvm::StringRef Callee = (Rhs && Rhs.getType() == PtrTy)
         ? "matlab_struct_set_mat"
@@ -1358,6 +1387,19 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
     auto &C = static_cast<const CallOrIndex &>(E);
     if (C.Resolved == CallKind::Call) {
       auto *N = dynamic_cast<const NameExpr *>(C.Callee);
+      /* isstruct(x): compile-time fold based on whether x's binding
+       * has been initialised as a struct. Any other ptr (matrix) or
+       * scalar returns 0.0. */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          N->Name == "isstruct" && C.Args.size() == 1) {
+        auto *ArgN = dynamic_cast<const NameExpr *>(C.Args[0]);
+        auto F64 = mlir::Float64Type::get(&MCtx);
+        double Val = 0.0;
+        if (ArgN && ArgN->Ref && StructInitialised.count(ArgN->Ref))
+          Val = 1.0;
+        return mlir::arith::ConstantOp::create(
+            B, L, F64, mlir::FloatAttr::get(F64, Val));
+      }
       llvm::SmallVector<mlir::Value, 4> Args;
       for (const Expr *A : C.Args) if (A) Args.push_back(lowerExpr(*A));
       if (N && N->Ref) {
@@ -1430,16 +1472,14 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
     return emitUnreg("matlab.cell_subscript", Idx, RT, L);
   }
   case NodeKind::FieldAccess: {
-    /* s.x read. v1 assumes scalar (f64) fields unless Sema has told
-     * us otherwise. If the binding is a Struct kind we still default
-     * to f64 — matrix-typed fields are boxed 1×1 by the runtime. */
+    /* s.x read  OR  s.a.b read. resolveStructBase walks a nested
+     * chain via matlab_struct_get_child_struct so the intermediate
+     * level always lands on a real struct pointer. */
     auto &F = static_cast<const FieldAccess &>(E);
-    auto *BN = dynamic_cast<const NameExpr *>(F.Base);
-    if (!BN || !BN->Ref) return emitUnreg("matlab.undef", {}, RT, L);
-    mlir::Value Slot = ensureStructSlot(BN->Ref, BN->Name, L);
+    mlir::Value SPtr = resolveStructBase(F.Base, L);
+    if (!SPtr) return emitUnreg("matlab.undef", {}, RT, L);
     auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
     auto F64 = mlir::Float64Type::get(&MCtx);
-    mlir::Value SPtr = emitLoad(Slot, PtrTy, L);
     mlir::Value NameV = emitFieldNameChar(F.Field, L);
     /* Default to f64 (scalar field). Only fetch as a matrix when Sema
      * concretely says tensor — a `none`/`any` type, common when Sema
@@ -1463,8 +1503,8 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
      * names we'd need a runtime entry that takes a char-matrix name;
      * that's a follow-up. */
     auto &F = static_cast<const DynamicField &>(E);
-    auto *BN = dynamic_cast<const NameExpr *>(F.Base);
-    if (!BN || !BN->Ref) return emitUnreg("matlab.undef", {}, RT, L);
+    mlir::Value SPtr = resolveStructBase(F.Base, L);
+    if (!SPtr) return emitUnreg("matlab.undef", {}, RT, L);
     std::string FieldName;
     if (auto *Lit = dynamic_cast<const StringLiteral *>(F.Name))
       FieldName = Lit->Value;
@@ -1472,10 +1512,8 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
       FieldName = Lit->Value;
     else
       return emitUnreg("matlab.undef", {}, RT, L);
-    mlir::Value Slot = ensureStructSlot(BN->Ref, BN->Name, L);
     auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
     auto F64 = mlir::Float64Type::get(&MCtx);
-    mlir::Value SPtr = emitLoad(Slot, PtrTy, L);
     mlir::Value NameV = emitFieldNameChar(FieldName, L);
     mlir::NamedAttribute Cal(
         mlir::StringAttr::get(&MCtx, "callee"),

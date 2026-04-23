@@ -1526,6 +1526,23 @@ double matlab_struct_has_field(matlab_struct *s, const char *name, int64_t len) 
     return struct_find_field(s, name, (int32_t)len) >= 0 ? 1.0 : 0.0;
 }
 
+/* Get-or-create a nested child struct at s.name. Returns the child
+ * struct pointer, creating an empty one and stashing it in the parent
+ * if the field doesn't exist yet. Used for s.a.b = v to resolve the
+ * intermediate s.a level. */
+matlab_struct *matlab_struct_get_child_struct(matlab_struct *s,
+                                               const char *name, int64_t len) {
+    if (!s) return matlab_struct_new();
+    int32_t idx = struct_find_field(s, name, (int32_t)len);
+    if (idx >= 0 && s->kinds[idx] == 2 && s->ptr_vals[idx])
+        return (matlab_struct *)s->ptr_vals[idx];
+    matlab_struct *child = matlab_struct_new();
+    idx = struct_reserve(s, name, (int32_t)len);
+    s->kinds[idx] = 2;
+    s->ptr_vals[idx] = child;
+    return child;
+}
+
 /* ---------------------------------------------------------------------- */
 /* Global / persistent storage.
  *
