@@ -75,7 +75,8 @@ bool extractRange(Value V, Value &Start, Value &Step, Value &End,
 }
 
 bool lowerForOp(Operation *ForOp) {
-  if (ForOp->getNumOperands() != 1 || ForOp->getNumRegions() != 1)
+  if (ForOp->getNumRegions() != 1) return false;
+  if (ForOp->getNumOperands() < 1 || ForOp->getNumOperands() > 2)
     return false;
   Region &Body = ForOp->getRegion(0);
   if (!Body.hasOneBlock()) return false;
@@ -87,6 +88,12 @@ bool lowerForOp(Operation *ForOp) {
   auto F64 = B.getF64Type();
 
   Value Iter = ForOp->getOperand(0);
+  /* Optional second operand: did_break i1 slot. When present, the
+   * scf.while cond also checks !did_break so a break inside the body
+   * exits the loop immediately on the next cond check. */
+  Value BreakSlot;
+  if (ForOp->getNumOperands() == 2) BreakSlot = ForOp->getOperand(1);
+
   Value Start, Step, End;
   if (!extractRange(Iter, Start, Step, End, B, L)) return false;
 
@@ -108,6 +115,18 @@ bool lowerForOp(Operation *ForOp) {
     Value GeCmp = arith::CmpFOp::create(
         B, L, arith::CmpFPredicate::OGE, IV, End);
     Value C = arith::SelectOp::create(B, L, PosStep, LeCmp, GeCmp);
+    if (BreakSlot) {
+      auto I1 = B.getI1Type();
+      OperationState St(L, "matlab.load");
+      St.addOperands(BreakSlot);
+      St.addTypes(I1);
+      Operation *LoadOp = B.create(St);
+      Value BV = LoadOp->getResult(0);
+      Value True = arith::ConstantOp::create(B, L, I1,
+          B.getIntegerAttr(I1, 1));
+      Value NotBr = arith::XOrIOp::create(B, L, BV, True);
+      C = arith::AndIOp::create(B, L, C, NotBr);
+    }
     scf::ConditionOp::create(B, L, C, ValueRange{IV});
   }
 

@@ -189,6 +189,19 @@ private:
   // runtime matlab_end_of_dim call.
   std::vector<std::pair<mlir::Value, int64_t>> SubscriptCtx;
 
+  /* Per-loop state for break/continue lowering. Each loop that
+   * contains a break or continue allocates two i1 slots (did_break,
+   * did_continue). matlab.break / matlab.continue write true to the
+   * top-of-stack slot; the body restructuring wraps statements after
+   * a break-/continue-containing stmt in an scf.if guarded by
+   * !did_break && !did_continue so their side effects are skipped.
+   * The enclosing loop's cond consumes did_break to exit. */
+  struct LoopCtx {
+    mlir::Value BreakSlot;
+    mlir::Value ContinueSlot;
+  };
+  std::vector<LoopCtx> LoopStack;
+
   //--- location / type helpers
   mlir::Location loc(SourceLocation L) const;
   mlir::Location loc(SourceRange R) const { return loc(R.Begin); }
@@ -218,6 +231,16 @@ private:
   //--- blocks / stmts / exprs
   void lowerBlock(const ::matlab::Block &B);
   void lowerStmt(const Stmt &St);
+  /* Walk a statement (including nested if/for/while bodies) for
+   * matlab.break or matlab.continue. Used by ForStmt/WhileStmt
+   * lowering to decide whether to emit the did_break/did_continue
+   * flag plumbing. */
+  bool stmtContainsBreakOrContinue(const Stmt &St);
+  bool blockContainsBreakOrContinue(const ::matlab::Block &Blk);
+  /* Lower statements of a loop body, inserting scf.if-guarded tails
+   * after any stmt that contains break/continue so remaining work is
+   * skipped once a flag is set. */
+  void lowerLoopBody(const ::matlab::Block &Blk);
   mlir::Value lowerExpr(const Expr &E);
   void lowerLValueStore(const Expr &LHS, mlir::Value Rhs);
 
@@ -230,6 +253,12 @@ private:
 
   int32_t globalSlotId(Binding *Bnd);
   std::string CurFnName;
+  /* Declared arity of the currently-lowered function — used to fold
+   * references to the `nargin` / `nargout` builtins into compile-time
+   * constants. Per-call-site arity would need LHS-threaded
+   * monomorphisation; this v1 uses the declared counts. */
+  unsigned CurFnNargin = 0;
+  unsigned CurFnNargout = 0;
   mlir::Value getOrCreateSlot(Binding *Bnd, const Type *T, llvm::StringRef N,
                               mlir::Location L);
 };
@@ -409,6 +438,18 @@ mlir::Value Lowerer::loadBinding(Binding *Bnd, const Type *ValTy,
         mlir::StringAttr::get(&MCtx, "matlab_global_get_f64"));
     return emitUnreg("matlab.call_builtin", {IdV}, F64, L, {Cal});
   }
+  /* nargin / nargout: compile-time constants. nargin is the declared
+   * param count of the enclosing function; nargout is the declared
+   * output count (accurate per-callsite introspection would need
+   * per-LHS-arity monomorphisation, which we don't do today). */
+  if (Bnd->Kind == BindingKind::Builtin &&
+      (Bnd->Name == "nargin" || Bnd->Name == "nargout")) {
+    auto F64 = mlir::Float64Type::get(&MCtx);
+    int64_t N = (Bnd->Name == "nargin") ? (int64_t)CurFnNargin
+                                        : (int64_t)CurFnNargout;
+    return mlir::arith::ConstantOp::create(
+        B, L, F64, mlir::FloatAttr::get(F64, (double)N));
+  }
   if (Bnd->Kind == BindingKind::Function ||
       Bnd->Kind == BindingKind::Builtin) {
     mlir::NamedAttribute Cal(
@@ -487,6 +528,8 @@ void Lowerer::lowerFunction(const Function &F, mlir::ModuleOp M) {
 
   Slots.clear();
   CurFnName = std::string(F.Name);
+  CurFnNargin = F.ParamRefs.size();
+  CurFnNargout = F.OutputRefs.size();
 
   // Spill parameters into slots.
   for (size_t i = 0; i < F.ParamRefs.size(); ++i) {
@@ -542,6 +585,93 @@ void Lowerer::lowerFunction(const Function &F, mlir::ModuleOp M) {
 
 void Lowerer::lowerBlock(const ::matlab::Block &Blk) {
   for (const Stmt *S : Blk.Stmts) if (S) lowerStmt(*S);
+}
+
+bool Lowerer::stmtContainsBreakOrContinue(const Stmt &St) {
+  switch (St.Kind) {
+  case NodeKind::BreakStmt:
+  case NodeKind::ContinueStmt:
+    return true;
+  case NodeKind::IfStmt: {
+    auto &I = static_cast<const IfStmt &>(St);
+    if (I.Then && blockContainsBreakOrContinue(*I.Then)) return true;
+    for (auto &EI : I.Elseifs)
+      if (EI.Body && blockContainsBreakOrContinue(*EI.Body)) return true;
+    if (I.Else && blockContainsBreakOrContinue(*I.Else)) return true;
+    return false;
+  }
+  case NodeKind::SwitchStmt: {
+    auto &S = static_cast<const SwitchStmt &>(St);
+    for (auto &C : S.Cases)
+      if (C.Body && blockContainsBreakOrContinue(*C.Body)) return true;
+    return false;
+  }
+  case NodeKind::TryStmt: {
+    auto &T = static_cast<const TryStmt &>(St);
+    if (T.TryBody && blockContainsBreakOrContinue(*T.TryBody)) return true;
+    if (T.CatchBody && blockContainsBreakOrContinue(*T.CatchBody)) return true;
+    return false;
+  }
+  /* for/while establish their OWN break/continue scope — nested break
+   * inside a sub-loop binds to that sub-loop, not the outer one. So we
+   * don't recurse into their bodies. */
+  case NodeKind::ForStmt:
+  case NodeKind::WhileStmt:
+    return false;
+  default:
+    return false;
+  }
+}
+
+bool Lowerer::blockContainsBreakOrContinue(const ::matlab::Block &Blk) {
+  for (const Stmt *S : Blk.Stmts)
+    if (S && stmtContainsBreakOrContinue(*S)) return true;
+  return false;
+}
+
+void Lowerer::lowerLoopBody(const ::matlab::Block &Blk) {
+  /* Walk statements. After any stmt that might have broken/continued,
+   * wrap the remainder in scf.if(!did_break && !did_continue) { ... }.
+   * The flags are stored in the top-of-stack LoopCtx. */
+  auto I1 = mlir::IntegerType::get(&MCtx, 1);
+  auto wrap = [&](size_t Start) {
+    if (LoopStack.empty()) {
+      for (size_t j = Start; j < Blk.Stmts.size(); ++j)
+        if (Blk.Stmts[j]) lowerStmt(*Blk.Stmts[j]);
+      return;
+    }
+    auto &Ctx = LoopStack.back();
+    mlir::Location L = loc(Blk.Range);
+    mlir::Value BV = emitLoad(Ctx.BreakSlot, I1, L);
+    mlir::Value CV = emitLoad(Ctx.ContinueSlot, I1, L);
+    mlir::Value True = mlir::arith::ConstantOp::create(
+        B, L, I1, mlir::IntegerAttr::get(I1, 1));
+    mlir::Value NotBr = mlir::arith::XOrIOp::create(B, L, BV, True);
+    mlir::Value NotCt = mlir::arith::XOrIOp::create(B, L, CV, True);
+    mlir::Value Cond = mlir::arith::AndIOp::create(B, L, NotBr, NotCt);
+    auto IfOp = mlir::scf::IfOp::create(B, L, mlir::TypeRange{}, Cond,
+                                         /*withElseRegion=*/false);
+    mlir::OpBuilder::InsertionGuard G(B);
+    /* Insert before scf.yield so cloned ops don't land after the
+     * terminator. IfOp auto-creates an empty then block with a
+     * scf.yield terminator. */
+    B.setInsertionPoint(IfOp.thenBlock()->getTerminator());
+    /* Recurse so nested risky stmts in the tail get the same treatment. */
+    matlab::Block Sub;
+    Sub.Range = Blk.Range;
+    for (size_t j = Start; j < Blk.Stmts.size(); ++j)
+      Sub.Stmts.push_back(Blk.Stmts[j]);
+    lowerLoopBody(Sub);
+  };
+  for (size_t i = 0; i < Blk.Stmts.size(); ++i) {
+    const Stmt *S = Blk.Stmts[i];
+    if (!S) continue;
+    lowerStmt(*S);
+    if (stmtContainsBreakOrContinue(*S) && i + 1 < Blk.Stmts.size()) {
+      wrap(i + 1);
+      return;
+    }
+  }
 }
 
 void Lowerer::lowerStmt(const Stmt &St) {
@@ -706,9 +836,31 @@ void Lowerer::lowerStmt(const Stmt &St) {
     // Save the outer insertion point *before* createBlock moves it.
     mlir::OpBuilder::InsertionGuard G(B);
 
+    /* If the body has break/continue, pre-allocate the flag slots here
+     * so they're visible to LowerSeqLoops as matlab.for's second
+     * operand (did_break). We emit them BEFORE the matlab.for op. */
+    bool ForHasBC = !F.IsParfor && F.Body &&
+                    blockContainsBreakOrContinue(*F.Body);
+    mlir::Value BSlotF, CSlotF;
+    if (ForHasBC) {
+      auto I1 = mlir::IntegerType::get(&MCtx, 1);
+      mlir::NamedAttribute NB(mlir::StringAttr::get(&MCtx, "name"),
+          mlir::FlatSymbolRefAttr::get(&MCtx, "__did_break"));
+      BSlotF = emitUnreg("matlab.alloc", {}, I1, loc(F.Range), {NB});
+      mlir::NamedAttribute NC(mlir::StringAttr::get(&MCtx, "name"),
+          mlir::FlatSymbolRefAttr::get(&MCtx, "__did_continue"));
+      CSlotF = emitUnreg("matlab.alloc", {}, I1, loc(F.Range), {NC});
+      mlir::Value FalseV = mlir::arith::ConstantOp::create(
+          B, loc(F.Range), I1, mlir::IntegerAttr::get(I1, 0));
+      emitStore(FalseV, BSlotF, loc(F.Range));
+      emitStore(FalseV, CSlotF, loc(F.Range));
+    }
+    llvm::SmallVector<mlir::Value, 2> ForOperands;
+    ForOperands.push_back(Iter);
+    if (ForHasBC) ForOperands.push_back(BSlotF);
     mlir::Operation *ForOp = emitUnregOp(
         F.IsParfor ? "matlab.parfor" : "matlab.for",
-        {Iter}, {}, loc(F.Range), {VarAttr}, /*NumRegions=*/1);
+        ForOperands, {}, loc(F.Range), {VarAttr}, /*NumRegions=*/1);
     auto &Region = ForOp->getRegion(0);
     mlir::Block *Body = B.createBlock(&Region, Region.end(), {ElemTy}, {loc(F.Range)});
 
@@ -729,13 +881,42 @@ void Lowerer::lowerStmt(const Stmt &St) {
       B.setInsertionPointToEnd(Body);
       emitStore(Body->getArgument(0), Slot, loc(F.Range));
     }
-    if (F.Body) lowerBlock(*F.Body);
+    if (ForHasBC) {
+      auto I1 = mlir::IntegerType::get(&MCtx, 1);
+      B.setInsertionPointToEnd(Body);
+      LoopStack.push_back({BSlotF, CSlotF});
+      lowerLoopBody(*F.Body);
+      /* Reset did_continue at the end of each iteration. */
+      mlir::Value FalseR = mlir::arith::ConstantOp::create(
+          B, loc(F.Range), I1, mlir::IntegerAttr::get(I1, 0));
+      emitStore(FalseR, CSlotF, loc(F.Range));
+      LoopStack.pop_back();
+    } else if (F.Body) {
+      lowerBlock(*F.Body);
+    }
     emitUnregOp("matlab.yield", {}, {}, loc(F.Range));
     return;
   }
   case NodeKind::WhileStmt: {
     auto &W = static_cast<const WhileStmt &>(St);
     mlir::OpBuilder::InsertionGuard G(B);
+
+    bool HasBC = W.Body && blockContainsBreakOrContinue(*W.Body);
+    auto I1 = mlir::IntegerType::get(&MCtx, 1);
+    mlir::Value BSlot, CSlot;
+    if (HasBC) {
+      /* Allocate the flags in the surrounding scope, before the while. */
+      mlir::NamedAttribute NB(mlir::StringAttr::get(&MCtx, "name"),
+          mlir::FlatSymbolRefAttr::get(&MCtx, "__did_break"));
+      BSlot = emitUnreg("matlab.alloc", {}, I1, loc(W.Range), {NB});
+      mlir::NamedAttribute NC(mlir::StringAttr::get(&MCtx, "name"),
+          mlir::FlatSymbolRefAttr::get(&MCtx, "__did_continue"));
+      CSlot = emitUnreg("matlab.alloc", {}, I1, loc(W.Range), {NC});
+      mlir::Value FalseV = mlir::arith::ConstantOp::create(
+          B, loc(W.Range), I1, mlir::IntegerAttr::get(I1, 0));
+      emitStore(FalseV, BSlot, loc(W.Range));
+      emitStore(FalseV, CSlot, loc(W.Range));
+    }
 
     // matlab.while has two regions: cond (yields i1) and body.
     mlir::Operation *Op = emitUnregOp("matlab.while", {}, {}, loc(W.Range), {},
@@ -750,10 +931,28 @@ void Lowerer::lowerStmt(const Stmt &St) {
         ? lowerExpr(*W.Cond)
         : emitUnreg("matlab.const_logical", {},
                     mlir::IntegerType::get(&MCtx, 1), loc(W.Range));
+    if (HasBC) {
+      /* cond = orig && !did_break */
+      mlir::Value BV = emitLoad(BSlot, I1, loc(W.Range));
+      mlir::Value True = mlir::arith::ConstantOp::create(
+          B, loc(W.Range), I1, mlir::IntegerAttr::get(I1, 1));
+      mlir::Value NotBr = mlir::arith::XOrIOp::create(B, loc(W.Range), BV, True);
+      C = mlir::arith::AndIOp::create(B, loc(W.Range), C, NotBr);
+    }
     emitUnregOp("matlab.yield", {C}, {}, loc(W.Range));
 
     B.setInsertionPointToEnd(Body);
-    if (W.Body) lowerBlock(*W.Body);
+    if (HasBC) {
+      LoopStack.push_back({BSlot, CSlot});
+      if (W.Body) lowerLoopBody(*W.Body);
+      /* Reset did_continue for the next iteration. */
+      mlir::Value FalseR = mlir::arith::ConstantOp::create(
+          B, loc(W.Range), I1, mlir::IntegerAttr::get(I1, 0));
+      emitStore(FalseR, CSlot, loc(W.Range));
+      LoopStack.pop_back();
+    } else if (W.Body) {
+      lowerBlock(*W.Body);
+    }
     emitUnregOp("matlab.yield", {}, {}, loc(W.Range));
     return;
   }
@@ -794,10 +993,24 @@ void Lowerer::lowerStmt(const Stmt &St) {
     mlir::func::ReturnOp::create(B, loc(St.Range));
     return;
   case NodeKind::BreakStmt:
-    emitUnregOp("matlab.break", {}, {}, loc(St.Range));
+    if (!LoopStack.empty()) {
+      auto I1 = mlir::IntegerType::get(&MCtx, 1);
+      mlir::Value True = mlir::arith::ConstantOp::create(
+          B, loc(St.Range), I1, mlir::IntegerAttr::get(I1, 1));
+      emitStore(True, LoopStack.back().BreakSlot, loc(St.Range));
+    } else {
+      emitUnregOp("matlab.break", {}, {}, loc(St.Range));
+    }
     return;
   case NodeKind::ContinueStmt:
-    emitUnregOp("matlab.continue", {}, {}, loc(St.Range));
+    if (!LoopStack.empty()) {
+      auto I1 = mlir::IntegerType::get(&MCtx, 1);
+      mlir::Value True = mlir::arith::ConstantOp::create(
+          B, loc(St.Range), I1, mlir::IntegerAttr::get(I1, 1));
+      emitStore(True, LoopStack.back().ContinueSlot, loc(St.Range));
+    } else {
+      emitUnregOp("matlab.continue", {}, {}, loc(St.Range));
+    }
     return;
   case NodeKind::GlobalDecl:
   case NodeKind::PersistentDecl:

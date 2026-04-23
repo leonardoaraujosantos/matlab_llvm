@@ -36,6 +36,7 @@ void Resolver::registerBuiltins() {
     "struct", "cell", "fieldnames",
     "svd", "eig", "inv", "pinv", "det", "rank",
     "arrayfun", "cellfun",
+    "nargin", "nargout", "varargin", "varargout",
   }) {
     registerBuiltin(N);
   }

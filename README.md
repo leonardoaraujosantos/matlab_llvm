@@ -294,7 +294,7 @@ threads deterministically prints 55.
 | `if / elseif / else` | ✅ | ✅ | ✅ (`scf.if` chain) | ✅ |
 | `for i = 1:n` (sequential) | ✅ | ✅ | ✅ `matlab.for` → `scf.while` over f64 counter; supports step + negative step | — |
 | `while` (sequential) | ✅ | ✅ | ✅ `matlab.while` → `scf.while` | — |
-| `break` / `continue` | ✅ (parsed) | ✅ | ❌ not lowered — loops must exit by condition | — |
+| `break` / `continue` | ✅ | ✅ | ✅ did_break/did_continue i1 flags + scf.if tail wrap inside loops | — |
 | `switch / case / otherwise` | ✅ | ✅ | ✅ (lowers to if-chain) | ✅ |
 | `return` | ✅ | ✅ | ✅ | ✅ |
 | `function y = f(x)` definitions (incl. multi-return) | ✅ | ✅ | ✅ | ✅ |
@@ -394,7 +394,7 @@ chapters. Here's how this compiler maps to it.
 |---|:-:|
 | `if / elseif / else` | ✅ |
 | `switch / case / otherwise` | ✅ |
-| `for / while / continue / break` | ✅ sequential `for`/`while` lower to `scf.while` (supports step + negative step); `parfor` runs on pthreads; `break`/`continue` not yet lowered |
+| `for / while / continue / break` | ✅ sequential `for`/`while` lower to `scf.while` (supports step + negative step); `break` / `continue` via did_break / did_continue i1 flags + scf.if tail-wrapping; `parfor` runs on pthreads |
 | `return` | ✅ |
 | Vectorization | ✅ whole-matrix ops execute; codegen still doesn't auto-vectorize loops |
 | Preallocation (`zeros(n,n)`) | ✅ runtime allocates and zeros |
@@ -622,10 +622,11 @@ justfile           task runner: build / test / compile / mlir / examples / ...
 
 ## Roadmap, ordered by what unblocks the most programs
 
-1. **`break` / `continue`** — parsed as `matlab.break` / `matlab.continue`
-   but not yet lowered. Sequential `for`/`while` bodies have to exit by
-   condition today. Needs an scf.while exit-on-condition extension or a
-   CFG lowering with explicit jump blocks.
+1. **Per-call-site `nargin` / `nargout`** — today both are compile-time
+   constants derived from the function's declared arities. Call-site
+   introspection (different arities across call sites) would need LHS-
+   threaded monomorphisation similar to the existing per-signature
+   clones.
 2. **Structs with runtime layout** — `s.x = …` parses and typechecks
    but the field-access lowering is still a placeholder. A boxed
    `{ field_name_table, value_ptr_table }` descriptor unblocks
