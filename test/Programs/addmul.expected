@@ -1,5 +1,5 @@
 module {
-  func.func @addmul(%arg0: none, %arg1: none, %arg2: none) -> none {
+  func.func @addmul(%arg0: none {matlab.name = "a"}, %arg1: none {matlab.name = "b"}, %arg2: none {matlab.name = "c"}) -> none {
     %0 = "matlab.add"(%arg0, %arg1) : (none, none) -> none
     %1 = "matlab.matmul"(%0, %arg2) : (none, none) -> none
     return %1 : none

@@ -146,6 +146,18 @@ LogicalResult rewriteDispCall(Operation *Call, OpBuilder &B,
     return success();
   }
 
+  // Integer / logical scalar: MATLAB's disp prints a `logical` (i1) or any
+  // int as a plain 0 / 1 / numeric value, same as a double would look.
+  // Widen to f64 via arith.sitofp and dispatch to matlab_disp_f64.
+  if (auto IT = mlir::dyn_cast<IntegerType>(Arg.getType())) {
+    Value AsF64 = arith::SIToFPOp::create(B, Call->getLoc(), F64, Arg);
+    auto Fn = getOrInsertRuntimeFunc(B, M, "matlab_disp_f64", VoidTy, {F64});
+    LLVM::CallOp::create(B, Call->getLoc(), Fn, ValueRange{AsF64});
+    Call->erase();
+    (void)IT;
+    return success();
+  }
+
   // tensor<NxF64> (vector) / tensor<MxNxF64> (matrix) literal arguments:
   // walk the matlab.concat_* chain back to scalar defining ops, stack-alloc
   // a contiguous row-major buffer, fill it, and call the appropriate runtime

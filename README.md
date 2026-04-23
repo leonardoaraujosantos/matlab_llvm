@@ -99,7 +99,9 @@ flowchart LR
   sema --> mlir["MLIR<br/>(matlab + func + scf +<br/>arith + tensor + llvm<br/>dialects)"]
   mlir --> passes["MLIR passes<br/>(slot promotion,<br/>scalar→arith,<br/>outline parfor,<br/>lower seq loops,<br/>lower user calls,<br/>lower anon calls,<br/>lower tensor ops,<br/>lower I/O,<br/>scalar slots→alloca)"]
   passes --> llvmir["LLVM IR"]
+  passes --> csrc["C / C++ source<br/>(emitC walker)"]
   llvmir --> exe["executable<br/>(clang + matlab_runtime.c)"]
+  csrc --> exe2["executable<br/>(cc / c++ + matlab_runtime.c)"]
 ```
 
 The MIR branch is kept as a reference/diagnostic IR — all production
@@ -150,6 +152,8 @@ One CLI, many stages:
 | `-emit-mlir` | Real MLIR module (unregistered `matlab.*` + registered dialects) |
 | `-emit-mlir -opt` | Same, after slot-promotion + scalar-to-arith |
 | `-emit-llvm` | LLVM IR text |
+| `-emit-c` | Self-contained C source (links with `runtime/matlab_runtime.c`) |
+| `-emit-cpp` | Self-contained C++ source (same runtime via `extern "C"`) |
 
 To compile and run a program:
 
@@ -164,6 +168,33 @@ Or manually:
 build/matlabc -emit-llvm foo.m > foo.ll
 clang foo.ll runtime/matlab_runtime.c -o foo
 ```
+
+Or via the C/C++ emission path (no LLVM toolchain required at compile
+time — just a C compiler and `runtime/matlab_runtime.c`):
+
+```bash
+build/matlabc -emit-c foo.m > foo.c
+cc foo.c runtime/matlab_runtime.c -o foo -lm -lpthread
+
+build/matlabc -emit-cpp foo.m > foo.cpp
+c++ -x c++ foo.cpp -x c runtime/matlab_runtime.c -o foo -lm -lpthread
+```
+
+The `just` equivalents build the artefact in one step:
+
+```bash
+just compile-c   examples/matrix_mult.m    # -> ./matrix_mult
+just compile-cpp examples/matrix_mult.m    # -> ./matrix_mult
+```
+
+Both emitters produce code that matches the LLVM path's stdout byte-for-byte
+on all 95 `test/Run/*.m` programs and all 12 `examples/*.m` programs
+(see `just test-emitc`).
+
+A deeper write-up of the C/C++ backend — what it emits for each op,
+the runtime ABI bridge, and the Option A vs Option B design discussion
+from when the branch was created — lives at
+[`docs/emit_c_cpp.md`](docs/emit_c_cpp.md).
 
 A gallery of small programs that exercise different corners of the
 language lives in [`examples/`](examples/). Every file there is expected
@@ -208,6 +239,7 @@ flowchart TD
       LIO[LowerIO]
       LSS[LowerScalarSlots]
       LTL[LowerToLLVMIR]
+      EMC[EmitC]
     end
     Context --> Lowering2 --> Passes
   end
@@ -222,8 +254,10 @@ flowchart TD
   Sema --> Lowering2
   TypeMap --> Lowering2
   Passes --> LLVMIR[("LLVM IR")]
+  Passes --> CSRC[("C / C++ source")]
   Shim --> Exe
   LLVMIR --> Exe[("a.out")]
+  CSRC --> Exe
 ```
 
 ## Parfor execution model
@@ -511,6 +545,15 @@ Noteworthy passes:
 - **`LowerScalarSlots`** (`LowerScalarSlots.cpp`) — post-refinement
   pass that converts surviving scalar `matlab.alloc` into `llvm.alloca`
   with matching `llvm.load`/`llvm.store`.
+- **`EmitC`** (`EmitC.cpp`) — alternative backend: walks the same
+  post-`LowerIO` module and prints self-contained C (or C++) source
+  instead of going through the LLVM dialect conversion pipeline.
+  `func.func` becomes a C function, `arith.*` / `scf.while` / `scf.if`
+  print structurally, `llvm.call` becomes a direct C call against the
+  matlab runtime (prototypes are re-declared inline with `void*` for
+  pointer params so the same file compiles under both `cc` and `c++`
+  and links via C ABI to `runtime/matlab_runtime.c`). Invoked by
+  `-emit-c` / `-emit-cpp`.
 
 ### 6. Runtime (`runtime/matlab_runtime.c`)
 
@@ -609,12 +652,19 @@ Two CTest suites, ~165 goldens total:
 | `Programs` | `-emit-mlir -opt` | 31 | Medium programs (matrix ops, loops, functions) |
 | `Errors` | `-dump-ast` | 4 | Parser/Sema diagnostics |
 | `Run` | `-emit-llvm` + link + exec | 95 | End-to-end stdout goldens — I/O, parfor, sequential for/while, `break`/`continue`, matrix math, linear algebra, SVD/eig (incl. `[V,D]`), reductions, slicing, indexed store, logical indexing, anon calls + scalar & matrix captures, `@name` + `@myFunc` handles, multi-self-recursion, polymorphic user calls, implicit display, `clear`, `global`/`persistent`, `nargin`/`nargout`, structs (incl. nested `s.a.b` + `isstruct`/`isfield`) + `s.(name)`, 1-D cells (literals + read + write), `try`/`catch` via error flag |
+| `Run (emit-c)` | `-emit-c` + `cc` + exec | 95 | Same 95 programs, emitted as C and compiled with `cc`. Output compared against the `.stdout` goldens. |
+| `Run (emit-cpp)` | `-emit-cpp` + `c++` + exec | 95 | Same 95 programs, emitted as C++ and compiled with `c++`. |
+| `Run (emit-c strict)` | `-emit-c` + `cc -Wall -Wextra -Werror` | 95 | Same 95 programs compiled with warnings-as-errors. Catches quality regressions (type confusion, implicit decls, sign mismatches) that `-w` would hide. |
+| `Run (emit-cpp strict)` | `-emit-cpp` + `c++ -Wall -Wextra -Werror` | 95 | Same, C++ lane. |
+| `EmitCFail` | `-emit-c` on IR the emitter can't handle | 1+ | Verifies the fail-fast contract: non-zero exit + expected stderr diagnostic. |
 
 ```bash
 ctest --test-dir build
 # or just:
 test/run_tests.sh build/matlabc
 test/Run/run_tests.sh build/matlabc
+MODE=c   test/Run/run_tests_emitc.sh build/matlabc
+MODE=cpp test/Run/run_tests_emitc.sh build/matlabc
 ```
 
 Set `UPDATE=1` on `run_tests.sh` to regenerate `.expected` / `.stdout`

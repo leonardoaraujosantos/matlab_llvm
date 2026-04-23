@@ -1,5 +1,5 @@
 module {
-  func.func @classify(%arg0: none) -> f64 {
+  func.func @classify(%arg0: none {matlab.name = "x"}) -> f64 {
     %cst = arith.constant 1.000000e+00 : f64
     %cst_0 = arith.constant -1.000000e+00 : f64
     %cst_1 = arith.constant 0.000000e+00 : f64

@@ -1,5 +1,5 @@
 module {
-  func.func @demo(%arg0: none) -> f64 {
+  func.func @demo(%arg0: none {matlab.name = "n"}) -> f64 {
     %0 = "matlab.alloc"() {name = "n"} : () -> none
     "matlab.store"(%arg0, %0) : (none, none) -> ()
     %1 = "matlab.alloc"() {name = "total"} : () -> f64

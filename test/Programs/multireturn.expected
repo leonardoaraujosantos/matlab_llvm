@@ -5,7 +5,7 @@ module {
     %0 = "matlab.call"(%cst, %cst_0) {callee = "sumdiff"} : (f64, f64) -> none
     return
   }
-  func.func @sumdiff(%arg0: none, %arg1: none) -> (none, none) {
+  func.func @sumdiff(%arg0: none {matlab.name = "a"}, %arg1: none {matlab.name = "b"}) -> (none, none) {
     %0 = "matlab.add"(%arg0, %arg1) : (none, none) -> none
     %1 = "matlab.sub"(%arg0, %arg1) : (none, none) -> none
     return %0, %1 : none, none

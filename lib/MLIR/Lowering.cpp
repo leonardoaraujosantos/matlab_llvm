@@ -613,6 +613,15 @@ void Lowerer::lowerFunction(const Function &F, mlir::ModuleOp M) {
   auto FnTy = mlir::FunctionType::get(&MCtx, InTys, OutTys);
   auto Fn = mlir::func::FuncOp::create(loc(F.Range),
                                        std::string(F.Name), FnTy);
+  // Attach the MATLAB parameter name to each func arg as a discardable
+  // attribute so downstream backends (EmitC) can print readable
+  // signatures like `fact(double n)` instead of `fact(double v15)`.
+  for (size_t i = 0; i < F.ParamRefs.size(); ++i) {
+    Binding *Bnd = F.ParamRefs[i];
+    if (!Bnd || Bnd->Name.empty()) continue;
+    Fn.setArgAttr(i, mlir::StringAttr::get(&MCtx, "matlab.name"),
+                  mlir::StringAttr::get(&MCtx, Bnd->Name));
+  }
   B.insert(Fn);
 
   auto *Entry = Fn.addEntryBlock();
@@ -1053,26 +1062,33 @@ void Lowerer::lowerStmt(const Stmt &St) {
     mlir::Value Disc = Sw.Discriminant
         ? lowerExpr(*Sw.Discriminant)
         : emitUnreg("matlab.undef", {}, mirTy(TC.any()), loc(Sw.Range));
-    bool HasOtherwise = false;
+    // Lower as a chain of nested scf.if:
+    //   if (disc == v1) { body1 }
+    //   else if (disc == v2) { body2 }
+    //   else { otherwise_body }
+    // Each subsequent case goes into the ELSE region of the previous if.
+    // Without this nesting cases run independently (so case 2 fires even
+    // after case 1 matched, and `otherwise` runs unconditionally).
+    const ::matlab::Block *OtherwiseBody = nullptr;
+    llvm::SmallVector<const ::matlab::SwitchCase *, 8> ValueCases;
     for (auto &C : Sw.Cases) {
-      if (!C.Value) { HasOtherwise = true; continue; }
-      mlir::Value V = lowerExpr(*C.Value);
+      if (!C.Value) OtherwiseBody = C.Body;
+      else ValueCases.push_back(&C);
+    }
+    mlir::OpBuilder::InsertionGuard OuterGuard(B);
+    for (auto *C : ValueCases) {
+      mlir::Value V = lowerExpr(*C->Value);
       mlir::Value Cond = emitUnreg("matlab.eq", {Disc, V},
                                    mlir::IntegerType::get(&MCtx, 1),
                                    loc(Sw.Range));
-      mlir::OpBuilder::InsertionGuard G(B);
       auto IfOp = mlir::scf::IfOp::create(B, loc(Sw.Range), mlir::TypeRange{},
                                           Cond, /*withElseRegion=*/true);
       B.setInsertionPoint(IfOp.getThenRegion().front().getTerminator());
-      if (C.Body) lowerBlock(*C.Body);
+      if (C->Body) lowerBlock(*C->Body);
+      // Descend into the else region for any remaining cases / otherwise.
+      B.setInsertionPoint(IfOp.getElseRegion().front().getTerminator());
     }
-    if (HasOtherwise) {
-      for (auto &C : Sw.Cases) {
-        if (C.Value) continue;
-        if (C.Body) lowerBlock(*C.Body);
-        break;
-      }
-    }
+    if (OtherwiseBody) lowerBlock(*OtherwiseBody);
     (void)Disc;
     return;
   }
@@ -1743,8 +1759,9 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
 mlir::ModuleOp lowerToMLIR(Context &Ctx,
                            TypeContext &TC,
                            DiagnosticEngine &Diag,
-                           const TranslationUnit &TU) {
-  Lowerer L(Ctx.get(), TC, Diag);
+                           const TranslationUnit &TU,
+                           const SourceManager *SM) {
+  Lowerer L(Ctx.get(), TC, Diag, SM);
   return L.lower(TU);
 }
 

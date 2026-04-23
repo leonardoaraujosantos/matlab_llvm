@@ -113,5 +113,14 @@ unsigned runOutlineParfor(mlir::ModuleOp M);
 /// LLVM IR textual module. Returns empty string on failure.
 std::string lowerToLLVMIR(mlir::ModuleOp M);
 
+/// Emit a self-contained C (or C++ when Cpp==true) source that reproduces
+/// the semantics of the MLIR module. Expects the module to have been driven
+/// through the same pipeline as -emit-llvm up to and including runLowerIO
+/// (i.e. every matlab.* op has been replaced by arith / scf / func / llvm.*
+/// ops and llvm.call sites against the matlab_* C runtime). The emitted
+/// source is intended to be compiled and linked against runtime/matlab_runtime.c.
+/// Returns empty string on failure.
+std::string emitC(mlir::ModuleOp M, bool Cpp);
+
 } // namespace mlirgen
 } // namespace matlab
