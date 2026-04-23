@@ -326,6 +326,9 @@ public:
   Expr *Iter = nullptr;
   Block *Body = nullptr;
   bool IsParfor = false;
+  /* Populated by the Resolver so the lowerer can pre-allocate the
+   * loop-var slot before emitting the induction-variable store. */
+  Binding *VarRef = nullptr;
   ForStmt() : Stmt(NodeKind::ForStmt) {}
 };
 

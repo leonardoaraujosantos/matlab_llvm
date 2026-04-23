@@ -586,14 +586,21 @@ void Lowerer::lowerStmt(const Stmt &St) {
     auto &Region = ForOp->getRegion(0);
     mlir::Block *Body = B.createBlock(&Region, Region.end(), {ElemTy}, {loc(F.Range)});
 
-    // Find Sema binding for F.Var and store the induction variable into it.
-    Binding *VarBind = nullptr;
-    for (auto &[Bnd, _] : Slots)
-      if (Bnd->Name == F.Var) { VarBind = Bnd; break; }
+    /* Find Sema binding for F.Var. First-time references to the loop
+     * variable happen INSIDE the body (via NameExpr) and would otherwise
+     * allocate the slot lazily at read time — too late for our induction-
+     * store. Resolve F.VarRef (populated by the Resolver) and
+     * pre-allocate the slot before emitting the store. */
+    Binding *VarBind = F.VarRef;
+    if (!VarBind)
+      for (auto &[Bnd, _] : Slots)
+        if (Bnd->Name == F.Var) { VarBind = Bnd; break; }
 
     B.setInsertionPointToEnd(Body);
     if (VarBind) {
-      mlir::Value Slot = Slots[VarBind];
+      mlir::Value Slot = getOrCreateSlot(VarBind, TC.scalar(Dtype::Double),
+                                         VarBind->Name, loc(F.Range));
+      B.setInsertionPointToEnd(Body);
       emitStore(Body->getArgument(0), Slot, loc(F.Range));
     }
     if (F.Body) lowerBlock(*F.Body);

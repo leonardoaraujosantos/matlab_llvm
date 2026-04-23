@@ -159,6 +159,12 @@ int main(int Argc, char **Argv) {
         // direct block argument (f64) into disp/fprintf rather than via an
         // outer slot that would still be `none`-typed at LowerIO time.
         mlirgen::runOutlineParfor(M);
+        // Lower sequential matlab.for / matlab.while into scf.while so
+        // the MLIR conversion pipeline can finish translation. Must run
+        // before LowerTensorOps (which would erase the matlab.range
+        // producer the for-lowering relies on) and after OutlineParfor
+        // (which consumes matlab.parfor).
+        mlirgen::runLowerSeqLoops(M);
         // Outline anonymous-function bodies into llvm.funcs so their
         // handles become plain function pointers and call_indirect sites
         // collapse to direct llvm.calls.

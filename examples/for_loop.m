@@ -1,15 +1,28 @@
-% Sequential for-loops aren't lowered end-to-end yet (only parfor is),
-% so we demonstrate loop-style work by expressing it with matrix ops
-% that the compiler already knows how to run in parallel.
-%
-% sum(1..10) — the scalar accumulator version would be:
-%     total = 0; for i = 1:10; total = total + i; end
-% but the vectorised form produces the same answer without a loop:
+% Classic for-loop accumulator: sum of 1..10.
+total = 0;
+for i = 1:10
+    total = total + i;
+end
 disp('sum(1..10) =');
-disp(sum(1:10));
+disp(total);
 
-% A 3x3 multiplication table built without a nested for-loop.
-% (1:3)' is a column, (1:3) is a row; outer product = multiplication
-% table.
+% Nested loop: fill a 3x3 multiplication table.
+T = zeros(3, 3);
+for i = 1:3
+    for j = 1:3
+        T(i, j) = i * j;
+    end
+end
 disp('3x3 multiplication table:');
-disp((1:3)' * (1:3));
+disp(T);
+
+% Non-unit and negative step.
+disp('2:2:10 =');
+for k = 2:2:10
+    disp(k);
+end
+
+disp('countdown 5..1:');
+for k = 5:-1:1
+    disp(k);
+end

@@ -133,7 +133,10 @@ void Resolver::collectAssignmentsInStmt(Stmt &S, Scope *FnScope) {
     auto &F = static_cast<ForStmt &>(S);
     if (!F.Var.empty()) {
       Binding *B = Sema.newBinding();
-      FnScope->getOrDeclareVar(F.Var, B);
+      /* A prior for-loop with the same variable name reuses its
+       * binding; keep VarRef pointing at the real one so the lowerer's
+       * slot lookup returns the shared slot. */
+      F.VarRef = FnScope->getOrDeclareVar(F.Var, B);
     }
     if (F.Body) collectAssignmentsInBlock(*F.Body, FnScope);
     break;

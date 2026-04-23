@@ -78,6 +78,12 @@ bool runLowerAnonCalls(mlir::ModuleOp M);
 /// unregistered ops that don't type-check) would error at verify time.
 bool runLowerUserCalls(mlir::ModuleOp M);
 
+/// Lowers sequential matlab.for (over a matlab.range) and matlab.while
+/// into scf.while constructs so the MLIR conversion pipeline can finish
+/// translation down to LLVM IR. Must run before LowerTensorOps (which
+/// otherwise erases matlab.range) and after OutlineParfor.
+bool runLowerSeqLoops(mlir::ModuleOp M);
+
 /// Outlines each matlab.parfor body into a private func.func and replaces
 /// the parfor op with an llvm.call to matlab_parfor_dispatch, which spawns
 /// one pthread per iteration. v1 supports bodies that only reference the

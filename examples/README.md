@@ -17,7 +17,8 @@ just compile examples/<name>.m /tmp/<name> && /tmp/<name>
 | `eigendecomp.m`   | `eig`, `det`, `inv` on a symmetric tridiagonal                   |
 | `logical_mask.m`  | Logical indexing `A(A > 0)`, `mean`, `sum`-of-logical            |
 | `stats.m`         | `numel`, `sum`, `mean`, `min`, `max`, `sqrt` of `sum(x.*x)`      |
-| `for_loop.m`      | Vectorised substitutes for loops (outer product, `sum`)          |
+| `for_loop.m`      | Sequential `for` loops, nested + non-unit step + negative step    |
+| `fibonacci.m`     | Iterative `while` loop with loop-carried state                   |
 | `factorial.m`     | Single-recursion user function (`if/else`, `*`, `-`)             |
 | `parfor.m`        | `parfor` reductions (single/multi/step) + calls to user helpers  |
 | `func_handles.m`  | `@sin` / `@sqrt` / `@abs` / `@exp` handles via indirect call     |
@@ -25,11 +26,12 @@ just compile examples/<name>.m /tmp/<name> && /tmp/<name>
 
 ## Current limitations the examples work around
 
-- Sequential `for` / `while` lowering isn't wired to LLVM yet (only
-  `parfor` is), so `for_loop.m` uses vectorised equivalents.
+- `break` and `continue` are parsed but not lowered to LLVM yet, so the
+  examples avoid early-exit patterns.
 - `fprintf` with `%f`/`%d` against a computed scalar whose Sema type is
   `any` (e.g. `mean(A(:))`) falls off the fast-path today. Use `disp()`
   when printing aggregate results.
 - Two recursive self-calls in one expression (`fib(n-1) + fib(n-2)`)
-  isn't handled by `LowerUserCalls` yet, so the classic Fibonacci is
-  replaced with `factorial` above.
+  isn't handled by `LowerUserCalls` yet, so the classic recursive
+  Fibonacci is written iteratively here and `factorial.m` shows the
+  single-recursion path.

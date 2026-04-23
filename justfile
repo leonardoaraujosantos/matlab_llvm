@@ -45,7 +45,7 @@ test-run: build
 # Regenerate all golden `.expected` / `.stdout` files. Use after an
 # intentional output change.
 update-goldens: build
-    UPDATE=1 ./test/run_tests.sh {{BUILD_DIR}}/matlabc
+    UPDATE=1 ./test/run_tests.sh $(pwd)/{{BUILD_DIR}}/matlabc
 
 # Build a standalone executable from a .m file using the runtime shim.
 # Example: `just compile examples/hello.m` produces ./hello.

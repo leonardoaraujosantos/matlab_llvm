@@ -264,8 +264,9 @@ threads deterministically prints 55.
 | Singular values `svd(A)` | ✅ | ✅ | ✅ (one-sided Jacobi, pure C) | ✅ |
 | Eigenvalues `eig(A)` | ✅ | ✅ | ✅ (Jacobi; symmetric only — see docs) | ✅ |
 | `if / elseif / else` | ✅ | ✅ | ✅ (`scf.if` chain) | ✅ |
-| `for i = 1:n` (sequential) | ✅ | ✅ | ⚠️ emits `matlab.for`; no lowering to LLVM yet — use `parfor` or vectorise | — |
-| `while` (sequential) | ✅ | ✅ | ⚠️ emits `matlab.while`; no lowering to LLVM yet | — |
+| `for i = 1:n` (sequential) | ✅ | ✅ | ✅ `matlab.for` → `scf.while` over f64 counter; supports step + negative step | — |
+| `while` (sequential) | ✅ | ✅ | ✅ `matlab.while` → `scf.while` | — |
+| `break` / `continue` | ✅ (parsed) | ✅ | ❌ not lowered — loops must exit by condition | — |
 | `switch / case / otherwise` | ✅ | ✅ | ✅ (lowers to if-chain) | ✅ |
 | `break`, `continue`, `return` | ✅ | ✅ | ✅ | ✅ |
 | `function y = f(x)` definitions (incl. multi-return) | ✅ | ✅ | ✅ | ✅ |
@@ -362,7 +363,7 @@ chapters. Here's how this compiler maps to it.
 |---|:-:|
 | `if / elseif / else` | ✅ |
 | `switch / case / otherwise` | ✅ |
-| `for / while / continue / break` | ⚠️ `parfor` runs; sequential `for`/`while` are parsed + sema'd but not yet lowered to LLVM |
+| `for / while / continue / break` | ✅ sequential `for`/`while` lower to `scf.while`; `parfor` runs on pthreads; `break`/`continue` not yet lowered |
 | `return` | ✅ |
 | Vectorization | ✅ whole-matrix ops execute; codegen still doesn't auto-vectorize loops |
 | Preallocation (`zeros(n,n)`) | ✅ runtime allocates and zeros |
@@ -581,10 +582,10 @@ justfile           task runner: build / test / compile / mlir / examples / ...
 2. **Row deletion** `A(2, :) = []` — runtime entries
    (`matlab_erase_rows`, `matlab_erase_cols`) are ready; need the
    frontend to detect the `= []` pattern and route to them.
-3. **Sequential `for` / `while` lowering** — `matlab.parfor` lowers to
-   a runtime-backed thread pool, but the sequential variants are still
-   emitted and left for a pass that never runs. Needs either an scf.for
-   conversion or a simple runtime-less unroll for constant trip counts.
+3. **`break` / `continue`** — parsed as `matlab.break` / `matlab.continue`
+   but not yet lowered. Sequential `for`/`while` bodies have to exit by
+   condition today. Needs an scf.while exit-on-condition extension or a
+   CFG lowering with explicit jump blocks.
 4. **Non-scalar anon captures** — today scalar (f64) captures work by
    spilling the value at @-time and threading it through call_indirect
    as a leading argument. Matrix captures would need pointer captures
