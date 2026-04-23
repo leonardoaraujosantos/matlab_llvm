@@ -69,7 +69,7 @@ out of scope.
 | Script-mode top-level (no leading `function`) | ✅ | |
 | Command syntax (`clear x`) | ✅ | Parser-level sugar to `clear('x')` |
 | `import` statement | 🟡 | Parses, not executed |
-| `classdef` / OOP | 🟡 | Minimum: single class per file, `properties` + `methods`, constructor, dot-method dispatch, property get/set via `matlab_obj` runtime. No inheritance / attributes / validation / operator overloading / events yet. |
+| `classdef` / OOP | 🟡 | `properties` + `methods`, constructor, inheritance (`< Parent`), static methods, operator overloading (`plus`, `minus`, `mtimes`, `eq`, etc.), `Dependent` properties with `get.Prop` / `set.Prop`, `enumeration` blocks. Missing: value-class copy semantics (all objects handle-shaped), events / listeners, property validators (parsed but not enforced), `handle` destructors. |
 | `spmd` | ❌ | |
 
 ---
@@ -190,7 +190,7 @@ out of scope.
 | `sprintf` | 🟡 | Registered; runtime entry missing |
 | `input` (numeric) | ✅ |
 | `error`, `warning` with message text | ✅ |
-| File I/O: `fopen`, `fclose`, `fprintf(fid, ...)`, `fgetl`, `feof` | 🟡 | Minimum set wired; `fread`, `fwrite`, `load`, `save` still ❌ |
+| File I/O: `fopen`, `fclose`, `fprintf(fid, ...)`, `fgetl`, `feof`, `fread`, `fwrite`, `save`, `load` | 🟡 | Text + binary single-matrix round-trip work. `save`/`load` use a custom `MLB1` header format, **not** MATLAB's `.mat` format. |
 | `readtable`, `writetable`, `readmatrix`, `xlsread` | ❌ |
 
 ### Control / system

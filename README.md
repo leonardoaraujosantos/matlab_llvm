@@ -164,9 +164,11 @@ handles (`@sin`, `@myFunc`, `@(x) x+k`); structs (nested fields,
 dynamic `s.(name)`, `isstruct` / `isfield` / `rmfield`); 1-D cell
 arrays; real string type (`"..."`, `+`, `disp`, `strlen`,
 `isstring`); `global` / `persistent`; error flag + `catch ME;
-ME.message`; implicit display; command syntax; minimum `classdef`
-(handle-shaped objects, `properties`, `methods`, constructor with
-`nargin`, property read/write, dot-method dispatch).
+ME.message`; implicit display; command syntax; `classdef` with
+inheritance, static methods, operator overloading (`plus`, `minus`,
+`mtimes`, `eq`, etc.), `Dependent` properties with `get.Prop` /
+`set.Prop` methods, property attribute syntax (parsed; only
+`Dependent` changes behavior), `enumeration` blocks.
 
 Runtime built-ins include: linear algebra (`*`, `\`, `/`, `inv`,
 `det`, `svd`-values, `eig` for symmetric matrices); constructors
@@ -175,13 +177,18 @@ ops (`transpose`, `diag`, `reshape`, `repmat`); reductions (`sum`);
 element-wise math (`exp`, `log`, `sin`, `cos`, `tan`, `sqrt`, `abs`);
 predicates (`isempty`, `isequal`, `find`); I/O (`disp`, `fprintf`
 up to 4 args, `input`, `error`, `warning`); file I/O (`fopen`,
-`fclose`, `fprintf(fid, ...)`, `fgetl`, `feof`).
+`fclose`, `fprintf(fid, ...)`, `fgetl`, `feof`, `fread`, `fwrite`,
+`save` / `load` — custom binary format, not MATLAB `.mat`).
 
-**Not yet:** `classdef` / OOP, struct arrays, 2-D cells,
-`varargout`, complex numbers, 3-D vector slicing (only scalar
-`A(i,j,k)` today), 4-D+ arrays, sparse matrices, non-symmetric
-`eig`, full `[U, S, V] = svd(A)`, `fft` family, string functions
-(`sprintf`, `regexp`, `num2str`, etc.), file I/O, REPL, debugger.
+**Not yet:** value-class copy semantics (every object is
+handle-shaped for now), events / listeners, property validators
+(`{mustBeNumeric}` parses but isn't enforced), struct arrays, 2-D
+cells, `varargout`, complex numbers, 3-D vector slicing (only
+scalar `A(i,j,k)` today), 4-D+ arrays, sparse matrices,
+non-symmetric `eig`, full `[U, S, V] = svd(A)`, `fft` family,
+string functions (`sprintf`, `regexp`, `num2str`, etc.),
+MATLAB `.mat` format (`save` / `load` use a custom binary layout
+instead), REPL, debugger.
 
 **Not planned:** plotting, Simulink, toolboxes, GPU arrays, live
 scripts (`.mlx`), MathWorks bit-exact numerics.

@@ -41,6 +41,7 @@ void Resolver::registerBuiltins() {
     "nargin", "nargout", "varargin", "varargout",
     "fopen", "fclose", "fgetl", "feof",
     "fread", "fwrite",
+    "save", "load",
   }) {
     registerBuiltin(N);
   }

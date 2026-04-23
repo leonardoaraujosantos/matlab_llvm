@@ -2124,3 +2124,55 @@ double matlab_fwrite_f64(double fd, double v) {
     pthread_mutex_unlock(&matlab_io_mutex);
     return (double)wrote;
 }
+
+/* save / load — custom binary format. NOT MATLAB .mat compatible.
+ *
+ * Layout: 4-byte magic "MLB1", int64 rows, int64 cols, rows*cols
+ * doubles. One matrix per file; no variable names, no structs, no
+ * cells. Purpose is to let scripts round-trip numeric data across
+ * runs without relying on the MathWorks-specific MAT-File v5
+ * format, which would need a dedicated parser.
+ *
+ * API diverges from MATLAB: save(path, A) takes the *value* rather
+ * than a variable-name string, because the compiler doesn't retain
+ * variable-name metadata at runtime. Likewise A = load(path)
+ * returns the matrix directly, not a struct with fieldname-per-var. */
+static const char MATLAB_SAVE_MAGIC[4] = {'M', 'L', 'B', '1'};
+
+double matlab_save_mat(matlab_string *path, matlab_mat *A) {
+    if (!path || !A) return -1.0;
+    FILE *f = fopen(path->data, "wb");
+    if (!f) return -1.0;
+    pthread_mutex_lock(&matlab_io_mutex);
+    fwrite(MATLAB_SAVE_MAGIC, 1, 4, f);
+    fwrite(&A->rows, sizeof(int64_t), 1, f);
+    fwrite(&A->cols, sizeof(int64_t), 1, f);
+    size_t n = (size_t)(A->rows * A->cols);
+    if (n > 0) fwrite(A->data, sizeof(double), n, f);
+    pthread_mutex_unlock(&matlab_io_mutex);
+    fclose(f);
+    return 0.0;
+}
+
+matlab_mat *matlab_load_mat(matlab_string *path) {
+    if (!path) return mat_alloc(0, 0);
+    FILE *f = fopen(path->data, "rb");
+    if (!f) return mat_alloc(0, 0);
+    char magic[4];
+    if (fread(magic, 1, 4, f) != 4 ||
+        memcmp(magic, MATLAB_SAVE_MAGIC, 4) != 0) {
+        fclose(f);
+        return mat_alloc(0, 0);
+    }
+    int64_t rows = 0, cols = 0;
+    if (fread(&rows, sizeof(int64_t), 1, f) != 1 ||
+        fread(&cols, sizeof(int64_t), 1, f) != 1) {
+        fclose(f);
+        return mat_alloc(0, 0);
+    }
+    matlab_mat *A = mat_alloc(rows, cols);
+    size_t n = (size_t)(rows * cols);
+    if (n > 0) fread(A->data, sizeof(double), n, f);
+    fclose(f);
+    return A;
+}

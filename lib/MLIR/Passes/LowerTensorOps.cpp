@@ -989,6 +989,40 @@ bool TensorLowering::rewriteBuiltinCalls() {
       Changed = true;
       continue;
     }
+    /* save(path, A) / load(path) — custom binary format, one matrix
+     * per file. save takes a matlab_string path and a ptr matrix;
+     * load takes a matlab_string path and returns a ptr matrix.
+     * This is NOT MATLAB .mat-compatible — see runtime comments. */
+    if (Name == "save" && Call->getNumOperands() == 2 &&
+        Call->getOperand(0).getType() == PtrTy &&
+        Call->getOperand(1).getType() == PtrTy) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt("matlab_save_mat", F64, {PtrTy, PtrTy});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                      Call->getOperands());
+      if (Call->getNumResults() == 1) {
+        if (Call->getResult(0).getType() != F64)
+          Call->getResult(0).setType(F64);
+        Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      }
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+    if (Name == "load" && Call->getNumOperands() == 1 &&
+        Call->getNumResults() == 1 &&
+        Call->getOperand(0).getType() == PtrTy) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt("matlab_load_mat", PtrTy, {PtrTy});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                      Call->getOperands());
+      if (Call->getResult(0).getType() != PtrTy)
+        Call->getResult(0).setType(PtrTy);
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
     /* fwrite(fid, A) — either matrix or scalar. Both variants return
      * the count of elements written as an f64. */
     if (Name == "fwrite" && Call->getNumOperands() == 2 &&
