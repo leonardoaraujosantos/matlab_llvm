@@ -329,12 +329,114 @@ bool rewriteMakeHandle(ModuleOp M) {
   return Changed;
 }
 
+/* Trace a call_indirect's callee operand back to a matlab.make_handle,
+ * returning the handle's callee name on success. We follow one level of
+ * matlab.load <- matlab.store <- make_handle when the handle flows
+ * through a slot (`f = @sq; f(3)`). Direct handle operands work too. */
+StringRef traceHandleCallee(Value Callee) {
+  Operation *Def = Callee.getDefiningOp();
+  if (!Def) return {};
+  if (isMatlabOp(Def, "matlab.make_handle")) {
+    if (auto A = Def->getAttrOfType<StringAttr>("callee"))
+      return A.getValue();
+    return {};
+  }
+  if (isMatlabOp(Def, "matlab.load") && Def->getNumOperands() == 1) {
+    Value Slot = Def->getOperand(0);
+    StringRef Found;
+    for (OpOperand &Use : Slot.getUses()) {
+      Operation *U = Use.getOwner();
+      if (!isMatlabOp(U, "matlab.store")) continue;
+      if (U->getNumOperands() != 2 || U->getOperand(1) != Slot) continue;
+      Operation *SrcDef = U->getOperand(0).getDefiningOp();
+      if (!isMatlabOp(SrcDef, "matlab.make_handle")) return {};
+      auto A = SrcDef->getAttrOfType<StringAttr>("callee");
+      if (!A) return {};
+      if (Found.empty()) Found = A.getValue();
+      else if (Found != A.getValue()) return {};
+    }
+    return Found;
+  }
+  return {};
+}
+
+/* Rewrite matlab.call_indirect through a handle whose callee resolves
+ * to a func.func in the module as a direct matlab.call. This runs
+ * BEFORE the LowerUserCalls/LowerScalarsToArith fixpoint so the
+ * emitted matlab.call picks up type refinement the same way as a
+ * syntactic `sq(3)`. */
+bool rewriteUserCallIndirect(ModuleOp M) {
+  SmallVector<Operation *> Calls;
+  M.walk([&](Operation *Op) {
+    if (isMatlabOp(Op, "matlab.call_indirect")) Calls.push_back(Op);
+  });
+  bool Changed = false;
+  OpBuilder B(M.getContext());
+  for (Operation *Call : Calls) {
+    if (Call->getNumOperands() < 1) continue;
+    StringRef Name = traceHandleCallee(Call->getOperand(0));
+    if (Name.empty()) continue;
+    if (!M.lookupSymbol<func::FuncOp>(Name)) continue;
+
+    B.setInsertionPoint(Call);
+    SmallVector<Value> Args(Call->operand_begin() + 1,
+                            Call->operand_end());
+    OperationState State(Call->getLoc(),
+                          OperationName("matlab.call", M.getContext()));
+    State.addOperands(Args);
+    State.addTypes(Call->getResultTypes());
+    State.addAttribute("callee", StringAttr::get(M.getContext(), Name));
+    Operation *Direct = B.create(State);
+
+    if (Call->getNumResults() >= 1 && Direct->getNumResults() >= 1)
+      Call->getResult(0).replaceAllUsesWith(Direct->getResult(0));
+    Call->erase();
+    Changed = true;
+  }
+
+  /* Clean up orphaned make_handle/slot/load/store chains whose calls we
+   * just replaced. We iterate a few rounds because erasing a load may
+   * newly orphan a store, and erasing a store may newly orphan an
+   * alloc. */
+  for (int Round = 0; Round < 4; ++Round) {
+    SmallVector<Operation *> Dead;
+    M.walk([&](Operation *Op) {
+      if (Op->getNumResults() == 1 && Op->getResult(0).use_empty() &&
+          (isMatlabOp(Op, "matlab.make_handle") ||
+           isMatlabOp(Op, "matlab.load"))) {
+        Dead.push_back(Op);
+        return;
+      }
+      if (isMatlabOp(Op, "matlab.store") && Op->getNumOperands() == 2) {
+        /* A store is dead if its slot has no remaining load users. */
+        Value Slot = Op->getOperand(1);
+        bool HasLoad = false;
+        for (Operation *U : Slot.getUsers())
+          if (isMatlabOp(U, "matlab.load")) { HasLoad = true; break; }
+        if (!HasLoad) Dead.push_back(Op);
+      }
+      if (isMatlabOp(Op, "matlab.alloc") && Op->getNumResults() == 1 &&
+          Op->getResult(0).use_empty())
+        Dead.push_back(Op);
+    });
+    if (Dead.empty()) break;
+    for (Operation *Op : Dead) Op->erase();
+  }
+  return Changed;
+}
+
 } // namespace
 
 bool runLowerAnonCalls(ModuleOp M) {
+  /* User-function handles (`f = @sq; f(3)`) — rewrite to direct
+   * matlab.call so the LowerUserCalls fixpoint refines sq's signature
+   * the same way it handles a syntactic sq(3). Must run before the
+   * scalar-math handle rewrite so those remain addressof+llvm.call. */
+  bool Changed = rewriteUserCallIndirect(M);
+
   /* make_handle first so @sin-style handles resolve to addressof before the
    * anon outliner inspects call_indirect sites. */
-  bool Changed = rewriteMakeHandle(M);
+  Changed |= rewriteMakeHandle(M);
 
   SmallVector<Operation *> Anons;
   M.walk([&](Operation *Op) {

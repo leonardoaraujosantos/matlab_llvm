@@ -277,7 +277,7 @@ threads deterministically prints 55.
 | Anonymous functions `@(x) x^2` | ✅ | ✅ | ✅ outlined to `llvm.func` | ✅ |
 | Anon captures `k = 5; @(x) x + k` | ✅ | ✅ | ✅ by-value at @-time, scalar captures | ✅ |
 | Calls through handles `f(x)` | ✅ | ✅ | ✅ `matlab.call_indirect` → LLVM function pointer | ✅ |
-| Function handles `@name` | ✅ | ✅ | ✅ scalar math entries only (`@sin`/`@cos`/… → `matlab_*_s`) | ✅ |
+| Function handles `@name` | ✅ | ✅ | ✅ scalar math entries (`@sin`/`@cos`/…) + user functions (`@mySq`) via compile-time folding | ✅ |
 | Logical indexing `A(A > 0)` | ✅ | ✅ | ✅ (masked slice) | ✅ |
 | Empty matrix `A = []` / deallocate | ✅ | ✅ | ✅ (`matlab_empty_mat`) | ✅ |
 | Matrix comparisons `A > B`, `A == s` etc. | ✅ | ✅ | ✅ (returns 0/1 matrix) | ✅ |

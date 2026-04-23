@@ -1,11 +1,13 @@
-% Function handles with `@name` — take a pointer to a runtime scalar
-% builtin and call it through the variable. Supported callees today
-% are the scalar math functions whose signatures are (f64) -> f64:
+% Function handles with `@name` — take a pointer to a scalar math
+% builtin OR to a user-defined function and call it through the
+% variable.
+%
+% Supported builtin handles today (signature f64 -> f64):
 %   @sin  @cos  @tan  @exp  @log  @sqrt  @abs
 %
-% Anonymous functions `@(x) expr` also work as long as they don't
-% capture outer variables; see `math_anon_call.m` in test/Run/ for a
-% pure-body example.
+% User-function handles (`@mySq; f(3)`) are resolved at compile time
+% into direct calls; the handle-through-slot chain is folded away
+% before the LowerUserCalls fixpoint refines the callee's signature.
 
 f = @sin;
 disp('sin(0) via handle =');
@@ -26,3 +28,20 @@ disp(h(-42));
 k = @exp;
 disp('exp(1) =');
 disp(k(1));
+
+% User-function handles.
+p = @mySq;
+disp('mySq(6) via user-handle =');
+disp(p(6));
+
+q = @myCube;
+disp('myCube(4) =');
+disp(q(4));
+
+function y = mySq(x)
+    y = x * x;
+end
+
+function y = myCube(x)
+    y = x * x * x;
+end
