@@ -369,7 +369,7 @@ chapters. Here's how this compiler maps to it.
 | Text / character arrays | ✅ char array; ⚠️ string-type (double-quoted) partial |
 | Tables | ❌ |
 | Cell arrays | ⚠️ parsed, typed as `cell`; no runtime |
-| Structs (`s.x`, `s.(name)`) | ⚠️ parsed; field access lowers to placeholder |
+| Structs (`s.x`, `s.(name)`) | ✅ runtime-backed `matlab_struct` — scalar and matrix fields, updates, dynamic read with literal field name; nested / struct-array pending |
 | Floating-point / integer types | ✅ lattice supports all, runtime uses double |
 
 ### Chapter 3 — Mathematics
@@ -569,6 +569,16 @@ we leak).
   The frontend hands out stable slot IDs per name, so different
   functions declaring the same `global x` share storage; `persistent`
   names are namespaced per declaring function.
+- Structs: `matlab_struct_new` / `matlab_struct_set_f64` /
+  `matlab_struct_set_mat` / `matlab_struct_get_f64` /
+  `matlab_struct_get_mat` / `matlab_struct_has_field`. Parallel
+  name/kind/value tables with linear-scan lookup; scalar and matrix
+  fields can mix inside the same struct, with transparent 1×1 boxing/
+  unboxing when the read and stored kinds differ.
+- Error flag: `matlab_set_error` / `matlab_check_error` /
+  `matlab_clear_error`, a process-wide i32 that the try/catch lowering
+  checks after the try body. `error(...)` sets the flag; the catch
+  body clears it and runs.
 
 **Concurrency**
 
@@ -590,7 +600,7 @@ Two CTest suites, ~165 goldens total:
 | `Opt` | `-emit-mlir -opt` | 5 | Slot promotion + constant folding through `arith` |
 | `Programs` | `-emit-mlir -opt` | 31 | Medium programs (matrix ops, loops, functions) |
 | `Errors` | `-dump-ast` | 4 | Parser/Sema diagnostics |
-| `Run` | `-emit-llvm` + link + exec | 88 | End-to-end stdout goldens — I/O, parfor, sequential for/while, `break`/`continue`, matrix math, linear algebra, SVD/eig (incl. `[V,D]`), reductions, slicing, indexed store, logical indexing, anon calls + scalar & matrix captures, `@name` + `@myFunc` handles, multi-self-recursion, polymorphic user calls, implicit display, `clear`, `global`/`persistent`, `nargin`/`nargout` |
+| `Run` | `-emit-llvm` + link + exec | 91 | End-to-end stdout goldens — I/O, parfor, sequential for/while, `break`/`continue`, matrix math, linear algebra, SVD/eig (incl. `[V,D]`), reductions, slicing, indexed store, logical indexing, anon calls + scalar & matrix captures, `@name` + `@myFunc` handles, multi-self-recursion, polymorphic user calls, implicit display, `clear`, `global`/`persistent`, `nargin`/`nargout`, structs + `s.(name)`, `try`/`catch` via error flag |
 
 ```bash
 ctest --test-dir build
@@ -636,19 +646,19 @@ programs.
 
 ### Heterogeneous data — the biggest user-facing gap
 
-1. **Structs with runtime layout** — `s.x = …` parses and typechecks
-   but the field-access lowering is still a placeholder. Needs a
-   boxed `{ field_name_table, value_ptr_table }` descriptor so
-   `s.field` reads/writes, nested structs, and struct arrays work.
-2. **Dynamic field access `s.(name)`** — depends on structs; once the
-   descriptor exists, a runtime-key lookup falls out.
-3. **Cells `{…}` / `C{i,j}`** — parsed, typed as `cell`, no runtime.
+1. **Nested structs and struct arrays** — scalar `s.x`, `s.x = v`,
+   field update, `s.(name)` with a literal name, and matrix-valued
+   fields all execute today. Missing: nested (`s.inner.x`), struct
+   arrays (`s(1).x`, `s(2).x`), `fieldnames(s)`, `rmfield(s, 'x')`,
+   `isstruct`, and runtime-varying `s.(expr)` where `expr` isn't a
+   literal.
+2. **Cells `{…}` / `C{i,j}`** — parsed, typed as `cell`, no runtime.
    Needs a tagged-value container (`matlab_cell` with per-slot dtype
    tag) so heterogeneous collections work.
-4. **`varargin` / `varargout`** — depends on cells. Once cells exist,
+3. **`varargin` / `varargout`** — depends on cells. Once cells exist,
    these become special parameter bindings that receive/produce a cell
    of the remaining args/returns.
-5. **Real `string` type** vs char array — `"…"` parses but runtime
+4. **Real `string` type** vs char array — `"…"` parses but runtime
    treats it the same as `'…'`. Needs a distinct descriptor plus
    `strsplit` / `+` concatenation entry points so `"a" + "b"` returns
    a string instead of a numeric sum of character codes.
@@ -677,10 +687,15 @@ programs.
 
 ### Error handling
 
-11. **`try` / `catch` with an error struct** — parsed, catch-body
-    emission still drops. Needs a runtime error object (`matlab_err`),
-    stack-unwinding convention (setjmp/longjmp or llvm's invoke/landing),
-    and integration with `error()` / `warning()` runtime entries.
+11. **Full try / catch with stack unwinding** — today the try body
+    runs, then the catch body runs iff the process-global
+    `matlab_error_flag` is set (by an explicit `error(...)` call).
+    That handles the common idiom but misses: runtime faults
+    (OOB access, divide-by-zero), per-statement unwinding (error
+    mid-try jumps straight to catch), and binding the exception to
+    `catch ME` with `ME.message` / `ME.identifier`. A proper
+    implementation needs either setjmp/longjmp shared with the
+    runtime or LLVM invoke/landingpad, plus an `matlab_err` struct.
 
 ### Linear-algebra extensions
 
