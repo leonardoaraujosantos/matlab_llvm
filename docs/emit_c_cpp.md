@@ -345,9 +345,45 @@ dominates.
   ordering is equally nondeterministic across runs. The `.sorted`
   marker files already used by the LLVM test runner apply identically
   to the C/C++ test runners.
-- **Non-UTF-8 string literals.** We emit string globals as
-  `unsigned char[]` byte arrays rather than `"..."` C string literals,
-  which sidesteps escape-sequence issues and C++ narrowing warnings but
-  is slightly less readable when hand-inspecting the output. A
-  pretty-printer that switches to `"..."` for pure-ASCII strings would
-  be a nice polish.
+- **Non-UTF-8 string literals.** ASCII-safe strings are emitted as
+  `"..."` C literals with `\n` / `\t` / `\r` escapes. Strings containing
+  non-printable or non-ASCII bytes fall back to an `unsigned char[]`
+  byte array so C++ narrowing conversions and escape ambiguity are
+  avoided.
+
+## Robustness
+
+The emitter fails fast rather than producing broken output:
+
+- **Unknown ops** hit a fallthrough that prints `/* UNSUPPORTED: <op> */`
+  **and** flags the emission as failed. `matlabc -emit-c` exits non-zero
+  with `error: emit-c: unsupported op in emitter: <mnemonic>` on stderr.
+  This catches both the "undeclared identifier" case (op had a result
+  downstream code referenced) and the silent-drop case (op had no
+  results — a side-effecting op we forgot, which would otherwise miscompile).
+- **Multi-result `func.func` / `llvm.func`** fails with a clear
+  diagnostic rather than emitting invalid C. The printer only supports
+  0- or 1-result functions; if a future pass produces multi-return
+  signatures, the emitter refuses to continue.
+- **Pre-emit `mlir::verify`** runs right before `emitC()` in the driver,
+  so a malformed IR state is surfaced with a clear MLIR diagnostic
+  rather than as a cryptic cc/c++ compile failure on the generated
+  source.
+
+## Readability features
+
+- **MATLAB variable names flow through.** `matlab.alloc` carries a
+  `name` StringAttr from the frontend. `LowerScalarSlots` and
+  `LowerTensorOps` propagate it to the resulting `llvm.alloca` as a
+  discardable `matlab.name` attribute. The emitter uses it to name C
+  locals, so a MATLAB `total = 0; for i = 1:10; total = total + i; end`
+  produces C locals called `total`, `i`, `total_p`, `i_p` (rather than
+  `v0_slot`, `v1_slot`, etc.).
+- **`#line` directives** map every emitted statement back to the
+  originating line in the `.m` source, so debuggers can step through
+  the MATLAB program by its original lines. Requires the `SourceManager`
+  to be threaded into `lowerToMLIR` (the driver does this automatically).
+- **ASCII-safe quoted strings** for readable hand-inspection.
+- **Per-section blank lines** between the runtime-extern block, the
+  string-constant block, the forward-decl block, and the function
+  bodies.

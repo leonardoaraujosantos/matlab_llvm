@@ -145,7 +145,7 @@ int main(int Argc, char **Argv) {
       Opts.Mode == Options::Mode::EmitCpp) {
     mlirgen::Context MCtx;
     if (TU) {
-      auto M = mlirgen::lowerToMLIR(MCtx, TC, Diag, *TU);
+      auto M = mlirgen::lowerToMLIR(MCtx, TC, Diag, *TU, &SM);
       if (mlir::failed(mlir::verify(M))) {
         std::cerr << "error: MLIR verification failed after lowering\n";
         return 1;
@@ -284,6 +284,14 @@ int main(int Argc, char **Argv) {
         mlirgen::runLowerIO(M);
         if (Opts.Mode == Options::Mode::EmitC ||
             Opts.Mode == Options::Mode::EmitCpp) {
+          // Verify the module right before emission so a malformed IR
+          // state is surfaced with a clear error rather than as a cryptic
+          // cc/c++ compile failure on the emitted source.
+          if (mlir::failed(mlir::verify(M))) {
+            std::cerr
+                << "error: MLIR verification failed before C emission\n";
+            return 1;
+          }
           std::string Src = mlirgen::emitC(
               M, Opts.Mode == Options::Mode::EmitCpp);
           if (Src.empty()) return 1;

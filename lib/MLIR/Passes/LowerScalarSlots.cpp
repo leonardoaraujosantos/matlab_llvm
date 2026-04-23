@@ -55,8 +55,13 @@ bool runLowerScalarSlots(ModuleOp M) {
     OpBuilder B(Alloc);
     Value One = LLVM::ConstantOp::create(B, Alloc->getLoc(), I64,
                                           B.getI64IntegerAttr(1));
-    Value Ptr = LLVM::AllocaOp::create(B, Alloc->getLoc(), PtrTy, ElemTy,
-                                        One, /*alignment=*/0);
+    auto AllocaOp = LLVM::AllocaOp::create(B, Alloc->getLoc(), PtrTy, ElemTy,
+                                            One, /*alignment=*/0);
+    // Preserve the original MATLAB slot name as a discardable attr so the
+    // EmitC backend can use it for readable identifiers.
+    if (auto NameAttr = Alloc->getAttrOfType<StringAttr>("name"))
+      AllocaOp->setAttr("matlab.name", NameAttr);
+    Value Ptr = AllocaOp.getResult();
 
     // Rewrite loads and stores that use this slot. Walk a copy because
     // erase mutates the use list.

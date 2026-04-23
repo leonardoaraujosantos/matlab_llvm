@@ -197,8 +197,13 @@ bool TensorLowering::retypeMatrixSlots() {
     B.setInsertionPoint(Alloc);
     Value One = LLVM::ConstantOp::create(
         B, Alloc->getLoc(), I64, B.getI64IntegerAttr(1));
-    Value NewSlot = LLVM::AllocaOp::create(B, Alloc->getLoc(), PtrTy, PtrTy,
-                                            One, /*alignment=*/0);
+    auto NewSlotOp = LLVM::AllocaOp::create(B, Alloc->getLoc(), PtrTy, PtrTy,
+                                             One, /*alignment=*/0);
+    // Propagate the matlab.alloc `name` attribute to the alloca so the
+    // EmitC backend can emit readable variable names.
+    if (auto NameAttr = Alloc->getAttrOfType<StringAttr>("name"))
+      NewSlotOp->setAttr("matlab.name", NameAttr);
+    Value NewSlot = NewSlotOp.getResult();
 
     SmallVector<Operation *> ToErase;
     for (OpOperand &Use : Alloc->getResult(0).getUses()) {

@@ -1743,8 +1743,9 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
 mlir::ModuleOp lowerToMLIR(Context &Ctx,
                            TypeContext &TC,
                            DiagnosticEngine &Diag,
-                           const TranslationUnit &TU) {
-  Lowerer L(Ctx.get(), TC, Diag);
+                           const TranslationUnit &TU,
+                           const SourceManager *SM) {
+  Lowerer L(Ctx.get(), TC, Diag, SM);
   return L.lower(TU);
 }
 

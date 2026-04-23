@@ -21,8 +21,11 @@
 #include "mlir/Support/LLVM.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/ADT/StringSet.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include <cctype>
+#include <iostream>
 #include <sstream>
 #include <string>
 
@@ -44,6 +47,8 @@ private:
   // --- Naming / types -----------------------------------------------------
   std::string name(mlir::Value V);
   std::string freshName(const char *Prefix = "v");
+  std::string uniqueName(llvm::StringRef Hint);
+  std::string sanitizeIdent(llvm::StringRef In);
   std::string cTypeOf(mlir::Type T);
   std::string cTypeOfValue(mlir::Value V) { return cTypeOf(V.getType()); }
 
@@ -61,13 +66,25 @@ private:
   // --- Helpers -----------------------------------------------------------
   void indent(int N) { for (int i = 0; i < N; ++i) OS << "  "; }
   std::string constStr(mlir::LLVM::GlobalOp G);
+  void fail(llvm::StringRef Msg) {
+    if (!Failed)
+      std::cerr << "error: emit-c: " << Msg.str() << "\n";
+    Failed = true;
+  }
+  void emitLineDirective(mlir::Location L, int Indent);
 
   std::ostream &OS;
   bool Cpp;
+  bool Failed = false;
 
   llvm::DenseMap<mlir::Value, std::string> Names;
   llvm::DenseMap<mlir::Operation *, std::string> GlobalStrs;  // global -> C name
+  llvm::StringSet<> UsedNames;  // identifiers already claimed.
   int NextId = 0;
+
+  // Most recent #line directive emitted — used to dedupe.
+  std::string LastLineFile;
+  int LastLineNum = -1;
 };
 
 // ---------------------------------------------------------------------------
@@ -75,9 +92,41 @@ private:
 // ---------------------------------------------------------------------------
 
 std::string Emitter::freshName(const char *Prefix) {
-  std::string S = Prefix;
-  S += std::to_string(NextId++);
-  return S;
+  for (;;) {
+    std::string S = Prefix;
+    S += std::to_string(NextId++);
+    if (UsedNames.insert(S).second) return S;
+  }
+}
+
+// Make a C identifier out of a free-form MATLAB variable name. Allowed
+// chars: [A-Za-z0-9_]. Illegal chars become '_'. If the first char is a
+// digit, prepend an underscore. Empty / all-bad input falls back to "v".
+std::string Emitter::sanitizeIdent(llvm::StringRef In) {
+  std::string Out;
+  Out.reserve(In.size() + 1);
+  for (char C : In) {
+    if ((C >= 'A' && C <= 'Z') || (C >= 'a' && C <= 'z') ||
+        (C >= '0' && C <= '9') || C == '_') {
+      Out += C;
+    } else {
+      Out += '_';
+    }
+  }
+  if (Out.empty()) Out = "v";
+  else if (Out[0] >= '0' && Out[0] <= '9') Out = "_" + Out;
+  return Out;
+}
+
+// Give a locally unique C identifier derived from Hint. If Hint collides
+// with a previously-used name, append _2 / _3 / ... until free.
+std::string Emitter::uniqueName(llvm::StringRef Hint) {
+  std::string Base = sanitizeIdent(Hint);
+  if (UsedNames.insert(Base).second) return Base;
+  for (int k = 2; ; ++k) {
+    std::string Cand = Base + "_" + std::to_string(k);
+    if (UsedNames.insert(Cand).second) return Cand;
+  }
 }
 
 std::string Emitter::name(mlir::Value V) {
@@ -86,6 +135,32 @@ std::string Emitter::name(mlir::Value V) {
   std::string N = freshName();
   Names[V] = N;
   return N;
+}
+
+// Emit a `#line N "file"` directive at the given indent level if the
+// location is a FileLineColLoc and hasn't been emitted already for this
+// (file, line) pair.
+void Emitter::emitLineDirective(mlir::Location L, int Indent) {
+  // Unwrap NameLoc / FusedLoc to reach the underlying FileLineColLoc if
+  // present. Ops produced by builders often carry wrapped locations.
+  mlir::FileLineColLoc FL;
+  if ((FL = mlir::dyn_cast<mlir::FileLineColLoc>(L))) {
+    // direct.
+  } else if (auto NL = mlir::dyn_cast<mlir::NameLoc>(L)) {
+    FL = mlir::dyn_cast<mlir::FileLineColLoc>(NL.getChildLoc());
+  } else if (auto FuL = mlir::dyn_cast<mlir::FusedLoc>(L)) {
+    for (auto Sub : FuL.getLocations())
+      if ((FL = mlir::dyn_cast<mlir::FileLineColLoc>(Sub))) break;
+  }
+  if (!FL) return;
+  std::string File = FL.getFilename().str();
+  int Line = static_cast<int>(FL.getLine());
+  if (File.empty() || Line <= 0) return;
+  if (File == LastLineFile && Line == LastLineNum) return;
+  LastLineFile = File;
+  LastLineNum = Line;
+  indent(Indent);
+  OS << "#line " << Line << " \"" << File << "\"\n";
 }
 
 std::string Emitter::cTypeOf(mlir::Type T) {
@@ -124,10 +199,38 @@ void Emitter::emitGlobal(mlir::LLVM::GlobalOp G) {
   std::string N = G.getSymName().str();
   GlobalStrs[G.getOperation()] = N;
   std::string Raw = constStr(G);
-  // Emit as a byte array with an explicit length so we don't accidentally
-  // escape anything — the runtime gets (ptr, len).
-  // Use unsigned char so bytes > 127 don't trip C++ narrowing conversion
-  // warnings when the source contains non-ASCII.
+  UsedNames.insert(N);
+
+  // If every byte is printable ASCII (or a common whitespace escape),
+  // emit as a quoted string literal — far more readable than a byte array
+  // when inspecting emitted .c files by hand.
+  bool ASCIISafe = true;
+  for (unsigned char C : Raw) {
+    if (C >= 0x20 && C < 0x7F) continue;
+    if (C == '\n' || C == '\t' || C == '\r') continue;
+    ASCIISafe = false;
+    break;
+  }
+  if (ASCIISafe) {
+    // Drop the explicit array size — C++ requires room for the implicit
+    // null terminator, and the runtime never reads past Raw.size() anyway
+    // (the length is passed as a separate int64_t argument).
+    OS << "static const char " << N << "[] = \"";
+    for (unsigned char C : Raw) {
+      switch (C) {
+        case '\\': OS << "\\\\"; break;
+        case '"':  OS << "\\\""; break;
+        case '\n': OS << "\\n"; break;
+        case '\t': OS << "\\t"; break;
+        case '\r': OS << "\\r"; break;
+        default:   OS << (char)C; break;
+      }
+    }
+    OS << "\";\n";
+    return;
+  }
+  // Byte-array fallback — unsigned char so bytes > 127 don't trip C++
+  // narrowing conversion warnings on non-ASCII content.
   OS << "static const unsigned char " << N << "[" << Raw.size() << "] = {";
   for (size_t i = 0; i < Raw.size(); ++i) {
     if (i) OS << ",";
@@ -157,14 +260,35 @@ void Emitter::emitProlog() {
 bool Emitter::run(mlir::ModuleOp M) {
   emitProlog();
 
-  // Pass 0: emit `extern "C"` runtime prototypes for every llvm.func that's
-  // only a declaration (body is empty). These are the matlab_* runtime
-  // entries imported by LowerIO / LowerTensorOps / LowerParfor.
+  // -- Pre-emission checks: every defined function must have 0 or 1 results.
+  // The printer has no story for multi-result returns (no pass emits them
+  // today; guarding is cheap). Fail fast rather than emit broken C.
+  for (auto &Op : M.getBody()->getOperations()) {
+    if (auto F = mlir::dyn_cast<mlir::func::FuncOp>(Op)) {
+      if (F.getBody().empty()) continue;
+      unsigned N = F.getFunctionType().getNumResults();
+      if (N > 1) {
+        fail(("func.func @" + F.getSymName() +
+              " has " + std::to_string(N) +
+              " results; emitter supports at most 1").str());
+        return false;
+      }
+    } else if (auto F = mlir::dyn_cast<mlir::LLVM::LLVMFuncOp>(Op)) {
+      if (F.getBody().empty()) continue;
+      // LLVM funcs return a single type (possibly void); no additional check.
+    }
+  }
+
+  // Pass 0: `extern "C"` runtime prototypes for every llvm.func that's
+  // only a declaration (the matlab_* entries imported by LowerIO /
+  // LowerTensorOps / LowerParfor).
+  OS << "// Runtime prototypes (linked against runtime/matlab_runtime.c).\n";
   if (Cpp) OS << "extern \"C\" {\n";
   for (auto &Op : M.getBody()->getOperations()) {
     auto F = mlir::dyn_cast<mlir::LLVM::LLVMFuncOp>(Op);
     if (!F) continue;
     if (!F.getBody().empty()) continue;  // skip defined funcs.
+    UsedNames.insert(F.getSymName().str());
     auto FT = F.getFunctionType();
     std::string RetTy =
         mlir::isa<mlir::LLVM::LLVMVoidType>(FT.getReturnType())
@@ -181,18 +305,23 @@ bool Emitter::run(mlir::ModuleOp M) {
   if (Cpp) OS << "} // extern \"C\"\n";
   OS << "\n";
 
-  // Pass 1: emit all llvm.mlir.global string constants so any later code
-  // can reference them by name.
+  // Pass 1: llvm.mlir.global string constants. Reserve symbol names first
+  // so body-local identifiers won't collide with them.
+  OS << "// Module-level string constants.\n";
   for (auto &Op : M.getBody()->getOperations()) {
     if (auto G = mlir::dyn_cast<mlir::LLVM::GlobalOp>(Op))
       emitGlobal(G);
   }
   OS << "\n";
 
-  // Pass 2: forward-declare every function so call ordering doesn't matter.
+  // Pass 2: forward-declare every defined function so call ordering doesn't
+  // matter. Reserve the function's symbol name so body-local identifiers
+  // can't collide (important now that locals may inherit MATLAB names).
+  OS << "// Forward declarations.\n";
   for (auto &Op : M.getBody()->getOperations()) {
     if (auto F = mlir::dyn_cast<mlir::func::FuncOp>(Op)) {
       if (F.getBody().empty()) continue;
+      UsedNames.insert(F.getSymName().str());
       if (F.getSymName() == "main") continue;  // main has no forward decl.
       auto FT = F.getFunctionType();
       std::string RetTy = FT.getNumResults() == 0
@@ -207,7 +336,7 @@ bool Emitter::run(mlir::ModuleOp M) {
       OS << ");\n";
     } else if (auto F = mlir::dyn_cast<mlir::LLVM::LLVMFuncOp>(Op)) {
       if (F.getBody().empty()) continue;
-      // Skip @main here; handled in pass 3 without a forward decl.
+      UsedNames.insert(F.getSymName().str());
       if (F.getSymName() == "main") continue;
       auto FT = F.getFunctionType();
       std::string RetTy =
@@ -227,6 +356,7 @@ bool Emitter::run(mlir::ModuleOp M) {
 
   // Pass 3: emit function bodies.
   for (auto &Op : M.getBody()->getOperations()) {
+    if (Failed) break;
     if (auto F = mlir::dyn_cast<mlir::func::FuncOp>(Op)) {
       if (F.getBody().empty()) continue;
       emitFuncFunc(F);
@@ -236,10 +366,11 @@ bool Emitter::run(mlir::ModuleOp M) {
     }
   }
 
-  return true;
+  return !Failed;
 }
 
 void Emitter::emitFuncFunc(mlir::func::FuncOp F) {
+  NextId = 0;  // Reset local SSA counter so each function restarts at v0.
   auto FT = F.getFunctionType();
   bool IsMain = F.getSymName() == "main";
   std::string RetTy;
@@ -249,6 +380,7 @@ void Emitter::emitFuncFunc(mlir::func::FuncOp F) {
     RetTy = FT.getNumResults() == 0 ? std::string("void")
                                      : cTypeOf(FT.getResult(0));
   }
+  emitLineDirective(F.getLoc(), 0);
   OS << (IsMain ? "" : "static ") << RetTy << " " << F.getSymName().str()
      << "(";
   auto &Entry = F.getBody().front();
@@ -266,11 +398,13 @@ void Emitter::emitFuncFunc(mlir::func::FuncOp F) {
 }
 
 void Emitter::emitLLVMFunc(mlir::LLVM::LLVMFuncOp F) {
+  NextId = 0;
   auto FT = F.getFunctionType();
   std::string RetTy =
       mlir::isa<mlir::LLVM::LLVMVoidType>(FT.getReturnType())
           ? std::string("void")
           : cTypeOf(FT.getReturnType());
+  emitLineDirective(F.getLoc(), 0);
   OS << "static " << RetTy << " " << F.getSymName().str() << "(";
   auto &Entry = F.getBody().front();
   for (unsigned i = 0; i < FT.getNumParams(); ++i) {
@@ -309,6 +443,11 @@ void Emitter::emitBlock(mlir::Block &B, int Indent) {
 
 void Emitter::emitOp(mlir::Operation &Op, int Indent) {
   llvm::StringRef Name = Op.getName().getStringRef();
+
+  // Emit a #line directive if this op has a FileLineColLoc that differs
+  // from the last directive we printed. Deduped inside emitLineDirective,
+  // so constants / pure expression ops don't pollute the output.
+  emitLineDirective(Op.getLoc(), Indent);
 
   // --- llvm.mlir.zero / llvm.mlir.null -------------------------------
   if (mlir::isa<mlir::LLVM::ZeroOp>(Op)) {
@@ -523,8 +662,22 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
 
   // --- llvm.alloca / load / store -------------------------------------
   if (auto A = mlir::dyn_cast<mlir::LLVM::AllocaOp>(Op)) {
-    std::string N = this->name(A.getResult());
-    std::string SlotName = N + "_slot";
+    // If LowerScalarSlots / LowerTensorOps propagated the original
+    // matlab.alloc `name` attribute, use it as the slot identifier so the
+    // emitted C mirrors the MATLAB source (total_slot rather than v3_slot).
+    std::string Hint;
+    if (auto NA = A->getAttrOfType<mlir::StringAttr>("matlab.name"))
+      Hint = NA.getValue().str();
+    std::string N, SlotName;
+    if (!Hint.empty()) {
+      SlotName = uniqueName(Hint);
+      // The pointer value itself still needs a unique identifier.
+      N = uniqueName(Hint + "_p");
+    } else {
+      N = this->name(A.getResult());
+      SlotName = N + "_slot";
+    }
+    Names[A.getResult()] = N;
     // Two shapes appear:
     //   1) alloca<T> with ArraySize=1 — a scalar slot (LowerScalarSlots).
     //   2) alloca<!llvm.array<N x T>> with ArraySize=1 — a contiguous buffer
@@ -700,9 +853,14 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
   if (mlir::isa<mlir::arith::OrIOp>(Op))  { emitBinF("|"); return; }
   if (mlir::isa<mlir::arith::XOrIOp>(Op)) { emitBinF("^"); return; }
 
-  // --- Fallback: log as a comment so we know what we missed -----------
+  // --- Fallback: unknown op — refuse to emit rather than silently drop it.
+  // A silent drop is dangerous for zero-result side-effect ops (the program
+  // would compile but produce wrong output). For ops with results, the
+  // downstream "undeclared identifier" error was our only signal; now
+  // we surface the root cause at emit time with the MLIR op name.
   indent(Indent);
-  OS << "/* TODO: " << Name.str() << " */\n";
+  OS << "/* UNSUPPORTED: " << Name.str() << " */\n";
+  fail(("unsupported op in emitter: " + Name).str());
 }
 
 } // namespace
