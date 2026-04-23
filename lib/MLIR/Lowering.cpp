@@ -1464,12 +1464,25 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
     return emitUnreg("matlab.subscript", Idx, RT, L, {NA});
   }
   case NodeKind::CellIndex: {
+    /* C{i} read — routes to matlab_cell_get_f64 by default, or
+     * matlab_cell_get_mat when Sema concretely says matrix. Single
+     * 1-D index for v1. */
     auto &C = static_cast<const CellIndex &>(E);
+    if (C.Args.size() != 1)
+      return emitUnreg("matlab.undef", {}, RT, L);
     mlir::Value Arr = C.Callee ? lowerExpr(*C.Callee) : mlir::Value{};
-    llvm::SmallVector<mlir::Value, 4> Idx;
-    Idx.push_back(Arr);
-    for (const Expr *A : C.Args) if (A) Idx.push_back(lowerExpr(*A));
-    return emitUnreg("matlab.cell_subscript", Idx, RT, L);
+    mlir::Value Idx = lowerExpr(*C.Args[0]);
+    auto F64 = mlir::Float64Type::get(&MCtx);
+    auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+    bool WantMat = mlir::isa<mlir::RankedTensorType,
+                              mlir::UnrankedTensorType>(RT);
+    llvm::StringRef Callee = WantMat ? "matlab_cell_get_mat"
+                                      : "matlab_cell_get_f64";
+    mlir::NamedAttribute Cal(
+        mlir::StringAttr::get(&MCtx, "callee"),
+        mlir::StringAttr::get(&MCtx, Callee));
+    mlir::Type ResTy = WantMat ? (mlir::Type)PtrTy : (mlir::Type)F64;
+    return emitUnreg("matlab.call_builtin", {Arr, Idx}, ResTy, L, {Cal});
   }
   case NodeKind::FieldAccess: {
     /* s.x read  OR  s.a.b read. resolveStructBase walks a nested
@@ -1538,17 +1551,43 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
     return emitUnreg("matlab.concat_col", Rows, RT, L);
   }
   case NodeKind::CellLiteral: {
+    /* {a, b, c, ...} creates a matlab_cell and sets slot i = expr_i.
+     * v1: 1-D only (flattens multi-row literals into a single row).
+     * Kind is picked from each element's MLIR type at the call site:
+     * ptr -> matlab_cell_set_mat, else -> matlab_cell_set_f64. */
     auto &M = static_cast<const CellLiteral &>(E);
-    llvm::SmallVector<mlir::Value, 4> Rows;
-    for (auto &R : M.Rows) {
-      llvm::SmallVector<mlir::Value, 4> Cs;
-      for (const Expr *C : R) if (C) Cs.push_back(lowerExpr(*C));
-      mlir::Value Row = emitUnreg("matlab.make_cell", Cs,
-                                  mlir::NoneType::get(&MCtx), L);
-      Rows.push_back(Row);
+    auto F64 = mlir::Float64Type::get(&MCtx);
+    auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+    llvm::SmallVector<mlir::Value, 8> Elems;
+    for (auto &R : M.Rows)
+      for (const Expr *El : R)
+        if (El) Elems.push_back(lowerExpr(*El));
+    mlir::Value Cnt = mlir::arith::ConstantOp::create(
+        B, L, F64, mlir::FloatAttr::get(F64, (double)Elems.size()));
+    mlir::NamedAttribute New(
+        mlir::StringAttr::get(&MCtx, "callee"),
+        mlir::StringAttr::get(&MCtx, "matlab_cell_new"));
+    mlir::Value Cell = emitUnreg("matlab.call_builtin", {Cnt},
+                                  PtrTy, L, {New});
+    for (size_t i = 0; i < Elems.size(); ++i) {
+      mlir::Value Idx = mlir::arith::ConstantOp::create(
+          B, L, F64, mlir::FloatAttr::get(F64, (double)(i + 1)));
+      mlir::Value V = Elems[i];
+      /* Tensor and ptr both route to set_mat — a literal matrix is
+       * tensor-typed at lowering time and gets retyped to ptr by
+       * LowerTensorOps later. */
+      bool IsMat = V && (V.getType() == PtrTy ||
+                         mlir::isa<mlir::RankedTensorType,
+                                   mlir::UnrankedTensorType>(V.getType()));
+      llvm::StringRef Callee = IsMat ? "matlab_cell_set_mat"
+                                      : "matlab_cell_set_f64";
+      mlir::NamedAttribute Cal(
+          mlir::StringAttr::get(&MCtx, "callee"),
+          mlir::StringAttr::get(&MCtx, Callee));
+      emitUnregOp("matlab.call_builtin", {Cell, Idx, V},
+                  {mlir::NoneType::get(&MCtx)}, L, {Cal});
     }
-    if (Rows.size() == 1) return Rows.front();
-    return emitUnreg("matlab.make_cell", Rows, RT, L);
+    return Cell;
   }
   case NodeKind::AnonFunction: {
     auto &A = static_cast<const AnonFunction &>(E);

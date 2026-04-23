@@ -1526,6 +1526,104 @@ double matlab_struct_has_field(matlab_struct *s, const char *name, int64_t len) 
     return struct_find_field(s, name, (int32_t)len) >= 0 ? 1.0 : 0.0;
 }
 
+/* ---------------------------------------------------------------------- */
+/* Cell arrays — 1-D tagged containers.
+ *
+ * Each slot is tagged with a kind (0 = f64, 1 = matlab_mat*). Index is
+ * 1-based to match MATLAB. Out-of-range get returns 0.0 (f64) or an
+ * empty matrix (mat). Autogrows on set past end.
+ */
+struct matlab_cell_s {
+    int32_t n;
+    int32_t cap;
+    int32_t *kinds;
+    double *f64_vals;
+    void **ptr_vals;
+};
+typedef struct matlab_cell_s matlab_cell;
+
+static void cell_grow_to(matlab_cell *c, int32_t need) {
+    if (c->cap >= need) return;
+    int32_t NewCap = c->cap ? c->cap : 4;
+    while (NewCap < need) NewCap *= 2;
+    c->kinds    = (int32_t *)realloc(c->kinds,    (size_t)NewCap * sizeof(int32_t));
+    c->f64_vals = (double *)realloc(c->f64_vals,  (size_t)NewCap * sizeof(double));
+    c->ptr_vals = (void **)realloc(c->ptr_vals,   (size_t)NewCap * sizeof(void *));
+    for (int32_t i = c->cap; i < NewCap; ++i) {
+        c->kinds[i] = 0;
+        c->f64_vals[i] = 0.0;
+        c->ptr_vals[i] = NULL;
+    }
+    c->cap = NewCap;
+}
+
+matlab_cell *matlab_cell_new(double n) {
+    matlab_cell *c = (matlab_cell *)calloc(1, sizeof(*c));
+    int32_t cap0 = n > 0 ? (int32_t)n : 4;
+    cell_grow_to(c, cap0);
+    return c;
+}
+
+void matlab_cell_set_f64(matlab_cell *c, double i1, double v) {
+    if (!c) return;
+    int32_t i = (int32_t)i1 - 1;
+    if (i < 0) return;
+    if (i >= c->cap) cell_grow_to(c, i + 1);
+    if (i >= c->n) c->n = i + 1;
+    c->kinds[i] = 0;
+    c->f64_vals[i] = v;
+    c->ptr_vals[i] = NULL;
+}
+
+void matlab_cell_set_mat(matlab_cell *c, double i1, matlab_mat *m) {
+    if (!c) return;
+    int32_t i = (int32_t)i1 - 1;
+    if (i < 0) return;
+    if (i >= c->cap) cell_grow_to(c, i + 1);
+    if (i >= c->n) c->n = i + 1;
+    c->kinds[i] = 1;
+    c->f64_vals[i] = 0.0;
+    c->ptr_vals[i] = m;
+}
+
+double matlab_cell_get_f64(matlab_cell *c, double i1) {
+    if (!c) return 0.0;
+    int32_t i = (int32_t)i1 - 1;
+    if (i < 0 || i >= c->n) return 0.0;
+    if (c->kinds[i] == 0) return c->f64_vals[i];
+    /* If the slot holds a 1x1 matrix, unbox to scalar. */
+    if (c->kinds[i] == 1 && c->ptr_vals[i]) {
+        matlab_mat *m = (matlab_mat *)c->ptr_vals[i];
+        if (m->rows == 1 && m->cols == 1) return m->data[0];
+    }
+    return 0.0;
+}
+
+matlab_mat *matlab_cell_get_mat(matlab_cell *c, double i1) {
+    if (!c) return mat_alloc(0, 0);
+    int32_t i = (int32_t)i1 - 1;
+    if (i < 0 || i >= c->n) return mat_alloc(0, 0);
+    if (c->kinds[i] == 1 && c->ptr_vals[i])
+        return (matlab_mat *)c->ptr_vals[i];
+    if (c->kinds[i] == 0) {
+        matlab_mat *m = mat_alloc(1, 1);
+        m->data[0] = c->f64_vals[i];
+        return m;
+    }
+    return mat_alloc(0, 0);
+}
+
+double matlab_cell_numel(matlab_cell *c) {
+    if (!c) return 0.0;
+    return (double)c->n;
+}
+
+double matlab_iscell(matlab_cell *c) {
+    return c ? 1.0 : 0.0;
+}
+
+/* ---------------------------------------------------------------------- */
+
 /* Get-or-create a nested child struct at s.name. Returns the child
  * struct pointer, creating an empty one and stashing it in the parent
  * if the field doesn't exist yet. Used for s.a.b = v to resolve the

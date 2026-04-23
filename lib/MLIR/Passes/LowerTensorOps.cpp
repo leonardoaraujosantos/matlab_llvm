@@ -148,9 +148,27 @@ private:
 bool TensorLowering::retypeMatrixSlots() {
   SmallVector<Operation *> Allocs;
   Mod.walk([&](Operation *Op) {
-    if (isMatlabOp(Op, "matlab.alloc") && Op->getNumResults() == 1 &&
-        isTensorLike(Op->getResult(0).getType()))
-      Allocs.push_back(Op);
+    if (!isMatlabOp(Op, "matlab.alloc") || Op->getNumResults() != 1)
+      return;
+    Type T = Op->getResult(0).getType();
+    /* Pick up tensor-typed slots, plus `none`-typed ones whose stores
+     * are ptr-typed — cells / structs assigned via 'C = {...}' or
+     * 's = matlab_struct_new()' land on a none slot that we want to
+     * retype to ptr. */
+    if (isTensorLike(T)) { Allocs.push_back(Op); return; }
+    if (mlir::isa<NoneType>(T)) {
+      bool AnyPtrStore = false;
+      for (OpOperand &Use : Op->getResult(0).getUses()) {
+        Operation *U = Use.getOwner();
+        if (isMatlabOp(U, "matlab.store") && U->getNumOperands() == 2 &&
+            U->getOperand(1) == Op->getResult(0) &&
+            U->getOperand(0).getType() == PtrTy) {
+          AnyPtrStore = true;
+          break;
+        }
+      }
+      if (AnyPtrStore) Allocs.push_back(Op);
+    }
   });
 
   bool Changed = false;
@@ -481,6 +499,75 @@ bool TensorLowering::rewriteBuiltinCalls() {
               B, Call->getLoc(), F64, B.getF64FloatAttr(0.0));
           R.replaceAllUsesWith(Z);
         }
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+
+    /* Cell runtime. matlab_cell_new takes an f64 capacity hint and
+     * returns ptr; set/get take (ptr, f64 index, value?) with f64 /
+     * matrix-ptr value variants. Index is 1-based in the runtime. */
+    if (Name == "matlab_cell_new" && Call->getNumResults() == 1 &&
+        Call->getNumOperands() == 1 &&
+        Call->getOperand(0).getType() == F64) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt("matlab_cell_new", PtrTy, {F64});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                      ValueRange{Call->getOperand(0)});
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+    if ((Name == "matlab_cell_set_f64" ||
+         Name == "matlab_cell_set_mat") &&
+        Call->getNumOperands() == 3 &&
+        Call->getOperand(0).getType() == PtrTy &&
+        Call->getOperand(1).getType() == F64) {
+      bool IsMat = Name == "matlab_cell_set_mat";
+      Value V = Call->getOperand(2);
+      if (IsMat && V.getType() != PtrTy) continue;
+      if (!IsMat && V.getType() != F64) continue;
+      B.setInsertionPoint(Call);
+      auto Fn = rt(Name, VoidTy, {PtrTy, F64,
+                                    IsMat ? (Type)PtrTy : (Type)F64});
+      LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                            ValueRange{Call->getOperand(0),
+                                       Call->getOperand(1), V});
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+    if ((Name == "matlab_cell_get_f64" ||
+         Name == "matlab_cell_get_mat" ||
+         Name == "matlab_cell_numel" ||
+         Name == "matlab_iscell") &&
+        Call->getNumResults() == 1) {
+      B.setInsertionPoint(Call);
+      Type Ret;
+      SmallVector<Type, 2> Args;
+      SmallVector<Value, 2> Ops;
+      if (Name == "matlab_cell_get_mat") {
+        if (Call->getNumOperands() != 2) continue;
+        Ret = PtrTy;
+        Args = {PtrTy, F64};
+        Ops = {Call->getOperand(0), Call->getOperand(1)};
+      } else if (Name == "matlab_cell_get_f64") {
+        if (Call->getNumOperands() != 2) continue;
+        Ret = F64;
+        Args = {PtrTy, F64};
+        Ops = {Call->getOperand(0), Call->getOperand(1)};
+      } else {
+        if (Call->getNumOperands() != 1 ||
+            Call->getOperand(0).getType() != PtrTy) continue;
+        Ret = F64;
+        Args = {PtrTy};
+        Ops = {Call->getOperand(0)};
+      }
+      auto Fn = rt(Name, Ret, Args);
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                      ValueRange(Ops));
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
       Call->erase();
       Changed = true;
       continue;
