@@ -32,7 +32,7 @@ using namespace matlab;
 namespace {
 struct Options {
   enum class Mode { DumpTokens, DumpAST, EmitSema, EmitMIR, EmitMLIR,
-                    EmitLLVM, Check };
+                    EmitLLVM, EmitC, EmitCpp, Check };
   Mode Mode = Mode::Check;
   bool Opt = false;
   std::string InputPath;
@@ -54,6 +54,8 @@ bool parseArgs(int Argc, char **Argv, Options &Opts, const char *&Prog) {
     else if (A == "-emit-mir") Opts.Mode = Options::Mode::EmitMIR;
     else if (A == "-emit-mlir") Opts.Mode = Options::Mode::EmitMLIR;
     else if (A == "-emit-llvm") Opts.Mode = Options::Mode::EmitLLVM;
+    else if (A == "-emit-c") Opts.Mode = Options::Mode::EmitC;
+    else if (A == "-emit-cpp") Opts.Mode = Options::Mode::EmitCpp;
     else if (A == "-opt" || A == "-O") Opts.Opt = true;
     else if (A == "-h" || A == "--help") return false;
     else if (!A.empty() && A[0] == '-') {
@@ -138,7 +140,9 @@ int main(int Argc, char **Argv) {
 
 #if MATLAB_LLVM_WITH_MLIR
   if (Opts.Mode == Options::Mode::EmitMLIR ||
-      Opts.Mode == Options::Mode::EmitLLVM) {
+      Opts.Mode == Options::Mode::EmitLLVM ||
+      Opts.Mode == Options::Mode::EmitC ||
+      Opts.Mode == Options::Mode::EmitCpp) {
     mlirgen::Context MCtx;
     if (TU) {
       auto M = mlirgen::lowerToMLIR(MCtx, TC, Diag, *TU);
@@ -147,7 +151,10 @@ int main(int Argc, char **Argv) {
         return 1;
       }
       // Opt/Run paths always clean up slots and scalars.
-      bool WantClean = Opts.Opt || Opts.Mode == Options::Mode::EmitLLVM;
+      bool WantFullPipeline = Opts.Mode == Options::Mode::EmitLLVM ||
+                              Opts.Mode == Options::Mode::EmitC ||
+                              Opts.Mode == Options::Mode::EmitCpp;
+      bool WantClean = Opts.Opt || WantFullPipeline;
       if (WantClean) {
         mlirgen::runSlotPromotion(M);
         mlirgen::runLowerScalarsToArith(M);
@@ -157,7 +164,7 @@ int main(int Argc, char **Argv) {
           return 1;
         }
       }
-      if (Opts.Mode == Options::Mode::EmitLLVM) {
+      if (WantFullPipeline) {
         // Outline parfor first — that way the induction variable flows as a
         // direct block argument (f64) into disp/fprintf rather than via an
         // outer slot that would still be `none`-typed at LowerIO time.
@@ -275,9 +282,17 @@ int main(int Argc, char **Argv) {
         // promoted by SlotPromotion (because they're used across blocks).
         mlirgen::runLowerScalarSlots(M);
         mlirgen::runLowerIO(M);
-        std::string LL = mlirgen::lowerToLLVMIR(M);
-        if (LL.empty()) return 1;
-        std::cout << LL;
+        if (Opts.Mode == Options::Mode::EmitC ||
+            Opts.Mode == Options::Mode::EmitCpp) {
+          std::string Src = mlirgen::emitC(
+              M, Opts.Mode == Options::Mode::EmitCpp);
+          if (Src.empty()) return 1;
+          std::cout << Src;
+        } else {
+          std::string LL = mlirgen::lowerToLLVMIR(M);
+          if (LL.empty()) return 1;
+          std::cout << LL;
+        }
       } else {
         mlirgen::printModule(std::cout, M);
       }

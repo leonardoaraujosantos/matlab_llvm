@@ -93,6 +93,42 @@ mlir-opt FILE: build
 llvm FILE: build
     ./{{BUILD_DIR}}/matlabc -emit-llvm {{FILE}}
 
+# Emit self-contained C that links against runtime/matlab_runtime.c.
+emit-c FILE: build
+    ./{{BUILD_DIR}}/matlabc -emit-c {{FILE}}
+
+# Emit self-contained C++ (same semantics, extern "C" wrap around runtime).
+emit-cpp FILE: build
+    ./{{BUILD_DIR}}/matlabc -emit-cpp {{FILE}}
+
+# Compile a .m file via the C emitter: produces ./<name> using cc.
+# Example: `just compile-c examples/hello.m` -> ./hello
+compile-c FILE: build
+    #!/usr/bin/env bash
+    set -euo pipefail
+    name=$(basename {{FILE}} .m)
+    src=$(mktemp -t mlc.XXXXXX).c
+    ./{{BUILD_DIR}}/matlabc -emit-c {{FILE}} > "$src"
+    cc -w "$src" runtime/matlab_runtime.c -o "./$name" -lm -lpthread
+    rm -f "$src"
+    echo "built ./$name"
+
+# Compile a .m file via the C++ emitter.
+compile-cpp FILE: build
+    #!/usr/bin/env bash
+    set -euo pipefail
+    name=$(basename {{FILE}} .m)
+    src=$(mktemp -t mlc.XXXXXX).cpp
+    ./{{BUILD_DIR}}/matlabc -emit-cpp {{FILE}} > "$src"
+    c++ -w -x c++ "$src" -x c runtime/matlab_runtime.c -o "./$name" -lm -lpthread
+    rm -f "$src"
+    echo "built ./$name"
+
+# Run both C and C++ emission test suites (95 programs each).
+test-emitc: build
+    ctest --test-dir {{BUILD_DIR}} --output-on-failure \
+        -R "run-tests-emit-(c|cpp)"
+
 # Remove the build directory.
 clean:
     rm -rf {{BUILD_DIR}}

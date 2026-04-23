@@ -100,6 +100,7 @@ if(MATLAB_LLVM_WITH_MLIR)
     lib/MLIR/Passes/LowerScalarSlots.cpp
     lib/MLIR/Passes/LowerTensorOps.cpp
     lib/MLIR/Passes/LowerToLLVMIR.cpp
+    lib/MLIR/Passes/EmitC.cpp
   )
   target_link_libraries(MatlabMLIR
     PUBLIC  MatlabSema MatlabAST MatlabBasic
@@ -135,4 +136,20 @@ if(MATLAB_LLVM_WITH_MLIR)
     COMMAND ${CMAKE_SOURCE_DIR}/test/Run/run_tests.sh $<TARGET_FILE:matlabc>
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Run
   )
+  # -emit-c path: run every .m through cc and compare output.
+  add_test(
+    NAME run-tests-emit-c
+    COMMAND ${CMAKE_SOURCE_DIR}/test/Run/run_tests_emitc.sh $<TARGET_FILE:matlabc>
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Run
+  )
+  set_tests_properties(run-tests-emit-c PROPERTIES
+    ENVIRONMENT "MODE=c")
+  # -emit-cpp path: same but with c++.
+  add_test(
+    NAME run-tests-emit-cpp
+    COMMAND ${CMAKE_SOURCE_DIR}/test/Run/run_tests_emitc.sh $<TARGET_FILE:matlabc>
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Run
+  )
+  set_tests_properties(run-tests-emit-cpp PROPERTIES
+    ENVIRONMENT "MODE=cpp")
 endif()
