@@ -300,6 +300,7 @@ threads deterministically prints 55.
 | `function y = f(x)` definitions (incl. multi-return) | ✅ | ✅ | ✅ | ✅ |
 | User-defined function calls — scalar | ✅ | ✅ | ✅ (monomorphized) | ✅ |
 | User-defined function calls — chained / recursive (single + multi self-call) | ✅ | ✅ | ✅ `fib(n-1)+fib(n-2)` closes under self-recursion speculation | ✅ |
+| Multi-callsite polymorphism (`sq(5)` + `sq([1 2 3])`) | ✅ | ✅ | ✅ per-signature clones (`sq`, `sq__s0`, …) specialised after LowerTensorOps | ✅ |
 | `[V, D] = eig(A)` multi-return via `nargout` | ✅ | ✅ | ✅ routed to `matlab_eig_V`/`matlab_eig_D` | ✅ |
 | Implicit display (`x = 1` with no `;`) | ✅ | ✅ | ✅ emits `disp("x =")` + `disp(value)` | ✅ |
 | **`parfor i = 1:N`** (one pthread per iteration) | ✅ | ✅ | ✅ (outlined body) | ✅ |
@@ -635,9 +636,6 @@ justfile           task runner: build / test / compile / mlir / examples / ...
 4. **Real `string` type** (vs char array) — `"…"` parses but runtime
    treats it the same as `'…'`. Needs a distinct descriptor +
    `strsplit`/`+` concatenation entry points.
-5. **Multi-callsite polymorphism** — today a function called from two
-   sites with different concrete types stays `none`. Template-style
-   specialization per call signature would unblock this.
 6. **Matrix-typed anon params** — scalar and matrix captures work, but
    anon params are still hard-coded f64. `@(x) A * x` with a vector
    `x` needs call-site-driven param-type inference (inspect the

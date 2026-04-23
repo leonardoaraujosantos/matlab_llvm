@@ -11,7 +11,10 @@
 #include "matlab/MLIR/Context.h"
 #include "matlab/MLIR/Lowering.h"
 #include "matlab/MLIR/Passes/Passes.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/Builders.h"
+#include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Verifier.h"
 #endif
 #include "matlab/Sema/Resolver.h"
@@ -195,6 +198,75 @@ int main(int Argc, char **Argv) {
           // The newly-lowered llvm.call producing a ptr may now be the
           // operand of an un-lowered matlab.call_builtin @disp (etc.).
           // Re-run LowerTensorOps so disp(ptr) routes to matlab_disp_mat.
+          mlirgen::runLowerTensorOps(M);
+        }
+        // Multi-callsite monomorphisation: if a user function is called
+        // with both scalar and matrix args (sq(5) + sq([1 2 3])) we
+        // clone it per concrete signature so each specialisation
+        // retypes independently. Runs AFTER LowerTensorOps when
+        // operand types have collapsed to f64 / !llvm.ptr — matrix
+        // shapes share the ptr sig. If any clones were made, iterate
+        // the user-call + tensor-op fixpoint once more so the clones
+        // get their signatures refined and their bodies retyped.
+        if (mlirgen::runMonomorphiseUserCalls(M)) {
+          for (int Iter = 0; Iter < 4; ++Iter) {
+            bool A = mlirgen::runLowerScalarsToArith(M);
+            bool B = mlirgen::runLowerUserCalls(M);
+            if (!A && !B) break;
+          }
+          mlirgen::runLowerTensorOps(M);
+          // Final sweep: refresh each func.func's signature from the
+          // types that actually flow through its func.return. Needed
+          // because LowerTensorOps rewrote the body but didn't touch
+          // the enclosing function's return type.
+          M.walk([&](mlir::func::FuncOp Fn) {
+            if (Fn.empty()) return;
+            llvm::SmallVector<mlir::Type, 4> NewResults(
+                Fn.getFunctionType().getResults().begin(),
+                Fn.getFunctionType().getResults().end());
+            bool Changed = false;
+            Fn.walk([&](mlir::func::ReturnOp Ret) {
+              if (Ret.getNumOperands() != NewResults.size()) return;
+              for (unsigned i = 0; i < Ret.getNumOperands(); ++i) {
+                auto Old = NewResults[i];
+                auto New = Ret.getOperand(i).getType();
+                if (mlir::isa<mlir::NoneType>(Old) && Old != New) {
+                  NewResults[i] = New;
+                  Changed = true;
+                }
+              }
+            });
+            if (Changed) {
+              auto Ty = mlir::FunctionType::get(
+                  Fn.getContext(),
+                  Fn.getFunctionType().getInputs(), NewResults);
+              Fn.setFunctionType(Ty);
+            }
+          });
+          // Stale func.call ops need their result types patched too.
+          M.walk([&](mlir::func::CallOp Call) {
+            auto Tgt = M.lookupSymbol<mlir::func::FuncOp>(
+                Call.getCallee());
+            if (!Tgt) return;
+            auto SigR = Tgt.getFunctionType().getResults();
+            if (Call.getNumResults() != SigR.size()) return;
+            bool Mismatch = false;
+            for (unsigned i = 0; i < SigR.size(); ++i)
+              if (Call.getResult(i).getType() != SigR[i]) {
+                Mismatch = true; break;
+              }
+            if (!Mismatch) return;
+            mlir::OpBuilder CB(Call);
+            auto Nc = mlir::func::CallOp::create(CB, Call.getLoc(),
+                                                  SigR, Call.getCallee(),
+                                                  Call.getOperands());
+            for (unsigned i = 0; i < SigR.size(); ++i)
+              Call.getResult(i).replaceAllUsesWith(Nc.getResult(i));
+            Call.erase();
+          });
+          // After patching call results, any disp(ptr) sites that were
+          // previously fed by a none-typed func.call now see a ptr
+          // operand and need LowerTensorOps's matlab_disp_mat dispatch.
           mlirgen::runLowerTensorOps(M);
         }
         // After user-call refinement, any surviving matlab.alloc whose

@@ -85,6 +85,15 @@ bool runLowerAnonCallsPost(mlir::ModuleOp M);
 /// unregistered ops that don't type-check) would error at verify time.
 bool runLowerUserCalls(mlir::ModuleOp M);
 
+/// Multi-callsite monomorphisation. When a user function is called with
+/// distinct concrete arg signatures (e.g. sq(5) and sq([1 2 3])), clone
+/// the function per signature and redirect each group of sites to its
+/// specialisation. Runs AFTER LowerTensorOps so tensor-typed operands
+/// have collapsed to !llvm.ptr — matrices of different shapes share
+/// the ptr signature, so we only split when types genuinely differ
+/// (f64 vs ptr). Re-runs LowerUserCalls to retype the clones.
+bool runMonomorphiseUserCalls(mlir::ModuleOp M);
+
 /// Lowers sequential matlab.for (over a matlab.range) and matlab.while
 /// into scf.while constructs so the MLIR conversion pipeline can finish
 /// translation down to LLVM IR. Must run before LowerTensorOps (which

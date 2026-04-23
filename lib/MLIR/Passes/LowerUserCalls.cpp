@@ -22,6 +22,8 @@
 #include "matlab/MLIR/Passes/Passes.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+#include "mlir/Dialect/LLVMIR/LLVMTypes.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -198,6 +200,96 @@ void refreshFuncCalls(ModuleOp M) {
 
 } // namespace
 
+/* Clone a user function per distinct concrete call-site signature when
+ * it's polymorphically used. Runs after LowerTensorOps so call sites
+ * have collapsed tensor types to !llvm.ptr — the only real dispatch
+ * distinction remaining is f64 vs ptr, with f64 covering scalar calls
+ * and ptr covering any matrix shape. */
+bool runMonomorphiseUserCalls(ModuleOp M) {
+  MLIRContext *Ctx = M.getContext();
+  /* Gather matlab.call sites that remain (untyped-path). */
+  llvm::DenseMap<StringRef, llvm::SmallVector<Operation *>> Sites;
+  M.walk([&](Operation *Op) {
+    if (!isMatlabOp(Op, "matlab.call")) return;
+    auto CA = Op->getAttrOfType<StringAttr>("callee");
+    if (!CA) return;
+    Sites[CA.getValue()].push_back(Op);
+  });
+  bool Changed = false;
+  for (auto &[Name, S] : Sites) {
+    auto Fn = M.lookupSymbol<func::FuncOp>(Name);
+    if (!Fn) continue;
+    unsigned Arity = Fn.getFunctionType().getNumInputs();
+    struct SigKey {
+      llvm::SmallVector<Type, 4> Tys;
+      bool operator==(const SigKey &O) const { return Tys == O.Tys; }
+    };
+    struct SigHash {
+      size_t operator()(const SigKey &K) const {
+        size_t h = 0;
+        for (Type T : K.Tys)
+          h ^= mlir::hash_value(T) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        return h;
+      }
+    };
+    std::unordered_map<SigKey, llvm::SmallVector<Operation *>, SigHash>
+        Buckets;
+    for (Operation *C : S) {
+      if (C->getNumOperands() != Arity) continue;
+      SigKey K;
+      bool AllConcrete = true;
+      for (unsigned i = 0; i < Arity; ++i) {
+        Type T = C->getOperand(i).getType();
+        if (mlir::isa<NoneType>(T)) AllConcrete = false;
+        K.Tys.push_back(T);
+      }
+      if (!AllConcrete) continue;
+      Buckets[K].push_back(C);
+    }
+    if (Buckets.size() <= 1) continue;
+
+    /* Pick the keep-bucket by smallest hash for stable output. */
+    SigHash H{};
+    SigKey KeepKey;
+    bool HaveKeep = false;
+    size_t BestHash = 0;
+    for (auto &[K, _] : Buckets) {
+      size_t h = H(K);
+      if (!HaveKeep || h < BestHash) {
+        BestHash = h; KeepKey = K; HaveKeep = true;
+      }
+    }
+
+    OpBuilder B(Ctx);
+    unsigned CloneIdx = 0;
+    for (auto &[K, BSites] : Buckets) {
+      if (K == KeepKey) continue;
+      std::string CloneName = (Name.str() + "__s" +
+                               std::to_string(CloneIdx++));
+      while (M.lookupSymbol(CloneName)) CloneName += "_";
+      B.setInsertionPointToEnd(M.getBody());
+      auto Cloned = mlir::cast<func::FuncOp>(B.clone(*Fn.getOperation()));
+      Cloned.setSymName(CloneName);
+      /* Redirect sites. */
+      for (Operation *C : BSites)
+        C->setAttr("callee", StringAttr::get(Ctx, CloneName));
+      /* Set signature + entry block args from the bucket's concrete
+       * types. Tensor types don't appear here post-LowerTensorOps. */
+      if (!Cloned.empty()) {
+        Block &Entry = Cloned.getBody().front();
+        for (unsigned i = 0; i < Entry.getNumArguments() &&
+                             i < K.Tys.size(); ++i) {
+          Entry.getArgument(i).setType(K.Tys[i]);
+        }
+      }
+      Cloned.setFunctionType(FunctionType::get(Ctx, K.Tys,
+          Cloned.getFunctionType().getResults()));
+      Changed = true;
+    }
+  }
+  return Changed;
+}
+
 bool runLowerUserCalls(ModuleOp M) {
   MLIRContext *Ctx = M.getContext();
   bool Changed = false;
@@ -210,6 +302,7 @@ bool runLowerUserCalls(ModuleOp M) {
     if (!CA) return;
     Calls[CA.getValue()].push_back(Op);
   });
+
 
   // --- 2. Retype signatures --------------------------------------------
   for (auto &[Name, Sites] : Calls) {
