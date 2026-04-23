@@ -973,6 +973,53 @@ bool TensorLowering::rewriteBuiltinCalls() {
       Changed = true;
       continue;
     }
+    /* fread(fid, n) -> matlab_mat* (n-by-1). Binary reads: n doubles. */
+    if (Name == "fread" && Call->getNumOperands() == 2 &&
+        Call->getNumResults() == 1 &&
+        Call->getOperand(0).getType() == F64 &&
+        Call->getOperand(1).getType() == F64) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt("matlab_fread", PtrTy, {F64, F64});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                      Call->getOperands());
+      if (Call->getResult(0).getType() != PtrTy)
+        Call->getResult(0).setType(PtrTy);
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+    /* fwrite(fid, A) — either matrix or scalar. Both variants return
+     * the count of elements written as an f64. */
+    if (Name == "fwrite" && Call->getNumOperands() == 2 &&
+        Call->getNumResults() == 1 &&
+        Call->getOperand(0).getType() == F64) {
+      Type ArgT = Call->getOperand(1).getType();
+      if (ArgT == PtrTy) {
+        B.setInsertionPoint(Call);
+        auto Fn = rt("matlab_fwrite_mat", F64, {F64, PtrTy});
+        auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                        Call->getOperands());
+        if (Call->getResult(0).getType() != F64)
+          Call->getResult(0).setType(F64);
+        Call->getResult(0).replaceAllUsesWith(NC.getResult());
+        Call->erase();
+        Changed = true;
+        continue;
+      }
+      if (ArgT == F64) {
+        B.setInsertionPoint(Call);
+        auto Fn = rt("matlab_fwrite_f64", F64, {F64, F64});
+        auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                        Call->getOperands());
+        if (Call->getResult(0).getType() != F64)
+          Call->getResult(0).setType(F64);
+        Call->getResult(0).replaceAllUsesWith(NC.getResult());
+        Call->erase();
+        Changed = true;
+        continue;
+      }
+    }
 
     /* 3-D array runtime: matlab_mat3 descriptor. The frontend emits
      * these directly on bindings tracked as 3-D (zeros/ones with 3

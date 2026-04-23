@@ -40,6 +40,7 @@ void Resolver::registerBuiltins() {
     "arrayfun", "cellfun",
     "nargin", "nargout", "varargin", "varargout",
     "fopen", "fclose", "fgetl", "feof",
+    "fread", "fwrite",
   }) {
     registerBuiltin(N);
   }

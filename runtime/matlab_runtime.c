@@ -2084,3 +2084,43 @@ double matlab_feof(double fd) {
     if (!f) return 1.0;
     return feof(f) ? 1.0 : 0.0;
 }
+
+/* Binary file I/O.
+ *
+ * matlab_fread(fd, n) reads up to n doubles (8 bytes each) from the
+ * file and returns them as an n-by-1 column matrix. A short read
+ * (fewer than n doubles available) shrinks the result — MATLAB
+ * behaves the same way.
+ *
+ * matlab_fwrite_mat(fd, A) writes every element of the matrix A in
+ * row-major / column-major (we use row-major internally — the same
+ * layout matlab_fread produces). */
+matlab_mat *matlab_fread(double fd, double n) {
+    FILE *f = matlab_file_lookup(fd);
+    int64_t want = (int64_t)n;
+    if (want < 0) want = 0;
+    matlab_mat *A = mat_alloc(want, 1);
+    if (!f || want == 0) { A->rows = 0; return A; }
+    size_t got = fread(A->data, sizeof(double), (size_t)want, f);
+    A->rows = (int64_t)got;
+    return A;
+}
+
+double matlab_fwrite_mat(double fd, matlab_mat *A) {
+    FILE *f = matlab_file_lookup(fd);
+    if (!f || !A) return 0.0;
+    size_t n = (size_t)(A->rows * A->cols);
+    pthread_mutex_lock(&matlab_io_mutex);
+    size_t wrote = fwrite(A->data, sizeof(double), n, f);
+    pthread_mutex_unlock(&matlab_io_mutex);
+    return (double)wrote;
+}
+
+double matlab_fwrite_f64(double fd, double v) {
+    FILE *f = matlab_file_lookup(fd);
+    if (!f) return 0.0;
+    pthread_mutex_lock(&matlab_io_mutex);
+    size_t wrote = fwrite(&v, sizeof(double), 1, f);
+    pthread_mutex_unlock(&matlab_io_mutex);
+    return (double)wrote;
+}
