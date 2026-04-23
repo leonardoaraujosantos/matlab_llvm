@@ -397,10 +397,25 @@ The emitter fails fast rather than producing broken output:
   locals, so a MATLAB `total = 0; for i = 1:10; total = total + i; end`
   produces C locals called `total`, `i`, `total_p`, `i_p` (rather than
   `v0_slot`, `v1_slot`, etc.).
+- **Function parameter names flow through.** AST→MLIR lowering attaches
+  `matlab.name` as an arg attribute on each `func.func` parameter.
+  `function y = fact(n)` emits `static double fact(double n)`.
+- **Single-use SSA values inline into their user.** A pre-emission
+  analysis marks pure single-use producers (constants, arith/cmp/select/
+  casts, loads without intervening store/call, GEPs) as inlineable. At
+  emission time, `exprFor(V)` lazily builds the C expression from the
+  producer instead of declaring a `vN` local. `factorial.m` drops from
+  ~90 emitted lines to 62 and the recursive branch reads
+  `*(double*)y_p = ((*(double*)n_slot_p) * v7);` instead of a five-line
+  sequence of temporaries. Constants always inline (any use count);
+  other pure ops inline only when single-use and same-block to avoid
+  duplicating work. The analysis is purely a printer optimization —
+  it doesn't change the MLIR module, stdout, or the fail-fast contract.
 - **`#line` directives** map every emitted statement back to the
   originating line in the `.m` source, so debuggers can step through
   the MATLAB program by its original lines. Requires the `SourceManager`
   to be threaded into `lowerToMLIR` (the driver does this automatically).
+  Emits basenames, not absolute paths.
 - **ASCII-safe quoted strings** for readable hand-inspection.
 - **Per-section blank lines** between the runtime-extern block, the
   string-constant block, the forward-decl block, and the function

@@ -31,7 +31,8 @@ CXX="${CXX:-c++}"
 if [[ "$STRICT" == "1" ]]; then
   WFLAGS=(-Wall -Wextra -Werror
           -Wno-unused-variable -Wno-unused-but-set-variable
-          -Wno-unused-parameter -Wno-unused-function)
+          -Wno-unused-parameter -Wno-unused-function
+          -Wno-parentheses-equality)
   LABEL_SUFFIX=" strict"
 else
   WFLAGS=(-w)

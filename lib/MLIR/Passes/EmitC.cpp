@@ -20,6 +20,7 @@
 #include "mlir/IR/Value.h"
 #include "mlir/Support/LLVM.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/StringSet.h"
 #include "llvm/Support/raw_ostream.h"
@@ -73,6 +74,24 @@ private:
   }
   void emitLineDirective(mlir::Location L, int Indent);
 
+  // --- Single-use inlining ----------------------------------------------
+  // Return the C expression to use when referring to V: either the inline
+  // expression built lazily from its producer, or its declared identifier
+  // (for values the emitter already materialized as a C local).
+  std::string exprFor(mlir::Value V);
+  // Walk a region, marking producers that should be skipped during emission
+  // and whose uses should inline the expression instead. Does NOT build
+  // the strings — those are synthesised on demand by buildInlineExpr so
+  // operand references resolve against names that are only chosen at
+  // emission time (e.g. slot_p for llvm.alloca results).
+  void computeInlines(mlir::Region &R);
+  // Is Op's result safe to inline at its use?
+  bool canInline(mlir::Operation &Op);
+  // Build the inline expression for an inlineable Op, recursively
+  // resolving operand references via exprFor (which re-enters this
+  // function for any operand whose producer is also inlined).
+  bool buildInlineExpr(mlir::Operation &Op, std::string &Expr);
+
   std::ostream &OS;
   bool Cpp;
   bool Failed = false;
@@ -80,6 +99,10 @@ private:
   llvm::DenseMap<mlir::Value, std::string> Names;
   llvm::DenseMap<mlir::Operation *, std::string> GlobalStrs;  // global -> C name
   llvm::StringSet<> UsedNames;  // identifiers already claimed.
+  // Per-function: SSA values whose producer is skipped; the cached
+  // expression to substitute at use sites.
+  llvm::DenseMap<mlir::Value, std::string> InlineExprs;
+  llvm::DenseSet<mlir::Operation *> InlinedOps;
   int NextId = 0;
 
   // Most recent #line directive emitted — used to dedupe.
@@ -135,6 +158,225 @@ std::string Emitter::name(mlir::Value V) {
   std::string N = freshName();
   Names[V] = N;
   return N;
+}
+
+// Format an IntegerAttr as a C integer literal. i1 values are emitted as
+// 0 / 1 (unsigned) so they work correctly when XOR'd against bool operands
+// (IntegerAttr::getInt sign-extends i1 `true` to -1, which breaks
+// `bool ^ -1` logical-NOT semantics when inlined as an expression).
+static std::string formatIntAttr(mlir::IntegerAttr IA) {
+  char Buf[64];
+  auto T = mlir::dyn_cast<mlir::IntegerType>(IA.getType());
+  if (T && T.getWidth() == 1) {
+    snprintf(Buf, sizeof(Buf), "%u",
+             (unsigned)(IA.getValue().getZExtValue() & 1u));
+    return Buf;
+  }
+  snprintf(Buf, sizeof(Buf), "%lld", (long long)IA.getInt());
+  return Buf;
+}
+
+// Return the C expression to substitute when referring to V.
+//  - If V was declared (Names has an entry), return that identifier.
+//  - Else if V has an inline expression cached, return it.
+//  - Else if V's producer was marked inlineable, build the expression
+//    lazily NOW (this point comes after all prior non-inlined ops have
+//    already been emitted, so operand names are stable).
+//  - Else fall back to name() (auto-allocates a fresh v-id).
+std::string Emitter::exprFor(mlir::Value V) {
+  auto NI = Names.find(V);
+  if (NI != Names.end()) return NI->second;
+  auto II = InlineExprs.find(V);
+  if (II != InlineExprs.end()) return II->second;
+  if (mlir::Operation *Def = V.getDefiningOp()) {
+    if (InlinedOps.count(Def)) {
+      std::string Expr;
+      if (buildInlineExpr(*Def, Expr)) {
+        InlineExprs[V] = Expr;
+        return Expr;
+      }
+    }
+  }
+  return name(V);
+}
+
+// Is Op's result safe to inline into its use?
+bool Emitter::canInline(mlir::Operation &Op) {
+  using namespace mlir;
+  if (Op.getNumResults() != 1) return false;
+  Value V = Op.getResult(0);
+
+  // Constants / zero / addressof: always inline regardless of use count.
+  // Pure, zero-cost, no operand ordering concerns.
+  if (isa<LLVM::ConstantOp, arith::ConstantOp, LLVM::ZeroOp,
+          LLVM::AddressOfOp>(Op))
+    return true;
+
+  // Everything else requires single-use AND a same-block user. The
+  // same-block restriction is a conservative approximation of dominance
+  // that works for our snapshot shape (scf regions, no cf.br).
+  if (!V.hasOneUse()) return false;
+  Operation *User = V.getUses().begin()->getOwner();
+  if (User->getBlock() != Op.getBlock()) return false;
+
+  if (isa<arith::AddFOp, arith::SubFOp, arith::MulFOp, arith::DivFOp,
+          arith::AddIOp, arith::SubIOp, arith::MulIOp,
+          arith::AndIOp, arith::OrIOp,  arith::XOrIOp,
+          arith::CmpFOp, arith::CmpIOp, arith::SelectOp,
+          arith::SIToFPOp, arith::UIToFPOp,
+          arith::FPToSIOp, arith::FPToUIOp,
+          arith::ExtSIOp, arith::ExtUIOp, arith::TruncIOp,
+          arith::TruncFOp, arith::ExtFOp,
+          LLVM::GEPOp>(Op))
+    return true;
+
+  // llvm.load: no intervening store to the same address AND no call
+  // between producer and use in the block. Alloca'd slots don't escape
+  // emitted code; stores through the exact same SSA value are the only
+  // thing that can change the loaded value.
+  if (auto L = dyn_cast<LLVM::LoadOp>(Op)) {
+    Value AddrV = L.getAddr();
+    Block *BB = Op.getBlock();
+    for (auto It = ++Block::iterator(&Op);
+         It != BB->end() && &*It != User; ++It) {
+      if (auto S = dyn_cast<LLVM::StoreOp>(&*It))
+        if (S.getAddr() == AddrV) return false;
+      if (isa<LLVM::CallOp, func::CallOp>(&*It)) return false;
+    }
+    return true;
+  }
+
+  return false;
+}
+
+// Build the C expression for an inlineable op's result. Operands
+// resolve via exprFor, which recurses into further inlineable producers.
+bool Emitter::buildInlineExpr(mlir::Operation &Op, std::string &Expr) {
+  using namespace mlir;
+  if (auto C = dyn_cast<LLVM::ConstantOp>(Op)) {
+    auto A = C.getValue();
+    char Buf[64];
+    if (auto IA = dyn_cast<IntegerAttr>(A)) {
+      Expr = formatIntAttr(IA); return true;
+    }
+    if (auto FA = dyn_cast<FloatAttr>(A)) {
+      snprintf(Buf, sizeof(Buf), "%.17g", FA.getValueAsDouble());
+      Expr = Buf; return true;
+    }
+    return false;
+  }
+  if (auto C = dyn_cast<arith::ConstantOp>(Op)) {
+    auto A = C.getValue();
+    char Buf[64];
+    if (auto FA = dyn_cast<FloatAttr>(A)) {
+      snprintf(Buf, sizeof(Buf), "%.17g", FA.getValueAsDouble());
+      Expr = Buf; return true;
+    }
+    if (auto IA = dyn_cast<IntegerAttr>(A)) {
+      Expr = formatIntAttr(IA); return true;
+    }
+    return false;
+  }
+  if (isa<LLVM::ZeroOp>(Op)) { Expr = "0"; return true; }
+  if (auto A = dyn_cast<LLVM::AddressOfOp>(Op)) {
+    Expr = "((void*)&" + A.getGlobalName().str() + ")";
+    return true;
+  }
+  auto bin = [&](const char *cc) {
+    Expr = "(" + exprFor(Op.getOperand(0)) + " " + cc + " "
+         + exprFor(Op.getOperand(1)) + ")";
+    return true;
+  };
+  if (isa<arith::AddFOp>(Op)) return bin("+");
+  if (isa<arith::SubFOp>(Op)) return bin("-");
+  if (isa<arith::MulFOp>(Op)) return bin("*");
+  if (isa<arith::DivFOp>(Op)) return bin("/");
+  if (isa<arith::AddIOp>(Op)) return bin("+");
+  if (isa<arith::SubIOp>(Op)) return bin("-");
+  if (isa<arith::MulIOp>(Op)) return bin("*");
+  if (isa<arith::AndIOp>(Op)) return bin("&");
+  if (isa<arith::OrIOp>(Op))  return bin("|");
+  if (isa<arith::XOrIOp>(Op)) return bin("^");
+  if (auto C = dyn_cast<arith::CmpFOp>(Op)) {
+    const char *cc = "==";
+    switch (C.getPredicate()) {
+      case arith::CmpFPredicate::OEQ:
+      case arith::CmpFPredicate::UEQ: cc = "=="; break;
+      case arith::CmpFPredicate::ONE:
+      case arith::CmpFPredicate::UNE: cc = "!="; break;
+      case arith::CmpFPredicate::OLT:
+      case arith::CmpFPredicate::ULT: cc = "<"; break;
+      case arith::CmpFPredicate::OLE:
+      case arith::CmpFPredicate::ULE: cc = "<="; break;
+      case arith::CmpFPredicate::OGT:
+      case arith::CmpFPredicate::UGT: cc = ">"; break;
+      case arith::CmpFPredicate::OGE:
+      case arith::CmpFPredicate::UGE: cc = ">="; break;
+      default: return false;
+    }
+    Expr = "(" + exprFor(C.getLhs()) + " " + cc + " " + exprFor(C.getRhs()) + ")";
+    return true;
+  }
+  if (auto C = dyn_cast<arith::CmpIOp>(Op)) {
+    const char *cc = "==";
+    switch (C.getPredicate()) {
+      case arith::CmpIPredicate::eq:  cc = "=="; break;
+      case arith::CmpIPredicate::ne:  cc = "!="; break;
+      case arith::CmpIPredicate::slt:
+      case arith::CmpIPredicate::ult: cc = "<"; break;
+      case arith::CmpIPredicate::sle:
+      case arith::CmpIPredicate::ule: cc = "<="; break;
+      case arith::CmpIPredicate::sgt:
+      case arith::CmpIPredicate::ugt: cc = ">"; break;
+      case arith::CmpIPredicate::sge:
+      case arith::CmpIPredicate::uge: cc = ">="; break;
+    }
+    Expr = "(" + exprFor(C.getLhs()) + " " + cc + " " + exprFor(C.getRhs()) + ")";
+    return true;
+  }
+  if (auto S = dyn_cast<arith::SelectOp>(Op)) {
+    Expr = "(" + exprFor(S.getCondition()) + " ? "
+         + exprFor(S.getTrueValue()) + " : "
+         + exprFor(S.getFalseValue()) + ")";
+    return true;
+  }
+  Value V = Op.getResult(0);
+  if (isa<arith::SIToFPOp, arith::UIToFPOp>(Op)) {
+    Expr = "((double)" + exprFor(Op.getOperand(0)) + ")"; return true;
+  }
+  if (isa<arith::FPToSIOp, arith::FPToUIOp,
+          arith::ExtSIOp, arith::ExtUIOp, arith::TruncIOp,
+          arith::TruncFOp, arith::ExtFOp>(Op)) {
+    Expr = "((" + cTypeOfValue(V) + ")" + exprFor(Op.getOperand(0)) + ")";
+    return true;
+  }
+  if (auto L = dyn_cast<LLVM::LoadOp>(Op)) {
+    Expr = "(*(" + cTypeOfValue(V) + "*)" + exprFor(L.getAddr()) + ")";
+    return true;
+  }
+  if (auto G = dyn_cast<LLVM::GEPOp>(Op)) {
+    std::string ElTy = cTypeOf(G.getElemType());
+    std::string E = "((void*)(((" + ElTy + "*)" + exprFor(G.getBase()) + ")";
+    for (auto Idx : G.getIndices()) {
+      if (auto Vv = llvm::dyn_cast<mlir::Value>(Idx))
+        E += " + " + exprFor(Vv);
+      else if (auto A = llvm::dyn_cast<IntegerAttr>(Idx))
+        E += " + " + std::to_string(A.getInt());
+    }
+    E += "))";
+    Expr = E;
+    return true;
+  }
+  return false;
+}
+
+void Emitter::computeInlines(mlir::Region &R) {
+  for (auto &B : R.getBlocks()) {
+    for (auto &Op : B.getOperations()) {
+      if (canInline(Op)) InlinedOps.insert(&Op);
+      for (auto &SubR : Op.getRegions()) computeInlines(SubR);
+    }
+  }
 }
 
 // Emit a `#line N "file"` directive at the given indent level if the
@@ -376,6 +618,9 @@ bool Emitter::run(mlir::ModuleOp M) {
 
 void Emitter::emitFuncFunc(mlir::func::FuncOp F) {
   NextId = 0;  // Reset local SSA counter so each function restarts at v0.
+  InlineExprs.clear();
+  InlinedOps.clear();
+  computeInlines(F.getBody());
   auto FT = F.getFunctionType();
   bool IsMain = F.getSymName() == "main";
   std::string RetTy;
@@ -412,6 +657,9 @@ void Emitter::emitFuncFunc(mlir::func::FuncOp F) {
 
 void Emitter::emitLLVMFunc(mlir::LLVM::LLVMFuncOp F) {
   NextId = 0;
+  InlineExprs.clear();
+  InlinedOps.clear();
+  computeInlines(F.getBody());
   auto FT = F.getFunctionType();
   std::string RetTy =
       mlir::isa<mlir::LLVM::LLVMVoidType>(FT.getReturnType())
@@ -457,6 +705,11 @@ void Emitter::emitBlock(mlir::Block &B, int Indent) {
 void Emitter::emitOp(mlir::Operation &Op, int Indent) {
   llvm::StringRef Name = Op.getName().getStringRef();
 
+  // If the analysis decided to inline this op's result at its use site,
+  // skip the declaration entirely. The consumer will substitute the
+  // cached expression via exprFor().
+  if (InlinedOps.count(&Op)) return;
+
   // Emit a #line directive if this op has a FileLineColLoc that differs
   // from the last directive we printed. Deduped inside emitLineDirective,
   // so constants / pure expression ops don't pollute the output.
@@ -478,7 +731,7 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
     OS << Ty << " " << N << " = ";
     auto V = C.getValue();
     if (auto IA = mlir::dyn_cast<mlir::IntegerAttr>(V)) {
-      OS << IA.getInt();
+      OS << formatIntAttr(IA);
     } else if (auto FA = mlir::dyn_cast<mlir::FloatAttr>(V)) {
       char Buf[64];
       snprintf(Buf, sizeof(Buf), "%.17g", FA.getValueAsDouble());
@@ -504,7 +757,7 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
       snprintf(Buf, sizeof(Buf), "%.17g", D);
       OS << Buf;
     } else if (auto IA = mlir::dyn_cast<mlir::IntegerAttr>(V)) {
-      OS << IA.getInt();
+      OS << formatIntAttr(IA);
     } else {
       OS << "0 /* unknown const */";
     }
@@ -516,13 +769,13 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
   if (auto R = mlir::dyn_cast<mlir::func::ReturnOp>(Op)) {
     indent(Indent);
     if (R.getNumOperands() == 0) OS << "return;\n";
-    else OS << "return " << this->name(R.getOperand(0)) << ";\n";
+    else OS << "return " << this->exprFor(R.getOperand(0)) << ";\n";
     return;
   }
   if (auto R = mlir::dyn_cast<mlir::LLVM::ReturnOp>(Op)) {
     indent(Indent);
     if (R.getNumOperands() == 0) OS << "return;\n";
-    else OS << "return " << this->name(R.getOperand(0)) << ";\n";
+    else OS << "return " << this->exprFor(R.getOperand(0)) << ";\n";
     return;
   }
 
@@ -537,7 +790,7 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
       OS << Callee->str() << "(";
       for (unsigned i = 0; i < Call.getNumOperands(); ++i) {
         if (i) OS << ", ";
-        OS << this->name(Call.getOperand(i));
+        OS << this->exprFor(Call.getOperand(i));
       }
       OS << ");\n";
     } else {
@@ -553,10 +806,10 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
         OS << cTypeOfValue(Call.getOperand(i));
       }
       if (Call.getNumOperands() == 1) OS << "void";
-      OS << "))" << this->name(Call.getOperand(0)) << ")(";
+      OS << "))" << this->exprFor(Call.getOperand(0)) << ")(";
       for (unsigned i = 1; i < Call.getNumOperands(); ++i) {
         if (i > 1) OS << ", ";
-        OS << this->name(Call.getOperand(i));
+        OS << this->exprFor(Call.getOperand(i));
       }
       OS << ");\n";
     }
@@ -571,7 +824,7 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
     OS << Call.getCallee().str() << "(";
     for (unsigned i = 0; i < Call.getNumOperands(); ++i) {
       if (i) OS << ", ";
-      OS << this->name(Call.getOperand(i));
+      OS << this->exprFor(Call.getOperand(i));
     }
     OS << ");\n";
     return;
@@ -590,8 +843,8 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
     indent(Indent);
     std::string N = this->name(Op.getResult(0));
     OS << cTypeOfValue(Op.getResult(0)) << " " << N << " = "
-       << this->name(Op.getOperand(0)) << " " << CC << " "
-       << this->name(Op.getOperand(1)) << ";\n";
+       << this->exprFor(Op.getOperand(0)) << " " << CC << " "
+       << this->exprFor(Op.getOperand(1)) << ";\n";
   };
   if (mlir::isa<mlir::arith::AddFOp>(Op)) { emitBinF("+"); return; }
   if (mlir::isa<mlir::arith::SubFOp>(Op)) { emitBinF("-"); return; }
@@ -621,8 +874,8 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
     }
     indent(Indent);
     std::string N = this->name(C.getResult());
-    OS << "bool " << N << " = (" << this->name(C.getLhs()) << " " << CC << " "
-       << this->name(C.getRhs()) << ");\n";
+    OS << "bool " << N << " = (" << this->exprFor(C.getLhs()) << " " << CC << " "
+       << this->exprFor(C.getRhs()) << ");\n";
     return;
   }
   if (auto C = mlir::dyn_cast<mlir::arith::CmpIOp>(Op)) {
@@ -641,8 +894,8 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
     }
     indent(Indent);
     std::string N = this->name(C.getResult());
-    OS << "bool " << N << " = (" << this->name(C.getLhs()) << " " << CC << " "
-       << this->name(C.getRhs()) << ");\n";
+    OS << "bool " << N << " = (" << this->exprFor(C.getLhs()) << " " << CC << " "
+       << this->exprFor(C.getRhs()) << ");\n";
     return;
   }
 
@@ -651,7 +904,7 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
     indent(Indent);
     std::string N = this->name(Op.getResult(0));
     OS << cTypeOfValue(Op.getResult(0)) << " " << N << " = (double)"
-       << this->name(Op.getOperand(0)) << ";\n";
+       << this->exprFor(Op.getOperand(0)) << ";\n";
     return;
   }
   if (mlir::isa<mlir::arith::FPToSIOp, mlir::arith::FPToUIOp>(Op)) {
@@ -659,7 +912,7 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
     std::string N = this->name(Op.getResult(0));
     OS << cTypeOfValue(Op.getResult(0)) << " " << N << " = ("
        << cTypeOfValue(Op.getResult(0)) << ")"
-       << this->name(Op.getOperand(0)) << ";\n";
+       << this->exprFor(Op.getOperand(0)) << ";\n";
     return;
   }
   if (mlir::isa<mlir::arith::ExtSIOp, mlir::arith::ExtUIOp,
@@ -669,7 +922,7 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
     std::string N = this->name(Op.getResult(0));
     OS << cTypeOfValue(Op.getResult(0)) << " " << N << " = ("
        << cTypeOfValue(Op.getResult(0)) << ")"
-       << this->name(Op.getOperand(0)) << ";\n";
+       << this->exprFor(Op.getOperand(0)) << ";\n";
     return;
   }
 
@@ -730,11 +983,11 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
     // source is a plain buffer. For the matrix-literal case we only ever
     // see a single i64 index, so this is tight.
     OS << "void* " << N << " = (void*)(((" << ElTy << "*)"
-       << this->name(G.getBase()) << ")";
-    // Inline constant indices; SSA indices use their names.
+       << this->exprFor(G.getBase()) << ")";
+    // Inline constant indices; SSA indices use their current expression.
     for (auto Idx : G.getIndices()) {
       if (auto V = llvm::dyn_cast<mlir::Value>(Idx)) {
-        OS << " + " << this->name(V);
+        OS << " + " << this->exprFor(V);
       } else if (auto A = llvm::dyn_cast<mlir::IntegerAttr>(Idx)) {
         OS << " + " << A.getInt();
       }
@@ -747,14 +1000,14 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
     std::string N = this->name(L.getResult());
     std::string ResTy = cTypeOfValue(L.getResult());
     OS << ResTy << " " << N << " = *(" << ResTy << "*)"
-       << this->name(L.getAddr()) << ";\n";
+       << this->exprFor(L.getAddr()) << ";\n";
     return;
   }
   if (auto S = mlir::dyn_cast<mlir::LLVM::StoreOp>(Op)) {
     indent(Indent);
     std::string Ty = cTypeOfValue(S.getValue());
-    OS << "*(" << Ty << "*)" << this->name(S.getAddr()) << " = "
-       << this->name(S.getValue()) << ";\n";
+    OS << "*(" << Ty << "*)" << this->exprFor(S.getAddr()) << " = "
+       << this->exprFor(S.getValue()) << ";\n";
     return;
   }
 
@@ -768,7 +1021,7 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
       OS << cTypeOfValue(If.getResult(i)) << " " << N << " = 0;\n";
     }
     indent(Indent);
-    OS << "if (" << this->name(If.getCondition()) << ") {\n";
+    OS << "if (" << this->exprFor(If.getCondition()) << ") {\n";
     emitRegion(If.getThenRegion(), Indent + 1);
     if (!If.getElseRegion().empty()) {
       indent(Indent);
@@ -788,7 +1041,7 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
       for (unsigned i = 0; i < Y.getNumOperands(); ++i) {
         indent(Indent);
         OS << this->name(If.getResult(i)) << " = "
-           << this->name(Y.getOperand(i)) << ";\n";
+           << this->exprFor(Y.getOperand(i)) << ";\n";
       }
       return;
     }
@@ -797,7 +1050,7 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
       for (unsigned i = 0; i < Y.getNumOperands(); ++i) {
         auto BA = W.getBefore().front().getArgument(i);
         indent(Indent);
-        OS << this->name(BA) << " = " << this->name(Y.getOperand(i))
+        OS << this->name(BA) << " = " << this->exprFor(Y.getOperand(i))
            << ";\n";
       }
       return;
@@ -820,7 +1073,7 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
       Names[BA] = N;
       indent(Indent);
       OS << cTypeOf(BA.getType()) << " " << N << " = "
-         << this->name(W.getInits()[i]) << ";\n";
+         << this->exprFor(W.getInits()[i]) << ";\n";
     }
     // Result locals for scf.while's outer results: mirror iter-arg names
     // (same storage is used on exit). Bind result SSA values to the same
@@ -838,11 +1091,14 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
     for (auto &Inner : Before.getOperations()) {
       if (auto Cond = mlir::dyn_cast<mlir::scf::ConditionOp>(Inner)) {
         indent(Indent + 1);
-        OS << "if (!" << this->name(Cond.getCondition()) << ") break;\n";
-        // Bind after-block args to the forwarded values' names.
+        OS << "if (!" << this->exprFor(Cond.getCondition()) << ") break;\n";
+        // Bind after-block args to the forwarded values' current expression.
+        // Using InlineExprs here means if the forwarded value was inlined,
+        // the after-block transparently re-expands to the expression string;
+        // if it was declared, we re-use the name.
         for (unsigned i = 0; i < Cond.getArgs().size(); ++i) {
           auto AA = After.getArgument(i);
-          Names[AA] = this->name(Cond.getArgs()[i]);
+          InlineExprs[AA] = this->exprFor(Cond.getArgs()[i]);
         }
         continue;
       }
@@ -862,9 +1118,9 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
     indent(Indent);
     std::string N = this->name(S.getResult());
     OS << cTypeOfValue(S.getResult()) << " " << N << " = ("
-       << this->name(S.getCondition()) << ") ? "
-       << this->name(S.getTrueValue()) << " : "
-       << this->name(S.getFalseValue()) << ";\n";
+       << this->exprFor(S.getCondition()) << ") ? "
+       << this->exprFor(S.getTrueValue()) << " : "
+       << this->exprFor(S.getFalseValue()) << ";\n";
     return;
   }
 
