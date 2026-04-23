@@ -230,7 +230,8 @@ private:
   //--- top-level
   void lowerScript(const Script &S, mlir::ModuleOp M);
   void lowerFunction(const Function &F, mlir::ModuleOp M,
-                     const ClassDef *Owner = nullptr);
+                     const ClassDef *Owner = nullptr,
+                     bool IsStatic = false);
   void lowerClass(const ClassDef &C, mlir::ModuleOp M);
 
   //--- blocks / stmts / exprs
@@ -608,11 +609,12 @@ void Lowerer::lowerClass(const ClassDef &C, mlir::ModuleOp M) {
   /* Each method is emitted as a flat free function with a mangled name
    * `ClassName__method`; the constructor uses the same form
    * `ClassName__ClassName`. Static methods follow the same convention
-   * with `ClassName__` prefix. Dispatch happens statically at call
-   * sites from a Sema-pinned class — no v-table, no runtime method
-   * lookup. */
+   * with `ClassName__` prefix but receive no implicit `obj` param.
+   * Dispatch happens statically at call sites from a Sema-pinned
+   * class — no v-table, no runtime method lookup. */
   for (const Function *Mth : C.Methods) if (Mth) lowerFunction(*Mth, M, &C);
-  for (const Function *Mth : C.StaticMethods) if (Mth) lowerFunction(*Mth, M, &C);
+  for (const Function *Mth : C.StaticMethods)
+    if (Mth) lowerFunction(*Mth, M, &C, /*IsStatic=*/true);
 }
 
 void Lowerer::lowerScript(const Script &S, mlir::ModuleOp M) {
@@ -634,7 +636,7 @@ void Lowerer::lowerScript(const Script &S, mlir::ModuleOp M) {
 }
 
 void Lowerer::lowerFunction(const Function &F, mlir::ModuleOp M,
-                             const ClassDef *Owner) {
+                             const ClassDef *Owner, bool IsStatic) {
   mlir::OpBuilder::InsertionGuard G(B);
   B.setInsertionPointToEnd(M.getBody());
 
@@ -648,8 +650,8 @@ void Lowerer::lowerFunction(const Function &F, mlir::ModuleOp M,
    * output are both the object pointer (matlab_obj*). Tag each one
    * up-front so its slot is allocated ptr-typed and the binding is
    * recognised as a class instance by property / method dispatch. */
-  bool IsCtor = Owner && F.Name == Owner->Name;
-  bool IsMethod = Owner && !IsCtor;
+  bool IsCtor = Owner && !IsStatic && F.Name == Owner->Name;
+  bool IsMethod = Owner && !IsStatic && !IsCtor;
   llvm::SmallVector<mlir::Type, 4> InTys, OutTys;
   for (size_t i = 0; i < F.ParamRefs.size(); ++i) {
     Binding *P = F.ParamRefs[i];
@@ -1725,28 +1727,63 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
         return Obj;
       }
       /* Dot-method call: `obj.method(args)` where `obj` is pinned to a
-       * class and that class defines a method named `method`. Emit a
-       * direct call to the mangled free function, prepending obj as the
-       * first argument. */
+       * class whose own methods — or any ancestor's — contain `method`.
+       * The mangled name uses the *defining* class, so subclasses reach
+       * inherited methods via the ancestor's function without needing
+       * duplicate emission. */
+      auto findMethod = [](const ClassDef *Start, std::string_view Nm)
+          -> std::pair<const ClassDef *, const Function *> {
+        for (const ClassDef *CC = Start; CC; CC = CC->Super) {
+          for (const Function *Mm : CC->Methods)
+            if (Mm && Mm->Name == Nm) return {CC, Mm};
+        }
+        return {nullptr, nullptr};
+      };
+      auto findStatic = [](const ClassDef *Start, std::string_view Nm)
+          -> std::pair<const ClassDef *, const Function *> {
+        for (const ClassDef *CC = Start; CC; CC = CC->Super) {
+          for (const Function *Mm : CC->StaticMethods)
+            if (Mm && Mm->Name == Nm) return {CC, Mm};
+        }
+        return {nullptr, nullptr};
+      };
       if (auto *FA = dynamic_cast<const FieldAccess *>(C.Callee)) {
         const ClassDef *PCls = nullptr;
         if (auto *BN = dynamic_cast<const NameExpr *>(FA->Base))
           if (BN->Ref && BN->Ref->PinnedClass) PCls = BN->Ref->PinnedClass;
         if (PCls) {
-          const Function *Mth = nullptr;
-          for (const Function *Mm : PCls->Methods)
-            if (Mm && Mm->Name == FA->Field) { Mth = Mm; break; }
+          auto [Owner, Mth] = findMethod(PCls, FA->Field);
           if (Mth) {
             mlir::Value Obj = lowerExpr(*FA->Base);
             llvm::SmallVector<mlir::Value, 4> Args;
             Args.push_back(Obj);
             for (const Expr *A : C.Args) if (A) Args.push_back(lowerExpr(*A));
-            std::string Callee = std::string(PCls->Name) + "__" +
+            std::string Callee = std::string(Owner->Name) + "__" +
                                   std::string(FA->Field);
             mlir::NamedAttribute Cal(
                 mlir::StringAttr::get(&MCtx, "callee"),
                 mlir::StringAttr::get(&MCtx, Callee));
             return emitUnreg("matlab.call", Args, RT, L, {Cal});
+          }
+        }
+        /* Static method dispatch: `ClassName.method(args)` — the Base
+         * resolves to a Class binding, so lowerExpr on it would try to
+         * produce a value. Intercept here and route to the class's
+         * static method table (walking the inheritance chain). */
+        if (auto *BN = dynamic_cast<const NameExpr *>(FA->Base)) {
+          if (BN->Ref && BN->Ref->Kind == BindingKind::Class &&
+              BN->Ref->ClassDef) {
+            auto [Owner, Mth] = findStatic(BN->Ref->ClassDef, FA->Field);
+            if (Mth) {
+              llvm::SmallVector<mlir::Value, 4> Args;
+              for (const Expr *A : C.Args) if (A) Args.push_back(lowerExpr(*A));
+              std::string Callee = std::string(Owner->Name) + "__" +
+                                    std::string(FA->Field);
+              mlir::NamedAttribute Cal(
+                  mlir::StringAttr::get(&MCtx, "callee"),
+                  mlir::StringAttr::get(&MCtx, Callee));
+              return emitUnreg("matlab.call", Args, RT, L, {Cal});
+            }
           }
         }
       }
@@ -1757,14 +1794,11 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
           !C.Args.empty()) {
         if (auto *AN = dynamic_cast<const NameExpr *>(C.Args[0])) {
           if (AN->Ref && AN->Ref->PinnedClass) {
-            const ClassDef *PCls = AN->Ref->PinnedClass;
-            const Function *Mth = nullptr;
-            for (const Function *Mm : PCls->Methods)
-              if (Mm && Mm->Name == N->Name) { Mth = Mm; break; }
+            auto [Owner, Mth] = findMethod(AN->Ref->PinnedClass, N->Name);
             if (Mth) {
               llvm::SmallVector<mlir::Value, 4> Args;
               for (const Expr *A : C.Args) if (A) Args.push_back(lowerExpr(*A));
-              std::string Callee = std::string(PCls->Name) + "__" +
+              std::string Callee = std::string(Owner->Name) + "__" +
                                     std::string(N->Name);
               mlir::NamedAttribute Cal(
                   mlir::StringAttr::get(&MCtx, "callee"),

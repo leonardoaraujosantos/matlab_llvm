@@ -454,6 +454,10 @@ public:
   /* Populated by Sema. */
   Binding *Self = nullptr;
   int32_t ClassId = -1;
+  /* Resolved parent classdef (nullptr for root classes or when the
+   * super is the built-in `handle` pseudo-class, which we accept for
+   * syntax compatibility but give no runtime behavior to). */
+  ClassDef *Super = nullptr;
 
   ClassDef() : Node(NodeKind::ClassDef) {}
 };

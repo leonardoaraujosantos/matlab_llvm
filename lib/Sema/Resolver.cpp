@@ -78,6 +78,22 @@ void Resolver::resolve(TranslationUnit &TU) {
     int32_t PropId = 0;
     for (auto &P : C->Props) P.PropId = PropId++;
   }
+  /* Resolve superclass pointers. `handle` is MATLAB's root reference-
+   * semantics class and has no user-facing behavior in our runtime —
+   * we accept the syntax but leave Super = null. Any other name must
+   * resolve to another classdef declared in this TU. */
+  for (ClassDef *C : TU.Classes) {
+    if (C->SuperName.empty() || C->SuperName == "handle") continue;
+    Binding *SB = Global->lookup(C->SuperName);
+    if (SB && SB->Kind == BindingKind::Class && SB->ClassDef) {
+      C->Super = SB->ClassDef;
+    } else {
+      Diag.error(C->Range.Begin,
+                 std::string("unknown superclass '") +
+                     std::string(C->SuperName) + "' for class '" +
+                     std::string(C->Name) + "'");
+    }
+  }
 
   if (TU.ScriptNode) {
     Scope *ScriptScope = Sema.newScope(Global, "<script>");
@@ -418,14 +434,31 @@ void Resolver::resolveCallee(CallOrIndex &C, Scope *S) {
   }
 
   /* Dot-method call: `obj.method(args)` parses as CallOrIndex whose
-   * callee is a FieldAccess. If the base variable is pinned to a user
-   * class and that class defines a method `method`, classify as a Call
-   * so lowering emits a method dispatch rather than a matlab.subscript. */
+   * callee is a FieldAccess. Classify as Call so lowering emits a
+   * method dispatch rather than a matlab.subscript when either:
+   *   (a) the base variable is pinned to a class (instance method),
+   *   (b) the base name itself resolves to a Class binding (static
+   *       method), walking both chains up their Super ancestors. */
   if (auto *FA = dynamic_cast<FieldAccess *>(C.Callee)) {
     if (auto *BN = dynamic_cast<NameExpr *>(FA->Base)) {
       if (BN->Ref && BN->Ref->PinnedClass) {
-        for (matlab::Function *Mth : BN->Ref->PinnedClass->Methods) {
-          if (Mth && Mth->Name == FA->Field) {
+        for (ClassDef *CC = BN->Ref->PinnedClass; CC; CC = CC->Super) {
+          bool Found = false;
+          for (matlab::Function *Mth : CC->Methods)
+            if (Mth && Mth->Name == FA->Field) { Found = true; break; }
+          if (Found) {
+            C.Resolved = CallKind::Call;
+            return;
+          }
+        }
+      }
+      if (BN->Ref && BN->Ref->Kind == BindingKind::Class &&
+          BN->Ref->ClassDef) {
+        for (ClassDef *CC = BN->Ref->ClassDef; CC; CC = CC->Super) {
+          bool Found = false;
+          for (matlab::Function *Mth : CC->StaticMethods)
+            if (Mth && Mth->Name == FA->Field) { Found = true; break; }
+          if (Found) {
             C.Resolved = CallKind::Call;
             return;
           }
