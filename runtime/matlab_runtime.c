@@ -1677,30 +1677,47 @@ double matlab_ndims3(matlab_mat3 *A) {
 /* ---------------------------------------------------------------------- */
 /* Minimum classdef support.
  *
- * A matlab_obj is the generic user-defined-class descriptor: a class_id
- * tag (assigned by Sema, unique per classdef) plus a matlab_struct that
- * stores the property values using the same name/kind/value table we
- * already use for plain structs. That lets obj.Prop / obj.Prop = v
- * reuse the existing struct machinery — no new dispatch at runtime.
+ * A matlab_obj is the generic user-defined-class descriptor. Its layout
+ * is deliberately ABI-compatible with matlab_struct — every field of
+ * matlab_struct appears at the same offset, followed by a class_id tag
+ * at the tail. This means matlab_struct_get/set routines work
+ * *unchanged* when called with a matlab_obj* — handy because not every
+ * method parameter that happens to carry a class instance can be
+ * proven at compile time to be an obj, and we'd rather have the
+ * reasonable-default path than crash on mis-dispatch. The dedicated
+ * matlab_obj_* entries additionally expose the class_id.
  *
  * Methods are emitted as ordinary free functions with a name-mangled
  * form (see lowerer): `ClassName__method`. The first parameter is
  * always the object pointer. There is no virtual-dispatch table in v1
- * because inheritance and overrides are deferred; every call site
- * resolves statically from the pinned class recorded in Sema.
+ * because inheritance and overrides are resolved statically at each
+ * call site from the pinned class recorded in Sema.
  *
  * All objects are handle-shaped (reference semantics) — MATLAB value
  * classes copy-on-modify, which would require a deeper change to our
  * f64-plus-pointer data model, so they are deferred. */
-typedef struct matlab_obj_s {
+struct matlab_obj_s {
+    /* matlab_struct fields — MUST MATCH matlab_struct_s exactly. */
+    int32_t nfields;
+    int32_t capacity;
+    char **names;
+    int32_t *kinds;
+    double *f64_vals;
+    void **ptr_vals;
+    /* Class tag — appended so the struct-compatible prefix stays
+     * well-defined. */
     int32_t class_id;
-    matlab_struct *props;
-} matlab_obj;
+};
+typedef struct matlab_obj_s matlab_obj;
 
 matlab_obj *matlab_obj_new(int32_t class_id) {
     matlab_obj *o = (matlab_obj *)calloc(1, sizeof(*o));
+    o->capacity = MATLAB_STRUCT_CAP_INIT;
+    o->names    = (char **)calloc((size_t)o->capacity, sizeof(char *));
+    o->kinds    = (int32_t *)calloc((size_t)o->capacity, sizeof(int32_t));
+    o->f64_vals = (double *)calloc((size_t)o->capacity, sizeof(double));
+    o->ptr_vals = (void **)calloc((size_t)o->capacity, sizeof(void *));
     o->class_id = class_id;
-    o->props = matlab_struct_new();
     return o;
 }
 
@@ -1708,24 +1725,24 @@ double matlab_obj_class_id(matlab_obj *o) {
     return o ? (double)o->class_id : 0.0;
 }
 
+/* Each accessor just forwards to the matlab_struct_* variant, because
+ * the layout is identical through the struct prefix. Keeping these
+ * as distinct symbols lets the frontend pick the name that reflects
+ * the programmer's intent (property vs. struct field). */
 void matlab_obj_set_f64(matlab_obj *o, const char *name, int64_t len, double v) {
-    if (!o) return;
-    matlab_struct_set_f64(o->props, name, len, v);
+    matlab_struct_set_f64((matlab_struct *)o, name, len, v);
 }
 
 void matlab_obj_set_mat(matlab_obj *o, const char *name, int64_t len, matlab_mat *m) {
-    if (!o) return;
-    matlab_struct_set_mat(o->props, name, len, m);
+    matlab_struct_set_mat((matlab_struct *)o, name, len, m);
 }
 
 double matlab_obj_get_f64(matlab_obj *o, const char *name, int64_t len) {
-    if (!o) return 0.0;
-    return matlab_struct_get_f64(o->props, name, len);
+    return matlab_struct_get_f64((matlab_struct *)o, name, len);
 }
 
 matlab_mat *matlab_obj_get_mat(matlab_obj *o, const char *name, int64_t len) {
-    if (!o) return mat_alloc(0, 0);
-    return matlab_struct_get_mat(o->props, name, len);
+    return matlab_struct_get_mat((matlab_struct *)o, name, len);
 }
 
 /* ---------------------------------------------------------------------- */

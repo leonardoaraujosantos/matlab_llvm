@@ -659,6 +659,11 @@ void Lowerer::lowerFunction(const Function &F, mlir::ModuleOp M,
       InTys.push_back(PtrTyArg);
     } else if (IsMethod && i == 0) {
       InTys.push_back(PtrTyArg);
+    } else if (P && P->PinnedClass) {
+      /* Operator-overload methods may pin additional params to the
+       * same class — type them as ptr so property access routes
+       * through matlab_obj_get instead of the struct path. */
+      InTys.push_back(PtrTyArg);
     } else {
       InTys.push_back(mirTy(P && P->InferredType ? P->InferredType : TC.any()));
     }
@@ -706,6 +711,7 @@ void Lowerer::lowerFunction(const Function &F, mlir::ModuleOp M,
     if (!Bnd) continue;
     bool IsVarArg = IsVariadic && i + 1 == F.ParamRefs.size();
     bool IsSelfParam = IsMethod && i == 0;
+    bool IsClassParam = Bnd->PinnedClass != nullptr;
     mlir::Value Slot;
     if (IsVarArg) {
       mlir::NamedAttribute NA(
@@ -714,16 +720,18 @@ void Lowerer::lowerFunction(const Function &F, mlir::ModuleOp M,
       Slot = emitUnreg("matlab.alloc", {}, PtrTyArg,
                        loc(F.Range), {NA});
       CellBindings.insert(Bnd);
-    } else if (IsSelfParam) {
-      /* `obj` parameter of an ordinary method: always a matlab_obj*. */
+    } else if (IsSelfParam || IsClassParam) {
+      /* `obj` parameter of an ordinary method — or any other param
+       * pinned to a user class by the resolver (e.g. the second
+       * operand of an operator overload). Slot is ptr-typed so
+       * property / method dispatch routes through matlab_obj_*. */
       mlir::NamedAttribute NA(
           mlir::StringAttr::get(&MCtx, "name"),
           mlir::FlatSymbolRefAttr::get(&MCtx, std::string(Bnd->Name)));
       Slot = emitUnreg("matlab.alloc", {}, PtrTyArg,
                        loc(F.Range), {NA});
-      /* Binding is already PinnedClass'd by the resolver for methods;
-       * keep that in sync here too in case Sema didn't run. */
-      Bnd->PinnedClass = const_cast<ClassDef *>(Owner);
+      if (IsSelfParam && !Bnd->PinnedClass)
+        Bnd->PinnedClass = const_cast<ClassDef *>(Owner);
     } else {
       const Type *T = Bnd->InferredType ? Bnd->InferredType : TC.any();
       Slot = emitAlloc(T, Bnd->Name, loc(F.Range));
@@ -1651,6 +1659,71 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
           mlir::StringAttr::get(&MCtx, "matlab_string_concat"));
       return emitUnreg("matlab.call_builtin", {LHS, RHS}, PtrTy, L, {Cal});
     }
+    /* Operator overloading: when either operand is a class-pinned
+     * binding whose class defines a method named after the operator
+     * (e.g. `plus`, `minus`, `times`, `mtimes`, `eq`, `ne`, `lt`,
+     * `le`, `gt`, `ge`), dispatch to that method. MATLAB picks the
+     * dominant class when both operands are objects of different
+     * classes; for v1 we just prefer the LHS's class. */
+    auto pinnedFromExpr = [](const Expr *X) -> const ClassDef * {
+      if (auto *NE = dynamic_cast<const NameExpr *>(X))
+        if (NE->Ref && NE->Ref->PinnedClass) return NE->Ref->PinnedClass;
+      return nullptr;
+    };
+    const ClassDef *OpCls = pinnedFromExpr(Bi.LHS);
+    if (!OpCls) OpCls = pinnedFromExpr(Bi.RHS);
+    if (OpCls) {
+      llvm::StringRef OpMethod;
+      switch (Bi.Op) {
+        case BinOp::Add:          OpMethod = "plus";     break;
+        case BinOp::Sub:          OpMethod = "minus";    break;
+        case BinOp::Mul:          OpMethod = "mtimes";   break;
+        case BinOp::Div:          OpMethod = "mrdivide"; break;
+        case BinOp::LeftDiv:      OpMethod = "mldivide"; break;
+        case BinOp::Pow:          OpMethod = "mpower";   break;
+        case BinOp::ElemMul:      OpMethod = "times";    break;
+        case BinOp::ElemDiv:      OpMethod = "rdivide";  break;
+        case BinOp::ElemLeftDiv:  OpMethod = "ldivide";  break;
+        case BinOp::ElemPow:      OpMethod = "power";    break;
+        case BinOp::Eq:           OpMethod = "eq";       break;
+        case BinOp::Ne:           OpMethod = "ne";       break;
+        case BinOp::Lt:           OpMethod = "lt";       break;
+        case BinOp::Le:           OpMethod = "le";       break;
+        case BinOp::Gt:           OpMethod = "gt";       break;
+        case BinOp::Ge:           OpMethod = "ge";       break;
+        default: break;
+      }
+      if (!OpMethod.empty()) {
+        const ClassDef *Owner = nullptr;
+        std::string_view OpSV(OpMethod.data(), OpMethod.size());
+        for (const ClassDef *CC = OpCls; CC; CC = CC->Super) {
+          for (const Function *Mm : CC->Methods)
+            if (Mm && Mm->Name == OpSV) { Owner = CC; break; }
+          if (Owner) break;
+        }
+        if (Owner) {
+          mlir::Value LHS = Bi.LHS ? lowerExpr(*Bi.LHS) : mlir::Value{};
+          mlir::Value RHS = Bi.RHS ? lowerExpr(*Bi.RHS) : mlir::Value{};
+          std::string Callee = std::string(Owner->Name) + "__" +
+                                std::string(OpMethod);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, Callee));
+          /* Pick a concrete result type: comparison operators return
+           * f64 (logical 0/1); arithmetic operators return a class
+           * instance (matlab_obj*). Leaving RT as `none` would force
+           * the slot receiving this value to stay none-typed through
+           * all the pipelines. */
+          bool IsCmp = (Bi.Op == BinOp::Eq || Bi.Op == BinOp::Ne ||
+                        Bi.Op == BinOp::Lt || Bi.Op == BinOp::Le ||
+                        Bi.Op == BinOp::Gt || Bi.Op == BinOp::Ge);
+          mlir::Type ResTy = IsCmp
+              ? (mlir::Type)mlir::Float64Type::get(&MCtx)
+              : (mlir::Type)mlir::LLVM::LLVMPointerType::get(&MCtx);
+          return emitUnreg("matlab.call", {LHS, RHS}, ResTy, L, {Cal});
+        }
+      }
+    }
     mlir::Value LHS = Bi.LHS ? lowerExpr(*Bi.LHS) : mlir::Value{};
     mlir::Value RHS = Bi.RHS ? lowerExpr(*Bi.RHS) : mlir::Value{};
     /* Eagerly refine the result type when both operands are primitive
@@ -1816,6 +1889,31 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
                   mlir::StringAttr::get(&MCtx, "callee"),
                   mlir::StringAttr::get(&MCtx, Callee));
               return emitUnreg("matlab.call", Args, RT, L, {Cal});
+            }
+          }
+        }
+      }
+      /* disp(obj) where `obj` is a class instance whose class (or any
+       * ancestor) defines `disp` as a method — route to the overload
+       * instead of the generic matrix/scalar disp. */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          N->Name == "disp" && C.Args.size() == 1) {
+        if (auto *AN = dynamic_cast<const NameExpr *>(C.Args[0])) {
+          if (AN->Ref && AN->Ref->PinnedClass) {
+            const ClassDef *Owner = nullptr;
+            for (const ClassDef *CC = AN->Ref->PinnedClass; CC; CC = CC->Super) {
+              for (const Function *Mm : CC->Methods)
+                if (Mm && Mm->Name == "disp") { Owner = CC; break; }
+              if (Owner) break;
+            }
+            if (Owner) {
+              mlir::Value Obj = lowerExpr(*C.Args[0]);
+              std::string Callee = std::string(Owner->Name) + "__disp";
+              mlir::NamedAttribute Cal(
+                  mlir::StringAttr::get(&MCtx, "callee"),
+                  mlir::StringAttr::get(&MCtx, Callee));
+              return emitUnreg("matlab.call", {Obj},
+                               mlir::NoneType::get(&MCtx), L, {Cal});
             }
           }
         }

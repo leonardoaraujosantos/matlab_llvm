@@ -107,12 +107,41 @@ void Resolver::resolve(TranslationUnit &TU) {
 
   /* Resolve class method bodies. Each method is an ordinary Function
    * whose first parameter (`obj`) is typed as the owning class, so
-   * property accesses route correctly. */
+   * property accesses route correctly. Operator-overload methods that
+   * take a second class operand (e.g. plus(a, b)) reach the right
+   * dispatch path via matlab_obj's struct-compatible layout — the
+   * field-access helpers work whether the caller went through
+   * matlab_obj_* or matlab_struct_*. */
+  auto isBinaryObjectOperator = [](std::string_view N) {
+    return N == "plus" || N == "minus" ||
+           N == "eq" || N == "ne" || N == "lt" || N == "le" ||
+           N == "gt" || N == "ge" ||
+           N == "and" || N == "or";
+  };
   for (ClassDef *C : TU.Classes) {
     for (Function *M : C->Methods) {
       resolveFunction(*M, Global);
-      if (!M->ParamRefs.empty())
-        M->ParamRefs.front()->PinnedClass = C;
+      /* Constructor: `function obj = ClassName(args)`. The obj is an
+       * Output — first Input is an ordinary user arg, not the self
+       * pointer. Pin the Output here; the first Input is left alone.
+       * Non-constructor: first Input is the self `obj` — pin it. */
+      bool IsCtor = M->Name == C->Name;
+      if (IsCtor) {
+        if (!M->OutputRefs.empty() && M->OutputRefs.front())
+          M->OutputRefs.front()->PinnedClass = C;
+      } else {
+        if (!M->ParamRefs.empty() && M->ParamRefs.front())
+          M->ParamRefs.front()->PinnedClass = C;
+      }
+      /* For binary-object operators, also pin the second param — both
+       * operands are expected to be the same class in those cases,
+       * and pinning lets property reads route through the class path
+       * even when the method body uses `b.field`. Scalar-mixing ops
+       * like mtimes/times leave the second param alone: it might be a
+       * scalar (a * 3). */
+      if (!IsCtor && isBinaryObjectOperator(M->Name) &&
+          M->ParamRefs.size() >= 2 && M->ParamRefs[1])
+        M->ParamRefs[1]->PinnedClass = C;
     }
     for (Function *M : C->StaticMethods) {
       resolveFunction(*M, Global);
@@ -281,17 +310,50 @@ void Resolver::resolveStmt(Stmt &St, Scope *S) {
      * direct constructor call `ClassName(args)`. Later lookups of
      * `lhs.prop` or `lhs.method(args)` then dispatch against this class
      * without dynamic type discovery. */
-    if (A.RHS && A.RHS->Kind == NodeKind::CallOrIndex) {
-      auto *Cx = static_cast<CallOrIndex *>(A.RHS);
-      if (auto *Nx = dynamic_cast<NameExpr *>(Cx->Callee)) {
-        if (Nx->Ref && Nx->Ref->Kind == BindingKind::Class &&
-            Nx->Ref->ClassDef) {
-          for (Expr *L : A.LHS) {
-            if (auto *LN = dynamic_cast<NameExpr *>(L)) {
-              if (LN->Ref && LN->Ref->Kind != BindingKind::Class)
-                LN->Ref->PinnedClass = Nx->Ref->ClassDef;
-            }
-          }
+    /* Walk the RHS to find a class hint. A direct ClassName(args)
+     * constructor call obviously produces an instance of that class.
+     * A BinaryOp where either operand is pinned to a class is treated
+     * as producing another instance of that class (the operator
+     * overload's assumed return type for arithmetic ops). Similarly a
+     * dot-method call `obj.m(args)` on a pinned obj returns... we
+     * don't know, so skip. Returning a new instance is the common
+     * pattern for v1 and matches the BasicClass / Vec2 examples. */
+    std::function<ClassDef *(Expr *)> pinnedOfRhs =
+        [&pinnedOfRhs](Expr *RE) -> ClassDef * {
+      if (!RE) return nullptr;
+      if (auto *NE = dynamic_cast<NameExpr *>(RE)) {
+        if (NE->Ref && NE->Ref->PinnedClass) return NE->Ref->PinnedClass;
+        return nullptr;
+      }
+      if (auto *CX = dynamic_cast<CallOrIndex *>(RE)) {
+        if (auto *NX = dynamic_cast<NameExpr *>(CX->Callee)) {
+          if (NX->Ref && NX->Ref->Kind == BindingKind::Class &&
+              NX->Ref->ClassDef) return NX->Ref->ClassDef;
+        }
+      }
+      if (auto *Bi = dynamic_cast<BinaryOpExpr *>(RE)) {
+        if (auto *L = pinnedOfRhs(Bi->LHS)) {
+          bool IsCmp =
+              Bi->Op == BinOp::Eq || Bi->Op == BinOp::Ne ||
+              Bi->Op == BinOp::Lt || Bi->Op == BinOp::Le ||
+              Bi->Op == BinOp::Gt || Bi->Op == BinOp::Ge;
+          if (!IsCmp) return L;
+        }
+        if (auto *R = pinnedOfRhs(Bi->RHS)) {
+          bool IsCmp =
+              Bi->Op == BinOp::Eq || Bi->Op == BinOp::Ne ||
+              Bi->Op == BinOp::Lt || Bi->Op == BinOp::Le ||
+              Bi->Op == BinOp::Gt || Bi->Op == BinOp::Ge;
+          if (!IsCmp) return R;
+        }
+      }
+      return nullptr;
+    };
+    if (ClassDef *RhsCls = pinnedOfRhs(A.RHS)) {
+      for (Expr *L : A.LHS) {
+        if (auto *LN = dynamic_cast<NameExpr *>(L)) {
+          if (LN->Ref && LN->Ref->Kind != BindingKind::Class)
+            LN->Ref->PinnedClass = RhsCls;
         }
       }
     }
