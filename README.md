@@ -51,13 +51,40 @@ disp(inv(A));         % Gauss-Jordan via LU
 disp(svd([1 2; 3 4]));            % [5.4650; 0.3660]
 A = [2 -1 0; -1 2 -1; 0 -1 2];
 disp(eig(A));                     % [0.5858; 2; 3.4142]  (2 ± √2 and 2)
+[V, D] = eig(A);                  % two-return form dispatches via nargout
+disp(V * D * V');                 % ≈ A (reconstruction)
+```
+
+```matlab
+% Classic for-loop accumulator — sequential for/while lower to scf.while.
+s = 0;
+for k = 2:2:10
+    s = s + k;
+end
+disp(s);                          % 30
+
+% Recursive fib with two self-calls in one expression.
+disp(fib(12));                    % 144
+function y = fib(n)
+    if n < 2, y = n; else, y = fib(n-1) + fib(n-2); end
+end
+```
+
+```matlab
+% Function handles for builtins, user functions, and anon with captures.
+k = 5;
+f = @(x) x + k;                   % scalar by-value capture at @-time
+g = @sq;                          % user-function handle
+h = @sin;                         % runtime scalar-math handle
+disp(f(3));  disp(g(6));  disp(h(0));   % 8, 36, 0
+function y = sq(x), y = x * x; end
 ```
 
 No MathWorks source, no Octave dependency, no numerics library
-dependency. Just C++20, MLIR (22.1 from Homebrew), and a ~700-line C
+dependency. Just C++20, MLIR (22.1 from Homebrew), and a ~1400-line C
 runtime shim that wraps libc, pthreads, a heap-allocated `matlab_mat`
 descriptor, and a global mutex for stdout and reductions. The entire
-runtime — including matmul, inverse, solve, determinant — is
+runtime — including matmul, inverse, solve, determinant, SVD, eig — is
 transpilable as a single self-contained file.
 
 ## Pipeline
@@ -70,7 +97,7 @@ flowchart LR
   ast --> sema["Sema<br/>(scope tree,<br/>type lattice,<br/>fixpoint inference)"]
   sema --> mir["MIR<br/>(in-house SSA,<br/>zero-dep,<br/>reference/diagnostic IR)"]
   sema --> mlir["MLIR<br/>(matlab + func + scf +<br/>arith + tensor + llvm<br/>dialects)"]
-  mlir --> passes["MLIR passes<br/>(slot promotion,<br/>scalar→arith,<br/>outline parfor,<br/>lower user calls,<br/>lower anon calls,<br/>lower tensor ops,<br/>lower I/O,<br/>scalar slots→alloca)"]
+  mlir --> passes["MLIR passes<br/>(slot promotion,<br/>scalar→arith,<br/>outline parfor,<br/>lower seq loops,<br/>lower user calls,<br/>lower anon calls,<br/>lower tensor ops,<br/>lower I/O,<br/>scalar slots→alloca)"]
   passes --> llvmir["LLVM IR"]
   llvmir --> exe["executable<br/>(clang + matlab_runtime.c)"]
 ```
@@ -176,6 +203,7 @@ flowchart TD
       LTO[LowerTensorOps]
       LUC[LowerUserCalls]
       LPF[OutlineParfor]
+      LSL[LowerSeqLoops]
       LAC[LowerAnonCalls]
       LIO[LowerIO]
       LSS[LowerScalarSlots]
@@ -268,10 +296,12 @@ threads deterministically prints 55.
 | `while` (sequential) | ✅ | ✅ | ✅ `matlab.while` → `scf.while` | — |
 | `break` / `continue` | ✅ (parsed) | ✅ | ❌ not lowered — loops must exit by condition | — |
 | `switch / case / otherwise` | ✅ | ✅ | ✅ (lowers to if-chain) | ✅ |
-| `break`, `continue`, `return` | ✅ | ✅ | ✅ | ✅ |
+| `return` | ✅ | ✅ | ✅ | ✅ |
 | `function y = f(x)` definitions (incl. multi-return) | ✅ | ✅ | ✅ | ✅ |
 | User-defined function calls — scalar | ✅ | ✅ | ✅ (monomorphized) | ✅ |
-| User-defined function calls — chained / recursive | ✅ | ✅ | ✅ | ✅ |
+| User-defined function calls — chained / recursive (single + multi self-call) | ✅ | ✅ | ✅ `fib(n-1)+fib(n-2)` closes under self-recursion speculation | ✅ |
+| `[V, D] = eig(A)` multi-return via `nargout` | ✅ | ✅ | ✅ routed to `matlab_eig_V`/`matlab_eig_D` | ✅ |
+| Implicit display (`x = 1` with no `;`) | ✅ | ✅ | ✅ emits `disp("x =")` + `disp(value)` | ✅ |
 | **`parfor i = 1:N`** (one pthread per iteration) | ✅ | ✅ | ✅ (outlined body) | ✅ |
 | **`parfor` with `x = x + rhs` reductions** | ✅ | ✅ | ✅ (atomic add) | ✅ |
 | Anonymous functions `@(x) x^2` | ✅ | ✅ | ✅ outlined to `llvm.func` | ✅ |
@@ -348,9 +378,9 @@ chapters. Here's how this compiler maps to it.
 | Powers and exponentials (`.^`, `exp`, `log`, `A^n`) | ✅ element-wise plus integer matrix power via repeated matmul |
 | Solving linear systems `A\b`, `A/b`, `inv(A)`, `det(A)` | ✅ pure-C LU with partial pivoting, no BLAS/LAPACK dep |
 | Singular values `svd(A)` | ✅ one-sided Jacobi SVD, pure C, ~100 LoC |
-| Eigenvalues `eig(A)` | ✅ Jacobi rotations for symmetric matrices; non-symmetric inputs are symmetrized as `(A + Aᵀ)/2` (correct for symmetric, approximate otherwise). General-case QR iteration still open |
+| Eigenvalues `eig(A)` / `[V, D] = eig(A)` | ✅ Jacobi rotations for symmetric matrices (both single-return and two-return via `nargout`); non-symmetric inputs are symmetrized as `(A + Aᵀ)/2` (correct for symmetric, approximate otherwise). General-case QR iteration still open |
 | Random number arrays (`rand`, `randn`) | ✅ runtime uses xorshift64 + Box-Muller; seed via `matlab_rng_state` |
-| Function handles (create, pass, call) | ✅ `@(x) ...` with scalar captures + `@sin`-style handles both execute |
+| Function handles (create, pass, call) | ✅ `@(x) ...` with scalar captures, `@sin`-style builtin handles, and `@myFunc` user-function handles all execute |
 | Vectorization (whole-matrix ops replacing loops) | ✅ element-wise add/sub/emul/ediv/epow all dispatch to runtime |
 
 ### Chapter 4 — Graphics
@@ -363,13 +393,13 @@ chapters. Here's how this compiler maps to it.
 |---|:-:|
 | `if / elseif / else` | ✅ |
 | `switch / case / otherwise` | ✅ |
-| `for / while / continue / break` | ✅ sequential `for`/`while` lower to `scf.while`; `parfor` runs on pthreads; `break`/`continue` not yet lowered |
+| `for / while / continue / break` | ✅ sequential `for`/`while` lower to `scf.while` (supports step + negative step); `parfor` runs on pthreads; `break`/`continue` not yet lowered |
 | `return` | ✅ |
 | Vectorization | ✅ whole-matrix ops execute; codegen still doesn't auto-vectorize loops |
 | Preallocation (`zeros(n,n)`) | ✅ runtime allocates and zeros |
 | Scripts | ✅ lowered to `@main` |
 | Functions (named) | ✅ |
-| Local / nested / private / anonymous functions | ✅ named + nested parsed; anonymous created + called (scalar captures supported) |
+| Local / nested / private / anonymous functions | ✅ named + nested parsed; anonymous created + called (scalar captures supported); `@myFunc` handles to user functions fold to direct calls |
 | Global variables | ⚠️ parsed, not materialized |
 | Command vs function syntax | ✅ disambiguated at parse time |
 
@@ -425,7 +455,9 @@ flowchart TD
   Mod --> SlotProm[SlotPromotion<br/>intra-block mem2reg]
   SlotProm --> ToArith[LowerScalarsToArith<br/>matlab.add/mul → arith.addf/mulf]
   ToArith --> OutlinePF[OutlineParfor<br/>→ llvm.func + dispatcher]
-  OutlinePF --> UserCalls[LowerUserCalls<br/>monomorphize signatures<br/>matlab.call → func.call]
+  OutlinePF --> SeqLoops[LowerSeqLoops<br/>matlab.for/while → scf.while]
+  SeqLoops --> AnonCalls[LowerAnonCalls<br/>make_anon → llvm.func,<br/>make_handle → addressof/call]
+  AnonCalls --> UserCalls[LowerUserCalls<br/>monomorphize signatures<br/>matlab.call → func.call]
   UserCalls --> TensorOps[LowerTensorOps<br/>matrix ops → runtime calls<br/>tensor&lt;MxN&gt; → !llvm.ptr]
   TensorOps --> ScalarSlots[LowerScalarSlots<br/>matlab.alloc → llvm.alloca]
   ScalarSlots --> IO[LowerIO<br/>const_char → llvm.global<br/>disp/fprintf → llvm.call]
@@ -440,6 +472,13 @@ Noteworthy passes:
   outlines the body into a private `llvm.func`, packs reduction
   pointers into a state struct, emits a call to
   `matlab_parfor_dispatch`.
+- **`LowerSeqLoops`** (`LowerSeqLoops.cpp`) — sequential `matlab.for`
+  (over a `matlab.range`) becomes an `scf.while` carrying one f64
+  induction value, with a cond region that picks `OLE` for positive
+  step and `OGE` for negative step; `matlab.while` maps directly to
+  `scf.while`. Runs after `OutlineParfor` (so `matlab.parfor` is
+  already consumed) and before `LowerTensorOps` (which would erase
+  the `matlab.range` producer).
 - **`LowerUserCalls`** (`LowerUserCalls.cpp`) — iterates to fixpoint:
   collects call-site arg types, refines `func.func` signatures,
   forward-propagates concrete types through unregistered `matlab.*`
@@ -450,9 +489,14 @@ Noteworthy passes:
   taking `(captures..., params...)` as f64 arguments, replaces the
   op with `llvm.mlir.addressof @__anon_N`, and rewrites matching
   `matlab.call_indirect` sites into `llvm.call`-through-pointer.
-  A pre-step also resolves `matlab.make_handle {callee="sin"}`-style
-  ops to `addressof @matlab_sin_s` for the scalar math runtime
-  entries (`sin`, `cos`, `tan`, `exp`, `log`, `sqrt`, `abs`).
+  Pre-steps handle two handle flavours: `matlab.make_handle {callee="sin"}`
+  resolves to `addressof @matlab_sin_s` for the scalar math runtime
+  entries (`sin`, `cos`, `tan`, `exp`, `log`, `sqrt`, `abs`); a
+  user-function handle (`f = @mySq; f(3)`) is folded by tracing the
+  `call_indirect` operand through one level of `matlab.load`/
+  `matlab.store` back to the originating `make_handle`, then
+  replacing the indirect call with a direct `matlab.call @mySq` so
+  `LowerUserCalls` picks up the signature refinement.
 - **`LowerTensorOps`** (`LowerTensorOps.cpp`) — every tensor-typed
   `matlab.*` op becomes an `llvm.call` against the matrix runtime.
   Literal `[...]` matrices materialize as a stack array of doubles
@@ -474,7 +518,7 @@ implementation that doesn't pull in a platform-specific numerics
 vendor. The tradeoff is performance (a naive O(N³) matmul is ~10–100×
 slower than OpenBLAS for large matrices), not correctness.
 
-~700 lines of C. Entries wired today:
+~1400 lines of C. Entries wired today:
 
 **I/O**
 
@@ -509,7 +553,12 @@ we leak).
   matrix, returns descending singular values), `matlab_eig` (Jacobi
   for symmetric matrices, ascending eigenvalues; non-symmetric inputs
   are symmetrized to `(A + Aᵀ)/2` — correct for symmetric, garbage for
-  matrices with complex eigenvalues).
+  matrices with complex eigenvalues). `matlab_eig_V` / `matlab_eig_D`
+  share a `jacobi_sym` helper so `[V, D] = eig(A)` works end-to-end —
+  V holds eigenvectors as columns ordered by ascending eigenvalue,
+  D is a diagonal matrix of the same eigenvalues.
+- Slicing: `matlab_slice1` (1-D index, including logical masks and
+  colon), `matlab_slice2` (2-D row × col index).
 - Scalar indexing: `matlab_subscript1_s`, `matlab_subscript2_s`
   (1-based, out-of-range returns 0).
 
@@ -521,7 +570,7 @@ we leak).
 
 ## Testing
 
-Two CTest suites, ~150 goldens total:
+Two CTest suites, ~158 goldens total:
 
 | Suite | Driver flag | Tests | What it checks |
 |---|---|:-:|---|
@@ -533,7 +582,7 @@ Two CTest suites, ~150 goldens total:
 | `Opt` | `-emit-mlir -opt` | 5 | Slot promotion + constant folding through `arith` |
 | `Programs` | `-emit-mlir -opt` | 31 | Medium programs (matrix ops, loops, functions) |
 | `Errors` | `-dump-ast` | 4 | Parser/Sema diagnostics |
-| `Run` | `-emit-llvm` + link + exec | 73 | End-to-end stdout goldens — I/O, parfor, matrix math, linear algebra, SVD/eig, reductions, slicing, indexed store, logical indexing, anon calls (+ captures), `@name` handles, `clear`, user calls |
+| `Run` | `-emit-llvm` + link + exec | 81 | End-to-end stdout goldens — I/O, parfor, sequential for/while, matrix math, linear algebra, SVD/eig (incl. `[V,D]`), reductions, slicing, indexed store, logical indexing, anon calls + scalar captures, `@name` + `@myFunc` handles, multi-self-recursion, implicit display, `clear`, user calls |
 
 ```bash
 ctest --test-dir build
@@ -572,33 +621,51 @@ justfile           task runner: build / test / compile / mlir / examples / ...
 
 ## Roadmap, ordered by what unblocks the most programs
 
-1. **General-case `eig`** — today we do Jacobi for symmetric matrices
+1. **`break` / `continue`** — parsed as `matlab.break` / `matlab.continue`
+   but not yet lowered. Sequential `for`/`while` bodies have to exit by
+   condition today. Needs an scf.while exit-on-condition extension or a
+   CFG lowering with explicit jump blocks.
+2. **Structs with runtime layout** — `s.x = …` parses and typechecks
+   but the field-access lowering is still a placeholder. A boxed
+   `{ field_name_table, value_ptr_table }` descriptor unblocks
+   `s.field` reads/writes and `s.(name)` dynamic access.
+3. **Cells `{…}` / `varargin` / `varargout`** — parsed, typed as
+   `cell`, no runtime. Needs a tagged-value container (like a
+   `matlab_mat*` with a dtype tag) so heterogeneous collections work.
+4. **Real `string` type** (vs char array) — `"…"` parses but runtime
+   treats it the same as `'…'`. Needs a distinct descriptor +
+   `strsplit`/`+` concatenation entry points.
+5. **Multi-callsite polymorphism** — today a function called from two
+   sites with different concrete types stays `none`. Template-style
+   specialization per call signature would unblock this.
+6. **Non-scalar anon captures** — today scalar (f64) captures work by
+   spilling the value at @-time and threading it through call_indirect
+   as a leading argument. Matrix captures would need pointer captures
+   + reference-count discipline (or a deep copy at @-time).
+7. **General-case `eig`** — today we do Jacobi for symmetric matrices
    (and symmetrize non-symmetric inputs, which is approximate).
    QR iteration with Wilkinson shifts would handle asymmetric matrices
    with real spectra; complex-eigenvalue support would need 2×2 block
    handling. Still pure C.
    `pinv`, `rank`, `null` are natural byproducts of extending SVD
    to a full `[U, S, V]` return.
-2. **Row deletion** `A(2, :) = []` — runtime entries
+8. **Row deletion** `A(2, :) = []` — runtime entries
    (`matlab_erase_rows`, `matlab_erase_cols`) are ready; need the
    frontend to detect the `= []` pattern and route to them.
-3. **`break` / `continue`** — parsed as `matlab.break` / `matlab.continue`
-   but not yet lowered. Sequential `for`/`while` bodies have to exit by
-   condition today. Needs an scf.while exit-on-condition extension or a
-   CFG lowering with explicit jump blocks.
-4. **Non-scalar anon captures** — today scalar (f64) captures work by
-   spilling the value at @-time and threading it through call_indirect
-   as a leading argument. Matrix captures would need pointer captures
-   + reference-count discipline (or a deep copy at @-time).
-6. **`classdef`**, cells, structs with a proper boxed-value layout.
-7. **Multi-callsite polymorphism** — today a function called from two
-   sites with different concrete types stays `none`. Template-style
-   specialization per call signature would unblock this.
-8. **Optional `-DMATLAB_USE_BLAS`** — link CBLAS as an opt-in fast
-   path for matmul / LU. The default pure-C path stays intact so the
-   runtime remains single-file and transpilable.
-9. **REPL / Live Scripts** — out of scope for now.
-10. **Plotting** — out of scope; would need a plotting backend.
+9. **N-dim arrays (>2D)** — Sema models rank but the tensor-ops
+   runtime assumes `rows × cols`. Needs a stride-aware descriptor
+   plus N-dim indexing in the runtime.
+10. **Integer types** (`int32`, `uint8`, …) end-to-end — Sema has them
+    in the lattice but the runtime is f64-only. Needs typed load/store
+    + op dispatch.
+11. **`global` / `persistent` materialization**, `try / catch` with a
+    runtime error object, `classdef` (OOP) — larger language projects,
+    each a mini-subsystem.
+12. **Optional `-DMATLAB_USE_BLAS`** — link CBLAS as an opt-in fast
+    path for matmul / LU. The default pure-C path stays intact so the
+    runtime remains single-file and transpilable.
+13. **REPL / Live Scripts** — out of scope for now.
+14. **Plotting** — out of scope; would need a plotting backend.
 
 ## Non-goals (for now)
 
