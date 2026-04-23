@@ -944,6 +944,18 @@ void Lowerer::lowerStmt(const Stmt &St) {
       return false;
     };
     bool RhsIsString = isStringExpr(A.RHS);
+    /* String-producing builtins also turn the LHS into a string
+     * binding: fgetl returns a matlab_string*, so `s = fgetl(fid)`
+     * must route disp(s), strlen(s), etc. through the string
+     * runtime. */
+    if (!RhsIsString && A.RHS && A.RHS->Kind == NodeKind::CallOrIndex) {
+      auto *CX = static_cast<const CallOrIndex *>(A.RHS);
+      if (auto *NX = dynamic_cast<const NameExpr *>(CX->Callee)) {
+        if (NX->Ref && NX->Ref->Kind == BindingKind::Builtin &&
+            NX->Name == "fgetl")
+          RhsIsString = true;
+      }
+    }
 
     /* Track 3-D bindings: RHS is a call to zeros/ones with 3 args. */
     bool RhsIsThreeD = false;

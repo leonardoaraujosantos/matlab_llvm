@@ -174,7 +174,8 @@ Runtime built-ins include: linear algebra (`*`, `\`, `/`, `inv`,
 ops (`transpose`, `diag`, `reshape`, `repmat`); reductions (`sum`);
 element-wise math (`exp`, `log`, `sin`, `cos`, `tan`, `sqrt`, `abs`);
 predicates (`isempty`, `isequal`, `find`); I/O (`disp`, `fprintf`
-up to 4 args, `input`, `error`, `warning`).
+up to 4 args, `input`, `error`, `warning`); file I/O (`fopen`,
+`fclose`, `fprintf(fid, ...)`, `fgetl`, `feof`).
 
 **Not yet:** `classdef` / OOP, struct arrays, 2-D cells,
 `varargout`, complex numbers, 3-D vector slicing (only scalar

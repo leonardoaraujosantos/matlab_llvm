@@ -39,6 +39,7 @@ void Resolver::registerBuiltins() {
     "svd", "eig", "inv", "pinv", "det", "rank",
     "arrayfun", "cellfun",
     "nargin", "nargout", "varargin", "varargout",
+    "fopen", "fclose", "fgetl", "feof",
   }) {
     registerBuiltin(N);
   }

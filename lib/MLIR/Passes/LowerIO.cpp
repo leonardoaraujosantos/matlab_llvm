@@ -244,6 +244,37 @@ LogicalResult rewriteFprintfCall(Operation *Call, OpBuilder &B,
   auto PtrTy = LLVM::LLVMPointerType::get(Ctx);
   auto VoidTy = LLVM::LLVMVoidType::get(Ctx);
 
+  /* `fprintf(fid, fmt, ...)` when the first arg is an f64 (the file id
+   * returned by fopen). The format flows through matlab_string_from_literal
+   * at the frontend, so the second operand here is a matlab_string*
+   * rather than a raw char array. Route to matlab_fprintf_file_{str,f64}
+   * which accept matlab_string* directly — only literal + single-f64
+   * forms are supported in v1. */
+  if (NOps >= 2 && Call->getOperand(0).getType() == F64) {
+    Value FmtV = Call->getOperand(1);
+    if (FmtV.getType() != PtrTy) return failure();
+    B.setInsertionPoint(Call);
+    ModuleOp M = Call->getParentOfType<ModuleOp>();
+    if (NOps == 2) {
+      auto Fn = getOrInsertRuntimeFunc(
+          B, M, "matlab_fprintf_file_str", VoidTy, {F64, PtrTy});
+      LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                            ValueRange{Call->getOperand(0), FmtV});
+      Call->erase();
+      return success();
+    }
+    if (NOps == 3 && Call->getOperand(2).getType() == F64) {
+      auto Fn = getOrInsertRuntimeFunc(
+          B, M, "matlab_fprintf_file_f64", VoidTy, {F64, PtrTy, F64});
+      LLVM::CallOp::create(
+          B, Call->getLoc(), Fn,
+          ValueRange{Call->getOperand(0), FmtV, Call->getOperand(2)});
+      Call->erase();
+      return success();
+    }
+    return failure();
+  }
+
   auto FmtPair = materializeStringArg(Call->getOperand(0), B, Strings);
   if (!FmtPair) return failure();
   auto [FmtPtr, FmtLen] = *FmtPair;

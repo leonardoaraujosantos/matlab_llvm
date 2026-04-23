@@ -190,7 +190,7 @@ out of scope.
 | `sprintf` | 🟡 | Registered; runtime entry missing |
 | `input` (numeric) | ✅ |
 | `error`, `warning` with message text | ✅ |
-| `print`, file I/O (`fopen`, `fread`, `fwrite`, `fclose`, `fgetl`, `load`, `save`) | ❌ |
+| File I/O: `fopen`, `fclose`, `fprintf(fid, ...)`, `fgetl`, `feof` | 🟡 | Minimum set wired; `fread`, `fwrite`, `load`, `save` still ❌ |
 | `readtable`, `writetable`, `readmatrix`, `xlsread` | ❌ |
 
 ### Control / system

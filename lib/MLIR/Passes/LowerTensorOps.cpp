@@ -146,6 +146,7 @@ private:
 };
 
 bool TensorLowering::retypeMatrixSlots() {
+  bool Changed = false;
   SmallVector<Operation *> Allocs;
   Mod.walk([&](Operation *Op) {
     if (!isMatlabOp(Op, "matlab.alloc") || Op->getNumResults() != 1)
@@ -161,20 +162,39 @@ bool TensorLowering::retypeMatrixSlots() {
     if (T == PtrTy) { Allocs.push_back(Op); return; }
     if (mlir::isa<NoneType>(T)) {
       bool AnyPtrStore = false;
+      bool AnyF64Store = false;
       for (OpOperand &Use : Op->getResult(0).getUses()) {
         Operation *U = Use.getOwner();
         if (isMatlabOp(U, "matlab.store") && U->getNumOperands() == 2 &&
-            U->getOperand(1) == Op->getResult(0) &&
-            U->getOperand(0).getType() == PtrTy) {
-          AnyPtrStore = true;
-          break;
+            U->getOperand(1) == Op->getResult(0)) {
+          if (U->getOperand(0).getType() == PtrTy) AnyPtrStore = true;
+          else if (mlir::isa<Float64Type>(U->getOperand(0).getType()))
+            AnyF64Store = true;
         }
       }
+      /* A none-typed slot whose only stores are f64 should be retyped
+       * to f64 so the scalar-slot lowering can convert it to llvm.alloca
+       * of f64. Only do this when no ptr store is also present — a
+       * slot receiving both would be genuinely polymorphic and needs
+       * the any-ptr fallback. */
       if (AnyPtrStore) Allocs.push_back(Op);
+      else if (AnyF64Store) {
+        /* Retype the alloc result and every matlab.load from it to
+         * f64 in place. The stores are already f64. On the next pass
+         * iteration, LowerScalarSlots will convert the whole slot to
+         * an llvm.alloca of f64. */
+        auto F64Ty = Float64Type::get(Ctx);
+        Op->getResult(0).setType(F64Ty);
+        for (OpOperand &Use : Op->getResult(0).getUses()) {
+          Operation *U = Use.getOwner();
+          if (isMatlabOp(U, "matlab.load") && U->getNumResults() == 1)
+            U->getResult(0).setType(F64Ty);
+        }
+        Changed = true;
+      }
     }
   });
 
-  bool Changed = false;
   for (Operation *Alloc : Allocs) {
     /* Only retype when every user is load/store AND every store's value
      * is already ptr-typed. A partial retype (rewriting loads but not
@@ -898,6 +918,56 @@ bool TensorLowering::rewriteBuiltinCalls() {
       auto Fn = rt("matlab_obj_new", PtrTy, {I32});
       auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
                                       ValueRange{Arg});
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+
+    /* File I/O. fopen takes two matlab_string* pointers (the frontend
+     * wraps raw char/string literals for us); fclose / feof take an f64
+     * file id; fgetl returns a matlab_string*. Sema leaves these
+     * untyped, so we retype the call's result before RAUW to match the
+     * runtime signature. */
+    if (Name == "fopen" && Call->getNumOperands() == 2 &&
+        Call->getNumResults() == 1 &&
+        Call->getOperand(0).getType() == PtrTy &&
+        Call->getOperand(1).getType() == PtrTy) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt("matlab_fopen", F64, {PtrTy, PtrTy});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                      Call->getOperands());
+      if (Call->getResult(0).getType() != F64)
+        Call->getResult(0).setType(F64);
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+    if ((Name == "fclose" || Name == "feof") &&
+        Call->getNumOperands() == 1 && Call->getNumResults() == 1 &&
+        Call->getOperand(0).getType() == F64) {
+      llvm::StringRef Rn = (Name == "fclose") ? "matlab_fclose" : "matlab_feof";
+      B.setInsertionPoint(Call);
+      auto Fn = rt(Rn, F64, {F64});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                      Call->getOperands());
+      if (Call->getResult(0).getType() != F64)
+        Call->getResult(0).setType(F64);
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+    if (Name == "fgetl" && Call->getNumOperands() == 1 &&
+        Call->getNumResults() == 1 &&
+        Call->getOperand(0).getType() == F64) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt("matlab_fgetl", PtrTy, {F64});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                      Call->getOperands());
+      if (Call->getResult(0).getType() != PtrTy)
+        Call->getResult(0).setType(PtrTy);
       Call->getResult(0).replaceAllUsesWith(NC.getResult());
       Call->erase();
       Changed = true;

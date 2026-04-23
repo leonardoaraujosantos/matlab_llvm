@@ -1959,3 +1959,111 @@ void matlab_disp_mat(matlab_mat *A) {
     }
     matlab_disp_mat_f64(A->data, A->rows, A->cols);
 }
+
+/* ---------------------------------------------------------------------- */
+/* Minimal file I/O.
+ *
+ * MATLAB exposes file I/O via integer file identifiers (0 = stdin,
+ * 1 = stdout, 2 = stderr by convention; 3+ are user-opened files).
+ * We keep a small fixed-size table mapping id -> FILE* and return the
+ * id as a double to match how other scalars flow through the runtime.
+ *
+ * Only the common cases are supported in v1:
+ *   fid = fopen(path, mode);        % path, mode are string literals
+ *   fprintf(fid, fmt);              % write literal
+ *   fprintf(fid, fmt, v);           % write one f64
+ *   s = fgetl(fid);                 % read one line (no trailing NL)
+ *   matlab_feof(fid)                % 1 at EOF else 0
+ *   fclose(fid);                    % 0 on success, -1 on failure
+ */
+#define MATLAB_FILE_TABLE_SIZE 64
+static FILE *matlab_file_table[MATLAB_FILE_TABLE_SIZE];
+static pthread_mutex_t matlab_file_mutex = PTHREAD_MUTEX_INITIALIZER;
+static int matlab_file_table_initialised = 0;
+
+static void matlab_file_table_init(void) {
+    if (matlab_file_table_initialised) return;
+    matlab_file_table_initialised = 1;
+    matlab_file_table[0] = stdin;
+    matlab_file_table[1] = stdout;
+    matlab_file_table[2] = stderr;
+}
+
+double matlab_fopen(matlab_string *path, matlab_string *mode) {
+    if (!path || !mode) return -1.0;
+    pthread_mutex_lock(&matlab_file_mutex);
+    matlab_file_table_init();
+    FILE *f = fopen(path->data, mode->data);
+    if (!f) {
+        pthread_mutex_unlock(&matlab_file_mutex);
+        return -1.0;
+    }
+    int slot = -1;
+    for (int i = 3; i < MATLAB_FILE_TABLE_SIZE; ++i) {
+        if (!matlab_file_table[i]) { slot = i; break; }
+    }
+    if (slot < 0) { fclose(f); pthread_mutex_unlock(&matlab_file_mutex); return -1.0; }
+    matlab_file_table[slot] = f;
+    pthread_mutex_unlock(&matlab_file_mutex);
+    return (double)slot;
+}
+
+double matlab_fclose(double fd) {
+    int i = (int)fd;
+    if (i < 3 || i >= MATLAB_FILE_TABLE_SIZE) return -1.0;
+    pthread_mutex_lock(&matlab_file_mutex);
+    FILE *f = matlab_file_table[i];
+    matlab_file_table[i] = NULL;
+    pthread_mutex_unlock(&matlab_file_mutex);
+    if (!f) return -1.0;
+    return fclose(f) == 0 ? 0.0 : -1.0;
+}
+
+static FILE *matlab_file_lookup(double fd) {
+    int i = (int)fd;
+    if (i < 0 || i >= MATLAB_FILE_TABLE_SIZE) return NULL;
+    matlab_file_table_init();
+    return matlab_file_table[i];
+}
+
+void matlab_fprintf_file_str(double fd, matlab_string *fmt) {
+    FILE *f = matlab_file_lookup(fd);
+    if (!f || !fmt) return;
+    char buf[4096];
+    int64_t len = expand_escapes(buf, fmt->data, (int64_t)fmt->len);
+    if (len < (int64_t)sizeof buf) buf[len] = '\0';
+    else buf[sizeof buf - 1] = '\0';
+    pthread_mutex_lock(&matlab_io_mutex);
+    fputs(buf, f);
+    pthread_mutex_unlock(&matlab_io_mutex);
+}
+
+void matlab_fprintf_file_f64(double fd, matlab_string *fmt, double v) {
+    FILE *f = matlab_file_lookup(fd);
+    if (!f || !fmt) return;
+    char buf[4096];
+    int64_t len = expand_escapes(buf, fmt->data, (int64_t)fmt->len);
+    if (len < (int64_t)sizeof buf) buf[len] = '\0';
+    else buf[sizeof buf - 1] = '\0';
+    pthread_mutex_lock(&matlab_io_mutex);
+    fprintf(f, buf, v);
+    pthread_mutex_unlock(&matlab_io_mutex);
+}
+
+matlab_string *matlab_fgetl(double fd) {
+    FILE *f = matlab_file_lookup(fd);
+    if (!f) return matlab_string_from_literal("", 0);
+    char buf[4096];
+    if (!fgets(buf, sizeof buf, f))
+        return matlab_string_from_literal("", 0);
+    size_t len = strlen(buf);
+    if (len > 0 && buf[len - 1] == '\n') { buf[len - 1] = '\0'; len--; }
+    if (len > 0 && buf[len - 1] == '\r') { buf[len - 1] = '\0'; len--; }
+    return matlab_string_from_literal(buf, (int64_t)len);
+}
+
+double matlab_feof(double fd) {
+    FILE *f = matlab_file_lookup(fd);
+    if (!f) return 1.0;
+    return feof(f) ? 1.0 : 0.0;
+}
