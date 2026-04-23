@@ -318,7 +318,7 @@ threads deterministically prints 55.
 | Structs `s.x = v`, `s.x` read, `s.a.b` nested, `s.(name)` dynamic | ✅ | ✅ | ✅ runtime-backed `matlab_struct` with f64/matrix/nested-struct field kinds | ✅ |
 | `isstruct(x)` / `isfield(s, 'x')` | ✅ | ✅ | ✅ `isstruct` compile-time fold; `isfield` routes to `matlab_struct_has_field` | ✅ |
 | `classdef` (OOP) | ❌ | ❌ | ❌ | — |
-| Cells `{a, b, c}` + `C{i}` read | ✅ | ✅ | ✅ 1-D matlab_cell with f64/matrix slot kinds (transparent 1×1 box) | ✅ |
+| Cells `{a, b, c}`, `C{i}` read, `C{i} = v` write | ✅ | ✅ | ✅ 1-D matlab_cell with f64/matrix slot kinds (transparent 1×1 box), auto-grow on out-of-range write | ✅ |
 | Command syntax (`disp hello` → `disp('hello')`) | ✅ | ✅ | ✅ | — |
 
 Legend: ✅ works · ⚠️ partial · ❌ not implemented · — not applicable.
@@ -369,7 +369,7 @@ chapters. Here's how this compiler maps to it.
 | Multidimensional arrays (>2 dims) | ⚠️ Sema models `NDArray` rank but lowering assumes ≤2D |
 | Text / character arrays | ✅ char array; ⚠️ string-type (double-quoted) partial |
 | Tables | ❌ |
-| Cell arrays | ✅ 1-D `{a, b, c}` literals + `C{i}` read via runtime-backed `matlab_cell`; 2-D cells, cell-LHS assignment, `cellfun` still pending |
+| Cell arrays | ✅ 1-D `{a, b, c}` literals, `C{i}` read, `C{i} = v` write (auto-grow) via runtime-backed `matlab_cell`; 2-D cells and `cellfun` still pending |
 | Structs (`s.x`, `s.(name)`) | ✅ runtime-backed `matlab_struct` — scalar and matrix fields, updates, dynamic read with literal field name; nested / struct-array pending |
 | Floating-point / integer types | ✅ lattice supports all, runtime uses double |
 
@@ -608,7 +608,7 @@ Two CTest suites, ~165 goldens total:
 | `Opt` | `-emit-mlir -opt` | 5 | Slot promotion + constant folding through `arith` |
 | `Programs` | `-emit-mlir -opt` | 31 | Medium programs (matrix ops, loops, functions) |
 | `Errors` | `-dump-ast` | 4 | Parser/Sema diagnostics |
-| `Run` | `-emit-llvm` + link + exec | 94 | End-to-end stdout goldens — I/O, parfor, sequential for/while, `break`/`continue`, matrix math, linear algebra, SVD/eig (incl. `[V,D]`), reductions, slicing, indexed store, logical indexing, anon calls + scalar & matrix captures, `@name` + `@myFunc` handles, multi-self-recursion, polymorphic user calls, implicit display, `clear`, `global`/`persistent`, `nargin`/`nargout`, structs (incl. nested `s.a.b` + `isstruct`/`isfield`) + `s.(name)`, 1-D cells, `try`/`catch` via error flag |
+| `Run` | `-emit-llvm` + link + exec | 95 | End-to-end stdout goldens — I/O, parfor, sequential for/while, `break`/`continue`, matrix math, linear algebra, SVD/eig (incl. `[V,D]`), reductions, slicing, indexed store, logical indexing, anon calls + scalar & matrix captures, `@name` + `@myFunc` handles, multi-self-recursion, polymorphic user calls, implicit display, `clear`, `global`/`persistent`, `nargin`/`nargout`, structs (incl. nested `s.a.b` + `isstruct`/`isfield`) + `s.(name)`, 1-D cells (literals + read + write), `try`/`catch` via error flag |
 
 ```bash
 ctest --test-dir build
@@ -660,11 +660,12 @@ programs.
    struct arrays (`s(1).x`, `s(2).x`), `fieldnames(s)` (returns a
    cell of char arrays, blocked on cells), `rmfield(s, 'x')`, and
    runtime-varying `s.(expr)` where `expr` isn't a literal.
-2. **Cell LHS assignment `C{i} = v`, 2-D cells, cell concat** —
-   1-D `C = {a, b, c}` literals and `C{i}` reads execute today via
-   `matlab_cell`. Pending: `C{i} = v` writes, `{…; …}` 2-D cells,
-   `C1 = [C1, C2]` concatenation, `cellfun`, and `numel(C)` / `iscell`
-   for cells (today those route to matrix paths).
+2. **2-D cells + cell concat + cellfun** — 1-D `C = {a, b, c}`
+   literals, `C{i}` reads, and `C{i} = v` writes all execute today
+   via `matlab_cell`. Pending: `{…; …}` 2-D cells, `[C1, C2]`
+   concatenation, `cellfun`, and `numel(C)` / `iscell` specialised
+   for cells (today those route to matrix paths — an extra runtime
+   dispatch layer would fix it).
 3. **`varargin` / `varargout`** — cells exist, but the call-site
    packing (bundle remaining args into a cell) and the function-side
    unpacking haven't been wired yet.

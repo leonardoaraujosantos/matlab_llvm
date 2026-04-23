@@ -1255,6 +1255,27 @@ void Lowerer::lowerLValueStore(const Expr &LHS, mlir::Value Rhs) {
                 {mlir::NoneType::get(&MCtx)}, loc(C.Range), {Cal});
     return;
   }
+  case NodeKind::CellIndex: {
+    /* C{i} = Rhs. Evaluate the cell ptr, the index, and Rhs; route
+     * to matlab_cell_set_f64 or matlab_cell_set_mat based on value
+     * kind. Single 1-D index for v1. */
+    auto &C = static_cast<const CellIndex &>(LHS);
+    if (C.Args.size() != 1 || !C.Callee) return;
+    mlir::Value Cell = lowerExpr(*C.Callee);
+    mlir::Value Idx = lowerExpr(*C.Args[0]);
+    auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+    bool IsMat = Rhs && (Rhs.getType() == PtrTy ||
+                         mlir::isa<mlir::RankedTensorType,
+                                   mlir::UnrankedTensorType>(Rhs.getType()));
+    llvm::StringRef Callee = IsMat ? "matlab_cell_set_mat"
+                                    : "matlab_cell_set_f64";
+    mlir::NamedAttribute Cal(
+        mlir::StringAttr::get(&MCtx, "callee"),
+        mlir::StringAttr::get(&MCtx, Callee));
+    emitUnregOp("matlab.call_builtin", {Cell, Idx, Rhs},
+                {mlir::NoneType::get(&MCtx)}, loc(C.Range), {Cal});
+    return;
+  }
   case NodeKind::FieldAccess: {
     /* s.x = Rhs  OR  s.a.b = Rhs. For the nested case the base is
      * itself a FieldAccess; resolveStructBase walks the chain,
