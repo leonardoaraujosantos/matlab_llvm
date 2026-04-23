@@ -348,11 +348,11 @@ threads deterministically prints 55.
 | Empty matrix `A = []` / deallocate | ✅ | ✅ | ✅ (`matlab_empty_mat`) | ✅ |
 | Matrix comparisons `A > B`, `A == s` etc. | ✅ | ✅ | ✅ (returns 0/1 matrix) | ✅ |
 | `global`, `persistent` | ✅ | ✅ | ✅ scalar (f64) via runtime-backed slot table; globals shared by name, persistents namespaced per function | ✅ |
-| `try / catch` | ✅ | ✅ | ✅ runs try body; catch body runs when `error()` set the runtime error flag (no stack unwinding) | ✅ |
+| `try / catch` + `catch ME; disp(ME.message)` | ✅ | ✅ | ✅ runs try body; catch body runs when `error('msg')` set the runtime error flag; `ME.message` reads back the stored text (no stack unwinding for runtime faults) | ✅ |
 | Structs `s.x = v`, `s.x` read, `s.a.b` nested, `s.(name)` dynamic | ✅ | ✅ | ✅ runtime-backed `matlab_struct` with f64/matrix/nested-struct field kinds | ✅ |
 | `isstruct(x)` / `isfield(s, 'x')` | ✅ | ✅ | ✅ `isstruct` compile-time fold; `isfield` routes to `matlab_struct_has_field` | ✅ |
 | `classdef` (OOP) | ❌ | ❌ | ❌ | — |
-| Cells `{a, b, c}`, `C{i}` read, `C{i} = v` write | ✅ | ✅ | ✅ 1-D matlab_cell with f64/matrix slot kinds (transparent 1×1 box), auto-grow on out-of-range write | ✅ |
+| Cells `{a, b, c}`, `C{i}` read, `C{i} = v` write, `numel(C)` / `length(C)` / `iscell(C)` | ✅ | ✅ | ✅ 1-D matlab_cell with f64/matrix slot kinds (transparent 1×1 box), auto-grow on out-of-range write, cell-aware numel/length/iscell via binding tracking | ✅ |
 | Command syntax (`disp hello` → `disp('hello')`) | ✅ | ✅ | ✅ | — |
 
 Legend: ✅ works · ⚠️ partial · ❌ not implemented · — not applicable.
@@ -403,7 +403,7 @@ chapters. Here's how this compiler maps to it.
 | Multidimensional arrays (>2 dims) | ⚠️ Sema models `NDArray` rank but lowering assumes ≤2D |
 | Text / character arrays | ✅ char array; ⚠️ string-type (double-quoted) partial |
 | Tables | ❌ |
-| Cell arrays | ✅ 1-D `{a, b, c}` literals, `C{i}` read, `C{i} = v` write (auto-grow) via runtime-backed `matlab_cell`; 2-D cells and `cellfun` still pending |
+| Cell arrays | ✅ 1-D `{a, b, c}` literals, `C{i}` read, `C{i} = v` write (auto-grow), `numel`/`length`/`iscell` on cells via runtime-backed `matlab_cell`; 2-D cells and `cellfun` still pending |
 | Structs (`s.x`, `s.(name)`) | ✅ runtime-backed `matlab_struct` — scalar and matrix fields, updates, dynamic read with literal field name; nested / struct-array pending |
 | Floating-point / integer types | ✅ lattice supports all, runtime uses double |
 
@@ -651,9 +651,9 @@ Two CTest suites, ~165 goldens total:
 | `Opt` | `-emit-mlir -opt` | 5 | Slot promotion + constant folding through `arith` |
 | `Programs` | `-emit-mlir -opt` | 31 | Medium programs (matrix ops, loops, functions) |
 | `Errors` | `-dump-ast` | 4 | Parser/Sema diagnostics |
-| `Run` | `-emit-llvm` + link + exec | 95 | End-to-end stdout goldens — I/O, parfor, sequential for/while, `break`/`continue`, matrix math, linear algebra, SVD/eig (incl. `[V,D]`), reductions, slicing, indexed store, logical indexing, anon calls + scalar & matrix captures, `@name` + `@myFunc` handles, multi-self-recursion, polymorphic user calls, implicit display, `clear`, `global`/`persistent`, `nargin`/`nargout`, structs (incl. nested `s.a.b` + `isstruct`/`isfield`) + `s.(name)`, 1-D cells (literals + read + write), `try`/`catch` via error flag |
-| `Run (emit-c)` | `-emit-c` + `cc` + exec | 95 | Same 95 programs, emitted as C and compiled with `cc`. Output compared against the `.stdout` goldens. |
-| `Run (emit-cpp)` | `-emit-cpp` + `c++` + exec | 95 | Same 95 programs, emitted as C++ and compiled with `c++`. |
+| `Run` | `-emit-llvm` + link + exec | 98 | End-to-end stdout goldens — I/O, parfor, sequential for/while, `break`/`continue`, matrix math, linear algebra, SVD/eig (incl. `[V,D]`), reductions, slicing, indexed store, logical indexing, anon calls + scalar & matrix captures, `@name` + `@myFunc` handles, multi-self-recursion, polymorphic user calls, implicit display, `clear`, `global`/`persistent`, `nargin`/`nargout`, structs (incl. nested `s.a.b`, `isstruct`/`isfield`/`rmfield`) + `s.(name)`, 1-D cells (literals + read + write + `numel`/`iscell`), `try`/`catch` + `catch ME; ME.message` via error flag |
+| `Run (emit-c)` | `-emit-c` + `cc` + exec | 98 | Same 98 programs, emitted as C and compiled with `cc`. Output compared against the `.stdout` goldens. |
+| `Run (emit-cpp)` | `-emit-cpp` + `c++` + exec | 98 | Same 98 programs, emitted as C++ and compiled with `c++`. |
 | `Run (emit-c strict)` | `-emit-c` + `cc -Wall -Wextra -Werror` | 95 | Same 95 programs compiled with warnings-as-errors. Catches quality regressions (type confusion, implicit decls, sign mismatches) that `-w` would hide. |
 | `Run (emit-cpp strict)` | `-emit-cpp` + `c++ -Wall -Wextra -Werror` | 95 | Same, C++ lane. |
 | `EmitCFail` | `-emit-c` on IR the emitter can't handle | 1+ | Verifies the fail-fast contract: non-zero exit + expected stderr diagnostic. |
@@ -704,12 +704,12 @@ programs.
 
 ### Heterogeneous data — the biggest user-facing gap
 
-1. **Struct arrays + `fieldnames` / `rmfield`** — scalar `s.x`,
-   nested `s.a.b`, field update, literal-name `s.(name)`, matrix
-   fields, and `isstruct` / `isfield` all execute today. Missing:
+1. **Struct arrays + `fieldnames`** — scalar `s.x`, nested `s.a.b`,
+   field update, literal-name `s.(name)`, matrix fields,
+   `isstruct` / `isfield` / `rmfield` all execute today. Missing:
    struct arrays (`s(1).x`, `s(2).x`), `fieldnames(s)` (returns a
-   cell of char arrays, blocked on cells), `rmfield(s, 'x')`, and
-   runtime-varying `s.(expr)` where `expr` isn't a literal.
+   cell of char arrays — blocked on a proper char-matrix dtype),
+   and runtime-varying `s.(expr)` where `expr` isn't a literal.
 2. **2-D cells + cell concat + cellfun** — 1-D `C = {a, b, c}`
    literals, `C{i}` reads, and `C{i} = v` writes all execute today
    via `matlab_cell`. Pending: `{…; …}` 2-D cells, `[C1, C2]`
@@ -748,15 +748,15 @@ programs.
 
 ### Error handling
 
-11. **Full try / catch with stack unwinding** — today the try body
-    runs, then the catch body runs iff the process-global
-    `matlab_error_flag` is set (by an explicit `error(...)` call).
-    That handles the common idiom but misses: runtime faults
+11. **Full try / catch with stack unwinding** — today `try` runs
+    its body, then `catch` (with optional `catch ME`) runs iff the
+    process-global `matlab_error_flag` is set by an explicit
+    `error('msg')` call, and `disp(ME.message)` prints the stored
+    text. That handles the common idiom but misses: runtime faults
     (OOB access, divide-by-zero), per-statement unwinding (error
-    mid-try jumps straight to catch), and binding the exception to
-    `catch ME` with `ME.message` / `ME.identifier`. A proper
-    implementation needs either setjmp/longjmp shared with the
-    runtime or LLVM invoke/landingpad, plus an `matlab_err` struct.
+    mid-try jumps straight to catch), `ME.identifier` / `ME.stack`,
+    and nested try/catch. A proper fix needs either setjmp/longjmp
+    shared with the runtime or LLVM invoke/landingpad.
 
 ### Linear-algebra extensions
 
