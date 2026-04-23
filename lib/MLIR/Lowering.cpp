@@ -267,6 +267,11 @@ private:
    * Tracked per-Binding so a function with multiple FieldAccess sites
    * only initialises once. */
   std::unordered_set<Binding *> StructInitialised;
+  /* Bindings introduced by `catch ME` — when `ME.<field>` is accessed
+   * we route known fields (like `message`) to dedicated runtime
+   * entries instead of the generic struct-get path, since the error
+   * info lives outside a real matlab_struct. */
+  std::unordered_set<Binding *> CatchBindings;
   std::string CurFnName;
   /* Declared arity of the currently-lowered function — used to fold
    * references to the `nargin` / `nargout` builtins into compile-time
@@ -1126,7 +1131,9 @@ void Lowerer::lowerStmt(const Stmt &St) {
           mlir::StringAttr::get(&MCtx, "matlab_clear_error"));
       emitUnregOp("matlab.call_builtin", {},
                   {mlir::NoneType::get(&MCtx)}, L, {Clr});
+      if (T.CatchVarRef) CatchBindings.insert(T.CatchVarRef);
       lowerBlock(*T.CatchBody);
+      if (T.CatchVarRef) CatchBindings.erase(T.CatchVarRef);
     }
     return;
   }
@@ -1424,6 +1431,25 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
     auto &C = static_cast<const CallOrIndex &>(E);
     if (C.Resolved == CallKind::Call) {
       auto *N = dynamic_cast<const NameExpr *>(C.Callee);
+      /* disp(ME.message) inside a catch body — route to the dedicated
+       * matlab_err_disp_message runtime that prints the stored error
+       * text. We only recognise the single-arg 'message' field on a
+       * catch-var; other fields fall through to the generic struct
+       * get path (which returns 0.0 for missing fields). */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          N->Name == "disp" && C.Args.size() == 1) {
+        if (auto *F = dynamic_cast<const FieldAccess *>(C.Args[0]))
+          if (auto *B0 = dynamic_cast<const NameExpr *>(F->Base))
+            if (B0->Ref && CatchBindings.count(B0->Ref) &&
+                F->Field == "message") {
+              mlir::NamedAttribute Cal(
+                  mlir::StringAttr::get(&MCtx, "callee"),
+                  mlir::StringAttr::get(&MCtx,
+                                         "matlab_err_disp_message"));
+              return emitUnreg("matlab.call_builtin", {},
+                               mlir::NoneType::get(&MCtx), L, {Cal});
+            }
+      }
       /* isstruct(x): compile-time fold based on whether x's binding
        * has been initialised as a struct. Any other ptr (matrix) or
        * scalar returns 0.0. */

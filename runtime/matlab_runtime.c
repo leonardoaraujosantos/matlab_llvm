@@ -1393,9 +1393,43 @@ double matlab_subscript1_s(matlab_mat *A, double i) {
  */
 static int32_t matlab_error_flag = 0;
 
+/* Error message storage: a heap-copy of the most recent error() string.
+ * `matlab_set_error_msg` trims to 1023 bytes and null-terminates;
+ * `matlab_err_disp_message` routes to the I/O runtime so catch blocks can
+ * do `disp(ME.message)` and get the raw text without needing a new
+ * char-matrix descriptor. */
+static char matlab_error_msg[1024] = {0};
+static int64_t matlab_error_msg_len = 0;
+
 void matlab_set_error(void) { matlab_error_flag = 1; }
 int32_t matlab_check_error(void) { return matlab_error_flag; }
-void matlab_clear_error(void) { matlab_error_flag = 0; }
+void matlab_clear_error(void) {
+    /* Only clear the flag — the message stays available for the catch
+     * body to read (e.g. via ME.message). A subsequent error() call
+     * will overwrite the message via matlab_set_error_msg. */
+    matlab_error_flag = 0;
+}
+
+void matlab_set_error_msg(const char *msg, int64_t len) {
+    matlab_error_flag = 1;
+    int64_t n = len;
+    if (n < 0) n = 0;
+    if (n > 1023) n = 1023;
+    if (msg && n > 0) memcpy(matlab_error_msg, msg, (size_t)n);
+    matlab_error_msg[n] = '\0';
+    matlab_error_msg_len = n;
+}
+
+void matlab_disp_str(const char *s, int64_t n); /* forward decl */
+
+void matlab_err_disp_message(void) {
+    if (matlab_error_msg_len > 0)
+        matlab_disp_str(matlab_error_msg, matlab_error_msg_len);
+    else {
+        static const char empty[] = "";
+        matlab_disp_str(empty, 0);
+    }
+}
 
 /* ---------------------------------------------------------------------- */
 /* Struct storage — s.field = v with f64 and matlab_mat* field values.

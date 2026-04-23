@@ -491,19 +491,77 @@ bool TensorLowering::rewriteBuiltinCalls() {
       Changed = true;
       continue;
     }
-    /* Rewrite @error(...) calls — whatever args the user passes we
-     * ignore for v1 and just flip the error flag. */
+    /* Rewrite @error(...) calls. If the first arg is a const_char we
+     * route through matlab_set_error_msg(ptr, len) so 'catch ME;
+     * disp(ME.message)' gets back the user's text. Otherwise fall
+     * back to matlab_set_error with no message. Extra args are
+     * ignored in v1 (no printf-style formatting yet). */
     if (Name == "error") {
       B.setInsertionPoint(Call);
-      auto Fn = rt("matlab_set_error", VoidTy, {});
-      LLVM::CallOp::create(B, Call->getLoc(), Fn, ValueRange{});
-      /* Replace any result users with zero — error() has no real return. */
+      Value MsgPtr;
+      int64_t MsgLen = 0;
+      if (Call->getNumOperands() >= 1) {
+        Operation *Def = Call->getOperand(0).getDefiningOp();
+        if (isMatlabOp(Def, "matlab.const_char")) {
+          auto VA = Def->getAttrOfType<StringAttr>("value");
+          if (VA) {
+            StringRef Text = VA.getValue();
+            MsgLen = (int64_t)Text.size();
+            LLVM::GlobalOp Found;
+            for (auto G : Mod.getOps<LLVM::GlobalOp>()) {
+              if (!G.getConstant()) continue;
+              auto Attr =
+                  mlir::dyn_cast_or_null<StringAttr>(G.getValueAttr());
+              if (Attr && Attr.getValue() == Text) { Found = G; break; }
+            }
+            if (!Found) {
+              OpBuilder::InsertionGuard G(B);
+              B.setInsertionPointToStart(Mod.getBody());
+              auto ArrayTy = LLVM::LLVMArrayType::get(
+                  IntegerType::get(Ctx, 8),
+                  static_cast<unsigned>(Text.size()));
+              unsigned N = 0;
+              std::string SymName;
+              do { SymName = ("__matlab_err_msg" + std::to_string(N++)); }
+              while (Mod.lookupSymbol(SymName));
+              Found = LLVM::GlobalOp::create(
+                  B, Mod.getLoc(), ArrayTy, /*isConstant=*/true,
+                  LLVM::Linkage::Internal, SymName,
+                  StringAttr::get(Ctx, Text));
+            }
+            B.setInsertionPoint(Call);
+            MsgPtr = LLVM::AddressOfOp::create(
+                B, Call->getLoc(), PtrTy, Found.getSymName());
+            Def->getResult(0).replaceAllUsesWith(MsgPtr);
+          }
+        }
+      }
+      if (MsgPtr) {
+        auto Fn = rt("matlab_set_error_msg", VoidTy, {PtrTy, I64});
+        Value LenV = LLVM::ConstantOp::create(
+            B, Call->getLoc(), I64, B.getI64IntegerAttr(MsgLen));
+        LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                              ValueRange{MsgPtr, LenV});
+      } else {
+        auto Fn = rt("matlab_set_error", VoidTy, {});
+        LLVM::CallOp::create(B, Call->getLoc(), Fn, ValueRange{});
+      }
       for (auto R : Call->getResults())
         if (!R.use_empty()) {
           Value Z = LLVM::ConstantOp::create(
               B, Call->getLoc(), F64, B.getF64FloatAttr(0.0));
           R.replaceAllUsesWith(Z);
         }
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+
+    /* disp(ME.message) frontend-intercept routes here. */
+    if (Name == "matlab_err_disp_message" && Call->getNumOperands() == 0) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt("matlab_err_disp_message", VoidTy, {});
+      LLVM::CallOp::create(B, Call->getLoc(), Fn, ValueRange{});
       Call->erase();
       Changed = true;
       continue;

@@ -355,6 +355,7 @@ class TryStmt : public Stmt {
 public:
   Block *TryBody = nullptr;
   std::string_view CatchVar;  // empty if no binding
+  Binding *CatchVarRef = nullptr; // populated by Resolver when CatchVar set
   Block *CatchBody = nullptr; // nullable
   TryStmt() : Stmt(NodeKind::TryStmt) {}
 };

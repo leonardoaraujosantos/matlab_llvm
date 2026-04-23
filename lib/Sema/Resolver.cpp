@@ -166,7 +166,7 @@ void Resolver::collectAssignmentsInStmt(Stmt &S, Scope *FnScope) {
     if (T.TryBody) collectAssignmentsInBlock(*T.TryBody, FnScope);
     if (!T.CatchVar.empty()) {
       Binding *B = Sema.newBinding();
-      FnScope->getOrDeclareVar(T.CatchVar, B);
+      T.CatchVarRef = FnScope->getOrDeclareVar(T.CatchVar, B);
     }
     if (T.CatchBody) collectAssignmentsInBlock(*T.CatchBody, FnScope);
     break;
