@@ -619,9 +619,20 @@ void Lowerer::lowerFunction(const Function &F, mlir::ModuleOp M) {
   B.setInsertionPointToEnd(M.getBody());
 
   // Build parameter / result type vectors from Sema-inferred types.
+  /* If the function's last input is `varargin`, that parameter
+   * receives a matlab_cell pointer packed by the call site, so type
+   * it as !llvm.ptr up front. */
+  bool IsVariadic = !F.Inputs.empty() && F.Inputs.back() == "varargin";
+  auto PtrTyArg = mlir::LLVM::LLVMPointerType::get(&MCtx);
   llvm::SmallVector<mlir::Type, 4> InTys, OutTys;
-  for (Binding *P : F.ParamRefs)
-    InTys.push_back(mirTy(P && P->InferredType ? P->InferredType : TC.any()));
+  for (size_t i = 0; i < F.ParamRefs.size(); ++i) {
+    Binding *P = F.ParamRefs[i];
+    if (IsVariadic && i + 1 == F.ParamRefs.size()) {
+      InTys.push_back(PtrTyArg);
+    } else {
+      InTys.push_back(mirTy(P && P->InferredType ? P->InferredType : TC.any()));
+    }
+  }
   for (Binding *O : F.OutputRefs)
     OutTys.push_back(mirTy(O && O->InferredType ? O->InferredType : TC.any()));
 
@@ -647,12 +658,25 @@ void Lowerer::lowerFunction(const Function &F, mlir::ModuleOp M) {
   CurFnNargin = F.ParamRefs.size();
   CurFnNargout = F.OutputRefs.size();
 
-  // Spill parameters into slots.
+  // Spill parameters into slots. For the varargin tail, emit a
+  // ptr-typed slot and register the binding as a cell so numel /
+  // length / iscell(varargin) dispatch to the cell runtime.
   for (size_t i = 0; i < F.ParamRefs.size(); ++i) {
     Binding *Bnd = F.ParamRefs[i];
     if (!Bnd) continue;
-    const Type *T = Bnd->InferredType ? Bnd->InferredType : TC.any();
-    mlir::Value Slot = emitAlloc(T, Bnd->Name, loc(F.Range));
+    bool IsVarArg = IsVariadic && i + 1 == F.ParamRefs.size();
+    mlir::Value Slot;
+    if (IsVarArg) {
+      mlir::NamedAttribute NA(
+          mlir::StringAttr::get(&MCtx, "name"),
+          mlir::FlatSymbolRefAttr::get(&MCtx, std::string(Bnd->Name)));
+      Slot = emitUnreg("matlab.alloc", {}, PtrTyArg,
+                       loc(F.Range), {NA});
+      CellBindings.insert(Bnd);
+    } else {
+      const Type *T = Bnd->InferredType ? Bnd->InferredType : TC.any();
+      Slot = emitAlloc(T, Bnd->Name, loc(F.Range));
+    }
     Slots[Bnd] = Slot;
     emitStore(Entry->getArgument(i), Slot, loc(F.Range));
   }
@@ -1610,13 +1634,70 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
       }
       llvm::SmallVector<mlir::Value, 4> Args;
       for (const Expr *A : C.Args) if (A) Args.push_back(lowerExpr(*A));
+      /* Variadic callee: if the user function's last declared input is
+       * named "varargin", pack trailing args into a matlab_cell and
+       * pass it as the last argument. The leading declared-1 args are
+       * passed positionally. A call with only declared-1 args still
+       * packs an empty cell so the callee's signature stays uniform. */
+      unsigned OrigArity = (unsigned)Args.size();
+      bool Packed = false;
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Function &&
+          N->Ref->FuncDef && !N->Ref->FuncDef->Inputs.empty() &&
+          N->Ref->FuncDef->Inputs.back() == "varargin") {
+        auto F64 = mlir::Float64Type::get(&MCtx);
+        auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+        unsigned DeclIn = (unsigned)N->Ref->FuncDef->Inputs.size();
+        unsigned Fixed = DeclIn - 1;
+        if (Args.size() >= Fixed) {
+          Packed = true;
+          /* Build the cell out of the trailing overflow args. */
+          unsigned ExtraN = (unsigned)Args.size() - Fixed;
+          mlir::Value Cnt = mlir::arith::ConstantOp::create(
+              B, L, F64, mlir::FloatAttr::get(F64, (double)ExtraN));
+          mlir::NamedAttribute New(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_cell_new"));
+          mlir::Value Cell = emitUnreg("matlab.call_builtin", {Cnt},
+                                        PtrTy, L, {New});
+          for (unsigned i = 0; i < ExtraN; ++i) {
+            mlir::Value Idx = mlir::arith::ConstantOp::create(
+                B, L, F64, mlir::FloatAttr::get(F64, (double)(i + 1)));
+            mlir::Value V = Args[Fixed + i];
+            bool IsMat = V && (V.getType() == PtrTy ||
+                               mlir::isa<mlir::RankedTensorType,
+                                         mlir::UnrankedTensorType>(V.getType()));
+            llvm::StringRef Callee = IsMat ? "matlab_cell_set_mat"
+                                            : "matlab_cell_set_f64";
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, Callee));
+            emitUnregOp("matlab.call_builtin", {Cell, Idx, V},
+                        {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          }
+          Args.resize(Fixed);
+          Args.push_back(Cell);
+        }
+      }
       if (N && N->Ref) {
         mlir::NamedAttribute Cal(
             mlir::StringAttr::get(&MCtx, "callee"),
             mlir::StringAttr::get(&MCtx, std::string(N->Name)));
+        llvm::SmallVector<mlir::NamedAttribute, 2> AllAttrs = {Cal};
+        /* Record the original (pre-packing) call-site arity so the
+         * monomorphiser can bucket by user-visible arity for
+         * varargin-packed callees; otherwise nargin inside the body
+         * would always equal declared-arity regardless of how many
+         * args the user actually passed. */
+        if (Packed) {
+          AllAttrs.push_back(mlir::NamedAttribute(
+              mlir::StringAttr::get(&MCtx, "user_arity"),
+              mlir::IntegerAttr::get(
+                  mlir::IntegerType::get(&MCtx, 64),
+                  (int64_t)OrigArity)));
+        }
         return emitUnreg(N->Ref->Kind == BindingKind::Builtin
                               ? "matlab.call_builtin" : "matlab.call",
-                          Args, RT, L, {Cal});
+                          Args, RT, L, AllAttrs);
       }
       mlir::Value CV = C.Callee ? lowerExpr(*C.Callee) : mlir::Value{};
       llvm::SmallVector<mlir::Value, 4> Os;

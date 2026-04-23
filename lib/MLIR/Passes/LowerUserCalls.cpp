@@ -267,20 +267,22 @@ bool runMonomorphiseUserCalls(ModuleOp M) {
     auto Fn = M.lookupSymbol<func::FuncOp>(Name);
     if (!Fn) continue;
     unsigned DeclArity = Fn.getFunctionType().getNumInputs();
-    /* Bucket by (call-site arity, first-N concrete arg types). This
-     * captures both multi-signature polymorphism and the per-call-
-     * site nargin story: f(5, 7) and f(5) bucket separately so each
-     * clone sees its own nargin. */
+    /* Bucket by (user-visible arity, operand-type tuple). UserArity
+     * captures what the programmer wrote at the call site (number of
+     * args before the frontend's variadic-packing step), so nargin
+     * inside the clone reflects the original call. ActualArity ==
+     * Tys.size() is the operand count after packing and drives
+     * signature sizing. For non-variadic callees the two agree. */
     struct SigKey {
-      unsigned Arity = 0;
+      unsigned UserArity = 0;
       llvm::SmallVector<Type, 4> Tys;
       bool operator==(const SigKey &O) const {
-        return Arity == O.Arity && Tys == O.Tys;
+        return UserArity == O.UserArity && Tys == O.Tys;
       }
     };
     struct SigHash {
       size_t operator()(const SigKey &K) const {
-        size_t h = std::hash<unsigned>{}(K.Arity);
+        size_t h = std::hash<unsigned>{}(K.UserArity);
         for (Type T : K.Tys)
           h ^= mlir::hash_value(T) + 0x9e3779b9 + (h << 6) + (h >> 2);
         return h;
@@ -292,7 +294,10 @@ bool runMonomorphiseUserCalls(ModuleOp M) {
       unsigned N = C->getNumOperands();
       if (N > DeclArity) continue; /* too many args — user error, skip */
       SigKey K;
-      K.Arity = N;
+      if (auto UA = C->getAttrOfType<IntegerAttr>("user_arity"))
+        K.UserArity = (unsigned)UA.getValue().getSExtValue();
+      else
+        K.UserArity = N;
       bool AllConcrete = true;
       for (unsigned i = 0; i < N; ++i) {
         Type T = C->getOperand(i).getType();
@@ -304,31 +309,26 @@ bool runMonomorphiseUserCalls(ModuleOp M) {
     }
     if (Buckets.empty()) continue;
 
-    /* The "keep" bucket is the one whose (arity, types) most closely
-     * matches the existing function. Prefer a bucket whose arity
-     * equals DeclArity so the original function keeps serving the
-     * canonical shape; otherwise pick by smallest hash for stability. */
-    SigHash H{};
+    /* The original function keeps serving the bucket whose UserArity
+     * matches its current nargin_value (or the declared arity if
+     * unset). If no bucket matches, ALL buckets clone — we don't want
+     * to overwrite the original's nargin_value when it's already in
+     * use by earlier-converted func.call sites. */
+    int64_t CurrentNargin = (int64_t)DeclArity;
+    if (auto A = Fn->getAttrOfType<IntegerAttr>("matlab.nargin_value"))
+      CurrentNargin = A.getValue().getSExtValue();
     SigKey KeepKey;
     bool HaveKeep = false;
-    size_t BestHash = 0;
     for (auto &[K, _] : Buckets) {
-      bool prefer = (K.Arity == DeclArity);
-      bool keepPrefer = (KeepKey.Arity == DeclArity);
-      if (!HaveKeep || (prefer && !keepPrefer)) {
-        BestHash = H(K); KeepKey = K; HaveKeep = true;
-        continue;
-      }
-      if (prefer == keepPrefer) {
-        size_t h = H(K);
-        if (h < BestHash) { BestHash = h; KeepKey = K; }
+      if ((int64_t)K.UserArity == CurrentNargin) {
+        KeepKey = K; HaveKeep = true; break;
       }
     }
 
     OpBuilder B(Ctx);
     unsigned CloneIdx = 0;
     for (auto &[K, BSites] : Buckets) {
-      bool IsKeep = (K == KeepKey);
+      bool IsKeep = HaveKeep && (K == KeepKey);
       func::FuncOp Target;
       if (IsKeep) {
         Target = Fn;
@@ -344,23 +344,19 @@ bool runMonomorphiseUserCalls(ModuleOp M) {
         Changed = true;
       }
 
-      /* Always set the per-bucket nargin attribute. The keep bucket
-       * also benefits if its arity differs from DeclArity (rare: the
-       * original func was never actually called at full declared
-       * arity, but something else referenced it). */
+      /* nargin_value = user-visible arity (pre-packing). */
       Target->setAttr(
           "matlab.nargin_value",
-          IntegerAttr::get(I64, (int64_t)K.Arity));
+          IntegerAttr::get(I64, (int64_t)K.UserArity));
 
-      /* Keep the clone's declared arity = DeclArity so the body's
-       * references to all params still resolve. We pad calls with
-       * 0.0 at the matlab.call -> func.call rewrite. For the
-       * concrete-type retype: the first K.Arity entry-block args get
-       * their bucket types; trailing ones default to f64 (compatible
-       * with the 0.0 padding in LowerUserCalls). */
+      /* Signature / block args match the ACTUAL operand count
+       * (post-packing), which is Tys.size(). Trailing declared
+       * params beyond that are padded to f64 at the call site; in
+       * the signature we default them to f64 too. */
+      unsigned ActualArity = (unsigned)K.Tys.size();
       SmallVector<Type, 4> AllInputs(K.Tys.begin(), K.Tys.end());
       auto F64 = Float64Type::get(Ctx);
-      for (unsigned i = K.Arity; i < DeclArity; ++i)
+      for (unsigned i = ActualArity; i < DeclArity; ++i)
         AllInputs.push_back(F64);
       if (!Target.empty()) {
         Block &Entry = Target.getBody().front();
@@ -538,6 +534,22 @@ bool runLowerUserCalls(ModuleOp M) {
     unsigned N = Call->getNumOperands();
     unsigned M_ = FnTy.getNumInputs();
     if (N > M_) continue; /* too many args — skip */
+
+    /* Skip this call if the user-visible arity (from the frontend's
+     * variadic-packing attribute) doesn't match the callee's
+     * matlab.nargin_value. The monomorphiser will clone the callee
+     * with a matching nargin_value attribute first. Without this
+     * skip, two calls to a variadic function with different user
+     * arities but the same post-packing operand types would both
+     * get converted to func.call of the same function — losing the
+     * per-callsite nargin distinction. */
+    if (auto UA = Call->getAttrOfType<IntegerAttr>("user_arity")) {
+      int64_t CallUA = UA.getValue().getSExtValue();
+      int64_t FnUA = (int64_t)M_;
+      if (auto FA = Fn->getAttrOfType<IntegerAttr>("matlab.nargin_value"))
+        FnUA = FA.getValue().getSExtValue();
+      if (CallUA != FnUA) continue;
+    }
 
     // Only convert if the first N operand types match the leading N
     // inputs of the callee's signature exactly. Missing trailing args
