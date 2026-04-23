@@ -7,6 +7,7 @@
 #include "matlab/Sema/Scope.h"
 #include "matlab/Sema/Type.h"
 
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/AsmState.h"
@@ -165,6 +166,20 @@ private:
   std::unordered_map<const AnonFunction *,
                      std::vector<mlir::Value>> PendingCaptures;
 
+  // Map from global/persistent BINDING to a slot-ID used by the runtime's
+  // matlab_global_{get,set}_f64 helpers. IDs are assigned in first-seen
+  // order and are module-global so every function that declares the same
+  // global shares its slot. Persistent bindings are namespaced per
+  // declaring function; the map key is the distinct Binding instance and
+  // the ID space is shared with globals — both go through the same
+  // runtime table.
+  std::unordered_map<Binding *, int32_t> GlobalIds;
+  // Name -> ID for global bindings so different functions declaring
+  // the same `global x` share a slot even though each function has its
+  // own Binding for x.
+  std::unordered_map<std::string, int32_t> GlobalIdByName;
+  int32_t NextGlobalId = 0;
+
   // Stack of (base, dim) contexts for `end` resolution inside subscripts.
   // Each entry represents the subscript arg currently being lowered:
   //   base = the matrix being indexed (already-lowered SSA value)
@@ -212,6 +227,9 @@ private:
   llvm::StringRef postfixName(PostfixOp O);
 
   mlir::Value loadBinding(Binding *Bnd, const Type *ValTy, mlir::Location L);
+
+  int32_t globalSlotId(Binding *Bnd);
+  std::string CurFnName;
   mlir::Value getOrCreateSlot(Binding *Bnd, const Type *T, llvm::StringRef N,
                               mlir::Location L);
 };
@@ -348,9 +366,49 @@ mlir::Value Lowerer::getOrCreateSlot(Binding *Bnd, const Type *T,
   return Slot;
 }
 
+int32_t Lowerer::globalSlotId(Binding *Bnd) {
+  auto It = GlobalIds.find(Bnd);
+  if (It != GlobalIds.end()) return It->second;
+  std::string Key;
+  if (Bnd->Kind == BindingKind::Persistent) {
+    Key = CurFnName + "." + std::string(Bnd->Name);
+  } else {
+    Key = std::string(Bnd->Name);
+  }
+  auto Nit = GlobalIdByName.find(Key);
+  int32_t Id;
+  if (Nit == GlobalIdByName.end()) {
+    Id = NextGlobalId++;
+    GlobalIdByName[Key] = Id;
+  } else {
+    Id = Nit->second;
+  }
+  GlobalIds[Bnd] = Id;
+  return Id;
+}
+
 mlir::Value Lowerer::loadBinding(Binding *Bnd, const Type *ValTy,
                                  mlir::Location L) {
   if (!Bnd) return emitUnreg("matlab.undef", {}, mirTy(ValTy), L);
+  /* Globals and persistents live in a runtime-backed scalar table.
+   * Emit a matlab.call_builtin @matlab_global_get_f64(id) — the
+   * generic call-builtin-to-llvm path lowers it to an opaque runtime
+   * call. The slot ID is name-keyed so every function declaring the
+   * same `global x` shares storage; `persistent y` inside function f
+   * is keyed as "f.y" so it stays distinct from a like-named
+   * persistent in another function. */
+  if (Bnd->Kind == BindingKind::Global ||
+      Bnd->Kind == BindingKind::Persistent) {
+    int32_t Id = globalSlotId(Bnd);
+    auto F64 = mlir::Float64Type::get(&MCtx);
+    auto I32 = mlir::IntegerType::get(&MCtx, 32);
+    mlir::Value IdV = mlir::arith::ConstantOp::create(
+        B, L, I32, mlir::IntegerAttr::get(I32, (int64_t)Id));
+    mlir::NamedAttribute Cal(
+        mlir::StringAttr::get(&MCtx, "callee"),
+        mlir::StringAttr::get(&MCtx, "matlab_global_get_f64"));
+    return emitUnreg("matlab.call_builtin", {IdV}, F64, L, {Cal});
+  }
   if (Bnd->Kind == BindingKind::Function ||
       Bnd->Kind == BindingKind::Builtin) {
     mlir::NamedAttribute Cal(
@@ -401,6 +459,7 @@ void Lowerer::lowerScript(const Script &S, mlir::ModuleOp M) {
   auto *Entry = Fn.addEntryBlock();
   B.setInsertionPointToEnd(Entry);
   Slots.clear();
+  CurFnName = "script";
 
   if (S.Body) lowerBlock(*S.Body);
 
@@ -427,6 +486,7 @@ void Lowerer::lowerFunction(const Function &F, mlir::ModuleOp M) {
   B.setInsertionPointToEnd(Entry);
 
   Slots.clear();
+  CurFnName = std::string(F.Name);
 
   // Spill parameters into slots.
   for (size_t i = 0; i < F.ParamRefs.size(); ++i) {
@@ -742,6 +802,10 @@ void Lowerer::lowerStmt(const Stmt &St) {
   case NodeKind::GlobalDecl:
   case NodeKind::PersistentDecl:
   case NodeKind::ImportStmt:
+    /* ID allocation is lazy: the first load/store against a Global or
+     * Persistent binding consults GlobalIdByName keyed by the name
+     * (globals) or <fnname>.<name> (persistents). See loadBinding and
+     * the Global/Persistent handling in lowerLValueStore. */
     return;
   case NodeKind::CommandStmt: {
     auto &C = static_cast<const CommandStmt &>(St);
@@ -807,6 +871,22 @@ void Lowerer::lowerLValueStore(const Expr &LHS, mlir::Value Rhs) {
   case NodeKind::NameExpr: {
     auto &N = static_cast<const NameExpr &>(LHS);
     if (!N.Ref) return;
+    /* Globals / persistents route through matlab_global_set_f64(id). */
+    if (N.Ref->Kind == BindingKind::Global ||
+        N.Ref->Kind == BindingKind::Persistent) {
+      if (!Rhs) return;
+      int32_t Id = globalSlotId(N.Ref);
+      auto I32 = mlir::IntegerType::get(&MCtx, 32);
+      mlir::Value IdV = mlir::arith::ConstantOp::create(
+          B, loc(N.Range), I32,
+          mlir::IntegerAttr::get(I32, (int64_t)Id));
+      mlir::NamedAttribute Cal(
+          mlir::StringAttr::get(&MCtx, "callee"),
+          mlir::StringAttr::get(&MCtx, "matlab_global_set_f64"));
+      emitUnregOp("matlab.call_builtin", {IdV, Rhs},
+                  {mlir::NoneType::get(&MCtx)}, loc(N.Range), {Cal});
+      return;
+    }
     const Type *T = LHS.Ty ? LHS.Ty : TC.any();
     mlir::Value Slot = getOrCreateSlot(N.Ref, T, N.Name, loc(N.Range));
     if (Rhs) emitStore(Rhs, Slot, loc(N.Range));
@@ -927,7 +1007,17 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
     auto &Bi = static_cast<const BinaryOpExpr &>(E);
     mlir::Value LHS = Bi.LHS ? lowerExpr(*Bi.LHS) : mlir::Value{};
     mlir::Value RHS = Bi.RHS ? lowerExpr(*Bi.RHS) : mlir::Value{};
-    return emitUnreg(binOpName(Bi.Op), {LHS, RHS}, RT, L);
+    /* Eagerly refine the result type when both operands are primitive
+     * scalars and Sema left the expression type as `any`/none. This
+     * lets LowerScalarsToArith rewrite the op — its match fails when
+     * the result type is NoneType but operands are f64. */
+    mlir::Type ResTy = RT;
+    if (mlir::isa<mlir::NoneType>(ResTy) && LHS && RHS &&
+        LHS.getType() == RHS.getType() &&
+        mlir::isa<mlir::Float64Type, mlir::IntegerType>(LHS.getType())) {
+      ResTy = LHS.getType();
+    }
+    return emitUnreg(binOpName(Bi.Op), {LHS, RHS}, ResTy, L);
   }
   case NodeKind::UnaryOp: {
     auto &U = static_cast<const UnaryOpExpr &>(E);

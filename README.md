@@ -311,7 +311,7 @@ threads deterministically prints 55.
 | Logical indexing `A(A > 0)` | ✅ | ✅ | ✅ (masked slice) | ✅ |
 | Empty matrix `A = []` / deallocate | ✅ | ✅ | ✅ (`matlab_empty_mat`) | ✅ |
 | Matrix comparisons `A > B`, `A == s` etc. | ✅ | ✅ | ✅ (returns 0/1 matrix) | ✅ |
-| `global`, `persistent` | ✅ (parsed) | ⚠️ | ❌ | — |
+| `global`, `persistent` | ✅ | ✅ | ✅ scalar (f64) via runtime-backed slot table; globals shared by name, persistents namespaced per function | ✅ |
 | `try / catch` | ✅ | ✅ | ⚠️ catch dropped | — |
 | `classdef` (OOP) | ❌ | ❌ | ❌ | — |
 | Cells `{...}`, structs `s.x` | ✅ (parsed) | ⚠️ partial | ❌ | — |

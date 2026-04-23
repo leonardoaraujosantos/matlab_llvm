@@ -261,6 +261,28 @@ bool runLowerUserCalls(ModuleOp M) {
       if (NewInputs[i] != OldType.getInput(i)) InputsChanged = true;
     for (unsigned i = 0; i < NewResults.size(); ++i)
       if (NewResults[i] != OldType.getResult(i)) ResultsChanged = true;
+
+    /* Always run body-local scalar type propagation: it refines
+     * matlab.alloc / matlab.load result types from store operand
+     * types, which can then unlock return-type inference even when
+     * the function takes no parameters (nothing for the input
+     * consensus loop to do). */
+    propagateScalarTypes(Fn);
+    NewResults.assign(Fn.getFunctionType().getResults().begin(),
+                      Fn.getFunctionType().getResults().end());
+    Fn.walk([&](func::ReturnOp Ret) {
+      if (Ret.getNumOperands() != NewResults.size()) return;
+      for (unsigned i = 0; i < Ret.getNumOperands(); ++i) {
+        Type RetTy = Ret.getOperand(i).getType();
+        if (canRefineTo(NewResults[i], RetTy))
+          NewResults[i] = RetTy;
+      }
+    });
+    ResultsChanged = false;
+    for (unsigned i = 0; i < NewResults.size(); ++i)
+      if (NewResults[i] != Fn.getFunctionType().getResult(i))
+        ResultsChanged = true;
+
     if (!InputsChanged && !ResultsChanged) continue;
 
     // Apply param changes first (they enable body propagation), then

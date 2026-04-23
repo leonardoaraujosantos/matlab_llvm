@@ -335,6 +335,36 @@ bool TensorLowering::rewriteBuiltinCalls() {
     if (!CA) continue;
     StringRef Name = CA.getValue();
 
+    /* Global / persistent scalar table accessors. The frontend emits
+     * matlab.call_builtin @matlab_global_get_f64(i32) and
+     * matlab.call_builtin @matlab_global_set_f64(i32, f64). */
+    auto I32 = IntegerType::get(Ctx, 32);
+    if (Name == "matlab_global_get_f64" &&
+        Call->getNumOperands() == 1 && Call->getNumResults() == 1 &&
+        Call->getOperand(0).getType() == I32) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt("matlab_global_get_f64", F64, {I32});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                      ValueRange{Call->getOperand(0)});
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+    if (Name == "matlab_global_set_f64" &&
+        Call->getNumOperands() == 2 &&
+        Call->getOperand(0).getType() == I32 &&
+        Call->getOperand(1).getType() == F64) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt("matlab_global_set_f64", VoidTy, {I32, F64});
+      LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                            ValueRange{Call->getOperand(0),
+                                       Call->getOperand(1)});
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+
     /* Multi-return dispatch (nargout > 1): today only eig has a two-
      * output variant [V, D] = eig(A). We emit two independent runtime
      * calls so each result can be consumed separately; the frontend

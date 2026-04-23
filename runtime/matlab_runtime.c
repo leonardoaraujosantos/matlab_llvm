@@ -1378,6 +1378,36 @@ double matlab_subscript1_s(matlab_mat *A, double i) {
 
 /*---------- I/O ----------------------------------------------------------*/
 
+/* ---------------------------------------------------------------------- */
+/* Global / persistent storage.
+ *
+ * The compiler assigns a unique integer ID per global or persistent name
+ * (persistent names are namespaced by the declaring function). Each ID
+ * indexes a flat scalar table. matlab_global_get_f64 reads the current
+ * value; matlab_global_set_f64 writes it. Unset slots read as 0.0.
+ *
+ * Capacity is fixed at compile time — 128 slots cover any plausible
+ * hand-written MATLAB program in the test suite. Bumping it just means
+ * enlarging the array; no dynamic growth because the IDs are handed out
+ * in compile order and never freed.
+ *
+ * No mutex: single-threaded reads/writes. parfor bodies don't currently
+ * access globals (their slots are captured by value via the reduction
+ * dispatcher). If that ever changes we'll need one.
+ */
+#define MATLAB_GLOBAL_TABLE_SIZE 128
+static double matlab_global_table[MATLAB_GLOBAL_TABLE_SIZE];
+
+double matlab_global_get_f64(int32_t id) {
+    if (id < 0 || id >= MATLAB_GLOBAL_TABLE_SIZE) return 0.0;
+    return matlab_global_table[id];
+}
+
+void matlab_global_set_f64(int32_t id, double v) {
+    if (id < 0 || id >= MATLAB_GLOBAL_TABLE_SIZE) return;
+    matlab_global_table[id] = v;
+}
+
 /* Matrix disp. Special-cases 1×1 to print scalar-style and 1×N to print
  * on one line (matching MATLAB's default disp formatting). */
 void matlab_disp_mat(matlab_mat *A) {

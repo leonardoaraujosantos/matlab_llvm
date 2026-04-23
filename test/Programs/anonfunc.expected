@@ -8,9 +8,9 @@ module {
       "matlab.store"(%arg0, %2) : (f64, f64) -> ()
       %3 = "matlab.load"(%2) : (f64) -> f64
       %4 = "matlab.load"(%2) : (f64) -> f64
-      %5 = "matlab.matmul"(%3, %4) : (f64, f64) -> none
-      %6 = "matlab.add"(%5, %cst_0) : (none, f64) -> none
-      "matlab.yield"(%6) : (none) -> ()
+      %5 = arith.mulf %3, %4 : f64
+      %6 = arith.addf %5, %cst_0 : f64
+      "matlab.yield"(%6) : (f64) -> ()
     }) {params = "x"} : () -> none
     %1 = "matlab.call_indirect"(%0, %cst) : (none, f64) -> none
     return
