@@ -1,11 +1,17 @@
-% Iterative Fibonacci via a while loop — demonstrates `while` lowering
-% and loop-carried scalar state. The recursive form needs
-% LowerUserCalls to handle two self-calls in one expression, which
-% isn't wired yet (see roadmap).
+% Classic recursive Fibonacci: fib(n) = fib(n-1) + fib(n-2).
+disp('recursive fib(0..9):');
+disp(fib(0));
+disp(fib(1));
+disp(fib(2));
+disp(fib(5));
+disp(fib(9));
+disp(fib(12));
+
+% Iterative form with a while loop for comparison.
+disp('iterative fib(0..9):');
 n = 10;
 a = 0;
 b = 1;
-disp('fib(0..9):');
 i = 0;
 while i < n
     disp(a);
@@ -13,4 +19,12 @@ while i < n
     a = b;
     b = t;
     i = i + 1;
+end
+
+function y = fib(n)
+    if n < 2
+        y = n;
+    else
+        y = fib(n - 1) + fib(n - 2);
+    end
 end

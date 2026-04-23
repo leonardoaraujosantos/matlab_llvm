@@ -62,6 +62,26 @@ bool isScalarPrimitive(Type T) {
 // etc. into the eventual func.return operand type, enabling return-type
 // refinement.
 void propagateScalarTypes(func::FuncOp Fn) {
+  /* For self-recursion closure: when `fib(n-1) + fib(n-2)` appears, both
+   * operands of the add are matlab.call results to the enclosing function,
+   * currently typed `none`. If the enclosing function has a single scalar
+   * input type, speculate that the recursive-call results share that type
+   * so the add (and downstream return) can refine — which then retypes the
+   * signature's return and closes the loop. */
+  StringRef SelfName = Fn.getSymName();
+  Type SelfInScalar;
+  if (Fn.getFunctionType().getNumInputs() >= 1 &&
+      isScalarPrimitive(Fn.getFunctionType().getInput(0)))
+    SelfInScalar = Fn.getFunctionType().getInput(0);
+
+  auto isSelfCallNoneResult = [&](Value V) -> bool {
+    Operation *Def = V.getDefiningOp();
+    if (!isMatlabOp(Def, "matlab.call")) return false;
+    auto CA = Def->getAttrOfType<StringAttr>("callee");
+    if (!CA || CA.getValue() != SelfName) return false;
+    return mlir::isa<NoneType>(V.getType());
+  };
+
   bool Changed = true;
   while (Changed) {
     Changed = false;
@@ -78,6 +98,12 @@ void propagateScalarTypes(func::FuncOp Fn) {
         Type Concrete;
         if (isScalarPrimitive(A)) Concrete = A;
         else if (isScalarPrimitive(B)) Concrete = B;
+        /* Self-recursion speculation: both operands are self-calls with
+         * `none` results, and we know the function's scalar input type. */
+        if (!Concrete && SelfInScalar &&
+            isSelfCallNoneResult(Op->getOperand(0)) &&
+            isSelfCallNoneResult(Op->getOperand(1)))
+          Concrete = SelfInScalar;
         if (Concrete && canRefineTo(R, Concrete)) {
           // Optimistically refine the result to the concrete side even if
           // only one operand is concretely typed. The other is typically a

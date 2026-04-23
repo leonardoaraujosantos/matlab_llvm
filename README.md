@@ -590,10 +590,6 @@ justfile           task runner: build / test / compile / mlir / examples / ...
    spilling the value at @-time and threading it through call_indirect
    as a leading argument. Matrix captures would need pointer captures
    + reference-count discipline (or a deep copy at @-time).
-5. **Multi-recursion user calls** — `fib(n-1) + fib(n-2)` in a single
-   expression currently falls through LowerUserCalls' pattern and leaves
-   `func.func` ops un-lowered. Works fine with a single recursive call
-   (`fact`).
 6. **`classdef`**, cells, structs with a proper boxed-value layout.
 7. **Multi-callsite polymorphism** — today a function called from two
    sites with different concrete types stays `none`. Template-style

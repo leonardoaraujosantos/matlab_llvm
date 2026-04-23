@@ -31,7 +31,3 @@ just compile examples/<name>.m /tmp/<name> && /tmp/<name>
 - `fprintf` with `%f`/`%d` against a computed scalar whose Sema type is
   `any` (e.g. `mean(A(:))`) falls off the fast-path today. Use `disp()`
   when printing aggregate results.
-- Two recursive self-calls in one expression (`fib(n-1) + fib(n-2)`)
-  isn't handled by `LowerUserCalls` yet, so the classic recursive
-  Fibonacci is written iteratively here and `factorial.m` shows the
-  single-recursion path.
