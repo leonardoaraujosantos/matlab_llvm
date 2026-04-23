@@ -634,6 +634,120 @@ matlab_mat *matlab_eig(matlab_mat *A_in) {
     return E;
 }
 
+/* Two-return eig: [V, D] = eig(A). V has eigenvectors as columns,
+ * D is a diagonal matrix of eigenvalues (ascending). Outputs packed
+ * into a single heap struct that the frontend decomposes; we simply
+ * expose two independent entry points that share the same Jacobi sweep.
+ *
+ * Both V and D arrive allocated internally and returned via out-params.
+ * The frontend calls matlab_eig_V and matlab_eig_D separately when
+ * nargout==2; each walks the full Jacobi sweep on its own copy so the
+ * two calls are independent (simple and correct, if a bit redundant). */
+
+/* Jacobi sweep producing eigenvalues AND eigenvectors in column-major
+ * V (same shape as A). */
+static void jacobi_sym(matlab_mat *A_in, double *eigvals, double *V) {
+    int64_t n = A_in->rows;
+    double *H = (double *)malloc((size_t)(n * n) * sizeof(double));
+    for (int64_t i = 0; i < n; ++i)
+        for (int64_t j = 0; j < n; ++j)
+            H[i * n + j] = 0.5 * (A_in->data[i * n + j] +
+                                  A_in->data[j * n + i]);
+    /* V starts as identity. */
+    for (int64_t i = 0; i < n; ++i)
+        for (int64_t j = 0; j < n; ++j)
+            V[i * n + j] = (i == j) ? 1.0 : 0.0;
+
+    const double eps = 1e-14;
+    const int max_sweeps = 50;
+    for (int sweep = 0; sweep < max_sweeps; ++sweep) {
+        double off = 0.0;
+        for (int64_t p = 0; p < n - 1; ++p) {
+            for (int64_t q = p + 1; q < n; ++q) {
+                double Apq = H[p * n + q];
+                off += Apq * Apq;
+                if (fabs(Apq) < eps) continue;
+                double App = H[p * n + p];
+                double Aqq = H[q * n + q];
+                double tau = (Aqq - App) / (2.0 * Apq);
+                double sign_tau = (tau >= 0.0) ? 1.0 : -1.0;
+                double t = sign_tau / (fabs(tau) + sqrt(1.0 + tau * tau));
+                double c = 1.0 / sqrt(1.0 + t * t);
+                double s = t * c;
+                H[p * n + p] = App - t * Apq;
+                H[q * n + q] = Aqq + t * Apq;
+                H[p * n + q] = 0.0;
+                H[q * n + p] = 0.0;
+                for (int64_t i = 0; i < n; ++i) {
+                    if (i == p || i == q) continue;
+                    double Aip = H[i * n + p];
+                    double Aiq = H[i * n + q];
+                    H[i * n + p] = c * Aip - s * Aiq;
+                    H[i * n + q] = s * Aip + c * Aiq;
+                    H[p * n + i] = H[i * n + p];
+                    H[q * n + i] = H[i * n + q];
+                }
+                /* Rotate V's columns p, q. */
+                for (int64_t i = 0; i < n; ++i) {
+                    double Vip = V[i * n + p];
+                    double Viq = V[i * n + q];
+                    V[i * n + p] = c * Vip - s * Viq;
+                    V[i * n + q] = s * Vip + c * Viq;
+                }
+            }
+        }
+        if (off < eps * eps) break;
+    }
+    for (int64_t i = 0; i < n; ++i) eigvals[i] = H[i * n + i];
+    free(H);
+}
+
+/* matlab_eig_V(A): eigenvector matrix (columns = eigenvectors), ordered
+ * so the i-th column corresponds to the i-th ascending eigenvalue. */
+matlab_mat *matlab_eig_V(matlab_mat *A_in) {
+    if (A_in->rows != A_in->cols) return mat_alloc(0, 0);
+    int64_t n = A_in->rows;
+    double *eigvals = (double *)malloc((size_t)n * sizeof(double));
+    matlab_mat *V = mat_alloc(n, n);
+    jacobi_sym(A_in, eigvals, V->data);
+    /* Sort V's columns by ascending eigvals (insertion sort). */
+    for (int64_t i = 0; i < n; ++i) {
+        for (int64_t j = i + 1; j < n; ++j) {
+            if (eigvals[j] < eigvals[i]) {
+                double t = eigvals[i]; eigvals[i] = eigvals[j]; eigvals[j] = t;
+                for (int64_t r = 0; r < n; ++r) {
+                    double tmp = V->data[r * n + i];
+                    V->data[r * n + i] = V->data[r * n + j];
+                    V->data[r * n + j] = tmp;
+                }
+            }
+        }
+    }
+    free(eigvals);
+    return V;
+}
+
+/* matlab_eig_D(A): diagonal matrix of eigenvalues (ascending). */
+matlab_mat *matlab_eig_D(matlab_mat *A_in) {
+    if (A_in->rows != A_in->cols) return mat_alloc(0, 0);
+    int64_t n = A_in->rows;
+    double *eigvals = (double *)malloc((size_t)n * sizeof(double));
+    double *Vtmp = (double *)malloc((size_t)(n * n) * sizeof(double));
+    jacobi_sym(A_in, eigvals, Vtmp);
+    /* Ascending sort of eigvals. */
+    for (int64_t i = 0; i < n; ++i)
+        for (int64_t j = i + 1; j < n; ++j)
+            if (eigvals[j] < eigvals[i]) {
+                double t = eigvals[i]; eigvals[i] = eigvals[j]; eigvals[j] = t;
+            }
+    matlab_mat *D = mat_alloc(n, n);
+    for (int64_t i = 0; i < n * n; ++i) D->data[i] = 0.0;
+    for (int64_t i = 0; i < n; ++i) D->data[i * n + i] = eigvals[i];
+    free(eigvals);
+    free(Vtmp);
+    return D;
+}
+
 /* det(A): product of LU diagonal times permutation sign. */
 double matlab_det(matlab_mat *A) {
     if (A->rows != A->cols) return 0.0;

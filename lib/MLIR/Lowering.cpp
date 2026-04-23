@@ -498,6 +498,42 @@ void Lowerer::lowerStmt(const Stmt &St) {
      * trying to subscript a matrix. */
     bool RhsIsHandle = A.RHS && (A.RHS->Kind == NodeKind::AnonFunction ||
                                  A.RHS->Kind == NodeKind::FuncHandle);
+
+    /* Multi-return call: [V, D] = eig(A). If the LHS arity is > 1 and
+     * the RHS is a call to a builtin that has a multi-return variant,
+     * emit a matlab.call_builtin with N result types and a nargout
+     * attribute so LowerTensorOps can dispatch to the right runtime
+     * entry. Each LHS then gets its own result. */
+    if (A.LHS.size() > 1 && A.RHS &&
+        A.RHS->Kind == NodeKind::CallOrIndex) {
+      auto *C = static_cast<const CallOrIndex *>(A.RHS);
+      auto *Callee = dynamic_cast<const NameExpr *>(C->Callee);
+      if (Callee && Callee->Ref &&
+          Callee->Ref->Kind == BindingKind::Builtin) {
+        llvm::SmallVector<mlir::Value, 4> Args;
+        for (const Expr *Arg : C->Args)
+          if (Arg) Args.push_back(lowerExpr(*Arg));
+        mlir::NamedAttribute Cal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, std::string(Callee->Name)));
+        mlir::NamedAttribute NO(
+            mlir::StringAttr::get(&MCtx, "nargout"),
+            mlir::IntegerAttr::get(
+                mlir::IntegerType::get(&MCtx, 64),
+                (int64_t)A.LHS.size()));
+        llvm::SmallVector<mlir::Type, 4> Rtys(
+            A.LHS.size(), mlir::NoneType::get(&MCtx));
+        mlir::Operation *Op = emitUnregOp("matlab.call_builtin", Args,
+                                           Rtys, loc(A.Range), {Cal, NO});
+        for (size_t i = 0;
+             i < A.LHS.size() && i < (size_t)Op->getNumResults(); ++i) {
+          if (A.LHS[i])
+            lowerLValueStore(*A.LHS[i], Op->getResult(i));
+        }
+        return;
+      }
+    }
+
     mlir::Value Rhs = A.RHS ? lowerExpr(*A.RHS) : mlir::Value{};
     if (RhsIsHandle) {
       /* Pick up capture spill slots left by the AnonFunction lowering

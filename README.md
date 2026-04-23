@@ -262,7 +262,7 @@ threads deterministically prints 55.
 | Linear solve `A\b`, `A/b` | ✅ | ✅ | ✅ (LU solve, pure C) | ✅ |
 | Determinant `det(A)` | ✅ | ✅ | ✅ (LU byproduct) | ✅ |
 | Singular values `svd(A)` | ✅ | ✅ | ✅ (one-sided Jacobi, pure C) | ✅ |
-| Eigenvalues `eig(A)` | ✅ | ✅ | ✅ (Jacobi; symmetric only — see docs) | ✅ |
+| Eigenvalues `eig(A)` / `[V,D] = eig(A)` | ✅ | ✅ | ✅ (Jacobi; symmetric only) — two-return form dispatches via `nargout` | ✅ |
 | `if / elseif / else` | ✅ | ✅ | ✅ (`scf.if` chain) | ✅ |
 | `for i = 1:n` (sequential) | ✅ | ✅ | ✅ `matlab.for` → `scf.while` over f64 counter; supports step + negative step | — |
 | `while` (sequential) | ✅ | ✅ | ✅ `matlab.while` → `scf.while` | — |

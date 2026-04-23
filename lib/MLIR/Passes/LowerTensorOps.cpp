@@ -335,6 +335,28 @@ bool TensorLowering::rewriteBuiltinCalls() {
     if (!CA) continue;
     StringRef Name = CA.getValue();
 
+    /* Multi-return dispatch (nargout > 1): today only eig has a two-
+     * output variant [V, D] = eig(A). We emit two independent runtime
+     * calls so each result can be consumed separately; the frontend
+     * will have marked each LHS with a distinct result slot. */
+    auto NA = Call->getAttrOfType<IntegerAttr>("nargout");
+    if (NA && NA.getValue().getSExtValue() == 2 && Name == "eig" &&
+        Call->getNumOperands() == 1 && Call->getNumResults() == 2 &&
+        Call->getOperand(0).getType() == PtrTy) {
+      B.setInsertionPoint(Call);
+      auto FnV = rt("matlab_eig_V", PtrTy, {PtrTy});
+      auto FnD = rt("matlab_eig_D", PtrTy, {PtrTy});
+      auto CV = LLVM::CallOp::create(B, Call->getLoc(), FnV,
+                                      ValueRange{Call->getOperand(0)});
+      auto CD = LLVM::CallOp::create(B, Call->getLoc(), FnD,
+                                      ValueRange{Call->getOperand(0)});
+      Call->getResult(0).replaceAllUsesWith(CV.getResult());
+      Call->getResult(1).replaceAllUsesWith(CD.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+
     // Table of simple 1- or 2-arg builtins returning either a matrix ptr
     // or an f64 scalar. The call is accepted only if operand types match.
     struct Spec {
