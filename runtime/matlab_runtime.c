@@ -1560,6 +1560,28 @@ double matlab_struct_has_field(matlab_struct *s, const char *name, int64_t len) 
     return struct_find_field(s, name, (int32_t)len) >= 0 ? 1.0 : 0.0;
 }
 
+/* rmfield(s, 'name'): remove a field in place and return the same ptr.
+ * MATLAB's rmfield conceptually returns a new struct, but mutating
+ * in place + returning the same pointer matches the common
+ * `s = rmfield(s, 'x')` idiom. If the field doesn't exist we leave
+ * the struct untouched. */
+matlab_struct *matlab_struct_rmfield(matlab_struct *s, const char *name,
+                                      int64_t len) {
+    if (!s) return s;
+    int32_t idx = struct_find_field(s, name, (int32_t)len);
+    if (idx < 0) return s;
+    /* Free the heap-copied name and shift the remaining entries left. */
+    free(s->names[idx]);
+    for (int32_t i = idx; i < s->nfields - 1; ++i) {
+        s->names[i]    = s->names[i + 1];
+        s->kinds[i]    = s->kinds[i + 1];
+        s->f64_vals[i] = s->f64_vals[i + 1];
+        s->ptr_vals[i] = s->ptr_vals[i + 1];
+    }
+    --s->nfields;
+    return s;
+}
+
 /* ---------------------------------------------------------------------- */
 /* Cell arrays — 1-D tagged containers.
  *
