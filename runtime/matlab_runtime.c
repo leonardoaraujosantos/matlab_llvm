@@ -1561,6 +1561,32 @@ double matlab_struct_has_field(matlab_struct *s, const char *name, int64_t len) 
 }
 
 /* ---------------------------------------------------------------------- */
+/* Integer type casts. Runtime is still f64 internally, but int32(x),
+ * uint8(x), logical(x), etc. truncate and saturate the way MATLAB's
+ * typed lattice demands so downstream arithmetic sees the right value.
+ * The result stays f64 (our sole numeric dtype), which keeps disp,
+ * fprintf and the arithmetic runtime working unchanged. */
+static double sat(double x, double lo, double hi) {
+    double t = trunc(x);
+    if (t < lo) return lo;
+    if (t > hi) return hi;
+    return t;
+}
+
+double matlab_int8_s(double x)   { return sat(x, -128.0,        127.0); }
+double matlab_int16_s(double x)  { return sat(x, -32768.0,      32767.0); }
+double matlab_int32_s(double x)  { return sat(x, -2147483648.0, 2147483647.0); }
+double matlab_int64_s(double x)  { return sat(x, -9.2233720368547758e18,
+                                                  9.2233720368547758e18); }
+double matlab_uint8_s(double x)  { return sat(x, 0.0, 255.0); }
+double matlab_uint16_s(double x) { return sat(x, 0.0, 65535.0); }
+double matlab_uint32_s(double x) { return sat(x, 0.0, 4294967295.0); }
+double matlab_uint64_s(double x) { return sat(x, 0.0, 1.8446744073709552e19); }
+double matlab_double_s(double x) { return x; }
+double matlab_single_s(double x) { return (double)(float)x; }
+double matlab_logical_s(double x) { return x != 0.0 ? 1.0 : 0.0; }
+
+/* ---------------------------------------------------------------------- */
 /* Real string type ("..." literals, distinct from '...' char arrays).
  *
  * matlab_string is a tiny {data, len} descriptor with a heap-copied

@@ -963,6 +963,15 @@ bool TensorLowering::rewriteBuiltinCalls() {
         {"sin", "matlab_sin_s"}, {"cos", "matlab_cos_s"},
         {"tan", "matlab_tan_s"}, {"sqrt", "matlab_sqrt_s"},
         {"abs", "matlab_abs_s"},
+        /* Integer / type cast builtins — runtime is still f64, but
+         * these truncate + saturate to the target dtype's range so
+         * downstream arithmetic sees the value MATLAB would. */
+        {"int8",   "matlab_int8_s"},   {"int16",  "matlab_int16_s"},
+        {"int32",  "matlab_int32_s"},  {"int64",  "matlab_int64_s"},
+        {"uint8",  "matlab_uint8_s"},  {"uint16", "matlab_uint16_s"},
+        {"uint32", "matlab_uint32_s"}, {"uint64", "matlab_uint64_s"},
+        {"double", "matlab_double_s"}, {"single", "matlab_single_s"},
+        {"logical", "matlab_logical_s"},
       };
       auto It = Scalar.find(Name);
       if (It == Scalar.end()) continue;
@@ -972,6 +981,13 @@ bool TensorLowering::rewriteBuiltinCalls() {
       auto Fn = rt(It->second, F64, {F64});
       auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
                                       ValueRange{Call->getOperand(0)});
+      /* Sema may have typed the call's result as a specific integer
+       * width (si32 for int32, ui8 for uint8, etc.) while the runtime
+       * returns f64. Since we stay f64 internally, retype the call's
+       * result to f64 before replacing uses so downstream arith ops
+       * don't see a type mismatch. */
+      if (Call->getResult(0).getType() != F64)
+        Call->getResult(0).setType(F64);
       Call->getResult(0).replaceAllUsesWith(NC.getResult());
       Call->erase();
       Changed = true;
