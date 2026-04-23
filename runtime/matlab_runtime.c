@@ -1560,6 +1560,58 @@ double matlab_struct_has_field(matlab_struct *s, const char *name, int64_t len) 
     return struct_find_field(s, name, (int32_t)len) >= 0 ? 1.0 : 0.0;
 }
 
+/* ---------------------------------------------------------------------- */
+/* Real string type ("..." literals, distinct from '...' char arrays).
+ *
+ * matlab_string is a tiny {data, len} descriptor with a heap-copied
+ * payload. The frontend emits matlab_string_from_literal(global, N) for
+ * a "..." literal, and `+` between two strings lowers to
+ * matlab_string_concat(a, b). disp of a string pointer routes to
+ * matlab_string_disp via the frontend's StringBindings tracking.
+ *
+ * Lifetime is leaked per-program; that's consistent with the rest of
+ * the runtime and fine for the short-lived programs the compiler
+ * targets today.
+ */
+struct matlab_string_s {
+    char *data;
+    int64_t len;
+};
+typedef struct matlab_string_s matlab_string;
+
+matlab_string *matlab_string_from_literal(const char *src, int64_t len) {
+    matlab_string *s = (matlab_string *)calloc(1, sizeof(*s));
+    s->len = len < 0 ? 0 : len;
+    s->data = (char *)malloc((size_t)s->len + 1);
+    if (src && s->len > 0) memcpy(s->data, src, (size_t)s->len);
+    s->data[s->len] = '\0';
+    return s;
+}
+
+matlab_string *matlab_string_concat(matlab_string *a, matlab_string *b) {
+    int64_t la = a ? a->len : 0;
+    int64_t lb = b ? b->len : 0;
+    matlab_string *s = (matlab_string *)calloc(1, sizeof(*s));
+    s->len = la + lb;
+    s->data = (char *)malloc((size_t)s->len + 1);
+    if (a && la > 0) memcpy(s->data, a->data, (size_t)la);
+    if (b && lb > 0) memcpy(s->data + la, b->data, (size_t)lb);
+    s->data[s->len] = '\0';
+    return s;
+}
+
+void matlab_string_disp(matlab_string *s) {
+    if (!s) return;
+    matlab_disp_str(s->data, s->len);
+}
+
+double matlab_string_len(matlab_string *s) {
+    if (!s) return 0.0;
+    return (double)s->len;
+}
+
+double matlab_isstring(matlab_string *s) { return s ? 1.0 : 0.0; }
+
 /* rmfield(s, 'name'): remove a field in place and return the same ptr.
  * MATLAB's rmfield conceptually returns a new struct, but mutating
  * in place + returning the same pointer matches the common

@@ -616,6 +616,92 @@ bool TensorLowering::rewriteBuiltinCalls() {
       continue;
     }
 
+    /* Real string runtime. matlab_string_from_literal takes a
+     * const_char arg; the others take matlab_string* pointers. We
+     * materialise the literal's bytes as an llvm.mlir.global + len,
+     * same pattern as the struct / cell field names. */
+    if (Name == "matlab_string_from_literal" &&
+        Call->getNumResults() == 1 && Call->getNumOperands() == 1) {
+      Value Ch = Call->getOperand(0);
+      Operation *Def = Ch.getDefiningOp();
+      if (!isMatlabOp(Def, "matlab.const_char")) continue;
+      auto VA = Def->getAttrOfType<StringAttr>("value");
+      if (!VA) continue;
+      StringRef Text = VA.getValue();
+      /* Reuse an existing __matlab_str* global or create one. */
+      LLVM::GlobalOp Found;
+      for (auto G : Mod.getOps<LLVM::GlobalOp>()) {
+        if (!G.getConstant()) continue;
+        auto Attr = mlir::dyn_cast_or_null<StringAttr>(G.getValueAttr());
+        if (Attr && Attr.getValue() == Text) { Found = G; break; }
+      }
+      if (!Found) {
+        OpBuilder::InsertionGuard G(B);
+        B.setInsertionPointToStart(Mod.getBody());
+        auto ArrayTy = LLVM::LLVMArrayType::get(
+            IntegerType::get(Ctx, 8),
+            static_cast<unsigned>(Text.size()));
+        unsigned N = 0;
+        std::string SymName;
+        do { SymName = ("__matlab_str_s" + std::to_string(N++)); }
+        while (Mod.lookupSymbol(SymName));
+        Found = LLVM::GlobalOp::create(
+            B, Mod.getLoc(), ArrayTy, /*isConstant=*/true,
+            LLVM::Linkage::Internal, SymName,
+            StringAttr::get(Ctx, Text));
+      }
+      B.setInsertionPoint(Call);
+      Value Addr = LLVM::AddressOfOp::create(
+          B, Call->getLoc(), PtrTy, Found.getSymName());
+      Def->getResult(0).replaceAllUsesWith(Addr);
+      int64_t Len = (int64_t)Text.size();
+      Value LenV = LLVM::ConstantOp::create(
+          B, Call->getLoc(), I64, B.getI64IntegerAttr(Len));
+      auto Fn = rt("matlab_string_from_literal", PtrTy, {PtrTy, I64});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                      ValueRange{Addr, LenV});
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+    if (Name == "matlab_string_concat" && Call->getNumResults() == 1 &&
+        Call->getNumOperands() == 2 &&
+        Call->getOperand(0).getType() == PtrTy &&
+        Call->getOperand(1).getType() == PtrTy) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt("matlab_string_concat", PtrTy, {PtrTy, PtrTy});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                      ValueRange{Call->getOperand(0),
+                                                 Call->getOperand(1)});
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+    if (Name == "matlab_string_disp" && Call->getNumOperands() == 1 &&
+        Call->getOperand(0).getType() == PtrTy) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt("matlab_string_disp", VoidTy, {PtrTy});
+      LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                            ValueRange{Call->getOperand(0)});
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+    if (Name == "matlab_string_len" && Call->getNumResults() == 1 &&
+        Call->getNumOperands() == 1 &&
+        Call->getOperand(0).getType() == PtrTy) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt("matlab_string_len", F64, {PtrTy});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                      ValueRange{Call->getOperand(0)});
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+
     /* disp(ME.message) frontend-intercept routes here. */
     if (Name == "matlab_err_disp_message" && Call->getNumOperands() == 0) {
       B.setInsertionPoint(Call);

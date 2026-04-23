@@ -24,6 +24,7 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/raw_os_ostream.h"
 
+#include <functional>
 #include <ostream>
 #include <string>
 #include <unordered_map>
@@ -276,6 +277,12 @@ private:
    * numel(C) / length(C) / iscell(C) can dispatch to the matlab_cell_*
    * runtime entries instead of the matrix path. */
   std::unordered_set<Binding *> CellBindings;
+  /* Bindings whose current value is a matlab_string (from a "..."
+   * literal or a matlab_string_concat result). Tracked so `a + b`
+   * on two string operands routes to matlab_string_concat rather
+   * than numeric addition, disp(s) routes to matlab_string_disp,
+   * and strlen(s) routes to matlab_string_len. */
+  std::unordered_set<Binding *> StringBindings;
   std::string CurFnName;
   /* Declared arity of the currently-lowered function — used to fold
    * references to the `nargin` / `nargout` builtins into compile-time
@@ -803,6 +810,22 @@ void Lowerer::lowerStmt(const Stmt &St) {
      * CellLiteral and calls to known cell-producing builtins qualify;
      * for v1 we cover the literal case. */
     bool RhsIsCellLit = A.RHS && A.RHS->Kind == NodeKind::CellLiteral;
+    /* Track string-typed bindings (from "..." literals or string ops)
+     * so `+` / disp / strlen / isstring can dispatch correctly.
+     * Recursively sees through nested `+` chains so `u = s + " " + t`
+     * is recognised. */
+    std::function<bool(const Expr *)> isStringExpr =
+        [this, &isStringExpr](const Expr *E) -> bool {
+      if (!E) return false;
+      if (E->Kind == NodeKind::StringLiteral) return true;
+      if (auto *N = dynamic_cast<const NameExpr *>(E))
+        return N->Ref && StringBindings.count(N->Ref) > 0;
+      if (auto *Bi = dynamic_cast<const BinaryOpExpr *>(E))
+        if (Bi->Op == BinOp::Add)
+          return isStringExpr(Bi->LHS) && isStringExpr(Bi->RHS);
+      return false;
+    };
+    bool RhsIsString = isStringExpr(A.RHS);
 
     /* Multi-return call: [V, D] = eig(A). If the LHS arity is > 1 and
      * the RHS is a call to a builtin that has a multi-return variant,
@@ -861,6 +884,11 @@ void Lowerer::lowerStmt(const Stmt &St) {
       for (const Expr *L : A.LHS)
         if (auto *N = dynamic_cast<const NameExpr *>(L))
           if (N->Ref) CellBindings.insert(N->Ref);
+    }
+    if (RhsIsString) {
+      for (const Expr *L : A.LHS)
+        if (auto *N = dynamic_cast<const NameExpr *>(L))
+          if (N->Ref) StringBindings.insert(N->Ref);
     }
     for (const Expr *L : A.LHS) if (L) lowerLValueStore(*L, Rhs);
     /* Implicit display: MATLAB prints the result of a statement that
@@ -1369,10 +1397,23 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
     return emitUnreg("matlab.const_complex", {}, RT, L, {A});
   }
   case NodeKind::StringLiteral: {
+    /* Double-quoted "..." -> a matlab_string descriptor. We emit a
+     * const_char carrying the literal bytes plus a call to the
+     * runtime's matlab_string_from_literal which heap-copies them
+     * into a { data, len } struct. This distinguishes real strings
+     * from char arrays ('...' still lowers via matlab.const_char
+     * directly) so later `+` / disp / strlen can dispatch on kind. */
     auto &S = static_cast<const StringLiteral &>(E);
-    mlir::NamedAttribute A(mlir::StringAttr::get(&MCtx, "value"),
-                            mlir::StringAttr::get(&MCtx, S.Value));
-    return emitUnreg("matlab.const_str", {}, RT, L, {A});
+    auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+    mlir::NamedAttribute VA(
+        mlir::StringAttr::get(&MCtx, "value"),
+        mlir::StringAttr::get(&MCtx, S.Value));
+    mlir::Value Ch = emitUnreg("matlab.const_char", {},
+                                mlir::NoneType::get(&MCtx), L, {VA});
+    mlir::NamedAttribute Cal(
+        mlir::StringAttr::get(&MCtx, "callee"),
+        mlir::StringAttr::get(&MCtx, "matlab_string_from_literal"));
+    return emitUnreg("matlab.call_builtin", {Ch}, PtrTy, L, {Cal});
   }
   case NodeKind::CharLiteral: {
     auto &S = static_cast<const CharLiteral &>(E);
@@ -1406,6 +1447,32 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
     return emitUnreg("matlab.colon", {}, RT, L);
   case NodeKind::BinaryOp: {
     auto &Bi = static_cast<const BinaryOpExpr &>(E);
+    /* String concatenation: `"a" + "b"` or `s1 + s2` where both
+     * operands are known strings (or themselves string-producing
+     * subexpressions). Detect BEFORE lowering operands so we pick
+     * the right runtime call and attach the ptr result type up
+     * front (the generic matlab.add path would produce f64). */
+    std::function<bool(const Expr *)> isStringOperand =
+        [this, &isStringOperand](const Expr *X) -> bool {
+      if (!X) return false;
+      if (X->Kind == NodeKind::StringLiteral) return true;
+      if (auto *N = dynamic_cast<const NameExpr *>(X))
+        return N->Ref && StringBindings.count(N->Ref) > 0;
+      if (auto *Bi2 = dynamic_cast<const BinaryOpExpr *>(X))
+        if (Bi2->Op == BinOp::Add)
+          return isStringOperand(Bi2->LHS) && isStringOperand(Bi2->RHS);
+      return false;
+    };
+    if (Bi.Op == BinOp::Add &&
+        isStringOperand(Bi.LHS) && isStringOperand(Bi.RHS)) {
+      auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+      mlir::Value LHS = lowerExpr(*Bi.LHS);
+      mlir::Value RHS = lowerExpr(*Bi.RHS);
+      mlir::NamedAttribute Cal(
+          mlir::StringAttr::get(&MCtx, "callee"),
+          mlir::StringAttr::get(&MCtx, "matlab_string_concat"));
+      return emitUnreg("matlab.call_builtin", {LHS, RHS}, PtrTy, L, {Cal});
+    }
     mlir::Value LHS = Bi.LHS ? lowerExpr(*Bi.LHS) : mlir::Value{};
     mlir::Value RHS = Bi.RHS ? lowerExpr(*Bi.RHS) : mlir::Value{};
     /* Eagerly refine the result type when both operands are primitive
@@ -1445,6 +1512,47 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
     auto &C = static_cast<const CallOrIndex &>(E);
     if (C.Resolved == CallKind::Call) {
       auto *N = dynamic_cast<const NameExpr *>(C.Callee);
+      /* disp(s) where s is a tracked string binding -> matlab_string_disp.
+       * Also handles disp("literal") by routing a StringLiteral arg. */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          N->Name == "disp" && C.Args.size() == 1) {
+        bool IsStr = false;
+        if (C.Args[0]->Kind == NodeKind::StringLiteral) IsStr = true;
+        else if (auto *AN = dynamic_cast<const NameExpr *>(C.Args[0]))
+          IsStr = AN->Ref && StringBindings.count(AN->Ref) > 0;
+        if (IsStr) {
+          mlir::Value V = lowerExpr(*C.Args[0]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_string_disp"));
+          return emitUnreg("matlab.call_builtin", {V},
+                           mlir::NoneType::get(&MCtx), L, {Cal});
+        }
+      }
+      /* strlen(s) on a string binding -> matlab_string_len. */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          N->Name == "strlen" && C.Args.size() == 1) {
+        auto *AN = dynamic_cast<const NameExpr *>(C.Args[0]);
+        if (AN && AN->Ref && StringBindings.count(AN->Ref)) {
+          auto F64 = mlir::Float64Type::get(&MCtx);
+          mlir::Value V = lowerExpr(*C.Args[0]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_string_len"));
+          return emitUnreg("matlab.call_builtin", {V}, F64, L, {Cal});
+        }
+      }
+      /* isstring(x) compile-time fold. */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          N->Name == "isstring" && C.Args.size() == 1) {
+        auto *AN = dynamic_cast<const NameExpr *>(C.Args[0]);
+        auto F64 = mlir::Float64Type::get(&MCtx);
+        double Val = 0.0;
+        if (C.Args[0]->Kind == NodeKind::StringLiteral) Val = 1.0;
+        else if (AN && AN->Ref && StringBindings.count(AN->Ref)) Val = 1.0;
+        return mlir::arith::ConstantOp::create(
+            B, L, F64, mlir::FloatAttr::get(F64, Val));
+      }
       /* disp(ME.message) inside a catch body — route to the dedicated
        * matlab_err_disp_message runtime that prints the stored error
        * text. We only recognise the single-arg 'message' field on a
