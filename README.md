@@ -303,6 +303,7 @@ threads deterministically prints 55.
 | Multi-callsite polymorphism (`sq(5)` + `sq([1 2 3])`) | ✅ | ✅ | ✅ per-signature clones (`sq`, `sq__s0`, …) specialised after LowerTensorOps | ✅ |
 | `[V, D] = eig(A)` multi-return via `nargout` | ✅ | ✅ | ✅ routed to `matlab_eig_V`/`matlab_eig_D` | ✅ |
 | Implicit display (`x = 1` with no `;`) | ✅ | ✅ | ✅ emits `disp("x =")` + `disp(value)` | ✅ |
+| `nargin` / `nargout` introspection | ✅ | ✅ | ✅ compile-time constants from the enclosing function's declared arities | — |
 | **`parfor i = 1:N`** (one pthread per iteration) | ✅ | ✅ | ✅ (outlined body) | ✅ |
 | **`parfor` with `x = x + rhs` reductions** | ✅ | ✅ | ✅ (atomic add) | ✅ |
 | Anonymous functions `@(x) x^2` | ✅ | ✅ | ✅ outlined to `llvm.func` | ✅ |
@@ -401,7 +402,7 @@ chapters. Here's how this compiler maps to it.
 | Scripts | ✅ lowered to `@main` |
 | Functions (named) | ✅ |
 | Local / nested / private / anonymous functions | ✅ named + nested parsed; anonymous created + called (scalar captures supported); `@myFunc` handles to user functions fold to direct calls |
-| Global variables | ⚠️ parsed, not materialized |
+| Global variables | ✅ materialised as a runtime-backed scalar slot table; `persistent` also works (per-function namespace) |
 | Command vs function syntax | ✅ disambiguated at parse time |
 
 **Net coverage (rough):** Quick Start & Programming are solid; Language
@@ -562,6 +563,11 @@ we leak).
   colon), `matlab_slice2` (2-D row × col index).
 - Scalar indexing: `matlab_subscript1_s`, `matlab_subscript2_s`
   (1-based, out-of-range returns 0).
+- Scope storage: `matlab_global_get_f64` / `matlab_global_set_f64`
+  backed by a fixed-size scalar slot table (`matlab_global_table[128]`).
+  The frontend hands out stable slot IDs per name, so different
+  functions declaring the same `global x` share storage; `persistent`
+  names are namespaced per declaring function.
 
 **Concurrency**
 
@@ -571,7 +577,7 @@ we leak).
 
 ## Testing
 
-Two CTest suites, ~158 goldens total:
+Two CTest suites, ~165 goldens total:
 
 | Suite | Driver flag | Tests | What it checks |
 |---|---|:-:|---|
@@ -583,7 +589,7 @@ Two CTest suites, ~158 goldens total:
 | `Opt` | `-emit-mlir -opt` | 5 | Slot promotion + constant folding through `arith` |
 | `Programs` | `-emit-mlir -opt` | 31 | Medium programs (matrix ops, loops, functions) |
 | `Errors` | `-dump-ast` | 4 | Parser/Sema diagnostics |
-| `Run` | `-emit-llvm` + link + exec | 81 | End-to-end stdout goldens — I/O, parfor, sequential for/while, matrix math, linear algebra, SVD/eig (incl. `[V,D]`), reductions, slicing, indexed store, logical indexing, anon calls + scalar captures, `@name` + `@myFunc` handles, multi-self-recursion, implicit display, `clear`, user calls |
+| `Run` | `-emit-llvm` + link + exec | 88 | End-to-end stdout goldens — I/O, parfor, sequential for/while, `break`/`continue`, matrix math, linear algebra, SVD/eig (incl. `[V,D]`), reductions, slicing, indexed store, logical indexing, anon calls + scalar & matrix captures, `@name` + `@myFunc` handles, multi-self-recursion, polymorphic user calls, implicit display, `clear`, `global`/`persistent`, `nargin`/`nargout` |
 
 ```bash
 ctest --test-dir build
@@ -620,52 +626,127 @@ examples/          gallery of small end-to-end programs (see examples/README.md)
 justfile           task runner: build / test / compile / mlir / examples / ...
 ```
 
-## Roadmap, ordered by what unblocks the most programs
+## What's missing
 
-1. **Per-call-site `nargin` / `nargout`** — today both are compile-time
-   constants derived from the function's declared arities. Call-site
-   introspection (different arities across call sites) would need LHS-
-   threaded monomorphisation similar to the existing per-signature
-   clones.
-2. **Structs with runtime layout** — `s.x = …` parses and typechecks
-   but the field-access lowering is still a placeholder. A boxed
-   `{ field_name_table, value_ptr_table }` descriptor unblocks
-   `s.field` reads/writes and `s.(name)` dynamic access.
-3. **Cells `{…}` / `varargin` / `varargout`** — parsed, typed as
-   `cell`, no runtime. Needs a tagged-value container (like a
-   `matlab_mat*` with a dtype tag) so heterogeneous collections work.
-4. **Real `string` type** (vs char array) — `"…"` parses but runtime
-   treats it the same as `'…'`. Needs a distinct descriptor +
-   `strsplit`/`+` concatenation entry points.
-6. **Matrix-typed anon params** — scalar and matrix captures work, but
-   anon params are still hard-coded f64. `@(x) A * x` with a vector
-   `x` needs call-site-driven param-type inference (inspect the
-   call_indirect operand types, retype the outlined function's entry
-   block, rerun LowerTensorOps on its body).
-7. **General-case `eig`** — today we do Jacobi for symmetric matrices
-   (and symmetrize non-symmetric inputs, which is approximate).
-   QR iteration with Wilkinson shifts would handle asymmetric matrices
-   with real spectra; complex-eigenvalue support would need 2×2 block
-   handling. Still pure C.
-   `pinv`, `rank`, `null` are natural byproducts of extending SVD
-   to a full `[U, S, V]` return.
-8. **Row deletion** `A(2, :) = []` — runtime entries
-   (`matlab_erase_rows`, `matlab_erase_cols`) are ready; need the
-   frontend to detect the `= []` pattern and route to them.
-9. **N-dim arrays (>2D)** — Sema models rank but the tensor-ops
+A grouped view of the gaps between this compiler and MATLAB, roughly
+ordered by "blocks how many real programs". Items inside each group
+are individually roadmap-sized — pick one to unlock a whole class of
+programs.
+
+### Heterogeneous data — the biggest user-facing gap
+
+1. **Structs with runtime layout** — `s.x = …` parses and typechecks
+   but the field-access lowering is still a placeholder. Needs a
+   boxed `{ field_name_table, value_ptr_table }` descriptor so
+   `s.field` reads/writes, nested structs, and struct arrays work.
+2. **Dynamic field access `s.(name)`** — depends on structs; once the
+   descriptor exists, a runtime-key lookup falls out.
+3. **Cells `{…}` / `C{i,j}`** — parsed, typed as `cell`, no runtime.
+   Needs a tagged-value container (`matlab_cell` with per-slot dtype
+   tag) so heterogeneous collections work.
+4. **`varargin` / `varargout`** — depends on cells. Once cells exist,
+   these become special parameter bindings that receive/produce a cell
+   of the remaining args/returns.
+5. **Real `string` type** vs char array — `"…"` parses but runtime
+   treats it the same as `'…'`. Needs a distinct descriptor plus
+   `strsplit` / `+` concatenation entry points so `"a" + "b"` returns
+   a string instead of a numeric sum of character codes.
+
+### Type-system depth
+
+6. **Integer types** (`int32`, `uint8`, `int64`, …) end-to-end —
+   Sema has them in the lattice but the runtime is f64-only. Needs
+   typed `matlab_mat` variants + op dispatch per dtype.
+7. **Complex numbers** — imaginary literals parse but the runtime is
+   real-only. `sqrt(-1)` returns NaN today. Needs a complex descriptor
+   plus complex versions of every arithmetic / linear-algebra entry.
+8. **N-dim arrays (>2D)** — Sema models rank but the tensor-ops
    runtime assumes `rows × cols`. Needs a stride-aware descriptor
    plus N-dim indexing in the runtime.
-10. **Integer types** (`int32`, `uint8`, …) end-to-end — Sema has them
-    in the lattice but the runtime is f64-only. Needs typed load/store
-    + op dispatch.
-11. **`global` / `persistent` materialization**, `try / catch` with a
-    runtime error object, `classdef` (OOP) — larger language projects,
-    each a mini-subsystem.
-12. **Optional `-DMATLAB_USE_BLAS`** — link CBLAS as an opt-in fast
+9. **Matrix-typed anon params** — scalar and matrix captures work,
+   but anon params are still hard-coded f64. `@(x) A * x` with a
+   vector `x` needs call-site-driven param-type inference (inspect the
+   call_indirect operand types, retype the outlined function's entry
+   block, rerun LowerTensorOps on its body).
+10. **Per-call-site `nargin` / `nargout`** — today both are compile-
+    time constants derived from the function's declared arities.
+    Call-site introspection (different arities across call sites)
+    would need LHS-threaded monomorphisation similar to the existing
+    per-signature clones.
+
+### Error handling
+
+11. **`try` / `catch` with an error struct** — parsed, catch-body
+    emission still drops. Needs a runtime error object (`matlab_err`),
+    stack-unwinding convention (setjmp/longjmp or llvm's invoke/landing),
+    and integration with `error()` / `warning()` runtime entries.
+
+### Linear-algebra extensions
+
+12. **General-case `eig`** — today we do Jacobi for symmetric matrices
+    (and symmetrize non-symmetric inputs, which is approximate).
+    QR iteration with Wilkinson shifts would handle asymmetric matrices
+    with real spectra; complex-eigenvalue support would need 2×2 block
+    handling. Still pure C.
+13. **Full `[U, S, V] = svd(A)` + friends** — SVD returns only
+    singular values today. Extending to a full decomposition unlocks
+    `pinv`, `rank`, `null`, `orth` as natural byproducts.
+14. **Row / column deletion** `A(2, :) = []` — runtime entries
+    (`matlab_erase_rows`, `matlab_erase_cols`) are ready; needs the
+    frontend to detect the `= []` pattern and route to them.
+
+### OOP & file-level features
+
+15. **`classdef`** — classes, methods, inheritance, properties,
+    `handle` vs value semantics. Largest single language feature
+    still missing; needs dispatch tables, vtables, property slots.
+16. **Package folders / `addpath`** — multi-file projects today
+    must be single-file. Needs a module system + path resolution.
+
+### Runtime / performance
+
+17. **Optional `-DMATLAB_USE_BLAS`** — link CBLAS as an opt-in fast
     path for matmul / LU. The default pure-C path stays intact so the
     runtime remains single-file and transpilable.
-13. **REPL / Live Scripts** — out of scope for now.
-14. **Plotting** — out of scope; would need a plotting backend.
+18. **Copy-on-write matrix descriptor** — we currently allocate and
+    leak every intermediate. Programs with long lifetimes will OOM.
+19. **Sparse matrices** — `sparse(i, j, v, m, n)` plus sparse BLAS.
+20. **Compile-time / runtime `eval`** — not planned.
+
+### Standard library — the long tail
+
+21. **Signal processing**: `fft`, `ifft`, `conv`, `filter`, `xcorr`,
+    `fftshift`.
+22. **Sorting / searching**: `sort`, `sortrows`, `unique`, `cumsum`,
+    `cumprod`, `histc`, `accumarray`.
+23. **Interpolation / grids**: `linspace`, `logspace`, `meshgrid`,
+    `ndgrid`, `interp1`, `interp2`, `spline`.
+24. **Random**: `randi`, `randperm`, proper `rng(seed)` API.
+25. **String manipulation**: `sprintf`, `strcat`, `strsplit`, `regexp`,
+    `num2str`, `str2double`.
+26. **File I/O**: `fopen` / `fread` / `fwrite` / `fclose`, `load` /
+    `save` for `.mat`, `csvread` / `csvwrite`.
+27. **Date/time**: `tic` / `toc`, `datetime`, `datestr`, `clock`.
+28. **Predicates**: `isnumeric`, `ischar`, `isa`, `class`.
+
+### Tooling / ecosystem
+
+29. **Debugger (DAP)**: no `dbstop`, `keyboard`, breakpoints.
+30. **LSP**: no go-to-definition, hover types, completions.
+31. **Testing framework**: `matlab.unittest.TestCase`.
+32. **Mex-style C interop**: call C from MATLAB or expose matlab_llvm
+    functions as a C library.
+
+### Out of scope
+
+- **Plotting** (`plot`, `surf`, `imshow`, `figure`, `hold on`, ...)
+  — would need a display backend; MATLAB's plotting stack is enormous.
+- **REPL / Live Scripts** (`.mlx`) — would need ORCv2 JIT integration.
+- **Simulink** and all domain toolboxes.
+- **App Designer / UIs**.
+- **GPU arrays** (`gpuArray`).
+- **Parallel Server / cluster execution**.
+- **Bit-compatible floating-point** with MathWorks' exact orderings.
 
 ## Non-goals (for now)
 
