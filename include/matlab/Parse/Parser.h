@@ -60,6 +60,7 @@ private:
 
   //--- top level
   Function *parseFunction();
+  ClassDef *parseClassDef();
   Block *parseBlock(bool (Parser::*Stop)() const);
 
   //--- statements

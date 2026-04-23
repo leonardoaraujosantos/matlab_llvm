@@ -31,6 +31,7 @@ private:
   void registerBuiltin(std::string_view Name);
 
   Binding *declareFn(Scope *S, Function *F);
+  Binding *declareClass(Scope *S, ClassDef *C);
 
   // Two-pass scope construction for a function.
   void collectAssignments(Function &F, Scope *FnScope);

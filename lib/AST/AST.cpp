@@ -63,7 +63,7 @@ const char *nodeKindName(NodeKind K) {
   CASE(ReturnStmt) CASE(BreakStmt) CASE(ContinueStmt)
   CASE(GlobalDecl) CASE(PersistentDecl) CASE(ImportStmt) CASE(CommandStmt)
   CASE(Block)
-  CASE(Function) CASE(Script) CASE(TranslationUnit)
+  CASE(Function) CASE(Script) CASE(ClassDef) CASE(TranslationUnit)
 #undef CASE
   }
   return "?";

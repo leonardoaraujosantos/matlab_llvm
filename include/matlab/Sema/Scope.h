@@ -11,6 +11,7 @@
 namespace matlab {
 
 class Function;
+class ClassDef;
 class Type;
 
 enum class BindingKind : uint8_t {
@@ -22,6 +23,7 @@ enum class BindingKind : uint8_t {
   Function,   // TU-level or nested function (user-defined)
   Builtin,    // known MATLAB builtin (extern)
   Import,     // `import pkg.name` alias (unused for now)
+  Class,      // user-defined classdef; ClassName(args) = constructor call
 };
 
 const char *bindingKindName(BindingKind K);
@@ -31,9 +33,15 @@ struct Binding {
   std::string_view Name;
   SourceLocation FirstUse;
   matlab::Function *FuncDef = nullptr; // for Kind=Function; null for Builtin
+  matlab::ClassDef *ClassDef = nullptr; // for Kind=Class
   const Type *DeclaredType = nullptr;  // optional, e.g. for builtins
   // Type inference fills in the current inferred type here after analysis.
   const Type *InferredType = nullptr;
+  /* For ordinary variables whose value is a class instance, the resolver
+   * pins the ClassDef here so `obj.prop` / `obj.method(args)` can find
+   * the property / method without dynamic dispatch. Populated when a Var
+   * is the output of a `ClassName(args)` constructor call. */
+  matlab::ClassDef *PinnedClass = nullptr;
   bool WrittenTo = false;
   bool ReadFrom = false;
 };

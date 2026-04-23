@@ -841,6 +841,69 @@ bool TensorLowering::rewriteBuiltinCalls() {
       continue;
     }
 
+    /* User-defined-class property accessors. Same shape as the struct
+     * variants but the base is a matlab_obj* rather than matlab_struct*,
+     * so the field name + length are materialised and passed identically;
+     * the runtime delegates to the embedded struct table. */
+    if ((Name == "matlab_obj_set_f64" || Name == "matlab_obj_set_mat") &&
+        Call->getNumOperands() == 3) {
+      Value Base = Call->getOperand(0);
+      Value NameV = Call->getOperand(1);
+      Value Val = Call->getOperand(2);
+      if (Base.getType() != PtrTy) continue;
+      int64_t Len = 0;
+      Value Ptr = fieldNameAddr(NameV, Len);
+      if (!Ptr) continue;
+      bool IsMat = Name == "matlab_obj_set_mat";
+      if (IsMat && Val.getType() != PtrTy) continue;
+      if (!IsMat && Val.getType() != F64) continue;
+      B.setInsertionPoint(Call);
+      Value LenV = LLVM::ConstantOp::create(
+          B, Call->getLoc(), I64, B.getI64IntegerAttr(Len));
+      auto Fn = rt(Name, VoidTy, {PtrTy, PtrTy, I64,
+                                    IsMat ? (Type)PtrTy : (Type)F64});
+      LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                            ValueRange{Base, Ptr, LenV, Val});
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+    if ((Name == "matlab_obj_get_f64" || Name == "matlab_obj_get_mat") &&
+        Call->getNumOperands() == 2 && Call->getNumResults() == 1) {
+      Value Base = Call->getOperand(0);
+      Value NameV = Call->getOperand(1);
+      if (Base.getType() != PtrTy) continue;
+      int64_t Len = 0;
+      Value Ptr = fieldNameAddr(NameV, Len);
+      if (!Ptr) continue;
+      bool IsPtr = Name == "matlab_obj_get_mat";
+      Type Ret = IsPtr ? (Type)PtrTy : (Type)F64;
+      B.setInsertionPoint(Call);
+      Value LenV = LLVM::ConstantOp::create(
+          B, Call->getLoc(), I64, B.getI64IntegerAttr(Len));
+      auto Fn = rt(Name, Ret, {PtrTy, PtrTy, I64});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                      ValueRange{Base, Ptr, LenV});
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+    if (Name == "matlab_obj_new" && Call->getNumOperands() == 1 &&
+        Call->getNumResults() == 1) {
+      Value Arg = Call->getOperand(0);
+      auto I32 = IntegerType::get(Ctx, 32);
+      if (Arg.getType() != I32) continue;
+      B.setInsertionPoint(Call);
+      auto Fn = rt("matlab_obj_new", PtrTy, {I32});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                      ValueRange{Arg});
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+
     /* 3-D array runtime: matlab_mat3 descriptor. The frontend emits
      * these directly on bindings tracked as 3-D (zeros/ones with 3
      * args). Each entry matches (ptr, ...) operand types. */

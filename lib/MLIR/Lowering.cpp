@@ -229,7 +229,9 @@ private:
 
   //--- top-level
   void lowerScript(const Script &S, mlir::ModuleOp M);
-  void lowerFunction(const Function &F, mlir::ModuleOp M);
+  void lowerFunction(const Function &F, mlir::ModuleOp M,
+                     const ClassDef *Owner = nullptr);
+  void lowerClass(const ClassDef &C, mlir::ModuleOp M);
 
   //--- blocks / stmts / exprs
   void lowerBlock(const ::matlab::Block &B);
@@ -597,8 +599,20 @@ mlir::ModuleOp Lowerer::lower(const TranslationUnit &TU) {
 
   if (TU.ScriptNode) lowerScript(*TU.ScriptNode, M);
   for (const Function *F : TU.Functions) if (F) lowerFunction(*F, M);
+  for (const ClassDef *C : TU.Classes) if (C) lowerClass(*C, M);
 
   return M;
+}
+
+void Lowerer::lowerClass(const ClassDef &C, mlir::ModuleOp M) {
+  /* Each method is emitted as a flat free function with a mangled name
+   * `ClassName__method`; the constructor uses the same form
+   * `ClassName__ClassName`. Static methods follow the same convention
+   * with `ClassName__` prefix. Dispatch happens statically at call
+   * sites from a Sema-pinned class — no v-table, no runtime method
+   * lookup. */
+  for (const Function *Mth : C.Methods) if (Mth) lowerFunction(*Mth, M, &C);
+  for (const Function *Mth : C.StaticMethods) if (Mth) lowerFunction(*Mth, M, &C);
 }
 
 void Lowerer::lowerScript(const Script &S, mlir::ModuleOp M) {
@@ -619,7 +633,8 @@ void Lowerer::lowerScript(const Script &S, mlir::ModuleOp M) {
   mlir::func::ReturnOp::create(B, loc(S.Range));
 }
 
-void Lowerer::lowerFunction(const Function &F, mlir::ModuleOp M) {
+void Lowerer::lowerFunction(const Function &F, mlir::ModuleOp M,
+                             const ClassDef *Owner) {
   mlir::OpBuilder::InsertionGuard G(B);
   B.setInsertionPointToEnd(M.getBody());
 
@@ -629,21 +644,39 @@ void Lowerer::lowerFunction(const Function &F, mlir::ModuleOp M) {
    * it as !llvm.ptr up front. */
   bool IsVariadic = !F.Inputs.empty() && F.Inputs.back() == "varargin";
   auto PtrTyArg = mlir::LLVM::LLVMPointerType::get(&MCtx);
+  /* A class method's first input and a class constructor's first
+   * output are both the object pointer (matlab_obj*). Tag each one
+   * up-front so its slot is allocated ptr-typed and the binding is
+   * recognised as a class instance by property / method dispatch. */
+  bool IsCtor = Owner && F.Name == Owner->Name;
+  bool IsMethod = Owner && !IsCtor;
   llvm::SmallVector<mlir::Type, 4> InTys, OutTys;
   for (size_t i = 0; i < F.ParamRefs.size(); ++i) {
     Binding *P = F.ParamRefs[i];
     if (IsVariadic && i + 1 == F.ParamRefs.size()) {
       InTys.push_back(PtrTyArg);
+    } else if (IsMethod && i == 0) {
+      InTys.push_back(PtrTyArg);
     } else {
       InTys.push_back(mirTy(P && P->InferredType ? P->InferredType : TC.any()));
     }
   }
-  for (Binding *O : F.OutputRefs)
-    OutTys.push_back(mirTy(O && O->InferredType ? O->InferredType : TC.any()));
+  for (size_t i = 0; i < F.OutputRefs.size(); ++i) {
+    Binding *O = F.OutputRefs[i];
+    if (IsCtor && i == 0) {
+      OutTys.push_back(PtrTyArg);
+    } else {
+      OutTys.push_back(mirTy(O && O->InferredType ? O->InferredType : TC.any()));
+    }
+  }
 
   auto FnTy = mlir::FunctionType::get(&MCtx, InTys, OutTys);
-  auto Fn = mlir::func::FuncOp::create(loc(F.Range),
-                                       std::string(F.Name), FnTy);
+  std::string FnName;
+  if (Owner)
+    FnName = std::string(Owner->Name) + "__" + std::string(F.Name);
+  else
+    FnName = std::string(F.Name);
+  auto Fn = mlir::func::FuncOp::create(loc(F.Range), FnName, FnTy);
   // Attach the MATLAB parameter name to each func arg as a discardable
   // attribute so downstream backends (EmitC) can print readable
   // signatures like `fact(double n)` instead of `fact(double v15)`.
@@ -670,6 +703,7 @@ void Lowerer::lowerFunction(const Function &F, mlir::ModuleOp M) {
     Binding *Bnd = F.ParamRefs[i];
     if (!Bnd) continue;
     bool IsVarArg = IsVariadic && i + 1 == F.ParamRefs.size();
+    bool IsSelfParam = IsMethod && i == 0;
     mlir::Value Slot;
     if (IsVarArg) {
       mlir::NamedAttribute NA(
@@ -678,6 +712,16 @@ void Lowerer::lowerFunction(const Function &F, mlir::ModuleOp M) {
       Slot = emitUnreg("matlab.alloc", {}, PtrTyArg,
                        loc(F.Range), {NA});
       CellBindings.insert(Bnd);
+    } else if (IsSelfParam) {
+      /* `obj` parameter of an ordinary method: always a matlab_obj*. */
+      mlir::NamedAttribute NA(
+          mlir::StringAttr::get(&MCtx, "name"),
+          mlir::FlatSymbolRefAttr::get(&MCtx, std::string(Bnd->Name)));
+      Slot = emitUnreg("matlab.alloc", {}, PtrTyArg,
+                       loc(F.Range), {NA});
+      /* Binding is already PinnedClass'd by the resolver for methods;
+       * keep that in sync here too in case Sema didn't run. */
+      Bnd->PinnedClass = const_cast<ClassDef *>(Owner);
     } else {
       const Type *T = Bnd->InferredType ? Bnd->InferredType : TC.any();
       Slot = emitAlloc(T, Bnd->Name, loc(F.Range));
@@ -689,8 +733,52 @@ void Lowerer::lowerFunction(const Function &F, mlir::ModuleOp M) {
   for (size_t i = 0; i < F.OutputRefs.size(); ++i) {
     Binding *Bnd = F.OutputRefs[i];
     if (!Bnd) continue;
-    const Type *T = Bnd->InferredType ? Bnd->InferredType : TC.any();
-    mlir::Value Slot = emitAlloc(T, Bnd->Name, loc(F.Range));
+    bool IsCtorObj = IsCtor && i == 0;
+    mlir::Value Slot;
+    if (IsCtorObj) {
+      /* The constructor's first output is the newly-built object. Emit
+       * a ptr-typed slot, then initialise it with matlab_obj_new(class_id)
+       * before the user body runs so `obj.Prop = ...` has somewhere to
+       * write. */
+      mlir::NamedAttribute NA(
+          mlir::StringAttr::get(&MCtx, "name"),
+          mlir::FlatSymbolRefAttr::get(&MCtx, std::string(Bnd->Name)));
+      Slot = emitUnreg("matlab.alloc", {}, PtrTyArg,
+                       loc(F.Range), {NA});
+      Bnd->PinnedClass = const_cast<ClassDef *>(Owner);
+      auto I32 = mlir::IntegerType::get(&MCtx, 32);
+      mlir::Value ClsId = mlir::arith::ConstantOp::create(
+          B, loc(F.Range), I32,
+          mlir::IntegerAttr::get(I32, (int64_t)Owner->ClassId));
+      mlir::NamedAttribute Cal(
+          mlir::StringAttr::get(&MCtx, "callee"),
+          mlir::StringAttr::get(&MCtx, "matlab_obj_new"));
+      mlir::Value Obj = emitUnreg("matlab.call_builtin", {ClsId},
+                                   PtrTyArg, loc(F.Range), {Cal});
+      emitStore(Obj, Slot, loc(F.Range));
+      /* Apply default property values, if any, by emitting the literal
+       * and storing to the field via matlab_obj_set_f64 / _set_mat. */
+      for (const auto &P : Owner->Props) {
+        if (!P.Default) continue;
+        mlir::Value DV = lowerExpr(*P.Default);
+        mlir::Value ObjPtr = emitLoad(Slot, PtrTyArg, loc(F.Range));
+        mlir::Value NameV = emitFieldNameChar(P.Name, loc(F.Range));
+        auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+        bool IsMat = DV && (DV.getType() == PtrTy ||
+                            mlir::isa<mlir::RankedTensorType,
+                                      mlir::UnrankedTensorType>(DV.getType()));
+        llvm::StringRef Callee = IsMat ? "matlab_obj_set_mat"
+                                       : "matlab_obj_set_f64";
+        mlir::NamedAttribute Cal2(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, Callee));
+        emitUnregOp("matlab.call_builtin", {ObjPtr, NameV, DV},
+                    {mlir::NoneType::get(&MCtx)}, loc(F.Range), {Cal2});
+      }
+    } else {
+      const Type *T = Bnd->InferredType ? Bnd->InferredType : TC.any();
+      Slot = emitAlloc(T, Bnd->Name, loc(F.Range));
+    }
     Slots[Bnd] = Slot;
   }
   // Pre-allocate local var slots so allocas stay at the function prologue.
@@ -1404,11 +1492,29 @@ void Lowerer::lowerLValueStore(const Expr &LHS, mlir::Value Rhs) {
      * itself a FieldAccess; resolveStructBase walks the chain,
      * auto-allocating intermediate struct fields via
      * matlab_struct_get_child_struct so 's.a.b = v' works even when
-     * s.a didn't exist yet. */
+     * s.a didn't exist yet.
+     *
+     * If the base is a class-pinned variable, route to matlab_obj_set_*
+     * instead so class_id + property table is preserved. */
     auto &F = static_cast<const FieldAccess &>(LHS);
+    auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+    const ClassDef *PinnedCls = nullptr;
+    if (auto *BN = dynamic_cast<const NameExpr *>(F.Base))
+      if (BN->Ref && BN->Ref->PinnedClass) PinnedCls = BN->Ref->PinnedClass;
+    if (PinnedCls) {
+      mlir::Value Obj = lowerExpr(*F.Base);
+      mlir::Value NameV = emitFieldNameChar(F.Field, loc(F.Range));
+      llvm::StringRef Callee = (Rhs && Rhs.getType() == PtrTy)
+          ? "matlab_obj_set_mat" : "matlab_obj_set_f64";
+      mlir::NamedAttribute Cal(
+          mlir::StringAttr::get(&MCtx, "callee"),
+          mlir::StringAttr::get(&MCtx, Callee));
+      emitUnregOp("matlab.call_builtin", {Obj, NameV, Rhs},
+                  {mlir::NoneType::get(&MCtx)}, loc(F.Range), {Cal});
+      return;
+    }
     mlir::Value SPtr = resolveStructBase(F.Base, loc(F.Range));
     if (!SPtr) return;
-    auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
     mlir::Value NameV = emitFieldNameChar(F.Field, loc(F.Range));
     llvm::StringRef Callee = (Rhs && Rhs.getType() == PtrTy)
         ? "matlab_struct_set_mat"
@@ -1570,6 +1676,104 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
     auto &C = static_cast<const CallOrIndex &>(E);
     if (C.Resolved == CallKind::Call) {
       auto *N = dynamic_cast<const NameExpr *>(C.Callee);
+      auto PtrTyConst = mlir::LLVM::LLVMPointerType::get(&MCtx);
+      /* Constructor call: `ClassName(args)` where ClassName resolves to
+       * a user classdef. Route to the emitted `ClassName__ClassName`
+       * function, returning a matlab_obj*. If the class has no explicit
+       * constructor, emit `matlab_obj_new(class_id)` directly and skip
+       * arg-binding — MATLAB's implicit default constructor is no-arg. */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Class &&
+          N->Ref->ClassDef) {
+        const ClassDef *CD = N->Ref->ClassDef;
+        bool HasCtor = false;
+        for (const Function *Mth : CD->Methods)
+          if (Mth && Mth->Name == CD->Name) { HasCtor = true; break; }
+        if (HasCtor) {
+          llvm::SmallVector<mlir::Value, 4> Args;
+          for (const Expr *A : C.Args) if (A) Args.push_back(lowerExpr(*A));
+          std::string Callee = std::string(CD->Name) + "__" +
+                                std::string(CD->Name);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, Callee));
+          return emitUnreg("matlab.call", Args, PtrTyConst, L, {Cal});
+        }
+        auto I32 = mlir::IntegerType::get(&MCtx, 32);
+        mlir::Value ClsId = mlir::arith::ConstantOp::create(
+            B, L, I32, mlir::IntegerAttr::get(I32, (int64_t)CD->ClassId));
+        mlir::NamedAttribute Cal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "matlab_obj_new"));
+        mlir::Value Obj = emitUnreg("matlab.call_builtin", {ClsId},
+                                     PtrTyConst, L, {Cal});
+        /* Apply default property values (constructor-less path). */
+        for (const auto &P : CD->Props) {
+          if (!P.Default) continue;
+          mlir::Value DV = lowerExpr(*P.Default);
+          mlir::Value NameV = emitFieldNameChar(P.Name, L);
+          bool IsMat = DV && (DV.getType() == PtrTyConst ||
+                              mlir::isa<mlir::RankedTensorType,
+                                        mlir::UnrankedTensorType>(DV.getType()));
+          llvm::StringRef Cn = IsMat ? "matlab_obj_set_mat"
+                                      : "matlab_obj_set_f64";
+          mlir::NamedAttribute Cal2(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, Cn));
+          emitUnregOp("matlab.call_builtin", {Obj, NameV, DV},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal2});
+        }
+        return Obj;
+      }
+      /* Dot-method call: `obj.method(args)` where `obj` is pinned to a
+       * class and that class defines a method named `method`. Emit a
+       * direct call to the mangled free function, prepending obj as the
+       * first argument. */
+      if (auto *FA = dynamic_cast<const FieldAccess *>(C.Callee)) {
+        const ClassDef *PCls = nullptr;
+        if (auto *BN = dynamic_cast<const NameExpr *>(FA->Base))
+          if (BN->Ref && BN->Ref->PinnedClass) PCls = BN->Ref->PinnedClass;
+        if (PCls) {
+          const Function *Mth = nullptr;
+          for (const Function *Mm : PCls->Methods)
+            if (Mm && Mm->Name == FA->Field) { Mth = Mm; break; }
+          if (Mth) {
+            mlir::Value Obj = lowerExpr(*FA->Base);
+            llvm::SmallVector<mlir::Value, 4> Args;
+            Args.push_back(Obj);
+            for (const Expr *A : C.Args) if (A) Args.push_back(lowerExpr(*A));
+            std::string Callee = std::string(PCls->Name) + "__" +
+                                  std::string(FA->Field);
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, Callee));
+            return emitUnreg("matlab.call", Args, RT, L, {Cal});
+          }
+        }
+      }
+      /* Free-function method call: `method(obj, args)` where `obj` is
+       * pinned to a class whose method list contains `method`. Same
+       * emission as the dot form. */
+      if (N && N->Ref && N->Ref->Kind != BindingKind::Class &&
+          !C.Args.empty()) {
+        if (auto *AN = dynamic_cast<const NameExpr *>(C.Args[0])) {
+          if (AN->Ref && AN->Ref->PinnedClass) {
+            const ClassDef *PCls = AN->Ref->PinnedClass;
+            const Function *Mth = nullptr;
+            for (const Function *Mm : PCls->Methods)
+              if (Mm && Mm->Name == N->Name) { Mth = Mm; break; }
+            if (Mth) {
+              llvm::SmallVector<mlir::Value, 4> Args;
+              for (const Expr *A : C.Args) if (A) Args.push_back(lowerExpr(*A));
+              std::string Callee = std::string(PCls->Name) + "__" +
+                                    std::string(N->Name);
+              mlir::NamedAttribute Cal(
+                  mlir::StringAttr::get(&MCtx, "callee"),
+                  mlir::StringAttr::get(&MCtx, Callee));
+              return emitUnreg("matlab.call", Args, RT, L, {Cal});
+            }
+          }
+        }
+      }
       /* disp(s) where s is a tracked string binding -> matlab_string_disp.
        * Also handles disp("literal") by routing a StringLiteral arg. */
       if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
@@ -1863,12 +2067,33 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
   case NodeKind::FieldAccess: {
     /* s.x read  OR  s.a.b read. resolveStructBase walks a nested
      * chain via matlab_struct_get_child_struct so the intermediate
-     * level always lands on a real struct pointer. */
+     * level always lands on a real struct pointer.
+     *
+     * If the base variable is pinned to a user class (e.g. because
+     * it was assigned from `ClassName(...)` or is a class-method's
+     * `obj` parameter), route through matlab_obj_get_* instead so the
+     * class_id tag is preserved. */
     auto &F = static_cast<const FieldAccess &>(E);
-    mlir::Value SPtr = resolveStructBase(F.Base, L);
-    if (!SPtr) return emitUnreg("matlab.undef", {}, RT, L);
     auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
     auto F64 = mlir::Float64Type::get(&MCtx);
+    const ClassDef *PinnedCls = nullptr;
+    if (auto *BN = dynamic_cast<const NameExpr *>(F.Base))
+      if (BN->Ref && BN->Ref->PinnedClass) PinnedCls = BN->Ref->PinnedClass;
+    if (PinnedCls) {
+      mlir::Value Obj = lowerExpr(*F.Base);
+      mlir::Value NameV = emitFieldNameChar(F.Field, L);
+      bool WantMat = mlir::isa<mlir::RankedTensorType,
+                                mlir::UnrankedTensorType>(RT);
+      llvm::StringRef Callee = WantMat ? "matlab_obj_get_mat"
+                                        : "matlab_obj_get_f64";
+      mlir::NamedAttribute Cal(
+          mlir::StringAttr::get(&MCtx, "callee"),
+          mlir::StringAttr::get(&MCtx, Callee));
+      mlir::Type ResTy = WantMat ? (mlir::Type)PtrTy : (mlir::Type)F64;
+      return emitUnreg("matlab.call_builtin", {Obj, NameV}, ResTy, L, {Cal});
+    }
+    mlir::Value SPtr = resolveStructBase(F.Base, L);
+    if (!SPtr) return emitUnreg("matlab.undef", {}, RT, L);
     mlir::Value NameV = emitFieldNameChar(F.Field, L);
     /* Default to f64 (scalar field). Only fetch as a matrix when Sema
      * concretely says tensor — a `none`/`any` type, common when Sema

@@ -69,7 +69,7 @@ out of scope.
 | Script-mode top-level (no leading `function`) | ✅ | |
 | Command syntax (`clear x`) | ✅ | Parser-level sugar to `clear('x')` |
 | `import` statement | 🟡 | Parses, not executed |
-| `classdef` / OOP | ❌ | |
+| `classdef` / OOP | 🟡 | Minimum: single class per file, `properties` + `methods`, constructor, dot-method dispatch, property get/set via `matlab_obj` runtime. No inheritance / attributes / validation / operator overloading / events yet. |
 | `spmd` | ❌ | |
 
 ---

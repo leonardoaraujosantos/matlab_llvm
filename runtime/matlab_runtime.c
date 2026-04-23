@@ -1675,6 +1675,60 @@ double matlab_ndims3(matlab_mat3 *A) {
 }
 
 /* ---------------------------------------------------------------------- */
+/* Minimum classdef support.
+ *
+ * A matlab_obj is the generic user-defined-class descriptor: a class_id
+ * tag (assigned by Sema, unique per classdef) plus a matlab_struct that
+ * stores the property values using the same name/kind/value table we
+ * already use for plain structs. That lets obj.Prop / obj.Prop = v
+ * reuse the existing struct machinery — no new dispatch at runtime.
+ *
+ * Methods are emitted as ordinary free functions with a name-mangled
+ * form (see lowerer): `ClassName__method`. The first parameter is
+ * always the object pointer. There is no virtual-dispatch table in v1
+ * because inheritance and overrides are deferred; every call site
+ * resolves statically from the pinned class recorded in Sema.
+ *
+ * All objects are handle-shaped (reference semantics) — MATLAB value
+ * classes copy-on-modify, which would require a deeper change to our
+ * f64-plus-pointer data model, so they are deferred. */
+typedef struct matlab_obj_s {
+    int32_t class_id;
+    matlab_struct *props;
+} matlab_obj;
+
+matlab_obj *matlab_obj_new(int32_t class_id) {
+    matlab_obj *o = (matlab_obj *)calloc(1, sizeof(*o));
+    o->class_id = class_id;
+    o->props = matlab_struct_new();
+    return o;
+}
+
+double matlab_obj_class_id(matlab_obj *o) {
+    return o ? (double)o->class_id : 0.0;
+}
+
+void matlab_obj_set_f64(matlab_obj *o, const char *name, int64_t len, double v) {
+    if (!o) return;
+    matlab_struct_set_f64(o->props, name, len, v);
+}
+
+void matlab_obj_set_mat(matlab_obj *o, const char *name, int64_t len, matlab_mat *m) {
+    if (!o) return;
+    matlab_struct_set_mat(o->props, name, len, m);
+}
+
+double matlab_obj_get_f64(matlab_obj *o, const char *name, int64_t len) {
+    if (!o) return 0.0;
+    return matlab_struct_get_f64(o->props, name, len);
+}
+
+matlab_mat *matlab_obj_get_mat(matlab_obj *o, const char *name, int64_t len) {
+    if (!o) return mat_alloc(0, 0);
+    return matlab_struct_get_mat(o->props, name, len);
+}
+
+/* ---------------------------------------------------------------------- */
 /* Real string type ("..." literals, distinct from '...' char arrays).
  *
  * matlab_string is a tiny {data, len} descriptor with a heap-copied

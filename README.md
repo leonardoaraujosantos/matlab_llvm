@@ -164,7 +164,9 @@ handles (`@sin`, `@myFunc`, `@(x) x+k`); structs (nested fields,
 dynamic `s.(name)`, `isstruct` / `isfield` / `rmfield`); 1-D cell
 arrays; real string type (`"..."`, `+`, `disp`, `strlen`,
 `isstring`); `global` / `persistent`; error flag + `catch ME;
-ME.message`; implicit display; command syntax.
+ME.message`; implicit display; command syntax; minimum `classdef`
+(handle-shaped objects, `properties`, `methods`, constructor with
+`nargin`, property read/write, dot-method dispatch).
 
 Runtime built-ins include: linear algebra (`*`, `\`, `/`, `inv`,
 `det`, `svd`-values, `eig` for symmetric matrices); constructors

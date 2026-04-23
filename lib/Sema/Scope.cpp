@@ -14,6 +14,7 @@ const char *bindingKindName(BindingKind K) {
   case BindingKind::Function:   return "function";
   case BindingKind::Builtin:    return "builtin";
   case BindingKind::Import:     return "import";
+  case BindingKind::Class:      return "class";
   }
   return "?";
 }

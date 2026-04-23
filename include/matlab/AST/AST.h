@@ -63,6 +63,7 @@ enum class NodeKind : uint16_t {
   // Top-level
   Function,
   Script,
+  ClassDef,
   TranslationUnit,
 };
 
@@ -429,11 +430,40 @@ public:
   Script() : Node(NodeKind::Script) {}
 };
 
+/* A property declared inside a classdef's `properties` block. Only Name +
+ * optional Default are captured for now; attributes like `(Access=private)`
+ * and validation `{mustBeNumeric}` are parsed but stored opaquely as a
+ * textual attribute list. */
+struct ClassProp {
+  std::string_view Name;
+  Expr *Default = nullptr;         // nullable
+  SourceRange Range;
+  // Populated by Sema after inference: the global slot id used to read/
+  // write this property through matlab_obj_get_* / matlab_obj_set_*.
+  int32_t PropId = -1;
+};
+
+class ClassDef : public Node {
+public:
+  std::string_view Name;
+  std::string_view SuperName;      // empty if no `< Super`
+  std::vector<ClassProp> Props;
+  std::vector<Function *> Methods; // includes the constructor if present
+  std::vector<Function *> StaticMethods;
+
+  /* Populated by Sema. */
+  Binding *Self = nullptr;
+  int32_t ClassId = -1;
+
+  ClassDef() : Node(NodeKind::ClassDef) {}
+};
+
 class TranslationUnit : public Node {
 public:
   // Exactly one of Script or top-level Functions is populated in typical files.
   Script *ScriptNode = nullptr;
   std::vector<Function *> Functions;
+  std::vector<ClassDef *> Classes;
   TranslationUnit() : Node(NodeKind::TranslationUnit) {}
 };
 

@@ -197,6 +197,18 @@ int main(int Argc, char **Argv) {
         // IR are !llvm.ptr to heap-allocated matlab_mat descriptors, and
         // disp on a matrix ptr routes to matlab_disp_mat.
         mlirgen::runLowerTensorOps(M);
+        /* After LowerTensorOps has retyped any slots whose stores are
+         * ptr-typed (class-instance slots, cell / struct slots), the
+         * call-site loads feeding into user-method calls change type
+         * from `none` to `ptr`. Re-run the scalar+user-call fixpoint
+         * so the method-call matlab.call sites now match their
+         * func.func signatures and get converted to func.call. */
+        for (int Iter = 0; Iter < 4; ++Iter) {
+          bool A = mlirgen::runLowerScalarsToArith(M);
+          bool B = mlirgen::runLowerUserCalls(M);
+          if (!A && !B) break;
+        }
+        mlirgen::runLowerTensorOps(M);
         // Second-chance anon call rewrite: any matlab.call_indirect that
         // survived the first LowerAnonCalls because its matrix operands
         // were still tensor-typed can now match the outlined function's

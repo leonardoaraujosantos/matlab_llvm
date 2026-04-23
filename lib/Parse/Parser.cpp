@@ -89,7 +89,18 @@ TranslationUnit *Parser::parseFile() {
 
   skipStatementTerminators();
 
-  if (at(TokenKind::kw_function)) {
+  if (at(TokenKind::kw_classdef)) {
+    // A class file. MATLAB allows exactly one classdef per file, optionally
+    // followed by local functions. We accept the same shape.
+    if (auto *C = parseClassDef()) TU->Classes.push_back(C);
+    skipStatementTerminators();
+    while (at(TokenKind::kw_function)) {
+      if (auto *F = parseFunction()) TU->Functions.push_back(F);
+      skipStatementTerminators();
+    }
+    if (!at(TokenKind::eof))
+      Diag.error(cur().Loc, "stray tokens after classdef");
+  } else if (at(TokenKind::kw_function)) {
     // A .m file that is a function file. May contain multiple functions.
     while (at(TokenKind::kw_function)) {
       if (auto *F = parseFunction()) TU->Functions.push_back(F);
@@ -99,19 +110,27 @@ TranslationUnit *Parser::parseFile() {
       Diag.error(cur().Loc, "stray tokens after function definitions");
   } else {
     // Script file — top-level statements, possibly followed by helper
-    // functions.
+    // functions and/or classdefs. MATLAB itself requires class files to
+    // contain *only* a classdef; we accept script + classdef in one file
+    // for testing / single-file demos, which simplifies the run-tests
+    // pipeline that compiles one .m at a time.
     auto *S = Ctx.make<Script>();
     S->Body = Ctx.make<Block>();
     S->Range.Begin = cur().Loc;
-    while (!at(TokenKind::eof) && !at(TokenKind::kw_function)) {
+    while (!at(TokenKind::eof) && !at(TokenKind::kw_function) &&
+           !at(TokenKind::kw_classdef)) {
       if (auto *St = parseStmt()) S->Body->Stmts.push_back(St);
       skipStatementTerminators();
     }
     S->Range.End = cur().Loc;
     TU->ScriptNode = S;
 
-    while (at(TokenKind::kw_function)) {
-      if (auto *F = parseFunction()) TU->Functions.push_back(F);
+    while (at(TokenKind::kw_function) || at(TokenKind::kw_classdef)) {
+      if (at(TokenKind::kw_classdef)) {
+        if (auto *C = parseClassDef()) TU->Classes.push_back(C);
+      } else {
+        if (auto *F = parseFunction()) TU->Functions.push_back(F);
+      }
       skipStatementTerminators();
     }
   }
@@ -208,6 +227,164 @@ Function *Parser::parseFunction() {
   popScope();
   F->Range.End = cur().Loc;
   return F;
+}
+
+//===----------------------------------------------------------------------===//
+// ClassDef
+//
+// Parses a minimum MATLAB classdef:
+//
+//   classdef Name                       % or "classdef Name < Super"
+//     properties [(...)]
+//       Prop1
+//       Prop2 = default
+//     end
+//     methods [(...)]
+//       function obj = Name(args) ... end    % constructor
+//       function r = m(obj, ...) ... end
+//     end
+//   end
+//
+// Attribute blocks like `(Dependent)`, `(Access=private)` and validation
+// `{mustBeNumeric}` are parsed shallowly — we skip to the closing token
+// without interpreting them, so they survive round-trip but don't yet
+// influence Sema or lowering.
+//===----------------------------------------------------------------------===//
+
+ClassDef *Parser::parseClassDef() {
+  assert(at(TokenKind::kw_classdef));
+  auto *C = Ctx.make<ClassDef>();
+  C->Range.Begin = cur().Loc;
+  ++Idx; // consume 'classdef'
+
+  /* Optional class-level attribute list: classdef (Attr1, Attr2) Name ...
+   * For v1 we skip the whole parenthesised block. */
+  if (consume(TokenKind::l_paren)) {
+    int Depth = 1;
+    while (Depth > 0 && !at(TokenKind::eof)) {
+      if (at(TokenKind::l_paren)) ++Depth;
+      else if (at(TokenKind::r_paren)) --Depth;
+      ++Idx;
+    }
+  }
+
+  if (!at(TokenKind::identifier)) {
+    Diag.error(cur().Loc, "expected class name after 'classdef'");
+    synchronize();
+    return C;
+  }
+  C->Name = take().Text;
+
+  /* Optional superclass: `< Super` (or `< A & B`, which we flatten — v1
+   * supports single inheritance only, so we record the first super and
+   * silently drop any '& extra' for now). */
+  if (consume(TokenKind::less)) {
+    if (at(TokenKind::identifier)) C->SuperName = take().Text;
+    while (consume(TokenKind::amp)) {
+      if (at(TokenKind::identifier)) ++Idx; // drop additional supers (v1)
+    }
+  }
+  skipStatementTerminators();
+
+  while (!at(TokenKind::eof) && !at(TokenKind::kw_end)) {
+    if (at(TokenKind::kw_properties)) {
+      ++Idx;
+      /* Skip optional `(Access=public, ...)` attribute block. */
+      if (consume(TokenKind::l_paren)) {
+        int Depth = 1;
+        while (Depth > 0 && !at(TokenKind::eof)) {
+          if (at(TokenKind::l_paren)) ++Depth;
+          else if (at(TokenKind::r_paren)) --Depth;
+          ++Idx;
+        }
+      }
+      skipStatementTerminators();
+      while (!at(TokenKind::kw_end) && !at(TokenKind::eof)) {
+        if (!at(TokenKind::identifier)) { ++Idx; continue; }
+        ClassProp P;
+        P.Range.Begin = cur().Loc;
+        P.Name = take().Text;
+        /* Skip optional `(1,1)` size spec or `{mustBeNumeric}` validator. */
+        if (consume(TokenKind::l_paren)) {
+          int Depth = 1;
+          while (Depth > 0 && !at(TokenKind::eof)) {
+            if (at(TokenKind::l_paren)) ++Depth;
+            else if (at(TokenKind::r_paren)) --Depth;
+            ++Idx;
+          }
+        }
+        if (consume(TokenKind::l_brace)) {
+          int Depth = 1;
+          while (Depth > 0 && !at(TokenKind::eof)) {
+            if (at(TokenKind::l_brace)) ++Depth;
+            else if (at(TokenKind::r_brace)) --Depth;
+            ++Idx;
+          }
+        }
+        /* Optional type annotation, e.g. `Next Node = Node.empty` — drop
+         * the `Node` part; we don't type-check it yet. */
+        if (at(TokenKind::identifier)) ++Idx;
+        if (consume(TokenKind::equal)) {
+          P.Default = parseExpr();
+        }
+        P.Range.End = cur().Loc;
+        C->Props.push_back(std::move(P));
+        skipStatementTerminators();
+      }
+      if (at(TokenKind::kw_end)) ++Idx;
+      skipStatementTerminators();
+    } else if (at(TokenKind::kw_methods)) {
+      ++Idx;
+      bool IsStatic = false;
+      if (consume(TokenKind::l_paren)) {
+        /* Scan for the word "Static" inside the attribute list — enough
+         * for v1 dispatch. Anything else is skipped. */
+        int Depth = 1;
+        while (Depth > 0 && !at(TokenKind::eof)) {
+          if (at(TokenKind::l_paren)) ++Depth;
+          else if (at(TokenKind::r_paren)) --Depth;
+          else if (at(TokenKind::identifier) && cur().Text == "Static")
+            IsStatic = true;
+          ++Idx;
+        }
+      }
+      skipStatementTerminators();
+      while (at(TokenKind::kw_function)) {
+        if (auto *F = parseFunction()) {
+          if (IsStatic) C->StaticMethods.push_back(F);
+          else          C->Methods.push_back(F);
+        }
+        skipStatementTerminators();
+      }
+      if (at(TokenKind::kw_end)) ++Idx;
+      skipStatementTerminators();
+    } else if (at(TokenKind::kw_events) ||
+               at(TokenKind::kw_enumeration)) {
+      /* Parsed-but-ignored: skip to the matching end. */
+      ++Idx;
+      if (consume(TokenKind::l_paren)) {
+        int Depth = 1;
+        while (Depth > 0 && !at(TokenKind::eof)) {
+          if (at(TokenKind::l_paren)) ++Depth;
+          else if (at(TokenKind::r_paren)) --Depth;
+          ++Idx;
+        }
+      }
+      while (!at(TokenKind::kw_end) && !at(TokenKind::eof)) ++Idx;
+      if (at(TokenKind::kw_end)) ++Idx;
+      skipStatementTerminators();
+    } else {
+      Diag.error(cur().Loc,
+                 "unexpected token inside classdef; expected "
+                 "properties/methods/end");
+      ++Idx;
+      skipStatementTerminators();
+    }
+  }
+  if (at(TokenKind::kw_end)) ++Idx;
+
+  C->Range.End = cur().Loc;
+  return C;
 }
 
 //===----------------------------------------------------------------------===//

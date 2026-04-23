@@ -289,7 +289,25 @@ void Dumper::dump(const Node &N, unsigned Indent) {
     auto &T = static_cast<const TranslationUnit &>(N);
     pad(Indent); OS << "TranslationUnit\n";
     if (T.ScriptNode) dump(*T.ScriptNode, Indent + 1);
+    for (auto *C : T.Classes) if (C) dump(*C, Indent + 1);
     for (auto *F : T.Functions) if (F) dump(*F, Indent + 1);
+    break;
+  }
+  case NodeKind::ClassDef: {
+    auto &C = static_cast<const ClassDef &>(N);
+    pad(Indent); OS << "ClassDef " << C.Name;
+    if (!C.SuperName.empty()) OS << " < " << C.SuperName;
+    OS << "\n";
+    for (auto &P : C.Props) {
+      pad(Indent + 1); OS << "Property " << P.Name << "\n";
+      if (P.Default) dumpExpr(*P.Default, Indent + 2);
+    }
+    for (auto *F : C.Methods) if (F) dump(*F, Indent + 1);
+    for (auto *F : C.StaticMethods) {
+      if (!F) continue;
+      pad(Indent + 1); OS << "Static\n";
+      dump(*F, Indent + 2);
+    }
     break;
   }
   case NodeKind::Script: {

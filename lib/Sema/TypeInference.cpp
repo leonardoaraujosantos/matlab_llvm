@@ -46,6 +46,16 @@ bool TypeInference::envEqual(const Env &A, const Env &B) {
 void TypeInference::run(TranslationUnit &TU) {
   if (TU.ScriptNode) runScript(*TU.ScriptNode);
   for (Function *F : TU.Functions) runFunction(*F);
+  /* Class methods are ordinary free functions at this stage (Resolver
+   * registered them as Function bindings with a class-pinned first
+   * param). Walk them too so their bodies get the same type-inference
+   * treatment as top-level functions — otherwise comparisons like
+   * `nargin == 1` inside a method body keep a NoneType result and
+   * scf.if lowering breaks. */
+  for (ClassDef *C : TU.Classes) {
+    for (Function *M : C->Methods) if (M) runFunction(*M);
+    for (Function *M : C->StaticMethods) if (M) runFunction(*M);
+  }
 }
 
 void TypeInference::runScript(Script &S) {

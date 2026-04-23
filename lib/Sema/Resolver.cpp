@@ -52,10 +52,32 @@ Binding *Resolver::declareFn(Scope *S, Function *F) {
   return Declared;
 }
 
+Binding *Resolver::declareClass(Scope *S, ClassDef *C) {
+  Binding *B = Sema.newBinding();
+  Binding *Declared = S->declare(C->Name, BindingKind::Class, B);
+  Declared->ClassDef = C;
+  C->Self = Declared;
+  return Declared;
+}
+
 void Resolver::resolve(TranslationUnit &TU) {
   // Register all top-level functions in the global scope *before* resolving
   // their bodies so mutual calls work.
   for (Function *F : TU.Functions) declareFn(Global, F);
+  /* Classes share the same global name space as functions — `ClassName(args)`
+   * looks like a function call at the parser level and is disambiguated
+   * here by binding kind. Register before resolving any bodies so
+   * script-level constructor calls resolve. */
+  int32_t NextClassId = 1;
+  for (ClassDef *C : TU.Classes) {
+    declareClass(Global, C);
+    C->ClassId = NextClassId++;
+    /* Give each property a stable id per class (used by the runtime's
+     * property table so names don't have to be re-hashed at every
+     * access). */
+    int32_t PropId = 0;
+    for (auto &P : C->Props) P.PropId = PropId++;
+  }
 
   if (TU.ScriptNode) {
     Scope *ScriptScope = Sema.newScope(Global, "<script>");
@@ -65,6 +87,20 @@ void Resolver::resolve(TranslationUnit &TU) {
   }
 
   for (Function *F : TU.Functions) resolveFunction(*F, Global);
+
+  /* Resolve class method bodies. Each method is an ordinary Function
+   * whose first parameter (`obj`) is typed as the owning class, so
+   * property accesses route correctly. */
+  for (ClassDef *C : TU.Classes) {
+    for (Function *M : C->Methods) {
+      resolveFunction(*M, Global);
+      if (!M->ParamRefs.empty())
+        M->ParamRefs.front()->PinnedClass = C;
+    }
+    for (Function *M : C->StaticMethods) {
+      resolveFunction(*M, Global);
+    }
+  }
 }
 
 //===----------------------------------------------------------------------===//
@@ -224,6 +260,24 @@ void Resolver::resolveStmt(Stmt &St, Scope *S) {
     auto &A = static_cast<AssignStmt &>(St);
     if (A.RHS) resolveExpr(*A.RHS, S);
     for (Expr *L : A.LHS) resolveLValue(*L, S);
+    /* Pin the LHS variable to the class of the RHS when the RHS is a
+     * direct constructor call `ClassName(args)`. Later lookups of
+     * `lhs.prop` or `lhs.method(args)` then dispatch against this class
+     * without dynamic type discovery. */
+    if (A.RHS && A.RHS->Kind == NodeKind::CallOrIndex) {
+      auto *Cx = static_cast<CallOrIndex *>(A.RHS);
+      if (auto *Nx = dynamic_cast<NameExpr *>(Cx->Callee)) {
+        if (Nx->Ref && Nx->Ref->Kind == BindingKind::Class &&
+            Nx->Ref->ClassDef) {
+          for (Expr *L : A.LHS) {
+            if (auto *LN = dynamic_cast<NameExpr *>(L)) {
+              if (LN->Ref && LN->Ref->Kind != BindingKind::Class)
+                LN->Ref->PinnedClass = Nx->Ref->ClassDef;
+            }
+          }
+        }
+      }
+    }
     break;
   }
   case NodeKind::IfStmt: {
@@ -291,7 +345,8 @@ void Resolver::resolveLValue(Expr &E, Scope *S) {
                      std::string(N.Name) + "'");
       return;
     }
-    if (B->Kind == BindingKind::Function || B->Kind == BindingKind::Builtin) {
+    if (B->Kind == BindingKind::Function || B->Kind == BindingKind::Builtin ||
+        B->Kind == BindingKind::Class) {
       Diag.error(N.Range.Begin,
                  std::string("cannot assign to function '") +
                      std::string(N.Name) + "'");
@@ -351,6 +406,7 @@ void Resolver::resolveCallee(CallOrIndex &C, Scope *S) {
       case BindingKind::Function:
       case BindingKind::Builtin:
       case BindingKind::Import:
+      case BindingKind::Class:
         C.Resolved = CallKind::Call;
         return;
       }
@@ -359,6 +415,23 @@ void Resolver::resolveCallee(CallOrIndex &C, Scope *S) {
     // call and let type inference report it as ambiguous.
     C.Resolved = CallKind::Call;
     return;
+  }
+
+  /* Dot-method call: `obj.method(args)` parses as CallOrIndex whose
+   * callee is a FieldAccess. If the base variable is pinned to a user
+   * class and that class defines a method `method`, classify as a Call
+   * so lowering emits a method dispatch rather than a matlab.subscript. */
+  if (auto *FA = dynamic_cast<FieldAccess *>(C.Callee)) {
+    if (auto *BN = dynamic_cast<NameExpr *>(FA->Base)) {
+      if (BN->Ref && BN->Ref->PinnedClass) {
+        for (matlab::Function *Mth : BN->Ref->PinnedClass->Methods) {
+          if (Mth && Mth->Name == FA->Field) {
+            C.Resolved = CallKind::Call;
+            return;
+          }
+        }
+      }
+    }
   }
 
   // Non-identifier callee: could be a function handle call, a chained index,
