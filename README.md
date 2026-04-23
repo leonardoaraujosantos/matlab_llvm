@@ -81,10 +81,12 @@ function y = sq(x), y = x * x; end
 ```
 
 No MathWorks source, no Octave dependency, no numerics library
-dependency. Just C++20, MLIR (22.1 from Homebrew), and a ~1400-line C
+dependency. Just C++20, MLIR (22.1 from Homebrew), and a ~1700-line C
 runtime shim that wraps libc, pthreads, a heap-allocated `matlab_mat`
-descriptor, and a global mutex for stdout and reductions. The entire
-runtime — including matmul, inverse, solve, determinant, SVD, eig — is
+descriptor, `matlab_struct` / `matlab_cell` containers, and a global
+mutex for stdout and reductions. The entire runtime — including
+matmul, inverse, solve, determinant, SVD, eig, structs with nested
+fields, cells with mixed kinds, and the try/catch error flag — is
 transpilable as a single self-contained file.
 
 ## Pipeline
@@ -97,7 +99,7 @@ flowchart LR
   ast --> sema["Sema<br/>(scope tree,<br/>type lattice,<br/>fixpoint inference)"]
   sema --> mir["MIR<br/>(in-house SSA,<br/>zero-dep,<br/>reference/diagnostic IR)"]
   sema --> mlir["MLIR<br/>(matlab + func + scf +<br/>arith + tensor + llvm<br/>dialects)"]
-  mlir --> passes["MLIR passes<br/>(slot promotion,<br/>scalar→arith,<br/>outline parfor,<br/>lower seq loops,<br/>lower user calls,<br/>lower anon calls,<br/>lower tensor ops,<br/>lower I/O,<br/>scalar slots→alloca)"]
+  mlir --> passes["MLIR passes<br/>(slot promotion,<br/>scalar→arith,<br/>outline parfor,<br/>lower seq loops,<br/>lower user calls,<br/>lower anon calls,<br/>lower tensor ops,<br/>lower I/O,<br/>scalar slots→alloca,<br/>emit C/C++ source)"]
   passes --> llvmir["LLVM IR"]
   passes --> csrc["C / C++ source<br/>(emitC walker)"]
   llvmir --> exe["executable<br/>(clang + matlab_runtime.c)"]
@@ -188,7 +190,7 @@ just compile-cpp examples/matrix_mult.m    # -> ./matrix_mult
 ```
 
 Both emitters produce code that matches the LLVM path's stdout byte-for-byte
-on all 95 `test/Run/*.m` programs and all 12 `examples/*.m` programs
+on all 98 `test/Run/*.m` programs and all 12 `examples/*.m` programs
 (see `just test-emitc`).
 
 A deeper write-up of the C/C++ backend — what it emits for each op,
@@ -350,7 +352,7 @@ threads deterministically prints 55.
 | `global`, `persistent` | ✅ | ✅ | ✅ scalar (f64) via runtime-backed slot table; globals shared by name, persistents namespaced per function | ✅ |
 | `try / catch` + `catch ME; disp(ME.message)` | ✅ | ✅ | ✅ runs try body; catch body runs when `error('msg')` set the runtime error flag; `ME.message` reads back the stored text (no stack unwinding for runtime faults) | ✅ |
 | Structs `s.x = v`, `s.x` read, `s.a.b` nested, `s.(name)` dynamic | ✅ | ✅ | ✅ runtime-backed `matlab_struct` with f64/matrix/nested-struct field kinds | ✅ |
-| `isstruct(x)` / `isfield(s, 'x')` | ✅ | ✅ | ✅ `isstruct` compile-time fold; `isfield` routes to `matlab_struct_has_field` | ✅ |
+| `isstruct(x)` / `isfield(s, 'x')` / `rmfield(s, 'x')` | ✅ | ✅ | ✅ `isstruct` compile-time fold; `isfield` → `matlab_struct_has_field`; `rmfield` → `matlab_struct_rmfield` (in-place shift-down) | ✅ |
 | `classdef` (OOP) | ❌ | ❌ | ❌ | — |
 | Cells `{a, b, c}`, `C{i}` read, `C{i} = v` write, `numel(C)` / `length(C)` / `iscell(C)` | ✅ | ✅ | ✅ 1-D matlab_cell with f64/matrix slot kinds (transparent 1×1 box), auto-grow on out-of-range write, cell-aware numel/length/iscell via binding tracking | ✅ |
 | Command syntax (`disp hello` → `disp('hello')`) | ✅ | ✅ | ✅ | — |
@@ -386,7 +388,7 @@ chapters. Here's how this compiler maps to it.
 | Array Indexing (`A(i,j)`, `A(:,2)`, `A(end)`) | ✅ scalar and colon/range/`end` slicing all execute end-to-end |
 | Workspace Variables | ✅ scalar/array slot model |
 | Text and Characters (strings vs chars) | ⚠️ parses both, runtime only handles `'…'` |
-| Calling Functions (builtins like `sin`, `zeros`) | ✅ Sema registry of ~60 builtins, runtime subset wired |
+| Calling Functions (builtins like `sin`, `zeros`) | ✅ Sema registry of ~70 builtins, runtime subset wired |
 | 2-D / 3-D Plots | ❌ not in scope |
 | Programming and Scripts (scripts vs functions) | ✅ |
 | Help and Documentation | ❌ |
@@ -404,7 +406,7 @@ chapters. Here's how this compiler maps to it.
 | Text / character arrays | ✅ char array; ⚠️ string-type (double-quoted) partial |
 | Tables | ❌ |
 | Cell arrays | ✅ 1-D `{a, b, c}` literals, `C{i}` read, `C{i} = v` write (auto-grow), `numel`/`length`/`iscell` on cells via runtime-backed `matlab_cell`; 2-D cells and `cellfun` still pending |
-| Structs (`s.x`, `s.(name)`) | ✅ runtime-backed `matlab_struct` — scalar and matrix fields, updates, dynamic read with literal field name; nested / struct-array pending |
+| Structs (`s.x`, `s.a.b`, `s.(name)`) | ✅ runtime-backed `matlab_struct` — scalar, matrix, and nested-struct fields, updates, dynamic read with literal field name, `isstruct`/`isfield`/`rmfield`; struct-arrays (`s(1).x`) and `fieldnames` still pending |
 | Floating-point / integer types | ✅ lattice supports all, runtime uses double |
 
 ### Chapter 3 — Mathematics
@@ -500,7 +502,9 @@ flowchart TD
   TensorOps --> ScalarSlots[LowerScalarSlots<br/>matlab.alloc → llvm.alloca]
   ScalarSlots --> IO[LowerIO<br/>const_char → llvm.global<br/>disp/fprintf → llvm.call]
   IO --> ConvertPipeline["MLIR conversion pipeline<br/>(scf→cf, arith→llvm,<br/>func→llvm)"]
+  IO --> EmitCOut["EmitC walker<br/>(alternative backend:<br/>writes .c / .cpp)"]
   ConvertPipeline --> LLVMIR[LLVM IR]
+  EmitCOut --> CSource["C / C++ source"]
 ```
 
 Noteworthy passes:
@@ -565,7 +569,7 @@ implementation that doesn't pull in a platform-specific numerics
 vendor. The tradeoff is performance (a naive O(N³) matmul is ~10–100×
 slower than OpenBLAS for large matrices), not correctness.
 
-~1400 lines of C. Entries wired today:
+~1700 lines of C. Entries wired today:
 
 **I/O**
 
@@ -616,20 +620,28 @@ we leak).
 - Structs: `matlab_struct_new` / `matlab_struct_set_f64` /
   `matlab_struct_set_mat` / `matlab_struct_get_f64` /
   `matlab_struct_get_mat` / `matlab_struct_has_field` /
-  `matlab_struct_get_child_struct`. Parallel name/kind/value tables
-  with linear-scan lookup; scalar, matrix, and nested-struct fields
-  can mix inside the same descriptor with transparent 1×1 boxing
-  when a scalar is read as matrix or vice-versa.
+  `matlab_struct_get_child_struct` / `matlab_struct_rmfield`.
+  Parallel name/kind/value tables with linear-scan lookup; scalar,
+  matrix, and nested-struct fields can mix inside the same descriptor
+  with transparent 1×1 boxing when a scalar is read as matrix or
+  vice-versa. `rmfield` shifts the remaining entries down in place
+  and returns the same pointer so `s = rmfield(s, 'x')` just works.
 - Cells: `matlab_cell_new` / `matlab_cell_set_f64` /
   `matlab_cell_set_mat` / `matlab_cell_get_f64` /
   `matlab_cell_get_mat` / `matlab_cell_numel` / `matlab_iscell`.
   1-D only for v1; each slot carries a kind tag (0 = f64, 1 =
   matlab_mat*) so `{1, [10 20], 'x'}`-style heterogeneous literals
-  work.
-- Error flag: `matlab_set_error` / `matlab_check_error` /
-  `matlab_clear_error`, a process-wide i32 that the try/catch lowering
-  checks after the try body. `error(...)` sets the flag; the catch
-  body clears it and runs.
+  work. Auto-grows on out-of-range writes. The frontend tracks
+  cell-typed bindings so `numel(C)` / `length(C)` / `iscell(C)` route
+  to the cell runtime instead of the matrix path.
+- Error flag: `matlab_set_error` / `matlab_set_error_msg(ptr, len)` /
+  `matlab_check_error` / `matlab_clear_error` plus
+  `matlab_err_disp_message`. A process-wide i32 that the try/catch
+  lowering consults after the try body; `error('msg')` stores a heap
+  copy of the string, and `catch ME; disp(ME.message)` is intercepted
+  at lowering and routed to `matlab_err_disp_message` which prints the
+  stored text. Clearing the flag preserves the message so the catch
+  body can still read it; a subsequent `error()` overwrites.
 
 **Concurrency**
 
@@ -639,7 +651,8 @@ we leak).
 
 ## Testing
 
-Two CTest suites, ~165 goldens total:
+Seven CTest suites, ~560 goldens total (the 98 Run programs × 3
+compilation lanes plus the frontend + emit-c-fail suites):
 
 | Suite | Driver flag | Tests | What it checks |
 |---|---|:-:|---|
@@ -711,11 +724,11 @@ programs.
    cell of char arrays — blocked on a proper char-matrix dtype),
    and runtime-varying `s.(expr)` where `expr` isn't a literal.
 2. **2-D cells + cell concat + cellfun** — 1-D `C = {a, b, c}`
-   literals, `C{i}` reads, and `C{i} = v` writes all execute today
-   via `matlab_cell`. Pending: `{…; …}` 2-D cells, `[C1, C2]`
-   concatenation, `cellfun`, and `numel(C)` / `iscell` specialised
-   for cells (today those route to matrix paths — an extra runtime
-   dispatch layer would fix it).
+   literals, `C{i}` reads, `C{i} = v` writes, and `numel`/`length`/
+   `iscell` on cells all execute today via `matlab_cell`. Pending:
+   `{…; …}` 2-D cells, `[C1, C2]` concatenation, `cellfun`, passing
+   cells through user-function calls (the monomorphiser currently
+   doesn't distinguish cell pointers from matrix pointers).
 3. **`varargin` / `varargout`** — cells exist, but the call-site
    packing (bundle remaining args into a cell) and the function-side
    unpacking haven't been wired yet.
@@ -726,21 +739,21 @@ programs.
 
 ### Type-system depth
 
-6. **Integer types** (`int32`, `uint8`, `int64`, …) end-to-end —
+5. **Integer types** (`int32`, `uint8`, `int64`, …) end-to-end —
    Sema has them in the lattice but the runtime is f64-only. Needs
    typed `matlab_mat` variants + op dispatch per dtype.
-7. **Complex numbers** — imaginary literals parse but the runtime is
+6. **Complex numbers** — imaginary literals parse but the runtime is
    real-only. `sqrt(-1)` returns NaN today. Needs a complex descriptor
    plus complex versions of every arithmetic / linear-algebra entry.
-8. **N-dim arrays (>2D)** — Sema models rank but the tensor-ops
+7. **N-dim arrays (>2D)** — Sema models rank but the tensor-ops
    runtime assumes `rows × cols`. Needs a stride-aware descriptor
    plus N-dim indexing in the runtime.
-9. **Matrix-typed anon params** — scalar and matrix captures work,
+8. **Matrix-typed anon params** — scalar and matrix captures work,
    but anon params are still hard-coded f64. `@(x) A * x` with a
    vector `x` needs call-site-driven param-type inference (inspect the
    call_indirect operand types, retype the outlined function's entry
    block, rerun LowerTensorOps on its body).
-10. **Per-call-site `nargin` / `nargout`** — today both are compile-
+9. **Per-call-site `nargin` / `nargout`** — today both are compile-
     time constants derived from the function's declared arities.
     Call-site introspection (different arities across call sites)
     would need LHS-threaded monomorphisation similar to the existing
@@ -748,7 +761,7 @@ programs.
 
 ### Error handling
 
-11. **Full try / catch with stack unwinding** — today `try` runs
+10. **Full try / catch with stack unwinding** — today `try` runs
     its body, then `catch` (with optional `catch ME`) runs iff the
     process-global `matlab_error_flag` is set by an explicit
     `error('msg')` call, and `disp(ME.message)` prints the stored
@@ -760,58 +773,58 @@ programs.
 
 ### Linear-algebra extensions
 
-12. **General-case `eig`** — today we do Jacobi for symmetric matrices
+11. **General-case `eig`** — today we do Jacobi for symmetric matrices
     (and symmetrize non-symmetric inputs, which is approximate).
     QR iteration with Wilkinson shifts would handle asymmetric matrices
     with real spectra; complex-eigenvalue support would need 2×2 block
     handling. Still pure C.
-13. **Full `[U, S, V] = svd(A)` + friends** — SVD returns only
+12. **Full `[U, S, V] = svd(A)` + friends** — SVD returns only
     singular values today. Extending to a full decomposition unlocks
     `pinv`, `rank`, `null`, `orth` as natural byproducts.
-14. **Row / column deletion** `A(2, :) = []` — runtime entries
+13. **Row / column deletion** `A(2, :) = []` — runtime entries
     (`matlab_erase_rows`, `matlab_erase_cols`) are ready; needs the
     frontend to detect the `= []` pattern and route to them.
 
 ### OOP & file-level features
 
-15. **`classdef`** — classes, methods, inheritance, properties,
+14. **`classdef`** — classes, methods, inheritance, properties,
     `handle` vs value semantics. Largest single language feature
     still missing; needs dispatch tables, vtables, property slots.
-16. **Package folders / `addpath`** — multi-file projects today
+15. **Package folders / `addpath`** — multi-file projects today
     must be single-file. Needs a module system + path resolution.
 
 ### Runtime / performance
 
-17. **Optional `-DMATLAB_USE_BLAS`** — link CBLAS as an opt-in fast
+16. **Optional `-DMATLAB_USE_BLAS`** — link CBLAS as an opt-in fast
     path for matmul / LU. The default pure-C path stays intact so the
     runtime remains single-file and transpilable.
-18. **Copy-on-write matrix descriptor** — we currently allocate and
+17. **Copy-on-write matrix descriptor** — we currently allocate and
     leak every intermediate. Programs with long lifetimes will OOM.
-19. **Sparse matrices** — `sparse(i, j, v, m, n)` plus sparse BLAS.
-20. **Compile-time / runtime `eval`** — not planned.
+18. **Sparse matrices** — `sparse(i, j, v, m, n)` plus sparse BLAS.
+19. **Compile-time / runtime `eval`** — not planned.
 
 ### Standard library — the long tail
 
-21. **Signal processing**: `fft`, `ifft`, `conv`, `filter`, `xcorr`,
+20. **Signal processing**: `fft`, `ifft`, `conv`, `filter`, `xcorr`,
     `fftshift`.
-22. **Sorting / searching**: `sort`, `sortrows`, `unique`, `cumsum`,
+21. **Sorting / searching**: `sort`, `sortrows`, `unique`, `cumsum`,
     `cumprod`, `histc`, `accumarray`.
-23. **Interpolation / grids**: `linspace`, `logspace`, `meshgrid`,
+22. **Interpolation / grids**: `linspace`, `logspace`, `meshgrid`,
     `ndgrid`, `interp1`, `interp2`, `spline`.
-24. **Random**: `randi`, `randperm`, proper `rng(seed)` API.
-25. **String manipulation**: `sprintf`, `strcat`, `strsplit`, `regexp`,
+23. **Random**: `randi`, `randperm`, proper `rng(seed)` API.
+24. **String manipulation**: `sprintf`, `strcat`, `strsplit`, `regexp`,
     `num2str`, `str2double`.
-26. **File I/O**: `fopen` / `fread` / `fwrite` / `fclose`, `load` /
+25. **File I/O**: `fopen` / `fread` / `fwrite` / `fclose`, `load` /
     `save` for `.mat`, `csvread` / `csvwrite`.
-27. **Date/time**: `tic` / `toc`, `datetime`, `datestr`, `clock`.
-28. **Predicates**: `isnumeric`, `ischar`, `isa`, `class`.
+26. **Date/time**: `tic` / `toc`, `datetime`, `datestr`, `clock`.
+27. **Predicates**: `isnumeric`, `ischar`, `isa`, `class`.
 
 ### Tooling / ecosystem
 
-29. **Debugger (DAP)**: no `dbstop`, `keyboard`, breakpoints.
-30. **LSP**: no go-to-definition, hover types, completions.
-31. **Testing framework**: `matlab.unittest.TestCase`.
-32. **Mex-style C interop**: call C from MATLAB or expose matlab_llvm
+28. **Debugger (DAP)**: no `dbstop`, `keyboard`, breakpoints.
+29. **LSP**: no go-to-definition, hover types, completions.
+30. **Testing framework**: `matlab.unittest.TestCase`.
+31. **Mex-style C interop**: call C from MATLAB or expose matlab_llvm
     functions as a C library.
 
 ### Out of scope
