@@ -283,6 +283,11 @@ private:
    * than numeric addition, disp(s) routes to matlab_string_disp,
    * and strlen(s) routes to matlab_string_len. */
   std::unordered_set<Binding *> StringBindings;
+  /* Bindings whose current value is a 3-D matlab_mat3 descriptor.
+   * Populated when the RHS is a 3-arg zeros / ones, so A(i,j,k),
+   * A(i,j,k) = v, and size(A, 3) all route to matlab_mat3 runtime
+   * entries instead of the 2-D path. */
+  std::unordered_set<Binding *> ThreeDBindings;
   std::string CurFnName;
   /* Declared arity of the currently-lowered function — used to fold
    * references to the `nargin` / `nargout` builtins into compile-time
@@ -850,6 +855,18 @@ void Lowerer::lowerStmt(const Stmt &St) {
     };
     bool RhsIsString = isStringExpr(A.RHS);
 
+    /* Track 3-D bindings: RHS is a call to zeros/ones with 3 args. */
+    bool RhsIsThreeD = false;
+    if (A.RHS && A.RHS->Kind == NodeKind::CallOrIndex) {
+      auto *C = static_cast<const CallOrIndex *>(A.RHS);
+      if (auto *N = dynamic_cast<const NameExpr *>(C->Callee)) {
+        if (C->Args.size() == 3 && N->Ref &&
+            N->Ref->Kind == BindingKind::Builtin &&
+            (N->Name == "zeros" || N->Name == "ones"))
+          RhsIsThreeD = true;
+      }
+    }
+
     /* Multi-return call: [V, D] = eig(A). If the LHS arity is > 1 and
      * the RHS is a call to a builtin that has a multi-return variant,
      * emit a matlab.call_builtin with N result types and a nargout
@@ -912,6 +929,11 @@ void Lowerer::lowerStmt(const Stmt &St) {
       for (const Expr *L : A.LHS)
         if (auto *N = dynamic_cast<const NameExpr *>(L))
           if (N->Ref) StringBindings.insert(N->Ref);
+    }
+    if (RhsIsThreeD) {
+      for (const Expr *L : A.LHS)
+        if (auto *N = dynamic_cast<const NameExpr *>(L))
+          if (N->Ref) ThreeDBindings.insert(N->Ref);
     }
     for (const Expr *L : A.LHS) if (L) lowerLValueStore(*L, Rhs);
     /* Implicit display: MATLAB prints the result of a statement that
@@ -1336,6 +1358,19 @@ void Lowerer::lowerLValueStore(const Expr &LHS, mlir::Value Rhs) {
       if (Base) SubscriptCtx.pop_back();
     }
     if (Rhs) Os.push_back(Rhs);
+    /* 3-D scalar store: A(i, j, k) = v on a matlab_mat3 binding
+     * routes to matlab_subscript3_store. */
+    if (C.Args.size() == 3 && Rhs) {
+      if (auto *NE = dynamic_cast<const NameExpr *>(C.Callee))
+        if (NE->Ref && ThreeDBindings.count(NE->Ref)) {
+          mlir::NamedAttribute Cal3(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_subscript3_store"));
+          emitUnregOp("matlab.call_builtin", Os,
+                      {mlir::NoneType::get(&MCtx)}, loc(C.Range), {Cal3});
+          return;
+        }
+    }
     mlir::NamedAttribute Cal(
         mlir::StringAttr::get(&MCtx, "callee"),
         mlir::StringAttr::get(&MCtx, "__subscript_store"));
@@ -1632,6 +1667,46 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             return emitUnreg("matlab.call_builtin", {Arg}, F64, L, {Cal});
           }
       }
+      /* size(A, dim) / numel(A) / ndims(A) on a 3-D binding route to
+       * the matlab_mat3 runtime; the 2-D variants treat the descriptor
+       * as a matlab_mat* and would read wrong fields. */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          N->Name == "size" && C.Args.size() == 2) {
+        if (auto *ArgN = dynamic_cast<const NameExpr *>(C.Args[0]))
+          if (ArgN->Ref && ThreeDBindings.count(ArgN->Ref)) {
+            auto F64 = mlir::Float64Type::get(&MCtx);
+            mlir::Value A = lowerExpr(*C.Args[0]);
+            mlir::Value D = lowerExpr(*C.Args[1]);
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_size3_dim"));
+            return emitUnreg("matlab.call_builtin", {A, D}, F64, L, {Cal});
+          }
+      }
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          N->Name == "numel" && C.Args.size() == 1) {
+        if (auto *ArgN = dynamic_cast<const NameExpr *>(C.Args[0]))
+          if (ArgN->Ref && ThreeDBindings.count(ArgN->Ref)) {
+            auto F64 = mlir::Float64Type::get(&MCtx);
+            mlir::Value A = lowerExpr(*C.Args[0]);
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_numel3"));
+            return emitUnreg("matlab.call_builtin", {A}, F64, L, {Cal});
+          }
+      }
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          N->Name == "ndims" && C.Args.size() == 1) {
+        if (auto *ArgN = dynamic_cast<const NameExpr *>(C.Args[0]))
+          if (ArgN->Ref && ThreeDBindings.count(ArgN->Ref)) {
+            auto F64 = mlir::Float64Type::get(&MCtx);
+            mlir::Value A = lowerExpr(*C.Args[0]);
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_ndims3"));
+            return emitUnreg("matlab.call_builtin", {A}, F64, L, {Cal});
+          }
+      }
       llvm::SmallVector<mlir::Value, 4> Args;
       for (const Expr *A : C.Args) if (A) Args.push_back(lowerExpr(*A));
       /* Variadic callee: if the user function's last declared input is
@@ -1746,6 +1821,18 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
     }
     if (IsHandleCall)
       return emitUnreg("matlab.call_indirect", Idx, RT, L);
+    /* 3-D scalar subscript: A(i, j, k) where A is tracked as a
+     * matlab_mat3 binding routes to matlab_subscript3_s. */
+    if (C.Args.size() == 3) {
+      if (auto *NE = dynamic_cast<const NameExpr *>(C.Callee))
+        if (NE->Ref && ThreeDBindings.count(NE->Ref)) {
+          auto F64 = mlir::Float64Type::get(&MCtx);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_subscript3_s"));
+          return emitUnreg("matlab.call_builtin", Idx, F64, L, {Cal});
+        }
+    }
     mlir::NamedAttribute NA(
         mlir::StringAttr::get(&MCtx, "nindices"),
         mlir::IntegerAttr::get(mlir::IntegerType::get(&MCtx, 64),

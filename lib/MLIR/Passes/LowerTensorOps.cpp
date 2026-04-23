@@ -841,6 +841,65 @@ bool TensorLowering::rewriteBuiltinCalls() {
       continue;
     }
 
+    /* 3-D array runtime: matlab_mat3 descriptor. The frontend emits
+     * these directly on bindings tracked as 3-D (zeros/ones with 3
+     * args). Each entry matches (ptr, ...) operand types. */
+    if (Name == "matlab_subscript3_s" && Call->getNumOperands() == 4 &&
+        Call->getNumResults() == 1 &&
+        Call->getOperand(0).getType() == PtrTy &&
+        Call->getOperand(1).getType() == F64 &&
+        Call->getOperand(2).getType() == F64 &&
+        Call->getOperand(3).getType() == F64) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt("matlab_subscript3_s", F64, {PtrTy, F64, F64, F64});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                      Call->getOperands());
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+    if (Name == "matlab_subscript3_store" &&
+        Call->getNumOperands() == 5 &&
+        Call->getOperand(0).getType() == PtrTy &&
+        Call->getOperand(1).getType() == F64 &&
+        Call->getOperand(2).getType() == F64 &&
+        Call->getOperand(3).getType() == F64 &&
+        Call->getOperand(4).getType() == F64) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt("matlab_subscript3_store", VoidTy,
+                   {PtrTy, F64, F64, F64, F64});
+      LLVM::CallOp::create(B, Call->getLoc(), Fn, Call->getOperands());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+    if (Name == "matlab_size3_dim" && Call->getNumOperands() == 2 &&
+        Call->getNumResults() == 1 &&
+        Call->getOperand(0).getType() == PtrTy &&
+        Call->getOperand(1).getType() == F64) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt("matlab_size3_dim", F64, {PtrTy, F64});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                      Call->getOperands());
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+    if ((Name == "matlab_numel3" || Name == "matlab_ndims3") &&
+        Call->getNumOperands() == 1 && Call->getNumResults() == 1 &&
+        Call->getOperand(0).getType() == PtrTy) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt(Name, F64, {PtrTy});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                      Call->getOperands());
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+
     /* Global / persistent scalar table accessors. The frontend emits
      * matlab.call_builtin @matlab_global_get_f64(i32) and
      * matlab.call_builtin @matlab_global_set_f64(i32, f64). */
@@ -905,7 +964,9 @@ bool TensorLowering::rewriteBuiltinCalls() {
     };
     static const Spec Table[] = {
       {"zeros",      "matlab_zeros",      1, "ff"},
+      {"zeros",      "matlab_zeros3",     1, "fff"},
       {"ones",       "matlab_ones",       1, "ff"},
+      {"ones",       "matlab_ones3",      1, "fff"},
       {"eye",        "matlab_eye",        1, "ff"},
       {"magic",      "matlab_magic",      1, "f"},
       {"rand",       "matlab_rand",       1, "ff"},

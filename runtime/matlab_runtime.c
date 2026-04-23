@@ -1587,6 +1587,94 @@ double matlab_single_s(double x) { return (double)(float)x; }
 double matlab_logical_s(double x) { return x != 0.0 ? 1.0 : 0.0; }
 
 /* ---------------------------------------------------------------------- */
+/* Minimal 3-D arrays.
+ *
+ * A separate matlab_mat3 descriptor {data, rows, cols, depth} so
+ * existing 2-D paths keep working unchanged. Data is laid out
+ * slice-major (depth varies slowest, cols fastest) so rows+cols
+ * stride within a slice like ordinary 2-D, and consecutive slices
+ * live contiguously.
+ *
+ * Only the trio that common 3-D code actually needs is wired for v1:
+ * zeros(m, n, p) / ones(m, n, p) constructors, scalar read/write
+ * A(i, j, k), size(A, 3). Reductions, slicing, disp and arithmetic
+ * are still 2-D-only; calling them on a 3-D array gives undefined
+ * results and is documented as a follow-up. */
+typedef struct matlab_mat3 {
+    double *data;
+    int64_t rows, cols, depth;
+} matlab_mat3;
+
+static matlab_mat3 *mat3_alloc(int64_t m, int64_t n, int64_t p) {
+    if (m < 0) m = 0;
+    if (n < 0) n = 0;
+    if (p < 0) p = 0;
+    matlab_mat3 *A = (matlab_mat3 *)calloc(1, sizeof(*A));
+    A->rows = m; A->cols = n; A->depth = p;
+    A->data = (double *)calloc((size_t)(m * n * p), sizeof(double));
+    return A;
+}
+
+matlab_mat3 *matlab_zeros3(double m, double n, double p) {
+    return mat3_alloc((int64_t)m, (int64_t)n, (int64_t)p);
+}
+
+matlab_mat3 *matlab_ones3(double m, double n, double p) {
+    matlab_mat3 *A = mat3_alloc((int64_t)m, (int64_t)n, (int64_t)p);
+    int64_t total = A->rows * A->cols * A->depth;
+    for (int64_t i = 0; i < total; ++i) A->data[i] = 1.0;
+    return A;
+}
+
+static int64_t mat3_offset(matlab_mat3 *A, int64_t i, int64_t j, int64_t k) {
+    /* Slice-major layout: slice k occupies indices [k*rows*cols, (k+1)*rows*cols),
+     * within which row-major rows*cols applies. */
+    return k * A->rows * A->cols + i * A->cols + j;
+}
+
+double matlab_subscript3_s(matlab_mat3 *A, double i1, double j1, double k1) {
+    if (!A) return 0.0;
+    int64_t i = (int64_t)i1 - 1;
+    int64_t j = (int64_t)j1 - 1;
+    int64_t k = (int64_t)k1 - 1;
+    if (i < 0 || i >= A->rows) return 0.0;
+    if (j < 0 || j >= A->cols) return 0.0;
+    if (k < 0 || k >= A->depth) return 0.0;
+    return A->data[mat3_offset(A, i, j, k)];
+}
+
+void matlab_subscript3_store(matlab_mat3 *A, double i1, double j1,
+                              double k1, double v) {
+    if (!A) return;
+    int64_t i = (int64_t)i1 - 1;
+    int64_t j = (int64_t)j1 - 1;
+    int64_t k = (int64_t)k1 - 1;
+    if (i < 0 || i >= A->rows) return;
+    if (j < 0 || j >= A->cols) return;
+    if (k < 0 || k >= A->depth) return;
+    A->data[mat3_offset(A, i, j, k)] = v;
+}
+
+double matlab_size3_dim(matlab_mat3 *A, double d) {
+    if (!A) return 0.0;
+    int64_t dim = (int64_t)d;
+    if (dim == 1) return (double)A->rows;
+    if (dim == 2) return (double)A->cols;
+    if (dim == 3) return (double)A->depth;
+    return 1.0;
+}
+
+double matlab_numel3(matlab_mat3 *A) {
+    if (!A) return 0.0;
+    return (double)(A->rows * A->cols * A->depth);
+}
+
+double matlab_ndims3(matlab_mat3 *A) {
+    if (!A) return 0.0;
+    return A->depth > 1 ? 3.0 : 2.0;
+}
+
+/* ---------------------------------------------------------------------- */
 /* Real string type ("..." literals, distinct from '...' char arrays).
  *
  * matlab_string is a tiny {data, len} descriptor with a heap-copied

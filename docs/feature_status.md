@@ -99,10 +99,11 @@ out of scope.
 | `logical` | ✅ | Stored as f64 0/1 |
 | `char` array (single-quoted) | ✅ | UTF-8 byte array; display supported |
 | `string` scalar (double-quoted) | ✅ | |
-| `single` | ❌ | No runtime |
-| `int8..int64`, `uint8..uint64` | ❌ | Tracked in Sema; no runtime ops |
+| `single` | 🟡 | Cast builtin routes to f64 (truncate only) |
+| `int8..int64`, `uint8..uint64` | 🟡 | Cast builtins truncate + saturate; storage stays f64 |
 | `complex` | ❌ | Imaginary literals lex/parse; arithmetic missing |
-| N-D arrays (>2D) | ❌ | |
+| N-D arrays (3-D) | 🟡 | `zeros(m,n,p)` / `ones(m,n,p)` + scalar `A(i,j,k)` read/write, `size(A, 3)`, `numel`, `ndims` |
+| N-D arrays (>3D) | ❌ | |
 | Sparse matrices | ❌ | |
 | `categorical`, `datetime`, `duration`, `table`, `timetable` | ❌ | |
 
@@ -291,12 +292,12 @@ deliberate non-goals; see "Out of scope."
 | Missing | Scope | Notes |
 |---|---|---|
 | **OOP** — `classdef`, properties, methods, events, inheritance, operator overloading | Large | ~6–8 weeks. New AST nodes, new Sema (method dispatch, inheritance), runtime object layout, `dot`-call vs field-access ambiguity |
-| **N-dim arrays (>2D)** | Medium | ~2–3 weeks. Runtime descriptor generalization from `(rows, cols)` to `(ndims, shape[])`; update all per-op lowering |
-| **Integer runtime** (`int8..int64`, `uint8..uint64`) | Medium | ~2 weeks. Parallel runtime type (`matlab_mat_i32`, etc.) or tagged-value runtime; per-dtype op dispatch |
+| **N-dim arrays (>3D)** | Medium | ~2–3 weeks. Runtime descriptor generalization from `(rows, cols, depth)` to `(ndims, shape[])`; update all per-op lowering. 3-D already supported via `matlab_mat3` for `zeros/ones` + scalar indexing |
+| **Integer runtime** (`int8..int64`, `uint8..uint64`) | Medium | ~2 weeks. Cast builtins already truncate + saturate against f64 storage; dedicated typed runtime (`matlab_mat_i32`, etc.) still needed for memory-layout fidelity |
 | **Complex numbers** | Medium | ~2 weeks. Runtime `matlab_mat_c64`; complex-aware versions of every elementwise op + linalg |
 | **Struct arrays** (`s(i).x`) | Medium | ~1 week. Runtime struct-array descriptor; slicing over struct fields |
 | **Sparse matrices** | Large | ~3–4 weeks. Sparse representation + sparse-aware linalg; or lean on SuiteSparse |
-| **Variable-argument propagation** (`varargin`, `varargout`) | Small | ~3–5 days. Call-site packing/unpacking lowering |
+| **`varargout`** | Small | ~2–3 days. `varargin` ships; `varargout` needs multi-return unpacking at call site |
 | **`classdef` dependent types** (`table`, `datetime`, `categorical`) | Large | Built on OOP; add after that |
 | **`eval`, `evalin`, `assignin`** | Small | ~2–3 days. Requires REPL / interpreter path — see `docs/repl.md` |
 

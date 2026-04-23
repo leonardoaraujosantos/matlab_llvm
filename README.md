@@ -148,16 +148,23 @@ All three backends produce stdout that matches byte-for-byte on the
 See [`docs/feature_status.md`](docs/feature_status.md) for the
 authoritative inventory. Short version:
 
-**Supported:** numeric scalars and 2-D dense matrices (f64); all
-standard arithmetic / comparison / logical / element-wise operators;
-control flow (`if` / `elseif` / `else` / `for` / `while` / `switch` /
-`try` / `break` / `continue` / `return`); `parfor` with atomic-add
-reductions; user-defined functions with multi-return and recursion;
-polymorphic call monomorphization; anonymous functions with captures;
-function handles (`@sin`, `@myFunc`, `@(x) x+k`); structs (nested
-fields, dynamic `s.(name)`, `isstruct` / `isfield` / `rmfield`); 1-D
-cell arrays; `global` / `persistent`; error flag + `catch ME;
-ME.message`; implicit display; `nargin` / `nargout`; command syntax.
+**Supported:** numeric scalars and 2-D dense matrices (f64); 3-D
+arrays via `zeros(m,n,p)` / `ones(m,n,p)` with scalar `A(i,j,k)`
+read/write; integer cast builtins (`int8` / `int16` / `int32` /
+`int64` / `uint8` / `uint16` / `uint32` / `uint64` / `single` /
+`double` / `logical`) with MATLAB-style truncate + saturate
+semantics; all standard arithmetic / comparison / logical /
+element-wise operators; control flow (`if` / `elseif` / `else` /
+`for` / `while` / `switch` / `try` / `break` / `continue` /
+`return`); `parfor` with atomic-add reductions; user-defined
+functions with multi-return and recursion; polymorphic call
+monomorphization (per-callsite `nargin` / `nargout`); `varargin` with
+call-site cell packing; anonymous functions with captures; function
+handles (`@sin`, `@myFunc`, `@(x) x+k`); structs (nested fields,
+dynamic `s.(name)`, `isstruct` / `isfield` / `rmfield`); 1-D cell
+arrays; real string type (`"..."`, `+`, `disp`, `strlen`,
+`isstring`); `global` / `persistent`; error flag + `catch ME;
+ME.message`; implicit display; command syntax.
 
 Runtime built-ins include: linear algebra (`*`, `\`, `/`, `inv`,
 `det`, `svd`-values, `eig` for symmetric matrices); constructors
@@ -168,8 +175,8 @@ predicates (`isempty`, `isequal`, `find`); I/O (`disp`, `fprintf`
 up to 4 args, `input`, `error`, `warning`).
 
 **Not yet:** `classdef` / OOP, struct arrays, 2-D cells,
-`varargin` / `varargout`, integer and complex runtime (tracked in
-Sema, not in runtime), N-D arrays, sparse matrices, non-symmetric
+`varargout`, complex numbers, 3-D vector slicing (only scalar
+`A(i,j,k)` today), 4-D+ arrays, sparse matrices, non-symmetric
 `eig`, full `[U, S, V] = svd(A)`, `fft` family, string functions
 (`sprintf`, `regexp`, `num2str`, etc.), file I/O, REPL, debugger.
 
