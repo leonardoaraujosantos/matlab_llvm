@@ -186,6 +186,20 @@ Function *Parser::parseFunction() {
     return F;
   }
   F->Name = take().Text;
+  /* Property accessor method names: `function v = get.Prop(obj)` and
+   * `function set.Prop(obj, v)` use a dotted identifier for the
+   * method name. Stitch it back together and intern the combined
+   * string so downstream Sema / lowering can look it up by name
+   * ("get.Prop" / "set.Prop"). Only applies when the head identifier
+   * is exactly `get` or `set` to avoid silently turning arbitrary
+   * dotted names into valid method names. */
+  if ((F->Name == "get" || F->Name == "set") && consume(TokenKind::dot)) {
+    if (at(TokenKind::identifier)) {
+      std::string Combined = std::string(F->Name) + "." +
+                              std::string(take().Text);
+      F->Name = Ctx.intern(Combined);
+    }
+  }
 
   if (consume(TokenKind::l_paren)) {
     if (!at(TokenKind::r_paren)) {
@@ -289,12 +303,41 @@ ClassDef *Parser::parseClassDef() {
   while (!at(TokenKind::eof) && !at(TokenKind::kw_end)) {
     if (at(TokenKind::kw_properties)) {
       ++Idx;
-      /* Skip optional `(Access=public, ...)` attribute block. */
+      /* Parse the optional `(Attr1, Attr2, Key=Val)` attribute block.
+       * We capture the subset we understand (Dependent, Constant,
+       * Abstract, Access/GetAccess/SetAccess=NAME). Anything else is
+       * skipped with depth-tracked paren matching. */
+      bool BlockDependent = false;
+      bool BlockConstant = false;
+      bool BlockAbstract = false;
+      std::string_view BlockAccess, BlockGet, BlockSet;
       if (consume(TokenKind::l_paren)) {
         int Depth = 1;
         while (Depth > 0 && !at(TokenKind::eof)) {
-          if (at(TokenKind::l_paren)) ++Depth;
-          else if (at(TokenKind::r_paren)) --Depth;
+          if (at(TokenKind::l_paren)) { ++Depth; ++Idx; continue; }
+          if (at(TokenKind::r_paren)) { --Depth; ++Idx; continue; }
+          if (at(TokenKind::identifier)) {
+            std::string_view K = cur().Text;
+            if (K == "Dependent") { BlockDependent = true; ++Idx; continue; }
+            if (K == "Constant")  { BlockConstant = true; ++Idx; continue; }
+            if (K == "Abstract")  { BlockAbstract = true; ++Idx; continue; }
+            if (K == "Access" || K == "GetAccess" || K == "SetAccess") {
+              ++Idx;
+              if (consume(TokenKind::equal)) {
+                if (at(TokenKind::identifier) ||
+                    at(TokenKind::string_literal) ||
+                    at(TokenKind::char_literal)) {
+                  std::string_view V = cur().Text;
+                  if (K == "Access")    BlockAccess = V;
+                  if (K == "GetAccess") BlockGet = V;
+                  if (K == "SetAccess") BlockSet = V;
+                  ++Idx;
+                  continue;
+                }
+              }
+              continue;
+            }
+          }
           ++Idx;
         }
       }
@@ -304,6 +347,12 @@ ClassDef *Parser::parseClassDef() {
         ClassProp P;
         P.Range.Begin = cur().Loc;
         P.Name = take().Text;
+        P.Dependent = BlockDependent;
+        P.Constant  = BlockConstant;
+        P.IsAbstract = BlockAbstract;
+        P.Access = BlockAccess;
+        P.GetAccess = BlockGet;
+        P.SetAccess = BlockSet;
         /* Skip optional `(1,1)` size spec or `{mustBeNumeric}` validator. */
         if (consume(TokenKind::l_paren)) {
           int Depth = 1;

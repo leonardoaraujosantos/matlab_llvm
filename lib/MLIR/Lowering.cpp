@@ -683,6 +683,10 @@ void Lowerer::lowerFunction(const Function &F, mlir::ModuleOp M,
     FnName = std::string(Owner->Name) + "__" + std::string(F.Name);
   else
     FnName = std::string(F.Name);
+  /* Replace dots in method names (`get.Prop`, `set.Prop`) with an
+   * underscore at the emitted-symbol level so the mangled name stays
+   * a valid identifier in C / C++ output. */
+  for (char &ch : FnName) if (ch == '.') ch = '_';
   auto Fn = mlir::func::FuncOp::create(loc(F.Range), FnName, FnTy);
   // Attach the MATLAB parameter name to each func arg as a discardable
   // attribute so downstream backends (EmitC) can print readable
@@ -1524,6 +1528,38 @@ void Lowerer::lowerLValueStore(const Expr &LHS, mlir::Value Rhs) {
     if (auto *BN = dynamic_cast<const NameExpr *>(F.Base))
       if (BN->Ref && BN->Ref->PinnedClass) PinnedCls = BN->Ref->PinnedClass;
     if (PinnedCls) {
+      /* Dependent property with a user-defined set.Prop method:
+       * dispatch to ClassName__set.Prop(obj, v). If the property is
+       * Dependent but has NO set method defined, a write is a user
+       * error at MATLAB level; we silently drop it here rather than
+       * failing so the common read-only-dependent pattern works. */
+      const ClassProp *DepProp = nullptr;
+      const ClassDef *DepOwner = nullptr;
+      for (const ClassDef *CC = PinnedCls; CC; CC = CC->Super) {
+        for (const auto &P : CC->Props)
+          if (P.Name == F.Field) {
+            if (P.Dependent) { DepProp = &P; DepOwner = CC; }
+            break;
+          }
+        if (DepProp) break;
+      }
+      if (DepProp) {
+        std::string SetName = "set." + std::string(F.Field);
+        const Function *SetMth = nullptr;
+        for (const Function *Mm : DepOwner->Methods)
+          if (Mm && Mm->Name == SetName) { SetMth = Mm; break; }
+        if (SetMth) {
+          mlir::Value Obj = lowerExpr(*F.Base);
+          std::string Callee = std::string(DepOwner->Name) + "__set_" +
+                                std::string(F.Field);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, Callee));
+          emitUnregOp("matlab.call", {Obj, Rhs},
+                      {mlir::NoneType::get(&MCtx)}, loc(F.Range), {Cal});
+        }
+        return;
+      }
       mlir::Value Obj = lowerExpr(*F.Base);
       mlir::Value NameV = emitFieldNameChar(F.Field, loc(F.Range));
       llvm::StringRef Callee = (Rhs && Rhs.getType() == PtrTy)
@@ -2224,6 +2260,28 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
     if (auto *BN = dynamic_cast<const NameExpr *>(F.Base))
       if (BN->Ref && BN->Ref->PinnedClass) PinnedCls = BN->Ref->PinnedClass;
     if (PinnedCls) {
+      /* Dependent property: no stored backing — dispatch to the
+       * class's get.Prop method (emitted as ClassName__get.Prop). */
+      const ClassProp *DepProp = nullptr;
+      const ClassDef *DepOwner = nullptr;
+      for (const ClassDef *CC = PinnedCls; CC; CC = CC->Super) {
+        for (const auto &P : CC->Props)
+          if (P.Name == F.Field) {
+            if (P.Dependent) { DepProp = &P; DepOwner = CC; }
+            break;
+          }
+        if (DepProp) break;
+      }
+      if (DepProp) {
+        mlir::Value Obj = lowerExpr(*F.Base);
+        std::string Callee = std::string(DepOwner->Name) +
+                              "__get_" + std::string(F.Field);
+        mlir::NamedAttribute Cal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, Callee));
+        mlir::Type ResTy = F64;
+        return emitUnreg("matlab.call", {Obj}, ResTy, L, {Cal});
+      }
       mlir::Value Obj = lowerExpr(*F.Base);
       mlir::Value NameV = emitFieldNameChar(F.Field, L);
       bool WantMat = mlir::isa<mlir::RankedTensorType,

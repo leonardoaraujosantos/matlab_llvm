@@ -438,6 +438,16 @@ struct ClassProp {
   std::string_view Name;
   Expr *Default = nullptr;         // nullable
   SourceRange Range;
+  /* Attributes parsed from the `properties (Attr, ...)` block header.
+   * Only Dependent is actually enforced by lowering today; the others
+   * are captured so tools / future passes can see them but don't
+   * change behavior. */
+  bool Dependent = false;
+  bool Constant = false;
+  bool IsAbstract = false;
+  std::string_view Access;         // "public" / "private" / "protected" / ""
+  std::string_view SetAccess;
+  std::string_view GetAccess;
   // Populated by Sema after inference: the global slot id used to read/
   // write this property through matlab_obj_get_* / matlab_obj_set_*.
   int32_t PropId = -1;
