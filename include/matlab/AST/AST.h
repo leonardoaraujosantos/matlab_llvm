@@ -460,6 +460,11 @@ public:
   std::vector<ClassProp> Props;
   std::vector<Function *> Methods; // includes the constructor if present
   std::vector<Function *> StaticMethods;
+  /* Enumeration members parsed from `enumeration ... end`. Each name
+   * is a class-level constant; ClassName.Member evaluates to the
+   * member's 0-based index as an f64. Rich enum semantics (methods
+   * on enum values, associated data) aren't modelled. */
+  std::vector<std::string_view> EnumMembers;
 
   /* Populated by Sema. */
   Binding *Self = nullptr;

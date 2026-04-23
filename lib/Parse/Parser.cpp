@@ -407,8 +407,41 @@ ClassDef *Parser::parseClassDef() {
       }
       if (at(TokenKind::kw_end)) ++Idx;
       skipStatementTerminators();
-    } else if (at(TokenKind::kw_events) ||
-               at(TokenKind::kw_enumeration)) {
+    } else if (at(TokenKind::kw_enumeration)) {
+      ++Idx;
+      /* Optional attribute list like `(Enumerator)` — skip. */
+      if (consume(TokenKind::l_paren)) {
+        int Depth = 1;
+        while (Depth > 0 && !at(TokenKind::eof)) {
+          if (at(TokenKind::l_paren)) ++Depth;
+          else if (at(TokenKind::r_paren)) --Depth;
+          ++Idx;
+        }
+      }
+      skipStatementTerminators();
+      while (!at(TokenKind::kw_end) && !at(TokenKind::eof)) {
+        if (at(TokenKind::identifier)) {
+          C->EnumMembers.push_back(take().Text);
+          /* MATLAB allows `Member(value_expr)` to associate a value
+           * with each member. We skip any such parenthesised block
+           * — the member's position in the list is what we use for
+           * comparisons, and we don't model associated data yet. */
+          if (consume(TokenKind::l_paren)) {
+            int Depth = 1;
+            while (Depth > 0 && !at(TokenKind::eof)) {
+              if (at(TokenKind::l_paren)) ++Depth;
+              else if (at(TokenKind::r_paren)) --Depth;
+              ++Idx;
+            }
+          }
+        } else {
+          ++Idx;
+        }
+        skipStatementTerminators();
+      }
+      if (at(TokenKind::kw_end)) ++Idx;
+      skipStatementTerminators();
+    } else if (at(TokenKind::kw_events)) {
       /* Parsed-but-ignored: skip to the matching end. */
       ++Idx;
       if (consume(TokenKind::l_paren)) {

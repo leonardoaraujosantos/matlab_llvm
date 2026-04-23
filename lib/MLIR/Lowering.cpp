@@ -2259,6 +2259,24 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
     const ClassDef *PinnedCls = nullptr;
     if (auto *BN = dynamic_cast<const NameExpr *>(F.Base))
       if (BN->Ref && BN->Ref->PinnedClass) PinnedCls = BN->Ref->PinnedClass;
+    /* Enumeration member reference: `ClassName.Member`. The base is a
+     * NameExpr whose binding is BindingKind::Class, not a pinned var.
+     * Each member gets its 0-based position as an f64 constant;
+     * equality comparisons then work via plain numeric compare. */
+    if (auto *BN = dynamic_cast<const NameExpr *>(F.Base)) {
+      if (BN->Ref && BN->Ref->Kind == BindingKind::Class &&
+          BN->Ref->ClassDef) {
+        const ClassDef *CD = BN->Ref->ClassDef;
+        for (size_t i = 0; i < CD->EnumMembers.size(); ++i) {
+          if (CD->EnumMembers[i] == F.Field) {
+            mlir::NamedAttribute VA(
+                mlir::StringAttr::get(&MCtx, "value"),
+                mlir::FloatAttr::get(F64, (double)i));
+            return emitUnreg("matlab.const_float", {}, F64, L, {VA});
+          }
+        }
+      }
+    }
     if (PinnedCls) {
       /* Dependent property: no stored backing — dispatch to the
        * class's get.Prop method (emitted as ClassName__get.Prop). */
