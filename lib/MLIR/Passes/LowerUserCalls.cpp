@@ -21,6 +21,7 @@
 
 #include "matlab/MLIR/Passes/Passes.h"
 
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/LLVMIR/LLVMTypes.h"
@@ -200,6 +201,51 @@ void refreshFuncCalls(ModuleOp M) {
 
 } // namespace
 
+/* Lower every matlab.nargin / matlab.nargout inside each func.func to
+ * an arith.constant. The value is taken from the optional
+ * 'matlab.nargin_value' / 'matlab.nargout_value' attribute on the
+ * enclosing func (set by the monomorphiser when cloning for a
+ * particular call-site arity), or the function's declared arity as a
+ * fallback. */
+bool runLowerNarginNargout(ModuleOp M) {
+  auto F64 = Float64Type::get(M.getContext());
+  bool Changed = false;
+  M.walk([&](func::FuncOp Fn) {
+    int64_t NarginVal = (int64_t)Fn.getFunctionType().getNumInputs();
+    int64_t NargoutVal = (int64_t)Fn.getFunctionType().getNumResults();
+    if (auto A = Fn->getAttrOfType<IntegerAttr>("matlab.nargin_value"))
+      NarginVal = A.getValue().getSExtValue();
+    if (auto A = Fn->getAttrOfType<IntegerAttr>("matlab.nargout_value"))
+      NargoutVal = A.getValue().getSExtValue();
+    SmallVector<Operation *> Dead;
+    Fn.walk([&](Operation *Op) {
+      StringRef N = Op->getName().getStringRef();
+      if (N != "matlab.nargin" && N != "matlab.nargout") return;
+      if (Op->getNumResults() != 1) return;
+      OpBuilder B(Op);
+      int64_t V = (N == "matlab.nargin") ? NarginVal : NargoutVal;
+      auto C = arith::ConstantOp::create(
+          B, Op->getLoc(), F64, FloatAttr::get(F64, (double)V));
+      Op->getResult(0).replaceAllUsesWith(C.getResult());
+      Dead.push_back(Op);
+    });
+    for (Operation *Op : Dead) { Op->erase(); Changed = true; }
+  });
+  /* Script-level matlab.nargin/nargout (outside a func.func) fold to 0. */
+  M.walk([&](Operation *Op) {
+    StringRef N = Op->getName().getStringRef();
+    if (N != "matlab.nargin" && N != "matlab.nargout") return;
+    if (Op->getNumResults() != 1) return;
+    OpBuilder B(Op);
+    auto C = arith::ConstantOp::create(
+        B, Op->getLoc(), F64, FloatAttr::get(F64, 0.0));
+    Op->getResult(0).replaceAllUsesWith(C.getResult());
+    Op->erase();
+    Changed = true;
+  });
+  return Changed;
+}
+
 /* Clone a user function per distinct concrete call-site signature when
  * it's polymorphically used. Runs after LowerTensorOps so call sites
  * have collapsed tensor types to !llvm.ptr — the only real dispatch
@@ -207,6 +253,7 @@ void refreshFuncCalls(ModuleOp M) {
  * and ptr covering any matrix shape. */
 bool runMonomorphiseUserCalls(ModuleOp M) {
   MLIRContext *Ctx = M.getContext();
+  auto I64 = IntegerType::get(Ctx, 64);
   /* Gather matlab.call sites that remain (untyped-path). */
   llvm::DenseMap<StringRef, llvm::SmallVector<Operation *>> Sites;
   M.walk([&](Operation *Op) {
@@ -219,14 +266,21 @@ bool runMonomorphiseUserCalls(ModuleOp M) {
   for (auto &[Name, S] : Sites) {
     auto Fn = M.lookupSymbol<func::FuncOp>(Name);
     if (!Fn) continue;
-    unsigned Arity = Fn.getFunctionType().getNumInputs();
+    unsigned DeclArity = Fn.getFunctionType().getNumInputs();
+    /* Bucket by (call-site arity, first-N concrete arg types). This
+     * captures both multi-signature polymorphism and the per-call-
+     * site nargin story: f(5, 7) and f(5) bucket separately so each
+     * clone sees its own nargin. */
     struct SigKey {
+      unsigned Arity = 0;
       llvm::SmallVector<Type, 4> Tys;
-      bool operator==(const SigKey &O) const { return Tys == O.Tys; }
+      bool operator==(const SigKey &O) const {
+        return Arity == O.Arity && Tys == O.Tys;
+      }
     };
     struct SigHash {
       size_t operator()(const SigKey &K) const {
-        size_t h = 0;
+        size_t h = std::hash<unsigned>{}(K.Arity);
         for (Type T : K.Tys)
           h ^= mlir::hash_value(T) + 0x9e3779b9 + (h << 6) + (h >> 2);
         return h;
@@ -235,10 +289,12 @@ bool runMonomorphiseUserCalls(ModuleOp M) {
     std::unordered_map<SigKey, llvm::SmallVector<Operation *>, SigHash>
         Buckets;
     for (Operation *C : S) {
-      if (C->getNumOperands() != Arity) continue;
+      unsigned N = C->getNumOperands();
+      if (N > DeclArity) continue; /* too many args — user error, skip */
       SigKey K;
+      K.Arity = N;
       bool AllConcrete = true;
-      for (unsigned i = 0; i < Arity; ++i) {
+      for (unsigned i = 0; i < N; ++i) {
         Type T = C->getOperand(i).getType();
         if (mlir::isa<NoneType>(T)) AllConcrete = false;
         K.Tys.push_back(T);
@@ -246,45 +302,75 @@ bool runMonomorphiseUserCalls(ModuleOp M) {
       if (!AllConcrete) continue;
       Buckets[K].push_back(C);
     }
-    if (Buckets.size() <= 1) continue;
+    if (Buckets.empty()) continue;
 
-    /* Pick the keep-bucket by smallest hash for stable output. */
+    /* The "keep" bucket is the one whose (arity, types) most closely
+     * matches the existing function. Prefer a bucket whose arity
+     * equals DeclArity so the original function keeps serving the
+     * canonical shape; otherwise pick by smallest hash for stability. */
     SigHash H{};
     SigKey KeepKey;
     bool HaveKeep = false;
     size_t BestHash = 0;
     for (auto &[K, _] : Buckets) {
-      size_t h = H(K);
-      if (!HaveKeep || h < BestHash) {
-        BestHash = h; KeepKey = K; HaveKeep = true;
+      bool prefer = (K.Arity == DeclArity);
+      bool keepPrefer = (KeepKey.Arity == DeclArity);
+      if (!HaveKeep || (prefer && !keepPrefer)) {
+        BestHash = H(K); KeepKey = K; HaveKeep = true;
+        continue;
+      }
+      if (prefer == keepPrefer) {
+        size_t h = H(K);
+        if (h < BestHash) { BestHash = h; KeepKey = K; }
       }
     }
 
     OpBuilder B(Ctx);
     unsigned CloneIdx = 0;
     for (auto &[K, BSites] : Buckets) {
-      if (K == KeepKey) continue;
-      std::string CloneName = (Name.str() + "__s" +
-                               std::to_string(CloneIdx++));
-      while (M.lookupSymbol(CloneName)) CloneName += "_";
-      B.setInsertionPointToEnd(M.getBody());
-      auto Cloned = mlir::cast<func::FuncOp>(B.clone(*Fn.getOperation()));
-      Cloned.setSymName(CloneName);
-      /* Redirect sites. */
-      for (Operation *C : BSites)
-        C->setAttr("callee", StringAttr::get(Ctx, CloneName));
-      /* Set signature + entry block args from the bucket's concrete
-       * types. Tensor types don't appear here post-LowerTensorOps. */
-      if (!Cloned.empty()) {
-        Block &Entry = Cloned.getBody().front();
+      bool IsKeep = (K == KeepKey);
+      func::FuncOp Target;
+      if (IsKeep) {
+        Target = Fn;
+      } else {
+        std::string CloneName = (Name.str() + "__s" +
+                                 std::to_string(CloneIdx++));
+        while (M.lookupSymbol(CloneName)) CloneName += "_";
+        B.setInsertionPointToEnd(M.getBody());
+        Target = mlir::cast<func::FuncOp>(B.clone(*Fn.getOperation()));
+        Target.setSymName(CloneName);
+        for (Operation *C : BSites)
+          C->setAttr("callee", StringAttr::get(Ctx, CloneName));
+        Changed = true;
+      }
+
+      /* Always set the per-bucket nargin attribute. The keep bucket
+       * also benefits if its arity differs from DeclArity (rare: the
+       * original func was never actually called at full declared
+       * arity, but something else referenced it). */
+      Target->setAttr(
+          "matlab.nargin_value",
+          IntegerAttr::get(I64, (int64_t)K.Arity));
+
+      /* Keep the clone's declared arity = DeclArity so the body's
+       * references to all params still resolve. We pad calls with
+       * 0.0 at the matlab.call -> func.call rewrite. For the
+       * concrete-type retype: the first K.Arity entry-block args get
+       * their bucket types; trailing ones default to f64 (compatible
+       * with the 0.0 padding in LowerUserCalls). */
+      SmallVector<Type, 4> AllInputs(K.Tys.begin(), K.Tys.end());
+      auto F64 = Float64Type::get(Ctx);
+      for (unsigned i = K.Arity; i < DeclArity; ++i)
+        AllInputs.push_back(F64);
+      if (!Target.empty()) {
+        Block &Entry = Target.getBody().front();
         for (unsigned i = 0; i < Entry.getNumArguments() &&
-                             i < K.Tys.size(); ++i) {
-          Entry.getArgument(i).setType(K.Tys[i]);
+                             i < AllInputs.size(); ++i) {
+          Entry.getArgument(i).setType(AllInputs[i]);
         }
       }
-      Cloned.setFunctionType(FunctionType::get(Ctx, K.Tys,
-          Cloned.getFunctionType().getResults()));
-      Changed = true;
+      Target.setFunctionType(FunctionType::get(Ctx, AllInputs,
+          Target.getFunctionType().getResults()));
     }
   }
   return Changed;
@@ -347,6 +433,25 @@ bool runLowerUserCalls(ModuleOp M) {
       }
     });
 
+    /* Always run body-local scalar type propagation FIRST (before the
+     * Compatible-gated exit): it refines matlab.alloc / matlab.load
+     * result types from store operand types regardless of whether
+     * the call-site consensus passed. This matters for per-arity
+     * clones whose sites carry fewer args than declared — they flip
+     * Compatible to false, but the clone's body still needs its
+     * slot types propagated from its (already-retyped) block args. */
+    propagateScalarTypes(Fn);
+    NewResults.assign(Fn.getFunctionType().getResults().begin(),
+                      Fn.getFunctionType().getResults().end());
+    Fn.walk([&](func::ReturnOp Ret) {
+      if (Ret.getNumOperands() != NewResults.size()) return;
+      for (unsigned i = 0; i < Ret.getNumOperands(); ++i) {
+        Type RetTy = Ret.getOperand(i).getType();
+        if (canRefineTo(NewResults[i], RetTy))
+          NewResults[i] = RetTy;
+      }
+    });
+
     // c) Apply signature update if anything actually changed.
     if (!Compatible) continue;
     bool InputsChanged = false, ResultsChanged = false;
@@ -355,11 +460,8 @@ bool runLowerUserCalls(ModuleOp M) {
     for (unsigned i = 0; i < NewResults.size(); ++i)
       if (NewResults[i] != OldType.getResult(i)) ResultsChanged = true;
 
-    /* Always run body-local scalar type propagation: it refines
-     * matlab.alloc / matlab.load result types from store operand
-     * types, which can then unlock return-type inference even when
-     * the function takes no parameters (nothing for the input
-     * consensus loop to do). */
+    /* (propagateScalarTypes moved above the Compatible-gated exit so
+     * per-arity clones still get their body types refined.) */
     propagateScalarTypes(Fn);
     NewResults.assign(Fn.getFunctionType().getResults().begin(),
                       Fn.getFunctionType().getResults().end());
@@ -433,16 +535,16 @@ bool runLowerUserCalls(ModuleOp M) {
     auto Fn = M.lookupSymbol<func::FuncOp>(CA.getValue());
     if (!Fn) continue;
     auto FnTy = Fn.getFunctionType();
-    if (Call->getNumOperands() != FnTy.getNumInputs()) continue;
+    unsigned N = Call->getNumOperands();
+    unsigned M_ = FnTy.getNumInputs();
+    if (N > M_) continue; /* too many args — skip */
 
-    // Only convert if operand types match the callee's signature exactly.
-    // If an operand is more concrete than the signature (e.g. call site
-    // passes f64 but sig still says none), skip this call — a later run of
-    // the pass will refine the callee's signature first, and then this
-    // call will become convertible. The driver loops LowerUserCalls +
-    // LowerScalarsToArith to fixpoint for exactly this reason.
+    // Only convert if the first N operand types match the leading N
+    // inputs of the callee's signature exactly. Missing trailing args
+    // (fewer-arg calls) get padded with 0.0 or null-ptr depending on
+    // the declared type.
     bool OK = true;
-    for (unsigned i = 0; i < FnTy.getNumInputs(); ++i) {
+    for (unsigned i = 0; i < N; ++i) {
       if (FnTy.getInput(i) != Call->getOperand(i).getType()) {
         OK = false; break;
       }
@@ -452,6 +554,22 @@ bool runLowerUserCalls(ModuleOp M) {
     OpBuilder B(Call);
     llvm::SmallVector<Value, 4> Args(Call->operand_begin(),
                                      Call->operand_end());
+    /* Pad missing trailing args. Scalar f64 -> 0.0; ptr-typed -> null
+     * pointer constant. Any other declared type we leave unpadded and
+     * skip the rewrite — later passes or a proper error will surface. */
+    for (unsigned i = N; i < M_; ++i) {
+      Type T = FnTy.getInput(i);
+      if (mlir::isa<Float64Type>(T)) {
+        Args.push_back(arith::ConstantOp::create(
+            B, Call->getLoc(), T, FloatAttr::get(T, 0.0)));
+      } else if (T == LLVM::LLVMPointerType::get(M.getContext())) {
+        Args.push_back(LLVM::ZeroOp::create(
+            B, Call->getLoc(), T));
+      } else {
+        OK = false; break;
+      }
+    }
+    if (!OK) continue;
     auto NewCall = func::CallOp::create(B, Call->getLoc(),
                                         FnTy.getResults(),
                                         CA.getValue(), Args);

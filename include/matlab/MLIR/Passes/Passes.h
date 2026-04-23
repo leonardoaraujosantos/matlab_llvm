@@ -91,8 +91,18 @@ bool runLowerUserCalls(mlir::ModuleOp M);
 /// specialisation. Runs AFTER LowerTensorOps so tensor-typed operands
 /// have collapsed to !llvm.ptr — matrices of different shapes share
 /// the ptr signature, so we only split when types genuinely differ
-/// (f64 vs ptr). Re-runs LowerUserCalls to retype the clones.
+/// (f64 vs ptr). Also splits by call-site arity so functions called
+/// with fewer args than declared get a per-arity clone with the
+/// matching `nargin` value. Re-runs LowerUserCalls to retype the clones.
 bool runMonomorphiseUserCalls(mlir::ModuleOp M);
+
+/// Lower matlab.nargin / matlab.nargout placeholder ops to
+/// arith.constant inside each enclosing func.func. The value comes
+/// from the `matlab.nargin_value` / `matlab.nargout_value` attribute
+/// on the function when present (set by the monomorphiser for
+/// per-arity clones), falling back to the function's declared input
+/// or result count.
+bool runLowerNarginNargout(mlir::ModuleOp M);
 
 /// Lowers sequential matlab.for (over a matlab.range) and matlab.while
 /// into scf.while constructs so the MLIR conversion pipeline can finish

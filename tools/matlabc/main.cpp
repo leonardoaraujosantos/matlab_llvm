@@ -276,6 +276,11 @@ int main(int Argc, char **Argv) {
           // operand and need LowerTensorOps's matlab_disp_mat dispatch.
           mlirgen::runLowerTensorOps(M);
         }
+        // Lower matlab.nargin / matlab.nargout placeholders to
+        // arith.constant. Runs AFTER the monomorphiser so per-arity
+        // clones see their own call-site arity rather than the
+        // function's declared arity.
+        mlirgen::runLowerNarginNargout(M);
         // After user-call refinement, any surviving matlab.alloc whose
         // result type is now a scalar primitive can be promoted to
         // llvm.alloca. This catches function-body locals that weren't

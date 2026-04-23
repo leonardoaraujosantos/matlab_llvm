@@ -546,17 +546,16 @@ mlir::Value Lowerer::loadBinding(Binding *Bnd, const Type *ValTy,
         mlir::StringAttr::get(&MCtx, "matlab_global_get_f64"));
     return emitUnreg("matlab.call_builtin", {IdV}, F64, L, {Cal});
   }
-  /* nargin / nargout: compile-time constants. nargin is the declared
-   * param count of the enclosing function; nargout is the declared
-   * output count (accurate per-callsite introspection would need
-   * per-LHS-arity monomorphisation, which we don't do today). */
+  /* nargin / nargout: emit placeholder matlab.nargin / matlab.nargout
+   * ops. A late pass rewrites them to arith.constant per-function AFTER
+   * the monomorphiser has produced per-arity clones, so each clone
+   * gets its own correct nargin/nargout value. */
   if (Bnd->Kind == BindingKind::Builtin &&
       (Bnd->Name == "nargin" || Bnd->Name == "nargout")) {
     auto F64 = mlir::Float64Type::get(&MCtx);
-    int64_t N = (Bnd->Name == "nargin") ? (int64_t)CurFnNargin
-                                        : (int64_t)CurFnNargout;
-    return mlir::arith::ConstantOp::create(
-        B, L, F64, mlir::FloatAttr::get(F64, (double)N));
+    llvm::StringRef OpName =
+        (Bnd->Name == "nargin") ? "matlab.nargin" : "matlab.nargout";
+    return emitUnreg(OpName, {}, F64, L);
   }
   if (Bnd->Kind == BindingKind::Function ||
       Bnd->Kind == BindingKind::Builtin) {
