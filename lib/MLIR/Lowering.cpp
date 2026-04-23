@@ -517,6 +517,36 @@ void Lowerer::lowerStmt(const Stmt &St) {
       }
     }
     for (const Expr *L : A.LHS) if (L) lowerLValueStore(*L, Rhs);
+    /* Implicit display: MATLAB prints the result of a statement that
+     * doesn't end in a semicolon. We handle the common case of a single
+     * named LHS (x = expr). Skip when: the rhs is a handle (we've
+     * spilled it; disp would try to matrix-print a function pointer),
+     * the rhs's type is NoneType (void call result), or the LHS isn't
+     * a single NameExpr.
+     *
+     * Formatted as two disp calls — "x =" then the value — so it lines
+     * up with MATLAB's '%NAME =\n<value>' layout without needing a new
+     * runtime entry. */
+    if (!A.Suppressed && Rhs && !RhsIsHandle &&
+        !mlir::isa<mlir::NoneType>(Rhs.getType()) &&
+        A.LHS.size() == 1 && A.LHS[0] &&
+        A.LHS[0]->Kind == NodeKind::NameExpr) {
+      auto *N = static_cast<const NameExpr *>(A.LHS[0]);
+      std::string Label = std::string(N->Name) + " =";
+      mlir::NamedAttribute LV(
+          mlir::StringAttr::get(&MCtx, "value"),
+          mlir::StringAttr::get(&MCtx, Label));
+      mlir::Value LabelV = emitUnreg("matlab.const_char", {},
+                                      mlir::NoneType::get(&MCtx),
+                                      loc(A.Range), {LV});
+      mlir::NamedAttribute Cal(
+          mlir::StringAttr::get(&MCtx, "callee"),
+          mlir::StringAttr::get(&MCtx, "disp"));
+      emitUnregOp("matlab.call_builtin", {LabelV},
+                  {mlir::NoneType::get(&MCtx)}, loc(A.Range), {Cal});
+      emitUnregOp("matlab.call_builtin", {Rhs},
+                  {mlir::NoneType::get(&MCtx)}, loc(A.Range), {Cal});
+    }
     return;
   }
   case NodeKind::IfStmt: {
