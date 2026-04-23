@@ -613,6 +613,15 @@ void Lowerer::lowerFunction(const Function &F, mlir::ModuleOp M) {
   auto FnTy = mlir::FunctionType::get(&MCtx, InTys, OutTys);
   auto Fn = mlir::func::FuncOp::create(loc(F.Range),
                                        std::string(F.Name), FnTy);
+  // Attach the MATLAB parameter name to each func arg as a discardable
+  // attribute so downstream backends (EmitC) can print readable
+  // signatures like `fact(double n)` instead of `fact(double v15)`.
+  for (size_t i = 0; i < F.ParamRefs.size(); ++i) {
+    Binding *Bnd = F.ParamRefs[i];
+    if (!Bnd || Bnd->Name.empty()) continue;
+    Fn.setArgAttr(i, mlir::StringAttr::get(&MCtx, "matlab.name"),
+                  mlir::StringAttr::get(&MCtx, Bnd->Name));
+  }
   B.insert(Fn);
 
   auto *Entry = Fn.addEntryBlock();

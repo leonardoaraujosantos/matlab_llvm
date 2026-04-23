@@ -152,4 +152,28 @@ if(MATLAB_LLVM_WITH_MLIR)
   )
   set_tests_properties(run-tests-emit-cpp PROPERTIES
     ENVIRONMENT "MODE=cpp")
+  # Strict-warnings lanes: catch quality regressions in the emitted
+  # source (type confusion, implicit decls, sign mismatches, ...) that
+  # would otherwise slip past the default -w suite.
+  add_test(
+    NAME run-tests-emit-c-strict
+    COMMAND ${CMAKE_SOURCE_DIR}/test/Run/run_tests_emitc.sh $<TARGET_FILE:matlabc>
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Run
+  )
+  set_tests_properties(run-tests-emit-c-strict PROPERTIES
+    ENVIRONMENT "MODE=c;STRICT=1")
+  add_test(
+    NAME run-tests-emit-cpp-strict
+    COMMAND ${CMAKE_SOURCE_DIR}/test/Run/run_tests_emitc.sh $<TARGET_FILE:matlabc>
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Run
+  )
+  set_tests_properties(run-tests-emit-cpp-strict PROPERTIES
+    ENVIRONMENT "MODE=cpp;STRICT=1")
+  # Fail-fast contract: unsupported MLIR ops must produce a clear error
+  # and a non-zero exit rather than silently generating broken C.
+  add_test(
+    NAME emitc-fail-tests
+    COMMAND ${CMAKE_SOURCE_DIR}/test/EmitCFail/run_tests.sh $<TARGET_FILE:matlabc>
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/EmitCFail
+  )
 endif()

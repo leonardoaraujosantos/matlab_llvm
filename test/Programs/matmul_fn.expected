@@ -17,7 +17,7 @@ module {
     %6 = "matlab.call"(%2, %5) {callee = "mult2x2"} : (tensor<2x2xf64>, tensor<2x2xf64>) -> none
     return
   }
-  func.func @mult2x2(%arg0: none, %arg1: none) -> none {
+  func.func @mult2x2(%arg0: none {matlab.name = "A"}, %arg1: none {matlab.name = "B"}) -> none {
     %0 = "matlab.matmul"(%arg0, %arg1) : (none, none) -> none
     return %0 : none
   }

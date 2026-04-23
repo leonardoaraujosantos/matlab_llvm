@@ -127,7 +127,7 @@ compile-cpp FILE: build
 # Run both C and C++ emission test suites (95 programs each).
 test-emitc: build
     ctest --test-dir {{BUILD_DIR}} --output-on-failure \
-        -R "run-tests-emit-(c|cpp)"
+        -R "(run-tests-emit-(c|cpp)(-strict)?|emitc-fail-tests)"
 
 # Remove the build directory.
 clean:

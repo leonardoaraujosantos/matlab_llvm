@@ -16,7 +16,7 @@ module {
     %4 = "matlab.call"(%3) {callee = "upper_left_2x2"} : (tensor<3x3xf64>) -> none
     return
   }
-  func.func @upper_left_2x2(%arg0: none) -> none {
+  func.func @upper_left_2x2(%arg0: none {matlab.name = "A"}) -> none {
     %cst = arith.constant 1.000000e+00 : f64
     %cst_0 = arith.constant 2.000000e+00 : f64
     %0 = "matlab.range"(%cst, %cst_0) {has_step = false} : (f64, f64) -> tensor<2xf64>

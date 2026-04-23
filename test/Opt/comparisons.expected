@@ -1,5 +1,5 @@
 module {
-  func.func @demo(%arg0: none, %arg1: none) -> i1 {
+  func.func @demo(%arg0: none {matlab.name = "x"}, %arg1: none {matlab.name = "y"}) -> i1 {
     %false = arith.constant false
     return %false : i1
   }

@@ -328,8 +328,26 @@ dominates.
 | `run-tests`      (`-emit-llvm` + clang)             | 95 | 95/95 pass |
 | `run-tests-emit-c`   (`-emit-c`  + `cc`, **new**)   | 95 | 95/95 pass |
 | `run-tests-emit-cpp` (`-emit-cpp` + `c++`, **new**) | 95 | 95/95 pass |
+| `run-tests-emit-c-strict`  (`-emit-c`  + `cc  -Wall -Wextra -Werror`) | 95 | 95/95 pass |
+| `run-tests-emit-cpp-strict`(`-emit-cpp` + `c++ -Wall -Wextra -Werror`) | 95 | 95/95 pass |
+| `emitc-fail-tests`  (fail-fast diagnostic contract)     | 1+ | pass |
 
-`ctest --test-dir build` runs all four targets end-to-end.
+`ctest --test-dir build` runs all seven targets end-to-end.
+
+The strict lanes exempt `-Wunused-variable`, `-Wunused-but-set-variable`,
+`-Wunused-parameter`, and `-Wunused-function`. The emitter produces one C
+local per SSA value and a local per alloca's underlying storage, so in a
+branch where a value isn't consumed it shows up as unused-but-declared.
+That's deliberate. Everything else — implicit declarations, type
+confusion, sign mismatches, missing returns, uninitialized use — must
+still pass.
+
+The `emitc-fail-tests` suite (under `test/EmitCFail/`) locks in the
+fail-fast contract: for each `.m` that contains an op the emitter can't
+handle, `matlabc -emit-c` must (a) exit non-zero and (b) include the
+matching `.stderr` golden's text as a substring of stderr. Today the
+suite covers `matlab.call_builtin` (e.g. `mod(x,y)`); new entries can
+be added as new unsupported ops come up.
 
 ## Known limitations / future work
 

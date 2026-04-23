@@ -7,6 +7,7 @@
 #
 # Usage: run_tests_emitc.sh <path-to-matlabc>
 # Env:   MODE=c|cpp  (default: c)
+#        STRICT=1    compile with -Wall -Wextra -Werror instead of -w
 #        CC=cc       C compiler (default: cc)
 #        CXX=c++     C++ compiler (default: c++)
 set -u
@@ -18,12 +19,28 @@ if [[ -z "$MATLABC" || ! -x "$MATLABC" ]]; then
 fi
 
 MODE="${MODE:-c}"
+STRICT="${STRICT:-0}"
 CC="${CC:-cc}"
 CXX="${CXX:-c++}"
 
+# In strict mode: treat warnings as errors, but exempt categories that are
+# inherent to the emitter's output shape (one C local per SSA value, so
+# lots of writes-without-use in dead branches) or to the runtime's macros
+# (unused induction vars inside COLWISE_REDUCE). Everything else — type
+# confusion, implicit decls, sign mismatches, missing returns — must pass.
+if [[ "$STRICT" == "1" ]]; then
+  WFLAGS=(-Wall -Wextra -Werror
+          -Wno-unused-variable -Wno-unused-but-set-variable
+          -Wno-unused-parameter -Wno-unused-function)
+  LABEL_SUFFIX=" strict"
+else
+  WFLAGS=(-w)
+  LABEL_SUFFIX=""
+fi
+
 case "$MODE" in
-  c)   FLAG="-emit-c";   COMPILE=("$CC" -w) ; EXT=c   ; LABEL="emit-c"   ;;
-  cpp) FLAG="-emit-cpp"; COMPILE=("$CXX" -w) ; EXT=cpp ; LABEL="emit-cpp" ;;
+  c)   FLAG="-emit-c";   COMPILE=("$CC"  "${WFLAGS[@]}"); EXT=c   ; LABEL="emit-c${LABEL_SUFFIX}"   ;;
+  cpp) FLAG="-emit-cpp"; COMPILE=("$CXX" "${WFLAGS[@]}"); EXT=cpp ; LABEL="emit-cpp${LABEL_SUFFIX}" ;;
   *)   echo "MODE must be c or cpp (got: $MODE)" >&2; exit 2 ;;
 esac
 
@@ -50,21 +67,25 @@ for m in "$TESTDIR"/*.m; do
 
   # For C++ we need to compile the emitted file as C++ and the runtime as C
   # (the runtime is plain C). cc handles both in one invocation.
+  cc_err="$(mktemp -t mlc.XXXXXX).err"
   if [[ "$MODE" == cpp ]]; then
     if ! "${COMPILE[@]}" -x c++ "$tmpsrc" -x c "$RUNTIME" -o "$tmpbin" \
-           -lm -lpthread 2>/dev/null; then
+           -lm -lpthread 2>"$cc_err"; then
       echo "FAIL $base: $LABEL compile failed"
+      [[ "$STRICT" == "1" ]] && sed 's/^/  /' "$cc_err" | head -5
       fail=$((fail+1))
-      rm -f "$tmpsrc" "$tmpbin"; continue
+      rm -f "$tmpsrc" "$tmpbin" "$cc_err"; continue
     fi
   else
     if ! "${COMPILE[@]}" "$tmpsrc" "$RUNTIME" -o "$tmpbin" \
-           -lm -lpthread 2>/dev/null; then
+           -lm -lpthread 2>"$cc_err"; then
       echo "FAIL $base: $LABEL compile failed"
+      [[ "$STRICT" == "1" ]] && sed 's/^/  /' "$cc_err" | head -5
       fail=$((fail+1))
-      rm -f "$tmpsrc" "$tmpbin"; continue
+      rm -f "$tmpsrc" "$tmpbin" "$cc_err"; continue
     fi
   fi
+  rm -f "$cc_err"
 
   got="$("$tmpbin")" || {
     echo "FAIL $base: non-zero exit"

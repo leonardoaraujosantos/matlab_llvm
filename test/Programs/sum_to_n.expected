@@ -1,5 +1,5 @@
 module {
-  func.func @sum_to_n(%arg0: none) -> f64 {
+  func.func @sum_to_n(%arg0: none {matlab.name = "n"}) -> f64 {
     %cst = arith.constant 0.000000e+00 : f64
     %cst_0 = arith.constant 1.000000e+00 : f64
     %0 = "matlab.alloc"() {name = "n"} : () -> none

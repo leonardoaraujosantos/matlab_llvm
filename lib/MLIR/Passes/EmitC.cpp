@@ -156,6 +156,11 @@ void Emitter::emitLineDirective(mlir::Location L, int Indent) {
   std::string File = FL.getFilename().str();
   int Line = static_cast<int>(FL.getLine());
   if (File.empty() || Line <= 0) return;
+  // Emit only the basename so the generated .c is portable across
+  // build machines and doesn't leak an absolute path. Debuggers resolve
+  // #line filenames against the compilation directory.
+  if (auto Slash = File.find_last_of("/\\"); Slash != std::string::npos)
+    File = File.substr(Slash + 1);
   if (File == LastLineFile && Line == LastLineNum) return;
   LastLineFile = File;
   LastLineNum = Line;
@@ -387,7 +392,15 @@ void Emitter::emitFuncFunc(mlir::func::FuncOp F) {
   for (unsigned i = 0; i < FT.getNumInputs(); ++i) {
     if (i) OS << ", ";
     auto Arg = Entry.getArgument(i);
-    std::string N = freshName();
+    // Prefer the matlab.name arg-attr attached at AST->MLIR lowering so
+    // the emitted signature mirrors the source (`fact(double n)` rather
+    // than `fact(double v15)`). Fall back to a fresh v-counter when the
+    // attr is missing (e.g. outlined parfor / anon bodies).
+    std::string N;
+    if (auto NA = F.getArgAttrOfType<mlir::StringAttr>(i, "matlab.name"))
+      N = uniqueName(NA.getValue());
+    else
+      N = freshName();
     Names[Arg] = N;
     OS << cTypeOf(FT.getInput(i)) << " " << N;
   }
@@ -670,9 +683,16 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
       Hint = NA.getValue().str();
     std::string N, SlotName;
     if (!Hint.empty()) {
-      SlotName = uniqueName(Hint);
+      // Common collision: a MATLAB param `n` is spilled into a slot named
+      // `n`, but the func arg already claimed `n`. Prefer "<hint>_slot"
+      // over the numeric "_2" suffix uniqueName would otherwise produce.
+      std::string Sane = sanitizeIdent(Hint);
+      if (UsedNames.find(Sane) != UsedNames.end())
+        SlotName = uniqueName(Sane + "_slot");
+      else
+        SlotName = uniqueName(Sane);
       // The pointer value itself still needs a unique identifier.
-      N = uniqueName(Hint + "_p");
+      N = uniqueName(SlotName + "_p");
     } else {
       N = this->name(A.getResult());
       SlotName = N + "_slot";

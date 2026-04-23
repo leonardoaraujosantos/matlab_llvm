@@ -654,6 +654,9 @@ Two CTest suites, ~165 goldens total:
 | `Run` | `-emit-llvm` + link + exec | 95 | End-to-end stdout goldens — I/O, parfor, sequential for/while, `break`/`continue`, matrix math, linear algebra, SVD/eig (incl. `[V,D]`), reductions, slicing, indexed store, logical indexing, anon calls + scalar & matrix captures, `@name` + `@myFunc` handles, multi-self-recursion, polymorphic user calls, implicit display, `clear`, `global`/`persistent`, `nargin`/`nargout`, structs (incl. nested `s.a.b` + `isstruct`/`isfield`) + `s.(name)`, 1-D cells (literals + read + write), `try`/`catch` via error flag |
 | `Run (emit-c)` | `-emit-c` + `cc` + exec | 95 | Same 95 programs, emitted as C and compiled with `cc`. Output compared against the `.stdout` goldens. |
 | `Run (emit-cpp)` | `-emit-cpp` + `c++` + exec | 95 | Same 95 programs, emitted as C++ and compiled with `c++`. |
+| `Run (emit-c strict)` | `-emit-c` + `cc -Wall -Wextra -Werror` | 95 | Same 95 programs compiled with warnings-as-errors. Catches quality regressions (type confusion, implicit decls, sign mismatches) that `-w` would hide. |
+| `Run (emit-cpp strict)` | `-emit-cpp` + `c++ -Wall -Wextra -Werror` | 95 | Same, C++ lane. |
+| `EmitCFail` | `-emit-c` on IR the emitter can't handle | 1+ | Verifies the fail-fast contract: non-zero exit + expected stderr diagnostic. |
 
 ```bash
 ctest --test-dir build

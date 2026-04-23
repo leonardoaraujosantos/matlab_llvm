@@ -1,5 +1,5 @@
 module {
-  func.func @fact(%arg0: none) -> none {
+  func.func @fact(%arg0: none {matlab.name = "n"}) -> none {
     %cst = arith.constant 1.000000e+00 : f64
     %0 = "matlab.alloc"() {name = "n"} : () -> none
     "matlab.store"(%arg0, %0) : (none, none) -> ()
