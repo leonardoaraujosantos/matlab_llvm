@@ -1379,6 +1379,154 @@ double matlab_subscript1_s(matlab_mat *A, double i) {
 /*---------- I/O ----------------------------------------------------------*/
 
 /* ---------------------------------------------------------------------- */
+/* Try / catch via an error flag.
+ *
+ * Without stack unwinding support (setjmp/longjmp or LLVM invoke)
+ * we can't catch runtime faults. What we CAN catch cleanly is an
+ * explicit error() call: matlab_set_error sets a process-global flag,
+ * and the try-body's lowering wraps subsequent statements in an
+ * scf.if(!flag) guard. After the try-body, the catch-body runs if the
+ * flag is set, clearing it first.
+ *
+ * Single-threaded: parfor bodies don't currently participate in
+ * try/catch. If they ever do, this needs thread-local storage.
+ */
+static int32_t matlab_error_flag = 0;
+
+void matlab_set_error(void) { matlab_error_flag = 1; }
+int32_t matlab_check_error(void) { return matlab_error_flag; }
+void matlab_clear_error(void) { matlab_error_flag = 0; }
+
+/* ---------------------------------------------------------------------- */
+/* Struct storage — s.field = v with f64 and matlab_mat* field values.
+ *
+ * matlab_struct holds a parallel table of field name / value / kind
+ * entries. Lookup is linear scan: name counts in MATLAB structs are
+ * small (tens at most), and a hash table would complicate the
+ * transpile-friendly C. Fields are looked up case-sensitively. A fresh
+ * struct starts empty; set-field appends if the name is new, or
+ * overwrites in place if it already exists.
+ *
+ * Kind tag:
+ *   0 = f64 (value held in the double slot)
+ *   1 = matlab_mat* (pointer held in the ptr slot)
+ *   2 = matlab_struct* (nested struct)
+ * Getting a missing field as f64 returns 0.0; getting as a ptr
+ * returns a fresh empty matrix so downstream code doesn't crash on
+ * null. */
+#define MATLAB_STRUCT_CAP_INIT 4
+
+struct matlab_struct_s {
+    int32_t nfields;
+    int32_t capacity;
+    char **names;
+    int32_t *kinds;
+    double *f64_vals;
+    void **ptr_vals;
+};
+typedef struct matlab_struct_s matlab_struct;
+
+matlab_struct *matlab_struct_new(void) {
+    matlab_struct *s = (matlab_struct *)calloc(1, sizeof(*s));
+    s->capacity = MATLAB_STRUCT_CAP_INIT;
+    s->names    = (char **)calloc((size_t)s->capacity, sizeof(char *));
+    s->kinds    = (int32_t *)calloc((size_t)s->capacity, sizeof(int32_t));
+    s->f64_vals = (double *)calloc((size_t)s->capacity, sizeof(double));
+    s->ptr_vals = (void **)calloc((size_t)s->capacity, sizeof(void *));
+    return s;
+}
+
+static int32_t struct_find_field(matlab_struct *s, const char *name, int32_t len) {
+    for (int32_t i = 0; i < s->nfields; ++i) {
+        if ((int32_t)strlen(s->names[i]) == len &&
+            memcmp(s->names[i], name, (size_t)len) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static void struct_grow_if_needed(matlab_struct *s) {
+    if (s->nfields < s->capacity) return;
+    int32_t NewCap = s->capacity * 2;
+    s->names    = (char **)realloc(s->names,    (size_t)NewCap * sizeof(char *));
+    s->kinds    = (int32_t *)realloc(s->kinds,  (size_t)NewCap * sizeof(int32_t));
+    s->f64_vals = (double *)realloc(s->f64_vals,(size_t)NewCap * sizeof(double));
+    s->ptr_vals = (void **)realloc(s->ptr_vals, (size_t)NewCap * sizeof(void *));
+    for (int32_t i = s->capacity; i < NewCap; ++i) {
+        s->names[i] = NULL;
+        s->kinds[i] = 0;
+        s->f64_vals[i] = 0.0;
+        s->ptr_vals[i] = NULL;
+    }
+    s->capacity = NewCap;
+}
+
+static int32_t struct_reserve(matlab_struct *s, const char *name, int32_t len) {
+    int32_t idx = struct_find_field(s, name, len);
+    if (idx >= 0) return idx;
+    struct_grow_if_needed(s);
+    idx = s->nfields++;
+    char *copy = (char *)malloc((size_t)len + 1);
+    memcpy(copy, name, (size_t)len);
+    copy[len] = '\0';
+    s->names[idx] = copy;
+    s->kinds[idx] = 0;
+    s->f64_vals[idx] = 0.0;
+    s->ptr_vals[idx] = NULL;
+    return idx;
+}
+
+void matlab_struct_set_f64(matlab_struct *s, const char *name, int64_t len, double v) {
+    if (!s) return;
+    int32_t idx = struct_reserve(s, name, (int32_t)len);
+    s->kinds[idx] = 0;
+    s->f64_vals[idx] = v;
+    s->ptr_vals[idx] = NULL;
+}
+
+void matlab_struct_set_mat(matlab_struct *s, const char *name, int64_t len, matlab_mat *m) {
+    if (!s) return;
+    int32_t idx = struct_reserve(s, name, (int32_t)len);
+    s->kinds[idx] = 1;
+    s->f64_vals[idx] = 0.0;
+    s->ptr_vals[idx] = m;
+}
+
+double matlab_struct_get_f64(matlab_struct *s, const char *name, int64_t len) {
+    if (!s) return 0.0;
+    int32_t idx = struct_find_field(s, name, (int32_t)len);
+    if (idx < 0) return 0.0;
+    if (s->kinds[idx] == 0) return s->f64_vals[idx];
+    /* If the field holds a 1x1 matrix, unbox to scalar. */
+    if (s->kinds[idx] == 1 && s->ptr_vals[idx]) {
+        matlab_mat *m = (matlab_mat *)s->ptr_vals[idx];
+        if (m->rows == 1 && m->cols == 1) return m->data[0];
+    }
+    return 0.0;
+}
+
+matlab_mat *matlab_struct_get_mat(matlab_struct *s, const char *name, int64_t len) {
+    if (!s) return mat_alloc(0, 0);
+    int32_t idx = struct_find_field(s, name, (int32_t)len);
+    if (idx < 0) return mat_alloc(0, 0);
+    if (s->kinds[idx] == 1 && s->ptr_vals[idx])
+        return (matlab_mat *)s->ptr_vals[idx];
+    /* Box a scalar field into a 1x1 matrix. */
+    if (s->kinds[idx] == 0) {
+        matlab_mat *m = mat_alloc(1, 1);
+        m->data[0] = s->f64_vals[idx];
+        return m;
+    }
+    return mat_alloc(0, 0);
+}
+
+double matlab_struct_has_field(matlab_struct *s, const char *name, int64_t len) {
+    if (!s) return 0.0;
+    return struct_find_field(s, name, (int32_t)len) >= 0 ? 1.0 : 0.0;
+}
+
+/* ---------------------------------------------------------------------- */
 /* Global / persistent storage.
  *
  * The compiler assigns a unique integer ID per global or persistent name

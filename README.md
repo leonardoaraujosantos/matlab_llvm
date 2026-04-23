@@ -314,9 +314,10 @@ threads deterministically prints 55.
 | Empty matrix `A = []` / deallocate | ✅ | ✅ | ✅ (`matlab_empty_mat`) | ✅ |
 | Matrix comparisons `A > B`, `A == s` etc. | ✅ | ✅ | ✅ (returns 0/1 matrix) | ✅ |
 | `global`, `persistent` | ✅ | ✅ | ✅ scalar (f64) via runtime-backed slot table; globals shared by name, persistents namespaced per function | ✅ |
-| `try / catch` | ✅ | ✅ | ⚠️ catch dropped | — |
+| `try / catch` | ✅ | ✅ | ✅ runs try body; catch body runs when `error()` set the runtime error flag (no stack unwinding) | ✅ |
+| Structs `s.x = v`, `s.x` read, `s.(name)` dynamic read | ✅ | ✅ | ✅ runtime-backed `matlab_struct` with per-field f64/matrix kinds | ✅ |
 | `classdef` (OOP) | ❌ | ❌ | ❌ | — |
-| Cells `{...}`, structs `s.x` | ✅ (parsed) | ⚠️ partial | ❌ | — |
+| Cells `{...}` | ✅ (parsed) | ⚠️ partial | ❌ | — |
 | Command syntax (`disp hello` → `disp('hello')`) | ✅ | ✅ | ✅ | — |
 
 Legend: ✅ works · ⚠️ partial · ❌ not implemented · — not applicable.

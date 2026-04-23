@@ -335,6 +335,160 @@ bool TensorLowering::rewriteBuiltinCalls() {
     if (!CA) continue;
     StringRef Name = CA.getValue();
 
+    /* matlab_struct_new / set_f64 / set_mat / get_f64 / get_mat /
+     * has_field. The frontend emits these as matlab.call_builtin with
+     * a const_char for the field name. We materialise the name as an
+     * llvm.mlir.global + addressof (ptr + length) and declare the
+     * runtime function with the appropriate signature. */
+    auto fieldNameAddr =
+        [&](Value NameV, int64_t &LenOut) -> Value {
+      Operation *Def = NameV.getDefiningOp();
+      if (!isMatlabOp(Def, "matlab.const_char")) return Value{};
+      auto VA = Def->getAttrOfType<StringAttr>("value");
+      if (!VA) return Value{};
+      StringRef Text = VA.getValue();
+      LenOut = (int64_t)Text.size();
+      /* Reuse an existing __matlab_str* global for the same text if
+       * LowerIO already created one. */
+      LLVM::GlobalOp Found;
+      for (auto G : Mod.getOps<LLVM::GlobalOp>()) {
+        if (!G.getConstant()) continue;
+        auto Attr = mlir::dyn_cast_or_null<StringAttr>(G.getValueAttr());
+        if (Attr && Attr.getValue() == Text) { Found = G; break; }
+      }
+      if (!Found) {
+        OpBuilder::InsertionGuard G(B);
+        B.setInsertionPointToStart(Mod.getBody());
+        auto ArrayTy = LLVM::LLVMArrayType::get(
+            IntegerType::get(Ctx, 8),
+            static_cast<unsigned>(Text.size()));
+        unsigned N = 0;
+        std::string SymName;
+        do {
+          SymName = ("__matlab_str_f" + std::to_string(N++));
+        } while (Mod.lookupSymbol(SymName));
+        Found = LLVM::GlobalOp::create(
+            B, Mod.getLoc(), ArrayTy, /*isConstant=*/true,
+            LLVM::Linkage::Internal, SymName,
+            StringAttr::get(Ctx, Text));
+      }
+      B.setInsertionPoint(Def);
+      Value Addr = LLVM::AddressOfOp::create(
+          B, Def->getLoc(), PtrTy, Found.getSymName());
+      /* The const_char op's result is only consumed by the call site
+       * we're about to rewrite. Replace uses with Addr so the op drops
+       * to zero users after the call's erase; a later sweep deletes
+       * the dead const_char. */
+      Def->getResult(0).replaceAllUsesWith(Addr);
+      return Addr;
+    };
+
+    /* Error-flag accessors: matlab_set_error / matlab_check_error /
+     * matlab_clear_error. Used by try/catch and by the `error()`
+     * builtin itself. */
+    if (Name == "matlab_set_error" && Call->getNumOperands() == 0) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt("matlab_set_error", VoidTy, {});
+      LLVM::CallOp::create(B, Call->getLoc(), Fn, ValueRange{});
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+    if (Name == "matlab_clear_error" && Call->getNumOperands() == 0) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt("matlab_clear_error", VoidTy, {});
+      LLVM::CallOp::create(B, Call->getLoc(), Fn, ValueRange{});
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+    if (Name == "matlab_check_error" && Call->getNumResults() == 1 &&
+        Call->getNumOperands() == 0) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt("matlab_check_error",
+                    IntegerType::get(Ctx, 32), {});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn, ValueRange{});
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+    /* Rewrite @error(...) calls — whatever args the user passes we
+     * ignore for v1 and just flip the error flag. */
+    if (Name == "error") {
+      B.setInsertionPoint(Call);
+      auto Fn = rt("matlab_set_error", VoidTy, {});
+      LLVM::CallOp::create(B, Call->getLoc(), Fn, ValueRange{});
+      /* Replace any result users with zero — error() has no real return. */
+      for (auto R : Call->getResults())
+        if (!R.use_empty()) {
+          Value Z = LLVM::ConstantOp::create(
+              B, Call->getLoc(), F64, B.getF64FloatAttr(0.0));
+          R.replaceAllUsesWith(Z);
+        }
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+
+    if (Name == "matlab_struct_new" && Call->getNumResults() == 1 &&
+        Call->getNumOperands() == 0) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt("matlab_struct_new", PtrTy, {});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn, ValueRange{});
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+    if ((Name == "matlab_struct_set_f64" ||
+         Name == "matlab_struct_set_mat") &&
+        Call->getNumOperands() == 3) {
+      Value Base = Call->getOperand(0);
+      Value NameV = Call->getOperand(1);
+      Value Val = Call->getOperand(2);
+      if (Base.getType() != PtrTy) continue;
+      int64_t Len = 0;
+      Value Ptr = fieldNameAddr(NameV, Len);
+      if (!Ptr) continue;
+      bool IsMat = Name == "matlab_struct_set_mat";
+      if (IsMat && Val.getType() != PtrTy) continue;
+      if (!IsMat && Val.getType() != F64) continue;
+      B.setInsertionPoint(Call);
+      Value LenV = LLVM::ConstantOp::create(
+          B, Call->getLoc(), I64, B.getI64IntegerAttr(Len));
+      auto Fn = rt(Name, VoidTy, {PtrTy, PtrTy, I64,
+                                    IsMat ? (Type)PtrTy : (Type)F64});
+      LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                            ValueRange{Base, Ptr, LenV, Val});
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+    if ((Name == "matlab_struct_get_f64" ||
+         Name == "matlab_struct_get_mat" ||
+         Name == "matlab_struct_has_field") &&
+        Call->getNumOperands() == 2 && Call->getNumResults() == 1) {
+      Value Base = Call->getOperand(0);
+      Value NameV = Call->getOperand(1);
+      if (Base.getType() != PtrTy) continue;
+      int64_t Len = 0;
+      Value Ptr = fieldNameAddr(NameV, Len);
+      if (!Ptr) continue;
+      bool IsMat = Name == "matlab_struct_get_mat";
+      Type Ret = IsMat ? (Type)PtrTy : (Type)F64;
+      B.setInsertionPoint(Call);
+      Value LenV = LLVM::ConstantOp::create(
+          B, Call->getLoc(), I64, B.getI64IntegerAttr(Len));
+      auto Fn = rt(Name, Ret, {PtrTy, PtrTy, I64});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                      ValueRange{Base, Ptr, LenV});
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+
     /* Global / persistent scalar table accessors. The frontend emits
      * matlab.call_builtin @matlab_global_get_f64(i32) and
      * matlab.call_builtin @matlab_global_set_f64(i32, f64). */
@@ -499,6 +653,22 @@ bool TensorLowering::rewriteBuiltinCalls() {
     Call->erase();
     Changed = true;
   }
+
+  /* Sweep dead matlab.const_char ops whose only users were the struct
+   * call sites we just rewrote. Run until fixed-point in case an
+   * intermediate op we dropped frees up chains. */
+  for (int R = 0; R < 4; ++R) {
+    SmallVector<Operation *> Dead;
+    Mod.walk([&](Operation *Op) {
+      if (isMatlabOp(Op, "matlab.const_char") &&
+          Op->getNumResults() == 1 &&
+          Op->getResult(0).use_empty())
+        Dead.push_back(Op);
+    });
+    if (Dead.empty()) break;
+    for (Operation *Op : Dead) Op->erase();
+  }
+
   return Changed;
 }
 

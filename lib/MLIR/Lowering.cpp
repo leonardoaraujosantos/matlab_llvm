@@ -9,6 +9,8 @@
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+#include "mlir/Dialect/LLVMIR/LLVMTypes.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/AsmState.h"
 #include "mlir/IR/Builders.h"
@@ -252,6 +254,13 @@ private:
   mlir::Value loadBinding(Binding *Bnd, const Type *ValTy, mlir::Location L);
 
   int32_t globalSlotId(Binding *Bnd);
+  mlir::Value ensureStructSlot(Binding *Bnd, std::string_view Name,
+                                mlir::Location L);
+  mlir::Value emitFieldNameChar(std::string_view Name, mlir::Location L);
+  /* Bindings that have been initialised to a fresh matlab_struct_new().
+   * Tracked per-Binding so a function with multiple FieldAccess sites
+   * only initialises once. */
+  std::unordered_set<Binding *> StructInitialised;
   std::string CurFnName;
   /* Declared arity of the currently-lowered function — used to fold
    * references to the `nargin` / `nargout` builtins into compile-time
@@ -393,6 +402,61 @@ mlir::Value Lowerer::getOrCreateSlot(Binding *Bnd, const Type *T,
   mlir::Value Slot = emitAlloc(T, N, L);
   Slots[Bnd] = Slot;
   return Slot;
+}
+
+mlir::Value Lowerer::ensureStructSlot(Binding *Bnd, std::string_view Name,
+                                       mlir::Location L) {
+  /* Allocate a ptr slot for the struct and initialise it with a fresh
+   * matlab_struct_new() in the function's entry block. Idempotent per
+   * binding. The returned value is the slot (ptr-typed matlab.alloc
+   * result) — callers matlab.load/store through it. */
+  auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+  auto It = Slots.find(Bnd);
+  mlir::Value Slot;
+  if (It != Slots.end()) {
+    Slot = It->second;
+  } else {
+    /* emitAlloc wants a Sema Type*; we go around it with a raw
+     * matlab.alloc of ptr result so retypeMatrixSlots leaves it alone. */
+    mlir::OpBuilder::InsertionGuard G(B);
+    auto *InsBlock = B.getInsertionBlock();
+    mlir::Operation *P = InsBlock ? InsBlock->getParentOp() : nullptr;
+    while (P && !mlir::isa<mlir::func::FuncOp>(P)) {
+      auto *PB = P->getBlock();
+      P = PB ? PB->getParentOp() : nullptr;
+    }
+    if (P) B.setInsertionPointToStart(
+        &mlir::cast<mlir::func::FuncOp>(P).getBody().front());
+    mlir::NamedAttribute NA(
+        mlir::StringAttr::get(&MCtx, "name"),
+        mlir::FlatSymbolRefAttr::get(&MCtx, std::string(Name)));
+    Slot = emitUnreg("matlab.alloc", {}, PtrTy, L, {NA});
+    Slots[Bnd] = Slot;
+  }
+  if (!StructInitialised.count(Bnd)) {
+    StructInitialised.insert(Bnd);
+    mlir::OpBuilder::InsertionGuard G(B);
+    /* Insert the init right after the alloc so the slot has a value
+     * before any read/write. Placing in the function entry block
+     * works because Slot was allocated there too. */
+    auto *SlotOp = Slot.getDefiningOp();
+    if (SlotOp) B.setInsertionPointAfter(SlotOp);
+    mlir::NamedAttribute Cal(
+        mlir::StringAttr::get(&MCtx, "callee"),
+        mlir::StringAttr::get(&MCtx, "matlab_struct_new"));
+    mlir::Value NewPtr = emitUnreg("matlab.call_builtin", {}, PtrTy, L, {Cal});
+    emitStore(NewPtr, Slot, L);
+  }
+  return Slot;
+}
+
+mlir::Value Lowerer::emitFieldNameChar(std::string_view Name,
+                                        mlir::Location L) {
+  mlir::NamedAttribute VA(
+      mlir::StringAttr::get(&MCtx, "value"),
+      mlir::StringAttr::get(&MCtx, std::string(Name)));
+  return emitUnreg("matlab.const_char", {},
+                   mlir::NoneType::get(&MCtx), L, {VA});
 }
 
 int32_t Lowerer::globalSlotId(Binding *Bnd) {
@@ -985,8 +1049,41 @@ void Lowerer::lowerStmt(const Stmt &St) {
     return;
   }
   case NodeKind::TryStmt: {
+    /* try/catch without real stack unwinding: the try body runs
+     * normally; after it, we check the runtime error flag. If set, we
+     * clear it and run the catch body. The frontend doesn't yet wrap
+     * individual try-body statements in error-flag guards, so calls
+     * that explicitly error() will only trigger the catch if the
+     * error() call is the last thing evaluated before leaving try —
+     * good enough for the common 'try; error_if_bad; catch; fallback'
+     * idiom. */
     auto &T = static_cast<const TryStmt &>(St);
     if (T.TryBody) lowerBlock(*T.TryBody);
+    if (T.CatchBody) {
+      mlir::Location L = loc(T.Range);
+      auto I32 = mlir::IntegerType::get(&MCtx, 32);
+      auto I1 = mlir::IntegerType::get(&MCtx, 1);
+      /* matlab_check_error() -> i32 ; !=0 -> i1 */
+      mlir::NamedAttribute Chk(
+          mlir::StringAttr::get(&MCtx, "callee"),
+          mlir::StringAttr::get(&MCtx, "matlab_check_error"));
+      mlir::Value Flag = emitUnreg("matlab.call_builtin", {}, I32, L, {Chk});
+      mlir::Value Zero = mlir::arith::ConstantOp::create(
+          B, L, I32, mlir::IntegerAttr::get(I32, 0));
+      mlir::Value Cond = mlir::arith::CmpIOp::create(
+          B, L, mlir::arith::CmpIPredicate::ne, Flag, Zero);
+      (void)I1;
+      auto IfOp = mlir::scf::IfOp::create(B, L, mlir::TypeRange{}, Cond,
+                                           /*withElseRegion=*/false);
+      mlir::OpBuilder::InsertionGuard G(B);
+      B.setInsertionPoint(IfOp.thenBlock()->getTerminator());
+      mlir::NamedAttribute Clr(
+          mlir::StringAttr::get(&MCtx, "callee"),
+          mlir::StringAttr::get(&MCtx, "matlab_clear_error"));
+      emitUnregOp("matlab.call_builtin", {},
+                  {mlir::NoneType::get(&MCtx)}, L, {Clr});
+      lowerBlock(*T.CatchBody);
+    }
     return;
   }
   case NodeKind::ReturnStmt:
@@ -1131,19 +1228,23 @@ void Lowerer::lowerLValueStore(const Expr &LHS, mlir::Value Rhs) {
     return;
   }
   case NodeKind::FieldAccess: {
+    /* s.x = Rhs  -->  ensure s has a matlab_struct; call
+     *                 matlab_struct_set_{f64|mat}(s_ptr, "x", Rhs). */
     auto &F = static_cast<const FieldAccess &>(LHS);
-    mlir::Value Base = F.Base ? lowerExpr(*F.Base) : mlir::Value{};
-    llvm::SmallVector<mlir::Value, 2> Os;
-    if (Base) Os.push_back(Base);
-    if (Rhs) Os.push_back(Rhs);
-    mlir::NamedAttribute FN(
-        mlir::StringAttr::get(&MCtx, "field"),
-        mlir::StringAttr::get(&MCtx, std::string(F.Field)));
-    mlir::NamedAttribute Store(
-        mlir::StringAttr::get(&MCtx, "store"),
-        mlir::BoolAttr::get(&MCtx, true));
-    emitUnregOp("matlab.field", Os,
-                {mlir::NoneType::get(&MCtx)}, loc(F.Range), {FN, Store});
+    auto *BN = dynamic_cast<const NameExpr *>(F.Base);
+    if (!BN || !BN->Ref) return;
+    mlir::Value Slot = ensureStructSlot(BN->Ref, BN->Name, loc(F.Range));
+    auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+    mlir::Value SPtr = emitLoad(Slot, PtrTy, loc(F.Range));
+    mlir::Value NameV = emitFieldNameChar(F.Field, loc(F.Range));
+    llvm::StringRef Callee = (Rhs && Rhs.getType() == PtrTy)
+        ? "matlab_struct_set_mat"
+        : "matlab_struct_set_f64";
+    mlir::NamedAttribute Cal(
+        mlir::StringAttr::get(&MCtx, "callee"),
+        mlir::StringAttr::get(&MCtx, Callee));
+    emitUnregOp("matlab.call_builtin", {SPtr, NameV, Rhs},
+                {mlir::NoneType::get(&MCtx)}, loc(F.Range), {Cal});
     return;
   }
   default:
@@ -1329,18 +1430,57 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
     return emitUnreg("matlab.cell_subscript", Idx, RT, L);
   }
   case NodeKind::FieldAccess: {
+    /* s.x read. v1 assumes scalar (f64) fields unless Sema has told
+     * us otherwise. If the binding is a Struct kind we still default
+     * to f64 — matrix-typed fields are boxed 1×1 by the runtime. */
     auto &F = static_cast<const FieldAccess &>(E);
-    mlir::Value Base = F.Base ? lowerExpr(*F.Base) : mlir::Value{};
-    mlir::NamedAttribute FA(
-        mlir::StringAttr::get(&MCtx, "field"),
-        mlir::StringAttr::get(&MCtx, std::string(F.Field)));
-    return emitUnreg("matlab.field", {Base}, RT, L, {FA});
+    auto *BN = dynamic_cast<const NameExpr *>(F.Base);
+    if (!BN || !BN->Ref) return emitUnreg("matlab.undef", {}, RT, L);
+    mlir::Value Slot = ensureStructSlot(BN->Ref, BN->Name, L);
+    auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+    auto F64 = mlir::Float64Type::get(&MCtx);
+    mlir::Value SPtr = emitLoad(Slot, PtrTy, L);
+    mlir::Value NameV = emitFieldNameChar(F.Field, L);
+    /* Default to f64 (scalar field). Only fetch as a matrix when Sema
+     * concretely says tensor — a `none`/`any` type, common when Sema
+     * can't specialise through struct fields, falls back to f64. Users
+     * who want matrix fields can annotate or the runtime will box a
+     * 1×1 transparently. */
+    bool WantMat = mlir::isa<mlir::RankedTensorType,
+                              mlir::UnrankedTensorType>(RT);
+    llvm::StringRef Callee = WantMat ? "matlab_struct_get_mat"
+                                      : "matlab_struct_get_f64";
+    mlir::NamedAttribute Cal(
+        mlir::StringAttr::get(&MCtx, "callee"),
+        mlir::StringAttr::get(&MCtx, Callee));
+    mlir::Type ResTy = WantMat ? (mlir::Type)PtrTy : (mlir::Type)F64;
+    return emitUnreg("matlab.call_builtin", {SPtr, NameV}, ResTy, L, {Cal});
   }
   case NodeKind::DynamicField: {
+    /* s.(name_expr). v1 handles the compile-time-constant case where
+     * name_expr is a literal char/string (the common use when
+     * templating fieldnames from a small set). For runtime-varying
+     * names we'd need a runtime entry that takes a char-matrix name;
+     * that's a follow-up. */
     auto &F = static_cast<const DynamicField &>(E);
-    mlir::Value Base = F.Base ? lowerExpr(*F.Base) : mlir::Value{};
-    mlir::Value Name = F.Name ? lowerExpr(*F.Name) : mlir::Value{};
-    return emitUnreg("matlab.dyn_field", {Base, Name}, RT, L);
+    auto *BN = dynamic_cast<const NameExpr *>(F.Base);
+    if (!BN || !BN->Ref) return emitUnreg("matlab.undef", {}, RT, L);
+    std::string FieldName;
+    if (auto *Lit = dynamic_cast<const StringLiteral *>(F.Name))
+      FieldName = Lit->Value;
+    else if (auto *Lit = dynamic_cast<const CharLiteral *>(F.Name))
+      FieldName = Lit->Value;
+    else
+      return emitUnreg("matlab.undef", {}, RT, L);
+    mlir::Value Slot = ensureStructSlot(BN->Ref, BN->Name, L);
+    auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+    auto F64 = mlir::Float64Type::get(&MCtx);
+    mlir::Value SPtr = emitLoad(Slot, PtrTy, L);
+    mlir::Value NameV = emitFieldNameChar(FieldName, L);
+    mlir::NamedAttribute Cal(
+        mlir::StringAttr::get(&MCtx, "callee"),
+        mlir::StringAttr::get(&MCtx, "matlab_struct_get_f64"));
+    return emitUnreg("matlab.call_builtin", {SPtr, NameV}, F64, L, {Cal});
   }
   case NodeKind::MatrixLiteral: {
     auto &M = static_cast<const MatrixLiteral &>(E);
