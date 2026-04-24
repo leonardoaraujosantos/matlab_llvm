@@ -58,9 +58,16 @@ bool runLowerScalarSlots(ModuleOp M) {
     auto AllocaOp = LLVM::AllocaOp::create(B, Alloc->getLoc(), PtrTy, ElemTy,
                                             One, /*alignment=*/0);
     // Preserve the original MATLAB slot name as a discardable attr so the
-    // EmitC backend can use it for readable identifiers.
-    if (auto NameAttr = Alloc->getAttrOfType<StringAttr>("name"))
+    // EmitC backend can use it for readable identifiers. The frontend uses
+    // StringAttr for user variables and FlatSymbolRefAttr for synthesized
+    // slots (`__did_break`, `__did_continue`); normalise both to StringAttr
+    // so downstream code only has to check one shape.
+    if (auto NameAttr = Alloc->getAttrOfType<StringAttr>("name")) {
       AllocaOp->setAttr("matlab.name", NameAttr);
+    } else if (auto SymAttr = Alloc->getAttrOfType<FlatSymbolRefAttr>("name")) {
+      AllocaOp->setAttr("matlab.name",
+          StringAttr::get(Ctx, SymAttr.getValue()));
+    }
     Value Ptr = AllocaOp.getResult();
 
     // Rewrite loads and stores that use this slot. Walk a copy because

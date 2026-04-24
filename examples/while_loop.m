@@ -12,8 +12,8 @@ disp('sum(1..10) =');
 disp(total);
 
 % Break out early once a running product exceeds a threshold. Exercises
-% `break` inside a while — emitter falls back to the `while (1) { ... }`
-% intermediate form to honour the extra break-slot predicate.
+% `break` inside a while — the emitter un-lowers the frontend's did_break
+% slot back into a C `break;` statement so the output reads naturally.
 n = 1;
 p = 1;
 while 1 == 1

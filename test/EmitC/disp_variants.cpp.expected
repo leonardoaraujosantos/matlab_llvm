@@ -5,7 +5,7 @@
 // Covers the three disp-substitution cases: string literal, f64, i64.
 int main(void) {
   std::cout << "header:" << '\n';
-  std::cout << 3.1400000000000001 << '\n';
+  std::cout << 3.14 << '\n';
   std::cout << 42.0 << '\n';
 
   std::cout << 7.0 << '\n';
