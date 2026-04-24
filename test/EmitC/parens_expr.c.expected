@@ -3,20 +3,14 @@
 #include <stdbool.h>
 #include <stdio.h>
 
-// Runtime prototypes (linked against runtime/matlab_runtime.c).
-
-// Module-level string constants.
-
 // Forward declarations.
 static double compute(double, double);
 
 // Exercises paren-simplification candidates: nested arithmetic, loads,
 // returns, comparisons. Locks the expected paren density in output.
 int main(void) {
-  double v0 = compute(2, 3);
-  printf("%g\n", (double)v0);
-  double v1 = compute(4, 5);
-  printf("%g\n", (double)v1);
+  printf("%g\n", compute(2.0, 3.0));
+  printf("%g\n", compute(4.0, 5.0));
   return 0;
 }
 

@@ -144,6 +144,11 @@ private:
   // surviving the IO substitutions. Used to prune dead externs from the
   // prolog so the emitted file doesn't declare functions it never calls.
   llvm::StringSet<> LiveRuntimeFuncs;
+  // `llvm.mlir.global` symbols that are still referenced by a surviving
+  // (non-substituted) callsite. Globals whose only users fed the
+  // substituted `matlab_disp_str(literal)` path are dead after emission
+  // and get pruned from the prolog.
+  llvm::StringSet<> LiveGlobals;
 
   llvm::DenseMap<mlir::Value, std::string> Names;
   llvm::DenseMap<mlir::Operation *, std::string> GlobalStrs;  // global -> C name
@@ -255,6 +260,28 @@ static std::string formatIntAttr(mlir::IntegerAttr IA) {
   return Buf;
 }
 
+// Format a FloatAttr as a C double literal. `%.17g` round-trips every
+// finite double, but prints integer-valued numbers without a decimal
+// (`42`, `-1`) which are C ints — dangerous in `printf("%g\n", ...)`
+// varargs context and noisy in generated source. Append `.0` when the
+// formatted text has no `.`, `e`, `E`, `n` (NaN/inf) so the type stays
+// double without bloating common fractional values like `3.14`.
+static std::string formatFloatAttr(mlir::FloatAttr FA) {
+  char Buf[64];
+  double D = FA.getValueAsDouble();
+  snprintf(Buf, sizeof(Buf), "%.17g", D);
+  std::string S = Buf;
+  bool HasDotOrExp = false;
+  for (char C : S) {
+    if (C == '.' || C == 'e' || C == 'E' || C == 'n') {
+      HasDotOrExp = true;
+      break;
+    }
+  }
+  if (!HasDotOrExp) S += ".0";
+  return S;
+}
+
 // Return the C expression to substitute when referring to V.
 //  - If V was declared (Names has an entry), return that identifier.
 //  - Else if V has an inline expression cached, return it.
@@ -348,6 +375,35 @@ bool Emitter::canInline(mlir::Operation &Op) {
     return true;
   }
 
+  // Function calls: inlining moves the call's text to the use site. The
+  // call's side effects still run at the use's position; they ran before
+  // the use in the original order too, so the net timing is unchanged —
+  // PROVIDED no store or other call sits between producer and user. Any
+  // intervening side-effecting op could observe or be observed by the
+  // call, so we conservatively refuse to hop over them. Indirect calls
+  // (no callee attribute) can't be textually inlined cleanly because
+  // the function pointer cast is already a mouthful.
+  if (auto C = dyn_cast<func::CallOp>(Op)) {
+    Block *BB = Op.getBlock();
+    for (auto It = ++Block::iterator(&Op);
+         It != BB->end() && &*It != User; ++It) {
+      if (isa<LLVM::StoreOp>(*It)) return false;
+      if (isa<LLVM::CallOp, func::CallOp>(*It)) return false;
+    }
+    (void)C;
+    return true;
+  }
+  if (auto C = dyn_cast<LLVM::CallOp>(Op)) {
+    if (!C.getCallee()) return false;
+    Block *BB = Op.getBlock();
+    for (auto It = ++Block::iterator(&Op);
+         It != BB->end() && &*It != User; ++It) {
+      if (isa<LLVM::StoreOp>(*It)) return false;
+      if (isa<LLVM::CallOp, func::CallOp>(*It)) return false;
+    }
+    return true;
+  }
+
   return false;
 }
 
@@ -357,22 +413,18 @@ bool Emitter::buildInlineExpr(mlir::Operation &Op, std::string &Expr) {
   using namespace mlir;
   if (auto C = dyn_cast<LLVM::ConstantOp>(Op)) {
     auto A = C.getValue();
-    char Buf[64];
     if (auto IA = dyn_cast<IntegerAttr>(A)) {
       Expr = formatIntAttr(IA); return true;
     }
     if (auto FA = dyn_cast<FloatAttr>(A)) {
-      snprintf(Buf, sizeof(Buf), "%.17g", FA.getValueAsDouble());
-      Expr = Buf; return true;
+      Expr = formatFloatAttr(FA); return true;
     }
     return false;
   }
   if (auto C = dyn_cast<arith::ConstantOp>(Op)) {
     auto A = C.getValue();
-    char Buf[64];
     if (auto FA = dyn_cast<FloatAttr>(A)) {
-      snprintf(Buf, sizeof(Buf), "%.17g", FA.getValueAsDouble());
-      Expr = Buf; return true;
+      Expr = formatFloatAttr(FA); return true;
     }
     if (auto IA = dyn_cast<IntegerAttr>(A)) {
       Expr = formatIntAttr(IA); return true;
@@ -477,6 +529,30 @@ bool Emitter::buildInlineExpr(mlir::Operation &Op, std::string &Expr) {
         E += " + " + std::to_string(A.getInt());
     }
     E += "))";
+    Expr = E;
+    return true;
+  }
+  // Function calls inline as `callee(arg, arg, ...)`. Argument positions
+  // are outermost — strip any superfluous outer parens from each operand
+  // so `fact((n - 1))` reads as `fact(n - 1)`.
+  if (auto C = dyn_cast<func::CallOp>(Op)) {
+    std::string E = C.getCallee().str() + "(";
+    for (unsigned i = 0; i < C.getNumOperands(); ++i) {
+      if (i) E += ", ";
+      E += dropOuterParens(exprFor(C.getOperand(i)));
+    }
+    E += ")";
+    Expr = E;
+    return true;
+  }
+  if (auto C = dyn_cast<LLVM::CallOp>(Op)) {
+    if (!C.getCallee()) return false;
+    std::string E = C.getCallee()->str() + "(";
+    for (unsigned i = 0; i < C.getNumOperands(); ++i) {
+      if (i) E += ", ";
+      E += dropOuterParens(exprFor(C.getOperand(i)));
+    }
+    E += ")";
     Expr = E;
     return true;
   }
@@ -747,6 +823,13 @@ void Emitter::emitLineDirective(mlir::Location L, int Indent) {
   }
 
   if (NoLine) return;
+  // Only emit `#line` on forward progression (or the first emit of a
+  // function / cross-file switch). A synthesized op that bounces the
+  // location back to an earlier line would otherwise re-point the
+  // debugger backward, which is useless noise. `SameFile` with
+  // backward motion is suppressed — the prior `#line` is still in
+  // effect for those lines.
+  if (SameFile && !ForwardJump) return;
   indent(Indent);
   OS << "#line " << Line << " \"" << File << "\"\n";
 }
@@ -832,7 +915,8 @@ void Emitter::emitGlobal(mlir::LLVM::GlobalOp G) {
 // ---------------------------------------------------------------------------
 
 void Emitter::emitProlog() {
-  OS << "// Generated by matlabc -emit-c. Do not edit.\n";
+  OS << "// Generated by matlabc " << (Cpp ? "-emit-cpp" : "-emit-c")
+     << ". Do not edit.\n";
   OS << "#include <stdint.h>\n";
   if (!Cpp) OS << "#include <stdbool.h>\n";
   // IO-substitution headers. When the module has no parfor (no mutex
@@ -850,6 +934,7 @@ void Emitter::emitProlog() {
 void Emitter::precomputeModuleProperties(mlir::ModuleOp M) {
   HasParfor = false;
   LiveRuntimeFuncs.clear();
+  LiveGlobals.clear();
   bool AnyDispStrLiteral = false;
   bool AnyDispScalar = false;
   // First pass: detect parfor. IO substitution is gated on its absence,
@@ -895,7 +980,30 @@ void Emitter::precomputeModuleProperties(mlir::ModuleOp M) {
         AnyDispScalar = true;
       }
     }
-    if (!Substituted) LiveRuntimeFuncs.insert(Name);
+    if (!Substituted) {
+      LiveRuntimeFuncs.insert(Name);
+      // A surviving call keeps its operand-producing globals live.
+      for (mlir::Value Opnd : C.getOperands()) {
+        if (auto A = Opnd.getDefiningOp<mlir::LLVM::AddressOfOp>())
+          LiveGlobals.insert(A.getGlobalName());
+      }
+    }
+  });
+  // addressof uses outside `llvm.call` (indirect dispatch, parfor bodies
+  // loaded via function-pointer) also keep their global live. Walk every
+  // addressof and check: if any user is NOT an llvm.call we'd have
+  // substituted, mark the global live. This catches things we didn't
+  // see in the call-walk above.
+  M.walk([&](mlir::LLVM::AddressOfOp A) {
+    for (mlir::Operation *U : A.getResult().getUsers()) {
+      auto Call = mlir::dyn_cast<mlir::LLVM::CallOp>(U);
+      if (!Call) {
+        // Non-call consumer (e.g. func-ptr table) — definitely live.
+        LiveGlobals.insert(A.getGlobalName());
+        return;
+      }
+      // Already handled above in the call-walk; skip.
+    }
   });
   if (AnyDispStrLiteral || AnyDispScalar) {
     if (Cpp) NeedsIostream = true;
@@ -965,17 +1073,16 @@ bool Emitter::tryEmitIOSubstitution(mlir::LLVM::CallOp Call, int Indent) {
   }
 
   if (Name == "matlab_disp_f64" && Call.getNumOperands() == 1) {
-    // The arg is a double in MLIR, but the emitter prints integer-valued
-    // doubles without a decimal (e.g. `42` rather than `42.0`). For C's
-    // variadic `printf` that's a type mismatch — `%g` requires a double
-    // — so wrap in an explicit cast. `std::cout` picks the right overload
-    // at compile time so no cast is needed for C++.
+    // Integer-valued doubles are formatted with a trailing `.0` (see
+    // formatFloatAttr), so `printf("%g\n", <expr>)` is type-correct
+    // without an explicit `(double)` cast. If the arg ends up being a
+    // non-literal SSA value of type double, no cast is needed either —
+    // it already has the right type.
     indent(Indent);
     if (Cpp) {
       OS << "std::cout << " << stmtExpr(Call.getOperand(0)) << " << '\\n';\n";
     } else {
-      OS << "printf(\"%g\\n\", (double)" << stmtExpr(Call.getOperand(0))
-         << ");\n";
+      OS << "printf(\"%g\\n\", " << stmtExpr(Call.getOperand(0)) << ");\n";
     }
     return true;
   }
@@ -1023,83 +1130,111 @@ bool Emitter::run(mlir::ModuleOp M) {
 
   // Pass 0: `extern "C"` runtime prototypes for every llvm.func that's
   // only a declaration (the matlab_* entries imported by LowerIO /
-  // LowerTensorOps / LowerParfor).
-  OS << "// Runtime prototypes (linked against runtime/matlab_runtime.c).\n";
-  if (Cpp) OS << "extern \"C\" {\n";
-  for (auto &Op : M.getBody()->getOperations()) {
-    auto F = mlir::dyn_cast<mlir::LLVM::LLVMFuncOp>(Op);
-    if (!F) continue;
-    if (!F.getBody().empty()) continue;  // skip defined funcs.
-    UsedNames.insert(F.getSymName().str());
-    // Skip runtime declarations whose calls all got substituted for
-    // direct stdio / iostream equivalents. The extern would otherwise
-    // dangle in the output as a dead forward decl.
-    if (LiveRuntimeFuncs.find(F.getSymName()) == LiveRuntimeFuncs.end())
-      continue;
-    auto FT = F.getFunctionType();
-    std::string RetTy =
-        mlir::isa<mlir::LLVM::LLVMVoidType>(FT.getReturnType())
-            ? std::string("void")
-            : cTypeOf(FT.getReturnType());
-    OS << "extern " << RetTy << " " << F.getSymName().str() << "(";
-    for (unsigned i = 0; i < FT.getNumParams(); ++i) {
-      if (i) OS << ", ";
-      OS << cTypeOf(FT.getParamType(i));
-    }
-    if (FT.getNumParams() == 0) OS << "void";
-    OS << ");\n";
-  }
-  if (Cpp) OS << "} // extern \"C\"\n";
-  OS << "\n";
-
-  // Pass 1: llvm.mlir.global string constants. Reserve symbol names first
-  // so body-local identifiers won't collide with them.
-  OS << "// Module-level string constants.\n";
-  for (auto &Op : M.getBody()->getOperations()) {
-    if (auto G = mlir::dyn_cast<mlir::LLVM::GlobalOp>(Op))
-      emitGlobal(G);
-  }
-  OS << "\n";
-
-  // Pass 2: forward-declare every defined function so call ordering doesn't
-  // matter. Reserve the function's symbol name so body-local identifiers
-  // can't collide (important now that locals may inherit MATLAB names).
-  OS << "// Forward declarations.\n";
-  for (auto &Op : M.getBody()->getOperations()) {
-    if (auto F = mlir::dyn_cast<mlir::func::FuncOp>(Op)) {
-      if (F.getBody().empty()) continue;
+  // LowerTensorOps / LowerParfor). Buffer first so an empty section
+  // (every runtime call got IO-substituted) is elided completely —
+  // no dangling `extern "C" {}` + comment pair.
+  {
+    std::ostringstream Buf;
+    for (auto &Op : M.getBody()->getOperations()) {
+      auto F = mlir::dyn_cast<mlir::LLVM::LLVMFuncOp>(Op);
+      if (!F) continue;
+      if (!F.getBody().empty()) continue;
       UsedNames.insert(F.getSymName().str());
-      if (F.getSymName() == "main") continue;  // main has no forward decl.
-      auto FT = F.getFunctionType();
-      std::string RetTy = FT.getNumResults() == 0
-                              ? std::string("void")
-                              : cTypeOf(FT.getResult(0));
-      OS << "static " << RetTy << " " << F.getSymName().str() << "(";
-      for (unsigned i = 0; i < FT.getNumInputs(); ++i) {
-        if (i) OS << ", ";
-        OS << cTypeOf(FT.getInput(i));
-      }
-      if (FT.getNumInputs() == 0) OS << "void";
-      OS << ");\n";
-    } else if (auto F = mlir::dyn_cast<mlir::LLVM::LLVMFuncOp>(Op)) {
-      if (F.getBody().empty()) continue;
-      UsedNames.insert(F.getSymName().str());
-      if (F.getSymName() == "main") continue;
+      if (LiveRuntimeFuncs.find(F.getSymName()) == LiveRuntimeFuncs.end())
+        continue;
       auto FT = F.getFunctionType();
       std::string RetTy =
           mlir::isa<mlir::LLVM::LLVMVoidType>(FT.getReturnType())
               ? std::string("void")
               : cTypeOf(FT.getReturnType());
-      OS << "static " << RetTy << " " << F.getSymName().str() << "(";
+      Buf << "extern " << RetTy << " " << F.getSymName().str() << "(";
       for (unsigned i = 0; i < FT.getNumParams(); ++i) {
-        if (i) OS << ", ";
-        OS << cTypeOf(FT.getParamType(i));
+        if (i) Buf << ", ";
+        Buf << cTypeOf(FT.getParamType(i));
       }
-      if (FT.getNumParams() == 0) OS << "void";
-      OS << ");\n";
+      if (FT.getNumParams() == 0) Buf << "void";
+      Buf << ");\n";
+    }
+    if (!Buf.str().empty()) {
+      OS << "// Runtime prototypes (linked against runtime/matlab_runtime.c).\n";
+      if (Cpp) OS << "extern \"C\" {\n";
+      OS << Buf.str();
+      if (Cpp) OS << "} // extern \"C\"\n";
+      OS << "\n";
     }
   }
-  OS << "\n";
+
+  // Pass 1: llvm.mlir.global string constants. Skip globals that are dead
+  // after IO substitution (their only users fed a substituted disp_str
+  // callsite). Also skip the heading when no global survives — the
+  // cleanest output for parfor-free programs leaves no trace of the
+  // runtime's internal constants.
+  {
+    bool AnyLive = false;
+    for (auto &Op : M.getBody()->getOperations()) {
+      auto G = mlir::dyn_cast<mlir::LLVM::GlobalOp>(Op);
+      if (!G) continue;
+      if (LiveGlobals.count(G.getSymName())) { AnyLive = true; break; }
+    }
+    if (AnyLive) {
+      OS << "// Module-level string constants.\n";
+      for (auto &Op : M.getBody()->getOperations()) {
+        auto G = mlir::dyn_cast<mlir::LLVM::GlobalOp>(Op);
+        if (!G) continue;
+        if (!LiveGlobals.count(G.getSymName())) continue;
+        emitGlobal(G);
+      }
+      OS << "\n";
+    }
+  }
+
+  // Pass 2: forward-declare every defined function so call ordering doesn't
+  // matter. Reserve the function's symbol name so body-local identifiers
+  // can't collide (important now that locals may inherit MATLAB names).
+  // Buffered so the "// Forward declarations." heading only appears when
+  // there's at least one non-main function to declare.
+  {
+    std::ostringstream Buf;
+    for (auto &Op : M.getBody()->getOperations()) {
+      if (auto F = mlir::dyn_cast<mlir::func::FuncOp>(Op)) {
+        if (F.getBody().empty()) continue;
+        UsedNames.insert(F.getSymName().str());
+        if (F.getSymName() == "main") continue;
+        auto FT = F.getFunctionType();
+        std::string RetTy = FT.getNumResults() == 0
+                                ? std::string("void")
+                                : cTypeOf(FT.getResult(0));
+        Buf << "static " << RetTy << " " << F.getSymName().str() << "(";
+        for (unsigned i = 0; i < FT.getNumInputs(); ++i) {
+          if (i) Buf << ", ";
+          Buf << cTypeOf(FT.getInput(i));
+        }
+        if (FT.getNumInputs() == 0) Buf << "void";
+        Buf << ");\n";
+      } else if (auto F = mlir::dyn_cast<mlir::LLVM::LLVMFuncOp>(Op)) {
+        if (F.getBody().empty()) continue;
+        UsedNames.insert(F.getSymName().str());
+        if (F.getSymName() == "main") continue;
+        auto FT = F.getFunctionType();
+        std::string RetTy =
+            mlir::isa<mlir::LLVM::LLVMVoidType>(FT.getReturnType())
+                ? std::string("void")
+                : cTypeOf(FT.getReturnType());
+        Buf << "static " << RetTy << " " << F.getSymName().str() << "(";
+        for (unsigned i = 0; i < FT.getNumParams(); ++i) {
+          if (i) Buf << ", ";
+          Buf << cTypeOf(FT.getParamType(i));
+        }
+        if (FT.getNumParams() == 0) Buf << "void";
+        Buf << ");\n";
+      }
+    }
+    if (!Buf.str().empty()) {
+      OS << "// Forward declarations.\n";
+      OS << Buf.str();
+      OS << "\n";
+    }
+  }
 
   /* Pass 2b (C++ only): reconstruct idiomatic class { ... }; blocks
    * from the class-method metadata the frontend stamped on each
@@ -1411,9 +1546,7 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
     if (auto IA = mlir::dyn_cast<mlir::IntegerAttr>(V)) {
       OS << formatIntAttr(IA);
     } else if (auto FA = mlir::dyn_cast<mlir::FloatAttr>(V)) {
-      char Buf[64];
-      snprintf(Buf, sizeof(Buf), "%.17g", FA.getValueAsDouble());
-      OS << Buf;
+      OS << formatFloatAttr(FA);
     } else {
       OS << "0 /* unknown const */";
     }
@@ -1429,11 +1562,7 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
     OS << Ty << " " << N << " = ";
     auto V = C.getValue();
     if (auto FA = mlir::dyn_cast<mlir::FloatAttr>(V)) {
-      // Print with enough precision to round-trip.
-      double D = FA.getValueAsDouble();
-      char Buf[64];
-      snprintf(Buf, sizeof(Buf), "%.17g", D);
-      OS << Buf;
+      OS << formatFloatAttr(FA);
     } else if (auto IA = mlir::dyn_cast<mlir::IntegerAttr>(V)) {
       OS << formatIntAttr(IA);
     } else {

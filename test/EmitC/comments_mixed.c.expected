@@ -3,13 +3,6 @@
 #include <stdbool.h>
 #include <stdio.h>
 
-// Runtime prototypes (linked against runtime/matlab_runtime.c).
-
-// Module-level string constants.
-static const char __matlab_str0[] = "hello";
-
-// Forward declarations.
-
 // File-top doc comment describing this program.
 // Multi-line block — each line should appear as a `//` line in output.
 
@@ -17,10 +10,10 @@ static const char __matlab_str0[] = "hello";
 int main(void) {
   puts("hello");
   // trailing comment after a string disp
-  printf("%g\n", (double)42);
+  printf("%g\n", 42.0);
   // trailing on numeric disp
 
-  printf("%g\n", (double)1);
+  printf("%g\n", 1.0);
   // prints the variable
   return 0;
 }

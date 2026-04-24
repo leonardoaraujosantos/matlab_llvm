@@ -3,19 +3,13 @@
 #include <stdbool.h>
 #include <stdio.h>
 
-// Runtime prototypes (linked against runtime/matlab_runtime.c).
-
-// Module-level string constants.
-
-// Forward declarations.
-
 // Exercises the scf.while emission shape. Target: `while (i < 10) { ... }`
 // rather than the `while (1) { if (!cond) break; ... }` intermediate form.
 int main(void) {
-  double i = 0;
-  while (i < 10) {
-    printf("%g\n", (double)i);
-    i = i + 1;
+  double i = 0.0;
+  while (i < 10.0) {
+    printf("%g\n", i);
+    i = i + 1.0;
   }
   return 0;
 }

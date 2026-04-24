@@ -3,25 +3,19 @@
 #include <stdbool.h>
 #include <stdio.h>
 
-// Runtime prototypes (linked against runtime/matlab_runtime.c).
-
-// Module-level string constants.
-
 // Forward declarations.
 static double sign_of(double);
 
 // Both arms pure single-store: should collapse to `return cond ? a : b;`
 // via IfStoreToSelect + Mem2RegLite.
 int main(void) {
-  double v0 = sign_of(5);
-  printf("%g\n", (double)v0);
-  double v1 = sign_of(-2);
-  printf("%g\n", (double)v1);
+  printf("%g\n", sign_of(5.0));
+  printf("%g\n", sign_of(-2.0));
   return 0;
 }
 
 
 static double sign_of(double x) {
-  return (x > 0) ? 1 : -1;
+  return (x > 0.0) ? 1.0 : -1.0;
 }
 
