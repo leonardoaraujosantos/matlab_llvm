@@ -985,6 +985,143 @@ CUM_SCAN(cumprod, 1.0, acc * x)
 
 #undef CUM_SCAN
 
+/* -------- Sort / unique / set operations ----------------------------------
+ *
+ * All operate on doubles using the natural ordering. Results preserve
+ * the shape of vectors: a 1×N input produces a 1×N result, an N×1
+ * input produces an N×1 result. For 2-D matrices sort operates
+ * column-wise by default (matching MATLAB's sort(A) behavior on
+ * matrices).
+ *--------------------------------------------------------------------------*/
+
+static int cmp_double_asc(const void *a, const void *b) {
+    double da = *(const double *)a, db = *(const double *)b;
+    return (da > db) - (da < db);
+}
+
+matlab_mat *matlab_sort(matlab_mat *A) {
+    if (!A) return mat_alloc(0, 0);
+    int64_t m = A->rows, n = A->cols;
+    matlab_mat *R = mat_alloc(m, n);
+    if (m == 1 || n == 1) {
+        int64_t total = m * n;
+        memcpy(R->data, A->data, (size_t)total * sizeof(double));
+        qsort(R->data, (size_t)total, sizeof(double), cmp_double_asc);
+        return R;
+    }
+    /* Column-wise sort for matrices. Allocate a per-column buffer
+     * once outside the loop and reuse it for every column. */
+    double *col = (double *)malloc((size_t)m * sizeof(double));
+    for (int64_t j = 0; j < n; ++j) {
+        for (int64_t i = 0; i < m; ++i) col[i] = A->data[i * n + j];
+        qsort(col, (size_t)m, sizeof(double), cmp_double_asc);
+        for (int64_t i = 0; i < m; ++i) R->data[i * n + j] = col[i];
+    }
+    free(col);
+    return R;
+}
+
+matlab_mat *matlab_unique(matlab_mat *A) {
+    if (!A) return mat_alloc(0, 0);
+    int64_t total = A->rows * A->cols;
+    if (total == 0) return mat_alloc(0, 0);
+    double *tmp = (double *)malloc((size_t)total * sizeof(double));
+    memcpy(tmp, A->data, (size_t)total * sizeof(double));
+    qsort(tmp, (size_t)total, sizeof(double), cmp_double_asc);
+    int64_t u = 0;
+    for (int64_t k = 0; k < total; ++k) {
+        if (u == 0 || tmp[u - 1] != tmp[k]) tmp[u++] = tmp[k];
+    }
+    /* Preserve column-vector shape when input was a column, otherwise
+     * return a row vector. MATLAB's default is column for all
+     * unique() results; we keep a column to match that. */
+    matlab_mat *R = mat_alloc(u, 1);
+    memcpy(R->data, tmp, (size_t)u * sizeof(double));
+    free(tmp);
+    return R;
+}
+
+static int has_value(const double *xs, int64_t n, double v) {
+    for (int64_t i = 0; i < n; ++i) if (xs[i] == v) return 1;
+    return 0;
+}
+
+matlab_mat *matlab_ismember(matlab_mat *A, matlab_mat *B) {
+    if (!A) return mat_alloc(0, 0);
+    int64_t m = A->rows, n = A->cols;
+    matlab_mat *R = mat_alloc(m, n);
+    int64_t bn = B ? B->rows * B->cols : 0;
+    for (int64_t k = 0; k < m * n; ++k)
+        R->data[k] = has_value(B ? B->data : NULL, bn, A->data[k]) ? 1.0 : 0.0;
+    return R;
+}
+
+static matlab_mat *set_op(matlab_mat *A, matlab_mat *B, int op /*0=diff,1=inter,2=union*/) {
+    int64_t an = A ? A->rows * A->cols : 0;
+    int64_t bn = B ? B->rows * B->cols : 0;
+    int64_t cap = an + bn;
+    double *tmp = cap > 0 ? (double *)malloc((size_t)cap * sizeof(double)) : NULL;
+    int64_t u = 0;
+    if (op == 0 /* setdiff */) {
+        for (int64_t i = 0; i < an; ++i)
+            if (!has_value(B ? B->data : NULL, bn, A->data[i]))
+                tmp[u++] = A->data[i];
+    } else if (op == 1 /* intersect */) {
+        for (int64_t i = 0; i < an; ++i)
+            if (has_value(B ? B->data : NULL, bn, A->data[i]))
+                tmp[u++] = A->data[i];
+    } else /* union */ {
+        for (int64_t i = 0; i < an; ++i) tmp[u++] = A->data[i];
+        for (int64_t j = 0; j < bn; ++j) tmp[u++] = B->data[j];
+    }
+    /* Sort + dedupe to match MATLAB's unique-and-sorted output. */
+    if (u > 0) {
+        qsort(tmp, (size_t)u, sizeof(double), cmp_double_asc);
+        int64_t uu = 0;
+        for (int64_t k = 0; k < u; ++k)
+            if (uu == 0 || tmp[uu - 1] != tmp[k]) tmp[uu++] = tmp[k];
+        u = uu;
+    }
+    matlab_mat *R = mat_alloc(u, 1);
+    if (u > 0) memcpy(R->data, tmp, (size_t)u * sizeof(double));
+    if (tmp) free(tmp);
+    return R;
+}
+
+matlab_mat *matlab_setdiff(matlab_mat *A, matlab_mat *B)   { return set_op(A, B, 0); }
+matlab_mat *matlab_intersect(matlab_mat *A, matlab_mat *B) { return set_op(A, B, 1); }
+matlab_mat *matlab_union(matlab_mat *A, matlab_mat *B)     { return set_op(A, B, 2); }
+
+/* sortrows(A): stable lexicographic sort on rows. Column priority is
+ * left-to-right: compare row[0][0] vs row[1][0], tie-break on [1], etc. */
+static const matlab_mat *sortrows_ctx;
+static int cmp_row_lex(const void *a, const void *b) {
+    int64_t ia = *(const int64_t *)a, ib = *(const int64_t *)b;
+    const matlab_mat *M = sortrows_ctx;
+    for (int64_t j = 0; j < M->cols; ++j) {
+        double xa = M->data[ia * M->cols + j];
+        double xb = M->data[ib * M->cols + j];
+        if (xa < xb) return -1;
+        if (xa > xb) return 1;
+    }
+    return 0;
+}
+
+matlab_mat *matlab_sortrows(matlab_mat *A) {
+    if (!A) return mat_alloc(0, 0);
+    int64_t m = A->rows, n = A->cols;
+    matlab_mat *R = mat_alloc(m, n);
+    int64_t *idx = (int64_t *)malloc((size_t)m * sizeof(int64_t));
+    for (int64_t i = 0; i < m; ++i) idx[i] = i;
+    sortrows_ctx = A;
+    qsort(idx, (size_t)m, sizeof(int64_t), cmp_row_lex);
+    for (int64_t i = 0; i < m; ++i)
+        for (int64_t j = 0; j < n; ++j)
+            R->data[i * n + j] = A->data[idx[i] * n + j];
+    free(idx);
+    return R;
+}
+
 /* Element-wise min/max of two matrices with the usual broadcast. */
 matlab_mat *matlab_min_mm(matlab_mat *A, matlab_mat *B) {
     int64_t m = A->rows, n = A->cols;

@@ -28,6 +28,8 @@ void Resolver::registerBuiltins() {
     "log2", "log10", "sign",
     "min", "max", "sum", "prod", "mean",
     "cumsum", "cumprod",
+    "sort", "sortrows", "unique", "ismember",
+    "setdiff", "intersect", "union",
     "mtimes", "mldivide", "mrdivide",
     "transpose", "ctranspose",
     "disp", "fprintf", "sprintf", "error", "warning", "input", "clear",
