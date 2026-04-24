@@ -1205,8 +1205,18 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"sin",        "matlab_sin_m",      1, "p"},
       {"cos",        "matlab_cos_m",      1, "p"},
       {"tan",        "matlab_tan_m",      1, "p"},
+      {"asin",       "matlab_asin_m",     1, "p"},
+      {"acos",       "matlab_acos_m",     1, "p"},
+      {"atan",       "matlab_atan_m",     1, "p"},
+      {"sinh",       "matlab_sinh_m",     1, "p"},
+      {"cosh",       "matlab_cosh_m",     1, "p"},
+      {"tanh",       "matlab_tanh_m",     1, "p"},
+      {"log2",       "matlab_log2_m",     1, "p"},
+      {"log10",      "matlab_log10_m",    1, "p"},
       {"sqrt",       "matlab_sqrt_m",     1, "p"},
       {"abs",        "matlab_abs_m",      1, "p"},
+      {"sign",       "matlab_sign_m",     1, "p"},
+      {"atan2",      "matlab_atan2_m",    1, "pp"},
       {"inv",        "matlab_inv",        1, "p"},
       {"det",        "matlab_det",        0, "p"},
       {"svd",        "matlab_svd",        1, "p"},
@@ -1217,19 +1227,23 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"matlab_empty_mat", "matlab_empty_mat", 1, ""},
     };
 
-    // Pick the first entry with both a name match AND an arity match, so
-    // overloaded builtins (e.g. size(A) vs size(A, dim)) route correctly.
+    // Pick the first entry with name + arity + TYPE match so overloaded
+    // builtins (e.g. size(A) vs size(A, dim); sin(matrix) vs sin(scalar))
+    // route correctly. If no Table entry fits the call-site's operand
+    // types, S stays null and the code falls through to the scalar map
+    // below (where sin(f64) -> matlab_sin_s etc. live).
     const Spec *S = nullptr;
     unsigned NOps = Call->getNumOperands();
-    for (auto &E : Table) {
-      if (E.MLName != Name) continue;
-      if (E.ArgKinds.size() == NOps) { S = &E; break; }
-    }
-    /* Fallback: first name-match regardless of arity — keeps older single-
-     * entry builtins working even when the call-site arity happens to
-     * differ from our spec. The arity check inside the match logic below
-     * will still reject mismatches safely. */
-    if (!S) for (auto &E : Table) if (E.MLName == Name) { S = &E; break; }
+    auto argTypesMatch = [&](const Spec &E) -> bool {
+      if (E.ArgKinds.size() != NOps) return false;
+      for (unsigned i = 0; i < NOps; ++i) {
+        Type Exp = E.ArgKinds[i] == 'f' ? (Type)F64 : (Type)PtrTy;
+        if (Call->getOperand(i).getType() != Exp) return false;
+      }
+      return true;
+    };
+    for (auto &E : Table)
+      if (E.MLName == Name && argTypesMatch(E)) { S = &E; break; }
     if (!S) {
       // Scalar variants of exp/log/sin/cos/tan/sqrt/abs when the arg is f64
       // already. Fall through to scalar-path below.
@@ -1238,6 +1252,14 @@ bool TensorLowering::rewriteBuiltinCalls() {
         {"sin", "matlab_sin_s"}, {"cos", "matlab_cos_s"},
         {"tan", "matlab_tan_s"}, {"sqrt", "matlab_sqrt_s"},
         {"abs", "matlab_abs_s"},
+        /* Trig/exp tail — scalar variants mirror their matrix forms
+         * in the table above. */
+        {"asin", "matlab_asin_s"}, {"acos", "matlab_acos_s"},
+        {"atan", "matlab_atan_s"},
+        {"sinh", "matlab_sinh_s"}, {"cosh", "matlab_cosh_s"},
+        {"tanh", "matlab_tanh_s"},
+        {"log2", "matlab_log2_s"}, {"log10", "matlab_log10_s"},
+        {"sign", "matlab_sign_s"},
         /* Integer / type cast builtins — runtime is still f64, but
          * these truncate + saturate to the target dtype's range so
          * downstream arithmetic sees the value MATLAB would. */
@@ -1248,6 +1270,21 @@ bool TensorLowering::rewriteBuiltinCalls() {
         {"double", "matlab_double_s"}, {"single", "matlab_single_s"},
         {"logical", "matlab_logical_s"},
       };
+      /* Two-argument scalar: atan2(y, x). */
+      if (Name == "atan2" && Call->getNumOperands() == 2 &&
+          Call->getOperand(0).getType() == F64 &&
+          Call->getOperand(1).getType() == F64) {
+        B.setInsertionPoint(Call);
+        auto Fn = rt("matlab_atan2_s", F64, {F64, F64});
+        auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                        Call->getOperands());
+        if (Call->getResult(0).getType() != F64)
+          Call->getResult(0).setType(F64);
+        Call->getResult(0).replaceAllUsesWith(NC.getResult());
+        Call->erase();
+        Changed = true;
+        continue;
+      }
       auto It = Scalar.find(Name);
       if (It == Scalar.end()) continue;
       if (Call->getNumOperands() != 1) continue;

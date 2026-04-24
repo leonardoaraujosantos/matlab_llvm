@@ -24,6 +24,8 @@ void Resolver::registerBuiltins() {
     "size", "length", "numel", "ndims",
     "reshape", "repmat", "linspace",
     "abs", "sqrt", "exp", "log", "sin", "cos", "tan",
+    "asin", "acos", "atan", "atan2", "sinh", "cosh", "tanh",
+    "log2", "log10", "sign",
     "min", "max", "sum", "prod", "mean",
     "mtimes", "mldivide", "mrdivide",
     "transpose", "ctranspose",

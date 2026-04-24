@@ -1342,8 +1342,17 @@ UNARY_M(log,  log(x))
 UNARY_M(sin,  sin(x))
 UNARY_M(cos,  cos(x))
 UNARY_M(tan,  tan(x))
+UNARY_M(asin, asin(x))
+UNARY_M(acos, acos(x))
+UNARY_M(atan, atan(x))
+UNARY_M(sinh, sinh(x))
+UNARY_M(cosh, cosh(x))
+UNARY_M(tanh, tanh(x))
+UNARY_M(log2, log2(x))
+UNARY_M(log10, log10(x))
 UNARY_M(sqrt, sqrt(x))
 UNARY_M(abs,  fabs(x))
+UNARY_M(sign, (x > 0.0 ? 1.0 : (x < 0.0 ? -1.0 : 0.0)))
 
 #undef UNARY_M
 
@@ -1355,8 +1364,31 @@ double matlab_log_s(double x)  { return log(x);  }
 double matlab_sin_s(double x)  { return sin(x);  }
 double matlab_cos_s(double x)  { return cos(x);  }
 double matlab_tan_s(double x)  { return tan(x);  }
+double matlab_asin_s(double x) { return asin(x); }
+double matlab_acos_s(double x) { return acos(x); }
+double matlab_atan_s(double x) { return atan(x); }
+double matlab_atan2_s(double y, double x) { return atan2(y, x); }
+double matlab_sinh_s(double x) { return sinh(x); }
+double matlab_cosh_s(double x) { return cosh(x); }
+double matlab_tanh_s(double x) { return tanh(x); }
+double matlab_log2_s(double x) { return log2(x); }
+double matlab_log10_s(double x){ return log10(x); }
 double matlab_sqrt_s(double x) { return sqrt(x); }
 double matlab_abs_s(double x)  { return fabs(x); }
+double matlab_sign_s(double x) {
+    return x > 0.0 ? 1.0 : (x < 0.0 ? -1.0 : 0.0);
+}
+
+/* atan2 on matrices: elementwise y vs x, both matrices must be same size. */
+matlab_mat *matlab_atan2_m(matlab_mat *Y, matlab_mat *X) {
+    if (!Y || !X) return mat_alloc(0, 0);
+    int64_t m = Y->rows, n = Y->cols;
+    if (X->rows != m || X->cols != n) return mat_alloc(0, 0);
+    matlab_mat *C = mat_alloc(m, n);
+    for (int64_t k = 0; k < m * n; ++k)
+        C->data[k] = atan2(Y->data[k], X->data[k]);
+    return C;
+}
 
 /*---------- Indexing -----------------------------------------------------
  * A(i, j) scalar load: 1-based indexing like MATLAB. Out-of-range returns
