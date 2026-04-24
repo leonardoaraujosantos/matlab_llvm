@@ -117,6 +117,16 @@ if(MATLAB_LLVM_WITH_MLIR)
   target_compile_definitions(MatlabMLIR PUBLIC MATLAB_LLVM_WITH_MLIR=1)
 endif()
 
+add_executable(matlab-lsp tools/matlab-lsp/main.cpp)
+target_link_libraries(matlab-lsp
+  PRIVATE MatlabParse MatlabSema MatlabAST MatlabLex MatlabBasic)
+if(MATLAB_LLVM_WITH_MLIR)
+  # The LSP binary only needs llvm::json from LLVMSupport — but since
+  # MATLAB_LLVM_WITH_MLIR implies a usable llvm install, link against
+  # LLVMSupport directly so we don't pick up the full MLIR stack.
+  target_link_libraries(matlab-lsp PRIVATE LLVMSupport)
+endif()
+
 add_executable(matlabc tools/matlabc/main.cpp)
 target_link_libraries(matlabc
   PRIVATE MatlabMIR MatlabParse MatlabSema MatlabAST MatlabLex MatlabBasic)

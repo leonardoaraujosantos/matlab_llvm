@@ -273,7 +273,7 @@ algebra, logical masks, struct/cell usage.
 | `#line` directives in emitted C / C++ | ✅ |
 | REPL / interactive interpreter | 🟡 | JIT via MLIR ExecutionEngine, persistent workspace. `matlabc -repl`. |
 | Debugger (DAP) | ❌ | Aids shipped: `dbg(x)` source-located print, `who`/`whos`/`clear` workspace commands, `#line` in emitted C/C++. Full breakpoint/step debugging is blocked on a JIT-level instrumentation pass or a tree-walking interpreter — see `docs/debug.md`. |
-| Language Server (LSP) | ❌ |
+| Language Server (LSP) | 🟡 | `matlab-lsp` binary with initialize / shutdown, didOpen / didChange / didClose, publishDiagnostics, definition, documentSymbol. No completion / hover / rename / workspace-symbol yet. See `docs/lsp.md`. |
 | Unit-test framework (MATLAB `matlab.unittest`) | ❌ |
 | Live Scripts (`.mlx`) | ❌ |
 | MEX interop (loading `.mex` files) | ❌ |
