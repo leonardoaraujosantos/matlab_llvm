@@ -1036,16 +1036,31 @@ bool TensorLowering::rewriteBuiltinCalls() {
         Call->getNumOperands() == 2) {
       Value NameV = Call->getOperand(0);
       Value Val = Call->getOperand(1);
+      /* Retarget f64-vs-mat based on the actual runtime type of Val
+       * — the frontend chose between set_f64 / set_mat from Sema's
+       * inferred type, but later passes may refine a binop result
+       * from f64 to ptr (e.g. `x * 2` where x is a workspace matrix).
+       * When the initial choice doesn't match the final value type,
+       * flip to the correct variant so the store uses the right
+       * runtime entry. */
+      bool IsMat;
+      if (Val.getType() == PtrTy)      IsMat = true;
+      else if (Val.getType() == F64)    IsMat = false;
+      else continue;   /* neither ptr nor f64 yet — wait for another iter */
+      /* Call fieldNameAddr AFTER the Val type check. fieldNameAddr
+       * has a side effect (materialises a global + addressof and
+       * replaces the const_char's uses with the addressof); once
+       * that fires, subsequent calls can't find the original
+       * const_char. So don't call it unless we're about to commit
+       * to the rewrite. */
       int64_t Len = 0;
       Value Ptr = fieldNameAddr(NameV, Len);
       if (!Ptr) continue;
-      bool IsMat = (Name == "matlab_ws_set_mat");
-      if (IsMat && Val.getType() != PtrTy) continue;
-      if (!IsMat && Val.getType() != F64) continue;
+      StringRef RuntimeName = IsMat ? "matlab_ws_set_mat" : "matlab_ws_set_f64";
       B.setInsertionPoint(Call);
       Value LenV = LLVM::ConstantOp::create(
           B, Call->getLoc(), I64, B.getI64IntegerAttr(Len));
-      auto Fn = rt(Name, VoidTy,
+      auto Fn = rt(RuntimeName, VoidTy,
                    {PtrTy, I64, IsMat ? (Type)PtrTy : (Type)F64});
       LLVM::CallOp::create(B, Call->getLoc(), Fn,
                             ValueRange{Ptr, LenV, Val});

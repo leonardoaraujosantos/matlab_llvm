@@ -552,25 +552,24 @@ mlir::Value Lowerer::loadBinding(Binding *Bnd, const Type *ValTy,
    * for this binding (e.g. because a for-loop init pre-allocated
    * one for its induction variable), prefer the slot — the loop
    * body writes into it per iteration, and reading the workspace
-   * would miss the in-flight updates. */
+   * would miss the in-flight updates.
+   *
+   * We always call matlab_ws_get_mat (not _get_f64) because at this
+   * point Sema usually can't tell whether the workspace cell holds
+   * a scalar or a matrix — the runtime auto-boxes a stored scalar
+   * into a 1x1 matrix on _get_mat, so the single PtrTy return type
+   * covers both cases. Downstream arithmetic sees a matrix and
+   * takes the runtime matrix-op path; `disp` of a 1x1 matrix
+   * prints the scalar value. A small overhead for the scalar case
+   * but negligible for a human-paced REPL. */
   if (ReplMode && InScriptBody && Bnd->Kind == BindingKind::Var &&
       Slots.find(Bnd) == Slots.end()) {
-    auto F64 = mlir::Float64Type::get(&MCtx);
     auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
     mlir::Value NameV = emitFieldNameChar(Bnd->Name, L);
-    /* Pick scalar vs. matrix based on the Sema-inferred type: a
-     * tensor-typed binding routes to _get_mat. Anything else we
-     * treat as scalar; the runtime will auto-box a 1x1 matrix
-     * back into an f64 if the stored value was a matrix. */
-    bool WantMat = mlir::isa<mlir::RankedTensorType,
-                              mlir::UnrankedTensorType>(mirTy(ValTy));
-    llvm::StringRef Callee = WantMat ? "matlab_ws_get_mat"
-                                      : "matlab_ws_get_f64";
     mlir::NamedAttribute Cal(
         mlir::StringAttr::get(&MCtx, "callee"),
-        mlir::StringAttr::get(&MCtx, Callee));
-    mlir::Type ResTy = WantMat ? (mlir::Type)PtrTy : (mlir::Type)F64;
-    return emitUnreg("matlab.call_builtin", {NameV}, ResTy, L, {Cal});
+        mlir::StringAttr::get(&MCtx, "matlab_ws_get_mat"));
+    return emitUnreg("matlab.call_builtin", {NameV}, PtrTy, L, {Cal});
   }
   /* Globals and persistents live in a runtime-backed scalar table.
    * Emit a matlab.call_builtin @matlab_global_get_f64(id) — the
