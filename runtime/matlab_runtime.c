@@ -874,6 +874,117 @@ COLWISE_REDUCE(max, -INFINITY,  (x > acc ? x : acc),        acc)
 
 #undef COLWISE_REDUCE
 
+/* Dimension-aware reductions: sum(A, dim) etc.
+ * dim==1 collapses rows (result has 1 row, A->cols cols);
+ * dim==2 collapses cols (result has A->rows rows, 1 col).
+ * Any other dim just returns a 1×1 with the grand total. */
+#define DIM_REDUCE(NAME, INIT_EXPR, UPDATE_EXPR, FINALIZE_EXPR)           \
+    matlab_mat *matlab_##NAME##_dim(matlab_mat *A, double d) {            \
+        if (!A) return mat_alloc(0, 0);                                    \
+        int64_t m = A->rows, n = A->cols;                                  \
+        int64_t dim = (int64_t)d;                                          \
+        if (dim == 1) {                                                    \
+            matlab_mat *R = mat_alloc(1, n);                               \
+            for (int64_t j = 0; j < n; ++j) {                              \
+                double acc = INIT_EXPR;                                    \
+                int64_t total = m;                                         \
+                for (int64_t i = 0; i < m; ++i) {                          \
+                    double x = A->data[i * n + j];                         \
+                    acc = UPDATE_EXPR;                                     \
+                }                                                          \
+                R->data[j] = total > 0 ? (FINALIZE_EXPR) : INIT_EXPR;      \
+            }                                                              \
+            return R;                                                      \
+        }                                                                  \
+        if (dim == 2) {                                                    \
+            matlab_mat *R = mat_alloc(m, 1);                               \
+            for (int64_t i = 0; i < m; ++i) {                              \
+                double acc = INIT_EXPR;                                    \
+                int64_t total = n;                                         \
+                for (int64_t j = 0; j < n; ++j) {                          \
+                    double x = A->data[i * n + j];                         \
+                    acc = UPDATE_EXPR;                                     \
+                }                                                          \
+                R->data[i] = total > 0 ? (FINALIZE_EXPR) : INIT_EXPR;      \
+            }                                                              \
+            return R;                                                      \
+        }                                                                  \
+        /* Fallback: treat as flat */                                      \
+        int64_t total = m * n;                                             \
+        double acc = INIT_EXPR;                                            \
+        for (int64_t k = 0; k < total; ++k) {                              \
+            double x = A->data[k];                                         \
+            acc = UPDATE_EXPR;                                             \
+        }                                                                  \
+        matlab_mat *R = mat_alloc(1, 1);                                   \
+        R->data[0] = total > 0 ? (FINALIZE_EXPR) : 0.0;                    \
+        return R;                                                          \
+    }
+
+DIM_REDUCE(sum,  0.0,       acc + x,             acc)
+DIM_REDUCE(prod, 1.0,       acc * x,             acc)
+DIM_REDUCE(mean, 0.0,       acc + x,             acc / (double)total)
+DIM_REDUCE(min,  INFINITY,  (x < acc ? x : acc), acc)
+DIM_REDUCE(max, -INFINITY,  (x > acc ? x : acc), acc)
+
+#undef DIM_REDUCE
+
+/* Cumulative scans: along dim 1 by default (or along the only axis
+ * when A is a row / column vector). Output has the same shape as A. */
+#define CUM_SCAN(NAME, INIT_EXPR, UPDATE_EXPR)                            \
+    matlab_mat *matlab_##NAME(matlab_mat *A) {                            \
+        if (!A) return mat_alloc(0, 0);                                    \
+        int64_t m = A->rows, n = A->cols;                                  \
+        matlab_mat *R = mat_alloc(m, n);                                   \
+        if (m == 1 || n == 1) {                                            \
+            int64_t total = m * n;                                         \
+            double acc = INIT_EXPR;                                        \
+            for (int64_t k = 0; k < total; ++k) {                          \
+                double x = A->data[k]; acc = UPDATE_EXPR;                  \
+                R->data[k] = acc;                                          \
+            }                                                              \
+            return R;                                                      \
+        }                                                                  \
+        for (int64_t j = 0; j < n; ++j) {                                  \
+            double acc = INIT_EXPR;                                        \
+            for (int64_t i = 0; i < m; ++i) {                              \
+                double x = A->data[i * n + j]; acc = UPDATE_EXPR;          \
+                R->data[i * n + j] = acc;                                  \
+            }                                                              \
+        }                                                                  \
+        return R;                                                          \
+    }                                                                      \
+    matlab_mat *matlab_##NAME##_dim(matlab_mat *A, double d) {             \
+        if (!A) return mat_alloc(0, 0);                                    \
+        int64_t m = A->rows, n = A->cols;                                  \
+        int64_t dim = (int64_t)d;                                          \
+        matlab_mat *R = mat_alloc(m, n);                                   \
+        if (dim == 2) {                                                    \
+            for (int64_t i = 0; i < m; ++i) {                              \
+                double acc = INIT_EXPR;                                    \
+                for (int64_t j = 0; j < n; ++j) {                          \
+                    double x = A->data[i * n + j]; acc = UPDATE_EXPR;      \
+                    R->data[i * n + j] = acc;                              \
+                }                                                          \
+            }                                                              \
+            return R;                                                      \
+        }                                                                  \
+        /* dim==1 or anything else: column scans */                        \
+        for (int64_t j = 0; j < n; ++j) {                                  \
+            double acc = INIT_EXPR;                                        \
+            for (int64_t i = 0; i < m; ++i) {                              \
+                double x = A->data[i * n + j]; acc = UPDATE_EXPR;          \
+                R->data[i * n + j] = acc;                                  \
+            }                                                              \
+        }                                                                  \
+        return R;                                                          \
+    }
+
+CUM_SCAN(cumsum,  0.0, acc + x)
+CUM_SCAN(cumprod, 1.0, acc * x)
+
+#undef CUM_SCAN
+
 /* Element-wise min/max of two matrices with the usual broadcast. */
 matlab_mat *matlab_min_mm(matlab_mat *A, matlab_mat *B) {
     int64_t m = A->rows, n = A->cols;

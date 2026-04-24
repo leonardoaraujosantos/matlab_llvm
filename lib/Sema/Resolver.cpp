@@ -27,6 +27,7 @@ void Resolver::registerBuiltins() {
     "asin", "acos", "atan", "atan2", "sinh", "cosh", "tanh",
     "log2", "log10", "sign",
     "min", "max", "sum", "prod", "mean",
+    "cumsum", "cumprod",
     "mtimes", "mldivide", "mrdivide",
     "transpose", "ctranspose",
     "disp", "fprintf", "sprintf", "error", "warning", "input", "clear",
