@@ -58,6 +58,11 @@ compile FILE OUT="":
 repl: build
     {{BUILD_DIR}}/matlabc -repl
 
+# Print a canonically-formatted version of a .m file to stdout.
+# Example: `just format examples/factorial.m`
+format FILE: build
+    {{BUILD_DIR}}/matlabc -format {{FILE}}
+
 # Build and run every program in examples/. Stops at the first failure.
 examples: build
     #!/usr/bin/env bash

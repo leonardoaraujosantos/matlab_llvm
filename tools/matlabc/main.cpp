@@ -1,5 +1,6 @@
 #include "matlab/AST/AST.h"
 #include "matlab/AST/ASTDumper.h"
+#include "matlab/AST/Formatter.h"
 #include "matlab/Basic/Diagnostic.h"
 #include "matlab/Basic/SourceManager.h"
 #include "matlab/Lex/Lexer.h"
@@ -43,7 +44,7 @@ using namespace matlab;
 namespace {
 struct Options {
   enum class Mode { DumpTokens, DumpAST, EmitSema, EmitMIR, EmitMLIR,
-                    EmitLLVM, EmitC, EmitCpp, Check, Repl };
+                    EmitLLVM, EmitC, EmitCpp, Check, Repl, Format };
   Mode Mode = Mode::Check;
   bool Opt = false;
   std::string InputPath;
@@ -53,7 +54,7 @@ int usage(const char *Prog) {
   std::cerr << "usage: " << Prog
             << " [-dump-tokens | -dump-ast | -emit-sema | -emit-mir |\n"
                "             -emit-mlir | -emit-llvm | -emit-c | -emit-cpp |\n"
-               "             -repl] FILE.m\n";
+               "             -format | -repl] FILE.m\n";
   return 64;
 }
 
@@ -70,6 +71,7 @@ bool parseArgs(int Argc, char **Argv, Options &Opts, const char *&Prog) {
     else if (A == "-emit-c") Opts.Mode = Options::Mode::EmitC;
     else if (A == "-emit-cpp") Opts.Mode = Options::Mode::EmitCpp;
     else if (A == "-repl") Opts.Mode = Options::Mode::Repl;
+    else if (A == "-format") Opts.Mode = Options::Mode::Format;
     else if (A == "-opt" || A == "-O") Opts.Opt = true;
     else if (A == "-h" || A == "--help") return false;
     else if (!A.empty() && A[0] == '-') {
@@ -314,6 +316,12 @@ int main(int Argc, char **Argv) {
 
   if (Opts.Mode == Options::Mode::DumpAST) {
     if (TU) dumpAST(std::cout, *TU);
+    Diag.printAll();
+    return Diag.hasErrors() ? 1 : 0;
+  }
+
+  if (Opts.Mode == Options::Mode::Format) {
+    if (TU) formatAST(std::cout, *TU);
     Diag.printAll();
     return Diag.hasErrors() ? 1 : 0;
   }

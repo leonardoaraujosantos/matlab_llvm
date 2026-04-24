@@ -59,6 +59,7 @@ target_link_libraries(MatlabLex PUBLIC MatlabBasic)
 add_library(MatlabAST STATIC
   lib/AST/AST.cpp
   lib/AST/ASTDumper.cpp
+  lib/AST/Formatter.cpp
 )
 target_link_libraries(MatlabAST PUBLIC MatlabBasic)
 
