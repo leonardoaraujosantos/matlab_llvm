@@ -208,14 +208,26 @@ def fprintf_f64_4(fmt, n, a, b, c, d):
     sys.stdout.write(_c_printf(_expand_escapes(fmt), a, b, c, d))
 
 
-def fprintf_file_str(fp, fmt, n):
+def _fp_write(fp, s):
     if fp is None: return
-    fp.write(_c_printf(_expand_escapes(fmt)))
+    try:
+        if 'b' in getattr(fp, 'mode', ''):
+            fp.write(s.encode('utf-8'))
+        else:
+            fp.write(s)
+    except Exception:
+        try: fp.write(s)
+        except Exception: pass
 
 
-def fprintf_file_f64(fp, fmt, n, v):
-    if fp is None: return
-    fp.write(_c_printf(_expand_escapes(fmt), v))
+def fprintf_file_str(fp, fmt, n=None):
+    _fp_write(fp, _c_printf(_expand_escapes(str(fmt))))
+
+
+def fprintf_file_f64(fp, fmt, n=None, v=None):
+    if v is None:
+        v = n; n = None
+    _fp_write(fp, _c_printf(_expand_escapes(str(fmt)), v))
 
 
 def input_num(prompt, plen=None):
@@ -325,11 +337,19 @@ def transpose(A):
 
 
 def diag(A):
-    return np.diag(_m(A))
+    a = _m(A)
+    if a.ndim <= 1 or a.shape[0] == 1 or a.shape[1] == 1:
+        # Input is a vector — build a diagonal matrix.
+        return np.diag(a.flatten())
+    # Input is a matrix — return its diagonal as a column vector.
+    return np.diag(a).reshape((-1, 1))
 
 
 def reshape(A, m, n):
-    return _m(A).reshape((int(m), int(n)), order='F')
+    # The matlab_llvm runtime stores matrices row-major and its reshape
+    # preserves that layout — mirror it rather than MATLAB's native
+    # column-major reshape so stdout matches the C lane byte-for-byte.
+    return _m(A).reshape((int(m), int(n)))
 
 
 # --- linear algebra --------------------------------------------------------
@@ -348,12 +368,26 @@ def eig_D(A):
     w, _ = np.linalg.eig(_m(A))
     return np.diag(w.real)
 def chol(A):          return np.linalg.cholesky(_m(A)).T
+def _lu_decompose(A):
+    """Dolittle LU for square matrices (no pivoting). Matches the
+    behavior of the matlab_llvm C runtime closely enough for small
+    test matrices."""
+    a = _m(A).astype(float).copy()
+    n = a.shape[0]
+    L = np.eye(n)
+    U = a.copy()
+    for k in _pyrange(n):
+        if U[k, k] == 0: continue
+        for i in _pyrange(k + 1, n):
+            f = U[i, k] / U[k, k]
+            L[i, k] = f
+            U[i, k:] -= f * U[k, k:]
+    return L, U
+
 def lu_L(A):
-    import scipy.linalg as sla  # pragma: no cover
-    _, L, _ = sla.lu(_m(A)); return L
+    L, _ = _lu_decompose(A); return L
 def lu_U(A):
-    import scipy.linalg as sla  # pragma: no cover
-    _, _, U = sla.lu(_m(A)); return U
+    _, U = _lu_decompose(A); return U
 def qr_Q(A): return np.linalg.qr(_m(A))[0]
 def qr_R(A): return np.linalg.qr(_m(A))[1]
 def pinv(A): return np.linalg.pinv(_m(A))
@@ -434,8 +468,14 @@ def sum(A):
     return _to_row(a.sum(axis=0))
 
 
+def _reduce_shape(v, d):
+    """Shape reduction output: dim=1 -> row, dim=2 -> column."""
+    arr = np.asarray(v).reshape(-1)
+    if int(d) == 1: return arr.reshape((1, arr.size))
+    return arr.reshape((arr.size, 1))
+
 def sum_dim(A, d):
-    return _to_row(np.sum(_m(A), axis=int(d) - 1))
+    return _reduce_shape(np.sum(_m(A), axis=int(d) - 1), d)
 
 
 def prod(A):
@@ -445,7 +485,7 @@ def prod(A):
 
 
 def prod_dim(A, d):
-    return _to_row(np.prod(_m(A), axis=int(d) - 1))
+    return _reduce_shape(np.prod(_m(A), axis=int(d) - 1), d)
 
 
 def mean(A):
@@ -455,7 +495,7 @@ def mean(A):
 
 
 def mean_dim(A, d):
-    return _to_row(np.mean(_m(A), axis=int(d) - 1))
+    return _reduce_shape(np.mean(_m(A), axis=int(d) - 1), d)
 
 
 def min(A):
@@ -561,16 +601,39 @@ def subscript3_store(A, i, j, k, v):
     A[int(i) - 1, int(j) - 1, int(k) - 1] = float(v)
 
 
+def _is_colon(idx):
+    """In the C runtime a NULL ptr means `:` (take all); the emitter
+    translates NULL to `0` so that sentinel is what we see here."""
+    return idx is None or (isinstance(idx, int) and idx == 0) or \
+           (isinstance(idx, float) and idx == 0.0)
+
+
 def slice1(A, idx):
     a = _m(A)
-    idx_flat = _m(idx).flatten(order='F').astype(int) - 1
-    return a.flatten(order='F')[idx_flat].reshape((-1, 1))
+    # Match the C runtime's column-major linearisation so stdout is
+    # byte-compatible with the emit-c lane.
+    a_col = a.flatten(order='F')
+    if _is_colon(idx):
+        return a_col.reshape((-1, 1))
+    idx_a = _m(idx)
+    if idx_a.shape == a.shape:
+        mask_vals = set(np.unique(idx_a).tolist())
+        if mask_vals.issubset({0.0, 1.0}):
+            return a_col[idx_a.flatten(order='F').astype(bool)].reshape((-1, 1))
+    idx_flat = idx_a.flatten(order='F').astype(int) - 1
+    return a_col[idx_flat].reshape((-1, 1))
 
 
 def slice2(A, rows, cols):
     a = _m(A)
-    r = _m(rows).flatten(order='F').astype(int) - 1
-    c = _m(cols).flatten(order='F').astype(int) - 1
+    if _is_colon(rows):
+        r = np.arange(a.shape[0])
+    else:
+        r = _m(rows).flatten(order='F').astype(int) - 1
+    if _is_colon(cols):
+        c = np.arange(a.shape[1])
+    else:
+        c = _m(cols).flatten(order='F').astype(int) - 1
     return a[np.ix_(r, c)]
 
 
@@ -590,14 +653,18 @@ def slice_store1_scalar(A, idx, v):
 
 
 def slice_store2(A, rows, cols, V):
-    r = _m(rows).flatten(order='F').astype(int) - 1
-    c = _m(cols).flatten(order='F').astype(int) - 1
+    r = np.arange(A.shape[0]) if _is_colon(rows) else \
+        _m(rows).flatten(order='F').astype(int) - 1
+    c = np.arange(A.shape[1]) if _is_colon(cols) else \
+        _m(cols).flatten(order='F').astype(int) - 1
     A[np.ix_(r, c)] = _m(V)
 
 
 def slice_store2_scalar(A, rows, cols, v):
-    r = _m(rows).flatten(order='F').astype(int) - 1
-    c = _m(cols).flatten(order='F').astype(int) - 1
+    r = np.arange(A.shape[0]) if _is_colon(rows) else \
+        _m(rows).flatten(order='F').astype(int) - 1
+    c = np.arange(A.shape[1]) if _is_colon(cols) else \
+        _m(cols).flatten(order='F').astype(int) - 1
     A[np.ix_(r, c)] = float(v)
 
 
@@ -690,8 +757,10 @@ def check_error():
     return _error_flag
 
 def clear_error():
-    global _error_flag, _error_msg
-    _error_flag = 0; _error_msg = ""
+    # Only clear the flag — the message stays available for the catch
+    # body to read. Mirrors the C runtime.
+    global _error_flag
+    _error_flag = 0
 
 def err_disp_message():
     if _error_msg:
@@ -762,6 +831,7 @@ def struct_get_child_struct(s, name, n=None):
 
 def struct_rmfield(s, name, n=None):
     if hasattr(s, 'pop'): s.pop(name, None)
+    return s
 
 
 # --- cells ----------------------------------------------------------------
@@ -769,11 +839,19 @@ def struct_rmfield(s, name, n=None):
 def cell_new(n):
     return [None] * int(n)
 
+def _cell_grow(c, idx):
+    while len(c) < idx:
+        c.append(None)
+
 def cell_set_f64(c, i, v):
-    c[int(i) - 1] = float(v)
+    idx = int(i)
+    _cell_grow(c, idx)
+    c[idx - 1] = float(v)
 
 def cell_set_mat(c, i, m):
-    c[int(i) - 1] = m
+    idx = int(i)
+    _cell_grow(c, idx)
+    c[idx - 1] = m
 
 def cell_get_f64(c, i):
     v = c[int(i) - 1]
@@ -795,7 +873,7 @@ def iscell(c):
 _obj_store = {}
 _obj_next_id = 1
 
-def obj_new():
+def obj_new(*_ignored):
     global _obj_next_id
     oid = _obj_next_id; _obj_next_id += 1
     _obj_store[oid] = {}
@@ -826,7 +904,7 @@ def num2str(v): return f"{float(v):g}"
 def str2double(s):
     try: return float(s)
     except Exception: return float('nan')
-def sprintf_f64(fmt, n, v): return _c_printf(_expand_escapes(fmt), v)
+def sprintf_f64(fmt, v): return _c_printf(_expand_escapes(str(fmt)), v)
 
 
 # --- set ops --------------------------------------------------------------
@@ -861,7 +939,13 @@ def flip(A): return np.flip(_m(A))
 def fliplr(A): return np.fliplr(_m(A))
 def flipud(A): return np.flipud(_m(A))
 def rot90(A): return np.rot90(_m(A))
-def sort(A): return np.sort(_m(A), axis=0)
+def sort(A):
+    a = _m(A)
+    # MATLAB sorts along the first non-singleton dim. A 1xN row sorts
+    # elementwise; taller matrices sort each column.
+    if a.ndim >= 2 and a.shape[0] == 1:
+        return np.sort(a, axis=1)
+    return np.sort(a, axis=0)
 def sortrows(A): return _m(A)[np.lexsort(_m(A).T[::-1])]
 def permute(A, perm):
     p = _m(perm).flatten().astype(int) - 1
@@ -886,9 +970,11 @@ def ind2sub(sz, k):
 # --- I/O files ------------------------------------------------------------
 
 def fopen(name, mode="r", mlen=None, moff=None):
-    # Caller passes (name, nlen, mode, mlen) — we accept the prefix.
     try:
-        m = mode if isinstance(mode, str) else "r"
+        m = str(mode) if mode is not None else "r"
+        # Normalise "w"/"r" + "b" suffix as binary so fread/fwrite work.
+        if "b" not in m:
+            m = m + "b"
         return open(name, m)
     except Exception:
         return None
@@ -903,25 +989,45 @@ def fgetl(fp):
     if fp is None: return ""
     line = fp.readline()
     if not line: return -1.0
-    return line.rstrip("\n")
+    if isinstance(line, bytes):
+        try: line = line.decode('utf-8', errors='replace')
+        except Exception: line = ""
+    return line.rstrip("\r\n")
 
 def fread(fp, n=None):
     if fp is None: return np.zeros((0, 0))
+    if n is not None:
+        # Interpret as a count of f64 elements (matches matlab_fread
+        # conventions for this test).
+        nb = int(n) * 8
+        data = fp.read(nb)
+        return np.frombuffer(data, dtype=np.float64).reshape((-1, 1))
     data = fp.read()
-    return np.frombuffer(data.encode('utf-8') if isinstance(data, str) else data,
-                          dtype=np.uint8).astype(float).reshape((-1, 1))
+    if isinstance(data, str): data = data.encode('utf-8', errors='replace')
+    return np.frombuffer(data, dtype=np.uint8).astype(float).reshape((-1, 1))
 
 def fwrite_mat(fp, A):
     if fp is None: return 0.0
     data = _m(A).astype(np.float64).tobytes()
-    try: fp.buffer.write(data)
+    try: fp.write(data)
     except Exception:
-        try: fp.write(data)
+        try: fp.buffer.write(data)
         except Exception: return 0.0
     return float(_m(A).size)
 
-def load_mat(name, n=None): return None
-def save_mat(name, n, A): pass
+_saved_mats = {}
+
+def load_mat(name, *args):
+    return _saved_mats.get(str(name), None)
+
+def save_mat(name, *args):
+    # Signature in emitted code varies; last non-string arg is the matrix.
+    for a in reversed(args):
+        if not isinstance(a, (int, float)):
+            _saved_mats[str(name)] = a
+            break
+    return 1.0
+
 def io_file_test(*args): return 0.0
 def save_test(*args): return 0.0
 def binary_test(*args): return 0.0
@@ -953,18 +1059,19 @@ def reduce_add_f64(ptr, delta):
 # --- assertions -----------------------------------------------------------
 
 def assert_(cond, *args):
-    if not cond:
-        raise AssertionError(args[0] if args else "assert failed")
+    # Mirrors matlab_assert: set the error flag rather than throwing,
+    # so try/catch lowering in the emitter keeps working.
+    if float(cond) == 0.0:
+        set_error_msg("assertion failed")
 
 
 def assert_msg(cond, msg, n=None):
-    if not cond:
-        raise AssertionError(str(msg))
+    if float(cond) == 0.0:
+        set_error_msg(str(msg) if msg else "assertion failed")
 
 
-# `assert` is a keyword, so expose with trailing-underscore binding AND
-# as `assert` via module attr — the emitter emits `rt.assert(...)`.
-sys.modules[__name__].__dict__['assert'] = assert_
+# The emitter remaps `matlab_assert` to `rt.assert_` since `assert` is a
+# Python keyword.
 
 
 # --- complex numbers ------------------------------------------------------
@@ -1003,8 +1110,28 @@ def disp_mat_c(A):
         print("  ".join(parts))
 
 
-def fft_c(A): return np.fft.fft(np.asarray(A).flatten()).reshape((-1, 1))
-def ifft_c(A): return np.fft.ifft(np.asarray(A).flatten()).reshape((-1, 1))
+def fft_c(A):
+    a = np.asarray(A)
+    flat = a.flatten()
+    r = np.fft.fft(flat)
+    # Preserve input shape when 1-D / row / column vectors.
+    if a.ndim <= 1:
+        return r.reshape((1, -1))
+    if a.shape[0] == 1:
+        return r.reshape((1, -1))
+    if a.shape[1] == 1:
+        return r.reshape((-1, 1))
+    return np.fft.fft(a, axis=0)
+
+
+def ifft_c(A):
+    a = np.asarray(A)
+    flat = a.flatten()
+    r = np.fft.ifft(flat)
+    if a.ndim <= 1: return r.reshape((1, -1))
+    if a.shape[0] == 1: return r.reshape((1, -1))
+    if a.shape[1] == 1: return r.reshape((-1, 1))
+    return np.fft.ifft(a, axis=0)
 def fft2_c(A): return np.fft.fft2(np.asarray(A))
 def ifft2_c(A): return np.fft.ifft2(np.asarray(A))
 

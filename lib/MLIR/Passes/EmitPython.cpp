@@ -214,8 +214,23 @@ static std::string dropOuterParens(std::string E) {
 std::string Emitter::remapRuntimeCallee(llvm::StringRef Name) {
   // Every matlab_* runtime entry maps to `rt.<suffix>`. Keep non-matlab_
   // names verbatim so user-outlined helpers still resolve.
-  if (Name.starts_with("matlab_"))
-    return ("rt." + Name.drop_front(strlen("matlab_")).str());
+  if (Name.starts_with("matlab_")) {
+    std::string Suf = Name.drop_front(strlen("matlab_")).str();
+    // Suffixes that collide with Python keywords need an underscore so
+    // `rt.assert(...)` parses. Kept in-sync with the runtime's
+    // keyword-adjacent helpers.
+    if (Suf == "assert" || Suf == "is" || Suf == "in" || Suf == "del" ||
+        Suf == "if" || Suf == "else" || Suf == "elif" || Suf == "not" ||
+        Suf == "and" || Suf == "or" || Suf == "lambda" || Suf == "pass" ||
+        Suf == "class" || Suf == "def" || Suf == "return" ||
+        Suf == "from" || Suf == "import" || Suf == "try" || Suf == "except"||
+        Suf == "finally" || Suf == "raise" || Suf == "with" ||
+        Suf == "while" || Suf == "for" || Suf == "yield" ||
+        Suf == "global" || Suf == "nonlocal" ||
+        Suf == "None" || Suf == "True" || Suf == "False")
+      Suf += "_";
+    return "rt." + Suf;
+  }
   return Name.str();
 }
 
@@ -1109,10 +1124,11 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
       OS << DirectSlots[AddrDef] << " = " << this->stmtExpr(S.getValue())
          << "\n";
     } else if (AddrDef && ArraySlots.count(AddrDef)) {
-      // Storing straight to the array slot (no GEP) — replace the list
-      // reference entirely. Rarely seen.
-      OS << ArraySlots[AddrDef] << " = " << this->stmtExpr(S.getValue())
-         << "\n";
+      // Store straight to the array alloca's base pointer = element 0.
+      // LLVM allows writing through an alloca address without a GEP; in
+      // Python this needs explicit indexing.
+      OS << ArraySlots[AddrDef] << "[0] = "
+         << this->stmtExpr(S.getValue()) << "\n";
     } else {
       // Non-direct: address is a GEP-like expression (`arr[idx]`).
       OS << this->stmtExpr(S.getAddr()) << " = "
