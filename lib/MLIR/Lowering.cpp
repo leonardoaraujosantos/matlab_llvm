@@ -982,7 +982,55 @@ void Lowerer::lowerStmt(const Stmt &St) {
   switch (St.Kind) {
   case NodeKind::ExprStmt: {
     auto &E = static_cast<const ExprStmt &>(St);
-    if (E.E) lowerExpr(*E.E);
+    if (!E.E) return;
+    mlir::Value V = lowerExpr(*E.E);
+    /* Implicit display on a non-suppressed bare expression: MATLAB
+     * prints `name =\n<value>` for a NameExpr and `ans =\n<value>`
+     * for any other expression, and additionally binds the value to
+     * `ans` in the workspace (REPL mode). Skip when the expression
+     * has no value (void call result like `disp(x)`) or the
+     * statement ends in `;`. */
+    if (E.Suppressed) return;
+    if (!V || mlir::isa<mlir::NoneType>(V.getType())) return;
+    auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+    /* Function-handle / anon values aren't meaningfully displayable. */
+    if (auto *NE = dynamic_cast<const NameExpr *>(E.E))
+      if (NE->Ref && HandleBindings.count(NE->Ref)) return;
+    std::string Label;
+    if (auto *NE = dynamic_cast<const NameExpr *>(E.E))
+      Label = std::string(NE->Name) + " =";
+    else
+      Label = "ans =";
+    mlir::NamedAttribute LV(
+        mlir::StringAttr::get(&MCtx, "value"),
+        mlir::StringAttr::get(&MCtx, Label));
+    mlir::Value LabelV = emitUnreg("matlab.const_char", {},
+                                    mlir::NoneType::get(&MCtx),
+                                    loc(E.Range), {LV});
+    mlir::NamedAttribute DispCal(
+        mlir::StringAttr::get(&MCtx, "callee"),
+        mlir::StringAttr::get(&MCtx, "disp"));
+    emitUnregOp("matlab.call_builtin", {LabelV},
+                {mlir::NoneType::get(&MCtx)}, loc(E.Range), {DispCal});
+    emitUnregOp("matlab.call_builtin", {V},
+                {mlir::NoneType::get(&MCtx)}, loc(E.Range), {DispCal});
+    /* In REPL mode, bind non-named-expression results to `ans` in the
+     * workspace so subsequent inputs can reference them. A bare
+     * NameExpr already has its value stored under its own name, so
+     * no extra write is needed for that case. */
+    if (ReplMode && InScriptBody && E.E->Kind != NodeKind::NameExpr) {
+      mlir::Value AnsName = emitFieldNameChar("ans", loc(E.Range));
+      bool IsMat = V.getType() == PtrTy ||
+                    mlir::isa<mlir::RankedTensorType,
+                              mlir::UnrankedTensorType>(V.getType());
+      llvm::StringRef Callee = IsMat ? "matlab_ws_set_mat"
+                                      : "matlab_ws_set_f64";
+      mlir::NamedAttribute WsCal(
+          mlir::StringAttr::get(&MCtx, "callee"),
+          mlir::StringAttr::get(&MCtx, Callee));
+      emitUnregOp("matlab.call_builtin", {AnsName, V},
+                  {mlir::NoneType::get(&MCtx)}, loc(E.Range), {WsCal});
+    }
     return;
   }
   case NodeKind::AssignStmt: {
@@ -1843,15 +1891,24 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
     }
     mlir::Value LHS = Bi.LHS ? lowerExpr(*Bi.LHS) : mlir::Value{};
     mlir::Value RHS = Bi.RHS ? lowerExpr(*Bi.RHS) : mlir::Value{};
-    /* Eagerly refine the result type when both operands are primitive
-     * scalars and Sema left the expression type as `any`/none. This
-     * lets LowerScalarsToArith rewrite the op — its match fails when
-     * the result type is NoneType but operands are f64. */
+    /* Eagerly refine the result type when Sema left the expression
+     * type as `any`/none:
+     *   - both operands same primitive scalar type  -> same scalar
+     *   - either operand is a ptr (matrix handle)    -> ptr
+     *     (matrix-matrix and matrix-scalar ops return a matrix)
+     *   - comparison operators on ptr operands       -> ptr
+     * This lets downstream rewrites match (the scalar-to-arith and
+     * matrix-runtime paths both require a concrete result type), and
+     * lets implicit-display in ExprStmt see a non-None value. */
+    auto MLPtr = mlir::LLVM::LLVMPointerType::get(&MCtx);
     mlir::Type ResTy = RT;
-    if (mlir::isa<mlir::NoneType>(ResTy) && LHS && RHS &&
-        LHS.getType() == RHS.getType() &&
-        mlir::isa<mlir::Float64Type, mlir::IntegerType>(LHS.getType())) {
-      ResTy = LHS.getType();
+    if (mlir::isa<mlir::NoneType>(ResTy) && LHS && RHS) {
+      if (LHS.getType() == RHS.getType() &&
+          mlir::isa<mlir::Float64Type, mlir::IntegerType>(LHS.getType())) {
+        ResTy = LHS.getType();
+      } else if (LHS.getType() == MLPtr || RHS.getType() == MLPtr) {
+        ResTy = MLPtr;
+      }
     }
     return emitUnreg(binOpName(Bi.Op), {LHS, RHS}, ResTy, L);
   }
