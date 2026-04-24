@@ -52,15 +52,75 @@ process via LLJIT's default dynamic-library search generator, so no
 - [`docs/lsp.md`](lsp.md) — non-interactive editor integration
   (diagnostics, goto-def, outline) on the same front-end stack.
 
+## Line editing and history
+
+The prompt runs a small termios-raw-mode line editor when stdin is a
+TTY — no external dependency (no `readline`, no `libedit`). Supported
+keys:
+
+| Key | Action |
+|---|---|
+| `↑` / `↓` | Previous / next line from history |
+| `←` / `→` | Cursor left / right |
+| `Home` / `End` (or `Ctrl-A` / `Ctrl-E`) | Jump to line start / end |
+| `Backspace` / `Delete` | Delete char before / at cursor |
+| `Ctrl-U` / `Ctrl-K` | Kill to start / to end of line |
+| `Ctrl-L` | Clear the screen |
+| `Ctrl-C` | Discard the current line (doesn't exit) |
+| `Ctrl-D` | Exit on an empty line; delete-char-forward otherwise |
+| `Enter` | Submit |
+
+History is bounded at 500 entries, deduplicates consecutive duplicates,
+and is not persisted across sessions (in-memory only). Wrap with
+`rlwrap` if you want a persistent `~/.matlab_history`.
+
+When stdin is piped (scripted input, CI, heredocs) the editor falls
+back transparently to `std::getline` — no raw-mode side effects, no
+escape-sequence handling, same behavior as before.
+
+## `help` — built-in topic browser
+
+```
+>> help
+  matlab_llvm REPL help
+  =====================
+
+  Usage:
+    help               — this overview
+    help <topic>       — detailed help on a topic
+
+  Topics (grouped):
+    FFT                fft  ifft  fft2  ifft2
+    Complex            conj  real  imag  angle  abs
+    Linear algebra     inv  det  svd  eig  lu  qr  chol  pinv  norm  trace  kron
+    ...
+
+>> help fft
+  fft
+  ===
+
+  GROUP:     FFT
+  SYNOPSIS   Y = fft(X)
+  DESCRIPTION
+    DFT of a real or complex vector / matrix column. Pure-C Cooley-Tukey.
+  EXAMPLES
+    fft([1 2 3 4])
+       10+0i  -2+2i  -2+0i  -2-2i
+    ...
+```
+
+`help` is intercepted at the REPL loop level, before the compile
+pipeline — it isn't a real Sema builtin, it's a REPL UX affordance
+(like MATLAB's own `help`). Accepts both command syntax (`help fft`)
+and function syntax (`help('fft')` / `help(fft)`). Table is defined
+inline in `tools/matlabc/main.cpp` — straightforward to extend.
+
 ## Known limitations
 
-- No line editing (history, arrow keys). Piped input and basic
-  interactive use work fine; for rich editing, wrap with `rlwrap`.
 - No JIT caching across inputs — each line rebuilds its own MLIR
   module and ExecutionEngine. Fast enough for human-paced use,
   noticeable on tight benchmark loops.
-- No `whos` / `clear` builtins wired up (`matlab_ws_clear` exists
-  in the runtime but no frontend dispatch).
+- History is in-memory only; no persistence across sessions.
 - User-defined functions declared inside the REPL are compiled into
   the current module and disappear after the line runs; a follow-up
   call in the next line won't find them.

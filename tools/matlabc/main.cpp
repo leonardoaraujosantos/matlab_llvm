@@ -39,9 +39,15 @@
 #include "matlab/Sema/Type.h"
 #include "matlab/Sema/TypeInference.h"
 
+#include <cstdio>
+#include <cstring>
 #include <iostream>
+#include <optional>
 #include <string>
 #include <string_view>
+#include <termios.h>
+#include <unistd.h>
+#include <vector>
 
 using namespace matlab;
 
@@ -256,6 +262,635 @@ int runReplInput(mlirgen::Context &MCtx, const std::string &Src, int Id) {
   return 0;
 }
 
+/* ===========================================================================
+ * REPL help command
+ *
+ * Table-driven. `help` without args prints a grouped topic index; `help <name>`
+ * prints a detailed entry. Intercepted in the REPL loop BEFORE the compile
+ * pipeline — help isn't a real builtin on the Sema side, it's a REPL UX
+ * affordance (matching MATLAB's own `help` command shape).
+ * =========================================================================*/
+
+struct HelpEntry {
+  const char *name;
+  const char *group;
+  const char *sig;
+  const char *desc;
+  const char *examples;
+};
+
+static const HelpEntry HelpTable[] = {
+  // ---- FFT / complex ----
+  {"fft", "FFT",
+   "Y = fft(X)",
+   "DFT of a real or complex vector / matrix column. Pure-C Cooley-Tukey.",
+   "fft([1 2 3 4])\n"
+   "   10+0i  -2+2i  -2+0i  -2-2i\n"
+   "% round-trip:\n"
+   "ifft(fft([1 2 3 4]))\n"
+   "   1  2  3  4"},
+  {"ifft", "FFT",
+   "X = ifft(Y)",
+   "Inverse DFT. Applies a 1/N scale per MATLAB's convention.",
+   "ifft(fft([1 2 3 4]))  % recovers the input up to rounding"},
+  {"fft2", "FFT",
+   "Y = fft2(X)",
+   "2-D DFT. Applies fft along rows then columns (separable transform).",
+   "fft2(eye(4))  % identity → all-ones 4x4 complex matrix"},
+  {"ifft2", "FFT",
+   "X = ifft2(Y)",
+   "Inverse 2-D DFT.",
+   "ifft2(fft2(magic(4)))  % recovers magic(4)"},
+  {"conj", "Complex",
+   "c = conj(z)",
+   "Complex conjugate. Polymorphic — identity on real input.",
+   "conj(3 + 4i)      % 3 - 4i\n"
+   "conj([1+2i  3-1i]) % [1-2i  3+1i]"},
+  {"real", "Complex",
+   "r = real(z)",
+   "Real part of a complex value. Returns a real matrix.",
+   "real(3 + 4i)      % 3\n"
+   "real(fft([1 2 3 4]))"},
+  {"imag", "Complex",
+   "i = imag(z)",
+   "Imaginary part. Returns a real matrix (zeros for real input).",
+   "imag(3 + 4i)      % 4"},
+  {"angle", "Complex",
+   "phi = angle(z)",
+   "Argument of a complex value in radians.",
+   "angle(1 + 1i)     % 0.7854 (π/4)"},
+  {"abs", "Complex",
+   "m = abs(x)",
+   "Magnitude. Real fast path; complex path uses hypot(re,im).",
+   "abs(-3)          % 3\n"
+   "abs(3 + 4i)      % 5"},
+
+  // ---- Linear algebra ----
+  {"inv", "Linear algebra",
+   "B = inv(A)",
+   "Matrix inverse via LU with partial pivoting. Real-only today.",
+   "A = [4 3; 6 3];\n"
+   "inv(A)\n"
+   "   -0.5    0.5\n"
+   "    1     -0.667"},
+  {"det", "Linear algebra",
+   "d = det(A)",
+   "Determinant. Falls out of the LU pivoting sign.",
+   "det([1 2; 3 4])   % -2"},
+  {"svd", "Linear algebra",
+   "s = svd(A)",
+   "Singular values (column vector). `[U,S,V]` form is a roadmap item.",
+   "svd(magic(4))    % [34, 17.889, 4.472, 0]"},
+  {"eig", "Linear algebra",
+   "v = eig(A)\n       [V, D] = eig(A)",
+   "Eigenvalues (1-return) or eigenvectors + diagonal (2-return). Jacobi; symmetric input.",
+   "eig([2 -1 0; -1 2 -1; 0 -1 2])\n"
+   "[V, D] = eig([4 1; 1 3]);\n"
+   "V * D * V'       % reconstructs the input"},
+  {"lu", "Linear algebra",
+   "[L, U] = lu(A)",
+   "LU factorization via Doolittle with partial pivoting.",
+   "[L, U] = lu([4 3; 6 3]);\n"
+   "L * U            % recovers the input"},
+  {"qr", "Linear algebra",
+   "[Q, R] = qr(A)",
+   "QR via modified Gram-Schmidt with reorthogonalization. m ≥ n.",
+   "[Q, R] = qr([1 2; 3 4; 5 6]);\n"
+   "Q' * Q           % identity (up to rounding)"},
+  {"chol", "Linear algebra",
+   "R = chol(A)",
+   "Cholesky factor (upper). Input must be positive-definite.",
+   "R = chol([4 2; 2 3]);\n"
+   "R' * R           % recovers the input"},
+  {"pinv", "Linear algebra",
+   "B = pinv(A)",
+   "Moore-Penrose pseudo-inverse via normal equations.",
+   "A = [1 2; 3 4; 5 6];\n"
+   "pinv(A) * A      % identity 2x2 (up to rounding)"},
+  {"norm", "Linear algebra",
+   "n = norm(A)",
+   "Frobenius norm.",
+   "norm([3 4])      % 5\n"
+   "norm(eye(3))     % sqrt(3)"},
+  {"trace", "Linear algebra",
+   "t = trace(A)",
+   "Sum of diagonal entries.",
+   "trace(magic(4))  % 34"},
+  {"kron", "Linear algebra",
+   "K = kron(A, B)",
+   "Kronecker product.",
+   "kron(eye(2), [1 2; 3 4])"},
+
+  // ---- Creation / shape ----
+  {"zeros", "Creation",
+   "A = zeros(n)\n       A = zeros(m, n)\n       A = zeros(m, n, p)",
+   "Matrix (or 3-D array) of zeros.",
+   "zeros(3)\n"
+   "zeros(2, 3)"},
+  {"ones", "Creation",
+   "A = ones(n)\n       A = ones(m, n)",
+   "Matrix of ones.",
+   "ones(3)\n"
+   "ones(2, 3)"},
+  {"eye", "Creation",
+   "A = eye(n)\n       A = eye(m, n)",
+   "Identity matrix (non-square form supported).",
+   "eye(4)"},
+  {"rand", "Creation",
+   "A = rand(n)\n       A = rand(m, n)",
+   "Uniform random on [0, 1). Deterministic seed per invocation.",
+   "rand(3)"},
+  {"randn", "Creation",
+   "A = randn(n)\n       A = randn(m, n)",
+   "Standard-normal random (Box-Muller).",
+   "randn(2, 5)"},
+  {"magic", "Creation",
+   "A = magic(n)",
+   "Magic square of order n.",
+   "magic(4)"},
+  {"linspace", "Creation",
+   "v = linspace(a, b, n)",
+   "n evenly-spaced points from a to b, endpoints inclusive.",
+   "linspace(0, 1, 5)\n"
+   "   0  0.25  0.5  0.75  1"},
+  {"diag", "Creation",
+   "d = diag(A)\n       D = diag(v)",
+   "Matrix → diagonal vector, or vector → diagonal matrix.",
+   "diag([1 2 3])\n"
+   "diag([1 2; 3 4])  % [1; 4]"},
+  {"reshape", "Shape",
+   "B = reshape(A, m, n)",
+   "Reshape keeping element order (column-major).",
+   "reshape(1:6, 2, 3)"},
+  {"repmat", "Shape",
+   "B = repmat(A, m, n)",
+   "Tile A m-by-n times.",
+   "repmat([1 2], 2, 3)"},
+  {"transpose", "Shape",
+   "B = A'   % ctranspose (complex-conjugate)\n       B = A.'  % transpose (no conjugate)",
+   "Matrix transpose. `'` conjugates for complex matrices; `.'` does not.",
+   "A = [1+1i 2; 3 4];\n"
+   "A'               % conjugate transpose\n"
+   "A.'              % plain transpose"},
+  {"size", "Shape",
+   "s = size(A)\n       [m, n] = size(A)\n       k = size(A, dim)",
+   "Matrix dimensions. Three forms: row vector, multi-return, single-dim.",
+   "[m, n] = size([1 2 3; 4 5 6])   % m=2, n=3"},
+  {"length", "Shape",
+   "n = length(A)",
+   "Longest dimension.",
+   "length([1 2 3 4])   % 4"},
+  {"numel", "Shape",
+   "n = numel(A)",
+   "Total number of elements.",
+   "numel(eye(3))       % 9"},
+
+  // ---- Reductions ----
+  {"sum", "Reduction",
+   "s = sum(A)\n       s = sum(A, dim)",
+   "Column-wise sum (default); dimension-aware variant.",
+   "sum([1 2 3 4])     % 10\n"
+   "sum(magic(4), 1)   % row vector of column sums"},
+  {"prod", "Reduction",
+   "p = prod(A)\n       p = prod(A, dim)",
+   "Column-wise product; dimension-aware variant.",
+   "prod(1:5)          % 120"},
+  {"mean", "Reduction",
+   "m = mean(A)\n       m = mean(A, dim)",
+   "Column-wise mean; dimension-aware variant.",
+   "mean([1 2 3 4])    % 2.5"},
+  {"min", "Reduction",
+   "m = min(A)\n       m = min(A, B)\n       m = min(A, [], dim)",
+   "Column-wise min (default), elementwise min of two, or dim-aware.",
+   "min([3 1 4 1 5])   % 1\n"
+   "min([1 5], [3 2])  % [1 2]"},
+  {"max", "Reduction",
+   "m = max(A)\n       m = max(A, B)",
+   "Column-wise max; elementwise-of-two; dim-aware.",
+   "max([3 1 4 1 5])   % 5"},
+  {"cumsum", "Reduction",
+   "c = cumsum(A)\n       c = cumsum(A, dim)",
+   "Running sum.",
+   "cumsum([1 2 3 4])  % [1 3 6 10]"},
+  {"sort", "Search",
+   "s = sort(A)",
+   "Column-wise ascending sort.",
+   "sort([3 1 4 1 5 9 2 6])"},
+  {"find", "Search",
+   "i = find(A)",
+   "Linear indices of non-zero entries.",
+   "find([0 1 0 1 1])  % [2; 4; 5]"},
+  {"unique", "Search",
+   "u = unique(A)",
+   "Unique sorted entries.",
+   "unique([3 1 4 1 5 9 2 6 5 3])"},
+
+  // ---- I/O ----
+  {"disp", "I/O",
+   "disp(x)",
+   "Print a value without a label. Polymorphic (scalar / matrix / complex / string).",
+   "disp(pi)\n"
+   "disp([1 2 3])\n"
+   "disp(3 + 4i)"},
+  {"fprintf", "I/O",
+   "fprintf(fmt, a, b, ...)",
+   "C-style formatted print. Up to 4 numeric args in v1.",
+   "fprintf('%d + %d = %d\\n', 2, 3, 5)\n"
+   "fprintf('%.4f\\n', pi)"},
+  {"sprintf", "I/O",
+   "s = sprintf(fmt, ...)",
+   "Format to a string instead of stdout.",
+   "s = sprintf('%.2f', pi);\n"
+   "disp(s)            % \"3.14\""},
+  {"error", "I/O",
+   "error(msg)",
+   "Throw a runtime error. Caught by surrounding try/catch if any.",
+   "try\n"
+   "   error('boom')\n"
+   "catch ME\n"
+   "   disp(ME.message)\n"
+   "end"},
+
+  // ---- Control flow ----
+  {"for", "Control",
+   "for i = start:step:end\n         body\n       end",
+   "Range-based loop. Step is optional (defaults to 1).",
+   "for i = 1:5\n"
+   "   disp(i);\n"
+   "end"},
+  {"while", "Control",
+   "while cond\n         body\n       end",
+   "Conditional loop.",
+   "i = 1;\n"
+   "while i <= 5\n"
+   "   disp(i); i = i + 1;\n"
+   "end"},
+  {"if", "Control",
+   "if cond, body\n       elseif cond, body\n       else body\n       end",
+   "Conditional. `elseif` / `else` optional.",
+   "x = 3;\n"
+   "if x > 0, disp('pos'); elseif x == 0, disp('zero'); else disp('neg'); end"},
+  {"parfor", "Control",
+   "parfor i = start:end\n         body\n       end",
+   "Parallel for — pthread per iteration. Reductions (`x = x + i`) get a mutex.",
+   "x = 0;\n"
+   "parfor i = 1:10\n"
+   "   x = x + i;\n"
+   "end\n"
+   "disp(x)  % 55"},
+  {"try", "Control",
+   "try\n         body\n       catch ME\n         body\n       end",
+   "Catch runtime errors. `ME.message` holds the thrown string.",
+   "try\n"
+   "   error('oops')\n"
+   "catch ME\n"
+   "   disp(ME.message)\n"
+   "end"},
+  {"function", "Control",
+   "function y = f(x) ... end\n       function [u, v] = g(x) ... end",
+   "User-defined function. Multi-return via `[a, b]` on LHS.",
+   "function y = sq(x)\n"
+   "   y = x * x;\n"
+   "end"},
+  {"classdef", "OOP",
+   "classdef Name\n         properties ... end\n         methods ... end\n       end",
+   "User-defined class. Supports inheritance, operator overloading, Dependent props, enums.",
+   "classdef Vec2\n"
+   "   properties, x, y, end\n"
+   "   methods\n"
+   "      function obj = Vec2(a, b), obj.x=a; obj.y=b; end\n"
+   "   end\n"
+   "end"},
+
+  // ---- Constants ----
+  {"pi", "Constants",
+   "pi",
+   "π (3.14159265358979…). Folds to arith.constant at emit time.",
+   "sin(pi)   % ~0\n"
+   "2 * pi    % 6.2832"},
+  {"e", "Constants",
+   "e",
+   "Euler's number (2.71828…).",
+   "e^2       % 7.389"},
+  {"Inf", "Constants",
+   "Inf",
+   "Positive infinity.",
+   "Inf > 1e300     % 1"},
+  {"NaN", "Constants",
+   "NaN",
+   "Not-a-number.",
+   "NaN == NaN     % 0 (per IEEE 754)"},
+  {"eps", "Constants",
+   "eps",
+   "Machine epsilon for double (2.22e-16).",
+   "eps             % 2.2204e-16"},
+
+  // ---- REPL ----
+  {"who", "REPL",
+   "who",
+   "List names in the current workspace.",
+   "x = 1;  y = [1 2 3];\n"
+   "who     % x, y"},
+  {"whos", "REPL",
+   "whos",
+   "List names + size + class.",
+   "A = magic(4);\n"
+   "whos"},
+  {"clear", "REPL",
+   "clear           % wipe the whole workspace\n       clear x         % remove one name",
+   "Workspace purge. Command syntax or function syntax both work.",
+   "clear x\n"
+   "clear"},
+  {"dbg", "REPL",
+   "dbg(x)\n       dbg(x, 'label')",
+   "Source-located debug print to stderr. Works in REPL and compiled code.",
+   "A = [1 2; 3 4];\n"
+   "dbg(A)\n"
+   "dbg(A * 3, 'scaled')"},
+  {"help", "REPL",
+   "help\n       help <topic>",
+   "This command. `help` with no argument lists all topics.",
+   "help\n"
+   "help fft\n"
+   "help classdef"},
+  {"exit", "REPL",
+   "exit\n       quit",
+   "Leave the REPL. Ctrl-D does the same.",
+   "exit"},
+};
+
+static std::string trimLR(std::string_view s) {
+  size_t a = 0, b = s.size();
+  while (a < b && std::isspace((unsigned char)s[a])) ++a;
+  while (b > a && std::isspace((unsigned char)s[b - 1])) --b;
+  return std::string(s.substr(a, b - a));
+}
+
+static void printHelpTopic(const HelpEntry &e) {
+  std::cout << "\n  " << e.name << "\n  "
+            << std::string(std::strlen(e.name), '=') << "\n\n";
+  std::cout << "  GROUP:     " << e.group << "\n\n";
+  std::cout << "  SYNOPSIS\n    " << e.sig << "\n\n";
+  std::cout << "  DESCRIPTION\n    " << e.desc << "\n\n";
+  std::cout << "  EXAMPLES\n    ";
+  for (const char *p = e.examples; *p; ++p) {
+    std::cout << *p;
+    if (*p == '\n' && *(p + 1)) std::cout << "    ";
+  }
+  std::cout << "\n\n";
+}
+
+static void printHelpOverview() {
+  std::cout << "\n  matlab_llvm REPL help\n"
+            << "  =====================\n\n"
+            << "  Usage:\n"
+            << "    help               — this overview\n"
+            << "    help <topic>       — detailed help on a topic\n\n"
+            << "  Topics (grouped):\n\n";
+  // Group by `group` field, preserving first-seen order.
+  std::vector<const char *> groups;
+  for (const auto &e : HelpTable) {
+    bool seen = false;
+    for (auto g : groups) if (g == e.group || std::strcmp(g, e.group) == 0) {
+      seen = true; break;
+    }
+    if (!seen) groups.push_back(e.group);
+  }
+  for (const char *g : groups) {
+    std::cout << "  " << g << "\n   ";
+    size_t col = 4;
+    for (const auto &e : HelpTable) {
+      if (std::strcmp(e.group, g) != 0) continue;
+      size_t entryLen = std::strlen(e.name) + 2;
+      if (col + entryLen > 70) {
+        std::cout << "\n   ";
+        col = 4;
+      }
+      std::cout << " " << e.name;
+      col += entryLen;
+    }
+    std::cout << "\n\n";
+  }
+}
+
+/* Returns true if the line was handled as a help command (caller should
+ * skip the compile pipeline for it). */
+static bool tryHandleHelp(const std::string &rawLine) {
+  std::string s = trimLR(rawLine);
+  /* tolerate trailing ";" (MATLAB suppression) and whitespace */
+  while (!s.empty() && (s.back() == ';' || std::isspace((unsigned char)s.back())))
+    s.pop_back();
+  if (s.empty()) return false;
+
+  /* Plain `help` */
+  if (s == "help") { printHelpOverview(); return true; }
+
+  /* `help <topic>` — command syntax */
+  auto tryTopic = [](const std::string &topic) {
+    std::string t = trimLR(topic);
+    /* strip optional quotes (function-call form: help('fft')) */
+    if (t.size() >= 2 &&
+        ((t.front() == '\'' && t.back() == '\'') ||
+         (t.front() == '"' && t.back() == '"')))
+      t = t.substr(1, t.size() - 2);
+    t = trimLR(t);
+    if (t.empty()) { printHelpOverview(); return true; }
+    for (const auto &e : HelpTable) {
+      if (t == e.name) { printHelpTopic(e); return true; }
+    }
+    std::cout << "  no help entry for '" << t
+              << "'. Type 'help' for the topic index.\n";
+    return true;
+  };
+
+  /* command form: `help fft` */
+  if (s.size() > 5 && (s[4] == ' ' || s[4] == '\t') &&
+      s.compare(0, 4, "help") == 0) {
+    return tryTopic(s.substr(5));
+  }
+  /* function form: `help(fft)` or `help('fft')` */
+  if (s.size() > 6 && s.compare(0, 5, "help(") == 0 && s.back() == ')') {
+    return tryTopic(s.substr(5, s.size() - 6));
+  }
+  return false;
+}
+
+/* ===========================================================================
+ * REPL line editor
+ *
+ * Raw-mode termios when stdin is a TTY: arrow keys for history (↑ / ↓),
+ * cursor movement (← / →), Home/End, Backspace/Delete, Ctrl-A/E/U/K/L,
+ * Ctrl-C (discard line), Ctrl-D (exit on empty; delete-char otherwise).
+ * Falls back to std::getline when stdin is piped (scripted REPL input,
+ * CI, heredocs).
+ * =========================================================================*/
+
+class ReplLineEditor {
+public:
+  ReplLineEditor() : TtyMode(isatty(STDIN_FILENO)) {
+    if (TtyMode) tcgetattr(STDIN_FILENO, &OrigTermios);
+  }
+  ~ReplLineEditor() { restoreTermios(); }
+
+  void addHistory(const std::string &line) {
+    if (line.empty()) return;
+    if (!History.empty() && History.back() == line) return;
+    History.push_back(line);
+    if (History.size() > kMaxHistory) History.erase(History.begin());
+  }
+
+  std::optional<std::string> readLine(const char *prompt) {
+    if (!TtyMode) return readLineCooked(prompt);
+    return readLineRaw(prompt);
+  }
+
+private:
+  static constexpr size_t kMaxHistory = 500;
+  bool TtyMode;
+  struct termios OrigTermios;
+  std::vector<std::string> History;
+
+  void restoreTermios() {
+    if (TtyMode) tcsetattr(STDIN_FILENO, TCSAFLUSH, &OrigTermios);
+  }
+
+  std::optional<std::string> readLineCooked(const char *prompt) {
+    std::cout << prompt << std::flush;
+    std::string Line;
+    if (!std::getline(std::cin, Line)) {
+      std::cout << '\n';
+      return std::nullopt;
+    }
+    return Line;
+  }
+
+  static void writeStr(const char *s) { (void)!write(STDOUT_FILENO, s, std::strlen(s)); }
+  static void writeStr(const std::string &s) { (void)!write(STDOUT_FILENO, s.data(), s.size()); }
+
+  std::optional<std::string> readLineRaw(const char *prompt) {
+    struct termios raw = OrigTermios;
+    raw.c_lflag &= ~(ICANON | ECHO);
+    raw.c_cc[VMIN] = 1;
+    raw.c_cc[VTIME] = 0;
+    tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
+
+    std::string Buf;
+    size_t Cursor = 0;
+    int HistIdx = (int)History.size();
+    std::string Saved;  /* in-progress edit when browsing history */
+
+    auto redraw = [&]() {
+      std::string out = "\r\x1b[K";
+      out += prompt;
+      out += Buf;
+      if (Cursor < Buf.size()) {
+        out += "\x1b[";
+        out += std::to_string(Buf.size() - Cursor);
+        out += "D";
+      }
+      writeStr(out);
+    };
+    writeStr(prompt);
+
+    auto leave = [&](std::optional<std::string> r) {
+      tcsetattr(STDIN_FILENO, TCSAFLUSH, &OrigTermios);
+      return r;
+    };
+
+    while (true) {
+      char c;
+      ssize_t n = read(STDIN_FILENO, &c, 1);
+      if (n <= 0) { writeStr("\n"); return leave(std::nullopt); }
+
+      /* Ctrl-D: EOF on empty line, delete-char-forward otherwise. */
+      if (c == 4) {
+        if (Buf.empty()) { writeStr("\n"); return leave(std::nullopt); }
+        if (Cursor < Buf.size()) { Buf.erase(Cursor, 1); redraw(); }
+        continue;
+      }
+      /* Ctrl-C: discard line; return empty string so the caller re-prompts. */
+      if (c == 3) { writeStr("^C\n"); return leave(std::string{}); }
+      /* Enter. */
+      if (c == '\r' || c == '\n') { writeStr("\n"); return leave(Buf); }
+      /* Backspace. */
+      if (c == 127 || c == 8) {
+        if (Cursor > 0) { Buf.erase(Cursor - 1, 1); --Cursor; redraw(); }
+        continue;
+      }
+      /* Ctrl-A / Ctrl-E: line start / end. */
+      if (c == 1)  { Cursor = 0;          redraw(); continue; }
+      if (c == 5)  { Cursor = Buf.size(); redraw(); continue; }
+      /* Ctrl-U / Ctrl-K: kill to start / to end. */
+      if (c == 21) { Buf.erase(0, Cursor); Cursor = 0; redraw(); continue; }
+      if (c == 11) { Buf.erase(Cursor);                   redraw(); continue; }
+      /* Ctrl-L: clear screen. */
+      if (c == 12) { writeStr("\x1b[2J\x1b[H"); redraw(); continue; }
+
+      /* ESC-prefixed escape sequence (arrow keys, Home, End, Delete, ...). */
+      if (c == 27) {
+        char seq[3] = {0, 0, 0};
+        if (read(STDIN_FILENO, &seq[0], 1) != 1) continue;
+        if (read(STDIN_FILENO, &seq[1], 1) != 1) continue;
+        if (seq[0] != '[' && seq[0] != 'O') continue;
+        switch (seq[1]) {
+        case 'A':  /* ↑ — previous history */
+          if (HistIdx == (int)History.size()) Saved = Buf;
+          if (HistIdx > 0) {
+            --HistIdx;
+            Buf = History[HistIdx];
+            Cursor = Buf.size();
+            redraw();
+          }
+          break;
+        case 'B':  /* ↓ — next history */
+          if (HistIdx < (int)History.size()) {
+            ++HistIdx;
+            Buf = (HistIdx == (int)History.size()) ? Saved : History[HistIdx];
+            Cursor = Buf.size();
+            redraw();
+          }
+          break;
+        case 'C':  /* → */
+          if (Cursor < Buf.size()) { ++Cursor; redraw(); }
+          break;
+        case 'D':  /* ← */
+          if (Cursor > 0) { --Cursor; redraw(); }
+          break;
+        case 'H':  /* Home (some terminals) */
+          Cursor = 0; redraw();
+          break;
+        case 'F':  /* End (some terminals) */
+          Cursor = Buf.size(); redraw();
+          break;
+        case '1':  /* Home (ESC[1~) or ESC[7~ */
+        case '7':
+          read(STDIN_FILENO, &seq[2], 1);  /* eat the '~' */
+          Cursor = 0; redraw();
+          break;
+        case '4':  /* End (ESC[4~) */
+        case '8':
+          read(STDIN_FILENO, &seq[2], 1);
+          Cursor = Buf.size(); redraw();
+          break;
+        case '3':  /* Delete (ESC[3~) */
+          read(STDIN_FILENO, &seq[2], 1);
+          if (Cursor < Buf.size()) { Buf.erase(Cursor, 1); redraw(); }
+          break;
+        default:
+          break;
+        }
+        continue;
+      }
+      /* Printable. */
+      if ((unsigned char)c >= 32 && c != 127) {
+        Buf.insert(Cursor, 1, c);
+        ++Cursor;
+        redraw();
+      }
+    }
+  }
+};
+
 int runRepl() {
   llvm::InitializeNativeTarget();
   llvm::InitializeNativeTargetAsmPrinter();
@@ -264,16 +899,29 @@ int runRepl() {
   mlir::registerBuiltinDialectTranslation(MCtx.get());
   mlir::registerLLVMDialectTranslation(MCtx.get());
 
-  std::cerr << "matlabc REPL (experimental). Ctrl-D or `exit` to quit.\n";
+  std::cerr << "matlabc REPL (experimental). Ctrl-D or `exit` to quit. "
+               "Type `help` for commands.\n";
+  ReplLineEditor Editor;
   std::string Accum;
   int Counter = 0;
   while (true) {
-    std::cout << (Accum.empty() ? ">> " : "   ") << std::flush;
-    std::string Line;
-    if (!std::getline(std::cin, Line)) { std::cout << '\n'; break; }
+    const char *Prompt = Accum.empty() ? ">> " : "   ";
+    auto LineOpt = Editor.readLine(Prompt);
+    if (!LineOpt) { std::cout << '\n'; break; }
+    std::string Line = *LineOpt;
+
     if (Accum.empty() && (Line == "exit" || Line == "quit" ||
                           Line == "exit;" || Line == "quit;"))
       break;
+
+    /* Help is a REPL-side UX affordance — not a real Sema builtin. Catch
+     * it at the top level, before we feed the line into the pipeline. */
+    if (Accum.empty() && tryHandleHelp(Line)) {
+      Editor.addHistory(Line);
+      continue;
+    }
+
+    Editor.addHistory(Line);
     Accum += Line;
     Accum += '\n';
 
