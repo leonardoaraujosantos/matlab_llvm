@@ -2302,6 +2302,53 @@ matlab_string *matlab_strcat(matlab_string *a, matlab_string *b) {
     return matlab_string_concat(a, b);
 }
 
+/* sub2ind([m n], i, j): column-major 1-based linear index into an
+ * m-by-n matrix. MATLAB is column-major in its linear indexing model
+ * even though our underlying storage is row-major — we follow
+ * MATLAB here so user-facing semantics line up. */
+double matlab_sub2ind(matlab_mat *shape, double di, double dj) {
+    if (!shape) return 0.0;
+    int64_t total = shape->rows * shape->cols;
+    if (total < 2) return 0.0;
+    int64_t m = (int64_t)shape->data[0];
+    int64_t i = (int64_t)di;   /* 1-based */
+    int64_t j = (int64_t)dj;   /* 1-based */
+    return (double)((j - 1) * m + i);
+}
+
+/* ind2sub([m n], idx): return [i j] as a 1x2 row. Column-major like
+ * sub2ind. */
+matlab_mat *matlab_ind2sub(matlab_mat *shape, double idx) {
+    matlab_mat *R = mat_alloc(1, 2);
+    if (!shape) return R;
+    int64_t total = shape->rows * shape->cols;
+    if (total < 2) return R;
+    int64_t m = (int64_t)shape->data[0];
+    int64_t k = (int64_t)idx - 1;   /* 0-based */
+    if (m <= 0) return R;
+    int64_t i = (k % m) + 1;
+    int64_t j = (k / m) + 1;
+    R->data[0] = (double)i;
+    R->data[1] = (double)j;
+    return R;
+}
+
+/* assert(cond) / assert(cond, msg). Uses the existing error flag so
+ * a failed assertion is catchable by try/catch. Two forms: f64-only
+ * cond, and cond + matlab_string message. */
+void matlab_assert(double cond) {
+    if (cond != 0.0) return;
+    matlab_set_error_msg("assertion failed", 16);
+}
+
+void matlab_assert_msg(double cond, matlab_string *msg) {
+    if (cond != 0.0) return;
+    if (msg && msg->len > 0)
+        matlab_set_error_msg(msg->data, msg->len);
+    else
+        matlab_set_error_msg("assertion failed", 16);
+}
+
 /* rmfield(s, 'name'): remove a field in place and return the same ptr.
  * MATLAB's rmfield conceptually returns a new struct, but mutating
  * in place + returning the same pointer matches the common

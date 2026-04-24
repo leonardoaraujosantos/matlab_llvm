@@ -32,6 +32,7 @@ void Resolver::registerBuiltins() {
     "setdiff", "intersect", "union",
     "horzcat", "vertcat", "permute", "squeeze",
     "flip", "fliplr", "flipud", "rot90",
+    "sub2ind", "ind2sub", "assert",
     "mtimes", "mldivide", "mrdivide",
     "transpose", "ctranspose",
     "disp", "fprintf", "sprintf", "error", "warning", "input", "clear",

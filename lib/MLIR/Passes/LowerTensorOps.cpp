@@ -793,6 +793,38 @@ bool TensorLowering::rewriteBuiltinCalls() {
       Changed = true;
       continue;
     }
+    /* assert(cond) / assert(cond, msg). Void return — the frontend
+     * drops any result. A false condition sets the error flag via
+     * matlab_set_error_msg, so subsequent try/catch can pick it up.
+     * Cond arrives as either f64 (e.g. `assert(v)` where v is a
+     * scalar) or i1 (from a comparison like `assert(x == y)`); in
+     * the i1 case we extend to f64 first. */
+    if (Name == "assert" && Call->getNumOperands() >= 1) {
+      auto I1 = IntegerType::get(Ctx, 1);
+      Value Cond = Call->getOperand(0);
+      if (Cond.getType() == F64 || Cond.getType() == I1) {
+        B.setInsertionPoint(Call);
+        if (Cond.getType() == I1) {
+          Cond = arith::UIToFPOp::create(B, Call->getLoc(), F64, Cond);
+        }
+        if (Call->getNumOperands() == 1) {
+          auto Fn = rt("matlab_assert", VoidTy, {F64});
+          LLVM::CallOp::create(B, Call->getLoc(), Fn, ValueRange{Cond});
+          Call->erase();
+          Changed = true;
+          continue;
+        }
+        if (Call->getNumOperands() == 2 &&
+            Call->getOperand(1).getType() == PtrTy) {
+          auto Fn = rt("matlab_assert_msg", VoidTy, {F64, PtrTy});
+          LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                ValueRange{Cond, Call->getOperand(1)});
+          Call->erase();
+          Changed = true;
+          continue;
+        }
+      }
+    }
     if (Name == "str2double" && Call->getNumOperands() == 1 &&
         Call->getNumResults() == 1 &&
         Call->getOperand(0).getType() == PtrTy) {
@@ -1323,6 +1355,8 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"union",      "matlab_union",      1, "pp"},
       {"horzcat",    "matlab_horzcat",    1, "pp"},
       {"vertcat",    "matlab_vertcat",    1, "pp"},
+      {"sub2ind",    "matlab_sub2ind",    0, "pff"},
+      {"ind2sub",    "matlab_ind2sub",    1, "pf"},
       {"permute",    "matlab_permute",    1, "pp"},
       {"squeeze",    "matlab_squeeze",    1, "p"},
       {"flip",       "matlab_flip",       1, "p"},
