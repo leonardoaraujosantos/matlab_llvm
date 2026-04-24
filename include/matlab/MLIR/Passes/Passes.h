@@ -5,6 +5,9 @@
 namespace mlir { class ModuleOp; }
 
 namespace matlab {
+
+class SourceManager;
+
 namespace mlirgen {
 
 /// Intra-block slot promotion: matlab.alloc / matlab.load / matlab.store
@@ -123,14 +126,40 @@ unsigned runOutlineParfor(mlir::ModuleOp M);
 /// LLVM IR textual module. Returns empty string on failure.
 std::string lowerToLLVMIR(mlir::ModuleOp M);
 
+/// Fold `scf.if` whose only effect is storing one of two externally-
+/// defined SSA values into the same slot down to a single `arith.select`
+/// plus one store. Chains nicely with Mem2RegLite so the slot disappears
+/// when both arms are its only writers (classic `y = cond ? a : b;`).
+/// Runs after LowerIO and before Mem2RegLite / EmitC.
+bool runIfStoreToSelect(mlir::ModuleOp M);
+
+/// Promote single-store `llvm.alloca` slots back to SSA so the EmitC
+/// backend can emit them as ordinary C locals rather than a pointer-plus-
+/// store-plus-load triple. Conservative: only fires on allocas whose
+/// entire use set is one store (in the entry block, dominating all reads)
+/// plus any number of plain loads. Runs after LowerIO and before EmitC
+/// / LowerToLLVMIR.
+bool runMem2RegLite(mlir::ModuleOp M);
+
 /// Emit a self-contained C (or C++ when Cpp==true) source that reproduces
 /// the semantics of the MLIR module. Expects the module to have been driven
 /// through the same pipeline as -emit-llvm up to and including runLowerIO
 /// (i.e. every matlab.* op has been replaced by arith / scf / func / llvm.*
 /// ops and llvm.call sites against the matlab_* C runtime). The emitted
 /// source is intended to be compiled and linked against runtime/matlab_runtime.c.
-/// Returns empty string on failure.
-std::string emitC(mlir::ModuleOp M, bool Cpp);
+/// When NoLine==true, no `#line` directives are emitted (debug info is
+/// lost — use for cleaner read-only output). When SM is non-null, MATLAB
+/// `%` comments from the source are propagated into the generated source
+/// as C++-style `//` comments above the corresponding statement. When
+/// Doxygen==true, function-leading comment blocks are rendered as
+/// `/** ... */` Doxygen blocks instead of `//` lines — useful when the
+/// emitted C/C++ is consumed by codebases that extract API docs with
+/// Doxygen. When CppAuto==true AND Cpp==true, call-result locals are
+/// declared with `auto` rather than their explicit type — more concise
+/// but loses the at-a-glance type hint. Returns empty string on failure.
+std::string emitC(mlir::ModuleOp M, bool Cpp, bool NoLine = false,
+                  bool Doxygen = false, bool CppAuto = false,
+                  const matlab::SourceManager *SM = nullptr);
 
 } // namespace mlirgen
 } // namespace matlab

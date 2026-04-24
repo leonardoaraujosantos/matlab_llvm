@@ -44,6 +44,11 @@ public:
   LineColumn getLineColumn(SourceLocation Loc) const;
   std::string_view getLineText(FileID File, uint32_t Line) const;
 
+  // Look up a registered file by the name it was loaded with. Returns 0
+  // when no file matches. O(N) over the entry count — fine for the tiny
+  // file counts we deal with (one or two .m files per run).
+  FileID findFileByName(std::string_view Name) const;
+
 private:
   struct Entry {
     std::string Name;

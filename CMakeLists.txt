@@ -100,6 +100,8 @@ if(MATLAB_LLVM_WITH_MLIR)
     lib/MLIR/Passes/LowerUserCalls.cpp
     lib/MLIR/Passes/LowerScalarSlots.cpp
     lib/MLIR/Passes/LowerTensorOps.cpp
+    lib/MLIR/Passes/IfStoreToSelect.cpp
+    lib/MLIR/Passes/Mem2RegLite.cpp
     lib/MLIR/Passes/LowerToLLVMIR.cpp
     lib/MLIR/Passes/EmitC.cpp
   )
@@ -201,5 +203,13 @@ if(MATLAB_LLVM_WITH_MLIR)
     NAME emitc-fail-tests
     COMMAND ${CMAKE_SOURCE_DIR}/test/EmitCFail/run_tests.sh $<TARGET_FILE:matlabc>
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/EmitCFail
+  )
+  # Shape goldens: diff the exact emitted C / C++ source against a per-
+  # input .c.expected / .cpp.expected. Catches cosmetic regressions that
+  # the behavioural run-tests lanes miss (they only diff stdout).
+  add_test(
+    NAME emitc-shape-tests
+    COMMAND ${CMAKE_SOURCE_DIR}/test/EmitC/run_tests.sh $<TARGET_FILE:matlabc>
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/EmitC
   )
 endif()

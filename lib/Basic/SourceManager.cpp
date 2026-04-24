@@ -65,6 +65,14 @@ LineColumn SourceManager::getLineColumn(SourceLocation Loc) const {
   return R;
 }
 
+FileID SourceManager::findFileByName(std::string_view Name) const {
+  for (uint32_t i = 0; i < Entries.size(); ++i) {
+    if (Entries[i]->Name == Name)
+      return static_cast<FileID>(i + 1);
+  }
+  return 0;
+}
+
 std::string_view SourceManager::getLineText(FileID File, uint32_t Line) const {
   const Entry *E = get(File);
   if (!E || Line == 0 || Line > E->LineStarts.size())

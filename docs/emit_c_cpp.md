@@ -313,11 +313,14 @@ dominates.
 | File | Purpose |
 |---|---|
 | `lib/MLIR/Passes/EmitC.cpp` | The emitter — all the case logic described above |
-| `include/matlab/MLIR/Passes/Passes.h` | `emitC(ModuleOp, bool Cpp)` declaration |
-| `tools/matlabc/main.cpp` | `-emit-c` / `-emit-cpp` flag parsing; reuses the `-emit-llvm` pipeline up through `runLowerIO`, then calls `emitC()` |
+| `lib/MLIR/Passes/Mem2RegLite.cpp` | Single-store alloca → SSA promotion (runs right before `emitC()`) |
+| `lib/MLIR/Passes/IfStoreToSelect.cpp` | `if/else/store-to-same-slot` → `arith.select` + one store |
+| `include/matlab/MLIR/Passes/Passes.h` | `emitC(ModuleOp, bool Cpp, bool NoLine, bool Doxygen, bool CppAuto, const SourceManager*)` declaration |
+| `tools/matlabc/main.cpp` | `-emit-c` / `-emit-cpp` / `-no-line` / `-doxygen` / `-cpp-auto` flag parsing; reuses the `-emit-llvm` pipeline up through `runLowerIO`, then calls `emitC()` |
 | `runtime/matlab_runtime.h` | Optional header with typed `matlab_*` prototypes — not used by the emitter itself (which inlines its own `void*` prototypes) but handy if you're writing C that links against the runtime by hand |
 | `test/Run/run_tests_emitc.sh` | Per-`.m` runner: emit, compile with `cc`/`c++`, execute, diff stdout against the existing `.stdout` golden |
-| `CMakeLists.txt` | Registers `EmitC.cpp` in `MatlabMLIR` and adds the `run-tests-emit-c` / `run-tests-emit-cpp` CTest targets |
+| `test/EmitC/run_tests.sh` | Per-`.m` shape runner: emit with `-no-line`, diff exact generated C/C++ against `.c.expected` / `.cpp.expected` goldens. Optional `.doxy.cpp.expected` / `.auto.cpp.expected` for flag variants. |
+| `CMakeLists.txt` | Registers all the pass sources in `MatlabMLIR` and the `run-tests-emit-c` / `run-tests-emit-cpp` / `emitc-shape-tests` CTest targets |
 | `justfile` | `emit-c` / `emit-cpp` / `compile-c` / `compile-cpp` / `test-emitc` recipes |
 
 ## Verification
@@ -331,8 +334,9 @@ dominates.
 | `run-tests-emit-c-strict`  (`-emit-c`  + `cc  -Wall -Wextra -Werror`) | 95 | 95/95 pass |
 | `run-tests-emit-cpp-strict`(`-emit-cpp` + `c++ -Wall -Wextra -Werror`) | 95 | 95/95 pass |
 | `emitc-fail-tests`  (fail-fast diagnostic contract)     | 1+ | pass |
+| `emitc-shape-tests` (exact C/C++ output diffed against goldens) | 18 | 18/18 pass |
 
-`ctest --test-dir build` runs all seven targets end-to-end.
+`ctest --test-dir build` runs all eight targets end-to-end.
 
 The strict lanes exempt `-Wunused-variable`, `-Wunused-but-set-variable`,
 `-Wunused-parameter`, and `-Wunused-function`. The emitter produces one C
@@ -348,6 +352,17 @@ handle, `matlabc -emit-c` must (a) exit non-zero and (b) include the
 matching `.stderr` golden's text as a substring of stderr. Today the
 suite covers `matlab.call_builtin` (e.g. `mod(x,y)`); new entries can
 be added as new unsupported ops come up.
+
+The `emitc-shape-tests` suite (under `test/EmitC/`) diffs the exact
+`-emit-c -no-line` / `-emit-cpp -no-line` output for a focused corpus
+of inputs against per-file `.c.expected` / `.cpp.expected` goldens.
+Catches cosmetic regressions (comment placement, paren density, loop
+shape) that `run-tests-emit-*` miss because those only compare stdout.
+Flag-variant goldens (`.doxy.cpp.expected`, `.auto.cpp.expected`) are
+opt-in per-input — present when the input specifically exercises the
+flag, absent otherwise. Regenerate with
+`UPDATE=1 test/EmitC/run_tests.sh build/matlabc` after an intentional
+output change.
 
 ## Known limitations / future work
 
@@ -395,8 +410,28 @@ The emitter fails fast rather than producing broken output:
   `LowerTensorOps` propagate it to the resulting `llvm.alloca` as a
   discardable `matlab.name` attribute. The emitter uses it to name C
   locals, so a MATLAB `total = 0; for i = 1:10; total = total + i; end`
-  produces C locals called `total`, `i`, `total_p`, `i_p` (rather than
-  `v0_slot`, `v1_slot`, etc.).
+  produces C locals called `total`, `i` (rather than `v0_slot`, `v1_slot`,
+  etc.).
+- **Direct-slot allocas skip the `void*` pointer trampoline.** When an
+  alloca's entire use set is plain `llvm.load` / `llvm.store` (no GEP,
+  call, or other consumer), the emitter drops the `void* x_p = &x;`
+  helper and has stores/loads address the slot by name directly. A
+  MATLAB `y = 0; if c; y = 1; else; y = 2; end; disp(y);` comes out as
+  `double y = 0; if (c) { y = 1; } else { y = 2; } matlab_disp_f64(y);`
+  rather than a `*(double*)y_p = …` triple.
+- **Single-store allocas get promoted to SSA (`Mem2RegLite`).** A pre-
+  EmitC pass collapses `alloca + store + load(s)` where the alloca has
+  exactly one store (dominating all loads) and no escaping uses. The
+  most common match is the parameter spill: `function y = fact(n) …`
+  would otherwise emit `double n_slot = 0; *(double*)&n_slot = n; …`;
+  after promotion, callers reference `n` directly and the slot is gone.
+- **If/else/store patterns collapse to `arith.select` (`IfStoreToSelect`).**
+  An `scf.if` whose both arms contain exactly `llvm.store %a, %slot` /
+  `llvm.store %b, %slot` (with `%a` and `%b` defined outside the if) is
+  rewritten to a single `arith.select %cond, %a, %b` + one store. Chained
+  with Mem2RegLite the slot evaporates entirely: a MATLAB
+  `function y = sign_of(x); if x > 0; y = 1; else; y = -1; end; end`
+  emits as `return ((x > 0) ? 1 : -1);`.
 - **Function parameter names flow through.** AST→MLIR lowering attaches
   `matlab.name` as an arg attribute on each `func.func` parameter.
   `function y = fact(n)` emits `static double fact(double n)`.
@@ -420,3 +455,62 @@ The emitter fails fast rather than producing broken output:
 - **Per-section blank lines** between the runtime-extern block, the
   string-constant block, the forward-decl block, and the function
   bodies.
+- **MATLAB `%` comments propagated as `//` comments.** When
+  `matlabc -emit-c` is invoked with a `SourceManager` (always, on the
+  CLI), the emitter scans the original `.m` for the contiguous block of
+  comment lines that precede each statement and prints them above the
+  generated C. File-top doc-comments appear above the function signature.
+- **Trailing same-line comments preserved.** The emitter also scans the
+  current line for a trailing `% comment` past the stmt body and emits it
+  as a `// ...` line directly under the statement it annotates. Handles
+  `%` characters inside `'...'` / `"..."` strings and inside transpose
+  (`A'`) correctly. Limitation: if every producer on a source line gets
+  inlined (e.g. a one-liner function whose body is a single pure
+  expression), there is no non-inlined op carrying that line's location,
+  so the trailing comment on that line is lost.
+- **Blank lines preserved from source.** Paragraph breaks in the `.m`
+  file — two consecutive newlines between statement groups — mirror to
+  blank lines in the emitted C. Suppressed immediately after an opening
+  brace so a block body doesn't start with a gratuitous empty line, and
+  collapsed with comment emission so a `% comment` separated from its
+  stmt by a blank line keeps both the comment and the separator.
+- **`-no-line` flag** suppresses every `#line` directive for cleaner
+  read-only output (debug info is lost — don't use for production
+  compiles that need `.m`-level stepping).
+- **Minimal-paren output at statement-level positions.** At outermost-
+  safe positions (return value, rhs of `=`, if/while condition, call
+  arguments) the emitter drops one layer of balanced parens from the
+  expression string — so `return (*y_p);` becomes `return *y_p;` and
+  `if ((n <= 1)) {` becomes `if (n <= 1) {`. In-expression parens are
+  untouched so operator precedence is unchanged.
+- **`while (cond) { ... }` loop shape** when the `scf.while` before-region
+  has no side-effecting work — the natural MATLAB `while cond` loop
+  lowers to `while (cond) { body; }` rather than the intermediate
+  `while (1) { if (!cond) break; body; }` form. Falls back to the
+  intermediate form when the before-region carries non-inlined ops
+  (those must run every iteration).
+- **Deferred slot declarations.** When a direct-slot alloca's first
+  same-block user is a StoreOp, the `T slot = 0;` declaration is merged
+  with the first store into `T slot = val;` at the store's position —
+  no top-of-function pile of zero-initialised scratch variables. Kept at
+  top for slots whose first write lives inside a nested scf region
+  (the declaration must dominate every arm).
+- **`disp` → stdio / iostream substitution** when the module has no
+  `parfor` (the runtime's output mutex is dead weight for
+  single-threaded programs). `matlab_disp_str(literal, n)` becomes
+  `puts("literal")` in C / `std::cout << "literal" << '\n';` in C++.
+  `matlab_disp_f64(x)` becomes `printf("%g\n", (double)x)` / `std::cout
+  << x << '\n';`. `matlab_disp_i64(x)` similarly. The runtime calls stay
+  put for modules that use `parfor` — workers race on stdout and the
+  mutex matters.
+- **`(void*)name` for string / function addressof** rather than the
+  heavier `((void*)&name)`. Arrays and functions both decay to a pointer
+  when referenced by name, so the `&` is redundant and the outer
+  grouping parens just add noise.
+- **`-doxygen` flag** renders function-leading comment blocks as
+  `/** ... */` Doxygen blocks rather than `//` lines. Useful when the
+  emitted source is consumed by a codebase that extracts API docs with
+  Doxygen; statement-level inline comments keep the `//` style.
+- **`-cpp-auto` flag (C++ only)** declares call-result locals with `auto`
+  rather than the explicit type — more concise at the cost of the
+  at-a-glance type hint. Only applies in `-emit-cpp` mode.

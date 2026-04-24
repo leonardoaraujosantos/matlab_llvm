@@ -8,6 +8,7 @@
 // The output is intended to be linked against runtime/matlab_runtime.c.
 
 #include "matlab/MLIR/Passes/Passes.h"
+#include "matlab/Basic/SourceManager.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
@@ -40,7 +41,10 @@ namespace {
 /// regions needs to share state across helpers.
 class Emitter {
 public:
-  Emitter(std::ostream &OS, bool Cpp) : OS(OS), Cpp(Cpp) {}
+  Emitter(std::ostream &OS, bool Cpp, bool NoLine, bool Doxygen,
+          bool CppAuto, const matlab::SourceManager *SM)
+      : OS(OS), Cpp(Cpp), NoLine(NoLine), Doxygen(Doxygen),
+        CppAuto(Cpp && CppAuto), SM(SM) {}
 
   bool run(mlir::ModuleOp M);
 
@@ -63,6 +67,22 @@ private:
   void emitFuncFunc(mlir::func::FuncOp F);
   void emitLLVMFunc(mlir::LLVM::LLVMFuncOp F);
   void emitProlog();
+  // Walk the module once to populate HasParfor / NeedsStdio / NeedsIostream
+  // so the prolog can emit the right `#include`s and the body emitter can
+  // decide whether to substitute matlab_disp_* calls for stdio / iostream
+  // equivalents.
+  void precomputeModuleProperties(mlir::ModuleOp M);
+  // Try to emit `llvm.call @matlab_disp_*` as a direct puts/printf/cout
+  // call when the module has no parfor (the runtime's mutex is dead
+  // weight for single-threaded output) and, for disp_str, the string
+  // argument is a compile-time literal. Returns true if the call was
+  // handled — caller skips its own emission. Otherwise false.
+  bool tryEmitIOSubstitution(mlir::LLVM::CallOp Call, int Indent);
+  // Escape a raw byte sequence for embedding in a `"..."` C/C++ literal.
+  // Only handles ASCII-safe input; callers should fall back to the
+  // runtime call when non-printable bytes are present.
+  static bool writeQuotedStringLiteral(std::ostream &OS,
+                                       llvm::StringRef Raw);
 
   // --- Helpers -----------------------------------------------------------
   void indent(int N) { for (int i = 0; i < N; ++i) OS << "  "; }
@@ -73,12 +93,26 @@ private:
     Failed = true;
   }
   void emitLineDirective(mlir::Location L, int Indent);
+  // Scan leading `%` comments in the source that precede `Line` (exclusive)
+  // down to `AfterLine` (exclusive). Emit them as `// ...` lines at the
+  // given indent. No-op when SM is null or the named file isn't in it.
+  // Returns true if any output was emitted (comments or preserved blanks).
+  // When `FunctionHeader` is true AND the Doxygen flag is set, the block
+  // is rendered as `/**\n * line\n * line\n */` instead of `//` lines.
+  bool emitLeadingComments(llvm::StringRef FullPath, int AfterLine,
+                           int Line, int Indent, bool FunctionHeader = false);
 
   // --- Single-use inlining ----------------------------------------------
   // Return the C expression to use when referring to V: either the inline
   // expression built lazily from its producer, or its declared identifier
   // (for values the emitter already materialized as a C local).
   std::string exprFor(mlir::Value V);
+  // exprFor, with one outermost layer of balanced parens stripped when
+  // present. Use only at statement-level positions where the surrounding
+  // syntax already delimits the expression (return value, rhs of `=`,
+  // if/while condition, function arguments). Never call from inside
+  // another composed expression — inner parens there enforce precedence.
+  std::string stmtExpr(mlir::Value V);
   // Walk a region, marking producers that should be skipped during emission
   // and whose uses should inline the expression instead. Does NOT build
   // the strings — those are synthesised on demand by buildInlineExpr so
@@ -94,7 +128,22 @@ private:
 
   std::ostream &OS;
   bool Cpp;
+  bool NoLine;
+  bool Doxygen;  // wrap function-leading comments in /** ... */
+  bool CppAuto;  // use `auto` for call-result locals in C++ mode
+  const matlab::SourceManager *SM;  // nullable; comments scan disabled if null
   bool Failed = false;
+
+  // Module-level properties, computed once up front so the prolog (header
+  // includes, runtime externs) and the body emission agree. Populated by
+  // precomputeModuleProperties before prolog/body emission.
+  bool HasParfor = false;  // any call to matlab_parfor_dispatch?
+  bool NeedsStdio = false; // will emit puts() / printf()
+  bool NeedsIostream = false; // will emit std::cout
+  // Runtime llvm.func declarations that still have at least one call site
+  // surviving the IO substitutions. Used to prune dead externs from the
+  // prolog so the emitted file doesn't declare functions it never calls.
+  llvm::StringSet<> LiveRuntimeFuncs;
 
   llvm::DenseMap<mlir::Value, std::string> Names;
   llvm::DenseMap<mlir::Operation *, std::string> GlobalStrs;  // global -> C name
@@ -103,11 +152,41 @@ private:
   // expression to substitute at use sites.
   llvm::DenseMap<mlir::Value, std::string> InlineExprs;
   llvm::DenseSet<mlir::Operation *> InlinedOps;
+  // Allocas whose entire use set is plain load/store (no call / GEP /
+  // cast consumer). For these, the pointer indirection is skipped and
+  // stores/loads are emitted as direct reads/writes of the slot's
+  // identifier: `y = 1;` rather than `*(double*)y_p = 1;`. Maps
+  // alloca-op -> the C identifier of the backing slot.
+  llvm::DenseMap<mlir::Operation *, std::string> DirectSlots;
+  // Subset of DirectSlots whose declaration was postponed so it can be
+  // merged with the first store into `T slot = val;`. An alloca joins
+  // this set when its first same-block user is a StoreOp, and is erased
+  // from it once that store has emitted the combined declaration.
+  llvm::DenseSet<mlir::Operation *> DirectSlotDefer;
   int NextId = 0;
 
   // Most recent #line directive emitted — used to dedupe.
   std::string LastLineFile;
   int LastLineNum = -1;
+  // True at the very start of a block's body (immediately after its
+  // opening `{`). Forward-jump blank lines are suppressed until the
+  // first real statement has been emitted — otherwise every block would
+  // open with a gratuitous blank line below the brace.
+  bool AtBlockStart = true;
+
+  // Trailing same-line comment for the current line, pending emission.
+  // Set when we move LastLineNum forward to a line that has `foo; % bar`
+  // shape; flushed on the next line advance or block exit so `// bar`
+  // lands right below the C output for that line.
+  int PendingTrailingLine = -1;      // -1 = no pending
+  int PendingTrailingIndent = 0;
+  std::string PendingTrailingText;
+  // Lines whose trailing comment has already been flushed in the current
+  // function. Prevents double-emit when an op's location bounces back to
+  // an earlier line (e.g. the synthesized `return 0;` in `main` reusing
+  // the script's first-stmt location).
+  llvm::DenseSet<int> TrailingEmittedLines;
+  void flushPendingTrailing();
 };
 
 // ---------------------------------------------------------------------------
@@ -200,6 +279,29 @@ std::string Emitter::exprFor(mlir::Value V) {
   return name(V);
 }
 
+// Strip one outermost layer of balanced parens from `E` if present. Safe
+// only at statement-level positions — inner parens carry precedence and
+// cannot be removed without analysis.
+static std::string dropOuterParens(std::string E) {
+  if (E.size() < 2 || E.front() != '(' || E.back() != ')') return E;
+  int Depth = 0;
+  for (size_t i = 0; i < E.size(); ++i) {
+    if (E[i] == '(') ++Depth;
+    else if (E[i] == ')') {
+      --Depth;
+      // If the opening paren closes before the end, the first `(` is NOT
+      // the partner of the final `)` — stripping would change meaning
+      // (`(a) + (b)` → `a) + (b`). Bail.
+      if (Depth == 0 && i + 1 < E.size()) return E;
+    }
+  }
+  return E.substr(1, E.size() - 2);
+}
+
+std::string Emitter::stmtExpr(mlir::Value V) {
+  return dropOuterParens(exprFor(V));
+}
+
 // Is Op's result safe to inline into its use?
 bool Emitter::canInline(mlir::Operation &Op) {
   using namespace mlir;
@@ -279,7 +381,12 @@ bool Emitter::buildInlineExpr(mlir::Operation &Op, std::string &Expr) {
   }
   if (isa<LLVM::ZeroOp>(Op)) { Expr = "0"; return true; }
   if (auto A = dyn_cast<LLVM::AddressOfOp>(Op)) {
-    Expr = "((void*)&" + A.getGlobalName().str() + ")";
+    // Array globals (string literals) and function symbols both decay to
+    // a pointer when referenced by name, so `(void*)name` is sufficient —
+    // no `&`, no outer paren wrapping. The C-style cast handles both the
+    // array→pointer decay (for const-qualified string buffers) and the
+    // function→function-pointer decay (outlined parfor / anon callees).
+    Expr = "(void*)" + A.getGlobalName().str();
     return true;
   }
   auto bin = [&](const char *cc) {
@@ -351,6 +458,12 @@ bool Emitter::buildInlineExpr(mlir::Operation &Op, std::string &Expr) {
     return true;
   }
   if (auto L = dyn_cast<LLVM::LoadOp>(Op)) {
+    // Inlining from a direct-slot alloca: the slot's identifier IS the
+    // value's expression — no `(*(T*)ptr)` wrapping.
+    if (auto *D = L.getAddr().getDefiningOp()) {
+      auto It = DirectSlots.find(D);
+      if (It != DirectSlots.end()) { Expr = It->second; return true; }
+    }
     Expr = "(*(" + cTypeOfValue(V) + "*)" + exprFor(L.getAddr()) + ")";
     return true;
   }
@@ -382,6 +495,159 @@ void Emitter::computeInlines(mlir::Region &R) {
 // Emit a `#line N "file"` directive at the given indent level if the
 // location is a FileLineColLoc and hasn't been emitted already for this
 // (file, line) pair.
+// Classify one line in the source buffer.
+namespace {
+enum class LineKind { Blank, Comment, Code };
+struct LineInfo { LineKind Kind; std::string_view Body; };
+LineInfo classifyLine(std::string_view Text) {
+  size_t I = 0;
+  while (I < Text.size() && (Text[I] == ' ' || Text[I] == '\t')) ++I;
+  if (I == Text.size()) return {LineKind::Blank, {}};
+  if (Text[I] != '%')   return {LineKind::Code, {}};
+  ++I;  // skip leading '%'
+  if (I < Text.size() && Text[I] == ' ') ++I;
+  return {LineKind::Comment, Text.substr(I)};
+}
+
+// Walk a code line looking for the first `%` that is NOT inside a string
+// literal. Returns std::string_view::npos when the line has no trailing
+// comment. Mirrors the MATLAB lexer's string / transpose disambiguation:
+//   - `"..."`   : always a string, `\` escapes next character
+//   - `'...'`   : string unless preceded by an identifier / number / `)` / `]`
+//                 / `.` (in which case `'` is the conjugate-transpose op)
+//   - `%`       : anywhere outside strings starts a line comment
+size_t findTrailingCommentStart(std::string_view S) {
+  unsigned char PrevNonSpace = 0;  // 0 at start-of-line: quote is NOT transpose
+  size_t I = 0;
+  while (I < S.size()) {
+    unsigned char C = S[I];
+    if (C == '%') return I;
+    if (C == '"') {
+      // Walk past the string body. Handle `""` as an escaped quote.
+      ++I;
+      while (I < S.size() && S[I] != '"') {
+        if (S[I] == '\\' && I + 1 < S.size()) I += 2;
+        else ++I;
+      }
+      if (I < S.size()) ++I;
+      PrevNonSpace = '"';
+      continue;
+    }
+    if (C == '\'') {
+      bool IsTranspose =
+          std::isalnum(PrevNonSpace) || PrevNonSpace == ')' ||
+          PrevNonSpace == ']' || PrevNonSpace == '.' || PrevNonSpace == '_';
+      ++I;
+      if (!IsTranspose) {
+        // Char literal: skip to next unescaped `'`. MATLAB uses `''` to
+        // embed a single quote inside a char array.
+        while (I < S.size()) {
+          if (S[I] == '\'') {
+            if (I + 1 < S.size() && S[I + 1] == '\'') { I += 2; continue; }
+            ++I; break;
+          }
+          ++I;
+        }
+      }
+      PrevNonSpace = '\'';
+      continue;
+    }
+    if (!std::isspace(C)) PrevNonSpace = C;
+    ++I;
+  }
+  return std::string_view::npos;
+}
+} // namespace
+
+void Emitter::flushPendingTrailing() {
+  if (PendingTrailingLine < 0) return;
+  indent(PendingTrailingIndent);
+  OS << "// " << PendingTrailingText << "\n";
+  TrailingEmittedLines.insert(PendingTrailingLine);
+  PendingTrailingLine = -1;
+  PendingTrailingIndent = 0;
+  PendingTrailingText.clear();
+}
+
+bool Emitter::emitLeadingComments(llvm::StringRef FullPath, int AfterLine,
+                                  int Line, int Indent, bool FunctionHeader) {
+  if (!SM || FullPath.empty() || Line <= 0) return false;
+  matlab::FileID F = SM->findFileByName(std::string_view(FullPath));
+  if (F == 0) return false;
+
+  // First, find the earliest line `L0` in (AfterLine, Line) such that every
+  // line in [L0, Line) is either a `%` comment or blank. That block is the
+  // current stmt's leading prelude. Anything further back that's `Code` has
+  // already been consumed by a previous emit (or is an SSA-only stmt that
+  // produced no output).
+  int Start = Line;
+  for (int L = Line - 1; L > AfterLine; --L) {
+    auto Info = classifyLine(SM->getLineText(F, (uint32_t)L));
+    if (Info.Kind == LineKind::Code) break;
+    Start = L;
+  }
+  if (Start == Line) return false;  // nothing in the prelude
+
+  // Doxygen-style rendering for function-leading blocks: `/**\n *
+  // line\n ... */`. The opening `/**` and closing `*/` frame the block,
+  // blank lines in the source become blank ` *` lines inside the block.
+  // Only triggered when the flag is on AND this is a function-header
+  // context — inline comments between statements keep the `//` style.
+  if (Doxygen && FunctionHeader) {
+    // Trim leading blanks inside the block so `/**\n *\n * text ...`
+    // doesn't gain a gratuitous empty row.
+    while (Start < Line) {
+      auto Info = classifyLine(SM->getLineText(F, (uint32_t)Start));
+      if (Info.Kind != LineKind::Blank) break;
+      ++Start;
+    }
+    if (Start == Line) return false;
+    indent(Indent);
+    OS << "/**\n";
+    bool LastWasBlank = false;
+    for (int L = Start; L < Line; ++L) {
+      auto Info = classifyLine(SM->getLineText(F, (uint32_t)L));
+      if (Info.Kind == LineKind::Blank) {
+        if (LastWasBlank) continue;
+        indent(Indent); OS << " *\n";
+        LastWasBlank = true;
+        continue;
+      }
+      indent(Indent);
+      OS << " * " << Info.Body << "\n";
+      LastWasBlank = false;
+    }
+    indent(Indent);
+    OS << " */\n";
+    return true;
+  }
+
+  // Walk Start..Line-1 emitting blanks and comments in source order.
+  // Suppress leading blanks (so a block that begins with `// comment`
+  // doesn't get a blank row above it right after `{`) and collapse
+  // consecutive blanks into a single empty line.
+  bool EmittedAny = false;
+  bool CanEmitBlank = !AtBlockStart;
+  bool LastWasBlank = false;
+  for (int L = Start; L < Line; ++L) {
+    auto Info = classifyLine(SM->getLineText(F, (uint32_t)L));
+    if (Info.Kind == LineKind::Blank) {
+      if (!CanEmitBlank || LastWasBlank) continue;
+      OS << "\n";
+      LastWasBlank = true;
+      EmittedAny = true;
+      continue;
+    }
+    // Comment.
+    indent(Indent);
+    OS << "// " << Info.Body << "\n";
+    CanEmitBlank = true;
+    LastWasBlank = false;
+    EmittedAny = true;
+  }
+  return EmittedAny;
+}
+
 void Emitter::emitLineDirective(mlir::Location L, int Indent) {
   // Unwrap NameLoc / FusedLoc to reach the underlying FileLineColLoc if
   // present. Ops produced by builders often carry wrapped locations.
@@ -395,17 +661,92 @@ void Emitter::emitLineDirective(mlir::Location L, int Indent) {
       if ((FL = mlir::dyn_cast<mlir::FileLineColLoc>(Sub))) break;
   }
   if (!FL) return;
-  std::string File = FL.getFilename().str();
+  std::string FullPath = FL.getFilename().str();
   int Line = static_cast<int>(FL.getLine());
-  if (File.empty() || Line <= 0) return;
+  if (FullPath.empty() || Line <= 0) return;
   // Emit only the basename so the generated .c is portable across
   // build machines and doesn't leak an absolute path. Debuggers resolve
   // #line filenames against the compilation directory.
+  std::string File = FullPath;
   if (auto Slash = File.find_last_of("/\\"); Slash != std::string::npos)
     File = File.substr(Slash + 1);
-  if (File == LastLineFile && Line == LastLineNum) return;
+  if (File == LastLineFile && Line == LastLineNum) {
+    // Same MATLAB line, same file — possibly re-emitted at a deeper indent
+    // (e.g. the function signature fires at indent 0, then the body opens
+    // and an op on the same line fires at indent 1). If we already queued
+    // a trailing for this line, upgrade its indent to match the current
+    // context so it lines up with the body statement it annotates.
+    if (PendingTrailingLine == Line && Indent > PendingTrailingIndent)
+      PendingTrailingIndent = Indent;
+    return;
+  }
+
+  // Crossing a line boundary: flush any trailing comment on the line we're
+  // leaving first so `x = 1; // trailing` lands directly under its stmt.
+  flushPendingTrailing();
+
+  bool SameFile = !LastLineFile.empty() && File == LastLineFile;
+  bool ForwardJump = SameFile && Line > LastLineNum;
+
+  // Scan for MATLAB `%` comments in the interval (LastLineNum, Line).
+  // Forward-within-the-same-file constraint keeps us from replaying
+  // comments when an op's location bounces backward (e.g. the scf.if
+  // closing brace inheriting the if-header's line). The scan ALSO emits
+  // preserved blank lines (interleaved with the comments) so its output
+  // matches the source's paragraph structure — we then skip the naive
+  // blank-preservation fallback below if it emitted anything.
+  bool ScanEmitted = false;
+  if (ForwardJump) {
+    ScanEmitted = emitLeadingComments(FullPath, LastLineNum, Line, Indent);
+  } else if (LastLineFile.empty()) {
+    // Fresh function entry or cross-file jump: scan a bounded stretch back
+    // so the function's leading doc-comment block shows up above the
+    // signature / first statement. Pass FunctionHeader=true so Doxygen
+    // mode can render the block as `/** ... */` rather than `//` lines.
+    ScanEmitted = emitLeadingComments(FullPath, Line - 64, Line, Indent,
+                                      /*FunctionHeader=*/true);
+  }
+
+  // Blank-line preservation fallback: if the scan didn't emit anything
+  // (no comments or blanks in the interval, or cross-file / first-op
+  // case), still reproduce a single blank for a multi-line forward
+  // jump so paragraph-style breaks survive even when no `%` sits in
+  // between. Never right after a `{`.
+  if (!ScanEmitted && !AtBlockStart && ForwardJump &&
+      Line > LastLineNum + 1) {
+    OS << "\n";
+  }
+  AtBlockStart = false;
   LastLineFile = File;
   LastLineNum = Line;
+
+  // Scan this line for a trailing `% comment` past the stmt body; stash
+  // it as pending so it lands right after this line's C output when we
+  // next cross a line boundary (or at block exit). Skip lines we've
+  // already emitted a trailing for — a synthesized op that bounces back
+  // to an earlier line must not replay the comment.
+  if (SM && !TrailingEmittedLines.count(Line)) {
+    matlab::FileID FID =
+        SM->findFileByName(std::string_view(FullPath));
+    if (FID != 0) {
+      std::string_view Text = SM->getLineText(FID, (uint32_t)Line);
+      size_t Pos = findTrailingCommentStart(Text);
+      if (Pos != std::string_view::npos) {
+        size_t Body = Pos + 1;
+        if (Body < Text.size() && Text[Body] == ' ') ++Body;
+        std::string_view Trailing = Text.substr(Body);
+        // Ignore pure whitespace after `%` — nothing meaningful to emit.
+        size_t NonSpace = Trailing.find_first_not_of(" \t");
+        if (NonSpace != std::string_view::npos) {
+          PendingTrailingLine = Line;
+          PendingTrailingIndent = Indent;
+          PendingTrailingText.assign(Trailing);
+        }
+      }
+    }
+  }
+
+  if (NoLine) return;
   indent(Indent);
   OS << "#line " << Line << " \"" << File << "\"\n";
 }
@@ -494,10 +835,163 @@ void Emitter::emitProlog() {
   OS << "// Generated by matlabc -emit-c. Do not edit.\n";
   OS << "#include <stdint.h>\n";
   if (!Cpp) OS << "#include <stdbool.h>\n";
+  // IO-substitution headers. When the module has no parfor (no mutex
+  // coordination needed) we can collapse the matlab_disp_* runtime calls
+  // into direct stdio / iostream output, which reads as hand-written C
+  // / modern C++. The flags were computed in precomputeModuleProperties.
+  if (NeedsStdio)    OS << "#include <stdio.h>\n";
+  if (NeedsIostream) OS << "#include <iostream>\n";
   OS << "\n";
   // Runtime function prototypes are emitted per-module below, with void*
   // for all pointer params so the same declaration works for C and C++
   // (C linkage handles the type bridging to the runtime's typed params).
+}
+
+void Emitter::precomputeModuleProperties(mlir::ModuleOp M) {
+  HasParfor = false;
+  LiveRuntimeFuncs.clear();
+  bool AnyDispStrLiteral = false;
+  bool AnyDispScalar = false;
+  // First pass: detect parfor. IO substitution is gated on its absence,
+  // so we need it settled before deciding whether a call survives.
+  M.walk([&](mlir::LLVM::CallOp C) {
+    if (auto Callee = C.getCallee())
+      if (*Callee == "matlab_parfor_dispatch") HasParfor = true;
+  });
+  // Second pass: for each call, decide whether it'll be substituted. If
+  // it survives, mark its callee live so the extern block keeps it.
+  M.walk([&](mlir::LLVM::CallOp C) {
+    auto Callee = C.getCallee();
+    if (!Callee) return;
+    llvm::StringRef Name = *Callee;
+    bool Substituted = false;
+    if (!HasParfor) {
+      if (Name == "matlab_disp_str" && C.getNumOperands() >= 1) {
+        // Literal-addressof: first operand produced by llvm.mlir.addressof
+        // of a global whose value is a StringAttr.
+        if (auto Addr = C.getOperand(0)
+                .getDefiningOp<mlir::LLVM::AddressOfOp>()) {
+          auto ParentMod = C->getParentOfType<mlir::ModuleOp>();
+          if (auto G = ParentMod.lookupSymbol<mlir::LLVM::GlobalOp>(
+                  Addr.getGlobalName()))
+            if (auto S = mlir::dyn_cast_or_null<mlir::StringAttr>(
+                    G.getValueAttr())) {
+              // Must be printable for the substitution to fire.
+              bool Printable = true;
+              for (unsigned char Ch : S.getValue()) {
+                bool OK = (Ch >= 0x20 && Ch < 0x7F) || Ch == '\n' ||
+                          Ch == '\t' || Ch == '\r';
+                if (!OK) { Printable = false; break; }
+              }
+              if (Printable) {
+                Substituted = true;
+                AnyDispStrLiteral = true;
+              }
+            }
+        }
+      }
+      if (Name == "matlab_disp_f64" || Name == "matlab_disp_i64") {
+        Substituted = true;
+        AnyDispScalar = true;
+      }
+    }
+    if (!Substituted) LiveRuntimeFuncs.insert(Name);
+  });
+  if (AnyDispStrLiteral || AnyDispScalar) {
+    if (Cpp) NeedsIostream = true;
+    else     NeedsStdio = true;
+  }
+}
+
+bool Emitter::writeQuotedStringLiteral(std::ostream &OS,
+                                       llvm::StringRef Raw) {
+  for (unsigned char C : Raw) {
+    if (C >= 0x20 && C < 0x7F) continue;
+    if (C == '\n' || C == '\t' || C == '\r') continue;
+    return false;  // non-printable — caller falls back.
+  }
+  OS << '"';
+  for (unsigned char C : Raw) {
+    switch (C) {
+      case '\\': OS << "\\\\"; break;
+      case '"':  OS << "\\\""; break;
+      case '\n': OS << "\\n"; break;
+      case '\t': OS << "\\t"; break;
+      case '\r': OS << "\\r"; break;
+      default:   OS << (char)C; break;
+    }
+  }
+  OS << '"';
+  return true;
+}
+
+bool Emitter::tryEmitIOSubstitution(mlir::LLVM::CallOp Call, int Indent) {
+  if (HasParfor) return false;
+  auto Callee = Call.getCallee();
+  if (!Callee) return false;
+  llvm::StringRef Name = *Callee;
+
+  if (Name == "matlab_disp_str") {
+    // Requires the address operand to come from a GlobalOp we can
+    // reconstruct the string content from. Non-literal disp (dynamic
+    // strings) keeps the runtime call so semantics are preserved.
+    if (Call.getNumOperands() < 1) return false;
+    auto Addr = Call.getOperand(0).getDefiningOp<mlir::LLVM::AddressOfOp>();
+    if (!Addr) return false;
+    auto ParentMod = Call->getParentOfType<mlir::ModuleOp>();
+    auto G = ParentMod.lookupSymbol<mlir::LLVM::GlobalOp>(Addr.getGlobalName());
+    if (!G) return false;
+    auto S = mlir::dyn_cast_or_null<mlir::StringAttr>(G.getValueAttr());
+    if (!S) return false;
+    llvm::StringRef Raw = S.getValue();
+    // Pre-check: non-printable chars force fallback because we can't
+    // embed them verbatim in a `"..."` literal without escape gymnastics
+    // we don't support yet.
+    for (unsigned char C : Raw) {
+      bool OK = (C >= 0x20 && C < 0x7F) || C == '\n' || C == '\t' || C == '\r';
+      if (!OK) return false;
+    }
+    indent(Indent);
+    if (Cpp) {
+      OS << "std::cout << ";
+      writeQuotedStringLiteral(OS, Raw);
+      OS << " << '\\n';\n";
+    } else {
+      OS << "puts(";
+      writeQuotedStringLiteral(OS, Raw);
+      OS << ");\n";
+    }
+    return true;
+  }
+
+  if (Name == "matlab_disp_f64" && Call.getNumOperands() == 1) {
+    // The arg is a double in MLIR, but the emitter prints integer-valued
+    // doubles without a decimal (e.g. `42` rather than `42.0`). For C's
+    // variadic `printf` that's a type mismatch — `%g` requires a double
+    // — so wrap in an explicit cast. `std::cout` picks the right overload
+    // at compile time so no cast is needed for C++.
+    indent(Indent);
+    if (Cpp) {
+      OS << "std::cout << " << stmtExpr(Call.getOperand(0)) << " << '\\n';\n";
+    } else {
+      OS << "printf(\"%g\\n\", (double)" << stmtExpr(Call.getOperand(0))
+         << ");\n";
+    }
+    return true;
+  }
+
+  if (Name == "matlab_disp_i64" && Call.getNumOperands() == 1) {
+    indent(Indent);
+    if (Cpp) {
+      OS << "std::cout << " << stmtExpr(Call.getOperand(0)) << " << '\\n';\n";
+    } else {
+      OS << "printf(\"%lld\\n\", (long long)" << stmtExpr(Call.getOperand(0))
+         << ");\n";
+    }
+    return true;
+  }
+
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -505,6 +999,7 @@ void Emitter::emitProlog() {
 // ---------------------------------------------------------------------------
 
 bool Emitter::run(mlir::ModuleOp M) {
+  precomputeModuleProperties(M);
   emitProlog();
 
   // -- Pre-emission checks: every defined function must have 0 or 1 results.
@@ -536,6 +1031,11 @@ bool Emitter::run(mlir::ModuleOp M) {
     if (!F) continue;
     if (!F.getBody().empty()) continue;  // skip defined funcs.
     UsedNames.insert(F.getSymName().str());
+    // Skip runtime declarations whose calls all got substituted for
+    // direct stdio / iostream equivalents. The extern would otherwise
+    // dangle in the output as a dead forward decl.
+    if (LiveRuntimeFuncs.find(F.getSymName()) == LiveRuntimeFuncs.end())
+      continue;
     auto FT = F.getFunctionType();
     std::string RetTy =
         mlir::isa<mlir::LLVM::LLVMVoidType>(FT.getReturnType())
@@ -778,6 +1278,15 @@ void Emitter::emitFuncFunc(mlir::func::FuncOp F) {
   NextId = 0;  // Reset local SSA counter so each function restarts at v0.
   InlineExprs.clear();
   InlinedOps.clear();
+  DirectSlots.clear();
+  // A new function is its own blank-line frame: don't let the previous
+  // function's final line number influence whether we emit a blank above
+  // the signature (the `}\n\n` end-of-function separator already handles it).
+  LastLineFile.clear();
+  LastLineNum = -1;
+  PendingTrailingLine = -1;
+  PendingTrailingText.clear();
+  TrailingEmittedLines.clear();
   computeInlines(F.getBody());
   auto FT = F.getFunctionType();
   bool IsMain = F.getSymName() == "main";
@@ -817,6 +1326,13 @@ void Emitter::emitLLVMFunc(mlir::LLVM::LLVMFuncOp F) {
   NextId = 0;
   InlineExprs.clear();
   InlinedOps.clear();
+  DirectSlots.clear();
+  DirectSlotDefer.clear();
+  LastLineFile.clear();
+  LastLineNum = -1;
+  PendingTrailingLine = -1;
+  PendingTrailingText.clear();
+  TrailingEmittedLines.clear();
   computeInlines(F.getBody());
   auto FT = F.getFunctionType();
   std::string RetTy =
@@ -851,8 +1367,12 @@ void Emitter::emitRegion(mlir::Region &R, int Indent) {
 }
 
 void Emitter::emitBlock(mlir::Block &B, int Indent) {
+  AtBlockStart = true;
   for (auto &Op : B.getOperations())
     emitOp(Op, Indent);
+  // Flush any trailing comment left pending on the last statement —
+  // no subsequent line-directive call will cross its line boundary.
+  flushPendingTrailing();
 }
 
 // ---------------------------------------------------------------------------
@@ -927,28 +1447,35 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
   if (auto R = mlir::dyn_cast<mlir::func::ReturnOp>(Op)) {
     indent(Indent);
     if (R.getNumOperands() == 0) OS << "return;\n";
-    else OS << "return " << this->exprFor(R.getOperand(0)) << ";\n";
+    else OS << "return " << this->stmtExpr(R.getOperand(0)) << ";\n";
     return;
   }
   if (auto R = mlir::dyn_cast<mlir::LLVM::ReturnOp>(Op)) {
     indent(Indent);
     if (R.getNumOperands() == 0) OS << "return;\n";
-    else OS << "return " << this->exprFor(R.getOperand(0)) << ";\n";
+    else OS << "return " << this->stmtExpr(R.getOperand(0)) << ";\n";
     return;
   }
 
   // --- llvm.call / func.call ------------------------------------------
   if (auto Call = mlir::dyn_cast<mlir::LLVM::CallOp>(Op)) {
+    // IO substitution: when no parfor could race on stdout, rewrite
+    // matlab_disp_str(literal) / matlab_disp_f64 / matlab_disp_i64 as
+    // direct puts / printf / std::cout. Keeps the runtime call when
+    // parfor is present (the mutex matters) or when the string arg
+    // isn't a compile-time literal.
+    if (tryEmitIOSubstitution(Call, Indent)) return;
     indent(Indent);
     if (Call.getNumResults() == 1) {
       std::string N = this->name(Call.getResult());
-      OS << cTypeOfValue(Call.getResult()) << " " << N << " = ";
+      std::string Ty = CppAuto ? "auto" : cTypeOfValue(Call.getResult());
+      OS << Ty << " " << N << " = ";
     }
     if (auto Callee = Call.getCallee()) {
       OS << Callee->str() << "(";
       for (unsigned i = 0; i < Call.getNumOperands(); ++i) {
         if (i) OS << ", ";
-        OS << this->exprFor(Call.getOperand(i));
+        OS << this->stmtExpr(Call.getOperand(i));
       }
       OS << ");\n";
     } else {
@@ -967,7 +1494,7 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
       OS << "))" << this->exprFor(Call.getOperand(0)) << ")(";
       for (unsigned i = 1; i < Call.getNumOperands(); ++i) {
         if (i > 1) OS << ", ";
-        OS << this->exprFor(Call.getOperand(i));
+        OS << this->stmtExpr(Call.getOperand(i));
       }
       OS << ");\n";
     }
@@ -977,12 +1504,13 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
     indent(Indent);
     if (Call.getNumResults() == 1) {
       std::string N = this->name(Call.getResult(0));
-      OS << cTypeOfValue(Call.getResult(0)) << " " << N << " = ";
+      std::string Ty = CppAuto ? "auto" : cTypeOfValue(Call.getResult(0));
+      OS << Ty << " " << N << " = ";
     }
     OS << Call.getCallee().str() << "(";
     for (unsigned i = 0; i < Call.getNumOperands(); ++i) {
       if (i) OS << ", ";
-      OS << this->exprFor(Call.getOperand(i));
+      OS << this->stmtExpr(Call.getOperand(i));
     }
     OS << ");\n";
     return;
@@ -992,7 +1520,7 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
   if (auto A = mlir::dyn_cast<mlir::LLVM::AddressOfOp>(Op)) {
     std::string N = this->name(A.getResult());
     indent(Indent);
-    OS << "void* " << N << " = (void*)&" << A.getGlobalName().str() << ";\n";
+    OS << "void* " << N << " = (void*)" << A.getGlobalName().str() << ";\n";
     return;
   }
 
@@ -1032,8 +1560,8 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
     }
     indent(Indent);
     std::string N = this->name(C.getResult());
-    OS << "bool " << N << " = (" << this->exprFor(C.getLhs()) << " " << CC << " "
-       << this->exprFor(C.getRhs()) << ");\n";
+    OS << "bool " << N << " = " << this->exprFor(C.getLhs()) << " " << CC
+       << " " << this->exprFor(C.getRhs()) << ";\n";
     return;
   }
   if (auto C = mlir::dyn_cast<mlir::arith::CmpIOp>(Op)) {
@@ -1052,8 +1580,8 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
     }
     indent(Indent);
     std::string N = this->name(C.getResult());
-    OS << "bool " << N << " = (" << this->exprFor(C.getLhs()) << " " << CC << " "
-       << this->exprFor(C.getRhs()) << ");\n";
+    OS << "bool " << N << " = " << this->exprFor(C.getLhs()) << " " << CC
+       << " " << this->exprFor(C.getRhs()) << ";\n";
     return;
   }
 
@@ -1102,28 +1630,86 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
         SlotName = uniqueName(Sane + "_slot");
       else
         SlotName = uniqueName(Sane);
-      // The pointer value itself still needs a unique identifier.
-      N = uniqueName(SlotName + "_p");
     } else {
-      N = this->name(A.getResult());
-      SlotName = N + "_slot";
+      SlotName = uniqueName("slot");
     }
-    Names[A.getResult()] = N;
     // Two shapes appear:
     //   1) alloca<T> with ArraySize=1 — a scalar slot (LowerScalarSlots).
     //   2) alloca<!llvm.array<N x T>> with ArraySize=1 — a contiguous buffer
     //      for a matrix literal (LowerTensorOps::materializeMat).
     mlir::Type ET = A.getElemType();
-    if (auto AT = mlir::dyn_cast<mlir::LLVM::LLVMArrayType>(ET)) {
+    bool IsArray = mlir::isa<mlir::LLVM::LLVMArrayType>(ET);
+
+    // Scan uses: if every consumer is a plain llvm.load / llvm.store that
+    // takes the alloca as its address (not the stored value), we can skip
+    // the `void* N = &slot;` trampoline and have stores/loads address the
+    // slot by name directly. Arrays still need the pointer form because
+    // GEPs on them index through it.
+    bool DirectSlot = !IsArray;
+    for (mlir::OpOperand &Use : A->getUses()) {
+      mlir::Operation *U = Use.getOwner();
+      if (auto L = mlir::dyn_cast<mlir::LLVM::LoadOp>(U)) {
+        if (L.getAddr() != A.getResult()) { DirectSlot = false; break; }
+        continue;
+      }
+      if (auto S = mlir::dyn_cast<mlir::LLVM::StoreOp>(U)) {
+        if (S.getAddr() != A.getResult()) { DirectSlot = false; break; }
+        continue;
+      }
+      DirectSlot = false;
+      break;
+    }
+
+    if (IsArray) {
+      auto AT = mlir::cast<mlir::LLVM::LLVMArrayType>(ET);
       std::string ElTy = cTypeOf(AT.getElementType());
       uint64_t N0 = AT.getNumElements();
+      N = uniqueName(SlotName + "_p");
+      Names[A.getResult()] = N;
       indent(Indent);
       OS << ElTy << " " << SlotName << "[" << N0 << "] = {0};\n";
       indent(Indent);
       OS << "void* " << N << " = (void*)" << SlotName << ";\n";
       return;
     }
+
     std::string ElTy = cTypeOf(ET);
+    if (DirectSlot) {
+      // No pointer variable. Bind the alloca's result SSA value to the
+      // slot's name — downstream code checks DirectSlots before treating
+      // it as a real pointer.
+      Names[A.getResult()] = SlotName;
+      DirectSlots[A.getOperation()] = SlotName;
+
+      // If the first user in this block is a StoreOp and we see no load
+      // of the slot before that store, defer the declaration so the store
+      // can emit `T slot = val;` in one line. Works only for same-block
+      // first-write ordering — stores in nested scf regions can't hoist
+      // the declaration out of their parent block.
+      bool DeferDecl = false;
+      mlir::Block *ABlock = A->getBlock();
+      for (auto It = mlir::Block::iterator(A->getNextNode());
+           It != ABlock->end(); ++It) {
+        mlir::Operation *Use = nullptr;
+        bool Relevant = false;
+        for (mlir::OpOperand &U : A.getResult().getUses()) {
+          if (U.getOwner() == &*It) { Use = U.getOwner(); Relevant = true; break; }
+        }
+        if (!Relevant) continue;
+        DeferDecl = mlir::isa<mlir::LLVM::StoreOp>(Use);
+        break;
+      }
+      if (DeferDecl) {
+        DirectSlotDefer.insert(A.getOperation());
+        return;  // the store will emit `T slot = val;`
+      }
+
+      indent(Indent);
+      OS << ElTy << " " << SlotName << " = 0;\n";
+      return;
+    }
+    N = uniqueName(SlotName + "_p");
+    Names[A.getResult()] = N;
     indent(Indent);
     OS << ElTy << " " << SlotName << " = 0;\n";
     indent(Indent);
@@ -1154,14 +1740,15 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
     return;
   }
   if (auto L = mlir::dyn_cast<mlir::LLVM::LoadOp>(Op)) {
-    // If the address is a named alloca, derive the load local's name from
-    // the slot's MATLAB name (e.g. loading `color_slot` -> `color_v`).
-    // Otherwise fall through to the default v<N> scheme. Only kicks in
-    // when the load wasn't inlined (multi-use, such as a switch
-    // discriminant referenced by each case).
+    // Direct-slot fast path: the address is an alloca we've optimized out
+    // of the pointer world. The load becomes a plain read of the slot's
+    // identifier — `double n_v = n;` — so subsequent expressions look
+    // like hand-written C.
+    mlir::Operation *AddrDef = L.getAddr().getDefiningOp();
+    bool IsDirect = AddrDef && DirectSlots.count(AddrDef);
     std::string N;
-    if (auto *AddrDef = L.getAddr().getDefiningOp()) {
-      if (auto A = mlir::dyn_cast<mlir::LLVM::AllocaOp>(AddrDef)) {
+    if (auto *D = AddrDef) {
+      if (auto A = mlir::dyn_cast<mlir::LLVM::AllocaOp>(D)) {
         if (auto NA = A->getAttrOfType<mlir::StringAttr>("matlab.name")) {
           N = uniqueName(NA.getValue().str() + "_v");
           Names[L.getResult()] = N;
@@ -1171,15 +1758,35 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
     if (N.empty()) N = this->name(L.getResult());
     indent(Indent);
     std::string ResTy = cTypeOfValue(L.getResult());
-    OS << ResTy << " " << N << " = *(" << ResTy << "*)"
-       << this->exprFor(L.getAddr()) << ";\n";
+    if (IsDirect) {
+      OS << ResTy << " " << N << " = " << DirectSlots[AddrDef] << ";\n";
+    } else {
+      OS << ResTy << " " << N << " = *(" << ResTy << "*)"
+         << this->exprFor(L.getAddr()) << ";\n";
+    }
     return;
   }
   if (auto S = mlir::dyn_cast<mlir::LLVM::StoreOp>(Op)) {
+    mlir::Operation *AddrDef = S.getAddr().getDefiningOp();
+    bool IsDirect = AddrDef && DirectSlots.count(AddrDef);
     indent(Indent);
-    std::string Ty = cTypeOfValue(S.getValue());
-    OS << "*(" << Ty << "*)" << this->exprFor(S.getAddr()) << " = "
-       << this->exprFor(S.getValue()) << ";\n";
+    if (IsDirect) {
+      // Merge the deferred slot declaration with its first store so the
+      // generated C reads `double y = a + b;` rather than `double y = 0;`
+      // followed later by `y = a + b;`.
+      if (DirectSlotDefer.erase(AddrDef)) {
+        std::string Ty = cTypeOfValue(S.getValue());
+        OS << Ty << " " << DirectSlots[AddrDef] << " = "
+           << this->stmtExpr(S.getValue()) << ";\n";
+      } else {
+        OS << DirectSlots[AddrDef] << " = "
+           << this->stmtExpr(S.getValue()) << ";\n";
+      }
+    } else {
+      std::string Ty = cTypeOfValue(S.getValue());
+      OS << "*(" << Ty << "*)" << this->exprFor(S.getAddr()) << " = "
+         << this->stmtExpr(S.getValue()) << ";\n";
+    }
     return;
   }
 
@@ -1193,7 +1800,7 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
       OS << cTypeOfValue(If.getResult(i)) << " " << N << " = 0;\n";
     }
     indent(Indent);
-    OS << "if (" << this->exprFor(If.getCondition()) << ") {\n";
+    OS << "if (" << this->stmtExpr(If.getCondition()) << ") {\n";
     emitRegion(If.getThenRegion(), Indent + 1);
     if (!If.getElseRegion().empty()) {
       indent(Indent);
@@ -1213,7 +1820,7 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
       for (unsigned i = 0; i < Y.getNumOperands(); ++i) {
         indent(Indent);
         OS << this->name(If.getResult(i)) << " = "
-           << this->exprFor(Y.getOperand(i)) << ";\n";
+           << this->stmtExpr(Y.getOperand(i)) << ";\n";
       }
       return;
     }
@@ -1222,7 +1829,7 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
       for (unsigned i = 0; i < Y.getNumOperands(); ++i) {
         auto BA = W.getBefore().front().getArgument(i);
         indent(Indent);
-        OS << this->name(BA) << " = " << this->exprFor(Y.getOperand(i))
+        OS << this->name(BA) << " = " << this->stmtExpr(Y.getOperand(i))
            << ";\n";
       }
       return;
@@ -1245,7 +1852,7 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
       Names[BA] = N;
       indent(Indent);
       OS << cTypeOf(BA.getType()) << " " << N << " = "
-         << this->exprFor(W.getInits()[i]) << ";\n";
+         << this->stmtExpr(W.getInits()[i]) << ";\n";
     }
     // Result locals for scf.while's outer results: mirror iter-arg names
     // (same storage is used on exit). Bind result SSA values to the same
@@ -1253,6 +1860,40 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
     for (unsigned i = 0; i < W.getNumResults(); ++i) {
       auto BA = Before.getArgument(i);
       Names[W.getResult(i)] = Names[BA];
+    }
+
+    // If the before-region consists only of the scf.condition terminator
+    // (and possibly some inlined-only producers whose output is absorbed
+    // at the condition-use site), we can emit the natural `while (cond)`
+    // loop shape rather than the `while (1) { ...; if (!cond) break; }`
+    // intermediate form. Any non-inlined work in the before-region must
+    // run every iteration and cannot be hoisted above the loop, so we
+    // fall back to the intermediate form when such work exists.
+    bool BeforeIsCondOnly = true;
+    for (auto &Inner : Before.getOperations()) {
+      if (mlir::isa<mlir::scf::ConditionOp>(Inner)) continue;
+      if (InlinedOps.count(&Inner)) continue;
+      BeforeIsCondOnly = false;
+      break;
+    }
+
+    if (BeforeIsCondOnly) {
+      auto Cond = mlir::cast<mlir::scf::ConditionOp>(Before.getTerminator());
+      // Bind after-block args to the forwarded values' current expression
+      // BEFORE emitting the condition — downstream reads resolve via
+      // InlineExprs. (The value name is resolved once here; body reads
+      // pick up the bound expression consistently.)
+      for (unsigned i = 0; i < Cond.getArgs().size(); ++i) {
+        auto AA = After.getArgument(i);
+        InlineExprs[AA] = this->exprFor(Cond.getArgs()[i]);
+      }
+      indent(Indent);
+      OS << "while (" << this->stmtExpr(Cond.getCondition()) << ") {\n";
+      for (auto &Inner : After.getOperations())
+        emitOp(Inner, Indent + 1);
+      indent(Indent);
+      OS << "}\n";
+      return;
     }
 
     indent(Indent);
@@ -1289,8 +1930,8 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
   if (auto S = mlir::dyn_cast<mlir::arith::SelectOp>(Op)) {
     indent(Indent);
     std::string N = this->name(S.getResult());
-    OS << cTypeOfValue(S.getResult()) << " " << N << " = ("
-       << this->exprFor(S.getCondition()) << ") ? "
+    OS << cTypeOfValue(S.getResult()) << " " << N << " = "
+       << this->exprFor(S.getCondition()) << " ? "
        << this->exprFor(S.getTrueValue()) << " : "
        << this->exprFor(S.getFalseValue()) << ";\n";
     return;
@@ -1313,9 +1954,10 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
 
 } // namespace
 
-std::string emitC(mlir::ModuleOp M, bool Cpp) {
+std::string emitC(mlir::ModuleOp M, bool Cpp, bool NoLine, bool Doxygen,
+                  bool CppAuto, const matlab::SourceManager *SM) {
   std::ostringstream OSS;
-  Emitter E(OSS, Cpp);
+  Emitter E(OSS, Cpp, NoLine, Doxygen, CppAuto, SM);
   if (!E.run(M)) return {};
   return OSS.str();
 }

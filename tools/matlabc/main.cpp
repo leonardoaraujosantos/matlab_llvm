@@ -51,6 +51,9 @@ struct Options {
                     EmitLLVM, EmitC, EmitCpp, Check, Repl, Format, Dap };
   Mode Mode = Mode::Check;
   bool Opt = false;
+  bool NoLine = false;
+  bool Doxygen = false;
+  bool CppAuto = false;
   std::string InputPath;
 };
 
@@ -58,7 +61,8 @@ int usage(const char *Prog) {
   std::cerr << "usage: " << Prog
             << " [-dump-tokens | -dump-ast | -emit-sema | -emit-mir |\n"
                "             -emit-mlir | -emit-llvm | -emit-c | -emit-cpp |\n"
-               "             -format | -repl | -dap] FILE.m\n";
+               "             -format | -repl | -dap]\n"
+               "            [-no-line] [-doxygen] [-cpp-auto]  FILE.m\n";
   return 64;
 }
 
@@ -78,6 +82,9 @@ bool parseArgs(int Argc, char **Argv, Options &Opts, const char *&Prog) {
     else if (A == "-format") Opts.Mode = Options::Mode::Format;
     else if (A == "-dap") Opts.Mode = Options::Mode::Dap;
     else if (A == "-opt" || A == "-O") Opts.Opt = true;
+    else if (A == "-no-line" || A == "--no-line") Opts.NoLine = true;
+    else if (A == "-doxygen" || A == "--doxygen") Opts.Doxygen = true;
+    else if (A == "-cpp-auto" || A == "--cpp-auto") Opts.CppAuto = true;
     else if (A == "-h" || A == "--help") return false;
     else if (!A.empty() && A[0] == '-') {
       std::cerr << "unknown flag: " << A << "\n";
@@ -1172,6 +1179,13 @@ int main(int Argc, char **Argv) {
         mlirgen::runLowerIO(M);
         if (Opts.Mode == Options::Mode::EmitC ||
             Opts.Mode == Options::Mode::EmitCpp) {
+          // Fold `if/else/store-to-same-slot` into `arith.select` first,
+          // then squash single-store allocas back into SSA so the emitted
+          // C doesn't drag a `T slot = 0; void* p = &slot;` prelude for
+          // every parameter spill / function-local constant. Keeps the
+          // LLVM path untouched (it has its own mem2reg on the backend).
+          mlirgen::runIfStoreToSelect(M);
+          mlirgen::runMem2RegLite(M);
           // Verify the module right before emission so a malformed IR
           // state is surfaced with a clear error rather than as a cryptic
           // cc/c++ compile failure on the emitted source.
@@ -1181,7 +1195,8 @@ int main(int Argc, char **Argv) {
             return 1;
           }
           std::string Src = mlirgen::emitC(
-              M, Opts.Mode == Options::Mode::EmitCpp);
+              M, Opts.Mode == Options::Mode::EmitCpp, Opts.NoLine,
+              Opts.Doxygen, Opts.CppAuto, &SM);
           if (Src.empty()) return 1;
           std::cout << Src;
         } else {
