@@ -38,6 +38,7 @@ void Resolver::registerBuiltins() {
     "disp", "fprintf", "sprintf", "error", "warning", "input", "clear",
     "keyboard", "pause", "tic", "toc",
     "dbg", "who", "whos",
+    "pi", "e", "Inf", "NaN", "eps", "realmin", "realmax",
     "isempty", "isequal", "find",
     "true", "false",
     "mod", "rem", "floor", "ceil", "round", "fix",

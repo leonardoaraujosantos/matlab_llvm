@@ -1704,6 +1704,10 @@ UNARY_M(log10, log10(x))
 UNARY_M(sqrt, sqrt(x))
 UNARY_M(abs,  fabs(x))
 UNARY_M(sign, (x > 0.0 ? 1.0 : (x < 0.0 ? -1.0 : 0.0)))
+UNARY_M(floor, floor(x))
+UNARY_M(ceil,  ceil(x))
+UNARY_M(round, round(x))   /* MATLAB rounds ties away from zero; C's round() matches. */
+UNARY_M(fix,   trunc(x))   /* MATLAB fix = truncate toward zero. */
 
 #undef UNARY_M
 
@@ -1728,6 +1732,36 @@ double matlab_sqrt_s(double x) { return sqrt(x); }
 double matlab_abs_s(double x)  { return fabs(x); }
 double matlab_sign_s(double x) {
     return x > 0.0 ? 1.0 : (x < 0.0 ? -1.0 : 0.0);
+}
+double matlab_floor_s(double x) { return floor(x); }
+double matlab_ceil_s(double x)  { return ceil(x); }
+double matlab_round_s(double x) { return round(x); }
+double matlab_fix_s(double x)   { return trunc(x); }
+
+/* MATLAB `mod(a,b)`: result has same sign as b (or 0). `rem(a,b)`: sign
+ * of a. C's fmod uses sign-of-a, so fmod == rem; derive mod from that. */
+double matlab_rem_s(double a, double b) {
+    if (b == 0.0) return a;            /* MATLAB: rem(a,0) == a */
+    return fmod(a, b);
+}
+double matlab_mod_s(double a, double b) {
+    if (b == 0.0) return a;            /* MATLAB: mod(a,0) == a */
+    double r = fmod(a, b);
+    if (r != 0.0 && ((r < 0.0) != (b < 0.0))) r += b;
+    return r;
+}
+
+/* linspace(a, b, n): n points evenly spaced from a to b inclusive.
+ * n < 2 returns just [b] per MATLAB. Returns a 1xn row matrix. */
+matlab_mat *matlab_linspace(double a, double b, double nd) {
+    int64_t n = (int64_t)nd;
+    if (n < 1) n = 1;
+    matlab_mat *C = mat_alloc(1, n);
+    if (n == 1) { C->data[0] = b; return C; }
+    double step = (b - a) / (double)(n - 1);
+    for (int64_t i = 0; i < n; ++i) C->data[i] = a + step * (double)i;
+    C->data[n - 1] = b;                /* exact endpoint */
+    return C;
 }
 
 /* atan2 on matrices: elementwise y vs x, both matrices must be same size. */

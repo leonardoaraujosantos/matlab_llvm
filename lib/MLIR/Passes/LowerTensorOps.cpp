@@ -429,6 +429,53 @@ bool TensorLowering::rewriteBuiltinCalls() {
       return Addr;
     };
 
+    /* Normalize 1-arg forms of 2-arg shape builtins: `eye(n)` is
+     * `eye(n, n)`, same for zeros / ones / rand / randn. The runtime
+     * only exposes 2-arg entries (matlab_eye(m, n) etc.), so rewrite
+     * the call site rather than widen the ABI. Only matches when the
+     * single operand is f64 — a 1-arg matrix form (e.g. `zeros(size(A))`)
+     * is a different, not-yet-supported semantic. */
+    if (Call->getNumOperands() == 1 &&
+        Call->getOperand(0).getType() == F64 &&
+        (Name == "eye" || Name == "zeros" || Name == "ones" ||
+         Name == "rand" || Name == "randn")) {
+      Value N0 = Call->getOperand(0);
+      B.setInsertionPoint(Call);
+      mlir::OperationState S(Call->getLoc(), "matlab.call_builtin");
+      S.addOperands({N0, N0});
+      S.addTypes(Call->getResultTypes());
+      for (auto A : Call->getAttrs()) S.addAttribute(A.getName(), A.getValue());
+      Operation *New = B.create(S);
+      for (unsigned i = 0; i < Call->getNumResults(); ++i)
+        Call->getResult(i).replaceAllUsesWith(New->getResult(i));
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+
+    /* `diag(s)` with a scalar f64 `s` is `diag([s])`, a 1x1 matrix
+     * with `s` on its single diagonal slot. Runtime matlab_diag takes
+     * a matrix ptr, so box the scalar via matlab_mat_from_scalar(f64)
+     * first. MATLAB accepts `diag(4) == 4` (scalar→1x1). */
+    if (Name == "diag" && Call->getNumOperands() == 1 &&
+        Call->getOperand(0).getType() == F64) {
+      Value S0 = Call->getOperand(0);
+      B.setInsertionPoint(Call);
+      auto Fn = rt("matlab_mat_from_scalar", PtrTy, {F64});
+      auto Box = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                       ValueRange{S0});
+      mlir::OperationState St(Call->getLoc(), "matlab.call_builtin");
+      St.addOperands({Box.getResult()});
+      St.addTypes(Call->getResultTypes());
+      for (auto A : Call->getAttrs()) St.addAttribute(A.getName(), A.getValue());
+      Operation *New = B.create(St);
+      for (unsigned i = 0; i < Call->getNumResults(); ++i)
+        Call->getResult(i).replaceAllUsesWith(New->getResult(i));
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+
     /* rmfield(s, 'name') — route to matlab_struct_rmfield, returning
      * the same ptr so `s = rmfield(s, 'x')` keeps s working. */
     if (Name == "rmfield" && Call->getNumOperands() == 2 &&
@@ -1467,6 +1514,32 @@ bool TensorLowering::rewriteBuiltinCalls() {
         Changed = true;
         continue;
       }
+      /* [r, c] = size(A): two f64 results, one ptr input. Split into
+       * two matlab_size_dim(A, 1) / matlab_size_dim(A, 2) calls —
+       * cheaper than a multi-return runtime entry, and reuses the
+       * existing size_dim primitive the single-return size(A, dim)
+       * already goes through. */
+      if (Name == "size") {
+        B.setInsertionPoint(Call);
+        auto Fn = rt("matlab_size_dim", F64, {PtrTy, F64});
+        auto D1 = LLVM::ConstantOp::create(B, Call->getLoc(), F64,
+                                            B.getF64FloatAttr(1.0));
+        auto D2 = LLVM::ConstantOp::create(B, Call->getLoc(), F64,
+                                            B.getF64FloatAttr(2.0));
+        auto C0 = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                        ValueRange{Call->getOperand(0), D1});
+        auto C1 = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                        ValueRange{Call->getOperand(0), D2});
+        if (Call->getResult(0).getType() != F64)
+          Call->getResult(0).setType(F64);
+        if (Call->getResult(1).getType() != F64)
+          Call->getResult(1).setType(F64);
+        Call->getResult(0).replaceAllUsesWith(C0.getResult());
+        Call->getResult(1).replaceAllUsesWith(C1.getResult());
+        Call->erase();
+        Changed = true;
+        continue;
+      }
     }
 
     // Table of simple 1- or 2-arg builtins returning either a matrix ptr
@@ -1548,6 +1621,13 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"sqrt",       "matlab_sqrt_m",     1, "p"},
       {"abs",        "matlab_abs_m",      1, "p"},
       {"sign",       "matlab_sign_m",     1, "p"},
+      {"floor",      "matlab_floor_m",    1, "p"},
+      {"ceil",       "matlab_ceil_m",     1, "p"},
+      {"round",      "matlab_round_m",    1, "p"},
+      {"fix",        "matlab_fix_m",      1, "p"},
+      {"linspace",   "matlab_linspace",   1, "fff"},
+      {"mod",        "matlab_mod_s",      0, "ff"},
+      {"rem",        "matlab_rem_s",      0, "ff"},
       {"atan2",      "matlab_atan2_m",    1, "pp"},
       {"inv",        "matlab_inv",        1, "p"},
       {"det",        "matlab_det",        0, "p"},
@@ -1604,6 +1684,8 @@ bool TensorLowering::rewriteBuiltinCalls() {
         {"tanh", "matlab_tanh_s"},
         {"log2", "matlab_log2_s"}, {"log10", "matlab_log10_s"},
         {"sign", "matlab_sign_s"},
+        {"floor", "matlab_floor_s"}, {"ceil", "matlab_ceil_s"},
+        {"round", "matlab_round_s"}, {"fix", "matlab_fix_s"},
         /* Integer / type cast builtins — runtime is still f64, but
          * these truncate + saturate to the target dtype's range so
          * downstream arithmetic sees the value MATLAB would. */

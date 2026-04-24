@@ -22,7 +22,10 @@
 #include "mlir/IR/Types.h"
 #include "mlir/IR/Verifier.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringSet.h"
 #include "llvm/Support/raw_os_ostream.h"
+
+#include <limits>
 
 #include <functional>
 #include <ostream>
@@ -596,6 +599,28 @@ mlir::Value Lowerer::loadBinding(Binding *Bnd, const Type *ValTy,
         mlir::StringAttr::get(&MCtx, "matlab_global_get_f64"));
     return emitUnreg("matlab.call_builtin", {IdV}, F64, L, {Cal});
   }
+  /* Numeric constants: MATLAB exposes pi / e / Inf / NaN / eps as
+   * zero-arg builtins that evaluate to compile-time constants when
+   * used as bare names (and to calls when invoked with args — not
+   * supported here; the common `pi` / `Inf` case is the only one
+   * most programs hit). Emit a direct arith.constant so downstream
+   * arithmetic sees an f64 it can fold or lower cheaply. Numeric
+   * values match MATLAB's definitions (eps = 2^-52, realmin /
+   * realmax are the smallest / largest normal f64). */
+  if (Bnd->Kind == BindingKind::Builtin) {
+    auto F64 = mlir::Float64Type::get(&MCtx);
+    auto emitF = [&](double V) -> mlir::Value {
+      return mlir::arith::ConstantOp::create(
+          B, L, F64, mlir::FloatAttr::get(F64, V));
+    };
+    if (Bnd->Name == "pi")      return emitF(3.14159265358979323846);
+    if (Bnd->Name == "e")       return emitF(2.71828182845904523536);
+    if (Bnd->Name == "Inf")     return emitF(std::numeric_limits<double>::infinity());
+    if (Bnd->Name == "NaN")     return emitF(std::numeric_limits<double>::quiet_NaN());
+    if (Bnd->Name == "eps")     return emitF(2.2204460492503131e-16);
+    if (Bnd->Name == "realmin") return emitF(2.2250738585072014e-308);
+    if (Bnd->Name == "realmax") return emitF(1.7976931348623157e+308);
+  }
   /* nargin / nargout: emit placeholder matlab.nargin / matlab.nargout
    * ops. A late pass rewrites them to arith.constant per-function AFTER
    * the monomorphiser has produced per-arity clones, so each clone
@@ -1166,12 +1191,72 @@ void Lowerer::lowerStmt(const Stmt &St) {
                 (int64_t)A.LHS.size()));
         llvm::SmallVector<mlir::Type, 4> Rtys(
             A.LHS.size(), mlir::NoneType::get(&MCtx));
+        /* Result-type refinement for builtins whose multi-return
+         * results have a well-known kind. Keeps the receiving slots
+         * from being allocated as matrix (tensor<?xf64>) when the
+         * callee actually yields scalar f64s. Same role as the
+         * single-return overrides just above the generic emit: we
+         * refine when Sema left the arity-split vague. */
+        {
+          auto F64 = mlir::Float64Type::get(&MCtx);
+          auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+          llvm::StringRef CN = Callee->Name;
+          /* [r, c] = size(A) — both f64. */
+          if (CN == "size" && A.LHS.size() == 2)
+            Rtys.assign(A.LHS.size(), F64);
+          /* [V, D] = eig / [Q, R] = qr / [L, U] = lu / [U, S, V] = svd —
+           * all ptr (matrix) results. */
+          else if ((CN == "eig" || CN == "qr" || CN == "lu" ||
+                    CN == "svd") && A.LHS.size() >= 2)
+            Rtys.assign(A.LHS.size(), PtrTy);
+          /* [row, col] = ind2sub(sz, i) — scalar f64s. */
+          else if (CN == "ind2sub" && A.LHS.size() == 2)
+            Rtys.assign(A.LHS.size(), F64);
+        }
         mlir::Operation *Op = emitUnregOp("matlab.call_builtin", Args,
                                            Rtys, loc(A.Range), {Cal, NO});
         for (size_t i = 0;
              i < A.LHS.size() && i < (size_t)Op->getNumResults(); ++i) {
-          if (A.LHS[i])
-            lowerLValueStore(*A.LHS[i], Op->getResult(i));
+          if (!A.LHS[i]) continue;
+          /* Slot-type shortcut: when the result is a concrete f64 or
+           * ptr (we refined Rtys above) and the LHS is a plain
+           * NameExpr, pre-allocate the slot with that type so Sema's
+           * possibly-incorrect tensor type doesn't leak through to
+           * the alloc. Without this, `[r, c] = size(A)` would get
+           * tensor<?xf64> slots that never lower to llvm.alloca of
+           * f64, leaving stray matlab.alloc ops in the final IR. */
+          auto ResTy = Op->getResult(i).getType();
+          if (auto *NE = dynamic_cast<const NameExpr *>(A.LHS[i]);
+              NE && NE->Ref &&
+              !(ReplMode && InScriptBody &&
+                NE->Ref->Kind == BindingKind::Var) &&
+              (mlir::isa<mlir::Float64Type>(ResTy) ||
+               ResTy == mlir::LLVM::LLVMPointerType::get(&MCtx))) {
+            if (Slots.find(NE->Ref) == Slots.end()) {
+              mlir::OpBuilder::InsertionGuard G(B);
+              auto *InsBlock = B.getInsertionBlock();
+              mlir::Operation *P = InsBlock ? InsBlock->getParentOp() : nullptr;
+              while (P && !mlir::isa<mlir::func::FuncOp>(P)) {
+                auto *PB = P->getBlock();
+                P = PB ? PB->getParentOp() : nullptr;
+              }
+              mlir::Block *Entry = P
+                  ? &mlir::cast<mlir::func::FuncOp>(P).getBody().front()
+                  : InsBlock;
+              B.setInsertionPointToStart(Entry);
+              mlir::NamedAttribute NameA(
+                  mlir::StringAttr::get(&MCtx, "name"),
+                  mlir::StringAttr::get(&MCtx, std::string(NE->Name)));
+              mlir::Value Slot = emitUnreg(
+                  "matlab.alloc", {}, ResTy, loc(NE->Range), {NameA});
+              Slots[NE->Ref] = Slot;
+            }
+            emitUnregOp("matlab.store",
+                        {Op->getResult(i), Slots[NE->Ref]}, {},
+                        loc(A.Range));
+            continue;
+          }
+          lowerLValueStore(*A.LHS[i], Op->getResult(i));
         }
         return;
       }
@@ -2518,9 +2603,38 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
                   mlir::IntegerType::get(&MCtx, 64),
                   (int64_t)OrigArity)));
         }
+        /* Refine the call's MLIR result type for known builtins when
+         * Sema left it open. The ExprStmt implicit-display path checks
+         * V.getType() at lowerExpr-return time and skips NoneType, so
+         * bare `det(A)` at the REPL used to silently drop its output.
+         * Split into "always f64" vs. "always ptr" based on the runtime
+         * signature — matches the LowerTensorOps dispatch table. */
+        mlir::Type ResTy = RT;
+        if (N->Ref->Kind == BindingKind::Builtin &&
+            mlir::isa<mlir::NoneType>(ResTy)) {
+          auto F64 = mlir::Float64Type::get(&MCtx);
+          auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+          static const llvm::StringSet<> F64Ret = {
+            "det", "norm", "trace", "length", "numel", "ndims",
+            "isempty", "isequal", "rank", "sub2ind", "mod", "rem",
+            "fix", "round", "floor", "ceil",
+          };
+          static const llvm::StringSet<> PtrRet = {
+            "zeros", "ones", "eye", "magic", "rand", "randn",
+            "sum", "prod", "mean", "min", "max", "cumsum", "cumprod",
+            "sort", "sortrows", "unique", "ismember", "setdiff",
+            "intersect", "union", "horzcat", "vertcat", "kron",
+            "chol", "pinv", "permute", "squeeze", "flip", "fliplr",
+            "flipud", "rot90", "size", "transpose", "ctranspose",
+            "diag", "reshape", "repmat", "inv", "svd", "eig",
+            "find", "ind2sub", "linspace",
+          };
+          if (F64Ret.contains(N->Name)) ResTy = F64;
+          else if (PtrRet.contains(N->Name)) ResTy = PtrTy;
+        }
         return emitUnreg(N->Ref->Kind == BindingKind::Builtin
                               ? "matlab.call_builtin" : "matlab.call",
-                          Args, RT, L, AllAttrs);
+                          Args, ResTy, L, AllAttrs);
       }
       mlir::Value CV = C.Callee ? lowerExpr(*C.Callee) : mlir::Value{};
       llvm::SmallVector<mlir::Value, 4> Os;
