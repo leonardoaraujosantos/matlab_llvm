@@ -2702,6 +2702,330 @@ void matlab_dbg_f64(const char *file, int64_t file_len,
     pthread_mutex_unlock(&matlab_io_mutex);
 }
 
+/* -------- Full DAP hook infrastructure ------------------------------------
+ *
+ * Injected into the JIT'd code by matlabc -g / matlabc -dap. The hook is
+ * called at each top-level statement boundary with (file_id, line) where
+ * file_id is the SourceManager's FileID cast to i32. The DAP server
+ * (in matlabc's -dap mode) shares this state via locks + condvar and
+ * drives the debuggee through setBreakpoints / continue / next commands.
+ *
+ * Breakpoints are stored as a linear array keyed by (file_id, line). A
+ * small capped array is fine since human-set breakpoints don't scale
+ * past a few dozen.
+ *
+ * Frames are tracked by matlab_dbg_enter_frame / _leave_frame so the
+ * DAP server can return a multi-entry stackTrace. When -g is on, every
+ * emitted user-function body calls enter on entry and leave before
+ * each return.
+ */
+#define MATLAB_DBG_MAX_BREAKPOINTS 256
+#define MATLAB_DBG_MAX_FRAMES 128
+
+enum matlab_dbg_action {
+    MATLAB_DBG_RUN       = 0,   /* no pause (no breakpoints hit) */
+    MATLAB_DBG_CONTINUE  = 1,   /* resume from a pause */
+    MATLAB_DBG_STEP_OVER = 2,   /* break at next statement at <= target depth */
+    MATLAB_DBG_STEP_IN   = 3,   /* break at the very next statement */
+    MATLAB_DBG_STEP_OUT  = 4,   /* break at next statement at <  target depth */
+    MATLAB_DBG_STOP      = 5,   /* terminate the program */
+};
+
+struct matlab_dbg_frame {
+    int32_t file_id;
+    int32_t line;
+    const char *fn_name;
+};
+
+struct matlab_dbg_state {
+    int enabled;
+    int stop_on_entry;
+    pthread_mutex_t mu;
+    pthread_cond_t cv_client;   /* debugger thread waits on this when paused */
+    pthread_cond_t cv_server;   /* server waits on this when requesting pause */
+
+    /* Last-hit pause point, published after the hook blocks. */
+    int paused;
+    int32_t cur_file_id;
+    int32_t cur_line;
+
+    /* What to do when resumed. */
+    enum matlab_dbg_action action;
+    int32_t step_target_depth;
+
+    /* Breakpoints (file_id, line) — linear scan. */
+    int n_bp;
+    int32_t bp_file[MATLAB_DBG_MAX_BREAKPOINTS];
+    int32_t bp_line[MATLAB_DBG_MAX_BREAKPOINTS];
+
+    /* Frame stack. Always at least one entry (the script / top level). */
+    int n_frames;
+    struct matlab_dbg_frame frames[MATLAB_DBG_MAX_FRAMES];
+
+    /* File-id <-> name table. Populated by matlab_dbg_register_file. */
+    int n_files;
+    const char *file_names[256];
+    int64_t file_name_lens[256];
+};
+
+static struct matlab_dbg_state matlab_dbg = {
+    .mu = PTHREAD_MUTEX_INITIALIZER,
+    .cv_client = PTHREAD_COND_INITIALIZER,
+    .cv_server = PTHREAD_COND_INITIALIZER,
+    .action = MATLAB_DBG_RUN,
+};
+
+/* Called from the server thread to enable the hook and set the
+ * stop-on-entry mode before the worker starts. */
+void matlab_dbg_enable(int stop_on_entry) {
+    pthread_mutex_lock(&matlab_dbg.mu);
+    matlab_dbg.enabled = 1;
+    matlab_dbg.stop_on_entry = stop_on_entry ? 1 : 0;
+    matlab_dbg.action = stop_on_entry ? MATLAB_DBG_STEP_IN : MATLAB_DBG_RUN;
+    matlab_dbg.n_frames = 1;
+    matlab_dbg.frames[0].file_id = 0;
+    matlab_dbg.frames[0].line = 0;
+    matlab_dbg.frames[0].fn_name = "<script>";
+    pthread_mutex_unlock(&matlab_dbg.mu);
+}
+
+/* Register (file_id -> filename) so the DAP server can resolve
+ * breakpoints by file path. Called once per source file before the
+ * debuggee starts. file_id is 1-based; we store 0-based. */
+void matlab_dbg_register_file(int32_t file_id,
+                               const char *name, int64_t name_len) {
+    if (file_id <= 0 || file_id > (int32_t)(sizeof matlab_dbg.file_names /
+                                              sizeof matlab_dbg.file_names[0]))
+        return;
+    /* Copy the name so we own it. */
+    char *copy = (char *)malloc((size_t)name_len + 1);
+    memcpy(copy, name, (size_t)name_len);
+    copy[name_len] = '\0';
+    pthread_mutex_lock(&matlab_dbg.mu);
+    matlab_dbg.file_names[file_id - 1] = copy;
+    matlab_dbg.file_name_lens[file_id - 1] = name_len;
+    if (file_id > matlab_dbg.n_files) matlab_dbg.n_files = file_id;
+    pthread_mutex_unlock(&matlab_dbg.mu);
+}
+
+/* Called from the server thread. Returns the previous breakpoint
+ * count for that file so the server can clear-and-reset atomically.
+ * Simple: we wipe every breakpoint for that file then re-add. */
+void matlab_dbg_clear_breakpoints_in_file(int32_t file_id) {
+    pthread_mutex_lock(&matlab_dbg.mu);
+    int w = 0;
+    for (int i = 0; i < matlab_dbg.n_bp; ++i) {
+        if (matlab_dbg.bp_file[i] == file_id) continue;
+        matlab_dbg.bp_file[w] = matlab_dbg.bp_file[i];
+        matlab_dbg.bp_line[w] = matlab_dbg.bp_line[i];
+        ++w;
+    }
+    matlab_dbg.n_bp = w;
+    pthread_mutex_unlock(&matlab_dbg.mu);
+}
+
+int matlab_dbg_add_breakpoint(int32_t file_id, int32_t line) {
+    pthread_mutex_lock(&matlab_dbg.mu);
+    int ok = matlab_dbg.n_bp < MATLAB_DBG_MAX_BREAKPOINTS;
+    if (ok) {
+        matlab_dbg.bp_file[matlab_dbg.n_bp] = file_id;
+        matlab_dbg.bp_line[matlab_dbg.n_bp] = line;
+        matlab_dbg.n_bp++;
+    }
+    pthread_mutex_unlock(&matlab_dbg.mu);
+    return ok;
+}
+
+/* Called from the server thread after handling a stopped event.
+ * Sets the next action and wakes the worker. */
+void matlab_dbg_resume(int action) {
+    pthread_mutex_lock(&matlab_dbg.mu);
+    matlab_dbg.action = (enum matlab_dbg_action)action;
+    if (action == MATLAB_DBG_STEP_OVER)
+        matlab_dbg.step_target_depth = matlab_dbg.n_frames;
+    else if (action == MATLAB_DBG_STEP_OUT)
+        matlab_dbg.step_target_depth = matlab_dbg.n_frames - 1;
+    matlab_dbg.paused = 0;
+    pthread_cond_broadcast(&matlab_dbg.cv_client);
+    pthread_mutex_unlock(&matlab_dbg.mu);
+}
+
+/* Called from the server thread to read the current pause point. */
+void matlab_dbg_get_pause(int32_t *file_id, int32_t *line) {
+    pthread_mutex_lock(&matlab_dbg.mu);
+    *file_id = matlab_dbg.cur_file_id;
+    *line = matlab_dbg.cur_line;
+    pthread_mutex_unlock(&matlab_dbg.mu);
+}
+
+/* Frame counts are published so the server can draw a stackTrace. */
+int matlab_dbg_frame_count(void) {
+    pthread_mutex_lock(&matlab_dbg.mu);
+    int n = matlab_dbg.n_frames;
+    pthread_mutex_unlock(&matlab_dbg.mu);
+    return n;
+}
+
+/* Snapshot frame i (0-based, 0 = innermost) into caller-supplied outs.
+ * Returns 1 on success. fn_name's storage is runtime-owned. */
+int matlab_dbg_frame_at(int i, int32_t *file_id, int32_t *line,
+                         const char **fn_name) {
+    pthread_mutex_lock(&matlab_dbg.mu);
+    /* Frames are stored with index 0 = outermost. Convert. */
+    int idx = matlab_dbg.n_frames - 1 - i;
+    int ok = idx >= 0 && idx < matlab_dbg.n_frames;
+    if (ok) {
+        *file_id = matlab_dbg.frames[idx].file_id;
+        *line    = matlab_dbg.frames[idx].line;
+        *fn_name = matlab_dbg.frames[idx].fn_name;
+    }
+    pthread_mutex_unlock(&matlab_dbg.mu);
+    return ok;
+}
+
+/* Workspace snapshot — the server asks for these on every `variables`
+ * request. Output uses a small array populated by the caller; the
+ * server copies fields out while holding no runtime lock. The struct
+ * for a variable's value is returned as its stored f64 or matrix
+ * pointer; the server formats for display. */
+int matlab_dbg_ws_count(void) {
+    matlab_ws_init_if_needed();
+    return matlab_ws ? matlab_ws->nfields : 0;
+}
+
+const char *matlab_dbg_ws_name(int i, int64_t *len_out) {
+    matlab_ws_init_if_needed();
+    if (!matlab_ws || i < 0 || i >= matlab_ws->nfields) {
+        *len_out = 0;
+        return "";
+    }
+    const char *n = matlab_ws->names[i];
+    *len_out = (int64_t)strlen(n);
+    return n;
+}
+
+int matlab_dbg_ws_kind(int i) {
+    matlab_ws_init_if_needed();
+    if (!matlab_ws || i < 0 || i >= matlab_ws->nfields) return -1;
+    return matlab_ws->kinds[i];
+}
+
+double matlab_dbg_ws_f64(int i) {
+    matlab_ws_init_if_needed();
+    if (!matlab_ws || i < 0 || i >= matlab_ws->nfields) return 0.0;
+    return matlab_ws->f64_vals[i];
+}
+
+void *matlab_dbg_ws_ptr(int i) {
+    matlab_ws_init_if_needed();
+    if (!matlab_ws || i < 0 || i >= matlab_ws->nfields) return NULL;
+    return matlab_ws->ptr_vals[i];
+}
+
+/* Shape accessors used by the DAP `variables` formatter. Thin wrappers
+ * around the opaque matlab_mat struct — the DAP server doesn't have
+ * access to the internal layout. */
+int64_t matlab_dbg_mat_rows(matlab_mat *m) { return m ? m->rows : 0; }
+int64_t matlab_dbg_mat_cols(matlab_mat *m) { return m ? m->cols : 0; }
+
+/* The injected hook. Called from JIT'd code at each statement entry
+ * when compiled with -g. Takes (file_id, line) as raw ints so the
+ * emitted call is cheap — just two arith.constant ops feeding a
+ * known runtime symbol. */
+void matlab_dbg_hook(int32_t file_id, int32_t line) {
+    pthread_mutex_lock(&matlab_dbg.mu);
+    if (!matlab_dbg.enabled) {
+        pthread_mutex_unlock(&matlab_dbg.mu);
+        return;
+    }
+    /* Update the innermost frame's line. */
+    if (matlab_dbg.n_frames > 0) {
+        matlab_dbg.frames[matlab_dbg.n_frames - 1].file_id = file_id;
+        matlab_dbg.frames[matlab_dbg.n_frames - 1].line = line;
+    }
+
+    int should_pause = 0;
+    /* Stepping: decide based on action + target depth. */
+    switch (matlab_dbg.action) {
+    case MATLAB_DBG_STEP_IN:
+        should_pause = 1;
+        break;
+    case MATLAB_DBG_STEP_OVER:
+        if (matlab_dbg.n_frames <= matlab_dbg.step_target_depth)
+            should_pause = 1;
+        break;
+    case MATLAB_DBG_STEP_OUT:
+        if (matlab_dbg.n_frames <= matlab_dbg.step_target_depth)
+            should_pause = 1;
+        break;
+    case MATLAB_DBG_STOP:
+        pthread_mutex_unlock(&matlab_dbg.mu);
+        pthread_exit(NULL);
+        return;
+    default:
+        break;
+    }
+    /* Breakpoint check (regardless of step action). */
+    if (!should_pause) {
+        for (int i = 0; i < matlab_dbg.n_bp; ++i) {
+            if (matlab_dbg.bp_file[i] == file_id &&
+                matlab_dbg.bp_line[i] == line) {
+                should_pause = 1;
+                break;
+            }
+        }
+    }
+    if (should_pause) {
+        matlab_dbg.cur_file_id = file_id;
+        matlab_dbg.cur_line = line;
+        matlab_dbg.paused = 1;
+        /* Signal the server that we're paused; wait for resume. */
+        pthread_cond_broadcast(&matlab_dbg.cv_server);
+        while (matlab_dbg.paused) {
+            pthread_cond_wait(&matlab_dbg.cv_client, &matlab_dbg.mu);
+        }
+    }
+    pthread_mutex_unlock(&matlab_dbg.mu);
+}
+
+/* Frame-tracking hooks (used when -g is on and we instrument user
+ * function entry/exit). For v1 the DAP server only sees a single
+ * frame since we don't yet inject these at user-function boundaries;
+ * keeping the API shape lets us add them without an ABI break. */
+void matlab_dbg_enter_frame(const char *fn_name, int64_t name_len) {
+    (void)name_len;
+    pthread_mutex_lock(&matlab_dbg.mu);
+    if (matlab_dbg.n_frames < MATLAB_DBG_MAX_FRAMES) {
+        matlab_dbg.frames[matlab_dbg.n_frames].fn_name = fn_name;
+        matlab_dbg.frames[matlab_dbg.n_frames].file_id = 0;
+        matlab_dbg.frames[matlab_dbg.n_frames].line = 0;
+        matlab_dbg.n_frames++;
+    }
+    pthread_mutex_unlock(&matlab_dbg.mu);
+}
+
+void matlab_dbg_leave_frame(void) {
+    pthread_mutex_lock(&matlab_dbg.mu);
+    if (matlab_dbg.n_frames > 1) matlab_dbg.n_frames--;
+    pthread_mutex_unlock(&matlab_dbg.mu);
+}
+
+/* Blocks until the worker is paused or has exited. Used by the
+ * server to know when it can handle client requests safely. */
+void matlab_dbg_wait_for_pause(void) {
+    pthread_mutex_lock(&matlab_dbg.mu);
+    while (!matlab_dbg.paused)
+        pthread_cond_wait(&matlab_dbg.cv_server, &matlab_dbg.mu);
+    pthread_mutex_unlock(&matlab_dbg.mu);
+}
+
+int matlab_dbg_is_paused(void) {
+    pthread_mutex_lock(&matlab_dbg.mu);
+    int p = matlab_dbg.paused;
+    pthread_mutex_unlock(&matlab_dbg.mu);
+    return p;
+}
+
 void matlab_dbg_mat(const char *file, int64_t file_len,
                     int32_t line,
                     const char *label, int64_t label_len,

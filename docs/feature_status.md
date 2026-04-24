@@ -291,7 +291,7 @@ overloading).
 | Formatter (AST pretty-printer, idempotent) | ✅ | `matlabc -format` / `just format`. Drops comments (not in AST). |
 | REPL / interactive interpreter | 🟡 | JIT via MLIR ExecutionEngine, persistent workspace, implicit display, `who`/`whos`/`clear`. `matlabc -repl`. See `docs/repl.md`. |
 | Language Server (LSP) | 🟡 | `matlab-lsp` binary: initialize/shutdown, didOpen/didChange/didClose, publishDiagnostics, definition, documentSymbol. No completion / hover / rename / workspace-symbol yet. See `docs/lsp.md`. |
-| Debugger (DAP) | 🟡 | Aids shipped: `dbg(x)` source-located print to stderr, `who`/`whos`/`clear` workspace commands, `#line` in emitted C/C++ so gdb/lldb steps the `.m` source. Full breakpoint/step debugging is blocked on a JIT-level instrumentation pass or a tree-walking interpreter — see `docs/debug.md`. |
+| Debugger (DAP) | 🟡 | `matlabc -dap FILE.m` speaks the full Debug Adapter Protocol over stdio: breakpoints (`setBreakpoints`), step (`next`/`stepIn`/`stepOut`), stack trace, `Locals` scope via the workspace snapshot, stdout forwarded as `output` events, clean `disconnect`. Plus the lightweight aids: `dbg(x)` prints to stderr, `who`/`whos`/`clear` list and purge the workspace, `#line` directives in emitted C / C++ so gdb/lldb step `.m` source. Deferred: pushing a stack frame on user-function entry (single `<script>` frame for now), `setVariable`, `evaluate`, conditional breakpoints. See `docs/debug.md`. |
 | Unit-test framework (MATLAB `matlab.unittest`) | ❌ |
 | Live Scripts (`.mlx`) | ❌ |
 | MEX interop (loading `.mex` files) | ❌ |
@@ -335,7 +335,7 @@ deliberate non-goals; see "Out of scope."
 
 | Missing | Scope | Reference |
 |---|---|---|
-| Full DAP (breakpoints + stepping) | 3–4 weeks | Needs JIT-level instrumentation or a tree-walking interpreter. See `docs/debug.md`. |
+| User-function frames in DAP stack trace | 0.5 week | Inject `matlab_dbg_enter_frame` / `_leave_frame` at function entry / return in the MLIR lowerer. Runtime and DAP server already call `stackTrace` from the frame list. See `docs/debug.md`. |
 | LSP completion / hover / rename | 2 weeks | Extends the current skeleton. See `docs/lsp.md`. |
 | Package manager / path | 1 week | `addpath`, `+pkg` directories. |
 | Linter (style + unused-var) | 1 week | AST pass; formatter infrastructure already reusable. |
@@ -368,7 +368,7 @@ sort / linalg tail, strings, REPL, file I/O, basic OOP, tooling —
 | 3 | `varargout` + 3-D vector slicing (`A(:,:,k)`) | 1 week | Library-style + volumetric code |
 | 4 | Complex-number runtime | 2 weeks | DSP programs |
 | 5 | OOP value-class copy semantics + property validators | 2 weeks | Modern MATLAB code |
-| 6 | Full DAP (breakpoints + stepping) | 3–4 weeks | Interactive debugging in editors |
+| 6 | DAP user-function frames + `evaluate` | 1 week | Stepping into user functions shows their frames; watch expressions |
 | 7 | `regexp` / `regexprep` + string tail | 1–2 weeks | Text-processing scripts |
 | 8 | Full non-symmetric `eig` + `[U, S, V] = svd` | 1 week | Scientific computing |
 | 9 | MATLAB `.mat` file-format parser | 2 weeks | Real data pipelines |

@@ -134,9 +134,10 @@ void collectCaptures(const Expr *E,
 class Lowerer {
 public:
   Lowerer(mlir::MLIRContext &MCtx, TypeContext &TC, DiagnosticEngine &Diag,
-          const SourceManager *SM = nullptr, bool ReplMode = false)
+          const SourceManager *SM = nullptr, bool ReplMode = false,
+          bool DebugMode = false)
       : MCtx(MCtx), TC(TC), Diag(Diag), SM(SM), B(&MCtx),
-        ReplMode(ReplMode) {
+        ReplMode(ReplMode), DebugMode(DebugMode) {
     (void)this->Diag;
     (void)this->SM;
   }
@@ -159,6 +160,11 @@ private:
    * so Vars declared inside a user function keep their slot-local
    * semantics. */
   bool InScriptBody = false;
+  /* When true, inject matlab_dbg_hook(file_id, line) at every
+   * top-level / function-body statement. The file_id comes from the
+   * SourceManager's FileID so the DAP server can resolve back to the
+   * source path via matlab_dbg_register_file. */
+  bool DebugMode = false;
 
   // Per-function: binding -> slot (Value result of matlab.alloc).
   std::unordered_map<Binding *, mlir::Value> Slots;
@@ -979,6 +985,29 @@ void Lowerer::lowerLoopBody(const ::matlab::Block &Blk) {
 }
 
 void Lowerer::lowerStmt(const Stmt &St) {
+  /* Debug-mode hook: emit matlab_dbg_hook(file_id, line) at the
+   * start of every statement. The compiled-in runtime sees
+   * file_id + line, checks its breakpoint / step state, and blocks
+   * if it should pause. Skipped for Blocks (the block's children
+   * each get their own hook) and for a few no-value control
+   * structures where a hook on the keyword is redundant with the
+   * one on the first inner statement. */
+  if (DebugMode && SM && St.Range.Begin.isValid() &&
+      St.Kind != NodeKind::Block) {
+    auto LC = SM->getLineColumn(St.Range.Begin);
+    auto I32 = mlir::IntegerType::get(&MCtx, 32);
+    mlir::Value FileV = mlir::arith::ConstantOp::create(
+        B, loc(St.Range), I32,
+        mlir::IntegerAttr::get(I32, (int64_t)St.Range.Begin.File));
+    mlir::Value LineV = mlir::arith::ConstantOp::create(
+        B, loc(St.Range), I32,
+        mlir::IntegerAttr::get(I32, (int64_t)LC.Line));
+    mlir::NamedAttribute Cal(
+        mlir::StringAttr::get(&MCtx, "callee"),
+        mlir::StringAttr::get(&MCtx, "matlab_dbg_hook"));
+    emitUnregOp("matlab.call_builtin", {FileV, LineV},
+                {mlir::NoneType::get(&MCtx)}, loc(St.Range), {Cal});
+  }
   switch (St.Kind) {
   case NodeKind::ExprStmt: {
     auto &E = static_cast<const ExprStmt &>(St);
@@ -1941,6 +1970,7 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
      * lets implicit-display in ExprStmt see a non-None value. */
     auto MLPtr = mlir::LLVM::LLVMPointerType::get(&MCtx);
     mlir::Type ResTy = RT;
+    /* Refine when Sema left the type open (None). */
     if (mlir::isa<mlir::NoneType>(ResTy) && LHS && RHS) {
       if (LHS.getType() == RHS.getType() &&
           mlir::isa<mlir::Float64Type, mlir::IntegerType>(LHS.getType())) {
@@ -1948,6 +1978,19 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
       } else if (LHS.getType() == MLPtr || RHS.getType() == MLPtr) {
         ResTy = MLPtr;
       }
+    }
+    /* REPL override: workspace reads always come back as ptr (the
+     * runtime auto-boxes scalars to 1x1 matrices on get_mat). Sema
+     * may still have inferred the binop result as f64 from source-
+     * level "x = 1; y = 2; z = x + y" propagation, but at MLIR level
+     * both operands are ptr, so the result must be ptr to stay
+     * well-typed through LowerTensorOps — otherwise we'd emit a
+     * `matlab.add(ptr, ptr) : f64`, and the downstream set_f64
+     * picker commits to the scalar path while add_mm replaces the
+     * operand with a ptr, leaving an ill-typed llvm.call. */
+    if (LHS && RHS &&
+        (LHS.getType() == MLPtr || RHS.getType() == MLPtr)) {
+      ResTy = MLPtr;
     }
     return emitUnreg(binOpName(Bi.Op), {LHS, RHS}, ResTy, L);
   }
@@ -1963,6 +2006,8 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
       else if (mlir::isa<mlir::Float64Type, mlir::IntegerType>(A.getType()))
         ResTy = A.getType();
     }
+    /* REPL override, same as BinaryOp above. */
+    if (A && A.getType() == MLPtr) ResTy = MLPtr;
     return emitUnreg(unOpName(U.Op), {A}, ResTy, L);
   }
   case NodeKind::PostfixOp: {
@@ -1976,6 +2021,8 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
     mlir::Type ResTy = RT;
     if (mlir::isa<mlir::NoneType>(ResTy) && A && A.getType() == MLPtr)
       ResTy = MLPtr;
+    /* REPL override, same as BinaryOp above. */
+    if (A && A.getType() == MLPtr) ResTy = MLPtr;
     return emitUnreg(postfixName(P.Op), {A}, ResTy, L);
   }
   case NodeKind::RangeExpr: {
@@ -2880,8 +2927,9 @@ mlir::ModuleOp lowerToMLIR(Context &Ctx,
                            DiagnosticEngine &Diag,
                            const TranslationUnit &TU,
                            const SourceManager *SM,
-                           bool ReplMode) {
-  Lowerer L(Ctx.get(), TC, Diag, SM, ReplMode);
+                           bool ReplMode,
+                           bool DebugMode) {
+  Lowerer L(Ctx.get(), TC, Diag, SM, ReplMode, DebugMode);
   return L.lower(TU);
 }
 

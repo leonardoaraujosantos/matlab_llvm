@@ -1074,6 +1074,23 @@ bool TensorLowering::rewriteBuiltinCalls() {
       continue;
     }
 
+    /* Debug hook: injected by the lowerer at each statement when
+     * -g is on. Two i32 operands (file_id, line); returns void. */
+    if (Name == "matlab_dbg_hook" &&
+        Call->getNumOperands() == 2 && Call->getNumResults() == 1) {
+      auto I32 = IntegerType::get(Ctx, 32);
+      Value FileV = Call->getOperand(0);
+      Value LineV = Call->getOperand(1);
+      if (FileV.getType() != I32 || LineV.getType() != I32) continue;
+      B.setInsertionPoint(Call);
+      auto Fn = rt("matlab_dbg_hook", VoidTy, {I32, I32});
+      LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                            ValueRange{FileV, LineV});
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+
     /* REPL workspace accessors. Shape is the same as struct_* but
      * without a base ptr (the workspace is a singleton inside the
      * runtime). Used only when matlabc is invoked with -repl. */

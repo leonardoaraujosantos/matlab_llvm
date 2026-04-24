@@ -32,7 +32,8 @@ mlir::ModuleOp lowerToMLIR(Context &Ctx,
                            DiagnosticEngine &Diag,
                            const TranslationUnit &TU,
                            const SourceManager *SM = nullptr,
-                           bool ReplMode = false);
+                           bool ReplMode = false,
+                           bool DebugMode = false);
 
 /// Dump an mlir::ModuleOp using the MLIR printer.
 void printModule(std::ostream &OS, mlir::ModuleOp M);

@@ -145,7 +145,7 @@ Design docs:
 - [`docs/emit_c_cpp.md`](docs/emit_c_cpp.md) — the C / C++ backend: op-to-C mapping, runtime ABI bridge, design alternatives considered.
 - [`docs/repl.md`](docs/repl.md) — shipped JIT REPL built on MLIR `ExecutionEngine`, with state persistence via a runtime workspace.
 - [`docs/lsp.md`](docs/lsp.md) — shipped Language Server (`matlab-lsp`): diagnostics, goto-definition, document outline, plus editor-setup snippets.
-- [`docs/debug.md`](docs/debug.md) — debugging aids (`dbg(x)`, `who` / `whos` / `clear`) and why full DAP is deferred.
+- [`docs/debug.md`](docs/debug.md) — DAP server (`matlabc -dap`) for editor-integrated breakpoints and stepping, plus the lightweight aids (`dbg(x)`, `who` / `whos` / `clear`).
 - [`docs/emit_python.md`](docs/emit_python.md) — planned Python backend.
 - [`docs/emit_systemc.md`](docs/emit_systemc.md) — planned SystemC (synthesizable) backend.
 
@@ -166,6 +166,7 @@ One driver, many stages:
 | `-emit-cpp` | Self-contained C++ source (same runtime via `extern "C"`) |
 | `-format`    | Canonically-formatted source — idempotent; drops comments |
 | `-repl`      | JIT-backed interactive prompt with persistent workspace |
+| `-dap`       | Debug Adapter Protocol server over stdio: breakpoints, step, variable inspection. See [`docs/debug.md`](docs/debug.md). |
 
 Plus a separate binary:
 
@@ -259,9 +260,9 @@ cells, `varargout`, complex numbers (parsed but no arithmetic),
 3-D vector slicing (only scalar `A(i,j,k)` today), 4-D+ arrays,
 sparse matrices, non-symmetric `eig`, full `[U, S, V] = svd(A)`,
 `fft` family, `regexp` / `regexprep`, MATLAB `.mat` file format,
-full Debug Adapter Protocol (only `dbg(x)` today — see
-[`docs/debug.md`](docs/debug.md)), LSP completion / hover /
-rename (see [`docs/lsp.md`](docs/lsp.md)).
+DAP user-function frames in stack trace and watch expressions (MVP
+breakpoint/step server shipped — see [`docs/debug.md`](docs/debug.md)),
+LSP completion / hover / rename (see [`docs/lsp.md`](docs/lsp.md)).
 
 **Not planned:** plotting, Simulink, toolboxes, GPU arrays, live
 scripts (`.mlx`), MathWorks bit-exact numerics.
@@ -289,7 +290,7 @@ UPDATE=1 test/run_tests.sh build/matlabc
 include/matlab/
   Basic/  Lex/  Parse/  AST/  Sema/  MIR/  MLIR/
 lib/                           implementations mirror include/
-tools/matlabc/                 CLI driver: emit modes, -format, -repl
+tools/matlabc/                 CLI driver: emit modes, -format, -repl, -dap
 tools/matlab-lsp/              Language Server (stdio JSON-RPC)
 runtime/                       matlab_runtime.c + build_and_run.sh
 test/                          goldens + run scripts (per-suite subdirs)

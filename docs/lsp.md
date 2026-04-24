@@ -93,8 +93,9 @@ skeleton to keep the first commit reviewable.
 
 - [`docs/repl.md`](repl.md) — same front-end stack, running
   interactively under MLIR's ExecutionEngine.
-- [`docs/debug.md`](debug.md) — matching debug aids (`dbg()`,
-  `who` / `whos` / `clear`).
+- [`docs/debug.md`](debug.md) — the debugger, which speaks DAP over
+  the same JSON-RPC-with-Content-Length framing described here. Plus
+  the lightweight aids (`dbg()`, `who` / `whos` / `clear`).
 
 ## Protocol cheat sheet
 
