@@ -104,6 +104,7 @@ if(MATLAB_LLVM_WITH_MLIR)
     lib/MLIR/Passes/Mem2RegLite.cpp
     lib/MLIR/Passes/LowerToLLVMIR.cpp
     lib/MLIR/Passes/EmitC.cpp
+    lib/MLIR/Passes/EmitPython.cpp
   )
   target_link_libraries(MatlabMLIR
     PUBLIC  MatlabSema MatlabAST MatlabBasic
