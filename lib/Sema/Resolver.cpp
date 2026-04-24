@@ -48,6 +48,7 @@ void Resolver::registerBuiltins() {
     "upper", "lower", "startsWith", "endsWith", "contains",
     "strtrim", "strrep", "strcat",
     "svd", "eig", "inv", "pinv", "det", "rank",
+    "qr", "lu", "chol", "norm", "trace", "kron",
     "arrayfun", "cellfun",
     "nargin", "nargout", "varargin", "varargout",
     "fopen", "fclose", "fgetl", "feof",

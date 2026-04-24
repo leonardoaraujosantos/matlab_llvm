@@ -1293,26 +1293,40 @@ bool TensorLowering::rewriteBuiltinCalls() {
       continue;
     }
 
-    /* Multi-return dispatch (nargout > 1): today only eig has a two-
-     * output variant [V, D] = eig(A). We emit two independent runtime
-     * calls so each result can be consumed separately; the frontend
-     * will have marked each LHS with a distinct result slot. */
+    /* Multi-return dispatch (nargout > 1). Each factorisation whose
+     * MATLAB form returns multiple matrices (eig / qr / lu) is emitted
+     * as two independent runtime calls sharing the input matrix; the
+     * frontend will have marked each LHS with a distinct result slot.
+     * This keeps the runtime ABI simple (one output per call) at the
+     * cost of factoring the input twice; fine for the scripts the
+     * compiler currently targets. */
     auto NA = Call->getAttrOfType<IntegerAttr>("nargout");
-    if (NA && NA.getValue().getSExtValue() == 2 && Name == "eig" &&
+    if (NA && NA.getValue().getSExtValue() == 2 &&
         Call->getNumOperands() == 1 && Call->getNumResults() == 2 &&
         Call->getOperand(0).getType() == PtrTy) {
-      B.setInsertionPoint(Call);
-      auto FnV = rt("matlab_eig_V", PtrTy, {PtrTy});
-      auto FnD = rt("matlab_eig_D", PtrTy, {PtrTy});
-      auto CV = LLVM::CallOp::create(B, Call->getLoc(), FnV,
-                                      ValueRange{Call->getOperand(0)});
-      auto CD = LLVM::CallOp::create(B, Call->getLoc(), FnD,
-                                      ValueRange{Call->getOperand(0)});
-      Call->getResult(0).replaceAllUsesWith(CV.getResult());
-      Call->getResult(1).replaceAllUsesWith(CD.getResult());
-      Call->erase();
-      Changed = true;
-      continue;
+      struct TwoRet { StringRef MLName, F0, F1; };
+      static const TwoRet TwoReturns[] = {
+        {"eig", "matlab_eig_V", "matlab_eig_D"},
+        {"qr",  "matlab_qr_Q",  "matlab_qr_R"},
+        {"lu",  "matlab_lu_L",  "matlab_lu_U"},
+      };
+      const TwoRet *T = nullptr;
+      for (auto &E : TwoReturns)
+        if (E.MLName == Name) { T = &E; break; }
+      if (T) {
+        B.setInsertionPoint(Call);
+        auto F0 = rt(T->F0, PtrTy, {PtrTy});
+        auto F1 = rt(T->F1, PtrTy, {PtrTy});
+        auto C0 = LLVM::CallOp::create(B, Call->getLoc(), F0,
+                                        ValueRange{Call->getOperand(0)});
+        auto C1 = LLVM::CallOp::create(B, Call->getLoc(), F1,
+                                        ValueRange{Call->getOperand(0)});
+        Call->getResult(0).replaceAllUsesWith(C0.getResult());
+        Call->getResult(1).replaceAllUsesWith(C1.getResult());
+        Call->erase();
+        Changed = true;
+        continue;
+      }
     }
 
     // Table of simple 1- or 2-arg builtins returning either a matrix ptr
@@ -1357,6 +1371,11 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"vertcat",    "matlab_vertcat",    1, "pp"},
       {"sub2ind",    "matlab_sub2ind",    0, "pff"},
       {"ind2sub",    "matlab_ind2sub",    1, "pf"},
+      {"norm",       "matlab_norm",       0, "p"},
+      {"trace",      "matlab_trace",      0, "p"},
+      {"kron",       "matlab_kron",       1, "pp"},
+      {"chol",       "matlab_chol",       1, "p"},
+      {"pinv",       "matlab_pinv",       1, "p"},
       {"permute",    "matlab_permute",    1, "pp"},
       {"squeeze",    "matlab_squeeze",    1, "p"},
       {"flip",       "matlab_flip",       1, "p"},
@@ -1405,13 +1424,25 @@ bool TensorLowering::rewriteBuiltinCalls() {
     // route correctly. If no Table entry fits the call-site's operand
     // types, S stays null and the code falls through to the scalar map
     // below (where sin(f64) -> matlab_sin_s etc. live).
+    //
+    // "Type match" accepts tensor-typed operands for ptr slots too:
+    // on early pipeline iterations a matrix-producing literal or
+    // builtin still has a tensor type, and we want to match and then
+    // defer until retypeMatrixSlots converts the tensor to ptr on a
+    // later iteration. Without this, sum(eye(4)) — where both ops
+    // are inline — would never rewrite.
     const Spec *S = nullptr;
     unsigned NOps = Call->getNumOperands();
     auto argTypesMatch = [&](const Spec &E) -> bool {
       if (E.ArgKinds.size() != NOps) return false;
       for (unsigned i = 0; i < NOps; ++i) {
-        Type Exp = E.ArgKinds[i] == 'f' ? (Type)F64 : (Type)PtrTy;
-        if (Call->getOperand(i).getType() != Exp) return false;
+        char Kind = E.ArgKinds[i];
+        Type Got = Call->getOperand(i).getType();
+        if (Kind == 'f') {
+          if (Got != F64) return false;
+        } else { /* 'p' */
+          if (Got != PtrTy && !isTensorLike(Got)) return false;
+        }
       }
       return true;
     };

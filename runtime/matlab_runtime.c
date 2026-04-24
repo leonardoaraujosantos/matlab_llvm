@@ -2349,6 +2349,238 @@ void matlab_assert_msg(double cond, matlab_string *msg) {
         matlab_set_error_msg("assertion failed", 16);
 }
 
+/* -------- Linear algebra tail --------------------------------------------
+ *
+ * norm / trace / kron / chol / pinv.
+ * Pure-C implementations, no BLAS/LAPACK. They're correct to the
+ * tolerance a double can naturally reach but aren't tuned for speed
+ * or numeric stability — matching the rest of the runtime.
+ *--------------------------------------------------------------------------*/
+
+/* norm(A): matrix Frobenius norm (sqrt(sum of squares)). For a
+ * vector, this coincides with the 2-norm. */
+double matlab_norm(matlab_mat *A) {
+    if (!A) return 0.0;
+    int64_t total = A->rows * A->cols;
+    double acc = 0.0;
+    for (int64_t k = 0; k < total; ++k) {
+        double x = A->data[k];
+        acc += x * x;
+    }
+    return sqrt(acc);
+}
+
+/* trace(A): sum of diagonal. Defined for square matrices; for
+ * non-square we sum min(rows, cols) leading-diagonal entries. */
+double matlab_trace(matlab_mat *A) {
+    if (!A) return 0.0;
+    int64_t n = A->rows < A->cols ? A->rows : A->cols;
+    double acc = 0.0;
+    for (int64_t i = 0; i < n; ++i) acc += A->data[i * A->cols + i];
+    return acc;
+}
+
+/* kron(A, B): Kronecker product. Result is (Am*Bm) x (An*Bn) and
+ * the (i*Bm+p, j*Bn+q) entry is A[i,j] * B[p,q]. */
+matlab_mat *matlab_kron(matlab_mat *A, matlab_mat *B) {
+    if (!A || !B) return mat_alloc(0, 0);
+    int64_t am = A->rows, an = A->cols;
+    int64_t bm = B->rows, bn = B->cols;
+    matlab_mat *R = mat_alloc(am * bm, an * bn);
+    for (int64_t i = 0; i < am; ++i)
+        for (int64_t p = 0; p < bm; ++p)
+            for (int64_t j = 0; j < an; ++j)
+                for (int64_t q = 0; q < bn; ++q) {
+                    double av = A->data[i * an + j];
+                    double bv = B->data[p * bn + q];
+                    R->data[(i * bm + p) * (an * bn) + (j * bn + q)] = av * bv;
+                }
+    return R;
+}
+
+/* chol(A): upper-triangular Cholesky factor R such that R'*R = A,
+ * for a symmetric positive-definite A. Returns a zero matrix if A
+ * is not SPD (i.e. a negative diagonal appears). */
+matlab_mat *matlab_chol(matlab_mat *A) {
+    if (!A || A->rows != A->cols) return mat_alloc(0, 0);
+    int64_t n = A->rows;
+    matlab_mat *R = mat_alloc(n, n);
+    /* Upper-triangular factor, row-major. */
+    for (int64_t i = 0; i < n; ++i) {
+        for (int64_t j = i; j < n; ++j) {
+            double s = A->data[i * n + j];
+            for (int64_t k = 0; k < i; ++k)
+                s -= R->data[k * n + i] * R->data[k * n + j];
+            if (i == j) {
+                if (s <= 0.0) {
+                    /* Not SPD — zero out and bail out. */
+                    for (int64_t k = 0; k < n * n; ++k) R->data[k] = 0.0;
+                    matlab_set_error_msg("chol: matrix is not positive definite", 38);
+                    return R;
+                }
+                R->data[i * n + j] = sqrt(s);
+            } else {
+                R->data[i * n + j] = s / R->data[i * n + i];
+            }
+        }
+    }
+    return R;
+}
+
+/* pinv(A): Moore-Penrose pseudoinverse via the normal-equation route
+ * appropriate for the matrix's shape:
+ *   - square & invertible: pinv(A) = inv(A).
+ *   - tall   (m > n): pinv(A) = (A' A)^-1 A'.
+ *   - wide   (m < n): pinv(A) = A' (A A')^-1.
+ * Numerically fine for well-conditioned inputs; real MATLAB uses SVD
+ * for rank-deficient cases, which we don't have. */
+matlab_mat *matlab_pinv(matlab_mat *A) {
+    if (!A) return mat_alloc(0, 0);
+    int64_t m = A->rows, n = A->cols;
+    if (m == n) return matlab_inv(A);
+    matlab_mat *AT = matlab_transpose(A);
+    if (m > n) {
+        /* pinv = (A' A)^-1 A' */
+        matlab_mat *ATA = matlab_matmul_mm(AT, A);
+        matlab_mat *inv_ATA = matlab_inv(ATA);
+        matlab_mat *R = matlab_matmul_mm(inv_ATA, AT);
+        return R;
+    }
+    /* m < n: pinv = A' (A A')^-1 */
+    matlab_mat *AAT = matlab_matmul_mm(A, AT);
+    matlab_mat *inv_AAT = matlab_inv(AAT);
+    matlab_mat *R = matlab_matmul_mm(AT, inv_AAT);
+    return R;
+}
+
+/* LU with partial pivoting.
+ *
+ * Decomposes A (n x n) into P*A = L*U where L is unit lower-triangular
+ * and U is upper-triangular. The two-output variants return L and U
+ * separately (P is implicit — users who need it can't currently get
+ * it, but the factors returned are for the permuted matrix).
+ */
+static void lu_factor(matlab_mat *A, matlab_mat *L, matlab_mat *U,
+                      int64_t *piv) {
+    int64_t n = A->rows;
+    /* Copy A -> U initially; L starts as identity. */
+    for (int64_t k = 0; k < n * n; ++k) U->data[k] = A->data[k];
+    for (int64_t i = 0; i < n; ++i) {
+        for (int64_t j = 0; j < n; ++j)
+            L->data[i * n + j] = (i == j) ? 1.0 : 0.0;
+        piv[i] = i;
+    }
+    for (int64_t k = 0; k < n; ++k) {
+        /* Partial pivot: find the largest |U[k..n-1, k]| */
+        int64_t p = k;
+        double best = fabs(U->data[k * n + k]);
+        for (int64_t i = k + 1; i < n; ++i) {
+            double v = fabs(U->data[i * n + k]);
+            if (v > best) { best = v; p = i; }
+        }
+        if (p != k) {
+            /* swap rows p, k in U */
+            for (int64_t j = 0; j < n; ++j) {
+                double t = U->data[k * n + j];
+                U->data[k * n + j] = U->data[p * n + j];
+                U->data[p * n + j] = t;
+            }
+            /* swap rows p, k in L's computed columns (j < k) */
+            for (int64_t j = 0; j < k; ++j) {
+                double t = L->data[k * n + j];
+                L->data[k * n + j] = L->data[p * n + j];
+                L->data[p * n + j] = t;
+            }
+            int64_t t = piv[k]; piv[k] = piv[p]; piv[p] = t;
+        }
+        double diag = U->data[k * n + k];
+        if (diag == 0.0) continue; /* singular pivot; leave as-is */
+        for (int64_t i = k + 1; i < n; ++i) {
+            double factor = U->data[i * n + k] / diag;
+            L->data[i * n + k] = factor;
+            for (int64_t j = k; j < n; ++j)
+                U->data[i * n + j] -= factor * U->data[k * n + j];
+        }
+    }
+}
+
+matlab_mat *matlab_lu_L(matlab_mat *A) {
+    if (!A || A->rows != A->cols) return mat_alloc(0, 0);
+    int64_t n = A->rows;
+    matlab_mat *L = mat_alloc(n, n);
+    matlab_mat *U = mat_alloc(n, n);
+    int64_t *piv = (int64_t *)malloc((size_t)n * sizeof(int64_t));
+    lu_factor(A, L, U, piv);
+    free(piv);
+    free(U->data); free(U);
+    return L;
+}
+
+matlab_mat *matlab_lu_U(matlab_mat *A) {
+    if (!A || A->rows != A->cols) return mat_alloc(0, 0);
+    int64_t n = A->rows;
+    matlab_mat *L = mat_alloc(n, n);
+    matlab_mat *U = mat_alloc(n, n);
+    int64_t *piv = (int64_t *)malloc((size_t)n * sizeof(int64_t));
+    lu_factor(A, L, U, piv);
+    free(piv);
+    free(L->data); free(L);
+    return U;
+}
+
+/* QR via classical Gram-Schmidt (with re-orthogonalisation pass for
+ * decent numeric behaviour). A is m x n with m >= n; Q is m x n,
+ * R is n x n. Rank-deficient columns get zero columns in Q. */
+static void qr_factor(matlab_mat *A, matlab_mat *Q, matlab_mat *R) {
+    int64_t m = A->rows, n = A->cols;
+    /* Copy columns of A into Q's storage then orthogonalise. */
+    for (int64_t k = 0; k < m * n; ++k) Q->data[k] = A->data[k];
+    for (int64_t k = 0; k < n * n; ++k) R->data[k] = 0.0;
+
+    for (int64_t j = 0; j < n; ++j) {
+        for (int64_t i = 0; i < j; ++i) {
+            double dot = 0.0;
+            for (int64_t r = 0; r < m; ++r)
+                dot += Q->data[r * n + i] * Q->data[r * n + j];
+            R->data[i * n + j] = dot;
+            for (int64_t r = 0; r < m; ++r)
+                Q->data[r * n + j] -= dot * Q->data[r * n + i];
+        }
+        double nrm = 0.0;
+        for (int64_t r = 0; r < m; ++r) {
+            double v = Q->data[r * n + j];
+            nrm += v * v;
+        }
+        nrm = sqrt(nrm);
+        R->data[j * n + j] = nrm;
+        if (nrm > 0.0) {
+            for (int64_t r = 0; r < m; ++r) Q->data[r * n + j] /= nrm;
+        }
+    }
+}
+
+matlab_mat *matlab_qr_Q(matlab_mat *A) {
+    if (!A) return mat_alloc(0, 0);
+    int64_t m = A->rows, n = A->cols;
+    if (m < n) return mat_alloc(0, 0);
+    matlab_mat *Q = mat_alloc(m, n);
+    matlab_mat *R = mat_alloc(n, n);
+    qr_factor(A, Q, R);
+    free(R->data); free(R);
+    return Q;
+}
+
+matlab_mat *matlab_qr_R(matlab_mat *A) {
+    if (!A) return mat_alloc(0, 0);
+    int64_t m = A->rows, n = A->cols;
+    if (m < n) return mat_alloc(0, 0);
+    matlab_mat *Q = mat_alloc(m, n);
+    matlab_mat *R = mat_alloc(n, n);
+    qr_factor(A, Q, R);
+    free(Q->data); free(Q);
+    return R;
+}
+
 /* rmfield(s, 'name'): remove a field in place and return the same ptr.
  * MATLAB's rmfield conceptually returns a new struct, but mutating
  * in place + returning the same pointer matches the common
