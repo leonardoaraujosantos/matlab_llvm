@@ -134,8 +134,9 @@ void collectCaptures(const Expr *E,
 class Lowerer {
 public:
   Lowerer(mlir::MLIRContext &MCtx, TypeContext &TC, DiagnosticEngine &Diag,
-          const SourceManager *SM = nullptr)
-      : MCtx(MCtx), TC(TC), Diag(Diag), SM(SM), B(&MCtx) {
+          const SourceManager *SM = nullptr, bool ReplMode = false)
+      : MCtx(MCtx), TC(TC), Diag(Diag), SM(SM), B(&MCtx),
+        ReplMode(ReplMode) {
     (void)this->Diag;
     (void)this->SM;
   }
@@ -148,6 +149,16 @@ private:
   DiagnosticEngine &Diag;
   const SourceManager *SM;
   mlir::OpBuilder B;
+  /* When true, script-level Var reads/writes route through
+   * matlab_ws_get_* / matlab_ws_set_* so variables persist across
+   * JIT invocations. Function bodies inside the same TU still use
+   * local slots. */
+  bool ReplMode = false;
+  /* True while lowering the script body (not inside any user function).
+   * REPL rerouting only fires when this is true AND ReplMode is on,
+   * so Vars declared inside a user function keep their slot-local
+   * semantics. */
+  bool InScriptBody = false;
 
   // Per-function: binding -> slot (Value result of matlab.alloc).
   std::unordered_map<Binding *, mlir::Value> Slots;
@@ -535,6 +546,32 @@ int32_t Lowerer::globalSlotId(Binding *Bnd) {
 mlir::Value Lowerer::loadBinding(Binding *Bnd, const Type *ValTy,
                                  mlir::Location L) {
   if (!Bnd) return emitUnreg("matlab.undef", {}, mirTy(ValTy), L);
+  /* REPL mode: script-level Var reads go through matlab_ws_get_*
+   * so state survives across JIT invocations. Function-body Vars
+   * still use normal slot lookup. If a local slot already exists
+   * for this binding (e.g. because a for-loop init pre-allocated
+   * one for its induction variable), prefer the slot — the loop
+   * body writes into it per iteration, and reading the workspace
+   * would miss the in-flight updates. */
+  if (ReplMode && InScriptBody && Bnd->Kind == BindingKind::Var &&
+      Slots.find(Bnd) == Slots.end()) {
+    auto F64 = mlir::Float64Type::get(&MCtx);
+    auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+    mlir::Value NameV = emitFieldNameChar(Bnd->Name, L);
+    /* Pick scalar vs. matrix based on the Sema-inferred type: a
+     * tensor-typed binding routes to _get_mat. Anything else we
+     * treat as scalar; the runtime will auto-box a 1x1 matrix
+     * back into an f64 if the stored value was a matrix. */
+    bool WantMat = mlir::isa<mlir::RankedTensorType,
+                              mlir::UnrankedTensorType>(mirTy(ValTy));
+    llvm::StringRef Callee = WantMat ? "matlab_ws_get_mat"
+                                      : "matlab_ws_get_f64";
+    mlir::NamedAttribute Cal(
+        mlir::StringAttr::get(&MCtx, "callee"),
+        mlir::StringAttr::get(&MCtx, Callee));
+    mlir::Type ResTy = WantMat ? (mlir::Type)PtrTy : (mlir::Type)F64;
+    return emitUnreg("matlab.call_builtin", {NameV}, ResTy, L, {Cal});
+  }
   /* Globals and persistents live in a runtime-backed scalar table.
    * Emit a matlab.call_builtin @matlab_global_get_f64(id) — the
    * generic call-builtin-to-llvm path lowers it to an opaque runtime
@@ -630,7 +667,10 @@ void Lowerer::lowerScript(const Script &S, mlir::ModuleOp M) {
   Slots.clear();
   CurFnName = "script";
 
+  bool SavedInScript = InScriptBody;
+  InScriptBody = true;
   if (S.Body) lowerBlock(*S.Body);
+  InScriptBody = SavedInScript;
 
   mlir::func::ReturnOp::create(B, loc(S.Range));
 }
@@ -1469,6 +1509,25 @@ void Lowerer::lowerLValueStore(const Expr &LHS, mlir::Value Rhs) {
           mlir::StringAttr::get(&MCtx, "callee"),
           mlir::StringAttr::get(&MCtx, "matlab_global_set_f64"));
       emitUnregOp("matlab.call_builtin", {IdV, Rhs},
+                  {mlir::NoneType::get(&MCtx)}, loc(N.Range), {Cal});
+      return;
+    }
+    /* REPL script-level Var writes route through matlab_ws_set_*.
+     * Like loadBinding above, skip the workspace path when a local
+     * slot already exists (e.g. for-loop induction variable) — the
+     * slot is the canonical store site during that loop. */
+    if (ReplMode && InScriptBody && N.Ref->Kind == BindingKind::Var && Rhs &&
+        Slots.find(N.Ref) == Slots.end()) {
+      auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+      mlir::Value NameV = emitFieldNameChar(N.Name, loc(N.Range));
+      bool IsMat = (Rhs.getType() == PtrTy ||
+                    mlir::isa<mlir::RankedTensorType,
+                              mlir::UnrankedTensorType>(Rhs.getType()));
+      llvm::StringRef Callee = IsMat ? "matlab_ws_set_mat" : "matlab_ws_set_f64";
+      mlir::NamedAttribute Cal(
+          mlir::StringAttr::get(&MCtx, "callee"),
+          mlir::StringAttr::get(&MCtx, Callee));
+      emitUnregOp("matlab.call_builtin", {NameV, Rhs},
                   {mlir::NoneType::get(&MCtx)}, loc(N.Range), {Cal});
       return;
     }
@@ -2580,8 +2639,9 @@ mlir::ModuleOp lowerToMLIR(Context &Ctx,
                            TypeContext &TC,
                            DiagnosticEngine &Diag,
                            const TranslationUnit &TU,
-                           const SourceManager *SM) {
-  Lowerer L(Ctx.get(), TC, Diag, SM);
+                           const SourceManager *SM,
+                           bool ReplMode) {
+  Lowerer L(Ctx.get(), TC, Diag, SM, ReplMode);
   return L.lower(TU);
 }
 

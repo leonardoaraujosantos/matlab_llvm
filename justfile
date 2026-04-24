@@ -52,6 +52,12 @@ update-goldens: build
 compile FILE OUT="":
     ./runtime/build_and_run.sh {{FILE}} {{OUT}}
 
+# Launch the JIT-backed REPL. Variables persist across input lines via
+# a runtime-side workspace; blocks (if/for/while/...) auto-continue
+# until their matching `end`.
+repl: build
+    {{BUILD_DIR}}/matlabc -repl
+
 # Build and run every program in examples/. Stops at the first failure.
 examples: build
     #!/usr/bin/env bash

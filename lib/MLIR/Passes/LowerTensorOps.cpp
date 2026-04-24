@@ -1010,6 +1010,50 @@ bool TensorLowering::rewriteBuiltinCalls() {
       continue;
     }
 
+    /* REPL workspace accessors. Shape is the same as struct_* but
+     * without a base ptr (the workspace is a singleton inside the
+     * runtime). Used only when matlabc is invoked with -repl. */
+    if ((Name == "matlab_ws_get_f64" || Name == "matlab_ws_get_mat") &&
+        Call->getNumOperands() == 1 && Call->getNumResults() == 1) {
+      Value NameV = Call->getOperand(0);
+      int64_t Len = 0;
+      Value Ptr = fieldNameAddr(NameV, Len);
+      if (!Ptr) continue;
+      bool IsMat = (Name == "matlab_ws_get_mat");
+      Type Ret = IsMat ? (Type)PtrTy : (Type)F64;
+      B.setInsertionPoint(Call);
+      Value LenV = LLVM::ConstantOp::create(
+          B, Call->getLoc(), I64, B.getI64IntegerAttr(Len));
+      auto Fn = rt(Name, Ret, {PtrTy, I64});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                      ValueRange{Ptr, LenV});
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+    if ((Name == "matlab_ws_set_f64" || Name == "matlab_ws_set_mat") &&
+        Call->getNumOperands() == 2) {
+      Value NameV = Call->getOperand(0);
+      Value Val = Call->getOperand(1);
+      int64_t Len = 0;
+      Value Ptr = fieldNameAddr(NameV, Len);
+      if (!Ptr) continue;
+      bool IsMat = (Name == "matlab_ws_set_mat");
+      if (IsMat && Val.getType() != PtrTy) continue;
+      if (!IsMat && Val.getType() != F64) continue;
+      B.setInsertionPoint(Call);
+      Value LenV = LLVM::ConstantOp::create(
+          B, Call->getLoc(), I64, B.getI64IntegerAttr(Len));
+      auto Fn = rt(Name, VoidTy,
+                   {PtrTy, I64, IsMat ? (Type)PtrTy : (Type)F64});
+      LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                            ValueRange{Ptr, LenV, Val});
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+
     /* User-defined-class property accessors. Same shape as the struct
      * variants but the base is a matlab_obj* rather than matlab_struct*,
      * so the field name + length are materialised and passed identically;

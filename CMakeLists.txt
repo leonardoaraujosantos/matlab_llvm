@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(matlab_llvm CXX)
+project(matlab_llvm C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -122,6 +122,21 @@ target_link_libraries(matlabc
 if(MATLAB_LLVM_WITH_MLIR)
   target_link_libraries(matlabc PRIVATE MatlabMLIR)
   target_compile_definitions(matlabc PRIVATE MATLAB_LLVM_WITH_MLIR=1)
+  # Link the runtime into matlabc so the JIT-backed -repl mode can
+  # resolve matlab_* and matlab_ws_* symbols from the running process
+  # via LLJIT's DynamicLibrarySearchGenerator::GetForCurrentProcess.
+  target_sources(matlabc PRIVATE runtime/matlab_runtime.c)
+  # Export the matlab_* symbols so the JIT's dynamic lookup finds them
+  # (by default executables hide symbols not referenced internally).
+  if(APPLE)
+    target_link_options(matlabc PRIVATE -rdynamic)
+  else()
+    target_link_options(matlabc PRIVATE -Wl,--export-dynamic)
+  endif()
+  # Pull in MLIR's ExecutionEngine + the LLVM JIT libraries it needs.
+  target_link_libraries(matlabc PRIVATE
+    MLIRExecutionEngine
+    LLVMOrcJIT LLVMExecutionEngine)
 endif()
 
 enable_testing()

@@ -2581,6 +2581,59 @@ matlab_mat *matlab_qr_R(matlab_mat *A) {
     return R;
 }
 
+/* -------- REPL workspace -------------------------------------------------
+ *
+ * A single matlab_struct* holds every variable the user has assigned
+ * across REPL inputs. Each JIT-compiled input uses matlab_ws_get_* /
+ * matlab_ws_set_* in place of local slots so state persists across
+ * invocations. Field names are the user-visible variable names.
+ *
+ * The runtime lazily allocates the workspace on first touch, which
+ * means the normal AOT path (matlabc -emit-llvm / -emit-c / ...)
+ * never pays for it — these symbols only get linked into a program
+ * when the compiler emits references to them, which today only the
+ * REPL mode does.
+ *--------------------------------------------------------------------------*/
+
+static matlab_struct *matlab_ws = NULL;
+
+static void matlab_ws_init_if_needed(void) {
+    if (!matlab_ws) matlab_ws = matlab_struct_new();
+}
+
+double matlab_ws_get_f64(const char *name, int64_t len) {
+    matlab_ws_init_if_needed();
+    return matlab_struct_get_f64(matlab_ws, name, len);
+}
+
+void matlab_ws_set_f64(const char *name, int64_t len, double v) {
+    matlab_ws_init_if_needed();
+    matlab_struct_set_f64(matlab_ws, name, len, v);
+}
+
+matlab_mat *matlab_ws_get_mat(const char *name, int64_t len) {
+    matlab_ws_init_if_needed();
+    return matlab_struct_get_mat(matlab_ws, name, len);
+}
+
+void matlab_ws_set_mat(const char *name, int64_t len, matlab_mat *m) {
+    matlab_ws_init_if_needed();
+    matlab_struct_set_mat(matlab_ws, name, len, m);
+}
+
+double matlab_ws_has(const char *name, int64_t len) {
+    matlab_ws_init_if_needed();
+    return matlab_struct_has_field(matlab_ws, name, len);
+}
+
+/* For the REPL's `whos` / `clear` style commands. */
+void matlab_ws_clear(void) {
+    /* Cheapest correct clear: allocate a fresh struct and let the old
+     * one leak. Leak is bounded by the number of clear() calls in a
+     * session, which is negligible for human-paced use. */
+    matlab_ws = matlab_struct_new();
+}
+
 /* rmfield(s, 'name'): remove a field in place and return the same ptr.
  * MATLAB's rmfield conceptually returns a new struct, but mutating
  * in place + returning the same pointer matches the common

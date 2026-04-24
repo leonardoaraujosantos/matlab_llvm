@@ -21,11 +21,19 @@ public:
   // Global scope (TU-level functions + registered builtins).
   Scope *globalScope() { return Global; }
 
+  // REPL mode: treats unresolved NameExpr references at script scope as
+  // implicit Vars (backed by the runtime workspace) instead of emitting
+  // an "undefined name" diagnostic. Lets the user type `disp(x)` for a
+  // variable defined in a prior input line without each input becoming
+  // its own isolated compilation unit.
+  void setReplMode(bool V) { ReplMode = V; }
+
 private:
   SemaContext &Sema;
   TypeContext &TC;
   DiagnosticEngine &Diag;
   Scope *Global = nullptr;
+  bool ReplMode = false;
 
   void registerBuiltins();
   void registerBuiltin(std::string_view Name);

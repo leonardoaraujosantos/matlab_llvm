@@ -560,9 +560,20 @@ void Resolver::resolveExpr(Expr &E, Scope *S) {
     auto &N = static_cast<NameExpr &>(E);
     Binding *B = S->lookup(N.Name);
     if (!B) {
-      Diag.error(N.Range.Begin,
-                 std::string("undefined name '") + std::string(N.Name) + "'");
-      return;
+      /* REPL mode: names that don't resolve are auto-declared as Vars
+       * in the current (script) scope. Lowering then routes the read
+       * through the runtime workspace, which holds values produced by
+       * earlier REPL inputs. This is the right trade-off for an
+       * interactive session where each input is its own TU but the
+       * user expects identifiers to persist. */
+      if (ReplMode) {
+        Binding *NB = Sema.newBinding();
+        B = S->getOrDeclareVar(N.Name, NB);
+      } else {
+        Diag.error(N.Range.Begin,
+                   std::string("undefined name '") + std::string(N.Name) + "'");
+        return;
+      }
     }
     N.Ref = B;
     B->ReadFrom = true;

@@ -12,10 +12,21 @@
 #include "matlab/MLIR/Lowering.h"
 #include "matlab/MLIR/Passes/Passes.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/ExecutionEngine/ExecutionEngine.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Verifier.h"
+#include "mlir/Conversion/ArithToLLVM/ArithToLLVM.h"
+#include "mlir/Conversion/ControlFlowToLLVM/ControlFlowToLLVM.h"
+#include "mlir/Conversion/FuncToLLVM/ConvertFuncToLLVMPass.h"
+#include "mlir/Conversion/ReconcileUnrealizedCasts/ReconcileUnrealizedCasts.h"
+#include "mlir/Conversion/SCFToControlFlow/SCFToControlFlow.h"
+#include "mlir/Pass/PassManager.h"
+#include "mlir/Target/LLVMIR/Dialect/Builtin/BuiltinToLLVMIRTranslation.h"
+#include "mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h"
+#include "mlir/Transforms/Passes.h"
+#include "llvm/Support/TargetSelect.h"
 #endif
 #include "matlab/Sema/Resolver.h"
 #include "matlab/Sema/SemaDumper.h"
@@ -32,7 +43,7 @@ using namespace matlab;
 namespace {
 struct Options {
   enum class Mode { DumpTokens, DumpAST, EmitSema, EmitMIR, EmitMLIR,
-                    EmitLLVM, EmitC, EmitCpp, Check };
+                    EmitLLVM, EmitC, EmitCpp, Check, Repl };
   Mode Mode = Mode::Check;
   bool Opt = false;
   std::string InputPath;
@@ -40,7 +51,9 @@ struct Options {
 
 int usage(const char *Prog) {
   std::cerr << "usage: " << Prog
-            << " [-dump-tokens | -dump-ast | -emit-sema | -emit-mir] FILE.m\n";
+            << " [-dump-tokens | -dump-ast | -emit-sema | -emit-mir |\n"
+               "             -emit-mlir | -emit-llvm | -emit-c | -emit-cpp |\n"
+               "             -repl] FILE.m\n";
   return 64;
 }
 
@@ -56,6 +69,7 @@ bool parseArgs(int Argc, char **Argv, Options &Opts, const char *&Prog) {
     else if (A == "-emit-llvm") Opts.Mode = Options::Mode::EmitLLVM;
     else if (A == "-emit-c") Opts.Mode = Options::Mode::EmitC;
     else if (A == "-emit-cpp") Opts.Mode = Options::Mode::EmitCpp;
+    else if (A == "-repl") Opts.Mode = Options::Mode::Repl;
     else if (A == "-opt" || A == "-O") Opts.Opt = true;
     else if (A == "-h" || A == "--help") return false;
     else if (!A.empty() && A[0] == '-') {
@@ -66,6 +80,8 @@ bool parseArgs(int Argc, char **Argv, Options &Opts, const char *&Prog) {
       Opts.InputPath = std::string(A);
     }
   }
+  /* -repl doesn't take a file. Everything else does. */
+  if (Opts.Mode == Options::Mode::Repl) return true;
   return !Opts.InputPath.empty();
 }
 
@@ -79,12 +95,201 @@ void dumpTokens(const SourceManager &SM, const std::vector<Token> &Ts) {
     std::cout << '\n';
   }
 }
+
+#if MATLAB_LLVM_WITH_MLIR
+/* --- REPL -----------------------------------------------------------------
+ *
+ * Accumulate input, parse + Sema + lower with ReplMode=true, run the same
+ * pass pipeline the -emit-llvm path uses, JIT with mlir::ExecutionEngine,
+ * invoke the generated `script` function. Variables live in a module-
+ * global matlab_struct inside the runtime so they persist across
+ * invocations. The JIT resolves matlab_* and matlab_ws_* symbols against
+ * the running matlabc process — the runtime is linked into the
+ * executable at build time for this purpose. */
+
+int blockDepth(const std::vector<Token> &Toks) {
+  int d = 0;
+  for (const auto &T : Toks) {
+    switch (T.Kind) {
+    case TokenKind::kw_if:
+    case TokenKind::kw_for:
+    case TokenKind::kw_while:
+    case TokenKind::kw_switch:
+    case TokenKind::kw_try:
+    case TokenKind::kw_function:
+    case TokenKind::kw_classdef:
+    case TokenKind::kw_parfor:
+      ++d; break;
+    case TokenKind::kw_end:
+      --d; break;
+    default: break;
+    }
+  }
+  return d < 0 ? 0 : d;
+}
+
+int runReplInput(mlirgen::Context &MCtx, const std::string &Src, int Id) {
+  SourceManager SM;
+  FileID F = SM.addBuffer("<repl:" + std::to_string(Id) + ">", Src);
+  DiagnosticEngine Diag(SM);
+  Lexer Lx(SM, F, Diag);
+  auto Toks = Lx.tokenize();
+
+  ASTContext AstCtx;
+  Parser P(std::move(Toks), AstCtx, Diag);
+  TranslationUnit *TU = P.parseFile();
+  if (!TU || Diag.hasErrors()) {
+    Diag.printAll();
+    return 1;
+  }
+
+  SemaContext Sema;
+  TypeContext TC;
+  Resolver R(Sema, TC, Diag);
+  R.setReplMode(true);
+  R.resolve(*TU);
+  TypeInference Inf(Sema, TC, Diag);
+  Inf.run(*TU);
+  if (Diag.hasErrors()) {
+    Diag.printAll();
+    return 1;
+  }
+
+  auto M = mlirgen::lowerToMLIR(MCtx, TC, Diag, *TU, &SM, /*ReplMode=*/true);
+  if (Diag.hasErrors() || mlir::failed(mlir::verify(M))) {
+    Diag.printAll();
+    std::cerr << "error: REPL MLIR verification failed\n";
+    return 1;
+  }
+
+  mlirgen::runSlotPromotion(M);
+  mlirgen::runLowerScalarsToArith(M);
+  mlirgen::runSlotPromotion(M);
+  mlirgen::runOutlineParfor(M);
+  mlirgen::runLowerSeqLoops(M);
+  mlirgen::runLowerAnonCalls(M);
+  for (int Iter = 0; Iter < 8; ++Iter) {
+    bool A = mlirgen::runLowerScalarsToArith(M);
+    bool B = mlirgen::runLowerUserCalls(M);
+    if (!A && !B) break;
+  }
+  mlirgen::runLowerTensorOps(M);
+  for (int Iter = 0; Iter < 4; ++Iter) {
+    bool A = mlirgen::runLowerScalarsToArith(M);
+    bool B = mlirgen::runLowerUserCalls(M);
+    if (!A && !B) break;
+  }
+  mlirgen::runLowerTensorOps(M);
+  mlirgen::runLowerNarginNargout(M);
+  mlirgen::runLowerScalarSlots(M);
+  mlirgen::runLowerIO(M);
+
+  if (mlir::failed(mlir::verify(M))) {
+    std::cerr << "error: REPL MLIR verification failed after passes\n";
+    return 1;
+  }
+
+  /* Same conversion-to-LLVM-dialect pipeline that lowerToLLVMIR runs.
+   * We do it here rather than calling lowerToLLVMIR so ExecutionEngine
+   * can consume the module directly instead of via an intermediate
+   * textual LLVM IR round-trip. */
+  mlir::PassManager PM(&MCtx.get());
+  PM.addPass(mlir::createCanonicalizerPass());
+  PM.addPass(mlir::createSCFToControlFlowPass());
+  PM.addPass(mlir::createConvertControlFlowToLLVMPass());
+  PM.addPass(mlir::createArithToLLVMConversionPass());
+  PM.addPass(mlir::createConvertFuncToLLVMPass());
+  PM.addPass(mlir::createReconcileUnrealizedCastsPass());
+  if (mlir::failed(PM.run(M))) {
+    std::cerr << "error: REPL MLIR-to-LLVM conversion pipeline failed\n";
+    return 1;
+  }
+
+  if (getenv("MATLABC_REPL_DUMP")) {
+    mlirgen::printModule(std::cerr, M);
+  }
+
+  mlir::ExecutionEngineOptions EngineOpts;
+  EngineOpts.jitCodeGenOptLevel = llvm::CodeGenOptLevel::Default;
+  auto EngineOrErr = mlir::ExecutionEngine::create(M, EngineOpts);
+  if (!EngineOrErr) {
+    std::cerr << "error: ExecutionEngine::create failed: "
+              << llvm::toString(EngineOrErr.takeError()) << "\n";
+    return 1;
+  }
+  auto &Engine = *EngineOrErr;
+  /* Look up the raw symbol rather than going through invoke<>. The
+   * template invoke builds `_mlir_ciface_<name>` and then invokePacked
+   * prepends another `_mlir_` layer for the packed wrapper — our
+   * script doesn't need packed arg marshalling, so we just cast the
+   * raw symbol to a function pointer and call it.
+   *
+   * LowerIO renames `script` to `main` and changes its return to i32;
+   * we match that here. A REPL script has no user-visible return
+   * value either way. */
+  auto FnOrErr = Engine->lookup("main");
+  if (!FnOrErr) {
+    std::cerr << "error: lookup(\"main\") failed: "
+              << llvm::toString(FnOrErr.takeError()) << "\n";
+    return 1;
+  }
+  using Thunk = int (*)(void);
+  auto Fn = reinterpret_cast<Thunk>(*FnOrErr);
+  (void)Fn();
+  return 0;
+}
+
+int runRepl() {
+  llvm::InitializeNativeTarget();
+  llvm::InitializeNativeTargetAsmPrinter();
+
+  mlirgen::Context MCtx;
+  mlir::registerBuiltinDialectTranslation(MCtx.get());
+  mlir::registerLLVMDialectTranslation(MCtx.get());
+
+  std::cerr << "matlabc REPL (experimental). Ctrl-D or `exit` to quit.\n";
+  std::string Accum;
+  int Counter = 0;
+  while (true) {
+    std::cout << (Accum.empty() ? ">> " : "   ") << std::flush;
+    std::string Line;
+    if (!std::getline(std::cin, Line)) { std::cout << '\n'; break; }
+    if (Accum.empty() && (Line == "exit" || Line == "quit" ||
+                          Line == "exit;" || Line == "quit;"))
+      break;
+    Accum += Line;
+    Accum += '\n';
+
+    /* Lex once to decide if we have a complete balanced input. */
+    SourceManager SM;
+    FileID F = SM.addBuffer("<repl>", Accum);
+    DiagnosticEngine Diag(SM);
+    Lexer Lx(SM, F, Diag);
+    auto Toks = Lx.tokenize();
+    if (blockDepth(Toks) > 0) continue;  /* need more input */
+
+    (void)runReplInput(MCtx, Accum, Counter++);
+    Accum.clear();
+  }
+  return 0;
+}
+#endif
 } // namespace
 
 int main(int Argc, char **Argv) {
   Options Opts;
   const char *Prog = Argv[0];
   if (!parseArgs(Argc, Argv, Opts, Prog)) return usage(Prog);
+
+#if MATLAB_LLVM_WITH_MLIR
+  if (Opts.Mode == Options::Mode::Repl) return runRepl();
+#else
+  if (Opts.Mode == Options::Mode::Repl) {
+    std::cerr << "error: matlabc was built without MLIR support; "
+                 "REPL is unavailable\n";
+    return 1;
+  }
+#endif
 
   SourceManager SM;
   FileID F = SM.loadFile(Opts.InputPath);

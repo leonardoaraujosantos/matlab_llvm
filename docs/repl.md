@@ -1,8 +1,66 @@
-# REPL / Interactive Interpreter — Plan
+# REPL / Interactive Interpreter
 
-Forward-looking design doc for adding an interactive MATLAB interpreter
-(`matlabc -i` or a new `matlabi` tool) on top of the existing compiler.
-Nothing here has shipped yet.
+A JIT-backed REPL is now available as `matlabc -repl` (or `just repl`).
+Each input line is lex + parse + Sema + lowered through the same
+pipeline as `-emit-llvm`, then handed directly to MLIR's
+`ExecutionEngine` for in-process JIT compilation and execution —
+no intermediate text LLVM IR, no clang invocation, no temp files.
+
+## State persistence
+
+Variables assigned in one input are visible in later inputs. The
+compiler reroutes script-level `Var` reads/writes through a runtime
+workspace (`matlab_ws_get_*` / `matlab_ws_set_*` backed by a single
+`matlab_struct` living in the matlabc process):
+
+```
+>> x = 42
+x =
+42
+>> y = x * 2
+y =
+84
+>> disp(x + y)
+126
+```
+
+For-loop induction variables and any other binding that already owns
+a function-local slot keep their slot-local semantics within their
+scope; only bindings that are pure "script workspace" variables route
+through the runtime table.
+
+## Multi-line blocks
+
+`if` / `for` / `while` / `switch` / `try` / `function` / `classdef`
+auto-continue: the prompt switches to `   ` while block depth is
+positive, and the whole block is compiled as a single unit once the
+matching `end` is seen.
+
+## Symbol resolution
+
+`matlabc` links `runtime/matlab_runtime.c` directly into its own
+binary (controlled by `CMakeLists.txt`). MLIR's `ExecutionEngine`
+resolves `matlab_*` and `matlab_ws_*` symbols against the running
+process via LLJIT's default dynamic-library search generator, so no
+`.so` / `.dylib` is required at runtime.
+
+## Known limitations
+
+- No line editing (history, arrow keys). Piped input and basic
+  interactive use work fine; for rich editing, wrap with `rlwrap`.
+- No JIT caching across inputs — each line rebuilds its own MLIR
+  module and ExecutionEngine. Fast enough for human-paced use,
+  noticeable on tight benchmark loops.
+- No `whos` / `clear` builtins wired up (`matlab_ws_clear` exists
+  in the runtime but no frontend dispatch).
+- User-defined functions declared inside the REPL are compiled into
+  the current module and disappear after the line runs; a follow-up
+  call in the next line won't find them.
+- `classdef` inside the REPL: same limitation as user functions.
+
+---
+
+## Historical design notes (pre-implementation)
 
 ## Scope
 

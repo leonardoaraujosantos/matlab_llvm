@@ -233,7 +233,7 @@ out of scope.
 | C++ emission | ✅ | `-emit-cpp` |
 | Python emission | ❌ | See `docs/emit_python.md` |
 | SystemC (synthesizable) emission | ❌ | See `docs/emit_systemc.md` |
-| JIT / REPL | ❌ | See `docs/repl.md` |
+| JIT / REPL | 🟡 | `matlabc -repl` with MLIR ExecutionEngine; state persists via a runtime workspace. No line editing / JIT cache / live user-function definitions yet. See `docs/repl.md`. |
 
 ### MLIR passes (`lib/MLIR/Passes/`)
 
@@ -266,12 +266,12 @@ algebra, logical masks, struct/cell usage.
 
 | Feature | Status |
 |---|:-:|
-| Compiler CLI (`matlabc`) with 9 emit modes | ✅ |
+| Compiler CLI (`matlabc`) with 9 emit modes + `-repl` | ✅ |
 | CMake + `just` build system | ✅ |
 | CTest integration (7 lanes) | ✅ |
 | Diagnostics with source-location | ✅ |
 | `#line` directives in emitted C / C++ | ✅ |
-| REPL / interactive interpreter | ❌ |
+| REPL / interactive interpreter | 🟡 | JIT via MLIR ExecutionEngine, persistent workspace. `matlabc -repl`. |
 | Debugger (DAP) | ❌ |
 | Language Server (LSP) | ❌ |
 | Unit-test framework (MATLAB `matlab.unittest`) | ❌ |
