@@ -55,7 +55,7 @@ explicitly out of scope.
 | Cell index (`C{i}`), field access (`s.x`), dynamic field (`s.(name)`) | ✅ | |
 | Anonymous function (`@(x) x+1`) with captures | ✅ | Scalar and matrix captures tested |
 | Function handle (`@sin`, `@myFunc`) | ✅ | |
-| Complex literal arithmetic | 🟡 | Literals parse; arithmetic returns NaN |
+| Complex literal arithmetic | ✅ | `2i`, `3+4i`, mixed real+complex binops route through `matlab_mat_c` (separate re/im planes, magic-tagged for polymorphic dispatch) |
 
 ### Parser — statements
 
@@ -90,7 +90,7 @@ explicitly out of scope.
 | `nargin` / `nargout` dispatch (multi-return selection) | ✅ | |
 | Polymorphic call monomorphization | ✅ | |
 | Integer dtype tracking (`int8..int64`, `uint8..uint64`) | 🟡 | Tracked in type lattice; runtime is f64-only |
-| Complex dtype tracking | 🟡 | Tracked; no runtime arithmetic |
+| Complex dtype tracking | ✅ | Lowers to `!llvm.ptr` (matlab_mat_c*); runtime arithmetic shipped |
 | N-dim (>2D) rank tracking | 🟡 | Tracked; runtime assumes ≤2D |
 
 ---
@@ -105,7 +105,7 @@ explicitly out of scope.
 | `string` scalar (double-quoted) | ✅ | |
 | `single` | 🟡 | Cast builtin routes to f64 (truncate only) |
 | `int8..int64`, `uint8..uint64` | 🟡 | Cast builtins truncate + saturate; storage stays f64 |
-| `complex` | ❌ | Imaginary literals lex/parse; arithmetic missing |
+| `complex` | ✅ | Imaginary literals (`2i`, `3j`), scalar + matrix arithmetic (add/sub/mul/div/matmul), mixed real+complex binops. Separate re/im planes; scalars auto-boxed to 1×1 — see [`docs/complex.md`](complex.md). |
 | N-D arrays (3-D) | 🟡 | `zeros(m,n,p)` / `ones(m,n,p)` + scalar `A(i,j,k)` read/write, `size(A, 3)`, `numel`, `ndims` |
 | N-D arrays (>3D) | ❌ | |
 | Sparse matrices | ❌ | |
@@ -134,7 +134,8 @@ explicitly out of scope.
 | `abs`, `sqrt`, `exp`, `log`, `sin`, `cos`, `tan` | ✅ |
 | `floor`, `ceil`, `round`, `fix`, `mod`, `rem` | ✅ |
 | `asin`, `acos`, `atan`, `atan2`, `sinh`, `cosh`, `tanh`, `log2`, `log10`, `sign` | ✅ |
-| `conj`, `real`, `imag`, `angle` | ❌ | Gated behind complex-number runtime |
+| `conj`, `real`, `imag`, `angle` | ✅ | Polymorphic — accept either real or complex input |
+| `fft`, `ifft`, `fft2`, `ifft2` | ✅ | Pure-C Cooley-Tukey radix-2 + Bluestein for general N. See [`docs/complex.md`](complex.md). |
 
 ### Reductions
 
@@ -315,7 +316,7 @@ deliberate non-goals; see "Out of scope."
 | **N-dim arrays (>3D)** | Medium | ~2–3 weeks. Runtime descriptor generalization from `(rows, cols, depth)` to `(ndims, shape[])`; update all per-op lowering. 3-D already supported via `matlab_mat3` for `zeros/ones` + scalar indexing. |
 | **3-D slicing** (`A(:,:,k)`) | Small | ~2–3 days. 3-D exists for scalar `A(i,j,k)`; vector / slice forms not wired. |
 | **Integer runtime** (`int8..int64`, `uint8..uint64`) | Medium | ~2 weeks. Cast builtins already truncate + saturate against f64 storage; dedicated typed runtime still needed for memory-layout fidelity. |
-| **Complex numbers** | Medium | ~2 weeks. Runtime `matlab_mat_c64`; complex-aware versions of every elementwise op + linalg. |
+| **Complex numbers — linalg tail** | Small | Scalars / matrix arithmetic / FFT shipped. Remaining: complex `inv` / `det` / `svd` / `eig` / `chol` / `qr`. |
 | **Struct arrays** (`s(i).x`) | Medium | ~1 week. Runtime struct-array descriptor; slicing over struct fields. |
 | **Sparse matrices** | Large | ~3–4 weeks. Sparse representation + sparse-aware linalg; or lean on SuiteSparse. |
 | **`varargout`** | Small | ~2–3 days. `varargin` ships; `varargout` needs multi-return unpacking at call site. |
@@ -366,7 +367,7 @@ sort / linalg tail, strings, REPL, file I/O, basic OOP, tooling —
 | 1 | Struct arrays (`s(i).x`) | 1 week | Data-in-records patterns |
 | 2 | Integer runtime (typed `matlab_mat_i32` / `_u8` / …) | 1.5 weeks | Image processing pixel code |
 | 3 | `varargout` + 3-D vector slicing (`A(:,:,k)`) | 1 week | Library-style + volumetric code |
-| 4 | Complex-number runtime | 2 weeks | DSP programs |
+| 4 | Complex linalg tail (`inv` / `det` / `svd` / `eig`) | 1 week | Complete DSP / scientific code |
 | 5 | OOP value-class copy semantics + property validators | 2 weeks | Modern MATLAB code |
 | 6 | DAP user-function frames + `evaluate` | 1 week | Stepping into user functions shows their frames; watch expressions |
 | 7 | `regexp` / `regexprep` + string tail | 1–2 weeks | Text-processing scripts |

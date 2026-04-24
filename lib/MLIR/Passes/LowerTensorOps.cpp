@@ -105,6 +105,12 @@ private:
   // materialize the literal matrix via matlab_mat_from_buf.
   bool rewriteLiterals();
 
+  // --- Complex literal (2i / 3j) ---------------------------------------
+  // matlab.const_complex with a "value" string attribute lowers to a
+  // matlab_complex_scalar(0.0, imag) call returning a ptr to a 1x1
+  // matlab_mat_c.
+  bool rewriteComplexLiterals();
+
   // --- Builtin calls -----------------------------------------------------
   bool rewriteBuiltinCalls();
 
@@ -304,6 +310,43 @@ Value TensorLowering::materializeMat(Location Loc, int64_t Rows, int64_t Cols,
   auto Call = LLVM::CallOp::create(B, Loc, Fn,
                                     ValueRange{BufPtr, MVal, NVal});
   return Call.getResult();
+}
+
+bool TensorLowering::rewriteComplexLiterals() {
+  SmallVector<Operation *> Lits;
+  Mod.walk([&](Operation *Op) {
+    if (isMatlabOp(Op, "matlab.const_complex")) Lits.push_back(Op);
+  });
+  bool Changed = false;
+  for (Operation *Op : Lits) {
+    auto VA = Op->getAttrOfType<StringAttr>("value");
+    if (!VA) continue;
+    /* The attribute value is the MATLAB source text — e.g. "2i", "3.5j",
+     * "1.25e-3i". Strip the trailing i/j and parse the leading number
+     * as the imaginary magnitude; real part is always 0 at a literal. */
+    StringRef Txt = VA.getValue();
+    if (Txt.empty()) continue;
+    char Suffix = Txt.back();
+    if (Suffix != 'i' && Suffix != 'j' && Suffix != 'I' && Suffix != 'J')
+      continue;
+    double Imag = 0.0;
+    if (Txt.drop_back(1).getAsDouble(Imag)) continue;  /* couldn't parse */
+    B.setInsertionPoint(Op);
+    auto Fn = rt("matlab_complex_scalar", PtrTy, {F64, F64});
+    auto Zero = LLVM::ConstantOp::create(B, Op->getLoc(), F64,
+                                          B.getF64FloatAttr(0.0));
+    auto Im = LLVM::ConstantOp::create(B, Op->getLoc(), F64,
+                                        B.getF64FloatAttr(Imag));
+    auto NC = LLVM::CallOp::create(B, Op->getLoc(), Fn,
+                                    ValueRange{Zero, Im});
+    if (Op->getNumResults() == 1 &&
+        Op->getResult(0).getType() != PtrTy)
+      Op->getResult(0).setType(PtrTy);
+    Op->getResult(0).replaceAllUsesWith(NC.getResult());
+    Op->erase();
+    Changed = true;
+  }
+  return Changed;
 }
 
 bool TensorLowering::rewriteLiterals() {
@@ -1619,7 +1662,11 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"log2",       "matlab_log2_m",     1, "p"},
       {"log10",      "matlab_log10_m",    1, "p"},
       {"sqrt",       "matlab_sqrt_m",     1, "p"},
-      {"abs",        "matlab_abs_m",      1, "p"},
+      /* abs_c is polymorphic — accepts both real and complex. Routing
+       * abs() through it keeps abs(complex) well-typed without a
+       * separate dispatch entry while the real fast path still
+       * collapses to the scalar math fn via the Scalar map above. */
+      {"abs",        "matlab_abs_c",      1, "p"},
       {"sign",       "matlab_sign_m",     1, "p"},
       {"floor",      "matlab_floor_m",    1, "p"},
       {"ceil",       "matlab_ceil_m",     1, "p"},
@@ -1637,6 +1684,18 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"size",       "matlab_size_dim",   0, "pf"},   /* size(A, dim) */
       {"find",       "matlab_find",       1, "p"},
       {"matlab_empty_mat", "matlab_empty_mat", 1, ""},
+      /* Complex builtins. Operand kind 'p' accepts either a matlab_mat*
+       * or a matlab_mat_c* — the runtime side dispatches on the layout.
+       * conj / fft / ifft / fft2 / ifft2 return complex (ptr); real /
+       * imag / angle return a real matrix (also ptr but matlab_mat*). */
+      {"conj",       "matlab_conj_c",     1, "p"},
+      {"real",       "matlab_real_c",     1, "p"},
+      {"imag",       "matlab_imag_c",     1, "p"},
+      {"angle",      "matlab_angle_c",    1, "p"},
+      {"fft",        "matlab_fft_c",      1, "p"},
+      {"ifft",       "matlab_ifft_c",     1, "p"},
+      {"fft2",       "matlab_fft2_c",     1, "p"},
+      {"ifft2",      "matlab_ifft2_c",    1, "p"},
     };
 
     // Pick the first entry with name + arity + TYPE match so overloaded
@@ -2203,6 +2262,7 @@ bool TensorLowering::run() {
   for (int Iter = 0; Iter < 8; ++Iter) {
     bool Changed = false;
     Changed |= retypeMatrixSlots();
+    Changed |= rewriteComplexLiterals();
     Changed |= rewriteBuiltinCalls();
     Changed |= rewriteLiterals();
     Changed |= rewriteBinaryOps();

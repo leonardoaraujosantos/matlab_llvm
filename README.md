@@ -146,6 +146,7 @@ Design docs:
 - [`docs/repl.md`](docs/repl.md) — shipped JIT REPL built on MLIR `ExecutionEngine`, with state persistence via a runtime workspace.
 - [`docs/lsp.md`](docs/lsp.md) — shipped Language Server (`matlab-lsp`): diagnostics, goto-definition, document outline, plus editor-setup snippets.
 - [`docs/debug.md`](docs/debug.md) — DAP server (`matlabc -dap`) for editor-integrated breakpoints and stepping, plus the lightweight aids (`dbg(x)`, `who` / `whos` / `clear`).
+- [`docs/complex.md`](docs/complex.md) — complex-number runtime and pure-C Cooley-Tukey FFT (radix-2 + Bluestein), no external deps.
 - [`docs/emit_python.md`](docs/emit_python.md) — planned Python backend.
 - [`docs/emit_systemc.md`](docs/emit_systemc.md) — planned SystemC (synthesizable) backend.
 
@@ -256,10 +257,12 @@ Runtime built-ins include:
 **Not yet:** value-class copy semantics (every object is
 handle-shaped), events / listeners, property validators
 (`{mustBeNumeric}` parses but isn't enforced), struct arrays, 2-D
-cells, `varargout`, complex numbers (parsed but no arithmetic),
-3-D vector slicing (only scalar `A(i,j,k)` today), 4-D+ arrays,
-sparse matrices, non-symmetric `eig`, full `[U, S, V] = svd(A)`,
-`fft` family, `regexp` / `regexprep`, MATLAB `.mat` file format,
+cells, `varargout`, complex linalg (`inv` / `svd` / `eig` on
+complex matrices — scalar / matrix arithmetic and FFT shipped, see
+[`docs/complex.md`](docs/complex.md)), 3-D vector slicing (only
+scalar `A(i,j,k)` today), 4-D+ arrays, sparse matrices,
+non-symmetric `eig`, full `[U, S, V] = svd(A)`,
+`regexp` / `regexprep`, MATLAB `.mat` file format,
 DAP user-function frames in stack trace and watch expressions (MVP
 breakpoint/step server shipped — see [`docs/debug.md`](docs/debug.md)),
 LSP completion / hover / rename (see [`docs/lsp.md`](docs/lsp.md)).

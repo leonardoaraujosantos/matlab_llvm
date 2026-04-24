@@ -1898,7 +1898,12 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
     auto &I = static_cast<const ImagLiteral &>(E);
     mlir::NamedAttribute A(mlir::StringAttr::get(&MCtx, "value"),
                             mlir::StringAttr::get(&MCtx, std::string(I.Text)));
-    return emitUnreg("matlab.const_complex", {}, RT, L, {A});
+    /* Always emit a ptr result — the runtime represents complex values
+     * as matlab_mat_c* (1x1 for scalars). Sema may leave RT as
+     * f64/complex-scalar; override to ptr so LowerTensorOps' complex
+     * dispatch can pick the right runtime call. */
+    auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+    return emitUnreg("matlab.const_complex", {}, PtrTy, L, {A});
   }
   case NodeKind::StringLiteral: {
     /* Double-quoted "..." -> a matlab_string descriptor. We emit a
@@ -2628,6 +2633,10 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             "flipud", "rot90", "size", "transpose", "ctranspose",
             "diag", "reshape", "repmat", "inv", "svd", "eig",
             "find", "ind2sub", "linspace",
+            /* Complex: all return a matrix descriptor (matlab_mat* or
+             * matlab_mat_c*), uniformly ptr at MLIR level. */
+            "conj", "real", "imag", "angle",
+            "fft", "ifft", "fft2", "ifft2",
           };
           if (F64Ret.contains(N->Name)) ResTy = F64;
           else if (PtrRet.contains(N->Name)) ResTy = PtrTy;

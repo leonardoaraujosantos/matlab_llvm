@@ -2,6 +2,7 @@
 
 #include "matlab/Sema/Type.h"
 
+#include "mlir/Dialect/LLVMIR/LLVMTypes.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/MLIRContext.h"
@@ -14,11 +15,11 @@ mlir::Type mapElementType(mlir::MLIRContext &Ctx, Dtype D) {
   switch (D) {
   case Dtype::Double:  return B.getF64Type();
   case Dtype::Single:  return B.getF32Type();
-  case Dtype::Complex: {
-    // Represent complex-double as a pair of f64s via ComplexType.
-    auto F64 = B.getF64Type();
-    return mlir::ComplexType::get(F64);
-  }
+  case Dtype::Complex:
+    /* Complex values flow through the runtime as matlab_mat_c* (even
+     * scalars — stored as 1x1). Map to !llvm.ptr directly so slots,
+     * loads, stores, and call sites stay well-typed end-to-end. */
+    return mlir::LLVM::LLVMPointerType::get(&Ctx);
   case Dtype::Int8:    return B.getIntegerType(8,  /*isSigned=*/true);
   case Dtype::Int16:   return B.getIntegerType(16, true);
   case Dtype::Int32:   return B.getIntegerType(32, true);

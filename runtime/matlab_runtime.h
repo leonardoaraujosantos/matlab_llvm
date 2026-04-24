@@ -10,7 +10,8 @@ extern "C" {
 
 // Opaque types — the layout lives in matlab_runtime.c; generated code only
 // ever passes pointers to these.
-typedef struct matlab_mat    matlab_mat;
+typedef struct matlab_mat      matlab_mat;
+typedef struct matlab_mat_c    matlab_mat_c;
 typedef struct matlab_struct_s matlab_struct;
 typedef struct matlab_cell_s   matlab_cell;
 
@@ -22,7 +23,7 @@ void matlab_disp_str(const char *s, int64_t n);
 void matlab_disp_f64(double v);
 void matlab_disp_vec_f64(const double *data, int64_t n);
 void matlab_disp_mat_f64(const double *data, int64_t m, int64_t n);
-void matlab_disp_mat(matlab_mat *A);
+void matlab_disp_mat(void *A);  /* polymorphic: matlab_mat* or matlab_mat_c* */
 void matlab_fprintf_str(const char *fmt, int64_t n);
 void matlab_fprintf_f64(const char *fmt, int64_t n, double v);
 void matlab_fprintf_f64_2(const char *fmt, int64_t n, double a, double b);
@@ -185,6 +186,34 @@ double matlab_iscell(matlab_cell *c);
 // Global / persistent.
 double matlab_global_get_f64(int32_t id);
 void   matlab_global_set_f64(int32_t id, double v);
+
+// Complex numbers.
+matlab_mat_c *matlab_complex_scalar(double re, double im);
+matlab_mat_c *matlab_mat_c_from_real(matlab_mat *A);
+matlab_mat_c *matlab_mat_c_from_buf(const double *re, const double *im,
+                                     double m, double n);
+/* Polymorphic: accept real matlab_mat* or complex matlab_mat_c*. */
+matlab_mat_c *matlab_conj_c(void *A);
+matlab_mat_c *matlab_neg_c(matlab_mat_c *A);
+matlab_mat   *matlab_real_c(void *A);
+matlab_mat   *matlab_imag_c(void *A);
+matlab_mat   *matlab_angle_c(void *A);
+matlab_mat   *matlab_abs_c(void *A);
+matlab_mat_c *matlab_add_cc(matlab_mat_c *A, matlab_mat_c *B);
+matlab_mat_c *matlab_sub_cc(matlab_mat_c *A, matlab_mat_c *B);
+matlab_mat_c *matlab_emul_cc(matlab_mat_c *A, matlab_mat_c *B);
+matlab_mat_c *matlab_ediv_cc(matlab_mat_c *A, matlab_mat_c *B);
+matlab_mat_c *matlab_matmul_cc(matlab_mat_c *A, matlab_mat_c *B);
+matlab_mat_c *matlab_transpose_c(matlab_mat_c *A);
+matlab_mat_c *matlab_ctranspose_c(matlab_mat_c *A);
+void          matlab_disp_mat_c(matlab_mat_c *A);
+
+// FFT — pure-C Cooley-Tukey (radix-2 + Bluestein for general N). All
+// accept either a real matlab_mat* or a complex matlab_mat_c*.
+matlab_mat_c *matlab_fft_c(void *A);
+matlab_mat_c *matlab_ifft_c(void *A);
+matlab_mat_c *matlab_fft2_c(void *A);
+matlab_mat_c *matlab_ifft2_c(void *A);
 
 #ifdef __cplusplus
 } // extern "C"

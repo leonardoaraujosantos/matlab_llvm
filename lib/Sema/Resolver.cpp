@@ -56,6 +56,8 @@ void Resolver::registerBuiltins() {
     "fopen", "fclose", "fgetl", "feof",
     "fread", "fwrite",
     "save", "load",
+    "conj", "real", "imag", "angle",
+    "fft", "ifft", "fft2", "ifft2",
   }) {
     registerBuiltin(N);
   }
