@@ -10,12 +10,13 @@ dialects) → codegen. Plus a MATLAB-aware **formatter** (`matlabc
 front-end.
 
 No MathWorks source, no Octave dependency, no numerics library
-dependency. Just C++20, MLIR 22.x, and a ~3100-line C runtime shim
-(libc + pthreads + heap-allocated `matlab_mat` / `matlab_mat3` /
-`matlab_struct` / `matlab_cell` / `matlab_obj` / `matlab_string`
-descriptors, plus matmul / inverse / solve / LU / QR / Cholesky /
-SVD / eig / sort / FFT-free math implemented inline) that compiles
-stand-alone.
+dependency. Just C++20, MLIR 22.x, and a ~4100-line C runtime shim
+(libc + pthreads + heap-allocated `matlab_mat` / `matlab_mat_c` /
+`matlab_mat3` / `matlab_struct` / `matlab_cell` / `matlab_obj` /
+`matlab_string` descriptors, plus matmul / inverse / solve / LU /
+QR / Cholesky / SVD / eig / sort / pure-C Cooley-Tukey FFT
+(radix-2 + Bluestein for arbitrary N) / complex arithmetic all
+implemented inline) that compiles stand-alone.
 
 ## Runs today
 
@@ -81,6 +82,16 @@ ans =
   ans              2x2              double
 ```
 
+```matlab
+% Complex arithmetic and FFT — pure-C Cooley-Tukey, no deps.
+x = [1 2 3 4];
+y = fft(x);                      % radix-2 when N is power-of-2
+disp(real(y));                   % 10  -2  -2  -2
+disp(imag(y));                   %  0   2   0  -2
+z = (3 + 4i) * (1 - 2i);
+disp(real(z));  disp(imag(z));   % 11, -2
+```
+
 More in [`examples/`](examples/) — every file there compiles and runs
 under the current compiler end-to-end.
 
@@ -123,10 +134,13 @@ flowchart LR
   MLIR --> Passes["MLIR passes<br/>slot prom · scalar→arith ·<br/>parfor · user calls ·<br/>anon calls · tensor ops ·<br/>I/O · scalar slots"]
   Passes --> LL[LLVM IR]
   Passes --> CSrc[C / C++ source]
+  Passes --> JIT["mlir::ExecutionEngine<br/>(JIT)"]
   LL --> Exe1["executable<br/>clang + runtime"]
   CSrc --> Exe2["executable<br/>cc / c++ + runtime"]
+  JIT --> Proc["in-process<br/>(matlabc -repl / -dap)"]
   RT[runtime/matlab_runtime.c] -.-> Exe1
   RT -.-> Exe2
+  RT -.-> JIT
 ```
 
 The frontend has no external dependencies. The in-house MIR
@@ -169,13 +183,24 @@ One driver, many stages:
 | `-repl`      | JIT-backed interactive prompt with persistent workspace |
 | `-dap`       | Debug Adapter Protocol server over stdio: breakpoints, step, variable inspection. See [`docs/debug.md`](docs/debug.md). |
 
+Modifiers (combine with any emit mode):
+
+| Flag | Effect |
+|---|---|
+| `-opt` / `-O` | Run optimization passes (slot promotion, scalar-to-arith) before emission |
+| `-no-line` | Suppress `#line` directives in `-emit-c` / `-emit-cpp` output |
+| `-doxygen` | Wrap function-leading comments as `/** ... */` Doxygen blocks in `-emit-c` / `-emit-cpp` |
+| `-cpp-auto` | Use C++ `auto` for call-result locals in `-emit-cpp` mode (ignored for `-emit-c`) |
+
 Plus a separate binary:
 
 | Binary        | Role |
 |---|---|
 | `matlab-lsp`  | Language Server (JSON-RPC over stdio): diagnostics, goto-definition, document outline — wires into any LSP-capable editor. See [`docs/lsp.md`](docs/lsp.md). |
 
-Build and run, via any of the three backends:
+Build and run, via any of the three compiled backends (the JIT path runs
+in-process via `-repl` / `-dap` — see [`docs/repl.md`](docs/repl.md) and
+[`docs/debug.md`](docs/debug.md)):
 
 ```bash
 # LLVM path (one-shot helper)
@@ -194,8 +219,9 @@ build/matlabc -emit-cpp foo.m > foo.cpp
 c++ -x c++ foo.cpp -x c runtime/matlab_runtime.c -o foo -lm -lpthread
 ```
 
-All three backends produce stdout that matches byte-for-byte on the
-98-program test corpus.
+All three **compiled** backends produce stdout that matches byte-for-byte
+on the 125+-program test corpus (the JIT path shares the same MLIR
+pipeline; divergence would surface in one of the compiled diffs first).
 
 ## Features
 
@@ -240,6 +266,10 @@ Runtime built-ins include:
   `tan`, `asin`, `acos`, `atan`, `atan2`, `sinh`, `cosh`, `tanh`,
   `log2`, `log10`, `sign`, `floor`, `ceil`, `round`, `fix`, `mod`,
   `rem`.
+- **Complex numbers + FFT**: imaginary literals (`2i`), mixed
+  real/complex arithmetic, `conj` / `real` / `imag` / `angle` / `abs`,
+  `fft` / `ifft` / `fft2` / `ifft2` via pure-C Cooley-Tukey (radix-2
+  + Bluestein for general N). See [`docs/complex.md`](docs/complex.md).
 - **Sort / search / sets**: `sort`, `sortrows`, `unique`, `find`,
   `ismember`, `setdiff`, `intersect`, `union`, `isempty`,
   `isequal`, `sub2ind`, `ind2sub`, `assert`.
@@ -272,10 +302,14 @@ scripts (`.mlx`), MathWorks bit-exact numerics.
 
 ## Testing
 
-Seven CTest suites. The end-to-end `Run` lane compiles 118 `.m`
+Eight CTest suites. The end-to-end `Run` lane compiles 125+ `.m`
 programs through all three compiled backends (LLVM, C, C++, plus
 `-Wall -Wextra -Werror` strict lanes for the C/C++ paths) and diffs
-stdout against `.stdout` goldens:
+stdout against `.stdout` goldens. An additional `emitc-shape-tests`
+lane diffs the exact `-emit-c` / `-emit-cpp` output against per-`.m`
+shape goldens in `test/EmitC/` to catch cosmetic regressions
+(comment placement, paren density, loop shape) that the stdout diff
+can't see:
 
 ```bash
 ctest --test-dir build
@@ -284,7 +318,8 @@ ctest --test-dir build
 To regenerate goldens after an intentional change:
 
 ```bash
-UPDATE=1 test/run_tests.sh build/matlabc
+UPDATE=1 test/run_tests.sh build/matlabc            # stdout goldens
+UPDATE=1 test/EmitC/run_tests.sh build/matlabc      # emit-c shape goldens
 ```
 
 ## Repo layout
