@@ -722,6 +722,123 @@ bool TensorLowering::rewriteBuiltinCalls() {
       continue;
     }
 
+    /* --- String-builtin dispatchers ------------------------------
+     * All operate on matlab_string* values (the runtime wraps
+     * "..." literals via matlab_string_from_literal). These are
+     * the "frontend-called" builtin names (sprintf, upper, ...) —
+     * distinct from the matlab_string_* internals above. */
+    if ((Name == "upper" || Name == "lower" || Name == "strtrim") &&
+        Call->getNumOperands() == 1 && Call->getNumResults() == 1 &&
+        Call->getOperand(0).getType() == PtrTy) {
+      std::string Rn = "matlab_" + Name.str();
+      B.setInsertionPoint(Call);
+      auto Fn = rt(Rn, PtrTy, {PtrTy});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                      Call->getOperands());
+      if (Call->getResult(0).getType() != PtrTy)
+        Call->getResult(0).setType(PtrTy);
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+    if ((Name == "startsWith" || Name == "endsWith" ||
+         Name == "contains") && Call->getNumOperands() == 2 &&
+        Call->getNumResults() == 1 &&
+        Call->getOperand(0).getType() == PtrTy &&
+        Call->getOperand(1).getType() == PtrTy) {
+      std::string Rn = "matlab_" + Name.str();
+      B.setInsertionPoint(Call);
+      auto Fn = rt(Rn, F64, {PtrTy, PtrTy});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                      Call->getOperands());
+      if (Call->getResult(0).getType() != F64)
+        Call->getResult(0).setType(F64);
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+    if ((Name == "strcat" || Name == "strrep") &&
+        Call->getNumResults() == 1 &&
+        (Call->getNumOperands() == 2 || Call->getNumOperands() == 3)) {
+      bool AllPtr = true;
+      for (Value V : Call->getOperands())
+        if (V.getType() != PtrTy) { AllPtr = false; break; }
+      if (!AllPtr) continue;
+      std::string Rn = "matlab_" + Name.str();
+      SmallVector<Type, 4> Sig(Call->getNumOperands(), (Type)PtrTy);
+      B.setInsertionPoint(Call);
+      auto Fn = rt(Rn, PtrTy, Sig);
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                      Call->getOperands());
+      if (Call->getResult(0).getType() != PtrTy)
+        Call->getResult(0).setType(PtrTy);
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+    if (Name == "num2str" && Call->getNumOperands() == 1 &&
+        Call->getNumResults() == 1 &&
+        Call->getOperand(0).getType() == F64) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt("matlab_num2str", PtrTy, {F64});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                      Call->getOperands());
+      if (Call->getResult(0).getType() != PtrTy)
+        Call->getResult(0).setType(PtrTy);
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+    if (Name == "str2double" && Call->getNumOperands() == 1 &&
+        Call->getNumResults() == 1 &&
+        Call->getOperand(0).getType() == PtrTy) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt("matlab_str2double", F64, {PtrTy});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                      Call->getOperands());
+      if (Call->getResult(0).getType() != F64)
+        Call->getResult(0).setType(F64);
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+    /* sprintf(fmt)          -> matlab_sprintf_str
+     * sprintf(fmt, v_f64)   -> matlab_sprintf_f64 */
+    if (Name == "sprintf" && Call->getNumResults() == 1 &&
+        Call->getNumOperands() >= 1 &&
+        Call->getOperand(0).getType() == PtrTy) {
+      if (Call->getNumOperands() == 1) {
+        B.setInsertionPoint(Call);
+        auto Fn = rt("matlab_sprintf_str", PtrTy, {PtrTy});
+        auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                        Call->getOperands());
+        if (Call->getResult(0).getType() != PtrTy)
+          Call->getResult(0).setType(PtrTy);
+        Call->getResult(0).replaceAllUsesWith(NC.getResult());
+        Call->erase();
+        Changed = true;
+        continue;
+      }
+      if (Call->getNumOperands() == 2 &&
+          Call->getOperand(1).getType() == F64) {
+        B.setInsertionPoint(Call);
+        auto Fn = rt("matlab_sprintf_f64", PtrTy, {PtrTy, F64});
+        auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                        Call->getOperands());
+        if (Call->getResult(0).getType() != PtrTy)
+          Call->getResult(0).setType(PtrTy);
+        Call->getResult(0).replaceAllUsesWith(NC.getResult());
+        Call->erase();
+        Changed = true;
+        continue;
+      }
+    }
+
     /* disp(ME.message) frontend-intercept routes here. */
     if (Name == "matlab_err_disp_message" && Call->getNumOperands() == 0) {
       B.setInsertionPoint(Call);

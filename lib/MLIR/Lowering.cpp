@@ -975,15 +975,20 @@ void Lowerer::lowerStmt(const Stmt &St) {
     };
     bool RhsIsString = isStringExpr(A.RHS);
     /* String-producing builtins also turn the LHS into a string
-     * binding: fgetl returns a matlab_string*, so `s = fgetl(fid)`
-     * must route disp(s), strlen(s), etc. through the string
+     * binding: fgetl, sprintf, num2str, upper, lower, strtrim,
+     * strrep, strcat all return matlab_string*, so subsequent
+     * disp(s) / strlen(s) / isstring(s) route through the string
      * runtime. */
     if (!RhsIsString && A.RHS && A.RHS->Kind == NodeKind::CallOrIndex) {
       auto *CX = static_cast<const CallOrIndex *>(A.RHS);
       if (auto *NX = dynamic_cast<const NameExpr *>(CX->Callee)) {
-        if (NX->Ref && NX->Ref->Kind == BindingKind::Builtin &&
-            NX->Name == "fgetl")
-          RhsIsString = true;
+        if (NX->Ref && NX->Ref->Kind == BindingKind::Builtin) {
+          auto N = NX->Name;
+          if (N == "fgetl" || N == "sprintf" || N == "num2str" ||
+              N == "upper" || N == "lower" || N == "strtrim" ||
+              N == "strrep" || N == "strcat")
+            RhsIsString = true;
+        }
       }
     }
 
@@ -1973,13 +1978,26 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
         }
       }
       /* disp(s) where s is a tracked string binding -> matlab_string_disp.
-       * Also handles disp("literal") by routing a StringLiteral arg. */
+       * Also handles disp("literal") by routing a StringLiteral arg
+       * and disp(expr) where expr is a call to a known string-
+       * returning builtin (e.g. disp(upper(s))). */
       if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
           N->Name == "disp" && C.Args.size() == 1) {
         bool IsStr = false;
         if (C.Args[0]->Kind == NodeKind::StringLiteral) IsStr = true;
         else if (auto *AN = dynamic_cast<const NameExpr *>(C.Args[0]))
           IsStr = AN->Ref && StringBindings.count(AN->Ref) > 0;
+        else if (auto *CC = dynamic_cast<const CallOrIndex *>(C.Args[0])) {
+          if (auto *CN = dynamic_cast<const NameExpr *>(CC->Callee)) {
+            if (CN->Ref && CN->Ref->Kind == BindingKind::Builtin) {
+              auto Nm = CN->Name;
+              if (Nm == "fgetl" || Nm == "sprintf" || Nm == "num2str" ||
+                  Nm == "upper" || Nm == "lower" || Nm == "strtrim" ||
+                  Nm == "strrep" || Nm == "strcat")
+                IsStr = true;
+            }
+          }
+        }
         if (IsStr) {
           mlir::Value V = lowerExpr(*C.Args[0]);
           mlir::NamedAttribute Cal(

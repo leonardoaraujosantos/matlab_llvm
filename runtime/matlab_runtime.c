@@ -2180,6 +2180,128 @@ double matlab_string_len(matlab_string *s) {
 
 double matlab_isstring(matlab_string *s) { return s ? 1.0 : 0.0; }
 
+/* sprintf(fmt, v) -> matlab_string. Only the one-f64 form is wired
+ * for now, matching the other fprintf family variants. The expand-
+ * escapes helper processes MATLAB-style backslash escapes. */
+matlab_string *matlab_sprintf_str(matlab_string *fmt) {
+    if (!fmt) return matlab_string_from_literal("", 0);
+    char buf[2048];
+    int64_t n = expand_escapes(buf, fmt->data, fmt->len);
+    if (n >= (int64_t)sizeof buf) n = (int64_t)sizeof buf - 1;
+    return matlab_string_from_literal(buf, n);
+}
+
+matlab_string *matlab_sprintf_f64(matlab_string *fmt, double v) {
+    if (!fmt) return matlab_string_from_literal("", 0);
+    char expanded[1024];
+    int64_t en = expand_escapes(expanded, fmt->data, fmt->len);
+    if (en < (int64_t)sizeof expanded) expanded[en] = '\0';
+    else expanded[sizeof expanded - 1] = '\0';
+    char out[2048];
+    int n = snprintf(out, sizeof out, expanded, v);
+    if (n < 0) n = 0;
+    if (n >= (int)sizeof out) n = (int)sizeof out - 1;
+    return matlab_string_from_literal(out, (int64_t)n);
+}
+
+matlab_string *matlab_num2str(double v) {
+    char buf[64];
+    int n = snprintf(buf, sizeof buf, "%g", v);
+    if (n < 0) n = 0;
+    return matlab_string_from_literal(buf, (int64_t)n);
+}
+
+double matlab_str2double(matlab_string *s) {
+    if (!s || !s->data) return 0.0 / 0.0; /* NaN */
+    char *end = NULL;
+    double v = strtod(s->data, &end);
+    if (end == s->data) return 0.0 / 0.0;
+    return v;
+}
+
+static matlab_string *map_chars(matlab_string *s, int (*f)(int)) {
+    if (!s) return matlab_string_from_literal("", 0);
+    matlab_string *r = matlab_string_from_literal(s->data, s->len);
+    for (int64_t i = 0; i < r->len; ++i)
+        r->data[i] = (char)f((unsigned char)r->data[i]);
+    return r;
+}
+
+static int to_upper_i(int c) { return (c >= 'a' && c <= 'z') ? c - 32 : c; }
+static int to_lower_i(int c) { return (c >= 'A' && c <= 'Z') ? c + 32 : c; }
+
+matlab_string *matlab_upper(matlab_string *s) { return map_chars(s, to_upper_i); }
+matlab_string *matlab_lower(matlab_string *s) { return map_chars(s, to_lower_i); }
+
+double matlab_startsWith(matlab_string *s, matlab_string *pre) {
+    if (!s || !pre) return 0.0;
+    if (pre->len > s->len) return 0.0;
+    return memcmp(s->data, pre->data, (size_t)pre->len) == 0 ? 1.0 : 0.0;
+}
+
+double matlab_endsWith(matlab_string *s, matlab_string *suf) {
+    if (!s || !suf) return 0.0;
+    if (suf->len > s->len) return 0.0;
+    return memcmp(s->data + (s->len - suf->len),
+                  suf->data, (size_t)suf->len) == 0 ? 1.0 : 0.0;
+}
+
+double matlab_contains(matlab_string *s, matlab_string *needle) {
+    if (!s || !needle) return 0.0;
+    if (needle->len == 0) return 1.0;
+    if (needle->len > s->len) return 0.0;
+    return strstr(s->data, needle->data) != NULL ? 1.0 : 0.0;
+}
+
+matlab_string *matlab_strtrim(matlab_string *s) {
+    if (!s) return matlab_string_from_literal("", 0);
+    int64_t lo = 0, hi = s->len;
+    while (lo < hi && (unsigned char)s->data[lo] <= ' ') ++lo;
+    while (hi > lo && (unsigned char)s->data[hi - 1] <= ' ') --hi;
+    return matlab_string_from_literal(s->data + lo, hi - lo);
+}
+
+/* strrep(s, old, new): every non-overlapping occurrence of `old` in
+ * `s` replaced with `new`. Returns a fresh heap string. */
+matlab_string *matlab_strrep(matlab_string *s, matlab_string *old, matlab_string *nw) {
+    if (!s) return matlab_string_from_literal("", 0);
+    if (!old || old->len == 0) return matlab_string_from_literal(s->data, s->len);
+    int64_t new_len = nw ? nw->len : 0;
+    /* First pass: count occurrences to size the output buffer. */
+    int64_t count = 0;
+    const char *p = s->data;
+    const char *end = s->data + s->len;
+    while (p + old->len <= end) {
+        if (memcmp(p, old->data, (size_t)old->len) == 0) {
+            ++count;
+            p += old->len;
+        } else {
+            ++p;
+        }
+    }
+    int64_t out_len = s->len + count * (new_len - old->len);
+    char *out = (char *)malloc((size_t)out_len + 1);
+    char *w = out;
+    p = s->data;
+    while (p + old->len <= end) {
+        if (memcmp(p, old->data, (size_t)old->len) == 0) {
+            if (new_len > 0) { memcpy(w, nw->data, (size_t)new_len); w += new_len; }
+            p += old->len;
+        } else {
+            *w++ = *p++;
+        }
+    }
+    while (p < end) *w++ = *p++;
+    *w = '\0';
+    matlab_string *r = matlab_string_from_literal(out, out_len);
+    free(out);
+    return r;
+}
+
+matlab_string *matlab_strcat(matlab_string *a, matlab_string *b) {
+    return matlab_string_concat(a, b);
+}
+
 /* rmfield(s, 'name'): remove a field in place and return the same ptr.
  * MATLAB's rmfield conceptually returns a new struct, but mutating
  * in place + returning the same pointer matches the common
