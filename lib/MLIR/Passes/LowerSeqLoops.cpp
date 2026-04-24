@@ -96,6 +96,10 @@ bool lowerForOp(Operation *ForOp) {
 
   Value Start, Step, End;
   if (!extractRange(Iter, Start, Step, End, B, L)) return false;
+  /* Remember the matlab.range producer so we can erase it below if its
+   * only user was this matlab.for. Leaving it in place would cause
+   * LowerTensorOps to emit a dead matlab_range() runtime call. */
+  Operation *RangeProducer = Iter.getDefiningOp();
 
   /* scf.while carrying one f64 induction value (%iv). */
   auto W = scf::WhileOp::create(B, L, TypeRange{F64}, ValueRange{Start});
@@ -152,6 +156,9 @@ bool lowerForOp(Operation *ForOp) {
   }
 
   ForOp->erase();
+  if (RangeProducer && RangeProducer->use_empty() &&
+      isMatlabOp(RangeProducer, "matlab.range"))
+    RangeProducer->erase();
   return true;
 }
 

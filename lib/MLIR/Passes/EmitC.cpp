@@ -36,6 +36,35 @@ namespace mlirgen {
 
 namespace {
 
+/// Metadata for an scf.while op that matched the canonical for-loop shape
+/// produced by LowerSeqLoops. Populated by Emitter::scanForLoopPatterns
+/// before emission so the scf.while handler can print a C-style
+/// `for (T iv = init; iv OP end; iv += step)` instead of a while loop.
+struct ForLoopInfo {
+  // Loop bounds (SSA values — stringified with stmtExpr at emit time).
+  mlir::Value Init;
+  mlir::Value End;
+  mlir::Value Step;
+  // True when the surviving condition is `arith.cmpf OGE iv, end` (i.e.
+  // the loop counts down). Drives `>=` vs `<=` in the for-head.
+  bool IsDecreasing = false;
+  // Ops absorbed into the for-head / for-increment; emitOp short-circuits
+  // when it sees them in SuppressedOps.
+  mlir::Operation *AddOp = nullptr;     // arith.addf iv, step
+  mlir::Operation *YieldOp = nullptr;   // scf.yield %add
+  // When non-null, the first op of the after-block is `llvm.store iv, slot`
+  // where `slot` is an alloca carrying the MATLAB loop-var name. We reuse
+  // that slot's identifier as the C induction variable.
+  mlir::Operation *BindStore = nullptr;
+  mlir::Operation *SlotAlloca = nullptr;
+  // C identifier for the induction variable. Either the MATLAB loop-var
+  // name lifted from SlotAlloca, or a fresh `vN` when no fusion applies.
+  std::string IvName;
+  // True when the slot's entire use-set lives inside this for-loop — safe
+  // to elide the slot's prolog declaration and scope the IV to the for.
+  bool FuseSlot = false;
+};
+
 /// Per-module emission state: symbol table for SSA values and a single
 /// output stream. Kept in a class because the recursive descent over
 /// regions needs to share state across helpers.
@@ -119,6 +148,15 @@ private:
   // operand references resolve against names that are only chosen at
   // emission time (e.g. slot_p for llvm.alloca results).
   void computeInlines(mlir::Region &R);
+  // Walk a region and tag scf.while ops that match the canonical for-loop
+  // shape produced by LowerSeqLoops. Populates ForPatterns and
+  // SuppressedOps so the scf.while emitter can print `for (...; ...; ...)`
+  // and the absorbed ops (arith.addf, scf.yield, and — when fusing — the
+  // iv-binding llvm.store and the slot's llvm.alloca) are skipped.
+  void scanForLoopPatterns(mlir::Region &R);
+  // Helper for scanForLoopPatterns: try to match one scf.while against the
+  // for-loop shape. Writes Info on success.
+  bool matchForPattern(mlir::scf::WhileOp W, ForLoopInfo &Info);
   // Is Op's result safe to inline at its use?
   bool canInline(mlir::Operation &Op);
   // Build the inline expression for an inlineable Op, recursively
@@ -168,6 +206,27 @@ private:
   // this set when its first same-block user is a StoreOp, and is erased
   // from it once that store has emitted the combined declaration.
   llvm::DenseSet<mlir::Operation *> DirectSlotDefer;
+  // scf.while ops that matched the for-loop shape from LowerSeqLoops.
+  // Emission consults this map to print a C-style for-head instead of a
+  // while, and to route inline expression bindings through the chosen IV
+  // name rather than a fresh `vN`.
+  llvm::DenseMap<mlir::Operation *, ForLoopInfo> ForPatterns;
+  // Ops that have been folded into an enclosing for-loop head/increment
+  // (arith.addf, scf.yield) or elided by slot fusion (iv-binding
+  // llvm.store). emitOp returns without printing when it encounters one
+  // of these.
+  llvm::DenseSet<mlir::Operation *> SuppressedOps;
+  // Loop-var slot allocas whose `double i = 0;` prolog declaration should
+  // be skipped — the for-loop that owns the slot declares the induction
+  // variable in its own `for (...)` init clause, and no code outside that
+  // loop reads the slot. The alloca handler still runs enough to register
+  // a DirectSlots entry aliased to the chosen IV name so in-body loads
+  // resolve correctly.
+  llvm::DenseSet<mlir::Operation *> FusedForSlots;
+  // Alloca op -> C identifier chosen for the fused IV. Shared across
+  // multiple for-loops claiming the same slot so each `for (double i =
+  // ...; ...)` agrees on the name.
+  llvm::DenseMap<mlir::Operation *, std::string> FusedForSlotName;
   int NextId = 0;
 
   // Most recent #line directive emitted — used to dedupe.
@@ -564,6 +623,163 @@ void Emitter::computeInlines(mlir::Region &R) {
     for (auto &Op : B.getOperations()) {
       if (canInline(Op)) InlinedOps.insert(&Op);
       for (auto &SubR : Op.getRegions()) computeInlines(SubR);
+    }
+  }
+}
+
+// Does the before-region of W consist of only the scf.condition terminator
+// plus ops the emitter will inline into the condition expression? Mirrors
+// the BeforeIsCondOnly check inside the scf.while emitter so the
+// for-loop pre-scan and that emitter always agree on when the "natural"
+// while-shape is emittable.
+static bool beforeRegionIsCondOnly(mlir::scf::WhileOp W,
+    const llvm::DenseSet<mlir::Operation *> &InlinedOps) {
+  for (auto &Inner : W.getBefore().front().getOperations()) {
+    if (mlir::isa<mlir::scf::ConditionOp>(Inner)) continue;
+    if (InlinedOps.count(&Inner)) continue;
+    return false;
+  }
+  return true;
+}
+
+bool Emitter::matchForPattern(mlir::scf::WhileOp W, ForLoopInfo &Info) {
+  // Shape expected from LowerSeqLoops::lowerForOp: one f64 iter-arg, the
+  // condition forwards the iter-arg unchanged, the condition itself is a
+  // single arith.cmpf OLE|OGE iv, end, and the after-block ends with
+  // arith.addf iv, step + scf.yield %add. Everything else is left as a
+  // plain while.
+  if (W.getInits().size() != 1) return false;
+  mlir::Block &Before = W.getBefore().front();
+  mlir::Block &After = W.getAfter().front();
+  if (Before.getNumArguments() != 1 || After.getNumArguments() != 1)
+    return false;
+  auto F64 = mlir::Float64Type::get(W.getContext());
+  if (Before.getArgument(0).getType() != F64) return false;
+  if (After.getArgument(0).getType() != F64) return false;
+
+  if (!beforeRegionIsCondOnly(W, InlinedOps)) return false;
+  auto Cond = mlir::cast<mlir::scf::ConditionOp>(Before.getTerminator());
+  // The condition must forward exactly the before-region's IV so the
+  // after-block's IV is identified with the one being compared.
+  if (Cond.getArgs().size() != 1) return false;
+  if (Cond.getArgs()[0] != Before.getArgument(0)) return false;
+
+  auto Cmp = Cond.getCondition().getDefiningOp<mlir::arith::CmpFOp>();
+  if (!Cmp) return false;
+  if (Cmp.getLhs() != Before.getArgument(0)) return false;
+  auto Pred = Cmp.getPredicate();
+  if (Pred != mlir::arith::CmpFPredicate::OLE &&
+      Pred != mlir::arith::CmpFPredicate::OGE) return false;
+  Info.End = Cmp.getRhs();
+  Info.IsDecreasing = (Pred == mlir::arith::CmpFPredicate::OGE);
+
+  // After-block: the last two ops must be arith.addf + scf.yield, with the
+  // addf's lhs being the after-block iv and the yield returning %addf.
+  if (After.getOperations().size() < 2) return false;
+  auto &TailYield = After.back();
+  auto Yld = mlir::dyn_cast<mlir::scf::YieldOp>(TailYield);
+  if (!Yld || Yld.getResults().size() != 1) return false;
+  auto *AddRaw = Yld.getResults()[0].getDefiningOp();
+  auto Add = mlir::dyn_cast_or_null<mlir::arith::AddFOp>(AddRaw);
+  if (!Add) return false;
+  if (Add.getLhs() != After.getArgument(0)) return false;
+  // The add must be second-to-last — i.e. the increment op that immediately
+  // precedes the yield — so eliding both leaves no orphan ops in the body.
+  if (Add->getNextNode() != Yld.getOperation()) return false;
+
+  Info.Init = W.getInits()[0];
+  Info.Step = Add.getRhs();
+  Info.AddOp = Add.getOperation();
+  Info.YieldOp = Yld.getOperation();
+  return true;
+}
+
+void Emitter::scanForLoopPatterns(mlir::Region &R) {
+  // First pass: identify for-pattern scf.while ops and propose a bind-store
+  // + slot alloca for each. Allocas may be claimed by multiple for-loops
+  // (e.g. `for i = 1:10 ... end; for i = 1:3 ... end;` reuses the `i`
+  // slot across two scf.while ops); we collect the list so the second
+  // pass can decide whether every use of the slot is inside at least one
+  // claimant's after-region.
+  llvm::DenseMap<mlir::Operation *, llvm::SmallVector<mlir::Operation *, 2>>
+      SlotClaimants;
+
+  R.walk([&](mlir::scf::WhileOp W) {
+    ForLoopInfo Info;
+    if (!matchForPattern(W, Info)) return;
+
+    mlir::Block &After = W.getAfter().front();
+    mlir::Value Iv = After.getArgument(0);
+    for (auto &Op : After.getOperations()) {
+      if (&Op == Info.AddOp || &Op == Info.YieldOp) break;
+      auto Store = mlir::dyn_cast<mlir::LLVM::StoreOp>(Op);
+      if (!Store) continue;
+      if (Store.getValue() != Iv) continue;
+      auto Alloca = Store.getAddr().getDefiningOp<mlir::LLVM::AllocaOp>();
+      if (!Alloca) break;
+      auto NA = Alloca->getAttrOfType<mlir::StringAttr>("matlab.name");
+      if (!NA) break;
+      Info.BindStore = Store.getOperation();
+      Info.SlotAlloca = Alloca.getOperation();
+      SlotClaimants[Info.SlotAlloca].push_back(W.getOperation());
+      break;
+    }
+    ForPatterns[W.getOperation()] = std::move(Info);
+  });
+
+  // Second pass: a slot is fusable when every use lives inside at least
+  // one of its claimants' after-regions. If any use escapes to function
+  // scope (or to an unrelated region), fusion would drop a value that
+  // code outside the loop still reads.
+  llvm::DenseMap<mlir::Operation *, bool> SlotFusable;
+  for (auto &Entry : SlotClaimants) {
+    mlir::Operation *Slot = Entry.first;
+    auto &Claimants = Entry.second;
+    bool OK = true;
+    for (auto &Use : Slot->getUses()) {
+      mlir::Operation *User = Use.getOwner();
+      bool InsideAny = false;
+      for (mlir::Operation *W : Claimants) {
+        mlir::Region *Loop = &W->getRegion(1);  // after-region
+        mlir::Region *P = User->getParentRegion();
+        while (P) {
+          if (P == Loop) { InsideAny = true; break; }
+          P = P->getParentRegion();
+        }
+        if (InsideAny) break;
+      }
+      if (!InsideAny) { OK = false; break; }
+    }
+    SlotFusable[Slot] = OK;
+  }
+
+  // Third pass: commit names and populate SuppressedOps / FusedForSlots.
+  // The trailing arith.addf and scf.yield are always absorbed; the
+  // iv-binding store and the slot's decl-emission are only skipped when
+  // fusion is possible.
+  for (auto &KV : ForPatterns) {
+    ForLoopInfo &Info = KV.second;
+    SuppressedOps.insert(Info.AddOp);
+    SuppressedOps.insert(Info.YieldOp);
+
+    bool Fuse = Info.SlotAlloca && SlotFusable.lookup(Info.SlotAlloca);
+    if (Fuse) {
+      Info.FuseSlot = true;
+      auto It = FusedForSlotName.find(Info.SlotAlloca);
+      if (It == FusedForSlotName.end()) {
+        auto NA = Info.SlotAlloca->getAttrOfType<mlir::StringAttr>(
+            "matlab.name");
+        std::string N = uniqueName(NA.getValue());
+        FusedForSlotName[Info.SlotAlloca] = N;
+        Info.IvName = N;
+      } else {
+        Info.IvName = It->second;
+      }
+      FusedForSlots.insert(Info.SlotAlloca);
+      SuppressedOps.insert(Info.BindStore);
+    } else {
+      Info.FuseSlot = false;
+      Info.IvName = freshName();
     }
   }
 }
@@ -1414,6 +1630,10 @@ void Emitter::emitFuncFunc(mlir::func::FuncOp F) {
   InlineExprs.clear();
   InlinedOps.clear();
   DirectSlots.clear();
+  ForPatterns.clear();
+  SuppressedOps.clear();
+  FusedForSlots.clear();
+  FusedForSlotName.clear();
   // A new function is its own blank-line frame: don't let the previous
   // function's final line number influence whether we emit a blank above
   // the signature (the `}\n\n` end-of-function separator already handles it).
@@ -1423,6 +1643,7 @@ void Emitter::emitFuncFunc(mlir::func::FuncOp F) {
   PendingTrailingText.clear();
   TrailingEmittedLines.clear();
   computeInlines(F.getBody());
+  scanForLoopPatterns(F.getBody());
   auto FT = F.getFunctionType();
   bool IsMain = F.getSymName() == "main";
   std::string RetTy;
@@ -1463,12 +1684,17 @@ void Emitter::emitLLVMFunc(mlir::LLVM::LLVMFuncOp F) {
   InlinedOps.clear();
   DirectSlots.clear();
   DirectSlotDefer.clear();
+  ForPatterns.clear();
+  SuppressedOps.clear();
+  FusedForSlots.clear();
+  FusedForSlotName.clear();
   LastLineFile.clear();
   LastLineNum = -1;
   PendingTrailingLine = -1;
   PendingTrailingText.clear();
   TrailingEmittedLines.clear();
   computeInlines(F.getBody());
+  scanForLoopPatterns(F.getBody());
   auto FT = F.getFunctionType();
   std::string RetTy =
       mlir::isa<mlir::LLVM::LLVMVoidType>(FT.getReturnType())
@@ -1522,6 +1748,12 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
   // skip the declaration entirely. The consumer will substitute the
   // cached expression via exprFor().
   if (InlinedOps.count(&Op)) return;
+
+  // Ops absorbed into a surrounding for-loop head (arith.addf, scf.yield)
+  // or elided by slot fusion (iv-binding llvm.store, the slot's alloca).
+  // The scf.while emitter has already accounted for them in the for-head
+  // or for-increment string.
+  if (SuppressedOps.count(&Op)) return;
 
   // Emit a #line directive if this op has a FileLineColLoc that differs
   // from the last directive we printed. Deduped inside emitLineDirective,
@@ -1743,6 +1975,17 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
 
   // --- llvm.alloca / load / store -------------------------------------
   if (auto A = mlir::dyn_cast<mlir::LLVM::AllocaOp>(Op)) {
+    // Loop-var slot absorbed by a fused for-loop: no `double i = 0;` at
+    // function scope — the for-loop's init clause declares the IV. We
+    // still register the slot under DirectSlots so in-body loads of the
+    // slot expand to the IV's name, and mark the value as direct so
+    // stores/loads short-circuit the pointer trampoline.
+    if (FusedForSlots.count(A.getOperation())) {
+      const std::string &N = FusedForSlotName[A.getOperation()];
+      Names[A.getResult()] = N;
+      DirectSlots[A.getOperation()] = N;
+      return;
+    }
     // If LowerScalarSlots / LowerTensorOps propagated the original
     // matlab.alloc `name` attribute, use it as the slot identifier so the
     // emitted C mirrors the MATLAB source (total_slot rather than v3_slot).
@@ -1971,6 +2214,59 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
   if (auto W = mlir::dyn_cast<mlir::scf::WhileOp>(Op)) {
     auto &Before = W.getBefore().front();
     auto &After = W.getAfter().front();
+
+    // Did the pre-scan flag this loop as a canonical MATLAB for-loop?
+    // When so, take the for-head shortcut: declare the IV in the `for(...)`
+    // init clause, fold the trailing arith.addf into the increment, and
+    // drop the redundant "i = v0;" bind store when slot fusion applies.
+    auto FPIt = ForPatterns.find(W.getOperation());
+    if (FPIt != ForPatterns.end()) {
+      const ForLoopInfo &Info = FPIt->second;
+      // Bind the IV name both where the condition is computed (before) and
+      // where it's consumed (after). The before-arg never actually appears
+      // in the output because the cmpf is inlined into the for-head, but
+      // routing its name avoids freshName() collisions downstream.
+      Names[Before.getArgument(0)] = Info.IvName;
+      InlineExprs[After.getArgument(0)] = Info.IvName;
+      // The scf.while's outer result (rarely read by the MATLAB frontend
+      // when a for-loop is lowered) mirrors the IV value at exit.
+      if (W.getNumResults() == 1)
+        InlineExprs[W.getResult(0)] = Info.IvName;
+
+      // Normalise the step to detect the `i -= K` polish for negative
+      // literal steps (5:-1:1 reads nicer as `k -= 1.0` than `k += -1.0`).
+      bool StepIsNegLit = false;
+      std::string StepExpr;
+      if (auto *Def = Info.Step.getDefiningOp()) {
+        mlir::FloatAttr FA;
+        if (auto CA = mlir::dyn_cast<mlir::arith::ConstantOp>(Def))
+          FA = mlir::dyn_cast<mlir::FloatAttr>(CA.getValue());
+        else if (auto CL = mlir::dyn_cast<mlir::LLVM::ConstantOp>(Def))
+          FA = mlir::dyn_cast<mlir::FloatAttr>(CL.getValue());
+        if (FA && FA.getValueAsDouble() < 0.0) {
+          StepIsNegLit = true;
+          auto NegBuilder = mlir::Builder(W.getContext());
+          StepExpr = formatFloatAttr(
+              NegBuilder.getF64FloatAttr(-FA.getValueAsDouble()));
+        }
+      }
+      if (!StepIsNegLit)
+        StepExpr = this->stmtExpr(Info.Step);
+
+      const char *CmpStr = Info.IsDecreasing ? ">=" : "<=";
+      const char *StepOp = StepIsNegLit ? "-=" : "+=";
+      indent(Indent);
+      OS << "for (" << cTypeOf(Before.getArgument(0).getType())
+         << " " << Info.IvName << " = " << this->stmtExpr(Info.Init)
+         << "; " << Info.IvName << " " << CmpStr << " "
+         << this->stmtExpr(Info.End) << "; " << Info.IvName << " "
+         << StepOp << " " << StepExpr << ") {\n";
+      for (auto &Inner : After.getOperations())
+        emitOp(Inner, Indent + 1);
+      indent(Indent);
+      OS << "}\n";
+      return;
+    }
 
     // Declare one mutable local per iter-arg, initialized from the while
     // operand, and bind the before-block arg to that name so references
