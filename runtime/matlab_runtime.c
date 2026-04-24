@@ -1122,6 +1122,109 @@ matlab_mat *matlab_sortrows(matlab_mat *A) {
     return R;
 }
 
+/* -------- Reshape / layout tail ----------------------------------
+ * horzcat / vertcat (as builtins, distinct from the [A B] / [A;B]
+ * literal paths which the frontend already lowers via concat_row /
+ * concat_col); permute / squeeze (2-D no-ops for most cases);
+ * flip family; rot90.
+ *------------------------------------------------------------------*/
+
+matlab_mat *matlab_horzcat(matlab_mat *A, matlab_mat *B) {
+    if (!A) return B;
+    if (!B) return A;
+    if (A->rows != B->rows) return mat_alloc(0, 0);
+    int64_t m = A->rows, na = A->cols, nb = B->cols;
+    matlab_mat *R = mat_alloc(m, na + nb);
+    for (int64_t i = 0; i < m; ++i) {
+        for (int64_t j = 0; j < na; ++j)
+            R->data[i * (na + nb) + j] = A->data[i * na + j];
+        for (int64_t j = 0; j < nb; ++j)
+            R->data[i * (na + nb) + na + j] = B->data[i * nb + j];
+    }
+    return R;
+}
+
+matlab_mat *matlab_vertcat(matlab_mat *A, matlab_mat *B) {
+    if (!A) return B;
+    if (!B) return A;
+    if (A->cols != B->cols) return mat_alloc(0, 0);
+    int64_t n = A->cols, ma = A->rows, mb = B->rows;
+    matlab_mat *R = mat_alloc(ma + mb, n);
+    memcpy(R->data, A->data, (size_t)(ma * n) * sizeof(double));
+    memcpy(R->data + ma * n, B->data, (size_t)(mb * n) * sizeof(double));
+    return R;
+}
+
+/* permute(A, [p1 p2]) for 2-D matrices. p = [1 2] is identity;
+ * anything else falls back to transpose (which matches p = [2 1]).
+ * Higher-rank permutations aren't modelled because we don't carry
+ * N-D shape through matlab_mat. */
+matlab_mat *matlab_permute(matlab_mat *A, matlab_mat *perm) {
+    if (!A || !perm) return mat_alloc(0, 0);
+    int64_t total = perm->rows * perm->cols;
+    int Identity = (total >= 2 &&
+                    perm->data[0] == 1.0 && perm->data[1] == 2.0);
+    if (Identity) {
+        matlab_mat *R = mat_alloc(A->rows, A->cols);
+        memcpy(R->data, A->data, (size_t)(A->rows * A->cols) * sizeof(double));
+        return R;
+    }
+    return matlab_transpose(A);
+}
+
+/* squeeze(A) is a no-op for 2-D matrices — MATLAB's squeeze only
+ * collapses singleton dims in higher-rank arrays, which we don't
+ * model. Keeps the name available as a syntactic identity. */
+matlab_mat *matlab_squeeze(matlab_mat *A) {
+    if (!A) return mat_alloc(0, 0);
+    int64_t m = A->rows, n = A->cols;
+    matlab_mat *R = mat_alloc(m, n);
+    memcpy(R->data, A->data, (size_t)(m * n) * sizeof(double));
+    return R;
+}
+
+matlab_mat *matlab_fliplr(matlab_mat *A) {
+    if (!A) return mat_alloc(0, 0);
+    int64_t m = A->rows, n = A->cols;
+    matlab_mat *R = mat_alloc(m, n);
+    for (int64_t i = 0; i < m; ++i)
+        for (int64_t j = 0; j < n; ++j)
+            R->data[i * n + j] = A->data[i * n + (n - 1 - j)];
+    return R;
+}
+
+matlab_mat *matlab_flipud(matlab_mat *A) {
+    if (!A) return mat_alloc(0, 0);
+    int64_t m = A->rows, n = A->cols;
+    matlab_mat *R = mat_alloc(m, n);
+    for (int64_t i = 0; i < m; ++i)
+        for (int64_t j = 0; j < n; ++j)
+            R->data[i * n + j] = A->data[(m - 1 - i) * n + j];
+    return R;
+}
+
+/* flip(A) with no dim: match MATLAB — flip along the first non-
+ * singleton dim. Vectors flip themselves; matrices flip rows (the
+ * equivalent of flipud). */
+matlab_mat *matlab_flip(matlab_mat *A) {
+    if (!A) return mat_alloc(0, 0);
+    if (A->rows == 1) return matlab_fliplr(A);
+    return matlab_flipud(A);
+}
+
+/* rot90(A): counter-clockwise 90° rotation, once. Result is
+ * cols-by-rows. Element at (i, j) in the result is taken from
+ * (j, cols-1-i) in the input. */
+matlab_mat *matlab_rot90(matlab_mat *A) {
+    if (!A) return mat_alloc(0, 0);
+    int64_t m = A->rows, n = A->cols;
+    matlab_mat *R = mat_alloc(n, m);
+    for (int64_t i = 0; i < n; ++i)
+        for (int64_t j = 0; j < m; ++j)
+            R->data[i * m + j] = A->data[j * n + (n - 1 - i)];
+    return R;
+}
+
 /* Element-wise min/max of two matrices with the usual broadcast. */
 matlab_mat *matlab_min_mm(matlab_mat *A, matlab_mat *B) {
     int64_t m = A->rows, n = A->cols;

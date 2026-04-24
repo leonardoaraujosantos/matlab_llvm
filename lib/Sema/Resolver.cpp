@@ -30,6 +30,8 @@ void Resolver::registerBuiltins() {
     "cumsum", "cumprod",
     "sort", "sortrows", "unique", "ismember",
     "setdiff", "intersect", "union",
+    "horzcat", "vertcat", "permute", "squeeze",
+    "flip", "fliplr", "flipud", "rot90",
     "mtimes", "mldivide", "mrdivide",
     "transpose", "ctranspose",
     "disp", "fprintf", "sprintf", "error", "warning", "input", "clear",
