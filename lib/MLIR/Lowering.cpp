@@ -983,6 +983,28 @@ void Lowerer::lowerStmt(const Stmt &St) {
   case NodeKind::ExprStmt: {
     auto &E = static_cast<const ExprStmt &>(St);
     if (!E.E) return;
+    /* Bare-name invocation of side-effect-only builtins like `who` /
+     * `whos` / `clear`: MATLAB allows `who` at the prompt as a
+     * command, parsed here as `ExprStmt(NameExpr("who"))`. Without
+     * this special case, lowerExpr would emit a matlab.make_handle
+     * and the implicit-display path would try to print a function
+     * handle. Treat them as zero-arg calls to the runtime entry. */
+    if (auto *NE = dynamic_cast<const NameExpr *>(E.E)) {
+      if (NE->Ref && NE->Ref->Kind == BindingKind::Builtin) {
+        llvm::StringRef RN;
+        if (NE->Name == "who")  RN = "matlab_ws_who";
+        else if (NE->Name == "whos") RN = "matlab_ws_whos";
+        else if (NE->Name == "clear") RN = "matlab_ws_clear";
+        if (!RN.empty()) {
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, RN));
+          emitUnregOp("matlab.call_builtin", {},
+                      {mlir::NoneType::get(&MCtx)}, loc(E.Range), {Cal});
+          return;
+        }
+      }
+    }
     mlir::Value V = lowerExpr(*E.E);
     /* Implicit display on a non-suppressed bare expression: MATLAB
      * prints `name =\n<value>` for a NameExpr and `ans =\n<value>`
@@ -1503,10 +1525,27 @@ void Lowerer::lowerStmt(const Stmt &St) {
       };
       if (C.Args.empty()) {
         for (auto &P : Slots) emitClearSlot(P.second);
+        /* REPL: also wipe the workspace. */
+        if (ReplMode && InScriptBody) {
+          mlir::NamedAttribute WCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_ws_clear"));
+          emitUnregOp("matlab.call_builtin", {},
+                      {mlir::NoneType::get(&MCtx)}, loc(C.Range), {WCal});
+        }
       } else {
         for (auto &A : C.Args) {
           for (auto &P : Slots) {
             if (P.first->Name == A) { emitClearSlot(P.second); break; }
+          }
+          /* REPL: also remove this name from the workspace. */
+          if (ReplMode && InScriptBody) {
+            mlir::Value NameV = emitFieldNameChar(A, loc(C.Range));
+            mlir::NamedAttribute WCal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_ws_clear_one"));
+            emitUnregOp("matlab.call_builtin", {NameV},
+                        {mlir::NoneType::get(&MCtx)}, loc(C.Range), {WCal});
           }
         }
       }
@@ -2194,6 +2233,116 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
           Val = 1.0;
         return mlir::arith::ConstantOp::create(
             B, L, F64, mlir::FloatAttr::get(F64, Val));
+      }
+      /* dbg(x) / dbg(x, 'label') — source-located debug print to
+       * stderr. Works like disp but prefixes the current file:line
+       * and the argument's name (when the arg is a bare NameExpr;
+       * otherwise the literal label or "<expr>").
+       *
+       * Routes to matlab_dbg_f64 for scalar args and matlab_dbg_mat
+       * for matrix/ptr args. The filename is extracted from the
+       * call site's SourceLocation so traces point at the .m
+       * source, not the generated C / LLVM IR. */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          N->Name == "dbg" &&
+          (C.Args.size() == 1 || C.Args.size() == 2) &&
+          C.Args[0]) {
+        std::string FileName = "<repl>";
+        int32_t Line = 0;
+        if (SM && C.Range.Begin.isValid()) {
+          FileName = std::string(SM->getName(C.Range.Begin.File));
+          Line = (int32_t)SM->getLineColumn(C.Range.Begin).Line;
+        }
+        /* Pick a label: explicit 2nd-arg string, a NameExpr's name,
+         * or the empty string (runtime substitutes "<expr>"). */
+        std::string Label;
+        if (C.Args.size() == 2 && C.Args[1]) {
+          if (auto *Lit = dynamic_cast<const StringLiteral *>(C.Args[1]))
+            Label = Lit->Value;
+          else if (auto *Lit = dynamic_cast<const CharLiteral *>(C.Args[1]))
+            Label = Lit->Value;
+        }
+        if (Label.empty())
+          if (auto *AN = dynamic_cast<const NameExpr *>(C.Args[0]))
+            Label = std::string(AN->Name);
+
+        mlir::Value V = lowerExpr(*C.Args[0]);
+        auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+        auto F64 = mlir::Float64Type::get(&MCtx);
+        auto I32 = mlir::IntegerType::get(&MCtx, 32);
+        mlir::NamedAttribute FileA(
+            mlir::StringAttr::get(&MCtx, "value"),
+            mlir::StringAttr::get(&MCtx, FileName));
+        mlir::Value FileV = emitUnreg("matlab.const_char", {},
+                                       mlir::NoneType::get(&MCtx), L, {FileA});
+        mlir::Value LineV = mlir::arith::ConstantOp::create(
+            B, L, I32, mlir::IntegerAttr::get(I32, (int64_t)Line));
+        mlir::NamedAttribute LabelA(
+            mlir::StringAttr::get(&MCtx, "value"),
+            mlir::StringAttr::get(&MCtx, Label));
+        mlir::Value LabelV = emitUnreg("matlab.const_char", {},
+                                        mlir::NoneType::get(&MCtx), L, {LabelA});
+        bool IsMat = V && (V.getType() == PtrTy ||
+                           mlir::isa<mlir::RankedTensorType,
+                                     mlir::UnrankedTensorType>(V.getType()));
+        llvm::StringRef Callee = IsMat ? "matlab_dbg_mat" : "matlab_dbg_f64";
+        if (!V) {
+          /* If lowerExpr couldn't produce a value, fall back to
+           * f64(0) — better than crashing the REPL. */
+          V = mlir::arith::ConstantOp::create(
+              B, L, F64, mlir::FloatAttr::get(F64, 0.0));
+        }
+        mlir::NamedAttribute Cal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, Callee));
+        return emitUnreg("matlab.call_builtin",
+                         {FileV, LineV, LabelV, V},
+                         mlir::NoneType::get(&MCtx), L, {Cal});
+      }
+      /* who / whos / clear — REPL workspace ergonomics. All route to
+       * matlab_ws_* runtime entries directly. `clear()` with no args
+       * clears the whole workspace; `clear x` (command syntax) and
+       * `clear('x')` (function syntax) drop one name. */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          N->Name == "who" && C.Args.empty()) {
+        mlir::NamedAttribute Cal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "matlab_ws_who"));
+        return emitUnreg("matlab.call_builtin", {},
+                         mlir::NoneType::get(&MCtx), L, {Cal});
+      }
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          N->Name == "whos" && C.Args.empty()) {
+        mlir::NamedAttribute Cal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "matlab_ws_whos"));
+        return emitUnreg("matlab.call_builtin", {},
+                         mlir::NoneType::get(&MCtx), L, {Cal});
+      }
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          N->Name == "clear") {
+        if (C.Args.empty()) {
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_ws_clear"));
+          return emitUnreg("matlab.call_builtin", {},
+                           mlir::NoneType::get(&MCtx), L, {Cal});
+        }
+        /* clear('x') / clear('x', 'y'): one runtime call per name. */
+        for (const Expr *A : C.Args) {
+          std::string Nm;
+          if (auto *Lit = dynamic_cast<const StringLiteral *>(A)) Nm = Lit->Value;
+          else if (auto *Lit = dynamic_cast<const CharLiteral *>(A)) Nm = Lit->Value;
+          else continue;
+          mlir::Value NameV = emitFieldNameChar(Nm, L);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_ws_clear_one"));
+          emitUnregOp("matlab.call_builtin", {NameV},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+        }
+        return emitUnreg("matlab.undef", {},
+                         mlir::NoneType::get(&MCtx), L);
       }
       /* iscell(x): compile-time fold. */
       if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&

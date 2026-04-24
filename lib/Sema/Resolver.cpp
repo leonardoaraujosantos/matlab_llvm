@@ -37,6 +37,7 @@ void Resolver::registerBuiltins() {
     "transpose", "ctranspose",
     "disp", "fprintf", "sprintf", "error", "warning", "input", "clear",
     "keyboard", "pause", "tic", "toc",
+    "dbg", "who", "whos",
     "isempty", "isequal", "find",
     "true", "false",
     "mod", "rem", "floor", "ceil", "round", "fix",

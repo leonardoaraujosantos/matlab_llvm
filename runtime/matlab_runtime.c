@@ -2634,6 +2634,112 @@ void matlab_ws_clear(void) {
     matlab_ws = matlab_struct_new();
 }
 
+/* Forward declaration — the definition is later in the file, but
+ * matlab_ws_clear_one needs the symbol. */
+matlab_struct *matlab_struct_rmfield(matlab_struct *s, const char *name,
+                                      int64_t len);
+
+/* Remove a single variable from the workspace. Silent no-op if the
+ * name isn't present. Matches MATLAB's `clear name` form. */
+void matlab_ws_clear_one(const char *name, int64_t len) {
+    matlab_ws_init_if_needed();
+    matlab_struct_rmfield(matlab_ws, name, len);
+}
+
+/* `who` prints just the variable names, one per line. `whos` adds
+ * shape/class columns. Both read the workspace struct. */
+void matlab_ws_who(void) {
+    matlab_ws_init_if_needed();
+    pthread_mutex_lock(&matlab_io_mutex);
+    for (int32_t i = 0; i < matlab_ws->nfields; ++i) {
+        printf("%s\n", matlab_ws->names[i]);
+    }
+    pthread_mutex_unlock(&matlab_io_mutex);
+}
+
+void matlab_ws_whos(void) {
+    matlab_ws_init_if_needed();
+    pthread_mutex_lock(&matlab_io_mutex);
+    printf("  %-16s %-16s %-8s\n", "Name", "Size", "Class");
+    for (int32_t i = 0; i < matlab_ws->nfields; ++i) {
+        const char *name = matlab_ws->names[i];
+        if (matlab_ws->kinds[i] == 0) {
+            printf("  %-16s %-16s %-8s\n", name, "1x1", "double");
+        } else if (matlab_ws->kinds[i] == 1) {
+            matlab_mat *m = (matlab_mat *)matlab_ws->ptr_vals[i];
+            char shape[32];
+            if (m) snprintf(shape, sizeof shape, "%lldx%lld",
+                            (long long)m->rows, (long long)m->cols);
+            else    snprintf(shape, sizeof shape, "-");
+            printf("  %-16s %-16s %-8s\n", name, shape, "double");
+        } else {
+            printf("  %-16s %-16s %-8s\n", name, "?", "?");
+        }
+    }
+    pthread_mutex_unlock(&matlab_io_mutex);
+}
+
+/* dbg(x) / dbg(x, "label") — source-located debug print to stderr.
+ * The frontend passes the source file + line (derived from the call
+ * site's Location) and the variable name (empty if the argument
+ * isn't a bare NameExpr). Value is either an f64 scalar or a
+ * matlab_mat* depending on which overload the lowerer selected. */
+void matlab_dbg_f64(const char *file, int64_t file_len,
+                    int32_t line,
+                    const char *label, int64_t label_len,
+                    double v) {
+    /* The file / label strings come from LLVM globals that are NOT
+     * null-terminated, so use the explicit length in the format. */
+    int fl = (int)(file_len > 0 ? file_len : 0);
+    int ll = (int)(label_len > 0 ? label_len : 0);
+    const char *flt = file ? file : "<repl>";
+    if (!file) fl = (int)strlen(flt);
+    pthread_mutex_lock(&matlab_io_mutex);
+    fprintf(stderr, "%.*s:%d: %.*s = %g\n",
+            fl, flt, line,
+            ll > 0 ? ll : (int)strlen("<expr>"),
+            ll > 0 ? label : "<expr>", v);
+    pthread_mutex_unlock(&matlab_io_mutex);
+}
+
+void matlab_dbg_mat(const char *file, int64_t file_len,
+                    int32_t line,
+                    const char *label, int64_t label_len,
+                    matlab_mat *m) {
+    int fl = (int)(file_len > 0 ? file_len : 0);
+    int ll = (int)(label_len > 0 ? label_len : 0);
+    const char *flt = file ? file : "<repl>";
+    if (!file) fl = (int)strlen(flt);
+    pthread_mutex_lock(&matlab_io_mutex);
+    if (!m) {
+        fprintf(stderr, "%.*s:%d: %.*s = <null>\n",
+                fl, flt, line,
+                ll > 0 ? ll : (int)strlen("<expr>"),
+                ll > 0 ? label : "<expr>");
+        pthread_mutex_unlock(&matlab_io_mutex);
+        return;
+    }
+    fprintf(stderr, "%.*s:%d: %.*s = [%lldx%lld]\n",
+            fl, flt, line,
+            ll > 0 ? ll : (int)strlen("<expr>"),
+            ll > 0 ? label : "<expr>",
+            (long long)m->rows, (long long)m->cols);
+    /* Also print the matrix content (up to 8 rows / 8 cols) so
+     * small matrices are readable inline. */
+    int64_t maxr = m->rows > 8 ? 8 : m->rows;
+    int64_t maxc = m->cols > 8 ? 8 : m->cols;
+    for (int64_t i = 0; i < maxr; ++i) {
+        fprintf(stderr, "  ");
+        for (int64_t j = 0; j < maxc; ++j) {
+            fprintf(stderr, " %10g", m->data[i * m->cols + j]);
+        }
+        if (m->cols > 8) fprintf(stderr, " ...");
+        fprintf(stderr, "\n");
+    }
+    if (m->rows > 8) fprintf(stderr, "  ...\n");
+    pthread_mutex_unlock(&matlab_io_mutex);
+}
+
 /* rmfield(s, 'name'): remove a field in place and return the same ptr.
  * MATLAB's rmfield conceptually returns a new struct, but mutating
  * in place + returning the same pointer matches the common

@@ -272,7 +272,7 @@ algebra, logical masks, struct/cell usage.
 | Diagnostics with source-location | ✅ |
 | `#line` directives in emitted C / C++ | ✅ |
 | REPL / interactive interpreter | 🟡 | JIT via MLIR ExecutionEngine, persistent workspace. `matlabc -repl`. |
-| Debugger (DAP) | ❌ |
+| Debugger (DAP) | ❌ | Aids shipped: `dbg(x)` source-located print, `who`/`whos`/`clear` workspace commands, `#line` in emitted C/C++. Full breakpoint/step debugging is blocked on a JIT-level instrumentation pass or a tree-walking interpreter — see `docs/debug.md`. |
 | Language Server (LSP) | ❌ |
 | Unit-test framework (MATLAB `matlab.unittest`) | ❌ |
 | Live Scripts (`.mlx`) | ❌ |

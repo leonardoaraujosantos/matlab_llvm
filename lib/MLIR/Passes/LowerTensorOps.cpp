@@ -1010,6 +1010,70 @@ bool TensorLowering::rewriteBuiltinCalls() {
       continue;
     }
 
+    /* Workspace management commands: who / whos / clear take no
+     * operands; clear_one takes a single const_char name. Delegate
+     * directly. */
+    if ((Name == "matlab_ws_who" || Name == "matlab_ws_whos" ||
+         Name == "matlab_ws_clear") && Call->getNumOperands() == 0) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt(Name, VoidTy, {});
+      LLVM::CallOp::create(B, Call->getLoc(), Fn, ValueRange{});
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+    if (Name == "matlab_ws_clear_one" && Call->getNumOperands() == 1) {
+      Value NameV = Call->getOperand(0);
+      int64_t Len = 0;
+      Value Ptr = fieldNameAddr(NameV, Len);
+      if (!Ptr) continue;
+      B.setInsertionPoint(Call);
+      Value LenV = LLVM::ConstantOp::create(
+          B, Call->getLoc(), I64, B.getI64IntegerAttr(Len));
+      auto Fn = rt("matlab_ws_clear_one", VoidTy, {PtrTy, I64});
+      LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                            ValueRange{Ptr, LenV});
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+
+    /* dbg(x) / dbg(x, "label"): the frontend emits
+     *   matlab.call_builtin @matlab_dbg_* (file_char, line_i32,
+     *                                      label_char, value)
+     * Materialise both const_chars to (ptr, i64) pairs and emit
+     * the 6-arg runtime call. */
+    if ((Name == "matlab_dbg_f64" || Name == "matlab_dbg_mat") &&
+        Call->getNumOperands() == 4) {
+      auto I32 = IntegerType::get(Ctx, 32);
+      Value FileV = Call->getOperand(0);
+      Value LineV = Call->getOperand(1);
+      Value LabelV = Call->getOperand(2);
+      Value Val = Call->getOperand(3);
+      if (LineV.getType() != I32) continue;
+      bool IsMat = Name == "matlab_dbg_mat";
+      if (IsMat && Val.getType() != PtrTy) continue;
+      if (!IsMat && Val.getType() != F64) continue;
+      int64_t FileLen = 0, LabelLen = 0;
+      Value FilePtr = fieldNameAddr(FileV, FileLen);
+      Value LabelPtr = fieldNameAddr(LabelV, LabelLen);
+      if (!FilePtr || !LabelPtr) continue;
+      B.setInsertionPoint(Call);
+      Value FileLenV = LLVM::ConstantOp::create(
+          B, Call->getLoc(), I64, B.getI64IntegerAttr(FileLen));
+      Value LabelLenV = LLVM::ConstantOp::create(
+          B, Call->getLoc(), I64, B.getI64IntegerAttr(LabelLen));
+      auto Fn = rt(Name, VoidTy,
+                   {PtrTy, I64, I32, PtrTy, I64,
+                    IsMat ? (Type)PtrTy : (Type)F64});
+      LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                            ValueRange{FilePtr, FileLenV, LineV,
+                                       LabelPtr, LabelLenV, Val});
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+
     /* REPL workspace accessors. Shape is the same as struct_* but
      * without a base ptr (the workspace is a singleton inside the
      * runtime). Used only when matlabc is invoked with -repl. */
