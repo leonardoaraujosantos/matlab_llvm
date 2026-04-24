@@ -89,6 +89,13 @@ skeleton to keep the first commit reviewable.
   Fast enough today; revisit if responsiveness regresses on large
   files.
 
+## See also
+
+- [`docs/repl.md`](repl.md) — same front-end stack, running
+  interactively under MLIR's ExecutionEngine.
+- [`docs/debug.md`](debug.md) — matching debug aids (`dbg()`,
+  `who` / `whos` / `clear`).
+
 ## Protocol cheat sheet
 
 The skeleton's dispatch table, abbreviated:

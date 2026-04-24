@@ -1,16 +1,21 @@
 # matlab_llvm
 
 A compiler from a practical subset of MATLAB to native executables,
-with three backends — **LLVM IR**, **portable C**, and **portable C++**
-— all producing identical stdout. Built end-to-end: lexer → parser →
-AST → semantic analysis → in-house SSA IR → MLIR (`matlab` + `func` +
-`scf` + `arith` + `llvm` dialects) → codegen.
+with four execution paths — **LLVM IR**, **portable C**, **portable
+C++**, and an in-process **JIT REPL** — all producing identical
+behavior. Built end-to-end: lexer → parser → AST → semantic analysis
+→ in-house SSA IR → MLIR (`matlab` + `func` + `scf` + `arith` + `llvm`
+dialects) → codegen. Plus a MATLAB-aware **formatter** (`matlabc
+-format`) and a **Language Server** (`matlab-lsp`) built on the same
+front-end.
 
 No MathWorks source, no Octave dependency, no numerics library
-dependency. Just C++20, MLIR 22.x, and a ~1700-line C runtime shim
-(libc + pthreads + a heap-allocated `matlab_mat` descriptor, plus
-`matlab_struct` / `matlab_cell`, plus matmul / inverse / solve / SVD /
-eig implemented inline) that compiles stand-alone.
+dependency. Just C++20, MLIR 22.x, and a ~3100-line C runtime shim
+(libc + pthreads + heap-allocated `matlab_mat` / `matlab_mat3` /
+`matlab_struct` / `matlab_cell` / `matlab_obj` / `matlab_string`
+descriptors, plus matmul / inverse / solve / LU / QR / Cholesky /
+SVD / eig / sort / FFT-free math implemented inline) that compiles
+stand-alone.
 
 ## Runs today
 
@@ -41,6 +46,41 @@ disp(f(3));  disp(g(6));  disp(h(0));     % 8, 36, 0
 function y = sq(x), y = x * x; end
 ```
 
+```matlab
+% OOP with inheritance, operator overloading, Dependent properties.
+classdef Vec2
+    properties
+        x
+        y
+    end
+    methods
+        function obj = Vec2(xv, yv), obj.x = xv; obj.y = yv; end
+        function r = plus(a, b),    r = Vec2(a.x + b.x, a.y + b.y); end
+        function r = mtimes(a, k),  r = Vec2(a.x * k, a.y * k); end
+    end
+end
+a = Vec2(1, 2);  b = Vec2(3, 4);
+disp((a + b).x);        % 4   — operator+ dispatches to Vec2__plus
+disp((a * 3).y);        % 6   — scalar scaling via Vec2__mtimes
+```
+
+```
+$ matlabc -repl                     # JIT REPL with persistent workspace
+matlabc REPL (experimental). Ctrl-D or `exit` to quit.
+>> A = [1 2; 3 4]
+A =
+         1         2
+         3         4
+>> A'             % implicit display: transpose shows without disp()
+ans =
+         1         3
+         2         4
+>> whos           % workspace introspection
+  Name             Size             Class
+  A                2x2              double
+  ans              2x2              double
+```
+
 More in [`examples/`](examples/) — every file there compiles and runs
 under the current compiler end-to-end.
 
@@ -63,6 +103,8 @@ just test                  # all ctest suites
 just compile FILE OUT      # .m → native executable (LLVM path)
 just compile-c FILE        # .m → native executable (C path)
 just examples              # build and run every examples/*.m
+just repl                  # launch the JIT-backed REPL
+just format FILE           # pretty-print a .m file to stdout
 just --list                # full recipe list
 ```
 
@@ -99,11 +141,13 @@ mutex-guarded atomic-add entry for reductions, so `x = x + i` across
 10 threads deterministically prints 55.
 
 Design docs:
-- [`docs/emit_c_cpp.md`](docs/emit_c_cpp.md) — the C / C++ backend: op-to-C mapping, runtime ABI bridge, design alternatives considered.
 - [`docs/feature_status.md`](docs/feature_status.md) — complete feature inventory and gap analysis for full MATLAB compatibility.
+- [`docs/emit_c_cpp.md`](docs/emit_c_cpp.md) — the C / C++ backend: op-to-C mapping, runtime ABI bridge, design alternatives considered.
+- [`docs/repl.md`](docs/repl.md) — shipped JIT REPL built on MLIR `ExecutionEngine`, with state persistence via a runtime workspace.
+- [`docs/lsp.md`](docs/lsp.md) — shipped Language Server (`matlab-lsp`): diagnostics, goto-definition, document outline, plus editor-setup snippets.
+- [`docs/debug.md`](docs/debug.md) — debugging aids (`dbg(x)`, `who` / `whos` / `clear`) and why full DAP is deferred.
 - [`docs/emit_python.md`](docs/emit_python.md) — planned Python backend.
 - [`docs/emit_systemc.md`](docs/emit_systemc.md) — planned SystemC (synthesizable) backend.
-- [`docs/repl.md`](docs/repl.md) — planned interactive interpreter / REPL.
 
 ## CLI
 
@@ -120,6 +164,14 @@ One driver, many stages:
 | `-emit-llvm` | LLVM IR text |
 | `-emit-c` | Self-contained C source (links with `runtime/matlab_runtime.c`) |
 | `-emit-cpp` | Self-contained C++ source (same runtime via `extern "C"`) |
+| `-format`    | Canonically-formatted source — idempotent; drops comments |
+| `-repl`      | JIT-backed interactive prompt with persistent workspace |
+
+Plus a separate binary:
+
+| Binary        | Role |
+|---|---|
+| `matlab-lsp`  | Language Server (JSON-RPC over stdio): diagnostics, goto-definition, document outline — wires into any LSP-capable editor. See [`docs/lsp.md`](docs/lsp.md). |
 
 Build and run, via any of the three backends:
 
@@ -170,35 +222,56 @@ inheritance, static methods, operator overloading (`plus`, `minus`,
 `set.Prop` methods, property attribute syntax (parsed; only
 `Dependent` changes behavior), `enumeration` blocks.
 
-Runtime built-ins include: linear algebra (`*`, `\`, `/`, `inv`,
-`det`, `svd`-values, `eig` for symmetric matrices); constructors
-(`zeros`, `ones`, `eye`, `magic`, `rand`, `randn`, `linspace`); shape
-ops (`transpose`, `diag`, `reshape`, `repmat`); reductions (`sum`);
-element-wise math (`exp`, `log`, `sin`, `cos`, `tan`, `sqrt`, `abs`);
-predicates (`isempty`, `isequal`, `find`); I/O (`disp`, `fprintf`
-up to 4 args, `input`, `error`, `warning`); file I/O (`fopen`,
-`fclose`, `fprintf(fid, ...)`, `fgetl`, `feof`, `fread`, `fwrite`,
-`save` / `load` — custom binary format, not MATLAB `.mat`).
+Runtime built-ins include:
+
+- **Linear algebra**: `*`, `\`, `/`, `inv`, `det`, `transpose`,
+  `trace`, `norm`, `kron`; symmetric `eig` (Jacobi), `lu` (partial
+  pivoting), `qr` (Gram-Schmidt), `chol`, `pinv` (via normal
+  equations), `svd` singular values.
+- **Constructors & shape**: `zeros`, `ones`, `eye`, `magic`, `rand`,
+  `randn`, `linspace`, `diag`, `reshape`, `repmat`, `horzcat`,
+  `vertcat`, `permute`, `squeeze`, `flip` / `fliplr` / `flipud`,
+  `rot90`, `size`, `length`, `numel`, `ndims`.
+- **Reductions** (single-arg and dim-aware): `sum`, `prod`, `mean`,
+  `min`, `max`, `cumsum`, `cumprod`.
+- **Element-wise math**: `abs`, `sqrt`, `exp`, `log`, `sin`, `cos`,
+  `tan`, `asin`, `acos`, `atan`, `atan2`, `sinh`, `cosh`, `tanh`,
+  `log2`, `log10`, `sign`, `floor`, `ceil`, `round`, `fix`, `mod`,
+  `rem`.
+- **Sort / search / sets**: `sort`, `sortrows`, `unique`, `find`,
+  `ismember`, `setdiff`, `intersect`, `union`, `isempty`,
+  `isequal`, `sub2ind`, `ind2sub`, `assert`.
+- **Strings**: `sprintf`, `num2str`, `str2double`, `strcat`,
+  `strtrim`, `strrep`, `upper`, `lower`, `startsWith`, `endsWith`,
+  `contains`, `strlen`, `isstring`.
+- **I/O**: `disp`, `fprintf` up to 4 args, `input`, `error`,
+  `warning`; file I/O `fopen`, `fclose`, `fprintf(fid, ...)`,
+  `fgetl`, `feof`, `fread`, `fwrite`, `save` / `load` (custom
+  binary format — not MATLAB `.mat`).
+- **Debug**: `dbg(x)` / `dbg(x, 'label')` — source-located print
+  to stderr; `who` / `whos` / `clear` workspace introspection (in
+  the REPL).
 
 **Not yet:** value-class copy semantics (every object is
-handle-shaped for now), events / listeners, property validators
+handle-shaped), events / listeners, property validators
 (`{mustBeNumeric}` parses but isn't enforced), struct arrays, 2-D
-cells, `varargout`, complex numbers, 3-D vector slicing (only
-scalar `A(i,j,k)` today), 4-D+ arrays, sparse matrices,
-non-symmetric `eig`, full `[U, S, V] = svd(A)`, `fft` family,
-string functions (`sprintf`, `regexp`, `num2str`, etc.),
-MATLAB `.mat` format (`save` / `load` use a custom binary layout
-instead), REPL, debugger.
+cells, `varargout`, complex numbers (parsed but no arithmetic),
+3-D vector slicing (only scalar `A(i,j,k)` today), 4-D+ arrays,
+sparse matrices, non-symmetric `eig`, full `[U, S, V] = svd(A)`,
+`fft` family, `regexp` / `regexprep`, MATLAB `.mat` file format,
+full Debug Adapter Protocol (only `dbg(x)` today — see
+[`docs/debug.md`](docs/debug.md)), LSP completion / hover /
+rename (see [`docs/lsp.md`](docs/lsp.md)).
 
 **Not planned:** plotting, Simulink, toolboxes, GPU arrays, live
 scripts (`.mlx`), MathWorks bit-exact numerics.
 
 ## Testing
 
-Multiple CTest suites, ~560 goldens. The end-to-end `Run` lane
-compiles 98 `.m` programs through all three backends (LLVM, C, C++,
-plus `-Wall -Wextra -Werror` strict lanes for the C/C++ paths) and
-diffs stdout against `.stdout` goldens:
+Seven CTest suites. The end-to-end `Run` lane compiles 118 `.m`
+programs through all three compiled backends (LLVM, C, C++, plus
+`-Wall -Wextra -Werror` strict lanes for the C/C++ paths) and diffs
+stdout against `.stdout` goldens:
 
 ```bash
 ctest --test-dir build
@@ -216,7 +289,8 @@ UPDATE=1 test/run_tests.sh build/matlabc
 include/matlab/
   Basic/  Lex/  Parse/  AST/  Sema/  MIR/  MLIR/
 lib/                           implementations mirror include/
-tools/matlabc/                 CLI driver (all flags wired in main.cpp)
+tools/matlabc/                 CLI driver: emit modes, -format, -repl
+tools/matlab-lsp/              Language Server (stdio JSON-RPC)
 runtime/                       matlab_runtime.c + build_and_run.sh
 test/                          goldens + run scripts (per-suite subdirs)
 examples/                      end-to-end example programs

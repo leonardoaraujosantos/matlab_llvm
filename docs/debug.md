@@ -136,6 +136,13 @@ accessibility that a tree-walking interpreter would provide; in
 compiled code the locals are register-allocated and invisible by the
 time execution reaches the keyboard point.
 
+## See also
+
+- [`docs/repl.md`](repl.md) — the JIT REPL that hosts `dbg()` /
+  `who` / `whos` / `clear`.
+- [`docs/lsp.md`](lsp.md) — the Language Server surfaces our
+  `DiagnosticEngine` output as editor squiggles.
+
 ## Roadmap
 
 Rough priorities if debug tooling gets its own focus block:

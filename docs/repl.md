@@ -44,6 +44,14 @@ resolves `matlab_*` and `matlab_ws_*` symbols against the running
 process via LLJIT's default dynamic-library search generator, so no
 `.so` / `.dylib` is required at runtime.
 
+## See also
+
+- [`docs/debug.md`](debug.md) — `dbg(x)` and the workspace
+  commands (`who` / `whos` / `clear`) that are especially useful
+  inside the REPL.
+- [`docs/lsp.md`](lsp.md) — non-interactive editor integration
+  (diagnostics, goto-def, outline) on the same front-end stack.
+
 ## Known limitations
 
 - No line editing (history, arrow keys). Piped input and basic

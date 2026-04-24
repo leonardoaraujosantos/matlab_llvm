@@ -4,10 +4,14 @@ Inventory of what this project supports today and what's missing for full
 MATLAB language compatibility. Derived from the lexer, parser, AST, Sema,
 MLIR passes, runtime, and test corpus as of the current branch.
 
-The project's target is the **practical scalar-and-dense-matrix subset**
-of MATLAB: enough to run numeric programs, linear algebra, and
-moderately complex control flow. OOP, toolboxes, and GUI features are
-out of scope.
+The project's target is the **practical scalar / matrix / classdef
+subset** of MATLAB: enough to run numeric programs, linear algebra,
+control flow, text processing, file I/O, user-defined functions and
+user-defined classes (with inheritance and operator overloading),
+and to surface all of that through three compiled backends (LLVM,
+C, C++), a JIT-backed REPL, an editor-facing Language Server, and
+a source formatter. Toolboxes, plotting, and GUI features are
+explicitly out of scope.
 
 ---
 
@@ -118,8 +122,9 @@ out of scope.
 | `zeros`, `ones`, `eye`, `rand`, `randn`, `magic` | ✅ |
 | `diag`, `reshape`, `repmat`, `linspace` | ✅ |
 | `size`, `length`, `numel`, `ndims` | ✅ |
-| `cat`, `horzcat`, `vertcat` (beyond `[A B]` literal) | ❌ |
-| `permute`, `squeeze`, `flip`, `rot90` | ❌ |
+| `horzcat`, `vertcat` (as builtins + `[A B]` / `[A;B]` literal forms) | ✅ |
+| `permute` (2-D identity / transpose), `squeeze` (2-D no-op), `flip` / `fliplr` / `flipud`, `rot90` | ✅ |
+| `cat` (N-dim), `permute` (>2D) | ❌ |
 
 ### Element-wise math
 
@@ -128,17 +133,18 @@ out of scope.
 | `+ - * / .* ./ .^` on matrix/matrix, matrix/scalar, scalar/matrix | ✅ |
 | `abs`, `sqrt`, `exp`, `log`, `sin`, `cos`, `tan` | ✅ |
 | `floor`, `ceil`, `round`, `fix`, `mod`, `rem` | ✅ |
-| `asin`, `acos`, `atan`, `atan2`, `sinh`, `cosh`, `tanh`, `log2`, `log10` | ❌ |
-| `sign`, `conj`, `real`, `imag`, `angle` | ❌ |
+| `asin`, `acos`, `atan`, `atan2`, `sinh`, `cosh`, `tanh`, `log2`, `log10`, `sign` | ✅ |
+| `conj`, `real`, `imag`, `angle` | ❌ | Gated behind complex-number runtime |
 
 ### Reductions
 
 | Function | Status |
 |---|:-:|
-| `sum` (all elements) | ✅ |
-| `min`, `max`, `mean`, `prod` | 🟡 | Registered as builtins; not all runtime-implemented |
-| `std`, `var`, `median`, `mode`, `cumsum`, `cumprod` | ❌ |
-| Dimension-aware reductions (`sum(A, 2)`) | ❌ |
+| `sum` (all elements, column-wise, or `sum(A, dim)`) | ✅ |
+| `min`, `max`, `mean`, `prod` (same 3 forms as `sum`) | ✅ |
+| `cumsum`, `cumprod` (single-arg + `(A, dim)`) | ✅ |
+| Dimension-aware reductions (`sum(A, 2)`, `mean(A, 1)`, ...) | ✅ |
+| `std`, `var`, `median`, `mode` | ❌ |
 
 ### Linear algebra
 
@@ -146,12 +152,15 @@ out of scope.
 |---|:-:|---|
 | `*` (matmul), `mldivide` (`A\b`), `mrdivide` (`A/b`) | ✅ | Pure-C triple-loop + LU |
 | `inv`, `det`, `transpose`, `ctranspose` | ✅ | |
-| `eig` (symmetric) | ✅ | Jacobi; non-symmetric is symmetrized (approximate) |
+| `eig` (symmetric, 1- or 2-return `[V, D] = eig(A)`) | ✅ | Jacobi; non-symmetric is symmetrized (approximate) |
+| `lu` (partial pivoting, 2-return `[L, U] = lu(A)`) | ✅ | |
+| `qr` (Gram-Schmidt, 2-return `[Q, R] = qr(A)`) | ✅ | m ≥ n |
+| `chol` (upper-triangular R with R'R = A) | ✅ | SPD-only; error flag on non-SPD input |
+| `pinv` (via normal equations) | ✅ | Full-rank square / tall / wide |
+| `norm` (Frobenius), `trace`, `kron` | ✅ | |
 | `eig` (non-symmetric, correct) | ❌ | |
 | `svd` (singular values only) | 🟡 | `U`, `V` not returned |
-| `pinv`, `rank` | 🟡 | Registered; not all wired |
-| `qr`, `lu`, `chol`, `schur`, `hess`, `null`, `orth` | ❌ |
-| `norm`, `trace`, `kron`, `cross`, `dot` | ❌ |
+| `rank`, `schur`, `hess`, `null`, `orth`, `cross`, `dot` | ❌ |
 
 ### Indexing / search
 
@@ -162,9 +171,11 @@ out of scope.
 | Indexed store (`A(i)=v`, `A(:,j)=v`) | ✅ |
 | `end` in index expressions | ✅ |
 | `find`, `isempty`, `isequal` | ✅ |
+| `sort` (column-wise + vector), `sortrows` (stable lex) | ✅ |
+| `unique`, `ismember` | ✅ |
+| `setdiff`, `intersect`, `union` | ✅ |
+| `sub2ind`, `ind2sub` (column-major, matching MATLAB's user-visible convention) | ✅ |
 | Row/column deletion (`A(i,:)=[]`) | 🟡 | Runtime entries exist; frontend pattern not wired |
-| `sort`, `sortrows`, `unique`, `ismember` | ❌ |
-| Linear vs. subscript indexing edge cases (`sub2ind`, `ind2sub`) | ❌ |
 
 ### Heterogeneous data
 
@@ -187,7 +198,7 @@ out of scope.
 |---|:-:|
 | `disp` (string, scalar, vector, matrix) | ✅ |
 | `fprintf` (up to 4 numeric args) with escape sequences | ✅ |
-| `sprintf` | 🟡 | Registered; runtime entry missing |
+| `sprintf` (literal + single-f64 form) | ✅ | Result is a `matlab_string` |
 | `input` (numeric) | ✅ |
 | `error`, `warning` with message text | ✅ |
 | File I/O: `fopen`, `fclose`, `fprintf(fid, ...)`, `fgetl`, `feof`, `fread`, `fwrite`, `save`, `load` | 🟡 | Text + binary single-matrix round-trip work. `save`/`load` use a custom `MLB1` header format, **not** MATLAB's `.mat` format. |
@@ -199,10 +210,12 @@ out of scope.
 |---|:-:|
 | `error` flag mechanism, try/catch with `ME.message` | ✅ |
 | `global`, `persistent` (scalar f64) | ✅ |
-| `clear` | ✅ |
+| `clear` (all or named; function + command syntax; REPL-aware) | ✅ |
+| `who`, `whos` (REPL workspace introspection) | ✅ |
+| `dbg(x)` / `dbg(x, 'label')` — source-located debug print | ✅ |
+| `assert(cond)` / `assert(cond, msg)` | ✅ | Sets the runtime error flag |
 | `parfor` with reduction mutex | ✅ |
 | `keyboard`, `pause`, `tic`, `toc` | 🟡 | Registered; implementation varies |
-| `assert` | ❌ |
 | `eval`, `evalin`, `assignin` | ❌ |
 | `feval` | 🟡 | Via function handles |
 
@@ -211,10 +224,11 @@ out of scope.
 | Feature | Status |
 |---|:-:|
 | String literal creation, `strlen`, `isstring` | ✅ |
-| Concatenation (`[s1 s2]`, `strcat`) | 🟡 | `[]` concat works; `strcat` not wired |
-| `sprintf`, `strsplit`, `strjoin`, `strtrim`, `strrep`, `regexp`, `regexprep` | ❌ |
-| `num2str`, `str2num`, `str2double` | ❌ |
-| `upper`, `lower`, `startsWith`, `endsWith`, `contains` | ❌ |
+| Concatenation: `[s1 s2]`, `strcat(a, b)`, `s1 + s2` | ✅ |
+| `sprintf` (literal + single-f64 form), `num2str`, `str2double` | ✅ |
+| `strtrim`, `strrep` | ✅ |
+| `upper`, `lower`, `startsWith`, `endsWith`, `contains` | ✅ |
+| `strsplit`, `strjoin`, `regexp`, `regexprep`, `str2num` | ❌ |
 
 ---
 
@@ -230,10 +244,11 @@ out of scope.
 | Optimization passes (slot promotion, scalar→arith) | ✅ | `-emit-mlir -opt` |
 | LLVM IR emission | ✅ | `-emit-llvm` |
 | C emission (self-contained) | ✅ | `-emit-c` |
-| C++ emission | ✅ | `-emit-cpp` |
+| C++ emission (classes + inheritance preserved) | ✅ | `-emit-cpp` |
+| Source formatter (AST pretty-printer) | ✅ | `-format` |
+| JIT / REPL | 🟡 | `matlabc -repl` with MLIR ExecutionEngine; state persists via a runtime workspace. No line editing / JIT cache / live user-function definitions yet. See `docs/repl.md`. |
 | Python emission | ❌ | See `docs/emit_python.md` |
 | SystemC (synthesizable) emission | ❌ | See `docs/emit_systemc.md` |
-| JIT / REPL | 🟡 | `matlabc -repl` with MLIR ExecutionEngine; state persists via a runtime workspace. No line editing / JIT cache / live user-function definitions yet. See `docs/repl.md`. |
 
 ### MLIR passes (`lib/MLIR/Passes/`)
 
@@ -250,15 +265,17 @@ All implemented; see `docs/emit_c_cpp.md` for pipeline diagram.
 | Suite | Count | Status |
 |---|--:|:-:|
 | `frontend-tests` (Lexer, Parser, Sema, MIR, MLIR, Opt, Programs, Errors) | 77 | ✅ 77/77 |
-| `run-tests` (`-emit-llvm` + clang) | 98 | ✅ |
-| `run-tests-emit-c` (`-emit-c` + cc) | 98 | ✅ |
-| `run-tests-emit-cpp` (`-emit-cpp` + c++) | 98 | ✅ |
-| `run-tests-emit-c-strict` / `-cpp-strict` (-Wall -Wextra -Werror) | 98 | ✅ |
+| `run-tests` (`-emit-llvm` + clang) | 118 | ✅ |
+| `run-tests-emit-c` (`-emit-c` + cc) | 118 | ✅ |
+| `run-tests-emit-cpp` (`-emit-cpp` + c++) | 118 | ✅ |
+| `run-tests-emit-c-strict` / `-cpp-strict` (-Wall -Wextra -Werror) | 118 | ✅ |
 | `emitc-fail-tests` (diagnostic contract) | 1+ | ✅ |
 
-Examples gallery: 14 programs under `examples/` exercise matrix ops,
+Examples gallery: 15 programs under `examples/` exercise matrix ops,
 recursion, anonymous functions, function handles, parfor, linear
-algebra, logical masks, struct/cell usage.
+algebra, logical masks, struct/cell usage, and OOP (`bank_account.m`
+— classdef with inheritance, `Dependent` properties, operator
+overloading).
 
 ---
 
@@ -266,18 +283,19 @@ algebra, logical masks, struct/cell usage.
 
 | Feature | Status |
 |---|:-:|
-| Compiler CLI (`matlabc`) with 9 emit modes + `-repl` | ✅ |
+| Compiler CLI (`matlabc`) with 9 emit modes + `-format` + `-repl` | ✅ |
 | CMake + `just` build system | ✅ |
 | CTest integration (7 lanes) | ✅ |
 | Diagnostics with source-location | ✅ |
 | `#line` directives in emitted C / C++ | ✅ |
-| REPL / interactive interpreter | 🟡 | JIT via MLIR ExecutionEngine, persistent workspace. `matlabc -repl`. |
-| Debugger (DAP) | ❌ | Aids shipped: `dbg(x)` source-located print, `who`/`whos`/`clear` workspace commands, `#line` in emitted C/C++. Full breakpoint/step debugging is blocked on a JIT-level instrumentation pass or a tree-walking interpreter — see `docs/debug.md`. |
-| Language Server (LSP) | 🟡 | `matlab-lsp` binary with initialize / shutdown, didOpen / didChange / didClose, publishDiagnostics, definition, documentSymbol. No completion / hover / rename / workspace-symbol yet. See `docs/lsp.md`. |
+| Formatter (AST pretty-printer, idempotent) | ✅ | `matlabc -format` / `just format`. Drops comments (not in AST). |
+| REPL / interactive interpreter | 🟡 | JIT via MLIR ExecutionEngine, persistent workspace, implicit display, `who`/`whos`/`clear`. `matlabc -repl`. See `docs/repl.md`. |
+| Language Server (LSP) | 🟡 | `matlab-lsp` binary: initialize/shutdown, didOpen/didChange/didClose, publishDiagnostics, definition, documentSymbol. No completion / hover / rename / workspace-symbol yet. See `docs/lsp.md`. |
+| Debugger (DAP) | 🟡 | Aids shipped: `dbg(x)` source-located print to stderr, `who`/`whos`/`clear` workspace commands, `#line` in emitted C/C++ so gdb/lldb steps the `.m` source. Full breakpoint/step debugging is blocked on a JIT-level instrumentation pass or a tree-walking interpreter — see `docs/debug.md`. |
 | Unit-test framework (MATLAB `matlab.unittest`) | ❌ |
 | Live Scripts (`.mlx`) | ❌ |
 | MEX interop (loading `.mex` files) | ❌ |
-| Formatter / linter | ❌ |
+| Linter (style / unused-var warnings) | ❌ |
 
 ---
 
@@ -287,45 +305,41 @@ Grouped by category and rough scope. "Full" means matching MathWorks'
 MATLAB semantics on a representative program corpus. Some of these are
 deliberate non-goals; see "Out of scope."
 
-### Language core (substantial work)
+### Language core (substantial work still open)
 
 | Missing | Scope | Notes |
 |---|---|---|
-| **OOP** — `classdef`, properties, methods, events, inheritance, operator overloading | Large | ~6–8 weeks. New AST nodes, new Sema (method dispatch, inheritance), runtime object layout, `dot`-call vs field-access ambiguity |
-| **N-dim arrays (>3D)** | Medium | ~2–3 weeks. Runtime descriptor generalization from `(rows, cols, depth)` to `(ndims, shape[])`; update all per-op lowering. 3-D already supported via `matlab_mat3` for `zeros/ones` + scalar indexing |
-| **Integer runtime** (`int8..int64`, `uint8..uint64`) | Medium | ~2 weeks. Cast builtins already truncate + saturate against f64 storage; dedicated typed runtime (`matlab_mat_i32`, etc.) still needed for memory-layout fidelity |
-| **Complex numbers** | Medium | ~2 weeks. Runtime `matlab_mat_c64`; complex-aware versions of every elementwise op + linalg |
-| **Struct arrays** (`s(i).x`) | Medium | ~1 week. Runtime struct-array descriptor; slicing over struct fields |
-| **Sparse matrices** | Large | ~3–4 weeks. Sparse representation + sparse-aware linalg; or lean on SuiteSparse |
-| **`varargout`** | Small | ~2–3 days. `varargin` ships; `varargout` needs multi-return unpacking at call site |
-| **`classdef` dependent types** (`table`, `datetime`, `categorical`) | Large | Built on OOP; add after that |
-| **`eval`, `evalin`, `assignin`** | Small | ~2–3 days. Requires REPL / interpreter path — see `docs/repl.md` |
+| **OOP value-class copy semantics** | Medium | ~1–2 weeks. Every object is handle-shaped today. True value semantics needs copy-on-assign / copy-on-modify plumbing at every `obj.prop = ...` and every call-site pass. |
+| **OOP events / listeners** | Medium | ~1 week. `notify` / `addlistener` / callback machinery. |
+| **OOP property validators** (`{mustBeNumeric}`, size specs) | Small | ~2–3 days. Syntax parses today; need runtime checks at each assignment. |
+| **N-dim arrays (>3D)** | Medium | ~2–3 weeks. Runtime descriptor generalization from `(rows, cols, depth)` to `(ndims, shape[])`; update all per-op lowering. 3-D already supported via `matlab_mat3` for `zeros/ones` + scalar indexing. |
+| **3-D slicing** (`A(:,:,k)`) | Small | ~2–3 days. 3-D exists for scalar `A(i,j,k)`; vector / slice forms not wired. |
+| **Integer runtime** (`int8..int64`, `uint8..uint64`) | Medium | ~2 weeks. Cast builtins already truncate + saturate against f64 storage; dedicated typed runtime still needed for memory-layout fidelity. |
+| **Complex numbers** | Medium | ~2 weeks. Runtime `matlab_mat_c64`; complex-aware versions of every elementwise op + linalg. |
+| **Struct arrays** (`s(i).x`) | Medium | ~1 week. Runtime struct-array descriptor; slicing over struct fields. |
+| **Sparse matrices** | Large | ~3–4 weeks. Sparse representation + sparse-aware linalg; or lean on SuiteSparse. |
+| **`varargout`** | Small | ~2–3 days. `varargin` ships; `varargout` needs multi-return unpacking at call site. |
+| **`classdef` dependent types** (`table`, `datetime`, `categorical`) | Large | Built on OOP; add after value semantics land. |
+| **`eval`, `evalin`, `assignin`** | Small | ~2–3 days. Evaluator already exists in `-repl`; hook it. |
 
-### Built-in library breadth (incremental — adds per function)
+### Built-in library breadth (incremental, each ~0.5–2 days)
 
-Each of these is ~0.5–2 days of runtime work plus test coverage:
-
-- **Trig/exp tail**: `asin`, `acos`, `atan`, `atan2`, `sinh`, `cosh`, `tanh`, `log2`, `log10`, `sign`, `conj`, `real`, `imag`, `angle`
-- **Reductions**: full `min`/`max`/`mean`/`prod`/`std`/`var`/`median`/`mode`, plus `cumsum`/`cumprod`, plus dimension arg
-- **Reshape/layout**: `cat`, `horzcat`, `vertcat`, `permute`, `squeeze`, `flip`, `rot90`
-- **Linalg tail**: correct non-symmetric `eig`, full `svd` with `U`/`V`, `pinv`, `rank`, `qr`, `lu`, `chol`, `norm`, `trace`, `kron`
-- **Search / sort**: `sort`, `sortrows`, `unique`, `ismember`, `setdiff`, `intersect`, `union`
-- **Indexing helpers**: `sub2ind`, `ind2sub`, `A(i,:)=[]` wiring
-- **Strings**: `sprintf`, `num2str`, `str2double`, `strsplit`, `strjoin`, `strtrim`, `strrep`, `regexp`, `upper`, `lower`, `startsWith`, `endsWith`, `contains`
-- **I/O**: `fopen`/`fread`/`fwrite`/`fclose`, `load`/`save` (.mat format), `readtable`/`writetable` (needs `table` type)
-
-Rough cumulative estimate for "covers 95% of everyday MATLAB code":
-**~6–8 weeks of runtime work**, parallelizable.
+- **Reductions tail**: `std`, `var`, `median`, `mode`.
+- **Reshape tail**: N-dim `cat`, N-dim `permute`.
+- **Linalg tail**: correct non-symmetric `eig`, full `[U, S, V] = svd(A)`, `rank`, `qr` (m<n), `schur`, `hess`, `null`, `orth`, `cross`, `dot`.
+- **Strings tail**: `strsplit`, `strjoin`, `regexp`, `regexprep`, `str2num`.
+- **Search / indexing tail**: `A(i,:)=[]` frontend wiring (runtime exists).
+- **I/O tail**: MATLAB `.mat` v5 format for `save`/`load`, `readtable`/`writetable` (needs `table` type).
 
 ### Tooling (each standalone)
 
 | Missing | Scope | Reference |
 |---|---|---|
-| REPL / interpreter | 4 weeks v1 | `docs/repl.md` |
-| Debugger (DAP server) | 2–3 weeks | Hooks on top of REPL |
-| Language Server (LSP) | 2–3 weeks | Reuses Lexer/Parser/Sema |
-| Formatter | 1 week | AST pretty-printer already close |
-| Package manager / path | 1 week | `addpath`, `+pkg` directories |
+| Full DAP (breakpoints + stepping) | 3–4 weeks | Needs JIT-level instrumentation or a tree-walking interpreter. See `docs/debug.md`. |
+| LSP completion / hover / rename | 2 weeks | Extends the current skeleton. See `docs/lsp.md`. |
+| Package manager / path | 1 week | `addpath`, `+pkg` directories. |
+| Linter (style + unused-var) | 1 week | AST pass; formatter infrastructure already reusable. |
+| Live-editor integration (Jupyter kernel) | 2 weeks | REPL already acts as a one-shot evaluator; a Jupyter adapter would mediate. |
 
 ### Out of scope (deliberate non-goals)
 
@@ -341,44 +355,70 @@ Rough cumulative estimate for "covers 95% of everyday MATLAB code":
 
 ## 9. Rough "fully compatible MATLAB-subset" roadmap
 
-If the goal is to run a majority of general-purpose MATLAB programs
-(not toolboxes, not OOP-heavy code, not GUI), the order that gives
-the most leverage:
+The path from today's state to running a majority of general-purpose
+MATLAB programs (not toolboxes, not GUI). Items 1–7 from the earlier
+version of this doc — dim-aware reductions, varargin / call polish,
+sort / linalg tail, strings, REPL, file I/O, basic OOP, tooling —
+**have all shipped**. The remaining runway:
 
 | Priority | Item | Effort | Unlocks |
 |:-:|---|--:|---|
-| 1 | Dimension-aware reductions + full trig/exp tail | 1 week | Everyday numeric scripts |
-| 2 | `varargin`/`varargout` + call-site polish | 1 week | Library-style functions |
-| 3 | Struct arrays | 1 week | Data-in-records patterns |
-| 4 | Integer runtime (i32/i64 minimum) | 1.5 weeks | Image processing pixel code |
-| 5 | N-dim arrays (3D common case) | 2 weeks | Volumetric data, batch dims |
-| 6 | `sort`, `unique`, `find` extensions, linalg tail | 1–2 weeks | Data manipulation patterns |
-| 7 | String/regex built-ins (`sprintf`, `regexp`, etc.) | 1–2 weeks | Text processing |
-| 8 | REPL (see `docs/repl.md`) | 4 weeks | Interactive use |
-| 9 | File I/O (`load`/`save` .mat, `fopen` family) | 2 weeks | Real data pipelines |
-| 10 | Complex arithmetic | 2 weeks | DSP programs |
-| 11 | OOP (`classdef`) | 6–8 weeks | Modern MATLAB code |
-| 12 | Sparse matrices | 3–4 weeks | Scientific computing |
+| 1 | Struct arrays (`s(i).x`) | 1 week | Data-in-records patterns |
+| 2 | Integer runtime (typed `matlab_mat_i32` / `_u8` / …) | 1.5 weeks | Image processing pixel code |
+| 3 | `varargout` + 3-D vector slicing (`A(:,:,k)`) | 1 week | Library-style + volumetric code |
+| 4 | Complex-number runtime | 2 weeks | DSP programs |
+| 5 | OOP value-class copy semantics + property validators | 2 weeks | Modern MATLAB code |
+| 6 | Full DAP (breakpoints + stepping) | 3–4 weeks | Interactive debugging in editors |
+| 7 | `regexp` / `regexprep` + string tail | 1–2 weeks | Text-processing scripts |
+| 8 | Full non-symmetric `eig` + `[U, S, V] = svd` | 1 week | Scientific computing |
+| 9 | MATLAB `.mat` file-format parser | 2 weeks | Real data pipelines |
+| 10 | N-dim arrays (>3D, full indexing) | 2–3 weeks | Batch dims, tensor code |
+| 11 | OOP events / listeners | 1 week | Callback-heavy code |
+| 12 | Sparse matrices | 3–4 weeks | Large-scale linalg |
+| 13 | `classdef` table / datetime / categorical | 3–4 weeks | Data-analysis idioms |
 
-Items 1–7 are roughly a **quarter of focused work** and would cover a
-large majority of non-OOP MATLAB programs. Items 8–10 round out the
-interactive and I/O surface. Items 11–12 are the big remaining land
-masses; either is a multi-month project on its own.
+Items 1–3 are the immediate-leverage path for generic MATLAB
+compatibility. Items 4–9 round out the "serious numeric work"
+surface. Items 10+ are larger investments whose shape depends on
+which direction the project pushes next.
 
 ---
 
 ## 10. Summary
 
-**Where we are:** a production-quality compiler for the scalar-and-
-dense-matrix subset of MATLAB, with three backends (LLVM, C, C++), full
-control flow, anonymous functions with captures, structs, 1-D cells,
-`parfor`, error handling, and a ~200-program test corpus that passes
-across all three backends.
+**Where we are:** a production-quality compiler + tooling stack
+covering the scalar / dense-matrix / classdef subset of MATLAB.
 
-**Biggest gaps to a "general-purpose MATLAB replacement":** integer /
-complex / N-D runtime, struct arrays, the long tail of built-in
-functions, and interactive tooling. Each is tractable; none is
-blocking; priorities depend on the target audience.
+- **Three compiled backends** (LLVM IR, portable C, portable C++)
+  producing byte-identical stdout on a 118-program run-test corpus.
+- **JIT-backed REPL** (`matlabc -repl`) with a persistent workspace,
+  implicit display, operator-overloading / indexing / transpose all
+  auto-showing, plus `who` / `whos` / `clear`.
+- **Language Server** (`matlab-lsp`): diagnostics, goto-definition,
+  document outline. Works with Neovim, VS Code, Helix out of the
+  box.
+- **Source formatter** (`matlabc -format`) with attribute-aware
+  classdef output and idempotent round-trip.
+- **Debug aids**: `dbg(x)` source-located print, workspace
+  inspection, `#line` directives in emitted C/C++ so gdb / lldb
+  step the original `.m`.
+- **OOP**: `classdef` with single inheritance, static methods,
+  operator overloading, `Dependent` properties (`get.Prop` /
+  `set.Prop`), enumerations.
+- **File I/O**: text (`fopen` / `fgetl` / `fprintf`), binary
+  (`fread` / `fwrite`), plus a custom single-matrix `save` /
+  `load` format.
+- **Linear algebra**: LU, QR, Cholesky, pseudo-inverse, norm,
+  trace, kron, symmetric eig, SVD singular values — all pure-C,
+  no BLAS / LAPACK dependency.
+- **~3100-line single-file C runtime** that compiles stand-alone.
 
-**Biggest architectural asks:** OOP and sparse matrices. Both are
-multi-month projects and neither has started.
+**Biggest gaps to a "general-purpose MATLAB replacement":** struct
+arrays, typed integer runtime, complex numbers, 3-D vector slicing,
+full DAP, and MATLAB `.mat`-format compatibility. Each is tractable
+(Section 9 lays out the order); none is blocking any of the above.
+
+**Biggest architectural asks:** value-class copy semantics for
+OOP, sparse matrices, and true N-D (>3D) arrays. Each is multi-week
+work and their priority depends on which direction the project
+pushes next.
