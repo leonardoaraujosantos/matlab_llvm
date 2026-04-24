@@ -1915,12 +1915,29 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
   case NodeKind::UnaryOp: {
     auto &U = static_cast<const UnaryOpExpr &>(E);
     mlir::Value A = U.Operand ? lowerExpr(*U.Operand) : mlir::Value{};
-    return emitUnreg(unOpName(U.Op), {A}, RT, L);
+    /* Same refinement as BinaryOp/PostfixOp: a unary op on a matrix
+     * returns a matrix, on a scalar returns the same scalar type. */
+    auto MLPtr = mlir::LLVM::LLVMPointerType::get(&MCtx);
+    mlir::Type ResTy = RT;
+    if (mlir::isa<mlir::NoneType>(ResTy) && A) {
+      if (A.getType() == MLPtr) ResTy = MLPtr;
+      else if (mlir::isa<mlir::Float64Type, mlir::IntegerType>(A.getType()))
+        ResTy = A.getType();
+    }
+    return emitUnreg(unOpName(U.Op), {A}, ResTy, L);
   }
   case NodeKind::PostfixOp: {
     auto &P = static_cast<const PostfixOpExpr &>(E);
     mlir::Value A = P.Operand ? lowerExpr(*P.Operand) : mlir::Value{};
-    return emitUnreg(postfixName(P.Op), {A}, RT, L);
+    /* Eagerly refine: transpose of a matrix (ptr) is still a matrix.
+     * Sema leaves Ty=any for Var operands, so without this the
+     * result stays NoneType — which breaks downstream disp / store
+     * dispatch and the REPL implicit-display check. */
+    auto MLPtr = mlir::LLVM::LLVMPointerType::get(&MCtx);
+    mlir::Type ResTy = RT;
+    if (mlir::isa<mlir::NoneType>(ResTy) && A && A.getType() == MLPtr)
+      ResTy = MLPtr;
+    return emitUnreg(postfixName(P.Op), {A}, ResTy, L);
   }
   case NodeKind::RangeExpr: {
     auto &R = static_cast<const RangeExpr &>(E);
@@ -2372,7 +2389,25 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
         mlir::StringAttr::get(&MCtx, "nindices"),
         mlir::IntegerAttr::get(mlir::IntegerType::get(&MCtx, 64),
                                (int64_t)C.Args.size()));
-    return emitUnreg("matlab.subscript", Idx, RT, L, {NA});
+    /* Eagerly refine the subscript result type when Sema left it as
+     * None: scalar per-element access (all f64 indices) returns f64
+     * via matlab_subscript{1,2}_s; anything involving a colon or a
+     * slice returns a matrix (ptr). The rewriter in LowerTensorOps
+     * reads this result type to pick the fast f64 path vs. the
+     * generic slice path, so leaving it None would send scalar
+     * A(i,j) through the slower path and — relevant to the REPL —
+     * make the implicit-display check skip the result entirely. */
+    mlir::Type SubRT = RT;
+    if (mlir::isa<mlir::NoneType>(SubRT)) {
+      auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+      auto F64 = mlir::Float64Type::get(&MCtx);
+      bool AllScalarF64 = true;
+      /* Idx[0] is the base; indices start at 1. */
+      for (size_t i = 1; i < Idx.size(); ++i)
+        if (Idx[i].getType() != F64) { AllScalarF64 = false; break; }
+      SubRT = AllScalarF64 ? (mlir::Type)F64 : (mlir::Type)PtrTy;
+    }
+    return emitUnreg("matlab.subscript", Idx, SubRT, L, {NA});
   }
   case NodeKind::CellIndex: {
     /* C{i} read — routes to matlab_cell_get_f64 by default, or

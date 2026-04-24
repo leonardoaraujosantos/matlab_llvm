@@ -2805,6 +2805,8 @@ void matlab_global_set_f64(int32_t id, double v) {
  * on one line (matching MATLAB's default disp formatting). */
 void matlab_disp_mat(matlab_mat *A) {
     if (!A) return;
+    /* Matches MATLAB: disp of an empty matrix prints nothing. */
+    if (A->rows == 0 || A->cols == 0) return;
     if (A->rows == 1 && A->cols == 1) {
         pthread_mutex_lock(&matlab_io_mutex);
         printf("%g\n", A->data[0]);

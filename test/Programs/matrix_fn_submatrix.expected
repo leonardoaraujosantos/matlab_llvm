@@ -17,11 +17,14 @@ module {
     return
   }
   func.func @upper_left_2x2(%arg0: none {matlab.name = "A"}) -> none {
-    %cst = arith.constant 1.000000e+00 : f64
-    %cst_0 = arith.constant 2.000000e+00 : f64
-    %0 = "matlab.range"(%cst, %cst_0) {has_step = false} : (f64, f64) -> tensor<2xf64>
-    %1 = "matlab.range"(%cst, %cst_0) {has_step = false} : (f64, f64) -> tensor<2xf64>
-    %2 = "matlab.subscript"(%arg0, %0, %1) {nindices = 2 : i64} : (none, tensor<2xf64>, tensor<2xf64>) -> none
-    return %2 : none
+    %cst = arith.constant 2.000000e+00 : f64
+    %cst_0 = arith.constant 1.000000e+00 : f64
+    %0 = "matlab.alloc"() {name = "S"} : () -> none
+    %1 = "matlab.range"(%cst_0, %cst) {has_step = false} : (f64, f64) -> tensor<2xf64>
+    %2 = "matlab.range"(%cst_0, %cst) {has_step = false} : (f64, f64) -> tensor<2xf64>
+    %3 = "matlab.subscript"(%arg0, %1, %2) {nindices = 2 : i64} : (none, tensor<2xf64>, tensor<2xf64>) -> !llvm.ptr
+    "matlab.store"(%3, %0) : (!llvm.ptr, none) -> ()
+    %4 = "matlab.load"(%0) : (none) -> none
+    return %4 : none
   }
 }
