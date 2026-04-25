@@ -127,7 +127,10 @@ private:
                                        llvm::StringRef Raw);
 
   // --- Helpers -----------------------------------------------------------
-  void indent(int N) { for (int i = 0; i < N; ++i) OS << "  "; }
+  void indent(int N) {
+    flushPendingLine();
+    for (int i = 0; i < N; ++i) OS << "  ";
+  }
   std::string constStr(mlir::LLVM::GlobalOp G);
   void fail(llvm::StringRef Msg) {
     if (!Failed)
@@ -135,6 +138,9 @@ private:
     Failed = true;
   }
   void emitLineDirective(mlir::Location L, int Indent);
+  // Write any pending `#line` directive to OS. Called by indent() so a
+  // content line always flushes the line directive that precedes it.
+  void flushPendingLine();
   // Scan leading `%` comments in the source that precede `Line` (exclusive)
   // down to `AfterLine` (exclusive). Emit them as `// ...` lines at the
   // given indent. No-op when SM is null or the named file isn't in it.
@@ -320,6 +326,16 @@ private:
   // Most recent #line directive emitted — used to dedupe.
   std::string LastLineFile;
   int LastLineNum = -1;
+  // A `#line N "file"` is buffered as pending and only written when the
+  // next real content arrives (via indent() or an explicit flush). If a
+  // second emitLineDirective fires before the pending one is flushed,
+  // the new line replaces the old one — collapses the doubled-#line
+  // pattern that classdef ctors used to produce when a static-folded
+  // `if nargin == N` left an empty branch behind.
+  bool PendingLineActive = false;
+  int PendingLineLine = 0;
+  std::string PendingLineFile;
+  int PendingLineIndent = 0;
   // True at the very start of a block's body (immediately after its
   // opening `{`). Forward-jump blank lines are suppressed until the
   // first real statement has been emitted — otherwise every block would
@@ -1749,7 +1765,170 @@ void Emitter::emitCppMethod(mlir::func::FuncOp F,
     Names[Arg] = N;
     OS << cTypeOf(FT.getInput(i)) << " " << N;
   }
-  OS << ") {\n";
+  OS << ")";
+
+  // Constructor member-init-list shortcut. When the body is just a flat
+  // sequence of `obj_set_f64(this, "X", _, value)` calls (modulo the
+  // suppressed obj_new + return, plus inlined constants/addressofs),
+  // emit `: Field(arg), Field(arg) {}` instead of body-assignment form.
+  // For subclasses with inherited fields the leading stores can become
+  // a base-ctor call when their order matches the parent ctor's params.
+  if (IsCtor && Cpp) {
+    auto ClsIt = Classes.find(ClassName);
+    auto M = F->getParentOfType<mlir::ModuleOp>();
+    if (ClsIt != Classes.end()) {
+      llvm::StringSet<> Inh = inheritedProperties(ClassName);
+      llvm::SmallVector<std::pair<std::string, std::string>, 8> SetCalls;
+      // The frontend wraps ctor bodies in `if nargin == N` checks; with
+      // `nargin` baked in by the polymorphic dispatch the condition
+      // folds to a literal true. Recognise that shape so the analyser
+      // can recurse into the live branch.
+      auto isStaticTrue = [&](mlir::Value V) -> bool {
+        if (auto C = V.getDefiningOp<mlir::arith::ConstantOp>())
+          if (auto IA = mlir::dyn_cast<mlir::IntegerAttr>(C.getValue()))
+            return IA.getValue().getZExtValue() != 0;
+        if (auto C = V.getDefiningOp<mlir::LLVM::ConstantOp>())
+          if (auto IA = mlir::dyn_cast<mlir::IntegerAttr>(C.getValue()))
+            return IA.getValue().getZExtValue() != 0;
+        if (auto Cmp = V.getDefiningOp<mlir::arith::CmpFOp>()) {
+          auto getLit = [](mlir::Value W, double &Dst) {
+            auto C = W.getDefiningOp<mlir::arith::ConstantOp>();
+            if (!C) return false;
+            auto FA = mlir::dyn_cast<mlir::FloatAttr>(C.getValue());
+            if (!FA) return false;
+            Dst = FA.getValueAsDouble();
+            return true;
+          };
+          double L, R;
+          if (!getLit(Cmp.getLhs(), L) || !getLit(Cmp.getRhs(), R))
+            return false;
+          using P = mlir::arith::CmpFPredicate;
+          switch (Cmp.getPredicate()) {
+            case P::OEQ: case P::UEQ: return L == R;
+            case P::ONE: case P::UNE: return L != R;
+            case P::OLT: case P::ULT: return L <  R;
+            case P::OLE: case P::ULE: return L <= R;
+            case P::OGT: case P::UGT: return L >  R;
+            case P::OGE: case P::UGE: return L >= R;
+            default: return false;
+          }
+        }
+        return false;
+      };
+
+      std::function<bool(mlir::Block &)> analyse =
+          [&](mlir::Block &Blk) -> bool {
+        for (auto &Op2 : Blk.getOperations()) {
+          if (SuppressedOps.count(&Op2)) continue;
+          if (InlinedOps.count(&Op2)) continue;
+          if (mlir::isa<mlir::arith::ConstantOp, mlir::LLVM::ConstantOp,
+                        mlir::LLVM::ZeroOp, mlir::LLVM::AddressOfOp>(Op2))
+            continue;
+          if (mlir::isa<mlir::arith::CmpFOp, mlir::arith::CmpIOp>(Op2))
+            continue;  // condition computation for the static-folded if
+          if (auto R = mlir::dyn_cast<mlir::func::ReturnOp>(Op2)) {
+            if (R.getNumOperands() == 0) continue;
+            return false;
+          }
+          if (auto R = mlir::dyn_cast<mlir::LLVM::ReturnOp>(Op2)) {
+            if (R.getNumOperands() == 0) continue;
+            return false;
+          }
+          if (auto Y = mlir::dyn_cast<mlir::scf::YieldOp>(Op2)) {
+            if (Y.getNumOperands() == 0) continue;
+            return false;
+          }
+          if (auto If = mlir::dyn_cast<mlir::scf::IfOp>(&Op2)) {
+            if (!isStaticTrue(If.getCondition())) return false;
+            if (!analyse(If.getThenRegion().front())) return false;
+            continue;
+          }
+          if (auto C = mlir::dyn_cast<mlir::LLVM::CallOp>(&Op2)) {
+            if (!C.getCallee()) return false;
+            llvm::StringRef N = *C.getCallee();
+            // matlab.nargin lowering: a const that's already inlined.
+            if (N == "matlab_obj_set_f64" && C.getNumOperands() >= 4 &&
+                C.getOperand(0) == ClassMethodSelf) {
+              auto Lit = getStringGlobalLit(C.getOperand(1), M);
+              if (!Lit || !isValidCppIdentifier(*Lit)) return false;
+              SetCalls.push_back({*Lit, stmtExpr(C.getOperand(3))});
+              continue;
+            }
+            return false;
+          }
+          // matlab.nargin op — surfaces as a builtin callop; covered above.
+          // Any other surviving op disqualifies the init-list shortcut.
+          return false;
+        }
+        return true;
+      };
+
+      bool Clean = analyse(Entry);
+      if (Clean && !SetCalls.empty()) {
+        // Split into base-ctor inits and own inits. The leading stores
+        // whose field names are inherited go through the parent's ctor
+        // call when their order matches the parent ctor's declared
+        // parameter order; everything else lands in the own-init list.
+        std::string BaseCall;
+        llvm::SmallVector<std::pair<std::string, std::string>, 4> OwnInits;
+        unsigned NextStore = 0;
+        if (!ClsIt->second.Super.empty() && !Inh.empty()) {
+          auto SupIt = Classes.find(ClsIt->second.Super);
+          if (SupIt != Classes.end() && !SupIt->second.Ctors.empty()) {
+            auto SupCtor = SupIt->second.Ctors.front();
+            auto SupFT = SupCtor.getFunctionType();
+            unsigned NParams = SupFT.getNumInputs();
+            // The first NParams stores must match the parent ctor's
+            // properties in declaration order. The simplest mapping
+            // assumes the parent's ctor stores them in the order its
+            // properties are declared.
+            if (SetCalls.size() >= NParams && NParams > 0 &&
+                SupIt->second.Properties.size() >= NParams) {
+              bool Match = true;
+              for (unsigned i = 0; i < NParams; ++i) {
+                if (SetCalls[i].first != SupIt->second.Properties[i]) {
+                  Match = false; break;
+                }
+              }
+              if (Match) {
+                BaseCall = ClsIt->second.Super + "(";
+                for (unsigned i = 0; i < NParams; ++i) {
+                  if (i) BaseCall += ", ";
+                  BaseCall += SetCalls[i].second;
+                }
+                BaseCall += ")";
+                NextStore = NParams;
+              }
+            }
+          }
+        }
+        // The remaining stores must all set own (non-inherited)
+        // properties — otherwise we'd shadow a base-class field.
+        bool AllOwn = true;
+        for (unsigned i = NextStore; i < SetCalls.size(); ++i) {
+          if (Inh.count(SetCalls[i].first)) { AllOwn = false; break; }
+          OwnInits.push_back(SetCalls[i]);
+        }
+        if (AllOwn) {
+          OS << " : ";
+          bool First = true;
+          if (!BaseCall.empty()) { OS << BaseCall; First = false; }
+          for (auto &P : OwnInits) {
+            if (!First) OS << ", ";
+            First = false;
+            OS << P.first << "(" << P.second << ")";
+          }
+          OS << " {}\n";
+          InClassMethodBody = false;
+          ClassMethodSelf = mlir::Value();
+          ClassMethodClassName.clear();
+          return;
+        }
+      }
+    }
+  }
+
+  OS << " {\n";
 
   // Trivial body? Empty / just-return / ctor with only obj_new+return.
   bool BodyIsTrivial = true;
@@ -1962,8 +2141,21 @@ void Emitter::emitLineDirective(mlir::Location L, int Indent) {
   // backward motion is suppressed — the prior `#line` is still in
   // effect for those lines.
   if (SameFile && !ForwardJump) return;
-  indent(Indent);
-  OS << "#line " << Line << " \"" << File << "\"\n";
+  // Buffer instead of writing immediately. flushPendingLine() in
+  // indent() (the entry point for every content emit) writes it just
+  // before the actual statement; back-to-back line directives with no
+  // statement between collapse to the most recent one.
+  PendingLineActive = true;
+  PendingLineLine = Line;
+  PendingLineFile = File;
+  PendingLineIndent = Indent;
+}
+
+void Emitter::flushPendingLine() {
+  if (!PendingLineActive) return;
+  for (int i = 0; i < PendingLineIndent; ++i) OS << "  ";
+  OS << "#line " << PendingLineLine << " \"" << PendingLineFile << "\"\n";
+  PendingLineActive = false;
 }
 
 std::string Emitter::cTypeOf(mlir::Type T) {
@@ -2049,7 +2241,7 @@ void Emitter::emitGlobal(mlir::LLVM::GlobalOp G) {
 void Emitter::emitProlog() {
   OS << "// Generated by matlabc " << (Cpp ? "-emit-cpp" : "-emit-c")
      << ". Do not edit.\n";
-  OS << "#include <stdint.h>\n";
+  OS << (Cpp ? "#include <cstdint>\n" : "#include <stdint.h>\n");
   if (!Cpp) OS << "#include <stdbool.h>\n";
   // IO-substitution headers. When the module has no parfor (no mutex
   // coordination needed) we can collapse the matlab_disp_* runtime calls
@@ -2082,7 +2274,28 @@ void Emitter::precomputeModuleProperties(mlir::ModuleOp M) {
     if (!Callee) return;
     llvm::StringRef Name = *Callee;
     bool Substituted = false;
-    if (!HasParfor) {
+    // C++ classdef rewrites: obj_get/set_f64 inside a class method
+    // becomes direct member access; obj_new in a ctor is suppressed.
+    // Outside a class method, obj_get/set on a tracked class instance
+    // also rewrites. None of these survive to the runtime, so they
+    // shouldn't pull in `extern matlab_obj_*` prototypes.
+    if (Cpp) {
+      auto inClassMethod = [&]() -> bool {
+        auto P = C->getParentOfType<mlir::func::FuncOp>();
+        return P && ClassMethodFuncs.count(P.getSymName());
+      };
+      if (Name == "matlab_obj_new" && inClassMethod())
+        Substituted = true;
+      if ((Name == "matlab_obj_get_f64" || Name == "matlab_obj_set_f64") &&
+          C.getNumOperands() >= 2) {
+        if (inClassMethod()) {
+          Substituted = true;
+        } else if (!classTypeOf(C.getOperand(0)).empty()) {
+          Substituted = true;
+        }
+      }
+    }
+    if (!HasParfor && !Substituted) {
       if (Name == "matlab_disp_str" && C.getNumOperands() >= 1) {
         // Literal-addressof: first operand produced by llvm.mlir.addressof
         // of a global whose value is a StringAttr.
@@ -2241,15 +2454,18 @@ bool Emitter::tryEmitIOSubstitution(mlir::LLVM::CallOp Call, int Indent) {
 // ---------------------------------------------------------------------------
 
 bool Emitter::run(mlir::ModuleOp M) {
-  precomputeModuleProperties(M);
   // Pre-pass: collect classdef methods into Classes so the C++ class
   // block emitter has the property list and ClassMethodFuncs is
   // populated when the free-function pass tries to skip class methods.
+  // Runs before precomputeModuleProperties so the live-runtime
+  // detection knows which obj_* / class-method calls will be rewritten
+  // and shouldn't pull in extern prototypes for them.
   collectClassdefs(M);
   // Tag every SSA value that holds a class instance (ctor result,
   // load from a class-typed alloca, etc.) so call-site rewrites + the
   // alloca / variable-type emit can resolve to the right class.
   if (Cpp) populateClassValueTypes(M);
+  precomputeModuleProperties(M);
   emitProlog();
   // Anything already in UsedNames after the prolog is module-scope
   // (function names, runtime externs, globals); freeze that snapshot so
@@ -2347,6 +2563,10 @@ bool Emitter::run(mlir::ModuleOp M) {
         if (F.getBody().empty()) continue;
         UsedNames.insert(F.getSymName().str());
         if (F.getSymName() == "main") continue;
+        // C++ class methods are emitted inside the class block — the
+        // flat function never gets a definition, so its forward decl
+        // would dangle.
+        if (Cpp && ClassMethodFuncs.count(F.getSymName())) continue;
         auto FT = F.getFunctionType();
         std::string RetTy = FT.getNumResults() == 0
                                 ? std::string("void")
@@ -2676,24 +2896,26 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
       }
     }
     indent(Indent);
-    if (Call.getNumResults() == 1) {
-      std::string N = this->name(Call.getResult());
-      std::string Ty = CppAuto ? "auto" : cTypeOfValue(Call.getResult());
-      // If the call result is a class-typed value (ctor result,
-      // tracked via ClassValueType after the rewrite below), declare
-      // the local with the class type instead of `void*`.
+    // For class-typed call results, try the rewrites first so we can
+    // emit direct-init syntax (`Class name(args);`) when the rewritten
+    // expression matches a `Class(args)` ctor call.
+    bool BoundResult = (Call.getNumResults() == 1);
+    std::string ResultName, ResultTy;
+    if (BoundResult) {
+      ResultName = this->name(Call.getResult());
+      ResultTy = CppAuto ? "auto" : cTypeOfValue(Call.getResult());
       if (auto CT = classTypeOf(Call.getResult()); !CT.empty())
-        Ty = CT.str();
-      OS << Ty << " " << N << " = ";
+        ResultTy = CT.str();
     }
     if (auto Callee = Call.getCallee()) {
       // Class-field read with binding: `name = obj_get_f64(obj, "X", _)`.
       // The inline-expression path is handled by buildInlineExpr; this
       // branch covers the rare non-inlined case.
-      if (*Callee == "matlab_obj_get_f64" && Call.getNumResults() == 1) {
+      if (*Callee == "matlab_obj_get_f64" && BoundResult) {
         std::string Rewrite;
         if (tryRewriteObjGet(Call, Rewrite)) {
-          OS << Rewrite << ";\n";
+          OS << ResultTy << " " << ResultName << " = "
+             << Rewrite << ";\n";
           return;
         }
       }
@@ -2703,10 +2925,29 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
       {
         std::string Rewrite;
         if (tryRewriteAsClassCall(*Callee, Call.getOperands(), Rewrite)) {
-          OS << Rewrite << ";\n";
+          if (BoundResult) {
+            // Direct-init: `Class name(args)` instead of
+            // `Class name = Class(args)` when the rewrite is exactly
+            // a ctor call with the same type as the binding.
+            std::string CtorPrefix = ResultTy + "(";
+            if (Cpp && Rewrite.size() > CtorPrefix.size() &&
+                Rewrite.compare(0, CtorPrefix.size(), CtorPrefix) == 0 &&
+                Rewrite.back() == ')') {
+              std::string Args = Rewrite.substr(
+                  CtorPrefix.size(),
+                  Rewrite.size() - CtorPrefix.size() - 1);
+              OS << ResultTy << " " << ResultName << "(" << Args << ");\n";
+            } else {
+              OS << ResultTy << " " << ResultName << " = "
+                 << Rewrite << ";\n";
+            }
+          } else {
+            OS << Rewrite << ";\n";
+          }
           return;
         }
       }
+      if (BoundResult) OS << ResultTy << " " << ResultName << " = ";
       OS << Callee->str() << "(";
       for (unsigned i = 0; i < Call.getNumOperands(); ++i) {
         if (i) OS << ", ";
@@ -2720,6 +2961,7 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
       // the function-pointer cast wrapping and emit a plain direct call:
       // `__anon_0(5.0, 3.0)` reads exactly like a hand-written C call,
       // unlike `((double(*)(double, double))(void*)__anon_0)(5.0, 3.0)`.
+      if (BoundResult) OS << ResultTy << " " << ResultName << " = ";
       auto AddrOf =
           Call.getOperand(0).getDefiningOp<mlir::LLVM::AddressOfOp>();
       if (AddrOf) {
@@ -2753,21 +2995,38 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
   }
   if (auto Call = mlir::dyn_cast<mlir::func::CallOp>(Op)) {
     indent(Indent);
-    if (Call.getNumResults() == 1) {
-      std::string N = this->name(Call.getResult(0));
-      std::string Ty = CppAuto ? "auto" : cTypeOfValue(Call.getResult(0));
+    bool BoundResult = (Call.getNumResults() == 1);
+    std::string ResultName, ResultTy;
+    if (BoundResult) {
+      ResultName = this->name(Call.getResult(0));
+      ResultTy = CppAuto ? "auto" : cTypeOfValue(Call.getResult(0));
       if (auto CT = classTypeOf(Call.getResult(0)); !CT.empty())
-        Ty = CT.str();
-      OS << Ty << " " << N << " = ";
+        ResultTy = CT.str();
     }
     {
       std::string Rewrite;
       if (tryRewriteAsClassCall(Call.getCallee(), Call.getOperands(),
                                  Rewrite)) {
-        OS << Rewrite << ";\n";
+        if (BoundResult) {
+          std::string CtorPrefix = ResultTy + "(";
+          if (Cpp && Rewrite.size() > CtorPrefix.size() &&
+              Rewrite.compare(0, CtorPrefix.size(), CtorPrefix) == 0 &&
+              Rewrite.back() == ')') {
+            std::string Args = Rewrite.substr(
+                CtorPrefix.size(),
+                Rewrite.size() - CtorPrefix.size() - 1);
+            OS << ResultTy << " " << ResultName << "(" << Args << ");\n";
+          } else {
+            OS << ResultTy << " " << ResultName << " = "
+               << Rewrite << ";\n";
+          }
+        } else {
+          OS << Rewrite << ";\n";
+        }
         return;
       }
     }
+    if (BoundResult) OS << ResultTy << " " << ResultName << " = ";
     OS << Call.getCallee().str() << "(";
     for (unsigned i = 0; i < Call.getNumOperands(); ++i) {
       if (i) OS << ", ";
@@ -3167,8 +3426,21 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
           Ty = It->second;
         else if (auto CT = classTypeOf(S.getValue()); !CT.empty())
           Ty = CT.str();
-        OS << Ty << " " << DirectSlots[AddrDef] << " = "
-           << this->stmtExpr(S.getValue()) << ";\n";
+        std::string Expr = this->stmtExpr(S.getValue());
+        // Direct-init syntax: when the RHS expression is exactly a
+        // `Ty(args)` ctor call, rewrite to `Ty name(args);` for
+        // idiomatic C++ — drops the visible repeated type name.
+        std::string CtorPrefix = Ty + "(";
+        if (Cpp && Expr.size() > CtorPrefix.size() &&
+            Expr.compare(0, CtorPrefix.size(), CtorPrefix) == 0 &&
+            Expr.back() == ')') {
+          std::string Args = Expr.substr(CtorPrefix.size(),
+                                          Expr.size() - CtorPrefix.size() - 1);
+          OS << Ty << " " << DirectSlots[AddrDef] << "(" << Args << ");\n";
+        } else {
+          OS << Ty << " " << DirectSlots[AddrDef] << " = "
+             << Expr << ";\n";
+        }
       } else {
         OS << DirectSlots[AddrDef] << " = "
            << this->stmtExpr(S.getValue()) << ";\n";
