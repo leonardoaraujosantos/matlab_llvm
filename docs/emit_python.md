@@ -1,8 +1,14 @@
 # Python Emission
 
-`-emit-python` is an implemented backend that lowers the shared MLIR
-pipeline into runnable Python source. It is the most experimental codegen
-path in the repository, but it is no longer a plan-only design.
+`-emit-python` lowers the shared MLIR pipeline into runnable Python
+source. The emitter aims for a near 1:1 translation of the MATLAB
+input — MATLAB `for i = 1:N` becomes Python `for i in range(1, N+1):`,
+matrix arithmetic uses inline numpy operators (`A @ B`, `A.T`,
+`np.linalg.inv(A)`), classdef code becomes proper Python `class` blocks
+with `__init__` / `@property` / `@staticmethod` / dunder operator
+overloads, and string-literal disp calls collapse to bare `print(...)`.
+The `matlab_runtime` import only appears when the body actually
+references the shim.
 
 ## Scope
 
@@ -12,9 +18,11 @@ Driver flag:
 |---|---|
 | `-emit-python` | Self-contained `.py` source |
 
-The generated file imports [`runtime/matlab_runtime.py`](../runtime/matlab_runtime.py),
-which is a NumPy-backed runtime shim. No LLVM toolchain or C compiler is
-needed at runtime:
+When the emitted body references the shim it imports
+[`runtime/matlab_runtime.py`](../runtime/matlab_runtime.py),
+a NumPy-backed runtime helper module. Programs that only do numpy /
+arithmetic / class work skip the runtime import entirely. No LLVM
+toolchain or C compiler is needed at runtime:
 
 ```bash
 build/matlabc -emit-python foo.m > foo.py
@@ -78,7 +86,7 @@ to `import matlab_runtime as rt`.
 | `scf.while` (general) | `while cond: <body>` — or `while True: ...; if not cond: break; ...` when the before-region has work |
 | `func.func @foo(%a, %b) -> T` | `def foo(a, b):` (param names taken from `matlab.name`); `pass` for empty bodies |
 | `func.call @foo(%a)` | `foo(a)` (inlined into the use site when single-use) |
-| `llvm.call @matlab_matmul_mm(%a, %b)` | `rt.matmul_mm(a, b)` (every `matlab_*` symbol drops its prefix) |
+| `llvm.call @matlab_<helper>(...)` | `rt.<helper>(...)` (every `matlab_*` symbol drops its prefix). For matrix builtins the call is rewritten to inline numpy / Python operators — see the **Numpy rewrite for matrix builtins** note below. |
 | `llvm.call @matlab_disp_str(%p, %len)` | `rt.disp_str(...)` — the `(ptr, length)` C ABI tail is dropped, since Python strings carry their own length |
 | `llvm.call %fp(%a)` (indirect) | `v0 = fp(a)` |
 | `llvm.alloca` (scalar slot) | skipped — load/store emit as plain Python `name = ...` |
@@ -203,31 +211,38 @@ Emitter behavior worth knowing:
 
 ## Runtime Model
 
-The backend relies on a Python runtime shim rather than trying to inline
-all semantics directly into emitted code.
+The backend pairs the emitted source with a NumPy-backed runtime shim
+([`runtime/matlab_runtime.py`](../runtime/matlab_runtime.py)) that
+implements MATLAB-semantics helpers the emit can't express inline. The
+emitter's job is to route around the shim wherever a clean Python /
+numpy idiom exists, and to call into the shim only for behaviour that
+needs MATLAB-specific semantics (column-major reductions, MATLAB-style
+slicing, string-with-length helpers, parfor dispatch, handles, etc.).
+Many programs end up importing only `numpy` (or nothing at all — see
+the conditional-import note above).
 
-Examples from [`runtime/matlab_runtime.py`](../runtime/matlab_runtime.py):
+Representative actual signatures:
 
 ```python
-import numpy as np
+def disp_f64(v):             ...      # matches MATLAB %g formatting
+def disp_mat(A):             ...      # right-aligned %7g columns (C-lane only)
+def fprintf_f64(fmt, *args): ...      # %d / %f / %g / %s expansion
+def slice2(A, rows, cols):   ...      # 1-indexed row/col selection
+def sum(A):                  ...      # column reduction for 2-D matrices
+def frange(start, end, step):...      # MATLAB-style for-loop generator
 
-def zeros(n, m=None):      return np.zeros((n, m) if m else (n,))
-def ones(n, m=None):       return np.ones((n, m) if m else (n,))
-def matmul(a, b):          return a @ b
-def transpose(a):          return a.T
-def inv(a):                return np.linalg.inv(a)
-def disp(x):               print(x)
-def fprintf(fmt, *args):   print(fmt % args, end="")
-def length(a):             return max(a.shape) if a.ndim else 1
-def size(a, dim=None):     return a.shape[dim-1] if dim else a.shape
+def obj_new(*_):             ...      # allocates a `_MatObj` instance
+def obj_set_f64(o, name, ...): ...    # routes through setattr() on _MatObj
+def obj_get_f64(o, name, ...): ...    # routes through getattr() on _MatObj
+def parfor_dispatch(start, step, end, body, state): ...
 ```
 
-The runtime covers:
-- matrix creation and arithmetic through NumPy
-- display and formatting compatibility helpers
-- structs and cells via Python containers
-- file and string utilities
-- portions of `parfor`, handles, and runtime error plumbing
+Coverage:
+- matrix creation, arithmetic, and decompositions through NumPy
+- MATLAB-formatted display and `fprintf` printf-spec expansion
+- structs, cells, classdef objects via Python containers / attributes
+- file I/O and string-handling helpers
+- `parfor` reductions, function handles, and runtime error plumbing
 
 ## Testing
 
@@ -298,26 +313,28 @@ def traffic_action(color, is_emergency):
 ```
 
 A third example, `examples/matrix_mult.m`, showing the numpy rewrite —
-no `matlab_runtime` import is needed at all because matrix display also
-collapses to plain `print(M)`:
+no `matlab_runtime` import is needed at all because matrix display
+also collapses to plain `print(M)`. User-source variable names (`A`,
+`B`) propagate through the slot-promotion pipeline, so the emitted
+identifiers match the MATLAB:
 
 ```python
 import numpy as np
 
 slot = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 10.0]
-v0 = np.array(slot).reshape(3, 3)
+A = np.array(slot).reshape(3, 3)
 
 slot_2 = [1.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 3.0]
-v1 = np.array(slot_2).reshape(3, 3)
+B = np.array(slot_2).reshape(3, 3)
 
 print("A * B =")
-print(v0 @ v1)
+print(A @ B)
 
 print("A .* B =")
-print(v0 * v1)
+print(A * B)
 
 print("A' =")
-print(v0.T)
+print(A.T)
 ```
 
 A fourth example, `examples/bank_account.m`, showing the full
