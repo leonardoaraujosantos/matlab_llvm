@@ -102,6 +102,34 @@ Emitter behavior worth knowing:
   `import numpy as np` lines are added only when the emitted body
   actually references those modules. A pure-arithmetic program like
   `examples/factorial.m` emits zero `import` lines.
+- **Numpy rewrite for matrix builtins**: the matrix subset of the
+  runtime ABI is emitted as inline numpy / Python-operator expressions
+  rather than `rt.<helper>` calls. Specifically:
+
+  | Runtime call | Emitted as |
+  |---|---|
+  | `matlab_matmul_mm(A, B)`  | `A @ B`           |
+  | `matlab_add_mm/ms/sm`     | `A + B`           |
+  | `matlab_sub_mm/ms/sm`     | `A - B`           |
+  | `matlab_emul_mm/ms/sm`    | `A * B`           |
+  | `matlab_ediv_mm/ms/sm`    | `A / B`           |
+  | `matlab_transpose(A)`     | `A.T`             |
+  | `matlab_inv(A)`           | `np.linalg.inv(A)`     |
+  | `matlab_det(A)`           | `np.linalg.det(A)`     |
+  | `matlab_mldivide_mm(A, B)`| `np.linalg.solve(A, B)`|
+  | `matlab_norm(A)`          | `np.linalg.norm(A)`    |
+  | `matlab_trace(A)`         | `np.trace(A)`          |
+  | `matlab_zeros(m[, n])`    | `np.zeros((m, n))`     |
+  | `matlab_ones(m[, n])`     | `np.ones((m, n))`      |
+  | `matlab_eye(n[, m])`      | `np.eye(n)` / `np.eye(n, m)` |
+  | `matlab_mat_from_buf(buf, m, n)` | `np.array(buf).reshape(m, n)` |
+  | `matlab_sqrt_m / exp_m / sin_m / …` | `np.sqrt(A)` / `np.exp(A)` / `np.sin(A)` / … |
+
+  MATLAB-semantics helpers (`slice1` / `slice2`, MATLAB-style
+  column-major reductions like `sum` / `mean` on a 2-D matrix,
+  `disp_mat`'s right-aligned `%7g` formatting, `eig` / `lu` / `qr` /
+  `svd` whose return shapes don't map 1:1 to numpy) stay on the
+  runtime path — they don't have a clean one-line numpy equivalent.
 - **For loops**: `scf.while` ops produced by `LowerSeqLoops::lowerForOp` collapse
   to native `for i in range(...):`. When init/end/step are integer literals,
   Python's `range` is used; otherwise the `rt.frange(start, end, step)` generator
@@ -235,6 +263,30 @@ def traffic_action(color, is_emergency):
     else:
         a = 3.0 if color == 3.0 else 0.0
     return a
+```
+
+A third example, `examples/matrix_mult.m`, showing the numpy rewrite —
+the only remaining `rt.` references are `disp_mat`, which is kept for
+MATLAB's right-aligned matrix-cell formatting:
+
+```python
+import matlab_runtime as rt
+import numpy as np
+
+slot = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 10.0]
+v0 = np.array(slot).reshape(3, 3)
+
+slot_2 = [1.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 3.0]
+v1 = np.array(slot_2).reshape(3, 3)
+
+print("A * B =")
+rt.disp_mat(v0 @ v1)
+
+print("A .* B =")
+rt.disp_mat(v0 * v1)
+
+print("A' =")
+rt.disp_mat(v0.T)
 ```
 
 And from `examples/bank_account.m`, showing pure-read inlining and the

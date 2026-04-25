@@ -151,6 +151,12 @@ private:
   // Returns 1 for static-true, 0 for static-false, -1 for "not foldable".
   static int evalConstCond(mlir::Value V);
 
+  // Try to rewrite a `matlab_<suffix>` call as an inline numpy / Python
+  // operator expression. Returns true on success and writes the
+  // replacement into Out (with parens around binary forms so the result
+  // composes cleanly inside other expressions).
+  bool tryRewriteAsNumpy(mlir::LLVM::CallOp C, std::string &Out);
+
   std::ostream &OS;
   bool NoLine;
   const matlab::SourceManager *SM;
@@ -664,6 +670,9 @@ bool Emitter::buildInlineExpr(mlir::Operation &Op, std::string &Expr) {
   }
   if (auto C = dyn_cast<LLVM::CallOp>(Op)) {
     if (!C.getCallee()) return false;
+    // Prefer the numpy / Python-operator rewrite for matrix builtins —
+    // it reads as the natural translation instead of a runtime trampoline.
+    if (tryRewriteAsNumpy(C, Expr)) return true;
     std::string Callee = remapRuntimeCallee(*C.getCallee());
     unsigned LengthIdx = ~0u;
     bool DropLen = false;
@@ -987,6 +996,142 @@ bool Emitter::calleeHasDroppableLengthArg(llvm::StringRef Suffix,
   // 2nd / 3rd operands; the Python runtime ignores name_len.
   if (Suffix == "obj_get_f64")   { LengthArgIdx = 2; return true; }
   if (Suffix == "obj_set_f64")   { LengthArgIdx = 2; return true; }
+  return false;
+}
+
+// ---------------------------------------------------------------------------
+// Numpy rewrite — matrix calls collapse to inline numpy expressions
+// ---------------------------------------------------------------------------
+//
+// The runtime shim wraps everything in `_m(...)` to coerce into ndarrays
+// before falling through to numpy under the hood. For programs whose
+// only matrix consumers are themselves rewritten (or `rt.disp_mat` /
+// `rt.slice*` / etc., which all accept ndarrays directly), we can skip
+// the round-trip and emit the numpy expression at the call site. The
+// generated source then reads as the natural numpy translation:
+//
+//     A @ B            instead of  rt.matmul_mm(A, B)
+//     A * B            instead of  rt.emul_mm(A, B)
+//     A.T              instead of  rt.transpose(A)
+//     np.linalg.inv(A) instead of  rt.inv(A)
+//     np.zeros((3, 3)) instead of  rt.zeros(3.0, 3.0)
+//
+// We deliberately keep MATLAB-semantics helpers (slice2, sum / mean
+// with column-major reductions, disp_mat formatting, etc.) on the
+// runtime path — those don't have a one-line numpy equivalent.
+bool Emitter::tryRewriteAsNumpy(mlir::LLVM::CallOp C, std::string &Out) {
+  if (!C.getCallee()) return false;
+  llvm::StringRef Full = *C.getCallee();
+  if (!Full.starts_with("matlab_")) return false;
+  llvm::StringRef Suf = Full.drop_front(strlen("matlab_"));
+
+  auto opnd = [&](unsigned i) {
+    return dropOuterParens(this->exprFor(C.getOperand(i)));
+  };
+  auto wrapped = [&](unsigned i) {
+    return this->exprFor(C.getOperand(i));
+  };
+  // Format an integer-typed dimension argument: a constant integer
+  // literal becomes a bare `3`; anything else is wrapped in `int(...)`
+  // so it can index numpy shape tuples without a TypeError.
+  auto fmtIntDim = [&](mlir::Value V) -> std::string {
+    long long I;
+    if (tryEvalIntLiteral(V, I)) return std::to_string(I);
+    return "int(" + dropOuterParens(this->exprFor(V)) + ")";
+  };
+  auto bin = [&](const char *Op) {
+    Out = "(" + wrapped(0) + " " + Op + " " + wrapped(1) + ")";
+    return true;
+  };
+
+  // --- Element-wise / matrix arithmetic -----------------------------
+  if (C.getNumOperands() == 2) {
+    if (Suf == "matmul_mm") return bin("@");
+    if (Suf == "add_mm" || Suf == "add_ms" || Suf == "add_sm") return bin("+");
+    if (Suf == "sub_mm" || Suf == "sub_ms" || Suf == "sub_sm") return bin("-");
+    if (Suf == "emul_mm" || Suf == "emul_ms" || Suf == "emul_sm") return bin("*");
+    if (Suf == "ediv_mm" || Suf == "ediv_ms" || Suf == "ediv_sm") return bin("/");
+  }
+
+  // --- Construction --------------------------------------------------
+  if (Suf == "mat_from_buf" && C.getNumOperands() == 3) {
+    Out = "np.array(" + opnd(0) + ").reshape(" +
+          fmtIntDim(C.getOperand(1)) + ", " +
+          fmtIntDim(C.getOperand(2)) + ")";
+    return true;
+  }
+  if (Suf == "mat_from_scalar" && C.getNumOperands() == 1) {
+    Out = "np.array([[" + opnd(0) + "]])";
+    return true;
+  }
+  if (Suf == "zeros") {
+    if (C.getNumOperands() == 1) {
+      std::string D = fmtIntDim(C.getOperand(0));
+      Out = "np.zeros((" + D + ", " + D + "))";  // MATLAB zeros(n) is n×n.
+      return true;
+    }
+    if (C.getNumOperands() == 2) {
+      Out = "np.zeros((" + fmtIntDim(C.getOperand(0)) + ", " +
+            fmtIntDim(C.getOperand(1)) + "))";
+      return true;
+    }
+  }
+  if (Suf == "ones") {
+    if (C.getNumOperands() == 1) {
+      std::string D = fmtIntDim(C.getOperand(0));
+      Out = "np.ones((" + D + ", " + D + "))";
+      return true;
+    }
+    if (C.getNumOperands() == 2) {
+      Out = "np.ones((" + fmtIntDim(C.getOperand(0)) + ", " +
+            fmtIntDim(C.getOperand(1)) + "))";
+      return true;
+    }
+  }
+  if (Suf == "eye") {
+    if (C.getNumOperands() == 1) {
+      Out = "np.eye(" + fmtIntDim(C.getOperand(0)) + ")";
+      return true;
+    }
+    if (C.getNumOperands() == 2) {
+      Out = "np.eye(" + fmtIntDim(C.getOperand(0)) + ", " +
+            fmtIntDim(C.getOperand(1)) + ")";
+      return true;
+    }
+  }
+
+  // --- Linear algebra ------------------------------------------------
+  if (C.getNumOperands() == 1) {
+    if (Suf == "transpose") {
+      Out = wrapped(0) + ".T";
+      return true;
+    }
+    if (Suf == "inv")    { Out = "np.linalg.inv("  + opnd(0) + ")"; return true; }
+    if (Suf == "det")    { Out = "np.linalg.det("  + opnd(0) + ")"; return true; }
+    if (Suf == "norm")   { Out = "np.linalg.norm(" + opnd(0) + ")"; return true; }
+    if (Suf == "trace")  { Out = "np.trace("       + opnd(0) + ")"; return true; }
+  }
+  if (Suf == "mldivide_mm" && C.getNumOperands() == 2) {
+    Out = "np.linalg.solve(" + opnd(0) + ", " + opnd(1) + ")";
+    return true;
+  }
+
+  // --- Element-wise math (matrix variants) --------------------------
+  static constexpr struct { const char *Suf; const char *Np; } UnaryMatNp[] = {
+    {"sqrt_m", "np.sqrt"},   {"exp_m", "np.exp"},     {"log_m", "np.log"},
+    {"log2_m", "np.log2"},   {"log10_m", "np.log10"},
+    {"sin_m",  "np.sin"},    {"cos_m", "np.cos"},     {"tan_m", "np.tan"},
+    {"asin_m", "np.arcsin"}, {"acos_m", "np.arccos"}, {"atan_m", "np.arctan"},
+    {"sinh_m", "np.sinh"},   {"cosh_m", "np.cosh"},   {"tanh_m", "np.tanh"},
+    {"abs_m",  "np.abs"},    {"sign_m", "np.sign"},
+    {"floor_m","np.floor"},  {"ceil_m", "np.ceil"},   {"round_m", "np.round"},
+  };
+  for (auto &E : UnaryMatNp) {
+    if (Suf == E.Suf && C.getNumOperands() == 1) {
+      Out = std::string(E.Np) + "(" + opnd(0) + ")";
+      return true;
+    }
+  }
   return false;
 }
 
@@ -1628,6 +1773,15 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
         OS << "print(f'{" << this->stmtExpr(Call.getOperand(0))
            << ":g}')\n";
         return;
+      }
+      // Numpy / operator rewrite for matrix builtins — emit the inline
+      // expression directly when the call binds a result.
+      {
+        std::string Rewrite;
+        if (tryRewriteAsNumpy(Call, Rewrite)) {
+          OS << dropOuterParens(Rewrite) << "\n";
+          return;
+        }
       }
       OS << remapRuntimeCallee(*Callee) << "(";
       bool First = true;
