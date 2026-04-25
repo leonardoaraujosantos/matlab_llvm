@@ -29,6 +29,8 @@
 #include "llvm/ADT/StringSet.h"
 
 #include <cctype>
+#include <cstdlib>
+#include <functional>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -37,6 +39,31 @@ namespace matlab {
 namespace mlirgen {
 
 namespace {
+
+/// Metadata for an scf.while op that matched the canonical for-loop shape
+/// (one f64 iter-arg, condition `iv <= end` or `iv >= end`, body ends with
+/// `iv += step ; yield`). Mirrors the C emitter's ForLoopInfo so the same
+/// loops collapse to a clean `for iv in range(...)` / `for iv in
+/// rt.frange(...)` in Python.
+struct ForLoopInfo {
+  mlir::Value Init;
+  mlir::Value End;
+  mlir::Value Step;
+  bool IsDecreasing = false;
+  // The arith.addf and scf.yield at the tail of the after-region; absorbed
+  // into the for-head and never emitted as their own statements.
+  mlir::Operation *AddOp = nullptr;
+  mlir::Operation *YieldOp = nullptr;
+  // The store-to-slot that copies the iter-arg into the user-visible
+  // induction variable, plus the slot's alloca. Both are skipped when the
+  // loop owns the slot exclusively (FuseSlot = true).
+  mlir::Operation *BindStore = nullptr;
+  mlir::Operation *SlotAlloca = nullptr;
+  bool FuseSlot = false;
+  // The Python identifier used for the induction variable in the emitted
+  // `for iv in ...:` head.
+  std::string IvName;
+};
 
 class Emitter {
 public:
@@ -94,8 +121,35 @@ private:
   void gatherNonFlagConjuncts(mlir::Value V,
       llvm::SmallVectorImpl<mlir::Value> &Out);
 
+  // --- For-loop pattern detection ---------------------------------------
+  // Match an scf.while produced by LowerSeqLoops::lowerForOp. Populates
+  // ForPatterns / SuppressedOps / FusedForSlots so the scf.while emitter
+  // can print `for iv in range(...):` (or `rt.frange(...)`) instead of the
+  // 4-line while-emulated shape.
+  bool matchForPattern(mlir::scf::WhileOp W, ForLoopInfo &Info);
+  void scanForLoopPatterns(mlir::Region &R);
+
+  // Try to evaluate V as a compile-time integer-valued literal (covers
+  // both arith.constant f64 / i64 and llvm.mlir.constant). Returns true
+  // and writes Out when the value is exactly an integer.
+  static bool tryEvalIntLiteral(mlir::Value V, long long &Out);
+  // Compile-time triple-check: are all of init/end/step integer literals?
+  static bool forBoundsAreIntLiterals(const ForLoopInfo &Info,
+                                      long long &Init, long long &End,
+                                      long long &Step);
+
   // --- Callee remap: llvm.call @matlab_foo -> rt.foo --------------------
   static std::string remapRuntimeCallee(llvm::StringRef Name);
+
+  // True when the runtime helper named (without `matlab_` prefix) takes a
+  // string-length operand we can drop in Python (where strings carry
+  // their own length).
+  static bool calleeHasDroppableLengthArg(llvm::StringRef Suffix,
+                                          unsigned &LengthArgIdx);
+
+  // True when V is a constant condition we can fold at emit time.
+  // Returns 1 for static-true, 0 for static-false, -1 for "not foldable".
+  static int evalConstCond(mlir::Value V);
 
   std::ostream &OS;
   bool NoLine;
@@ -136,6 +190,20 @@ private:
   // (`!did_break [& !did_continue]`) guarding a real body; emit the
   // then-region inline at the parent's indent.
   llvm::DenseSet<mlir::Operation *> InlinedIfs;
+  // String globals (llvm.mlir.global with a StringAttr value), keyed off
+  // the global's symbol name. When the AddressOf op for one of these is
+  // inlined, return the Python literal directly so the emitted source
+  // reads `rt.disp_str("Hello")` instead of `rt.disp_str(__matlab_str0)`.
+  llvm::StringMap<std::string> StringGlobalLits;
+  // Globals (any kind) that have already been inlined at every use site;
+  // skip the top-of-file `name = "..."` declaration for them.
+  llvm::StringSet<> SuppressedGlobals;
+  // For-loop pattern matches (key: scf.while op).
+  llvm::DenseMap<mlir::Operation *, ForLoopInfo> ForPatterns;
+  // Slots whose alloca is owned by a for-loop's induction variable; the
+  // alloca itself is suppressed and the slot name is the loop's IV name.
+  llvm::DenseSet<mlir::Operation *> FusedForSlots;
+  llvm::DenseMap<mlir::Operation *, std::string> FusedForSlotName;
   int NextId = 0;
 
   // Most recent line emitted; used to suppress duplicate line markers
@@ -210,10 +278,31 @@ static std::string formatIntAttr(mlir::IntegerAttr IA) {
 }
 
 static std::string formatFloatAttr(mlir::FloatAttr FA) {
-  char Buf[64];
+  // Pick the shortest precision (1..17) whose `%g` text round-trips
+  // exactly back to D — that's what Python's `repr(0.05)` does, and what
+  // a user reading the generated source expects (`0.05`, not
+  // `0.050000000000000003`). We also avoid scientific notation when a
+  // longer decimal form is available — `10.0` reads better than `1e+01`.
   double D = FA.getValueAsDouble();
+  char Buf[64];
+  // `%.17g` is the conservative reference: any value round-trips at 17.
   snprintf(Buf, sizeof(Buf), "%.17g", D);
-  std::string S = Buf;
+  std::string Ref17 = Buf;
+  bool Ref17HasE = (Ref17.find('e') != std::string::npos ||
+                    Ref17.find('E') != std::string::npos);
+
+  std::string S;
+  for (int P = 1; P <= 17; ++P) {
+    snprintf(Buf, sizeof(Buf), "%.*g", P, D);
+    if (strtod(Buf, nullptr) != D) continue;
+    bool ThisHasE = (strchr(Buf, 'e') || strchr(Buf, 'E'));
+    // Reject a shorter form that switches to scientific notation when
+    // the conservative reference renders cleanly in decimal.
+    if (!Ref17HasE && ThisHasE) continue;
+    S = Buf;
+    break;
+  }
+  if (S.empty()) S = Ref17;
   bool HasDotOrExp = false;
   for (char C : S) {
     if (C == '.' || C == 'e' || C == 'E' || C == 'n') {
@@ -380,9 +469,16 @@ bool Emitter::buildInlineExpr(mlir::Operation &Op, std::string &Expr) {
   }
   if (isa<LLVM::ZeroOp>(Op)) { Expr = "0"; return true; }
   if (auto A = dyn_cast<LLVM::AddressOfOp>(Op)) {
-    // Addressof of a module-scope global: bare name. Works for both
-    // string globals and function symbols (function handles decay to
-    // the Python callable by name).
+    // String globals fold to a Python literal at the use site so the
+    // emitted source reads `rt.disp_str("Hello")` instead of
+    // `rt.disp_str(__matlab_str0)`. Function-symbol addressofs (function
+    // handles) keep the bare name so they decay to the Python callable.
+    auto It = StringGlobalLits.find(A.getGlobalName());
+    if (It != StringGlobalLits.end()) {
+      Expr = It->second;
+      SuppressedGlobals.insert(A.getGlobalName());
+      return true;
+    }
     Expr = A.getGlobalName().str();
     return true;
   }
@@ -522,9 +618,22 @@ bool Emitter::buildInlineExpr(mlir::Operation &Op, std::string &Expr) {
   if (auto C = dyn_cast<LLVM::CallOp>(Op)) {
     if (!C.getCallee()) return false;
     std::string Callee = remapRuntimeCallee(*C.getCallee());
+    unsigned LengthIdx = ~0u;
+    bool DropLen = false;
+    if (C.getCallee()->starts_with("matlab_")) {
+      unsigned Idx;
+      if (calleeHasDroppableLengthArg(
+              C.getCallee()->drop_front(strlen("matlab_")), Idx)) {
+        LengthIdx = Idx;
+        DropLen = true;
+      }
+    }
     std::string E = Callee + "(";
+    bool First = true;
     for (unsigned i = 0; i < C.getNumOperands(); ++i) {
-      if (i) E += ", ";
+      if (DropLen && i == LengthIdx) continue;
+      if (!First) E += ", ";
+      First = false;
       E += dropOuterParens(exprFor(C.getOperand(i)));
     }
     E += ")";
@@ -580,6 +689,254 @@ void Emitter::gatherNonFlagConjuncts(mlir::Value V,
     }
   }
   Out.push_back(V);
+}
+
+// ---------------------------------------------------------------------------
+// For-loop pattern detection (mirrors EmitC.cpp::matchForPattern)
+// ---------------------------------------------------------------------------
+
+bool Emitter::tryEvalIntLiteral(mlir::Value V, long long &Out) {
+  auto *D = V.getDefiningOp();
+  if (!D) return false;
+  mlir::Attribute A;
+  if (auto C = mlir::dyn_cast<mlir::arith::ConstantOp>(D)) A = C.getValue();
+  else if (auto C = mlir::dyn_cast<mlir::LLVM::ConstantOp>(D)) A = C.getValue();
+  else return false;
+  if (auto IA = mlir::dyn_cast<mlir::IntegerAttr>(A)) {
+    Out = IA.getInt();
+    return true;
+  }
+  if (auto FA = mlir::dyn_cast<mlir::FloatAttr>(A)) {
+    double D = FA.getValueAsDouble();
+    long long I = (long long)D;
+    if ((double)I == D) { Out = I; return true; }
+    return false;
+  }
+  return false;
+}
+
+bool Emitter::forBoundsAreIntLiterals(const ForLoopInfo &Info, long long &Init,
+                                       long long &End, long long &Step) {
+  return tryEvalIntLiteral(Info.Init, Init) &&
+         tryEvalIntLiteral(Info.End, End) &&
+         tryEvalIntLiteral(Info.Step, Step);
+}
+
+bool Emitter::matchForPattern(mlir::scf::WhileOp W, ForLoopInfo &Info) {
+  // Same shape as EmitC: one f64 iter-arg, before-region forwards it
+  // unchanged through scf.condition, condition is a single cmpf OLE/OGE,
+  // after-region ends with arith.addf iv, step + scf.yield %addf.
+  if (W.getInits().size() != 1) return false;
+  mlir::Block &Before = W.getBefore().front();
+  mlir::Block &After = W.getAfter().front();
+  if (Before.getNumArguments() != 1 || After.getNumArguments() != 1)
+    return false;
+  auto F64 = mlir::Float64Type::get(W.getContext());
+  if (Before.getArgument(0).getType() != F64) return false;
+  if (After.getArgument(0).getType() != F64) return false;
+
+  for (auto &Inner : Before.getOperations()) {
+    if (mlir::isa<mlir::scf::ConditionOp>(Inner)) continue;
+    if (InlinedOps.count(&Inner)) continue;
+    return false;
+  }
+  auto Cond = mlir::cast<mlir::scf::ConditionOp>(Before.getTerminator());
+  if (Cond.getArgs().size() != 1) return false;
+  if (Cond.getArgs()[0] != Before.getArgument(0)) return false;
+
+  llvm::SmallVector<mlir::Value, 2> CondParts;
+  gatherNonFlagConjuncts(Cond.getCondition(), CondParts);
+  if (CondParts.size() != 1) return false;
+  auto Cmp = CondParts[0].getDefiningOp<mlir::arith::CmpFOp>();
+  if (!Cmp) return false;
+  if (Cmp.getLhs() != Before.getArgument(0)) return false;
+  auto Pred = Cmp.getPredicate();
+  if (Pred != mlir::arith::CmpFPredicate::OLE &&
+      Pred != mlir::arith::CmpFPredicate::OGE) return false;
+  Info.End = Cmp.getRhs();
+  Info.IsDecreasing = (Pred == mlir::arith::CmpFPredicate::OGE);
+
+  if (After.getOperations().size() < 2) return false;
+  auto Yld = mlir::dyn_cast<mlir::scf::YieldOp>(&After.back());
+  if (!Yld || Yld.getResults().size() != 1) return false;
+  auto *AddRaw = Yld.getResults()[0].getDefiningOp();
+  auto Add = mlir::dyn_cast_or_null<mlir::arith::AddFOp>(AddRaw);
+  if (!Add) return false;
+  if (Add.getLhs() != After.getArgument(0)) return false;
+  if (Add->getNextNode() != Yld.getOperation()) return false;
+
+  Info.Init = W.getInits()[0];
+  Info.Step = Add.getRhs();
+  Info.AddOp = Add.getOperation();
+  Info.YieldOp = Yld.getOperation();
+  return true;
+}
+
+void Emitter::scanForLoopPatterns(mlir::Region &R) {
+  // Mirrors EmitC: a slot is fusable when every use of the slot lives
+  // inside one of its claimants' after-regions. Two consecutive loops
+  // reusing the same `i` slot can both fuse when neither references `i`
+  // outside its own body.
+  llvm::DenseMap<mlir::Operation *, llvm::SmallVector<mlir::Operation *, 2>>
+      SlotClaimants;
+
+  R.walk([&](mlir::scf::WhileOp W) {
+    ForLoopInfo Info;
+    if (!matchForPattern(W, Info)) return;
+    mlir::Block &After = W.getAfter().front();
+    mlir::Value Iv = After.getArgument(0);
+    for (auto &Op : After.getOperations()) {
+      if (&Op == Info.AddOp || &Op == Info.YieldOp) break;
+      auto Store = mlir::dyn_cast<mlir::LLVM::StoreOp>(Op);
+      if (!Store) continue;
+      if (Store.getValue() != Iv) continue;
+      auto Alloca = Store.getAddr().getDefiningOp<mlir::LLVM::AllocaOp>();
+      if (!Alloca) break;
+      auto NA = Alloca->getAttrOfType<mlir::StringAttr>("matlab.name");
+      if (!NA) break;
+      Info.BindStore = Store.getOperation();
+      Info.SlotAlloca = Alloca.getOperation();
+      SlotClaimants[Info.SlotAlloca].push_back(W.getOperation());
+      break;
+    }
+    ForPatterns[W.getOperation()] = std::move(Info);
+  });
+
+  llvm::DenseMap<mlir::Operation *, bool> SlotFusable;
+  for (auto &Entry : SlotClaimants) {
+    mlir::Operation *Slot = Entry.first;
+    auto &Claimants = Entry.second;
+    bool OK = true;
+    for (auto &Use : Slot->getUses()) {
+      mlir::Operation *User = Use.getOwner();
+      bool InsideAny = false;
+      for (mlir::Operation *W : Claimants) {
+        mlir::Region *Loop = &W->getRegion(1);
+        mlir::Region *P = User->getParentRegion();
+        while (P) {
+          if (P == Loop) { InsideAny = true; break; }
+          P = P->getParentRegion();
+        }
+        if (InsideAny) break;
+      }
+      if (!InsideAny) { OK = false; break; }
+    }
+    SlotFusable[Slot] = OK;
+  }
+
+  for (auto &KV : ForPatterns) {
+    ForLoopInfo &Info = KV.second;
+    SuppressedOps.insert(Info.AddOp);
+    SuppressedOps.insert(Info.YieldOp);
+
+    bool Fuse = Info.SlotAlloca && SlotFusable.lookup(Info.SlotAlloca);
+    if (Fuse) {
+      Info.FuseSlot = true;
+      auto It = FusedForSlotName.find(Info.SlotAlloca);
+      if (It == FusedForSlotName.end()) {
+        auto NA = Info.SlotAlloca->getAttrOfType<mlir::StringAttr>(
+            "matlab.name");
+        std::string N = uniqueName(NA.getValue());
+        FusedForSlotName[Info.SlotAlloca] = N;
+        Info.IvName = N;
+      } else {
+        Info.IvName = It->second;
+      }
+      FusedForSlots.insert(Info.SlotAlloca);
+      SuppressedOps.insert(Info.BindStore);
+    } else {
+      Info.FuseSlot = false;
+      Info.IvName = freshName();
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Constant condition folding
+// ---------------------------------------------------------------------------
+
+int Emitter::evalConstCond(mlir::Value V) {
+  // Fold `arith.cmpi/cmpf C1, C2` and the boolean constants directly.
+  // The polymorphic-dispatch layer bakes nargin into a constant comparison
+  // (`if 2 == 2:`) which we want to drop entirely.
+  if (auto *D = V.getDefiningOp()) {
+    if (auto C = mlir::dyn_cast<mlir::arith::ConstantOp>(D)) {
+      if (auto IA = mlir::dyn_cast<mlir::IntegerAttr>(C.getValue())) {
+        auto T = mlir::dyn_cast<mlir::IntegerType>(IA.getType());
+        if (T && T.getWidth() == 1) return (IA.getInt() & 1) ? 1 : 0;
+      }
+    }
+    if (auto C = mlir::dyn_cast<mlir::LLVM::ConstantOp>(D)) {
+      if (auto IA = mlir::dyn_cast<mlir::IntegerAttr>(C.getValue())) {
+        auto T = mlir::dyn_cast<mlir::IntegerType>(IA.getType());
+        if (T && T.getWidth() == 1) return (IA.getInt() & 1) ? 1 : 0;
+      }
+    }
+    if (auto Ci = mlir::dyn_cast<mlir::arith::CmpIOp>(D)) {
+      long long L, R;
+      if (tryEvalIntLiteral(Ci.getLhs(), L) &&
+          tryEvalIntLiteral(Ci.getRhs(), R)) {
+        switch (Ci.getPredicate()) {
+          case mlir::arith::CmpIPredicate::eq:  return L == R ? 1 : 0;
+          case mlir::arith::CmpIPredicate::ne:  return L != R ? 1 : 0;
+          case mlir::arith::CmpIPredicate::slt:
+          case mlir::arith::CmpIPredicate::ult: return L <  R ? 1 : 0;
+          case mlir::arith::CmpIPredicate::sle:
+          case mlir::arith::CmpIPredicate::ule: return L <= R ? 1 : 0;
+          case mlir::arith::CmpIPredicate::sgt:
+          case mlir::arith::CmpIPredicate::ugt: return L >  R ? 1 : 0;
+          case mlir::arith::CmpIPredicate::sge:
+          case mlir::arith::CmpIPredicate::uge: return L >= R ? 1 : 0;
+        }
+      }
+    }
+    if (auto Cf = mlir::dyn_cast<mlir::arith::CmpFOp>(D)) {
+      long long L, R;
+      if (tryEvalIntLiteral(Cf.getLhs(), L) &&
+          tryEvalIntLiteral(Cf.getRhs(), R)) {
+        switch (Cf.getPredicate()) {
+          case mlir::arith::CmpFPredicate::OEQ:
+          case mlir::arith::CmpFPredicate::UEQ: return L == R ? 1 : 0;
+          case mlir::arith::CmpFPredicate::ONE:
+          case mlir::arith::CmpFPredicate::UNE: return L != R ? 1 : 0;
+          case mlir::arith::CmpFPredicate::OLT:
+          case mlir::arith::CmpFPredicate::ULT: return L <  R ? 1 : 0;
+          case mlir::arith::CmpFPredicate::OLE:
+          case mlir::arith::CmpFPredicate::ULE: return L <= R ? 1 : 0;
+          case mlir::arith::CmpFPredicate::OGT:
+          case mlir::arith::CmpFPredicate::UGT: return L >  R ? 1 : 0;
+          case mlir::arith::CmpFPredicate::OGE:
+          case mlir::arith::CmpFPredicate::UGE: return L >= R ? 1 : 0;
+          default: return -1;
+        }
+      }
+    }
+  }
+  return -1;
+}
+
+// ---------------------------------------------------------------------------
+// Runtime call ABI: which helpers carry a droppable string-length operand?
+// ---------------------------------------------------------------------------
+
+bool Emitter::calleeHasDroppableLengthArg(llvm::StringRef Suffix,
+                                          unsigned &LengthArgIdx) {
+  // The C ABI passes (str_ptr, str_len) for any helper that takes a
+  // user-string. Python strings carry their length, so the length operand
+  // is dead weight — drop it. The runtime keeps an optional `n=None`
+  // parameter for back-compat with hand-written callers.
+  // Raw-string helpers carry an explicit (ptr, i64-length) tail. The
+  // matlab_string variants used by file I/O wrap the buffer in a
+  // descriptor and don't take a separate length, so they're absent
+  // from this list.
+  if (Suffix == "disp_str")      { LengthArgIdx = 1; return true; }
+  if (Suffix == "fprintf_str")   { LengthArgIdx = 1; return true; }
+  if (Suffix == "fprintf_f64")   { LengthArgIdx = 1; return true; }
+  if (Suffix == "fprintf_f64_2") { LengthArgIdx = 1; return true; }
+  if (Suffix == "fprintf_f64_3") { LengthArgIdx = 1; return true; }
+  if (Suffix == "fprintf_f64_4") { LengthArgIdx = 1; return true; }
+  if (Suffix == "input_num")     { LengthArgIdx = 1; return true; }
+  return false;
 }
 
 void Emitter::scanBreakContinueFlags(mlir::Region &R) {
@@ -778,6 +1135,32 @@ std::string Emitter::constStr(mlir::LLVM::GlobalOp G) {
   return "";
 }
 
+// Build a Python double-quoted string literal for `Raw` (with escapes).
+static std::string buildPyStringLit(llvm::StringRef Raw) {
+  std::string Out;
+  Out.reserve(Raw.size() + 2);
+  Out += '"';
+  for (unsigned char C : Raw) {
+    switch (C) {
+      case '\\': Out += "\\\\"; break;
+      case '"':  Out += "\\\""; break;
+      case '\n': Out += "\\n"; break;
+      case '\t': Out += "\\t"; break;
+      case '\r': Out += "\\r"; break;
+      default:
+        if (C >= 0x20 && C < 0x7F) Out += (char)C;
+        else {
+          char Buf[8];
+          snprintf(Buf, sizeof(Buf), "\\x%02x", (unsigned)C);
+          Out += Buf;
+        }
+        break;
+    }
+  }
+  Out += '"';
+  return Out;
+}
+
 void Emitter::emitGlobal(mlir::LLVM::GlobalOp G) {
   std::string N = G.getSymName().str();
   GlobalStrs[G.getOperation()] = N;
@@ -846,15 +1229,19 @@ bool Emitter::run(mlir::ModuleOp M) {
     }
   }
 
-  // Pass 1: module-scope globals (string constants).
-  bool AnyGlobal = false;
+  // Pass 1: register every string global's Python literal so AddressOf
+  // inlining can fold it directly. The top-of-file `__matlab_strN = "..."`
+  // declarations the C/C++ backend emits are unnecessary in Python — the
+  // literal lives at the use site instead, which reads more naturally.
   for (auto &Op : M.getBody()->getOperations()) {
-    auto G = mlir::dyn_cast<mlir::LLVM::GlobalOp>(Op);
-    if (!G) continue;
-    emitGlobal(G);
-    AnyGlobal = true;
+    if (auto G = mlir::dyn_cast<mlir::LLVM::GlobalOp>(Op)) {
+      auto Val = G.getValueAttr();
+      if (mlir::dyn_cast_or_null<mlir::StringAttr>(Val)) {
+        StringGlobalLits[G.getSymName()] = buildPyStringLit(constStr(G));
+        UsedNames.insert(G.getSymName().str());
+      }
+    }
   }
-  if (AnyGlobal) OS << "\n";
 
   // Pass 2: reserve the symbol of every defined function so locals don't
   // shadow them, and emit bodies. `@main` is emitted last so top-level
@@ -898,12 +1285,37 @@ void Emitter::emitFuncFunc(mlir::func::FuncOp F) {
   ContinueFlagSlots.clear();
   FlagIfKind.clear();
   InlinedIfs.clear();
+  ForPatterns.clear();
+  FusedForSlots.clear();
+  FusedForSlotName.clear();
   LastLineFile.clear();
   LastLineNum = -1;
-  scanBreakContinueFlags(F.getBody());
-  computeInlines(F.getBody());
-  auto FT = F.getFunctionType();
+  // Function-local UsedNames scope: every non-main function gets a fresh
+  // namespace so its parameters & locals stay short (`x`, `i`) instead of
+  // accumulating `_2`, `_3` suffixes from earlier functions. The
+  // module-level reservations (other functions, non-suppressed globals)
+  // are restored on exit so calls to peer functions still resolve.
+  llvm::StringSet<> SavedUsed;
   bool IsMain = F.getSymName() == "main";
+  if (!IsMain) {
+    SavedUsed = UsedNames;
+    UsedNames.clear();
+    // Re-reserve the symbol of every defined function and string global.
+    for (auto &Op : F->getParentOfType<mlir::ModuleOp>().getBody()
+                     ->getOperations()) {
+      if (auto Fn = mlir::dyn_cast<mlir::func::FuncOp>(Op))
+        UsedNames.insert(Fn.getSymName().str());
+      else if (auto Fn = mlir::dyn_cast<mlir::LLVM::LLVMFuncOp>(Op))
+        UsedNames.insert(Fn.getSymName().str());
+      else if (auto G = mlir::dyn_cast<mlir::LLVM::GlobalOp>(Op))
+        UsedNames.insert(G.getSymName().str());
+    }
+  }
+
+  computeInlines(F.getBody());
+  scanBreakContinueFlags(F.getBody());
+  scanForLoopPatterns(F.getBody());
+  auto FT = F.getFunctionType();
 
   // Hoist @main's body to module scope — mirrors the behaviour of
   // LowerIO renaming @script -> @main so scripts become top-level code
@@ -936,10 +1348,12 @@ void Emitter::emitFuncFunc(mlir::func::FuncOp F) {
     // Empty-or-just-return body: emit a `pass`.
     indent(1);
     OS << "pass\n\n";
+    if (!IsMain) UsedNames = std::move(SavedUsed);
     return;
   }
   emitRegion(F.getBody(), 1);
   OS << "\n";
+  if (!IsMain) UsedNames = std::move(SavedUsed);
 }
 
 void Emitter::emitLLVMFunc(mlir::LLVM::LLVMFuncOp F) {
@@ -953,10 +1367,25 @@ void Emitter::emitLLVMFunc(mlir::LLVM::LLVMFuncOp F) {
   ContinueFlagSlots.clear();
   FlagIfKind.clear();
   InlinedIfs.clear();
+  ForPatterns.clear();
+  FusedForSlots.clear();
+  FusedForSlotName.clear();
   LastLineFile.clear();
   LastLineNum = -1;
-  scanBreakContinueFlags(F.getBody());
+  llvm::StringSet<> SavedUsed = UsedNames;
+  UsedNames.clear();
+  for (auto &Op : F->getParentOfType<mlir::ModuleOp>().getBody()
+                   ->getOperations()) {
+    if (auto Fn = mlir::dyn_cast<mlir::func::FuncOp>(Op))
+      UsedNames.insert(Fn.getSymName().str());
+    else if (auto Fn = mlir::dyn_cast<mlir::LLVM::LLVMFuncOp>(Op))
+      UsedNames.insert(Fn.getSymName().str());
+    else if (auto G = mlir::dyn_cast<mlir::LLVM::GlobalOp>(Op))
+      UsedNames.insert(G.getSymName().str());
+  }
   computeInlines(F.getBody());
+  scanBreakContinueFlags(F.getBody());
+  scanForLoopPatterns(F.getBody());
   auto FT = F.getFunctionType();
   OS << "def " << F.getSymName().str() << "(";
   auto &Entry = F.getBody().front();
@@ -969,10 +1398,13 @@ void Emitter::emitLLVMFunc(mlir::LLVM::LLVMFuncOp F) {
   }
   OS << "):\n";
   if (F.getBody().front().empty()) {
-    indent(1); OS << "pass\n\n"; return;
+    indent(1); OS << "pass\n\n";
+    UsedNames = std::move(SavedUsed);
+    return;
   }
   emitRegion(F.getBody(), 1);
   OS << "\n";
+  UsedNames = std::move(SavedUsed);
 }
 
 // ---------------------------------------------------------------------------
@@ -994,14 +1426,20 @@ void Emitter::emitBlock(mlir::Block &B, int Indent) {
     emitOp(Op, Indent);
 }
 
-// Count real (non-yield, non-condition, non-inlined-no-op) statements a
-// block will emit. Used to decide whether to insert a `pass` placeholder.
+// Count real (non-condition, non-inlined-no-op) statements a block will
+// emit. scf.yield with one or more operands counts as that many
+// statements, since each operand becomes one `result_var = expr` line in
+// the parent's scope.
 static int countEmittedStmts(mlir::Block &B,
                              const llvm::DenseSet<mlir::Operation *> &Inlined,
                              const llvm::DenseSet<mlir::Operation *> &Suppressed) {
   int N = 0;
   for (auto &Op : B.getOperations()) {
-    if (mlir::isa<mlir::scf::YieldOp, mlir::scf::ConditionOp>(&Op)) continue;
+    if (mlir::isa<mlir::scf::ConditionOp>(&Op)) continue;
+    if (auto Y = mlir::dyn_cast<mlir::scf::YieldOp>(&Op)) {
+      N += (int)Y.getNumOperands();
+      continue;
+    }
     if (Inlined.count(&Op)) continue;
     if (Suppressed.count(&Op)) continue;
     ++N;
@@ -1059,16 +1497,30 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
       // as the script's exit status is dropped with it.
       return;
     }
-    indent(Indent);
-    if (R.getNumOperands() == 0) OS << "return\n";
-    else OS << "return " << this->stmtExpr(R.getOperand(0)) << "\n";
+    if (R.getNumOperands() == 0) {
+      // Void return at the end of the body is the implicit Python
+      // function exit; only emit `return` when it sits before more code.
+      if (R->getNextNode() == nullptr &&
+          R->getBlock() == &R->getParentRegion()->back())
+        return;
+      indent(Indent); OS << "return\n";
+    } else {
+      indent(Indent);
+      OS << "return " << this->stmtExpr(R.getOperand(0)) << "\n";
+    }
     return;
   }
   if (auto R = mlir::dyn_cast<mlir::LLVM::ReturnOp>(Op)) {
     if (InMainHoist) return;
-    indent(Indent);
-    if (R.getNumOperands() == 0) OS << "return\n";
-    else OS << "return " << this->stmtExpr(R.getOperand(0)) << "\n";
+    if (R.getNumOperands() == 0) {
+      if (R->getNextNode() == nullptr &&
+          R->getBlock() == &R->getParentRegion()->back())
+        return;
+      indent(Indent); OS << "return\n";
+    } else {
+      indent(Indent);
+      OS << "return " << this->stmtExpr(R.getOperand(0)) << "\n";
+    }
     return;
   }
 
@@ -1080,9 +1532,25 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
       OS << N << " = ";
     }
     if (auto Callee = Call.getCallee()) {
+      // For user-string runtime helpers, drop the (str_ptr, str_len) tail
+      // length operand — Python strings carry their length, and the
+      // matching runtime stub keeps `n` optional for back-compat.
+      unsigned LengthIdx = ~0u;
+      bool DropLen = false;
+      if (Callee->starts_with("matlab_")) {
+        unsigned Idx;
+        if (calleeHasDroppableLengthArg(
+                Callee->drop_front(strlen("matlab_")), Idx)) {
+          LengthIdx = Idx;
+          DropLen = true;
+        }
+      }
       OS << remapRuntimeCallee(*Callee) << "(";
+      bool First = true;
       for (unsigned i = 0; i < Call.getNumOperands(); ++i) {
-        if (i) OS << ", ";
+        if (DropLen && i == LengthIdx) continue;
+        if (!First) OS << ", ";
+        First = false;
         OS << this->stmtExpr(Call.getOperand(i));
       }
       OS << ")\n";
@@ -1116,7 +1584,13 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
   if (auto A = mlir::dyn_cast<mlir::LLVM::AddressOfOp>(Op)) {
     std::string N = this->name(A.getResult());
     indent(Indent);
-    OS << N << " = " << A.getGlobalName().str() << "\n";
+    auto It = StringGlobalLits.find(A.getGlobalName());
+    if (It != StringGlobalLits.end()) {
+      OS << N << " = " << It->second << "\n";
+      SuppressedGlobals.insert(A.getGlobalName());
+    } else {
+      OS << N << " = " << A.getGlobalName().str() << "\n";
+    }
     return;
   }
 
@@ -1336,6 +1810,18 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
       return;
     }
 
+    // For-loop fused slot: the surrounding `for iv in range(...):`
+    // emitter declares the IV directly. Skip the alloca and any
+    // pre-store; future loads/stores resolve to the IV name.
+    if (FusedForSlots.count(A.getOperation())) {
+      auto NIt = FusedForSlotName.find(A.getOperation());
+      if (NIt != FusedForSlotName.end()) {
+        Names[A.getResult()] = NIt->second;
+        DirectSlots[A.getOperation()] = NIt->second;
+      }
+      return;
+    }
+
     // Scalar slot: every use we've seen from Mem2RegLite is load/store.
     // Bind the alloca SSA value to the slot name; downstream load/store
     // treat it as a direct Python variable.
@@ -1354,6 +1840,26 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
     // (scf.if / scf.while) that uses the slot, the use sits under a
     // conditional / loop and may be skipped at runtime — keep the init
     // so post-loop reads bind safely.
+    // True when every dynamic execution of `B` performs at least one
+    // unconditional Store into SlotV before reading from it (or before
+    // returning). Recurses through scf.if when both branches store; that
+    // covers MATLAB return-slot patterns like `if c; y = a; else y = b;
+    // end` where the return slot is fully assigned regardless of branch.
+    std::function<bool(mlir::Block &, mlir::Value)> blockAlwaysStores =
+        [&](mlir::Block &B, mlir::Value SlotV) -> bool {
+      for (auto &Op2 : B) {
+        if (auto St = mlir::dyn_cast<mlir::LLVM::StoreOp>(Op2))
+          if (St.getAddr() == SlotV) return true;
+        if (auto If = mlir::dyn_cast<mlir::scf::IfOp>(Op2)) {
+          if (If.getElseRegion().empty()) continue;
+          if (blockAlwaysStores(If.getThenRegion().front(), SlotV) &&
+              blockAlwaysStores(If.getElseRegion().front(), SlotV))
+            return true;
+        }
+      }
+      return false;
+    };
+
     bool DropInit = false;
     {
       mlir::Block *ABlock = A->getBlock();
@@ -1378,7 +1884,19 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
           });
           if (NestedUse) break;
         }
-        if (NestedUse) break;
+        if (NestedUse) {
+          // Allow the nested-use case when the op is an scf.if whose
+          // both branches unconditionally store into the slot — the
+          // pre-init is then dead weight.
+          if (auto If = mlir::dyn_cast<mlir::scf::IfOp>(&*It)) {
+            if (!If.getElseRegion().empty() &&
+                blockAlwaysStores(If.getThenRegion().front(), SlotV) &&
+                blockAlwaysStores(If.getElseRegion().front(), SlotV)) {
+              DropInit = true;
+            }
+          }
+          break;
+        }
       }
     }
     if (DropInit) return;
@@ -1472,8 +1990,9 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
     auto FK = FlagIfKind.find(&Op);
     if (FK != FlagIfKind.end()) {
       indent(Indent);
-      OS << "if " << this->stmtExpr(If.getCondition()) << ": "
-         << FK->second << "\n";
+      OS << "if " << this->stmtExpr(If.getCondition()) << ":\n";
+      indent(Indent + 1);
+      OS << FK->second << "\n";
       return;
     }
     // Pure flag-guard wrapping real body: skip the `if (...)` and emit
@@ -1482,12 +2001,18 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
       emitRegion(If.getThenRegion(), Indent);
       return;
     }
-    // Declare result locals (one per scf.if result) so yields assign
-    // to them.
-    for (unsigned i = 0; i < If.getNumResults(); ++i) {
-      std::string N = this->name(If.getResult(i));
-      indent(Indent);
-      OS << N << " = 0\n";
+    // Static-condition folding. Polymorphic dispatch in the frontend
+    // bakes nargin into a constant comparison (`if 2 == 2:`); detect
+    // that here and emit only the live branch.
+    int Folded = evalConstCond(If.getCondition());
+    if (Folded == 1) {
+      emitRegion(If.getThenRegion(), Indent);
+      return;
+    }
+    if (Folded == 0) {
+      if (!If.getElseRegion().empty())
+        emitRegion(If.getElseRegion(), Indent);
+      return;
     }
     indent(Indent);
     OS << "if " << this->stmtExpr(If.getCondition()) << ":\n";
@@ -1538,6 +2063,52 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
   if (auto W = mlir::dyn_cast<mlir::scf::WhileOp>(Op)) {
     auto &Before = W.getBefore().front();
     auto &After = W.getAfter().front();
+
+    // Did the pre-scan flag this loop as a canonical MATLAB for-loop?
+    auto FPIt = ForPatterns.find(W.getOperation());
+    if (FPIt != ForPatterns.end()) {
+      const ForLoopInfo &Info = FPIt->second;
+      Names[Before.getArgument(0)] = Info.IvName;
+      InlineExprs[After.getArgument(0)] = Info.IvName;
+      if (W.getNumResults() == 1)
+        InlineExprs[W.getResult(0)] = Info.IvName;
+
+      // Prefer Python's int `range(...)` when init/end/step are integer
+      // literals; otherwise fall back to a runtime helper so floating-
+      // point steps and runtime-computed bounds still iterate correctly.
+      long long IInit, IEnd, IStep;
+      bool IntForm = forBoundsAreIntLiterals(Info, IInit, IEnd, IStep) &&
+                     IStep != 0;
+      indent(Indent);
+      if (IntForm) {
+        long long Stop = (IStep > 0) ? IEnd + 1 : IEnd - 1;
+        OS << "for " << Info.IvName << " in range("
+           << IInit << ", " << Stop;
+        if (IStep != 1) OS << ", " << IStep;
+        OS << "):\n";
+      } else {
+        OS << "for " << Info.IvName << " in rt.frange("
+           << this->stmtExpr(Info.Init) << ", "
+           << this->stmtExpr(Info.End) << ", "
+           << this->stmtExpr(Info.Step) << "):\n";
+      }
+      // Body: emit every after-region op except the absorbed addf and
+      // the trailing yield (already in SuppressedOps via scanForLoopPatterns).
+      int EmittedStmts = 0;
+      for (auto &Inner : After.getOperations()) {
+        if (mlir::isa<mlir::scf::YieldOp>(&Inner)) continue;
+        if (InlinedOps.count(&Inner)) continue;
+        if (SuppressedOps.count(&Inner)) continue;
+        ++EmittedStmts;
+      }
+      if (EmittedStmts == 0) {
+        indent(Indent + 1); OS << "pass\n";
+      } else {
+        for (auto &Inner : After.getOperations())
+          emitOp(Inner, Indent + 1);
+      }
+      return;
+    }
 
     for (unsigned i = 0; i < W.getInits().size(); ++i) {
       auto BA = Before.getArgument(i);

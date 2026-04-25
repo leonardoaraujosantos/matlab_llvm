@@ -192,20 +192,40 @@ def fprintf_str(fmt, n=None):
     sys.stdout.write(_c_printf(_expand_escapes(fmt)))
 
 
-def fprintf_f64(fmt, n, v):
-    sys.stdout.write(_c_printf(_expand_escapes(fmt), v))
+# The `-emit-python` backend drops the C-ABI string-length operand at
+# call sites, so the natural Python signatures are `(fmt, *values)`.
+# We accept both shapes for back-compat with hand-written callers that
+# pass the legacy `n` length.
+def _fprintf_split(fmt, args):
+    if args and isinstance(args[0], int) and len(args) > 0:
+        # Detect the legacy (fmt, n, ...values) shape: n is an int that
+        # equals strlen(fmt). When that matches, drop it.
+        try:
+            if args[0] == len(_expand_escapes(fmt)):
+                return args[1:]
+        except Exception:
+            pass
+    return args
 
 
-def fprintf_f64_2(fmt, n, a, b):
-    sys.stdout.write(_c_printf(_expand_escapes(fmt), a, b))
+def fprintf_f64(fmt, *args):
+    args = _fprintf_split(fmt, args)
+    sys.stdout.write(_c_printf(_expand_escapes(fmt), *args))
 
 
-def fprintf_f64_3(fmt, n, a, b, c):
-    sys.stdout.write(_c_printf(_expand_escapes(fmt), a, b, c))
+def fprintf_f64_2(fmt, *args):
+    args = _fprintf_split(fmt, args)
+    sys.stdout.write(_c_printf(_expand_escapes(fmt), *args))
 
 
-def fprintf_f64_4(fmt, n, a, b, c, d):
-    sys.stdout.write(_c_printf(_expand_escapes(fmt), a, b, c, d))
+def fprintf_f64_3(fmt, *args):
+    args = _fprintf_split(fmt, args)
+    sys.stdout.write(_c_printf(_expand_escapes(fmt), *args))
+
+
+def fprintf_f64_4(fmt, *args):
+    args = _fprintf_split(fmt, args)
+    sys.stdout.write(_c_printf(_expand_escapes(fmt), *args))
 
 
 def _fp_write(fp, s):
@@ -321,6 +341,25 @@ def range(start, step, end):
     if count <= 0: return np.zeros((1, 0))
     vals = s + st * np.arange(count)
     return vals.reshape((1, count))
+
+
+def frange(start, end, step):
+    # Iterator form of MATLAB's colon, used as the fallback target of
+    # `for i = start:step:end` in `-emit-python` when bounds are not
+    # compile-time integer literals. Each yielded value is a Python float
+    # so downstream arithmetic stays in f64.
+    s = float(start); st = float(step); e = float(end)
+    if st == 0: return
+    if st > 0:
+        x = s
+        while x <= e:
+            yield x
+            x = x + st
+    else:
+        x = s
+        while x >= e:
+            yield x
+            x = x + st
 
 
 def linspace(a, b, n=None):

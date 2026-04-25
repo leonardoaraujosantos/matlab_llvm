@@ -64,35 +64,56 @@ to `import matlab_runtime as rt`.
 
 | MLIR | Python output |
 |---|---|
-| `%c = arith.constant 1.0 : f64` | `v0 = 1.0` |
-| `%c = arith.constant 1 : i64` | `v0 = 1` |
-| `%s = arith.addf %a, %b` | `v1 = v0 + v2` |
+| `%c = arith.constant 1.0 : f64` | `1.0` (shortest round-tripping repr; `0.05`, not `0.050000000000000003`) |
+| `%c = arith.constant 1 : i64` | `1` |
+| `%s = arith.addf %a, %b` | `v1 = a + b` |
 | `arith.mulf / divf / subf` | `*` / `/` / `-` |
 | `arith.cmpi / cmpf` | `==`, `!=`, `<`, `<=`, `>`, `>=` |
-| `arith.andi / ori / xori` | `&`, `\|`, `^` (on `int`); `and`/`or` for `i1` |
+| `arith.andi / ori / xori` | `&`, `\|`, `^` (on `int`); `and` / `or` / `!=` for `i1` |
 | `arith.select %c, %a, %b` | `v0 = a if c else b` |
 | casts (`sitofp`, `fptosi`, etc.) | `float(x)` / `int(x)` / no-op |
-| `scf.if %c -> T { yield %a } else { yield %b }` | `v0 = a if c else b` (single-result), else `if/else` block assigning to `v0` |
-| `scf.while { cond } do { body }` | `while True: <before>; if not cond: break; <after>` — **or** the simpler `while cond: <body>` when the before-region has no side effects |
-| `func.func @foo(%a, %b) -> T` | `def foo(a, b): ...` with `return` on `func.return` |
-| `func.call @foo(%a)` | `v0 = foo(a)` |
-| `llvm.call @matlab_matmul_mm(%a, %b)` | `v0 = rt.matmul(a, b)` (remap each `matlab_*` symbol) |
+| `scf.if %c -> T { yield %a } else { yield %b }` | `if c: v0 = a` / `else: v0 = b` (no `v0 = 0` predeclaration; the yields cover both paths) |
+| `scf.if` with statically-known `c` | only the live branch is emitted; e.g. polymorphic dispatch's `if 2 == 2` collapses |
+| `scf.while` matching `for i = a:s:b` | `for i in range(a, b+1, s):` (or `rt.frange(a, b, s)` for non-integer bounds) |
+| `scf.while` (general) | `while cond: <body>` — or `while True: ...; if not cond: break; ...` when the before-region has work |
+| `func.func @foo(%a, %b) -> T` | `def foo(a, b):` (param names taken from `matlab.name`); `pass` for empty bodies |
+| `func.call @foo(%a)` | `foo(a)` (inlined into the use site when single-use) |
+| `llvm.call @matlab_matmul_mm(%a, %b)` | `rt.matmul_mm(a, b)` (every `matlab_*` symbol drops its prefix) |
+| `llvm.call @matlab_disp_str(%p, %len)` | `rt.disp_str(...)` — the `(ptr, length)` C ABI tail is dropped, since Python strings carry their own length |
 | `llvm.call %fp(%a)` (indirect) | `v0 = fp(a)` |
-| `llvm.alloca` (scalar slot) | skip entirely — emit the stored value as a plain assignment on `store` |
-| `llvm.alloca` (array slot) | `v0 = np.zeros(N)` |
-| `llvm.store %v, %p` | if `%p` traces to a scalar slot: `slot_name = v`; if array: `v0[idx] = v` |
-| `llvm.load %p` | `slot_name` or `v0[idx]` |
-| `llvm.getelementptr %base[%i]` | tracked as `(base, i)` pair; materialized only when load/store consumes it |
-| `llvm.mlir.global @s = "..."` | `s = "..."` at module scope |
+| `llvm.alloca` (scalar slot) | skipped — load/store emit as plain Python `name = ...` |
+| `llvm.alloca` (matrix-literal array) | `slot = [v0, v1, ...]` (the GEP+store pairs that filled it are folded in) |
+| `llvm.store %v, %p` | scalar slot: `name = v`; array element: `name[idx] = v` |
+| `llvm.load %p` | scalar slot: bare `name`; array element: `name[idx]` |
+| `llvm.getelementptr %base[%i]` | tracked as `(base, i)` pair; materialized only at the load/store consumer |
+| `llvm.mlir.global @s = "..."` | inlined as a Python string literal at every `addressof` use site (no top-of-file declaration) |
 
-Important emitter behavior:
-- scalar `alloca` + `store` + `load` patterns collapse into plain Python locals
-- many runtime calls become `rt.<name>(...)`
-- top-level script bodies are hoisted to module scope
-- break and continue flags introduced by lowering are reconstructed into
-  native Python `break` and `continue`
-- preserved comments and line markers are supported, similar to the C/C++
-  emitter
+Emitter behavior worth knowing:
+- **Strings inline**: `rt.disp_str("Hello")` directly, instead of a top-of-file
+  `__matlab_str0 = "Hello"` declaration referenced by `rt.disp_str(__matlab_str0, 13)`.
+- **For loops**: `scf.while` ops produced by `LowerSeqLoops::lowerForOp` collapse
+  to native `for i in range(...):`. When init/end/step are integer literals,
+  Python's `range` is used; otherwise the `rt.frange(start, end, step)` generator
+  preserves MATLAB's inclusive `start:step:end` semantics.
+- **Static-condition folding**: `scf.if` whose condition is a constant-vs-constant
+  comparison (e.g. the `if nargin == 2` baked in by polymorphic dispatch) emits
+  only the live branch.
+- **Scalar slot collapse**: alloca + store + load patterns become plain Python
+  variables. The `slot = 0` pre-declaration is dropped when the slot is
+  unconditionally written before any read, including via an `scf.if` whose
+  both branches store into the slot (covers MATLAB return-slot patterns).
+- **Trailing `return`**: dropped when it sits at the end of a void function;
+  Python's implicit return covers it.
+- **break / continue un-lowering**: the frontend's `did_break` / `did_continue`
+  flag slots are re-lowered to native Python `break` / `continue`, with the
+  guarding `& !did_break` conjunct stripped from the loop condition.
+- **Per-function name scope**: each `def` gets a fresh identifier table so
+  parameters keep their natural names (`x`, `i`) instead of accumulating
+  `_2`, `_3` suffixes from earlier functions.
+- **Top-level script body** is hoisted to module scope (mirrors the
+  `LowerIO` rename of `@script` to `@main`).
+- **Comments and blank lines** from the MATLAB source propagate to the
+  emitted Python, similar to the C/C++ emitter.
 
 ## Runtime Model
 
@@ -137,6 +158,41 @@ That runner:
 - honors `.sorted` markers for nondeterministic `parfor` output
 - honors `.skip-emit-python` markers for known divergences
 
+## Sample output
+
+```matlab
+% factorial.m
+function y = fact(n)
+  if n <= 1
+    y = 1;
+  else
+    y = n * fact(n - 1);
+  end
+end
+disp("fact(1..6):");
+for i = 1:6
+  disp(fact(i));
+end
+```
+
+emits:
+
+```python
+import matlab_runtime as rt
+import numpy as np
+
+def fact(n):
+    if n <= 1.0:
+        y = 1.0
+    else:
+        y = n * fact(n - 1.0)
+    return y
+
+rt.disp_str("fact(1..6):")
+for i in range(1, 7):
+    rt.disp_f64(fact(i))
+```
+
 ## Limitations
 
 This backend should be treated as experimental.
@@ -145,7 +201,8 @@ Known constraints:
 - some numerically sensitive cases are skipped in the Python lane
 - parity is strongest on common scalar, matrix, control-flow, and
   runtime-library programs, not on every edge case
-- the generated Python is intended to be readable enough to inspect, not
-  idiomatic hand-written Python
+- the generated Python aims to read like the natural translation of the
+  MATLAB source — not perfectly idiomatic hand-written Python, but close
+  enough to inspect and modify
 - if you need the most mature code generation path, prefer `-emit-c`,
   `-emit-cpp`, or `-emit-llvm`

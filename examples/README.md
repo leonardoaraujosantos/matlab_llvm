@@ -1,34 +1,51 @@
 # examples/
 
-Short, self-contained MATLAB programs that the `matlab_llvm` compiler can
-take end-to-end: parse → Sema → MLIR → LLVM IR → native executable.
+This directory contains short, runnable programs that exercise the main
+language and runtime features the project supports today.
 
-Every file here is expected to compile cleanly with:
+Each example is intended to compile and run end-to-end through the normal
+pipeline:
+
+`MATLAB source -> parse -> Sema -> MLIR -> backend -> executable`
+
+Quick check for any one example:
 
 ```sh
 just compile examples/<name>.m /tmp/<name> && /tmp/<name>
 ```
 
-| File              | Demonstrates                                                     |
-| ----------------- | ---------------------------------------------------------------- |
-| `hello.m`         | `disp` of a char literal; `fprintf` with an inline format string |
-| `matrix_mult.m`   | Matrix construction, `*`, `.*`, transpose                        |
-| `solve_linear.m`  | Left-division `A \ b` for a small linear system                  |
-| `eigendecomp.m`   | `eig`, `det`, `inv` on a symmetric tridiagonal                   |
-| `logical_mask.m`  | Logical indexing `A(A > 0)`, `mean`, `sum`-of-logical            |
-| `stats.m`         | `numel`, `sum`, `mean`, `min`, `max`, `sqrt` of `sum(x.*x)`      |
-| `for_loop.m`      | Sequential `for` loops, nested + non-unit step + negative step    |
-| `fibonacci.m`     | Iterative `while` loop with loop-carried state                   |
-| `factorial.m`     | Single-recursion user function (`if/else`, `*`, `-`)             |
-| `parfor.m`        | `parfor` reductions (single/multi/step) + calls to user helpers  |
-| `func_handles.m`  | `@sin` / `@sqrt` / `@abs` / `@exp` handles via indirect call     |
-| `anon_capture.m`  | `@(x) x + k` — by-value captures of outer scalar variables       |
-| `bank_account.m`  | `classdef` with `properties` / `methods` / `Dependent` / `< handle`-style inheritance / operator overloading (`eq`) |
+Run the whole directory with:
 
-## Current limitations the examples work around
+```sh
+just examples
+```
 
-- `break` and `continue` are parsed but not lowered to LLVM yet, so the
-  examples avoid early-exit patterns.
-- `fprintf` with `%f`/`%d` against a computed scalar whose Sema type is
-  `any` (e.g. `mean(A(:))`) falls off the fast-path today. Use `disp()`
-  when printing aggregate results.
+## Feature Coverage
+
+| File | Demonstrates |
+|---|---|
+| `hello.m` | `disp`, `fprintf`, basic script execution |
+| `matrix_mult.m` | matrix literals, `*`, `.*`, transpose |
+| `solve_linear.m` | left division `A \ b` |
+| `eigendecomp.m` | `eig`, `det`, `inv` |
+| `logical_mask.m` | logical indexing and reductions |
+| `stats.m` | `numel`, `sum`, `mean`, `min`, `max`, derived scalar math |
+| `for_loop.m` | nested `for`, non-unit step, negative step |
+| `while_loop.m` | `while` loops |
+| `fibonacci.m` | loop-carried state and iterative control flow |
+| `factorial.m` | recursion and user-defined functions |
+| `parfor.m` | `parfor` reductions and helper calls |
+| `func_handles.m` | builtin and user function handles |
+| `anon_capture.m` | anonymous functions with captures |
+| `bank_account.m` | `classdef`, properties, methods, `Dependent`, inheritance-style object model, operator overloading |
+| `traffic_action.m` | branching and simple classification |
+| `is_old.m` | boolean logic and predicate-style functions |
+
+## Notes
+
+- These are demonstration programs, not an exhaustive compatibility
+  suite. The full supported surface is broader than this directory.
+- The authoritative feature inventory is
+  [`../docs/feature_status.md`](../docs/feature_status.md).
+- If you want broader coverage, inspect `test/Run/`, which holds the main
+  execution corpus used for backend parity checking.

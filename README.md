@@ -104,6 +104,13 @@ build/matlabc -emit-python foo.m > foo.py
 PYTHONPATH=runtime python3 foo.py
 ```
 
+The Python emitter aims to read as the natural translation of the source —
+MATLAB `for i = 1:N` becomes Python `for i in range(1, N+1):`, MATLAB
+`break` stays `break`, string literals inline at their use site, and
+polymorphic-dispatch guards collapse statically. See
+[`docs/emit_python.md`](docs/emit_python.md) for the full op-to-Python
+mapping.
+
 Use the development shortcuts in [`justfile`](justfile):
 
 ```bash
