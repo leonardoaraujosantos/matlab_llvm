@@ -13,6 +13,7 @@ Use this page as the entry point to the repo docs.
 - [`emit_c_cpp.md`](emit_c_cpp.md): C and C++ emission design and guarantees
 - [`emit_python.md`](emit_python.md): Python emission status, workflow, and limits
 - [`complex.md`](complex.md): complex numbers, FFT, and DSP-oriented runtime support
+- [`emit_systemverilog.md`](emit_systemverilog.md): direct RTL/SystemVerilog backend plan, including combinational, register, counter, and FSM inference
 - [`emit_systemc.md`](emit_systemc.md): future SystemC backend plan
 
 ## Interactive Tooling
