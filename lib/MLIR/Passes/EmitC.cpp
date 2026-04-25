@@ -36,6 +36,19 @@ namespace mlirgen {
 
 namespace {
 
+/// One MATLAB classdef and its discovered scalar properties. The C++
+/// emitter lifts these to a real C++ class with named member fields and
+/// translated method bodies — so `acc.Balance` is a direct field access
+/// rather than a `matlab_obj_get_f64(acc, "Balance", 7)` runtime call.
+struct CppClassDef {
+  std::string Super;
+  // Property names in encounter order (deduped). Currently every
+  // property is `double`-typed.
+  std::vector<std::string> Properties;
+  std::vector<mlir::func::FuncOp> Ctors;
+  std::vector<mlir::func::FuncOp> Methods;  // non-ctor (regular / get / op / static)
+};
+
 /// Metadata for an scf.while op that matched the canonical for-loop shape
 /// produced by LowerSeqLoops. Populated by Emitter::scanForLoopPatterns
 /// before emission so the scf.while handler can print a C-style
@@ -181,6 +194,40 @@ private:
   // function for any operand whose producer is also inlined).
   bool buildInlineExpr(mlir::Operation &Op, std::string &Expr);
 
+  // ----- Classdef → real C++ class translation --------------------------
+  // Walk the module, group classdef methods by `matlab.class_name`,
+  // discover scalar properties from `obj_set_f64` / `obj_get_f64` calls
+  // in method bodies. Populates Classes and ClassMethodFuncs.
+  void collectClassdefs(mlir::ModuleOp M);
+  // Walk every SSA value in the module and tag it with a class type
+  // when the value originates from a class-ctor call result, an alloca
+  // that received a class-typed store, or a load from a tracked alloca.
+  // Iterated to a fixpoint so transitive store→load propagation lands.
+  void populateClassValueTypes(mlir::ModuleOp M);
+  // Emit one classdef as a real C++ class block with named member
+  // fields, default+parameterised constructors, and translated method
+  // bodies that use `Field` (bare) instead of runtime hash calls.
+  void emitCppClass(llvm::StringRef ClassName, const CppClassDef &CD);
+  // Emit a single class method (ctor / regular / get / operator /
+  // static) inside the open class block at indent 1.
+  void emitCppMethod(mlir::func::FuncOp F, llvm::StringRef ClassName);
+  // Properties of a class plus everything inherited up the super chain.
+  llvm::StringSet<> inheritedProperties(llvm::StringRef ClassName) const;
+  // Rewrite `matlab_obj_get_f64(self, "X", _)` and
+  // `matlab_obj_set_f64(self, "X", _, v)` to direct member access when
+  // the receiver is the active class-method's `this` or an SSA value
+  // tagged with a class type.
+  bool tryRewriteObjGet(mlir::LLVM::CallOp C, std::string &Out);
+  bool tryRewriteObjSet(mlir::LLVM::CallOp C, std::string &Out);
+  // Rewrite a call to a classdef method as the matching C++ syntax —
+  // `Class(args)`, `obj.method(args)`, `a == b`, `obj.X`, `Class::method(args)`.
+  bool tryRewriteAsClassCall(llvm::StringRef Callee,
+                              mlir::ValueRange Operands,
+                              std::string &Out);
+  // Look up the C++ class type assigned to V (from a ctor result, an
+  // alloca-tracked load, etc.), or empty if V isn't a class instance.
+  llvm::StringRef classTypeOf(mlir::Value V) const;
+
   std::ostream &OS;
   bool Cpp;
   bool NoLine;
@@ -292,6 +339,25 @@ private:
   // the script's first-stmt location).
   llvm::DenseSet<int> TrailingEmittedLines;
   void flushPendingTrailing();
+
+  // ----- Classdef → real C++ class translation --------------------------
+  // Populated by collectClassdefs() before any function emission and
+  // consumed by the class-block emit + every call-site rewrite.
+  llvm::StringMap<CppClassDef> Classes;
+  // Set of flat-function symbol names ("BankAccount__deposit") whose
+  // bodies are now emitted inside a class block. The free-function
+  // emission pass skips these so we don't get duplicate definitions.
+  llvm::StringSet<> ClassMethodFuncs;
+  // Active class-method context — set while emitting a class method body.
+  // Drives obj_get/set_f64 → bare-field-name rewriting in emitOp.
+  bool InClassMethodBody = false;
+  mlir::Value ClassMethodSelf;
+  std::string ClassMethodClassName;
+  // SSA values known to hold instances of a particular class. Set when
+  // we see a ctor call's result; propagated through alloca / store /
+  // load chains. Drives variable-type emission and call-site rewrites.
+  llvm::DenseMap<mlir::Value, std::string> ClassValueType;
+  llvm::DenseMap<mlir::Operation *, std::string> ClassAllocaType;
 };
 
 // ---------------------------------------------------------------------------
@@ -739,6 +805,8 @@ bool Emitter::buildInlineExpr(mlir::Operation &Op, std::string &Expr) {
   // are outermost — strip any superfluous outer parens from each operand
   // so `fact((n - 1))` reads as `fact(n - 1)`.
   if (auto C = dyn_cast<func::CallOp>(Op)) {
+    if (tryRewriteAsClassCall(C.getCallee(), C.getOperands(), Expr))
+      return true;
     std::string E = C.getCallee().str() + "(";
     for (unsigned i = 0; i < C.getNumOperands(); ++i) {
       if (i) E += ", ";
@@ -750,6 +818,14 @@ bool Emitter::buildInlineExpr(mlir::Operation &Op, std::string &Expr) {
   }
   if (auto C = dyn_cast<LLVM::CallOp>(Op)) {
     if (!C.getCallee()) return false;
+    // Class-field read: obj_get_f64(self, "X", _) → bare field name (or
+    // `instance.X` outside the class method). Tried first so it pre-empts
+    // the generic call form below.
+    if (tryRewriteObjGet(C, Expr)) return true;
+    // Class-method call: emit `Class(args)` / `obj.method(args)` /
+    // `a OP b` / `obj.X` / `Class::method(args)`.
+    if (tryRewriteAsClassCall(*C.getCallee(), C.getOperands(), Expr))
+      return true;
     std::string E = C.getCallee()->str() + "(";
     for (unsigned i = 0; i < C.getNumOperands(); ++i) {
       if (i) E += ", ";
@@ -1177,6 +1253,528 @@ void Emitter::flushPendingTrailing() {
   PendingTrailingLine = -1;
   PendingTrailingIndent = 0;
   PendingTrailingText.clear();
+}
+
+// ---------------------------------------------------------------------------
+// Classdef → real C++ class translation
+// ---------------------------------------------------------------------------
+
+llvm::StringRef Emitter::classTypeOf(mlir::Value V) const {
+  auto It = ClassValueType.find(V);
+  if (It != ClassValueType.end()) return It->second;
+  return {};
+}
+
+// Walk a string-global addressof and return the literal text, or {}.
+static std::optional<std::string> getStringGlobalLit(
+    mlir::Value V, mlir::ModuleOp M) {
+  auto *D = V.getDefiningOp();
+  auto Addr = mlir::dyn_cast_or_null<mlir::LLVM::AddressOfOp>(D);
+  if (!Addr) return std::nullopt;
+  auto G = M.lookupSymbol<mlir::LLVM::GlobalOp>(Addr.getGlobalName());
+  if (!G) return std::nullopt;
+  auto S = mlir::dyn_cast_or_null<mlir::StringAttr>(G.getValueAttr());
+  if (!S) return std::nullopt;
+  return S.getValue().str();
+}
+
+// True iff `Name` is a plain C/C++ identifier (and not a C++ keyword).
+static bool isValidCppIdentifier(llvm::StringRef Name) {
+  if (Name.empty()) return false;
+  unsigned char C0 = (unsigned char)Name[0];
+  if (!(std::isalpha(C0) || C0 == '_')) return false;
+  for (char C : Name)
+    if (!std::isalnum((unsigned char)C) && C != '_') return false;
+  static constexpr const char *Kw[] = {
+    "alignas","alignof","and","auto","bool","break","case","catch","char",
+    "class","const","constexpr","continue","decltype","default","delete",
+    "do","double","else","enum","explicit","export","extern","false",
+    "float","for","friend","goto","if","inline","int","long","mutable",
+    "namespace","new","not","nullptr","operator","or","private","protected",
+    "public","register","return","short","signed","sizeof","static","struct",
+    "switch","template","this","throw","true","try","typedef","typeid",
+    "typename","union","unsigned","using","virtual","void","volatile","while",
+    "xor",
+  };
+  for (auto *K : Kw) if (Name == K) return false;
+  return true;
+}
+
+// Map MATLAB operator method names to the matching C++ operator spelling.
+static llvm::StringRef cppOperatorSpellingFor(llvm::StringRef Name) {
+  if (Name == "eq")     return "==";
+  if (Name == "ne")     return "!=";
+  if (Name == "lt")     return "<";
+  if (Name == "le")     return "<=";
+  if (Name == "gt")     return ">";
+  if (Name == "ge")     return ">=";
+  if (Name == "plus")   return "+";
+  if (Name == "minus")  return "-";
+  if (Name == "mtimes") return "*";
+  if (Name == "times")  return "*";
+  if (Name == "mrdivide") return "/";
+  if (Name == "rdivide")  return "/";
+  return {};
+}
+
+// Map a MATLAB method name (possibly with `get.` prefix or operator
+// alias) to the C++ method identifier we emit. Operators get the dunder
+// `operator<spelling>` form; get-properties keep the `get_` prefix
+// joined with the property; everything else gets dot-stripped.
+static std::string cppMethodIdentFor(llvm::StringRef Name) {
+  if (Name.starts_with("get.")) {
+    std::string S = "get_";
+    S += Name.drop_front(4).str();
+    return S;
+  }
+  if (auto Op = cppOperatorSpellingFor(Name); !Op.empty())
+    return ("operator" + Op).str();
+  std::string S = Name.str();
+  for (char &C : S) if (C == '.') C = '_';
+  return S;
+}
+
+void Emitter::collectClassdefs(mlir::ModuleOp M) {
+  for (auto &Op : M.getBody()->getOperations()) {
+    auto F = mlir::dyn_cast<mlir::func::FuncOp>(Op);
+    if (!F || F.getBody().empty()) continue;
+    auto CN = F->getAttrOfType<mlir::StringAttr>("matlab.class_name");
+    if (!CN) continue;
+    auto Kind = F->getAttrOfType<mlir::StringAttr>("matlab.method_kind");
+    auto &CD = Classes[CN.getValue()];
+    if (auto SC = F->getAttrOfType<mlir::StringAttr>("matlab.class_super"))
+      if (CD.Super.empty()) CD.Super = SC.getValue().str();
+    if (Kind && Kind.getValue() == "ctor")
+      CD.Ctors.push_back(F);
+    else
+      CD.Methods.push_back(F);
+    ClassMethodFuncs.insert(F.getSymName().str());
+
+    // Discover properties from obj_set_f64 / obj_get_f64 calls.
+    F.getBody().walk([&](mlir::LLVM::CallOp C) {
+      if (!C.getCallee()) return;
+      llvm::StringRef Callee = *C.getCallee();
+      if (Callee != "matlab_obj_set_f64" && Callee != "matlab_obj_get_f64")
+        return;
+      if (C.getNumOperands() < 2) return;
+      auto Lit = getStringGlobalLit(C.getOperand(1), M);
+      if (!Lit || !isValidCppIdentifier(*Lit)) return;
+      for (auto &P : CD.Properties) if (P == *Lit) return;
+      CD.Properties.push_back(*Lit);
+    });
+  }
+}
+
+void Emitter::populateClassValueTypes(mlir::ModuleOp M) {
+  auto markCallResult = [&](mlir::Operation *Op, mlir::Value Result,
+                             std::optional<llvm::StringRef> CalleeName)
+                            -> bool {
+    if (!CalleeName) return false;
+    if (!ClassMethodFuncs.count(*CalleeName)) return false;
+    auto F = M.lookupSymbol<mlir::func::FuncOp>(*CalleeName);
+    if (!F) return false;
+    auto Kind = F->getAttrOfType<mlir::StringAttr>("matlab.method_kind");
+    if (!Kind) return false;
+    auto CN = F->getAttrOfType<mlir::StringAttr>("matlab.class_name");
+    if (!CN) return false;
+    // ctors return their class.
+    bool TagIt = (Kind.getValue() == "ctor");
+    // Same-class operator overloads (`plus`, `minus`, `mtimes` …) that
+    // return `!llvm.ptr` also produce a class-typed value at the use
+    // site. Comparison ops (eq / ne / lt …) return `f64` so they're
+    // skipped naturally by the FuncType check below.
+    if (!TagIt) {
+      auto MN = F->getAttrOfType<mlir::StringAttr>("matlab.method_name");
+      auto FT = F.getFunctionType();
+      if (MN && FT.getNumResults() == 1 &&
+          mlir::isa<mlir::LLVM::LLVMPointerType>(FT.getResult(0))) {
+        auto Op = cppOperatorSpellingFor(MN.getValue());
+        if (Op == "+" || Op == "-" || Op == "*" || Op == "/")
+          TagIt = true;
+      }
+    }
+    if (!TagIt) return false;
+    auto It = ClassValueType.find(Result);
+    if (It != ClassValueType.end() && It->second == CN.getValue().str())
+      return false;
+    ClassValueType[Result] = CN.getValue().str();
+    return true;
+  };
+
+  bool Changed = true;
+  while (Changed) {
+    Changed = false;
+    M.walk([&](mlir::Operation *Op) {
+      if (auto C = mlir::dyn_cast<mlir::LLVM::CallOp>(Op)) {
+        if (C.getCallee() && C.getNumResults() == 1)
+          Changed |= markCallResult(Op, C.getResult(),
+                                     llvm::StringRef(*C.getCallee()));
+      }
+      if (auto C = mlir::dyn_cast<mlir::func::CallOp>(Op)) {
+        if (C.getNumResults() == 1)
+          Changed |= markCallResult(Op, C.getResult(0),
+                                     llvm::StringRef(C.getCallee()));
+      }
+      // Store of class-typed value into alloca.
+      if (auto S = mlir::dyn_cast<mlir::LLVM::StoreOp>(Op)) {
+        auto CT = classTypeOf(S.getValue());
+        if (CT.empty()) return;
+        auto *Def = S.getAddr().getDefiningOp();
+        auto A = mlir::dyn_cast_or_null<mlir::LLVM::AllocaOp>(Def);
+        if (!A) return;
+        auto &T = ClassAllocaType[A.getOperation()];
+        if (T != CT) { T = CT.str(); Changed = true; }
+      }
+      // Load from class-typed alloca.
+      if (auto L = mlir::dyn_cast<mlir::LLVM::LoadOp>(Op)) {
+        auto *Def = L.getAddr().getDefiningOp();
+        auto A = mlir::dyn_cast_or_null<mlir::LLVM::AllocaOp>(Def);
+        if (!A) return;
+        auto It = ClassAllocaType.find(A.getOperation());
+        if (It == ClassAllocaType.end()) return;
+        auto &T = ClassValueType[L.getResult()];
+        if (T != It->second) { T = It->second; Changed = true; }
+      }
+    });
+  }
+}
+
+llvm::StringSet<> Emitter::inheritedProperties(
+    llvm::StringRef ClassName) const {
+  llvm::StringSet<> Out;
+  llvm::StringRef Cur = ClassName;
+  // Walk the super chain; every property the parent (transitively)
+  // declares is inherited and must NOT be redeclared on the child.
+  while (true) {
+    auto It = Classes.find(Cur);
+    if (It == Classes.end()) break;
+    if (It->second.Super.empty()) break;
+    auto Sup = Classes.find(It->second.Super);
+    if (Sup == Classes.end()) break;
+    for (auto &P : Sup->second.Properties) Out.insert(P);
+    Cur = It->second.Super;
+  }
+  return Out;
+}
+
+bool Emitter::tryRewriteObjGet(mlir::LLVM::CallOp C, std::string &Out) {
+  // Only the C++ path emits real classes; C stays on the runtime hash.
+  if (!Cpp) return false;
+  if (!C.getCallee() || *C.getCallee() != "matlab_obj_get_f64") return false;
+  if (C.getNumOperands() < 2) return false;
+  auto M = C->getParentOfType<mlir::ModuleOp>();
+  auto Lit = getStringGlobalLit(C.getOperand(1), M);
+  if (!Lit || !isValidCppIdentifier(*Lit)) return false;
+  mlir::Value Recv = C.getOperand(0);
+  // Inside a class method, the receiver is the method's `this`; emit
+  // bare `Field` (member name resolves against `this`).
+  if (InClassMethodBody && Recv == ClassMethodSelf) {
+    Out = *Lit;
+    return true;
+  }
+  // Outside a class method, the receiver must be a tracked class
+  // instance for the rewrite to be safe.
+  if (!classTypeOf(Recv).empty()) {
+    Out = exprFor(Recv) + "." + *Lit;
+    return true;
+  }
+  return false;
+}
+
+bool Emitter::tryRewriteObjSet(mlir::LLVM::CallOp C, std::string &Out) {
+  if (!Cpp) return false;
+  if (!C.getCallee() || *C.getCallee() != "matlab_obj_set_f64") return false;
+  if (C.getNumOperands() < 4) return false;
+  auto M = C->getParentOfType<mlir::ModuleOp>();
+  auto Lit = getStringGlobalLit(C.getOperand(1), M);
+  if (!Lit || !isValidCppIdentifier(*Lit)) return false;
+  mlir::Value Recv = C.getOperand(0);
+  std::string Lhs;
+  if (InClassMethodBody && Recv == ClassMethodSelf) {
+    Lhs = *Lit;
+  } else if (!classTypeOf(Recv).empty()) {
+    Lhs = stmtExpr(Recv) + "." + *Lit;
+  } else {
+    return false;
+  }
+  Out = Lhs + " = " + stmtExpr(C.getOperand(3));
+  return true;
+}
+
+bool Emitter::tryRewriteAsClassCall(llvm::StringRef Callee,
+                                     mlir::ValueRange Operands,
+                                     std::string &Out) {
+  if (!Cpp) return false;
+  if (!ClassMethodFuncs.count(Callee)) return false;
+  // Resolve the func op via any parent module in scope.
+  mlir::func::FuncOp F;
+  for (auto &KV : Classes) {
+    for (auto Fn : KV.second.Ctors)
+      if (Fn.getSymName() == Callee) { F = Fn; break; }
+    if (F) break;
+    for (auto Fn : KV.second.Methods)
+      if (Fn.getSymName() == Callee) { F = Fn; break; }
+    if (F) break;
+  }
+  if (!F) return false;
+  auto CN = F->getAttrOfType<mlir::StringAttr>("matlab.class_name");
+  auto Kind = F->getAttrOfType<mlir::StringAttr>("matlab.method_kind");
+  auto MN = F->getAttrOfType<mlir::StringAttr>("matlab.method_name");
+  if (!CN) return false;
+  std::string Cls = CN.getValue().str();
+
+  if (Kind && Kind.getValue() == "ctor") {
+    std::string E = Cls + "(";
+    for (unsigned i = 0; i < Operands.size(); ++i) {
+      if (i) E += ", ";
+      E += stmtExpr(Operands[i]);
+    }
+    E += ")";
+    Out = E;
+    return true;
+  }
+  if (Kind && Kind.getValue() == "static") {
+    std::string Name = MN ? MN.getValue().str() : "";
+    if (Name.empty()) return false;
+    std::string E = Cls + "::" + Name + "(";
+    for (unsigned i = 0; i < Operands.size(); ++i) {
+      if (i) E += ", ";
+      E += stmtExpr(Operands[i]);
+    }
+    E += ")";
+    Out = E;
+    return true;
+  }
+  if (MN && MN.getValue().starts_with("get.")) {
+    if (Operands.size() != 1) return false;
+    if (classTypeOf(Operands[0]).empty()) return false;
+    Out = exprFor(Operands[0]) + "." +
+          ("get_" + MN.getValue().drop_front(4)).str() + "()";
+    return true;
+  }
+  if (MN) {
+    if (auto Op = cppOperatorSpellingFor(MN.getValue()); !Op.empty()) {
+      if (Operands.size() != 2) return false;
+      if (classTypeOf(Operands[0]).empty()) return false;
+      Out = "(" + exprFor(Operands[0]) + " " + Op.str() + " "
+          + exprFor(Operands[1]) + ")";
+      return true;
+    }
+  }
+  if (Operands.empty()) return false;
+  if (classTypeOf(Operands[0]).empty()) return false;
+  std::string Name = MN ? cppMethodIdentFor(MN.getValue()) : "";
+  if (Name.empty()) return false;
+  std::string E = exprFor(Operands[0]) + "." + Name + "(";
+  for (unsigned i = 1; i < Operands.size(); ++i) {
+    if (i > 1) E += ", ";
+    E += stmtExpr(Operands[i]);
+  }
+  E += ")";
+  Out = E;
+  return true;
+}
+
+void Emitter::emitCppClass(llvm::StringRef ClassName,
+                            const CppClassDef &CD) {
+  llvm::StringSet<> Inh = inheritedProperties(ClassName);
+  llvm::SmallVector<llvm::StringRef, 8> Own;
+  for (auto &P : CD.Properties)
+    if (!Inh.count(P)) Own.push_back(P);
+
+  OS << "class " << ClassName.str();
+  if (!CD.Super.empty()) OS << " : public " << CD.Super;
+  OS << " {\npublic:\n";
+  for (auto &P : Own) OS << "  double " << P.str() << ";\n";
+  if (!Own.empty() || !CD.Ctors.empty() || !CD.Methods.empty()) OS << "\n";
+  // Always emit a default ctor — needed when the parent class chain
+  // requires one for `Foo() = default;` style construction by main /
+  // by std::array etc. and to keep field zero-init explicit.
+  OS << "  " << ClassName.str() << "() = default;\n";
+  for (auto F : CD.Ctors)  emitCppMethod(F, ClassName);
+  for (auto F : CD.Methods) emitCppMethod(F, ClassName);
+  OS << "};\n\n";
+}
+
+void Emitter::emitCppMethod(mlir::func::FuncOp F,
+                             llvm::StringRef ClassName) {
+  // Per-method emitter state — mirrors emitFuncFunc's reset.
+  NextId = 0;
+  InlineExprs.clear();
+  InlinedOps.clear();
+  DirectSlots.clear();
+  ForPatterns.clear();
+  SuppressedOps.clear();
+  FusedForSlots.clear();
+  FusedForSlotName.clear();
+  BreakFlagSlots.clear();
+  ContinueFlagSlots.clear();
+  FlagIfKind.clear();
+  InlinedIfs.clear();
+  Names.clear();
+  UsedNames = UsedNamesAfterProlog;
+  // Reserve `this` so locals can't accidentally shadow it. The existing
+  // class name is reserved at module scope already.
+  UsedNames.insert("this");
+  LastLineFile.clear();
+  LastLineNum = -1;
+  PendingTrailingLine = -1;
+  PendingTrailingText.clear();
+  TrailingEmittedLines.clear();
+
+  computeInlines(F.getBody());
+  scanBreakContinueFlags(F.getBody());
+  scanForLoopPatterns(F.getBody());
+
+  auto FT = F.getFunctionType();
+  auto Kind = F->getAttrOfType<mlir::StringAttr>("matlab.method_kind");
+  auto MN   = F->getAttrOfType<mlir::StringAttr>("matlab.method_name");
+  bool IsCtor   = Kind && Kind.getValue() == "ctor";
+  bool IsStatic = Kind && Kind.getValue() == "static";
+  bool IsBinaryOp = MN && !cppOperatorSpellingFor(MN.getValue()).empty() &&
+                    FT.getNumInputs() == 2;
+  bool IsGet = MN && MN.getValue().starts_with("get.");
+
+  auto &Entry = F.getBody().front();
+
+  // Bind `self` (or `other` for binary ops). Static methods bind no
+  // implicit receiver — every parameter is a real argument.
+  if (!IsCtor && !IsStatic && FT.getNumInputs() >= 1) {
+    Names[Entry.getArgument(0)] = "this";
+    InClassMethodBody = true;
+    ClassMethodSelf = Entry.getArgument(0);
+    ClassMethodClassName = ClassName.str();
+  }
+  if (IsBinaryOp && FT.getNumInputs() == 2 &&
+      mlir::isa<mlir::LLVM::LLVMPointerType>(FT.getInput(1))) {
+    UsedNames.insert("other");
+    Names[Entry.getArgument(1)] = "other";
+    // The binary-op `other` is a same-class instance, so obj_get_f64
+    // on it should rewrite to `other.Field`.
+    ClassValueType[Entry.getArgument(1)] = ClassName.str();
+  }
+  // Constructor: locate `matlab_obj_new`, alias its result to `this`,
+  // suppress that call + the trailing `return obj_new_result`.
+  mlir::Operation *CtorObjNew = nullptr;
+  if (IsCtor) {
+    F.getBody().walk([&](mlir::LLVM::CallOp C) {
+      if (CtorObjNew) return;
+      if (C.getCallee() && *C.getCallee() == "matlab_obj_new" &&
+          C.getNumResults() == 1) {
+        CtorObjNew = C.getOperation();
+        Names[C.getResult()] = "this";
+        SuppressedOps.insert(C.getOperation());
+      }
+    });
+    if (CtorObjNew) {
+      F.getBody().walk([&](mlir::Operation *Op) {
+        if (auto R = mlir::dyn_cast<mlir::func::ReturnOp>(Op)) {
+          if (R.getNumOperands() == 1 &&
+              R.getOperand(0) == CtorObjNew->getResult(0))
+            SuppressedOps.insert(Op);
+        }
+      });
+      InClassMethodBody = true;
+      ClassMethodSelf = CtorObjNew->getResult(0);
+      ClassMethodClassName = ClassName.str();
+    }
+  }
+
+  // For binary-op methods whose second arg is a same-class !llvm.ptr,
+  // emit it as `const Class &other`. When the second arg is a scalar
+  // (f64 / int) the operator takes a plain value (e.g. `Vec2 * double`).
+  bool SecondIsSameClass = false;
+  if (IsBinaryOp && FT.getNumInputs() == 2) {
+    auto SecondTy = FT.getInput(1);
+    SecondIsSameClass =
+        mlir::isa<mlir::LLVM::LLVMPointerType>(SecondTy);
+  }
+
+  // For methods whose IR return type is `!llvm.ptr` and that belong to a
+  // class, the body produces a class instance — emit the C++ return type
+  // as the class name (so `Vec2 operator+(...)` returns a Vec2 directly).
+  // Comparison-style operators (eq/ne/lt/le/gt/ge) keep their MATLAB
+  // 1.0/0.0 return type.
+  bool MethodReturnsThisClass = false;
+  if (!IsCtor && FT.getNumResults() == 1 &&
+      mlir::isa<mlir::LLVM::LLVMPointerType>(FT.getResult(0))) {
+    if (MN) {
+      auto Op = cppOperatorSpellingFor(MN.getValue());
+      if (Op == "+" || Op == "-" || Op == "*" || Op == "/")
+        MethodReturnsThisClass = true;
+    }
+  }
+
+  // Header line.
+  indent(1);
+  if (IsStatic) OS << "static ";
+  if (IsCtor) {
+    OS << ClassName.str() << "(";
+  } else {
+    std::string RetTy;
+    if (FT.getNumResults() == 0)        RetTy = "void";
+    else if (MethodReturnsThisClass)    RetTy = ClassName.str();
+    else                                RetTy = cTypeOf(FT.getResult(0));
+    std::string MethodName;
+    if (IsGet)
+      MethodName = ("get_" + MN.getValue().drop_front(4)).str();
+    else if (auto Op = MN ? cppOperatorSpellingFor(MN.getValue())
+                          : llvm::StringRef();
+             !Op.empty())
+      MethodName = ("operator" + Op).str();
+    else if (MN)
+      MethodName = cppMethodIdentFor(MN.getValue());
+    else
+      MethodName = F.getSymName().str();
+    OS << RetTy << " " << MethodName << "(";
+  }
+
+  // Parameters: skip the implicit `this` (first arg for non-ctor / non-static).
+  bool FirstParam = true;
+  unsigned StartArg = (IsCtor || IsStatic) ? 0 : 1;
+  for (unsigned i = StartArg; i < FT.getNumInputs(); ++i) {
+    if (!FirstParam) OS << ", ";
+    FirstParam = false;
+    auto Arg = Entry.getArgument(i);
+    std::string N;
+    if (i == 1 && IsBinaryOp && SecondIsSameClass) {
+      OS << "const " << ClassName.str() << " &other";
+      Names[Arg] = "other";
+      continue;
+    }
+    if (auto NA = F.getArgAttrOfType<mlir::StringAttr>(i, "matlab.name"))
+      N = uniqueName(NA.getValue());
+    else
+      N = freshName();
+    Names[Arg] = N;
+    OS << cTypeOf(FT.getInput(i)) << " " << N;
+  }
+  OS << ") {\n";
+
+  // Trivial body? Empty / just-return / ctor with only obj_new+return.
+  bool BodyIsTrivial = true;
+  for (auto &Op : Entry.getOperations()) {
+    if (SuppressedOps.count(&Op)) continue;
+    if (InlinedOps.count(&Op)) continue;
+    if (auto R = mlir::dyn_cast<mlir::func::ReturnOp>(Op)) {
+      if (R.getNumOperands() == 0) continue;
+      BodyIsTrivial = false; break;
+    }
+    if (mlir::isa<mlir::arith::ConstantOp, mlir::LLVM::ConstantOp,
+                  mlir::LLVM::ZeroOp, mlir::LLVM::AddressOfOp>(Op))
+      continue;
+    BodyIsTrivial = false;
+    break;
+  }
+  if (!BodyIsTrivial) emitRegion(F.getBody(), 2);
+
+  indent(1);
+  OS << "}\n";
+
+  // Reset class-method context.
+  InClassMethodBody = false;
+  ClassMethodSelf = mlir::Value();
+  ClassMethodClassName.clear();
 }
 
 bool Emitter::emitLeadingComments(llvm::StringRef FullPath, int AfterLine,
@@ -1614,7 +2212,10 @@ bool Emitter::tryEmitIOSubstitution(mlir::LLVM::CallOp Call, int Indent) {
     // it already has the right type.
     indent(Indent);
     if (Cpp) {
-      OS << "std::cout << " << stmtExpr(Call.getOperand(0)) << " << '\\n';\n";
+      // `<<` binds tighter than `==` / `<` / etc. in C++, so any
+      // operator-overload expression has to keep its outer parens here
+      // — use exprFor (paren-preserving) instead of stmtExpr.
+      OS << "std::cout << " << exprFor(Call.getOperand(0)) << " << '\\n';\n";
     } else {
       OS << "printf(\"%g\\n\", " << stmtExpr(Call.getOperand(0)) << ");\n";
     }
@@ -1624,7 +2225,7 @@ bool Emitter::tryEmitIOSubstitution(mlir::LLVM::CallOp Call, int Indent) {
   if (Name == "matlab_disp_i64" && Call.getNumOperands() == 1) {
     indent(Indent);
     if (Cpp) {
-      OS << "std::cout << " << stmtExpr(Call.getOperand(0)) << " << '\\n';\n";
+      OS << "std::cout << " << exprFor(Call.getOperand(0)) << " << '\\n';\n";
     } else {
       OS << "printf(\"%lld\\n\", (long long)" << stmtExpr(Call.getOperand(0))
          << ");\n";
@@ -1641,6 +2242,14 @@ bool Emitter::tryEmitIOSubstitution(mlir::LLVM::CallOp Call, int Indent) {
 
 bool Emitter::run(mlir::ModuleOp M) {
   precomputeModuleProperties(M);
+  // Pre-pass: collect classdef methods into Classes so the C++ class
+  // block emitter has the property list and ClassMethodFuncs is
+  // populated when the free-function pass tries to skip class methods.
+  collectClassdefs(M);
+  // Tag every SSA value that holds a class instance (ctor result,
+  // load from a class-typed alloca, etc.) so call-site rewrites + the
+  // alloca / variable-type emit can resolve to the right class.
+  if (Cpp) populateClassValueTypes(M);
   emitProlog();
   // Anything already in UsedNames after the prolog is module-scope
   // (function names, runtime externs, globals); freeze that snapshot so
@@ -1774,169 +2383,42 @@ bool Emitter::run(mlir::ModuleOp M) {
     }
   }
 
-  /* Pass 2b (C++ only): reconstruct idiomatic class { ... }; blocks
-   * from the class-method metadata the frontend stamped on each
-   * func.func. The blocks are inline trampolines around the flat
-   * ClassName__method functions — the class body itself holds a
-   * single void* (matlab_obj*) and dispatches all methods through
-   * the corresponding flat function. Users who want proper OOP
-   * syntax in their handwritten glue code can then write
-   * `c = a + b;` with full type-checking, without us needing to
-   * rewrite the emitted main() body to match. */
-  if (Cpp) {
-    struct MethodInfo {
-      std::string Mangled;  // flat function name
-      std::string Name;     // user-visible method name
-      std::string Kind;     // "ctor" / "method" / "static"
-      mlir::func::FuncOp Fn;
-    };
-    std::unordered_map<std::string, std::vector<MethodInfo>> ByClass;
-    std::unordered_map<std::string, std::string> SuperOf;
-    std::vector<std::string> ClassOrder;
-    for (auto &Op : M.getBody()->getOperations()) {
-      auto F = mlir::dyn_cast<mlir::func::FuncOp>(Op);
-      if (!F) continue;
-      auto ClsA = F->getAttrOfType<mlir::StringAttr>("matlab.class_name");
-      auto NameA = F->getAttrOfType<mlir::StringAttr>("matlab.method_name");
-      auto KindA = F->getAttrOfType<mlir::StringAttr>("matlab.method_kind");
-      if (!ClsA || !NameA || !KindA) continue;
-      std::string Cls = ClsA.getValue().str();
-      if (!ByClass.count(Cls)) ClassOrder.push_back(Cls);
-      MethodInfo MI{F.getSymName().str(), NameA.getValue().str(),
-                    KindA.getValue().str(), F};
-      ByClass[Cls].push_back(std::move(MI));
-      if (auto SA = F->getAttrOfType<mlir::StringAttr>("matlab.class_super"))
-        SuperOf[Cls] = SA.getValue().str();
-    }
-
-    auto opNameFor = [](llvm::StringRef N) -> llvm::StringRef {
-      if (N == "plus")     return "operator+";
-      if (N == "minus")    return "operator-";
-      if (N == "mtimes")   return "operator*";
-      if (N == "times")    return "operator*";
-      if (N == "mrdivide") return "operator/";
-      if (N == "rdivide")  return "operator/";
-      if (N == "eq")       return "operator==";
-      if (N == "ne")       return "operator!=";
-      if (N == "lt")       return "operator<";
-      if (N == "le")       return "operator<=";
-      if (N == "gt")       return "operator>";
-      if (N == "ge")       return "operator>=";
-      return llvm::StringRef();
-    };
-
-    if (!ClassOrder.empty()) {
-      OS << "// User-defined classes (wrappers over the flat ClassName__method "
-            "functions).\n";
-      for (const auto &Cls : ClassOrder) {
-        OS << "class " << Cls;
-        if (SuperOf.count(Cls)) OS << " : public " << SuperOf[Cls];
-        OS << " {\npublic:\n";
-        OS << "  void *_impl;\n";
-        OS << "  explicit " << Cls << "(void *impl = nullptr) : _impl(impl) {}\n";
-        for (auto &MI : ByClass[Cls]) {
-          auto FT = MI.Fn.getFunctionType();
-          if (MI.Kind == "ctor") {
-            /* User-defined constructor: mirrors the flat ctor
-             * signature, delegates to it for _impl. */
-            OS << "  " << Cls << "(";
-            for (unsigned i = 0; i < FT.getNumInputs(); ++i) {
-              if (i) OS << ", ";
-              OS << cTypeOf(FT.getInput(i)) << " a" << i;
-            }
-            OS << ") : _impl(" << MI.Mangled << "(";
-            for (unsigned i = 0; i < FT.getNumInputs(); ++i) {
-              if (i) OS << ", ";
-              OS << "a" << i;
-            }
-            OS << ")) {}\n";
-            continue;
-          }
-          if (MI.Kind == "static") {
-            std::string RetTy = FT.getNumResults() == 0
-                ? std::string("void")
-                : cTypeOf(FT.getResult(0));
-            OS << "  static " << RetTy << " " << MI.Name << "(";
-            for (unsigned i = 0; i < FT.getNumInputs(); ++i) {
-              if (i) OS << ", ";
-              OS << cTypeOf(FT.getInput(i)) << " a" << i;
-            }
-            OS << ") { "
-               << (FT.getNumResults() == 0 ? "" : "return ")
-               << MI.Mangled << "(";
-            for (unsigned i = 0; i < FT.getNumInputs(); ++i) {
-              if (i) OS << ", ";
-              OS << "a" << i;
-            }
-            OS << "); }\n";
-            continue;
-          }
-          /* Instance method. First param is the receiver (_impl);
-           * emit a member function taking the remaining inputs. */
-          if (FT.getNumInputs() < 1) continue;
-          llvm::StringRef OpName = opNameFor(MI.Name);
-          /* Sanitise dots in the method name (get.Area -> get_Area)
-           * so the emitted identifier is valid C++. */
-          std::string SafeName = MI.Name;
-          for (char &c : SafeName) if (c == '.') c = '_';
-          std::string Target = OpName.empty() ? SafeName : OpName.str();
-          std::string RetTyS = FT.getNumResults() == 0
-              ? std::string("void")
-              : cTypeOf(FT.getResult(0));
-          /* Wrap a ptr-typed result back into the same class for
-           * operator overloads — so `a + b` reads as a Vec2 at the
-           * use site rather than a naked void*. */
-          bool WrapResult = (!OpName.empty() &&
-                              FT.getNumResults() == 1 &&
-                              RetTyS == std::string("void*") &&
-                              OpName != "operator==" &&
-                              OpName != "operator!=" &&
-                              OpName != "operator<" &&
-                              OpName != "operator<=" &&
-                              OpName != "operator>" &&
-                              OpName != "operator>=");
-          std::string EffRetTy = WrapResult ? Cls : RetTyS;
-          OS << "  " << EffRetTy << " " << Target << "(";
-          for (unsigned i = 1; i < FT.getNumInputs(); ++i) {
-            if (i > 1) OS << ", ";
-            mlir::Type T = FT.getInput(i);
-            bool SecondIsSameClass = (!OpName.empty() && i == 1 &&
-                                       cTypeOf(T) == std::string("void*"));
-            if (SecondIsSameClass)
-              OS << "const " << Cls << " &a" << i;
-            else
-              OS << cTypeOf(T) << " a" << i;
-          }
-          OS << ")";
-          OS << " { ";
-          if (FT.getNumResults() > 0) {
-            if (WrapResult) OS << "return " << Cls << "(";
-            else             OS << "return ";
-          }
-          OS << MI.Mangled << "(_impl";
-          for (unsigned i = 1; i < FT.getNumInputs(); ++i) {
-            OS << ", ";
-            mlir::Type T = FT.getInput(i);
-            bool SecondIsSameClass = (!OpName.empty() && i == 1 &&
-                                       cTypeOf(T) == std::string("void*"));
-            if (SecondIsSameClass) OS << "a" << i << "._impl";
-            else                    OS << "a" << i;
-          }
-          OS << ")";
-          if (WrapResult) OS << ")";
-          OS << "; }\n";
-        }
-        OS << "};\n";
+  /* Pass 2b (C++ only): emit each MATLAB classdef as a real C++ class
+   * with named member fields and translated method bodies (so
+   * `acc.Balance` is a direct field access, not a runtime hash call).
+   * Inheritance requires parents to be declared first; we walk in
+   * topological order so a `Savings : public BankAccount` always sees
+   * its base class declared above it. */
+  if (Cpp && !Classes.empty()) {
+    llvm::SmallVector<llvm::StringRef, 8> ClassOrder;
+    llvm::StringSet<> Emitted;
+    bool Progress = true;
+    while (Progress) {
+      Progress = false;
+      for (auto &KV : Classes) {
+        if (Emitted.count(KV.first())) continue;
+        if (!KV.second.Super.empty() && !Emitted.count(KV.second.Super))
+          continue;
+        ClassOrder.push_back(KV.first());
+        Emitted.insert(KV.first());
+        Progress = true;
       }
-      OS << "\n";
     }
+    // Any leftover (forward-declared super not in module) emits anyway
+    // so the class isn't silently dropped.
+    for (auto &KV : Classes)
+      if (!Emitted.count(KV.first())) ClassOrder.push_back(KV.first());
+    for (llvm::StringRef Name : ClassOrder)
+      emitCppClass(Name, Classes[Name]);
   }
 
-  // Pass 3: emit function bodies.
+  // Pass 3: emit function bodies. Class methods are already emitted
+  // inside their class block, so skip the flat-function form for them.
   for (auto &Op : M.getBody()->getOperations()) {
     if (Failed) break;
     if (auto F = mlir::dyn_cast<mlir::func::FuncOp>(Op)) {
       if (F.getBody().empty()) continue;
+      if (Cpp && ClassMethodFuncs.count(F.getSymName())) continue;
       emitFuncFunc(F);
     } else if (auto F = mlir::dyn_cast<mlir::LLVM::LLVMFuncOp>(Op)) {
       if (F.getBody().empty()) continue;
@@ -2182,13 +2664,49 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
     // parfor is present (the mutex matters) or when the string arg
     // isn't a compile-time literal.
     if (tryEmitIOSubstitution(Call, Indent)) return;
+    // Class-field write: `obj_set_f64(obj, "X", _, v)` → `obj.X = v;`.
+    // Statement-form only (the call returns void).
+    if (Call.getCallee() && *Call.getCallee() == "matlab_obj_set_f64" &&
+        Call.getNumResults() == 0) {
+      std::string Rewrite;
+      if (tryRewriteObjSet(Call, Rewrite)) {
+        indent(Indent);
+        OS << Rewrite << ";\n";
+        return;
+      }
+    }
     indent(Indent);
     if (Call.getNumResults() == 1) {
       std::string N = this->name(Call.getResult());
       std::string Ty = CppAuto ? "auto" : cTypeOfValue(Call.getResult());
+      // If the call result is a class-typed value (ctor result,
+      // tracked via ClassValueType after the rewrite below), declare
+      // the local with the class type instead of `void*`.
+      if (auto CT = classTypeOf(Call.getResult()); !CT.empty())
+        Ty = CT.str();
       OS << Ty << " " << N << " = ";
     }
     if (auto Callee = Call.getCallee()) {
+      // Class-field read with binding: `name = obj_get_f64(obj, "X", _)`.
+      // The inline-expression path is handled by buildInlineExpr; this
+      // branch covers the rare non-inlined case.
+      if (*Callee == "matlab_obj_get_f64" && Call.getNumResults() == 1) {
+        std::string Rewrite;
+        if (tryRewriteObjGet(Call, Rewrite)) {
+          OS << Rewrite << ";\n";
+          return;
+        }
+      }
+      // Class-method call (constructor / regular / get / operator /
+      // static). When the callee resolves to a classdef method the
+      // result is C++-class-typed.
+      {
+        std::string Rewrite;
+        if (tryRewriteAsClassCall(*Callee, Call.getOperands(), Rewrite)) {
+          OS << Rewrite << ";\n";
+          return;
+        }
+      }
       OS << Callee->str() << "(";
       for (unsigned i = 0; i < Call.getNumOperands(); ++i) {
         if (i) OS << ", ";
@@ -2238,7 +2756,17 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
     if (Call.getNumResults() == 1) {
       std::string N = this->name(Call.getResult(0));
       std::string Ty = CppAuto ? "auto" : cTypeOfValue(Call.getResult(0));
+      if (auto CT = classTypeOf(Call.getResult(0)); !CT.empty())
+        Ty = CT.str();
       OS << Ty << " " << N << " = ";
+    }
+    {
+      std::string Rewrite;
+      if (tryRewriteAsClassCall(Call.getCallee(), Call.getOperands(),
+                                 Rewrite)) {
+        OS << Rewrite << ";\n";
+        return;
+      }
     }
     OS << Call.getCallee().str() << "(";
     for (unsigned i = 0; i < Call.getNumOperands(); ++i) {
@@ -2514,6 +3042,15 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
     }
 
     std::string ElTy = cTypeOf(ET);
+    // Class-typed allocas emit as `ClassName slot;` (default-constructed)
+    // instead of `void* slot = 0;`. The slot's SSA value still routes
+    // through DirectSlots — store/load expand to plain assignments /
+    // reads. The store-form will emit `ClassName slot = val;` when
+    // DeferDecl applies, in which case skip the bare declaration here.
+    auto AllocaCT = ClassAllocaType.find(A.getOperation());
+    if (Cpp && AllocaCT != ClassAllocaType.end()) {
+      ElTy = AllocaCT->second;
+    }
     if (DirectSlot) {
       // No pointer variable. Bind the alloca's result SSA value to the
       // slot's name — downstream code checks DirectSlots before treating
@@ -2545,13 +3082,21 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
       }
 
       indent(Indent);
-      OS << ElTy << " " << SlotName << " = 0;\n";
+      // Class-typed slot: `BankAccount acc;` (default-init). Bare
+      // doubles still get `= 0;` to avoid an uninitialized-read trap.
+      if (Cpp && AllocaCT != ClassAllocaType.end())
+        OS << ElTy << " " << SlotName << ";\n";
+      else
+        OS << ElTy << " " << SlotName << " = 0;\n";
       return;
     }
     N = uniqueName(SlotName + "_p");
     Names[A.getResult()] = N;
     indent(Indent);
-    OS << ElTy << " " << SlotName << " = 0;\n";
+    if (Cpp && AllocaCT != ClassAllocaType.end())
+      OS << ElTy << " " << SlotName << ";\n";
+    else
+      OS << ElTy << " " << SlotName << " = 0;\n";
     indent(Indent);
     OS << "void* " << N << " = (void*)&" << SlotName << ";\n";
     return;
@@ -2616,6 +3161,12 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
       // followed later by `y = a + b;`.
       if (DirectSlotDefer.erase(AddrDef)) {
         std::string Ty = cTypeOfValue(S.getValue());
+        // Class-typed alloca: emit `BankAccount slot = ctor(...);`.
+        if (auto It = ClassAllocaType.find(AddrDef);
+            Cpp && It != ClassAllocaType.end())
+          Ty = It->second;
+        else if (auto CT = classTypeOf(S.getValue()); !CT.empty())
+          Ty = CT.str();
         OS << Ty << " " << DirectSlots[AddrDef] << " = "
            << this->stmtExpr(S.getValue()) << ";\n";
       } else {
