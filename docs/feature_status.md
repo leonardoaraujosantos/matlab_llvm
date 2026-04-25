@@ -1,24 +1,38 @@
 # MATLAB Compatibility — Feature Status
 
-Inventory of what this project supports today and what's missing for full
-MATLAB language compatibility. Derived from the lexer, parser, AST, Sema,
-MLIR passes, runtime, and test corpus as of the current branch.
+This document is the high-signal inventory of what the codebase supports
+today and what is still partial or missing. It is derived from the
+frontend, MLIR passes, runtimes, CLI modes, and the in-tree test corpus.
 
-The project's target is the **practical scalar / matrix / classdef
-subset** of MATLAB: enough to run numeric programs, linear algebra,
-control flow, text processing, file I/O, user-defined functions and
-user-defined classes (with inheritance and operator overloading),
-and to surface all of that through three compiled backends (LLVM,
-C, C++), a JIT-backed REPL, an editor-facing Language Server, and
-a source formatter. Toolboxes, plotting, and GUI features are
-explicitly out of scope.
+The target is a **practical MATLAB subset** for numeric and compiler
+workflows:
+- dense numeric programs
+- linear algebra
+- control flow and functions
+- handles, anonymous functions, structs, strings, and basic cells
+- `classdef` with inheritance and operator overloading
+- multiple output backends plus REPL and editor tooling
+
+Out of scope:
+- toolboxes
+- plotting and GUI APIs
+- full MATLAB compatibility
+- `.mat` file compatibility
+
+## Reading Guide
+
+- Use this file to answer "is feature X implemented?"
+- Use the README for the overall project view.
+- Use backend-specific docs when you need lowering or runtime details.
 
 ---
 
 ## Legend
 
-- ✅ Implemented and tested end-to-end (all three backends: LLVM / C / C++)
-- 🟡 Partial — parsed and/or modelled in Sema but runtime/lowering incomplete
+- ✅ Implemented and tested end-to-end on the main shipped paths
+  (LLVM / C / C++ unless noted otherwise)
+- 🟡 Partial — parsed and/or modelled in Sema, but runtime, lowering, or
+  backend coverage is incomplete
 - ❌ Not supported
 
 ---
