@@ -177,6 +177,25 @@ Emitter behavior worth knowing:
   `mat_from_buf` call. The Python emitter then prefers the propagated
   name over a fresh `vN` id, so a MATLAB `A = [1 2; 3 4]` emits as
   `A = np.array(...).reshape(2, 2)` rather than `v0 = ...`.
+- **MATLAB classdef → Python class**: every function tagged with
+  `matlab.class_name` is collected into a class block. The constructor
+  becomes `__init__` (with the synthesized `obj_new` allocation
+  suppressed and the trailing `return self` dropped); regular methods
+  bind the first parameter to `self`; static methods (`matlab.method_kind
+  = "static"`) emit `@staticmethod` and skip the `self` slot;
+  `Dependent` properties (`matlab.method_name = "get.X"`) emit
+  `@property`; and operator overloads (`eq`, `ne`, `lt`, `le`, `gt`,
+  `ge`, `plus`, `minus`, `mtimes`/`times`, `mrdivide`/`rdivide`,
+  `uminus`) become Python dunders. Field reads / writes inside method
+  bodies route through the same `obj.X` rewrite as elsewhere, so
+  `self.Balance = self.Balance + amt` reads naturally.
+- **Class-method call sites**: `<ClassName>__<method>(args)` is rewritten
+  according to the method kind:
+  - constructor → `ClassName(args)`
+  - regular method → `args[0].method(args[1:])`
+  - static method → `ClassName.method(args)`
+  - operator → `args[0] OP args[1]` (e.g. `acc == other`)
+  - get-property → `args[0].PropName` (no parens)
 - **Top-level script body** is hoisted to module scope (mirrors the
   `LowerIO` rename of `@script` to `@main`).
 - **Comments and blank lines** from the MATLAB source propagate to the
@@ -301,18 +320,41 @@ print("A' =")
 print(v0.T)
 ```
 
-And from `examples/bank_account.m`, showing pure-read inlining and the
-`select(c, 1.0, 0.0)` fold collapsing the body of `eq` to one line:
+A fourth example, `examples/bank_account.m`, showing the full
+classdef → Python class translation: constructor → `__init__`,
+`Dependent` get-properties → `@property`, operator overloading →
+dunder, inheritance → Python subclass, field reads / writes →
+attribute access:
 
 ```python
-def BankAccount__get_Overdrawn(obj):
-    return float(rt.obj_get_f64(obj, "Balance") < 0.0)
+class BankAccount:
+    def __init__(self, id, bal):
+        self.Id = id
+        self.Balance = bal
+    def deposit(self, amt):
+        self.Balance = self.Balance + amt
+    def withdraw(self, amt):
+        self.Balance = self.Balance - amt
+    @property
+    def Overdrawn(self):
+        return float(self.Balance < 0.0)
+    def __eq__(self, other):
+        return float(self.Id == other.Id)
 
-def BankAccount__eq(a, b):
-    return float(rt.obj_get_f64(a, "Id") == rt.obj_get_f64(b, "Id"))
+class Savings(BankAccount):
+    def __init__(self, id, bal, rate):
+        self.Id = id
+        self.Balance = bal
+        self.Rate = rate
+    def interest(self):
+        return self.Balance * self.Rate
 
-def Savings__interest(obj):
-    return rt.obj_get_f64(obj, "Balance") * rt.obj_get_f64(obj, "Rate")
+acc = BankAccount(1001.0, 500.0)
+acc.deposit(250.0)
+print(f'{acc.Balance:g}')               # 750
+print(f'{acc.Overdrawn:g}')              # 0
+print(f'{acc == BankAccount(1001.0, 0.0):g}')   # 1
+print(f'{Savings(2000.0, 1000.0, 0.05).interest():g}')  # 100
 ```
 
 ## Limitations

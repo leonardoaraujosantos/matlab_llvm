@@ -40,6 +40,26 @@ namespace mlirgen {
 
 namespace {
 
+/// One class method (constructor / regular / get-property / operator)
+/// captured during the pre-pass. The same struct doubles as the value
+/// type of the call-site lookup table that drives method-call rewrites.
+struct ClassMethodInfo {
+  mlir::func::FuncOp Func;
+  std::string ClassName;
+  enum Kind { Ctor, Method, Get, Operator, Static } Kind = Method;
+  std::string EmitName;   // Python `def` name (e.g. `__init__`, `deposit`,
+                          // `Overdrawn`, `__eq__`).
+  std::string OpSpelling; // Operator spelling for `Operator` kind only —
+                          // e.g. `==` so call sites can render `a == b`.
+};
+
+/// Metadata for one MATLAB classdef: its (optional) superclass and
+/// every method in the order Sema emitted them (mirrors source order).
+struct ClassDef {
+  std::string Super;
+  llvm::SmallVector<ClassMethodInfo, 8> Methods;
+};
+
 /// Metadata for an scf.while op that matched the canonical for-loop shape
 /// (one f64 iter-arg, condition `iv <= end` or `iv >= end`, body ends with
 /// `iv += step ; yield`). Mirrors the C emitter's ForLoopInfo so the same
@@ -164,6 +184,29 @@ private:
   bool tryRewriteObjGet(mlir::LLVM::CallOp C, std::string &Out);
   bool tryRewriteObjSet(mlir::LLVM::CallOp C, std::string &Out);
 
+  // Walk the module and group every classdef method by `matlab.class_name`
+  // into Classes; populate CalleeIndex so call-site rewrites can look
+  // up `BankAccount__deposit` and emit `acc.deposit(...)`. Expensive to
+  // do per-call, hence the one-shot pre-pass.
+  void collectClasses(mlir::ModuleOp M);
+
+  // Emit one classdef as a Python `class` block (with `(Super)` when set).
+  void emitClassBlock(llvm::StringRef ClassName, const ClassDef &CI);
+
+  // Emit a single method inside an open class block. `Indent` is the
+  // method-body indent (the `class` block uses Indent-1).
+  void emitClassMethod(const ClassMethodInfo &CMI, int Indent);
+
+  // Try to rewrite `<ClassName>__<method>(args...)` as one of:
+  //   - constructor:  `ClassName(args)`
+  //   - regular call: `args[0].method(args[1:])`
+  //   - operator:     `args[0] OP args[1]`
+  //   - get-property: `args[0].PropName`
+  // Returns true on success and writes the replacement into Out.
+  bool tryRewriteAsClassCall(llvm::StringRef Callee,
+                              mlir::ValueRange Operands,
+                              std::string &Out);
+
   std::ostream &OS;
   bool NoLine;
   const matlab::SourceManager *SM;
@@ -217,6 +260,11 @@ private:
   // alloca itself is suppressed and the slot name is the loop's IV name.
   llvm::DenseSet<mlir::Operation *> FusedForSlots;
   llvm::DenseMap<mlir::Operation *, std::string> FusedForSlotName;
+  // Classdef registry. Classes maps the class name to its method list;
+  // CalleeIndex maps every class-method symbol (`BankAccount__deposit`)
+  // to its info so call-site rewriting can resolve it without scanning.
+  llvm::StringMap<ClassDef> Classes;
+  llvm::StringMap<ClassMethodInfo> CalleeIndex;
   int NextId = 0;
 
   // Most recent line emitted; used to suppress duplicate line markers
@@ -678,6 +726,10 @@ bool Emitter::buildInlineExpr(mlir::Operation &Op, std::string &Expr) {
     return true;
   }
   if (auto C = dyn_cast<func::CallOp>(Op)) {
+    // Class-method call: rewrite to `obj.method(args)` / `Class(args)` /
+    // operator form when the callee resolves to a class method.
+    if (tryRewriteAsClassCall(C.getCallee(), C.getOperands(), Expr))
+      return true;
     std::string E = C.getCallee().str() + "(";
     for (unsigned i = 0; i < C.getNumOperands(); ++i) {
       if (i) E += ", ";
@@ -691,6 +743,10 @@ bool Emitter::buildInlineExpr(mlir::Operation &Op, std::string &Expr) {
     if (!C.getCallee()) return false;
     // Class-field read: obj_get_f64(obj, "X") → obj.X.
     if (tryRewriteObjGet(C, Expr)) return true;
+    // Class-method call: prefer `obj.method(...)` / `Class(...)` /
+    // operator form when the callee is one of our classdef methods.
+    if (tryRewriteAsClassCall(*C.getCallee(), C.getOperands(), Expr))
+      return true;
     // Prefer the numpy / Python-operator rewrite for matrix builtins —
     // it reads as the natural translation instead of a runtime trampoline.
     if (tryRewriteAsNumpy(C, Expr)) return true;
@@ -1203,6 +1259,134 @@ bool Emitter::tryRewriteObjGet(mlir::LLVM::CallOp C, std::string &Out) {
   return true;
 }
 
+// ---------------------------------------------------------------------------
+// Classdef collection + call-site rewrite
+// ---------------------------------------------------------------------------
+
+// Map a MATLAB operator method name to the matching Python dunder + the
+// in-source operator spelling (used at call sites). Returns true on
+// success and writes the dunder name (e.g. `__eq__`) and the operator
+// (`==`). Only a curated subset is mapped here — unmapped names stay as
+// regular methods so the generated source remains valid even when the
+// classdef defines a one-off.
+static bool mapOperatorMethod(llvm::StringRef Name, std::string &Dunder,
+                              std::string &Op) {
+  if (Name == "eq")     { Dunder = "__eq__"; Op = "=="; return true; }
+  if (Name == "ne")     { Dunder = "__ne__"; Op = "!="; return true; }
+  if (Name == "lt")     { Dunder = "__lt__"; Op = "<";  return true; }
+  if (Name == "le")     { Dunder = "__le__"; Op = "<="; return true; }
+  if (Name == "gt")     { Dunder = "__gt__"; Op = ">";  return true; }
+  if (Name == "ge")     { Dunder = "__ge__"; Op = ">="; return true; }
+  if (Name == "plus")   { Dunder = "__add__"; Op = "+"; return true; }
+  if (Name == "minus")  { Dunder = "__sub__"; Op = "-"; return true; }
+  if (Name == "mtimes" ||
+      Name == "times")  { Dunder = "__mul__"; Op = "*"; return true; }
+  if (Name == "mrdivide" ||
+      Name == "rdivide"){ Dunder = "__truediv__"; Op = "/"; return true; }
+  if (Name == "uminus") { Dunder = "__neg__"; Op = "-"; return true; }
+  return false;
+}
+
+void Emitter::collectClasses(mlir::ModuleOp M) {
+  for (auto &Op : M.getBody()->getOperations()) {
+    auto F = mlir::dyn_cast<mlir::func::FuncOp>(Op);
+    if (!F) continue;
+    if (F.getBody().empty()) continue;
+    auto CN = F->getAttrOfType<mlir::StringAttr>("matlab.class_name");
+    if (!CN) continue;
+
+    ClassMethodInfo CMI;
+    CMI.Func = F;
+    CMI.ClassName = CN.getValue().str();
+
+    auto Kind = F->getAttrOfType<mlir::StringAttr>("matlab.method_kind");
+    auto MN   = F->getAttrOfType<mlir::StringAttr>("matlab.method_name");
+    llvm::StringRef MName = MN ? MN.getValue() : llvm::StringRef();
+
+    if (Kind && Kind.getValue() == "ctor") {
+      CMI.Kind = ClassMethodInfo::Ctor;
+      CMI.EmitName = "__init__";
+    } else if (Kind && Kind.getValue() == "static") {
+      CMI.Kind = ClassMethodInfo::Static;
+      CMI.EmitName = MName.empty() ? "" : MName.str();
+      if (CMI.EmitName.empty()) continue;
+    } else if (MName.starts_with("get.")) {
+      CMI.Kind = ClassMethodInfo::Get;
+      CMI.EmitName = MName.drop_front(4).str();
+    } else if (std::string D, O; mapOperatorMethod(MName, D, O)) {
+      CMI.Kind = ClassMethodInfo::Operator;
+      CMI.EmitName = D;
+      CMI.OpSpelling = O;
+    } else if (!MName.empty()) {
+      CMI.Kind = ClassMethodInfo::Method;
+      CMI.EmitName = MName.str();
+    } else {
+      // No method_name attribute — skip (we can't classify it).
+      continue;
+    }
+
+    auto &CD = Classes[CMI.ClassName];
+    if (auto Sup = F->getAttrOfType<mlir::StringAttr>("matlab.class_super"))
+      if (CD.Super.empty()) CD.Super = Sup.getValue().str();
+    CD.Methods.push_back(CMI);
+    CalleeIndex[F.getSymName()] = CMI;
+  }
+}
+
+bool Emitter::tryRewriteAsClassCall(llvm::StringRef Callee,
+                                     mlir::ValueRange Operands,
+                                     std::string &Out) {
+  auto It = CalleeIndex.find(Callee);
+  if (It == CalleeIndex.end()) return false;
+  const ClassMethodInfo &CMI = It->second;
+  switch (CMI.Kind) {
+    case ClassMethodInfo::Ctor: {
+      std::string E = CMI.ClassName + "(";
+      for (unsigned i = 0; i < Operands.size(); ++i) {
+        if (i) E += ", ";
+        E += dropOuterParens(this->stmtExpr(Operands[i]));
+      }
+      E += ")";
+      Out = E;
+      return true;
+    }
+    case ClassMethodInfo::Get: {
+      if (Operands.size() != 1) return false;
+      Out = exprFor(Operands[0]) + "." + CMI.EmitName;
+      return true;
+    }
+    case ClassMethodInfo::Operator: {
+      if (Operands.size() != 2) return false;
+      Out = "(" + exprFor(Operands[0]) + " " + CMI.OpSpelling + " "
+          + exprFor(Operands[1]) + ")";
+      return true;
+    }
+    case ClassMethodInfo::Method: {
+      if (Operands.empty()) return false;
+      std::string E = exprFor(Operands[0]) + "." + CMI.EmitName + "(";
+      for (unsigned i = 1; i < Operands.size(); ++i) {
+        if (i > 1) E += ", ";
+        E += dropOuterParens(this->stmtExpr(Operands[i]));
+      }
+      E += ")";
+      Out = E;
+      return true;
+    }
+    case ClassMethodInfo::Static: {
+      // No self — emit `ClassName.method(args)` per Python convention.
+      std::string E = CMI.ClassName + "." + CMI.EmitName + "(";
+      for (unsigned i = 0; i < Operands.size(); ++i) {
+        if (i) E += ", ";
+        E += dropOuterParens(this->stmtExpr(Operands[i]));
+      }
+      E += ")";
+      Out = E;
+      return true;
+    }
+  }
+  return false;
+}
+
 bool Emitter::tryRewriteObjSet(mlir::LLVM::CallOp C, std::string &Out) {
   if (!C.getCallee()) return false;
   if (*C.getCallee() != "matlab_obj_set_f64") return false;
@@ -1522,7 +1706,12 @@ bool Emitter::run(mlir::ModuleOp M) {
     }
   }
 
-  // Pass 2: reserve the symbol of every defined function so locals don't
+  // Pass 2: collect MATLAB classdefs. Functions tagged with
+  // `matlab.class_name` are routed into a class block (emitted in
+  // pass 4) instead of being emitted as flat module-level defs.
+  collectClasses(M);
+
+  // Pass 3: reserve the symbol of every defined function so locals don't
   // shadow them, and emit bodies. `@main` is emitted last so top-level
   // script code references already-defined functions.
   mlir::func::FuncOp MainFn;
@@ -1536,12 +1725,44 @@ bool Emitter::run(mlir::ModuleOp M) {
       UsedNames.insert(F.getSymName().str());
     }
   }
+  // Reserve the bare class names too so a free-function's local can't
+  // accidentally shadow a class type used at a constructor call site.
+  for (auto &KV : Classes) UsedNames.insert(KV.first().str());
 
+  // Pass 4: emit class blocks. Order matters when a subclass references
+  // its parent — emit classes whose Super is already declared first.
+  llvm::SmallVector<llvm::StringRef, 8> ClassOrder;
+  llvm::StringSet<> Emitted;
+  bool Progress = true;
+  while (Progress) {
+    Progress = false;
+    for (auto &KV : Classes) {
+      if (Emitted.count(KV.first())) continue;
+      if (!KV.second.Super.empty() && !Emitted.count(KV.second.Super))
+        continue;
+      ClassOrder.push_back(KV.first());
+      Emitted.insert(KV.first());
+      Progress = true;
+    }
+  }
+  // Any remaining (cycle / forward-reference Super not in module) — emit
+  // anyway so we don't silently drop them.
+  for (auto &KV : Classes)
+    if (!Emitted.count(KV.first())) ClassOrder.push_back(KV.first());
+
+  for (llvm::StringRef Name : ClassOrder) {
+    if (Failed) break;
+    emitClassBlock(Name, Classes[Name]);
+  }
+
+  // Pass 5: emit free (non-class, non-main) functions.
   for (auto &Op : M.getBody()->getOperations()) {
     if (Failed) break;
     if (auto F = mlir::dyn_cast<mlir::func::FuncOp>(Op)) {
       if (F.getBody().empty()) continue;
-      if (F == MainFn) continue;  // emit last
+      if (F == MainFn) continue;
+      // Class methods are emitted inside their class block instead.
+      if (F->hasAttr("matlab.class_name")) continue;
       emitFuncFunc(F);
     } else if (auto F = mlir::dyn_cast<mlir::LLVM::LLVMFuncOp>(Op)) {
       if (F.getBody().empty()) continue;
@@ -1633,6 +1854,174 @@ void Emitter::emitFuncFunc(mlir::func::FuncOp F) {
   emitRegion(F.getBody(), 1);
   OS << "\n";
   if (!IsMain) UsedNames = std::move(SavedUsed);
+}
+
+void Emitter::emitClassBlock(llvm::StringRef ClassName, const ClassDef &CI) {
+  OS << "class " << ClassName.str();
+  if (!CI.Super.empty()) OS << "(" << CI.Super << ")";
+  OS << ":\n";
+  if (CI.Methods.empty()) {
+    indent(1);
+    OS << "pass\n\n";
+    return;
+  }
+  for (const auto &CMI : CI.Methods)
+    emitClassMethod(CMI, /*Indent=*/1);
+  OS << "\n";
+}
+
+void Emitter::emitClassMethod(const ClassMethodInfo &CMI, int Indent) {
+  mlir::func::FuncOp F = CMI.Func;
+  NextId = 0;
+  InlineExprs.clear();
+  InlinedOps.clear();
+  DirectSlots.clear();
+  ArraySlots.clear();
+  SuppressedOps.clear();
+  BreakFlagSlots.clear();
+  ContinueFlagSlots.clear();
+  FlagIfKind.clear();
+  InlinedIfs.clear();
+  ForPatterns.clear();
+  FusedForSlots.clear();
+  FusedForSlotName.clear();
+  LastLineFile.clear();
+  LastLineNum = -1;
+  Names.clear();
+
+  // Method-local name scope: snapshot module-level UsedNames so locals
+  // and params don't accumulate `_2` suffixes from earlier emits.
+  llvm::StringSet<> SavedUsed = UsedNames;
+  UsedNames.clear();
+  for (auto &Op : F->getParentOfType<mlir::ModuleOp>().getBody()
+                   ->getOperations()) {
+    if (auto Fn = mlir::dyn_cast<mlir::func::FuncOp>(Op))
+      UsedNames.insert(Fn.getSymName().str());
+    else if (auto Fn = mlir::dyn_cast<mlir::LLVM::LLVMFuncOp>(Op))
+      UsedNames.insert(Fn.getSymName().str());
+    else if (auto G = mlir::dyn_cast<mlir::LLVM::GlobalOp>(Op))
+      UsedNames.insert(G.getSymName().str());
+  }
+  for (auto &KV : Classes) UsedNames.insert(KV.first().str());
+  // Reserve `self` / `other` so other locals never collide.
+  UsedNames.insert("self");
+
+  computeInlines(F.getBody());
+  scanBreakContinueFlags(F.getBody());
+  scanForLoopPatterns(F.getBody());
+
+  auto &Entry = F.getBody().front();
+  auto FT = F.getFunctionType();
+  bool IsCtor = CMI.Kind == ClassMethodInfo::Ctor;
+  bool IsStatic = CMI.Kind == ClassMethodInfo::Static;
+  bool IsBinaryOp = CMI.Kind == ClassMethodInfo::Operator &&
+                    FT.getNumInputs() == 2;
+
+  // Bind `self` (and `other` for binary operators). Static methods have
+  // no implicit self — every parameter is a real argument.
+  if (!IsCtor && !IsStatic && FT.getNumInputs() >= 1) {
+    Names[Entry.getArgument(0)] = "self";
+  }
+  if (IsBinaryOp) {
+    UsedNames.insert("other");
+    Names[Entry.getArgument(1)] = "other";
+  }
+  // For a constructor, walk the body looking for the obj_new call. Bind
+  // its result to `self` so all the field-store rewrites read as
+  // `self.X = ...`. The obj_new itself is suppressed (Python's __init__
+  // doesn't allocate the instance — Python does that for us).
+  mlir::Operation *CtorObjNew = nullptr;
+  if (IsCtor) {
+    F.getBody().walk([&](mlir::LLVM::CallOp C) {
+      if (CtorObjNew) return;
+      if (C.getCallee() && *C.getCallee() == "matlab_obj_new" &&
+          C.getNumResults() == 1) {
+        CtorObjNew = C.getOperation();
+        Names[C.getResult()] = "self";
+        SuppressedOps.insert(C.getOperation());
+      }
+    });
+    // The trailing `return obj_new_result` is implicit in __init__.
+    if (CtorObjNew) {
+      F.getBody().walk([&](mlir::Operation *Op) {
+        if (auto R = mlir::dyn_cast<mlir::func::ReturnOp>(Op)) {
+          if (R.getNumOperands() == 1 &&
+              R.getOperand(0) == CtorObjNew->getResult(0))
+            SuppressedOps.insert(Op);
+        }
+        if (auto R = mlir::dyn_cast<mlir::LLVM::ReturnOp>(Op)) {
+          if (R.getNumOperands() == 1 &&
+              R.getOperand(0) == CtorObjNew->getResult(0))
+            SuppressedOps.insert(Op);
+        }
+      });
+    }
+  }
+
+  // Decorators (one per line, before `def`).
+  if (CMI.Kind == ClassMethodInfo::Get) {
+    indent(Indent);
+    OS << "@property\n";
+  }
+  if (IsStatic) {
+    indent(Indent);
+    OS << "@staticmethod\n";
+  }
+  // Header: `def name(self, p1, p2, ...):`. For ctors we synthesize the
+  // `self` slot; for everything else the first param IS self. Static
+  // methods omit `self` entirely.
+  indent(Indent);
+  OS << "def " << CMI.EmitName << "(";
+  bool FirstParam = true;
+  if (!IsStatic) { OS << "self"; FirstParam = false; }
+  unsigned StartArg = (IsCtor || IsStatic) ? 0 : 1;
+  for (unsigned i = StartArg; i < FT.getNumInputs(); ++i) {
+    if (!FirstParam) OS << ", ";
+    FirstParam = false;
+    auto Arg = Entry.getArgument(i);
+    std::string N;
+    if (i == 1 && IsBinaryOp) {
+      N = "other";
+    } else if (auto NA =
+                   F.getArgAttrOfType<mlir::StringAttr>(i, "matlab.name")) {
+      N = uniqueName(NA.getValue());
+    } else {
+      N = freshName();
+    }
+    Names[Arg] = N;
+    OS << N;
+  }
+  OS << "):\n";
+
+  // Empty / trivial body: emit `pass` only when nothing observable
+  // would be emitted. A non-suppressed return-with-value counts; a
+  // void-or-suppressed return doesn't (its emit collapses to nothing).
+  bool BodyIsTrivial = true;
+  for (auto &Op : Entry.getOperations()) {
+    if (SuppressedOps.count(&Op)) continue;
+    if (InlinedOps.count(&Op)) continue;
+    if (auto R = mlir::dyn_cast<mlir::func::ReturnOp>(Op)) {
+      if (R.getNumOperands() == 0) continue;
+      BodyIsTrivial = false; break;
+    }
+    if (auto R = mlir::dyn_cast<mlir::LLVM::ReturnOp>(Op)) {
+      if (R.getNumOperands() == 0) continue;
+      BodyIsTrivial = false; break;
+    }
+    if (mlir::isa<mlir::arith::ConstantOp, mlir::LLVM::ConstantOp,
+                  mlir::LLVM::ZeroOp, mlir::LLVM::AddressOfOp>(Op))
+      continue;
+    BodyIsTrivial = false;
+    break;
+  }
+  if (BodyIsTrivial) {
+    indent(Indent + 1); OS << "pass\n";
+    UsedNames = std::move(SavedUsed);
+    return;
+  }
+
+  emitRegion(F.getBody(), Indent + 1);
+  UsedNames = std::move(SavedUsed);
 }
 
 void Emitter::emitLLVMFunc(mlir::LLVM::LLVMFuncOp F) {
@@ -1832,6 +2221,16 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
           return;
         }
       }
+      // Class-method call (constructor / regular / operator / get-prop).
+      // Catches the case where the result is bound to a local rather
+      // than inlined into another expression.
+      {
+        std::string Rewrite;
+        if (tryRewriteAsClassCall(*Callee, Call.getOperands(), Rewrite)) {
+          OS << dropOuterParens(Rewrite) << "\n";
+          return;
+        }
+      }
       // For user-string runtime helpers, drop the (str_ptr, str_len) tail
       // length operand — Python strings carry their length, and the
       // matching runtime stub keeps `n` optional for back-compat.
@@ -1921,6 +2320,14 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
     if (Call.getNumResults() == 1) {
       std::string N = this->name(Call.getResult(0));
       OS << N << " = ";
+    }
+    {
+      std::string Rewrite;
+      if (tryRewriteAsClassCall(Call.getCallee(), Call.getOperands(),
+                                 Rewrite)) {
+        OS << dropOuterParens(Rewrite) << "\n";
+        return;
+      }
     }
     OS << Call.getCallee().str() << "(";
     for (unsigned i = 0; i < Call.getNumOperands(); ++i) {
