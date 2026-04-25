@@ -98,6 +98,10 @@ Emitter behavior worth knowing:
   `print(f'{x:g}')`. Output matches MATLAB's `%g` format for every finite
   value; the runtime path stays for matrices (`disp_mat`) where MATLAB's
   multi-column alignment rules don't have a clean f-string equivalent.
+- **Conditional imports**: the `import matlab_runtime as rt` and
+  `import numpy as np` lines are added only when the emitted body
+  actually references those modules. A pure-arithmetic program like
+  `examples/factorial.m` emits zero `import` lines.
 - **For loops**: `scf.while` ops produced by `LowerSeqLoops::lowerForOp` collapse
   to native `for i in range(...):`. When init/end/step are integer literals,
   Python's `range` is used; otherwise the `rt.frange(start, end, step)` generator
@@ -197,12 +201,10 @@ for i = 1:6
 end
 ```
 
-emits:
+emits (note no `import` lines — this body needs neither the runtime
+shim nor numpy):
 
 ```python
-import matlab_runtime as rt
-import numpy as np
-
 def fact(n):
     if n <= 1.0:
         y = 1.0
