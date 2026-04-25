@@ -6,7 +6,7 @@
 // Covers the three disp-substitution cases: string literal, f64, i64.
 int main(void) {
   puts("header:");
-  printf("%g\n", 3.1400000000000001);
+  printf("%g\n", 3.14);
   printf("%g\n", 42.0);
 
   printf("%g\n", 7.0);
