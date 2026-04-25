@@ -1175,6 +1175,48 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
     // treat it as a direct Python variable.
     Names[A.getResult()] = SlotName;
     DirectSlots[A.getOperation()] = SlotName;
+
+    // Drop the pre-declaration `slot = 0` when the slot's first use is
+    // an unconditional store. Python doesn't need pre-declaration —
+    // assignment creates the binding — so the zero-init is dead weight
+    // when overwritten before any read.
+    //
+    // Conservative dominance check: walk the parent block in program
+    // order; at each op, look for any operand that is the slot. If the
+    // op directly stores into the slot, the init is dead. If the op
+    // directly loads, keep the init. If the op has a nested region
+    // (scf.if / scf.while) that uses the slot, the use sits under a
+    // conditional / loop and may be skipped at runtime — keep the init
+    // so post-loop reads bind safely.
+    bool DropInit = false;
+    {
+      mlir::Block *ABlock = A->getBlock();
+      mlir::Value SlotV = A.getResult();
+      for (auto It = mlir::Block::iterator(A->getNextNode());
+           It != ABlock->end(); ++It) {
+        mlir::Operation *DirectUser = nullptr;
+        for (mlir::OpOperand &U : SlotV.getUses()) {
+          if (U.getOwner() == &*It) { DirectUser = U.getOwner(); break; }
+        }
+        if (DirectUser) {
+          if (auto St = mlir::dyn_cast<mlir::LLVM::StoreOp>(DirectUser)) {
+            if (St.getAddr() == SlotV) { DropInit = true; break; }
+          }
+          break;  // load (or other consumer) — keep the init.
+        }
+        bool NestedUse = false;
+        for (auto &Reg : It->getRegions()) {
+          Reg.walk([&](mlir::Operation *Inner) {
+            for (mlir::Value Opnd : Inner->getOperands())
+              if (Opnd == SlotV) NestedUse = true;
+          });
+          if (NestedUse) break;
+        }
+        if (NestedUse) break;
+      }
+    }
+    if (DropInit) return;
+
     indent(Indent);
     OS << SlotName << " = 0\n";
     return;
