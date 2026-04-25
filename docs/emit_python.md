@@ -94,6 +94,10 @@ Emitter behavior worth knowing:
   by `rt.disp_str(__matlab_str0, 13)`. When the argument is a string literal,
   the `rt.disp_str` call collapses further to `print(...)` — byte-equivalent
   output, but reads as plain Python.
+- **Scalar `disp` substitution**: `rt.disp_f64(x)` collapses to
+  `print(f'{x:g}')`. Output matches MATLAB's `%g` format for every finite
+  value; the runtime path stays for matrices (`disp_mat`) where MATLAB's
+  multi-column alignment rules don't have a clean f-string equivalent.
 - **For loops**: `scf.while` ops produced by `LowerSeqLoops::lowerForOp` collapse
   to native `for i in range(...):`. When init/end/step are integer literals,
   Python's `range` is used; otherwise the `rt.frange(start, end, step)` generator
@@ -208,7 +212,7 @@ def fact(n):
 
 print("fact(1..6):")
 for i in range(1, 7):
-    rt.disp_f64(fact(i))
+    print(f'{fact(i):g}')
 ```
 
 A second example showing `elseif` chaining and `select(c, 1.0, 0.0)` folding,

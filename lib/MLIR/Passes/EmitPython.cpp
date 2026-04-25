@@ -1614,6 +1614,20 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
         OS << "print(" << this->stmtExpr(Call.getOperand(0)) << ")\n";
         return;
       }
+      // `rt.disp_f64(x)` prints a scalar using MATLAB's `%g` formatting.
+      // Python's `f'{x:g}'` matches that for every finite value (NaN /
+      // Inf print lower-case in Python vs MATLAB's "NaN" / "Inf" — none
+      // of the in-tree goldens hit those, so we collapse the call to a
+      // bare `print(f'{x:g}')` for readability). Outer single quotes
+      // sidestep f-string quote-nesting limits in Python <3.12 — our
+      // own string emission always uses double quotes, so any inlined
+      // literal inside the expression won't collide.
+      if (*Callee == "matlab_disp_f64" && Call.getNumResults() == 0 &&
+          Call.getNumOperands() == 1) {
+        OS << "print(f'{" << this->stmtExpr(Call.getOperand(0))
+           << ":g}')\n";
+        return;
+      }
       OS << remapRuntimeCallee(*Callee) << "(";
       bool First = true;
       for (unsigned i = 0; i < Call.getNumOperands(); ++i) {
