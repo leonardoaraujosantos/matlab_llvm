@@ -490,6 +490,25 @@ bool Emitter::canInline(mlir::Operation &Op) {
           LLVM::GEPOp>(Op))
     return true;
 
+  // Is this LLVM call to a runtime helper that's known to be a pure
+  // read with no side effects? Such calls don't block inlining of an
+  // earlier value across them. The list mirrors EmitPython's allowlist
+  // and is intentionally small — adding the wrong helper here would
+  // visibly reorder side effects in the generated source.
+  auto isPureReadCall = [](Operation &Op2) -> bool {
+    auto C = dyn_cast<LLVM::CallOp>(Op2);
+    if (!C || !C.getCallee()) return false;
+    StringRef N = *C.getCallee();
+    if (!N.starts_with("matlab_")) return false;
+    StringRef S = N.drop_front(strlen("matlab_"));
+    return S == "obj_get_f64" || S == "size" || S == "size_dim" ||
+           S == "numel" || S == "numel3" || S == "length" ||
+           S == "ndims" || S == "isempty" || S == "isnumeric" ||
+           S == "isscalar" || S == "ismatrix" || S == "isvector" ||
+           S == "isstruct" || S == "isfield" || S == "iscell" ||
+           S == "isstring" || S == "string_len";
+  };
+
   // llvm.load: no intervening store to the same address AND no call
   // between producer and use in the block. Alloca'd slots don't escape
   // emitted code; stores through the exact same SSA value are the only
@@ -501,7 +520,10 @@ bool Emitter::canInline(mlir::Operation &Op) {
          It != BB->end() && &*It != User; ++It) {
       if (auto S = dyn_cast<LLVM::StoreOp>(&*It))
         if (S.getAddr() == AddrV) return false;
-      if (isa<LLVM::CallOp, func::CallOp>(&*It)) return false;
+      if (isa<func::CallOp>(&*It)) return false;
+      if (isa<LLVM::CallOp>(&*It)) {
+        if (!isPureReadCall(*It)) return false;
+      }
     }
     return true;
   }
@@ -519,7 +541,10 @@ bool Emitter::canInline(mlir::Operation &Op) {
     for (auto It = ++Block::iterator(&Op);
          It != BB->end() && &*It != User; ++It) {
       if (isa<LLVM::StoreOp>(*It)) return false;
-      if (isa<LLVM::CallOp, func::CallOp>(*It)) return false;
+      if (isa<func::CallOp>(*It)) return false;
+      if (isa<LLVM::CallOp>(*It)) {
+        if (!isPureReadCall(*It)) return false;
+      }
     }
     (void)C;
     return true;
@@ -530,7 +555,10 @@ bool Emitter::canInline(mlir::Operation &Op) {
     for (auto It = ++Block::iterator(&Op);
          It != BB->end() && &*It != User; ++It) {
       if (isa<LLVM::StoreOp>(*It)) return false;
-      if (isa<LLVM::CallOp, func::CallOp>(*It)) return false;
+      if (isa<func::CallOp>(*It)) return false;
+      if (isa<LLVM::CallOp>(*It)) {
+        if (!isPureReadCall(*It)) return false;
+      }
     }
     return true;
   }
