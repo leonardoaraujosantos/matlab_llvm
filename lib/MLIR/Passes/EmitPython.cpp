@@ -106,6 +106,14 @@ private:
   // they render as `name = [0.0] * N`, with stores/loads going via
   // indexing.
   llvm::DenseMap<mlir::Operation *, std::string> ArraySlots;
+  // Subset of ArraySlots whose backing buffer was already emitted as a
+  // collapsed Python list literal (`slot = [v0, v1, ...]`) — the
+  // GEP/store ops that filled it have been absorbed and must not emit
+  // their own statements. Keyed off SuppressedOps below.
+  // Ops whose emission has been folded into a different op (e.g. the
+  // GEP+store pairs that filled a matrix literal). Skip these in
+  // emitOp().
+  llvm::DenseSet<mlir::Operation *> SuppressedOps;
   int NextId = 0;
 
   // Most recent line emitted; used to suppress duplicate line markers
@@ -731,6 +739,7 @@ void Emitter::emitFuncFunc(mlir::func::FuncOp F) {
   InlinedOps.clear();
   DirectSlots.clear();
   ArraySlots.clear();
+  SuppressedOps.clear();
   LastLineFile.clear();
   LastLineNum = -1;
   computeInlines(F.getBody());
@@ -780,6 +789,7 @@ void Emitter::emitLLVMFunc(mlir::LLVM::LLVMFuncOp F) {
   InlinedOps.clear();
   DirectSlots.clear();
   ArraySlots.clear();
+  SuppressedOps.clear();
   LastLineFile.clear();
   LastLineNum = -1;
   computeInlines(F.getBody());
@@ -837,6 +847,7 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
   llvm::StringRef Name = Op.getName().getStringRef();
 
   if (InlinedOps.count(&Op)) return;
+  if (SuppressedOps.count(&Op)) return;
 
   advanceTo(Op.getLoc(), Indent);
 
@@ -1070,10 +1081,90 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
     if (IsArray) {
       auto AT = mlir::cast<mlir::LLVM::LLVMArrayType>(ET);
       uint64_t N0 = AT.getNumElements();
-      // Python: list of floats is fine for small numeric buffers; the
-      // runtime wraps into np.array when handing off to matrix ops.
       Names[A.getResult()] = SlotName;
       ArraySlots[A.getOperation()] = SlotName;
+
+      // Matrix-literal init pattern from LowerTensorOps::materializeMat:
+      // every alloca user is a GEP-with-constant-index-then-store (or a
+      // direct store at idx 0). When all N indices 0..N-1 are filled
+      // exactly once with stmtExpr-able values, collapse into a single
+      // `slot = [v0, v1, ...]` Python list literal and absorb the
+      // GEP/store ops.
+      auto getConstIdx = [](mlir::LLVM::GEPOp G, uint64_t &Out) -> bool {
+        auto Idxs = G.getIndices();
+        if (std::distance(Idxs.begin(), Idxs.end()) != 1) return false;
+        auto Raw = *Idxs.begin();
+        if (auto IA = mlir::dyn_cast<mlir::IntegerAttr>(Raw)) {
+          Out = IA.getValue().getZExtValue();
+          return true;
+        }
+        if (auto V = mlir::dyn_cast<mlir::Value>(Raw)) {
+          if (auto C = V.getDefiningOp<mlir::LLVM::ConstantOp>())
+            if (auto IA = mlir::dyn_cast<mlir::IntegerAttr>(C.getValue())) {
+              Out = IA.getValue().getZExtValue();
+              return true;
+            }
+          if (auto C = V.getDefiningOp<mlir::arith::ConstantOp>())
+            if (auto IA = mlir::dyn_cast<mlir::IntegerAttr>(C.getValue())) {
+              Out = IA.getValue().getZExtValue();
+              return true;
+            }
+        }
+        return false;
+      };
+      llvm::SmallVector<mlir::Value, 16> InitVals(N0);
+      llvm::SmallVector<mlir::Operation *, 32> AbsorbedOps;
+      bool InitOK = N0 > 0;
+      uint64_t Filled = 0;
+      for (mlir::OpOperand &Use : A->getUses()) {
+        if (!InitOK) break;
+        mlir::Operation *U = Use.getOwner();
+        if (auto St = mlir::dyn_cast<mlir::LLVM::StoreOp>(U)) {
+          if (St.getAddr() != A.getResult()) { InitOK = false; break; }
+          if (InitVals[0]) { InitOK = false; break; }  // duplicate idx 0
+          InitVals[0] = St.getValue();
+          AbsorbedOps.push_back(St.getOperation());
+          ++Filled;
+          continue;
+        }
+        if (auto Gep = mlir::dyn_cast<mlir::LLVM::GEPOp>(U)) {
+          if (Gep.getBase() != A.getResult()) { InitOK = false; break; }
+          uint64_t Idx;
+          if (!getConstIdx(Gep, Idx) || Idx >= N0 || InitVals[Idx]) {
+            InitOK = false; break;
+          }
+          if (!Gep.getResult().hasOneUse()) { InitOK = false; break; }
+          auto St = mlir::dyn_cast<mlir::LLVM::StoreOp>(
+              *Gep.getResult().getUsers().begin());
+          if (!St || St.getAddr() != Gep.getResult()) {
+            InitOK = false; break;
+          }
+          InitVals[Idx] = St.getValue();
+          AbsorbedOps.push_back(Gep.getOperation());
+          AbsorbedOps.push_back(St.getOperation());
+          ++Filled;
+          continue;
+        }
+        // The legitimate post-init consumer (e.g. matlab_mat_from_buf).
+        if (mlir::isa<mlir::LLVM::CallOp>(U)) continue;
+        InitOK = false;
+        break;
+      }
+      if (InitOK && Filled == N0)
+        for (auto V : InitVals) if (!V) { InitOK = false; break; }
+      if (InitOK && Filled == N0) {
+        indent(Indent);
+        OS << SlotName << " = [";
+        for (uint64_t i = 0; i < N0; ++i) {
+          if (i) OS << ", ";
+          OS << this->stmtExpr(InitVals[i]);
+        }
+        OS << "]\n";
+        for (auto *Op2 : AbsorbedOps) SuppressedOps.insert(Op2);
+        return;
+      }
+
+      // Fallback: zero-filled list, individual stores follow.
       indent(Indent);
       OS << SlotName << " = [0.0] * " << N0 << "\n";
       return;
