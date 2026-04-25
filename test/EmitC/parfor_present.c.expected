@@ -20,6 +20,5 @@ int main(void) {
 // so the mutex still coordinates interleaved output between workers.
 static void __parfor_body_0(double v0, void* v1) {
   matlab_disp_f64(v0);
-  return;
 }
 
