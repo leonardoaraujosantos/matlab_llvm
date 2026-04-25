@@ -70,8 +70,8 @@ for m in "$TESTDIR"/*.m; do
   # (the runtime is plain C). cc handles both in one invocation.
   cc_err="$(mktemp -t mlc.XXXXXX).err"
   if [[ "$MODE" == cpp ]]; then
-    if ! "${COMPILE[@]}" -x c++ "$tmpsrc" -x c "$RUNTIME" -o "$tmpbin" \
-           -lm -lpthread 2>"$cc_err"; then
+    if ! "${COMPILE[@]}" "-I$ROOT/runtime" -x c++ "$tmpsrc" -x c "$RUNTIME" \
+           -o "$tmpbin" -lm -lpthread 2>"$cc_err"; then
       echo "FAIL $base: $LABEL compile failed"
       [[ "$STRICT" == "1" ]] && sed 's/^/  /' "$cc_err" | head -5
       fail=$((fail+1))

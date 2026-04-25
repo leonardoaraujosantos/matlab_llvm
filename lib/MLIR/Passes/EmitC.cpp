@@ -27,6 +27,7 @@
 #include "llvm/Support/raw_ostream.h"
 
 #include <cctype>
+#include <cmath>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -97,7 +98,10 @@ private:
   std::string uniqueName(llvm::StringRef Hint);
   std::string sanitizeIdent(llvm::StringRef In);
   std::string cTypeOf(mlir::Type T);
-  std::string cTypeOfValue(mlir::Value V) { return cTypeOf(V.getType()); }
+  std::string cTypeOfValue(mlir::Value V) {
+    if (Cpp && isMatrixValue(V)) return "Matrix";
+    return cTypeOf(V.getType());
+  }
 
   // --- Region / block printing -------------------------------------------
   void emitRegion(mlir::Region &R, int Indent);
@@ -233,6 +237,19 @@ private:
   // Look up the C++ class type assigned to V (from a ctor result, an
   // alloca-tracked load, etc.), or empty if V isn't a class instance.
   llvm::StringRef classTypeOf(mlir::Value V) const;
+
+  // Same fixpoint propagation as populateClassValueTypes, but for runtime
+  // matrix values. Marks SSA values whose defining call returns
+  // `matlab_mat*` and propagates through alloca / store / load and
+  // through user-function args/results.
+  void populateMatrixValueTypes(mlir::ModuleOp M);
+  bool isMatrixReturningRuntimeFn(llvm::StringRef Name) const;
+  bool isMatrixValue(mlir::Value V) const { return MatrixValues.count(V); }
+  // Try to rewrite a matlab_* runtime call as a `Matrix` operator/method
+  // expression. Returns true if Out was filled.
+  bool tryRewriteAsMatrixCall(llvm::StringRef Callee,
+                               mlir::ValueRange Operands,
+                               std::string &Out);
 
   std::ostream &OS;
   bool Cpp;
@@ -374,6 +391,16 @@ private:
   // load chains. Drives variable-type emission and call-site rewrites.
   llvm::DenseMap<mlir::Value, std::string> ClassValueType;
   llvm::DenseMap<mlir::Operation *, std::string> ClassAllocaType;
+  // SSA values known to hold a `matlab_mat *` (a runtime matrix) — drives
+  // C++ type emission as `Matrix` and the operator/method rewrites that
+  // turn `matlab_matmul_mm(A, B)` back into `A * B`. Only used in Cpp
+  // mode; the C lane keeps `void*`.
+  llvm::DenseSet<mlir::Value> MatrixValues;
+  llvm::DenseSet<mlir::Operation *> MatrixAllocas;
+  // True when at least one runtime call surfaced a Matrix-typed value —
+  // gates emission of the `#include "matlab_runtime.hpp"` line and the
+  // suppression of the per-runtime-fn extern "C" block.
+  bool UsesMatrixWrapper = false;
 };
 
 // ---------------------------------------------------------------------------
@@ -823,12 +850,21 @@ bool Emitter::buildInlineExpr(mlir::Operation &Op, std::string &Expr) {
   if (auto C = dyn_cast<func::CallOp>(Op)) {
     if (tryRewriteAsClassCall(C.getCallee(), C.getOperands(), Expr))
       return true;
+    if (tryRewriteAsMatrixCall(C.getCallee(), C.getOperands(), Expr))
+      return true;
     std::string E = C.getCallee().str() + "(";
     for (unsigned i = 0; i < C.getNumOperands(); ++i) {
       if (i) E += ", ";
       E += dropOuterParens(exprFor(C.getOperand(i)));
     }
     E += ")";
+    // C++ mode: an unrewritten matrix-returning call (matlab_zeros / ones /
+    // eye / rand / …) returns void* at the C ABI level. When the result
+    // flows into ostream<< or any context expecting a typed Matrix, wrap
+    // it in `Matrix(...)` so overload resolution picks the friend `<<`
+    // and not ostream's pointer overload.
+    if (Cpp && C.getNumResults() == 1 && isMatrixValue(C.getResult(0)))
+      E = "Matrix(" + E + ")";
     Expr = E;
     return true;
   }
@@ -842,12 +878,17 @@ bool Emitter::buildInlineExpr(mlir::Operation &Op, std::string &Expr) {
     // `a OP b` / `obj.X` / `Class::method(args)`.
     if (tryRewriteAsClassCall(*C.getCallee(), C.getOperands(), Expr))
       return true;
+    // Matrix runtime call: `matlab_matmul_mm(A, B)` → `(A * B)`, etc.
+    if (tryRewriteAsMatrixCall(*C.getCallee(), C.getOperands(), Expr))
+      return true;
     std::string E = C.getCallee()->str() + "(";
     for (unsigned i = 0; i < C.getNumOperands(); ++i) {
       if (i) E += ", ";
       E += dropOuterParens(exprFor(C.getOperand(i)));
     }
     E += ")";
+    if (Cpp && C.getNumResults() == 1 && isMatrixValue(C.getResult()))
+      E = "Matrix(" + E + ")";
     Expr = E;
     return true;
   }
@@ -1453,6 +1494,263 @@ void Emitter::populateClassValueTypes(mlir::ModuleOp M) {
       }
     });
   }
+}
+
+// Set of runtime functions that return `matlab_mat *`. Drives both the
+// matrix-value propagation pass and the call-rewrite layer that maps
+// these calls back to operator/method form.
+static llvm::StringRef MatrixReturningFns[] = {
+    "matlab_mat_from_buf", "matlab_mat_from_scalar", "matlab_empty_mat",
+    "matlab_zeros", "matlab_ones", "matlab_eye", "matlab_magic",
+    "matlab_rand", "matlab_randn", "matlab_range", "matlab_repmat",
+    "matlab_matmul_mm", "matlab_inv", "matlab_mldivide_mm",
+    "matlab_mrdivide_mm", "matlab_svd", "matlab_eig", "matlab_eig_V",
+    "matlab_eig_D", "matlab_transpose", "matlab_diag", "matlab_reshape",
+    "matlab_matpow",
+    "matlab_add_mm", "matlab_sub_mm", "matlab_emul_mm", "matlab_ediv_mm",
+    "matlab_epow_mm", "matlab_add_ms", "matlab_sub_ms", "matlab_emul_ms",
+    "matlab_ediv_ms", "matlab_epow_ms", "matlab_add_sm", "matlab_sub_sm",
+    "matlab_emul_sm", "matlab_ediv_sm", "matlab_epow_sm",
+    "matlab_gt_mm", "matlab_ge_mm", "matlab_lt_mm", "matlab_le_mm",
+    "matlab_eq_mm", "matlab_ne_mm", "matlab_gt_ms", "matlab_ge_ms",
+    "matlab_lt_ms", "matlab_le_ms", "matlab_eq_ms", "matlab_ne_ms",
+    "matlab_gt_sm", "matlab_ge_sm", "matlab_lt_sm", "matlab_le_sm",
+    "matlab_eq_sm", "matlab_ne_sm",
+    "matlab_neg_m", "matlab_exp_m", "matlab_log_m", "matlab_sin_m",
+    "matlab_cos_m", "matlab_tan_m", "matlab_sqrt_m", "matlab_abs_m",
+    "matlab_asin_m", "matlab_acos_m", "matlab_atan_m", "matlab_sinh_m",
+    "matlab_cosh_m", "matlab_tanh_m", "matlab_log2_m", "matlab_log10_m",
+    "matlab_sign_m", "matlab_floor_m", "matlab_ceil_m", "matlab_round_m",
+    "matlab_fix_m", "matlab_atan2_m",
+    "matlab_sum", "matlab_prod", "matlab_mean", "matlab_min", "matlab_max",
+    "matlab_min_mm", "matlab_max_mm",
+    "matlab_sum_dim", "matlab_prod_dim", "matlab_mean_dim",
+    "matlab_min_dim", "matlab_max_dim",
+    "matlab_cumsum", "matlab_cumprod",
+    "matlab_cumsum_dim", "matlab_cumprod_dim",
+    "matlab_size", "matlab_slice1", "matlab_slice2", "matlab_find",
+    "matlab_erase_rows", "matlab_erase_cols",
+    "matlab_struct_get_mat", "matlab_cell_get_mat", "matlab_obj_get_mat",
+    "matlab_ws_get_mat",
+    "matlab_linspace", "matlab_chol", "matlab_pinv", "matlab_permute",
+    "matlab_rot90", "matlab_kron", "matlab_squeeze",
+    "matlab_lu_L", "matlab_lu_U", "matlab_qr_Q", "matlab_qr_R",
+    "matlab_flip", "matlab_fliplr", "matlab_flipud",
+    "matlab_horzcat", "matlab_vertcat",
+    "matlab_sort", "matlab_sortrows",
+    "matlab_intersect", "matlab_ismember", "matlab_setdiff",
+    "matlab_union", "matlab_unique", "matlab_ind2sub",
+    "matlab_load_mat", "matlab_fread",
+    // Complex / FFT — runtime returns `matlab_mat_c *` or real
+    // `matlab_mat *`, both representable as a Matrix wrapper since the
+    // wrapper only holds a `void *`.
+    "matlab_complex_scalar", "matlab_mat_c_from_real",
+    "matlab_mat_c_from_buf", "matlab_conj_c", "matlab_neg_c",
+    "matlab_real_c", "matlab_imag_c", "matlab_angle_c", "matlab_abs_c",
+    "matlab_add_cc", "matlab_sub_cc", "matlab_emul_cc", "matlab_ediv_cc",
+    "matlab_matmul_cc", "matlab_transpose_c", "matlab_ctranspose_c",
+    "matlab_fft_c", "matlab_ifft_c", "matlab_fft2_c", "matlab_ifft2_c",
+};
+
+bool Emitter::isMatrixReturningRuntimeFn(llvm::StringRef Name) const {
+  for (auto &S : MatrixReturningFns)
+    if (Name == S) return true;
+  return false;
+}
+
+void Emitter::populateMatrixValueTypes(mlir::ModuleOp M) {
+  if (!Cpp) return;
+  // Seed: every result of a matrix-returning runtime call.
+  // Plus parameters/results of MATLAB functions that pass matrices through
+  // (we can detect these once propagation hits a func.return / func.call).
+  bool Changed = true;
+  while (Changed) {
+    Changed = false;
+    M.walk([&](mlir::Operation *Op) {
+      if (auto C = mlir::dyn_cast<mlir::LLVM::CallOp>(Op)) {
+        if (C.getCallee() && C.getNumResults() == 1 &&
+            isMatrixReturningRuntimeFn(*C.getCallee()))
+          if (MatrixValues.insert(C.getResult()).second) Changed = true;
+      }
+      // Store of matrix-typed value into alloca → mark alloca, then any
+      // load from the alloca becomes matrix-typed in the next pass.
+      if (auto S = mlir::dyn_cast<mlir::LLVM::StoreOp>(Op)) {
+        if (!isMatrixValue(S.getValue())) return;
+        auto *Def = S.getAddr().getDefiningOp();
+        auto A = mlir::dyn_cast_or_null<mlir::LLVM::AllocaOp>(Def);
+        if (!A) return;
+        if (MatrixAllocas.insert(A.getOperation()).second) Changed = true;
+      }
+      if (auto L = mlir::dyn_cast<mlir::LLVM::LoadOp>(Op)) {
+        auto *Def = L.getAddr().getDefiningOp();
+        auto A = mlir::dyn_cast_or_null<mlir::LLVM::AllocaOp>(Def);
+        if (!A || !MatrixAllocas.count(A.getOperation())) return;
+        if (MatrixValues.insert(L.getResult()).second) Changed = true;
+      }
+      // Yield in scf.if: if any operand is matrix-typed, the parent's
+      // matching result is matrix-typed.
+      if (auto Y = mlir::dyn_cast<mlir::scf::YieldOp>(Op)) {
+        auto *Parent = Op->getParentOp();
+        if (auto If = mlir::dyn_cast_or_null<mlir::scf::IfOp>(Parent)) {
+          for (unsigned i = 0; i < Y.getNumOperands(); ++i)
+            if (isMatrixValue(Y.getOperand(i)))
+              if (MatrixValues.insert(If.getResult(i)).second) Changed = true;
+        }
+      }
+      // Indirect call to an anon body: `((cast)__anon_N)(args...)` where
+      // the first operand is `llvm.mlir.addressof @__anon_N`. Treat as
+      // a direct call to that function for arg/result propagation —
+      // otherwise capture-bound matrix args stay typed `void*` in the
+      // anon body's signature and any matrix op in the body fails to
+      // compile.
+      if (auto Call = mlir::dyn_cast<mlir::LLVM::CallOp>(Op)) {
+        if (!Call.getCallee()) {
+          if (auto AO = Call.getOperand(0)
+                            .getDefiningOp<mlir::LLVM::AddressOfOp>()) {
+            if (auto Callee = M.lookupSymbol<mlir::LLVM::LLVMFuncOp>(
+                    AO.getGlobalName())) {
+              if (!Callee.getBody().empty()) {
+                auto &Entry = Callee.getBody().front();
+                // Operands index 1.. correspond to block args 0..
+                for (unsigned i = 1; i < Call.getNumOperands() &&
+                                      (i - 1) < Entry.getNumArguments();
+                     ++i) {
+                  if (isMatrixValue(Call.getOperand(i))) {
+                    auto BA = Entry.getArgument(i - 1);
+                    if (MatrixValues.insert(BA).second) Changed = true;
+                  }
+                }
+                // Return propagation: if the callee returns matrix, the
+                // call result at this site is matrix-typed.
+                if (Call.getNumResults() == 1) {
+                  Callee.walk([&](mlir::LLVM::ReturnOp R) {
+                    if (R.getNumOperands() == 1 &&
+                        isMatrixValue(R.getOperand(0)))
+                      if (MatrixValues.insert(Call.getResult()).second)
+                        Changed = true;
+                  });
+                }
+              }
+            }
+          }
+        }
+      }
+      // Function call: if a callee's return is propagated as matrix,
+      // mark the call result. Symmetric for arguments → block args.
+      if (auto Call = mlir::dyn_cast<mlir::func::CallOp>(Op)) {
+        auto Callee =
+            M.lookupSymbol<mlir::func::FuncOp>(Call.getCallee());
+        if (!Callee) return;
+        if (Callee.getBody().empty()) return;
+        // Result propagation: if the callee's return statement yields a
+        // matrix-typed value, callers see Matrix.
+        Callee.walk([&](mlir::func::ReturnOp R) {
+          for (unsigned i = 0; i < R.getNumOperands() &&
+                                i < Call.getNumResults();
+               ++i) {
+            if (isMatrixValue(R.getOperand(i)))
+              if (MatrixValues.insert(Call.getResult(i)).second)
+                Changed = true;
+          }
+        });
+        // Argument propagation: if the call passes a Matrix in arg #i,
+        // the callee's block-arg #i is Matrix-typed.
+        if (Callee.getBody().getNumArguments() == Call.getNumOperands()) {
+          for (unsigned i = 0; i < Call.getNumOperands(); ++i) {
+            if (isMatrixValue(Call.getOperand(i))) {
+              auto BA = Callee.getBody().front().getArgument(i);
+              if (MatrixValues.insert(BA).second) Changed = true;
+            }
+          }
+        }
+      }
+    });
+  }
+  if (!MatrixValues.empty()) UsesMatrixWrapper = true;
+}
+
+bool Emitter::tryRewriteAsMatrixCall(llvm::StringRef Callee,
+                                       mlir::ValueRange Operands,
+                                       std::string &Out) {
+  if (!Cpp) return false;
+  // Scalar-returning matrix methods. The first operand must be a tracked
+  // matrix value — otherwise the runtime call isn't operating on a
+  // wrapper instance and we shouldn't dot-call into it.
+  auto firstIsMatrix = [&]() {
+    return !Operands.empty() && isMatrixValue(Operands[0]);
+  };
+  if (firstIsMatrix() && Operands.size() == 1) {
+    auto opnd0 = dropOuterParens(this->exprFor(Operands[0]));
+    if (Callee == "matlab_numel")  { Out = opnd0 + ".numel()"; return true; }
+    if (Callee == "matlab_length") { Out = opnd0 + ".length()"; return true; }
+    if (Callee == "matlab_det")    { Out = opnd0 + ".det()"; return true; }
+  }
+  if (!isMatrixReturningRuntimeFn(Callee)) return false;
+  // Helpers: pretty operand spelling without superfluous outer parens.
+  auto opnd = [&](unsigned i) {
+    return dropOuterParens(this->exprFor(Operands[i]));
+  };
+  auto bin = [&](llvm::StringRef Op) -> std::string {
+    return "(" + opnd(0) + " " + Op.str() + " " + opnd(1) + ")";
+  };
+  auto m1 = [&](llvm::StringRef Method) -> std::string {
+    return opnd(0) + "." + Method.str() + "()";
+  };
+  auto m2 = [&](llvm::StringRef Method) -> std::string {
+    return opnd(0) + "." + Method.str() + "(" + opnd(1) + ")";
+  };
+  if (Operands.size() == 2) {
+    if (Callee == "matlab_matmul_mm") { Out = bin("*"); return true; }
+    if (Callee == "matlab_add_mm")    { Out = bin("+"); return true; }
+    if (Callee == "matlab_sub_mm")    { Out = bin("-"); return true; }
+    if (Callee == "matlab_emul_mm")     { Out = m2("emul"); return true; }
+    if (Callee == "matlab_ediv_mm")     { Out = m2("ediv"); return true; }
+    if (Callee == "matlab_epow_mm")     { Out = m2("epow"); return true; }
+    if (Callee == "matlab_mldivide_mm") { Out = m2("mldivide"); return true; }
+    if (Callee == "matlab_mrdivide_mm") { Out = m2("mrdivide"); return true; }
+    if (Callee == "matlab_add_ms")    { Out = bin("+"); return true; }
+    if (Callee == "matlab_sub_ms")    { Out = bin("-"); return true; }
+    if (Callee == "matlab_emul_ms")   { Out = bin("*"); return true; }
+    if (Callee == "matlab_ediv_ms")   { Out = bin("/"); return true; }
+    if (Callee == "matlab_add_sm")    { Out = bin("+"); return true; }
+    if (Callee == "matlab_sub_sm")    { Out = bin("-"); return true; }
+    if (Callee == "matlab_emul_sm")   { Out = bin("*"); return true; }
+    if (Callee == "matlab_ediv_sm")   { Out = bin("/"); return true; }
+  }
+  if (Operands.size() == 1) {
+    if (Callee == "matlab_transpose") { Out = m1("t"); return true; }
+    if (Callee == "matlab_inv")       { Out = m1("inv"); return true; }
+    if (Callee == "matlab_diag")      { Out = m1("diag"); return true; }
+    if (Callee == "matlab_sum")       { Out = m1("sum"); return true; }
+    if (Callee == "matlab_prod")      { Out = m1("prod"); return true; }
+    if (Callee == "matlab_mean")      { Out = m1("mean"); return true; }
+    if (Callee == "matlab_min")       { Out = m1("min"); return true; }
+    if (Callee == "matlab_max")       { Out = m1("max"); return true; }
+    if (Callee == "matlab_sqrt_m")    { Out = m1("sqrt"); return true; }
+    if (Callee == "matlab_abs_m")     { Out = m1("abs"); return true; }
+    if (Callee == "matlab_exp_m")     { Out = m1("exp"); return true; }
+    if (Callee == "matlab_log_m")     { Out = m1("log"); return true; }
+    if (Callee == "matlab_sin_m")     { Out = m1("sin"); return true; }
+    if (Callee == "matlab_cos_m")     { Out = m1("cos"); return true; }
+    if (Callee == "matlab_tan_m")     { Out = m1("tan"); return true; }
+    if (Callee == "matlab_neg_m")     { Out = "(-" + opnd(0) + ")"; return true; }
+    if (Callee == "matlab_eig")       { Out = m1("eig"); return true; }
+    if (Callee == "matlab_eig_V")     { Out = m1("eigV"); return true; }
+    if (Callee == "matlab_eig_D")     { Out = m1("eigD"); return true; }
+    if (Callee == "matlab_svd")       { Out = m1("svd"); return true; }
+  }
+  // matlab_mat_from_buf((void*)slot, m, n) — caller side. The slot
+  // expression is already an inlined "(void*)slotName" cast. Strip it
+  // back to the pointer expression and emit `Matrix(slot, m, n)` via
+  // the explicit pointer ctor (Matrix's matlab_mat* ctor accepts the
+  // implicit-converted pointer).
+  if (Callee == "matlab_mat_from_buf" && Operands.size() == 3) {
+    std::string Buf = this->exprFor(Operands[0]);
+    Out = "Matrix(" + Buf + ", " + this->exprFor(Operands[1]) +
+          ", " + this->exprFor(Operands[2]) + ")";
+    return true;
+  }
+  return false;
 }
 
 llvm::StringSet<> Emitter::inheritedProperties(
@@ -2249,6 +2547,12 @@ void Emitter::emitProlog() {
   // / modern C++. The flags were computed in precomputeModuleProperties.
   if (NeedsStdio)    OS << "#include <stdio.h>\n";
   if (NeedsIostream) OS << "#include <iostream>\n";
+  // C++ Matrix wrapper: when any matrix-typed value flows through the
+  // module, pull in the wrapper header. It transitively includes the
+  // C ABI header, so the per-fn extern "C" block becomes redundant
+  // (we still emit it for non-matrix runtime fns).
+  if (Cpp && UsesMatrixWrapper)
+    OS << "#include \"matlab_runtime.hpp\"\n";
   OS << "\n";
   // Runtime function prototypes are emitted per-module below, with void*
   // for all pointer params so the same declaration works for C and C++
@@ -2353,6 +2657,15 @@ void Emitter::precomputeModuleProperties(mlir::ModuleOp M) {
   if (AnyDispStrLiteral || AnyDispScalar) {
     if (Cpp) NeedsIostream = true;
     else     NeedsStdio = true;
+  }
+  // The Matrix-wrapper rewrites emit `std::cout << M;` for matlab_disp_mat
+  // and friends. Even if the program has no other disp call, the wrapper
+  // path still needs <iostream>.
+  if (Cpp) {
+    M.walk([&](mlir::LLVM::CallOp C) {
+      if (!C.getCallee()) return;
+      if (*C.getCallee() == "matlab_disp_mat") NeedsIostream = true;
+    });
   }
 }
 
@@ -2465,6 +2778,7 @@ bool Emitter::run(mlir::ModuleOp M) {
   // load from a class-typed alloca, etc.) so call-site rewrites + the
   // alloca / variable-type emit can resolve to the right class.
   if (Cpp) populateClassValueTypes(M);
+  if (Cpp) populateMatrixValueTypes(M);
   precomputeModuleProperties(M);
   emitProlog();
   // Anything already in UsedNames after the prolog is module-scope
@@ -2498,6 +2812,31 @@ bool Emitter::run(mlir::ModuleOp M) {
   // no dangling `extern "C" {}` + comment pair.
   {
     std::ostringstream Buf;
+    // Set of runtime functions whose declaration is already provided by
+    // matlab_runtime.hpp — when the wrapper is in use, redeclaring them
+    // in the per-module extern "C" block is just noise.
+    auto wrapperCovers = [&](llvm::StringRef N) -> bool {
+      if (!Cpp || !UsesMatrixWrapper) return false;
+      static llvm::StringRef Covered[] = {
+          "matlab_mat_from_buf", "matlab_disp_mat", "matlab_matmul_mm",
+          "matlab_add_mm", "matlab_sub_mm", "matlab_emul_mm",
+          "matlab_ediv_mm", "matlab_epow_mm", "matlab_add_ms",
+          "matlab_sub_ms", "matlab_emul_ms", "matlab_ediv_ms",
+          "matlab_add_sm", "matlab_sub_sm", "matlab_emul_sm",
+          "matlab_ediv_sm", "matlab_transpose", "matlab_inv",
+          "matlab_diag", "matlab_sum", "matlab_prod", "matlab_mean",
+          "matlab_min", "matlab_max", "matlab_sqrt_m", "matlab_abs_m",
+          "matlab_exp_m", "matlab_log_m", "matlab_sin_m",
+          "matlab_cos_m", "matlab_tan_m", "matlab_numel",
+          "matlab_length", "matlab_det", "matlab_mldivide_mm",
+          "matlab_mrdivide_mm", "matlab_eig", "matlab_eig_V",
+          "matlab_eig_D", "matlab_svd", "matlab_neg_m",
+          "matlab_reshape", "matlab_repmat", "matlab_matpow",
+      };
+      for (auto &S : Covered)
+        if (N == S) return true;
+      return false;
+    };
     for (auto &Op : M.getBody()->getOperations()) {
       auto F = mlir::dyn_cast<mlir::LLVM::LLVMFuncOp>(Op);
       if (!F) continue;
@@ -2505,6 +2844,7 @@ bool Emitter::run(mlir::ModuleOp M) {
       UsedNames.insert(F.getSymName().str());
       if (LiveRuntimeFuncs.find(F.getSymName()) == LiveRuntimeFuncs.end())
         continue;
+      if (wrapperCovers(F.getSymName())) continue;
       auto FT = F.getFunctionType();
       std::string RetTy =
           mlir::isa<mlir::LLVM::LLVMVoidType>(FT.getReturnType())
@@ -2571,10 +2911,26 @@ bool Emitter::run(mlir::ModuleOp M) {
         std::string RetTy = FT.getNumResults() == 0
                                 ? std::string("void")
                                 : cTypeOf(FT.getResult(0));
+        // Lift to Matrix when any propagated return value is matrix-typed
+        // — keep forward decl in sync with the function definition's
+        // signature emission below.
+        if (Cpp && FT.getNumResults() == 1) {
+          bool AnyMatrix = false;
+          F.walk([&](mlir::func::ReturnOp R) {
+            if (R.getNumOperands() == 1 && isMatrixValue(R.getOperand(0)))
+              AnyMatrix = true;
+          });
+          if (AnyMatrix) RetTy = "Matrix";
+        }
         Buf << "static " << RetTy << " " << F.getSymName().str() << "(";
+        auto &Entry = F.getBody().front();
         for (unsigned i = 0; i < FT.getNumInputs(); ++i) {
           if (i) Buf << ", ";
-          Buf << cTypeOf(FT.getInput(i));
+          std::string ParamTy =
+              (Cpp && isMatrixValue(Entry.getArgument(i)))
+                  ? "Matrix"
+                  : cTypeOf(FT.getInput(i));
+          Buf << ParamTy;
         }
         if (FT.getNumInputs() == 0) Buf << "void";
         Buf << ");\n";
@@ -2587,10 +2943,23 @@ bool Emitter::run(mlir::ModuleOp M) {
             mlir::isa<mlir::LLVM::LLVMVoidType>(FT.getReturnType())
                 ? std::string("void")
                 : cTypeOf(FT.getReturnType());
+        if (Cpp && !mlir::isa<mlir::LLVM::LLVMVoidType>(FT.getReturnType())) {
+          bool AnyMatrix = false;
+          F.walk([&](mlir::LLVM::ReturnOp R) {
+            if (R.getNumOperands() == 1 && isMatrixValue(R.getOperand(0)))
+              AnyMatrix = true;
+          });
+          if (AnyMatrix) RetTy = "Matrix";
+        }
         Buf << "static " << RetTy << " " << F.getSymName().str() << "(";
+        auto &Entry = F.getBody().front();
         for (unsigned i = 0; i < FT.getNumParams(); ++i) {
           if (i) Buf << ", ";
-          Buf << cTypeOf(FT.getParamType(i));
+          std::string ParamTy =
+              (Cpp && isMatrixValue(Entry.getArgument(i)))
+                  ? "Matrix"
+                  : cTypeOf(FT.getParamType(i));
+          Buf << ParamTy;
         }
         if (FT.getNumParams() == 0) Buf << "void";
         Buf << ");\n";
@@ -2685,6 +3054,19 @@ void Emitter::emitFuncFunc(mlir::func::FuncOp F) {
     RetTy = FT.getNumResults() == 0 ? std::string("void")
                                      : cTypeOf(FT.getResult(0));
   }
+  // Lift the result type to Matrix when the function's return values are
+  // matrix-typed in the propagated map — keeps signatures and bodies in
+  // sync (the body's `return X.emul(X)` only type-checks if RetTy is
+  // Matrix, not void*).
+  if (Cpp && FT.getNumResults() == 1 &&
+      !F.getBody().empty()) {
+    bool AnyMatrix = false;
+    F.walk([&](mlir::func::ReturnOp R) {
+      if (R.getNumOperands() != 1) return;
+      if (isMatrixValue(R.getOperand(0))) AnyMatrix = true;
+    });
+    if (AnyMatrix) RetTy = "Matrix";
+  }
   emitLineDirective(F.getLoc(), 0);
   OS << (IsMain ? "" : "static ") << RetTy << " " << F.getSymName().str()
      << "(";
@@ -2702,7 +3084,11 @@ void Emitter::emitFuncFunc(mlir::func::FuncOp F) {
     else
       N = freshName();
     Names[Arg] = N;
-    OS << cTypeOf(FT.getInput(i)) << " " << N;
+    // Param emits as Matrix when the propagated map flagged the block-arg
+    // as matrix-typed (caller passed a Matrix in this position).
+    std::string ParamTy =
+        (Cpp && isMatrixValue(Arg)) ? "Matrix" : cTypeOf(FT.getInput(i));
+    OS << ParamTy << " " << N;
   }
   if (FT.getNumInputs() == 0) OS << "void";
   OS << ") {\n";
@@ -2740,6 +3126,17 @@ void Emitter::emitLLVMFunc(mlir::LLVM::LLVMFuncOp F) {
       mlir::isa<mlir::LLVM::LLVMVoidType>(FT.getReturnType())
           ? std::string("void")
           : cTypeOf(FT.getReturnType());
+  // Lift to Matrix in C++ mode when any return value is matrix-typed —
+  // mirrors the func::FuncOp branch above. LLVM functions reach here
+  // for outlined parfor / anon bodies.
+  if (Cpp && !mlir::isa<mlir::LLVM::LLVMVoidType>(FT.getReturnType())) {
+    bool AnyMatrix = false;
+    F.walk([&](mlir::LLVM::ReturnOp R) {
+      if (R.getNumOperands() == 1 && isMatrixValue(R.getOperand(0)))
+        AnyMatrix = true;
+    });
+    if (AnyMatrix) RetTy = "Matrix";
+  }
   emitLineDirective(F.getLoc(), 0);
   OS << "static " << RetTy << " " << F.getSymName().str() << "(";
   auto &Entry = F.getBody().front();
@@ -2748,7 +3145,9 @@ void Emitter::emitLLVMFunc(mlir::LLVM::LLVMFuncOp F) {
     auto Arg = Entry.getArgument(i);
     std::string N = freshName();
     Names[Arg] = N;
-    OS << cTypeOf(FT.getParamType(i)) << " " << N;
+    std::string ParamTy =
+        (Cpp && isMatrixValue(Arg)) ? "Matrix" : cTypeOf(FT.getParamType(i));
+    OS << ParamTy << " " << N;
   }
   if (FT.getNumParams() == 0) OS << "void";
   OS << ") {\n";
@@ -2947,6 +3346,37 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
           return;
         }
       }
+      // Matrix-runtime statement-level rewrites.
+      if (Cpp && *Callee == "matlab_disp_mat" &&
+          Call.getNumOperands() == 1 && Call.getNumResults() == 0) {
+        OS << "std::cout << " << exprFor(Call.getOperand(0)) << ";\n";
+        return;
+      }
+      {
+        std::string Rewrite;
+        if (tryRewriteAsMatrixCall(*Callee, Call.getOperands(), Rewrite)) {
+          if (BoundResult) {
+            // Direct-init for `Matrix(...)` ctor expressions, mirroring
+            // the class-call path so we get `Matrix A(slot, m, n)` not
+            // `Matrix A = Matrix(slot, m, n)`.
+            std::string CtorPrefix = ResultTy + "(";
+            if (Rewrite.size() > CtorPrefix.size() &&
+                Rewrite.compare(0, CtorPrefix.size(), CtorPrefix) == 0 &&
+                Rewrite.back() == ')') {
+              std::string Args = Rewrite.substr(
+                  CtorPrefix.size(),
+                  Rewrite.size() - CtorPrefix.size() - 1);
+              OS << ResultTy << " " << ResultName << "(" << Args << ");\n";
+            } else {
+              OS << ResultTy << " " << ResultName << " = "
+                 << Rewrite << ";\n";
+            }
+          } else {
+            OS << Rewrite << ";\n";
+          }
+          return;
+        }
+      }
       if (BoundResult) OS << ResultTy << " " << ResultName << " = ";
       OS << Callee->str() << "(";
       for (unsigned i = 0; i < Call.getNumOperands(); ++i) {
@@ -3010,6 +3440,29 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
         if (BoundResult) {
           std::string CtorPrefix = ResultTy + "(";
           if (Cpp && Rewrite.size() > CtorPrefix.size() &&
+              Rewrite.compare(0, CtorPrefix.size(), CtorPrefix) == 0 &&
+              Rewrite.back() == ')') {
+            std::string Args = Rewrite.substr(
+                CtorPrefix.size(),
+                Rewrite.size() - CtorPrefix.size() - 1);
+            OS << ResultTy << " " << ResultName << "(" << Args << ");\n";
+          } else {
+            OS << ResultTy << " " << ResultName << " = "
+               << Rewrite << ";\n";
+          }
+        } else {
+          OS << Rewrite << ";\n";
+        }
+        return;
+      }
+    }
+    {
+      std::string Rewrite;
+      if (tryRewriteAsMatrixCall(Call.getCallee(), Call.getOperands(),
+                                  Rewrite)) {
+        if (BoundResult) {
+          std::string CtorPrefix = ResultTy + "(";
+          if (Rewrite.size() > CtorPrefix.size() &&
               Rewrite.compare(0, CtorPrefix.size(), CtorPrefix) == 0 &&
               Rewrite.back() == ')') {
             std::string Args = Rewrite.substr(
@@ -3310,6 +3763,11 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
     if (Cpp && AllocaCT != ClassAllocaType.end()) {
       ElTy = AllocaCT->second;
     }
+    // Matrix-typed allocas use the same direct-slot path as class
+    // allocas: `Matrix slot;` (default-constructed null) instead of
+    // `void* slot = 0;`. The wrapper's default ctor is null-safe.
+    bool IsMatrixSlot = Cpp && MatrixAllocas.count(A.getOperation());
+    if (IsMatrixSlot) ElTy = "Matrix";
     if (DirectSlot) {
       // No pointer variable. Bind the alloca's result SSA value to the
       // slot's name — downstream code checks DirectSlots before treating
@@ -3343,7 +3801,7 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
       indent(Indent);
       // Class-typed slot: `BankAccount acc;` (default-init). Bare
       // doubles still get `= 0;` to avoid an uninitialized-read trap.
-      if (Cpp && AllocaCT != ClassAllocaType.end())
+      if ((Cpp && AllocaCT != ClassAllocaType.end()) || IsMatrixSlot)
         OS << ElTy << " " << SlotName << ";\n";
       else
         OS << ElTy << " " << SlotName << " = 0;\n";
@@ -3585,6 +4043,98 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
       return true;
     };
 
+    // Switch re-emission. A run of `else if (x == c1) ... else if (x == c2)
+    // ...` against the same SSA value with integer-valued double literals
+    // came from a MATLAB `switch x; case c1; ... case cN; otherwise; end`.
+    // Re-emit it as a real C/C++ `switch ((int)x) { ... }` so the original
+    // intent survives lowering. We try this both at the top of an if-chain
+    // (whole chain is a switch) and partway through (the suffix is the
+    // switch — outer non-`==` arms stay as if/else-if).
+    auto matchEqLit = [&](mlir::Value Cond, mlir::Value &Var,
+                          int64_t &Lit) -> bool {
+      auto Cmp = Cond.getDefiningOp<mlir::arith::CmpFOp>();
+      if (!Cmp) return false;
+      auto P = Cmp.getPredicate();
+      if (P != mlir::arith::CmpFPredicate::OEQ &&
+          P != mlir::arith::CmpFPredicate::UEQ)
+        return false;
+      auto getIntLit = [](mlir::Value V, int64_t &Out) {
+        auto C = V.getDefiningOp<mlir::arith::ConstantOp>();
+        if (!C) return false;
+        auto FA = mlir::dyn_cast<mlir::FloatAttr>(C.getValue());
+        if (!FA) return false;
+        double D = FA.getValueAsDouble();
+        if (!std::isfinite(D)) return false;
+        int64_t I = (int64_t)D;
+        if ((double)I != D) return false;
+        Out = I;
+        return true;
+      };
+      // Accept both `x == lit` and `lit == x`.
+      if (getIntLit(Cmp.getRhs(), Lit)) { Var = Cmp.getLhs(); return true; }
+      if (getIntLit(Cmp.getLhs(), Lit)) { Var = Cmp.getRhs(); return true; }
+      return false;
+    };
+
+    auto tryCollectSwitch =
+        [&](mlir::scf::IfOp Start, mlir::Value &Var,
+            llvm::SmallVectorImpl<std::pair<int64_t, mlir::Region *>> &Cases,
+            mlir::scf::IfOp &End) -> bool {
+      Cases.clear();
+      if (Start.getNumResults() != 0) return false;
+      mlir::Value V0;
+      int64_t L0;
+      if (!matchEqLit(Start.getCondition(), V0, L0)) return false;
+      Var = V0;
+      Cases.push_back({L0, &Start.getThenRegion()});
+      mlir::scf::IfOp Cur = Start;
+      mlir::scf::IfOp Inner;
+      while (isElseIfChain(Cur, Inner)) {
+        mlir::Value V;
+        int64_t L;
+        if (!matchEqLit(Inner.getCondition(), V, L) || V != Var)
+          return false;
+        Cases.push_back({L, &Inner.getThenRegion()});
+        Cur = Inner;
+      }
+      End = Cur;
+      return Cases.size() >= 2;
+    };
+
+    auto emitSwitch =
+        [&](mlir::Value Var,
+            llvm::ArrayRef<std::pair<int64_t, mlir::Region *>> Cases,
+            mlir::scf::IfOp End, unsigned Ind) {
+          indent(Ind);
+          OS << "switch ((int)" << this->stmtExpr(Var) << ") {\n";
+          for (auto &Pair : Cases) {
+            indent(Ind);
+            OS << "case " << Pair.first << ":\n";
+            emitRegion(*Pair.second, Ind + 1);
+            indent(Ind + 1);
+            OS << "break;\n";
+          }
+          if (!End.getElseRegion().empty() && !elseIsTrivial(End)) {
+            indent(Ind);
+            OS << "default:\n";
+            emitRegion(End.getElseRegion(), Ind + 1);
+            indent(Ind + 1);
+            OS << "break;\n";
+          }
+          indent(Ind);
+          OS << "}\n";
+        };
+
+    {
+      llvm::SmallVector<std::pair<int64_t, mlir::Region *>, 8> Cases;
+      mlir::Value SwVar;
+      mlir::scf::IfOp End;
+      if (tryCollectSwitch(If, SwVar, Cases, End)) {
+        emitSwitch(SwVar, Cases, End, Indent);
+        return;
+      }
+    }
+
     indent(Indent);
     OS << "if (" << this->stmtExpr(If.getCondition()) << ") {\n";
     emitRegion(If.getThenRegion(), Indent + 1);
@@ -3592,6 +4142,19 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
     mlir::scf::IfOp Cur = If;
     mlir::scf::IfOp Inner;
     while (isElseIfChain(Cur, Inner)) {
+      // Mid-chain switch suffix: from this Inner onward the chain is a
+      // pure `==` cascade — emit `else { switch ... }` and stop.
+      llvm::SmallVector<std::pair<int64_t, mlir::Region *>, 8> Cases;
+      mlir::Value SwVar;
+      mlir::scf::IfOp End;
+      if (tryCollectSwitch(Inner, SwVar, Cases, End)) {
+        indent(Indent);
+        OS << "} else {\n";
+        emitSwitch(SwVar, Cases, End, Indent + 1);
+        indent(Indent);
+        OS << "}\n";
+        return;
+      }
       indent(Indent);
       OS << "} else if (" << this->stmtExpr(Inner.getCondition()) << ") {\n";
       emitRegion(Inner.getThenRegion(), Indent + 1);
