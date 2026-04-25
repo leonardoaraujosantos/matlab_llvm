@@ -11,6 +11,7 @@ Use this page as the entry point to the repo docs.
 ## Backends And Runtime
 
 - [`emit_c_cpp.md`](emit_c_cpp.md): C and C++ emission design and guarantees
+- [`emit_cpp_classdef.md`](emit_cpp_classdef.md): plan to translate MATLAB `classdef` to real C++ classes (replaces the runtime-hash wrapper, queued for a focused follow-up)
 - [`emit_python.md`](emit_python.md): Python emission status, workflow, and limits
 - [`complex.md`](complex.md): complex numbers, FFT, and DSP-oriented runtime support
 - [`emit_systemverilog.md`](emit_systemverilog.md): direct RTL/SystemVerilog backend plan, including combinational, register, counter, and FSM inference
