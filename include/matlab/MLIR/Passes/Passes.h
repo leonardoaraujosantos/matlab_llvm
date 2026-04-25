@@ -161,5 +161,17 @@ std::string emitC(mlir::ModuleOp M, bool Cpp, bool NoLine = false,
                   bool Doxygen = false, bool CppAuto = false,
                   const matlab::SourceManager *SM = nullptr);
 
+/// Emit a self-contained Python source that reproduces the semantics of the
+/// MLIR module. Expects the module to have been driven through the same
+/// pipeline as -emit-c up to and including runLowerIO / IfStoreToSelect /
+/// Mem2RegLite. The emitted source imports `matlab_runtime` (a NumPy-backed
+/// Python shim) and runs on CPython 3.10+. When NoLine==true, no line-
+/// comment source markers are emitted. When SM is non-null, MATLAB `%`
+/// comments from the source are propagated into the generated source as
+/// `#` lines above the corresponding statement. Returns empty string on
+/// failure.
+std::string emitPython(mlir::ModuleOp M, bool NoLine = false,
+                       const matlab::SourceManager *SM = nullptr);
+
 } // namespace mlirgen
 } // namespace matlab

@@ -54,7 +54,8 @@ using namespace matlab;
 namespace {
 struct Options {
   enum class Mode { DumpTokens, DumpAST, EmitSema, EmitMIR, EmitMLIR,
-                    EmitLLVM, EmitC, EmitCpp, Check, Repl, Format, Dap };
+                    EmitLLVM, EmitC, EmitCpp, EmitPython, Check, Repl,
+                    Format, Dap };
   Mode Mode = Mode::Check;
   bool Opt = false;
   bool NoLine = false;
@@ -67,6 +68,7 @@ int usage(const char *Prog) {
   std::cerr << "usage: " << Prog
             << " [-dump-tokens | -dump-ast | -emit-sema | -emit-mir |\n"
                "             -emit-mlir | -emit-llvm | -emit-c | -emit-cpp |\n"
+               "             -emit-python |\n"
                "             -format | -repl | -dap]\n"
                "            [-no-line] [-doxygen] [-cpp-auto]  FILE.m\n";
   return 64;
@@ -84,6 +86,7 @@ bool parseArgs(int Argc, char **Argv, Options &Opts, const char *&Prog) {
     else if (A == "-emit-llvm") Opts.Mode = Options::Mode::EmitLLVM;
     else if (A == "-emit-c") Opts.Mode = Options::Mode::EmitC;
     else if (A == "-emit-cpp") Opts.Mode = Options::Mode::EmitCpp;
+    else if (A == "-emit-python") Opts.Mode = Options::Mode::EmitPython;
     else if (A == "-repl") Opts.Mode = Options::Mode::Repl;
     else if (A == "-format") Opts.Mode = Options::Mode::Format;
     else if (A == "-dap") Opts.Mode = Options::Mode::Dap;
@@ -1668,7 +1671,8 @@ int main(int Argc, char **Argv) {
   if (Opts.Mode == Options::Mode::EmitMLIR ||
       Opts.Mode == Options::Mode::EmitLLVM ||
       Opts.Mode == Options::Mode::EmitC ||
-      Opts.Mode == Options::Mode::EmitCpp) {
+      Opts.Mode == Options::Mode::EmitCpp ||
+      Opts.Mode == Options::Mode::EmitPython) {
     mlirgen::Context MCtx;
     if (TU) {
       auto M = mlirgen::lowerToMLIR(MCtx, TC, Diag, *TU, &SM);
@@ -1679,7 +1683,8 @@ int main(int Argc, char **Argv) {
       // Opt/Run paths always clean up slots and scalars.
       bool WantFullPipeline = Opts.Mode == Options::Mode::EmitLLVM ||
                               Opts.Mode == Options::Mode::EmitC ||
-                              Opts.Mode == Options::Mode::EmitCpp;
+                              Opts.Mode == Options::Mode::EmitCpp ||
+                              Opts.Mode == Options::Mode::EmitPython;
       bool WantClean = Opts.Opt || WantFullPipeline;
       if (WantClean) {
         mlirgen::runSlotPromotion(M);
@@ -1826,7 +1831,8 @@ int main(int Argc, char **Argv) {
         mlirgen::runLowerScalarSlots(M);
         mlirgen::runLowerIO(M);
         if (Opts.Mode == Options::Mode::EmitC ||
-            Opts.Mode == Options::Mode::EmitCpp) {
+            Opts.Mode == Options::Mode::EmitCpp ||
+            Opts.Mode == Options::Mode::EmitPython) {
           // Fold `if/else/store-to-same-slot` into `arith.select` first,
           // then squash single-store allocas back into SSA so the emitted
           // C doesn't drag a `T slot = 0; void* p = &slot;` prelude for
@@ -1842,9 +1848,14 @@ int main(int Argc, char **Argv) {
                 << "error: MLIR verification failed before C emission\n";
             return 1;
           }
-          std::string Src = mlirgen::emitC(
-              M, Opts.Mode == Options::Mode::EmitCpp, Opts.NoLine,
-              Opts.Doxygen, Opts.CppAuto, &SM);
+          std::string Src;
+          if (Opts.Mode == Options::Mode::EmitPython) {
+            Src = mlirgen::emitPython(M, Opts.NoLine, &SM);
+          } else {
+            Src = mlirgen::emitC(
+                M, Opts.Mode == Options::Mode::EmitCpp, Opts.NoLine,
+                Opts.Doxygen, Opts.CppAuto, &SM);
+          }
           if (Src.empty()) return 1;
           std::cout << Src;
         } else {

@@ -104,6 +104,7 @@ if(MATLAB_LLVM_WITH_MLIR)
     lib/MLIR/Passes/Mem2RegLite.cpp
     lib/MLIR/Passes/LowerToLLVMIR.cpp
     lib/MLIR/Passes/EmitC.cpp
+    lib/MLIR/Passes/EmitPython.cpp
   )
   target_link_libraries(MatlabMLIR
     PUBLIC  MatlabSema MatlabAST MatlabBasic
@@ -197,6 +198,12 @@ if(MATLAB_LLVM_WITH_MLIR)
   )
   set_tests_properties(run-tests-emit-cpp-strict PROPERTIES
     ENVIRONMENT "MODE=cpp;STRICT=1")
+  # -emit-python path: run every .m through python3 and compare output.
+  add_test(
+    NAME run-tests-emit-python
+    COMMAND ${CMAKE_SOURCE_DIR}/test/Run/run_tests_emitpython.sh $<TARGET_FILE:matlabc>
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Run
+  )
   # Fail-fast contract: unsupported MLIR ops must produce a clear error
   # and a non-zero exit rather than silently generating broken C.
   add_test(

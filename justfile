@@ -112,6 +112,10 @@ emit-c FILE: build
 emit-cpp FILE: build
     ./{{BUILD_DIR}}/matlabc -emit-cpp {{FILE}}
 
+# Emit self-contained Python that imports runtime/matlab_runtime.py.
+emit-python FILE: build
+    ./{{BUILD_DIR}}/matlabc -emit-python {{FILE}}
+
 # Compile a .m file via the C emitter: produces ./<name> using cc.
 # Example: `just compile-c examples/hello.m` -> ./hello
 compile-c FILE: build
@@ -135,10 +139,36 @@ compile-cpp FILE: build
     rm -f "$src"
     echo "built ./$name"
 
+# Emit and immediately run a .m file via python3.
+# Example: `just compile-python examples/hello.m` -> prints hello
+compile-python FILE: build
+    #!/usr/bin/env bash
+    set -euo pipefail
+    src=$(mktemp -t mlp.XXXXXX).py
+    ./{{BUILD_DIR}}/matlabc -emit-python {{FILE}} > "$src"
+    PYTHONPATH=runtime python3 "$src"
+    rm -f "$src"
+
+# Emit every program in examples/ to .py files under OUT (default /tmp/emit-python-examples).
+# Useful for eyeballing the generated code across the whole corpus at once.
+emit-python-examples OUT="/tmp/emit-python-examples": build
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p "{{OUT}}"
+    for f in examples/*.m; do
+        name=$(basename "$f" .m)
+        ./{{BUILD_DIR}}/matlabc -emit-python "$f" > "{{OUT}}/$name.py"
+        echo "wrote {{OUT}}/$name.py"
+    done
+
 # Run both C and C++ emission test suites (95 programs each).
 test-emitc: build
     ctest --test-dir {{BUILD_DIR}} --output-on-failure \
         -R "(run-tests-emit-(c|cpp)(-strict)?|emitc-fail-tests)"
+
+# Run the Python emission suite.
+test-emitpython: build
+    ./test/Run/run_tests_emitpython.sh ./{{BUILD_DIR}}/matlabc
 
 # Remove the build directory.
 clean:
