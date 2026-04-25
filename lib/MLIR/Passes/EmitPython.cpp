@@ -85,6 +85,15 @@ private:
   bool canInline(mlir::Operation &Op);
   bool buildInlineExpr(mlir::Operation &Op, std::string &Expr);
 
+  // --- Break/continue flag un-lowering ----------------------------------
+  // Walk a region and tag every break / continue flag slot, the false
+  // stores that initialise/reset them, and the scf.if ops that should
+  // collapse into native `break` / `continue` one-liners.
+  void scanBreakContinueFlags(mlir::Region &R);
+  bool isFlagInversion(mlir::Value V);
+  void gatherNonFlagConjuncts(mlir::Value V,
+      llvm::SmallVectorImpl<mlir::Value> &Out);
+
   // --- Callee remap: llvm.call @matlab_foo -> rt.foo --------------------
   static std::string remapRuntimeCallee(llvm::StringRef Name);
 
@@ -114,6 +123,19 @@ private:
   // GEP+store pairs that filled a matrix literal). Skip these in
   // emitOp().
   llvm::DenseSet<mlir::Operation *> SuppressedOps;
+  // Break / continue flag slot allocas (matlab.name = "__did_break" /
+  // "__did_continue"). The frontend lowers MATLAB `break`/`continue`
+  // through these flags; the emitter un-lowers them back to native
+  // Python keywords.
+  llvm::DenseSet<mlir::Operation *> BreakFlagSlots;
+  llvm::DenseSet<mlir::Operation *> ContinueFlagSlots;
+  // scf.if ops whose entire body is a single flag-store; re-emit as
+  // `if cond: break` (or continue). Value is the keyword to print.
+  llvm::DenseMap<mlir::Operation *, const char *> FlagIfKind;
+  // scf.if ops whose condition is purely a break/continue flag check
+  // (`!did_break [& !did_continue]`) guarding a real body; emit the
+  // then-region inline at the parent's indent.
+  llvm::DenseSet<mlir::Operation *> InlinedIfs;
   int NextId = 0;
 
   // Most recent line emitted; used to suppress duplicate line markers
@@ -512,6 +534,138 @@ bool Emitter::buildInlineExpr(mlir::Operation &Op, std::string &Expr) {
   return false;
 }
 
+// Is V a constant integer with the given value?
+static bool isConstInt(mlir::Value V, uint64_t Want) {
+  auto *D = V.getDefiningOp();
+  if (!D) return false;
+  if (auto C = mlir::dyn_cast<mlir::arith::ConstantOp>(D))
+    if (auto IA = mlir::dyn_cast<mlir::IntegerAttr>(C.getValue()))
+      return IA.getValue().getZExtValue() == Want;
+  if (auto C = mlir::dyn_cast<mlir::LLVM::ConstantOp>(D))
+    if (auto IA = mlir::dyn_cast<mlir::IntegerAttr>(C.getValue()))
+      return IA.getValue().getZExtValue() == Want;
+  return false;
+}
+
+bool Emitter::isFlagInversion(mlir::Value V) {
+  // True if V reduces to a static `True` once break/continue flags are
+  // un-lowered: a constant true, the xor(load flag, true) idiom, or the
+  // xor(const-false, const-true) Mem2RegLite leaves when a flag has no
+  // store-of-true.
+  if (!V.getType().isInteger(1)) return false;
+  if (isConstInt(V, 1)) return true;
+  auto Xor = V.getDefiningOp<mlir::arith::XOrIOp>();
+  if (!Xor) return false;
+  if (!Xor.getResult().getType().isInteger(1)) return false;
+  mlir::Value Flag;
+  if (isConstInt(Xor.getRhs(), 1)) Flag = Xor.getLhs();
+  else if (isConstInt(Xor.getLhs(), 1)) Flag = Xor.getRhs();
+  else return false;
+  if (isConstInt(Flag, 0)) return true;
+  auto Load = Flag.getDefiningOp<mlir::LLVM::LoadOp>();
+  if (!Load) return false;
+  auto *Addr = Load.getAddr().getDefiningOp();
+  if (!Addr) return false;
+  return BreakFlagSlots.count(Addr) || ContinueFlagSlots.count(Addr);
+}
+
+void Emitter::gatherNonFlagConjuncts(mlir::Value V,
+    llvm::SmallVectorImpl<mlir::Value> &Out) {
+  if (isFlagInversion(V)) return;
+  if (auto And = V.getDefiningOp<mlir::arith::AndIOp>()) {
+    if (And.getResult().getType().isInteger(1)) {
+      gatherNonFlagConjuncts(And.getLhs(), Out);
+      gatherNonFlagConjuncts(And.getRhs(), Out);
+      return;
+    }
+  }
+  Out.push_back(V);
+}
+
+void Emitter::scanBreakContinueFlags(mlir::Region &R) {
+  // Phase 1: identify the break / continue flag slots.
+  R.walk([&](mlir::LLVM::AllocaOp A) {
+    auto NA = A->getAttrOfType<mlir::StringAttr>("matlab.name");
+    if (!NA) return;
+    if (NA.getValue() == "__did_break") {
+      BreakFlagSlots.insert(A.getOperation());
+      SuppressedOps.insert(A.getOperation());
+    } else if (NA.getValue() == "__did_continue") {
+      ContinueFlagSlots.insert(A.getOperation());
+      SuppressedOps.insert(A.getOperation());
+    }
+  });
+
+  if (BreakFlagSlots.empty() && ContinueFlagSlots.empty()) return;
+
+  // Phase 2: any const-false store into a flag slot is the pre-loop
+  // initialisation or end-of-iteration continue reset — elided.
+  R.walk([&](mlir::LLVM::StoreOp S) {
+    auto *Addr = S.getAddr().getDefiningOp();
+    if (!Addr) return;
+    bool IsFlag = BreakFlagSlots.count(Addr) || ContinueFlagSlots.count(Addr);
+    if (!IsFlag) return;
+    if (isConstInt(S.getValue(), 0)) {
+      SuppressedOps.insert(S.getOperation());
+    }
+  });
+
+  // Phase 3: classify scf.if ops.
+  //  - `scf.if cond { flag := true }` → `if cond: break/continue`.
+  //  - `scf.if (!flag [& !flag]) { ... }` → emit body inline.
+  R.walk([&](mlir::scf::IfOp If) {
+    if (!If.getElseRegion().empty()) {
+      bool ElseTrivial = true;
+      for (auto &Blk : If.getElseRegion().getBlocks()) {
+        for (auto &Inner : Blk.getOperations()) {
+          if (mlir::isa<mlir::scf::YieldOp>(Inner)) continue;
+          ElseTrivial = false;
+          break;
+        }
+        if (!ElseTrivial) break;
+      }
+      if (!ElseTrivial) return;
+    }
+    if (If.getNumResults() != 0) return;
+
+    // Single store-of-true into a flag slot in the then-region.
+    {
+      mlir::LLVM::StoreOp FlagStore;
+      bool OtherRealOps = false;
+      for (auto &Blk : If.getThenRegion().getBlocks()) {
+        for (auto &Inner : Blk.getOperations()) {
+          if (mlir::isa<mlir::scf::YieldOp>(Inner)) continue;
+          if (auto S = mlir::dyn_cast<mlir::LLVM::StoreOp>(Inner)) {
+            auto *Addr = S.getAddr().getDefiningOp();
+            bool Flag = Addr && (BreakFlagSlots.count(Addr) ||
+                                 ContinueFlagSlots.count(Addr));
+            if (Flag && isConstInt(S.getValue(), 1) && !FlagStore) {
+              FlagStore = S;
+              continue;
+            }
+          }
+          if (mlir::isa<mlir::arith::ConstantOp, mlir::LLVM::ConstantOp>(Inner))
+            continue;
+          OtherRealOps = true;
+        }
+      }
+      if (FlagStore && !OtherRealOps) {
+        auto *Addr = FlagStore.getAddr().getDefiningOp();
+        FlagIfKind[If.getOperation()] =
+            BreakFlagSlots.count(Addr) ? "break" : "continue";
+        SuppressedOps.insert(FlagStore.getOperation());
+        return;
+      }
+    }
+
+    // Pure flag-guard: every conjunct in the condition reduces to true.
+    llvm::SmallVector<mlir::Value, 2> Kept;
+    gatherNonFlagConjuncts(If.getCondition(), Kept);
+    if (Kept.empty())
+      InlinedIfs.insert(If.getOperation());
+  });
+}
+
 void Emitter::computeInlines(mlir::Region &R) {
   for (auto &B : R.getBlocks()) {
     for (auto &Op : B.getOperations()) {
@@ -740,8 +894,13 @@ void Emitter::emitFuncFunc(mlir::func::FuncOp F) {
   DirectSlots.clear();
   ArraySlots.clear();
   SuppressedOps.clear();
+  BreakFlagSlots.clear();
+  ContinueFlagSlots.clear();
+  FlagIfKind.clear();
+  InlinedIfs.clear();
   LastLineFile.clear();
   LastLineNum = -1;
+  scanBreakContinueFlags(F.getBody());
   computeInlines(F.getBody());
   auto FT = F.getFunctionType();
   bool IsMain = F.getSymName() == "main";
@@ -790,8 +949,13 @@ void Emitter::emitLLVMFunc(mlir::LLVM::LLVMFuncOp F) {
   DirectSlots.clear();
   ArraySlots.clear();
   SuppressedOps.clear();
+  BreakFlagSlots.clear();
+  ContinueFlagSlots.clear();
+  FlagIfKind.clear();
+  InlinedIfs.clear();
   LastLineFile.clear();
   LastLineNum = -1;
+  scanBreakContinueFlags(F.getBody());
   computeInlines(F.getBody());
   auto FT = F.getFunctionType();
   OS << "def " << F.getSymName().str() << "(";
@@ -833,11 +997,13 @@ void Emitter::emitBlock(mlir::Block &B, int Indent) {
 // Count real (non-yield, non-condition, non-inlined-no-op) statements a
 // block will emit. Used to decide whether to insert a `pass` placeholder.
 static int countEmittedStmts(mlir::Block &B,
-                             const llvm::DenseSet<mlir::Operation *> &Inlined) {
+                             const llvm::DenseSet<mlir::Operation *> &Inlined,
+                             const llvm::DenseSet<mlir::Operation *> &Suppressed) {
   int N = 0;
   for (auto &Op : B.getOperations()) {
     if (mlir::isa<mlir::scf::YieldOp, mlir::scf::ConditionOp>(&Op)) continue;
     if (Inlined.count(&Op)) continue;
+    if (Suppressed.count(&Op)) continue;
     ++N;
   }
   return N;
@@ -1301,6 +1467,21 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
 
   // --- scf.if ---------------------------------------------------------
   if (auto If = mlir::dyn_cast<mlir::scf::IfOp>(Op)) {
+    // Break/continue short-circuit: `scf.if cond { flag := true }` came
+    // from a MATLAB `if cond; break; end`. Re-emit as a one-liner.
+    auto FK = FlagIfKind.find(&Op);
+    if (FK != FlagIfKind.end()) {
+      indent(Indent);
+      OS << "if " << this->stmtExpr(If.getCondition()) << ": "
+         << FK->second << "\n";
+      return;
+    }
+    // Pure flag-guard wrapping real body: skip the `if (...)` and emit
+    // the then-region inline at the parent's indent.
+    if (InlinedIfs.count(&Op)) {
+      emitRegion(If.getThenRegion(), Indent);
+      return;
+    }
     // Declare result locals (one per scf.if result) so yields assign
     // to them.
     for (unsigned i = 0; i < If.getNumResults(); ++i) {
@@ -1310,21 +1491,21 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
     }
     indent(Indent);
     OS << "if " << this->stmtExpr(If.getCondition()) << ":\n";
-    if (countEmittedStmts(If.getThenRegion().front(), InlinedOps) == 0 &&
-        If.getThenRegion().front().getOperations().size() <= 1) {
+    if (countEmittedStmts(If.getThenRegion().front(), InlinedOps,
+                           SuppressedOps) == 0) {
       indent(Indent + 1); OS << "pass\n";
     } else {
       emitRegion(If.getThenRegion(), Indent + 1);
     }
     if (!If.getElseRegion().empty()) {
+      // Skip the empty else (Python doesn't need `else: pass`).
+      if (countEmittedStmts(If.getElseRegion().front(), InlinedOps,
+                             SuppressedOps) == 0) {
+        return;
+      }
       indent(Indent);
       OS << "else:\n";
-      if (countEmittedStmts(If.getElseRegion().front(), InlinedOps) == 0 &&
-          If.getElseRegion().front().getOperations().size() <= 1) {
-        indent(Indent + 1); OS << "pass\n";
-      } else {
-        emitRegion(If.getElseRegion(), Indent + 1);
-      }
+      emitRegion(If.getElseRegion(), Indent + 1);
     }
     return;
   }
@@ -1378,6 +1559,22 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
       break;
     }
 
+    // Render a loop condition with break/continue-flag inversions
+    // stripped: `while cond & !did_break` → `while cond` once we're
+    // emitting native `break` / `continue`. An entirely stripped
+    // condition collapses to `True`.
+    auto emitStrippedCond = [&](mlir::Value V) -> std::string {
+      llvm::SmallVector<mlir::Value, 2> Parts;
+      gatherNonFlagConjuncts(V, Parts);
+      if (Parts.empty()) return "True";
+      std::string Out;
+      for (unsigned i = 0; i < Parts.size(); ++i) {
+        if (i) Out += " and ";
+        Out += this->stmtExpr(Parts[i]);
+      }
+      return Out;
+    };
+
     if (BeforeIsCondOnly) {
       auto Cond = mlir::cast<mlir::scf::ConditionOp>(Before.getTerminator());
       for (unsigned i = 0; i < Cond.getArgs().size(); ++i) {
@@ -1385,7 +1582,7 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
         InlineExprs[AA] = this->exprFor(Cond.getArgs()[i]);
       }
       indent(Indent);
-      OS << "while " << this->stmtExpr(Cond.getCondition()) << ":\n";
+      OS << "while " << emitStrippedCond(Cond.getCondition()) << ":\n";
       int EmittedStmts = 0;
       for (auto &Inner : After.getOperations()) {
         if (!InlinedOps.count(&Inner) &&
@@ -1405,9 +1602,11 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
     OS << "while True:\n";
     for (auto &Inner : Before.getOperations()) {
       if (auto Cond = mlir::dyn_cast<mlir::scf::ConditionOp>(Inner)) {
-        indent(Indent + 1);
-        OS << "if not " << this->exprFor(Cond.getCondition())
-           << ": break\n";
+        std::string CondStr = emitStrippedCond(Cond.getCondition());
+        if (CondStr != "True") {
+          indent(Indent + 1);
+          OS << "if not (" << CondStr << "): break\n";
+        }
         for (unsigned i = 0; i < Cond.getArgs().size(); ++i) {
           auto AA = After.getArgument(i);
           InlineExprs[AA] = this->exprFor(Cond.getArgs()[i]);

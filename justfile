@@ -149,6 +149,18 @@ compile-python FILE: build
     PYTHONPATH=runtime python3 "$src"
     rm -f "$src"
 
+# Emit every program in examples/ to .py files under OUT (default /tmp/emit-python-examples).
+# Useful for eyeballing the generated code across the whole corpus at once.
+emit-python-examples OUT="/tmp/emit-python-examples": build
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p "{{OUT}}"
+    for f in examples/*.m; do
+        name=$(basename "$f" .m)
+        ./{{BUILD_DIR}}/matlabc -emit-python "$f" > "{{OUT}}/$name.py"
+        echo "wrote {{OUT}}/$name.py"
+    done
+
 # Run both C and C++ emission test suites (95 programs each).
 test-emitc: build
     ctest --test-dir {{BUILD_DIR}} --output-on-failure \
