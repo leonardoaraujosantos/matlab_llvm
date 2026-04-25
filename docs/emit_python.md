@@ -102,6 +102,13 @@ Emitter behavior worth knowing:
   `import numpy as np` lines are added only when the emitted body
   actually references those modules. A pure-arithmetic program like
   `examples/factorial.m` emits zero `import` lines.
+- **Matrix `disp` substitution**: `rt.disp_mat(M)` collapses to plain
+  `print(M)`. Numpy's bracket / dotted-float matrix repr diverges from
+  MATLAB's right-aligned `%7g` columns, so the Python lane uses
+  per-test `<name>.stdout-python` overrides for tests that print
+  matrices; the C / C++ goldens stay on the shared `<name>.stdout`.
+  Programs that only do matrix display now drop the `import
+  matlab_runtime as rt` line entirely (e.g. `examples/matrix_mult.py`).
 - **Numpy rewrite for matrix builtins**: the matrix subset of the
   runtime ABI is emitted as inline numpy / Python-operator expressions
   rather than `rt.<helper>` calls. Specifically:
@@ -266,11 +273,10 @@ def traffic_action(color, is_emergency):
 ```
 
 A third example, `examples/matrix_mult.m`, showing the numpy rewrite —
-the only remaining `rt.` references are `disp_mat`, which is kept for
-MATLAB's right-aligned matrix-cell formatting:
+no `matlab_runtime` import is needed at all because matrix display also
+collapses to plain `print(M)`:
 
 ```python
-import matlab_runtime as rt
 import numpy as np
 
 slot = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 10.0]
@@ -280,13 +286,13 @@ slot_2 = [1.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 3.0]
 v1 = np.array(slot_2).reshape(3, 3)
 
 print("A * B =")
-rt.disp_mat(v0 @ v1)
+print(v0 @ v1)
 
 print("A .* B =")
-rt.disp_mat(v0 * v1)
+print(v0 * v1)
 
 print("A' =")
-rt.disp_mat(v0.T)
+print(v0.T)
 ```
 
 And from `examples/bank_account.m`, showing pure-read inlining and the

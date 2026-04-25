@@ -1774,6 +1774,16 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
            << ":g}')\n";
         return;
       }
+      // Matrix `disp` collapses to plain `print(M)`. The Python lane
+      // accepts numpy's bracket-and-dotted-float matrix formatting via
+      // a per-test `.stdout-python` override (see test/Run/
+      // run_tests_emitpython.sh); the C/C++ goldens keep the MATLAB-
+      // style `%7g` right-aligned columns they share.
+      if (*Callee == "matlab_disp_mat" && Call.getNumResults() == 0 &&
+          Call.getNumOperands() == 1) {
+        OS << "print(" << this->stmtExpr(Call.getOperand(0)) << ")\n";
+        return;
+      }
       // Numpy / operator rewrite for matrix builtins — emit the inline
       // expression directly when the call binds a result.
       {

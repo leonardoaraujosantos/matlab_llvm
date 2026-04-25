@@ -5,3 +5,6 @@ build/
 compile_commands.json
 .DS_Store
 Testing/
+
+# Local Claude Code state (worktrees, transcripts, agent scratch)
+.claude/
