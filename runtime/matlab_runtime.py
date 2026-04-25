@@ -908,6 +908,23 @@ def iscell(c):
 
 
 # --- object / class -------------------------------------------------------
+#
+# `obj_new` returns a plain Python object whose attributes back the
+# class's properties. The Python emitter rewrites `obj_get_f64(o, "X")`
+# to `o.X` and `obj_set_f64(o, "X", v)` to `o.X = v` whenever the field
+# name is a valid Python identifier, so most accesses bypass the
+# runtime functions entirely. The functions below remain for the cases
+# that don't qualify (non-identifier field names, hand-written callers)
+# and for back-compat with the legacy oid-int API.
+
+class _MatObj:
+    """Heap-allocated MATLAB classdef instance.
+
+    Properties land directly as attributes — the Python emitter targets
+    `obj.Field` syntax. Tracks an `_oid` so the dict-based fallback
+    (`obj_set_f64` with non-identifier fields) keeps working.
+    """
+    __slots__ = ("_oid", "__dict__")
 
 _obj_store = {}
 _obj_next_id = 1
@@ -915,10 +932,21 @@ _obj_next_id = 1
 def obj_new(*_ignored):
     global _obj_next_id
     oid = _obj_next_id; _obj_next_id += 1
-    _obj_store[oid] = {}
-    return oid
+    obj = _MatObj()
+    obj._oid = oid
+    _obj_store[oid] = obj  # keep a strong ref + a lookup path for legacy callers
+    return obj
 
-def obj_set_f64(oid, name, *rest):
+def _resolve_obj(oid_or_obj):
+    """Accept either a `_MatObj` instance or the legacy integer oid."""
+    if isinstance(oid_or_obj, _MatObj): return oid_or_obj
+    obj = _obj_store.get(int(oid_or_obj))
+    if isinstance(obj, _MatObj): return obj
+    # Pre-existing int-oid stores (back-compat path): wrap a thin facade
+    # that proxies attribute access into the original dict.
+    return None
+
+def obj_set_f64(oid_or_obj, name, *rest):
     # The C ABI is `obj_set_f64(oid, name_ptr, name_len, value)`. The
     # `-emit-python` backend drops `name_len`, so the natural Python
     # call is `obj_set_f64(oid, name, value)`. Accept both shapes by
@@ -928,11 +956,24 @@ def obj_set_f64(oid, name, *rest):
         v = rest[1]
     else:
         v = rest[-1]
-    _obj_store.setdefault(int(oid), {})[name] = float(v)
+    obj = _resolve_obj(oid_or_obj)
+    if obj is not None:
+        setattr(obj, name, float(v))
+        return
+    # Pure legacy path — store in the dict-of-dicts. Used only by
+    # hand-written callers that pass an int oid never produced by
+    # obj_new() since obj_new() now returns _MatObj.
+    _obj_store.setdefault(int(oid_or_obj), {})[name] = float(v)
 
 
-def obj_get_f64(oid, name, *unused):
-    return float(_obj_store.get(int(oid), {}).get(name, 0.0))
+def obj_get_f64(oid_or_obj, name, *unused):
+    obj = _resolve_obj(oid_or_obj)
+    if obj is not None:
+        return float(getattr(obj, name, 0.0))
+    bucket = _obj_store.get(int(oid_or_obj), {})
+    if isinstance(bucket, dict):
+        return float(bucket.get(name, 0.0))
+    return 0.0
 
 
 # --- strings --------------------------------------------------------------

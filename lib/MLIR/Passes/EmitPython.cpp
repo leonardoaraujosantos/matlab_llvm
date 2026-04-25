@@ -157,6 +157,13 @@ private:
   // composes cleanly inside other expressions).
   bool tryRewriteAsNumpy(mlir::LLVM::CallOp C, std::string &Out);
 
+  // Try to rewrite obj_get_f64 / obj_set_f64 calls as Python attribute
+  // access. obj_get_f64 produces a value expression; obj_set_f64 only
+  // makes sense as a statement. The field-name operand must be a
+  // string-global addressof matching a valid Python identifier.
+  bool tryRewriteObjGet(mlir::LLVM::CallOp C, std::string &Out);
+  bool tryRewriteObjSet(mlir::LLVM::CallOp C, std::string &Out);
+
   std::ostream &OS;
   bool NoLine;
   const matlab::SourceManager *SM;
@@ -682,6 +689,8 @@ bool Emitter::buildInlineExpr(mlir::Operation &Op, std::string &Expr) {
   }
   if (auto C = dyn_cast<LLVM::CallOp>(Op)) {
     if (!C.getCallee()) return false;
+    // Class-field read: obj_get_f64(obj, "X") → obj.X.
+    if (tryRewriteObjGet(C, Expr)) return true;
     // Prefer the numpy / Python-operator rewrite for matrix builtins —
     // it reads as the natural translation instead of a runtime trampoline.
     if (tryRewriteAsNumpy(C, Expr)) return true;
@@ -1145,6 +1154,67 @@ bool Emitter::tryRewriteAsNumpy(mlir::LLVM::CallOp C, std::string &Out) {
     }
   }
   return false;
+}
+
+// ---------------------------------------------------------------------------
+// Class field access — `obj_get_f64(obj, "X")` → `obj.X`
+// ---------------------------------------------------------------------------
+
+// Recover the bare field name from the second operand of an obj_*_f64 call.
+// Returns the identifier text on success (with surrounding quotes stripped),
+// or std::nullopt when the operand isn't a string-literal addressof or the
+// literal isn't a valid Python identifier.
+static std::optional<std::string> getFieldNameLit(
+    mlir::Value V, const llvm::StringMap<std::string> &StringGlobalLits) {
+  auto *D = V.getDefiningOp();
+  auto A = mlir::dyn_cast_or_null<mlir::LLVM::AddressOfOp>(D);
+  if (!A) return std::nullopt;
+  auto It = StringGlobalLits.find(A.getGlobalName());
+  if (It == StringGlobalLits.end()) return std::nullopt;
+  llvm::StringRef Lit = It->second;
+  if (Lit.size() < 2 || Lit.front() != '"' || Lit.back() != '"')
+    return std::nullopt;
+  std::string Name = Lit.substr(1, Lit.size() - 2).str();
+  if (Name.empty()) return std::nullopt;
+  // Must be a plain Python identifier — anything fancy stays on the
+  // runtime path so we don't emit broken `obj.123` or `obj.with-dash`.
+  unsigned char C0 = (unsigned char)Name[0];
+  if (!(std::isalpha(C0) || C0 == '_')) return std::nullopt;
+  for (char C : Name)
+    if (!std::isalnum((unsigned char)C) && C != '_') return std::nullopt;
+  // Don't shadow a Python keyword.
+  static constexpr const char *Keywords[] = {
+    "False","None","True","and","as","assert","async","await","break",
+    "class","continue","def","del","elif","else","except","finally","for",
+    "from","global","if","import","in","is","lambda","nonlocal","not","or",
+    "pass","raise","return","try","while","with","yield",
+  };
+  for (auto *KW : Keywords) if (Name == KW) return std::nullopt;
+  return Name;
+}
+
+bool Emitter::tryRewriteObjGet(mlir::LLVM::CallOp C, std::string &Out) {
+  if (!C.getCallee()) return false;
+  if (*C.getCallee() != "matlab_obj_get_f64") return false;
+  if (C.getNumOperands() < 2) return false;
+  auto Field = getFieldNameLit(C.getOperand(1), StringGlobalLits);
+  if (!Field) return false;
+  Out = exprFor(C.getOperand(0)) + "." + *Field;
+  return true;
+}
+
+bool Emitter::tryRewriteObjSet(mlir::LLVM::CallOp C, std::string &Out) {
+  if (!C.getCallee()) return false;
+  if (*C.getCallee() != "matlab_obj_set_f64") return false;
+  // The C ABI is (obj, name_ptr, name_len, value); the length is
+  // dropped at the emit layer for callees in calleeHasDroppableLengthArg,
+  // so the value is always at operand index 3 here.
+  if (C.getNumOperands() < 4) return false;
+  auto Field = getFieldNameLit(C.getOperand(1), StringGlobalLits);
+  if (!Field) return false;
+  Out = dropOuterParens(exprFor(C.getOperand(0))) + "." + *Field +
+        " = " + dropOuterParens(stmtExpr(C.getOperand(3)));
+  return true;
 }
 
 void Emitter::scanBreakContinueFlags(mlir::Region &R) {
@@ -1735,12 +1805,33 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
 
   // --- llvm.call / func.call ------------------------------------------
   if (auto Call = mlir::dyn_cast<mlir::LLVM::CallOp>(Op)) {
+    // Class-field write — `obj_set_f64(obj, "X", v)` becomes
+    // `obj.X = v` and is always a void statement (no result to bind).
+    if (Call.getCallee() && *Call.getCallee() == "matlab_obj_set_f64" &&
+        Call.getNumResults() == 0) {
+      std::string Rewrite;
+      if (tryRewriteObjSet(Call, Rewrite)) {
+        indent(Indent);
+        OS << Rewrite << "\n";
+        return;
+      }
+    }
     indent(Indent);
     if (Call.getNumResults() == 1) {
       std::string N = this->name(Call.getResult());
       OS << N << " = ";
     }
     if (auto Callee = Call.getCallee()) {
+      // Class-field read with binding: `name = obj_get_f64(obj, "X")` →
+      // `name = obj.X`. Inline-expression sites are handled by
+      // buildInlineExpr; this path covers the rare non-inlined case.
+      if (*Callee == "matlab_obj_get_f64" && Call.getNumResults() == 1) {
+        std::string Rewrite;
+        if (tryRewriteObjGet(Call, Rewrite)) {
+          OS << dropOuterParens(Rewrite) << "\n";
+          return;
+        }
+      }
       // For user-string runtime helpers, drop the (str_ptr, str_len) tail
       // length operand — Python strings carry their length, and the
       // matching runtime stub keeps `n` optional for back-compat.
