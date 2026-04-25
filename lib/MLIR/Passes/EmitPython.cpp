@@ -272,6 +272,13 @@ private:
   std::string LastLineFile;
   int LastLineNum = -1;
   bool AtBlockStart = true;
+  // When non-empty, advanceTo's first-call branch (which would scan
+  // back from the first op's line for leading comments) skips any
+  // line ≤ this value in the matching file. We set it after hoisting
+  // the script's top-of-file comment block to module-top so the same
+  // lines aren't re-emitted at @main's first op.
+  std::string PreEmittedCommentFile;
+  int PreEmittedCommentLine = 0;
 
   // Top-level script body (the body of `@main`) is hoisted to module
   // scope. While emitting that body this flag is true so we don't add
@@ -1518,6 +1525,15 @@ bool Emitter::emitLeadingComments(llvm::StringRef FullPath, int AfterLine,
   matlab::FileID F = SM->findFileByName(std::string_view(FullPath));
   if (F == 0) return false;
 
+  // If we pre-emitted the script's leading comment block at module-top,
+  // skip those lines so they aren't re-emitted when @main's first op
+  // triggers a leading-comment scan.
+  std::string FileLeaf = FullPath.str();
+  if (auto Slash = FileLeaf.find_last_of("/\\"); Slash != std::string::npos)
+    FileLeaf = FileLeaf.substr(Slash + 1);
+  if (PreEmittedCommentLine > 0 && FileLeaf == PreEmittedCommentFile)
+    AfterLine = std::max(AfterLine, PreEmittedCommentLine);
+
   int Start = Line;
   for (int L = Line - 1; L > AfterLine; --L) {
     auto Info = classifyLine(SM->getLineText(F, (uint32_t)L));
@@ -1728,6 +1744,85 @@ bool Emitter::run(mlir::ModuleOp M) {
   // Reserve the bare class names too so a free-function's local can't
   // accidentally shadow a class type used at a constructor call site.
   for (auto &KV : Classes) UsedNames.insert(KV.first().str());
+
+  // Hoist the script's top-of-file `% ...` comment block to module-top
+  // so the file's documentation stays at the top of the generated
+  // Python instead of being shoved between the function definitions
+  // and the script body. We pre-emit it here and remember the highest
+  // line number we covered so emitLeadingComments doesn't re-emit
+  // those same lines when @main's first op fires advanceTo().
+  if (MainFn && SM) {
+    auto extract = [](mlir::Location L) -> mlir::FileLineColLoc {
+      if (auto FL = mlir::dyn_cast<mlir::FileLineColLoc>(L)) return FL;
+      if (auto NL = mlir::dyn_cast<mlir::NameLoc>(L))
+        if (auto FL = mlir::dyn_cast<mlir::FileLineColLoc>(NL.getChildLoc()))
+          return FL;
+      if (auto FuL = mlir::dyn_cast<mlir::FusedLoc>(L)) {
+        for (auto Sub : FuL.getLocations())
+          if (auto FL = mlir::dyn_cast<mlir::FileLineColLoc>(Sub))
+            return FL;
+      }
+      return {};
+    };
+    // Find the smallest line number among MainFn's body ops (any op
+    // with a real location) to serve as "where the script body
+    // starts." First-visited isn't reliable — constants and slot
+    // allocas sometimes carry the location of their last use.
+    std::string FullPath;
+    int MinLine = 0;
+    MainFn.getBody().walk([&](mlir::Operation *Op) {
+      if (auto FL = extract(Op->getLoc())) {
+        int L = (int)FL.getLine();
+        if (L > 0 && (MinLine == 0 || L < MinLine)) {
+          MinLine = L;
+          FullPath = FL.getFilename().str();
+        }
+      }
+    });
+    if (MinLine > 0 && !FullPath.empty()) {
+      int Line = MinLine;
+      std::string FileLeaf = FullPath;
+      if (auto Slash = FileLeaf.find_last_of("/\\");
+          Slash != std::string::npos)
+        FileLeaf = FileLeaf.substr(Slash + 1);
+      matlab::FileID F = SM->findFileByName(std::string_view(FullPath));
+      if (F != 0 && Line > 1) {
+        // Walk back from `Line - 1` until we hit code or run out of
+        // file. Any contiguous comment / blank-line block starting at
+        // line 1 is the file-leading documentation.
+        int Start = Line;
+        for (int L = Line - 1; L >= 1; --L) {
+          auto Info = classifyLine(SM->getLineText(F, (uint32_t)L));
+          if (Info.Kind == LineKind::Code) { Start = L + 1; break; }
+          Start = L;
+        }
+        if (Start <= 1) {
+          bool LastWasBlank = false;
+          bool EmittedAny = false;
+          for (int L = Start; L < Line; ++L) {
+            auto Info = classifyLine(SM->getLineText(F, (uint32_t)L));
+            if (Info.Kind == LineKind::Blank) {
+              if (LastWasBlank) continue;
+              OS << "\n";
+              LastWasBlank = true;
+              continue;
+            }
+            if (Info.Kind == LineKind::Comment) {
+              OS << "# " << Info.Body << "\n";
+              LastWasBlank = false;
+              EmittedAny = true;
+            }
+          }
+          // Ensure exactly one blank line separates the hoisted block
+          // from whatever class / def comes next, regardless of whether
+          // the source ended with a blank.
+          if (EmittedAny && !LastWasBlank) OS << "\n";
+          PreEmittedCommentFile = FileLeaf;
+          PreEmittedCommentLine = Line - 1;
+        }
+      }
+    }
+  }
 
   // Pass 4: emit class blocks. Order matters when a subclass references
   // its parent — emit classes whose Super is already declared first.
@@ -2060,7 +2155,13 @@ void Emitter::emitLLVMFunc(mlir::LLVM::LLVMFuncOp F) {
   for (unsigned i = 0; i < FT.getNumParams(); ++i) {
     if (i) OS << ", ";
     auto Arg = Entry.getArgument(i);
-    std::string N = freshName();
+    // Prefer the user-source name carried as an arg-attr (set by
+    // anonymous-function outlining for capture / param SSA values).
+    std::string N;
+    if (auto NA = F.getArgAttrOfType<mlir::StringAttr>(i, "matlab.name"))
+      N = uniqueName(NA.getValue());
+    else
+      N = freshName();
     Names[Arg] = N;
     OS << N;
   }

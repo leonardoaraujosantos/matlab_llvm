@@ -54,6 +54,19 @@ bool isMatlabOp(Operation *Op, StringRef Name) {
   return Op && Op->getName().getStringRef() == Name;
 }
 
+// Copy a `matlab.name` hint from an old op being rewritten onto its
+// replacement, so the EmitPython backend can keep surfacing the
+// user-source variable name (`x = np.linalg.solve(A, b)`) instead of
+// falling back to a fresh `vN` id. No-op when `Old` carries no name or
+// `New` already has one.
+static void carryName(Operation *Old, Operation *New) {
+  if (!Old || !New) return;
+  auto NA = Old->getAttrOfType<StringAttr>("matlab.name");
+  if (!NA) return;
+  if (New->hasAttr("matlab.name")) return;
+  New->setAttr("matlab.name", NA);
+}
+
 bool isTensorLike(Type T) {
   return mlir::isa<RankedTensorType, UnrankedTensorType>(T);
 }
@@ -342,6 +355,7 @@ bool TensorLowering::rewriteComplexLiterals() {
     if (Op->getNumResults() == 1 &&
         Op->getResult(0).getType() != PtrTy)
       Op->getResult(0).setType(PtrTy);
+    carryName(Op, NC);
     Op->getResult(0).replaceAllUsesWith(NC.getResult());
     Op->erase();
     Changed = true;
@@ -375,6 +389,7 @@ bool TensorLowering::rewriteLiterals() {
       B.setInsertionPoint(Op);
       auto Fn = rt("matlab_empty_mat", PtrTy, {});
       auto NC = LLVM::CallOp::create(B, Op->getLoc(), Fn, ValueRange{});
+      carryName(Op, NC);
       Op->getResult(0).replaceAllUsesWith(NC.getResult());
       Op->erase();
       Changed = true;
@@ -577,6 +592,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
       auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
                                       ValueRange{Call->getOperand(0),
                                                  Ptr, LenV});
+      carryName(Call, NC);
       Call->getResult(0).replaceAllUsesWith(NC.getResult());
       Call->erase();
       Changed = true;
@@ -632,6 +648,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
       auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
                                       ValueRange{Call->getOperand(0),
                                                  Ptr, LenV});
+      carryName(Call, NC);
       Call->getResult(0).replaceAllUsesWith(NC.getResult());
       Call->erase();
       Changed = true;
@@ -663,6 +680,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
       auto Fn = rt("matlab_check_error",
                     IntegerType::get(Ctx, 32), {});
       auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn, ValueRange{});
+      carryName(Call, NC);
       Call->getResult(0).replaceAllUsesWith(NC.getResult());
       Call->erase();
       Changed = true;
@@ -778,6 +796,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
       auto Fn = rt("matlab_string_from_literal", PtrTy, {PtrTy, I64});
       auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
                                       ValueRange{Addr, LenV});
+      carryName(Call, NC);
       Call->getResult(0).replaceAllUsesWith(NC.getResult());
       Call->erase();
       Changed = true;
@@ -792,6 +811,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
       auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
                                       ValueRange{Call->getOperand(0),
                                                  Call->getOperand(1)});
+      carryName(Call, NC);
       Call->getResult(0).replaceAllUsesWith(NC.getResult());
       Call->erase();
       Changed = true;
@@ -814,6 +834,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
       auto Fn = rt("matlab_string_len", F64, {PtrTy});
       auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
                                       ValueRange{Call->getOperand(0)});
+      carryName(Call, NC);
       Call->getResult(0).replaceAllUsesWith(NC.getResult());
       Call->erase();
       Changed = true;
@@ -835,6 +856,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
                                       Call->getOperands());
       if (Call->getResult(0).getType() != PtrTy)
         Call->getResult(0).setType(PtrTy);
+      carryName(Call, NC);
       Call->getResult(0).replaceAllUsesWith(NC.getResult());
       Call->erase();
       Changed = true;
@@ -852,6 +874,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
                                       Call->getOperands());
       if (Call->getResult(0).getType() != F64)
         Call->getResult(0).setType(F64);
+      carryName(Call, NC);
       Call->getResult(0).replaceAllUsesWith(NC.getResult());
       Call->erase();
       Changed = true;
@@ -872,6 +895,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
                                       Call->getOperands());
       if (Call->getResult(0).getType() != PtrTy)
         Call->getResult(0).setType(PtrTy);
+      carryName(Call, NC);
       Call->getResult(0).replaceAllUsesWith(NC.getResult());
       Call->erase();
       Changed = true;
@@ -886,6 +910,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
                                       Call->getOperands());
       if (Call->getResult(0).getType() != PtrTy)
         Call->getResult(0).setType(PtrTy);
+      carryName(Call, NC);
       Call->getResult(0).replaceAllUsesWith(NC.getResult());
       Call->erase();
       Changed = true;
@@ -932,6 +957,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
                                       Call->getOperands());
       if (Call->getResult(0).getType() != F64)
         Call->getResult(0).setType(F64);
+      carryName(Call, NC);
       Call->getResult(0).replaceAllUsesWith(NC.getResult());
       Call->erase();
       Changed = true;
@@ -949,6 +975,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
                                         Call->getOperands());
         if (Call->getResult(0).getType() != PtrTy)
           Call->getResult(0).setType(PtrTy);
+        carryName(Call, NC);
         Call->getResult(0).replaceAllUsesWith(NC.getResult());
         Call->erase();
         Changed = true;
@@ -962,6 +989,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
                                         Call->getOperands());
         if (Call->getResult(0).getType() != PtrTy)
           Call->getResult(0).setType(PtrTy);
+        carryName(Call, NC);
         Call->getResult(0).replaceAllUsesWith(NC.getResult());
         Call->erase();
         Changed = true;
@@ -989,6 +1017,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
       auto Fn = rt("matlab_cell_new", PtrTy, {F64});
       auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
                                       ValueRange{Call->getOperand(0)});
+      carryName(Call, NC);
       Call->getResult(0).replaceAllUsesWith(NC.getResult());
       Call->erase();
       Changed = true;
@@ -1042,6 +1071,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
       auto Fn = rt(Name, Ret, Args);
       auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
                                       ValueRange(Ops));
+      carryName(Call, NC);
       Call->getResult(0).replaceAllUsesWith(NC.getResult());
       Call->erase();
       Changed = true;
@@ -1053,6 +1083,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
       B.setInsertionPoint(Call);
       auto Fn = rt("matlab_struct_new", PtrTy, {});
       auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn, ValueRange{});
+      carryName(Call, NC);
       Call->getResult(0).replaceAllUsesWith(NC.getResult());
       Call->erase();
       Changed = true;
@@ -1102,6 +1133,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
       auto Fn = rt(Name, Ret, {PtrTy, PtrTy, I64});
       auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
                                       ValueRange{Base, Ptr, LenV});
+      carryName(Call, NC);
       Call->getResult(0).replaceAllUsesWith(NC.getResult());
       Call->erase();
       Changed = true;
@@ -1206,6 +1238,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
       auto Fn = rt(Name, Ret, {PtrTy, I64});
       auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
                                       ValueRange{Ptr, LenV});
+      carryName(Call, NC);
       Call->getResult(0).replaceAllUsesWith(NC.getResult());
       Call->erase();
       Changed = true;
@@ -1291,6 +1324,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
       auto Fn = rt(Name, Ret, {PtrTy, PtrTy, I64});
       auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
                                       ValueRange{Base, Ptr, LenV});
+      carryName(Call, NC);
       Call->getResult(0).replaceAllUsesWith(NC.getResult());
       Call->erase();
       Changed = true;
@@ -1305,6 +1339,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
       auto Fn = rt("matlab_obj_new", PtrTy, {I32});
       auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
                                       ValueRange{Arg});
+      carryName(Call, NC);
       Call->getResult(0).replaceAllUsesWith(NC.getResult());
       Call->erase();
       Changed = true;
@@ -1326,6 +1361,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
                                       Call->getOperands());
       if (Call->getResult(0).getType() != F64)
         Call->getResult(0).setType(F64);
+      carryName(Call, NC);
       Call->getResult(0).replaceAllUsesWith(NC.getResult());
       Call->erase();
       Changed = true;
@@ -1341,6 +1377,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
                                       Call->getOperands());
       if (Call->getResult(0).getType() != F64)
         Call->getResult(0).setType(F64);
+      carryName(Call, NC);
       Call->getResult(0).replaceAllUsesWith(NC.getResult());
       Call->erase();
       Changed = true;
@@ -1355,6 +1392,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
                                       Call->getOperands());
       if (Call->getResult(0).getType() != PtrTy)
         Call->getResult(0).setType(PtrTy);
+      carryName(Call, NC);
       Call->getResult(0).replaceAllUsesWith(NC.getResult());
       Call->erase();
       Changed = true;
@@ -1371,6 +1409,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
                                       Call->getOperands());
       if (Call->getResult(0).getType() != PtrTy)
         Call->getResult(0).setType(PtrTy);
+      carryName(Call, NC);
       Call->getResult(0).replaceAllUsesWith(NC.getResult());
       Call->erase();
       Changed = true;
@@ -1405,6 +1444,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
                                       Call->getOperands());
       if (Call->getResult(0).getType() != PtrTy)
         Call->getResult(0).setType(PtrTy);
+      carryName(Call, NC);
       Call->getResult(0).replaceAllUsesWith(NC.getResult());
       Call->erase();
       Changed = true;
@@ -1423,6 +1463,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
                                         Call->getOperands());
         if (Call->getResult(0).getType() != F64)
           Call->getResult(0).setType(F64);
+        carryName(Call, NC);
         Call->getResult(0).replaceAllUsesWith(NC.getResult());
         Call->erase();
         Changed = true;
@@ -1435,6 +1476,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
                                         Call->getOperands());
         if (Call->getResult(0).getType() != F64)
           Call->getResult(0).setType(F64);
+        carryName(Call, NC);
         Call->getResult(0).replaceAllUsesWith(NC.getResult());
         Call->erase();
         Changed = true;
@@ -1455,6 +1497,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
       auto Fn = rt("matlab_subscript3_s", F64, {PtrTy, F64, F64, F64});
       auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
                                       Call->getOperands());
+      carryName(Call, NC);
       Call->getResult(0).replaceAllUsesWith(NC.getResult());
       Call->erase();
       Changed = true;
@@ -1483,6 +1526,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
       auto Fn = rt("matlab_size3_dim", F64, {PtrTy, F64});
       auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
                                       Call->getOperands());
+      carryName(Call, NC);
       Call->getResult(0).replaceAllUsesWith(NC.getResult());
       Call->erase();
       Changed = true;
@@ -1495,6 +1539,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
       auto Fn = rt(Name, F64, {PtrTy});
       auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
                                       Call->getOperands());
+      carryName(Call, NC);
       Call->getResult(0).replaceAllUsesWith(NC.getResult());
       Call->erase();
       Changed = true;
@@ -1512,6 +1557,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
       auto Fn = rt("matlab_global_get_f64", F64, {I32});
       auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
                                       ValueRange{Call->getOperand(0)});
+      carryName(Call, NC);
       Call->getResult(0).replaceAllUsesWith(NC.getResult());
       Call->erase();
       Changed = true;
@@ -1773,6 +1819,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
                                         Call->getOperands());
         if (Call->getResult(0).getType() != F64)
           Call->getResult(0).setType(F64);
+        carryName(Call, NC);
         Call->getResult(0).replaceAllUsesWith(NC.getResult());
         Call->erase();
         Changed = true;
@@ -1793,6 +1840,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
        * don't see a type mismatch. */
       if (Call->getResult(0).getType() != F64)
         Call->getResult(0).setType(F64);
+      carryName(Call, NC);
       Call->getResult(0).replaceAllUsesWith(NC.getResult());
       Call->erase();
       Changed = true;
@@ -1822,6 +1870,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
     auto Fn = rt(S->RTName, ResTy, ExpTys);
     auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
                                     Call->getOperands());
+    carryName(Call, NC);
     Call->getResult(0).replaceAllUsesWith(NC.getResult());
     Call->erase();
     Changed = true;
@@ -1947,6 +1996,7 @@ bool TensorLowering::rewriteBinaryOps() {
 
     if (!Fn) continue;
     auto NC = LLVM::CallOp::create(B, Op->getLoc(), Fn, Args);
+    carryName(Op, NC);
     Op->getResult(0).replaceAllUsesWith(NC.getResult());
     Op->erase();
     Changed = true;
@@ -1969,6 +2019,7 @@ bool TensorLowering::rewritePostfix() {
     auto Fn = rt("matlab_transpose", PtrTy, {PtrTy});
     auto NC = LLVM::CallOp::create(B, Op->getLoc(), Fn,
                                     ValueRange{Op->getOperand(0)});
+    carryName(Op, NC);
     Op->getResult(0).replaceAllUsesWith(NC.getResult());
     Op->erase();
     Changed = true;
@@ -1989,6 +2040,7 @@ bool TensorLowering::rewriteUnaryNeg() {
     auto Fn = rt("matlab_neg_m", PtrTy, {PtrTy});
     auto NC = LLVM::CallOp::create(B, Op->getLoc(), Fn,
                                     ValueRange{Op->getOperand(0)});
+    carryName(Op, NC);
     Op->getResult(0).replaceAllUsesWith(NC.getResult());
     Op->erase();
     Changed = true;
@@ -2025,6 +2077,7 @@ bool TensorLowering::rewriteRange() {
     auto Fn = rt("matlab_range", PtrTy, {F64, F64, F64});
     auto NC = LLVM::CallOp::create(B, Op->getLoc(), Fn,
                                     ValueRange{Start, Step, End});
+    carryName(Op, NC);
     Op->getResult(0).replaceAllUsesWith(NC.getResult());
     Op->erase();
     Changed = true;
@@ -2066,6 +2119,7 @@ bool TensorLowering::rewriteSubscript() {
     auto NC = LLVM::CallOp::create(B, Op->getLoc(), Fn,
                                     ValueRange{Op->getOperand(0),
                                                Op->getOperand(1)});
+    carryName(Op, NC);
     Op->getResult(0).replaceAllUsesWith(NC.getResult());
     Op->erase();
     Changed = true;
