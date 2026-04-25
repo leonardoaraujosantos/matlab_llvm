@@ -918,10 +918,20 @@ def obj_new(*_ignored):
     _obj_store[oid] = {}
     return oid
 
-def obj_set_f64(oid, name, n, v):
+def obj_set_f64(oid, name, *rest):
+    # The C ABI is `obj_set_f64(oid, name_ptr, name_len, value)`. The
+    # `-emit-python` backend drops `name_len`, so the natural Python
+    # call is `obj_set_f64(oid, name, value)`. Accept both shapes by
+    # peeling the legacy length arg off the front when it's a small int
+    # that matches `len(name)`.
+    if len(rest) == 2 and isinstance(rest[0], int) and rest[0] == len(str(name)):
+        v = rest[1]
+    else:
+        v = rest[-1]
     _obj_store.setdefault(int(oid), {})[name] = float(v)
 
-def obj_get_f64(oid, name, n=None):
+
+def obj_get_f64(oid, name, *unused):
     return float(_obj_store.get(int(oid), {}).get(name, 0.0))
 
 

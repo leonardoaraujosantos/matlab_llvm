@@ -10,11 +10,19 @@ The core pipeline is:
 `MATLAB source -> Lexer -> Parser -> AST -> Sema -> MIR -> MLIR -> LLVM / C / C++ / Python`
 
 The project is self-contained by design:
+
 - no MathWorks source
 - no Octave dependency
 - no BLAS/LAPACK dependency for the compiled backends
 - C++20 frontend and MLIR-based lowering
 - in-tree C and Python runtimes
+
+## Code Generation
+
+The project also allows emission from the MLIR:
+- C/C++
+- Python
+- SystemVerilog (Future)
 
 ## What It Covers
 
@@ -33,6 +41,7 @@ control flow, functions, basic OOP, and editor tooling.
 | Outputs | LLVM IR, C, C++, experimental Python, native executables via helper scripts |
 
 Current corpus size in-tree:
+
 - `16` runnable programs in [`examples/`](examples/)
 - `125` execution tests in `test/Run/`
 
@@ -42,6 +51,7 @@ For the authoritative compatibility inventory, see
 ## Quick Start
 
 Prerequisites:
+
 - LLVM 22.x and MLIR
 - CMake 3.20+
 - Ninja
@@ -226,6 +236,7 @@ flowchart LR
 ```
 
 Notes:
+
 - The frontend can build without MLIR.
 - MIR is maintained as a readable internal IR and diagnostic target.
 - Production lowering goes through MLIR.
@@ -235,9 +246,11 @@ Notes:
 ## Documentation Map
 
 Start here for the high-level index:
+
 - [`docs/README.md`](docs/README.md)
 
 Core docs:
+
 - [`docs/feature_status.md`](docs/feature_status.md): feature inventory and known gaps
 - [`docs/repl.md`](docs/repl.md): REPL behavior and limits
 - [`docs/lsp.md`](docs/lsp.md): editor integration and LSP surface
@@ -248,6 +261,7 @@ Core docs:
 - [`docs/emit_systemc.md`](docs/emit_systemc.md): future SystemC backend
 
 Program examples:
+
 - [`examples/README.md`](examples/README.md)
 
 ## Repository Layout

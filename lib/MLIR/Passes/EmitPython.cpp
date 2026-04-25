@@ -403,6 +403,26 @@ bool Emitter::canInline(mlir::Operation &Op) {
           LLVM::GEPOp>(Op))
     return true;
 
+  // Is this LLVM call to a runtime helper that's known to be a pure
+  // read with no side effects? Such calls don't block inlining of an
+  // earlier value across them.
+  auto isPureReadCall = [](Operation &Op2) -> bool {
+    auto C = dyn_cast<LLVM::CallOp>(Op2);
+    if (!C || !C.getCallee()) return false;
+    StringRef N = *C.getCallee();
+    if (!N.starts_with("matlab_")) return false;
+    StringRef S = N.drop_front(strlen("matlab_"));
+    // Conservative allowlist of known-pure runtime accessors. Adding
+    // the wrong helper here would visibly reorder side effects in the
+    // generated source, so we keep this list small and explicit.
+    return S == "obj_get_f64" || S == "size" || S == "size_dim" ||
+           S == "numel" || S == "numel3" || S == "length" ||
+           S == "ndims" || S == "isempty" || S == "isnumeric" ||
+           S == "isscalar" || S == "ismatrix" || S == "isvector" ||
+           S == "isstruct" || S == "isfield" || S == "iscell" ||
+           S == "isstring" || S == "string_len";
+  };
+
   if (auto L = dyn_cast<LLVM::LoadOp>(Op)) {
     Value AddrV = L.getAddr();
     Block *BB = Op.getBlock();
@@ -410,7 +430,10 @@ bool Emitter::canInline(mlir::Operation &Op) {
          It != BB->end() && &*It != User; ++It) {
       if (auto S = dyn_cast<LLVM::StoreOp>(&*It))
         if (S.getAddr() == AddrV) return false;
-      if (isa<LLVM::CallOp, func::CallOp>(&*It)) return false;
+      if (isa<func::CallOp>(&*It)) return false;
+      if (isa<LLVM::CallOp>(&*It)) {
+        if (!isPureReadCall(*It)) return false;
+      }
     }
     return true;
   }
@@ -420,7 +443,10 @@ bool Emitter::canInline(mlir::Operation &Op) {
     for (auto It = ++Block::iterator(&Op);
          It != BB->end() && &*It != User; ++It) {
       if (isa<LLVM::StoreOp>(*It)) return false;
-      if (isa<LLVM::CallOp, func::CallOp>(*It)) return false;
+      if (isa<func::CallOp>(*It)) return false;
+      if (isa<LLVM::CallOp>(*It)) {
+        if (!isPureReadCall(*It)) return false;
+      }
     }
     (void)C;
     return true;
@@ -431,7 +457,10 @@ bool Emitter::canInline(mlir::Operation &Op) {
     for (auto It = ++Block::iterator(&Op);
          It != BB->end() && &*It != User; ++It) {
       if (isa<LLVM::StoreOp>(*It)) return false;
-      if (isa<LLVM::CallOp, func::CallOp>(*It)) return false;
+      if (isa<func::CallOp>(*It)) return false;
+      if (isa<LLVM::CallOp>(*It)) {
+        if (!isPureReadCall(*It)) return false;
+      }
     }
     return true;
   }
@@ -547,9 +576,27 @@ bool Emitter::buildInlineExpr(mlir::Operation &Op, std::string &Expr) {
     return true;
   }
   if (auto S = dyn_cast<arith::SelectOp>(Op)) {
+    // Common shape from MATLAB's logical-to-double coercion: select(c,
+    // 1.0, 0.0). Fold to `float(c)` instead of the ternary so the
+    // emitted source reads like the MATLAB expression that produced it.
+    auto isLit = [](Value V, double Want) -> bool {
+      if (auto *D = V.getDefiningOp()) {
+        FloatAttr FA;
+        if (auto C = dyn_cast<arith::ConstantOp>(D))
+          FA = dyn_cast<FloatAttr>(C.getValue());
+        else if (auto C = dyn_cast<LLVM::ConstantOp>(D))
+          FA = dyn_cast<FloatAttr>(C.getValue());
+        return FA && FA.getValueAsDouble() == Want;
+      }
+      return false;
+    };
+    if (isLit(S.getTrueValue(), 1.0) && isLit(S.getFalseValue(), 0.0)) {
+      Expr = "float(" + dropOuterParens(exprFor(S.getCondition())) + ")";
+      return true;
+    }
     // Python ternary: `a if c else b`.
     Expr = "(" + exprFor(S.getTrueValue()) + " if "
-         + exprFor(S.getCondition()) + " else "
+         + dropOuterParens(exprFor(S.getCondition())) + " else "
          + exprFor(S.getFalseValue()) + ")";
     return true;
   }
@@ -936,6 +983,10 @@ bool Emitter::calleeHasDroppableLengthArg(llvm::StringRef Suffix,
   if (Suffix == "fprintf_f64_3") { LengthArgIdx = 1; return true; }
   if (Suffix == "fprintf_f64_4") { LengthArgIdx = 1; return true; }
   if (Suffix == "input_num")     { LengthArgIdx = 1; return true; }
+  // Object field accessors carry the (name_ptr, name_len) pair as their
+  // 2nd / 3rd operands; the Python runtime ignores name_len.
+  if (Suffix == "obj_get_f64")   { LengthArgIdx = 2; return true; }
+  if (Suffix == "obj_set_f64")   { LengthArgIdx = 2; return true; }
   return false;
 }
 
@@ -1545,6 +1596,24 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
           DropLen = true;
         }
       }
+      // `rt.disp_str("literal")` is byte-identical to `print("literal")`,
+      // so collapse it. Detect by callee + a single (post-length-drop)
+      // operand that traces to a string-global addressof. We keep the
+      // runtime call for `disp_str(<variable>)` since the runtime path
+      // also handles non-`str` payloads.
+      auto isStringLiteralOperand = [&](mlir::Value V) -> bool {
+        if (auto *D = V.getDefiningOp())
+          if (auto A = mlir::dyn_cast<mlir::LLVM::AddressOfOp>(D))
+            return StringGlobalLits.count(A.getGlobalName()) > 0;
+        return false;
+      };
+      if ((*Callee == "matlab_disp_str" ||
+           *Callee == "matlab_string_disp") &&
+          Call.getNumResults() == 0 && Call.getNumOperands() >= 1 &&
+          isStringLiteralOperand(Call.getOperand(0))) {
+        OS << "print(" << this->stmtExpr(Call.getOperand(0)) << ")\n";
+        return;
+      }
       OS << remapRuntimeCallee(*Callee) << "(";
       bool First = true;
       for (unsigned i = 0; i < Call.getNumOperands(); ++i) {
@@ -2014,6 +2083,46 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
         emitRegion(If.getElseRegion(), Indent);
       return;
     }
+
+    // Detect an else-region whose only meaningful op is a single nested
+    // scf.if (the shape MATLAB `elseif` lowers to). Walk the chain so
+    // a cascade of elseifs collapses to one `elif <cond>:` per branch
+    // instead of a deepening `else: if ...` ladder.
+    auto findElseElif = [&](mlir::scf::IfOp Parent)
+        -> mlir::scf::IfOp {
+      if (Parent.getElseRegion().empty()) return {};
+      auto &EBlock = Parent.getElseRegion().front();
+      mlir::scf::IfOp Inner;
+      for (auto &Inn : EBlock.getOperations()) {
+        if (mlir::isa<mlir::scf::YieldOp>(&Inn)) {
+          // Void if (no results): yield is a no-op. Result-bearing if:
+          // the yield must forward exactly the inner if's results so
+          // chaining is safe.
+          if (auto Y = mlir::dyn_cast<mlir::scf::YieldOp>(Inn)) {
+            if (Y.getNumOperands() == 0) continue;
+            if (!Inner) return {};
+            if (Y.getNumOperands() != Inner.getNumResults()) return {};
+            for (unsigned i = 0; i < Y.getNumOperands(); ++i)
+              if (Y.getOperand(i) != Inner.getResult(i)) return {};
+            continue;
+          }
+        }
+        if (InlinedOps.count(&Inn)) continue;
+        if (SuppressedOps.count(&Inn)) continue;
+        if (auto NestedIf = mlir::dyn_cast<mlir::scf::IfOp>(Inn)) {
+          if (Inner) return {};  // multiple ifs — not a clean elif
+          // Skip elif folding for the special break/continue forms;
+          // those need their own scf.if emit path.
+          if (FlagIfKind.count(NestedIf.getOperation())) return {};
+          if (InlinedIfs.count(NestedIf.getOperation())) return {};
+          Inner = NestedIf;
+          continue;
+        }
+        return {};  // some other op rules out clean elif folding
+      }
+      return Inner;
+    };
+
     indent(Indent);
     OS << "if " << this->stmtExpr(If.getCondition()) << ":\n";
     if (countEmittedStmts(If.getThenRegion().front(), InlinedOps,
@@ -2022,15 +2131,52 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
     } else {
       emitRegion(If.getThenRegion(), Indent + 1);
     }
-    if (!If.getElseRegion().empty()) {
-      // Skip the empty else (Python doesn't need `else: pass`).
-      if (countEmittedStmts(If.getElseRegion().front(), InlinedOps,
-                             SuppressedOps) == 0) {
+
+    // Walk the else-chain, folding each cleanly-chainable nested scf.if
+    // into an `elif`. The inner if's result SSA values are aliased to
+    // the parent's result-locals so each branch's yield writes to the
+    // shared variable.
+    mlir::scf::IfOp Cur = If;
+    while (true) {
+      mlir::scf::IfOp Next = findElseElif(Cur);
+      if (!Next) break;
+      // Statically-folded inner condition: lift the live branch up to
+      // the parent's indent and stop chaining.
+      int InnerFold = evalConstCond(Next.getCondition());
+      if (InnerFold == 1) {
+        for (unsigned i = 0; i < Next.getNumResults(); ++i)
+          Names[Next.getResult(i)] = this->name(Cur.getResult(i));
+        emitRegion(Next.getThenRegion(), Indent);
         return;
       }
+      if (InnerFold == 0) {
+        for (unsigned i = 0; i < Next.getNumResults(); ++i)
+          Names[Next.getResult(i)] = this->name(Cur.getResult(i));
+        if (!Next.getElseRegion().empty())
+          emitRegion(Next.getElseRegion(), Indent);
+        return;
+      }
+      // Alias the inner if's result SSA values to the parent's result-
+      // local names so the inner yield assigns to the shared variable.
+      for (unsigned i = 0; i < Next.getNumResults(); ++i)
+        Names[Next.getResult(i)] = this->name(Cur.getResult(i));
+      indent(Indent);
+      OS << "elif " << this->stmtExpr(Next.getCondition()) << ":\n";
+      if (countEmittedStmts(Next.getThenRegion().front(), InlinedOps,
+                             SuppressedOps) == 0) {
+        indent(Indent + 1); OS << "pass\n";
+      } else {
+        emitRegion(Next.getThenRegion(), Indent + 1);
+      }
+      Cur = Next;
+    }
+
+    if (!Cur.getElseRegion().empty() &&
+        countEmittedStmts(Cur.getElseRegion().front(), InlinedOps,
+                           SuppressedOps) > 0) {
       indent(Indent);
       OS << "else:\n";
-      emitRegion(If.getElseRegion(), Indent + 1);
+      emitRegion(Cur.getElseRegion(), Indent + 1);
     }
     return;
   }

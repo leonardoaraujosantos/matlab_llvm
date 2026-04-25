@@ -89,21 +89,39 @@ to `import matlab_runtime as rt`.
 | `llvm.mlir.global @s = "..."` | inlined as a Python string literal at every `addressof` use site (no top-of-file declaration) |
 
 Emitter behavior worth knowing:
-- **Strings inline**: `rt.disp_str("Hello")` directly, instead of a top-of-file
-  `__matlab_str0 = "Hello"` declaration referenced by `rt.disp_str(__matlab_str0, 13)`.
+- **Strings inline**: `rt.disp_str("Hello")` (or `print("Hello")`) directly,
+  instead of a top-of-file `__matlab_str0 = "Hello"` declaration referenced
+  by `rt.disp_str(__matlab_str0, 13)`. When the argument is a string literal,
+  the `rt.disp_str` call collapses further to `print(...)` — byte-equivalent
+  output, but reads as plain Python.
 - **For loops**: `scf.while` ops produced by `LowerSeqLoops::lowerForOp` collapse
   to native `for i in range(...):`. When init/end/step are integer literals,
   Python's `range` is used; otherwise the `rt.frange(start, end, step)` generator
   preserves MATLAB's inclusive `start:step:end` semantics.
+- **`elif` chaining**: an `scf.if` whose else-region is a single nested `scf.if`
+  (the shape MATLAB `elseif` lowers to) emits as `elif <cond>:`, walking the
+  cascade down to a final `else:` block. Result-bearing `scf.if` chains have
+  their result SSA values aliased so each branch writes to the shared local.
 - **Static-condition folding**: `scf.if` whose condition is a constant-vs-constant
   comparison (e.g. the `if nargin == 2` baked in by polymorphic dispatch) emits
   only the live branch.
+- **`select(c, 1.0, 0.0)` fold**: emitted as `float(c)` rather than the literal
+  ternary `1.0 if c else 0.0` (covers MATLAB's logical-to-double coercion).
+- **Pure-read inlining**: a single-use `rt.obj_get_f64` (or another helper on
+  the known-pure allowlist: `size`, `numel`, `length`, `ndims`, `isempty`, …)
+  inlines past peer pure-read calls. `Savings.interest` collapses to a single
+  return line: `return rt.obj_get_f64(obj, "Balance") * rt.obj_get_f64(obj, "Rate")`.
 - **Scalar slot collapse**: alloca + store + load patterns become plain Python
   variables. The `slot = 0` pre-declaration is dropped when the slot is
   unconditionally written before any read, including via an `scf.if` whose
   both branches store into the slot (covers MATLAB return-slot patterns).
 - **Trailing `return`**: dropped when it sits at the end of a void function;
   Python's implicit return covers it.
+- **String-length operands dropped**: runtime helpers whose C ABI takes
+  `(ptr, i64-length)` (`disp_str`, `fprintf_str`, `fprintf_f64*`, `input_num`)
+  or `(name_ptr, name_len)` (`obj_get_f64`, `obj_set_f64`) lose the length
+  operand at the call site. The Python runtime stubs make the length parameter
+  optional so hand-written callers still work.
 - **break / continue un-lowering**: the frontend's `did_break` / `did_continue`
   flag slots are re-lowered to native Python `break` / `continue`, with the
   guarding `& !did_break` conjunct stripped from the loop condition.
@@ -188,9 +206,43 @@ def fact(n):
         y = n * fact(n - 1.0)
     return y
 
-rt.disp_str("fact(1..6):")
+print("fact(1..6):")
 for i in range(1, 7):
     rt.disp_f64(fact(i))
+```
+
+A second example showing `elseif` chaining and `select(c, 1.0, 0.0)` folding,
+from `examples/traffic_action.m`:
+
+```python
+def traffic_action(color, is_emergency):
+    if is_emergency != 0.0:
+        a = 9.0
+    elif color < 1.0:
+        a = 0.0
+    elif color > 3.0:
+        a = 0.0
+    elif color == 1.0:
+        a = 1.0
+    elif color == 2.0:
+        a = 2.0
+    else:
+        a = 3.0 if color == 3.0 else 0.0
+    return a
+```
+
+And from `examples/bank_account.m`, showing pure-read inlining and the
+`select(c, 1.0, 0.0)` fold collapsing the body of `eq` to one line:
+
+```python
+def BankAccount__get_Overdrawn(obj):
+    return float(rt.obj_get_f64(obj, "Balance") < 0.0)
+
+def BankAccount__eq(a, b):
+    return float(rt.obj_get_f64(a, "Id") == rt.obj_get_f64(b, "Id"))
+
+def Savings__interest(obj):
+    return rt.obj_get_f64(obj, "Balance") * rt.obj_get_f64(obj, "Rate")
 ```
 
 ## Limitations
