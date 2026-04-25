@@ -101,7 +101,8 @@ bool runOnFunction(Region &Body) {
       // (matrix-literal buffers from LowerTensorOps) have semantic element
       // structure we don't want to alias-analyze.
       Type ET = A.getElemType();
-      if (!isa<Float64Type, Float32Type, IntegerType>(ET)) continue;
+      if (!isa<Float64Type, Float32Type, IntegerType,
+               LLVM::LLVMPointerType>(ET)) continue;
       Candidates.push_back(A);
     }
   }

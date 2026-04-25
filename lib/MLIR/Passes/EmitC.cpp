@@ -208,6 +208,12 @@ private:
   llvm::DenseMap<mlir::Value, std::string> Names;
   llvm::DenseMap<mlir::Operation *, std::string> GlobalStrs;  // global -> C name
   llvm::StringSet<> UsedNames;  // identifiers already claimed.
+  // Snapshot of UsedNames after the prolog has finished registering
+  // module-scope symbols (function names, runtime externs, globals).
+  // emitFuncFunc / emitLLVMFunc reset UsedNames to this snapshot so
+  // every function body starts with a clean local namespace; otherwise
+  // a parameter `x` claimed by `mySq` would force `myCube` to use `x_2`.
+  llvm::StringSet<> UsedNamesAfterProlog;
   // Per-function: SSA values whose producer is skipped; the cached
   // expression to substitute at use sites.
   llvm::DenseMap<mlir::Value, std::string> InlineExprs;
@@ -1595,6 +1601,10 @@ bool Emitter::tryEmitIOSubstitution(mlir::LLVM::CallOp Call, int Indent) {
 bool Emitter::run(mlir::ModuleOp M) {
   precomputeModuleProperties(M);
   emitProlog();
+  // Anything already in UsedNames after the prolog is module-scope
+  // (function names, runtime externs, globals); freeze that snapshot so
+  // each function body can start with a fresh local namespace.
+  UsedNamesAfterProlog = UsedNames;
 
   // -- Pre-emission checks: every defined function must have 0 or 1 results.
   // The printer has no story for multi-result returns (no pass emits them
@@ -1909,6 +1919,9 @@ void Emitter::emitFuncFunc(mlir::func::FuncOp F) {
   ContinueFlagSlots.clear();
   FlagIfKind.clear();
   InlinedIfs.clear();
+  // Restore the module-scope name set so locals from prior functions
+  // don't shadow names this function would prefer (e.g. parameter `x`).
+  UsedNames = UsedNamesAfterProlog;
   // A new function is its own blank-line frame: don't let the previous
   // function's final line number influence whether we emit a blank above
   // the signature (the `}\n\n` end-of-function separator already handles it).
@@ -1968,6 +1981,9 @@ void Emitter::emitLLVMFunc(mlir::LLVM::LLVMFuncOp F) {
   ContinueFlagSlots.clear();
   FlagIfKind.clear();
   InlinedIfs.clear();
+  // Restore the module-scope name set so locals from prior functions
+  // don't shadow names this function would prefer (e.g. parameter `x`).
+  UsedNames = UsedNamesAfterProlog;
   LastLineFile.clear();
   LastLineNum = -1;
   PendingTrailingLine = -1;
@@ -2090,13 +2106,27 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
   }
 
   // --- func.return / llvm.return --------------------------------------
+  // A bare `return;` (no operand) at the very end of a function body is
+  // C-redundant — control falls off naturally. Skip it for void
+  // returns; keep `return X;` everywhere.
+  auto isTrailingVoid = [](mlir::Operation *Op) {
+    if (Op->getNumOperands() != 0) return false;
+    if (Op != &Op->getBlock()->back()) return false;
+    mlir::Operation *Parent = Op->getParentOp();
+    if (!Parent) return false;
+    if (!mlir::isa<mlir::func::FuncOp, mlir::LLVM::LLVMFuncOp>(Parent))
+      return false;
+    return true;
+  };
   if (auto R = mlir::dyn_cast<mlir::func::ReturnOp>(Op)) {
+    if (isTrailingVoid(R.getOperation())) return;
     indent(Indent);
     if (R.getNumOperands() == 0) OS << "return;\n";
     else OS << "return " << this->stmtExpr(R.getOperand(0)) << ";\n";
     return;
   }
   if (auto R = mlir::dyn_cast<mlir::LLVM::ReturnOp>(Op)) {
+    if (isTrailingVoid(R.getOperation())) return;
     indent(Indent);
     if (R.getNumOperands() == 0) OS << "return;\n";
     else OS << "return " << this->stmtExpr(R.getOperand(0)) << ";\n";
@@ -2126,6 +2156,22 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
       OS << ");\n";
     } else {
       // Indirect call: first operand is the function pointer, rest are args.
+      // When the pointer is just an addressof of a known function symbol
+      // (the LowerAnonCalls shape — `llvm.mlir.addressof @__anon_N`), skip
+      // the function-pointer cast wrapping and emit a plain direct call:
+      // `__anon_0(5.0, 3.0)` reads exactly like a hand-written C call,
+      // unlike `((double(*)(double, double))(void*)__anon_0)(5.0, 3.0)`.
+      auto AddrOf =
+          Call.getOperand(0).getDefiningOp<mlir::LLVM::AddressOfOp>();
+      if (AddrOf) {
+        OS << AddrOf.getGlobalName().str() << "(";
+        for (unsigned i = 1; i < Call.getNumOperands(); ++i) {
+          if (i > 1) OS << ", ";
+          OS << this->stmtExpr(Call.getOperand(i));
+        }
+        OS << ");\n";
+        return;
+      }
       // Cast the pointer to the correct function type built from the call's
       // operand and result signatures.
       std::string RetTy = Call.getNumResults() == 1
@@ -2321,6 +2367,102 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
       auto AT = mlir::cast<mlir::LLVM::LLVMArrayType>(ET);
       std::string ElTy = cTypeOf(AT.getElementType());
       uint64_t N0 = AT.getNumElements();
+
+      // Matrix-literal init coming out of LowerTensorOps::materializeMat
+      // is a strict pattern: GEP[k] + store cover indices 0..N-1 in
+      // straight-line order, indexed by inlinable llvm.constant ops, and
+      // every stored value is a constant or otherwise stmtExpr-able.
+      // Squash the whole sequence into a single C99 initializer list.
+      auto getConstIdx = [](mlir::LLVM::GEPOp G,
+                             uint64_t &Out) -> bool {
+        auto Idxs = G.getIndices();
+        if (std::distance(Idxs.begin(), Idxs.end()) != 1) return false;
+        auto Raw = *Idxs.begin();
+        if (auto IA = mlir::dyn_cast<mlir::IntegerAttr>(Raw)) {
+          Out = IA.getValue().getZExtValue();
+          return true;
+        }
+        if (auto V = mlir::dyn_cast<mlir::Value>(Raw)) {
+          if (auto C = V.getDefiningOp<mlir::LLVM::ConstantOp>())
+            if (auto IA = mlir::dyn_cast<mlir::IntegerAttr>(C.getValue())) {
+              Out = IA.getValue().getZExtValue();
+              return true;
+            }
+          if (auto C = V.getDefiningOp<mlir::arith::ConstantOp>())
+            if (auto IA = mlir::dyn_cast<mlir::IntegerAttr>(C.getValue())) {
+              Out = IA.getValue().getZExtValue();
+              return true;
+            }
+        }
+        return false;
+      };
+      llvm::SmallVector<mlir::Value, 16> InitVals(N0);
+      llvm::SmallVector<mlir::Operation *, 32> AbsorbedOps;
+      bool InitOK = N0 > 0;
+      uint64_t Filled = 0;
+      // Walk the alloca's uses: every consumer must be a store TO the
+      // alloca (idx 0 with no GEP) OR a GEP-with-constant-index whose
+      // only user is a store. We tolerate any interleaved layout, since
+      // the materializeMat sequence gets reshuffled by canonicalization
+      // (idx 0 collapses to the bare alloca address).
+      for (mlir::OpOperand &Use : A->getUses()) {
+        if (!InitOK) break;
+        mlir::Operation *U = Use.getOwner();
+        if (auto St = mlir::dyn_cast<mlir::LLVM::StoreOp>(U)) {
+          if (St.getAddr() != A.getResult()) { InitOK = false; break; }
+          if (InitVals[0]) { InitOK = false; break; }  // duplicate idx 0
+          InitVals[0] = St.getValue();
+          AbsorbedOps.push_back(St.getOperation());
+          ++Filled;
+          continue;
+        }
+        if (auto Gep = mlir::dyn_cast<mlir::LLVM::GEPOp>(U)) {
+          if (Gep.getBase() != A.getResult()) { InitOK = false; break; }
+          uint64_t Idx;
+          if (!getConstIdx(Gep, Idx) || Idx >= N0 || InitVals[Idx]) {
+            InitOK = false; break;
+          }
+          // The GEP must have exactly one user, a store of a value into
+          // the GEPed pointer.
+          if (!Gep.getResult().hasOneUse()) { InitOK = false; break; }
+          auto St = mlir::dyn_cast<mlir::LLVM::StoreOp>(
+              *Gep.getResult().getUsers().begin());
+          if (!St || St.getAddr() != Gep.getResult()) {
+            InitOK = false; break;
+          }
+          InitVals[Idx] = St.getValue();
+          AbsorbedOps.push_back(Gep.getOperation());
+          AbsorbedOps.push_back(St.getOperation());
+          ++Filled;
+          continue;
+        }
+        // Anything other than store / GEP — e.g. the matlab_mat_from_buf
+        // call consuming the buffer pointer — is the legitimate post-init
+        // user, not part of the init sequence.
+        if (mlir::isa<mlir::LLVM::CallOp>(U)) continue;
+        InitOK = false;
+        break;
+      }
+      if (InitOK && Filled == N0)
+        for (auto V : InitVals) if (!V) { InitOK = false; break; }
+      if (InitOK && Filled == N0) {
+        indent(Indent);
+        OS << ElTy << " " << SlotName << "[" << N0 << "] = {";
+        for (uint64_t i = 0; i < N0; ++i) {
+          if (i) OS << ", ";
+          OS << this->stmtExpr(InitVals[i]);
+        }
+        OS << "};\n";
+        // Skip the `void* slot_p = (void*)slot;` trampoline — bind the
+        // alloca's SSA value to the inline cast so consumers read
+        // `matlab_mat_from_buf((void*)slot, 3.0, 3.0)` directly.
+        InlineExprs[A.getResult()] = "(void*)" + SlotName;
+        for (auto *Op2 : AbsorbedOps) SuppressedOps.insert(Op2);
+        return;
+      }
+
+      // Fallback: zero-init buffer + a separate trampoline pointer when
+      // the init pattern doesn't match (e.g. a non-constant element).
       N = uniqueName(SlotName + "_p");
       Names[A.getResult()] = N;
       indent(Indent);
@@ -2471,30 +2613,132 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
       indent(Indent);
       OS << cTypeOfValue(If.getResult(i)) << " " << N << " = 0;\n";
     }
-    indent(Indent);
-    OS << "if (" << this->stmtExpr(If.getCondition()) << ") {\n";
-    emitRegion(If.getThenRegion(), Indent + 1);
-    // Skip an empty-or-trivial else branch when the if carries no result
-    // locals (`if cond; ...; end` from MATLAB always materialises an else
-    // block containing only an scf.yield — printing `} else { }` is noise).
-    bool ElseIsTrivial = true;
-    if (!If.getElseRegion().empty()) {
-      for (auto &Blk : If.getElseRegion().getBlocks()) {
+    // Constant-folded condition: when the if-cond reduces to a literal
+    // true or false (the typical `if nargin >= 2` shape after type
+    // refinement leaves `if (2.0 == 2.0)` for a 2-arg function), drop
+    // the if and emit only the live branch's body. Catches both the
+    // arith and llvm constant op shapes.
+    auto isConstBool = [&](mlir::Value V, bool &Out) -> bool {
+      if (auto C = V.getDefiningOp<mlir::arith::ConstantOp>()) {
+        if (auto IA = mlir::dyn_cast<mlir::IntegerAttr>(C.getValue())) {
+          Out = IA.getValue().getZExtValue() != 0;
+          return true;
+        }
+      }
+      if (auto C = V.getDefiningOp<mlir::LLVM::ConstantOp>()) {
+        if (auto IA = mlir::dyn_cast<mlir::IntegerAttr>(C.getValue())) {
+          Out = IA.getValue().getZExtValue() != 0;
+          return true;
+        }
+      }
+      // arith.cmpf with two literal float operands of the same value
+      // also folds (LowerNarginNargout leaves `cmpf eq, 2.0, 2.0`).
+      if (auto Cmp = V.getDefiningOp<mlir::arith::CmpFOp>()) {
+        auto getLit = [](mlir::Value W, double &Dst) {
+          auto C = W.getDefiningOp<mlir::arith::ConstantOp>();
+          if (!C) return false;
+          auto FA = mlir::dyn_cast<mlir::FloatAttr>(C.getValue());
+          if (!FA) return false;
+          Dst = FA.getValueAsDouble();
+          return true;
+        };
+        double L, R;
+        if (!getLit(Cmp.getLhs(), L) || !getLit(Cmp.getRhs(), R))
+          return false;
+        switch (Cmp.getPredicate()) {
+          case mlir::arith::CmpFPredicate::OEQ:
+          case mlir::arith::CmpFPredicate::UEQ: Out = (L == R); break;
+          case mlir::arith::CmpFPredicate::ONE:
+          case mlir::arith::CmpFPredicate::UNE: Out = (L != R); break;
+          case mlir::arith::CmpFPredicate::OLT:
+          case mlir::arith::CmpFPredicate::ULT: Out = (L <  R); break;
+          case mlir::arith::CmpFPredicate::OLE:
+          case mlir::arith::CmpFPredicate::ULE: Out = (L <= R); break;
+          case mlir::arith::CmpFPredicate::OGT:
+          case mlir::arith::CmpFPredicate::UGT: Out = (L >  R); break;
+          case mlir::arith::CmpFPredicate::OGE:
+          case mlir::arith::CmpFPredicate::UGE: Out = (L >= R); break;
+          default: return false;
+        }
+        return true;
+      }
+      return false;
+    };
+    bool CB;
+    if (If.getNumResults() == 0 && isConstBool(If.getCondition(), CB)) {
+      mlir::Region &Live = CB ? If.getThenRegion() : If.getElseRegion();
+      if (!Live.empty()) emitRegion(Live, Indent);
+      return;
+    }
+
+    // The `if cond { ... } else if cond { ... } ...` chain MATLAB
+    // generates from `elseif` / `switch` lowers to a tower of nested
+    // scf.if ops where each else region holds exactly one inner scf.if
+    // and no other real ops. Detect that shape and unwrap into a flat
+    // C `} else if (...) { ... }` cascade so the output reads as the
+    // MATLAB programmer wrote it instead of the right-leaning lowering.
+    auto isElseIfChain = [&](mlir::scf::IfOp Outer,
+                             mlir::scf::IfOp &Inner) -> bool {
+      if (Outer.getNumResults() != 0) return false;
+      if (Outer.getElseRegion().empty()) return false;
+      mlir::scf::IfOp Found;
+      for (auto &Blk : Outer.getElseRegion().getBlocks()) {
+        for (auto &Inner2 : Blk.getOperations()) {
+          if (mlir::isa<mlir::scf::YieldOp>(Inner2)) continue;
+          if (InlinedOps.count(&Inner2)) continue;
+          if (SuppressedOps.count(&Inner2)) continue;
+          if (auto N = mlir::dyn_cast<mlir::scf::IfOp>(Inner2)) {
+            if (Found) return false;  // more than one real op
+            Found = N;
+            continue;
+          }
+          return false;
+        }
+      }
+      if (!Found) return false;
+      Inner = Found;
+      return true;
+    };
+
+    auto thenIsTrivial = [&](mlir::scf::IfOp X) {
+      // Then-region only used by emitOp's normal path; for the else-if
+      // chain we don't need this. Kept here for symmetry / readability.
+      (void)X;
+      return false;
+    };
+    (void)thenIsTrivial;
+
+    auto elseIsTrivial = [&](mlir::scf::IfOp X) {
+      if (X.getElseRegion().empty()) return true;
+      for (auto &Blk : X.getElseRegion().getBlocks()) {
         for (auto &Inner : Blk.getOperations()) {
           if (mlir::isa<mlir::scf::YieldOp>(Inner)) continue;
           if (InlinedOps.count(&Inner)) continue;
           if (SuppressedOps.count(&Inner)) continue;
-          ElseIsTrivial = false;
-          break;
+          return false;
         }
-        if (!ElseIsTrivial) break;
       }
+      return true;
+    };
+
+    indent(Indent);
+    OS << "if (" << this->stmtExpr(If.getCondition()) << ") {\n";
+    emitRegion(If.getThenRegion(), Indent + 1);
+
+    mlir::scf::IfOp Cur = If;
+    mlir::scf::IfOp Inner;
+    while (isElseIfChain(Cur, Inner)) {
+      indent(Indent);
+      OS << "} else if (" << this->stmtExpr(Inner.getCondition()) << ") {\n";
+      emitRegion(Inner.getThenRegion(), Indent + 1);
+      Cur = Inner;
     }
-    bool HasResults = If.getNumResults() > 0;
-    if (!If.getElseRegion().empty() && (HasResults || !ElseIsTrivial)) {
+
+    if (!Cur.getElseRegion().empty() &&
+        (Cur.getNumResults() > 0 || !elseIsTrivial(Cur))) {
       indent(Indent);
       OS << "} else {\n";
-      emitRegion(If.getElseRegion(), Indent + 1);
+      emitRegion(Cur.getElseRegion(), Indent + 1);
     }
     indent(Indent);
     OS << "}\n";
