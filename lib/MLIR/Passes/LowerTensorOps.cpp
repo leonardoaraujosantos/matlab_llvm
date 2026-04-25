@@ -385,6 +385,14 @@ bool TensorLowering::rewriteLiterals() {
     if (!gatherLiteralElements(Op, Rows, Cols, Elts)) continue;
     B.setInsertionPoint(Op);
     Value M = materializeMat(Op->getLoc(), Rows, Cols, Elts);
+    // Carry forward the user-source variable name (set by SlotPromotion
+    // when the literal was assigned into a named slot) onto the new
+    // mat_from_buf call so the Python emitter can render
+    // `A = np.array(...).reshape(...)` instead of an anonymous v0.
+    if (auto NA = Op->getAttrOfType<StringAttr>("matlab.name"))
+      if (Operation *Def = M.getDefiningOp())
+        if (!Def->hasAttr("matlab.name"))
+          Def->setAttr("matlab.name", NA);
     Op->getResult(0).replaceAllUsesWith(M);
     Op->erase();
     Changed = true;

@@ -171,6 +171,12 @@ Emitter behavior worth knowing:
 - **Per-function name scope**: each `def` gets a fresh identifier table so
   parameters keep their natural names (`x`, `i`) instead of accumulating
   `_2`, `_3` suffixes from earlier functions.
+- **User-source variable names**: `SlotPromotion` propagates an alloc's
+  `name` attribute onto the defining op of the value being stored, and
+  `LowerTensorOps` carries it from `concat_col` onto the resulting
+  `mat_from_buf` call. The Python emitter then prefers the propagated
+  name over a fresh `vN` id, so a MATLAB `A = [1 2; 3 4]` emits as
+  `A = np.array(...).reshape(2, 2)` rather than `v0 = ...`.
 - **Top-level script body** is hoisted to module scope (mirrors the
   `LowerIO` rename of `@script` to `@main`).
 - **Comments and blank lines** from the MATLAB source propagate to the

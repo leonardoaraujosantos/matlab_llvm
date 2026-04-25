@@ -264,6 +264,18 @@ std::string Emitter::uniqueName(llvm::StringRef Hint) {
 std::string Emitter::name(mlir::Value V) {
   auto It = Names.find(V);
   if (It != Names.end()) return It->second;
+  // Prefer the user-source variable name carried through SlotPromotion +
+  // LowerTensorOps (and any other pass that sets `matlab.name` on a
+  // value's defining op). Falling back to a fresh `vN` only when no
+  // hint is available keeps generated source readable for matrix
+  // literals: `A = np.array(...)` instead of `v0 = np.array(...)`.
+  if (auto *D = V.getDefiningOp()) {
+    if (auto NA = D->getAttrOfType<mlir::StringAttr>("matlab.name")) {
+      std::string N = uniqueName(NA.getValue());
+      Names[V] = N;
+      return N;
+    }
+  }
   std::string N = freshName();
   Names[V] = N;
   return N;

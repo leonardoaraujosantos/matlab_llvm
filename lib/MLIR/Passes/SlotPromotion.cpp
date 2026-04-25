@@ -127,11 +127,26 @@ void promoteBlock(mlir::Block &BB, bool &Changed) {
 
   // Erase replaced loads (their results have no users after RAUW).
   for (mlir::Operation *Op : LoadsToErase) Op->erase();
-  // For slots that stayed promotable, erase staged stores and the alloc.
+  // For slots that stayed promotable, propagate the alloc's user-source
+  // `name` attribute onto the defining op of the first stored value, so
+  // downstream emitters can surface readable variable names instead of
+  // fresh `v0` / `v1` ids. Then erase the staged stores and the alloc.
   for (mlir::Operation *Alloc : Promotable) {
     auto It = StoresPerSlot.find(Alloc);
-    if (It != StoresPerSlot.end())
+    if (It != StoresPerSlot.end()) {
+      if (auto NameAttr =
+              Alloc->getAttrOfType<mlir::StringAttr>("name")) {
+        for (mlir::Operation *S : It->second) {
+          mlir::Value Stored = S->getOperand(0);
+          if (mlir::Operation *Def = Stored.getDefiningOp()) {
+            // Don't clobber a name a previous promotion already set.
+            if (!Def->hasAttr("matlab.name"))
+              Def->setAttr("matlab.name", NameAttr);
+          }
+        }
+      }
       for (mlir::Operation *S : It->second) S->erase();
+    }
     if (Alloc->getResult(0).use_empty()) {
       Alloc->erase();
       Changed = true;
