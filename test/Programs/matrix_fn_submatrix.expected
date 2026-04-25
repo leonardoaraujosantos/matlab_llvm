@@ -12,8 +12,8 @@ module {
     %0 = "matlab.concat_row"(%cst_5, %cst_6, %cst_7) : (f64, f64, f64) -> none
     %1 = "matlab.concat_row"(%cst_4, %cst_3, %cst_2) : (f64, f64, f64) -> none
     %2 = "matlab.concat_row"(%cst_1, %cst_0, %cst) : (f64, f64, f64) -> none
-    %3 = "matlab.concat_col"(%0, %1, %2) : (none, none, none) -> tensor<3x3xf64>
-    %4 = "matlab.call"(%3) {callee = "upper_left_2x2"} : (tensor<3x3xf64>) -> none
+    %3 = "matlab.concat_col"(%0, %1, %2) {matlab.name = "M"} : (none, none, none) -> tensor<3x3xf64>
+    %4 = "matlab.call"(%3) {callee = "upper_left_2x2", matlab.name = "R"} : (tensor<3x3xf64>) -> none
     return
   }
   func.func @upper_left_2x2(%arg0: none {matlab.name = "A"}) -> none {

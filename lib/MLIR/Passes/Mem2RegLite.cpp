@@ -82,6 +82,19 @@ bool tryPromote(LLVM::AllocaOp Alloca) {
     // Type check: load result must match the stored value's type.
     if (L.getResult().getType() != StoredVal.getType()) return false;
   }
+  // Carry the alloca's user-source variable name forward onto the
+  // defining op of the stored value, so downstream emitters can
+  // surface readable names instead of falling back to a fresh `vN` id.
+  // Mirrors what SlotPromotion does at the MATLAB-dialect level for
+  // type-matched promotions; here we cover the LLVM-dialect case where
+  // the slot survived earlier passes due to a `none`-typed alloc and
+  // got Mem2Reg'd later. Don't clobber a name a previous pass set.
+  if (auto NA =
+          Alloca->getAttrOfType<StringAttr>("matlab.name")) {
+    if (Operation *Def = StoredVal.getDefiningOp())
+      if (!Def->hasAttr("matlab.name"))
+        Def->setAttr("matlab.name", NA);
+  }
   for (LLVM::LoadOp L : Loads) {
     L.getResult().replaceAllUsesWith(StoredVal);
     L.erase();

@@ -3,12 +3,12 @@ module {
     %cst = arith.constant 2.000000e+00 : f64
     %cst_0 = arith.constant 3.000000e+00 : f64
     %cst_1 = arith.constant 4.000000e+00 : f64
-    %0 = "matlab.call"(%cst, %cst_0, %cst_1) {callee = "addmul"} : (f64, f64, f64) -> none
+    %0 = "matlab.call"(%cst, %cst_0, %cst_1) {callee = "addmul", matlab.name = "r"} : (f64, f64, f64) -> none
     return
   }
   func.func @addmul(%arg0: none {matlab.name = "a"}, %arg1: none {matlab.name = "b"}, %arg2: none {matlab.name = "c"}) -> none {
-    %0 = "matlab.add"(%arg0, %arg1) : (none, none) -> none
-    %1 = "matlab.matmul"(%0, %arg2) : (none, none) -> none
+    %0 = "matlab.add"(%arg0, %arg1) {matlab.name = "t"} : (none, none) -> none
+    %1 = "matlab.matmul"(%0, %arg2) {matlab.name = "z"} : (none, none) -> none
     return %1 : none
   }
 }

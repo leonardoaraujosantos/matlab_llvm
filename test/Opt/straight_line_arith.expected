@@ -1,7 +1,7 @@
 module {
   func.func @demo(%arg0: none {matlab.name = "x"}) -> none {
     %cst = arith.constant 3.000000e+00 : f64
-    %0 = "matlab.matmul"(%cst, %arg0) : (f64, none) -> none
+    %0 = "matlab.matmul"(%cst, %arg0) {matlab.name = "y"} : (f64, none) -> none
     return %0 : none
   }
 }

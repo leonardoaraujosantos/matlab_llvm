@@ -3,8 +3,8 @@ module {
     %cst = arith.constant 4.000000e+00 : f64
     %cst_0 = arith.constant 2.000000e+00 : f64
     %cst_1 = arith.constant 3.000000e+00 : f64
-    %0 = "matlab.call_builtin"(%cst_0, %cst_1) {callee = "zeros"} : (f64, f64) -> tensor<2x3xf64>
-    %1 = "matlab.emul"(%0, %cst) : (tensor<2x3xf64>, f64) -> tensor<2x3xf64>
+    %0 = "matlab.call_builtin"(%cst_0, %cst_1) {callee = "zeros", matlab.name = "A"} : (f64, f64) -> tensor<2x3xf64>
+    %1 = "matlab.emul"(%0, %cst) {matlab.name = "B"} : (tensor<2x3xf64>, f64) -> tensor<2x3xf64>
     return
   }
 }

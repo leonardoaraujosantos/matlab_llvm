@@ -14,12 +14,12 @@ module {
     %cst_10 = arith.constant 3.000000e+00 : f64
     %0 = "matlab.concat_row"(%cst_8, %cst_9, %cst_10) : (f64, f64, f64) -> none
     %1 = "matlab.concat_row"(%cst_7, %cst_6, %cst_5) : (f64, f64, f64) -> none
-    %2 = "matlab.concat_col"(%0, %1) : (none, none) -> tensor<2x3xf64>
+    %2 = "matlab.concat_col"(%0, %1) {matlab.name = "A"} : (none, none) -> tensor<2x3xf64>
     %3 = "matlab.concat_row"(%cst_4, %cst_3) : (f64, f64) -> none
     %4 = "matlab.concat_row"(%cst_2, %cst_1) : (f64, f64) -> none
     %5 = "matlab.concat_row"(%cst_0, %cst) : (f64, f64) -> none
-    %6 = "matlab.concat_col"(%3, %4, %5) : (none, none, none) -> tensor<3x2xf64>
-    %7 = "matlab.matmul"(%2, %6) : (tensor<2x3xf64>, tensor<3x2xf64>) -> tensor<2x2xf64>
+    %6 = "matlab.concat_col"(%3, %4, %5) {matlab.name = "B"} : (none, none, none) -> tensor<3x2xf64>
+    %7 = "matlab.matmul"(%2, %6) {matlab.name = "C"} : (tensor<2x3xf64>, tensor<3x2xf64>) -> tensor<2x2xf64>
     return
   }
 }

@@ -11,8 +11,8 @@ module {
       %5 = arith.mulf %3, %4 : f64
       %6 = arith.addf %5, %cst_0 : f64
       "matlab.yield"(%6) : (f64) -> ()
-    }) {params = "x"} : () -> none
-    %1 = "matlab.call_indirect"(%0, %cst) : (none, f64) -> none
+    }) {matlab.name = "f", params = "x"} : () -> none
+    %1 = "matlab.call_indirect"(%0, %cst) {matlab.name = "y"} : (none, f64) -> none
     return
   }
 }

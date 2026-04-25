@@ -11,9 +11,9 @@ module {
     %cst_7 = arith.constant 3.000000e+01 : f64
     %0 = "matlab.concat_row"(%cst_5, %cst_6, %cst_7) : (f64, f64, f64) -> none
     %1 = "matlab.concat_row"(%cst_4, %cst_3, %cst_2) : (f64, f64, f64) -> none
-    %2 = "matlab.concat_col"(%0, %1) : (none, none) -> tensor<2x3xf64>
-    %3 = "matlab.subscript"(%2, %cst_1, %cst_0) {nindices = 2 : i64} : (tensor<2x3xf64>, f64, f64) -> f64
-    %4 = "matlab.subscript"(%2, %cst_0, %cst) {nindices = 2 : i64} : (tensor<2x3xf64>, f64, f64) -> f64
+    %2 = "matlab.concat_col"(%0, %1) {matlab.name = "A"} : (none, none) -> tensor<2x3xf64>
+    %3 = "matlab.subscript"(%2, %cst_1, %cst_0) {matlab.name = "x", nindices = 2 : i64} : (tensor<2x3xf64>, f64, f64) -> f64
+    %4 = "matlab.subscript"(%2, %cst_0, %cst) {matlab.name = "y", nindices = 2 : i64} : (tensor<2x3xf64>, f64, f64) -> f64
     return
   }
 }

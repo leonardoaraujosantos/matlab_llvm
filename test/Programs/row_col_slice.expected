@@ -12,15 +12,15 @@ module {
     %0 = "matlab.concat_row"(%cst_5, %cst_6, %cst_7) : (f64, f64, f64) -> none
     %1 = "matlab.concat_row"(%cst_4, %cst_3, %cst_2) : (f64, f64, f64) -> none
     %2 = "matlab.concat_row"(%cst_1, %cst_0, %cst) : (f64, f64, f64) -> none
-    %3 = "matlab.concat_col"(%0, %1, %2) : (none, none, none) -> tensor<3x3xf64>
+    %3 = "matlab.concat_col"(%0, %1, %2) {matlab.name = "A"} : (none, none, none) -> tensor<3x3xf64>
     %4 = "matlab.colon"() : () -> none
-    %5 = "matlab.subscript"(%3, %cst_5, %4) {nindices = 2 : i64} : (tensor<3x3xf64>, f64, none) -> tensor<3xf64>
+    %5 = "matlab.subscript"(%3, %cst_5, %4) {matlab.name = "r1", nindices = 2 : i64} : (tensor<3x3xf64>, f64, none) -> tensor<3xf64>
     %6 = "matlab.colon"() : () -> none
-    %7 = "matlab.subscript"(%3, %cst_7, %6) {nindices = 2 : i64} : (tensor<3x3xf64>, f64, none) -> tensor<3xf64>
+    %7 = "matlab.subscript"(%3, %cst_7, %6) {matlab.name = "r3", nindices = 2 : i64} : (tensor<3x3xf64>, f64, none) -> tensor<3xf64>
     %8 = "matlab.colon"() : () -> none
-    %9 = "matlab.subscript"(%3, %8, %cst_5) {nindices = 2 : i64} : (tensor<3x3xf64>, none, f64) -> tensor<3x1xf64>
+    %9 = "matlab.subscript"(%3, %8, %cst_5) {matlab.name = "c1", nindices = 2 : i64} : (tensor<3x3xf64>, none, f64) -> tensor<3x1xf64>
     %10 = "matlab.colon"() : () -> none
-    %11 = "matlab.subscript"(%3, %10, %cst_6) {nindices = 2 : i64} : (tensor<3x3xf64>, none, f64) -> tensor<3x1xf64>
+    %11 = "matlab.subscript"(%3, %10, %cst_6) {matlab.name = "c2", nindices = 2 : i64} : (tensor<3x3xf64>, none, f64) -> tensor<3x1xf64>
     return
   }
 }

@@ -10,12 +10,12 @@ module {
     %cst_6 = arith.constant 2.000000e+00 : f64
     %0 = "matlab.concat_row"(%cst_5, %cst_6) : (f64, f64) -> none
     %1 = "matlab.concat_row"(%cst_4, %cst_3) : (f64, f64) -> none
-    %2 = "matlab.concat_col"(%0, %1) : (none, none) -> tensor<2x2xf64>
+    %2 = "matlab.concat_col"(%0, %1) {matlab.name = "A"} : (none, none) -> tensor<2x2xf64>
     %3 = "matlab.concat_row"(%cst_2, %cst_1) : (f64, f64) -> none
     %4 = "matlab.concat_row"(%cst_0, %cst) : (f64, f64) -> none
-    %5 = "matlab.concat_col"(%3, %4) : (none, none) -> tensor<2x2xf64>
-    %6 = "matlab.add"(%2, %5) : (tensor<2x2xf64>, tensor<2x2xf64>) -> tensor<2x2xf64>
-    %7 = "matlab.sub"(%5, %2) : (tensor<2x2xf64>, tensor<2x2xf64>) -> tensor<2x2xf64>
+    %5 = "matlab.concat_col"(%3, %4) {matlab.name = "B"} : (none, none) -> tensor<2x2xf64>
+    %6 = "matlab.add"(%2, %5) {matlab.name = "C"} : (tensor<2x2xf64>, tensor<2x2xf64>) -> tensor<2x2xf64>
+    %7 = "matlab.sub"(%5, %2) {matlab.name = "D"} : (tensor<2x2xf64>, tensor<2x2xf64>) -> tensor<2x2xf64>
     return
   }
 }
