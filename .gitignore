@@ -6,5 +6,12 @@ compile_commands.json
 .DS_Store
 Testing/
 
+# Native binaries built from examples/*.m by the helper scripts.
+# Keep the .m sources and any markdown; drop the compiled artifacts.
+examples/*
+!examples/*.m
+!examples/*.md
+!examples/.gitignore
+
 # Local Claude Code state (worktrees, transcripts, agent scratch)
 .claude/
