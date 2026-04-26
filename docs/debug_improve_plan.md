@@ -224,16 +224,62 @@ verifies:
 
 ---
 
+## (7) DWARF in `-emit-llvm` — **shipped**
+
+`matlabc -emit-llvm -g` now attaches a DWARF line-table graph to the
+emitted LLVM IR so users compiling `.m → LLVM IR → native` via clang
+get source-level stepping in lldb / gdb. Implementation in
+`lib/MLIR/Passes/LowerToLLVMIR.cpp::attachDebugInfo`:
+
+- After the conversion-to-LLVM-dialect pipeline (so we're operating
+  on `llvm.func` ops, not the original `func.func`), walk every
+  function and stamp it with a `LLVM::DISubprogramAttr` attached via
+  `mlir::FusedLoc`. The MLIR-to-LLVM-IR translator
+  (`mlir::translateModuleToLLVMIR`) reads that fused location and
+  emits `!DISubprogram` metadata in the resulting IR, then threads
+  `!DILocation` through every instruction whose location is a
+  `FileLineColLoc` parented by that fused scope.
+- One `LLVM::DICompileUnitAttr` per source file (with
+  `LineTablesOnly` emission kind so we skip the heavier full DWARF
+  type-graph emission), one `LLVM::DIFileAttr` per file path.
+- The CU map is shared, so multi-file emit (item 2's sibling pre-load)
+  produces one CU per source file.
+- Emission is strictly opt-in: without `-g`, the output IR has no
+  DWARF metadata at all (verified by the new `debug-dwarf-tests`
+  ctest).
+
+End-to-end smoke validation:
+
+```bash
+matlabc -emit-llvm -g foo.m > foo.ll
+clang -g -c -x ir foo.ll -o foo.o
+clang -g foo.o runtime/matlab_runtime.c -o foo
+lldb foo
+(lldb) breakpoint set --file foo.m --line 7
+Breakpoint 1: where = foo`main + 88 at foo.m:7:1, address = 0x...
+```
+
+Validated by `debug-dwarf-tests` (asserts metadata presence with
+`-g` and absence without it). The lldb-attach step itself isn't a
+CTest — runtime-attach permissions vary by host (macOS in particular
+needs codesign entitlements for non-self attach).
+
+What's NOT in the DWARF graph: variable inspection
+(`DW_TAG_variable`), full type info, inlined-function info. Variable
+inspection is better served by `-dap`'s per-frame Locals; types and
+inlining haven't been pursued because line-tables-only is what
+enables source-level stepping for the typical user. Both are
+extensible from here without re-architecting.
+
+---
+
 ## Out of scope (separately tracked, not on the roadmap)
 
-- **`keyboard` as a nested REPL.** Needs the scoped-eval path from
-  item (5) plus a bidirectional REPL pump from the paused worker.
-  No design started.
-- **DWARF line tables in `-emit-llvm`.** Useful when piping
-  `.m → LLVM IR → native` via clang and stepping in lldb. We emit
-  `FileLineColLoc` on every op but the `-emit-llvm` text output
-  doesn't carry a `!DISubprogram` / `!DILocation` graph.
-  Orthogonal to DAP.
+- **`keyboard` as a nested REPL.** The scoped-eval bridge from
+  item (6) is now in place; the remaining piece is a bidirectional
+  REPL pump driven from the paused worker (read user input, route
+  through the bridge, print, loop until `dbcont`) plus a one-line
+  lowering recogniser for the `keyboard` builtin. Not started.
 - **Function breakpoints** (`setFunctionBreakpoints`). Capability
   advertised as `false`. No design.
 - **Hit-count breakpoints / data breakpoints / instruction
@@ -256,9 +302,10 @@ verifies:
 | 4 | shipped | — |
 | 5 | shipped | — |
 | 6 | shipped | — |
+| 7 | shipped | — |
 
-All originally-tracked items have landed. The remaining DAP-side
-follow-ups are smaller polish:
+All originally-tracked items plus DWARF-in-`-emit-llvm` have landed.
+The remaining DAP / native-debug follow-ups are smaller polish:
 
 - **Resolver-prefers-ws-over-builtin** (gated by item 6's shadowing
   limitation): teach the resolver under ReplMode to look up
@@ -270,6 +317,11 @@ follow-ups are smaller polish:
 - **Script-bodied helpers**: real MATLAB resolves local helper
   functions inside script files when set as the entry point. Not
   pursued today.
+- **DWARF variables / type info** (item 7 extension): line tables
+  cover stepping; adding `DW_TAG_variable` + a partial type graph
+  would let lldb's `frame variable` show locals on the native side.
+  Lower priority since `-dap` already covers variable inspection
+  thoroughly.
 
 These three would close the remaining DAP-relevant gaps; nothing on
 the original plan is still open.

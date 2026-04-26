@@ -1,5 +1,9 @@
 // Runs the standard MLIR conversion pipeline to produce a module in the LLVM
-// dialect, then translates it into LLVM IR textual form.
+// dialect, then translates it into LLVM IR textual form. Optionally attaches
+// LLVM-dialect debug-info attributes (DICompileUnit / DIFile / DISubprogram)
+// before translation so the resulting LLVM IR carries `!dbg` metadata that
+// clang's downstream codegen turns into DWARF — making lldb / gdb able to
+// step from the compiled binary back into the original `.m` source.
 
 #include "matlab/MLIR/Passes/Passes.h"
 
@@ -8,25 +12,135 @@
 #include "mlir/Conversion/FuncToLLVM/ConvertFuncToLLVMPass.h"
 #include "mlir/Conversion/ReconcileUnrealizedCasts/ReconcileUnrealizedCasts.h"
 #include "mlir/Conversion/SCFToControlFlow/SCFToControlFlow.h"
+#include "mlir/Dialect/LLVMIR/LLVMAttrs.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+#include "mlir/IR/Attributes.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/Location.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Target/LLVMIR/Dialect/Builtin/BuiltinToLLVMIRTranslation.h"
 #include "mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h"
 #include "mlir/Target/LLVMIR/Export.h"
 #include "mlir/Transforms/Passes.h"
+#include "llvm/BinaryFormat/Dwarf.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
+#include "llvm/Support/Path.h"
 #include "llvm/Support/raw_ostream.h"
 
 #include <iostream>
 #include <string>
+#include <unordered_map>
 
 namespace matlab {
 namespace mlirgen {
 
-std::string lowerToLLVMIR(mlir::ModuleOp M) {
+namespace {
+
+/* Walk every llvm.func in the module and stamp it with a
+ * DISubprogram (and its enclosing DICompileUnit / DIFile). The
+ * subprogram is attached as a fused location on the func op; the
+ * MLIR-to-LLVM-IR translator (mlir::translateModuleToLLVMIR) reads
+ * that attachment and emits real `!DISubprogram` metadata, then
+ * threads `!DILocation` through every instruction whose location is
+ * a `FileLineColLoc` parented by that fused scope.
+ *
+ * We pull the source file / line for each function from the first
+ * `FileLineColLoc` we find on the function or anywhere inside its
+ * body. Functions whose ops have no FileLineColLoc (purely-synthetic
+ * helpers) get skipped — debug info is best-effort, the produced IR
+ * still verifies and runs.
+ *
+ * Emission kind is LineTablesOnly: enough for source-level stepping
+ * and per-line breakpoints, but skips the (much heavier) full DWARF
+ * type-graph emission. Variable inspection (DW_TAG_variable etc.) is
+ * orthogonal and not pursued today — DAP is the right surface for
+ * MATLAB locals; lldb / gdb users get line tables.
+ */
+void attachDebugInfo(mlir::ModuleOp M) {
+  mlir::MLIRContext *Ctx = M.getContext();
+
+  /* Cache per-source-path so multi-file emit (when Sema starts
+   * pulling in siblings) shares a single CU per file. */
+  std::unordered_map<std::string, mlir::LLVM::DICompileUnitAttr> CUByFile;
+
+  auto getCUForFile = [&](mlir::StringAttr filename) {
+    auto It = CUByFile.find(filename.str());
+    if (It != CUByFile.end()) return It->second;
+
+    /* DIFileAttr wants the basename and the directory separately —
+     * llvm::sys::path::filename / parent_path do the split portably. */
+    llvm::StringRef Full = filename.getValue();
+    llvm::StringRef BaseName = llvm::sys::path::filename(Full);
+    llvm::StringRef Dir = llvm::sys::path::parent_path(Full);
+    if (Dir.empty()) Dir = ".";
+    auto File = mlir::LLVM::DIFileAttr::get(Ctx, BaseName, Dir);
+
+    /* DistinctAttr is what makes the CU node distinct in the LLVM
+     * `!metadata` graph; without it two CUs for the same file would
+     * collapse and confuse the linker. */
+    auto Id = mlir::DistinctAttr::create(mlir::UnitAttr::get(Ctx));
+
+    /* No DWARF language code for MATLAB. DW_LANG_C is the closest
+     * reasonable choice; lldb / gdb just need a recognisable language
+     * to enable line stepping. */
+    auto CU = mlir::LLVM::DICompileUnitAttr::get(
+        Ctx, Id, llvm::dwarf::DW_LANG_C, File,
+        mlir::StringAttr::get(Ctx, "matlabc"),
+        /*isOptimized=*/false,
+        mlir::LLVM::DIEmissionKind::LineTablesOnly,
+        mlir::LLVM::DINameTableKind::Default,
+        /*splitDebugFilename=*/mlir::StringAttr{});
+    CUByFile[filename.str()] = CU;
+    return CU;
+  };
+
+  /* Empty subroutine type — line-tables-only DWARF doesn't need the
+   * type signature elaborated, and producing one for MATLAB's
+   * dynamic-typed function shapes would be its own project. */
+  auto EmptySubT = mlir::LLVM::DISubroutineTypeAttr::get(
+      Ctx, llvm::dwarf::DW_CC_normal, /*types=*/{});
+
+  M.walk([&](mlir::LLVM::LLVMFuncOp Fn) {
+    /* Find a representative file/line for this function. Try the func
+     * op's own location first; otherwise the first FileLineColLoc in
+     * its body. */
+    mlir::FileLineColLoc FLC =
+        mlir::dyn_cast<mlir::FileLineColLoc>(Fn.getLoc());
+    if (!FLC) {
+      Fn.walk([&](mlir::Operation *Op) {
+        if (auto L = mlir::dyn_cast<mlir::FileLineColLoc>(Op->getLoc())) {
+          FLC = L;
+          return mlir::WalkResult::interrupt();
+        }
+        return mlir::WalkResult::advance();
+      });
+    }
+    if (!FLC) return;
+
+    auto CU = getCUForFile(FLC.getFilename());
+    auto File = CU.getFile();
+
+    auto NameAttr = Fn.getNameAttr();
+    auto SpId = mlir::DistinctAttr::create(mlir::UnitAttr::get(Ctx));
+    auto SP = mlir::LLVM::DISubprogramAttr::get(
+        Ctx, SpId, CU, /*scope=*/CU, NameAttr, /*linkageName=*/NameAttr,
+        File, /*line=*/FLC.getLine(), /*scopeLine=*/FLC.getLine(),
+        mlir::LLVM::DISubprogramFlags::Definition,
+        EmptySubT, /*retainedNodes=*/{}, /*annotations=*/{});
+
+    /* Attach via a FusedLoc carrying the subprogram as metadata. The
+     * translator looks for exactly this shape and uses it to root all
+     * inner DILocations. */
+    auto Fused = mlir::FusedLoc::get(Ctx, {Fn.getLoc()}, SP);
+    Fn->setLoc(Fused);
+  });
+}
+
+} // namespace
+
+std::string lowerToLLVMIR(mlir::ModuleOp M, bool EmitDebugInfo) {
   mlir::MLIRContext *Ctx = M.getContext();
 
   // Ensure translation-to-LLVMIR hooks are registered on the context.
@@ -46,6 +160,12 @@ std::string lowerToLLVMIR(mlir::ModuleOp M) {
     std::cerr << "error: MLIR-to-LLVM conversion pipeline failed\n";
     return {};
   }
+
+  /* Stamp DI attrs after the conversion so we're working against
+   * llvm.func ops (which the LLVMIR translator inspects), not the
+   * original func.func ops that get rewritten by ConvertFuncToLLVMPass. */
+  if (EmitDebugInfo)
+    attachDebugInfo(M);
 
   // Translate to LLVM IR.
   llvm::LLVMContext LLVMCtx;

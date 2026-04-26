@@ -124,7 +124,12 @@ unsigned runOutlineParfor(mlir::ModuleOp M);
 
 /// Convert the whole module down to the LLVM dialect and translate to an
 /// LLVM IR textual module. Returns empty string on failure.
-std::string lowerToLLVMIR(mlir::ModuleOp M);
+///
+/// When `EmitDebugInfo` is true, attach DICompileUnit / DIFile /
+/// DISubprogram attributes so the resulting LLVM IR carries `!dbg`
+/// metadata pointing back at the original `.m` source — i.e. clang + lldb /
+/// gdb can step from the compiled binary into the user's `.m` file.
+std::string lowerToLLVMIR(mlir::ModuleOp M, bool EmitDebugInfo = false);
 
 /// Fold `scf.if` whose only effect is storing one of two externally-
 /// defined SSA values into the same slot down to a single `arith.select`

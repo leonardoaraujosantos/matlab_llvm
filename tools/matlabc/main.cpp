@@ -2604,7 +2604,12 @@ int main(int Argc, char **Argv) {
           if (Src.empty()) return 1;
           std::cout << Src;
         } else {
-          std::string LL = mlirgen::lowerToLLVMIR(M);
+          /* `-g` on the -emit-llvm path turns on DWARF emission so the
+           * resulting LLVM IR carries `!dbg` metadata. clang's downstream
+           * codegen turns those into a DWARF section, and lldb / gdb can
+           * then step through the original `.m` source after compiling
+           * the IR with `clang -x ir -g foo.ll -o foo`. */
+          std::string LL = mlirgen::lowerToLLVMIR(M, Opts.Debug);
           if (LL.empty()) return 1;
           std::cout << LL;
         }

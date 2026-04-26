@@ -84,6 +84,9 @@ matlabc -emit-mlir -g  file.m    # with matlab_dbg_hook(file_id, line)
                                  # IR shape -dap runs against, minus the
                                  # ReplMode workspace plumbing)
 matlabc -emit-llvm   file.m      # final LLVM IR text
+matlabc -emit-llvm -g file.m     # ... plus DWARF (!DICompileUnit /
+                                 # !DISubprogram / !DILocation) so
+                                 # clang+lldb step into the .m
 matlabc -emit-c      file.m      # portable C (no #line by default;
                                  # add -line for lldb/gdb stepping)
 matlabc -emit-cpp    file.m      # portable C++ (classes preserved)
@@ -373,6 +376,61 @@ helper variable is named `total` rather than `sum` for this reason.
 
 - **Function breakpoints.** Not advertised as supported.
 
+## Native debugging via `lldb` / `gdb`: DWARF in `-emit-llvm`
+
+The DAP path is the right choice for IDE-driven debugging during
+JIT execution. For users who compile `.m` → LLVM IR → native via
+`clang` and want to step in `lldb` / `gdb` against the resulting
+binary, `-emit-llvm -g` attaches a DWARF line-table graph to the IR:
+
+- One `!DICompileUnit` per source file (`!DIFile` references the
+  original `.m` filename + directory; emission kind is
+  `LineTablesOnly` so we skip the heavier full DWARF type graph).
+- One `!DISubprogram` per `llvm.func` (name, linkage name, file,
+  line, scope-line — sufficient for `breakpoint set --file foo.m
+  --line 5` to resolve to a binary address).
+- One `!DILocation` per IR instruction whose MLIR location was a
+  `FileLineColLoc`. The translator threads these automatically once
+  the parent function carries a fused-location DISubprogram, which
+  is the trick: we walk every `llvm.func` after the conversion-to-
+  LLVM-dialect pipeline and stamp each one with a `DISubprogramAttr`
+  attached via `FusedLoc`.
+
+End-to-end:
+
+```bash
+matlabc -emit-llvm -g foo.m > foo.ll
+clang -g -c -x ir foo.ll -o foo.o
+clang -g foo.o runtime/matlab_runtime.c -o foo -lm -lpthread
+lldb foo
+(lldb) breakpoint set --file foo.m --line 7
+Breakpoint 1: where = foo`main + 88 at foo.m:7:1, address = 0x...
+```
+
+Without `-g`, the `-emit-llvm` output has none of this metadata —
+DWARF is strictly opt-in. The `-g` flag also enables the runtime
+hook injection (same as for `-dap`); the hooks are dead calls in
+this path (the runtime sees `matlab_dbg.enabled == 0` and returns
+immediately) but cost a function call per statement. If you don't
+need them, the `-emit-c -line` path is cheaper — `cc -g` reads
+`#line` directives and produces equivalent line-table DWARF without
+any runtime instrumentation.
+
+What's NOT in the DWARF graph today: variable inspection
+(`DW_TAG_variable`), full type info (struct / array shapes),
+inlined-function info. Variable inspection is better served by
+`-dap`'s per-frame Locals; types and inlining haven't been pursued
+because the line-tables-only build is what enables source-level
+stepping for the typical user. Both are extensible from here without
+re-architecting.
+
+The shape of the emitted metadata is verified by the
+`debug-dwarf-tests` ctest (asserts `!DICompileUnit` /
+`!DISubprogram` / `!DILocation` are present with `-g` and absent
+without it). The lldb-attach path itself isn't a CTest because
+runtime-attach permissions vary by host (macOS in particular
+requires codesign entitlements for non-self attach).
+
 ### Tracing the wire
 
 Every DAP client has a "trace the protocol to a file" toggle; that's
@@ -403,7 +461,7 @@ Compare to the protocol cheat sheet at the end of
 
 ### Test coverage
 
-Two ctest suites guard the debugging surface (both gated on
+Three ctest suites guard the debugging surface (all gated on
 `MATLAB_LLVM_WITH_MLIR=ON`):
 
 - **`debug-hook-tests`** — drives `matlabc -emit-mlir -g` over a small
@@ -448,6 +506,12 @@ Two ctest suites guard the debugging surface (both gated on
     `error('boom')`; stderr must contain the message header plus one
     frame line per call site (innermost first)
 
+- **`debug-dwarf-tests`** — runs `matlabc -emit-llvm -g` and
+  `-emit-llvm` (no -g) over a fixture, asserts the DWARF metadata
+  graph (`!DICompileUnit`, `!DIFile`, `!DISubprogram`, `!DILocation`,
+  `!llvm.dbg.cu` registration, function-level `!dbg` attachment) is
+  present with `-g` and absent without it.
+
 Run the lot via:
 
 ```bash
@@ -462,21 +526,14 @@ when a scenario fails (the Python harness uses bounded timeouts).
 ### `keyboard` as a nested REPL
 
 MATLAB's `keyboard` pauses execution and opens an interactive prompt
-at the paused location with access to the surrounding scope. We have
-the pause machinery (`matlab_dbg_hook`), the REPL, and per-frame
-Locals — but wiring an interactive evaluator that operates on a
-non-script frame's mini-ws on demand still needs the
-snapshot/restore bridge tracked as plan item (6). Once that lands,
-`keyboard` becomes a small REPL-pump-around-pause integration
-on top.
-
-### DWARF line tables in `-emit-llvm`
-
-Useful when compiling `.m` → LLVM IR → native with clang and then
-stepping in lldb. We do emit file/line locations on every op (via
-`FileLineColLoc`), but the `-emit-llvm` text output doesn't yet carry
-a full `!DISubprogram` / `!DILocation` metadata graph. Separate work
-from DAP; both are tractable.
+at the paused location with access to the surrounding scope. We
+have the pause machinery (`matlab_dbg_hook`), the REPL, per-frame
+Locals, and now (after plan item 6) the snapshot/restore bridge that
+lets `runReplInput` operate against a frame's mini-ws. The remaining
+piece is a bidirectional REPL pump driven from the paused worker —
+read user input over a channel, route it through the bridge, print
+the result, loop until `dbcont`. Plus a one-line lowering recogniser
+for the `keyboard` builtin. Not started.
 
 ## See also
 

@@ -247,4 +247,17 @@ if(MATLAB_LLVM_WITH_MLIR)
             $<TARGET_FILE:matlabc>
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Debug
   )
+  # DWARF emission shape test: asserts that `matlabc -emit-llvm -g`
+  # produces an LLVM IR module with a !DICompileUnit / !DIFile /
+  # !DISubprogram / !DILocation graph (line tables only) and that
+  # `-emit-llvm` without -g produces none of that. The downstream
+  # lldb/gdb stepping path is exercised by hand-clang-compiling the IR
+  # — covered separately in docs/debug.md, not in CTest, since
+  # entitlements for runtime attach vary by host.
+  add_test(
+    NAME debug-dwarf-tests
+    COMMAND ${CMAKE_SOURCE_DIR}/test/Debug/run_dwarf_tests.sh
+            $<TARGET_FILE:matlabc>
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Debug
+  )
 endif()
