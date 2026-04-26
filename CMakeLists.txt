@@ -105,6 +105,7 @@ if(MATLAB_LLVM_WITH_MLIR)
     lib/MLIR/Passes/LowerToLLVMIR.cpp
     lib/MLIR/Passes/EmitC.cpp
     lib/MLIR/Passes/EmitPython.cpp
+    lib/MLIR/Passes/EmitTypeScript.cpp
   )
   target_link_libraries(MatlabMLIR
     PUBLIC  MatlabSema MatlabAST MatlabBasic
@@ -202,6 +203,13 @@ if(MATLAB_LLVM_WITH_MLIR)
   add_test(
     NAME run-tests-emit-python
     COMMAND ${CMAKE_SOURCE_DIR}/test/Run/run_tests_emitpython.sh $<TARGET_FILE:matlabc>
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Run
+  )
+  # -emit-typescript path: run every .m through tsx/bun/ts-node and
+  # compare output. Skips silently if no TS runner is on PATH.
+  add_test(
+    NAME run-tests-emit-typescript
+    COMMAND ${CMAKE_SOURCE_DIR}/test/Run/run_tests_emitts.sh $<TARGET_FILE:matlabc>
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Run
   )
   # Fail-fast contract: unsupported MLIR ops must produce a clear error

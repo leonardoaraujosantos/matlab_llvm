@@ -58,8 +58,8 @@ using namespace matlab;
 namespace {
 struct Options {
   enum class Mode { DumpTokens, DumpAST, EmitSema, EmitMIR, EmitMLIR,
-                    EmitLLVM, EmitC, EmitCpp, EmitPython, Check, Repl,
-                    Format, Dap };
+                    EmitLLVM, EmitC, EmitCpp, EmitPython, EmitTypeScript,
+                    Check, Repl, Format, Dap };
   Mode Mode = Mode::Check;
   bool Opt = false;
   /* `-emit-c` / `-emit-cpp` default to NOT emitting `#line` directives
@@ -86,7 +86,7 @@ int usage(const char *Prog) {
   std::cerr << "usage: " << Prog
             << " [-dump-tokens | -dump-ast | -emit-sema | -emit-mir |\n"
                "             -emit-mlir | -emit-llvm | -emit-c | -emit-cpp |\n"
-               "             -emit-python |\n"
+               "             -emit-python | -emit-typescript |\n"
                "             -format | -repl | -dap]\n"
                "            [-no-line | -line] [-doxygen] [-cpp-auto] [-g]  FILE.m\n";
   return 64;
@@ -105,6 +105,8 @@ bool parseArgs(int Argc, char **Argv, Options &Opts, const char *&Prog) {
     else if (A == "-emit-c") Opts.Mode = Options::Mode::EmitC;
     else if (A == "-emit-cpp") Opts.Mode = Options::Mode::EmitCpp;
     else if (A == "-emit-python") Opts.Mode = Options::Mode::EmitPython;
+    else if (A == "-emit-typescript" || A == "-emit-ts")
+      Opts.Mode = Options::Mode::EmitTypeScript;
     else if (A == "-repl") Opts.Mode = Options::Mode::Repl;
     else if (A == "-format") Opts.Mode = Options::Mode::Format;
     else if (A == "-dap") Opts.Mode = Options::Mode::Dap;
@@ -2403,7 +2405,8 @@ int main(int Argc, char **Argv) {
       Opts.Mode == Options::Mode::EmitLLVM ||
       Opts.Mode == Options::Mode::EmitC ||
       Opts.Mode == Options::Mode::EmitCpp ||
-      Opts.Mode == Options::Mode::EmitPython) {
+      Opts.Mode == Options::Mode::EmitPython ||
+      Opts.Mode == Options::Mode::EmitTypeScript) {
     mlirgen::Context MCtx;
     if (TU) {
       auto M = mlirgen::lowerToMLIR(MCtx, TC, Diag, *TU, &SM,
@@ -2417,7 +2420,8 @@ int main(int Argc, char **Argv) {
       bool WantFullPipeline = Opts.Mode == Options::Mode::EmitLLVM ||
                               Opts.Mode == Options::Mode::EmitC ||
                               Opts.Mode == Options::Mode::EmitCpp ||
-                              Opts.Mode == Options::Mode::EmitPython;
+                              Opts.Mode == Options::Mode::EmitPython ||
+                              Opts.Mode == Options::Mode::EmitTypeScript;
       bool WantClean = Opts.Opt || WantFullPipeline;
       if (WantClean) {
         mlirgen::runSlotPromotion(M);
@@ -2565,7 +2569,8 @@ int main(int Argc, char **Argv) {
         mlirgen::runLowerIO(M);
         if (Opts.Mode == Options::Mode::EmitC ||
             Opts.Mode == Options::Mode::EmitCpp ||
-            Opts.Mode == Options::Mode::EmitPython) {
+            Opts.Mode == Options::Mode::EmitPython ||
+            Opts.Mode == Options::Mode::EmitTypeScript) {
           // Fold `if/else/store-to-same-slot` into `arith.select` first,
           // then squash single-store allocas back into SSA so the emitted
           // C doesn't drag a `T slot = 0; void* p = &slot;` prelude for
@@ -2584,6 +2589,8 @@ int main(int Argc, char **Argv) {
           std::string Src;
           if (Opts.Mode == Options::Mode::EmitPython) {
             Src = mlirgen::emitPython(M, Opts.NoLine, &SM);
+          } else if (Opts.Mode == Options::Mode::EmitTypeScript) {
+            Src = mlirgen::emitTypeScript(M, Opts.NoLine, &SM);
           } else {
             /* C / C++ default to suppressing `#line`. `-line` opts back
              * in; `-no-line` is the (now-redundant) explicit form of

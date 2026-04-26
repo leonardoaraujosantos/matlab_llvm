@@ -173,5 +173,16 @@ std::string emitC(mlir::ModuleOp M, bool Cpp, bool NoLine = false,
 std::string emitPython(mlir::ModuleOp M, bool NoLine = false,
                        const matlab::SourceManager *SM = nullptr);
 
+/// Emit a self-contained TypeScript source that reproduces the semantics
+/// of the MLIR module. Expects the same pipeline state as -emit-python.
+/// The emitted file imports `matlab_runtime` (a numpy-ts-backed shim)
+/// and `numpy_ts` (a minimal numpy-like API) and runs on Bun / `tsx` /
+/// Node + `ts-node`. When NoLine==true, no line-comment source markers
+/// are emitted. When SM is non-null, MATLAB `%` comments from the
+/// source are propagated into the generated source as `//` lines above
+/// the corresponding statement. Returns empty string on failure.
+std::string emitTypeScript(mlir::ModuleOp M, bool NoLine = false,
+                           const matlab::SourceManager *SM = nullptr);
+
 } // namespace mlirgen
 } // namespace matlab

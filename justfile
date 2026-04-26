@@ -116,6 +116,11 @@ emit-cpp FILE: build
 emit-python FILE: build
     ./{{BUILD_DIR}}/matlabc -emit-python {{FILE}}
 
+# Emit self-contained TypeScript that imports runtime/matlab_runtime.ts
+# (numpy-ts-backed shim). Run with bun / tsx / ts-node.
+emit-typescript FILE: build
+    ./{{BUILD_DIR}}/matlabc -emit-typescript {{FILE}}
+
 # Compile a .m file via the C emitter: produces ./<name> using cc.
 # Example: `just compile-c examples/hello.m` -> ./hello
 compile-c FILE: build
@@ -149,6 +154,22 @@ compile-python FILE: build
     PYTHONPATH=runtime python3 "$src"
     rm -f "$src"
 
+# Emit and immediately run a .m file via a TypeScript runner (bun, tsx,
+# or ts-node — first one found on PATH). Drops the emitted .ts into
+# runtime/ so the relative imports of matlab_runtime / numpy_ts resolve.
+# Example: `just compile-typescript examples/hello.m` -> prints hello
+compile-typescript FILE: build
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if command -v bun  >/dev/null 2>&1; then runner="bun run";
+    elif command -v tsx >/dev/null 2>&1; then runner="tsx";
+    elif command -v ts-node >/dev/null 2>&1; then runner="ts-node --transpile-only";
+    else echo "error: need bun, tsx, or ts-node on PATH" >&2; exit 1; fi
+    src="runtime/__just_compile_$(basename {{FILE}} .m).ts"
+    ./{{BUILD_DIR}}/matlabc -emit-typescript {{FILE}} > "$src"
+    trap 'rm -f "$src"' EXIT
+    (cd runtime && $runner "$(basename "$src")")
+
 # Emit every program in examples/ to .py files under OUT (default /tmp/emit-python-examples).
 # Useful for eyeballing the generated code across the whole corpus at once.
 emit-python-examples OUT="/tmp/emit-python-examples": build
@@ -161,6 +182,18 @@ emit-python-examples OUT="/tmp/emit-python-examples": build
         echo "wrote {{OUT}}/$name.py"
     done
 
+# Emit every program in examples/ to .ts files under OUT (default /tmp/emit-typescript-examples).
+# Useful for eyeballing the generated code across the whole corpus at once.
+emit-typescript-examples OUT="/tmp/emit-typescript-examples": build
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p "{{OUT}}"
+    for f in examples/*.m; do
+        name=$(basename "$f" .m)
+        ./{{BUILD_DIR}}/matlabc -emit-typescript "$f" > "{{OUT}}/$name.ts"
+        echo "wrote {{OUT}}/$name.ts"
+    done
+
 # Run both C and C++ emission test suites (95 programs each).
 test-emitc: build
     ctest --test-dir {{BUILD_DIR}} --output-on-failure \
@@ -169,6 +202,10 @@ test-emitc: build
 # Run the Python emission suite.
 test-emitpython: build
     ./test/Run/run_tests_emitpython.sh ./{{BUILD_DIR}}/matlabc
+
+# Run the TypeScript emission suite (uses bun/tsx/ts-node — first found).
+test-emitts: build
+    ./test/Run/run_tests_emitts.sh ./{{BUILD_DIR}}/matlabc
 
 # Remove the build directory.
 clean:
