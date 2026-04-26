@@ -169,6 +169,14 @@ private:
    * source path via matlab_dbg_register_file. */
   bool DebugMode = false;
 
+  /* Push/pop a runtime frame around the body of a user function. The
+   * lowered call carries a const_char with the displayed name (e.g.
+   * "fact" or "MyClass.foo"); LowerTensorOps converts that into a
+   * (ptr, length) pair for matlab_dbg_enter_frame. The leave call is
+   * a zero-arg builtin. Both are no-ops outside DebugMode. */
+  void emitDbgEnterFrame(llvm::StringRef Name, mlir::Location L);
+  void emitDbgLeaveFrame(mlir::Location L);
+
   // Per-function: binding -> slot (Value result of matlab.alloc).
   std::unordered_map<Binding *, mlir::Value> Slots;
 
@@ -529,6 +537,25 @@ mlir::Value Lowerer::emitFieldNameChar(std::string_view Name,
       mlir::StringAttr::get(&MCtx, std::string(Name)));
   return emitUnreg("matlab.const_char", {},
                    mlir::NoneType::get(&MCtx), L, {VA});
+}
+
+void Lowerer::emitDbgEnterFrame(llvm::StringRef Name, mlir::Location L) {
+  if (!DebugMode) return;
+  mlir::Value NameV = emitFieldNameChar(Name, L);
+  mlir::NamedAttribute Cal(
+      mlir::StringAttr::get(&MCtx, "callee"),
+      mlir::StringAttr::get(&MCtx, "matlab_dbg_enter_frame"));
+  emitUnregOp("matlab.call_builtin", {NameV},
+              {mlir::NoneType::get(&MCtx)}, L, {Cal});
+}
+
+void Lowerer::emitDbgLeaveFrame(mlir::Location L) {
+  if (!DebugMode) return;
+  mlir::NamedAttribute Cal(
+      mlir::StringAttr::get(&MCtx, "callee"),
+      mlir::StringAttr::get(&MCtx, "matlab_dbg_leave_frame"));
+  emitUnregOp("matlab.call_builtin", {},
+              {mlir::NoneType::get(&MCtx)}, L, {Cal});
 }
 
 int32_t Lowerer::globalSlotId(Binding *Bnd) {
@@ -898,6 +925,17 @@ void Lowerer::lowerFunction(const Function &F, mlir::ModuleOp M,
     }
   }
 
+  /* Push a debug frame for this user function so the DAP server's
+   * stackTrace request walks back through the call chain instead of
+   * always reporting a single <script> frame. The displayed name is
+   * the bare function name for free functions and "Class.method" for
+   * class methods (constructors print as "Class.Class"). */
+  {
+    std::string FrameName = std::string(F.Name);
+    if (Owner) FrameName = std::string(Owner->Name) + "." + FrameName;
+    emitDbgEnterFrame(FrameName, loc(F.Range));
+  }
+
   if (F.Body) lowerBlock(*F.Body);
 
   // Implicit return: load each output slot and return.
@@ -908,6 +946,7 @@ void Lowerer::lowerFunction(const Function &F, mlir::ModuleOp M,
     mlir::Value Slot = Slots[Bnd];
     Rets.push_back(emitLoad(Slot, OutTys[i], loc(F.Range)));
   }
+  emitDbgLeaveFrame(loc(F.Range));
   mlir::func::ReturnOp::create(B, loc(F.Range), Rets);
 
   // Nested functions: emit at module level.
@@ -1585,6 +1624,12 @@ void Lowerer::lowerStmt(const Stmt &St) {
     return;
   }
   case NodeKind::ReturnStmt:
+    /* Pop the debug frame before the early return so the DAP frame
+     * stack stays balanced with the implicit-return path above. The
+     * helper is a no-op when DebugMode is off and when InScriptBody
+     * is set (the script frame is owned by matlab_dbg_enable, never
+     * pushed by the lowerer). */
+    if (!InScriptBody) emitDbgLeaveFrame(loc(St.Range));
     mlir::func::ReturnOp::create(B, loc(St.Range));
     return;
   case NodeKind::BreakStmt:

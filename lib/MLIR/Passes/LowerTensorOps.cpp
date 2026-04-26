@@ -1221,6 +1221,40 @@ bool TensorLowering::rewriteBuiltinCalls() {
       continue;
     }
 
+    /* User-function frame entry: emitted by the lowerer at the top of
+     * each user function body when -g is on. Single const_char operand
+     * carrying the displayed name. We materialize the name as an
+     * !llvm.ptr (via fieldNameAddr, same path as struct field names)
+     * and call matlab_dbg_enter_frame(ptr, i64). */
+    if (Name == "matlab_dbg_enter_frame" &&
+        Call->getNumOperands() == 1 && Call->getNumResults() == 1) {
+      Value NameV = Call->getOperand(0);
+      int64_t Len = 0;
+      Value Ptr = fieldNameAddr(NameV, Len);
+      if (!Ptr) continue;
+      B.setInsertionPoint(Call);
+      Value LenV = LLVM::ConstantOp::create(
+          B, Call->getLoc(), I64, B.getI64IntegerAttr(Len));
+      auto Fn = rt("matlab_dbg_enter_frame", VoidTy, {PtrTy, I64});
+      LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                            ValueRange{Ptr, LenV});
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+
+    /* User-function frame exit: emitted before each func.return when
+     * -g is on. No operands. */
+    if (Name == "matlab_dbg_leave_frame" &&
+        Call->getNumOperands() == 0 && Call->getNumResults() == 1) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt("matlab_dbg_leave_frame", VoidTy, {});
+      LLVM::CallOp::create(B, Call->getLoc(), Fn, ValueRange{});
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+
     /* REPL workspace accessors. Shape is the same as struct_* but
      * without a base ptr (the workspace is a singleton inside the
      * runtime). Used only when matlabc is invoked with -repl. */

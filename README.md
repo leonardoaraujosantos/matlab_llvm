@@ -167,6 +167,46 @@ Useful modifiers:
 The repo also builds `matlab-lsp`, a lightweight Language Server that
 reuses the same frontend.
 
+## Debugging
+
+`matlabc -dap` starts a Debug Adapter Protocol server on stdio so any
+DAP-aware editor (VS Code via a generic DAP extension, `nvim-dap`,
+JetBrains, Emacs `dap-mode`, …) can drive a live debugging session
+against your `.m` script. What works today:
+
+| Capability | Notes |
+|---|---|
+| Plain line breakpoints | `setBreakpoints`; verified against the loaded source |
+| Conditional breakpoints | `condition` evaluated against the workspace via the REPL JIT — pause iff non-zero |
+| Log points | `logMessage` with `{name}` placeholders, emitted as DAP `output` events; never pauses |
+| Step into / over / out | Full step into user-function bodies — frame stack pushed on entry, popped on return |
+| Continue / pause / stop on entry | All standard resume actions plus `stopOnEntry` on launch |
+| Multi-frame stack trace | `stackTrace` walks back through nested calls (e.g. recursive `fact(5)` shows 5 `fact` frames + `<script>`) |
+| Variable inspection | `Locals` scope = the script-level workspace; matrices show shape, 1×1 unboxes to scalar |
+| `setVariable` (scalars) | Type a number in the watch box and the new value flows through subsequent reads |
+| Multi-file path resolution | Every `SourceManager`-loaded file is registered with the runtime; phantom paths cleanly return `verified=false` |
+
+Minimal nvim-dap config:
+
+```lua
+require('dap').adapters.matlab = {
+  type = 'executable',
+  command = '/path/to/matlab_llvm/build/matlabc',
+  args = { '-dap' },
+}
+require('dap').configurations.matlab = {{
+  type = 'matlab', request = 'launch',
+  name = 'Run current .m', program = '${file}', stopOnEntry = false,
+}}
+```
+
+For the full protocol surface, threading model, and the limits of the
+current condition / log-point evaluator (script-level workspace only —
+locals inside user functions aren't reachable yet), see
+[`docs/debug.md`](docs/debug.md). Lower-level aids — `dbg(x)` source-
+located prints, `who` / `whos` / `clear` in the REPL, `#line`-annotated
+C/C++ output for stepping in `lldb`/`gdb` — live there too.
+
 ## Main Features
 
 Examples of shipped functionality:

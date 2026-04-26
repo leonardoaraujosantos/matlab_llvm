@@ -2852,15 +2852,28 @@ struct matlab_dbg_state {
     int paused;
     int32_t cur_file_id;
     int32_t cur_line;
+    /* Index into bp_* of the breakpoint that triggered the current
+     * pause. -1 when the pause came from stepping rather than a bp.
+     * The DAP server reads cond_text[cur_bp_idx] / log_text[...] to
+     * decide whether to evaluate before notifying the IDE. */
+    int cur_bp_idx;
 
     /* What to do when resumed. */
     enum matlab_dbg_action action;
     int32_t step_target_depth;
 
-    /* Breakpoints (file_id, line) — linear scan. */
+    /* Breakpoints (file_id, line) — linear scan. cond_text and
+     * log_text are heap-owned (NULL when absent). cond_disabled flips
+     * to 1 once the DAP server reports a condition syntax error so
+     * subsequent hits don't keep retrying it. */
     int n_bp;
     int32_t bp_file[MATLAB_DBG_MAX_BREAKPOINTS];
     int32_t bp_line[MATLAB_DBG_MAX_BREAKPOINTS];
+    char *cond_text[MATLAB_DBG_MAX_BREAKPOINTS];
+    int64_t cond_len[MATLAB_DBG_MAX_BREAKPOINTS];
+    char *log_text[MATLAB_DBG_MAX_BREAKPOINTS];
+    int64_t log_len[MATLAB_DBG_MAX_BREAKPOINTS];
+    int cond_disabled[MATLAB_DBG_MAX_BREAKPOINTS];
 
     /* Frame stack. Always at least one entry (the script / top level). */
     int n_frames;
@@ -2912,17 +2925,55 @@ void matlab_dbg_register_file(int32_t file_id,
     pthread_mutex_unlock(&matlab_dbg.mu);
 }
 
+/* Look up a registered filename by file_id. Returns NULL if unknown.
+ * The returned pointer is valid for the lifetime of the process —
+ * we own the heap copy made by matlab_dbg_register_file. Used by the
+ * DAP server to resolve a paused frame's file_id back to a path so
+ * stackTrace responses can reference the correct source. */
+const char *matlab_dbg_file_name(int32_t file_id, int64_t *len_out) {
+    const char *name = NULL;
+    int64_t len = 0;
+    pthread_mutex_lock(&matlab_dbg.mu);
+    if (file_id >= 1 &&
+        file_id <= (int32_t)(sizeof matlab_dbg.file_names /
+                              sizeof matlab_dbg.file_names[0])) {
+        name = matlab_dbg.file_names[file_id - 1];
+        len = matlab_dbg.file_name_lens[file_id - 1];
+    }
+    pthread_mutex_unlock(&matlab_dbg.mu);
+    if (len_out) *len_out = name ? len : 0;
+    return name;
+}
+
 /* Called from the server thread. Returns the previous breakpoint
  * count for that file so the server can clear-and-reset atomically.
- * Simple: we wipe every breakpoint for that file then re-add. */
+ * Simple: we wipe every breakpoint for that file then re-add. The
+ * cond_text / log_text heap copies are freed before compaction so a
+ * setBreakpoints replay doesn't leak. */
 void matlab_dbg_clear_breakpoints_in_file(int32_t file_id) {
     pthread_mutex_lock(&matlab_dbg.mu);
     int w = 0;
     for (int i = 0; i < matlab_dbg.n_bp; ++i) {
-        if (matlab_dbg.bp_file[i] == file_id) continue;
+        if (matlab_dbg.bp_file[i] == file_id) {
+            free(matlab_dbg.cond_text[i]);
+            free(matlab_dbg.log_text[i]);
+            continue;
+        }
         matlab_dbg.bp_file[w] = matlab_dbg.bp_file[i];
         matlab_dbg.bp_line[w] = matlab_dbg.bp_line[i];
+        matlab_dbg.cond_text[w] = matlab_dbg.cond_text[i];
+        matlab_dbg.cond_len[w]  = matlab_dbg.cond_len[i];
+        matlab_dbg.log_text[w]  = matlab_dbg.log_text[i];
+        matlab_dbg.log_len[w]   = matlab_dbg.log_len[i];
+        matlab_dbg.cond_disabled[w] = matlab_dbg.cond_disabled[i];
         ++w;
+    }
+    /* Zero out the slots we evicted so subsequent _ex inserts don't
+     * inherit a stale pointer the compaction loop just moved away. */
+    for (int i = w; i < matlab_dbg.n_bp; ++i) {
+        matlab_dbg.cond_text[i] = NULL; matlab_dbg.cond_len[i] = 0;
+        matlab_dbg.log_text[i]  = NULL; matlab_dbg.log_len[i]  = 0;
+        matlab_dbg.cond_disabled[i] = 0;
     }
     matlab_dbg.n_bp = w;
     pthread_mutex_unlock(&matlab_dbg.mu);
@@ -2932,12 +2983,88 @@ int matlab_dbg_add_breakpoint(int32_t file_id, int32_t line) {
     pthread_mutex_lock(&matlab_dbg.mu);
     int ok = matlab_dbg.n_bp < MATLAB_DBG_MAX_BREAKPOINTS;
     if (ok) {
-        matlab_dbg.bp_file[matlab_dbg.n_bp] = file_id;
-        matlab_dbg.bp_line[matlab_dbg.n_bp] = line;
+        int i = matlab_dbg.n_bp;
+        matlab_dbg.bp_file[i] = file_id;
+        matlab_dbg.bp_line[i] = line;
+        matlab_dbg.cond_text[i] = NULL; matlab_dbg.cond_len[i] = 0;
+        matlab_dbg.log_text[i]  = NULL; matlab_dbg.log_len[i]  = 0;
+        matlab_dbg.cond_disabled[i] = 0;
         matlab_dbg.n_bp++;
     }
     pthread_mutex_unlock(&matlab_dbg.mu);
     return ok;
+}
+
+/* Conditional / log-point-aware insert. Either pointer may be NULL
+ * (with the matching len = 0) to mean "no condition" / "no log". The
+ * runtime owns the heap copy so the server can release its own
+ * buffers immediately after returning. */
+int matlab_dbg_add_breakpoint_ex(int32_t file_id, int32_t line,
+                                  const char *cond, int64_t cond_len,
+                                  const char *log,  int64_t log_len) {
+    pthread_mutex_lock(&matlab_dbg.mu);
+    int ok = matlab_dbg.n_bp < MATLAB_DBG_MAX_BREAKPOINTS;
+    if (ok) {
+        int i = matlab_dbg.n_bp;
+        matlab_dbg.bp_file[i] = file_id;
+        matlab_dbg.bp_line[i] = line;
+        matlab_dbg.cond_text[i] = NULL; matlab_dbg.cond_len[i] = 0;
+        matlab_dbg.log_text[i]  = NULL; matlab_dbg.log_len[i]  = 0;
+        matlab_dbg.cond_disabled[i] = 0;
+        if (cond && cond_len > 0) {
+            matlab_dbg.cond_text[i] = (char *)malloc((size_t)cond_len + 1);
+            memcpy(matlab_dbg.cond_text[i], cond, (size_t)cond_len);
+            matlab_dbg.cond_text[i][cond_len] = '\0';
+            matlab_dbg.cond_len[i] = cond_len;
+        }
+        if (log && log_len > 0) {
+            matlab_dbg.log_text[i] = (char *)malloc((size_t)log_len + 1);
+            memcpy(matlab_dbg.log_text[i], log, (size_t)log_len);
+            matlab_dbg.log_text[i][log_len] = '\0';
+            matlab_dbg.log_len[i] = log_len;
+        }
+        matlab_dbg.n_bp++;
+    }
+    pthread_mutex_unlock(&matlab_dbg.mu);
+    return ok;
+}
+
+/* Snapshot the cond / log text for a given bp index. Caller-supplied
+ * pointers receive runtime-owned strings that stay valid until the
+ * next clear_breakpoints_in_file call. The disabled out-param is
+ * non-zero when the condition was previously rejected (eval failed)
+ * — callers should treat the bp as condition-less but still suppress
+ * the pause to match VS Code's "broken condition is silent" UX.
+ * Returns 0 on out-of-range. */
+int matlab_dbg_breakpoint_meta(int idx, const char **cond, int64_t *cond_len,
+                                const char **log, int64_t *log_len,
+                                int *disabled) {
+    int ok = 0;
+    pthread_mutex_lock(&matlab_dbg.mu);
+    if (idx >= 0 && idx < matlab_dbg.n_bp) {
+        if (cond)     *cond     = matlab_dbg.cond_text[idx];
+        if (cond_len) *cond_len = matlab_dbg.cond_len[idx];
+        if (log)      *log      = matlab_dbg.log_text[idx];
+        if (log_len)  *log_len  = matlab_dbg.log_len[idx];
+        if (disabled) *disabled = matlab_dbg.cond_disabled[idx];
+        ok = 1;
+    }
+    pthread_mutex_unlock(&matlab_dbg.mu);
+    return ok;
+}
+
+void matlab_dbg_disable_condition(int idx) {
+    pthread_mutex_lock(&matlab_dbg.mu);
+    if (idx >= 0 && idx < matlab_dbg.n_bp)
+        matlab_dbg.cond_disabled[idx] = 1;
+    pthread_mutex_unlock(&matlab_dbg.mu);
+}
+
+int matlab_dbg_get_pause_bp(void) {
+    pthread_mutex_lock(&matlab_dbg.mu);
+    int idx = matlab_dbg.cur_bp_idx;
+    pthread_mutex_unlock(&matlab_dbg.mu);
+    return idx;
 }
 
 /* Called from the server thread after handling a stopped event.
@@ -3049,6 +3176,7 @@ void matlab_dbg_hook(int32_t file_id, int32_t line) {
     }
 
     int should_pause = 0;
+    int matched_bp = -1;
     /* Stepping: decide based on action + target depth. */
     switch (matlab_dbg.action) {
     case MATLAB_DBG_STEP_IN:
@@ -3069,19 +3197,21 @@ void matlab_dbg_hook(int32_t file_id, int32_t line) {
     default:
         break;
     }
-    /* Breakpoint check (regardless of step action). */
-    if (!should_pause) {
-        for (int i = 0; i < matlab_dbg.n_bp; ++i) {
-            if (matlab_dbg.bp_file[i] == file_id &&
-                matlab_dbg.bp_line[i] == line) {
-                should_pause = 1;
-                break;
-            }
+    /* Breakpoint check (regardless of step action). Records the
+     * matched index so the DAP server can read the breakpoint's
+     * condition / log strings without re-walking the table. */
+    for (int i = 0; i < matlab_dbg.n_bp; ++i) {
+        if (matlab_dbg.bp_file[i] == file_id &&
+            matlab_dbg.bp_line[i] == line) {
+            matched_bp = i;
+            should_pause = 1;
+            break;
         }
     }
     if (should_pause) {
         matlab_dbg.cur_file_id = file_id;
         matlab_dbg.cur_line = line;
+        matlab_dbg.cur_bp_idx = matched_bp;
         matlab_dbg.paused = 1;
         /* Signal the server that we're paused; wait for resume. */
         pthread_cond_broadcast(&matlab_dbg.cv_server);

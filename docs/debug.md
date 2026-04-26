@@ -158,12 +158,15 @@ VS Code via a generic-DAP extension:
 | Launch a `.m` file              | `launch` (with `program`, `stopOnEntry`) |
 | Stop on entry                   | `stopOnEntry` option on `launch`    |
 | Line breakpoints                | `setBreakpoints`                    |
+| Conditional breakpoints         | `setBreakpoints` `condition`        |
+| Log points (no pause)           | `setBreakpoints` `logMessage`       |
 | Resume                          | `continue`                          |
 | Step over / in / out            | `next` / `stepIn` / `stepOut`       |
 | Pause a running program         | `pause` (breaks at the next stmt)   |
-| Stack trace                     | `stackTrace`                        |
+| Stack trace across user fns     | `stackTrace`                        |
 | Scopes (just `Locals` for now)  | `scopes`                            |
 | Workspace variables snapshot    | `variables`                         |
+| Mutate scalar variables         | `setVariable`                       |
 | Clean shutdown / terminate      | `disconnect` / `terminate`          |
 | Program stdout forwarded        | `output` event (category `stdout`)  |
 
@@ -187,23 +190,48 @@ VS Code via a generic-DAP extension:
   doesn't page cleanly. Use `dbg(M)` in the source if you need
   content.
 
-### Known limits (deferred, not blocked)
+### Conditional breakpoints and log points
 
-- **Step into user functions.** The hook fires inside user-function
-  bodies, but we don't yet push a stack frame at function entry /
-  pop at return. Effect: `stepIn` into a user call steps to the
-  first statement inside it, but the `stackTrace` response still
-  shows a single `<script>` frame. The runtime API for frames
-  (`matlab_dbg_enter_frame` / `_leave_frame`) is in place; only the
-  MLIR lowering injections are missing.
-- **Conditional breakpoints / function breakpoints / log points.**
-  Advertised as unsupported in the `initialize` capabilities.
-- **`setVariable`.** You can inspect but not mutate from the
-  debugger; advertised as unsupported.
-- **Multiple source files.** `matlab_dbg_register_file` supports up
-  to 256 files in the runtime table, but the DAP server currently
-  only registers the entry-point `.m`. Cross-file breakpoints land
-  once multi-TU compilation does.
+`setBreakpoints` honours the optional `condition` and `logMessage`
+fields; both are advertised as supported in the `initialize`
+response (`supportsConditionalBreakpoints`, `supportsLogPoints`).
+
+- **Conditional**: when the breakpoint matches, the DAP server
+  evaluates the condition by piggybacking on the REPL JIT — the
+  expression is wrapped as `__matlab_dbg_cond = (<expr>);` and run
+  through the full Lex → Parse → Sema → MLIR → JIT pipeline against
+  the persistent `matlab_ws` workspace. Non-zero result → pause;
+  zero → silently resume; eval failure → log once and treat the
+  condition as broken (subsequent hits skip the bp without
+  re-running the JIT).
+
+- **Log points**: emit a DAP `output` event without ever pausing.
+  The template supports `{name}` placeholders that resolve to the
+  matching workspace variable's printed form (1×1 matrices unbox
+  to scalar). Bare identifiers only — anything more complex is
+  passed through as the literal substring.
+
+Both modes only see the script-level workspace: locals inside a
+user function, for-loop induction variables, and SSA scratch values
+aren't visible. Per-function slot tables (Option B in
+`docs/debug_improve_plan.md`) are the planned follow-up.
+
+### Other known limits (deferred, not blocked)
+
+- **Function breakpoints.** Not advertised as supported.
+- **`setVariable`.** Scalars only — typing `x = 99` in the watch box
+  while paused calls `matlab_ws_set_f64` and the new value flows
+  through to subsequent `disp(x)` calls. Matrix / string / struct /
+  cell targets return a clear "only scalar set is supported" error
+  without dropping the DAP connection. Capability advertised as
+  `supportsSetVariable=true`.
+- **Multiple source files.** The DAP server keeps a path → file_id
+  table seeded from every file the SourceManager loaded, and the
+  `setBreakpoints` handler resolves the IDE-supplied path against
+  it (canonicalized via `realpath`). Today only the entry-point
+  `.m` is loaded — once Sema starts pulling in sibling `.m` files
+  for cross-file calls they'll appear here automatically. Phantom
+  paths still respond with `verified=false` instead of crashing.
 
 ### Tracing the wire
 
@@ -237,10 +265,11 @@ Compare to the protocol cheat sheet at the end of
 
 ### Call-stack traces in `error()`
 
-`error()` currently prints just the message text. A backtrace would
-require `matlab_dbg_enter_frame` to be invoked at every user-function
-entry and `_leave_frame` before each return — same plumbing the DAP
-`stepIn` improvement needs. Lands together.
+`error()` currently prints just the message text. The frame-stack
+plumbing is already wired (each user function pushes via
+`matlab_dbg_enter_frame` and pops via `_leave_frame` when -g is
+on), but the runtime doesn't yet snapshot the frames into the
+diagnostic before unwinding. Tracked as a follow-up.
 
 ### `keyboard` as a nested REPL
 

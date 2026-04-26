@@ -40,6 +40,7 @@
 #include "matlab/Sema/TypeInference.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <optional>
@@ -47,6 +48,7 @@
 #include <string_view>
 #include <termios.h>
 #include <unistd.h>
+#include <unordered_map>
 #include <vector>
 
 using namespace matlab;
@@ -962,12 +964,11 @@ int runRepl() {
  * on the debugger-side condvar when it decides to pause.
  *
  * Scope for v1:
- *   - script-level stepping (user-function entry/exit hooks aren't
- *     emitted yet, so stepIn past a call falls through to stepOver
- *     semantically).
- *   - Locals scope = the REPL workspace snapshot. Stack trace has one
- *     frame ("<script>") plus any frames matlab_dbg_enter_frame has
- *     pushed (currently only done by future user-function work). */
+ *   - Full step into / step out across user functions: the lowerer
+ *     wraps each user-function body with matlab_dbg_enter_frame /
+ *     matlab_dbg_leave_frame, so stackTrace reports the live call
+ *     chain instead of a single <script> frame.
+ *   - Locals scope = the REPL workspace snapshot. */
 
 /* Prototypes for the runtime DAP API. Defined in matlab_runtime.c and
  * linked into matlabc for this path. */
@@ -975,6 +976,7 @@ extern "C" {
 void matlab_dbg_enable(int stop_on_entry);
 void matlab_dbg_register_file(int32_t file_id, const char *name,
                                int64_t name_len);
+const char *matlab_dbg_file_name(int32_t file_id, int64_t *len_out);
 void matlab_dbg_clear_breakpoints_in_file(int32_t file_id);
 int  matlab_dbg_add_breakpoint(int32_t file_id, int32_t line);
 void matlab_dbg_resume(int action);
@@ -989,6 +991,15 @@ const char *matlab_dbg_ws_name(int i, int64_t *len_out);
 int  matlab_dbg_ws_kind(int i);
 double matlab_dbg_ws_f64(int i);
 void  *matlab_dbg_ws_ptr(int i);
+void  matlab_ws_set_f64(const char *name, int64_t len, double v);
+int  matlab_dbg_add_breakpoint_ex(int32_t file_id, int32_t line,
+                                   const char *cond, int64_t cond_len,
+                                   const char *log,  int64_t log_len);
+int  matlab_dbg_breakpoint_meta(int idx, const char **cond, int64_t *cond_len,
+                                 const char **log, int64_t *log_len,
+                                 int *disabled);
+void matlab_dbg_disable_condition(int idx);
+int  matlab_dbg_get_pause_bp(void);
 }
 
 /* Forward declarations from matlab_runtime.c so we can format matrices
@@ -1028,6 +1039,19 @@ struct Shared {
   pthread_mutex_t Mu = PTHREAD_MUTEX_INITIALIZER;
   pthread_cond_t Cv = PTHREAD_COND_INITIALIZER;
   int NextSeq = 1;
+  /* Mapping from canonicalized source path to the runtime's file_id.
+   * Populated at compileProgram() with every file the SourceManager
+   * loaded, then consulted by setBreakpoints to look up the id for
+   * the source the IDE asked about. Keys are realpath()-resolved so
+   * "./examples/factorial.m" and "/abs/.../factorial.m" collapse. */
+  std::unordered_map<std::string, int32_t> PathToFileId;
+  /* Counter bumped every time a continue/next/stepIn/stepOut request
+   * is processed. The monitor records the pre-resume value when it
+   * blocks for the client's response and exits its inner wait once
+   * the counter has advanced. This is robust to the worker re-pausing
+   * inside the wait window — without the counter we'd see paused
+   * flip 1→0→1 and conclude the resume hadn't happened. */
+  uint64_t ResumeGen = 0;
 };
 
 Shared G;
@@ -1117,11 +1141,141 @@ void sendEvent(llvm::StringRef Event, Value Body = Object{}) {
  * via the CLI or `launch.program` — emit it verbatim. */
 std::string absPath(const std::string &P) { return P; }
 
+/* Resolve a path to an absolute, symlink-collapsed form for use as a
+ * key in PathToFileId. Returns the original string when realpath()
+ * fails (e.g. a phantom path the IDE supplied for a file that no
+ * longer exists). The resulting key is what every lookup in the map
+ * compares against; canonicalising both sides means relative,
+ * symlinked, and trailing-slash-equivalent paths all collapse. */
+std::string canonPath(const std::string &P) {
+  if (P.empty()) return P;
+  char Resolved[PATH_MAX];
+  if (realpath(P.c_str(), Resolved)) return std::string(Resolved);
+  return P;
+}
+
 Object sourceObj() {
   Object O;
   O["name"] = G.ProgramPath.substr(G.ProgramPath.find_last_of('/') + 1);
   O["path"] = absPath(G.ProgramPath);
   return O;
+}
+
+/* Build a DAP source object for a specific runtime file_id by
+ * resolving the path through matlab_dbg_file_name. Falls back to
+ * the entry-point's source when the id is unknown (e.g. a frame
+ * whose file_id was never registered). */
+Object sourceObjForFile(int32_t Fid) {
+  int64_t Len = 0;
+  const char *Name = matlab_dbg_file_name(Fid, &Len);
+  if (!Name || Len == 0) return sourceObj();
+  std::string Path(Name, (size_t)Len);
+  Object O;
+  O["name"] = Path.substr(Path.find_last_of('/') + 1);
+  O["path"] = absPath(Path);
+  return O;
+}
+
+/* Single MLIR context shared by the program JIT and any condition /
+ * log-point evaluator runs the monitor thread fires off. mlir::
+ * MLIRContext isn't thread-safe, but the worker only touches it
+ * during compileProgram; afterward the JIT'd code runs against
+ * a finalized engine and the monitor thread is the sole consumer. */
+mlirgen::Context &sharedDapContext() {
+  static mlirgen::Context Ctx;
+  static bool Inited = false;
+  if (!Inited) {
+    mlir::registerBuiltinDialectTranslation(Ctx.get());
+    mlir::registerLLVMDialectTranslation(Ctx.get());
+    Inited = true;
+  }
+  return Ctx;
+}
+
+/* Forward decls -- runReplInput is defined above in the same
+ * anonymous namespace; matlab_ws_* are runtime entries linked into
+ * matlabc. The conditional-breakpoint evaluator below calls into
+ * both. */
+extern "C" {
+double matlab_ws_get_f64(const char *name, int64_t len);
+double matlab_ws_has(const char *name, int64_t len);
+}
+
+/* Counter so each condition / log eval gets a unique <repl:N> file
+ * name in error messages. */
+int NextEvalId = 1000000;
+
+/* Try to evaluate `expr` as a MATLAB scalar in the current
+ * workspace. Wraps it in `__matlab_dbg_cond = (expr);` and runs the
+ * full REPL pipeline; the result lands in matlab_ws under that name.
+ *
+ * Returns 1 if the expression evaluated to a non-zero scalar, 0 if
+ * it evaluated to zero, and -1 if the eval failed (parse error,
+ * undefined name, etc). The caller can use -1 to disable the
+ * condition so subsequent hits don't keep retrying. */
+int evalConditionInWorkspace(const std::string &Expr) {
+  std::string Src = "__matlab_dbg_cond = (" + Expr + ");";
+  int Rc = runReplInput(sharedDapContext(), Src, NextEvalId++);
+  if (Rc != 0) return -1;
+  const char Name[] = "__matlab_dbg_cond";
+  if (matlab_ws_has(Name, (int64_t)(sizeof Name - 1)) == 0.0) return -1;
+  double V = matlab_ws_get_f64(Name, (int64_t)(sizeof Name - 1));
+  return V != 0.0 ? 1 : 0;
+}
+
+/* Walk a logMessage template, substituting `{name}` placeholders
+ * with the matching workspace variable's printed form. v1 only
+ * resolves bare identifiers — anything more complex (`{a + b}` or
+ * `{x(1)}`) is left as the literal substring so the user gets a
+ * clear hint to simplify. The output goes through formatVar so
+ * matrices become "RxC double" without dumping the whole buffer. */
+std::string formatVar(int Kind, int WsIdx);
+std::string interpolateLogMessage(const std::string &Tmpl) {
+  std::string Out;
+  Out.reserve(Tmpl.size());
+  for (size_t i = 0; i < Tmpl.size();) {
+    if (Tmpl[i] == '{') {
+      auto End = Tmpl.find('}', i + 1);
+      if (End != std::string::npos) {
+        std::string Inner = Tmpl.substr(i + 1, End - i - 1);
+        /* Trim whitespace. */
+        size_t s = 0, e = Inner.size();
+        while (s < e && std::isspace((unsigned char)Inner[s])) ++s;
+        while (e > s && std::isspace((unsigned char)Inner[e - 1])) --e;
+        Inner = Inner.substr(s, e - s);
+        bool IsIdent = !Inner.empty() && (std::isalpha((unsigned char)Inner[0]) || Inner[0] == '_');
+        for (size_t k = 1; IsIdent && k < Inner.size(); ++k)
+          if (!std::isalnum((unsigned char)Inner[k]) && Inner[k] != '_')
+            IsIdent = false;
+        if (IsIdent) {
+          int N = matlab_dbg_ws_count();
+          int Found = -1, Kind = -1;
+          for (int j = 0; j < N; ++j) {
+            int64_t Nlen = 0;
+            const char *Nm = matlab_dbg_ws_name(j, &Nlen);
+            if ((size_t)Nlen == Inner.size() &&
+                std::memcmp(Nm, Inner.data(), (size_t)Nlen) == 0) {
+              Found = j; Kind = matlab_dbg_ws_kind(j);
+              break;
+            }
+          }
+          if (Found >= 0) {
+            Out += formatVar(Kind, Found);
+          } else {
+            Out += "{"; Out += Inner; Out += "}";
+          }
+          i = End + 1;
+          continue;
+        }
+        /* Non-identifier expressions: pass through verbatim. */
+        Out += Tmpl.substr(i, End - i + 1);
+        i = End + 1;
+        continue;
+      }
+    }
+    Out += Tmpl[i++];
+  }
+  return Out;
 }
 
 /* Build + JIT the program, store into G.Engine, register its file
@@ -1134,8 +1288,20 @@ bool compileProgram() {
     return false;
   }
   G.FileId = (int32_t)F;
-  matlab_dbg_register_file(G.FileId, G.ProgramPath.data(),
-                            (int64_t)G.ProgramPath.size());
+  G.PathToFileId.clear();
+
+  /* Register every file the SourceManager knows about with the
+   * runtime's debug table. Today only the entry-point is loaded;
+   * once Sema starts pulling sibling .m files in to resolve
+   * cross-file calls they'll appear here automatically and
+   * cross-file breakpoints will Just Work. */
+  auto registerSMFile = [](FileID Fid, const std::string &Name) {
+    matlab_dbg_register_file((int32_t)Fid, Name.data(),
+                              (int64_t)Name.size());
+    G.PathToFileId[canonPath(Name)] = (int32_t)Fid;
+  };
+  for (size_t i = 1; i <= SM.numFiles(); ++i)
+    registerSMFile((FileID)i, SM.getName((FileID)i));
 
   DiagnosticEngine Diag(SM);
   Lexer Lx(SM, F, Diag);
@@ -1154,16 +1320,11 @@ bool compileProgram() {
   Inf.run(*TU);
   if (Diag.hasErrors()) { Diag.printAll(); return false; }
 
-  /* Keep MLIR context alive for the lifetime of the ExecutionEngine.
-   * We leak it into a static — the process exits on disconnect so
-   * there's no lifecycle to manage beyond that. */
-  static mlirgen::Context MCtx;
-  static bool Inited = false;
-  if (!Inited) {
-    mlir::registerBuiltinDialectTranslation(MCtx.get());
-    mlir::registerLLVMDialectTranslation(MCtx.get());
-    Inited = true;
-  }
+  /* Keep MLIR context alive for the lifetime of the ExecutionEngine
+   * AND for any subsequent breakpoint-condition evaluations the
+   * monitor thread runs through runReplInput. Static-local on first
+   * call, registers translations once, reused thereafter. */
+  mlirgen::Context &MCtx = sharedDapContext();
 
   auto M = mlirgen::lowerToMLIR(MCtx, TC, Diag, *TU, &SM,
                                 /*ReplMode=*/true, /*DebugMode=*/true);
@@ -1242,7 +1403,12 @@ void *workerMain(void *) {
 }
 
 /* Monitor thread: waits for either a pause or worker exit, and emits
- * the matching DAP event. Loops until the worker exits. */
+ * the matching DAP event. Loops until the worker exits. When the
+ * pause came from a conditional or log-point breakpoint we filter
+ * here — log messages get emitted as `output` events and the
+ * worker is resumed without ever telling the IDE we stopped; failing
+ * conditions silently resume too. The IDE only sees a `stopped`
+ * event for "real" pauses (step, plain bp, or true condition). */
 void *monitorMain(void *) {
   bool Debug = getenv("MATLABC_DAP_TRACE") != nullptr;
   while (true) {
@@ -1255,20 +1421,88 @@ void *monitorMain(void *) {
     if (matlab_dbg_is_paused()) {
       int32_t Fid = 0, Ln = 0;
       matlab_dbg_get_pause(&Fid, &Ln);
-      if (Debug) std::fprintf(stderr, "[monitor] stopped at %d\n", Ln);
-      Object Body{
-        {"reason", "breakpoint"},
-        {"threadId", 1},
-        {"allThreadsStopped", true},
-        {"line", (int64_t)Ln},
-      };
-      sendEvent("stopped", Value(std::move(Body)));
-      /* Wait until the worker is no longer paused (client resumed). */
-      pthread_mutex_lock(&G.Mu);
-      while (matlab_dbg_is_paused() && !G.WorkerExited)
-        pthread_cond_wait(&G.Cv, &G.Mu);
-      pthread_mutex_unlock(&G.Mu);
-      if (Debug) std::fprintf(stderr, "[monitor] resumed\n");
+      int BpIdx = matlab_dbg_get_pause_bp();
+      const char *Cond = nullptr, *Log = nullptr;
+      int64_t CondLen = 0, LogLen = 0;
+      int CondDisabled = 0;
+      if (BpIdx >= 0)
+        matlab_dbg_breakpoint_meta(BpIdx, &Cond, &CondLen, &Log, &LogLen,
+                                    &CondDisabled);
+
+      bool Suppress = false;
+
+      if (Log && LogLen > 0) {
+        /* Log point: emit an output event with the interpolated
+         * template, never tell the IDE we stopped. The worker is
+         * blocked inside matlab_dbg_hook; we resume it ourselves. */
+        std::string Tmpl(Log, (size_t)LogLen);
+        std::string Msg = interpolateLogMessage(Tmpl);
+        Msg += "\n";
+        sendEvent("output", Object{{"category", "console"},
+                                    {"output", Msg}});
+        Suppress = true;
+      } else if (CondDisabled) {
+        /* Eval failed earlier — silently suppress without re-trying
+         * the JIT pipeline. The diagnostic was already printed. */
+        Suppress = true;
+      } else if (Cond && CondLen > 0) {
+        /* Conditional breakpoint: evaluate against the workspace.
+         * eval == 0 → user expression was false; suppress the stop.
+         * eval == -1 → eval failed; mark the condition disabled so
+         * we don't keep paying the JIT cost for a broken expr. */
+        std::string Expr(Cond, (size_t)CondLen);
+        int Result = evalConditionInWorkspace(Expr);
+        if (Result == -1) {
+          std::fprintf(stderr,
+                       "[matlabc -dap] condition disabled at line %d: %s\n",
+                       (int)Ln, Expr.c_str());
+          matlab_dbg_disable_condition(BpIdx);
+          Suppress = true;
+        } else if (Result == 0) {
+          Suppress = true;
+        }
+      }
+
+      if (Suppress) {
+        if (Debug) {
+          std::fprintf(stderr, "[monitor] suppressed pause at %d\n", Ln);
+          std::fflush(stderr);
+        }
+        matlab_dbg_resume(CONTINUE);
+        pthread_mutex_lock(&G.Mu);
+        pthread_cond_broadcast(&G.Cv);
+        pthread_mutex_unlock(&G.Mu);
+      } else {
+        if (Debug) {
+          std::fprintf(stderr, "[monitor] stopped at %d\n", Ln);
+          std::fflush(stderr);
+        }
+        /* Snapshot the current resume generation BEFORE sending the
+         * stopped event. The continue/step handlers bump it under
+         * G.Mu, so we exit the inner wait the moment the client has
+         * acted — even if the worker has already re-paused at the
+         * next breakpoint by then. Without this, a paused→resume→
+         * paused sequence inside the wait window would mask the
+         * client's resume and leave us blocked forever. */
+        pthread_mutex_lock(&G.Mu);
+        uint64_t MyGen = G.ResumeGen;
+        pthread_mutex_unlock(&G.Mu);
+        Object Body{
+          {"reason", "breakpoint"},
+          {"threadId", 1},
+          {"allThreadsStopped", true},
+          {"line", (int64_t)Ln},
+        };
+        sendEvent("stopped", Value(std::move(Body)));
+        pthread_mutex_lock(&G.Mu);
+        while (G.ResumeGen == MyGen && !G.WorkerExited)
+          pthread_cond_wait(&G.Cv, &G.Mu);
+        pthread_mutex_unlock(&G.Mu);
+        if (Debug) {
+          std::fprintf(stderr, "[monitor] resumed\n");
+          std::fflush(stderr);
+        }
+      }
     }
 
     if (Exited) break;
@@ -1321,7 +1555,10 @@ void *pauseWatcherMain(void *) {
 }
 
 /* Format a variable for the DAP `variables` response. Matrices get
- * a shape summary ("1x3 double"), scalars get the f64 value. */
+ * a shape summary ("1x3 double") except 1x1 matrices, which unbox
+ * to the scalar value — matches matlab_struct_get_f64's auto-unbox
+ * and is also what users want to see in the watch panel for a
+ * counter-style variable. */
 std::string formatVar(int Kind, int WsIdx) {
   if (Kind == 0) {
     char Buf[64];
@@ -1333,6 +1570,17 @@ std::string formatVar(int Kind, int WsIdx) {
     if (!M) return "[]";
     int64_t R = matlab_dbg_mat_rows(M);
     int64_t C = matlab_dbg_mat_cols(M);
+    if (R == 1 && C == 1) {
+      char Buf[64];
+      /* matlab_dbg_mat_rows / _cols are the only DAP-exposed entries
+       * — there's no _data accessor. Fall back to ws_get_f64 which
+       * auto-unboxes via matlab_struct_get_f64. */
+      int64_t Nlen = 0;
+      const char *Nm = matlab_dbg_ws_name(WsIdx, &Nlen);
+      double V = matlab_ws_get_f64(Nm, Nlen);
+      snprintf(Buf, sizeof Buf, "%g", V);
+      return Buf;
+    }
     char Buf[64];
     snprintf(Buf, sizeof Buf, "%lldx%lld double",
              (long long)R, (long long)C);
@@ -1356,8 +1604,17 @@ bool handleRequest(const Object &Msg) {
     Object Caps{
       {"supportsConfigurationDoneRequest", true},
       {"supportsFunctionBreakpoints", false},
-      {"supportsConditionalBreakpoints", false},
-      {"supportsSetVariable", false},
+      /* Conditional breakpoints + log points evaluate at script-frame
+       * scope only (they read the workspace through matlab_ws_*).
+       * Conditions inside user-function frames see <script>'s vars
+       * but not the function's locals — Option B (per-function slot
+       * tables) is the planned follow-up. */
+      {"supportsConditionalBreakpoints", true},
+      {"supportsLogPoints", true},
+      /* setVariable accepts scalar (f64) values today; matrices,
+       * strings, structs, and cells are rejected with a clear
+       * error message in the response body. */
+      {"supportsSetVariable", true},
       {"supportsStepBack", false},
       {"supportsTerminateRequest", true},
     };
@@ -1394,8 +1651,21 @@ bool handleRequest(const Object &Msg) {
       sendResponse(ReqSeq, *Cmd, false, Value("no source"));
       return true;
     }
-    /* Wipe prior breakpoints for this file and replay the request. */
-    matlab_dbg_clear_breakpoints_in_file(G.FileId);
+    /* Resolve the IDE-supplied source.path against our path → file_id
+     * table. A miss means the JIT didn't load that file (yet) — we
+     * still respond successfully with verified=false for each
+     * breakpoint so the IDE doesn't tear down the connection, but
+     * nothing gets added to the runtime table. */
+    auto SrcPath = Src->getString("path");
+    int32_t Fid = 0;
+    if (SrcPath) {
+      auto It = G.PathToFileId.find(canonPath(SrcPath->str()));
+      if (It != G.PathToFileId.end()) Fid = It->second;
+    }
+    if (Fid != 0) {
+      /* Wipe prior breakpoints for this file and replay the request. */
+      matlab_dbg_clear_breakpoints_in_file(Fid);
+    }
     const Array *Bps = Args->getArray("breakpoints");
     Array Verified;
     if (Bps) {
@@ -1404,7 +1674,21 @@ bool handleRequest(const Object &Msg) {
         if (!BO) continue;
         auto Ln = BO->getInteger("line");
         if (!Ln) continue;
-        bool OK = matlab_dbg_add_breakpoint(G.FileId, (int32_t)*Ln);
+        bool OK = false;
+        if (Fid != 0) {
+          /* condition / logMessage are optional in the DAP spec;
+           * when present, route through the _ex form so the runtime
+           * stores the strings alongside the (file_id, line) pair
+           * for the monitor thread to read once the bp matches. */
+          auto Cond = BO->getString("condition");
+          auto Log  = BO->getString("logMessage");
+          std::string CS = Cond ? Cond->str() : std::string();
+          std::string LS = Log  ? Log->str()  : std::string();
+          OK = matlab_dbg_add_breakpoint_ex(
+              Fid, (int32_t)*Ln,
+              CS.empty() ? nullptr : CS.data(), (int64_t)CS.size(),
+              LS.empty() ? nullptr : LS.data(), (int64_t)LS.size());
+        }
         Verified.push_back(Object{
           {"verified", OK},
           {"line", *Ln},
@@ -1457,7 +1741,7 @@ bool handleRequest(const Object &Msg) {
         {"name", FnName ? FnName : "<frame>"},
         {"line", (int64_t)Ln},
         {"column", (int64_t)1},
-        {"source", sourceObj()},
+        {"source", sourceObjForFile(Fid)},
       };
       Frames.push_back(std::move(Fr));
     }
@@ -1499,8 +1783,73 @@ bool handleRequest(const Object &Msg) {
     return true;
   }
 
+  if (*Cmd == "setVariable") {
+    /* Mutate a workspace variable from the watch box. v1 supports
+     * scalar (f64) only — matrix / string / struct / cell come back
+     * as a non-fatal error so the IDE keeps the connection open and
+     * the user can correct the value. */
+    auto NameOpt = Args->getString("name");
+    auto ValOpt = Args->getString("value");
+    if (!NameOpt || !ValOpt) {
+      sendResponse(ReqSeq, *Cmd, false,
+                   Value("setVariable requires name and value"));
+      return true;
+    }
+    std::string NameStr = NameOpt->str();
+    std::string ValStr = ValOpt->str();
+    /* Find the variable to learn its current kind. Reject non-scalar
+     * targets up-front since matlab_ws_set_f64 would silently
+     * overwrite the existing matrix/struct entry with a scalar. */
+    int Kind = -1;
+    int N = matlab_dbg_ws_count();
+    for (int i = 0; i < N; ++i) {
+      int64_t Nlen = 0;
+      const char *Nm = matlab_dbg_ws_name(i, &Nlen);
+      if ((size_t)Nlen == NameStr.size() &&
+          std::memcmp(Nm, NameStr.data(), (size_t)Nlen) == 0) {
+        Kind = matlab_dbg_ws_kind(i);
+        break;
+      }
+    }
+    /* Kind == -1 means the name isn't in the workspace yet — allow
+     * the assignment as a fresh scalar (mirrors `>> x = 99` at the
+     * REPL when x didn't exist). */
+    if (Kind != -1 && Kind != 0) {
+      sendResponse(ReqSeq, *Cmd, false,
+                   Value("only scalar set is supported"));
+      return true;
+    }
+    /* Parse the value as a double. strtod tolerates trailing
+     * whitespace; we reject anything past the first non-numeric
+     * character so "1.5junk" doesn't silently land as 1.5. */
+    char *EndP = nullptr;
+    double V = std::strtod(ValStr.c_str(), &EndP);
+    if (!EndP || EndP == ValStr.c_str()) {
+      sendResponse(ReqSeq, *Cmd, false,
+                   Value("value is not a number"));
+      return true;
+    }
+    while (*EndP == ' ' || *EndP == '\t' || *EndP == '\n' || *EndP == '\r')
+      ++EndP;
+    if (*EndP != '\0') {
+      sendResponse(ReqSeq, *Cmd, false,
+                   Value("trailing characters after number"));
+      return true;
+    }
+    matlab_ws_set_f64(NameStr.data(), (int64_t)NameStr.size(), V);
+    char Buf[64];
+    snprintf(Buf, sizeof Buf, "%g", V);
+    sendResponse(ReqSeq, *Cmd, true,
+                 Object{{"value", std::string(Buf)}});
+    return true;
+  }
+
   auto nudgeMonitor = [] {
     pthread_mutex_lock(&G.Mu);
+    /* Bump the generation so the monitor's inner wait, which
+     * snapshots ResumeGen before sleeping, exits the moment the
+     * client has acted. The broadcast wakes the wait. */
+    G.ResumeGen++;
     pthread_cond_broadcast(&G.Cv);
     pthread_mutex_unlock(&G.Mu);
   };

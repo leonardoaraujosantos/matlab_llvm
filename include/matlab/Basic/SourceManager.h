@@ -41,6 +41,9 @@ public:
   std::string_view getBuffer(FileID File) const;
   const std::string &getName(FileID File) const;
 
+  // Number of files currently loaded. FileIDs are 1..numFiles().
+  size_t numFiles() const { return Entries.size(); }
+
   LineColumn getLineColumn(SourceLocation Loc) const;
   std::string_view getLineText(FileID File, uint32_t Line) const;
 
