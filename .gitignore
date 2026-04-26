@@ -15,3 +15,7 @@ examples/*
 
 # Local Claude Code state (worktrees, transcripts, agent scratch)
 .claude/
+
+# Python bytecode caches from the test harness scripts
+__pycache__/
+*.pyc
