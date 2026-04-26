@@ -1059,13 +1059,37 @@ void Lowerer::lowerStmt(const Stmt &St) {
   if (DebugMode && SM && St.Range.Begin.isValid() &&
       St.Kind != NodeKind::Block) {
     auto LC = SM->getLineColumn(St.Range.Begin);
+    uint32_t HookLine = LC.Line;
+    /* Normalize the hook line to the first non-blank, non-comment-only
+     * source line within [Begin.Line, End.Line]. For well-formed
+     * statements Begin already points at code and the loop exits on
+     * its first iteration, so this is a no-op. The slide-forward path
+     * matters when a parse path anchors Begin to a position that ends
+     * up on a blank/comment line — without it, stepping would land on
+     * a row with no executable code, which is confusing in the IDE.
+     * The walk is bounded by End.Line so it can never cross into the
+     * next statement and steal its line. */
+    if (St.Range.End.isValid()) {
+      uint32_t EndLine = SM->getLineColumn(St.Range.End).Line;
+      while (HookLine < EndLine) {
+        auto Text = SM->getLineText(St.Range.Begin.File, HookLine);
+        size_t I = 0;
+        while (I < Text.size() && (Text[I] == ' ' || Text[I] == '\t'))
+          ++I;
+        bool Blank = (I == Text.size());
+        bool CommentOnly = (I < Text.size() &&
+                            (Text[I] == '%' || Text[I] == '#'));
+        if (!Blank && !CommentOnly) break;
+        ++HookLine;
+      }
+    }
     auto I32 = mlir::IntegerType::get(&MCtx, 32);
     mlir::Value FileV = mlir::arith::ConstantOp::create(
         B, loc(St.Range), I32,
         mlir::IntegerAttr::get(I32, (int64_t)St.Range.Begin.File));
     mlir::Value LineV = mlir::arith::ConstantOp::create(
         B, loc(St.Range), I32,
-        mlir::IntegerAttr::get(I32, (int64_t)LC.Line));
+        mlir::IntegerAttr::get(I32, (int64_t)HookLine));
     mlir::NamedAttribute Cal(
         mlir::StringAttr::get(&MCtx, "callee"),
         mlir::StringAttr::get(&MCtx, "matlab_dbg_hook"));

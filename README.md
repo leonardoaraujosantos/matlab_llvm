@@ -163,6 +163,7 @@ Useful modifiers:
 | `-no-line` | omit `#line` markers in generated C / C++ / Python |
 | `-doxygen` | preserve function-leading comments as Doxygen blocks in `-emit-c` / `-emit-cpp` |
 | `-cpp-auto` | prefer `auto` in generated C++ locals |
+| `-g` / `--debug-hooks` | inject `matlab_dbg_hook(file_id, line)` at every statement (the same instrumentation `-dap` runs against; visible in `-emit-mlir` / `-emit-c` / `-emit-cpp` output) |
 
 The repo also builds `matlab-lsp`, a lightweight Language Server that
 reuses the same frontend.
@@ -179,12 +180,13 @@ against your `.m` script. What works today:
 | Plain line breakpoints | `setBreakpoints`; verified against the loaded source |
 | Conditional breakpoints | `condition` evaluated against the workspace via the REPL JIT — pause iff non-zero |
 | Log points | `logMessage` with `{name}` placeholders, emitted as DAP `output` events; never pauses |
-| Step into / over / out | Full step into user-function bodies — frame stack pushed on entry, popped on return |
+| Step into / over / out | Full step into user-function bodies — frame stack pushed on entry, popped on return; pauses surface as DAP `reason="step"` |
 | Continue / pause / stop on entry | All standard resume actions plus `stopOnEntry` on launch |
 | Multi-frame stack trace | `stackTrace` walks back through nested calls (e.g. recursive `fact(5)` shows 5 `fact` frames + `<script>`) |
 | Variable inspection | `Locals` scope = the script-level workspace; matrices show shape, 1×1 unboxes to scalar |
 | `setVariable` (scalars) | Type a number in the watch box and the new value flows through subsequent reads |
 | Multi-file path resolution | Every `SourceManager`-loaded file is registered with the runtime; phantom paths cleanly return `verified=false` |
+| Hook line normalization | Stepping never lands on a blank or comment-only row — the lowering anchors each statement's hook to its first executable line |
 
 Minimal nvim-dap config:
 
@@ -206,6 +208,12 @@ locals inside user functions aren't reachable yet), see
 [`docs/debug.md`](docs/debug.md). Lower-level aids — `dbg(x)` source-
 located prints, `who` / `whos` / `clear` in the REPL, `#line`-annotated
 C/C++ output for stepping in `lldb`/`gdb` — live there too.
+
+The debugging surface is regression-tested by two ctest suites,
+`debug-hook-tests` (per-statement hook injection in the lowering) and
+`debug-dap-tests` (end-to-end DAP scenarios driven by a small Python
+client over `matlabc -dap`'s stdio). Run with
+`ctest --test-dir build -R "debug-"`.
 
 ## Main Features
 

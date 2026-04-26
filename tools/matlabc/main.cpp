@@ -63,6 +63,11 @@ struct Options {
   bool NoLine = false;
   bool Doxygen = false;
   bool CppAuto = false;
+  /* When true, lowering injects matlab_dbg_hook(file_id, line) at the
+   * start of every statement. Enabled implicitly for -dap; exposed via
+   * -g for tests and tooling that want to inspect the injected hooks
+   * in the emitted MLIR / C / C++ without standing up a DAP session. */
+  bool Debug = false;
   std::string InputPath;
 };
 
@@ -72,7 +77,7 @@ int usage(const char *Prog) {
                "             -emit-mlir | -emit-llvm | -emit-c | -emit-cpp |\n"
                "             -emit-python |\n"
                "             -format | -repl | -dap]\n"
-               "            [-no-line] [-doxygen] [-cpp-auto]  FILE.m\n";
+               "            [-no-line] [-doxygen] [-cpp-auto] [-g]  FILE.m\n";
   return 64;
 }
 
@@ -96,6 +101,7 @@ bool parseArgs(int Argc, char **Argv, Options &Opts, const char *&Prog) {
     else if (A == "-no-line" || A == "--no-line") Opts.NoLine = true;
     else if (A == "-doxygen" || A == "--doxygen") Opts.Doxygen = true;
     else if (A == "-cpp-auto" || A == "--cpp-auto") Opts.CppAuto = true;
+    else if (A == "-g" || A == "--debug-hooks") Opts.Debug = true;
     else if (A == "-h" || A == "--help") return false;
     else if (!A.empty() && A[0] == '-') {
       std::cerr << "unknown flag: " << A << "\n";
@@ -1487,8 +1493,14 @@ void *monitorMain(void *) {
         pthread_mutex_lock(&G.Mu);
         uint64_t MyGen = G.ResumeGen;
         pthread_mutex_unlock(&G.Mu);
+        /* The runtime sets cur_bp_idx >= 0 only when a breakpoint
+         * matched; step / pause comes through with BpIdx == -1.
+         * Surface that as the DAP-standard "step" reason so the IDE
+         * renders the right icon and doesn't imply the user has an
+         * unexpected breakpoint sitting on the current line. */
+        const char *Reason = (BpIdx >= 0) ? "breakpoint" : "step";
         Object Body{
-          {"reason", "breakpoint"},
+          {"reason", Reason},
           {"threadId", 1},
           {"allThreadsStopped", true},
           {"line", (int64_t)Ln},
@@ -2024,7 +2036,9 @@ int main(int Argc, char **Argv) {
       Opts.Mode == Options::Mode::EmitPython) {
     mlirgen::Context MCtx;
     if (TU) {
-      auto M = mlirgen::lowerToMLIR(MCtx, TC, Diag, *TU, &SM);
+      auto M = mlirgen::lowerToMLIR(MCtx, TC, Diag, *TU, &SM,
+                                    /*ReplMode=*/false,
+                                    /*DebugMode=*/Opts.Debug);
       if (mlir::failed(mlir::verify(M))) {
         std::cerr << "error: MLIR verification failed after lowering\n";
         return 1;

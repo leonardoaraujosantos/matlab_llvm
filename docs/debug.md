@@ -77,10 +77,20 @@ matlabc -emit-sema   file.m      # resolver + type inference
 matlabc -emit-mir    file.m      # reference IR (in-house)
 matlabc -emit-mlir   file.m      # mlir dialect (pre-passes)
 matlabc -emit-mlir -opt file.m   # after slot-promotion + scalar-arith
+matlabc -emit-mlir -g  file.m    # with matlab_dbg_hook(file_id, line)
+                                 # injected at every statement (the same
+                                 # IR shape -dap runs against, minus the
+                                 # ReplMode workspace plumbing)
 matlabc -emit-llvm   file.m      # final LLVM IR text
 matlabc -emit-c      file.m      # portable C (includes #line)
 matlabc -emit-cpp    file.m      # portable C++ (classes preserved)
 ```
+
+`-g` (alias `--debug-hooks`) is the same flag the test suite uses to
+verify that every emitted hook lands on a real, executable source line.
+Combine it with `-emit-mlir` to see exactly which statements get a
+hook and which lines they report — handy when an editor stops on a
+seemingly random row.
 
 In the REPL, set `MATLABC_REPL_DUMP=1` to print the final MLIR of each
 input before it's handed to the JIT — useful when a compile-time error
@@ -161,7 +171,7 @@ VS Code via a generic-DAP extension:
 | Conditional breakpoints         | `setBreakpoints` `condition`        |
 | Log points (no pause)           | `setBreakpoints` `logMessage`       |
 | Resume                          | `continue`                          |
-| Step over / in / out            | `next` / `stepIn` / `stepOut`       |
+| Step over / in / out            | `next` / `stepIn` / `stepOut` (stops report `reason="step"`) |
 | Pause a running program         | `pause` (breaks at the next stmt)   |
 | Stack trace across user fns     | `stackTrace`                        |
 | Scopes (just `Locals` for now)  | `scopes`                            |
@@ -189,6 +199,19 @@ VS Code via a generic-DAP extension:
   matrices in the `variables` response since VS Code's watch UI
   doesn't page cleanly. Use `dbg(M)` in the source if you need
   content.
+- **Hook line normalization.** The `matlab_dbg_hook(file_id, line)`
+  call injected at the start of each statement is anchored to the
+  first non-blank, non-comment-only line within that statement's
+  source range. The walk is bounded by the statement's end line so it
+  can never overshoot into the next statement — but it does mean
+  stepping reliably lands on a row that contains code, never on a
+  blank separator or a `% ...` comment line. Implementation:
+  `lib/MLIR/Lowering.cpp::lowerStmt`.
+- **Stop reasons.** When the runtime pauses, the DAP server inspects
+  `matlab_dbg_get_pause_bp()` to distinguish a real breakpoint match
+  (returns `>= 0`) from a step / `pause` (returns `-1`). The `stopped`
+  event's `reason` field is `"breakpoint"` or `"step"` accordingly,
+  matching the DAP spec so the IDE renders the correct icon.
 
 ### Conditional breakpoints and log points
 
@@ -260,6 +283,42 @@ exchange looks like:
 
 Compare to the protocol cheat sheet at the end of
 [`docs/lsp.md`](lsp.md) for the equivalent LSP framing.
+
+### Test coverage
+
+Two ctest suites guard the debugging surface (both gated on
+`MATLAB_LLVM_WITH_MLIR=ON`):
+
+- **`debug-hook-tests`** — drives `matlabc -emit-mlir -g` over a small
+  set of fixtures in `test/Debug/*.m` (blank lines, comment lines,
+  `if`/`for`/`while` blocks, helper-function bodies). Extracts the
+  line constant baked into every emitted `matlab_dbg_hook` call and
+  asserts both the exact list per fixture *and* the property that
+  every hook line points at a non-blank, non-comment-only source row.
+  This is what guards "stepping never lands on a blank line", whether
+  or not the lowering's normalization pass had to fire.
+
+- **`debug-dap-tests`** — spawns `matlabc -dap` as a subprocess and
+  drives the protocol with a small Python client
+  (`test/Debug/dap_client.py`). Six scenarios cover the end-to-end
+  surface:
+  - plain breakpoint (`reason="breakpoint"`, expected line)
+  - step-vs-breakpoint reasons (the regression where every pause
+    was hardcoded as `"breakpoint"` even after `next`)
+  - `stackTrace` / `scopes` / `variables` introspection
+  - `setVariable` round-trip (write a scalar, read it back)
+  - conditional breakpoint (false condition silently resumes, true
+    one stops)
+  - log point (emits an `output` event, never `stopped`)
+
+Run the lot via:
+
+```bash
+ctest --test-dir build -R "debug-" --output-on-failure
+```
+
+Both suites finish in well under two seconds combined; no hangs even
+when a scenario fails (the Python harness uses bounded timeouts).
 
 ## Deliberately out of scope
 

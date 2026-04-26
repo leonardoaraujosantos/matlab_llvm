@@ -219,4 +219,24 @@ if(MATLAB_LLVM_WITH_MLIR)
     COMMAND ${CMAKE_SOURCE_DIR}/test/EmitC/run_tests.sh $<TARGET_FILE:matlabc>
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/EmitC
   )
+  # Debug-hook injection: drives `matlabc -emit-mlir -g` over fixtures
+  # that exercise blank lines, comments, control-flow blocks, and
+  # function bodies; asserts each matlab_dbg_hook call lands on a real,
+  # executable source line. Guards both the per-fixture line lists and
+  # the "stepping never lands on a blank line" invariant.
+  add_test(
+    NAME debug-hook-tests
+    COMMAND ${CMAKE_SOURCE_DIR}/test/Debug/run_tests.sh $<TARGET_FILE:matlabc>
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Debug
+  )
+  # End-to-end DAP scenarios: spawns matlabc -dap, drives the protocol
+  # with a Python harness, asserts breakpoint hits, step-vs-breakpoint
+  # stop reasons, stackTrace / scopes / variables, setVariable,
+  # conditional breakpoints, and log points.
+  add_test(
+    NAME debug-dap-tests
+    COMMAND python3 ${CMAKE_SOURCE_DIR}/test/Debug/run_dap_tests.py
+            $<TARGET_FILE:matlabc>
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Debug
+  )
 endif()
