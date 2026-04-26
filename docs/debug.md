@@ -179,7 +179,8 @@ VS Code via a generic-DAP extension:
 | Stack trace across user fns     | `stackTrace`                        |
 | Per-frame Locals                | `scopes(frameId)` returns one Locals scope per frame; `variables(ref)` reads either the script ws or that frame's mini-ws |
 | Workspace variables snapshot    | `variables`                         |
-| Watch / hover / debug-console eval | `evaluate` (against script-level workspace; function-frame scoping is the planned follow-up) |
+| Watch / hover / debug-console eval | `evaluate` against any frame's locals — pass `frameId` for function-frame scope, omit for script scope |
+| Multi-file breakpoints          | Sibling `.m` files (function-only or classdef-only) in the entry-point's directory get auto-loaded; bps on their lines fire correctly |
 | Mutate any workspace variable   | `setVariable` (any MATLAB expr on RHS — scalar, matrix, string, struct) |
 | Clean shutdown / terminate      | `disconnect` / `terminate`          |
 | Program stdout forwarded        | `output` event (category `stdout`)  |
@@ -329,17 +330,48 @@ identifier before the wrap, so a malformed `name` like
 `"x); system(...)"` can't smuggle extra statements past the literal
 concatenation.
 
+### Multi-file breakpoints
+
+`compileProgram` walks the entry-point's directory for sibling `.m`
+files, parses each independently, and merges any **function-only or
+classdef-only** sibling's `Functions` / `Classes` into the main
+`TranslationUnit`. Siblings with a script body are skipped (they're
+treated as their own entry-point candidates). Each loaded file lands
+in `SourceManager` with a fresh FileID and gets registered with the
+runtime via `matlab_dbg_register_file`, so an IDE-supplied path on
+`helper.m:5` resolves through `G.PathToFileId` and the breakpoint
+fires when the JIT'd helper executes that line.
+
+Sibling load order is alphabetically deterministic so file_id
+assignment is reproducible across runs.
+
+Phantom paths (a path the IDE knows about but no file is loaded for)
+still come back with `verified=false` instead of crashing.
+
+Out of scope today: cross-directory walks, script-bodied helpers,
+and friendlier duplicate-symbol diagnostics. See
+[`docs/debug_improve_plan.md`](debug_improve_plan.md) item 2 for the
+follow-up policy options.
+
+### Frame-scoped `evaluate`
+
+`evaluate` accepts an optional `frameId`. When it points at a
+non-script frame, the handler bridges that frame's mini-workspace
+into `matlab_ws` for the duration of the eval and reverses the
+bridge afterward — snapshot pre-existing entries, stamp the frame
+locals on top, run `runReplInput`, restore. Stamped names that
+didn't pre-exist get cleared via `matlab_ws_clear_one` so eval
+doesn't leak function locals into the persistent script workspace.
+
+Known shadowing limitation: the REPL JIT resolves bare identifiers
+as builtin function references when the name matches a MATLAB
+builtin (`sum`, `prod`, ...) — so a function-frame local named
+after a builtin won't resolve through `evaluate`. The fixture's
+helper variable is named `total` rather than `sum` for this reason.
+
 ### Other known limits (deferred, not blocked)
 
 - **Function breakpoints.** Not advertised as supported.
-- **Multiple source files.** The DAP server keeps a path → file_id
-  table seeded from every file the SourceManager loaded, and the
-  `setBreakpoints` handler resolves the IDE-supplied path against
-  it (canonicalized via `realpath`). Today only the entry-point
-  `.m` is loaded — once Sema starts pulling in sibling `.m` files
-  for cross-file calls they'll appear here automatically. Phantom
-  paths still respond with `verified=false` instead of crashing.
-  This is the only "gated on infrastructure outside DAP" item.
 
 ### Tracing the wire
 
@@ -385,19 +417,27 @@ Two ctest suites guard the debugging surface (both gated on
 
 - **`debug-dap-tests`** — spawns `matlabc -dap` as a subprocess and
   drives the protocol with a small Python client
-  (`test/Debug/dap_client.py`). Nine scenarios cover the end-to-end
+  (`test/Debug/dap_client.py`). Eleven scenarios cover the end-to-end
   surface:
   - plain breakpoint (`reason="breakpoint"`, expected line)
   - step-vs-breakpoint reasons (the regression where every pause
     was hardcoded as `"breakpoint"` even after `next`)
   - `stackTrace` / `scopes` / `variables` introspection
   - **function-frame Locals** — paused inside `compute(a, b)`,
-    `variables` for the function frame shows `a` / `b` / `sum` and
+    `variables` for the function frame shows `a` / `b` / `total` and
     NOT script-scope `seed`; the script frame's view shows `seed`
     and not the function's locals
-  - **`evaluate`** — pure arithmetic (`1 + 1`), workspace references
-    (`x`, `x + y`), matrix literals (`[1 2; 3 4]`), trailing-semicolon
-    tolerance, malformed-expression rejection
+  - **`evaluate`** (script scope) — pure arithmetic (`1 + 1`),
+    workspace references (`x`, `x + y`), matrix literals
+    (`[1 2; 3 4]`), trailing-semicolon tolerance, malformed
+    rejection
+  - **`evaluate` in a function frame** — `evaluate("a", frameId=…)`
+    resolves to the function's parameter; without `frameId` the same
+    expression silently defaults; after the bridge reverses, the
+    script ws is unchanged
+  - **multi-file breakpoint** — `dap_main.m` calls `helper_fn` from
+    a sibling `dap_helper.m`; bp on the helper file is `verified`,
+    fires, and `stackTrace` reports the helper's source path
   - `setVariable` round-trip — scalar, matrix literal `[1 2; 3 4]`,
     fresh-name assignment, malformed-RHS rejection,
     non-identifier-name rejection

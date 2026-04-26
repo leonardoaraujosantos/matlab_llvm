@@ -40,27 +40,54 @@ and the multi-frame `stackTrace` covered indirectly through
 
 ---
 
-## (2) Multi-file breakpoints — **gated** on Sema cross-file work
+## (2) Multi-file breakpoints — **shipped** (function-only siblings)
 
-The DAP server's path → file_id table (`G.PathToFileId`) and the
-`setBreakpoints` resolver are fully wired (`tools/matlabc/main.cpp`
-around `:1660`). What's missing is upstream: today only the
-entry-point `.m` is loaded by `SourceManager::loadFile`. Cross-file
-calls — `myscript.m` calling a function defined in `helper.m` — would
-need Sema to discover sibling files at name-resolution time, parse
-them, and register them with the runtime via
-`matlab_dbg_register_file` so breakpoint paths resolve.
+`compileProgram` in `tools/matlabc/main.cpp` walks the entry-point's
+directory for sibling `.m` files. Each sibling is lexed + parsed
+into its own `TranslationUnit` and, **only if** its `ScriptNode` is
+empty (function-only or classdef-only files), its `Functions` and
+`Classes` are merged into the main TU. The "skip script-bodied
+siblings" rule prevents stitching unrelated executable code into the
+launch — the DAP-test corpus has many `*.m` fixtures that are
+themselves entry points and would conflict otherwise.
 
-This is a non-trivial frontend change (file discovery policy,
-duplicate-symbol diagnostics, transitive imports for classdef
-hierarchies) and lives outside the DAP layer. Once it lands the DAP
-side will Just Work; no further DAP changes needed.
+Each loaded file gets a distinct `SourceManager` FileID, gets
+registered with the runtime via the existing
+`matlab_dbg_register_file` walk, and lands in `G.PathToFileId`. An
+IDE-supplied breakpoint path on `helper.m:5` now resolves through the
+table; the JIT'd helper's hooks carry the right file_id (the
+parser stamps each token with its source FileID, which the lowering
+hook uses verbatim), so the breakpoint fires.
 
-Tracking note for the eventual implementer: when sibling files are
-parsed, call `SM.loadFile(siblingPath)` and pass the resulting FileID
-+ canonical path to `matlab_dbg_register_file` from
-`tools/matlabc/main.cpp::compileProgram` (already pre-walks the
-SourceManager entries — extending the loop is a one-line change).
+Sibling load order is **deterministic** (alphabetical sort of the
+directory listing) so file_id assignment is reproducible across runs
+— useful when comparing DAP traces.
+
+Validated by `scn_multifile_breakpoint` in
+`test/Debug/dap_scenarios.py`, which uses the
+`test/Debug/multifile/` fixture (a `dap_main.m` that calls a
+`helper_fn` defined in `dap_helper.m`) and verifies:
+- the helper-file breakpoint comes back `verified=true`
+- the stop event reports the helper file's path and line
+- `stackTrace` shows `helper_fn` over `<script>` with each frame's
+  source path correctly attributed
+- function-frame Locals work for the helper (parameter spill +
+  intermediate compute)
+
+### Out of scope for this commit
+
+- **Script-bodied helpers**: a sibling that mixes top-level
+  statements with local-function definitions still won't have its
+  helpers visible to the entry point. Real MATLAB's path-based
+  resolution is more nuanced; this commit covers the common
+  function-file pattern.
+- **Cross-directory imports**: only the entry point's own directory
+  is walked. Adding subdirectories or a `path` config flag is the
+  next obvious step.
+- **Duplicate-symbol diagnostics across siblings**: if two sibling
+  files define a function with the same name, Sema flags the second
+  one. That's the right behavior but the diagnostic could be
+  friendlier.
 
 ---
 
@@ -149,35 +176,51 @@ because legacy ref `1` still maps to the script-level workspace view.
 
 ---
 
-## (6) Frame-scoped `evaluate` — **deferred**
+## (6) Frame-scoped `evaluate` — **shipped**
 
-Now that `variables` can render any frame's locals, the obvious next
-step is letting `evaluate` operate against the same per-frame slice.
-Today the evaluator runs through `runReplInput`, which compiles
-against the global `matlab_ws` — so a watch expression typed while
-paused inside `compute(a, b)` can reference `seed` (script ws) but
-NOT `a` / `b` / `sum` (function-frame mini-ws).
+The DAP `evaluate` handler in `tools/matlabc/main.cpp` now accepts an
+optional `frameId`. When it points at a non-script frame, the handler
+bridges that frame's mini-workspace into `matlab_ws` for the
+duration of the eval and reverses the bridge on the way out:
 
-### Recommended approach
+1. **Snapshot** the pre-existing `matlab_ws` entries whose names
+   collide with the frame's mini-ws.
+2. **Stamp** the frame's mini-ws entries into `matlab_ws`. Tracks
+   stamped names + which were pre-existing.
+3. **Run** `runReplInput` for `__matlab_dbg_eval = (<expr>);`.
+4. **Read** the result + format via `formatVar`.
+5. **Restore**: clear `__matlab_dbg_eval` (so it doesn't pile up
+   across calls), clear stamped names that didn't pre-exist (via
+   `matlab_ws_clear_one`), and re-set names that were pre-existing
+   to their snapshot values.
 
-The cleanest path is to bridge the requested frame's mini-ws into
-`matlab_ws` for the duration of the eval:
+Implementation is entirely in the DAP handler — no runtime or
+lowering changes. The runtime already exposed
+`matlab_ws_clear_one(name, len)` (used by MATLAB's `clear name` form)
+which made the restore trivial.
 
-1. **Snapshot the script ws** so the bridge is reversible.
-2. **Stamp the frame's mini-ws entries** into `matlab_ws` under their
-   bare names (overwriting any same-named script var temporarily).
-3. **Run `runReplInput`** for `__matlab_dbg_eval = (<expr>);`.
-4. **Read the result**, then **restore the script ws** from the
-   snapshot.
+### Known shadowing limitation
 
-The snapshot/restore avoids leaking function-frame state into the
-script's persistent workspace once the user resumes. Implementation
-lives entirely in `tools/matlabc/main.cpp`'s `evaluate` handler;
-neither the runtime nor the lowering needs to change.
+The REPL JIT resolves bare identifiers as builtin function references
+when a name matches a MATLAB builtin (`sum`, `prod`, `max`, ...) —
+even after stamping. So a function-frame local named `sum` won't
+resolve through `evaluate`; the user gets a compile failure. The
+fixture's helper variable was renamed from `sum` to `total` to avoid
+the collision. A proper fix would teach the resolver to prefer
+matlab_ws entries over builtins under ReplMode, which is a
+self-contained Resolver change but bigger than this commit.
 
-Validation: extend `scn_evaluate` so that, while paused inside
-`compute()`, `evaluate("a + b")` returns the expected `sum` value;
-afterwards script-scope `seed` is still its pre-eval value.
+Validated by `scn_evaluate_in_frame` in
+`test/Debug/dap_scenarios.py`, which paused inside `compute(a, b)`
+verifies:
+- `evaluate("a")` without frameId silently resolves to the runtime's
+  default-empty value (NOT `3`)
+- `evaluate("a", frameId=inner)` returns `"3"`; same for `b`,
+  `total`, and arithmetic on them
+- After the bridge fires, the script frame's Locals (which surface
+  `matlab_ws + frame_locals[0]`) still don't show `a`, `b`, `total`
+  — the restore took them back out
+- Pre-existing script-scope vars (`seed`) survive untouched
 
 ---
 
@@ -208,13 +251,25 @@ afterwards script-scope `seed` is still its pre-eval value.
 | # | Status | Depends on |
 |---|---|---|
 | 1 | shipped | — |
-| 2 | gated   | Sema cross-file work |
+| 2 | shipped (function-only siblings) | — |
 | 3 | shipped | — |
 | 4 | shipped | — |
 | 5 | shipped | — |
-| 6 | deferred | (5) shipped — has the per-frame mini-ws to bridge |
+| 6 | shipped | — |
 
-The next actionable pickup is item (6) — small focused change
-(snapshot/restore around `runReplInput` inside the `evaluate`
-handler) that closes the last DAP-side gap on this list. Item (2)
-waits on Sema regardless of DAP work.
+All originally-tracked items have landed. The remaining DAP-side
+follow-ups are smaller polish:
+
+- **Resolver-prefers-ws-over-builtin** (gated by item 6's shadowing
+  limitation): teach the resolver under ReplMode to look up
+  `matlab_ws` before falling back to builtin function references, so
+  a workspace variable named `sum` shadows the builtin in
+  `evaluate`-context expressions. Self-contained Resolver change.
+- **Cross-directory multi-file**: extend item 2's directory walk to
+  also cover sub-directories, or accept a `path` configuration entry.
+- **Script-bodied helpers**: real MATLAB resolves local helper
+  functions inside script files when set as the entry point. Not
+  pursued today.
+
+These three would close the remaining DAP-relevant gaps; nothing on
+the original plan is still open.

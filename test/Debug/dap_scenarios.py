@@ -293,13 +293,13 @@ def scn_function_locals(matlabc, program):
         os.path.dirname(os.path.abspath(program)),
         "dap_locals_program.m",
     )
-    # Line 12 is `s = sum * 2;` inside compute(). The hook fires at
-    # the start of the stmt, so by then a, b (param spills) and sum
-    # (line 11) are all in the function frame's mini-ws.
+    # Line 11 is `s = total * 2;` inside compute(). The hook fires at
+    # the start of the stmt, so by then a, b (param spills) and total
+    # (line 10) are all in the function frame's mini-ws.
     with DapClient(matlabc, locals_program) as c:
-        initialize_and_launch(c, breakpoints=[{"line": 12}])
+        initialize_and_launch(c, breakpoints=[{"line": 11}])
         body = _stop_event(c)
-        assert body.get("line") == 12, body
+        assert body.get("line") == 11, body
 
         st = c.request("stackTrace", {"threadId": 1})
         frames = st.get("stackFrames") or []
@@ -323,8 +323,8 @@ def scn_function_locals(matlabc, program):
             f"expected compute.a=3, got {vars_inner!r}"
         assert vars_inner.get("b") == "4", \
             f"expected compute.b=4, got {vars_inner!r}"
-        assert vars_inner.get("sum") == "7", \
-            f"expected compute.sum=7, got {vars_inner!r}"
+        assert vars_inner.get("total") == "7", \
+            f"expected compute.total=7, got {vars_inner!r}"
         # `s` not yet assigned (the bp is on the line that computes it
         # — hook fires before the store), so it must not appear.
         assert "s" not in vars_inner, \
@@ -349,13 +349,11 @@ def scn_function_locals(matlabc, program):
 
 
 def scn_evaluate(matlabc, program):
-    """DAP `evaluate` powers watch / hover / debug console expressions.
+    """DAP `evaluate` against the script-level workspace.
 
     Runs the user expression through the same REPL JIT pipeline
-    conditional breakpoints use, against the script-level workspace.
-    Function-frame locals aren't yet visible to the evaluator (the
-    follow-up to this commit) — hence the assertions are limited to
-    things reachable from script scope.
+    conditional breakpoints use. The frame-scoped variant is exercised
+    by scn_evaluate_in_frame below.
     """
     with DapClient(matlabc, program) as c:
         initialize_and_launch(c, breakpoints=[{"line": 8}])
@@ -387,6 +385,168 @@ def scn_evaluate(matlabc, program):
             raise AssertionError("evaluate accepted a malformed expression")
         except DapError:
             pass
+
+        c.request("continue")
+        c.wait_event("terminated", timeout=5.0)
+
+
+def scn_evaluate_in_frame(matlabc, program):
+    """`evaluate` resolves function-frame locals when frameId points at
+    a non-script frame.
+
+    Implementation: the DAP server snapshots matlab_ws, stamps the
+    chosen frame's mini-ws into ws, runs runReplInput, reads the
+    result, then restores ws (clearing freshly-stamped names that
+    didn't exist pre-stamp). The script workspace must be unchanged
+    after the call so subsequent script-frame evals don't see leaked
+    function locals.
+    """
+    import os
+    locals_program = os.path.join(
+        os.path.dirname(os.path.abspath(program)),
+        "dap_locals_program.m",
+    )
+    # Pause inside compute(a, b) where a=3, b=4, total=7 are visible.
+    with DapClient(matlabc, locals_program) as c:
+        initialize_and_launch(c, breakpoints=[{"line": 11}])
+        _stop_event(c)
+        st = c.request("stackTrace", {"threadId": 1})
+        frames = st.get("stackFrames") or []
+        inner = frames[0]
+        outer = frames[1]
+        inner_id = inner["id"]
+        outer_id = outer["id"]
+
+        # Without frameId — eval defaults to the script ws. The REPL
+        # JIT silently resolves an unknown name to an empty matrix
+        # (0x0 double) rather than erroring. The exact rendering
+        # ("0x0 double" today) is a runtime detail; what matters for
+        # the bridge test is that this baseline value is NOT "3", so
+        # we'll be sure the per-frame branch below changed something.
+        resp_no_frame = c.request("evaluate", {"expression": "a"})
+        assert resp_no_frame.get("result") != "3", \
+            f"sanity: 'a' without frameId must not be 3 (compute's value): {resp_no_frame!r}"
+
+        # With frameId pointing at the function frame: a/b/total must
+        # all resolve and arithmetic on them must work.
+        for expr, expected in (("a", "3"), ("b", "4"), ("total", "7"),
+                               ("a + b", "7"), ("total * 2", "14")):
+            resp = c.request("evaluate", {
+                "expression": expr,
+                "frameId": inner_id,
+            })
+            assert resp.get("result") == expected, \
+                f"evaluate({expr!r}) in compute frame: expected {expected}, got {resp!r}"
+
+        # After the function-frame eval, the script workspace must NOT
+        # have 'a', 'b', or 'total' lingering — those were temporarily
+        # stamped during eval and must have been cleared on restore.
+        # The script frame's variables snapshot is a clean way to
+        # check (it shows matlab_ws + script-frame mini-ws).
+        sc_outer = c.request("scopes", {"frameId": outer_id})
+        ref_outer = (sc_outer.get("scopes") or [{}])[0].get("variablesReference")
+        vars_outer = _vars_by_name(c, ref=ref_outer)
+        for n in ("a", "b", "total"):
+            assert n not in vars_outer, \
+                f"frame-scoped eval leaked {n!r} into the script workspace: {vars_outer!r}"
+
+        # And explicit `evaluate` without frameId must NOT now resolve
+        # 'a' to 3 — the restore took the stamped value back out of ws.
+        resp = c.request("evaluate", {"expression": "a"})
+        assert resp.get("result") != "3", \
+            f"after frame-scoped eval the bridge should be reversed: {resp!r}"
+        # And the value must equal what we got before the bridge fired,
+        # i.e. nothing about the script ws view of 'a' has changed.
+        assert resp.get("result") == resp_no_frame.get("result"), \
+            f"script-scope evaluate('a') changed across the bridge: " \
+            f"before={resp_no_frame!r} after={resp!r}"
+
+        # Pre-existing script-scope `seed` survives the eval round-trip
+        # untouched.
+        resp = c.request("evaluate", {"expression": "seed"})
+        assert resp.get("result") == "7", \
+            f"script-scope seed should be 7 after frame eval, got {resp!r}"
+
+        c.request("continue")
+        c.wait_event("terminated", timeout=5.0)
+
+
+def scn_multifile_breakpoint(matlabc, program):
+    """Breakpoints on a sibling .m file resolve and fire.
+
+    The DAP path's compileProgram walks the entry-point's directory
+    for function-only sibling .m files, parses each, and merges their
+    Functions/Classes into the main TU. Each loaded file gets a
+    distinct SourceManager FileID and is registered with the runtime
+    via matlab_dbg_register_file, so an IDE-supplied path resolves
+    through G.PathToFileId in the setBreakpoints handler. The bp
+    fires when the JIT'd helper executes the matching line.
+    """
+    import os
+    multifile_dir = os.path.join(
+        os.path.dirname(os.path.abspath(program)),
+        "multifile",
+    )
+    main_path = os.path.join(multifile_dir, "dap_main.m")
+    helper_path = os.path.join(multifile_dir, "dap_helper.m")
+    with DapClient(matlabc, main_path) as c:
+        # Drive setBreakpoints separately for the helper file —
+        # initialize_and_launch's breakpoints argument always targets
+        # the program path, but multi-file is interesting precisely
+        # when the bp lands in a different file.
+        caps = c.request("initialize", {
+            "clientID": "matlabc-test",
+            "linesStartAt1": True,
+            "columnsStartAt1": True,
+            "pathFormat": "path",
+        })
+        c.wait_event("initialized", timeout=5.0)
+        c.request("launch", {
+            "program": main_path,
+            "stopOnEntry": False,
+        })
+        # Line 6 of dap_helper.m is `r = intermediate + 1;` — the
+        # second statement inside helper_fn.
+        body = c.request("setBreakpoints", {
+            "source": {"path": helper_path},
+            "breakpoints": [{"line": 6}],
+        })
+        verified = body.get("breakpoints") or []
+        assert verified and verified[0].get("verified"), \
+            f"sibling-file bp must be verified, got {verified!r}"
+        c.request("configurationDone")
+
+        ev = c.wait_event("stopped", timeout=10.0)
+        sb = ev.get("body") or {}
+        assert sb.get("reason") == "breakpoint", sb
+        assert sb.get("line") == 6, \
+            f"expected stop at helper line 6, got {sb!r}"
+
+        # stackTrace shows helper_fn at top with the helper file's
+        # source path, and <script> below with main's path.
+        st = c.request("stackTrace", {"threadId": 1})
+        frames = st.get("stackFrames") or []
+        assert len(frames) >= 2, f"expected helper + script frames: {frames!r}"
+        assert "helper_fn" in (frames[0].get("name") or ""), frames[0]
+        srcA = ((frames[0].get("source") or {}).get("path") or "")
+        srcB = ((frames[1].get("source") or {}).get("path") or "")
+        assert srcA.endswith("dap_helper.m"), \
+            f"top frame source should be dap_helper.m, got {srcA!r}"
+        assert srcB.endswith("dap_main.m"), \
+            f"bottom frame source should be dap_main.m, got {srcB!r}"
+
+        # Function-frame Locals reflect helper_fn's mid-execution state
+        # — `intermediate` was assigned on line 5 (= 7 * 3 = 21), `x` is
+        # the parameter spilled at frame entry, `r` not yet stored.
+        sc = c.request("scopes", {"frameId": frames[0]["id"]})
+        ref = (sc.get("scopes") or [{}])[0].get("variablesReference")
+        vars_inner = _vars_by_name(c, ref=ref)
+        assert vars_inner.get("x") == "7", \
+            f"helper_fn.x should be 7, got {vars_inner!r}"
+        assert vars_inner.get("intermediate") == "21", \
+            f"helper_fn.intermediate should be 21, got {vars_inner!r}"
+        assert "r" not in vars_inner, \
+            f"helper_fn.r must not be visible before its assignment: {vars_inner!r}"
 
         c.request("continue")
         c.wait_event("terminated", timeout=5.0)

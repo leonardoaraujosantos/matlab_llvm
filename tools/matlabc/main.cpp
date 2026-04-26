@@ -48,6 +48,7 @@
 #include <string_view>
 #include <termios.h>
 #include <unistd.h>
+#include <filesystem>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -1009,6 +1010,8 @@ int  matlab_dbg_ws_kind(int i);
 double matlab_dbg_ws_f64(int i);
 void  *matlab_dbg_ws_ptr(int i);
 void  matlab_ws_set_f64(const char *name, int64_t len, double v);
+void  matlab_ws_set_mat(const char *name, int64_t len, struct matlab_mat *m);
+void  matlab_ws_clear_one(const char *name, int64_t len);
 int  matlab_dbg_add_breakpoint_ex(int32_t file_id, int32_t line,
                                    const char *cond, int64_t cond_len,
                                    const char *log,  int64_t log_len);
@@ -1338,6 +1341,77 @@ bool compileProgram() {
   Parser P(std::move(Toks), AstCtx, Diag);
   TranslationUnit *TU = P.parseFile();
   if (!TU || Diag.hasErrors()) { Diag.printAll(); return false; }
+
+  /* Multi-file breakpoints: walk the entry-point's directory for
+   * sibling .m files, parse each, and merge any function-only or
+   * classdef-only siblings into the main TU. The merge gives Sema /
+   * lowering visibility into helpers defined alongside the entry
+   * point, which in turn lets each helper file's lines emit hooks
+   * carrying the correct file_id — so an IDE breakpoint set on
+   * `helper.m:5` resolves through G.PathToFileId and fires when the
+   * compiled helper executes that line.
+   *
+   * Only function-/classdef-only siblings are pulled in: a sibling
+   * that has a script body (top-level statements) is treated as its
+   * own entry-point candidate and skipped to avoid stitching in
+   * unrelated executable code from neighbouring scripts (the
+   * test/Debug/ corpus has many such files).
+   *
+   * Per-file diagnostics are dropped on parse failure so a malformed
+   * sibling doesn't tank the launch — the entry point still
+   * compiles. The same shared ASTContext is reused so node lifetimes
+   * align with the main TU. */
+  {
+    namespace fs = std::filesystem;
+    fs::path EntryPath = fs::path(G.ProgramPath);
+    std::error_code EC;
+    fs::path Dir = fs::canonical(EntryPath, EC).parent_path();
+    if (!EC && fs::exists(Dir, EC)) {
+      std::vector<std::string> Siblings;
+      for (auto It = fs::directory_iterator(Dir, EC);
+           !EC && It != fs::directory_iterator(); ++It) {
+        if (!It->is_regular_file()) continue;
+        if (It->path().extension() != ".m") continue;
+        std::string SP = It->path().string();
+        /* Skip the entry point itself — it's already loaded. */
+        fs::path Cand = fs::canonical(It->path(), EC);
+        if (EC) continue;
+        fs::path EntryCanon = fs::canonical(EntryPath, EC);
+        if (EC) continue;
+        if (Cand == EntryCanon) continue;
+        Siblings.push_back(SP);
+      }
+      /* Sort for deterministic file_id assignment across runs — the
+       * IDs are exposed via DAP `source.path` so a stable ordering
+       * keeps log lines comparable. */
+      std::sort(Siblings.begin(), Siblings.end());
+      for (const std::string &SP : Siblings) {
+        FileID SF = SM.loadFile(SP);
+        if (SF == 0) continue;
+        DiagnosticEngine SibDiag(SM);
+        Lexer SibLx(SM, SF, SibDiag);
+        auto SibToks = SibLx.tokenize();
+        Parser SibP(std::move(SibToks), AstCtx, SibDiag);
+        TranslationUnit *SibTU = SibP.parseFile();
+        if (!SibTU || SibDiag.hasErrors()) continue;
+        /* Skip siblings that have a script body — they're scripts in
+         * their own right, not function-file helpers. */
+        bool HasScriptBody = SibTU->ScriptNode &&
+                              SibTU->ScriptNode->Body &&
+                              !SibTU->ScriptNode->Body->Stmts.empty();
+        if (HasScriptBody) continue;
+        for (auto *Fn : SibTU->Functions) TU->Functions.push_back(Fn);
+        for (auto *Cls : SibTU->Classes) TU->Classes.push_back(Cls);
+      }
+      /* Re-sync the path → file_id table now that SM has more entries.
+       * This loop runs again at the bottom of the registration block;
+       * doing it here keeps both sides consistent if the resolver
+       * needs to see the auxiliary files (it shouldn't, but defensive
+       * cheap). */
+      for (size_t i = 1; i <= SM.numFiles(); ++i)
+        registerSMFile((FileID)i, SM.getName((FileID)i));
+    }
+  }
 
   SemaContext Sema;
   TypeContext TC;
@@ -1990,11 +2064,14 @@ bool handleRequest(const Object &Msg) {
      * `variables` response, so a watch on `[1 2; 3 4]` shows up as
      * "2x2 double" and a watch on `x + 1` shows the scalar.
      *
-     * Frame-scoped eval is v1: the expression evaluates against the
-     * script-level workspace plus the script frame's mini-ws (loop
-     * vars, etc.). Function-frame locals aren't visible to the
-     * evaluator yet — that requires a frame-scoped eval entry point
-     * and is the natural follow-up to this commit. */
+     * Frame-scoped eval (item 6 in the plan): when the IDE supplies a
+     * frameId pointing at a non-script frame, we bridge that frame's
+     * mini-workspace into matlab_ws for the duration of the eval.
+     * The bridge is reversible: snapshot every pre-existing matlab_ws
+     * entry, stamp the frame locals on top, run the eval, then
+     * restore. Names that didn't exist pre-stamp get cleared via
+     * matlab_ws_clear_one so eval doesn't leak function locals into
+     * the persistent script workspace. */
     auto ExprOpt = Args->getString("expression");
     if (!ExprOpt) {
       sendResponse(ReqSeq, *Cmd, false,
@@ -2014,29 +2091,135 @@ bool handleRequest(const Object &Msg) {
                    Value("evaluate received an empty expression"));
       return true;
     }
+
+    /* Resolve frameId -> runtime frame index. DAP frame ids are
+     * innermost-first; the runtime indexes outermost-first. The
+     * script frame (rt index 0) doesn't need bridging — its locals
+     * are already in matlab_ws + frame_locals[0] which the REPL JIT
+     * accesses directly. */
+    auto FrameIdOpt = Args->getInteger("frameId");
+    int RtFrameIdx = -1;
+    if (FrameIdOpt) {
+      int Total = matlab_dbg_frame_count();
+      int DapFrameId = (int)*FrameIdOpt;
+      int Idx = Total - 1 - DapFrameId;
+      if (Idx > 0 && Idx < Total) RtFrameIdx = Idx;
+    }
+
+    /* Snapshot the pre-eval state of every matlab_ws entry whose name
+     * collides with what we're about to stamp from the frame's
+     * mini-ws. We use a struct-of-arrays so the snapshot survives the
+     * subsequent set_f64/set_mat calls without dangling pointers
+     * (matlab_ws may reorganize internally on insert).
+     *
+     * Two sets of names are tracked:
+     *   - PreExisting: names already in matlab_ws before stamping.
+     *     Restored with their original kind/value after eval.
+     *   - Stamped: names we wrote during stamping. After eval, any
+     *     stamped name not also PreExisting gets matlab_ws_clear_one'd
+     *     so the script workspace doesn't keep function locals. */
+    struct WsBackup { std::string name; int kind; double f64; void *ptr; };
+    std::vector<WsBackup> Backup;
+    std::unordered_set<std::string> PreExisting;
+    std::vector<std::string> Stamped;
+    if (RtFrameIdx > 0) {
+      int N = matlab_dbg_ws_count();
+      for (int i = 0; i < N; ++i) {
+        int64_t Nlen = 0;
+        const char *Nm = matlab_dbg_ws_name(i, &Nlen);
+        if (!Nm) continue;
+        std::string Nstr(Nm, (size_t)Nlen);
+        PreExisting.insert(Nstr);
+      }
+      int FN = matlab_dbg_frame_locals_count(RtFrameIdx);
+      for (int i = 0; i < FN; ++i) {
+        int64_t Nlen = 0;
+        const char *Nm = matlab_dbg_frame_local_name(RtFrameIdx, i, &Nlen);
+        if (!Nm) continue;
+        std::string Nstr(Nm, (size_t)Nlen);
+        /* Capture the prior matlab_ws value (if any) so we can put it
+         * back. Re-look-up by name rather than caching above so we
+         * pick up the current kind/value rather than a stale one in
+         * case the ws got reorganized. */
+        if (PreExisting.count(Nstr)) {
+          int wsN = matlab_dbg_ws_count();
+          for (int j = 0; j < wsN; ++j) {
+            int64_t WL = 0;
+            const char *WN = matlab_dbg_ws_name(j, &WL);
+            if (!WN || (size_t)WL != Nstr.size() ||
+                std::memcmp(WN, Nstr.data(), Nstr.size()) != 0)
+              continue;
+            int K = matlab_dbg_ws_kind(j);
+            WsBackup B{Nstr, K, 0.0, nullptr};
+            if (K == 0) B.f64 = matlab_dbg_ws_f64(j);
+            else if (K == 1) B.ptr = matlab_dbg_ws_ptr(j);
+            Backup.push_back(std::move(B));
+            break;
+          }
+        }
+        int K = matlab_dbg_frame_local_kind(RtFrameIdx, i);
+        if (K == 0) {
+          double V = matlab_dbg_frame_local_f64(RtFrameIdx, i);
+          matlab_ws_set_f64(Nstr.data(), (int64_t)Nstr.size(), V);
+        } else if (K == 1) {
+          void *P = matlab_dbg_frame_local_ptr(RtFrameIdx, i);
+          /* matlab_ws_set_mat takes the matrix descriptor pointer
+           * verbatim; the struct stays owned by the JIT's slot for
+           * the lifetime of the frame, which covers our eval. */
+          matlab_ws_set_mat(Nstr.data(), (int64_t)Nstr.size(),
+                             (struct matlab_mat *)P);
+        }
+        Stamped.push_back(std::move(Nstr));
+      }
+    }
+
     const char EvalName[] = "__matlab_dbg_eval";
     std::string Src = std::string(EvalName) + " = (" + Expr + ");";
     int Rc = runReplInput(sharedDapContext(), Src, NextEvalId++);
-    if (Rc != 0) {
+
+    /* Read the result before any restoration so we can format it. */
+    std::string Display;
+    bool RcOk = (Rc == 0);
+    if (RcOk) {
+      int N = matlab_dbg_ws_count();
+      int Found = -1, Kind = -1;
+      int64_t EvalLen = (int64_t)(sizeof EvalName - 1);
+      for (int i = 0; i < N; ++i) {
+        int64_t Nlen = 0;
+        const char *Nm = matlab_dbg_ws_name(i, &Nlen);
+        if (Nlen == EvalLen &&
+            std::memcmp(Nm, EvalName, (size_t)Nlen) == 0) {
+          Found = i; Kind = matlab_dbg_ws_kind(i);
+          break;
+        }
+      }
+      Display = (Found >= 0) ? formatVar(Kind, Found)
+                             : std::string("<void>");
+    }
+
+    /* Restore matlab_ws to its pre-stamp state. Order matters: clear
+     * the freshly-stamped names first (so they don't shadow the
+     * restored values), then re-set the pre-existing ones. The eval
+     * result holder is also cleared so it doesn't pile up in the
+     * workspace across many evaluate calls. */
+    matlab_ws_clear_one(EvalName, (int64_t)(sizeof EvalName - 1));
+    for (const std::string &Nstr : Stamped) {
+      if (!PreExisting.count(Nstr))
+        matlab_ws_clear_one(Nstr.data(), (int64_t)Nstr.size());
+    }
+    for (const WsBackup &B : Backup) {
+      if (B.kind == 0)
+        matlab_ws_set_f64(B.name.data(), (int64_t)B.name.size(), B.f64);
+      else if (B.kind == 1)
+        matlab_ws_set_mat(B.name.data(), (int64_t)B.name.size(),
+                           (struct matlab_mat *)B.ptr);
+    }
+
+    if (!RcOk) {
       sendResponse(ReqSeq, *Cmd, false,
                    Value("evaluate expression failed to compile"));
       return true;
     }
-    /* Look up the eval result by name and format. */
-    int N = matlab_dbg_ws_count();
-    int Found = -1, Kind = -1;
-    int64_t EvalLen = (int64_t)(sizeof EvalName - 1);
-    for (int i = 0; i < N; ++i) {
-      int64_t Nlen = 0;
-      const char *Nm = matlab_dbg_ws_name(i, &Nlen);
-      if (Nlen == EvalLen &&
-          std::memcmp(Nm, EvalName, (size_t)Nlen) == 0) {
-        Found = i; Kind = matlab_dbg_ws_kind(i);
-        break;
-      }
-    }
-    std::string Display = (Found >= 0) ? formatVar(Kind, Found)
-                                       : std::string("<void>");
     sendResponse(ReqSeq, *Cmd, true,
                  Object{{"result", Display},
                         {"variablesReference", 0}});

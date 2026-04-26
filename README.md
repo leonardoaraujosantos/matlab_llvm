@@ -184,11 +184,11 @@ against your `.m` script. What works today:
 | Step into / over / out | Full step into user-function bodies — frame stack pushed on entry, popped on return; pauses surface as DAP `reason="step"` |
 | Continue / pause / stop on entry | All standard resume actions plus `stopOnEntry` on launch |
 | Multi-frame stack trace | `stackTrace` walks back through nested calls (e.g. recursive `fact(5)` shows 5 `fact` frames + `<script>`) |
-| Per-frame variable inspection | `scopes(frameId)` + `variables(ref)` render Locals for any frame — function bodies show their own locals (`a`, `b`, `sum`), the script frame merges `matlab_ws` + loop-induction vars |
-| `evaluate` (watch / hover / debug console) | Routes through the REPL JIT — pure arithmetic, workspace references, matrix literals all work; v1 evaluates against the script-level workspace |
+| Per-frame variable inspection | `scopes(frameId)` + `variables(ref)` render Locals for any frame — function bodies show their own locals (`a`, `b`, `total`), the script frame merges `matlab_ws` + loop-induction vars |
+| `evaluate` against any frame | `evaluate(expr, frameId=…)` bridges the chosen frame's mini-ws into the REPL JIT and reverses afterward — watch / hover / debug-console expressions resolve function-frame locals |
 | `setVariable` (any RHS) | Watch-box mutation routes through the REPL JIT — scalars, matrix literals, strings, struct accessors all work |
 | `error()` backtrace | When `-dap` is on, `error()` prints `error: <msg>` plus one `at <fn> (<file>:<line>)` frame per call site to stderr |
-| Multi-file path resolution | Every `SourceManager`-loaded file is registered with the runtime; phantom paths cleanly return `verified=false` |
+| Multi-file breakpoints | Function-only / classdef-only sibling `.m` files in the entry-point's directory get auto-loaded; bps on their lines resolve and fire correctly |
 | Hook line normalization | Stepping never lands on a blank or comment-only row — the lowering anchors each statement's hook to its first executable line |
 
 Minimal nvim-dap config:
