@@ -7,13 +7,10 @@
 
 // Another paragraph, separated from the first by a blank line.
 int main(void) {
-  std::cout << "hello" << '\n';
-  // trailing comment after a string disp
-  std::cout << 42.0 << '\n';
-  // trailing on numeric disp
+  std::cout << "hello" << '\n';  // trailing comment after a string disp
+  std::cout << 42.0 << '\n';  // trailing on numeric disp
 
-  std::cout << 1.0 << '\n';
-  // prints the variable
+  std::cout << 1.0 << '\n';  // prints the variable
   return 0;
 }
 

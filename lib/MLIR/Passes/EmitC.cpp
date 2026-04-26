@@ -22,6 +22,7 @@
 #include "mlir/Support/LLVM.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/StringSet.h"
 #include "llvm/Support/raw_ostream.h"
@@ -140,6 +141,17 @@ private:
   // argument is a compile-time literal. Returns true if the call was
   // handled — caller skips its own emission. Otherwise false.
   bool tryEmitIOSubstitution(mlir::LLVM::CallOp Call, int Indent);
+  // Pre-emit `static double <name> = 0.0;` declarations at the top of
+  // a function body for every distinct `persistent` variable referenced
+  // inside it. The lowering tags the matlab_global_get_f64 /
+  // matlab_global_set_f64 calls with `persistent_name` + `persistent_fn`
+  // string attributes (see lib/MLIR/Lowering.cpp); EmitC reads them to
+  // recover the original MATLAB identifier and produce idiomatic
+  // function-static state instead of routing through the runtime's
+  // keyed-by-int global table. Calling this also primes Names[V] for
+  // every persistent get-call result and inserts the call into
+  // SuppressedOps so the verbatim emit is skipped.
+  void emitPersistentStaticsFor(mlir::Region &Body, int Indent);
   // Escape a raw byte sequence for embedding in a `"..."` C/C++ literal.
   // Only handles ASCII-safe input; callers should fall back to the
   // runtime call when non-printable bytes are present.
@@ -1391,8 +1403,30 @@ size_t findTrailingCommentStart(std::string_view S) {
 
 void Emitter::flushPendingTrailing() {
   if (PendingTrailingLine < 0) return;
-  indent(PendingTrailingIndent);
-  OS << "// " << PendingTrailingText << "\n";
+  /* Land the trailing comment at end-of-line of the statement it
+   * annotates, not on a line of its own. Every statement emit ends in
+   * `\n`; we seek back over it, write `  // <text>\n`, and the
+   * resulting buffer reads as `printf("...");  // 1` — the same shape
+   * the user wrote in the .m source. Falls back to a fresh-line emit
+   * if the back-seek can't find a preceding `\n` (shouldn't happen at
+   * runtime but stays robust if a future caller invokes us mid-line). */
+  auto Pos = OS.tellp();
+  bool Patched = false;
+  if (Pos != std::ostream::pos_type(-1) && static_cast<long>(Pos) > 0) {
+    /* Peek the byte immediately before the write head. We can't read
+     * the current ostringstream's contents without copying, but a
+     * one-char `seekg`/`get` round-trip works since the buffer is the
+     * same underlying stringbuf. */
+    OS.seekp(static_cast<long>(Pos) - 1);
+    /* Overwrite the trailing `\n` with `  // <text>\n`. ostringstream
+     * extends the buffer naturally if the new write is longer. */
+    OS << "  // " << PendingTrailingText << "\n";
+    Patched = true;
+  }
+  if (!Patched) {
+    indent(PendingTrailingIndent);
+    OS << "// " << PendingTrailingText << "\n";
+  }
   TrailingEmittedLines.insert(PendingTrailingLine);
   PendingTrailingLine = -1;
   PendingTrailingIndent = 0;
@@ -2852,6 +2886,16 @@ void Emitter::precomputeModuleProperties(mlir::ModuleOp M) {
         Substituted = true;
         AnyDispScalar = true;
       }
+      /* Persistent-variable accesses get rewritten to a function-static
+       * `<name>` reference by emitPersistentStaticsFor — the verbatim
+       * runtime call is suppressed. Mark them as substituted here so the
+       * `extern matlab_global_*` prototype block doesn't get pulled in
+       * for what's now hand-written-looking C. */
+      if ((Name == "matlab_global_get_f64" ||
+           Name == "matlab_global_set_f64") &&
+          C->hasAttr("persistent_name")) {
+        Substituted = true;
+      }
     }
     if (!Substituted) {
       LiveRuntimeFuncs.insert(Name);
@@ -2913,6 +2957,48 @@ bool Emitter::writeQuotedStringLiteral(std::ostream &OS,
   }
   OS << '"';
   return true;
+}
+
+void Emitter::emitPersistentStaticsFor(mlir::Region &Body, int Indent) {
+  /* First pass: collect every distinct persistent name referenced in
+   * this function. Stable insertion order (sorted at the end) keeps the
+   * emitted prologue deterministic across runs. */
+  llvm::SetVector<llvm::StringRef> Names;
+  Body.walk([&](mlir::LLVM::CallOp C) {
+    auto PN = C->getAttrOfType<mlir::StringAttr>("persistent_name");
+    if (!PN) return;
+    Names.insert(PN.getValue());
+  });
+  if (Names.empty()) return;
+
+  /* Emit the static decls. C and C++ share the same syntax. Initialise
+   * to 0.0 — that matches the runtime's matlab_global_get_f64 default
+   * (returns 0 for a never-stored slot), so the AOT-compiled binary
+   * has the same first-call semantics as the JIT. MATLAB's true
+   * semantic is `[]` (empty matrix), but our scalar-only persistent
+   * support already starts at 0.0 in the JIT path; this commit is
+   * about codegen quality, not changing that semantic. */
+  llvm::SmallVector<llvm::StringRef, 4> Sorted(Names.begin(), Names.end());
+  std::sort(Sorted.begin(), Sorted.end());
+  for (llvm::StringRef N : Sorted) {
+    indent(Indent);
+    OS << "static double " << N.str() << " = 0.0;\n";
+  }
+
+  /* Second pass: re-bind every get-call's result to the bare name and
+   * mark the call op as suppressed so the verbatim runtime call isn't
+   * emitted. Set-calls are handled in emitOp's LLVM::CallOp branch via
+   * the same persistent_name attr lookup. */
+  Body.walk([&](mlir::LLVM::CallOp C) {
+    auto PN = C->getAttrOfType<mlir::StringAttr>("persistent_name");
+    if (!PN) return;
+    auto Callee = C.getCallee();
+    if (!Callee) return;
+    if (*Callee == "matlab_global_get_f64" && C.getNumResults() == 1) {
+      this->Names[C.getResult()] = PN.getValue().str();
+      SuppressedOps.insert(C.getOperation());
+    }
+  });
 }
 
 bool Emitter::tryEmitIOSubstitution(mlir::LLVM::CallOp Call, int Indent) {
@@ -3475,6 +3561,9 @@ void Emitter::emitFuncFunc(mlir::func::FuncOp F) {
       OS << "  " << ClsName << " self = {0};\n";
     }
   }
+  /* Stamp `static double <name> = 0.0;` for every persistent variable
+   * the body references, before the regular SSA emit walks in. */
+  emitPersistentStaticsFor(F.getBody(), 1);
   emitRegion(F.getBody(), 1);
   if (IsCClassMethod && IsCtor && CtorObjNew)
     OS << "  return self;\n";
@@ -3541,6 +3630,10 @@ void Emitter::emitLLVMFunc(mlir::LLVM::LLVMFuncOp F) {
   }
   if (FT.getNumParams() == 0) OS << "void";
   OS << ") {\n";
+  /* See emitFuncFunc — same persistent-static prologue applies to
+   * llvm.func bodies (used for outlined parfor / anon helpers and for
+   * functions that get rewritten by ConvertFuncToLLVMPass). */
+  emitPersistentStaticsFor(F.getBody(), 1);
   emitRegion(F.getBody(), 1);
   OS << "}\n\n";
 }
@@ -3673,6 +3766,19 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
     // parfor is present (the mutex matters) or when the string arg
     // isn't a compile-time literal.
     if (tryEmitIOSubstitution(Call, Indent)) return;
+    /* Persistent-variable write: `matlab_global_set_f64(_, v)` carrying
+     * a `persistent_name` attr lowers to `<name> = <v>;`. The static
+     * decl was already emitted by emitPersistentStaticsFor at the top
+     * of the function. */
+    if (Call.getCallee() && *Call.getCallee() == "matlab_global_set_f64" &&
+        Call.getNumResults() == 0 && Call.getNumOperands() == 2) {
+      if (auto PN = Call->getAttrOfType<mlir::StringAttr>("persistent_name")) {
+        indent(Indent);
+        OS << PN.getValue().str() << " = "
+           << stmtExpr(Call.getOperand(1)) << ";\n";
+        return;
+      }
+    }
     // Class-field write: `obj_set_f64(obj, "X", _, v)` → `obj.X = v;`.
     // Statement-form only (the call returns void).
     if (Call.getCallee() && *Call.getCallee() == "matlab_obj_set_f64" &&

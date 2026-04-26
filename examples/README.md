@@ -34,6 +34,7 @@ just examples
 | `while_loop.m` | `while` loops |
 | `fibonacci.m` | loop-carried state and iterative control flow |
 | `factorial.m` | recursion and user-defined functions |
+| `persistent_counter.m` | `persistent` — function-local state that survives across calls |
 | `parfor.m` | `parfor` reductions and helper calls |
 | `func_handles.m` | builtin and user function handles |
 | `anon_capture.m` | anonymous functions with captures |

@@ -653,10 +653,19 @@ mlir::Value Lowerer::loadBinding(Binding *Bnd, const Type *ValTy,
     auto I32 = mlir::IntegerType::get(&MCtx, 32);
     mlir::Value IdV = mlir::arith::ConstantOp::create(
         B, L, I32, mlir::IntegerAttr::get(I32, (int64_t)Id));
-    mlir::NamedAttribute Cal(
+    llvm::SmallVector<mlir::NamedAttribute, 3> Attrs;
+    Attrs.push_back(mlir::NamedAttribute(
         mlir::StringAttr::get(&MCtx, "callee"),
-        mlir::StringAttr::get(&MCtx, "matlab_global_get_f64"));
-    return emitUnreg("matlab.call_builtin", {IdV}, F64, L, {Cal});
+        mlir::StringAttr::get(&MCtx, "matlab_global_get_f64")));
+    if (Bnd->Kind == BindingKind::Persistent) {
+      Attrs.push_back(mlir::NamedAttribute(
+          mlir::StringAttr::get(&MCtx, "persistent_name"),
+          mlir::StringAttr::get(&MCtx, std::string(Bnd->Name))));
+      Attrs.push_back(mlir::NamedAttribute(
+          mlir::StringAttr::get(&MCtx, "persistent_fn"),
+          mlir::StringAttr::get(&MCtx, CurFnName)));
+    }
+    return emitUnreg("matlab.call_builtin", {IdV}, F64, L, Attrs);
   }
   /* Numeric constants: MATLAB exposes pi / e / Inf / NaN / eps as
    * zero-arg builtins that evaluate to compile-time constants when
@@ -1798,7 +1807,15 @@ void Lowerer::lowerLValueStore(const Expr &LHS, mlir::Value Rhs) {
   case NodeKind::NameExpr: {
     auto &N = static_cast<const NameExpr &>(LHS);
     if (!N.Ref) return;
-    /* Globals / persistents route through matlab_global_set_f64(id). */
+    /* Globals / persistents route through matlab_global_set_f64(id).
+     * For persistents we additionally tag the call with the binding's
+     * bare name + enclosing function name so the AOT emitters
+     * (-emit-c, -emit-cpp, -emit-python, -emit-typescript) can recover
+     * a readable identifier and lower to an idiomatic per-language
+     * construct (`static double n;`, function-attribute, closure-let)
+     * instead of the verbatim runtime call. The LLVM / JIT path
+     * ignores the extra attrs, so REPL state-survives-across-
+     * invocations semantics are unchanged. */
     if (N.Ref->Kind == BindingKind::Global ||
         N.Ref->Kind == BindingKind::Persistent) {
       if (!Rhs) return;
@@ -1807,11 +1824,20 @@ void Lowerer::lowerLValueStore(const Expr &LHS, mlir::Value Rhs) {
       mlir::Value IdV = mlir::arith::ConstantOp::create(
           B, loc(N.Range), I32,
           mlir::IntegerAttr::get(I32, (int64_t)Id));
-      mlir::NamedAttribute Cal(
+      llvm::SmallVector<mlir::NamedAttribute, 3> Attrs;
+      Attrs.push_back(mlir::NamedAttribute(
           mlir::StringAttr::get(&MCtx, "callee"),
-          mlir::StringAttr::get(&MCtx, "matlab_global_set_f64"));
+          mlir::StringAttr::get(&MCtx, "matlab_global_set_f64")));
+      if (N.Ref->Kind == BindingKind::Persistent) {
+        Attrs.push_back(mlir::NamedAttribute(
+            mlir::StringAttr::get(&MCtx, "persistent_name"),
+            mlir::StringAttr::get(&MCtx, std::string(N.Ref->Name))));
+        Attrs.push_back(mlir::NamedAttribute(
+            mlir::StringAttr::get(&MCtx, "persistent_fn"),
+            mlir::StringAttr::get(&MCtx, CurFnName)));
+      }
       emitUnregOp("matlab.call_builtin", {IdV, Rhs},
-                  {mlir::NoneType::get(&MCtx)}, loc(N.Range), {Cal});
+                  {mlir::NoneType::get(&MCtx)}, loc(N.Range), Attrs);
       return;
     }
     /* REPL script-level Var writes route through matlab_ws_set_*.

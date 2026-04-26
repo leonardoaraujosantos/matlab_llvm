@@ -14,10 +14,8 @@ static const char __matlab_str_s0[] = "75% done";
 // Exercises the trailing-comment scanner: `%` inside string literals
 // must NOT be picked up as the start of a comment.
 int main(void) {
-  std::cout << "50% done" << '\n';
-  // trailing past a single-quoted string with %
-  matlab_string_disp(matlab_string_from_literal((void*)__matlab_str_s0, 8));
-  // trailing past a double-quoted string with %
+  std::cout << "50% done" << '\n';  // trailing past a single-quoted string with %
+  matlab_string_disp(matlab_string_from_literal((void*)__matlab_str_s0, 8));  // trailing past a double-quoted string with %
   std::cout << "hi" << '\n';
   return 0;
 }

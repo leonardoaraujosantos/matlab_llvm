@@ -25,6 +25,7 @@
 #include "mlir/Support/LLVM.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/StringSet.h"
 
@@ -1946,8 +1947,38 @@ void Emitter::emitFuncFunc(mlir::func::FuncOp F) {
     if (!IsMain) UsedNames = std::move(SavedUsed);
     return;
   }
+  /* Suppress the verbatim runtime calls for persistent accesses and
+   * register the inline replacement: `<fn>.<name>` for reads, and a
+   * statement-level `<fn>.<name> = <expr>` for writes (handled in the
+   * call-emit path below). The initialiser line `<fn>.<name> = 0.0`
+   * is emitted after the function body closes so the name is bound
+   * the first time the function is called. */
+  llvm::SetVector<llvm::StringRef> PersistentNames;
+  std::string FnSym = F.getSymName().str();
+  F.getBody().walk([&](mlir::LLVM::CallOp C) {
+    auto PN = C->getAttrOfType<mlir::StringAttr>("persistent_name");
+    if (!PN) return;
+    PersistentNames.insert(PN.getValue());
+    auto Callee = C.getCallee();
+    if (!Callee) return;
+    if (*Callee == "matlab_global_get_f64" && C.getNumResults() == 1) {
+      this->Names[C.getResult()] = FnSym + "." + PN.getValue().str();
+      SuppressedOps.insert(C.getOperation());
+    }
+  });
+
   emitRegion(F.getBody(), 1);
   OS << "\n";
+  /* Module-level initialisers for every persistent referenced inside.
+   * Sorted for deterministic output across runs. */
+  if (!PersistentNames.empty()) {
+    llvm::SmallVector<llvm::StringRef, 4> Sorted(
+        PersistentNames.begin(), PersistentNames.end());
+    std::sort(Sorted.begin(), Sorted.end());
+    for (llvm::StringRef PN : Sorted)
+      OS << FnSym << "." << PN.str() << " = 0.0\n";
+    OS << "\n";
+  }
   if (!IsMain) UsedNames = std::move(SavedUsed);
 }
 
@@ -2393,6 +2424,20 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
         std::string Rewrite;
         if (tryRewriteAsNumpy(Call, Rewrite)) {
           OS << dropOuterParens(Rewrite) << "\n";
+          return;
+        }
+      }
+      /* Persistent variable write: `matlab_global_set_f64(_, v)` with
+       * persistent_name + persistent_fn lowers to `<fn>.<name> = <v>`.
+       * The init line `<fn>.<name> = 0.0` is emitted below the
+       * function body by emitFuncFunc. */
+      if (*Callee == "matlab_global_set_f64" && Call.getNumResults() == 0 &&
+          Call.getNumOperands() == 2) {
+        auto PN = Call->getAttrOfType<mlir::StringAttr>("persistent_name");
+        auto PF = Call->getAttrOfType<mlir::StringAttr>("persistent_fn");
+        if (PN && PF) {
+          OS << PF.getValue().str() << "." << PN.getValue().str()
+             << " = " << this->stmtExpr(Call.getOperand(1)) << "\n";
           return;
         }
       }

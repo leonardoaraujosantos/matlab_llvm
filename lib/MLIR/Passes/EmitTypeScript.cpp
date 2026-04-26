@@ -35,6 +35,7 @@
 #include "mlir/Support/LLVM.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/StringSet.h"
 
@@ -1707,6 +1708,34 @@ void Emitter::emitFuncFunc(mlir::func::FuncOp F) {
     return;
   }
 
+  /* Walk for persistent variables and stamp module-level `let` decls
+   * just before the function's `function` line. The mangled name is
+   * `<fn>_<var>` so two functions can each declare `persistent n`
+   * without colliding at module scope. Refs inside the function body
+   * are rewritten to the mangled name; the verbatim runtime call is
+   * suppressed. */
+  llvm::SetVector<llvm::StringRef> PersistentNames;
+  std::string FnSym = F.getSymName().str();
+  F.getBody().walk([&](mlir::LLVM::CallOp C) {
+    auto PN = C->getAttrOfType<mlir::StringAttr>("persistent_name");
+    if (!PN) return;
+    PersistentNames.insert(PN.getValue());
+    auto Callee = C.getCallee();
+    if (!Callee) return;
+    if (*Callee == "matlab_global_get_f64" && C.getNumResults() == 1) {
+      this->Names[C.getResult()] = FnSym + "_" + PN.getValue().str();
+      SuppressedOps.insert(C.getOperation());
+    }
+  });
+  if (!PersistentNames.empty()) {
+    llvm::SmallVector<llvm::StringRef, 4> Sorted(
+        PersistentNames.begin(), PersistentNames.end());
+    std::sort(Sorted.begin(), Sorted.end());
+    for (llvm::StringRef PN : Sorted)
+      OS << "let " << FnSym << "_" << PN.str() << ": number = 0.0;\n";
+    OS << "\n";
+  }
+
   OS << "function " << F.getSymName().str() << "(";
   auto &Entry = F.getBody().front();
   for (unsigned i = 0; i < FT.getNumInputs(); ++i) {
@@ -2152,6 +2181,20 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
         std::string Rewrite;
         if (tryRewriteAsNumpy(Call, Rewrite)) {
           OS << dropOuterParens(Rewrite) << ";\n";
+          return;
+        }
+      }
+      /* Persistent variable write: `matlab_global_set_f64(_, v)` with
+       * persistent_name + persistent_fn lowers to `<fn>_<name> = <v>;`.
+       * The module-level `let <fn>_<name> = 0.0;` decl was emitted by
+       * emitFuncFunc above, before the function definition. */
+      if (*Callee == "matlab_global_set_f64" && Call.getNumResults() == 0 &&
+          Call.getNumOperands() == 2) {
+        auto PN = Call->getAttrOfType<mlir::StringAttr>("persistent_name");
+        auto PF = Call->getAttrOfType<mlir::StringAttr>("persistent_fn");
+        if (PN && PF) {
+          OS << PF.getValue().str() << "_" << PN.getValue().str()
+             << " = " << this->stmtExpr(Call.getOperand(1)) << ";\n";
           return;
         }
       }

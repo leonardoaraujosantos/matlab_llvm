@@ -8,13 +8,10 @@
 
 // Another paragraph, separated from the first by a blank line.
 int main(void) {
-  puts("hello");
-  // trailing comment after a string disp
-  printf("%g\n", 42.0);
-  // trailing on numeric disp
+  puts("hello");  // trailing comment after a string disp
+  printf("%g\n", 42.0);  // trailing on numeric disp
 
-  printf("%g\n", 1.0);
-  // prints the variable
+  printf("%g\n", 1.0);  // prints the variable
   return 0;
 }
 

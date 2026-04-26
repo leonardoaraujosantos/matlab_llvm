@@ -1625,6 +1625,15 @@ bool TensorLowering::rewriteBuiltinCalls() {
       auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
                                       ValueRange{Call->getOperand(0)});
       carryName(Call, NC);
+      /* Forward persistent_name / persistent_fn so the AOT emitters
+       * (EmitC / EmitPython / EmitTypeScript) can recognise the call
+       * as a persistent access and lower to idiomatic per-language
+       * code instead of a verbatim runtime call. The LLVM/JIT path
+       * ignores these attrs. */
+      if (auto PN = Call->getAttrOfType<StringAttr>("persistent_name"))
+        NC->setAttr("persistent_name", PN);
+      if (auto PF = Call->getAttrOfType<StringAttr>("persistent_fn"))
+        NC->setAttr("persistent_fn", PF);
       Call->getResult(0).replaceAllUsesWith(NC.getResult());
       Call->erase();
       Changed = true;
@@ -1636,9 +1645,13 @@ bool TensorLowering::rewriteBuiltinCalls() {
         Call->getOperand(1).getType() == F64) {
       B.setInsertionPoint(Call);
       auto Fn = rt("matlab_global_set_f64", VoidTy, {I32, F64});
-      LLVM::CallOp::create(B, Call->getLoc(), Fn,
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
                             ValueRange{Call->getOperand(0),
                                        Call->getOperand(1)});
+      if (auto PN = Call->getAttrOfType<StringAttr>("persistent_name"))
+        NC->setAttr("persistent_name", PN);
+      if (auto PF = Call->getAttrOfType<StringAttr>("persistent_fn"))
+        NC->setAttr("persistent_fn", PF);
       Call->erase();
       Changed = true;
       continue;
