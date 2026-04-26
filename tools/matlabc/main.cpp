@@ -49,6 +49,7 @@
 #include <termios.h>
 #include <unistd.h>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 using namespace matlab;
@@ -60,7 +61,16 @@ struct Options {
                     Format, Dap };
   Mode Mode = Mode::Check;
   bool Opt = false;
+  /* `-emit-c` / `-emit-cpp` default to NOT emitting `#line` directives
+   * — the cleaner output is what most users want for hand-reading the
+   * generated C / C++. Pass `-line` to opt back in when you need
+   * `lldb` / `gdb` to step from the compiled binary back into the
+   * original .m source. `-no-line` is still accepted (and is now a
+   * no-op for C / C++ since it matches the default) for any scripts
+   * that have been passing it explicitly. Python emission has no
+   * `#line` mechanism so the flag is silently ignored there. */
   bool NoLine = false;
+  bool EmitLine = false;
   bool Doxygen = false;
   bool CppAuto = false;
   /* When true, lowering injects matlab_dbg_hook(file_id, line) at the
@@ -77,7 +87,7 @@ int usage(const char *Prog) {
                "             -emit-mlir | -emit-llvm | -emit-c | -emit-cpp |\n"
                "             -emit-python |\n"
                "             -format | -repl | -dap]\n"
-               "            [-no-line] [-doxygen] [-cpp-auto] [-g]  FILE.m\n";
+               "            [-no-line | -line] [-doxygen] [-cpp-auto] [-g]  FILE.m\n";
   return 64;
 }
 
@@ -99,6 +109,7 @@ bool parseArgs(int Argc, char **Argv, Options &Opts, const char *&Prog) {
     else if (A == "-dap") Opts.Mode = Options::Mode::Dap;
     else if (A == "-opt" || A == "-O") Opts.Opt = true;
     else if (A == "-no-line" || A == "--no-line") Opts.NoLine = true;
+    else if (A == "-line" || A == "--line") Opts.EmitLine = true;
     else if (A == "-doxygen" || A == "--doxygen") Opts.Doxygen = true;
     else if (A == "-cpp-auto" || A == "--cpp-auto") Opts.CppAuto = true;
     else if (A == "-g" || A == "--debug-hooks") Opts.Debug = true;
@@ -1006,6 +1017,17 @@ int  matlab_dbg_breakpoint_meta(int idx, const char **cond, int64_t *cond_len,
                                  int *disabled);
 void matlab_dbg_disable_condition(int idx);
 int  matlab_dbg_get_pause_bp(void);
+/* Per-frame Locals — written by the lowering's mirror calls in
+ * DebugMode after every store to a named slot. The DAP server reads
+ * these to render `Locals` for any frame in the call stack. The
+ * frame_idx convention here matches matlab_dbg.frames[]: 0 is the
+ * outermost / script frame, n_frames-1 is the innermost. */
+int  matlab_dbg_frame_locals_count(int frame_idx);
+const char *matlab_dbg_frame_local_name(int frame_idx, int i,
+                                         int64_t *len_out);
+int  matlab_dbg_frame_local_kind(int frame_idx, int i);
+double matlab_dbg_frame_local_f64(int frame_idx, int i);
+void  *matlab_dbg_frame_local_ptr(int frame_idx, int i);
 }
 
 /* Forward declarations from matlab_runtime.c so we can format matrices
@@ -1629,6 +1651,12 @@ bool handleRequest(const Object &Msg) {
       {"supportsSetVariable", true},
       {"supportsStepBack", false},
       {"supportsTerminateRequest", true},
+      /* `evaluate` powers watch / hover / debug-console expressions.
+       * v1 evaluates against the script-level workspace plus the
+       * script frame's mini-ws; function-frame locals aren't visible
+       * to the evaluator yet (the per-frame mini-ws is read by
+       * `variables` but not bridged into runReplInput). */
+      {"supportsEvaluateForHovers", true},
     };
     sendResponse(ReqSeq, *Cmd, true, Value(std::move(Caps)));
     sendEvent("initialized");
@@ -1764,10 +1792,21 @@ bool handleRequest(const Object &Msg) {
   }
 
   if (*Cmd == "scopes") {
+    /* DAP `scopes` is parameterised by the frame the IDE is asking
+     * about. Return one Locals scope whose variablesReference encodes
+     * the frame so the matching `variables` request knows which slice
+     * of the runtime to read. Encoding: 1000 + DAP_frame_id, where
+     * DAP frame ids are 0 = innermost / top-of-stack (matches what
+     * stackTrace publishes). The legacy ref `1` is preserved as an
+     * alias for the script-level workspace so any IDE / test that
+     * hardcodes it keeps working. */
     Array Sc;
+    auto FrameId = Args->getInteger("frameId");
+    int64_t DapFrameId = FrameId.value_or(0);
+    int64_t Ref = 1000 + DapFrameId;
     Sc.push_back(Object{
       {"name", "Locals"},
-      {"variablesReference", 1},
+      {"variablesReference", Ref},
       {"expensive", false},
     });
     sendResponse(ReqSeq, *Cmd, true, Object{{"scopes", std::move(Sc)}});
@@ -1775,17 +1814,88 @@ bool handleRequest(const Object &Msg) {
   }
 
   if (*Cmd == "variables") {
+    /* Decode the variablesReference. The DAP frame_id (0 = innermost)
+     * maps to the runtime's frames[] array (0 = outermost) via the
+     * inverse: runtime_idx = n_frames - 1 - dap_frame_id. The script
+     * frame (runtime_idx == 0) gets a merged view: matlab_ws (REPL-
+     * mode'd script assignments) plus frame_locals[0] (loop induction
+     * vars and other slot-stored values). Function frames just use
+     * their per-frame mini-ws. */
     auto VR = Args->getInteger("variablesReference");
     Array Vs;
-    if (VR && *VR == 1) {
+    int64_t Ref = VR.value_or(0);
+    int RtFrameIdx = -1;          /* -1 means "script ws only" */
+    bool MergeScriptWs = false;
+    if (Ref == 1) {
+      /* Legacy ref. Behave as before: return matlab_ws contents only.
+       * Existing tests that hardcode `1` continue to work. */
+      MergeScriptWs = true;
+    } else if (Ref >= 1000) {
+      int DapFrameId = (int)(Ref - 1000);
+      int Total = matlab_dbg_frame_count();
+      RtFrameIdx = Total - 1 - DapFrameId;
+      if (RtFrameIdx < 0 || RtFrameIdx >= Total) RtFrameIdx = -1;
+      /* The outermost frame is the script — merge matlab_ws into its
+       * Locals view. Inner function frames only show their own mini-ws. */
+      if (RtFrameIdx == 0) MergeScriptWs = true;
+    }
+
+    /* Track names we've already emitted so the merge doesn't report
+     * the same variable twice when matlab_ws and the script-frame
+     * mini-ws both happen to carry it. matlab_ws wins (it's the most
+     * authoritative for top-level assignments under ReplMode). */
+    std::unordered_set<std::string> Seen;
+    if (MergeScriptWs) {
       int N = matlab_dbg_ws_count();
       for (int i = 0; i < N; ++i) {
         int64_t Nlen = 0;
         const char *Nm = matlab_dbg_ws_name(i, &Nlen);
         int K = matlab_dbg_ws_kind(i);
+        std::string Nstr(Nm, (size_t)Nlen);
+        Seen.insert(Nstr);
         Vs.push_back(Object{
-          {"name", std::string(Nm, (size_t)Nlen)},
+          {"name", Nstr},
           {"value", formatVar(K, i)},
+          {"variablesReference", 0},
+        });
+      }
+    }
+    if (RtFrameIdx >= 0) {
+      int N = matlab_dbg_frame_locals_count(RtFrameIdx);
+      for (int i = 0; i < N; ++i) {
+        int64_t Nlen = 0;
+        const char *Nm = matlab_dbg_frame_local_name(RtFrameIdx, i, &Nlen);
+        if (!Nm) continue;
+        std::string Nstr(Nm, (size_t)Nlen);
+        if (Seen.count(Nstr)) continue;
+        int K = matlab_dbg_frame_local_kind(RtFrameIdx, i);
+        /* Inline format: scalars print as "%g", matrices as "RxC
+         * double" (with 1x1 unboxed). Mirrors formatVar for ws but
+         * pulls values from the per-frame accessors. */
+        std::string Val;
+        if (K == 0) {
+          char Buf[64];
+          double V = matlab_dbg_frame_local_f64(RtFrameIdx, i);
+          snprintf(Buf, sizeof Buf, "%g", V);
+          Val = Buf;
+        } else if (K == 1) {
+          auto *M = (struct matlab_mat *)matlab_dbg_frame_local_ptr(
+              RtFrameIdx, i);
+          if (!M) Val = "[]";
+          else {
+            int64_t R = matlab_dbg_mat_rows(M);
+            int64_t C = matlab_dbg_mat_cols(M);
+            char Buf[64];
+            snprintf(Buf, sizeof Buf, "%lldx%lld double",
+                     (long long)R, (long long)C);
+            Val = Buf;
+          }
+        } else {
+          Val = "<unknown>";
+        }
+        Vs.push_back(Object{
+          {"name", Nstr},
+          {"value", Val},
           {"variablesReference", 0},
         });
       }
@@ -1796,10 +1906,16 @@ bool handleRequest(const Object &Msg) {
   }
 
   if (*Cmd == "setVariable") {
-    /* Mutate a workspace variable from the watch box. v1 supports
-     * scalar (f64) only — matrix / string / struct / cell come back
-     * as a non-fatal error so the IDE keeps the connection open and
-     * the user can correct the value. */
+    /* Mutate a workspace variable from the watch box. We piggyback on
+     * the REPL JIT pipeline that conditional breakpoints already use:
+     * wrap the user's input as `<name> = (<value>);` and run it
+     * through Lex → Parse → Sema → MLIR → JIT against the persistent
+     * workspace struct. Any valid MATLAB expression on the RHS works
+     * — scalars, matrix literals (`[1 2; 3 4]`), strings, struct
+     * accessors, function calls — without us having to re-parse them
+     * here. After the assignment lands, we re-read the variable's
+     * formatted value for the response so the IDE's watch box shows
+     * what actually got stored. */
     auto NameOpt = Args->getString("name");
     auto ValOpt = Args->getString("value");
     if (!NameOpt || !ValOpt) {
@@ -1809,50 +1925,121 @@ bool handleRequest(const Object &Msg) {
     }
     std::string NameStr = NameOpt->str();
     std::string ValStr = ValOpt->str();
-    /* Find the variable to learn its current kind. Reject non-scalar
-     * targets up-front since matlab_ws_set_f64 would silently
-     * overwrite the existing matrix/struct entry with a scalar. */
-    int Kind = -1;
+    /* Defense-in-depth: validate the name is a plain identifier so a
+     * malformed `name` like `x); system(...` can't smuggle extra
+     * statements into the assignment we're about to JIT. The REPL
+     * pipeline would catch syntax errors anyway, but failing fast
+     * here keeps the error message tight ("not a valid identifier")
+     * instead of reflecting a parser diagnostic. */
+    auto IsIdent = [](const std::string &S) {
+      if (S.empty()) return false;
+      char c0 = S[0];
+      if (!(std::isalpha((unsigned char)c0) || c0 == '_')) return false;
+      for (size_t i = 1; i < S.size(); ++i) {
+        char c = S[i];
+        if (!(std::isalnum((unsigned char)c) || c == '_')) return false;
+      }
+      return true;
+    };
+    if (!IsIdent(NameStr)) {
+      sendResponse(ReqSeq, *Cmd, false,
+                   Value("name is not a valid identifier"));
+      return true;
+    }
+    /* The runReplInput pipeline operates at script scope and writes
+     * to the workspace via matlab_ws_set_*, exactly the same path the
+     * scenario's normal assignments use. Wrap with a single trailing
+     * semicolon to suppress implicit display so the IDE doesn't see a
+     * spurious `output` event for what should be a silent mutation. */
+    std::string Src = NameStr + " = (" + ValStr + ");";
+    int Rc = runReplInput(sharedDapContext(), Src, NextEvalId++);
+    if (Rc != 0) {
+      sendResponse(ReqSeq, *Cmd, false,
+                   Value("setVariable expression failed to compile"));
+      return true;
+    }
+    /* Re-read the variable's stored kind/value to render the response.
+     * If the assignment somehow didn't land (e.g. RHS produced a
+     * void), fall back to "<unset>" rather than emitting an empty
+     * value the IDE would render as a blank cell. */
     int N = matlab_dbg_ws_count();
+    int Found = -1, Kind = -1;
     for (int i = 0; i < N; ++i) {
       int64_t Nlen = 0;
       const char *Nm = matlab_dbg_ws_name(i, &Nlen);
       if ((size_t)Nlen == NameStr.size() &&
           std::memcmp(Nm, NameStr.data(), (size_t)Nlen) == 0) {
-        Kind = matlab_dbg_ws_kind(i);
+        Found = i; Kind = matlab_dbg_ws_kind(i);
         break;
       }
     }
-    /* Kind == -1 means the name isn't in the workspace yet — allow
-     * the assignment as a fresh scalar (mirrors `>> x = 99` at the
-     * REPL when x didn't exist). */
-    if (Kind != -1 && Kind != 0) {
-      sendResponse(ReqSeq, *Cmd, false,
-                   Value("only scalar set is supported"));
-      return true;
-    }
-    /* Parse the value as a double. strtod tolerates trailing
-     * whitespace; we reject anything past the first non-numeric
-     * character so "1.5junk" doesn't silently land as 1.5. */
-    char *EndP = nullptr;
-    double V = std::strtod(ValStr.c_str(), &EndP);
-    if (!EndP || EndP == ValStr.c_str()) {
-      sendResponse(ReqSeq, *Cmd, false,
-                   Value("value is not a number"));
-      return true;
-    }
-    while (*EndP == ' ' || *EndP == '\t' || *EndP == '\n' || *EndP == '\r')
-      ++EndP;
-    if (*EndP != '\0') {
-      sendResponse(ReqSeq, *Cmd, false,
-                   Value("trailing characters after number"));
-      return true;
-    }
-    matlab_ws_set_f64(NameStr.data(), (int64_t)NameStr.size(), V);
-    char Buf[64];
-    snprintf(Buf, sizeof Buf, "%g", V);
+    std::string Display = (Found >= 0) ? formatVar(Kind, Found)
+                                       : std::string("<unset>");
     sendResponse(ReqSeq, *Cmd, true,
-                 Object{{"value", std::string(Buf)}});
+                 Object{{"value", Display}});
+    return true;
+  }
+
+  if (*Cmd == "evaluate") {
+    /* DAP `evaluate` is what powers the watch panel, hover-eval, and
+     * the debug console. Implementation: wrap the user's expression
+     * as `__matlab_dbg_eval = (<expr>);` and run it through the same
+     * REPL JIT pipeline conditional breakpoints already use. The
+     * result lands in matlab_ws under that name; we read the kind
+     * back and format with the same formatVar that powers the
+     * `variables` response, so a watch on `[1 2; 3 4]` shows up as
+     * "2x2 double" and a watch on `x + 1` shows the scalar.
+     *
+     * Frame-scoped eval is v1: the expression evaluates against the
+     * script-level workspace plus the script frame's mini-ws (loop
+     * vars, etc.). Function-frame locals aren't visible to the
+     * evaluator yet — that requires a frame-scoped eval entry point
+     * and is the natural follow-up to this commit. */
+    auto ExprOpt = Args->getString("expression");
+    if (!ExprOpt) {
+      sendResponse(ReqSeq, *Cmd, false,
+                   Value("evaluate requires an expression"));
+      return true;
+    }
+    std::string Expr = ExprOpt->str();
+    /* The DAP spec allows `expression` to be a statement-level command
+     * in the "repl" context. Strip a single trailing semicolon if the
+     * user typed one — our wrap injects its own. */
+    while (!Expr.empty() &&
+           (Expr.back() == ' ' || Expr.back() == '\t' ||
+            Expr.back() == '\n' || Expr.back() == ';'))
+      Expr.pop_back();
+    if (Expr.empty()) {
+      sendResponse(ReqSeq, *Cmd, false,
+                   Value("evaluate received an empty expression"));
+      return true;
+    }
+    const char EvalName[] = "__matlab_dbg_eval";
+    std::string Src = std::string(EvalName) + " = (" + Expr + ");";
+    int Rc = runReplInput(sharedDapContext(), Src, NextEvalId++);
+    if (Rc != 0) {
+      sendResponse(ReqSeq, *Cmd, false,
+                   Value("evaluate expression failed to compile"));
+      return true;
+    }
+    /* Look up the eval result by name and format. */
+    int N = matlab_dbg_ws_count();
+    int Found = -1, Kind = -1;
+    int64_t EvalLen = (int64_t)(sizeof EvalName - 1);
+    for (int i = 0; i < N; ++i) {
+      int64_t Nlen = 0;
+      const char *Nm = matlab_dbg_ws_name(i, &Nlen);
+      if (Nlen == EvalLen &&
+          std::memcmp(Nm, EvalName, (size_t)Nlen) == 0) {
+        Found = i; Kind = matlab_dbg_ws_kind(i);
+        break;
+      }
+    }
+    std::string Display = (Found >= 0) ? formatVar(Kind, Found)
+                                       : std::string("<void>");
+    sendResponse(ReqSeq, *Cmd, true,
+                 Object{{"result", Display},
+                        {"variablesReference", 0}});
     return true;
   }
 
@@ -2215,8 +2402,13 @@ int main(int Argc, char **Argv) {
           if (Opts.Mode == Options::Mode::EmitPython) {
             Src = mlirgen::emitPython(M, Opts.NoLine, &SM);
           } else {
+            /* C / C++ default to suppressing `#line`. `-line` opts back
+             * in; `-no-line` is the (now-redundant) explicit form of
+             * the default. Both flags together is harmless — line
+             * directives are emitted only when EmitLine is set. */
+            bool NoLineForC = !Opts.EmitLine;
             Src = mlirgen::emitC(
-                M, Opts.Mode == Options::Mode::EmitCpp, Opts.NoLine,
+                M, Opts.Mode == Options::Mode::EmitCpp, NoLineForC,
                 Opts.Doxygen, Opts.CppAuto, &SM);
           }
           if (Src.empty()) return 1;

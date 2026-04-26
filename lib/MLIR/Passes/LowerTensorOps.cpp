@@ -1255,6 +1255,39 @@ bool TensorLowering::rewriteBuiltinCalls() {
       continue;
     }
 
+    /* Per-frame Locals mirror: emitted by emitStore in DebugMode for
+     * every store to a named slot. The first operand is a const_char
+     * carrying the variable name; the second is the stored value.
+     * We dispatch on the operand's lowered type — f64 routes to
+     * matlab_dbg_frame_set_f64, !llvm.ptr (matrix descriptor) routes
+     * to matlab_dbg_frame_set_mat. Operands that are still
+     * none-typed at this point (scalar promotion hasn't completed yet)
+     * are punted to the next iteration of the rewrite loop. */
+    if (Name == "matlab_dbg_frame_set" &&
+        Call->getNumOperands() == 2 && Call->getNumResults() == 1) {
+      Value NameV = Call->getOperand(0);
+      Value Val = Call->getOperand(1);
+      mlir::Type VT = Val.getType();
+      bool IsF64 = mlir::isa<mlir::Float64Type>(VT);
+      bool IsPtr = mlir::isa<LLVM::LLVMPointerType>(VT);
+      if (!IsF64 && !IsPtr) continue; /* still none-typed, retry */
+      int64_t Len = 0;
+      Value Ptr = fieldNameAddr(NameV, Len);
+      if (!Ptr) continue;
+      B.setInsertionPoint(Call);
+      Value LenV = LLVM::ConstantOp::create(
+          B, Call->getLoc(), I64, B.getI64IntegerAttr(Len));
+      const char *Callee = IsF64 ? "matlab_dbg_frame_set_f64"
+                                 : "matlab_dbg_frame_set_mat";
+      mlir::Type ValTy = IsF64 ? mlir::Type(F64) : mlir::Type(PtrTy);
+      auto Fn = rt(Callee, VoidTy, {PtrTy, I64, ValTy});
+      LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                            ValueRange{Ptr, LenV, Val});
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+
     /* REPL workspace accessors. Shape is the same as struct_* but
      * without a base ptr (the workspace is a singleton inside the
      * runtime). Used only when matlabc is invoked with -repl. */

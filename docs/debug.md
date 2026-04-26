@@ -1,9 +1,10 @@
 # Debugging matlab_llvm programs
 
 A tour of the debugging aids shipped today. The baseline (`dbg()`,
-REPL workspace commands, `#line`-annotated C output) composes with the
-full Debug Adapter Protocol server (`matlabc -dap`) so you can stay in
-an editor when a print doesn't cut it.
+REPL workspace commands, opt-in `#line`-annotated C output via
+`-emit-c -line`) composes with the full Debug Adapter Protocol server
+(`matlabc -dap`) so you can stay in an editor when a print doesn't
+cut it.
 
 ## Quick tools for "what's going on at this line?"
 
@@ -53,13 +54,14 @@ function syntax (`clear('x')`).
 
 ### `#line` directives in emitted C / C++
 
-The `-emit-c` and `-emit-cpp` backends annotate each emitted statement
-with a `#line "src.m"` directive. gdb and lldb pick these up
-automatically when stepping through the compiled C / C++ code, so the
-debugger shows your `.m` source rather than the generated C:
+The `-emit-c` and `-emit-cpp` backends can annotate each emitted
+statement with a `#line "src.m"` directive. gdb and lldb pick these
+up automatically when stepping through the compiled C / C++ code, so
+the debugger shows your `.m` source rather than the generated C.
+`#line` markers are off by default — pass `-line` to opt in:
 
 ```
-$ matlabc -emit-c examples/factorial.m > /tmp/fact.c
+$ matlabc -emit-c -line examples/factorial.m > /tmp/fact.c
 $ cc -g /tmp/fact.c runtime/matlab_runtime.c -o /tmp/fact
 $ lldb /tmp/fact
 (lldb) breakpoint set -f factorial.m -l 9
@@ -82,7 +84,8 @@ matlabc -emit-mlir -g  file.m    # with matlab_dbg_hook(file_id, line)
                                  # IR shape -dap runs against, minus the
                                  # ReplMode workspace plumbing)
 matlabc -emit-llvm   file.m      # final LLVM IR text
-matlabc -emit-c      file.m      # portable C (includes #line)
+matlabc -emit-c      file.m      # portable C (no #line by default;
+                                 # add -line for lldb/gdb stepping)
 matlabc -emit-cpp    file.m      # portable C++ (classes preserved)
 ```
 
@@ -174,9 +177,10 @@ VS Code via a generic-DAP extension:
 | Step over / in / out            | `next` / `stepIn` / `stepOut` (stops report `reason="step"`) |
 | Pause a running program         | `pause` (breaks at the next stmt)   |
 | Stack trace across user fns     | `stackTrace`                        |
-| Scopes (just `Locals` for now)  | `scopes`                            |
+| Per-frame Locals                | `scopes(frameId)` returns one Locals scope per frame; `variables(ref)` reads either the script ws or that frame's mini-ws |
 | Workspace variables snapshot    | `variables`                         |
-| Mutate scalar variables         | `setVariable`                       |
+| Watch / hover / debug-console eval | `evaluate` (against script-level workspace; function-frame scoping is the planned follow-up) |
+| Mutate any workspace variable   | `setVariable` (any MATLAB expr on RHS — scalar, matrix, string, struct) |
 | Clean shutdown / terminate      | `disconnect` / `terminate`          |
 | Program stdout forwarded        | `output` event (category `stdout`)  |
 
@@ -234,20 +238,100 @@ response (`supportsConditionalBreakpoints`, `supportsLogPoints`).
   to scalar). Bare identifiers only — anything more complex is
   passed through as the literal substring.
 
-Both modes only see the script-level workspace: locals inside a
-user function, for-loop induction variables, and SSA scratch values
-aren't visible. Per-function slot tables (Option B in
-`docs/debug_improve_plan.md`) are the planned follow-up.
+Both modes evaluate against the script-level workspace. The
+`variables` panel exposes function-frame locals through the per-frame
+mini-ws machinery described below, but the conditional / log
+evaluators don't yet bridge those into the REPL JIT — so a
+breakpoint condition referencing a function-local won't see it. The
+follow-up that closes that gap is item (6) in
+[`docs/debug_improve_plan.md`](debug_improve_plan.md).
+
+### Per-frame Locals + `evaluate`
+
+`Locals` for any frame in the call stack is rendered from a per-frame
+mini-workspace the runtime maintains alongside `matlab_dbg.frames[]`.
+The lowering's `emitStore` injects a `matlab_dbg_frame_set` builtin
+after every store to a named slot when DebugMode is on; LowerTensorOps
+dispatches by the operand's lowered type to either
+`matlab_dbg_frame_set_f64(name, len, val)` or
+`matlab_dbg_frame_set_mat(name, len, ptr)`. The frame push
+(`matlab_dbg_enter_frame`) was hoisted to fire *before* the parameter
+spill loop in `lowerFunction` so the spill-store mirrors land in the
+new frame, not the caller's.
+
+DAP-side: `scopes(frameId)` returns one Locals scope whose
+`variablesReference` is `1000 + DAP_frame_id`. `variables(ref)`
+decodes the reference, maps the DAP frame id back to the runtime's
+outermost-first `frames[]` index, and dispatches:
+
+- The **script frame** merges `matlab_ws` (REPL-mode top-level
+  assignments) with `frame_locals[0]` (loop-induction variables and
+  other slot-stored values that bypass `ws_set`).
+- A **function frame** returns its own per-frame mini-ws. Names
+  duplicated across `matlab_ws` and a frame's mini-ws de-dup with
+  `matlab_ws` winning.
+
+The legacy `variablesReference == 1` is preserved as an alias for
+the script-level workspace view so older scenarios / IDEs that
+hardcode it keep working.
+
+`evaluate` runs the user expression through the same REPL JIT
+pipeline conditional breakpoints use: wrap as
+`__matlab_dbg_eval = (<expr>);`, run through `runReplInput`, then
+re-read by name and format with `formatVar`. Capability advertised
+as `supportsEvaluateForHovers=true`. v1 evaluates against the
+script-level workspace plus the script frame's mini-ws — function
+frame locals aren't yet visible to the evaluator (see plan item
+(6) for the bridge). Malformed expressions come back as
+`success=false`; the connection stays open.
+
+### `error()` backtrace
+
+When DebugMode is on (`-dap` or `-g`-built binaries that call
+`matlab_dbg_enable`), `error()` snapshots the runtime frame stack
+inside `matlab_set_error_msg` *before* the unwind pops it, then emits
+the diagnostic to stderr with one `at <fn> (<file>:<line>)` line per
+frame:
+
+```
+error: boom
+  at deeper (/path/to/script.m:17)
+  at fail   (/path/to/script.m:13)
+  at <script> (/path/to/script.m:9)
+```
+
+The print uses `write(2)` rather than `fprintf` so libc's stdio file
+lock can't deadlock against MLIR's ExecutionEngine on shutdown. Frame
+names are heap-copied on `matlab_dbg_enter_frame` so the runtime owns
+null-terminated copies — fixes a latent bug where the JIT's read-only
+name globals (sized exactly to the string, no trailing 0) would cause
+`%s`-style readers to walk into adjacent constants.
+
+In production (non-debug) builds `matlab_dbg.enabled` is false and the
+print is suppressed — `error()` keeps its existing semantics (sets the
+flag for try/catch, no stderr noise).
+
+### `setVariable` for any RHS expression
+
+The watch-box mutation path runs through the same REPL JIT that
+conditional breakpoints use. The DAP server wraps the user's text as
+`<name> = (<value>);` and runs it through Lex → Parse → Sema → MLIR →
+JIT against the persistent workspace. Anything the parser accepts on
+the RHS works: scalar literals, matrix literals (`[1 2; 3 4]`),
+strings, struct accessors, function calls. The response renders the
+new value via the same `formatVar` that the `variables` request uses,
+so the IDE watch box shows `2x2 double` after a matrix set instead of
+a stale scalar.
+
+Compile errors come back as `success=false` with a clear message; the
+DAP connection stays open. The variable name is validated as a plain
+identifier before the wrap, so a malformed `name` like
+`"x); system(...)"` can't smuggle extra statements past the literal
+concatenation.
 
 ### Other known limits (deferred, not blocked)
 
 - **Function breakpoints.** Not advertised as supported.
-- **`setVariable`.** Scalars only — typing `x = 99` in the watch box
-  while paused calls `matlab_ws_set_f64` and the new value flows
-  through to subsequent `disp(x)` calls. Matrix / string / struct /
-  cell targets return a clear "only scalar set is supported" error
-  without dropping the DAP connection. Capability advertised as
-  `supportsSetVariable=true`.
 - **Multiple source files.** The DAP server keeps a path → file_id
   table seeded from every file the SourceManager loaded, and the
   `setBreakpoints` handler resolves the IDE-supplied path against
@@ -255,6 +339,7 @@ aren't visible. Per-function slot tables (Option B in
   `.m` is loaded — once Sema starts pulling in sibling `.m` files
   for cross-file calls they'll appear here automatically. Phantom
   paths still respond with `verified=false` instead of crashing.
+  This is the only "gated on infrastructure outside DAP" item.
 
 ### Tracing the wire
 
@@ -300,16 +385,28 @@ Two ctest suites guard the debugging surface (both gated on
 
 - **`debug-dap-tests`** — spawns `matlabc -dap` as a subprocess and
   drives the protocol with a small Python client
-  (`test/Debug/dap_client.py`). Six scenarios cover the end-to-end
+  (`test/Debug/dap_client.py`). Nine scenarios cover the end-to-end
   surface:
   - plain breakpoint (`reason="breakpoint"`, expected line)
   - step-vs-breakpoint reasons (the regression where every pause
     was hardcoded as `"breakpoint"` even after `next`)
   - `stackTrace` / `scopes` / `variables` introspection
-  - `setVariable` round-trip (write a scalar, read it back)
+  - **function-frame Locals** — paused inside `compute(a, b)`,
+    `variables` for the function frame shows `a` / `b` / `sum` and
+    NOT script-scope `seed`; the script frame's view shows `seed`
+    and not the function's locals
+  - **`evaluate`** — pure arithmetic (`1 + 1`), workspace references
+    (`x`, `x + y`), matrix literals (`[1 2; 3 4]`), trailing-semicolon
+    tolerance, malformed-expression rejection
+  - `setVariable` round-trip — scalar, matrix literal `[1 2; 3 4]`,
+    fresh-name assignment, malformed-RHS rejection,
+    non-identifier-name rejection
   - conditional breakpoint (false condition silently resumes, true
     one stops)
   - log point (emits an `output` event, never `stopped`)
+  - `error()` backtrace — nested user-function calls raise via
+    `error('boom')`; stderr must contain the message header plus one
+    frame line per call site (innermost first)
 
 Run the lot via:
 
@@ -322,22 +419,16 @@ when a scenario fails (the Python harness uses bounded timeouts).
 
 ## Deliberately out of scope
 
-### Call-stack traces in `error()`
-
-`error()` currently prints just the message text. The frame-stack
-plumbing is already wired (each user function pushes via
-`matlab_dbg_enter_frame` and pops via `_leave_frame` when -g is
-on), but the runtime doesn't yet snapshot the frames into the
-diagnostic before unwinding. Tracked as a follow-up.
-
 ### `keyboard` as a nested REPL
 
 MATLAB's `keyboard` pauses execution and opens an interactive prompt
 at the paused location with access to the surrounding scope. We have
-the pause machinery (`matlab_dbg_hook`) and the REPL, but wiring the
-locals of a non-script frame through to an interactive evaluator
-requires the scoped-eval path DAP's `evaluate` request would also
-need. Neither is started.
+the pause machinery (`matlab_dbg_hook`), the REPL, and per-frame
+Locals — but wiring an interactive evaluator that operates on a
+non-script frame's mini-ws on demand still needs the
+snapshot/restore bridge tracked as plan item (6). Once that lands,
+`keyboard` becomes a small REPL-pump-around-pause integration
+on top.
 
 ### DWARF line tables in `-emit-llvm`
 

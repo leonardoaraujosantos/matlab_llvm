@@ -316,10 +316,10 @@ dominates.
 | `lib/MLIR/Passes/Mem2RegLite.cpp` | Single-store alloca → SSA promotion (runs right before `emitC()`) |
 | `lib/MLIR/Passes/IfStoreToSelect.cpp` | `if/else/store-to-same-slot` → `arith.select` + one store |
 | `include/matlab/MLIR/Passes/Passes.h` | `emitC(ModuleOp, bool Cpp, bool NoLine, bool Doxygen, bool CppAuto, const SourceManager*)` declaration |
-| `tools/matlabc/main.cpp` | `-emit-c` / `-emit-cpp` / `-no-line` / `-doxygen` / `-cpp-auto` flag parsing; reuses the `-emit-llvm` pipeline up through `runLowerIO`, then calls `emitC()` |
+| `tools/matlabc/main.cpp` | `-emit-c` / `-emit-cpp` / `-line` / `-no-line` / `-doxygen` / `-cpp-auto` flag parsing; reuses the `-emit-llvm` pipeline up through `runLowerIO`, then calls `emitC()` |
 | `runtime/matlab_runtime.h` | Optional header with typed `matlab_*` prototypes — not used by the emitter itself (which inlines its own `void*` prototypes) but handy if you're writing C that links against the runtime by hand |
 | `test/Run/run_tests_emitc.sh` | Per-`.m` runner: emit, compile with `cc`/`c++`, execute, diff stdout against the existing `.stdout` golden |
-| `test/EmitC/run_tests.sh` | Per-`.m` shape runner: emit with `-no-line`, diff exact generated C/C++ against `.c.expected` / `.cpp.expected` goldens. Optional `.doxy.cpp.expected` / `.auto.cpp.expected` for flag variants. |
+| `test/EmitC/run_tests.sh` | Per-`.m` shape runner: emit (with no `#line` directives, which is now the default), diff exact generated C/C++ against `.c.expected` / `.cpp.expected` goldens. Optional `.doxy.cpp.expected` / `.auto.cpp.expected` for flag variants. |
 | `CMakeLists.txt` | Registers all the pass sources in `MatlabMLIR` and the `run-tests-emit-c` / `run-tests-emit-cpp` / `emitc-shape-tests` CTest targets |
 | `justfile` | `emit-c` / `emit-cpp` / `compile-c` / `compile-cpp` / `test-emitc` recipes |
 
@@ -354,8 +354,9 @@ suite covers `matlab.call_builtin` (e.g. `mod(x,y)`); new entries can
 be added as new unsupported ops come up.
 
 The `emitc-shape-tests` suite (under `test/EmitC/`) diffs the exact
-`-emit-c -no-line` / `-emit-cpp -no-line` output for a focused corpus
-of inputs against per-file `.c.expected` / `.cpp.expected` goldens.
+`-emit-c` / `-emit-cpp` output (with `#line` markers off — the default)
+for a focused corpus of inputs against per-file `.c.expected` /
+`.cpp.expected` goldens.
 Catches cosmetic regressions (comment placement, paren density, loop
 shape) that `run-tests-emit-*` miss because those only compare stdout.
 Flag-variant goldens (`.doxy.cpp.expected`, `.auto.cpp.expected`) are
@@ -474,9 +475,13 @@ The emitter fails fast rather than producing broken output:
   brace so a block body doesn't start with a gratuitous empty line, and
   collapsed with comment emission so a `% comment` separated from its
   stmt by a blank line keeps both the comment and the separator.
-- **`-no-line` flag** suppresses every `#line` directive for cleaner
-  read-only output (debug info is lost — don't use for production
-  compiles that need `.m`-level stepping).
+- **`#line` directives off by default.** The C / C++ emitters do not
+  emit `#line` markers unless `-line` is passed. The clean output is
+  what most users want when reading the generated source; pass `-line`
+  when you need `lldb` / `gdb` to step from the compiled binary back
+  into the original `.m`. `-no-line` is still accepted (matches the
+  default) for backwards compatibility with scripts that pass it
+  explicitly.
 - **Minimal-paren output at statement-level positions.** At outermost-
   safe positions (return value, rhs of `=`, if/while condition, call
   arguments) the emitter drops one layer of balanced parens from the

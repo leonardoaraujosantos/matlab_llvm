@@ -160,7 +160,8 @@ Useful modifiers:
 | Flag | Effect |
 |---|---|
 | `-opt` / `-O` | run optimization passes before emission |
-| `-no-line` | omit `#line` markers in generated C / C++ / Python |
+| `-line` | emit `#line` markers in generated C / C++ (off by default — opt in when you need `lldb` / `gdb` to step into the original `.m`) |
+| `-no-line` | redundant for C / C++ (matches the default); accepted for backwards compat |
 | `-doxygen` | preserve function-leading comments as Doxygen blocks in `-emit-c` / `-emit-cpp` |
 | `-cpp-auto` | prefer `auto` in generated C++ locals |
 | `-g` / `--debug-hooks` | inject `matlab_dbg_hook(file_id, line)` at every statement (the same instrumentation `-dap` runs against; visible in `-emit-mlir` / `-emit-c` / `-emit-cpp` output) |
@@ -183,8 +184,10 @@ against your `.m` script. What works today:
 | Step into / over / out | Full step into user-function bodies — frame stack pushed on entry, popped on return; pauses surface as DAP `reason="step"` |
 | Continue / pause / stop on entry | All standard resume actions plus `stopOnEntry` on launch |
 | Multi-frame stack trace | `stackTrace` walks back through nested calls (e.g. recursive `fact(5)` shows 5 `fact` frames + `<script>`) |
-| Variable inspection | `Locals` scope = the script-level workspace; matrices show shape, 1×1 unboxes to scalar |
-| `setVariable` (scalars) | Type a number in the watch box and the new value flows through subsequent reads |
+| Per-frame variable inspection | `scopes(frameId)` + `variables(ref)` render Locals for any frame — function bodies show their own locals (`a`, `b`, `sum`), the script frame merges `matlab_ws` + loop-induction vars |
+| `evaluate` (watch / hover / debug console) | Routes through the REPL JIT — pure arithmetic, workspace references, matrix literals all work; v1 evaluates against the script-level workspace |
+| `setVariable` (any RHS) | Watch-box mutation routes through the REPL JIT — scalars, matrix literals, strings, struct accessors all work |
+| `error()` backtrace | When `-dap` is on, `error()` prints `error: <msg>` plus one `at <fn> (<file>:<line>)` frame per call site to stderr |
 | Multi-file path resolution | Every `SourceManager`-loaded file is registered with the runtime; phantom paths cleanly return `verified=false` |
 | Hook line normalization | Stepping never lands on a blank or comment-only row — the lowering anchors each statement's hook to its first executable line |
 

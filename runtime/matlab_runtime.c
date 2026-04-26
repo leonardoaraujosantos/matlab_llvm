@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>  /* for write(2), used by matlab_err_emit_traceback_to_stderr */
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -1888,7 +1889,18 @@ static int32_t matlab_error_flag = 0;
 static char matlab_error_msg[1024] = {0};
 static int64_t matlab_error_msg_len = 0;
 
-void matlab_set_error(void) { matlab_error_flag = 1; }
+/* Forward declarations for the debug-frame snapshot below — the dbg
+ * state struct is defined later in this file but matlab_set_error_msg
+ * needs to peek at it to capture a backtrace at error time. */
+struct matlab_dbg_frame;
+static void matlab_err_snapshot_frames(void);
+static void matlab_err_emit_traceback_to_stderr(void);
+
+void matlab_set_error(void) {
+    matlab_error_flag = 1;
+    matlab_err_snapshot_frames();
+    matlab_err_emit_traceback_to_stderr();
+}
 int32_t matlab_check_error(void) { return matlab_error_flag; }
 void matlab_clear_error(void) {
     /* Only clear the flag — the message stays available for the catch
@@ -1905,6 +1917,8 @@ void matlab_set_error_msg(const char *msg, int64_t len) {
     if (msg && n > 0) memcpy(matlab_error_msg, msg, (size_t)n);
     matlab_error_msg[n] = '\0';
     matlab_error_msg_len = n;
+    matlab_err_snapshot_frames();
+    matlab_err_emit_traceback_to_stderr();
 }
 
 void matlab_disp_str(const char *s, int64_t n); /* forward decl */
@@ -2825,6 +2839,30 @@ void matlab_dbg_f64(const char *file, int64_t file_len,
  */
 #define MATLAB_DBG_MAX_BREAKPOINTS 256
 #define MATLAB_DBG_MAX_FRAMES 128
+/* Per-frame Locals: bounded at lowering time by how many distinct
+ * named slots a single user function can carry. 64 is well above what
+ * any of our examples currently produce; bump if needed. */
+#define MATLAB_DBG_MAX_LOCALS 64
+
+/* Per-frame mini-workspace entry. Mirrors the shape of the script-
+ * level matlab_ws struct but is keyed by frame index so the DAP
+ * server can pick the right slice for the user's selected frame.
+ * `kind` follows the same convention as matlab_dbg_ws_kind: 0 = f64,
+ * 1 = matlab_mat *. The matrix pointer is borrowed from the JIT's
+ * slot — the slot is alive for the lifetime of the frame, which is
+ * exactly when the DAP server reads from us. */
+struct matlab_dbg_local {
+    char *name;       /* heap-copied, null-terminated */
+    int64_t name_len;
+    int kind;         /* 0 = f64, 1 = matrix ptr */
+    double f64;
+    void *ptr;
+};
+
+struct matlab_dbg_frame_locals {
+    int n;
+    struct matlab_dbg_local entries[MATLAB_DBG_MAX_LOCALS];
+};
 
 enum matlab_dbg_action {
     MATLAB_DBG_RUN       = 0,   /* no pause (no breakpoints hit) */
@@ -2878,6 +2916,13 @@ struct matlab_dbg_state {
     /* Frame stack. Always at least one entry (the script / top level). */
     int n_frames;
     struct matlab_dbg_frame frames[MATLAB_DBG_MAX_FRAMES];
+    /* Per-frame Locals. Index aligns with `frames[]`: frame 0 is the
+     * script's mini-ws (parallel to matlab_ws but populated by the
+     * lowering's mirror calls — covers loop induction variables and
+     * other slot-stored vars that don't go through matlab_ws_set_*).
+     * Frames 1..n-1 are user-function frames. Cleared on enter, freed
+     * on leave. */
+    struct matlab_dbg_frame_locals frame_locals[MATLAB_DBG_MAX_FRAMES];
 
     /* File-id <-> name table. Populated by matlab_dbg_register_file. */
     int n_files;
@@ -2892,6 +2937,163 @@ static struct matlab_dbg_state matlab_dbg = {
     .action = MATLAB_DBG_RUN,
 };
 
+/* Forward decl: defined alongside matlab_dbg_enter_frame below but
+ * called from matlab_dbg_enable to clear any frame-locals state left
+ * over from a prior launch. */
+static void matlab_dbg_free_frame_locals(int frame_idx);
+
+/* --- error() backtrace snapshot --------------------------------------
+ *
+ * matlab_set_error / matlab_set_error_msg snapshot the current frame
+ * stack here BEFORE any unwind pops the runtime frames. Without the
+ * snapshot, by the time the script returns to the DAP server (or a
+ * `disp(ME.message)` runs in a catch body) the leave_frame calls
+ * fired on each function return have erased the call site that
+ * threw, leaving us with nothing useful to print.
+ *
+ * The snapshot is intentionally a value-copy (file_id, line, name
+ * pointer). The fn_name pointers stored in matlab_dbg.frames[].fn_name
+ * are runtime-owned (either string literals from the JIT'd const
+ * globals, or "<script>" itself), so copying the pointer is safe —
+ * they outlive the snapshot.
+ *
+ * `matlab_err_emit_traceback_to_stderr` prints the snapshot to stderr
+ * with the format:
+ *
+ *   error: <msg>
+ *     at <fn> (<file>:<line>)
+ *     at <fn> (<file>:<line>)
+ *
+ * Gated on matlab_dbg.enabled so that non-debug binaries (the
+ * production -emit-c / -emit-cpp / -emit-llvm path with no -dap)
+ * keep their existing silent semantics — only DAP / `-g` runs see
+ * the diagnostic. */
+static int matlab_err_n_frames = 0;
+static struct matlab_dbg_frame matlab_err_frames[MATLAB_DBG_MAX_FRAMES];
+
+static void matlab_err_snapshot_frames(void) {
+    pthread_mutex_lock(&matlab_dbg.mu);
+    /* Free any names retained from a previous error snapshot before
+     * stamping new ones in — otherwise repeated error() calls leak. */
+    for (int i = 0; i < matlab_err_n_frames; ++i) {
+        free((char *)matlab_err_frames[i].fn_name);
+        matlab_err_frames[i].fn_name = NULL;
+    }
+    int n = matlab_dbg.n_frames;
+    if (n > MATLAB_DBG_MAX_FRAMES) n = MATLAB_DBG_MAX_FRAMES;
+    for (int i = 0; i < n; ++i) {
+        matlab_err_frames[i].file_id = matlab_dbg.frames[i].file_id;
+        matlab_err_frames[i].line    = matlab_dbg.frames[i].line;
+        /* Dup the name so the snapshot survives the leave_frame calls
+         * that fire while the error unwinds the runtime frame stack.
+         * The script frame's name is a string literal ("<script>")
+         * that wasn't malloc'd, so we always dup to a uniformly-owned
+         * copy. */
+        const char *src = matlab_dbg.frames[i].fn_name;
+        if (src) {
+            size_t L = strlen(src);
+            char *copy = (char *)malloc(L + 1);
+            if (copy) { memcpy(copy, src, L); copy[L] = '\0'; }
+            matlab_err_frames[i].fn_name = copy;
+        } else {
+            matlab_err_frames[i].fn_name = NULL;
+        }
+    }
+    matlab_err_n_frames = n;
+    pthread_mutex_unlock(&matlab_dbg.mu);
+}
+
+/* Resolve a file_id back to its registered name. Mirrors
+ * matlab_dbg_file_name but is callable without holding the dbg mutex
+ * (the caller already takes care of synchronization). Returns
+ * "<unknown>" when the file_id is out of range. */
+static const char *matlab_err_file_name_locked(int32_t file_id, int64_t *len_out) {
+    int max = (int)(sizeof matlab_dbg.file_names /
+                    sizeof matlab_dbg.file_names[0]);
+    if (file_id >= 1 && file_id <= max) {
+        const char *name = matlab_dbg.file_names[file_id - 1];
+        if (name) {
+            if (len_out) *len_out = matlab_dbg.file_name_lens[file_id - 1];
+            return name;
+        }
+    }
+    static const char unknown[] = "<unknown>";
+    if (len_out) *len_out = (int64_t)(sizeof unknown - 1);
+    return unknown;
+}
+
+static void matlab_err_emit_traceback_to_stderr(void) {
+    pthread_mutex_lock(&matlab_dbg.mu);
+    int debug_on = matlab_dbg.enabled;
+    pthread_mutex_unlock(&matlab_dbg.mu);
+    if (!debug_on) return;
+
+    /* Build the whole traceback into a fixed-size buffer and emit it
+     * via a single write(2) call. We can't use fprintf here because
+     * libc's <stdio.h> file lock can deadlock if the worker thread
+     * happens to hold a recursive_mutex inside LLVM's ExecutionEngine
+     * at the point error() fires — observed during DAP shutdown when
+     * stderr-bound fprintf races with the engine's own diagnostic
+     * stream. write(2) bypasses all of that. */
+    char buf[2048];
+    size_t off = 0;
+    #define APP(fmt, ...) do { \
+        if (off < sizeof buf) { \
+            int n = snprintf(buf + off, sizeof buf - off, fmt, ##__VA_ARGS__); \
+            if (n > 0) off += (size_t)n > sizeof buf - off \
+                              ? sizeof buf - off : (size_t)n; \
+        } \
+    } while (0)
+
+    APP("error: ");
+    if (matlab_error_msg_len > 0) {
+        size_t mlen = (size_t)matlab_error_msg_len;
+        if (off + mlen > sizeof buf) mlen = sizeof buf - off;
+        memcpy(buf + off, matlab_error_msg, mlen);
+        off += mlen;
+    }
+    APP("\n");
+
+    pthread_mutex_lock(&matlab_dbg.mu);
+    for (int idx = matlab_err_n_frames - 1; idx >= 0; --idx) {
+        const struct matlab_dbg_frame *f = &matlab_err_frames[idx];
+        const char *fn = f->fn_name ? f->fn_name : "<frame>";
+        int64_t fnLen = 0;
+        const char *file = matlab_err_file_name_locked(f->file_id, &fnLen);
+        APP("  at %s (%.*s:%d)\n", fn, (int)fnLen, file, f->line);
+    }
+    pthread_mutex_unlock(&matlab_dbg.mu);
+    #undef APP
+
+    (void)!write(STDERR_FILENO, buf, off);
+}
+
+/* Public read-only accessors so the DAP server (or a future REPL UI)
+ * can render the same backtrace as a structured response. */
+int matlab_err_traceback_count(void) {
+    int n;
+    pthread_mutex_lock(&matlab_dbg.mu);
+    n = matlab_err_n_frames;
+    pthread_mutex_unlock(&matlab_dbg.mu);
+    return n;
+}
+
+int matlab_err_traceback_at(int i, int32_t *file_id, int32_t *line,
+                             const char **fn_name) {
+    int ok = 0;
+    pthread_mutex_lock(&matlab_dbg.mu);
+    /* i = 0 = innermost; mirrors matlab_dbg_frame_at's API shape. */
+    int idx = matlab_err_n_frames - 1 - i;
+    if (idx >= 0 && idx < matlab_err_n_frames) {
+        if (file_id) *file_id = matlab_err_frames[idx].file_id;
+        if (line)    *line    = matlab_err_frames[idx].line;
+        if (fn_name) *fn_name = matlab_err_frames[idx].fn_name;
+        ok = 1;
+    }
+    pthread_mutex_unlock(&matlab_dbg.mu);
+    return ok;
+}
+
 /* Called from the server thread to enable the hook and set the
  * stop-on-entry mode before the worker starts. */
 void matlab_dbg_enable(int stop_on_entry) {
@@ -2903,6 +3105,10 @@ void matlab_dbg_enable(int stop_on_entry) {
     matlab_dbg.frames[0].file_id = 0;
     matlab_dbg.frames[0].line = 0;
     matlab_dbg.frames[0].fn_name = "<script>";
+    /* Clear any stale Locals captured during a previous launch (the
+     * dbg state is process-static and DAP can re-launch). */
+    for (int i = 0; i < MATLAB_DBG_MAX_FRAMES; ++i)
+        matlab_dbg_free_frame_locals(i);
     pthread_mutex_unlock(&matlab_dbg.mu);
 }
 
@@ -3223,14 +3429,49 @@ void matlab_dbg_hook(int32_t file_id, int32_t line) {
 }
 
 /* Frame-tracking hooks (used when -g is on and we instrument user
- * function entry/exit). For v1 the DAP server only sees a single
- * frame since we don't yet inject these at user-function boundaries;
- * keeping the API shape lets us add them without an ABI break. */
+ * function entry/exit). The name pointer the JIT hands us is into a
+ * read-only global that is NOT null-terminated — the global is sized
+ * exactly to the bytes of the function name, with no trailing 0. Any
+ * caller that subsequently uses %s on `fn_name` would read past the
+ * global into whatever happens to be next in the constant pool, which
+ * is exactly what tripped up the DAP `stackTrace` response and the
+ * error()-backtrace printer.
+ *
+ * Heap-copy the name on enter and free it on leave. This keeps every
+ * downstream consumer (DAP server, traceback printer, future eval)
+ * able to treat fn_name as a plain C string. The cost is a tiny
+ * malloc/free per call when -g is on, which is the path that's
+ * already paying the per-statement hook overhead. */
+/* Free the locals stored at frame_idx — used both on leave_frame
+ * and as a defensive reset on enter_frame in case a previous run
+ * left stale entries (shouldn't happen with balanced enter/leave but
+ * cheap insurance for recursive functions reusing the same depth). */
+static void matlab_dbg_free_frame_locals(int frame_idx) {
+    /* Caller must hold matlab_dbg.mu. */
+    if (frame_idx < 0 || frame_idx >= MATLAB_DBG_MAX_FRAMES) return;
+    struct matlab_dbg_frame_locals *fl = &matlab_dbg.frame_locals[frame_idx];
+    for (int i = 0; i < fl->n; ++i) {
+        free(fl->entries[i].name);
+        fl->entries[i].name = NULL;
+    }
+    fl->n = 0;
+}
+
 void matlab_dbg_enter_frame(const char *fn_name, int64_t name_len) {
-    (void)name_len;
+    if (name_len < 0) name_len = 0;
+    char *owned = (char *)malloc((size_t)name_len + 1);
+    if (owned) {
+        if (name_len > 0) memcpy(owned, fn_name, (size_t)name_len);
+        owned[name_len] = '\0';
+    }
     pthread_mutex_lock(&matlab_dbg.mu);
     if (matlab_dbg.n_frames < MATLAB_DBG_MAX_FRAMES) {
-        matlab_dbg.frames[matlab_dbg.n_frames].fn_name = fn_name;
+        /* Defensive reset of the slot we're about to occupy — a
+         * leave_frame on the previous tenant should have cleared it
+         * but a malformed enter/leave pairing would otherwise leak
+         * stale Locals into the new frame. */
+        matlab_dbg_free_frame_locals(matlab_dbg.n_frames);
+        matlab_dbg.frames[matlab_dbg.n_frames].fn_name = owned;
         matlab_dbg.frames[matlab_dbg.n_frames].file_id = 0;
         matlab_dbg.frames[matlab_dbg.n_frames].line = 0;
         matlab_dbg.n_frames++;
@@ -3240,8 +3481,157 @@ void matlab_dbg_enter_frame(const char *fn_name, int64_t name_len) {
 
 void matlab_dbg_leave_frame(void) {
     pthread_mutex_lock(&matlab_dbg.mu);
-    if (matlab_dbg.n_frames > 1) matlab_dbg.n_frames--;
+    if (matlab_dbg.n_frames > 1) {
+        matlab_dbg.n_frames--;
+        /* Free the name copy made on enter. The slot is unused now;
+         * a subsequent enter at this depth will allocate a fresh copy.
+         * Cast away const since we malloc'd it ourselves. */
+        char *owned = (char *)matlab_dbg.frames[matlab_dbg.n_frames].fn_name;
+        matlab_dbg.frames[matlab_dbg.n_frames].fn_name = NULL;
+        free(owned);
+        /* Drop the Locals captured for this frame. Function-frame
+         * matrix pointers were borrowed from the JIT's slots and are
+         * about to go out of scope alongside the frame, so freeing the
+         * entries' names is the only resource we own. */
+        matlab_dbg_free_frame_locals(matlab_dbg.n_frames);
+    }
     pthread_mutex_unlock(&matlab_dbg.mu);
+}
+
+/* Mirror entry points called from the lowering after every store to
+ * a named slot when DebugMode is on. Records the variable's current
+ * value into the innermost frame's mini-workspace so the DAP server
+ * can render Locals for any frame in the stack — not just the
+ * script-level workspace.
+ *
+ * The implementation is deliberately the simple linear-scan one:
+ * MATLAB programs' per-function variable counts are tiny (a handful)
+ * and stores are cheap; a hash table would be heavier for no gain.
+ * Names are heap-copied on first set (subsequent updates reuse the
+ * existing entry). The matrix pointer is stored as borrowed — the
+ * matrix struct itself is owned by the JIT's slot or workspace and
+ * survives at least until matlab_dbg_leave_frame fires. */
+static int matlab_dbg_frame_local_find_or_alloc(int frame_idx,
+                                                 const char *name,
+                                                 int64_t name_len) {
+    /* Caller holds the dbg mutex. Returns an index in entries[] or
+     * -1 if the table is full / frame_idx is out of range. */
+    if (frame_idx < 0 || frame_idx >= MATLAB_DBG_MAX_FRAMES) return -1;
+    struct matlab_dbg_frame_locals *fl = &matlab_dbg.frame_locals[frame_idx];
+    for (int i = 0; i < fl->n; ++i) {
+        if (fl->entries[i].name_len == name_len &&
+            memcmp(fl->entries[i].name, name, (size_t)name_len) == 0)
+            return i;
+    }
+    if (fl->n >= MATLAB_DBG_MAX_LOCALS) return -1;
+    char *copy = (char *)malloc((size_t)name_len + 1);
+    if (!copy) return -1;
+    memcpy(copy, name, (size_t)name_len);
+    copy[name_len] = '\0';
+    int idx = fl->n++;
+    fl->entries[idx].name = copy;
+    fl->entries[idx].name_len = name_len;
+    fl->entries[idx].kind = 0;
+    fl->entries[idx].f64 = 0.0;
+    fl->entries[idx].ptr = NULL;
+    return idx;
+}
+
+void matlab_dbg_frame_set_f64(const char *name, int64_t name_len, double v) {
+    if (!name || name_len <= 0) return;
+    pthread_mutex_lock(&matlab_dbg.mu);
+    /* The innermost live frame is at n_frames - 1. If n_frames is 0
+     * (no enter has fired and matlab_dbg_enable wasn't called either)
+     * silently drop — the caller is the JIT for code that runs before
+     * DAP attaches; we have nowhere safe to record the value. */
+    int idx = matlab_dbg_frame_local_find_or_alloc(
+        matlab_dbg.n_frames - 1, name, name_len);
+    if (idx >= 0) {
+        struct matlab_dbg_frame_locals *fl =
+            &matlab_dbg.frame_locals[matlab_dbg.n_frames - 1];
+        fl->entries[idx].kind = 0;
+        fl->entries[idx].f64 = v;
+        fl->entries[idx].ptr = NULL;
+    }
+    pthread_mutex_unlock(&matlab_dbg.mu);
+}
+
+void matlab_dbg_frame_set_mat(const char *name, int64_t name_len, void *mat) {
+    if (!name || name_len <= 0) return;
+    pthread_mutex_lock(&matlab_dbg.mu);
+    int idx = matlab_dbg_frame_local_find_or_alloc(
+        matlab_dbg.n_frames - 1, name, name_len);
+    if (idx >= 0) {
+        struct matlab_dbg_frame_locals *fl =
+            &matlab_dbg.frame_locals[matlab_dbg.n_frames - 1];
+        fl->entries[idx].kind = 1;
+        fl->entries[idx].ptr = mat;
+        fl->entries[idx].f64 = 0.0;
+    }
+    pthread_mutex_unlock(&matlab_dbg.mu);
+}
+
+/* DAP read-side: enumerate Locals for a given frame index. Frame
+ * indexing here matches matlab_dbg.frames[] (0 = outermost / script,
+ * n_frames-1 = innermost). The DAP server adapts this to its own
+ * top-of-stack-first frame ordering. */
+int matlab_dbg_frame_locals_count(int frame_idx) {
+    int n = 0;
+    pthread_mutex_lock(&matlab_dbg.mu);
+    if (frame_idx >= 0 && frame_idx < matlab_dbg.n_frames)
+        n = matlab_dbg.frame_locals[frame_idx].n;
+    pthread_mutex_unlock(&matlab_dbg.mu);
+    return n;
+}
+
+const char *matlab_dbg_frame_local_name(int frame_idx, int i,
+                                         int64_t *len_out) {
+    const char *p = NULL;
+    int64_t L = 0;
+    pthread_mutex_lock(&matlab_dbg.mu);
+    if (frame_idx >= 0 && frame_idx < matlab_dbg.n_frames) {
+        struct matlab_dbg_frame_locals *fl = &matlab_dbg.frame_locals[frame_idx];
+        if (i >= 0 && i < fl->n) {
+            p = fl->entries[i].name;
+            L = fl->entries[i].name_len;
+        }
+    }
+    pthread_mutex_unlock(&matlab_dbg.mu);
+    if (len_out) *len_out = L;
+    return p;
+}
+
+int matlab_dbg_frame_local_kind(int frame_idx, int i) {
+    int k = -1;
+    pthread_mutex_lock(&matlab_dbg.mu);
+    if (frame_idx >= 0 && frame_idx < matlab_dbg.n_frames) {
+        struct matlab_dbg_frame_locals *fl = &matlab_dbg.frame_locals[frame_idx];
+        if (i >= 0 && i < fl->n) k = fl->entries[i].kind;
+    }
+    pthread_mutex_unlock(&matlab_dbg.mu);
+    return k;
+}
+
+double matlab_dbg_frame_local_f64(int frame_idx, int i) {
+    double v = 0.0;
+    pthread_mutex_lock(&matlab_dbg.mu);
+    if (frame_idx >= 0 && frame_idx < matlab_dbg.n_frames) {
+        struct matlab_dbg_frame_locals *fl = &matlab_dbg.frame_locals[frame_idx];
+        if (i >= 0 && i < fl->n) v = fl->entries[i].f64;
+    }
+    pthread_mutex_unlock(&matlab_dbg.mu);
+    return v;
+}
+
+void *matlab_dbg_frame_local_ptr(int frame_idx, int i) {
+    void *p = NULL;
+    pthread_mutex_lock(&matlab_dbg.mu);
+    if (frame_idx >= 0 && frame_idx < matlab_dbg.n_frames) {
+        struct matlab_dbg_frame_locals *fl = &matlab_dbg.frame_locals[frame_idx];
+        if (i >= 0 && i < fl->n) p = fl->entries[i].ptr;
+    }
+    pthread_mutex_unlock(&matlab_dbg.mu);
+    return p;
 }
 
 /* Blocks until the worker is paused or has exited. Used by the

@@ -384,6 +384,38 @@ mlir::Value Lowerer::emitLoad(mlir::Value Slot, mlir::Type Ty,
 
 void Lowerer::emitStore(mlir::Value V, mlir::Value Slot, mlir::Location Loc) {
   emitUnregOp("matlab.store", {V, Slot}, {}, Loc);
+  /* Mirror the store to the runtime's per-frame Locals table so the
+   * DAP server can render `Locals` for any frame in the call stack —
+   * not just the script-level workspace. Only fires when DebugMode is
+   * on (no overhead in production builds) and only for slots that
+   * carry a binding name on their `matlab.alloc` op (skips synthetic
+   * BreakSlot / ContinueSlot / spill slots that have no user-visible
+   * identity).
+   *
+   * The mirror dispatches by the stored value's type:
+   *   - f64  -> matlab_dbg_frame_set_f64(name, len, val)
+   *   - other -> matlab_dbg_frame_set_mat(name, len, ptr)
+   * Tensor / matrix types end up as !llvm.ptr after LowerTensorOps,
+   * which is what the runtime expects. */
+  if (!DebugMode) return;
+  mlir::Operation *Def = Slot.getDefiningOp();
+  if (!Def) return;
+  /* The slot is the result of a matlab.alloc op; everything else
+   * (block args, loads, etc.) isn't a store target with a name. */
+  auto NameAttr = Def->getAttrOfType<mlir::StringAttr>("name");
+  if (!NameAttr) return;
+  llvm::StringRef Name = NameAttr.getValue();
+  if (Name.empty()) return;
+  mlir::Value NameV = emitFieldNameChar(Name, Loc);
+  /* Emit a generic matlab_dbg_frame_set builtin and let LowerTensorOps
+   * dispatch on the (by then concrete) operand type — at this point in
+   * the pipeline V is still `none`-typed, so picking the f64 vs mat
+   * variant here would always be wrong. */
+  mlir::NamedAttribute Cal(
+      mlir::StringAttr::get(&MCtx, "callee"),
+      mlir::StringAttr::get(&MCtx, "matlab_dbg_frame_set"));
+  emitUnregOp("matlab.call_builtin", {NameV, V},
+              {mlir::NoneType::get(&MCtx)}, Loc, {Cal});
 }
 
 //===----------------------------------------------------------------------===//
@@ -822,6 +854,18 @@ void Lowerer::lowerFunction(const Function &F, mlir::ModuleOp M,
   CurFnNargin = F.ParamRefs.size();
   CurFnNargout = F.OutputRefs.size();
 
+  /* Push the debug frame BEFORE the parameter spills so the mirror
+   * calls emitStore injects (in DebugMode) for each parameter store
+   * land in this function's mini-workspace, not the caller's. The
+   * displayed name is the bare function name for free functions and
+   * "Class.method" for class methods (constructors print as
+   * "Class.Class"). No-op outside DebugMode. */
+  {
+    std::string FrameName = std::string(F.Name);
+    if (Owner) FrameName = std::string(Owner->Name) + "." + FrameName;
+    emitDbgEnterFrame(FrameName, loc(F.Range));
+  }
+
   // Spill parameters into slots. For the varargin tail, emit a
   // ptr-typed slot and register the binding as a cell so numel /
   // length / iscell(varargin) dispatch to the cell runtime.
@@ -923,17 +967,6 @@ void Lowerer::lowerFunction(const Function &F, mlir::ModuleOp M,
       mlir::Value Slot = emitAlloc(T, N, loc(F.Range));
       Slots[Bnd] = Slot;
     }
-  }
-
-  /* Push a debug frame for this user function so the DAP server's
-   * stackTrace request walks back through the call chain instead of
-   * always reporting a single <script> frame. The displayed name is
-   * the bare function name for free functions and "Class.method" for
-   * class methods (constructors print as "Class.Class"). */
-  {
-    std::string FrameName = std::string(F.Name);
-    if (Owner) FrameName = std::string(Owner->Name) + "." + FrameName;
-    emitDbgEnterFrame(FrameName, loc(F.Range));
   }
 
   if (F.Body) lowerBlock(*F.Body);
