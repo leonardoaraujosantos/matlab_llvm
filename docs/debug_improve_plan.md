@@ -275,22 +275,141 @@ extensible from here without re-architecting.
 
 ## Out of scope (separately tracked, not on the roadmap)
 
-- **`keyboard` as a nested REPL.** The scoped-eval bridge from
-  item (6) is now in place; the remaining piece is a bidirectional
-  REPL pump driven from the paused worker (read user input, route
-  through the bridge, print, loop until `dbcont`) plus a one-line
-  lowering recogniser for the `keyboard` builtin. Not started.
-- **Function breakpoints** (`setFunctionBreakpoints`). Capability
-  advertised as `false`. No design.
-- **Hit-count breakpoints / data breakpoints / instruction
-  breakpoints.** None advertised, none wired.
-- **Reverse debugging / step-back.** `supportsStepBack=false`.
-  Explicitly out of scope.
-- **Always-on frame instrumentation in non-debug builds.** Current
-  `enter_frame` / `leave_frame` only fire when `-g` is on (or
-  implicitly under `-dap`). A production crash from `error()` in a
-  non-debug build still has no backtrace. Adding always-on frames
-  is a steady-state cost decision separate from this roadmap.
+The items below are tracked here so future contributors don't
+re-discover them from scratch — each has a brief sketch of what
+it'd take to implement and why it's deferred. Status: **none are
+started**; the shipped items above (1–7) form the supported surface.
+
+### `keyboard` as a nested REPL
+
+MATLAB's `keyboard` statement pauses execution at the line where
+it appears and drops into an interactive prompt with full access to
+the surrounding scope. The scoped-eval bridge from item (6) is
+already in place; the remaining pieces are:
+
+- **A bidirectional REPL pump** driven from the paused worker
+  thread: read user input over a channel, route through item (6)'s
+  snapshot/stamp/restore bridge, print result, loop until `dbcont`.
+  In `-dap` mode the input channel is the IDE's debug-console pane
+  via repeated `evaluate(context="repl")` requests; in standalone
+  mode a tty pump on stdin/stdout works.
+- **A lowering recogniser** for the `keyboard` builtin — emit a
+  call to a new `matlab_dbg_keyboard()` runtime entry that flips the
+  pause state with a "nested REPL" flag the DAP server / standalone
+  pump knows how to respond to.
+- **`dbcont` / `dbquit` / `dbstack`** as REPL commands handled
+  inside the pump rather than passed through to the JIT.
+
+Effort estimate: half-day or so once item (6) is understood. The
+dependency graph is fully unblocked.
+
+### Function breakpoints (`setFunctionBreakpoints`)
+
+DAP lets the IDE set breakpoints by *function name* rather than by
+file:line. The runtime-side change is small:
+
+- **Runtime**: extend `matlab_dbg_state` with a parallel
+  `fn_bp_names[]` table keyed by interned name. The frame-tracking
+  hook (`matlab_dbg_enter_frame`) already has the function name in
+  hand — compare against the table and pause if matched.
+- **DAP server**: add a `setFunctionBreakpoints` handler, populate
+  the runtime table, flip `supportsFunctionBreakpoints` to `true`
+  in `initialize`.
+
+Why deferred: file:line breakpoints already cover the common case
+(set bp on the function's first line). The IDE-facing benefit is
+"breakpoint follows the function across renames" which is uncommon
+in the matlab_llvm corpus. Easy to add later without disturbing
+anything else.
+
+### Hit-count breakpoints
+
+DAP `setBreakpoints` accepts a `hitCondition` string (e.g. `"5"`,
+`">10"`, `"%2 == 0"`) so the breakpoint only fires after N hits or
+on every Nth hit. Implementation:
+
+- **Runtime**: per-bp counter alongside the existing condition /
+  log fields; increment on every hit; compare against the
+  hit-condition spec before deciding whether to pause.
+- **DAP server**: parse `hitCondition` (a small grammar:
+  literal-int → `==`, `>N`/`>=N`/`<N`/`<=N` → comparison,
+  `%N == K` → modulo). Pass through to the runtime via a new
+  `matlab_dbg_add_breakpoint_ex2` API or extend the existing one.
+- **Capability**: advertise `supportsHitConditionalBreakpoints=true`.
+
+Useful for "stop on the 5th iteration of this loop" without
+hand-rolling a conditional that references the loop counter
+(especially since the conditional evaluator can't see function-frame
+loop indices today). Small enough to land in an afternoon.
+
+### Data breakpoints
+
+DAP `setDataBreakpoints` fires when a *value* changes (e.g. "stop
+when `x` is written to"). For a JIT'd MATLAB this is the most
+expensive option to implement well:
+
+- **Approach A (per-store check)**: at every `matlab_ws_set_*` and
+  `matlab_dbg_frame_set_*` call, look up the name in a watched-data
+  table; pause if matched. Adds cost to every store in DebugMode but
+  is mechanically simple.
+- **Approach B (page-protect)**: mprotect the workspace page and
+  catch SIGSEGV; only feasible if the matrix descriptor's storage
+  is page-aligned, which it isn't today.
+
+Why deferred: Approach A's per-store cost compounds with the
+existing DebugMode hook overhead; Approach B is a substantial
+runtime overhaul. The user-facing value (stop when a variable
+changes) is mostly covered by conditional breakpoints with the
+right condition expression.
+
+### Instruction breakpoints (`setInstructionBreakpoints`)
+
+DAP can set breakpoints on raw machine-code addresses. This is the
+debugger-disassembly view's "click to break here" affordance.
+Useful for native binaries; nearly meaningless for the JIT path
+where instruction addresses are ephemeral and re-emitted each
+launch.
+
+Could be implemented for the `-emit-llvm -g`-clang-native flow by
+deferring entirely to lldb / gdb's own instruction-bp machinery
+(they already support it via DWARF). For DAP under JIT: not
+pursued.
+
+### Reverse debugging / step-back
+
+DAP advertises `supportsStepBack` for time-travel debuggers
+(`rr`, `gdb` reverse-execution, etc.). Implementing this for a JIT
+needs deterministic re-execution from a checkpoint — every external
+side effect (`disp`, file I/O, `randn`, threading) has to be
+journaled and replayable. That's a substantial runtime project of
+its own.
+
+Explicitly out of scope. `supportsStepBack=false` and there's no
+plan to flip it.
+
+### Always-on frame instrumentation
+
+Today `matlab_dbg_enter_frame` / `_leave_frame` only fire when
+DebugMode is on (i.e. when `-g` was passed at compile time). A
+production crash from `error()` in a non-debug build therefore has
+no backtrace — the runtime sees an empty frame stack and the
+emitted message has no "at fn (file.m:line)" lines.
+
+To get always-on backtraces:
+
+- **Lowering**: emit `enter_frame` / `leave_frame` unconditionally
+  (drop the `if (!DebugMode) return;` early-out).
+- **Cost**: two function calls per user-function invocation, plus
+  one heap-copy of the function name on entry. Measurable but
+  small for typical workloads; uglier for hot inner-loop functions
+  called millions of times.
+- **Symbol export**: the runtime already exports these symbols
+  (`-rdynamic` / `--export-dynamic`); no link-time change needed.
+
+Why deferred: it's a steady-state cost decision rather than a
+correctness fix, and the typical user only needs the backtrace in
+debug builds. If we want it, the change is one-line in lowering
+plus a small benchmark to pin the per-call overhead.
 
 ## Ordering
 
