@@ -1538,9 +1538,15 @@ void Emitter::populateClassValueTypes(mlir::ModuleOp M) {
       }
     }
     if (!TagIt) return false;
+    /* Pin to the first observed class — propagation must be
+     * monotonic or the outer fixpoint can oscillate. With two call
+     * sites that pass different subclass values into the same
+     * inherited-method block-arg (e.g. `a.describe()` on Animal and
+     * `s.describe()` on Shape both reach Animal__describe's arg 0),
+     * the previous "always overwrite" path flipped the tag every
+     * iteration and the loop never converged. */
     auto It = ClassValueType.find(Result);
-    if (It != ClassValueType.end() && It->second == CN.getValue().str())
-      return false;
+    if (It != ClassValueType.end()) return false;
     ClassValueType[Result] = CN.getValue().str();
     return true;
   };
@@ -1559,15 +1565,18 @@ void Emitter::populateClassValueTypes(mlir::ModuleOp M) {
           Changed |= markCallResult(Op, C.getResult(0),
                                      llvm::StringRef(C.getCallee()));
       }
-      // Store of class-typed value into alloca.
+      // Store of class-typed value into alloca. First-write wins so
+      // the outer fixpoint converges when an alloca legitimately sees
+      // both base- and subclass-typed stores along different paths.
       if (auto S = mlir::dyn_cast<mlir::LLVM::StoreOp>(Op)) {
         auto CT = classTypeOf(S.getValue());
         if (CT.empty()) return;
         auto *Def = S.getAddr().getDefiningOp();
         auto A = mlir::dyn_cast_or_null<mlir::LLVM::AllocaOp>(Def);
         if (!A) return;
-        auto &T = ClassAllocaType[A.getOperation()];
-        if (T != CT) { T = CT.str(); Changed = true; }
+        if (ClassAllocaType.count(A.getOperation())) return;
+        ClassAllocaType[A.getOperation()] = CT.str();
+        Changed = true;
       }
       // Load from class-typed alloca.
       if (auto L = mlir::dyn_cast<mlir::LLVM::LoadOp>(Op)) {
@@ -1576,8 +1585,9 @@ void Emitter::populateClassValueTypes(mlir::ModuleOp M) {
         if (!A) return;
         auto It = ClassAllocaType.find(A.getOperation());
         if (It == ClassAllocaType.end()) return;
-        auto &T = ClassValueType[L.getResult()];
-        if (T != It->second) { T = It->second; Changed = true; }
+        if (ClassValueType.count(L.getResult())) return;
+        ClassValueType[L.getResult()] = It->second;
+        Changed = true;
       }
       // Direct func.call: propagate class-type tags from caller's
       // argument SSA values into the callee's block-args. Lets a binary
@@ -1592,8 +1602,14 @@ void Emitter::populateClassValueTypes(mlir::ModuleOp M) {
         for (unsigned i = 0; i < Call.getNumOperands(); ++i) {
           auto CT = classTypeOf(Call.getOperand(i));
           if (CT.empty()) continue;
-          auto &T = ClassValueType[Entry.getArgument(i)];
-          if (T != CT) { T = CT.str(); Changed = true; }
+          /* First call site wins. With inheritance, a base-class
+           * method can be invoked from both the base type and any
+           * subclass — the previous unconditional overwrite made
+           * the fixpoint flip the block-arg's tag every iteration,
+           * which never converges and stalls the emit indefinitely. */
+          if (ClassValueType.count(Entry.getArgument(i))) continue;
+          ClassValueType[Entry.getArgument(i)] = CT.str();
+          Changed = true;
         }
       }
     });
@@ -1986,7 +2002,8 @@ bool Emitter::tryRewriteAsClassCall(llvm::StringRef Callee,
       return true;
     }
     if (Operands.empty()) return false;
-    if (classTypeOf(Operands[0]).empty()) return false;
+    auto ActualCls = classTypeOf(Operands[0]);
+    if (ActualCls.empty()) return false;
     bool RecvIsSelf = (InClassMethodBody && Operands[0] == ClassMethodSelf);
     bool RecvIsCtorValue = false;
     if (RecvIsSelf)
@@ -2001,6 +2018,14 @@ bool Emitter::tryRewriteAsClassCall(llvm::StringRef Callee,
     } else {
       Recv = "&" + stmtExpr(Operands[0]);
     }
+    /* Inheritance cast: when the receiver is a subclass and the
+     * method lives on the parent (e.g. `s.describe()` on Shape
+     * routing to Animal__describe), insert an explicit cast so
+     * strict cc doesn't trip on Shape* -> Animal*. The C ABI laid
+     * out by emitCStructTypedef folds parent fields into the child
+     * struct in super-to-sub order, so the cast is layout-safe. */
+    if (ActualCls != Cls)
+      Recv = "(" + Cls + " *)" + Recv;
     std::string E = Callee.str() + "(" + Recv;
     for (unsigned i = 1; i < Operands.size(); ++i) {
       E += ", ";
@@ -3168,6 +3193,21 @@ bool Emitter::run(mlir::ModuleOp M) {
                                 ? std::string("void")
                                 : cTypeOf(FT.getResult(0));
         if (IsCClassMethod && IsCtor) RetTy = ClsName;
+        // C class method that returns an instance (typical for an
+        // operator overload like `r = Vec2(...)`): lift the MLIR
+        // !llvm.ptr return type to the typedef'd struct so the C
+        // signature reads `static Vec2 Vec2__plus(...)` and call
+        // sites can do `Vec2 c = Vec2__plus(&a, b);` without a
+        // void* incompatible-init error.
+        if (IsCClassMethod && !IsCtor && FT.getNumResults() == 1) {
+          std::string ReturnedCls;
+          F.walk([&](mlir::func::ReturnOp R) {
+            if (R.getNumOperands() != 1) return;
+            auto CT = classTypeOf(R.getOperand(0));
+            if (!CT.empty()) ReturnedCls = CT.str();
+          });
+          if (!ReturnedCls.empty()) RetTy = ReturnedCls;
+        }
         // Lift to Matrix when any propagated return value is matrix-typed
         // — keep forward decl in sync with the function definition's
         // signature emission below.
@@ -3348,6 +3388,20 @@ void Emitter::emitFuncFunc(mlir::func::FuncOp F) {
   bool IsCtor = KindAttr && KindAttr.getValue() == "ctor";
   bool IsStatic = KindAttr && KindAttr.getValue() == "static";
   if (IsCClassMethod && IsCtor) RetTy = ClsName;
+  // Operator overloads / methods that return a freshly-built class
+  // instance: lift the !llvm.ptr return type to the typedef'd
+  // struct so `Vec2 c = Vec2__plus(...)` compiles instead of
+  // initializing Vec2 from a void* return.
+  if (IsCClassMethod && !IsCtor && FT.getNumResults() == 1 &&
+      !F.getBody().empty()) {
+    std::string ReturnedCls;
+    F.walk([&](mlir::func::ReturnOp R) {
+      if (R.getNumOperands() != 1) return;
+      auto CT = classTypeOf(R.getOperand(0));
+      if (!CT.empty()) ReturnedCls = CT.str();
+    });
+    if (!ReturnedCls.empty()) RetTy = ReturnedCls;
+  }
   emitLineDirective(F.getLoc(), 0);
   OS << (IsMain ? "" : "static ") << RetTy << " " << F.getSymName().str()
      << "(";
