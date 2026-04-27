@@ -271,6 +271,27 @@ bool matchHWForLoop(mlir::Operation *WhileOp, HWForLoopInfo &Info);
 /// them downstream as before).
 bool runLowerStaticFiArrays(mlir::ModuleOp M);
 
+/// Phase 5.4 — constant-coefficient multiplier rewrite.
+///
+/// Recognizes `arith.muli %x, %c` (or `%c, %x`) where `%c` is a
+/// compile-time constant, and rewrites to a shift-add tree using
+/// the most-common coefficient patterns:
+///   - `x * 0`            → `0`
+///   - `x * 1`            → `x`
+///   - `x * -1`           → `0 - x`
+///   - `x * 2^k`          → `x << k`
+///   - `x * -(2^k)`       → `0 - (x << k)`
+///   - `x * (2^k - 1)`    → `(x << k) - x`        (e.g. ×7, ×15)
+///   - `x * (2^k + 1)`    → `(x << k) + x`        (e.g. ×9, ×17)
+///
+/// Other constants are left as ordinary `muli` ops; full Booth /
+/// CSD recoding for arbitrary coefficients is a v2 follow-up. The
+/// rewrite removes the `*` operator that some synthesis flows
+/// either reject (DSP-slice-disabled flows on FPGA) or
+/// pattern-match into a hardened multiplier (which costs an
+/// extra clock on most ASIC standard-cell flows). Returns true.
+bool runConstMulCSD(mlir::ModuleOp M);
+
 /// Phase 5.5 — pre-synthesis hardware report. Walks the
 /// post-pipeline module (after the SV pipeline's
 /// LowerStaticFiArrays / HWStateInfer / RefineSlotTypes etc.

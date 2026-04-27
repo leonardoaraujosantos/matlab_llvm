@@ -1359,12 +1359,35 @@ Extend `HWUnroll` to honor a streaming factor:
 Serialized bodies become small FSMs (one state per pipeline stage of
 the body), reusing the `hw.fsm` machinery from Phase 4.
 
-**Step 5.4** — Constant-multiplier optimization.
-At MLIR level, recognize `muli %x, c` where `c` is a constant and
-rewrite to a CSD/canonical-signed-digit shift-add tree. Vendor-neutral
-— produces identical RTL on ASIC and FPGA flows. Default `auto`
-(rewrite if it reduces operator count); `-sv-const-mul=off|csd|fcsd`
-overrides.
+**Step 5.4** — Constant-multiplier optimization. **Shipped as
+Phase 5.4 v1.**
+
+Recognizes `arith.muli %x, %c` (or `%c, %x`) where `%c` is a
+compile-time constant and rewrites to a shift-add tree using
+the most-common coefficient patterns:
+
+  ×0          → 0           (folded)
+  ×1          → x           (passthrough)
+  ×-1         → 0 - x
+  ×2^k        → x << k
+  ×-(2^k)     → 0 - (x << k)
+  ×(2^k - 1)  → (x << k) - x      (×3, ×7, ×15, ×31, ...)
+  ×(2^k + 1)  → (x << k) + x      (×5, ×9, ×17, ×33, ...)
+
+Other constants stay as ordinary `muli`. Full Booth/CSD
+recoding for arbitrary coefficients is a v2 follow-up; v1
+captures the patterns that account for most DSP coefficients
+users actually write.
+
+CLI: `-sv-const-mul=off|auto|csd` (default `auto` = on for the
+SV pipeline only; the C/Python/TS backends still emit `*`
+directly to match user-side semantics there).
+
+Implementation: `lib/MLIR/Passes/ConstMulCSD.cpp`. Runs after
+the user-call iteration loop and the static-fi-array lowering,
+before the verifier check. The hardware report (`-emit-
+hardware-report`) reflects the rewrite — patterns that get
+collapsed appear as shift / add / sub counts instead of mul.
 
 **Step 5.5** — Reports. **Shipped as Phase 5.5 v1.**
 

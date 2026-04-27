@@ -97,6 +97,12 @@ struct Options {
    * adjacency. */
   enum class SvFSMEncoding { Binary, OneHot, Gray };
   SvFSMEncoding SvFSMEnc = SvFSMEncoding::Binary;
+  /* Phase 5.4 — constant-coefficient multiplier rewrite. `auto`
+   * (default) enables the simple-CSD shift-add patterns; `off`
+   * disables. Reserved values like `csd` / `fcsd` map to the
+   * same v1 implementation today (full CSD recoding is a
+   * follow-up). */
+  bool SvConstMulOpt = true;
   std::string InputPath;
   /* Additional input files. When multiple `.m` files are passed, the
    * driver concatenates their contents in CLI order — the first file
@@ -164,6 +170,11 @@ bool parseArgs(int Argc, char **Argv, Options &Opts, const char *&Prog) {
       Opts.SvFSMEnc = Options::SvFSMEncoding::OneHot;
     else if (A == "-sv-fsm-encoding=gray")
       Opts.SvFSMEnc = Options::SvFSMEncoding::Gray;
+    else if (A == "-sv-const-mul=off")
+      Opts.SvConstMulOpt = false;
+    else if (A == "-sv-const-mul=auto" || A == "-sv-const-mul=csd" ||
+             A == "-sv-const-mul=on")
+      Opts.SvConstMulOpt = true;
     else if (A == "-h" || A == "--help") return false;
     else if (!A.empty() && A[0] == '-') {
       std::cerr << "unknown flag: " << A << "\n";
@@ -3097,6 +3108,13 @@ int main(int Argc, char **Argv) {
           // HWStateInfer matcher's single-use-isempty constraint
           // accepts the literal HDL Coder mealy/moore idiom.
           mlirgen::runSplitIsEmptyOr(M);
+
+          // Phase 5.4: rewrite constant-coefficient multiplications
+          // to shift-add trees (`x*7 → (x<<3) - x`). Default-on for
+          // the SV pipeline; `-sv-const-mul=off` disables. Runs only
+          // for SV emit / report / check-synth — other backends
+          // emit `*` directly to match user-side semantics.
+          if (Opts.SvConstMulOpt) mlirgen::runConstMulCSD(M);
 
           // Phase 4.5.2: replace any `unrealized_conversion_cast`
           // placeholder on scf.if conditions (inserted at MIR-to-MLIR
