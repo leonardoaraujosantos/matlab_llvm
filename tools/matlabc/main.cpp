@@ -1229,6 +1229,15 @@ int matlab_dbg_was_paused_from_watch(void);
 int     matlab_dbg_thread_count(void);
 int32_t matlab_dbg_thread_id_at(int idx);
 int32_t matlab_dbg_paused_thread_id(void);
+
+/* readMemory / writeMemory accessors. Hand out a memoryReference
+ * (hex pointer string) per matrix-variable row; the DAP server
+ * decodes it back to a buffer pointer for the read. Bounded by
+ * matlab_dbg_mat_data_bytes so a malformed request can't walk
+ * past the buffer. Complex matrices return NULL (their re/im
+ * pair can't be summarised through a single pointer). */
+void   *matlab_dbg_mat_data_ptr(void *mat);
+int64_t matlab_dbg_mat_data_bytes(void *mat);
 /* Existing in matlab_runtime.c — re-declared here for the DAP server.
  * `matlab_err_traceback_*` reads the snapshot frames captured at the
  * point matlab_set_error fired, so it survives the unwind. */
@@ -2494,6 +2503,126 @@ void *lookupMatRef(int64_t ref) {
   return MatRefs[idx];
 }
 
+/* Memory-region registry for the DAP `readMemory` / `writeMemory`
+ * requests. Whenever we hand out a memoryReference on a matrix
+ * variable row, we also record (data_ptr, byte_count) here so the
+ * read/write handler can validate the request against a known
+ * buffer instead of trusting the IDE's hex string blindly. The
+ * registry is keyed by the data pointer itself — duplicate entries
+ * just refresh the byte_count.
+ *
+ * Without this gate, `readMemory({memoryReference: "0xdeadbeef",
+ * count: 1MB})` would happily walk out-of-bounds memory; a stray
+ * IDE request from a paused-but-stale debug session is the
+ * realistic failure mode. */
+struct MemRegion { void *Ptr; int64_t Bytes; };
+std::vector<MemRegion> MemRegions;
+
+void registerMemRegion(void *Ptr, int64_t Bytes) {
+  if (!Ptr || Bytes <= 0) return;
+  for (auto &R : MemRegions) {
+    if (R.Ptr == Ptr) { R.Bytes = Bytes; return; }
+  }
+  MemRegions.push_back({Ptr, Bytes});
+}
+
+const MemRegion *lookupMemRegion(void *Ptr) {
+  for (const auto &R : MemRegions)
+    if (R.Ptr == Ptr) return &R;
+  return nullptr;
+}
+
+/* Base64 encode/decode for the DAP readMemory/writeMemory payload
+ * (the `data` field carries raw bytes as base64 per spec). Tiny
+ * standalone implementation — pulling in a third-party codec for
+ * <30 lines of code wasn't worth the dependency. */
+std::string b64Encode(const uint8_t *Data, size_t N) {
+  static const char Tbl[] =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  std::string Out;
+  Out.reserve(((N + 2) / 3) * 4);
+  for (size_t i = 0; i < N; i += 3) {
+    uint32_t v = (uint32_t)Data[i] << 16;
+    if (i + 1 < N) v |= (uint32_t)Data[i + 1] << 8;
+    if (i + 2 < N) v |= (uint32_t)Data[i + 2];
+    Out.push_back(Tbl[(v >> 18) & 0x3F]);
+    Out.push_back(Tbl[(v >> 12) & 0x3F]);
+    Out.push_back(i + 1 < N ? Tbl[(v >> 6) & 0x3F] : '=');
+    Out.push_back(i + 2 < N ? Tbl[v & 0x3F]      : '=');
+  }
+  return Out;
+}
+
+std::vector<uint8_t> b64Decode(const std::string &S) {
+  static int8_t Inv[256] = {0};
+  static bool Init = false;
+  if (!Init) {
+    for (int i = 0; i < 256; ++i) Inv[i] = -1;
+    const char *Tbl =
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    for (int i = 0; i < 64; ++i) Inv[(uint8_t)Tbl[i]] = (int8_t)i;
+    Init = true;
+  }
+  std::vector<uint8_t> Out;
+  Out.reserve((S.size() / 4) * 3);
+  uint32_t v = 0;
+  int bits = 0;
+  for (char c : S) {
+    if (c == '=' || c == '\n' || c == '\r' || c == ' ') continue;
+    int8_t d = Inv[(uint8_t)c];
+    if (d < 0) continue;
+    v = (v << 6) | (uint32_t)d;
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      Out.push_back((uint8_t)((v >> bits) & 0xFF));
+    }
+  }
+  return Out;
+}
+
+/* Side-effect helper: when a variable row is about to surface a
+ * matrix, stash the matrix's data buffer in MemRegions and return
+ * the formatted memoryReference string. The IDE's `readMemory` /
+ * `writeMemory` requests later decode the hex back to a pointer
+ * and we re-validate against MemRegions to bound the I/O.
+ *
+ * Returns an empty string for matrices we can't expose (1x1 real
+ * — already unboxed; complex — has separate re/im buffers). The
+ * caller skips the memoryReference field in those cases so the
+ * row stays clean. */
+std::string registerMatMemRef(void *Mraw) {
+  void *Data = matlab_dbg_mat_data_ptr(Mraw);
+  int64_t Bytes = matlab_dbg_mat_data_bytes(Mraw);
+  if (!Data || Bytes <= 0) return std::string();
+  registerMemRegion(Data, Bytes);
+  /* matlab_dbg_mat_data_ptr already filtered by kind; format and
+   * return. */
+  char Buf[32];
+  snprintf(Buf, sizeof Buf, "0x%llx",
+           (unsigned long long)(uintptr_t)Data);
+  return Buf;
+}
+
+/* Inverse of the inline pointer-to-hex formatting in
+ * registerMatMemRef. Returns nullptr on malformed input. */
+void *parseMemRef(const std::string &S) {
+  if (S.size() < 3) return nullptr;
+  size_t off = 0;
+  if (S[0] == '0' && (S[1] == 'x' || S[1] == 'X')) off = 2;
+  uintptr_t V = 0;
+  for (size_t i = off; i < S.size(); ++i) {
+    char c = S[i];
+    int d;
+    if (c >= '0' && c <= '9') d = c - '0';
+    else if (c >= 'a' && c <= 'f') d = c - 'a' + 10;
+    else if (c >= 'A' && c <= 'F') d = c - 'A' + 10;
+    else return nullptr;
+    V = (V << 4) | (uintptr_t)d;
+  }
+  return (void *)V;
+}
+
 /* Format a single matrix row for display alongside its
  * variablesReference. 1x1 matrices unbox to the scalar (matches
  * matlab_struct_get_f64 and what users want to see in a counter
@@ -2780,8 +2909,8 @@ bool handleRequest(const Object &Msg) {
        * MVP doesn't ship. The corresponding handlers respond with
        * success=false + a precise reason. */
       {"supportsDataBreakpoints", true},
-      {"supportsReadMemoryRequest", false},
-      {"supportsWriteMemoryRequest", false},
+      {"supportsReadMemoryRequest", true},
+      {"supportsWriteMemoryRequest", true},
       {"supportsDisassembleRequest", false},
       {"supportsInstructionBreakpoints", false},
       {"supportsSteppingGranularity", false},
@@ -3148,6 +3277,7 @@ bool handleRequest(const Object &Msg) {
           int64_t ChildRef = 0;
           int64_t IndexedHint = 0;
           int64_t NamedHint = 0;
+          std::string MemRef;
           if (K == 0) {
             char Buf[64];
             snprintf(Buf, sizeof Buf, "%g",
@@ -3158,10 +3288,13 @@ bool handleRequest(const Object &Msg) {
             Val = formatMatShape(M);
             /* Multi-cell matrix properties are drillable too — the
              * Matrix Viewer / Variable Inspector can chase the ref
-             * down without a separate eval. */
+             * down without a separate eval. The memoryReference
+             * exposes the data buffer so the IDE's memory view
+             * can dump raw bytes. */
             if (M && matIsMultiCell(M)) {
               ChildRef = registerMatRef(M);
               IndexedHint = matIndexedCount(M);
+              MemRef = registerMatMemRef(M);
             }
           } else if (K == 2) {
             void *child = matlab_dbg_obj_field_ptr(obj, i);
@@ -3182,6 +3315,7 @@ bool handleRequest(const Object &Msg) {
           };
           if (IndexedHint > 0) Row["indexedVariables"] = IndexedHint;
           if (NamedHint > 0) Row["namedVariables"] = NamedHint;
+          if (!MemRef.empty()) Row["memoryReference"] = MemRef;
           Vs.push_back(std::move(Row));
         }
         /* Method rows. After the property rows, emit one entry per
@@ -3290,6 +3424,7 @@ bool handleRequest(const Object &Msg) {
         int64_t ChildRef = 0;
         int64_t IndexedCount = 0;
         int64_t NamedCount = 0;
+        std::string MemRef;
         if (K == 2) {
           if (void *obj = matlab_dbg_ws_ptr(i)) {
             ChildRef = registerObjRef(obj);
@@ -3300,6 +3435,7 @@ bool handleRequest(const Object &Msg) {
           if (M && matIsMultiCell(M)) {
             ChildRef = registerMatRef(M);
             IndexedCount = matIndexedCount(M);
+            MemRef = registerMatMemRef(M);
           }
         }
         Object Row{
@@ -3310,6 +3446,7 @@ bool handleRequest(const Object &Msg) {
         };
         if (IndexedCount > 0) Row["indexedVariables"] = IndexedCount;
         if (NamedCount > 0) Row["namedVariables"] = NamedCount;
+        if (!MemRef.empty()) Row["memoryReference"] = MemRef;
         Vs.push_back(std::move(Row));
       }
     }
@@ -3329,6 +3466,7 @@ bool handleRequest(const Object &Msg) {
         int64_t ChildRef = 0;
         int64_t IndexedCount = 0;
         int64_t NamedCount = 0;
+        std::string MemRef;
         if (K == 0) {
           char Buf[64];
           double V = matlab_dbg_frame_local_f64(RtFrameIdx, i);
@@ -3343,6 +3481,7 @@ bool handleRequest(const Object &Msg) {
           if (M && matIsMultiCell(M)) {
             ChildRef = registerMatRef(M);
             IndexedCount = matIndexedCount(M);
+            MemRef = registerMatMemRef(M);
           }
         } else if (K == 2) {
           void *obj = matlab_dbg_frame_local_ptr(RtFrameIdx, i);
@@ -3364,6 +3503,7 @@ bool handleRequest(const Object &Msg) {
         };
         if (IndexedCount > 0) Row["indexedVariables"] = IndexedCount;
         if (NamedCount > 0) Row["namedVariables"] = NamedCount;
+        if (!MemRef.empty()) Row["memoryReference"] = MemRef;
         Vs.push_back(std::move(Row));
       }
     }
@@ -4287,16 +4427,125 @@ bool handleRequest(const Object &Msg) {
                        "this build does not include"));
     return true;
   }
-  if (*Cmd == "readMemory" || *Cmd == "writeMemory") {
-    sendResponse(ReqSeq, *Cmd, false,
-                 Value("memory inspection is unsupported: the JIT image "
-                       "is not exposed at the byte level"));
+  if (*Cmd == "readMemory") {
+    /* Decode the memoryReference back to a buffer pointer and read
+     * `count` bytes starting at `offset`. The buffer must have been
+     * registered via registerMemRegion (matrix data buffers are the
+     * only thing we hand out today) — this gates the read against
+     * a known size so a malformed request can't walk past the end.
+     *
+     * Per DAP spec, the response carries:
+     *   - address: the requested memoryReference (echoed back)
+     *   - data: base64 of the bytes actually read
+     *   - unreadableBytes: count we couldn't satisfy (clipped at
+     *     the buffer end)
+     * IDEs use the truncation field to render "..." past the end. */
+    auto MemRefOpt = Args->getString("memoryReference");
+    auto OffsetOpt = Args->getInteger("offset");
+    auto CountOpt  = Args->getInteger("count");
+    if (!MemRefOpt || !CountOpt) {
+      sendResponse(ReqSeq, *Cmd, false,
+                   Value("readMemory requires memoryReference and count"));
+      return true;
+    }
+    void *Base = parseMemRef(MemRefOpt->str());
+    const MemRegion *R = lookupMemRegion(Base);
+    if (!R) {
+      sendResponse(ReqSeq, *Cmd, false,
+                   Value("memoryReference does not point at a registered "
+                         "buffer (only matrix data buffers are exposed)"));
+      return true;
+    }
+    int64_t Offset = OffsetOpt.value_or(0);
+    int64_t Count  = *CountOpt;
+    if (Offset < 0 || Count < 0) {
+      sendResponse(ReqSeq, *Cmd, false,
+                   Value("readMemory offset/count must be non-negative"));
+      return true;
+    }
+    /* Cap reads at 1MB so a runaway request can't allocate gigs
+     * of base64. The IDE retries with smaller chunks if it really
+     * wants more — the memory-view widgets all do this anyway. */
+    constexpr int64_t MaxRead = 1024 * 1024;
+    if (Count > MaxRead) Count = MaxRead;
+    int64_t Start = Offset;
+    int64_t End = Offset + Count;
+    int64_t Unreadable = 0;
+    if (Start > R->Bytes) { Start = R->Bytes; Unreadable = Count; }
+    if (End > R->Bytes) {
+      Unreadable += End - R->Bytes;
+      End = R->Bytes;
+    }
+    int64_t Avail = End - Start;
+    if (Avail < 0) Avail = 0;
+    std::string Data = b64Encode(
+        (const uint8_t *)R->Ptr + Start, (size_t)Avail);
+    Object Body{
+      {"address", MemRefOpt->str()},
+      {"data", std::move(Data)},
+    };
+    if (Unreadable > 0) Body["unreadableBytes"] = Unreadable;
+    sendResponse(ReqSeq, *Cmd, true, std::move(Body));
     return true;
   }
+
+  if (*Cmd == "writeMemory") {
+    /* Inverse of readMemory. Same registration check — only buffers
+     * we previously handed out via memoryReference are writable. The
+     * IDE sends `data` as base64 plus an offset; we decode and
+     * memcpy into the buffer (clipped at the buffer end so a long
+     * write can't smash adjacent state). */
+    auto MemRefOpt = Args->getString("memoryReference");
+    auto OffsetOpt = Args->getInteger("offset");
+    auto DataOpt   = Args->getString("data");
+    if (!MemRefOpt || !DataOpt) {
+      sendResponse(ReqSeq, *Cmd, false,
+                   Value("writeMemory requires memoryReference and data"));
+      return true;
+    }
+    void *Base = parseMemRef(MemRefOpt->str());
+    const MemRegion *R = lookupMemRegion(Base);
+    if (!R) {
+      sendResponse(ReqSeq, *Cmd, false,
+                   Value("memoryReference does not point at a registered "
+                         "buffer"));
+      return true;
+    }
+    int64_t Offset = OffsetOpt.value_or(0);
+    if (Offset < 0 || Offset > R->Bytes) {
+      sendResponse(ReqSeq, *Cmd, false,
+                   Value("writeMemory offset out of range"));
+      return true;
+    }
+    auto Bytes = b64Decode(DataOpt->str());
+    int64_t Avail = R->Bytes - Offset;
+    int64_t N = (int64_t)Bytes.size();
+    int64_t BytesWritten = N <= Avail ? N : Avail;
+    int64_t BytesIgnored = N - BytesWritten;
+    if (BytesWritten > 0)
+      std::memcpy((uint8_t *)R->Ptr + Offset, Bytes.data(),
+                  (size_t)BytesWritten);
+    Object Body{{"bytesWritten", BytesWritten}};
+    if (BytesIgnored > 0) Body["offset"] = (int64_t)0;
+    sendResponse(ReqSeq, *Cmd, true, std::move(Body));
+    return true;
+  }
+
   if (*Cmd == "disassemble" || *Cmd == "locations") {
+    /* Disassembly proper would need to wire LLVM's MCDisassembler
+     * against the JIT'd code's address range — multi-day project
+     * (target machine setup, instruction printer, instruction-by-
+     * instruction stepping). The DWARF path (`matlabc -emit-llvm
+     * -g | clang | lldb`) already covers users who want native
+     * debugging; instruction-level inside the JIT-attached session
+     * is genuinely low-value for a MATLAB-level debugger. Stays
+     * refused. */
     sendResponse(ReqSeq, *Cmd, false,
-                 Value("disassembly is unsupported: native frames are not "
-                       "tracked by the runtime"));
+                 Value("disassembly is unsupported: wiring LLVM's "
+                       "MCDisassembler against the JIT-emitted code "
+                       "is out of scope for this build. The "
+                       "`-emit-llvm -g | clang | lldb` path covers "
+                       "native-level debugging if you need it"));
     return true;
   }
 

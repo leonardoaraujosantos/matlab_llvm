@@ -999,6 +999,96 @@ def scn_data_breakpoint_read_refused(matlabc, program):
         c.wait_event("terminated", timeout=5.0)
 
 
+def scn_read_write_memory(matlabc, program):
+    """Matrix variable rows now carry a `memoryReference` pointing
+    at the data buffer, so the IDE can `readMemory` / `writeMemory`
+    raw cell bytes through the standard DAP affordances.
+
+    For `dap_matrix_program.m`, A is a 2x3 row-major double matrix
+    `[1 2 3; 4 5 6]`. We read the first 24 bytes (3 cells of slice 0)
+    and confirm the doubles match {1, 2, 3}, then write a new
+    pattern back and read it again to confirm the round-trip.
+    Reading past the buffer end reports the unread tail in
+    `unreadableBytes` instead of erroring."""
+    import os
+    import base64
+    import struct
+
+    mat_program = os.path.join(
+        os.path.dirname(os.path.abspath(program)),
+        "dap_matrix_program.m",
+    )
+    with DapClient(matlabc, mat_program) as c:
+        initialize_and_launch(c, breakpoints=[{"line": 10}])
+        _stop_event(c)
+
+        st = c.request("stackTrace", {"threadId": 1})
+        sc = c.request("scopes", {"frameId": st["stackFrames"][0]["id"]})
+        body = c.request("variables",
+                         {"variablesReference": sc["scopes"][0]["variablesReference"]})
+        rows = {v["name"]: v for v in (body.get("variables") or [])}
+        mem_ref = rows["A"].get("memoryReference")
+        assert mem_ref and mem_ref.startswith("0x"), \
+            f"matrix A should carry a memoryReference: {rows['A']!r}"
+
+        # Read the first three doubles (24 bytes). Row-major layout
+        # → A's first row is [1, 2, 3].
+        body = c.request("readMemory", {
+            "memoryReference": mem_ref,
+            "offset": 0,
+            "count": 24,
+        })
+        assert body.get("address") == mem_ref, body
+        bytes_back = base64.b64decode(body["data"])
+        assert len(bytes_back) == 24, f"expected 24 bytes, got {len(bytes_back)}"
+        cells = struct.unpack("<3d", bytes_back)
+        assert cells == (1.0, 2.0, 3.0), \
+            f"first row should be [1, 2, 3], got {cells!r}"
+
+        # Read past the end — A is 2x3 = 6 cells = 48 bytes total.
+        # Asking for 96 bytes should return 48 with unreadableBytes=48.
+        body = c.request("readMemory", {
+            "memoryReference": mem_ref, "offset": 0, "count": 96,
+        })
+        assert body.get("unreadableBytes") == 48, \
+            f"reading past EOB should report unreadableBytes=48: {body!r}"
+        bytes_back = base64.b64decode(body["data"])
+        assert len(bytes_back) == 48, body
+
+        # Round-trip via writeMemory: stamp a new pattern at offset 0
+        # (3 cells) and read it back.
+        new_pattern = struct.pack("<3d", 99.0, 88.0, 77.0)
+        body = c.request("writeMemory", {
+            "memoryReference": mem_ref,
+            "offset": 0,
+            "data": base64.b64encode(new_pattern).decode("ascii"),
+        })
+        assert body.get("bytesWritten") == 24, \
+            f"writeMemory should report 24 bytes written: {body!r}"
+
+        body = c.request("readMemory", {
+            "memoryReference": mem_ref, "offset": 0, "count": 24,
+        })
+        cells = struct.unpack("<3d", base64.b64decode(body["data"]))
+        assert cells == (99.0, 88.0, 77.0), \
+            f"writeMemory round-trip failed: {cells!r}"
+
+        # Bogus memoryReference is rejected cleanly.
+        try:
+            c.request("readMemory", {
+                "memoryReference": "0xdeadbeef",
+                "offset": 0,
+                "count": 16,
+            })
+            raise AssertionError("readMemory should refuse unknown ptr")
+        except DapError as e:
+            assert "registered" in str(e).lower(), \
+                f"refusal should mention registration: {e}"
+
+        c.request("continue")
+        c.wait_event("terminated", timeout=5.0)
+
+
 def scn_parfor_thread_enumeration(matlabc, program):
     """parfor spawns one pthread per iteration; each registers
     itself with the runtime on its first hook fire. The DAP
@@ -1301,8 +1391,7 @@ def scn_unsupported_refusals(matlabc, program):
         initialize_and_launch(c, breakpoints=[{"line": 5}])
         _stop_event(c)
 
-        for cmd in ("stepBack", "reverseContinue", "readMemory",
-                    "writeMemory", "disassemble",
+        for cmd in ("stepBack", "reverseContinue", "disassemble",
                     "setInstructionBreakpoints", "restartFrame",
                     "goto", "gotoTargets"):
             try:

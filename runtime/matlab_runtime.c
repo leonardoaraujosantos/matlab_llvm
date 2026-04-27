@@ -4528,6 +4528,39 @@ int64_t matlab_dbg_mat3_depth(const matlab_mat3 *m) {
     if (!m || !mat_is_3d(m)) return 0;
     return m->depth;
 }
+/* Memory-inspection accessors. The DAP `readMemory` / `writeMemory`
+ * requests use a `memoryReference` (per spec, a hex string) plus an
+ * offset to identify what to read. We hand out memory refs only for
+ * matrix data buffers — everything else is opaque or scalar — and
+ * the readMemory handler decodes the hex back to a pointer to walk
+ * the cells as raw bytes. Returning the buffer pointer + total byte
+ * size lets the DAP server bound the read so a 100MB readMemory
+ * request can't walk past the buffer. */
+void *matlab_dbg_mat_data_ptr(void *Mraw) {
+    if (!Mraw) return NULL;
+    int32_t kind = matlab_dbg_mat_kind(Mraw);
+    if (kind == 1) return ((matlab_mat *)Mraw)->data;
+    if (kind == 3) return ((matlab_mat3 *)Mraw)->data;
+    /* Complex matrices have two parallel buffers (re/im); a single
+     * pointer can't cover both. Refuse for now — the IDE's memory
+     * view would only see the real component, which would be
+     * misleading. */
+    return NULL;
+}
+int64_t matlab_dbg_mat_data_bytes(void *Mraw) {
+    if (!Mraw) return 0;
+    int32_t kind = matlab_dbg_mat_kind(Mraw);
+    if (kind == 1) {
+        matlab_mat *m = (matlab_mat *)Mraw;
+        return m->rows * m->cols * (int64_t)sizeof(double);
+    }
+    if (kind == 3) {
+        matlab_mat3 *m = (matlab_mat3 *)Mraw;
+        return m->rows * m->cols * m->depth * (int64_t)sizeof(double);
+    }
+    return 0;
+}
+
 double matlab_dbg_mat3_get(const matlab_mat3 *m,
                            int64_t i, int64_t j, int64_t k) {
     if (!m || !mat_is_3d(m) || !m->data) return 0.0;

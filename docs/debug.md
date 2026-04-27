@@ -179,6 +179,7 @@ VS Code via a generic-DAP extension:
 | Log points (no pause)           | `setBreakpoints` `logMessage` — `{name}` placeholders resolve against the innermost paused frame's mini-ws (same bridge as conditional bps) |
 | Hit-count breakpoints           | `setBreakpoints` `hitCondition` — accepts `N`, `==N`, `>=N`, `>N`, `%N`. Skip-counter lives in the runtime's bp table so the JIT cost of cond eval is paid only once the gate passes |
 | Data breakpoints (write only)   | `dataBreakpointInfo` resolves a name to a stable dataId; `setDataBreakpoints` installs a write-watch. Every `matlab_ws_set_*` and `matlab_dbg_frame_set_*` checks the watch list and trips a pause when a name matches; `stopped` carries `reason: "data breakpoint"` and the watch's id in `hitBreakpointIds`. Read watchpoints are refused with a clear message (would gate every `matlab_ws_get_*` on the hot path) |
+| Memory inspection on matrices   | Matrix variable rows carry a `memoryReference` (hex-formatted data-buffer pointer); `readMemory` and `writeMemory` decode it back, validate against a server-side region table (only matrix data buffers are exposed — refuses arbitrary addresses), and stream cell bytes as base64. Reads past the buffer end report `unreadableBytes` instead of erroring. 1MB read cap per request |
 | Function breakpoints            | `setFunctionBreakpoints` resolves a name against the compiled function table and pins a line bp at the body's first statement. Class methods are registered under `MethodName`, `ClassName.MethodName`, and `ClassName/MethodName` so any form the user types resolves |
 | Breakpoint candidate lines      | `breakpointLocations` returns every bp-eligible line in a range (computed by an AST walker at compileProgram time) |
 | Exception breakpoints           | `setExceptionBreakpoints` with the `error` filter — runtime pauses on the first hook fired after `matlab_set_error` |
@@ -226,8 +227,7 @@ each so clients suppress the corresponding UI affordances.
 | Request                          | Reason                                                              |
 | -------------------------------- | ------------------------------------------------------------------- |
 | `stepBack`, `reverseContinue`    | Reverse stepping needs a state recorder the runtime does not include |
-| `readMemory`, `writeMemory`      | The JIT image is not exposed at the byte level                      |
-| `disassemble`, `locations`       | Native frames are not tracked by the runtime                        |
+| `disassemble`, `locations`       | Wiring LLVM's MCDisassembler against the JIT-emitted code is multi-day work; the `-emit-llvm -g \| clang \| lldb` path covers native-level debugging without it |
 | `setDataBreakpoints`, `dataBreakpointInfo` | No workspace-store watcher (data breakpoints would need every `matlab_ws_set_*` to compare against a watch list) |
 | `setInstructionBreakpoints`      | The JIT exposes no public mapping from line to native PC            |
 | `restartFrame`                   | The runtime does not snapshot per-frame workspace at function entry |
@@ -682,10 +682,16 @@ helper variable is named `total` rather than `sum` for this reason.
   state recorder, so `stepBack` and `reverseContinue` respond with
   `success=false`. The infrastructure to add: a per-statement
   diff log of `matlab_ws_*` writes plus frame-stack edits.
-- **Memory / disassembly inspection.** The MLIR ExecutionEngine
-  doesn't surface a public mapping from line to native PC, and we
-  don't track JIT'd code addresses on the server side. `readMemory`,
-  `writeMemory`, `disassemble`, `locations` all refuse cleanly.
+- **Memory inspection on matrices.** *Done.* Matrix variable rows
+  carry a `memoryReference` pointing at the data buffer; the DAP
+  server keeps a `MemRegions` registry of (ptr, byte_count) pairs
+  for every buffer it hands out. `readMemory` and `writeMemory`
+  decode the hex pointer, validate against the registry to bound
+  the I/O, and stream cell bytes as base64. Buffers we don't
+  expose (the LLVM JIT image, complex matrices' parallel re/im
+  buffers) stay opaque. Disassembly remains refused — wiring
+  LLVM's MCDisassembler is multi-day work and the `-emit-llvm -g
+  \| clang \| lldb` path already covers native-level debugging.
 - **Data breakpoints (write watchpoints).** *Done.* The runtime
   carries a per-name watch table; every `matlab_ws_set_f64/_mat/
   _obj` and `matlab_dbg_frame_set_f64/_mat/_obj` calls
@@ -827,7 +833,7 @@ Three ctest suites guard the debugging surface (all gated on
 
 - **`debug-dap-tests`** — spawns `matlabc -dap` as a subprocess and
   drives the protocol with a small Python client
-  (`test/Debug/dap_client.py`). Thirty-eight scenarios cover the
+  (`test/Debug/dap_client.py`). Thirty-nine scenarios cover the
   end-to-end surface:
 
   *Stepping & basic flow:*
@@ -997,6 +1003,15 @@ Three ctest suites guard the debugging surface (all gated on
     plus one entry per parfor pthread ("parfor-1" / etc.). The
     runtime's `matlab_dbg_thread_slot_locked` lazy-registers
     each pthread on its first hook fire
+  - **`read_write_memory`** — using `dap_matrix_program.m`'s
+    `A = [1 2 3; 4 5 6]`, exercises the matrix `memoryReference`
+    field: reads the first 3 doubles via `readMemory` and
+    confirms they match {1, 2, 3}; reads past the buffer end
+    and verifies `unreadableBytes` reports the truncated tail;
+    writes a new pattern via `writeMemory` and reads it back
+    to confirm the round-trip; sends a bogus memoryReference
+    and verifies the handler refuses with a registration-check
+    message
 
 - **`debug-dwarf-tests`** — runs `matlabc -emit-llvm -g` and
   `-emit-llvm` (no -g) over a fixture, asserts the DWARF metadata
