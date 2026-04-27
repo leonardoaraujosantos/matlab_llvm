@@ -101,6 +101,7 @@ private:
   void emitBinop(mlir::Operation &Op, llvm::StringRef SvOp, int Indent);
   void emitUnaryNeg(mlir::Operation &Op, int Indent);
   void emitCmp(mlir::arith::CmpIOp C, int Indent);
+  void emitCmpF(mlir::arith::CmpFOp C, int Indent);
   void emitSelect(mlir::arith::SelectOp S, int Indent);
   void emitExtTrunc(mlir::Operation &Op, int Indent);
   void emitScfIf(mlir::scf::IfOp If, int Indent);
@@ -451,8 +452,40 @@ void Emitter::declarePrelude(mlir::func::FuncOp F) {
     // for-iv, the cmpf result, the addf next-value) that the SV
     // emitter renders as part of the SV `for (int i = ...)` head and
     // the loop pattern. They never become datapath signals.
-    if (mlir::isa<mlir::scf::WhileOp, mlir::scf::ConditionOp,
-                  mlir::arith::CmpFOp, mlir::arith::AddFOp>(Op))
+    //
+    // arith.cmpf and arith.addf, however, ALSO appear in datapath
+    // contexts after Phase 4 lands FSM emission: the state-equality
+    // check `switch (st) case 0: ...` lowers via the runtime ABI
+    // through `arith.cmpf oeq, get_f64(st), 0.0 : f64` whose result
+    // is a real datapath i1. Skip these ops only when they're part
+    // of a recognized for-loop pattern (i.e., they live in the
+    // before-region's terminator chain or the after-region's tail).
+    auto IsForLoopStructural = [](mlir::Operation *Op) {
+      mlir::Operation *Parent = Op->getParentOp();
+      if (!Parent) return false;
+      auto W = mlir::dyn_cast<mlir::scf::WhileOp>(Parent);
+      if (!W) return false;
+      // Cmpf used by scf.condition (the for-loop's terminator) is
+      // structural; cmpf elsewhere is datapath.
+      if (mlir::isa<mlir::arith::CmpFOp>(Op)) {
+        for (mlir::OpOperand &U : Op->getResult(0).getUses())
+          if (mlir::isa<mlir::scf::ConditionOp>(U.getOwner()))
+            return true;
+        return false;
+      }
+      // Addf used by scf.yield (after-region tail) is structural.
+      if (mlir::isa<mlir::arith::AddFOp>(Op)) {
+        for (mlir::OpOperand &U : Op->getResult(0).getUses())
+          if (mlir::isa<mlir::scf::YieldOp>(U.getOwner()))
+            return true;
+        return false;
+      }
+      return false;
+    };
+    if (mlir::isa<mlir::scf::WhileOp, mlir::scf::ConditionOp>(Op))
+      return;
+    if (mlir::isa<mlir::arith::CmpFOp, mlir::arith::AddFOp>(Op) &&
+        IsForLoopStructural(Op))
       return;
     if (auto C = mlir::dyn_cast<mlir::arith::ConstantOp>(Op)) {
       // Constants render inline; no prelude entry.
@@ -526,6 +559,39 @@ void Emitter::emitCmp(mlir::arith::CmpIOp C, int Indent) {
   case mlir::arith::CmpIPredicate::ule: SvOp = "<=";  break;
   case mlir::arith::CmpIPredicate::ugt: SvOp = ">";   break;
   case mlir::arith::CmpIPredicate::uge: SvOp = ">=";  break;
+  }
+  indent(Indent);
+  OS << name(C.getResult()) << " = "
+     << exprFor(C.getLhs()) << " " << SvOp.str() << " "
+     << exprFor(C.getRhs()) << ";\n";
+}
+
+void Emitter::emitCmpF(mlir::arith::CmpFOp C, int Indent) {
+  // Phase 4: arith.cmpf surfaces in the FSM lowering — `switch (st)
+  // case <const>` becomes a chain of `arith.cmpf oeq, get_f64(st),
+  // <case_const>`. The LHS is a recognized persistent get (routed
+  // through `exprFor` to the register signal name) and the RHS is
+  // an integer-valued f64 constant (rendered as a plain integer
+  // literal via the same `exprFor` path used for switch case
+  // labels). All ordered/unordered variants pick the same SV
+  // operator since unordered makes no sense on integer-shaped data.
+  llvm::StringRef SvOp;
+  switch (C.getPredicate()) {
+  case mlir::arith::CmpFPredicate::OEQ:
+  case mlir::arith::CmpFPredicate::UEQ: SvOp = "=="; break;
+  case mlir::arith::CmpFPredicate::ONE:
+  case mlir::arith::CmpFPredicate::UNE: SvOp = "!="; break;
+  case mlir::arith::CmpFPredicate::OLT:
+  case mlir::arith::CmpFPredicate::ULT: SvOp = "<"; break;
+  case mlir::arith::CmpFPredicate::OLE:
+  case mlir::arith::CmpFPredicate::ULE: SvOp = "<="; break;
+  case mlir::arith::CmpFPredicate::OGT:
+  case mlir::arith::CmpFPredicate::UGT: SvOp = ">"; break;
+  case mlir::arith::CmpFPredicate::OGE:
+  case mlir::arith::CmpFPredicate::UGE: SvOp = ">="; break;
+  default:
+    fail("unsupported arith.cmpf predicate (only ord/unord eq/ne/lt/le/gt/ge)");
+    return;
   }
   indent(Indent);
   OS << name(C.getResult()) << " = "
@@ -892,6 +958,7 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
   if (isa<arith::ShRSIOp>(Op)) { emitBinop(Op, ">>>", Indent); return; }
   if (isa<arith::ShRUIOp>(Op)) { emitBinop(Op, ">>",  Indent); return; }
   if (auto C = dyn_cast<arith::CmpIOp>(Op)) { emitCmp(C, Indent); return; }
+  if (auto C = dyn_cast<arith::CmpFOp>(Op)) { emitCmpF(C, Indent); return; }
   if (auto S = dyn_cast<arith::SelectOp>(Op)) { emitSelect(S, Indent); return; }
   if (isa<arith::ExtSIOp, arith::ExtUIOp, arith::TruncIOp>(Op)) {
     emitExtTrunc(Op, Indent); return;

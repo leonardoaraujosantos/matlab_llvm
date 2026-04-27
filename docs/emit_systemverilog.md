@@ -899,7 +899,42 @@ shift register, edge-detector. Goldens plus Verilator lint plus an
 optional simulation lane (`just test-sv-sim`) that drives a
 testbench against the MATLAB reference.
 
-### Phase 4 — FSMs and RAM inference (~2 weeks)
+### Phase 4 — FSMs and RAM inference (~2 weeks; v1 ships only FSMs)
+
+**Phase 4 v1 (shipped) scope.** FSM emission is much smaller than
+this section originally projected — the **Phase 3 two-process pattern
+already handles FSMs end-to-end** when the user expresses state
+transitions as a `switch (state)` (or nested `if (state == c)`
+cascade) on a `persistent` integer state variable. Concretely, v1
+adds **one missing op handler** to the SV emitter — `arith.cmpf` for
+state-equality checks lowered through the persistent-get f64 ABI —
+and lets Phase 3's existing always_comb / always_ff machinery do the
+rest. Both Mealy and Moore styles emit clean lint-passing SV today
+(`test/EmitSV/fsm_2state.m`, `fsm_moore3.m`).
+
+**Deferred to follow-up Phase 4 quality work**:
+- `unique case` + `typedef enum` rendering instead of nested
+  `if/else` cascade. Synth tools handle the cascade correctly today,
+  but the explicit case-statement form reads better and gives the
+  synth tool more freedom to choose state encoding.
+- One-hot / Gray state encoding via `% hdl: fsm_encoding('one_hot')`
+  pragma.
+- FSM ambiguity diagnostics (multiple unconditional next-state
+  writes in one arm, missing `otherwise`, unreachable states).
+- Hierarchical FSM extraction (an `hw.fsm` op carrying explicit
+  state table + per-state IR blocks) — not needed for direct
+  emission but useful for downstream passes.
+
+**RAM inference deferred to Phase 4.5.** The persistent-array storage
+pattern depends on `LowerStaticFiArrays` from Phase 4.5.4, which
+turns `fi(zeros(1, N), ...)` into an `llvm.alloca [N x iW]`. Once
+that lands, RAM-inference is a small extension of the Phase 3
+`HWStateInfer` pass (recognize `persistent + array + scalar
+read/write` and tag with `hw.role<ram>`) plus the canonical
+synchronous-RAM pattern in the SV emitter.
+
+The original Phase 4 design content below is kept verbatim as the
+target shape for the full subset.
 
 **Goal.** Persistent state variable + `switch` compiles to a
 two-process FSM. Persistent arrays with single-element scalar access

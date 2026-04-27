@@ -75,13 +75,39 @@ bool runHWBitWidthInfer(mlir::ModuleOp M,
       // For-loop control-flow ops (Phase 2): the canonical bounded
       // for-loop pattern uses an `f64` induction variable inside
       // `arith.cmpf` / `arith.addf` / `scf.condition` / `scf.yield`.
-      // These are structural — neither emits any datapath value the
-      // SV emitter renders directly (the iv lowers to an SV `int` at
-      // emission time). Skip them so the f64 type doesn't trip the
-      // `isAcceptedType` check.
+      // These are structural — they emit no datapath value the SV
+      // emitter renders directly (the iv lowers to an SV `int` at
+      // emission time). Skip the structural roles so the f64 type
+      // doesn't trip the `isAcceptedType` check.
+      //
+      // Phase 4: cmpf can also appear as the datapath state-equality
+      // check `cmpf oeq, get_f64(st), <case_label>` — an i1 result
+      // that the SV emitter must declare normally. Distinguish the
+      // two via the consumer: cmpf used by scf.condition is
+      // structural; cmpf used by anything else is datapath.
       if (mlir::isa<mlir::scf::WhileOp, mlir::scf::ConditionOp,
-                    mlir::scf::YieldOp,
-                    mlir::arith::CmpFOp, mlir::arith::AddFOp>(Op))
+                    mlir::scf::YieldOp>(Op))
+        return;
+      auto IsForLoopStructural = [](mlir::Operation *Op) {
+        if (!Op->getParentOp() ||
+            !mlir::isa<mlir::scf::WhileOp>(Op->getParentOp()))
+          return false;
+        if (mlir::isa<mlir::arith::CmpFOp>(Op)) {
+          for (mlir::OpOperand &U : Op->getResult(0).getUses())
+            if (mlir::isa<mlir::scf::ConditionOp>(U.getOwner()))
+              return true;
+          return false;
+        }
+        if (mlir::isa<mlir::arith::AddFOp>(Op)) {
+          for (mlir::OpOperand &U : Op->getResult(0).getUses())
+            if (mlir::isa<mlir::scf::YieldOp>(U.getOwner()))
+              return true;
+          return false;
+        }
+        return false;
+      };
+      if (mlir::isa<mlir::arith::CmpFOp, mlir::arith::AddFOp>(Op) &&
+          IsForLoopStructural(Op))
         return;
       // arith.constant of f64 is also structural in Phase 2 — it
       // appears only as init/end/step of a recognized for-loop. If a
