@@ -696,7 +696,7 @@ piece the next stage builds on.
 | C | ✅ shipped | Static array literal init (`fi([0.1, 0.2, ...], ...)` → alloca + per-element stores) | ~2 days | coefficient-table half of fir / seq |
 | D | ✅ shipped | Loop-iv array indexing (`for i = 1:N; arr(i) ...; end`) | ~3 days | for-loop bodies in fir / seq |
 | E | ✅ shipped | Vector concat with static shapes (`[x, delay(1:end-1)]`) | ~3 days | shift-register pattern in fir / seq |
-| F | 🟡 deferred | Persistent fi-arrays + whole-vector assign (`persistent` + `acc(:) = ...`) | ~6 days | `fir_asic_pipelined` ✅, `sequential_processor` ✅ |
+| F | ✅ shipped (v1) | Persistent fi-arrays — N parallel scalar persistents (shift-register patterns work). `acc(:) = ...` colon-assign on scalars works as a regular store; vector colon-assign + `isempty(c) \|\| reset` array variant + `fi(<fi-arg>, ...)` saturate cast on call-arg fi values still need follow-up sub-stages before the full `fir_asic_pipelined.m` / `sequential_processor.m` close. | ~6 days | persistent shift-register pattern ✅; full fir/seq closure pending sub-stages |
 
 Total: ~4–5 weeks of focused work, **one stage per
 implementation session** (the existing Phase 5.6.x cadence). The

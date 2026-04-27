@@ -449,6 +449,38 @@ bool runRefineFuncSigs(mlir::ModuleOp M);
 /// no concrete numeric type.
 bool runRefineIfConds(mlir::ModuleOp M);
 
+/// Phase 5.6 Stage F — persistent fi-array lowering.
+///
+/// Rewrites the canonical persistent-fi-array shift register
+/// pattern:
+///
+///   persistent buf;
+///   if isempty(buf)
+///       buf = fi(zeros(1, N), S, W, F);
+///   end
+///   buf = [<scalar>, buf(1:N-1)];
+///   ... = buf(k) ...                  % constant-k reads
+///
+/// into N parallel scalar persistents (indices `idx*100 + k` for
+/// k in [0..N-1]) that the existing `HWStateInfer` recognition +
+/// SV emitter render as N parallel always_ff registers. Runs
+/// after `LowerStaticFiArrays` (Stages C / D / E) so the
+/// next-cycle pointer is a static `llvm.alloca [N x iW]` whose
+/// element values can be extracted by GEP+load.
+///
+/// Each `_persistent_get_ptr(idx) → subscript1_s(_, k)` chain
+/// (with constant k) becomes `_global_get_f64(idx*100 + k)`.
+/// Each `_persistent_set_ptr(idx, p)` becomes N
+/// `_global_set_f64(idx*100 + k, gep+load(p, k))` calls. The
+/// original isempty guard is replaced by N parallel guards (one
+/// per element), so the existing scalar-persistent recognition
+/// matches each independently.
+///
+/// Returns true on success. Patterns that don't match the
+/// canonical shape are left in place; HWLegalize then rejects
+/// them as runtime calls.
+bool runLowerPersistentFiArrays(mlir::ModuleOp M);
+
 /// Phase 3 persistent-variable recognition. The MATLAB pattern:
 ///
 ///   persistent c;

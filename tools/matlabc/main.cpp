@@ -50,6 +50,9 @@
 #include <termios.h>
 #include <unistd.h>
 #include <filesystem>
+#include <algorithm>
+#include <functional>
+#include <set>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -237,10 +240,56 @@ int blockDepth(const std::vector<Token> &Toks) {
   return d < 0 ? 0 : d;
 }
 
-int runReplInput(mlirgen::Context &MCtx, const std::string &Src, int Id) {
+/* Format every diagnostic in `Diag` as a single multi-line string,
+ * one diag per line in `<file>:<line>:<col>: <level>: <message>`
+ * shape. Used by the DAP evaluate handler to carry compile errors
+ * into the response so the IDE's watch row can show the actual
+ * cause instead of "see debug console". The shape mirrors what
+ * Diag.printAll() emits to stderr — keeps the user's mental model
+ * consistent across the two surfaces. */
+std::string formatDiagnostics(const SourceManager &SM,
+                               const DiagnosticEngine &Diag) {
+  std::string Out;
+  for (const Diagnostic &D : Diag.diagnostics()) {
+    auto LC = SM.getLineColumn(D.Loc);
+    if (D.Loc.isValid())
+      Out += SM.getName(D.Loc.File);
+    else
+      Out += "<input>";
+    if (LC.Line) {
+      Out += ":";
+      Out += std::to_string(LC.Line);
+      Out += ":";
+      Out += std::to_string(LC.Column);
+    }
+    Out += ": ";
+    switch (D.Level) {
+    case DiagLevel::Error:   Out += "error: ";   break;
+    case DiagLevel::Warning: Out += "warning: "; break;
+    case DiagLevel::Note:    Out += "note: ";    break;
+    }
+    Out += D.Message;
+    Out += "\n";
+  }
+  return Out;
+}
+
+/* Run a REPL input through the full Lex → Parse → Sema → MLIR →
+ * JIT pipeline. Returns 0 on success, 1 on any diagnostic-level
+ * error. When `DiagOut` is non-null, captured diagnostics are
+ * formatted into that string in addition to being printed to
+ * stderr — used by the DAP evaluate handler to surface compile
+ * errors in the watch box without forcing the user to scan the
+ * debug console. */
+int runReplInput(mlirgen::Context &MCtx, const std::string &Src, int Id,
+                 std::string *DiagOut = nullptr) {
   SourceManager SM;
   FileID F = SM.addBuffer("<repl:" + std::to_string(Id) + ">", Src);
   DiagnosticEngine Diag(SM);
+  auto onFail = [&] {
+    if (DiagOut) *DiagOut = formatDiagnostics(SM, Diag);
+    Diag.printAll();
+  };
   Lexer Lx(SM, F, Diag);
   auto Toks = Lx.tokenize();
 
@@ -248,7 +297,7 @@ int runReplInput(mlirgen::Context &MCtx, const std::string &Src, int Id) {
   Parser P(std::move(Toks), AstCtx, Diag);
   TranslationUnit *TU = P.parseFile();
   if (!TU || Diag.hasErrors()) {
-    Diag.printAll();
+    onFail();
     return 1;
   }
 
@@ -260,13 +309,13 @@ int runReplInput(mlirgen::Context &MCtx, const std::string &Src, int Id) {
   TypeInference Inf(Sema, TC, Diag);
   Inf.run(*TU);
   if (Diag.hasErrors()) {
-    Diag.printAll();
+    onFail();
     return 1;
   }
 
   auto M = mlirgen::lowerToMLIR(MCtx, TC, Diag, *TU, &SM, /*ReplMode=*/true);
   if (Diag.hasErrors() || mlir::failed(mlir::verify(M))) {
-    Diag.printAll();
+    onFail();
     std::cerr << "error: REPL MLIR verification failed\n";
     return 1;
   }
@@ -1087,6 +1136,13 @@ void  matlab_ws_clear_one(const char *name, int64_t len);
 int  matlab_dbg_add_breakpoint_ex(int32_t file_id, int32_t line,
                                    const char *cond, int64_t cond_len,
                                    const char *log,  int64_t log_len);
+/* Same as _ex plus a hit-count gate. hit_op encoding:
+ *   0 = no gate (default; same as _ex)
+ *   1 = ==     2 = >=     3 = >     4 = % (every Nth) */
+int  matlab_dbg_add_breakpoint_ex2(int32_t file_id, int32_t line,
+                                    const char *cond, int64_t cond_len,
+                                    const char *log,  int64_t log_len,
+                                    int hit_op, int64_t hit_target);
 int  matlab_dbg_breakpoint_meta(int idx, const char **cond, int64_t *cond_len,
                                  const char **log, int64_t *log_len,
                                  int *disabled);
@@ -1115,6 +1171,41 @@ int  matlab_dbg_obj_field_kind(void *obj, int i);
 double matlab_dbg_obj_field_f64(void *obj, int i);
 void *matlab_dbg_obj_field_ptr(void *obj, int i);
 void matlab_ws_set_obj(const char *name, int64_t len, void *obj);
+
+/* DAP completeness extras. Each one is a thin reader over state the
+ * runtime already maintains (executable lines, function table, error
+ * snapshot) — added so the DAP server doesn't need to re-walk MLIR
+ * or re-parse the AST to answer breakpointLocations / exceptionInfo /
+ * setFunctionBreakpoints requests.
+ *
+ * matlab_dbg_executable_lines: writes up to `cap` line numbers into
+ * `out` (the lines a breakpoint can land on for this file) and
+ * returns the total count. Pass `out=NULL, cap=0` to query the count
+ * without copying.
+ *
+ * matlab_dbg_lookup_function: name → (file_id, first body line). 0
+ * on miss, 1 on hit.
+ *
+ * matlab_dbg_set_pause_on_error: when non-zero, the runtime hook
+ * pauses on the first hook fired after matlab_set_error sets the
+ * flag, surfacing the failing frame to the DAP client.
+ *
+ * matlab_dbg_last_error_msg / err_frame_count / err_frame_at: read
+ * the snapshot captured by matlab_set_error_msg before the unwind.
+ * Same shape as matlab_dbg_frame_at but indexes the err_frames[]
+ * array instead of the live frames[] stack. */
+/* Toggle "pause on error" — when on, the runtime hook surfaces a
+ * pause on the first hook fired after matlab_set_error. */
+void matlab_dbg_set_pause_on_error(int on);
+/* Read the message captured by matlab_set_error_msg before the
+ * unwind. NULL/0-len when no error has fired this session. */
+const char *matlab_dbg_last_error_msg(int64_t *len_out);
+/* Existing in matlab_runtime.c — re-declared here for the DAP server.
+ * `matlab_err_traceback_*` reads the snapshot frames captured at the
+ * point matlab_set_error fired, so it survives the unwind. */
+int  matlab_err_traceback_count(void);
+int  matlab_err_traceback_at(int i, int32_t *file_id, int32_t *line,
+                              const char **fn_name);
 }
 
 /* Forward declarations from matlab_runtime.c so we can format matrices
@@ -1143,6 +1234,11 @@ int OriginalStdoutFd = -1;
 /* The read end of the pipe the debuggee writes to. Forwarded to the
  * client as `output` events. */
 int DebuggeeOutFd = -1;
+/* Same pair for stderr — keeps Diag prints (compile / lower errors
+ * from REPL eval, error()-traceback emissions) out of the DAP
+ * channel while still surfacing them in the IDE's debug console. */
+int OriginalStderrFd = -1;
+int DebuggeeErrFd = -1;
 
 /* Module-wide state threaded through worker / server / reader. */
 struct Shared {
@@ -1161,6 +1257,60 @@ struct Shared {
    * the source the IDE asked about. Keys are realpath()-resolved so
    * "./examples/factorial.m" and "/abs/.../factorial.m" collapse. */
   std::unordered_map<std::string, int32_t> PathToFileId;
+  /* Per-file set of line numbers a breakpoint can land on. Populated
+   * during compileProgram by walking every statement in the script
+   * body and every function body. The DAP `breakpointLocations`
+   * request reads from this so the IDE can grey out lines that
+   * aren't valid bp targets. The set is approximate — it lists every
+   * statement's start line, which is a superset of the lines the
+   * MLIR lowering's `matlab_dbg_hook` actually fires on, so the bp
+   * install (`setBreakpoints`) is still authoritative for whether a
+   * given line resolves. */
+  std::unordered_map<int32_t, std::set<int32_t>> BpLocations;
+  /* Function name -> (file_id, first body line). Built at
+   * compileProgram time from the TU's Function list (top-level +
+   * nested) so the DAP `setFunctionBreakpoints` request can install
+   * a line breakpoint at the function's entry by name. */
+  struct FnEntry { int32_t FileId = 0; int32_t Line = 0; };
+  std::unordered_map<std::string, FnEntry> FunctionTable;
+  /* Breakpoints set against a path the runtime hasn't registered
+   * yet (e.g. setBreakpoints arrived before launch / compileProgram).
+   * Held here keyed by canonical path, replayed when the path
+   * later registers. Each entry mirrors the DAP request payload so
+   * we can re-verify with the same condition / logMessage /
+   * hitCondition the IDE sent originally. */
+  struct PendingBp {
+    std::string Path;
+    int32_t Line = 0;
+    std::string Condition;
+    std::string LogMessage;
+    std::string HitCondition;
+  };
+  std::vector<PendingBp> PendingBps;
+  /* Class methods grouped by class name. Built at compileProgram
+   * from each ClassDef's `Methods` + `StaticMethods` lists. Used
+   * by the `variables` expansion of a class instance to surface
+   * "method rows" alongside property rows — the IDE's debugger
+   * panel renders properties under a value icon and methods under
+   * a function icon (presentationHint.kind="method").
+   *
+   * The inheritance chain is followed via ClassParent (class name
+   * -> super-class name) so a `Savings < Account` instance lists
+   * its own Rate property + Savings constructor *and* inherits
+   * Account's deposit method. */
+  struct MethodEntry {
+    std::string Name;
+    int32_t FileId = 0;
+    int32_t Line = 0;
+    bool Static = false;
+    std::vector<std::string> Inputs;
+    std::vector<std::string> Outputs;
+    std::string DefiningClass;   /* for "inherited from X" hint */
+  };
+  std::unordered_map<std::string, std::vector<MethodEntry>> ClassMethods;
+  /* ClassName -> direct superclass name. Empty when no `< Super`
+   * clause. Walked iteratively to gather inherited methods. */
+  std::unordered_map<std::string, std::string> ClassParent;
   /* Counter bumped every time a continue/next/stepIn/stepOut request
    * is processed. The monitor records the pre-resume value when it
    * blocks for the client's response and exits its inner wait once
@@ -1321,22 +1471,138 @@ double matlab_ws_has(const char *name, int64_t len);
  * name in error messages. */
 int NextEvalId = 1000000;
 
+/* Bridge a runtime function frame's mini-workspace into matlab_ws
+ * for the duration of a REPL eval, then reverse the bridge.
+ *
+ * Used by:
+ *   - evaluate (watch / hover / repl), parameterised by frameId
+ *   - cond/log breakpoint evaluators, always against the innermost
+ *     paused frame so a bp inside `compute(a, b)` can have a
+ *     condition like `a > 5`
+ *
+ * Bridge mechanics:
+ *   - Snapshot every matlab_ws name that collides with a frame
+ *     local (PreExisting) so we can restore the original value.
+ *   - Stamp the frame locals onto matlab_ws via the kind-specific
+ *     setter (set_f64 / set_mat / set_obj).
+ *   - On reverse: clear stamped names that didn't pre-exist, then
+ *     restore the pre-existing ones.
+ *
+ * Script frame (rt index 0) needs no bridging — its locals are
+ * already in matlab_ws + frame_locals[0] which the JIT accesses
+ * directly. The constructor simply returns without doing work. */
+struct FrameBridge {
+  struct WsBackup { std::string name; int kind; double f64; void *ptr; };
+  std::vector<WsBackup> Backup;
+  std::unordered_set<std::string> PreExisting;
+  std::vector<std::string> Stamped;
+  bool Active = false;
+
+  void stamp(int RtFrameIdx) {
+    if (RtFrameIdx <= 0) return;
+    Active = true;
+    int N = matlab_dbg_ws_count();
+    for (int i = 0; i < N; ++i) {
+      int64_t Nlen = 0;
+      const char *Nm = matlab_dbg_ws_name(i, &Nlen);
+      if (!Nm) continue;
+      PreExisting.insert(std::string(Nm, (size_t)Nlen));
+    }
+    int FN = matlab_dbg_frame_locals_count(RtFrameIdx);
+    for (int i = 0; i < FN; ++i) {
+      int64_t Nlen = 0;
+      const char *Nm = matlab_dbg_frame_local_name(RtFrameIdx, i, &Nlen);
+      if (!Nm) continue;
+      std::string Nstr(Nm, (size_t)Nlen);
+      if (PreExisting.count(Nstr)) {
+        int wsN = matlab_dbg_ws_count();
+        for (int j = 0; j < wsN; ++j) {
+          int64_t WL = 0;
+          const char *WN = matlab_dbg_ws_name(j, &WL);
+          if (!WN || (size_t)WL != Nstr.size() ||
+              std::memcmp(WN, Nstr.data(), Nstr.size()) != 0)
+            continue;
+          int K = matlab_dbg_ws_kind(j);
+          WsBackup B{Nstr, K, 0.0, nullptr};
+          if (K == 0) B.f64 = matlab_dbg_ws_f64(j);
+          else if (K == 1 || K == 2) B.ptr = matlab_dbg_ws_ptr(j);
+          Backup.push_back(std::move(B));
+          break;
+        }
+      }
+      int K = matlab_dbg_frame_local_kind(RtFrameIdx, i);
+      if (K == 0) {
+        matlab_ws_set_f64(Nstr.data(), (int64_t)Nstr.size(),
+                           matlab_dbg_frame_local_f64(RtFrameIdx, i));
+      } else if (K == 1) {
+        matlab_ws_set_mat(Nstr.data(), (int64_t)Nstr.size(),
+            (struct matlab_mat *)matlab_dbg_frame_local_ptr(
+                RtFrameIdx, i));
+      } else if (K == 2) {
+        matlab_ws_set_obj(Nstr.data(), (int64_t)Nstr.size(),
+            matlab_dbg_frame_local_ptr(RtFrameIdx, i));
+      }
+      Stamped.push_back(std::move(Nstr));
+    }
+  }
+  void restore() {
+    if (!Active) return;
+    for (const std::string &Nstr : Stamped) {
+      if (!PreExisting.count(Nstr))
+        matlab_ws_clear_one(Nstr.data(), (int64_t)Nstr.size());
+    }
+    for (const WsBackup &B : Backup) {
+      if (B.kind == 0)
+        matlab_ws_set_f64(B.name.data(), (int64_t)B.name.size(), B.f64);
+      else if (B.kind == 1)
+        matlab_ws_set_mat(B.name.data(), (int64_t)B.name.size(),
+                           (struct matlab_mat *)B.ptr);
+      else if (B.kind == 2)
+        matlab_ws_set_obj(B.name.data(), (int64_t)B.name.size(), B.ptr);
+    }
+    Backup.clear();
+    PreExisting.clear();
+    Stamped.clear();
+    Active = false;
+  }
+};
+
+/* Returns the runtime index of the innermost frame, or -1 if no
+ * function frame is on the stack (paused inside the script body or
+ * pre-launch). The script frame is rt index 0, so >= 1 means we're
+ * inside a user function and the bridge is meaningful. */
+int innermostFunctionFrameIdx() {
+  int Total = matlab_dbg_frame_count();
+  if (Total <= 1) return -1;
+  return Total - 1;
+}
+
 /* Try to evaluate `expr` as a MATLAB scalar in the current
  * workspace. Wraps it in `__matlab_dbg_cond = (expr);` and runs the
  * full REPL pipeline; the result lands in matlab_ws under that name.
+ *
+ * Bridges the innermost user-function frame (when there is one) so
+ * conditions on a bp inside a function body can reference function
+ * locals — without the bridge, only script-scope vars are visible.
  *
  * Returns 1 if the expression evaluated to a non-zero scalar, 0 if
  * it evaluated to zero, and -1 if the eval failed (parse error,
  * undefined name, etc). The caller can use -1 to disable the
  * condition so subsequent hits don't keep retrying. */
 int evalConditionInWorkspace(const std::string &Expr) {
+  FrameBridge FB;
+  FB.stamp(innermostFunctionFrameIdx());
   std::string Src = "__matlab_dbg_cond = (" + Expr + ");";
   int Rc = runReplInput(sharedDapContext(), Src, NextEvalId++);
-  if (Rc != 0) return -1;
   const char Name[] = "__matlab_dbg_cond";
-  if (matlab_ws_has(Name, (int64_t)(sizeof Name - 1)) == 0.0) return -1;
-  double V = matlab_ws_get_f64(Name, (int64_t)(sizeof Name - 1));
-  return V != 0.0 ? 1 : 0;
+  int Result = -1;
+  if (Rc == 0 && matlab_ws_has(Name, (int64_t)(sizeof Name - 1)) != 0.0) {
+    double V = matlab_ws_get_f64(Name, (int64_t)(sizeof Name - 1));
+    Result = V != 0.0 ? 1 : 0;
+  }
+  matlab_ws_clear_one(Name, (int64_t)(sizeof Name - 1));
+  FB.restore();
+  return Result;
 }
 
 /* Walk a logMessage template, substituting `{name}` placeholders
@@ -1394,6 +1660,12 @@ std::string interpolateLogMessage(const std::string &Tmpl) {
   return Out;
 }
 
+/* Forward decl: defined alongside the variables-row helpers further
+ * down. compileProgram needs it to emit `breakpoint` events for any
+ * pending bps that resolved to executable lines after the path
+ * registry was populated. */
+int64_t encodeBpId(int32_t file_id, int32_t line);
+
 /* Build + JIT the program, store into G.Engine, register its file
  * with the runtime. Returns true on success. */
 bool compileProgram() {
@@ -1405,6 +1677,10 @@ bool compileProgram() {
   }
   G.FileId = (int32_t)F;
   G.PathToFileId.clear();
+  G.BpLocations.clear();
+  G.FunctionTable.clear();
+  G.ClassMethods.clear();
+  G.ClassParent.clear();
 
   /* Register every file the SourceManager knows about with the
    * runtime's debug table. Today only the entry-point is loaded;
@@ -1498,6 +1774,141 @@ bool compileProgram() {
     }
   }
 
+  /* Walk the parsed TU to populate G.BpLocations and G.FunctionTable
+   * — the data the breakpointLocations / setFunctionBreakpoints DAP
+   * requests answer from. Does NOT need Sema to have run; we only
+   * touch syntactic info (statement source ranges, function names,
+   * body block heads). The walker recurses into nested if/for/while/
+   * switch/try blocks so a breakpoint set on a line inside a loop
+   * body lights up correctly even though the loop's outer Range
+   * already covered the line. */
+  {
+    auto stmtLine = [&](Stmt *S) -> std::pair<int32_t, int32_t> {
+      if (!S) return {0, 0};
+      auto LC = SM.getLineColumn(S->Range.Begin);
+      return {(int32_t)S->Range.Begin.File, (int32_t)LC.Line};
+    };
+    auto recordStmt = [&](Stmt *S) {
+      auto FL = stmtLine(S);
+      if (FL.first != 0 && FL.second != 0)
+        G.BpLocations[FL.first].insert(FL.second);
+    };
+    std::function<void(Block *)> walkBlock;
+    walkBlock = [&](Block *B) {
+      if (!B) return;
+      for (Stmt *S : B->Stmts) {
+        if (!S) continue;
+        recordStmt(S);
+        switch (S->Kind) {
+        case NodeKind::IfStmt: {
+          auto *IF = static_cast<IfStmt *>(S);
+          walkBlock(IF->Then);
+          for (auto &E : IF->Elseifs) walkBlock(E.Body);
+          walkBlock(IF->Else);
+          break;
+        }
+        case NodeKind::ForStmt:
+          walkBlock(static_cast<ForStmt *>(S)->Body);
+          break;
+        case NodeKind::WhileStmt:
+          walkBlock(static_cast<WhileStmt *>(S)->Body);
+          break;
+        case NodeKind::SwitchStmt: {
+          auto *SW = static_cast<SwitchStmt *>(S);
+          for (auto &C : SW->Cases) walkBlock(C.Body);
+          break;
+        }
+        case NodeKind::TryStmt: {
+          auto *TS = static_cast<TryStmt *>(S);
+          walkBlock(TS->TryBody);
+          walkBlock(TS->CatchBody);
+          break;
+        }
+        case NodeKind::Block:
+          walkBlock(static_cast<Block *>(S));
+          break;
+        default:
+          break;
+        }
+      }
+    };
+    if (TU->ScriptNode) walkBlock(TU->ScriptNode->Body);
+    std::function<void(Function *)> walkFn;
+    walkFn = [&](Function *Fn) {
+      if (!Fn || !Fn->Body) return;
+      /* Function table: name → (file_id, first body line). The first
+       * body line is the natural breakpoint target for "stop on
+       * entry to fn"; if the body is empty, fall back to the
+       * function declaration's own start line. */
+      int32_t Fid = 0, Ln = 0;
+      if (!Fn->Body->Stmts.empty()) {
+        auto FL = stmtLine(Fn->Body->Stmts.front());
+        Fid = FL.first; Ln = FL.second;
+      }
+      if (Fid == 0 || Ln == 0) {
+        auto LC = SM.getLineColumn(Fn->Range.Begin);
+        Fid = (int32_t)Fn->Range.Begin.File;
+        Ln = (int32_t)LC.Line;
+      }
+      G.FunctionTable[std::string(Fn->Name)] = {Fid, Ln};
+      walkBlock(Fn->Body);
+      for (Function *Nested : Fn->Nested) walkFn(Nested);
+    };
+    for (Function *Fn : TU->Functions) walkFn(Fn);
+    /* Class methods are also breakpoint targets. Each method's body
+     * lives in its own Function, attached to the class via Methods.
+     * The runtime hooks fire from method bodies the same way they
+     * do from free functions.
+     *
+     * Methods are registered under three keys so the IDE can resolve
+     * them with whichever form the user typed:
+     *   - bare name:        "deposit"
+     *   - dotted form:      "Account.deposit"
+     *   - qualified form:   "Account/deposit"  (matches MATLAB's own UI)
+     * The bare-name overwrite is intentional — if two classes share a
+     * method name (`Account.deposit` and `Savings.deposit`), the last
+     * one wins as the bare-name target, but the dotted/qualified
+     * forms always disambiguate. Static methods and constructors get
+     * the same treatment. */
+    auto registerMethod = [&](const std::string &ClassName, Function *Fn,
+                              bool Static) {
+      if (!Fn || Fn->Name.empty()) return;
+      walkFn(Fn);
+      /* walkFn already wrote the bare-name entry into FunctionTable.
+       * Re-read it so the dotted / qualified aliases point at the same
+       * (file_id, line) pair. */
+      auto It = G.FunctionTable.find(std::string(Fn->Name));
+      if (It == G.FunctionTable.end()) return;
+      Shared::FnEntry E = It->second;
+      G.FunctionTable[ClassName + "." + std::string(Fn->Name)] = E;
+      G.FunctionTable[ClassName + "/" + std::string(Fn->Name)] = E;
+      /* Also populate ClassMethods for the variables-row surface. The
+       * MethodEntry captures parameter names so the "value column"
+       * can render a signature like `@deposit(obj, amt)` instead of
+       * a bare name; the IDE renders methods with a function icon
+       * via presentationHint. */
+      Shared::MethodEntry ME;
+      ME.Name = std::string(Fn->Name);
+      ME.FileId = E.FileId;
+      ME.Line = E.Line;
+      ME.Static = Static;
+      ME.DefiningClass = ClassName;
+      ME.Inputs.reserve(Fn->Inputs.size());
+      for (auto N : Fn->Inputs) ME.Inputs.push_back(std::string(N));
+      ME.Outputs.reserve(Fn->Outputs.size());
+      for (auto N : Fn->Outputs) ME.Outputs.push_back(std::string(N));
+      G.ClassMethods[ClassName].push_back(std::move(ME));
+    };
+    for (ClassDef *C : TU->Classes) {
+      if (!C) continue;
+      std::string CN(C->Name);
+      if (!C->SuperName.empty())
+        G.ClassParent[CN] = std::string(C->SuperName);
+      for (Function *M : C->Methods)       registerMethod(CN, M, false);
+      for (Function *M : C->StaticMethods) registerMethod(CN, M, true);
+    }
+  }
+
   SemaContext Sema;
   TypeContext TC;
   Resolver R(Sema, TC, Diag);
@@ -1567,6 +1978,12 @@ bool compileProgram() {
     return false;
   }
 
+  /* Forward decl so the pending-breakpoints replay below + monitorMain
+   * (further down) can build `breakpoint` events / stopped events with
+   * stable bp ids. The encoder is defined alongside the variables-row
+   * helpers further down. */
+  extern int64_t encodeBpId(int32_t file_id, int32_t line);
+
   mlir::ExecutionEngineOptions EngineOpts;
   EngineOpts.jitCodeGenOptLevel = llvm::CodeGenOptLevel::Default;
   auto EngineOrErr = mlir::ExecutionEngine::create(M, EngineOpts);
@@ -1576,11 +1993,71 @@ bool compileProgram() {
     return false;
   }
   G.Engine = std::move(*EngineOrErr);
+  /* Replay any pending breakpoints whose path now resolves through
+   * G.PathToFileId. Snap to nearest executable line, install via
+   * the runtime, and emit a `breakpoint` event with reason="changed"
+   * so the IDE updates the gutter glyph from "unverified" to
+   * "verified". Bps that still don't resolve stay queued — a future
+   * compileProgram (e.g. after `restart`) gets another chance. */
+  if (!G.PendingBps.empty()) {
+    std::vector<Shared::PendingBp> StillPending;
+    for (Shared::PendingBp &P : G.PendingBps) {
+      auto It = G.PathToFileId.find(P.Path);
+      if (It == G.PathToFileId.end()) {
+        StillPending.push_back(std::move(P));
+        continue;
+      }
+      int32_t PFid = It->second;
+      int32_t Line = P.Line;
+      auto BL = G.BpLocations.find(PFid);
+      if (BL != G.BpLocations.end() && BL->second.count(Line) == 0) {
+        auto Snap = BL->second.lower_bound(Line);
+        if (Snap == BL->second.end()) continue;
+        Line = *Snap;
+      }
+      int HitOp = 0;
+      int64_t HitTarget = 0;
+      if (!P.HitCondition.empty()) {
+        llvm::StringRef HC(P.HitCondition);
+        HC = HC.trim();
+        if (HC.consume_front(">=")) HitOp = 2;
+        else if (HC.consume_front("==")) HitOp = 1;
+        else if (HC.consume_front(">"))  HitOp = 3;
+        else if (HC.consume_front("%"))  HitOp = 4;
+        else HitOp = 1;
+        HC = HC.trim();
+        int64_t N = 0;
+        if (!HC.getAsInteger(10, N) && N > 0) HitTarget = N;
+        else HitOp = 0;
+      }
+      bool OK = matlab_dbg_add_breakpoint_ex2(
+          PFid, Line,
+          P.Condition.empty() ? nullptr : P.Condition.data(),
+          (int64_t)P.Condition.size(),
+          P.LogMessage.empty() ? nullptr : P.LogMessage.data(),
+          (int64_t)P.LogMessage.size(),
+          HitOp, HitTarget);
+      if (!OK) continue;
+      Object Bp{
+        {"verified", true},
+        {"line", (int64_t)Line},
+        {"id", encodeBpId(PFid, Line)},
+        {"source", Object{
+          {"name", P.Path}, {"path", P.Path},
+        }},
+      };
+      sendEvent("breakpoint",
+                Object{{"reason", "changed"},
+                       {"breakpoint", std::move(Bp)}});
+    }
+    G.PendingBps = std::move(StillPending);
+  }
   return true;
 }
 
 /* Worker thread: invokes the JIT'd `main`. Sets WorkerExited + wakes
  * the monitor loop on return. */
+
 void *workerMain(void *) {
   auto FnOrErr = G.Engine->lookup("main");
   if (FnOrErr) {
@@ -1630,9 +2107,16 @@ void *monitorMain(void *) {
       if (Log && LogLen > 0) {
         /* Log point: emit an output event with the interpolated
          * template, never tell the IDE we stopped. The worker is
-         * blocked inside matlab_dbg_hook; we resume it ourselves. */
+         * blocked inside matlab_dbg_hook; we resume it ourselves.
+         *
+         * Bridge function-frame locals so `{a}` resolves to the
+         * function's parameter when the bp fires inside a function
+         * body — same machinery as the conditional-bp evaluator. */
         std::string Tmpl(Log, (size_t)LogLen);
+        FrameBridge FB;
+        FB.stamp(innermostFunctionFrameIdx());
         std::string Msg = interpolateLogMessage(Tmpl);
+        FB.restore();
         Msg += "\n";
         sendEvent("output", Object{{"category", "console"},
                                     {"output", Msg}});
@@ -1695,6 +2179,17 @@ void *monitorMain(void *) {
           {"allThreadsStopped", true},
           {"line", (int64_t)Ln},
         };
+        /* hitBreakpointIds: when the pause was triggered by a
+         * matched breakpoint (BpIdx >= 0), surface the bp's id (the
+         * same id we returned in setBreakpoints / setFunctionBreakpoints)
+         * so the IDE can highlight the row that fired. Single-element
+         * array because our hook stops on the first match — we don't
+         * coalesce same-line bps. */
+        if (BpIdx >= 0) {
+          Array Ids;
+          Ids.push_back(encodeBpId(Fid, Ln));
+          Body["hitBreakpointIds"] = std::move(Ids);
+        }
         sendEvent("stopped", Value(std::move(Body)));
         pthread_mutex_lock(&G.Mu);
         while (G.ResumeGen == MyGen && !G.WorkerExited)
@@ -1709,6 +2204,11 @@ void *monitorMain(void *) {
 
     if (Exited) break;
   }
+  /* `thread` event with reason="exited" mirrors the "started" event we
+   * fire on configurationDone — keeps adapters that track the live
+   * thread set in sync. */
+  sendEvent("thread",
+            Object{{"reason", "exited"}, {"threadId", (int64_t)1}});
   sendEvent("exited", Object{{"exitCode", 0}});
   sendEvent("terminated");
   return nullptr;
@@ -1722,6 +2222,34 @@ void *stdoutReaderMain(void *) {
     if (n <= 0) break;
     Object Body{
       {"category", "stdout"},
+      {"output", std::string(Buf, (size_t)n)},
+    };
+    sendEvent("output", Value(std::move(Body)));
+  }
+  return nullptr;
+}
+
+/* Same as stdoutReaderMain for stderr. Diagnostics from the REPL
+ * JIT (parser / type / lowering errors) and the error()-traceback
+ * printer write here; the IDE's debug console renders them with the
+ * `stderr` category styling so users can tell error output from
+ * normal program output at a glance.
+ *
+ * Tee'd to OriginalStderrFd: unlike stdout (which the JIT'd disp/
+ * fprintf "owns" exclusively for DAP forwarding), stderr is what
+ * spawning callers — including our test harness — read for failure
+ * context. Keeping the original stream alive preserves
+ * `subprocess.stderr` capture and CI logs while still forwarding
+ * the same bytes to the IDE as `output` events. */
+void *stderrReaderMain(void *) {
+  char Buf[4096];
+  while (true) {
+    ssize_t n = read(DebuggeeErrFd, Buf, sizeof Buf);
+    if (n <= 0) break;
+    if (OriginalStderrFd >= 0)
+      (void)!write(OriginalStderrFd, Buf, (size_t)n);
+    Object Body{
+      {"category", "stderr"},
       {"output", std::string(Buf, (size_t)n)},
     };
     sendEvent("output", Value(std::move(Body)));
@@ -1790,6 +2318,61 @@ void *lookupObjRef(int64_t ref) {
  * owning slot (function-frame mini-ws or matlab_ws); the slot
  * outlives any client read because the runtime is paused while the
  * DAP server is responding. */
+/* DAP `variables` rows that carry a `variablesReference` can also
+ * advertise the *kind* of children to expect via `indexedVariables`
+ * (for numeric grids — matrices) and `namedVariables` (for property
+ * sets — class instances). Matrix-viewer / variable-inspector panels
+ * use these counts to lay out a grid widget or a property table
+ * without first paging through children. Both fields are optional
+ * per the spec — we set them when we know the count cheaply. */
+/* Encode a (file_id, line) pair as a stable DAP breakpoint id. The
+ * IDE round-trips ids opaquely (setBreakpoints → stopped's
+ * hitBreakpointIds), so any deterministic mapping that's unique
+ * across the session works. file_id * 1e6 + line keeps function and
+ * line breakpoints in the same id space without a separate registry,
+ * and is reversible for debugging. Caps the line number at <1M. */
+constexpr int64_t BpIdLineWidth = 1000000;
+int64_t encodeBpId(int32_t file_id, int32_t line) {
+  return (int64_t)file_id * BpIdLineWidth + (int64_t)line;
+}
+
+int64_t matIndexedCount(struct matlab_mat *M) {
+  if (!M) return 0;
+  int64_t r = matlab_dbg_mat_rows(M);
+  int64_t c = matlab_dbg_mat_cols(M);
+  if (r <= 0 || c <= 0) return 0;
+  return r * c;
+}
+
+/* Total namedVariables for a class instance — properties (from the
+ * obj's struct prefix) plus methods walked across the inheritance
+ * chain via G.ClassParent, with overrides de-duped by name (so
+ * `Savings.deposit` shadowing `Account.deposit` counts as one row).
+ * IDEs use namedVariables as a sizing hint for the property pane;
+ * undercounting makes the pane stop scrolling before the last
+ * method row. */
+int64_t objNamedCount(void *obj) {
+  if (!obj) return 0;
+  int64_t Total = matlab_dbg_obj_field_count(obj);
+  int32_t cid = matlab_dbg_obj_class_id_of(obj);
+  int64_t cnLen = 0;
+  const char *cn = matlab_dbg_class_name(cid, &cnLen);
+  if (!cn || cnLen <= 0) return Total;
+  std::string ClassName(cn, (size_t)cnLen);
+  std::unordered_set<std::string> Seen;
+  for (std::string Cur = ClassName; !Cur.empty();) {
+    auto MIt = G.ClassMethods.find(Cur);
+    if (MIt != G.ClassMethods.end()) {
+      for (const Shared::MethodEntry &ME : MIt->second)
+        if (Seen.insert(ME.Name).second) ++Total;
+    }
+    auto PIt = G.ClassParent.find(Cur);
+    if (PIt == G.ClassParent.end()) break;
+    Cur = PIt->second;
+  }
+  return Total;
+}
+
 constexpr int64_t MatRefBase = 200000;
 std::vector<void *> MatRefs;
 
@@ -1943,22 +2526,67 @@ bool handleRequest(const Object &Msg) {
   if (!Cmd) return true;
 
   if (*Cmd == "initialize") {
+    /* Exception-breakpoint filters drive the IDE's "Pause on Errors"
+     * / "Pause on Caught Errors" toggles. We expose a single filter
+     * `error` that maps to MATLAB's error() flag — when enabled, the
+     * runtime hook pauses the worker on the next statement after the
+     * flag is set so the user can inspect the failing frame. */
+    Array ExcFilters;
+    ExcFilters.push_back(Object{
+      {"filter", "error"},
+      {"label", "MATLAB error()"},
+      {"default", false},
+      {"description", "Pause when matlab_set_error fires (uncaught error)."},
+    });
     Object Caps{
       {"supportsConfigurationDoneRequest", true},
-      {"supportsFunctionBreakpoints", false},
+      /* Function breakpoints resolve a function name against the
+       * compiled translation unit's function table and install a
+       * line breakpoint at the function's first body line. */
+      {"supportsFunctionBreakpoints", true},
       /* Conditional breakpoints + log points evaluate at script-frame
        * scope only (they read the workspace through matlab_ws_*).
        * Conditions inside user-function frames see <script>'s vars
        * but not the function's locals — Option B (per-function slot
        * tables) is the planned follow-up. */
       {"supportsConditionalBreakpoints", true},
+      {"supportsHitConditionalBreakpoints", true},
       {"supportsLogPoints", true},
-      /* setVariable accepts scalar (f64) values today; matrices,
-       * strings, structs, and cells are rejected with a clear
-       * error message in the response body. */
+      /* setVariable + setExpression both reuse the REPL-JIT
+       * assignment path: wrap as `<lhs> = (<rhs>);` and run through
+       * runReplInput. Any MATLAB expression on the RHS works. */
       {"supportsSetVariable", true},
+      {"supportsSetExpression", true},
+      /* No state recorder yet, so reverse stepping and step-back are
+       * advertised as unsupported. The handlers respond
+       * success=false with a clear "requires recorder" message
+       * rather than the unknown-request fallthrough. */
       {"supportsStepBack", false},
+      {"supportsRestartFrame", false},
+      {"supportsRestartRequest", true},
+      {"supportsGotoTargetsRequest", false},
+      {"supportsStepInTargetsRequest", true},
+      {"supportsCompletionsRequest", true},
+      {"supportsModulesRequest", true},
+      {"supportsLoadedSourcesRequest", true},
       {"supportsTerminateRequest", true},
+      {"supportsTerminateThreadsRequest", true},
+      {"supportTerminateDebuggee", true},
+      {"supportsExceptionInfoRequest", true},
+      {"supportsBreakpointLocationsRequest", true},
+      {"exceptionBreakpointFilters", std::move(ExcFilters)},
+      /* Memory / disassembly / data-watchpoints / instruction
+       * breakpoints all need infrastructure (JIT-frame addressing,
+       * watchpoint instrumentation, native disassembly) that this
+       * MVP doesn't ship. The corresponding handlers respond with
+       * success=false + a precise reason. */
+      {"supportsDataBreakpoints", false},
+      {"supportsReadMemoryRequest", false},
+      {"supportsWriteMemoryRequest", false},
+      {"supportsDisassembleRequest", false},
+      {"supportsInstructionBreakpoints", false},
+      {"supportsSteppingGranularity", false},
+      {"supportsCancelRequest", false},
       /* `evaluate` powers watch / hover / debug-console expressions.
        * v1 evaluates against the script-level workspace plus the
        * script frame's mini-ws; function-frame locals aren't visible
@@ -2005,14 +2633,37 @@ bool handleRequest(const Object &Msg) {
      * breakpoint so the IDE doesn't tear down the connection, but
      * nothing gets added to the runtime table. */
     auto SrcPath = Src->getString("path");
+    std::string CanonSrc = SrcPath ? canonPath(SrcPath->str())
+                                   : std::string();
     int32_t Fid = 0;
-    if (SrcPath) {
-      auto It = G.PathToFileId.find(canonPath(SrcPath->str()));
+    if (!CanonSrc.empty()) {
+      auto It = G.PathToFileId.find(CanonSrc);
       if (It != G.PathToFileId.end()) Fid = It->second;
     }
     if (Fid != 0) {
       /* Wipe prior breakpoints for this file and replay the request. */
       matlab_dbg_clear_breakpoints_in_file(Fid);
+    }
+    /* Drop any prior pending entries for this path — the IDE's
+     * setBreakpoints semantics replace, not append. After this clear,
+     * we'll re-queue the new list below if the path is still unknown. */
+    if (!CanonSrc.empty()) {
+      G.PendingBps.erase(
+        std::remove_if(G.PendingBps.begin(), G.PendingBps.end(),
+                       [&](const Shared::PendingBp &P) {
+                         return P.Path == CanonSrc;
+                       }),
+        G.PendingBps.end());
+    }
+    /* Look up the per-file executable-line set populated by the AST
+     * walker in compileProgram. Used to snap user-picked lines onto
+     * the nearest bp-eligible row when they click on a blank /
+     * comment-only line — better UX than silently failing to
+     * verify. */
+    const std::set<int32_t> *ExecLines = nullptr;
+    if (Fid != 0) {
+      auto BL = G.BpLocations.find(Fid);
+      if (BL != G.BpLocations.end()) ExecLines = &BL->second;
     }
     const Array *Bps = Args->getArray("breakpoints");
     Array Verified;
@@ -2022,25 +2673,100 @@ bool handleRequest(const Object &Msg) {
         if (!BO) continue;
         auto Ln = BO->getInteger("line");
         if (!Ln) continue;
+        int32_t Requested = (int32_t)*Ln;
+        int32_t Resolved = Requested;
+        std::string Msg;
+        bool Snapped = false;
+        if (Fid == 0) {
+          Msg = "source not loaded by compileProgram";
+        } else if (ExecLines) {
+          if (ExecLines->count(Requested) == 0) {
+            /* Snap forward to the next executable line. Forward
+             * only — snapping backward would land before the user's
+             * intent for a click in a blank-line gap between two
+             * statements. */
+            auto It = ExecLines->lower_bound(Requested);
+            if (It != ExecLines->end()) {
+              Resolved = *It;
+              Snapped = true;
+              Msg = "snapped to next executable line";
+            } else {
+              Msg = "no executable line at or after this row";
+            }
+          }
+        }
         bool OK = false;
-        if (Fid != 0) {
+        if (Fid != 0 && (!Msg.size() || Snapped)) {
           /* condition / logMessage are optional in the DAP spec;
            * when present, route through the _ex form so the runtime
            * stores the strings alongside the (file_id, line) pair
            * for the monitor thread to read once the bp matches. */
           auto Cond = BO->getString("condition");
           auto Log  = BO->getString("logMessage");
+          auto Hit  = BO->getString("hitCondition");
           std::string CS = Cond ? Cond->str() : std::string();
           std::string LS = Log  ? Log->str()  : std::string();
-          OK = matlab_dbg_add_breakpoint_ex(
-              Fid, (int32_t)*Ln,
+          /* Parse `hitCondition` into (op, target). DAP doesn't
+           * specify the syntax beyond "an expression that determines
+           * how many hits are ignored" — VS Code accepts a bare
+           * integer (== N), `>=N`, `>N`, and `%N`. We support all
+           * four; anything else falls back to op=0 (no gate) plus a
+           * message field so the user knows their input was ignored. */
+          int HitOp = 0;
+          int64_t HitTarget = 0;
+          if (Hit && !Hit->empty()) {
+            llvm::StringRef HC = *Hit;
+            HC = HC.trim();
+            if (HC.consume_front(">=")) HitOp = 2;
+            else if (HC.consume_front("==")) HitOp = 1;
+            else if (HC.consume_front(">"))  HitOp = 3;
+            else if (HC.consume_front("%"))  HitOp = 4;
+            else HitOp = 1;  /* bare "100" = stop on the 100th hit */
+            HC = HC.trim();
+            int64_t N = 0;
+            if (!HC.getAsInteger(10, N) && N > 0) {
+              HitTarget = N;
+            } else {
+              HitOp = 0;
+              if (Msg.empty())
+                Msg = "ignored unparseable hitCondition";
+            }
+          }
+          OK = matlab_dbg_add_breakpoint_ex2(
+              Fid, Resolved,
               CS.empty() ? nullptr : CS.data(), (int64_t)CS.size(),
-              LS.empty() ? nullptr : LS.data(), (int64_t)LS.size());
+              LS.empty() ? nullptr : LS.data(), (int64_t)LS.size(),
+              HitOp, HitTarget);
+          if (!OK && Msg.empty())
+            Msg = "breakpoint table full";
         }
-        Verified.push_back(Object{
+        /* Path didn't resolve at request time — queue the bp so we
+         * can re-verify it once compileProgram registers the path
+         * (e.g. setBreakpoints arrived before launch, which the DAP
+         * spec allows). The IDE sees verified=false in this response;
+         * when the path later registers, we emit a `breakpoint`
+         * event with reason="changed" carrying verified=true. */
+        if (Fid == 0 && !CanonSrc.empty()) {
+          Shared::PendingBp P;
+          P.Path = CanonSrc;
+          P.Line = Requested;
+          if (auto Cond = BO->getString("condition"))
+            P.Condition = Cond->str();
+          if (auto Log = BO->getString("logMessage"))
+            P.LogMessage = Log->str();
+          if (auto Hit = BO->getString("hitCondition"))
+            P.HitCondition = Hit->str();
+          G.PendingBps.push_back(std::move(P));
+          if (Msg.empty())
+            Msg = "source not loaded yet — bp queued for replay";
+        }
+        Object Out{
           {"verified", OK},
-          {"line", *Ln},
-        });
+          {"line", (int64_t)Resolved},
+        };
+        if (OK) Out["id"] = encodeBpId(Fid, Resolved);
+        if (!Msg.empty()) Out["message"] = Msg;
+        Verified.push_back(std::move(Out));
       }
     }
     sendResponse(ReqSeq, *Cmd, true,
@@ -2051,9 +2777,11 @@ bool handleRequest(const Object &Msg) {
   if (*Cmd == "configurationDone") {
     sendResponse(ReqSeq, *Cmd, true, Object{});
     pthread_mutex_lock(&G.Mu);
+    bool JustStarted = false;
     if (!G.WorkerStarted) {
       pthread_create(&G.Worker, nullptr, workerMain, nullptr);
       G.WorkerStarted = true;
+      JustStarted = true;
       /* Detach; we use G.WorkerExited to know when it's done. */
       pthread_detach(G.Worker);
       /* Spawn the helper threads after the worker is kicked. */
@@ -2064,8 +2792,43 @@ bool handleRequest(const Object &Msg) {
       pthread_detach(Watcher);
       pthread_create(&Rdr, nullptr, stdoutReaderMain, nullptr);
       pthread_detach(Rdr);
+      if (DebuggeeErrFd >= 0) {
+        pthread_t ErrRdr;
+        pthread_create(&ErrRdr, nullptr, stderrReaderMain, nullptr);
+        pthread_detach(ErrRdr);
+      }
     }
     pthread_mutex_unlock(&G.Mu);
+    if (JustStarted) {
+      /* `process` advertises the debuggee identity to the IDE — useful
+       * for adapters that show "Attached to <name> (pid: ...)" in
+       * their status bar. We're a JIT host so there is no separate
+       * pid to advertise; report ours. */
+      sendEvent("process", Object{
+        {"name", G.ProgramPath},
+        {"systemProcessId", (int64_t)getpid()},
+        {"isLocalProcess", true},
+        {"startMethod", "launch"},
+      });
+      /* `thread` started: single MATLAB worker. The id matches what
+       * `threads` returns and what `stopped`/`continued` events
+       * carry. */
+      sendEvent("thread",
+                Object{{"reason", "started"}, {"threadId", (int64_t)1}});
+      /* `loadedSource` per registered file gives the IDE a
+       * source-tree view (multi-file launches show every sibling .m
+       * that was auto-loaded, not just the entry point). */
+      for (const auto &Kv : G.PathToFileId) {
+        sendEvent("loadedSource", Object{
+          {"reason", "new"},
+          {"source", Object{
+            {"name", Kv.first},
+            {"path", Kv.first},
+            {"sourceReference", (int64_t)0},
+          }},
+        });
+      }
+    }
     return true;
   }
 
@@ -2164,6 +2927,8 @@ bool handleRequest(const Object &Msg) {
           int K = matlab_dbg_obj_field_kind(obj, i);
           std::string Val;
           int64_t ChildRef = 0;
+          int64_t IndexedHint = 0;
+          int64_t NamedHint = 0;
           if (K == 0) {
             char Buf[64];
             snprintf(Buf, sizeof Buf, "%g",
@@ -2176,22 +2941,96 @@ bool handleRequest(const Object &Msg) {
              * Matrix Viewer / Variable Inspector can chase the ref
              * down without a separate eval. */
             if (M && (matlab_dbg_mat_rows(M) != 1 ||
-                      matlab_dbg_mat_cols(M) != 1))
+                      matlab_dbg_mat_cols(M) != 1)) {
               ChildRef = registerMatRef(M);
+              IndexedHint = matIndexedCount(M);
+            }
           } else if (K == 2) {
             void *child = matlab_dbg_obj_field_ptr(obj, i);
             Val = formatObj(child);
-            if (child) ChildRef = registerObjRef(child);
+            if (child) {
+              ChildRef = registerObjRef(child);
+              NamedHint = objNamedCount(child);
+            }
           } else {
             Val = "<unknown>";
           }
-          Vs.push_back(Object{
+          Object Row{
             {"name", std::string(Nm, (size_t)Nlen)},
             {"value", Val},
             {"type", typeForVar(K, K == 2 ? matlab_dbg_obj_field_ptr(obj, i)
                                           : nullptr)},
             {"variablesReference", ChildRef},
-          });
+          };
+          if (IndexedHint > 0) Row["indexedVariables"] = IndexedHint;
+          if (NamedHint > 0) Row["namedVariables"] = NamedHint;
+          Vs.push_back(std::move(Row));
+        }
+        /* Method rows. After the property rows, emit one entry per
+         * method declared on the obj's class (resolved via the
+         * runtime's class_id table) and on every superclass walked
+         * via G.ClassParent. Methods are leaves (variablesReference=0)
+         * — there's no "expand a method" affordance — but the IDE
+         * renders them with a function icon via
+         * `presentationHint.kind="method"`.
+         *
+         * The value column shows a compact signature (`@deposit(obj,
+         * amt)`) so users can see arity at a glance without
+         * jumping to the source. Methods inherited from a parent
+         * class get a "(inherited from X)" suffix on the value to
+         * disambiguate from the obj's own methods.
+         *
+         * Duplicate-name handling: a derived class can override a
+         * parent method (`Savings.deposit` shadows `Account.deposit`).
+         * We track seen names while walking the chain so the
+         * override wins and the parent entry is suppressed. */
+        int32_t cid = matlab_dbg_obj_class_id_of(obj);
+        int64_t cnLen = 0;
+        const char *cn = matlab_dbg_class_name(cid, &cnLen);
+        if (cn && cnLen > 0) {
+          std::string ClassName(cn, (size_t)cnLen);
+          std::unordered_set<std::string> SeenMethods;
+          for (std::string Cur = ClassName; !Cur.empty();) {
+            auto MIt = G.ClassMethods.find(Cur);
+            if (MIt != G.ClassMethods.end()) {
+              for (const Shared::MethodEntry &ME : MIt->second) {
+                if (!SeenMethods.insert(ME.Name).second) continue;
+                std::string Sig = "@" + ME.Name + "(";
+                for (size_t k = 0; k < ME.Inputs.size(); ++k) {
+                  if (k) Sig += ", ";
+                  Sig += ME.Inputs[k];
+                }
+                Sig += ")";
+                if (Cur != ClassName) {
+                  Sig += "  (inherited from ";
+                  Sig += Cur;
+                  Sig += ")";
+                }
+                std::string TypeLabel = ME.Static ? "static method"
+                                                  : "method";
+                Object Row{
+                  {"name", ME.Name},
+                  {"value", Sig},
+                  {"type", TypeLabel},
+                  {"variablesReference", (int64_t)0},
+                  /* DAP `presentationHint` controls the IDE's row
+                   * glyph. `kind: "method"` selects the function
+                   * icon; `attributes: ["readOnly"]` suppresses the
+                   * inline-edit affordance (you can't reassign a
+                   * method on an instance through the watch UI). */
+                  {"presentationHint", Object{
+                    {"kind", "method"},
+                    {"attributes", Array{Value("readOnly")}},
+                    {"visibility", "public"},
+                  }},
+                };
+                Vs.push_back(std::move(Row));
+              }
+            }
+            auto PIt = G.ClassParent.find(Cur);
+            if (PIt == G.ClassParent.end()) break;
+            Cur = PIt->second;
+          }
         }
       }
       sendResponse(ReqSeq, *Cmd, true,
@@ -2231,20 +3070,30 @@ bool handleRequest(const Object &Msg) {
          * 1x1 matrices are skipped because formatMatShape already
          * unboxes them to the scalar value. */
         int64_t ChildRef = 0;
+        int64_t IndexedCount = 0;
+        int64_t NamedCount = 0;
         if (K == 2) {
-          if (void *obj = matlab_dbg_ws_ptr(i)) ChildRef = registerObjRef(obj);
+          if (void *obj = matlab_dbg_ws_ptr(i)) {
+            ChildRef = registerObjRef(obj);
+            NamedCount = objNamedCount(obj);
+          }
         } else if (K == 1) {
           auto *M = (struct matlab_mat *)matlab_dbg_ws_ptr(i);
           if (M && (matlab_dbg_mat_rows(M) != 1 ||
-                    matlab_dbg_mat_cols(M) != 1))
+                    matlab_dbg_mat_cols(M) != 1)) {
             ChildRef = registerMatRef(M);
+            IndexedCount = matIndexedCount(M);
+          }
         }
-        Vs.push_back(Object{
+        Object Row{
           {"name", Nstr},
           {"value", formatVar(K, i)},
           {"type", typeForVar(K, K == 2 ? matlab_dbg_ws_ptr(i) : nullptr)},
           {"variablesReference", ChildRef},
-        });
+        };
+        if (IndexedCount > 0) Row["indexedVariables"] = IndexedCount;
+        if (NamedCount > 0) Row["namedVariables"] = NamedCount;
+        Vs.push_back(std::move(Row));
       }
     }
     if (RtFrameIdx >= 0) {
@@ -2261,6 +3110,8 @@ bool handleRequest(const Object &Msg) {
          * pulls values from the per-frame accessors. */
         std::string Val;
         int64_t ChildRef = 0;
+        int64_t IndexedCount = 0;
+        int64_t NamedCount = 0;
         if (K == 0) {
           char Buf[64];
           double V = matlab_dbg_frame_local_f64(RtFrameIdx, i);
@@ -2273,23 +3124,31 @@ bool handleRequest(const Object &Msg) {
           /* Same gating as the matlab_ws merge above: only multi-cell
            * matrices get a child ref, scalars are leaves. */
           if (M && (matlab_dbg_mat_rows(M) != 1 ||
-                    matlab_dbg_mat_cols(M) != 1))
+                    matlab_dbg_mat_cols(M) != 1)) {
             ChildRef = registerMatRef(M);
+            IndexedCount = matIndexedCount(M);
+          }
         } else if (K == 2) {
           void *obj = matlab_dbg_frame_local_ptr(RtFrameIdx, i);
           Val = formatObj(obj);
-          if (obj) ChildRef = registerObjRef(obj);
+          if (obj) {
+            ChildRef = registerObjRef(obj);
+            NamedCount = objNamedCount(obj);
+          }
         } else {
           Val = "<unknown>";
         }
-        Vs.push_back(Object{
+        Object Row{
           {"name", Nstr},
           {"value", Val},
           {"type", typeForVar(K, K == 2 ? matlab_dbg_frame_local_ptr(
                                               RtFrameIdx, i)
                                         : nullptr)},
           {"variablesReference", ChildRef},
-        });
+        };
+        if (IndexedCount > 0) Row["indexedVariables"] = IndexedCount;
+        if (NamedCount > 0) Row["namedVariables"] = NamedCount;
+        Vs.push_back(std::move(Row));
       }
     }
     sendResponse(ReqSeq, *Cmd, true,
@@ -2390,6 +3249,26 @@ bool handleRequest(const Object &Msg) {
      * restore. Names that didn't exist pre-stamp get cleared via
      * matlab_ws_clear_one so eval doesn't leak function locals into
      * the persistent script workspace. */
+    /* Worker-state gate. `runReplInput` shares matlab_ws with the
+     * JIT'd program, so evaluating while the worker is mid-execution
+     * races on the workspace and the JIT engine state. We allow eval
+     * in three states:
+     *   - Pre-launch  (worker not yet started; ws is empty)
+     *   - Paused      (worker stopped at a breakpoint; safe by design)
+     *   - Post-exit   (worker finished; ws is a stable snapshot)
+     * The "running, not paused" case is the unsafe one. */
+    {
+      pthread_mutex_lock(&G.Mu);
+      bool Running = G.WorkerStarted && !G.WorkerExited;
+      pthread_mutex_unlock(&G.Mu);
+      if (Running && !matlab_dbg_is_paused()) {
+        sendResponse(ReqSeq, *Cmd, false,
+                     Value("evaluate is only valid while the program is "
+                           "paused or has exited"));
+        return true;
+      }
+    }
+
     auto ExprOpt = Args->getString("expression");
     if (!ExprOpt) {
       sendResponse(ReqSeq, *Cmd, false,
@@ -2397,13 +3276,97 @@ bool handleRequest(const Object &Msg) {
       return true;
     }
     std::string Expr = ExprOpt->str();
-    /* The DAP spec allows `expression` to be a statement-level command
-     * in the "repl" context. Strip a single trailing semicolon if the
-     * user typed one — our wrap injects its own. */
-    while (!Expr.empty() &&
-           (Expr.back() == ' ' || Expr.back() == '\t' ||
-            Expr.back() == '\n' || Expr.back() == ';'))
-      Expr.pop_back();
+
+    /* DAP `context` distinguishes the watch panel / hover from the REPL
+     * console. Watch and hover want a value to display, so we wrap as
+     * `__matlab_dbg_eval = (<expr>);` and read the result back. REPL
+     * wants statement-level execution: `disp(T)`, `clear x`,
+     * `T(2,2) = 99` — so we run the input verbatim and let stdout flow
+     * out via the existing pipe redirect → DAP `output` events. */
+    auto CtxOpt = Args->getString("context");
+    bool IsRepl = CtxOpt && *CtxOpt == "repl";
+
+    /* Watch-mode auto-promotion: certain inputs are statement-shaped
+     * void calls that cannot survive the `__matlab_dbg_eval = (...);`
+     * wrap — the assignment-of-void crashes deep in the lowering /
+     * JIT (SIGSEGV, no diagnostic). Detect them up front by extracting
+     * the leading identifier and matching against a known set of
+     * void-returning builtins; route those through the REPL branch
+     * (run verbatim, no wrap) and return `result="<void>"` to the
+     * IDE so the watch row shows a clear placeholder instead of a
+     * dropped connection.
+     *
+     * False positives on the list are safe — the worst case is a
+     * watch on `disp(A)` showing "<void>" while disp's output flows
+     * out as DAP `output` events. False negatives crash matlabc, so
+     * the list errs on the inclusive side. */
+    auto isVoidStatement = [](llvm::StringRef S) {
+      while (!S.empty() && (S.front() == ' ' || S.front() == '\t'))
+        S = S.drop_front();
+      size_t i = 0;
+      while (i < S.size() &&
+             (std::isalnum((unsigned char)S[i]) || S[i] == '_'))
+        ++i;
+      if (i == 0) return false;
+      llvm::StringRef Name = S.substr(0, i);
+      llvm::StringRef Rest = S.drop_front(i);
+      while (!Rest.empty() && (Rest.front() == ' ' || Rest.front() == '\t'))
+        Rest = Rest.drop_front();
+      /* Statement form (`clear x`, `who`, `whos`) — bare name not
+       * followed by `(` qualifies if it's in the void-statement set. */
+      bool IsCallForm = !Rest.empty() && Rest.front() == '(';
+      static const llvm::StringRef VoidCalls[] = {
+        "disp", "fprintf", "printf", "error", "warning", "assert",
+        "dbg", "plot", "figure", "hold", "axis", "title", "xlabel",
+        "ylabel", "legend", "save", "load", "drawnow", "pause",
+        "clf", "cla", "close", "set", "delete", "addpath", "rmpath",
+        "clear", "who", "whos",
+      };
+      static const llvm::StringRef VoidStatements[] = {
+        "clear", "who", "whos", "drawnow", "pause", "clf", "cla",
+        "close", "hold", "dbcont", "dbstop", "dbquit", "dbup",
+        "dbdown",
+      };
+      if (IsCallForm) {
+        for (auto V : VoidCalls) if (Name == V) return true;
+        return false;
+      }
+      for (auto V : VoidStatements) if (Name == V) return true;
+      return false;
+    };
+    bool VoidPromoted = false;
+    if (!IsRepl && isVoidStatement(Expr)) {
+      IsRepl = true;
+      VoidPromoted = true;
+    }
+
+    if (IsRepl) {
+      /* Trim outer whitespace only — preserve a trailing `;` because in
+       * MATLAB it suppresses the implicit display of an assignment's
+       * result, and that user intent is meaningful in the REPL. */
+      while (!Expr.empty() &&
+             (Expr.back() == ' ' || Expr.back() == '\t' ||
+              Expr.back() == '\n' || Expr.back() == '\r'))
+        Expr.pop_back();
+      while (!Expr.empty() &&
+             (Expr.front() == ' ' || Expr.front() == '\t'))
+        Expr.erase(Expr.begin());
+      /* runReplInput's lexer/parser assume the input ends with a
+       * newline (the standalone REPL appends `\n` after each line of
+       * stdin input). Without it, parser recovery on a malformed input
+       * walks past EOF and trips a libc++ length_error in some
+       * downstream string op, aborting the process. Append it
+       * unconditionally — it's a no-op for already-well-formed inputs
+       * and keeps malformed ones contained to a clean diagnostic. */
+      if (!Expr.empty()) Expr.push_back('\n');
+    } else {
+      /* Watch / hover: strip trailing whitespace AND `;` — the wrap we
+       * add below injects its own terminator. */
+      while (!Expr.empty() &&
+             (Expr.back() == ' ' || Expr.back() == '\t' ||
+              Expr.back() == '\n' || Expr.back() == ';'))
+        Expr.pop_back();
+    }
     if (Expr.empty()) {
       sendResponse(ReqSeq, *Cmd, false,
                    Value("evaluate received an empty expression"));
@@ -2424,92 +3387,30 @@ bool handleRequest(const Object &Msg) {
       if (Idx > 0 && Idx < Total) RtFrameIdx = Idx;
     }
 
-    /* Snapshot the pre-eval state of every matlab_ws entry whose name
-     * collides with what we're about to stamp from the frame's
-     * mini-ws. We use a struct-of-arrays so the snapshot survives the
-     * subsequent set_f64/set_mat calls without dangling pointers
-     * (matlab_ws may reorganize internally on insert).
-     *
-     * Two sets of names are tracked:
-     *   - PreExisting: names already in matlab_ws before stamping.
-     *     Restored with their original kind/value after eval.
-     *   - Stamped: names we wrote during stamping. After eval, any
-     *     stamped name not also PreExisting gets matlab_ws_clear_one'd
-     *     so the script workspace doesn't keep function locals. */
-    struct WsBackup { std::string name; int kind; double f64; void *ptr; };
-    std::vector<WsBackup> Backup;
-    std::unordered_set<std::string> PreExisting;
-    std::vector<std::string> Stamped;
-    if (RtFrameIdx > 0) {
-      int N = matlab_dbg_ws_count();
-      for (int i = 0; i < N; ++i) {
-        int64_t Nlen = 0;
-        const char *Nm = matlab_dbg_ws_name(i, &Nlen);
-        if (!Nm) continue;
-        std::string Nstr(Nm, (size_t)Nlen);
-        PreExisting.insert(Nstr);
-      }
-      int FN = matlab_dbg_frame_locals_count(RtFrameIdx);
-      for (int i = 0; i < FN; ++i) {
-        int64_t Nlen = 0;
-        const char *Nm = matlab_dbg_frame_local_name(RtFrameIdx, i, &Nlen);
-        if (!Nm) continue;
-        std::string Nstr(Nm, (size_t)Nlen);
-        /* Capture the prior matlab_ws value (if any) so we can put it
-         * back. Re-look-up by name rather than caching above so we
-         * pick up the current kind/value rather than a stale one in
-         * case the ws got reorganized. */
-        if (PreExisting.count(Nstr)) {
-          int wsN = matlab_dbg_ws_count();
-          for (int j = 0; j < wsN; ++j) {
-            int64_t WL = 0;
-            const char *WN = matlab_dbg_ws_name(j, &WL);
-            if (!WN || (size_t)WL != Nstr.size() ||
-                std::memcmp(WN, Nstr.data(), Nstr.size()) != 0)
-              continue;
-            int K = matlab_dbg_ws_kind(j);
-            WsBackup B{Nstr, K, 0.0, nullptr};
-            if (K == 0) B.f64 = matlab_dbg_ws_f64(j);
-            else if (K == 1 || K == 2) B.ptr = matlab_dbg_ws_ptr(j);
-            Backup.push_back(std::move(B));
-            break;
-          }
-        }
-        int K = matlab_dbg_frame_local_kind(RtFrameIdx, i);
-        if (K == 0) {
-          double V = matlab_dbg_frame_local_f64(RtFrameIdx, i);
-          matlab_ws_set_f64(Nstr.data(), (int64_t)Nstr.size(), V);
-        } else if (K == 1) {
-          void *P = matlab_dbg_frame_local_ptr(RtFrameIdx, i);
-          /* matlab_ws_set_mat takes the matrix descriptor pointer
-           * verbatim; the struct stays owned by the JIT's slot for
-           * the lifetime of the frame, which covers our eval. */
-          matlab_ws_set_mat(Nstr.data(), (int64_t)Nstr.size(),
-                             (struct matlab_mat *)P);
-        } else if (K == 2) {
-          /* Class instance: stamp via matlab_ws_set_obj so the
-           * workspace remembers it as kind=2. The eval JIT only
-           * needs to see the obj pointer; method dispatch routes
-           * through matlab_obj_* the same way it does in the
-           * compiled code, so `obj.method()` and `obj.Prop` work
-           * inside watch expressions. */
-          void *P = matlab_dbg_frame_local_ptr(RtFrameIdx, i);
-          matlab_ws_set_obj(Nstr.data(), (int64_t)Nstr.size(), P);
-        }
-        Stamped.push_back(std::move(Nstr));
-      }
-    }
+    /* Bridge the requested frame's locals into matlab_ws for the
+     * eval, then reverse the bridge afterward. Same helper used by
+     * the cond/log breakpoint evaluators; see FrameBridge above. */
+    FrameBridge FB;
+    FB.stamp(RtFrameIdx);
 
     const char EvalName[] = "__matlab_dbg_eval";
-    std::string Src = std::string(EvalName) + " = (" + Expr + ");";
-    int Rc = runReplInput(sharedDapContext(), Src, NextEvalId++);
+    std::string Src = IsRepl
+                       ? Expr
+                       : (std::string(EvalName) + " = (" + Expr + ");");
+    std::string DiagText;
+    int Rc = runReplInput(sharedDapContext(), Src, NextEvalId++, &DiagText);
 
-    /* Read the result before any restoration so we can format it. */
+    /* Read the result before any restoration so we can format it. The
+     * REPL path skips this entirely — its "result" is whatever the user's
+     * statement printed via disp/fprintf, which already streamed out as
+     * `output` events through the stdout-redirect pipe. */
     std::string Display;
     std::string EvalType;
     int64_t EvalRef = 0;
+    int64_t EvalIndexed = 0;
+    int64_t EvalNamed = 0;
     bool RcOk = (Rc == 0);
-    if (RcOk) {
+    if (RcOk && !IsRepl) {
       int N = matlab_dbg_ws_count();
       int Found = -1, Kind = -1;
       int64_t EvalLen = (int64_t)(sizeof EvalName - 1);
@@ -2567,47 +3468,59 @@ bool handleRequest(const Object &Msg) {
        * box can drill into a `[1 2; 3 4]` literal or an `A * B`
        * expression. */
       if (Found >= 0 && Kind == 2) {
-        if (void *obj = matlab_dbg_ws_ptr(Found))
+        if (void *obj = matlab_dbg_ws_ptr(Found)) {
           EvalRef = registerObjRef(obj);
+          EvalNamed = objNamedCount(obj);
+        }
       } else if (Found >= 0 && Kind == 1) {
         auto *M = (struct matlab_mat *)matlab_dbg_ws_ptr(Found);
         if (M && (matlab_dbg_mat_rows(M) != 1 ||
-                  matlab_dbg_mat_cols(M) != 1))
+                  matlab_dbg_mat_cols(M) != 1)) {
           EvalRef = registerMatRef(M);
+          EvalIndexed = matIndexedCount(M);
+        }
       }
       if (Found >= 0)
         EvalType = typeForVar(Kind,
             Kind == 2 ? matlab_dbg_ws_ptr(Found) : nullptr);
     }
 
-    /* Restore matlab_ws to its pre-stamp state. Order matters: clear
-     * the freshly-stamped names first (so they don't shadow the
-     * restored values), then re-set the pre-existing ones. The eval
-     * result holder is also cleared so it doesn't pile up in the
-     * workspace across many evaluate calls. */
+    /* Clear the eval-result holder first so it doesn't pile up
+     * across many evaluate calls, then reverse the frame bridge
+     * (clears stamped names, restores pre-existing values). */
     matlab_ws_clear_one(EvalName, (int64_t)(sizeof EvalName - 1));
-    for (const std::string &Nstr : Stamped) {
-      if (!PreExisting.count(Nstr))
-        matlab_ws_clear_one(Nstr.data(), (int64_t)Nstr.size());
-    }
-    for (const WsBackup &B : Backup) {
-      if (B.kind == 0)
-        matlab_ws_set_f64(B.name.data(), (int64_t)B.name.size(), B.f64);
-      else if (B.kind == 1)
-        matlab_ws_set_mat(B.name.data(), (int64_t)B.name.size(),
-                           (struct matlab_mat *)B.ptr);
-      else if (B.kind == 2)
-        matlab_ws_set_obj(B.name.data(), (int64_t)B.name.size(), B.ptr);
-    }
+    FB.restore();
 
     if (!RcOk) {
-      sendResponse(ReqSeq, *Cmd, false,
-                   Value("evaluate expression failed to compile"));
+      /* Captured diagnostics (parser / type / lowering errors)
+       * become the response message so the IDE's watch row shows
+       * the actual cause — first line in the cell, full text in
+       * the hover tooltip. The same bytes also reached stderr via
+       * Diag.printAll(); the stderr-forwarding pipe surfaces them
+       * in the debug console for users who prefer scrolling
+       * through the full text there. */
+      std::string Msg = DiagText;
+      /* Trim trailing newlines so the IDE's single-line message
+       * field doesn't render an awkward blank trailing row. */
+      while (!Msg.empty() && (Msg.back() == '\n' || Msg.back() == '\r'))
+        Msg.pop_back();
+      if (Msg.empty())
+        Msg = IsRepl ? "REPL input failed to run"
+                     : "evaluate expression failed to compile";
+      sendResponse(ReqSeq, *Cmd, false, Value(Msg));
       return true;
     }
+    /* If the watch handler auto-promoted a void statement to the
+     * REPL path, the IDE still expects a value-shaped response.
+     * Render `<void>` so the watch row shows a clear placeholder
+     * instead of an empty cell — the actual side effect (printed
+     * output) flowed through the DAP `output` event channel. */
+    if (VoidPromoted) Display = "<void>";
     Object Body{{"result", Display},
                 {"variablesReference", EvalRef}};
     if (!EvalType.empty()) Body["type"] = EvalType;
+    if (EvalIndexed > 0) Body["indexedVariables"] = EvalIndexed;
+    if (EvalNamed > 0) Body["namedVariables"] = EvalNamed;
     sendResponse(ReqSeq, *Cmd, true, std::move(Body));
     return true;
   }
@@ -2621,24 +3534,500 @@ bool handleRequest(const Object &Msg) {
     pthread_cond_broadcast(&G.Cv);
     pthread_mutex_unlock(&G.Mu);
   };
+  /* --- Source / file inspection --------------------------------------- */
+
+  if (*Cmd == "loadedSources") {
+    /* Return one Source object per .m file the SourceManager loaded
+     * during compileProgram (entry point + auto-loaded siblings).
+     * Mirrors the `loadedSource` events we fire on configurationDone
+     * so a late-attaching client can still build a complete source
+     * tree via this poll. */
+    Array Ss;
+    for (const auto &Kv : G.PathToFileId) {
+      Ss.push_back(Object{
+        {"name", Kv.first},
+        {"path", Kv.first},
+        {"sourceReference", (int64_t)0},
+      });
+    }
+    sendResponse(ReqSeq, *Cmd, true,
+                 Object{{"sources", std::move(Ss)}});
+    return true;
+  }
+
+  if (*Cmd == "source") {
+    /* Read file content from disk by path. Used by IDEs that don't
+     * have direct file-system access (remote-debug or container
+     * scenarios). Local debug sessions short-circuit this — the IDE
+     * already has the .m file open. */
+    auto SrcObj = Args->getObject("source");
+    std::string Path;
+    if (SrcObj) {
+      if (auto P = SrcObj->getString("path")) Path = P->str();
+    }
+    if (Path.empty()) {
+      sendResponse(ReqSeq, *Cmd, false, Value("source requires a path"));
+      return true;
+    }
+    std::ifstream In(Path);
+    if (!In) {
+      sendResponse(ReqSeq, *Cmd, false,
+                   Value("source: cannot open " + Path));
+      return true;
+    }
+    std::string Content((std::istreambuf_iterator<char>(In)),
+                        std::istreambuf_iterator<char>());
+    sendResponse(ReqSeq, *Cmd, true,
+                 Object{{"content", std::move(Content)},
+                        {"mimeType", "text/x-matlab"}});
+    return true;
+  }
+
+  if (*Cmd == "modules") {
+    /* No shared-library / dynamically-loaded module concept in our
+     * JIT model — every .m file goes through compileProgram into a
+     * single ExecutionEngine. Return an empty list so module-aware
+     * IDEs render an empty Modules pane instead of falling back to
+     * the unknown-handler reply. */
+    sendResponse(ReqSeq, *Cmd, true,
+                 Object{{"modules", Array{}}, {"totalModules", (int64_t)0}});
+    return true;
+  }
+
+  /* --- Breakpoint variants -------------------------------------------- */
+
+  if (*Cmd == "breakpointLocations") {
+    /* Return every breakpointable line in [startLine, endLine] for
+     * a given source. Server-side: G.BpLocations is populated at
+     * compileProgram time by walking the AST (one entry per
+     * statement start line). The actual hook may not fire on every
+     * recorded line (the lowering normalises hook lines past blank
+     * / comment-only rows), but setBreakpoints is authoritative for
+     * whether a given line resolves — this request is only there to
+     * tell the IDE which rows to highlight as candidates. */
+    auto SrcObj = Args->getObject("source");
+    auto StartLineOpt = Args->getInteger("line");
+    auto EndLineOpt = Args->getInteger("endLine");
+    int32_t Fid = 0;
+    if (SrcObj) {
+      if (auto P = SrcObj->getString("path")) {
+        auto It = G.PathToFileId.find(canonPath(P->str()));
+        if (It != G.PathToFileId.end()) Fid = It->second;
+      }
+    }
+    int64_t Start = StartLineOpt.value_or(1);
+    int64_t End = EndLineOpt.value_or(Start);
+    Array Locs;
+    auto It = G.BpLocations.find(Fid);
+    if (It != G.BpLocations.end()) {
+      for (int32_t L : It->second) {
+        if ((int64_t)L >= Start && (int64_t)L <= End) {
+          Locs.push_back(Object{{"line", (int64_t)L},
+                                {"column", (int64_t)1}});
+        }
+      }
+    }
+    sendResponse(ReqSeq, *Cmd, true,
+                 Object{{"breakpoints", std::move(Locs)}});
+    return true;
+  }
+
+  if (*Cmd == "setFunctionBreakpoints") {
+    /* Resolve each function name against G.FunctionTable (populated
+     * at compileProgram time) and install a line breakpoint at the
+     * function's first body line. Unknown names come back with
+     * verified=false rather than dropping the connection. */
+    const Array *Bps = Args->getArray("breakpoints");
+    Array Verified;
+    if (Bps) {
+      for (const auto &V : *Bps) {
+        const Object *B = V.getAsObject();
+        std::string Nm = B && B->getString("name")
+                              ? B->getString("name")->str()
+                              : std::string();
+        auto It = G.FunctionTable.find(Nm);
+        if (It != G.FunctionTable.end() && It->second.FileId != 0) {
+          matlab_dbg_add_breakpoint(It->second.FileId, It->second.Line);
+          int64_t Nlen = 0;
+          const char *Path = matlab_dbg_file_name(It->second.FileId, &Nlen);
+          Object Out{{"verified", true},
+                     {"line", (int64_t)It->second.Line},
+                     {"id", encodeBpId(It->second.FileId,
+                                       It->second.Line)}};
+          if (Path) {
+            Out["source"] = Object{
+              {"name", std::string(Path, (size_t)Nlen)},
+              {"path", std::string(Path, (size_t)Nlen)},
+            };
+          }
+          Verified.push_back(std::move(Out));
+        } else {
+          Verified.push_back(Object{
+            {"verified", false},
+            {"message", "no function named '" + Nm + "' in compiled program"},
+          });
+        }
+      }
+    }
+    sendResponse(ReqSeq, *Cmd, true,
+                 Object{{"breakpoints", std::move(Verified)}});
+    return true;
+  }
+
+  if (*Cmd == "setExceptionBreakpoints") {
+    /* Toggle the runtime's "pause on error()" filter. The IDE sends
+     * the active filter list; we look for our `error` filter and
+     * forward the on/off state to the runtime. Filters we don't
+     * recognise are ignored silently — the spec says we MUST NOT
+     * fail the request because the IDE may not know which filters
+     * apply to the current session. */
+    const Array *Filters = Args->getArray("filters");
+    bool ErrorOn = false;
+    if (Filters) {
+      for (const auto &V : *Filters) {
+        if (auto S = V.getAsString()) {
+          if (*S == "error") ErrorOn = true;
+        }
+      }
+    }
+    matlab_dbg_set_pause_on_error(ErrorOn ? 1 : 0);
+    sendResponse(ReqSeq, *Cmd, true,
+                 Object{{"breakpoints", Array{}}});
+    return true;
+  }
+
+  if (*Cmd == "setDataBreakpoints" || *Cmd == "dataBreakpointInfo") {
+    /* Data breakpoints (watchpoints) need the runtime to instrument
+     * every workspace store and compare against a watch list — not
+     * hard, just not built. Refuse cleanly so the IDE knows. */
+    sendResponse(ReqSeq, *Cmd, false,
+                 Value("data breakpoints require a workspace-store watcher "
+                       "that this build does not include"));
+    return true;
+  }
+
+  if (*Cmd == "setInstructionBreakpoints") {
+    /* Instruction breakpoints address into native code by absolute
+     * memory location. The JIT'd image isn't exposed at that
+     * granularity — there's no public mapping from line to native
+     * PC. Refuse. */
+    sendResponse(ReqSeq, *Cmd, false,
+                 Value("instruction breakpoints are unsupported: the JIT "
+                       "image is not addressable at the instruction level"));
+    return true;
+  }
+
+  /* --- Evaluation extras ---------------------------------------------- */
+
+  if (*Cmd == "completions") {
+    /* Return the union of (a) workspace names whose prefix matches,
+     * (b) frame locals (via the supplied frameId, if any), and (c)
+     * builtin function names. Ranking: ws + frame names first
+     * (user-defined > builtins), each in alphabetical order, capped
+     * at 64 entries to keep the response small. */
+    auto TextOpt = Args->getString("text");
+    auto ColOpt = Args->getInteger("column");
+    std::string Text = TextOpt ? TextOpt->str() : std::string();
+    /* DAP `column` is 1-based and points one past the last typed
+     * char — the prefix is everything from the last non-identifier
+     * char up to (column - 1). */
+    int64_t Col = ColOpt.value_or((int64_t)Text.size() + 1);
+    if (Col < 1) Col = 1;
+    if ((size_t)Col > Text.size() + 1) Col = (int64_t)(Text.size() + 1);
+    int64_t Start = Col - 1;
+    while (Start > 0) {
+      char c = Text[(size_t)(Start - 1)];
+      if (!(std::isalnum((unsigned char)c) || c == '_')) break;
+      --Start;
+    }
+    std::string Prefix = Text.substr((size_t)Start,
+                                      (size_t)(Col - 1 - Start));
+
+    auto FrameIdOpt = Args->getInteger("frameId");
+    int RtFrameIdx = -1;
+    if (FrameIdOpt) {
+      int Total = matlab_dbg_frame_count();
+      int Idx = Total - 1 - (int)*FrameIdOpt;
+      if (Idx >= 0 && Idx < Total) RtFrameIdx = Idx;
+    }
+
+    std::set<std::string> Names;
+    int Nws = matlab_dbg_ws_count();
+    for (int i = 0; i < Nws; ++i) {
+      int64_t L = 0;
+      const char *N = matlab_dbg_ws_name(i, &L);
+      if (N) Names.insert(std::string(N, (size_t)L));
+    }
+    if (RtFrameIdx >= 0) {
+      int Nf = matlab_dbg_frame_locals_count(RtFrameIdx);
+      for (int i = 0; i < Nf; ++i) {
+        int64_t L = 0;
+        const char *N = matlab_dbg_frame_local_name(RtFrameIdx, i, &L);
+        if (N) Names.insert(std::string(N, (size_t)L));
+      }
+    }
+    /* Builtins: a small curated set covers the common REPL surface.
+     * Alphabetical order keeps the response stable across runs. */
+    static const char *Builtins[] = {
+      "abs", "ceil", "clear", "cos", "det", "diag", "disp", "eig",
+      "exp", "eye", "fft", "find", "floor", "fprintf", "imag", "inv",
+      "isempty", "isequal", "length", "log", "max", "mean", "min",
+      "ndims", "numel", "ones", "prod", "rand", "randn", "real",
+      "reshape", "round", "sin", "size", "sort", "sqrt", "sum", "svd",
+      "tan", "transpose", "who", "whos", "zeros",
+    };
+    for (const char *B : Builtins) Names.insert(B);
+
+    Array Targets;
+    int Cap = 64;
+    for (const std::string &N : Names) {
+      if (N.size() < Prefix.size()) continue;
+      if (N.compare(0, Prefix.size(), Prefix) != 0) continue;
+      Targets.push_back(Object{
+        {"label", N},
+        {"text", N},
+        {"start", (int64_t)Start},
+        {"length", (int64_t)Prefix.size()},
+      });
+      if ((int)Targets.size() >= Cap) break;
+    }
+    sendResponse(ReqSeq, *Cmd, true,
+                 Object{{"targets", std::move(Targets)}});
+    return true;
+  }
+
+  if (*Cmd == "setExpression") {
+    /* setVariable mutates by name; setExpression mutates by lvalue
+     * expression (e.g. `s.field` or `A(2,3)`). Both share the same
+     * REPL-JIT assignment path — we just pass the lvalue through as
+     * the LHS without the identifier-only guard setVariable applies.
+     * The compiler diagnostics catch malformed lvalues. */
+    auto LhsOpt = Args->getString("expression");
+    auto ValOpt = Args->getString("value");
+    if (!LhsOpt || !ValOpt) {
+      sendResponse(ReqSeq, *Cmd, false,
+                   Value("setExpression requires expression and value"));
+      return true;
+    }
+    std::string Lhs = LhsOpt->str();
+    std::string Rhs = ValOpt->str();
+    std::string Src = Lhs + " = (" + Rhs + ");";
+    int Rc = runReplInput(sharedDapContext(), Src, NextEvalId++);
+    if (Rc != 0) {
+      sendResponse(ReqSeq, *Cmd, false,
+                   Value("setExpression failed; see debug console for details"));
+      return true;
+    }
+    /* Read the stored value back by re-evaluating the same lvalue.
+     * For `s.field = computeSomething()` the user wants to see the
+     * computed result in the watch row, not the literal text
+     * "computeSomething()". The readback uses the same
+     * `__matlab_dbg_eval = (<lhs>);` wrap as the watch path —
+     * arbitrary lvalues are valid expressions, so they round-trip
+     * cleanly.
+     *
+     * If the readback fails (e.g. the LHS is itself only valid as
+     * an assignment target — uncommon but possible for some
+     * future indexing forms), fall back to echoing the raw RHS
+     * rather than failing the whole request: the assignment did
+     * land, we just couldn't render the result. */
+    const char ReadName[] = "__matlab_dbg_eval";
+    std::string ReadSrc = std::string(ReadName) + " = (" + Lhs + ");";
+    int ReadRc = runReplInput(sharedDapContext(), ReadSrc, NextEvalId++);
+    std::string Display = Rhs;
+    int64_t ReadRef = 0;
+    int64_t ReadIndexed = 0;
+    int64_t ReadNamed = 0;
+    std::string ReadType;
+    if (ReadRc == 0) {
+      int N = matlab_dbg_ws_count();
+      int Found = -1, Kind = -1;
+      int64_t Elen = (int64_t)(sizeof ReadName - 1);
+      for (int i = 0; i < N; ++i) {
+        int64_t Nlen = 0;
+        const char *Nm = matlab_dbg_ws_name(i, &Nlen);
+        if (Nlen == Elen &&
+            std::memcmp(Nm, ReadName, (size_t)Nlen) == 0) {
+          Found = i; Kind = matlab_dbg_ws_kind(i);
+          break;
+        }
+      }
+      if (Found >= 0) {
+        Display = formatVar(Kind, Found);
+        ReadType = typeForVar(Kind,
+            Kind == 2 ? matlab_dbg_ws_ptr(Found) : nullptr);
+        if (Kind == 2) {
+          if (void *obj = matlab_dbg_ws_ptr(Found)) {
+            ReadRef = registerObjRef(obj);
+            ReadNamed = matlab_dbg_obj_field_count(obj);
+          }
+        } else if (Kind == 1) {
+          auto *M = (struct matlab_mat *)matlab_dbg_ws_ptr(Found);
+          if (M && (matlab_dbg_mat_rows(M) != 1 ||
+                    matlab_dbg_mat_cols(M) != 1)) {
+            ReadRef = registerMatRef(M);
+            ReadIndexed = matIndexedCount(M);
+          }
+        }
+      }
+      matlab_ws_clear_one(ReadName, Elen);
+    }
+    Object Body{{"value", Display},
+                {"variablesReference", ReadRef}};
+    if (!ReadType.empty()) Body["type"] = ReadType;
+    if (ReadIndexed > 0) Body["indexedVariables"] = ReadIndexed;
+    if (ReadNamed > 0) Body["namedVariables"] = ReadNamed;
+    sendResponse(ReqSeq, *Cmd, true, std::move(Body));
+    return true;
+  }
+
+  if (*Cmd == "exceptionInfo") {
+    /* Surface the most recent matlab error()'s message + frame
+     * snapshot for the IDE's exception-info hover. The runtime
+     * snapshot is captured at error() time inside matlab_set_error,
+     * so this response reflects the failing frame even after the
+     * worker has unwound past it. */
+    int64_t MsgLen = 0;
+    const char *Msg = matlab_dbg_last_error_msg(&MsgLen);
+    std::string Body(Msg ? std::string(Msg, (size_t)MsgLen)
+                          : std::string("(no error recorded)"));
+    int Nf = matlab_err_traceback_count();
+    std::string Stack;
+    for (int i = 0; i < Nf; ++i) {
+      int32_t Fid = 0, Ln = 0;
+      const char *FnName = nullptr;
+      if (!matlab_err_traceback_at(i, &Fid, &Ln, &FnName)) break;
+      int64_t Plen = 0;
+      const char *Path = matlab_dbg_file_name(Fid, &Plen);
+      char LineBuf[32];
+      snprintf(LineBuf, sizeof LineBuf, ":%d", (int)Ln);
+      Stack += "  at ";
+      Stack += FnName ? FnName : "<frame>";
+      Stack += " (";
+      Stack += Path ? std::string(Path, (size_t)Plen) : "<file>";
+      Stack += LineBuf;
+      Stack += ")\n";
+    }
+    Object Details{{"message", Body}};
+    if (!Stack.empty()) Details["stackTrace"] = Stack;
+    sendResponse(ReqSeq, *Cmd, true, Object{
+      {"exceptionId", "matlab.error"},
+      {"description", Body},
+      {"breakMode", "always"},
+      {"details", std::move(Details)},
+    });
+    return true;
+  }
+
+  /* --- Goto / restart / step-in targets ------------------------------- */
+
+  if (*Cmd == "stepInTargets") {
+    /* MATLAB's call sites are simple — at most one user-defined call
+     * per statement — so the IDE's "step into a specific call"
+     * picker doesn't have anything to choose between. Return one
+     * target that maps back to the regular stepIn behaviour. */
+    Array Ts;
+    Ts.push_back(Object{
+      {"id", (int64_t)1},
+      {"label", "step into next call"},
+    });
+    sendResponse(ReqSeq, *Cmd, true,
+                 Object{{"targets", std::move(Ts)}});
+    return true;
+  }
+
+  if (*Cmd == "gotoTargets" || *Cmd == "goto") {
+    /* Goto requires moving the program counter to an arbitrary line
+     * within the current frame — possible in interpreters but our
+     * compiled-and-JIT model has no PC manipulation primitive. */
+    sendResponse(ReqSeq, *Cmd, false,
+                 Value("goto is unsupported: the JIT exposes no "
+                       "in-frame PC manipulation primitive"));
+    return true;
+  }
+
+  if (*Cmd == "restartFrame") {
+    /* Restarting a frame would require rolling the runtime's
+     * matlab_ws back to the frame's entry state and re-entering —
+     * we don't snapshot at function entry, so refusing is the only
+     * honest answer. */
+    sendResponse(ReqSeq, *Cmd, false,
+                 Value("restartFrame is unsupported: the runtime does not "
+                       "snapshot per-frame workspace at function entry"));
+    return true;
+  }
+
+  if (*Cmd == "restart") {
+    /* Per the DAP spec, the canonical implementation is to send a
+     * `terminated` event with `restart: true` and let the client
+     * follow up with a fresh `launch`. That keeps the
+     * tear-down/rebuild logic in one place (the launch handler)
+     * instead of duplicating compileProgram + worker spawn here. */
+    matlab_dbg_resume(STOP);
+    sendResponse(ReqSeq, *Cmd, true, Object{});
+    sendEvent("terminated", Object{{"restart", true}});
+    return true;
+  }
+
+  /* --- Reverse / memory / disassembly (unsupported) ------------------- */
+
+  if (*Cmd == "stepBack" || *Cmd == "reverseContinue") {
+    sendResponse(ReqSeq, *Cmd, false,
+                 Value("reverse stepping requires a state recorder that "
+                       "this build does not include"));
+    return true;
+  }
+  if (*Cmd == "readMemory" || *Cmd == "writeMemory") {
+    sendResponse(ReqSeq, *Cmd, false,
+                 Value("memory inspection is unsupported: the JIT image "
+                       "is not exposed at the byte level"));
+    return true;
+  }
+  if (*Cmd == "disassemble" || *Cmd == "locations") {
+    sendResponse(ReqSeq, *Cmd, false,
+                 Value("disassembly is unsupported: native frames are not "
+                       "tracked by the runtime"));
+    return true;
+  }
+
+  /* `continued` events let adapters that resume the worker out-of-band
+   * (e.g. via a remote-restart UX) stay in sync. We emit one for every
+   * resume request even though the spec says we MAY skip it for
+   * client-initiated resumes — emitting unconditionally keeps the
+   * `stopped` ↔ `continued` ordering symmetric and matches what
+   * VS Code's debug UI prefers. allThreadsContinued is true because
+   * MATLAB execution is single-threaded. */
+  auto emitContinued = [&] {
+    sendEvent("continued",
+              Object{{"threadId", (int64_t)1},
+                     {"allThreadsContinued", true}});
+  };
+
   if (*Cmd == "continue") {
     matlab_dbg_resume(CONTINUE);
     nudgeMonitor();
     sendResponse(ReqSeq, *Cmd, true,
                  Object{{"allThreadsContinued", true}});
+    emitContinued();
     return true;
   }
   if (*Cmd == "next") {
     matlab_dbg_resume(STEP_OVER); nudgeMonitor();
-    sendResponse(ReqSeq, *Cmd, true, Object{}); return true;
+    sendResponse(ReqSeq, *Cmd, true, Object{});
+    emitContinued();
+    return true;
   }
   if (*Cmd == "stepIn") {
     matlab_dbg_resume(STEP_IN); nudgeMonitor();
-    sendResponse(ReqSeq, *Cmd, true, Object{}); return true;
+    sendResponse(ReqSeq, *Cmd, true, Object{});
+    emitContinued();
+    return true;
   }
   if (*Cmd == "stepOut") {
     matlab_dbg_resume(STEP_OUT); nudgeMonitor();
-    sendResponse(ReqSeq, *Cmd, true, Object{}); return true;
+    sendResponse(ReqSeq, *Cmd, true, Object{});
+    emitContinued();
+    return true;
   }
 
   if (*Cmd == "pause") {
@@ -2648,7 +4037,26 @@ bool handleRequest(const Object &Msg) {
     return true;
   }
 
-  if (*Cmd == "terminate" || *Cmd == "disconnect") {
+  /* Lifecycle teardown. The DAP spec separates `terminate` (graceful:
+   * ask the debuggee to wind down, with a chance to restart) from
+   * `disconnect` (forceful: detach and exit). We honour both:
+   *
+   *   - `terminate` asks the runtime to stop, sends a `terminated`
+   *     event, and keeps the DAP server loop alive so the client may
+   *     follow up with `restart` or `disconnect`. The
+   *     `terminateDebuggee` arg on `disconnect` (DAP default = true
+   *     for launch sessions) is unused — we always stop the worker.
+   *
+   *   - `disconnect` stops the worker AND exits the request loop, so
+   *     the matlabc process winds down. Matches the behaviour the
+   *     test suite already relied on. */
+  if (*Cmd == "terminate" || *Cmd == "terminateThreads") {
+    matlab_dbg_resume(STOP);
+    sendResponse(ReqSeq, *Cmd, true, Object{});
+    sendEvent("terminated");
+    return true;
+  }
+  if (*Cmd == "disconnect") {
     matlab_dbg_resume(STOP);
     sendResponse(ReqSeq, *Cmd, true, Object{});
     return false; /* tell the loop to exit */
@@ -2683,6 +4091,32 @@ int runDap(const std::string &CLIPath) {
   }
   close(Pipe[1]);
   DebuggeeOutFd = Pipe[0];
+
+  /* Same redirect for stderr. The DAP server's own diagnostics still
+   * need an unredirected stderr — std::cerr lines emitted before
+   * runDap reach the parent process directly. After this point any
+   * fprintf(stderr, ...) goes through our pipe and surfaces as
+   * `output` events with `category: "stderr"`. */
+  int ErrPipe[2];
+  if (pipe(ErrPipe) != 0) {
+    std::cerr << "matlabc -dap: stderr pipe() failed\n";
+    return 1;
+  }
+  OriginalStderrFd = dup(STDERR_FILENO);
+  if (OriginalStderrFd < 0) {
+    std::cerr << "matlabc -dap: dup(stderr) failed\n";
+    return 1;
+  }
+  if (dup2(ErrPipe[1], STDERR_FILENO) < 0) {
+    /* Best-effort: if redirect fails, just log and proceed without
+     * stderr capture — the rest of the server is still functional. */
+    (void)!write(OriginalStderrFd, "matlabc -dap: stderr dup2 failed\n", 33);
+    close(ErrPipe[0]);
+    close(ErrPipe[1]);
+  } else {
+    close(ErrPipe[1]);
+    DebuggeeErrFd = ErrPipe[0];
+  }
 
   G.ProgramPath = CLIPath;
   std::ios::sync_with_stdio(false);
@@ -3164,6 +4598,14 @@ int main(int Argc, char **Argv) {
           // HWStateInfer matcher's single-use-isempty constraint
           // accepts the literal HDL Coder mealy/moore idiom.
           mlirgen::runSplitIsEmptyOr(M);
+
+          // Phase 5.6 Stage F: lower persistent fi-array shift-
+          // register patterns into N parallel scalar persistents.
+          // Runs after `LowerStaticFiArrays` (so the next-cycle
+          // pointer is a static `llvm.alloca [N x iW]`) but before
+          // `HWStateInfer` so the synthetic scalar persistents
+          // surface as recognized state.
+          mlirgen::runLowerPersistentFiArrays(M);
 
           // Phase 5.1: replace runtime-call `matlab_fi_sat_s64` /
           // `_u64` saturate helpers with explicit clamp circuits

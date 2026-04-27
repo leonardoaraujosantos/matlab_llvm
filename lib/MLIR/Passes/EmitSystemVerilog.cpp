@@ -1874,11 +1874,20 @@ bool Emitter::emitModuleForFunc(mlir::func::FuncOp F) {
         if (auto *Cmp = IfOp.getCondition().getDefiningOp())
           Suppress.insert(Cmp);
     }
-    // Suppress the isempty call itself.
+    // Suppress the isempty call itself. Accept both `llvm.call`
+    // and `matlab.call_builtin` shapes — Stage F's synthetic
+    // per-element persistents emit the latter form, scalar
+    // persistents lower to the former by pipeline time.
     F.walk([&](mlir::Operation *Op) {
       if (auto Call = mlir::dyn_cast<mlir::LLVM::CallOp>(Op)) {
         auto C = Call.getCallee();
         if (C && *C == "matlab_persistent_isempty") Suppress.insert(Op);
+        return;
+      }
+      if (Op->getName().getStringRef() == "matlab.call_builtin") {
+        auto S = Op->getAttrOfType<mlir::StringAttr>("callee");
+        if (S && S.getValue() == "matlab_persistent_isempty")
+          Suppress.insert(Op);
       }
     });
   }
