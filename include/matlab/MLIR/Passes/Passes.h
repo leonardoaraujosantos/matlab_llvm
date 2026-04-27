@@ -246,6 +246,18 @@ struct HWForLoopInfo {
 /// require that Info.Init / End / Step are `arith.constant`.
 bool matchHWForLoop(mlir::Operation *WhileOp, HWForLoopInfo &Info);
 
+/// Phase 4.5.2 fixup. The Lowering pass places an
+/// `unrealized_conversion_cast` on `scf.if` conditions whose source
+/// type was `none` at lowering time (e.g. a load of a slot whose
+/// type only refines after `LowerUserCalls`). After the
+/// scalar-to-arith / user-call iteration loop has refined the
+/// source to a concrete integer or float, this pass walks every
+/// such cast and replaces it with the canonical `arith.cmpi ne,
+/// src, 0` (integer) or `arith.cmpf one, src, 0.0` (float). Returns
+/// true on success; emits an error per cast whose source still has
+/// no concrete numeric type.
+bool runRefineIfConds(mlir::ModuleOp M);
+
 /// Phase 3 persistent-variable recognition. The MATLAB pattern:
 ///
 ///   persistent c;

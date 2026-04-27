@@ -408,6 +408,16 @@ private:
   void lowerLoopBody(const ::matlab::Block &Blk);
   mlir::Value lowerExpr(const Expr &E);
   void lowerLValueStore(const Expr &LHS, mlir::Value Rhs);
+  /* Coerce an scf.if condition value to i1, regardless of the source
+   * type. Float / wide-integer conds get an explicit cmpf-or-cmpi
+   * against zero. `none`-typed conds (which arise when the cond is a
+   * load of an `any`-typed slot, or a function param whose type
+   * refines later) get an unrealized_conversion_cast as a verifier
+   * placeholder. The RefineIfConds fixup pass that runs in the SV
+   * pipeline after type-flow refinement replaces the placeholder
+   * with a real cmpi/cmpf once the source type lands. */
+  mlir::Value fixupIfCond(mlir::OpBuilder &B, mlir::Value Cond,
+                          mlir::Location LC);
 
   //--- op-kind translation
   llvm::StringRef binOpName(BinOp O);
@@ -1261,6 +1271,33 @@ bool Lowerer::blockContainsBreakOrContinue(const ::matlab::Block &Blk) {
   return false;
 }
 
+mlir::Value Lowerer::fixupIfCond(mlir::OpBuilder &B, mlir::Value Cond,
+                                  mlir::Location LC) {
+  mlir::Type CT = Cond.getType();
+  if (auto IT = mlir::dyn_cast<mlir::IntegerType>(CT)) {
+    if (IT.getWidth() == 1) return Cond;
+    mlir::Value Zero = mlir::arith::ConstantOp::create(
+        B, LC, IT, mlir::IntegerAttr::get(IT, 0));
+    return mlir::arith::CmpIOp::create(
+        B, LC, mlir::arith::CmpIPredicate::ne, Cond, Zero);
+  }
+  if (mlir::isa<mlir::Float64Type, mlir::Float32Type>(CT)) {
+    auto FT = mlir::cast<mlir::FloatType>(CT);
+    mlir::Value Zero = mlir::arith::ConstantOp::create(
+        B, LC, FT, mlir::FloatAttr::get(FT, 0.0));
+    return mlir::arith::CmpFOp::create(
+        B, LC, mlir::arith::CmpFPredicate::ONE, Cond, Zero);
+  }
+  if (mlir::isa<mlir::NoneType>(CT)) {
+    auto I1 = mlir::IntegerType::get(&MCtx, 1);
+    return mlir::UnrealizedConversionCastOp::create(
+               B, LC, mlir::TypeRange{I1}, mlir::ValueRange{Cond})
+        .getResult(0);
+  }
+  // Pass through anything else (e.g. already-i1) unchanged.
+  return Cond;
+}
+
 void Lowerer::lowerLoopBody(const ::matlab::Block &Blk) {
   /* Walk statements. After any stmt that might have broken/continued,
    * wrap the remainder in scf.if(!did_break && !did_continue) { ... }.
@@ -1657,27 +1694,14 @@ void Lowerer::lowerStmt(const Stmt &St) {
         ? lowerExpr(*I.Cond)
         : emitUnreg("matlab.const_logical", {},
                     mlir::IntegerType::get(&MCtx, 1), loc(I.Range));
-    /* scf.if requires i1; if the cond came back as f64 (e.g. a runtime
-     * call returning a logical-as-double like matlab_persistent_isempty),
-     * convert via "x != 0.0". Integer conds wider than i1 also need a
-     * cmpi to 0 — handled symmetrically. */
-    {
-      mlir::Type CT = Cond.getType();
-      mlir::Location LC = loc(I.Range);
-      if (mlir::isa<mlir::Float64Type, mlir::Float32Type>(CT)) {
-        auto FT = mlir::cast<mlir::FloatType>(CT);
-        mlir::Value Zero = mlir::arith::ConstantOp::create(
-            B, LC, FT, mlir::FloatAttr::get(FT, 0.0));
-        Cond = mlir::arith::CmpFOp::create(
-            B, LC, mlir::arith::CmpFPredicate::ONE, Cond, Zero);
-      } else if (auto IT = mlir::dyn_cast<mlir::IntegerType>(CT);
-                 IT && IT.getWidth() > 1) {
-        mlir::Value Zero = mlir::arith::ConstantOp::create(
-            B, LC, IT, mlir::IntegerAttr::get(IT, 0));
-        Cond = mlir::arith::CmpIOp::create(
-            B, LC, mlir::arith::CmpIPredicate::ne, Cond, Zero);
-      }
-    }
+    /* scf.if requires i1; if the cond came back as something else
+     * (f64 from a runtime call, integer wider than i1, or `none`
+     * from a still-unrefined slot / function param), insert the
+     * appropriate truthy comparison. `none` cases get an
+     * unrealized_conversion_cast as a verifier placeholder that the
+     * RefineIfConds fixup replaces with a real cmpi/cmpf once
+     * type-flow propagates. */
+    Cond = fixupIfCond(B, Cond, loc(I.Range));
 
     // scf.if with withElseRegion=true auto-inserts scf.yield terminators; we
     // insert BEFORE those when emitting our body.
@@ -1698,6 +1722,7 @@ void Lowerer::lowerStmt(const Stmt &St) {
           ? lowerExpr(*EI.Cond)
           : emitUnreg("matlab.const_logical", {},
                       mlir::IntegerType::get(&MCtx, 1), loc(I.Range));
+      Cond2 = fixupIfCond(B, Cond2, loc(I.Range));
       auto Inner = mlir::scf::IfOp::create(
           B, loc(I.Range), mlir::TypeRange{}, Cond2, /*withElseRegion=*/true);
       B.setInsertionPoint(Inner.getThenRegion().front().getTerminator());

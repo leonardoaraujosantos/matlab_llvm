@@ -3099,6 +3099,13 @@ int main(int Argc, char **Argv) {
             Call.erase();
           });
 
+          // Phase 4.5.2: replace any `unrealized_conversion_cast`
+          // placeholder on scf.if conditions (inserted at MIR-to-MLIR
+          // lowering when the cond was `none`-typed) with a real
+          // `arith.cmpi ne` / `arith.cmpf one` against zero, now
+          // that operand types have refined.
+          mlirgen::runRefineIfConds(M);
+
           // Same pre-emit cleanup as EmitC: fold `if/else` stores into
           // `arith.select` and promote single-store allocas. Required so
           // scalar combinational programs surface to the SV emitter as

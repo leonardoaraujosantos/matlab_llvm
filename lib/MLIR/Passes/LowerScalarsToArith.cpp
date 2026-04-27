@@ -108,6 +108,41 @@ struct ConstLogicalToArith : public NameMatch {
 };
 
 //===----------------------------------------------------------------------===//
+// `true` / `false` literal handles
+//===----------------------------------------------------------------------===//
+
+/// Sema registers `true` / `false` as builtin function names, so a
+/// MATLAB statement like `overflow = false;` lowers to a
+/// `matlab.make_handle` op with `callee = "true"` or `callee =
+/// "false"`. The downstream pipeline can't distinguish these from
+/// real function-handle constructions, so they survive as `none`-
+/// typed handles and break type-flow.
+///
+/// Rewrite them to `arith.constant 1 : i1` / `arith.constant 0 : i1`
+/// so they become well-typed boolean constants. Matches by callee
+/// string attr (the make_handle op has `none` result type by
+/// default; we replace it with an i1 op so consumers see the
+/// concrete boolean type).
+struct TrueFalseHandleToArith : public NameMatch {
+  TrueFalseHandleToArith(mlir::MLIRContext *Ctx)
+      : NameMatch("matlab.make_handle", Ctx) {}
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *Op,
+                  mlir::PatternRewriter &R) const override {
+    auto C = Op->getAttrOfType<mlir::StringAttr>("callee");
+    if (!C) return mlir::failure();
+    int64_t Val;
+    if (C.getValue() == "true") Val = 1;
+    else if (C.getValue() == "false") Val = 0;
+    else return mlir::failure();
+    auto I1 = R.getI1Type();
+    auto Attr = mlir::IntegerAttr::get(I1, Val);
+    R.replaceOpWithNewOp<mlir::arith::ConstantOp>(Op, I1, Attr);
+    return mlir::success();
+  }
+};
+
+//===----------------------------------------------------------------------===//
 // Unary
 //===----------------------------------------------------------------------===//
 
@@ -314,6 +349,7 @@ bool runLowerScalarsToArith(mlir::ModuleOp M) {
   Patterns.add<ConstFloatToArith>("matlab.const_float", Ctx);
   Patterns.add<ConstIntToArith>("matlab.const_int", Ctx);
   Patterns.add<ConstLogicalToArith>("matlab.const_logical", Ctx);
+  Patterns.add<TrueFalseHandleToArith>(Ctx);
   Patterns.add<NegToArith>("matlab.neg", Ctx);
   // Elementwise and "matmul-as-scalar-mul" both collapse on scalars.
   Patterns.add<BinArithToArith<mlir::arith::AddFOp, mlir::arith::AddIOp>>(
