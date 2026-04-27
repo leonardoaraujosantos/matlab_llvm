@@ -271,6 +271,32 @@ bool matchHWForLoop(mlir::Operation *WhileOp, HWForLoopInfo &Info);
 /// them downstream as before).
 bool runLowerStaticFiArrays(mlir::ModuleOp M);
 
+/// Phase 4 v2.6 — `% hdl: <directive>(<args>)` pragma scanner.
+///
+/// Walks every user `func.func` in the module, finds the source
+/// line range covered by the function's body ops, and scans
+/// those source lines for `% hdl: ...` pragma comments. Each
+/// recognized directive is attached as a discardable string
+/// attribute on the func.func with name `hdl.<directive>`,
+/// where the value is the unparsed quoted argument.
+///
+/// Currently recognized directives:
+///   - `% hdl: fsm_encoding('binary' | 'one_hot' | 'gray')`
+///       attaches `hdl.fsm_encoding = "binary"` etc. The SV
+///       emitter's per-FSM logic checks this attribute and
+///       overrides the CLI-wide `-sv-fsm-encoding` flag for
+///       FSMs in the function it tags.
+///
+/// The infrastructure is intentionally generic — Phase 5 will
+/// add `pipeline`, `loopspec`, `ram`, etc. directives without
+/// re-doing the comment-scanning plumbing.
+///
+/// Returns true on success. Unknown directives are silently
+/// ignored (forward-compatibility for future pragmas the user
+/// might mention without our knowing them yet); malformed
+/// pragmas surface a warning.
+bool runScanHWPragmas(mlir::ModuleOp M, const matlab::SourceManager *SM);
+
 /// Pre-HWStateInfer normalization. The HDL Coder canonical
 /// initializer is two separate guards:
 ///

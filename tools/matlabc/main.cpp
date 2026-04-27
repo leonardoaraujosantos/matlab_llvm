@@ -3076,6 +3076,14 @@ int main(int Argc, char **Argv) {
           std::cout << Src;
         } else if (Opts.Mode == Options::Mode::EmitSystemVerilog ||
                    Opts.Mode == Options::Mode::CheckSynthesizable) {
+          // Phase 4 v2.6: scan `% hdl: <directive>(<args>)`
+          // pragmas inside each user function and attach as
+          // string attributes on the func.func. The SV emitter
+          // checks them for per-function overrides (e.g.
+          // `hdl.fsm_encoding` overrides the CLI-wide
+          // `-sv-fsm-encoding` flag).
+          mlirgen::runScanHWPragmas(M, &SM);
+
           // Pre-HWStateInfer normalization: split `if isempty(c) ||
           // X ... end` into the canonical two-guard form
           // (`if isempty(c)` + `if X`, both cloned bodies) so the

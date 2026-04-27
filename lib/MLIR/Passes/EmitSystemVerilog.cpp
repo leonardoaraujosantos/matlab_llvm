@@ -1272,6 +1272,25 @@ void Emitter::emitBody(mlir::func::FuncOp F) {
 }
 
 bool Emitter::emitModuleForFunc(mlir::func::FuncOp F) {
+  // Phase 4 v2.6: per-function FSM encoding override. If the
+  // function carries an `hdl.fsm_encoding` string attribute
+  // (set by ScanHWPragmas from a `% hdl: fsm_encoding('...')`
+  // comment), use that encoding instead of the CLI-wide flag.
+  // Saved + restored around the function so different functions
+  // in the same module can use different encodings.
+  HWFSMEncoding SavedFSMEnc = FSMEnc;
+  if (auto Attr = F->getAttrOfType<mlir::StringAttr>("hdl.fsm_encoding")) {
+    llvm::StringRef V = Attr.getValue();
+    if (V == "binary") FSMEnc = HWFSMEncoding::Binary;
+    else if (V == "one_hot" || V == "one-hot")
+      FSMEnc = HWFSMEncoding::OneHot;
+    else if (V == "gray") FSMEnc = HWFSMEncoding::Gray;
+    else
+      mlir::emitWarning(F.getLoc())
+          << "unrecognized hdl.fsm_encoding value '" << V
+          << "' (expected 'binary', 'one_hot', or 'gray')";
+  }
+
   // Reset per-function state.
   Names.clear();
   Used.clear();
@@ -1354,6 +1373,9 @@ bool Emitter::emitModuleForFunc(mlir::func::FuncOp F) {
   emitBody(F);
   emitAlwaysFF();
   OS << "\nendmodule\n";
+
+  // Restore the CLI-wide FSM encoding for the next function.
+  FSMEnc = SavedFSMEnc;
   return !Failed;
 }
 

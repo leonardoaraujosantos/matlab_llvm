@@ -980,12 +980,49 @@ declaration, reset assignment) is unchanged. The
 under all 3 encodings (`fsm-encoding sweep` line in the
 runner's summary).
 
-**Phase 4 v2 deferred to follow-up:**
-- Per-FSM encoding pragma (`% hdl: fsm_encoding('one_hot')` on
-  a specific function) instead of a CLI-wide flag.
+**Phase 4 v2.6 (shipped) — `% hdl:` pragma scanner**:
+
+A small generic pass `runScanHWPragmas(M, SM)` walks every
+user `func.func`, finds the source line range its body ops
+cover (plus one line above to catch pragmas immediately
+before the function), and scans those lines for `% hdl:
+<directive>(<args>)` comments. Each recognized directive
+attaches as a discardable string attribute on the
+function: `hdl.<directive> = "<arg>"`.
+
+```matlab
+function out = controller(...)
+    % hdl: fsm_encoding('one_hot')
+    persistent state;
+    ...
+end
+```
+
+The first directive shipped:
+
+- **`fsm_encoding('binary' | 'one_hot' | 'gray')`** — overrides
+  the CLI-wide `-sv-fsm-encoding` flag for this function's
+  FSMs only. Lets a single design mix encodings (e.g. a
+  control FSM kept binary for area and a fast-path FSM
+  marked one-hot for decode latency). Saved + restored
+  around each function so siblings can use different
+  encodings.
+
+The pragma infrastructure is intentionally generic — Phase 5
+will reuse it for `pipeline`, `loopspec`, `ram`, etc.
+without re-doing the comment-scanning plumbing. Unknown
+directives are silently ignored (forward-compatibility),
+malformed pragmas (no `(...)`, mismatched quotes) emit a
+warning.
+
+**Phase 4 v2 deferred to a future round:**
 - Hierarchical FSM extraction (an `hw.fsm` op carrying explicit
   state table + per-state IR blocks) — not needed for direct
-  emission but useful for downstream passes.
+  emission but useful for downstream passes that operate on
+  FSMs (state minimization, formal extraction, alternate
+  emission targets). Pure forward-investment with no current
+  consumer; revisit when a concrete pass needs explicit FSM
+  ops.
 
 **RAM inference deferred to Phase 4.5.** The persistent-array storage
 pattern depends on `LowerStaticFiArrays` from Phase 4.5.4, which
