@@ -1545,6 +1545,24 @@ All three sub-items shipped in v1:
     excluded. Trailing same-line comments (`x = 1; % bar`) need
     a real lexer change and are still deferred.
 
+Phase 5.6.3 — readability follow-up (also shipped). The SV emitter
+now inlines pure single-use ops at their use site instead of
+materializing a `vN_1 = ...` scratch signal per SSA value. Covers
+arith ops (`addi/subi/muli/and/or/xor/shl/shr*/cmpi/cmpf/select/
+ext/trunc`), the matlab-dialect binops that survive lowering
+(`matlab.add/sub/matmul/emul/eq/ne/lt/le/gt/ge`), and `llvm.load`
+of a slot. A `stripOuterParens` helper drops redundant parens in
+unambiguous RHS contexts (`if (...)`, `... = expr;`, yield assigns)
+so the emitted SV reads as ordinary expressions rather than
+double-wrapped calls. Slot-output collapse: when an `llvm.alloca`'s
+`matlab.name` matches an output port's name AND every load of it
+flows only into the func.return that drives that port, the slot
+and the port share one signal — body stores write `<port>` directly,
+the `<port> = <port>` self-assign at return is suppressed, no
+scratch `<name>_1` declaration. Net effect on the
+`examples/hdl/alu_16bit` module: ~95 lines → ~50 lines, no
+auxiliary signals, all source comments + names preserved.
+
 Two independent gaps, shipped together because they share
 infrastructure (the lexer / `ScanHWPragmas` pass and the
 emitter's name-resolution path).

@@ -11,45 +11,26 @@ module mux_4to1_16bit (
     output logic signed [15:0] y
 );
 
-    logic signed [15:0] y_1;
-    logic v0_1;
-    logic v1_1;
-    logic v2_1;
-    logic v3_1;
-    logic signed [15:0] v4_1;
-
     always_comb begin
-        y_1 = '0;
-        v0_1 = '0;
-        v1_1 = '0;
-        v2_1 = '0;
-        v3_1 = '0;
-        v4_1 = '0;
         y = '0;
-        y_1 = 16'sd0;
-        v0_1 = sel == 0;
-        if (v0_1) begin
-            y_1 = in0;
+        y = 16'sd0;
+        if (sel == 0) begin
+            y = in0;
         end else begin
-            v1_1 = sel == 1;
-            if (v1_1) begin
-                y_1 = in1;
+            if (sel == 1) begin
+                y = in1;
             end else begin
-                v2_1 = sel == 2;
-                if (v2_1) begin
-                    y_1 = in2;
+                if (sel == 2) begin
+                    y = in2;
                 end else begin
-                    v3_1 = sel == 3;
-                    if (v3_1) begin
-                        y_1 = in3;
+                    if (sel == 3) begin
+                        y = in3;
                     end else begin
-                        y_1 = in0;
+                        y = in0;
                     end
                 end
             end
         end
-        v4_1 = y_1;
-        y = v4_1;
     end
 
 endmodule

@@ -10,34 +10,19 @@ module ramp_or_zero (
 
     logic signed [15:0] y_1;
     logic signed [15:0] inc;
-    logic v0_1;
-    logic signed [15:0] v1_1;
-    logic signed [15:0] v2_1;
-    logic signed [15:0] v3_1;
-    logic signed [15:0] v4_1;
 
     always_comb begin
         y_1 = '0;
         inc = '0;
-        v0_1 = '0;
-        v1_1 = '0;
-        v2_1 = '0;
-        v3_1 = '0;
-        v4_1 = '0;
         y = '0;
         y_1 = seed;
-        v0_1 = en > 8'sd0;
-        if (v0_1) begin
+        if (en > 8'sd0) begin
             inc = 16'sd1;
-            for (int i5_ = 1; i5_ <= 3; i5_ = i5_ + 1) begin
-                v1_1 = y_1;
-                v2_1 = inc;
-                v3_1 = v1_1 + v2_1;
-                y_1 = v3_1;
+            for (int i0_ = 1; i0_ <= 3; i0_ = i0_ + 1) begin
+                y_1 = y_1 + inc;
             end
         end
-        v4_1 = y_1;
-        y = v4_1;
+        y = y_1;
     end
 
 endmodule

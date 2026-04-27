@@ -13,47 +13,31 @@ module moore_fsm (
 
     typedef enum logic [1:0] {S0, S1, S2} current_state_t;
 
-    logic v0_1;
-    logic v1_1;
-    logic v2_1;
-    logic v3_1;
-    logic v4_1;
-    logic out_signal_1;
     current_state_t current_state;
     current_state_t current_state_next;
 
     always_comb begin
-        v0_1 = '0;
-        v1_1 = '0;
-        v2_1 = '0;
-        v3_1 = '0;
-        v4_1 = '0;
-        out_signal_1 = '0;
         current_state_next = current_state;
         out_signal = '0;
         state_display = '0;
-        v0_1 = reset != 8'sd0;
-        if (v0_1) begin
+        if (reset != 8'sd0) begin
             current_state_next = S0;
         end
         unique case (current_state)
             S0: begin
-                v1_1 = input_bit == 1;
-                if (v1_1) begin
+                if (input_bit == 1) begin
                     current_state_next = S1;
                 end
             end
             S1: begin
-                v2_1 = input_bit == 0;
-                if (v2_1) begin
+                if (input_bit == 0) begin
                     current_state_next = S2;
                 end else begin
                     current_state_next = S0;
                 end
             end
             S2: begin
-                v3_1 = input_bit == 1;
-                if (v3_1) begin
+                if (input_bit == 1) begin
                     current_state_next = S1;
                 end else begin
                     current_state_next = S0;
@@ -63,9 +47,7 @@ module moore_fsm (
                 current_state_next = S0;
             end
         endcase
-        v4_1 = current_state == S2;
-        out_signal_1 = v4_1 ? 1'b1 : 1'b0;
-        out_signal = out_signal_1;
+        out_signal = (current_state == S2) ? 1'b1 : 1'b0;
         state_display = 8'(current_state);
     end
 

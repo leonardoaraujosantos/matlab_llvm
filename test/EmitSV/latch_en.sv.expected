@@ -10,16 +10,13 @@ module latch_en (
     output logic signed [7:0] out
 );
 
-    logic v0_1;
     logic signed [7:0] r;
     logic signed [7:0] r_next;
 
     always_comb begin
-        v0_1 = '0;
         r_next = r;
         out = '0;
-        v0_1 = en > 8'sd0;
-        if (v0_1) begin
+        if (en > 8'sd0) begin
             r_next = d;
         end
         out = r;

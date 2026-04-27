@@ -10,78 +10,35 @@ module alu_16bit (
     output logic overflow
 );
 
-    logic signed [15:0] data_out_1;
-    logic v0_1;
-    logic signed [15:0] v1_1;
-    logic v2_1;
-    logic signed [15:0] v3_1;
-    logic v4_1;
-    logic signed [15:0] v5_1;
-    logic v6_1;
-    logic signed [15:0] v7_1;
-    logic v8_1;
-    logic signed [15:0] v9_1;
-    logic v10_1;
-    logic signed [15:0] v11_1;
-    logic signed [15:0] v12_1;
-
     always_comb begin
-        data_out_1 = '0;
-        v0_1 = '0;
-        v1_1 = '0;
-        v2_1 = '0;
-        v3_1 = '0;
-        v4_1 = '0;
-        v5_1 = '0;
-        v6_1 = '0;
-        v7_1 = '0;
-        v8_1 = '0;
-        v9_1 = '0;
-        v10_1 = '0;
-        v11_1 = '0;
-        v12_1 = '0;
         data_out = '0;
         overflow = '0;
-        data_out_1 = 16'sd0;
-        v0_1 = sel == 0;
-        if (v0_1) begin
-            v1_1 = a + b;
-            data_out_1 = v1_1;
+        data_out = 16'sd0;
+        if (sel == 0) begin
+            data_out = a + b;
         end else begin
-            v2_1 = sel == 1;
-            if (v2_1) begin
-                v3_1 = a - b;
-                data_out_1 = v3_1;
+            if (sel == 1) begin
+                data_out = a - b;
             end else begin
-                v4_1 = sel == 2;
-                if (v4_1) begin
-                    v5_1 = a & b;
-                    data_out_1 = v5_1;
+                if (sel == 2) begin
+                    data_out = a & b;
                 end else begin
-                    v6_1 = sel == 3;
-                    if (v6_1) begin
-                        v7_1 = a | b;
-                        data_out_1 = v7_1;
+                    if (sel == 3) begin
+                        data_out = a | b;
                     end else begin
-                        v8_1 = sel == 4;
-                        if (v8_1) begin
-                            v9_1 = a ^ b;
-                            data_out_1 = v9_1;
+                        if (sel == 4) begin
+                            data_out = a ^ b;
                         end else begin
-                            v10_1 = sel == 5;
-                            if (v10_1) begin
-                                v11_1 = a ^ -16'sd1;
-                                data_out_1 = v11_1;
+                            if (sel == 5) begin
+                                data_out = a ^ -16'sd1;
                             end else begin
-                                data_out_1 = 16'sd0;
+                                data_out = 16'sd0;
                             end
                         end
                     end
                 end
             end
         end
-        v12_1 = data_out_1;
-        data_out = v12_1;
         overflow = 1'b0;
     end
 

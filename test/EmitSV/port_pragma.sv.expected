@@ -8,13 +8,9 @@ module port_pragma (
     output logic signed [15:0] y
 );
 
-    logic signed [15:0] v0_1;
-
     always_comb begin
-        v0_1 = '0;
         y = '0;
-        v0_1 = a + b;
-        y = v0_1;
+        y = a + b;
     end
 
 endmodule

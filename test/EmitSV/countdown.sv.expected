@@ -8,24 +8,15 @@ module countdown (
 );
 
     logic signed [15:0] y_1;
-    logic signed [15:0] v0_1;
-    logic signed [15:0] v1_1;
-    logic signed [15:0] v2_1;
 
     always_comb begin
         y_1 = '0;
-        v0_1 = '0;
-        v1_1 = '0;
-        v2_1 = '0;
         y = '0;
         y_1 = seed;
-        for (int i3_ = 5; i3_ >= 1; i3_ = i3_ - 1) begin
-            v0_1 = y_1;
-            v1_1 = v0_1 + 16'sd1;
-            y_1 = v1_1;
+        for (int i0_ = 5; i0_ >= 1; i0_ = i0_ - 1) begin
+            y_1 = y_1 + 16'sd1;
         end
-        v2_1 = y_1;
-        y = v2_1;
+        y = y_1;
     end
 
 endmodule

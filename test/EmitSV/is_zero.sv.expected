@@ -7,22 +7,12 @@ module is_zero (
     output logic r
 );
 
-    logic r_1;
-    logic v0_1;
-    logic v1_1;
-
     always_comb begin
-        r_1 = '0;
-        v0_1 = '0;
-        v1_1 = '0;
         r = '0;
-        r_1 = 1'b0;
-        v0_1 = v == 8'sd0;
-        if (v0_1) begin
-            r_1 = 1'b1;
+        r = 1'b0;
+        if (v == 8'sd0) begin
+            r = 1'b1;
         end
-        v1_1 = r_1;
-        r = v1_1;
     end
 
 endmodule

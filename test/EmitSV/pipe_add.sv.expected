@@ -10,8 +10,6 @@ module pipe_add (
     output logic signed [15:0] y
 );
 
-    logic signed [15:0] v0_1;
-
     // Phase 5.2 input-pipeline registers (2 stages).
     logic signed [15:0] a_d1;
     logic signed [15:0] a_d2;
@@ -22,10 +20,8 @@ module pipe_add (
     logic signed [15:0] y_d1;
 
     always_comb begin
-        v0_1 = '0;
         y_d0 = '0;
-        v0_1 = a_d2 + b_d2;
-        y_d0 = v0_1;
+        y_d0 = a_d2 + b_d2;
     end
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin

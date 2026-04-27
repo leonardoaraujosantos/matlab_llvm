@@ -8,19 +8,9 @@ module sumsq (
     output logic signed [31:0] y
 );
 
-    logic signed [31:0] v0_1;
-    logic signed [31:0] v1_1;
-    logic signed [31:0] v2_1;
-
     always_comb begin
-        v0_1 = '0;
-        v1_1 = '0;
-        v2_1 = '0;
         y = '0;
-        v0_1 = a * a;
-        v1_1 = b * b;
-        v2_1 = v0_1 + v1_1;
-        y = v2_1;
+        y = (a * a) + (b * b);
     end
 
 endmodule

@@ -9,28 +9,15 @@ module clamp (
     output logic signed [15:0] y
 );
 
-    logic signed [15:0] y_1;
-    logic v0_1;
-    logic v1_1;
-    logic signed [15:0] v2_1;
-
     always_comb begin
-        y_1 = '0;
-        v0_1 = '0;
-        v1_1 = '0;
-        v2_1 = '0;
         y = '0;
-        y_1 = x;
-        v0_1 = x < lo;
-        if (v0_1) begin
-            y_1 = lo;
+        y = x;
+        if (x < lo) begin
+            y = lo;
         end
-        v1_1 = x > hi;
-        if (v1_1) begin
-            y_1 = hi;
+        if (x > hi) begin
+            y = hi;
         end
-        v2_1 = y_1;
-        y = v2_1;
     end
 
 endmodule

@@ -158,6 +158,12 @@ private:
   /// literal name on match, empty string on miss.
   std::string fsmEnumLiteralForConstAgainst(mlir::Value RegSide,
                                              mlir::Value ConstSide);
+  /// Render the inline-form expression for a pure arith op that
+  /// `isInlineable` returned true for. Operands recursively go
+  /// through `exprFor`, so a tree of inlineable ops collapses
+  /// into a single readable expression. Always parenthesized so
+  /// the surrounding precedence is unambiguous.
+  std::string renderInlineExpr(mlir::Operation *Op);
 
   // --- State -------------------------------------------------------------
   std::ostream &OS;
@@ -224,6 +230,15 @@ private:
   std::string CommentFile;
   uint32_t CommentMinLine = 0;
   uint32_t CommentMaxLine = 0;
+
+  // Phase 5.6.3 — slot-output collapse. When a stack slot has the
+  // same `matlab.name` as an output port and every load of it
+  // feeds the func.return that drives that port, the slot and the
+  // port can share one signal — no separate `data_out_1` scratch
+  // signal, no `data_out = data_out_1;` epilogue. This map tracks
+  // the matched alloca → result-index pairs; populated once per
+  // function in `emitModuleForFunc`.
+  llvm::DenseMap<mlir::Operation *, unsigned> SlotMergedToOut;
   // Helper: scan the source range (LastEmittedLine[file] .. line-1]
   // for the op at `Loc` and emit any `% ...` comment-only lines
   // there as `// ...` SV comments at the given indent. No-op when
@@ -345,11 +360,62 @@ std::string Emitter::intLiteral(int64_t Val, mlir::Type T, bool Signed) {
 }
 
 bool Emitter::isInlineable(mlir::Value V) {
-  // Phase 1 takes the predictable-RTL path: every named producer gets
-  // a top-level declaration and every op writes its result by name.
-  // Inlining is reserved for a later quality pass once the golden
-  // tests pin the verbose form down.
-  (void)V;
+  // Inline pure single-use arith ops at their use site so the
+  // emitted SV reads as ordinary expressions rather than the
+  // dataflow trace `vN_1 = ...; vM_1 = vN_1 op ...; ...`. Single
+  // use because computing twice would expand the netlist; same
+  // block because lifting an op into a control-flow region (or
+  // across a yield) would change the surrounding latch-guard
+  // dance.
+  auto *Op = V.getDefiningOp();
+  if (!Op) return false;
+  if (Op->getNumResults() != 1) return false;
+  if (!V.hasOneUse()) return false;
+  // Don't inline values that the FSM/persistent path consumes
+  // specially — those routes need the named signal at the use
+  // site (register signal, _next signal, FSM enum literal).
+  if (GetSiteToReg.contains(Op)) return false;
+  if (SetSiteToReg.contains(Op)) return false;
+  if (Suppress.contains(Op)) return false;
+  // Only same-block uses. Crossing into an scf.if region body
+  // would inline an unconditional computation under a guard,
+  // which is harmless for pure ops but masks the structure.
+  // Crossing OUT of a region (a yield consumer) would be even
+  // less local. Keep the rule simple: definer and the sole
+  // user must share a parent block.
+  mlir::Operation *User = (*V.getUsers().begin());
+  if (User->getBlock() != Op->getBlock()) return false;
+  llvm::StringRef N = Op->getName().getStringRef();
+  // Pure datapath arith ops.
+  if (N == "arith.addi" || N == "arith.subi" ||
+      N == "arith.muli" ||
+      N == "arith.andi" || N == "arith.ori"  || N == "arith.xori" ||
+      N == "arith.shli" || N == "arith.shrsi"|| N == "arith.shrui"||
+      N == "arith.divsi"|| N == "arith.divui"||
+      N == "arith.remsi"|| N == "arith.remui")
+    return true;
+  // Comparisons and selects.
+  if (mlir::isa<mlir::arith::CmpIOp, mlir::arith::CmpFOp,
+                mlir::arith::SelectOp>(Op))
+    return true;
+  // Width casts.
+  if (N == "arith.extsi" || N == "arith.extui" ||
+      N == "arith.trunci")
+    return true;
+  // matlab.* surviving binops (handled by the dispatcher's matlab
+  // fallback) — same inlining contract.
+  if (N == "matlab.add" || N == "matlab.sub" ||
+      N == "matlab.matmul" || N == "matlab.emul" ||
+      N == "matlab.eq" || N == "matlab.ne" ||
+      N == "matlab.lt" || N == "matlab.le" ||
+      N == "matlab.gt" || N == "matlab.ge")
+    return true;
+  // Plain LLVM scalar load of a slot — single-use loads inline as
+  // the slot name (or `<arr>[<idx>]` for GEP-based loads). Keeps
+  // the canonical "spill-load-spill" patter from showing up as a
+  // chain of `vN_1 = slot;` aliases right before each consumer.
+  if (mlir::isa<mlir::LLVM::LoadOp>(Op))
+    return true;
   return false;
 }
 
@@ -397,8 +463,159 @@ std::string Emitter::exprFor(mlir::Value V) {
     auto It = GetSiteToReg.find(Op);
     if (It != GetSiteToReg.end())
       return Persists[It->second].Name;
+    // Phase 5.6.3: pure single-use arith ops inline at use site.
+    // Recursively builds a parenthesized expression so trees of
+    // inlineable ops collapse into one readable line.
+    if (isInlineable(V))
+      return renderInlineExpr(Op);
   }
   return name(V);
+}
+
+/// Drop a single matching outer paren pair from `S` so a top-level
+/// inline expression embedded in an unambiguous context (RHS of
+/// assignment, body of `if (...)`, `case` selector) doesn't render
+/// with double parens. Conservative: only strips when the entire
+/// string is `(...)` with the open paren at index 0 and the close
+/// paren at the very end and they match.
+static std::string stripOuterParens(const std::string &S) {
+  if (S.size() < 2 || S.front() != '(' || S.back() != ')') return S;
+  int Depth = 0;
+  for (size_t I = 0; I < S.size(); ++I) {
+    if (S[I] == '(') ++Depth;
+    else if (S[I] == ')') {
+      --Depth;
+      if (Depth == 0 && I + 1 != S.size()) return S;
+    }
+  }
+  return S.substr(1, S.size() - 2);
+}
+
+std::string Emitter::renderInlineExpr(mlir::Operation *Op) {
+  llvm::StringRef N = Op->getName().getStringRef();
+  // Load: render as the slot name (or the GEP address string for
+  // array element loads). No parens — a load is just a reference.
+  if (auto L = mlir::dyn_cast<mlir::LLVM::LoadOp>(Op)) {
+    if (auto *AddrOp = L.getAddr().getDefiningOp()) {
+      auto It = GepAddr.find(AddrOp);
+      if (It != GepAddr.end()) return It->second;
+    }
+    return name(L.getAddr());
+  }
+  // FSM-aware rendering for cmp ops mirrors emitCmp{,F}: when the
+  // peer side of a comparison against a recognized FSM register's
+  // get-call resolves to a case value, render the enum literal
+  // instead of the raw integer constant.
+  auto fsmEnum = [&](mlir::Value RegSide, mlir::Value ConstSide,
+                     std::string &Out) -> bool {
+    auto E = fsmEnumLiteralForConstAgainst(RegSide, ConstSide);
+    if (E.empty()) return false;
+    Out = E;
+    return true;
+  };
+  if (auto C = mlir::dyn_cast<mlir::arith::CmpIOp>(Op)) {
+    llvm::StringRef SvOp;
+    switch (C.getPredicate()) {
+    case mlir::arith::CmpIPredicate::eq:  SvOp = "==";  break;
+    case mlir::arith::CmpIPredicate::ne:  SvOp = "!=";  break;
+    case mlir::arith::CmpIPredicate::slt: SvOp = "<";   break;
+    case mlir::arith::CmpIPredicate::sle: SvOp = "<=";  break;
+    case mlir::arith::CmpIPredicate::sgt: SvOp = ">";   break;
+    case mlir::arith::CmpIPredicate::sge: SvOp = ">=";  break;
+    case mlir::arith::CmpIPredicate::ult: SvOp = "<";   break;
+    case mlir::arith::CmpIPredicate::ule: SvOp = "<=";  break;
+    case mlir::arith::CmpIPredicate::ugt: SvOp = ">";   break;
+    case mlir::arith::CmpIPredicate::uge: SvOp = ">=";  break;
+    }
+    std::string L = exprFor(C.getLhs());
+    std::string R = exprFor(C.getRhs());
+    if (!fsmEnum(C.getLhs(), C.getRhs(), R))
+      fsmEnum(C.getRhs(), C.getLhs(), L);
+    std::ostringstream S; S << "(" << L << " " << SvOp.str() << " " << R << ")";
+    return S.str();
+  }
+  if (auto C = mlir::dyn_cast<mlir::arith::CmpFOp>(Op)) {
+    llvm::StringRef SvOp;
+    switch (C.getPredicate()) {
+    case mlir::arith::CmpFPredicate::OEQ:
+    case mlir::arith::CmpFPredicate::UEQ: SvOp = "=="; break;
+    case mlir::arith::CmpFPredicate::ONE:
+    case mlir::arith::CmpFPredicate::UNE: SvOp = "!="; break;
+    case mlir::arith::CmpFPredicate::OLT:
+    case mlir::arith::CmpFPredicate::ULT: SvOp = "<"; break;
+    case mlir::arith::CmpFPredicate::OLE:
+    case mlir::arith::CmpFPredicate::ULE: SvOp = "<="; break;
+    case mlir::arith::CmpFPredicate::OGT:
+    case mlir::arith::CmpFPredicate::UGT: SvOp = ">"; break;
+    case mlir::arith::CmpFPredicate::OGE:
+    case mlir::arith::CmpFPredicate::UGE: SvOp = ">="; break;
+    default: return name(Op->getResult(0));  // unsupported pred
+    }
+    std::string L = exprFor(C.getLhs());
+    std::string R = exprFor(C.getRhs());
+    if (!fsmEnum(C.getLhs(), C.getRhs(), R))
+      fsmEnum(C.getRhs(), C.getLhs(), L);
+    std::ostringstream S; S << "(" << L << " " << SvOp.str() << " " << R << ")";
+    return S.str();
+  }
+  if (auto S = mlir::dyn_cast<mlir::arith::SelectOp>(Op)) {
+    std::ostringstream Out;
+    Out << "(" << exprFor(S.getCondition()) << " ? "
+        << exprFor(S.getTrueValue()) << " : "
+        << exprFor(S.getFalseValue()) << ")";
+    return Out.str();
+  }
+  if (N == "arith.extsi" || N == "arith.extui" || N == "arith.trunci") {
+    bool Signed = (N == "arith.extsi");
+    unsigned W = widthOf(Op->getResult(0).getType());
+    std::ostringstream Out;
+    Out << W << "'(";
+    if (Signed) Out << "$signed(";
+    Out << exprFor(Op->getOperand(0));
+    if (Signed) Out << ")";
+    Out << ")";
+    return Out.str();
+  }
+  // Binary arith ops with an SV operator equivalent.
+  llvm::StringRef SvOp;
+  if (N == "arith.addi" || N == "matlab.add") SvOp = "+";
+  else if (N == "arith.subi" || N == "matlab.sub") SvOp = "-";
+  else if (N == "arith.muli" || N == "matlab.matmul" ||
+           N == "matlab.emul") SvOp = "*";
+  else if (N == "arith.andi") SvOp = "&";
+  else if (N == "arith.ori")  SvOp = "|";
+  else if (N == "arith.xori") SvOp = "^";
+  else if (N == "arith.shli") SvOp = "<<";
+  else if (N == "arith.shrsi") SvOp = ">>>";
+  else if (N == "arith.shrui") SvOp = ">>";
+  else if (N == "arith.divsi" || N == "arith.divui") SvOp = "/";
+  else if (N == "arith.remsi" || N == "arith.remui") SvOp = "%";
+  else if (N == "matlab.eq") SvOp = "==";
+  else if (N == "matlab.ne") SvOp = "!=";
+  else if (N == "matlab.lt") SvOp = "<";
+  else if (N == "matlab.le") SvOp = "<=";
+  else if (N == "matlab.gt") SvOp = ">";
+  else if (N == "matlab.ge") SvOp = ">=";
+  if (!SvOp.empty() && Op->getNumOperands() == 2) {
+    bool IsCmp = (N == "matlab.eq" || N == "matlab.ne" ||
+                  N == "matlab.lt" || N == "matlab.le" ||
+                  N == "matlab.gt" || N == "matlab.ge");
+    std::string L = exprFor(Op->getOperand(0));
+    std::string R = exprFor(Op->getOperand(1));
+    if (IsCmp && (N == "matlab.eq" || N == "matlab.ne")) {
+      if (auto E = fsmEnumLiteralForConstAgainst(
+              Op->getOperand(0), Op->getOperand(1)); !E.empty())
+        R = E;
+      else if (auto E = fsmEnumLiteralForConstAgainst(
+                   Op->getOperand(1), Op->getOperand(0)); !E.empty())
+        L = E;
+    }
+    std::ostringstream Out;
+    Out << "(" << L << " " << SvOp.str() << " " << R << ")";
+    return Out.str();
+  }
+  // Unrecognized — fall back to the named result.
+  return name(Op->getResult(0));
 }
 
 void Emitter::emitPortList(mlir::func::FuncOp F) {
@@ -454,6 +671,13 @@ void Emitter::emitPortList(mlir::func::FuncOp F) {
     while (Used.contains(Nm)) Nm += "_";
     Used.insert(Nm);
     OutNames.push_back(Nm);
+  }
+  // Phase 5.6.3: bind each merged alloca's signal name to its
+  // matched output port name BEFORE declarePrelude runs. Stores
+  // into the slot then render `<port> = ...;` directly.
+  for (auto &Pair : SlotMergedToOut) {
+    mlir::Value SlotVal = Pair.first->getResult(0);
+    Names[SlotVal] = OutNames[Pair.second];
   }
 
   // Print the port list. Phase 3: prepend clk + reset port when the
@@ -557,6 +781,10 @@ void Emitter::declarePrelude(mlir::func::FuncOp F) {
     if (GetSiteToReg.contains(Op)) return;
     if (SetSiteToReg.contains(Op)) return;
     if (auto A = mlir::dyn_cast<mlir::LLVM::AllocaOp>(Op)) {
+      // Phase 5.6.3: a slot merged into an output port shares the
+      // port's signal name (already bound in `emitPortList`); no
+      // separate declaration or prelude pre-init.
+      if (SlotMergedToOut.contains(A.getOperation())) return;
       // Slot signal name comes from the alloca's `name` attr.
       mlir::Value Slot = A.getResult();
       // Force an entry in Names so loads/stores share it.
@@ -629,6 +857,9 @@ void Emitter::declarePrelude(mlir::func::FuncOp F) {
       return;
     }
     for (mlir::Value V : Op->getResults()) {
+      // Phase 5.6.3: inlineable values render at use site; no
+      // top-level `logic` declaration and no prelude pre-init.
+      if (isInlineable(V)) continue;
       // Reserve a name now so it appears in the prelude.
       (void)name(V);
       PreludeDecls.push_back(V);
@@ -683,6 +914,8 @@ void Emitter::emitBinop(mlir::Operation &Op, llvm::StringRef SvOp,
     fail("binop with unexpected arity");
     return;
   }
+  // Inlined at use site — no statement of our own.
+  if (isInlineable(Op.getResult(0))) return;
   indent(Indent);
   OS << name(Op.getResult(0)) << " = "
      << exprFor(Op.getOperand(0)) << " " << SvOp.str() << " "
@@ -725,6 +958,7 @@ std::string Emitter::fsmEnumLiteralForConstAgainst(mlir::Value RegSide,
 }
 
 void Emitter::emitCmp(mlir::arith::CmpIOp C, int Indent) {
+  if (isInlineable(C.getResult())) return;
   llvm::StringRef SvOp;
   switch (C.getPredicate()) {
   case mlir::arith::CmpIPredicate::eq:  SvOp = "==";  break;
@@ -753,6 +987,7 @@ void Emitter::emitCmp(mlir::arith::CmpIOp C, int Indent) {
 }
 
 void Emitter::emitCmpF(mlir::arith::CmpFOp C, int Indent) {
+  if (isInlineable(C.getResult())) return;
   // Phase 4: arith.cmpf surfaces in the FSM lowering — `switch (st)
   // case <const>` becomes a chain of `arith.cmpf oeq, get_f64(st),
   // <case_const>`. The LHS is a recognized persistent get (routed
@@ -797,6 +1032,7 @@ void Emitter::emitCmpF(mlir::arith::CmpFOp C, int Indent) {
 }
 
 void Emitter::emitSelect(mlir::arith::SelectOp S, int Indent) {
+  if (isInlineable(S.getResult())) return;
   indent(Indent);
   OS << name(S.getResult()) << " = "
      << exprFor(S.getCondition()) << " ? "
@@ -805,6 +1041,7 @@ void Emitter::emitSelect(mlir::arith::SelectOp S, int Indent) {
 }
 
 void Emitter::emitExtTrunc(mlir::Operation &Op, int Indent) {
+  if (isInlineable(Op.getResult(0))) return;
   // SystemVerilog: extending or truncating a packed integer is a
   // direct width cast. We emit `<W>'($signed(x))` for sign-ext,
   // `<W>'(x)` for zero-ext / truncate.
@@ -827,7 +1064,8 @@ void Emitter::emitScfIf(mlir::scf::IfOp If, int Indent) {
   //     `if`'s SSA results. Renders as the same construct, with each
   //     arm writing the result name(s).
   indent(Indent);
-  OS << "if (" << exprFor(If.getCondition()) << ") begin\n";
+  OS << "if (" << stripOuterParens(exprFor(If.getCondition()))
+     << ") begin\n";
   emitRegion(If.getThenRegion(), Indent + 1);
   // The else region is "empty" in MLIR terms when no false-branch was
   // written. MLIR still synthesizes a single block containing just an
@@ -875,7 +1113,7 @@ void Emitter::emitScfYield(mlir::scf::YieldOp Y, int Indent) {
   for (unsigned I = 0; I < Y.getNumOperands(); ++I) {
     indent(Indent);
     OS << name(If->getResult(I)) << " = "
-       << exprFor(Y.getOperand(I)) << ";\n";
+       << stripOuterParens(exprFor(Y.getOperand(I))) << ";\n";
   }
 }
 
@@ -971,6 +1209,9 @@ void Emitter::emitGEP(mlir::LLVM::GEPOp G, int Indent) {
 }
 
 void Emitter::emitLoad(mlir::LLVM::LoadOp L, int Indent) {
+  // Phase 5.6.3: single-use loads inline at their consumer via
+  // exprFor → renderInlineExpr; emit nothing here.
+  if (isInlineable(L.getResult())) return;
   // If the address is a GEP we've recorded, render `<arr>[<idx>]`
   // as the source. Otherwise this is a plain slot load.
   std::string AddrExpr;
@@ -991,7 +1232,8 @@ void Emitter::emitStore(mlir::LLVM::StoreOp S, int Indent) {
   }
   if (AddrExpr.empty()) AddrExpr = name(S.getAddr());
   indent(Indent);
-  OS << AddrExpr << " = " << exprFor(S.getValue()) << ";\n";
+  OS << AddrExpr << " = " << stripOuterParens(exprFor(S.getValue()))
+     << ";\n";
 }
 
 void Emitter::emitReturn(mlir::func::ReturnOp R, int Indent) {
@@ -1001,7 +1243,6 @@ void Emitter::emitReturn(mlir::func::ReturnOp R, int Indent) {
     return;
   }
   for (unsigned I = 0; I < R.getNumOperands(); ++I) {
-    indent(Indent);
     std::string Expr = exprFor(R.getOperand(I));
     // Phase 4 v2: when the return value is a recognized FSM
     // register's get-call result, the rendered expression is the
@@ -1024,7 +1265,13 @@ void Emitter::emitReturn(mlir::func::ReturnOp R, int Indent) {
         }
       }
     }
-    OS << OutWriteNames[I] << " = " << Expr << ";\n";
+    std::string Rhs = stripOuterParens(Expr);
+    // Phase 5.6.3: a slot-merged output port assigns itself
+    // here; the body already wrote it through the merged signal
+    // name. Suppress the `port = port;` no-op.
+    if (Rhs == OutWriteNames[I]) continue;
+    indent(Indent);
+    OS << OutWriteNames[I] << " = " << Rhs << ";\n";
   }
 }
 
@@ -1202,6 +1449,10 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
         fail(("unsupported arity on " + OpName + " in SV emitter").str());
         return;
       }
+      // Phase 5.6.3: when the result is single-use and the
+      // consumer is in the same block, the value renders inline at
+      // the use site via exprFor → renderInlineExpr.
+      if (isInlineable(Op.getResult(0))) return;
       indent(Indent);
       std::string LExpr = exprFor(Op.getOperand(0));
       std::string RExpr = exprFor(Op.getOperand(1));
@@ -1461,6 +1712,55 @@ bool Emitter::emitModuleForFunc(mlir::func::FuncOp F) {
   FSMs.clear();
   CascadeOp.clear();
   LastEmittedLine.clear();
+  SlotMergedToOut.clear();
+  // Phase 5.6.3: detect allocas whose `matlab.name` matches an
+  // output port's `matlab.name` AND whose only loads feed the
+  // function's func.return. For each match, record the merge so
+  // (a) the alloca's signal name aliases the port, (b) the
+  // prelude skips its declaration, (c) the return suppresses the
+  // self-assign `port = port;`.
+  {
+    auto FT = F.getFunctionType();
+    llvm::StringMap<unsigned> OutByName;
+    for (unsigned I = 0; I < FT.getNumResults(); ++I) {
+      if (auto S = F.getResultAttrOfType<mlir::StringAttr>(I, "matlab.name"))
+        OutByName[S.getValue()] = I;
+    }
+    if (!OutByName.empty()) {
+      F.walk([&](mlir::LLVM::AllocaOp A) {
+        auto NA = A->getAttrOfType<mlir::StringAttr>("matlab.name");
+        if (!NA) return;
+        // The slot's `name` attr may have come from the slot's
+        // alloc (matlab.alloc → llvm.alloca lowering). Look up
+        // matching output result.
+        auto It = OutByName.find(NA.getValue());
+        if (It == OutByName.end()) return;
+        // Validate: every load of the alloca must feed only the
+        // func.return op. If a load has any other consumer, bail.
+        bool Ok = true;
+        bool SawReturnLoad = false;
+        for (auto *U : A->getUsers()) {
+          if (mlir::isa<mlir::LLVM::StoreOp>(U)) continue;
+          if (auto L = mlir::dyn_cast<mlir::LLVM::LoadOp>(U)) {
+            for (auto *LU : L->getUsers()) {
+              if (mlir::isa<mlir::func::ReturnOp>(LU)) {
+                SawReturnLoad = true;
+              } else {
+                Ok = false; break;
+              }
+            }
+            if (!Ok) break;
+            continue;
+          }
+          // Anything else (a non-load, non-store user) bails.
+          Ok = false;
+          break;
+        }
+        if (!Ok || !SawReturnLoad) return;
+        SlotMergedToOut[A.getOperation()] = It->second;
+      });
+    }
+  }
   // Phase 5.6.2b: discover the function's body line range so the
   // comment-forwarding scan can drop anything outside it (script-
   // header prose, leftover driver comments, etc.). Seed from the
