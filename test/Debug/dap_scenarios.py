@@ -863,6 +863,142 @@ def scn_class_instance_methods(matlabc, program):
         c.wait_event("terminated", timeout=5.0)
 
 
+def scn_data_breakpoint_write(matlabc, program):
+    """Write-only data breakpoint: stop every time `target` gets
+    assigned. The fixture writes `target = 1` then `target = 2`,
+    so the runtime trips twice; the stopped event reports
+    reason="data breakpoint" and surfaces the watch's id in
+    hitBreakpointIds."""
+    import os
+    wp_program = os.path.join(
+        os.path.dirname(os.path.abspath(program)),
+        "dap_watchpoint_program.m",
+    )
+    with DapClient(matlabc, wp_program) as c:
+        caps = c.request("initialize", {
+            "clientID": "matlabc-test",
+            "linesStartAt1": True,
+            "columnsStartAt1": True,
+        })
+        assert caps.get("supportsDataBreakpoints"), \
+            f"data breakpoints caps not advertised: {caps}"
+        c.wait_event("initialized", timeout=5.0)
+        c.request("launch", {"program": wp_program, "stopOnEntry": False})
+
+        # Resolve a dataId for the name. dataBreakpointInfo round-
+        # trips it through the IDE; we mirror the real DAP flow.
+        info = c.request("dataBreakpointInfo", {"name": "target"})
+        data_id = info.get("dataId")
+        assert data_id == "target", \
+            f"dataBreakpointInfo should hand back the name as dataId: {info!r}"
+        types = info.get("accessTypes") or []
+        assert "write" in types, f"write accessType missing: {info!r}"
+
+        body = c.request("setDataBreakpoints", {
+            "breakpoints": [{"dataId": data_id, "accessType": "write"}],
+        })
+        bps = body.get("breakpoints") or []
+        assert bps and bps[0].get("verified"), \
+            f"watchpoint not verified: {bps!r}"
+        wp_id = bps[0].get("id")
+        assert isinstance(wp_id, int) and wp_id > 0, \
+            f"watchpoint should carry a stable id: {bps!r}"
+
+        c.request("configurationDone")
+
+        # First trip: line 6 (`target = 1;`).
+        ev = c.wait_event("stopped", timeout=5.0)
+        body = ev.get("body") or {}
+        assert body.get("reason") == "data breakpoint", \
+            f"first stop should report reason='data breakpoint': {body!r}"
+        assert body.get("hitBreakpointIds") == [wp_id], \
+            f"first stop should surface watch id: {body!r}"
+
+        # Workspace inspection: target == 1 right after the first write.
+        st = c.request("stackTrace", {"threadId": 1})
+        sc = c.request("scopes", {"frameId": st["stackFrames"][0]["id"]})
+        rows = _vars_by_name(c, ref=sc["scopes"][0]["variablesReference"])
+        assert rows.get("target") == "1", \
+            f"target should be 1 at first trip: {rows!r}"
+
+        c.request("continue")
+
+        # Second trip: line 7 (`target = 2;`).
+        ev = c.wait_event("stopped", timeout=5.0)
+        body = ev.get("body") or {}
+        assert body.get("reason") == "data breakpoint", \
+            f"second stop should report reason='data breakpoint': {body!r}"
+
+        rows = _vars_by_name(c, ref=sc["scopes"][0]["variablesReference"])
+        assert rows.get("target") == "2", \
+            f"target should be 2 at second trip: {rows!r}"
+
+        c.request("continue")
+        c.wait_event("terminated", timeout=5.0)
+
+
+def scn_data_breakpoint_clear(matlabc, program):
+    """An empty `setDataBreakpoints` list clears every prior watch.
+    After clearing, an assignment that previously tripped now runs
+    through silently."""
+    import os
+    wp_program = os.path.join(
+        os.path.dirname(os.path.abspath(program)),
+        "dap_watchpoint_program.m",
+    )
+    with DapClient(matlabc, wp_program) as c:
+        c.request("initialize", {
+            "clientID": "matlabc-test",
+            "linesStartAt1": True,
+        })
+        c.wait_event("initialized", timeout=5.0)
+        c.request("launch", {"program": wp_program, "stopOnEntry": False})
+
+        # Set then clear the watch in the same pre-launch window.
+        c.request("setDataBreakpoints", {
+            "breakpoints": [{"dataId": "target", "accessType": "write"}],
+        })
+        c.request("setDataBreakpoints", {"breakpoints": []})
+        c.request("configurationDone")
+
+        # No watchpoint trips — program runs to completion without a
+        # `stopped` event.
+        c.expect_no_event("stopped", window=0.5)
+        c.wait_event("terminated", timeout=5.0)
+
+
+def scn_data_breakpoint_read_refused(matlabc, program):
+    """Read watchpoints aren't supported — every matlab_ws_get_*
+    would have to gate on a watch list (hot-path). The handler
+    rejects with `verified=false` plus a message; the connection
+    stays open."""
+    import os
+    wp_program = os.path.join(
+        os.path.dirname(os.path.abspath(program)),
+        "dap_watchpoint_program.m",
+    )
+    with DapClient(matlabc, wp_program) as c:
+        c.request("initialize", {
+            "clientID": "matlabc-test",
+            "linesStartAt1": True,
+        })
+        c.wait_event("initialized", timeout=5.0)
+        c.request("launch", {"program": wp_program, "stopOnEntry": False})
+
+        body = c.request("setDataBreakpoints", {
+            "breakpoints": [{"dataId": "target", "accessType": "read"}],
+        })
+        bps = body.get("breakpoints") or []
+        assert bps and bps[0].get("verified") is False, \
+            f"read watch should not verify: {bps!r}"
+        assert "read" in (bps[0].get("message") or "").lower() or \
+               "write" in (bps[0].get("message") or "").lower(), \
+            f"read-refusal message should explain why: {bps!r}"
+
+        c.request("configurationDone")
+        c.wait_event("terminated", timeout=5.0)
+
+
 def scn_keyboard_builtin(matlabc, program):
     """A `keyboard` call in user code drops the worker into a paused
     state — same machinery as a breakpoint, but triggered from the
@@ -1120,7 +1256,7 @@ def scn_unsupported_refusals(matlabc, program):
         _stop_event(c)
 
         for cmd in ("stepBack", "reverseContinue", "readMemory",
-                    "writeMemory", "disassemble", "setDataBreakpoints",
+                    "writeMemory", "disassemble",
                     "setInstructionBreakpoints", "restartFrame",
                     "goto", "gotoTargets"):
             try:

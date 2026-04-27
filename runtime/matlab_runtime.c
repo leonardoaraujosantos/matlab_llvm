@@ -3302,9 +3302,18 @@ double matlab_ws_get_f64(const char *name, int64_t len) {
     return matlab_struct_get_f64(matlab_ws, name, len);
 }
 
+/* Helper: after a workspace write, check the watchpoint table and
+ * pause if the name matches. Defined further down (the body needs
+ * matlab_dbg state + watch_check / watch_trip helpers in scope, and
+ * those live alongside the rest of the dbg machinery later in the
+ * file). Forward-declared here so the matlab_ws_set_* call sites
+ * compile. */
+static void matlab_ws_check_watch(const char *name, int64_t len);
+
 void matlab_ws_set_f64(const char *name, int64_t len, double v) {
     matlab_ws_init_if_needed();
     matlab_struct_set_f64(matlab_ws, name, len, v);
+    matlab_ws_check_watch(name, len);
 }
 
 matlab_mat *matlab_ws_get_mat(const char *name, int64_t len) {
@@ -3315,6 +3324,7 @@ matlab_mat *matlab_ws_get_mat(const char *name, int64_t len) {
 void matlab_ws_set_mat(const char *name, int64_t len, matlab_mat *m) {
     matlab_ws_init_if_needed();
     matlab_struct_set_mat(matlab_ws, name, len, m);
+    matlab_ws_check_watch(name, len);
 }
 
 /* Class-instance assignment to the script-level workspace. Stores
@@ -3328,6 +3338,7 @@ void matlab_ws_set_obj(const char *name, int64_t len, matlab_obj *o) {
     matlab_ws->kinds[idx] = 2;
     matlab_ws->f64_vals[idx] = 0.0;
     matlab_ws->ptr_vals[idx] = o;
+    matlab_ws_check_watch(name, len);
 }
 
 double matlab_ws_has(const char *name, int64_t len) {
@@ -3507,6 +3518,32 @@ struct matlab_dbg_state {
      * "entry" so the IDE renders the keyboard glyph rather than a
      * generic step/pause. Cleared by the next resume. */
     int paused_from_keyboard;
+
+    /* Data breakpoints (write watchpoints). The DAP server adds an
+     * entry via matlab_dbg_add_watchpoint; the runtime's set_*
+     * functions check the table after every workspace / frame-local
+     * write and trip a pause if the name matches.
+     *
+     * Scope encoding:
+     *   0 = "any" (matches script ws *or* any frame)
+     *   1 = script workspace only (matlab_ws_set_*)
+     *   2 = innermost frame only (matlab_dbg_frame_set_*)
+     * v1 ships scope=0 since the DAP IDE picks the watch from the
+     * Variables panel and the user expects "stop when this name
+     * gets reassigned anywhere"; tighter scoping can layer on later
+     * via the dataBreakpointInfo `accessType` argument.
+     *
+     * `last_writer_idx` is set by the set_* sites when a watchpoint
+     * trips, mirroring how cur_bp_idx works for line breakpoints —
+     * the DAP server reads it to surface the originating watch's
+     * id in the stopped event's hitBreakpointIds. */
+    int n_wp;
+    char *wp_name[MATLAB_DBG_MAX_BREAKPOINTS];
+    int64_t wp_name_len[MATLAB_DBG_MAX_BREAKPOINTS];
+    int32_t wp_scope[MATLAB_DBG_MAX_BREAKPOINTS];
+    int32_t wp_id[MATLAB_DBG_MAX_BREAKPOINTS];   /* DAP-assigned id */
+    int last_wp_idx;   /* index of the watchpoint that tripped, or -1 */
+    int paused_from_watch;
 
     /* Breakpoints (file_id, line) — linear scan. cond_text and
      * log_text are heap-owned (NULL when absent). cond_disabled flips
@@ -3809,6 +3846,136 @@ int matlab_dbg_was_paused_from_keyboard(void) {
     return v;
 }
 
+/* --- Data breakpoints (write watchpoints) --------------------------- */
+
+/* Add a watchpoint by name with caller-assigned id (the DAP server
+ * encodes its dataId from the name's hash so subsequent setBreakpoints
+ * round-trips reuse the same id). scope is 0 (any) / 1 (script-ws) /
+ * 2 (innermost-frame). Returns 1 on success, 0 on table-full or
+ * duplicate. The runtime owns the heap-copy of `name`. */
+int matlab_dbg_add_watchpoint(const char *name, int64_t name_len,
+                               int32_t scope, int32_t id) {
+    if (!name || name_len <= 0) return 0;
+    pthread_mutex_lock(&matlab_dbg.mu);
+    /* De-dup: if a watch with the same id already exists, refresh
+     * its scope rather than appending a duplicate row. */
+    for (int i = 0; i < matlab_dbg.n_wp; ++i) {
+        if (matlab_dbg.wp_id[i] == id) {
+            matlab_dbg.wp_scope[i] = scope;
+            pthread_mutex_unlock(&matlab_dbg.mu);
+            return 1;
+        }
+    }
+    int ok = matlab_dbg.n_wp < MATLAB_DBG_MAX_BREAKPOINTS;
+    if (ok) {
+        int i = matlab_dbg.n_wp;
+        matlab_dbg.wp_name[i] = (char *)malloc((size_t)name_len + 1);
+        memcpy(matlab_dbg.wp_name[i], name, (size_t)name_len);
+        matlab_dbg.wp_name[i][name_len] = '\0';
+        matlab_dbg.wp_name_len[i] = name_len;
+        matlab_dbg.wp_scope[i] = scope;
+        matlab_dbg.wp_id[i] = id;
+        matlab_dbg.n_wp++;
+    }
+    pthread_mutex_unlock(&matlab_dbg.mu);
+    return ok;
+}
+
+/* Wipe the entire watchpoint table. The DAP `setDataBreakpoints`
+ * request passes a fresh full list each time (same semantics as
+ * setBreakpoints), so the cleanest implementation is clear-then-add.
+ * Keeps the per-call code in the DAP handler simple. */
+void matlab_dbg_clear_watchpoints(void) {
+    pthread_mutex_lock(&matlab_dbg.mu);
+    for (int i = 0; i < matlab_dbg.n_wp; ++i) {
+        free(matlab_dbg.wp_name[i]);
+        matlab_dbg.wp_name[i] = NULL;
+        matlab_dbg.wp_name_len[i] = 0;
+        matlab_dbg.wp_scope[i] = 0;
+        matlab_dbg.wp_id[i] = 0;
+    }
+    matlab_dbg.n_wp = 0;
+    pthread_mutex_unlock(&matlab_dbg.mu);
+}
+
+/* DAP-side reader for the stopped-event handler: returns the id of
+ * the most recent tripped watchpoint, or 0 if no watch has tripped
+ * since the last resume. Cleared on resume by the worker's hook. */
+int32_t matlab_dbg_last_watchpoint_id(void) {
+    int32_t id = 0;
+    pthread_mutex_lock(&matlab_dbg.mu);
+    if (matlab_dbg.last_wp_idx >= 0 &&
+        matlab_dbg.last_wp_idx < matlab_dbg.n_wp)
+        id = matlab_dbg.wp_id[matlab_dbg.last_wp_idx];
+    pthread_mutex_unlock(&matlab_dbg.mu);
+    return id;
+}
+
+/* "Was the most recent pause caused by a tripped watchpoint?" — same
+ * shape as matlab_dbg_was_paused_from_keyboard. The monitor checks
+ * this when mapping BpIdx==-1 to a stop reason; "data breakpoint" is
+ * the DAP standard reason for watchpoint hits. */
+int matlab_dbg_was_paused_from_watch(void) {
+    int v;
+    pthread_mutex_lock(&matlab_dbg.mu);
+    v = matlab_dbg.paused_from_watch;
+    pthread_mutex_unlock(&matlab_dbg.mu);
+    return v;
+}
+
+/* Internal: scan the watchpoint table for a name match. scope_hint
+ * is the call site's scope (1 = script-ws, 2 = frame-set); a watch
+ * with scope=0 (any) matches both. Returns the index of the matching
+ * watch, or -1 on miss. CALLER MUST HOLD matlab_dbg.mu — this is
+ * called from inside the set_* lock-region. */
+static int matlab_dbg_watch_check(const char *name, int64_t name_len,
+                                   int32_t scope_hint) {
+    for (int i = 0; i < matlab_dbg.n_wp; ++i) {
+        if (matlab_dbg.wp_name_len[i] != name_len) continue;
+        int32_t s = matlab_dbg.wp_scope[i];
+        if (s != 0 && s != scope_hint) continue;
+        if (memcmp(matlab_dbg.wp_name[i], name, (size_t)name_len) == 0)
+            return i;
+    }
+    return -1;
+}
+
+/* Internal: trip a watchpoint. Sets the paused-from-watch flag plus
+ * cur_* fields and blocks on the same condvar a real bp uses, so
+ * the DAP monitor wakes and emits a `stopped` event. Same pattern
+ * as matlab_dbg_keyboard_hook. CALLER MUST HOLD matlab_dbg.mu. */
+static void matlab_dbg_watch_trip(int wp_idx) {
+    if (matlab_dbg.n_frames > 0) {
+        matlab_dbg.cur_file_id = matlab_dbg.frames[matlab_dbg.n_frames - 1].file_id;
+        matlab_dbg.cur_line    = matlab_dbg.frames[matlab_dbg.n_frames - 1].line;
+    }
+    matlab_dbg.cur_bp_idx = -1;
+    matlab_dbg.last_wp_idx = wp_idx;
+    matlab_dbg.paused = 1;
+    matlab_dbg.paused_from_watch = 1;
+    pthread_cond_broadcast(&matlab_dbg.cv_server);
+    while (matlab_dbg.paused) {
+        pthread_cond_wait(&matlab_dbg.cv_client, &matlab_dbg.mu);
+    }
+    matlab_dbg.paused_from_watch = 0;
+    matlab_dbg.last_wp_idx = -1;
+}
+
+/* Body of the matlab_ws_set_* watchpoint helper — forward-declared
+ * up by the matlab_ws_set_* sites where matlab_dbg state isn't yet
+ * in scope. The write has already landed when this fires, so the
+ * IDE inspecting the variable on pause sees the new value (matches
+ * gdb's "old/new" model where the new value is visible at the stop). */
+static void matlab_ws_check_watch(const char *name, int64_t len) {
+    if (!name || len <= 0) return;
+    pthread_mutex_lock(&matlab_dbg.mu);
+    if (matlab_dbg.enabled && matlab_dbg.n_wp > 0) {
+        int idx = matlab_dbg_watch_check(name, len, /*scope_hint=*/1);
+        if (idx >= 0) matlab_dbg_watch_trip(idx);
+    }
+    pthread_mutex_unlock(&matlab_dbg.mu);
+}
+
 /* Called from the server thread to enable the hook and set the
  * stop-on-entry mode before the worker starts. */
 void matlab_dbg_enable(int stop_on_entry) {
@@ -3820,6 +3987,7 @@ void matlab_dbg_enable(int stop_on_entry) {
     matlab_dbg.frames[0].file_id = 0;
     matlab_dbg.frames[0].line = 0;
     matlab_dbg.frames[0].fn_name = "<script>";
+    matlab_dbg.last_wp_idx = -1;
     /* Clear any stale Locals captured during a previous launch (the
      * dbg state is process-static and DAP can re-launch). */
     for (int i = 0; i < MATLAB_DBG_MAX_FRAMES; ++i)
@@ -4482,6 +4650,13 @@ void matlab_dbg_frame_set_f64(const char *name, int64_t name_len, double v) {
         fl->entries[idx].f64 = v;
         fl->entries[idx].ptr = NULL;
     }
+    /* Watchpoint check on frame-local writes. scope_hint=2 (frame).
+     * Already inside the dbg mutex, so we call _watch_check /
+     * _trip directly without re-locking. */
+    if (matlab_dbg.enabled && matlab_dbg.n_wp > 0) {
+        int wp = matlab_dbg_watch_check(name, name_len, /*scope_hint=*/2);
+        if (wp >= 0) matlab_dbg_watch_trip(wp);
+    }
     pthread_mutex_unlock(&matlab_dbg.mu);
 }
 
@@ -4496,6 +4671,10 @@ void matlab_dbg_frame_set_mat(const char *name, int64_t name_len, void *mat) {
         fl->entries[idx].kind = 1;
         fl->entries[idx].ptr = mat;
         fl->entries[idx].f64 = 0.0;
+    }
+    if (matlab_dbg.enabled && matlab_dbg.n_wp > 0) {
+        int wp = matlab_dbg_watch_check(name, name_len, /*scope_hint=*/2);
+        if (wp >= 0) matlab_dbg_watch_trip(wp);
     }
     pthread_mutex_unlock(&matlab_dbg.mu);
 }
@@ -4515,6 +4694,10 @@ void matlab_dbg_frame_set_obj(const char *name, int64_t name_len, void *obj) {
         fl->entries[idx].kind = 2;
         fl->entries[idx].ptr = obj;
         fl->entries[idx].f64 = 0.0;
+    }
+    if (matlab_dbg.enabled && matlab_dbg.n_wp > 0) {
+        int wp = matlab_dbg_watch_check(name, name_len, /*scope_hint=*/2);
+        if (wp >= 0) matlab_dbg_watch_trip(wp);
     }
     pthread_mutex_unlock(&matlab_dbg.mu);
 }

@@ -1204,6 +1204,23 @@ const char *matlab_dbg_last_error_msg(int64_t *len_out);
  * breakpoint, step, or pause request). The DAP server uses this to
  * surface stop reason="entry". */
 int matlab_dbg_was_paused_from_keyboard(void);
+
+/* Data breakpoints (write watchpoints). The runtime maintains a
+ * per-name watch list and the matlab_ws_set_* / matlab_dbg_frame_set_*
+ * sites trip a pause on a name match.
+ *
+ * `add_watchpoint`: appends or refreshes by id. scope is 0 (any),
+ * 1 (script-ws only), 2 (innermost-frame only); v1 always passes 0.
+ * `clear_watchpoints`: drops the whole list (the DAP request always
+ * carries a fresh full list, so clear-then-add is the simplest impl).
+ * `last_watchpoint_id`: id of the watch that tripped the most recent
+ * pause, or 0; mirrors hitBreakpointIds for line bps.
+ * `was_paused_from_watch`: stop-reason discriminator. */
+int matlab_dbg_add_watchpoint(const char *name, int64_t name_len,
+                               int32_t scope, int32_t id);
+void matlab_dbg_clear_watchpoints(void);
+int32_t matlab_dbg_last_watchpoint_id(void);
+int matlab_dbg_was_paused_from_watch(void);
 /* Existing in matlab_runtime.c — re-declared here for the DAP server.
  * `matlab_err_traceback_*` reads the snapshot frames captured at the
  * point matlab_set_error fired, so it survives the unwind. */
@@ -2195,14 +2212,17 @@ void *monitorMain(void *) {
          * renders the right icon and doesn't imply the user has an
          * unexpected breakpoint sitting on the current line. */
         /* Stop reason precedence:
-         *   - bp matched (BpIdx >= 0)         -> "breakpoint"
-         *   - keyboard() call from user code  -> "entry"
-         *   - everything else (step / pause)  -> "step"
-         * The keyboard check looks at a runtime flag set by
-         * matlab_dbg_keyboard_hook; reading it via the public API
-         * is safe because the worker is paused on the condvar. */
+         *   - bp matched (BpIdx >= 0)             -> "breakpoint"
+         *   - data-bp tripped (watchpoint write)  -> "data breakpoint"
+         *   - keyboard() call from user code      -> "entry"
+         *   - everything else (step / pause)      -> "step"
+         * The runtime exposes per-source flags (paused_from_watch,
+         * paused_from_keyboard); reading them here is race-free
+         * because the worker is currently parked on the condvar. */
         const char *Reason;
+        bool FromWatch = matlab_dbg_was_paused_from_watch();
         if (BpIdx >= 0) Reason = "breakpoint";
+        else if (FromWatch) Reason = "data breakpoint";
         else if (matlab_dbg_was_paused_from_keyboard()) Reason = "entry";
         else Reason = "step";
         Object Body{
@@ -2216,11 +2236,21 @@ void *monitorMain(void *) {
          * same id we returned in setBreakpoints / setFunctionBreakpoints)
          * so the IDE can highlight the row that fired. Single-element
          * array because our hook stops on the first match — we don't
-         * coalesce same-line bps. */
+         * coalesce same-line bps. Data breakpoints use the same
+         * field with the watchpoint's id (returned in
+         * setDataBreakpoints) so the IDE highlights the watched
+         * variable's row. */
         if (BpIdx >= 0) {
           Array Ids;
           Ids.push_back(encodeBpId(Fid, Ln));
           Body["hitBreakpointIds"] = std::move(Ids);
+        } else if (FromWatch) {
+          int32_t WId = matlab_dbg_last_watchpoint_id();
+          if (WId != 0) {
+            Array Ids;
+            Ids.push_back((int64_t)WId);
+            Body["hitBreakpointIds"] = std::move(Ids);
+          }
         }
         sendEvent("stopped", Value(std::move(Body)));
         pthread_mutex_lock(&G.Mu);
@@ -2733,7 +2763,7 @@ bool handleRequest(const Object &Msg) {
        * watchpoint instrumentation, native disassembly) that this
        * MVP doesn't ship. The corresponding handlers respond with
        * success=false + a precise reason. */
-      {"supportsDataBreakpoints", false},
+      {"supportsDataBreakpoints", true},
       {"supportsReadMemoryRequest", false},
       {"supportsWriteMemoryRequest", false},
       {"supportsDisassembleRequest", false},
@@ -3845,13 +3875,109 @@ bool handleRequest(const Object &Msg) {
     return true;
   }
 
-  if (*Cmd == "setDataBreakpoints" || *Cmd == "dataBreakpointInfo") {
-    /* Data breakpoints (watchpoints) need the runtime to instrument
-     * every workspace store and compare against a watch list — not
-     * hard, just not built. Refuse cleanly so the IDE knows. */
-    sendResponse(ReqSeq, *Cmd, false,
-                 Value("data breakpoints require a workspace-store watcher "
-                       "that this build does not include"));
+  if (*Cmd == "dataBreakpointInfo") {
+    /* The IDE asks "can I set a data breakpoint on this name?"
+     * before sending setDataBreakpoints. We accept any plain
+     * identifier — the runtime's watch table is keyed by name, so
+     * resolution is trivial. The returned `dataId` is the same
+     * string we'll receive back in setDataBreakpoints; encoding the
+     * name itself keeps the round-trip stable across IDE restarts.
+     *
+     * `accessTypes` tells the IDE which kinds of watch the user
+     * can pick. We expose only "write" because read watchpoints
+     * would need every matlab_ws_get_* / frame_local_* call to
+     * gate against the watch list — measurable hot-path cost we
+     * don't want to pay until someone needs it. */
+    auto NameOpt = Args->getString("name");
+    if (!NameOpt || NameOpt->empty()) {
+      sendResponse(ReqSeq, *Cmd, false,
+                   Value("dataBreakpointInfo requires a name"));
+      return true;
+    }
+    std::string Nm = NameOpt->str();
+    /* Defensive identifier check — same as setVariable. The watch
+     * table treats the name as a literal byte string, so a stray
+     * `;` or backslash wouldn't cause harm, but rejecting non-
+     * identifiers gives a cleaner error than letting the watch
+     * silently never match. */
+    auto IsIdent = [](const std::string &S) {
+      if (S.empty()) return false;
+      char c0 = S[0];
+      if (!(std::isalpha((unsigned char)c0) || c0 == '_')) return false;
+      for (size_t i = 1; i < S.size(); ++i)
+        if (!(std::isalnum((unsigned char)S[i]) || S[i] == '_'))
+          return false;
+      return true;
+    };
+    if (!IsIdent(Nm)) {
+      sendResponse(ReqSeq, *Cmd, true, Object{
+        {"dataId", Value(nullptr)},
+        {"description", "name is not a plain identifier"},
+      });
+      return true;
+    }
+    Array AccessTypes;
+    AccessTypes.push_back(Value("write"));
+    sendResponse(ReqSeq, *Cmd, true, Object{
+      {"dataId", Nm},                     /* dataId == the name */
+      {"description", "write to " + Nm},
+      {"accessTypes", std::move(AccessTypes)},
+      {"canPersist", true},
+    });
+    return true;
+  }
+
+  if (*Cmd == "setDataBreakpoints") {
+    /* Replace-the-whole-list semantics, same as setBreakpoints.
+     * The IDE always passes the full active set; we wipe the
+     * runtime's watch table and re-add each entry. ID encoding
+     * uses a simple hash of the name so cleared-then-readded
+     * watches keep stable hitBreakpointIds-style references. */
+    matlab_dbg_clear_watchpoints();
+    const Array *Bps = Args->getArray("breakpoints");
+    Array Verified;
+    if (Bps) {
+      for (const auto &V : *Bps) {
+        const Object *B = V.getAsObject();
+        if (!B) continue;
+        auto DataId = B->getString("dataId");
+        if (!DataId || DataId->empty()) {
+          Verified.push_back(Object{
+            {"verified", false},
+            {"message", "missing dataId"},
+          });
+          continue;
+        }
+        std::string Nm = DataId->str();
+        auto AT = B->getString("accessType");
+        std::string Access = AT ? AT->str() : std::string("write");
+        if (Access != "write") {
+          Verified.push_back(Object{
+            {"verified", false},
+            {"message",
+             "only 'write' access type is supported; "
+             "read watchpoints would require gating every "
+             "workspace get on a watch list"},
+          });
+          continue;
+        }
+        /* Stable id derived from the name. djb2 hash truncated
+         * to 31 bits so we never collide with the encodeBpId
+         * line-bp space (which uses file_id*1e6 + line). The
+         * runtime stores it verbatim and surfaces it on trip. */
+        uint32_t H = 5381;
+        for (char c : Nm) H = (H * 33u) ^ (uint8_t)c;
+        int32_t Id = (int32_t)(H & 0x7FFFFFFFu);
+        bool OK = matlab_dbg_add_watchpoint(
+            Nm.data(), (int64_t)Nm.size(), /*scope=*/0, Id);
+        Object Out{{"verified", OK}};
+        if (OK) Out["id"] = (int64_t)Id;
+        else Out["message"] = "watchpoint table full";
+        Verified.push_back(std::move(Out));
+      }
+    }
+    sendResponse(ReqSeq, *Cmd, true,
+                 Object{{"breakpoints", std::move(Verified)}});
     return true;
   }
 

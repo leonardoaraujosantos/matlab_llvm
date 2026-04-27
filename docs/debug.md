@@ -178,6 +178,7 @@ VS Code via a generic-DAP extension:
 | Conditional breakpoints         | `setBreakpoints` `condition` — evaluates against the innermost paused frame, so a bp inside `compute(a, b)` can use `a > 5` |
 | Log points (no pause)           | `setBreakpoints` `logMessage` — `{name}` placeholders resolve against the innermost paused frame's mini-ws (same bridge as conditional bps) |
 | Hit-count breakpoints           | `setBreakpoints` `hitCondition` — accepts `N`, `==N`, `>=N`, `>N`, `%N`. Skip-counter lives in the runtime's bp table so the JIT cost of cond eval is paid only once the gate passes |
+| Data breakpoints (write only)   | `dataBreakpointInfo` resolves a name to a stable dataId; `setDataBreakpoints` installs a write-watch. Every `matlab_ws_set_*` and `matlab_dbg_frame_set_*` checks the watch list and trips a pause when a name matches; `stopped` carries `reason: "data breakpoint"` and the watch's id in `hitBreakpointIds`. Read watchpoints are refused with a clear message (would gate every `matlab_ws_get_*` on the hot path) |
 | Function breakpoints            | `setFunctionBreakpoints` resolves a name against the compiled function table and pins a line bp at the body's first statement. Class methods are registered under `MethodName`, `ClassName.MethodName`, and `ClassName/MethodName` so any form the user types resolves |
 | Breakpoint candidate lines      | `breakpointLocations` returns every bp-eligible line in a range (computed by an AST walker at compileProgram time) |
 | Exception breakpoints           | `setExceptionBreakpoints` with the `error` filter — runtime pauses on the first hook fired after `matlab_set_error` |
@@ -685,10 +686,16 @@ helper variable is named `total` rather than `sum` for this reason.
   doesn't surface a public mapping from line to native PC, and we
   don't track JIT'd code addresses on the server side. `readMemory`,
   `writeMemory`, `disassemble`, `locations` all refuse cleanly.
-- **Data breakpoints (watchpoints).** `matlab_ws_set_*` is the
-  obvious instrumentation point; gating each store on a watch list
-  would deliver this, but isn't built. `setDataBreakpoints` and
-  `dataBreakpointInfo` refuse.
+- **Data breakpoints (write watchpoints).** *Done.* The runtime
+  carries a per-name watch table; every `matlab_ws_set_f64/_mat/
+  _obj` and `matlab_dbg_frame_set_f64/_mat/_obj` calls
+  `matlab_dbg_watch_check`/`_trip` after the write lands, so the
+  IDE inspecting the variable on pause sees the new value. Watch
+  ids are derived from a djb2 hash of the name (truncated to 31
+  bits to avoid collision with the line-bp id space) so they
+  round-trip cleanly across `setDataBreakpoints` calls. Read
+  watchpoints stay refused — gating every `matlab_ws_get_*` is
+  hot-path cost we don't want to pay until someone needs it.
 - **Instruction breakpoints.** Same root cause as memory — no
   byte-level addressing of the JIT image.
 - **Restart-frame / goto.** Need per-frame workspace snapshots and
@@ -807,7 +814,7 @@ Three ctest suites guard the debugging surface (all gated on
 
 - **`debug-dap-tests`** — spawns `matlabc -dap` as a subprocess and
   drives the protocol with a small Python client
-  (`test/Debug/dap_client.py`). Thirty-four scenarios cover the
+  (`test/Debug/dap_client.py`). Thirty-seven scenarios cover the
   end-to-end surface:
 
   *Stepping & basic flow:*
@@ -958,6 +965,19 @@ Three ctest suites guard the debugging surface (all gated on
     arrives with `reason="entry"` at the keyboard line; the
     Locals panel still shows `x=41`; resumption produces the
     expected `disp(x)` output and exits cleanly
+  - **`data_breakpoint_write`** — `dap_watchpoint_program.m`
+    writes `target = 1; target = 2;`. With a write-watch on
+    `target`, the runtime trips on both writes; each `stopped`
+    event reports `reason="data breakpoint"` and surfaces the
+    watch's id in `hitBreakpointIds`. Inspecting the workspace
+    at each trip shows the freshly-written value
+  - **`data_breakpoint_clear`** — verifies that an empty
+    `setDataBreakpoints` list wipes prior watches; the program
+    runs to termination without any `stopped` events
+  - **`data_breakpoint_read_refused`** — `accessType: "read"`
+    comes back with `verified=false` and a message explaining
+    that only `write` is supported (read watchpoints would gate
+    every `matlab_ws_get_*` on the hot path)
 
 - **`debug-dwarf-tests`** — runs `matlabc -emit-llvm -g` and
   `-emit-llvm` (no -g) over a fixture, asserts the DWARF metadata
