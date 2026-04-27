@@ -271,6 +271,27 @@ bool matchHWForLoop(mlir::Operation *WhileOp, HWForLoopInfo &Info);
 /// them downstream as before).
 bool runLowerStaticFiArrays(mlir::ModuleOp M);
 
+/// Phase 5.5 — pre-synthesis hardware report. Walks the
+/// post-pipeline module (after the SV pipeline's
+/// LowerStaticFiArrays / HWStateInfer / RefineSlotTypes etc.
+/// have run) and emits a Markdown summary to the given stream:
+/// per user `func.func`, the inferred hardware class
+/// (combinational / clocked / FSM-bearing), input + output
+/// port shapes with widths, operator counts (adders, sub-
+/// tracters, multipliers, comparators, shifts, bitwise),
+/// register count + total flip-flop bits, FSM state counts +
+/// chosen encoding.
+///
+/// The estimate is intentionally pre-synthesis — absolute
+/// gate counts come from the user's downstream synthesis
+/// tool. The report exists so the user can see the cost
+/// shape of each module before invoking synth, and so
+/// reviewers have a stable artifact to diff across PRs.
+///
+/// Returns true on success.
+bool emitHardwareReport(mlir::ModuleOp M, std::ostream &OS,
+                        const matlab::SourceManager *SM = nullptr);
+
 /// Phase 4 v2.6 — `% hdl: <directive>(<args>)` pragma scanner.
 ///
 /// Walks every user `func.func` in the module, finds the source

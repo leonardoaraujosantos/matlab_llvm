@@ -118,6 +118,7 @@ if(MATLAB_LLVM_WITH_MLIR)
     lib/MLIR/Passes/SplitIsEmptyOr.cpp
     lib/MLIR/Passes/LowerStaticFiArrays.cpp
     lib/MLIR/Passes/ScanHWPragmas.cpp
+    lib/MLIR/Passes/EmitHardwareReport.cpp
   )
   target_link_libraries(MatlabMLIR
     PUBLIC  MatlabSema MatlabAST MatlabBasic

@@ -167,6 +167,14 @@ compile-sv FILE: build
         echo "built $out (verilator not on PATH; lint skipped)"
     fi
 
+# Pre-synthesis hardware report (Phase 5.5). Walks the same post-
+# pipeline IR `-emit-systemverilog` consumes and prints a Markdown
+# summary per user function — operator counts, register widths,
+# FSM state counts. Useful before invoking your downstream synth
+# tool so you see the resource shape of each module first.
+report-hw FILE: build
+    ./{{BUILD_DIR}}/matlabc -emit-hardware-report {{FILE}}
+
 # Multi-file SystemVerilog compile: typed driver + module file(s).
 # Useful when a function lives in its own .m file (the MATLAB
 # convention) and a separate driver provides the typed call site that

@@ -61,6 +61,7 @@ struct Options {
   enum class Mode { DumpTokens, DumpAST, EmitSema, EmitMIR, EmitMLIR,
                     EmitLLVM, EmitC, EmitCpp, EmitPython, EmitTypeScript,
                     EmitFiReport, EmitSystemVerilog, CheckSynthesizable,
+                    EmitHardwareReport,
                     Check, Repl, Format, Dap };
   Mode Mode = Mode::Check;
   bool Opt = false;
@@ -112,6 +113,7 @@ int usage(const char *Prog) {
                "             -emit-mlir | -emit-llvm | -emit-c | -emit-cpp |\n"
                "             -emit-python | -emit-typescript |\n"
                "             -emit-systemverilog | -check-synthesizable |\n"
+               "             -emit-hardware-report |\n"
                "             -format | -repl | -dap]\n"
                "            [-no-line | -line] [-doxygen] [-cpp-auto] [-g]  FILE.m\n";
   return 64;
@@ -138,6 +140,8 @@ bool parseArgs(int Argc, char **Argv, Options &Opts, const char *&Prog) {
       Opts.Mode = Options::Mode::EmitSystemVerilog;
     else if (A == "-check-synthesizable")
       Opts.Mode = Options::Mode::CheckSynthesizable;
+    else if (A == "-emit-hardware-report" || A == "-emit-hw-report")
+      Opts.Mode = Options::Mode::EmitHardwareReport;
     else if (A == "-repl") Opts.Mode = Options::Mode::Repl;
     else if (A == "-format") Opts.Mode = Options::Mode::Format;
     else if (A == "-dap") Opts.Mode = Options::Mode::Dap;
@@ -2851,7 +2855,8 @@ int main(int Argc, char **Argv) {
       Opts.Mode == Options::Mode::EmitPython ||
       Opts.Mode == Options::Mode::EmitTypeScript ||
       Opts.Mode == Options::Mode::EmitSystemVerilog ||
-      Opts.Mode == Options::Mode::CheckSynthesizable) {
+      Opts.Mode == Options::Mode::CheckSynthesizable ||
+      Opts.Mode == Options::Mode::EmitHardwareReport) {
     mlirgen::Context MCtx;
     if (TU) {
       auto M = mlirgen::lowerToMLIR(MCtx, TC, Diag, *TU, &SM,
@@ -2868,7 +2873,8 @@ int main(int Argc, char **Argv) {
                               Opts.Mode == Options::Mode::EmitPython ||
                               Opts.Mode == Options::Mode::EmitTypeScript ||
                               Opts.Mode == Options::Mode::EmitSystemVerilog ||
-                              Opts.Mode == Options::Mode::CheckSynthesizable;
+                              Opts.Mode == Options::Mode::CheckSynthesizable ||
+                              Opts.Mode == Options::Mode::EmitHardwareReport;
       bool WantClean = Opts.Opt || WantFullPipeline;
       if (WantClean) {
         mlirgen::runSlotPromotion(M);
@@ -3075,7 +3081,8 @@ int main(int Argc, char **Argv) {
           if (Src.empty()) return 1;
           std::cout << Src;
         } else if (Opts.Mode == Options::Mode::EmitSystemVerilog ||
-                   Opts.Mode == Options::Mode::CheckSynthesizable) {
+                   Opts.Mode == Options::Mode::CheckSynthesizable ||
+                   Opts.Mode == Options::Mode::EmitHardwareReport) {
           // Phase 4 v2.6: scan `% hdl: <directive>(<args>)`
           // pragmas inside each user function and attach as
           // string attributes on the func.func. The SV emitter
@@ -3129,6 +3136,19 @@ int main(int Argc, char **Argv) {
             }
             Diag.printAll();
             return Ok ? 0 : 1;
+          }
+          if (Opts.Mode == Options::Mode::EmitHardwareReport) {
+            // Phase 5.5 — emit a Markdown summary of the post-
+            // pipeline IR's resource shape. Same gate as
+            // `-emit-systemverilog`, then walk the module and
+            // print operator counts / register info / FSM info.
+            if (!Ok) {
+              Diag.printAll();
+              return 1;
+            }
+            mlirgen::emitHardwareReport(M, std::cout, &SM);
+            Diag.printAll();
+            return 0;
           }
           if (!Ok) {
             Diag.printAll();

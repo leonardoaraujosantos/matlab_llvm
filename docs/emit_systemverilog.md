@@ -1366,19 +1366,40 @@ rewrite to a CSD/canonical-signed-digit shift-add tree. Vendor-neutral
 (rewrite if it reduces operator count); `-sv-const-mul=off|csd|fcsd`
 overrides.
 
-**Step 5.5** — Reports.
-`-emit-hardware-report` driver flag, parallel to the
-`-emit-fixed-point-report` already shipped. Emits a Markdown summary:
-- inferred class per function (combinational / register / counter /
-  FSM / RAM)
-- bit width per signal
-- estimated operator count (adders, multipliers, comparators)
-- estimated state-bit count
-- number of inferred memories and their shape
+**Step 5.5** — Reports. **Shipped as Phase 5.5 v1.**
 
-The estimate is **pre-synthesis**; absolute area numbers come from
-the user's downstream synth tool. The point is to expose cost
-visibility before invoking it.
+`-emit-hardware-report` driver flag (also accepts
+`-emit-hw-report`), parallel to the existing
+`-emit-fixed-point-report`. Emits a Markdown summary per
+user function: inferred class (combinational / clocked /
+FSM-bearing), input/output port widths, operator counts
+(add / sub / mul / div / cmp / shift / bitop / mux),
+register count + total flip-flop bits, FSM state counts +
+chosen encoding (per the active CLI flag or per-FSM
+pragma).
+
+The estimate is **pre-synthesis**; absolute gate counts
+come from the user's downstream synthesis tool. The
+report's purpose is visibility before synthesis: see the
+cost shape of each module, diff resource changes across
+PRs, and catch unintended widenings before they hit the
+synth tool's timing report.
+
+Implementation: `lib/MLIR/Passes/EmitHardwareReport.cpp`.
+Runs the same SV pipeline as `-emit-systemverilog` up to
+and including `HWLegalize`, then walks the post-pipeline
+module collecting counts. The walker tallies arith /
+matlab dialect operators by kind, uses
+`gatherHWPersistentState` for register info, and matches
+the FSM cascade pattern to count state-equality scf.if's
+per persistent register.
+
+RAM inference is still deferred (Phase 4 RAM-inference
+follow-up depends on Phase 4.5.4 static-fi-array
+infrastructure for the persistent-array case). Today the
+report always shows "RAM: none".
+
+Justfile recipe: `just report-hw FILE.m`.
 
 **Tests.** `test/EmitSV/fi/*.m` — fixed-point FIR, IIR, CIC.
 `test/EmitSV/pipelined/*.m` — long-path datapath under various
