@@ -1132,26 +1132,73 @@ combinational. `fir_asic_pipelined.m` and
 **Problem.** `function y = f(vec_a)` with `vec_a` typed as a
 3-element fi vector at the call site today refines to a
 `!llvm.ptr` argument going through `matlab_fi_quantize_s` —
-runtime cast, not synthesizable.
+runtime cast, not synthesizable. Worse, the user-call refinement
+*collapses* the call-site `!llvm.ptr` to the function arg's
+inferred scalar element type, so the body's `vec_a(1)` becomes a
+malformed `matlab.subscript(scalar_i16, 1.0)`.
 
-**Fix.** Extend the user-call refinement so a vector arg with
-constant shape (matched by `fi(vec, T)` at the call site) lowers
-to a fixed-size `llvm.array` parameter passed by value, mirroring
-the static-array storage in 4.5.4. The SV emitter renders these as
-input port arrays (`input logic [W-1:0] vec_a [N]`).
+**Status (v1 not shipped).** Supporting vector args end-to-end
+needs Sema + MIR-to-MLIR lowering + user-call refinement + LLVM
+tensor-op lowering all to track vector function-argument shapes
+through the pipeline. Multi-week effort that touches multiple
+non-SV-specific subsystems. Out of scope for the current Phase
+4.5 round.
 
-**Test:** `vector_processor(fi([1 2 3], T), fi([4 5 6], T))`
-emits a module with two i16 input arrays of length 3 and two i32
-scalar outputs.
+**Recommended workarounds today** — both lint clean and emit
+correct SV; documented as fixtures in `test/EmitSV/`:
+
+  - `vector_proc3.m` — pass elements individually:
+    `function [...] = f(a1, a2, a3, b1, b2, b3)`. The script
+    side "unrolls" the vector into N scalars per argument.
+    Module emits with N input ports per vector.
+  - `vector_proc_local.m` — same scalar-args boundary, but the
+    body builds a local `fi(zeros(1, N), ...)` array (Phase
+    4.5.4) from the scalars and uses array-style access
+    inside. Keeps the array shape readable in the source while
+    the function signature stays scalar.
+
+**Future fix sketch.** Extend the user-call refinement so a
+vector arg with constant shape (matched by `fi(vec, T)` at the
+call site) lowers to a fixed-size `!llvm.array<N x iW>`
+parameter passed by value, mirroring the static-array storage
+in 4.5.4. The SV emitter renders these as input port arrays
+(`input logic [W-1:0] vec_a [N]`). Test target:
+`vector_processor(fi([1 2 3], T), fi([4 5 6], T))` emits with
+two i16 input arrays of length 3 and two i32 scalar outputs.
 
 #### 4.5.6 What stays out of Phase 4.5
 
-- 2-D fi matrices and persistent fi matrices — the existing
+- **Vector function arguments** (4.5.5 above) — multi-week
+  upstream pipeline work; scalar-args + local-array workarounds
+  ship as fixtures.
+- **Persistent fi-arrays** (`persistent delay_line; if isempty
+  delay_line = fi(zeros(1, N), ...);`) — needs
+  `matlab_persistent_set_ptr` / `_get_ptr` recognition, plus
+  RAM-or-register-bank inference per the Phase 4 RAM-inference
+  goal that itself depends on 4.5.4.
+- **Loop-iv array indexing** (`for i = 1:N; acc = acc + arr(i);
+  end`) — Phase 4.5.4 v1 only handles constant indices. Adding
+  loop-iv indices needs the iv to lower to an integer (today
+  it's f64 and Phase 2 explicitly rejected iv-as-datapath uses).
+- **Vector concat / slice** (`[x, delay(1:end-1)]`,
+  `delay(1:end-1)`) — `matlab_mat_i64_concat_row` and
+  `matlab_mat_i64_slice1` runtime calls. Static-shape variants
+  could fold to GEP-based shuffles.
+- **Array literal init** (`h = [0.1, 0.2, 0.3, 0.4]`) — currently
+  goes through `matlab_mat_from_buf`. Static cases could fold to
+  per-element stores into an alloca, similar to 4.5.4's zero-init.
+- **2-D fi matrices** and persistent fi matrices — the existing
   feature_status doc lists this as a separate gap; the SV path
   inherits whatever the upstream pipeline supports.
-- N-dim arrays beyond what Phase 4.5.4 produces.
+- **N-dim arrays beyond what Phase 4.5.4 produces.**
 - `sin` / `cos` / `sqrt` etc. (CORDIC lowering) — Phase 5.
 - Float fallbacks and policy flags — Phase 5.
+
+The three remaining `examples/hdl/` modules (`vector_processor`,
+`fir_asic_pipelined`, `sequential_processor`) all hit
+combinations of these. They're realistic FIR designs that
+exercise persistent fi-arrays + loop-iv array indexing + vector
+concat — the full set is a follow-up phase, not Phase 4.5.
 
 #### Effort budget
 
