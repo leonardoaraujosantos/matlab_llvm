@@ -3591,6 +3591,37 @@ struct matlab_dbg_state {
     const char *file_names[256];
     int64_t file_name_lens[256];
 
+    /* Thread registry. Populated lazily on first hook entry from
+     * each pthread that runs JIT'd code (the main worker plus any
+     * parfor-spawned workers). The DAP server's `threads` request
+     * enumerates this list; `stopped` events name the originating
+     * thread by id.
+     *
+     * Identity is the pthread_t value; the `id` we hand to the DAP
+     * client is a sequential integer (1 = main worker; 2..N =
+     * parfor workers in spawn order). The mapping is one-shot per
+     * thread and persists for the rest of the session — even if a
+     * thread is joined, we keep its slot so any earlier `stopped`
+     * event id stays valid in the IDE's UI history.
+     *
+     * Limitation (v1): the frame stack itself (`frames[]` /
+     * `frame_locals[]` / `n_frames` above) is shared across all
+     * threads. A parfor body that hits a bp will surface the right
+     * thread id in the stopped event, but `stackTrace(threadId)`
+     * returns whatever the last-modifying thread put on the global
+     * stack — which can be the queried thread or a sibling. Per-
+     * thread frame stacks are the follow-up; documented in
+     * docs/debug.md. */
+    int n_threads;
+    pthread_t thread_keys[32];
+    int32_t  thread_ids[32];   /* sequential, 1-based; matches DAP threadId */
+    /* Index into thread_keys/_ids of the thread that hit the
+     * current pause, or -1 when no pause is active. Set by the
+     * hook when should_pause flips on; cleared on resume. The
+     * DAP server reads it via matlab_dbg_paused_thread_id() to
+     * surface the originating thread on `stopped` events. */
+    int paused_thread_idx;
+
     /* Class-id -> class-name table. Populated by
      * matlab_dbg_register_class at the top of the script body when -g
      * is on (one entry per classdef in the translation unit). The DAP
@@ -3808,12 +3839,17 @@ const char *matlab_dbg_last_error_msg(int64_t *len_out) {
  * location is left as whatever the most recent matlab_dbg_hook
  * recorded — already what the user wants for the call site
  * because the hook fires at the same statement. */
+/* Forward decl — defined alongside the thread enumeration helpers
+ * further down. The keyboard / watch trip code below needs it. */
+static int matlab_dbg_thread_slot_locked(void);
+
 void matlab_dbg_keyboard_hook(void) {
     pthread_mutex_lock(&matlab_dbg.mu);
     if (!matlab_dbg.enabled) {
         pthread_mutex_unlock(&matlab_dbg.mu);
         return;
     }
+    int thr_idx = matlab_dbg_thread_slot_locked();
     /* Copy the innermost frame's (file_id, line) into the cur_*
      * fields so the DAP `stopped` event reports the keyboard call
      * site. matlab_dbg_hook fired at the start of this same
@@ -3826,11 +3862,13 @@ void matlab_dbg_keyboard_hook(void) {
     matlab_dbg.cur_bp_idx = -1;
     matlab_dbg.paused = 1;
     matlab_dbg.paused_from_keyboard = 1;
+    matlab_dbg.paused_thread_idx = thr_idx;
     pthread_cond_broadcast(&matlab_dbg.cv_server);
     while (matlab_dbg.paused) {
         pthread_cond_wait(&matlab_dbg.cv_client, &matlab_dbg.mu);
     }
     matlab_dbg.paused_from_keyboard = 0;
+    matlab_dbg.paused_thread_idx = -1;
     pthread_mutex_unlock(&matlab_dbg.mu);
 }
 
@@ -3945,6 +3983,7 @@ static int matlab_dbg_watch_check(const char *name, int64_t name_len,
  * the DAP monitor wakes and emits a `stopped` event. Same pattern
  * as matlab_dbg_keyboard_hook. CALLER MUST HOLD matlab_dbg.mu. */
 static void matlab_dbg_watch_trip(int wp_idx) {
+    int thr_idx = matlab_dbg_thread_slot_locked();
     if (matlab_dbg.n_frames > 0) {
         matlab_dbg.cur_file_id = matlab_dbg.frames[matlab_dbg.n_frames - 1].file_id;
         matlab_dbg.cur_line    = matlab_dbg.frames[matlab_dbg.n_frames - 1].line;
@@ -3953,12 +3992,71 @@ static void matlab_dbg_watch_trip(int wp_idx) {
     matlab_dbg.last_wp_idx = wp_idx;
     matlab_dbg.paused = 1;
     matlab_dbg.paused_from_watch = 1;
+    matlab_dbg.paused_thread_idx = thr_idx;
     pthread_cond_broadcast(&matlab_dbg.cv_server);
     while (matlab_dbg.paused) {
         pthread_cond_wait(&matlab_dbg.cv_client, &matlab_dbg.mu);
     }
     matlab_dbg.paused_from_watch = 0;
     matlab_dbg.last_wp_idx = -1;
+    matlab_dbg.paused_thread_idx = -1;
+}
+
+/* Lazy thread registration. Called from the hook on every entry —
+ * fast path is a constant-time scan of the (small) thread_keys
+ * table. New thread → append + assign sequential id. CALLER MUST
+ * HOLD matlab_dbg.mu (the hook already does). Returns the slot
+ * index in the threads table; the DAP-facing thread id is
+ * thread_ids[idx]. */
+static int matlab_dbg_thread_slot_locked(void) {
+    pthread_t self = pthread_self();
+    for (int i = 0; i < matlab_dbg.n_threads; ++i) {
+        if (pthread_equal(matlab_dbg.thread_keys[i], self)) return i;
+    }
+    if (matlab_dbg.n_threads >= 32) {
+        /* Table full — reuse slot 0 (main worker). Means the
+         * 33rd parfor worker borrows the main worker's id. Better
+         * than refusing to track and breaking the hook entirely. */
+        return 0;
+    }
+    int idx = matlab_dbg.n_threads++;
+    matlab_dbg.thread_keys[idx] = self;
+    /* Sequential id starting at 1; thread 1 is the main worker
+     * registered on its first hook fire. Matches the DAP server's
+     * pre-existing assumption that threadId 1 is "main". */
+    matlab_dbg.thread_ids[idx] = idx + 1;
+    return idx;
+}
+
+/* DAP-side enumeration: total registered threads. */
+int matlab_dbg_thread_count(void) {
+    int n;
+    pthread_mutex_lock(&matlab_dbg.mu);
+    n = matlab_dbg.n_threads;
+    pthread_mutex_unlock(&matlab_dbg.mu);
+    return n;
+}
+
+/* DAP-side: thread id at index. Returns 0 on out-of-range. */
+int32_t matlab_dbg_thread_id_at(int idx) {
+    int32_t id = 0;
+    pthread_mutex_lock(&matlab_dbg.mu);
+    if (idx >= 0 && idx < matlab_dbg.n_threads)
+        id = matlab_dbg.thread_ids[idx];
+    pthread_mutex_unlock(&matlab_dbg.mu);
+    return id;
+}
+
+/* DAP-side: id of the thread that triggered the current pause, or
+ * 0 if no pause is active. */
+int32_t matlab_dbg_paused_thread_id(void) {
+    int32_t id = 0;
+    pthread_mutex_lock(&matlab_dbg.mu);
+    int idx = matlab_dbg.paused_thread_idx;
+    if (idx >= 0 && idx < matlab_dbg.n_threads)
+        id = matlab_dbg.thread_ids[idx];
+    pthread_mutex_unlock(&matlab_dbg.mu);
+    return id;
 }
 
 /* Body of the matlab_ws_set_* watchpoint helper — forward-declared
@@ -3988,6 +4086,11 @@ void matlab_dbg_enable(int stop_on_entry) {
     matlab_dbg.frames[0].line = 0;
     matlab_dbg.frames[0].fn_name = "<script>";
     matlab_dbg.last_wp_idx = -1;
+    matlab_dbg.paused_thread_idx = -1;
+    /* Reset the thread registry on every launch so DAP threadIds
+     * start fresh — a re-launch otherwise carries stale entries
+     * from the prior session into the IDE's threads pane. */
+    matlab_dbg.n_threads = 0;
     /* Clear any stale Locals captured during a previous launch (the
      * dbg state is process-static and DAP can re-launch). */
     for (int i = 0; i < MATLAB_DBG_MAX_FRAMES; ++i)
@@ -4444,6 +4547,11 @@ void matlab_dbg_hook(int32_t file_id, int32_t line) {
         pthread_mutex_unlock(&matlab_dbg.mu);
         return;
     }
+    /* Lazy-register the calling thread on first hook entry so the
+     * DAP server can enumerate it via `threads`. The thread is also
+     * recorded as the would-be paused-thread when `should_pause`
+     * flips below. */
+    int thr_idx = matlab_dbg_thread_slot_locked();
     /* Update the innermost frame's line. */
     if (matlab_dbg.n_frames > 0) {
         matlab_dbg.frames[matlab_dbg.n_frames - 1].file_id = file_id;
@@ -4516,11 +4624,13 @@ void matlab_dbg_hook(int32_t file_id, int32_t line) {
         matlab_dbg.cur_line = line;
         matlab_dbg.cur_bp_idx = matched_bp;
         matlab_dbg.paused = 1;
+        matlab_dbg.paused_thread_idx = thr_idx;
         /* Signal the server that we're paused; wait for resume. */
         pthread_cond_broadcast(&matlab_dbg.cv_server);
         while (matlab_dbg.paused) {
             pthread_cond_wait(&matlab_dbg.cv_client, &matlab_dbg.mu);
         }
+        matlab_dbg.paused_thread_idx = -1;
     }
     pthread_mutex_unlock(&matlab_dbg.mu);
 }

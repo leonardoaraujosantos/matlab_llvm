@@ -193,7 +193,7 @@ VS Code via a generic-DAP extension:
 | Stderr forwarded                | `output` event (category `stderr`) — Diag prints from REPL eval, error()-tracebacks, and any other write to fd 2 surface in the IDE's debug console with stderr styling. Tee'd to the original stderr fd so subprocess capture / CI logs still see them |
 | Watch error inline              | When `evaluate` fails, the response `message` carries the captured `<file>:<line>:<col>: error: <msg>` diagnostic instead of a generic placeholder — same bytes also forwarded to the debug console for full multi-line context |
 | `breakpoint` event on resolve   | `setBreakpoints` against a path the runtime hasn't loaded yet (request arrived before launch / compileProgram) returns `verified=false` and queues the bp; once the path registers, the queued bp is replayed and a `breakpoint` event with `reason: "changed"` carries the now-verified state |
-| List threads                    | `threads` returns one thread (`id=1`, `name="main"`); `thread` events fire on `started` / `exited` |
+| List threads                    | `threads` enumerates the runtime's lazy-registered thread table — main script worker as `id=1` ("main") plus one entry per spawned parfor worker (`id=2..N`, "parfor-1" / "parfor-2" / ...). Stop events carry the originating thread's id. `thread` events fire on the main worker's `started` / `exited` |
 | Per-frame Locals                | `scopes(frameId)` returns one Locals scope per frame; `variables(ref)` reads either the script ws or that frame's mini-ws |
 | Workspace variables snapshot    | `variables`                         |
 | Class instances in Locals/Watch | `1x1 ClassName` rows expand into properties **and methods**. Methods render with `presentationHint.kind="method"` (function-icon glyph) and a `@name(args)` value-column signature; methods inherited from a superclass carry an `(inherited from X)` suffix. Override (same-name method on derived class) suppresses the parent entry |
@@ -696,6 +696,19 @@ helper variable is named `total` rather than `sum` for this reason.
   round-trip cleanly across `setDataBreakpoints` calls. Read
   watchpoints stay refused — gating every `matlab_ws_get_*` is
   hot-path cost we don't want to pay until someone needs it.
+- **Parfor / multi-thread debugging.** *Partial.* The runtime
+  lazy-registers each pthread that calls into the debug API
+  (`matlab_dbg_thread_slot_locked` runs on every `matlab_dbg_hook`
+  entry) and assigns sequential ids: 1 = main worker, 2..N =
+  parfor workers in spawn order. The DAP `threads` request
+  enumerates them; `stopped` events name the originating thread.
+  v1 limitation: the frame stack itself (`frames[]` /
+  `frame_locals[]` / `n_frames`) is still shared across threads —
+  a bp inside a parfor body fires from the right thread id but
+  `stackTrace` reflects whatever thread most recently touched the
+  global stack. Per-thread frame chains are follow-up work; the
+  refactor would replace the global frame state with per-thread
+  slots keyed by `pthread_self()`.
 - **Instruction breakpoints.** Same root cause as memory — no
   byte-level addressing of the JIT image.
 - **Restart-frame / goto.** Need per-frame workspace snapshots and
@@ -814,7 +827,7 @@ Three ctest suites guard the debugging surface (all gated on
 
 - **`debug-dap-tests`** — spawns `matlabc -dap` as a subprocess and
   drives the protocol with a small Python client
-  (`test/Debug/dap_client.py`). Thirty-seven scenarios cover the
+  (`test/Debug/dap_client.py`). Thirty-eight scenarios cover the
   end-to-end surface:
 
   *Stepping & basic flow:*
@@ -978,6 +991,12 @@ Three ctest suites guard the debugging surface (all gated on
     comes back with `verified=false` and a message explaining
     that only `write` is supported (read watchpoints would gate
     every `matlab_ws_get_*` on the hot path)
+  - **`parfor_thread_enumeration`** — `dap_parfor_program.m`
+    runs `parfor i = 1:3`. After the body executes, the
+    `threads` request reports the main worker (id=1, "main")
+    plus one entry per parfor pthread ("parfor-1" / etc.). The
+    runtime's `matlab_dbg_thread_slot_locked` lazy-registers
+    each pthread on its first hook fire
 
 - **`debug-dwarf-tests`** — runs `matlabc -emit-llvm -g` and
   `-emit-llvm` (no -g) over a fixture, asserts the DWARF metadata

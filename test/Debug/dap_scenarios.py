@@ -999,6 +999,52 @@ def scn_data_breakpoint_read_refused(matlabc, program):
         c.wait_event("terminated", timeout=5.0)
 
 
+def scn_parfor_thread_enumeration(matlabc, program):
+    """parfor spawns one pthread per iteration; each registers
+    itself with the runtime on its first hook fire. The DAP
+    `threads` request enumerates them.
+
+    dap_parfor_program.m runs `parfor i = 1:3`, so after the body
+    executes there are four threads in the table: 1 = main worker,
+    2..4 = parfor workers. Names are "main" / "parfor-1" / etc.
+
+    v1 limitation (documented): the frame stack is shared across
+    threads. A bp inside the parfor body would surface the
+    originating thread id in the stopped event, but stackTrace's
+    contents reflect whatever thread last touched the global
+    stack. Per-thread frame chains are follow-up work."""
+    import os
+    parfor_program = os.path.join(
+        os.path.dirname(os.path.abspath(program)),
+        "dap_parfor_program.m",
+    )
+    with DapClient(matlabc, parfor_program) as c:
+        initialize_and_launch(c)
+        c.wait_event("terminated", timeout=10.0)
+
+        body = c.request("threads")
+        ts = body.get("threads") or []
+        ids = sorted(t.get("id") for t in ts)
+        names = {t.get("id"): t.get("name") for t in ts}
+
+        # Main worker is always id 1; parfor workers are 2..4 (one
+        # per iteration of `1:3`).
+        assert 1 in ids, f"main worker missing from threads: {ts!r}"
+        assert names.get(1) == "main", \
+            f"thread 1 should be 'main': {names!r}"
+        # Don't pin the exact count — MAX_THREADS = 32 caps at 32
+        # but a single 3-iter parfor should produce 4 entries
+        # total. We assert >= 2 so any future scheduler change
+        # (e.g. coalescing) doesn't break the test.
+        assert len(ts) >= 2, \
+            f"parfor should register multiple threads, got {ts!r}"
+        # All non-main names should follow the parfor-N format.
+        for tid, nm in names.items():
+            if tid == 1: continue
+            assert nm.startswith("parfor-"), \
+                f"thread {tid} name should start with 'parfor-': {nm!r}"
+
+
 def scn_keyboard_builtin(matlabc, program):
     """A `keyboard` call in user code drops the worker into a paused
     state — same machinery as a breakpoint, but triggered from the

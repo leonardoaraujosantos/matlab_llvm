@@ -1221,6 +1221,14 @@ int matlab_dbg_add_watchpoint(const char *name, int64_t name_len,
 void matlab_dbg_clear_watchpoints(void);
 int32_t matlab_dbg_last_watchpoint_id(void);
 int matlab_dbg_was_paused_from_watch(void);
+
+/* Thread enumeration. Populated lazily as parfor / other workers
+ * call into the debug runtime; the main script worker is thread
+ * id 1. The DAP `threads` request reports this list; `stopped`
+ * events carry the originating thread id. */
+int     matlab_dbg_thread_count(void);
+int32_t matlab_dbg_thread_id_at(int idx);
+int32_t matlab_dbg_paused_thread_id(void);
 /* Existing in matlab_runtime.c — re-declared here for the DAP server.
  * `matlab_err_traceback_*` reads the snapshot frames captured at the
  * point matlab_set_error fired, so it survives the unwind. */
@@ -2225,9 +2233,17 @@ void *monitorMain(void *) {
         else if (FromWatch) Reason = "data breakpoint";
         else if (matlab_dbg_was_paused_from_keyboard()) Reason = "entry";
         else Reason = "step";
+        /* threadId reports the runtime-assigned id of the worker
+         * that hit the pause. For the main script (no parfor),
+         * this is always 1; for parfor bodies, each spawned
+         * pthread gets its own sequential id (2, 3, ...) on first
+         * hook fire. Falls back to 1 pre-registration so old
+         * tests / clients keep working. */
+        int32_t StopThreadId = matlab_dbg_paused_thread_id();
+        if (StopThreadId == 0) StopThreadId = 1;
         Object Body{
           {"reason", Reason},
-          {"threadId", 1},
+          {"threadId", (int64_t)StopThreadId},
           {"allThreadsStopped", true},
           {"line", (int64_t)Ln},
         };
@@ -3016,8 +3032,28 @@ bool handleRequest(const Object &Msg) {
   }
 
   if (*Cmd == "threads") {
+    /* Enumerate registered threads from the runtime. Thread id 1
+     * is the main script worker (lazy-registered on its first
+     * hook fire); ids 2..N are parfor workers, in spawn order.
+     *
+     * Pre-launch the table is empty — return a synthetic single
+     * "main" entry so the IDE renders the threads pane instead
+     * of falling back to "no threads". The synthetic id matches
+     * what the runtime would assign on first hook fire, so a
+     * pre-launch threads response stays consistent with the
+     * post-launch view. */
     Array Ts;
-    Ts.push_back(Object{{"id", 1}, {"name", "main"}});
+    int N = matlab_dbg_thread_count();
+    if (N == 0) {
+      Ts.push_back(Object{{"id", 1}, {"name", "main"}});
+    } else {
+      for (int i = 0; i < N; ++i) {
+        int32_t Id = matlab_dbg_thread_id_at(i);
+        std::string Name = (Id == 1) ? "main"
+                                      : "parfor-" + std::to_string(Id - 1);
+        Ts.push_back(Object{{"id", (int64_t)Id}, {"name", std::move(Name)}});
+      }
+    }
     sendResponse(ReqSeq, *Cmd, true, Object{{"threads", std::move(Ts)}});
     return true;
   }
