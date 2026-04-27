@@ -3010,6 +3010,12 @@ int main(int Argc, char **Argv) {
         // BEFORE LowerScalarSlots so the just-retyped slots get
         // promoted to llvm.alloca on the same pass.
         mlirgen::runRefineSlotTypes(M);
+        // Phase 4.5.4: rewrite `fi(zeros(1, N), ...)` runtime-call
+        // chains into stack-allocated `llvm.alloca <[N x iW]>` with
+        // GEP + load/store access. Must also run before
+        // LowerScalarSlots so the slot wrapping the array pointer
+        // is erased.
+        mlirgen::runLowerStaticFiArrays(M);
         // Patch func.func signatures from the refined return types.
         mlirgen::runRefineFuncSigs(M);
         // After user-call refinement, any surviving matlab.alloc whose

@@ -246,6 +246,31 @@ struct HWForLoopInfo {
 /// require that Info.Init / End / Step are `arith.constant`.
 bool matchHWForLoop(mlir::Operation *WhileOp, HWForLoopInfo &Info);
 
+/// Phase 4.5.4 — static fi-array lowering. Rewrites the canonical
+///
+///     v = fi(zeros(1, N), S, W, F);   % N constant
+///     v(1) = ...;  v(2) = ...;        % constant-index writes
+///     ... = v(1) + v(2) + ...;        % constant-index reads
+///
+/// pattern from runtime-call form (`matlab_mat_i64_zeros` +
+/// `__subscript_store` + `matlab_mat_i64_subscript1_s`) into a
+/// stack-allocated `llvm.alloca !llvm.array<N x iW>` with
+/// `llvm.getelementptr` + `llvm.load` / `llvm.store` access.
+/// Element width W is inferred from the typed-value operand of
+/// every `__subscript_store` site (all must agree). Read sites
+/// return i64 today; the rewrite truncates back to iW so the
+/// subsequent fi-arithmetic chain stays integer-typed.
+///
+/// Phase 4.5.4 v1 scope:
+///   - 1-D vectors only (rows = 1, cols = N constant)
+///   - constant integer indices on both reads and writes
+///   - element type uniform across all stores
+///
+/// Returns true on success (no diagnostic emitted on a non-match;
+/// the runtime calls just stay in place and HWLegalize rejects
+/// them downstream as before).
+bool runLowerStaticFiArrays(mlir::ModuleOp M);
+
 /// Pre-HWStateInfer normalization. The HDL Coder canonical
 /// initializer is two separate guards:
 ///

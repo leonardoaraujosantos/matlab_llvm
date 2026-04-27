@@ -206,21 +206,24 @@ bool runHWLegalize(mlir::ModuleOp M, const matlab::SourceManager * /*SM*/) {
     });
   });
 
-  // 3. Allow scalar multi-store `llvm.alloca`s in user functions (they
-  //    render as a `logic` declaration + blocking assignments inside
-  //    `always_comb`), but reject array allocas — those are Phase 2
-  //    territory. A scalar alloca's element type is one of i1 / i8 /
-  //    i16 / i32 / i64; anything else (LLVM array/struct/pointer
-  //    element) is out of scope.
+  // 3. `llvm.alloca` element types: scalar primitives render as
+  //    `logic` declarations + blocking assignments inside
+  //    `always_comb`; static arrays of scalar primitives (Phase 4.5.4
+  //    `LowerStaticFiArrays`) render as `logic [W-1:0] arr [N];` with
+  //    indexed access. Anything else (struct element, runtime ptr) is
+  //    out of scope.
   walkUserFuncs([&](mlir::func::FuncOp F) {
     F.walk([&](mlir::LLVM::AllocaOp A) {
       mlir::Type ET = A.getElemType();
-      if (!isSynthScalar(ET)) {
-        mlir::emitError(A.getLoc())
-            << "non-scalar stack allocation is not supported in Phase 1 "
-            << "(arrays are Phase 2; persistent state is Phase 3)";
-        Ok = false;
+      if (isSynthScalar(ET)) return;  // scalar slot
+      if (auto Arr = mlir::dyn_cast<mlir::LLVM::LLVMArrayType>(ET)) {
+        if (isSynthScalar(Arr.getElementType())) return;  // static array
       }
+      mlir::emitError(A.getLoc())
+          << "stack allocation has unsynthesizable element type "
+          << "(must be a scalar i1 / i8 / i16 / i32 / i64 or a static "
+             "1-D array of those)";
+      Ok = false;
     });
   });
 

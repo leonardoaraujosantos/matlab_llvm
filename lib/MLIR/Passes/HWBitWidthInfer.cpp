@@ -53,14 +53,16 @@ bool runHWBitWidthInfer(mlir::ModuleOp M,
       // Skip the func.func op itself; its result types are the function
       // results, validated by HWLegalize.
       if (mlir::isa<mlir::func::FuncOp>(Op)) return;
-      // The slot trio (alloca / load / store) carries `!llvm.ptr`
-      // results that are conceptually the slot's *address*, not a
-      // datapath value. Skip them — the SV emitter renders the slot as
-      // a `logic [W-1:0]` declaration whose width comes from the
+      // The slot trio (alloca / load / store / gep) carries
+      // `!llvm.ptr` results that are conceptually slot / element
+      // addresses, not datapath values. Skip them — the SV emitter
+      // renders the slot or array as a `logic [W-1:0]` (or
+      // `[W-1:0] arr [N]`) declaration whose width comes from the
       // alloca's element type (validated in HWLegalize).
       if (mlir::isa<mlir::LLVM::AllocaOp,
                     mlir::LLVM::LoadOp,
-                    mlir::LLVM::StoreOp>(Op)) {
+                    mlir::LLVM::StoreOp,
+                    mlir::LLVM::GEPOp>(Op)) {
         if (auto Ld = mlir::dyn_cast<mlir::LLVM::LoadOp>(Op)) {
           // The loaded value (typed scalar) does need to be checked.
           if (!isAcceptedType(Ld.getResult().getType())) {

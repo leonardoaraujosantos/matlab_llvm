@@ -110,6 +110,7 @@ private:
   void emitAlloca(mlir::LLVM::AllocaOp A, int Indent);
   void emitLoad(mlir::LLVM::LoadOp L, int Indent);
   void emitStore(mlir::LLVM::StoreOp S, int Indent);
+  void emitGEP(mlir::LLVM::GEPOp G, int Indent);
   void emitReturn(mlir::func::ReturnOp R, int Indent);
 
   // --- Helpers -----------------------------------------------------------
@@ -166,6 +167,11 @@ private:
   // to suppress the isempty-guarded scf.if (its init becomes the
   // reset value) and the cmpf+isempty trio that feeds it.
   llvm::DenseSet<mlir::Operation *> Suppress;
+  // Phase 4.5.4: GEP ops that resolve to `arr_name[idx_expr]`. The
+  // load/store consuming the GEP renders the indexed access
+  // directly. The map's value is the SV expression (e.g.
+  // `"v[2]"`).
+  llvm::DenseMap<mlir::Operation *, std::string> GepAddr;
 };
 
 unsigned Emitter::widthOf(mlir::Type T) {
@@ -278,6 +284,18 @@ std::string Emitter::exprFor(mlir::Value V) {
           Signed = (IT.getWidth() != 1);
         return intLiteral(IA.getInt(), C.getType(), Signed);
       }
+    }
+    // Phase 4.5.4: `llvm.mlir.constant` (used as the GEP index in
+    // the static-fi-array lowering) renders as a plain integer
+    // literal so `<arr>[<idx>]` falls out cleanly. Indices are
+    // unsized so SV self-determined-width rules pick the right
+    // shape.
+    if (auto C = mlir::dyn_cast<mlir::LLVM::ConstantOp>(Op)) {
+      if (auto IA = mlir::dyn_cast<mlir::IntegerAttr>(C.getValue())) {
+        std::ostringstream S; S << IA.getInt(); return S.str();
+      }
+    }
+    if (auto C = mlir::dyn_cast<mlir::arith::ConstantOp>(Op)) {
       // The frontend emits MATLAB switch-case labels as `f64`
       // constants regardless of the discriminator's actual integer
       // type, producing comparisons like `arith.cmpi i8, f64`. Render
@@ -448,6 +466,12 @@ void Emitter::declarePrelude(mlir::func::FuncOp F) {
     if (mlir::isa<mlir::LLVM::StoreOp, mlir::scf::YieldOp,
                   mlir::func::ReturnOp>(Op))
       return;
+    // Phase 4.5.4: `llvm.getelementptr` produces an `!llvm.ptr` that
+    // we never reify as a named SV signal — the load/store consumer
+    // renders the indexed access expression directly via the
+    // GepAddr side-table.
+    if (mlir::isa<mlir::LLVM::GEPOp>(Op))
+      return;
     // For-loop control-flow ops produce structural results (the
     // for-iv, the cmpf result, the addf next-value) that the SV
     // emitter renders as part of the SV `for (int i = ...)` head and
@@ -507,6 +531,12 @@ void Emitter::declarePrelude(mlir::func::FuncOp F) {
   for (mlir::Value V : PreludeDecls) {
     auto It = SlotElemTy.find(V);
     mlir::Type T = (It != SlotElemTy.end()) ? It->second : V.getType();
+    // Phase 4.5.4: array element type → `logic [W-1:0] arr [N];`.
+    if (auto Arr = mlir::dyn_cast<mlir::LLVM::LLVMArrayType>(T)) {
+      OS << "    " << svType(Arr.getElementType()) << " "
+         << name(V) << " [" << Arr.getNumElements() << "];\n";
+      continue;
+    }
     OS << "    " << svType(T) << " " << name(V) << ";\n";
   }
   // Phase 3: declare a `<reg>` and `<reg>_next` pair for every
@@ -755,18 +785,46 @@ void Emitter::emitAlloca(mlir::LLVM::AllocaOp A, int Indent) {
   (void)A; (void)Indent;
 }
 
+void Emitter::emitGEP(mlir::LLVM::GEPOp G, int Indent) {
+  // Phase 4.5.4: a `getelementptr [N x iW], %arr[0, %idx]` resolves
+  // to the SV indexed-access expression `<arr>[<idx>]`. We don't
+  // emit a statement for it — instead we record the address-string
+  // in `GepAddr` so the consuming load/store renders the indexed
+  // access directly.
+  (void)Indent;
+  if (G.getDynamicIndices().empty()) return;  // unexpected shape
+  // Two indices total: the array's "outer" 0 (compile-time) plus
+  // the per-element index. Our static-array lowering only ever
+  // emits exactly that shape; bail otherwise.
+  if (G.getDynamicIndices().size() != 1) return;
+  std::string Arr = name(G.getBase());
+  std::string Idx = exprFor(G.getDynamicIndices()[0]);
+  std::string Expr = Arr + "[" + Idx + "]";
+  GepAddr[G.getOperation()] = Expr;
+}
+
 void Emitter::emitLoad(mlir::LLVM::LoadOp L, int Indent) {
-  // Render as `<load_result> = <slot_name>;` — the slot's logic
-  // declaration carries the value. We keep an explicit assignment so
-  // every named SSA value has a home in always_comb (Phase 1
-  // simplicity). A later quality pass can elide single-use loads.
+  // If the address is a GEP we've recorded, render `<arr>[<idx>]`
+  // as the source. Otherwise this is a plain slot load.
+  std::string AddrExpr;
+  if (auto *AddrOp = L.getAddr().getDefiningOp()) {
+    auto It = GepAddr.find(AddrOp);
+    if (It != GepAddr.end()) AddrExpr = It->second;
+  }
+  if (AddrExpr.empty()) AddrExpr = name(L.getAddr());
   indent(Indent);
-  OS << name(L.getResult()) << " = " << name(L.getAddr()) << ";\n";
+  OS << name(L.getResult()) << " = " << AddrExpr << ";\n";
 }
 
 void Emitter::emitStore(mlir::LLVM::StoreOp S, int Indent) {
+  std::string AddrExpr;
+  if (auto *AddrOp = S.getAddr().getDefiningOp()) {
+    auto It = GepAddr.find(AddrOp);
+    if (It != GepAddr.end()) AddrExpr = It->second;
+  }
+  if (AddrExpr.empty()) AddrExpr = name(S.getAddr());
   indent(Indent);
-  OS << name(S.getAddr()) << " = " << exprFor(S.getValue()) << ";\n";
+  OS << AddrExpr << " = " << exprFor(S.getValue()) << ";\n";
 }
 
 void Emitter::emitReturn(mlir::func::ReturnOp R, int Indent) {
@@ -967,6 +1025,7 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
   if (auto Y = dyn_cast<scf::YieldOp>(Op)) { emitScfYield(Y, Indent); return; }
   if (auto W = dyn_cast<scf::WhileOp>(Op)) { emitScfWhile(W, Indent); return; }
   if (auto A = dyn_cast<LLVM::AllocaOp>(Op)) { emitAlloca(A, Indent); return; }
+  if (auto G = dyn_cast<LLVM::GEPOp>(Op)) { emitGEP(G, Indent); return; }
   if (auto L = dyn_cast<LLVM::LoadOp>(Op)) { emitLoad(L, Indent); return; }
   if (auto S = dyn_cast<LLVM::StoreOp>(Op)) { emitStore(S, Indent); return; }
   if (auto R = dyn_cast<func::ReturnOp>(Op)) { emitReturn(R, Indent); return; }
@@ -1006,6 +1065,16 @@ void Emitter::emitBody(mlir::func::FuncOp F) {
   // conditionally written in only some branches.
   for (mlir::Value V : PreludeDecls) {
     indent(2);
+    // Phase 4.5.4: arrays use the SV `'{default: '0}` literal so
+    // every element zero-inits.
+    if (auto *Op = V.getDefiningOp()) {
+      if (auto A = mlir::dyn_cast<mlir::LLVM::AllocaOp>(Op)) {
+        if (mlir::isa<mlir::LLVM::LLVMArrayType>(A.getElemType())) {
+          OS << name(V) << " = '{default: '0};\n";
+          continue;
+        }
+      }
+    }
     OS << name(V) << " = '0;\n";
   }
   // Phase 3: each persistent register's `_next` signal defaults to
