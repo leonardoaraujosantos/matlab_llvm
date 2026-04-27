@@ -691,7 +691,7 @@ piece the next stage builds on.
 |---|---|---|--:|---|
 | A | (split) | (split — see notes below) | — | — |
 | A.1 | 🟡 deferred | fi-spec propagation across function-call boundaries (precondition for clean Saturate-cast on the function-arg path) | ~3 days | enables `fi(arg, ...)` casts to clamp correctly, used by fir/seq's final stage |
-| A.2 | 🟡 deferred | Constant-index reads on vector args | ~1 day | small extension once Stage B lands; no value standalone |
+| A.2 | ✅ subsumed by B | Constant-index reads on vector args | — | the body subscripts that A.2 targeted (`vec_a(k)`) are rewritten by Stage B's `LowerStaticFiArrays.tryRewriteArg`; verified working in `test/EmitSV/vector_processor.m` |
 | B | ✅ shipped | Vector function arguments | ~4 days | `vector_processor` ✅ |
 | C | ✅ shipped | Static array literal init (`fi([0.1, 0.2, ...], ...)` → alloca + per-element stores) | ~2 days | coefficient-table half of fir / seq |
 | D | ✅ shipped | Loop-iv array indexing (`for i = 1:N; arr(i) ...; end`) | ~3 days | for-loop bodies in fir / seq |
