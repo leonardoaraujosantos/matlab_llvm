@@ -93,6 +93,7 @@ if(MATLAB_LLVM_WITH_MLIR)
     lib/MLIR/Dialect/MatlabDialect.cpp
     lib/MLIR/Passes/SlotPromotion.cpp
     lib/MLIR/Passes/LowerScalarsToArith.cpp
+    lib/MLIR/Passes/LowerFixedPoint.cpp
     lib/MLIR/Passes/LowerIO.cpp
     lib/MLIR/Passes/LowerParfor.cpp
     lib/MLIR/Passes/LowerSeqLoops.cpp

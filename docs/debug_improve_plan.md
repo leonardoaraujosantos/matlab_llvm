@@ -271,6 +271,107 @@ inlining haven't been pursued because line-tables-only is what
 enables source-level stepping for the typical user. Both are
 extensible from here without re-architecting.
 
+## (8) Class instances in Locals + Watch — **shipped**
+
+The `kind=2` path in the runtime, lowering, and DAP server makes
+user-classdef instances first-class citizens in the LOCALS panel
+and the watch box. Before this commit a class instance read like
+`<huge>x<huge> double` because the matrix formatter was reading
+`matlab_obj` internal fields as rows / cols; now it reads
+`1x1 ClassName` and the row expands into one child per stored
+property.
+
+What ships:
+
+- **Runtime.** `matlab_dbg_local` now carries `kind=2` for object
+  pointers; `matlab_dbg_frame_set_obj` is the new mirror entry.
+  `matlab_struct` / `matlab_ws` gained `kind=2` storage via
+  `matlab_ws_set_obj` so script-level class assignments stamp the
+  workspace with the right kind. `matlab_dbg_register_class` /
+  `_class_name` map class IDs back to printable names; the
+  matlab_obj layout already carries `class_id` at the tail of the
+  struct prefix, so the registry plus the obj pointer is all the
+  formatter needs. Property introspection lands as
+  `matlab_dbg_obj_field_count` / `_name` / `_kind` / `_f64` / `_ptr`.
+- **Lowering.** Class-bound slots get a `matlab.class_id` integer
+  attribute on their `matlab.alloc` op (set in `getOrCreateSlot`,
+  the IsCtorObj output, and the IsSelfParam / IsClassParam input
+  sites in `lowerFunction`). `emitStore` forwards it onto the
+  `matlab_dbg_frame_set` builtin so `LowerTensorOps` can pick the
+  obj variant. The script-level `matlab_ws_set_*` site routes
+  class-bound assignments through `matlab_ws_set_obj`. `lowerScript`
+  emits one `matlab_dbg_register_class` call per classdef in the
+  TU at the top of the script body when DebugMode is on.
+- **DAP.** `formatVar` handles `kind=2`. `variables` requests hand
+  out a `variablesReference >= 100000` for each class-instance row
+  and an `ObjRefs` registry maps the handle back to the
+  `matlab_obj *` for child expansion. `evaluate` promotes
+  `kind=1` results back to `kind=2` when the result pointer
+  matches a currently-tracked obj pointer (works around the REPL
+  JIT's fresh-Sema not knowing workspace bindings are
+  class-typed).
+
+Validated by `scn_class_instance_locals` against
+`dap_class_program.m` (two distinct classes plus a subclass; a
+mutator runs before the breakpoint to verify property mutation
+shows up in the expanded view; both `variables` and `evaluate`
+exercise the obj path).
+
+### Known limit
+
+`acc.Balance` typed into the watch box still goes through the
+REPL's struct path because the fresh Sema for the eval snippet
+doesn't pin `acc` to a class. For stored-f64 properties the
+struct-prefix layout means the read happens to find the field
+anyway; for Dependent properties (which need `get.<Name>`
+dispatch) it returns 0. Workaround: expand the row in the LOCALS
+panel — that path goes through obj introspection and shows every
+materialised property correctly. Dependent properties would
+require a separate pass to query them via the lowered
+`get.<Name>__<Class>` function; not started.
+
+## (9) Matrix expansion in Locals + Watch — **shipped**
+
+Numeric matrices used to render as `RxC double` with no
+expansion path: the LOCALS panel had no disclosure arrow and the
+watch box gave the same shape summary for any matrix expression.
+Now every kind=1 row carries a `variablesReference` so the IDE
+can drill into the cells.
+
+What ships:
+
+- **Runtime.** `matlab_dbg_mat_get(m, i, j)` exposes 1-based
+  element access without leaking the `matlab_mat` layout to the
+  DAP server. Out-of-range indices and complex matrices return
+  `0.0` so a malformed children request can't read past the
+  buffer.
+- **DAP server.** `MatRefBase = 200000` + a `MatRefs` vector mirror
+  the obj-ref registry. Kind=1 rows in LOCALS / per-frame Locals /
+  obj-property children / watch eval results all register the
+  matrix and emit a mat-ref. `variables(ref >= MatRefBase)` walks
+  the buffer row-major and emits children with `(i,j)` /
+  `(i)` labels (the latter for row / column vectors). 1x1 matrices
+  stay leaves and unbox to the scalar in the parent value.
+  `MatExpandCap = 256` caps the children list with a `…` /
+  `(truncated)` trailer so a 1000x1000 matrix can't blow up the
+  wire payload.
+
+Validated by `scn_matrix_expansion` against
+`dap_matrix_program.m` (covers the 2x3 / 3x1 / 1x1 formatting
+paths and the watch-result variant).
+
+### Out of scope (for now)
+
+- **Custom matrix-viewer request.** Editor panels that want a 2D
+  grid in one response (instead of 256 child rows) need a
+  dedicated handler — easy to layer over the same `MatRefs`
+  registry, but no IDE in the tree consumes it yet.
+- **Real complex matrices** (the `MATLAB_MAT_C_MAGIC`-tagged
+  descriptor). `mat_get` short-circuits to 0 there; a parallel
+  `_get_real` / `_get_imag` pair would feed a richer formatter.
+- **3-D matrices** (`matlab_mat3`). Pattern is identical but
+  needs an `(i,j,k)` labeller and a stricter cap.
+
 ---
 
 ## Out of scope (separately tracked, not on the roadmap)

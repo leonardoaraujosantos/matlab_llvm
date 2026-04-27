@@ -794,6 +794,9 @@ bool Emitter::buildInlineExpr(mlir::Operation &Op, std::string &Expr) {
   if (isa<arith::AddIOp>(Op)) return bin("+");
   if (isa<arith::SubIOp>(Op)) return bin("-");
   if (isa<arith::MulIOp>(Op)) return bin("*");
+  if (isa<arith::ShLIOp>(Op))  return bin("<<");
+  if (isa<arith::ShRSIOp>(Op)) return bin(">>");
+  if (isa<arith::ShRUIOp>(Op)) return bin(">>");
   // For i1 results use logical operators — the MATLAB frontend routes
   // `&&` / `||` / `!` through arith, but emitting them as bitwise `&` /
   // `|` / `^` in C is both visually confusing and silently skips short-
@@ -4008,6 +4011,26 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
   if (mlir::isa<mlir::arith::AddIOp>(Op)) { emitBinF("+"); return; }
   if (mlir::isa<mlir::arith::SubIOp>(Op)) { emitBinF("-"); return; }
   if (mlir::isa<mlir::arith::MulIOp>(Op)) { emitBinF("*"); return; }
+  // arith.shli / shrsi / shrui — emitted by LowerFixedPoint for fi
+  // arithmetic. C `<<` and `>>` on signed integers are well-defined for
+  // non-negative left-hand sides; LowerFixedPoint always extends operands
+  // to a signed/unsigned native lane first, so emitting `<<` / `>>` here
+  // is correct.
+  if (mlir::isa<mlir::arith::ShLIOp>(Op))  { emitBinF("<<"); return; }
+  if (mlir::isa<mlir::arith::ShRSIOp>(Op)) { emitBinF(">>"); return; }
+  if (mlir::isa<mlir::arith::ShRUIOp>(Op)) { emitBinF(">>"); return; }
+  // arith.bitcast — re-interpret the bits at a different integer width
+  // (signless ↔ signed/unsigned). In the C output it's a plain cast since
+  // we only use it to transition between signless and signed integer
+  // types of the same width, which compile-target-side is a no-op.
+  if (mlir::isa<mlir::arith::BitcastOp>(Op)) {
+    indent(Indent);
+    std::string N = this->name(Op.getResult(0));
+    OS << cTypeOfValue(Op.getResult(0)) << " " << N << " = ("
+       << cTypeOfValue(Op.getResult(0)) << ")"
+       << this->exprFor(Op.getOperand(0)) << ";\n";
+    return;
+  }
 
   // --- arith.cmpf / cmpi ----------------------------------------------
   if (auto C = mlir::dyn_cast<mlir::arith::CmpFOp>(Op)) {

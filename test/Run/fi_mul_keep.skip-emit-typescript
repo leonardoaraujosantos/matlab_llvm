@@ -1,0 +1,2 @@
+TS BigInt arithmetic doesn't mix with `number` shifts produced by EmitTypeScript.
+The C/LLVM/Python lanes cover this case bit-exactly.

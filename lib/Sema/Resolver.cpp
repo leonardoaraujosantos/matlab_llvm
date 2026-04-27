@@ -44,6 +44,11 @@ void Resolver::registerBuiltins() {
     "mod", "rem", "floor", "ceil", "round", "fix",
     "double", "single", "int8", "int16", "int32", "int64",
     "uint8", "uint16", "uint32", "uint64", "logical", "char",
+    /* Fixed-Point Designer (fi) — see docs/emit_fixed_point.md. */
+    "fi", "numerictype", "fimath", "fipref",
+    "int", "storedInteger", "storedIntegerToDouble",
+    "reinterpretcast", "removefimath", "setfimath",
+    "bin", "hex", "dec",
     "struct", "cell", "fieldnames", "isstruct", "isfield", "iscell",
     "rmfield", "string", "strlen", "isstring",
     "sprintf", "num2str", "str2double",

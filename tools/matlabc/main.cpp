@@ -211,6 +211,11 @@ int runReplInput(mlirgen::Context &MCtx, const std::string &Src, int Id) {
   }
 
   mlirgen::runSlotPromotion(M);
+  // Rewrite Fixed-Point Designer (`fi`) ops into integer-shift sequences
+  // BEFORE the generic scalar-to-arith pass — otherwise the matlab.add /
+  // matlab.matmul that carry fi attributes get folded to plain arith.addi
+  // / arith.muli and lose the spec metadata. See docs/emit_fixed_point.md.
+  mlirgen::runLowerFixedPoint(M);
   mlirgen::runLowerScalarsToArith(M);
   mlirgen::runSlotPromotion(M);
   mlirgen::runOutlineParfor(M);
@@ -1033,6 +1038,18 @@ const char *matlab_dbg_frame_local_name(int frame_idx, int i,
 int  matlab_dbg_frame_local_kind(int frame_idx, int i);
 double matlab_dbg_frame_local_f64(int frame_idx, int i);
 void  *matlab_dbg_frame_local_ptr(int frame_idx, int i);
+/* Class-instance support. matlab_dbg_class_name resolves the class_id
+ * tag stamped on a matlab_obj* by matlab_obj_new. The introspection
+ * accessors (_obj_field_*) walk the obj's struct prefix so the DAP
+ * server can expand a class instance into one row per property. */
+const char *matlab_dbg_class_name(int32_t class_id, int64_t *len_out);
+int32_t matlab_dbg_obj_class_id_of(void *obj);
+int  matlab_dbg_obj_field_count(void *obj);
+const char *matlab_dbg_obj_field_name(void *obj, int i, int64_t *len_out);
+int  matlab_dbg_obj_field_kind(void *obj, int i);
+double matlab_dbg_obj_field_f64(void *obj, int i);
+void *matlab_dbg_obj_field_ptr(void *obj, int i);
+void matlab_ws_set_obj(const char *name, int64_t len, void *obj);
 }
 
 /* Forward declarations from matlab_runtime.c so we can format matrices
@@ -1041,6 +1058,7 @@ void  *matlab_dbg_frame_local_ptr(int frame_idx, int i);
 struct matlab_mat;
 extern "C" int64_t matlab_dbg_mat_rows(struct matlab_mat *m);
 extern "C" int64_t matlab_dbg_mat_cols(struct matlab_mat *m);
+extern "C" double matlab_dbg_mat_get(struct matlab_mat *m, int64_t i, int64_t j);
 
 namespace dap {
 
@@ -1440,6 +1458,11 @@ bool compileProgram() {
 
 
   mlirgen::runSlotPromotion(M);
+  // Rewrite Fixed-Point Designer (`fi`) ops into integer-shift sequences
+  // BEFORE the generic scalar-to-arith pass — otherwise the matlab.add /
+  // matlab.matmul that carry fi attributes get folded to plain arith.addi
+  // / arith.muli and lose the spec metadata. See docs/emit_fixed_point.md.
+  mlirgen::runLowerFixedPoint(M);
   mlirgen::runLowerScalarsToArith(M);
   mlirgen::runSlotPromotion(M);
   mlirgen::runOutlineParfor(M);
@@ -1664,11 +1687,147 @@ void *pauseWatcherMain(void *) {
   return nullptr;
 }
 
+/* Object-ref registry. Each class instance the IDE asks to expand
+ * gets a small integer handle in this vector; we hand the handle
+ * back as the row's variablesReference so the next `variables`
+ * request can find the matlab_obj* again. The registry is process-
+ * lifetime — entries pile up across pauses but the obj pointers stay
+ * valid as long as their owning slot is alive (script-frame for the
+ * REPL workspace, function-frame for per-frame Locals). The base is
+ * picked above the existing 1 / 1000+ ranges so the encodings don't
+ * collide. */
+constexpr int64_t ObjRefBase = 100000;
+std::vector<void *> ObjRefs;
+
+int64_t registerObjRef(void *obj) {
+  if (!obj) return 0;
+  ObjRefs.push_back(obj);
+  return ObjRefBase + (int64_t)(ObjRefs.size() - 1);
+}
+
+void *lookupObjRef(int64_t ref) {
+  if (ref < ObjRefBase || ref >= ObjRefBase + 100000) return nullptr;
+  size_t idx = (size_t)(ref - ObjRefBase);
+  if (idx >= ObjRefs.size()) return nullptr;
+  return ObjRefs[idx];
+}
+
+/* Matrix-ref registry. Mirror of ObjRefs but for matlab_mat *
+ * pointers — every matrix row in LOCALS / WATCH / property children
+ * gets a handle here so the IDE can drill into the cells via the
+ * standard DAP `variables` request. The base sits above ObjRefs's
+ * window so a stray ref doesn't accidentally route to the wrong
+ * registry. As with ObjRefs the matrix pointer is borrowed from the
+ * owning slot (function-frame mini-ws or matlab_ws); the slot
+ * outlives any client read because the runtime is paused while the
+ * DAP server is responding. */
+constexpr int64_t MatRefBase = 200000;
+std::vector<void *> MatRefs;
+
+int64_t registerMatRef(void *mat) {
+  if (!mat) return 0;
+  MatRefs.push_back(mat);
+  return MatRefBase + (int64_t)(MatRefs.size() - 1);
+}
+
+void *lookupMatRef(int64_t ref) {
+  if (ref < MatRefBase) return nullptr;
+  size_t idx = (size_t)(ref - MatRefBase);
+  if (idx >= MatRefs.size()) return nullptr;
+  return MatRefs[idx];
+}
+
+/* Format a single matrix row for display alongside its
+ * variablesReference. 1x1 matrices unbox to the scalar (matches
+ * matlab_struct_get_f64 and what users want to see in a counter
+ * variable); everything else gets the `RxC double` shape summary so
+ * the disclosure arrow in the IDE has a meaningful preview before
+ * it's clicked. */
+std::string formatMatShape(struct matlab_mat *M) {
+  if (!M) return "[]";
+  int64_t R = matlab_dbg_mat_rows(M);
+  int64_t C = matlab_dbg_mat_cols(M);
+  if (R == 1 && C == 1) {
+    char Buf[64];
+    snprintf(Buf, sizeof Buf, "%g", matlab_dbg_mat_get(M, 1, 1));
+    return Buf;
+  }
+  char Buf[64];
+  snprintf(Buf, sizeof Buf, "%lldx%lld double",
+           (long long)R, (long long)C);
+  return Buf;
+}
+
+/* Cap matrix expansion at 256 children so a watchful IDE doesn't
+ * pull a 1000x1000 grid in one shot. The trailing "..." row makes
+ * the truncation visible. Children layout:
+ *   - 1xN row vector  -> linear "(j)" labels.
+ *   - Mx1 col vector  -> linear "(i)" labels.
+ *   - MxN matrix      -> "(i,j)" labels in row-major order.
+ * 1x1 matrices have no children — the parent row already shows the
+ * scalar via formatMatShape. */
+constexpr size_t MatExpandCap = 256;
+
+void appendMatChildren(Array &Vs, struct matlab_mat *M) {
+  if (!M) return;
+  int64_t R = matlab_dbg_mat_rows(M);
+  int64_t C = matlab_dbg_mat_cols(M);
+  if (R == 1 && C == 1) return;
+  bool RowVec = (R == 1);
+  bool ColVec = (C == 1);
+  size_t emitted = 0;
+  auto emit = [&](std::string label, double v) {
+    char Buf[64];
+    snprintf(Buf, sizeof Buf, "%g", v);
+    Vs.push_back(Object{
+      {"name", std::move(label)},
+      {"value", std::string(Buf)},
+      {"variablesReference", (int64_t)0},
+    });
+    ++emitted;
+  };
+  for (int64_t i = 1; i <= R; ++i) {
+    for (int64_t j = 1; j <= C; ++j) {
+      if (emitted >= MatExpandCap) {
+        Vs.push_back(Object{
+          {"name", std::string("…")},
+          {"value", std::string("(truncated)")},
+          {"variablesReference", (int64_t)0},
+        });
+        return;
+      }
+      char LabelBuf[64];
+      if (RowVec)      snprintf(LabelBuf, sizeof LabelBuf, "(%lld)", (long long)j);
+      else if (ColVec) snprintf(LabelBuf, sizeof LabelBuf, "(%lld)", (long long)i);
+      else             snprintf(LabelBuf, sizeof LabelBuf, "(%lld,%lld)",
+                                  (long long)i, (long long)j);
+      emit(LabelBuf, matlab_dbg_mat_get(M, i, j));
+    }
+  }
+}
+
+/* Render a class instance as `1x1 ClassName`, falling back to the
+ * raw class_id when the registry hasn't been populated (DebugMode
+ * off path; shouldn't happen for -dap launches but the runtime is
+ * the source of truth so the formatter handles it gracefully). */
+std::string formatObj(void *obj) {
+  if (!obj) return "[]";
+  int32_t cid = matlab_dbg_obj_class_id_of(obj);
+  int64_t cnLen = 0;
+  const char *cn = matlab_dbg_class_name(cid, &cnLen);
+  std::string clsName;
+  if (cn && cnLen > 0) clsName.assign(cn, (size_t)cnLen);
+  else                  clsName = "<class " + std::to_string(cid) + ">";
+  return std::string("1x1 ") + clsName;
+}
+
 /* Format a variable for the DAP `variables` response. Matrices get
  * a shape summary ("1x3 double") except 1x1 matrices, which unbox
  * to the scalar value — matches matlab_struct_get_f64's auto-unbox
  * and is also what users want to see in the watch panel for a
- * counter-style variable. */
+ * counter-style variable. Class instances render as `1x1 ClassName`;
+ * the LOCALS handler attaches a variablesReference so the row
+ * expands into one child per property. */
 std::string formatVar(int Kind, int WsIdx) {
   if (Kind == 0) {
     char Buf[64];
@@ -1676,25 +1835,10 @@ std::string formatVar(int Kind, int WsIdx) {
     return Buf;
   }
   if (Kind == 1) {
-    auto *M = (struct matlab_mat *)matlab_dbg_ws_ptr(WsIdx);
-    if (!M) return "[]";
-    int64_t R = matlab_dbg_mat_rows(M);
-    int64_t C = matlab_dbg_mat_cols(M);
-    if (R == 1 && C == 1) {
-      char Buf[64];
-      /* matlab_dbg_mat_rows / _cols are the only DAP-exposed entries
-       * — there's no _data accessor. Fall back to ws_get_f64 which
-       * auto-unboxes via matlab_struct_get_f64. */
-      int64_t Nlen = 0;
-      const char *Nm = matlab_dbg_ws_name(WsIdx, &Nlen);
-      double V = matlab_ws_get_f64(Nm, Nlen);
-      snprintf(Buf, sizeof Buf, "%g", V);
-      return Buf;
-    }
-    char Buf[64];
-    snprintf(Buf, sizeof Buf, "%lldx%lld double",
-             (long long)R, (long long)C);
-    return Buf;
+    return formatMatShape((struct matlab_mat *)matlab_dbg_ws_ptr(WsIdx));
+  }
+  if (Kind == 2) {
+    return formatObj(matlab_dbg_ws_ptr(WsIdx));
   }
   return "<unknown>";
 }
@@ -1902,6 +2046,68 @@ bool handleRequest(const Object &Msg) {
     int64_t Ref = VR.value_or(0);
     int RtFrameIdx = -1;          /* -1 means "script ws only" */
     bool MergeScriptWs = false;
+    /* Matrix expansion: same pattern as the obj path below, but the
+     * children are scalar cells instead of properties. The handle
+     * came from a kind=1 row (LOCALS, watch eval, or an obj
+     * property that holds a matrix); we resolve it back to the
+     * matlab_mat* and walk its row-major buffer via the runtime
+     * accessor. The window check is `< MatRefBase + 100000` so an
+     * out-of-range ref doesn't accidentally hit MatRefs when the
+     * caller meant ObjRefs (or vice versa). */
+    if (Ref >= MatRefBase) {
+      auto *M = (struct matlab_mat *)lookupMatRef(Ref);
+      if (M) appendMatChildren(Vs, M);
+      sendResponse(ReqSeq, *Cmd, true,
+                   Object{{"variables", std::move(Vs)}});
+      return true;
+    }
+    /* Object-property expansion: when the IDE clicks the disclosure
+     * arrow on a class-instance row, the request comes back with the
+     * variablesReference we previously handed out. Resolve it back to
+     * a matlab_obj* and emit one row per property. */
+    if (Ref >= ObjRefBase) {
+      void *obj = lookupObjRef(Ref);
+      if (obj) {
+        int N = matlab_dbg_obj_field_count(obj);
+        for (int i = 0; i < N; ++i) {
+          int64_t Nlen = 0;
+          const char *Nm = matlab_dbg_obj_field_name(obj, i, &Nlen);
+          if (!Nm) continue;
+          int K = matlab_dbg_obj_field_kind(obj, i);
+          std::string Val;
+          int64_t ChildRef = 0;
+          if (K == 0) {
+            char Buf[64];
+            snprintf(Buf, sizeof Buf, "%g",
+                     matlab_dbg_obj_field_f64(obj, i));
+            Val = Buf;
+          } else if (K == 1) {
+            auto *M = (struct matlab_mat *)matlab_dbg_obj_field_ptr(obj, i);
+            Val = formatMatShape(M);
+            /* Multi-cell matrix properties are drillable too — the
+             * Matrix Viewer / Variable Inspector can chase the ref
+             * down without a separate eval. */
+            if (M && (matlab_dbg_mat_rows(M) != 1 ||
+                      matlab_dbg_mat_cols(M) != 1))
+              ChildRef = registerMatRef(M);
+          } else if (K == 2) {
+            void *child = matlab_dbg_obj_field_ptr(obj, i);
+            Val = formatObj(child);
+            if (child) ChildRef = registerObjRef(child);
+          } else {
+            Val = "<unknown>";
+          }
+          Vs.push_back(Object{
+            {"name", std::string(Nm, (size_t)Nlen)},
+            {"value", Val},
+            {"variablesReference", ChildRef},
+          });
+        }
+      }
+      sendResponse(ReqSeq, *Cmd, true,
+                   Object{{"variables", std::move(Vs)}});
+      return true;
+    }
     if (Ref == 1) {
       /* Legacy ref. Behave as before: return matlab_ws contents only.
        * Existing tests that hardcode `1` continue to work. */
@@ -1929,10 +2135,24 @@ bool handleRequest(const Object &Msg) {
         int K = matlab_dbg_ws_kind(i);
         std::string Nstr(Nm, (size_t)Nlen);
         Seen.insert(Nstr);
+        /* Class instances get a variablesReference so the IDE can
+         * expand them. Matrix rows get one too, so the IDE can drill
+         * into the cells via the standard `variables(ref)` path —
+         * 1x1 matrices are skipped because formatMatShape already
+         * unboxes them to the scalar value. */
+        int64_t ChildRef = 0;
+        if (K == 2) {
+          if (void *obj = matlab_dbg_ws_ptr(i)) ChildRef = registerObjRef(obj);
+        } else if (K == 1) {
+          auto *M = (struct matlab_mat *)matlab_dbg_ws_ptr(i);
+          if (M && (matlab_dbg_mat_rows(M) != 1 ||
+                    matlab_dbg_mat_cols(M) != 1))
+            ChildRef = registerMatRef(M);
+        }
         Vs.push_back(Object{
           {"name", Nstr},
           {"value", formatVar(K, i)},
-          {"variablesReference", 0},
+          {"variablesReference", ChildRef},
         });
       }
     }
@@ -1949,6 +2169,7 @@ bool handleRequest(const Object &Msg) {
          * double" (with 1x1 unboxed). Mirrors formatVar for ws but
          * pulls values from the per-frame accessors. */
         std::string Val;
+        int64_t ChildRef = 0;
         if (K == 0) {
           char Buf[64];
           double V = matlab_dbg_frame_local_f64(RtFrameIdx, i);
@@ -1957,22 +2178,23 @@ bool handleRequest(const Object &Msg) {
         } else if (K == 1) {
           auto *M = (struct matlab_mat *)matlab_dbg_frame_local_ptr(
               RtFrameIdx, i);
-          if (!M) Val = "[]";
-          else {
-            int64_t R = matlab_dbg_mat_rows(M);
-            int64_t C = matlab_dbg_mat_cols(M);
-            char Buf[64];
-            snprintf(Buf, sizeof Buf, "%lldx%lld double",
-                     (long long)R, (long long)C);
-            Val = Buf;
-          }
+          Val = formatMatShape(M);
+          /* Same gating as the matlab_ws merge above: only multi-cell
+           * matrices get a child ref, scalars are leaves. */
+          if (M && (matlab_dbg_mat_rows(M) != 1 ||
+                    matlab_dbg_mat_cols(M) != 1))
+            ChildRef = registerMatRef(M);
+        } else if (K == 2) {
+          void *obj = matlab_dbg_frame_local_ptr(RtFrameIdx, i);
+          Val = formatObj(obj);
+          if (obj) ChildRef = registerObjRef(obj);
         } else {
           Val = "<unknown>";
         }
         Vs.push_back(Object{
           {"name", Nstr},
           {"value", Val},
-          {"variablesReference", 0},
+          {"variablesReference", ChildRef},
         });
       }
     }
@@ -2154,7 +2376,7 @@ bool handleRequest(const Object &Msg) {
             int K = matlab_dbg_ws_kind(j);
             WsBackup B{Nstr, K, 0.0, nullptr};
             if (K == 0) B.f64 = matlab_dbg_ws_f64(j);
-            else if (K == 1) B.ptr = matlab_dbg_ws_ptr(j);
+            else if (K == 1 || K == 2) B.ptr = matlab_dbg_ws_ptr(j);
             Backup.push_back(std::move(B));
             break;
           }
@@ -2170,6 +2392,15 @@ bool handleRequest(const Object &Msg) {
            * the lifetime of the frame, which covers our eval. */
           matlab_ws_set_mat(Nstr.data(), (int64_t)Nstr.size(),
                              (struct matlab_mat *)P);
+        } else if (K == 2) {
+          /* Class instance: stamp via matlab_ws_set_obj so the
+           * workspace remembers it as kind=2. The eval JIT only
+           * needs to see the obj pointer; method dispatch routes
+           * through matlab_obj_* the same way it does in the
+           * compiled code, so `obj.method()` and `obj.Prop` work
+           * inside watch expressions. */
+          void *P = matlab_dbg_frame_local_ptr(RtFrameIdx, i);
+          matlab_ws_set_obj(Nstr.data(), (int64_t)Nstr.size(), P);
         }
         Stamped.push_back(std::move(Nstr));
       }
@@ -2181,6 +2412,7 @@ bool handleRequest(const Object &Msg) {
 
     /* Read the result before any restoration so we can format it. */
     std::string Display;
+    int64_t EvalRef = 0;
     bool RcOk = (Rc == 0);
     if (RcOk) {
       int N = matlab_dbg_ws_count();
@@ -2195,8 +2427,59 @@ bool handleRequest(const Object &Msg) {
           break;
         }
       }
-      Display = (Found >= 0) ? formatVar(Kind, Found)
-                             : std::string("<void>");
+      /* Class-instance promotion. The REPL JIT compiling
+       * `__matlab_dbg_eval = (<expr>);` doesn't know that the RHS is a
+       * class instance — its Sema is fresh and has no view into the
+       * workspace's existing bindings — so the result lands with
+       * kind=1 (matlab_mat) even when the underlying pointer is a
+       * matlab_obj. Detect that here by sweeping every currently
+       * tracked obj pointer (matlab_ws kind=2 plus every frame's
+       * mini-ws kind=2) and matching against the eval result's ptr.
+       * On a hit we know the value is a class instance and switch the
+       * display + variablesReference to the obj path. */
+      if (Found >= 0 && Kind == 1) {
+        void *EvalPtr = matlab_dbg_ws_ptr(Found);
+        auto isKnownObj = [&](void *p) -> bool {
+          if (!p) return false;
+          int wsN = matlab_dbg_ws_count();
+          for (int j = 0; j < wsN; ++j)
+            if (matlab_dbg_ws_kind(j) == 2 &&
+                matlab_dbg_ws_ptr(j) == p)
+              return true;
+          int fc = matlab_dbg_frame_count();
+          for (int f = 0; f < fc; ++f) {
+            int fn = matlab_dbg_frame_locals_count(f);
+            for (int j = 0; j < fn; ++j)
+              if (matlab_dbg_frame_local_kind(f, j) == 2 &&
+                  matlab_dbg_frame_local_ptr(f, j) == p)
+                return true;
+          }
+          return false;
+        };
+        if (isKnownObj(EvalPtr)) Kind = 2;
+      }
+      Display = (Found >= 0)
+                ? (Kind == 2
+                   ? formatObj(matlab_dbg_ws_ptr(Found))
+                   : formatVar(Kind, Found))
+                : std::string("<void>");
+      /* Hand back a variablesReference for class-instance eval
+       * results so the IDE can expand a watched object inline (the
+       * obj pointer survives the matlab_ws_clear_one below — the
+       * underlying obj is owned by the originating slot, not by the
+       * workspace's name binding). Multi-cell matrix results get
+       * the same treatment via the MatRefs registry so the watch
+       * box can drill into a `[1 2; 3 4]` literal or an `A * B`
+       * expression. */
+      if (Found >= 0 && Kind == 2) {
+        if (void *obj = matlab_dbg_ws_ptr(Found))
+          EvalRef = registerObjRef(obj);
+      } else if (Found >= 0 && Kind == 1) {
+        auto *M = (struct matlab_mat *)matlab_dbg_ws_ptr(Found);
+        if (M && (matlab_dbg_mat_rows(M) != 1 ||
+                  matlab_dbg_mat_cols(M) != 1))
+          EvalRef = registerMatRef(M);
+      }
     }
 
     /* Restore matlab_ws to its pre-stamp state. Order matters: clear
@@ -2215,6 +2498,8 @@ bool handleRequest(const Object &Msg) {
       else if (B.kind == 1)
         matlab_ws_set_mat(B.name.data(), (int64_t)B.name.size(),
                            (struct matlab_mat *)B.ptr);
+      else if (B.kind == 2)
+        matlab_ws_set_obj(B.name.data(), (int64_t)B.name.size(), B.ptr);
     }
 
     if (!RcOk) {
@@ -2224,7 +2509,7 @@ bool handleRequest(const Object &Msg) {
     }
     sendResponse(ReqSeq, *Cmd, true,
                  Object{{"result", Display},
-                        {"variablesReference", 0}});
+                        {"variablesReference", EvalRef}});
     return true;
   }
 
@@ -2425,6 +2710,8 @@ int main(int Argc, char **Argv) {
       bool WantClean = Opts.Opt || WantFullPipeline;
       if (WantClean) {
         mlirgen::runSlotPromotion(M);
+        // See docs/emit_fixed_point.md — fi ops must lower before arith.
+        mlirgen::runLowerFixedPoint(M);
         mlirgen::runLowerScalarsToArith(M);
         mlirgen::runSlotPromotion(M);
         if (mlir::failed(mlir::verify(M))) {

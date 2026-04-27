@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -22,6 +23,7 @@ enum class Dtype : uint8_t {
   Complex, // complex double
   Int8,  Int16,  Int32,  Int64,
   UInt8, UInt16, UInt32, UInt64,
+  Fixed,  // MATLAB Fixed-Point Designer `fi` — see FixedSpec on ArrayType.
 };
 
 const char *dtypeName(Dtype D);
@@ -29,6 +31,54 @@ bool isInteger(Dtype D);
 bool isFloating(Dtype D);
 bool isNumeric(Dtype D);
 Dtype promoteDtype(Dtype A, Dtype B); // arithmetic promotion; Unknown if unresolvable
+
+//===----------------------------------------------------------------------===//
+// FixedSpec — Fixed-Point Designer numerictype + fimath parameters.
+//
+// Only meaningful when the parent ArrayType has Elt == Dtype::Fixed. The
+// rendered name is `numerictype(s,WL,FL)`; arithmetic / overflow / rounding
+// modes ride alongside on the same struct so binop promotion and the
+// LowerFixedPoint pass can read them in one place.
+//===----------------------------------------------------------------------===//
+
+struct FixedSpec {
+  bool Signed = true;
+  uint8_t WordLength = 16;     // 1..64; sub-native widths are legal in the
+                               // type but emitted code stores in the smallest
+                               // containing native int.
+  int8_t  FractionLength = 15; // 0..WL; negative deferred (see plan §3.5).
+  // Wrap = 0, Saturate = 1 — aligned with the runtime ABI (matlab_fi_*).
+  enum class Overflow : uint8_t { Wrap = 0, Saturate = 1 } OF = Overflow::Saturate;
+  enum class Rounding : uint8_t {
+    Floor, Nearest, Zero, Convergent, Ceiling
+  } RM = Rounding::Floor;
+
+  bool operator==(const FixedSpec &O) const {
+    return Signed == O.Signed && WordLength == O.WordLength &&
+           FractionLength == O.FractionLength && OF == O.OF && RM == O.RM;
+  }
+  bool operator!=(const FixedSpec &O) const { return !(*this == O); }
+
+  // Number of integer-magnitude bits (== WL - FL - Signed). May be negative
+  // for "scaling smaller than 1 LSB"; we don't ship that case yet but the
+  // arithmetic rules still need the value as signed.
+  int  integerLength() const {
+    return int(WordLength) - int(FractionLength) - (Signed ? 1 : 0);
+  }
+  // Smallest native storage class that can hold WL bits with this signedness.
+  // Returns 8 / 16 / 32 / 64; 0 if WL == 0 (not a legal fi but defensively
+  // handled).
+  uint8_t storageBits() const {
+    if (WordLength == 0) return 0;
+    if (WordLength <= 8)  return 8;
+    if (WordLength <= 16) return 16;
+    if (WordLength <= 32) return 32;
+    return 64;
+  }
+};
+
+// Render `numerictype(1,16,8)` form. Used by dtype names + toString.
+std::string fixedSpecName(const FixedSpec &S);
 
 //===----------------------------------------------------------------------===//
 // Shape — rank + per-dim extents. -1 denotes dynamic / unknown extent.
@@ -87,7 +137,14 @@ class ArrayType : public Type {
 public:
   Dtype Elt = Dtype::Unknown;
   Shape S;
+  /// Only meaningful when Elt == Dtype::Fixed. Carries the WL/FL/signedness/
+  /// overflow/rounding parameters of the fi value. nullopt is the
+  /// "don't-care" state used by joins where the spec is unresolved.
+  std::optional<FixedSpec> FxSpec;
+
   ArrayType(Dtype D, Shape Sh) : Type(Kind::Array), Elt(D), S(std::move(Sh)) {}
+  ArrayType(Dtype D, Shape Sh, FixedSpec Spec)
+      : Type(Kind::Array), Elt(D), S(std::move(Sh)), FxSpec(Spec) {}
 };
 
 class StringArrayType : public Type {
@@ -133,6 +190,10 @@ public:
   // Commonly-used interned types.
   const ArrayType *scalar(Dtype D);
   const ArrayType *arrayOf(Dtype D, Shape S);
+  // Fixed-point variants — Elt is Dtype::Fixed and the FixedSpec is interned
+  // alongside the shape so two requests with the same spec hash-equal.
+  const ArrayType *fixedScalar(FixedSpec Spec);
+  const ArrayType *fixedArray(FixedSpec Spec, Shape S);
   const StringArrayType *stringScalar();
   const StringArrayType *stringArray(Shape S);
   const CellType *cellAny();
@@ -149,7 +210,12 @@ private:
   std::unique_ptr<AnyType> AnyT;
   std::vector<std::unique_ptr<Type>> Owned;
   // Simple memoization.
-  struct ArrayKey { Dtype D; Shape S; bool operator==(const ArrayKey&) const; };
+  struct ArrayKey {
+    Dtype D;
+    Shape S;
+    std::optional<FixedSpec> FxSpec;
+    bool operator==(const ArrayKey&) const;
+  };
   struct ArrayKeyHash { size_t operator()(const ArrayKey &K) const; };
   // We keep a vector here because Shape::Dims order matters; linear scan is
   // fine for our sizes.

@@ -20,6 +20,20 @@ bool runSlotPromotion(mlir::ModuleOp M);
 /// (f32/f64/integer/i1). Array / tensor ops are left for later phases.
 bool runLowerScalarsToArith(mlir::ModuleOp M);
 
+/// Rewrite Fixed-Point Designer (`fi`) ops into integer-shift sequences:
+///   - `matlab.fi.const`  -> arith.constant (the stored integer)
+///   - `matlab.fi.cast`   -> matlab_fi_quantize_{s,u} call (double → fi)
+///                           or shift + saturate + truncate (fi → fi clamp)
+///   - `matlab.add` / `matlab.sub` (fi-tagged) -> extend, align FLs by
+///                          shift, integer add/sub, optional saturate
+///   - `matlab.matmul` / `matlab.emul` (fi-tagged scalar) -> integer mul
+///   - `matlab.neg` (fi-tagged) -> arith.subi 0
+/// All other ops pass through unchanged. Runs after LowerScalarsToArith
+/// (so non-fi scalar arith is already in arith.*) and before LowerSeqLoops
+/// / LowerTensorOps. See docs/emit_fixed_point.md §7 for the rewrite
+/// semantics.
+bool runLowerFixedPoint(mlir::ModuleOp M);
+
 /// Lowering of I/O-related matlab.* ops to external runtime calls.
 ///
 ///   matlab.const_char "txt" : () -> tensor<1xNxi8>

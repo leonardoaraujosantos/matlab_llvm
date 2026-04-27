@@ -25,6 +25,7 @@
 #include "llvm/ADT/StringSet.h"
 #include "llvm/Support/raw_os_ostream.h"
 
+#include <cmath>
 #include <limits>
 
 #include <functional>
@@ -60,7 +61,102 @@ double foldFloat(const Expr *E) {
     try { return std::stod(std::string(L->Text)); } catch (...) { return 0.0; }
   }
   if (dynamic_cast<const IntegerLiteral *>(E)) return (double)foldInt(E);
+  if (auto *U = dynamic_cast<const UnaryOpExpr *>(E)) {
+    if (U->Op == UnOp::Minus) return -foldFloat(U->Operand);
+    if (U->Op == UnOp::Plus)  return  foldFloat(U->Operand);
+  }
   return 0.0;
+}
+
+//===----------------------------------------------------------------------===//
+// Fixed-Point Designer (fi) helpers — see docs/emit_fixed_point.md.
+//===----------------------------------------------------------------------===//
+
+// Build the named-attribute set that every fi-tagged op carries.
+// LowerFixedPoint reads these to drive its rewrite. Keys (all integer-
+// valued except the marker):
+//   "fi"        : i1   marker (always 1)
+//   "fi_signed" : i1
+//   "fi_wl"     : i32  word length
+//   "fi_fl"     : i32  fraction length
+//   "fi_of"     : i32  overflow mode (0=Wrap, 1=Saturate)
+//   "fi_rm"     : i32  rounding mode (0=Floor, 1=Nearest, ...)
+llvm::SmallVector<mlir::NamedAttribute, 6>
+buildFixedAttrs(mlir::MLIRContext *Ctx, const FixedSpec &S) {
+  auto I1 = mlir::IntegerType::get(Ctx, 1);
+  auto I32 = mlir::IntegerType::get(Ctx, 32);
+  llvm::SmallVector<mlir::NamedAttribute, 6> Attrs;
+  Attrs.emplace_back(mlir::StringAttr::get(Ctx, "fi"),
+                     mlir::IntegerAttr::get(I1, 1));
+  Attrs.emplace_back(mlir::StringAttr::get(Ctx, "fi_signed"),
+                     mlir::IntegerAttr::get(I1, S.Signed ? 1 : 0));
+  Attrs.emplace_back(mlir::StringAttr::get(Ctx, "fi_wl"),
+                     mlir::IntegerAttr::get(I32, (int64_t)S.WordLength));
+  Attrs.emplace_back(mlir::StringAttr::get(Ctx, "fi_fl"),
+                     mlir::IntegerAttr::get(I32, (int64_t)S.FractionLength));
+  Attrs.emplace_back(mlir::StringAttr::get(Ctx, "fi_of"),
+                     mlir::IntegerAttr::get(I32, (int64_t)S.OF));
+  Attrs.emplace_back(mlir::StringAttr::get(Ctx, "fi_rm"),
+                     mlir::IntegerAttr::get(I32, (int64_t)S.RM));
+  return Attrs;
+}
+
+// Compile-time quantize: real-world value -> stored integer for the spec.
+// Mirrors matlab_fi_quantize_s/u in the runtime; used by Lowering.cpp's
+// `fi(literal, …)` constant fold so the emitted IR has an `arith.constant`
+// of the stored value rather than a runtime call.
+int64_t quantizeFixedSigned(double v, const FixedSpec &S) {
+  double scaled = std::ldexp(v, S.FractionLength);
+  int64_t stored;
+  switch (S.RM) {
+  case FixedSpec::Rounding::Nearest:
+    stored = (int64_t)std::floor(scaled + 0.5);
+    break;
+  case FixedSpec::Rounding::Floor:
+  default:
+    stored = (int64_t)std::floor(scaled);
+    break;
+  }
+  if (S.OF == FixedSpec::Overflow::Saturate) {
+    if (S.WordLength >= 64) return stored;
+    int64_t hi = ((int64_t)1 << (S.WordLength - 1)) - 1;
+    int64_t lo = -((int64_t)1 << (S.WordLength - 1));
+    if (stored > hi) stored = hi;
+    if (stored < lo) stored = lo;
+    return stored;
+  }
+  // Wrap: mask to WL bits then sign-extend.
+  if (S.WordLength == 0) return 0;
+  if (S.WordLength >= 64) return stored;
+  uint64_t mask = ((uint64_t)1 << S.WordLength) - 1u;
+  uint64_t bits = ((uint64_t)stored) & mask;
+  if (bits & ((uint64_t)1 << (S.WordLength - 1))) bits |= ~mask;
+  return (int64_t)bits;
+}
+
+uint64_t quantizeFixedUnsigned(double v, const FixedSpec &S) {
+  double scaled = std::ldexp(v, S.FractionLength);
+  if (scaled < 0.0) scaled = 0.0;
+  uint64_t stored;
+  switch (S.RM) {
+  case FixedSpec::Rounding::Nearest:
+    stored = (uint64_t)std::floor(scaled + 0.5);
+    break;
+  case FixedSpec::Rounding::Floor:
+  default:
+    stored = (uint64_t)std::floor(scaled);
+    break;
+  }
+  if (S.OF == FixedSpec::Overflow::Saturate) {
+    if (S.WordLength >= 64) return stored;
+    uint64_t hi = ((uint64_t)1 << S.WordLength) - 1u;
+    if (stored > hi) stored = hi;
+    return stored;
+  }
+  if (S.WordLength == 0) return 0;
+  if (S.WordLength >= 64) return stored;
+  uint64_t mask = ((uint64_t)1 << S.WordLength) - 1u;
+  return stored & mask;
 }
 
 /* Walk an anon function body collecting NameExpr bindings that refer to
@@ -163,6 +259,9 @@ private:
    * so Vars declared inside a user function keep their slot-local
    * semantics. */
   bool InScriptBody = false;
+  /* Set during lower() so lowerScript can iterate the TU's classdefs
+   * to emit class-name registrations. nullptr outside lower(). */
+  const TranslationUnit *CurTU = nullptr;
   /* When true, inject matlab_dbg_hook(file_id, line) at every
    * top-level / function-body statement. The file_id comes from the
    * SourceManager's FileID so the DAP server can resolve back to the
@@ -410,12 +509,22 @@ void Lowerer::emitStore(mlir::Value V, mlir::Value Slot, mlir::Location Loc) {
   /* Emit a generic matlab_dbg_frame_set builtin and let LowerTensorOps
    * dispatch on the (by then concrete) operand type — at this point in
    * the pipeline V is still `none`-typed, so picking the f64 vs mat
-   * variant here would always be wrong. */
-  mlir::NamedAttribute Cal(
+   * variant here would always be wrong.
+   *
+   * If the slot is tagged with a `matlab.class_id` (set when the
+   * binding is pinned to a user classdef), forward the attribute on
+   * the call so LowerTensorOps can pick matlab_dbg_frame_set_obj. The
+   * obj path keeps the class identity visible in the LOCALS panel
+   * instead of falling through to the matrix formatter. */
+  llvm::SmallVector<mlir::NamedAttribute, 2> Attrs;
+  Attrs.push_back(mlir::NamedAttribute(
       mlir::StringAttr::get(&MCtx, "callee"),
-      mlir::StringAttr::get(&MCtx, "matlab_dbg_frame_set"));
+      mlir::StringAttr::get(&MCtx, "matlab_dbg_frame_set")));
+  if (auto ClsId = Def->getAttrOfType<mlir::IntegerAttr>("matlab.class_id"))
+    Attrs.push_back(mlir::NamedAttribute(
+        mlir::StringAttr::get(&MCtx, "matlab.class_id"), ClsId));
   emitUnregOp("matlab.call_builtin", {NameV, V},
-              {mlir::NoneType::get(&MCtx)}, Loc, {Cal});
+              {mlir::NoneType::get(&MCtx)}, Loc, Attrs);
 }
 
 //===----------------------------------------------------------------------===//
@@ -490,6 +599,16 @@ mlir::Value Lowerer::getOrCreateSlot(Binding *Bnd, const Type *T,
   mlir::OpBuilder::InsertionGuard G(B);
   B.setInsertionPointToStart(Entry);
   mlir::Value Slot = emitAlloc(T, N, L);
+  /* Carry the class_id forward so the DAP store-mirror knows the slot
+   * holds a class instance — same reason as the explicit-alloc sites
+   * in lowerFunction, just for slots created lazily on first
+   * assignment. */
+  if (Bnd && Bnd->PinnedClass && Bnd->PinnedClass->ClassId > 0) {
+    auto I32 = mlir::IntegerType::get(&MCtx, 32);
+    Slot.getDefiningOp()->setAttr(
+        "matlab.class_id",
+        mlir::IntegerAttr::get(I32, (int64_t)Bnd->PinnedClass->ClassId));
+  }
   Slots[Bnd] = Slot;
   return Slot;
 }
@@ -733,9 +852,14 @@ mlir::ModuleOp Lowerer::lower(const TranslationUnit &TU) {
   mlir::ModuleOp M = mlir::ModuleOp::create(mlir::UnknownLoc::get(&MCtx));
   B.setInsertionPointToEnd(M.getBody());
 
+  /* Stash the TU pointer so lowerScript can iterate Classes when
+   * emitting the per-class debug-name registration (DebugMode only).
+   * Cleared at the end of lower() so it never outlives this call. */
+  CurTU = &TU;
   if (TU.ScriptNode) lowerScript(*TU.ScriptNode, M);
   for (const Function *F : TU.Functions) if (F) lowerFunction(*F, M);
   for (const ClassDef *C : TU.Classes) if (C) lowerClass(*C, M);
+  CurTU = nullptr;
 
   return M;
 }
@@ -764,6 +888,27 @@ void Lowerer::lowerScript(const Script &S, mlir::ModuleOp M) {
   B.setInsertionPointToEnd(Entry);
   Slots.clear();
   CurFnName = "script";
+
+  /* Register every classdef's name with the runtime so the DAP server
+   * can resolve a matlab_obj's class_id back to a printable class
+   * name. Emitted as the first thing in the script body so the table
+   * is populated before any constructor runs. No-op outside
+   * DebugMode — the registry is dead weight in production builds. */
+  if (DebugMode && CurTU) {
+    auto I32 = mlir::IntegerType::get(&MCtx, 32);
+    for (const ClassDef *C : CurTU->Classes) {
+      if (!C || C->ClassId <= 0) continue;
+      mlir::Value ClsId = mlir::arith::ConstantOp::create(
+          B, loc(S.Range), I32,
+          mlir::IntegerAttr::get(I32, (int64_t)C->ClassId));
+      mlir::Value NameV = emitFieldNameChar(C->Name, loc(S.Range));
+      mlir::NamedAttribute Cal(
+          mlir::StringAttr::get(&MCtx, "callee"),
+          mlir::StringAttr::get(&MCtx, "matlab_dbg_register_class"));
+      emitUnregOp("matlab.call_builtin", {ClsId, NameV},
+                  {mlir::NoneType::get(&MCtx)}, loc(S.Range), {Cal});
+    }
+  }
 
   bool SavedInScript = InScriptBody;
   InScriptBody = true;
@@ -904,6 +1049,17 @@ void Lowerer::lowerFunction(const Function &F, mlir::ModuleOp M,
                        loc(F.Range), {NA});
       if (IsSelfParam && !Bnd->PinnedClass)
         Bnd->PinnedClass = const_cast<ClassDef *>(Owner);
+      /* Tag the alloc with the pinned class id so the DAP store-mirror
+       * in emitStore knows to route through matlab_dbg_frame_set_obj
+       * (which preserves class identity in the LOCALS panel) rather
+       * than the generic matrix path. */
+      if (Bnd->PinnedClass && Bnd->PinnedClass->ClassId > 0) {
+        auto I32 = mlir::IntegerType::get(&MCtx, 32);
+        Slot.getDefiningOp()->setAttr(
+            "matlab.class_id",
+            mlir::IntegerAttr::get(I32,
+                                    (int64_t)Bnd->PinnedClass->ClassId));
+      }
     } else {
       const Type *T = Bnd->InferredType ? Bnd->InferredType : TC.any();
       Slot = emitAlloc(T, Bnd->Name, loc(F.Range));
@@ -929,6 +1085,12 @@ void Lowerer::lowerFunction(const Function &F, mlir::ModuleOp M,
                        loc(F.Range), {NA});
       Bnd->PinnedClass = const_cast<ClassDef *>(Owner);
       auto I32 = mlir::IntegerType::get(&MCtx, 32);
+      /* Tag the alloc so emitStore picks up the class identity for
+       * the DAP mirror (see analogous comment in the IsClassParam
+       * branch above). */
+      Slot.getDefiningOp()->setAttr(
+          "matlab.class_id",
+          mlir::IntegerAttr::get(I32, (int64_t)Owner->ClassId));
       mlir::Value ClsId = mlir::arith::ConstantOp::create(
           B, loc(F.Range), I32,
           mlir::IntegerAttr::get(I32, (int64_t)Owner->ClassId));
@@ -974,6 +1136,14 @@ void Lowerer::lowerFunction(const Function &F, mlir::ModuleOp M,
       if (Slots.count(Bnd)) continue;
       const Type *T = Bnd->InferredType ? Bnd->InferredType : TC.any();
       mlir::Value Slot = emitAlloc(T, N, loc(F.Range));
+      /* Tag class-instance locals so the DAP mirror routes them
+       * through matlab_dbg_frame_set_obj. */
+      if (Bnd->PinnedClass && Bnd->PinnedClass->ClassId > 0) {
+        auto I32 = mlir::IntegerType::get(&MCtx, 32);
+        Slot.getDefiningOp()->setAttr(
+            "matlab.class_id",
+            mlir::IntegerAttr::get(I32, (int64_t)Bnd->PinnedClass->ClassId));
+      }
       Slots[Bnd] = Slot;
     }
   }
@@ -1254,7 +1424,8 @@ void Lowerer::lowerStmt(const Stmt &St) {
           auto N = NX->Name;
           if (N == "fgetl" || N == "sprintf" || N == "num2str" ||
               N == "upper" || N == "lower" || N == "strtrim" ||
-              N == "strrep" || N == "strcat")
+              N == "strrep" || N == "strcat" ||
+              N == "bin" || N == "hex" || N == "dec")
             RhsIsString = true;
         }
       }
@@ -1851,7 +2022,15 @@ void Lowerer::lowerLValueStore(const Expr &LHS, mlir::Value Rhs) {
       bool IsMat = (Rhs.getType() == PtrTy ||
                     mlir::isa<mlir::RankedTensorType,
                               mlir::UnrankedTensorType>(Rhs.getType()));
-      llvm::StringRef Callee = IsMat ? "matlab_ws_set_mat" : "matlab_ws_set_f64";
+      /* When the Sema-inferred class for this binding is set, the
+       * pointer is a matlab_obj* (class instance) rather than a
+       * matlab_mat*. Route to matlab_ws_set_obj so the workspace
+       * tracks kind=2; the DAP server uses that to render the
+       * variable as `1x1 ClassName` and to expose its properties. */
+      bool IsObj = N.Ref->PinnedClass != nullptr && IsMat;
+      llvm::StringRef Callee = IsObj ? "matlab_ws_set_obj"
+                                     : (IsMat ? "matlab_ws_set_mat"
+                                              : "matlab_ws_set_f64");
       mlir::NamedAttribute Cal(
           mlir::StringAttr::get(&MCtx, "callee"),
           mlir::StringAttr::get(&MCtx, Callee));
@@ -1866,6 +2045,49 @@ void Lowerer::lowerLValueStore(const Expr &LHS, mlir::Value Rhs) {
   }
   case NodeKind::CallOrIndex: {
     auto &C = static_cast<const CallOrIndex &>(LHS);
+    /* `name(:) = rhs` for an fi-typed scalar `name` is the type-preserving
+     * idiom that holds `name`'s FixedSpec across iterations of an
+     * accumulator loop (see plan §11). At Sema time we already kept the
+     * lhs's type; here we emit a `matlab.fi.cast` to clamp the rhs to
+     * the lhs's spec, then store into lhs's slot directly. */
+    if (Rhs && C.Args.size() == 1 && C.Args[0] &&
+        C.Args[0]->Kind == NodeKind::ColonExpr) {
+      auto *N = dynamic_cast<const NameExpr *>(C.Callee);
+      if (N && N->Ref && N->Ty && N->Ty->K == Type::Kind::Array) {
+        auto &LA = static_cast<const ArrayType &>(*N->Ty);
+        if (LA.Elt == Dtype::Fixed && LA.FxSpec) {
+          mlir::Type Stor = mirTy(N->Ty);
+          mlir::Value RhsVal = Rhs;
+          // Tag the cast with both source and destination specs so
+          // LowerFixedPoint can emit the shift/sat sequence. The source
+          // spec is read off the RHS's defining op (which the binop
+          // emission tags with fi_signed/fi_wl/fi_fl) — that's the
+          // closest match for the rhs's runtime type.
+          auto Attrs = buildFixedAttrs(&MCtx, *LA.FxSpec);
+          mlir::NamedAttribute IsClamp(
+              mlir::StringAttr::get(&MCtx, "fi_clamp"),
+              mlir::IntegerAttr::get(mlir::IntegerType::get(&MCtx, 1), 1));
+          llvm::SmallVector<mlir::NamedAttribute, 12> A;
+          A.push_back(IsClamp);
+          for (auto &E0 : Attrs) A.push_back(E0);
+          if (auto *DefOp = RhsVal.getDefiningOp()) {
+            auto carry = [&](llvm::StringRef From, llvm::StringRef To) {
+              if (auto Atr = DefOp->getAttr(From))
+                A.emplace_back(mlir::StringAttr::get(&MCtx, To), Atr);
+            };
+            carry("fi_signed", "fi_lhs_signed");
+            carry("fi_wl",     "fi_lhs_wl");
+            carry("fi_fl",     "fi_lhs_fl");
+          }
+          mlir::Value Cast = emitUnreg("matlab.fi.cast", {RhsVal}, Stor,
+                                        loc(C.Range), A);
+          mlir::Value Slot =
+              getOrCreateSlot(N->Ref, N->Ty, N->Name, loc(N->Range));
+          emitStore(Cast, Slot, loc(C.Range));
+          return;
+        }
+      }
+    }
     llvm::SmallVector<mlir::Value, 4> Os;
     mlir::Value Base;
     if (C.Callee) {
@@ -2210,6 +2432,100 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
         (LHS.getType() == MLPtr || RHS.getType() == MLPtr)) {
       ResTy = MLPtr;
     }
+    /* Fixed-Point Designer: tag the binop with the result FixedSpec so
+     * LowerFixedPoint can rewrite it into integer-shift sequences. We
+     * also forward the operand specs as separate attributes (the rewrite
+     * needs to know each operand's FL to emit the alignment shift). */
+    auto fiSpec = [](const Expr *X) -> std::optional<FixedSpec> {
+      if (!X || !X->Ty || X->Ty->K != Type::Kind::Array) return std::nullopt;
+      auto &A = static_cast<const ArrayType &>(*X->Ty);
+      if (A.Elt != Dtype::Fixed || !A.FxSpec) return std::nullopt;
+      return *A.FxSpec;
+    };
+    auto LhsSpec = fiSpec(Bi.LHS);
+    auto RhsSpec = fiSpec(Bi.RHS);
+    auto ResSpec = (Bi.Ty && Bi.Ty->K == Type::Kind::Array)
+        ? static_cast<const ArrayType &>(*Bi.Ty).FxSpec
+        : std::nullopt;
+    if (ResSpec && (LhsSpec || RhsSpec)) {
+      /* Mixed fi + double: cast the double side into the fi side's spec
+       * (MATLAB's Phase-1 promotion rule). When the double is a literal,
+       * we constant-fold here; otherwise we emit a runtime quantize.
+       * Either way, both operands become integer-typed by the time we
+       * emit the binop, so LowerFixedPoint sees the canonical shape. */
+      auto promoteOperand = [&](mlir::Value V, const Expr *Src,
+                                const std::optional<FixedSpec> &OwnSpec,
+                                const FixedSpec &Target,
+                                std::optional<FixedSpec> &OutSpec) {
+        if (OwnSpec) { OutSpec = OwnSpec; return V; }
+        if (!V || !mlir::isa<mlir::Float64Type, mlir::Float32Type>(V.getType()))
+          return V;
+        // Literal-fold: fold the AST node directly so the stored value
+        // is already in the IR as an arith.constant.
+        auto isLit = [](const Expr *X) {
+          if (!X) return false;
+          if (X->Kind == NodeKind::IntegerLiteral ||
+              X->Kind == NodeKind::FPLiteral) return true;
+          if (auto *U = dynamic_cast<const UnaryOpExpr *>(X))
+            if (U->Op == UnOp::Minus || U->Op == UnOp::Plus)
+              return U->Operand && (
+                  U->Operand->Kind == NodeKind::IntegerLiteral ||
+                  U->Operand->Kind == NodeKind::FPLiteral);
+          return false;
+        };
+        OutSpec = Target;
+        uint8_t Bits = Target.storageBits();
+        auto IT = mlir::IntegerType::get(&MCtx, Bits == 0 ? 64 : Bits);
+        if (isLit(Src)) {
+          double Val = foldFloat(Src);
+          int64_t Stored = Target.Signed
+              ? quantizeFixedSigned(Val, Target)
+              : (int64_t)quantizeFixedUnsigned(Val, Target);
+          return (mlir::Value)mlir::arith::ConstantOp::create(
+              B, L, IT, mlir::IntegerAttr::get(IT, Stored));
+        }
+        // Runtime path: call matlab_fi_quantize_{s,u}.
+        auto F64 = mlir::Float64Type::get(&MCtx);
+        if (V.getType() != F64)
+          V = mlir::arith::ExtFOp::create(B, L, F64, V);
+        llvm::SmallVector<mlir::NamedAttribute, 8> CA;
+        auto QAttrs = buildFixedAttrs(&MCtx, Target);
+        for (auto &E0 : QAttrs) CA.push_back(E0);
+        mlir::NamedAttribute Cal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx,
+                Target.Signed ? "matlab_fi_quantize_s"
+                              : "matlab_fi_quantize_u"));
+        CA.push_back(Cal);
+        return emitUnreg("matlab.fi.cast", {V}, IT, L, CA);
+      };
+      LHS = promoteOperand(LHS, Bi.LHS, LhsSpec, *ResSpec, LhsSpec);
+      RHS = promoteOperand(RHS, Bi.RHS, RhsSpec, *ResSpec, RhsSpec);
+
+      llvm::SmallVector<mlir::NamedAttribute, 16> A;
+      auto Outer = buildFixedAttrs(&MCtx, *ResSpec);
+      for (auto &E0 : Outer) A.push_back(E0);
+      auto I32 = mlir::IntegerType::get(&MCtx, 32);
+      auto I1 = mlir::IntegerType::get(&MCtx, 1);
+      auto pushOperand = [&](llvm::StringRef Pre,
+                             const std::optional<FixedSpec> &S) {
+        if (!S) return;
+        A.emplace_back(mlir::StringAttr::get(&MCtx, (Pre + "_signed").str()),
+                       mlir::IntegerAttr::get(I1, S->Signed ? 1 : 0));
+        A.emplace_back(mlir::StringAttr::get(&MCtx, (Pre + "_wl").str()),
+                       mlir::IntegerAttr::get(I32, (int64_t)S->WordLength));
+        A.emplace_back(mlir::StringAttr::get(&MCtx, (Pre + "_fl").str()),
+                       mlir::IntegerAttr::get(I32, (int64_t)S->FractionLength));
+      };
+      pushOperand("fi_lhs", LhsSpec);
+      pushOperand("fi_rhs", RhsSpec);
+      // Override ResTy to the fi storage class — Sema's mapType already
+      // returns the right thing, but if ResTy was refined to ptr above
+      // by the REPL guard it would be wrong for fi. Restore from RT.
+      mlir::Type FiResTy = mirTy(Bi.Ty);
+      if (mlir::isa<mlir::IntegerType>(FiResTy)) ResTy = FiResTy;
+      return emitUnreg(binOpName(Bi.Op), {LHS, RHS}, ResTy, L, A);
+    }
     return emitUnreg(binOpName(Bi.Op), {LHS, RHS}, ResTy, L);
   }
   case NodeKind::UnaryOp: {
@@ -2306,6 +2622,162 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
         }
         return Obj;
       }
+      /* bin(fi) / hex(fi) / dec(fi) — render the stored integer as a
+       * matlab_string. The result is tagged through StringBindings on
+       * assignment (see AssignStmt lowering) so disp(s) routes to
+       * matlab_string_disp. */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          (N->Name == "bin" || N->Name == "hex" || N->Name == "dec") &&
+          C.Args.size() == 1 && C.Args[0] &&
+          C.Args[0]->Ty && C.Args[0]->Ty->K == Type::Kind::Array) {
+        auto &AT = static_cast<const ArrayType &>(*C.Args[0]->Ty);
+        if (AT.Elt == Dtype::Fixed && AT.FxSpec) {
+          mlir::Value V = lowerExpr(*C.Args[0]);
+          auto I64 = mlir::IntegerType::get(&MCtx, 64);
+          auto I8  = mlir::IntegerType::get(&MCtx, 8);
+          auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+          mlir::Value Wide = V;
+          if (auto IT = mlir::dyn_cast<mlir::IntegerType>(V.getType())) {
+            if (IT.getWidth() < 64) {
+              Wide = AT.FxSpec->Signed
+                  ? (mlir::Value)mlir::arith::ExtSIOp::create(B, L, I64, V)
+                  : (mlir::Value)mlir::arith::ExtUIOp::create(B, L, I64, V);
+            }
+          }
+          mlir::Value WL = mlir::arith::ConstantOp::create(
+              B, L, I8,
+              mlir::IntegerAttr::get(I8, (int64_t)AT.FxSpec->WordLength));
+          std::string Callee = std::string("matlab_fi_") +
+              std::string(N->Name) + "_" + (AT.FxSpec->Signed ? "s" : "u");
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, Callee));
+          return emitUnreg("matlab.call_builtin", {Wide, WL}, PtrTy, L, {Cal});
+        }
+      }
+
+      /* int(fi) / storedInteger(fi) — return the underlying stored
+       * integer in its native lane. Sema already typed the result as the
+       * matching int8/16/32/64, so all lowering needs to do is pass the
+       * value through; the fi storage class IS the native int. */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          (N->Name == "int" || N->Name == "storedInteger") &&
+          C.Args.size() == 1 && C.Args[0] &&
+          C.Args[0]->Ty && C.Args[0]->Ty->K == Type::Kind::Array) {
+        auto &AT = static_cast<const ArrayType &>(*C.Args[0]->Ty);
+        if (AT.Elt == Dtype::Fixed && AT.FxSpec) {
+          mlir::Value V = lowerExpr(*C.Args[0]);
+          mlir::Type ResTy = mirTy(E.Ty ? E.Ty : TC.any());
+          if (V.getType() == ResTy) return V;
+          if (mlir::isa<mlir::IntegerType>(V.getType()) &&
+              mlir::isa<mlir::IntegerType>(ResTy))
+            return mlir::arith::BitcastOp::create(B, L, ResTy, V);
+          return V; // type mapper covers the storage class.
+        }
+      }
+
+      /* storedIntegerToDouble(fi) / double(fi) — render the real-world
+       * value. We multiply the stored int by 2^-FL at runtime; for now
+       * we route through the runtime helper matlab_fi_to_double_*, which
+       * is shorter than emitting an extsi + sitofp + mul sequence. */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          (N->Name == "double" || N->Name == "storedIntegerToDouble") &&
+          C.Args.size() == 1 && C.Args[0] &&
+          C.Args[0]->Ty && C.Args[0]->Ty->K == Type::Kind::Array) {
+        auto &AT = static_cast<const ArrayType &>(*C.Args[0]->Ty);
+        if (AT.Elt == Dtype::Fixed && AT.FxSpec &&
+            AT.S.K == Shape::Rank::Scalar) {
+          mlir::Value V = lowerExpr(*C.Args[0]);
+          auto F64 = mlir::Float64Type::get(&MCtx);
+          auto I64 = mlir::IntegerType::get(&MCtx, 64);
+          /* Sign- or zero-extend stored int to i64 so we have headroom
+           * for the multiply, then SIToFP, then multiply by 2^-FL. */
+          mlir::Value Wide = V;
+          if (auto IT = mlir::dyn_cast<mlir::IntegerType>(V.getType())) {
+            if (IT.getWidth() < 64) {
+              if (AT.FxSpec->Signed)
+                Wide = mlir::arith::ExtSIOp::create(B, L, I64, V);
+              else
+                Wide = mlir::arith::ExtUIOp::create(B, L, I64, V);
+            }
+          }
+          mlir::Value AsF = AT.FxSpec->Signed
+              ? (mlir::Value)mlir::arith::SIToFPOp::create(B, L, F64, Wide)
+              : (mlir::Value)mlir::arith::UIToFPOp::create(B, L, F64, Wide);
+          double Scale = std::ldexp(1.0, -AT.FxSpec->FractionLength);
+          mlir::Value ScaleC = mlir::arith::ConstantOp::create(
+              B, L, F64, mlir::FloatAttr::get(F64, Scale));
+          return mlir::arith::MulFOp::create(B, L, AsF, ScaleC);
+        }
+      }
+
+      /* Fixed-Point Designer constructor: `fi(value, signed, WL, FL)` and
+       * its shorter variants. When all spec args are constants — the
+       * common case — we constant-fold to an `arith.constant` of the
+       * stored integer plus fi_* attributes; otherwise we emit a call to
+       * matlab_fi_quantize_{s,u} and tag the result. Result type comes
+       * from Sema (mapType picks the smallest native int). */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          N->Name == "fi" && !C.Args.empty()) {
+        const Type *ResT = E.Ty ? E.Ty : TC.any();
+        if (ResT->K == Type::Kind::Array) {
+          auto &AT = static_cast<const ArrayType &>(*ResT);
+          if (AT.Elt == Dtype::Fixed && AT.FxSpec) {
+            FixedSpec Spec = *AT.FxSpec;
+            mlir::Type StorTy = mirTy(ResT);
+            auto Attrs = buildFixedAttrs(&MCtx, Spec);
+            // Constant-fold scalar literal inputs (the apply_gain shape).
+            auto isLiteralFold = [](const Expr *X) -> bool {
+              if (!X) return false;
+              if (X->Kind == NodeKind::IntegerLiteral ||
+                  X->Kind == NodeKind::FPLiteral) return true;
+              if (auto *U = dynamic_cast<const UnaryOpExpr *>(X))
+                if (U->Op == UnOp::Minus || U->Op == UnOp::Plus)
+                  return U->Operand && (
+                      U->Operand->Kind == NodeKind::IntegerLiteral ||
+                      U->Operand->Kind == NodeKind::FPLiteral);
+              return false;
+            };
+            if (AT.S.K == Shape::Rank::Scalar && isLiteralFold(C.Args[0])) {
+              double Val = foldFloat(C.Args[0]);
+              int64_t Stored = Spec.Signed
+                  ? quantizeFixedSigned(Val, Spec)
+                  : (int64_t)quantizeFixedUnsigned(Val, Spec);
+              auto IT = mlir::dyn_cast<mlir::IntegerType>(StorTy);
+              if (!IT) IT = mlir::IntegerType::get(&MCtx, 64);
+              mlir::NamedAttribute VA(
+                  mlir::StringAttr::get(&MCtx, "value"),
+                  mlir::IntegerAttr::get(IT, Stored));
+              llvm::SmallVector<mlir::NamedAttribute, 8> A;
+              A.push_back(VA);
+              for (auto &E0 : Attrs) A.push_back(E0);
+              return emitUnreg("matlab.fi.const", {}, IT, L, A);
+            }
+            // Runtime quantize for non-literal value.
+            mlir::Value V = lowerExpr(*C.Args[0]);
+            // Cast V to f64 if it isn't already (callee expects double).
+            if (V && !mlir::isa<mlir::Float64Type>(V.getType())) {
+              auto F64 = mlir::Float64Type::get(&MCtx);
+              if (mlir::isa<mlir::IntegerType>(V.getType()))
+                V = mlir::arith::SIToFPOp::create(B, L, F64, V);
+              else if (mlir::isa<mlir::Float32Type>(V.getType()))
+                V = mlir::arith::ExtFOp::create(B, L, F64, V);
+            }
+            llvm::SmallVector<mlir::NamedAttribute, 8> A;
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx,
+                    Spec.Signed ? "matlab_fi_quantize_s"
+                                : "matlab_fi_quantize_u"));
+            A.push_back(Cal);
+            for (auto &E0 : Attrs) A.push_back(E0);
+            // Result type is the storage class — LowerFixedPoint inserts
+            // the truncate from i64 to this width.
+            return emitUnreg("matlab.fi.cast", {V}, StorTy, L, A);
+          }
+        }
+      }
+
       /* Dot-method call: `obj.method(args)` where `obj` is pinned to a
        * class whose own methods — or any ancestor's — contain `method`.
        * The mangled name uses the *defining* class, so subclasses reach
@@ -2388,6 +2860,44 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
           }
         }
       }
+      /* disp(fi_value) — render the real-world value via the runtime
+       * helper, passing the storage int + WL + FL. The helper picks the
+       * right printf format. */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          N->Name == "disp" && C.Args.size() == 1 && C.Args[0] &&
+          C.Args[0]->Ty && C.Args[0]->Ty->K == Type::Kind::Array) {
+        auto &AT = static_cast<const ArrayType &>(*C.Args[0]->Ty);
+        if (AT.Elt == Dtype::Fixed && AT.FxSpec &&
+            AT.S.K == Shape::Rank::Scalar) {
+          mlir::Value V = lowerExpr(*C.Args[0]);
+          // Sign- or zero-extend to i64 for the runtime call.
+          auto I64 = mlir::IntegerType::get(&MCtx, 64);
+          auto I8 = mlir::IntegerType::get(&MCtx, 8);
+          mlir::Value Wide = V;
+          if (auto IT = mlir::dyn_cast<mlir::IntegerType>(V.getType())) {
+            if (IT.getWidth() < 64) {
+              if (AT.FxSpec->Signed)
+                Wide = mlir::arith::ExtSIOp::create(B, L, I64, V);
+              else
+                Wide = mlir::arith::ExtUIOp::create(B, L, I64, V);
+            }
+          }
+          mlir::Value WL = mlir::arith::ConstantOp::create(
+              B, L, I8,
+              mlir::IntegerAttr::get(I8, (int64_t)AT.FxSpec->WordLength));
+          mlir::Value FL = mlir::arith::ConstantOp::create(
+              B, L, I8,
+              mlir::IntegerAttr::get(I8, (int64_t)AT.FxSpec->FractionLength));
+          llvm::StringRef Callee = AT.FxSpec->Signed
+              ? "matlab_fi_disp_s" : "matlab_fi_disp_u";
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, Callee));
+          return emitUnreg("matlab.call_builtin", {Wide, WL, FL},
+                           mlir::NoneType::get(&MCtx), L, {Cal});
+        }
+      }
+
       /* disp(obj) where `obj` is a class instance whose class (or any
        * ancestor) defines `disp` as a method — route to the overload
        * instead of the generic matrix/scalar disp. */
@@ -2429,7 +2939,8 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
               auto Nm = CN->Name;
               if (Nm == "fgetl" || Nm == "sprintf" || Nm == "num2str" ||
                   Nm == "upper" || Nm == "lower" || Nm == "strtrim" ||
-                  Nm == "strrep" || Nm == "strcat")
+                  Nm == "strrep" || Nm == "strcat" ||
+                  Nm == "bin" || Nm == "hex" || Nm == "dec")
                 IsStr = true;
             }
           }
@@ -2889,6 +3400,28 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
     auto &F = static_cast<const FieldAccess &>(E);
     auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
     auto F64 = mlir::Float64Type::get(&MCtx);
+    /* Fixed-Point Designer property access: `n.WordLength` / `.FractionLength`
+     * / `.Signed` / `.IntegerLength` are compile-time constants drawn from
+     * the FixedSpec. `n.Value` (real-world double) and `n.bin/hex/dec` are
+     * Phase-4 surface and fall through. */
+    if (F.Base && F.Base->Ty && F.Base->Ty->K == Type::Kind::Array) {
+      auto &BA = static_cast<const ArrayType &>(*F.Base->Ty);
+      if (BA.Elt == Dtype::Fixed && BA.FxSpec) {
+        double Val = 0.0;
+        bool Match = true;
+        if (F.Field == "WordLength")          Val = (double)BA.FxSpec->WordLength;
+        else if (F.Field == "FractionLength") Val = (double)BA.FxSpec->FractionLength;
+        else if (F.Field == "Signed")         Val = BA.FxSpec->Signed ? 1.0 : 0.0;
+        else if (F.Field == "IntegerLength")  Val = (double)BA.FxSpec->integerLength();
+        else Match = false;
+        if (Match) {
+          mlir::NamedAttribute VA(
+              mlir::StringAttr::get(&MCtx, "value"),
+              mlir::FloatAttr::get(F64, Val));
+          return emitUnreg("matlab.const_float", {}, F64, L, {VA});
+        }
+      }
+    }
     const ClassDef *PinnedCls = nullptr;
     if (auto *BN = dynamic_cast<const NameExpr *>(F.Base))
       if (BN->Ref && BN->Ref->PinnedClass) PinnedCls = BN->Ref->PinnedClass;

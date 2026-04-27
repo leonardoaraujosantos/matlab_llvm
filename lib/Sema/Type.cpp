@@ -24,14 +24,23 @@ const char *dtypeName(Dtype D) {
   case Dtype::UInt16:  return "uint16";
   case Dtype::UInt32:  return "uint32";
   case Dtype::UInt64:  return "uint64";
+  case Dtype::Fixed:   return "fi"; // spec rendered separately by fixedSpecName
   }
   return "?";
+}
+
+std::string fixedSpecName(const FixedSpec &S) {
+  std::ostringstream OS;
+  OS << "numerictype(" << (S.Signed ? 1 : 0) << ',' << int(S.WordLength)
+     << ',' << int(S.FractionLength) << ')';
+  return OS.str();
 }
 
 bool isInteger(Dtype D) {
   switch (D) {
   case Dtype::Int8: case Dtype::Int16: case Dtype::Int32: case Dtype::Int64:
   case Dtype::UInt8: case Dtype::UInt16: case Dtype::UInt32: case Dtype::UInt64:
+  case Dtype::Fixed:
     return true;
   default: return false;
   }
@@ -54,6 +63,11 @@ bool isNumeric(Dtype D) { return isInteger(D) || isFloating(D); }
 //   - Mixed integer kinds -> Unknown (MATLAB errors at runtime)
 Dtype promoteDtype(Dtype A, Dtype B) {
   if (A == Dtype::Unknown || B == Dtype::Unknown) return Dtype::Unknown;
+  // Fixed beats double in the MATLAB Fixed-Point Designer rules: a
+  // fi+double expression casts the double to the fi's numerictype. The
+  // *spec* must be resolved by the caller (TypeInference / LowerFixedPoint);
+  // the dtype lattice only reports that the result is Fixed.
+  if (A == Dtype::Fixed || B == Dtype::Fixed) return Dtype::Fixed;
   if (A == Dtype::Logical) A = Dtype::Double; // logical-as-numeric
   if (B == Dtype::Logical) B = Dtype::Double;
   if (A == Dtype::Char)    A = Dtype::Double; // char arithmetic yields double
@@ -162,7 +176,11 @@ std::string Type::toString() const {
   case Kind::Any: return "any";
   case Kind::Array: {
     auto &A = static_cast<const ArrayType &>(*this);
-    std::string S = dtypeName(A.Elt);
+    std::string S;
+    if (A.Elt == Dtype::Fixed && A.FxSpec)
+      S = fixedSpecName(*A.FxSpec);
+    else
+      S = dtypeName(A.Elt);
     if (A.S.K == Shape::Rank::Scalar) return S;
     return S + ":" + A.S.toString();
   }
@@ -188,7 +206,10 @@ TypeContext::TypeContext() {
 TypeContext::~TypeContext() = default;
 
 bool TypeContext::ArrayKey::operator==(const ArrayKey &O) const {
-  return D == O.D && S == O.S;
+  if (D != O.D || !(S == O.S)) return false;
+  // FixedSpec equality only matters for Dtype::Fixed; for any other dtype
+  // the field stays nullopt and compares equal trivially.
+  return FxSpec == O.FxSpec;
 }
 size_t TypeContext::ArrayKeyHash::operator()(const ArrayKey &) const {
   return 0; // unused (linear scan)
@@ -208,10 +229,25 @@ const ArrayType *TypeContext::scalar(Dtype D) {
 
 const ArrayType *TypeContext::arrayOf(Dtype D, Shape S) {
   for (auto &E : ArrayCache) {
-    if (E.first.D == D && E.first.S == S) return E.second;
+    if (E.first.D == D && E.first.S == S && !E.first.FxSpec) return E.second;
   }
   auto *T = own<ArrayType>(D, S);
-  ArrayCache.push_back({{D, std::move(S)}, T});
+  ArrayCache.push_back({{D, std::move(S), std::nullopt}, T});
+  return T;
+}
+
+const ArrayType *TypeContext::fixedScalar(FixedSpec Spec) {
+  return fixedArray(Spec, Shape::scalar());
+}
+
+const ArrayType *TypeContext::fixedArray(FixedSpec Spec, Shape S) {
+  for (auto &E : ArrayCache) {
+    if (E.first.D == Dtype::Fixed && E.first.S == S && E.first.FxSpec &&
+        *E.first.FxSpec == Spec)
+      return E.second;
+  }
+  auto *T = own<ArrayType>(Dtype::Fixed, S, Spec);
+  ArrayCache.push_back({{Dtype::Fixed, std::move(S), Spec}, T});
   return T;
 }
 
@@ -258,7 +294,22 @@ const Type *TypeContext::join(const Type *A, const Type *B) {
       // Promote numerically.
       Dtype P = promoteDtype(AA.Elt, BB.Elt);
       if (P == Dtype::Unknown) return any();
+      // Fixed × non-Fixed mixes happen at binop sites where the non-Fixed
+      // side is cast to the Fixed side's spec. Sema's join (used for
+      // control-flow merges) doesn't have enough information to pick that
+      // spec, so we report `any` and leave it to the binop visitor.
+      if (P == Dtype::Fixed) return any();
       return arrayOf(P, joinShape(AA.S, BB.S));
+    }
+    if (AA.Elt == Dtype::Fixed) {
+      // Both are fi: matching specs join shapes; mismatched specs fall back
+      // to `any` (a real promotion needs §3.10 fimath rules — handled at
+      // arithmetic sites, not here).
+      if (AA.FxSpec && BB.FxSpec && *AA.FxSpec == *BB.FxSpec)
+        return fixedArray(*AA.FxSpec, joinShape(AA.S, BB.S));
+      if (!AA.FxSpec && !BB.FxSpec)
+        return arrayOf(Dtype::Fixed, joinShape(AA.S, BB.S));
+      return any();
     }
     return arrayOf(AA.Elt, joinShape(AA.S, BB.S));
   }
@@ -282,7 +333,26 @@ const Type *TypeContext::broadcastNumeric(const Type *A, const Type *B) {
   auto &BB = static_cast<const ArrayType &>(*B);
   Dtype D = promoteDtype(AA.Elt, BB.Elt);
   if (D == Dtype::Unknown) return any();
-  return arrayOf(D, broadcastShape(AA.S, BB.S));
+  Shape Out = broadcastShape(AA.S, BB.S);
+  if (D == Dtype::Fixed) {
+    // Pick a concrete FixedSpec when one side has it. The full §3.10–3.14
+    // rule (KeepLSB sum: result FL = max(FL_a, FL_b), result WL grows by
+    // 1 for add/sub) is applied at the binop site in TypeInference where
+    // the operator is known. Here we only handle the trivial case "both
+    // are fi with matching spec" — a wider mix returns the spec from the
+    // fi operand when the other side is non-fi (mixed fi+double).
+    const std::optional<FixedSpec> &La = AA.FxSpec;
+    const std::optional<FixedSpec> &Rb = BB.FxSpec;
+    if (La && Rb) {
+      if (*La == *Rb) return fixedArray(*La, Out);
+      // Differing specs: defer to arithmetic-site rules.
+      return arrayOf(Dtype::Fixed, Out);
+    }
+    if (La) return fixedArray(*La, Out);
+    if (Rb) return fixedArray(*Rb, Out);
+    return arrayOf(Dtype::Fixed, Out);
+  }
+  return arrayOf(D, Out);
 }
 
 const Type *scalarOf(TypeContext &C, Dtype D) { return C.scalar(D); }

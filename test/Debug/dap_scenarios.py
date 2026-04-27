@@ -552,6 +552,172 @@ def scn_multifile_breakpoint(matlabc, program):
         c.wait_event("terminated", timeout=5.0)
 
 
+def scn_matrix_expansion(matlabc, program):
+    """Matrix variables surface a `variablesReference` so the IDE can
+    drill into the cells via the standard `variables(ref)` request.
+
+    Without this the LOCALS panel showed `RxC double` and stopped —
+    no disclosure arrow, no values, no input for an editor's matrix
+    viewer / variable inspector. The fix wires a MatRefs registry
+    server-side and a `matlab_dbg_mat_get` element accessor in the
+    runtime; this scenario verifies the wire format end-to-end.
+
+    Uses dap_matrix_program.m which constructs:
+      - `A`: 2x3 matrix     -> children labelled (i,j) row-major
+      - `b`: 3x1 col vector -> children labelled (i)
+      - `s`: 1x1 scalar     -> unboxed in parent value, no children
+    """
+    import os
+    mat_program = os.path.join(
+        os.path.dirname(os.path.abspath(program)),
+        "dap_matrix_program.m",
+    )
+    # Line 10 is `disp(s);` — the last script-body statement, by
+    # which point all three matrices are assigned.
+    with DapClient(matlabc, mat_program) as c:
+        initialize_and_launch(c, breakpoints=[{"line": 10}])
+        body = _stop_event(c)
+        assert body.get("line") == 10, body
+
+        st = c.request("stackTrace", {"threadId": 1})
+        frames = st.get("stackFrames") or []
+        assert frames, st
+        sc = c.request("scopes", {"frameId": frames[0].get("id", 0)})
+        ref = (sc.get("scopes") or [{}])[0].get("variablesReference")
+        assert ref, sc
+        body = c.request("variables", {"variablesReference": ref})
+        rows = {v.get("name"): v for v in (body.get("variables") or [])}
+
+        # Shape labels and ref gating.
+        assert rows.get("A", {}).get("value") == "2x3 double", rows.get("A")
+        assert rows.get("b", {}).get("value") == "3x1 double", rows.get("b")
+        # Scalar-shaped matrix unboxes to its value and stays a leaf.
+        assert rows.get("s", {}).get("value") == "7", rows.get("s")
+        assert rows.get("s", {}).get("variablesReference") == 0, \
+            f"1x1 matrix `s` should be a leaf: {rows.get('s')!r}"
+        for n in ("A", "b"):
+            r = rows[n].get("variablesReference")
+            assert r and r >= 200000, \
+                f"{n} should carry a mat-ref >= 200000, got {r!r}"
+
+        # Drill into A (2x3, row-major). Children must be labelled
+        # `(i,j)` and carry the cell values.
+        a_cells = _vars_by_name(c, ref=rows["A"]["variablesReference"])
+        expected_A = {"(1,1)": "1", "(1,2)": "2", "(1,3)": "3",
+                       "(2,1)": "4", "(2,2)": "5", "(2,3)": "6"}
+        for k, v in expected_A.items():
+            assert a_cells.get(k) == v, \
+                f"A{k} expected {v!r}, got {a_cells!r}"
+
+        # Drill into b (column vector). Linear `(i)` labels.
+        b_cells = _vars_by_name(c, ref=rows["b"]["variablesReference"])
+        for i, v in enumerate(["10", "20", "30"], start=1):
+            assert b_cells.get(f"({i})") == v, \
+                f"b({i}) expected {v!r}, got {b_cells!r}"
+
+        # `evaluate` should also surface a mat ref for matrix results.
+        ev = c.request("evaluate", {
+            "expression": "A",
+            "frameId": frames[0].get("id", 0),
+        })
+        assert ev.get("result") == "2x3 double", ev
+        wref = ev.get("variablesReference")
+        assert wref and wref >= 200000, \
+            f"watch(A) should carry mat-ref, got {wref!r}"
+        watch_cells = _vars_by_name(c, ref=wref)
+        assert watch_cells.get("(2,3)") == "6", watch_cells
+
+        c.request("continue")
+        c.wait_event("terminated", timeout=5.0)
+
+
+def scn_class_instance_locals(matlabc, program):
+    """Class instances render as `1x1 ClassName` and expand into
+    properties.
+
+    Without classdef-aware mirror calls every `acc = MyClass(...)` row
+    landed in the LOCALS panel as `RxC double` with garbage dimensions
+    (the matrix formatter dereferenced the matlab_obj* as if it were a
+    matlab_mat* and read pointer fields as rows/cols). The fix wires a
+    kind=2 entry through matlab_dbg_frame_set_obj / matlab_ws_set_obj
+    plus a class_id -> name registry; the DAP server reads it back to
+    surface the class identity and to hand out a variablesReference
+    that drives the property tree.
+
+    Uses dap_class_program.m which constructs two distinct classes
+    (Account, Savings) so the scenario verifies both names resolve
+    via the registry, not just the first one inserted.
+    """
+    import os
+    cls_program = os.path.join(
+        os.path.dirname(os.path.abspath(program)),
+        "dap_class_program.m",
+    )
+    # Line 10 is `disp(p.Id);` — the last script-body statement, by
+    # which point all three class-bound script vars (acc, sav, p)
+    # have been assigned and at least one mutator (acc.deposit) has
+    # fired.
+    with DapClient(matlabc, cls_program) as c:
+        initialize_and_launch(c, breakpoints=[{"line": 10}])
+        body = _stop_event(c)
+        assert body.get("line") == 10, body
+
+        st = c.request("stackTrace", {"threadId": 1})
+        frames = st.get("stackFrames") or []
+        assert frames, st
+        sc = c.request("scopes", {"frameId": frames[0].get("id", 0)})
+        ref = (sc.get("scopes") or [{}])[0].get("variablesReference")
+        assert ref, sc
+        body = c.request("variables", {"variablesReference": ref})
+        rows = {v.get("name"): v for v in (body.get("variables") or [])}
+        # Top-level rows: each class-bound var must surface as
+        # "1x1 ClassName" and carry a non-zero variablesReference.
+        assert rows.get("acc", {}).get("value") == "1x1 Account", \
+            f"acc should render as 1x1 Account: {rows.get('acc')!r}"
+        assert rows.get("sav", {}).get("value") == "1x1 Savings", \
+            f"sav should render as 1x1 Savings: {rows.get('sav')!r}"
+        assert rows.get("p", {}).get("value") == "1x1 Account", \
+            f"p should render as 1x1 Account: {rows.get('p')!r}"
+        for n in ("acc", "sav", "p"):
+            r = rows[n].get("variablesReference")
+            assert r and r >= 100000, \
+                f"{n} should carry an obj-ref >= 100000, got {r!r}"
+
+        # Expand `acc`: deposit ran with amt=25, so Balance must be 75.
+        acc_props = _vars_by_name(c, ref=rows["acc"]["variablesReference"])
+        assert acc_props.get("Id") == "101", \
+            f"acc.Id must be 101, got {acc_props!r}"
+        assert acc_props.get("Balance") == "75", \
+            f"acc.Balance after deposit must be 75, got {acc_props!r}"
+
+        # Expand `sav` — must include the inherited Id/Balance plus
+        # the Savings-specific Rate (0.10).
+        sav_props = _vars_by_name(c, ref=rows["sav"]["variablesReference"])
+        assert sav_props.get("Id") == "202", sav_props
+        assert sav_props.get("Balance") == "100", sav_props
+        assert sav_props.get("Rate") == "0.1", sav_props
+
+        # `evaluate` should also surface a class instance with an
+        # expandable variablesReference. Watching `acc` exercises the
+        # kind=1 -> kind=2 promotion path that compensates for the
+        # REPL JIT not knowing the workspace var is class-typed.
+        ev = c.request("evaluate", {
+            "expression": "acc",
+            "frameId": frames[0].get("id", 0),
+        })
+        assert ev.get("result") == "1x1 Account", \
+            f"watch(acc) should be 1x1 Account, got {ev!r}"
+        wref = ev.get("variablesReference")
+        assert wref and wref >= 100000, \
+            f"watch(acc) should carry obj-ref, got {wref!r}"
+        watch_props = _vars_by_name(c, ref=wref)
+        assert watch_props.get("Id") == "101", watch_props
+        assert watch_props.get("Balance") == "75", watch_props
+
+        c.request("continue")
+        c.wait_event("terminated", timeout=5.0)
+
+
 def scn_log_point(matlabc, program):
     """Log point emits an interpolated 'output' event; no 'stopped'."""
     with DapClient(matlabc, program) as c:

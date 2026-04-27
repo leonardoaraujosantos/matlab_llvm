@@ -946,6 +946,143 @@ export function uint8_s(x: number): number { return satTrunc(x, 0, 255); }
 export function uint16_s(x: number): number { return satTrunc(x, 0, 65535); }
 export function logical_s(x: number): number { return +x !== 0 ? 1 : 0; }
 
+// --- Fixed-Point Designer (fi) — see docs/emit_fixed_point.md §6.2 --------
+// BigInt-backed when WL > 32 to stay bit-exact past JS's 53-bit safe-int
+// boundary; for WL <= 32 these shims accept and return number. The MLIR
+// emit pass picks the right entry point based on the FixedSpec's WL.
+// Overflow: 0=Wrap, 1=Saturate. Rounding: 0=Floor, 1=Nearest. Other modes
+// trip set_error.
+
+export function fi_sat_s64(x: bigint | number, WL: number): bigint {
+  const v = typeof x === 'bigint' ? x : BigInt(Math.trunc(+x));
+  if (WL === 0) return 0n;
+  if (WL >= 64) return v;
+  const hi = (1n << BigInt(WL - 1)) - 1n;
+  const lo = -(1n << BigInt(WL - 1));
+  return v > hi ? hi : v < lo ? lo : v;
+}
+
+export function fi_sat_u64(x: bigint | number, WL: number): bigint {
+  let v = typeof x === 'bigint' ? x : BigInt(Math.trunc(+x));
+  if (v < 0n) v = 0n;
+  if (WL === 0) return 0n;
+  if (WL >= 64) return v;
+  const hi = (1n << BigInt(WL)) - 1n;
+  return v > hi ? hi : v;
+}
+
+export function fi_round_floor_s(x: bigint | number, shift: number): bigint {
+  const v = typeof x === 'bigint' ? x : BigInt(Math.trunc(+x));
+  if (shift === 0) return v;
+  if (shift >= 64) return v < 0n ? -1n : 0n;
+  // BigInt `>>` is arithmetic (sign-preserving) and floors toward -inf.
+  return v >> BigInt(shift);
+}
+
+export function fi_round_nearest_s(x: bigint | number, shift: number): bigint {
+  const v = typeof x === 'bigint' ? x : BigInt(Math.trunc(+x));
+  if (shift === 0) return v;
+  if (shift >= 64) return 0n;
+  const half = 1n << BigInt(shift - 1);
+  return (v + half) >> BigInt(shift);
+}
+
+export function fi_round_floor_u(x: bigint | number, shift: number): bigint {
+  const v = typeof x === 'bigint' ? x : BigInt(Math.trunc(+x));
+  if (shift === 0) return v;
+  if (shift >= 64) return 0n;
+  return v >> BigInt(shift);
+}
+
+export function fi_round_nearest_u(x: bigint | number, shift: number): bigint {
+  const v = typeof x === 'bigint' ? x : BigInt(Math.trunc(+x));
+  if (shift === 0) return v;
+  if (shift >= 64) return 0n;
+  const half = 1n << BigInt(shift - 1);
+  return (v + half) >> BigInt(shift);
+}
+
+export function fi_quantize_s(v: number, WL: number, FL: number,
+                              overflow: number, rounding: number): bigint {
+  const scaled = +v * Math.pow(2, FL);
+  let stored: bigint;
+  if (rounding === 0)      stored = BigInt(Math.floor(scaled));
+  else if (rounding === 1) stored = BigInt(Math.floor(scaled + 0.5));
+  else { set_error(); return 0n; }
+  if (overflow === 1) return fi_sat_s64(stored, WL);
+  if (WL === 0) return 0n;
+  if (WL >= 64) return stored;
+  const mask = (1n << BigInt(WL)) - 1n;
+  const bits = stored & mask;
+  return (bits & (1n << BigInt(WL - 1))) ? bits - (1n << BigInt(WL)) : bits;
+}
+
+export function fi_quantize_u(v: number, WL: number, FL: number,
+                              overflow: number, rounding: number): bigint {
+  let scaled = +v * Math.pow(2, FL);
+  if (scaled < 0) scaled = 0;
+  let stored: bigint;
+  if (rounding === 0)      stored = BigInt(Math.floor(scaled));
+  else if (rounding === 1) stored = BigInt(Math.floor(scaled + 0.5));
+  else { set_error(); return 0n; }
+  if (overflow === 1) return fi_sat_u64(stored, WL);
+  if (WL === 0) return 0n;
+  if (WL >= 64) return stored;
+  const mask = (1n << BigInt(WL)) - 1n;
+  return stored & mask;
+}
+
+export function fi_disp_s(stored: bigint | number, _WL: number, FL: number): void {
+  const v = typeof stored === 'bigint' ? Number(stored) : +stored;
+  disp_f64(v * Math.pow(2, -FL));
+}
+
+export function fi_disp_u(stored: bigint | number, _WL: number, FL: number): void {
+  const v = typeof stored === 'bigint' ? Number(stored) : +stored;
+  disp_f64(v * Math.pow(2, -FL));
+}
+
+function _fi_bin(stored: bigint | number, WL: number): string {
+  if (WL === 0) return "";
+  if (WL > 64) WL = 64;
+  const mask = (1n << BigInt(WL)) - 1n;
+  const v = typeof stored === 'bigint' ? stored : BigInt(Math.trunc(+stored));
+  const bits = v & mask;
+  return bits.toString(2).padStart(WL, "0");
+}
+
+export function fi_bin_s(stored: bigint | number, WL: number): string {
+  return _fi_bin(stored, WL);
+}
+export function fi_bin_u(stored: bigint | number, WL: number): string {
+  return _fi_bin(stored, WL);
+}
+
+function _fi_hex(stored: bigint | number, WL: number): string {
+  if (WL === 0) return "";
+  const digits = Math.floor((WL + 3) / 4);
+  const mask = (1n << BigInt(WL)) - 1n;
+  const v = typeof stored === 'bigint' ? stored : BigInt(Math.trunc(+stored));
+  const bits = v & mask;
+  return bits.toString(16).padStart(digits, "0");
+}
+
+export function fi_hex_s(stored: bigint | number, WL: number): string {
+  return _fi_hex(stored, WL);
+}
+export function fi_hex_u(stored: bigint | number, WL: number): string {
+  return _fi_hex(stored, WL);
+}
+
+export function fi_dec_s(stored: bigint | number, _WL: number): string {
+  const v = typeof stored === 'bigint' ? stored : BigInt(Math.trunc(+stored));
+  return v.toString();
+}
+export function fi_dec_u(stored: bigint | number, _WL: number): string {
+  const v = typeof stored === 'bigint' ? stored : BigInt(Math.trunc(+stored));
+  return v.toString();
+}
+
 // --- error flag (try/catch) -----------------------------------------------
 
 let _error_flag = 0;

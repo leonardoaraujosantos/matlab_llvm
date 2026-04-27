@@ -778,6 +778,112 @@ def uint16_s(x): return int(x) & 0xffff
 def logical_s(x): return 1.0 if float(x) != 0 else 0.0
 
 
+# --- Fixed-Point Designer (fi) — see docs/emit_fixed_point.md §6.2 -------
+# Python ints are arbitrary precision, so high-WL fi values stay bit-exact
+# regardless of Python's 53-bit float mantissa. The shim mirrors the C
+# helpers verbatim. Overflow: 0=Wrap, 1=Saturate. Rounding: 0=Floor,
+# 1=Nearest, 2=Zero, 3=Convergent, 4=Ceiling — Phase 1 ships 0/1.
+import math as _fi_math
+import builtins as _fi_builtins
+
+def fi_sat_s64(x, WL):
+    if WL == 0: return 0
+    if WL >= 64: return int(x)
+    hi = (1 << (WL - 1)) - 1
+    lo = -(1 << (WL - 1))
+    # The matrix runtime above shadows `min`/`max` with MATLAB-style
+    # overloads, so reach through `builtins` for the scalar Python ones.
+    return _fi_builtins.max(lo, _fi_builtins.min(hi, int(x)))
+
+def fi_sat_u64(x, WL):
+    if WL == 0: return 0
+    if WL >= 64: return int(x) & ((1 << 64) - 1)
+    hi = (1 << WL) - 1
+    return _fi_builtins.max(0, _fi_builtins.min(hi, int(x)))
+
+def fi_round_floor_s(x, shift):
+    if shift == 0: return int(x)
+    if shift >= 64: return -1 if int(x) < 0 else 0
+    # Python `>>` on negative ints already floors toward -inf — perfect.
+    return int(x) >> shift
+
+def fi_round_nearest_s(x, shift):
+    if shift == 0: return int(x)
+    if shift >= 64: return 0
+    half = 1 << (shift - 1)
+    return (int(x) + half) >> shift
+
+def fi_round_floor_u(x, shift):
+    if shift == 0: return int(x)
+    if shift >= 64: return 0
+    return int(x) >> shift
+
+def fi_round_nearest_u(x, shift):
+    if shift == 0: return int(x)
+    if shift >= 64: return 0
+    half = 1 << (shift - 1)
+    return (int(x) + half) >> shift
+
+def fi_quantize_s(v, WL, FL, overflow, rounding):
+    scaled = float(v) * (2.0 ** int(FL))
+    if rounding == 0:   stored = int(_fi_math.floor(scaled))
+    elif rounding == 1: stored = int(_fi_math.floor(scaled + 0.5))
+    else:
+        set_error()
+        return 0
+    if overflow == 1: return fi_sat_s64(stored, WL)
+    if WL == 0: return 0
+    mask = (1 << WL) - 1
+    bits = stored & mask
+    if bits & (1 << (WL - 1)): bits |= ~mask
+    # Python int is unbounded; sign-extending into a Python int means
+    # subtracting 2^WL when the sign bit is set.
+    if stored & (1 << (WL - 1)): return bits if bits < 0 else bits - (1 << WL)
+    return bits & mask
+
+def fi_quantize_u(v, WL, FL, overflow, rounding):
+    scaled = float(v) * (2.0 ** int(FL))
+    if scaled < 0.0: scaled = 0.0
+    if rounding == 0:   stored = int(_fi_math.floor(scaled))
+    elif rounding == 1: stored = int(_fi_math.floor(scaled + 0.5))
+    else:
+        set_error()
+        return 0
+    if overflow == 1: return fi_sat_u64(stored, WL)
+    if WL == 0: return 0
+    mask = (1 << WL) - 1
+    return stored & mask
+
+def fi_disp_s(stored, WL, FL):
+    disp_f64(float(stored) * (2.0 ** -int(FL)))
+
+def fi_disp_u(stored, WL, FL):
+    disp_f64(float(stored) * (2.0 ** -int(FL)))
+
+def _fi_bin(stored, WL):
+    if WL == 0: return ""
+    if WL > 64: WL = 64
+    mask = (1 << WL) - 1
+    bits = int(stored) & mask
+    return format(bits, "0{}b".format(int(WL)))
+
+def fi_bin_s(stored, WL): return _fi_bin(stored, WL)
+def fi_bin_u(stored, WL): return _fi_bin(stored, WL)
+
+def _fi_hex(stored, WL):
+    if WL == 0: return ""
+    digits = (int(WL) + 3) // 4
+    mask = (1 << int(WL)) - 1
+    bits = int(stored) & mask
+    return format(bits, "0{}x".format(digits))
+
+def fi_hex_s(stored, WL): return _fi_hex(stored, WL)
+def fi_hex_u(stored, WL): return _fi_hex(stored, WL)
+
+def fi_dec_s(stored, WL): return str(int(stored))
+def fi_dec_u(stored, WL): return str(int(stored))
+
+
 # --- error flag (try/catch) -----------------------------------------------
 
 _error_flag = 0

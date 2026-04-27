@@ -505,6 +505,12 @@ bool Emitter::buildInlineExpr(mlir::Operation &Op, std::string &Expr) {
   if (isa<arith::AddIOp>(Op)) return bin("+");
   if (isa<arith::SubIOp>(Op)) return bin("-");
   if (isa<arith::MulIOp>(Op)) return bin("*");
+  // Shifts from LowerFixedPoint. JS `>>` is arithmetic on i32; for the
+  // larger widths LowerFixedPoint emits BigInt-shaped helpers via the
+  // runtime calls, so we don't need a BigInt path here.
+  if (isa<arith::ShLIOp>(Op))  return bin("<<");
+  if (isa<arith::ShRSIOp>(Op)) return bin(">>");
+  if (isa<arith::ShRUIOp>(Op)) return bin(">>>");
   // Bitwise vs logical split on i1. TypeScript has `&&` / `||` for
   // booleans; bitwise operators on numbers keep their JS semantics.
   if (auto A = dyn_cast<arith::AndIOp>(Op)) {
@@ -2269,6 +2275,15 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
   if (mlir::isa<mlir::arith::AddIOp>(Op)) { emitBin("+"); return; }
   if (mlir::isa<mlir::arith::SubIOp>(Op)) { emitBin("-"); return; }
   if (mlir::isa<mlir::arith::MulIOp>(Op)) { emitBin("*"); return; }
+  if (mlir::isa<mlir::arith::ShLIOp>(Op))  { emitBin("<<"); return; }
+  if (mlir::isa<mlir::arith::ShRSIOp>(Op)) { emitBin(">>"); return; }
+  if (mlir::isa<mlir::arith::ShRUIOp>(Op)) { emitBin(">>>"); return; }
+  if (mlir::isa<mlir::arith::BitcastOp>(Op)) {
+    indent(Indent);
+    std::string N = this->name(Op.getResult(0));
+    OS << "const " << N << " = " << this->exprFor(Op.getOperand(0)) << ";\n";
+    return;
+  }
 
   if (auto A = mlir::dyn_cast<mlir::arith::AndIOp>(Op)) {
     if (isI1(A.getType())) { emitBin("&&"); return; }

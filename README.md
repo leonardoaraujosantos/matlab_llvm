@@ -273,6 +273,15 @@ disp(real(y));
 disp(imag(y));
 ```
 
+```matlab
+% Fixed-Point Designer (`fi`) — emits idiomatic int + shift code in C
+gain = fi(1.5, 1, 16, 8);    % Q8.8 signed
+x    = fi(0.75, 1, 16, 8);
+y    = fi(0, 1, 16, 8);
+y(:) = x * gain;             % real-world 1.125
+disp(y);
+```
+
 ## Architecture
 
 ```mermaid

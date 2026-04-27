@@ -604,6 +604,12 @@ bool Emitter::buildInlineExpr(mlir::Operation &Op, std::string &Expr) {
   if (isa<arith::AddIOp>(Op)) return bin("+");
   if (isa<arith::SubIOp>(Op)) return bin("-");
   if (isa<arith::MulIOp>(Op)) return bin("*");
+  // arith.shli / shrsi / shrui from LowerFixedPoint. Python `>>` on int
+  // is arithmetic (sign-preserving) and floors toward -inf — exactly what
+  // matlab_fi_round_floor_s does on the C side.
+  if (isa<arith::ShLIOp>(Op))  return bin("<<");
+  if (isa<arith::ShRSIOp>(Op)) return bin(">>");
+  if (isa<arith::ShRUIOp>(Op)) return bin(">>");
   // Bitwise vs logical split on i1. `and`/`or` on bools is shorter;
   // `^` doesn't have a short logical form, so emit `!=` (works because
   // `True != False`).
@@ -2512,6 +2518,15 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
   if (mlir::isa<mlir::arith::AddIOp>(Op)) { emitBin("+"); return; }
   if (mlir::isa<mlir::arith::SubIOp>(Op)) { emitBin("-"); return; }
   if (mlir::isa<mlir::arith::MulIOp>(Op)) { emitBin("*"); return; }
+  if (mlir::isa<mlir::arith::ShLIOp>(Op))  { emitBin("<<"); return; }
+  if (mlir::isa<mlir::arith::ShRSIOp>(Op)) { emitBin(">>"); return; }
+  if (mlir::isa<mlir::arith::ShRUIOp>(Op)) { emitBin(">>"); return; }
+  if (mlir::isa<mlir::arith::BitcastOp>(Op)) {
+    indent(Indent);
+    std::string N = this->name(Op.getResult(0));
+    OS << N << " = " << this->exprFor(Op.getOperand(0)) << "\n";
+    return;
+  }
 
   if (auto A = mlir::dyn_cast<mlir::arith::AndIOp>(Op)) {
     if (isI1(A.getType())) { emitBin("and"); return; }

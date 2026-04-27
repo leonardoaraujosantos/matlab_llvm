@@ -12,6 +12,10 @@ examples/*
 !examples/*.m
 !examples/*.md
 !examples/.gitignore
+!examples/*/
+examples/*/*
+!examples/*/*.m
+!examples/*/*.md
 
 # Local Claude Code state (worktrees, transcripts, agent scratch)
 .claude/

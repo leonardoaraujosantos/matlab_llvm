@@ -20,16 +20,26 @@ mlir::Type mapElementType(mlir::MLIRContext &Ctx, Dtype D) {
      * scalars — stored as 1x1). Map to !llvm.ptr directly so slots,
      * loads, stores, and call sites stay well-typed end-to-end. */
     return mlir::LLVM::LLVMPointerType::get(&Ctx);
-  case Dtype::Int8:    return B.getIntegerType(8,  /*isSigned=*/true);
-  case Dtype::Int16:   return B.getIntegerType(16, true);
-  case Dtype::Int32:   return B.getIntegerType(32, true);
-  case Dtype::Int64:   return B.getIntegerType(64, true);
-  case Dtype::UInt8:   return B.getIntegerType(8,  /*isSigned=*/false);
-  case Dtype::UInt16:  return B.getIntegerType(16, false);
-  case Dtype::UInt32:  return B.getIntegerType(32, false);
-  case Dtype::UInt64:  return B.getIntegerType(64, false);
+  /* Use signless integers throughout — the arith dialect's ops require
+   * signless operands and results. The signedness rides on producing /
+   * consuming ops as semantic info (e.g. the FixedSpec attribute, or
+   * the choice of arith.extsi vs arith.extui). */
+  case Dtype::Int8:    return B.getIntegerType(8);
+  case Dtype::Int16:   return B.getIntegerType(16);
+  case Dtype::Int32:   return B.getIntegerType(32);
+  case Dtype::Int64:   return B.getIntegerType(64);
+  case Dtype::UInt8:   return B.getIntegerType(8);
+  case Dtype::UInt16:  return B.getIntegerType(16);
+  case Dtype::UInt32:  return B.getIntegerType(32);
+  case Dtype::UInt64:  return B.getIntegerType(64);
   case Dtype::Logical: return B.getI1Type();
   case Dtype::Char:    return B.getI8Type();
+  case Dtype::Fixed:
+    /* Without the FixedSpec we can't pick a precise width; default to i64
+     * so downstream LowerFixedPoint sees room for the widest stored class.
+     * Sites that have the spec on hand should use mapType (which routes
+     * through the ArrayType.FxSpec) for the precise i8/i16/i32/i64. */
+    return B.getIntegerType(64, /*isSigned=*/true);
   case Dtype::Unknown: return B.getF64Type(); // fall back to double
   }
   return B.getF64Type();
@@ -63,7 +73,19 @@ mlir::Type mapType(mlir::MLIRContext &Ctx, const matlab::Type *T) {
   case matlab::Type::Kind::Any: return B.getNoneType();
   case matlab::Type::Kind::Array: {
     auto &A = static_cast<const ArrayType &>(*T);
-    mlir::Type Elt = mapElementType(Ctx, A.Elt);
+    mlir::Type Elt;
+    if (A.Elt == Dtype::Fixed && A.FxSpec) {
+      /* Pick the smallest native integer that can hold WL bits. The
+       * signedness is semantic info that rides on the op's fi_signed
+       * attribute — we use *signless* MLIR integer types here so the
+       * value flows through arith.* ops cleanly (arith requires signless
+       * operands). LowerFixedPoint reads the signedness from the
+       * attribute when picking extsi/extui, shrsi/shrui, etc. */
+      uint8_t Bits = A.FxSpec->storageBits();
+      Elt = B.getIntegerType(Bits == 0 ? 64 : Bits);
+    } else {
+      Elt = mapElementType(Ctx, A.Elt);
+    }
     return mapShapedType(Ctx, A.S, Elt);
   }
   case matlab::Type::Kind::StringArray:

@@ -156,6 +156,33 @@ double matlab_tan_s(double x);
 double matlab_sqrt_s(double x);
 double matlab_abs_s(double x);
 
+// Fixed-Point Designer (fi) — see docs/emit_fixed_point.md §6.2.
+// Overflow modes: 0 = Wrap, 1 = Saturate.
+// Rounding modes: 0 = Floor, 1 = Nearest, 2 = Zero, 3 = Convergent, 4 = Ceiling.
+// Phase 1 ships Floor + Nearest; the others trip matlab_set_error and return 0.
+int64_t  matlab_fi_sat_s64(int64_t x, uint8_t WL);
+uint64_t matlab_fi_sat_u64(uint64_t x, uint8_t WL);
+int64_t  matlab_fi_round_floor_s(int64_t x, uint8_t shift);
+int64_t  matlab_fi_round_nearest_s(int64_t x, uint8_t shift);
+uint64_t matlab_fi_round_floor_u(uint64_t x, uint8_t shift);
+uint64_t matlab_fi_round_nearest_u(uint64_t x, uint8_t shift);
+int64_t  matlab_fi_quantize_s(double v, uint8_t WL, int8_t FL,
+                              uint8_t overflow, uint8_t rounding);
+uint64_t matlab_fi_quantize_u(double v, uint8_t WL, int8_t FL,
+                              uint8_t overflow, uint8_t rounding);
+void     matlab_fi_disp_s(int64_t  stored, uint8_t WL, int8_t FL);
+void     matlab_fi_disp_u(uint64_t stored, uint8_t WL, int8_t FL);
+
+// bin(n) / hex(n) / dec(n) — render the stored integer as a matlab_string.
+// Each helper allocates a heap-owned descriptor; the caller passes it on
+// to disp/strlen/etc. through the regular string-binding path.
+void *matlab_fi_bin_s(int64_t  stored, uint8_t WL);
+void *matlab_fi_bin_u(uint64_t stored, uint8_t WL);
+void *matlab_fi_hex_s(int64_t  stored, uint8_t WL);
+void *matlab_fi_hex_u(uint64_t stored, uint8_t WL);
+void *matlab_fi_dec_s(int64_t  stored, uint8_t WL);
+void *matlab_fi_dec_u(uint64_t stored, uint8_t WL);
+
 // Try/catch error flag.
 void    matlab_set_error(void);
 int32_t matlab_check_error(void);

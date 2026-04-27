@@ -1,7 +1,7 @@
 # SystemVerilog Emission for Hardware Inference — Plan
 
 This document scopes a future backend that lowers a constrained MATLAB
-subset into **synthesizable SystemVerilog** for FPGA or ASIC flows.
+subset into **synthesizable SystemVerilog**.
 
 The key requirement is not just emission. The tool must also decide
 whether the MATLAB source is **hardware-inferable** at all:
@@ -41,6 +41,222 @@ The user writes MATLAB that behaves like an RTL algorithm:
 - bounded loops or explicit next-state logic
 
 If the source instead looks like a software program, the tool rejects it.
+
+## Known Limitations
+
+These are the inherent constraints any MATLAB-to-RTL flow inherits from
+the static, parallel nature of synthesizable hardware. Anything that
+depends on dynamic memory, recursion, or runtime software objects
+cannot be synthesized. The categories below mirror the limits
+documented for MathWorks' HDL Coder and apply equally to this backend.
+
+### Data Types And Variables
+
+- **Strings and text.** Hardware has no notion of `char` or `string`.
+  `fprintf`, `disp`, and any text manipulation inside HDL code are
+  rejected.
+- **Variable-size arrays.** In MATLAB an array can grow (e.g.
+  `A = [A, x]`). In RTL every signal and array must have a fixed,
+  compile-time-known shape.
+- **`double` / `single`.** Native floating-point is not synthesized
+  efficiently — translating it produces a large, inefficient float
+  pipeline. The supported path is fixed-point (`fi`); native float is
+  only available behind an explicit policy flag.
+- **Recursion.** A function cannot call itself. Hardware needs a fully
+  defined logic graph.
+
+### Functions And Libraries
+
+- **Visualization.** No `plot`, `imshow`, `grid`, or any GUI call.
+- **High-level toolboxes.** Most Deep Learning and Image Processing
+  Toolbox entry points are not supported. Only functions explicitly
+  marked for "C/C++ Code Generation Support" or HDL are eligible.
+- **System calls.** `input()`, `pause()`, `eval()`, `load`, and `save`
+  cannot exist in silicon.
+
+### Control Flow
+
+- **Unbounded `while` loops.** A `while` loop is only legal when the
+  compiler can prove (or the user states) a maximum trip count, so the
+  logic can be unrolled or mapped to an FSM.
+- **`try` / `catch`.** Software exception handling has no RTL
+  equivalent.
+- **Objects and classes.** OOP support is narrow. Dynamic instantiation
+  and complex polymorphism are not supported.
+
+### Memory And Pointers
+
+- **Dynamic allocation.** No `malloc` or runtime object creation. All
+  storage (registers and RAM) must be pre-allocated through
+  `persistent` variables or dedicated memory blocks.
+- **Pointers.** No raw memory pointers — there is no equivalent of a
+  C/C++ pointer.
+
+### Complex Arithmetic
+
+- **Division.** Fixed-point `/` is supported but produces heavy
+  hardware. Prefer powers of two (shifts) over variable divisors.
+- **Non-linear math.** `sin`, `cos`, `log`, `sqrt` do not map to simple
+  gates. Implementations rely on CORDIC or lookup tables, which
+  consume significant chip area.
+
+### Quick Self-Check
+
+MathWorks' HDL Coder exposes `checkPotentialHDLCode('your_file.m')` for
+exactly this purpose — it enumerates the lines that violate hardware
+rules. Our `HWLegalize` pass should expose an equivalent diagnostic
+mode so users can validate a function against this subset before
+invoking emission.
+
+## Hardware Optimizations and Capabilities
+
+Beyond direct combinational/sequential mapping, the backend should
+target the higher-leverage transformations that make hand-written RTL
+impractical. The capabilities below mirror the headline features of
+HDL Coder and define the value proposition of this path versus a thin
+"MATLAB to Verilog" syntactic translator.
+
+### 1. Loop Serialization (Area vs. Throughput)
+
+A `for` loop over a compile-time-bounded range has two legal lowerings:
+- **Unrolled** — every iteration becomes parallel hardware (one
+  multiplier per iteration). High throughput, high area.
+- **Serialized** — a single shared datapath runs the iterations across
+  cycles. Lower area, longer latency.
+
+#### Controlling the Lowering
+
+Two mechanisms select between the strategies, mirroring HDL Coder's
+pragma + project-option split:
+
+- **In-source pragma.** `coder.unroll` (or our equivalent attribute)
+  inside the function forces full unroll regardless of the default
+  policy. A `coder.serialize` (or `streaming_factor`) attribute does
+  the inverse.
+- **Compiler option.** A streaming factor passed to the backend
+  selects how many physical datapath copies to instantiate. A
+  streaming factor of `1` over a loop of trip count `N` produces a
+  single shared multiplier driven for `N` cycles; a factor of `N`
+  produces full unroll. Intermediate factors produce partial unrolls.
+
+```matlab
+function y = process_vector(vec_in)
+    %#codegen
+    y = fi(zeros(1, 4), 1, 16, 8);
+
+    % Force full unroll: 4 parallel multipliers, single-cycle result.
+    coder.unroll;
+    for i = 1:4
+        y(i) = vec_in(i) * fi(1.5, 1, 16, 8);
+    end
+end
+```
+
+Omitting `coder.unroll` and passing a streaming factor of `1` would
+instead emit one multiplier plus a small index counter that drives the
+loop across four cycles, with the iteration value muxed into the right
+output slot.
+
+#### Tradeoffs
+
+| Strategy   | Hardware                                       | Latency  | Area                |
+| ---------- | ---------------------------------------------- | -------- | ------------------- |
+| Unroll     | N independent datapaths                        | 1 cycle  | High (N × resource) |
+| Serialize  | 1 shared datapath + index counter + output mux | N cycles | Low (1 × resource)  |
+
+#### Default Policy
+
+- Small loops (trip count below a configured threshold, e.g. 8)
+  unroll by default — the area cost is acceptable and parallel
+  evaluation is the obvious shape.
+- Large loops (e.g. 1024-iteration vector ops) serialize by default,
+  and their backing storage is mapped to RAM rather than a register
+  bank. Forcing unroll on a 1024-wide loop produces an unrealistic
+  resource footprint, so the compiler should emit a warning when an
+  explicit `coder.unroll` is honored beyond the threshold.
+
+### 2. RAM Inference
+
+Large `persistent` arrays must not consume thousands of flip-flops.
+The backend should detect single-read/single-write port patterns with
+clocked indexing and map the storage to a synchronous RAM primitive
+instead of a register bank.
+
+```matlab
+function data_out = ram_inference(addr, data_in, we)
+    %#codegen
+    persistent ram_block;
+    if isempty(ram_block)
+        ram_block = fi(zeros(1, 1024), 1, 16, 0);
+    end
+
+    if we
+        ram_block(addr) = data_in;
+    end
+    data_out = ram_block(addr);
+end
+```
+
+Size thresholds and supported access shapes belong in
+`docs/hardware_subset.md` once that file exists.
+
+### 3. CORDIC for Trigonometric and Hyperbolic Functions
+
+`sin`, `cos`, `atan2`, `sqrt`, and similar non-linear primitives
+should be lowered to CORDIC engines (shifts + adds) rather than huge
+lookup tables or synthesized float pipelines. `HWLegalize` should
+accept these calls only when the active numeric policy authorizes the
+substitution.
+
+```matlab
+function [s, c] = hardware_sine_cosine(theta)
+    %#codegen
+    s = sin(theta);
+    c = cos(theta);
+end
+```
+
+### 4. Adaptive Pipelining
+
+When a combinational expression's logic depth exceeds the target clock
+period, the backend should automatically insert pipeline registers to
+break the critical path while preserving functional equivalence across
+cycles. The user supplies a target frequency; the compiler picks the
+register boundaries.
+
+```matlab
+function result = complex_math(a, b, c, d)
+    %#codegen
+    val1 = a * b + c;
+    val2 = d * b - a;
+    result = val1 * val2;
+end
+```
+
+### 5. Multi-Rate Hardware via Clock Enables
+
+Different parts of an algorithm can run at different effective rates
+under a single master clock by emitting clock-enable signals. This
+keeps timing closure simpler than multi-clock designs while still
+exposing rate adaptation in the generated RTL.
+
+### 6. AXI4 Interface Wrapping
+
+For SoC integration, the backend should optionally emit an AXI4-Lite
+or AXI4-Stream wrapper around a generated module so a host CPU can
+drive it without hand-written glue.
+
+### Additional Capabilities
+
+- **Float-to-fixed conversion.** Profile a `double` reference
+  implementation against representative inputs and propose `fi`
+  parameters with sufficient dynamic range and precision.
+- **Resource report.** Pre-synthesis estimate of multipliers, RAM
+  macros, and flip-flops the generated module will consume, so the
+  cost is visible before invoking downstream synthesis.
+- **Co-simulation testbench.** Auto-generate a SystemVerilog testbench
+  that drives the emitted module with the same vectors as the MATLAB
+  reference and asserts bit-exact equality.
 
 ## Documentation Set To Write
 

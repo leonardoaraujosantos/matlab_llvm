@@ -490,8 +490,8 @@ Examples gallery: one `examples/fi_filter.m` mirroring the FIR test.
 
 | Phase | Surface | Notes |
 |---|---|---|
-| 1 | Scalar `fi` constants, `+ - *`, signed + unsigned, `Wrap` + `Saturate`, `Floor` + `Nearest`, WL ∈ {8,16,32,64}, FL ≤ WL, scalar `lhs(:) = rhs` | Covers `apply_gain` and the scalar MAC. ~2.5 weeks. |
-| 2 | Sub-native WL (e.g. WL=12), implicit `fi + double` promotion, `bin/hex` display, `int(n)` / `storedInteger(n)` | ~1 week. |
+| 1 | Scalar `fi` constants, `+ - *`, signed + unsigned, `Saturate` (default), `Floor` + `Nearest`, WL ∈ {8,16,32,64}, FL ≤ WL, scalar `lhs(:) = rhs` | **✅ Shipped.** Covers `apply_gain` and the scalar MAC. `Wrap` overflow is implemented in the runtime + LowerFixedPoint, but currently unreachable from MATLAB syntax (needs the `fimath` object surface — Phase 4). |
+| 2 | Sub-native WL (e.g. WL=12), implicit `fi + double` promotion, `bin/hex/dec` display, `int(n)` / `storedInteger(n)` / `double(n)` | **✅ Shipped.** Tests: `fi_subnative.m`, `fi_mixed_double.m`, `fi_bin_hex.m`, `fi_int_extract.m`. |
 | 3 | `fi` arrays (1-D, 2-D), `length`/`size`/`numel`, indexing `A(i)`, vector concat `[x, A(1:end-1)]`, `persistent` storage of `fi` arrays, reductions on `fi` (`sum`, `mean`) | ~2 weeks. Couples to the typed integer runtime (§6.3) and to the `persistent` runtime extension (§12). Gating example: the FIR filter in §7.3. |
 | 4 | `fimath`, `numerictype`, `fipref` as first-class objects; `-emit-fixed-point-report` | ~1 week. |
 | 5 | Convergent / Zero / Ceiling rounding, `reinterpretcast` | ~0.5 week each. |

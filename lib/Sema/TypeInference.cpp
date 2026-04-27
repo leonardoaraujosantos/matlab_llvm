@@ -112,6 +112,26 @@ TypeInference::Env TypeInference::visitStmt(Stmt &St, Env In) {
           In[N->Ref] = RhsT;
           N->Ty = RhsT;
         }
+      } else if (auto *C = dynamic_cast<CallOrIndex *>(L);
+                 C && C->Args.size() == 1 && C->Args[0] &&
+                 C->Args[0]->Kind == NodeKind::ColonExpr) {
+        /* `lhs(:) = rhs` — type-preserving assignment. For an fi-typed
+         * lhs this is the "cast rhs into lhs's spec" idiom that prevents
+         * the FixedSpec from re-inferring (and growing unboundedly) on
+         * each iteration of an accumulator loop. We keep the existing
+         * type in Env and let LowerFixedPoint insert the explicit cast
+         * downstream. For non-fi lhs the behavior also preserves the
+         * destination type — same as MATLAB's "assign into existing
+         * variable's class" rule. */
+        visit(*L, In);
+        if (auto *N = dynamic_cast<NameExpr *>(C->Callee); N && N->Ref) {
+          auto It = In.find(N->Ref);
+          if (It != In.end() && It->second) {
+            // Keep existing type; annotate the LHS expression accordingly.
+            N->Ty = It->second;
+            L->Ty = It->second;
+          }
+        }
       } else {
         // Indexed LHS (e.g. a(i) = x). For now, keep the root's type as-is
         // and annotate the sub-expression with Any.
@@ -356,8 +376,21 @@ const Type *TypeInference::visit(Expr &E, Env &Env) {
     T = visitCellLit(static_cast<CellLiteral &>(E), Env); break;
   case NodeKind::FieldAccess: {
     auto &F = static_cast<FieldAccess &>(E);
-    if (F.Base) visit(*F.Base, Env);
+    const Type *BaseT = F.Base ? visit(*F.Base, Env) : nullptr;
     T = TC.any();
+    /* fi property access: WordLength / FractionLength / Signed /
+     * IntegerLength / Value / int / double — all known from FixedSpec. */
+    if (BaseT && BaseT->K == Type::Kind::Array) {
+      auto &A = static_cast<const ArrayType &>(*BaseT);
+      if (A.Elt == Dtype::Fixed && A.FxSpec) {
+        if (F.Field == "WordLength" || F.Field == "FractionLength" ||
+            F.Field == "Signed" || F.Field == "IntegerLength") {
+          T = TC.scalar(Dtype::Double);
+        } else if (F.Field == "Value") {
+          T = TC.arrayOf(Dtype::Double, A.S);
+        }
+      }
+    }
     break;
   }
   case NodeKind::DynamicField: {
@@ -385,13 +418,103 @@ const Type *TypeInference::visit(Expr &E, Env &Env) {
   return T;
 }
 
+// Fixed-Point Designer arithmetic-spec promotion.
+//
+// FullPrecision rules (User's Guide §3.10–3.14). The default for our scalar
+// pipeline. KeepLSB / SpecifyPrecision can override; Phase 1 only ships the
+// default and the `lhs(:) = rhs` clamp at assignment sites (see visitStmt).
+//
+// add/sub: align to the larger FL (left-shift smaller side); WL grows by 1.
+// mul:     WL_out = WL_a + WL_b; FL_out = FL_a + FL_b.
+// Mixed fi + double: cast the double side to the fi spec, then apply.
+namespace {
+
+FixedSpec promoteFixedAdd(const FixedSpec &A, const FixedSpec &B) {
+  FixedSpec R;
+  R.Signed = A.Signed || B.Signed;
+  R.FractionLength = std::max(A.FractionLength, B.FractionLength);
+  int LeftShiftA = R.FractionLength - A.FractionLength;
+  int LeftShiftB = R.FractionLength - B.FractionLength;
+  int WL_A = int(A.WordLength) + LeftShiftA;
+  int WL_B = int(B.WordLength) + LeftShiftB;
+  int WL = std::max(WL_A, WL_B) + 1;
+  if (WL > 64) WL = 64; // clamp at the widest native lane
+  R.WordLength = uint8_t(WL);
+  // Default fimath modes: inherit the more conservative of the two sides
+  // (Saturate over Wrap, Nearest over Floor).
+  R.OF = (A.OF == FixedSpec::Overflow::Saturate ||
+          B.OF == FixedSpec::Overflow::Saturate)
+             ? FixedSpec::Overflow::Saturate
+             : FixedSpec::Overflow::Wrap;
+  R.RM = (A.RM == FixedSpec::Rounding::Nearest ||
+          B.RM == FixedSpec::Rounding::Nearest)
+             ? FixedSpec::Rounding::Nearest
+             : FixedSpec::Rounding::Floor;
+  return R;
+}
+
+FixedSpec promoteFixedMul(const FixedSpec &A, const FixedSpec &B) {
+  FixedSpec R;
+  R.Signed = A.Signed || B.Signed;
+  int WL = int(A.WordLength) + int(B.WordLength);
+  if (WL > 64) WL = 64;
+  R.WordLength = uint8_t(WL);
+  int FL = int(A.FractionLength) + int(B.FractionLength);
+  if (FL > R.WordLength) FL = R.WordLength;
+  R.FractionLength = int8_t(FL);
+  R.OF = (A.OF == FixedSpec::Overflow::Saturate ||
+          B.OF == FixedSpec::Overflow::Saturate)
+             ? FixedSpec::Overflow::Saturate
+             : FixedSpec::Overflow::Wrap;
+  R.RM = (A.RM == FixedSpec::Rounding::Nearest ||
+          B.RM == FixedSpec::Rounding::Nearest)
+             ? FixedSpec::Rounding::Nearest
+             : FixedSpec::Rounding::Floor;
+  return R;
+}
+
+} // namespace
+
 const Type *TypeInference::visitBinary(BinaryOpExpr &B, Env &Env) {
   const Type *L = B.LHS ? visit(*B.LHS, Env) : TC.any();
   const Type *R = B.RHS ? visit(*B.RHS, Env) : TC.any();
 
+  // Per-op fi handling (FullPrecision rules; Phase 4 will route through a
+  // first-class fimath surface). Falls through to the regular numeric
+  // promotion path when neither operand is Fixed.
+  auto tryFixedBinop = [&](BinOp Op) -> const Type * {
+    if (!L || !R || L->K != Type::Kind::Array || R->K != Type::Kind::Array)
+      return nullptr;
+    auto &LA = static_cast<const ArrayType &>(*L);
+    auto &RA = static_cast<const ArrayType &>(*R);
+    if (LA.Elt != Dtype::Fixed && RA.Elt != Dtype::Fixed) return nullptr;
+    // Mixed fi + non-fi: cast the non-fi to the fi side's spec.
+    FixedSpec SL = LA.FxSpec ? *LA.FxSpec : FixedSpec{};
+    FixedSpec SR = RA.FxSpec ? *RA.FxSpec : FixedSpec{};
+    if (LA.Elt == Dtype::Fixed && RA.Elt != Dtype::Fixed) SR = SL;
+    if (RA.Elt == Dtype::Fixed && LA.Elt != Dtype::Fixed) SL = SR;
+    if (!LA.FxSpec && LA.Elt == Dtype::Fixed) return nullptr; // unresolved spec
+    if (!RA.FxSpec && RA.Elt == Dtype::Fixed) return nullptr;
+    Shape Out = broadcastShape(LA.S, RA.S);
+    switch (Op) {
+    case BinOp::Add: case BinOp::Sub:
+      return TC.fixedArray(promoteFixedAdd(SL, SR), Out);
+    case BinOp::ElemMul:
+    case BinOp::Mul: // matrix * scalar / scalar * matrix collapses to elt mul
+      return TC.fixedArray(promoteFixedMul(SL, SR), Out);
+    default:
+      return nullptr; // div / pow / cmp deferred — fall through.
+    }
+  };
+
   switch (B.Op) {
   case BinOp::Add: case BinOp::Sub:
-  case BinOp::ElemMul: case BinOp::ElemDiv:
+    if (auto *T = tryFixedBinop(B.Op)) return T;
+    return TC.broadcastNumeric(L, R);
+  case BinOp::ElemMul:
+    if (auto *T = tryFixedBinop(B.Op)) return T;
+    return TC.broadcastNumeric(L, R);
+  case BinOp::ElemDiv:
   case BinOp::ElemLeftDiv: case BinOp::ElemPow:
     return TC.broadcastNumeric(L, R);
 
@@ -401,8 +524,16 @@ const Type *TypeInference::visitBinary(BinaryOpExpr &B, Env &Env) {
       return TC.any();
     auto &LA = static_cast<const ArrayType &>(*L);
     auto &RA = static_cast<const ArrayType &>(*R);
+    // Scalar fi * scalar fi (the apply_gain shape) — promote spec via the
+    // mul rule. Vector/matrix fi mul is Phase 3 territory; for now accept
+    // scalar-scalar and let the rest fall through.
+    if ((LA.Elt == Dtype::Fixed || RA.Elt == Dtype::Fixed) &&
+        LA.S.K == Shape::Rank::Scalar && RA.S.K == Shape::Rank::Scalar) {
+      if (auto *T = tryFixedBinop(BinOp::Mul)) return T;
+    }
     Dtype D = promoteDtype(LA.Elt, RA.Elt);
     if (D == Dtype::Unknown) return TC.any();
+    if (D == Dtype::Fixed)   return TC.any(); // unresolved fi mul shape
     if (LA.S.K == Shape::Rank::Scalar) return TC.arrayOf(D, RA.S);
     if (RA.S.K == Shape::Rank::Scalar) return TC.arrayOf(D, LA.S);
     if (LA.S.K == Shape::Rank::Matrix && RA.S.K == Shape::Rank::Matrix) {
@@ -466,6 +597,14 @@ const Type *TypeInference::visitUnary(UnaryOpExpr &U, Env &Env) {
       return TC.arrayOf(Dtype::Logical, A.S);
     }
     return TC.scalar(Dtype::Logical);
+  }
+  /* Unary minus on unsigned fi is a MATLAB error; we surface it at lower
+   * stages (LowerFixedPoint will refuse to emit). For signed fi the spec
+   * is preserved (Saturate / Wrap on the smallest-negative case is a
+   * runtime concern). */
+  if (U.Op == UnOp::Minus && T && T->K == Type::Kind::Array) {
+    auto &A = static_cast<const ArrayType &>(*T);
+    if (A.Elt == Dtype::Fixed && A.FxSpec) return T;
   }
   return T;
 }
@@ -691,6 +830,80 @@ const Type *TypeInference::visitBuiltinCall(std::string_view Name,
   if (Name == "int64")   return TC.scalar(Dtype::Int64);
   if (Name == "logical") return TC.scalar(Dtype::Logical);
   if (Name == "char")    return TC.arrayOf(Dtype::Char, Shape::unknown());
+
+  //===--- Fixed-Point Designer (fi) -------------------------------------===//
+  // fi(value) / fi(value, signed, WL) / fi(value, signed, WL, FL).
+  // Constant args fold here (almost always literals in real fi code) so the
+  // FixedSpec is concrete by the time MLIR sees it. fi(value, T) and
+  // fi(value, T, F) — with numerictype/fimath objects — are Phase-4 surface
+  // and fall through to TC.any() for now.
+  if (Name == "fi") {
+    const Type *ValT = !ArgTys.empty() ? ArgTys[0] : nullptr;
+    Shape OutShape = Shape::scalar();
+    if (ValT && ValT->K == Type::Kind::Array)
+      OutShape = static_cast<const ArrayType &>(*ValT).S;
+    FixedSpec Spec; // defaults: signed Q15.16 — MATLAB's fi(value) default
+    if (Args.size() >= 3) {
+      int64_t Sgn = foldInt(Args[1]);
+      int64_t WL  = foldInt(Args[2]);
+      if (Sgn < 0 || WL <= 0 || WL > 64) return TC.any();
+      Spec.Signed = (Sgn != 0);
+      Spec.WordLength = uint8_t(WL);
+      // Default fraction length per MATLAB fi: WL-1 for signed, WL for
+      // unsigned, but only when the user omitted FL. Phase-4 fimath will
+      // override via DefaultFractionLength etc.
+      Spec.FractionLength = Spec.Signed ? int8_t(WL - 1) : int8_t(WL);
+    }
+    if (Args.size() >= 4) {
+      int64_t FL = foldInt(Args[3]);
+      if (FL < 0 || FL > Spec.WordLength) return TC.any();
+      Spec.FractionLength = int8_t(FL);
+    }
+    if (Args.size() == 2) {
+      // fi(value, T) — numerictype object form. Phase 4. Bail to any.
+      return TC.any();
+    }
+    return TC.fixedArray(Spec, OutShape);
+  }
+  if (Name == "numerictype" || Name == "fimath" || Name == "fipref") {
+    // Phase 4 surface — opaque for now.
+    return TC.any();
+  }
+  // int(n) / storedInteger(n) / storedIntegerToDouble(n) — return the native
+  // integer behind a fi value. For non-fi inputs, behave like a no-op.
+  if (Name == "int" || Name == "storedInteger") {
+    if (!ArgTys.empty() && ArgTys[0] && ArgTys[0]->K == Type::Kind::Array) {
+      auto &A = static_cast<const ArrayType &>(*ArgTys[0]);
+      if (A.Elt == Dtype::Fixed && A.FxSpec) {
+        Dtype D = Dtype::Int64;
+        switch (A.FxSpec->storageBits()) {
+        case 8:  D = A.FxSpec->Signed ? Dtype::Int8  : Dtype::UInt8;  break;
+        case 16: D = A.FxSpec->Signed ? Dtype::Int16 : Dtype::UInt16; break;
+        case 32: D = A.FxSpec->Signed ? Dtype::Int32 : Dtype::UInt32; break;
+        default: D = A.FxSpec->Signed ? Dtype::Int64 : Dtype::UInt64; break;
+        }
+        return TC.arrayOf(D, A.S);
+      }
+    }
+    return TC.any();
+  }
+  if (Name == "storedIntegerToDouble") {
+    if (!ArgTys.empty() && ArgTys[0] && ArgTys[0]->K == Type::Kind::Array) {
+      auto &A = static_cast<const ArrayType &>(*ArgTys[0]);
+      return TC.arrayOf(Dtype::Double, A.S);
+    }
+    return TC.scalar(Dtype::Double);
+  }
+  // reinterpretcast(n, T) — bit-reinterpret without changing storage. Phase 5.
+  if (Name == "reinterpretcast") return TC.any();
+  // removefimath / setfimath only adjust the fimath; keep numerictype.
+  if (Name == "removefimath" || Name == "setfimath") {
+    if (!ArgTys.empty() && ArgTys[0]) return ArgTys[0];
+    return TC.any();
+  }
+  // bin / hex / dec — render a fi as a string. Returns char array.
+  if (Name == "bin" || Name == "hex" || Name == "dec")
+    return TC.arrayOf(Dtype::Char, Shape::unknown());
 
   if (Name == "disp" || Name == "fprintf" || Name == "warning" ||
       Name == "error") {

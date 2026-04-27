@@ -120,6 +120,7 @@ Out of scope:
 | `single` | 🟡 | Cast builtin routes to f64 (truncate only) |
 | `int8..int64`, `uint8..uint64` | 🟡 | Cast builtins truncate + saturate; storage stays f64 |
 | `complex` | ✅ | Imaginary literals (`2i`, `3j`), scalar + matrix arithmetic (add/sub/mul/div/matmul), mixed real+complex binops. Separate re/im planes; scalars auto-boxed to 1×1 — see [`docs/complex.md`](complex.md). |
+| `fi` (Fixed-Point Designer) | 🟡 | Phases 1–2: scalar `fi(value, signed, WL, FL)` constructors with literal-fold, `+ - *`, `(:)` type-preserving assignment, `Saturate` overflow, `Floor`/`Nearest` rounding, sub-native WL (e.g. WL=12 in i16 lane), implicit `fi + double` promotion, `int(n)` / `storedInteger(n)` / `double(n)`, `bin/hex/dec` display. Storage = native `int8/16/32/64`. `numerictype` / `fimath` objects, fi arrays, slope/bias scaling are deferred — see [`docs/emit_fixed_point.md`](emit_fixed_point.md). |
 | N-D arrays (3-D) | 🟡 | `zeros(m,n,p)` / `ones(m,n,p)` + scalar `A(i,j,k)` read/write, `size(A, 3)`, `numel`, `ndims` |
 | N-D arrays (>3D) | ❌ | |
 | Sparse matrices | ❌ | |
@@ -379,7 +380,8 @@ sort / linalg tail, strings, REPL, file I/O, basic OOP, tooling —
 | Priority | Item | Effort | Unlocks |
 |:-:|---|--:|---|
 | 1 | Struct arrays (`s(i).x`) | 1 week | Data-in-records patterns |
-| 2 | Integer runtime (typed `matlab_mat_i32` / `_u8` / …) | 1.5 weeks | Image processing pixel code |
+| 2 | Integer runtime (typed `matlab_mat_i32` / `_u8` / …) | 1.5 weeks | Image processing pixel code; unblocks fi arrays (Phase 3) |
+| 2b | Fixed-Point Designer (`fi`) Phase 3+ — arrays, FIR/IIR, `numerictype`/`fimath` objects | 3 weeks | DSP simulation, hardware-faithful integer math (Phase 1 scalar already shipped — see [`emit_fixed_point.md`](emit_fixed_point.md)) |
 | 3 | `varargout` + 3-D vector slicing (`A(:,:,k)`) | 1 week | Library-style + volumetric code |
 | 4 | Complex linalg tail (`inv` / `det` / `svd` / `eig`) | 1 week | Complete DSP / scientific code |
 | 5 | OOP value-class copy semantics + property validators | 2 weeks | Modern MATLAB code |

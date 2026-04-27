@@ -182,6 +182,8 @@ VS Code via a generic-DAP extension:
 | Stack trace across user fns     | `stackTrace`                        |
 | Per-frame Locals                | `scopes(frameId)` returns one Locals scope per frame; `variables(ref)` reads either the script ws or that frame's mini-ws |
 | Workspace variables snapshot    | `variables`                         |
+| Class instances in Locals/Watch | `1x1 ClassName` rows expand into properties; works in both `variables` and `evaluate` |
+| Matrix expansion in Locals/Watch | `RxC double` rows expand into one child per cell (`(i,j)` row-major; linear `(i)` for vectors); `1x1` matrices unbox to the scalar |
 | Watch / hover / debug-console eval | `evaluate` against any frame's locals — pass `frameId` for function-frame scope, omit for script scope |
 | Multi-file breakpoints          | Sibling `.m` files (function-only or classdef-only) in the entry-point's directory get auto-loaded; bps on their lines fire correctly |
 | Mutate any workspace variable   | `setVariable` (any MATLAB expr on RHS — scalar, matrix, string, struct) |
@@ -256,12 +258,22 @@ follow-up that closes that gap is item (6) in
 mini-workspace the runtime maintains alongside `matlab_dbg.frames[]`.
 The lowering's `emitStore` injects a `matlab_dbg_frame_set` builtin
 after every store to a named slot when DebugMode is on; LowerTensorOps
-dispatches by the operand's lowered type to either
-`matlab_dbg_frame_set_f64(name, len, val)` or
-`matlab_dbg_frame_set_mat(name, len, ptr)`. The frame push
-(`matlab_dbg_enter_frame`) was hoisted to fire *before* the parameter
-spill loop in `lowerFunction` so the spill-store mirrors land in the
-new frame, not the caller's.
+dispatches by the operand's lowered type plus an optional
+`matlab.class_id` attribute to one of three runtime entries:
+
+- `matlab_dbg_frame_set_f64(name, len, val)` — scalar f64.
+- `matlab_dbg_frame_set_mat(name, len, ptr)` — `matlab_mat *`.
+- `matlab_dbg_frame_set_obj(name, len, ptr)` — `matlab_obj *` (user
+  classdef instance). The slot's `matlab.alloc` op carries
+  `matlab.class_id` whenever the binding is pinned to a classdef
+  (set in `getOrCreateSlot` and the explicit class-slot sites in
+  `lowerFunction`); `emitStore` forwards the attribute onto the
+  `matlab_dbg_frame_set` call so `LowerTensorOps` can pick the obj
+  variant.
+
+The frame push (`matlab_dbg_enter_frame`) was hoisted to fire *before*
+the parameter spill loop in `lowerFunction` so the spill-store mirrors
+land in the new frame, not the caller's.
 
 DAP-side: `scopes(frameId)` returns one Locals scope whose
 `variablesReference` is `1000 + DAP_frame_id`. `variables(ref)`
@@ -288,6 +300,134 @@ script-level workspace plus the script frame's mini-ws — function
 frame locals aren't yet visible to the evaluator (see plan item
 (6) for the bridge). Malformed expressions come back as
 `success=false`; the connection stays open.
+
+### Class instances in Locals + Watch
+
+`acc = BankAccount(...)` used to surface in the LOCALS panel as
+`<huge>x<huge> double` because the runtime tracked only two kinds
+(`f64` scalar and `matlab_mat *` matrix) and the matrix formatter
+dereferenced the `matlab_obj *` as if it were a `matlab_mat *` —
+reading internal pointer fields as rows / cols. Class instances now
+flow through a dedicated `kind=2` path end-to-end:
+
+1. **Lowering.** Slots whose binding is pinned to a user classdef
+   carry a `matlab.class_id` integer attribute on their
+   `matlab.alloc` op. `emitStore` forwards the attribute onto the
+   `matlab_dbg_frame_set` builtin; `LowerTensorOps` reads it back
+   and lowers to `matlab_dbg_frame_set_obj` (instead of `_set_mat`)
+   so the runtime's per-frame Locals table records `kind=2` with
+   the obj pointer borrowed from the slot. The script-level
+   `matlab_ws_set_*` write site in the assignment lowerer routes
+   class-bound assignments through the new `matlab_ws_set_obj`,
+   stamping `kind=2` directly on the `matlab_struct` workspace
+   entry.
+2. **Class-name registry.** `lowerScript` emits one
+   `matlab_dbg_register_class(class_id, "ClassName")` call per
+   classdef in the translation unit (DebugMode only) at the very
+   top of the script body, populating a small linear table inside
+   `matlab_dbg`. The DAP server reads it via `matlab_dbg_class_name`
+   to format `1x1 ClassName`. `matlab_obj` already carries `class_id`
+   at the tail of its struct prefix, so the runtime resolves the
+   name from the obj pointer alone.
+3. **Property introspection.** New `matlab_dbg_obj_field_*`
+   accessors expose the `matlab_obj`'s embedded `matlab_struct`
+   (`names[]` / `kinds[]` / `f64_vals[]` / `ptr_vals[]`) so the DAP
+   server can produce one child row per property when the IDE
+   asks to expand a class-instance row.
+4. **DAP plumbing.** `formatVar` handles `kind=2` directly. The
+   `variables` request hands out a `variablesReference` ≥ 100000
+   for each class-instance row, backed by a server-side registry
+   (`ObjRefs`) that maps the handle back to the underlying
+   `matlab_obj *`. Expansions read children via
+   `matlab_dbg_obj_field_*`; properties that themselves hold a
+   class instance recurse via the same registry.
+5. **Watch promotion.** The REPL JIT compiling
+   `__matlab_dbg_eval = (<expr>);` doesn't carry workspace class
+   info into its fresh Sema, so an expression that yields a class
+   instance lands in `matlab_ws` with `kind=1` (matlab_mat) — the
+   pointer is correct but the kind tag is wrong. The `evaluate`
+   handler compensates by sweeping every currently tracked
+   `kind=2` pointer (across `matlab_ws` and every frame's mini-ws)
+   and promoting the result to `kind=2` on a hit. Without the
+   promotion the watch box would show `<huge>x<huge> double`
+   again on a watched class instance.
+
+A test scenario (`scn_class_instance_locals`) and a fixture
+(`dap_class_program.m`) cover the full surface: two distinct
+classes, an inherited subclass, a mutator (`acc.deposit`),
+property expansion in both `variables` and `evaluate`, and the
+`kind=1`→`kind=2` promotion via the watch box.
+
+#### Known limit: dot-access on workspace class instances
+
+Inside the watch box, `acc.Balance` evaluates against a
+freshly-Sema'd REPL session that has no record of `acc`'s class.
+The dot lookup falls back to `matlab_struct_get_f64`, which
+correctly walks the obj's struct-compatible prefix — so for
+properties that exist on the matlab_obj and were stored as f64,
+the answer comes back. Properties that need `get.<Name>`
+dispatch (Dependent properties) or class-method calls are *not*
+resolved by the workspace evaluator yet — the user-facing watch
+will return `0` rather than the computed value. Workaround:
+expand the row in the LOCALS panel instead, which goes through
+the obj-introspection path and shows every stored property
+correctly (Dependent properties are still elided because they
+aren't materialised in the obj's field table).
+
+### Matrix expansion in Locals + Watch
+
+`A 3x3 double` used to be the end of the line in the LOCALS panel:
+clicking the row didn't reveal the cell values, the watch box gave
+the same one-line summary for any matrix expression, and editor-side
+"matrix viewer" panels had no DAP path to read element data. The
+expansion path mirrors the class-instance path:
+
+1. **Runtime.** `matlab_dbg_mat_get(matlab_mat *m, i, j)` returns
+   the `(i, j)` cell using 1-based indexing (matches the labels the
+   DAP server hands the IDE) so the server doesn't need access to
+   the `matlab_mat` layout. Out-of-range indices and complex
+   matrices return `0.0` defensively.
+2. **DAP plumbing.** `MatRefBase = 200000` plus a `MatRefs` vector
+   maps DAP variablesReferences to live `matlab_mat *` pointers. A
+   kind=1 row (LOCALS, watch eval result, or an obj property
+   holding a matrix) registers the pointer and ships its handle as
+   the row's `variablesReference`; 1x1 matrices stay leaves and
+   unbox to the scalar in the parent's `value` field. When
+   `variables(ref)` arrives with `ref >= MatRefBase`,
+   `appendMatChildren` walks the buffer in row-major order and
+   emits one cell per child:
+   - 1xN row vector → `(j)` linear labels
+   - Mx1 col vector → `(i)` linear labels
+   - MxN matrix → `(i,j)` two-dim labels
+3. **Truncation.** `MatExpandCap = 256` keeps the response payload
+   sane on large matrices; once the cap is hit a single `…` row
+   with value `(truncated)` flags the elision so users know the
+   IDE didn't quietly drop cells. A future Matrix Viewer protocol
+   can request the full grid via a custom request without going
+   through the truncated children path.
+
+The watch path uses the same registry: an `evaluate` of `A * x`
+lands as a kind=1 result in `matlab_ws`, and the response carries a
+mat-ref so the IDE can drill into the product without re-typing it
+into LOCALS.
+
+Validated by `scn_matrix_expansion` against `dap_matrix_program.m`
+(2x3 matrix, 3x1 column vector, 1x1 scalar — covers the three
+formatting paths plus the watch-result variant).
+
+#### Out of scope (for now)
+
+- **Custom matrix-viewer request.** Editor panels that want a 2D
+  grid in one shot (rather than 256 child rows) need a dedicated
+  request like `matlab/matrix(ref)` returning `{rows, cols, data}`.
+  Easy to layer on top of the existing registry — same handle
+  works, different response shape — but no IDE in the tree
+  consumes it yet so it isn't shipped.
+- **Real complex matrices.** `mat_get` returns 0 for the
+  complex-magic descriptor; a parallel `_get_real` / `_get_imag`
+  pair would feed a richer formatter.
+- **3-D matrices** (`matlab_mat3`). Same pattern but the labeller
+  would need an `(i,j,k)` form and the cap math gets stricter.
 
 ### `error()` backtrace
 
@@ -475,8 +615,8 @@ Three ctest suites guard the debugging surface (all gated on
 
 - **`debug-dap-tests`** — spawns `matlabc -dap` as a subprocess and
   drives the protocol with a small Python client
-  (`test/Debug/dap_client.py`). Eleven scenarios cover the end-to-end
-  surface:
+  (`test/Debug/dap_client.py`). Thirteen scenarios cover the
+  end-to-end surface:
   - plain breakpoint (`reason="breakpoint"`, expected line)
   - step-vs-breakpoint reasons (the regression where every pause
     was hardcoded as `"breakpoint"` even after `next`)
@@ -505,6 +645,20 @@ Three ctest suites guard the debugging surface (all gated on
   - `error()` backtrace — nested user-function calls raise via
     `error('boom')`; stderr must contain the message header plus one
     frame line per call site (innermost first)
+  - **matrix expansion** — `dap_matrix_program.m` constructs a
+    2x3, a 3x1, and a 1x1 matrix; the scenario asserts the
+    `RxC double` shape labels, the `(i,j)` / `(i)` cell layout,
+    the 1x1 unbox, and that an `evaluate("A")` watch result
+    carries the same mat-ref so the IDE can drill into a watched
+    expression
+  - **class-instance Locals + Watch** — `dap_class_program.m`
+    constructs `Account` and `Savings` (subclass) instances at
+    script scope; the LOCALS panel reports `1x1 Account` /
+    `1x1 Savings` with expandable property children, the inherited
+    `Id` / `Balance` come through alongside `Savings.Rate`, and a
+    watch-box `evaluate("acc")` exercises the kind=1 → kind=2
+    promotion for class instances that the REPL JIT mistakenly
+    stamps as matrices
 
 - **`debug-dwarf-tests`** — runs `matlabc -emit-llvm -g` and
   `-emit-llvm` (no -g) over a fixture, asserts the DWARF metadata

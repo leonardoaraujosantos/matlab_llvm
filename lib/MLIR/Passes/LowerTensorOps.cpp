@@ -1255,14 +1255,43 @@ bool TensorLowering::rewriteBuiltinCalls() {
       continue;
     }
 
+    /* Class-name registration: emitted at the top of the script body
+     * (DebugMode only) once per classdef so the runtime can resolve
+     * class_id -> class name when the DAP server formats class
+     * instances. Two operands: (i32 class_id, const_char name). */
+    if (Name == "matlab_dbg_register_class" &&
+        Call->getNumOperands() == 2 && Call->getNumResults() == 1) {
+      auto I32 = IntegerType::get(Ctx, 32);
+      Value ClsId = Call->getOperand(0);
+      Value NameV = Call->getOperand(1);
+      if (ClsId.getType() != I32) continue;
+      int64_t Len = 0;
+      Value Ptr = fieldNameAddr(NameV, Len);
+      if (!Ptr) continue;
+      B.setInsertionPoint(Call);
+      Value LenV = LLVM::ConstantOp::create(
+          B, Call->getLoc(), I64, B.getI64IntegerAttr(Len));
+      auto Fn = rt("matlab_dbg_register_class", VoidTy, {I32, PtrTy, I64});
+      LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                            ValueRange{ClsId, Ptr, LenV});
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+
     /* Per-frame Locals mirror: emitted by emitStore in DebugMode for
      * every store to a named slot. The first operand is a const_char
      * carrying the variable name; the second is the stored value.
      * We dispatch on the operand's lowered type — f64 routes to
      * matlab_dbg_frame_set_f64, !llvm.ptr (matrix descriptor) routes
-     * to matlab_dbg_frame_set_mat. Operands that are still
-     * none-typed at this point (scalar promotion hasn't completed yet)
-     * are punted to the next iteration of the rewrite loop. */
+     * to matlab_dbg_frame_set_mat. When the call carries a
+     * `matlab.class_id` attribute (set by emitStore for slots whose
+     * binding is pinned to a user classdef), the ptr operand is a
+     * matlab_obj* and we route to matlab_dbg_frame_set_obj instead so
+     * the runtime can stamp kind=2 and the DAP server keeps the class
+     * identity. Operands that are still none-typed at this point
+     * (scalar promotion hasn't completed yet) are punted to the next
+     * iteration of the rewrite loop. */
     if (Name == "matlab_dbg_frame_set" &&
         Call->getNumOperands() == 2 && Call->getNumResults() == 1) {
       Value NameV = Call->getOperand(0);
@@ -1271,6 +1300,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
       bool IsF64 = mlir::isa<mlir::Float64Type>(VT);
       bool IsPtr = mlir::isa<LLVM::LLVMPointerType>(VT);
       if (!IsF64 && !IsPtr) continue; /* still none-typed, retry */
+      bool IsObj = IsPtr && Call->hasAttr("matlab.class_id");
       int64_t Len = 0;
       Value Ptr = fieldNameAddr(NameV, Len);
       if (!Ptr) continue;
@@ -1278,7 +1308,8 @@ bool TensorLowering::rewriteBuiltinCalls() {
       Value LenV = LLVM::ConstantOp::create(
           B, Call->getLoc(), I64, B.getI64IntegerAttr(Len));
       const char *Callee = IsF64 ? "matlab_dbg_frame_set_f64"
-                                 : "matlab_dbg_frame_set_mat";
+                                 : (IsObj ? "matlab_dbg_frame_set_obj"
+                                          : "matlab_dbg_frame_set_mat");
       mlir::Type ValTy = IsF64 ? mlir::Type(F64) : mlir::Type(PtrTy);
       auto Fn = rt(Callee, VoidTy, {PtrTy, I64, ValTy});
       LLVM::CallOp::create(B, Call->getLoc(), Fn,
@@ -1311,7 +1342,8 @@ bool TensorLowering::rewriteBuiltinCalls() {
       Changed = true;
       continue;
     }
-    if ((Name == "matlab_ws_set_f64" || Name == "matlab_ws_set_mat") &&
+    if ((Name == "matlab_ws_set_f64" || Name == "matlab_ws_set_mat" ||
+         Name == "matlab_ws_set_obj") &&
         Call->getNumOperands() == 2) {
       Value NameV = Call->getOperand(0);
       Value Val = Call->getOperand(1);
@@ -1321,11 +1353,16 @@ bool TensorLowering::rewriteBuiltinCalls() {
        * from f64 to ptr (e.g. `x * 2` where x is a workspace matrix).
        * When the initial choice doesn't match the final value type,
        * flip to the correct variant so the store uses the right
-       * runtime entry. */
+       * runtime entry. The set_obj choice is sticky: it carries the
+       * Sema-pinned class info, so we trust the frontend and don't
+       * downgrade to set_mat even if the value is a generic ptr. */
+      bool IsObj = (Name == "matlab_ws_set_obj");
       bool IsMat;
-      if (Val.getType() == PtrTy)      IsMat = true;
-      else if (Val.getType() == F64)    IsMat = false;
+      if (IsObj) IsMat = true;
+      else if (Val.getType() == PtrTy)      IsMat = true;
+      else if (Val.getType() == F64)         IsMat = false;
       else continue;   /* neither ptr nor f64 yet — wait for another iter */
+      if (IsObj && Val.getType() != PtrTy) continue; /* retry once Val lowers */
       /* Call fieldNameAddr AFTER the Val type check. fieldNameAddr
        * has a side effect (materialises a global + addressof and
        * replaces the const_char's uses with the addressof); once
@@ -1335,7 +1372,9 @@ bool TensorLowering::rewriteBuiltinCalls() {
       int64_t Len = 0;
       Value Ptr = fieldNameAddr(NameV, Len);
       if (!Ptr) continue;
-      StringRef RuntimeName = IsMat ? "matlab_ws_set_mat" : "matlab_ws_set_f64";
+      StringRef RuntimeName = IsObj ? "matlab_ws_set_obj"
+                                    : (IsMat ? "matlab_ws_set_mat"
+                                             : "matlab_ws_set_f64");
       B.setInsertionPoint(Call);
       Value LenV = LLVM::ConstantOp::create(
           B, Call->getLoc(), I64, B.getI64IntegerAttr(Len));

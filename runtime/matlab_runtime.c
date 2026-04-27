@@ -7,6 +7,7 @@
 
 #include <math.h>
 #include <pthread.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -2047,6 +2048,17 @@ matlab_mat *matlab_struct_get_mat(matlab_struct *s, const char *name, int64_t le
     if (idx < 0) return mat_alloc(0, 0);
     if (s->kinds[idx] == 1 && s->ptr_vals[idx])
         return (matlab_mat *)s->ptr_vals[idx];
+    /* kind=2 is a class instance pointer. The caller is the lowered
+     * code reading a script-level class-bound variable, and Sema has
+     * already typed it as a matlab_obj* — it's only routed through
+     * the _get_mat entry because the workspace path is uniformly
+     * ptr-typed. Pass the pointer through verbatim so dot-property
+     * access and method dispatch see the obj they expect. The
+     * historical mat_alloc(0, 0) fallback was harmless under the
+     * old kind=1 storage but actively wrong now that obj instances
+     * carry kind=2. */
+    if (s->kinds[idx] == 2 && s->ptr_vals[idx])
+        return (matlab_mat *)s->ptr_vals[idx];
     /* Box a scalar field into a 1x1 matrix. */
     if (s->kinds[idx] == 0) {
         matlab_mat *m = mat_alloc(1, 1);
@@ -2086,6 +2098,198 @@ double matlab_uint64_s(double x) { return sat(x, 0.0, 1.8446744073709552e19); }
 double matlab_double_s(double x) { return x; }
 double matlab_single_s(double x) { return (double)(float)x; }
 double matlab_logical_s(double x) { return x != 0.0 ? 1.0 : 0.0; }
+
+/* ---------------------------------------------------------------------- */
+/* Fixed-Point Designer (fi) helpers — see docs/emit_fixed_point.md §6.2.
+ *
+ * The stored integer is the only state; the FixedSpec (WL/FL/signedness/
+ * overflow/rounding) is passed by argument at every call so the runtime
+ * stays stateless and the lowering compiler can fold these calls when
+ * it has constant arguments. Native int64/uint64 are the widest stored
+ * lanes; sub-native widths (WL=12 etc) are masked + saturated by the
+ * caller per assignment.
+ *
+ * Conventions:
+ *   - signed-shift code paths assume two's-complement arithmetic-right-
+ *     shift, which gcc/clang/MSVC all implement on every target we
+ *     compile against. We don't pretend portability beyond that.
+ *   - Nearest rounds halves toward +Inf (`round-half-up`), matching the
+ *     MATLAB `Nearest` mode.
+ *   - Floor truncates toward -Inf, matching MATLAB `Floor`. */
+
+int64_t matlab_fi_sat_s64(int64_t x, uint8_t WL) {
+    if (WL == 0) return 0;
+    if (WL >= 64) return x;
+    int64_t hi = ((int64_t)1 << (WL - 1)) - 1;
+    int64_t lo = -((int64_t)1 << (WL - 1));
+    if (x > hi) return hi;
+    if (x < lo) return lo;
+    return x;
+}
+
+uint64_t matlab_fi_sat_u64(uint64_t x, uint8_t WL) {
+    if (WL == 0) return 0;
+    if (WL >= 64) return x;
+    uint64_t hi = ((uint64_t)1 << WL) - 1u;
+    if (x > hi) return hi;
+    return x;
+}
+
+int64_t matlab_fi_round_floor_s(int64_t x, uint8_t shift) {
+    if (shift == 0) return x;
+    if (shift >= 64) return x < 0 ? -1 : 0;
+    return x >> shift; /* arithmetic on gcc/clang/MSVC */
+}
+
+int64_t matlab_fi_round_nearest_s(int64_t x, uint8_t shift) {
+    if (shift == 0) return x;
+    if (shift >= 64) return 0;
+    /* round-half-up: add half-LSB, then arithmetic shift. */
+    int64_t half = (int64_t)1 << (shift - 1);
+    return (x + half) >> shift;
+}
+
+uint64_t matlab_fi_round_floor_u(uint64_t x, uint8_t shift) {
+    if (shift == 0) return x;
+    if (shift >= 64) return 0;
+    return x >> shift;
+}
+
+uint64_t matlab_fi_round_nearest_u(uint64_t x, uint8_t shift) {
+    if (shift == 0) return x;
+    if (shift >= 64) return 0;
+    uint64_t half = (uint64_t)1 << (shift - 1);
+    return (x + half) >> shift;
+}
+
+/* Convert a real-world double to the stored integer for a fi (signed,WL,FL).
+ * Applies the rounding mode to the fractional part, then the overflow mode
+ * to the integer-magnitude clip. Phase 1 ships Floor + Nearest; the rest
+ * set the error flag so callers can detect unsupported modes. */
+int64_t matlab_fi_quantize_s(double v, uint8_t WL, int8_t FL,
+                             uint8_t overflow, uint8_t rounding) {
+    /* Scale to the fixed-point domain. FL may exceed 53 (mantissa bits),
+     * in which case the input double can't represent the full range
+     * losslessly — we accept that and document the limitation. */
+    double scaled = ldexp(v, FL);
+    int64_t stored;
+    switch (rounding) {
+    case 0: stored = (int64_t)floor(scaled); break;
+    case 1: stored = (int64_t)floor(scaled + 0.5); break;
+    case 2: case 3: case 4:
+    default:
+        matlab_set_error();
+        return 0;
+    }
+    if (overflow == 1) return matlab_fi_sat_s64(stored, WL);
+    /* Wrap: mask to WL bits then sign-extend. */
+    if (WL == 0) return 0;
+    if (WL >= 64) return stored;
+    uint64_t mask = ((uint64_t)1 << WL) - 1u;
+    uint64_t bits = ((uint64_t)stored) & mask;
+    /* Sign-extend from bit (WL-1). */
+    if (bits & ((uint64_t)1 << (WL - 1))) bits |= ~mask;
+    return (int64_t)bits;
+}
+
+uint64_t matlab_fi_quantize_u(double v, uint8_t WL, int8_t FL,
+                              uint8_t overflow, uint8_t rounding) {
+    double scaled = ldexp(v, FL);
+    if (scaled < 0.0) scaled = 0.0;
+    uint64_t stored;
+    switch (rounding) {
+    case 0: stored = (uint64_t)floor(scaled); break;
+    case 1: stored = (uint64_t)floor(scaled + 0.5); break;
+    case 2: case 3: case 4:
+    default:
+        matlab_set_error();
+        return 0;
+    }
+    if (overflow == 1) return matlab_fi_sat_u64(stored, WL);
+    if (WL == 0) return 0;
+    if (WL >= 64) return stored;
+    uint64_t mask = ((uint64_t)1 << WL) - 1u;
+    return stored & mask;
+}
+
+void matlab_fi_disp_s(int64_t stored, uint8_t WL, int8_t FL) {
+    (void)WL;
+    /* Render the real-world value: stored * 2^-FL. */
+    double v = ldexp((double)stored, -FL);
+    matlab_disp_f64(v);
+}
+
+void matlab_fi_disp_u(uint64_t stored, uint8_t WL, int8_t FL) {
+    (void)WL;
+    double v = ldexp((double)stored, -FL);
+    matlab_disp_f64(v);
+}
+
+/* bin / hex / dec — see matlab_runtime.h §fi.
+ * The output strings match MATLAB's fi formatting:
+ *   bin: WL bits, MSB first, leading zeros preserved.
+ *   hex: ceil(WL/4) hex digits, zero-padded.
+ *   dec: signed/unsigned decimal of the stored integer, no padding. */
+/* matlab_string_from_literal is defined later in this TU; declare it here
+ * with the matching matlab_string* signature so the fi helpers can use
+ * it without a circular include. The matlab_string struct itself is
+ * declared lazily — we only need a forward struct tag. */
+struct matlab_string_s;
+extern struct matlab_string_s *matlab_string_from_literal(const char *src,
+                                                          int64_t len);
+
+static void *fi_format_string(const char *fmt, ...) {
+    char buf[80];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(buf, sizeof buf, fmt, ap);
+    va_end(ap);
+    if (n < 0) n = 0;
+    if ((size_t)n > sizeof buf - 1) n = (int)(sizeof buf - 1);
+    return matlab_string_from_literal(buf, (int64_t)n);
+}
+
+void *matlab_fi_bin_s(int64_t stored, uint8_t WL) {
+    if (WL == 0) return matlab_string_from_literal("", 0);
+    if (WL > 64) WL = 64;
+    char buf[65];
+    uint64_t mask = (WL >= 64) ? ~(uint64_t)0 : (((uint64_t)1 << WL) - 1u);
+    uint64_t bits = (uint64_t)stored & mask;
+    for (int i = 0; i < WL; ++i)
+        buf[WL - 1 - i] = (bits & ((uint64_t)1 << i)) ? '1' : '0';
+    buf[WL] = '\0';
+    return matlab_string_from_literal(buf, WL);
+}
+
+void *matlab_fi_bin_u(uint64_t stored, uint8_t WL) {
+    return matlab_fi_bin_s((int64_t)stored, WL);
+}
+
+void *matlab_fi_hex_s(int64_t stored, uint8_t WL) {
+    if (WL == 0) return matlab_string_from_literal("", 0);
+    if (WL > 64) WL = 64;
+    int digits = (WL + 3) / 4;
+    uint64_t mask = (WL >= 64) ? ~(uint64_t)0 : (((uint64_t)1 << WL) - 1u);
+    uint64_t bits = (uint64_t)stored & mask;
+    char buf[24];
+    int n = snprintf(buf, sizeof buf, "%0*llx", digits, (unsigned long long)bits);
+    if (n < 0) n = 0;
+    return matlab_string_from_literal(buf, (int64_t)n);
+}
+
+void *matlab_fi_hex_u(uint64_t stored, uint8_t WL) {
+    return matlab_fi_hex_s((int64_t)stored, WL);
+}
+
+void *matlab_fi_dec_s(int64_t stored, uint8_t WL) {
+    (void)WL;
+    return fi_format_string("%lld", (long long)stored);
+}
+
+void *matlab_fi_dec_u(uint64_t stored, uint8_t WL) {
+    (void)WL;
+    return fi_format_string("%llu", (unsigned long long)stored);
+}
 
 /* ---------------------------------------------------------------------- */
 /* Minimal 3-D arrays.
@@ -2739,6 +2943,19 @@ void matlab_ws_set_mat(const char *name, int64_t len, matlab_mat *m) {
     matlab_struct_set_mat(matlab_ws, name, len, m);
 }
 
+/* Class-instance assignment to the script-level workspace. Stores
+ * the obj pointer with kind=2 so matlab_dbg_ws_kind reports it as
+ * an object — the DAP formatter then routes through the obj path
+ * (`1x1 ClassName`, expandable into properties) instead of treating
+ * the pointer as a matlab_mat * and reading garbage. */
+void matlab_ws_set_obj(const char *name, int64_t len, matlab_obj *o) {
+    matlab_ws_init_if_needed();
+    int32_t idx = struct_reserve(matlab_ws, name, (int32_t)len);
+    matlab_ws->kinds[idx] = 2;
+    matlab_ws->f64_vals[idx] = 0.0;
+    matlab_ws->ptr_vals[idx] = o;
+}
+
 double matlab_ws_has(const char *name, int64_t len) {
     matlab_ws_init_if_needed();
     return matlab_struct_has_field(matlab_ws, name, len);
@@ -2847,14 +3064,18 @@ void matlab_dbg_f64(const char *file, int64_t file_len,
 /* Per-frame mini-workspace entry. Mirrors the shape of the script-
  * level matlab_ws struct but is keyed by frame index so the DAP
  * server can pick the right slice for the user's selected frame.
- * `kind` follows the same convention as matlab_dbg_ws_kind: 0 = f64,
- * 1 = matlab_mat *. The matrix pointer is borrowed from the JIT's
- * slot — the slot is alive for the lifetime of the frame, which is
- * exactly when the DAP server reads from us. */
+ * `kind` follows the same convention as matlab_dbg_ws_kind:
+ *   0 = f64 scalar
+ *   1 = matlab_mat * (numeric matrix descriptor)
+ *   2 = matlab_obj * (user classdef instance — `ptr` is the obj,
+ *       its class_id field doubles as the registry key for class
+ *       names). The matrix / object pointers are borrowed from the
+ *       JIT's slot — the slot is alive for the lifetime of the
+ *       frame, which is exactly when the DAP server reads from us. */
 struct matlab_dbg_local {
     char *name;       /* heap-copied, null-terminated */
     int64_t name_len;
-    int kind;         /* 0 = f64, 1 = matrix ptr */
+    int kind;         /* 0 = f64, 1 = matrix ptr, 2 = obj ptr */
     double f64;
     void *ptr;
 };
@@ -2928,6 +3149,21 @@ struct matlab_dbg_state {
     int n_files;
     const char *file_names[256];
     int64_t file_name_lens[256];
+
+    /* Class-id -> class-name table. Populated by
+     * matlab_dbg_register_class at the top of the script body when -g
+     * is on (one entry per classdef in the translation unit). The DAP
+     * server uses this to surface a class instance as
+     * `1x1 ClassName` in the LOCALS panel and in the watch box.
+     * 64 is far above what any realistic program touches; a linear
+     * scan is cheap given how rarely these are read.
+     *
+     * `class_names[i]` is heap-copied on register and never freed —
+     * the registration is once-per-program and the strings are tiny. */
+    int n_classes;
+    int32_t class_ids[64];
+    char *class_names[64];
+    int64_t class_name_lens[64];
 };
 
 static struct matlab_dbg_state matlab_dbg = {
@@ -3129,6 +3365,109 @@ void matlab_dbg_register_file(int32_t file_id,
     matlab_dbg.file_name_lens[file_id - 1] = name_len;
     if (file_id > matlab_dbg.n_files) matlab_dbg.n_files = file_id;
     pthread_mutex_unlock(&matlab_dbg.mu);
+}
+
+/* Register (class_id -> class-name) so the DAP server can render a
+ * class instance as `1x1 ClassName` instead of falling back to the
+ * matrix shape (which read garbage off the obj struct). Called once
+ * per classdef from the lowered script entry when -g is on. The
+ * registration is idempotent — re-registering the same class_id
+ * overwrites the existing entry, which keeps the path safe under
+ * repeated launches in long-lived DAP sessions. The string is heap-
+ * copied here and freed at process exit (i.e. never — small and
+ * bounded by the number of distinct classdefs in the program). */
+void matlab_dbg_register_class(int32_t class_id,
+                                const char *name, int64_t name_len) {
+    if (class_id <= 0 || !name || name_len <= 0) return;
+    char *copy = (char *)malloc((size_t)name_len + 1);
+    if (!copy) return;
+    memcpy(copy, name, (size_t)name_len);
+    copy[name_len] = '\0';
+    pthread_mutex_lock(&matlab_dbg.mu);
+    int slot = -1;
+    for (int i = 0; i < matlab_dbg.n_classes; ++i) {
+        if (matlab_dbg.class_ids[i] == class_id) { slot = i; break; }
+    }
+    if (slot < 0) {
+        int cap = (int)(sizeof matlab_dbg.class_ids /
+                        sizeof matlab_dbg.class_ids[0]);
+        if (matlab_dbg.n_classes < cap) {
+            slot = matlab_dbg.n_classes++;
+            matlab_dbg.class_ids[slot] = class_id;
+            matlab_dbg.class_names[slot] = NULL;
+        }
+    }
+    if (slot >= 0) {
+        free(matlab_dbg.class_names[slot]);
+        matlab_dbg.class_names[slot] = copy;
+        matlab_dbg.class_name_lens[slot] = name_len;
+    } else {
+        free(copy);
+    }
+    pthread_mutex_unlock(&matlab_dbg.mu);
+}
+
+/* Look up the class name registered for a given class_id. Returns
+ * NULL if the class hasn't been registered (DebugMode off, or a
+ * built-in struct slipped through with kind=2 — defensive). */
+const char *matlab_dbg_class_name(int32_t class_id, int64_t *len_out) {
+    const char *name = NULL;
+    int64_t len = 0;
+    pthread_mutex_lock(&matlab_dbg.mu);
+    for (int i = 0; i < matlab_dbg.n_classes; ++i) {
+        if (matlab_dbg.class_ids[i] == class_id) {
+            name = matlab_dbg.class_names[i];
+            len  = matlab_dbg.class_name_lens[i];
+            break;
+        }
+    }
+    pthread_mutex_unlock(&matlab_dbg.mu);
+    if (len_out) *len_out = name ? len : 0;
+    return name;
+}
+
+/* Property introspection on a matlab_obj. Used by the DAP server to
+ * expand a class-instance row into one child per property. The obj
+ * pointer is borrowed from the per-frame Locals table; reading
+ * fields is lock-free (the mutating paths run on the debuggee
+ * thread, which is paused while the server is reading). */
+int matlab_dbg_obj_field_count(void *obj) {
+    if (!obj) return 0;
+    return ((matlab_obj *)obj)->nfields;
+}
+
+const char *matlab_dbg_obj_field_name(void *obj, int i, int64_t *len_out) {
+    if (!obj || i < 0) { if (len_out) *len_out = 0; return NULL; }
+    matlab_obj *o = (matlab_obj *)obj;
+    if (i >= o->nfields) { if (len_out) *len_out = 0; return NULL; }
+    const char *n = o->names[i];
+    if (len_out) *len_out = n ? (int64_t)strlen(n) : 0;
+    return n;
+}
+
+int matlab_dbg_obj_field_kind(void *obj, int i) {
+    if (!obj || i < 0) return -1;
+    matlab_obj *o = (matlab_obj *)obj;
+    if (i >= o->nfields) return -1;
+    return o->kinds[i];
+}
+
+double matlab_dbg_obj_field_f64(void *obj, int i) {
+    if (!obj || i < 0) return 0.0;
+    matlab_obj *o = (matlab_obj *)obj;
+    if (i >= o->nfields) return 0.0;
+    return o->f64_vals[i];
+}
+
+void *matlab_dbg_obj_field_ptr(void *obj, int i) {
+    if (!obj || i < 0) return NULL;
+    matlab_obj *o = (matlab_obj *)obj;
+    if (i >= o->nfields) return NULL;
+    return o->ptr_vals[i];
+}
+
+int32_t matlab_dbg_obj_class_id_of(void *obj) {
+    return obj ? ((matlab_obj *)obj)->class_id : 0;
 }
 
 /* Look up a registered filename by file_id. Returns NULL if unknown.
@@ -3365,6 +3704,24 @@ void *matlab_dbg_ws_ptr(int i) {
 int64_t matlab_dbg_mat_rows(matlab_mat *m) { return m ? m->rows : 0; }
 int64_t matlab_dbg_mat_cols(matlab_mat *m) { return m ? m->cols : 0; }
 
+/* Element accessor for the DAP matrix-expansion path. Out-of-range
+ * indices return 0.0 so a malformed children request can't read past
+ * the data buffer. Indices are 1-based to match how the DAP server
+ * presents cells (`(1,1)`, `(1,2)`, ...) — we subtract one before
+ * indexing the row-major buffer. Real complex matrices are out of
+ * scope for the v1 expander; the magic-marker path on m->data would
+ * point at the matlab_mat_c descriptor and we just return 0.0 here.
+ * The Matrix Viewer use case for complex values can layer on later
+ * via a dedicated accessor. */
+double matlab_dbg_mat_get(matlab_mat *m, int64_t i, int64_t j) {
+    if (!m || !m->data) return 0.0;
+    if (i < 1 || j < 1) return 0.0;
+    if (i > m->rows || j > m->cols) return 0.0;
+    if (mat_is_complex(m)) return 0.0;
+    /* Row-major: data[(i-1) * cols + (j-1)]. */
+    return m->data[(i - 1) * m->cols + (j - 1)];
+}
+
 /* The injected hook. Called from JIT'd code at each statement entry
  * when compiled with -g. Takes (file_id, line) as raw ints so the
  * emitted call is cheap — just two arith.constant ops feeding a
@@ -3566,6 +3923,25 @@ void matlab_dbg_frame_set_mat(const char *name, int64_t name_len, void *mat) {
             &matlab_dbg.frame_locals[matlab_dbg.n_frames - 1];
         fl->entries[idx].kind = 1;
         fl->entries[idx].ptr = mat;
+        fl->entries[idx].f64 = 0.0;
+    }
+    pthread_mutex_unlock(&matlab_dbg.mu);
+}
+
+/* Class-instance variant. `obj` is a matlab_obj* whose class_id tag
+ * is the registry key for the class name (see
+ * matlab_dbg_register_class). Same lifetime contract as set_mat —
+ * the obj is borrowed from the JIT's slot. */
+void matlab_dbg_frame_set_obj(const char *name, int64_t name_len, void *obj) {
+    if (!name || name_len <= 0) return;
+    pthread_mutex_lock(&matlab_dbg.mu);
+    int idx = matlab_dbg_frame_local_find_or_alloc(
+        matlab_dbg.n_frames - 1, name, name_len);
+    if (idx >= 0) {
+        struct matlab_dbg_frame_locals *fl =
+            &matlab_dbg.frame_locals[matlab_dbg.n_frames - 1];
+        fl->entries[idx].kind = 2;
+        fl->entries[idx].ptr = obj;
         fl->entries[idx].f64 = 0.0;
     }
     pthread_mutex_unlock(&matlab_dbg.mu);

@@ -547,3 +547,39 @@ The emitter fails fast rather than producing broken output:
 - **`-cpp-auto` flag (C++ only)** declares call-result locals with `auto`
   rather than the explicit type — more concise at the cost of the
   at-a-glance type hint. Only applies in `-emit-cpp` mode.
+
+## Fixed-Point (`fi`) Lowering
+
+Phase 1 `fi` support emits pure `<stdint.h>` integer math — no
+`rtwtypes.h`, no float detour. The frontend tags each fi op with its
+`FixedSpec` (signed / WL / FL / overflow / rounding) as MLIR
+attributes, and the `LowerFixedPoint` pass rewrites them into the
+canonical shift / saturate sequence that MATLAB Coder produces.
+
+For `apply_gain` (`y = x * gain`, both Q8.8 signed, clamped via `(:)`):
+
+```matlab
+gain = fi(1.5, 1, 16, 8);    % stored = 384
+y    = fi(0, 1, 16, 8);
+y(:) = x * gain;             % FullPrecision intermediate, clamped to Q8.8
+disp(y);
+```
+
+emits:
+
+```c
+int32_t v0 = ((int32_t)matlab_fi_sat_s64(((int64_t)x) * 384, 32)) >> 8;
+matlab_fi_disp_s((int64_t)((int16_t)matlab_fi_sat_s64((int64_t)v0, 16)), 16, 8);
+```
+
+Key points:
+
+- The `(:)` clamp on `y` introduces the `>> 8` back to FL=8; without it,
+  `y` would inherit the FullPrecision `(1, 32, 16)` intermediate.
+- `matlab_fi_sat_s64` / `matlab_fi_round_*` / `matlab_fi_quantize_*` are
+  the only runtime helpers the lowering depends on for Phase 1. They're
+  tiny, header-declared in `runtime/matlab_runtime.h`, and trivial to
+  port to a freestanding embedded build.
+- See [`emit_fixed_point.md`](emit_fixed_point.md) for the full plan,
+  including the FullPrecision vs KeepLSB rules, the `(:)` clamp idiom,
+  and Phase 3+ array support.
