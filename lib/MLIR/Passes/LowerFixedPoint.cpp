@@ -484,6 +484,14 @@ bool runLowerFixedPoint(ModuleOp M) {
           N.starts_with("matlab_mat_u64_") ||
           N.starts_with("matlab_persistent_"))
         Targets.push_back(Op);
+      /* numerictype / fimath / fipref are pure compile-time fi metadata —
+       * Sema reads their args at type-inference time; the constructor
+       * call has no runtime presence. Drop the op (and any dead
+       * matlab.const_char / matlab.alloc / matlab.store chain feeding /
+       * receiving its result will be cleaned up by the regular dead-op
+       * sweep). */
+      if (N == "numerictype" || N == "fimath" || N == "fipref")
+        Targets.push_back(Op);
       return;
     }
     if (!hasFiTag(Op)) return;
@@ -499,7 +507,43 @@ bool runLowerFixedPoint(ModuleOp M) {
     bool Did = false;
     if (N == "matlab.fi.const") Did = rewriteFiConst(Op);
     else if (N == "matlab.fi.cast") Did = rewriteFiCast(Op, M);
-    else if (N == "matlab.call_builtin") Did = rewriteFiCallBuiltin(Op, M);
+    else if (N == "matlab.call_builtin") {
+      auto C = Op->getAttrOfType<StringAttr>("callee");
+      if (C && (C.getValue() == "numerictype" ||
+                C.getValue() == "fimath" ||
+                C.getValue() == "fipref")) {
+        /* Compile-time-only constructor — drop the op along with the
+         * load/store/alloc chain that the binding sits on, since no
+         * runtime value is meaningful. We collect the corpse list before
+         * erasing because erase invalidates uses. */
+        llvm::SmallVector<Operation *, 8> Corpses;
+        if (Op->getNumResults() == 1) {
+          for (Operation *U : Op->getResult(0).getUsers()) {
+            Corpses.push_back(U);
+            // matlab.store consumers also pin a matlab.alloc slot whose
+            // only writer was this store; collect the slot so reads
+            // (loads / passes-through) are also dropped if their slot
+            // becomes empty. The slot is operand 1 of matlab.store.
+            if (U->getName().getStringRef() == "matlab.store" &&
+                U->getNumOperands() == 2) {
+              Value Slot = U->getOperand(1);
+              if (auto *D = Slot.getDefiningOp())
+                if (D->getName().getStringRef() == "matlab.alloc") {
+                  for (Operation *SU : Slot.getUsers())
+                    if (SU != U) Corpses.push_back(SU);
+                  Corpses.push_back(D);
+                }
+            }
+          }
+        }
+        for (Operation *Co : Corpses) Co->dropAllUses();
+        for (Operation *Co : Corpses) Co->erase();
+        Op->erase();
+        Did = true;
+      } else {
+        Did = rewriteFiCallBuiltin(Op, M);
+      }
+    }
     else if (N == "matlab.add") Did = rewriteFiAddSub(Op, M, /*IsSub=*/false);
     else if (N == "matlab.sub") Did = rewriteFiAddSub(Op, M, /*IsSub=*/true);
     else if (N == "matlab.matmul" || N == "matlab.emul")

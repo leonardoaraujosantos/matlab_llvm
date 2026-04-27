@@ -120,6 +120,8 @@ public:
     Cell,         // cell array (heterogeneous)
     Struct,       // named-field record
     FuncHandle,   // function handle (signature left opaque for now)
+    Numerictype,  // Fixed-Point Designer numerictype object — compile-time only
+    Fimath,       // Fixed-Point Designer fimath object — compile-time only
   };
   Kind K;
   explicit Type(Kind K) : K(K) {}
@@ -176,6 +178,31 @@ public:
   FuncHandleType() : Type(Kind::FuncHandle) {}
 };
 
+/// Fixed-Point Designer `numerictype(s, WL, FL)` object — pure compile-time
+/// metadata. Carries only the WL/FL/signedness; overflow + rounding live on
+/// FimathType. Has no runtime representation: any consumer (`fi(value, T)`,
+/// property access) reads the spec out at type-inference time and folds.
+class NumerictypeType : public Type {
+public:
+  bool Signed = true;
+  uint8_t WordLength = 16;
+  int8_t  FractionLength = 15;
+  NumerictypeType(bool S, uint8_t WL, int8_t FL)
+      : Type(Kind::Numerictype), Signed(S), WordLength(WL),
+        FractionLength(FL) {}
+};
+
+/// Fixed-Point Designer `fimath` object — pure compile-time metadata.
+/// Holds overflow + rounding overrides that fi() consumers apply on top
+/// of a numerictype.
+class FimathType : public Type {
+public:
+  FixedSpec::Overflow OF = FixedSpec::Overflow::Saturate;
+  FixedSpec::Rounding RM = FixedSpec::Rounding::Floor;
+  FimathType(FixedSpec::Overflow O, FixedSpec::Rounding R)
+      : Type(Kind::Fimath), OF(O), RM(R) {}
+};
+
 //===----------------------------------------------------------------------===//
 // TypeContext — owns Type objects and provides interned singletons.
 //===----------------------------------------------------------------------===//
@@ -194,6 +221,10 @@ public:
   // alongside the shape so two requests with the same spec hash-equal.
   const ArrayType *fixedScalar(FixedSpec Spec);
   const ArrayType *fixedArray(FixedSpec Spec, Shape S);
+  // Compile-time fi metadata objects.
+  const NumerictypeType *numerictype(bool Signed, uint8_t WL, int8_t FL);
+  const FimathType *fimath(FixedSpec::Overflow OF, FixedSpec::Rounding RM);
+
   const StringArrayType *stringScalar();
   const StringArrayType *stringArray(Shape S);
   const CellType *cellAny();
@@ -224,6 +255,8 @@ private:
   const CellType *CellAnyT = nullptr;
   const StructType *StructAnyT = nullptr;
   const FuncHandleType *FuncHandleT = nullptr;
+  std::vector<const NumerictypeType *> NumerictypeCache;
+  std::vector<const FimathType *> FimathCache;
 
   template <typename T, typename... A> T *own(A &&...as);
 };

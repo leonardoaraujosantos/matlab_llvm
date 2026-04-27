@@ -192,6 +192,14 @@ std::string Type::toString() const {
   case Kind::Cell:        return "cell";
   case Kind::Struct:      return "struct";
   case Kind::FuncHandle:  return "@handle";
+  case Kind::Numerictype: {
+    auto &N = static_cast<const NumerictypeType &>(*this);
+    std::ostringstream OS;
+    OS << "numerictype(" << (N.Signed ? 1 : 0) << ',' << int(N.WordLength)
+       << ',' << int(N.FractionLength) << ')';
+    return OS.str();
+  }
+  case Kind::Fimath:      return "fimath";
   }
   return "?";
 }
@@ -279,6 +287,28 @@ const FuncHandleType *TypeContext::funcHandle() {
   return FuncHandleT;
 }
 
+const NumerictypeType *TypeContext::numerictype(bool Signed, uint8_t WL,
+                                                 int8_t FL) {
+  /* Linear scan — these are tiny per-program (a handful at most). */
+  for (auto &E : NumerictypeCache) {
+    if (E->Signed == Signed && E->WordLength == WL && E->FractionLength == FL)
+      return E;
+  }
+  auto *T = own<NumerictypeType>(Signed, WL, FL);
+  NumerictypeCache.push_back(T);
+  return T;
+}
+
+const FimathType *TypeContext::fimath(FixedSpec::Overflow OF,
+                                       FixedSpec::Rounding RM) {
+  for (auto &E : FimathCache) {
+    if (E->OF == OF && E->RM == RM) return E;
+  }
+  auto *T = own<FimathType>(OF, RM);
+  FimathCache.push_back(T);
+  return T;
+}
+
 const Type *TypeContext::join(const Type *A, const Type *B) {
   if (!A) return B;
   if (!B) return A;
@@ -321,6 +351,12 @@ const Type *TypeContext::join(const Type *A, const Type *B) {
   case Type::Kind::Cell:       return cellAny();
   case Type::Kind::Struct:     return structAny();
   case Type::Kind::FuncHandle: return funcHandle();
+  case Type::Kind::Numerictype:
+  case Type::Kind::Fimath:
+    /* Compile-time fi metadata objects don't meaningfully merge across
+     * branches; defer to `any` (a control-flow merge on these almost
+     * never happens — they're constructed once per use). */
+    return any();
   case Type::Kind::Any:        return any();
   }
   return any();

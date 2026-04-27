@@ -59,6 +59,7 @@ namespace {
 struct Options {
   enum class Mode { DumpTokens, DumpAST, EmitSema, EmitMIR, EmitMLIR,
                     EmitLLVM, EmitC, EmitCpp, EmitPython, EmitTypeScript,
+                    EmitFiReport,
                     Check, Repl, Format, Dap };
   Mode Mode = Mode::Check;
   bool Opt = false;
@@ -107,6 +108,8 @@ bool parseArgs(int Argc, char **Argv, Options &Opts, const char *&Prog) {
     else if (A == "-emit-python") Opts.Mode = Options::Mode::EmitPython;
     else if (A == "-emit-typescript" || A == "-emit-ts")
       Opts.Mode = Options::Mode::EmitTypeScript;
+    else if (A == "-emit-fixed-point-report" || A == "-emit-fi-report")
+      Opts.Mode = Options::Mode::EmitFiReport;
     else if (A == "-repl") Opts.Mode = Options::Mode::Repl;
     else if (A == "-format") Opts.Mode = Options::Mode::Format;
     else if (A == "-dap") Opts.Mode = Options::Mode::Dap;
@@ -2678,6 +2681,80 @@ int main(int Argc, char **Argv) {
 
   if (Opts.Mode == Options::Mode::EmitSema) {
     if (TU) dumpSema(std::cout, *TU);
+    Diag.printAll();
+    return Diag.hasErrors() ? 1 : 0;
+  }
+
+  if (Opts.Mode == Options::Mode::EmitFiReport) {
+    /* Walk every Sema-typed binding in the TU and print a one-line
+     * summary for fi values. Modeled after MathWorks Coder's
+     * type-proposal report — surfaces WL/FL/signedness/overflow per
+     * binding. The intent is a low-cost sanity check before deploying
+     * fi code: catch unexpected widenings, missing (:) clamps,
+     * unintended Wrap modes. */
+    auto modeName = [](FixedSpec::Overflow O) -> const char * {
+      return O == FixedSpec::Overflow::Wrap ? "Wrap" : "Saturate";
+    };
+    auto roundName = [](FixedSpec::Rounding R) -> const char * {
+      switch (R) {
+      case FixedSpec::Rounding::Floor:      return "Floor";
+      case FixedSpec::Rounding::Nearest:    return "Nearest";
+      case FixedSpec::Rounding::Zero:       return "Zero";
+      case FixedSpec::Rounding::Convergent: return "Convergent";
+      case FixedSpec::Rounding::Ceiling:    return "Ceiling";
+      }
+      return "?";
+    };
+    auto printBinding = [&](const std::string &Scope, const std::string &Name,
+                            const Type *T) {
+      if (!T || T->K != Type::Kind::Array) return;
+      auto &A = static_cast<const ArrayType &>(*T);
+      if (A.Elt != Dtype::Fixed || !A.FxSpec) return;
+      auto &S = *A.FxSpec;
+      std::cout << "  " << (Scope.empty() ? "" : Scope + ".") << Name
+                << " : " << (S.Signed ? "signed" : "unsigned")
+                << " WL=" << int(S.WordLength)
+                << " FL=" << int(S.FractionLength)
+                << " IL=" << S.integerLength()
+                << " " << modeName(S.OF)
+                << "/" << roundName(S.RM)
+                << " shape=" << A.S.toString()
+                << "\n";
+    };
+    if (TU) {
+      std::cout << "fixed-point report — " << Opts.InputPath << "\n";
+      /* Script-level bindings live in the global Resolver scope rather
+       * than on a Script node directly; we walk every function's
+       * inferred bindings, plus any script-scope vars surfaced through
+       * the resolver. For Phase 1 we just walk the functions — script
+       * coverage is a follow-up. */
+      for (Function *F : TU->Functions) {
+        if (!F) continue;
+        bool HeaderPrinted = false;
+        auto reportOne = [&](std::string_view N, Binding *B) {
+          if (!B || !B->InferredType) return;
+          if (B->InferredType->K != Type::Kind::Array) return;
+          auto &A = static_cast<const ArrayType &>(*B->InferredType);
+          if (A.Elt != Dtype::Fixed) return;
+          if (!HeaderPrinted) {
+            std::cout << "[" << F->Name << "]\n";
+            HeaderPrinted = true;
+          }
+          printBinding(std::string(F->Name), std::string(N), B->InferredType);
+        };
+        /* Walk inputs, then locals, then outputs. The display order
+         * matches the function signature reading direction. */
+        for (size_t i = 0; i < F->ParamRefs.size(); ++i)
+          reportOne(F->Inputs[i], F->ParamRefs[i]);
+        if (F->FnScope) {
+          for (auto &[N, B] : F->FnScope->locals())
+            if (B->Kind == BindingKind::Var)
+              reportOne(N, B);
+        }
+        for (size_t i = 0; i < F->OutputRefs.size(); ++i)
+          reportOne(F->Outputs[i], F->OutputRefs[i]);
+      }
+    }
     Diag.printAll();
     return Diag.hasErrors() ? 1 : 0;
   }

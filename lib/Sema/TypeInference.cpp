@@ -877,32 +877,85 @@ const Type *TypeInference::visitBuiltinCall(std::string_view Name,
     if (ValT && ValT->K == Type::Kind::Array)
       OutShape = static_cast<const ArrayType &>(*ValT).S;
     FixedSpec Spec; // defaults: signed Q15.16 — MATLAB's fi(value) default
-    if (Args.size() >= 3) {
+    /* Phase 4: fi(value, T) and fi(value, T, F) — read the spec out of
+     * a numerictype object (compile-time). Phase 1 explicit-args form
+     * (fi(value, signed, WL, FL)) is the fall-through. */
+    bool UsedNumerictype = false;
+    if (Args.size() >= 2 && ArgTys.size() >= 2 && ArgTys[1] &&
+        ArgTys[1]->K == Type::Kind::Numerictype) {
+      auto &NT = static_cast<const NumerictypeType &>(*ArgTys[1]);
+      Spec.Signed = NT.Signed;
+      Spec.WordLength = NT.WordLength;
+      Spec.FractionLength = NT.FractionLength;
+      UsedNumerictype = true;
+    }
+    if (UsedNumerictype && Args.size() >= 3 && ArgTys[2] &&
+        ArgTys[2]->K == Type::Kind::Fimath) {
+      auto &FM = static_cast<const FimathType &>(*ArgTys[2]);
+      Spec.OF = FM.OF;
+      Spec.RM = FM.RM;
+    }
+    if (!UsedNumerictype && Args.size() >= 3) {
       int64_t Sgn = foldInt(Args[1]);
       int64_t WL  = foldInt(Args[2]);
       if (Sgn < 0 || WL <= 0 || WL > 64) return TC.any();
       Spec.Signed = (Sgn != 0);
       Spec.WordLength = uint8_t(WL);
       // Default fraction length per MATLAB fi: WL-1 for signed, WL for
-      // unsigned, but only when the user omitted FL. Phase-4 fimath will
-      // override via DefaultFractionLength etc.
+      // unsigned, but only when the user omitted FL.
       Spec.FractionLength = Spec.Signed ? int8_t(WL - 1) : int8_t(WL);
     }
-    if (Args.size() >= 4) {
+    if (!UsedNumerictype && Args.size() >= 4) {
       int64_t FL = foldInt(Args[3]);
       if (FL < 0 || FL > Spec.WordLength) return TC.any();
       Spec.FractionLength = int8_t(FL);
     }
-    if (Args.size() == 2) {
-      // fi(value, T) — numerictype object form. Phase 4. Bail to any.
+    if (!UsedNumerictype && Args.size() == 2) {
+      /* fi(value, T) where T didn't resolve as a numerictype. Bail. */
       return TC.any();
     }
     return TC.fixedArray(Spec, OutShape);
   }
-  if (Name == "numerictype" || Name == "fimath" || Name == "fipref") {
-    // Phase 4 surface — opaque for now.
+  // numerictype(signed, WL, FL) — compile-time object carrying the spec.
+  if (Name == "numerictype") {
+    if (Args.size() == 3) {
+      int64_t Sgn = foldInt(Args[0]);
+      int64_t WL  = foldInt(Args[1]);
+      int64_t FL  = foldInt(Args[2]);
+      if (Sgn >= 0 && WL > 0 && WL <= 64 && FL >= 0 && FL <= WL)
+        return TC.numerictype(Sgn != 0, uint8_t(WL), int8_t(FL));
+    }
     return TC.any();
   }
+  // fimath('OverflowAction', 'Saturate'|'Wrap',
+  //        'RoundingMethod', 'Floor'|'Nearest'). We accept name-value
+  // pairs in any order and ignore unknown names (forward-compatible
+  // for properties we don't yet model).
+  if (Name == "fimath") {
+    FixedSpec::Overflow OF = FixedSpec::Overflow::Saturate;
+    FixedSpec::Rounding RM = FixedSpec::Rounding::Floor;
+    auto literalText = [](Expr *E) -> std::string {
+      if (auto *S = dynamic_cast<StringLiteral *>(E)) return S->Value;
+      if (auto *S = dynamic_cast<CharLiteral *>(E))   return S->Value;
+      return "";
+    };
+    for (size_t i = 0; i + 1 < Args.size(); i += 2) {
+      std::string K = literalText(Args[i]);
+      std::string V = literalText(Args[i + 1]);
+      if (K == "OverflowAction") {
+        if (V == "Wrap")     OF = FixedSpec::Overflow::Wrap;
+        else if (V == "Saturate") OF = FixedSpec::Overflow::Saturate;
+      } else if (K == "RoundingMethod") {
+        if (V == "Nearest") RM = FixedSpec::Rounding::Nearest;
+        else if (V == "Floor") RM = FixedSpec::Rounding::Floor;
+        else if (V == "Zero") RM = FixedSpec::Rounding::Zero;
+        else if (V == "Convergent") RM = FixedSpec::Rounding::Convergent;
+        else if (V == "Ceiling") RM = FixedSpec::Rounding::Ceiling;
+      }
+    }
+    return TC.fimath(OF, RM);
+  }
+  if (Name == "fipref") return TC.any();
   // int(n) / storedInteger(n) / storedIntegerToDouble(n) — return the native
   // integer behind a fi value. For non-fi inputs, behave like a no-op.
   if (Name == "int" || Name == "storedInteger") {
@@ -930,10 +983,29 @@ const Type *TypeInference::visitBuiltinCall(std::string_view Name,
   }
   // reinterpretcast(n, T) — bit-reinterpret without changing storage. Phase 5.
   if (Name == "reinterpretcast") return TC.any();
-  // removefimath / setfimath only adjust the fimath; keep numerictype.
+  // setfimath(n, F) returns a fi with F's overflow/rounding overriding
+  // n's; WL/FL stay. removefimath(n) resets both to defaults (Saturate /
+  // Floor). For non-fi inputs, both are no-ops.
   if (Name == "removefimath" || Name == "setfimath") {
-    if (!ArgTys.empty() && ArgTys[0]) return ArgTys[0];
-    return TC.any();
+    if (ArgTys.empty() || !ArgTys[0] || ArgTys[0]->K != Type::Kind::Array)
+      return TC.any();
+    auto &A = static_cast<const ArrayType &>(*ArgTys[0]);
+    if (A.Elt != Dtype::Fixed || !A.FxSpec) return ArgTys[0];
+    FixedSpec NS = *A.FxSpec;
+    if (Name == "removefimath") {
+      NS.OF = FixedSpec::Overflow::Saturate;
+      NS.RM = FixedSpec::Rounding::Floor;
+    } else {
+      // setfimath(n, F): the fimath argument carries the overrides.
+      if (Args.size() >= 2 && ArgTys.size() >= 2 && ArgTys[1] &&
+          ArgTys[1]->K == Type::Kind::Fimath) {
+        auto &FM = static_cast<const FimathType &>(*ArgTys[1]);
+        NS.OF = FM.OF;
+        NS.RM = FM.RM;
+      }
+    }
+    if (A.S.K == Shape::Rank::Scalar) return TC.fixedScalar(NS);
+    return TC.fixedArray(NS, A.S);
   }
   // bin / hex / dec — render a fi as a string. Returns char array.
   if (Name == "bin" || Name == "hex" || Name == "dec")

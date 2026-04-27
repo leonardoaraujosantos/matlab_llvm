@@ -2697,6 +2697,22 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
         }
       }
 
+      /* setfimath(n, F) / removefimath(n) — compile-time spec mutation
+       * only. The stored integer is unchanged; we return the operand's
+       * value directly with the result expression's (new) type. */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          (N->Name == "setfimath" || N->Name == "removefimath") &&
+          !C.Args.empty() && C.Args[0] && C.Args[0]->Ty &&
+          C.Args[0]->Ty->K == Type::Kind::Array) {
+        auto &AT = static_cast<const ArrayType &>(*C.Args[0]->Ty);
+        if (AT.Elt == Dtype::Fixed && AT.FxSpec) {
+          mlir::Value V = lowerExpr(*C.Args[0]);
+          // The result type's storage class equals the operand's (WL/FL
+          // are unchanged), so a plain pass-through is correct.
+          return V;
+        }
+      }
+
       /* int(fi) / storedInteger(fi) — return the underlying stored
        * integer in its native lane. Sema already typed the result as the
        * matching int8/16/32/64, so all lowering needs to do is pass the
