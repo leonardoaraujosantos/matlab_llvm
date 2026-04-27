@@ -679,11 +679,32 @@ plus some upstream-pipeline lifts that block three of the eight
 | 5.6.3 SSA-temp inlining + slot-output collapse | ✅ shipped | `vN_1` scratch signals gone; pure single-use ops inline at use site; same-named slot + output port share one signal |
 | 5.6.4 trailing same-line comment forwarding | ✅ shipped | `case 0 % Soma` and `y = a + b; % sum` now both forward as `// ...` lines |
 
+### Vector-DSP roadmap (closing the last 3 examples/hdl/ modules)
+
+The three remaining unblocked modules — `vector_processor`,
+`fir_asic_pipelined`, `sequential_processor` — together exercise
+8 distinct pipeline gaps. Sequenced for incremental wins: each
+stage either closes one example outright or delivers a reusable
+piece the next stage builds on.
+
+| Stage | Items | Effort | Closes |
+|---|---|--:|---|
+| A | Saturate-cast verification + constant-index reads on vector args | ~1.5 days | half of `vector_processor` |
+| B | Vector function arguments (Sema + MIR + user-call + LLVM tensor lowering) | ~4 days | `vector_processor` ✅ |
+| C | Static array literal init (`fi([0.1, 0.2, ...], ...)` → alloca + per-element stores) | ~2 days | coefficient-table half of fir / seq |
+| D | Loop-iv array indexing (`for i = 1:N; arr(i) ...; end`) | ~3 days | for-loop bodies in fir / seq |
+| E | Vector concat with static shapes (`[x, delay(1:end-1)]`) | ~3 days | shift-register pattern in fir / seq |
+| F | Persistent fi-arrays + whole-vector assign (`persistent` + `acc(:) = ...`) | ~6 days | `fir_asic_pipelined` ✅, `sequential_processor` ✅ |
+
+Total: ~4 weeks of focused work. After Stage B we cross from 5/8
+to 6/8 modules emitting clean SV; the remaining two need C–F to
+work together because the shift-register-with-persistent-fi-array
+idiom in fir / seq depends on three orthogonal lifts (literal init,
+loop-iv indexing, vector concat) all landing.
+
 ### Out-of-scope items still on the plan
 
-These are listed in Phase 4.5.6 as "what stays out of Phase 4.5"
-and remain genuinely deferred. Each has a specific corpus
-trigger; the work is concrete but not on today's critical path:
+These items are deferred — concrete, but not yet attempted:
 
 - **Persistent fi-arrays** (`persistent delay_line; if isempty
   delay_line = fi(zeros(1, N), ...);`) — needs
@@ -700,6 +721,14 @@ trigger; the work is concrete but not on today's critical path:
 - **Array literal init** (`h = [0.1, 0.2, 0.3, 0.4]`) — currently
   goes through `matlab_mat_from_buf`. Static cases could fold
   to per-element stores into an alloca, similar to 4.5.4.
+- **Constant-index reads on vector function args** —
+  Phase 4.5.4 only handles locals; reading `vec_a(1)` from a
+  vector-typed function arg needs a small extension once vector
+  args themselves land (Stage B → A).
+- **Whole-vector colon-assignment** (`acc(:) = expr`) — when
+  `acc` is scalar this is just a store; when it's a vector this
+  is broadcast / element-wise assign. Recognized once loop-iv
+  indexing lands.
 - **2-D fi matrices** + persistent fi matrices.
 - **N-dim arrays** beyond what 4.5.4 produces.
 - **`sin` / `cos` / `sqrt`** — CORDIC lowering.
@@ -709,17 +738,19 @@ trigger; the work is concrete but not on today's critical path:
 
 For the SV-backend feature itself: **closed** for the scalar +
 fixed-vector + state + FSM corpus, with first-class fi support,
-optimization passes, and human-readable output. The five
-`examples/hdl/` modules that fit that corpus (`alu_16bit`,
-`mux_4to_1_16bit`, `counter_0_to_10`, `mealy_fsm`,
-`moore_fsm`) all emit clean lint-passing SV with source comments
-+ source-level identifier names preserved.
+optimization passes, and human-readable output. Five of the
+eight `examples/hdl/` modules (`alu_16bit`, `mux_4to_1_16bit`,
+`counter_0_to_10`, `mealy_fsm`, `moore_fsm`) emit clean
+lint-passing SV with source comments + source-level identifier
+names preserved.
 
-What's NOT covered is the **vector-DSP corpus** — the three
-remaining `examples/hdl/` modules that need persistent
-fi-arrays, vector-function-args, vector concat/slice, or
-loop-iv indices. Each is a multi-day-to-multi-week pipeline
-lift and is gated on real-user demand for the specific shape.
+The three remaining modules (`vector_processor`,
+`fir_asic_pipelined`, `sequential_processor`) need the
+vector-DSP roadmap above (Stages A–F, ~4 weeks) — each stage's
+lift is concrete and sized in days; the dependency between
+literal init / loop-iv indexing / vector concat is what makes
+fir + seq a multi-stage closeout rather than a single-shot
+feature.
 
 ### Original phase detail (kept for reference)
 
