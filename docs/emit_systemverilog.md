@@ -694,7 +694,7 @@ piece the next stage builds on.
 | A.2 | 🟡 deferred | Constant-index reads on vector args | ~1 day | small extension once Stage B lands; no value standalone |
 | B | 🟡 deferred | Vector function arguments (Sema + MIR + user-call + LLVM tensor lowering) | ~4 days | `vector_processor` ✅ |
 | C | ✅ shipped | Static array literal init (`fi([0.1, 0.2, ...], ...)` → alloca + per-element stores) | ~2 days | coefficient-table half of fir / seq |
-| D | 🟡 deferred | Loop-iv array indexing (`for i = 1:N; arr(i) ...; end`) | ~3 days | for-loop bodies in fir / seq |
+| D | ✅ shipped | Loop-iv array indexing (`for i = 1:N; arr(i) ...; end`) | ~3 days | for-loop bodies in fir / seq |
 | E | 🟡 deferred | Vector concat with static shapes (`[x, delay(1:end-1)]`) | ~3 days | shift-register pattern in fir / seq |
 | F | 🟡 deferred | Persistent fi-arrays + whole-vector assign (`persistent` + `acc(:) = ...`) | ~6 days | `fir_asic_pipelined` ✅, `sequential_processor` ✅ |
 
