@@ -59,7 +59,7 @@ namespace {
 struct Options {
   enum class Mode { DumpTokens, DumpAST, EmitSema, EmitMIR, EmitMLIR,
                     EmitLLVM, EmitC, EmitCpp, EmitPython, EmitTypeScript,
-                    EmitFiReport,
+                    EmitFiReport, EmitSystemVerilog, CheckSynthesizable,
                     Check, Repl, Format, Dap };
   Mode Mode = Mode::Check;
   bool Opt = false;
@@ -80,6 +80,14 @@ struct Options {
    * -g for tests and tooling that want to inspect the injected hooks
    * in the emitted MLIR / C / C++ without standing up a DAP session. */
   bool Debug = false;
+  /* SystemVerilog reset convention. ASIC default is async-assert /
+   * sync-deassert, active-low — `posedge clk or negedge rst_n` with
+   * the reset arm `if (!rst_n)`. Sync-active-high / sync-active-low
+   * are also supported via the `-sv-reset=...` flag for teams that
+   * prefer sync-only reset trees. Phase 1 / Phase 2 modules without
+   * persistent state do not consume this. */
+  enum class SvResetKind { AsyncLow, SyncHigh, SyncLow };
+  SvResetKind SvReset = SvResetKind::AsyncLow;
   std::string InputPath;
 };
 
@@ -88,6 +96,7 @@ int usage(const char *Prog) {
             << " [-dump-tokens | -dump-ast | -emit-sema | -emit-mir |\n"
                "             -emit-mlir | -emit-llvm | -emit-c | -emit-cpp |\n"
                "             -emit-python | -emit-typescript |\n"
+               "             -emit-systemverilog | -check-synthesizable |\n"
                "             -format | -repl | -dap]\n"
                "            [-no-line | -line] [-doxygen] [-cpp-auto] [-g]  FILE.m\n";
   return 64;
@@ -110,6 +119,10 @@ bool parseArgs(int Argc, char **Argv, Options &Opts, const char *&Prog) {
       Opts.Mode = Options::Mode::EmitTypeScript;
     else if (A == "-emit-fixed-point-report" || A == "-emit-fi-report")
       Opts.Mode = Options::Mode::EmitFiReport;
+    else if (A == "-emit-systemverilog" || A == "-emit-sv")
+      Opts.Mode = Options::Mode::EmitSystemVerilog;
+    else if (A == "-check-synthesizable")
+      Opts.Mode = Options::Mode::CheckSynthesizable;
     else if (A == "-repl") Opts.Mode = Options::Mode::Repl;
     else if (A == "-format") Opts.Mode = Options::Mode::Format;
     else if (A == "-dap") Opts.Mode = Options::Mode::Dap;
@@ -119,6 +132,12 @@ bool parseArgs(int Argc, char **Argv, Options &Opts, const char *&Prog) {
     else if (A == "-doxygen" || A == "--doxygen") Opts.Doxygen = true;
     else if (A == "-cpp-auto" || A == "--cpp-auto") Opts.CppAuto = true;
     else if (A == "-g" || A == "--debug-hooks") Opts.Debug = true;
+    else if (A == "-sv-reset=async-low")
+      Opts.SvReset = Options::SvResetKind::AsyncLow;
+    else if (A == "-sv-reset=sync-high")
+      Opts.SvReset = Options::SvResetKind::SyncHigh;
+    else if (A == "-sv-reset=sync-low")
+      Opts.SvReset = Options::SvResetKind::SyncLow;
     else if (A == "-h" || A == "--help") return false;
     else if (!A.empty() && A[0] == '-') {
       std::cerr << "unknown flag: " << A << "\n";
@@ -2776,7 +2795,9 @@ int main(int Argc, char **Argv) {
       Opts.Mode == Options::Mode::EmitC ||
       Opts.Mode == Options::Mode::EmitCpp ||
       Opts.Mode == Options::Mode::EmitPython ||
-      Opts.Mode == Options::Mode::EmitTypeScript) {
+      Opts.Mode == Options::Mode::EmitTypeScript ||
+      Opts.Mode == Options::Mode::EmitSystemVerilog ||
+      Opts.Mode == Options::Mode::CheckSynthesizable) {
     mlirgen::Context MCtx;
     if (TU) {
       auto M = mlirgen::lowerToMLIR(MCtx, TC, Diag, *TU, &SM,
@@ -2791,7 +2812,9 @@ int main(int Argc, char **Argv) {
                               Opts.Mode == Options::Mode::EmitC ||
                               Opts.Mode == Options::Mode::EmitCpp ||
                               Opts.Mode == Options::Mode::EmitPython ||
-                              Opts.Mode == Options::Mode::EmitTypeScript;
+                              Opts.Mode == Options::Mode::EmitTypeScript ||
+                              Opts.Mode == Options::Mode::EmitSystemVerilog ||
+                              Opts.Mode == Options::Mode::CheckSynthesizable;
       bool WantClean = Opts.Opt || WantFullPipeline;
       if (WantClean) {
         mlirgen::runSlotPromotion(M);
@@ -2977,6 +3000,45 @@ int main(int Argc, char **Argv) {
                 M, Opts.Mode == Options::Mode::EmitCpp, NoLineForC,
                 Opts.Doxygen, Opts.CppAuto, &SM);
           }
+          if (Src.empty()) return 1;
+          std::cout << Src;
+        } else if (Opts.Mode == Options::Mode::EmitSystemVerilog ||
+                   Opts.Mode == Options::Mode::CheckSynthesizable) {
+          // Same pre-emit cleanup as EmitC: fold `if/else` stores into
+          // `arith.select` and promote single-store allocas. Required so
+          // scalar combinational programs surface to the SV emitter as
+          // pure dataflow rather than a load/store dance.
+          mlirgen::runIfStoreToSelect(M);
+          mlirgen::runMem2RegLite(M);
+          if (mlir::failed(mlir::verify(M))) {
+            std::cerr
+                << "error: MLIR verification failed before SV emission\n";
+            return 1;
+          }
+          // Synthesizability gate. Runs in both `-emit-systemverilog` and
+          // `-check-synthesizable` modes — emission never silently
+          // produces broken RTL. See docs/emit_systemverilog.md.
+          bool Ok = mlirgen::runHWLegalize(M, &SM);
+          if (Ok) Ok = mlirgen::runHWBitWidthInfer(M, &SM);
+          if (Opts.Mode == Options::Mode::CheckSynthesizable) {
+            // Print Diag and exit; no SV output. Exit 0 on clean.
+            Diag.printAll();
+            return Ok ? 0 : 1;
+          }
+          if (!Ok) {
+            Diag.printAll();
+            return 1;
+          }
+          mlirgen::HWResetKind R = mlirgen::HWResetKind::AsyncLow;
+          switch (Opts.SvReset) {
+          case Options::SvResetKind::AsyncLow:
+            R = mlirgen::HWResetKind::AsyncLow; break;
+          case Options::SvResetKind::SyncHigh:
+            R = mlirgen::HWResetKind::SyncHigh; break;
+          case Options::SvResetKind::SyncLow:
+            R = mlirgen::HWResetKind::SyncLow; break;
+          }
+          std::string Src = mlirgen::emitSystemVerilog(M, &SM, R);
           if (Src.empty()) return 1;
           std::cout << Src;
         } else {

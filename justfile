@@ -121,6 +121,52 @@ emit-python FILE: build
 emit-typescript FILE: build
     ./{{BUILD_DIR}}/matlabc -emit-typescript {{FILE}}
 
+# Emit synthesizable SystemVerilog (ASIC target) from a .m file.
+# Phase 1 — scalar combinational only. See docs/emit_systemverilog.md.
+emit-sv FILE: build
+    ./{{BUILD_DIR}}/matlabc -emit-systemverilog {{FILE}}
+
+# Run the synthesizability gate on a .m file without producing
+# output. Exit 0 means the source can be synthesized; non-zero with a
+# diagnostic means it cannot.
+check-sv FILE: build
+    ./{{BUILD_DIR}}/matlabc -check-synthesizable {{FILE}}
+
+# Emit + lint with Verilator. Requires `verilator` on PATH.
+lint-sv FILE: build
+    #!/usr/bin/env bash
+    set -euo pipefail
+    name=$(basename {{FILE}} .m)
+    out=$(mktemp -d)/$name.sv
+    ./{{BUILD_DIR}}/matlabc -emit-systemverilog {{FILE}} > "$out"
+    verilator --lint-only -Wall --top-module "$name" "$out"
+    echo "lint OK: $out"
+
+# Run the SystemVerilog emission test suites (golden-diff + lint +
+# synthesizability gate). Verilator is auto-detected; set
+# `VERILATOR=` to skip the lint pass.
+test-sv: build
+    ctest --test-dir {{BUILD_DIR}} --output-on-failure -R "emit-sv-(fail-)?tests"
+
+# Compile a .m file via the SystemVerilog emitter: writes ./<name>.sv
+# and lints with Verilator when available. Parallel to `compile-c` /
+# `compile-cpp` / `compile-python` / `compile-typescript`, except
+# there's nothing to "run" — the .sv is the artifact, ready for
+# downstream synthesis (DC, Genus, Yosys, ...) or simulation.
+# Example: `just compile-sv examples/clamp.m` -> ./clamp.sv
+compile-sv FILE: build
+    #!/usr/bin/env bash
+    set -euo pipefail
+    name=$(basename {{FILE}} .m)
+    out="./$name.sv"
+    ./{{BUILD_DIR}}/matlabc -emit-systemverilog {{FILE}} > "$out"
+    if command -v verilator >/dev/null 2>&1; then
+        verilator --lint-only -Wall --top-module "$name" "$out"
+        echo "built $out (lint OK)"
+    else
+        echo "built $out (verilator not on PATH; lint skipped)"
+    fi
+
 # Compile a .m file via the C emitter: produces ./<name> using cc.
 # Example: `just compile-c examples/hello.m` -> ./hello
 compile-c FILE: build

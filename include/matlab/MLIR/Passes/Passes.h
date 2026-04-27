@@ -1,8 +1,14 @@
 #pragma once
 
+#include "mlir/IR/Value.h"
+#include "llvm/ADT/SmallVector.h"
+
 #include <string>
 
-namespace mlir { class ModuleOp; }
+namespace mlir {
+class ModuleOp;
+class Operation;
+} // namespace mlir
 
 namespace matlab {
 
@@ -202,6 +208,147 @@ std::string emitPython(mlir::ModuleOp M, bool NoLine = false,
 /// the corresponding statement. Returns empty string on failure.
 std::string emitTypeScript(mlir::ModuleOp M, bool NoLine = false,
                            const matlab::SourceManager *SM = nullptr);
+
+/// Pattern info describing a canonical bounded for-loop shape that
+/// `LowerSeqLoops` produces from `for i = init:end` (with optional
+/// step). The same pattern is recognized by `HWLegalize` (Phase 2) and
+/// `EmitSystemVerilog` so they agree on what to accept and what to
+/// emit.
+///
+///   scf.while %iv = %init {
+///     %cmp = arith.cmpf ole|oge, %iv, %end
+///     scf.condition (%cmp) %iv : f64
+///   } do {
+///   ^bb0(%iv: f64):
+///     ...body...
+///     %next = arith.addf %iv, %step
+///     scf.yield %next : f64
+///   }
+///
+/// `IsDecreasing` is true when the comparison is `oge` (i.e. the loop
+/// counts down from `init` to `end`). All three of `Init`, `End`,
+/// `Step` are SSA values that — for Phase 2 — must be `arith.constant`
+/// of `f64`. The caller checks the constant-ness; this struct just
+/// records what was matched.
+struct HWForLoopInfo {
+  mlir::Value Init;
+  mlir::Value End;
+  mlir::Value Step;
+  bool IsDecreasing = false;
+  // The iv block-arg of the after-region. Used to verify that no body
+  // op consumes the induction variable as a datapath value (Phase 2
+  // restriction; relaxed in later phases).
+  mlir::Value Iv;
+};
+
+/// Try to match the canonical for-loop pattern on an `scf.while`.
+/// Returns true on success, populating Info. Phase 2 callers further
+/// require that Info.Init / End / Step are `arith.constant`.
+bool matchHWForLoop(mlir::Operation *WhileOp, HWForLoopInfo &Info);
+
+/// Phase 3 persistent-variable recognition. The MATLAB pattern:
+///
+///   persistent c;
+///   if isempty(c)
+///       c = <reset>;
+///   end
+///   ... user body that may read or write c via the runtime ABI ...
+///   count = c;
+///
+/// lowers to a fixed runtime-call shape:
+///
+///   %ie = llvm.call @matlab_persistent_isempty(%idx) : (i32) -> f64
+///   %c  = arith.cmpf one, %ie, 0.0
+///   scf.if %c {
+///     llvm.call @matlab_global_set_f64(%idx, %reset_init)  // reset value
+///   }
+///   ...
+///   %v  = llvm.call @matlab_global_get_f64(%idx) : (i32) -> f64   // reads
+///   ...
+///   llvm.call @matlab_global_set_f64(%idx, %next_value)            // writes
+///
+/// `gatherHWPersistentState` recognizes this shape and returns one
+/// HWPersistentInfo per persistent variable in `F`. Each persistent
+/// becomes an inferable register in the emitted SystemVerilog.
+struct HWPersistentInfo {
+  // Integer index used by the runtime-call ABI (the 1st operand of
+  // every isempty / get / set call site).
+  int32_t Idx = 0;
+  // User-visible variable name, taken from the `persistent_name`
+  // string attr on each call site. Same across all sites.
+  std::string Name;
+  // The integer width and signedness of the register, inferred from
+  // the typed value operand of each `_set_f64` site. Sites must
+  // agree; mismatch is a hard error.
+  unsigned Width = 0;
+  bool Signed = true;
+  // The reset-init value's MLIR Value, taken from the lone set call
+  // inside the `isempty` then-region.
+  mlir::Value ResetValue;
+  // The scf.if op holding the `isempty` guard. The SV emitter skips
+  // this op during always_comb body emission — the reset value is
+  // routed into the always_ff's reset branch instead.
+  mlir::Operation *IsEmptyGuard = nullptr;
+  // Every `_get_f64` call site. The emitter renders the result of
+  // each as a reference to the register's current-value signal.
+  llvm::SmallVector<mlir::Operation *, 4> Gets;
+  // Every `_set_f64` call site (excluding the one inside the
+  // isempty guard). The emitter renders these as assignments to the
+  // register's `_next` signal.
+  llvm::SmallVector<mlir::Operation *, 4> Sets;
+};
+
+/// Walk a func.func and gather every recognized persistent variable.
+/// Returns true if every persistent in `F` matched the canonical
+/// shape; on failure, emits errors via mlir::emitError on the
+/// offending op and returns false. `Out` is appended to.
+bool gatherHWPersistentState(mlir::Operation *FuncOp,
+                             llvm::SmallVectorImpl<HWPersistentInfo> &Out);
+
+/// Synthesizability gate for the SystemVerilog backend (ASIC target).
+/// Walks the post-LowerIO module and emits a source-located error for
+/// every construct that cannot be mapped to inferable RTL — runtime
+/// calls that survive lowering, recursion, dynamic-shape allocas,
+/// `scf.while` (Phase 1 rejects all; later phases relax), function
+/// values, `f64` arithmetic without an explicit fixed-point policy,
+/// strings/cells/structs in datapath, and `inferred-latch` hazards
+/// (an `always_comb`-shaped path where a result isn't fully assigned
+/// on every branch).
+///
+/// Returns true if the module is synthesizable (no errors emitted).
+/// Drives both `-check-synthesizable` (run-only-this-pass mode) and
+/// `-emit-systemverilog` (gate-then-emit). See docs/emit_systemverilog.md
+/// — "Synthesizability gate" for the per-phase coverage table.
+bool runHWLegalize(mlir::ModuleOp M, const matlab::SourceManager *SM = nullptr);
+
+/// Bit-width inference for the SystemVerilog backend. Walks the module
+/// and verifies every SSA value carries a type that the SV emitter
+/// can render: `i1` (→ `logic`), `i8/i16/i32/i64` (signed or unsigned
+/// → `logic [W-1:0]`). Anything else (including `f64`) is rejected.
+/// Phase 1 keeps the inference inline with verification — the
+/// per-value `sv.type` attribute attachment is deferred to Phase 5
+/// when fixed-point binary-point tracking needs it.
+///
+/// Returns true on success.
+bool runHWBitWidthInfer(mlir::ModuleOp M,
+                        const matlab::SourceManager *SM = nullptr);
+
+/// Reset convention for the SystemVerilog backend. ASIC default is
+/// `AsyncLow` (async-assert / sync-deassert active-low) — the typical
+/// Synopsys flow convention. Sync variants are available for teams
+/// that prefer sync-only reset trees. Stateless modules ignore this.
+enum class HWResetKind { AsyncLow, SyncHigh, SyncLow };
+
+/// Emit synthesizable SystemVerilog (ASIC target) from a module that
+/// has been driven through the full lowering pipeline (same state as
+/// `-emit-c` consumes — post-LowerIO, IfStoreToSelect, Mem2RegLite).
+/// Produces one `module` per `func.func`. Combinational logic lands
+/// in `always_comb`; persistent variables become `always_ff`-driven
+/// registers with a `clk` + reset port pair added to the module's
+/// signature. Returns empty string on failure.
+std::string emitSystemVerilog(mlir::ModuleOp M,
+                              const matlab::SourceManager *SM = nullptr,
+                              HWResetKind Reset = HWResetKind::AsyncLow);
 
 } // namespace mlirgen
 } // namespace matlab

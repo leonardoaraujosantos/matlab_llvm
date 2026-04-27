@@ -107,6 +107,11 @@ if(MATLAB_LLVM_WITH_MLIR)
     lib/MLIR/Passes/EmitC.cpp
     lib/MLIR/Passes/EmitPython.cpp
     lib/MLIR/Passes/EmitTypeScript.cpp
+    lib/MLIR/Passes/HWForLoop.cpp
+    lib/MLIR/Passes/HWStateInfer.cpp
+    lib/MLIR/Passes/HWLegalize.cpp
+    lib/MLIR/Passes/HWBitWidthInfer.cpp
+    lib/MLIR/Passes/EmitSystemVerilog.cpp
   )
   target_link_libraries(MatlabMLIR
     PUBLIC  MatlabSema MatlabAST MatlabBasic
@@ -248,6 +253,25 @@ if(MATLAB_LLVM_WITH_MLIR)
             $<TARGET_FILE:matlabc>
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Debug
   )
+  # SystemVerilog emission shape test (Phase 1 scope, ASIC target).
+  # Diffs the emitted .sv against per-input goldens and — when
+  # Verilator is on PATH — runs `verilator --lint-only -Wall` on each
+  # one to catch inferred-latch hazards / missing widths that the
+  # golden alone would miss. See docs/emit_systemverilog.md.
+  add_test(
+    NAME emit-sv-tests
+    COMMAND ${CMAKE_SOURCE_DIR}/test/EmitSV/run_tests.sh $<TARGET_FILE:matlabc>
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/EmitSV
+  )
+  # Synthesizability gate — for each fixture, asserts that
+  # `-emit-systemverilog` rejects with a matching diagnostic and that
+  # `-check-synthesizable` does the same without writing stdout.
+  add_test(
+    NAME emit-sv-fail-tests
+    COMMAND ${CMAKE_SOURCE_DIR}/test/EmitSVFail/run_tests.sh $<TARGET_FILE:matlabc>
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/EmitSVFail
+  )
+
   # DWARF emission shape test: asserts that `matlabc -emit-llvm -g`
   # produces an LLVM IR module with a !DICompileUnit / !DIFile /
   # !DISubprogram / !DILocation graph (line tables only) and that

@@ -265,6 +265,7 @@ Out of scope:
 | JIT / REPL | 🟡 | `matlabc -repl` with MLIR ExecutionEngine; state persists via a runtime workspace. No line editing / JIT cache / live user-function definitions yet. See `docs/repl.md`. |
 | Python emission | ✅ | `-emit-python`. NumPy-backed runtime in `runtime/matlab_runtime.py`; see `docs/emit_python.md`. Matrix display uses numpy's bracket repr (`.stdout-python` per-test goldens for the test lane). |
 | SystemC (synthesizable) emission | ❌ | See `docs/emit_systemc.md` |
+| SystemVerilog (ASIC, synthesizable) emission | ❌ | See `docs/emit_systemverilog.md` |
 
 ### MLIR passes (`lib/MLIR/Passes/`)
 

@@ -1,0 +1,1024 @@
+// Emits synthesizable SystemVerilog (ASIC target) from an MLIR ModuleOp
+// whose ops have been driven through the same lowering pipeline as
+// `-emit-c` plus the SV-specific gate (HWLegalize / HWBitWidthInfer).
+//
+// Phase 1 scope: scalar combinational only — one `module` per user
+// `func.func`, one `always_comb` body, ports named after MATLAB
+// parameter / result names, integer datapath only (i1 / i8 / i16 /
+// i32 / i64). Registers, FSMs, and RAM inference are later phases.
+//
+// IR shape consumed (matches what EmitC.cpp consumes after LowerIO +
+// IfStoreToSelect + Mem2RegLite):
+//
+//   func.func body ::= seq of (
+//       arith.constant
+//     | arith.{add,sub,mul,divs,divu,rems,remu,andi,ori,xori,
+//              shli,shrsi,shrui}i
+//     | arith.cmpi
+//     | arith.select
+//     | arith.{extsi,extui,trunci}
+//     | scf.if (with or without results)
+//     | scf.yield
+//     | llvm.alloca / llvm.load / llvm.store    -- scalar slots
+//     | func.return
+//   )
+//
+// Anything outside this set causes a hard `error: emit-sv:` diagnostic
+// rather than silent passthrough. Hardware emission has zero tolerance
+// for silent fallback.
+
+#include "matlab/MLIR/Passes/Passes.h"
+#include "matlab/Basic/SourceManager.h"
+
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/Operation.h"
+#include "mlir/IR/Value.h"
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/StringRef.h"
+#include "llvm/ADT/StringSet.h"
+
+#include <cctype>
+#include <cstdint>
+#include <iostream>
+#include <sstream>
+#include <string>
+
+namespace matlab {
+namespace mlirgen {
+
+namespace {
+
+class Emitter {
+public:
+  Emitter(std::ostream &OS, const matlab::SourceManager *SM,
+          HWResetKind Reset)
+      : OS(OS), SM(SM), Reset(Reset) { (void)this->SM; }
+
+  bool run(mlir::ModuleOp M);
+
+private:
+  // --- Top-level ---------------------------------------------------------
+  bool emitModuleForFunc(mlir::func::FuncOp F);
+  void emitProlog();
+
+  // --- Naming ------------------------------------------------------------
+  // Stable identifier for an SSA value. Looks up an explicit MATLAB
+  // name first (matlab.name attr on the producing op or block-arg
+  // attr), falls back to a fresh `vN`. A given Value always maps to
+  // the same string within one Emitter invocation.
+  std::string name(mlir::Value V);
+  std::string freshName(const char *Prefix = "v");
+  std::string sanitize(llvm::StringRef In);
+
+  // --- Type rendering ----------------------------------------------------
+  // Width of an integer MLIR type. Caller has already verified that T
+  // is one of i1 / i8 / i16 / i32 / i64 (HWBitWidthInfer enforces).
+  unsigned widthOf(mlir::Type T);
+  // Render a SystemVerilog port / signal type for an MLIR integer
+  // type. `Signed` controls the explicit `signed` qualifier — Phase 1
+  // defaults all multi-bit integer ports to `signed` so MATLAB's
+  // signed comparisons (`<`, `>=`, ...) lower to SV's signed
+  // comparisons without `$signed(...)` wrappers. `i1` always renders
+  // as bare `logic` (no width, no sign).
+  std::string svType(mlir::Type T, bool Signed = true);
+
+  // --- Body emission -----------------------------------------------------
+  void emitBody(mlir::func::FuncOp F);
+  void emitAlwaysFF();
+  void emitOp(mlir::Operation &Op, int Indent);
+  void emitRegion(mlir::Region &R, int Indent);
+  void emitBlock(mlir::Block &B, int Indent);
+  void declarePrelude(mlir::func::FuncOp F);
+
+  // --- Op handlers -------------------------------------------------------
+  void emitArithConstant(mlir::arith::ConstantOp C, int Indent);
+  void emitBinop(mlir::Operation &Op, llvm::StringRef SvOp, int Indent);
+  void emitUnaryNeg(mlir::Operation &Op, int Indent);
+  void emitCmp(mlir::arith::CmpIOp C, int Indent);
+  void emitSelect(mlir::arith::SelectOp S, int Indent);
+  void emitExtTrunc(mlir::Operation &Op, int Indent);
+  void emitScfIf(mlir::scf::IfOp If, int Indent);
+  void emitScfYield(mlir::scf::YieldOp Y, int Indent);
+  void emitScfWhile(mlir::scf::WhileOp W, int Indent);
+  void emitAlloca(mlir::LLVM::AllocaOp A, int Indent);
+  void emitLoad(mlir::LLVM::LoadOp L, int Indent);
+  void emitStore(mlir::LLVM::StoreOp S, int Indent);
+  void emitReturn(mlir::func::ReturnOp R, int Indent);
+
+  // --- Helpers -----------------------------------------------------------
+  void indent(int N) { for (int i = 0; i < N; ++i) OS << "    "; }
+  void fail(llvm::StringRef Msg) {
+    if (!Failed)
+      std::cerr << "error: emit-sv: " << Msg.str() << "\n";
+    Failed = true;
+  }
+  // Render an SV literal for an integer constant. Width comes from V's
+  // type; signedness flag controls the `'sd` vs `'d` suffix and
+  // negative-value rendering.
+  std::string intLiteral(int64_t Val, mlir::Type T, bool Signed);
+  // Render the expression form of V. For an SSA value with an explicit
+  // name slot, returns the name. For unnamed pure ops (constants,
+  // inline-friendly arith), returns the inline expression. The returned
+  // string is parenthesized when the surrounding precedence requires it.
+  std::string exprFor(mlir::Value V);
+  // Comma-separated SV port-list lines for the function. Output ports
+  // come last so callers reading the module declaration see "inputs ...
+  // -> outputs". Result names are taken from the function's `result_names`
+  // attribute when present, otherwise `y`, `y1`, `y2`, ... .
+  void emitPortList(mlir::func::FuncOp F);
+  // True when V is the result of an op the emitter inlines at use site.
+  bool isInlineable(mlir::Value V);
+
+  // --- State -------------------------------------------------------------
+  std::ostream &OS;
+  const matlab::SourceManager *SM;
+  HWResetKind Reset;
+  llvm::DenseMap<mlir::Value, std::string> Names;
+  llvm::StringSet<> Used;
+  unsigned NextFresh = 0;
+  bool Failed = false;
+  // Per-function: argument names (parallel to F.getArguments()).
+  std::vector<std::string> ArgNames;
+  // Per-function: output names (parallel to F's result types).
+  std::vector<std::string> OutNames;
+  // Per-function: SSA values that should be declared as `logic` at
+  // module scope. Filled by declarePrelude.
+  std::vector<mlir::Value> PreludeDecls;
+  // Per-function: persistent registers (Phase 3). Empty for stateless
+  // functions. Each entry carries the recognized get/set sites the
+  // emitter routes through register signals.
+  llvm::SmallVector<HWPersistentInfo, 4> Persists;
+  // Quick lookup: get-call op → index into Persists. The result of
+  // each recognized get_f64 renders as the register's current-value
+  // signal name.
+  llvm::DenseMap<mlir::Operation *, unsigned> GetSiteToReg;
+  // Quick lookup: set-call op → index into Persists. Each renders as
+  // an assignment to the register's `_next` signal.
+  llvm::DenseMap<mlir::Operation *, unsigned> SetSiteToReg;
+  // Ops the emitter must skip during always_comb body emission. Used
+  // to suppress the isempty-guarded scf.if (its init becomes the
+  // reset value) and the cmpf+isempty trio that feeds it.
+  llvm::DenseSet<mlir::Operation *> Suppress;
+};
+
+unsigned Emitter::widthOf(mlir::Type T) {
+  if (auto IT = mlir::dyn_cast<mlir::IntegerType>(T))
+    return IT.getWidth();
+  return 0;
+}
+
+std::string Emitter::svType(mlir::Type T, bool Signed) {
+  unsigned W = widthOf(T);
+  if (W == 0) return "/* unknown */";
+  if (W == 1) return "logic";
+  std::ostringstream S;
+  S << "logic";
+  if (Signed) S << " signed";
+  S << " [" << (W - 1) << ":0]";
+  return S.str();
+}
+
+std::string Emitter::sanitize(llvm::StringRef In) {
+  std::string Out;
+  Out.reserve(In.size());
+  for (char c : In) {
+    if (std::isalnum((unsigned char)c) || c == '_')
+      Out.push_back(c);
+    else
+      Out.push_back('_');
+  }
+  if (Out.empty() || std::isdigit((unsigned char)Out[0]))
+    Out.insert(Out.begin(), '_');
+  return Out;
+}
+
+std::string Emitter::freshName(const char *Prefix) {
+  while (true) {
+    std::string Cand = std::string(Prefix) + std::to_string(NextFresh++);
+    if (Used.insert(Cand).second) return Cand;
+  }
+}
+
+std::string Emitter::name(mlir::Value V) {
+  auto It = Names.find(V);
+  if (It != Names.end()) return It->second;
+  // Try the producing op's `matlab.name` attr.
+  std::string Cand;
+  if (auto *Op = V.getDefiningOp()) {
+    if (auto S = Op->getAttrOfType<mlir::StringAttr>("matlab.name"))
+      Cand = sanitize(S.getValue());
+    if (Cand.empty())
+      if (auto S = Op->getAttrOfType<mlir::StringAttr>("name"))
+        Cand = sanitize(S.getValue());
+  }
+  if (Cand.empty()) Cand = freshName();
+  // Disambiguate against the live identifier set.
+  if (Used.contains(Cand)) {
+    std::string Base = Cand;
+    unsigned I = 1;
+    while (Used.contains(Cand))
+      Cand = Base + "_" + std::to_string(I++);
+  }
+  Used.insert(Cand);
+  Names[V] = Cand;
+  return Cand;
+}
+
+std::string Emitter::intLiteral(int64_t Val, mlir::Type T, bool Signed) {
+  unsigned W = widthOf(T);
+  std::ostringstream S;
+  if (W == 1) {
+    S << (Val ? "1'b1" : "1'b0");
+    return S.str();
+  }
+  if (Signed) {
+    // SystemVerilog grammar: a sized literal cannot embed the sign in
+    // its value digits (`16'sd-32000` is a syntax error). Emit
+    // negative values as `-16'sd<abs>`. Special-case INT64_MIN which
+    // has no positive representation in the same width.
+    if (Val < 0) {
+      uint64_t Abs = (Val == std::numeric_limits<int64_t>::min())
+                         ? uint64_t(1) << 63
+                         : (uint64_t)(-Val);
+      S << "-" << W << "'sd" << Abs;
+    } else {
+      S << W << "'sd" << Val;
+    }
+  } else {
+    // Mask to width to avoid sign-extension surprises.
+    uint64_t Mask = (W >= 64) ? ~uint64_t(0) : ((uint64_t(1) << W) - 1);
+    S << W << "'d" << ((uint64_t)Val & Mask);
+  }
+  return S.str();
+}
+
+bool Emitter::isInlineable(mlir::Value V) {
+  // Phase 1 takes the predictable-RTL path: every named producer gets
+  // a top-level declaration and every op writes its result by name.
+  // Inlining is reserved for a later quality pass once the golden
+  // tests pin the verbose form down.
+  (void)V;
+  return false;
+}
+
+std::string Emitter::exprFor(mlir::Value V) {
+  if (auto *Op = V.getDefiningOp()) {
+    if (auto C = mlir::dyn_cast<mlir::arith::ConstantOp>(Op)) {
+      if (auto IA = mlir::dyn_cast<mlir::IntegerAttr>(C.getValue())) {
+        bool Signed = true;
+        // i1 is unsigned-style.
+        if (auto IT = mlir::dyn_cast<mlir::IntegerType>(C.getType()))
+          Signed = (IT.getWidth() != 1);
+        return intLiteral(IA.getInt(), C.getType(), Signed);
+      }
+    }
+    // Phase 3: a persistent-get call result reads as the register's
+    // current-value signal, regardless of the get's declared f64 ABI
+    // type. The synth tool / SV semantics handle implicit
+    // sign-extension into wider expressions.
+    auto It = GetSiteToReg.find(Op);
+    if (It != GetSiteToReg.end())
+      return Persists[It->second].Name;
+  }
+  return name(V);
+}
+
+void Emitter::emitPortList(mlir::func::FuncOp F) {
+  auto FT = F.getFunctionType();
+  // Reserve the synthesized clock + reset names BEFORE arg/output
+  // name resolution so a user arg named `rst` / `rst_n` / `clk` gets
+  // suffixed (`rst_`) and doesn't shadow the system port.
+  if (!Persists.empty()) {
+    Used.insert("clk");
+    if (Reset == HWResetKind::AsyncLow || Reset == HWResetKind::SyncLow)
+      Used.insert("rst_n");
+    else
+      Used.insert("rst");
+  }
+  // Argument names: prefer matlab.name on the entry-block arg
+  // (lowering attaches it via `function_arg_name`), fall back to
+  // `arg<i>`.
+  ArgNames.clear();
+  ArgNames.reserve(FT.getNumInputs());
+  for (unsigned I = 0; I < FT.getNumInputs(); ++I) {
+    std::string Nm;
+    if (auto S = F.getArgAttrOfType<mlir::StringAttr>(I, "matlab.name"))
+      Nm = sanitize(S.getValue());
+    if (Nm.empty()) Nm = "arg" + std::to_string(I);
+    while (Used.contains(Nm)) Nm += "_";
+    Used.insert(Nm);
+    ArgNames.push_back(Nm);
+    Names[F.getArgument(I)] = Nm;
+  }
+  // Output names. Phase 1 looks for an `sv.result_names` array attr
+  // (an extension point for later) and otherwise uses `y`, `y1`, ...
+  OutNames.clear();
+  OutNames.reserve(FT.getNumResults());
+  for (unsigned I = 0; I < FT.getNumResults(); ++I) {
+    std::string Nm = (I == 0) ? "y" : ("y" + std::to_string(I));
+    while (Used.contains(Nm)) Nm += "_";
+    Used.insert(Nm);
+    OutNames.push_back(Nm);
+  }
+
+  // Print the port list. Phase 3: prepend clk + reset port when the
+  // function has any persistent state.
+  bool First = true;
+  if (!Persists.empty()) {
+    OS << "    input  logic clk";
+    First = false;
+    if (Reset == HWResetKind::AsyncLow || Reset == HWResetKind::SyncLow) {
+      OS << ",\n    input  logic rst_n";
+    } else {
+      OS << ",\n    input  logic rst";
+    }
+  }
+  for (unsigned I = 0; I < FT.getNumInputs(); ++I) {
+    if (!First) OS << ",\n";
+    First = false;
+    OS << "    input  " << svType(FT.getInput(I)) << " " << ArgNames[I];
+  }
+  for (unsigned I = 0; I < FT.getNumResults(); ++I) {
+    if (!First) OS << ",\n";
+    First = false;
+    // For results that come from a persistent get, the function's
+    // declared result type is the runtime ABI's f64 — render the SV
+    // port at the register's actual integer width instead.
+    mlir::Type T = FT.getResult(I);
+    // Find a func.return op and inspect its operand[I]; if it's a
+    // recognized persistent get, use that register's width.
+    F.walk([&](mlir::func::ReturnOp R) {
+      if (R.getNumOperands() <= I) return;
+      auto *Op = R.getOperand(I).getDefiningOp();
+      if (!Op) return;
+      auto It = GetSiteToReg.find(Op);
+      if (It == GetSiteToReg.end()) return;
+      auto &P = Persists[It->second];
+      T = mlir::IntegerType::get(F.getContext(), P.Width);
+    });
+    OS << "    output " << svType(T) << " " << OutNames[I];
+  }
+  OS << "\n";
+}
+
+void Emitter::declarePrelude(mlir::func::FuncOp F) {
+  // Walk the body and collect every SSA value that needs a `logic`
+  // declaration. Skip block-arguments of the entry block (those are
+  // ports); skip values produced by ops we render inline (constants);
+  // skip values produced by `llvm.alloca` (they're slot addresses,
+  // not signals — the slot's element type defines the actual signal
+  // we declare).
+  PreludeDecls.clear();
+  // Map alloca SSA value -> its declared signal name. The corresponding
+  // load/store ops will reuse that name.
+  // Actually the names map already handles this — we just need to make
+  // sure we *declare* the slot name with its element type, and that
+  // load/store route through the same name.
+
+  llvm::DenseMap<mlir::Value, mlir::Type> SlotElemTy;
+  // Helper: true when Op or any ancestor is on the suppression list.
+  // We use this to skip ops that live inside the isempty if-guard
+  // (the init set call in particular — its result type is `none`,
+  // and the prelude has nothing meaningful to declare for it).
+  auto IsSuppressedOrInside = [&](mlir::Operation *Op) {
+    for (mlir::Operation *Cur = Op; Cur; Cur = Cur->getParentOp())
+      if (Suppress.contains(Cur)) return true;
+    return false;
+  };
+  // Pre-pass — find single-use fi-tagged binops whose only consumer
+  // is a recognized persistent set; mark them suppressed so the
+  // prelude doesn't declare their wide intermediate values. The set
+  // site emits the binop's expression inline. Doing this here, before
+  // the main walk, keeps `Suppress` consistent for both the prelude
+  // and the body.
+  for (auto &P : Persists) {
+    for (mlir::Operation *Set : P.Sets) {
+      if (Set->getNumOperands() < 2) continue;
+      mlir::Value Val = Set->getOperand(1);
+      auto *VOp = Val.getDefiningOp();
+      if (!VOp) continue;
+      llvm::StringRef N = VOp->getName().getStringRef();
+      bool IsArith = (N == "matlab.add" || N == "matlab.sub" ||
+                      N == "matlab.matmul" || N == "matlab.emul");
+      if (IsArith && Val.hasOneUse()) Suppress.insert(VOp);
+    }
+  }
+  F.walk([&](mlir::Operation *Op) {
+    // Phase 3 — suppress declaration of values whose producer is
+    // routed to a register signal (persistent get) or whose op is on
+    // the suppression list (or nested inside one).
+    if (IsSuppressedOrInside(Op)) return;
+    if (GetSiteToReg.contains(Op)) return;
+    if (SetSiteToReg.contains(Op)) return;
+    if (auto A = mlir::dyn_cast<mlir::LLVM::AllocaOp>(Op)) {
+      // Slot signal name comes from the alloca's `name` attr.
+      mlir::Value Slot = A.getResult();
+      // Force an entry in Names so loads/stores share it.
+      (void)name(Slot);
+      SlotElemTy[Slot] = A.getElemType();
+      // We'll emit the declaration when we encounter the alloca during
+      // body emission, but it's cleaner to declare slots up front.
+      PreludeDecls.push_back(Slot);
+      return;
+    }
+    // `llvm.store`, `scf.yield`, `func.return` produce no SSA result,
+    // so nothing to declare. `llvm.load` *does* produce an SSA result
+    // (the loaded value) and falls through to the generic decl path.
+    if (mlir::isa<mlir::LLVM::StoreOp, mlir::scf::YieldOp,
+                  mlir::func::ReturnOp>(Op))
+      return;
+    // For-loop control-flow ops produce structural results (the
+    // for-iv, the cmpf result, the addf next-value) that the SV
+    // emitter renders as part of the SV `for (int i = ...)` head and
+    // the loop pattern. They never become datapath signals.
+    if (mlir::isa<mlir::scf::WhileOp, mlir::scf::ConditionOp,
+                  mlir::arith::CmpFOp, mlir::arith::AddFOp>(Op))
+      return;
+    if (auto C = mlir::dyn_cast<mlir::arith::ConstantOp>(Op)) {
+      // Constants render inline; no prelude entry.
+      (void)C;
+      return;
+    }
+    if (mlir::isa<mlir::LLVM::ConstantOp>(Op)) {
+      // `llvm.mlir.constant` is consumed as an alloca size operand —
+      // never appears in the datapath, so no prelude entry.
+      return;
+    }
+    for (mlir::Value V : Op->getResults()) {
+      // Reserve a name now so it appears in the prelude.
+      (void)name(V);
+      PreludeDecls.push_back(V);
+    }
+  });
+
+  for (mlir::Value V : PreludeDecls) {
+    auto It = SlotElemTy.find(V);
+    mlir::Type T = (It != SlotElemTy.end()) ? It->second : V.getType();
+    OS << "    " << svType(T) << " " << name(V) << ";\n";
+  }
+  // Phase 3: declare a `<reg>` and `<reg>_next` pair for every
+  // persistent register. The register signal carries the current
+  // (clocked) value; the `_next` signal carries the combinational
+  // next-state expression that always_ff samples on the next edge.
+  for (auto &P : Persists) {
+    auto T = mlir::IntegerType::get(F.getContext(), P.Width);
+    OS << "    " << svType(T) << " " << P.Name << ";\n";
+    OS << "    " << svType(T) << " " << P.Name << "_next;\n";
+  }
+  if (!PreludeDecls.empty() || !Persists.empty()) OS << "\n";
+}
+
+void Emitter::emitArithConstant(mlir::arith::ConstantOp C, int Indent) {
+  // Constants are rendered inline at use site by exprFor. Emit nothing.
+  (void)C; (void)Indent;
+}
+
+void Emitter::emitBinop(mlir::Operation &Op, llvm::StringRef SvOp,
+                        int Indent) {
+  if (Op.getNumOperands() != 2 || Op.getNumResults() != 1) {
+    fail("binop with unexpected arity");
+    return;
+  }
+  indent(Indent);
+  OS << name(Op.getResult(0)) << " = "
+     << exprFor(Op.getOperand(0)) << " " << SvOp.str() << " "
+     << exprFor(Op.getOperand(1)) << ";\n";
+}
+
+void Emitter::emitUnaryNeg(mlir::Operation &Op, int Indent) {
+  // arith doesn't have a `negi`; the lowering emits `subi 0, x` or
+  // `muli x, -1`. We don't see a direct neg in the IR. Reserved for
+  // future use.
+  (void)Op; (void)Indent;
+  fail("emitUnaryNeg called unexpectedly");
+}
+
+void Emitter::emitCmp(mlir::arith::CmpIOp C, int Indent) {
+  llvm::StringRef SvOp;
+  switch (C.getPredicate()) {
+  case mlir::arith::CmpIPredicate::eq:  SvOp = "==";  break;
+  case mlir::arith::CmpIPredicate::ne:  SvOp = "!=";  break;
+  case mlir::arith::CmpIPredicate::slt: SvOp = "<";   break;
+  case mlir::arith::CmpIPredicate::sle: SvOp = "<=";  break;
+  case mlir::arith::CmpIPredicate::sgt: SvOp = ">";   break;
+  case mlir::arith::CmpIPredicate::sge: SvOp = ">=";  break;
+  case mlir::arith::CmpIPredicate::ult: SvOp = "<";   break;
+  case mlir::arith::CmpIPredicate::ule: SvOp = "<=";  break;
+  case mlir::arith::CmpIPredicate::ugt: SvOp = ">";   break;
+  case mlir::arith::CmpIPredicate::uge: SvOp = ">=";  break;
+  }
+  indent(Indent);
+  OS << name(C.getResult()) << " = "
+     << exprFor(C.getLhs()) << " " << SvOp.str() << " "
+     << exprFor(C.getRhs()) << ";\n";
+}
+
+void Emitter::emitSelect(mlir::arith::SelectOp S, int Indent) {
+  indent(Indent);
+  OS << name(S.getResult()) << " = "
+     << exprFor(S.getCondition()) << " ? "
+     << exprFor(S.getTrueValue()) << " : "
+     << exprFor(S.getFalseValue()) << ";\n";
+}
+
+void Emitter::emitExtTrunc(mlir::Operation &Op, int Indent) {
+  // SystemVerilog: extending or truncating a packed integer is a
+  // direct width cast. We emit `<W>'($signed(x))` for sign-ext,
+  // `<W>'(x)` for zero-ext / truncate.
+  bool Signed = mlir::isa<mlir::arith::ExtSIOp>(Op);
+  unsigned W = widthOf(Op.getResult(0).getType());
+  indent(Indent);
+  OS << name(Op.getResult(0)) << " = " << W << "'(";
+  if (Signed) OS << "$signed(";
+  OS << exprFor(Op.getOperand(0));
+  if (Signed) OS << ")";
+  OS << ");\n";
+}
+
+void Emitter::emitScfIf(mlir::scf::IfOp If, int Indent) {
+  // Phase 1 supports both shapes:
+  //   - scf.if without results: pure side-effecting branches that store
+  //     to slots. Renders as `if (cond) begin ... end else begin ... end`
+  //     inside `always_comb`.
+  //   - scf.if with results: the values yielded by each arm assign the
+  //     `if`'s SSA results. Renders as the same construct, with each
+  //     arm writing the result name(s).
+  indent(Indent);
+  OS << "if (" << exprFor(If.getCondition()) << ") begin\n";
+  emitRegion(If.getThenRegion(), Indent + 1);
+  // The else region is "empty" in MLIR terms when no false-branch was
+  // written. MLIR still synthesizes a single block containing just an
+  // implicit `scf.yield` for the no-result form, so `getElseRegion()`
+  // is non-empty even for `if cond { body }`. Skip the else-branch
+  // emission when its only op is the auto-yield.
+  bool ElseIsEmpty = If.getElseRegion().empty();
+  if (!ElseIsEmpty) {
+    auto &EB = If.getElseRegion().front();
+    auto NumOps = std::distance(EB.begin(), EB.end());
+    if (NumOps == 1 && mlir::isa<mlir::scf::YieldOp>(EB.front()) &&
+        EB.front().getNumOperands() == 0)
+      ElseIsEmpty = true;
+  }
+  if (!ElseIsEmpty) {
+    indent(Indent);
+    OS << "end else begin\n";
+    emitRegion(If.getElseRegion(), Indent + 1);
+  }
+  indent(Indent);
+  OS << "end\n";
+}
+
+void Emitter::emitScfYield(mlir::scf::YieldOp Y, int Indent) {
+  // Yield can come from inside an scf.if (assign parent results) or
+  // from inside the after-region of a recognized for-loop (no datapath
+  // effect — the addf step is part of the loop pattern). The latter is
+  // skipped silently.
+  auto *Parent = Y->getParentOp();
+  if (mlir::isa<mlir::scf::WhileOp>(Parent)) {
+    // Loop yield. The matched for-loop pattern absorbs the addf+yield
+    // into the for-head; nothing to emit here.
+    return;
+  }
+  auto If = mlir::dyn_cast<mlir::scf::IfOp>(Parent);
+  if (!If) {
+    if (Y.getNumOperands() != 0)
+      fail("scf.yield outside scf.if not supported in Phase 1");
+    return;
+  }
+  if (Y.getNumOperands() != If->getNumResults()) {
+    fail("scf.yield arity mismatch");
+    return;
+  }
+  for (unsigned I = 0; I < Y.getNumOperands(); ++I) {
+    indent(Indent);
+    OS << name(If->getResult(I)) << " = "
+       << exprFor(Y.getOperand(I)) << ";\n";
+  }
+}
+
+void Emitter::emitScfWhile(mlir::scf::WhileOp W, int Indent) {
+  // Phase 2: only the canonical bounded for-loop shape is accepted —
+  // HWLegalize already rejected everything else with a precise
+  // diagnostic. Reach for the same matcher, render as a synthesizable
+  // SV `for` with an integer counter. ASIC synthesis tools fully
+  // unroll constant-bound for-loops inside `always_comb`; the explicit
+  // for-form keeps the source readable and the emitter simple.
+  HWForLoopInfo Info;
+  if (!matchHWForLoop(W, Info)) {
+    fail("scf.while did not match canonical for-loop pattern at "
+         "emit time (HWLegalize should have rejected earlier)");
+    return;
+  }
+  auto ToInt = [](mlir::Value V) -> int64_t {
+    auto C = V.getDefiningOp<mlir::arith::ConstantOp>();
+    if (!C) return 0;
+    auto FA = mlir::dyn_cast<mlir::FloatAttr>(C.getValue());
+    if (!FA) return 0;
+    double D = FA.getValueAsDouble();
+    return (int64_t)D;
+  };
+  int64_t InitV = ToInt(Info.Init);
+  int64_t EndV = ToInt(Info.End);
+  int64_t StepV = ToInt(Info.Step);
+  std::string IvName;
+  if (auto *Op = W.getOperation()) {
+    if (auto S = Op->getAttrOfType<mlir::StringAttr>("matlab.name"))
+      IvName = sanitize(S.getValue());
+  }
+  if (IvName.empty()) IvName = freshName("i");
+  // Avoid colliding with prelude-declared signals.
+  while (Used.contains(IvName)) IvName += "_";
+  Used.insert(IvName);
+
+  indent(Indent);
+  if (Info.IsDecreasing) {
+    // For descending ranges (`for i = init:-1:end`) the matched
+    // arith.addf is `iv + (negative step)`. Render as
+    // `iv = iv - |step|` so the SV head reads naturally.
+    int64_t Mag = StepV < 0 ? -StepV : StepV;
+    OS << "for (int " << IvName << " = " << InitV << "; "
+       << IvName << " >= " << EndV << "; "
+       << IvName << " = " << IvName << " - " << Mag
+       << ") begin\n";
+  } else {
+    OS << "for (int " << IvName << " = " << InitV << "; "
+       << IvName << " <= " << EndV << "; "
+       << IvName << " = " << IvName << " + " << StepV
+       << ") begin\n";
+  }
+  // Emit the after-region's body, but stop before the trailing
+  // arith.addf + scf.yield (those are part of the loop pattern and
+  // already encoded in the for-head).
+  mlir::Block &AB = W.getAfter().front();
+  for (mlir::Operation &Op : AB.getOperations()) {
+    if (Failed) break;
+    // Skip the addf %iv, %step that feeds the yield.
+    if (auto Add = mlir::dyn_cast<mlir::arith::AddFOp>(Op)) {
+      if (Add.getLhs() == Info.Iv) continue;
+    }
+    if (mlir::isa<mlir::scf::YieldOp>(Op)) continue;
+    emitOp(Op, Indent + 1);
+  }
+  indent(Indent);
+  OS << "end\n";
+}
+
+void Emitter::emitAlloca(mlir::LLVM::AllocaOp A, int Indent) {
+  // The signal was already declared in the prelude. Nothing to emit
+  // inside `always_comb`.
+  (void)A; (void)Indent;
+}
+
+void Emitter::emitLoad(mlir::LLVM::LoadOp L, int Indent) {
+  // Render as `<load_result> = <slot_name>;` — the slot's logic
+  // declaration carries the value. We keep an explicit assignment so
+  // every named SSA value has a home in always_comb (Phase 1
+  // simplicity). A later quality pass can elide single-use loads.
+  indent(Indent);
+  OS << name(L.getResult()) << " = " << name(L.getAddr()) << ";\n";
+}
+
+void Emitter::emitStore(mlir::LLVM::StoreOp S, int Indent) {
+  indent(Indent);
+  OS << name(S.getAddr()) << " = " << exprFor(S.getValue()) << ";\n";
+}
+
+void Emitter::emitReturn(mlir::func::ReturnOp R, int Indent) {
+  // Drive the output ports.
+  if (R.getNumOperands() != OutNames.size()) {
+    fail("func.return arity mismatch");
+    return;
+  }
+  for (unsigned I = 0; I < R.getNumOperands(); ++I) {
+    indent(Indent);
+    OS << OutNames[I] << " = " << exprFor(R.getOperand(I)) << ";\n";
+  }
+}
+
+void Emitter::emitOp(mlir::Operation &Op, int Indent) {
+  using namespace mlir;
+
+  // Phase 3 — suppress ops the persistent-state matcher captured.
+  // The isempty if-guard, its cmpf, and the isempty call all feed
+  // only the reset path; they're emitted inside always_ff and have
+  // no place in always_comb.
+  if (Suppress.contains(&Op)) return;
+
+  // Phase 3 — recognized persistent set call → assignment to the
+  // register's `_next` signal. Inline the value expression when its
+  // producer is a single-use fi-tagged matlab arith op so the
+  // emitted SV avoids a wide intermediate temp (which Verilator
+  // flags as WIDTHEXPAND when its declared width exceeds the
+  // operand widths).
+  {
+    auto It = SetSiteToReg.find(&Op);
+    if (It != SetSiteToReg.end()) {
+      auto &P = Persists[It->second];
+      mlir::Value Val = Op.getOperand(1);
+      // Build the SV expression for `Val` — single-use fi arith ops
+      // are rendered inline; everything else falls through to a
+      // named reference.
+      std::string ValExpr;
+      if (auto *VOp = Val.getDefiningOp()) {
+        llvm::StringRef N = VOp->getName().getStringRef();
+        bool IsArith = (N == "matlab.add" || N == "matlab.sub" ||
+                        N == "matlab.matmul" || N == "matlab.emul");
+        if (IsArith && Val.hasOneUse() && VOp->getNumOperands() == 2) {
+          // Mark the producer for skip — its result is folded into
+          // this set-site expression.
+          Suppress.insert(VOp);
+          llvm::StringRef Sv = "+";
+          if (N == "matlab.sub") Sv = "-";
+          if (N == "matlab.matmul" || N == "matlab.emul") Sv = "*";
+          ValExpr = exprFor(VOp->getOperand(0)) + " " + Sv.str() +
+                    " " + exprFor(VOp->getOperand(1));
+        }
+      }
+      if (ValExpr.empty()) ValExpr = exprFor(Val);
+
+      indent(Indent);
+      OS << P.Name << "_next = ";
+      // The set's RHS may be wider than the register (e.g. an fi
+      // i8+i8 add yields i9 → i16 in MLIR's signless type system).
+      // Truncate to the register width via an SV size cast so the
+      // assignment is unambiguous.
+      unsigned VW = 0;
+      if (auto IT = mlir::dyn_cast<mlir::IntegerType>(Val.getType()))
+        VW = IT.getWidth();
+      if (VW > P.Width) OS << P.Width << "'(";
+      OS << ValExpr;
+      if (VW > P.Width) OS << ")";
+      OS << ";\n";
+      return;
+    }
+  }
+
+  // Phase 3 — recognized persistent get call has no statement-level
+  // effect. Its uses route through the register signal name via
+  // exprFor; the call op itself is skipped.
+  if (GetSiteToReg.contains(&Op)) return;
+
+  // Phase 3 — recognized scalar `matlab.*` arithmetic / comparison
+  // ops that survive LowerFixedPoint with an f64 operand (typically
+  // because one operand is a persistent get). The SV emitter renders
+  // them as if the f64 input were already the register's integer
+  // value (`exprFor` routes persistent-get results to the register
+  // signal name).
+  {
+    llvm::StringRef OpName = Op.getName().getStringRef();
+    llvm::StringRef Sv;
+    if (OpName == "matlab.add") Sv = "+";
+    else if (OpName == "matlab.sub") Sv = "-";
+    else if (OpName == "matlab.matmul" || OpName == "matlab.emul") Sv = "*";
+    else if (OpName == "matlab.gt") Sv = ">";
+    else if (OpName == "matlab.ge") Sv = ">=";
+    else if (OpName == "matlab.lt") Sv = "<";
+    else if (OpName == "matlab.le") Sv = "<=";
+    else if (OpName == "matlab.eq") Sv = "==";
+    else if (OpName == "matlab.ne") Sv = "!=";
+    if (!Sv.empty()) {
+      if (Op.getNumOperands() != 2 || Op.getNumResults() != 1) {
+        fail(("unsupported arity on " + OpName + " in SV emitter").str());
+        return;
+      }
+      indent(Indent);
+      OS << name(Op.getResult(0)) << " = "
+         << exprFor(Op.getOperand(0)) << " " << Sv.str() << " "
+         << exprFor(Op.getOperand(1)) << ";\n";
+      return;
+    }
+  }
+
+  if (auto C = dyn_cast<arith::ConstantOp>(Op)) {
+    emitArithConstant(C, Indent); return;
+  }
+  if (isa<arith::AddIOp>(Op)) { emitBinop(Op, "+", Indent); return; }
+  if (isa<arith::SubIOp>(Op)) { emitBinop(Op, "-", Indent); return; }
+  if (isa<arith::MulIOp>(Op)) { emitBinop(Op, "*", Indent); return; }
+  if (isa<arith::DivSIOp>(Op)) { emitBinop(Op, "/", Indent); return; }
+  if (isa<arith::DivUIOp>(Op)) { emitBinop(Op, "/", Indent); return; }
+  if (isa<arith::RemSIOp>(Op)) { emitBinop(Op, "%", Indent); return; }
+  if (isa<arith::RemUIOp>(Op)) { emitBinop(Op, "%", Indent); return; }
+  if (isa<arith::AndIOp>(Op)) { emitBinop(Op, "&", Indent); return; }
+  if (isa<arith::OrIOp>(Op))  { emitBinop(Op, "|", Indent); return; }
+  if (isa<arith::XOrIOp>(Op)) { emitBinop(Op, "^", Indent); return; }
+  if (isa<arith::ShLIOp>(Op))  { emitBinop(Op, "<<",  Indent); return; }
+  if (isa<arith::ShRSIOp>(Op)) { emitBinop(Op, ">>>", Indent); return; }
+  if (isa<arith::ShRUIOp>(Op)) { emitBinop(Op, ">>",  Indent); return; }
+  if (auto C = dyn_cast<arith::CmpIOp>(Op)) { emitCmp(C, Indent); return; }
+  if (auto S = dyn_cast<arith::SelectOp>(Op)) { emitSelect(S, Indent); return; }
+  if (isa<arith::ExtSIOp, arith::ExtUIOp, arith::TruncIOp>(Op)) {
+    emitExtTrunc(Op, Indent); return;
+  }
+  if (auto If = dyn_cast<scf::IfOp>(Op)) { emitScfIf(If, Indent); return; }
+  if (auto Y = dyn_cast<scf::YieldOp>(Op)) { emitScfYield(Y, Indent); return; }
+  if (auto W = dyn_cast<scf::WhileOp>(Op)) { emitScfWhile(W, Indent); return; }
+  if (auto A = dyn_cast<LLVM::AllocaOp>(Op)) { emitAlloca(A, Indent); return; }
+  if (auto L = dyn_cast<LLVM::LoadOp>(Op)) { emitLoad(L, Indent); return; }
+  if (auto S = dyn_cast<LLVM::StoreOp>(Op)) { emitStore(S, Indent); return; }
+  if (auto R = dyn_cast<func::ReturnOp>(Op)) { emitReturn(R, Indent); return; }
+
+  // `llvm.mlir.constant` is produced as the size operand of an alloca
+  // (always 1 in our pipeline, scalar slot). It has no datapath
+  // semantics — the slot's `logic` declaration carries everything.
+  if (isa<LLVM::ConstantOp>(Op)) return;
+
+  std::ostringstream Err;
+  Err << "unsupported op in emitter: " << Op.getName().getStringRef().str();
+  fail(Err.str());
+}
+
+void Emitter::emitBlock(mlir::Block &B, int Indent) {
+  for (auto &Op : B.getOperations()) {
+    if (Failed) return;
+    emitOp(Op, Indent);
+  }
+}
+
+void Emitter::emitRegion(mlir::Region &R, int Indent) {
+  for (auto &B : R) {
+    if (Failed) return;
+    emitBlock(B, Indent);
+  }
+}
+
+void Emitter::emitBody(mlir::func::FuncOp F) {
+  // Single always_comb block. Phase 1 has no clocked logic.
+  OS << "    always_comb begin\n";
+  // Latch guard: pre-assign every always_comb-driven signal at the
+  // top so no code path leaves it unassigned. This is the canonical
+  // SV idiom for combinational temps and is recognized by every
+  // synth tool as a default-assignment pattern (no latch inferred).
+  // Without it, Verilator (correctly) flags any signal that's
+  // conditionally written in only some branches.
+  for (mlir::Value V : PreludeDecls) {
+    indent(2);
+    OS << name(V) << " = '0;\n";
+  }
+  // Phase 3: each persistent register's `_next` signal defaults to
+  // the current register value — i.e. "hold by default". The user's
+  // body may then conditionally overwrite it. Without this, branches
+  // that don't assign `_next` would infer a latch.
+  for (auto &P : Persists) {
+    indent(2);
+    OS << P.Name << "_next = " << P.Name << ";\n";
+  }
+  // Likewise drive every output port to 0 by default — `func.return`
+  // will overwrite later, but if the function has any conditional
+  // structure the same latch-inference rule applies.
+  for (const auto &Out : OutNames) {
+    indent(2);
+    OS << Out << " = '0;\n";
+  }
+  emitRegion(F.getBody(), 2);
+  OS << "    end\n";
+}
+
+bool Emitter::emitModuleForFunc(mlir::func::FuncOp F) {
+  // Reset per-function state.
+  Names.clear();
+  Used.clear();
+  NextFresh = 0;
+  ArgNames.clear();
+  OutNames.clear();
+  PreludeDecls.clear();
+  Persists.clear();
+  GetSiteToReg.clear();
+  SetSiteToReg.clear();
+  Suppress.clear();
+
+  // Collect persistent registers for this function. HWLegalize already
+  // validated these — gathering can only fail if the IR mutated since;
+  // bail with a hard error in that case.
+  if (!gatherHWPersistentState(F.getOperation(), Persists)) {
+    fail("persistent state shape changed since HWLegalize");
+    return false;
+  }
+  // Reserve register signal names ahead of port-list emission so they
+  // don't collide with module / arg / output names.
+  for (unsigned R = 0; R < Persists.size(); ++R) {
+    auto &P = Persists[R];
+    std::string Base = sanitize(P.Name);
+    while (Used.contains(Base)) Base += "_";
+    Used.insert(Base);
+    P.Name = Base;
+    std::string NextSig = Base + "_next";
+    while (Used.contains(NextSig)) NextSig += "_";
+    Used.insert(NextSig);
+    // Stash the chosen `_next` name in a side-channel via the get/set
+    // tables: GetSiteToReg/SetSiteToReg map to the register index, and
+    // we look up `Persists[idx].Name` / `Persists[idx].Name + "_next"`
+    // at emit time. (We keep `_next` implicit — `Name + "_next"` is
+    // computed as needed.)
+    for (auto *Op : P.Gets) GetSiteToReg[Op] = R;
+    for (auto *Op : P.Sets) SetSiteToReg[Op] = R;
+    // The isempty guard is suppressed during always_comb emission
+    // (its init becomes the reset value). Suppress the cmpf and
+    // isempty call too — they feed only the guard.
+    if (P.IsEmptyGuard) {
+      Suppress.insert(P.IsEmptyGuard);
+      // The cmpf operand of the guard is the cmpf op.
+      if (auto IfOp = mlir::dyn_cast<mlir::scf::IfOp>(P.IsEmptyGuard))
+        if (auto *Cmp = IfOp.getCondition().getDefiningOp())
+          Suppress.insert(Cmp);
+    }
+    // Suppress the isempty call itself.
+    F.walk([&](mlir::Operation *Op) {
+      if (auto Call = mlir::dyn_cast<mlir::LLVM::CallOp>(Op)) {
+        auto C = Call.getCallee();
+        if (C && *C == "matlab_persistent_isempty") Suppress.insert(Op);
+      }
+    });
+  }
+
+  std::string ModName = sanitize(F.getSymName());
+  // Module name conflicts with a register/port name only in adversarial
+  // input; not worth a full uniquifier — collisions are caught by the
+  // synth tool downstream.
+  (void)ModName;
+
+  OS << "module " << sanitize(F.getSymName()) << " (\n";
+  emitPortList(F);
+  OS << ");\n\n";
+  declarePrelude(F);
+  emitBody(F);
+  emitAlwaysFF();
+  OS << "\nendmodule\n";
+  return !Failed;
+}
+
+void Emitter::emitAlwaysFF() {
+  if (Persists.empty()) return;
+  OS << "\n";
+  // One always_ff block per reset domain. Phase 3 has a single domain
+  // (clk + chosen reset polarity / synchronicity). All registers are
+  // driven from the same block.
+  switch (Reset) {
+  case HWResetKind::AsyncLow:
+    OS << "    always_ff @(posedge clk or negedge rst_n) begin\n";
+    OS << "        if (!rst_n) begin\n";
+    break;
+  case HWResetKind::SyncHigh:
+    OS << "    always_ff @(posedge clk) begin\n";
+    OS << "        if (rst) begin\n";
+    break;
+  case HWResetKind::SyncLow:
+    OS << "    always_ff @(posedge clk) begin\n";
+    OS << "        if (!rst_n) begin\n";
+    break;
+  }
+  for (auto &P : Persists) {
+    indent(3);
+    OS << P.Name << " <= " << exprFor(P.ResetValue) << ";\n";
+  }
+  OS << "        end else begin\n";
+  for (auto &P : Persists) {
+    indent(3);
+    OS << P.Name << " <= " << P.Name << "_next;\n";
+  }
+  OS << "        end\n";
+  OS << "    end\n";
+}
+
+void Emitter::emitProlog() {
+  OS << "// Generated by matlabc -emit-systemverilog. Do not edit.\n";
+  OS << "// Target: ASIC, vendor-neutral synthesizable SystemVerilog.\n";
+  OS << "// Phase 1 — scalar combinational only.\n\n";
+}
+
+bool Emitter::run(mlir::ModuleOp M) {
+  emitProlog();
+  bool First = true;
+  M.walk([&](mlir::func::FuncOp F) {
+    if (Failed) return;
+    if (F.empty()) return;
+    {
+      llvm::StringRef N = F.getSymName();
+      if (N == "script" || N == "main") return; // skip top-level driver
+    }
+    if (!First) OS << "\n";
+    First = false;
+    if (!emitModuleForFunc(F)) return;
+  });
+  return !Failed;
+}
+
+} // namespace
+
+std::string emitSystemVerilog(mlir::ModuleOp M,
+                              const matlab::SourceManager *SM,
+                              HWResetKind Reset) {
+  std::ostringstream OS;
+  Emitter E(OS, SM, Reset);
+  if (!E.run(M)) return std::string();
+  return OS.str();
+}
+
+} // namespace mlirgen
+} // namespace matlab

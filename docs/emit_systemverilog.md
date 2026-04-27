@@ -13,6 +13,33 @@ whether the MATLAB source is **hardware-inferable** at all:
 
 This is a legality-first design. Silent fallback is not acceptable.
 
+## Target: ASIC, Not FPGA
+
+Output is **vendor-neutral synthesizable SystemVerilog** intended for
+standard-cell synthesis (Synopsys Design Compiler, Cadence Genus,
+Yosys). Specifically:
+
+- No FPGA primitives — no `RAMB36E1`, `DSP48`, `xpm_*`, distributed-RAM
+  styles, LUT-shape pragmas.
+- No vendor attributes — no `(* ram_style = "block" *)`,
+  `(* use_dsp = "yes" *)`, `(* keep *)` quirks tied to one toolchain.
+- No FPGA platform glue — no AXI/AXI-Lite wrappers, IP-core packaging,
+  block-design TCL, board files.
+- Generic inferable RTL only. Memories are emitted as the canonical
+  `always_ff` synchronous-read pattern; the synthesis tool maps it to
+  a memory-compiler instance, register file, or flop array based on
+  its own area/timing model.
+- ASIC reset convention by default: **async-assert / sync-deassert**,
+  active-low `rst_n` (typical Synopsys flow). A flag selects sync
+  reset for teams that prefer it.
+- Clock-gating left to the synth tool. We emit explicit `if (en)`
+  enables inside `always_ff`; the tool inserts integrated clock-gating
+  cells (ICGs) when its library has them. We do not hand-instantiate
+  any standard-cell ICG.
+
+If FPGA targeting becomes a goal later, that's a separate flag and a
+separate output style — not a parameter of this backend.
+
 ## Goals
 
 - Generate synthesizable SystemVerilog, not simulation-only Verilog.
@@ -239,12 +266,6 @@ Different parts of an algorithm can run at different effective rates
 under a single master clock by emitting clock-enable signals. This
 keeps timing closure simpler than multi-clock designs while still
 exposing rate adaptation in the generated RTL.
-
-### 6. AXI4 Interface Wrapping
-
-For SoC integration, the backend should optionally emit an AXI4-Lite
-or AXI4-Stream wrapper around a generated module so a host CPU can
-drive it without hand-written glue.
 
 ### Additional Capabilities
 
@@ -615,56 +636,619 @@ Recommended defaults:
 
 This keeps synthesis intent obvious and lint-friendly.
 
-## Suggested Implementation Phases
+## Implementation Plan
 
-### Phase 1: Combinational MVP
+This section is the concrete plan: files to add, passes to write, tests
+to land, in the order they need to land. It mirrors the structure of
+[`docs/emit_systemc.md`](emit_systemc.md), which has shipped through a
+similar phased build-out.
 
-Document and implement:
-- scalar combinational functions
-- fixed-size vectors
-- `if`/`else`
-- statically bounded `for`
-- no persistent state
+### Why this differs from `-emit-systemc`
 
-Output:
-- pure `always_comb`
+`-emit-systemc` produces input for a downstream HLS tool, which owns
+loop scheduling, FSM extraction, and pipelining. `-emit-systemverilog`
+goes **direct to RTL** — there is no HLS tool in the loop, so this
+backend owns those decisions itself. Concretely, this means three
+extra MLIR passes (`HWStateInfer`, `HWFSMExtract`, `HWPipeline`) that
+have no counterpart in the SystemC path, plus tighter rejection on
+anything that would otherwise need an HLS tool to clean up.
 
-### Phase 2: Registers And Counters
+The two backends share the legality and bit-width-inference passes
+conceptually but keep separate implementations — the SV path is
+stricter (e.g. it rejects `scf.while` outright unless it has an
+explicit FSM annotation, where the SystemC path can punt to the HLS
+tool).
 
-Document and implement:
-- `persistent` -> register mapping
-- reset/init rules
-- enable patterns
-- increment/decrement pattern recognition
+### Architecture
 
-Output:
-- `always_ff`
-- simple counters and registers
+```text
+AST ──► MLIR ──► [existing pipeline ... LowerIO]
+                       │
+                       ├──► emitC()        ──► .c           (existing)
+                       ├──► emitSystemC()  ──► .cpp + .h    (planned)
+                       │
+                       └──► [HWLegalize]      ───► reject or tag
+                            [HWBitWidthInfer] ───► annotate values with !sv.type
+                            [HWStateInfer]    ───► classify persistent vars: reg / counter / RAM
+                            [HWFSMExtract]    ───► persistent state + switch → hw.fsm
+                            [HWPipeline]      ───► retiming when target frequency given
+                                 │
+                                 └──► emitSystemVerilog() ──► .sv
+```
 
-### Phase 3: FSMs
+`HWLegalize` and `HWBitWidthInfer` are conceptually similar to the
+SystemC versions but separate implementations, since the rules and
+the type lattice (`logic [W-1:0]` / `logic signed [W-1:0]`) differ.
 
-Document and implement:
-- explicit state-variable coding style
-- switch-based next-state logic
-- state encoding rules
-- legality checks for ambiguous transitions
+### Synthesizability gate
 
-Output:
-- two-process FSM style in SystemVerilog
+**The emitter detects, up front, whether the MATLAB source can be
+synthesized at all and rejects it with a source-level diagnostic if
+it cannot.** This is a first-class deliverable, not a side effect of
+emission. The "Legality Rules" section above defines the rules; this
+section defines how they are surfaced and enforced.
 
-### Phase 4: Storage Inference
+**Driver mode `-check-synthesizable`.** Runs the full frontend +
+lowering + `HWLegalize` and stops. Produces no `.sv` output — its job
+is to answer "would emission succeed?" and list every offending line.
+Mirrors MathWorks' `checkPotentialHDLCode('your_file.m')`. Exit code
+is 0 on clean, non-zero on any rejection. CI lanes consuming this
+mode can gate merges on hardware-readiness without depending on the
+SV emission lane.
 
-Document and implement:
-- fixed-size persistent arrays
-- register bank vs. RAM inference
-- indexing restrictions
+**`-emit-systemverilog` itself runs the same gate.** Emission never
+silently produces non-synthesizable RTL — if `HWLegalize` reports any
+error, the emitter aborts with the same diagnostic and writes
+nothing. There is no `--force` or fallback path. Silent emission of
+broken RTL is the failure mode this whole backend exists to prevent.
 
-### Phase 5: Advanced Arithmetic
+**Detection categories** (each maps to a checker in `HWLegalize`):
 
-Document and implement:
-- fixed-point arithmetic policies
-- optional floating-point operator subset
-- vendor/operator library hooks if needed
+| Category | Examples |
+|---|---|
+| **Runtime calls** | any `matlab_*` symbol survives lowering — `disp`, `fprintf`, `parfor`, `eval`, file I/O |
+| **Dynamic shape** | `llvm.alloca` of non-constant size, growth assignment `A = [A, x]`, variable-size matrices |
+| **Recursion** | call-graph cycle — direct or indirect |
+| **Indirect calls** | function handles, anonymous functions, `feval` |
+| **Floating-point without policy** | bare `f64` / `f32` arithmetic, `sin`/`cos`/`exp`/`sqrt` without an `fi`-or-LUT lowering enabled |
+| **Unbounded control flow** | `scf.while` without a constant trip-count proof or an explicit FSM annotation; `try`/`catch` |
+| **Unsupported types** | `string`, `cell`, struct fields in datapath, sparse matrices, N-D (>3D) arrays |
+| **Unsynthesizable persistent shapes** | `persistent` arrays accessed with non-scalar indices, missing `isempty(...)` initializer, multi-driven across function-call boundaries |
+| **Inferred-latch hazards** | `always_comb` whose conditional branches do not fully assign every output on every path |
+| **Cross-call side effects** | global writes, persistent var read after a call that may write to it without a mapping rule |
+
+**Detection coverage grows by phase.** The synthesizability gate is
+not "all rules at once"; it expands as features land:
+
+| Phase | Rules added to `HWLegalize` |
+|---|---|
+| 1 | Runtime calls, dynamic shape, recursion, indirect calls, FP-without-policy, *all* `scf.while`, strings/cells/structs, inferred-latch hazards |
+| 2 | `scf.for` with non-constant bounds (was already error-out via missing constant fold; now explicit), array shapes that don't constant-fold |
+| 3 | `persistent` without `isempty` init, persistent writes outside `always_ff`-mappable patterns, multi-clock hints (out of scope for v1) |
+| 4 | FSM ambiguity (multiple unconditional next-state writes in one arm, missing `otherwise`, unreachable states), RAM-pattern violations (slice access, whole-array copy, data-dependent index *shape*) |
+| 5 | Retiming barriers crossed (saturating `fi` ops moved across pipeline registers), unsupported `fi` overflow/rounding combos, `coder.hdl.*` annotation conflicts |
+
+**Diagnostic format.** Every rejection answers four things, mirroring
+the "Diagnostic Quality Requirement" section above:
+
+```text
+error: <one-line summary of the offending construct>
+  --> path/to/file.m:LINE:COL
+note: <why it cannot be synthesized>
+note: <whether the issue is combinational-only / sequential-only / fully unsupported>
+help: <concrete rewrite the user should consider, with a doc link>
+```
+
+Each rule lives in its own checker file under
+`lib/MLIR/Passes/HWLegalize/`, named after the rule, with a
+`.stderr` golden test under `test/EmitSVFail/<rule>/` so regressions
+in the *diagnostic* are caught the same way as regressions in the
+*emitter*.
+
+**Coverage report.** `-check-synthesizable -hardware-report` (Phase 5)
+emits a Markdown summary of which rules fired, how many times, and
+on which lines — the same shape as the fixed-point report. This is
+what teams hand to a reviewer along with a diff to demonstrate "this
+function is hardware-ready".
+
+### Phase 1 — Combinational MVP, scalars only (~1 week)
+
+**Goal.** A `foo.m` of pure scalar arithmetic with `if`/`else` compiles
+to one `module` with `input`/`output` ports and a single `always_comb`
+block. No loops, no arrays, no state.
+
+**Step 1.1** — CLI flag.
+`tools/matlabc/main.cpp`: `Mode::EmitSystemVerilog`, `-emit-systemverilog`
+parser, dispatch branch.
+`include/matlab/MLIR/Passes/Passes.h`: declare
+`emitSystemVerilog(ModuleOp, raw_ostream&)`.
+
+**Step 1.2** — `HWLegalize` (Phase-1 scope).
+`lib/MLIR/Passes/HWLegalize.cpp`. Walk post-`LowerIO` module and
+diagnose via `mlir::emitError(loc)`:
+- any `llvm.call` to a `matlab_*` runtime symbol
+- recursion (call-graph cycle)
+- `llvm.alloca` of non-constant size
+- any `scf.while` (Phase 1 rejects all `while`; later phases relax)
+- string/cell/struct globals
+- `f64` values without an explicit fixed-point or integer policy
+
+**Step 1.3** — `HWBitWidthInfer`.
+`lib/MLIR/Passes/HWBitWidthInfer.cpp`. Attaches a discardable
+`sv.type` attribute to every SSA value:
+- `i1` → `logic`
+- `i8/16/32/64` (unsigned) → `logic [W-1:0]`
+- `i8/16/32/64` (signed)   → `logic signed [W-1:0]`
+- fixed-point (Phase 5 surface) → `logic signed [W-1:0]` plus a
+  binary-point attribute for downstream operator widening
+- `f64` rejected unless the user opts into a soft-float operator
+  policy (out-of-scope for v1)
+
+**Step 1.4** — Emitter.
+`lib/MLIR/Passes/EmitSystemVerilog.cpp`. Each top-level `func.func`
+becomes a SystemVerilog `module`:
+- one `input` port per argument, one `output` per return value
+- a single `always_comb` block holds the lowered body
+- `arith.constant` → SV literal with explicit width
+  (`16'd5`, `16'sd-3`)
+- `arith.addi/subi/muli/and/or/xor/shl/shr` → matching SV operators
+- `scf.if` with results → ternary `cond ? a : b`
+- multi-line `if/else` with side effects → blocking-assignment `=` in
+  `always_comb` writing to a temporary `logic`
+- temporaries declared at the top of the module via `logic [W-1:0]`
+
+**Step 1.5** — Tests.
+`test/EmitSV/combinational/*.m` — scalar programs. Goldens are the
+emitted `.sv`. A smoke check runs **Verilator** in lint-only mode:
+
+```bash
+verilator --lint-only -Wall foo.sv
+```
+
+Make Verilator optional at configure time (`-DMATLAB_LLVM_VERILATOR=ON`)
+so CI without Verilator still passes the golden-diff lane.
+
+`test/EmitSVFail/*.m` — legality rejections with `.stderr` goldens,
+mirroring the existing `test/EmitCFail/` contract.
+
+### Phase 2 — Fixed-size vectors, statically bounded `for` (~1 week)
+
+**Goal.** MATLAB `for i = 1:N` with constant `N` and writes into a
+fixed-shape vector compiles to **unrolled** combinational logic, all
+inside a single `always_comb`.
+
+**Step 2.1** — Reuse `HWLegalize` to enforce:
+- every `scf.for` has constant bounds (otherwise reject)
+- every `llvm.alloca` for an array has a constant shape
+
+**Step 2.2** — `HWUnroll` (or extend an existing pass).
+For `scf.for` with constant trip count ≤ unroll threshold (default
+64, configurable), fully unroll in place. The threshold is policy:
+above it, the pass emits a warning and unrolls anyway in Phase 2;
+serialization is Phase 4.
+
+**Step 2.3** — Emitter updates.
+- `llvm.alloca` of `!llvm.array<N x iW>` → declare a packed array:
+  `logic [W-1:0] arr [N];` (or unpacked, configurable)
+- `llvm.store` / `llvm.load` → `arr[i] = v;` / `v = arr[i];`
+- unrolled iterations emit a sequence of statements; the SV synth
+  tool collapses identical structure cheaply
+
+**Tests.** `test/EmitSV/vectors/*.m` — dot products, fixed-tap FIR
+combinational form, small constant-coefficient transforms. Goldens
+plus Verilator lint.
+
+### Phase 3 — Registers, counters, and `persistent` (~1 week)
+
+**Goal.** `persistent` variables compile to clocked registers. The
+canonical HDL Coder counter shape works:
+
+```matlab
+function count = step(en, rst)
+    persistent c;
+    if isempty(c)
+        c = uint8(0);
+    end
+    if rst
+        c = uint8(0);
+    elseif en
+        c = c + uint8(1);
+    end
+    count = c;
+end
+```
+
+**Step 3.1** — `HWStateInfer`.
+`lib/MLIR/Passes/HWStateInfer.cpp`. Recognizes the
+`persistent + isempty(init) + conditional update` pattern in MLIR and
+classifies each persistent variable as one of:
+- **register** — arbitrary next-state expression
+- **counter** — constant ±1 update guarded by enable, optional reset
+- **RAM candidate** — array with single-element scalar accesses (Phase 4)
+
+The pass attaches an `hw.role = #hw.role<reg|counter|ram>` attr and a
+reset-init value attr. It also adds an implicit clock + reset port to
+each `func.func` that holds at least one stateful var.
+
+**Step 3.2** — Module-port synthesis.
+The emitter adds `input logic clk` and either `input logic rst_n`
+(default ASIC: async-assert, sync-deassert) or `input logic rst`
+(sync-reset mode) to any module containing state. Configured via
+`-sv-reset=async-low|sync-high|sync-low` (default `async-low`).
+
+**Step 3.3** — Emitter: `always_ff`.
+Emit one `always_ff @(posedge clk or negedge rst_n)` block per
+state-bearing function, with the reset branch first:
+
+```systemverilog
+always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n)         c <= 8'd0;
+    else if (rst)       c <= 8'd0;
+    else if (en)        c <= c + 8'd1;
+end
+```
+
+Counter recognition isn't strictly necessary for correctness — a plain
+register lowering produces identical RTL — but tagging it improves
+diagnostics ("inferred 8-bit up-counter") and unlocks later width
+analysis.
+
+**Tests.** `test/EmitSV/registers/*.m` — counter, accumulator,
+shift register, edge-detector. Goldens plus Verilator lint plus an
+optional simulation lane (`just test-sv-sim`) that drives a
+testbench against the MATLAB reference.
+
+### Phase 4 — FSMs and RAM inference (~2 weeks)
+
+**Goal.** Persistent state variable + `switch` compiles to a
+two-process FSM. Persistent arrays with single-element scalar access
+patterns compile to inferable synchronous RAM.
+
+**Step 4.1** — `HWFSMExtract`.
+`lib/MLIR/Passes/HWFSMExtract.cpp`. Recognizes:
+- a persistent state variable initialized to a constant in the
+  `isempty` branch
+- a `switch` on that variable with a `case` arm per state and a
+  catch-all `otherwise`
+- next-state writes inside each arm
+
+Rewrites the construct into an `hw.fsm` op carrying the state enum,
+per-state next-state IR, and per-state output IR. This op is what the
+emitter pattern-matches on.
+
+Diagnostics for ambiguous transitions (multiple unconditional writes
+to the same state inside one arm), missing `otherwise`, or unreachable
+states.
+
+**Step 4.2** — Emitter: two-process FSM.
+```systemverilog
+typedef enum logic [1:0] { S0, S1, S2, S3 } state_t;
+state_t state, next_state;
+
+always_ff @(posedge clk or negedge rst_n)
+    if (!rst_n) state <= S0;
+    else        state <= next_state;
+
+always_comb begin
+    next_state = state;
+    z = '0;
+    unique case (state)
+        S0: begin /* outputs + transitions */ end
+        ...
+        default: next_state = S0;
+    endcase
+end
+```
+
+`unique case` is emitted only when `HWFSMExtract` proves arm
+exclusivity; otherwise plain `case`.
+
+State encoding default is binary; `% hdl: fsm_encoding('one_hot' | 'gray')`
+or a CLI flag overrides.
+
+**Step 4.3** — RAM inference in `HWStateInfer` (full).
+Extend the Phase-3 pass to recognize the HDL Coder RAM pattern:
+- persistent array of fixed shape, initialized once via `zeros(...)`
+- every read access is `arr(scalar_index)`
+- every write access is `arr(scalar_index) = scalar_value`
+- index expression is data-dependent in the *runtime* sense but
+  structurally a single load/store — no slicing, no whole-array copy
+
+Tag matching arrays with `hw.role = #hw.role<ram>` and an interface
+descriptor (single-port read/write, 1-cycle read latency).
+
+**Step 4.4** — Emitter: synchronous-read RAM (vendor-neutral).
+Emit the canonical pattern that every standard-cell synth tool
+recognizes:
+
+```systemverilog
+logic [W-1:0] mem [DEPTH];
+logic [W-1:0] mem_q;
+
+always_ff @(posedge clk) begin
+    if (we) mem[addr] <= din;
+    mem_q <= mem[addr];
+end
+
+assign dout = mem_q;
+```
+
+We do **not** emit any vendor `(* ram_style = ... *)` attribute. The
+synthesis tool picks register-file vs. memory-compiler instance based
+on its own thresholds. For ASIC flows that need a specific memory
+compiler instance, the user wraps our output and replaces the array
+manually.
+
+**Tests.** `test/EmitSV/fsm/*.m`, `test/EmitSV/ram/*.m` — Mealy and
+Moore controllers, single-port RAM, register file. Verilator lint
+plus simulation-equivalence lane.
+
+### Phase 5 — Fixed-point, optimizations, reports (~2 weeks)
+
+**Goal.** First-class `fi` support in the SV path, plus the
+optimization knobs that make the output competitive with hand RTL.
+
+**Step 5.1** — Fixed-point lowering.
+`fi`-typed values already exist in the IR after Phase 5 of the
+fixed-point feature (shipped — see [`emit_fixed_point.md`](emit_fixed_point.md)).
+The SV emitter:
+- maps `fi(value, S, W, F)` to `logic signed [W-1:0]` (or unsigned)
+  with the binary-point tracked in `sv.type`
+- inserts width adjustments at every operator: add/sub widen by 1,
+  multiply widens to `W1+W2`, then truncate per the active rounding
+  / overflow mode using shift-and-add masks
+- folds compile-time constants in the chosen `fi` representation
+
+The lowering reuses the rounding/overflow plumbing already in the
+fi runtime — no new arithmetic semantics, just a different output
+form (RTL operators instead of runtime calls).
+
+**Step 5.2** — `HWPipeline` (adaptive pipelining).
+`lib/MLIR/Passes/HWPipeline.cpp`. Driven by `-sv-target-freq=N`
+(MHz) plus a target-library timing model (initially: a constant
+"adder = 1 unit, multiplier = 4 units, mux = 0.5 units" cost
+table — refined later).
+
+Walks each `always_comb`/datapath, computes longest combinational
+path, inserts pipeline registers (rewriting to `always_ff`) until
+every path fits the cycle budget. Updates module latency in a
+generated header comment so the user sees the cost.
+
+This is **retiming-style pipelining**, equivalent to HDL Coder's
+"distributed pipelining" feature: register count is determined by the
+cycle target, register placement is determined by path balance.
+
+**Step 5.3** — Loop serialization.
+Extend `HWUnroll` to honor a streaming factor:
+- `coder.hdl.loopspec('stream', 1)` or `-sv-streaming-factor=1` →
+  one shared body, iteration counter, output mux
+- factor `N` (= trip count) → full unroll (same as Phase 2 default)
+- intermediate factors → partial unroll
+
+Serialized bodies become small FSMs (one state per pipeline stage of
+the body), reusing the `hw.fsm` machinery from Phase 4.
+
+**Step 5.4** — Constant-multiplier optimization.
+At MLIR level, recognize `muli %x, c` where `c` is a constant and
+rewrite to a CSD/canonical-signed-digit shift-add tree. Vendor-neutral
+— produces identical RTL on ASIC and FPGA flows. Default `auto`
+(rewrite if it reduces operator count); `-sv-const-mul=off|csd|fcsd`
+overrides.
+
+**Step 5.5** — Reports.
+`-emit-hardware-report` driver flag, parallel to the
+`-emit-fixed-point-report` already shipped. Emits a Markdown summary:
+- inferred class per function (combinational / register / counter /
+  FSM / RAM)
+- bit width per signal
+- estimated operator count (adders, multipliers, comparators)
+- estimated state-bit count
+- number of inferred memories and their shape
+
+The estimate is **pre-synthesis**; absolute area numbers come from
+the user's downstream synth tool. The point is to expose cost
+visibility before invoking it.
+
+**Tests.** `test/EmitSV/fi/*.m` — fixed-point FIR, IIR, CIC.
+`test/EmitSV/pipelined/*.m` — long-path datapath under various
+target frequencies. `test/EmitSV/reports/*.m` — golden hardware
+reports.
+
+### Op mapping table
+
+#### Combinational (`always_comb`)
+
+| MLIR | SystemVerilog |
+|---|---|
+| `arith.constant 5 : i16` + `sv.type = logic [15:0]` | `16'd5` |
+| `arith.addi / subi / muli / divi` | `+` / `-` / `*` / `/` (rejected by default; warn) |
+| `arith.andi / ori / xori / shli / shrui / shrsi` | `&` / `\|` / `^` / `<<` / `>>` / `>>>` |
+| `arith.cmpi` | `==`, `<`, etc., producing 1-bit `logic` |
+| `arith.select` | `cond ? a : b` |
+| `arith.extsi` / `extui` / `trunci` | sign/zero-extend / slice |
+| `scf.if -> T` | ternary (preferred), else temp + `if/else` in `always_comb` |
+| `func.func` (leaf, stateless) | `module` with `always_comb` body |
+| `llvm.alloca` of static array | `logic [W-1:0] arr [N];` |
+| `llvm.load / store` (constant index) | `v = arr[i];` / `arr[i] = v;` |
+
+#### Sequential (`always_ff`)
+
+| MLIR | SystemVerilog |
+|---|---|
+| `hw.role<reg>` persistent var | `logic [W-1:0] r;` + `always_ff` register |
+| `hw.role<counter>` persistent var | counter register + reset/enable arms |
+| `hw.fsm` op (Phase 4) | `typedef enum`, `state_reg`, two-process FSM |
+| `hw.role<ram>` persistent array | inferable sync-RAM block |
+| iter-arg of pipelined `scf.for` | pipeline register stage |
+
+#### Rejected (Phase 1+)
+
+| MLIR | Diagnostic |
+|---|---|
+| any `llvm.call @matlab_*` runtime call | `error: runtime call <name> has no synthesizable form` |
+| `llvm.call @matlab_disp_*` / `_fprintf_*` | `error: I/O is not synthesizable` |
+| `llvm.call @matlab_parfor_*` | `error: parfor has no RTL form; use static for-loop` |
+| `llvm.alloca` of dynamic size | `error: array size must be compile-time constant` |
+| recursion | `error: recursion not synthesizable` |
+| function handle / anonymous fn | `error: function values not synthesizable` |
+| string literal in datapath | `error: string types not synthesizable` |
+| `scf.while` without FSM annotation (Phase 1–3) | `error: data-dependent while-loop needs explicit FSM form` |
+| `f64` value without numeric policy | `error: floating-point requires explicit fi() conversion` |
+
+### Pragma surface
+
+MATLAB-side annotations are recognized by the frontend as comments
+above the relevant line and threaded through MLIR as `hw.pragma`
+attributes. Vendor-neutral — no Vivado/Quartus directives:
+
+```matlab
+% hdl: clock(name='clk')
+% hdl: reset(name='rst_n', polarity='active_low', kind='async')
+% hdl: pipeline(stages=2)
+% hdl: fsm_encoding('one_hot')
+% hdl: ram(latency=1, ports=1)
+% hdl: loopspec('stream', factor=1)
+% hdl: keep   % do not retime across this expression
+```
+
+These mirror HDL Coder's `coder.hdl.*` calls but stay in comment form
+so the source compiles unchanged in stock MATLAB.
+
+### Files
+
+| File | Purpose |
+|---|---|
+| `lib/MLIR/Passes/HWLegalize.cpp` | Rejects non-synthesizable IR with source-line diagnostics |
+| `lib/MLIR/Passes/HWBitWidthInfer.cpp` | Annotates every value with `sv.type = logic [W-1:0]` (signed/unsigned) |
+| `lib/MLIR/Passes/HWStateInfer.cpp` | Classifies persistent vars: register / counter / RAM |
+| `lib/MLIR/Passes/HWFSMExtract.cpp` | `persistent state + switch` → `hw.fsm` op |
+| `lib/MLIR/Passes/HWUnroll.cpp` | Loop unrolling + (Phase 5) serialization |
+| `lib/MLIR/Passes/HWPipeline.cpp` | Adaptive pipelining via retiming |
+| `lib/MLIR/Passes/EmitSystemVerilog.cpp` | Walker that prints `.sv`; combinational, FSM, RAM paths |
+| `include/matlab/MLIR/Passes/Passes.h` | Pass declarations |
+| `tools/matlabc/main.cpp` | `-emit-systemverilog` flag, `-sv-reset`, `-sv-target-freq`, `-sv-streaming-factor`, `-sv-const-mul`, `-emit-hardware-report` |
+| `test/EmitSV/combinational/*.m` | Phase 1–2 tests: golden `.sv` + Verilator lint |
+| `test/EmitSV/registers/*.m` | Phase 3 tests |
+| `test/EmitSV/fsm/*.m` | Phase 4 tests |
+| `test/EmitSV/ram/*.m` | Phase 4 tests |
+| `test/EmitSV/fi/*.m` | Phase 5 fixed-point tests |
+| `test/EmitSV/pipelined/*.m` | Phase 5 retiming tests |
+| `test/EmitSVFail/*.m` | Legality rejection tests with `.stderr` goldens |
+| `justfile` | `emit-sv FILE`, `lint-sv FILE`, `test-sv`, `test-sv-sim` recipes |
+
+### Testing strategy
+
+Three layers, mirroring the SystemC plan but adapted for direct-to-RTL:
+
+1. **Golden-diff** (fast, always in CI). Each `test/EmitSV/*.m` pairs
+   with a `.sv` golden. Catches emitter regressions without running
+   anything.
+2. **Verilator lint** (medium, optional in CI behind
+   `-DMATLAB_LLVM_VERILATOR=ON`). `verilator --lint-only -Wall` on
+   every emitted `.sv`. Catches syntax errors, missing widths,
+   inferred-latch hazards, multi-driven nets.
+3. **Simulation equivalence** (slow, opt-in). For Phase 3+ tests,
+   auto-generate a SystemVerilog testbench that drives the emitted
+   module with the same input vectors used by the MATLAB reference
+   and asserts bit-exact equality. Run under `just test-sv-sim`,
+   not by default in CI. Verilator's `--binary` mode is sufficient;
+   no commercial simulator required.
+
+Synthesis itself is **not** in our test matrix. ASIC synthesis takes
+hours and requires a target standard-cell library the user owns. We
+optimize for "the synthesis tool will accept this without warnings"
+via the lint lane, and "this matches the MATLAB reference" via the
+sim lane.
+
+### Effort estimate
+
+| Phase | Scope | Effort |
+|---|---|--:|
+| 1 | Scalar combinational + legality + bit-width infer + emitter skeleton | ~1 week |
+| 2 | Static arrays + fully-unrolled `for` | ~1 week |
+| 3 | `persistent` → register/counter, ASIC reset, `always_ff` emission | ~1 week |
+| 4 | FSM extraction + RAM inference | ~2 weeks |
+| 5 | Fixed-point + adaptive pipelining + serialization + const-mul + report | ~2 weeks |
+| **Total to a useful v1** | Phase 1+2+3 | **~3 weeks** |
+| **Total to full subset** | Phase 1+2+3+4+5 | **~7 weeks** |
+
+Phase 1+2+3 is already useful: pure DSP datapaths, registered
+accumulators, FIR filters, simple pipelines compile and lint clean.
+Phase 4 unlocks controllers and memory-backed designs. Phase 5
+brings the optimizations that make output competitive with
+hand-written RTL on a real ASIC flow.
+
+### Open questions
+
+1. **Reset convention default.** Async-assert/sync-deassert active-low
+   `rst_n` is the dominant ASIC convention but not universal — some
+   teams (especially ARM/embedded) prefer sync reset. Default
+   `async-low`, surface loudly in docs, configurable via `-sv-reset`.
+
+2. **Fixed-point overflow propagation in pipelined paths.** Our
+   `fi` semantics already define overflow per operator (saturate /
+   wrap). Pipeline register insertion does not change semantics, but
+   *retiming across* a saturating operator is unsound. `HWPipeline`
+   must treat saturating ops as retiming barriers — confirm this is
+   modeled correctly before shipping.
+
+3. **Multi-clock designs.** Out of scope for v1. Single clock domain
+   only; cross-clock-domain logic requires explicit user wrapping
+   today. A future `% hdl: clock(name='clk2')` annotation could enable
+   it without changing the core architecture.
+
+4. **Inferred-latch detection.** Verilator catches most cases.
+   `HWLegalize` should additionally reject any `always_comb` whose
+   conditional outputs aren't fully assigned on every path — the
+   standard "missing else" trap. Phase 1 enforces this.
+
+5. **State encoding default.** Binary is the safest default for
+   pre-RTL — synth tools re-encode aggressively anyway. One-hot is
+   useful for high-frequency designs but produces wider state regs.
+   Default `binary`, override per-FSM via `% hdl: fsm_encoding(...)`.
+
+6. **`std::sort`-style algorithms.** Some MATLAB patterns
+   (sorting networks, priority queues) need explicit hardware
+   primitives. Out of scope for v1 — reject with a pointer to the
+   hardware-subset doc.
+
+## Design alternatives
+
+### Alternative A — Lower through CIRCT
+
+CIRCT (the LLVM hardware subproject) has its own MLIR dialects (`hw`,
+`comb`, `seq`, `fsm`, `sv`) and goes directly to Verilog via its
+`ExportVerilog` pass.
+
+**Pros**: structurally correct hardware IR (no ad-hoc `hw.fsm` op),
+mature Verilog emitter, less code to write.
+**Cons**: hard build dependency on the CIRCT distribution,
+interfaces still churning, and our subset of MATLAB that survives
+the conversion is small enough that a direct emitter is comparable
+in code size and far more controllable.
+
+Revisit when (a) we want to share infrastructure with other CIRCT
+frontends, or (b) CIRCT's `sv` dialect stabilizes enough that the
+import cost is once-only.
+
+### Alternative B — Lower through SystemC then through HLS
+
+Use the existing `-emit-systemc` pipeline and rely on a downstream
+HLS tool to produce SV.
+
+**Pros**: zero new code in this repo.
+**Cons**: shifts vendor dependency to the user (HLS tool license),
+gives up control over RTL style (each HLS tool emits different
+shapes), and produces output that's harder to review than direct
+RTL emission. Defeats the point of an ASIC-targeted backend.
+
+### Alternative C — Emit Verilog-2001 instead of SystemVerilog
+
+**Pros**: works with older synthesis tools.
+**Cons**: loses `always_comb`/`always_ff`/`unique case`/`logic` —
+the very constructs that make synthesis intent unambiguous. The
+ASIC tool ecosystem fully supports SystemVerilog-2017; there's no
+practical reason to downgrade.
 
 ## Relationship To Existing SystemC Plan
 
