@@ -126,6 +126,18 @@ emit-typescript FILE: build
 emit-sv FILE: build
     ./{{BUILD_DIR}}/matlabc -emit-systemverilog {{FILE}}
 
+# Multi-file SystemVerilog emit: typed driver + module file(s). Use
+# this when the function lives in its own .m file (the MATLAB
+# convention) and a separate driver provides the typed call site that
+# the user-call refinement pipeline needs to fix port widths. Output
+# goes to stdout — pipe to a file or use `compile-sv-multi` for the
+# write+lint combo. Example:
+#   just emit-sv-multi examples/hdl/alu_16bit_synth.m \
+#                      examples/hdl/alu_16bit.m
+emit-sv-multi DRIVER MODULE *EXTRA: build
+    ./{{BUILD_DIR}}/matlabc -emit-systemverilog \
+        {{DRIVER}} {{MODULE}} {{EXTRA}}
+
 # Run the synthesizability gate on a .m file without producing
 # output. Exit 0 means the source can be synthesized; non-zero with a
 # diagnostic means it cannot.

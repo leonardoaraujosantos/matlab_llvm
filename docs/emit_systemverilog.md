@@ -1299,6 +1299,39 @@ combinations of these. They're realistic FIR designs that
 exercise persistent fi-arrays + loop-iv array indexing + vector
 concat — the full set is a follow-up phase, not Phase 4.5.
 
+#### Driving the examples/hdl/ corpus
+
+Function-only `.m` files (the MATLAB convention — one function
+per file) carry no caller, so the user-call refinement pass has
+no typed call site to fix port widths. Each synthesizable
+example in `examples/hdl/` therefore ships with a small
+`<name>_synth.m` driver alongside it that performs a single
+typed call, e.g.:
+
+```matlab
+% examples/hdl/alu_16bit_synth.m
+T = numerictype(1, 16, 0);
+S = numerictype(0, 8, 0);
+[d, o] = alu_16bit(fi(5, T), fi(3, T), fi(2, S));
+disp(d);
+```
+
+Compile via the multi-file recipe:
+
+```sh
+just emit-sv-multi examples/hdl/alu_16bit_synth.m \
+                   examples/hdl/alu_16bit.m
+```
+
+Today five examples ship with drivers — `alu_16bit`,
+`mux_4to_1_16bit`, `counter_0_to_10`, `mealy_fsm`, `moore_fsm`.
+The remaining three (`vector_processor`, `fir_asic_pipelined`,
+`sequential_processor`) need vector-port + persistent-fi-array
+shift register support that's a separate follow-up phase. A
+future `% hdl: port(...)` pragma (planned next phase) will let
+function-only files declare their port types inline, removing
+the need for a separate driver file.
+
 #### Effort budget
 
 | Item | Effort | Affects beyond SV |
