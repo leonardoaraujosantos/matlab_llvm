@@ -2292,6 +2292,266 @@ void *matlab_fi_dec_u(uint64_t stored, uint8_t WL) {
 }
 
 /* ---------------------------------------------------------------------- */
+/* Typed integer matrix descriptors for `fi` arrays — see plan §6.3.
+ *
+ * Same layout as matlab_mat but with int64_t / uint64_t element data.
+ * No magic field — the fi codepath knows it's working with a typed
+ * descriptor from Sema/lowering, so polymorphic dispatch isn't needed
+ * (and disp is wired through the fi-aware lowering hook).
+ *
+ * Phase 3 ships 64-bit lanes only. Tighter lanes (i8/i16/i32) become
+ * relevant when the compiler proves a lane fits — Phase 5+. */
+
+typedef struct matlab_mat_i64 {
+    int64_t *data;
+    int64_t  rows;
+    int64_t  cols;
+} matlab_mat_i64;
+
+typedef struct matlab_mat_u64 {
+    uint64_t *data;
+    int64_t   rows;
+    int64_t   cols;
+} matlab_mat_u64;
+
+static matlab_mat_i64 *mat_i64_alloc(int64_t m, int64_t n) {
+    if (m < 0) m = 0;
+    if (n < 0) n = 0;
+    matlab_mat_i64 *A = (matlab_mat_i64 *)calloc(1, sizeof(*A));
+    A->rows = m; A->cols = n;
+    A->data = (int64_t *)calloc((size_t)(m * n + 1), sizeof(int64_t));
+    return A;
+}
+
+static matlab_mat_u64 *mat_u64_alloc(int64_t m, int64_t n) {
+    if (m < 0) m = 0;
+    if (n < 0) n = 0;
+    matlab_mat_u64 *A = (matlab_mat_u64 *)calloc(1, sizeof(*A));
+    A->rows = m; A->cols = n;
+    A->data = (uint64_t *)calloc((size_t)(m * n + 1), sizeof(uint64_t));
+    return A;
+}
+
+matlab_mat_i64 *matlab_mat_i64_zeros(double rows, double cols) {
+    return mat_i64_alloc((int64_t)rows, (int64_t)cols);
+}
+matlab_mat_u64 *matlab_mat_u64_zeros(double rows, double cols) {
+    return mat_u64_alloc((int64_t)rows, (int64_t)cols);
+}
+
+matlab_mat_i64 *matlab_mat_i64_from_buf(const int64_t *buf,
+                                         double rows, double cols) {
+    int64_t m = (int64_t)rows, n = (int64_t)cols;
+    matlab_mat_i64 *A = mat_i64_alloc(m, n);
+    if (buf && m * n > 0)
+        memcpy(A->data, buf, (size_t)(m * n) * sizeof(int64_t));
+    return A;
+}
+matlab_mat_u64 *matlab_mat_u64_from_buf(const uint64_t *buf,
+                                         double rows, double cols) {
+    int64_t m = (int64_t)rows, n = (int64_t)cols;
+    matlab_mat_u64 *A = mat_u64_alloc(m, n);
+    if (buf && m * n > 0)
+        memcpy(A->data, buf, (size_t)(m * n) * sizeof(uint64_t));
+    return A;
+}
+matlab_mat_i64 *matlab_mat_i64_from_scalar(int64_t v) {
+    matlab_mat_i64 *A = mat_i64_alloc(1, 1);
+    A->data[0] = v;
+    return A;
+}
+matlab_mat_u64 *matlab_mat_u64_from_scalar(uint64_t v) {
+    matlab_mat_u64 *A = mat_u64_alloc(1, 1);
+    A->data[0] = v;
+    return A;
+}
+
+double matlab_mat_i64_length(matlab_mat_i64 *A) {
+    if (!A) return 0.0;
+    return (double)(A->rows > A->cols ? A->rows : A->cols);
+}
+double matlab_mat_i64_numel(matlab_mat_i64 *A) {
+    if (!A) return 0.0;
+    return (double)(A->rows * A->cols);
+}
+double matlab_mat_i64_size_dim(matlab_mat_i64 *A, double dim) {
+    if (!A) return 0.0;
+    int d = (int)dim;
+    if (d == 1) return (double)A->rows;
+    if (d == 2) return (double)A->cols;
+    return 1.0;
+}
+int64_t matlab_mat_i64_rows(matlab_mat_i64 *A) { return A ? A->rows : 0; }
+int64_t matlab_mat_i64_cols(matlab_mat_i64 *A) { return A ? A->cols : 0; }
+
+double matlab_mat_u64_length(matlab_mat_u64 *A) {
+    if (!A) return 0.0;
+    return (double)(A->rows > A->cols ? A->rows : A->cols);
+}
+double matlab_mat_u64_numel(matlab_mat_u64 *A) {
+    if (!A) return 0.0;
+    return (double)(A->rows * A->cols);
+}
+double matlab_mat_u64_size_dim(matlab_mat_u64 *A, double dim) {
+    if (!A) return 0.0;
+    int d = (int)dim;
+    if (d == 1) return (double)A->rows;
+    if (d == 2) return (double)A->cols;
+    return 1.0;
+}
+
+/* Linear-index helper. MATLAB indices are 1-based; row vectors and
+ * column vectors collapse to a single dimension. */
+static int64_t mat_lin_idx(int64_t rows, int64_t cols, double i) {
+    int64_t k = (int64_t)i - 1;
+    if (k < 0) k = 0;
+    int64_t total = rows * cols;
+    if (k >= total) k = total - 1;
+    return k;
+}
+
+int64_t matlab_mat_i64_subscript1_s(matlab_mat_i64 *A, double i) {
+    if (!A || A->rows * A->cols == 0) return 0;
+    return A->data[mat_lin_idx(A->rows, A->cols, i)];
+}
+int64_t matlab_mat_i64_subscript2_s(matlab_mat_i64 *A, double i, double j) {
+    if (!A || A->rows * A->cols == 0) return 0;
+    int64_t r = (int64_t)i - 1, c = (int64_t)j - 1;
+    if (r < 0) r = 0; if (r >= A->rows) r = A->rows - 1;
+    if (c < 0) c = 0; if (c >= A->cols) c = A->cols - 1;
+    return A->data[r * A->cols + c];
+}
+uint64_t matlab_mat_u64_subscript1_s(matlab_mat_u64 *A, double i) {
+    if (!A || A->rows * A->cols == 0) return 0;
+    return A->data[mat_lin_idx(A->rows, A->cols, i)];
+}
+uint64_t matlab_mat_u64_subscript2_s(matlab_mat_u64 *A, double i, double j) {
+    if (!A || A->rows * A->cols == 0) return 0;
+    int64_t r = (int64_t)i - 1, c = (int64_t)j - 1;
+    if (r < 0) r = 0; if (r >= A->rows) r = A->rows - 1;
+    if (c < 0) c = 0; if (c >= A->cols) c = A->cols - 1;
+    return A->data[r * A->cols + c];
+}
+
+/* slice1 — gather elements along a 1-D index vector (which is itself
+ * a matlab_mat of doubles, e.g. produced by `1:end-1`). */
+matlab_mat_i64 *matlab_mat_i64_slice1(matlab_mat_i64 *A, matlab_mat *idx) {
+    int64_t n = idx ? idx->rows * idx->cols : 0;
+    /* Result is a row vector when A is a row vector or scalar; otherwise
+     * a column. For Phase 3 (FIR shape) row is the common case. */
+    int64_t rr = (A && A->rows == 1) ? 1 : (n > 0 ? n : 0);
+    int64_t cc = (A && A->rows == 1) ? n : 1;
+    matlab_mat_i64 *R = mat_i64_alloc(rr, cc);
+    for (int64_t k = 0; k < n; ++k) {
+        double idxv = idx->data[k];
+        R->data[k] = matlab_mat_i64_subscript1_s(A, idxv);
+    }
+    return R;
+}
+matlab_mat_u64 *matlab_mat_u64_slice1(matlab_mat_u64 *A, matlab_mat *idx) {
+    int64_t n = idx ? idx->rows * idx->cols : 0;
+    int64_t rr = (A && A->rows == 1) ? 1 : (n > 0 ? n : 0);
+    int64_t cc = (A && A->rows == 1) ? n : 1;
+    matlab_mat_u64 *R = mat_u64_alloc(rr, cc);
+    for (int64_t k = 0; k < n; ++k) {
+        double idxv = idx->data[k];
+        R->data[k] = matlab_mat_u64_subscript1_s(A, idxv);
+    }
+    return R;
+}
+
+void matlab_mat_i64_set1_s(matlab_mat_i64 *A, double i, int64_t v) {
+    if (!A || A->rows * A->cols == 0) return;
+    A->data[mat_lin_idx(A->rows, A->cols, i)] = v;
+}
+void matlab_mat_u64_set1_s(matlab_mat_u64 *A, double i, uint64_t v) {
+    if (!A || A->rows * A->cols == 0) return;
+    A->data[mat_lin_idx(A->rows, A->cols, i)] = v;
+}
+
+void matlab_mat_i64_fill(matlab_mat_i64 *A, int64_t v) {
+    if (!A) return;
+    int64_t n = A->rows * A->cols;
+    for (int64_t k = 0; k < n; ++k) A->data[k] = v;
+}
+void matlab_mat_u64_fill(matlab_mat_u64 *A, uint64_t v) {
+    if (!A) return;
+    int64_t n = A->rows * A->cols;
+    for (int64_t k = 0; k < n; ++k) A->data[k] = v;
+}
+
+/* Row-vector concat: `[A, B]` along the column axis when both are row
+ * vectors. The FIR shift register `[x, delay_line(1:end-1)]` is the
+ * gating use case. */
+matlab_mat_i64 *matlab_mat_i64_concat_row(matlab_mat_i64 *A,
+                                           matlab_mat_i64 *B) {
+    int64_t na = A ? A->rows * A->cols : 0;
+    int64_t nb = B ? B->rows * B->cols : 0;
+    matlab_mat_i64 *R = mat_i64_alloc(1, na + nb);
+    if (A && A->data) memcpy(R->data, A->data, (size_t)na * sizeof(int64_t));
+    if (B && B->data) memcpy(R->data + na, B->data,
+                              (size_t)nb * sizeof(int64_t));
+    return R;
+}
+matlab_mat_u64 *matlab_mat_u64_concat_row(matlab_mat_u64 *A,
+                                           matlab_mat_u64 *B) {
+    int64_t na = A ? A->rows * A->cols : 0;
+    int64_t nb = B ? B->rows * B->cols : 0;
+    matlab_mat_u64 *R = mat_u64_alloc(1, na + nb);
+    if (A && A->data) memcpy(R->data, A->data, (size_t)na * sizeof(uint64_t));
+    if (B && B->data) memcpy(R->data + na, B->data,
+                              (size_t)nb * sizeof(uint64_t));
+    return R;
+}
+
+int64_t matlab_mat_i64_sum(matlab_mat_i64 *A) {
+    if (!A) return 0;
+    int64_t n = A->rows * A->cols, acc = 0;
+    for (int64_t k = 0; k < n; ++k) acc += A->data[k];
+    return acc;
+}
+uint64_t matlab_mat_u64_sum(matlab_mat_u64 *A) {
+    if (!A) return 0;
+    int64_t n = A->rows * A->cols;
+    uint64_t acc = 0;
+    for (int64_t k = 0; k < n; ++k) acc += A->data[k];
+    return acc;
+}
+
+void matlab_mat_i64_disp(matlab_mat_i64 *A, uint8_t WL, int8_t FL) {
+    (void)WL;
+    if (!A) { matlab_disp_str("(null)", 6); return; }
+    int64_t n = A->rows * A->cols;
+    pthread_mutex_lock(&matlab_io_mutex);
+    /* Render as a row of real-world values (stored * 2^-FL), one line
+     * per row. The format roughly matches matlab_disp_mat_f64. */
+    for (int64_t r = 0; r < A->rows; ++r) {
+        for (int64_t c = 0; c < A->cols; ++c) {
+            double v = ldexp((double)A->data[r * A->cols + c], -FL);
+            printf("   %7g", v);
+        }
+        putchar('\n');
+    }
+    if (n == 0) putchar('\n');
+    pthread_mutex_unlock(&matlab_io_mutex);
+}
+void matlab_mat_u64_disp(matlab_mat_u64 *A, uint8_t WL, int8_t FL) {
+    (void)WL;
+    if (!A) { matlab_disp_str("(null)", 6); return; }
+    int64_t n = A->rows * A->cols;
+    pthread_mutex_lock(&matlab_io_mutex);
+    for (int64_t r = 0; r < A->rows; ++r) {
+        for (int64_t c = 0; c < A->cols; ++c) {
+            double v = ldexp((double)A->data[r * A->cols + c], -FL);
+            printf("   %7g", v);
+        }
+        putchar('\n');
+    }
+    if (n == 0) putchar('\n');
+    pthread_mutex_unlock(&matlab_io_mutex);
+}
+
+/* ---------------------------------------------------------------------- */
 /* Minimal 3-D arrays.
  *
  * A separate matlab_mat3 descriptor {data, rows, cols, depth} so
@@ -4220,6 +4480,12 @@ matlab_struct *matlab_struct_get_child_struct(matlab_struct *s,
  */
 #define MATLAB_GLOBAL_TABLE_SIZE 128
 static double matlab_global_table[MATLAB_GLOBAL_TABLE_SIZE];
+/* Parallel pointer table — used by `persistent` storage of typed values
+ * like matlab_mat_i64* (fi arrays). Independent of the f64 table; an ID
+ * may legitimately use one or the other depending on the binding's
+ * declared type. NULL signifies "unset" so the caller (lowered isempty
+ * check) initialises on the first read. See plan §12. */
+static void *matlab_global_ptr_table[MATLAB_GLOBAL_TABLE_SIZE];
 
 double matlab_global_get_f64(int32_t id) {
     if (id < 0 || id >= MATLAB_GLOBAL_TABLE_SIZE) return 0.0;
@@ -4229,6 +4495,21 @@ double matlab_global_get_f64(int32_t id) {
 void matlab_global_set_f64(int32_t id, double v) {
     if (id < 0 || id >= MATLAB_GLOBAL_TABLE_SIZE) return;
     matlab_global_table[id] = v;
+}
+
+void *matlab_persistent_get_ptr(int32_t id) {
+    if (id < 0 || id >= MATLAB_GLOBAL_TABLE_SIZE) return NULL;
+    return matlab_global_ptr_table[id];
+}
+
+void matlab_persistent_set_ptr(int32_t id, void *p) {
+    if (id < 0 || id >= MATLAB_GLOBAL_TABLE_SIZE) return;
+    matlab_global_ptr_table[id] = p;
+}
+
+double matlab_persistent_isempty(int32_t id) {
+    if (id < 0 || id >= MATLAB_GLOBAL_TABLE_SIZE) return 1.0;
+    return matlab_global_ptr_table[id] == NULL ? 1.0 : 0.0;
 }
 
 /* Matrix disp. Special-cases 1×1 to print scalar-style and 1×N to print

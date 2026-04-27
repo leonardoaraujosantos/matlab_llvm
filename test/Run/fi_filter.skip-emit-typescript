@@ -1,0 +1,3 @@
+FIR mixes BigInt-backed fi-array reads with native number `acc_v` shift values.
+EmitTypeScript would need to bigint-coerce arithmetic where any operand is a
+fi-array element. The C/LLVM/Python lanes cover this path bit-exactly.

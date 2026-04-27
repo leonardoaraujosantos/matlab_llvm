@@ -42,6 +42,7 @@ just examples
 | `traffic_action.m` | branching and simple classification |
 | `is_old.m` | boolean logic and predicate-style functions |
 | `fi_apply_gain.m` | Fixed-Point Designer (`fi`) constructor + `*` + `(:)` clamp + `disp` |
+| `fi_fir_filter.m` | fi arrays + vector concat + scalar MAC accumulator (Phase 3 gating shape) |
 
 ## Notes
 

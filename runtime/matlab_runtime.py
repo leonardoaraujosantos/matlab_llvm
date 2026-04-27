@@ -884,6 +884,101 @@ def fi_dec_s(stored, WL): return str(int(stored))
 def fi_dec_u(stored, WL): return str(int(stored))
 
 
+# --- typed integer matrix runtime (fi arrays) ---------------------------
+# Backed by a plain Python list of Python ints (arbitrary precision —
+# bit-exact regardless of the C-side WL). Each descriptor carries its
+# own rows/cols so length/numel match the C runtime.
+
+class _MatI64:
+    __slots__ = ("data", "rows", "cols")
+    def __init__(self, rows, cols, data=None):
+        self.rows = int(rows); self.cols = int(cols)
+        n = self.rows * self.cols
+        self.data = [0] * n if data is None else list(data)
+
+def mat_i64_zeros(rows, cols): return _MatI64(rows, cols)
+def mat_u64_zeros(rows, cols): return _MatI64(rows, cols)
+def mat_i64_from_buf(buf, rows, cols): return _MatI64(rows, cols, buf)
+def mat_u64_from_buf(buf, rows, cols): return _MatI64(rows, cols, buf)
+def mat_i64_from_scalar(v): return _MatI64(1, 1, [int(v)])
+def mat_u64_from_scalar(v): return _MatI64(1, 1, [int(v)])
+
+def mat_i64_length(A): return float(_fi_builtins.max(A.rows, A.cols))
+def mat_u64_length(A): return float(_fi_builtins.max(A.rows, A.cols))
+def mat_i64_numel(A): return float(A.rows * A.cols)
+def mat_u64_numel(A): return float(A.rows * A.cols)
+def mat_i64_size_dim(A, dim):
+    d = int(dim)
+    if d == 1: return float(A.rows)
+    if d == 2: return float(A.cols)
+    return 1.0
+def mat_u64_size_dim(A, dim): return mat_i64_size_dim(A, dim)
+def mat_i64_rows(A): return A.rows
+def mat_i64_cols(A): return A.cols
+
+def _lin(A, i):
+    k = int(i) - 1
+    if k < 0: k = 0
+    n = A.rows * A.cols
+    if k >= n: k = n - 1
+    return k
+
+def mat_i64_subscript1_s(A, i): return A.data[_lin(A, i)]
+def mat_u64_subscript1_s(A, i): return A.data[_lin(A, i)]
+def mat_i64_subscript2_s(A, i, j):
+    r = int(i) - 1; c = int(j) - 1
+    return A.data[r * A.cols + c]
+def mat_u64_subscript2_s(A, i, j): return mat_i64_subscript2_s(A, i, j)
+
+def mat_i64_set1_s(A, i, v): A.data[_lin(A, i)] = int(v)
+def mat_u64_set1_s(A, i, v): A.data[_lin(A, i)] = int(v)
+def mat_i64_fill(A, v):
+    iv = int(v)
+    for k in _fi_builtins.range(A.rows * A.cols): A.data[k] = iv
+def mat_u64_fill(A, v): mat_i64_fill(A, v)
+
+def mat_i64_slice1(A, idx):
+    # idx is a NumPy 1-D array of doubles (1-based indices).
+    flat = np.asarray(idx).ravel()
+    n = int(flat.size)
+    out = _MatI64(1 if A.rows == 1 else n, n if A.rows == 1 else 1)
+    for k in _fi_builtins.range(n):
+        out.data[k] = mat_i64_subscript1_s(A, float(flat[k]))
+    return out
+def mat_u64_slice1(A, idx): return mat_i64_slice1(A, idx)
+
+def mat_i64_concat_row(A, B):
+    if A is None: return B
+    if B is None: return A
+    out = _MatI64(1, A.rows * A.cols + B.rows * B.cols)
+    out.data = list(A.data) + list(B.data)
+    return out
+def mat_u64_concat_row(A, B): return mat_i64_concat_row(A, B)
+
+def mat_i64_sum(A): return sum(A.data) if A else 0
+def mat_u64_sum(A): return sum(A.data) if A else 0
+
+def mat_i64_disp(A, WL, FL):
+    if A is None: print("(null)"); return
+    scale = 2.0 ** -int(FL)
+    for r in _fi_builtins.range(A.rows):
+        line = ""
+        for c in _fi_builtins.range(A.cols):
+            line += "   %7g" % (float(A.data[r * A.cols + c]) * scale)
+        print(line)
+    if A.rows * A.cols == 0: print("")
+def mat_u64_disp(A, WL, FL): mat_i64_disp(A, WL, FL)
+
+
+# --- persistent typed pointer table (fi arrays + future heap types) -----
+_persistent_ptr = {}
+def persistent_get_ptr(id):  return _persistent_ptr.get(int(id))
+def persistent_set_ptr(id, p): _persistent_ptr[int(id)] = p
+def persistent_isempty(id):
+    p = _persistent_ptr.get(int(id))
+    return 1.0 if p is None else 0.0
+
+
 # --- error flag (try/catch) -----------------------------------------------
 
 _error_flag = 0

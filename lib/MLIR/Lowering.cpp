@@ -770,12 +770,25 @@ mlir::Value Lowerer::loadBinding(Binding *Bnd, const Type *ValTy,
     int32_t Id = globalSlotId(Bnd);
     auto F64 = mlir::Float64Type::get(&MCtx);
     auto I32 = mlir::IntegerType::get(&MCtx, 32);
+    auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
     mlir::Value IdV = mlir::arith::ConstantOp::create(
         B, L, I32, mlir::IntegerAttr::get(I32, (int64_t)Id));
+    /* Pick the typed-pointer table for persistent fi-array bindings
+     * (and any other heap-backed type whose Sema type is a non-scalar
+     * array). The default scalar f64 table covers everything else —
+     * persistent counters, persistent flags, etc. */
+    bool UsePtr = false;
+    if (Bnd->Kind == BindingKind::Persistent && ValTy &&
+        ValTy->K == Type::Kind::Array) {
+      auto &VA = static_cast<const ArrayType &>(*ValTy);
+      if (VA.Elt == Dtype::Fixed && VA.S.K != Shape::Rank::Scalar)
+        UsePtr = true;
+    }
     llvm::SmallVector<mlir::NamedAttribute, 3> Attrs;
     Attrs.push_back(mlir::NamedAttribute(
         mlir::StringAttr::get(&MCtx, "callee"),
-        mlir::StringAttr::get(&MCtx, "matlab_global_get_f64")));
+        mlir::StringAttr::get(&MCtx,
+            UsePtr ? "matlab_persistent_get_ptr" : "matlab_global_get_f64")));
     if (Bnd->Kind == BindingKind::Persistent) {
       Attrs.push_back(mlir::NamedAttribute(
           mlir::StringAttr::get(&MCtx, "persistent_name"),
@@ -784,7 +797,8 @@ mlir::Value Lowerer::loadBinding(Binding *Bnd, const Type *ValTy,
           mlir::StringAttr::get(&MCtx, "persistent_fn"),
           mlir::StringAttr::get(&MCtx, CurFnName)));
     }
-    return emitUnreg("matlab.call_builtin", {IdV}, F64, L, Attrs);
+    return emitUnreg("matlab.call_builtin", {IdV},
+                     UsePtr ? (mlir::Type)PtrTy : (mlir::Type)F64, L, Attrs);
   }
   /* Numeric constants: MATLAB exposes pi / e / Inf / NaN / eps as
    * zero-arg builtins that evaluate to compile-time constants when
@@ -1611,6 +1625,27 @@ void Lowerer::lowerStmt(const Stmt &St) {
         ? lowerExpr(*I.Cond)
         : emitUnreg("matlab.const_logical", {},
                     mlir::IntegerType::get(&MCtx, 1), loc(I.Range));
+    /* scf.if requires i1; if the cond came back as f64 (e.g. a runtime
+     * call returning a logical-as-double like matlab_persistent_isempty),
+     * convert via "x != 0.0". Integer conds wider than i1 also need a
+     * cmpi to 0 — handled symmetrically. */
+    {
+      mlir::Type CT = Cond.getType();
+      mlir::Location LC = loc(I.Range);
+      if (mlir::isa<mlir::Float64Type, mlir::Float32Type>(CT)) {
+        auto FT = mlir::cast<mlir::FloatType>(CT);
+        mlir::Value Zero = mlir::arith::ConstantOp::create(
+            B, LC, FT, mlir::FloatAttr::get(FT, 0.0));
+        Cond = mlir::arith::CmpFOp::create(
+            B, LC, mlir::arith::CmpFPredicate::ONE, Cond, Zero);
+      } else if (auto IT = mlir::dyn_cast<mlir::IntegerType>(CT);
+                 IT && IT.getWidth() > 1) {
+        mlir::Value Zero = mlir::arith::ConstantOp::create(
+            B, LC, IT, mlir::IntegerAttr::get(IT, 0));
+        Cond = mlir::arith::CmpIOp::create(
+            B, LC, mlir::arith::CmpIPredicate::ne, Cond, Zero);
+      }
+    }
 
     // scf.if with withElseRegion=true auto-inserts scf.yield terminators; we
     // insert BEFORE those when emitting our body.
@@ -1992,13 +2027,19 @@ void Lowerer::lowerLValueStore(const Expr &LHS, mlir::Value Rhs) {
       if (!Rhs) return;
       int32_t Id = globalSlotId(N.Ref);
       auto I32 = mlir::IntegerType::get(&MCtx, 32);
+      auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
       mlir::Value IdV = mlir::arith::ConstantOp::create(
           B, loc(N.Range), I32,
           mlir::IntegerAttr::get(I32, (int64_t)Id));
+      /* Same UsePtr heuristic as the load path (loadBinding above): a
+       * persistent fi-array binding rides the typed-pointer table. */
+      bool UsePtr = (N.Ref->Kind == BindingKind::Persistent &&
+                     Rhs.getType() == PtrTy);
       llvm::SmallVector<mlir::NamedAttribute, 3> Attrs;
       Attrs.push_back(mlir::NamedAttribute(
           mlir::StringAttr::get(&MCtx, "callee"),
-          mlir::StringAttr::get(&MCtx, "matlab_global_set_f64")));
+          mlir::StringAttr::get(&MCtx,
+              UsePtr ? "matlab_persistent_set_ptr" : "matlab_global_set_f64")));
       if (N.Ref->Kind == BindingKind::Persistent) {
         Attrs.push_back(mlir::NamedAttribute(
             mlir::StringAttr::get(&MCtx, "persistent_name"),
@@ -2711,6 +2752,66 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
         }
       }
 
+      /* fi(zeros(m, n), signed, WL, FL) — fi array zero-init.
+       * Folds at lower-time to a direct call to matlab_mat_{i,u}64_zeros,
+       * bypassing the f64 zeros + cast detour. This is the FIR delay-line
+       * shape from plan §7.3. */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          N->Name == "fi" && C.Args.size() >= 4 && C.Args[0] &&
+          E.Ty && E.Ty->K == Type::Kind::Array) {
+        auto &OutAT = static_cast<const ArrayType &>(*E.Ty);
+        if (OutAT.Elt == Dtype::Fixed && OutAT.FxSpec &&
+            OutAT.S.K != Shape::Rank::Scalar) {
+          if (auto *ZC = dynamic_cast<const CallOrIndex *>(C.Args[0])) {
+            auto *ZN = dynamic_cast<const NameExpr *>(ZC->Callee);
+            if (ZN && ZN->Ref && ZN->Ref->Kind == BindingKind::Builtin &&
+                (ZN->Name == "zeros" || ZN->Name == "ones") &&
+                !ZC->Args.empty()) {
+              auto F64 = mlir::Float64Type::get(&MCtx);
+              auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+              mlir::Value M = lowerExpr(*ZC->Args[0]);
+              mlir::Value Ncols = ZC->Args.size() >= 2
+                  ? lowerExpr(*ZC->Args[1])
+                  : M;
+              llvm::StringRef Callee = OutAT.FxSpec->Signed
+                  ? "matlab_mat_i64_zeros"
+                  : "matlab_mat_u64_zeros";
+              mlir::NamedAttribute Cal(
+                  mlir::StringAttr::get(&MCtx, "callee"),
+                  mlir::StringAttr::get(&MCtx, Callee));
+              llvm::SmallVector<mlir::NamedAttribute, 8> A;
+              A.push_back(Cal);
+              auto FAttrs = buildFixedAttrs(&MCtx, *OutAT.FxSpec);
+              for (auto &E0 : FAttrs) A.push_back(E0);
+              mlir::Value Z = emitUnreg("matlab.call_builtin", {M, Ncols},
+                                         PtrTy, L, A);
+              if (ZN->Name == "ones") {
+                /* fi(ones(m,n), s, WL, FL) — fill with stored value
+                 * representing 1.0 (i.e. 1 << FL), saturated to WL. */
+                int64_t StoredOne = (int64_t)1 << OutAT.FxSpec->FractionLength;
+                if (OutAT.FxSpec->WordLength < 64 &&
+                    StoredOne >= ((int64_t)1 << (OutAT.FxSpec->WordLength -
+                                                 (OutAT.FxSpec->Signed ? 1 : 0))))
+                  StoredOne = ((int64_t)1 << (OutAT.FxSpec->WordLength -
+                                              (OutAT.FxSpec->Signed ? 1 : 0))) - 1;
+                auto I64 = mlir::IntegerType::get(&MCtx, 64);
+                mlir::Value Vone = mlir::arith::ConstantOp::create(
+                    B, L, I64, mlir::IntegerAttr::get(I64, StoredOne));
+                mlir::NamedAttribute Cf(
+                    mlir::StringAttr::get(&MCtx, "callee"),
+                    mlir::StringAttr::get(&MCtx,
+                        OutAT.FxSpec->Signed
+                            ? "matlab_mat_i64_fill"
+                            : "matlab_mat_u64_fill"));
+                emitUnregOp("matlab.call_builtin", {Z, Vone},
+                            {mlir::NoneType::get(&MCtx)}, L, {Cf});
+              }
+              return Z;
+            }
+          }
+        }
+      }
+
       /* Fixed-Point Designer constructor: `fi(value, signed, WL, FL)` and
        * its shorter variants. When all spec args are constants — the
        * common case — we constant-fold to an `arith.constant` of the
@@ -2860,6 +2961,133 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
           }
         }
       }
+      /* isempty(persistent_var) — route to matlab_persistent_isempty(id)
+       * which checks the typed-pointer table directly. Fires on any
+       * persistent binding so the "first call initialises" idiom works
+       * uniformly regardless of whether the binding will hold a fi
+       * array, a regular matrix, or a scalar. */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          N->Name == "isempty" && C.Args.size() == 1 && C.Args[0]) {
+        if (auto *AN = dynamic_cast<const NameExpr *>(C.Args[0])) {
+          if (AN->Ref && AN->Ref->Kind == BindingKind::Persistent) {
+            int32_t Id = globalSlotId(AN->Ref);
+            auto F64 = mlir::Float64Type::get(&MCtx);
+            auto I32 = mlir::IntegerType::get(&MCtx, 32);
+            mlir::Value IdV = mlir::arith::ConstantOp::create(
+                B, L, I32, mlir::IntegerAttr::get(I32, (int64_t)Id));
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_persistent_isempty"));
+            return emitUnreg("matlab.call_builtin", {IdV}, F64, L, {Cal});
+          }
+        }
+      }
+
+      /* sum / mean on fi arrays — route to the typed-int reduction
+       * helper, returning the stored integer (i64). LowerFixedPoint sees
+       * the fi_signed/wl/fl attrs to pick the right narrow + cast on the
+       * consumer side (typically a (:) clamp). */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          (N->Name == "sum" || N->Name == "mean") &&
+          C.Args.size() == 1 && C.Args[0] && C.Args[0]->Ty &&
+          C.Args[0]->Ty->K == Type::Kind::Array) {
+        auto &AS = static_cast<const ArrayType &>(*C.Args[0]->Ty);
+        if (AS.Elt == Dtype::Fixed && AS.FxSpec &&
+            AS.S.K != Shape::Rank::Scalar) {
+          mlir::Value V = lowerExpr(*C.Args[0]);
+          auto I64 = mlir::IntegerType::get(&MCtx, 64);
+          std::string Cn = std::string("matlab_mat_") +
+              (AS.FxSpec->Signed ? "i64_" : "u64_") + "sum";
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, Cn));
+          llvm::SmallVector<mlir::NamedAttribute, 8> AA;
+          AA.push_back(Cal);
+          auto Atrs = buildFixedAttrs(&MCtx, *AS.FxSpec);
+          for (auto &E0 : Atrs) AA.push_back(E0);
+          mlir::Value Sum = emitUnreg("matlab.call_builtin", {V}, I64, L, AA);
+          if (N->Name == "mean") {
+            // mean = sum / numel. Compute sum/N as integer (truncated)
+            // for now; a higher-fidelity path could use FullPrecision
+            // division. Emit numel via the typed-int helper, divide.
+            auto F64 = mlir::Float64Type::get(&MCtx);
+            std::string NumelN = std::string("matlab_mat_") +
+                (AS.FxSpec->Signed ? "i64_" : "u64_") + "numel";
+            mlir::NamedAttribute NCal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, NumelN));
+            mlir::Value Nf = emitUnreg("matlab.call_builtin", {V}, F64, L, {NCal});
+            mlir::Value Ni = mlir::arith::FPToSIOp::create(B, L, I64, Nf);
+            Sum = AS.FxSpec->Signed
+                ? (mlir::Value)mlir::arith::DivSIOp::create(B, L, Sum, Ni)
+                : (mlir::Value)mlir::arith::DivUIOp::create(B, L, Sum, Ni);
+          }
+          return Sum;
+        }
+      }
+
+      /* length/numel/size on fi arrays — route to the typed-int matrix
+       * shape helpers. Sema already returns scalar Double, so the result
+       * type stays f64. */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          (N->Name == "length" || N->Name == "numel" ||
+           N->Name == "size") &&
+          !C.Args.empty() && C.Args[0] && C.Args[0]->Ty &&
+          C.Args[0]->Ty->K == Type::Kind::Array) {
+        auto &AS = static_cast<const ArrayType &>(*C.Args[0]->Ty);
+        if (AS.Elt == Dtype::Fixed && AS.FxSpec &&
+            AS.S.K != Shape::Rank::Scalar) {
+          mlir::Value V = lowerExpr(*C.Args[0]);
+          auto F64 = mlir::Float64Type::get(&MCtx);
+          if (N->Name == "length" || N->Name == "numel") {
+            std::string Cn = std::string("matlab_mat_") +
+                (AS.FxSpec->Signed ? "i64_" : "u64_") +
+                std::string(N->Name);
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, Cn));
+            return emitUnreg("matlab.call_builtin", {V}, F64, L, {Cal});
+          }
+          // size(A, k) -> scalar; size(A) -> 1x2 row vector (deferred —
+          // the FIR shape uses size_dim only).
+          if (C.Args.size() >= 2) {
+            mlir::Value Dim = lowerExpr(*C.Args[1]);
+            std::string Cn = std::string("matlab_mat_") +
+                (AS.FxSpec->Signed ? "i64_" : "u64_") + "size_dim";
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, Cn));
+            return emitUnreg("matlab.call_builtin", {V, Dim}, F64, L, {Cal});
+          }
+        }
+      }
+
+      /* disp(fi_array) — route to the typed-int matrix disp helper
+       * which renders each element as its real-world value. */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          N->Name == "disp" && C.Args.size() == 1 && C.Args[0] &&
+          C.Args[0]->Ty && C.Args[0]->Ty->K == Type::Kind::Array) {
+        auto &AT0 = static_cast<const ArrayType &>(*C.Args[0]->Ty);
+        if (AT0.Elt == Dtype::Fixed && AT0.FxSpec &&
+            AT0.S.K != Shape::Rank::Scalar) {
+          mlir::Value V = lowerExpr(*C.Args[0]);
+          auto I8 = mlir::IntegerType::get(&MCtx, 8);
+          mlir::Value WL = mlir::arith::ConstantOp::create(
+              B, L, I8,
+              mlir::IntegerAttr::get(I8, (int64_t)AT0.FxSpec->WordLength));
+          mlir::Value FL = mlir::arith::ConstantOp::create(
+              B, L, I8,
+              mlir::IntegerAttr::get(I8, (int64_t)AT0.FxSpec->FractionLength));
+          llvm::StringRef Callee = AT0.FxSpec->Signed
+              ? "matlab_mat_i64_disp" : "matlab_mat_u64_disp";
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, Callee));
+          return emitUnreg("matlab.call_builtin", {V, WL, FL},
+                           mlir::NoneType::get(&MCtx), L, {Cal});
+        }
+      }
+
       /* disp(fi_value) — render the real-world value via the runtime
        * helper, passing the storage int + WL + FL. The helper picks the
        * right printf format. */
@@ -3331,6 +3559,66 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
     }
     if (IsHandleCall)
       return emitUnreg("matlab.call_indirect", Idx, RT, L);
+    /* fi-array subscript: A(i) / A(i,j) / A(idx_vec) on a fi-typed base
+     * routes directly to the typed-int matrix subscript helpers. We
+     * detect the fi base via the callee expression's Sema type. */
+    {
+      const Type *BaseT = C.Callee ? C.Callee->Ty : nullptr;
+      if (BaseT && BaseT->K == Type::Kind::Array) {
+        auto &BA = static_cast<const ArrayType &>(*BaseT);
+        if (BA.Elt == Dtype::Fixed && BA.FxSpec &&
+            BA.S.K != Shape::Rank::Scalar &&
+            !C.Args.empty()) {
+          auto F64 = mlir::Float64Type::get(&MCtx);
+          auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+          auto I64 = mlir::IntegerType::get(&MCtx, 64);
+          // Idx[0] is the base (already lowered above).
+          // Per-element subscript: every index is an f64 scalar.
+          bool AllScalarF64 = true;
+          for (size_t i = 1; i < Idx.size(); ++i)
+            if (Idx[i].getType() != F64) { AllScalarF64 = false; break; }
+          if (AllScalarF64 && (C.Args.size() == 1 || C.Args.size() == 2)) {
+            std::string Cn = std::string("matlab_mat_") +
+                (BA.FxSpec->Signed ? "i64_" : "u64_") +
+                "subscript" +
+                std::to_string((int)C.Args.size()) + "_s";
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, Cn));
+            llvm::SmallVector<mlir::NamedAttribute, 8> AA;
+            AA.push_back(Cal);
+            auto Atrs = buildFixedAttrs(&MCtx, *BA.FxSpec);
+            for (auto &E0 : Atrs) AA.push_back(E0);
+            return emitUnreg("matlab.call_builtin", Idx, I64, L, AA);
+          }
+          // Slice path: the index produced a non-scalar (range / vector).
+          // For 1-D fi vectors we route through matlab_mat_*_slice1.
+          if (C.Args.size() == 1 && !AllScalarF64) {
+            mlir::Value IxV = Idx[1];
+            // The index value may be a tensor/range; ensure it's a ptr by
+            // boxing through matlab_mat_from_buf path. The existing
+            // tensor lowering rewrites range-typed values to ptr later,
+            // so we leave this hook lazy: emit the call and let the
+            // tensor pass adapt the operand. For literal integer ranges
+            // produced by `matlab.range`, the LowerTensorOps pass already
+            // emits a matlab_range(...) call yielding ptr — that's our
+            // happy path here.
+            std::string Cn = std::string("matlab_mat_") +
+                (BA.FxSpec->Signed ? "i64_" : "u64_") + "slice1";
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, Cn));
+            llvm::SmallVector<mlir::NamedAttribute, 8> AA;
+            AA.push_back(Cal);
+            auto Atrs = buildFixedAttrs(&MCtx, *BA.FxSpec);
+            for (auto &E0 : Atrs) AA.push_back(E0);
+            return emitUnreg("matlab.call_builtin", {Idx[0], IxV},
+                             PtrTy, L, AA);
+          }
+        }
+      }
+    }
+
     /* 3-D scalar subscript: A(i, j, k) where A is tracked as a
      * matlab_mat3 binding routes to matlab_subscript3_s. */
     if (C.Args.size() == 3) {
@@ -3523,6 +3811,64 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
   case NodeKind::MatrixLiteral: {
     auto &M = static_cast<const MatrixLiteral &>(E);
     bool SingleRow = M.Rows.size() == 1;
+    /* fi-typed row vector: route every element through matlab_mat_i64
+     * (or _u64) helpers and chain concat calls. We accept scalar fi
+     * elements (wrap via matlab_mat_i64_from_scalar) and existing fi
+     * arrays (use directly). */
+    if (SingleRow && E.Ty && E.Ty->K == Type::Kind::Array) {
+      auto &OutA = static_cast<const ArrayType &>(*E.Ty);
+      if (OutA.Elt == Dtype::Fixed && OutA.FxSpec) {
+        auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+        auto F64 = mlir::Float64Type::get(&MCtx);
+        bool Signed = OutA.FxSpec->Signed;
+        std::string FromScalar = std::string("matlab_mat_") +
+            (Signed ? "i64_" : "u64_") + "from_scalar";
+        std::string Concat = std::string("matlab_mat_") +
+            (Signed ? "i64_" : "u64_") + "concat_row";
+        llvm::SmallVector<mlir::Value, 4> Pieces;
+        for (const Expr *Cx : M.Rows[0]) {
+          if (!Cx) continue;
+          mlir::Value V = lowerExpr(*Cx);
+          if (V.getType() != PtrTy) {
+            // Scalar (i8/i16/i32/i64) — wrap to a 1-element typed matrix
+            // via matlab_mat_*_from_scalar(int64).
+            auto I64 = mlir::IntegerType::get(&MCtx, 64);
+            if (auto IT = mlir::dyn_cast<mlir::IntegerType>(V.getType())) {
+              if (IT.getWidth() < 64)
+                V = Signed
+                    ? (mlir::Value)mlir::arith::ExtSIOp::create(B, L, I64, V)
+                    : (mlir::Value)mlir::arith::ExtUIOp::create(B, L, I64, V);
+            }
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, FromScalar));
+            llvm::SmallVector<mlir::NamedAttribute, 8> AA;
+            AA.push_back(Cal);
+            auto Atrs = buildFixedAttrs(&MCtx, *OutA.FxSpec);
+            for (auto &E0 : Atrs) AA.push_back(E0);
+            V = emitUnreg("matlab.call_builtin", {V}, PtrTy, L, AA);
+          }
+          Pieces.push_back(V);
+        }
+        if (Pieces.empty()) {
+          /* Empty matrix — fall through to the generic path. */
+        } else {
+          mlir::Value Acc = Pieces[0];
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, Concat));
+          llvm::SmallVector<mlir::NamedAttribute, 8> AA;
+          AA.push_back(Cal);
+          auto Atrs = buildFixedAttrs(&MCtx, *OutA.FxSpec);
+          for (auto &E0 : Atrs) AA.push_back(E0);
+          for (size_t i = 1; i < Pieces.size(); ++i) {
+            Acc = emitUnreg("matlab.call_builtin", {Acc, Pieces[i]},
+                             PtrTy, L, AA);
+          }
+          return Acc;
+        }
+      }
+    }
     llvm::SmallVector<mlir::Value, 4> Rows;
     for (auto &R : M.Rows) {
       llvm::SmallVector<mlir::Value, 4> Cs;

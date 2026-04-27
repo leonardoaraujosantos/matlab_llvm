@@ -402,12 +402,28 @@ bool rewriteFiMul(Operation *Op, ModuleOp M) {
   return true;
 }
 
-/// matlab.call_builtin @matlab_fi_* -> llvm.call. The signature is inferred
-/// from the operand and result types directly so we don't need a per-name
-/// table here; only the callee prefix matters.
+/// matlab.call_builtin @matlab_fi_* / @matlab_mat_i64_* / @matlab_mat_u64_*
+/// -> llvm.call. The signature is inferred from the operand and result
+/// types directly so we don't need a per-name table here; only the callee
+/// prefix matters.
 bool rewriteFiCallBuiltin(Operation *Op, ModuleOp M) {
   auto Callee = Op->getAttrOfType<StringAttr>("callee");
-  if (!Callee || !Callee.getValue().starts_with("matlab_fi_")) return false;
+  if (!Callee) return false;
+  llvm::StringRef N = Callee.getValue();
+  if (!N.starts_with("matlab_fi_") &&
+      !N.starts_with("matlab_mat_i64_") &&
+      !N.starts_with("matlab_mat_u64_") &&
+      !N.starts_with("matlab_persistent_"))
+    return false;
+  // Defer the rewrite if any operand is not yet LLVM-compatible — e.g. a
+  // tensor coming out of matlab.range that LowerTensorOps still has to
+  // retype to ptr. The pass will be re-run after LowerTensorOps and pick
+  // this site up then.
+  for (Value V : Op->getOperands()) {
+    Type T = V.getType();
+    if (isa<RankedTensorType, UnrankedTensorType, NoneType>(T))
+      return false;
+  }
   OpBuilder B(Op);
   Location L = Op->getLoc();
   llvm::SmallVector<Type, 6> ArgTys;
@@ -461,7 +477,12 @@ bool runLowerFixedPoint(ModuleOp M) {
     }
     if (isMatlabOp(Op, "matlab.call_builtin")) {
       auto C = Op->getAttrOfType<StringAttr>("callee");
-      if (C && C.getValue().starts_with("matlab_fi_"))
+      if (!C) return;
+      auto N = C.getValue();
+      if (N.starts_with("matlab_fi_") ||
+          N.starts_with("matlab_mat_i64_") ||
+          N.starts_with("matlab_mat_u64_") ||
+          N.starts_with("matlab_persistent_"))
         Targets.push_back(Op);
       return;
     }

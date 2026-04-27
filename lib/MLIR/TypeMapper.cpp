@@ -38,8 +38,10 @@ mlir::Type mapElementType(mlir::MLIRContext &Ctx, Dtype D) {
     /* Without the FixedSpec we can't pick a precise width; default to i64
      * so downstream LowerFixedPoint sees room for the widest stored class.
      * Sites that have the spec on hand should use mapType (which routes
-     * through the ArrayType.FxSpec) for the precise i8/i16/i32/i64. */
-    return B.getIntegerType(64, /*isSigned=*/true);
+     * through the ArrayType.FxSpec) for the precise i8/i16/i32/i64.
+     * Use the signless type — arith ops require signless operands; the
+     * fi_signed attribute carries the semantic signedness. */
+    return B.getIntegerType(64);
   case Dtype::Unknown: return B.getF64Type(); // fall back to double
   }
   return B.getF64Type();
@@ -80,7 +82,14 @@ mlir::Type mapType(mlir::MLIRContext &Ctx, const matlab::Type *T) {
        * attribute — we use *signless* MLIR integer types here so the
        * value flows through arith.* ops cleanly (arith requires signless
        * operands). LowerFixedPoint reads the signedness from the
-       * attribute when picking extsi/extui, shrsi/shrui, etc. */
+       * attribute when picking extsi/extui, shrsi/shrui, etc.
+       *
+       * For fi *arrays* (non-scalar), the runtime uses heap-allocated
+       * matlab_mat_i64 / matlab_mat_u64 descriptors. Map those to
+       * !llvm.ptr so slot allocation and runtime calls stay well-typed
+       * end-to-end — same convention as the f64 / complex matrix paths. */
+      if (A.S.K != Shape::Rank::Scalar)
+        return mlir::LLVM::LLVMPointerType::get(&Ctx);
       uint8_t Bits = A.FxSpec->storageBits();
       Elt = B.getIntegerType(Bits == 0 ? 64 : Bits);
     } else {

@@ -1083,6 +1083,143 @@ export function fi_dec_u(stored: bigint | number, _WL: number): string {
   return v.toString();
 }
 
+// --- typed integer matrix runtime (fi arrays) ----------------------------
+// Backed by a plain BigInt[]; bit-exact regardless of WL because BigInt is
+// arbitrary precision. Each descriptor carries its own rows/cols.
+
+export class MatI64 {
+  rows: number;
+  cols: number;
+  data: bigint[];
+  constructor(rows: number, cols: number, data?: ArrayLike<bigint | number>) {
+    this.rows = rows; this.cols = cols;
+    const n = rows * cols;
+    this.data = new Array<bigint>(n);
+    if (data) {
+      for (let k = 0; k < n; k++)
+        this.data[k] = typeof data[k] === 'bigint' ? (data[k] as bigint) : BigInt(data[k] as number);
+    } else {
+      for (let k = 0; k < n; k++) this.data[k] = 0n;
+    }
+  }
+}
+
+function _coerceBig(v: bigint | number): bigint {
+  return typeof v === 'bigint' ? v : BigInt(Math.trunc(+v));
+}
+
+export function mat_i64_zeros(rows: number, cols: number): MatI64 {
+  return new MatI64(rows, cols);
+}
+export const mat_u64_zeros = mat_i64_zeros;
+export function mat_i64_from_buf(buf: ArrayLike<bigint | number>,
+                                  rows: number, cols: number): MatI64 {
+  return new MatI64(rows, cols, buf);
+}
+export const mat_u64_from_buf = mat_i64_from_buf;
+export function mat_i64_from_scalar(v: bigint | number): MatI64 {
+  const m = new MatI64(1, 1);
+  m.data[0] = _coerceBig(v);
+  return m;
+}
+export const mat_u64_from_scalar = mat_i64_from_scalar;
+
+export function mat_i64_length(A: MatI64): number { return Math.max(A.rows, A.cols); }
+export function mat_u64_length(A: MatI64): number { return Math.max(A.rows, A.cols); }
+export function mat_i64_numel(A: MatI64): number { return A.rows * A.cols; }
+export function mat_u64_numel(A: MatI64): number { return A.rows * A.cols; }
+export function mat_i64_size_dim(A: MatI64, dim: number): number {
+  const d = Math.trunc(dim);
+  if (d === 1) return A.rows;
+  if (d === 2) return A.cols;
+  return 1;
+}
+export const mat_u64_size_dim = mat_i64_size_dim;
+
+function _lin(A: MatI64, i: number): number {
+  let k = Math.trunc(i) - 1;
+  if (k < 0) k = 0;
+  const n = A.rows * A.cols;
+  if (k >= n) k = n - 1;
+  return k;
+}
+export function mat_i64_subscript1_s(A: MatI64, i: number): bigint {
+  return A.data[_lin(A, i)];
+}
+export const mat_u64_subscript1_s = mat_i64_subscript1_s;
+export function mat_i64_subscript2_s(A: MatI64, i: number, j: number): bigint {
+  const r = Math.trunc(i) - 1, c = Math.trunc(j) - 1;
+  return A.data[r * A.cols + c];
+}
+export const mat_u64_subscript2_s = mat_i64_subscript2_s;
+
+export function mat_i64_set1_s(A: MatI64, i: number, v: bigint | number): void {
+  A.data[_lin(A, i)] = _coerceBig(v);
+}
+export const mat_u64_set1_s = mat_i64_set1_s;
+export function mat_i64_fill(A: MatI64, v: bigint | number): void {
+  const iv = _coerceBig(v);
+  for (let k = 0; k < A.rows * A.cols; k++) A.data[k] = iv;
+}
+export const mat_u64_fill = mat_i64_fill;
+
+export function mat_i64_slice1(A: MatI64, idx: any): MatI64 {
+  // idx is a numpy-ts NDArray of doubles (1-based indices).
+  const flat = idx.data ?? idx;
+  const n = flat.length;
+  const out = A.rows === 1 ? new MatI64(1, n) : new MatI64(n, 1);
+  for (let k = 0; k < n; k++)
+    out.data[k] = mat_i64_subscript1_s(A, +flat[k]);
+  return out;
+}
+export const mat_u64_slice1 = mat_i64_slice1;
+
+export function mat_i64_concat_row(A: MatI64 | null, B: MatI64 | null): MatI64 {
+  if (!A) return B as MatI64;
+  if (!B) return A;
+  const out = new MatI64(1, A.rows * A.cols + B.rows * B.cols);
+  out.data = [...A.data, ...B.data];
+  return out;
+}
+export const mat_u64_concat_row = mat_i64_concat_row;
+
+export function mat_i64_sum(A: MatI64): bigint {
+  if (!A) return 0n;
+  let acc = 0n;
+  for (const v of A.data) acc += v;
+  return acc;
+}
+export const mat_u64_sum = mat_i64_sum;
+
+export function mat_i64_disp(A: MatI64, _WL: number, FL: number): void {
+  if (!A) { console.log("(null)"); return; }
+  const scale = Math.pow(2, -FL);
+  for (let r = 0; r < A.rows; r++) {
+    let line = "";
+    for (let c = 0; c < A.cols; c++) {
+      const v = Number(A.data[r * A.cols + c]) * scale;
+      line += "   " + v.toFixed(0).length > 7
+          ? "   " + v.toString()
+          : "   " + v.toString().padStart(7, ' ');
+    }
+    console.log(line);
+  }
+  if (A.rows * A.cols === 0) console.log("");
+}
+export const mat_u64_disp = mat_i64_disp;
+
+// --- persistent typed pointer table --------------------------------------
+const _persistentPtr = new Map<number, any>();
+export function persistent_get_ptr(id: number): any {
+  return _persistentPtr.get(id) ?? null;
+}
+export function persistent_set_ptr(id: number, p: any): void {
+  _persistentPtr.set(id, p);
+}
+export function persistent_isempty(id: number): number {
+  return _persistentPtr.has(id) ? 0 : 1;
+}
+
 // --- error flag (try/catch) -----------------------------------------------
 
 let _error_flag = 0;

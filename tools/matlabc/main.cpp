@@ -233,6 +233,10 @@ int runReplInput(mlirgen::Context &MCtx, const std::string &Src, int Id) {
     if (!A && !B) break;
   }
   mlirgen::runLowerTensorOps(M);
+  // Second LowerFixedPoint sweep — picks up matlab.call_builtin
+  // @matlab_mat_*_slice1 / _concat_row sites that needed their tensor
+  // operand retyped to ptr by LowerTensorOps first.
+  mlirgen::runLowerFixedPoint(M);
   mlirgen::runLowerNarginNargout(M);
   mlirgen::runLowerScalarSlots(M);
   mlirgen::runLowerIO(M);
@@ -1480,6 +1484,10 @@ bool compileProgram() {
     if (!A && !B) break;
   }
   mlirgen::runLowerTensorOps(M);
+  // Second LowerFixedPoint sweep — picks up matlab.call_builtin
+  // @matlab_mat_*_slice1 / _concat_row sites that needed their tensor
+  // operand retyped to ptr by LowerTensorOps first.
+  mlirgen::runLowerFixedPoint(M);
   mlirgen::runLowerNarginNargout(M);
   mlirgen::runLowerScalarSlots(M);
   mlirgen::runLowerIO(M);
@@ -2764,6 +2772,10 @@ int main(int Argc, char **Argv) {
           if (!A && !B) break;
         }
         mlirgen::runLowerTensorOps(M);
+        // Second LowerFixedPoint sweep — picks up matlab.call_builtin
+        // @matlab_mat_*_slice1 / _concat_row sites that needed their
+        // tensor operand retyped to ptr by LowerTensorOps first.
+        mlirgen::runLowerFixedPoint(M);
         // Second-chance anon call rewrite: any matlab.call_indirect that
         // survived the first LowerAnonCalls because its matrix operands
         // were still tensor-typed can now match the outlined function's

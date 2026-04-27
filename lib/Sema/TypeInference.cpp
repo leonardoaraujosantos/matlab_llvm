@@ -681,22 +681,56 @@ const Type *TypeInference::visitMatrix(MatrixLiteral &M, Env &Env) {
   int64_t Rows = static_cast<int64_t>(M.Rows.size());
   int64_t Cols = -1;
   bool AllScalars = true;
+  // Track the first FixedSpec we see so we can pin the result to it
+  // when every fi-typed element shares the same spec. The Phase-1
+  // spec-propagation rules apply at binop sites; concat is unambiguous
+  // — all elements must already be in the same numerictype.
+  std::optional<FixedSpec> FxSpec;
+  bool AllSameFxSpec = true;
+  int64_t TotalElts = 0;
   for (auto &R : M.Rows) {
     int64_t RowCols = 0;
     for (Expr *E : R) {
       if (!E) continue;
       const Type *T = visit(*E, Env);
-      if (!T || T->K != Type::Kind::Array) { AllScalars = false; RowCols++; continue; }
+      if (!T || T->K != Type::Kind::Array) { AllScalars = false; RowCols++; TotalElts++; continue; }
       auto &A = static_cast<const ArrayType &>(*T);
       if (A.S.K != Shape::Rank::Scalar) AllScalars = false;
       if (First) { D = A.Elt; First = false; }
       else       D = promoteDtype(D, A.Elt);
+      // Track per-element fi spec / element count.
+      int64_t EltCount = 1;
+      if (A.S.K == Shape::Rank::Vector && !A.S.Dims.empty() && A.S.Dims[0] >= 0)
+        EltCount = A.S.Dims[0];
+      else if (A.S.K == Shape::Rank::Matrix && A.S.Dims.size() == 2 &&
+               A.S.Dims[0] >= 0 && A.S.Dims[1] >= 0)
+        EltCount = A.S.Dims[0] * A.S.Dims[1];
+      else if (A.S.K != Shape::Rank::Scalar)
+        EltCount = -1;
+      if (EltCount < 0) AllScalars = false; // we still know it's a vector/matrix though
+      if (A.Elt == Dtype::Fixed) {
+        if (!A.FxSpec) { AllSameFxSpec = false; }
+        else if (!FxSpec) FxSpec = A.FxSpec;
+        else if (!(*FxSpec == *A.FxSpec)) AllSameFxSpec = false;
+      }
+      TotalElts += (EltCount > 0 ? EltCount : 0);
       RowCols++;
     }
     if (Cols < 0)                Cols = RowCols;
     else if (Cols != RowCols)    Cols = -1;
   }
   if (First) D = Dtype::Double;
+  // Fi result path: the matrix literal carries an fi vector/matrix shape
+  // and the FixedSpec from the (matched) elements.
+  if (D == Dtype::Fixed && FxSpec && AllSameFxSpec) {
+    if (Rows == 1) {
+      // Row vector: total length = sum of per-element widths (each
+      // scalar contributes 1; sub-vector contributes its length).
+      int64_t Len = TotalElts > 0 ? TotalElts : -1;
+      return TC.fixedArray(*FxSpec, Shape::vector(Len));
+    }
+    return TC.fixedArray(*FxSpec, Shape::unknown());
+  }
   if (AllScalars && Rows >= 0 && Cols >= 0) {
     if (Rows == 1 && Cols == 1) return TC.scalar(D);
     if (Rows == 1)               return TC.arrayOf(D, Shape::vector(Cols));
@@ -905,6 +939,17 @@ const Type *TypeInference::visitBuiltinCall(std::string_view Name,
   if (Name == "bin" || Name == "hex" || Name == "dec")
     return TC.arrayOf(Dtype::Char, Shape::unknown());
 
+  // sum / mean / min / max on a fi array return a fi scalar with the
+  // input's spec preserved. (FullPrecision sum widens by log2(N) bits;
+  // for the FIR shape that doesn't matter because the accumulator's
+  // spec is set explicitly via fi(0, 1, 36, 28) etc.)
+  if ((Name == "sum" || Name == "mean" || Name == "min" || Name == "max") &&
+      !ArgTys.empty() && ArgTys[0] && ArgTys[0]->K == Type::Kind::Array) {
+    auto &A = static_cast<const ArrayType &>(*ArgTys[0]);
+    if (A.Elt == Dtype::Fixed && A.FxSpec)
+      return TC.fixedScalar(*A.FxSpec);
+  }
+
   if (Name == "disp" || Name == "fprintf" || Name == "warning" ||
       Name == "error") {
     return TC.any(); // effectively void
@@ -964,13 +1009,26 @@ const Type *TypeInference::visitCallOrIndex(CallOrIndex &C, Env &Env) {
         return {-1, false};
       };
 
+      // Helpers to construct results that preserve the FixedSpec when
+      // the source array is fi-typed.
+      auto fiScalar = [&]() -> const Type * {
+        if (Arr.Elt == Dtype::Fixed && Arr.FxSpec)
+          return TC.fixedScalar(*Arr.FxSpec);
+        return TC.scalar(Arr.Elt);
+      };
+      auto fiArray = [&](Shape S) -> const Type * {
+        if (Arr.Elt == Dtype::Fixed && Arr.FxSpec)
+          return TC.fixedArray(*Arr.FxSpec, std::move(S));
+        return TC.arrayOf(Arr.Elt, std::move(S));
+      };
+
       // All scalar indices collapse to a scalar element.
       bool AllScalar = true;
       for (const Expr *Arg : C.Args) {
         auto [L, Known] = classifyIdx(Arg);
         if (!(Known && L == 1)) { AllScalar = false; break; }
       }
-      if (AllScalar) return TC.scalar(Arr.Elt);
+      if (AllScalar) return fiScalar();
 
       // Try to recover a ranked result when we're doing 2D subscripting and
       // each index's output length is known (either folded or a colon whose
@@ -983,11 +1041,11 @@ const Type *TypeInference::visitCallOrIndex(CallOrIndex &C, Env &Env) {
           int64_t R = (L0 < 0) ? Arr.S.Dims[0] : L0;
           int64_t Co = (L1 < 0) ? Arr.S.Dims[1] : L1;
           if (R == 1 && Co >= 0)
-            return TC.arrayOf(Arr.Elt, Shape::vector(Co));
+            return fiArray(Shape::vector(Co));
           if (Co == 1 && R >= 0)
-            return TC.arrayOf(Arr.Elt, Shape::matrix(R, 1));
+            return fiArray(Shape::matrix(R, 1));
           if (R >= 0 && Co >= 0)
-            return TC.arrayOf(Arr.Elt, Shape::matrix(R, Co));
+            return fiArray(Shape::matrix(R, Co));
         }
       }
       // One-arg indexing of a vector: return a vector of the index length.
@@ -995,10 +1053,10 @@ const Type *TypeInference::visitCallOrIndex(CallOrIndex &C, Env &Env) {
         auto [L, K] = classifyIdx(C.Args[0]);
         if (K) {
           if (L < 0 && !Arr.S.Dims.empty()) L = Arr.S.Dims[0];
-          if (L >= 0) return TC.arrayOf(Arr.Elt, Shape::vector(L));
+          if (L >= 0) return fiArray(Shape::vector(L));
         }
       }
-      return TC.arrayOf(Arr.Elt, Shape::unknown());
+      return fiArray(Shape::unknown());
     }
     if (C.Callee->Ty->K == Type::Kind::StringArray) {
       return TC.stringScalar();

@@ -173,6 +173,58 @@ uint64_t matlab_fi_quantize_u(double v, uint8_t WL, int8_t FL,
 void     matlab_fi_disp_s(int64_t  stored, uint8_t WL, int8_t FL);
 void     matlab_fi_disp_u(uint64_t stored, uint8_t WL, int8_t FL);
 
+// Typed integer matrix descriptors for `fi` arrays — see plan §6.3 and
+// docs/emit_fixed_point.md. Phase 3 ships 64-bit lanes only; tighter
+// lanes (i32/i16/i8) come later. Same row-major layout as matlab_mat.
+typedef struct matlab_mat_i64 matlab_mat_i64;
+typedef struct matlab_mat_u64 matlab_mat_u64;
+
+// Constructors.
+matlab_mat_i64 *matlab_mat_i64_zeros(double rows, double cols);
+matlab_mat_i64 *matlab_mat_i64_from_buf(const int64_t *buf, double rows, double cols);
+matlab_mat_i64 *matlab_mat_i64_from_scalar(int64_t v);
+matlab_mat_u64 *matlab_mat_u64_zeros(double rows, double cols);
+matlab_mat_u64 *matlab_mat_u64_from_buf(const uint64_t *buf, double rows, double cols);
+matlab_mat_u64 *matlab_mat_u64_from_scalar(uint64_t v);
+
+// Shape / predicates.
+double  matlab_mat_i64_length(matlab_mat_i64 *A);
+double  matlab_mat_i64_numel (matlab_mat_i64 *A);
+double  matlab_mat_i64_size_dim(matlab_mat_i64 *A, double dim);
+int64_t matlab_mat_i64_rows  (matlab_mat_i64 *A);
+int64_t matlab_mat_i64_cols  (matlab_mat_i64 *A);
+double  matlab_mat_u64_length(matlab_mat_u64 *A);
+double  matlab_mat_u64_numel (matlab_mat_u64 *A);
+double  matlab_mat_u64_size_dim(matlab_mat_u64 *A, double dim);
+
+// Indexing.
+int64_t  matlab_mat_i64_subscript1_s(matlab_mat_i64 *A, double i);
+int64_t  matlab_mat_i64_subscript2_s(matlab_mat_i64 *A, double i, double j);
+uint64_t matlab_mat_u64_subscript1_s(matlab_mat_u64 *A, double i);
+uint64_t matlab_mat_u64_subscript2_s(matlab_mat_u64 *A, double i, double j);
+matlab_mat_i64 *matlab_mat_i64_slice1(matlab_mat_i64 *A, matlab_mat *idx);
+matlab_mat_u64 *matlab_mat_u64_slice1(matlab_mat_u64 *A, matlab_mat *idx);
+
+// In-place scalar store (used by `A(i) = v` and persistent updates).
+void matlab_mat_i64_set1_s(matlab_mat_i64 *A, double i, int64_t  v);
+void matlab_mat_u64_set1_s(matlab_mat_u64 *A, double i, uint64_t v);
+
+// Fill every element with a constant stored value (used by fi(ones(...))).
+void matlab_mat_i64_fill(matlab_mat_i64 *A, int64_t  v);
+void matlab_mat_u64_fill(matlab_mat_u64 *A, uint64_t v);
+
+// Concat (1-D, vector style — `[x, A(1:end-1)]`).
+matlab_mat_i64 *matlab_mat_i64_concat_row(matlab_mat_i64 *A, matlab_mat_i64 *B);
+matlab_mat_u64 *matlab_mat_u64_concat_row(matlab_mat_u64 *A, matlab_mat_u64 *B);
+
+// Reductions (return scalar stored int).
+int64_t  matlab_mat_i64_sum(matlab_mat_i64 *A);
+uint64_t matlab_mat_u64_sum(matlab_mat_u64 *A);
+
+// disp — render every element via the fi disp helper (real-world double).
+void matlab_mat_i64_disp(matlab_mat_i64 *A, uint8_t WL, int8_t FL);
+void matlab_mat_u64_disp(matlab_mat_u64 *A, uint8_t WL, int8_t FL);
+
 // bin(n) / hex(n) / dec(n) — render the stored integer as a matlab_string.
 // Each helper allocates a heap-owned descriptor; the caller passes it on
 // to disp/strlen/etc. through the regular string-binding path.
@@ -213,6 +265,11 @@ double matlab_iscell(matlab_cell *c);
 // Global / persistent.
 double matlab_global_get_f64(int32_t id);
 void   matlab_global_set_f64(int32_t id, double v);
+// Typed (pointer) persistent slots — used by fi-array persistents and
+// any future heap-backed persistent types. See plan §12.
+void  *matlab_persistent_get_ptr(int32_t id);
+void   matlab_persistent_set_ptr(int32_t id, void *p);
+double matlab_persistent_isempty(int32_t id);
 
 // Complex numbers.
 matlab_mat_c *matlab_complex_scalar(double re, double im);
