@@ -227,6 +227,13 @@ private:
   // and other file-level prose outside the function body don't
   // leak into the emitted module.
   llvm::StringMap<uint32_t> LastEmittedLine;
+  // Phase 5.6.4 — trailing-comment scan also looks at the line of
+  // the most recently emitted op for a `% ...` after non-WS code,
+  // emitting it as `// ...` on the next line. `LastTailEmittedLine`
+  // tracks which lines have already had their trailing comment
+  // processed so we don't emit duplicates when several ops share
+  // a source line.
+  llvm::StringMap<uint32_t> LastTailEmittedLine;
   std::string CommentFile;
   uint32_t CommentMinLine = 0;
   uint32_t CommentMaxLine = 0;
@@ -1546,52 +1553,78 @@ void Emitter::emitLeadingCommentsBefore(mlir::Location Loc, int Indent) {
   matlab::FileID FID = SM->findFileByName(File.str());
   if (FID == 0) return;
   uint32_t &Last = LastEmittedLine[File];
-  uint32_t Start = std::max(Last + 1, CommentMinLine);
-  if (Start >= Line) {
-    Last = std::max(Last, Line);
-    return;
-  }
-  if (Line > CommentMaxLine + 1) {
-    Last = std::max(Last, Line);
-    return;
-  }
-  for (uint32_t L = Start; L < Line; ++L) {
-    auto LineText = SM->getLineText(FID, L);
-    llvm::StringRef LR(LineText.data(), LineText.size());
-    // Trim leading + trailing whitespace.
-    while (!LR.empty() && std::isspace((unsigned char)LR.front()))
-      LR = LR.drop_front();
-    while (!LR.empty() && std::isspace((unsigned char)LR.back()))
-      LR = LR.drop_back();
-    if (LR.empty()) continue;
-    if (LR.front() != '%') continue;
-    LR = LR.drop_front();
-    // Drop a single leading space after the `%` so `% foo` becomes
-    // `// foo` instead of `//  foo`.
-    if (!LR.empty() && LR.front() == ' ') LR = LR.drop_front();
-    // Skip the `#codegen` marker — it's a MATLAB Coder directive
-    // with no SV equivalent.
-    if (LR == "#codegen") continue;
-    // Skip our own `% hdl: ...` pragmas; they configure the
-    // emitter and shouldn't appear in the output.
-    {
-      llvm::StringRef T = LR;
-      while (!T.empty() && std::isspace((unsigned char)T.front()))
-        T = T.drop_front();
-      if (T.starts_with("hdl:")) continue;
+  uint32_t &Tail = LastTailEmittedLine[File];
+  // Helper: extract `% ...` text from one source line. Returns
+  // empty string when the line has no comment-text we want to
+  // emit (no `%` at all, comment-only line that's a `#codegen` /
+  // `hdl:` / `--- file ` marker, or empty body after stripping).
+  // `LeadingOnly` toggles between "leading-only" comments (full-
+  // line `%`-prefixed, used for the standalone-comment case) and
+  // "trailing-only" comments (`%` after non-WS code on a line
+  // that's otherwise a statement).
+  auto extractCommentText = [&](uint32_t L, bool TrailingOnly) -> std::string {
+    if (L < CommentMinLine || L > CommentMaxLine) return {};
+    auto Txt = SM->getLineText(FID, L);
+    llvm::StringRef LR(Txt.data(), Txt.size());
+    // Find the first `%` not in a quoted string.
+    bool InSingle = false, InDouble = false;
+    size_t Pos = llvm::StringRef::npos;
+    for (size_t I = 0; I < LR.size(); ++I) {
+      char C = LR[I];
+      if (!InDouble && C == '\'' && !InSingle) {
+        InSingle = true; continue;
+      }
+      if (InSingle && C == '\'') { InSingle = false; continue; }
+      if (!InSingle && C == '"' && !InDouble) { InDouble = true; continue; }
+      if (InDouble && C == '"') { InDouble = false; continue; }
+      if (InSingle || InDouble) continue;
+      if (C == '%') { Pos = I; break; }
     }
-    // Skip the multi-file separator marker that the driver
-    // injects when matlabc is invoked with multiple .m inputs:
-    //   `--- file <path> ---`
+    if (Pos == llvm::StringRef::npos) return {};
+    // Determine HasCode: non-WS before the `%`.
+    bool HasCode = false;
+    for (size_t I = 0; I < Pos; ++I)
+      if (!std::isspace((unsigned char)LR[I])) { HasCode = true; break; }
+    if (TrailingOnly && !HasCode) return {};
+    if (!TrailingOnly && HasCode) return {};
+    llvm::StringRef Tx = LR.substr(Pos + 1);
+    while (!Tx.empty() && std::isspace((unsigned char)Tx.front()))
+      Tx = Tx.drop_front();
+    while (!Tx.empty() && std::isspace((unsigned char)Tx.back()))
+      Tx = Tx.drop_back();
+    if (Tx.empty()) return {};
+    if (Tx == "#codegen") return {};
     {
-      llvm::StringRef T = LR;
-      while (!T.empty() && std::isspace((unsigned char)T.front()))
-        T = T.drop_front();
-      if (T.starts_with("--- file ")) continue;
+      llvm::StringRef T = Tx;
+      if (T.starts_with("hdl:")) return {};
+      if (T.starts_with("--- file ")) return {};
     }
-    indent(Indent);
-    OS << "// " << LR.str() << "\n";
+    return Tx.str();
+  };
+  // Phase 5.6.4: a single scan over the unprocessed-source range
+  // [max(Last+1, CommentMinLine) .. Line] picks up BOTH leading
+  // (`%` at start) and trailing (`%` after code) comments and
+  // emits each at most once. `Tail` advances monotonically so a
+  // subsequent op visiting the same range no-ops. Out-of-source-
+  // order MLIR walks (e.g. case-cascades whose inner-region body
+  // ops emit before the next case's branch is processed) cause
+  // some trailing comments to land near the first op rather than
+  // the matching one — acceptable approximation for v1.
+  uint32_t StartLine = std::max(Tail + 1, CommentMinLine);
+  uint32_t EndLine = std::min(Line, CommentMaxLine);
+  for (uint32_t L = StartLine; L <= EndLine; ++L) {
+    if (L > Line) break;
+    // First try the leading-only case: an unindented `% ...`
+    // line with no code on it.
+    std::string Text = extractCommentText(L, /*TrailingOnly=*/false);
+    if (Text.empty())
+      Text = extractCommentText(L, /*TrailingOnly=*/true);
+    if (!Text.empty()) {
+      indent(Indent);
+      OS << "// " << Text << "\n";
+    }
   }
+  Tail = std::max(Tail, EndLine);
   Last = std::max(Last, Line);
 }
 
@@ -1712,6 +1745,7 @@ bool Emitter::emitModuleForFunc(mlir::func::FuncOp F) {
   FSMs.clear();
   CascadeOp.clear();
   LastEmittedLine.clear();
+  LastTailEmittedLine.clear();
   SlotMergedToOut.clear();
   // Phase 5.6.3: detect allocas whose `matlab.name` matches an
   // output port's `matlab.name` AND whose only loads feed the
