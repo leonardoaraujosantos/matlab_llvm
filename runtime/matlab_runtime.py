@@ -824,10 +824,61 @@ def fi_round_nearest_u(x, shift):
     half = 1 << (shift - 1)
     return (int(x) + half) >> shift
 
+# --- Phase 5 rounding modes ----------------------------------------------
+
+def fi_round_zero_s(x, shift):
+    if shift == 0: return int(x)
+    if shift >= 64: return 0
+    xi = int(x)
+    if xi >= 0: return xi >> shift
+    bias = (1 << shift) - 1
+    return (xi + bias) >> shift
+
+def fi_round_zero_u(x, shift):
+    return fi_round_floor_u(x, shift)
+
+def fi_round_ceiling_s(x, shift):
+    if shift == 0: return int(x)
+    if shift >= 64: return 1 if int(x) > 0 else 0
+    bias = (1 << shift) - 1
+    return (int(x) + bias) >> shift
+
+def fi_round_ceiling_u(x, shift):
+    if shift == 0: return int(x)
+    if shift >= 64: return 1 if int(x) > 0 else 0
+    bias = (1 << shift) - 1
+    return (int(x) + bias) >> shift
+
+def fi_round_convergent_s(x, shift):
+    if shift == 0: return int(x)
+    if shift >= 64: return 0
+    half = 1 << (shift - 1)
+    xi = int(x)
+    lsb = (xi >> shift) & 1
+    return (xi + half - 1 + lsb) >> shift
+
+def fi_round_convergent_u(x, shift):
+    if shift == 0: return int(x)
+    if shift >= 64: return 0
+    half = 1 << (shift - 1)
+    xi = int(x)
+    lsb = (xi >> shift) & 1
+    return (xi + half - 1 + lsb) >> shift
+
 def fi_quantize_s(v, WL, FL, overflow, rounding):
     scaled = float(v) * (2.0 ** int(FL))
     if rounding == 0:   stored = int(_fi_math.floor(scaled))
     elif rounding == 1: stored = int(_fi_math.floor(scaled + 0.5))
+    elif rounding == 2: stored = int(_fi_math.trunc(scaled))
+    elif rounding == 3:
+        # Convergent: round-half-to-even.
+        frac = scaled - _fi_math.floor(scaled)
+        if frac == 0.5:
+            lo = int(_fi_math.floor(scaled))
+            stored = lo if lo % 2 == 0 else lo + 1
+        else:
+            stored = int(round(scaled))
+    elif rounding == 4: stored = int(_fi_math.ceil(scaled))
     else:
         set_error()
         return 0
@@ -846,6 +897,15 @@ def fi_quantize_u(v, WL, FL, overflow, rounding):
     if scaled < 0.0: scaled = 0.0
     if rounding == 0:   stored = int(_fi_math.floor(scaled))
     elif rounding == 1: stored = int(_fi_math.floor(scaled + 0.5))
+    elif rounding == 2: stored = int(_fi_math.trunc(scaled))
+    elif rounding == 3:
+        frac = scaled - _fi_math.floor(scaled)
+        if frac == 0.5:
+            lo = int(_fi_math.floor(scaled))
+            stored = lo if lo % 2 == 0 else lo + 1
+        else:
+            stored = int(round(scaled))
+    elif rounding == 4: stored = int(_fi_math.ceil(scaled))
     else:
         set_error()
         return 0

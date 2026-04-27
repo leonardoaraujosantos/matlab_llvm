@@ -981,8 +981,23 @@ const Type *TypeInference::visitBuiltinCall(std::string_view Name,
     }
     return TC.scalar(Dtype::Double);
   }
-  // reinterpretcast(n, T) — bit-reinterpret without changing storage. Phase 5.
-  if (Name == "reinterpretcast") return TC.any();
+  // reinterpretcast(n, T) — bit-reinterpret stored int as a different
+  // numerictype without changing storage. The two specs must have
+  // matching WL (the storage lane is the same); FL/signedness can swap.
+  if (Name == "reinterpretcast") {
+    if (Args.size() < 2 || ArgTys.size() < 2 || !ArgTys[0] || !ArgTys[1])
+      return TC.any();
+    if (ArgTys[1]->K != Type::Kind::Numerictype) return TC.any();
+    auto &NT = static_cast<const NumerictypeType &>(*ArgTys[1]);
+    Shape OutShape = Shape::scalar();
+    if (ArgTys[0]->K == Type::Kind::Array)
+      OutShape = static_cast<const ArrayType &>(*ArgTys[0]).S;
+    FixedSpec NS;
+    NS.Signed = NT.Signed;
+    NS.WordLength = NT.WordLength;
+    NS.FractionLength = NT.FractionLength;
+    return TC.fixedArray(NS, OutShape);
+  }
   // setfimath(n, F) returns a fi with F's overflow/rounding overriding
   // n's; WL/FL stay. removefimath(n) resets both to defaults (Saturate /
   // Floor). For non-fi inputs, both are no-ops.

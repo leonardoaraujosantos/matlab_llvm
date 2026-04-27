@@ -112,6 +112,22 @@ int64_t quantizeFixedSigned(double v, const FixedSpec &S) {
   case FixedSpec::Rounding::Nearest:
     stored = (int64_t)std::floor(scaled + 0.5);
     break;
+  case FixedSpec::Rounding::Zero:
+    stored = (int64_t)std::trunc(scaled);
+    break;
+  case FixedSpec::Rounding::Ceiling:
+    stored = (int64_t)std::ceil(scaled);
+    break;
+  case FixedSpec::Rounding::Convergent: {
+    double frac = scaled - std::floor(scaled);
+    if (frac == 0.5) {
+      int64_t lo = (int64_t)std::floor(scaled);
+      stored = (lo % 2 == 0) ? lo : lo + 1;
+    } else {
+      stored = (int64_t)std::round(scaled);
+    }
+    break;
+  }
   case FixedSpec::Rounding::Floor:
   default:
     stored = (int64_t)std::floor(scaled);
@@ -142,6 +158,22 @@ uint64_t quantizeFixedUnsigned(double v, const FixedSpec &S) {
   case FixedSpec::Rounding::Nearest:
     stored = (uint64_t)std::floor(scaled + 0.5);
     break;
+  case FixedSpec::Rounding::Zero:
+    stored = (uint64_t)std::trunc(scaled);
+    break;
+  case FixedSpec::Rounding::Ceiling:
+    stored = (uint64_t)std::ceil(scaled);
+    break;
+  case FixedSpec::Rounding::Convergent: {
+    double frac = scaled - std::floor(scaled);
+    if (frac == 0.5) {
+      uint64_t lo = (uint64_t)std::floor(scaled);
+      stored = (lo % 2 == 0) ? lo : lo + 1;
+    } else {
+      stored = (uint64_t)std::round(scaled);
+    }
+    break;
+  }
   case FixedSpec::Rounding::Floor:
   default:
     stored = (uint64_t)std::floor(scaled);
@@ -2694,6 +2726,43 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
               mlir::StringAttr::get(&MCtx, "callee"),
               mlir::StringAttr::get(&MCtx, Callee));
           return emitUnreg("matlab.call_builtin", {Wide, WL}, PtrTy, L, {Cal});
+        }
+      }
+
+      /* reinterpretcast(n, T) — bit-reinterpret the stored integer as
+       * a new numerictype. Same-width: just type-change the value (which
+       * for signless integers is identity). Different storage widths
+       * extend or truncate; semantically the user is asking for the
+       * raw bits, so signed extension follows the *target* signedness. */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          N->Name == "reinterpretcast" &&
+          C.Args.size() >= 1 && C.Args[0] && C.Args[0]->Ty &&
+          C.Args[0]->Ty->K == Type::Kind::Array) {
+        auto &SrcA = static_cast<const ArrayType &>(*C.Args[0]->Ty);
+        if (SrcA.Elt == Dtype::Fixed && SrcA.FxSpec) {
+          mlir::Value V = lowerExpr(*C.Args[0]);
+          mlir::Type ResTy = mirTy(E.Ty ? E.Ty : TC.any());
+          if (V.getType() == ResTy) return V;
+          if (auto SrcIT = mlir::dyn_cast<mlir::IntegerType>(V.getType())) {
+            if (auto DstIT = mlir::dyn_cast<mlir::IntegerType>(ResTy)) {
+              if (SrcIT.getWidth() == DstIT.getWidth())
+                return V; // signless ↔ signless of same width is a no-op
+              if (SrcIT.getWidth() < DstIT.getWidth()) {
+                bool DstSigned = false;
+                if (auto *DA = E.Ty;
+                    DA && DA->K == Type::Kind::Array) {
+                  auto &DD = static_cast<const ArrayType &>(*DA);
+                  if (DD.Elt == Dtype::Fixed && DD.FxSpec)
+                    DstSigned = DD.FxSpec->Signed;
+                }
+                return DstSigned
+                    ? (mlir::Value)mlir::arith::ExtSIOp::create(B, L, ResTy, V)
+                    : (mlir::Value)mlir::arith::ExtUIOp::create(B, L, ResTy, V);
+              }
+              return mlir::arith::TruncIOp::create(B, L, ResTy, V);
+            }
+          }
+          return V;
         }
       }
 

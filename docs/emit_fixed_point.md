@@ -494,11 +494,61 @@ Examples gallery: one `examples/fi_filter.m` mirroring the FIR test.
 | 2 | Sub-native WL (e.g. WL=12), implicit `fi + double` promotion, `bin/hex/dec` display, `int(n)` / `storedInteger(n)` / `double(n)` | **✅ Shipped.** Tests: `fi_subnative.m`, `fi_mixed_double.m`, `fi_bin_hex.m`, `fi_int_extract.m`. |
 | 3 | `fi` arrays (1-D), `length`/`size`/`numel`, indexing `A(i)` and slicing `A(1:end-1)`, vector concat `[x, A(1:end-1)]`, `persistent` storage of `fi` arrays, reductions on `fi` (`sum`, `mean`) | **✅ Shipped (script form).** Backed by `matlab_mat_i64` / `matlab_mat_u64` heap descriptors. Gating test `fi_filter.m` exercises the full FIR shape from §7.3. Function-internal fi typing across user calls is deferred — the FIR runs at script scope. emit-typescript: scalar shifts on BigInt operands need a coercion pass; FIR test marked skipped on that lane. |
 | 4 | `fimath`, `numerictype` as first-class objects; `setfimath`/`removefimath`; `-emit-fixed-point-report` | **✅ Shipped.** `numerictype(s,WL,FL)` and `fimath('OverflowAction','Wrap'\|'Saturate','RoundingMethod','Floor'\|'Nearest')` are compile-time-only types; `fi(value, T)` and `fi(value, T, F)` read the spec out at type-inference time and fold the constructor away. The `Wrap` overflow mode is now reachable from MATLAB syntax. `fipref` accepted but no-op for now. Tests: `fi_numerictype.m`, `fi_fimath_wrap.m`, `fi_setfimath.m`. |
-| 5 | Convergent / Zero / Ceiling rounding, `reinterpretcast` | ~0.5 week each. |
+| 5 | Convergent / Zero / Ceiling rounding, `reinterpretcast` | **✅ Shipped.** All five rounding modes (Floor, Nearest, Zero, Ceiling, Convergent/banker's) flow through both the constructor quantize path and the runtime shift path used by mul/cast. `reinterpretcast(n, T)` bit-reinterprets the stored integer as a different numerictype with matching storage width. Tests: `fi_round_modes.m`, `fi_reinterpretcast.m`. |
 | 6 | Slope/Bias scaling | Deferred — likely never. |
 
 Phase 1 is the gating deliverable. Everything after it is an
 incremental, independently-shippable patch.
+
+### 10.1 What's still missing after Phase 5
+
+The phasing table above is **closed** for Phases 1–5 and Phase 6 stays
+deferred. The work below is what's *not* in the original plan but
+remains visible in real fi programs — grouped by criticality.
+
+#### High-impact gaps
+
+| Gap | Scope | Why it matters | Reference |
+|---|---|---|---|
+| **Function-internal fi typing across user calls** | ~1 week | `function y = apply_gain(x)` doesn't propagate the fi spec from the call site into the body. Workaround today: keep fi arithmetic at script scope (the FIR gating test does this). The fix extends `runMonomorphiseUserCalls` to split on `FixedSpec` (not just `Dtype`), so `apply_gain(fi(_, 1, 16, 8))` clones a body that types `x` as `fi 1/16/8`. | §11 — original "function input typing" open question |
+| **2-D fi arrays (matrix subscripts)** | ~1.5 weeks | Phase 3 ships 1-D fi vectors only. `A(i,j)` on a 2-D fi matrix has the path through `matlab_mat_i64_subscript2_s`, but tested only via 1-D shape today. Needs concrete 2-D indexing tests, slice2, and matmul on fi matrices (the shift-and-accumulate pattern, not just element-wise). | §6.3 |
+| **emit-typescript fi-array shifts on BigInt** | ~3 days | The FIR gating test is `.skip-emit-typescript` because mixed BigInt × number arithmetic on fi-array element reads needs a coercion pass in `EmitTypeScript.cpp`. Either teach the emitter to wrap any operand of a shift in `BigInt(...)` when the producer is a fi-array subscript, or adopt a number-only TS shim for WL ≤ 32. | Phase 3 commit |
+| **fi reductions tail** (`prod`, `min`, `max`, `cumsum`, `dot`) | ~3 days | `sum`/`mean` shipped in Phase 3. The other reductions return `any` from Sema today, so the (:) clamp on the result fails. Each is a small Sema + lowering hookup that mirrors the `sum` path. | §3.4 |
+
+#### Medium-impact gaps
+
+| Gap | Scope | Notes |
+|---|---|---|
+| **fi parfor reductions** | ~1 week | The pthread fan-out runtime needs to know the integer storage class. The §11 plan flagged this as needing the typed-int runtime to land first (it has — Phase 3) so this is now actually doable. |
+| **`fipref` honored for display formatting** | ~2 days | Recognised as a builtin but no-op; MATLAB's `fipref` controls precision and number-of-digits output. The `disp(fi)` path always prints `%g`. |
+| **LSP hover with FixedSpec** | ~1 day | `matlab-lsp` doesn't show fi metadata on hover. The Sema type is already there; just needs the LSP `hover` handler to detect `Dtype::Fixed` and format the spec. |
+| **DAP `Locals` renders fi as real-world value** | ~1 day | Today fi values show as their raw stored integer in the debugger. Should call `matlab_fi_disp_*` formatting machinery for the variables panel. |
+| **Diagnostic when `fi + double` literal doesn't fit** | ~half-day | §11 wanted "diagnose loudly when the double constant doesn't fit". Today the `fi + 5.0e9` case silently saturates to the WL max. |
+| **`fi(x, T)` where `T` is non-literal numerictype** | ~2 days | Works when `T = numerictype(1, 16, 8)` is constant-folded at compile time. A runtime-built `T` (e.g. selected by an `if`) bails to `any`. |
+
+#### Low-impact / deliberate non-goals
+
+| Item | Status | Reason |
+|---|---|---|
+| Slope/Bias scaling (`Slope ≠ 2^-FL`) | ❌ Deferred — likely never | §2 non-goal. No real call for it in DSP/HDL workflows since the FFT/filter literature already standardised on binary-point-only. |
+| Custom WL > 64 | ❌ Out of scope | §2 non-goal. Storage class would have to grow (i128 is rare in MATLAB code). |
+| Complex `fi` (fi values with imaginary parts) | ❌ Out of scope | §3.6 non-goal. Real-only fi covers the gating DSP cases. |
+| 3-D fi arrays | ❌ Out of scope | §3.6 non-goal — bounded by the same project-wide 2-D limit. |
+| `fi` as `classdef` property type | 🟡 Mechanically works, untested | §3.6: classdef properties are dynamic so a fi value stores fine, but no special path / no test. |
+| Lookup-table replacement of transcendentals (`exp` → table) | ❌ Out of scope | §2 non-goal — explicit. |
+| `fxpopt` / `fxptdlg` tooling | ❌ Out of scope | §2 non-goal — explicit. |
+| `fiaccel` (auto double→fi conversion) | ❌ Out of scope | §2 non-goal — users supply explicit `fi(...)` calls. |
+
+#### Suggested next-up order
+
+If pulling the next deliverable from this list, the order that gives the
+most user-visible win per day:
+
+1. **Function-internal fi typing** (high-impact, unlocks `function y = apply_gain(x)` form of every example).
+2. **2-D fi arrays** (high-impact, unlocks fi matmul / image-processing-style code).
+3. **fi reductions tail** (low-effort, fills out the §3.4 surface).
+4. **emit-typescript BigInt coercion** (cleans up the one outstanding test skip).
+5. **DAP / LSP polish** (small standalone wins for users actively debugging fi code).
 
 ## 11. Open Questions
 

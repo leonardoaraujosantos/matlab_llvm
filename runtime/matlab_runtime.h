@@ -166,6 +166,13 @@ int64_t  matlab_fi_round_floor_s(int64_t x, uint8_t shift);
 int64_t  matlab_fi_round_nearest_s(int64_t x, uint8_t shift);
 uint64_t matlab_fi_round_floor_u(uint64_t x, uint8_t shift);
 uint64_t matlab_fi_round_nearest_u(uint64_t x, uint8_t shift);
+// Phase 5 rounding modes.
+int64_t  matlab_fi_round_zero_s(int64_t x, uint8_t shift);
+uint64_t matlab_fi_round_zero_u(uint64_t x, uint8_t shift);
+int64_t  matlab_fi_round_ceiling_s(int64_t x, uint8_t shift);
+uint64_t matlab_fi_round_ceiling_u(uint64_t x, uint8_t shift);
+int64_t  matlab_fi_round_convergent_s(int64_t x, uint8_t shift);
+uint64_t matlab_fi_round_convergent_u(uint64_t x, uint8_t shift);
 int64_t  matlab_fi_quantize_s(double v, uint8_t WL, int8_t FL,
                               uint8_t overflow, uint8_t rounding);
 uint64_t matlab_fi_quantize_u(double v, uint8_t WL, int8_t FL,

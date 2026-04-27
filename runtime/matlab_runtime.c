@@ -2162,6 +2162,61 @@ uint64_t matlab_fi_round_nearest_u(uint64_t x, uint8_t shift) {
     return (x + half) >> shift;
 }
 
+/* Zero rounding (truncate toward zero). For non-negative values this
+ * matches Floor; for negative values, add `2^shift - 1` before the
+ * arithmetic right shift so the truncation lands on the "smaller in
+ * magnitude" integer rather than the more-negative one. */
+int64_t matlab_fi_round_zero_s(int64_t x, uint8_t shift) {
+    if (shift == 0) return x;
+    if (shift >= 64) return 0;
+    if (x >= 0) return x >> shift;
+    int64_t bias = ((int64_t)1 << shift) - 1;
+    return (x + bias) >> shift;
+}
+uint64_t matlab_fi_round_zero_u(uint64_t x, uint8_t shift) {
+    /* Unsigned: zero == floor. */
+    return matlab_fi_round_floor_u(x, shift);
+}
+
+/* Ceiling rounding (toward +infinity). Add `2^shift - 1` then arithmetic
+ * shift — the bias is just enough to push any non-zero remainder up. */
+int64_t matlab_fi_round_ceiling_s(int64_t x, uint8_t shift) {
+    if (shift == 0) return x;
+    if (shift >= 64) return x > 0 ? 1 : 0;
+    int64_t bias = ((int64_t)1 << shift) - 1;
+    return (x + bias) >> shift;
+}
+uint64_t matlab_fi_round_ceiling_u(uint64_t x, uint8_t shift) {
+    if (shift == 0) return x;
+    if (shift >= 64) return x > 0 ? 1 : 0;
+    uint64_t bias = ((uint64_t)1 << shift) - 1;
+    return (x + bias) >> shift;
+}
+
+/* Convergent rounding (banker's, round-half-to-even). Halves round to
+ * the nearest even integer rather than always up — eliminates the small
+ * positive bias that round-half-up introduces in long DSP chains.
+ *
+ * Formula: shifted = (x + half - 1 + ((x >> shift) & 1)) >> shift
+ *   - For non-half cases this matches Nearest (the +1 in the lsb is
+ *     dominated by the existing fractional bits).
+ *   - For exact halves the +(parity of pre-shift LSB) tie-breaks to
+ *     even: round up if odd, round down if even. */
+int64_t matlab_fi_round_convergent_s(int64_t x, uint8_t shift) {
+    if (shift == 0) return x;
+    if (shift >= 64) return 0;
+    int64_t half = (int64_t)1 << (shift - 1);
+    int64_t lsb = (x >> shift) & 1;
+    return (x + half - 1 + lsb) >> shift;
+}
+uint64_t matlab_fi_round_convergent_u(uint64_t x, uint8_t shift) {
+    if (shift == 0) return x;
+    if (shift >= 64) return 0;
+    uint64_t half = (uint64_t)1 << (shift - 1);
+    uint64_t lsb = (x >> shift) & 1;
+    return (x + half - 1 + lsb) >> shift;
+}
+
 /* Convert a real-world double to the stored integer for a fi (signed,WL,FL).
  * Applies the rounding mode to the fractional part, then the overflow mode
  * to the integer-magnitude clip. Phase 1 ships Floor + Nearest; the rest
@@ -2174,9 +2229,22 @@ int64_t matlab_fi_quantize_s(double v, uint8_t WL, int8_t FL,
     double scaled = ldexp(v, FL);
     int64_t stored;
     switch (rounding) {
-    case 0: stored = (int64_t)floor(scaled); break;
-    case 1: stored = (int64_t)floor(scaled + 0.5); break;
-    case 2: case 3: case 4:
+    case 0: stored = (int64_t)floor(scaled); break;       /* Floor */
+    case 1: stored = (int64_t)floor(scaled + 0.5); break; /* Nearest */
+    case 2: stored = (int64_t)trunc(scaled); break;       /* Zero */
+    case 3: {                                              /* Convergent */
+        double r = round(scaled);
+        /* round(0.5) returns 1.0 in C99; we need round-half-to-even. */
+        double frac = scaled - floor(scaled);
+        if (frac == 0.5) {
+            int64_t lo = (int64_t)floor(scaled);
+            stored = (lo % 2 == 0) ? lo : lo + 1;
+        } else {
+            stored = (int64_t)r;
+        }
+        break;
+    }
+    case 4: stored = (int64_t)ceil(scaled); break;        /* Ceiling */
     default:
         matlab_set_error();
         return 0;
@@ -2198,9 +2266,20 @@ uint64_t matlab_fi_quantize_u(double v, uint8_t WL, int8_t FL,
     if (scaled < 0.0) scaled = 0.0;
     uint64_t stored;
     switch (rounding) {
-    case 0: stored = (uint64_t)floor(scaled); break;
-    case 1: stored = (uint64_t)floor(scaled + 0.5); break;
-    case 2: case 3: case 4:
+    case 0: stored = (uint64_t)floor(scaled); break;       /* Floor */
+    case 1: stored = (uint64_t)floor(scaled + 0.5); break; /* Nearest */
+    case 2: stored = (uint64_t)trunc(scaled); break;       /* Zero (== Floor for unsigned) */
+    case 3: {                                               /* Convergent */
+        double frac = scaled - floor(scaled);
+        if (frac == 0.5) {
+            uint64_t lo = (uint64_t)floor(scaled);
+            stored = (lo % 2 == 0) ? lo : lo + 1;
+        } else {
+            stored = (uint64_t)round(scaled);
+        }
+        break;
+    }
+    case 4: stored = (uint64_t)ceil(scaled); break;         /* Ceiling */
     default:
         matlab_set_error();
         return 0;

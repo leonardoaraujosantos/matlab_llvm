@@ -1002,12 +1002,57 @@ export function fi_round_nearest_u(x: bigint | number, shift: number): bigint {
   return (v + half) >> BigInt(shift);
 }
 
+export function fi_round_zero_s(x: bigint | number, shift: number): bigint {
+  const v = typeof x === 'bigint' ? x : BigInt(Math.trunc(+x));
+  if (shift === 0) return v;
+  if (shift >= 64) return 0n;
+  if (v >= 0n) return v >> BigInt(shift);
+  const bias = (1n << BigInt(shift)) - 1n;
+  return (v + bias) >> BigInt(shift);
+}
+export const fi_round_zero_u = fi_round_floor_u;
+
+export function fi_round_ceiling_s(x: bigint | number, shift: number): bigint {
+  const v = typeof x === 'bigint' ? x : BigInt(Math.trunc(+x));
+  if (shift === 0) return v;
+  if (shift >= 64) return v > 0n ? 1n : 0n;
+  const bias = (1n << BigInt(shift)) - 1n;
+  return (v + bias) >> BigInt(shift);
+}
+export function fi_round_ceiling_u(x: bigint | number, shift: number): bigint {
+  return fi_round_ceiling_s(x, shift);
+}
+
+export function fi_round_convergent_s(x: bigint | number, shift: number): bigint {
+  const v = typeof x === 'bigint' ? x : BigInt(Math.trunc(+x));
+  if (shift === 0) return v;
+  if (shift >= 64) return 0n;
+  const half = 1n << BigInt(shift - 1);
+  const lsb = (v >> BigInt(shift)) & 1n;
+  return (v + half - 1n + lsb) >> BigInt(shift);
+}
+export function fi_round_convergent_u(x: bigint | number, shift: number): bigint {
+  return fi_round_convergent_s(x, shift);
+}
+
 export function fi_quantize_s(v: number, WL: number, FL: number,
                               overflow: number, rounding: number): bigint {
   const scaled = +v * Math.pow(2, FL);
   let stored: bigint;
   if (rounding === 0)      stored = BigInt(Math.floor(scaled));
   else if (rounding === 1) stored = BigInt(Math.floor(scaled + 0.5));
+  else if (rounding === 2) stored = BigInt(Math.trunc(scaled));
+  else if (rounding === 3) {
+    // Convergent: round-half-to-even.
+    const frac = scaled - Math.floor(scaled);
+    if (frac === 0.5) {
+      const lo = BigInt(Math.floor(scaled));
+      stored = (lo % 2n === 0n) ? lo : lo + 1n;
+    } else {
+      stored = BigInt(Math.round(scaled));
+    }
+  }
+  else if (rounding === 4) stored = BigInt(Math.ceil(scaled));
   else { set_error(); return 0n; }
   if (overflow === 1) return fi_sat_s64(stored, WL);
   if (WL === 0) return 0n;
@@ -1024,6 +1069,17 @@ export function fi_quantize_u(v: number, WL: number, FL: number,
   let stored: bigint;
   if (rounding === 0)      stored = BigInt(Math.floor(scaled));
   else if (rounding === 1) stored = BigInt(Math.floor(scaled + 0.5));
+  else if (rounding === 2) stored = BigInt(Math.trunc(scaled));
+  else if (rounding === 3) {
+    const frac = scaled - Math.floor(scaled);
+    if (frac === 0.5) {
+      const lo = BigInt(Math.floor(scaled));
+      stored = (lo % 2n === 0n) ? lo : lo + 1n;
+    } else {
+      stored = BigInt(Math.round(scaled));
+    }
+  }
+  else if (rounding === 4) stored = BigInt(Math.ceil(scaled));
   else { set_error(); return 0n; }
   if (overflow === 1) return fi_sat_u64(stored, WL);
   if (WL === 0) return 0n;

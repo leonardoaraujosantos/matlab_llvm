@@ -161,8 +161,10 @@ Value emitSaturate(OpBuilder &B, Location L, ModuleOp M, Value In,
 }
 
 /// Apply the configured rounding mode to shift `In` right by `Shift` bits.
-/// Falls back to a plain arithmetic right shift for shift==0 or for
-/// rounding modes Phase 1 doesn't ship.
+/// Floor and Nearest are inlined as arith ops (the shift amount is
+/// always known at compile time so we can do it without a runtime call).
+/// Zero / Convergent / Ceiling defer to the matlab_fi_round_*_{s,u}
+/// runtime helpers so the rewrite stays compact.
 Value emitRoundingShift(OpBuilder &B, Location L, ModuleOp M, Value In,
                         unsigned Shift, unsigned Rounding, bool Signed) {
   if (Shift == 0) return In;
@@ -179,6 +181,38 @@ Value emitRoundingShift(OpBuilder &B, Location L, ModuleOp M, Value In,
     Value Sh = emitConstantInt(B, L, Bits, (int64_t)Shift);
     if (Signed) return arith::ShRSIOp::create(B, L, Adjusted, Sh);
     return arith::ShRUIOp::create(B, L, Adjusted, Sh);
+  }
+  /* Phase 5 modes: route through runtime helpers. The helper takes int64
+   * (or uint64) so we widen first and narrow back. */
+  llvm::StringRef HelperName;
+  switch (Rounding) {
+  case 2: HelperName = Signed ? "matlab_fi_round_zero_s"
+                              : "matlab_fi_round_zero_u"; break;
+  case 3: HelperName = Signed ? "matlab_fi_round_convergent_s"
+                              : "matlab_fi_round_convergent_u"; break;
+  case 4: HelperName = Signed ? "matlab_fi_round_ceiling_s"
+                              : "matlab_fi_round_ceiling_u"; break;
+  default: HelperName = ""; break;
+  }
+  if (!HelperName.empty()) {
+    Type I64 = IntegerType::get(Ctx, 64);
+    Type I8 = IntegerType::get(Ctx, 8);
+    Value Wide = In;
+    if (Bits < 64) {
+      Wide = Signed
+          ? (Value)arith::ExtSIOp::create(B, L, I64, In)
+          : (Value)arith::ExtUIOp::create(B, L, I64, In);
+    }
+    auto Fn = getOrInsertRTDecl(B, M, HelperName, I64, {I64, I8});
+    Value ShV = arith::ConstantOp::create(B, L, I8,
+                                          IntegerAttr::get(I8, (int64_t)Shift));
+    auto Call = LLVM::CallOp::create(B, L, Fn, ValueRange{Wide, ShV});
+    Value Out = Call.getResult();
+    if (Bits < 64) {
+      Type Narrow = IntegerType::get(Ctx, Bits);
+      Out = arith::TruncIOp::create(B, L, Narrow, Out);
+    }
+    return Out;
   }
   // Floor (and unsupported modes): plain shift.
   Value Sh = emitConstantInt(B, L, Bits, (int64_t)Shift);
