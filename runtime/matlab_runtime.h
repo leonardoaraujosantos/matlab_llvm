@@ -41,6 +41,8 @@ void matlab_reduce_add_f64(double *ptr, double delta);
 // Matrix constructors.
 matlab_mat *matlab_mat_from_buf(const double *buf, double m, double n);
 matlab_mat *matlab_mat_from_scalar(double x);
+// `if M` / `while M` truth test: 1 iff M is non-empty AND all elems non-zero.
+int8_t      matlab_mat_truth(matlab_mat *m);
 matlab_mat *matlab_empty_mat(void);
 matlab_mat *matlab_zeros(double m, double n);
 matlab_mat *matlab_ones(double m, double n);

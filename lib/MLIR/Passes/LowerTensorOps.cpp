@@ -31,6 +31,7 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/LLVMIR/LLVMTypes.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinAttributes.h"
@@ -135,6 +136,17 @@ private:
 
   // --- disp(matrix) -----------------------------------------------------
   bool rewriteDispMatrix();
+
+  // --- matlab_mat_truth(ptr) -> i8 — DAP/REPL cond coercion -------------
+  bool rewriteMatTruth();
+
+  // --- Coerce ptr-typed scf.if / scf.condition operands back to i1 ------
+  // After rewriteBinaryOps replaces a matlab.lt/gt/etc. (originally i1)
+  // with matlab_*_mm/ms/sm (returning ptr), any scf.if condition or
+  // scf.condition first-operand whose type drifted from i1 to ptr would
+  // fail SCF verification. Insert a matlab_mat_truth call + cmpi ne 0
+  // at each such use site.
+  bool fixupCondOperands();
 
   // --- Unary neg on tensor ----------------------------------------------
   bool rewriteUnaryNeg();
@@ -2415,6 +2427,155 @@ bool TensorLowering::rewriteSubscriptStore() {
   return Changed;
 }
 
+/* After rewriteBinaryOps, scf.if / scf.condition operands that started
+ * as matlab.gt/lt/eq/...:i1 may now be matlab_*_mm:!llvm.ptr. Coerce
+ * each one back to i1 with a matlab_mat_truth(ptr) -> i8 call followed
+ * by a cmp ne 0.
+ *
+ * Similarly arith.cmpf/cmpi can be left with a ptr operand when an
+ * earlier scalar lowering folded matlab.gt(f64,f64) to arith.cmpf and
+ * one of the operands later got retyped from f64 to ptr (e.g. abs of
+ * a matrix). Rewrite those into a matlab_<base>_mm/_ms/_sm runtime
+ * call, then matlab_mat_truth, then cmpi ne 0. Idempotent — runs in
+ * the LowerTensorOps fixpoint. */
+bool TensorLowering::fixupCondOperands() {
+  auto I8 = IntegerType::get(Ctx, 8);
+  bool Changed = false;
+
+  auto matTruth = [&](Value V, Location L) -> Value {
+    auto Fn = rt("matlab_mat_truth", I8, {PtrTy});
+    auto Call = LLVM::CallOp::create(B, L, Fn, ValueRange{V});
+    Value Zero = arith::ConstantOp::create(
+        B, L, I8, B.getIntegerAttr(I8, 0));
+    return arith::CmpIOp::create(
+        B, L, arith::CmpIPredicate::ne, Call.getResult(), Zero);
+  };
+
+  auto coerce = [&](Operation *User, unsigned OpIdx) -> bool {
+    Value V = User->getOperand(OpIdx);
+    if (V.getType() != PtrTy) return false;
+    B.setInsertionPoint(User);
+    User->setOperand(OpIdx, matTruth(V, User->getLoc()));
+    return true;
+  };
+
+  Mod.walk([&](Operation *Op) {
+    if (auto If = dyn_cast<scf::IfOp>(Op)) {
+      if (coerce(If, 0)) Changed = true;
+    } else if (auto Cond = dyn_cast<scf::ConditionOp>(Op)) {
+      if (coerce(Cond, 0)) Changed = true;
+    }
+  });
+
+  /* Rewrite scalar arith.cmpf with a leaked ptr operand into a runtime
+   * matrix comparison + truth coercion. The dialect rejects ptr
+   * operands, so this MUST run before the LLVM conversion pipeline. */
+  SmallVector<arith::CmpFOp> CmpFs;
+  SmallVector<arith::CmpIOp> CmpIs;
+  Mod.walk([&](Operation *Op) {
+    if (auto Cf = dyn_cast<arith::CmpFOp>(Op)) {
+      if (Cf.getLhs().getType() == PtrTy || Cf.getRhs().getType() == PtrTy)
+        CmpFs.push_back(Cf);
+    } else if (auto Ci = dyn_cast<arith::CmpIOp>(Op)) {
+      if (Ci.getLhs().getType() == PtrTy || Ci.getRhs().getType() == PtrTy)
+        CmpIs.push_back(Ci);
+    }
+  });
+
+  auto baseForCmpF = [](arith::CmpFPredicate P) -> StringRef {
+    using P_ = arith::CmpFPredicate;
+    switch (P) {
+      case P_::OEQ: case P_::UEQ: return "eq";
+      case P_::ONE: case P_::UNE: return "ne";
+      case P_::OLT: case P_::ULT: return "lt";
+      case P_::OLE: case P_::ULE: return "le";
+      case P_::OGT: case P_::UGT: return "gt";
+      case P_::OGE: case P_::UGE: return "ge";
+      default: return "";
+    }
+  };
+  auto baseForCmpI = [](arith::CmpIPredicate P) -> StringRef {
+    using P_ = arith::CmpIPredicate;
+    switch (P) {
+      case P_::eq:                       return "eq";
+      case P_::ne:                       return "ne";
+      case P_::slt: case P_::ult:        return "lt";
+      case P_::sle: case P_::ule:        return "le";
+      case P_::sgt: case P_::ugt:        return "gt";
+      case P_::sge: case P_::uge:        return "ge";
+    }
+    return "";
+  };
+
+  auto rewriteCmpToMat = [&](Operation *Op, Value LHS, Value RHS,
+                             StringRef Base) {
+    if (Base.empty()) return;
+    bool LP = LHS.getType() == PtrTy, RP = RHS.getType() == PtrTy;
+    bool LF = LHS.getType() == B.getF64Type();
+    bool RF = RHS.getType() == B.getF64Type();
+    /* Only handle ptr/ptr, ptr/f64, f64/ptr — anything else we leave
+     * for verification to surface. */
+    if (!((LP && RP) || (LP && RF) || (LF && RP))) return;
+    B.setInsertionPoint(Op);
+    LLVM::LLVMFuncOp Fn;
+    SmallVector<Value, 2> Args;
+    if (LP && RP) {
+      Fn = rt(("matlab_" + Base + "_mm").str(), PtrTy, {PtrTy, PtrTy});
+      Args = {LHS, RHS};
+    } else if (LP && RF) {
+      Fn = rt(("matlab_" + Base + "_ms").str(), PtrTy, {PtrTy, B.getF64Type()});
+      Args = {LHS, RHS};
+    } else {
+      Fn = rt(("matlab_" + Base + "_sm").str(), PtrTy, {B.getF64Type(), PtrTy});
+      Args = {LHS, RHS};
+    }
+    auto Call = LLVM::CallOp::create(B, Op->getLoc(), Fn, Args);
+    Value I1V = matTruth(Call.getResult(), Op->getLoc());
+    Op->getResult(0).replaceAllUsesWith(I1V);
+    Op->erase();
+  };
+
+  for (auto Cf : CmpFs) {
+    rewriteCmpToMat(Cf, Cf.getLhs(), Cf.getRhs(),
+                    baseForCmpF(Cf.getPredicate()));
+    Changed = true;
+  }
+  for (auto Ci : CmpIs) {
+    rewriteCmpToMat(Ci, Ci.getLhs(), Ci.getRhs(),
+                    baseForCmpI(Ci.getPredicate()));
+    Changed = true;
+  }
+  return Changed;
+}
+
+/* Lower matlab.call_builtin @matlab_mat_truth(ptr) -> i8 to a direct
+ * LLVM call. Emitted by Lowerer::fixupIfCond when a scf.if / matlab.while
+ * cond resolves to a matrix pointer (DAP/REPL workspace path). */
+bool TensorLowering::rewriteMatTruth() {
+  SmallVector<Operation *> Calls;
+  Mod.walk([&](Operation *Op) {
+    if (!isMatlabOp(Op, "matlab.call_builtin")) return;
+    auto CA = Op->getAttrOfType<StringAttr>("callee");
+    if (!CA || CA.getValue() != "matlab_mat_truth") return;
+    if (Op->getNumOperands() != 1) return;
+    if (Op->getOperand(0).getType() != PtrTy) return;
+    if (Op->getNumResults() != 1) return;
+    Calls.push_back(Op);
+  });
+  bool Changed = false;
+  auto I8 = IntegerType::get(Ctx, 8);
+  for (Operation *Op : Calls) {
+    B.setInsertionPoint(Op);
+    auto Fn = rt("matlab_mat_truth", I8, {PtrTy});
+    auto NC = LLVM::CallOp::create(B, Op->getLoc(), Fn,
+                                    ValueRange{Op->getOperand(0)});
+    Op->getResult(0).replaceAllUsesWith(NC.getResult());
+    Op->erase();
+    Changed = true;
+  }
+  return Changed;
+}
+
 bool TensorLowering::rewriteDispMatrix() {
   SmallVector<Operation *> Disps;
   Mod.walk([&](Operation *Op) {
@@ -2453,6 +2614,8 @@ bool TensorLowering::run() {
     Changed |= rewriteSubscript();
     Changed |= rewriteSubscriptStore();
     Changed |= rewriteDispMatrix();
+    Changed |= rewriteMatTruth();
+    Changed |= fixupCondOperands();
     if (!Changed) break;
     AnyChanged = true;
   }

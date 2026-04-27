@@ -1851,6 +1851,7 @@ void appendMatChildren(Array &Vs, struct matlab_mat *M) {
     Vs.push_back(Object{
       {"name", std::move(label)},
       {"value", std::string(Buf)},
+      {"type", std::string("double")},
       {"variablesReference", (int64_t)0},
     });
     ++emitted;
@@ -1888,6 +1889,24 @@ std::string formatObj(void *obj) {
   if (cn && cnLen > 0) clsName.assign(cn, (size_t)cnLen);
   else                  clsName = "<class " + std::to_string(cid) + ">";
   return std::string("1x1 ") + clsName;
+}
+
+/* DAP `type` field. Drives the IDE's TYPE column and hover tooltips.
+ * MATLAB-style canonical names: scalar/matrix as `double`, classes as
+ * the class name. The runtime kind enum (0=f64, 1=mat, 2=obj) maps
+ * directly. */
+std::string typeForVar(int Kind, void *Ptr) {
+  if (Kind == 0) return "double";
+  if (Kind == 1) return "double";
+  if (Kind == 2) {
+    if (!Ptr) return "object";
+    int32_t cid = matlab_dbg_obj_class_id_of(Ptr);
+    int64_t cnLen = 0;
+    const char *cn = matlab_dbg_class_name(cid, &cnLen);
+    if (cn && cnLen > 0) return std::string(cn, (size_t)cnLen);
+    return "object";
+  }
+  return "any";
 }
 
 /* Format a variable for the DAP `variables` response. Matrices get
@@ -2169,6 +2188,8 @@ bool handleRequest(const Object &Msg) {
           Vs.push_back(Object{
             {"name", std::string(Nm, (size_t)Nlen)},
             {"value", Val},
+            {"type", typeForVar(K, K == 2 ? matlab_dbg_obj_field_ptr(obj, i)
+                                          : nullptr)},
             {"variablesReference", ChildRef},
           });
         }
@@ -2221,6 +2242,7 @@ bool handleRequest(const Object &Msg) {
         Vs.push_back(Object{
           {"name", Nstr},
           {"value", formatVar(K, i)},
+          {"type", typeForVar(K, K == 2 ? matlab_dbg_ws_ptr(i) : nullptr)},
           {"variablesReference", ChildRef},
         });
       }
@@ -2263,6 +2285,9 @@ bool handleRequest(const Object &Msg) {
         Vs.push_back(Object{
           {"name", Nstr},
           {"value", Val},
+          {"type", typeForVar(K, K == 2 ? matlab_dbg_frame_local_ptr(
+                                              RtFrameIdx, i)
+                                        : nullptr)},
           {"variablesReference", ChildRef},
         });
       }
@@ -2481,6 +2506,7 @@ bool handleRequest(const Object &Msg) {
 
     /* Read the result before any restoration so we can format it. */
     std::string Display;
+    std::string EvalType;
     int64_t EvalRef = 0;
     bool RcOk = (Rc == 0);
     if (RcOk) {
@@ -2549,6 +2575,9 @@ bool handleRequest(const Object &Msg) {
                   matlab_dbg_mat_cols(M) != 1))
           EvalRef = registerMatRef(M);
       }
+      if (Found >= 0)
+        EvalType = typeForVar(Kind,
+            Kind == 2 ? matlab_dbg_ws_ptr(Found) : nullptr);
     }
 
     /* Restore matlab_ws to its pre-stamp state. Order matters: clear
@@ -2576,9 +2605,10 @@ bool handleRequest(const Object &Msg) {
                    Value("evaluate expression failed to compile"));
       return true;
     }
-    sendResponse(ReqSeq, *Cmd, true,
-                 Object{{"result", Display},
-                        {"variablesReference", EvalRef}});
+    Object Body{{"result", Display},
+                {"variablesReference", EvalRef}};
+    if (!EvalType.empty()) Body["type"] = EvalType;
+    sendResponse(ReqSeq, *Cmd, true, std::move(Body));
     return true;
   }
 

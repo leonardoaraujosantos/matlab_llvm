@@ -1309,6 +1309,21 @@ matlab_mat *matlab_mat_from_scalar(double x) {
     return M;
 }
 
+/* MATLAB `if M` / `while M` semantics: truthy iff M is non-empty AND
+ * every element is non-zero. Used by the DAP/REPL paths where script
+ * variables are workspace-backed and a scalar load comes back as a
+ * 1×1 matrix pointer rather than a raw f64 — fixupIfCond emits a
+ * matlab.call_builtin @matlab_mat_truth(ptr) -> i8 to coerce the
+ * result back to a scalar logical for scf.if / scf.while. */
+int8_t matlab_mat_truth(matlab_mat *m) {
+    if (!m) return 0;
+    int64_t n = m->rows * m->cols;
+    if (n == 0) return 0;
+    for (int64_t i = 0; i < n; ++i)
+        if (m->data[i] == 0.0) return 0;
+    return 1;
+}
+
 /* A(rows, cols): rank-2 slice. Result dims are the lengths of rows/cols
  * (or the base's dim if the corresponding index is NULL/colon). 1-based
  * indexing; out-of-range indices leave 0 in the output cell. */

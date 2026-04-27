@@ -1305,6 +1305,23 @@ mlir::Value Lowerer::fixupIfCond(mlir::OpBuilder &B, mlir::Value Cond,
                B, LC, mlir::TypeRange{I1}, mlir::ValueRange{Cond})
         .getResult(0);
   }
+  /* Matrix-pointer conditions appear in DAP/REPL mode whenever a
+   * scalar slot is fetched via matlab_ws_get_mat: the runtime returns
+   * a 1x1 matlab_mat*, and any matlab.lt/gt/etc. on it propagates the
+   * ptr type. Route through matlab_mat_truth(ptr) -> i8 (1 iff
+   * MATLAB's `if M` is true: non-empty AND every element non-zero),
+   * then compare against zero to materialise an i1. */
+  if (mlir::isa<mlir::LLVM::LLVMPointerType>(CT)) {
+    auto I8 = mlir::IntegerType::get(&MCtx, 8);
+    mlir::NamedAttribute Cal(
+        mlir::StringAttr::get(&MCtx, "callee"),
+        mlir::StringAttr::get(&MCtx, "matlab_mat_truth"));
+    mlir::Value I8V = emitUnreg("matlab.call_builtin", {Cond}, I8, LC, {Cal});
+    mlir::Value Zero = mlir::arith::ConstantOp::create(
+        B, LC, I8, mlir::IntegerAttr::get(I8, 0));
+    return mlir::arith::CmpIOp::create(
+        B, LC, mlir::arith::CmpIPredicate::ne, I8V, Zero);
+  }
   // Pass through anything else (e.g. already-i1) unchanged.
   return Cond;
 }
@@ -1863,6 +1880,10 @@ void Lowerer::lowerStmt(const Stmt &St) {
         ? lowerExpr(*W.Cond)
         : emitUnreg("matlab.const_logical", {},
                     mlir::IntegerType::get(&MCtx, 1), loc(W.Range));
+    /* Match the if-stmt path: in DAP/REPL mode the cond may come back
+     * as ptr (matlab_mat *) or f64 / wider int. Coerce to i1 before
+     * the optional break-fold below combines it with the i1 break flag. */
+    C = fixupIfCond(B, C, loc(W.Range));
     if (HasBC) {
       /* cond = orig && !did_break */
       mlir::Value BV = emitLoad(BSlot, I1, loc(W.Range));

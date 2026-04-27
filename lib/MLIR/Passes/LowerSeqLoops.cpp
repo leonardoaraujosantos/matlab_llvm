@@ -28,6 +28,8 @@
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+#include "mlir/Dialect/LLVMIR/LLVMTypes.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/BuiltinTypes.h"
@@ -184,16 +186,15 @@ bool lowerWhileOp(Operation *WhileOp) {
     OpBuilder::InsertionGuard G(B);
     B.setInsertionPointToEnd(Cond);
     IRMapping Map;
+    bool Ok = true;
     for (Operation &Op : CondBB) {
       if (isMatlabOp(&Op, "matlab.yield")) {
-        if (Op.getNumOperands() != 1) return false;
+        if (Op.getNumOperands() != 1) { Ok = false; break; }
         Value C = Map.lookupOrDefault(Op.getOperand(0));
         /* scf.condition expects i1 — coerce if the yielded value is an
          * integer or float logical. For our lowerer, conditions are i1. */
         if (!mlir::isa<IntegerType>(C.getType()) ||
             mlir::cast<IntegerType>(C.getType()).getWidth() != 1) {
-          /* If it's f64 (rare — matlab.const_logical should be i1), cast
-           * through arith.cmpf != 0. */
           auto F64 = B.getF64Type();
           if (C.getType() == F64) {
             Value Zero = arith::ConstantOp::create(
@@ -201,13 +202,43 @@ bool lowerWhileOp(Operation *WhileOp) {
             C = arith::CmpFOp::create(
                 B, L, arith::CmpFPredicate::ONE, C, Zero);
           } else {
-            return false;
+            /* Fallback for ptr-typed conds (matlab_mat *) that fixupIfCond
+             * didn't intercept upstream — emit a runtime truth call so we
+             * don't leave a malformed scf.while behind. */
+            auto PtrTy = LLVM::LLVMPointerType::get(B.getContext());
+            auto I8 = B.getIntegerType(8);
+            if (C.getType() == PtrTy) {
+              auto Mod = WhileOp->getParentOfType<ModuleOp>();
+              auto Fn = Mod.lookupSymbol<LLVM::LLVMFuncOp>("matlab_mat_truth");
+              if (!Fn) {
+                OpBuilder::InsertionGuard G(B);
+                B.setInsertionPointToStart(Mod.getBody());
+                Fn = LLVM::LLVMFuncOp::create(
+                    B, Mod.getLoc(), "matlab_mat_truth",
+                    LLVM::LLVMFunctionType::get(I8, {PtrTy}));
+              }
+              auto Call = LLVM::CallOp::create(B, L, Fn, ValueRange{C});
+              Value I8V = Call.getResult();
+              Value Zero8 = arith::ConstantOp::create(
+                  B, L, I8, B.getIntegerAttr(I8, 0));
+              C = arith::CmpIOp::create(
+                  B, L, arith::CmpIPredicate::ne, I8V, Zero8);
+            } else {
+              Ok = false; break;
+            }
           }
         }
         scf::ConditionOp::create(B, L, C, ValueRange{});
         continue;
       }
       B.clone(Op, Map);
+    }
+    if (!Ok) {
+      /* Bail-out cleanup: erase the partially-built scf.while so we
+       * don't leave verifier-rejected IR. The original matlab.while
+       * stays in place; downstream passes will surface the real error. */
+      W.erase();
+      return false;
     }
   }
 
