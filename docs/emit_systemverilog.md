@@ -1522,6 +1522,130 @@ Justfile recipe: `just report-hw FILE.m`.
 target frequencies. `test/EmitSV/reports/*.m` — golden hardware
 reports.
 
+### Phase 5.6 — Port-type pragmas + source-name preservation (~3 days)
+
+**Goal.** Let function-only `.m` files emit synthesizable SV
+*without* a separate typed-driver file, and carry source-level
+identifiers all the way to the generated module so the output is
+human-readable for downstream review.
+
+Two independent gaps, shipped together because they share
+infrastructure (the lexer / `ScanHWPragmas` pass and the
+emitter's name-resolution path).
+
+#### 5.6.1 — `% hdl: port(...)` port-type pragma
+
+**Problem.** Today the user-call refinement pass needs a typed
+caller (e.g. `y = f(fi(0,1,16,0))`) to fix the function's port
+widths. Without one, args default to `f64` and the
+synthesizability gate rejects them. The `examples/hdl/*_synth.m`
+driver convention works but adds a parallel file per module.
+
+**Fix.** Extend the existing `% hdl: <directive>(<arg>)` scanner
+(`lib/MLIR/Passes/ScanHWPragmas.cpp`, currently parses
+`fsm_encoding`, `input_pipeline`, `output_pipeline`) to also
+recognize:
+
+```matlab
+function y = mux_4to1_16bit(in0, in1, in2, in3, sel)
+    %#codegen
+    % hdl: port(in0, fi, signed, 16, 0)
+    % hdl: port(in1, fi, signed, 16, 0)
+    % hdl: port(in2, fi, signed, 16, 0)
+    % hdl: port(in3, fi, signed, 16, 0)
+    % hdl: port(sel, uint, 8)
+    ...
+```
+
+Pragma forms:
+  - `port(<arg>, fi, signed|unsigned, <W>, <F>)` — full fi spec
+  - `port(<arg>, uint, <W>)` / `port(<arg>, int, <W>)` — plain
+    integer
+  - `port(<arg>, bool)` — i1
+  - `port(<return>, ...)` — same syntax for returns by name
+
+Lowering: `ScanHWPragmas` attaches a synthetic `matlab.porttype`
+attribute on the func. A new pre-pipeline pass
+`ApplyPortTypePragmas` rewrites the function signature to the
+declared types, then re-runs the existing `RefineFuncSigs` to
+propagate. Bare `just emit-sv examples/hdl/mux_4to_1_16bit.m`
+then works standalone — no driver, no multi-file invocation.
+
+When both a typed caller AND a `port(...)` pragma exist, they
+must agree; mismatch is a hard error.
+
+#### 5.6.2 — Source-name preservation
+
+**Problem.** Today's SV output preserves arg names, top-level
+local names, persistent register names, and FSM enum labels
+(`S0`, `S1`, ...) via the `matlab.name` attr propagated through
+the slot pipeline. But it drops two categories:
+
+1. **Function return-variable names** — `[data_out, overflow] =
+   alu_16bit(...)` emits ports `output logic ... y, output logic
+   y1` instead of `output logic ... data_out, output logic
+   overflow`. `EmitSystemVerilog.cpp:emitPortList` hardcodes `y`,
+   `y1`, ... for results.
+2. **Source comments** — MATLAB-source comments
+   (`% Switch case to select the operation`, `% Reset and count
+   logic`) never reach MLIR; the lexer drops them as trivia.
+
+**Fix 5.6.2a — Return-variable names** (~0.5 day):
+  - Resolver / lowering: when constructing the func, set
+    `matlab.result_name` on each result via `setResultAttr` from
+    the source-level return-variable identifier (the names in
+    `[data_out, overflow] = ...`).
+  - `EmitSystemVerilog.cpp:emitPortList` (line 426): read the
+    attr, fall back to the existing `y`/`y1` scheme when absent
+    or when the name collides with a reserved port (`clk`, `rst`,
+    args). The arg-name path already does the
+    `Used.insert + suffix` collision dance; reuse it.
+  - Mirror in `gatherHWPersistentState` / hardware-report so
+    `report-hw` shows the user names.
+
+**Fix 5.6.2b — Source comments** (~2 days, the bulk):
+  - Lexer: keep `Comment` tokens (or attach trailing-comment
+    strings to the next non-trivia token) instead of dropping
+    them. The existing dump-tokens mode already roundtrips comments,
+    so the data is there.
+  - AST → MLIR lowering: attach attached-comment text as a
+    `matlab.comment` string array attr on the producing op.
+    Already done implicitly via location info for diagnostics; we
+    just need a stable attribute carrier separate from `Loc`.
+  - Emitter: when emitting a statement-equivalent op (e.g. the
+    body of an `always_comb` for a top-level statement, the
+    `case` arms of a switch), prefix `// <comment>` lines.
+
+**Out of scope.** Inline `data_out =` rename for SSA-numbered
+intermediates (`v0_1, v1_1, ...`) — those are MLIR SSA values
+without source names. We *could* attach `matlab.name` from the
+producing ASTNode for the *first* user-visible store, but
+that's a much bigger heuristic. Defer.
+
+#### Effort budget
+
+| Item | Effort | Affects beyond SV |
+|---|--:|---|
+| 5.6.1 port-type pragma scanner | ~0.5 day | no — SV-specific surface |
+| 5.6.1 ApplyPortTypePragmas pass | ~1 day | yes — emit-c also benefits from explicit port types |
+| 5.6.2a return-name preservation | ~0.5 day | yes — emit-c/cpp/python/ts return-variable names also improve |
+| 5.6.2b comment preservation (lexer + lowering + emit) | ~2 days | yes — every emitter benefits |
+| Tests | ~0.5 day | — |
+
+Total: ~3 days, biased toward 5.6.2b.
+
+**Tests.** Each `examples/hdl/*.m` gets a `_pragma.m` variant
+that uses `port(...)` pragmas instead of the `_synth.m` driver,
+verifying both produce the same SV. Comment-preservation tests
+in `test/EmitSV/comments/*.m` golden-diff a function with rich
+comments against the expected SV with `// <comment>` lines.
+
+**Migration.** Once 5.6.1 ships, the `_synth.m` drivers in
+`examples/hdl/` become a redundant convention. Decide then
+whether to drop them or keep both as parallel demos (the typed
+driver is a more familiar MATLAB-engineer pattern, the pragma is
+a more familiar HDL-engineer pattern).
+
 ### Op mapping table
 
 #### Combinational (`always_comb`)
