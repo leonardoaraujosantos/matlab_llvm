@@ -3109,6 +3109,15 @@ int main(int Argc, char **Argv) {
           // accepts the literal HDL Coder mealy/moore idiom.
           mlirgen::runSplitIsEmptyOr(M);
 
+          // Phase 5.1: replace runtime-call `matlab_fi_sat_s64` /
+          // `_u64` saturate helpers with explicit clamp circuits
+          // (cmpi + select chain). Earlier the SV pipeline DCE'd
+          // these via passthrough, which was correct only for
+          // Wrap-mode fi; the explicit clamp gives correct
+          // Saturate semantics regardless and synthesizes to a
+          // small comparator + 2-way mux per bound.
+          mlirgen::runLowerFiSaturate(M);
+
           // Phase 5.4: rewrite constant-coefficient multiplications
           // to shift-add trees (`x*7 → (x<<3) - x`). Default-on for
           // the SV pipeline; `-sv-const-mul=off` disables. Runs only

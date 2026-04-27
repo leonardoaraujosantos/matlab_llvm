@@ -371,28 +371,14 @@ bool runLowerStaticFiArrays(mlir::ModuleOp M) {
   });
   for (mlir::LLVM::CallOp C : DeadWrappers) C.erase();
 
-  // Replace `matlab_fi_sat_s64(%val, %width)` with passthrough on
-  // `%val`. The runtime helper saturates an i64 carrying an
-  // intermediate fi-arithmetic value to a target width. For
-  // Wrap-mode arithmetic (the default fi OverflowAction) on
-  // synthesizable RTL, the synth tool's natural integer
-  // wraparound semantics handle the same job for free; the
-  // `arith.trunci` op already chained after the saturate is
-  // sufficient. For explicit `Saturate` mode the user must write
-  // an explicit clamp expression (Phase 5 will re-introduce a
-  // proper saturate primitive). Today this transformation is
-  // applied unconditionally — Saturate-mode fi support in the SV
-  // path is not yet promised.
-  llvm::SmallVector<mlir::LLVM::CallOp, 8> Saturates;
-  M.walk([&](mlir::LLVM::CallOp C) {
-    auto Sym = C.getCallee();
-    if (Sym && *Sym == "matlab_fi_sat_s64") Saturates.push_back(C);
-  });
-  for (mlir::LLVM::CallOp C : Saturates) {
-    if (C->getNumOperands() < 1 || C->getNumResults() != 1) continue;
-    C->getResult(0).replaceAllUsesWith(C->getOperand(0));
-    C.erase();
-  }
+  // (Phase 5.1 moved the matlab_fi_sat_s64 / _u64 handling into
+  // LowerFiSaturate, which emits an explicit clamp circuit
+  // instead of the simple passthrough DCE that was here. The
+  // earlier passthrough was correct only for Wrap-mode fi —
+  // the explicit clamp gives correct Saturate semantics
+  // regardless of overflow mode and produces identical results
+  // for in-range values, so existing fixtures continue to
+  // function unchanged.)
 
   // Collapse `arith.trunci(W → N) of arith.extsi(M → W)` chains
   // produced by the saturate-replacement step into a single

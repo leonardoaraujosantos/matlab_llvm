@@ -1319,20 +1319,48 @@ ship in either order; pick by which corpus matters more — FSMs
 **Goal.** First-class `fi` support in the SV path, plus the
 optimization knobs that make the output competitive with hand RTL.
 
-**Step 5.1** — Fixed-point lowering.
-`fi`-typed values already exist in the IR after Phase 5 of the
-fixed-point feature (shipped — see [`emit_fixed_point.md`](emit_fixed_point.md)).
-The SV emitter:
-- maps `fi(value, S, W, F)` to `logic signed [W-1:0]` (or unsigned)
-  with the binary-point tracked in `sv.type`
-- inserts width adjustments at every operator: add/sub widen by 1,
-  multiply widens to `W1+W2`, then truncate per the active rounding
-  / overflow mode using shift-and-add masks
-- folds compile-time constants in the chosen `fi` representation
+**Step 5.1** — Fixed-point Saturate semantics. **Shipped as
+Phase 5.1 v1.**
 
-The lowering reuses the rounding/overflow plumbing already in the
-fi runtime — no new arithmetic semantics, just a different output
-form (RTL operators instead of runtime calls).
+Replaces every runtime-call `matlab_fi_sat_s64(val, W)` (and
+`_u64`) in the post-pipeline IR with an explicit clamp circuit
+built from `arith.cmpi` + `arith.select`:
+
+  signed:    out = (val > MAX) ? MAX : (val < MIN ? MIN : val)
+              MAX =  2^(W-1) - 1,    MIN = -2^(W-1)
+  unsigned:  out = (val > MAX) ? MAX : val
+              MAX =  2^W - 1
+
+Renders in SV as the matching ternary chain (`v6_1 = v5_1 >
+32'sd65535;  v8_1 = v7_1 ? -32'sd65536 : v5_1;  v9_1 = v6_1 ?
+32'sd65535 : v8_1;`), which synthesizes to a comparator + 2-way
+mux per bound — small, well-understood by every standard-cell
+synth tool.
+
+Replaces the earlier passthrough DCE in `LowerStaticFiArrays`
+which was correct only for Wrap-mode fi (the trunci downstream
+produced the same value as the saturate for non-overflowing
+inputs). Saturate-mode programs now get correct semantics on
+overflow.
+
+**Width-narrowing peel.** When the saturate's input is
+`arith.extsi narrow → wide` and the saturate target ≤ narrow's
+width, the clamp emits at the narrow width (with a single
+extsi back to wide for downstream consumers) instead of the
+wide intermediate. The downstream `extsi/trunci` collapse
+folds the round-trip away, so the SV ends up with no wide
+unused-bit signals — Verilator stays clean.
+
+Implementation: `lib/MLIR/Passes/LowerFiSaturate.cpp`. Runs in
+the SV pipeline immediately after the user-call iteration loop
+and `LowerStaticFiArrays`, before `ConstMulCSD` and the
+`HWLegalize` gate.
+
+**Reduce-mode optimization** for fi paths that only need Wrap
+semantics (where the truncation downstream gives equivalent
+results on overflow): not yet exposed. Today the explicit clamp
+runs unconditionally; a future `% hdl: fi_overflow('wrap')`
+pragma could opt back into the cheaper passthrough form.
 
 **Step 5.2** — `HWPipeline` (adaptive pipelining).
 `lib/MLIR/Passes/HWPipeline.cpp`. Driven by `-sv-target-freq=N`

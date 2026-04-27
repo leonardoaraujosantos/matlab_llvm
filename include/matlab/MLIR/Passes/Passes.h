@@ -271,6 +271,32 @@ bool matchHWForLoop(mlir::Operation *WhileOp, HWForLoopInfo &Info);
 /// them downstream as before).
 bool runLowerStaticFiArrays(mlir::ModuleOp M);
 
+/// Phase 5.1 — fixed-point saturate semantics.
+///
+/// Replaces every `llvm.call @matlab_fi_sat_s64(%val, %width)`
+/// (and `_u64`) with the explicit signed/unsigned clamp circuit:
+///
+///   signed:    out = (val > MAX) ? MAX : (val < MIN ? MIN : val)
+///                where MAX = 2^(W-1) - 1, MIN = -2^(W-1)
+///   unsigned:  out = (val > MAX) ? MAX : val
+///                where MAX = 2^W - 1
+///
+/// Width W comes from the second operand (constant `i8`). The
+/// expression is built from `arith.cmpi` + `arith.select`, so it
+/// renders as `out = (val > <max>) ? <max> : ...` ternary chains
+/// in SV — synthesizable as a small comparator + 2-way mux per
+/// bound.
+///
+/// This replaces the simple "passthrough" DCE step that
+/// LowerStaticFiArrays previously used, which was correct for
+/// Wrap-mode fi but silently changed Saturate-mode programs to
+/// Wrap. The clamp produces identical results for in-range
+/// values; differs from passthrough only on overflow (where it
+/// gives the user-asked Saturate semantic).
+///
+/// Returns true on success.
+bool runLowerFiSaturate(mlir::ModuleOp M);
+
 /// Phase 5.4 — constant-coefficient multiplier rewrite.
 ///
 /// Recognizes `arith.muli %x, %c` (or `%c, %x`) where `%c` is a
