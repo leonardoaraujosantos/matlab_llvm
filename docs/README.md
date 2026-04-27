@@ -8,6 +8,11 @@ Use this page as the entry point to the repo docs.
 - [`feature_status.md`](feature_status.md): authoritative compatibility matrix
 - [`../examples/README.md`](../examples/README.md): runnable sample programs
 
+## Frontend And Sema
+
+- [`sema.md`](sema.md): tour of `lib/Sema/` — bindings, scopes, name resolution, and type inference
+- [`save_load_compat.md`](save_load_compat.md): plan to bring `save` / `load` to the real MATLAB API and `.mat` v5 file format
+
 ## Backends And Runtime
 
 - [`emit_c_cpp.md`](emit_c_cpp.md): C and C++ emission design and guarantees
