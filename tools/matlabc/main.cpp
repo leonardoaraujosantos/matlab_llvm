@@ -3056,6 +3056,13 @@ int main(int Argc, char **Argv) {
           std::cout << Src;
         } else if (Opts.Mode == Options::Mode::EmitSystemVerilog ||
                    Opts.Mode == Options::Mode::CheckSynthesizable) {
+          // Pre-HWStateInfer normalization: split `if isempty(c) ||
+          // X ... end` into the canonical two-guard form
+          // (`if isempty(c)` + `if X`, both cloned bodies) so the
+          // HWStateInfer matcher's single-use-isempty constraint
+          // accepts the literal HDL Coder mealy/moore idiom.
+          mlirgen::runSplitIsEmptyOr(M);
+
           // Phase 4.5.2: replace any `unrealized_conversion_cast`
           // placeholder on scf.if conditions (inserted at MIR-to-MLIR
           // lowering when the cond was `none`-typed) with a real

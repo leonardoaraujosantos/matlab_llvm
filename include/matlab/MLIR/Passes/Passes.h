@@ -246,6 +246,26 @@ struct HWForLoopInfo {
 /// require that Info.Init / End / Step are `arith.constant`.
 bool matchHWForLoop(mlir::Operation *WhileOp, HWForLoopInfo &Info);
 
+/// Pre-HWStateInfer normalization. The HDL Coder canonical
+/// initializer is two separate guards:
+///
+///   if isempty(c)   c = INIT; end
+///   if reset        c = INIT; end
+///
+/// but users frequently write the joined short-circuit form:
+///
+///   if isempty(c) || reset  c = INIT; end
+///
+/// which lowers to `matlab.short_or(isempty(idx), reset)` feeding
+/// one scf.if. HWStateInfer's matcher requires the isempty result
+/// to have exactly one use (a cmpf feeding the guard), so the
+/// joined form fails legalization. This pass rewrites the joined
+/// form into the canonical two-guard shape: clones the if-body,
+/// drops the OR, and places one scf.if with the isempty operand
+/// and another with the remaining operand. Both run the same body.
+/// Returns true on success.
+bool runSplitIsEmptyOr(mlir::ModuleOp M);
+
 /// Phase 4.5.1 — slot-type inference for `matlab.alloc` ops still
 /// typed `none` after the user-call iteration loop runs. Walks
 /// every `matlab.alloc` whose result is `none`, looks at all

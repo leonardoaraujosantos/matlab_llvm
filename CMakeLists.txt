@@ -115,6 +115,7 @@ if(MATLAB_LLVM_WITH_MLIR)
     lib/MLIR/Passes/RefineIfConds.cpp
     lib/MLIR/Passes/RefineFuncSigs.cpp
     lib/MLIR/Passes/RefineSlotTypes.cpp
+    lib/MLIR/Passes/SplitIsEmptyOr.cpp
   )
   target_link_libraries(MatlabMLIR
     PUBLIC  MatlabSema MatlabAST MatlabBasic
