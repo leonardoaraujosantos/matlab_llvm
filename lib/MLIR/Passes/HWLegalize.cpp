@@ -35,6 +35,8 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 
+#include <functional>
+
 namespace matlab {
 namespace mlirgen {
 
@@ -227,18 +229,68 @@ bool runHWLegalize(mlir::ModuleOp M, const matlab::SourceManager * /*SM*/) {
         }
       }
       if (!Info.Iv.use_empty()) {
-        // The induction variable's only legal uses are inside the
-        // matcher's recognized cmpf and addf — those live in the
-        // before-region's terminator chain and the after-region's
-        // tail respectively. We accept the iv whenever its uses are
-        // exactly those structural roles. Anything else (e.g. a body
-        // op reading %iv as an operand) is a datapath use.
-        for (mlir::OpOperand &U : Info.Iv.getUses()) {
-          mlir::Operation *User = U.getOwner();
+        // Phase 5.6 Stage D: extended structural-sink classifier.
+        // The iv (block arg of the canonical-for-loop's after-region)
+        // is allowed to flow through any of:
+        //   - the loop's own cmpf / addf / yield / condition ops,
+        //   - `arith.fptosi` (and the `subi 1` 1-based → 0-based
+        //     adjustment) feeding an `llvm.getelementptr` index —
+        //     LowerStaticFiArrays emits this for `arr(i)` style
+        //     accesses,
+        //   - a `matlab.store` / `llvm.store` into a slot whose
+        //     loads themselves only feed structural sinks (the
+        //     classic iv-spill pattern that SlotPromotion didn't
+        //     fold because the slot lives at the function level).
+        std::function<bool(mlir::Operation *)> isStructuralIvSink =
+            [&](mlir::Operation *User) -> bool {
           if (mlir::isa<mlir::arith::CmpFOp, mlir::arith::AddFOp,
                         mlir::scf::YieldOp,
                         mlir::scf::ConditionOp>(User))
-            continue;
+            return true;
+          if (auto Cast = mlir::dyn_cast<mlir::arith::FPToSIOp>(User)) {
+            for (mlir::Operation *DownUser : Cast->getUsers()) {
+              if (mlir::isa<mlir::LLVM::GEPOp>(DownUser)) return true;
+              if (auto SubOp =
+                      mlir::dyn_cast<mlir::arith::SubIOp>(DownUser)) {
+                for (mlir::Operation *S2 : SubOp->getUsers())
+                  if (mlir::isa<mlir::LLVM::GEPOp>(S2)) return true;
+              }
+            }
+            return false;
+          }
+          // iv-spill: store(iv, slot) where the slot is plain alloca
+          // and every load of it feeds structural sinks.
+          mlir::Operation *Slot = nullptr;
+          bool IsStoreToSlot = false;
+          if (User->getName().getStringRef() == "matlab.store" &&
+              User->getNumOperands() == 2) {
+            Slot = User->getOperand(1).getDefiningOp();
+            IsStoreToSlot = true;
+          }
+          if (auto LS = mlir::dyn_cast<mlir::LLVM::StoreOp>(User)) {
+            Slot = LS.getAddr().getDefiningOp();
+            IsStoreToSlot = true;
+          }
+          if (IsStoreToSlot && Slot &&
+              (Slot->getName().getStringRef() == "matlab.alloc" ||
+               mlir::isa<mlir::LLVM::AllocaOp>(Slot))) {
+            for (mlir::Operation *SU : Slot->getResult(0).getUsers()) {
+              if (SU == User) continue;
+              bool IsLoad =
+                  SU->getName().getStringRef() == "matlab.load" ||
+                  mlir::isa<mlir::LLVM::LoadOp>(SU);
+              if (!IsLoad) return false;
+              for (mlir::Operation *LU : SU->getResult(0).getUsers()) {
+                if (!isStructuralIvSink(LU)) return false;
+              }
+            }
+            return true;
+          }
+          return false;
+        };
+        for (mlir::OpOperand &U : Info.Iv.getUses()) {
+          mlir::Operation *User = U.getOwner();
+          if (isStructuralIvSink(User)) continue;
           mlir::emitError(User->getLoc())
               << "induction variable used as datapath value is not "
               << "supported in Phase 2 (loop body must not consume "
@@ -257,13 +309,50 @@ bool runHWLegalize(mlir::ModuleOp M, const matlab::SourceManager * /*SM*/) {
   //    `LowerStaticFiArrays`) render as `logic [W-1:0] arr [N];` with
   //    indexed access. Anything else (struct element, runtime ptr) is
   //    out of scope.
+  //
+  // Phase 5.6 Stage D: an `f64` alloca that's exclusively used as an
+  // iv-spill slot for a recognized for-loop iv (every store has the
+  // iv as the value, every load feeds a structural sink — fptosi →
+  // gep, cmpf, addf, ...) is exempt. The slot doesn't generate any
+  // hardware; it's a plumbing artifact that SlotPromotion / Mem2Reg
+  // didn't fold because the alloca lives in the function entry
+  // block while the store lives inside the loop's body region.
   walkUserFuncs([&](mlir::func::FuncOp F) {
+    // Collect the set of recognized for-loop iv block-args within
+    // this function so we can identify iv-spill slots cheaply.
+    llvm::DenseSet<mlir::Value> Ivs;
+    F.walk([&](mlir::scf::WhileOp W) {
+      HWForLoopInfo Info;
+      if (matchHWForLoop(W, Info) && Info.Iv)
+        Ivs.insert(Info.Iv);
+    });
+    auto isIvSpillSlot = [&](mlir::LLVM::AllocaOp A) -> bool {
+      if (Ivs.empty()) return false;
+      bool AnyStore = false;
+      for (mlir::Operation *U : A->getUsers()) {
+        if (auto S = mlir::dyn_cast<mlir::LLVM::StoreOp>(U)) {
+          if (S.getAddr() != A.getRes()) return false;
+          if (!Ivs.contains(S.getValue())) return false;
+          AnyStore = true;
+          continue;
+        }
+        if (auto L = mlir::dyn_cast<mlir::LLVM::LoadOp>(U)) {
+          if (L.getAddr() != A.getRes()) return false;
+          continue;
+        }
+        return false;
+      }
+      return AnyStore;
+    };
     F.walk([&](mlir::LLVM::AllocaOp A) {
       mlir::Type ET = A.getElemType();
       if (isSynthScalar(ET)) return;  // scalar slot
       if (auto Arr = mlir::dyn_cast<mlir::LLVM::LLVMArrayType>(ET)) {
         if (isSynthScalar(Arr.getElementType())) return;  // static array
       }
+      if (mlir::isa<mlir::Float64Type, mlir::Float32Type>(ET) &&
+          isIvSpillSlot(A))
+        return;  // iv-spill scaffolding
       mlir::emitError(A.getLoc())
           << "stack allocation has unsynthesizable element type "
           << "(must be a scalar i1 / i8 / i16 / i32 / i64 or a static "

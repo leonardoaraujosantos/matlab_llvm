@@ -112,19 +112,45 @@ struct Site {
 /// Walk every use of `Ptr` and the slot (if any) and gather the
 /// recognized uses. Returns false if any use doesn't fit the
 /// pattern.
+/// True when `User` looks like a "store of `Ptr` into some slot" — both
+/// the pre-pipeline matlab.store form and the post-LowerScalarSlots
+/// llvm.store form. Returns the slot's defining op via `OutSlot` on
+/// success (the slot is a matlab.alloc or llvm.alloca).
+bool isSlotStoreOfPtr(mlir::OpOperand &U, mlir::Operation *&OutSlot) {
+  mlir::Operation *User = U.getOwner();
+  // matlab.store(ptr, slot)
+  if (isMatlabOpName(User, "matlab.store") &&
+      User->getNumOperands() == 2 && U.getOperandNumber() == 0) {
+    auto *Alloc = User->getOperand(1).getDefiningOp();
+    if (!isMatlabOpName(Alloc, "matlab.alloc") &&
+        !mlir::isa_and_nonnull<mlir::LLVM::AllocaOp>(Alloc))
+      return false;
+    OutSlot = Alloc;
+    return true;
+  }
+  // llvm.store(ptr, slot) — same pattern after slot-typing.
+  if (auto SOp = mlir::dyn_cast<mlir::LLVM::StoreOp>(User)) {
+    if (U.getOperandNumber() != 0) return false;
+    auto *Alloc = SOp.getAddr().getDefiningOp();
+    if (!isMatlabOpName(Alloc, "matlab.alloc") &&
+        !mlir::isa_and_nonnull<mlir::LLVM::AllocaOp>(Alloc))
+      return false;
+    OutSlot = Alloc;
+    return true;
+  }
+  return false;
+}
+
 bool gatherUses(mlir::Value Ptr, Site &S) {
   // First, check direct uses of the zeros result.
   for (mlir::OpOperand &U : Ptr.getUses()) {
     mlir::Operation *User = U.getOwner();
-    if (isMatlabOpName(User, "matlab.store") &&
-        User->getNumOperands() == 2 && U.getOperandNumber() == 0) {
+    mlir::Operation *Slot = nullptr;
+    if (isSlotStoreOfPtr(U, Slot)) {
       // The pointer is being stored INTO a slot.
       S.SlotStores.push_back(User);
-      mlir::Value SlotV = User->getOperand(1);
-      mlir::Operation *Alloc = SlotV.getDefiningOp();
-      if (!isMatlabOpName(Alloc, "matlab.alloc")) return false;
-      if (S.Slot && S.Slot != Alloc) return false;
-      S.Slot = Alloc;
+      if (S.Slot && S.Slot != Slot) return false;
+      S.Slot = Slot;
       continue;
     }
     std::string Callee;
@@ -145,10 +171,16 @@ bool gatherUses(mlir::Value Ptr, Site &S) {
   if (S.Slot) {
     for (mlir::OpOperand &U : S.Slot->getResult(0).getUses()) {
       mlir::Operation *User = U.getOwner();
-      if (isMatlabOpName(User, "matlab.store")) continue;  // slot store
-      if (isMatlabOpName(User, "matlab.load")) {
+      // Phase 5.6 Stage D: accept either the matlab.store/load pair
+      // or the post-LowerScalarSlots llvm.store/load pair — slot
+      // typing may have already retyped the slot to !llvm.ptr by
+      // the time this pass runs.
+      if (isMatlabOpName(User, "matlab.store") ||
+          mlir::isa<mlir::LLVM::StoreOp>(User)) continue;
+      bool IsLoad = isMatlabOpName(User, "matlab.load") ||
+                    mlir::isa<mlir::LLVM::LoadOp>(User);
+      if (IsLoad) {
         S.SlotLoads.push_back(User);
-        // Walk the load's uses.
         for (mlir::OpOperand &LU : User->getResult(0).getUses()) {
           mlir::Operation *LUO = LU.getOwner();
           std::string Callee;
@@ -208,18 +240,18 @@ bool tryRewrite(mlir::LLVM::CallOp Zeros) {
   if (!gatherUses(Zeros.getResult(), S)) return false;
   if (!inferElemWidth(S, S.ElemW)) return false;
 
-  // Every store and read index must be a compile-time integer.
+  // Phase 5.6 Stage D: store/read indices may be either compile-time
+  // constants OR an SSA value — typically a for-loop induction
+  // variable, since the most common shape is `for i = 1:N; arr(i)
+  // ...; end`. Constant indices fold to a fixed GEP offset; SSA
+  // indices lower to `arith.fptosi(idx) - 1` (1-based → 0-based)
+  // feeding the GEP. The validation here only checks arity; the
+  // rewrite path below handles both shapes.
   for (mlir::Operation *St : S.Stores) {
     if (St->getNumOperands() < 3) return false;
-    int64_t I;
-    if (!readIntConst(St->getOperand(1), I)) return false;
-    if (I < 1 || I > N) return false;
   }
   for (mlir::LLVM::CallOp Rd : S.Reads) {
     if (Rd.getNumOperands() != 2) return false;
-    int64_t I;
-    if (!readIntConst(Rd.getOperand(1), I)) return false;
-    if (I < 1 || I > N) return false;
   }
 
   mlir::OpBuilder B(Zeros);
@@ -248,16 +280,43 @@ bool tryRewrite(mlir::LLVM::CallOp Zeros) {
     mlir::LLVM::StoreOp::create(B, L, Zero, Gep.getRes());
   }
 
+  // Helper: build the 0-based integer index value for a GEP, from
+  // the runtime call's 1-based index operand. For a compile-time
+  // constant the GEP gets a static i32; for an SSA value (e.g. a
+  // for-loop iv typed f64), we emit `fptosi(idx) - 1`.
+  auto buildGepIndex = [&](mlir::OpBuilder &Bldr, mlir::Location IL,
+                           mlir::Value RawIdx) -> mlir::Value {
+    int64_t K;
+    if (readIntConst(RawIdx, K)) {
+      return mlir::LLVM::ConstantOp::create(Bldr, IL, I32,
+          mlir::IntegerAttr::get(I32, K - 1)).getRes();
+    }
+    // Non-constant: convert to integer and adjust to 0-based.
+    mlir::Value IntIdx;
+    if (mlir::isa<mlir::FloatType>(RawIdx.getType())) {
+      IntIdx = mlir::arith::FPToSIOp::create(Bldr, IL, I32, RawIdx);
+    } else if (auto IT = mlir::dyn_cast<mlir::IntegerType>(RawIdx.getType())) {
+      if (IT.getWidth() == 32) IntIdx = RawIdx;
+      else if (IT.getWidth() < 32)
+        IntIdx = mlir::arith::ExtSIOp::create(Bldr, IL, I32, RawIdx);
+      else
+        IntIdx = mlir::arith::TruncIOp::create(Bldr, IL, I32, RawIdx);
+    } else {
+      return {};
+    }
+    auto OneI32 = mlir::arith::ConstantOp::create(Bldr, IL, I32,
+        mlir::IntegerAttr::get(I32, 1));
+    return mlir::arith::SubIOp::create(Bldr, IL, IntIdx, OneI32).getResult();
+  };
+
   // Replace each store with GEP + store.
   for (mlir::Operation *St : S.Stores) {
-    int64_t Idx;
-    readIntConst(St->getOperand(1), Idx);  // already validated
     mlir::OpBuilder SB(St);
-    auto IdxC = mlir::LLVM::ConstantOp::create(SB, St->getLoc(), I32,
-        mlir::IntegerAttr::get(I32, Idx - 1));
+    mlir::Value GepIdx = buildGepIndex(SB, St->getLoc(), St->getOperand(1));
+    if (!GepIdx) return false;
     auto Gep = mlir::LLVM::GEPOp::create(
         SB, St->getLoc(), PtrTy, ArrTy, Alloca.getRes(),
-        mlir::ArrayRef<mlir::LLVM::GEPArg>{0, IdxC.getRes()});
+        mlir::ArrayRef<mlir::LLVM::GEPArg>{0, GepIdx});
     mlir::Value V = St->getOperand(2);
     // The runtime ABI accepted `none`-typed values via call_builtin;
     // by Phase 4.5.4 the value should already have a refined integer
@@ -276,14 +335,12 @@ bool tryRewrite(mlir::LLVM::CallOp Zeros) {
   // immediately get truncated away (Verilator flags those upper
   // bits as UNUSEDSIGNAL).
   for (mlir::LLVM::CallOp Rd : S.Reads) {
-    int64_t Idx;
-    readIntConst(Rd.getOperand(1), Idx);
     mlir::OpBuilder RB(Rd);
-    auto IdxC = mlir::LLVM::ConstantOp::create(RB, Rd.getLoc(), I32,
-        mlir::IntegerAttr::get(I32, Idx - 1));
+    mlir::Value GepIdx = buildGepIndex(RB, Rd.getLoc(), Rd.getOperand(1));
+    if (!GepIdx) return false;
     auto Gep = mlir::LLVM::GEPOp::create(
         RB, Rd.getLoc(), PtrTy, ArrTy, Alloca.getRes(),
-        mlir::ArrayRef<mlir::LLVM::GEPArg>{0, IdxC.getRes()});
+        mlir::ArrayRef<mlir::LLVM::GEPArg>{0, GepIdx});
     auto Ld = mlir::LLVM::LoadOp::create(
         RB, Rd.getLoc(), ElemTy, Gep.getRes());
     mlir::Value LoadVal = Ld.getRes();
