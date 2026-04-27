@@ -89,6 +89,13 @@ struct Options {
    * persistent state do not consume this. */
   enum class SvResetKind { AsyncLow, SyncHigh, SyncLow };
   SvResetKind SvReset = SvResetKind::AsyncLow;
+  /* FSM state-encoding policy for `-emit-systemverilog`. Binary
+   * is the default (smallest register, synth tool re-encodes
+   * anyway). One-hot picks single-bit-per-state for fastest
+   * decode; gray picks reflected-binary for single-bit-transition
+   * adjacency. */
+  enum class SvFSMEncoding { Binary, OneHot, Gray };
+  SvFSMEncoding SvFSMEnc = SvFSMEncoding::Binary;
   std::string InputPath;
   /* Additional input files. When multiple `.m` files are passed, the
    * driver concatenates their contents in CLI order — the first file
@@ -146,6 +153,13 @@ bool parseArgs(int Argc, char **Argv, Options &Opts, const char *&Prog) {
       Opts.SvReset = Options::SvResetKind::SyncHigh;
     else if (A == "-sv-reset=sync-low")
       Opts.SvReset = Options::SvResetKind::SyncLow;
+    else if (A == "-sv-fsm-encoding=binary")
+      Opts.SvFSMEnc = Options::SvFSMEncoding::Binary;
+    else if (A == "-sv-fsm-encoding=one-hot" ||
+             A == "-sv-fsm-encoding=one_hot")
+      Opts.SvFSMEnc = Options::SvFSMEncoding::OneHot;
+    else if (A == "-sv-fsm-encoding=gray")
+      Opts.SvFSMEnc = Options::SvFSMEncoding::Gray;
     else if (A == "-h" || A == "--help") return false;
     else if (!A.empty() && A[0] == '-') {
       std::cerr << "unknown flag: " << A << "\n";
@@ -3093,7 +3107,18 @@ int main(int Argc, char **Argv) {
           bool Ok = mlirgen::runHWLegalize(M, &SM);
           if (Ok) Ok = mlirgen::runHWBitWidthInfer(M, &SM);
           if (Opts.Mode == Options::Mode::CheckSynthesizable) {
-            // Print Diag and exit; no SV output. Exit 0 on clean.
+            // Also run the SV emitter in dry-run mode so FSM-time
+            // diagnostics (Phase 4 v2.3 ambiguity checks) fire
+            // alongside HWLegalize's gate. Discard the rendered
+            // SV — `-check-synthesizable` writes no stdout. The
+            // dry-run still has to materialize the string because
+            // the emitter's gather step is integral to its run().
+            if (Ok) {
+              std::string Dry = mlirgen::emitSystemVerilog(
+                  M, &SM, mlirgen::HWResetKind::AsyncLow,
+                  mlirgen::HWFSMEncoding::Binary);
+              if (Dry.empty()) Ok = false;
+            }
             Diag.printAll();
             return Ok ? 0 : 1;
           }
@@ -3110,7 +3135,16 @@ int main(int Argc, char **Argv) {
           case Options::SvResetKind::SyncLow:
             R = mlirgen::HWResetKind::SyncLow; break;
           }
-          std::string Src = mlirgen::emitSystemVerilog(M, &SM, R);
+          mlirgen::HWFSMEncoding FE = mlirgen::HWFSMEncoding::Binary;
+          switch (Opts.SvFSMEnc) {
+          case Options::SvFSMEncoding::Binary:
+            FE = mlirgen::HWFSMEncoding::Binary; break;
+          case Options::SvFSMEncoding::OneHot:
+            FE = mlirgen::HWFSMEncoding::OneHot; break;
+          case Options::SvFSMEncoding::Gray:
+            FE = mlirgen::HWFSMEncoding::Gray; break;
+          }
+          std::string Src = mlirgen::emitSystemVerilog(M, &SM, R, FE);
           if (Src.empty()) return 1;
           std::cout << Src;
         } else {

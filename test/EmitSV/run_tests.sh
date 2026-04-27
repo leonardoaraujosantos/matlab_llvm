@@ -84,10 +84,51 @@ for m in "$TESTDIR"/*.m; do
   rm -f "$tmp"
 done
 
+# Phase 4 v2.5 — quick smoke sweep of the FSM-encoding flag on
+# every FSM fixture (anything whose filename starts with fsm_ /
+# mealy_ / moore_). For each, emit with -sv-fsm-encoding=one-hot
+# and -sv-fsm-encoding=gray and re-lint with Verilator. We don't
+# diff goldens for these — only the typedef enum line changes
+# and that's already covered by the binary golden — but we do
+# verify the alternate encodings still produce lint-clean SV.
+enc_pass=0; enc_fail=0
+if [[ -n "$VERILATOR" && -x "$VERILATOR" ]]; then
+  for m in "$TESTDIR"/*.m; do
+    base="$(basename "${m%.m}")"
+    case "$base" in
+      fsm_*|mealy_*|moore_*) ;;
+      *) continue ;;
+    esac
+    for enc in one-hot gray; do
+      tmpdir="$(mktemp -d -t emitsvenc.XXXXXX)"
+      tmp="$tmpdir/$base.sv"
+      if ! "$MATLABC" -emit-systemverilog -sv-fsm-encoding="$enc" \
+           "$m" > "$tmp" 2>/dev/null; then
+        echo "FAIL $base [enc=$enc]: matlabc exited non-zero"
+        enc_fail=$((enc_fail+1))
+        rm -rf "$tmpdir"; continue
+      fi
+      if ! "$VERILATOR" --lint-only -Wall --top-module "$base" \
+           "$tmp" >/dev/null 2>&1; then
+        echo "FAIL $base [enc=$enc]: verilator lint"
+        "$VERILATOR" --lint-only -Wall --top-module "$base" "$tmp" 2>&1 \
+          | sed 's/^/  /'
+        enc_fail=$((enc_fail+1))
+      else
+        enc_pass=$((enc_pass+1))
+      fi
+      rm -rf "$tmpdir"
+    done
+  done
+fi
+
 echo "----"
 if [[ $lint_skip -gt 0 ]]; then
   echo "emit-sv passed: $pass    failed: $fail    missing: $miss    (verilator skipped on $lint_skip)"
 else
   echo "emit-sv passed: $pass    failed: $fail    missing: $miss    (verilator lint included)"
 fi
-exit $(( fail > 0 || miss > 0 ? 1 : 0 ))
+if [[ $enc_pass -gt 0 || $enc_fail -gt 0 ]]; then
+  echo "fsm-encoding sweep: passed: $enc_pass    failed: $enc_fail"
+fi
+exit $(( fail > 0 || miss > 0 || enc_fail > 0 ? 1 : 0 ))

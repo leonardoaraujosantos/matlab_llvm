@@ -425,6 +425,19 @@ bool runHWBitWidthInfer(mlir::ModuleOp M,
 /// that prefer sync-only reset trees. Stateless modules ignore this.
 enum class HWResetKind { AsyncLow, SyncHigh, SyncLow };
 
+/// FSM state-encoding policy. Affects the explicit values assigned
+/// to each enum literal in the generated `typedef enum`.
+///   - Binary  : sequential ints — S0=0, S1=1, ..., width =
+///                 ⌈log2(N)⌉. Smallest register, default.
+///   - OneHot  : one bit per state — S0=1, S1=2, S2=4, ..., width
+///                 = N. Fastest decode, largest register; common
+///                 for high-frequency control paths.
+///   - Gray    : reflected-binary gray code — S0=0, S1=1, S2=3,
+///                 S3=2, ..., width = ⌈log2(N)⌉. Single-bit
+///                 transitions between adjacent states; useful for
+///                 metastability-sensitive crossings.
+enum class HWFSMEncoding { Binary, OneHot, Gray };
+
 /// Emit synthesizable SystemVerilog (ASIC target) from a module that
 /// has been driven through the full lowering pipeline (same state as
 /// `-emit-c` consumes — post-LowerIO, IfStoreToSelect, Mem2RegLite).
@@ -434,7 +447,8 @@ enum class HWResetKind { AsyncLow, SyncHigh, SyncLow };
 /// signature. Returns empty string on failure.
 std::string emitSystemVerilog(mlir::ModuleOp M,
                               const matlab::SourceManager *SM = nullptr,
-                              HWResetKind Reset = HWResetKind::AsyncLow);
+                              HWResetKind Reset = HWResetKind::AsyncLow,
+                              HWFSMEncoding FSMEnc = HWFSMEncoding::Binary);
 
 } // namespace mlirgen
 } // namespace matlab

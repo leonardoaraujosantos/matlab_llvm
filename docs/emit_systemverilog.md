@@ -941,11 +941,48 @@ rest. Both Mealy and Moore styles emit clean lint-passing SV today
   an explicit width cast (`y1 = 8'(state)`) so the assignment
   to a non-enum port stays width-clean.
 
+**Phase 4 v2.3 (shipped) — FSM ambiguity diagnostics**:
+- **Duplicate case label** — two `case <c>` arms with the same
+  constant in the same switch. The second arm is unreachable and
+  `unique case` would also be malformed. Hard error.
+- **Empty case arm** — a recognized cascade arm whose body is
+  empty. Almost always an oversight (state stuck without explicit
+  transitions / outputs). Hard error.
+- (Skipped) **State written but never matched** — false-positive
+  prone in Moore-style designs whose output-decode cascade
+  intentionally covers only a subset of states and routes the
+  rest through `default:`.
+- (Skipped) **Multiple unconditional writes per arm** — MATLAB
+  execution semantics legitimately allows this (later write
+  wins); too high false-positive rate to flag.
+
+Both diagnostics fire under `-emit-systemverilog` and
+`-check-synthesizable`. The check-mode invocation runs the SV
+emitter dry (output discarded) so FSM-time issues surface
+alongside the HWLegalize gate.
+
+**Phase 4 v2.5 (shipped) — state-encoding flag**:
+- `-sv-fsm-encoding=binary` (default) — sequential ints, width
+  ⌈log2(N)⌉. Smallest register; synth tools re-encode anyway.
+- `-sv-fsm-encoding=one-hot` (alias `one_hot`) — one bit per
+  state, width N. Fastest decode, largest register. Common for
+  high-frequency control paths.
+- `-sv-fsm-encoding=gray` — reflected-binary gray code, width
+  ⌈log2(N)⌉. Single-bit transitions between adjacent states;
+  useful for CDC sync FIFOs and similar metastability-sensitive
+  paths.
+
+The chosen encoding shows up only in the typedef enum's
+explicit per-state values (`S0 = 3'd1, S1 = 3'd2, S2 = 3'd4` for
+3-state one-hot etc.); everything else (case statement, register
+declaration, reset assignment) is unchanged. The
+`emit-sv-tests` lane verifies all 5 FSM fixtures lint clean
+under all 3 encodings (`fsm-encoding sweep` line in the
+runner's summary).
+
 **Phase 4 v2 deferred to follow-up:**
-- One-hot / Gray state encoding via `% hdl: fsm_encoding('one_hot')`
-  pragma.
-- FSM ambiguity diagnostics (multiple unconditional next-state
-  writes in one arm, missing `otherwise`, unreachable states).
+- Per-FSM encoding pragma (`% hdl: fsm_encoding('one_hot')` on
+  a specific function) instead of a CLI-wide flag.
 - Hierarchical FSM extraction (an `hw.fsm` op carrying explicit
   state table + per-state IR blocks) — not needed for direct
   emission but useful for downstream passes.

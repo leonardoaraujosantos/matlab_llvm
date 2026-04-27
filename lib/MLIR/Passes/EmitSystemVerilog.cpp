@@ -40,6 +40,7 @@
 #include "mlir/IR/Value.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/StringSet.h"
 
@@ -57,8 +58,10 @@ namespace {
 class Emitter {
 public:
   Emitter(std::ostream &OS, const matlab::SourceManager *SM,
-          HWResetKind Reset)
-      : OS(OS), SM(SM), Reset(Reset) { (void)this->SM; }
+          HWResetKind Reset, HWFSMEncoding FSMEnc)
+      : OS(OS), SM(SM), Reset(Reset), FSMEnc(FSMEnc) {
+    (void)this->SM;
+  }
 
   bool run(mlir::ModuleOp M);
 
@@ -157,6 +160,7 @@ private:
   std::ostream &OS;
   const matlab::SourceManager *SM;
   HWResetKind Reset;
+  HWFSMEncoding FSMEnc;
   llvm::DenseMap<mlir::Value, std::string> Names;
   llvm::StringSet<> Used;
   unsigned NextFresh = 0;
@@ -1481,6 +1485,62 @@ void Emitter::gatherFSMs(mlir::func::FuncOp F) {
 
     if (Info.Cases.size() < 2) return;  // not really a cascade
 
+    // Phase 4 v2.3 — ambiguity diagnostics. Three checks, each
+    // with low false-positive rate and high real-bug rate.
+    //
+    // (1) Duplicate case labels. The user wrote two `case <c>`
+    //     arms with the same constant in the same switch — the
+    //     later arm is unreachable, definite bug.
+    {
+      llvm::SmallSet<int64_t, 4> Seen;
+      for (auto &[Val, _Region] : Info.Cases) {
+        if (!Seen.insert(Val).second) {
+          mlir::emitError(Info.Head->getLoc())
+              << "FSM cascade on persistent '" << Persists[RegIdx].Name
+              << "' has a duplicate case label '" << Val
+              << "' — the second arm is unreachable. "
+              << "Remove the duplicate or distinguish the constants.";
+          Failed = true;
+          break;
+        }
+      }
+    }
+
+    // (Skipped: "state written but never matched in any case
+    // arm" check. False-positives when a Moore-style output-decode
+    // cascade only covers a subset of states and routes the rest
+    // through its default arm — which is a perfectly valid pattern
+    // even though no `case X` exists for some constants the state
+    // register can hold.)
+
+    // (2) Empty case arm — a recognized cascade arm whose body
+    //     is empty (just an scf.yield) suggests the user meant
+    //     to do something but didn't. Deliberately empty arms
+    //     are usually written as `case Sx, /* fall through */`
+    //     in HDL Coder style, which we don't yet support; for
+    //     now flag empty arms as suspect.
+    for (size_t i = 0; i < Info.Cases.size(); ++i) {
+      auto &[Val, Region] = Info.Cases[i];
+      if (!Region) continue;  // synthesized reset arm
+      bool Empty = true;
+      for (mlir::Block &B : *Region) {
+        for (mlir::Operation &Op : B) {
+          if (mlir::isa<mlir::scf::YieldOp>(Op)) continue;
+          Empty = false; break;
+        }
+        if (!Empty) break;
+      }
+      if (Empty) {
+        mlir::emitError(Info.Head->getLoc())
+            << "FSM cascade on persistent '" << Persists[RegIdx].Name
+            << "' has an empty `case " << Val
+            << "` arm — the user wrote `case " << Val
+            << "` with no body, which is almost always unintended. "
+               "Add a body or remove the arm.";
+        Failed = true;
+      }
+    }
+
     // Generate enum-literal names. v1 uses S0/S1/.../SN based on the
     // order constants appear; the case constants are remembered so we
     // can map the persistent's reset value to the right name.
@@ -1544,15 +1604,38 @@ void Emitter::emitFSMTypedefs() {
   for (auto &F : FSMs) {
     if (!Emitted.insert(F.RegIndex).second) continue;
     unsigned N = (unsigned)F.Cases.size();
+
+    // Compute encoded value per state and the underlying width.
+    // - Binary  : sequential, width = ⌈log2(N)⌉ (≥1).
+    // - OneHot  : one bit per state, width = N.
+    // - Gray    : reflected-binary gray code, width = ⌈log2(N)⌉.
     unsigned W = 1;
-    while ((1u << W) < N) ++W;
+    llvm::SmallVector<uint64_t, 8> Values(N);
+    if (FSMEnc == HWFSMEncoding::OneHot) {
+      W = N;
+      for (unsigned i = 0; i < N; ++i)
+        Values[i] = (uint64_t)1 << i;
+    } else {
+      while ((1u << W) < N) ++W;
+      for (unsigned i = 0; i < N; ++i) {
+        if (FSMEnc == HWFSMEncoding::Gray)
+          Values[i] = i ^ (i >> 1);
+        else
+          Values[i] = i;  // Binary
+      }
+    }
+
     indent(1);
     OS << "typedef enum logic";
     if (W > 1) OS << " [" << (W - 1) << ":0]";
     OS << " {";
+    bool ExplicitVals = (FSMEnc != HWFSMEncoding::Binary);
     for (unsigned i = 0; i < F.CaseNames.size(); ++i) {
       if (i) OS << ", ";
       OS << F.CaseNames[i];
+      if (ExplicitVals) {
+        OS << " = " << W << "'d" << Values[i];
+      }
     }
     OS << "} " << F.EnumType << ";\n";
   }
@@ -1669,9 +1752,9 @@ bool Emitter::run(mlir::ModuleOp M) {
 
 std::string emitSystemVerilog(mlir::ModuleOp M,
                               const matlab::SourceManager *SM,
-                              HWResetKind Reset) {
+                              HWResetKind Reset, HWFSMEncoding FSMEnc) {
   std::ostringstream OS;
-  Emitter E(OS, SM, Reset);
+  Emitter E(OS, SM, Reset, FSMEnc);
   if (!E.run(M)) return std::string();
   return OS.str();
 }
