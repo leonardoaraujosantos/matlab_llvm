@@ -395,6 +395,191 @@ bool tryRewrite(mlir::LLVM::CallOp Zeros) {
 
 } // namespace
 
+/// Phase 5.6 Stage B — function-arg vector lowering.
+///
+/// When a func.func has a parameter whose declared type is
+/// `!llvm.ptr` and that arg carries the `matlab.array_n` /
+/// `matlab.fi_wl` attribute set (attached by `Lowering` when the
+/// parameter's Sema-inferred type is a vector fi-array), the arg
+/// IS the static-array source. There's no `matlab_mat_i64_zeros`
+/// to rewrite — the storage was allocated by the caller (a Stage
+/// C literal-init shortcut produces exactly this shape). The body's
+/// `matlab_mat_i64_subscript1_s` reads on the arg pointer get
+/// rewritten to direct GEP+load on that pointer.
+///
+/// Also drops the no-op `matlab.fi.cast(load_arg_slot) → ptr`
+/// re-cast pattern that the user-written `vec_a = fi(vec_a, S, W,
+/// F)` produces. The re-cast is identity for a vector arg whose
+/// type already matches; LowerFixedPoint can't lower it (its
+/// constructor branch only takes f64 input) so it would otherwise
+/// trip HWLegalize as an unhandled op.
+bool tryRewriteArg(mlir::BlockArgument Arg, int64_t N, unsigned ElemW) {
+  if (N <= 0 || ElemW == 0 || ElemW > 64) return false;
+  mlir::MLIRContext *Ctx = Arg.getContext();
+  auto PtrTy = mlir::LLVM::LLVMPointerType::get(Ctx);
+  auto ElemTy = mlir::IntegerType::get(Ctx, ElemW);
+  auto ArrTy = mlir::LLVM::LLVMArrayType::get(ElemTy, N);
+  auto I32 = mlir::IntegerType::get(Ctx, 32);
+  auto I64 = mlir::IntegerType::get(Ctx, 64);
+
+  // Walk the arg's direct uses + the slot it lives in (if any) to
+  // gather subscript reads. Mirrors `gatherUses` but starts at a
+  // function arg rather than a `matlab_mat_i64_zeros` call.
+  llvm::SmallVector<mlir::LLVM::CallOp, 4> Reads;
+  llvm::SmallVector<mlir::Operation *, 4> SlotLoads;
+  llvm::SmallVector<mlir::Operation *, 4> SlotStores;
+  llvm::SmallVector<mlir::Operation *, 4> NoOpReCasts;
+  mlir::Operation *Slot = nullptr;
+  for (mlir::OpOperand &U : Arg.getUses()) {
+    mlir::Operation *User = U.getOwner();
+    mlir::Operation *S = nullptr;
+    if (isSlotStoreOfPtr(U, S)) {
+      SlotStores.push_back(User);
+      if (Slot && Slot != S) return false;
+      Slot = S;
+      continue;
+    }
+    // Any other direct use of the arg (e.g. a subscript_s call
+    // with the arg directly) — handle below in the unified loop.
+    std::string Callee;
+    if (!getCalleeStr(User, Callee)) return false;
+    if (Callee == "matlab_mat_i64_subscript1_s" &&
+        U.getOperandNumber() == 0) {
+      Reads.push_back(mlir::cast<mlir::LLVM::CallOp>(User));
+      continue;
+    }
+    return false;
+  }
+  if (Slot) {
+    for (mlir::OpOperand &U : Slot->getResult(0).getUses()) {
+      mlir::Operation *User = U.getOwner();
+      if (isMatlabOpName(User, "matlab.store") ||
+          mlir::isa<mlir::LLVM::StoreOp>(User)) continue;
+      bool IsLoad = isMatlabOpName(User, "matlab.load") ||
+                    mlir::isa<mlir::LLVM::LoadOp>(User);
+      if (!IsLoad) return false;
+      SlotLoads.push_back(User);
+      for (mlir::OpOperand &LU : User->getResult(0).getUses()) {
+        mlir::Operation *LUO = LU.getOwner();
+        // The body's `vec_a = fi(vec_a, S, W, F)` re-cast on a
+        // vector arg surfaces as `matlab.fi.cast(load) → ptr`
+        // whose result feeds another `matlab.store/llvm.store`
+        // back into the same slot. Recognize and erase as a no-
+        // op (the re-cast IS identity when the input is already
+        // typed as the target fi spec, which the call site
+        // guarantees by passing a typed array).
+        if (isMatlabOpName(LUO, "matlab.fi.cast") &&
+            LUO->getNumResults() == 1) {
+          // Validate: result is a ptr being stored back into the
+          // same slot.
+          for (mlir::Operation *CU : LUO->getResult(0).getUsers()) {
+            mlir::Operation *S = nullptr;
+            mlir::OpOperand *Op0 = nullptr;
+            for (mlir::OpOperand &O : CU->getOpOperands())
+              if (O.get() == LUO->getResult(0)) { Op0 = &O; break; }
+            if (Op0 && isSlotStoreOfPtr(*Op0, S) && S == Slot) {
+              NoOpReCasts.push_back(LUO);
+              SlotStores.push_back(CU);
+              break;
+            }
+          }
+          continue;
+        }
+        std::string Callee;
+        if (!getCalleeStr(LUO, Callee)) return false;
+        if (Callee == "matlab_mat_i64_subscript1_s" &&
+            LU.getOperandNumber() == 0) {
+          Reads.push_back(mlir::cast<mlir::LLVM::CallOp>(LUO));
+          continue;
+        }
+        return false;
+      }
+    }
+  }
+  if (Reads.empty()) return false;
+
+  // Helper mirrors the in-place version in `tryRewrite`.
+  auto buildGepIndex = [&](mlir::OpBuilder &Bldr, mlir::Location IL,
+                           mlir::Value RawIdx) -> mlir::Value {
+    int64_t K;
+    if (readIntConst(RawIdx, K)) {
+      return mlir::LLVM::ConstantOp::create(Bldr, IL, I32,
+          mlir::IntegerAttr::get(I32, K - 1)).getRes();
+    }
+    mlir::Value IntIdx;
+    if (mlir::isa<mlir::FloatType>(RawIdx.getType()))
+      IntIdx = mlir::arith::FPToSIOp::create(Bldr, IL, I32, RawIdx);
+    else if (auto IT = mlir::dyn_cast<mlir::IntegerType>(RawIdx.getType())) {
+      if (IT.getWidth() == 32) IntIdx = RawIdx;
+      else if (IT.getWidth() < 32)
+        IntIdx = mlir::arith::ExtSIOp::create(Bldr, IL, I32, RawIdx);
+      else
+        IntIdx = mlir::arith::TruncIOp::create(Bldr, IL, I32, RawIdx);
+    } else return {};
+    auto OneI32 = mlir::arith::ConstantOp::create(Bldr, IL, I32,
+        mlir::IntegerAttr::get(I32, 1));
+    return mlir::arith::SubIOp::create(Bldr, IL, IntIdx, OneI32).getResult();
+  };
+
+  // For each read: GEP + load on the arg pointer, replacing the
+  // runtime call. Mirrors the consumer-rewrite in `tryRewrite`.
+  for (mlir::LLVM::CallOp Rd : Reads) {
+    mlir::OpBuilder RB(Rd);
+    mlir::Value GepIdx = buildGepIndex(RB, Rd.getLoc(), Rd.getOperand(1));
+    if (!GepIdx) return false;
+    auto Gep = mlir::LLVM::GEPOp::create(
+        RB, Rd.getLoc(), PtrTy, ArrTy, Arg,
+        mlir::ArrayRef<mlir::LLVM::GEPArg>{0, GepIdx});
+    auto Ld = mlir::LLVM::LoadOp::create(RB, Rd.getLoc(), ElemTy, Gep.getRes());
+    mlir::Value LoadVal = Ld.getRes();
+    llvm::SmallVector<mlir::Operation *, 4> ToErase;
+    bool AnyOther = false;
+    for (mlir::OpOperand &U : Rd.getResult().getUses()) {
+      mlir::Operation *Use = U.getOwner();
+      if (auto Tr = mlir::dyn_cast<mlir::arith::TruncIOp>(Use)) {
+        unsigned TW = mlir::cast<mlir::IntegerType>(
+            Tr.getResult().getType()).getWidth();
+        if (TW <= ElemW) {
+          mlir::Value V = LoadVal;
+          if (TW < ElemW) {
+            mlir::OpBuilder TB(Tr);
+            auto NarrowTy = mlir::IntegerType::get(Ctx, TW);
+            V = mlir::arith::TruncIOp::create(TB, Tr.getLoc(), NarrowTy, V);
+          }
+          Tr.getResult().replaceAllUsesWith(V);
+          ToErase.push_back(Tr);
+          continue;
+        }
+      }
+      AnyOther = true;
+    }
+    for (mlir::Operation *Op : ToErase) Op->erase();
+    if (AnyOther) {
+      mlir::Value Wide = LoadVal;
+      if (ElemW < 64)
+        Wide = mlir::arith::ExtSIOp::create(RB, Rd.getLoc(), I64, Wide);
+      Rd.getResult().replaceAllUsesWith(Wide);
+    }
+    Rd.erase();
+  }
+
+  // Erase no-op re-casts and any slot store/load chains they
+  // belonged to. A surviving slot load with no remaining uses
+  // also goes; the slot itself stays if other uses exist.
+  for (mlir::Operation *Op : NoOpReCasts) Op->erase();
+  for (mlir::Operation *Op : SlotStores) Op->erase();
+  for (mlir::Operation *Op : SlotLoads) {
+    if (Op->getResult(0).use_empty()) Op->erase();
+    else Op->getResult(0).replaceAllUsesWith(Arg);
+  }
+  // The slot's own store of the original arg → ptr is now
+  // dead; collapse the slot to point directly at the arg by
+  // replacing remaining slot loads (above). If the slot has any
+  // other uses we leave it; downstream cleanup handles it.
+  if (Slot && Slot->getResult(0).use_empty()) Slot->erase();
+  return true;
+}
+
 bool runLowerStaticFiArrays(mlir::ModuleOp M) {
   llvm::SmallVector<mlir::LLVM::CallOp, 4> Worklist;
   M.walk([&](mlir::LLVM::CallOp C) {
@@ -406,6 +591,28 @@ bool runLowerStaticFiArrays(mlir::ModuleOp M) {
   for (mlir::LLVM::CallOp C : Worklist) {
     (void)tryRewrite(C);
   }
+
+  // Phase 5.6 Stage B: also rewrite vector function args whose
+  // declared type is `!llvm.ptr` and which carry the
+  // `matlab.array_n` / `matlab.fi_wl` attributes attached by
+  // `Lowering` for inferred-vector parameters. The arg's
+  // pointer is treated as the static-array source.
+  M.walk([&](mlir::func::FuncOp F) {
+    if (F.empty()) return;
+    auto FT = F.getFunctionType();
+    for (unsigned I = 0; I < FT.getNumInputs(); ++I) {
+      auto N = F.getArgAttrOfType<mlir::IntegerAttr>(I, "matlab.array_n");
+      auto WL = F.getArgAttrOfType<mlir::IntegerAttr>(I, "matlab.fi_wl");
+      if (!N || !WL) continue;
+      mlir::BlockArgument Arg = F.getArgument(I);
+      if (!mlir::isa<mlir::LLVM::LLVMPointerType>(Arg.getType())) continue;
+      // Pick the storage class — same rule as Stage C: smallest
+      // native int that fits the WL.
+      unsigned W = (unsigned)WL.getInt();
+      unsigned StorBits = W <= 8 ? 8 : (W <= 16 ? 16 : (W <= 32 ? 32 : 64));
+      (void)tryRewriteArg(Arg, N.getInt(), StorBits);
+    }
+  });
 
   // Dead-code-eliminate runtime-call helpers that survived the
   // rewrite without consumers. The `__subscript_store` lowering

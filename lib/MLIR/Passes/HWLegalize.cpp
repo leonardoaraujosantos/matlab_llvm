@@ -381,14 +381,21 @@ bool runHWLegalize(mlir::ModuleOp M, const matlab::SourceManager * /*SM*/) {
     // 4b. Parameter types.
     auto FT = F.getFunctionType();
     for (auto [I, T] : llvm::enumerate(FT.getInputs())) {
-      if (!isSynthScalar(T)) {
-        mlir::emitError(F.getLoc())
-            << "function '" << F.getSymName() << "' parameter " << I
-            << " has unsynthesizable type (only i1 / i8 / i16 / i32 / "
-               "i64 are supported in Phase 1; floating-point requires "
-               "explicit fi(...) conversion)";
-        Ok = false;
-      }
+      if (isSynthScalar(T)) continue;
+      // Phase 5.6 Stage B: a `!llvm.ptr` parameter that carries
+      // the `matlab.array_n` + `matlab.fi_wl` attributes is a
+      // recognized vector arg — the SV emitter renders it as
+      // `input logic [W-1:0] name [N];`.
+      if (mlir::isa<mlir::LLVM::LLVMPointerType>(T) &&
+          F.getArgAttrOfType<mlir::IntegerAttr>(I, "matlab.array_n") &&
+          F.getArgAttrOfType<mlir::IntegerAttr>(I, "matlab.fi_wl"))
+        continue;
+      mlir::emitError(F.getLoc())
+          << "function '" << F.getSymName() << "' parameter " << I
+          << " has unsynthesizable type (only i1 / i8 / i16 / i32 / "
+             "i64 are supported in Phase 1; floating-point requires "
+             "explicit fi(...) conversion)";
+      Ok = false;
     }
     // 4c. Result types. Phase 3 relaxation: a function whose result
     //     directly returns a recognized persistent get (`return %g`

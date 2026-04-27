@@ -703,6 +703,25 @@ void Emitter::emitPortList(mlir::func::FuncOp F) {
   for (unsigned I = 0; I < FT.getNumInputs(); ++I) {
     if (!First) OS << ",\n";
     First = false;
+    // Phase 5.6 Stage B: a `!llvm.ptr` arg with `matlab.array_n` +
+    // `matlab.fi_wl` attrs is a vector port. Render as
+    // `input logic [W-1:0] name [N]` (signedness from the
+    // `matlab.fi_signed` attr, default to signed for fi).
+    if (mlir::isa<mlir::LLVM::LLVMPointerType>(FT.getInput(I))) {
+      auto NA = F.getArgAttrOfType<mlir::IntegerAttr>(I, "matlab.array_n");
+      auto WLA = F.getArgAttrOfType<mlir::IntegerAttr>(I, "matlab.fi_wl");
+      if (NA && WLA) {
+        unsigned W = (unsigned)WLA.getInt();
+        bool Signed = true;
+        if (auto SA =
+                F.getArgAttrOfType<mlir::IntegerAttr>(I, "matlab.fi_signed"))
+          Signed = SA.getInt() != 0;
+        auto IT = mlir::IntegerType::get(F.getContext(), W);
+        OS << "    input  " << svType(IT, Signed) << " " << ArgNames[I]
+           << " [" << NA.getInt() << "]";
+        continue;
+      }
+    }
     OS << "    input  " << svType(FT.getInput(I)) << " " << ArgNames[I];
   }
   for (unsigned I = 0; I < FT.getNumResults(); ++I) {

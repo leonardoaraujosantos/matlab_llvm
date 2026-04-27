@@ -692,7 +692,7 @@ piece the next stage builds on.
 | A | (split) | (split — see notes below) | — | — |
 | A.1 | 🟡 deferred | fi-spec propagation across function-call boundaries (precondition for clean Saturate-cast on the function-arg path) | ~3 days | enables `fi(arg, ...)` casts to clamp correctly, used by fir/seq's final stage |
 | A.2 | 🟡 deferred | Constant-index reads on vector args | ~1 day | small extension once Stage B lands; no value standalone |
-| B | 🟡 deferred | Vector function arguments — Sema mistypes the vec arg as a scalar primitive, then the body's subscript ops surface as `matlab.subscript(scalar, idx)` (a malformed shape that propagates through the whole pipeline). Fix needs Sema TypeInference to track the array shape across function-arg boundaries, plus the MIR/Lowering+user-call refinement to follow that through. | ~4 days | `vector_processor` ✅ |
+| B | ✅ shipped | Vector function arguments | ~4 days | `vector_processor` ✅ |
 | C | ✅ shipped | Static array literal init (`fi([0.1, 0.2, ...], ...)` → alloca + per-element stores) | ~2 days | coefficient-table half of fir / seq |
 | D | ✅ shipped | Loop-iv array indexing (`for i = 1:N; arr(i) ...; end`) | ~3 days | for-loop bodies in fir / seq |
 | E | 🟡 deferred | Vector concat with static shapes (`[x, delay(1:end-1)]`) | ~3 days | shift-register pattern in fir / seq |

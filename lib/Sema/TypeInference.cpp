@@ -1,8 +1,12 @@
 #include "matlab/Sema/TypeInference.h"
 
+#include "llvm/ADT/DenseMap.h"
+
 #include <algorithm>
 #include <cassert>
 #include <cstdlib>
+#include <functional>
+#include <optional>
 #include <string>
 
 namespace matlab {
@@ -65,10 +69,143 @@ void TypeInference::runScript(Script &S) {
 
 void TypeInference::runFunction(Function &F) {
   Env E;
-  // Parameters start with Any.
+  // Phase 5.6 Stage B — vector function arguments. Before the
+  // ordinary body walk, scan the body's AST for `param(k)`
+  // constant-index subscript sites. If any parameter is read with
+  // a constant integer index, seed its env type with a `Vector(N)`
+  // shape (where N is the largest index seen) so subsequent
+  // visits of the same param flow as a vector instead of
+  // collapsing to a scalar via the assignment `param = fi(param,
+  // ...)` re-cast idiom. The element dtype starts as Unknown; the
+  // body's own ops (fi-cast, etc.) refine it. Without this seed,
+  // `vec_a = fi(vec_a, 1, 16, 8); ... = vec_a(k);` mistypes vec_a
+  // as scalar `i16`, the subscript surfaces as
+  // `matlab.subscript(scalar, idx)`, and the whole pipeline
+  // operates on a malformed shape (Stage B blocker writeup in
+  // docs/emit_systemverilog.md).
+  llvm::DenseMap<Binding *, int64_t> ParamMaxIdx;
+  if (F.Body) {
+    std::function<void(const Expr &)> walkExpr;
+    std::function<void(const Stmt &)> walkStmt;
+    std::function<void(const ::matlab::Block &)> walkBlock;
+    walkExpr = [&](const Expr &E0) {
+      if (auto *C = dynamic_cast<const CallOrIndex *>(&E0)) {
+        // Recognized call/index whose callee is a NameExpr bound
+        // to one of the function's parameters. Pull out constant
+        // integer indices.
+        if (auto *N = dynamic_cast<const NameExpr *>(C->Callee)) {
+          if (N->Ref) {
+            for (Binding *PB : F.ParamRefs) {
+              if (PB == N->Ref) {
+                if (C->Args.size() == 1 && C->Args[0]) {
+                  // Inline a tiny `foldInt` — `foldIntExpr` lives
+                  // later in this TU. Only IntegerLiteral / signed-
+                  // unary forms are valid Vector indices.
+                  std::function<std::optional<int64_t>(const Expr *)>
+                      foldI = [&](const Expr *Ex) -> std::optional<int64_t> {
+                    if (!Ex) return std::nullopt;
+                    if (auto *L = dynamic_cast<const IntegerLiteral *>(Ex)) {
+                      try { return std::stoll(std::string(L->Text)); }
+                      catch (...) { return std::nullopt; }
+                    }
+                    if (auto *U = dynamic_cast<const UnaryOpExpr *>(Ex)) {
+                      auto V = foldI(U->Operand);
+                      if (!V) return std::nullopt;
+                      if (U->Op == UnOp::Minus) return -*V;
+                      if (U->Op == UnOp::Plus)  return  *V;
+                    }
+                    return std::nullopt;
+                  };
+                  auto K = foldI(C->Args[0]);
+                  if (K && *K > 0) {
+                    auto It = ParamMaxIdx.find(PB);
+                    if (It == ParamMaxIdx.end() || It->second < *K)
+                      ParamMaxIdx[PB] = *K;
+                  }
+                }
+                break;
+              }
+            }
+          }
+        }
+        if (C->Callee) walkExpr(*C->Callee);
+        for (Expr *A : C->Args) if (A) walkExpr(*A);
+        return;
+      }
+      if (auto *B = dynamic_cast<const BinaryOpExpr *>(&E0)) {
+        if (B->LHS) walkExpr(*B->LHS);
+        if (B->RHS) walkExpr(*B->RHS);
+        return;
+      }
+      if (auto *U = dynamic_cast<const UnaryOpExpr *>(&E0)) {
+        if (U->Operand) walkExpr(*U->Operand);
+        return;
+      }
+      if (auto *P = dynamic_cast<const PostfixOpExpr *>(&E0)) {
+        if (P->Operand) walkExpr(*P->Operand);
+        return;
+      }
+    };
+    walkStmt = [&](const Stmt &S) {
+      switch (S.Kind) {
+      case NodeKind::ExprStmt: {
+        auto &Es = static_cast<const ExprStmt &>(S);
+        if (Es.E) walkExpr(*Es.E);
+        return;
+      }
+      case NodeKind::AssignStmt: {
+        auto &As = static_cast<const AssignStmt &>(S);
+        for (Expr *L : As.LHS) if (L) walkExpr(*L);
+        if (As.RHS) walkExpr(*As.RHS);
+        return;
+      }
+      case NodeKind::IfStmt: {
+        auto &I = static_cast<const IfStmt &>(S);
+        if (I.Cond) walkExpr(*I.Cond);
+        if (I.Then) walkBlock(*I.Then);
+        for (auto &EI : I.Elseifs) {
+          if (EI.Cond) walkExpr(*EI.Cond);
+          if (EI.Body) walkBlock(*EI.Body);
+        }
+        if (I.Else) walkBlock(*I.Else);
+        return;
+      }
+      case NodeKind::ForStmt: {
+        auto &Fs = static_cast<const ForStmt &>(S);
+        if (Fs.Iter) walkExpr(*Fs.Iter);
+        if (Fs.Body) walkBlock(*Fs.Body);
+        return;
+      }
+      case NodeKind::WhileStmt: {
+        auto &Ws = static_cast<const WhileStmt &>(S);
+        if (Ws.Cond) walkExpr(*Ws.Cond);
+        if (Ws.Body) walkBlock(*Ws.Body);
+        return;
+      }
+      default: return;
+      }
+    };
+    walkBlock = [&](const ::matlab::Block &B0) {
+      for (Stmt *S : B0.Stmts) if (S) walkStmt(*S);
+    };
+    walkBlock(*F.Body);
+  }
+
+  // Parameters start with Any unless the pre-pass found vector-
+  // shape evidence, in which case they start as `arrayOf(Unknown,
+  // Vector(N))`. The body's typed assignments (fi-cast, etc.)
+  // will refine the element dtype.
   for (Binding *B : F.ParamRefs) {
-    E[B] = TC.any();
-    B->InferredType = TC.any();
+    auto It = ParamMaxIdx.find(B);
+    if (It != ParamMaxIdx.end() && It->second >= 1) {
+      const Type *T = TC.arrayOf(Dtype::Unknown,
+                                  Shape::vector(It->second));
+      E[B] = T;
+      B->InferredType = T;
+    } else {
+      E[B] = TC.any();
+      B->InferredType = TC.any();
+    }
   }
   // Outputs start unassigned; treat as Any to allow use before assignment
   // analysis downstream.

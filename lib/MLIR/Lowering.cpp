@@ -1053,6 +1053,36 @@ void Lowerer::lowerFunction(const Function &F, mlir::ModuleOp M,
     if (!Bnd || Bnd->Name.empty()) continue;
     Fn.setArgAttr(i, mlir::StringAttr::get(&MCtx, "matlab.name"),
                   mlir::StringAttr::get(&MCtx, Bnd->Name));
+    // Phase 5.6 Stage B: attach static shape + fi metadata for
+    // vector-typed parameters so the downstream pipeline
+    // (LowerStaticFiArrays / SV port emission) can recognize the
+    // arg as an inferable static array. The TypeMapper has
+    // already mapped the param type to `!llvm.ptr`, which loses
+    // the shape and element-width info — these attrs reattach
+    // it. Only set when the inferred type carries enough info
+    // (Vector with known length + Fixed element with FxSpec).
+    if (Bnd->InferredType &&
+        Bnd->InferredType->K == Type::Kind::Array) {
+      auto &AT = static_cast<const ArrayType &>(*Bnd->InferredType);
+      if (AT.S.K == Shape::Rank::Vector && !AT.S.Dims.empty() &&
+          AT.S.Dims[0] >= 1 && AT.Elt == Dtype::Fixed && AT.FxSpec) {
+        auto I64 = mlir::IntegerType::get(&MCtx, 64);
+        auto I32 = mlir::IntegerType::get(&MCtx, 32);
+        auto I1 = mlir::IntegerType::get(&MCtx, 1);
+        Fn.setArgAttr(i,
+            mlir::StringAttr::get(&MCtx, "matlab.array_n"),
+            mlir::IntegerAttr::get(I64, AT.S.Dims[0]));
+        Fn.setArgAttr(i,
+            mlir::StringAttr::get(&MCtx, "matlab.fi_wl"),
+            mlir::IntegerAttr::get(I32, (int64_t)AT.FxSpec->WordLength));
+        Fn.setArgAttr(i,
+            mlir::StringAttr::get(&MCtx, "matlab.fi_fl"),
+            mlir::IntegerAttr::get(I32, (int64_t)AT.FxSpec->FractionLength));
+        Fn.setArgAttr(i,
+            mlir::StringAttr::get(&MCtx, "matlab.fi_signed"),
+            mlir::IntegerAttr::get(I1, AT.FxSpec->Signed ? 1 : 0));
+      }
+    }
   }
   // Phase 5.6.2a: same for return-variable names. The SV emitter uses
   // these to give output ports human-readable names (`output ...
