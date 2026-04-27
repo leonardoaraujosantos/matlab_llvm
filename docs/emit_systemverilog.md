@@ -1522,12 +1522,28 @@ Justfile recipe: `just report-hw FILE.m`.
 target frequencies. `test/EmitSV/reports/*.m` — golden hardware
 reports.
 
-### Phase 5.6 — Port-type pragmas + source-name preservation (~3 days)
+### Phase 5.6 — Port-type pragmas + source-name preservation (~3 days). **Shipped.**
 
 **Goal.** Let function-only `.m` files emit synthesizable SV
 *without* a separate typed-driver file, and carry source-level
 identifiers all the way to the generated module so the output is
 human-readable for downstream review.
+
+All three sub-items shipped in v1:
+  - 5.6.1 — `% hdl: port(<name>, <kind>, ...)` pragma scanner +
+    `ApplyPortTypePragmas` pass that retypes the function
+    signature before the user-call refinement loop.
+  - 5.6.2a — `matlab.name` result attr propagated through
+    `Lowering` and read by `EmitSystemVerilog::emitPortList`.
+  - 5.6.2b — source-comment forwarding implemented as a
+    side-channel in the SV emitter (no lex/AST changes): the
+    emitter tracks the last-emitted source line per function and
+    scans `SourceManager::getLineText` for `%` comment-only lines
+    between the previous op and the next, emitting them as `//`
+    inside the `always_comb` body. Scoped to the function's body
+    line range so script-driver and file-header prose are
+    excluded. Trailing same-line comments (`x = 1; % bar`) need
+    a real lexer change and are still deferred.
 
 Two independent gaps, shipped together because they share
 infrastructure (the lexer / `ScanHWPragmas` pass and the

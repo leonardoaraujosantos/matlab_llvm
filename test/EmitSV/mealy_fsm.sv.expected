@@ -7,12 +7,12 @@ module mealy_fsm (
     input  logic rst_n,
     input  logic signed [7:0] input_bit,
     input  logic signed [7:0] reset,
-    output logic y
+    output logic out_signal
 );
 
     typedef enum logic {S0, S1} current_state_t;
 
-    logic out_signal;
+    logic out_signal_1;
     logic v0_1;
     logic v1_1;
     logic v2_1;
@@ -21,46 +21,46 @@ module mealy_fsm (
     current_state_t current_state_next;
 
     always_comb begin
-        out_signal = '0;
+        out_signal_1 = '0;
         v0_1 = '0;
         v1_1 = '0;
         v2_1 = '0;
         v3_1 = '0;
         current_state_next = current_state;
-        y = '0;
+        out_signal = '0;
         v0_1 = reset != 8'sd0;
         if (v0_1) begin
             current_state_next = S0;
         end
-        out_signal = 1'b0;
+        out_signal_1 = 1'b0;
         unique case (current_state)
             S0: begin
                 v1_1 = input_bit == 1;
                 if (v1_1) begin
                     current_state_next = S1;
-                    out_signal = 1'b0;
+                    out_signal_1 = 1'b0;
                 end else begin
                     current_state_next = S0;
-                    out_signal = 1'b0;
+                    out_signal_1 = 1'b0;
                 end
             end
             S1: begin
                 v2_1 = input_bit == 1;
                 if (v2_1) begin
                     current_state_next = S1;
-                    out_signal = 1'b1;
+                    out_signal_1 = 1'b1;
                 end else begin
                     current_state_next = S0;
-                    out_signal = 1'b0;
+                    out_signal_1 = 1'b0;
                 end
             end
             default: begin
                 current_state_next = S0;
-                out_signal = 1'b0;
+                out_signal_1 = 1'b0;
             end
         endcase
-        v3_1 = out_signal;
-        y = v3_1;
+        v3_1 = out_signal_1;
+        out_signal = v3_1;
     end
 
     always_ff @(posedge clk or negedge rst_n) begin

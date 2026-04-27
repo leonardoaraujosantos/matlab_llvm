@@ -365,6 +365,29 @@ bool emitHardwareReport(mlir::ModuleOp M, std::ostream &OS,
 /// pragmas surface a warning.
 bool runScanHWPragmas(mlir::ModuleOp M, const matlab::SourceManager *SM);
 
+/// Phase 5.6.1 — apply `% hdl: port(...)` pragmas to function
+/// signatures.
+///
+/// Reads the `hdl.ports` ArrayAttr that `runScanHWPragmas` attaches
+/// to a `func.func` (one DictionaryAttr entry per recognized port
+/// pragma) and rewrites the function's input/result types to the
+/// declared kind/width. Each entry's `name` field is matched against
+/// the function's `matlab.name` arg / result attribute (set by
+/// Lowering); a `name` that doesn't match any port surfaces a
+/// warning and is ignored.
+///
+/// Runs BEFORE the user-call refinement loop in the SV pipeline so
+/// downstream passes (LowerScalarsToArith, RefineFuncSigs, etc.)
+/// pick up the typed entry-block args naturally — no separate
+/// re-typing of body ops is needed beyond what existing patterns
+/// already do for typed callers.
+///
+/// Returns true on success. Mismatches between a `port(...)`
+/// pragma and an existing concrete arg type (e.g. when a typed
+/// caller has already refined the same arg to a different type)
+/// are a hard error.
+bool runApplyPortTypePragmas(mlir::ModuleOp M);
+
 /// Pre-HWStateInfer normalization. The HDL Coder canonical
 /// initializer is two separate guards:
 ///

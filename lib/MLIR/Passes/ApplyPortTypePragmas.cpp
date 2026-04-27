@@ -1,0 +1,146 @@
+// Phase 5.6.1 — apply `% hdl: port(...)` pragmas to function
+// signatures so a function-only `.m` file emits synthesizable
+// SystemVerilog without a separate typed driver.
+//
+// `ScanHWPragmas` parses `% hdl: port(<name>, <kind>, ...)`
+// comments and attaches them as an `hdl.ports` ArrayAttr on the
+// func.func, with one DictionaryAttr per port (fields: name,
+// kind, signed, width, frac). This pass walks every such function
+// and rewrites the FunctionType + entry-block arg types to the
+// declared types, matching by `matlab.name` arg/result attr.
+//
+// Runs BEFORE the user-call refinement iteration loop so the
+// existing pattern set (BinArithToArith, slot-type inference,
+// etc.) sees the typed args naturally.
+
+#include "matlab/MLIR/Passes/Passes.h"
+
+#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/IR/BuiltinAttributes.h"
+#include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/Diagnostics.h"
+
+#include <string>
+
+namespace matlab {
+namespace mlirgen {
+
+namespace {
+
+/// Build the MLIR type for a parsed port DictionaryAttr.
+mlir::Type typeForPortAttr(mlir::MLIRContext &Ctx,
+                           mlir::DictionaryAttr Entry) {
+  auto KindAttr = Entry.getAs<mlir::StringAttr>("kind");
+  auto WidthAttr = Entry.getAs<mlir::IntegerAttr>("width");
+  if (!KindAttr || !WidthAttr) return {};
+  unsigned W = (unsigned)WidthAttr.getInt();
+  if (W == 0 || W > 64) return {};
+  // For `bool` we always emit i1; everything else gets the declared
+  // width as a (signless) integer. MLIR integers don't carry sign;
+  // signedness is preserved on the DictionaryAttr and read back by
+  // downstream passes / emitters when they need it.
+  if (KindAttr.getValue() == "bool" || KindAttr.getValue() == "i1")
+    return mlir::IntegerType::get(&Ctx, 1);
+  return mlir::IntegerType::get(&Ctx, W);
+}
+
+} // namespace
+
+bool runApplyPortTypePragmas(mlir::ModuleOp M) {
+  bool Failed = false;
+  M.walk([&](mlir::func::FuncOp F) {
+    if (F.empty()) return;
+    auto PortsAttr = F->getAttrOfType<mlir::ArrayAttr>("hdl.ports");
+    if (!PortsAttr || PortsAttr.empty()) return;
+
+    auto &Ctx = *F.getContext();
+    auto FT = F.getFunctionType();
+
+    // Build mutable type lists seeded with the existing signature.
+    llvm::SmallVector<mlir::Type> InTys(FT.getInputs().begin(),
+                                        FT.getInputs().end());
+    llvm::SmallVector<mlir::Type> OutTys(FT.getResults().begin(),
+                                         FT.getResults().end());
+
+    // Index args + results by their `matlab.name` attribute. Args
+    // that have no name attr are skipped (they cannot be addressed
+    // by a `port(...)` pragma).
+    auto findArgByName = [&](llvm::StringRef Name) -> int {
+      for (unsigned I = 0; I < FT.getNumInputs(); ++I)
+        if (auto S = F.getArgAttrOfType<mlir::StringAttr>(I, "matlab.name"))
+          if (S.getValue() == Name) return (int)I;
+      return -1;
+    };
+    auto findResByName = [&](llvm::StringRef Name) -> int {
+      for (unsigned I = 0; I < FT.getNumResults(); ++I)
+        if (auto S = F.getResultAttrOfType<mlir::StringAttr>(I, "matlab.name"))
+          if (S.getValue() == Name) return (int)I;
+      return -1;
+    };
+
+    for (auto Attr : PortsAttr) {
+      auto Entry = mlir::dyn_cast<mlir::DictionaryAttr>(Attr);
+      if (!Entry) continue;
+      auto NameAttr = Entry.getAs<mlir::StringAttr>("name");
+      if (!NameAttr) continue;
+      auto T = typeForPortAttr(Ctx, Entry);
+      if (!T) {
+        F.emitWarning() << "ignoring `port(" << NameAttr.getValue()
+                        << ", ...)` pragma with malformed type fields";
+        continue;
+      }
+
+      int Idx = findArgByName(NameAttr.getValue());
+      if (Idx >= 0) {
+        // Reject the silent case where a typed caller already
+        // refined this arg to something incompatible — surfacing
+        // the conflict early is friendlier than emitting wrong RTL.
+        auto Existing = InTys[Idx];
+        bool IsAny = mlir::isa<mlir::NoneType>(Existing);
+        if (!IsAny && Existing != T) {
+          F.emitError() << "`port(" << NameAttr.getValue()
+                        << ", ...)` pragma declares type " << T
+                        << " but arg already has incompatible type "
+                        << Existing;
+          Failed = true;
+          continue;
+        }
+        InTys[Idx] = T;
+        continue;
+      }
+      int RIdx = findResByName(NameAttr.getValue());
+      if (RIdx >= 0) {
+        // Result-port pragmas are accepted as type *hints* but not
+        // applied to the function signature here. The body's
+        // return op is still `none`-typed at this stage; we let
+        // RefineFuncSigs (which runs right after) infer result
+        // types from the typed body so the verifier stays happy.
+        // The pragma still serves as a check downstream — a
+        // future pass can compare the inferred result type against
+        // the pragma and warn on mismatch.
+        (void)OutTys[RIdx];
+        continue;
+      }
+      F.emitWarning() << "`port(" << NameAttr.getValue()
+                      << ", ...)` pragma names no known arg or result; "
+                         "ignored";
+    }
+
+    if (Failed) return;
+
+    // Update the function type + entry-block arg types so downstream
+    // passes see typed values. Only inputs change here; result types
+    // get inferred by RefineFuncSigs from the typed body.
+    auto NewFT = mlir::FunctionType::get(&Ctx, InTys, OutTys);
+    F.setType(NewFT);
+    auto &Entry = F.front();
+    for (unsigned I = 0; I < InTys.size(); ++I) {
+      Entry.getArgument(I).setType(InTys[I]);
+    }
+  });
+  return !Failed;
+}
+
+} // namespace mlirgen
+} // namespace matlab

@@ -1054,6 +1054,17 @@ void Lowerer::lowerFunction(const Function &F, mlir::ModuleOp M,
     Fn.setArgAttr(i, mlir::StringAttr::get(&MCtx, "matlab.name"),
                   mlir::StringAttr::get(&MCtx, Bnd->Name));
   }
+  // Phase 5.6.2a: same for return-variable names. The SV emitter uses
+  // these to give output ports human-readable names (`output ...
+  // data_out, output ... overflow`) instead of the synthesized
+  // `y, y1, y2, ...` fallback.
+  for (size_t i = 0; i < F.OutputRefs.size(); ++i) {
+    Binding *Bnd = F.OutputRefs[i];
+    if (!Bnd || Bnd->Name.empty()) continue;
+    if (IsCtor && i == 0) continue;
+    Fn.setResultAttr(i, mlir::StringAttr::get(&MCtx, "matlab.name"),
+                     mlir::StringAttr::get(&MCtx, Bnd->Name));
+  }
   B.insert(Fn);
 
   auto *Entry = Fn.addEntryBlock();

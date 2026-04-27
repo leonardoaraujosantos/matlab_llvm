@@ -7,7 +7,7 @@ module latch_en (
     input  logic rst_n,
     input  logic signed [7:0] d,
     input  logic signed [7:0] en,
-    output logic signed [7:0] y
+    output logic signed [7:0] out
 );
 
     logic v0_1;
@@ -17,12 +17,12 @@ module latch_en (
     always_comb begin
         v0_1 = '0;
         r_next = r;
-        y = '0;
+        out = '0;
         v0_1 = en > 8'sd0;
         if (v0_1) begin
             r_next = d;
         end
-        y = r;
+        out = r;
     end
 
     always_ff @(posedge clk or negedge rst_n) begin

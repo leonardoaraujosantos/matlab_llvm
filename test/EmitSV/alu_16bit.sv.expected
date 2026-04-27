@@ -6,11 +6,11 @@ module alu_16bit (
     input  logic signed [15:0] a,
     input  logic signed [15:0] b,
     input  logic signed [7:0] sel,
-    output logic signed [15:0] y,
-    output logic y1
+    output logic signed [15:0] data_out,
+    output logic overflow
 );
 
-    logic signed [15:0] data_out;
+    logic signed [15:0] data_out_1;
     logic v0_1;
     logic signed [15:0] v1_1;
     logic v2_1;
@@ -26,7 +26,7 @@ module alu_16bit (
     logic signed [15:0] v12_1;
 
     always_comb begin
-        data_out = '0;
+        data_out_1 = '0;
         v0_1 = '0;
         v1_1 = '0;
         v2_1 = '0;
@@ -40,49 +40,49 @@ module alu_16bit (
         v10_1 = '0;
         v11_1 = '0;
         v12_1 = '0;
-        y = '0;
-        y1 = '0;
-        data_out = 16'sd0;
+        data_out = '0;
+        overflow = '0;
+        data_out_1 = 16'sd0;
         v0_1 = sel == 0;
         if (v0_1) begin
             v1_1 = a + b;
-            data_out = v1_1;
+            data_out_1 = v1_1;
         end else begin
             v2_1 = sel == 1;
             if (v2_1) begin
                 v3_1 = a - b;
-                data_out = v3_1;
+                data_out_1 = v3_1;
             end else begin
                 v4_1 = sel == 2;
                 if (v4_1) begin
                     v5_1 = a & b;
-                    data_out = v5_1;
+                    data_out_1 = v5_1;
                 end else begin
                     v6_1 = sel == 3;
                     if (v6_1) begin
                         v7_1 = a | b;
-                        data_out = v7_1;
+                        data_out_1 = v7_1;
                     end else begin
                         v8_1 = sel == 4;
                         if (v8_1) begin
                             v9_1 = a ^ b;
-                            data_out = v9_1;
+                            data_out_1 = v9_1;
                         end else begin
                             v10_1 = sel == 5;
                             if (v10_1) begin
                                 v11_1 = a ^ -16'sd1;
-                                data_out = v11_1;
+                                data_out_1 = v11_1;
                             end else begin
-                                data_out = 16'sd0;
+                                data_out_1 = 16'sd0;
                             end
                         end
                     end
                 end
             end
         end
-        v12_1 = data_out;
-        y = v12_1;
-        y1 = 1'b0;
+        v12_1 = data_out_1;
+        data_out = v12_1;
+        overflow = 1'b0;
     end
 
 endmodule

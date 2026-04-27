@@ -41,6 +41,7 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallSet.h"
+#include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/StringSet.h"
 
@@ -209,6 +210,25 @@ private:
   // a dedicated always_ff that shifts the register chain.
   int InputPipelineN = 0;
   int OutputPipelineN = 0;
+
+  // Phase 5.6.2b — source-comment forwarding. Tracks the last
+  // source line per file that the emitter has already considered
+  // (either emitted or scanned for comments), so the next op's
+  // leading-comment scan starts at the right place. Reset per
+  // function so each module's body starts a fresh scan window.
+  // The scan is also scoped to the current function's line range
+  // (CommentMinLine .. CommentMaxLine) so script-header comments
+  // and other file-level prose outside the function body don't
+  // leak into the emitted module.
+  llvm::StringMap<uint32_t> LastEmittedLine;
+  std::string CommentFile;
+  uint32_t CommentMinLine = 0;
+  uint32_t CommentMaxLine = 0;
+  // Helper: scan the source range (LastEmittedLine[file] .. line-1]
+  // for the op at `Loc` and emit any `% ...` comment-only lines
+  // there as `// ...` SV comments at the given indent. No-op when
+  // SM is null or the op has no FileLineColLoc.
+  void emitLeadingCommentsBefore(mlir::Location Loc, int Indent);
 
   // Phase 4 v2: FSM cascades recognized in the function body.
   // Each entry is one cascade — the head scf.if op, the persistent
@@ -419,12 +439,18 @@ void Emitter::emitPortList(mlir::func::FuncOp F) {
       Names[F.getArgument(I)] = Nm;
     }
   }
-  // Output names. Phase 1 looks for an `sv.result_names` array attr
-  // (an extension point for later) and otherwise uses `y`, `y1`, ...
+  // Output names. Phase 5.6.2a: prefer the MATLAB return-variable name
+  // (set by Lowering as `matlab.name` on each func result) so a
+  // signature like `[data_out, overflow] = alu_16bit(...)` emits the
+  // ports `output ... data_out, output ... overflow` instead of the
+  // generic `y, y1, ...` fallback.
   OutNames.clear();
   OutNames.reserve(FT.getNumResults());
   for (unsigned I = 0; I < FT.getNumResults(); ++I) {
-    std::string Nm = (I == 0) ? "y" : ("y" + std::to_string(I));
+    std::string Nm;
+    if (auto S = F.getResultAttrOfType<mlir::StringAttr>(I, "matlab.name"))
+      Nm = sanitize(S.getValue());
+    if (Nm.empty()) Nm = (I == 0) ? "y" : ("y" + std::to_string(I));
     while (Used.contains(Nm)) Nm += "_";
     Used.insert(Nm);
     OutNames.push_back(Nm);
@@ -1255,9 +1281,73 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
   fail(Err.str());
 }
 
+void Emitter::emitLeadingCommentsBefore(mlir::Location Loc, int Indent) {
+  if (!SM) return;
+  auto FL = mlir::dyn_cast<mlir::FileLineColLoc>(Loc);
+  if (!FL) return;
+  uint32_t Line = FL.getLine();
+  if (Line == 0) return;
+  llvm::StringRef File = FL.getFilename().getValue();
+  // Scope the scan to the current function's body range. This
+  // drops file-header / script-driver comments that aren't part
+  // of the function being emitted.
+  if (CommentFile.empty() || File != CommentFile) return;
+  matlab::FileID FID = SM->findFileByName(File.str());
+  if (FID == 0) return;
+  uint32_t &Last = LastEmittedLine[File];
+  uint32_t Start = std::max(Last + 1, CommentMinLine);
+  if (Start >= Line) {
+    Last = std::max(Last, Line);
+    return;
+  }
+  if (Line > CommentMaxLine + 1) {
+    Last = std::max(Last, Line);
+    return;
+  }
+  for (uint32_t L = Start; L < Line; ++L) {
+    auto LineText = SM->getLineText(FID, L);
+    llvm::StringRef LR(LineText.data(), LineText.size());
+    // Trim leading + trailing whitespace.
+    while (!LR.empty() && std::isspace((unsigned char)LR.front()))
+      LR = LR.drop_front();
+    while (!LR.empty() && std::isspace((unsigned char)LR.back()))
+      LR = LR.drop_back();
+    if (LR.empty()) continue;
+    if (LR.front() != '%') continue;
+    LR = LR.drop_front();
+    // Drop a single leading space after the `%` so `% foo` becomes
+    // `// foo` instead of `//  foo`.
+    if (!LR.empty() && LR.front() == ' ') LR = LR.drop_front();
+    // Skip the `#codegen` marker — it's a MATLAB Coder directive
+    // with no SV equivalent.
+    if (LR == "#codegen") continue;
+    // Skip our own `% hdl: ...` pragmas; they configure the
+    // emitter and shouldn't appear in the output.
+    {
+      llvm::StringRef T = LR;
+      while (!T.empty() && std::isspace((unsigned char)T.front()))
+        T = T.drop_front();
+      if (T.starts_with("hdl:")) continue;
+    }
+    // Skip the multi-file separator marker that the driver
+    // injects when matlabc is invoked with multiple .m inputs:
+    //   `--- file <path> ---`
+    {
+      llvm::StringRef T = LR;
+      while (!T.empty() && std::isspace((unsigned char)T.front()))
+        T = T.drop_front();
+      if (T.starts_with("--- file ")) continue;
+    }
+    indent(Indent);
+    OS << "// " << LR.str() << "\n";
+  }
+  Last = std::max(Last, Line);
+}
+
 void Emitter::emitBlock(mlir::Block &B, int Indent) {
   for (auto &Op : B.getOperations()) {
     if (Failed) return;
+    emitLeadingCommentsBefore(Op.getLoc(), Indent);
     emitOp(Op, Indent);
   }
 }
@@ -1370,6 +1460,31 @@ bool Emitter::emitModuleForFunc(mlir::func::FuncOp F) {
   GepAddr.clear();
   FSMs.clear();
   CascadeOp.clear();
+  LastEmittedLine.clear();
+  // Phase 5.6.2b: discover the function's body line range so the
+  // comment-forwarding scan can drop anything outside it (script-
+  // header prose, leftover driver comments, etc.). Seed from the
+  // FuncOp's own location (the `function` keyword line) so a
+  // function-leading comment immediately above the signature gets
+  // included while file-level prose above does not.
+  CommentFile.clear();
+  CommentMinLine = ~0u;
+  CommentMaxLine = 0;
+  if (auto FL = mlir::dyn_cast<mlir::FileLineColLoc>(F.getLoc())) {
+    CommentFile = FL.getFilename().str();
+    CommentMinLine = FL.getLine();
+    CommentMaxLine = FL.getLine();
+  }
+  F.walk([&](mlir::Operation *Op) {
+    if (auto FL = mlir::dyn_cast<mlir::FileLineColLoc>(Op->getLoc())) {
+      uint32_t L = FL.getLine();
+      if (L == 0) return;
+      if (CommentFile.empty()) CommentFile = FL.getFilename().str();
+      else if (FL.getFilename().getValue() != CommentFile) return;
+      CommentMinLine = std::min(CommentMinLine, L);
+      CommentMaxLine = std::max(CommentMaxLine, L);
+    }
+  });
 
   // Collect persistent registers for this function. HWLegalize already
   // validated these — gathering can only fail if the IR mutated since;

@@ -2887,6 +2887,32 @@ int main(int Argc, char **Argv) {
                               Opts.Mode == Options::Mode::CheckSynthesizable ||
                               Opts.Mode == Options::Mode::EmitHardwareReport;
       bool WantClean = Opts.Opt || WantFullPipeline;
+      bool IsSVPath = Opts.Mode == Options::Mode::EmitSystemVerilog ||
+                      Opts.Mode == Options::Mode::CheckSynthesizable ||
+                      Opts.Mode == Options::Mode::EmitHardwareReport;
+      if (IsSVPath) {
+        // Phase 5.6.1: scan `% hdl: port(...)` pragmas + apply them
+        // to func signatures BEFORE the refinement iteration so a
+        // function-only `.m` file (no typed driver) gets its port
+        // widths from the pragma and the rest of the pipeline sees
+        // typed args naturally. ScanHWPragmas is idempotent; the
+        // SV-specific re-scan further down picks up the rest of the
+        // pragma surface (fsm_encoding, input_pipeline, ...).
+        mlirgen::runScanHWPragmas(M, &SM);
+        if (!mlirgen::runApplyPortTypePragmas(M)) {
+          Diag.printAll();
+          return 1;
+        }
+        // Seed slot/load types from the now-typed entry-block args
+        // BEFORE SlotPromotion runs in WantClean. SlotPromotion
+        // only fires when the value type matches the load result
+        // type; without this RefineSlotTypes pass, all slots stay
+        // `none`-typed and the body never gets concretely typed
+        // (LowerUserCalls only runs propagateScalarTypes on funcs
+        // with active matlab.call sites, which a no-caller bare
+        // function lacks).
+        mlirgen::runRefineSlotTypes(M);
+      }
       if (WantClean) {
         mlirgen::runSlotPromotion(M);
         // See docs/emit_fixed_point.md — fi ops must lower before arith.

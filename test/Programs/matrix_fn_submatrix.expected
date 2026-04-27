@@ -16,7 +16,7 @@ module {
     %4 = "matlab.call"(%3) {callee = "upper_left_2x2", matlab.name = "R"} : (tensor<3x3xf64>) -> none
     return
   }
-  func.func @upper_left_2x2(%arg0: none {matlab.name = "A"}) -> none {
+  func.func @upper_left_2x2(%arg0: none {matlab.name = "A"}) -> (none {matlab.name = "S"}) {
     %cst = arith.constant 2.000000e+00 : f64
     %cst_0 = arith.constant 1.000000e+00 : f64
     %0 = "matlab.alloc"() {name = "S"} : () -> none

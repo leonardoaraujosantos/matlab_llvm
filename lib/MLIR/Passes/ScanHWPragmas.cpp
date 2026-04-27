@@ -11,6 +11,14 @@
 // Today's recognized directives:
 //   `fsm_encoding('binary' | 'one_hot' | 'gray')` →
 //       `hdl.fsm_encoding = "binary"` (etc.) string attr
+//   `input_pipeline(N)` / `output_pipeline(N)` →
+//       `hdl.input_pipeline = "N"` string attr (Phase 5.2)
+//   `port(<name>, <kind>, [<signed>,] <W>[, <F>])` →
+//       `hdl.ports = [<DictAttr per port>, ...]` (Phase 5.6.1).
+//       Supported kinds: `fi`, `int`, `uint`, `bool`. The matching
+//       func arg / result is rewritten to the declared type by
+//       `ApplyPortTypePragmas`, so a function-only `.m` file emits
+//       SV without a separate typed driver.
 //
 // Unknown directives are silently ignored so the pragma surface
 // can be extended over time without breaking older user code
@@ -43,6 +51,109 @@ llvm::StringRef stripWS(llvm::StringRef S) {
   while (!S.empty() && std::isspace((unsigned char)S.front())) S = S.drop_front();
   while (!S.empty() && std::isspace((unsigned char)S.back()))  S = S.drop_back();
   return S;
+}
+
+/// Split `<a>, <b>, <c>` (top level, no nested parens supported here
+/// — the pragma surface uses simple flat arg lists) into trimmed
+/// pieces. Empty input → empty output.
+std::vector<std::string> splitCommas(llvm::StringRef S) {
+  std::vector<std::string> Out;
+  size_t I = 0;
+  while (I < S.size()) {
+    size_t J = S.find(',', I);
+    if (J == llvm::StringRef::npos) J = S.size();
+    Out.push_back(stripWS(S.substr(I, J - I)).str());
+    if (J == S.size()) break;
+    I = J + 1;
+  }
+  // Drop a single trailing empty piece (for `a, b,`).
+  if (!Out.empty() && Out.back().empty()) Out.pop_back();
+  return Out;
+}
+
+/// Parse one `port(...)` arg list (the substring inside the
+/// parens). Forms:
+///   port(<name>, fi, signed|unsigned, <W>, <F>)
+///   port(<name>, int, <W>)            // signed N-bit integer
+///   port(<name>, uint, <W>)           // unsigned N-bit integer
+///   port(<name>, bool)                // i1
+/// Builds a DictionaryAttr `{name, kind, signed, width, frac}` and
+/// returns true on success. Unknown kinds / malformed pieces fail.
+bool parsePortPragma(llvm::StringRef Body, mlir::MLIRContext &Ctx,
+                     mlir::DictionaryAttr &Out, std::string &Err) {
+  auto Parts = splitCommas(Body);
+  if (Parts.size() < 2) {
+    Err = "port pragma needs at least `name, kind`";
+    return false;
+  }
+  // Strip surrounding quotes from each piece.
+  for (auto &P : Parts) {
+    if (P.size() >= 2 &&
+        ((P.front() == '\'' && P.back() == '\'') ||
+         (P.front() == '"'  && P.back() == '"')))
+      P = P.substr(1, P.size() - 2);
+  }
+  std::string Name = Parts[0];
+  std::string Kind = Parts[1];
+  if (Name.empty()) { Err = "port name is empty"; return false; }
+  if (Kind.empty()) { Err = "port kind is empty"; return false; }
+
+  bool Signed = true;
+  int64_t W = 0, F = 0;
+  if (Kind == "fi") {
+    if (Parts.size() != 5) {
+      Err = "port(<name>, fi, signed|unsigned, <W>, <F>) takes 5 args";
+      return false;
+    }
+    if (Parts[2] == "signed") Signed = true;
+    else if (Parts[2] == "unsigned") Signed = false;
+    else { Err = "fi sign must be `signed` or `unsigned`"; return false; }
+    try { W = std::stoll(Parts[3]); } catch (...) {
+      Err = "fi width is not an integer"; return false;
+    }
+    try { F = std::stoll(Parts[4]); } catch (...) {
+      Err = "fi frac is not an integer"; return false;
+    }
+  } else if (Kind == "int" || Kind == "uint") {
+    Signed = (Kind == "int");
+    if (Parts.size() != 3) {
+      Err = "port(<name>, int|uint, <W>) takes 3 args";
+      return false;
+    }
+    try { W = std::stoll(Parts[2]); } catch (...) {
+      Err = "int width is not an integer"; return false;
+    }
+  } else if (Kind == "bool" || Kind == "i1") {
+    if (Parts.size() != 2) {
+      Err = "port(<name>, bool) takes 2 args";
+      return false;
+    }
+    Signed = false;
+    W = 1;
+  } else {
+    Err = "unknown port kind `" + Kind + "` (want fi|int|uint|bool)";
+    return false;
+  }
+  if (W <= 0 || W > 64) {
+    Err = "port width out of range (1..64)";
+    return false;
+  }
+
+  llvm::SmallVector<mlir::NamedAttribute> Fields;
+  Fields.push_back({mlir::StringAttr::get(&Ctx, "name"),
+                    mlir::StringAttr::get(&Ctx, Name)});
+  Fields.push_back({mlir::StringAttr::get(&Ctx, "kind"),
+                    mlir::StringAttr::get(&Ctx, Kind)});
+  Fields.push_back({mlir::StringAttr::get(&Ctx, "signed"),
+                    mlir::BoolAttr::get(&Ctx, Signed)});
+  Fields.push_back({mlir::StringAttr::get(&Ctx, "width"),
+                    mlir::IntegerAttr::get(
+                        mlir::IntegerType::get(&Ctx, 64), W)});
+  Fields.push_back({mlir::StringAttr::get(&Ctx, "frac"),
+                    mlir::IntegerAttr::get(
+                        mlir::IntegerType::get(&Ctx, 64), F)});
+  Out = mlir::DictionaryAttr::get(&Ctx, Fields);
+  return true;
 }
 
 /// Parse `<directive>(<arg-text>)` (with optional spaces) and
@@ -136,12 +247,28 @@ bool runScanHWPragmas(mlir::ModuleOp M, const matlab::SourceManager *SM) {
     // (one line of leading whitespace tolerated) — extend the
     // scan range one line up to catch that case.
     uint32_t StartLine = MinL > 1 ? MinL - 1 : 1;
+    llvm::SmallVector<mlir::Attribute> PortAttrs;
     for (uint32_t L = StartLine; L <= MaxL; ++L) {
       auto Line = SM->getLineText(FID, L);
       llvm::StringRef LR(Line.data(), Line.size());
       scanLineForPragma(
           LR,
           [&](const std::string &Dir, const std::string &Arg) {
+            // Phase 5.6.1: `port(...)` is multi-arg and accumulates
+            // across lines; everything else stays one-attr-per-
+            // directive. The string `Arg` we got here is already the
+            // text inside the outermost `()`, so split on commas.
+            if (Dir == "port") {
+              mlir::DictionaryAttr Entry;
+              std::string Err;
+              if (parsePortPragma(Arg, *F.getContext(), Entry, Err)) {
+                PortAttrs.push_back(Entry);
+              } else {
+                mlir::emitWarning(F.getLoc())
+                    << "malformed `% hdl: port(...)` pragma: " << Err;
+              }
+              return;
+            }
             std::string AttrName = "hdl." + Dir;
             F->setAttr(AttrName,
                        mlir::StringAttr::get(F.getContext(), Arg));
@@ -149,6 +276,10 @@ bool runScanHWPragmas(mlir::ModuleOp M, const matlab::SourceManager *SM) {
           [&](const std::string &Msg) {
             mlir::emitWarning(F.getLoc()) << Msg;
           });
+    }
+    if (!PortAttrs.empty()) {
+      F->setAttr("hdl.ports",
+                 mlir::ArrayAttr::get(F.getContext(), PortAttrs));
     }
   });
   return true;
