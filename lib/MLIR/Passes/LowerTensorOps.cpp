@@ -1154,9 +1154,16 @@ bool TensorLowering::rewriteBuiltinCalls() {
 
     /* Workspace management commands: who / whos / clear take no
      * operands; clear_one takes a single const_char name. Delegate
-     * directly. */
+     * directly.
+     *
+     * `matlab_dbg_keyboard_hook` is the runtime entry the lowerer
+     * emits for a `keyboard` builtin call — same shape (no
+     * operands, no result), so it slots into the same dispatch
+     * arm. */
     if ((Name == "matlab_ws_who" || Name == "matlab_ws_whos" ||
-         Name == "matlab_ws_clear") && Call->getNumOperands() == 0) {
+         Name == "matlab_ws_clear" ||
+         Name == "matlab_dbg_keyboard_hook") &&
+        Call->getNumOperands() == 0) {
       B.setInsertionPoint(Call);
       auto Fn = rt(Name, VoidTy, {});
       LLVM::CallOp::create(B, Call->getLoc(), Fn, ValueRange{});
