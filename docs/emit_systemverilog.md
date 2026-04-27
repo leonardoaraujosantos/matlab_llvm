@@ -687,16 +687,16 @@ The three remaining unblocked modules — `vector_processor`,
 stage either closes one example outright or delivers a reusable
 piece the next stage builds on.
 
-| Stage | Items | Effort | Closes |
-|---|---|--:|---|
-| A | (split — see notes below) | — | — |
-| A.1 | fi-spec propagation across function-call boundaries (precondition for clean Saturate-cast on the function-arg path) | ~3 days | enables `fi(arg, ...)` casts to clamp correctly, used by fir/seq's final stage |
-| A.2 | Constant-index reads on vector args | ~1 day | small extension once Stage B lands; no value standalone |
-| B | Vector function arguments (Sema + MIR + user-call + LLVM tensor lowering) | ~4 days | `vector_processor` ✅ |
-| C | Static array literal init (`fi([0.1, 0.2, ...], ...)` → alloca + per-element stores) | ~2 days | coefficient-table half of fir / seq |
-| D | Loop-iv array indexing (`for i = 1:N; arr(i) ...; end`) | ~3 days | for-loop bodies in fir / seq |
-| E | Vector concat with static shapes (`[x, delay(1:end-1)]`) | ~3 days | shift-register pattern in fir / seq |
-| F | Persistent fi-arrays + whole-vector assign (`persistent` + `acc(:) = ...`) | ~6 days | `fir_asic_pipelined` ✅, `sequential_processor` ✅ |
+| Stage | Status | Items | Effort | Closes |
+|---|---|---|--:|---|
+| A | (split) | (split — see notes below) | — | — |
+| A.1 | 🟡 deferred | fi-spec propagation across function-call boundaries (precondition for clean Saturate-cast on the function-arg path) | ~3 days | enables `fi(arg, ...)` casts to clamp correctly, used by fir/seq's final stage |
+| A.2 | 🟡 deferred | Constant-index reads on vector args | ~1 day | small extension once Stage B lands; no value standalone |
+| B | 🟡 deferred | Vector function arguments (Sema + MIR + user-call + LLVM tensor lowering) | ~4 days | `vector_processor` ✅ |
+| C | ✅ shipped | Static array literal init (`fi([0.1, 0.2, ...], ...)` → alloca + per-element stores) | ~2 days | coefficient-table half of fir / seq |
+| D | 🟡 deferred | Loop-iv array indexing (`for i = 1:N; arr(i) ...; end`) | ~3 days | for-loop bodies in fir / seq |
+| E | 🟡 deferred | Vector concat with static shapes (`[x, delay(1:end-1)]`) | ~3 days | shift-register pattern in fir / seq |
+| F | 🟡 deferred | Persistent fi-arrays + whole-vector assign (`persistent` + `acc(:) = ...`) | ~6 days | `fir_asic_pipelined` ✅, `sequential_processor` ✅ |
 
 Total: ~4–5 weeks of focused work, **one stage per
 implementation session** (the existing Phase 5.6.x cadence). The
