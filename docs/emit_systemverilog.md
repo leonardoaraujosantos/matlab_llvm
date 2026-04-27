@@ -692,7 +692,7 @@ piece the next stage builds on.
 | A | (split) | (split — see notes below) | — | — |
 | A.1 | 🟡 deferred | fi-spec propagation across function-call boundaries (precondition for clean Saturate-cast on the function-arg path) | ~3 days | enables `fi(arg, ...)` casts to clamp correctly, used by fir/seq's final stage |
 | A.2 | 🟡 deferred | Constant-index reads on vector args | ~1 day | small extension once Stage B lands; no value standalone |
-| B | 🟡 deferred | Vector function arguments (Sema + MIR + user-call + LLVM tensor lowering) | ~4 days | `vector_processor` ✅ |
+| B | 🟡 deferred | Vector function arguments — Sema mistypes the vec arg as a scalar primitive, then the body's subscript ops surface as `matlab.subscript(scalar, idx)` (a malformed shape that propagates through the whole pipeline). Fix needs Sema TypeInference to track the array shape across function-arg boundaries, plus the MIR/Lowering+user-call refinement to follow that through. | ~4 days | `vector_processor` ✅ |
 | C | ✅ shipped | Static array literal init (`fi([0.1, 0.2, ...], ...)` → alloca + per-element stores) | ~2 days | coefficient-table half of fir / seq |
 | D | ✅ shipped | Loop-iv array indexing (`for i = 1:N; arr(i) ...; end`) | ~3 days | for-loop bodies in fir / seq |
 | E | 🟡 deferred | Vector concat with static shapes (`[x, delay(1:end-1)]`) | ~3 days | shift-register pattern in fir / seq |
@@ -703,6 +703,34 @@ implementation session** (the existing Phase 5.6.x cadence). The
 shift-register-with-persistent-fi-array idiom in fir / seq depends
 on three orthogonal lifts (literal init, loop-iv indexing, vector
 concat) all landing before stage F can complete.
+
+#### Stage B detail (deferred — blocker investigated)
+
+Investigation in a Stage B exploration session revealed the
+specific blocker: Sema's TypeInference resolves the function
+parameter `vec_a` (untyped in source) to a scalar `i16`,
+matching the inferred element type. The body then lowers to
+`matlab.subscript(vec_a_loaded : i16, k : f64) → i16` — a
+subscript on a *scalar*. That malformed shape propagates
+through the rest of the pipeline.
+
+What Stage B's first sub-step needs: Sema must track when a
+function parameter is consumed via `vec_a(k)` or assigned a
+vector via `vec_a = fi(<vec_lit>, ...)` and infer an array type
+in those cases. The MIR-to-MLIR Lowering then maps the param to
+`!llvm.ptr` (or a static `!llvm.array<N x iW>` when the shape
+is known); subscript reads lower to GEP+load on the param
+pointer; user-call refinement preserves the array type when
+the call-site passes a typed array (already produced by Stage C
+for literal-init args).
+
+Alternative scoping ("scalar-ization shortcut"): a focused pre-
+refinement pass could clone vector-arg functions into N-scalar-
+arg specializations, rewriting `vec_a(k)` constant subscripts
+to direct arg references and the call sites to pass each
+element as a scalar. This bypasses the Sema lift but only
+covers constant-index reads — `vector_processor`'s shape works,
+but loop-iv subscripts on vector args don't.
 
 #### Stage A re-scoped (was "verification")
 
