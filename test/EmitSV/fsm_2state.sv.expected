@@ -9,52 +9,50 @@ module fsm_2state (
     output logic signed [7:0] y
 );
 
+    typedef enum logic {S0, S1} state_t;
+
     logic signed [7:0] out;
     logic v0_1;
     logic v1_1;
-    logic v2_1;
-    logic v3_1;
-    logic signed [7:0] v4_1;
-    logic signed [7:0] state;
-    logic signed [7:0] state_next;
+    logic signed [7:0] v2_1;
+    state_t state;
+    state_t state_next;
 
     always_comb begin
         out = '0;
         v0_1 = '0;
         v1_1 = '0;
         v2_1 = '0;
-        v3_1 = '0;
-        v4_1 = '0;
         state_next = state;
         y = '0;
         out = 8'sd0;
-        v0_1 = state == 0;
-        if (v0_1) begin
-            v1_1 = x > 8'sd0;
-            if (v1_1) begin
-                state_next = 8'sd1;
+        unique case (state)
+            S0: begin
+                v0_1 = x > 8'sd0;
+                if (v0_1) begin
+                    state_next = S1;
+                end
+                out = 8'sd0;
             end
-            out = 8'sd0;
-        end else begin
-            v2_1 = state == 1;
-            if (v2_1) begin
-                v3_1 = x > 8'sd0;
-                if (v3_1) begin
+            S1: begin
+                v1_1 = x > 8'sd0;
+                if (v1_1) begin
                     out = 8'sd1;
                 end else begin
-                    state_next = 8'sd0;
+                    state_next = S0;
                 end
-            end else begin
-                state_next = 8'sd0;
             end
-        end
-        v4_1 = out;
-        y = v4_1;
+            default: begin
+                state_next = S0;
+            end
+        endcase
+        v2_1 = out;
+        y = v2_1;
     end
 
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            state <= 8'sd0;
+            state <= S0;
         end else begin
             state <= state_next;
         end

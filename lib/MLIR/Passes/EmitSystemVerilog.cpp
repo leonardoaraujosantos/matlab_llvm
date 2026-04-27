@@ -91,6 +91,15 @@ private:
   // --- Body emission -----------------------------------------------------
   void emitBody(mlir::func::FuncOp F);
   void emitAlwaysFF();
+  void emitFSMTypedefs();
+  void emitFSMCase(mlir::scf::IfOp Head, int Indent);
+  /// Phase 4 v2 — FSM cascade detection. Walks every `scf.if`
+  /// whose condition is `cmpf oeq, persistent_get, const` and
+  /// peels the else-chain to collect a list of `(case_const,
+  /// then_region)` pairs. Heads (top-of-cascade ifs) are stored
+  /// in `FSMs`; inner cascade ifs are added to `Suppress` and
+  /// `CascadeInner` so the regular emit dispatch skips them.
+  void gatherFSMs(mlir::func::FuncOp F);
   void emitOp(mlir::Operation &Op, int Indent);
   void emitRegion(mlir::Region &R, int Indent);
   void emitBlock(mlir::Block &B, int Indent);
@@ -136,6 +145,13 @@ private:
   void emitPortList(mlir::func::FuncOp F);
   // True when V is the result of an op the emitter inlines at use site.
   bool isInlineable(mlir::Value V);
+  /// Phase 4 v2 — when one operand of a comparison or assignment
+  /// is a recognized FSM register (persistent_get whose RegIndex
+  /// is in FSMs), render its peer constant as the matching enum
+  /// literal instead of a raw integer literal. Returns the enum
+  /// literal name on match, empty string on miss.
+  std::string fsmEnumLiteralForConstAgainst(mlir::Value RegSide,
+                                             mlir::Value ConstSide);
 
   // --- State -------------------------------------------------------------
   std::ostream &OS;
@@ -172,6 +188,27 @@ private:
   // directly. The map's value is the SV expression (e.g.
   // `"v[2]"`).
   llvm::DenseMap<mlir::Operation *, std::string> GepAddr;
+  // Phase 4 v2: FSM cascades recognized in the function body.
+  // Each entry is one cascade — the head scf.if op, the persistent
+  // register's index in `Persists`, the per-case (const, region)
+  // pairs in source order, and the optional default else-region.
+  struct HWFSMInfo {
+    unsigned RegIndex;
+    mlir::Operation *Head = nullptr;
+    llvm::SmallVector<std::pair<int64_t, mlir::Region *>, 6> Cases;
+    mlir::Region *DefaultRegion = nullptr;
+    // SV-side enum-literal names per case const, plus the reset
+    // literal for the always_ff. Filled at gather time.
+    llvm::SmallVector<std::string, 6> CaseNames;
+    std::string ResetName;
+    // SV state-register-type name (e.g. "state_t").
+    std::string EnumType;
+  };
+  llvm::SmallVector<HWFSMInfo, 2> FSMs;
+  // Map from any cascade scf.if op (head OR inner) to the FSM
+  // index. Inner ifs are also added to `Suppress` so they don't
+  // get rendered twice.
+  llvm::DenseMap<mlir::Operation *, unsigned> CascadeOp;
 };
 
 unsigned Emitter::widthOf(mlir::Type T) {
@@ -543,10 +580,24 @@ void Emitter::declarePrelude(mlir::func::FuncOp F) {
   // persistent register. The register signal carries the current
   // (clocked) value; the `_next` signal carries the combinational
   // next-state expression that always_ff samples on the next edge.
-  for (auto &P : Persists) {
-    auto T = mlir::IntegerType::get(F.getContext(), P.Width);
-    OS << "    " << svType(T) << " " << P.Name << ";\n";
-    OS << "    " << svType(T) << " " << P.Name << "_next;\n";
+  // Phase 4 v2 — when a register has been recognized as an FSM
+  // state (its index appears in FSMs[].RegIndex), declare both
+  // signals at the typedef-enum type instead of the raw `logic
+  // [W-1:0]`. The synth tool sees state encoding intent and the
+  // user-facing source reads cleanly.
+  for (unsigned R = 0; R < Persists.size(); ++R) {
+    auto &P = Persists[R];
+    std::string Ty;
+    bool IsFSM = false;
+    for (auto &FI : FSMs) {
+      if (FI.RegIndex == R) { Ty = FI.EnumType; IsFSM = true; break; }
+    }
+    if (!IsFSM) {
+      auto T = mlir::IntegerType::get(F.getContext(), P.Width);
+      Ty = svType(T);
+    }
+    OS << "    " << Ty << " " << P.Name << ";\n";
+    OS << "    " << Ty << " " << P.Name << "_next;\n";
   }
   if (!PreludeDecls.empty() || !Persists.empty()) OS << "\n";
 }
@@ -576,6 +627,33 @@ void Emitter::emitUnaryNeg(mlir::Operation &Op, int Indent) {
   fail("emitUnaryNeg called unexpectedly");
 }
 
+std::string Emitter::fsmEnumLiteralForConstAgainst(mlir::Value RegSide,
+                                                    mlir::Value ConstSide) {
+  auto *Op = RegSide.getDefiningOp();
+  if (!Op) return std::string();
+  auto It = GetSiteToReg.find(Op);
+  if (It == GetSiteToReg.end()) return std::string();
+  unsigned RegIdx = It->second;
+  const HWFSMInfo *Fsm = nullptr;
+  for (auto &FI : FSMs) {
+    if (FI.RegIndex == RegIdx) { Fsm = &FI; break; }
+  }
+  if (!Fsm) return std::string();
+  auto C = ConstSide.getDefiningOp<mlir::arith::ConstantOp>();
+  if (!C) return std::string();
+  int64_t V;
+  if (auto IA = mlir::dyn_cast<mlir::IntegerAttr>(C.getValue())) {
+    V = IA.getInt();
+  } else if (auto FA = mlir::dyn_cast<mlir::FloatAttr>(C.getValue())) {
+    V = (int64_t)FA.getValueAsDouble();
+  } else {
+    return std::string();
+  }
+  for (size_t i = 0; i < Fsm->Cases.size(); ++i)
+    if (Fsm->Cases[i].first == V) return Fsm->CaseNames[i];
+  return std::string();
+}
+
 void Emitter::emitCmp(mlir::arith::CmpIOp C, int Indent) {
   llvm::StringRef SvOp;
   switch (C.getPredicate()) {
@@ -591,9 +669,17 @@ void Emitter::emitCmp(mlir::arith::CmpIOp C, int Indent) {
   case mlir::arith::CmpIPredicate::uge: SvOp = ">=";  break;
   }
   indent(Indent);
-  OS << name(C.getResult()) << " = "
-     << exprFor(C.getLhs()) << " " << SvOp.str() << " "
-     << exprFor(C.getRhs()) << ";\n";
+  std::string LExpr = exprFor(C.getLhs());
+  std::string RExpr = exprFor(C.getRhs());
+  if (auto E = fsmEnumLiteralForConstAgainst(C.getLhs(), C.getRhs());
+      !E.empty()) {
+    RExpr = E;
+  } else if (auto E = fsmEnumLiteralForConstAgainst(C.getRhs(), C.getLhs());
+             !E.empty()) {
+    LExpr = E;
+  }
+  OS << name(C.getResult()) << " = " << LExpr << " " << SvOp.str() << " "
+     << RExpr << ";\n";
 }
 
 void Emitter::emitCmpF(mlir::arith::CmpFOp C, int Indent) {
@@ -624,9 +710,20 @@ void Emitter::emitCmpF(mlir::arith::CmpFOp C, int Indent) {
     return;
   }
   indent(Indent);
+  // FSM-aware: if the LHS is a recognized persistent get for an
+  // FSM register and the RHS is a const matching one of the case
+  // values, render `<state> == S<n>` instead of `<state> == 8'sdN`.
+  std::string LExpr = exprFor(C.getLhs());
+  std::string RExpr = exprFor(C.getRhs());
+  if (auto E = fsmEnumLiteralForConstAgainst(C.getLhs(), C.getRhs());
+      !E.empty()) {
+    RExpr = E;
+  } else if (auto E = fsmEnumLiteralForConstAgainst(C.getRhs(), C.getLhs());
+             !E.empty()) {
+    LExpr = E;
+  }
   OS << name(C.getResult()) << " = "
-     << exprFor(C.getLhs()) << " " << SvOp.str() << " "
-     << exprFor(C.getRhs()) << ";\n";
+     << LExpr << " " << SvOp.str() << " " << RExpr << ";\n";
 }
 
 void Emitter::emitSelect(mlir::arith::SelectOp S, int Indent) {
@@ -835,7 +932,29 @@ void Emitter::emitReturn(mlir::func::ReturnOp R, int Indent) {
   }
   for (unsigned I = 0; I < R.getNumOperands(); ++I) {
     indent(Indent);
-    OS << OutNames[I] << " = " << exprFor(R.getOperand(I)) << ";\n";
+    std::string Expr = exprFor(R.getOperand(I));
+    // Phase 4 v2: when the return value is a recognized FSM
+    // register's get-call result, the rendered expression is the
+    // enum-typed register name. The output port stays at the
+    // original raw integer width (e.g. `logic signed [7:0] y1`),
+    // so we need an explicit width cast — Verilator otherwise
+    // flags the assignment as WIDTHEXPAND. The cast width comes
+    // from the persistent register's underlying integer width.
+    if (auto *Op = R.getOperand(I).getDefiningOp()) {
+      auto It = GetSiteToReg.find(Op);
+      if (It != GetSiteToReg.end()) {
+        auto &P = Persists[It->second];
+        bool IsFSM = false;
+        for (auto &FI : FSMs)
+          if (FI.RegIndex == It->second) { IsFSM = true; break; }
+        if (IsFSM) {
+          std::ostringstream W;
+          W << P.Width << "'(" << Expr << ")";
+          Expr = W.str();
+        }
+      }
+    }
+    OS << OutNames[I] << " = " << Expr << ";\n";
   }
 }
 
@@ -859,6 +978,28 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
     if (It != SetSiteToReg.end()) {
       auto &P = Persists[It->second];
       mlir::Value Val = Op.getOperand(1);
+      // Phase 4 v2: an FSM register's `_next = ...` assignment with
+      // a constant value renders as the enum literal (e.g. `S1`),
+      // not a raw integer literal. Drops out cleanly because the
+      // const came from the matched cascade case-label.
+      const HWFSMInfo *Fsm = nullptr;
+      for (auto &FI : FSMs) {
+        if (FI.RegIndex == It->second) { Fsm = &FI; break; }
+      }
+      if (Fsm) {
+        if (auto C = Val.getDefiningOp<mlir::arith::ConstantOp>()) {
+          if (auto IA = mlir::dyn_cast<mlir::IntegerAttr>(C.getValue())) {
+            int64_t V = IA.getInt();
+            for (size_t i = 0; i < Fsm->Cases.size(); ++i) {
+              if (Fsm->Cases[i].first == V) {
+                indent(Indent);
+                OS << P.Name << "_next = " << Fsm->CaseNames[i] << ";\n";
+                return;
+              }
+            }
+          }
+        }
+      }
       // Build the SV expression for `Val` — single-use fi arith ops
       // are rendered inline; everything else falls through to a
       // named reference.
@@ -992,9 +1133,25 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
         return;
       }
       indent(Indent);
-      OS << name(Op.getResult(0)) << " = "
-         << exprFor(Op.getOperand(0)) << " " << Sv.str() << " "
-         << exprFor(Op.getOperand(1)) << ";\n";
+      std::string LExpr = exprFor(Op.getOperand(0));
+      std::string RExpr = exprFor(Op.getOperand(1));
+      // FSM-aware: render the constant peer as the enum literal
+      // when comparing/using a recognized FSM register's get.
+      // Only do this for equality/inequality — other ops (`+`, `-`,
+      // `*`) on enum literals are still raw integer arithmetic.
+      if (OpName == "matlab.eq" || OpName == "matlab.ne") {
+        if (auto E = fsmEnumLiteralForConstAgainst(
+                Op.getOperand(0), Op.getOperand(1));
+            !E.empty()) {
+          RExpr = E;
+        } else if (auto E = fsmEnumLiteralForConstAgainst(
+                       Op.getOperand(1), Op.getOperand(0));
+                   !E.empty()) {
+          LExpr = E;
+        }
+      }
+      OS << name(Op.getResult(0)) << " = " << LExpr << " " << Sv.str() << " "
+         << RExpr << ";\n";
       return;
     }
   }
@@ -1021,7 +1178,21 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
   if (isa<arith::ExtSIOp, arith::ExtUIOp, arith::TruncIOp>(Op)) {
     emitExtTrunc(Op, Indent); return;
   }
-  if (auto If = dyn_cast<scf::IfOp>(Op)) { emitScfIf(If, Indent); return; }
+  if (auto If = dyn_cast<scf::IfOp>(Op)) {
+    // Phase 4 v2 — head of an FSM cascade renders as `unique case`;
+    // inner cascade ifs are already absorbed into the head's case
+    // arms and emit nothing (their THEN regions are walked by
+    // emitFSMCase).
+    auto FIt = CascadeOp.find(&Op);
+    if (FIt != CascadeOp.end()) {
+      auto &FI = FSMs[FIt->second];
+      if (FI.Head == &Op) emitFSMCase(If, Indent);
+      // Inner cascade ifs: skip silently.
+      return;
+    }
+    emitScfIf(If, Indent);
+    return;
+  }
   if (auto Y = dyn_cast<scf::YieldOp>(Op)) { emitScfYield(Y, Indent); return; }
   if (auto W = dyn_cast<scf::WhileOp>(Op)) { emitScfWhile(W, Indent); return; }
   if (auto A = dyn_cast<LLVM::AllocaOp>(Op)) { emitAlloca(A, Indent); return; }
@@ -1108,6 +1279,9 @@ bool Emitter::emitModuleForFunc(mlir::func::FuncOp F) {
   GetSiteToReg.clear();
   SetSiteToReg.clear();
   Suppress.clear();
+  GepAddr.clear();
+  FSMs.clear();
+  CascadeOp.clear();
 
   // Collect persistent registers for this function. HWLegalize already
   // validated these — gathering can only fail if the IR mutated since;
@@ -1153,6 +1327,11 @@ bool Emitter::emitModuleForFunc(mlir::func::FuncOp F) {
     });
   }
 
+  // Phase 4 v2 — recognize FSM cascades on persistent registers
+  // BEFORE the prelude / body emit so the cascade ifs are added to
+  // Suppress and the register's declaration uses the enum type.
+  gatherFSMs(F);
+
   std::string ModName = sanitize(F.getSymName());
   // Module name conflicts with a register/port name only in adversarial
   // input; not worth a full uniquifier — collisions are caught by the
@@ -1162,11 +1341,259 @@ bool Emitter::emitModuleForFunc(mlir::func::FuncOp F) {
   OS << "module " << sanitize(F.getSymName()) << " (\n";
   emitPortList(F);
   OS << ");\n\n";
+  // FSM typedef enums declared at module scope, before signal decls.
+  if (!FSMs.empty()) {
+    emitFSMTypedefs();
+    OS << "\n";
+  }
   declarePrelude(F);
   emitBody(F);
   emitAlwaysFF();
   OS << "\nendmodule\n";
   return !Failed;
+}
+
+// Helper: try to match an scf.if condition as a state-equality
+// check `<cmp> <persistent_get>, <const>` and return (RegIndex,
+// CaseValue) on success. Two surface shapes are accepted:
+//
+//   - `arith.cmpf oeq, get_f64(reg), <const>` — the canonical
+//     shape from a `switch state` lowering when the case labels
+//     are float-typed (the front-end emits switch labels as f64
+//     regardless of the discriminator type).
+//   - `matlab.eq(get_f64(reg), <const>)` — the shape that
+//     survives when the case labels are typed integers (e.g.
+//     uint8(N) folded to i8 constants) and the LHS f64 ABI never
+//     converted, leaving the unregistered matlab.eq op for the
+//     emitter to handle.
+static bool matchStateEq(mlir::Value Cond,
+                         const llvm::DenseMap<mlir::Operation *, unsigned>
+                             &GetSiteToReg,
+                         unsigned &OutReg, int64_t &OutVal) {
+  mlir::Value Lhs;
+  mlir::Value Rhs;
+  if (auto Cmp = Cond.getDefiningOp<mlir::arith::CmpFOp>()) {
+    if (Cmp.getPredicate() != mlir::arith::CmpFPredicate::OEQ) return false;
+    Lhs = Cmp.getLhs();
+    Rhs = Cmp.getRhs();
+  } else if (auto *Op = Cond.getDefiningOp()) {
+    if (Op->getName().getStringRef() != "matlab.eq") return false;
+    if (Op->getNumOperands() != 2) return false;
+    Lhs = Op->getOperand(0);
+    Rhs = Op->getOperand(1);
+  } else {
+    return false;
+  }
+  auto *L = Lhs.getDefiningOp();
+  if (!L) return false;
+  auto It = GetSiteToReg.find(L);
+  if (It == GetSiteToReg.end()) return false;
+  auto C = Rhs.getDefiningOp<mlir::arith::ConstantOp>();
+  if (!C) return false;
+  if (auto FA = mlir::dyn_cast<mlir::FloatAttr>(C.getValue())) {
+    OutVal = (int64_t)FA.getValueAsDouble();
+  } else if (auto IA = mlir::dyn_cast<mlir::IntegerAttr>(C.getValue())) {
+    OutVal = IA.getInt();
+  } else {
+    return false;
+  }
+  OutReg = It->second;
+  return true;
+}
+
+void Emitter::gatherFSMs(mlir::func::FuncOp F) {
+  llvm::DenseSet<mlir::Operation *> Inner;  // skip these as heads
+  F.walk([&](mlir::scf::IfOp If) {
+    if (Inner.contains(If.getOperation())) return;
+    unsigned RegIdx;
+    int64_t CaseVal;
+    if (!matchStateEq(If.getCondition(), GetSiteToReg, RegIdx, CaseVal))
+      return;
+    HWFSMInfo Info;
+    Info.RegIndex = RegIdx;
+    Info.Head = If.getOperation();
+    Info.Cases.push_back({CaseVal, &If.getThenRegion()});
+
+    mlir::scf::IfOp Cur = If;
+    while (true) {
+      mlir::Region &Else = Cur.getElseRegion();
+      if (Else.empty() || !Else.hasOneBlock()) break;
+      mlir::Block &EB = Else.front();
+      // Look for the pattern `<cmpf-supporting ops>; scf.if <cmpf>;
+      // scf.yield` — the next-cascade scf.if is the LAST non-yield
+      // op in the else block; the ops before it are the cmpf chain
+      // feeding its condition. The cascade continues only when the
+      // last non-yield op is a state-eq scf.if matching the same
+      // register, AND no other side-effecting ops exist between
+      // the cmpf chain and that scf.if.
+      mlir::scf::IfOp Next = nullptr;
+      bool ExtraSideEffects = false;
+      for (mlir::Operation &Op : EB) {
+        if (mlir::isa<mlir::scf::YieldOp>(Op)) continue;
+        if (auto NIf = mlir::dyn_cast<mlir::scf::IfOp>(Op)) {
+          if (Next) { ExtraSideEffects = true; break; }
+          Next = NIf;
+          continue;
+        }
+        // Non-if ops in the else region: only allow pure operands
+        // feeding the next scf.if's condition (cmpf / cmpi /
+        // constants / matlab.eq for the mixed-type integer-literal
+        // case-label form / a recognized persistent-get re-read,
+        // which is what the IR uses to look up the state register
+        // for each cascade tail). Anything else (a store, an
+        // unrelated call, ...) means the else has its own side
+        // effects and is the default arm.
+        bool IsPureCmp =
+            mlir::isa<mlir::arith::CmpFOp, mlir::arith::CmpIOp,
+                      mlir::arith::ConstantOp,
+                      mlir::LLVM::ConstantOp>(Op) ||
+            Op.getName().getStringRef() == "matlab.eq";
+        bool IsPersistentGet = false;
+        if (auto Call = mlir::dyn_cast<mlir::LLVM::CallOp>(Op)) {
+          auto Sym = Call.getCallee();
+          if (Sym && *Sym == "matlab_global_get_f64")
+            IsPersistentGet = true;
+        }
+        if (!IsPureCmp && !IsPersistentGet) {
+          ExtraSideEffects = true;
+          break;
+        }
+      }
+      unsigned NextReg;
+      int64_t NextVal;
+      if (Next && !ExtraSideEffects &&
+          matchStateEq(Next.getCondition(), GetSiteToReg,
+                        NextReg, NextVal) &&
+          NextReg == RegIdx) {
+        Info.Cases.push_back({NextVal, &Next.getThenRegion()});
+        Inner.insert(Next.getOperation());
+        Cur = Next;
+        continue;
+      }
+      // Else-region is the default arm (anything else).
+      bool ElseEmpty = true;
+      for (mlir::Operation &Op : EB) {
+        if (!mlir::isa<mlir::scf::YieldOp>(Op)) { ElseEmpty = false; break; }
+      }
+      if (!ElseEmpty) Info.DefaultRegion = &Else;
+      break;
+    }
+
+    if (Info.Cases.size() < 2) return;  // not really a cascade
+
+    // Generate enum-literal names. v1 uses S0/S1/.../SN based on the
+    // order constants appear; the case constants are remembered so we
+    // can map the persistent's reset value to the right name.
+    auto &P = Persists[Info.RegIndex];
+    Info.EnumType = P.Name + "_t";
+    for (auto &[Val, Region] : Info.Cases) {
+      Info.CaseNames.push_back("S" + std::to_string(Val));
+    }
+    // If the default region exists but no case matched the reset
+    // value, add a synthetic enum literal for the reset state too —
+    // SV requires the enum literal to be defined before use.
+    int64_t ResetVal = 0;
+    if (auto *RV = P.ResetValue.getDefiningOp()) {
+      if (auto C = mlir::dyn_cast<mlir::arith::ConstantOp>(RV)) {
+        if (auto IA = mlir::dyn_cast<mlir::IntegerAttr>(C.getValue()))
+          ResetVal = IA.getInt();
+      }
+    }
+    bool Found = false;
+    for (auto &[Val, Region] : Info.Cases) {
+      if (Val == ResetVal) { Found = true; break; }
+    }
+    if (!Found) {
+      Info.Cases.insert(Info.Cases.begin(), {ResetVal, nullptr});
+      Info.CaseNames.insert(Info.CaseNames.begin(),
+                            "S" + std::to_string(ResetVal));
+    }
+    Info.ResetName = "S" + std::to_string(ResetVal);
+
+    unsigned Idx = (unsigned)FSMs.size();
+    CascadeOp[Info.Head] = Idx;
+    for (mlir::Operation *I : Inner) CascadeOp[I] = Idx;
+    // Suppress the cmpf ops feeding the cascade scf.ifs — they're
+    // structural to the case lowering and shouldn't render as
+    // separate `v_N = state == X` assignments. Don't add the
+    // cascade scf.ifs themselves to Suppress: their bodies are
+    // case arms that we still want to walk for prelude
+    // declarations.
+    auto SuppressIfCmp = [&](mlir::scf::IfOp If) {
+      if (auto *Op = If.getCondition().getDefiningOp()) {
+        if (mlir::isa<mlir::arith::CmpFOp>(Op) ||
+            Op->getName().getStringRef() == "matlab.eq")
+          Suppress.insert(Op);
+      }
+    };
+    SuppressIfCmp(mlir::cast<mlir::scf::IfOp>(Info.Head));
+    for (mlir::Operation *I : Inner)
+      SuppressIfCmp(mlir::cast<mlir::scf::IfOp>(I));
+    FSMs.push_back(std::move(Info));
+  });
+}
+
+void Emitter::emitFSMTypedefs() {
+  // A function may contain multiple cascade-shaped switch
+  // statements on the same persistent register (e.g. the
+  // canonical Moore output-decode `if state == S2 then ... else
+  // ...` after the state-transition cascade). Each is rendered as
+  // its own `unique case`, but they share the underlying enum
+  // type, so emit each typedef only once per register.
+  llvm::DenseSet<unsigned> Emitted;
+  for (auto &F : FSMs) {
+    if (!Emitted.insert(F.RegIndex).second) continue;
+    unsigned N = (unsigned)F.Cases.size();
+    unsigned W = 1;
+    while ((1u << W) < N) ++W;
+    indent(1);
+    OS << "typedef enum logic";
+    if (W > 1) OS << " [" << (W - 1) << ":0]";
+    OS << " {";
+    for (unsigned i = 0; i < F.CaseNames.size(); ++i) {
+      if (i) OS << ", ";
+      OS << F.CaseNames[i];
+    }
+    OS << "} " << F.EnumType << ";\n";
+  }
+}
+
+void Emitter::emitFSMCase(mlir::scf::IfOp Head, int Indent) {
+  auto It = CascadeOp.find(Head.getOperation());
+  if (It == CascadeOp.end()) {
+    fail("emitFSMCase called on unrecognized scf.if");
+    return;
+  }
+  auto &F = FSMs[It->second];
+  auto &P = Persists[F.RegIndex];
+  indent(Indent);
+  OS << "unique case (" << P.Name << ")\n";
+  for (size_t i = 0; i < F.Cases.size(); ++i) {
+    auto &[Val, Region] = F.Cases[i];
+    indent(Indent + 1);
+    OS << F.CaseNames[i] << ": begin\n";
+    if (Region) {
+      emitRegion(*Region, Indent + 2);
+    }
+    indent(Indent + 1);
+    OS << "end\n";
+  }
+  if (F.DefaultRegion) {
+    indent(Indent + 1);
+    OS << "default: begin\n";
+    emitRegion(*F.DefaultRegion, Indent + 2);
+    indent(Indent + 1);
+    OS << "end\n";
+  } else {
+    // Always emit a default for `unique case` so synth tools don't
+    // warn about incompletely-decoded inputs. The default reasserts
+    // the hold-by-default `<reg>_next = <reg>` (already set at the
+    // top of always_comb), so no explicit body needed.
+    indent(Indent + 1);
+    OS << "default: ;\n";
+  }
+  indent(Indent);
+  OS << "endcase\n";
 }
 
 void Emitter::emitAlwaysFF() {
@@ -1189,9 +1616,22 @@ void Emitter::emitAlwaysFF() {
     OS << "        if (!rst_n) begin\n";
     break;
   }
-  for (auto &P : Persists) {
+  for (unsigned R = 0; R < Persists.size(); ++R) {
+    auto &P = Persists[R];
     indent(3);
-    OS << P.Name << " <= " << exprFor(P.ResetValue) << ";\n";
+    // Phase 4 v2: FSM register's reset value is the enum literal
+    // for the reset-state, not a raw integer literal.
+    bool IsFSM = false;
+    std::string ResetExpr;
+    for (auto &FI : FSMs) {
+      if (FI.RegIndex == R) {
+        ResetExpr = FI.ResetName;
+        IsFSM = true;
+        break;
+      }
+    }
+    if (!IsFSM) ResetExpr = exprFor(P.ResetValue);
+    OS << P.Name << " <= " << ResetExpr << ";\n";
   }
   OS << "        end else begin\n";
   for (auto &P : Persists) {

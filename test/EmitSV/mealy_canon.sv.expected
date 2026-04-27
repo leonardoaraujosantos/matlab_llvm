@@ -10,15 +10,15 @@ module mealy_canon (
     output logic y
 );
 
+    typedef enum logic {S0, S1} current_state_t;
+
     logic out_signal;
     logic v0_1;
     logic v1_1;
     logic v2_1;
     logic v3_1;
-    logic v4_1;
-    logic v5_1;
-    logic signed [7:0] current_state;
-    logic signed [7:0] current_state_next;
+    current_state_t current_state;
+    current_state_t current_state_next;
 
     always_comb begin
         out_signal = '0;
@@ -26,41 +26,39 @@ module mealy_canon (
         v1_1 = '0;
         v2_1 = '0;
         v3_1 = '0;
-        v4_1 = '0;
-        v5_1 = '0;
         current_state_next = current_state;
         y = '0;
         v0_1 = reset != 8'sd0;
         if (v0_1) begin
-            current_state_next = 8'sd0;
+            current_state_next = S0;
         end
         out_signal = 1'b0;
-        v1_1 = current_state == 8'sd0;
-        if (v1_1) begin
-            v2_1 = input_bit == 8'sd1;
-            if (v2_1) begin
-                current_state_next = 8'sd1;
+        unique case (current_state)
+            S0: begin
+                v1_1 = input_bit == 8'sd1;
+                if (v1_1) begin
+                    current_state_next = S1;
+                end
             end
-        end else begin
-            v3_1 = current_state == 8'sd1;
-            if (v3_1) begin
-                v4_1 = input_bit == 8'sd1;
-                if (v4_1) begin
+            S1: begin
+                v2_1 = input_bit == 8'sd1;
+                if (v2_1) begin
                     out_signal = 1'b1;
                 end else begin
-                    current_state_next = 8'sd0;
+                    current_state_next = S0;
                 end
-            end else begin
-                current_state_next = 8'sd0;
             end
-        end
-        v5_1 = out_signal;
-        y = v5_1;
+            default: begin
+                current_state_next = S0;
+            end
+        endcase
+        v3_1 = out_signal;
+        y = v3_1;
     end
 
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            current_state <= 8'sd0;
+            current_state <= S0;
         end else begin
             current_state <= current_state_next;
         end

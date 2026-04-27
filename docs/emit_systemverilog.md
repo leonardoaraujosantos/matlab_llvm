@@ -912,11 +912,36 @@ and lets Phase 3's existing always_comb / always_ff machinery do the
 rest. Both Mealy and Moore styles emit clean lint-passing SV today
 (`test/EmitSV/fsm_2state.m`, `fsm_moore3.m`).
 
-**Deferred to follow-up Phase 4 quality work**:
-- `unique case` + `typedef enum` rendering instead of nested
-  `if/else` cascade. Synth tools handle the cascade correctly today,
-  but the explicit case-statement form reads better and gives the
-  synth tool more freedom to choose state encoding.
+**Phase 4 v2 (shipped):**
+- `typedef enum logic [W-1:0] { S0, S1, ... } reg_t;` declared
+  at module scope (W = ⌈log2(N)⌉ for binary encoding) and
+  deduped per persistent register.
+- The state register declared as `reg_t reg, reg_next;` instead
+  of raw `logic [W-1:0]`.
+- Cascades of `scf.if cmpf(oeq, get(reg), const)` (or the
+  `matlab.eq` mixed-type equivalent) render as `unique case
+  (reg) S0: ... default: ... endcase` inside `always_comb`.
+  Inner cascade `scf.if`s and their cmpf/eq operands are
+  suppressed; their then-regions become case arm bodies; the
+  deepest else-region (or the implicit hold-by-default) becomes
+  the `default:` arm.
+- `state_next = <const>` writes render as `state_next = S<n>`
+  enum literals; the `always_ff` reset uses the same enum
+  literal for the reset state (`state <= S0` instead of `state
+  <= 8'sd0`).
+- Non-cascade comparisons of an FSM register against a case
+  constant (e.g. the Moore-style `if state == S2` output decode
+  before the second cascade collapses) render the constant as
+  the matching enum literal too — Verilator otherwise warns on
+  width mismatch between the small enum and the wider integer
+  literal.
+- Multiple cascades on the same register (state-transition
+  switch + output decode) share one typedef; both render as
+  `unique case`. Output ports that return the FSM register get
+  an explicit width cast (`y1 = 8'(state)`) so the assignment
+  to a non-enum port stays width-clean.
+
+**Phase 4 v2 deferred to follow-up:**
 - One-hot / Gray state encoding via `% hdl: fsm_encoding('one_hot')`
   pragma.
 - FSM ambiguity diagnostics (multiple unconditional next-state
