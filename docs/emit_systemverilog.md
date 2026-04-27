@@ -695,7 +695,7 @@ piece the next stage builds on.
 | B | ✅ shipped | Vector function arguments | ~4 days | `vector_processor` ✅ |
 | C | ✅ shipped | Static array literal init (`fi([0.1, 0.2, ...], ...)` → alloca + per-element stores) | ~2 days | coefficient-table half of fir / seq |
 | D | ✅ shipped | Loop-iv array indexing (`for i = 1:N; arr(i) ...; end`) | ~3 days | for-loop bodies in fir / seq |
-| E | 🟡 deferred | Vector concat with static shapes (`[x, delay(1:end-1)]`) | ~3 days | shift-register pattern in fir / seq |
+| E | ✅ shipped | Vector concat with static shapes (`[x, delay(1:end-1)]`) | ~3 days | shift-register pattern in fir / seq |
 | F | 🟡 deferred | Persistent fi-arrays + whole-vector assign (`persistent` + `acc(:) = ...`) | ~6 days | `fir_asic_pipelined` ✅, `sequential_processor` ✅ |
 
 Total: ~4–5 weeks of focused work, **one stage per

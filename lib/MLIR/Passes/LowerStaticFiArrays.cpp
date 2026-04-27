@@ -57,15 +57,28 @@ bool getCalleeStr(mlir::Operation *Op, std::string &Out) {
 }
 
 bool readF64Const(mlir::Value V, double &Out) {
-  auto C = V.getDefiningOp<mlir::arith::ConstantOp>();
-  if (!C) return false;
-  if (auto FA = mlir::dyn_cast<mlir::FloatAttr>(C.getValue())) {
-    Out = FA.getValueAsDouble();
-    return true;
+  if (auto C = V.getDefiningOp<mlir::arith::ConstantOp>()) {
+    if (auto FA = mlir::dyn_cast<mlir::FloatAttr>(C.getValue())) {
+      Out = FA.getValueAsDouble();
+      return true;
+    }
+    if (auto IA = mlir::dyn_cast<mlir::IntegerAttr>(C.getValue())) {
+      Out = (double)IA.getInt();
+      return true;
+    }
   }
-  if (auto IA = mlir::dyn_cast<mlir::IntegerAttr>(C.getValue())) {
-    Out = (double)IA.getInt();
-    return true;
+  // `llvm.mlir.constant` from LowerTensorOps's helper for default
+  // step values.
+  if (auto C = V.getDefiningOp<mlir::LLVM::ConstantOp>()) {
+    auto VAttr = C.getValue();
+    if (auto FA = mlir::dyn_cast<mlir::FloatAttr>(VAttr)) {
+      Out = FA.getValueAsDouble();
+      return true;
+    }
+    if (auto IA = mlir::dyn_cast<mlir::IntegerAttr>(VAttr)) {
+      Out = (double)IA.getInt();
+      return true;
+    }
   }
   return false;
 }
@@ -580,7 +593,266 @@ bool tryRewriteArg(mlir::BlockArgument Arg, int64_t N, unsigned ElemW) {
   return true;
 }
 
+/// Phase 5.6 Stage E — rewrite a `matlab_mat_i64_concat_row(a, b,
+/// ...)` whose every operand has a statically-known length into a
+/// fresh `matlab_mat_i64_zeros(1, N) + N __subscript_store` chain.
+/// The existing zeros-folding path (`tryRewrite` above) then turns
+/// the chain into an `llvm.alloca [N x iW]` + per-element stores.
+///
+/// Recognized operand shapes:
+///   - `matlab_mat_i64_from_scalar(val_i64)` — single element. The
+///     scalar value gets stored at the corresponding output slot,
+///     truncated/extended to the storage class as needed.
+///   - `matlab_mat_i64_slice1(src_ptr, range_tensor)` where the
+///     range is a `matlab.range(start, end)` with both bounds
+///     compile-time constants. Each element in the slice is read
+///     via a fresh `subscript1_s(src_ptr, k)` call, then stored at
+///     the corresponding output slot. The fold path's later
+///     `tryRewrite` on src_ptr (zeros-allocated) collapses both
+///     the read and write sides to GEP+load/store on the source's
+///     and destination's allocas.
+///
+/// Returns true on success. Drops the original concat / slice /
+/// from_scalar / range ops if they have no remaining uses.
+bool tryRewriteConcat(mlir::LLVM::CallOp Concat) {
+  auto Sym = Concat.getCallee();
+  if (!Sym || *Sym != "matlab_mat_i64_concat_row") return false;
+  if (Concat.getNumResults() != 1) return false;
+
+  struct OpInfo {
+    enum Kind { Scalar, Slice } K;
+    mlir::Value SrcVal;
+    int64_t Start = 0;
+    int64_t Len = 1;
+    mlir::Operation *DefOp = nullptr;
+  };
+  llvm::SmallVector<OpInfo, 4> OpInfos;
+  int64_t TotalN = 0;
+  for (mlir::Value Arg : Concat.getOperands()) {
+    auto *Def = Arg.getDefiningOp();
+    if (!Def) return false;
+    auto Call = mlir::dyn_cast<mlir::LLVM::CallOp>(Def);
+    if (!Call) return false;
+    auto Callee = Call.getCallee();
+    if (!Callee) return false;
+    OpInfo Oi;
+    Oi.DefOp = Def;
+    if (*Callee == "matlab_mat_i64_from_scalar" ||
+        *Callee == "matlab_mat_u64_from_scalar") {
+      if (Call.getNumOperands() != 1) return false;
+      Oi.K = OpInfo::Scalar;
+      Oi.SrcVal = Call.getOperand(0);
+      Oi.Len = 1;
+    } else if (*Callee == "matlab_mat_i64_zeros" ||
+               *Callee == "matlab_mat_u64_zeros") {
+      // A `zeros(1, N)` source (typically from a literal-init
+      // array `fi([c1, c2, ..., cN], ...)` after Stage C lowering)
+      // contributes N elements: reads are emitted on the zeros'
+      // result pointer at indices [1..N]. The downstream
+      // `tryRewrite` on the same zeros call then folds both the
+      // existing __subscript_stores AND our new subscript reads
+      // into the same `llvm.alloca [N x iW]`.
+      if (Call.getNumOperands() != 2) return false;
+      double Rows, Cols;
+      if (!readF64Const(Call.getOperand(0), Rows)) return false;
+      if (!readF64Const(Call.getOperand(1), Cols)) return false;
+      if (Rows != 1.0 || Cols < 1.0) return false;
+      Oi.K = OpInfo::Slice;
+      Oi.SrcVal = Call.getResult();
+      Oi.Start = 1;
+      Oi.Len = (int64_t)Cols;
+    } else if (*Callee == "matlab_mat_i64_slice1" ||
+               *Callee == "matlab_mat_u64_slice1") {
+      if (Call.getNumOperands() != 2) return false;
+      // Post-LowerTensorOps shape: the range arg is a `llvm.call
+      // @matlab_range(start, step, end) → ptr` (always 3 args; step
+      // defaults to 1.0 when source had no explicit step).
+      auto RngCall = Call.getOperand(1).getDefiningOp<mlir::LLVM::CallOp>();
+      if (!RngCall) return false;
+      auto RngCallee = RngCall.getCallee();
+      if (!RngCallee || *RngCallee != "matlab_range") return false;
+      if (RngCall.getNumOperands() != 3) return false;
+      double Start, Step, End;
+      if (!readF64Const(RngCall.getOperand(0), Start)) return false;
+      if (!readF64Const(RngCall.getOperand(1), Step)) return false;
+      if (!readF64Const(RngCall.getOperand(2), End)) return false;
+      // Stage E v1: only unit-step ranges. Strided slices need
+      // per-element index arithmetic; defer.
+      if (Step != 1.0) return false;
+      if (Start < 1 || End < Start) return false;
+      Oi.K = OpInfo::Slice;
+      Oi.SrcVal = Call.getOperand(0);
+      Oi.Start = (int64_t)Start;
+      Oi.Len = (int64_t)(End - Start + 1);
+    } else {
+      return false;
+    }
+    OpInfos.push_back(Oi);
+    TotalN += Oi.Len;
+  }
+  if (TotalN < 1) return false;
+
+  mlir::OpBuilder B(Concat);
+  mlir::Location L = Concat.getLoc();
+  auto &Ctx = *Concat.getContext();
+  auto F64 = mlir::Float64Type::get(&Ctx);
+  auto I64 = mlir::IntegerType::get(&Ctx, 64);
+  auto PtrTy = mlir::LLVM::LLVMPointerType::get(&Ctx);
+  // Inherit the fi-spec attrs from the concat call so the
+  // synthesized zeros / __subscript_store ops carry the same
+  // metadata (LowerStaticFiArrays' existing logic + downstream
+  // emitter use these).
+  llvm::SmallVector<mlir::NamedAttribute, 8> ConcatAttrs;
+  for (auto &E0 : Concat->getAttrs()) {
+    if (E0.getName().getValue() == "callee") continue;
+    ConcatAttrs.push_back(E0);
+  }
+  // Storage class width from fi_wl.
+  unsigned ElemW = 16;
+  bool Signed = true;
+  if (auto WLA = Concat->getAttrOfType<mlir::IntegerAttr>("fi_wl")) {
+    unsigned W = (unsigned)WLA.getInt();
+    ElemW = W <= 8 ? 8 : (W <= 16 ? 16 : (W <= 32 ? 32 : 64));
+  }
+  if (auto SA = Concat->getAttrOfType<mlir::IntegerAttr>("fi_signed"))
+    Signed = SA.getInt() != 0;
+  auto IT = mlir::IntegerType::get(&Ctx, ElemW);
+
+  // Step 1: emit matlab_mat_{i,u}64_zeros(1, N) for the result.
+  llvm::StringRef ZerosCallee = Signed ? "matlab_mat_i64_zeros"
+                                       : "matlab_mat_u64_zeros";
+  auto getOrInsert = [&](llvm::StringRef Name, mlir::Type Ret,
+                         mlir::ArrayRef<mlir::Type> Args)
+      -> mlir::LLVM::LLVMFuncOp {
+    auto M = Concat->getParentOfType<mlir::ModuleOp>();
+    if (auto Existing = M.lookupSymbol<mlir::LLVM::LLVMFuncOp>(Name))
+      return Existing;
+    mlir::OpBuilder::InsertionGuard G(B);
+    B.setInsertionPointToStart(M.getBody());
+    auto Ty = mlir::LLVM::LLVMFunctionType::get(Ret, Args);
+    auto Fn = mlir::LLVM::LLVMFuncOp::create(B, M.getLoc(), Name, Ty);
+    Fn.setLinkage(mlir::LLVM::Linkage::External);
+    return Fn;
+  };
+  auto ZerosFn = getOrInsert(ZerosCallee, PtrTy, {F64, F64});
+  mlir::Value RowsV = mlir::arith::ConstantOp::create(B, L, F64,
+      mlir::FloatAttr::get(F64, 1.0));
+  mlir::Value ColsV = mlir::arith::ConstantOp::create(B, L, F64,
+      mlir::FloatAttr::get(F64, (double)TotalN));
+  auto ZerosCall = mlir::LLVM::CallOp::create(B, L, ZerosFn,
+      mlir::ValueRange{RowsV, ColsV});
+  for (auto &E0 : ConcatAttrs)
+    ZerosCall->setAttr(E0.getName(), E0.getValue());
+  mlir::Value NewArr = ZerosCall.getResult();
+
+  // Step 2: per-element __subscript_store. For Slice operands we
+  // also emit per-element subscript1_s reads on the source ptr.
+  llvm::StringRef SubReadCallee = Signed ? "matlab_mat_i64_subscript1_s"
+                                         : "matlab_mat_u64_subscript1_s";
+  int64_t DstK = 1;
+  for (auto &Oi : OpInfos) {
+    if (Oi.K == OpInfo::Scalar) {
+      // Adjust scalar value to the storage type.
+      mlir::Value V = Oi.SrcVal;
+      if (auto VIT = mlir::dyn_cast<mlir::IntegerType>(V.getType())) {
+        if (VIT.getWidth() != ElemW) {
+          if (VIT.getWidth() < ElemW)
+            V = Signed ? (mlir::Value)mlir::arith::ExtSIOp::create(B, L, IT, V)
+                       : (mlir::Value)mlir::arith::ExtUIOp::create(B, L, IT, V);
+          else
+            V = mlir::arith::TruncIOp::create(B, L, IT, V);
+        }
+      } else {
+        return false;
+      }
+      mlir::Value KV = mlir::arith::ConstantOp::create(B, L, F64,
+          mlir::FloatAttr::get(F64, (double)DstK));
+      mlir::OperationState St(L, "matlab.call_builtin");
+      St.addOperands({NewArr, KV, V});
+      St.addTypes({mlir::NoneType::get(&Ctx)});
+      St.addAttribute("callee",
+          mlir::StringAttr::get(&Ctx, "__subscript_store"));
+      for (auto &E0 : ConcatAttrs)
+        St.addAttribute(E0.getName(), E0.getValue());
+      (void)B.create(St);
+      DstK++;
+      continue;
+    }
+    // Slice: emit per-element reads on Oi.SrcVal at indices
+    // [Start..Start+Len-1], stored at consecutive output slots.
+    auto SubReadFn = getOrInsert(SubReadCallee, I64, {PtrTy, F64});
+    for (int64_t i = 0; i < Oi.Len; ++i) {
+      int64_t SrcK = Oi.Start + i;
+      mlir::Value SrcKV = mlir::arith::ConstantOp::create(B, L, F64,
+          mlir::FloatAttr::get(F64, (double)SrcK));
+      auto Rd = mlir::LLVM::CallOp::create(B, L, SubReadFn,
+          mlir::ValueRange{Oi.SrcVal, SrcKV});
+      for (auto &E0 : ConcatAttrs)
+        Rd->setAttr(E0.getName(), E0.getValue());
+      // Trunc the i64 to the storage class for the store.
+      mlir::Value V = Rd.getResult();
+      if (ElemW < 64)
+        V = mlir::arith::TruncIOp::create(B, L, IT, V);
+      mlir::Value DstKV = mlir::arith::ConstantOp::create(B, L, F64,
+          mlir::FloatAttr::get(F64, (double)DstK));
+      mlir::OperationState St(L, "matlab.call_builtin");
+      St.addOperands({NewArr, DstKV, V});
+      St.addTypes({mlir::NoneType::get(&Ctx)});
+      St.addAttribute("callee",
+          mlir::StringAttr::get(&Ctx, "__subscript_store"));
+      for (auto &E0 : ConcatAttrs)
+        St.addAttribute(E0.getName(), E0.getValue());
+      (void)B.create(St);
+      DstK++;
+    }
+  }
+
+  // Step 3: rewrite the concat result to point at the new zeros'
+  // pointer; erase the concat + recursively-dead helper ops.
+  Concat.getResult().replaceAllUsesWith(NewArr);
+  Concat.erase();
+  // Iterative DCE: erase any op whose results have all become
+  // dead. Keep going until nothing further changes — handles the
+  // chain `from_scalar(extsi(fi.cast))` and `slice1(load,
+  // matlab_range(c1, c2, c3))` whose intermediate ops drop out
+  // one level at a time.
+  llvm::SmallVector<mlir::Operation *, 8> Seeds;
+  for (auto &Oi : OpInfos) if (Oi.DefOp) Seeds.push_back(Oi.DefOp);
+  bool Changed = true;
+  while (Changed) {
+    Changed = false;
+    llvm::SmallVector<mlir::Operation *, 8> NextSeeds;
+    for (mlir::Operation *Op : Seeds) {
+      if (!Op) continue;
+      bool AllDead = true;
+      for (mlir::Value R : Op->getResults())
+        if (!R.use_empty()) { AllDead = false; break; }
+      if (!AllDead) continue;
+      // Op is dead — remember its operand-defs and erase.
+      for (mlir::Value V : Op->getOperands())
+        if (auto *D = V.getDefiningOp()) NextSeeds.push_back(D);
+      Op->erase();
+      Changed = true;
+    }
+    Seeds = std::move(NextSeeds);
+  }
+  return true;
+}
+
 bool runLowerStaticFiArrays(mlir::ModuleOp M) {
+  // Phase 5.6 Stage E: pre-fold concat-of-statically-shaped-
+  // operands into a `matlab_mat_i64_zeros + N __subscript_store`
+  // chain so the standard zeros-folding path below picks them up.
+  llvm::SmallVector<mlir::LLVM::CallOp, 4> Concats;
+  M.walk([&](mlir::LLVM::CallOp C) {
+    auto Sym = C.getCallee();
+    if (!Sym) return;
+    if (*Sym == "matlab_mat_i64_concat_row" ||
+        *Sym == "matlab_mat_u64_concat_row")
+      Concats.push_back(C);
+  });
+  for (mlir::LLVM::CallOp C : Concats) (void)tryRewriteConcat(C);
+
   llvm::SmallVector<mlir::LLVM::CallOp, 4> Worklist;
   M.walk([&](mlir::LLVM::CallOp C) {
     auto Sym = C.getCallee();
