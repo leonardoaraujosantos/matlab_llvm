@@ -726,6 +726,7 @@ not "all rules at once"; it expands as features land:
 | 2 | `scf.for` with non-constant bounds (was already error-out via missing constant fold; now explicit), array shapes that don't constant-fold |
 | 3 | `persistent` without `isempty` init, persistent writes outside `always_ff`-mappable patterns, multi-clock hints (out of scope for v1) |
 | 4 | FSM ambiguity (multiple unconditional next-state writes in one arm, missing `otherwise`, unreachable states), RAM-pattern violations (slice access, whole-array copy, data-dependent index *shape*) |
+| 4.5 | Multi-store slots that disagree on type, `if <non-i1, non-fi>`, `true`/`false` used in non-bool contexts, fi-array access patterns outside the canonical scalar read/write shape, vector args with non-constant length |
 | 5 | Retiming barriers crossed (saturating `fi` ops moved across pipeline registers), unsupported `fi` overflow/rounding combos, `coder.hdl.*` annotation conflicts |
 
 **Diagnostic format.** Every rejection answers four things, mirroring
@@ -983,6 +984,155 @@ manually.
 Moore controllers, single-port RAM, register file. Verilator lint
 plus simulation-equivalence lane.
 
+### Phase 4.5 — Pipeline Hardening for HDL examples (~1.5 weeks)
+
+**Goal.** Unblock the `examples/hdl/` corpus that today's Phase 1-3
+backend cannot accept due to limitations in the *existing* lowering
+pipeline (not the SV emitter itself). Each item below is an
+orthogonal pipeline issue surfaced by a real example program; each
+also fails identically under `-emit-c` today, so fixes here help
+every backend, not just SV.
+
+These are intentionally not Phase 4: FSM extraction and RAM
+inference are SV-emitter work, while the items here are
+front-end / type-flow / scalar-promotion plumbing.
+
+**Trigger examples** (drawn from `examples/hdl/`):
+- `alu_16bit.m` — multi-store scalar slot retyping + `false` literal
+- `counter_0_to_10.m` — `if <fi-truthy>` conversion
+- `vector_processor.m` — vector function args + `fi(vec, T)` cast
+- `fir_asic_pipelined.m`, `sequential_processor.m` —
+  `fi(zeros(1, N), ...)` static fi arrays
+
+#### 4.5.1 Multi-store scalar slot retyping
+
+**Problem.** A `matlab.alloc` (slot) initialized once with a typed
+store and then over-written in multiple branches keeps its
+`none`-typed result, even when every store agrees on a concrete
+scalar integer / fi type. Today `LowerScalarSlots` only promotes
+slots whose type is already concrete, so the `data_out` slot in
+`alu_16bit` stays `none` and downstream typing breaks.
+
+**Fix.** Extend the slot-type inference inside `LowerUserCalls` (or
+add a small post-pass) so a `matlab.alloc` whose every store has
+the same concrete scalar type adopts that type. The slot then
+participates in normal scalar arith lowering.
+
+**Test:** `alu_16bit.m` with a typed driver should emit clean SV
+with a single signed `data_out` register-style local plus the
+case-tree.
+
+#### 4.5.2 `if <fi-typed value>` truthy lowering
+
+**Problem.** MATLAB's `if x` (where `x` is a fi-typed integer) is
+the natural truthiness pattern. Today the lowering produces
+`scf.if` with a non-`i1` condition operand, which fails MLIR
+verification:
+
+```
+'scf.if' op operand #0 must be 1-bit signless integer, but got 'none'
+```
+
+**Fix.** When Sema sees an `IfStmt` whose condition is an integer
+or fi value, emit an implicit `cond != 0` comparison so the
+resulting `scf.if` consumes a clean `i1`. Alternatively, do the
+fix-up in `LowerScalarsToArith` (rewrite `scf.if` whose condition
+is a non-`i1` integer to `arith.cmpi ne, cond, 0`).
+
+**Test:** `counter_0_to_10.m` (which writes `if reset` /
+`if count_val >= 10`) should compile without manual
+`> fi(0, ...)` rewrites.
+
+#### 4.5.3 `false` / `true` as bool literals (not handles)
+
+**Problem.** `overflow = false` produces a `matlab.make_handle`
+with `callee = "false"` because `true` and `false` are registered
+as builtin function names, not constants. The slot ends up
+holding a function handle, not a bool, and the function's
+`overflow` output stays `none`-typed.
+
+**Fix.** Special-case `true` / `false` in Sema (or in MIR
+lowering) to emit `arith.constant 1 : i1` / `0 : i1` instead of
+`make_handle`. Update Resolver to mark them as constants rather
+than builtins.
+
+**Test:** `alu_16bit.m`'s second output `overflow` should emit as
+a 1-bit SV port driven from a clean comparison (after 4.5.4 lands
+the multi-store slot retyping covers `data_out`).
+
+#### 4.5.4 Static fi-array lowering
+
+**Problem.** `fi(zeros(1, N), S, W, F)` lowers to a runtime call
+chain (`matlab_mat_i64_zeros` → `matlab_persistent_set_ptr` →
+`matlab_mat_i64_subscript1_s`). Synthesis can't accept any of
+those — they're heap allocations and dynamic dispatches.
+
+**Fix.** Add a `LowerStaticFiArrays` pass that runs before
+`LowerTensorOps` and recognizes the canonical pattern:
+
+```matlab
+arr = fi(zeros(1, N), S, W, F);    % constant N, constant fi spec
+... arr(i) ...                      % constant or for-loop iv index
+arr(i) = ...
+```
+
+For Phase 4.5, the supported access shapes mirror the HDL Coder
+RAM-inference rules (see Phase 4 §4.3): single-element scalar
+read or write, no slicing or whole-array copy. The pass rewrites
+the storage to an `llvm.alloca [N x iW]` (with the fi `S/F` spec
+threaded via a discardable `sv.fi_spec` attr for Phase 5
+arithmetic) and the access calls to `llvm.getelementptr` +
+`llvm.load` / `llvm.store`. The SV emitter then renders the array
+as `logic [W-1:0] arr [N];` with index expressions, identical to
+the Phase 2 array shape.
+
+**Test:** `vector_processor.m` (constant-index reads of
+`vec_a(1)` / `vec_a(2)` / `vec_a(3)`) — pure unrolled
+combinational. `fir_asic_pipelined.m` and
+`sequential_processor.m` exercise the same path inside a
+`for i = 1:4` body, also unrolled by Phase 2's loop handling.
+
+#### 4.5.5 Vector function arguments
+
+**Problem.** `function y = f(vec_a)` with `vec_a` typed as a
+3-element fi vector at the call site today refines to a
+`!llvm.ptr` argument going through `matlab_fi_quantize_s` —
+runtime cast, not synthesizable.
+
+**Fix.** Extend the user-call refinement so a vector arg with
+constant shape (matched by `fi(vec, T)` at the call site) lowers
+to a fixed-size `llvm.array` parameter passed by value, mirroring
+the static-array storage in 4.5.4. The SV emitter renders these as
+input port arrays (`input logic [W-1:0] vec_a [N]`).
+
+**Test:** `vector_processor(fi([1 2 3], T), fi([4 5 6], T))`
+emits a module with two i16 input arrays of length 3 and two i32
+scalar outputs.
+
+#### 4.5.6 What stays out of Phase 4.5
+
+- 2-D fi matrices and persistent fi matrices — the existing
+  feature_status doc lists this as a separate gap; the SV path
+  inherits whatever the upstream pipeline supports.
+- N-dim arrays beyond what Phase 4.5.4 produces.
+- `sin` / `cos` / `sqrt` etc. (CORDIC lowering) — Phase 5.
+- Float fallbacks and policy flags — Phase 5.
+
+#### Effort budget
+
+| Item | Effort | Affects beyond SV |
+|---|--:|---|
+| 4.5.1 multi-store slot retyping | ~2 days | yes — emit-c also benefits |
+| 4.5.2 if-fi truthy | ~1 day | yes |
+| 4.5.3 true/false constants | ~0.5 day | yes |
+| 4.5.4 static fi arrays | ~1 week | yes — biggest win |
+| 4.5.5 vector args | ~3 days | yes |
+| **Total** | **~1.5 weeks** | |
+
+Phase 4.5 is intentionally orthogonal to Phase 4. The two can
+ship in either order; pick by which corpus matters more — FSMs
+(Phase 4) or vector / array DSP (Phase 4.5).
+
 ### Phase 5 — Fixed-point, optimizations, reports (~2 weeks)
 
 **Goal.** First-class `fi` support in the SV path, plus the
@@ -1168,15 +1318,18 @@ sim lane.
 | 2 | Static arrays + fully-unrolled `for` | ~1 week |
 | 3 | `persistent` → register/counter, ASIC reset, `always_ff` emission | ~1 week |
 | 4 | FSM extraction + RAM inference | ~2 weeks |
+| 4.5 | Pipeline hardening: multi-store slots, `if <fi>`, `true`/`false`, static fi arrays, vector args | ~1.5 weeks |
 | 5 | Fixed-point + adaptive pipelining + serialization + const-mul + report | ~2 weeks |
 | **Total to a useful v1** | Phase 1+2+3 | **~3 weeks** |
-| **Total to full subset** | Phase 1+2+3+4+5 | **~7 weeks** |
+| **Total to full subset** | Phase 1+2+3+4+4.5+5 | **~8.5 weeks** |
 
 Phase 1+2+3 is already useful: pure DSP datapaths, registered
 accumulators, FIR filters, simple pipelines compile and lint clean.
-Phase 4 unlocks controllers and memory-backed designs. Phase 5
-brings the optimizations that make output competitive with
-hand-written RTL on a real ASIC flow.
+Phase 4 unlocks controllers and memory-backed designs. Phase 4.5
+unblocks the `examples/hdl/` corpus that depends on cross-pipeline
+fixes (multi-store slots, `if <fi>`, static arrays). Phase 5 brings
+the optimizations that make output competitive with hand-written
+RTL on a real ASIC flow.
 
 ### Open questions
 
