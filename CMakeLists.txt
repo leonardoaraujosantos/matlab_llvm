@@ -148,8 +148,11 @@ if(MATLAB_LLVM_WITH_MLIR)
 endif()
 
 add_executable(matlabc tools/matlabc/main.cpp)
+# MatlabMIR and MatlabParse PUBLIC-link the rest transitively;
+# listing them explicitly here would duplicate them on the link line
+# (ld64 warns "ignoring duplicate libraries").
 target_link_libraries(matlabc
-  PRIVATE MatlabMIR MatlabParse MatlabSema MatlabAST MatlabLex MatlabBasic)
+  PRIVATE MatlabMIR MatlabParse)
 if(MATLAB_LLVM_WITH_MLIR)
   target_link_libraries(matlabc PRIVATE MatlabMLIR)
   target_compile_definitions(matlabc PRIVATE MATLAB_LLVM_WITH_MLIR=1)

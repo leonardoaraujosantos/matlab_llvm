@@ -2909,7 +2909,6 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             if (ZN && ZN->Ref && ZN->Ref->Kind == BindingKind::Builtin &&
                 (ZN->Name == "zeros" || ZN->Name == "ones") &&
                 !ZC->Args.empty()) {
-              auto F64 = mlir::Float64Type::get(&MCtx);
               auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
               mlir::Value M = lowerExpr(*ZC->Args[0]);
               mlir::Value Ncols = ZC->Args.size() >= 2
@@ -3942,7 +3941,6 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
       FieldName = Lit->Value;
     else
       return emitUnreg("matlab.undef", {}, RT, L);
-    auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
     auto F64 = mlir::Float64Type::get(&MCtx);
     mlir::Value NameV = emitFieldNameChar(FieldName, L);
     mlir::NamedAttribute Cal(
@@ -3961,7 +3959,6 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
       auto &OutA = static_cast<const ArrayType &>(*E.Ty);
       if (OutA.Elt == Dtype::Fixed && OutA.FxSpec) {
         auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
-        auto F64 = mlir::Float64Type::get(&MCtx);
         bool Signed = OutA.FxSpec->Signed;
         std::string FromScalar = std::string("matlab_mat_") +
             (Signed ? "i64_" : "u64_") + "from_scalar";

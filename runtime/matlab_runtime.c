@@ -872,6 +872,7 @@ matlab_mat *matlab_repmat(matlab_mat *A, double m, double n) {
         for (int64_t j = 0; j < n; ++j) {                                 \
             double acc = INIT_EXPR;                                       \
             int64_t total = m;                                            \
+            (void)total; /* used only by mean's FINALIZE_EXPR */          \
             for (int64_t i = 0; i < m; ++i) {                             \
                 double x = A->data[i * n + j];                            \
                 acc = UPDATE_EXPR;                                        \
@@ -3627,22 +3628,28 @@ static void matlab_err_emit_traceback_to_stderr(void) {
      * stream. write(2) bypasses all of that. */
     char buf[2048];
     size_t off = 0;
+    #define APP_LIT(s) do { \
+        size_t l = sizeof(s) - 1; \
+        if (off + l > sizeof buf) l = sizeof buf - off; \
+        memcpy(buf + off, s, l); \
+        off += l; \
+    } while (0)
     #define APP(fmt, ...) do { \
         if (off < sizeof buf) { \
-            int n = snprintf(buf + off, sizeof buf - off, fmt, ##__VA_ARGS__); \
+            int n = snprintf(buf + off, sizeof buf - off, fmt, __VA_ARGS__); \
             if (n > 0) off += (size_t)n > sizeof buf - off \
                               ? sizeof buf - off : (size_t)n; \
         } \
     } while (0)
 
-    APP("error: ");
+    APP_LIT("error: ");
     if (matlab_error_msg_len > 0) {
         size_t mlen = (size_t)matlab_error_msg_len;
         if (off + mlen > sizeof buf) mlen = sizeof buf - off;
         memcpy(buf + off, matlab_error_msg, mlen);
         off += mlen;
     }
-    APP("\n");
+    APP_LIT("\n");
 
     pthread_mutex_lock(&matlab_dbg.mu);
     for (int idx = matlab_err_n_frames - 1; idx >= 0; --idx) {
@@ -4799,10 +4806,6 @@ matlab_mat *matlab_abs_c(void *Aptr) {
 }
 
 /* Element-wise binary ---------------------------------------------------*/
-
-static int mat_c_same_shape(matlab_mat_c *A, matlab_mat_c *B) {
-    return A && B && A->rows == B->rows && A->cols == B->cols;
-}
 
 /* Broadcast: 1x1 matches any shape. Returns the shape to use. 0 on
  * incompatible shapes. */
