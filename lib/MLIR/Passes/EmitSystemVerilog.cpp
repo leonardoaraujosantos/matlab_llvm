@@ -277,6 +277,20 @@ std::string Emitter::exprFor(mlir::Value V) {
           Signed = (IT.getWidth() != 1);
         return intLiteral(IA.getInt(), C.getType(), Signed);
       }
+      // The frontend emits MATLAB switch-case labels as `f64`
+      // constants regardless of the discriminator's actual integer
+      // type, producing comparisons like `arith.cmpi i8, f64`. Render
+      // the f64 here as an unsized SV integer literal — SV's
+      // self-determined-width rules promote it to match the integer
+      // side. (We accept `widthwarn` from Verilator on this rather
+      // than guess a width without surrounding-op context.)
+      if (auto FA = mlir::dyn_cast<mlir::FloatAttr>(C.getValue())) {
+        double D = FA.getValueAsDouble();
+        int64_t I = (int64_t)D;
+        if ((double)I == D) {
+          std::ostringstream S; S << I; return S.str();
+        }
+      }
     }
     // Phase 3: a persistent-get call result reads as the register's
     // current-value signal, regardless of the get's declared f64 ABI
@@ -763,6 +777,72 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
   // effect. Its uses route through the register signal name via
   // exprFor; the call op itself is skipped.
   if (GetSiteToReg.contains(&Op)) return;
+
+  // Recognized bitwise builtins on integer / fi operands. The
+  // frontend lowers `bitand/bitor/bitxor/bitshift/bitcmp(...)` to a
+  // `matlab.call_builtin` site with the matching `callee` attr and
+  // `none`-or-integer-typed operands; the SV emitter renders them as
+  // direct bitwise operators. `bitshift(a, k)` with positive `k`
+  // shifts left; negative `k` shifts right (arith for signed).
+  if (Op.getName().getStringRef() == "matlab.call_builtin") {
+    auto Callee = Op.getAttrOfType<mlir::StringAttr>("callee");
+    if (Callee) {
+      llvm::StringRef N = Callee.getValue();
+      llvm::StringRef Sv;
+      bool Unary = false;
+      if (N == "bitand") Sv = "&";
+      else if (N == "bitor")  Sv = "|";
+      else if (N == "bitxor") Sv = "^";
+      else if (N == "bitcmp") { Sv = "~"; Unary = true; }
+      if (!Sv.empty()) {
+        unsigned ExpectOperands = Unary ? 1 : 2;
+        if (Op.getNumOperands() != ExpectOperands ||
+            Op.getNumResults() != 1) {
+          fail(("unsupported arity on " + N + " in SV emitter").str());
+          return;
+        }
+        indent(Indent);
+        OS << name(Op.getResult(0)) << " = ";
+        if (Unary) {
+          OS << Sv.str() << exprFor(Op.getOperand(0));
+        } else {
+          OS << exprFor(Op.getOperand(0)) << " " << Sv.str() << " "
+             << exprFor(Op.getOperand(1));
+        }
+        OS << ";\n";
+        return;
+      }
+      if (N == "bitshift") {
+        if (Op.getNumOperands() != 2 || Op.getNumResults() != 1) {
+          fail("unsupported arity on bitshift in SV emitter");
+          return;
+        }
+        // Positive shift = left, negative = arithmetic right. The
+        // shift amount may be a positive or negative compile-time
+        // constant; check.
+        mlir::Value Amt = Op.getOperand(1);
+        bool IsLeft = true;
+        int64_t AmtV = 0;
+        bool AmtKnown = false;
+        if (auto C = Amt.getDefiningOp<mlir::arith::ConstantOp>()) {
+          if (auto IA = mlir::dyn_cast<mlir::IntegerAttr>(C.getValue())) {
+            AmtV = IA.getInt(); AmtKnown = true;
+          } else if (auto FA = mlir::dyn_cast<mlir::FloatAttr>(C.getValue())) {
+            AmtV = (int64_t)FA.getValueAsDouble(); AmtKnown = true;
+          }
+        }
+        if (AmtKnown && AmtV < 0) { IsLeft = false; AmtV = -AmtV; }
+        indent(Indent);
+        OS << name(Op.getResult(0)) << " = " << exprFor(Op.getOperand(0));
+        if (IsLeft) OS << " << ";
+        else        OS << " >>> ";
+        if (AmtKnown) OS << AmtV;
+        else          OS << exprFor(Amt);
+        OS << ";\n";
+        return;
+      }
+    }
+  }
 
   // Phase 3 — recognized scalar `matlab.*` arithmetic / comparison
   // ops that survive LowerFixedPoint with an f64 operand (typically

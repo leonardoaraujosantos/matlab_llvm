@@ -149,7 +149,13 @@ struct BinArithToArith : public NameMatch {
       return mlir::failure();
     mlir::Value A = Op->getOperand(0);
     mlir::Value B = Op->getOperand(1);
+    // Prefer result type when set; fall back to operand type when the
+    // result type is still `none` (Sema doesn't always propagate the
+    // result type for unregistered matlab.* ops, especially when one
+    // operand was refined late by user-call lowering or by an earlier
+    // bitop rewrite).
     mlir::Type Ty = Op->getResult(0).getType();
+    if (mlir::isa<mlir::NoneType>(Ty)) Ty = A.getType();
     if (A.getType() != Ty || B.getType() != Ty) return mlir::failure();
     if (isScalarFloat(Ty)) {
       R.replaceOpWithNewOp<FOp>(Op, A, B);
@@ -162,6 +168,58 @@ struct BinArithToArith : public NameMatch {
       }
     }
     return mlir::failure();
+  }
+};
+
+//===----------------------------------------------------------------------===//
+// Bitwise builtins (bitand / bitor / bitxor / bitcmp / bitshift)
+//===----------------------------------------------------------------------===//
+
+/// Lowers `matlab.call_builtin @<bitop>(a, b)` to `arith.<op>i` when
+/// the OPERAND types are matching scalar integers. The original
+/// matlab.call_builtin result type is `none` (Sema doesn't propagate
+/// builtin return types through call_builtin); the lowering picks
+/// up the operand integer type and uses it for the new arith op.
+/// Downstream consumers see a typed result and continue lowering.
+template <typename IOp>
+struct BinaryBitwiseBuiltin : public NameMatch {
+  llvm::StringRef Callee;
+  BinaryBitwiseBuiltin(llvm::StringRef CalleeName, mlir::MLIRContext *Ctx)
+      : NameMatch("matlab.call_builtin", Ctx), Callee(CalleeName) {}
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *Op,
+                  mlir::PatternRewriter &R) const override {
+    auto C = Op->getAttrOfType<mlir::StringAttr>("callee");
+    if (!C || C.getValue() != Callee) return mlir::failure();
+    if (Op->getNumOperands() != 2 || Op->getNumResults() != 1)
+      return mlir::failure();
+    mlir::Type ATy = Op->getOperand(0).getType();
+    mlir::Type BTy = Op->getOperand(1).getType();
+    if (!isScalarInt(ATy) || ATy != BTy) return mlir::failure();
+    R.replaceOpWithNewOp<IOp>(Op, ATy, Op->getOperand(0), Op->getOperand(1));
+    return mlir::success();
+  }
+};
+
+/// Lowers `matlab.call_builtin @bitcmp(a)` (bitwise NOT) to
+/// `arith.xori a, -1`. Single-operand on a scalar integer.
+struct BitCmpBuiltin : public NameMatch {
+  BitCmpBuiltin(mlir::MLIRContext *Ctx)
+      : NameMatch("matlab.call_builtin", Ctx) {}
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *Op,
+                  mlir::PatternRewriter &R) const override {
+    auto C = Op->getAttrOfType<mlir::StringAttr>("callee");
+    if (!C || C.getValue() != "bitcmp") return mlir::failure();
+    if (Op->getNumOperands() != 1 || Op->getNumResults() != 1)
+      return mlir::failure();
+    mlir::Type Ty = Op->getOperand(0).getType();
+    if (!isScalarInt(Ty)) return mlir::failure();
+    auto Cst = mlir::arith::ConstantOp::create(
+        R, Op->getLoc(), Ty,
+        mlir::IntegerAttr::get(Ty, -1));
+    R.replaceOpWithNewOp<mlir::arith::XOrIOp>(Op, Op->getOperand(0), Cst);
+    return mlir::success();
   }
 };
 
@@ -268,6 +326,17 @@ bool runLowerScalarsToArith(mlir::ModuleOp M) {
       "matlab.ediv", Ctx);
   Patterns.add<ScalarMatMulToMulf>("matlab.matmul", Ctx);
   Patterns.add<ScalarMatDivToDivf>("matlab.matdiv", Ctx);
+
+  // Bitwise builtins. Only fire when operand types are concrete
+  // matching scalar integers — type-refinement-driven, like the rest
+  // of this pass. Once function signatures are refined by repeated
+  // user-call lowering, bitand/bitor/bitxor sites collapse to their
+  // arith counterparts, which then participate in the next round of
+  // type propagation through their result type.
+  Patterns.add<BinaryBitwiseBuiltin<mlir::arith::AndIOp>>("bitand", Ctx);
+  Patterns.add<BinaryBitwiseBuiltin<mlir::arith::OrIOp>>("bitor", Ctx);
+  Patterns.add<BinaryBitwiseBuiltin<mlir::arith::XOrIOp>>("bitxor", Ctx);
+  Patterns.add<BitCmpBuiltin>(Ctx);
 
   using namespace mlir::arith;
   Patterns.add<CmpToArith<CmpFPredicate::OEQ, CmpIPredicate::eq>>(

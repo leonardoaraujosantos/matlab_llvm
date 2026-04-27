@@ -167,6 +167,27 @@ compile-sv FILE: build
         echo "built $out (verilator not on PATH; lint skipped)"
     fi
 
+# Multi-file SystemVerilog compile: typed driver + module file(s).
+# Useful when a function lives in its own .m file (the MATLAB
+# convention) and a separate driver provides the typed call site that
+# the user-call refinement pipeline consumes. The first non-driver
+# argument's basename is used as the output module name.
+# Example:
+#   just compile-sv-multi driver.m examples/hdl/mux_4to_1_16bit.m
+compile-sv-multi DRIVER MODULE *EXTRA: build
+    #!/usr/bin/env bash
+    set -euo pipefail
+    name=$(basename {{MODULE}} .m)
+    out="./$name.sv"
+    ./{{BUILD_DIR}}/matlabc -emit-systemverilog \
+        {{DRIVER}} {{MODULE}} {{EXTRA}} > "$out"
+    if command -v verilator >/dev/null 2>&1; then
+        verilator --lint-only -Wall --top-module "$name" "$out"
+        echo "built $out (lint OK)"
+    else
+        echo "built $out (verilator not on PATH; lint skipped)"
+    fi
+
 # Compile a .m file via the C emitter: produces ./<name> using cc.
 # Example: `just compile-c examples/hello.m` -> ./hello
 compile-c FILE: build

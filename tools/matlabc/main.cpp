@@ -42,6 +42,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <iostream>
 #include <optional>
 #include <string>
@@ -89,6 +90,13 @@ struct Options {
   enum class SvResetKind { AsyncLow, SyncHigh, SyncLow };
   SvResetKind SvReset = SvResetKind::AsyncLow;
   std::string InputPath;
+  /* Additional input files. When multiple `.m` files are passed, the
+   * driver concatenates their contents in CLI order — the first file
+   * (kept in InputPath for backward compat with single-file modes) is
+   * the script entry; subsequent files contribute function definitions
+   * referenced from the script. Lets a `test_<mod>.m` driver compile
+   * together with its `<mod>.m` definition without manual splicing. */
+  std::vector<std::string> ExtraInputs;
 };
 
 int usage(const char *Prog) {
@@ -143,8 +151,10 @@ bool parseArgs(int Argc, char **Argv, Options &Opts, const char *&Prog) {
       std::cerr << "unknown flag: " << A << "\n";
       return false;
     } else {
-      if (!Opts.InputPath.empty()) return false;
-      Opts.InputPath = std::string(A);
+      if (Opts.InputPath.empty())
+        Opts.InputPath = std::string(A);
+      else
+        Opts.ExtraInputs.push_back(std::string(A));
     }
   }
   /* -repl doesn't take a file. Everything else does.
@@ -2658,10 +2668,40 @@ int main(int Argc, char **Argv) {
 #endif
 
   SourceManager SM;
-  FileID F = SM.loadFile(Opts.InputPath);
-  if (F == 0) {
-    std::cerr << Opts.InputPath << ": cannot open file\n";
-    return 1;
+  FileID F = 0;
+  if (Opts.ExtraInputs.empty()) {
+    F = SM.loadFile(Opts.InputPath);
+    if (F == 0) {
+      std::cerr << Opts.InputPath << ": cannot open file\n";
+      return 1;
+    }
+  } else {
+    /* Multi-file input — concatenate `Opts.InputPath` + every
+     * `ExtraInputs` path in CLI order with `\n` separators, surface
+     * to the rest of the pipeline as one synthetic buffer. The
+     * combined name is the primary input's path (so diagnostics
+     * still mention a recognizable file) and per-file `% --- file
+     * <path> ---` markers separate the regions. */
+    std::string Combined;
+    auto Append = [&](const std::string &P) -> bool {
+      std::ifstream In(P, std::ios::binary);
+      if (!In) {
+        std::cerr << P << ": cannot open file\n";
+        return false;
+      }
+      std::ostringstream Buf;
+      Buf << In.rdbuf();
+      if (!Combined.empty()) Combined += '\n';
+      Combined += "% --- file ";
+      Combined += P;
+      Combined += " ---\n";
+      Combined += Buf.str();
+      return true;
+    };
+    if (!Append(Opts.InputPath)) return 1;
+    for (const auto &P : Opts.ExtraInputs)
+      if (!Append(P)) return 1;
+    F = SM.addBuffer(Opts.InputPath, std::move(Combined));
   }
 
   DiagnosticEngine Diag(SM);
@@ -3004,6 +3044,61 @@ int main(int Argc, char **Argv) {
           std::cout << Src;
         } else if (Opts.Mode == Options::Mode::EmitSystemVerilog ||
                    Opts.Mode == Options::Mode::CheckSynthesizable) {
+          // Patch every user `func.func`'s declared result types from
+          // its body's `func.return` operand types. The user-call
+          // refinement pass updates result types only when call-site
+          // arg types prove "Compatible"; for functions whose body
+          // lowers slowly (e.g. matlab.call_builtin @bitand chains
+          // that only collapse to arith.* after the iteration runs
+          // multiple rounds), the result type can lag behind the
+          // typed return value. This explicit pass picks up that
+          // lag so the SV emitter sees a consistent signature.
+          M.walk([&](mlir::func::FuncOp Fn) {
+            if (Fn.empty()) return;
+            llvm::SmallVector<mlir::Type, 4> NewResults(
+                Fn.getFunctionType().getResults().begin(),
+                Fn.getFunctionType().getResults().end());
+            bool Changed = false;
+            Fn.walk([&](mlir::func::ReturnOp Ret) {
+              if (Ret.getNumOperands() != NewResults.size()) return;
+              for (unsigned i = 0; i < Ret.getNumOperands(); ++i) {
+                auto Old = NewResults[i];
+                auto New = Ret.getOperand(i).getType();
+                if (mlir::isa<mlir::NoneType>(Old) && Old != New) {
+                  NewResults[i] = New;
+                  Changed = true;
+                }
+              }
+            });
+            if (Changed) {
+              auto Ty = mlir::FunctionType::get(
+                  Fn.getContext(),
+                  Fn.getFunctionType().getInputs(), NewResults);
+              Fn.setFunctionType(Ty);
+            }
+          });
+          // Stale func.call ops need their result types patched too.
+          M.walk([&](mlir::func::CallOp Call) {
+            auto Tgt = M.lookupSymbol<mlir::func::FuncOp>(
+                Call.getCallee());
+            if (!Tgt) return;
+            auto SigR = Tgt.getFunctionType().getResults();
+            if (Call.getNumResults() != SigR.size()) return;
+            bool Mismatch = false;
+            for (unsigned i = 0; i < SigR.size(); ++i)
+              if (Call.getResult(i).getType() != SigR[i]) {
+                Mismatch = true; break;
+              }
+            if (!Mismatch) return;
+            mlir::OpBuilder CB(Call);
+            auto Nc = mlir::func::CallOp::create(
+                CB, Call.getLoc(), SigR, Call.getCallee(),
+                Call.getOperands());
+            for (unsigned i = 0; i < SigR.size(); ++i)
+              Call.getResult(i).replaceAllUsesWith(Nc.getResult(i));
+            Call.erase();
+          });
+
           // Same pre-emit cleanup as EmitC: fold `if/else` stores into
           // `arith.select` and promote single-store allocas. Required so
           // scalar combinational programs surface to the SV emitter as
