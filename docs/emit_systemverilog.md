@@ -689,18 +689,51 @@ piece the next stage builds on.
 
 | Stage | Items | Effort | Closes |
 |---|---|--:|---|
-| A | Saturate-cast verification + constant-index reads on vector args | ~1.5 days | half of `vector_processor` |
+| A | (split — see notes below) | — | — |
+| A.1 | fi-spec propagation across function-call boundaries (precondition for clean Saturate-cast on the function-arg path) | ~3 days | enables `fi(arg, ...)` casts to clamp correctly, used by fir/seq's final stage |
+| A.2 | Constant-index reads on vector args | ~1 day | small extension once Stage B lands; no value standalone |
 | B | Vector function arguments (Sema + MIR + user-call + LLVM tensor lowering) | ~4 days | `vector_processor` ✅ |
 | C | Static array literal init (`fi([0.1, 0.2, ...], ...)` → alloca + per-element stores) | ~2 days | coefficient-table half of fir / seq |
 | D | Loop-iv array indexing (`for i = 1:N; arr(i) ...; end`) | ~3 days | for-loop bodies in fir / seq |
 | E | Vector concat with static shapes (`[x, delay(1:end-1)]`) | ~3 days | shift-register pattern in fir / seq |
 | F | Persistent fi-arrays + whole-vector assign (`persistent` + `acc(:) = ...`) | ~6 days | `fir_asic_pipelined` ✅, `sequential_processor` ✅ |
 
-Total: ~4 weeks of focused work. After Stage B we cross from 5/8
-to 6/8 modules emitting clean SV; the remaining two need C–F to
-work together because the shift-register-with-persistent-fi-array
-idiom in fir / seq depends on three orthogonal lifts (literal init,
-loop-iv indexing, vector concat) all landing.
+Total: ~4–5 weeks of focused work, **one stage per
+implementation session** (the existing Phase 5.6.x cadence). The
+shift-register-with-persistent-fi-array idiom in fir / seq depends
+on three orthogonal lifts (literal init, loop-iv indexing, vector
+concat) all landing before stage F can complete.
+
+#### Stage A re-scoped (was "verification")
+
+Original plan called Stage A "saturate-cast verification" treating
+it as a half-day check. Closer inspection shows the verification
+actually fails on the path used by fir / seq:
+
+  ```matlab
+  function y = step(x)              % x is i32 fi(_, 32, 29)
+      y = fi(x, 1, 16, 12, 'OverflowAction', 'Saturate');
+  end
+  ```
+
+`Lowering` emits this fi-cast with `callee = matlab_fi_quantize_*`
+(the constructor form) regardless of input type.
+`LowerFixedPoint::rewriteFiCast` only takes the constructor path
+when the input is `f64` / `f32`; integer inputs need the clamp
+path with `fi_clamp` attr **and** `fi_lhs_*` attrs naming the
+source spec. Neither is set today, so the cast survives to the
+SV emitter as `unsupported op`.
+
+The proper fix needs **fi-spec propagation across function calls**:
+the call-site fi spec (signed/WL/FL) attaches to the function arg
+as `matlab.fi_arg_*` attrs; `LowerFixedPoint` reads those to
+populate the missing `fi_lhs_*` on the cast; the existing clamp
+path (Phase 5.1) handles the rewrite.
+
+Without this, `fi(<fi_value>, ...)` casts simply fail in the SV
+pipeline whenever the input crosses a function boundary — which
+is exactly the FIR / sequential_processor final stage. So Stage
+A.1 is genuinely a multi-day effort, not a verification.
 
 ### Out-of-scope items still on the plan
 
