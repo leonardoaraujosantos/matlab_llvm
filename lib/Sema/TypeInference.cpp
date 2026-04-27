@@ -84,12 +84,70 @@ void TypeInference::runFunction(Function &F) {
   // operates on a malformed shape (Stage B blocker writeup in
   // docs/emit_systemverilog.md).
   llvm::DenseMap<Binding *, int64_t> ParamMaxIdx;
+  // Phase 5.6 Stage A.1 — fi-spec propagation across function-arg
+  // re-cast sites. When the body contains `fi(param, S, W, F)` (a
+  // re-cast of an fi-typed function parameter), we capture the
+  // declared output spec and use it as the param's inferred type
+  // — the user's intent is "interpret the existing fi value with
+  // this exact spec", which only matches if the param itself is
+  // already that spec at the call site. Without this, the param
+  // stays Any and Lowering can't emit fi.cast attrs that
+  // LowerFixedPoint's clamp path needs.
+  llvm::DenseMap<Binding *, FixedSpec> ParamFiSpec;
   if (F.Body) {
     std::function<void(const Expr &)> walkExpr;
     std::function<void(const Stmt &)> walkStmt;
     std::function<void(const ::matlab::Block &)> walkBlock;
     walkExpr = [&](const Expr &E0) {
       if (auto *C = dynamic_cast<const CallOrIndex *>(&E0)) {
+        // Phase 5.6 Stage A.1: recognize `fi(param, signed, WL,
+        // FL)` re-cast where `param` is a NameExpr bound to a
+        // function parameter. Capture the declared output spec
+        // as the param's inferred fi spec.
+        if (auto *FN = dynamic_cast<const NameExpr *>(C->Callee)) {
+          if (FN->Ref && FN->Ref->Kind == BindingKind::Builtin &&
+              FN->Name == "fi" && C->Args.size() >= 4 && C->Args[0]) {
+            if (auto *VN = dynamic_cast<const NameExpr *>(C->Args[0])) {
+              if (VN->Ref) {
+                for (Binding *PB : F.ParamRefs) {
+                  if (PB != VN->Ref) continue;
+                  // Need (signed, WL, FL) as compile-time integers.
+                  std::function<std::optional<int64_t>(const Expr *)>
+                      foldI = [&](const Expr *Ex) -> std::optional<int64_t> {
+                    if (!Ex) return std::nullopt;
+                    if (auto *L =
+                            dynamic_cast<const IntegerLiteral *>(Ex)) {
+                      try { return std::stoll(std::string(L->Text)); }
+                      catch (...) { return std::nullopt; }
+                    }
+                    if (auto *U = dynamic_cast<const UnaryOpExpr *>(Ex)) {
+                      auto V = foldI(U->Operand);
+                      if (!V) return std::nullopt;
+                      if (U->Op == UnOp::Minus) return -*V;
+                      if (U->Op == UnOp::Plus)  return  *V;
+                    }
+                    return std::nullopt;
+                  };
+                  auto Sgn = foldI(C->Args[1]);
+                  auto WL  = foldI(C->Args[2]);
+                  auto FL  = foldI(C->Args[3]);
+                  if (Sgn && WL && FL && *Sgn >= 0 && *WL > 0 &&
+                      *WL <= 64 && *FL >= 0 && *FL <= *WL) {
+                    FixedSpec Spec;
+                    Spec.Signed = (*Sgn != 0);
+                    Spec.WordLength = (uint8_t)*WL;
+                    Spec.FractionLength = (int8_t)*FL;
+                    auto It = ParamFiSpec.find(PB);
+                    if (It == ParamFiSpec.end()) {
+                      ParamFiSpec[PB] = Spec;
+                    }
+                  }
+                  break;
+                }
+              }
+            }
+          }
+        }
         // Recognized call/index whose callee is a NameExpr bound
         // to one of the function's parameters. Pull out constant
         // integer indices.
@@ -145,6 +203,17 @@ void TypeInference::runFunction(Function &F) {
         if (P->Operand) walkExpr(*P->Operand);
         return;
       }
+      if (auto *M = dynamic_cast<const MatrixLiteral *>(&E0)) {
+        for (auto &Row : M->Rows)
+          for (Expr *El : Row) if (El) walkExpr(*El);
+        return;
+      }
+      if (auto *R = dynamic_cast<const RangeExpr *>(&E0)) {
+        if (R->Start) walkExpr(*R->Start);
+        if (R->Step)  walkExpr(*R->Step);
+        if (R->End)   walkExpr(*R->End);
+        return;
+      }
     };
     walkStmt = [&](const Stmt &S) {
       switch (S.Kind) {
@@ -192,14 +261,29 @@ void TypeInference::runFunction(Function &F) {
   }
 
   // Parameters start with Any unless the pre-pass found vector-
-  // shape evidence, in which case they start as `arrayOf(Unknown,
-  // Vector(N))`. The body's typed assignments (fi-cast, etc.)
-  // will refine the element dtype.
+  // shape or fi-spec evidence. Vector-shape: param appears as
+  // `param(k)` with constant k; the param starts as
+  // `arrayOf(Unknown, Vector(N))`. fi-spec: param appears in
+  // `fi(param, signed, WL, FL)` re-cast; param starts as
+  // `fixedScalar(spec)` (or `fixedArray` when both the vector
+  // and fi pieces of evidence are present).
   for (Binding *B : F.ParamRefs) {
-    auto It = ParamMaxIdx.find(B);
-    if (It != ParamMaxIdx.end() && It->second >= 1) {
+    auto VIt = ParamMaxIdx.find(B);
+    auto FIt = ParamFiSpec.find(B);
+    bool HasVec = VIt != ParamMaxIdx.end() && VIt->second >= 1;
+    bool HasFi = FIt != ParamFiSpec.end();
+    if (HasVec && HasFi) {
+      const Type *T = TC.fixedArray(FIt->second,
+                                     Shape::vector(VIt->second));
+      E[B] = T;
+      B->InferredType = T;
+    } else if (HasVec) {
       const Type *T = TC.arrayOf(Dtype::Unknown,
-                                  Shape::vector(It->second));
+                                  Shape::vector(VIt->second));
+      E[B] = T;
+      B->InferredType = T;
+    } else if (HasFi) {
+      const Type *T = TC.fixedScalar(FIt->second);
       E[B] = T;
       B->InferredType = T;
     } else {

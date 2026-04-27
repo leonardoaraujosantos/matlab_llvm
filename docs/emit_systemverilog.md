@@ -690,7 +690,7 @@ piece the next stage builds on.
 | Stage | Status | Items | Effort | Closes |
 |---|---|---|--:|---|
 | A | (split) | (split — see notes below) | — | — |
-| A.1 | 🟡 deferred | fi-spec propagation across function-call boundaries (precondition for clean Saturate-cast on the function-arg path) | ~3 days | enables `fi(arg, ...)` casts to clamp correctly, used by fir/seq's final stage |
+| A.1 | ✅ shipped (v1) | fi-spec propagation across function-arg re-cast sites — `fi(<fi-arg>, S, W, F)` lowers as a clamp cast with `fi_lhs_*` source-spec attrs. v1 is heuristic: Sema infers the source spec from the body's *target* spec (assumes the call site passes a value with matching spec, which is the typical HDL Coder pattern). | ~3 days | unblocks fir/seq's `fi(x, ...)` opener |
 | A.2 | ✅ subsumed by B | Constant-index reads on vector args | — | the body subscripts that A.2 targeted (`vec_a(k)`) are rewritten by Stage B's `LowerStaticFiArrays.tryRewriteArg`; verified working in `test/EmitSV/vector_processor.m` |
 | B | ✅ shipped | Vector function arguments | ~4 days | `vector_processor` ✅ |
 | C | ✅ shipped | Static array literal init (`fi([0.1, 0.2, ...], ...)` → alloca + per-element stores) | ~2 days | coefficient-table half of fir / seq |

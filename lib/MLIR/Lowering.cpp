@@ -1465,6 +1465,17 @@ void Lowerer::lowerStmt(const Stmt &St) {
         if (NE->Name == "who")  RN = "matlab_ws_who";
         else if (NE->Name == "whos") RN = "matlab_ws_whos";
         else if (NE->Name == "clear") RN = "matlab_ws_clear";
+        /* `keyboard` drops the worker into a paused state at the
+         * next hook firing — same machinery as a breakpoint, but
+         * triggered by the program itself rather than a DAP-set
+         * bp. The IDE's REPL panel (already wired via
+         * evaluate context=repl) takes over from there.
+         *
+         * Outside DebugMode the runtime function is a no-op (the
+         * matlab_dbg.enabled flag is 0), so a `keyboard` call in
+         * a release-mode binary does nothing — same posture as
+         * the breakpoint hook itself. */
+        else if (NE->Name == "keyboard") RN = "matlab_dbg_keyboard_hook";
         if (!RN.empty()) {
           mlir::NamedAttribute Cal(
               mlir::StringAttr::get(&MCtx, "callee"),
@@ -3121,6 +3132,39 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             }
             // Runtime quantize for non-literal value.
             mlir::Value V = lowerExpr(*C.Args[0]);
+            // Phase 5.6 Stage A.1 — fi-on-fi re-cast. When the
+            // input is itself a fi-typed value (Sema's type is
+            // an Array{Fixed, ...}), emit a *clamp* cast carrying
+            // `fi_lhs_*` attrs naming the source spec.
+            // LowerFixedPoint's clamp path then does the proper
+            // shift+saturate+truncate; otherwise we'd round-trip
+            // through f64 and fail downstream because the
+            // integer-scaled-by-2^FL semantic would be wrong.
+            // Trigger examples in fir / sequential_processor:
+            //   delay_line = [fi(x, 1, 16, 14), ...];   % x is fi(1,16,14)
+            //   y = fi(full_res, 1, 16, 12, 'Saturate'); % fi-of-fi
+            const Type *InT = C.Args[0]->Ty;
+            std::optional<FixedSpec> InFi;
+            if (InT && InT->K == Type::Kind::Array) {
+              auto &IAT = static_cast<const ArrayType &>(*InT);
+              if (IAT.Elt == Dtype::Fixed && IAT.FxSpec)
+                InFi = *IAT.FxSpec;
+            }
+            if (InFi && V && mlir::isa<mlir::IntegerType>(V.getType())) {
+              auto I1 = mlir::IntegerType::get(&MCtx, 1);
+              auto I32 = mlir::IntegerType::get(&MCtx, 32);
+              llvm::SmallVector<mlir::NamedAttribute, 12> A;
+              for (auto &E0 : Attrs) A.push_back(E0);
+              A.emplace_back(mlir::StringAttr::get(&MCtx, "fi_clamp"),
+                             mlir::IntegerAttr::get(I1, 1));
+              A.emplace_back(mlir::StringAttr::get(&MCtx, "fi_lhs_signed"),
+                             mlir::IntegerAttr::get(I1, InFi->Signed ? 1 : 0));
+              A.emplace_back(mlir::StringAttr::get(&MCtx, "fi_lhs_wl"),
+                             mlir::IntegerAttr::get(I32, (int64_t)InFi->WordLength));
+              A.emplace_back(mlir::StringAttr::get(&MCtx, "fi_lhs_fl"),
+                             mlir::IntegerAttr::get(I32, (int64_t)InFi->FractionLength));
+              return emitUnreg("matlab.fi.cast", {V}, StorTy, L, A);
+            }
             // Cast V to f64 if it isn't already (callee expects double).
             if (V && !mlir::isa<mlir::Float64Type>(V.getType())) {
               auto F64 = mlir::Float64Type::get(&MCtx);

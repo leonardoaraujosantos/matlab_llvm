@@ -452,10 +452,49 @@ bool tryRewriteArg(mlir::BlockArgument Arg, int64_t N, unsigned ElemW) {
       Slot = S;
       continue;
     }
+    // Phase 5.6 Stage A.1: a `matlab.fi.cast(arg) → ptr` no-op
+    // re-cast may directly consume the arg (when Sema's Stage A.1
+    // pre-pass infers the param's fi spec, lowerExpr can return
+    // the arg pointer without a slot round-trip). Add it to the
+    // NoOpReCasts list and walk through to the cast's
+    // consumers — same as the slot-load path.
+    if (isMatlabOpName(User, "matlab.fi.cast") &&
+        User->getNumResults() == 1 &&
+        mlir::isa<mlir::LLVM::LLVMPointerType>(User->getResult(0).getType())) {
+      bool AllOk = true;
+      for (mlir::OpOperand &CU : User->getResult(0).getUses()) {
+        mlir::Operation *CUO = CU.getOwner();
+        // Either: (a) the cast feeds a slot store (we tag it as
+        // NoOpReCast and add to SlotStores so we erase both); or
+        // (b) the cast feeds a subscript_s read directly.
+        mlir::Operation *S = nullptr;
+        if (isSlotStoreOfPtr(CU, S)) {
+          if (Slot && Slot != S) { AllOk = false; break; }
+          Slot = S;
+          SlotStores.push_back(CUO);
+          continue;
+        }
+        std::string CCallee;
+        if (!getCalleeStr(CUO, CCallee)) { AllOk = false; break; }
+        if (CCallee == "matlab_mat_i64_subscript1_s" &&
+            CU.getOperandNumber() == 0) {
+          Reads.push_back(mlir::cast<mlir::LLVM::CallOp>(CUO));
+          continue;
+        }
+        AllOk = false; break;
+      }
+      if (!AllOk) {
+        return false;
+      }
+      NoOpReCasts.push_back(User);
+      continue;
+    }
     // Any other direct use of the arg (e.g. a subscript_s call
     // with the arg directly) — handle below in the unified loop.
     std::string Callee;
-    if (!getCalleeStr(User, Callee)) return false;
+    if (!getCalleeStr(User, Callee)) {
+      return false;
+    }
     if (Callee == "matlab_mat_i64_subscript1_s" &&
         U.getOperandNumber() == 0) {
       Reads.push_back(mlir::cast<mlir::LLVM::CallOp>(User));
@@ -470,7 +509,9 @@ bool tryRewriteArg(mlir::BlockArgument Arg, int64_t N, unsigned ElemW) {
           mlir::isa<mlir::LLVM::StoreOp>(User)) continue;
       bool IsLoad = isMatlabOpName(User, "matlab.load") ||
                     mlir::isa<mlir::LLVM::LoadOp>(User);
-      if (!IsLoad) return false;
+      if (!IsLoad) {
+        return false;
+      }
       SlotLoads.push_back(User);
       for (mlir::OpOperand &LU : User->getResult(0).getUses()) {
         mlir::Operation *LUO = LU.getOwner();
@@ -499,7 +540,9 @@ bool tryRewriteArg(mlir::BlockArgument Arg, int64_t N, unsigned ElemW) {
           continue;
         }
         std::string Callee;
-        if (!getCalleeStr(LUO, Callee)) return false;
+        if (!getCalleeStr(LUO, Callee)) {
+          return false;
+        }
         if (Callee == "matlab_mat_i64_subscript1_s" &&
             LU.getOperandNumber() == 0) {
           Reads.push_back(mlir::cast<mlir::LLVM::CallOp>(LUO));
