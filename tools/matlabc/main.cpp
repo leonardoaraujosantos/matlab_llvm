@@ -1200,6 +1200,10 @@ void matlab_dbg_set_pause_on_error(int on);
 /* Read the message captured by matlab_set_error_msg before the
  * unwind. NULL/0-len when no error has fired this session. */
 const char *matlab_dbg_last_error_msg(int64_t *len_out);
+/* True iff the most recent pause came from a `keyboard` call (not a
+ * breakpoint, step, or pause request). The DAP server uses this to
+ * surface stop reason="entry". */
+int matlab_dbg_was_paused_from_keyboard(void);
 /* Existing in matlab_runtime.c — re-declared here for the DAP server.
  * `matlab_err_traceback_*` reads the snapshot frames captured at the
  * point matlab_set_error fired, so it survives the unwind. */
@@ -1212,9 +1216,27 @@ int  matlab_err_traceback_at(int i, int32_t *file_id, int32_t *line,
  * into human-readable "1x3 double" strings for the DAP `variables`
  * response without duplicating the display logic. */
 struct matlab_mat;
+struct matlab_mat_c;
+struct matlab_mat3;
 extern "C" int64_t matlab_dbg_mat_rows(struct matlab_mat *m);
 extern "C" int64_t matlab_dbg_mat_cols(struct matlab_mat *m);
 extern "C" double matlab_dbg_mat_get(struct matlab_mat *m, int64_t i, int64_t j);
+/* Discriminator: 1 = real 2-D matlab_mat, 2 = matlab_mat_c (complex),
+ * 3 = matlab_mat3 (3-D). The DAP server stores a kind=1 ws/frame
+ * value as a `void *` because all three share the same LLVM type;
+ * matlab_dbg_mat_kind reads the magic byte at offset 0 to dispatch. */
+extern "C" int32_t matlab_dbg_mat_kind(const void *p);
+extern "C" int64_t matlab_dbg_mat_c_rows(const struct matlab_mat_c *m);
+extern "C" int64_t matlab_dbg_mat_c_cols(const struct matlab_mat_c *m);
+extern "C" double matlab_dbg_mat_c_re(const struct matlab_mat_c *m,
+                                       int64_t i, int64_t j);
+extern "C" double matlab_dbg_mat_c_im(const struct matlab_mat_c *m,
+                                       int64_t i, int64_t j);
+extern "C" int64_t matlab_dbg_mat3_rows(const struct matlab_mat3 *m);
+extern "C" int64_t matlab_dbg_mat3_cols(const struct matlab_mat3 *m);
+extern "C" int64_t matlab_dbg_mat3_depth(const struct matlab_mat3 *m);
+extern "C" double matlab_dbg_mat3_get(const struct matlab_mat3 *m,
+                                       int64_t i, int64_t j, int64_t k);
 
 namespace dap {
 
@@ -2172,7 +2194,17 @@ void *monitorMain(void *) {
          * Surface that as the DAP-standard "step" reason so the IDE
          * renders the right icon and doesn't imply the user has an
          * unexpected breakpoint sitting on the current line. */
-        const char *Reason = (BpIdx >= 0) ? "breakpoint" : "step";
+        /* Stop reason precedence:
+         *   - bp matched (BpIdx >= 0)         -> "breakpoint"
+         *   - keyboard() call from user code  -> "entry"
+         *   - everything else (step / pause)  -> "step"
+         * The keyboard check looks at a runtime flag set by
+         * matlab_dbg_keyboard_hook; reading it via the public API
+         * is safe because the worker is paused on the condvar. */
+        const char *Reason;
+        if (BpIdx >= 0) Reason = "breakpoint";
+        else if (matlab_dbg_was_paused_from_keyboard()) Reason = "entry";
+        else Reason = "step";
         Object Body{
           {"reason", Reason},
           {"threadId", 1},
@@ -2336,12 +2368,39 @@ int64_t encodeBpId(int32_t file_id, int32_t line) {
   return (int64_t)file_id * BpIdLineWidth + (int64_t)line;
 }
 
-int64_t matIndexedCount(struct matlab_mat *M) {
-  if (!M) return 0;
-  int64_t r = matlab_dbg_mat_rows(M);
-  int64_t c = matlab_dbg_mat_cols(M);
+int64_t matIndexedCount(struct matlab_mat *Mraw) {
+  if (!Mraw) return 0;
+  int32_t Kind = matlab_dbg_mat_kind(Mraw);
+  if (Kind == 2) {
+    auto *M = (struct matlab_mat_c *)Mraw;
+    return matlab_dbg_mat_c_rows(M) * matlab_dbg_mat_c_cols(M);
+  }
+  if (Kind == 3) {
+    auto *M = (struct matlab_mat3 *)Mraw;
+    return matlab_dbg_mat3_rows(M) * matlab_dbg_mat3_cols(M)
+         * matlab_dbg_mat3_depth(M);
+  }
+  int64_t r = matlab_dbg_mat_rows(Mraw);
+  int64_t c = matlab_dbg_mat_cols(Mraw);
   if (r <= 0 || c <= 0) return 0;
   return r * c;
+}
+
+/* Multi-cell test used to gate `variablesReference` assignment.
+ * A 1x1 real matrix unboxes to its scalar value in the parent row
+ * and gets no expansion; same logic for a 1x1 complex (rendered
+ * as "re+im*i"). 3-D arrays are always drillable — there's no
+ * scalar shape they unbox to. Centralised here so every site that
+ * decides whether to call registerMatRef agrees on the rule. */
+bool matIsMultiCell(struct matlab_mat *Mraw) {
+  if (!Mraw) return false;
+  int32_t Kind = matlab_dbg_mat_kind(Mraw);
+  if (Kind == 2) {
+    auto *M = (struct matlab_mat_c *)Mraw;
+    return matlab_dbg_mat_c_rows(M) != 1 || matlab_dbg_mat_c_cols(M) != 1;
+  }
+  if (Kind == 3) return true;
+  return matlab_dbg_mat_rows(Mraw) != 1 || matlab_dbg_mat_cols(Mraw) != 1;
 }
 
 /* Total namedVariables for a class instance — properties (from the
@@ -2395,13 +2454,46 @@ void *lookupMatRef(int64_t ref) {
  * variable); everything else gets the `RxC double` shape summary so
  * the disclosure arrow in the IDE has a meaningful preview before
  * it's clicked. */
-std::string formatMatShape(struct matlab_mat *M) {
-  if (!M) return "[]";
-  int64_t R = matlab_dbg_mat_rows(M);
-  int64_t C = matlab_dbg_mat_cols(M);
+/* Render the shape header that lands in the parent row's `value`
+ * column — `2x3 double`, `2x3 complex`, `2x3x4 double`. 1x1 real
+ * matrices unbox to the scalar value (matches what the watch box
+ * naturally expects); 1x1 complex unbox to "re+im*i" form. */
+std::string formatMatShape(struct matlab_mat *Mraw) {
+  if (!Mraw) return "[]";
+  int32_t Kind = matlab_dbg_mat_kind(Mraw);
+  if (Kind == 2) {
+    auto *M = (struct matlab_mat_c *)Mraw;
+    int64_t R = matlab_dbg_mat_c_rows(M);
+    int64_t C = matlab_dbg_mat_c_cols(M);
+    if (R == 1 && C == 1) {
+      double re = matlab_dbg_mat_c_re(M, 1, 1);
+      double im = matlab_dbg_mat_c_im(M, 1, 1);
+      char Buf[64];
+      if (im >= 0)
+        snprintf(Buf, sizeof Buf, "%g+%gi", re, im);
+      else
+        snprintf(Buf, sizeof Buf, "%g-%gi", re, -im);
+      return Buf;
+    }
+    char Buf[64];
+    snprintf(Buf, sizeof Buf, "%lldx%lld complex",
+             (long long)R, (long long)C);
+    return Buf;
+  }
+  if (Kind == 3) {
+    auto *M = (struct matlab_mat3 *)Mraw;
+    char Buf[64];
+    snprintf(Buf, sizeof Buf, "%lldx%lldx%lld double",
+             (long long)matlab_dbg_mat3_rows(M),
+             (long long)matlab_dbg_mat3_cols(M),
+             (long long)matlab_dbg_mat3_depth(M));
+    return Buf;
+  }
+  int64_t R = matlab_dbg_mat_rows(Mraw);
+  int64_t C = matlab_dbg_mat_cols(Mraw);
   if (R == 1 && C == 1) {
     char Buf[64];
-    snprintf(Buf, sizeof Buf, "%g", matlab_dbg_mat_get(M, 1, 1));
+    snprintf(Buf, sizeof Buf, "%g", matlab_dbg_mat_get(Mraw, 1, 1));
     return Buf;
   }
   char Buf[64];
@@ -2413,48 +2505,109 @@ std::string formatMatShape(struct matlab_mat *M) {
 /* Cap matrix expansion at 256 children so a watchful IDE doesn't
  * pull a 1000x1000 grid in one shot. The trailing "..." row makes
  * the truncation visible. Children layout:
- *   - 1xN row vector  -> linear "(j)" labels.
- *   - Mx1 col vector  -> linear "(i)" labels.
- *   - MxN matrix      -> "(i,j)" labels in row-major order.
+ *   - real 2-D 1xN row vector  -> linear "(j)" labels.
+ *   - real 2-D Mx1 col vector  -> linear "(i)" labels.
+ *   - real 2-D MxN matrix      -> "(i,j)" labels in row-major order.
+ *   - complex MxN              -> "(i,j)" labels with value
+ *                                  rendered as "re+im*i" so a single
+ *                                  child row carries both parts.
+ *   - 3-D MxNxP                -> "(i,j,k)" labels, slice-major
+ *                                  iteration so cells with the same
+ *                                  k group together.
  * 1x1 matrices have no children — the parent row already shows the
- * scalar via formatMatShape. */
+ * scalar (or `re+im*i`) via formatMatShape. */
 constexpr size_t MatExpandCap = 256;
 
-void appendMatChildren(Array &Vs, struct matlab_mat *M) {
-  if (!M) return;
-  int64_t R = matlab_dbg_mat_rows(M);
-  int64_t C = matlab_dbg_mat_cols(M);
-  if (R == 1 && C == 1) return;
-  bool RowVec = (R == 1);
-  bool ColVec = (C == 1);
+void appendMatChildren(Array &Vs, struct matlab_mat *Mraw) {
+  if (!Mraw) return;
+  int32_t Kind = matlab_dbg_mat_kind(Mraw);
+
   size_t emitted = 0;
-  auto emit = [&](std::string label, double v) {
-    char Buf[64];
-    snprintf(Buf, sizeof Buf, "%g", v);
+  auto emitTruncated = [&] {
+    Vs.push_back(Object{
+      {"name", std::string("…")},
+      {"value", std::string("(truncated)")},
+      {"variablesReference", (int64_t)0},
+    });
+  };
+  auto emit = [&](std::string label, std::string val,
+                  const char *Type) {
     Vs.push_back(Object{
       {"name", std::move(label)},
-      {"value", std::string(Buf)},
-      {"type", std::string("double")},
+      {"value", std::move(val)},
+      {"type", std::string(Type)},
       {"variablesReference", (int64_t)0},
     });
     ++emitted;
   };
+
+  if (Kind == 2) {
+    auto *M = (struct matlab_mat_c *)Mraw;
+    int64_t R = matlab_dbg_mat_c_rows(M);
+    int64_t C = matlab_dbg_mat_c_cols(M);
+    if (R == 1 && C == 1) return;
+    for (int64_t i = 1; i <= R; ++i) {
+      for (int64_t j = 1; j <= C; ++j) {
+        if (emitted >= MatExpandCap) { emitTruncated(); return; }
+        char LabelBuf[64];
+        snprintf(LabelBuf, sizeof LabelBuf, "(%lld,%lld)",
+                 (long long)i, (long long)j);
+        double re = matlab_dbg_mat_c_re(M, i, j);
+        double im = matlab_dbg_mat_c_im(M, i, j);
+        char ValBuf[80];
+        if (im >= 0)
+          snprintf(ValBuf, sizeof ValBuf, "%g+%gi", re, im);
+        else
+          snprintf(ValBuf, sizeof ValBuf, "%g-%gi", re, -im);
+        emit(LabelBuf, ValBuf, "complex");
+      }
+    }
+    return;
+  }
+
+  if (Kind == 3) {
+    auto *M = (struct matlab_mat3 *)Mraw;
+    int64_t R = matlab_dbg_mat3_rows(M);
+    int64_t C = matlab_dbg_mat3_cols(M);
+    int64_t D = matlab_dbg_mat3_depth(M);
+    /* Slice-major: outermost loop is k so all (i,j) of slice k
+     * appear contiguously. Matches how MATLAB's whos / disp render
+     * 3-D arrays page by page. */
+    for (int64_t k = 1; k <= D; ++k) {
+      for (int64_t i = 1; i <= R; ++i) {
+        for (int64_t j = 1; j <= C; ++j) {
+          if (emitted >= MatExpandCap) { emitTruncated(); return; }
+          char LabelBuf[64];
+          snprintf(LabelBuf, sizeof LabelBuf, "(%lld,%lld,%lld)",
+                   (long long)i, (long long)j, (long long)k);
+          char ValBuf[64];
+          snprintf(ValBuf, sizeof ValBuf, "%g",
+                   matlab_dbg_mat3_get(M, i, j, k));
+          emit(LabelBuf, ValBuf, "double");
+        }
+      }
+    }
+    return;
+  }
+
+  /* Real 2-D matlab_mat path. */
+  int64_t R = matlab_dbg_mat_rows(Mraw);
+  int64_t C = matlab_dbg_mat_cols(Mraw);
+  if (R == 1 && C == 1) return;
+  bool RowVec = (R == 1);
+  bool ColVec = (C == 1);
   for (int64_t i = 1; i <= R; ++i) {
     for (int64_t j = 1; j <= C; ++j) {
-      if (emitted >= MatExpandCap) {
-        Vs.push_back(Object{
-          {"name", std::string("…")},
-          {"value", std::string("(truncated)")},
-          {"variablesReference", (int64_t)0},
-        });
-        return;
-      }
+      if (emitted >= MatExpandCap) { emitTruncated(); return; }
       char LabelBuf[64];
       if (RowVec)      snprintf(LabelBuf, sizeof LabelBuf, "(%lld)", (long long)j);
       else if (ColVec) snprintf(LabelBuf, sizeof LabelBuf, "(%lld)", (long long)i);
       else             snprintf(LabelBuf, sizeof LabelBuf, "(%lld,%lld)",
                                   (long long)i, (long long)j);
-      emit(LabelBuf, matlab_dbg_mat_get(M, i, j));
+      char ValBuf[64];
+      snprintf(ValBuf, sizeof ValBuf, "%g",
+               matlab_dbg_mat_get(Mraw, i, j));
+      emit(LabelBuf, ValBuf, "double");
     }
   }
 }
@@ -2940,8 +3093,7 @@ bool handleRequest(const Object &Msg) {
             /* Multi-cell matrix properties are drillable too — the
              * Matrix Viewer / Variable Inspector can chase the ref
              * down without a separate eval. */
-            if (M && (matlab_dbg_mat_rows(M) != 1 ||
-                      matlab_dbg_mat_cols(M) != 1)) {
+            if (M && matIsMultiCell(M)) {
               ChildRef = registerMatRef(M);
               IndexedHint = matIndexedCount(M);
             }
@@ -3079,8 +3231,7 @@ bool handleRequest(const Object &Msg) {
           }
         } else if (K == 1) {
           auto *M = (struct matlab_mat *)matlab_dbg_ws_ptr(i);
-          if (M && (matlab_dbg_mat_rows(M) != 1 ||
-                    matlab_dbg_mat_cols(M) != 1)) {
+          if (M && matIsMultiCell(M)) {
             ChildRef = registerMatRef(M);
             IndexedCount = matIndexedCount(M);
           }
@@ -3123,8 +3274,7 @@ bool handleRequest(const Object &Msg) {
           Val = formatMatShape(M);
           /* Same gating as the matlab_ws merge above: only multi-cell
            * matrices get a child ref, scalars are leaves. */
-          if (M && (matlab_dbg_mat_rows(M) != 1 ||
-                    matlab_dbg_mat_cols(M) != 1)) {
+          if (M && matIsMultiCell(M)) {
             ChildRef = registerMatRef(M);
             IndexedCount = matIndexedCount(M);
           }
@@ -3474,8 +3624,7 @@ bool handleRequest(const Object &Msg) {
         }
       } else if (Found >= 0 && Kind == 1) {
         auto *M = (struct matlab_mat *)matlab_dbg_ws_ptr(Found);
-        if (M && (matlab_dbg_mat_rows(M) != 1 ||
-                  matlab_dbg_mat_cols(M) != 1)) {
+        if (M && matIsMultiCell(M)) {
           EvalRef = registerMatRef(M);
           EvalIndexed = matIndexedCount(M);
         }
@@ -3863,8 +4012,7 @@ bool handleRequest(const Object &Msg) {
           }
         } else if (Kind == 1) {
           auto *M = (struct matlab_mat *)matlab_dbg_ws_ptr(Found);
-          if (M && (matlab_dbg_mat_rows(M) != 1 ||
-                    matlab_dbg_mat_cols(M) != 1)) {
+          if (M && matIsMultiCell(M)) {
             ReadRef = registerMatRef(M);
             ReadIndexed = matIndexedCount(M);
           }

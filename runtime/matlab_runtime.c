@@ -192,8 +192,16 @@ typedef struct matlab_mat {
 
 /* Forward-declared here (layout + body further down in the complex
  * section) so matlab_disp_mat and the other polymorphic entries can
- * discriminate real vs. complex descriptors via the magic marker. */
+ * discriminate real vs. complex descriptors via the magic marker.
+ *
+ * matlab_mat3 carries its own magic for the same reason — once the
+ * DAP server starts walking matrices for the variables panel, it
+ * needs a way to tell 2-D and 3-D apart from a kind=1 ptr without
+ * a separate kind id. The magics are at offset 0 of each tagged
+ * descriptor; matlab_mat is untagged (its first 8 bytes are a heap
+ * data pointer whose low 32 bits won't collide in practice). */
 #define MATLAB_MAT_C_MAGIC 0xC0FFEE01u
+#define MATLAB_MAT3_MAGIC  0xC0FFEE03u
 
 typedef struct matlab_mat_c matlab_mat_c;
 void matlab_disp_mat_c(matlab_mat_c *A);
@@ -201,6 +209,10 @@ void matlab_disp_mat_c(matlab_mat_c *A);
 static int mat_is_complex(const void *p) {
     if (!p) return 0;
     return *(const uint32_t *)p == MATLAB_MAT_C_MAGIC;
+}
+static int mat_is_3d(const void *p) {
+    if (!p) return 0;
+    return *(const uint32_t *)p == MATLAB_MAT3_MAGIC;
 }
 
 static matlab_mat *mat_alloc(int64_t m, int64_t n) {
@@ -2661,6 +2673,12 @@ void matlab_mat_u64_disp(matlab_mat_u64 *A, uint8_t WL, int8_t FL) {
  * are still 2-D-only; calling them on a 3-D array gives undefined
  * results and is documented as a follow-up. */
 typedef struct matlab_mat3 {
+    /* Magic at offset 0 lets mat_is_3d() discriminate this descriptor
+     * from a plain matlab_mat* without a separate kind id; see the
+     * comment near MATLAB_MAT3_MAGIC. _pad keeps `data` 8-byte
+     * aligned. */
+    uint32_t magic;
+    uint32_t _pad;
     double *data;
     int64_t rows, cols, depth;
 } matlab_mat3;
@@ -2670,6 +2688,7 @@ static matlab_mat3 *mat3_alloc(int64_t m, int64_t n, int64_t p) {
     if (n < 0) n = 0;
     if (p < 0) p = 0;
     matlab_mat3 *A = (matlab_mat3 *)calloc(1, sizeof(*A));
+    A->magic = MATLAB_MAT3_MAGIC;
     A->rows = m; A->cols = n; A->depth = p;
     A->data = (double *)calloc((size_t)(m * n * p), sizeof(double));
     return A;
@@ -3476,10 +3495,31 @@ struct matlab_dbg_state {
     enum matlab_dbg_action action;
     int32_t step_target_depth;
 
+    /* Exception-breakpoint filter: when set, the hook pauses on the
+     * first statement after matlab_set_error fires. Toggled by the
+     * DAP server's `setExceptionBreakpoints` handler in response to
+     * the IDE's "Pause on Errors" UI. */
+    int pause_on_error;
+
+    /* Set non-zero when the current pause was triggered by a
+     * `keyboard` builtin call (not a step / bp / error). The DAP
+     * server reads this in monitorMain to surface a stop reason of
+     * "entry" so the IDE renders the keyboard glyph rather than a
+     * generic step/pause. Cleared by the next resume. */
+    int paused_from_keyboard;
+
     /* Breakpoints (file_id, line) — linear scan. cond_text and
      * log_text are heap-owned (NULL when absent). cond_disabled flips
      * to 1 once the DAP server reports a condition syntax error so
-     * subsequent hits don't keep retrying it. */
+     * subsequent hits don't keep retrying it.
+     *
+     * Hit-count gating: hit_count counts every time the hook reaches
+     * this bp's line (incremented unconditionally on a match);
+     * hit_op + hit_target encode the user's `hitCondition` (e.g.
+     * `>= 100` is op=GE, target=100). The hook compares count vs.
+     * target with op — only triggers a pause when the test passes.
+     * op=0 means no hit-count gate (default; the bp pauses every
+     * time the line runs). */
     int n_bp;
     int32_t bp_file[MATLAB_DBG_MAX_BREAKPOINTS];
     int32_t bp_line[MATLAB_DBG_MAX_BREAKPOINTS];
@@ -3488,6 +3528,15 @@ struct matlab_dbg_state {
     char *log_text[MATLAB_DBG_MAX_BREAKPOINTS];
     int64_t log_len[MATLAB_DBG_MAX_BREAKPOINTS];
     int cond_disabled[MATLAB_DBG_MAX_BREAKPOINTS];
+    int64_t hit_count[MATLAB_DBG_MAX_BREAKPOINTS];
+    int64_t hit_target[MATLAB_DBG_MAX_BREAKPOINTS];
+    /* hit_op encoding (0 = none, no gate):
+     *   1 = ==   (stop on the Nth hit only)
+     *   2 = >=   (stop on hit N and every hit after — most common)
+     *   3 = >    (stop after N hits)
+     *   4 = %    (stop every Nth hit, e.g. `%5` for every 5th iter)
+     * Anything else is treated as no gate. */
+    int hit_op[MATLAB_DBG_MAX_BREAKPOINTS];
 
     /* Frame stack. Always at least one entry (the script / top level). */
     int n_frames;
@@ -3691,6 +3740,75 @@ int matlab_err_traceback_at(int i, int32_t *file_id, int32_t *line,
     return ok;
 }
 
+/* DAP `setExceptionBreakpoints` plumbing — toggle the pause-on-error
+ * filter the hook checks above. Held under matlab_dbg.mu so a flip
+ * mid-eval doesn't race the hook's read of the same field. */
+void matlab_dbg_set_pause_on_error(int on) {
+    pthread_mutex_lock(&matlab_dbg.mu);
+    matlab_dbg.pause_on_error = on ? 1 : 0;
+    pthread_mutex_unlock(&matlab_dbg.mu);
+}
+
+/* DAP `exceptionInfo` reader — surfaces the message captured by
+ * matlab_set_error_msg before the unwind. Returns NULL/0 when no
+ * error has fired this session. The buffer is owned by the runtime
+ * (static char[1024], null-terminated); the caller must not free it. */
+const char *matlab_dbg_last_error_msg(int64_t *len_out) {
+    if (len_out) *len_out = matlab_error_msg_len;
+    return matlab_error_msg_len > 0 ? matlab_error_msg : NULL;
+}
+
+/* Lowered call site for a `keyboard` builtin in user code. Sets
+ * paused=1 and blocks on the same condvar a real breakpoint uses,
+ * so the DAP server's monitor thread wakes and emits a `stopped`
+ * event. The `paused_from_keyboard` flag tells monitorMain to
+ * surface stop reason="entry" instead of "step" — the IDE then
+ * renders the keyboard / pause-on-source glyph rather than a
+ * generic step icon.
+ *
+ * No-op when matlab_dbg.enabled == 0 (release builds without -g):
+ * a `keyboard` call simply returns immediately. The latest source
+ * location is left as whatever the most recent matlab_dbg_hook
+ * recorded — already what the user wants for the call site
+ * because the hook fires at the same statement. */
+void matlab_dbg_keyboard_hook(void) {
+    pthread_mutex_lock(&matlab_dbg.mu);
+    if (!matlab_dbg.enabled) {
+        pthread_mutex_unlock(&matlab_dbg.mu);
+        return;
+    }
+    /* Copy the innermost frame's (file_id, line) into the cur_*
+     * fields so the DAP `stopped` event reports the keyboard call
+     * site. matlab_dbg_hook fired at the start of this same
+     * statement and already set frames[innermost], so this just
+     * promotes that to the pause-time fields. */
+    if (matlab_dbg.n_frames > 0) {
+        matlab_dbg.cur_file_id = matlab_dbg.frames[matlab_dbg.n_frames - 1].file_id;
+        matlab_dbg.cur_line    = matlab_dbg.frames[matlab_dbg.n_frames - 1].line;
+    }
+    matlab_dbg.cur_bp_idx = -1;
+    matlab_dbg.paused = 1;
+    matlab_dbg.paused_from_keyboard = 1;
+    pthread_cond_broadcast(&matlab_dbg.cv_server);
+    while (matlab_dbg.paused) {
+        pthread_cond_wait(&matlab_dbg.cv_client, &matlab_dbg.mu);
+    }
+    matlab_dbg.paused_from_keyboard = 0;
+    pthread_mutex_unlock(&matlab_dbg.mu);
+}
+
+/* DAP-side reader: was the most recent pause triggered by a
+ * keyboard() call? monitorMain checks this before mapping
+ * (BpIdx == -1) to reason="step", switching to "entry" instead
+ * when this flag is set. */
+int matlab_dbg_was_paused_from_keyboard(void) {
+    int v;
+    pthread_mutex_lock(&matlab_dbg.mu);
+    v = matlab_dbg.paused_from_keyboard;
+    pthread_mutex_unlock(&matlab_dbg.mu);
+    return v;
+}
+
 /* Called from the server thread to enable the hook and set the
  * stop-on-entry mode before the worker starts. */
 void matlab_dbg_enable(int stop_on_entry) {
@@ -3872,14 +3990,23 @@ void matlab_dbg_clear_breakpoints_in_file(int32_t file_id) {
         matlab_dbg.log_text[w]  = matlab_dbg.log_text[i];
         matlab_dbg.log_len[w]   = matlab_dbg.log_len[i];
         matlab_dbg.cond_disabled[w] = matlab_dbg.cond_disabled[i];
+        matlab_dbg.hit_count[w]  = matlab_dbg.hit_count[i];
+        matlab_dbg.hit_target[w] = matlab_dbg.hit_target[i];
+        matlab_dbg.hit_op[w]     = matlab_dbg.hit_op[i];
         ++w;
     }
     /* Zero out the slots we evicted so subsequent _ex inserts don't
-     * inherit a stale pointer the compaction loop just moved away. */
+     * inherit a stale pointer the compaction loop just moved away.
+     * Hit-count fields reset to 0 so a re-set bp counts from
+     * scratch; otherwise repeated `setBreakpoints` round-trips
+     * during a debug session would silently inherit prior counts. */
     for (int i = w; i < matlab_dbg.n_bp; ++i) {
         matlab_dbg.cond_text[i] = NULL; matlab_dbg.cond_len[i] = 0;
         matlab_dbg.log_text[i]  = NULL; matlab_dbg.log_len[i]  = 0;
         matlab_dbg.cond_disabled[i] = 0;
+        matlab_dbg.hit_count[i] = 0;
+        matlab_dbg.hit_target[i] = 0;
+        matlab_dbg.hit_op[i] = 0;
     }
     matlab_dbg.n_bp = w;
     pthread_mutex_unlock(&matlab_dbg.mu);
@@ -3901,13 +4028,15 @@ int matlab_dbg_add_breakpoint(int32_t file_id, int32_t line) {
     return ok;
 }
 
-/* Conditional / log-point-aware insert. Either pointer may be NULL
- * (with the matching len = 0) to mean "no condition" / "no log". The
- * runtime owns the heap copy so the server can release its own
- * buffers immediately after returning. */
-int matlab_dbg_add_breakpoint_ex(int32_t file_id, int32_t line,
-                                  const char *cond, int64_t cond_len,
-                                  const char *log,  int64_t log_len) {
+/* Conditional / log-point-aware insert with optional hit-count
+ * gate. Either text pointer may be NULL (with matching len = 0)
+ * to mean "no condition" / "no log". hit_op == 0 disables the
+ * hit-count gate. The runtime owns the heap copy so the server
+ * can release its own buffers immediately after returning. */
+int matlab_dbg_add_breakpoint_ex2(int32_t file_id, int32_t line,
+                                   const char *cond, int64_t cond_len,
+                                   const char *log,  int64_t log_len,
+                                   int hit_op, int64_t hit_target) {
     pthread_mutex_lock(&matlab_dbg.mu);
     int ok = matlab_dbg.n_bp < MATLAB_DBG_MAX_BREAKPOINTS;
     if (ok) {
@@ -3917,6 +4046,9 @@ int matlab_dbg_add_breakpoint_ex(int32_t file_id, int32_t line,
         matlab_dbg.cond_text[i] = NULL; matlab_dbg.cond_len[i] = 0;
         matlab_dbg.log_text[i]  = NULL; matlab_dbg.log_len[i]  = 0;
         matlab_dbg.cond_disabled[i] = 0;
+        matlab_dbg.hit_count[i] = 0;
+        matlab_dbg.hit_target[i] = hit_target;
+        matlab_dbg.hit_op[i] = hit_op;
         if (cond && cond_len > 0) {
             matlab_dbg.cond_text[i] = (char *)malloc((size_t)cond_len + 1);
             memcpy(matlab_dbg.cond_text[i], cond, (size_t)cond_len);
@@ -3933,6 +4065,14 @@ int matlab_dbg_add_breakpoint_ex(int32_t file_id, int32_t line,
     }
     pthread_mutex_unlock(&matlab_dbg.mu);
     return ok;
+}
+
+/* Backward-compat wrapper for the v1 _ex API (no hit-count gate). */
+int matlab_dbg_add_breakpoint_ex(int32_t file_id, int32_t line,
+                                  const char *cond, int64_t cond_len,
+                                  const char *log,  int64_t log_len) {
+    return matlab_dbg_add_breakpoint_ex2(file_id, line, cond, cond_len,
+                                          log, log_len, 0, 0);
 }
 
 /* Snapshot the cond / log text for a given bp index. Caller-supplied
@@ -4069,18 +4209,61 @@ int64_t matlab_dbg_mat_cols(matlab_mat *m) { return m ? m->cols : 0; }
  * indices return 0.0 so a malformed children request can't read past
  * the data buffer. Indices are 1-based to match how the DAP server
  * presents cells (`(1,1)`, `(1,2)`, ...) — we subtract one before
- * indexing the row-major buffer. Real complex matrices are out of
- * scope for the v1 expander; the magic-marker path on m->data would
- * point at the matlab_mat_c descriptor and we just return 0.0 here.
- * The Matrix Viewer use case for complex values can layer on later
- * via a dedicated accessor. */
+ * indexing the row-major buffer. Complex / 3-D / typed-int matrices
+ * have their own accessors below; this one returns 0.0 if asked
+ * about a tagged descriptor. */
 double matlab_dbg_mat_get(matlab_mat *m, int64_t i, int64_t j) {
     if (!m || !m->data) return 0.0;
     if (i < 1 || j < 1) return 0.0;
+    if (mat_is_complex(m) || mat_is_3d(m)) return 0.0;
     if (i > m->rows || j > m->cols) return 0.0;
-    if (mat_is_complex(m)) return 0.0;
     /* Row-major: data[(i-1) * cols + (j-1)]. */
     return m->data[(i - 1) * m->cols + (j - 1)];
+}
+
+/* Discriminators + per-kind accessors used by the DAP `variables`
+ * expander to drill into complex and 3-D matrices.
+ *
+ * The DAP server stores any kind=1 ws/frame value as a `void *`
+ * because matlab_mat / matlab_mat_c / matlab_mat3 share that LLVM
+ * type but have different layouts. Each helper below begins by
+ * confirming the magic before accessing layout-specific fields, so
+ * passing a plain matlab_mat into `matlab_dbg_mat_c_re()` is a
+ * defensive zero rather than a wild read. */
+int32_t matlab_dbg_mat_kind(const void *p) {
+    if (!p) return 0;
+    if (mat_is_complex(p)) return 2;   /* matlab_mat_c */
+    if (mat_is_3d(p))      return 3;   /* matlab_mat3   */
+    return 1;                          /* plain matlab_mat */
+}
+/* matlab_mat_c accessors are defined alongside its struct body
+ * further down in the complex section — that section needs to be
+ * in scope to access ->re / ->im / ->rows / ->cols. The discriminator
+ * above is layout-agnostic (reads only the magic at offset 0) so
+ * it lives here. */
+int64_t matlab_dbg_mat_c_rows(const matlab_mat_c *m);
+int64_t matlab_dbg_mat_c_cols(const matlab_mat_c *m);
+double matlab_dbg_mat_c_re(const matlab_mat_c *m, int64_t i, int64_t j);
+double matlab_dbg_mat_c_im(const matlab_mat_c *m, int64_t i, int64_t j);
+int64_t matlab_dbg_mat3_rows(const matlab_mat3 *m) {
+    if (!m || !mat_is_3d(m)) return 0;
+    return m->rows;
+}
+int64_t matlab_dbg_mat3_cols(const matlab_mat3 *m) {
+    if (!m || !mat_is_3d(m)) return 0;
+    return m->cols;
+}
+int64_t matlab_dbg_mat3_depth(const matlab_mat3 *m) {
+    if (!m || !mat_is_3d(m)) return 0;
+    return m->depth;
+}
+double matlab_dbg_mat3_get(const matlab_mat3 *m,
+                           int64_t i, int64_t j, int64_t k) {
+    if (!m || !mat_is_3d(m) || !m->data) return 0.0;
+    if (i < 1 || j < 1 || k < 1) return 0.0;
+    if (i > m->rows || j > m->cols || k > m->depth) return 0.0;
+    /* Slice-major: matches mat3_offset above. */
+    return m->data[(k - 1) * m->rows * m->cols + (i - 1) * m->cols + (j - 1)];
 }
 
 /* The injected hook. Called from JIT'd code at each statement entry
@@ -4123,14 +4306,42 @@ void matlab_dbg_hook(int32_t file_id, int32_t line) {
     }
     /* Breakpoint check (regardless of step action). Records the
      * matched index so the DAP server can read the breakpoint's
-     * condition / log strings without re-walking the table. */
+     * condition / log strings without re-walking the table.
+     *
+     * Hit-count gate: when hit_op is set, increment hit_count and
+     * compare to hit_target with the encoded operator. A hit_op
+     * of 0 (no gate) goes straight to should_pause = 1, matching
+     * the prior behaviour. The gate runs BEFORE the conditional /
+     * log eval so a `hitCondition: ">= 100"` skips the JIT cost
+     * for the first 99 hits — important for tight loops. */
     for (int i = 0; i < matlab_dbg.n_bp; ++i) {
         if (matlab_dbg.bp_file[i] == file_id &&
             matlab_dbg.bp_line[i] == line) {
             matched_bp = i;
+            int op = matlab_dbg.hit_op[i];
+            if (op != 0) {
+                int64_t c = ++matlab_dbg.hit_count[i];
+                int64_t t = matlab_dbg.hit_target[i];
+                int gate = 0;
+                switch (op) {
+                case 1: gate = (c == t); break;
+                case 2: gate = (c >= t); break;
+                case 3: gate = (c >  t); break;
+                case 4: gate = (t > 0 && c % t == 0); break;
+                default: gate = 1; break;
+                }
+                if (!gate) break;
+            }
             should_pause = 1;
             break;
         }
+    }
+    /* Exception-breakpoint filter: pause if the error flag is set
+     * AND the DAP client has enabled the `error` filter. Reads the
+     * error flag directly to avoid recursing through the public API
+     * while we already hold matlab_dbg.mu. */
+    if (matlab_dbg.pause_on_error && matlab_error_flag) {
+        should_pause = 1;
     }
     if (should_pause) {
         matlab_dbg.cur_file_id = file_id;
@@ -4679,6 +4890,31 @@ static matlab_mat_c *mat_c_alloc(int64_t m, int64_t n) {
     A->re = (double *)calloc((size_t)(m * n + 1), sizeof(double));
     A->im = (double *)calloc((size_t)(m * n + 1), sizeof(double));
     return A;
+}
+
+/* DAP-side accessors for complex matrices. Forward-declared in the
+ * matlab_dbg section above; defined here where the matlab_mat_c
+ * layout is fully visible. Each defends against being called with
+ * a non-complex descriptor by re-checking the magic byte. */
+int64_t matlab_dbg_mat_c_rows(const matlab_mat_c *m) {
+    if (!m || !mat_is_complex(m)) return 0;
+    return m->rows;
+}
+int64_t matlab_dbg_mat_c_cols(const matlab_mat_c *m) {
+    if (!m || !mat_is_complex(m)) return 0;
+    return m->cols;
+}
+double matlab_dbg_mat_c_re(const matlab_mat_c *m, int64_t i, int64_t j) {
+    if (!m || !mat_is_complex(m) || !m->re) return 0.0;
+    if (i < 1 || j < 1) return 0.0;
+    if (i > m->rows || j > m->cols) return 0.0;
+    return m->re[(i - 1) * m->cols + (j - 1)];
+}
+double matlab_dbg_mat_c_im(const matlab_mat_c *m, int64_t i, int64_t j) {
+    if (!m || !mat_is_complex(m) || !m->im) return 0.0;
+    if (i < 1 || j < 1) return 0.0;
+    if (i > m->rows || j > m->cols) return 0.0;
+    return m->im[(i - 1) * m->cols + (j - 1)];
 }
 
 /* Constructors ----------------------------------------------------------*/

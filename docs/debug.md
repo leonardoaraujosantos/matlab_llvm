@@ -172,23 +172,65 @@ VS Code via a generic-DAP extension:
 | ------------------------------- | ----------------------------------- |
 | Initialize handshake            | `initialize` + `initialized` event  |
 | Launch a `.m` file              | `launch` (with `program`, `stopOnEntry`) |
+| Attach to a running session     | `attach` (alias for `launch` — same single-process model) |
 | Stop on entry                   | `stopOnEntry` option on `launch`    |
-| Line breakpoints                | `setBreakpoints`                    |
-| Conditional breakpoints         | `setBreakpoints` `condition`        |
-| Log points (no pause)           | `setBreakpoints` `logMessage`       |
-| Resume                          | `continue`                          |
-| Step over / in / out            | `next` / `stepIn` / `stepOut` (stops report `reason="step"`) |
+| Line breakpoints                | `setBreakpoints` — invalid lines (blank, comment-only) snap forward to the nearest executable row; each verified bp gets a stable `id` for `hitBreakpointIds` correlation, and a `message` field surfaces the snap or "no executable line at or after this row" for unresolvable picks |
+| Conditional breakpoints         | `setBreakpoints` `condition` — evaluates against the innermost paused frame, so a bp inside `compute(a, b)` can use `a > 5` |
+| Log points (no pause)           | `setBreakpoints` `logMessage` — `{name}` placeholders resolve against the innermost paused frame's mini-ws (same bridge as conditional bps) |
+| Hit-count breakpoints           | `setBreakpoints` `hitCondition` — accepts `N`, `==N`, `>=N`, `>N`, `%N`. Skip-counter lives in the runtime's bp table so the JIT cost of cond eval is paid only once the gate passes |
+| Function breakpoints            | `setFunctionBreakpoints` resolves a name against the compiled function table and pins a line bp at the body's first statement. Class methods are registered under `MethodName`, `ClassName.MethodName`, and `ClassName/MethodName` so any form the user types resolves |
+| Breakpoint candidate lines      | `breakpointLocations` returns every bp-eligible line in a range (computed by an AST walker at compileProgram time) |
+| Exception breakpoints           | `setExceptionBreakpoints` with the `error` filter — runtime pauses on the first hook fired after `matlab_set_error` |
+| Resume                          | `continue` (also fires `continued` event) |
+| Step over / in / out            | `next` / `stepIn` / `stepOut` (stops report `reason="step"`, also fire `continued` events) |
+| Step-into-targets               | `stepInTargets` returns one target (MATLAB call sites have at most one user-defined call per statement) |
 | Pause a running program         | `pause` (breaks at the next stmt)   |
 | Stack trace across user fns     | `stackTrace`                        |
+| `stopped` correlation           | `stopped` event includes `hitBreakpointIds` when the pause came from a matched bp — same id space as `setBreakpoints` / `setFunctionBreakpoints` responses |
+| Matrix grid hint                | `variables` / `evaluate` rows backed by a multi-cell matrix carry `indexedVariables` (cell count) so matrix-viewer panels can render an MxN grid widget without paging children |
+| Property table hint             | Class-instance rows carry `namedVariables` (property count) for the same reason |
+| Stderr forwarded                | `output` event (category `stderr`) — Diag prints from REPL eval, error()-tracebacks, and any other write to fd 2 surface in the IDE's debug console with stderr styling. Tee'd to the original stderr fd so subprocess capture / CI logs still see them |
+| Watch error inline              | When `evaluate` fails, the response `message` carries the captured `<file>:<line>:<col>: error: <msg>` diagnostic instead of a generic placeholder — same bytes also forwarded to the debug console for full multi-line context |
+| `breakpoint` event on resolve   | `setBreakpoints` against a path the runtime hasn't loaded yet (request arrived before launch / compileProgram) returns `verified=false` and queues the bp; once the path registers, the queued bp is replayed and a `breakpoint` event with `reason: "changed"` carries the now-verified state |
+| List threads                    | `threads` returns one thread (`id=1`, `name="main"`); `thread` events fire on `started` / `exited` |
 | Per-frame Locals                | `scopes(frameId)` returns one Locals scope per frame; `variables(ref)` reads either the script ws or that frame's mini-ws |
 | Workspace variables snapshot    | `variables`                         |
-| Class instances in Locals/Watch | `1x1 ClassName` rows expand into properties; works in both `variables` and `evaluate` |
-| Matrix expansion in Locals/Watch | `RxC double` rows expand into one child per cell (`(i,j)` row-major; linear `(i)` for vectors); `1x1` matrices unbox to the scalar |
-| Watch / hover / debug-console eval | `evaluate` against any frame's locals — pass `frameId` for function-frame scope, omit for script scope |
+| Class instances in Locals/Watch | `1x1 ClassName` rows expand into properties **and methods**. Methods render with `presentationHint.kind="method"` (function-icon glyph) and a `@name(args)` value-column signature; methods inherited from a superclass carry an `(inherited from X)` suffix. Override (same-name method on derived class) suppresses the parent entry |
+| Matrix expansion in Locals/Watch | `RxC double` rows expand into one child per cell (`(i,j)` row-major; linear `(i)` for vectors); `1x1` matrices unbox to the scalar. Complex matrices show as `RxC complex` and expand to one row per cell with value rendered as `re+im*i`; `1x1` complex unboxes to `re+im*i`. 3-D arrays show as `MxNxP double` and expand with `(i,j,k)` labels in slice-major order |
+| `keyboard` builtin              | A `keyboard;` call in user code pauses the worker — same machinery as a breakpoint, but triggered from the program. The `stopped` event carries `reason: "entry"` so the IDE switches to the REPL view; resumption proceeds normally with the workspace intact |
+| Watch / hover / debug-console eval | `evaluate` against any frame's locals — pass `frameId` for function-frame scope, omit for script scope; `context: "watch"` (default) wraps as an assignment, `context: "repl"` runs verbatim (see below) |
+| REPL prompt against the live session | `evaluate` with `context: "repl"` runs `disp(T)` / `clear x` / `T(2,2) = 99` etc. against the paused session; output flows out as `stdout` `output` events. See "REPL with debug session" below |
 | Multi-file breakpoints          | Sibling `.m` files (function-only or classdef-only) in the entry-point's directory get auto-loaded; bps on their lines fire correctly |
+| Loaded source list              | `loadedSources` returns every registered file; one `loadedSource` event per file is also emitted at `configurationDone` |
+| Source content fetch            | `source` returns the file's bytes (used by IDEs without local fs access) |
+| Completions for REPL/watch      | `completions` returns the union of workspace names + frame locals (when `frameId` is set) + a curated set of MATLAB builtins, filtered by the prefix |
 | Mutate any workspace variable   | `setVariable` (any MATLAB expr on RHS — scalar, matrix, string, struct) |
-| Clean shutdown / terminate      | `disconnect` / `terminate`          |
+| Mutate by lvalue expression     | `setExpression` — same REPL-JIT path as setVariable, but the LHS can be `s.field`, `A(i,j)`, etc. The response renders the *computed* value via a readback (so `x = 2 * 21` returns `value="42"`, not `"2 * 21"`), with `indexedVariables` / `namedVariables` hints for matrix and class-instance results |
+| Exception inspection            | `exceptionInfo` returns the message + frame snapshot captured by `matlab_set_error_msg` before the unwind; survives across the failing call's return |
+| Process / lifecycle events      | `process` (on launch), `thread:started` / `thread:exited`, `loadedSource:new`, `continued`, `stopped`, `output`, `exited`, `terminated` |
+| Restart                         | `restart` resumes with `STOP`, sends a `terminated` event with `restart: true`, expects the client to re-launch |
+| Modules pane                    | `modules` returns an empty list (single-engine JIT host has no shared-library concept) |
+| Graceful terminate              | `terminate` / `terminateThreads` stops the worker and emits `terminated`; the DAP loop stays alive so the IDE may follow up with `restart` or `disconnect` |
+| Forceful detach                 | `disconnect` stops the worker and exits the DAP server loop |
 | Program stdout forwarded        | `output` event (category `stdout`)  |
+
+#### Explicit refusals
+
+These requests respond `success=false` with a precise message
+explaining the missing infrastructure, instead of falling through to
+the unknown-handler silent-success. The IDE knows up front what
+isn't available, and `initialize` advertises `supportsX=false` for
+each so clients suppress the corresponding UI affordances.
+
+| Request                          | Reason                                                              |
+| -------------------------------- | ------------------------------------------------------------------- |
+| `stepBack`, `reverseContinue`    | Reverse stepping needs a state recorder the runtime does not include |
+| `readMemory`, `writeMemory`      | The JIT image is not exposed at the byte level                      |
+| `disassemble`, `locations`       | Native frames are not tracked by the runtime                        |
+| `setDataBreakpoints`, `dataBreakpointInfo` | No workspace-store watcher (data breakpoints would need every `matlab_ws_set_*` to compare against a watch list) |
+| `setInstructionBreakpoints`      | The JIT exposes no public mapping from line to native PC            |
+| `restartFrame`                   | The runtime does not snapshot per-frame workspace at function entry |
+| `goto`, `gotoTargets`            | The JIT exposes no in-frame PC manipulation primitive               |
 
 ### Architecture notes
 
@@ -196,7 +238,12 @@ VS Code via a generic-DAP extension:
   reader thread that forwards each chunk as a DAP `output` event;
   we hang on to the original `STDOUT_FILENO` for DAP frames. Without
   this, `disp()` from the program would splice into the JSON-RPC
-  stream and corrupt the channel.
+  stream and corrupt the channel. Stderr gets the same treatment
+  with two differences: (a) the reader emits `category: "stderr"`
+  events (drives the IDE's error styling), and (b) the bytes are
+  *also* tee'd to the original stderr fd so `subprocess.stderr`
+  capture and CI logs keep working — stdout is JIT-owned, stderr
+  is shared.
 - **Pause signalling.** The runtime broadcasts a condvar when it
   transitions to "paused"; the server's monitor thread wakes, emits
   a `stopped` event, and blocks until the client resumes. A small
@@ -222,6 +269,29 @@ VS Code via a generic-DAP extension:
   (returns `>= 0`) from a step / `pause` (returns `-1`). The `stopped`
   event's `reason` field is `"breakpoint"` or `"step"` accordingly,
   matching the DAP spec so the IDE renders the correct icon.
+- **Lifecycle events.** `configurationDone` is the trigger for the
+  full lifecycle handshake: the worker thread is spawned and we
+  emit a `process` event (debugger identity), a `thread:started`
+  event, and one `loadedSource:new` event per file the
+  SourceManager registered. The monitor thread fires
+  `thread:exited` + `exited` + `terminated` when the worker
+  returns. Stepping requests (`continue` / `next` / `stepIn` /
+  `stepOut`) all send a synchronous `continued` event after
+  responding, so adapters that track stopped/continued symmetry
+  stay in sync.
+- **Worker-state safety gate on `evaluate`.** `runReplInput` shares
+  `matlab_ws` with the JIT'd program, so evaluating while the
+  worker is running races on the workspace and the JIT engine.
+  The evaluate handler's first action is to refuse with
+  `success=false` unless the worker is paused, pre-launch, or
+  exited. This is a blanket safety check — applies to watch / hover
+  / repl alike.
+- **Server-side bp/function tables.** During `compileProgram`,
+  before Sema runs, the server walks the parsed TU to populate
+  `G.BpLocations` (per-file set of statement start lines) and
+  `G.FunctionTable` (function name → (file_id, first body line)).
+  These back the `breakpointLocations` and `setFunctionBreakpoints`
+  responses without re-walking the AST per request.
 
 ### Conditional breakpoints and log points
 
@@ -244,13 +314,29 @@ response (`supportsConditionalBreakpoints`, `supportsLogPoints`).
   to scalar). Bare identifiers only — anything more complex is
   passed through as the literal substring.
 
-Both modes evaluate against the script-level workspace. The
-`variables` panel exposes function-frame locals through the per-frame
-mini-ws machinery described below, but the conditional / log
-evaluators don't yet bridge those into the REPL JIT — so a
-breakpoint condition referencing a function-local won't see it. The
-follow-up that closes that gap is item (6) in
-[`docs/debug_improve_plan.md`](debug_improve_plan.md).
+Both modes also bridge function-frame locals into the REPL JIT
+when the bp fires inside a user function — a condition like
+`a > 5` on a bp in `compute(a, b)` resolves `a` to the parameter,
+not to a missing script-scope name. The bridge uses the same
+`FrameBridge` helper the `evaluate` handler uses (stamp the
+innermost frame's mini-ws into matlab_ws, run the eval, reverse).
+Plan item (6) of `debug_improve_plan.md` is closed by this.
+
+#### Exception breakpoints (`error` filter)
+
+`initialize` advertises a single exception-breakpoint filter named
+`error`. When the IDE enables it via `setExceptionBreakpoints`, the
+DAP server flips `matlab_dbg.pause_on_error = 1`; the runtime hook
+then pauses the worker on the first statement after `matlab_set_error`
+fires. The user can inspect the failing frame's locals before
+resuming.
+
+This is not the same path as the printed `error()` traceback (that
+prints to stderr and then unwinds) — the filter forces a *pause* so
+the call site is still on the live frame stack. After resuming, the
+flag goes back to its idle state; matlab_set_error keeps recording
+the snapshot for `exceptionInfo` regardless of whether the filter
+caused a pause.
 
 ### Per-frame Locals + `evaluate`
 
@@ -292,14 +378,81 @@ the script-level workspace view so older scenarios / IDEs that
 hardcode it keep working.
 
 `evaluate` runs the user expression through the same REPL JIT
-pipeline conditional breakpoints use: wrap as
-`__matlab_dbg_eval = (<expr>);`, run through `runReplInput`, then
-re-read by name and format with `formatVar`. Capability advertised
-as `supportsEvaluateForHovers=true`. v1 evaluates against the
-script-level workspace plus the script frame's mini-ws — function
-frame locals aren't yet visible to the evaluator (see plan item
-(6) for the bridge). Malformed expressions come back as
-`success=false`; the connection stays open.
+pipeline conditional breakpoints use. The behaviour now branches on
+the DAP `context` field:
+
+- **`context: "watch"`** (default — also covers `"hover"` and the
+  Variables panel's expanded watches): wrap as
+  `__matlab_dbg_eval = (<expr>);`, run through `runReplInput`, then
+  re-read by name and format with `formatVar`. The response carries
+  the rendered `result` and (when applicable) a `variablesReference`
+  for class-instance or matrix expansion. This path is value-shaped
+  — statements like `disp(T)` that don't return a value can't be
+  bound to the holder slot.
+
+- **`context: "repl"`**: run the user's input verbatim (no wrap, no
+  result readback) and return an empty `result`. Output flows out
+  through the existing stdout-redirect pipe and surfaces as DAP
+  `output` events with `category: "stdout"` — the IDE renders
+  those in its REPL panel alongside the typed prompt. This path
+  supports statements that don't have a value: `disp(T)`, `clear x`,
+  `T(2,2) = 99`, `[u, s, v] = svd(A)`. Trailing `;` is preserved
+  (in MATLAB it suppresses the implicit echo of an assignment's
+  result).
+
+Frame-scoped eval still applies on both paths: pass `frameId` and
+the handler bridges that frame's mini-workspace into `matlab_ws`
+for the duration of the eval, then reverses the bridge.
+
+A worker-state gate fast-fails any evaluate that arrives while the
+worker is mid-execution (`success=false`, message "evaluate is only
+valid while the program is paused or has exited"). Pre-launch and
+post-exit eval are both allowed — the workspace is empty pre-launch
+and frozen post-exit, so concurrent access is impossible.
+
+Capability advertised as `supportsEvaluateForHovers=true`. v1
+evaluates against the script-level workspace plus the script
+frame's mini-ws — function frame locals aren't yet visible to the
+evaluator (see plan item (6) for the bridge). Malformed expressions
+come back as `success=false`; the connection stays open.
+
+### REPL with a debug session
+
+The `context: "repl"` branch above is what makes the IDE's REPL
+panel work *while attached to a debug session*: type code at the
+prompt and have it evaluate against the paused worker's workspace,
+not against an isolated `matlabc -repl` subprocess.
+
+- **Statement execution.** `disp(A)`, `clear x`, `who`, `whos`,
+  `tmp = 99`, multi-output destructures, function calls — anything
+  the standalone REPL accepts. The input is appended with a `\n`
+  (matching what the standalone REPL does when reading lines from
+  stdin) so parser recovery on malformed input lands on a clean
+  diagnostic instead of running off the end of the buffer.
+
+- **Output routing.** Bytes written to `stdout` by the JIT'd code
+  hit the stdout-redirect pipe set up at `runDap` startup
+  (`dup2(pipe[1], STDOUT_FILENO)`); the reader thread forwards them
+  as DAP `output` events. The REPL panel renders those events
+  inline; the synchronous `evaluate` response carries an empty
+  `result`. (We do *not* try to capture the bytes synchronously
+  inside the eval handler — the reader thread already owns the
+  pipe.)
+
+- **Diagnostics.** `runReplInput` writes Diag messages to stderr,
+  which is *not* piped through the DAP server. Parse / type / lower
+  errors land on the matlabc process's stderr (visible in the IDE's
+  adapter log, not in the REPL panel). Future work: redirect
+  stderr too and forward as `stderr` `output` events.
+
+- **Frame scope.** Pass `frameId` to evaluate against a function
+  frame's locals; omit it to use the script workspace. Same bridge
+  logic as the watch path.
+
+- **Lifecycle.** REPL eval is allowed pre-launch (empty workspace),
+  while paused (current frame), and post-exit (frozen final state).
+  The "running, not paused" case is rejected because `runReplInput`
+  shares `matlab_ws` with the running JIT.
 
 ### Class instances in Locals + Watch
 
@@ -423,11 +576,13 @@ formatting paths plus the watch-result variant).
   Easy to layer on top of the existing registry — same handle
   works, different response shape — but no IDE in the tree
   consumes it yet so it isn't shipped.
-- **Real complex matrices.** `mat_get` returns 0 for the
-  complex-magic descriptor; a parallel `_get_real` / `_get_imag`
-  pair would feed a richer formatter.
-- **3-D matrices** (`matlab_mat3`). Same pattern but the labeller
-  would need an `(i,j,k)` form and the cap math gets stricter.
+- **Real complex matrices.** *Done.* The runtime exposes a kind
+  discriminator (`matlab_dbg_mat_kind`) plus per-kind accessors —
+  `matlab_dbg_mat_c_re/_im` for complex, `matlab_dbg_mat3_get` for
+  3-D. The DAP server's `formatMatShape` and `appendMatChildren`
+  dispatch on the kind: complex cells render as `re+im*i`, 3-D
+  cells get `(i,j,k)` labels in slice-major order. 1×1 complex
+  unboxes to `re+im*i` in the parent value column.
 
 ### `error()` backtrace
 
@@ -506,6 +661,14 @@ locals on top, run `runReplInput`, restore. Stamped names that
 didn't pre-exist get cleared via `matlab_ws_clear_one` so eval
 doesn't leak function locals into the persistent script workspace.
 
+The bridge logic is factored into a `FrameBridge` helper shared
+across three sites: the `evaluate` handler (parameterised by
+`frameId`), the conditional-bp evaluator, and the log-point
+interpolator. The latter two always bridge the *innermost*
+function frame so a bp inside `compute(a, b)` can use `a > 5` as
+its condition. The script frame (rt index 0) needs no bridging —
+its locals are already in matlab_ws / frame_locals[0].
+
 Known shadowing limitation: the REPL JIT resolves bare identifiers
 as builtin function references when the name matches a MATLAB
 builtin (`sum`, `prod`, ...) — so a function-frame local named
@@ -514,7 +677,36 @@ helper variable is named `total` rather than `sum` for this reason.
 
 ### Other known limits (deferred, not blocked)
 
-- **Function breakpoints.** Not advertised as supported.
+- **Reverse stepping / time-travel debugging.** The runtime has no
+  state recorder, so `stepBack` and `reverseContinue` respond with
+  `success=false`. The infrastructure to add: a per-statement
+  diff log of `matlab_ws_*` writes plus frame-stack edits.
+- **Memory / disassembly inspection.** The MLIR ExecutionEngine
+  doesn't surface a public mapping from line to native PC, and we
+  don't track JIT'd code addresses on the server side. `readMemory`,
+  `writeMemory`, `disassemble`, `locations` all refuse cleanly.
+- **Data breakpoints (watchpoints).** `matlab_ws_set_*` is the
+  obvious instrumentation point; gating each store on a watch list
+  would deliver this, but isn't built. `setDataBreakpoints` and
+  `dataBreakpointInfo` refuse.
+- **Instruction breakpoints.** Same root cause as memory — no
+  byte-level addressing of the JIT image.
+- **Restart-frame / goto.** Need per-frame workspace snapshots and
+  in-frame PC manipulation respectively. Both refuse.
+- **`disp(T)` in a watch box** *(fixed)*. The watch handler used to
+  SIGSEGV when wrapping a void call (`__matlab_dbg_eval = (disp(T));`
+  binds nothing). The handler now detects statement-shaped void
+  calls (`disp`, `fprintf`, `error`, `warning`, `assert`, `clear`,
+  `who`, `whos`, plotting calls, etc.) up front and routes them
+  through the REPL branch — the watch row shows `<void>` and the
+  side-effect output flows out as `output` events. False-positive
+  cost is bounded: a watch on a void call shows `<void>` instead of
+  the empty cell it used to show; false negatives would crash, so
+  the detection list errs on the inclusive side.
+- **Stderr → DAP `output`.** Compile / lower diagnostics from
+  REPL-mode evaluate go to the matlabc process's stderr, not into
+  the IDE's REPL panel. A second pipe redirect for stderr (mirror
+  of the existing stdout one) would close this gap.
 
 ## Native debugging via `lldb` / `gdb`: DWARF in `-emit-llvm`
 
@@ -615,36 +807,123 @@ Three ctest suites guard the debugging surface (all gated on
 
 - **`debug-dap-tests`** — spawns `matlabc -dap` as a subprocess and
   drives the protocol with a small Python client
-  (`test/Debug/dap_client.py`). Thirteen scenarios cover the
+  (`test/Debug/dap_client.py`). Thirty-four scenarios cover the
   end-to-end surface:
+
+  *Stepping & basic flow:*
   - plain breakpoint (`reason="breakpoint"`, expected line)
   - step-vs-breakpoint reasons (the regression where every pause
     was hardcoded as `"breakpoint"` even after `next`)
+  - `threads` request + `continued` event symmetry on resume
   - `stackTrace` / `scopes` / `variables` introspection
+
+  *Variables & evaluation:*
   - **function-frame Locals** — paused inside `compute(a, b)`,
     `variables` for the function frame shows `a` / `b` / `total` and
     NOT script-scope `seed`; the script frame's view shows `seed`
     and not the function's locals
-  - **`evaluate`** (script scope) — pure arithmetic (`1 + 1`),
-    workspace references (`x`, `x + y`), matrix literals
+  - **`evaluate`** (watch / script scope) — pure arithmetic
+    (`1 + 1`), workspace references (`x`, `x + y`), matrix literals
     (`[1 2; 3 4]`), trailing-semicolon tolerance, malformed
     rejection
+  - **`evaluate` with `context: "repl"`** — runs `disp(A)` against
+    a paused matrix, captures the row output via the stdout pipe
+    as `output` events; verifies REPL-scope assignment
+    (`tmp_repl = 99;`) is visible to a follow-up watch read;
+    trailing `;` preserved; malformed input fails cleanly
   - **`evaluate` in a function frame** — `evaluate("a", frameId=…)`
     resolves to the function's parameter; without `frameId` the same
     expression silently defaults; after the bridge reverses, the
     script ws is unchanged
-  - **multi-file breakpoint** — `dap_main.m` calls `helper_fn` from
-    a sibling `dap_helper.m`; bp on the helper file is `verified`,
-    fires, and `stackTrace` reports the helper's source path
+
+  *Mutation:*
   - `setVariable` round-trip — scalar, matrix literal `[1 2; 3 4]`,
     fresh-name assignment, malformed-RHS rejection,
     non-identifier-name rejection
+  - `setExpression` lvalue mutation — assigns through arbitrary
+    lvalue expressions; verified by a follow-up `evaluate` read
+
+  *Breakpoint variants:*
   - conditional breakpoint (false condition silently resumes, true
     one stops)
   - log point (emits an `output` event, never `stopped`)
+  - `setFunctionBreakpoints` — resolves `compute` from
+    `dap_locals_program.m`'s function table to `compute.m:10`;
+    unknown name comes back with `verified=false`
+  - `breakpointLocations` — returns only executable lines
+    (assignment / disp lines for `dap_program.m`); blank and
+    comment-only lines are excluded
+  - **multi-file breakpoint** — `dap_main.m` calls `helper_fn` from
+    a sibling `dap_helper.m`; bp on the helper file is `verified`,
+    fires, and `stackTrace` reports the helper's source path
+
+  *Errors:*
   - `error()` backtrace — nested user-function calls raise via
     `error('boom')`; stderr must contain the message header plus one
     frame line per call site (innermost first)
+  - `setExceptionBreakpoints` + `exceptionInfo` — toggles the
+    `error` filter; once the runtime hook pauses on the failing
+    statement (or the program runs to completion), `exceptionInfo`
+    returns the captured message and frame snapshot
+
+  *Source / sources / completions:*
+  - `loadedSources` + `source` — the entry point appears in the
+    loaded list; fetching its content matches the file on disk
+  - `completions` — workspace name `x` and builtin `disp` both
+    surface for prefixes `x` / `dis`
+
+  *Lifecycle / capabilities:*
+  - `modules` — returns an empty list cleanly
+  - **`unsupported_refusals`** — every advertised-as-unsupported
+    request (`stepBack`, `reverseContinue`, `readMemory`,
+    `writeMemory`, `disassemble`, `setDataBreakpoints`,
+    `setInstructionBreakpoints`, `restartFrame`, `goto`,
+    `gotoTargets`) responds with `success=false` and a precise
+    reason; the connection stays open
+
+  *Frame-scoped evaluation:*
+  - **`frame_scoped_conditional_breakpoint`** — a bp inside
+    `compute(a, b)` with condition `a > 2` fires when called as
+    `compute(3, 4)`; the cond evaluator stamps the function frame's
+    mini-ws into matlab_ws, runs the cond, and restores. With the
+    same fixture, condition `a > 99` silently resumes (no stop)
+  - **`frame_scoped_log_point`** — `{a}` / `{b}` placeholders in a
+    function-body logMessage interpolate against the function
+    frame's mini-ws, not the script ws
+
+  *Hit counts + class methods:*
+  - **`hit_count_breakpoint`** — `hitCondition: ">= 3"` on a bp
+    inside `for i = 1:3` pauses on the third iteration only;
+    `i == 3` is verified through `variables` of the script frame
+  - **`class_method_function_breakpoints`** — `setFunctionBreakpoints`
+    resolves `Account.deposit` under all three name forms
+    (`deposit`, `Account.deposit`, `Account/deposit`)
+
+  *Lifecycle:*
+  - **`pending_breakpoint_event`** — sends `setBreakpoints` BEFORE
+    `launch` (DAP-permitted ordering); the response carries
+    `verified=false` and the bp is queued. After `configurationDone`,
+    a `breakpoint` event with `reason="changed"` arrives carrying
+    `verified=true`, and the bp fires normally
+
+  *UX hardening:*
+  - `breakpoint_ids` — each bp from `setBreakpoints` carries a
+    stable `id`; the `stopped` event surfaces it as
+    `hitBreakpointIds` when that specific bp triggered the pause
+  - `stderr_forwarded` — the error()-traceback bytes that hit
+    stderr are forwarded to the IDE as `output` events with
+    `category: "stderr"`, while still reaching the parent
+    process's stderr (verified by the existing error-traceback
+    scenario's stderr_buf assertion continuing to pass)
+  - **`watch_void_promotion`** — watch-mode `disp(A)` used to
+    SIGSEGV the matlabc process (the `__matlab_dbg_eval = (...);`
+    wrap can't bind a void RHS). The handler now detects
+    statement-shaped void calls (`disp`, `clear`, `who`, `whos`,
+    plotting calls, etc.) up front and routes them through the
+    REPL branch, returning `result="<void>"`; side-effect output
+    flows through the existing stdout pipe
+
+  *Composite / domain:*
   - **matrix expansion** — `dap_matrix_program.m` constructs a
     2x3, a 3x1, and a 1x1 matrix; the scenario asserts the
     `RxC double` shape labels, the `(i,j)` / `(i)` cell layout,
@@ -659,6 +938,26 @@ Three ctest suites guard the debugging surface (all gated on
     watch-box `evaluate("acc")` exercises the kind=1 → kind=2
     promotion for class instances that the REPL JIT mistakenly
     stamps as matrices
+  - **`class_instance_methods`** — same fixture; verifies that
+    expanding `acc` shows `deposit` + `Account` constructor as
+    method rows alongside the property rows, with
+    `type: "method"`, `presentationHint.kind: "method"`, and a
+    `@deposit(obj, amt)` signature in the value column.
+    Expanding `sav` (Savings < Account) shows its own constructor
+    plus an inherited `Account` ctor and `deposit` — both flagged
+    `(inherited from Account)`
+  - **`complex_and_3d_matrix_expansion`** — `dap_complex_program.m`
+    constructs `c = 3 + 4i` (1×1 complex) and `A = ones(2,2,2)`
+    (2×2×2 real). The complex 1×1 unboxes to `"3+4i"` in the
+    value column with no expansion; `A` reports
+    `value="2x2x2 double"` + `indexedVariables=8` + a mat-ref;
+    drilling emits all eight `(i,j,k)` cells in slice-major order
+    with the mutated `(1,2,1)=42` and the rest `=1`
+  - **`keyboard_builtin`** — `dap_keyboard_program.m` calls
+    `keyboard;` after assigning `x = 41`. The DAP `stopped` event
+    arrives with `reason="entry"` at the keyboard line; the
+    Locals panel still shows `x=41`; resumption produces the
+    expected `disp(x)` output and exits cleanly
 
 - **`debug-dwarf-tests`** — runs `matlabc -emit-llvm -g` and
   `-emit-llvm` (no -g) over a fixture, asserts the DWARF metadata
@@ -675,19 +974,42 @@ ctest --test-dir build -R "debug-" --output-on-failure
 Both suites finish in well under two seconds combined; no hangs even
 when a scenario fails (the Python harness uses bounded timeouts).
 
+### `keyboard` builtin
+
+MATLAB's `keyboard` pauses execution at the call site with access
+to the surrounding scope. Under DAP it routes through the same
+pause machinery as a breakpoint:
+
+- The lowerer recognises `keyboard;` (bare-name builtin call) in
+  the `ExprStmt` dispatch — same place that catches `who`/`whos`/
+  `clear` — and emits `matlab.call_builtin {callee =
+  "matlab_dbg_keyboard_hook"}`.
+- `LowerTensorOps` maps that to a direct `llvm.call` on the
+  runtime symbol.
+- `matlab_dbg_keyboard_hook()` snapshots the innermost frame's
+  `(file_id, line)` into the cur_* fields, sets `paused=1` and a
+  `paused_from_keyboard` flag, then blocks on the same condvar a
+  real breakpoint uses.
+- The DAP monitor reads the flag via
+  `matlab_dbg_was_paused_from_keyboard()` and surfaces stop
+  reason="entry" — distinguishing keyboard-initiated pauses from
+  breakpoints (`"breakpoint"`) and steps (`"step"`).
+- The IDE's REPL panel (already wired via
+  `evaluate context="repl"`) takes over from there; resumption
+  via `continue` proceeds normally with the workspace intact.
+
+In release-mode (non-`-g`) builds `matlab_dbg.enabled` is 0 and
+`matlab_dbg_keyboard_hook` returns immediately, so a `keyboard`
+call in a compiled binary is a no-op rather than an error.
+
+#### Standalone REPL pump
+
+Outside DAP, `matlabc -repl` would still benefit from a bidirectional
+pump that read input from stdin and routed it through the same
+frame-bridge for `runReplInput`. Not built; the DAP path is what most
+users hit through their IDE.
+
 ## Deliberately out of scope
-
-### `keyboard` as a nested REPL
-
-MATLAB's `keyboard` pauses execution and opens an interactive prompt
-at the paused location with access to the surrounding scope. We
-have the pause machinery (`matlab_dbg_hook`), the REPL, per-frame
-Locals, and now (after plan item 6) the snapshot/restore bridge that
-lets `runReplInput` operate against a frame's mini-ws. The remaining
-piece is a bidirectional REPL pump driven from the paused worker —
-read user input over a channel, route it through the bridge, print
-the result, loop until `dbcont`. Plus a one-line lowering recogniser
-for the `keyboard` builtin. Not started.
 
 ## See also
 

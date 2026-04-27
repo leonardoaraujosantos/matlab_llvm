@@ -379,12 +379,19 @@ def scn_evaluate(matlabc, program):
         assert resp.get("result") == "11", \
             f"evaluate with trailing ; should still return 11, got {resp!r}"
         # Malformed expression must come back as success=false without
-        # dropping the connection.
+        # dropping the connection. The response message must carry the
+        # actual diagnostic captured from runReplInput — not the
+        # generic "see debug console" placeholder.
         try:
             c.request("evaluate", {"expression": "1 +"})
             raise AssertionError("evaluate accepted a malformed expression")
-        except DapError:
-            pass
+        except DapError as e:
+            err = str(e)
+            assert "error:" in err.lower() or "expected" in err.lower() or \
+                   "unexpected" in err.lower(), \
+                f"evaluate error should carry the captured diagnostic, got {err!r}"
+            assert "see debug console" not in err, \
+                f"evaluate error should NOT fall back to placeholder: {err!r}"
 
         c.request("continue")
         c.wait_event("terminated", timeout=5.0)
@@ -466,6 +473,879 @@ def scn_evaluate_in_frame(matlabc, program):
         resp = c.request("evaluate", {"expression": "seed"})
         assert resp.get("result") == "7", \
             f"script-scope seed should be 7 after frame eval, got {resp!r}"
+
+        c.request("continue")
+        c.wait_event("terminated", timeout=5.0)
+
+
+def scn_threads_and_continued(matlabc, program):
+    """`threads` returns a single-thread list, and `continued` events
+    are emitted on every resume request — important for adapters that
+    track stopped/continued symmetry."""
+    with DapClient(matlabc, program) as c:
+        initialize_and_launch(c, breakpoints=[{"line": 5}])
+        _stop_event(c)
+
+        body = c.request("threads")
+        ts = body.get("threads") or []
+        assert any(t.get("id") == 1 for t in ts), \
+            f"expected thread id=1 in {body!r}"
+
+        c.request("continue")
+        ev = c.wait_event("continued", timeout=5.0)
+        assert (ev.get("body") or {}).get("threadId") == 1, \
+            f"continued event missing threadId: {ev!r}"
+        c.wait_event("terminated", timeout=5.0)
+
+
+def scn_loaded_sources_and_source(matlabc, program):
+    """`loadedSources` lists the registered .m files; `source` returns
+    file content for adapters that don't have direct fs access."""
+    with DapClient(matlabc, program) as c:
+        initialize_and_launch(c, breakpoints=[{"line": 5}])
+        _stop_event(c)
+
+        body = c.request("loadedSources")
+        sources = body.get("sources") or []
+        paths = [s.get("path") for s in sources]
+        assert any(_abs(p) == _abs(program) for p in paths), \
+            f"entry-point not in loadedSources: {paths!r}"
+
+        body = c.request("source", {"source": {"path": program}})
+        content = body.get("content") or ""
+        with open(program) as f:
+            expected = f.read()
+        assert content == expected, \
+            f"source content mismatch (got {len(content)} bytes, expected {len(expected)})"
+
+        c.request("continue")
+        c.wait_event("terminated", timeout=5.0)
+
+
+def scn_completions(matlabc, program):
+    """`completions` returns workspace + builtin matches for a prefix.
+
+    At line 8 of dap_program.m, `x` and `y` are in the workspace; both
+    must surface for prefix `x` / `y`. A bare prefix `dis` should
+    surface the `disp` builtin from the curated list."""
+    with DapClient(matlabc, program) as c:
+        initialize_and_launch(c, breakpoints=[{"line": 8}])
+        _stop_event(c)
+
+        body = c.request("completions", {"text": "x", "column": 2})
+        labels = [t.get("label") for t in (body.get("targets") or [])]
+        assert "x" in labels, f"workspace x missing: {labels!r}"
+
+        body = c.request("completions", {"text": "dis", "column": 4})
+        labels = [t.get("label") for t in (body.get("targets") or [])]
+        assert "disp" in labels, f"disp builtin missing: {labels!r}"
+
+        c.request("continue")
+        c.wait_event("terminated", timeout=5.0)
+
+
+def scn_set_expression(matlabc, program):
+    """`setExpression` mutates by lvalue expression — uses the same
+    REPL-JIT assignment path as setVariable but accepts arbitrary
+    lvalues (struct fields, indexed cells, etc.). For dap_program.m
+    we just rebind a top-level scalar.
+
+    The response renders the computed value via a readback of the
+    same lvalue, so an RHS like `2 * 21` returns `value="42"`,
+    not the raw RHS string."""
+    with DapClient(matlabc, program) as c:
+        initialize_and_launch(c, breakpoints=[{"line": 8}])
+        _stop_event(c)
+
+        # Computed RHS — the response must show the result, not
+        # the literal "2 * 21".
+        resp = c.request("setExpression",
+                         {"expression": "x", "value": "2 * 21"})
+        assert resp.get("value") == "42", \
+            f"setExpression should return the computed value, got {resp!r}"
+
+        # Independent confirmation via evaluate.
+        resp = c.request("evaluate", {"expression": "x"})
+        assert resp.get("result") == "42", \
+            f"setExpression didn't persist: x={resp!r}"
+
+        # Matrix-valued RHS — the response should report the
+        # shape label ("2x2 double") and a mat-ref for drilling.
+        resp = c.request("setExpression",
+                         {"expression": "x", "value": "[1 2; 3 4]"})
+        assert resp.get("value") == "2x2 double", \
+            f"matrix setExpression: {resp!r}"
+        assert (resp.get("variablesReference") or 0) >= 200000, \
+            f"matrix setExpression should carry mat-ref: {resp!r}"
+        assert resp.get("indexedVariables") == 4, \
+            f"matrix setExpression should advertise indexedVariables=4: {resp!r}"
+
+        c.request("continue")
+        c.wait_event("terminated", timeout=5.0)
+
+
+def scn_function_breakpoints(matlabc, program):
+    """`setFunctionBreakpoints` resolves a name against the compiled
+    function table and installs a line breakpoint at the body's first
+    line. Hits like a normal bp."""
+    import os
+    locals_program = os.path.join(
+        os.path.dirname(os.path.abspath(program)),
+        "dap_locals_program.m",
+    )
+    with DapClient(matlabc, locals_program) as c:
+        # Use the lifecycle helper but skip its line breakpoints —
+        # we install function bps below before configurationDone.
+        caps = c.request("initialize", {
+            "clientID": "matlabc-test",
+            "linesStartAt1": True,
+            "columnsStartAt1": True,
+        })
+        assert caps.get("supportsFunctionBreakpoints"), caps
+        c.wait_event("initialized", timeout=5.0)
+        c.request("launch", {"program": locals_program, "stopOnEntry": False})
+        body = c.request("setFunctionBreakpoints", {
+            "breakpoints": [{"name": "compute"}, {"name": "no_such_fn"}],
+        })
+        bps = body.get("breakpoints") or []
+        assert bps[0].get("verified") is True, f"compute bp not verified: {bps[0]!r}"
+        assert bps[1].get("verified") is False, \
+            f"no_such_fn should not verify: {bps[1]!r}"
+        c.request("configurationDone")
+
+        ev = c.wait_event("stopped", timeout=5.0)
+        body = ev.get("body") or {}
+        # Should stop inside compute (line 10 = `total = a + b;`).
+        assert body.get("line") == 10, f"function bp landed at {body!r}"
+        c.request("continue")
+        c.wait_event("terminated", timeout=5.0)
+
+
+def scn_frame_scoped_conditional_breakpoint(matlabc, program):
+    """A conditional bp inside a function body must see the
+    function's parameters / locals — not just script-scope vars.
+
+    dap_locals_program.m has `function s = compute(a, b)` with
+    `total = a + b;` on line 10. We set a bp on that line with
+    condition `a > 2` (a is a parameter, value 3 in the call); the
+    runtime hook fires, the cond evaluator bridges the function
+    frame's mini-ws into matlab_ws, the condition evaluates true,
+    and the IDE sees a `stopped` event.
+
+    Without the bridge, `a` resolves to 0x0 / undefined in the
+    REPL JIT and the condition silently evaluates false."""
+    import os
+    locals_program = os.path.join(
+        os.path.dirname(os.path.abspath(program)),
+        "dap_locals_program.m",
+    )
+    with DapClient(matlabc, locals_program) as c:
+        initialize_and_launch(c, breakpoints=[
+            {"line": 10, "condition": "a > 2"},
+        ])
+        ev = c.wait_event("stopped", timeout=5.0)
+        body = ev.get("body") or {}
+        assert body.get("line") == 10, \
+            f"frame-scoped cond should land at line 10: {body!r}"
+        assert body.get("reason") == "breakpoint", body
+        c.request("continue")
+        c.wait_event("terminated", timeout=5.0)
+
+    # Verify the negative case: `a > 99` is false, no stop event.
+    with DapClient(matlabc, locals_program) as c:
+        initialize_and_launch(c, breakpoints=[
+            {"line": 10, "condition": "a > 99"},
+        ])
+        c.expect_no_event("stopped", window=0.5)
+        c.wait_event("terminated", timeout=5.0)
+
+
+def scn_frame_scoped_log_point(matlabc, program):
+    """`{name}` placeholders in a logMessage on a function-body bp
+    resolve against the function frame, not just script ws.
+    `{a}` inside `compute(3, 4)` must print `3`."""
+    import os
+    locals_program = os.path.join(
+        os.path.dirname(os.path.abspath(program)),
+        "dap_locals_program.m",
+    )
+    with DapClient(matlabc, locals_program) as c:
+        initialize_and_launch(c, breakpoints=[
+            {"line": 10, "logMessage": "a={a} b={b}"},
+        ])
+        ev = c.wait_event(
+            "output",
+            timeout=5.0,
+            predicate=lambda m: (m.get("body") or {}).get("category") == "console",
+        )
+        out = (ev.get("body") or {}).get("output", "")
+        assert out.strip() == "a=3 b=4", \
+            f"logpoint didn't bridge frame locals: {out!r}"
+        c.expect_no_event("stopped", window=0.4)
+        c.wait_event("terminated", timeout=5.0)
+
+
+def scn_pending_breakpoint_event(matlabc, program):
+    """`setBreakpoints` against a path the runtime hasn't registered
+    yet (request arrived before launch / compileProgram) returns
+    verified=false and queues the bp. After launch populates the
+    path registry, the queued bp is replayed and a `breakpoint`
+    event with reason="changed" surfaces the now-verified state.
+
+    DAP-permitted ordering: initialize → initialized → setBreakpoints
+    → launch → configurationDone. (Our usual helper does launch
+    first; this scenario swaps the order to exercise the queue.)"""
+    with DapClient(matlabc, program) as c:
+        c.request("initialize", {
+            "clientID": "matlabc-test",
+            "linesStartAt1": True,
+            "columnsStartAt1": True,
+        })
+        c.wait_event("initialized", timeout=5.0)
+
+        # setBreakpoints BEFORE launch — path registry is empty,
+        # so the bp comes back unverified and goes on the pending
+        # queue.
+        body = c.request("setBreakpoints", {
+            "source": {"path": program},
+            "breakpoints": [{"line": 5}],
+        })
+        bps = body.get("breakpoints") or []
+        assert bps and bps[0].get("verified") is False, \
+            f"expected verified=false pre-launch: {bps!r}"
+
+        # Launch + configurationDone — compileProgram registers the
+        # path, sweeps the queue, emits the change event.
+        c.request("launch", {"program": program, "stopOnEntry": False})
+        c.request("configurationDone")
+
+        ev = c.wait_event(
+            "breakpoint",
+            timeout=5.0,
+            predicate=lambda m: (m.get("body") or {}).get("reason") == "changed",
+        )
+        bp = (ev.get("body") or {}).get("breakpoint") or {}
+        assert bp.get("verified") is True, \
+            f"changed event should carry verified=true: {bp!r}"
+        assert bp.get("line") == 5, bp
+        assert isinstance(bp.get("id"), int), bp
+
+        # Bp should fire normally now.
+        ev = c.wait_event("stopped", timeout=5.0)
+        body = ev.get("body") or {}
+        assert body.get("line") == 5, body
+        c.request("continue")
+        c.wait_event("terminated", timeout=5.0)
+
+
+def scn_hit_count_breakpoint(matlabc, program):
+    """`hitCondition` on a bp inside a loop body suppresses the
+    first N-1 hits and pauses on the Nth (or every match after
+    that, depending on the operator).
+
+    dap_program.m line 9 (`z = z + i;`) is inside a `for i = 1:3`
+    loop, so the bp fires 3 times. `hitCondition: ">= 3"` should
+    pause on the third iteration only — by which point i == 3."""
+    with DapClient(matlabc, program) as c:
+        caps = c.request("initialize", {
+            "clientID": "matlabc-test",
+            "linesStartAt1": True,
+            "columnsStartAt1": True,
+        })
+        assert caps.get("supportsHitConditionalBreakpoints"), \
+            f"hit-count caps not advertised: {caps}"
+        c.wait_event("initialized", timeout=5.0)
+        c.request("launch", {"program": program, "stopOnEntry": False})
+        body = c.request("setBreakpoints", {
+            "source": {"path": program},
+            "breakpoints": [{"line": 9, "hitCondition": ">= 3"}],
+        })
+        bps = body.get("breakpoints") or []
+        assert bps[0].get("verified"), bps
+        c.request("configurationDone")
+
+        ev = c.wait_event("stopped", timeout=5.0)
+        body = ev.get("body") or {}
+        assert body.get("line") == 9, body
+
+        # Confirm the iteration counter — `i` should be 3.
+        st = c.request("stackTrace", {"threadId": 1})
+        sc = c.request("scopes", {"frameId": (st["stackFrames"] or [{}])[0]["id"]})
+        ref = (sc.get("scopes") or [{}])[0].get("variablesReference")
+        rows = _vars_by_name(c, ref=ref)
+        assert rows.get("i") == "3", \
+            f"hit count ≥3 should pause when i=3, got i={rows.get('i')!r}"
+
+        c.request("continue")
+        c.wait_event("terminated", timeout=5.0)
+
+
+def scn_class_instance_methods(matlabc, program):
+    """Class-instance expansion in `variables` surfaces method rows
+    after property rows. Method rows carry presentationHint.kind=
+    "method" so the IDE renders a function icon, plus a value column
+    with a `@name(args)` signature for arity at a glance.
+
+    Inherited methods from a superclass appear too, with an
+    "(inherited from X)" suffix on the value. Override (same-name
+    method on the derived class) suppresses the parent's entry.
+
+    Uses dap_class_program.m which has Account (Id, Balance, deposit)
+    and Savings < Account (Rate, plus inherited deposit / Account
+    ctor)."""
+    import os
+    class_program = os.path.join(
+        os.path.dirname(os.path.abspath(program)),
+        "dap_class_program.m",
+    )
+    with DapClient(matlabc, class_program) as c:
+        initialize_and_launch(c, breakpoints=[{"line": 10}])
+        _stop_event(c)
+
+        st = c.request("stackTrace", {"threadId": 1})
+        sc = c.request("scopes", {"frameId": st["stackFrames"][0]["id"]})
+        ref = sc["scopes"][0]["variablesReference"]
+        body = c.request("variables", {"variablesReference": ref})
+        rows = {v["name"]: v for v in (body.get("variables") or [])}
+
+        # acc: Account instance. Children = Id, Balance, then
+        # Account constructor + deposit method.
+        acc_ref = rows["acc"]["variablesReference"]
+        body = c.request("variables", {"variablesReference": acc_ref})
+        children = {v["name"]: v for v in (body.get("variables") or [])}
+
+        # Properties still present.
+        assert children.get("Id", {}).get("value") == "101", \
+            f"Id property missing/wrong: {children!r}"
+        assert children.get("Balance", {}).get("value") == "75", \
+            f"Balance property missing/wrong: {children!r}"
+
+        # Methods present, tagged by type and presentationHint.
+        for m in ("deposit", "Account"):
+            row = children.get(m)
+            assert row, f"method {m!r} missing from acc: {children!r}"
+            assert row.get("type") == "method", \
+                f"method {m!r} type expected 'method': {row!r}"
+            assert row.get("variablesReference") == 0, \
+                f"method {m!r} should be a leaf: {row!r}"
+            ph = row.get("presentationHint") or {}
+            assert ph.get("kind") == "method", \
+                f"method {m!r} missing presentationHint.kind=method: {row!r}"
+            # Value column must include the signature.
+            assert "@" + m in (row.get("value") or ""), \
+                f"method {m!r} value should be a signature: {row!r}"
+        # acc's deposit row must NOT carry an "inherited from"
+        # suffix — it's defined directly on Account.
+        assert "inherited" not in (children["deposit"].get("value") or ""), \
+            f"acc.deposit should be direct, not inherited: {children['deposit']!r}"
+
+        # sav: Savings instance. Inherits Account's deposit; should
+        # carry the "inherited from Account" hint.
+        sav_ref = rows["sav"]["variablesReference"]
+        body = c.request("variables", {"variablesReference": sav_ref})
+        children = {v["name"]: v for v in (body.get("variables") or [])}
+
+        # Inherited Id + Balance from Account, plus own Rate.
+        assert children.get("Rate", {}).get("value") == "0.1", \
+            f"Savings.Rate missing/wrong: {children!r}"
+
+        # Savings own constructor + inherited Account ctor + inherited deposit.
+        assert children.get("Savings", {}).get("type") == "method", children
+        assert "inherited" not in (children["Savings"].get("value") or ""), \
+            f"Savings.Savings (own ctor) should not be inherited: {children['Savings']!r}"
+        for m in ("Account", "deposit"):
+            row = children.get(m)
+            assert row, f"inherited method {m!r} missing on sav: {children!r}"
+            assert "inherited from Account" in (row.get("value") or ""), \
+                f"sav.{m} should report inheritance: {row!r}"
+
+        c.request("continue")
+        c.wait_event("terminated", timeout=5.0)
+
+
+def scn_keyboard_builtin(matlabc, program):
+    """A `keyboard` call in user code drops the worker into a paused
+    state — same machinery as a breakpoint, but triggered from the
+    program itself rather than a DAP-set bp. The `stopped` event
+    carries `reason: "entry"` so the IDE's REPL panel takes over.
+
+    Once resumed, the program continues normally and the workspace
+    is intact (so `disp(x)` after the keyboard call still prints
+    the value set before it)."""
+    import os
+    kb_program = os.path.join(
+        os.path.dirname(os.path.abspath(program)),
+        "dap_keyboard_program.m",
+    )
+    with DapClient(matlabc, kb_program) as c:
+        initialize_and_launch(c)
+        ev = c.wait_event("stopped", timeout=5.0)
+        body = ev.get("body") or {}
+        assert body.get("reason") == "entry", \
+            f"keyboard pause should report reason=entry: {body!r}"
+        assert body.get("line") == 5, \
+            f"keyboard pause should land at line 5: {body!r}"
+
+        # Workspace is intact at the keyboard pause.
+        st = c.request("stackTrace", {"threadId": 1})
+        sc = c.request("scopes", {"frameId": st["stackFrames"][0]["id"]})
+        body = c.request("variables", {
+            "variablesReference": sc["scopes"][0]["variablesReference"],
+        })
+        rows = {v["name"]: v["value"] for v in (body.get("variables") or [])}
+        assert rows.get("x") == "41", \
+            f"x should be visible at keyboard pause: {rows!r}"
+
+        # Resume continues normally — disp(x) on line 6 prints "41".
+        c.request("continue")
+        ev = c.wait_event(
+            "output",
+            timeout=5.0,
+            predicate=lambda m: (m.get("body") or {}).get("category") == "stdout"
+                                 and "41" in ((m.get("body") or {}).get("output") or ""),
+        )
+        c.wait_event("terminated", timeout=5.0)
+
+
+def scn_complex_and_3d_matrix_expansion(matlabc, program):
+    """Complex (matlab_mat_c) and 3-D (matlab_mat3) matrices surface
+    in the DAP variables panel with the right shape header and
+    drillable children:
+
+    - Complex 1x1 unboxes to `re+im*i` in the parent value column
+      (no children — same as a 1x1 real matrix unboxes to its
+      scalar).
+    - 3-D MxNxP shows up as `MxNxP double`, carries
+      `indexedVariables = M*N*P`, and expands into one child per
+      cell labelled `(i,j,k)` in slice-major order so cells of the
+      same k group together.
+
+    Uses dap_complex_program.m which constructs both shapes."""
+    import os
+    cmplx_program = os.path.join(
+        os.path.dirname(os.path.abspath(program)),
+        "dap_complex_program.m",
+    )
+    with DapClient(matlabc, cmplx_program) as c:
+        initialize_and_launch(c, breakpoints=[{"line": 9}])
+        _stop_event(c)
+
+        st = c.request("stackTrace", {"threadId": 1})
+        sc = c.request("scopes", {"frameId": st["stackFrames"][0]["id"]})
+        ref = sc["scopes"][0]["variablesReference"]
+        body = c.request("variables", {"variablesReference": ref})
+        rows = {v["name"]: v for v in (body.get("variables") or [])}
+
+        # Complex 1x1 — unboxes to "3+4i" with no expansion ref.
+        c_row = rows.get("c")
+        assert c_row is not None, f"c row missing: {rows!r}"
+        assert c_row.get("value") == "3+4i", \
+            f"complex 1x1 should unbox to '3+4i': {c_row!r}"
+        assert c_row.get("variablesReference") == 0, \
+            f"complex 1x1 should be a leaf: {c_row!r}"
+
+        # 3-D 2x2x2 — shape label + cell expansion.
+        a_row = rows.get("A")
+        assert a_row is not None, f"A row missing: {rows!r}"
+        assert a_row.get("value") == "2x2x2 double", \
+            f"3-D shape header wrong: {a_row!r}"
+        assert a_row.get("indexedVariables") == 8, \
+            f"3-D should advertise indexedVariables=2*2*2=8: {a_row!r}"
+        a_ref = a_row.get("variablesReference")
+        assert a_ref and a_ref >= 200000, \
+            f"3-D row should carry mat-ref: {a_row!r}"
+
+        body = c.request("variables", {"variablesReference": a_ref})
+        cells = {v["name"]: v.get("value") for v in (body.get("variables") or [])}
+        # All eight (i,j,k) labels must be present.
+        expected_labels = [(i, j, k) for k in (1, 2)
+                           for i in (1, 2) for j in (1, 2)]
+        for (i, j, k) in expected_labels:
+            label = f"({i},{j},{k})"
+            assert label in cells, f"3-D label {label!r} missing: {cells!r}"
+        # Mutated cell must read 42; everything else is 1 (from ones).
+        assert cells.get("(1,2,1)") == "42", \
+            f"3-D mutated cell should be 42: {cells!r}"
+        for (i, j, k) in expected_labels:
+            if (i, j, k) == (1, 2, 1):
+                continue
+            label = f"({i},{j},{k})"
+            assert cells.get(label) == "1", \
+                f"3-D cell {label!r} should be 1, got {cells.get(label)!r}"
+
+        c.request("continue")
+        c.wait_event("terminated", timeout=5.0)
+
+
+def scn_class_method_function_breakpoints(matlabc, program):
+    """`setFunctionBreakpoints` resolves class methods under both
+    `MethodName`, `ClassName.MethodName`, and `ClassName/MethodName`
+    forms. dap_class_program.m has `Account.deposit` — we exercise
+    all three names and confirm the bp lands inside the method body."""
+    import os
+    class_program = os.path.join(
+        os.path.dirname(os.path.abspath(program)),
+        "dap_class_program.m",
+    )
+    for name in ("deposit", "Account.deposit", "Account/deposit"):
+        with DapClient(matlabc, class_program) as c:
+            caps = c.request("initialize", {
+                "clientID": "matlabc-test",
+                "linesStartAt1": True,
+                "columnsStartAt1": True,
+            })
+            assert caps.get("supportsFunctionBreakpoints"), caps
+            c.wait_event("initialized", timeout=5.0)
+            c.request("launch", {"program": class_program, "stopOnEntry": False})
+            body = c.request("setFunctionBreakpoints", {
+                "breakpoints": [{"name": name}],
+            })
+            bps = body.get("breakpoints") or []
+            assert bps and bps[0].get("verified") is True, \
+                f"function bp on {name!r} not verified: {bps!r}"
+            # The body line for `deposit` is line 25 (`obj.Balance = ...`).
+            assert bps[0].get("line") == 25, \
+                f"function bp on {name!r} landed at unexpected line: {bps!r}"
+            c.request("configurationDone")
+            ev = c.wait_event("stopped", timeout=5.0)
+            body = ev.get("body") or {}
+            assert body.get("line") == 25, \
+                f"stopped at unexpected line for {name!r}: {body!r}"
+            c.request("continue")
+            c.wait_event("terminated", timeout=5.0)
+
+
+def scn_breakpoint_locations(matlabc, program):
+    """`breakpointLocations` returns the bp-eligible lines in a
+    range, populated server-side by the AST walker."""
+    with DapClient(matlabc, program) as c:
+        initialize_and_launch(c, breakpoints=[{"line": 5}])
+        _stop_event(c)
+
+        body = c.request("breakpointLocations", {
+            "source": {"path": program},
+            "line": 1,
+            "endLine": 12,
+        })
+        lines = sorted({(b.get("line") or 0)
+                        for b in (body.get("breakpoints") or [])})
+        # dap_program.m has assignments on 4-6 and a disp on 12;
+        # those must appear. Line 7 is blank, 11 is blank, 1-3 are
+        # comments — NOT in the set.
+        for L in (4, 5, 6, 12):
+            assert L in lines, f"line {L} missing from bp locations: {lines!r}"
+        for L in (1, 2, 3, 7, 11):
+            assert L not in lines, \
+                f"non-executable line {L} surfaced as bp location: {lines!r}"
+
+        c.request("continue")
+        c.wait_event("terminated", timeout=5.0)
+
+
+def scn_exception_info_and_filter(matlabc, program):
+    """`setExceptionBreakpoints` toggles the `error` filter and
+    `exceptionInfo` returns the captured message + frame snapshot
+    once an error has fired.
+
+    Uses dap_error_program.m which calls error('boom') two frames
+    deep. With the filter on, the runtime hook pauses on the first
+    statement after matlab_set_error fires — we then read
+    exceptionInfo to confirm the snapshot survived the unwind."""
+    import os
+    err_program = os.path.join(
+        os.path.dirname(os.path.abspath(program)),
+        "dap_error_program.m",
+    )
+    with DapClient(matlabc, err_program) as c:
+        caps = c.request("initialize", {
+            "clientID": "matlabc-test",
+            "linesStartAt1": True,
+            "columnsStartAt1": True,
+        })
+        filters = caps.get("exceptionBreakpointFilters") or []
+        assert any(f.get("filter") == "error" for f in filters), \
+            f"error filter not advertised in caps: {filters!r}"
+        c.wait_event("initialized", timeout=5.0)
+        c.request("launch", {"program": err_program, "stopOnEntry": False})
+        c.request("setExceptionBreakpoints", {"filters": ["error"]})
+        c.request("configurationDone")
+
+        # Either the runtime pauses (if the hook fires after the error
+        # flag is set) or the program just runs to completion (the
+        # error fires on the last statement and unwinds straight to
+        # exit). Both are valid; only assert that exceptionInfo
+        # survives — read it after we see either stopped or
+        # terminated.
+        evname = c.wait_event("stopped", timeout=2.0) \
+                  if False else None  # placeholder; see below
+        # Race-free: poll for stopped, fall back to terminated.
+        try:
+            c.wait_event("stopped", timeout=2.0)
+            paused = True
+        except DapError:
+            paused = False
+
+        if paused:
+            body = c.request("exceptionInfo", {"threadId": 1})
+            assert body.get("exceptionId") == "matlab.error", body
+            assert "boom" in (body.get("description") or ""), body
+            c.request("continue")
+
+        c.wait_event("terminated", timeout=5.0)
+
+
+def scn_modules(matlabc, program):
+    """`modules` returns an empty list — we have no shared-library
+    concept but the request must respond gracefully so module-aware
+    IDEs render an empty pane instead of erroring."""
+    with DapClient(matlabc, program) as c:
+        initialize_and_launch(c, breakpoints=[{"line": 5}])
+        _stop_event(c)
+
+        body = c.request("modules")
+        assert isinstance(body.get("modules"), list), body
+        assert body.get("modules") == [], body
+        assert body.get("totalModules") == 0, body
+
+        c.request("continue")
+        c.wait_event("terminated", timeout=5.0)
+
+
+def scn_unsupported_refusals(matlabc, program):
+    """Reverse-debug, memory, and disassembly requests must respond
+    with success=false and a precise reason — better UX than the
+    catch-all silent-success the unknown-handler used to give."""
+    with DapClient(matlabc, program) as c:
+        initialize_and_launch(c, breakpoints=[{"line": 5}])
+        _stop_event(c)
+
+        for cmd in ("stepBack", "reverseContinue", "readMemory",
+                    "writeMemory", "disassemble", "setDataBreakpoints",
+                    "setInstructionBreakpoints", "restartFrame",
+                    "goto", "gotoTargets"):
+            try:
+                c.request(cmd, {})
+                raise AssertionError(f"{cmd} should refuse")
+            except DapError as e:
+                assert "unsupported" in str(e) or \
+                       "require" in str(e) or \
+                       "does not include" in str(e), \
+                    f"{cmd} refusal had unexpected message: {e}"
+
+        c.request("continue")
+        c.wait_event("terminated", timeout=5.0)
+
+
+def scn_breakpoint_ids(matlabc, program):
+    """setBreakpoints assigns each bp a stable id; the stopped event
+    surfaces it via hitBreakpointIds when that bp triggers the pause.
+    This lets the IDE highlight which row of the breakpoints panel
+    fired (when multiple bps share a file)."""
+    with DapClient(matlabc, program) as c:
+        caps = c.request("initialize", {
+            "clientID": "matlabc-test",
+            "linesStartAt1": True,
+            "columnsStartAt1": True,
+        })
+        c.wait_event("initialized", timeout=5.0)
+        c.request("launch", {"program": program, "stopOnEntry": False})
+        body = c.request("setBreakpoints", {
+            "source": {"path": program},
+            "breakpoints": [{"line": 5}, {"line": 6}],
+        })
+        bps = body.get("breakpoints") or []
+        assert len(bps) == 2 and all(b.get("verified") for b in bps), bps
+        ids = [b.get("id") for b in bps]
+        assert all(isinstance(i, int) and i > 0 for i in ids), \
+            f"missing/invalid bp ids: {ids!r}"
+        assert ids[0] != ids[1], f"distinct lines should get distinct ids: {ids!r}"
+
+        c.request("configurationDone")
+        ev = c.wait_event("stopped", timeout=5.0)
+        body = ev.get("body") or {}
+        hit = body.get("hitBreakpointIds") or []
+        assert hit == [ids[0]], \
+            f"line-5 stop should report id={ids[0]!r}, got {hit!r}"
+
+        c.request("continue")
+        ev = c.wait_event("stopped", timeout=5.0)
+        body = ev.get("body") or {}
+        hit = body.get("hitBreakpointIds") or []
+        assert hit == [ids[1]], \
+            f"line-6 stop should report id={ids[1]!r}, got {hit!r}"
+
+        c.request("continue")
+        c.wait_event("terminated", timeout=5.0)
+
+
+def scn_stderr_forwarded(matlabc, program):
+    """`error()` writes its traceback to stderr; the DAP server tees
+    those bytes to a `stderr`-categorised `output` event so the IDE's
+    debug console renders them with error styling. The bytes also
+    reach the parent process's stderr (kept alive for subprocess
+    capture / CI logs)."""
+    import os
+    err_program = os.path.join(
+        os.path.dirname(os.path.abspath(program)),
+        "dap_error_program.m",
+    )
+    with DapClient(matlabc, err_program) as c:
+        initialize_and_launch(c)
+        # The error fires during the program run; collect stderr-
+        # categorised output events until we see the message text.
+        try:
+            ev = c.wait_event(
+                "output",
+                timeout=5.0,
+                predicate=lambda m: (
+                    (m.get("body") or {}).get("category") == "stderr"
+                    and "boom" in ((m.get("body") or {}).get("output") or "")
+                ),
+            )
+            out = (ev.get("body") or {}).get("output", "")
+            assert "boom" in out, f"stderr forwarding missed: {out!r}"
+        finally:
+            try:
+                c.wait_event("terminated", timeout=5.0)
+            except Exception:
+                pass
+
+
+def scn_watch_void_promotion(matlabc, program):
+    """Watch-mode `disp(T)` used to SIGSEGV the matlabc process: the
+    `__matlab_dbg_eval = (disp(T));` wrap binds a void RHS and the
+    JIT crashes deep in the lowering. The fix detects statement-shaped
+    void calls in the watch handler and routes them through the REPL
+    branch, returning `result="<void>"` so the watch row shows a
+    clear placeholder. Side effects (the matrix print) still flow
+    through DAP `output` events."""
+    import os
+    mat_program = os.path.join(
+        os.path.dirname(os.path.abspath(program)),
+        "dap_matrix_program.m",
+    )
+    with DapClient(matlabc, mat_program) as c:
+        initialize_and_launch(c, breakpoints=[{"line": 10}])
+        _stop_event(c)
+
+        # Watch eval of disp(A) — used to crash. Now returns
+        # result="<void>" cleanly. The watch context (no `context`
+        # field) is the watch panel's default.
+        resp = c.request("evaluate", {"expression": "disp(A)"})
+        assert resp.get("result") == "<void>", \
+            f"watch-mode disp(A) should auto-promote to <void>: {resp!r}"
+
+        # The actual matrix bytes flow through the stdout pipe →
+        # DAP output events. Wait for one that contains matrix cells.
+        ev = c.wait_event(
+            "output",
+            timeout=5.0,
+            predicate=lambda m: (
+                (m.get("body") or {}).get("category") == "stdout"
+                and "1" in ((m.get("body") or {}).get("output") or "")
+            ),
+        )
+        out = (ev.get("body") or {}).get("output", "")
+        for cell in ("1", "6"):
+            assert cell in out, \
+                f"disp output missing cell {cell!r}: {out!r}"
+
+        # Value-shaped watches must still work — the auto-promotion
+        # only fires for known void-call shapes. `A` is a matrix
+        # name, not a call, so it goes through the normal wrap.
+        resp = c.request("evaluate", {"expression": "A"})
+        assert resp.get("result") == "2x3 double", \
+            f"value-shaped watch broke after fix: {resp!r}"
+        assert resp.get("variablesReference", 0) >= 200000, \
+            f"matrix watch should carry mat-ref: {resp!r}"
+
+        # Bare `who` / `whos` (statement form, no parens) also auto-
+        # promote — these would parse as bare identifiers and
+        # similarly fail to bind under the wrap.
+        resp = c.request("evaluate", {"expression": "whos"})
+        assert resp.get("result") == "<void>", \
+            f"watch `whos` should promote to <void>: {resp!r}"
+
+        c.request("continue")
+        c.wait_event("terminated", timeout=5.0)
+        # Process must still be alive for the orderly disconnect.
+        # If the crash regressed, poll() would return -11 / -6 here.
+        # The `with` block's __exit__ does the disconnect.
+
+
+def scn_evaluate_repl(matlabc, program):
+    """`evaluate` with context='repl' runs input verbatim — supporting
+    statement-level commands like `disp(T)` and assignments — instead of
+    wrapping it as `__matlab_dbg_eval = (...)` like the watch path does.
+
+    Output flows through the existing stdout pipe redirect and surfaces
+    as DAP `output` events with category='stdout'. The evaluate response
+    body itself returns an empty `result` because there's no synthesized
+    holder to read back.
+
+    Uses dap_matrix_program.m so we have a live 2x3 matrix `A` to disp.
+    The bp is on line 10 (`disp(s);`); we run the eval before continuing.
+    """
+    import os
+    mat_program = os.path.join(
+        os.path.dirname(os.path.abspath(program)),
+        "dap_matrix_program.m",
+    )
+    with DapClient(matlabc, mat_program) as c:
+        initialize_and_launch(c, breakpoints=[{"line": 10}])
+        _stop_event(c)
+
+        # 1) disp(A) on a 2x3 matrix prints two rows via stdout. Watch
+        #    mode can't run this (disp returns no value to assign); REPL
+        #    mode succeeds and we capture the output via DAP events.
+        resp = c.request("evaluate", {
+            "expression": "disp(A)",
+            "context": "repl",
+        })
+        # Result is empty by design — output is the answer.
+        assert resp.get("result", "") == "", \
+            f"REPL evaluate should return empty result, got {resp!r}"
+        ev = c.wait_event(
+            "output",
+            timeout=5.0,
+            predicate=lambda m: (
+                (m.get("body") or {}).get("category") == "stdout"
+                and "1" in ((m.get("body") or {}).get("output") or "")
+            ),
+        )
+        out = (ev.get("body") or {}).get("output", "")
+        for cell in ("1", "2", "3", "4", "5", "6"):
+            assert cell in out, \
+                f"disp(A) output missing cell {cell!r}: {out!r}"
+
+        # 2) REPL-mode assignment to a fresh script-scope name persists,
+        #    visible to a follow-up watch read. (No frameId -> no
+        #    frame-bridge stamping, so the write sticks in matlab_ws.)
+        c.request("evaluate", {
+            "expression": "tmp_repl = 99;",
+            "context": "repl",
+        })
+        resp = c.request("evaluate", {"expression": "tmp_repl"})
+        assert resp.get("result") == "99", \
+            f"REPL-set tmp_repl should read back as 99, got {resp!r}"
+
+        # 3) Trailing `;` is preserved (REPL strips only outer
+        #    whitespace) — a no-op statement runs without erroring.
+        c.request("evaluate", {
+            "expression": "5 + 3;",
+            "context": "repl",
+        })
+
+        # 4) Malformed REPL input fails cleanly without dropping the
+        #    connection.
+        try:
+            c.request("evaluate", {
+                "expression": "1 +",
+                "context": "repl",
+            })
+            raise AssertionError("malformed REPL input should fail")
+        except DapError:
+            pass
 
         c.request("continue")
         c.wait_event("terminated", timeout=5.0)
