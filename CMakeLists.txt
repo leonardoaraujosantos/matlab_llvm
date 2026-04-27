@@ -113,6 +113,8 @@ if(MATLAB_LLVM_WITH_MLIR)
     lib/MLIR/Passes/HWBitWidthInfer.cpp
     lib/MLIR/Passes/EmitSystemVerilog.cpp
     lib/MLIR/Passes/RefineIfConds.cpp
+    lib/MLIR/Passes/RefineFuncSigs.cpp
+    lib/MLIR/Passes/RefineSlotTypes.cpp
   )
   target_link_libraries(MatlabMLIR
     PUBLIC  MatlabSema MatlabAST MatlabBasic

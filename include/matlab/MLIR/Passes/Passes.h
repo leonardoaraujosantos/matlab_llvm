@@ -246,6 +246,35 @@ struct HWForLoopInfo {
 /// require that Info.Init / End / Step are `arith.constant`.
 bool matchHWForLoop(mlir::Operation *WhileOp, HWForLoopInfo &Info);
 
+/// Phase 4.5.1 — slot-type inference for `matlab.alloc` ops still
+/// typed `none` after the user-call iteration loop runs. Walks
+/// every `matlab.alloc` whose result is `none`, looks at all
+/// `matlab.store` ops whose addr operand is the alloc's result;
+/// if every stored value's type agrees on the same scalar
+/// primitive (integer or float), retypes the alloc's result and
+/// every `matlab.load` reading from it. Idempotent.
+///
+/// LowerUserCalls' propagateScalarTypes does the same work, but
+/// only for functions still reached via a `matlab.call` site —
+/// once those collapse to `func.call`, the slot-retype logic
+/// stops running. This pass picks up where that left off.
+bool runRefineSlotTypes(mlir::ModuleOp M);
+
+/// Phase 4.5.1 helper. Walks every `func.func` and patches its
+/// declared result types from the body's `func.return` operand
+/// types when the declared type was still `none`. Also refreshes
+/// any `func.call` site whose result type now disagrees with the
+/// callee's signature (creates a new typed `func.call` that
+/// replaces the stale one).
+///
+/// Used both inline after the LowerScalarsToArith / LowerUserCalls
+/// iteration loop (so the early verify check doesn't fail on
+/// `make_handle("false") → arith.constant 1 : i1` rewrites that
+/// haven't propagated to the function signature yet) and from the
+/// SV pipeline as a final consistency pass before HWLegalize.
+/// Returns true on success.
+bool runRefineFuncSigs(mlir::ModuleOp M);
+
 /// Phase 4.5.2 fixup. The Lowering pass places an
 /// `unrealized_conversion_cast` on `scf.if` conditions whose source
 /// type was `none` at lowering time (e.g. a load of a slot whose

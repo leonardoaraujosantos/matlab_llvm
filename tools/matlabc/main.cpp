@@ -2862,6 +2862,11 @@ int main(int Argc, char **Argv) {
         mlirgen::runLowerFixedPoint(M);
         mlirgen::runLowerScalarsToArith(M);
         mlirgen::runSlotPromotion(M);
+        // Patch func.func signatures from refined return-op types so
+        // the verifier doesn't trip on `make_handle("false") →
+        // arith.constant : i1` rewrites whose function still
+        // declares `-> none`. Idempotent.
+        mlirgen::runRefineFuncSigs(M);
         if (mlir::failed(mlir::verify(M))) {
           std::cerr << "error: MLIR verification failed after passes\n";
           return 1;
@@ -3000,6 +3005,13 @@ int main(int Argc, char **Argv) {
         // clones see their own call-site arity rather than the
         // function's declared arity.
         mlirgen::runLowerNarginNargout(M);
+        // Phase 4.5.1: refine `none`-typed `matlab.alloc` slots whose
+        // every store agrees on a concrete scalar type. Must run
+        // BEFORE LowerScalarSlots so the just-retyped slots get
+        // promoted to llvm.alloca on the same pass.
+        mlirgen::runRefineSlotTypes(M);
+        // Patch func.func signatures from the refined return types.
+        mlirgen::runRefineFuncSigs(M);
         // After user-call refinement, any surviving matlab.alloc whose
         // result type is now a scalar primitive can be promoted to
         // llvm.alloca. This catches function-body locals that weren't
@@ -3044,61 +3056,6 @@ int main(int Argc, char **Argv) {
           std::cout << Src;
         } else if (Opts.Mode == Options::Mode::EmitSystemVerilog ||
                    Opts.Mode == Options::Mode::CheckSynthesizable) {
-          // Patch every user `func.func`'s declared result types from
-          // its body's `func.return` operand types. The user-call
-          // refinement pass updates result types only when call-site
-          // arg types prove "Compatible"; for functions whose body
-          // lowers slowly (e.g. matlab.call_builtin @bitand chains
-          // that only collapse to arith.* after the iteration runs
-          // multiple rounds), the result type can lag behind the
-          // typed return value. This explicit pass picks up that
-          // lag so the SV emitter sees a consistent signature.
-          M.walk([&](mlir::func::FuncOp Fn) {
-            if (Fn.empty()) return;
-            llvm::SmallVector<mlir::Type, 4> NewResults(
-                Fn.getFunctionType().getResults().begin(),
-                Fn.getFunctionType().getResults().end());
-            bool Changed = false;
-            Fn.walk([&](mlir::func::ReturnOp Ret) {
-              if (Ret.getNumOperands() != NewResults.size()) return;
-              for (unsigned i = 0; i < Ret.getNumOperands(); ++i) {
-                auto Old = NewResults[i];
-                auto New = Ret.getOperand(i).getType();
-                if (mlir::isa<mlir::NoneType>(Old) && Old != New) {
-                  NewResults[i] = New;
-                  Changed = true;
-                }
-              }
-            });
-            if (Changed) {
-              auto Ty = mlir::FunctionType::get(
-                  Fn.getContext(),
-                  Fn.getFunctionType().getInputs(), NewResults);
-              Fn.setFunctionType(Ty);
-            }
-          });
-          // Stale func.call ops need their result types patched too.
-          M.walk([&](mlir::func::CallOp Call) {
-            auto Tgt = M.lookupSymbol<mlir::func::FuncOp>(
-                Call.getCallee());
-            if (!Tgt) return;
-            auto SigR = Tgt.getFunctionType().getResults();
-            if (Call.getNumResults() != SigR.size()) return;
-            bool Mismatch = false;
-            for (unsigned i = 0; i < SigR.size(); ++i)
-              if (Call.getResult(i).getType() != SigR[i]) {
-                Mismatch = true; break;
-              }
-            if (!Mismatch) return;
-            mlir::OpBuilder CB(Call);
-            auto Nc = mlir::func::CallOp::create(
-                CB, Call.getLoc(), SigR, Call.getCallee(),
-                Call.getOperands());
-            for (unsigned i = 0; i < SigR.size(); ++i)
-              Call.getResult(i).replaceAllUsesWith(Nc.getResult(i));
-            Call.erase();
-          });
-
           // Phase 4.5.2: replace any `unrealized_conversion_cast`
           // placeholder on scf.if conditions (inserted at MIR-to-MLIR
           // lowering when the cond was `none`-typed) with a real
