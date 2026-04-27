@@ -643,6 +643,90 @@ to land, in the order they need to land. It mirrors the structure of
 [`docs/emit_systemc.md`](emit_systemc.md), which has shipped through a
 similar phased build-out.
 
+### Status snapshot — where we are vs the original plan
+
+The original Phase 1 → 5 build-out is essentially **done**. Every
+phase has shipped at least a v1; many ship more than the original
+plan called for (the FSM v2 work, the comment / port-name /
+inlining work in 5.6 weren't in the initial outline). What remains
+is a small set of **deferred features** with explicit triggers,
+plus some upstream-pipeline lifts that block three of the eight
+`examples/hdl/` modules.
+
+| Phase | Status | What ships today |
+|---|---|---|
+| 1 — combinational MVP, scalars only | ✅ shipped | scalar arith, if/else, ports + always_comb, HWLegalize gate, HWBitWidthInfer, Verilator lint lane |
+| 2 — fixed-size vectors + bounded `for` | ✅ shipped | unrolled `for i = 1:N`, packed-array slot decls, GEP-based load/store |
+| 3 — registers + `persistent` | ✅ shipped | `HWStateInfer`, two-process `always_ff` + `always_comb`, async-low / sync-high / sync-low reset (`-sv-reset=...`), counter / register classification |
+| 4 v1 — FSM emission via Phase-3 cascade | ✅ shipped | persistent state + switch + case → `unique case` cascade, both Mealy and Moore styles lint clean |
+| 4 v2 — FSM polish | ✅ shipped | `typedef enum` state types, FSM-aware enum literals at compares + `_next` writes, ambiguity diagnostics (duplicate / empty case), encoding flag (`-sv-fsm-encoding=binary|one_hot|gray`), `% hdl:` pragma scanner with per-FSM `fsm_encoding(...)` override |
+| 4 RAM inference | 🟡 deferred | depends on persistent fi-array recognition; the SV emitter side is a small extension once the upstream pipeline lifts that |
+| 4.5.1 multi-store slot retyping | ✅ shipped | `RefineSlotTypes` pass — `[data_out, overflow] = ...` style functions emit cleanly |
+| 4.5.2 `if <fi>` truthy | ✅ shipped | `RefineIfConds` rewrites `unrealized_conversion_cast` + retyped slot loads to `cmpi ne, 0` |
+| 4.5.3 `true` / `false` literals | ✅ shipped | Resolver special-cases them; lower to `arith.constant 0/1 : i1` |
+| 4.5.4 static fi arrays | ✅ shipped | `LowerStaticFiArrays` rewrites `fi(zeros(1, N), ...)` to `llvm.alloca` + GEP + load/store |
+| 4.5.5 vector function arguments | 🟡 deferred | scalar-args + local-array workarounds shipped (`vector_proc3.m`, `vector_proc_local.m`); end-to-end vector args is a multi-week pipeline lift across Sema + MIR + user-call refinement + LLVM tensor lowering |
+| 5.1 fi Saturate semantics | ✅ shipped | `LowerFiSaturate` — explicit clamp circuit (cmpi + select), narrow-width peel optimization, `OverflowAction='Saturate'` is the default |
+| 5.2 v1 port pipelining | ✅ shipped | `% hdl: input_pipeline(N)` + `output_pipeline(N)`, dedicated always_ff shifts the chain, increases function output latency by N |
+| 5.2 v2 adaptive distributed pipelining | 🟡 deferred | trigger: a real DSP user asks for `-sv-target-freq=N`-driven retiming. v1 covers the common "stages between combinational stages" need |
+| 5.3 v1 large-loop unroll warning | ✅ shipped | trip count > 64 emits a warning suggesting `% hdl: loopspec('stream')`; unrolls anyway |
+| 5.3 v2 actual streaming | 🟡 deferred | trigger: a user hits the warning and needs the area win. v2 builds an iteration-counter FSM + shared body instance using the Phase-4 cascade machinery |
+| 5.4 constant-multiplier optimization | ✅ shipped | `ConstMulCSD` — ×0/×1/×-1/×2^k/×(2^k±1) rewrites; full Booth/CSD recoding deferred to v2 |
+| 5.5 hardware report | ✅ shipped | `-emit-hardware-report` walks the post-pipeline IR; per-func operator counts, register widths, FSM state counts, encoding |
+| 5.6.1 `% hdl: port(...)` pragma | ✅ shipped | function-only `.m` files emit SV without a separate driver |
+| 5.6.2a function-result name preservation | ✅ shipped | `[data_out, overflow] = f(...)` emits `output ... data_out, output ... overflow` instead of `y, y1` |
+| 5.6.2b leading-comment forwarding | ✅ shipped | side-channel `SourceManager` scan in the emitter; comment lines outside the function body's range are dropped |
+| 5.6.3 SSA-temp inlining + slot-output collapse | ✅ shipped | `vN_1` scratch signals gone; pure single-use ops inline at use site; same-named slot + output port share one signal |
+| 5.6.4 trailing same-line comment forwarding | ✅ shipped | `case 0 % Soma` and `y = a + b; % sum` now both forward as `// ...` lines |
+
+### Out-of-scope items still on the plan
+
+These are listed in Phase 4.5.6 as "what stays out of Phase 4.5"
+and remain genuinely deferred. Each has a specific corpus
+trigger; the work is concrete but not on today's critical path:
+
+- **Persistent fi-arrays** (`persistent delay_line; if isempty
+  delay_line = fi(zeros(1, N), ...);`) — needs
+  `matlab_persistent_set_ptr` / `_get_ptr` recognition, plus
+  RAM-or-register-bank inference. Blocker for
+  `fir_asic_pipelined.m`, `sequential_processor.m`.
+- **Loop-iv array indexing** (`for i = 1:N; acc += arr(i); end`)
+  — Phase 4.5.4 v1 only handles constant indices; loop-iv
+  indices need the iv to lower to integer (currently f64,
+  rejected by HWLegalize as datapath).
+- **Vector concat / slice** (`[x, delay(1:end-1)]`,
+  `delay(1:end-1)`) — runtime-call shapes today; static cases
+  could fold to GEP-based shuffles.
+- **Array literal init** (`h = [0.1, 0.2, 0.3, 0.4]`) — currently
+  goes through `matlab_mat_from_buf`. Static cases could fold
+  to per-element stores into an alloca, similar to 4.5.4.
+- **2-D fi matrices** + persistent fi matrices.
+- **N-dim arrays** beyond what 4.5.4 produces.
+- **`sin` / `cos` / `sqrt`** — CORDIC lowering.
+- **Float fallbacks** + policy flags.
+
+### Closure assessment
+
+For the SV-backend feature itself: **closed** for the scalar +
+fixed-vector + state + FSM corpus, with first-class fi support,
+optimization passes, and human-readable output. The five
+`examples/hdl/` modules that fit that corpus (`alu_16bit`,
+`mux_4to_1_16bit`, `counter_0_to_10`, `mealy_fsm`,
+`moore_fsm`) all emit clean lint-passing SV with source comments
++ source-level identifier names preserved.
+
+What's NOT covered is the **vector-DSP corpus** — the three
+remaining `examples/hdl/` modules that need persistent
+fi-arrays, vector-function-args, vector concat/slice, or
+loop-iv indices. Each is a multi-day-to-multi-week pipeline
+lift and is gated on real-user demand for the specific shape.
+
+### Original phase detail (kept for reference)
+
+The full per-phase plan below is preserved as the original
+target shape. Each "shipped" phase still describes the full
+v1+v2 contract including the pieces that landed.
+
 ### Why this differs from `-emit-systemc`
 
 `-emit-systemc` produces input for a downstream HLS tool, which owns
