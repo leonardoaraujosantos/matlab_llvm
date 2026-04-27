@@ -108,6 +108,68 @@ struct ConstLogicalToArith : public NameMatch {
 };
 
 //===----------------------------------------------------------------------===//
+// `int<N>` / `uint<N>` constant casts
+//===----------------------------------------------------------------------===//
+
+/// `uint8(0)`, `int16(5)`, etc. with a compile-time-constant operand
+/// today route through a runtime call (`matlab_uint8_s` / `matlab_
+/// int16_s` / ...) — unsynthesizable. When the operand is a literal
+/// `arith.constant` (float or integer), fold the cast to a typed
+/// `arith.constant` of the target integer width. The cast still goes
+/// through the runtime when its operand is a runtime value, so this
+/// only fires on the constant case.
+struct IntCastConstantFold : public NameMatch {
+  IntCastConstantFold(mlir::MLIRContext *Ctx)
+      : NameMatch("matlab.call_builtin", Ctx) {}
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *Op,
+                  mlir::PatternRewriter &R) const override {
+    auto C = Op->getAttrOfType<mlir::StringAttr>("callee");
+    if (!C) return mlir::failure();
+    llvm::StringRef N = C.getValue();
+    unsigned W;
+    bool Signed;
+    if      (N == "int8")   { W = 8;  Signed = true;  }
+    else if (N == "int16")  { W = 16; Signed = true;  }
+    else if (N == "int32")  { W = 32; Signed = true;  }
+    else if (N == "int64")  { W = 64; Signed = true;  }
+    else if (N == "uint8")  { W = 8;  Signed = false; }
+    else if (N == "uint16") { W = 16; Signed = false; }
+    else if (N == "uint32") { W = 32; Signed = false; }
+    else if (N == "uint64") { W = 64; Signed = false; }
+    else return mlir::failure();
+    if (Op->getNumOperands() != 1 || Op->getNumResults() != 1)
+      return mlir::failure();
+    auto CstOp = Op->getOperand(0).getDefiningOp<mlir::arith::ConstantOp>();
+    if (!CstOp) return mlir::failure();
+    int64_t Val;
+    if (auto IA = mlir::dyn_cast<mlir::IntegerAttr>(CstOp.getValue()))
+      Val = IA.getInt();
+    else if (auto FA = mlir::dyn_cast<mlir::FloatAttr>(CstOp.getValue()))
+      Val = (int64_t)FA.getValueAsDouble();
+    else
+      return mlir::failure();
+    // Mask + sign-correct to the target width so e.g. uint8(-1) → 255.
+    auto Ty = mlir::IntegerType::get(R.getContext(), W);
+    uint64_t Mask = (W >= 64) ? ~uint64_t(0) : ((uint64_t(1) << W) - 1);
+    int64_t Trunc;
+    if (Signed) {
+      // Sign-extend the masked value back to int64.
+      uint64_t U = ((uint64_t)Val) & Mask;
+      uint64_t SignBit = (W < 64) ? (uint64_t(1) << (W - 1)) : 0;
+      Trunc = (W < 64 && (U & SignBit))
+                 ? (int64_t)(U | (~uint64_t(0) << W))
+                 : (int64_t)U;
+    } else {
+      Trunc = (int64_t)((uint64_t)Val & Mask);
+    }
+    auto Attr = mlir::IntegerAttr::get(Ty, Trunc);
+    R.replaceOpWithNewOp<mlir::arith::ConstantOp>(Op, Ty, Attr);
+    return mlir::success();
+  }
+};
+
+//===----------------------------------------------------------------------===//
 // `true` / `false` literal handles
 //===----------------------------------------------------------------------===//
 
@@ -350,6 +412,7 @@ bool runLowerScalarsToArith(mlir::ModuleOp M) {
   Patterns.add<ConstIntToArith>("matlab.const_int", Ctx);
   Patterns.add<ConstLogicalToArith>("matlab.const_logical", Ctx);
   Patterns.add<TrueFalseHandleToArith>(Ctx);
+  Patterns.add<IntCastConstantFold>(Ctx);
   Patterns.add<NegToArith>("matlab.neg", Ctx);
   // Elementwise and "matmul-as-scalar-mul" both collapse on scalars.
   Patterns.add<BinArithToArith<mlir::arith::AddFOp, mlir::arith::AddIOp>>(
