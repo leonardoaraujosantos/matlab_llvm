@@ -1362,30 +1362,62 @@ results on overflow): not yet exposed. Today the explicit clamp
 runs unconditionally; a future `% hdl: fi_overflow('wrap')`
 pragma could opt back into the cheaper passthrough form.
 
-**Step 5.2** — `HWPipeline` (adaptive pipelining).
-`lib/MLIR/Passes/HWPipeline.cpp`. Driven by `-sv-target-freq=N`
-(MHz) plus a target-library timing model (initially: a constant
-"adder = 1 unit, multiplier = 4 units, mux = 0.5 units" cost
-table — refined later).
+**Step 5.2** — Pipelining. **Phase 5.2 v1 (port pipelining)
+shipped.**
 
-Walks each `always_comb`/datapath, computes longest combinational
-path, inserts pipeline registers (rewriting to `always_ff`) until
-every path fits the cycle budget. Updates module latency in a
-generated header comment so the user sees the cost.
+Two pragmas, scanned by Phase 4 v2.6's `% hdl:` infrastructure:
 
-This is **retiming-style pipelining**, equivalent to HDL Coder's
-"distributed pipelining" feature: register count is determined by the
-cycle target, register placement is determined by path balance.
+  - `% hdl: input_pipeline(N)` — adds N flop stages on every
+    input port. The body's references go through the last
+    stage (`<arg>_dN`) instead of the raw port; an always_ff
+    shifts the chain on every clock.
+  - `% hdl: output_pipeline(N)` — adds N flop stages between
+    the body's combinational output and the actual port. The
+    always_comb writes to `<port>_d0`; the always_ff shifts
+    `_d0 → _d1 → … → _dN`; an `assign port = <port>_dN`
+    drives the port.
 
-**Step 5.3** — Loop serialization.
-Extend `HWUnroll` to honor a streaming factor:
-- `coder.hdl.loopspec('stream', 1)` or `-sv-streaming-factor=1` →
-  one shared body, iteration counter, output mux
-- factor `N` (= trip count) → full unroll (same as Phase 2 default)
-- intermediate factors → partial unroll
+Either pragma adds `clk` + `rst_n` to the module's port list
+(with the chosen reset polarity / synchronicity from
+`-sv-reset=...`). Function output latency increases by the
+sum of input + output pipeline depths. Mirrors HDL Coder's
+"Input/Output Pipelining = N" project option.
 
-Serialized bodies become small FSMs (one state per pipeline stage of
-the body), reusing the `hw.fsm` machinery from Phase 4.
+Adaptive distributed pipelining (cell-cost-driven register
+insertion across combinational depth, driven by
+`-sv-target-freq=N`) is a v2 follow-up. The retiming-pass
+shape is sketched out in the original Phase 5.2 design but
+not yet implemented — port pipelining covers the common
+"add N stages between combinational stages" need that real
+DSP designs hit first.
+
+**Step 5.3** — Loop serialization. **Phase 5.3 v1 (warning
+only) shipped.**
+
+For-loops with trip count > 64 (configurable threshold) emit
+an informational warning suggesting the user mark them with
+`% hdl: loopspec('stream')` for serialization. The actual
+streaming transformation (sequential body + iteration
+counter FSM, shared datapath instance) is a v2 follow-up:
+
+  - `coder.hdl.loopspec('stream', 1)` → one shared body
+    instance, iteration counter, output mux. Lower area,
+    higher latency.
+  - factor `N` (= trip count) → full unroll (Phase 2's
+    default).
+  - intermediate factors → partial unroll.
+
+Today the synth tool unrolls every constant-bound loop fully
+(it sees the `for (int i = ...; ...; ++i) begin ... end`
+inside `always_comb` and replicates the body N times). For
+N=1024 that's an unrealistic resource footprint. The
+warning surfaces this before the user discovers it from
+their synth tool's report. Threshold knob is reserved
+(`-sv-unroll-threshold=N`) but the default is hard-coded at
+64 today.
+
+Serialized bodies will become small FSMs reusing the
+Phase 4 v2 cascade machinery; v2 follow-up work.
 
 **Step 5.4** — Constant-multiplier optimization. **Shipped as
 Phase 5.4 v1.**

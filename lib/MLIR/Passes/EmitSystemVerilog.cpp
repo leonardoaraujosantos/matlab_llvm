@@ -95,6 +95,8 @@ private:
   void emitBody(mlir::func::FuncOp F);
   void emitAlwaysFF();
   void emitFSMTypedefs();
+  void emitPipelineDecls(mlir::func::FuncOp F);
+  void emitPipelineFF();
   void emitFSMCase(mlir::scf::IfOp Head, int Indent);
   /// Phase 4 v2 — FSM cascade detection. Walks every `scf.if`
   /// whose condition is `cmpf oeq, persistent_get, const` and
@@ -168,7 +170,14 @@ private:
   // Per-function: argument names (parallel to F.getArguments()).
   std::vector<std::string> ArgNames;
   // Per-function: output names (parallel to F's result types).
+  // OutNames is the SV port name (`y`, `y1`, ...) that the
+  // module declaration uses. OutWriteNames is the name the
+  // always_comb body writes to: same as OutNames when there's
+  // no output pipelining; `<port>_d0` when output_pipeline > 0
+  // so the body feeds the pipeline-register chain instead of
+  // the port directly.
   std::vector<std::string> OutNames;
+  std::vector<std::string> OutWriteNames;
   // Per-function: SSA values that should be declared as `logic` at
   // module scope. Filled by declarePrelude.
   std::vector<mlir::Value> PreludeDecls;
@@ -192,6 +201,15 @@ private:
   // directly. The map's value is the SV expression (e.g.
   // `"v[2]"`).
   llvm::DenseMap<mlir::Operation *, std::string> GepAddr;
+  // Phase 5.2 v1: per-function port-pipeline stage counts read
+  // from `hdl.input_pipeline` / `hdl.output_pipeline` pragma
+  // attributes. 0 means "no pipelining on that side". When
+  // either is non-zero, the emitter routes the always_comb
+  // body through internal pre-/post-pipeline signals and adds
+  // a dedicated always_ff that shifts the register chain.
+  int InputPipelineN = 0;
+  int OutputPipelineN = 0;
+
   // Phase 4 v2: FSM cascades recognized in the function body.
   // Each entry is one cascade — the head scf.if op, the persistent
   // register's index in `Persists`, the per-case (const, region)
@@ -367,8 +385,11 @@ void Emitter::emitPortList(mlir::func::FuncOp F) {
   auto FT = F.getFunctionType();
   // Reserve the synthesized clock + reset names BEFORE arg/output
   // name resolution so a user arg named `rst` / `rst_n` / `clk` gets
-  // suffixed (`rst_`) and doesn't shadow the system port.
-  if (!Persists.empty()) {
+  // suffixed (`rst_`) and doesn't shadow the system port. Phase 5.2
+  // adds port-pipeline registers as another reason to need a clock.
+  bool NeedsClock = !Persists.empty() ||
+                    InputPipelineN > 0 || OutputPipelineN > 0;
+  if (NeedsClock) {
     Used.insert("clk");
     if (Reset == HWResetKind::AsyncLow || Reset == HWResetKind::SyncLow)
       Used.insert("rst_n");
@@ -388,7 +409,15 @@ void Emitter::emitPortList(mlir::func::FuncOp F) {
     while (Used.contains(Nm)) Nm += "_";
     Used.insert(Nm);
     ArgNames.push_back(Nm);
-    Names[F.getArgument(I)] = Nm;
+    // Phase 5.2: when input_pipeline > 0, route the body's
+    // references through the last-stage pipeline register
+    // (`<arg>_dN`). The port itself stays at `<arg>`; the
+    // input-pipeline always_ff drives the register chain.
+    if (InputPipelineN > 0) {
+      Names[F.getArgument(I)] = Nm + "_d" + std::to_string(InputPipelineN);
+    } else {
+      Names[F.getArgument(I)] = Nm;
+    }
   }
   // Output names. Phase 1 looks for an `sv.result_names` array attr
   // (an extension point for later) and otherwise uses `y`, `y1`, ...
@@ -402,9 +431,10 @@ void Emitter::emitPortList(mlir::func::FuncOp F) {
   }
 
   // Print the port list. Phase 3: prepend clk + reset port when the
-  // function has any persistent state.
+  // function has any persistent state. Phase 5.2: also when port
+  // pipelining is on.
   bool First = true;
-  if (!Persists.empty()) {
+  if (NeedsClock) {
     OS << "    input  logic clk";
     First = false;
     if (Reset == HWResetKind::AsyncLow || Reset == HWResetKind::SyncLow) {
@@ -439,6 +469,16 @@ void Emitter::emitPortList(mlir::func::FuncOp F) {
     OS << "    output " << svType(T) << " " << OutNames[I];
   }
   OS << "\n";
+
+  // Phase 5.2: after the port list is printed, populate
+  // OutWriteNames — what the always_comb body actually writes
+  // to. With no pipeline this is just OutNames; with
+  // output_pipeline > 0 it's `<port>_d0` so the body feeds the
+  // pipeline-register chain that drives the port.
+  OutWriteNames = OutNames;
+  if (OutputPipelineN > 0) {
+    for (auto &N : OutWriteNames) N += "_d0";
+  }
 }
 
 void Emitter::declarePrelude(mlir::func::FuncOp F) {
@@ -958,7 +998,7 @@ void Emitter::emitReturn(mlir::func::ReturnOp R, int Indent) {
         }
       }
     }
-    OS << OutNames[I] << " = " << Expr << ";\n";
+    OS << OutWriteNames[I] << " = " << Expr << ";\n";
   }
 }
 
@@ -1262,8 +1302,10 @@ void Emitter::emitBody(mlir::func::FuncOp F) {
   }
   // Likewise drive every output port to 0 by default — `func.return`
   // will overwrite later, but if the function has any conditional
-  // structure the same latch-inference rule applies.
-  for (const auto &Out : OutNames) {
+  // structure the same latch-inference rule applies. Use
+  // OutWriteNames so output_pipeline=N writes feed `<out>_d0`
+  // (the pre-pipeline signal) instead of the actual port.
+  for (const auto &Out : OutWriteNames) {
     indent(2);
     OS << Out << " = '0;\n";
   }
@@ -1290,6 +1332,29 @@ bool Emitter::emitModuleForFunc(mlir::func::FuncOp F) {
           << "unrecognized hdl.fsm_encoding value '" << V
           << "' (expected 'binary', 'one_hot', or 'gray')";
   }
+
+  // Phase 5.2: per-function port-pipeline stage counts.
+  InputPipelineN = 0;
+  OutputPipelineN = 0;
+  auto parsePipelineAttr = [&](llvm::StringRef Name, int &OutN) {
+    if (auto A = F->getAttrOfType<mlir::StringAttr>(Name)) {
+      int V = 0;
+      try { V = std::stoi(A.getValue().str()); }
+      catch (...) {
+        mlir::emitWarning(F.getLoc())
+            << Name << " value '" << A.getValue() << "' is not an integer";
+        return;
+      }
+      if (V < 0) {
+        mlir::emitWarning(F.getLoc())
+            << Name << " stage count must be ≥ 0, got " << V;
+        return;
+      }
+      OutN = V;
+    }
+  };
+  parsePipelineAttr("hdl.input_pipeline", InputPipelineN);
+  parsePipelineAttr("hdl.output_pipeline", OutputPipelineN);
 
   // Reset per-function state.
   Names.clear();
@@ -1370,8 +1435,12 @@ bool Emitter::emitModuleForFunc(mlir::func::FuncOp F) {
     OS << "\n";
   }
   declarePrelude(F);
+  // Phase 5.2 — port-pipeline register declarations.
+  emitPipelineDecls(F);
   emitBody(F);
   emitAlwaysFF();
+  // Phase 5.2 — pipeline shift register + assign-out drivers.
+  emitPipelineFF();
   OS << "\nendmodule\n";
 
   // Restore the CLI-wide FSM encoding for the next function.
@@ -1699,6 +1768,137 @@ void Emitter::emitFSMCase(mlir::scf::IfOp Head, int Indent) {
   }
   indent(Indent);
   OS << "endcase\n";
+}
+
+/// Phase 5.2: needs clk + rst_n ports when port pipelining is on
+/// or there are persistent registers.
+static bool wantsClock(int InputPipelineN, int OutputPipelineN,
+                       size_t PersistsCount) {
+  return InputPipelineN > 0 || OutputPipelineN > 0 || PersistsCount > 0;
+}
+
+void Emitter::emitPipelineDecls(mlir::func::FuncOp F) {
+  if (InputPipelineN <= 0 && OutputPipelineN <= 0) return;
+  // Input pipeline: each input port `<arg>` gets stages
+  // `<arg>_d1, <arg>_d2, ..., <arg>_dN`. The body's references
+  // to the port (already named in ArgNames[I]) are routed to
+  // `<arg>_dN` via the Names map override below.
+  auto FT = F.getFunctionType();
+  if (InputPipelineN > 0) {
+    OS << "    // Phase 5.2 input-pipeline registers (";
+    OS << InputPipelineN << " stage" << (InputPipelineN > 1 ? "s" : "");
+    OS << ").\n";
+    for (unsigned I = 0; I < FT.getNumInputs(); ++I) {
+      const std::string &Base = ArgNames[I];
+      for (int S = 1; S <= InputPipelineN; ++S) {
+        OS << "    " << svType(FT.getInput(I)) << " "
+           << Base << "_d" << S << ";\n";
+      }
+    }
+  }
+  // Output pipeline: each output port `<out>` gets stages
+  // `<out>_d0` (combinational pre-pipe), `<out>_d1, ..., <out>_dN`.
+  // The combinational body writes to `<out>_d0`; the always_ff
+  // shifts d0 → d1 → … → dN; an `assign <out> = <out>_dN;`
+  // drives the port. (The hold-by-default `<out> = '0;` line in
+  // emitBody already pre-assigns; we redirect it to `<out>_d0`.)
+  if (OutputPipelineN > 0) {
+    OS << "    // Phase 5.2 output-pipeline registers (";
+    OS << OutputPipelineN << " stage" << (OutputPipelineN > 1 ? "s" : "");
+    OS << ").\n";
+    for (unsigned I = 0; I < FT.getNumResults(); ++I) {
+      mlir::Type T = FT.getResult(I);
+      // Effective port type may differ from FT for FSM returns;
+      // re-derive via the per-function trick used in emitPortList
+      // (Phase 4 v2.6). For pipeline declarations we use the
+      // function-result type — port pipelining is post-FSM.
+      F.walk([&](mlir::func::ReturnOp R) {
+        if (R.getNumOperands() <= I) return;
+        auto *Op = R.getOperand(I).getDefiningOp();
+        if (!Op) return;
+        auto It = GetSiteToReg.find(Op);
+        if (It == GetSiteToReg.end()) return;
+        auto &P = Persists[It->second];
+        T = mlir::IntegerType::get(F.getContext(), P.Width);
+      });
+      const std::string &Base = OutNames[I];
+      for (int S = 0; S <= OutputPipelineN; ++S) {
+        OS << "    " << svType(T) << " "
+           << Base << "_d" << S << ";\n";
+      }
+    }
+  }
+  OS << "\n";
+}
+
+void Emitter::emitPipelineFF() {
+  if (InputPipelineN <= 0 && OutputPipelineN <= 0) return;
+  // One synchronous block shifting both pipelines on every
+  // posedge clk; the chosen reset policy applies.
+  switch (Reset) {
+  case HWResetKind::AsyncLow:
+    OS << "    always_ff @(posedge clk or negedge rst_n) begin\n";
+    OS << "        if (!rst_n) begin\n"; break;
+  case HWResetKind::SyncHigh:
+    OS << "    always_ff @(posedge clk) begin\n";
+    OS << "        if (rst) begin\n"; break;
+  case HWResetKind::SyncLow:
+    OS << "    always_ff @(posedge clk) begin\n";
+    OS << "        if (!rst_n) begin\n"; break;
+  }
+  // Reset every pipeline stage to 0.
+  if (InputPipelineN > 0) {
+    for (size_t I = 0; I < ArgNames.size(); ++I) {
+      const std::string &Base = ArgNames[I];
+      for (int S = 1; S <= InputPipelineN; ++S) {
+        indent(3);
+        OS << Base << "_d" << S << " <= '0;\n";
+      }
+    }
+  }
+  if (OutputPipelineN > 0) {
+    for (size_t I = 0; I < OutNames.size(); ++I) {
+      const std::string &Base = OutNames[I];
+      for (int S = 1; S <= OutputPipelineN; ++S) {
+        indent(3);
+        OS << Base << "_d" << S << " <= '0;\n";
+      }
+    }
+  }
+  OS << "        end else begin\n";
+  // Shift each pipeline.
+  if (InputPipelineN > 0) {
+    for (size_t I = 0; I < ArgNames.size(); ++I) {
+      const std::string &Base = ArgNames[I];
+      indent(3);
+      OS << Base << "_d1 <= " << Base << ";\n";
+      for (int S = 2; S <= InputPipelineN; ++S) {
+        indent(3);
+        OS << Base << "_d" << S << " <= " << Base << "_d" << (S - 1)
+           << ";\n";
+      }
+    }
+  }
+  if (OutputPipelineN > 0) {
+    for (size_t I = 0; I < OutNames.size(); ++I) {
+      const std::string &Base = OutNames[I];
+      for (int S = 1; S <= OutputPipelineN; ++S) {
+        indent(3);
+        OS << Base << "_d" << S << " <= " << Base << "_d" << (S - 1)
+           << ";\n";
+      }
+    }
+  }
+  OS << "        end\n";
+  OS << "    end\n\n";
+  // Drive output ports from the last-stage pipeline register.
+  if (OutputPipelineN > 0) {
+    for (size_t I = 0; I < OutNames.size(); ++I) {
+      OS << "    assign " << OutNames[I]
+         << " = " << OutNames[I] << "_d" << OutputPipelineN << ";\n";
+    }
+    OS << "\n";
+  }
 }
 
 void Emitter::emitAlwaysFF() {

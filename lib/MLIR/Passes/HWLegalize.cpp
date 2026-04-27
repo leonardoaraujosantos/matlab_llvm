@@ -181,6 +181,51 @@ bool runHWLegalize(mlir::ModuleOp M, const matlab::SourceManager * /*SM*/) {
         Ok = false;
         return;
       }
+
+      // Phase 5.3 v1 — large-loop unroll warning. If the trip
+      // count exceeds a threshold (default 64), the synth tool
+      // will fully unroll the loop into N copies of the body —
+      // potentially a huge area cost. Warn and suggest a
+      // streaming pragma for the user. The actual streaming
+      // transformation (sequential body + iteration counter
+      // FSM) is a v2 follow-up.
+      auto ReadF64 = [](mlir::Value V, double &Out) -> bool {
+        auto C = V.getDefiningOp<mlir::arith::ConstantOp>();
+        if (!C) return false;
+        if (auto FA = mlir::dyn_cast<mlir::FloatAttr>(C.getValue())) {
+          Out = FA.getValueAsDouble();
+          return true;
+        }
+        if (auto IA = mlir::dyn_cast<mlir::IntegerAttr>(C.getValue())) {
+          Out = (double)IA.getInt();
+          return true;
+        }
+        return false;
+      };
+      double Init, End, Step;
+      if (ReadF64(Info.Init, Init) && ReadF64(Info.End, End) &&
+          ReadF64(Info.Step, Step) && Step != 0.0) {
+        double TripD = Info.IsDecreasing
+                           ? ((Init - End) / (-Step) + 1)
+                           : ((End - Init) / Step + 1);
+        int64_t Trip = (int64_t)TripD;
+        if (Trip > 64) {
+          // Use llvm::errs() rather than mlir::emitWarning — the
+          // matlabc driver doesn't register a SourceMgrDiagnostic
+          // handler, so the InFlightDiagnostic from emitWarning
+          // gets dropped silently. Stick with raw stderr for
+          // informational warnings.
+          auto Loc = W.getLoc();
+          llvm::errs() << Loc << ": warning: for-loop with trip "
+                       << "count " << Trip << " will be fully "
+                       << "unrolled by the synth tool — consider "
+                       << "serializing with `% hdl: loopspec("
+                       << "'stream')` to share one body instance "
+                       << "across iterations (loop serialization "
+                       << "is a Phase 5.3 v2 follow-up; the "
+                       << "warning is informational today)\n";
+        }
+      }
       if (!Info.Iv.use_empty()) {
         // The induction variable's only legal uses are inside the
         // matcher's recognized cmpf and addf — those live in the
