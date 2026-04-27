@@ -2953,6 +2953,100 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
         }
       }
 
+      /* fi([lit, lit, ...], signed, WL, FL) — fi array literal init.
+       * Folds at lower-time into a `matlab_mat_i64_zeros(1, N)` followed
+       * by per-element `__subscript_store(arr, k+1, quantized_lit_k)`
+       * calls — the same shape that `fi(zeros(1, N), ...) ; v(k) = ...;`
+       * lowers to, which the existing `LowerStaticFiArrays` pass folds
+       * to `llvm.alloca [N x iW]` with constant-init stores. Drops out
+       * the `concat_row + matlab_mat_from_buf + fi.cast(tensor)` runtime
+       * detour that doesn't lower in any backend. Coefficient table
+       * shape (`h = fi([0.1, 0.2, ...], 1, 16, 15)`) for FIR / IIR / CIC
+       * filter implementations. Phase 5.6 Stage C. */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          N->Name == "fi" && C.Args.size() >= 4 && C.Args[0] &&
+          E.Ty && E.Ty->K == Type::Kind::Array) {
+        auto &OutAT = static_cast<const ArrayType &>(*E.Ty);
+        if (OutAT.Elt == Dtype::Fixed && OutAT.FxSpec &&
+            OutAT.S.K != Shape::Rank::Scalar) {
+          if (auto *ML = dynamic_cast<const MatrixLiteral *>(C.Args[0])) {
+            // 1-row literal `[v0, v1, ..., vN]`. (2-D matrix literals
+            // are out of v1 scope; the static-fi-array infrastructure
+            // is 1-D today.)
+            if (ML->Rows.size() == 1 && !ML->Rows[0].empty()) {
+              auto &Row = ML->Rows[0];
+              auto isLiteralFold = [](const Expr *X) -> bool {
+                if (!X) return false;
+                if (X->Kind == NodeKind::IntegerLiteral ||
+                    X->Kind == NodeKind::FPLiteral) return true;
+                if (auto *U = dynamic_cast<const UnaryOpExpr *>(X))
+                  if (U->Op == UnOp::Minus || U->Op == UnOp::Plus)
+                    return U->Operand && (
+                        U->Operand->Kind == NodeKind::IntegerLiteral ||
+                        U->Operand->Kind == NodeKind::FPLiteral);
+                return false;
+              };
+              bool AllLit = true;
+              for (Expr *E0 : Row) {
+                if (!isLiteralFold(E0)) { AllLit = false; break; }
+              }
+              if (AllLit) {
+                FixedSpec Spec = *OutAT.FxSpec;
+                auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+                auto F64 = mlir::Float64Type::get(&MCtx);
+                // Step 1: emit matlab_mat_i64_zeros(1, N).
+                mlir::Value RowsV = mlir::arith::ConstantOp::create(
+                    B, L, F64, mlir::FloatAttr::get(F64, 1.0));
+                mlir::Value ColsV = mlir::arith::ConstantOp::create(
+                    B, L, F64, mlir::FloatAttr::get(F64, (double)Row.size()));
+                llvm::StringRef ZeroCallee = Spec.Signed
+                    ? "matlab_mat_i64_zeros"
+                    : "matlab_mat_u64_zeros";
+                mlir::NamedAttribute ZCal(
+                    mlir::StringAttr::get(&MCtx, "callee"),
+                    mlir::StringAttr::get(&MCtx, ZeroCallee));
+                llvm::SmallVector<mlir::NamedAttribute, 8> ZA;
+                ZA.push_back(ZCal);
+                auto FAttrs = buildFixedAttrs(&MCtx, Spec);
+                for (auto &E0 : FAttrs) ZA.push_back(E0);
+                mlir::Value Z = emitUnreg("matlab.call_builtin",
+                                           {RowsV, ColsV}, PtrTy, L, ZA);
+                // Step 2: per-element __subscript_store with the
+                // compile-time-quantized stored integer.
+                unsigned StorBits = Spec.WordLength <= 8 ? 8
+                                  : Spec.WordLength <= 16 ? 16
+                                  : Spec.WordLength <= 32 ? 32 : 64;
+                auto IT = mlir::IntegerType::get(&MCtx, StorBits);
+                for (size_t k = 0; k < Row.size(); ++k) {
+                  double Val = foldFloat(Row[k]);
+                  int64_t Stored = Spec.Signed
+                      ? quantizeFixedSigned(Val, Spec)
+                      : (int64_t)quantizeFixedUnsigned(Val, Spec);
+                  mlir::Value KV = mlir::arith::ConstantOp::create(
+                      B, L, F64, mlir::FloatAttr::get(F64, (double)(k + 1)));
+                  llvm::SmallVector<mlir::NamedAttribute, 8> CA;
+                  mlir::NamedAttribute VA(
+                      mlir::StringAttr::get(&MCtx, "value"),
+                      mlir::IntegerAttr::get(IT, Stored));
+                  CA.push_back(VA);
+                  for (auto &E0 : FAttrs) CA.push_back(E0);
+                  mlir::Value QV = emitUnreg("matlab.fi.const", {}, IT, L, CA);
+                  mlir::NamedAttribute SCal(
+                      mlir::StringAttr::get(&MCtx, "callee"),
+                      mlir::StringAttr::get(&MCtx, "__subscript_store"));
+                  llvm::SmallVector<mlir::NamedAttribute, 8> SA;
+                  SA.push_back(SCal);
+                  for (auto &E0 : FAttrs) SA.push_back(E0);
+                  emitUnregOp("matlab.call_builtin", {Z, KV, QV},
+                              {mlir::NoneType::get(&MCtx)}, L, SA);
+                }
+                return Z;
+              }
+            }
+          }
+        }
+      }
+
       /* Fixed-Point Designer constructor: `fi(value, signed, WL, FL)` and
        * its shorter variants. When all spec args are constants — the
        * common case — we constant-fold to an `arith.constant` of the
