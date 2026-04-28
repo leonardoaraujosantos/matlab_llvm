@@ -1299,6 +1299,88 @@ def scn_step_back_overwrites(matlabc, program):
         c.wait_event("terminated", timeout=5.0)
 
 
+def scn_step_back_inside_function(matlabc, program):
+    """stepBack from inside a function frame must:
+      a) update the *innermost frame's* line so DAP `stackTrace`
+         reflects the rewound position (the IDE renders the caret
+         from stackTrace, not from the stopped event's line);
+      b) refuse to cross out of the current function — boundary
+         records from the caller frame are skipped, and stepping
+         past the function's first statement returns reason=entry
+         instead of teleporting up into the script frame.
+
+    Uses examples/factorial.m: bp on line 14 (`y = 1;`) inside
+    `fact(n)`. Reaching it requires `disp(fact(1));` to call fact,
+    which fires hooks across the script + function frames; the
+    rewind has to ignore all of that and stay in fact's body.
+    """
+    import os
+    fact_program = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(program))),
+        "examples", "factorial.m",
+    )
+    if not os.path.exists(fact_program):
+        # Skip cleanly when the example layout differs (e.g. when
+        # tests run from a worktree that omits examples/).
+        return
+    with DapClient(matlabc, fact_program) as c:
+        c.request("initialize", {"clientID": "t", "linesStartAt1": True})
+        c.wait_event("initialized", timeout=5.0)
+        c.request("launch", {"program": fact_program, "stopOnEntry": False})
+        c.request("setBreakpoints", {
+            "source": {"path": fact_program},
+            "breakpoints": [{"line": 14}],
+        })
+        c.request("configurationDone")
+        ev = c.wait_event("stopped", timeout=10.0)
+        body = ev.get("body") or {}
+        assert body.get("line") == 14 and body.get("reason") == "breakpoint", body
+
+        def _frames():
+            st = c.request("stackTrace", {"threadId": 1})
+            return [(f.get("name"), f.get("line"))
+                    for f in (st.get("stackFrames") or [])]
+
+        # Initial stack: paused inside fact, called from the script.
+        frames = _frames()
+        assert frames[0] == ("fact", 14), \
+            f"initial innermost frame should be fact:14: {frames!r}"
+
+        # stepBack #1: stays inside fact, walks back to line 13
+        # (the `if n <= 1` test). innermost frame line MUST update.
+        c.request("stepBack")
+        ev = c.wait_event("stopped", timeout=5.0)
+        body = ev.get("body") or {}
+        assert body.get("line") == 13 and body.get("reason") == "step", body
+        frames = _frames()
+        assert frames[0] == ("fact", 13), \
+            f"after stepBack the innermost frame should be fact:13 " \
+            f"(IDE renders caret from stackTrace, not stopped.line): {frames!r}"
+
+        # stepBack #2: walking back from line 13 would cross into
+        # the caller (the `disp(fact(1))` site on script line 5).
+        # The runtime refuses to cross frames; reports
+        # reason=entry to signal "rewind exhausted in this frame".
+        c.request("stepBack")
+        ev = c.wait_event("stopped", timeout=5.0)
+        body = ev.get("body") or {}
+        assert body.get("reason") == "entry", \
+            f"stepBack across the function-call boundary should " \
+            f"report reason=entry, not silently teleport up: {body!r}"
+        # Frame state stays at fact:13 (where the prior stepBack
+        # left us) — we didn't cross.
+        frames = _frames()
+        assert frames[0] == ("fact", 13), \
+            f"refused-cross stepBack should leave the frame " \
+            f"unchanged: {frames!r}"
+
+        c.request("continue")
+        try:
+            c.wait_event("terminated", timeout=10.0)
+        except DapError:
+            pass
+
+
 def scn_reverse_continue(matlabc, program):
     """`reverseContinue` walks the undo log back to the program
     entry. From line 8 of dap_revstep_program.m, a single

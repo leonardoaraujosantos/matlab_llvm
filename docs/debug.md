@@ -181,7 +181,7 @@ VS Code via a generic-DAP extension:
 | Data breakpoints (read / write / readWrite) | `dataBreakpointInfo` advertises all three access types and resolves a name to a stable dataId; `setDataBreakpoints` installs the watch. Write side: every `matlab_ws_set_*` and `matlab_dbg_frame_set_*` checks the watch list. Read side: `matlab_ws_get_f64` / `matlab_ws_get_mat` check too, with a lock-free n_wp==0 fast path so the JIT pays no measurable cost when no watches are armed. `stopped` events carry `reason: "data breakpoint"` and the watch's id in `hitBreakpointIds`. Limitation: function-frame reads bypass the runtime API (the JIT loads from stack slots directly), so a read-watch on a function local is silently invisible — script-scope reads only |
 | Memory inspection on matrices   | Matrix variable rows carry a `memoryReference` (hex-formatted data-buffer pointer); `readMemory` and `writeMemory` decode it back, validate against a server-side region table (only matrix data buffers are exposed — refuses arbitrary addresses), and stream cell bytes as base64. Reads past the buffer end report `unreadableBytes` instead of erroring. 1MB read cap per request |
 | Disassembly                     | `disassemble` walks JIT-emitted machine code instruction-by-instruction using the host triple's `MCDisassembler`. With no `memoryReference`, defaults to the JIT's `main` entry point. Each result row carries an address, raw bytes (hex), and printed asm. Decode failures emit a `.byte` recovery row and step forward 1 byte so a single bad byte doesn't collapse the response. Negative `instructionOffset` is refused (would need a backward-decoder for variable-length archs) |
-| Reverse stepping                | `stepBack` and `reverseContinue` rewind through a per-statement undo log. Every `matlab_ws_set_*` and `matlab_dbg_frame_set_*` push prev-value records before the write; the hook stamps a statement boundary on each fire. stepBack pops one statement's worth of records and reapplies them in reverse. Irreversible ops (disp / fprintf when wired) emit a marker that stops the rewind with a clear message. Ring buffer holds 4096 records — enough for hundreds of statements at typical mutation rates |
+| Reverse stepping                | `stepBack` and `reverseContinue` rewind through a per-statement undo log. Every `matlab_ws_set_*` and `matlab_dbg_frame_set_*` push prev-value records before the write; the hook stamps a statement boundary (with the calling thread's frame depth) on each fire. stepBack pops one statement's worth of records and reapplies them in reverse, **staying within the current function frame** — boundaries from deeper (callee) frames are skipped past, and walking off the front of the current function returns `reason: "entry"` rather than teleporting into the caller. The innermost frame's line is updated so DAP `stackTrace` reflects the rewound caret. Ring buffer holds 4096 records — enough for hundreds of statements at typical mutation rates |
 | Function breakpoints            | `setFunctionBreakpoints` resolves a name against the compiled function table and pins a line bp at the body's first statement. Class methods are registered under `MethodName`, `ClassName.MethodName`, and `ClassName/MethodName` so any form the user types resolves |
 | Breakpoint candidate lines      | `breakpointLocations` returns every bp-eligible line in a range (computed by an AST walker at compileProgram time) |
 | Exception breakpoints           | `setExceptionBreakpoints` with the `error` filter — runtime pauses on the first hook fired after `matlab_set_error` |
@@ -682,16 +682,25 @@ helper variable is named `total` rather than `sum` for this reason.
   runtime maintains a 4096-entry ring-buffer undo log: every
   `matlab_ws_set_*` and `matlab_dbg_frame_set_*` pushes a
   prev-value record before the write, and the hook stamps a
-  statement boundary on each fire. `matlab_dbg_step_back` drops
-  the head boundary (the current paused-statement marker), walks
+  statement boundary (carrying the thread's frame depth at
+  stamp time) on each fire. `matlab_dbg_step_back` drops the
+  head boundary (the current paused-statement marker), walks
   back applying each non-boundary record in reverse, and stops
-  at the previous statement boundary (which stays in the log as
-  the new "now" marker). Variables that didn't pre-exist are
-  removed via `matlab_struct_rmfield` so the rewound state
+  at the previous boundary *with the same frame depth* — so
+  rewinding inside a function call stays within that function
+  and skips past nested-callee boundary records that were
+  stamped during the descent. Walking off the front of the
+  current function returns `reason: "entry"` rather than
+  silently teleporting up into the caller; the user can
+  `continue` from there or use forward step-out semantics.
+  The innermost frame's line is updated as part of the rewind
+  so DAP `stackTrace` (which the IDE renders the caret from)
+  reflects the new position. Variables that didn't pre-exist
+  are removed via `matlab_struct_rmfield` so the rewound state
   matches the pre-write workspace exactly — no stale `x = 0`
   shadow. The DAP `stepBack` and `reverseContinue` handlers
-  drive this. Limitations: per-statement granularity (not per-
-  instruction); rewinding past the first statement returns
+  drive this. Limitations: per-statement granularity (not
+  per-instruction); rewinding past the first statement returns
   `reason=entry` with `description: "stepBack: undo log
   exhausted"`. Irreversible ops can stamp a kind=4 marker that
   stops the rewind cleanly — the runtime API
@@ -868,7 +877,7 @@ Three ctest suites guard the debugging surface (all gated on
 
 - **`debug-dap-tests`** — spawns `matlabc -dap` as a subprocess and
   drives the protocol with a small Python client
-  (`test/Debug/dap_client.py`). Forty-six scenarios cover the
+  (`test/Debug/dap_client.py`). Forty-seven scenarios cover the
   end-to-end surface:
 
   *Stepping & basic flow:*
@@ -1071,6 +1080,14 @@ Three ctest suites guard the debugging surface (all gated on
     stepBack walks `x` through `3 → 2 → 1 → removed`,
     confirming that `prev_existed=1` records restore the prior
     value (instead of removing the binding)
+  - **`step_back_inside_function`** — `examples/factorial.m`
+    has `disp(fact(1))` calling a recursive `fact(n)`. Pause at
+    line 14 inside `fact`; assert (a) the *innermost frame's*
+    line in `stackTrace` updates to 13 after stepBack (the IDE
+    renders the caret from stackTrace, not the stopped event's
+    `line` field), and (b) the next stepBack refuses to cross
+    out of `fact` into the script frame, returning
+    `reason=entry`. Locks in the depth-aware boundary matching
   - **`reverse_continue`** — same fixture; `reverseContinue`
     walks the undo log back one statement and stops with
     `reason=step` at line 7 (or `reason=entry` if the log was

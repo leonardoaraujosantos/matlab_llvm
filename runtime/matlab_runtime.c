@@ -4182,7 +4182,12 @@ static void matlab_dbg_undo_clear_locked(void) {
 }
 
 /* Stamp a statement-boundary record. The hook calls this on every
- * fire so stepBack knows where each statement began. */
+ * fire so stepBack knows where each statement began. The frame
+ * depth (n_frames at the time of the stamp) is stored in
+ * `frame_idx` so stepBack can refuse to walk past a boundary that
+ * crossed a function call — the user expects "step back" to stay
+ * within the current frame (the language-level debugger contract),
+ * not silently teleport into the caller. */
 static void matlab_dbg_undo_record_stmt_locked(int32_t file_id,
                                                 int32_t line,
                                                 int32_t thread_slot) {
@@ -4192,6 +4197,7 @@ static void matlab_dbg_undo_record_stmt_locked(int32_t file_id,
     r->file_id = file_id;
     r->line = line;
     r->thread_slot = thread_slot;
+    r->frame_idx = matlab_dbg.thread_n_frames[thread_slot];
 }
 
 /* Stamp an irreversible-op marker. The set_error path and the
@@ -4363,6 +4369,18 @@ int matlab_dbg_step_back(int32_t *out_file_id, int32_t *out_line,
     int hit_irreversible = 0;
     int32_t boundary_file_id = 0, boundary_line = 0;
     int boundary_idx = -1;
+    /* Capture the paused thread's current frame depth — stepBack
+     * is a same-frame operation. Boundary records carry the depth
+     * at stamp time in `frame_idx`; we accept only matches.
+     * Boundaries from inside callee frames (deeper) were stamped
+     * during the recursive descent and shouldn't pull us into
+     * those frames; boundaries from caller frames (shallower)
+     * mean we walked off the front of the current function — we
+     * stop with hit_boundary=0 so the IDE renders the rewind as
+     * "exhausted within this frame" instead of teleporting up. */
+    int paused_thread = matlab_dbg.paused_thread_idx;
+    int target_depth = (paused_thread >= 0 && paused_thread < 32)
+                       ? matlab_dbg.thread_n_frames[paused_thread] : 0;
 
     /* Step 1: drop the current "now" boundary. The hook stamps a
      * boundary on every fire, so head-1 IS that stamp when paused
@@ -4403,9 +4421,36 @@ int matlab_dbg_step_back(int32_t *out_file_id, int32_t *out_line,
             break;
         }
         if (r->kind == 0) {
-            /* Statement boundary — this is the new "now". Keep
-             * it in the log so the next stepBack drops it (per
-             * step 1). */
+            /* Statement boundary candidate. Match against the
+             * paused thread's current frame depth so stepBack
+             * doesn't cross function-call frames. Cases:
+             *   - depth == target: same frame, this is our stop.
+             *   - depth >  target: deeper frame (a callee that
+             *     ran during the previous statement, like
+             *     `disp(fact(4))` calling fact). Skip past the
+             *     whole nested call by continuing to walk back
+             *     until we find a same-depth boundary again.
+             *   - depth <  target: caller frame. We walked off
+             *     the front of the current function. Stop with
+             *     hit_boundary = 0 (treated as "log exhausted
+             *     within this frame") rather than teleport up.
+             * Records with frame_idx == 0 (legacy from before
+             * the depth tracking) are accepted as same-frame —
+             * back-compat for any pre-existing boundary stamps. */
+            int rec_depth = r->frame_idx;
+            if (rec_depth != 0 && rec_depth > target_depth) {
+                /* Deeper frame — keep walking back. */
+                continue;
+            }
+            if (rec_depth != 0 && rec_depth < target_depth) {
+                /* Shallower (caller) frame — refuse to cross. */
+                ++idx;
+                if (idx >= 4096) idx = 0;
+                --popped;
+                break;
+            }
+            /* Same frame: this is the new "now". Keep it in the
+             * log so the next stepBack drops it (per step 1). */
             hit_boundary = 1;
             boundary_idx = idx;
             boundary_file_id = r->file_id;
@@ -4491,9 +4536,25 @@ int matlab_dbg_step_back(int32_t *out_file_id, int32_t *out_line,
      * its values rolled back but no line to resume at. Treat as
      * "nothing more to rewind". */
     matlab_dbg.recording_undo = 1;
+    /* Update the innermost frame's (file_id, line) to the rewound
+     * boundary so DAP `stackTrace` reflects the new position.
+     * Without this, the per-thread chain still has the old line
+     * from the original hook fire, the inspector renders the
+     * caret there, and the user sees no visible movement even
+     * though `cur_line` and the `stopped` event line are correct.
+     *
+     * Done BEFORE the shared-frames snapshot below so the
+     * snapshot picks up the rewound line. */
+    int p = matlab_dbg.paused_thread_idx;
+    if (hit_boundary && p >= 0 && p < 32) {
+        int n_thr = matlab_dbg.thread_n_frames[p];
+        if (n_thr > 0) {
+            matlab_dbg.thread_frames[p][n_thr - 1].file_id = boundary_file_id;
+            matlab_dbg.thread_frames[p][n_thr - 1].line = boundary_line;
+        }
+    }
     /* Refresh shared frames[] from the paused thread so DAP
      * inspectors see the rewound view. */
-    int p = matlab_dbg.paused_thread_idx;
     if (p >= 0 && p < 32) {
         int n = matlab_dbg.thread_n_frames[p];
         if (n > MATLAB_DBG_MAX_FRAMES) n = MATLAB_DBG_MAX_FRAMES;
