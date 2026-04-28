@@ -5477,6 +5477,12 @@ int main(int Argc, char **Argv) {
           // LLVM path untouched (it has its own mem2reg on the backend).
           mlirgen::runIfStoreToSelect(M);
           mlirgen::runMem2RegLite(M);
+          // Final signature catch-up: Mem2RegLite / IfStoreToSelect
+          // can promote slots and rewrite arms in ways that retype
+          // call-site operands. RefineFuncSigs's input-side
+          // refinement (step 0) catches the leftover none → typed
+          // gap so the verifier doesn't reject a stale func.call.
+          mlirgen::runRefineFuncSigs(M);
           // Verify the module right before emission so a malformed IR
           // state is surfaced with a clear error rather than as a cryptic
           // cc/c++ compile failure on the emitted source.

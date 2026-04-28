@@ -171,24 +171,97 @@ void propagateScalarTypes(func::FuncOp Fn) {
 // Update existing func.call ops whose result types no longer match their
 // callee's current signature.
 void refreshFuncCalls(ModuleOp M) {
+  // First pass: refine func signatures from operand types of their
+  // func.call sites. If a call site's operand type is concrete and
+  // the corresponding func arg is still NoneType, retype the func.
+  // This covers the chain `matlab.call(none, none) → func.call →
+  // LowerScalarsToArith retypes operands` where the per-iter
+  // signature-refinement loop already settled and won't revisit.
+  M.walk([&](func::CallOp Call) {
+    auto Fn = M.lookupSymbol<func::FuncOp>(Call.getCallee());
+    if (!Fn || Fn.empty()) return;
+    auto FT = Fn.getFunctionType();
+    if (Call.getNumOperands() != FT.getNumInputs()) return;
+    llvm::SmallVector<Type, 4> NewIn(FT.getInputs().begin(),
+                                      FT.getInputs().end());
+    bool Changed = false;
+    for (unsigned i = 0; i < FT.getNumInputs(); ++i) {
+      Type CallTy = Call.getOperand(i).getType();
+      if (canRefineTo(NewIn[i], CallTy)) {
+        NewIn[i] = CallTy;
+        Changed = true;
+      }
+    }
+    if (!Changed) return;
+    auto NewFT = FunctionType::get(Fn.getContext(), NewIn, FT.getResults());
+    Fn.setFunctionType(NewFT);
+    Block &Entry = Fn.getBody().front();
+    for (unsigned i = 0; i < FT.getNumInputs(); ++i) {
+      if (Entry.getArgument(i).getType() != NewIn[i])
+        Entry.getArgument(i).setType(NewIn[i]);
+    }
+    propagateScalarTypes(Fn);
+    // Re-derive func result types from the now-typed body.
+    llvm::SmallVector<Type, 4> NewRes(Fn.getFunctionType().getResults().begin(),
+                                       Fn.getFunctionType().getResults().end());
+    bool ResChanged = false;
+    Fn.walk([&](func::ReturnOp Ret) {
+      if (Ret.getNumOperands() != NewRes.size()) return;
+      for (unsigned i = 0; i < Ret.getNumOperands(); ++i) {
+        if (canRefineTo(NewRes[i], Ret.getOperand(i).getType())) {
+          NewRes[i] = Ret.getOperand(i).getType();
+          ResChanged = true;
+        }
+      }
+    });
+    if (ResChanged) {
+      Fn.setFunctionType(FunctionType::get(Fn.getContext(),
+          Fn.getFunctionType().getInputs(), NewRes));
+    }
+  });
+
   llvm::SmallVector<func::CallOp> Stale;
   M.walk([&](func::CallOp Call) {
     auto Fn = M.lookupSymbol<func::FuncOp>(Call.getCallee());
     if (!Fn) return;
     auto Sig = Fn.getFunctionType().getResults();
+    auto SigIn = Fn.getFunctionType().getInputs();
     if (Call.getNumResults() != Sig.size()) { Stale.push_back(Call); return; }
     for (unsigned i = 0; i < Call.getNumResults(); ++i) {
       if (Call.getResult(i).getType() != Sig[i]) {
         Stale.push_back(Call); return;
       }
     }
+    // Also re-emit when an operand type differs from the (possibly
+    // freshly-refined) input signature. The new func.call will pass
+    // verifier; the old one would trip the type-mismatch check.
+    if (Call.getNumOperands() == SigIn.size()) {
+      for (unsigned i = 0; i < SigIn.size(); ++i) {
+        if (Call.getOperand(i).getType() != SigIn[i]) {
+          Stale.push_back(Call);
+          return;
+        }
+      }
+    }
   });
   for (auto Call : Stale) {
     auto Fn = M.lookupSymbol<func::FuncOp>(Call.getCallee());
     if (!Fn) continue;
+    auto FT = Fn.getFunctionType();
+    // Only re-emit when operand types match the input signature
+    // exactly (or can be cheaply coerced). For now we punt on
+    // non-matching operands — leaves the bad call in place,
+    // verifier will surface it as a precise diagnostic.
+    if (Call.getNumOperands() != FT.getNumInputs()) continue;
+    bool OpMatch = true;
+    for (unsigned i = 0; i < FT.getNumInputs(); ++i)
+      if (Call.getOperand(i).getType() != FT.getInput(i)) {
+        OpMatch = false; break;
+      }
+    if (!OpMatch) continue;
     OpBuilder B(Call);
     auto NewCall = func::CallOp::create(B, Call.getLoc(),
-                                         Fn.getFunctionType().getResults(),
+                                         FT.getResults(),
                                          Call.getCallee(),
                                          Call.getOperands());
     unsigned NCopy = std::min((unsigned)Call.getNumResults(),

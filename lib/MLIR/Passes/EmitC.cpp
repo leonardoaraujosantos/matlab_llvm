@@ -298,6 +298,7 @@ private:
   bool HasParfor = false;  // any call to matlab_parfor_dispatch?
   bool NeedsStdio = false; // will emit puts() / printf()
   bool NeedsIostream = false; // will emit std::cout
+  bool NeedsTupleHeader = false; // C++ uses std::tuple / std::tie
   // Runtime llvm.func declarations that still have at least one call site
   // surviving the IO substitutions. Used to prune dead externs from the
   // prolog so the emitted file doesn't declare functions it never calls.
@@ -419,6 +420,17 @@ private:
   bool InClassMethodBody = false;
   mlir::Value ClassMethodSelf;
   std::string ClassMethodClassName;
+  // Multi-return emit state. Set in emitFuncFunc; consumed by
+  // ReturnOp / func.call emission.
+  //  - Cpp + MultiRet: signature is `std::tuple<T0,T1,...>`,
+  //    return becomes `return std::make_tuple(...)`.
+  //  - !Cpp + MultiRet: signature has `out_*` pointer params
+  //    appended (names captured here); body's ReturnOp stores
+  //    each operand through its matching `*out_i = ...` and emits
+  //    a bare `return;`.
+  std::vector<std::string> CurFuncOutPtrs;
+  bool CurFuncIsMultiRet = false;
+  bool CurFuncIsCpp = false;
   // SSA values known to hold instances of a particular class. Set when
   // we see a ctor call's result; propagated through alloca / store /
   // load chains. Drives variable-type emission and call-site rewrites.
@@ -631,6 +643,22 @@ bool Emitter::canInline(mlir::Operation &Op) {
           arith::TruncFOp, arith::ExtFOp,
           LLVM::GEPOp>(Op))
     return true;
+  // Unregistered matlab.* binops on scalar primitives — same shape
+  // and constraints as the registered arith.* ops above. Inline so
+  // the C output reads as a single expression instead of a series
+  // of named temporaries.
+  {
+    StringRef MN = Op.getName().getStringRef();
+    if (Op.getNumOperands() == 2 && Op.getNumResults() == 1 &&
+        (MN == "matlab.add" || MN == "matlab.sub" ||
+         MN == "matlab.emul" || MN == "matlab.matmul" ||
+         MN == "matlab.ediv" || MN == "matlab.matdiv" ||
+         MN == "matlab.eq" || MN == "matlab.ne" ||
+         MN == "matlab.lt" || MN == "matlab.le" ||
+         MN == "matlab.gt" || MN == "matlab.ge" ||
+         MN == "matlab.short_or" || MN == "matlab.short_and"))
+      return true;
+  }
 
   // Is this LLVM call to a runtime helper that's known to be a pure
   // read with no side effects? Such calls don't block inlining of an
@@ -886,6 +914,35 @@ bool Emitter::buildInlineExpr(mlir::Operation &Op, std::string &Expr) {
          + exprFor(S.getTrueValue()) + " : "
          + exprFor(S.getFalseValue()) + ")";
     return true;
+  }
+  // Unregistered matlab.* binary ops that survived to emit time when
+  // both operands are scalar primitives. The frontend emits these
+  // for `a == b` / `a < b` / `a || b` / etc. on i1 / integer / f64
+  // operands; the SV pipeline keeps them as matlab.* unchanged, and
+  // the C pipeline never had handlers — leading to "unsupported op"
+  // errors on programs that mix HDL idioms with C-friendly numerics.
+  {
+    StringRef MN = Op.getName().getStringRef();
+    if (Op.getNumOperands() == 2 && Op.getNumResults() == 1) {
+      const char *CC = nullptr;
+      if (MN == "matlab.add") CC = "+";
+      else if (MN == "matlab.sub") CC = "-";
+      else if (MN == "matlab.emul" || MN == "matlab.matmul") CC = "*";
+      else if (MN == "matlab.ediv" || MN == "matlab.matdiv") CC = "/";
+      else if (MN == "matlab.eq") CC = "==";
+      else if (MN == "matlab.ne") CC = "!=";
+      else if (MN == "matlab.lt") CC = "<";
+      else if (MN == "matlab.le") CC = "<=";
+      else if (MN == "matlab.gt") CC = ">";
+      else if (MN == "matlab.ge") CC = ">=";
+      else if (MN == "matlab.short_or") CC = "||";
+      else if (MN == "matlab.short_and") CC = "&&";
+      if (CC) {
+        Expr = "(" + exprFor(Op.getOperand(0)) + " " + CC + " "
+             + exprFor(Op.getOperand(1)) + ")";
+        return true;
+      }
+    }
   }
   Value V = Op.getResult(0);
   if (isa<arith::SIToFPOp, arith::UIToFPOp>(Op)) {
@@ -2801,6 +2858,9 @@ void Emitter::emitProlog() {
   // / modern C++. The flags were computed in precomputeModuleProperties.
   if (NeedsStdio)    OS << "#include <stdio.h>\n";
   if (NeedsIostream) OS << "#include <iostream>\n";
+  // C++ multi-return uses std::tuple / std::tie; include the header
+  // when any user function in the module returns more than one value.
+  if (Cpp && NeedsTupleHeader) OS << "#include <tuple>\n";
   // C++ Matrix wrapper: when any matrix-typed value flows through the
   // module, pull in the wrapper header. It transitively includes the
   // C ABI header, so the per-fn extern "C" block becomes redundant
@@ -2817,8 +2877,14 @@ void Emitter::precomputeModuleProperties(mlir::ModuleOp M) {
   HasParfor = false;
   LiveRuntimeFuncs.clear();
   LiveGlobals.clear();
+  NeedsTupleHeader = false;
   bool AnyDispStrLiteral = false;
   bool AnyDispScalar = false;
+  // C++ multi-return: any user function with >1 result triggers
+  // <tuple> + std::make_tuple in returns + std::tie at call sites.
+  M.walk([&](mlir::func::FuncOp F) {
+    if (F.getFunctionType().getNumResults() > 1) NeedsTupleHeader = true;
+  });
   // First pass: detect parfor. IO substitution is gated on its absence,
   // so we need it settled before deciding whether a call survives.
   M.walk([&](mlir::LLVM::CallOp C) {
@@ -3120,22 +3186,12 @@ bool Emitter::run(mlir::ModuleOp M) {
   // each function body can start with a fresh local namespace.
   UsedNamesAfterProlog = UsedNames;
 
-  // -- Pre-emission checks: every defined function must have 0 or 1 results.
-  // The printer has no story for multi-result returns (no pass emits them
-  // today; guarding is cheap). Fail fast rather than emit broken C.
+  // -- Pre-emission checks: LLVM funcs must remain single-result. C/C++
+  // func.funcs with multiple results are emitted via out-pointer params
+  // (C) or std::tuple return (C++), so they're allowed past this guard.
   for (auto &Op : M.getBody()->getOperations()) {
-    if (auto F = mlir::dyn_cast<mlir::func::FuncOp>(Op)) {
+    if (auto F = mlir::dyn_cast<mlir::LLVM::LLVMFuncOp>(Op)) {
       if (F.getBody().empty()) continue;
-      unsigned N = F.getFunctionType().getNumResults();
-      if (N > 1) {
-        fail(("func.func @" + F.getSymName() +
-              " has " + std::to_string(N) +
-              " results; emitter supports at most 1").str());
-        return false;
-      }
-    } else if (auto F = mlir::dyn_cast<mlir::LLVM::LLVMFuncOp>(Op)) {
-      if (F.getBody().empty()) continue;
-      // LLVM funcs return a single type (possibly void); no additional check.
     }
   }
 
@@ -3278,9 +3334,24 @@ bool Emitter::run(mlir::ModuleOp M) {
             ClassNameAttr ? ClassNameAttr.getValue().str() : "";
         bool IsCtor = KindAttr && KindAttr.getValue() == "ctor";
         bool IsStatic = KindAttr && KindAttr.getValue() == "static";
-        std::string RetTy = FT.getNumResults() == 0
-                                ? std::string("void")
-                                : cTypeOf(FT.getResult(0));
+        bool MultiRet = FT.getNumResults() > 1;
+        std::string RetTy;
+        if (MultiRet) {
+          if (Cpp) {
+            RetTy = "std::tuple<";
+            for (unsigned i = 0; i < FT.getNumResults(); ++i) {
+              if (i) RetTy += ", ";
+              RetTy += cTypeOf(FT.getResult(i));
+            }
+            RetTy += ">";
+          } else {
+            RetTy = "void";
+          }
+        } else {
+          RetTy = FT.getNumResults() == 0
+                      ? std::string("void")
+                      : cTypeOf(FT.getResult(0));
+        }
         if (IsCClassMethod && IsCtor) RetTy = ClsName;
         // C class method that returns an instance (typical for an
         // operator overload like `r = Vec2(...)`): lift the MLIR
@@ -3327,7 +3398,17 @@ bool Emitter::run(mlir::ModuleOp M) {
             ParamTy = cTypeOf(FT.getInput(i));
           Buf << ParamTy;
         }
-        if (FT.getNumInputs() == 0 ||
+        // C multi-return: append `T_i*` out-pointer params after the
+        // regular args. Match the definition's signature so the
+        // forward decl + body agree (compiler would otherwise reject
+        // the def as a redeclaration).
+        if (MultiRet && !Cpp) {
+          for (unsigned i = 0; i < FT.getNumResults(); ++i) {
+            if (FT.getNumInputs() > 0 || i > 0) Buf << ", ";
+            Buf << cTypeOf(FT.getResult(i)) << "*";
+          }
+        }
+        if (FT.getNumInputs() == 0 && (!MultiRet || Cpp) ||
             (IsCClassMethod && IsCtor && FT.getNumInputs() == 0))
           Buf << "void";
         Buf << ");\n";
@@ -3428,6 +3509,9 @@ void Emitter::emitFuncFunc(mlir::func::FuncOp F) {
   ContinueFlagSlots.clear();
   FlagIfKind.clear();
   InlinedIfs.clear();
+  CurFuncOutPtrs.clear();
+  CurFuncIsMultiRet = false;
+  CurFuncIsCpp = false;
   // Restore the module-scope name set so locals from prior functions
   // don't shadow names this function would prefer (e.g. parameter `x`).
   UsedNames = UsedNamesAfterProlog;
@@ -3444,9 +3528,27 @@ void Emitter::emitFuncFunc(mlir::func::FuncOp F) {
   scanForLoopPatterns(F.getBody());
   auto FT = F.getFunctionType();
   bool IsMain = F.getSymName() == "main";
+  bool MultiRet = FT.getNumResults() > 1;
   std::string RetTy;
   if (IsMain) {
     RetTy = "int";
+  } else if (MultiRet) {
+    if (Cpp) {
+      // C++: return a std::tuple. Header inclusion of <tuple> is
+      // ensured by emitProlog when MultiRet is detected (see
+      // precomputeModuleProperties).
+      std::string TupleTy = "std::tuple<";
+      for (unsigned i = 0; i < FT.getNumResults(); ++i) {
+        if (i) TupleTy += ", ";
+        TupleTy += cTypeOf(FT.getResult(i));
+      }
+      TupleTy += ">";
+      RetTy = TupleTy;
+    } else {
+      // C: void return + out-pointer params appended after the
+      // regular args. Each result `i` becomes `T_i *out_<argname>_<i>`.
+      RetTy = "void";
+    }
   } else {
     RetTy = FT.getNumResults() == 0 ? std::string("void")
                                      : cTypeOf(FT.getResult(0));
@@ -3531,10 +3633,35 @@ void Emitter::emitFuncFunc(mlir::func::FuncOp F) {
       ParamTy = cTypeOf(FT.getInput(i));
     OS << ParamTy << " " << N;
   }
-  if (FT.getNumInputs() == 0 ||
+  // Multi-return: in C, append out-pointer params for each result.
+  // Names match the function's `matlab.name` result attrs when
+  // available so the call site reads naturally as
+  //   `f(args, &y, &ovfl);`. C++ uses tuple return, no out-params.
+  std::vector<std::string> OutNames;
+  if (MultiRet && !Cpp) {
+    OutNames.reserve(FT.getNumResults());
+    for (unsigned i = 0; i < FT.getNumResults(); ++i) {
+      std::string ON;
+      if (auto NA =
+              F.getResultAttrOfType<mlir::StringAttr>(i, "matlab.name"))
+        ON = "out_" + NA.getValue().str();
+      else
+        ON = "out_" + std::to_string(i);
+      ON = uniqueName(ON);
+      OutNames.push_back(ON);
+      if (FT.getNumInputs() > 0 || i > 0) OS << ", ";
+      OS << cTypeOf(FT.getResult(i)) << " *" << ON;
+    }
+  }
+  if (FT.getNumInputs() == 0 && (!MultiRet || Cpp) ||
       (IsCClassMethod && IsCtor && FT.getNumInputs() == 0))
     OS << "void";
   OS << ") {\n";
+  // Stash out-pointer names for the return-op emit. Cleared per
+  // function via emitFuncFunc's start-of-function reset.
+  CurFuncOutPtrs = std::move(OutNames);
+  CurFuncIsMultiRet = MultiRet;
+  CurFuncIsCpp = Cpp;
   // C constructor: locate `matlab_obj_new`, alias its result to `self`,
   // suppress that call + the trailing `return obj_new_result`. Emit
   // `ClassName self = {0};` at the top so subsequent obj_set_f64
@@ -3748,6 +3875,30 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
   };
   if (auto R = mlir::dyn_cast<mlir::func::ReturnOp>(Op)) {
     if (isTrailingVoid(R.getOperation())) return;
+    // Multi-return: C uses out-pointer params (`*out_i = ...; return;`),
+    // C++ uses `return std::make_tuple(...)`. Single-return is the
+    // common case.
+    if (CurFuncIsMultiRet && R.getNumOperands() > 1) {
+      if (CurFuncIsCpp) {
+        indent(Indent);
+        OS << "return std::make_tuple(";
+        for (unsigned i = 0; i < R.getNumOperands(); ++i) {
+          if (i) OS << ", ";
+          OS << this->stmtExpr(R.getOperand(i));
+        }
+        OS << ");\n";
+      } else {
+        for (unsigned i = 0; i < R.getNumOperands() &&
+                              i < CurFuncOutPtrs.size(); ++i) {
+          indent(Indent);
+          OS << "*" << CurFuncOutPtrs[i] << " = "
+             << this->stmtExpr(R.getOperand(i)) << ";\n";
+        }
+        indent(Indent);
+        OS << "return;\n";
+      }
+      return;
+    }
     indent(Indent);
     if (R.getNumOperands() == 0) OS << "return;\n";
     else OS << "return " << this->stmtExpr(R.getOperand(0)) << ";\n";
@@ -3923,6 +4074,50 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
     return;
   }
   if (auto Call = mlir::dyn_cast<mlir::func::CallOp>(Op)) {
+    // Multi-result call site. C: declare locals, pass `&local`
+    // for each out-pointer; the bare call becomes `f(args, &a, &b);`.
+    // C++: declare locals from a `std::tie(a, b) = f(args)` (or
+    // structured bindings — but tie is simpler when locals' types
+    // are already declared elsewhere). Single-result and zero-result
+    // calls take the regular path below.
+    if (Call.getNumResults() > 1) {
+      // Declare each result local first so `out_*` pointer operands
+      // have something to point to. Then emit the call.
+      llvm::SmallVector<std::string, 4> Locals;
+      for (unsigned i = 0; i < Call.getNumResults(); ++i) {
+        std::string LN = this->name(Call.getResult(i));
+        std::string LT = cTypeOfValue(Call.getResult(i));
+        Locals.push_back(LN);
+        indent(Indent);
+        OS << LT << " " << LN << ";\n";
+      }
+      indent(Indent);
+      if (Cpp) {
+        OS << "std::tie(";
+        for (unsigned i = 0; i < Locals.size(); ++i) {
+          if (i) OS << ", ";
+          OS << Locals[i];
+        }
+        OS << ") = " << Call.getCallee().str() << "(";
+        for (unsigned i = 0; i < Call.getNumOperands(); ++i) {
+          if (i) OS << ", ";
+          OS << this->stmtExpr(Call.getOperand(i));
+        }
+        OS << ");\n";
+      } else {
+        OS << Call.getCallee().str() << "(";
+        for (unsigned i = 0; i < Call.getNumOperands(); ++i) {
+          if (i) OS << ", ";
+          OS << this->stmtExpr(Call.getOperand(i));
+        }
+        for (unsigned i = 0; i < Locals.size(); ++i) {
+          if (i || Call.getNumOperands() > 0) OS << ", ";
+          OS << "&" << Locals[i];
+        }
+        OS << ");\n";
+      }
+      return;
+    }
     indent(Indent);
     bool BoundResult = (Call.getNumResults() == 1);
     std::string ResultName, ResultTy;
@@ -4075,6 +4270,48 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
     OS << "bool " << N << " = " << this->exprFor(C.getLhs()) << " " << CC
        << " " << this->exprFor(C.getRhs()) << ";\n";
     return;
+  }
+
+  // --- Unregistered matlab.* ops that need to fall through here ------
+  // These survive when LowerScalarsToArith / LowerFixedPoint don't pick
+  // them up (e.g. bool args to a function whose body uses `||` or `==`
+  // on scalar bool). Render them as the equivalent C operator.
+  {
+    llvm::StringRef MN = Op.getName().getStringRef();
+    auto emitMlabBin = [&](const char *CC) {
+      indent(Indent);
+      std::string N = this->name(Op.getResult(0));
+      OS << cTypeOfValue(Op.getResult(0)) << " " << N << " = "
+         << this->exprFor(Op.getOperand(0)) << " " << CC << " "
+         << this->exprFor(Op.getOperand(1)) << ";\n";
+    };
+    auto emitMlabBinBool = [&](const char *CC) {
+      indent(Indent);
+      std::string N = this->name(Op.getResult(0));
+      OS << "bool " << N << " = "
+         << this->exprFor(Op.getOperand(0)) << " " << CC << " "
+         << this->exprFor(Op.getOperand(1)) << ";\n";
+    };
+    if (Op.getNumOperands() == 2 && Op.getNumResults() == 1) {
+      if (MN == "matlab.add") { emitMlabBin("+"); return; }
+      if (MN == "matlab.sub") { emitMlabBin("-"); return; }
+      if (MN == "matlab.emul" ||
+          MN == "matlab.matmul") { emitMlabBin("*"); return; }
+      if (MN == "matlab.ediv" ||
+          MN == "matlab.matdiv") { emitMlabBin("/"); return; }
+      if (MN == "matlab.eq") { emitMlabBinBool("=="); return; }
+      if (MN == "matlab.ne") { emitMlabBinBool("!="); return; }
+      if (MN == "matlab.lt") { emitMlabBinBool("<");  return; }
+      if (MN == "matlab.le") { emitMlabBinBool("<="); return; }
+      if (MN == "matlab.gt") { emitMlabBinBool(">");  return; }
+      if (MN == "matlab.ge") { emitMlabBinBool(">="); return; }
+      // Short-circuit logical: render as `||` / `&&`. C's short-circuit
+      // semantics match MATLAB's. The frontend produces these for
+      // `cond1 || cond2` / `cond1 && cond2`; the SV pipeline keeps
+      // them, the C pipeline didn't have a handler.
+      if (MN == "matlab.short_or")  { emitMlabBinBool("||"); return; }
+      if (MN == "matlab.short_and") { emitMlabBinBool("&&"); return; }
+    }
   }
 
   // --- arith casts ----------------------------------------------------
