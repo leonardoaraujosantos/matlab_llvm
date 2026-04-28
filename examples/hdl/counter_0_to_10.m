@@ -1,5 +1,6 @@
 function count = counter_0_to_10(reset)
-    % #codegen
+    %#codegen
+    % hdl: port(reset, bool)
     
     % 'persistent' define variáveis que mantêm o valor entre chamadas (Registradores)
     persistent count_reg;

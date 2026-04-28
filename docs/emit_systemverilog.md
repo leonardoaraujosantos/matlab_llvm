@@ -696,7 +696,7 @@ piece the next stage builds on.
 | C | ✅ shipped | Static array literal init (`fi([0.1, 0.2, ...], ...)` → alloca + per-element stores) | ~2 days | coefficient-table half of fir / seq |
 | D | ✅ shipped | Loop-iv array indexing (`for i = 1:N; arr(i) ...; end`) | ~3 days | for-loop bodies in fir / seq |
 | E | ✅ shipped | Vector concat with static shapes (`[x, delay(1:end-1)]`) | ~3 days | shift-register pattern in fir / seq |
-| F | ✅ shipped (v1) | Persistent fi-arrays — N parallel scalar persistents (shift-register patterns work). `acc(:) = ...` colon-assign on scalars works as a regular store; vector colon-assign + `isempty(c) \|\| reset` array variant + `fi(<fi-arg>, ...)` saturate cast on call-arg fi values still need follow-up sub-stages before the full `fir_asic_pipelined.m` / `sequential_processor.m` close. | ~6 days | persistent shift-register pattern ✅; full fir/seq closure pending sub-stages |
+| F | ✅ shipped (v2) | Persistent fi-arrays — N parallel scalar persistents. v2 adds: F.2 IR-level for-loop unroller (`HWUnrollFor`) so loop-iv subscripts on persistents become per-iteration constants; iv-spill-load fold so the cloned bodies have integer-constant GEP indices; multi-guard init handling (`if isempty(c) \|\| reset`); `matlab.short_or` / `matlab.short_and` SV op handlers for the canonical overflow-check idiom. Closes `sequential_processor.m` standalone. | ~6 days | shift-register + sequential_processor ✅; fir_asic_pipelined needs subscript_store-on-persistent (`reg_products(i) = ...`) which is one more sub-stage |
 
 Total: ~4–5 weeks of focused work, **one stage per
 implementation session** (the existing Phase 5.6.x cadence). The

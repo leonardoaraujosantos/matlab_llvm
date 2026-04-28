@@ -13,9 +13,11 @@ module step2 (
         y_1 = '0;
         y = '0;
         y_1 = seed;
-        for (int i0_ = 1; i0_ <= 9; i0_ = i0_ + 2) begin
-            y_1 = y_1 + 16'sd2;
-        end
+        y_1 = y_1 + 16'sd2;
+        y_1 = y_1 + 16'sd2;
+        y_1 = y_1 + 16'sd2;
+        y_1 = y_1 + 16'sd2;
+        y_1 = y_1 + 16'sd2;
         y = y_1;
     end
 

@@ -415,7 +415,8 @@ bool Emitter::isInlineable(mlir::Value V) {
       N == "matlab.matmul" || N == "matlab.emul" ||
       N == "matlab.eq" || N == "matlab.ne" ||
       N == "matlab.lt" || N == "matlab.le" ||
-      N == "matlab.gt" || N == "matlab.ge")
+      N == "matlab.gt" || N == "matlab.ge" ||
+      N == "matlab.short_or" || N == "matlab.short_and")
     return true;
   // Plain LLVM scalar load of a slot — single-use loads inline as
   // the slot name (or `<arr>[<idx>]` for GEP-based loads). Keeps
@@ -603,6 +604,8 @@ std::string Emitter::renderInlineExpr(mlir::Operation *Op) {
   else if (N == "matlab.le") SvOp = "<=";
   else if (N == "matlab.gt") SvOp = ">";
   else if (N == "matlab.ge") SvOp = ">=";
+  else if (N == "matlab.short_or") SvOp = "||";
+  else if (N == "matlab.short_and") SvOp = "&&";
   if (!SvOp.empty() && Op->getNumOperands() == 2) {
     bool IsCmp = (N == "matlab.eq" || N == "matlab.ne" ||
                   N == "matlab.lt" || N == "matlab.le" ||
@@ -1470,6 +1473,11 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
     else if (OpName == "matlab.le") Sv = "<=";
     else if (OpName == "matlab.eq") Sv = "==";
     else if (OpName == "matlab.ne") Sv = "!=";
+    // Phase 5.6 closure: short-circuit boolean operators on
+    // i1 operands lower as plain SV `||` / `&&`. Used by the
+    // canonical `(x > hi) || (x < lo)` overflow-check idiom.
+    else if (OpName == "matlab.short_or") Sv = "||";
+    else if (OpName == "matlab.short_and") Sv = "&&";
     if (!Sv.empty()) {
       if (Op.getNumOperands() != 2 || Op.getNumResults() != 1) {
         fail(("unsupported arity on " + OpName + " in SV emitter").str());

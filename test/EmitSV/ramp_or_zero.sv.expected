@@ -18,9 +18,9 @@ module ramp_or_zero (
         y_1 = seed;
         if (en > 8'sd0) begin
             inc = 16'sd1;
-            for (int i0_ = 1; i0_ <= 3; i0_ = i0_ + 1) begin
-                y_1 = y_1 + inc;
-            end
+            y_1 = y_1 + inc;
+            y_1 = y_1 + inc;
+            y_1 = y_1 + inc;
         end
         y = y_1;
     end

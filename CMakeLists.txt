@@ -118,6 +118,7 @@ if(MATLAB_LLVM_WITH_MLIR)
     lib/MLIR/Passes/SplitIsEmptyOr.cpp
     lib/MLIR/Passes/LowerStaticFiArrays.cpp
     lib/MLIR/Passes/LowerPersistentFiArrays.cpp
+    lib/MLIR/Passes/HWUnrollFor.cpp
     lib/MLIR/Passes/ScanHWPragmas.cpp
     lib/MLIR/Passes/ApplyPortTypePragmas.cpp
     lib/MLIR/Passes/EmitHardwareReport.cpp

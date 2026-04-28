@@ -1,5 +1,8 @@
 function [data_out, overflow] = alu_16bit(a, b, sel)
-    % #codegen
+    %#codegen
+    % hdl: port(a, fi, signed, 16, 0)
+    % hdl: port(b, fi, signed, 16, 0)
+    % hdl: port(sel, fi, unsigned, 8, 0)
     % A diretiva #codegen é essencial para indicar compatibilidade com HDL
     
     % Inicializa a saída com o tipo de dado correto (16-bit assinado)

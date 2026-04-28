@@ -1,5 +1,7 @@
 function out_signal = mealy_fsm(input_bit, reset)
-    % #codegen
+    %#codegen
+    % hdl: port(input_bit, fi, unsigned, 8, 0)
+    % hdl: port(reset, fi, unsigned, 8, 0)
     
     % Definição dos estados
     S0 = uint8(0); 

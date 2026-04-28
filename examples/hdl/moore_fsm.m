@@ -1,5 +1,7 @@
 function [out_signal, state_display] = moore_fsm(input_bit, reset)
-    % #codegen
+    %#codegen
+    % hdl: port(input_bit, fi, unsigned, 8, 0)
+    % hdl: port(reset, fi, unsigned, 8, 0)
     
     % Definição dos estados usando tipos enumerados ou inteiros
     % Usar uint8 é eficiente para o HDL Coder

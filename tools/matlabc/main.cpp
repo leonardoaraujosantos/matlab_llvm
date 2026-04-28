@@ -5158,6 +5158,14 @@ int main(int Argc, char **Argv) {
           // accepts the literal HDL Coder mealy/moore idiom.
           mlirgen::runSplitIsEmptyOr(M);
 
+          // Phase 5.6 Stage F.2: unroll constant-bound canonical
+          // for-loops at the IR level. Stage F's per-element
+          // persistent-fi-array rewrite needs constant subscript
+          // indices on every read; without IR-level unrolling
+          // the body of `for i = 1:N; arr(i) ...; end` keeps
+          // the f64 iv as the subscript index and Stage F bails.
+          mlirgen::runHWUnrollFor(M);
+
           // Phase 5.6 Stage F: lower persistent fi-array shift-
           // register patterns into N parallel scalar persistents.
           // Runs after `LowerStaticFiArrays` (so the next-cycle

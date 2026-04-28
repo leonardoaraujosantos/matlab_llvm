@@ -449,6 +449,26 @@ bool runRefineFuncSigs(mlir::ModuleOp M);
 /// no concrete numeric type.
 bool runRefineIfConds(mlir::ModuleOp M);
 
+/// Phase 5.6 Stage F.2 — unroll constant-bound canonical for-
+/// loops. Given an `scf.while` matching the canonical
+/// `for i = Init : Step : End` shape with all three bounds as
+/// compile-time constants, replace the loop with N inlined
+/// copies of the body, each with the iv substituted by the
+/// concrete iteration value (still f64 to match the original
+/// type — fptosi inside the body folds when the consumer
+/// expects an integer).
+///
+/// Runs in the SV pipeline before `LowerPersistentFiArrays` so
+/// any `for i = 1:N; arr(i) ...; end` body that referenced the
+/// iv as a subscript index ends up with constant indices that
+/// Stage F can rewrite into per-element scalar persistents.
+///
+/// Bails on loops that don't match the canonical shape or whose
+/// bounds aren't compile-time constants — those stay as
+/// scf.while and the SV emitter renders them as Phase-2
+/// unrolled `for` loops at synth time. Returns true.
+bool runHWUnrollFor(mlir::ModuleOp M);
+
 /// Phase 5.6 Stage F — persistent fi-array lowering.
 ///
 /// Rewrites the canonical persistent-fi-array shift register

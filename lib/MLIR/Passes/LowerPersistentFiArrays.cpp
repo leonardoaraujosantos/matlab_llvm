@@ -317,8 +317,9 @@ bool rewriteOne(mlir::func::FuncOp F, int32_t Idx,
     llvm::SmallVector<mlir::Operation *, 4> SubReads;
     for (mlir::Operation *U : Get->getResult(0).getUsers()) {
       if (!isMatlabCallBuiltin(U, "matlab_mat_i64_subscript1_s") &&
-          !isMatlabCallBuiltin(U, "matlab_mat_u64_subscript1_s"))
+          !isMatlabCallBuiltin(U, "matlab_mat_u64_subscript1_s")) {
         return false;
+      }
       SubReads.push_back(U);
     }
     for (mlir::Operation *Sub : SubReads) {
@@ -330,7 +331,9 @@ bool rewriteOne(mlir::func::FuncOp F, int32_t Idx,
         return false;
       }
       int64_t K = (int64_t)KD;
-      if (K < 1 || K > N) return false;
+      if (K < 1 || K > N) {
+        return false;
+      }
       int32_t IdxK = Idx * 100 + (int32_t)(K - 1);
       mlir::OpBuilder SB(Sub);
       mlir::Value KConst = mlir::arith::ConstantOp::create(SB,
@@ -561,9 +564,10 @@ bool runLowerPersistentFiArrays(mlir::ModuleOp M) {
       if (Bk.PersistentFn.empty())
         Bk.PersistentFn = F.getSymName().str();
       if (!Bk.IsEmpty || !Bk.InitSet) continue;
-      (void)rewriteOne(F, Pair.first, Bk.Name, Bk.PersistentFn,
-                       Bk.IsEmpty, Bk.InitSet, Bk.RegularSets,
-                       Bk.Gets);
+      bool Ok = rewriteOne(F, Pair.first, Bk.Name, Bk.PersistentFn,
+                           Bk.IsEmpty, Bk.InitSet, Bk.RegularSets,
+                           Bk.Gets);
+      (void)Ok;
     }
   });
   return true;

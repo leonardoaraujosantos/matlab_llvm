@@ -1,5 +1,10 @@
 function y = mux_4to1_16bit(in0, in1, in2, in3, sel)
-    % #codegen
+    %#codegen
+    % hdl: port(in0, fi, signed, 16, 0)
+    % hdl: port(in1, fi, signed, 16, 0)
+    % hdl: port(in2, fi, signed, 16, 0)
+    % hdl: port(in3, fi, signed, 16, 0)
+    % hdl: port(sel, fi, unsigned, 8, 0)
     % Define que o código é para geração de HDL
     
     % Inicializa a saída com o mesmo tipo das entradas

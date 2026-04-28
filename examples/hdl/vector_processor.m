@@ -1,5 +1,10 @@
 function [mag_sq, dot_prod] = vector_processor(vec_a, vec_b)
     %#codegen
+    % Stage B (vector function args) infers vec_a and vec_b as
+    % 3-element fi vectors automatically from the body's `vec_a(1)`
+    % / `vec_a(2)` / `vec_a(3)` const-index reads + the explicit
+    % `fi(vec_a, ...)` re-cast (which establishes the spec). No
+    % `% hdl: port(...)` pragmas needed — the inference is enough.
     
     % vec_a, vec_b: Vetores de 3 elementos (16 bits, 8 frac)
     % mag_sq: Magnitude ao quadrado de vec_a

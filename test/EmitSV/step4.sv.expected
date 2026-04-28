@@ -13,9 +13,10 @@ module step4 (
         y_1 = '0;
         y = '0;
         y_1 = seed;
-        for (int i0_ = 1; i0_ <= 4; i0_ = i0_ + 1) begin
-            y_1 = y_1 + 16'sd1;
-        end
+        y_1 = y_1 + 16'sd1;
+        y_1 = y_1 + 16'sd1;
+        y_1 = y_1 + 16'sd1;
+        y_1 = y_1 + 16'sd1;
         y = y_1;
     end
 
