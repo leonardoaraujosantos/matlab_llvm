@@ -7,30 +7,27 @@ module mux_4to1_16bit (
     input  logic signed [15:0] in1,
     input  logic signed [15:0] in2,
     input  logic signed [15:0] in3,
-    input  logic signed [7:0] sel,
+    input  logic [7:0] sel,
     output logic signed [15:0] y
 );
 
     always_comb begin
         y = '0;
         y = 16'sd0;
-        if (sel == 0) begin
-            y = in0;
-        end else begin
-            if (sel == 1) begin
-                y = in1;
-            end else begin
-                if (sel == 2) begin
-                    y = in2;
-                end else begin
-                    if (sel == 3) begin
-                        y = in3;
-                    end else begin
-                        y = in0;
-                    end
-                end
+        unique case (sel)
+            0: begin
+                y = in0;
             end
-        end
+            1: begin
+                y = in1;
+            end
+            2: begin
+                y = in2;
+            end
+            default: begin
+                y = (sel == 3) ? in3 : in0;
+            end
+        endcase
     end
 
 endmodule

@@ -17,11 +17,7 @@ module sat_add (
         if (raw > 16'sd32000) begin
             y = 16'sd32000;
         end else begin
-            if (raw < -16'sd32000) begin
-                y = -16'sd32000;
-            end else begin
-                y = raw;
-            end
+            y = (raw < -16'sd32000) ? -16'sd32000 : raw;
         end
     end
 
