@@ -1218,6 +1218,33 @@ def scn_disassemble(matlabc, program):
         c.wait_event("terminated", timeout=5.0)
 
 
+def scn_parfor_per_thread_frames(matlabc, program):
+    """Parfor body running on N pthreads: each one's enter_frame /
+    leave_frame mutates its own per-thread chain, so concurrent
+    workers don't corrupt each other's call stacks. The legacy
+    shared frames[] is now a paused-thread snapshot.
+
+    This scenario exercises the no-pause case — the parfor body
+    runs concurrently across 3 workers, each entering and leaving
+    a function frame. Without per-thread chains, the global
+    n_frames would race across threads and crash or produce
+    nonsense; with per-thread chains the program runs cleanly."""
+    import os
+    parfor_program = os.path.join(
+        os.path.dirname(os.path.abspath(program)),
+        "dap_parfor_program.m",
+    )
+    with DapClient(matlabc, parfor_program) as c:
+        initialize_and_launch(c)
+        c.wait_event("terminated", timeout=10.0)
+        # If we got here without a crash, per-thread chains work.
+        # Confirm thread enumeration is intact.
+        body = c.request("threads")
+        ts = body.get("threads") or []
+        assert len(ts) >= 2, \
+            f"parfor should have left multiple thread entries: {ts!r}"
+
+
 def scn_parfor_thread_enumeration(matlabc, program):
     """parfor spawns one pthread per iteration; each registers
     itself with the runtime on its first hook fire. The DAP

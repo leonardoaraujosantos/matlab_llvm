@@ -717,19 +717,23 @@ helper variable is named `total` rather than `sum` for this reason.
   from stack slots), so a read-watch on a function local is
   silently invisible — read watchpoints work for script-scope
   variables only.
-- **Parfor / multi-thread debugging.** *Partial.* The runtime
+- **Parfor / multi-thread debugging.** *Done.* The runtime
   lazy-registers each pthread that calls into the debug API
-  (`matlab_dbg_thread_slot_locked` runs on every `matlab_dbg_hook`
-  entry) and assigns sequential ids: 1 = main worker, 2..N =
-  parfor workers in spawn order. The DAP `threads` request
-  enumerates them; `stopped` events name the originating thread.
-  v1 limitation: the frame stack itself (`frames[]` /
-  `frame_locals[]` / `n_frames`) is still shared across threads —
-  a bp inside a parfor body fires from the right thread id but
-  `stackTrace` reflects whatever thread most recently touched the
-  global stack. Per-thread frame chains are follow-up work; the
-  refactor would replace the global frame state with per-thread
-  slots keyed by `pthread_self()`.
+  (`matlab_dbg_thread_slot_locked` runs on every
+  `matlab_dbg_hook` entry) and assigns sequential ids: 1 = main
+  worker, 2..N = parfor workers in spawn order. Each thread now
+  owns its own frame chain (`thread_frames[i][]`,
+  `thread_n_frames[i]`, `thread_frame_locals[i][]`,
+  `thread_step_target_depth[i]`); concurrent parfor bodies
+  enter/leave their own stacks without corrupting each other.
+  When a thread pauses (line bp / data bp / keyboard / error),
+  the hook snapshots that thread's chain into the legacy shared
+  `frames[]` / `frame_locals[]` arrays so DAP inspectors that
+  read those directly see the *paused* thread's stack — no
+  inspector refactor needed. Step-target depth is also
+  per-thread, so a step in worker A doesn't fire when worker B
+  reaches its target depth. Capacity is 32 threads (table-full
+  reuses slot 0 for overflow rather than refusing to track).
 - **Instruction breakpoints.** Same root cause as memory — no
   byte-level addressing of the JIT image.
 - **Restart-frame / goto.** Need per-frame workspace snapshots and
@@ -848,7 +852,7 @@ Three ctest suites guard the debugging surface (all gated on
 
 - **`debug-dap-tests`** — spawns `matlabc -dap` as a subprocess and
   drives the protocol with a small Python client
-  (`test/Debug/dap_client.py`). Forty-two scenarios cover the
+  (`test/Debug/dap_client.py`). Forty-three scenarios cover the
   end-to-end surface:
 
   *Stepping & basic flow:*
@@ -1024,6 +1028,12 @@ Three ctest suites guard the debugging surface (all gated on
     plus one entry per parfor pthread ("parfor-1" / etc.). The
     runtime's `matlab_dbg_thread_slot_locked` lazy-registers
     each pthread on its first hook fire
+  - **`parfor_per_thread_frames`** — concurrent parfor body
+    executes a function call (enter_frame / leave_frame) on
+    three pthreads simultaneously. Without per-thread chains
+    the global `n_frames` would race; with per-thread chains
+    each worker mutates its own slot and the program runs
+    cleanly. Confirms thread enumeration survives
   - **`disassemble`** — verifies `supportsDisassembleRequest`
     is advertised, walks four instructions starting from the JIT
     main entry, and confirms each row has an address (`0x...`),

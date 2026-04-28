@@ -3588,7 +3588,18 @@ struct matlab_dbg_state {
      * Anything else is treated as no gate. */
     int hit_op[MATLAB_DBG_MAX_BREAKPOINTS];
 
-    /* Frame stack. Always at least one entry (the script / top level). */
+    /* Frame stack. The shared (cross-thread) frames[] array stays here
+     * for the legacy single-threaded DAP path, but per-thread frame
+     * chains (see thread_frames[] below) now own the source of
+     * truth in multi-threaded sessions.
+     *
+     * On first hook fire from a given thread, n_frames is copied into
+     * the thread's per-thread slot from this template. Subsequent
+     * enter_frame / leave_frame / frame_set_* mutate the thread's
+     * own slot. The shared frames[] is updated in lockstep with the
+     * paused-thread's chain so DAP inspectors that read frames[]
+     * directly (the legacy code paths) keep working — the
+     * paused-thread's view is what's exposed. */
     int n_frames;
     struct matlab_dbg_frame frames[MATLAB_DBG_MAX_FRAMES];
     /* Per-frame Locals. Index aligns with `frames[]`: frame 0 is the
@@ -3598,6 +3609,24 @@ struct matlab_dbg_state {
      * Frames 1..n-1 are user-function frames. Cleared on enter, freed
      * on leave. */
     struct matlab_dbg_frame_locals frame_locals[MATLAB_DBG_MAX_FRAMES];
+
+    /* Per-thread frame chain. `thread_keys[i]` is the pthread_t;
+     * `thread_n_frames[i]` / `thread_frames[i][]` /
+     * `thread_frame_locals[i][]` is that thread's own call-stack
+     * state. The thread registry (thread_keys / thread_ids /
+     * n_threads) above is the index. The hook reads/writes the
+     * calling thread's slot; the DAP inspector functions
+     * (frame_count / frame_at / frame_local_*) take an implicit
+     * thread idx via paused_thread_idx so the pause is reported
+     * against the right call stack.
+     *
+     * Capacity-32 matches the registry; per-thread MAX_FRAMES is
+     * the same as the shared frames[]. The memory cost is bounded
+     * (~32 * 32 * sizeof(matlab_dbg_frame)) so we just inline. */
+    int                          thread_n_frames[32];
+    struct matlab_dbg_frame      thread_frames[32][MATLAB_DBG_MAX_FRAMES];
+    struct matlab_dbg_frame_locals thread_frame_locals[32][MATLAB_DBG_MAX_FRAMES];
+    int32_t                      thread_step_target_depth[32];
 
     /* File-id <-> name table. Populated by matlab_dbg_register_file. */
     int n_files;
@@ -3658,6 +3687,14 @@ static struct matlab_dbg_state matlab_dbg = {
     .action = MATLAB_DBG_RUN,
 };
 
+/* Forward decls for the per-thread chain helpers — definitions
+ * live further down alongside enter_frame. Multiple call sites
+ * up here (err_snapshot_frames, watch_trip, keyboard_hook) need
+ * to consult the per-thread chain before its definition appears,
+ * so they're declared at the top of the matlab_dbg section. */
+static int matlab_dbg_thread_slot_locked(void);
+static int matlab_dbg_thread_init_chain_locked(void);
+
 /* Forward decl: defined alongside matlab_dbg_enter_frame below but
  * called from matlab_dbg_enable to clear any frame-locals state left
  * over from a prior launch. */
@@ -3692,6 +3729,11 @@ static void matlab_dbg_free_frame_locals(int frame_idx);
 static int matlab_err_n_frames = 0;
 static struct matlab_dbg_frame matlab_err_frames[MATLAB_DBG_MAX_FRAMES];
 
+/* Forward decl — defined later in the file. The error snapshot
+ * path and the hook both need it, but its body sits next to the
+ * other thread-chain helpers far below. */
+static int matlab_dbg_thread_init_chain_locked(void);
+
 static void matlab_err_snapshot_frames(void) {
     pthread_mutex_lock(&matlab_dbg.mu);
     /* Free any names retained from a previous error snapshot before
@@ -3700,17 +3742,22 @@ static void matlab_err_snapshot_frames(void) {
         free((char *)matlab_err_frames[i].fn_name);
         matlab_err_frames[i].fn_name = NULL;
     }
-    int n = matlab_dbg.n_frames;
+    /* Snapshot the calling thread's per-thread chain (post-refactor
+     * source of truth for frame state). The shared frames[] is now
+     * a paused-thread snapshot, refreshed only on hook pause; an
+     * error fired between pauses sees stale data there. The
+     * per-thread chain is always up-to-date because every
+     * enter_frame / leave_frame / hook fire from this thread
+     * touched it directly. */
+    int slot = matlab_dbg_thread_init_chain_locked();
+    int n = matlab_dbg.thread_n_frames[slot];
     if (n > MATLAB_DBG_MAX_FRAMES) n = MATLAB_DBG_MAX_FRAMES;
     for (int i = 0; i < n; ++i) {
-        matlab_err_frames[i].file_id = matlab_dbg.frames[i].file_id;
-        matlab_err_frames[i].line    = matlab_dbg.frames[i].line;
-        /* Dup the name so the snapshot survives the leave_frame calls
-         * that fire while the error unwinds the runtime frame stack.
-         * The script frame's name is a string literal ("<script>")
-         * that wasn't malloc'd, so we always dup to a uniformly-owned
-         * copy. */
-        const char *src = matlab_dbg.frames[i].fn_name;
+        matlab_err_frames[i].file_id =
+            matlab_dbg.thread_frames[slot][i].file_id;
+        matlab_err_frames[i].line =
+            matlab_dbg.thread_frames[slot][i].line;
+        const char *src = matlab_dbg.thread_frames[slot][i].fn_name;
         if (src) {
             size_t L = strlen(src);
             char *copy = (char *)malloc(L + 1);
@@ -3854,7 +3901,6 @@ const char *matlab_dbg_last_error_msg(int64_t *len_out) {
  * because the hook fires at the same statement. */
 /* Forward decl — defined alongside the thread enumeration helpers
  * further down. The keyboard / watch trip code below needs it. */
-static int matlab_dbg_thread_slot_locked(void);
 
 void matlab_dbg_keyboard_hook(void) {
     pthread_mutex_lock(&matlab_dbg.mu);
@@ -3862,15 +3908,26 @@ void matlab_dbg_keyboard_hook(void) {
         pthread_mutex_unlock(&matlab_dbg.mu);
         return;
     }
-    int thr_idx = matlab_dbg_thread_slot_locked();
+    int thr_idx = matlab_dbg_thread_init_chain_locked();
     /* Copy the innermost frame's (file_id, line) into the cur_*
      * fields so the DAP `stopped` event reports the keyboard call
-     * site. matlab_dbg_hook fired at the start of this same
-     * statement and already set frames[innermost], so this just
-     * promotes that to the pause-time fields. */
-    if (matlab_dbg.n_frames > 0) {
-        matlab_dbg.cur_file_id = matlab_dbg.frames[matlab_dbg.n_frames - 1].file_id;
-        matlab_dbg.cur_line    = matlab_dbg.frames[matlab_dbg.n_frames - 1].line;
+     * site, then snapshot the calling thread's per-thread chain
+     * into the shared frames[] view so DAP inspectors that read
+     * frames[]/frame_locals[] directly see the caller's stack
+     * (not whatever the last paused thread left). */
+    int n_thr = matlab_dbg.thread_n_frames[thr_idx];
+    if (n_thr > 0) {
+        matlab_dbg.cur_file_id =
+            matlab_dbg.thread_frames[thr_idx][n_thr - 1].file_id;
+        matlab_dbg.cur_line =
+            matlab_dbg.thread_frames[thr_idx][n_thr - 1].line;
+    }
+    int snap_n = n_thr > MATLAB_DBG_MAX_FRAMES ? MATLAB_DBG_MAX_FRAMES : n_thr;
+    matlab_dbg.n_frames = snap_n;
+    for (int i = 0; i < snap_n; ++i) {
+        matlab_dbg.frames[i] = matlab_dbg.thread_frames[thr_idx][i];
+        matlab_dbg.frame_locals[i] =
+            matlab_dbg.thread_frame_locals[thr_idx][i];
     }
     matlab_dbg.cur_bp_idx = -1;
     matlab_dbg.paused = 1;
@@ -4037,10 +4094,22 @@ static int matlab_dbg_watch_check_read(const char *name, int64_t name_len,
  * the DAP monitor wakes and emits a `stopped` event. Same pattern
  * as matlab_dbg_keyboard_hook. CALLER MUST HOLD matlab_dbg.mu. */
 static void matlab_dbg_watch_trip(int wp_idx) {
-    int thr_idx = matlab_dbg_thread_slot_locked();
-    if (matlab_dbg.n_frames > 0) {
-        matlab_dbg.cur_file_id = matlab_dbg.frames[matlab_dbg.n_frames - 1].file_id;
-        matlab_dbg.cur_line    = matlab_dbg.frames[matlab_dbg.n_frames - 1].line;
+    int thr_idx = matlab_dbg_thread_init_chain_locked();
+    int n_thr = matlab_dbg.thread_n_frames[thr_idx];
+    if (n_thr > 0) {
+        matlab_dbg.cur_file_id =
+            matlab_dbg.thread_frames[thr_idx][n_thr - 1].file_id;
+        matlab_dbg.cur_line =
+            matlab_dbg.thread_frames[thr_idx][n_thr - 1].line;
+    }
+    /* Snapshot calling thread's chain into shared frames[] for
+     * DAP inspectors. Same trick as matlab_dbg_hook on pause. */
+    int snap_n = n_thr > MATLAB_DBG_MAX_FRAMES ? MATLAB_DBG_MAX_FRAMES : n_thr;
+    matlab_dbg.n_frames = snap_n;
+    for (int i = 0; i < snap_n; ++i) {
+        matlab_dbg.frames[i] = matlab_dbg.thread_frames[thr_idx][i];
+        matlab_dbg.frame_locals[i] =
+            matlab_dbg.thread_frame_locals[thr_idx][i];
     }
     matlab_dbg.cur_bp_idx = -1;
     matlab_dbg.last_wp_idx = wp_idx;
@@ -4168,12 +4237,35 @@ void matlab_dbg_enable(int stop_on_entry) {
     matlab_dbg.paused_thread_idx = -1;
     /* Reset the thread registry on every launch so DAP threadIds
      * start fresh — a re-launch otherwise carries stale entries
-     * from the prior session into the IDE's threads pane. */
+     * from the prior session into the IDE's threads pane. Per-
+     * thread frame chains and Locals are cleared in lockstep. */
     matlab_dbg.n_threads = 0;
-    /* Clear any stale Locals captured during a previous launch (the
-     * dbg state is process-static and DAP can re-launch). */
+    /* Clear any stale Locals captured during a previous launch
+     * (both the legacy shared frame_locals[] and every per-thread
+     * slot). dbg state is process-static and DAP can re-launch. */
     for (int i = 0; i < MATLAB_DBG_MAX_FRAMES; ++i)
         matlab_dbg_free_frame_locals(i);
+    for (int t = 0; t < 32; ++t) {
+        matlab_dbg.thread_n_frames[t] = 0;
+        matlab_dbg.thread_step_target_depth[t] = 0;
+        for (int i = 0; i < MATLAB_DBG_MAX_FRAMES; ++i) {
+            struct matlab_dbg_frame_locals *fl =
+                &matlab_dbg.thread_frame_locals[t][i];
+            for (int e = 0; e < fl->n; ++e) free(fl->entries[e].name);
+            fl->n = 0;
+            /* Also free any heap-owned fn_name on stale frames so a
+             * re-launch doesn't leak the prior session's strings. */
+            char *owned =
+                (char *)matlab_dbg.thread_frames[t][i].fn_name;
+            if (owned && i > 0) {
+                /* Frame 0 is the literal "<script>" — never freed. */
+                free(owned);
+            }
+            matlab_dbg.thread_frames[t][i].fn_name = NULL;
+            matlab_dbg.thread_frames[t][i].file_id = 0;
+            matlab_dbg.thread_frames[t][i].line = 0;
+        }
+    }
     pthread_mutex_unlock(&matlab_dbg.mu);
 }
 
@@ -4468,6 +4560,22 @@ int matlab_dbg_get_pause_bp(void) {
 void matlab_dbg_resume(int action) {
     pthread_mutex_lock(&matlab_dbg.mu);
     matlab_dbg.action = (enum matlab_dbg_action)action;
+    /* Step targets are per-thread: a step in worker A must use
+     * worker A's depth, not whatever the legacy shared
+     * n_frames last got snapshotted to. We seed every thread's
+     * target depth from the currently-paused thread's depth so
+     * the resume kicks the right thread to the right place. */
+    int paused = matlab_dbg.paused_thread_idx;
+    if (paused >= 0 && paused < 32) {
+        int n = matlab_dbg.thread_n_frames[paused];
+        if (action == MATLAB_DBG_STEP_OVER)
+            matlab_dbg.thread_step_target_depth[paused] = n;
+        else if (action == MATLAB_DBG_STEP_OUT)
+            matlab_dbg.thread_step_target_depth[paused] = n - 1;
+    }
+    /* Legacy single-thread fallback: keep updating the shared
+     * step_target_depth so any unconverted single-threaded
+     * stepping path still reads a sane value. */
     if (action == MATLAB_DBG_STEP_OVER)
         matlab_dbg.step_target_depth = matlab_dbg.n_frames;
     else if (action == MATLAB_DBG_STEP_OUT)
@@ -4660,29 +4768,34 @@ void matlab_dbg_hook(int32_t file_id, int32_t line) {
         return;
     }
     /* Lazy-register the calling thread on first hook entry so the
-     * DAP server can enumerate it via `threads`. The thread is also
-     * recorded as the would-be paused-thread when `should_pause`
-     * flips below. */
-    int thr_idx = matlab_dbg_thread_slot_locked();
-    /* Update the innermost frame's line. */
-    if (matlab_dbg.n_frames > 0) {
-        matlab_dbg.frames[matlab_dbg.n_frames - 1].file_id = file_id;
-        matlab_dbg.frames[matlab_dbg.n_frames - 1].line = line;
+     * DAP server can enumerate it via `threads`. Also seeds the
+     * thread's per-thread frame chain with a `<script>` entry on
+     * first touch so frame[0].fn_name reads correctly. */
+    int thr_idx = matlab_dbg_thread_init_chain_locked();
+    int *thr_n = &matlab_dbg.thread_n_frames[thr_idx];
+    /* Update the innermost frame's line in the calling thread's
+     * own chain. Concurrent parfor workers each touch their own
+     * slot, so no cross-thread corruption. */
+    if (*thr_n > 0) {
+        matlab_dbg.thread_frames[thr_idx][*thr_n - 1].file_id = file_id;
+        matlab_dbg.thread_frames[thr_idx][*thr_n - 1].line = line;
     }
 
     int should_pause = 0;
     int matched_bp = -1;
-    /* Stepping: decide based on action + target depth. */
+    /* Stepping: decide based on action + the calling thread's own
+     * depth (step targets are per-thread; a step in worker A
+     * shouldn't fire when worker B reaches its target depth). */
     switch (matlab_dbg.action) {
     case MATLAB_DBG_STEP_IN:
         should_pause = 1;
         break;
     case MATLAB_DBG_STEP_OVER:
-        if (matlab_dbg.n_frames <= matlab_dbg.step_target_depth)
+        if (*thr_n <= matlab_dbg.thread_step_target_depth[thr_idx])
             should_pause = 1;
         break;
     case MATLAB_DBG_STEP_OUT:
-        if (matlab_dbg.n_frames <= matlab_dbg.step_target_depth)
+        if (*thr_n <= matlab_dbg.thread_step_target_depth[thr_idx])
             should_pause = 1;
         break;
     case MATLAB_DBG_STOP:
@@ -4737,6 +4850,27 @@ void matlab_dbg_hook(int32_t file_id, int32_t line) {
         matlab_dbg.cur_bp_idx = matched_bp;
         matlab_dbg.paused = 1;
         matlab_dbg.paused_thread_idx = thr_idx;
+        /* Snapshot the calling thread's frame chain into the
+         * shared frames[] / frame_locals[] arrays so DAP
+         * inspectors that still read those directly see the
+         * paused thread's stack. The legacy single-threaded
+         * accessors (matlab_dbg_frame_count / _frame_at /
+         * _frame_local_*) are unmodified — they read from
+         * frames[]/frame_locals[] which is now a snapshot view.
+         *
+         * Names are kept as-is (the per-thread chain owns them),
+         * so the snapshot is a shallow copy. The shared array's
+         * matlab_dbg_free_frame_locals path is no longer called
+         * during normal lifecycle — ownership stays with the
+         * per-thread arrays. */
+        int n = matlab_dbg.thread_n_frames[thr_idx];
+        if (n > MATLAB_DBG_MAX_FRAMES) n = MATLAB_DBG_MAX_FRAMES;
+        matlab_dbg.n_frames = n;
+        for (int i = 0; i < n; ++i) {
+            matlab_dbg.frames[i] = matlab_dbg.thread_frames[thr_idx][i];
+            matlab_dbg.frame_locals[i] =
+                matlab_dbg.thread_frame_locals[thr_idx][i];
+        }
         /* Signal the server that we're paused; wait for resume. */
         pthread_cond_broadcast(&matlab_dbg.cv_server);
         while (matlab_dbg.paused) {
@@ -4776,6 +4910,21 @@ static void matlab_dbg_free_frame_locals(int frame_idx) {
     fl->n = 0;
 }
 
+/* Resolve the calling thread's per-thread frame chain, lazily
+ * seeding it with a `<script>` entry on first touch so DAP
+ * inspectors always have a frame[0] to read. CALLER MUST HOLD
+ * matlab_dbg.mu. */
+static int matlab_dbg_thread_init_chain_locked(void) {
+    int slot = matlab_dbg_thread_slot_locked();
+    if (matlab_dbg.thread_n_frames[slot] == 0) {
+        matlab_dbg.thread_n_frames[slot] = 1;
+        matlab_dbg.thread_frames[slot][0].file_id = 0;
+        matlab_dbg.thread_frames[slot][0].line = 0;
+        matlab_dbg.thread_frames[slot][0].fn_name = "<script>";
+    }
+    return slot;
+}
+
 void matlab_dbg_enter_frame(const char *fn_name, int64_t name_len) {
     if (name_len < 0) name_len = 0;
     char *owned = (char *)malloc((size_t)name_len + 1);
@@ -4784,35 +4933,42 @@ void matlab_dbg_enter_frame(const char *fn_name, int64_t name_len) {
         owned[name_len] = '\0';
     }
     pthread_mutex_lock(&matlab_dbg.mu);
-    if (matlab_dbg.n_frames < MATLAB_DBG_MAX_FRAMES) {
-        /* Defensive reset of the slot we're about to occupy — a
-         * leave_frame on the previous tenant should have cleared it
-         * but a malformed enter/leave pairing would otherwise leak
-         * stale Locals into the new frame. */
-        matlab_dbg_free_frame_locals(matlab_dbg.n_frames);
-        matlab_dbg.frames[matlab_dbg.n_frames].fn_name = owned;
-        matlab_dbg.frames[matlab_dbg.n_frames].file_id = 0;
-        matlab_dbg.frames[matlab_dbg.n_frames].line = 0;
-        matlab_dbg.n_frames++;
+    /* Per-thread chain push. Each pthread (main worker, parfor
+     * workers) maintains its own call-stack so concurrent
+     * parfor-body enters don't trample each other. The shared
+     * frames[] is refreshed only when this thread pauses (in
+     * the hook) so DAP inspectors that still read frames[]
+     * directly see the paused thread's stack. */
+    int slot = matlab_dbg_thread_init_chain_locked();
+    int *pn = &matlab_dbg.thread_n_frames[slot];
+    if (*pn < MATLAB_DBG_MAX_FRAMES) {
+        struct matlab_dbg_frame_locals *fl =
+            &matlab_dbg.thread_frame_locals[slot][*pn];
+        for (int i = 0; i < fl->n; ++i) free(fl->entries[i].name);
+        fl->n = 0;
+        matlab_dbg.thread_frames[slot][*pn].fn_name = owned;
+        matlab_dbg.thread_frames[slot][*pn].file_id = 0;
+        matlab_dbg.thread_frames[slot][*pn].line = 0;
+        (*pn)++;
+    } else {
+        free(owned);  /* table full; drop the name we copied */
     }
     pthread_mutex_unlock(&matlab_dbg.mu);
 }
 
 void matlab_dbg_leave_frame(void) {
     pthread_mutex_lock(&matlab_dbg.mu);
-    if (matlab_dbg.n_frames > 1) {
-        matlab_dbg.n_frames--;
-        /* Free the name copy made on enter. The slot is unused now;
-         * a subsequent enter at this depth will allocate a fresh copy.
-         * Cast away const since we malloc'd it ourselves. */
-        char *owned = (char *)matlab_dbg.frames[matlab_dbg.n_frames].fn_name;
-        matlab_dbg.frames[matlab_dbg.n_frames].fn_name = NULL;
+    int slot = matlab_dbg_thread_init_chain_locked();
+    int *pn = &matlab_dbg.thread_n_frames[slot];
+    if (*pn > 1) {
+        (*pn)--;
+        char *owned = (char *)matlab_dbg.thread_frames[slot][*pn].fn_name;
+        matlab_dbg.thread_frames[slot][*pn].fn_name = NULL;
         free(owned);
-        /* Drop the Locals captured for this frame. Function-frame
-         * matrix pointers were borrowed from the JIT's slots and are
-         * about to go out of scope alongside the frame, so freeing the
-         * entries' names is the only resource we own. */
-        matlab_dbg_free_frame_locals(matlab_dbg.n_frames);
+        struct matlab_dbg_frame_locals *fl =
+            &matlab_dbg.thread_frame_locals[slot][*pn];
+        for (int i = 0; i < fl->n; ++i) free(fl->entries[i].name);
+        fl->n = 0;
     }
     pthread_mutex_unlock(&matlab_dbg.mu);
 }
@@ -4830,6 +4986,33 @@ void matlab_dbg_leave_frame(void) {
  * existing entry). The matrix pointer is stored as borrowed — the
  * matrix struct itself is owned by the JIT's slot or workspace and
  * survives at least until matlab_dbg_leave_frame fires. */
+/* Generic find-or-alloc operating on a caller-supplied
+ * frame_locals slot. Lets the per-thread frame_set_* path target
+ * its own thread's slot without going through the shared
+ * matlab_dbg.frame_locals[]. */
+static int matlab_dbg_frame_local_find_or_alloc_in(
+    struct matlab_dbg_frame_locals *fl,
+    const char *name, int64_t name_len) {
+    if (!fl) return -1;
+    for (int i = 0; i < fl->n; ++i) {
+        if (fl->entries[i].name_len == name_len &&
+            memcmp(fl->entries[i].name, name, (size_t)name_len) == 0)
+            return i;
+    }
+    if (fl->n >= MATLAB_DBG_MAX_LOCALS) return -1;
+    char *copy = (char *)malloc((size_t)name_len + 1);
+    if (!copy) return -1;
+    memcpy(copy, name, (size_t)name_len);
+    copy[name_len] = '\0';
+    int idx = fl->n++;
+    fl->entries[idx].name = copy;
+    fl->entries[idx].name_len = name_len;
+    fl->entries[idx].kind = 0;
+    fl->entries[idx].f64 = 0.0;
+    fl->entries[idx].ptr = NULL;
+    return idx;
+}
+
 static int matlab_dbg_frame_local_find_or_alloc(int frame_idx,
                                                  const char *name,
                                                  int64_t name_len) {
@@ -4856,21 +5039,35 @@ static int matlab_dbg_frame_local_find_or_alloc(int frame_idx,
     return idx;
 }
 
+/* Resolve the calling thread's innermost-frame frame_locals slot,
+ * lazily seeding the chain if this is the thread's first touch.
+ * Returns NULL if the chain is empty (n == 0) — caller drops the
+ * write silently in that case. */
+static struct matlab_dbg_frame_locals *
+matlab_dbg_thread_innermost_locals_locked(void) {
+    int slot = matlab_dbg_thread_init_chain_locked();
+    int n = matlab_dbg.thread_n_frames[slot];
+    if (n <= 0 || n > MATLAB_DBG_MAX_FRAMES) return NULL;
+    return &matlab_dbg.thread_frame_locals[slot][n - 1];
+}
+
 void matlab_dbg_frame_set_f64(const char *name, int64_t name_len, double v) {
     if (!name || name_len <= 0) return;
     pthread_mutex_lock(&matlab_dbg.mu);
-    /* The innermost live frame is at n_frames - 1. If n_frames is 0
-     * (no enter has fired and matlab_dbg_enable wasn't called either)
-     * silently drop — the caller is the JIT for code that runs before
-     * DAP attaches; we have nowhere safe to record the value. */
-    int idx = matlab_dbg_frame_local_find_or_alloc(
-        matlab_dbg.n_frames - 1, name, name_len);
-    if (idx >= 0) {
-        struct matlab_dbg_frame_locals *fl =
-            &matlab_dbg.frame_locals[matlab_dbg.n_frames - 1];
-        fl->entries[idx].kind = 0;
-        fl->entries[idx].f64 = v;
-        fl->entries[idx].ptr = NULL;
+    /* Write into the calling thread's innermost-frame slot. Per-
+     * thread storage means concurrent parfor workers' Locals don't
+     * trample each other's frames. The shared frame_locals[] is
+     * refreshed by the hook on pause via the snapshot-to-shared
+     * copy, so DAP inspectors see the paused thread's view. */
+    struct matlab_dbg_frame_locals *fl =
+        matlab_dbg_thread_innermost_locals_locked();
+    if (fl) {
+        int idx = matlab_dbg_frame_local_find_or_alloc_in(fl, name, name_len);
+        if (idx >= 0) {
+            fl->entries[idx].kind = 0;
+            fl->entries[idx].f64 = v;
+            fl->entries[idx].ptr = NULL;
+        }
     }
     /* Watchpoint check on frame-local writes. scope_hint=2 (frame).
      * Already inside the dbg mutex, so we call _watch_check /
@@ -4885,14 +5082,15 @@ void matlab_dbg_frame_set_f64(const char *name, int64_t name_len, double v) {
 void matlab_dbg_frame_set_mat(const char *name, int64_t name_len, void *mat) {
     if (!name || name_len <= 0) return;
     pthread_mutex_lock(&matlab_dbg.mu);
-    int idx = matlab_dbg_frame_local_find_or_alloc(
-        matlab_dbg.n_frames - 1, name, name_len);
-    if (idx >= 0) {
-        struct matlab_dbg_frame_locals *fl =
-            &matlab_dbg.frame_locals[matlab_dbg.n_frames - 1];
-        fl->entries[idx].kind = 1;
-        fl->entries[idx].ptr = mat;
-        fl->entries[idx].f64 = 0.0;
+    struct matlab_dbg_frame_locals *fl =
+        matlab_dbg_thread_innermost_locals_locked();
+    if (fl) {
+        int idx = matlab_dbg_frame_local_find_or_alloc_in(fl, name, name_len);
+        if (idx >= 0) {
+            fl->entries[idx].kind = 1;
+            fl->entries[idx].ptr = mat;
+            fl->entries[idx].f64 = 0.0;
+        }
     }
     if (matlab_dbg.enabled && matlab_dbg.n_wp > 0) {
         int wp = matlab_dbg_watch_check(name, name_len, /*scope_hint=*/2);
@@ -4908,14 +5106,15 @@ void matlab_dbg_frame_set_mat(const char *name, int64_t name_len, void *mat) {
 void matlab_dbg_frame_set_obj(const char *name, int64_t name_len, void *obj) {
     if (!name || name_len <= 0) return;
     pthread_mutex_lock(&matlab_dbg.mu);
-    int idx = matlab_dbg_frame_local_find_or_alloc(
-        matlab_dbg.n_frames - 1, name, name_len);
-    if (idx >= 0) {
-        struct matlab_dbg_frame_locals *fl =
-            &matlab_dbg.frame_locals[matlab_dbg.n_frames - 1];
-        fl->entries[idx].kind = 2;
-        fl->entries[idx].ptr = obj;
-        fl->entries[idx].f64 = 0.0;
+    struct matlab_dbg_frame_locals *fl =
+        matlab_dbg_thread_innermost_locals_locked();
+    if (fl) {
+        int idx = matlab_dbg_frame_local_find_or_alloc_in(fl, name, name_len);
+        if (idx >= 0) {
+            fl->entries[idx].kind = 2;
+            fl->entries[idx].ptr = obj;
+            fl->entries[idx].f64 = 0.0;
+        }
     }
     if (matlab_dbg.enabled && matlab_dbg.n_wp > 0) {
         int wp = matlab_dbg_watch_check(name, name_len, /*scope_hint=*/2);
