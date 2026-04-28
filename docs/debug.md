@@ -180,6 +180,7 @@ VS Code via a generic-DAP extension:
 | Hit-count breakpoints           | `setBreakpoints` `hitCondition` — accepts `N`, `==N`, `>=N`, `>N`, `%N`. Skip-counter lives in the runtime's bp table so the JIT cost of cond eval is paid only once the gate passes |
 | Data breakpoints (read / write / readWrite) | `dataBreakpointInfo` advertises all three access types and resolves a name to a stable dataId; `setDataBreakpoints` installs the watch. Write side: every `matlab_ws_set_*` and `matlab_dbg_frame_set_*` checks the watch list. Read side: `matlab_ws_get_f64` / `matlab_ws_get_mat` check too, with a lock-free n_wp==0 fast path so the JIT pays no measurable cost when no watches are armed. `stopped` events carry `reason: "data breakpoint"` and the watch's id in `hitBreakpointIds`. Limitation: function-frame reads bypass the runtime API (the JIT loads from stack slots directly), so a read-watch on a function local is silently invisible — script-scope reads only |
 | Memory inspection on matrices   | Matrix variable rows carry a `memoryReference` (hex-formatted data-buffer pointer); `readMemory` and `writeMemory` decode it back, validate against a server-side region table (only matrix data buffers are exposed — refuses arbitrary addresses), and stream cell bytes as base64. Reads past the buffer end report `unreadableBytes` instead of erroring. 1MB read cap per request |
+| Disassembly                     | `disassemble` walks JIT-emitted machine code instruction-by-instruction using the host triple's `MCDisassembler`. With no `memoryReference`, defaults to the JIT's `main` entry point. Each result row carries an address, raw bytes (hex), and printed asm. Decode failures emit a `.byte` recovery row and step forward 1 byte so a single bad byte doesn't collapse the response. Negative `instructionOffset` is refused (would need a backward-decoder for variable-length archs) |
 | Function breakpoints            | `setFunctionBreakpoints` resolves a name against the compiled function table and pins a line bp at the body's first statement. Class methods are registered under `MethodName`, `ClassName.MethodName`, and `ClassName/MethodName` so any form the user types resolves |
 | Breakpoint candidate lines      | `breakpointLocations` returns every bp-eligible line in a range (computed by an AST walker at compileProgram time) |
 | Exception breakpoints           | `setExceptionBreakpoints` with the `error` filter — runtime pauses on the first hook fired after `matlab_set_error` |
@@ -227,7 +228,7 @@ each so clients suppress the corresponding UI affordances.
 | Request                          | Reason                                                              |
 | -------------------------------- | ------------------------------------------------------------------- |
 | `stepBack`, `reverseContinue`    | Reverse stepping needs a state recorder the runtime does not include |
-| `disassemble`, `locations`       | Wiring LLVM's MCDisassembler against the JIT-emitted code is multi-day work; the `-emit-llvm -g \| clang \| lldb` path covers native-level debugging without it |
+| `locations`                      | No PC -> .m source mapping is maintained for JIT'd code; the `-emit-llvm -g \| clang \| lldb` path covers native-level debugging where source lines round-trip through DWARF |
 | `setDataBreakpoints`, `dataBreakpointInfo` | No workspace-store watcher (data breakpoints would need every `matlab_ws_set_*` to compare against a watch list) |
 | `setInstructionBreakpoints`      | The JIT exposes no public mapping from line to native PC            |
 | `restartFrame`                   | The runtime does not snapshot per-frame workspace at function entry |
@@ -689,9 +690,19 @@ helper variable is named `total` rather than `sum` for this reason.
   decode the hex pointer, validate against the registry to bound
   the I/O, and stream cell bytes as base64. Buffers we don't
   expose (the LLVM JIT image, complex matrices' parallel re/im
-  buffers) stay opaque. Disassembly remains refused — wiring
-  LLVM's MCDisassembler is multi-day work and the `-emit-llvm -g
-  \| clang \| lldb` path already covers native-level debugging.
+  buffers) stay opaque.
+- **Disassembly.** *Done.* `disassemble` uses the host triple's
+  `MCDisassembler` to walk JIT-emitted machine code instruction-
+  by-instruction. The disassembler holder (target, MCInfo,
+  MCRegisterInfo, MCInstrInfo, MCSubtargetInfo, MCContext,
+  MCDisassembler, MCInstPrinter) is built lazily on first
+  `disassemble` request — `InitializeNativeTargetDisassembler`
+  is deferred to first-use so it doesn't clash with MLIR's
+  startup target init. The default base address is
+  `Engine->lookup("main")` cached as `G.MainAddr` in the worker.
+  `locations` (PC -> source line) stays refused — we don't
+  maintain a JIT line table; the `-emit-llvm -g | clang | lldb`
+  path covers that need via DWARF.
 - **Data breakpoints (read / write / readWrite).** *Done.* The
   runtime carries a per-name watch table with an `wp_access` byte
   per entry. Write side: every `matlab_ws_set_*` and
@@ -837,7 +848,7 @@ Three ctest suites guard the debugging surface (all gated on
 
 - **`debug-dap-tests`** — spawns `matlabc -dap` as a subprocess and
   drives the protocol with a small Python client
-  (`test/Debug/dap_client.py`). Forty-one scenarios cover the
+  (`test/Debug/dap_client.py`). Forty-two scenarios cover the
   end-to-end surface:
 
   *Stepping & basic flow:*
@@ -1013,6 +1024,11 @@ Three ctest suites guard the debugging surface (all gated on
     plus one entry per parfor pthread ("parfor-1" / etc.). The
     runtime's `matlab_dbg_thread_slot_locked` lazy-registers
     each pthread on its first hook fire
+  - **`disassemble`** — verifies `supportsDisassembleRequest`
+    is advertised, walks four instructions starting from the JIT
+    main entry, and confirms each row has an address (`0x...`),
+    a hex-bytes string, and printed asm. Negative
+    `instructionOffset` comes back with a clear refusal
   - **`read_write_memory`** — using `dap_matrix_program.m`'s
     `A = [1 2 3; 4 5 6]`, exercises the matrix `memoryReference`
     field: reads the first 3 doubles via `readMemory` and

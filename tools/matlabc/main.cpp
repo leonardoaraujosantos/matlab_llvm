@@ -14,6 +14,21 @@
 #include "matlab/MLIR/Passes/Passes.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/ExecutionEngine/ExecutionEngine.h"
+/* MC layer for the DAP `disassemble` request — host-triple's
+ * disassembler tables turn JIT-emitted bytes back into text
+ * without a full lldb integration. */
+#include "llvm/MC/MCAsmInfo.h"
+#include "llvm/MC/MCContext.h"
+#include "llvm/MC/MCDisassembler/MCDisassembler.h"
+#include "llvm/MC/MCInst.h"
+#include "llvm/MC/MCInstPrinter.h"
+#include "llvm/MC/MCInstrInfo.h"
+#include "llvm/MC/MCRegisterInfo.h"
+#include "llvm/MC/MCSubtargetInfo.h"
+#include "llvm/MC/MCTargetOptions.h"
+#include "llvm/MC/TargetRegistry.h"
+#include "llvm/Support/TargetSelect.h"
+#include "llvm/TargetParser/Host.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinTypes.h"
@@ -1310,6 +1325,13 @@ int DebuggeeErrFd = -1;
 struct Shared {
   std::string ProgramPath;   /* absolute / CLI-supplied path */
   std::unique_ptr<mlir::ExecutionEngine> Engine;
+  /* JIT-resolved address of `main` — the first instruction of the
+   * compiled program. The DAP `disassemble` request uses this as
+   * the implicit base when the IDE asks to disassemble "from the
+   * top" (no memoryReference supplied). Set in workerMain right
+   * before the call, so it's available for any request that comes
+   * in while the worker is paused. */
+  void *MainAddr = nullptr;
   int32_t FileId = 1;
   pthread_t Worker;
   bool WorkerStarted = false;
@@ -2127,6 +2149,7 @@ bool compileProgram() {
 void *workerMain(void *) {
   auto FnOrErr = G.Engine->lookup("main");
   if (FnOrErr) {
+    G.MainAddr = (void *)*FnOrErr;
     using Thunk = int (*)(void);
     auto Fn = reinterpret_cast<Thunk>(*FnOrErr);
     (void)Fn();
@@ -2614,6 +2637,65 @@ std::string registerMatMemRef(void *Mraw) {
   return Buf;
 }
 
+/* Lazily-built disassembler holder for the DAP `disassemble`
+ * request. Construction is non-trivial (target lookup, MCInfo +
+ * MCRegisterInfo + MCInstrInfo + MCSubtargetInfo + AsmInfo +
+ * MCContext + MCDisassembler + MCInstPrinter all have to be
+ * created in dependency order), so we cache the whole stack on
+ * first request and reuse it.
+ *
+ * Single-target: the host triple is whatever the JIT is running
+ * on. We don't try to support cross-disassembly because the IDE
+ * is always asking about the in-process JIT'd code. */
+struct DisasmHolder {
+  bool Inited = false;
+  bool Available = false;
+  std::string ErrMsg;
+  std::unique_ptr<llvm::MCRegisterInfo> MRI;
+  std::unique_ptr<llvm::MCAsmInfo> MAI;
+  std::unique_ptr<llvm::MCInstrInfo> MII;
+  std::unique_ptr<llvm::MCSubtargetInfo> STI;
+  std::unique_ptr<llvm::MCContext> Ctx;
+  std::unique_ptr<llvm::MCDisassembler> Dis;
+  std::unique_ptr<llvm::MCInstPrinter> Printer;
+};
+DisasmHolder &disasmHolder() {
+  static DisasmHolder H;
+  if (H.Inited) return H;
+  H.Inited = true;
+  /* Lazy init — see runDap() comment. Idempotent. */
+  llvm::InitializeNativeTargetDisassembler();
+  std::string Triple = llvm::sys::getDefaultTargetTriple();
+  std::string LookupErr;
+  const llvm::Target *T = llvm::TargetRegistry::lookupTarget(Triple, LookupErr);
+  if (!T) {
+    H.ErrMsg = "MCTarget lookup failed for " + Triple + ": " + LookupErr;
+    return H;
+  }
+  H.MRI.reset(T->createMCRegInfo(Triple));
+  if (!H.MRI) { H.ErrMsg = "createMCRegInfo failed"; return H; }
+  llvm::MCTargetOptions MCOpts;
+  H.MAI.reset(T->createMCAsmInfo(*H.MRI, Triple, MCOpts));
+  if (!H.MAI) { H.ErrMsg = "createMCAsmInfo failed"; return H; }
+  H.MII.reset(T->createMCInstrInfo());
+  if (!H.MII) { H.ErrMsg = "createMCInstrInfo failed"; return H; }
+  H.STI.reset(T->createMCSubtargetInfo(
+      Triple, llvm::sys::getHostCPUName(), ""));
+  if (!H.STI) { H.ErrMsg = "createMCSubtargetInfo failed"; return H; }
+  H.Ctx.reset(new llvm::MCContext(
+      llvm::Triple(Triple), H.MAI.get(), H.MRI.get(), H.STI.get()));
+  H.Dis.reset(T->createMCDisassembler(*H.STI, *H.Ctx));
+  if (!H.Dis) { H.ErrMsg = "createMCDisassembler failed"; return H; }
+  /* Asm-printer flavour 0 is the target's default; AT&T-vs-Intel
+   * is x86-only and the current users don't care. */
+  H.Printer.reset(T->createMCInstPrinter(
+      llvm::Triple(Triple), /*SyntaxVariant=*/0,
+      *H.MAI, *H.MII, *H.MRI));
+  if (!H.Printer) { H.ErrMsg = "createMCInstPrinter failed"; return H; }
+  H.Available = true;
+  return H;
+}
+
 /* Inverse of the inline pointer-to-hex formatting in
  * registerMatMemRef. Returns nullptr on malformed input. */
 void *parseMemRef(const std::string &S) {
@@ -2921,7 +3003,7 @@ bool handleRequest(const Object &Msg) {
       {"supportsDataBreakpoints", true},
       {"supportsReadMemoryRequest", true},
       {"supportsWriteMemoryRequest", true},
-      {"supportsDisassembleRequest", false},
+      {"supportsDisassembleRequest", true},
       {"supportsInstructionBreakpoints", false},
       {"supportsSteppingGranularity", false},
       {"supportsCancelRequest", false},
@@ -4161,8 +4243,9 @@ bool handleRequest(const Object &Msg) {
         uint32_t H = 5381;
         for (char c : Nm) H = (H * 33u) ^ (uint8_t)c;
         int32_t Id = (int32_t)(H & 0x7FFFFFFFu);
-        bool OK = matlab_dbg_add_watchpoint(
-            Nm.data(), (int64_t)Nm.size(), /*scope=*/0, Id);
+        bool OK = matlab_dbg_add_watchpoint_ex(
+            Nm.data(), (int64_t)Nm.size(),
+            /*scope=*/0, Id, AccessKind);
         Object Out{{"verified", OK}};
         if (OK) Out["id"] = (int64_t)Id;
         else Out["message"] = "watchpoint table full";
@@ -4548,21 +4631,144 @@ bool handleRequest(const Object &Msg) {
     return true;
   }
 
-  if (*Cmd == "disassemble" || *Cmd == "locations") {
-    /* Disassembly proper would need to wire LLVM's MCDisassembler
-     * against the JIT'd code's address range — multi-day project
-     * (target machine setup, instruction printer, instruction-by-
-     * instruction stepping). The DWARF path (`matlabc -emit-llvm
-     * -g | clang | lldb`) already covers users who want native
-     * debugging; instruction-level inside the JIT-attached session
-     * is genuinely low-value for a MATLAB-level debugger. Stays
-     * refused. */
+  if (*Cmd == "disassemble") {
+    /* Walk JIT-emitted machine code instruction-by-instruction
+     * using the host triple's MCDisassembler. The IDE supplies
+     * a memoryReference (must be JIT-emitted code — we accept the
+     * `main` entry point we cached, plus any pointer the IDE has
+     * seen via a prior disassemble response) plus an instruction
+     * count. We disassemble forward from there until count is met
+     * or the next instruction fails to decode (we fall back to a
+     * `.byte` row in that case so the response stays well-formed).
+     *
+     * No bounds-checking against a "code region table" the way
+     * readMemory uses MemRegions — we don't track JIT'd code
+     * segment extents on the server side, so the IDE has to be
+     * sensible about its memoryReference. The disassembler will
+     * eventually fail gracefully on garbage bytes. */
+    DisasmHolder &H = disasmHolder();
+    if (!H.Available) {
+      sendResponse(ReqSeq, *Cmd, false,
+                   Value("disassembler unavailable: " + H.ErrMsg));
+      return true;
+    }
+    auto MRefOpt = Args->getString("memoryReference");
+    auto CountOpt = Args->getInteger("instructionCount");
+    if (!CountOpt) {
+      sendResponse(ReqSeq, *Cmd, false,
+                   Value("disassemble requires instructionCount"));
+      return true;
+    }
+    /* Default to the JIT main entry point when memoryReference is
+     * empty or missing — matches what users expect from a "show me
+     * the code" request without prior context. */
+    void *Base = nullptr;
+    if (MRefOpt && !MRefOpt->empty()) Base = parseMemRef(MRefOpt->str());
+    if (!Base) Base = G.MainAddr;
+    if (!Base) {
+      sendResponse(ReqSeq, *Cmd, false,
+                   Value("disassemble: no memoryReference and the JIT "
+                         "main entry isn't resolved yet (worker hasn't "
+                         "started)"));
+      return true;
+    }
+    int64_t Offset = Args->getInteger("offset").value_or(0);
+    int64_t InstrOffset =
+        Args->getInteger("instructionOffset").value_or(0);
+    int64_t Count = *CountOpt;
+    if (Count <= 0 || Count > 4096) Count = 4096;
+
+    auto *Cursor = (const uint8_t *)Base + Offset;
+    /* Forward-decode-then-skip is the cheapest way to honour
+     * instructionOffset: the disassembler is the source of truth
+     * for instruction lengths so we can't pre-compute a stride. */
+    Array Instrs;
+    auto emitInstr = [&](uint64_t Addr, llvm::ArrayRef<uint8_t> Bytes,
+                         const std::string &Text) {
+      char AddrBuf[32];
+      snprintf(AddrBuf, sizeof AddrBuf, "0x%llx",
+               (unsigned long long)Addr);
+      /* Convert stack buffers to std::string before stuffing them
+       * into the Object literal. llvm::json::Value's `const char *`
+       * brace-init overload picks StringRef (no copy), and the
+       * stack buffer goes away when this lambda returns —
+       * serialising later reads garbage. The std::string overload
+       * does copy. */
+      std::string AddrStr(AddrBuf);
+      std::string ByteStr;
+      for (size_t i = 0; i < Bytes.size(); ++i) {
+        char B[4];
+        snprintf(B, sizeof B, "%02x", Bytes[i]);
+        if (i) ByteStr += ' ';
+        ByteStr += B;
+      }
+      Instrs.push_back(Object{
+        {"address", std::move(AddrStr)},
+        {"instructionBytes", std::move(ByteStr)},
+        {"instruction", Text},
+      });
+    };
+    auto stepOne = [&](const uint8_t *&P, bool DoEmit) -> bool {
+      llvm::MCInst Inst;
+      uint64_t Sz = 0;
+      llvm::ArrayRef<uint8_t> View(P, /*max-x86-insn=*/15);
+      auto Result = H.Dis->getInstruction(Inst, Sz, View,
+                                            (uint64_t)(uintptr_t)P,
+                                            llvm::nulls());
+      if (Result == llvm::MCDisassembler::Success && Sz > 0) {
+        if (DoEmit) {
+          std::string TextBuf;
+          llvm::raw_string_ostream TS(TextBuf);
+          H.Printer->printInst(&Inst, (uint64_t)(uintptr_t)P, "",
+                                *H.STI, TS);
+          TS.flush();
+          /* Trim leading whitespace the printer's tab-prefix produces. */
+          size_t s = 0;
+          while (s < TextBuf.size() &&
+                 (TextBuf[s] == ' ' || TextBuf[s] == '\t')) ++s;
+          emitInstr((uint64_t)(uintptr_t)P,
+                    llvm::ArrayRef<uint8_t>(P, (size_t)Sz),
+                    TextBuf.substr(s));
+        }
+        P += Sz;
+        return true;
+      }
+      /* Decode failed — emit one .byte row so the IDE can still
+       * render something, and step forward by 1 to recover.
+       * Stops the response from collapsing to "everything failed"
+       * on a single un-decoded byte. */
+      if (DoEmit)
+        emitInstr((uint64_t)(uintptr_t)P,
+                  llvm::ArrayRef<uint8_t>(P, 1),
+                  ".byte (decode failed)");
+      P += 1;
+      return false;
+    };
+    /* Skip InstrOffset instructions before emitting (positive only;
+     * negative offsets would need a backward-decoder which is
+     * non-trivial on variable-length archs — refuse cleanly). */
+    if (InstrOffset < 0) {
+      sendResponse(ReqSeq, *Cmd, false,
+                   Value("disassemble: negative instructionOffset is "
+                         "unsupported (variable-length arch)"));
+      return true;
+    }
+    for (int64_t i = 0; i < InstrOffset; ++i) stepOne(Cursor, false);
+    for (int64_t i = 0; i < Count; ++i) stepOne(Cursor, true);
+    sendResponse(ReqSeq, *Cmd, true,
+                 Object{{"instructions", std::move(Instrs)}});
+    return true;
+  }
+
+  if (*Cmd == "locations") {
+    /* `locations` maps a memoryReference back to a Source +
+     * (line, column). We don't maintain a PC -> .m line table, so
+     * this stays refused. The DWARF emitted by `-emit-llvm -g`
+     * covers the native-debugging case for users who need that
+     * mapping. */
     sendResponse(ReqSeq, *Cmd, false,
-                 Value("disassembly is unsupported: wiring LLVM's "
-                       "MCDisassembler against the JIT-emitted code "
-                       "is out of scope for this build. The "
-                       "`-emit-llvm -g | clang | lldb` path covers "
-                       "native-level debugging if you need it"));
+                 Value("locations is unsupported: no PC -> .m source "
+                       "mapping is maintained for JIT'd code"));
     return true;
   }
 
@@ -4648,6 +4854,12 @@ bool handleRequest(const Object &Msg) {
 int runDap(const std::string &CLIPath) {
   llvm::InitializeNativeTarget();
   llvm::InitializeNativeTargetAsmPrinter();
+  /* The disassembler init is deferred to first use (see
+   * disasmHolder() below). On some LLVM builds calling it during
+   * startup interacts badly with MLIR's already-completed target
+   * registration and trips a SIGTRAP; deferring keeps startup
+   * clean and only pays the init cost when a `disassemble`
+   * request actually arrives. */
 
   /* Redirect stdout to a pipe so matlab_disp_* etc. from the JIT'd
    * program don't corrupt the DAP channel. */

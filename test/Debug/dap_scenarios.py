@@ -1153,6 +1153,71 @@ def scn_read_write_memory(matlabc, program):
         c.wait_event("terminated", timeout=5.0)
 
 
+def scn_disassemble(matlabc, program):
+    """`disassemble` walks JIT-emitted machine code instruction-by-
+    instruction using the host triple's MCDisassembler. With no
+    memoryReference supplied the request defaults to the JIT's
+    `main` entry point (the compiled program's first instruction);
+    each result row carries an address, the raw bytes (hex), and
+    the printed asm.
+
+    Capability `supportsDisassembleRequest` is advertised. The
+    underlying LLVM init is deferred to first use to avoid a
+    static-init clash with MLIR's target registration on this
+    LLVM build."""
+    with DapClient(matlabc, program) as c:
+        caps = c.request("initialize", {
+            "clientID": "matlabc-test",
+            "linesStartAt1": True,
+        })
+        assert caps.get("supportsDisassembleRequest"), \
+            f"disassemble caps not advertised: {caps}"
+        c.wait_event("initialized", timeout=5.0)
+        c.request("launch", {"program": program, "stopOnEntry": False})
+        c.request("setBreakpoints", {
+            "source": {"path": program},
+            "breakpoints": [{"line": 5}],
+        })
+        c.request("configurationDone")
+        c.wait_event("stopped", timeout=5.0)
+
+        # memoryReference="" defaults to the JIT main entry point.
+        body = c.request("disassemble", {
+            "memoryReference": "",
+            "instructionCount": 4,
+        })
+        instrs = body.get("instructions") or []
+        assert len(instrs) == 4, f"expected 4 instructions: {instrs!r}"
+        for ins in instrs:
+            addr = ins.get("address") or ""
+            bytes_hex = ins.get("instructionBytes") or ""
+            text = ins.get("instruction") or ""
+            assert addr.startswith("0x"), f"bad address: {ins!r}"
+            # Each byte is two hex chars, separated by spaces.
+            for tok in bytes_hex.split():
+                assert len(tok) == 2 and all(
+                    ch in "0123456789abcdef" for ch in tok), \
+                    f"bad bytes encoding: {bytes_hex!r}"
+            # Decoded text is non-empty (disassembler succeeded) or
+            # the explicit ".byte (decode failed)" recovery row.
+            assert text and (text != "" or "decode failed" in text), ins
+
+        # Negative instructionOffset is refused.
+        try:
+            c.request("disassemble", {
+                "memoryReference": "",
+                "instructionCount": 1,
+                "instructionOffset": -1,
+            })
+            raise AssertionError("negative offset should refuse")
+        except DapError as e:
+            assert "negative" in str(e).lower(), \
+                f"refusal should mention negative: {e}"
+
+        c.request("continue")
+        c.wait_event("terminated", timeout=5.0)
+
+
 def scn_parfor_thread_enumeration(matlabc, program):
     """parfor spawns one pthread per iteration; each registers
     itself with the runtime on its first hook fire. The DAP
@@ -1455,7 +1520,7 @@ def scn_unsupported_refusals(matlabc, program):
         initialize_and_launch(c, breakpoints=[{"line": 5}])
         _stop_event(c)
 
-        for cmd in ("stepBack", "reverseContinue", "disassemble",
+        for cmd in ("stepBack", "reverseContinue", "locations",
                     "setInstructionBreakpoints", "restartFrame",
                     "goto", "gotoTargets"):
             try:
