@@ -877,7 +877,7 @@ Three ctest suites guard the debugging surface (all gated on
 
 - **`debug-dap-tests`** — spawns `matlabc -dap` as a subprocess and
   drives the protocol with a small Python client
-  (`test/Debug/dap_client.py`). Forty-seven scenarios cover the
+  (`test/Debug/dap_client.py`). Fifty-one scenarios cover the
   end-to-end surface:
 
   *Stepping & basic flow:*
@@ -1088,10 +1088,44 @@ Three ctest suites guard the debugging surface (all gated on
     `line` field), and (b) the next stepBack refuses to cross
     out of `fact` into the script frame, returning
     `reason=entry`. Locks in the depth-aware boundary matching
-  - **`reverse_continue`** — same fixture; `reverseContinue`
-    walks the undo log back one statement and stops with
-    `reason=step` at line 7 (or `reason=entry` if the log was
-    already exhausted)
+  - **`reverse_continue_to_breakpoint`** — sets two bps (lines
+    6 and 8) in `dap_revstep_program.m`. Hits the line-8 bp
+    after continuing past line 6's first hit; `reverseContinue`
+    must walk back to the line-6 bp and stop with
+    `reason="breakpoint"` plus the matching `hitBreakpointIds`.
+    Catches the regression where `reverseContinue` had a
+    `break`-on-first-iteration in the bp scan loop and was
+    really just a single-step
+  - **`reverse_continue_to_entry`** — same fixture, only one bp
+    (line 8). `reverseContinue` walks the entire undo log back
+    and stops with `reason="entry"` plus the
+    `"reverseContinue: undo log exhausted"` description
+  - **`caret_consistency`** — drives `next` / `continue` /
+    `stepBack` against `examples/factorial.m` and asserts that
+    on every pause `stackTrace[0].line` agrees with the most
+    recent `stopped` event's `line`. The IDE renders its caret
+    from `stackTrace` (not the event line), so any path that
+    desyncs the two leaves the user looking at a stale row.
+    The helper `_assert_caret_consistent` is also called from
+    `scn_basic_breakpoint`, `scn_step_reason`, `scn_step_back`,
+    `scn_hit_count_breakpoint`, and
+    `scn_frame_scoped_conditional_breakpoint` so the invariant
+    has cross-feature coverage
+  - **`write_memory_visible_in_variables`** — after
+    `writeMemory` mutates the (1,1) cell of `A` to 7777.0 in
+    `dap_matrix_program.m`, expanding the `A` row through
+    `variables(matrixRef)` must read `(1,1) = "7777"`. Locks in
+    that the byte-level mutation isn't ghost-state in a shadow
+    buffer — the IDE's matrix view sees what `writeMemory`
+    wrote
+  - **`read_watch_on_frame_local_is_invisible`** — negative
+    test for a documented limitation: a read-only data
+    breakpoint on a function-frame-local name (`total` in
+    `compute(a, b)`) does NOT trip when the function reads
+    that local. Frame reads bypass the runtime API, so the
+    watch table never sees them. If a future lowering wires
+    frame reads into the watch path, this test fails and the
+    docs need updating
   - **`read_write_memory`** — using `dap_matrix_program.m`'s
     `A = [1 2 3; 4 5 6]`, exercises the matrix `memoryReference`
     field: reads the first 3 doubles via `readMemory` and

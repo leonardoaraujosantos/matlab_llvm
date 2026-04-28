@@ -49,6 +49,29 @@ def _abs(p):
     return os.path.realpath(p)
 
 
+def _assert_caret_consistent(client, expected_line, msg=""):
+    """The IDE's source caret comes from `stackTrace`, not from
+    the `stopped` event's `line` field. The factorial regression
+    showed these can diverge: `stopped.line=13` was correct but
+    stackTrace[0] still reported the pre-rewind `line=14`, so the
+    caret didn't move on screen even though the protocol said it
+    should.
+
+    Any scenario that asserts a stopped line should also call this
+    helper so the caret-consistency contract is checked, not just
+    the wire-level field. The helper queries stackTrace afresh
+    (no caching) since the contract is about what the IDE will
+    see when it asks."""
+    st = client.request("stackTrace", {"threadId": 1})
+    frames = st.get("stackFrames") or []
+    assert frames, \
+        f"stackTrace empty when expected line={expected_line} ({msg})"
+    top_line = frames[0].get("line")
+    assert top_line == expected_line, \
+        f"caret desync: stackTrace[0].line={top_line} vs " \
+        f"expected line={expected_line} ({msg})"
+
+
 # --- scenarios ---------------------------------------------------------------
 
 def scn_basic_breakpoint(matlabc, program):
@@ -64,6 +87,7 @@ def scn_basic_breakpoint(matlabc, program):
             f"expected reason=breakpoint, got {body!r}"
         assert body.get("line") == 5, \
             f"expected line=5, got {body!r}"
+        _assert_caret_consistent(c, 5, "basic bp stop")
         c.request("continue")
         c.wait_event("terminated", timeout=5.0)
 
@@ -83,12 +107,14 @@ def scn_step_reason(matlabc, program):
             f"first stop reason should be 'step', got {body!r}"
         assert body.get("line") == 4, \
             f"first stop should be at line 4, got {body!r}"
+        _assert_caret_consistent(c, 4, "first step pause")
         c.request("next")
         body = _stop_event(c)
         assert body.get("reason") == "step", \
             f"step-over stop reason should be 'step', got {body!r}"
         assert body.get("line") == 5, \
             f"second stop should be at line 5, got {body!r}"
+        _assert_caret_consistent(c, 5, "after next")
         c.request("continue")
         c.wait_event("terminated", timeout=5.0)
 
@@ -648,6 +674,7 @@ def scn_frame_scoped_conditional_breakpoint(matlabc, program):
         assert body.get("line") == 10, \
             f"frame-scoped cond should land at line 10: {body!r}"
         assert body.get("reason") == "breakpoint", body
+        _assert_caret_consistent(c, 10, "frame-scoped cond pause")
         c.request("continue")
         c.wait_event("terminated", timeout=5.0)
 
@@ -767,6 +794,7 @@ def scn_hit_count_breakpoint(matlabc, program):
         ev = c.wait_event("stopped", timeout=5.0)
         body = ev.get("body") or {}
         assert body.get("line") == 9, body
+        _assert_caret_consistent(c, 9, "hit-count bp pause")
 
         # Confirm the iteration counter — `i` should be 3.
         st = c.request("stackTrace", {"threadId": 1})
@@ -1210,6 +1238,7 @@ def scn_step_back(matlabc, program):
             f"stepBack #1 should report reason=step: {body!r}"
         assert body.get("line") == 7, \
             f"stepBack #1 should resume at line 7: {body!r}"
+        _assert_caret_consistent(c, 7, "stepBack #1")
         rows = _ws()
         assert rows == {"a": "100", "b": "200"}, \
             f"stepBack #1: c should be removed: {rows!r}"
@@ -1220,6 +1249,7 @@ def scn_step_back(matlabc, program):
         body = ev.get("body") or {}
         assert body.get("line") == 6, \
             f"stepBack #2 should resume at line 6: {body!r}"
+        _assert_caret_consistent(c, 6, "stepBack #2")
         rows = _ws()
         assert rows == {"a": "100"}, \
             f"stepBack #2: b should be removed: {rows!r}"
@@ -1230,6 +1260,7 @@ def scn_step_back(matlabc, program):
         body = ev.get("body") or {}
         assert body.get("line") == 5, \
             f"stepBack #3 should resume at line 5: {body!r}"
+        _assert_caret_consistent(c, 5, "stepBack #3")
         rows = _ws()
         assert rows == {}, \
             f"stepBack #3: a should be removed; workspace empty: {rows!r}"
@@ -1381,13 +1412,228 @@ def scn_step_back_inside_function(matlabc, program):
             pass
 
 
-def scn_reverse_continue(matlabc, program):
-    """`reverseContinue` walks the undo log back to the program
-    entry. From line 8 of dap_revstep_program.m, a single
-    reverseContinue stops at the previous statement (line 7) with
-    reason=step. (v1 reverseContinue stops at first successful
-    rewind rather than walking all the way; documented in the
-    handler comment.)"""
+def scn_write_memory_visible_in_variables(matlabc, program):
+    """A `writeMemory` mutation to a matrix data buffer must be
+    visible through the `variables` request — the same protocol
+    surface the IDE's Variables panel uses. Catches a regression
+    where writeMemory accidentally targets a shadow / cached copy
+    instead of the live buffer that variables() walks.
+
+    Uses dap_matrix_program.m's `A = [1 2 3; 4 5 6]`. We write
+    7777.0 into the (1,1) cell via writeMemory, then expand the
+    A row in `variables` and confirm the (1,1) child reads
+    "7777" — not "1"."""
+    import os
+    import base64
+    import struct
+    mat_program = os.path.join(
+        os.path.dirname(os.path.abspath(program)),
+        "dap_matrix_program.m",
+    )
+    with DapClient(matlabc, mat_program) as c:
+        initialize_and_launch(c, breakpoints=[{"line": 10}])
+        _stop_event(c)
+
+        st = c.request("stackTrace", {"threadId": 1})
+        sc = c.request("scopes", {"frameId": st["stackFrames"][0]["id"]})
+        body = c.request("variables",
+                         {"variablesReference": sc["scopes"][0]["variablesReference"]})
+        rows = {v["name"]: v for v in (body.get("variables") or [])}
+        a_row = rows.get("A")
+        assert a_row, f"A missing from script ws: {rows!r}"
+        mem_ref = a_row.get("memoryReference")
+        a_ref = a_row.get("variablesReference")
+        assert mem_ref and a_ref, f"A row should carry mem + var refs: {a_row!r}"
+
+        # Sanity: read (1,1) via variables before the mutation.
+        before = c.request("variables", {"variablesReference": a_ref})
+        before_cells = {v["name"]: v["value"] for v in (before.get("variables") or [])}
+        assert before_cells.get("(1,1)") == "1", \
+            f"pre-write (1,1) should be 1: {before_cells!r}"
+
+        # Write 7777.0 into the buffer's first 8 bytes.
+        body = c.request("writeMemory", {
+            "memoryReference": mem_ref,
+            "offset": 0,
+            "data": base64.b64encode(struct.pack("<d", 7777.0)).decode("ascii"),
+        })
+        assert body.get("bytesWritten") == 8, body
+
+        # Re-query variables on the SAME mat-ref. The cell view
+        # must reflect the mutation — no stale cache.
+        after = c.request("variables", {"variablesReference": a_ref})
+        after_cells = {v["name"]: v["value"] for v in (after.get("variables") or [])}
+        assert after_cells.get("(1,1)") == "7777", \
+            f"writeMemory mutation invisible via variables: " \
+            f"(1,1) reads {after_cells.get('(1,1)')!r}, " \
+            f"expected '7777': {after_cells!r}"
+
+        c.request("continue")
+        c.wait_event("terminated", timeout=5.0)
+
+
+def scn_read_watch_on_frame_local_is_invisible(matlabc, program):
+    """Negative test: documented limitation that read-watches on
+    function-frame-local variables are silently invisible. The
+    JIT lowers function-frame reads as direct slot loads (no
+    matlab_dbg_frame_local_get), so the runtime watch table
+    never gets consulted. Locks in this contract — if a future
+    change accidentally wires frame-local reads into the watch
+    path, the test fails and the docs need updating.
+
+    Uses dap_locals_program.m: `compute(a, b)` writes
+    `total = a + b;` on line 10 then reads `total` on line 11.
+    A read-only watch on `total` (script-scope by name) should
+    NOT trip — the function-frame read is invisible. The
+    program runs to completion with no extra `stopped` events."""
+    import os
+    locals_program = os.path.join(
+        os.path.dirname(os.path.abspath(program)),
+        "dap_locals_program.m",
+    )
+    with DapClient(matlabc, locals_program) as c:
+        c.request("initialize", {"clientID": "t", "linesStartAt1": True})
+        c.wait_event("initialized", timeout=5.0)
+        c.request("launch", {"program": locals_program, "stopOnEntry": False})
+        # Set a read-only data breakpoint on `total`. Inside
+        # compute() it's a frame local; the runtime watch table
+        # only fires on matlab_ws_get_*, which the JIT doesn't
+        # call for function locals.
+        c.request("setDataBreakpoints", {
+            "breakpoints": [{"dataId": "total", "accessType": "read"}],
+        })
+        c.request("configurationDone")
+
+        # No `stopped` event should arrive. If the read-watch
+        # accidentally started seeing frame-local reads (e.g. via
+        # a future lowering that emits matlab_dbg_frame_local_get
+        # mirror calls), the program would pause and this would
+        # fail.
+        c.expect_no_event("stopped", window=0.6)
+        c.wait_event("terminated", timeout=5.0)
+    """A `writeMemory` mutation to a matrix data buffer must be
+    visible through the `variables` request — the same protocol
+    surface the IDE's Variables panel uses. Catches a regression
+    where writeMemory accidentally targets a shadow / cached copy
+    instead of the live buffer that variables() walks.
+
+    Uses dap_matrix_program.m's `A = [1 2 3; 4 5 6]`. We write
+    7777.0 into the (1,1) cell via writeMemory, then expand the
+    A row in `variables` and confirm the (1,1) child reads
+    "7777" — not "1"."""
+    import os
+    import base64
+    import struct
+    mat_program = os.path.join(
+        os.path.dirname(os.path.abspath(program)),
+        "dap_matrix_program.m",
+    )
+    with DapClient(matlabc, mat_program) as c:
+        initialize_and_launch(c, breakpoints=[{"line": 10}])
+        _stop_event(c)
+
+        st = c.request("stackTrace", {"threadId": 1})
+        sc = c.request("scopes", {"frameId": st["stackFrames"][0]["id"]})
+        body = c.request("variables",
+                         {"variablesReference": sc["scopes"][0]["variablesReference"]})
+        rows = {v["name"]: v for v in (body.get("variables") or [])}
+        a_row = rows.get("A")
+        assert a_row, f"A missing from script ws: {rows!r}"
+        mem_ref = a_row.get("memoryReference")
+        a_ref = a_row.get("variablesReference")
+        assert mem_ref and a_ref, f"A row should carry mem + var refs: {a_row!r}"
+
+        # Sanity: read (1,1) via variables before the mutation.
+        before = c.request("variables", {"variablesReference": a_ref})
+        before_cells = {v["name"]: v["value"] for v in (before.get("variables") or [])}
+        assert before_cells.get("(1,1)") == "1", \
+            f"pre-write (1,1) should be 1: {before_cells!r}"
+
+        # Write 7777.0 into the buffer's first 8 bytes.
+        body = c.request("writeMemory", {
+            "memoryReference": mem_ref,
+            "offset": 0,
+            "data": base64.b64encode(struct.pack("<d", 7777.0)).decode("ascii"),
+        })
+        assert body.get("bytesWritten") == 8, body
+
+        # Re-query variables on the SAME mat-ref. The cell view
+        # must reflect the mutation — no stale cache.
+        after = c.request("variables", {"variablesReference": a_ref})
+        after_cells = {v["name"]: v["value"] for v in (after.get("variables") or [])}
+        assert after_cells.get("(1,1)") == "7777", \
+            f"writeMemory mutation invisible via variables: " \
+            f"(1,1) reads {after_cells.get('(1,1)')!r}, " \
+            f"expected '7777': {after_cells!r}"
+
+        c.request("continue")
+        c.wait_event("terminated", timeout=5.0)
+
+
+def scn_reverse_continue_to_breakpoint(matlabc, program):
+    """`reverseContinue` should walk the undo log back until it
+    hits a breakpoint (per DAP spec), not just one statement.
+    Two bps: lines 6 and 8 of dap_revstep_program.m. Hit line 8
+    by continuing past line 6's first hit, then reverseContinue
+    — must land on line 6 with reason="breakpoint" and the
+    earlier bp's hitBreakpointIds."""
+    import os
+    rs_program = os.path.join(
+        os.path.dirname(os.path.abspath(program)),
+        "dap_revstep_program.m",
+    )
+    with DapClient(matlabc, rs_program) as c:
+        c.request("initialize", {"clientID": "t", "linesStartAt1": True})
+        c.wait_event("initialized", timeout=5.0)
+        c.request("launch", {"program": rs_program, "stopOnEntry": False})
+        body = c.request("setBreakpoints", {
+            "source": {"path": rs_program},
+            "breakpoints": [{"line": 6}, {"line": 8}],
+        })
+        bps = body.get("breakpoints") or []
+        assert len(bps) == 2 and all(b.get("verified") for b in bps), bps
+        line6_id = bps[0].get("id")
+        line8_id = bps[1].get("id")
+        c.request("configurationDone")
+
+        # First pause: line 6 bp.
+        ev = c.wait_event("stopped", timeout=5.0)
+        body = ev.get("body") or {}
+        assert body.get("line") == 6 and body.get("reason") == "breakpoint", body
+
+        # Continue to second pause: line 8 bp.
+        c.request("continue")
+        ev = c.wait_event("stopped", timeout=5.0)
+        body = ev.get("body") or {}
+        assert body.get("line") == 8 and body.get("reason") == "breakpoint", body
+
+        # reverseContinue must walk back and land on line 6 with
+        # reason="breakpoint" — not stop at the next statement.
+        c.request("reverseContinue")
+        ev = c.wait_event("stopped", timeout=5.0)
+        body = ev.get("body") or {}
+        assert body.get("reason") == "breakpoint", \
+            f"reverseContinue with earlier bp should report " \
+            f"reason=breakpoint, got: {body!r}"
+        assert body.get("line") == 6, \
+            f"reverseContinue should land on the earlier bp " \
+            f"(line 6), got line={body.get('line')}: {body!r}"
+        assert body.get("hitBreakpointIds") == [line6_id], \
+            f"reverseContinue should surface the earlier bp's id, " \
+            f"got {body.get('hitBreakpointIds')!r} vs " \
+            f"line6_id={line6_id}: {body!r}"
+
+        c.request("continue")
+        try:
+            c.wait_event("terminated", timeout=5.0)
+        except DapError:
+            pass
+
+
+def scn_reverse_continue_to_entry(matlabc, program):
+    """`reverseContinue` with no earlier bp set walks the entire
+    undo log back and stops with reason="entry" plus a
+    description naming the exhausted-log condition."""
     import os
     rs_program = os.path.join(
         os.path.dirname(os.path.abspath(program)),
@@ -1407,15 +1653,85 @@ def scn_reverse_continue(matlabc, program):
         c.request("reverseContinue")
         ev = c.wait_event("stopped", timeout=5.0)
         body = ev.get("body") or {}
-        assert body.get("reason") in ("step", "entry"), \
-            f"reverseContinue should stop with reason=step|entry: {body!r}"
-        # First rewind step lands at line 7 (prior statement).
-        if body.get("reason") == "step":
-            assert body.get("line") == 7, \
-                f"reverseContinue first rewind should land at line 7: {body!r}"
+        assert body.get("reason") == "entry", \
+            f"reverseContinue with no earlier bp should report " \
+            f"reason=entry: {body!r}"
+        assert "exhausted" in (body.get("description") or "").lower(), \
+            f"entry stop should describe the empty-log condition: {body!r}"
 
         c.request("continue")
-        c.wait_event("terminated", timeout=5.0)
+        try:
+            c.wait_event("terminated", timeout=5.0)
+        except DapError:
+            pass
+
+
+def scn_caret_consistency(matlabc, program):
+    """Drives a sequence of next / stepBack / continue against
+    factorial.m and asserts that on every pause, stackTrace[0]'s
+    line matches the stopped event's line. This is the
+    class-of-bug catch the original factorial stepBack regression
+    needed: stopped.line was always correct, but stackTrace was
+    stale, and the IDE renders the caret from stackTrace.
+
+    Doesn't assert specific transitions — just the cross-source
+    invariant. If a future change makes any pause path forget to
+    refresh the per-thread frame chain, this scenario fails."""
+    import os
+    fact_program = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(program))),
+        "examples", "factorial.m",
+    )
+    if not os.path.exists(fact_program):
+        return
+    with DapClient(matlabc, fact_program) as c:
+        c.request("initialize", {"clientID": "t", "linesStartAt1": True})
+        c.wait_event("initialized", timeout=5.0)
+        c.request("launch", {"program": fact_program, "stopOnEntry": False})
+        c.request("setBreakpoints", {
+            "source": {"path": fact_program},
+            "breakpoints": [{"line": 14}],
+        })
+        c.request("configurationDone")
+
+        def _wait_and_check_caret(label):
+            ev = c.wait_event("stopped", timeout=10.0)
+            body = ev.get("body") or {}
+            line = body.get("line")
+            if line is None:
+                # reason="entry" / log-exhausted — no line to
+                # cross-check. Fine; helper would fail with no
+                # comparison target.
+                return body
+            _assert_caret_consistent(c, line, label)
+            return body
+
+        # Initial bp pause inside fact.
+        _wait_and_check_caret("initial breakpoint")
+
+        # next over `y = 1;` -> lands on line 17 (`end`) or wherever
+        # the lowering's hook positions the next stop. We don't
+        # care about the exact line, only that stackTrace agrees.
+        c.request("next")
+        _wait_and_check_caret("after next")
+
+        # continue past this fact() invocation, hit the bp again
+        # in the next recursive call.
+        c.request("continue")
+        _wait_and_check_caret("after continue (next bp hit)")
+
+        # stepBack: this is the path that originally desync'd.
+        c.request("stepBack")
+        body = _wait_and_check_caret("after stepBack")
+        # stepBack within the function should reach a step reason
+        # (or entry if the function had no prior boundary).
+        assert body.get("reason") in ("step", "entry"), body
+
+        c.request("continue")
+        try:
+            c.wait_event("terminated", timeout=10.0)
+        except DapError:
+            pass
 
 
 def scn_disassemble(matlabc, program):

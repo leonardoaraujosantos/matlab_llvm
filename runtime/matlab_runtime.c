@@ -5029,6 +5029,24 @@ int matlab_dbg_breakpoint_meta(int idx, const char **cond, int64_t *cond_len,
     return ok;
 }
 
+/* Iterate the runtime's active breakpoint table: returns (file_id,
+ * line) for breakpoint `idx`, or 0 on out-of-range. The DAP
+ * server's `reverseContinue` handler uses this to check whether a
+ * rewound line matches any active bp — `breakpoint_meta` above
+ * exposes the cond/log strings but not the source location, which
+ * is the bit reverseContinue actually needs. */
+int matlab_dbg_breakpoint_at(int idx, int32_t *file_id, int32_t *line) {
+    int ok = 0;
+    pthread_mutex_lock(&matlab_dbg.mu);
+    if (idx >= 0 && idx < matlab_dbg.n_bp) {
+        if (file_id) *file_id = matlab_dbg.bp_file[idx];
+        if (line)    *line    = matlab_dbg.bp_line[idx];
+        ok = 1;
+    }
+    pthread_mutex_unlock(&matlab_dbg.mu);
+    return ok;
+}
+
 void matlab_dbg_disable_condition(int idx) {
     pthread_mutex_lock(&matlab_dbg.mu);
     if (idx >= 0 && idx < matlab_dbg.n_bp)

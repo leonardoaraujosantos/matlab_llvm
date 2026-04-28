@@ -1161,6 +1161,9 @@ int  matlab_dbg_add_breakpoint_ex2(int32_t file_id, int32_t line,
 int  matlab_dbg_breakpoint_meta(int idx, const char **cond, int64_t *cond_len,
                                  const char **log, int64_t *log_len,
                                  int *disabled);
+/* Per-bp (file_id, line) accessor — used by reverseContinue to
+ * check whether a rewound line lands on an active bp. */
+int  matlab_dbg_breakpoint_at(int idx, int32_t *file_id, int32_t *line);
 void matlab_dbg_disable_condition(int idx);
 int  matlab_dbg_get_pause_bp(void);
 /* Per-frame Locals — written by the lowering's mirror calls in
@@ -4581,52 +4584,54 @@ bool handleRequest(const Object &Msg) {
 
   if (*Cmd == "reverseContinue") {
     /* Spec: "reverse-continue back to a breakpoint, exception, or
-     * the program start". v1 ships the simplest correct
-     * implementation: walk stepBack until we either run out of
-     * undo records or hit an irreversible-op marker. Honors line
-     * breakpoints too — the rewound line is checked against the
-     * runtime's bp table after each step; on a match we stop with
-     * reason="breakpoint". */
-    while (true) {
+     * the program start". Walk stepBack until one of:
+     *   - the rewound (file_id, line) matches an active breakpoint
+     *     -> stop with reason="breakpoint" + hitBreakpointIds
+     *   - stepBack returns Rc=-1 (irreversible op marker)
+     *     -> stop with reason="exception" + description
+     *   - stepBack returns Rc=0 (log exhausted)
+     *     -> stop with reason="entry" + description
+     *   - safety cap hit (10k iterations) — defensive against a
+     *     pathological undo log
+     *
+     * The bp scan uses matlab_dbg_breakpoint_at to read each
+     * (file_id, line) directly. Linear over n_bp on every rewound
+     * line; n_bp is small in practice. */
+    sendResponse(ReqSeq, *Cmd, true, Object{});
+    sendEvent("continued",
+              Object{{"threadId", (int64_t)1},
+                     {"allThreadsContinued", true}});
+    constexpr int RcBpHit = 1, RcIrrev = -1, RcEmpty = 0;
+    constexpr int SafetyCap = 10000;
+    for (int iter = 0; iter < SafetyCap; ++iter) {
       int32_t Fid = 0, Ln = 0;
       char Msg[256];
       Msg[0] = '\0';
       int Rc = matlab_dbg_step_back(&Fid, &Ln, Msg, sizeof Msg);
-      if (Rc == 1) {
-        /* Did we land on a bp line? Linear scan via the runtime's
-         * existing bp table is fine — n_bp is small. */
-        bool OnBp = false;
-        for (int i = 0; ; ++i) {
-          /* No public count accessor; abuse breakpoint_meta to
-           * iterate until it returns 0. */
-          const char *cond = nullptr; int64_t cl = 0;
-          const char *log  = nullptr; int64_t ll = 0;
-          int dis = 0;
-          if (!matlab_dbg_breakpoint_meta(i, &cond, &cl, &log, &ll, &dis))
-            break;
-          (void)cond; (void)cl; (void)log; (void)ll; (void)dis;
-          /* The meta API doesn't expose (file_id, line) per index.
-           * Fall back to "stop at every step" semantics for
-           * reverseContinue v1: stop at the first successful
-           * stepBack. Matches what users typically want from
-           * "rewind one statement at a time" anyway. */
-          (void)OnBp;
-          break;
+      if (Rc == RcBpHit) {
+        /* Did we land on a bp line? Walk every active bp and
+         * compare; first match wins. */
+        for (int i = 0;; ++i) {
+          int32_t BpFid = 0, BpLn = 0;
+          if (!matlab_dbg_breakpoint_at(i, &BpFid, &BpLn)) break;
+          if (BpFid == Fid && BpLn == Ln) {
+            Object Body{
+              {"reason", "breakpoint"},
+              {"threadId", (int64_t)1},
+              {"allThreadsStopped", true},
+              {"line", (int64_t)Ln},
+            };
+            Array Ids;
+            Ids.push_back(encodeBpId(BpFid, BpLn));
+            Body["hitBreakpointIds"] = std::move(Ids);
+            sendEvent("stopped", Value(std::move(Body)));
+            return true;
+          }
         }
-        sendResponse(ReqSeq, *Cmd, true, Object{});
-        sendEvent("continued",
-                  Object{{"threadId", (int64_t)1},
-                         {"allThreadsContinued", true}});
-        sendEvent("stopped", Object{
-          {"reason", "step"},
-          {"threadId", (int64_t)1},
-          {"allThreadsStopped", true},
-          {"line", (int64_t)Ln},
-        });
-        return true;
+        /* No bp hit — keep walking back. */
+        continue;
       }
-      if (Rc == -1) {
-        sendResponse(ReqSeq, *Cmd, true, Object{});
+      if (Rc == RcIrrev) {
         sendEvent("stopped", Object{
           {"reason", "exception"},
           {"description", std::string(Msg)},
@@ -4635,8 +4640,8 @@ bool handleRequest(const Object &Msg) {
         });
         return true;
       }
-      /* Rc == 0: log empty. Stop at the program start. */
-      sendResponse(ReqSeq, *Cmd, true, Object{});
+      /* Rc == RcEmpty: log exhausted; stop at program start. */
+      (void)RcEmpty;
       sendEvent("stopped", Object{
         {"reason", "entry"},
         {"description", "reverseContinue: undo log exhausted"},
@@ -4645,6 +4650,15 @@ bool handleRequest(const Object &Msg) {
       });
       return true;
     }
+    /* Safety cap exceeded — emit a stopped event so the IDE
+     * doesn't hang waiting on us. */
+    sendEvent("stopped", Object{
+      {"reason", "step"},
+      {"description", "reverseContinue: safety cap reached"},
+      {"threadId", (int64_t)1},
+      {"allThreadsStopped", true},
+    });
+    return true;
   }
   if (*Cmd == "readMemory") {
     /* Decode the memoryReference back to a buffer pointer and read
