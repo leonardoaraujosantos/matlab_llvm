@@ -1270,6 +1270,22 @@ int32_t matlab_dbg_paused_thread_id(void);
 int matlab_dbg_step_back(int32_t *out_file_id, int32_t *out_line,
                          char *out_msg, int64_t msg_cap);
 
+/* Rewound-state query + redo walker. After matlab_dbg_step_back,
+ * the JIT thread is still parked one statement past the rewound
+ * caret; the DAP server consults matlab_dbg_is_rewound on every
+ * forward step and, while true, routes through
+ * matlab_dbg_step_forward_redo instead of resuming the JIT. The
+ * redo function walks the undo log forward, re-applying each
+ * record's post-write state, until either a same-frame boundary
+ * is reached or the recorded future is exhausted (caught up to
+ * the JIT's parked position). Return values mirror step_back:
+ *    1 = landed on a boundary; out_file_id/out_line carry it.
+ *    0 = caught up — the caller should resume the JIT normally.
+ *   -1 = hit an irreversible-op marker (out_msg explains). */
+int matlab_dbg_is_rewound(void);
+int matlab_dbg_step_forward_redo(int32_t *out_file_id, int32_t *out_line,
+                                  char *out_msg, int64_t msg_cap);
+
 /* readMemory / writeMemory accessors. Hand out a memoryReference
  * (hex pointer string) per matrix-variable row; the DAP server
  * decodes it back to a buffer pointer for the read. Bounded by
@@ -4918,7 +4934,62 @@ bool handleRequest(const Object &Msg) {
                      {"allThreadsContinued", true}});
   };
 
+  /* Forward step in a rewound state: walk the recorded future
+   * via matlab_dbg_step_forward_redo instead of waking the JIT.
+   * The JIT is parked one statement past the rewound caret;
+   * resuming it directly would skip the rewound region (e.g.
+   * stepBack to line 17 → next lands at line 20 with line 19's
+   * writes applied, since that's where the JIT actually is).
+   * Returns:
+   *    1 → landed on a same-frame boundary; emit stopped event,
+   *        return true so the handler is done.
+   *    0 → caught up to the JIT's parked position; caller must
+   *        fall through to a normal matlab_dbg_resume(action).
+   *   -1 → hit an irreversible-op marker; surface the runtime's
+   *        message via the response and emit stopped at the
+   *        prior caret with reason="exception".
+   *
+   * For DAP `continue`: we loop redo-step until caught up (the
+   * full recorded future re-applies, no per-line bp checks
+   * during replay), then resume the JIT normally — the JIT will
+   * hit the next live bp from its parked position onward. */
+  auto emitStoppedAtRedo = [&](int32_t Ln) {
+    sendEvent("stopped", Object{
+      {"reason", "step"},
+      {"threadId", (int64_t)1},
+      {"allThreadsStopped", true},
+      {"line", (int64_t)Ln},
+    });
+  };
+
   if (*Cmd == "continue") {
+    /* Drain the redo log first so a continue after a stepBack
+     * gets the user back to live JIT execution before resuming. */
+    while (matlab_dbg_is_rewound()) {
+      int32_t Fid = 0, Ln = 0;
+      char Msg[256]; Msg[0] = '\0';
+      int Rc = matlab_dbg_step_forward_redo(&Fid, &Ln, Msg, sizeof Msg);
+      if (Rc == 0) break; /* caught up */
+      if (Rc == -1) {
+        /* Hit an irreversible marker: stop here with the runtime's
+         * message and let the user decide to stepBack or restart. */
+        sendResponse(ReqSeq, *Cmd, true,
+                     Object{{"allThreadsContinued", true}});
+        emitContinued();
+        sendEvent("stopped", Object{
+          {"reason", "exception"},
+          {"description", std::string(Msg)},
+          {"threadId", (int64_t)1},
+          {"allThreadsStopped", true},
+          {"line", (int64_t)Ln},
+        });
+        return true;
+      }
+      /* Rc == 1: a same-frame boundary. Keep replaying — the
+       * user asked for `continue`, not `next`. The replay does
+       * NOT re-trigger breakpoints on already-recorded lines;
+       * once we're caught up the JIT will hit the next live bp. */
+    }
     matlab_dbg_resume(CONTINUE);
     nudgeMonitor();
     sendResponse(ReqSeq, *Cmd, true,
@@ -4927,18 +4998,67 @@ bool handleRequest(const Object &Msg) {
     return true;
   }
   if (*Cmd == "next") {
+    if (matlab_dbg_is_rewound()) {
+      int32_t Fid = 0, Ln = 0;
+      char Msg[256]; Msg[0] = '\0';
+      int Rc = matlab_dbg_step_forward_redo(&Fid, &Ln, Msg, sizeof Msg);
+      if (Rc == 1) {
+        sendResponse(ReqSeq, *Cmd, true, Object{});
+        emitContinued();
+        emitStoppedAtRedo(Ln);
+        return true;
+      }
+      if (Rc == -1) {
+        sendResponse(ReqSeq, *Cmd, false,
+                     Value(std::string("next: ") + Msg));
+        return true;
+      }
+      /* Rc == 0: caught up. Fall through to JIT resume. */
+    }
     matlab_dbg_resume(STEP_OVER); nudgeMonitor();
     sendResponse(ReqSeq, *Cmd, true, Object{});
     emitContinued();
     return true;
   }
   if (*Cmd == "stepIn") {
+    if (matlab_dbg_is_rewound()) {
+      int32_t Fid = 0, Ln = 0;
+      char Msg[256]; Msg[0] = '\0';
+      int Rc = matlab_dbg_step_forward_redo(&Fid, &Ln, Msg, sizeof Msg);
+      if (Rc == 1) {
+        sendResponse(ReqSeq, *Cmd, true, Object{});
+        emitContinued();
+        emitStoppedAtRedo(Ln);
+        return true;
+      }
+      if (Rc == -1) {
+        sendResponse(ReqSeq, *Cmd, false,
+                     Value(std::string("stepIn: ") + Msg));
+        return true;
+      }
+    }
     matlab_dbg_resume(STEP_IN); nudgeMonitor();
     sendResponse(ReqSeq, *Cmd, true, Object{});
     emitContinued();
     return true;
   }
   if (*Cmd == "stepOut") {
+    if (matlab_dbg_is_rewound()) {
+      int32_t Fid = 0, Ln = 0;
+      char Msg[256]; Msg[0] = '\0';
+      int Rc = matlab_dbg_step_forward_redo(&Fid, &Ln, Msg, sizeof Msg);
+      if (Rc == 1) {
+        sendResponse(ReqSeq, *Cmd, true, Object{});
+        emitContinued();
+        emitStoppedAtRedo(Ln);
+        return true;
+      }
+      if (Rc == -1) {
+        sendResponse(ReqSeq, *Cmd, false,
+                     Value(std::string("stepOut: ") + Msg));
+        return true;
+      }
+    }
     matlab_dbg_resume(STEP_OUT); nudgeMonitor();
     sendResponse(ReqSeq, *Cmd, true, Object{});
     emitContinued();

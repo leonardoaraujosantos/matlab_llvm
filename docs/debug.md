@@ -699,15 +699,27 @@ helper variable is named `total` rather than `sum` for this reason.
   are removed via `matlab_struct_rmfield` so the rewound state
   matches the pre-write workspace exactly — no stale `x = 0`
   shadow. The DAP `stepBack` and `reverseContinue` handlers
-  drive this. Limitations: per-statement granularity (not
-  per-instruction); rewinding past the first statement returns
-  `reason=entry` with `description: "stepBack: undo log
-  exhausted"`. Irreversible ops can stamp a kind=4 marker that
-  stops the rewind cleanly — the runtime API
-  (`matlab_dbg_undo_record_irreversible`) exists, but `disp` /
-  `fprintf` don't yet stamp markers, so stepBack will currently
-  rewind past printed output silently. Wiring those call sites
-  is follow-up.
+  drive this. Each undo record carries BOTH the prior value (for
+  the rewind) and the post-write value (for the redo path), so
+  forward stepping after a stepBack walks the recorded future
+  via `matlab_dbg_step_forward_redo` instead of resuming the
+  JIT — the JIT stays parked at the hook where the user paused
+  before the rewind, and a "step forward after stepBack" replays
+  the recorded writes one statement at a time, no console
+  duplication, until the redo head catches up to the JIT's
+  parked position. At that point `rewound` clears and the next
+  forward step resumes the JIT for real. The DAP server
+  consults `matlab_dbg_is_rewound` from `next` / `stepIn` /
+  `stepOut` / `continue`; `continue` drains the redo log first
+  before resuming JIT execution. Limitations: per-statement
+  granularity (not per-instruction); rewinding past the first
+  statement returns `reason=entry` with `description: "stepBack:
+  undo log exhausted"`. Irreversible ops can stamp a kind=4
+  marker that stops both the rewind and the redo cleanly — the
+  runtime API (`matlab_dbg_undo_record_irreversible`) exists,
+  but `disp` / `fprintf` don't yet stamp markers, so stepBack
+  will currently rewind past printed output silently. Wiring
+  those call sites is follow-up.
 - **Memory inspection on matrices.** *Done.* Matrix variable rows
   carry a `memoryReference` pointing at the data buffer; the DAP
   server keeps a `MemRegions` registry of (ptr, byte_count) pairs
@@ -877,7 +889,7 @@ Three ctest suites guard the debugging surface (all gated on
 
 - **`debug-dap-tests`** — spawns `matlabc -dap` as a subprocess and
   drives the protocol with a small Python client
-  (`test/Debug/dap_client.py`). Fifty-one scenarios cover the
+  (`test/Debug/dap_client.py`). Fifty-five scenarios cover the
   end-to-end surface:
 
   *Stepping & basic flow:*
@@ -1088,6 +1100,42 @@ Three ctest suites guard the debugging surface (all gated on
     `line` field), and (b) the next stepBack refuses to cross
     out of `fact` into the script frame, returning
     `reason=entry`. Locks in the depth-aware boundary matching
+  - **`step_forward_back_forward`** — full
+    `bp(5) → next → next → stepBack → stepBack → next → next →
+    next` round trip on `dap_revstep_program.m`. Asserts that
+    forward steps after stepBack walk the redo log (caret + ws
+    advance through 5→6→7 with the captured post-write state)
+    and the JIT only resumes once the redo has caught up — the
+    third post-rewind `next` is the one that runs line 7 for
+    real and lands at line 8 with `c=300`. Locks in the
+    redo-after-rewind contract; before the redo log existed this
+    sequence "skipped" line 6 because the JIT was parked at line
+    7's hook all along
+  - **`step_forward_redo_overwrites`** —
+    `dap_revstep_overwrite_program.m` (`x = 1; x = 2; x = 3;
+    disp(x);`). Rewinds `x` through 3 → 2 → 1 → removed, then
+    forward steps replay the writes in order via the redo log
+    (1 → 2 → 3). Verifies each undo record carries both the
+    prior value (for stepBack) AND the post-write value (for
+    redo); without the post-write capture, redo would only see
+    the prior value of the most recent write
+  - **`continue_after_step_back_drains_redo`** —
+    `bp(5) → next → next → stepBack → stepBack → continue` with
+    a second bp at line 8. The `continue` must drain the redo
+    log all the way back to the JIT's parked position (so the
+    rewound writes are re-applied) before resuming JIT
+    execution. Final pause at the line-8 bp must show all three
+    writes (`a=100, b=200, c=300`) in the workspace; without the
+    drain, only the JIT's continuing writes would be visible and
+    the rewound region would silently disappear
+  - **`step_in_then_step_back`** — same factorial fixture, but
+    enters `fact` via `stepIn` from the `disp(fact(1))` site
+    (line 5) instead of via a function-line breakpoint. After
+    `stepIn → stepIn` lands at `fact:14`, two `stepBack`s walk
+    back to `fact:13` then refuse to cross the call boundary
+    (`reason=entry`, frame stays at `fact:13`). Confirms the
+    frame-crossing guard fires regardless of how the callee was
+    entered
   - **`reverse_continue_to_breakpoint`** — sets two bps (lines
     6 and 8) in `dap_revstep_program.m`. Hits the line-8 bp
     after continuing past line 6's first hit; `reverseContinue`

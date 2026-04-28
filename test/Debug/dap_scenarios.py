@@ -1412,6 +1412,328 @@ def scn_step_back_inside_function(matlabc, program):
             pass
 
 
+def scn_step_forward_back_forward(matlabc, program):
+    """Forward step after stepBack walks the recorded future via
+    the redo log instead of resuming the JIT thread (which is
+    parked one statement past the rewound caret). User-visible
+    contract: rewound caret + state + console output stay in
+    lockstep on the way back AND on the way forward; the JIT
+    only resumes once the redo catches up.
+
+    The redo path is exercised by `next`/`stepIn`/`continue`/
+    `stepOut` whenever matlab_dbg_is_rewound() reports true. Each
+    redo step re-applies the post-write state captured at the
+    original write (no JIT execution → no duplicate console
+    output, no side effects re-played) and stops at the next
+    same-frame statement boundary. When the redo head reaches the
+    snapshot of undo_head taken at the FIRST stepBack of the
+    sequence, `rewound` clears and the next forward step resumes
+    the JIT for real.
+
+    Sequence over dap_revstep_program.m (lines 5-8 are
+    `a=100; b=200; c=300; disp(c);`):
+
+      bp at 5      -> line=5  ws={}
+      next #1      -> line=6  ws={a:100}              (JIT runs line 5)
+      next #2      -> line=7  ws={a:100,b:200}        (JIT runs line 6)
+      stepBack #1  -> line=6  ws={a:100}              (b reverted)
+      stepBack #2  -> line=5  ws={}                   (a reverted)
+      next #3      -> line=6  ws={a:100}              (REDO replay,
+                                                        no JIT exec)
+      next #4      -> line=7  ws={a:100,b:200}        (REDO catches up)
+      next #5      -> line=8  ws={a:100,b:200,c:300}  (JIT resumes,
+                                                        runs line 7)
+
+    Before the redo log existed, `next #3` instead landed at
+    line 8 with `ws={c:300}` because the JIT had been parked at
+    line 7's hook and forward-stepping just resumed it from there
+    — confusing users into thinking line 6 had been silently
+    skipped. This test locks in the inverted contract."""
+    import os
+    rs_program = os.path.join(
+        os.path.dirname(os.path.abspath(program)),
+        "dap_revstep_program.m",
+    )
+    with DapClient(matlabc, rs_program) as c:
+        c.request("initialize", {"clientID": "t", "linesStartAt1": True})
+        c.wait_event("initialized", timeout=5.0)
+        c.request("launch", {"program": rs_program, "stopOnEntry": False})
+        c.request("setBreakpoints", {
+            "source": {"path": rs_program},
+            "breakpoints": [{"line": 5}],
+        })
+        c.request("configurationDone")
+
+        def _ws():
+            st = c.request("stackTrace", {"threadId": 1})
+            sc = c.request("scopes", {"frameId": st["stackFrames"][0]["id"]})
+            return _vars_by_name(c, ref=sc["scopes"][0]["variablesReference"])
+
+        def _step_assert(cmd, label, expected_line, expected_ws):
+            c.request(cmd)
+            ev = c.wait_event("stopped", timeout=5.0)
+            body = ev.get("body") or {}
+            assert body.get("line") == expected_line, \
+                f"{label}: expected line={expected_line}, got {body!r}"
+            _assert_caret_consistent(c, expected_line, label)
+            ws = _ws()
+            assert ws == expected_ws, \
+                f"{label}: expected ws={expected_ws!r}, got {ws!r}"
+
+        # bp at 5: paused before a=100 executes.
+        ev = c.wait_event("stopped", timeout=5.0)
+        assert (ev.get("body") or {}).get("line") == 5, ev
+        _assert_caret_consistent(c, 5, "initial bp")
+        assert _ws() == {}, f"bp@5 ws should be empty: {_ws()!r}"
+
+        # Forward via JIT execution.
+        _step_assert("next", "next #1",      6, {"a": "100"})
+        _step_assert("next", "next #2",      7, {"a": "100", "b": "200"})
+
+        # Two reverse steps.
+        _step_assert("stepBack", "stepBack #1", 6, {"a": "100"})
+        _step_assert("stepBack", "stepBack #2", 5, {})
+
+        # Forward steps now go through the redo log: each step
+        # re-applies the captured post-write state for one statement
+        # and lands at the next same-frame boundary, without resuming
+        # the JIT or re-emitting any console output.
+        _step_assert("next", "next #3 (redo)",       6, {"a": "100"})
+        _step_assert("next", "next #4 (redo catches up)",
+                     7, {"a": "100", "b": "200"})
+
+        # next #5 is past redo_cap — redo cleared, JIT resumes for real
+        # and runs line 7's body (c=300), pausing at line 8.
+        _step_assert("next", "next #5 (JIT resumes, runs line 7)",
+                     8, {"a": "100", "b": "200", "c": "300"})
+
+        c.request("continue")
+        c.wait_event("terminated", timeout=5.0)
+
+
+def scn_step_in_then_step_back(matlabc, program):
+    """stepIn followed by stepBack: stepBack stays inside the
+    callee frame and refuses to cross back into the caller, the
+    same guard scn_step_back_inside_function checks but reached
+    via stepIn instead of a function-line breakpoint.
+
+    Sequence over examples/factorial.m (line 5 is
+    `disp(fact(1));`; fact's body starts at line 13):
+
+      bp at 5             -> ('<script>', 5)
+      stepIn              -> ('fact', 13), ('<script>', 5)
+      stepIn #2           -> ('fact', 14), ('<script>', 5)
+      stepBack #1         -> ('fact', 13), ('<script>', 5)
+      stepBack #2         -> reason=entry, frame still ('fact', 13)
+    """
+    import os
+    fact_program = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(program))),
+        "examples", "factorial.m",
+    )
+    if not os.path.exists(fact_program):
+        # Skip cleanly when the example layout differs (e.g. a
+        # worktree without examples/).
+        return
+    with DapClient(matlabc, fact_program) as c:
+        c.request("initialize", {"clientID": "t", "linesStartAt1": True})
+        c.wait_event("initialized", timeout=5.0)
+        c.request("launch", {"program": fact_program, "stopOnEntry": False})
+        c.request("setBreakpoints", {
+            "source": {"path": fact_program},
+            "breakpoints": [{"line": 5}],
+        })
+        c.request("configurationDone")
+        ev = c.wait_event("stopped", timeout=10.0)
+        body = ev.get("body") or {}
+        assert body.get("line") == 5 and body.get("reason") == "breakpoint", body
+
+        def _frames():
+            st = c.request("stackTrace", {"threadId": 1})
+            return [(f.get("name"), f.get("line"))
+                    for f in (st.get("stackFrames") or [])]
+
+        frames = _frames()
+        assert frames[0][1] == 5, \
+            f"initial innermost frame should be at line 5: {frames!r}"
+
+        # stepIn: enter fact(1), pause at line 13 (`if n <= 1`).
+        c.request("stepIn")
+        ev = c.wait_event("stopped", timeout=5.0)
+        body = ev.get("body") or {}
+        assert body.get("line") == 13 and body.get("reason") == "step", body
+        frames = _frames()
+        assert frames[0] == ("fact", 13), \
+            f"after stepIn, innermost frame should be fact:13: {frames!r}"
+        # Caller frame still visible at the call site (line 5).
+        assert any(name != "fact" and ln == 5 for (name, ln) in frames[1:]), \
+            f"caller frame should remain visible at line 5: {frames!r}"
+
+        # stepIn #2: walk from `if n<=1` to the `y = 1` body.
+        c.request("stepIn")
+        ev = c.wait_event("stopped", timeout=5.0)
+        body = ev.get("body") or {}
+        assert body.get("line") == 14 and body.get("reason") == "step", body
+        frames = _frames()
+        assert frames[0] == ("fact", 14), \
+            f"after stepIn #2, innermost frame should be fact:14: {frames!r}"
+
+        # stepBack #1: rewind to fact:13. Stays inside the callee.
+        c.request("stepBack")
+        ev = c.wait_event("stopped", timeout=5.0)
+        body = ev.get("body") or {}
+        assert body.get("line") == 13 and body.get("reason") == "step", body
+        frames = _frames()
+        assert frames[0] == ("fact", 13), \
+            f"stepBack should stay inside fact, not cross back " \
+            f"to the script: {frames!r}"
+
+        # stepBack #2: would cross back into the caller's call
+        # site. The runtime refuses: reason=entry, frame stays
+        # at fact:13.
+        c.request("stepBack")
+        ev = c.wait_event("stopped", timeout=5.0)
+        body = ev.get("body") or {}
+        assert body.get("reason") == "entry", \
+            f"stepBack across the function-call boundary should " \
+            f"report reason=entry, not silently teleport up: {body!r}"
+        frames = _frames()
+        assert frames[0] == ("fact", 13), \
+            f"refused-cross stepBack should leave the frame at " \
+            f"fact:13: {frames!r}"
+
+        c.request("continue")
+        try:
+            c.wait_event("terminated", timeout=10.0)
+        except DapError:
+            pass
+
+
+def scn_step_forward_redo_overwrites(matlabc, program):
+    """Redo replay handles variables that get overwritten across
+    statements: each undo record carries both the prior value
+    (for stepBack) AND the post-write value (for redo). Without
+    the post-write capture, walking forward through the log would
+    only restore the *prior* value of the most recent write —
+    losing the actual progression.
+
+    Sequence over dap_revstep_overwrite_program.m (lines 1-4 are
+    `x=1; x=2; x=3; disp(x);`):
+
+      bp at 4    -> ws={x:3}
+      stepBack   -> ws={x:2}
+      stepBack   -> ws={x:1}
+      stepBack   -> ws={}
+      next       -> ws={x:1}    (redo replay of line 1's write)
+      next       -> ws={x:2}    (redo replay of line 2's write)
+      next       -> ws={x:3}    (redo replay of line 3's write — caught up)
+    """
+    import os
+    rs_program = os.path.join(
+        os.path.dirname(os.path.abspath(program)),
+        "dap_revstep_overwrite_program.m",
+    )
+    with DapClient(matlabc, rs_program) as c:
+        c.request("initialize", {"clientID": "t", "linesStartAt1": True})
+        c.wait_event("initialized", timeout=5.0)
+        c.request("launch", {"program": rs_program, "stopOnEntry": False})
+        c.request("setBreakpoints", {
+            "source": {"path": rs_program},
+            "breakpoints": [{"line": 4}],
+        })
+        c.request("configurationDone")
+        c.wait_event("stopped", timeout=5.0)
+
+        def _ws():
+            st = c.request("stackTrace", {"threadId": 1})
+            sc = c.request("scopes", {"frameId": st["stackFrames"][0]["id"]})
+            return _vars_by_name(c, ref=sc["scopes"][0]["variablesReference"])
+
+        assert _ws() == {"x": "3"}, _ws()
+
+        for cmd, expect in [
+            ("stepBack", {"x": "2"}),
+            ("stepBack", {"x": "1"}),
+            ("stepBack", {}),
+            ("next", {"x": "1"}),
+            ("next", {"x": "2"}),
+            ("next", {"x": "3"}),
+        ]:
+            c.request(cmd)
+            c.wait_event("stopped", timeout=5.0)
+            ws = _ws()
+            assert ws == expect, \
+                f"after {cmd}, expected ws={expect!r}, got {ws!r}"
+
+        c.request("continue")
+        c.wait_event("terminated", timeout=5.0)
+
+
+def scn_continue_after_step_back_drains_redo(matlabc, program):
+    """`continue` after `stepBack` must drain the redo log to
+    catch up to the JIT's parked position before resuming JIT
+    execution. Otherwise the JIT would execute one more
+    statement past the rewound caret immediately, the user
+    would see only ONE statement get re-executed, and the
+    program would terminate having "skipped" the rewound region.
+
+    Sequence over dap_revstep_program.m: bp at 5, walk to line 7,
+    then stepBack twice to line 5 (workspace empty), then
+    `continue`. The continue should:
+      1. Replay redo records all the way to redo_cap (catching up
+         to the JIT at line 7's hook). At this point ws has a, b
+         restored.
+      2. Resume the JIT, which runs line 7 (writes c=300) and
+         lines 8 (disp(c)).
+      3. Program terminates with all three writes visible in
+         the final state.
+    """
+    import os
+    rs_program = os.path.join(
+        os.path.dirname(os.path.abspath(program)),
+        "dap_revstep_program.m",
+    )
+    with DapClient(matlabc, rs_program) as c:
+        c.request("initialize", {"clientID": "t", "linesStartAt1": True})
+        c.wait_event("initialized", timeout=5.0)
+        c.request("launch", {"program": rs_program, "stopOnEntry": False})
+        c.request("setBreakpoints", {
+            "source": {"path": rs_program},
+            "breakpoints": [{"line": 5}, {"line": 8}],
+        })
+        c.request("configurationDone")
+        ev = c.wait_event("stopped", timeout=5.0)
+        assert (ev.get("body") or {}).get("line") == 5, ev
+
+        c.request("next")
+        c.wait_event("stopped", timeout=5.0)
+        c.request("next")
+        ev = c.wait_event("stopped", timeout=5.0)
+        assert (ev.get("body") or {}).get("line") == 7, ev
+
+        c.request("stepBack")
+        c.wait_event("stopped", timeout=5.0)
+        c.request("stepBack")
+        ev = c.wait_event("stopped", timeout=5.0)
+        assert (ev.get("body") or {}).get("line") == 5, ev
+
+        # Continue: redo drains, JIT resumes, program reaches
+        # the line-8 bp with all three writes applied.
+        c.request("continue")
+        ev = c.wait_event("stopped", timeout=5.0)
+        body = ev.get("body") or {}
+        assert body.get("line") == 8, \
+            f"continue should land at the line-8 bp: {body!r}"
+        st = c.request("stackTrace", {"threadId": 1})
+        sc = c.request("scopes", {"frameId": st["stackFrames"][0]["id"]})
+        ws = _vars_by_name(c, ref=sc["scopes"][0]["variablesReference"])
+        assert ws == {"a": "100", "b": "200", "c": "300"}, \
+            f"after continue past redo + JIT exec: {ws!r}"
+
+        c.request("continue")
+        c.wait_event("terminated", timeout=5.0)
+
+
 def scn_write_memory_visible_in_variables(matlabc, program):
     """A `writeMemory` mutation to a matrix data buffer must be
     visible through the `variables` request — the same protocol
@@ -2601,6 +2923,106 @@ def scn_class_instance_locals(matlabc, program):
         watch_props = _vars_by_name(c, ref=wref)
         assert watch_props.get("Id") == "101", watch_props
         assert watch_props.get("Balance") == "75", watch_props
+
+        c.request("continue")
+        c.wait_event("terminated", timeout=5.0)
+
+
+def scn_class_instance_disp_in_repl(matlabc, program):
+    """REPL evaluate of `disp(<obj>)` and bare `<obj>` used to SIGSEGV
+    matlabc: the REPL JIT compiles a fresh `disp(acc)` whose Sema can't
+    see the workspace's kind tags, types `acc` as a matrix, and lowers
+    to `matlab_disp_mat(<obj_ptr>)`. The runtime then dereferenced the
+    matlab_obj layout as a matlab_mat (rows/cols/data) and walked off
+    into garbage memory.
+
+    The fix maintains a runtime registry of live matlab_obj pointers
+    (every constructor call registers itself); matlab_disp_mat checks
+    the registry first and routes obj inputs through matlab_disp_obj,
+    which prints `ClassName with properties:` plus a property listing.
+
+    All three failure shapes are covered: REPL `disp(<obj>)`, REPL
+    bare `<obj>` (auto-displayed as `<name> = <value>`), and watch-mode
+    `disp(<obj>)` (which auto-promotes onto the same REPL path).
+    """
+    import os
+    cls_program = os.path.join(
+        os.path.dirname(os.path.abspath(program)),
+        "dap_class_program.m",
+    )
+    # Line 10 is `disp(p.Id);` — by then `acc` is constructed and
+    # `acc.deposit(25)` has run, so Balance == 75.
+    with DapClient(matlabc, cls_program) as c:
+        initialize_and_launch(c, breakpoints=[{"line": 10}])
+        _stop_event(c)
+
+        def collect_stdout(predicate, timeout=3.0):
+            import time
+            deadline = time.monotonic() + timeout
+            buf = []
+            while time.monotonic() < deadline:
+                try:
+                    ev = c.wait_event(
+                        "output",
+                        timeout=max(0.05, deadline - time.monotonic()),
+                    )
+                except DapError:
+                    break
+                body = ev.get("body") or {}
+                if body.get("category") == "stdout":
+                    buf.append(body.get("output", ""))
+                    if predicate("".join(buf)):
+                        break
+            return "".join(buf)
+
+        # 1) REPL `disp(acc)` — must not crash; output must include the
+        #    class name and the live property values.
+        resp = c.request("evaluate", {
+            "expression": "disp(acc)",
+            "context": "repl",
+        })
+        assert resp.get("result", "") == "", \
+            f"REPL disp(<obj>) returns empty result, got {resp!r}"
+        out = collect_stdout(lambda s: "Account" in s and "75" in s)
+        assert "Account" in out, f"disp(acc) output missing class name: {out!r}"
+        assert "Id: 101" in out, f"disp(acc) output missing Id: {out!r}"
+        assert "Balance: 75" in out, f"disp(acc) output missing Balance: {out!r}"
+        assert c.proc.poll() is None, "matlabc crashed after disp(acc) in REPL"
+
+        # 2) REPL bare `acc` — auto-displays as `acc = <value>`. Same
+        #    crash class as (1), different lowering path.
+        resp = c.request("evaluate", {
+            "expression": "acc",
+            "context": "repl",
+        })
+        assert resp.get("result", "") == "", \
+            f"REPL bare <obj> returns empty result, got {resp!r}"
+        out = collect_stdout(lambda s: "Account" in s and "Balance" in s)
+        assert "Account" in out, f"bare acc output missing class name: {out!r}"
+        assert "Balance: 75" in out, f"bare acc output missing Balance: {out!r}"
+        assert c.proc.poll() is None, "matlabc crashed after bare acc in REPL"
+
+        # 3) Watch-mode `disp(acc)` — auto-promotes onto the REPL branch
+        #    (disp is in the void-statement list) and previously crashed
+        #    via the same matlab_disp_mat path. The watch response
+        #    surfaces "<void>" while the actual print flows via stdout.
+        resp = c.request("evaluate", {"expression": "disp(acc)"})
+        assert resp.get("result") == "<void>", \
+            f"watch disp(<obj>) should auto-promote to <void>: {resp!r}"
+        out = collect_stdout(lambda s: "Account" in s and "Balance" in s)
+        assert "Account" in out, f"watch disp(acc) output missing class: {out!r}"
+        assert c.proc.poll() is None, "matlabc crashed after watch disp(acc)"
+
+        # 4) Subclass instance prints under its own class name and
+        #    surfaces its own added property (Rate).
+        resp = c.request("evaluate", {
+            "expression": "disp(sav)",
+            "context": "repl",
+        })
+        out = collect_stdout(lambda s: "Savings" in s and "0.1" in s)
+        assert "Savings" in out, f"disp(sav) output missing class name: {out!r}"
+        assert "Rate: 0.1" in out, f"disp(sav) output missing Rate: {out!r}"
+        assert c.proc.poll() is None, "matlabc crashed after disp(sav)"
 
         c.request("continue")
         c.wait_event("terminated", timeout=5.0)
