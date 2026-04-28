@@ -16,8 +16,6 @@ module vector_proc3 (
     always_comb begin
         mag_sq = '0;
         dot_prod = '0;
-        // Dot product
-        // Magnitude squared
         mag_sq = ((a1 * a1) + (a2 * a2)) + (a3 * a3);
         dot_prod = ((a1 * b1) + (a2 * b2)) + (a3 * b3);
     end

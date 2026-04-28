@@ -24,8 +24,11 @@ module mux_4to1_16bit (
             2: begin
                 y = in2;
             end
+            3: begin
+                y = in3;
+            end
             default: begin
-                y = (sel == 3) ? in3 : in0;
+                y = in0;
             end
         endcase
     end

@@ -488,6 +488,16 @@ bool rewriteFiCallBuiltin(Operation *Op, ModuleOp M) {
     ResTy = LLVM::LLVMVoidType::get(B.getContext());
   auto Fn = getOrInsertRTDecl(B, M, Callee.getValue(), ResTy, ArgTys);
   auto Call = LLVM::CallOp::create(B, L, Fn, Op->getOperands());
+  // Forward persistent_name / persistent_fn through the conversion so
+  // Stage F's per-element rewrite (LowerPersistentFiArrays) can build
+  // user-readable register names like `delay_line_0` instead of
+  // falling back to the synthetic `buf<idx>_<k>`. Same convention
+  // LowerTensorOps follows for the scalar `_global_set_f64` /
+  // `_global_get_f64` variants.
+  if (auto PN = Op->getAttrOfType<StringAttr>("persistent_name"))
+    Call->setAttr("persistent_name", PN);
+  if (auto PF = Op->getAttrOfType<StringAttr>("persistent_fn"))
+    Call->setAttr("persistent_fn", PF);
   if (Op->getNumResults() == 1 && !isa<LLVM::LLVMVoidType>(ResTy)) {
     Op->getResult(0).replaceAllUsesWith(Call.getResult());
   }

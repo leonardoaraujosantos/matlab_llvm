@@ -24,26 +24,26 @@ module fir_asic_pipelined (
     logic signed [63:0] v8_1;
     logic signed [63:0] full_res;
     logic signed [63:0] v9_1;
-    logic signed [31:0] buf1_2;
-    logic signed [31:0] buf1_2_next;
-    logic signed [15:0] buf0_0;
-    logic signed [15:0] buf0_0_next;
+    logic signed [31:0] reg_products_2;
+    logic signed [31:0] reg_products_2_next;
+    logic signed [15:0] delay_line_0;
+    logic signed [15:0] delay_line_0_next;
     logic signed [35:0] reg_acc;
     logic signed [35:0] reg_acc_next;
-    logic signed [15:0] buf0_2;
-    logic signed [15:0] buf0_2_next;
-    logic signed [31:0] buf1_1;
-    logic signed [31:0] buf1_1_next;
-    logic signed [31:0] buf1_3;
-    logic signed [31:0] buf1_3_next;
-    logic signed [15:0] buf0_1;
-    logic signed [15:0] buf0_1_next;
+    logic signed [15:0] delay_line_2;
+    logic signed [15:0] delay_line_2_next;
+    logic signed [31:0] reg_products_1;
+    logic signed [31:0] reg_products_1_next;
+    logic signed [31:0] reg_products_3;
+    logic signed [31:0] reg_products_3_next;
+    logic signed [15:0] delay_line_1;
+    logic signed [15:0] delay_line_1_next;
     logic signed [15:0] reg_output;
     logic signed [15:0] reg_output_next;
-    logic signed [15:0] buf0_3;
-    logic signed [15:0] buf0_3_next;
-    logic signed [31:0] buf1_0;
-    logic signed [31:0] buf1_0_next;
+    logic signed [15:0] delay_line_3;
+    logic signed [15:0] delay_line_3_next;
+    logic signed [31:0] reg_products_0;
+    logic signed [31:0] reg_products_0_next;
 
     always_comb begin
         acc_temp = '0;
@@ -58,29 +58,19 @@ module fir_asic_pipelined (
         v8_1 = '0;
         full_res = '0;
         v9_1 = '0;
-        buf1_2_next = buf1_2;
-        buf0_0_next = buf0_0;
+        reg_products_2_next = reg_products_2;
+        delay_line_0_next = delay_line_0;
         reg_acc_next = reg_acc;
-        buf0_2_next = buf0_2;
-        buf1_1_next = buf1_1;
-        buf1_3_next = buf1_3;
-        buf0_1_next = buf0_1;
+        delay_line_2_next = delay_line_2;
+        reg_products_1_next = reg_products_1;
+        reg_products_3_next = reg_products_3;
+        delay_line_1_next = delay_line_1;
         reg_output_next = reg_output;
-        buf0_3_next = buf0_3;
-        buf1_0_next = buf1_0;
+        delay_line_3_next = delay_line_3;
+        reg_products_0_next = reg_products_0;
         y = '0;
         ovfl = '0;
         // Tipos de dados constantes
-        // --- REGISTRADORES (PERSISTENT) ---
-        // Estágio 0: Entradas
-        // Estágio 1: Após Multiplicações
-        // Estágio 2: Após Soma (Filtro)
-        // Estágio 3: Após Ganho e Saturação
-        // --- ESTÁGIO 1: Shift Register e Multiplicação ---
-        // --- ESTÁGIO 2: Acumulação (Soma) ---
-        // O valor de 'acc' é guardado em um registrador para o próximo ciclo
-        // --- ESTÁGIO 3: Ganho e Saturação ---
-        // Saídas
         v0_1[0] = 16'sd0;
         v0_1[1] = 16'sd0;
         v0_1[2] = 16'sd0;
@@ -89,40 +79,45 @@ module fir_asic_pipelined (
         v0_1[1] = 16'sd6553;
         v0_1[2] = 16'sd9830;
         v0_1[3] = 16'sd13107;
+        // Estágio 3: Após Ganho e Saturação
         if (reset) begin
-            buf0_0_next = 16'sd0;
-            buf0_1_next = 16'sd0;
-            buf0_2_next = 16'sd0;
-            buf0_3_next = 16'sd0;
-            buf1_0_next = 32'sd0;
-            buf1_1_next = 32'sd0;
-            buf1_2_next = 32'sd0;
-            buf1_3_next = 32'sd0;
+            delay_line_0_next = 16'sd0;
+            delay_line_1_next = 16'sd0;
+            delay_line_2_next = 16'sd0;
+            delay_line_3_next = 16'sd0;
+            reg_products_0_next = 32'sd0;
+            reg_products_1_next = 32'sd0;
+            reg_products_2_next = 32'sd0;
+            reg_products_3_next = 32'sd0;
             reg_acc_next = 36'(64'sd0);
             reg_output_next = 16'sd0;
         end
-        buf0_0_next = x;
-        buf0_1_next = 16'(buf0_0);
-        buf0_2_next = 16'(buf0_1);
-        buf0_3_next = 16'(buf0_2);
-        buf1_0_next = (32'(buf0_0) * 32'($signed(v0_1[(32'sd1 - 32'sd1)])));
-        buf1_1_next = (32'(buf0_1) * 32'($signed(v0_1[(32'sd2 - 32'sd1)])));
-        buf1_2_next = (32'(buf0_2) * 32'($signed(v0_1[(32'sd3 - 32'sd1)])));
-        buf1_3_next = (32'(buf0_3) * 32'($signed(v0_1[(32'sd4 - 32'sd1)])));
+        // --- ESTÁGIO 1: Shift Register e Multiplicação ---
+        delay_line_0_next = x;
+        delay_line_1_next = 16'(delay_line_0);
+        delay_line_2_next = 16'(delay_line_1);
+        delay_line_3_next = 16'(delay_line_2);
+        reg_products_0_next = (32'(delay_line_0) * 32'($signed(v0_1[32'sd0])));
+        reg_products_1_next = (32'(delay_line_1) * 32'($signed(v0_1[32'sd1])));
+        reg_products_2_next = (32'(delay_line_2) * 32'($signed(v0_1[32'sd2])));
+        reg_products_3_next = (32'(delay_line_3) * 32'($signed(v0_1[32'sd3])));
+        // --- ESTÁGIO 2: Acumulação (Soma) ---
+        // O valor de 'acc' é guardado em um registrador para o próximo ciclo
         acc_temp = 64'sd0;
-        v1_1 = acc_temp + 64'($signed(buf1_0));
+        v1_1 = acc_temp + 64'($signed(reg_products_0));
         v2_1 = (v1_1 > 64'sd68719476735) ? 64'sd68719476735 : ((v1_1 < -64'sd68719476736) ? -64'sd68719476736 : v1_1);
         acc_temp = (v2_1 > 64'sd34359738367) ? 64'sd34359738367 : ((v2_1 < -64'sd34359738368) ? -64'sd34359738368 : v2_1);
-        v3_1 = acc_temp + 64'($signed(buf1_1));
+        v3_1 = acc_temp + 64'($signed(reg_products_1));
         v4_1 = (v3_1 > 64'sd68719476735) ? 64'sd68719476735 : ((v3_1 < -64'sd68719476736) ? -64'sd68719476736 : v3_1);
         acc_temp = (v4_1 > 64'sd34359738367) ? 64'sd34359738367 : ((v4_1 < -64'sd34359738368) ? -64'sd34359738368 : v4_1);
-        v5_1 = acc_temp + 64'($signed(buf1_2));
+        v5_1 = acc_temp + 64'($signed(reg_products_2));
         v6_1 = (v5_1 > 64'sd68719476735) ? 64'sd68719476735 : ((v5_1 < -64'sd68719476736) ? -64'sd68719476736 : v5_1);
         acc_temp = (v6_1 > 64'sd34359738367) ? 64'sd34359738367 : ((v6_1 < -64'sd34359738368) ? -64'sd34359738368 : v6_1);
-        v7_1 = acc_temp + 64'($signed(buf1_3));
+        v7_1 = acc_temp + 64'($signed(reg_products_3));
         v8_1 = (v7_1 > 64'sd68719476735) ? 64'sd68719476735 : ((v7_1 < -64'sd68719476736) ? -64'sd68719476736 : v7_1);
         acc_temp = (v8_1 > 64'sd34359738367) ? 64'sd34359738367 : ((v8_1 < -64'sd34359738368) ? -64'sd34359738368 : v8_1);
         reg_acc_next = 36'(acc_temp);
+        // --- ESTÁGIO 3: Ganho e Saturação ---
         full_res = reg_acc * gain;
         v9_1 = full_res >>> 64'sd29;
         reg_output_next = 16'(((v9_1 > 64'sd32767) ? 64'sd32767 : ((v9_1 < -64'sd32768) ? -64'sd32768 : v9_1)));
@@ -131,27 +126,27 @@ module fir_asic_pipelined (
 
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            buf1_2 <= 32'sd0;
-            buf0_0 <= 16'sd0;
+            reg_products_2 <= 32'sd0;
+            delay_line_0 <= 16'sd0;
             reg_acc <= 36'(64'sd0);
-            buf0_2 <= 16'sd0;
-            buf1_1 <= 32'sd0;
-            buf1_3 <= 32'sd0;
-            buf0_1 <= 16'sd0;
+            delay_line_2 <= 16'sd0;
+            reg_products_1 <= 32'sd0;
+            reg_products_3 <= 32'sd0;
+            delay_line_1 <= 16'sd0;
             reg_output <= 16'sd0;
-            buf0_3 <= 16'sd0;
-            buf1_0 <= 32'sd0;
+            delay_line_3 <= 16'sd0;
+            reg_products_0 <= 32'sd0;
         end else begin
-            buf1_2 <= buf1_2_next;
-            buf0_0 <= buf0_0_next;
+            reg_products_2 <= reg_products_2_next;
+            delay_line_0 <= delay_line_0_next;
             reg_acc <= reg_acc_next;
-            buf0_2 <= buf0_2_next;
-            buf1_1 <= buf1_1_next;
-            buf1_3 <= buf1_3_next;
-            buf0_1 <= buf0_1_next;
+            delay_line_2 <= delay_line_2_next;
+            reg_products_1 <= reg_products_1_next;
+            reg_products_3 <= reg_products_3_next;
+            delay_line_1 <= delay_line_1_next;
             reg_output <= reg_output_next;
-            buf0_3 <= buf0_3_next;
-            buf1_0 <= buf1_0_next;
+            delay_line_3 <= delay_line_3_next;
+            reg_products_0 <= reg_products_0_next;
         end
     end
 

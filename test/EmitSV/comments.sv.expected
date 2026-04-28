@@ -10,7 +10,6 @@ module comments (
 
     always_comb begin
         y = '0;
-        // Sum the two inputs to produce the result.
         y = a + b;
     end
 

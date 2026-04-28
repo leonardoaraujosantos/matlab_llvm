@@ -655,6 +655,49 @@ std::string Emitter::renderInlineExpr(mlir::Operation *Op) {
     if (isAllOnesIntConst(Op->getOperand(0)))
       return "~" + exprFor(Op->getOperand(1));
   }
+  // Const-fold integer arithmetic on two integer constants. The
+  // pipeline often leaves `(N - 1)` style 1-based-to-0-based index
+  // conversions where `N` is a per-iteration constant from the
+  // unrolled for-loop; rendering them as `(32'sd1 - 32'sd1)` is
+  // synthesizable but visually noisy. Fold here so subscript reads
+  // emit `arr[0]` instead of `arr[(32'sd1 - 32'sd1)]`. Bounded to
+  // `addi/subi/muli` on signless integer constants — anything else
+  // falls through to the binop renderer below.
+  if (Op->getNumOperands() == 2 &&
+      (N == "arith.addi" || N == "arith.subi" || N == "arith.muli")) {
+    auto getIntConst = [](mlir::Value V, int64_t &Out) -> bool {
+      auto *D = V.getDefiningOp();
+      if (!D) return false;
+      if (auto C = mlir::dyn_cast<mlir::arith::ConstantOp>(D)) {
+        if (auto IA = mlir::dyn_cast<mlir::IntegerAttr>(C.getValue())) {
+          Out = IA.getInt();
+          return true;
+        }
+      }
+      if (auto C = mlir::dyn_cast<mlir::LLVM::ConstantOp>(D)) {
+        if (auto IA = mlir::dyn_cast<mlir::IntegerAttr>(C.getValue())) {
+          Out = IA.getInt();
+          return true;
+        }
+      }
+      return false;
+    };
+    int64_t LhsC, RhsC;
+    if (getIntConst(Op->getOperand(0), LhsC) &&
+        getIntConst(Op->getOperand(1), RhsC)) {
+      int64_t Folded = N == "arith.addi" ? LhsC + RhsC :
+                       N == "arith.subi" ? LhsC - RhsC : LhsC * RhsC;
+      auto IT = mlir::dyn_cast<mlir::IntegerType>(
+          Op->getResult(0).getType());
+      if (IT) {
+        // Narrow to the result width's representable range to
+        // mirror SV's wraparound semantics on overflow. Then format
+        // via the existing intLiteral helper for consistent `W'sdN`
+        // / `W'dN` rendering.
+        return intLiteral(Folded, IT, /*Signed=*/true);
+      }
+    }
+  }
   // Binary arith ops with an SV operator equivalent.
   llvm::StringRef SvOp;
   if (N == "arith.addi" || N == "matlab.add") SvOp = "+";
@@ -1341,6 +1384,70 @@ bool Emitter::tryEmitSwitchCase(mlir::scf::IfOp Head, int Indent) {
   // from the case form and would just be noisier than the existing
   // if/else rendering.
   if (Cases.size() < 2) return false;
+  // If the default region holds the `IfStoreToSelect`-folded
+  // remnant of the last user case (`store(select(disc == const,
+  // X, Y), slot)`), unfold it back into one more case + a
+  // simpler default. Detection: the default's only op is a
+  // store whose value is `arith.select(<disc> == <const>, X, Y)`.
+  // The select form arises when the last `if (sel == 3) y = in3
+  // else y = in0` got folded; preserving the case form keeps the
+  // RTL semantically aligned with the user's `switch sel` source.
+  std::string ExtraCaseConst;
+  std::string ExtraCaseRhs;
+  std::string DefaultRhs;
+  std::string DefaultLhsName;
+  bool DefaultUnfolded = false;
+  if (Default && !Default->empty()) {
+    auto &DB = Default->front();
+    // Find the (single) store op; permit operand-chain ops feeding
+    // the stored value (e.g. the matlab.eq + arith.select that
+    // IfStoreToSelect produced from the deepest if/else fold).
+    mlir::Operation *Store = nullptr;
+    int StoreCount = 0;
+    for (mlir::Operation &TOp : DB) {
+      if (TOp.getName().getStringRef() == "matlab.store" ||
+          mlir::isa<mlir::LLVM::StoreOp>(&TOp)) {
+        Store = &TOp;
+        ++StoreCount;
+      }
+    }
+    if (StoreCount == 1 && Store && Store->getNumOperands() == 2) {
+      mlir::Value StVal = Store->getOperand(0);
+      mlir::Value StSlot = Store->getOperand(1);
+      auto Sel = StVal.getDefiningOp<mlir::arith::SelectOp>();
+      if (Sel) {
+        mlir::Operation *SCmp = Sel.getCondition().getDefiningOp();
+        mlir::Value SLhs;
+        mlir::Value SRhs;
+        if (SCmp) {
+          if (auto C = mlir::dyn_cast<mlir::arith::CmpIOp>(SCmp)) {
+            if (C.getPredicate() == mlir::arith::CmpIPredicate::eq) {
+              SLhs = C.getLhs(); SRhs = C.getRhs();
+            }
+          } else if (SCmp->getName().getStringRef() == "matlab.eq" &&
+                     SCmp->getNumOperands() == 2) {
+            SLhs = SCmp->getOperand(0);
+            SRhs = SCmp->getOperand(1);
+          }
+        }
+        // Same discriminator as the rest of the chain, RHS const.
+        if (SLhs == Disc && SRhs) {
+          auto *RDef = SRhs.getDefiningOp();
+          bool IsConst = RDef &&
+              (mlir::isa<mlir::arith::ConstantOp,
+                          mlir::LLVM::ConstantOp>(RDef) ||
+               RDef->getName().getStringRef() == "matlab.const_int");
+          if (IsConst) {
+            ExtraCaseConst = stripOuterParens(exprFor(SRhs));
+            ExtraCaseRhs = stripOuterParens(exprFor(Sel.getTrueValue()));
+            DefaultRhs = stripOuterParens(exprFor(Sel.getFalseValue()));
+            DefaultLhsName = name(StSlot);
+            DefaultUnfolded = true;
+          }
+        }
+      }
+    }
+  }
   indent(Indent);
   OS << "unique case (" << stripOuterParens(exprFor(Disc)) << ")\n";
   for (auto &E : Cases) {
@@ -1350,7 +1457,20 @@ bool Emitter::tryEmitSwitchCase(mlir::scf::IfOp Head, int Indent) {
     indent(Indent + 1);
     OS << "end\n";
   }
-  if (Default) {
+  if (DefaultUnfolded) {
+    indent(Indent + 1);
+    OS << ExtraCaseConst << ": begin\n";
+    indent(Indent + 2);
+    OS << DefaultLhsName << " = " << ExtraCaseRhs << ";\n";
+    indent(Indent + 1);
+    OS << "end\n";
+    indent(Indent + 1);
+    OS << "default: begin\n";
+    indent(Indent + 2);
+    OS << DefaultLhsName << " = " << DefaultRhs << ";\n";
+    indent(Indent + 1);
+    OS << "end\n";
+  } else if (Default) {
     indent(Indent + 1);
     OS << "default: begin\n";
     emitRegion(*Default, Indent + 2);
@@ -1917,37 +2037,126 @@ void Emitter::emitLeadingCommentsBefore(mlir::Location Loc, int Indent) {
     }
     return Tx.str();
   };
-  // Phase 5.6.4: a single scan over the unprocessed-source range
-  // [max(Last+1, CommentMinLine) .. Line] picks up BOTH leading
-  // (`%` at start) and trailing (`%` after code) comments and
-  // emits each at most once. `Tail` advances monotonically so a
-  // subsequent op visiting the same range no-ops. Out-of-source-
-  // order MLIR walks (e.g. case-cascades whose inner-region body
-  // ops emit before the next case's branch is processed) cause
-  // some trailing comments to land near the first op rather than
-  // the matching one — acceptable approximation for v1.
+  // Phase 5.6.4: emit ONLY comments that immediately precede this
+  // op's source line. "Immediately precede" means: every line
+  // between the comment and the op's line is itself a blank line,
+  // a comment, or a pragma. This avoids dumping comments for
+  // source lines that got folded away by Stage F or other
+  // optimizations, which previously caused all leading comments
+  // to bunch up at the top of `always_comb`.
+  //
+  // Skipped (too-distant) comments still advance Last/Tail so a
+  // subsequent op never re-considers them. A comment that's
+  // semantically orphaned (its target source line was folded) is
+  // simply dropped — preferable to mis-attaching it to an
+  // unrelated downstream op.
+  auto isBlankOrCommentOrPragma = [&](uint32_t L) -> bool {
+    auto Txt = SM->getLineText(FID, L);
+    llvm::StringRef LR(Txt.data(), Txt.size());
+    bool HasCode = false;
+    bool InSingle = false, InDouble = false;
+    for (size_t I = 0; I < LR.size(); ++I) {
+      char C = LR[I];
+      if (!InDouble && C == '\'' && !InSingle) {
+        InSingle = true; continue;
+      }
+      if (InSingle && C == '\'') { InSingle = false; continue; }
+      if (!InSingle && C == '"' && !InDouble) { InDouble = true; continue; }
+      if (InDouble && C == '"') { InDouble = false; continue; }
+      if (InSingle || InDouble) continue;
+      if (C == '%') break; // rest is a comment
+      if (!std::isspace((unsigned char)C)) { HasCode = true; break; }
+    }
+    return !HasCode;
+  };
   uint32_t StartLine = std::max(Tail + 1, CommentMinLine);
   uint32_t EndLine = std::min(Line, CommentMaxLine);
   for (uint32_t L = StartLine; L <= EndLine; ++L) {
     if (L > Line) break;
-    // First try the leading-only case: an unindented `% ...`
-    // line with no code on it.
     std::string Text = extractCommentText(L, /*TrailingOnly=*/false);
     if (Text.empty())
       Text = extractCommentText(L, /*TrailingOnly=*/true);
-    if (!Text.empty()) {
-      indent(Indent);
-      OS << "// " << Text << "\n";
+    if (Text.empty()) continue;
+    // Check whether every line strictly between L and Line is
+    // blank/comment/pragma. If so this comment is attached to the
+    // current op; otherwise it belongs to a folded-away predecessor
+    // and we drop it.
+    bool Adjacent = true;
+    for (uint32_t M = L + 1; M < Line; ++M) {
+      if (!isBlankOrCommentOrPragma(M)) { Adjacent = false; break; }
     }
+    if (!Adjacent) continue;
+    indent(Indent);
+    OS << "// " << Text << "\n";
   }
   Tail = std::max(Tail, EndLine);
   Last = std::max(Last, Line);
 }
 
+// Heuristic: ops that emit no visible SV. Comment-attachment skips
+// these so their associated source comments fall through to the
+// next visible op instead of bunching up against an invisible
+// constant or yield.
+static bool isInvisibleEmitOp(mlir::Operation &Op) {
+  if (mlir::isa<mlir::scf::YieldOp>(&Op)) return true;
+  if (mlir::isa<mlir::arith::ConstantOp,
+                mlir::LLVM::ConstantOp>(&Op)) return true;
+  // Persistent-state runtime ABI calls — these get suppressed by
+  // the SV emitter (state inferred to register signals); they
+  // emit no visible statement.
+  if (auto C = mlir::dyn_cast<mlir::LLVM::CallOp>(&Op)) {
+    auto Cl = C.getCallee();
+    if (Cl && (*Cl == "matlab_persistent_isempty" ||
+               *Cl == "matlab_persistent_get_ptr" ||
+               *Cl == "matlab_persistent_set_ptr" ||
+               *Cl == "matlab_global_get_f64")) {
+      return true;
+    }
+  }
+  // matlab.call_builtin → matlab_global_set_f64 IS the persistent
+  // register write which renders as `<reg>_next = <val>;` —
+  // visible. Other builtins (subscript_store, etc.) also render.
+  // Don't blanket-suppress them.
+  // matlab.alloc / llvm.alloca are also invisible to comment-
+  // attachment (they emit their declarations in the prelude).
+  if (mlir::isa<mlir::LLVM::AllocaOp>(&Op)) return true;
+  if (Op.getName().getStringRef() == "matlab.alloc") return true;
+  // Inline-only arith ops never emit a statement of their own —
+  // they're folded into the use site by exprFor.
+  if (mlir::isa<mlir::arith::CmpIOp, mlir::arith::CmpFOp,
+                mlir::arith::AddIOp, mlir::arith::SubIOp,
+                mlir::arith::MulIOp, mlir::arith::AndIOp,
+                mlir::arith::OrIOp, mlir::arith::XOrIOp,
+                mlir::arith::ShLIOp, mlir::arith::ShRSIOp,
+                mlir::arith::ShRUIOp, mlir::arith::SelectOp,
+                mlir::arith::ExtSIOp, mlir::arith::ExtUIOp,
+                mlir::arith::TruncIOp>(&Op)) {
+    if (Op.getNumResults() == 1 && !Op.getResult(0).use_empty()) {
+      // If every user of this result is in the same block, it'll
+      // be inlined at use sites and this op emits no statement.
+      bool AllSameBlock = true;
+      for (mlir::Operation *U : Op.getResult(0).getUsers()) {
+        if (U->getBlock() != Op.getBlock()) { AllSameBlock = false; break; }
+      }
+      if (AllSameBlock) return true;
+    }
+  }
+  // matlab.eq / etc. are also inline.
+  llvm::StringRef N = Op.getName().getStringRef();
+  if (N == "matlab.eq" || N == "matlab.ne" || N == "matlab.lt" ||
+      N == "matlab.le" || N == "matlab.gt" || N == "matlab.ge")
+    return true;
+  return false;
+}
+
 void Emitter::emitBlock(mlir::Block &B, int Indent) {
   for (auto &Op : B.getOperations()) {
     if (Failed) return;
-    emitLeadingCommentsBefore(Op.getLoc(), Indent);
+    // Skip suppressed (HWStateInfer / FSM-recognized) ops too —
+    // they emit no visible RTL; their comments should attach to
+    // the next visible op instead.
+    if (!isInvisibleEmitOp(Op) && !Suppress.contains(&Op))
+      emitLeadingCommentsBefore(Op.getLoc(), Indent);
     emitOp(Op, Indent);
   }
 }

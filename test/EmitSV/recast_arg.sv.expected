@@ -9,9 +9,6 @@ module recast_arg (
 
     always_comb begin
         r = '0;
-        // Re-cast `x` to the same fi spec — Sema infers x as
-        // fi(1, 16, 14), the cast is identity, and the SV emit collapses
-        // to a direct `r = x` assignment.
         r = x;
     end
 

@@ -1715,6 +1715,68 @@ bool TensorLowering::rewriteBuiltinCalls() {
       continue;
     }
 
+    /* Persistent-array runtime ABI: isempty / get_ptr / set_ptr.
+     * The frontend emits these as matlab.call_builtin; the SV
+     * pipeline (Stage F's LowerPersistentFiArrays) needs them as
+     * llvm.call BUT with persistent_name/persistent_fn preserved
+     * so the per-element rewrite can build user-readable register
+     * names (`<name>_<k>` instead of `buf<idx>_<k>`). Without
+     * explicit handling here the standard MLIR conversion path
+     * would convert the call but drop the unregistered attrs. */
+    if (Name == "matlab_persistent_isempty" &&
+        Call->getNumOperands() == 1 &&
+        Call->getOperand(0).getType() == I32 &&
+        Call->getNumResults() == 1 &&
+        Call->getResult(0).getType() == F64) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt("matlab_persistent_isempty", F64, {I32});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                      ValueRange{Call->getOperand(0)});
+      if (auto PN = Call->getAttrOfType<StringAttr>("persistent_name"))
+        NC->setAttr("persistent_name", PN);
+      if (auto PF = Call->getAttrOfType<StringAttr>("persistent_fn"))
+        NC->setAttr("persistent_fn", PF);
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+    if (Name == "matlab_persistent_get_ptr" &&
+        Call->getNumOperands() == 1 &&
+        Call->getOperand(0).getType() == I32 &&
+        Call->getNumResults() == 1 &&
+        Call->getResult(0).getType() == PtrTy) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt("matlab_persistent_get_ptr", PtrTy, {I32});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                      ValueRange{Call->getOperand(0)});
+      if (auto PN = Call->getAttrOfType<StringAttr>("persistent_name"))
+        NC->setAttr("persistent_name", PN);
+      if (auto PF = Call->getAttrOfType<StringAttr>("persistent_fn"))
+        NC->setAttr("persistent_fn", PF);
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+    if (Name == "matlab_persistent_set_ptr" &&
+        Call->getNumOperands() == 2 &&
+        Call->getOperand(0).getType() == I32 &&
+        Call->getOperand(1).getType() == PtrTy) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt("matlab_persistent_set_ptr", VoidTy, {I32, PtrTy});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                      ValueRange{Call->getOperand(0),
+                                                 Call->getOperand(1)});
+      if (auto PN = Call->getAttrOfType<StringAttr>("persistent_name"))
+        NC->setAttr("persistent_name", PN);
+      if (auto PF = Call->getAttrOfType<StringAttr>("persistent_fn"))
+        NC->setAttr("persistent_fn", PF);
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+
     /* Multi-return dispatch (nargout > 1). Each factorisation whose
      * MATLAB form returns multiple matrices (eig / qr / lu) is emitted
      * as two independent runtime calls sharing the input matrix; the

@@ -13,24 +13,24 @@ module fir_filter (
     logic signed [63:0] v1_1;
     logic signed [63:0] v2_1;
     logic signed [63:0] v3_1;
-    logic signed [15:0] buf0_0;
-    logic signed [15:0] buf0_0_next;
-    logic signed [15:0] buf0_2;
-    logic signed [15:0] buf0_2_next;
-    logic signed [15:0] buf0_1;
-    logic signed [15:0] buf0_1_next;
-    logic signed [15:0] buf0_3;
-    logic signed [15:0] buf0_3_next;
+    logic signed [15:0] delay_line_0;
+    logic signed [15:0] delay_line_0_next;
+    logic signed [15:0] delay_line_2;
+    logic signed [15:0] delay_line_2_next;
+    logic signed [15:0] delay_line_1;
+    logic signed [15:0] delay_line_1_next;
+    logic signed [15:0] delay_line_3;
+    logic signed [15:0] delay_line_3_next;
 
     always_comb begin
         v0_1 = '{default: '0};
         v1_1 = '0;
         v2_1 = '0;
         v3_1 = '0;
-        buf0_0_next = buf0_0;
-        buf0_2_next = buf0_2;
-        buf0_1_next = buf0_1;
-        buf0_3_next = buf0_3;
+        delay_line_0_next = delay_line_0;
+        delay_line_2_next = delay_line_2;
+        delay_line_1_next = delay_line_1;
+        delay_line_3_next = delay_line_3;
         r = '0;
         v0_1[0] = 16'sd0;
         v0_1[1] = 16'sd0;
@@ -40,27 +40,27 @@ module fir_filter (
         v0_1[1] = 16'sd2;
         v0_1[2] = 16'sd3;
         v0_1[3] = 16'sd4;
-        buf0_0_next = x;
-        buf0_1_next = 16'(buf0_0);
-        buf0_2_next = 16'(buf0_1);
-        buf0_3_next = 16'(buf0_2);
-        v1_1 = 64'($signed((32'(buf0_0) * 32'($signed(v0_1[0]))))) + 64'($signed((32'(buf0_1) * 32'($signed(v0_1[1])))));
-        v2_1 = ((v1_1 > 64'sd4294967295) ? 64'sd4294967295 : ((v1_1 < -64'sd4294967296) ? -64'sd4294967296 : v1_1)) + 64'($signed((32'(buf0_2) * 32'($signed(v0_1[2])))));
-        v3_1 = ((v2_1 > 64'sd8589934591) ? 64'sd8589934591 : ((v2_1 < -64'sd8589934592) ? -64'sd8589934592 : v2_1)) + 64'($signed((32'(buf0_3) * 32'($signed(v0_1[3])))));
+        delay_line_0_next = x;
+        delay_line_1_next = 16'(delay_line_0);
+        delay_line_2_next = 16'(delay_line_1);
+        delay_line_3_next = 16'(delay_line_2);
+        v1_1 = 64'($signed((32'(delay_line_0) * 32'($signed(v0_1[0]))))) + 64'($signed((32'(delay_line_1) * 32'($signed(v0_1[1])))));
+        v2_1 = ((v1_1 > 64'sd4294967295) ? 64'sd4294967295 : ((v1_1 < -64'sd4294967296) ? -64'sd4294967296 : v1_1)) + 64'($signed((32'(delay_line_2) * 32'($signed(v0_1[2])))));
+        v3_1 = ((v2_1 > 64'sd8589934591) ? 64'sd8589934591 : ((v2_1 < -64'sd8589934592) ? -64'sd8589934592 : v2_1)) + 64'($signed((32'(delay_line_3) * 32'($signed(v0_1[3])))));
         r = (v3_1 > 64'sd17179869183) ? 64'sd17179869183 : ((v3_1 < -64'sd17179869184) ? -64'sd17179869184 : v3_1);
     end
 
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            buf0_0 <= 16'sd0;
-            buf0_2 <= 16'sd0;
-            buf0_1 <= 16'sd0;
-            buf0_3 <= 16'sd0;
+            delay_line_0 <= 16'sd0;
+            delay_line_2 <= 16'sd0;
+            delay_line_1 <= 16'sd0;
+            delay_line_3 <= 16'sd0;
         end else begin
-            buf0_0 <= buf0_0_next;
-            buf0_2 <= buf0_2_next;
-            buf0_1 <= buf0_1_next;
-            buf0_3 <= buf0_3_next;
+            delay_line_0 <= delay_line_0_next;
+            delay_line_2 <= delay_line_2_next;
+            delay_line_1 <= delay_line_1_next;
+            delay_line_3 <= delay_line_3_next;
         end
     end
 

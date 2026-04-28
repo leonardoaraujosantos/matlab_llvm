@@ -3309,10 +3309,23 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             auto I32 = mlir::IntegerType::get(&MCtx, 32);
             mlir::Value IdV = mlir::arith::ConstantOp::create(
                 B, L, I32, mlir::IntegerAttr::get(I32, (int64_t)Id));
-            mlir::NamedAttribute Cal(
+            llvm::SmallVector<mlir::NamedAttribute, 3> Attrs;
+            Attrs.push_back(mlir::NamedAttribute(
                 mlir::StringAttr::get(&MCtx, "callee"),
-                mlir::StringAttr::get(&MCtx, "matlab_persistent_isempty"));
-            return emitUnreg("matlab.call_builtin", {IdV}, F64, L, {Cal});
+                mlir::StringAttr::get(&MCtx, "matlab_persistent_isempty")));
+            // Carry the binding's source name + enclosing function
+            // name so Stage F's per-element split can prefix the
+            // synthesized scalar persistents with `<name>_<k>`
+            // instead of falling back to `buf<idx>_<k>`. Without
+            // this, the SV register declarations lose their
+            // user-readable identity.
+            Attrs.push_back(mlir::NamedAttribute(
+                mlir::StringAttr::get(&MCtx, "persistent_name"),
+                mlir::StringAttr::get(&MCtx, std::string(AN->Ref->Name))));
+            Attrs.push_back(mlir::NamedAttribute(
+                mlir::StringAttr::get(&MCtx, "persistent_fn"),
+                mlir::StringAttr::get(&MCtx, CurFnName)));
+            return emitUnreg("matlab.call_builtin", {IdV}, F64, L, Attrs);
           }
         }
       }
