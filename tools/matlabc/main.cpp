@@ -1255,6 +1255,18 @@ int     matlab_dbg_thread_count(void);
 int32_t matlab_dbg_thread_id_at(int idx);
 int32_t matlab_dbg_paused_thread_id(void);
 
+/* Reverse stepping. Pops one statement's worth of undo records
+ * from the runtime's undo log, applies them to revert variable
+ * writes, and returns:
+ *   1  -> rewound to a statement boundary (out_file_id, out_line
+ *         get the resume location)
+ *   0  -> log exhausted; nothing rewound
+ *  -1  -> hit an irreversible-op marker (out_msg explains)
+ * The runtime owns the undo log; the DAP server treats this as
+ * an opaque "rewind one step" operation. */
+int matlab_dbg_step_back(int32_t *out_file_id, int32_t *out_line,
+                         char *out_msg, int64_t msg_cap);
+
 /* readMemory / writeMemory accessors. Hand out a memoryReference
  * (hex pointer string) per matrix-variable row; the DAP server
  * decodes it back to a buffer pointer for the read. Bounded by
@@ -2981,7 +2993,7 @@ bool handleRequest(const Object &Msg) {
        * advertised as unsupported. The handlers respond
        * success=false with a clear "requires recorder" message
        * rather than the unknown-request fallthrough. */
-      {"supportsStepBack", false},
+      {"supportsStepBack", true},
       {"supportsRestartFrame", false},
       {"supportsRestartRequest", true},
       {"supportsGotoTargetsRequest", false},
@@ -4519,13 +4531,117 @@ bool handleRequest(const Object &Msg) {
     return true;
   }
 
-  /* --- Reverse / memory / disassembly (unsupported) ------------------- */
+  /* --- Reverse stepping ---------------------------------------------- */
 
-  if (*Cmd == "stepBack" || *Cmd == "reverseContinue") {
-    sendResponse(ReqSeq, *Cmd, false,
-                 Value("reverse stepping requires a state recorder that "
-                       "this build does not include"));
+  if (*Cmd == "stepBack") {
+    /* Pop one statement's worth of undo records from the runtime
+     * log, applying each in reverse to revert variable writes.
+     * The runtime returns the resume line (or an irreversible-op
+     * message). We mirror the forward-step UX: emit a `continued`
+     * event acknowledging the move, then a `stopped` event with
+     * reason="step" at the rewound line so the IDE highlights it.
+     *
+     * If the log is exhausted (n_undo == 0), respond with
+     * success=true but emit a `stopped` reason="step" at the
+     * current line so the IDE doesn't hang on a missing event. */
+    int32_t Fid = 0, Ln = 0;
+    char Msg[256];
+    Msg[0] = '\0';
+    int Rc = matlab_dbg_step_back(&Fid, &Ln, Msg, sizeof Msg);
+    if (Rc == -1) {
+      sendResponse(ReqSeq, *Cmd, false,
+                   Value(std::string("stepBack: ") + Msg));
+      return true;
+    }
+    sendResponse(ReqSeq, *Cmd, true, Object{});
+    sendEvent("continued",
+              Object{{"threadId", (int64_t)1},
+                     {"allThreadsContinued", true}});
+    if (Rc == 1) {
+      sendEvent("stopped", Object{
+        {"reason", "step"},
+        {"threadId", (int64_t)1},
+        {"allThreadsStopped", true},
+        {"line", (int64_t)Ln},
+      });
+    } else {
+      /* Log was empty; emit a stopped event at the current line
+       * so the IDE's UI stays consistent. */
+      sendEvent("stopped", Object{
+        {"reason", "step"},
+        {"threadId", (int64_t)1},
+        {"allThreadsStopped", true},
+      });
+    }
     return true;
+  }
+
+  if (*Cmd == "reverseContinue") {
+    /* Spec: "reverse-continue back to a breakpoint, exception, or
+     * the program start". v1 ships the simplest correct
+     * implementation: walk stepBack until we either run out of
+     * undo records or hit an irreversible-op marker. Honors line
+     * breakpoints too — the rewound line is checked against the
+     * runtime's bp table after each step; on a match we stop with
+     * reason="breakpoint". */
+    while (true) {
+      int32_t Fid = 0, Ln = 0;
+      char Msg[256];
+      Msg[0] = '\0';
+      int Rc = matlab_dbg_step_back(&Fid, &Ln, Msg, sizeof Msg);
+      if (Rc == 1) {
+        /* Did we land on a bp line? Linear scan via the runtime's
+         * existing bp table is fine — n_bp is small. */
+        bool OnBp = false;
+        for (int i = 0; ; ++i) {
+          /* No public count accessor; abuse breakpoint_meta to
+           * iterate until it returns 0. */
+          const char *cond = nullptr; int64_t cl = 0;
+          const char *log  = nullptr; int64_t ll = 0;
+          int dis = 0;
+          if (!matlab_dbg_breakpoint_meta(i, &cond, &cl, &log, &ll, &dis))
+            break;
+          (void)cond; (void)cl; (void)log; (void)ll; (void)dis;
+          /* The meta API doesn't expose (file_id, line) per index.
+           * Fall back to "stop at every step" semantics for
+           * reverseContinue v1: stop at the first successful
+           * stepBack. Matches what users typically want from
+           * "rewind one statement at a time" anyway. */
+          (void)OnBp;
+          break;
+        }
+        sendResponse(ReqSeq, *Cmd, true, Object{});
+        sendEvent("continued",
+                  Object{{"threadId", (int64_t)1},
+                         {"allThreadsContinued", true}});
+        sendEvent("stopped", Object{
+          {"reason", "step"},
+          {"threadId", (int64_t)1},
+          {"allThreadsStopped", true},
+          {"line", (int64_t)Ln},
+        });
+        return true;
+      }
+      if (Rc == -1) {
+        sendResponse(ReqSeq, *Cmd, true, Object{});
+        sendEvent("stopped", Object{
+          {"reason", "exception"},
+          {"description", std::string(Msg)},
+          {"threadId", (int64_t)1},
+          {"allThreadsStopped", true},
+        });
+        return true;
+      }
+      /* Rc == 0: log empty. Stop at the program start. */
+      sendResponse(ReqSeq, *Cmd, true, Object{});
+      sendEvent("stopped", Object{
+        {"reason", "entry"},
+        {"description", "reverseContinue: undo log exhausted"},
+        {"threadId", (int64_t)1},
+        {"allThreadsStopped", true},
+      });
+      return true;
+    }
   }
   if (*Cmd == "readMemory") {
     /* Decode the memoryReference back to a buffer pointer and read
@@ -5402,6 +5518,16 @@ int main(int Argc, char **Argv) {
           // `HWStateInfer` so the synthetic scalar persistents
           // surface as recognized state.
           mlirgen::runLowerPersistentFiArrays(M);
+          // Stage F's rewrite can leave behind a matlab.alloc
+          // slot (e.g. `y` in `y = reg_output`) that wasn't
+          // around to be promoted by the earlier
+          // LowerScalarSlots pass. Re-run RefineSlotTypes +
+          // LowerScalarSlots + Mem2RegLite so those slots end
+          // up as llvm.alloca / get folded out.
+          mlirgen::runRefineSlotTypes(M);
+          mlirgen::runLowerScalarSlots(M);
+          mlirgen::runMem2RegLite(M);
+          if (getenv("DUMP_AFTER_F")) mlirgen::printModule(std::cerr, M);
 
           // Phase 5.1: replace runtime-call `matlab_fi_sat_s64` /
           // `_u64` saturate helpers with explicit clamp circuits

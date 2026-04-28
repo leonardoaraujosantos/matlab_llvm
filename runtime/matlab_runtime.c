@@ -3316,8 +3316,16 @@ double matlab_ws_get_f64(const char *name, int64_t len) {
     return v;
 }
 
+/* Forward decls for the undo helpers — defined alongside the
+ * watch helpers in the matlab_dbg section. matlab_ws_push_undo
+ * takes its own dbg-mutex acquisition since matlab_dbg itself
+ * isn't visible up here (defined later). */
+static void matlab_ws_push_undo(const char *name, int64_t len,
+                                 int kind_being_written);
+
 void matlab_ws_set_f64(const char *name, int64_t len, double v) {
     matlab_ws_init_if_needed();
+    matlab_ws_push_undo(name, len, /*kind=*/0);
     matlab_struct_set_f64(matlab_ws, name, len, v);
     matlab_ws_check_watch(name, len);
 }
@@ -3331,6 +3339,7 @@ matlab_mat *matlab_ws_get_mat(const char *name, int64_t len) {
 
 void matlab_ws_set_mat(const char *name, int64_t len, matlab_mat *m) {
     matlab_ws_init_if_needed();
+    matlab_ws_push_undo(name, len, /*kind=*/1);
     matlab_struct_set_mat(matlab_ws, name, len, m);
     matlab_ws_check_watch(name, len);
 }
@@ -3342,6 +3351,7 @@ void matlab_ws_set_mat(const char *name, int64_t len, matlab_mat *m) {
  * the pointer as a matlab_mat * and reading garbage. */
 void matlab_ws_set_obj(const char *name, int64_t len, matlab_obj *o) {
     matlab_ws_init_if_needed();
+    matlab_ws_push_undo(name, len, /*kind=*/2);
     int32_t idx = struct_reserve(matlab_ws, name, (int32_t)len);
     matlab_ws->kinds[idx] = 2;
     matlab_ws->f64_vals[idx] = 0.0;
@@ -3493,6 +3503,33 @@ struct matlab_dbg_frame {
     const char *fn_name;
 };
 
+/* Record kinds for the reverse-stepping undo log. matlab_dbg_state
+ * holds a fixed-size ring buffer of these; matlab_dbg_step_back
+ * walks them in reverse to revert variable writes.
+ *
+ *   0 = statement boundary {file_id, line, thread_slot}
+ *   1 = ws_set_f64 {name, prev_kind, prev_f64, prev_existed}
+ *   2 = ws_set_mat / ws_set_obj {name, prev_kind, prev_ptr,
+ *       prev_existed}
+ *   3 = frame_set_* {thread_slot, frame_idx, name, prev_kind,
+ *       prev_f64, prev_ptr, prev_existed}
+ *   4 = irreversible-op marker (disp / fprintf etc.) — stepBack
+ *       refuses to walk past one of these. */
+struct matlab_dbg_undo_rec {
+    int8_t kind;
+    int8_t prev_kind;
+    int8_t prev_existed;
+    int8_t _pad;
+    int32_t file_id;
+    int32_t line;
+    int32_t frame_idx;
+    int32_t thread_slot;
+    char *name;        /* heap-owned for kinds 1/2/3 */
+    int64_t name_len;
+    double prev_f64;
+    void *prev_ptr;
+};
+
 struct matlab_dbg_state {
     int enabled;
     int stop_on_entry;
@@ -3628,6 +3665,17 @@ struct matlab_dbg_state {
     struct matlab_dbg_frame_locals thread_frame_locals[32][MATLAB_DBG_MAX_FRAMES];
     int32_t                      thread_step_target_depth[32];
 
+    /* Reverse-stepping undo log. Members declared inline; the
+     * matlab_dbg_undo_rec struct itself is at file scope (above
+     * matlab_dbg_state). */
+    int n_undo;
+    int undo_head;     /* next slot to write (ring buffer head) */
+    int undo_full;     /* set once we've wrapped — gates how far we can rewind */
+    struct matlab_dbg_undo_rec undo_log[4096];
+    /* Recording flag — clear during the rewind itself so
+     * apply-undo's reverse-set doesn't push a meta-record. */
+    int recording_undo;
+
     /* File-id <-> name table. Populated by matlab_dbg_register_file. */
     int n_files;
     const char *file_names[256];
@@ -3691,9 +3739,13 @@ static struct matlab_dbg_state matlab_dbg = {
  * live further down alongside enter_frame. Multiple call sites
  * up here (err_snapshot_frames, watch_trip, keyboard_hook) need
  * to consult the per-thread chain before its definition appears,
- * so they're declared at the top of the matlab_dbg section. */
+ * so they're declared at the top of the matlab_dbg section.
+ * Same shape for the undo-log helpers used by enable() and the
+ * matlab_ws_set_* / matlab_dbg_frame_set_* call sites further
+ * up the file. */
 static int matlab_dbg_thread_slot_locked(void);
 static int matlab_dbg_thread_init_chain_locked(void);
+static void matlab_dbg_undo_clear_locked(void);
 
 /* Forward decl: defined alongside matlab_dbg_enter_frame below but
  * called from matlab_dbg_enable to clear any frame-locals state left
@@ -4093,6 +4145,354 @@ static int matlab_dbg_watch_check_read(const char *name, int64_t name_len,
  * cur_* fields and blocks on the same condvar a real bp uses, so
  * the DAP monitor wakes and emits a `stopped` event. Same pattern
  * as matlab_dbg_keyboard_hook. CALLER MUST HOLD matlab_dbg.mu. */
+/* --- Reverse stepping (undo log) ---------------------------------- */
+
+/* Append a record to the ring buffer, evicting the oldest if full.
+ * For kinds 1/2/3 the heap-owned `name` of the evicted record is
+ * freed. CALLER MUST HOLD matlab_dbg.mu. */
+static struct matlab_dbg_undo_rec *matlab_dbg_undo_alloc_locked(void) {
+    int slot = matlab_dbg.undo_head;
+    struct matlab_dbg_undo_rec *r = &matlab_dbg.undo_log[slot];
+    /* Evict the previous tenant's heap allocation. */
+    if (matlab_dbg.undo_full && r->name) {
+        free(r->name);
+        r->name = NULL;
+    }
+    matlab_dbg.undo_head = (slot + 1) % 4096;
+    if (matlab_dbg.undo_head == 0) matlab_dbg.undo_full = 1;
+    if (!matlab_dbg.undo_full) matlab_dbg.n_undo = matlab_dbg.undo_head;
+    else matlab_dbg.n_undo = 4096;
+    /* Reset to a clean record. */
+    memset(r, 0, sizeof *r);
+    return r;
+}
+
+/* Clear the entire undo log — called on enable() so re-launches
+ * start fresh, and after a successful rewind so a subsequent
+ * forward-step's writes don't conflate with stale undo records. */
+static void matlab_dbg_undo_clear_locked(void) {
+    int n = matlab_dbg.undo_full ? 4096 : matlab_dbg.undo_head;
+    for (int i = 0; i < n; ++i) {
+        free(matlab_dbg.undo_log[i].name);
+        matlab_dbg.undo_log[i].name = NULL;
+    }
+    matlab_dbg.undo_head = 0;
+    matlab_dbg.undo_full = 0;
+    matlab_dbg.n_undo = 0;
+}
+
+/* Stamp a statement-boundary record. The hook calls this on every
+ * fire so stepBack knows where each statement began. */
+static void matlab_dbg_undo_record_stmt_locked(int32_t file_id,
+                                                int32_t line,
+                                                int32_t thread_slot) {
+    if (!matlab_dbg.recording_undo) return;
+    struct matlab_dbg_undo_rec *r = matlab_dbg_undo_alloc_locked();
+    r->kind = 0;
+    r->file_id = file_id;
+    r->line = line;
+    r->thread_slot = thread_slot;
+}
+
+/* Stamp an irreversible-op marker. The set_error path and the
+ * disp/fprintf JIT entries call this so a stepBack that reaches
+ * the marker stops with a clear message instead of silently
+ * walking past a printed line. */
+void matlab_dbg_undo_record_irreversible(const char *reason) {
+    pthread_mutex_lock(&matlab_dbg.mu);
+    if (matlab_dbg.recording_undo) {
+        struct matlab_dbg_undo_rec *r = matlab_dbg_undo_alloc_locked();
+        r->kind = 4;
+        if (reason) {
+            int64_t L = (int64_t)strlen(reason);
+            r->name = (char *)malloc((size_t)L + 1);
+            if (r->name) {
+                memcpy(r->name, reason, (size_t)L + 1);
+                r->name_len = L;
+            }
+        }
+    }
+    pthread_mutex_unlock(&matlab_dbg.mu);
+}
+
+/* Capture current value of `name` from matlab_ws before it gets
+ * overwritten. Returns prev_kind (-1 if missing), prev_f64,
+ * prev_ptr. Used by the undo path on every ws_set_*. CALLER MUST
+ * HOLD matlab_dbg.mu — matlab_struct accesses are themselves
+ * lock-free, but we want the snapshot atomic w.r.t. the upcoming
+ * write. */
+static void matlab_ws_capture_prior(const char *name, int64_t len,
+                                     int8_t *out_kind, int8_t *out_existed,
+                                     double *out_f64, void **out_ptr) {
+    *out_kind = -1; *out_existed = 0; *out_f64 = 0.0; *out_ptr = NULL;
+    if (!matlab_ws) return;
+    /* Walk the matlab_struct in-place — no public accessor returns
+     * the kind alongside the value efficiently, so reach into the
+     * struct directly. */
+    for (int32_t i = 0; i < matlab_ws->nfields; ++i) {
+        int nl = (int)strlen(matlab_ws->names[i]);
+        if (nl == (int)len &&
+            memcmp(matlab_ws->names[i], name, (size_t)len) == 0) {
+            *out_existed = 1;
+            *out_kind = (int8_t)matlab_ws->kinds[i];
+            *out_f64 = matlab_ws->f64_vals[i];
+            *out_ptr = matlab_ws->ptr_vals[i];
+            return;
+        }
+    }
+}
+
+/* Push a ws_set undo record. Takes the dbg mutex itself — called
+ * from the matlab_ws_set_* sites which can't see matlab_dbg.mu
+ * directly (the static variable is defined further down in this
+ * TU). The fast path is a single n_undo / recording_undo check
+ * inside the lock; if recording is off (no DAP session), the
+ * function returns immediately. */
+static void matlab_ws_push_undo(const char *name, int64_t len,
+                                 int kind_being_written) {
+    pthread_mutex_lock(&matlab_dbg.mu);
+    if (!matlab_dbg.recording_undo) {
+        pthread_mutex_unlock(&matlab_dbg.mu);
+        return;
+    }
+    int8_t prev_kind, prev_existed;
+    double prev_f64;
+    void *prev_ptr;
+    matlab_ws_capture_prior(name, len, &prev_kind, &prev_existed,
+                             &prev_f64, &prev_ptr);
+    struct matlab_dbg_undo_rec *r = matlab_dbg_undo_alloc_locked();
+    /* Kind 1 for f64 writes, 2 for mat/obj writes — the rewind
+     * path uses this to pick the right matlab_ws_set_* on undo. */
+    r->kind = (kind_being_written == 0) ? 1 : 2;
+    r->prev_kind = prev_kind;
+    r->prev_existed = prev_existed;
+    r->prev_f64 = prev_f64;
+    r->prev_ptr = prev_ptr;
+    r->name = (char *)malloc((size_t)len + 1);
+    if (r->name) {
+        memcpy(r->name, name, (size_t)len);
+        r->name[len] = '\0';
+        r->name_len = len;
+    }
+    pthread_mutex_unlock(&matlab_dbg.mu);
+}
+
+/* Frame-local undo: capture prior entry from the named frame
+ * (innermost of the calling thread). Same shape as the ws helper
+ * but operates on thread_frame_locals. CALLER HOLDS matlab_dbg.mu. */
+static void matlab_dbg_frame_push_undo_locked(int thread_slot,
+                                                int frame_idx,
+                                                const char *name,
+                                                int64_t len) {
+    if (!matlab_dbg.recording_undo) return;
+    struct matlab_dbg_frame_locals *fl =
+        &matlab_dbg.thread_frame_locals[thread_slot][frame_idx];
+    int8_t prev_kind = -1, prev_existed = 0;
+    double prev_f64 = 0.0;
+    void *prev_ptr = NULL;
+    for (int i = 0; i < fl->n; ++i) {
+        if (fl->entries[i].name_len == len &&
+            memcmp(fl->entries[i].name, name, (size_t)len) == 0) {
+            prev_existed = 1;
+            prev_kind = (int8_t)fl->entries[i].kind;
+            prev_f64 = fl->entries[i].f64;
+            prev_ptr = fl->entries[i].ptr;
+            break;
+        }
+    }
+    struct matlab_dbg_undo_rec *r = matlab_dbg_undo_alloc_locked();
+    r->kind = 3;
+    r->thread_slot = thread_slot;
+    r->frame_idx = frame_idx;
+    r->prev_kind = prev_kind;
+    r->prev_existed = prev_existed;
+    r->prev_f64 = prev_f64;
+    r->prev_ptr = prev_ptr;
+    r->name = (char *)malloc((size_t)len + 1);
+    if (r->name) {
+        memcpy(r->name, name, (size_t)len);
+        r->name[len] = '\0';
+        r->name_len = len;
+    }
+}
+
+/* Rewind one statement: pop undo records starting from undo_head
+ * back until a kind=0 (statement boundary) is found, applying each
+ * write in reverse order. Stops at an irreversible-op marker
+ * (kind=4) without rewinding past it. Returns the line number to
+ * resume at, or 0 if the log is exhausted / the next record is an
+ * irreversible op.
+ *
+ * After rewinding, the next forward-step will re-execute the
+ * statement we just rolled back. The undo log itself is NOT
+ * cleared — the records we just popped are gone (head moved
+ * back), but anything older stays in case the user wants to
+ * stepBack again. */
+int matlab_dbg_step_back(int32_t *out_file_id, int32_t *out_line,
+                         char *out_msg, int64_t msg_cap) {
+    if (out_file_id) *out_file_id = 0;
+    if (out_line) *out_line = 0;
+    if (out_msg && msg_cap > 0) out_msg[0] = '\0';
+    pthread_mutex_lock(&matlab_dbg.mu);
+    if (matlab_dbg.n_undo == 0) {
+        if (out_msg && msg_cap > 0)
+            snprintf(out_msg, (size_t)msg_cap, "undo log is empty");
+        pthread_mutex_unlock(&matlab_dbg.mu);
+        return 0;
+    }
+    /* Walk backward from undo_head. Note `head` points one PAST the
+     * last written entry, so the actual top is at head-1. Wrap
+     * negative-mod the same way the ring buffer wraps positive. */
+    int idx = matlab_dbg.undo_head;
+    int wall = matlab_dbg.undo_full ? 4096 : matlab_dbg.undo_head;
+    int popped = 0;
+    /* Disable recording so any matlab_struct_* writes we issue here
+     * to roll values back don't push fresh undo records. */
+    matlab_dbg.recording_undo = 0;
+    int hit_boundary = 0;
+    int hit_irreversible = 0;
+    int32_t boundary_file_id = 0, boundary_line = 0;
+    /* Skip-past-current-boundary: the most recent record on the
+     * log is typically the statement-boundary stamp for the
+     * statement we're paused on. Pop it before walking back so
+     * we revert the *previous* statement's writes, not zero of
+     * them. */
+    int saw_first_boundary = 0;
+    while (popped < wall) {
+        idx = (idx == 0) ? 4096 - 1 : idx - 1;
+        struct matlab_dbg_undo_rec *r = &matlab_dbg.undo_log[idx];
+        ++popped;
+        if (r->kind == 4) {
+            /* Irreversible op marker — stop here. The user has
+             * to live with the prior printed output. */
+            hit_irreversible = 1;
+            if (out_msg && msg_cap > 0) {
+                if (r->name)
+                    snprintf(out_msg, (size_t)msg_cap,
+                             "can't reverse past: %s", r->name);
+                else
+                    snprintf(out_msg, (size_t)msg_cap,
+                             "can't reverse past an irreversible operation");
+            }
+            /* Don't pop the irreversible marker — leave it so a
+             * second stepBack also stops here, not behind it. */
+            ++idx;
+            if (idx >= 4096) idx = 0;
+            --popped;
+            break;
+        }
+        if (r->kind == 0) {
+            /* Statement boundary. The first one we hit is the
+             * current paused-statement's stamp — skip it, then
+             * the second boundary is the one we want to resume
+             * at (and the writes between were the prior
+             * statement's, which we just reverted on the way
+             * here). */
+            if (!saw_first_boundary) {
+                saw_first_boundary = 1;
+                continue;
+            }
+            hit_boundary = 1;
+            boundary_file_id = r->file_id;
+            boundary_line = r->line;
+            break;
+        }
+        /* Apply the undo: revert the write described by this record. */
+        if (r->kind == 1 || r->kind == 2) {
+            /* matlab_ws revert. If the variable didn't exist before,
+             * we can't easily delete it from matlab_struct (no
+             * remove API); zero it out via set_f64(0) + kind=0 as
+             * a best-effort revert. The DAP scenario for stepBack
+             * uses pre-existing names so this rare case stays a
+             * documented edge. */
+            if (r->prev_existed) {
+                if (r->prev_kind == 0) {
+                    matlab_struct_set_f64(matlab_ws, r->name, r->name_len,
+                                           r->prev_f64);
+                } else if (r->prev_kind == 1) {
+                    matlab_struct_set_mat(matlab_ws, r->name, r->name_len,
+                                           (matlab_mat *)r->prev_ptr);
+                } else if (r->prev_kind == 2) {
+                    int32_t i = struct_reserve(matlab_ws, r->name,
+                                                (int32_t)r->name_len);
+                    matlab_ws->kinds[i] = 2;
+                    matlab_ws->f64_vals[i] = 0.0;
+                    matlab_ws->ptr_vals[i] = r->prev_ptr;
+                }
+            } else {
+                /* Best-effort: zero the binding so the rewound
+                 * value isn't seen by subsequent reads. */
+                matlab_struct_set_f64(matlab_ws, r->name, r->name_len, 0.0);
+            }
+        } else if (r->kind == 3) {
+            /* frame_local revert. Walk the entries[] of the
+             * stamped frame and reset the named entry. If the
+             * variable didn't exist pre-write, drop it from the
+             * table (last-entry-swap) so subsequent reads miss. */
+            int t = r->thread_slot;
+            int f = r->frame_idx;
+            if (t >= 0 && t < 32 && f >= 0 && f < MATLAB_DBG_MAX_FRAMES) {
+                struct matlab_dbg_frame_locals *fl =
+                    &matlab_dbg.thread_frame_locals[t][f];
+                int found = -1;
+                for (int i = 0; i < fl->n; ++i) {
+                    if (fl->entries[i].name_len == r->name_len &&
+                        memcmp(fl->entries[i].name, r->name,
+                                (size_t)r->name_len) == 0) {
+                        found = i; break;
+                    }
+                }
+                if (r->prev_existed) {
+                    if (found >= 0) {
+                        fl->entries[found].kind = r->prev_kind;
+                        fl->entries[found].f64 = r->prev_f64;
+                        fl->entries[found].ptr = r->prev_ptr;
+                    }
+                } else if (found >= 0) {
+                    /* Variable didn't exist before — drop it. */
+                    free(fl->entries[found].name);
+                    fl->entries[found] = fl->entries[fl->n - 1];
+                    fl->n--;
+                }
+            }
+        }
+        /* The popped record's name copy is freed when its slot is
+         * later overwritten by undo_alloc; no free here. */
+    }
+    /* Move head back by `popped` (and clear undo_full if we
+     * shrunk past the wrap point so future allocs grow the
+     * meaningful set rather than overwrite). */
+    matlab_dbg.undo_head = idx;
+    matlab_dbg.n_undo -= popped;
+    if (matlab_dbg.n_undo < 0) matlab_dbg.n_undo = 0;
+    /* If we walked the whole buffer and never hit a boundary or
+     * irreversible op, the rewind is best-effort — the IDE got
+     * its values rolled back but no line to resume at. Treat as
+     * "nothing more to rewind". */
+    matlab_dbg.recording_undo = 1;
+    /* Refresh shared frames[] from the paused thread so DAP
+     * inspectors see the rewound view. */
+    int p = matlab_dbg.paused_thread_idx;
+    if (p >= 0 && p < 32) {
+        int n = matlab_dbg.thread_n_frames[p];
+        if (n > MATLAB_DBG_MAX_FRAMES) n = MATLAB_DBG_MAX_FRAMES;
+        matlab_dbg.n_frames = n;
+        for (int i = 0; i < n; ++i) {
+            matlab_dbg.frames[i] = matlab_dbg.thread_frames[p][i];
+            matlab_dbg.frame_locals[i] =
+                matlab_dbg.thread_frame_locals[p][i];
+        }
+    }
+    if (hit_boundary) {
+        if (out_file_id) *out_file_id = boundary_file_id;
+        if (out_line) *out_line = boundary_line;
+        matlab_dbg.cur_file_id = boundary_file_id;
+        matlab_dbg.cur_line = boundary_line;
+    }
+    pthread_mutex_unlock(&matlab_dbg.mu);
+    return hit_irreversible ? -1 : (hit_boundary ? 1 : 0);
+}
+
 static void matlab_dbg_watch_trip(int wp_idx) {
     int thr_idx = matlab_dbg_thread_init_chain_locked();
     int n_thr = matlab_dbg.thread_n_frames[thr_idx];
@@ -4235,6 +4635,12 @@ void matlab_dbg_enable(int stop_on_entry) {
     matlab_dbg.frames[0].fn_name = "<script>";
     matlab_dbg.last_wp_idx = -1;
     matlab_dbg.paused_thread_idx = -1;
+    /* Turn on undo recording for reverse-stepping. The hook stamps
+     * a stmt-boundary record on every fire; ws_set_* / frame_set_*
+     * push prev-value records before each write. Clearing the log
+     * here ensures a re-launch starts with an empty undo history. */
+    matlab_dbg_undo_clear_locked();
+    matlab_dbg.recording_undo = 1;
     /* Reset the thread registry on every launch so DAP threadIds
      * start fresh — a re-launch otherwise carries stale entries
      * from the prior session into the IDE's threads pane. Per-
@@ -4780,6 +5186,11 @@ void matlab_dbg_hook(int32_t file_id, int32_t line) {
         matlab_dbg.thread_frames[thr_idx][*thr_n - 1].file_id = file_id;
         matlab_dbg.thread_frames[thr_idx][*thr_n - 1].line = line;
     }
+    /* Statement-boundary record for reverse stepping. The undo
+     * log gets one of these per hook fire; stepBack walks back
+     * until it finds the previous boundary. Cheap (no allocation
+     * — kind=0 records just stamp ints). */
+    matlab_dbg_undo_record_stmt_locked(file_id, line, thr_idx);
 
     int should_pause = 0;
     int matched_bp = -1;
@@ -5059,6 +5470,10 @@ void matlab_dbg_frame_set_f64(const char *name, int64_t name_len, double v) {
      * trample each other's frames. The shared frame_locals[] is
      * refreshed by the hook on pause via the snapshot-to-shared
      * copy, so DAP inspectors see the paused thread's view. */
+    int slot = matlab_dbg_thread_init_chain_locked();
+    int n = matlab_dbg.thread_n_frames[slot];
+    if (n > 0)
+        matlab_dbg_frame_push_undo_locked(slot, n - 1, name, name_len);
     struct matlab_dbg_frame_locals *fl =
         matlab_dbg_thread_innermost_locals_locked();
     if (fl) {
@@ -5082,6 +5497,10 @@ void matlab_dbg_frame_set_f64(const char *name, int64_t name_len, double v) {
 void matlab_dbg_frame_set_mat(const char *name, int64_t name_len, void *mat) {
     if (!name || name_len <= 0) return;
     pthread_mutex_lock(&matlab_dbg.mu);
+    int slot = matlab_dbg_thread_init_chain_locked();
+    int n = matlab_dbg.thread_n_frames[slot];
+    if (n > 0)
+        matlab_dbg_frame_push_undo_locked(slot, n - 1, name, name_len);
     struct matlab_dbg_frame_locals *fl =
         matlab_dbg_thread_innermost_locals_locked();
     if (fl) {
@@ -5106,6 +5525,10 @@ void matlab_dbg_frame_set_mat(const char *name, int64_t name_len, void *mat) {
 void matlab_dbg_frame_set_obj(const char *name, int64_t name_len, void *obj) {
     if (!name || name_len <= 0) return;
     pthread_mutex_lock(&matlab_dbg.mu);
+    int slot = matlab_dbg_thread_init_chain_locked();
+    int n = matlab_dbg.thread_n_frames[slot];
+    if (n > 0)
+        matlab_dbg_frame_push_undo_locked(slot, n - 1, name, name_len);
     struct matlab_dbg_frame_locals *fl =
         matlab_dbg_thread_innermost_locals_locked();
     if (fl) {

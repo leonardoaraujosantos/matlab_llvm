@@ -1153,6 +1153,99 @@ def scn_read_write_memory(matlabc, program):
         c.wait_event("terminated", timeout=5.0)
 
 
+def scn_step_back(matlabc, program):
+    """`stepBack` rolls back the most recent statement's writes
+    and resumes at the prior line. The runtime maintains a per-
+    statement undo log of `matlab_ws_set_*` and frame-set writes;
+    stepBack pops one statement's worth of records and reverts
+    them.
+
+    Uses dap_revstep_program.m: straight-line a/b/c assignments
+    with no branching, so the rewind sequence is deterministic.
+    Break at line 7 (disp(c)); stepBack walks back through line 6
+    (c=300) reverting c, line 5 (b=200) reverting b, line 4
+    (a=100) reverting a."""
+    import os
+    rs_program = os.path.join(
+        os.path.dirname(os.path.abspath(program)),
+        "dap_revstep_program.m",
+    )
+    with DapClient(matlabc, rs_program) as c:
+        caps = c.request("initialize", {
+            "clientID": "matlabc-test",
+            "linesStartAt1": True,
+        })
+        assert caps.get("supportsStepBack"), \
+            f"stepBack caps not advertised: {caps}"
+        c.wait_event("initialized", timeout=5.0)
+        c.request("launch", {"program": rs_program, "stopOnEntry": False})
+        c.request("setBreakpoints", {
+            "source": {"path": rs_program},
+            "breakpoints": [{"line": 8}],   # disp(c)
+        })
+        c.request("configurationDone")
+        c.wait_event("stopped", timeout=5.0)
+
+        # At line 7 pause, all three vars are set.
+        def _ws():
+            st = c.request("stackTrace", {"threadId": 1})
+            sc = c.request("scopes", {"frameId": st["stackFrames"][0]["id"]})
+            return _vars_by_name(c, ref=sc["scopes"][0]["variablesReference"])
+        rows = _ws()
+        assert rows.get("a") == "100" and rows.get("b") == "200" \
+               and rows.get("c") == "300", \
+            f"all three vars should be set before stepBack: {rows!r}"
+
+        # First stepBack: rewinds at least one statement worth of
+        # writes. The most recent JIT-emitted ws_set was for `c`,
+        # so c should change. We don't assert on a/b — the JIT
+        # may emit multiple ws_set calls per statement (mirror
+        # writes into script-frame Locals), and the rewind walks
+        # all records between two statement boundaries; depending
+        # on lowering details, the rewound set may include
+        # auxiliary writes for earlier vars too. The user-visible
+        # contract is "c is no longer 300 after stepBack".
+        c.request("stepBack")
+        c.wait_event("stopped", timeout=5.0)
+        rows = _ws()
+        assert rows.get("c") != "300", \
+            f"stepBack should have reverted c=300: {rows!r}"
+
+        c.request("continue")
+        c.wait_event("terminated", timeout=5.0)
+
+
+def scn_reverse_continue(matlabc, program):
+    """`reverseContinue` walks the undo log back to the program
+    entry. With dap_revstep_program.m's three plain assignments,
+    one reverseContinue from line 7 should rewind at least one
+    statement and land with reason=step or entry."""
+    import os
+    rs_program = os.path.join(
+        os.path.dirname(os.path.abspath(program)),
+        "dap_revstep_program.m",
+    )
+    with DapClient(matlabc, rs_program) as c:
+        c.request("initialize", {"clientID": "t", "linesStartAt1": True})
+        c.wait_event("initialized", timeout=5.0)
+        c.request("launch", {"program": rs_program, "stopOnEntry": False})
+        c.request("setBreakpoints", {
+            "source": {"path": rs_program},
+            "breakpoints": [{"line": 8}],
+        })
+        c.request("configurationDone")
+        c.wait_event("stopped", timeout=5.0)
+
+        c.request("reverseContinue")
+        ev = c.wait_event("stopped", timeout=5.0)
+        body = ev.get("body") or {}
+        assert body.get("reason") in ("step", "entry"), \
+            f"reverseContinue should stop with reason=step|entry: {body!r}"
+
+        c.request("continue")
+        c.wait_event("terminated", timeout=5.0)
+
+
 def scn_disassemble(matlabc, program):
     """`disassemble` walks JIT-emitted machine code instruction-by-
     instruction using the host triple's MCDisassembler. With no
@@ -1547,7 +1640,7 @@ def scn_unsupported_refusals(matlabc, program):
         initialize_and_launch(c, breakpoints=[{"line": 5}])
         _stop_event(c)
 
-        for cmd in ("stepBack", "reverseContinue", "locations",
+        for cmd in ("locations",
                     "setInstructionBreakpoints", "restartFrame",
                     "goto", "gotoTargets"):
             try:

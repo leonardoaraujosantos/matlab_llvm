@@ -181,6 +181,7 @@ VS Code via a generic-DAP extension:
 | Data breakpoints (read / write / readWrite) | `dataBreakpointInfo` advertises all three access types and resolves a name to a stable dataId; `setDataBreakpoints` installs the watch. Write side: every `matlab_ws_set_*` and `matlab_dbg_frame_set_*` checks the watch list. Read side: `matlab_ws_get_f64` / `matlab_ws_get_mat` check too, with a lock-free n_wp==0 fast path so the JIT pays no measurable cost when no watches are armed. `stopped` events carry `reason: "data breakpoint"` and the watch's id in `hitBreakpointIds`. Limitation: function-frame reads bypass the runtime API (the JIT loads from stack slots directly), so a read-watch on a function local is silently invisible — script-scope reads only |
 | Memory inspection on matrices   | Matrix variable rows carry a `memoryReference` (hex-formatted data-buffer pointer); `readMemory` and `writeMemory` decode it back, validate against a server-side region table (only matrix data buffers are exposed — refuses arbitrary addresses), and stream cell bytes as base64. Reads past the buffer end report `unreadableBytes` instead of erroring. 1MB read cap per request |
 | Disassembly                     | `disassemble` walks JIT-emitted machine code instruction-by-instruction using the host triple's `MCDisassembler`. With no `memoryReference`, defaults to the JIT's `main` entry point. Each result row carries an address, raw bytes (hex), and printed asm. Decode failures emit a `.byte` recovery row and step forward 1 byte so a single bad byte doesn't collapse the response. Negative `instructionOffset` is refused (would need a backward-decoder for variable-length archs) |
+| Reverse stepping                | `stepBack` and `reverseContinue` rewind through a per-statement undo log. Every `matlab_ws_set_*` and `matlab_dbg_frame_set_*` push prev-value records before the write; the hook stamps a statement boundary on each fire. stepBack pops one statement's worth of records and reapplies them in reverse. Irreversible ops (disp / fprintf when wired) emit a marker that stops the rewind with a clear message. Ring buffer holds 4096 records — enough for hundreds of statements at typical mutation rates |
 | Function breakpoints            | `setFunctionBreakpoints` resolves a name against the compiled function table and pins a line bp at the body's first statement. Class methods are registered under `MethodName`, `ClassName.MethodName`, and `ClassName/MethodName` so any form the user types resolves |
 | Breakpoint candidate lines      | `breakpointLocations` returns every bp-eligible line in a range (computed by an AST walker at compileProgram time) |
 | Exception breakpoints           | `setExceptionBreakpoints` with the `error` filter — runtime pauses on the first hook fired after `matlab_set_error` |
@@ -679,10 +680,20 @@ helper variable is named `total` rather than `sum` for this reason.
 
 ### Other known limits (deferred, not blocked)
 
-- **Reverse stepping / time-travel debugging.** The runtime has no
-  state recorder, so `stepBack` and `reverseContinue` respond with
-  `success=false`. The infrastructure to add: a per-statement
-  diff log of `matlab_ws_*` writes plus frame-stack edits.
+- **Reverse stepping / time-travel debugging.** *Done.* The
+  runtime maintains a 4096-entry ring-buffer undo log: every
+  `matlab_ws_set_*` and `matlab_dbg_frame_set_*` pushes a
+  prev-value record before the write, and the hook stamps a
+  statement boundary on each fire. `matlab_dbg_step_back` walks
+  the log backward from `undo_head`, applying each non-boundary
+  record in reverse until it hits the previous statement
+  boundary. The DAP `stepBack` and `reverseContinue` handlers
+  drive this. v1 caveats: rewinding a write where the variable
+  didn't pre-exist sets it to 0 (no remove-from-struct API);
+  per-statement undo granularity (not per-instruction).
+  Irreversible ops can stamp a kind=4 marker that stops the
+  rewind cleanly — wiring this into `disp` / `fprintf` is
+  follow-up.
 - **Memory inspection on matrices.** *Done.* Matrix variable rows
   carry a `memoryReference` pointing at the data buffer; the DAP
   server keeps a `MemRegions` registry of (ptr, byte_count) pairs
@@ -852,7 +863,7 @@ Three ctest suites guard the debugging surface (all gated on
 
 - **`debug-dap-tests`** — spawns `matlabc -dap` as a subprocess and
   drives the protocol with a small Python client
-  (`test/Debug/dap_client.py`). Forty-three scenarios cover the
+  (`test/Debug/dap_client.py`). Forty-five scenarios cover the
   end-to-end surface:
 
   *Stepping & basic flow:*
@@ -1039,6 +1050,14 @@ Three ctest suites guard the debugging surface (all gated on
     main entry, and confirms each row has an address (`0x...`),
     a hex-bytes string, and printed asm. Negative
     `instructionOffset` comes back with a clear refusal
+  - **`step_back`** — `dap_revstep_program.m` runs three
+    straight-line assignments. Pause at the line after the
+    last assignment, request `stepBack`, and verify the most
+    recent ws_set was reverted (the watched variable's value
+    changed from its written value)
+  - **`reverse_continue`** — same fixture; `reverseContinue`
+    walks the undo log back and stops with `reason=step` or
+    `reason=entry`
   - **`read_write_memory`** — using `dap_matrix_program.m`'s
     `A = [1 2 3; 4 5 6]`, exercises the matrix `memoryReference`
     field: reads the first 3 doubles via `readMemory` and
