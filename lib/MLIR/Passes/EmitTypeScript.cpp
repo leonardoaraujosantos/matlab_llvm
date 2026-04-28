@@ -403,6 +403,20 @@ bool Emitter::canInline(mlir::Operation &Op) {
           arith::TruncFOp, arith::ExtFOp,
           LLVM::GEPOp>(Op))
     return true;
+  // Unregistered matlab.* binops on scalars — same constraints
+  // as the registered arith.* binops above.
+  {
+    StringRef MN = Op.getName().getStringRef();
+    if (Op.getNumOperands() == 2 && Op.getNumResults() == 1 &&
+        (MN == "matlab.add" || MN == "matlab.sub" ||
+         MN == "matlab.emul" || MN == "matlab.matmul" ||
+         MN == "matlab.ediv" || MN == "matlab.matdiv" ||
+         MN == "matlab.eq" || MN == "matlab.ne" ||
+         MN == "matlab.lt" || MN == "matlab.le" ||
+         MN == "matlab.gt" || MN == "matlab.ge" ||
+         MN == "matlab.short_or" || MN == "matlab.short_and"))
+      return true;
+  }
 
   auto isPureReadCall = [](Operation &Op2) -> bool {
     auto C = dyn_cast<LLVM::CallOp>(Op2);
@@ -524,6 +538,27 @@ bool Emitter::buildInlineExpr(mlir::Operation &Op, std::string &Expr) {
   if (auto X = dyn_cast<arith::XOrIOp>(Op)) {
     if (isI1(X.getType())) return bin("!==");
     return bin("^");
+  }
+  // Unregistered matlab.* binops on scalars — same shape as the
+  // registered arith.* binops above. Inlines so chains collapse.
+  {
+    StringRef MN = Op.getName().getStringRef();
+    if (Op.getNumOperands() == 2 && Op.getNumResults() == 1) {
+      const char *cc = nullptr;
+      if (MN == "matlab.add") cc = "+";
+      else if (MN == "matlab.sub") cc = "-";
+      else if (MN == "matlab.emul" || MN == "matlab.matmul") cc = "*";
+      else if (MN == "matlab.ediv" || MN == "matlab.matdiv") cc = "/";
+      else if (MN == "matlab.eq") cc = "===";
+      else if (MN == "matlab.ne") cc = "!==";
+      else if (MN == "matlab.lt") cc = "<";
+      else if (MN == "matlab.le") cc = "<=";
+      else if (MN == "matlab.gt") cc = ">";
+      else if (MN == "matlab.ge") cc = ">=";
+      else if (MN == "matlab.short_or") cc = "||";
+      else if (MN == "matlab.short_and") cc = "&&";
+      if (cc) return bin(cc);
+    }
   }
   if (auto C = dyn_cast<arith::CmpFOp>(Op)) {
     const char *cc = "===";
@@ -1520,18 +1555,9 @@ bool Emitter::run(mlir::ModuleOp M) {
   precomputeModuleProperties(M);
   emitProlog();
 
-  for (auto &Op : M.getBody()->getOperations()) {
-    if (auto F = mlir::dyn_cast<mlir::func::FuncOp>(Op)) {
-      if (F.getBody().empty()) continue;
-      unsigned N = F.getFunctionType().getNumResults();
-      if (N > 1) {
-        fail(("func.func @" + F.getSymName() +
-              " has " + std::to_string(N) +
-              " results; emitter supports at most 1").str());
-        return false;
-      }
-    }
-  }
+  // Multi-return: TypeScript supports tuple types and array
+  // destructuring natively (`function f(): [T0, T1]` + `const [a, b]
+  // = f();`). The return / call-site emit handles N>1 explicitly.
 
   // Pass 1: register every string global's TS literal so AddressOf
   // inlining can fold it directly.
@@ -2092,9 +2118,18 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
           R->getBlock() == &R->getParentRegion()->back())
         return;
       indent(Indent); OS << "return;\n";
-    } else {
+    } else if (R.getNumOperands() == 1) {
       indent(Indent);
       OS << "return " << this->stmtExpr(R.getOperand(0)) << ";\n";
+    } else {
+      // Multi-return: TS tuple — `return [a, b];`.
+      indent(Indent);
+      OS << "return [";
+      for (unsigned i = 0; i < R.getNumOperands(); ++i) {
+        if (i) OS << ", ";
+        OS << this->stmtExpr(R.getOperand(i));
+      }
+      OS << "];\n";
     }
     return;
   }
@@ -2229,6 +2264,14 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
     if (Call.getNumResults() == 1) {
       std::string N = this->name(Call.getResult(0));
       OS << "const " << N << " = ";
+    } else if (Call.getNumResults() > 1) {
+      // Multi-return: TS array destructuring — `const [a, b] = f(args);`.
+      OS << "const [";
+      for (unsigned i = 0; i < Call.getNumResults(); ++i) {
+        if (i) OS << ", ";
+        OS << this->name(Call.getResult(i));
+      }
+      OS << "] = ";
     }
     {
       std::string Rewrite;
@@ -2341,6 +2384,30 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
     OS << "const " << N << " = " << this->exprFor(C.getLhs()) << " " << CC
        << " " << this->exprFor(C.getRhs()) << ";\n";
     return;
+  }
+
+  // --- Unregistered matlab.* binops ----------------------------------
+  // Same scope-extension as EmitC/EmitPython: render frontend matlab.*
+  // ops as the equivalent JS/TS operator. Lets HDL-source files that
+  // don't depend on persistent state compile to TypeScript too.
+  {
+    llvm::StringRef MN = Op.getName().getStringRef();
+    if (Op.getNumOperands() == 2 && Op.getNumResults() == 1) {
+      const char *CC = nullptr;
+      if (MN == "matlab.add") CC = "+";
+      else if (MN == "matlab.sub") CC = "-";
+      else if (MN == "matlab.emul" || MN == "matlab.matmul") CC = "*";
+      else if (MN == "matlab.ediv" || MN == "matlab.matdiv") CC = "/";
+      else if (MN == "matlab.eq") CC = "===";
+      else if (MN == "matlab.ne") CC = "!==";
+      else if (MN == "matlab.lt") CC = "<";
+      else if (MN == "matlab.le") CC = "<=";
+      else if (MN == "matlab.gt") CC = ">";
+      else if (MN == "matlab.ge") CC = ">=";
+      else if (MN == "matlab.short_or") CC = "||";
+      else if (MN == "matlab.short_and") CC = "&&";
+      if (CC) { emitBin(CC); return; }
+    }
   }
 
   // --- arith casts ----------------------------------------------------

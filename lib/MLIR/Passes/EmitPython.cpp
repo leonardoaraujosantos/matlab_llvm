@@ -483,6 +483,20 @@ bool Emitter::canInline(mlir::Operation &Op) {
           arith::TruncFOp, arith::ExtFOp,
           LLVM::GEPOp>(Op))
     return true;
+  // Unregistered matlab.* binops on scalar primitives — same
+  // shape and constraints as the registered arith.* ops above.
+  {
+    StringRef MN = Op.getName().getStringRef();
+    if (Op.getNumOperands() == 2 && Op.getNumResults() == 1 &&
+        (MN == "matlab.add" || MN == "matlab.sub" ||
+         MN == "matlab.emul" || MN == "matlab.matmul" ||
+         MN == "matlab.ediv" || MN == "matlab.matdiv" ||
+         MN == "matlab.eq" || MN == "matlab.ne" ||
+         MN == "matlab.lt" || MN == "matlab.le" ||
+         MN == "matlab.gt" || MN == "matlab.ge" ||
+         MN == "matlab.short_or" || MN == "matlab.short_and"))
+      return true;
+  }
 
   // Is this LLVM call to a runtime helper that's known to be a pure
   // read with no side effects? Such calls don't block inlining of an
@@ -661,6 +675,28 @@ bool Emitter::buildInlineExpr(mlir::Operation &Op, std::string &Expr) {
     }
     Expr = "(" + exprFor(C.getLhs()) + " " + cc + " " + exprFor(C.getRhs()) + ")";
     return true;
+  }
+  // Unregistered matlab.* binops on scalar primitives — same set
+  // and shape as the registered arith.* ops above. Renders as
+  // single-expression so chains collapse to one Python line.
+  {
+    StringRef MN = Op.getName().getStringRef();
+    if (Op.getNumOperands() == 2 && Op.getNumResults() == 1) {
+      const char *cc = nullptr;
+      if (MN == "matlab.add") cc = "+";
+      else if (MN == "matlab.sub") cc = "-";
+      else if (MN == "matlab.emul" || MN == "matlab.matmul") cc = "*";
+      else if (MN == "matlab.ediv" || MN == "matlab.matdiv") cc = "/";
+      else if (MN == "matlab.eq") cc = "==";
+      else if (MN == "matlab.ne") cc = "!=";
+      else if (MN == "matlab.lt") cc = "<";
+      else if (MN == "matlab.le") cc = "<=";
+      else if (MN == "matlab.gt") cc = ">";
+      else if (MN == "matlab.ge") cc = ">=";
+      else if (MN == "matlab.short_or") cc = "or";
+      else if (MN == "matlab.short_and") cc = "and";
+      if (cc) return bin(cc);
+    }
   }
   if (auto S = dyn_cast<arith::SelectOp>(Op)) {
     // Common shape from MATLAB's logical-to-double coercion: select(c,
@@ -1701,19 +1737,9 @@ bool Emitter::run(mlir::ModuleOp M) {
   precomputeModuleProperties(M);
   emitProlog();
 
-  // Pre-emission: every defined function must have 0 or 1 results.
-  for (auto &Op : M.getBody()->getOperations()) {
-    if (auto F = mlir::dyn_cast<mlir::func::FuncOp>(Op)) {
-      if (F.getBody().empty()) continue;
-      unsigned N = F.getFunctionType().getNumResults();
-      if (N > 1) {
-        fail(("func.func @" + F.getSymName() +
-              " has " + std::to_string(N) +
-              " results; emitter supports at most 1").str());
-        return false;
-      }
-    }
-  }
+  // Multi-return: Python natively supports `return a, b` and `a, b = f(...)`,
+  // no module-level prep needed. The check is removed; the return-op and
+  // call-site emit handle N>1 results explicitly.
 
   // Pass 1: register every string global's Python literal so AddressOf
   // inlining can fold it directly. The top-of-file `__matlab_strN = "..."`
@@ -2310,9 +2336,18 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
           R->getBlock() == &R->getParentRegion()->back())
         return;
       indent(Indent); OS << "return\n";
-    } else {
+    } else if (R.getNumOperands() == 1) {
       indent(Indent);
       OS << "return " << this->stmtExpr(R.getOperand(0)) << "\n";
+    } else {
+      // Multi-return: `return a, b, c` (Python tuple).
+      indent(Indent);
+      OS << "return ";
+      for (unsigned i = 0; i < R.getNumOperands(); ++i) {
+        if (i) OS << ", ";
+        OS << this->stmtExpr(R.getOperand(i));
+      }
+      OS << "\n";
     }
     return;
   }
@@ -2472,6 +2507,13 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
     if (Call.getNumResults() == 1) {
       std::string N = this->name(Call.getResult(0));
       OS << N << " = ";
+    } else if (Call.getNumResults() > 1) {
+      // Multi-return: `a, b = f(args)` Python tuple unpacking.
+      for (unsigned i = 0; i < Call.getNumResults(); ++i) {
+        if (i) OS << ", ";
+        OS << this->name(Call.getResult(i));
+      }
+      OS << " = ";
     }
     {
       std::string Rewrite;
@@ -2584,6 +2626,32 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
     OS << N << " = " << this->exprFor(C.getLhs()) << " " << CC
        << " " << this->exprFor(C.getRhs()) << "\n";
     return;
+  }
+
+  // --- Unregistered matlab.* binops ----------------------------------
+  // Frontend leaves these for non-numeric / non-fully-typed call sites
+  // (mostly HDL-targeted code that the SV pipeline consumes
+  // unchanged). The Python emitter should render them as the
+  // equivalent Python operator so HDL-source files that don't depend
+  // on persistent state can also compile here.
+  {
+    llvm::StringRef MN = Op.getName().getStringRef();
+    if (Op.getNumOperands() == 2 && Op.getNumResults() == 1) {
+      const char *CC = nullptr;
+      if (MN == "matlab.add") CC = "+";
+      else if (MN == "matlab.sub") CC = "-";
+      else if (MN == "matlab.emul" || MN == "matlab.matmul") CC = "*";
+      else if (MN == "matlab.ediv" || MN == "matlab.matdiv") CC = "/";
+      else if (MN == "matlab.eq") CC = "==";
+      else if (MN == "matlab.ne") CC = "!=";
+      else if (MN == "matlab.lt") CC = "<";
+      else if (MN == "matlab.le") CC = "<=";
+      else if (MN == "matlab.gt") CC = ">";
+      else if (MN == "matlab.ge") CC = ">=";
+      else if (MN == "matlab.short_or") CC = "or";
+      else if (MN == "matlab.short_and") CC = "and";
+      if (CC) { emitBin(CC); return; }
+    }
   }
 
   // --- arith casts ----------------------------------------------------
