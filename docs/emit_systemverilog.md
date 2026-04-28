@@ -646,9 +646,7 @@ This keeps synthesis intent obvious and lint-friendly.
 ## Implementation Plan
 
 This section is the concrete plan: files to add, passes to write, tests
-to land, in the order they need to land. It mirrors the structure of
-[`docs/emit_systemc.md`](emit_systemc.md), which has shipped through a
-similar phased build-out.
+to land, in the order they need to land.
 
 ### Status snapshot — where we are vs the original plan
 
@@ -828,29 +826,22 @@ The full per-phase plan below is preserved as the original
 target shape. Each "shipped" phase still describes the full
 v1+v2 contract including the pieces that landed.
 
-### Why this differs from `-emit-systemc`
+### Direct-to-RTL design
 
-`-emit-systemc` produces input for a downstream HLS tool, which owns
-loop scheduling, FSM extraction, and pipelining. `-emit-systemverilog`
-goes **direct to RTL** — there is no HLS tool in the loop, so this
-backend owns those decisions itself. Concretely, this means three
-extra MLIR passes (`HWStateInfer`, `HWFSMExtract`, `HWPipeline`) that
-have no counterpart in the SystemC path, plus tighter rejection on
-anything that would otherwise need an HLS tool to clean up.
-
-The two backends share the legality and bit-width-inference passes
-conceptually but keep separate implementations — the SV path is
-stricter (e.g. it rejects `scf.while` outright unless it has an
-explicit FSM annotation, where the SystemC path can punt to the HLS
-tool).
+`-emit-systemverilog` goes **direct to RTL** — there is no HLS tool
+in the loop, so this backend owns loop scheduling, FSM extraction,
+and pipelining itself. Concretely, this means three SV-specific
+MLIR passes (`HWStateInfer`, `HWFSMExtract`, `HWPipeline`) plus
+tight rejection in `HWLegalize` for anything that can't be mapped
+to predictable hardware (no `scf.while` without explicit FSM
+annotation, no recursion, no dynamic allocation).
 
 ### Architecture
 
 ```text
 AST ──► MLIR ──► [existing pipeline ... LowerIO]
                        │
-                       ├──► emitC()        ──► .c           (existing)
-                       ├──► emitSystemC()  ──► .cpp + .h    (planned)
+                       ├──► emitC()       ──► .c   (existing)
                        │
                        └──► [HWLegalize]      ───► reject or tag
                             [HWBitWidthInfer] ───► annotate values with !sv.type
@@ -861,9 +852,8 @@ AST ──► MLIR ──► [existing pipeline ... LowerIO]
                                  └──► emitSystemVerilog() ──► .sv
 ```
 
-`HWLegalize` and `HWBitWidthInfer` are conceptually similar to the
-SystemC versions but separate implementations, since the rules and
-the type lattice (`logic [W-1:0]` / `logic signed [W-1:0]`) differ.
+`HWLegalize` and `HWBitWidthInfer` enforce the SV type lattice
+(`logic [W-1:0]` / `logic signed [W-1:0]`).
 
 ### Synthesizability gate
 
@@ -1951,7 +1941,7 @@ so the source compiles unchanged in stock MATLAB.
 
 ### Testing strategy
 
-Three layers, mirroring the SystemC plan but adapted for direct-to-RTL:
+Three layers for the direct-to-RTL path:
 
 1. **Golden-diff** (fast, always in CI). Each `test/EmitSV/*.m` pairs
    with a `.sv` golden. Catches emitter regressions without running
@@ -2047,38 +2037,13 @@ Revisit when (a) we want to share infrastructure with other CIRCT
 frontends, or (b) CIRCT's `sv` dialect stabilizes enough that the
 import cost is once-only.
 
-### Alternative B — Lower through SystemC then through HLS
-
-Use the existing `-emit-systemc` pipeline and rely on a downstream
-HLS tool to produce SV.
-
-**Pros**: zero new code in this repo.
-**Cons**: shifts vendor dependency to the user (HLS tool license),
-gives up control over RTL style (each HLS tool emits different
-shapes), and produces output that's harder to review than direct
-RTL emission. Defeats the point of an ASIC-targeted backend.
-
-### Alternative C — Emit Verilog-2001 instead of SystemVerilog
+### Alternative B — Emit Verilog-2001 instead of SystemVerilog
 
 **Pros**: works with older synthesis tools.
 **Cons**: loses `always_comb`/`always_ff`/`unique case`/`logic` —
 the very constructs that make synthesis intent unambiguous. The
 ASIC tool ecosystem fully supports SystemVerilog-2017; there's no
 practical reason to downgrade.
-
-## Relationship To Existing SystemC Plan
-
-The current repository already has
-[`docs/emit_systemc.md`](emit_systemc.md), which targets synthesizable
-SystemC/HLS. This SystemVerilog plan should not replace it.
-
-Recommended positioning:
-- `emit_systemc.md`: HLS/SystemC-oriented path
-- `emit_systemverilog.md`: direct RTL-oriented path
-
-The legality and inference docs can be shared conceptually between both
-paths, but the emission rules differ enough that they should remain
-separate.
 
 ## References
 

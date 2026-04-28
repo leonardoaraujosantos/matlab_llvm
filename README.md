@@ -342,7 +342,6 @@ Core docs:
 - [`docs/complex.md`](docs/complex.md): complex numbers and FFT
 - [`docs/sema.md`](docs/sema.md): semantic analysis and type inference
 - [`docs/save_load_compat.md`](docs/save_load_compat.md): `save` / `load` `.mat` compatibility
-- [`docs/emit_systemc.md`](docs/emit_systemc.md): future SystemC backend
 
 Program examples:
 

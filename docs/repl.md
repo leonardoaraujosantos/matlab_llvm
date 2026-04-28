@@ -601,7 +601,7 @@ workspace vs. function workspace distinctions.
    many responsibilities.
 
 2. **Does the interpreter share code with any emitter?**
-   No direct reuse is possible — the emitters print C/Python/SystemC,
+   No direct reuse is possible — the emitters print C/Python/SV,
    the interpreter calls runtime functions. But **the runtime itself
    is shared**. Every operation the interpreter needs is already
    callable in `runtime/matlab_runtime.c`; we're adding very few new

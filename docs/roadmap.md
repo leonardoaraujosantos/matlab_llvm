@@ -336,19 +336,7 @@ across logic). Just insertion at safe boundaries.
 
 ## Long-term / exploratory
 
-### 11. SystemC backend 🔵
-
-Already documented in [`docs/emit_systemc.md`](emit_systemc.md) as
-a future backend. Rough scope: same approach as the SV emitter,
-but targeting SystemC's `SC_MODULE` / `SC_THREAD` / `sc_signal`
-shape for system-level modeling.
-
-**Effort.** ~3 weeks (the SV pipeline is the template; SystemC
-output is mostly a different printer).
-
----
-
-### 12. MATLAB graphics / `plot` (limited) 🔵
+### 11. MATLAB graphics / `plot` (limited) 🔵
 
 For demos and tutorials. Render `plot(x, y)`, `bar(...)`,
 `imagesc(...)` to PNG / SVG via a small wrapper around matplotlib
@@ -360,7 +348,7 @@ of compiled programs.
 
 ---
 
-### 13. `.mat` file save / load 🔵
+### 12. `.mat` file save / load 🔵
 
 Already documented in [`docs/save_load_compat.md`](save_load_compat.md).
 Goal: read MATLAB v7.3 (HDF5-based) `.mat` files into the runtime
@@ -372,7 +360,7 @@ just the common cases (`save('out.mat', '-v7.3')` followed by
 
 ---
 
-### 14. Toolbox stubs for symbolic / optimization 🔵
+### 13. Toolbox stubs for symbolic / optimization 🔵
 
 Single-file stubs that route to the equivalent open-source
 library (`sympy` for Symbolic Math Toolbox, `scipy.optimize`
