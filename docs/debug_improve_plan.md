@@ -1,11 +1,18 @@
 # Debug Improvements Plan
 
-A focused, actionable plan for the remaining gaps in the DAP server
-called out in [`docs/debug.md`](debug.md). The companion file is
-already accurate about what works today; this doc tracks what's *not*
-shipped, in priority order, with the runtime / MLIR / DAP-server
-changes each item needs and the validation criteria a follow-up PR
-must meet.
+Historical record of the DAP / debug build-out, plus the small
+remaining follow-ups list at the end. The original plan was
+items (1–9) below; everything in that range is shipped. Several
+items the plan flagged as "out of scope" — `keyboard`, function
+breakpoints, hit-count breakpoints, data breakpoints, reverse
+stepping, disassembly, per-thread frames, memory inspection —
+shipped in subsequent rounds and are documented in the
+"Beyond the original plan" section further down.
+
+The companion file [`docs/debug.md`](debug.md) is the
+user-facing reference for what works today. This doc focuses on
+*how* each item was built (so future contributors can extend or
+debug them) and what's still open.
 
 The DAP server lives in `tools/matlabc/main.cpp`, the runtime debug
 state lives in `runtime/matlab_runtime.c`, and the per-statement hook
@@ -374,121 +381,134 @@ paths and the watch-result variant).
 
 ---
 
-## Out of scope (separately tracked, not on the roadmap)
+## Beyond the original plan — shipped follow-ups
 
-The items below are tracked here so future contributors don't
-re-discover them from scratch — each has a brief sketch of what
-it'd take to implement and why it's deferred. Status: **none are
-started**; the shipped items above (1–7) form the supported surface.
+The original roadmap (items 1–9 above) is fully landed. Subsequent
+DAP work added the items below, all shipped in the current tree.
+This section is preserved as historical record so future readers
+can see what each was, what shipped, and where to find the
+implementation.
 
-### `keyboard` as a nested REPL
+### `keyboard` builtin — **shipped**
 
-MATLAB's `keyboard` statement pauses execution at the line where
-it appears and drops into an interactive prompt with full access to
-the surrounding scope. The scoped-eval bridge from item (6) is
-already in place; the remaining pieces are:
+MATLAB's `keyboard;` pauses execution at the call site and drops
+into the IDE's REPL panel. The lowering recognises `keyboard` in
+the `ExprStmt` dispatch (`lib/MLIR/Lowering.cpp`, alongside the
+`who`/`whos`/`clear` arm) and emits
+`matlab.call_builtin {callee="matlab_dbg_keyboard_hook"}`;
+`LowerTensorOps` lowers that to a direct `llvm.call`. The runtime's
+`matlab_dbg_keyboard_hook` snapshots the calling thread's frame
+chain and blocks on the same condvar a real bp uses; the DAP
+monitor surfaces stop reason `"entry"` so the IDE switches to the
+REPL view. Capability: stop reason routes correctly via
+`matlab_dbg_was_paused_from_keyboard`.
 
-- **A bidirectional REPL pump** driven from the paused worker
-  thread: read user input over a channel, route through item (6)'s
-  snapshot/stamp/restore bridge, print result, loop until `dbcont`.
-  In `-dap` mode the input channel is the IDE's debug-console pane
-  via repeated `evaluate(context="repl")` requests; in standalone
-  mode a tty pump on stdin/stdout works.
-- **A lowering recogniser** for the `keyboard` builtin — emit a
-  call to a new `matlab_dbg_keyboard()` runtime entry that flips the
-  pause state with a "nested REPL" flag the DAP server / standalone
-  pump knows how to respond to.
-- **`dbcont` / `dbquit` / `dbstack`** as REPL commands handled
-  inside the pump rather than passed through to the JIT.
+The standalone-REPL pump (non-DAP) is still missing — see the open
+follow-ups list at the bottom of this file.
 
-Effort estimate: half-day or so once item (6) is understood. The
-dependency graph is fully unblocked.
+### Function breakpoints (`setFunctionBreakpoints`) — **shipped**
 
-### Function breakpoints (`setFunctionBreakpoints`)
+`setFunctionBreakpoints` resolves a name against `G.FunctionTable`
+(populated at `compileProgram` time by an AST walk over the TU's
+`Functions` + `ClassDef::Methods`) and pins a line breakpoint at
+the body's first statement. Class methods are registered under
+three keys (`MethodName`, `ClassName.MethodName`,
+`ClassName/MethodName`) so any form the user types resolves.
+`supportsFunctionBreakpoints` is now `true`.
 
-DAP lets the IDE set breakpoints by *function name* rather than by
-file:line. The runtime-side change is small:
+### Hit-count breakpoints — **shipped**
 
-- **Runtime**: extend `matlab_dbg_state` with a parallel
-  `fn_bp_names[]` table keyed by interned name. The frame-tracking
-  hook (`matlab_dbg_enter_frame`) already has the function name in
-  hand — compare against the table and pause if matched.
-- **DAP server**: add a `setFunctionBreakpoints` handler, populate
-  the runtime table, flip `supportsFunctionBreakpoints` to `true`
-  in `initialize`.
+`setBreakpoints.hitCondition` accepts `N`, `==N`, `>=N`, `>N`, and
+`%N`. The runtime's bp table grew `hit_count[]`, `hit_target[]`,
+and `hit_op[]` fields; the hook checks the gate before declaring a
+pause so a `hitCondition: ">= 100"` skips the JIT cost of cond
+eval for the first 99 hits. New runtime API
+`matlab_dbg_add_breakpoint_ex2` carries the gate; the v1 `_ex`
+form is a back-compat wrapper.
+`supportsHitConditionalBreakpoints` is now `true`.
 
-Why deferred: file:line breakpoints already cover the common case
-(set bp on the function's first line). The IDE-facing benefit is
-"breakpoint follows the function across renames" which is uncommon
-in the matlab_llvm corpus. Easy to add later without disturbing
-anything else.
+### Data breakpoints — **shipped** (read / write / readWrite)
 
-### Hit-count breakpoints
+Approach A from the original sketch: per-store check. The runtime
+maintains a watch table (`wp_name[]`, `wp_scope[]`, `wp_id[]`,
+`wp_access[]`); every `matlab_ws_set_*` and
+`matlab_dbg_frame_set_*` call hits `matlab_dbg_watch_check`
+followed by `matlab_dbg_watch_trip` if the name matches with a
+write-compatible access kind. Read watchpoints work too:
+`matlab_ws_get_f64` / `_get_mat` call `matlab_ws_check_read_watch`
+with a lock-free `n_wp == 0` fast path so the JIT pays no
+measurable cost when no watches are armed.
 
-DAP `setBreakpoints` accepts a `hitCondition` string (e.g. `"5"`,
-`">10"`, `"%2 == 0"`) so the breakpoint only fires after N hits or
-on every Nth hit. Implementation:
+Cost in practice is fine — the no-watch fast path is a single
+relaxed load; the with-watches path adds a small linear scan that
+only runs while the IDE has watches set. The page-protect approach
+B was never pursued and isn't needed.
+`supportsDataBreakpoints` is now `true`. Limitation: function-frame
+reads bypass the runtime API entirely (the JIT loads from stack
+slots), so a read-watch on a function local is silently invisible.
 
-- **Runtime**: per-bp counter alongside the existing condition /
-  log fields; increment on every hit; compare against the
-  hit-condition spec before deciding whether to pause.
-- **DAP server**: parse `hitCondition` (a small grammar:
-  literal-int → `==`, `>N`/`>=N`/`<N`/`<=N` → comparison,
-  `%N == K` → modulo). Pass through to the runtime via a new
-  `matlab_dbg_add_breakpoint_ex2` API or extend the existing one.
-- **Capability**: advertise `supportsHitConditionalBreakpoints=true`.
+### Instruction breakpoints (`setInstructionBreakpoints`) — **deferred**
 
-Useful for "stop on the 5th iteration of this loop" without
-hand-rolling a conditional that references the loop counter
-(especially since the conditional evaluator can't see function-frame
-loop indices today). Small enough to land in an afternoon.
+Still refused (`supportsInstructionBreakpoints=false`) — the JIT
+exposes no public mapping from line to native PC, and the
+disassemble path now ships uses the host triple's MCDisassembler
+without needing one. Users who want byte-level breakpoints can
+take the `-emit-llvm -g | clang | lldb` path which already
+supports them through DWARF.
 
-### Data breakpoints
+### Reverse debugging / step-back — **shipped** (per-statement undo log)
 
-DAP `setDataBreakpoints` fires when a *value* changes (e.g. "stop
-when `x` is written to"). For a JIT'd MATLAB this is the most
-expensive option to implement well:
+The runtime maintains a 4096-entry ring-buffer undo log. Every
+`matlab_ws_set_*` and `matlab_dbg_frame_set_*` pushes a prev-value
+record before the write; the hook stamps a statement boundary on
+each fire. `matlab_dbg_step_back` walks the log backward from
+`undo_head`, applies each non-boundary record in reverse until the
+previous boundary, and refreshes the shared `frames[]` snapshot
+from the paused thread's chain. The DAP `stepBack` and
+`reverseContinue` handlers drive this.
+`supportsStepBack` is now `true`.
 
-- **Approach A (per-store check)**: at every `matlab_ws_set_*` and
-  `matlab_dbg_frame_set_*` call, look up the name in a watched-data
-  table; pause if matched. Adds cost to every store in DebugMode but
-  is mechanically simple.
-- **Approach B (page-protect)**: mprotect the workspace page and
-  catch SIGSEGV; only feasible if the matrix descriptor's storage
-  is page-aligned, which it isn't today.
+v1 caveats (documented in `docs/debug.md`): per-statement
+granularity (not per-instruction); rewinding a write where the
+variable didn't pre-exist sets it to 0 (no remove-from-struct
+API); irreversible-op markers are wired into the runtime but
+`disp`/`fprintf` don't yet stamp them.
 
-Why deferred: Approach A's per-store cost compounds with the
-existing DebugMode hook overhead; Approach B is a substantial
-runtime overhaul. The user-facing value (stop when a variable
-changes) is mostly covered by conditional breakpoints with the
-right condition expression.
+### Disassembly (`disassemble`) — **shipped**
 
-### Instruction breakpoints (`setInstructionBreakpoints`)
+Walks JIT-emitted machine code instruction-by-instruction using
+the host triple's `MCDisassembler`. The DAP server caches the
+`(target, MCAsmInfo, MCRegisterInfo, MCInstrInfo, MCSubtargetInfo,
+MCContext, MCDisassembler, MCInstPrinter)` stack on first use —
+`InitializeNativeTargetDisassembler` is deferred to first-request
+to sidestep a static-init clash with MLIR's target registration on
+some LLVM builds. Default base address is `Engine->lookup("main")`
+cached as `G.MainAddr`. `supportsDisassembleRequest` is now
+`true`.
 
-DAP can set breakpoints on raw machine-code addresses. This is the
-debugger-disassembly view's "click to break here" affordance.
-Useful for native binaries; nearly meaningless for the JIT path
-where instruction addresses are ephemeral and re-emitted each
-launch.
+### Per-thread frame chains for parfor — **shipped**
 
-Could be implemented for the `-emit-llvm -g`-clang-native flow by
-deferring entirely to lldb / gdb's own instruction-bp machinery
-(they already support it via DWARF). For DAP under JIT: not
-pursued.
+Each pthread that calls into the debug runtime gets its own
+`thread_frames[i][]`, `thread_n_frames[i]`,
+`thread_frame_locals[i][]`, and `thread_step_target_depth[i]`.
+Concurrent parfor bodies enter/leave their own stacks instead of
+trampling a shared `n_frames`. The legacy single-threaded shared
+`frames[]` is now a snapshot of whichever thread last paused —
+the hook refreshes it on pause so DAP inspectors that read those
+arrays directly continue to work without per-thread refactoring.
 
-### Reverse debugging / step-back
+### Memory inspection on matrices — **shipped**
 
-DAP advertises `supportsStepBack` for time-travel debuggers
-(`rr`, `gdb` reverse-execution, etc.). Implementing this for a JIT
-needs deterministic re-execution from a checkpoint — every external
-side effect (`disp`, file I/O, `randn`, threading) has to be
-journaled and replayable. That's a substantial runtime project of
-its own.
+Matrix variable rows carry a `memoryReference` (hex-formatted
+data-buffer pointer); the DAP server's `MemRegions` registry
+records `(ptr, byte_count)` for every buffer it hands out so
+`readMemory` / `writeMemory` can validate against a known
+buffer. Reads past the buffer end report `unreadableBytes`
+instead of erroring. 1MB read cap per request.
+`supportsReadMemoryRequest` and `supportsWriteMemoryRequest` are
+now `true`.
 
-Explicitly out of scope. `supportsStepBack=false` and there's no
-plan to flip it.
-
-### Always-on frame instrumentation
+### Always-on frame instrumentation — **still deferred**
 
 Today `matlab_dbg_enter_frame` / `_leave_frame` only fire when
 DebugMode is on (i.e. when `-g` was passed at compile time). A
@@ -512,20 +532,71 @@ correctness fix, and the typical user only needs the backtrace in
 debug builds. If we want it, the change is one-line in lowering
 plus a small benchmark to pin the per-call overhead.
 
-## Ordering
+## Open follow-ups
 
-| # | Status | Depends on |
-|---|---|---|
-| 1 | shipped | — |
-| 2 | shipped (function-only siblings) | — |
-| 3 | shipped | — |
-| 4 | shipped | — |
-| 5 | shipped | — |
-| 6 | shipped | — |
-| 7 | shipped | — |
+Items still on the backlog that don't fit a single feature heading:
 
-All originally-tracked items plus DWARF-in-`-emit-llvm` have landed.
-The remaining DAP / native-debug follow-ups are smaller polish:
+- **Standalone-REPL `keyboard` pump** — the DAP path drops into
+  the IDE's REPL panel, but `matlabc -repl` outside DAP doesn't
+  have a bidirectional pump for nested REPL sessions. Would need
+  the line-editor loop to interact with the worker's pause state.
+- **Irreversible-op markers in `disp` / `fprintf`** — the
+  reverse-stepping infrastructure has a kind=4 marker for ops
+  that can't be undone (e.g. printed output). The runtime API
+  `matlab_dbg_undo_record_irreversible` exists; `disp`/`fprintf`
+  don't yet call it, so stepBack will silently rewind past
+  printed lines. Wiring the call sites is mechanical.
+- **Read watchpoints on function locals** — function-frame reads
+  bypass the runtime API entirely (the JIT loads from stack
+  slots), so a `read` watch on a function local is silently
+  invisible. Matching the write-side coverage would need the
+  lowering to emit a `matlab_dbg_frame_local_get` mirror call
+  alongside every read.
+- **`locations` / `setInstructionBreakpoints`** — would need a
+  PC -> .m line table the JIT path doesn't maintain. Refused
+  cleanly; the `-emit-llvm -g | clang | lldb` path covers users
+  who need this.
+- **`restartFrame` / `goto` / `gotoTargets`** — the runtime
+  doesn't snapshot per-frame workspace at function entry, and
+  the JIT exposes no in-frame PC manipulation primitive. Refused
+  cleanly.
+- **Parfor: per-thread `stackTrace` content** — per-thread frame
+  chains are now correct internally, but the DAP `stackTrace`
+  inspector still reads the snapshot of the *paused* thread. A
+  `stackTrace(threadId)` query for a different (running) thread
+  won't return that thread's stack. Useful only when the user has
+  multiple parfor workers that pause concurrently.
+
+## Status table
+
+| # | Item | Status | Notes |
+|---|---|---|---|
+| 1 | Stack frames for `stepIn` / `error()` backtrace | shipped | per-thread chains added later |
+| 2 | Multi-file breakpoints | shipped | function-only / classdef-only siblings |
+| 3 | `setVariable` | shipped | all kinds via REPL-JIT path |
+| 4 | Conditional / log breakpoints | shipped | frame-bridged in later round |
+| 5 | Function-frame Locals + DAP `evaluate` | shipped | |
+| 6 | Frame-scoped `evaluate` | shipped | shared `FrameBridge` helper |
+| 7 | DWARF in `-emit-llvm` | shipped | line-tables-only |
+| 8 | Class instances in Locals + Watch | shipped | methods exposed too |
+| 9 | Matrix expansion in Locals + Watch | shipped | complex / 3-D added later |
+
+Beyond the original plan (separate sections above):
+
+| Item | Status |
+|---|---|
+| `keyboard` builtin | shipped (DAP path); standalone REPL pump still open |
+| Function breakpoints | shipped; class-method names round-trip |
+| Hit-count breakpoints | shipped |
+| Data breakpoints (read / write / readWrite) | shipped |
+| Disassembly | shipped (host triple via `MCDisassembler`) |
+| Per-thread frame chains for parfor | shipped |
+| Reverse stepping (`stepBack` / `reverseContinue`) | shipped (per-statement undo log) |
+| Memory inspection on matrix buffers | shipped |
+| Always-on frame instrumentation | deferred |
+| `locations` / `setInstructionBreakpoints` / `restartFrame` / `goto` | refused cleanly |
+
+## Smaller polish still on the table
 
 - **Resolver-prefers-ws-over-builtin** (gated by item 6's shadowing
   limitation): teach the resolver under ReplMode to look up

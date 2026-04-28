@@ -44,6 +44,24 @@ resolves `matlab_*` and `matlab_ws_*` symbols against the running
 process via LLJIT's default dynamic-library search generator, so no
 `.so` / `.dylib` is required at runtime.
 
+## REPL inside a DAP debug session
+
+When `matlabc -dap` has the program paused, the IDE can route
+typed prompt input through a DAP `evaluate` request with
+`context: "repl"`. The DAP server runs the input through the
+same `runReplInput` pipeline (no `__matlab_dbg_eval = (...)`
+wrap, since REPL inputs are statement-level — `disp(x)`,
+`clear y`, multi-statement lines all work). Output flows back
+out as DAP `output` events with `category: "stdout"`. The frame
+bridge for `evaluate` is reused so REPL-typed expressions see
+the paused frame's locals.
+
+Effectively the IDE's REPL panel becomes a live prompt against
+the paused worker — the same surface as `matlabc -repl`, but
+with access to the current call stack instead of a fresh
+workspace. See [`docs/debug.md`](debug.md) for the DAP-side
+mechanics.
+
 ## See also
 
 - [`docs/debug.md`](debug.md) — `dbg(x)` and the workspace
@@ -129,6 +147,27 @@ inline in `tools/matlabc/main.cpp` — straightforward to extend.
 ---
 
 ## Historical design notes (pre-implementation)
+
+> **Everything below this line is historical** — the planning
+> notes from before the REPL was actually built. The implemented
+> path is the JIT-backed REPL described at the top of this file
+> (`matlabc -repl` lowers each input through the same MLIR
+> pipeline as `-emit-llvm` and hands it to `mlir::ExecutionEngine`).
+> The "Option A — Tree-walking interpreter" recommended below
+> was *not* the path taken; we went straight to the JIT backend
+> (Option B) and skipped the interpreter tier entirely. The
+> Phase 1–4 plan, op coverage checklist, and effort estimates are
+> kept here as design context for anyone reconsidering the
+> trade-offs (e.g. for a future debug-only stepping interpreter,
+> or a no-LLVM-build configuration).
+>
+> For the actual REPL feature surface — what works today, line
+> editing, multi-line blocks, the `help` topic browser, known
+> limitations — see the sections above.
+>
+> For DAP / debug-session interaction with the REPL (the
+> `evaluate(context="repl")` path that lets the IDE drop into a
+> nested REPL when paused), see [`docs/debug.md`](debug.md).
 
 ## Scope
 

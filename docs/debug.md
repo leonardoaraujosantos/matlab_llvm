@@ -228,9 +228,7 @@ each so clients suppress the corresponding UI affordances.
 
 | Request                          | Reason                                                              |
 | -------------------------------- | ------------------------------------------------------------------- |
-| `stepBack`, `reverseContinue`    | Reverse stepping needs a state recorder the runtime does not include |
 | `locations`                      | No PC -> .m source mapping is maintained for JIT'd code; the `-emit-llvm -g \| clang \| lldb` path covers native-level debugging where source lines round-trip through DWARF |
-| `setDataBreakpoints`, `dataBreakpointInfo` | No workspace-store watcher (data breakpoints would need every `matlab_ws_set_*` to compare against a watch list) |
 | `setInstructionBreakpoints`      | The JIT exposes no public mapping from line to native PC            |
 | `restartFrame`                   | The runtime does not snapshot per-frame workspace at function entry |
 | `goto`, `gotoTargets`            | The JIT exposes no in-frame PC manipulation primitive               |
@@ -930,12 +928,14 @@ Three ctest suites guard the debugging surface (all gated on
 
   *Lifecycle / capabilities:*
   - `modules` — returns an empty list cleanly
-  - **`unsupported_refusals`** — every advertised-as-unsupported
-    request (`stepBack`, `reverseContinue`, `readMemory`,
-    `writeMemory`, `disassemble`, `setDataBreakpoints`,
-    `setInstructionBreakpoints`, `restartFrame`, `goto`,
-    `gotoTargets`) responds with `success=false` and a precise
-    reason; the connection stays open
+  - **`unsupported_refusals`** — the still-refused requests
+    (`locations`, `setInstructionBreakpoints`, `restartFrame`,
+    `goto`, `gotoTargets`) respond with `success=false` and a
+    precise reason; the connection stays open. The list shrank
+    over successive rounds — `stepBack`, `reverseContinue`,
+    `readMemory`, `writeMemory`, `disassemble`, and
+    `setDataBreakpoints` were all moved out as the underlying
+    features shipped
 
   *Frame-scoped evaluation:*
   - **`frame_scoped_conditional_breakpoint`** — a bp inside
