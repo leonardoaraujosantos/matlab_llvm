@@ -268,13 +268,18 @@ std::string Emitter::name(mlir::Value V) {
 // Literal formatting
 // ---------------------------------------------------------------------------
 
-static std::string formatIntAttr(mlir::IntegerAttr IA) {
+static std::string formatIntAttr(mlir::IntegerAttr IA, bool Unsigned = false) {
   auto T = mlir::dyn_cast<mlir::IntegerType>(IA.getType());
   if (T && T.getWidth() == 1) {
     return (IA.getValue().getZExtValue() & 1u) ? "true" : "false";
   }
   char Buf[64];
-  snprintf(Buf, sizeof(Buf), "%lld", (long long)IA.getInt());
+  if (Unsigned) {
+    snprintf(Buf, sizeof(Buf), "%llu",
+             (unsigned long long)IA.getValue().getZExtValue());
+  } else {
+    snprintf(Buf, sizeof(Buf), "%lld", (long long)IA.getInt());
+  }
   return Buf;
 }
 
@@ -486,14 +491,16 @@ bool Emitter::buildInlineExpr(mlir::Operation &Op, std::string &Expr) {
   using namespace mlir;
   if (auto C = dyn_cast<LLVM::ConstantOp>(Op)) {
     auto A = C.getValue();
-    if (auto IA = dyn_cast<IntegerAttr>(A)) { Expr = formatIntAttr(IA); return true; }
+    bool Unsigned = (bool)Op.getAttr("matlab.unsigned");
+    if (auto IA = dyn_cast<IntegerAttr>(A)) { Expr = formatIntAttr(IA, Unsigned); return true; }
     if (auto FA = dyn_cast<FloatAttr>(A)) { Expr = formatFloatAttr(FA); return true; }
     return false;
   }
   if (auto C = dyn_cast<arith::ConstantOp>(Op)) {
     auto A = C.getValue();
+    bool Unsigned = (bool)Op.getAttr("matlab.unsigned");
     if (auto FA = dyn_cast<FloatAttr>(A)) { Expr = formatFloatAttr(FA); return true; }
-    if (auto IA = dyn_cast<IntegerAttr>(A)) { Expr = formatIntAttr(IA); return true; }
+    if (auto IA = dyn_cast<IntegerAttr>(A)) { Expr = formatIntAttr(IA, Unsigned); return true; }
     return false;
   }
   if (isa<LLVM::ZeroOp>(Op)) { Expr = "0"; return true; }

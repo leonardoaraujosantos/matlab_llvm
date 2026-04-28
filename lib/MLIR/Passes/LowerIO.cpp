@@ -148,9 +148,17 @@ LogicalResult rewriteDispCall(Operation *Call, OpBuilder &B,
 
   // Integer / logical scalar: MATLAB's disp prints a `logical` (i1) or any
   // int as a plain 0 / 1 / numeric value, same as a double would look.
-  // Widen to f64 via arith.sitofp and dispatch to matlab_disp_f64.
+  // Widen to f64 and dispatch to matlab_disp_f64. Pick UIToFPOp when the
+  // producer carries a `matlab.unsigned` tag (set by IntCastConstantFold
+  // for uint8 / uint16 / ... casts) so a saturated 0xFF doesn't render
+  // as signed -1; otherwise stay with the signed path.
   if (auto IT = mlir::dyn_cast<IntegerType>(Arg.getType())) {
-    Value AsF64 = arith::SIToFPOp::create(B, Call->getLoc(), F64, Arg);
+    bool IsUns = false;
+    if (auto *D = Arg.getDefiningOp())
+      IsUns = (bool)D->getAttr("matlab.unsigned");
+    Value AsF64 = IsUns
+        ? (Value)arith::UIToFPOp::create(B, Call->getLoc(), F64, Arg)
+        : (Value)arith::SIToFPOp::create(B, Call->getLoc(), F64, Arg);
     auto Fn = getOrInsertRuntimeFunc(B, M, "matlab_disp_f64", VoidTy, {F64});
     LLVM::CallOp::create(B, Call->getLoc(), Fn, ValueRange{AsF64});
     Call->erase();

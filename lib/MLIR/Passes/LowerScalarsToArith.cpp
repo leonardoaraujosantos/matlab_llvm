@@ -8,6 +8,8 @@
 
 #include "matlab/MLIR/Passes/Passes.h"
 
+#include <limits>
+
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinAttributes.h"
@@ -149,22 +151,30 @@ struct IntCastConstantFold : public NameMatch {
       Val = (int64_t)FA.getValueAsDouble();
     else
       return mlir::failure();
-    // Mask + sign-correct to the target width so e.g. uint8(-1) → 255.
+    // Saturate to the target width — matches the runtime helpers
+    // (matlab_int8_s / matlab_uint8_s / ...), which clamp rather than
+    // wrap. uint8(-5) is 0, uint8(300) is 255, int8(200) is 127.
     auto Ty = mlir::IntegerType::get(R.getContext(), W);
-    uint64_t Mask = (W >= 64) ? ~uint64_t(0) : ((uint64_t(1) << W) - 1);
     int64_t Trunc;
     if (Signed) {
-      // Sign-extend the masked value back to int64.
-      uint64_t U = ((uint64_t)Val) & Mask;
-      uint64_t SignBit = (W < 64) ? (uint64_t(1) << (W - 1)) : 0;
-      Trunc = (W < 64 && (U & SignBit))
-                 ? (int64_t)(U | (~uint64_t(0) << W))
-                 : (int64_t)U;
+      int64_t Lo = (W >= 64) ? std::numeric_limits<int64_t>::min()
+                              : -(int64_t(1) << (W - 1));
+      int64_t Hi = (W >= 64) ? std::numeric_limits<int64_t>::max()
+                              : ((int64_t(1) << (W - 1)) - 1);
+      Trunc = Val < Lo ? Lo : (Val > Hi ? Hi : Val);
     } else {
-      Trunc = (int64_t)((uint64_t)Val & Mask);
+      uint64_t Hi = (W >= 64) ? ~uint64_t(0) : ((uint64_t(1) << W) - 1);
+      Trunc = Val < 0 ? 0
+                      : ((uint64_t)Val > Hi ? (int64_t)Hi : Val);
     }
     auto Attr = mlir::IntegerAttr::get(Ty, Trunc);
-    R.replaceOpWithNewOp<mlir::arith::ConstantOp>(Op, Ty, Attr);
+    auto NewOp = R.replaceOpWithNewOp<mlir::arith::ConstantOp>(Op, Ty, Attr);
+    /* Tag unsigned-cast results so a downstream int→f64 conversion
+     * (LowerIO's disp dispatch, EmitC's printf widening, etc.) widens
+     * with UIToFPOp instead of SIToFPOp. Without this, uint8(255) bits
+     * = 0xFF would convert as signed i8 = -1 → -1.0, losing the
+     * saturation contract. */
+    if (!Signed) NewOp->setAttr("matlab.unsigned", R.getUnitAttr());
     return mlir::success();
   }
 };

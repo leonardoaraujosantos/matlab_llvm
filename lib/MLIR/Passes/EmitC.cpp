@@ -514,13 +514,22 @@ std::string Emitter::name(mlir::Value V) {
 // Format an IntegerAttr as a C integer literal. i1 values are emitted as
 // 0 / 1 (unsigned) so they work correctly when XOR'd against bool operands
 // (IntegerAttr::getInt sign-extends i1 `true` to -1, which breaks
-// `bool ^ -1` logical-NOT semantics when inlined as an expression).
-static std::string formatIntAttr(mlir::IntegerAttr IA) {
+// `bool ^ -1` logical-NOT semantics when inlined as an expression). When
+// `Unsigned` is true the value is rendered as a non-negative literal —
+// MLIR's IntegerAttr::getInt sign-extends narrow types (i8 0xFF → -1)
+// which is wrong for results of unsigned casts (uint8(255) saturates to
+// 255, not -1).
+static std::string formatIntAttr(mlir::IntegerAttr IA, bool Unsigned = false) {
   char Buf[64];
   auto T = mlir::dyn_cast<mlir::IntegerType>(IA.getType());
   if (T && T.getWidth() == 1) {
     snprintf(Buf, sizeof(Buf), "%u",
              (unsigned)(IA.getValue().getZExtValue() & 1u));
+    return Buf;
+  }
+  if (Unsigned) {
+    snprintf(Buf, sizeof(Buf), "%llu",
+             (unsigned long long)IA.getValue().getZExtValue());
     return Buf;
   }
   snprintf(Buf, sizeof(Buf), "%lld", (long long)IA.getInt());
@@ -782,8 +791,9 @@ bool Emitter::buildInlineExpr(mlir::Operation &Op, std::string &Expr) {
   using namespace mlir;
   if (auto C = dyn_cast<LLVM::ConstantOp>(Op)) {
     auto A = C.getValue();
+    bool Unsigned = (bool)Op.getAttr("matlab.unsigned");
     if (auto IA = dyn_cast<IntegerAttr>(A)) {
-      Expr = formatIntAttr(IA); return true;
+      Expr = formatIntAttr(IA, Unsigned); return true;
     }
     if (auto FA = dyn_cast<FloatAttr>(A)) {
       Expr = formatFloatAttr(FA); return true;
@@ -792,11 +802,12 @@ bool Emitter::buildInlineExpr(mlir::Operation &Op, std::string &Expr) {
   }
   if (auto C = dyn_cast<arith::ConstantOp>(Op)) {
     auto A = C.getValue();
+    bool Unsigned = (bool)Op.getAttr("matlab.unsigned");
     if (auto FA = dyn_cast<FloatAttr>(A)) {
       Expr = formatFloatAttr(FA); return true;
     }
     if (auto IA = dyn_cast<IntegerAttr>(A)) {
-      Expr = formatIntAttr(IA); return true;
+      Expr = formatIntAttr(IA, Unsigned); return true;
     }
     return false;
   }
@@ -2781,6 +2792,12 @@ std::string Emitter::cTypeOf(mlir::Type T) {
   if (mlir::isa<mlir::Float64Type>(T)) return "double";
   if (mlir::isa<mlir::LLVM::LLVMPointerType>(T)) return "void*";
   if (mlir::isa<mlir::IndexType>(T)) return "int64_t";
+  /* GEP into an `[N x T]` alloca emits indices `[0, k]` — the outer
+   * dimension's stride is captured in the indices, so for the
+   * stride math we want T's C type, not "[N x T]". Recurse on the
+   * element type. */
+  if (auto AT = mlir::dyn_cast<mlir::LLVM::LLVMArrayType>(T))
+    return cTypeOf(AT.getElementType());
   // Fallback: opaque pointer.
   return "void*";
 }

@@ -116,6 +116,10 @@ struct Site {
   llvm::SmallVector<mlir::Operation *, 4> Stores;
   // Every `llvm.call @matlab_mat_i64_subscript1_s` site.
   llvm::SmallVector<mlir::LLVM::CallOp, 4> Reads;
+  // Every `llvm.call @matlab_mat_i64_length` (or _u64_) consumer of
+  // the array pointer. Folded to `arith.constant N : f64` at the end
+  // — the static array length is known.
+  llvm::SmallVector<mlir::LLVM::CallOp, 2> LengthCalls;
   // Every load of the slot.  Erased at the end.
   llvm::SmallVector<mlir::Operation *, 4> SlotLoads;
   // Every store INTO the slot.  Erased at the end.
@@ -177,6 +181,16 @@ bool gatherUses(mlir::Value Ptr, Site &S) {
       S.Reads.push_back(mlir::cast<mlir::LLVM::CallOp>(User));
       continue;
     }
+    /* `length(arr)` on the static-array source — fold to the
+     * compile-time-known N at the end of tryRewrite. Lets a
+     * concat-rewritten `[x, a(1:end-1)]` survive the static-array
+     * lowering when the user code calls `length` on the result. */
+    if ((Callee == "matlab_mat_i64_length" ||
+         Callee == "matlab_mat_u64_length") &&
+        U.getOperandNumber() == 0) {
+      S.LengthCalls.push_back(mlir::cast<mlir::LLVM::CallOp>(User));
+      continue;
+    }
     return false;
   }
   // If the zeros result was stored into a slot, also walk the slot's
@@ -188,8 +202,22 @@ bool gatherUses(mlir::Value Ptr, Site &S) {
       // or the post-LowerScalarSlots llvm.store/load pair — slot
       // typing may have already retyped the slot to !llvm.ptr by
       // the time this pass runs.
-      if (isMatlabOpName(User, "matlab.store") ||
-          mlir::isa<mlir::LLVM::StoreOp>(User)) continue;
+      // Reject the rewrite if the slot has a store of some OTHER
+      // pointer (e.g. an initial `delay = zeros(1, 4)` outside a
+      // loop, then per-iteration `delay = [x, delay(1:3)]` inside).
+      // Erasing the slot in that case would leave the unrelated
+      // store with a dangling slot operand. The runtime-call path
+      // for nz_new is correct as-is — bail and let the runtime
+      // matlab_mat_i64 ptr flow through the slot dynamically.
+      if (isMatlabOpName(User, "matlab.store")) {
+        if (User->getNumOperands() == 2 &&
+            User->getOperand(0) != Ptr) return false;
+        continue;
+      }
+      if (auto SOp = mlir::dyn_cast<mlir::LLVM::StoreOp>(User)) {
+        if (SOp.getValue() != Ptr) return false;
+        continue;
+      }
       bool IsLoad = isMatlabOpName(User, "matlab.load") ||
                     mlir::isa<mlir::LLVM::LoadOp>(User);
       if (IsLoad) {
@@ -206,6 +234,12 @@ bool gatherUses(mlir::Value Ptr, Site &S) {
           if (Callee == "matlab_mat_i64_subscript1_s" &&
               LU.getOperandNumber() == 0) {
             S.Reads.push_back(mlir::cast<mlir::LLVM::CallOp>(LUO));
+            continue;
+          }
+          if ((Callee == "matlab_mat_i64_length" ||
+               Callee == "matlab_mat_u64_length") &&
+              LU.getOperandNumber() == 0) {
+            S.LengthCalls.push_back(mlir::cast<mlir::LLVM::CallOp>(LUO));
             continue;
           }
           return false;
@@ -252,6 +286,12 @@ bool tryRewrite(mlir::LLVM::CallOp Zeros) {
   S.N = N;
   if (!gatherUses(Zeros.getResult(), S)) return false;
   if (!inferElemWidth(S, S.ElemW)) return false;
+  /* Without any store sites we have no element width and the
+   * `[N x iW]` alloca below would be malformed. The static-array
+   * fold isn't applicable here (the array is read-only at this
+   * site) — leave the runtime call alone and let the LLVM
+   * translation handle it. */
+  if (S.Stores.empty() || S.ElemW == 0) return false;
 
   // Phase 5.6 Stage D: store/read indices may be either compile-time
   // constants OR an SSA value — typically a for-loop induction
@@ -392,6 +432,18 @@ bool tryRewrite(mlir::LLVM::CallOp Zeros) {
       Rd.getResult().replaceAllUsesWith(Wide);
     }
     Rd.erase();
+  }
+
+  // Replace each `length(arr)` consumer with a constant `N : f64`.
+  // The runtime helper returns f64 for length, so we match the ABI
+  // here and let downstream folders pick up the constant.
+  for (mlir::LLVM::CallOp Lc : S.LengthCalls) {
+    mlir::OpBuilder LB(Lc);
+    auto F64 = mlir::Float64Type::get(Ctx);
+    auto NV = mlir::arith::ConstantOp::create(
+        LB, Lc.getLoc(), F64, mlir::FloatAttr::get(F64, (double)S.N));
+    Lc.getResult().replaceAllUsesWith(NV.getResult());
+    Lc.erase();
   }
 
   // Erase any slot loads / stores / the slot alloc itself.
@@ -928,6 +980,110 @@ bool runLowerStaticFiArrays(mlir::ModuleOp M) {
       (void)tryRewriteArg(Arg, N.getInt(), StorBits);
     }
   });
+
+  // Fallback for __subscript_store sites that the static-array
+  // fold couldn't absorb (typically because the array had a non-
+  // foldable consumer — sum, mean, max, ... — that requires the
+  // runtime matlab_mat_i64 descriptor). Lower each surviving
+  // `matlab.call_builtin @__subscript_store(arr, idx_f64, val_int)`
+  // to `llvm.call @matlab_mat_{i,u}64_set1_s(arr, idx_f64, val_i64)`
+  // so the LLVM translation has a concrete runtime call and the
+  // static-array zeros call stays alive to feed the consumer. The
+  // RHS is sign- or zero-extended to i64 to match the runtime ABI;
+  // `fi_signed` on the original concat call (forwarded as an attr
+  // on the __subscript_store) tells us which extension to use.
+  //
+  // Skip the fallback when the destination array is destined for
+  // `matlab_persistent_set_ptr` — Stage F (LowerPersistentFiArrays)
+  // pattern-matches the `__subscript_store` chain feeding a
+  // persistent set and requires the original op shape. Rewriting
+  // these here would erase the pattern Stage F looks for and turn
+  // the synthesizable persistent-array shape back into an
+  // unsynthesizable runtime call.
+  {
+    /* True when this value flows into a `matlab_persistent_set_ptr`
+     * call, OR is itself the result of `matlab_persistent_get_ptr`
+     * (the FIR-asic-pipelined `reg_products(i) = ...` shape, where
+     * the per-element write goes directly through a Get without
+     * a follow-up Set). Stage F (LowerPersistentFiArrays) recognises
+     * either shape; rewriting the `__subscript_store` here would
+     * destroy the pattern. */
+    auto isPersistentDest = [](mlir::Value V) -> bool {
+      for (mlir::Operation *U : V.getUsers()) {
+        if (auto Call = mlir::dyn_cast<mlir::LLVM::CallOp>(U)) {
+          auto Sym = Call.getCallee();
+          if (Sym && *Sym == "matlab_persistent_set_ptr") return true;
+        }
+      }
+      if (auto *D = V.getDefiningOp()) {
+        if (auto Call = mlir::dyn_cast<mlir::LLVM::CallOp>(D)) {
+          auto Sym = Call.getCallee();
+          if (Sym && *Sym == "matlab_persistent_get_ptr") return true;
+        }
+      }
+      return false;
+    };
+    mlir::SmallVector<mlir::Operation *, 8> Survivors;
+    M.walk([&](mlir::Operation *Op) {
+      if (!isMatlabOpName(Op, "matlab.call_builtin")) return;
+      auto C = Op->getAttrOfType<mlir::StringAttr>("callee");
+      if (!C || C.getValue() != "__subscript_store") return;
+      if (Op->getNumOperands() < 1) return;
+      if (isPersistentDest(Op->getOperand(0))) return;
+      Survivors.push_back(Op);
+    });
+    if (!Survivors.empty()) {
+      auto &Ctx = *M.getContext();
+      auto F64 = mlir::Float64Type::get(&Ctx);
+      auto I64 = mlir::IntegerType::get(&Ctx, 64);
+      auto VoidTy = mlir::LLVM::LLVMVoidType::get(&Ctx);
+      auto PtrTy = mlir::LLVM::LLVMPointerType::get(&Ctx);
+      auto getOrInsert = [&](llvm::StringRef Name)
+          -> mlir::LLVM::LLVMFuncOp {
+        if (auto Existing = M.lookupSymbol<mlir::LLVM::LLVMFuncOp>(Name))
+          return Existing;
+        mlir::OpBuilder MB(&Ctx);
+        MB.setInsertionPointToStart(M.getBody());
+        auto Ty = mlir::LLVM::LLVMFunctionType::get(
+            VoidTy, {PtrTy, F64, I64});
+        auto Fn = mlir::LLVM::LLVMFuncOp::create(
+            MB, M.getLoc(), Name, Ty);
+        Fn.setLinkage(mlir::LLVM::Linkage::External);
+        return Fn;
+      };
+      for (mlir::Operation *Op : Survivors) {
+        if (Op->getNumOperands() != 3) continue;
+        mlir::Value Base = Op->getOperand(0);
+        mlir::Value Idx  = Op->getOperand(1);
+        mlir::Value Val  = Op->getOperand(2);
+        if (Base.getType() != PtrTy) continue;
+        if (Idx.getType() != F64) continue;
+        auto VIT = mlir::dyn_cast<mlir::IntegerType>(Val.getType());
+        if (!VIT) continue;
+        bool Signed = true;
+        if (auto SA = Op->getAttrOfType<mlir::IntegerAttr>("fi_signed"))
+          Signed = SA.getInt() != 0;
+        mlir::OpBuilder OB(Op);
+        mlir::Value V64 = Val;
+        if (VIT.getWidth() < 64) {
+          V64 = Signed
+              ? (mlir::Value)mlir::arith::ExtSIOp::create(
+                    OB, Op->getLoc(), I64, Val)
+              : (mlir::Value)mlir::arith::ExtUIOp::create(
+                    OB, Op->getLoc(), I64, Val);
+        } else if (VIT.getWidth() > 64) {
+          V64 = mlir::arith::TruncIOp::create(
+              OB, Op->getLoc(), I64, Val);
+        }
+        auto Fn = getOrInsert(Signed ? "matlab_mat_i64_set1_s"
+                                     : "matlab_mat_u64_set1_s");
+        mlir::LLVM::CallOp::create(
+            OB, Op->getLoc(), Fn,
+            mlir::ValueRange{Base, Idx, V64});
+        Op->erase();
+      }
+    }
+  }
 
   // Dead-code-eliminate runtime-call helpers that survived the
   // rewrite without consumers. The `__subscript_store` lowering
