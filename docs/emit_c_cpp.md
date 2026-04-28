@@ -68,6 +68,7 @@ The only ops that survive into the snapshot are:
 | `arith` | `arith.constant`, `arith.{add,sub,mul,div}{f,i}`, `arith.{and,or,xor}i`, `arith.cmp{f,i}`, `arith.select`, casts (`sitofp`, `fptosi`, `extsi`, `trunci`, `extf`, `truncf`) |
 | `scf` | `scf.while`, `scf.if`, `scf.condition`, `scf.yield` |
 | `llvm` | `llvm.call`, `llvm.func` (decl + outlined defn), `llvm.alloca`, `llvm.load`, `llvm.store`, `llvm.mlir.global`, `llvm.mlir.addressof`, `llvm.mlir.constant`, `llvm.mlir.zero`, `llvm.getelementptr`, `llvm.return` |
+| `matlab.*` (unregistered) | `matlab.{add,sub,emul,matmul,ediv,matdiv,eq,ne,lt,le,gt,ge,short_or,short_and}` — frontend leaves these on shapes that the SV pipeline consumes unchanged; the C/C++ emitter renders each as its C operator equivalent so HDL-source files that don't depend on persistent fi-arrays compile here too. `matlab.call_builtin @matlab_global_set_f64` with `persistent_name` is also recognized for the persistent-write idiom. |
 
 Each op maps to a one-liner of C:
 
@@ -395,10 +396,12 @@ The emitter fails fast rather than producing broken output:
   This catches both the "undeclared identifier" case (op had a result
   downstream code referenced) and the silent-drop case (op had no
   results — a side-effecting op we forgot, which would otherwise miscompile).
-- **Multi-result `func.func` / `llvm.func`** fails with a clear
-  diagnostic rather than emitting invalid C. The printer only supports
-  0- or 1-result functions; if a future pass produces multi-return
-  signatures, the emitter refuses to continue.
+- **Multi-result `func.func`** lowers natively — C uses out-pointer
+  params (`void f(in_args…, T0 *out_0, T1 *out_1, …)`), C++ uses
+  `std::tuple<T0, T1, …>` return + `std::tie(a, b) = f(…)` at call
+  sites. `<tuple>` is included automatically when the module has
+  any multi-return function. `llvm.func` (runtime helpers) remains
+  single-result; that's an unrelated ABI constraint.
 - **Pre-emit `mlir::verify`** runs right before `emitC()` in the driver,
   so a malformed IR state is surfaced with a clear MLIR diagnostic
   rather than as a cryptic cc/c++ compile failure on the generated
@@ -547,6 +550,36 @@ The emitter fails fast rather than producing broken output:
 - **`-cpp-auto` flag (C++ only)** declares call-result locals with `auto`
   rather than the explicit type — more concise at the cost of the
   at-a-glance type hint. Only applies in `-emit-cpp` mode.
+- **Multi-return** lowers natively. C uses out-pointer params:
+  ```matlab
+  function [data_out, overflow] = alu(a, b, sel)
+  ```
+  becomes
+  ```c
+  static void alu(int16_t a, int16_t b, int8_t sel,
+                  int16_t *out_data_out, bool *out_overflow);
+  ```
+  with each result rendered as `*out_<name> = <expr>;` and a bare
+  `return;`. Call sites declare locals + pass `&local`. C++ uses
+  `std::tuple<T0, T1, ...>` return + `std::tie(a, b) = f(...)`;
+  `<tuple>` is auto-included when needed.
+- **Persistent variables with `if isempty(x); x = init; end`** lower
+  to a `static T x = <init>;` declaration at function entry. The
+  isempty / cmpf / scf.if / init-set chain is suppressed so the
+  emitted body has no leftover runtime check. This matches MATLAB's
+  first-call-init semantics in software AOT for the standard
+  textbook `persistent x; if isempty(x) ...; end` idiom — the same
+  source pattern that the SV backend lowers to register reset
+  values.
+- **`matlab.* / matlab.call_builtin` survivors** (frontend ops that
+  the C path doesn't run through `LowerFixedPoint`'s
+  `matlab_persistent_*` sweep) are recognized at emit time:
+  matlab.{add,sub,emul,matmul,ediv,matdiv,eq,ne,lt,le,gt,ge}
+  render as their C operator counterparts; matlab.short_or /
+  short_and render as `||` / `&&` (short-circuit semantics
+  preserved); `matlab.call_builtin @matlab_global_set_f64` with
+  `persistent_name` renders as `<name> = <v>;` to match the
+  static-decl emitted at function entry.
 
 ## Fixed-Point (`fi`) Lowering
 

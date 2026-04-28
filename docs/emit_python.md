@@ -85,7 +85,14 @@ to `import matlab_runtime as rt`.
 | `scf.while` matching `for i = a:s:b` | `for i in range(a, b+1, s):` (or `rt.frange(a, b, s)` for non-integer bounds) |
 | `scf.while` (general) | `while cond: <body>` — or `while True: ...; if not cond: break; ...` when the before-region has work |
 | `func.func @foo(%a, %b) -> T` | `def foo(a, b):` (param names taken from `matlab.name`); `pass` for empty bodies |
+| `func.func @foo(...) -> (T0, T1)` (multi-return) | `def foo(...):` returning a Python tuple |
 | `func.call @foo(%a)` | `foo(a)` (inlined into the use site when single-use) |
+| `func.call` with N>1 results | `a, b = foo(args)` Python tuple unpacking |
+| `func.return %a, %b` (multi-return) | `return a, b` |
+| `matlab.{add,sub,emul,matmul,ediv,matdiv}` (unregistered scalar) | `+ - * /` operators |
+| `matlab.{eq,ne,lt,le,gt,ge}` (unregistered scalar) | `== != < <= > >=` |
+| `matlab.short_or` / `matlab.short_and` | Python `or` / `and` (short-circuit semantics preserved) |
+| `matlab.call_builtin @matlab_global_set_f64` (persistent write) | `<fn>.<name> = <v>` matching the module-level `<fn>.<name> = <init>` decl below the function |
 | `llvm.call @matlab_<helper>(...)` | `rt.<helper>(...)` (every `matlab_*` symbol drops its prefix). For matrix builtins the call is rewritten to inline numpy / Python operators — see the **Numpy rewrite for matrix builtins** note below. |
 | `llvm.call @matlab_disp_str(%p, %len)` | `rt.disp_str(...)` — the `(ptr, length)` C ABI tail is dropped, since Python strings carry their own length |
 | `llvm.call %fp(%a)` (indirect) | `v0 = fp(a)` |
@@ -168,6 +175,16 @@ Emitter behavior worth knowing:
   both branches store into the slot (covers MATLAB return-slot patterns).
 - **Trailing `return`**: dropped when it sits at the end of a void function;
   Python's implicit return covers it.
+- **Multi-return functions**: emit as `return a, b` Python tuples;
+  call sites use `a, b = f(args)` tuple unpacking. No `<typing>` /
+  `typing.Tuple` annotations — duck-typed by Python's runtime.
+- **Persistent + `if isempty(x); x = init; end`**: lowers to a
+  module-level `<fn>.<name> = <init>` line just below the function
+  definition. The `if isempty(_) ... end` chain is suppressed in
+  the body so reads are bare `<fn>.<name>` and writes are
+  `<fn>.<name> = <v>`. Persistents that have only datapath updates
+  (no isempty guard) fall back to the legacy `<fn>.<name> = 0.0`
+  initializer.
 - **String-length operands dropped**: runtime helpers whose C ABI takes
   `(ptr, i64-length)` (`disp_str`, `fprintf_str`, `fprintf_f64*`, `input_num`)
   or `(name_ptr, name_len)` (`obj_get_f64`, `obj_set_f64`) lose the length

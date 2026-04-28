@@ -44,6 +44,30 @@ just examples
 | `fi_apply_gain.m` | Fixed-Point Designer (`fi`) constructor + `*` + `(:)` clamp + `disp` |
 | `fi_fir_filter.m` | fi arrays + vector concat + scalar MAC accumulator (Phase 3 gating shape) |
 
+## HDL examples
+
+The `hdl/` subdirectory holds 8 synthesizable modules targeting the
+`-emit-systemverilog` backend. These compile to vendor-neutral
+SystemVerilog (Verilator lint-clean) and most also compile to C / C++ /
+Python / TypeScript via the standard backends:
+
+| Example | Shape | Notes |
+|---|---|---|
+| `alu_16bit.m` | combinational | switch-case ALU with overflow detection on add/sub |
+| `mux_4to_1_16bit.m` | combinational | 4:1 multiplexer; renders as `unique case` in SV |
+| `counter_0_to_10.m` | sequential | persistent counter with reset; canonical `if isempty(_); _ = init; end` idiom |
+| `mealy_fsm.m` | sequential FSM | 2-state Mealy detecting "11"; `typedef enum` in SV, `unique case` on state |
+| `moore_fsm.m` | sequential FSM | 3-state Moore; output decoded from state register only |
+| `vector_processor.m` | combinational | 3-element vector dot product + magnitude squared with saturate |
+| `sequential_processor.m` | sequential | 4-tap FIR with persistent shift register + accumulator |
+| `fir_asic_pipelined.m` | sequential | 4-tap pipelined FIR with N parallel persistent fi-array registers |
+
+Most have a paired `<name>_synth.m` typed driver for the C/C++/Python
+/TS path; the SV path uses inline `% hdl: port(...)` pragmas instead.
+
+See [`../docs/emit_systemverilog.md`](../docs/emit_systemverilog.md) for
+the SV pipeline and `% hdl:` pragma reference.
+
 ## Notes
 
 - These are demonstration programs, not an exhaustive compatibility
@@ -51,4 +75,6 @@ just examples
 - The authoritative feature inventory is
   [`../docs/feature_status.md`](../docs/feature_status.md).
 - If you want broader coverage, inspect `test/Run/`, which holds the main
-  execution corpus used for backend parity checking.
+  execution corpus used for backend parity checking. Hardware-output
+  parity is in `test/EmitSV/`, `test/EmitSVPorts/`, and
+  `test/EmitSVFail/`.

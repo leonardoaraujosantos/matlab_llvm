@@ -81,7 +81,7 @@ Out of scope:
 | `while ... end`, `break`, `continue`, `return` | ✅ | |
 | `switch / case / otherwise / end` | ✅ | |
 | `try / catch / end` with error binding | ✅ | `catch ME; disp(ME.message)` works |
-| `global`, `persistent` | ✅ | Scalar f64 only; 128-entry table |
+| `global`, `persistent` | ✅ | Scalar f64 only; 128-entry table. C/C++/Python/TS emit recognize the canonical `if isempty(x); x = init; end` first-call-init pattern and use `init` as the static-decl initializer (no runtime isempty check). |
 | `parfor ... end` | ✅ | pthread fan-out + reduction mutex |
 | `function` declaration (incl. nested functions, multi-return) | ✅ | |
 | Script-mode top-level (no leading `function`) | ✅ | |
@@ -259,13 +259,14 @@ Out of scope:
 | MLIR lowering (`matlab`, `func`, `scf`, `arith`) | ✅ | `-emit-mlir` |
 | Optimization passes (slot promotion, scalar→arith) | ✅ | `-emit-mlir -opt` |
 | LLVM IR emission | ✅ | `-emit-llvm` |
-| C emission (self-contained) | ✅ | `-emit-c` |
-| C++ emission (classes + inheritance preserved) | ✅ | `-emit-cpp` |
+| C emission (self-contained) | ✅ | `-emit-c`. Multi-return uses out-pointer params (`void f(args, T0 *out_0, ...)`); persistent + isempty-init pattern lowers to `static T x = <init>;`. `matlab.eq/ne/lt/le/gt/ge/short_or/short_and` and other unregistered MATLAB ops handled. |
+| C++ emission (classes + inheritance preserved) | ✅ | `-emit-cpp`. Same scope as `-emit-c` plus `std::tuple<...>` return for multi-return; `std::tie(a, b) = f(...)` at call sites. |
 | Source formatter (AST pretty-printer) | ✅ | `-format` |
 | JIT / REPL | 🟡 | `matlabc -repl` with MLIR ExecutionEngine; state persists via a runtime workspace. No line editing / JIT cache / live user-function definitions yet. See `docs/repl.md`. |
-| Python emission | ✅ | `-emit-python`. NumPy-backed runtime in `runtime/matlab_runtime.py`; see `docs/emit_python.md`. Matrix display uses numpy's bracket repr (`.stdout-python` per-test goldens for the test lane). |
+| Python emission | ✅ | `-emit-python`. NumPy-backed runtime in `runtime/matlab_runtime.py`; see `docs/emit_python.md`. Matrix display uses numpy's bracket repr (`.stdout-python` per-test goldens for the test lane). Multi-return uses native tuple unpacking (`a, b = f(...)`); persistent + isempty-init lowers to `<fn>.<name> = <init>` at module scope. |
+| TypeScript emission | 🟡 | `-emit-typescript`. Same scope as Python; runtime in `runtime/matlab_runtime.ts`. Multi-return uses array destructuring (`const [a, b] = f(...)`); persistent + isempty lowers to `let <fn>_<name>: number = <init>;`. |
 | SystemC (synthesizable) emission | ❌ | See `docs/emit_systemc.md` |
-| SystemVerilog (ASIC, synthesizable) emission | 🟡 | `-emit-systemverilog`. Vendor-neutral, synthesizable RTL targeting ASIC flows. Phases 1–5.6 shipped (scalar combinational + FSMs + fixed-point pipeline + persistent fi-arrays). 36 fixtures lint clean under Verilator (incl. `fir_asic_pipelined`, `sequential_processor`, `vector_processor`). Open: 2-D fi matrices, RAM inference, CORDIC for transcendentals. See `docs/emit_systemverilog.md` |
+| SystemVerilog (ASIC, synthesizable) emission | 🟡 | `-emit-systemverilog`. Vendor-neutral, synthesizable RTL targeting ASIC flows. Phases 1–5.6 shipped (scalar combinational + FSMs + fixed-point pipeline + persistent fi-arrays + readability polish: persistent register names from source, const-fold of dead index arithmetic, `unique case` lowering of `switch` chains, comment hoisting onto adjacent ops, unsigned port pragma). 37 golden fixtures lint clean under Verilator (incl. `alu_16bit`, `counter_0_to_10`, `fir_asic_pipelined`, `mealy_fsm`, `moore_fsm`, `mux_4to_1_16bit`, `sequential_processor`, `vector_processor`). 7 fi-spec ↔ SV declaration regression tests in `test/EmitSVPorts/`, 10 synthesizability-gate diagnostic tests in `test/EmitSVFail/`. Open: 2-D fi matrices, RAM inference, CORDIC for transcendentals. See `docs/emit_systemverilog.md` |
 
 ### MLIR passes (`lib/MLIR/Passes/`)
 
@@ -282,17 +283,24 @@ All implemented; see `docs/emit_c_cpp.md` for pipeline diagram.
 | Suite | Count | Status |
 |---|--:|:-:|
 | `frontend-tests` (Lexer, Parser, Sema, MIR, MLIR, Opt, Programs, Errors) | 77 | ✅ 77/77 |
-| `run-tests` (`-emit-llvm` + clang) | 118 | ✅ |
-| `run-tests-emit-c` (`-emit-c` + cc) | 118 | ✅ |
-| `run-tests-emit-cpp` (`-emit-cpp` + c++) | 118 | ✅ |
-| `run-tests-emit-c-strict` / `-cpp-strict` (-Wall -Wextra -Werror) | 118 | ✅ |
+| `run-tests` (`-emit-llvm` + clang) | 144 | ✅ |
+| `run-tests-emit-c` (`-emit-c` + cc) | 144 | ✅ 140/144 (4 pre-existing) |
+| `run-tests-emit-cpp` (`-emit-cpp` + c++) | 144 | ✅ |
+| `run-tests-emit-c-strict` / `-cpp-strict` (-Wall -Wextra -Werror) | 144 | ✅ |
+| `run-tests-emit-python` (`-emit-python` + python3) | 144 | ✅ 130/144 (3 pre-existing, 11 skipped) |
+| `run-tests-emit-typescript` (`-emit-typescript` + node) | 144 | ✅ 122/144 (2 pre-existing, 20 skipped) |
+| `emit-sv` golden tests + Verilator lint | 37 | ✅ 37/37 |
+| `emit-sv-fail` synthesizability gate diagnostics | 10 | ✅ 10/10 |
+| `emit-sv-ports` fi-spec ↔ SV declaration regression | 7 | ✅ 7/7 |
 | `emitc-fail-tests` (diagnostic contract) | 1+ | ✅ |
 
-Examples gallery: 15 programs under `examples/` exercise matrix ops,
+Examples gallery: 19 programs under `examples/` exercise matrix ops,
 recursion, anonymous functions, function handles, parfor, linear
 algebra, logical masks, struct/cell usage, and OOP (`bank_account.m`
 — classdef with inheritance, `Dependent` properties, operator
-overloading).
+overloading). 8 synthesizable HDL modules under `examples/hdl/`
+cover ALU, counter, mux, FSMs (Mealy / Moore), vector dot product
++ magnitude, sequential FIR processor, and pipelined FIR ASIC.
 
 ---
 
@@ -300,9 +308,9 @@ overloading).
 
 | Feature | Status |
 |---|:-:|
-| Compiler CLI (`matlabc`) with 9 emit modes + `-format` + `-repl` | ✅ |
+| Compiler CLI (`matlabc`) with 13 emit modes + `-format` + `-repl` + `-dap` | ✅ |
 | CMake + `just` build system | ✅ |
-| CTest integration (7 lanes) | ✅ |
+| CTest integration (10+ lanes incl. SV golden, SV port-spec, SV diagnostics, Python, TS, DAP) | ✅ |
 | Diagnostics with source-location | ✅ |
 | `#line` directives in emitted C / C++ | ✅ |
 | Formatter (AST pretty-printer, idempotent) | ✅ | `matlabc -format` / `just format`. Drops comments (not in AST). |

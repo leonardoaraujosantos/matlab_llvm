@@ -7,7 +7,7 @@ all built on the same parser and semantic analysis.
 
 The core pipeline is:
 
-`MATLAB source -> Lexer -> Parser -> AST -> Sema -> MIR -> MLIR -> LLVM / C / C++ / Python`
+`MATLAB source -> Lexer -> Parser -> AST -> Sema -> MIR -> MLIR -> LLVM / C / C++ / Python / TypeScript / SystemVerilog`
 
 The project is self-contained by design:
 
@@ -43,8 +43,12 @@ control flow, functions, basic OOP, and editor tooling.
 
 Current corpus size in-tree:
 
-- `16` runnable programs in [`examples/`](examples/)
-- `125` execution tests in `test/Run/`
+- `19` runnable programs in [`examples/`](examples/)
+- `8` synthesizable HDL example modules in [`examples/hdl/`](examples/hdl/)
+- `144` execution tests in `test/Run/`
+- `37` SystemVerilog golden fixtures (Verilator lint-clean) in `test/EmitSV/`
+- `7` fi-spec port-declaration regression tests in `test/EmitSVPorts/`
+- `10` synthesizability-gate diagnostic tests in `test/EmitSVFail/`
 
 For the authoritative compatibility inventory, see
 [`docs/feature_status.md`](docs/feature_status.md).
@@ -152,6 +156,11 @@ just llvm examples/matrix_mult.m
 | `-emit-c` | self-contained C source |
 | `-emit-cpp` | self-contained C++ source |
 | `-emit-python` | self-contained Python source using `runtime/matlab_runtime.py` |
+| `-emit-typescript` | self-contained TypeScript source using `runtime/matlab_runtime.ts` |
+| `-emit-systemverilog` | synthesizable SystemVerilog (ASIC, vendor-neutral RTL) |
+| `-check-synthesizable` | gate-only mode for `-emit-systemverilog` (no output, only diagnostics) |
+| `-emit-hardware-report` | per-module synthesis budget summary (registers / FSMs / pipeline) |
+| `-emit-fixed-point-report` | per-`fi` summary of WL/FL/saturate sites |
 | `-format` | canonical source formatting |
 | `-repl` | JIT-backed interactive interpreter |
 | `-dap` | Debug Adapter Protocol server over stdio |
@@ -294,10 +303,14 @@ flowchart LR
   Passes --> LLVM["LLVM IR"]
   Passes --> C["C / C++ emission"]
   Passes --> PY["Python emission"]
+  Passes --> TS["TypeScript emission"]
+  Passes --> SV["SystemVerilog emission"]
   Passes --> JIT["ExecutionEngine JIT"]
   LLVM --> EXE1["native executable"]
   C --> EXE2["native executable"]
   PY --> EXE3["python3 + runtime shim"]
+  TS --> EXE4["node / deno / bun"]
+  SV --> EXE5["Verilator / synth flow"]
 ```
 
 Notes:
@@ -321,8 +334,13 @@ Core docs:
 - [`docs/lsp.md`](docs/lsp.md): editor integration and LSP surface
 - [`docs/debug.md`](docs/debug.md): DAP mode and built-in debugging aids
 - [`docs/emit_c_cpp.md`](docs/emit_c_cpp.md): C and C++ backends
+- [`docs/emit_cpp_classdef.md`](docs/emit_cpp_classdef.md): MATLAB classdef → C++ class lowering
 - [`docs/emit_python.md`](docs/emit_python.md): Python backend status and behavior
+- [`docs/emit_systemverilog.md`](docs/emit_systemverilog.md): SystemVerilog (ASIC, synthesizable) backend
+- [`docs/emit_fixed_point.md`](docs/emit_fixed_point.md): Fixed-Point Designer (`fi`) lowering
 - [`docs/complex.md`](docs/complex.md): complex numbers and FFT
+- [`docs/sema.md`](docs/sema.md): semantic analysis and type inference
+- [`docs/save_load_compat.md`](docs/save_load_compat.md): `save` / `load` `.mat` compatibility
 - [`docs/emit_systemc.md`](docs/emit_systemc.md): future SystemC backend
 
 Program examples:
@@ -347,6 +365,22 @@ This is not a full MATLAB implementation. The target is the practical
 subset needed for numeric programs and compiler experimentation, not
 toolboxes, graphics, GUIs, or `.mat` compatibility.
 
-The Python backend is implemented and tested, but it is still the least
-mature code generation path. The C, C++, LLVM, REPL, and editor tooling
-docs should be treated as the primary supported surface today.
+Maturity by output path (most → least mature):
+
+1. **LLVM IR / native executable** — primary path. Full coverage of the
+   shipped MATLAB subset.
+2. **C / C++** — same coverage minus a few class-instance edge cases.
+   Multi-return functions emit as out-pointer params (C) / `std::tuple`
+   return (C++). Persistent variables with the canonical `if isempty(x);
+   x = init; end` pattern lower to `static T x = <init>;`.
+3. **Python** — multi-return uses native tuple unpacking; class /
+   anon-handle path still has rough edges on a few edge fixtures.
+4. **SystemVerilog** (ASIC, synthesizable) — Phase 5.6 closure shipped:
+   FSMs, persistent registers (scalar + fi-array shift registers), full
+   fixed-point lowering with quantize/saturate, `% hdl: port(...)`
+   pragmas. 37 fixtures lint clean under Verilator. See
+   `docs/emit_systemverilog.md` and `examples/hdl/` for the canonical
+   ASIC examples (`alu_16bit`, `counter_0_to_10`, `mealy_fsm`,
+   `moore_fsm`, `mux_4to_1_16bit`, `vector_processor`,
+   `sequential_processor`, `fir_asic_pipelined`).
+5. **TypeScript** — same scope as Python; least exercised in CI.
