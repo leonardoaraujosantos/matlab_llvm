@@ -178,7 +178,7 @@ VS Code via a generic-DAP extension:
 | Conditional breakpoints         | `setBreakpoints` `condition` — evaluates against the innermost paused frame, so a bp inside `compute(a, b)` can use `a > 5` |
 | Log points (no pause)           | `setBreakpoints` `logMessage` — `{name}` placeholders resolve against the innermost paused frame's mini-ws (same bridge as conditional bps) |
 | Hit-count breakpoints           | `setBreakpoints` `hitCondition` — accepts `N`, `==N`, `>=N`, `>N`, `%N`. Skip-counter lives in the runtime's bp table so the JIT cost of cond eval is paid only once the gate passes |
-| Data breakpoints (write only)   | `dataBreakpointInfo` resolves a name to a stable dataId; `setDataBreakpoints` installs a write-watch. Every `matlab_ws_set_*` and `matlab_dbg_frame_set_*` checks the watch list and trips a pause when a name matches; `stopped` carries `reason: "data breakpoint"` and the watch's id in `hitBreakpointIds`. Read watchpoints are refused with a clear message (would gate every `matlab_ws_get_*` on the hot path) |
+| Data breakpoints (read / write / readWrite) | `dataBreakpointInfo` advertises all three access types and resolves a name to a stable dataId; `setDataBreakpoints` installs the watch. Write side: every `matlab_ws_set_*` and `matlab_dbg_frame_set_*` checks the watch list. Read side: `matlab_ws_get_f64` / `matlab_ws_get_mat` check too, with a lock-free n_wp==0 fast path so the JIT pays no measurable cost when no watches are armed. `stopped` events carry `reason: "data breakpoint"` and the watch's id in `hitBreakpointIds`. Limitation: function-frame reads bypass the runtime API (the JIT loads from stack slots directly), so a read-watch on a function local is silently invisible — script-scope reads only |
 | Memory inspection on matrices   | Matrix variable rows carry a `memoryReference` (hex-formatted data-buffer pointer); `readMemory` and `writeMemory` decode it back, validate against a server-side region table (only matrix data buffers are exposed — refuses arbitrary addresses), and stream cell bytes as base64. Reads past the buffer end report `unreadableBytes` instead of erroring. 1MB read cap per request |
 | Function breakpoints            | `setFunctionBreakpoints` resolves a name against the compiled function table and pins a line bp at the body's first statement. Class methods are registered under `MethodName`, `ClassName.MethodName`, and `ClassName/MethodName` so any form the user types resolves |
 | Breakpoint candidate lines      | `breakpointLocations` returns every bp-eligible line in a range (computed by an AST walker at compileProgram time) |
@@ -692,16 +692,20 @@ helper variable is named `total` rather than `sum` for this reason.
   buffers) stay opaque. Disassembly remains refused — wiring
   LLVM's MCDisassembler is multi-day work and the `-emit-llvm -g
   \| clang \| lldb` path already covers native-level debugging.
-- **Data breakpoints (write watchpoints).** *Done.* The runtime
-  carries a per-name watch table; every `matlab_ws_set_f64/_mat/
-  _obj` and `matlab_dbg_frame_set_f64/_mat/_obj` calls
-  `matlab_dbg_watch_check`/`_trip` after the write lands, so the
-  IDE inspecting the variable on pause sees the new value. Watch
-  ids are derived from a djb2 hash of the name (truncated to 31
-  bits to avoid collision with the line-bp id space) so they
-  round-trip cleanly across `setDataBreakpoints` calls. Read
-  watchpoints stay refused — gating every `matlab_ws_get_*` is
-  hot-path cost we don't want to pay until someone needs it.
+- **Data breakpoints (read / write / readWrite).** *Done.* The
+  runtime carries a per-name watch table with an `wp_access` byte
+  per entry. Write side: every `matlab_ws_set_*` and
+  `matlab_dbg_frame_set_*` calls `matlab_dbg_watch_check`/`_trip`
+  after the write lands. Read side: `matlab_ws_get_f64` /
+  `matlab_ws_get_mat` call `matlab_ws_check_read_watch` after the
+  load, with a lock-free `n_wp == 0` fast path so the no-watch
+  case has no mutex cost. Watch ids are djb2 hashes of the name
+  (31-bit-truncated to stay clear of the line-bp id space) so
+  they round-trip cleanly. Limitation: function-frame reads
+  bypass the runtime API entirely (the JIT emits direct loads
+  from stack slots), so a read-watch on a function local is
+  silently invisible — read watchpoints work for script-scope
+  variables only.
 - **Parfor / multi-thread debugging.** *Partial.* The runtime
   lazy-registers each pthread that calls into the debug API
   (`matlab_dbg_thread_slot_locked` runs on every `matlab_dbg_hook`
@@ -833,7 +837,7 @@ Three ctest suites guard the debugging surface (all gated on
 
 - **`debug-dap-tests`** — spawns `matlabc -dap` as a subprocess and
   drives the protocol with a small Python client
-  (`test/Debug/dap_client.py`). Thirty-nine scenarios cover the
+  (`test/Debug/dap_client.py`). Forty-one scenarios cover the
   end-to-end surface:
 
   *Stepping & basic flow:*
@@ -993,10 +997,16 @@ Three ctest suites guard the debugging surface (all gated on
   - **`data_breakpoint_clear`** — verifies that an empty
     `setDataBreakpoints` list wipes prior watches; the program
     runs to termination without any `stopped` events
-  - **`data_breakpoint_read_refused`** — `accessType: "read"`
-    comes back with `verified=false` and a message explaining
-    that only `write` is supported (read watchpoints would gate
-    every `matlab_ws_get_*` on the hot path)
+  - **`data_breakpoint_accesstype_advertised`** —
+    `dataBreakpointInfo` returns all three access types
+    (`read` / `write` / `readWrite`) so the IDE renders an
+    accessType chooser
+  - **`data_breakpoint_read`** — read-only watch on `target`;
+    the two writes don't trip but `disp(target)` on line 8
+    does. Single trip with `reason="data breakpoint"`
+  - **`data_breakpoint_readwrite`** — readWrite watch trips
+    on every write (lines 6, 7) and the read (line 8) — three
+    trips total in the fixture
   - **`parfor_thread_enumeration`** — `dap_parfor_program.m`
     runs `parfor i = 1:3`. After the body executes, the
     `threads` request reports the main worker (id=1, "main")

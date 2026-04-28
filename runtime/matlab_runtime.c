@@ -3297,18 +3297,24 @@ static void matlab_ws_init_if_needed(void) {
     if (!matlab_ws) matlab_ws = matlab_struct_new();
 }
 
+/* Forward-declared up here so the matlab_ws_get_* / matlab_ws_set_*
+ * call sites below compile. The bodies live alongside the rest of
+ * the dbg machinery further down where matlab_dbg state is in
+ * scope. */
+static void matlab_ws_check_watch(const char *name, int64_t len);
+static void matlab_ws_check_read_watch(const char *name, int64_t len);
+
 double matlab_ws_get_f64(const char *name, int64_t len) {
     matlab_ws_init_if_needed();
-    return matlab_struct_get_f64(matlab_ws, name, len);
+    double v = matlab_struct_get_f64(matlab_ws, name, len);
+    /* Read watchpoint check. Fast path: when n_wp is 0 (the
+     * common case — no read-watches active) the entire body is a
+     * single mutex-free load + compare and the JIT's REPL-mode
+     * read sites pay no measurable cost. The full check fires
+     * only once a read-watch is armed. */
+    matlab_ws_check_read_watch(name, len);
+    return v;
 }
-
-/* Helper: after a workspace write, check the watchpoint table and
- * pause if the name matches. Defined further down (the body needs
- * matlab_dbg state + watch_check / watch_trip helpers in scope, and
- * those live alongside the rest of the dbg machinery later in the
- * file). Forward-declared here so the matlab_ws_set_* call sites
- * compile. */
-static void matlab_ws_check_watch(const char *name, int64_t len);
 
 void matlab_ws_set_f64(const char *name, int64_t len, double v) {
     matlab_ws_init_if_needed();
@@ -3318,7 +3324,9 @@ void matlab_ws_set_f64(const char *name, int64_t len, double v) {
 
 matlab_mat *matlab_ws_get_mat(const char *name, int64_t len) {
     matlab_ws_init_if_needed();
-    return matlab_struct_get_mat(matlab_ws, name, len);
+    matlab_mat *m = matlab_struct_get_mat(matlab_ws, name, len);
+    matlab_ws_check_read_watch(name, len);
+    return m;
 }
 
 void matlab_ws_set_mat(const char *name, int64_t len, matlab_mat *m) {
@@ -3542,6 +3550,11 @@ struct matlab_dbg_state {
     int64_t wp_name_len[MATLAB_DBG_MAX_BREAKPOINTS];
     int32_t wp_scope[MATLAB_DBG_MAX_BREAKPOINTS];
     int32_t wp_id[MATLAB_DBG_MAX_BREAKPOINTS];   /* DAP-assigned id */
+    /* Access kind: 0 = write only (default; matches the original
+     * watch-on-set behaviour), 1 = read only, 2 = read+write.
+     * The check helpers below filter by this so a read-only watch
+     * doesn't trip on a regular `matlab_ws_set_*`. */
+    int8_t  wp_access[MATLAB_DBG_MAX_BREAKPOINTS];
     int last_wp_idx;   /* index of the watchpoint that tripped, or -1 */
     int paused_from_watch;
 
@@ -3891,15 +3904,33 @@ int matlab_dbg_was_paused_from_keyboard(void) {
  * round-trips reuse the same id). scope is 0 (any) / 1 (script-ws) /
  * 2 (innermost-frame). Returns 1 on success, 0 on table-full or
  * duplicate. The runtime owns the heap-copy of `name`. */
+/* Forward decl — _ex body follows immediately, but the back-compat
+ * shim above forwards into it. */
+int matlab_dbg_add_watchpoint_ex(const char *name, int64_t name_len,
+                                  int32_t scope, int32_t id,
+                                  int32_t access);
+
 int matlab_dbg_add_watchpoint(const char *name, int64_t name_len,
                                int32_t scope, int32_t id) {
+    /* Backward-compat shim — defaults to write-only (the original
+     * accessType v1 supported). New callers should use the _ex
+     * variant below. */
+    return matlab_dbg_add_watchpoint_ex(name, name_len, scope, id,
+                                         /*access=*/0);
+}
+
+int matlab_dbg_add_watchpoint_ex(const char *name, int64_t name_len,
+                                  int32_t scope, int32_t id,
+                                  int32_t access) {
     if (!name || name_len <= 0) return 0;
+    if (access < 0 || access > 2) access = 0;
     pthread_mutex_lock(&matlab_dbg.mu);
     /* De-dup: if a watch with the same id already exists, refresh
-     * its scope rather than appending a duplicate row. */
+     * its scope+access rather than appending a duplicate row. */
     for (int i = 0; i < matlab_dbg.n_wp; ++i) {
         if (matlab_dbg.wp_id[i] == id) {
             matlab_dbg.wp_scope[i] = scope;
+            matlab_dbg.wp_access[i] = (int8_t)access;
             pthread_mutex_unlock(&matlab_dbg.mu);
             return 1;
         }
@@ -3913,6 +3944,7 @@ int matlab_dbg_add_watchpoint(const char *name, int64_t name_len,
         matlab_dbg.wp_name_len[i] = name_len;
         matlab_dbg.wp_scope[i] = scope;
         matlab_dbg.wp_id[i] = id;
+        matlab_dbg.wp_access[i] = (int8_t)access;
         matlab_dbg.n_wp++;
     }
     pthread_mutex_unlock(&matlab_dbg.mu);
@@ -3931,6 +3963,7 @@ void matlab_dbg_clear_watchpoints(void) {
         matlab_dbg.wp_name_len[i] = 0;
         matlab_dbg.wp_scope[i] = 0;
         matlab_dbg.wp_id[i] = 0;
+        matlab_dbg.wp_access[i] = 0;
     }
     matlab_dbg.n_wp = 0;
     pthread_mutex_unlock(&matlab_dbg.mu);
@@ -3968,10 +4001,31 @@ int matlab_dbg_was_paused_from_watch(void) {
  * called from inside the set_* lock-region. */
 static int matlab_dbg_watch_check(const char *name, int64_t name_len,
                                    int32_t scope_hint) {
+    /* Write-path: skip read-only watches. access==0 (write) and
+     * access==2 (readWrite) qualify; access==1 (read-only) does
+     * not. */
     for (int i = 0; i < matlab_dbg.n_wp; ++i) {
         if (matlab_dbg.wp_name_len[i] != name_len) continue;
         int32_t s = matlab_dbg.wp_scope[i];
         if (s != 0 && s != scope_hint) continue;
+        if (matlab_dbg.wp_access[i] == 1) continue;  /* read-only */
+        if (memcmp(matlab_dbg.wp_name[i], name, (size_t)name_len) == 0)
+            return i;
+    }
+    return -1;
+}
+
+/* Read-path counterpart. Called from matlab_ws_get_*; only matches
+ * watches whose access kind includes "read" (1 or 2). Same scope-
+ * filter shape as the write check. CALLER MUST HOLD matlab_dbg.mu. */
+static int matlab_dbg_watch_check_read(const char *name, int64_t name_len,
+                                        int32_t scope_hint) {
+    for (int i = 0; i < matlab_dbg.n_wp; ++i) {
+        if (matlab_dbg.wp_name_len[i] != name_len) continue;
+        int32_t s = matlab_dbg.wp_scope[i];
+        if (s != 0 && s != scope_hint) continue;
+        int8_t a = matlab_dbg.wp_access[i];
+        if (a != 1 && a != 2) continue;  /* write-only — skip */
         if (memcmp(matlab_dbg.wp_name[i], name, (size_t)name_len) == 0)
             return i;
     }
@@ -4069,6 +4123,31 @@ static void matlab_ws_check_watch(const char *name, int64_t len) {
     pthread_mutex_lock(&matlab_dbg.mu);
     if (matlab_dbg.enabled && matlab_dbg.n_wp > 0) {
         int idx = matlab_dbg_watch_check(name, len, /*scope_hint=*/1);
+        if (idx >= 0) matlab_dbg_watch_trip(idx);
+    }
+    pthread_mutex_unlock(&matlab_dbg.mu);
+}
+
+/* Read-side counterpart. Fast path: when n_wp is 0 (no watches at
+ * all) the n_wp check fails outside the lock, so we bail without
+ * paying mutex cost. The full check happens only when read-watches
+ * are armed.
+ *
+ * Note: scope_hint is hardcoded to 1 (script-ws) because the only
+ * read-path call sites are matlab_ws_get_*. Frame-local reads in
+ * user code go through stack slots and never call into this API,
+ * so they aren't visible to read-watches. The DAP `setDataBreakpoints`
+ * handler advertises this limitation in its accessTypes. */
+static void matlab_ws_check_read_watch(const char *name, int64_t len) {
+    if (!name || len <= 0) return;
+    /* Lock-free fast path. matlab_dbg.n_wp is an `int` and the
+     * worst case of a torn read is at most a one-statement delay
+     * before the watch fires — preferable to taking the global
+     * mutex on every JIT-emitted ws_get_* call. */
+    if (matlab_dbg.n_wp == 0) return;
+    pthread_mutex_lock(&matlab_dbg.mu);
+    if (matlab_dbg.enabled && matlab_dbg.n_wp > 0) {
+        int idx = matlab_dbg_watch_check_read(name, len, /*scope_hint=*/1);
         if (idx >= 0) matlab_dbg_watch_trip(idx);
     }
     pthread_mutex_unlock(&matlab_dbg.mu);

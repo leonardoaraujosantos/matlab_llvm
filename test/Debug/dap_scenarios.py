@@ -967,11 +967,80 @@ def scn_data_breakpoint_clear(matlabc, program):
         c.wait_event("terminated", timeout=5.0)
 
 
-def scn_data_breakpoint_read_refused(matlabc, program):
-    """Read watchpoints aren't supported — every matlab_ws_get_*
-    would have to gate on a watch list (hot-path). The handler
-    rejects with `verified=false` plus a message; the connection
-    stays open."""
+def scn_data_breakpoint_read(matlabc, program):
+    """Read watchpoint on a script-scope variable. The fixture
+    writes `target` twice and then reads it on line 8 (`disp(target)`).
+    With access="read", the writes don't trip but the disp's read
+    does — trip count = 1, reason="data breakpoint"."""
+    import os
+    wp_program = os.path.join(
+        os.path.dirname(os.path.abspath(program)),
+        "dap_watchpoint_program.m",
+    )
+    with DapClient(matlabc, wp_program) as c:
+        c.request("initialize", {"clientID": "matlabc-test",
+                                  "linesStartAt1": True})
+        c.wait_event("initialized", timeout=5.0)
+        c.request("launch", {"program": wp_program, "stopOnEntry": False})
+
+        body = c.request("setDataBreakpoints", {
+            "breakpoints": [{"dataId": "target", "accessType": "read"}],
+        })
+        bps = body.get("breakpoints") or []
+        assert bps and bps[0].get("verified"), \
+            f"read watchpoint should verify: {bps!r}"
+
+        c.request("configurationDone")
+
+        # Trip is on the read: line 8 (`disp(target);`).
+        ev = c.wait_event("stopped", timeout=5.0)
+        body = ev.get("body") or {}
+        assert body.get("reason") == "data breakpoint", body
+        assert body.get("line") == 8, \
+            f"read-watch should trip on the disp(target) read: {body!r}"
+
+        c.request("continue")
+        # No further trips — the next disp output and termination
+        # should follow without another stopped event.
+        c.wait_event("terminated", timeout=5.0)
+
+
+def scn_data_breakpoint_readwrite(matlabc, program):
+    """access="readWrite" trips on every read AND every write.
+    Three trips total for the fixture: two writes, one read."""
+    import os
+    wp_program = os.path.join(
+        os.path.dirname(os.path.abspath(program)),
+        "dap_watchpoint_program.m",
+    )
+    with DapClient(matlabc, wp_program) as c:
+        c.request("initialize", {"clientID": "matlabc-test",
+                                  "linesStartAt1": True})
+        c.wait_event("initialized", timeout=5.0)
+        c.request("launch", {"program": wp_program, "stopOnEntry": False})
+
+        c.request("setDataBreakpoints", {
+            "breakpoints": [{"dataId": "target", "accessType": "readWrite"}],
+        })
+        c.request("configurationDone")
+
+        # Write on line 6, write on line 7, read on line 8.
+        expected_lines = [6, 7, 8]
+        for L in expected_lines:
+            ev = c.wait_event("stopped", timeout=5.0)
+            body = ev.get("body") or {}
+            assert body.get("reason") == "data breakpoint", body
+            assert body.get("line") == L, \
+                f"trip on line {L} expected, got {body!r}"
+            c.request("continue")
+
+        c.wait_event("terminated", timeout=5.0)
+
+
+def scn_data_breakpoint_accesstype_advertised(matlabc, program):
+    """`dataBreakpointInfo` advertises read / write / readWrite as
+    the supported access types. The IDE renders a chooser when
+    setting a data breakpoint."""
     import os
     wp_program = os.path.join(
         os.path.dirname(os.path.abspath(program)),
@@ -985,16 +1054,11 @@ def scn_data_breakpoint_read_refused(matlabc, program):
         c.wait_event("initialized", timeout=5.0)
         c.request("launch", {"program": wp_program, "stopOnEntry": False})
 
-        body = c.request("setDataBreakpoints", {
-            "breakpoints": [{"dataId": "target", "accessType": "read"}],
-        })
-        bps = body.get("breakpoints") or []
-        assert bps and bps[0].get("verified") is False, \
-            f"read watch should not verify: {bps!r}"
-        assert "read" in (bps[0].get("message") or "").lower() or \
-               "write" in (bps[0].get("message") or "").lower(), \
-            f"read-refusal message should explain why: {bps!r}"
-
+        info = c.request("dataBreakpointInfo", {"name": "target"})
+        types = info.get("accessTypes") or []
+        for t in ("read", "write", "readWrite"):
+            assert t in types, \
+                f"accessType {t!r} not advertised: {info!r}"
         c.request("configurationDone")
         c.wait_event("terminated", timeout=5.0)
 

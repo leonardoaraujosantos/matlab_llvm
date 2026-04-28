@@ -1218,6 +1218,16 @@ int matlab_dbg_was_paused_from_keyboard(void);
  * `was_paused_from_watch`: stop-reason discriminator. */
 int matlab_dbg_add_watchpoint(const char *name, int64_t name_len,
                                int32_t scope, int32_t id);
+/* Same as add_watchpoint but with explicit access kind:
+ *   0 = write only (default; back-compat with the original API)
+ *   1 = read only
+ *   2 = read+write
+ * Read watchpoints fire on matlab_ws_get_* in JIT'd REPL-mode
+ * code; frame-local reads go through stack slots and aren't
+ * visible to the runtime watch table. */
+int matlab_dbg_add_watchpoint_ex(const char *name, int64_t name_len,
+                                  int32_t scope, int32_t id,
+                                  int32_t access);
 void matlab_dbg_clear_watchpoints(void);
 int32_t matlab_dbg_last_watchpoint_id(void);
 int matlab_dbg_was_paused_from_watch(void);
@@ -4092,11 +4102,21 @@ bool handleRequest(const Object &Msg) {
       });
       return true;
     }
+    /* Both read and write access types are supported. Read
+     * watchpoints fire on matlab_ws_get_* in JIT'd REPL-mode
+     * code; user-function-frame reads (`compute(a, b)` reading
+     * `a`) bypass the runtime API — they go through stack slots
+     * the JIT loads directly — so a read-watch on a function
+     * local is silently invisible. The IDE doesn't have a way
+     * to express that scope distinction, so we just advertise
+     * the access kinds and document the limitation. */
     Array AccessTypes;
+    AccessTypes.push_back(Value("read"));
     AccessTypes.push_back(Value("write"));
+    AccessTypes.push_back(Value("readWrite"));
     sendResponse(ReqSeq, *Cmd, true, Object{
       {"dataId", Nm},                     /* dataId == the name */
-      {"description", "write to " + Nm},
+      {"description", "watch on " + Nm},
       {"accessTypes", std::move(AccessTypes)},
       {"canPersist", true},
     });
@@ -4127,16 +4147,13 @@ bool handleRequest(const Object &Msg) {
         std::string Nm = DataId->str();
         auto AT = B->getString("accessType");
         std::string Access = AT ? AT->str() : std::string("write");
-        if (Access != "write") {
-          Verified.push_back(Object{
-            {"verified", false},
-            {"message",
-             "only 'write' access type is supported; "
-             "read watchpoints would require gating every "
-             "workspace get on a watch list"},
-          });
-          continue;
-        }
+        /* Map the DAP accessType string to the runtime's int
+         * encoding (0=write, 1=read, 2=readWrite). Unknown values
+         * default to write — same behaviour as omitting accessType. */
+        int32_t AccessKind;
+        if (Access == "read")            AccessKind = 1;
+        else if (Access == "readWrite")  AccessKind = 2;
+        else                              AccessKind = 0;
         /* Stable id derived from the name. djb2 hash truncated
          * to 31 bits so we never collide with the encodeBpId
          * line-bp space (which uses file_id*1e6 + line). The
