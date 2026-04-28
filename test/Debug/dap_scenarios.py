@@ -1155,16 +1155,21 @@ def scn_read_write_memory(matlabc, program):
 
 def scn_step_back(matlabc, program):
     """`stepBack` rolls back the most recent statement's writes
-    and resumes at the prior line. The runtime maintains a per-
-    statement undo log of `matlab_ws_set_*` and frame-set writes;
-    stepBack pops one statement's worth of records and reverts
-    them.
+    and resumes at the prior line.
 
-    Uses dap_revstep_program.m: straight-line a/b/c assignments
-    with no branching, so the rewind sequence is deterministic.
-    Break at line 7 (disp(c)); stepBack walks back through line 6
-    (c=300) reverting c, line 5 (b=200) reverting b, line 4
-    (a=100) reverting a."""
+    Uses dap_revstep_program.m: straight-line `a = 100; b = 200;
+    c = 300; disp(c);` on lines 5-8. Break at line 8 with state
+    {a=100, b=200, c=300}. Each stepBack walks back exactly one
+    statement, reverting only that statement's writes:
+
+      stepBack #1 -> line 7, state {a=100, b=200} (c removed)
+      stepBack #2 -> line 6, state {a=100}        (b removed)
+      stepBack #3 -> line 5, state {}             (a removed)
+      stepBack #4 -> reason=entry (log exhausted)
+
+    Variables that didn't pre-exist are removed from the workspace
+    via matlab_struct_rmfield, not zeroed — so `who`/`whos`/
+    DAP variable inspection see the pre-write state exactly."""
     import os
     rs_program = os.path.join(
         os.path.dirname(os.path.abspath(program)),
@@ -1181,35 +1186,114 @@ def scn_step_back(matlabc, program):
         c.request("launch", {"program": rs_program, "stopOnEntry": False})
         c.request("setBreakpoints", {
             "source": {"path": rs_program},
-            "breakpoints": [{"line": 8}],   # disp(c)
+            "breakpoints": [{"line": 8}],
         })
         c.request("configurationDone")
-        c.wait_event("stopped", timeout=5.0)
+        ev = c.wait_event("stopped", timeout=5.0)
+        assert (ev.get("body") or {}).get("line") == 8, ev
 
-        # At line 7 pause, all three vars are set.
         def _ws():
             st = c.request("stackTrace", {"threadId": 1})
             sc = c.request("scopes", {"frameId": st["stackFrames"][0]["id"]})
             return _vars_by_name(c, ref=sc["scopes"][0]["variablesReference"])
-        rows = _ws()
-        assert rows.get("a") == "100" and rows.get("b") == "200" \
-               and rows.get("c") == "300", \
-            f"all three vars should be set before stepBack: {rows!r}"
 
-        # First stepBack: rewinds at least one statement worth of
-        # writes. The most recent JIT-emitted ws_set was for `c`,
-        # so c should change. We don't assert on a/b — the JIT
-        # may emit multiple ws_set calls per statement (mirror
-        # writes into script-frame Locals), and the rewind walks
-        # all records between two statement boundaries; depending
-        # on lowering details, the rewound set may include
-        # auxiliary writes for earlier vars too. The user-visible
-        # contract is "c is no longer 300 after stepBack".
+        # Initial state: all three writes have happened.
+        rows = _ws()
+        assert rows == {"a": "100", "b": "200", "c": "300"}, \
+            f"unexpected initial state: {rows!r}"
+
+        # stepBack #1: line 7, c removed.
+        c.request("stepBack")
+        ev = c.wait_event("stopped", timeout=5.0)
+        body = ev.get("body") or {}
+        assert body.get("reason") == "step", \
+            f"stepBack #1 should report reason=step: {body!r}"
+        assert body.get("line") == 7, \
+            f"stepBack #1 should resume at line 7: {body!r}"
+        rows = _ws()
+        assert rows == {"a": "100", "b": "200"}, \
+            f"stepBack #1: c should be removed: {rows!r}"
+
+        # stepBack #2: line 6, b removed.
+        c.request("stepBack")
+        ev = c.wait_event("stopped", timeout=5.0)
+        body = ev.get("body") or {}
+        assert body.get("line") == 6, \
+            f"stepBack #2 should resume at line 6: {body!r}"
+        rows = _ws()
+        assert rows == {"a": "100"}, \
+            f"stepBack #2: b should be removed: {rows!r}"
+
+        # stepBack #3: line 5, a removed (workspace empty).
+        c.request("stepBack")
+        ev = c.wait_event("stopped", timeout=5.0)
+        body = ev.get("body") or {}
+        assert body.get("line") == 5, \
+            f"stepBack #3 should resume at line 5: {body!r}"
+        rows = _ws()
+        assert rows == {}, \
+            f"stepBack #3: a should be removed; workspace empty: {rows!r}"
+
+        # stepBack #4: undo log exhausted -> reason=entry.
+        c.request("stepBack")
+        ev = c.wait_event("stopped", timeout=5.0)
+        body = ev.get("body") or {}
+        assert body.get("reason") == "entry", \
+            f"stepBack past the first statement should report " \
+            f"reason=entry: {body!r}"
+        assert "exhausted" in (body.get("description") or "").lower(), \
+            f"entry stop should describe the empty-log condition: {body!r}"
+
+        c.request("continue")
+        c.wait_event("terminated", timeout=5.0)
+
+
+def scn_step_back_overwrites(matlabc, program):
+    """When a variable is overwritten across multiple statements,
+    stepBack walks the values backward through the prior versions.
+    Locks in that prev_existed=1 records restore the prior value
+    rather than removing the binding.
+
+    Uses dap_revstep_overwrite_program.m: `x = 1; x = 2; x = 3;
+    disp(x);` on lines 1-4. Break on the disp; stepBack walks x
+    through 2, 1, then removes."""
+    import os
+    rs_program = os.path.join(
+        os.path.dirname(os.path.abspath(program)),
+        "dap_revstep_overwrite_program.m",
+    )
+    with DapClient(matlabc, rs_program) as c:
+        c.request("initialize", {"clientID": "t", "linesStartAt1": True})
+        c.wait_event("initialized", timeout=5.0)
+        c.request("launch", {"program": rs_program, "stopOnEntry": False})
+        c.request("setBreakpoints", {
+            "source": {"path": rs_program},
+            "breakpoints": [{"line": 4}],   # disp(x)
+        })
+        c.request("configurationDone")
+        c.wait_event("stopped", timeout=5.0)
+
+        def _ws():
+            st = c.request("stackTrace", {"threadId": 1})
+            sc = c.request("scopes", {"frameId": st["stackFrames"][0]["id"]})
+            return _vars_by_name(c, ref=sc["scopes"][0]["variablesReference"])
+
+        assert _ws() == {"x": "3"}, _ws()
+
+        # stepBack #1 -> x reverted to 2 (the value from line 2).
         c.request("stepBack")
         c.wait_event("stopped", timeout=5.0)
-        rows = _ws()
-        assert rows.get("c") != "300", \
-            f"stepBack should have reverted c=300: {rows!r}"
+        assert _ws() == {"x": "2"}, _ws()
+
+        # stepBack #2 -> x reverted to 1 (line 1's value).
+        c.request("stepBack")
+        c.wait_event("stopped", timeout=5.0)
+        assert _ws() == {"x": "1"}, _ws()
+
+        # stepBack #3 -> x removed (line 1 had no prior write).
+        c.request("stepBack")
+        c.wait_event("stopped", timeout=5.0)
+        assert _ws() == {}, _ws()
 
         c.request("continue")
         c.wait_event("terminated", timeout=5.0)
@@ -1217,9 +1301,11 @@ def scn_step_back(matlabc, program):
 
 def scn_reverse_continue(matlabc, program):
     """`reverseContinue` walks the undo log back to the program
-    entry. With dap_revstep_program.m's three plain assignments,
-    one reverseContinue from line 7 should rewind at least one
-    statement and land with reason=step or entry."""
+    entry. From line 8 of dap_revstep_program.m, a single
+    reverseContinue stops at the previous statement (line 7) with
+    reason=step. (v1 reverseContinue stops at first successful
+    rewind rather than walking all the way; documented in the
+    handler comment.)"""
     import os
     rs_program = os.path.join(
         os.path.dirname(os.path.abspath(program)),
@@ -1241,6 +1327,10 @@ def scn_reverse_continue(matlabc, program):
         body = ev.get("body") or {}
         assert body.get("reason") in ("step", "entry"), \
             f"reverseContinue should stop with reason=step|entry: {body!r}"
+        # First rewind step lands at line 7 (prior statement).
+        if body.get("reason") == "step":
+            assert body.get("line") == 7, \
+                f"reverseContinue first rewind should land at line 7: {body!r}"
 
         c.request("continue")
         c.wait_event("terminated", timeout=5.0)

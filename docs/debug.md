@@ -682,16 +682,23 @@ helper variable is named `total` rather than `sum` for this reason.
   runtime maintains a 4096-entry ring-buffer undo log: every
   `matlab_ws_set_*` and `matlab_dbg_frame_set_*` pushes a
   prev-value record before the write, and the hook stamps a
-  statement boundary on each fire. `matlab_dbg_step_back` walks
-  the log backward from `undo_head`, applying each non-boundary
-  record in reverse until it hits the previous statement
-  boundary. The DAP `stepBack` and `reverseContinue` handlers
-  drive this. v1 caveats: rewinding a write where the variable
-  didn't pre-exist sets it to 0 (no remove-from-struct API);
-  per-statement undo granularity (not per-instruction).
-  Irreversible ops can stamp a kind=4 marker that stops the
-  rewind cleanly — wiring this into `disp` / `fprintf` is
-  follow-up.
+  statement boundary on each fire. `matlab_dbg_step_back` drops
+  the head boundary (the current paused-statement marker), walks
+  back applying each non-boundary record in reverse, and stops
+  at the previous statement boundary (which stays in the log as
+  the new "now" marker). Variables that didn't pre-exist are
+  removed via `matlab_struct_rmfield` so the rewound state
+  matches the pre-write workspace exactly — no stale `x = 0`
+  shadow. The DAP `stepBack` and `reverseContinue` handlers
+  drive this. Limitations: per-statement granularity (not per-
+  instruction); rewinding past the first statement returns
+  `reason=entry` with `description: "stepBack: undo log
+  exhausted"`. Irreversible ops can stamp a kind=4 marker that
+  stops the rewind cleanly — the runtime API
+  (`matlab_dbg_undo_record_irreversible`) exists, but `disp` /
+  `fprintf` don't yet stamp markers, so stepBack will currently
+  rewind past printed output silently. Wiring those call sites
+  is follow-up.
 - **Memory inspection on matrices.** *Done.* Matrix variable rows
   carry a `memoryReference` pointing at the data buffer; the DAP
   server keeps a `MemRegions` registry of (ptr, byte_count) pairs
@@ -861,7 +868,7 @@ Three ctest suites guard the debugging surface (all gated on
 
 - **`debug-dap-tests`** — spawns `matlabc -dap` as a subprocess and
   drives the protocol with a small Python client
-  (`test/Debug/dap_client.py`). Forty-five scenarios cover the
+  (`test/Debug/dap_client.py`). Forty-six scenarios cover the
   end-to-end surface:
 
   *Stepping & basic flow:*
@@ -1050,14 +1057,24 @@ Three ctest suites guard the debugging surface (all gated on
     main entry, and confirms each row has an address (`0x...`),
     a hex-bytes string, and printed asm. Negative
     `instructionOffset` comes back with a clear refusal
-  - **`step_back`** — `dap_revstep_program.m` runs three
-    straight-line assignments. Pause at the line after the
-    last assignment, request `stepBack`, and verify the most
-    recent ws_set was reverted (the watched variable's value
-    changed from its written value)
+  - **`step_back`** — `dap_revstep_program.m` runs `a=100;
+    b=200; c=300; disp(c);` on lines 5-8. Pause at line 8 with
+    `{a=100, b=200, c=300}`. Each stepBack walks back one
+    statement, asserting both the resume line *and* the exact
+    workspace state: stepBack #1 → line 7, `{a=100, b=200}`
+    (c removed via `rmfield`); stepBack #2 → line 6, `{a=100}`;
+    stepBack #3 → line 5, `{}`; stepBack #4 → `reason=entry`
+    with `description: "stepBack: undo log exhausted"`.
+    Variables that didn't pre-exist are *removed*, not zeroed
+  - **`step_back_overwrites`** — `dap_revstep_overwrite_program
+    .m` runs `x=1; x=2; x=3; disp(x);`. Pause at the disp;
+    stepBack walks `x` through `3 → 2 → 1 → removed`,
+    confirming that `prev_existed=1` records restore the prior
+    value (instead of removing the binding)
   - **`reverse_continue`** — same fixture; `reverseContinue`
-    walks the undo log back and stops with `reason=step` or
-    `reason=entry`
+    walks the undo log back one statement and stops with
+    `reason=step` at line 7 (or `reason=entry` if the log was
+    already exhausted)
   - **`read_write_memory`** — using `dap_matrix_program.m`'s
     `A = [1 2 3; 4 5 6]`, exercises the matrix `memoryReference`
     field: reads the first 3 doubles via `readMemory` and

@@ -4340,9 +4340,19 @@ int matlab_dbg_step_back(int32_t *out_file_id, int32_t *out_line,
         pthread_mutex_unlock(&matlab_dbg.mu);
         return 0;
     }
-    /* Walk backward from undo_head. Note `head` points one PAST the
-     * last written entry, so the actual top is at head-1. Wrap
-     * negative-mod the same way the ring buffer wraps positive. */
+    /* Algorithm:
+     *   1. Drop the head boundary record (the current "now" marker
+     *      from the most recent hook fire — represents the line the
+     *      worker is paused at).
+     *   2. Walk back, applying each non-boundary record's revert.
+     *   3. Stop at the next boundary; that's the new "now". The
+     *      boundary itself stays in the log (head = boundary_idx +
+     *      1) so subsequent stepBacks see it as their head and drop
+     *      it on entry.
+     *
+     * `head` points one PAST the last written entry, so the actual
+     * top is at head-1. Wrap negative-mod the same way the ring
+     * buffer wraps positive. */
     int idx = matlab_dbg.undo_head;
     int wall = matlab_dbg.undo_full ? 4096 : matlab_dbg.undo_head;
     int popped = 0;
@@ -4352,19 +4362,32 @@ int matlab_dbg_step_back(int32_t *out_file_id, int32_t *out_line,
     int hit_boundary = 0;
     int hit_irreversible = 0;
     int32_t boundary_file_id = 0, boundary_line = 0;
-    /* Skip-past-current-boundary: the most recent record on the
-     * log is typically the statement-boundary stamp for the
-     * statement we're paused on. Pop it before walking back so
-     * we revert the *previous* statement's writes, not zero of
-     * them. */
-    int saw_first_boundary = 0;
+    int boundary_idx = -1;
+
+    /* Step 1: drop the current "now" boundary. The hook stamps a
+     * boundary on every fire, so head-1 IS that stamp when paused
+     * at a fresh statement (the typical case). If the top isn't a
+     * boundary — e.g. the bp fired mid-statement after some
+     * writes — we keep walking; the writes get reverted normally
+     * and the boundary we hit is the previous statement's. */
+    {
+        int peek = (idx == 0) ? 4096 - 1 : idx - 1;
+        struct matlab_dbg_undo_rec *r = &matlab_dbg.undo_log[peek];
+        if (r->kind == 0) {
+            idx = peek;
+            ++popped;
+        }
+    }
+
     while (popped < wall) {
         idx = (idx == 0) ? 4096 - 1 : idx - 1;
         struct matlab_dbg_undo_rec *r = &matlab_dbg.undo_log[idx];
         ++popped;
         if (r->kind == 4) {
             /* Irreversible op marker — stop here. The user has
-             * to live with the prior printed output. */
+             * to live with the prior printed output. Don't pop
+             * the marker; leave it so a second stepBack also
+             * stops here, not behind it. */
             hit_irreversible = 1;
             if (out_msg && msg_cap > 0) {
                 if (r->name)
@@ -4374,37 +4397,34 @@ int matlab_dbg_step_back(int32_t *out_file_id, int32_t *out_line,
                     snprintf(out_msg, (size_t)msg_cap,
                              "can't reverse past an irreversible operation");
             }
-            /* Don't pop the irreversible marker — leave it so a
-             * second stepBack also stops here, not behind it. */
             ++idx;
             if (idx >= 4096) idx = 0;
             --popped;
             break;
         }
         if (r->kind == 0) {
-            /* Statement boundary. The first one we hit is the
-             * current paused-statement's stamp — skip it, then
-             * the second boundary is the one we want to resume
-             * at (and the writes between were the prior
-             * statement's, which we just reverted on the way
-             * here). */
-            if (!saw_first_boundary) {
-                saw_first_boundary = 1;
-                continue;
-            }
+            /* Statement boundary — this is the new "now". Keep
+             * it in the log so the next stepBack drops it (per
+             * step 1). */
             hit_boundary = 1;
+            boundary_idx = idx;
             boundary_file_id = r->file_id;
             boundary_line = r->line;
+            /* Advance idx past the boundary so head ends up just
+             * after it; the boundary record stays in place. */
+            ++idx;
+            if (idx >= 4096) idx = 0;
+            --popped;  /* don't count the kept boundary as popped */
             break;
         }
         /* Apply the undo: revert the write described by this record. */
         if (r->kind == 1 || r->kind == 2) {
-            /* matlab_ws revert. If the variable didn't exist before,
-             * we can't easily delete it from matlab_struct (no
-             * remove API); zero it out via set_f64(0) + kind=0 as
-             * a best-effort revert. The DAP scenario for stepBack
-             * uses pre-existing names so this rare case stays a
-             * documented edge. */
+            /* matlab_ws revert. If the variable existed before,
+             * restore the previous (kind, value/ptr); if it
+             * didn't, remove the binding entirely via
+             * matlab_struct_rmfield so the rewound state matches
+             * the pre-write workspace exactly (no stale "x = 0"
+             * shadow). */
             if (r->prev_existed) {
                 if (r->prev_kind == 0) {
                     matlab_struct_set_f64(matlab_ws, r->name, r->name_len,
@@ -4420,9 +4440,10 @@ int matlab_dbg_step_back(int32_t *out_file_id, int32_t *out_line,
                     matlab_ws->ptr_vals[i] = r->prev_ptr;
                 }
             } else {
-                /* Best-effort: zero the binding so the rewound
-                 * value isn't seen by subsequent reads. */
-                matlab_struct_set_f64(matlab_ws, r->name, r->name_len, 0.0);
+                /* Variable didn't exist before — remove the
+                 * binding so `who` / `whos` / DAP variable
+                 * inspection see the pre-write state. */
+                matlab_struct_rmfield(matlab_ws, r->name, r->name_len);
             }
         } else if (r->kind == 3) {
             /* frame_local revert. Walk the entries[] of the
@@ -4459,9 +4480,9 @@ int matlab_dbg_step_back(int32_t *out_file_id, int32_t *out_line,
         /* The popped record's name copy is freed when its slot is
          * later overwritten by undo_alloc; no free here. */
     }
-    /* Move head back by `popped` (and clear undo_full if we
-     * shrunk past the wrap point so future allocs grow the
-     * meaningful set rather than overwrite). */
+    /* Move head back by `popped` (the boundary we hit stays in the
+     * log because we decremented popped before breaking). */
+    (void)boundary_idx;  /* used only for the assertion in builds with -DDBG */
     matlab_dbg.undo_head = idx;
     matlab_dbg.n_undo -= popped;
     if (matlab_dbg.n_undo < 0) matlab_dbg.n_undo = 0;

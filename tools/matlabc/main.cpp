@@ -4565,10 +4565,13 @@ bool handleRequest(const Object &Msg) {
         {"line", (int64_t)Ln},
       });
     } else {
-      /* Log was empty; emit a stopped event at the current line
-       * so the IDE's UI stays consistent. */
+      /* Log was empty — we've rewound past the very first
+       * statement. Emit reason="entry" with a description so the
+       * IDE renders the stop with the program-start glyph rather
+       * than a generic step. */
       sendEvent("stopped", Object{
-        {"reason", "step"},
+        {"reason", "entry"},
+        {"description", "stepBack: undo log exhausted"},
         {"threadId", (int64_t)1},
         {"allThreadsStopped", true},
       });
