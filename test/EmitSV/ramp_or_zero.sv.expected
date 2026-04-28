@@ -4,7 +4,7 @@
 
 module ramp_or_zero (
     input  logic signed [15:0] seed,
-    input  logic signed [7:0] en,
+    input  logic [7:0] en,
     output logic signed [15:0] y
 );
 

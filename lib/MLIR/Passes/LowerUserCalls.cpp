@@ -489,6 +489,105 @@ bool runLowerUserCalls(ModuleOp M) {
             Entry.getArgument(i).setType(NewInputs[i]);
         }
       }
+      // Thread fi-spec metadata from caller operand defining ops to
+      // the func arg as `matlab.fi_signed` / `matlab.fi_wl` /
+      // `matlab.fi_fl` attrs. The SV port emitter reads these to
+      // render unsigned/declared-width ports correctly. Without
+      // them, a typed-driver-call path like
+      //   en = fi(1, numerictype(0, 8, 0));   % unsigned 8-bit
+      //   y = counter(en, ...);
+      // would emit `input logic signed [7:0] en` because the
+      // refined arg is i8 (signless) and the emitter defaults to
+      // signed for multi-bit integers. The pragma-typed path
+      // already attaches these attrs in `ApplyPortTypePragmas`;
+      // this is the analogous fix for the call-refinement path.
+      auto walkBackForFiAttrs =
+          [](mlir::Value V,
+             mlir::IntegerAttr &Wl, mlir::IntegerAttr &Fl,
+             mlir::Attribute &Sn) {
+        // Walk back through {load → store value, trunci/extsi/extui
+        // adapter operand} chains to find an op carrying fi_*
+        // attrs. Bound the walk to a few hops so a deeply chained
+        // value doesn't pessimize compile time.
+        for (int Hop = 0; V && Hop < 8; ++Hop) {
+          mlir::Operation *D = V.getDefiningOp();
+          if (!D) return;
+          if (auto WlA = D->getAttrOfType<mlir::IntegerAttr>("fi_wl"))
+            if (!Wl) Wl = WlA;
+          if (auto FlA = D->getAttrOfType<mlir::IntegerAttr>("fi_fl"))
+            if (!Fl) Fl = FlA;
+          if (!Sn) {
+            if (auto SnA = D->getAttr("fi_signed")) Sn = SnA;
+          }
+          if (Wl && Sn) return;
+          // matlab.load: trace through the slot's last store value.
+          if (isMatlabOp(D, "matlab.load") && D->getNumOperands() == 1) {
+            mlir::Value Slot = D->getOperand(0);
+            mlir::Operation *LastStore = nullptr;
+            for (mlir::Operation *U : Slot.getUsers()) {
+              if (isMatlabOp(U, "matlab.store") && U->getNumOperands() == 2 &&
+                  U->getOperand(1) == Slot)
+                LastStore = U; // last in iteration order — best effort
+            }
+            if (!LastStore) return;
+            V = LastStore->getOperand(0);
+            continue;
+          }
+          // Adapter ops: pass through to the source operand.
+          if (mlir::isa<mlir::arith::TruncIOp, mlir::arith::ExtSIOp,
+                        mlir::arith::ExtUIOp>(D)) {
+            V = D->getOperand(0);
+            continue;
+          }
+          return;
+        }
+      };
+      llvm::SmallVector<mlir::IntegerAttr, 4> ArgWL(NumIn);
+      llvm::SmallVector<mlir::IntegerAttr, 4> ArgFL(NumIn);
+      llvm::SmallVector<mlir::Attribute, 4> ArgSn(NumIn);
+      llvm::SmallVector<bool, 4> ArgConflict(NumIn, false);
+      bool FirstSite = true;
+      for (mlir::Operation *C : Sites) {
+        if (C->getNumOperands() != NumIn) continue;
+        for (unsigned i = 0; i < NumIn; ++i) {
+          mlir::IntegerAttr Wl, Fl;
+          mlir::Attribute Sn;
+          walkBackForFiAttrs(C->getOperand(i), Wl, Fl, Sn);
+          if (FirstSite) {
+            ArgWL[i] = Wl; ArgFL[i] = Fl; ArgSn[i] = Sn;
+          } else {
+            // Multi-site disagreement → drop the attr (don't emit
+            // a wrong-for-some-callers spec). One site's `nullptr`
+            // shouldn't drop the others' agreement, so only flag
+            // when both sides are present and disagree.
+            if (Wl && ArgWL[i] && Wl != ArgWL[i]) ArgConflict[i] = true;
+            if (Fl && ArgFL[i] && Fl != ArgFL[i]) ArgConflict[i] = true;
+            if (Sn && ArgSn[i] && Sn != ArgSn[i]) ArgConflict[i] = true;
+          }
+        }
+        FirstSite = false;
+      }
+      auto I32 = IntegerType::get(Ctx, 32);
+      for (unsigned i = 0; i < NumIn; ++i) {
+        if (ArgConflict[i]) continue;
+        if (ArgWL[i] && !Fn.getArgAttr(i, "matlab.fi_wl"))
+          Fn.setArgAttr(i, "matlab.fi_wl", ArgWL[i]);
+        if (ArgFL[i] && !Fn.getArgAttr(i, "matlab.fi_fl"))
+          Fn.setArgAttr(i, "matlab.fi_fl", ArgFL[i]);
+        if (ArgSn[i] && !Fn.getArgAttr(i, "matlab.fi_signed")) {
+          // The SV emitter expects matlab.fi_signed as an i32
+          // (consistent with the pragma path), but the source attr
+          // can be either a BoolAttr or an IntegerAttr depending on
+          // where it came from. Normalize to i32 0/1.
+          int64_t SnVal = 0;
+          if (auto BA = mlir::dyn_cast<mlir::BoolAttr>(ArgSn[i]))
+            SnVal = BA.getValue() ? 1 : 0;
+          else if (auto IA = mlir::dyn_cast<mlir::IntegerAttr>(ArgSn[i]))
+            SnVal = IA.getInt() != 0 ? 1 : 0;
+          Fn.setArgAttr(i, "matlab.fi_signed",
+                        mlir::IntegerAttr::get(I32, SnVal));
+        }
+      }
       propagateScalarTypes(Fn);
 
       // Re-examine return types after propagation.

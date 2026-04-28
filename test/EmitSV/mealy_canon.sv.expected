@@ -5,8 +5,8 @@
 module mealy_canon (
     input  logic clk,
     input  logic rst_n,
-    input  logic signed [7:0] input_bit,
-    input  logic signed [7:0] reset,
+    input  logic [7:0] input_bit,
+    input  logic [7:0] reset,
     output logic out_signal
 );
 

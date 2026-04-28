@@ -3,9 +3,9 @@
 // Phase 1 — scalar combinational only.
 
 module bit_combo (
-    input  logic signed [15:0] a,
-    input  logic signed [15:0] b,
-    output logic signed [15:0] y
+    input  logic [15:0] a,
+    input  logic [15:0] b,
+    output logic [15:0] y
 );
 
     always_comb begin

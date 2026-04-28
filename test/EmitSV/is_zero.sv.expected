@@ -3,7 +3,7 @@
 // Phase 1 — scalar combinational only.
 
 module is_zero (
-    input  logic signed [7:0] v,
+    input  logic [7:0] v,
     output logic r
 );
 

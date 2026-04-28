@@ -235,12 +235,31 @@ bool rewriteFiConst(Operation *Op) {
   if (auto IT = dyn_cast<IntegerType>(Ty)) {
     Signless = IntegerType::get(B.getContext(), IT.getWidth());
   }
-  Value C = arith::ConstantOp::create(B, Op->getLoc(), Signless,
+  auto C = arith::ConstantOp::create(B, Op->getLoc(), Signless,
                                       IntegerAttr::get(Signless, V.getInt()));
-  if (Signless != Ty) {
-    C = arith::BitcastOp::create(B, Op->getLoc(), Ty, C);
+  // Carry the fi spec onto the produced arith.constant so downstream
+  // passes (LowerUserCalls' arg-attr threading, HWStateInfer's reset
+  // sign/width recovery) can recover the user's `fi(_, signed, W, F)`
+  // even after const-folding has erased the matlab.fi.const op.
+  // arith.constant op has no schema for these attrs, but MLIR
+  // accepts additional attributes; the verifier doesn't reject
+  // them and downstream passes can read them by name.
+  for (auto &Atr : Op->getAttrs()) {
+    auto Name = Atr.getName().getValue();
+    if (Name.starts_with("fi_") || Name == "fi")
+      C->setAttr(Atr.getName(), Atr.getValue());
   }
-  Op->getResult(0).replaceAllUsesWith(C);
+  Value Out = C.getResult();
+  if (Signless != Ty) {
+    auto Bc = arith::BitcastOp::create(B, Op->getLoc(), Ty, Out);
+    for (auto &Atr : Op->getAttrs()) {
+      auto Name = Atr.getName().getValue();
+      if (Name.starts_with("fi_") || Name == "fi")
+        Bc->setAttr(Atr.getName(), Atr.getValue());
+    }
+    Out = Bc.getResult();
+  }
+  Op->getResult(0).replaceAllUsesWith(Out);
   Op->erase();
   return true;
 }

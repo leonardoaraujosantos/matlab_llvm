@@ -287,6 +287,18 @@ if(MATLAB_LLVM_WITH_MLIR)
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/EmitSVFail
   )
 
+  # fi-spec ↔ SV declaration regression suite. Each fixture
+  # declares ports with a known `fi(_, signed|unsigned, W, F)` spec
+  # via either a `% hdl: port(...)` pragma or a typed driver call,
+  # and asserts the emitted SV port-list / register declarations
+  # carry the matching signedness + bit width. Substring-based to
+  # stay focused on the property under test.
+  add_test(
+    NAME emit-sv-ports-tests
+    COMMAND ${CMAKE_SOURCE_DIR}/test/EmitSVPorts/run_tests.sh $<TARGET_FILE:matlabc>
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/EmitSVPorts
+  )
+
   # DWARF emission shape test: asserts that `matlabc -emit-llvm -g`
   # produces an LLVM IR module with a !DICompileUnit / !DIFile /
   # !DISubprogram / !DILocation graph (line tables only) and that

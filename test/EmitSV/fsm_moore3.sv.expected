@@ -5,7 +5,7 @@
 module fsm_moore3 (
     input  logic clk,
     input  logic rst_n,
-    input  logic signed [7:0] x,
+    input  logic [7:0] x,
     output logic signed [7:0] out
 );
 

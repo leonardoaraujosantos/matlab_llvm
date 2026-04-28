@@ -1,0 +1,3 @@
+output logic [3:0] count
+logic [3:0] c;
+logic [3:0] c_next;

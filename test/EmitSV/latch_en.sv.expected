@@ -5,8 +5,8 @@
 module latch_en (
     input  logic clk,
     input  logic rst_n,
-    input  logic signed [7:0] d,
-    input  logic signed [7:0] en,
+    input  logic [7:0] d,
+    input  logic [7:0] en,
     output logic [7:0] out
 );
 

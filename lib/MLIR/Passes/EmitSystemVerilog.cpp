@@ -818,6 +818,7 @@ void Emitter::emitPortList(mlir::func::FuncOp F) {
     // so the output port matches the user's declared spec.
     mlir::Type T = FT.getResult(I);
     bool ResSigned = true;
+    bool SawPersist = false;
     F.walk([&](mlir::func::ReturnOp R) {
       if (R.getNumOperands() <= I) return;
       auto *Op = R.getOperand(I).getDefiningOp();
@@ -827,7 +828,80 @@ void Emitter::emitPortList(mlir::func::FuncOp F) {
       auto &P = Persists[It->second];
       T = mlir::IntegerType::get(F.getContext(), P.Width);
       ResSigned = P.Signed;
+      SawPersist = true;
     });
+    // For non-persistent results (e.g. `r = a + b` where r is just
+    // a return value), trace back through the func.return op's
+    // operand defining op chain to find an `fi_signed` attr. The
+    // frontend tags fi-aware ops (matlab.fi.const, matlab.add,
+    // matlab.sub, matlab.fi.cast, etc.) with the spec they
+    // produce; LowerFixedPoint carries those attrs onto the
+    // arith.constant / etc. that survives. Without this thread
+    // an unsigned `r = a + b` would render `output logic signed
+    // [W-1:0] r` even though both operands and the result are
+    // declared unsigned.
+    if (!SawPersist) {
+      F.walk([&](mlir::func::ReturnOp R) {
+        if (R.getNumOperands() <= I) return;
+        mlir::Value V = R.getOperand(I);
+        for (int Hop = 0; V && Hop < 8; ++Hop) {
+          // Block arguments (entry-block func args): look at the
+          // arg attrs the call-refinement / pragma path threaded.
+          // For `r = a + b`, after recursing into the addi's LHS
+          // we land on arg0; reading `matlab.fi_signed` there
+          // closes the trace.
+          if (auto BA = mlir::dyn_cast<mlir::BlockArgument>(V)) {
+            auto *Owner = BA.getOwner();
+            auto Fn = mlir::dyn_cast<mlir::func::FuncOp>(
+                Owner->getParentOp());
+            if (!Fn) return;
+            unsigned ArgI = BA.getArgNumber();
+            if (auto IA = Fn.getArgAttrOfType<mlir::IntegerAttr>(
+                    ArgI, "matlab.fi_signed"))
+              ResSigned = IA.getInt() != 0;
+            return;
+          }
+          auto *D = V.getDefiningOp();
+          if (!D) return;
+          if (auto SA = D->getAttr("fi_signed")) {
+            if (auto BA = mlir::dyn_cast<mlir::BoolAttr>(SA))
+              ResSigned = BA.getValue();
+            else if (auto IA = mlir::dyn_cast<mlir::IntegerAttr>(SA))
+              ResSigned = IA.getInt() != 0;
+            return;
+          }
+          // matlab.load: trace through last store value.
+          if (D->getName().getStringRef() == "matlab.load" &&
+              D->getNumOperands() == 1) {
+            mlir::Value Slot = D->getOperand(0);
+            mlir::Operation *LastStore = nullptr;
+            for (mlir::Operation *U : Slot.getUsers()) {
+              if (U->getName().getStringRef() == "matlab.store" &&
+                  U->getNumOperands() == 2 && U->getOperand(1) == Slot)
+                LastStore = U;
+            }
+            if (!LastStore) return;
+            V = LastStore->getOperand(0);
+            continue;
+          }
+          if (mlir::isa<mlir::arith::TruncIOp, mlir::arith::ExtSIOp,
+                        mlir::arith::ExtUIOp>(D)) {
+            V = D->getOperand(0);
+            continue;
+          }
+          // Binary arith ops on signless ints — the result spec
+          // typically matches the LHS. Recurse one operand.
+          if (D->getNumOperands() == 2 &&
+              mlir::isa<mlir::arith::AddIOp, mlir::arith::SubIOp,
+                        mlir::arith::MulIOp, mlir::arith::AndIOp,
+                        mlir::arith::OrIOp, mlir::arith::XOrIOp>(D)) {
+            V = D->getOperand(0);
+            continue;
+          }
+          return;
+        }
+      });
+    }
     OS << "    output " << svType(T, ResSigned) << " " << OutNames[I];
   }
   OS << "\n";

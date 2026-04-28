@@ -5,8 +5,8 @@
 module counter (
     input  logic clk,
     input  logic rst_n,
-    input  logic signed [7:0] en,
-    input  logic signed [7:0] rst,
+    input  logic [7:0] en,
+    input  logic [7:0] rst,
     output logic [7:0] count
 );
 
