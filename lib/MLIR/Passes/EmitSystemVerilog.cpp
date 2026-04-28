@@ -120,6 +120,17 @@ private:
   void emitSelect(mlir::arith::SelectOp S, int Indent);
   void emitExtTrunc(mlir::Operation &Op, int Indent);
   void emitScfIf(mlir::scf::IfOp If, int Indent);
+  // Try to match an if/else-if chain where every condition is
+  // `<disc> == <const>` against the SAME `<disc>` value. On match,
+  // emit `unique case (<disc>) ... endcase` and return true. The
+  // synth tool then realizes this as a parallel mux instead of the
+  // priority cascade implied by nested if/else, which improves
+  // timing and matches the user's source-level `switch ... case`.
+  // Returns false (caller falls back to nested if/else) for chains
+  // with non-equality / non-uniform-discriminator conditions and
+  // for short chains (1 case) that don't benefit from the case
+  // form.
+  bool tryEmitSwitchCase(mlir::scf::IfOp Head, int Indent);
   void emitScfYield(mlir::scf::YieldOp Y, int Indent);
   void emitScfWhile(mlir::scf::WhileOp W, int Indent);
   void emitAlloca(mlir::LLVM::AllocaOp A, int Indent);
@@ -615,6 +626,35 @@ std::string Emitter::renderInlineExpr(mlir::Operation *Op) {
     Out << ")";
     return Out.str();
   }
+  // `arith.xori(x, all-ones)` is the canonical lowering of
+  // `bitcmp(x)` / bitwise NOT. Rendering as `x ^ -1` is
+  // synthesizable but reads wrong — `~x` is the SV idiom for a
+  // NOT gate and what every hand-written RTL author writes.
+  // Match either operand position (constant folding can't reorder
+  // a non-commutative op, but xori IS commutative — be safe).
+  auto isAllOnesIntConst = [](mlir::Value V) -> bool {
+    auto *D = V.getDefiningOp();
+    if (!D) return false;
+    llvm::APInt Val;
+    if (auto C = mlir::dyn_cast<mlir::arith::ConstantOp>(D)) {
+      auto IA = mlir::dyn_cast<mlir::IntegerAttr>(C.getValue());
+      if (!IA) return false;
+      Val = IA.getValue();
+    } else if (auto C = mlir::dyn_cast<mlir::LLVM::ConstantOp>(D)) {
+      auto IA = mlir::dyn_cast<mlir::IntegerAttr>(C.getValue());
+      if (!IA) return false;
+      Val = IA.getValue();
+    } else {
+      return false;
+    }
+    return Val.isAllOnes();
+  };
+  if (N == "arith.xori" && Op->getNumOperands() == 2) {
+    if (isAllOnesIntConst(Op->getOperand(1)))
+      return "~" + exprFor(Op->getOperand(0));
+    if (isAllOnesIntConst(Op->getOperand(0)))
+      return "~" + exprFor(Op->getOperand(1));
+  }
   // Binary arith ops with an SV operator equivalent.
   llvm::StringRef SvOp;
   if (N == "arith.addi" || N == "matlab.add") SvOp = "+";
@@ -756,7 +796,17 @@ void Emitter::emitPortList(mlir::func::FuncOp F) {
         continue;
       }
     }
-    OS << "    input  " << svType(FT.getInput(I)) << " " << ArgNames[I];
+    // Scalar (non-vector) port. Honor the `% hdl: port(name, fi,
+    // unsigned, W, F)` pragma's signedness via the `matlab.fi_signed`
+    // arg attr (set by ApplyPortTypePragmas). MLIR IntegerType is
+    // signless; defaulting to signed in `svType(Type)` over-claims
+    // for unsigned ports declared by pragma.
+    bool ScalarSigned = true;
+    if (auto SA =
+            F.getArgAttrOfType<mlir::IntegerAttr>(I, "matlab.fi_signed"))
+      ScalarSigned = SA.getInt() != 0;
+    OS << "    input  " << svType(FT.getInput(I), ScalarSigned)
+       << " " << ArgNames[I];
   }
   for (unsigned I = 0; I < FT.getNumResults(); ++I) {
     if (!First) OS << ",\n";
@@ -1115,6 +1165,127 @@ void Emitter::emitExtTrunc(mlir::Operation &Op, int Indent) {
   OS << ");\n";
 }
 
+bool Emitter::tryEmitSwitchCase(mlir::scf::IfOp Head, int Indent) {
+  // Match a chain of `if (<disc> == c0) ... else if (<disc> == c1)
+  // ... else if (<disc> == cN) ... else <default>`. Every cmp must
+  // be against the SAME `<disc>` and use equality (`arith.cmpi eq`
+  // or `matlab.eq`). Constants must reduce to integer values via
+  // the existing `exprFor` rendering. The chain is followed via
+  // the else-region: it must contain exactly one inner scf.if (and
+  // a yield), or it's the default arm.
+  struct CaseEntry { std::string ConstExpr; mlir::Region *Body; };
+  llvm::SmallVector<CaseEntry, 8> Cases;
+  mlir::Region *Default = nullptr;
+  mlir::Value Disc;
+  mlir::scf::IfOp Cur = Head;
+  while (Cur) {
+    mlir::Value Cond = Cur.getCondition();
+    mlir::Operation *Def = Cond.getDefiningOp();
+    if (!Def) return false;
+    mlir::Value LhsV;
+    mlir::Value RhsV;
+    if (auto Cmp = mlir::dyn_cast<mlir::arith::CmpIOp>(Def)) {
+      if (Cmp.getPredicate() != mlir::arith::CmpIPredicate::eq)
+        return false;
+      LhsV = Cmp.getLhs();
+      RhsV = Cmp.getRhs();
+    } else if (Def->getName().getStringRef() == "matlab.eq" &&
+               Def->getNumOperands() == 2) {
+      LhsV = Def->getOperand(0);
+      RhsV = Def->getOperand(1);
+    } else {
+      return false;
+    }
+    // The discriminator must be the same SSA value across every
+    // arm. Don't try to be clever about which side is the const —
+    // require LHS to be the discriminator and RHS to be the
+    // constant. (Both sides being constants would have folded
+    // earlier; both being non-const isn't a `switch` shape.)
+    if (!Disc) Disc = LhsV;
+    else if (Disc != LhsV) return false;
+    // RHS must be a constant the emitter can render. Use `exprFor`
+    // with a one-shot inlineability check: if RHS doesn't have a
+    // defining op or isn't a recognized constant op, bail.
+    auto *RDef = RhsV.getDefiningOp();
+    if (!RDef) return false;
+    bool IsConst = mlir::isa<mlir::arith::ConstantOp,
+                              mlir::LLVM::ConstantOp>(RDef) ||
+                   RDef->getName().getStringRef() == "matlab.const_int";
+    if (!IsConst) return false;
+    Cases.push_back({stripOuterParens(exprFor(RhsV)),
+                     &Cur.getThenRegion()});
+    // Else region: either empty (no default), a chained scf.if
+    // (continues the cascade — the next cmp's defining ops live
+    // alongside the inner if in the same block, so we look for
+    // "exactly one scf.if and one yield, plus zero or more
+    // pure operand-chain ops"), or arbitrary body (default arm).
+    auto &ER = Cur.getElseRegion();
+    if (ER.empty()) { Cur = nullptr; break; }
+    auto &EB = ER.front();
+    // No-op else (auto-yield only) — no default arm.
+    if (std::next(EB.begin()) == EB.end() &&
+        mlir::isa<mlir::scf::YieldOp>(EB.front()) &&
+        EB.front().getNumOperands() == 0) {
+      Cur = nullptr;
+      break;
+    }
+    // Find the (single) inner scf.if. Multiple scf.ifs or zero
+    // scf.ifs both fail this match (the latter falls through to
+    // the default-arm path).
+    mlir::scf::IfOp NextIf;
+    bool MultipleIfs = false;
+    for (mlir::Operation &TOp : EB) {
+      if (auto Inner = mlir::dyn_cast<mlir::scf::IfOp>(&TOp)) {
+        if (NextIf) { MultipleIfs = true; break; }
+        NextIf = Inner;
+      }
+    }
+    if (!MultipleIfs && NextIf) {
+      // Verify the inner if is the LAST non-yield op (so we don't
+      // mis-handle `else { sideEffectStore; if (...) {...} }`,
+      // which is a real default-arm + nested-if rather than a
+      // chain). The yield must immediately follow the inner if.
+      auto &Term = EB.back();
+      mlir::Operation *PrevToTerm = nullptr;
+      for (mlir::Operation &TOp : EB)
+        if (&TOp != &Term) PrevToTerm = &TOp;
+      if (PrevToTerm == NextIf.getOperation() &&
+          mlir::isa<mlir::scf::YieldOp>(Term) &&
+          Term.getNumOperands() == 0) {
+        Cur = NextIf;
+        continue;
+      }
+    }
+    // Anything else in the else region — treat as the default arm.
+    Default = &ER;
+    Cur = nullptr;
+    break;
+  }
+  // 2+ cases is the bar — a single `if x == c` doesn't benefit
+  // from the case form and would just be noisier than the existing
+  // if/else rendering.
+  if (Cases.size() < 2) return false;
+  indent(Indent);
+  OS << "unique case (" << stripOuterParens(exprFor(Disc)) << ")\n";
+  for (auto &E : Cases) {
+    indent(Indent + 1);
+    OS << E.ConstExpr << ": begin\n";
+    emitRegion(*E.Body, Indent + 2);
+    indent(Indent + 1);
+    OS << "end\n";
+  }
+  if (Default) {
+    indent(Indent + 1);
+    OS << "default: begin\n";
+    emitRegion(*Default, Indent + 2);
+    indent(Indent + 1);
+    OS << "end\n";
+  }
+  indent(Indent);
+  OS << "endcase\n";
+  return true;
+}
+
 void Emitter::emitScfIf(mlir::scf::IfOp If, int Indent) {
   // Phase 1 supports both shapes:
   //   - scf.if without results: pure side-effecting branches that store
@@ -1123,6 +1294,17 @@ void Emitter::emitScfIf(mlir::scf::IfOp If, int Indent) {
   //   - scf.if with results: the values yielded by each arm assign the
   //     `if`'s SSA results. Renders as the same construct, with each
   //     arm writing the result name(s).
+  //
+  // Switch-case detection runs first: a `switch sel; case 0 ... case 1
+  // ... otherwise` source pattern lowers through Sema to a chain of
+  // nested `scf.if (sel == cN)`. Rendering that as `unique case
+  // (sel)` instead of nested if/else lets the synth tool realize a
+  // parallel mux. Only triggers on result-less ifs (the chain that
+  // store to shared slots — the typical `data_out = ...` case);
+  // result-yielding ifs are rare and don't compose with `unique case`
+  // semantics anyway.
+  if (If->getNumResults() == 0 && tryEmitSwitchCase(If, Indent))
+    return;
   indent(Indent);
   OS << "if (" << stripOuterParens(exprFor(If.getCondition()))
      << ") begin\n";

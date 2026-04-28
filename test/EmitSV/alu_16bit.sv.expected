@@ -14,31 +14,29 @@ module alu_16bit (
         data_out = '0;
         overflow = '0;
         data_out = 16'sd0;
-        if (sel == 0) begin
-            data_out = a + b;
-        end else begin
-            if (sel == 1) begin
-                data_out = a - b;
-            end else begin
-                if (sel == 2) begin
-                    data_out = a & b;
-                end else begin
-                    if (sel == 3) begin
-                        data_out = a | b;
-                    end else begin
-                        if (sel == 4) begin
-                            data_out = a ^ b;
-                        end else begin
-                            if (sel == 5) begin
-                                data_out = a ^ -16'sd1;
-                            end else begin
-                                data_out = 16'sd0;
-                            end
-                        end
-                    end
-                end
+        unique case (sel)
+            0: begin
+                data_out = a + b;
             end
-        end
+            1: begin
+                data_out = a - b;
+            end
+            2: begin
+                data_out = a & b;
+            end
+            3: begin
+                data_out = a | b;
+            end
+            4: begin
+                data_out = a ^ b;
+            end
+            5: begin
+                data_out = ~a;
+            end
+            default: begin
+                data_out = 16'sd0;
+            end
+        endcase
         overflow = 1'b0;
     end
 

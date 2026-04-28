@@ -107,6 +107,17 @@ bool runApplyPortTypePragmas(mlir::ModuleOp M) {
           continue;
         }
         InTys[Idx] = T;
+        // Thread the pragma's signedness onto the arg as
+        // `matlab.fi_signed` so the SV port-list emitter can render
+        // unsigned ports as `logic [W-1:0]` instead of the default
+        // `logic signed [W-1:0]`. MLIR's IntegerType is signless;
+        // signedness lives on attrs. Same convention the vector
+        // (`!llvm.ptr`) port branch already follows.
+        if (auto SignedA = Entry.getAs<mlir::BoolAttr>("signed")) {
+          auto I32 = mlir::IntegerType::get(&Ctx, 32);
+          F.setArgAttr((unsigned)Idx, "matlab.fi_signed",
+              mlir::IntegerAttr::get(I32, SignedA.getValue() ? 1 : 0));
+        }
         continue;
       }
       int RIdx = findResByName(NameAttr.getValue());
