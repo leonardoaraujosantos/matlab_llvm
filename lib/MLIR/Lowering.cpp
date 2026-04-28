@@ -2177,6 +2177,31 @@ void Lowerer::lowerLValueStore(const Expr &LHS, mlir::Value Rhs) {
         Attrs.push_back(mlir::NamedAttribute(
             mlir::StringAttr::get(&MCtx, "persistent_fn"),
             mlir::StringAttr::get(&MCtx, CurFnName)));
+        // Tag with the binding's user-declared fi spec so the SV
+        // backend (`HWStateInfer`) can render the persistent
+        // register at the user's `fi(_, signed, WL, FL)` width
+        // and signedness. Without this the storage class (i8/i16/
+        // i32/i64) and the signless arith integer type's default
+        // (signed for multi-bit) would be used, producing too-
+        // wide signed regs for `fi(0, 0, 4, 0)`-style declarations.
+        // Walk type sources in priority: the NameExpr's own
+        // resolved Ty (set by Sema for the LHS) → the Rhs value's
+        // type-inference type (when the assignment is `x = fi(...)`
+        // the RHS expression's Ty carries the fresh spec) →
+        // the binding's InferredType / DeclaredType.
+        auto fxFromTy = [](const Type *T) -> const FixedSpec * {
+          if (!T || T->K != Type::Kind::Array) return nullptr;
+          auto &AT = static_cast<const ArrayType &>(*T);
+          if (AT.Elt != Dtype::Fixed || !AT.FxSpec) return nullptr;
+          return &(*AT.FxSpec);
+        };
+        const FixedSpec *Fx = fxFromTy(N.Ty);
+        if (!Fx) Fx = fxFromTy(N.Ref->InferredType);
+        if (!Fx) Fx = fxFromTy(N.Ref->DeclaredType);
+        if (Fx) {
+          auto FAttrs = buildFixedAttrs(&MCtx, *Fx);
+          for (auto &E0 : FAttrs) Attrs.push_back(E0);
+        }
       }
       emitUnregOp("matlab.call_builtin", {IdV, Rhs},
                   {mlir::NoneType::get(&MCtx)}, loc(N.Range), Attrs);

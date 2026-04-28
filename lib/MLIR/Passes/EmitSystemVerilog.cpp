@@ -813,10 +813,11 @@ void Emitter::emitPortList(mlir::func::FuncOp F) {
     First = false;
     // For results that come from a persistent get, the function's
     // declared result type is the runtime ABI's f64 — render the SV
-    // port at the register's actual integer width instead.
+    // port at the register's actual integer width instead. Also
+    // honor the register's signedness (`fi(_, 0, _, _)` → unsigned)
+    // so the output port matches the user's declared spec.
     mlir::Type T = FT.getResult(I);
-    // Find a func.return op and inspect its operand[I]; if it's a
-    // recognized persistent get, use that register's width.
+    bool ResSigned = true;
     F.walk([&](mlir::func::ReturnOp R) {
       if (R.getNumOperands() <= I) return;
       auto *Op = R.getOperand(I).getDefiningOp();
@@ -825,8 +826,9 @@ void Emitter::emitPortList(mlir::func::FuncOp F) {
       if (It == GetSiteToReg.end()) return;
       auto &P = Persists[It->second];
       T = mlir::IntegerType::get(F.getContext(), P.Width);
+      ResSigned = P.Signed;
     });
-    OS << "    output " << svType(T) << " " << OutNames[I];
+    OS << "    output " << svType(T, ResSigned) << " " << OutNames[I];
   }
   OS << "\n";
 
@@ -1005,7 +1007,7 @@ void Emitter::declarePrelude(mlir::func::FuncOp F) {
     }
     if (!IsFSM) {
       auto T = mlir::IntegerType::get(F.getContext(), P.Width);
-      Ty = svType(T);
+      Ty = svType(T, P.Signed);
     }
     OS << "    " << Ty << " " << P.Name << ";\n";
     OS << "    " << Ty << " " << P.Name << "_next;\n";
@@ -2633,7 +2635,22 @@ void Emitter::emitAlwaysFF() {
         break;
       }
     }
-    if (!IsFSM) ResetExpr = exprFor(P.ResetValue);
+    if (!IsFSM) {
+      ResetExpr = exprFor(P.ResetValue);
+      // The reset value typically renders at the storage class
+      // width (e.g. `8'sd0` for an i8-stored register), but the
+      // register itself is declared at the user-declared width
+      // (`P.Width`, from the fi spec). Wrap with an explicit
+      // width cast when the two diverge so Verilator doesn't
+      // flag WIDTHTRUNC. `<W>'(<expr>)` is the SV idiom for
+      // bit-width conversion.
+      unsigned RVW = widthOf(P.ResetValue.getType());
+      if (RVW > P.Width && P.Width > 0) {
+        std::ostringstream Cast;
+        Cast << P.Width << "'(" << ResetExpr << ")";
+        ResetExpr = Cast.str();
+      }
+    }
     OS << P.Name << " <= " << ResetExpr << ";\n";
   }
   OS << "        end else begin\n";

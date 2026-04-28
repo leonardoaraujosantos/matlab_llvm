@@ -247,6 +247,71 @@ bool gatherHWPersistentState(mlir::Operation *FuncOp,
       }
       Info.Width = W;
       Info.Signed = Sg;
+      // Override signedness + width from the `fi_*` attrs the
+      // frontend attached to the reset value's defining op, when
+      // present. MLIR's arith integer types are signless and width
+      // is the storage class (i8/i16/i32/i64); the user's
+      // `fi(value, signed, W, F)` declaration carries both as
+      // attrs. Without this override `fi(_, 0, W, F)` would
+      // render as `logic signed [STOR-1:0]` instead of the user-
+      // declared `logic [W-1:0]`. Walk through `arith.trunci` /
+      // `arith.extsi` / `arith.extui` adapters that the lowering
+      // sometimes inserts between the typed source op and the
+      // set call.
+      auto pickFiAttrs = [](mlir::Operation *Op,
+                            mlir::BoolAttr &SignedOut,
+                            mlir::IntegerAttr &WLOut) {
+        for (mlir::Operation *Cur = Op; Cur; ) {
+          if (auto SA = Cur->getAttrOfType<mlir::IntegerAttr>("fi_signed"))
+            SignedOut = mlir::BoolAttr::get(Cur->getContext(),
+                                             SA.getInt() != 0);
+          if (auto BA = Cur->getAttrOfType<mlir::BoolAttr>("fi_signed"))
+            SignedOut = BA;
+          if (auto WLA = Cur->getAttrOfType<mlir::IntegerAttr>("fi_wl"))
+            WLOut = WLA;
+          if (SignedOut && WLOut) return;
+          // Adapter chain: trunci / extsi / extui pass-through.
+          if (mlir::isa<mlir::arith::TruncIOp, mlir::arith::ExtSIOp,
+                        mlir::arith::ExtUIOp>(Cur)) {
+            Cur = Cur->getOperand(0).getDefiningOp();
+            continue;
+          }
+          break;
+        }
+      };
+      mlir::BoolAttr FiSignedAttr;
+      mlir::IntegerAttr FiWLAttr;
+      // Preferred source: the persistent set call carries the
+      // binding's user-declared fi spec (Lowering attaches
+      // fi_signed / fi_wl / fi_fl on every `_persistent_set_ptr`
+      // / `_global_set_f64` call for a Persistent binding). This
+      // is the "ground truth" for the register's declared spec —
+      // the user wrote `fi(_, signed, W, F)` and that's what
+      // they want emitted, regardless of how the datapath
+      // intermediates grow.
+      pickFiAttrs(InitSet, FiSignedAttr, FiWLAttr);
+      // Fall back: scan regular set sites for fi attrs on the
+      // call. Same source (Lowering tags every set), but if the
+      // pipeline ever drops the InitSet's attrs we still get a
+      // best-effort recovery from the datapath-update sets.
+      for (mlir::Operation *S : B.Sets) {
+        if (FiSignedAttr && FiWLAttr) break;
+        if (S == InitSet) continue;
+        pickFiAttrs(S, FiSignedAttr, FiWLAttr);
+      }
+      // Final fallback: walk the reset value's defining op + any
+      // upstream adapter ops (trunci/extsi/extui). Useful for
+      // bindings whose set call lost its attrs through some
+      // pipeline step that hasn't been audited.
+      if ((!FiSignedAttr || !FiWLAttr)) {
+        if (auto *Def = Info.ResetValue.getDefiningOp())
+          pickFiAttrs(Def, FiSignedAttr, FiWLAttr);
+      }
+      if (FiSignedAttr) Info.Signed = FiSignedAttr.getValue();
+      if (FiWLAttr) {
+        unsigned UserWL = (unsigned)FiWLAttr.getInt();
+        if (UserWL > 0 && UserWL <= Info.Width) Info.Width = UserWL;
+      }
     }
     if (B.Sets.size() <= 1) {
       // Only the init set was found — register has no datapath

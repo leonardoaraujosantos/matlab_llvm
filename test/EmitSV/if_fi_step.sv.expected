@@ -7,11 +7,11 @@ module if_fi_step (
     input  logic rst_n,
     input  logic signed [7:0] en,
     input  logic signed [7:0] rst,
-    output logic signed [7:0] out
+    output logic [7:0] out
 );
 
-    logic signed [7:0] c;
-    logic signed [7:0] c_next;
+    logic [7:0] c;
+    logic [7:0] c_next;
 
     always_comb begin
         c_next = c;

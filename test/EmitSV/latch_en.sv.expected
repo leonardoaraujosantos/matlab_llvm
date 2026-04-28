@@ -7,11 +7,11 @@ module latch_en (
     input  logic rst_n,
     input  logic signed [7:0] d,
     input  logic signed [7:0] en,
-    output logic signed [7:0] out
+    output logic [7:0] out
 );
 
-    logic signed [7:0] r;
-    logic signed [7:0] r_next;
+    logic [7:0] r;
+    logic [7:0] r_next;
 
     always_comb begin
         r_next = r;

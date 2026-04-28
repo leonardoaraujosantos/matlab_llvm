@@ -28,8 +28,8 @@ module fir_asic_pipelined (
     logic signed [31:0] buf1_2_next;
     logic signed [15:0] buf0_0;
     logic signed [15:0] buf0_0_next;
-    logic signed [63:0] reg_acc;
-    logic signed [63:0] reg_acc_next;
+    logic signed [35:0] reg_acc;
+    logic signed [35:0] reg_acc_next;
     logic signed [15:0] buf0_2;
     logic signed [15:0] buf0_2_next;
     logic signed [31:0] buf1_1;
@@ -98,7 +98,7 @@ module fir_asic_pipelined (
             buf1_1_next = 32'sd0;
             buf1_2_next = 32'sd0;
             buf1_3_next = 32'sd0;
-            reg_acc_next = 64'sd0;
+            reg_acc_next = 36'(64'sd0);
             reg_output_next = 16'sd0;
         end
         buf0_0_next = x;
@@ -122,7 +122,7 @@ module fir_asic_pipelined (
         v7_1 = acc_temp + 64'($signed(buf1_3));
         v8_1 = (v7_1 > 64'sd68719476735) ? 64'sd68719476735 : ((v7_1 < -64'sd68719476736) ? -64'sd68719476736 : v7_1);
         acc_temp = (v8_1 > 64'sd34359738367) ? 64'sd34359738367 : ((v8_1 < -64'sd34359738368) ? -64'sd34359738368 : v8_1);
-        reg_acc_next = acc_temp;
+        reg_acc_next = 36'(acc_temp);
         full_res = reg_acc * gain;
         v9_1 = full_res >>> 64'sd29;
         reg_output_next = 16'(((v9_1 > 64'sd32767) ? 64'sd32767 : ((v9_1 < -64'sd32768) ? -64'sd32768 : v9_1)));
@@ -133,7 +133,7 @@ module fir_asic_pipelined (
         if (!rst_n) begin
             buf1_2 <= 32'sd0;
             buf0_0 <= 16'sd0;
-            reg_acc <= 64'sd0;
+            reg_acc <= 36'(64'sd0);
             buf0_2 <= 16'sd0;
             buf1_1 <= 32'sd0;
             buf1_3 <= 32'sd0;
