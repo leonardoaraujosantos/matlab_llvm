@@ -466,11 +466,42 @@ std::string Emitter::exprFor(mlir::Value V) {
     }
     // Phase 3: a persistent-get call result reads as the register's
     // current-value signal, regardless of the get's declared f64 ABI
-    // type. The synth tool / SV semantics handle implicit
-    // sign-extension into wider expressions.
+    // type. When the IR-level type is wider than the register's
+    // storage width AND a consumer of the get's result actually
+    // uses the wider value (e.g. `addi(i64, get_i64)` from Stage
+    // F's array-persistent rewrite where the get returns i64 to
+    // match the runtime ABI but the underlying register is sized
+    // to `fi_wl`), wrap with an explicit `W'($signed(...))` so SV
+    // sees a properly sign-extended operand. Verilator otherwise
+    // flags WIDTHEXPAND and the SV semantics would zero-extend the
+    // raw bits, corrupting negative values. Skip the wrap when
+    // every consumer is an `arith.trunci` back down to the
+    // register width — the trunci already discards the wider bits.
     auto It = GetSiteToReg.find(Op);
-    if (It != GetSiteToReg.end())
-      return Persists[It->second].Name;
+    if (It != GetSiteToReg.end()) {
+      auto &P = Persists[It->second];
+      unsigned ResultW = widthOf(Op->getResult(0).getType());
+      bool NeedsExtend = false;
+      if (ResultW > P.Width && P.Width > 0) {
+        for (mlir::Operation *U : Op->getResult(0).getUsers()) {
+          // arith.trunci's SV rendering is `WT'(EXPR)` which is
+          // already an explicit width cast — no extra sign-extend
+          // wrapping needed regardless of the trunci's target
+          // width (the cast handles the conversion). Same goes
+          // for arith.extsi / arith.extui downstream.
+          if (mlir::isa<mlir::arith::TruncIOp, mlir::arith::ExtSIOp,
+                        mlir::arith::ExtUIOp>(U)) continue;
+          NeedsExtend = true;
+          break;
+        }
+      }
+      if (NeedsExtend) {
+        std::ostringstream S;
+        S << ResultW << "'($signed(" << P.Name << "))";
+        return S.str();
+      }
+      return P.Name;
+    }
     // Phase 5.6.3: pure single-use arith ops inline at use site.
     // Recursively builds a parenthesized expression so trees of
     // inlineable ops collapse into one readable line.

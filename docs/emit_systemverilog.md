@@ -696,7 +696,7 @@ piece the next stage builds on.
 | C | ✅ shipped | Static array literal init (`fi([0.1, 0.2, ...], ...)` → alloca + per-element stores) | ~2 days | coefficient-table half of fir / seq |
 | D | ✅ shipped | Loop-iv array indexing (`for i = 1:N; arr(i) ...; end`) | ~3 days | for-loop bodies in fir / seq |
 | E | ✅ shipped | Vector concat with static shapes (`[x, delay(1:end-1)]`) | ~3 days | shift-register pattern in fir / seq |
-| F | ✅ shipped (v2) | Persistent fi-arrays — N parallel scalar persistents. v2 adds: F.2 IR-level for-loop unroller (`HWUnrollFor`) so loop-iv subscripts on persistents become per-iteration constants; iv-spill-load fold so the cloned bodies have integer-constant GEP indices; multi-guard init handling (`if isempty(c) \|\| reset`); `matlab.short_or` / `matlab.short_and` SV op handlers for the canonical overflow-check idiom. Closes `sequential_processor.m` standalone. | ~6 days | shift-register + sequential_processor ✅; fir_asic_pipelined needs subscript_store-on-persistent (`reg_products(i) = ...`) which is one more sub-stage |
+| F | ✅ shipped (v3) | Persistent fi-arrays — N parallel scalar persistents. v3 adds: subscript-store on persistent get-ptr (`reg_products(i) = delay_line(i) * h(i)` from inside an unrolled for-loop body — Stage F's SubWrites path on the get's `__subscript_store` users); per-element idx encoding shifted to a `1000 + Idx*100 + k` base offset so synthetic per-element ids never collide with the user's original scalar persistents (the FIR-asic-pipelined idiom has 4 persistents at idx 0..3, where the old `Idx*100+k` scheme would have aliased delay_line[2]/[3] with reg_acc/reg_output); ElemW probe from the IR data shape (alloca elem type / `__subscript_store` val type) since the matlab.call_builtin → llvm.call lowering strips `fi_wl` before Stage F sees the zeros init; SV emitter sign-extends persistent gets when the IR-level result type is wider than the storage class AND a non-trunc/-ext consumer would otherwise see a width-mismatched signal (Verilator WIDTHEXPAND fix). Closes both `sequential_processor.m` and `fir_asic_pipelined.m` standalone. | ~6 days | shift-register + sequential_processor + fir_asic_pipelined ✅ |
 
 Total: ~4–5 weeks of focused work, **one stage per
 implementation session** (the existing Phase 5.6.x cadence). The
@@ -1469,11 +1469,13 @@ two i16 input arrays of length 3 and two i32 scalar outputs.
 - `sin` / `cos` / `sqrt` etc. (CORDIC lowering) — Phase 5.
 - Float fallbacks and policy flags — Phase 5.
 
-The three remaining `examples/hdl/` modules (`vector_processor`,
-`fir_asic_pipelined`, `sequential_processor`) all hit
-combinations of these. They're realistic FIR designs that
-exercise persistent fi-arrays + loop-iv array indexing + vector
-concat — the full set is a follow-up phase, not Phase 4.5.
+All three of those `examples/hdl/` modules
+(`vector_processor`, `fir_asic_pipelined`,
+`sequential_processor`) now compile end-to-end and lint clean
+under Verilator (Phase 5.6 Stage F v3 closure). They exercise
+the full vector-DSP path: vector function arguments, persistent
+fi-arrays + loop-iv array indexing + vector concat + per-element
+subscript-store on persistents.
 
 #### Driving the examples/hdl/ corpus
 
@@ -1502,11 +1504,11 @@ just emit-sv-multi examples/hdl/alu_16bit_synth.m \
 Today five examples ship with drivers — `alu_16bit`,
 `mux_4to_1_16bit`, `counter_0_to_10`, `mealy_fsm`, `moore_fsm`.
 The remaining three (`vector_processor`, `fir_asic_pipelined`,
-`sequential_processor`) need vector-port + persistent-fi-array
-shift register support that's a separate follow-up phase. A
-future `% hdl: port(...)` pragma (planned next phase) will let
-function-only files declare their port types inline, removing
-the need for a separate driver file.
+`sequential_processor`) use the `% hdl: port(...)` pragma
+(`port(name, fi, signed, W, F)` / `port(name, bool)`) to
+declare their port types inline, so they compile standalone
+without a typed driver. Each ships as both an `examples/hdl/`
+module and a `test/EmitSV/` golden fixture.
 
 #### Effort budget
 

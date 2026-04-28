@@ -22,7 +22,8 @@ The project is self-contained by design:
 The project also allows emission from the MLIR:
 - C/C++
 - Python
-- SystemVerilog (Future)
+- TypeScript
+- SystemVerilog (ASIC, synthesizable; vendor-neutral RTL — Verilator lint-clean)
 
 ## What It Covers
 

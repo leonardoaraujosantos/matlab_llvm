@@ -146,8 +146,28 @@ mlir::Value extractElement(mlir::OpBuilder &B, mlir::Location L,
   return Ld.getRes();
 }
 
+/// Per-element synthetic persistent ids carve out a private id
+/// range so they don't collide with the user's original scalar
+/// persistents. Original persistent indices start at 0 and grow
+/// densely (1, 2, 3, ...); without this offset, splitting an
+/// array at idx 0 with N=4 would emit synthetic ids 0..3 — which
+/// alias with the next three scalar persistents. Assumes the user
+/// won't have ≥ kSyntheticBase persistents in a single function
+/// (1000 is far more than any realistic source program declares).
+static constexpr int32_t kSyntheticBase = 1000;
+
 /// Rewrite one persistent fi-array bucket. Returns true on success
 /// (IR mutated); false leaves the IR untouched.
+///
+/// `IsEmpty` may be null when the bucket shares a guard with
+/// another bucket (the FIR-asic-pipelined idiom: one
+/// `if isempty(delay_line) || reset` block initializes both
+/// `delay_line` and `reg_products` — only the first has an
+/// isempty call, the rest are just init-sets inside the same
+/// scf.if). In that case the per-element guard chain is emitted
+/// fresh (each synthetic scalar persistent gets its own
+/// `_persistent_isempty(idx_k)` chain, identical reset to 0)
+/// and the original guard erase is left to the lead bucket.
 bool rewriteOne(mlir::func::FuncOp F, int32_t Idx,
                 llvm::StringRef Name,
                 llvm::StringRef PersistentFn,
@@ -155,7 +175,7 @@ bool rewriteOne(mlir::func::FuncOp F, int32_t Idx,
                 mlir::Operation *InitSet,
                 llvm::ArrayRef<mlir::Operation *> RegularSets,
                 llvm::ArrayRef<mlir::Operation *> Gets) {
-  if (!IsEmpty || !InitSet) return false;
+  if (!InitSet) return false;
 
   auto *Ctx = F.getContext();
   // Validate the init: zeros call with constant (1, N) shape.
@@ -190,6 +210,23 @@ bool rewriteOne(mlir::func::FuncOp F, int32_t Idx,
   // Capture into immortal NamedAttribute copies — the InitDef op
   // dies along with the guard's then-region when we erase the
   // guard below; reading attrs through it after that is UB.
+  // The fi_* attrs survive on the matlab.call_builtin form but get
+  // stripped during the conversion to llvm.call (which is where the
+  // pipeline shape lands by the time Stage F runs). Derive the
+  // storage class from the data shape instead:
+  //
+  //   1. RegularSet's `_persistent_set_ptr(idx, p)` where p is an
+  //      `llvm.alloca [N x iW]` (Stage E shift-register write) →
+  //      iW is the storage class. Most reliable for arrays with
+  //      shift-register writes (delay_line / reg_buf idiom).
+  //   2. A Get's `__subscript_store(get, k, val)` write-through
+  //      (FIR-asic-pipelined `reg_products(i) = ...` idiom) → val's
+  //      type is the storage class.
+  //   3. Fall back to `fi_wl` on InitDef if it's still around (it's
+  //      not on the post-pipeline llvm.call shape but the matcher
+  //      stays robust if the lowering shape shifts).
+  //   4. Otherwise default 16, matching the original Stage F v1
+  //      assumption.
   unsigned WL = 16;
   bool Signed = true;
   if (auto WLA = InitDef->getAttrOfType<mlir::IntegerAttr>("fi_wl"))
@@ -197,6 +234,34 @@ bool rewriteOne(mlir::func::FuncOp F, int32_t Idx,
   if (auto SA = InitDef->getAttrOfType<mlir::IntegerAttr>("fi_signed"))
     Signed = SA.getInt() != 0;
   unsigned ElemW = WL <= 8 ? 8 : (WL <= 16 ? 16 : (WL <= 32 ? 32 : 64));
+  // Probe RegularSets for an alloca-backed write.
+  for (mlir::Operation *Set : RegularSets) {
+    if (Set->getNumOperands() < 2) continue;
+    mlir::Value P = Set->getOperand(1);
+    auto Alloca = P.getDefiningOp<mlir::LLVM::AllocaOp>();
+    if (!Alloca) continue;
+    auto ArrT = mlir::dyn_cast<mlir::LLVM::LLVMArrayType>(
+        Alloca.getElemType());
+    if (!ArrT) continue;
+    if (auto IT =
+            mlir::dyn_cast<mlir::IntegerType>(ArrT.getElementType())) {
+      ElemW = IT.getWidth();
+      break;
+    }
+  }
+  // Probe Gets for a __subscript_store write-through.
+  for (mlir::Operation *G : Gets) {
+    if (G->getNumResults() != 1) continue;
+    for (mlir::Operation *U : G->getResult(0).getUsers()) {
+      if (!isCallTo(U, "__subscript_store")) continue;
+      if (U->getNumOperands() < 3) continue;
+      if (auto IT = mlir::dyn_cast<mlir::IntegerType>(
+              U->getOperand(2).getType())) {
+        ElemW = IT.getWidth();
+        break;
+      }
+    }
+  }
   auto ElemTy = mlir::IntegerType::get(Ctx, ElemW);
   auto F64 = mlir::Float64Type::get(Ctx);
   auto I32 = mlir::IntegerType::get(Ctx, 32);
@@ -222,40 +287,60 @@ bool rewriteOne(mlir::func::FuncOp F, int32_t Idx,
 
   // Locate the cmpf + scf.if structure consuming the isempty
   // result. Mirror HWStateInfer's matcher.
-  if (IsEmpty->getNumResults() != 1) {
-    return false;
-  }
-  if (!IsEmpty->getResult(0).hasOneUse()) {
-    return false;
-  }
-  mlir::Operation *Cmp = IsEmpty->getResult(0).use_begin()->getOwner();
-  auto CF = mlir::dyn_cast<mlir::arith::CmpFOp>(Cmp);
-  if (!CF || !CF.getResult().hasOneUse()) {
-    return false;
-  }
-  mlir::Operation *CmpUser = CF.getResult().use_begin()->getOwner();
-  auto Guard = mlir::dyn_cast<mlir::scf::IfOp>(CmpUser);
-  if (!Guard) {
-    return false;
+  //
+  // When the bucket has no IsEmpty (it shares a guard with another
+  // bucket), the per-element guard chain is emitted just before
+  // the InitSet's enclosing scf.if (we walk up to find it). The
+  // original cmpf/if/isempty erase is left to the lead bucket.
+  mlir::Operation *Cmp = nullptr;
+  mlir::arith::CmpFOp CF;
+  mlir::scf::IfOp Guard;
+  if (IsEmpty) {
+    if (IsEmpty->getNumResults() != 1) return false;
+    if (!IsEmpty->getResult(0).hasOneUse()) return false;
+    Cmp = IsEmpty->getResult(0).use_begin()->getOwner();
+    CF = mlir::dyn_cast<mlir::arith::CmpFOp>(Cmp);
+    if (!CF || !CF.getResult().hasOneUse()) return false;
+    mlir::Operation *CmpUser = CF.getResult().use_begin()->getOwner();
+    Guard = mlir::dyn_cast<mlir::scf::IfOp>(CmpUser);
+    if (!Guard) return false;
+  } else {
+    // Walk up from the InitSet to find the enclosing scf.if.
+    mlir::Operation *Cur = InitSet->getParentOp();
+    while (Cur) {
+      if (auto If = mlir::dyn_cast<mlir::scf::IfOp>(Cur)) {
+        Guard = If;
+        break;
+      }
+      Cur = Cur->getParentOp();
+    }
+    if (!Guard) return false;
   }
 
   // Synthesize per-element scalar persistents. For each k in
-  // [0..N-1]:
-  //   - Inject a fresh `_persistent_isempty(idx_k) → cmpf → if {
-  //     _global_set_f64(idx_k, 0) }` chain right before the
-  //     original guard.
-  //   - Replace the original guard's `_persistent_set_ptr(idx,
-  //     zeros)` with nothing (the per-k init guards above
-  //     handle it).
+  // [0..N-1], insert a `_global_set_f64(idx_k, 0)` call inside
+  // the existing guard's then-region (replacing the array's
+  // `_persistent_set_ptr(idx, zeros)`). Sibling scalar
+  // persistents that share the same `if isempty || reset` guard
+  // (the FIR-asic-pipelined idiom) keep working through their
+  // existing `_global_set_f64(idx, 0)` inits — HWStateInfer
+  // sees a uniform set of scalar inits inside one guard and
+  // handles all of them with the standard scalar path.
   mlir::OpBuilder B(Guard);
   mlir::Location L = Guard.getLoc();
   auto stringAttr = [&](llvm::StringRef S) {
     return mlir::StringAttr::get(Ctx, S);
   };
+  // For each k, emit a fresh `_persistent_isempty(idx_k) → cmpf
+  // → scf.if { _global_set_f64(idx_k, 0) }` chain right before
+  // the original guard. Each synthetic per-element scalar
+  // persistent gets its own canonical init-guard shape, which
+  // HWStateInfer recognizes uniformly. Sibling scalar persistents
+  // (reg_acc, reg_output) keep their existing inits inside the
+  // original guard untouched.
   auto buildIsEmptyChain = [&](int32_t IdxK,
                                std::function<void(mlir::OpBuilder &,
                                                   mlir::Location)> InitBody) {
-    // _persistent_isempty(idx_k)
     mlir::Value KConst = mlir::arith::ConstantOp::create(B, L, I32,
         mlir::IntegerAttr::get(I32, IdxK));
     mlir::OperationState IES(L, "matlab.call_builtin");
@@ -263,16 +348,11 @@ bool rewriteOne(mlir::func::FuncOp F, int32_t Idx,
     IES.addTypes({F64});
     IES.addAttribute("callee", stringAttr("matlab_persistent_isempty"));
     auto *IECall = B.create(IES);
-    // cmpf one, ie, 0.0
     mlir::Value Zero = mlir::arith::ConstantOp::create(B, L, F64,
         mlir::FloatAttr::get(F64, 0.0));
     auto Cmp = mlir::arith::CmpFOp::create(B, L,
         mlir::arith::CmpFPredicate::ONE,
         IECall->getResult(0), Zero);
-    // scf.if with then-region only. The IfOp builder auto-
-    // inserts a terminating `scf.yield` in the then-block; we
-    // insert our InitBody BEFORE that terminator so the block
-    // ends correctly with a single yield.
     auto NewGuard = mlir::scf::IfOp::create(B, L, Cmp.getResult(),
         /*withElseRegion=*/false);
     mlir::Block *Then = NewGuard.thenBlock();
@@ -280,13 +360,12 @@ bool rewriteOne(mlir::func::FuncOp F, int32_t Idx,
     InitBody(TB, L);
   };
   for (int64_t k = 0; k < N; ++k) {
-    int32_t IdxK = Idx * 100 + (int32_t)k;
+    int32_t IdxK = kSyntheticBase + Idx * 100 + (int32_t)k;
     buildIsEmptyChain(IdxK, [&](mlir::OpBuilder &TB, mlir::Location IL) {
-      // _global_set_f64(idx_k, init_k_typed) with init = 0.
       mlir::Value KConst = mlir::arith::ConstantOp::create(TB, IL, I32,
           mlir::IntegerAttr::get(I32, IdxK));
-      mlir::Value InitVal = mlir::arith::ConstantOp::create(TB, IL, ElemTy,
-          mlir::IntegerAttr::get(ElemTy, 0));
+      mlir::Value InitVal = mlir::arith::ConstantOp::create(TB, IL,
+          ElemTy, mlir::IntegerAttr::get(ElemTy, 0));
       mlir::OperationState SS(IL, "matlab.call_builtin");
       SS.addOperands({KConst, InitVal});
       SS.addTypes({mlir::NoneType::get(Ctx)});
@@ -298,14 +377,19 @@ bool rewriteOne(mlir::func::FuncOp F, int32_t Idx,
       (void)TB.create(SS);
     });
   }
-  // Erase the original isempty guard chain entirely. Its uses
-  // were the original isempty result → cmpf → if; we just emitted
-  // N replacement chains above. The guard's then-region holds the
-  // original `_persistent_set_ptr(idx, zeros_call)` and the
-  // zeros_call itself; both die with the guard.
-  Guard.erase();
-  CF.erase();
-  IsEmpty->erase();
+  // Erase this bucket's `_persistent_set_ptr(idx, zeros_call)`
+  // and the upstream `zeros_call`/`__subscript_store` chain.
+  // The Guard scf.if itself stays for now — sibling buckets that
+  // share the same guard (FIR-asic-pipelined idiom: one
+  // `if isempty(delay_line) || reset` block initializes both
+  // `delay_line` AND `reg_products`) need it intact. A final
+  // cleanup pass in `runLowerPersistentFiArrays` erases the
+  // (now empty) guard + its cmpf/isempty chain after every
+  // bucket has been processed.
+  if (auto *ZerosCall = InitDef) {
+    InitSet->erase();
+    if (ZerosCall->getResult(0).use_empty()) ZerosCall->erase();
+  }
 
   // For each get site (`_persistent_get_ptr(idx) →
   // subscript1_s(_, k_const)`), replace with `_global_get_f64(
@@ -314,13 +398,30 @@ bool rewriteOne(mlir::func::FuncOp F, int32_t Idx,
   // recognized constant subscript read.
   for (mlir::Operation *Get : Gets) {
     if (Get->getNumResults() != 1) return false;
+    // Two consumer shapes are accepted on a `_persistent_get_ptr`
+    // result:
+    //
+    //   (a) `matlab_mat_i64_subscript1_s(get, k)` — element READ.
+    //       Replaced with `_global_get_f64(idx*100 + k-1)`.
+    //   (b) `__subscript_store(get, k, val)` — element WRITE
+    //       (Phase 5.6 closure: the FIR-asic-pipelined idiom
+    //       `reg_products(i) = ...` writes back THROUGH the
+    //       persistent ptr without a `_persistent_set_ptr`
+    //       follow-up). Replaced with `_global_set_f64(idx*100
+    //       + k-1, val)`.
     llvm::SmallVector<mlir::Operation *, 4> SubReads;
+    llvm::SmallVector<mlir::Operation *, 4> SubWrites;
     for (mlir::Operation *U : Get->getResult(0).getUsers()) {
-      if (!isMatlabCallBuiltin(U, "matlab_mat_i64_subscript1_s") &&
-          !isMatlabCallBuiltin(U, "matlab_mat_u64_subscript1_s")) {
-        return false;
+      if (isCallTo(U, "matlab_mat_i64_subscript1_s") ||
+          isCallTo(U, "matlab_mat_u64_subscript1_s")) {
+        SubReads.push_back(U);
+        continue;
       }
-      SubReads.push_back(U);
+      if (isCallTo(U, "__subscript_store")) {
+        SubWrites.push_back(U);
+        continue;
+      }
+      return false;
     }
     for (mlir::Operation *Sub : SubReads) {
       if (Sub->getNumOperands() != 2 || Sub->getNumResults() != 1) {
@@ -334,7 +435,7 @@ bool rewriteOne(mlir::func::FuncOp F, int32_t Idx,
       if (K < 1 || K > N) {
         return false;
       }
-      int32_t IdxK = Idx * 100 + (int32_t)(K - 1);
+      int32_t IdxK = kSyntheticBase + Idx * 100 + (int32_t)(K - 1);
       mlir::OpBuilder SB(Sub);
       mlir::Value KConst = mlir::arith::ConstantOp::create(SB,
           Sub->getLoc(), I32, mlir::IntegerAttr::get(I32, IdxK));
@@ -357,6 +458,44 @@ bool rewriteOne(mlir::func::FuncOp F, int32_t Idx,
       Sub->getResult(0).replaceAllUsesWith(NewGet->getResult(0));
       Sub->erase();
       (void)F64;
+    }
+    // Phase 5.6 closure: per-element WRITES on the get-ptr
+    // (`reg_products(i) = ...`). Each becomes a fresh
+    // `_global_set_f64(idx_k, val)`.
+    for (mlir::Operation *Sub : SubWrites) {
+      if (Sub->getNumOperands() != 3) return false;
+      double KD;
+      if (!readF64Const(Sub->getOperand(1), KD)) return false;
+      int64_t K = (int64_t)KD;
+      if (K < 1 || K > N) return false;
+      int32_t IdxK = kSyntheticBase + Idx * 100 + (int32_t)(K - 1);
+      mlir::OpBuilder SB(Sub);
+      mlir::Value Val = Sub->getOperand(2);
+      // Trunc / extend the value to match the register's storage
+      // class — same rule as the regular-set path above.
+      if (Val.getType() != ElemTy) {
+        if (auto VIT =
+                mlir::dyn_cast<mlir::IntegerType>(Val.getType())) {
+          if (VIT.getWidth() > ElemW)
+            Val = mlir::arith::TruncIOp::create(SB, Sub->getLoc(),
+                ElemTy, Val);
+          else if (VIT.getWidth() < ElemW)
+            Val = mlir::arith::ExtSIOp::create(SB, Sub->getLoc(),
+                ElemTy, Val);
+        } else return false;
+      }
+      mlir::Value KConst = mlir::arith::ConstantOp::create(SB,
+          Sub->getLoc(), I32, mlir::IntegerAttr::get(I32, IdxK));
+      mlir::OperationState SS(Sub->getLoc(), "matlab.call_builtin");
+      SS.addOperands({KConst, Val});
+      SS.addTypes({mlir::NoneType::get(Ctx)});
+      SS.addAttribute("callee", stringAttr("matlab_global_set_f64"));
+      SS.addAttribute("persistent_fn", stringAttr(PersistentFn));
+      SS.addAttribute("persistent_name",
+          stringAttr((Name.str() + "_" + std::to_string(K - 1)).c_str()));
+      attachFiAttrs(SS);
+      (void)SB.create(SS);
+      Sub->erase();
     }
     Get->erase();
   }
@@ -399,7 +538,7 @@ bool rewriteOne(mlir::func::FuncOp F, int32_t Idx,
       }
       for (int64_t k = 0; k < N; ++k) {
         mlir::Value Val = extractElement(SB, Set->getLoc(), P, k, N, ElemW);
-        int32_t IdxK = Idx * 100 + (int32_t)k;
+        int32_t IdxK = kSyntheticBase + Idx * 100 + (int32_t)k;
         mlir::Value KConst = mlir::arith::ConstantOp::create(SB,
             Set->getLoc(), I32, mlir::IntegerAttr::get(I32, IdxK));
         mlir::OperationState SS(Set->getLoc(), "matlab.call_builtin");
@@ -468,7 +607,7 @@ bool rewriteOne(mlir::func::FuncOp F, int32_t Idx,
         Val = mlir::arith::ConstantOp::create(SB, Set->getLoc(), ElemTy,
             mlir::IntegerAttr::get(ElemTy, 0));
       }
-      int32_t IdxK = Idx * 100 + (int32_t)k;
+      int32_t IdxK = kSyntheticBase + Idx * 100 + (int32_t)k;
       mlir::Value KConst = mlir::arith::ConstantOp::create(SB,
           Set->getLoc(), I32, mlir::IntegerAttr::get(I32, IdxK));
       mlir::OperationState SS(Set->getLoc(), "matlab.call_builtin");
@@ -554,6 +693,12 @@ bool runLowerPersistentFiArrays(mlir::ModuleOp M) {
 
     for (auto &Pair : Buckets) {
       Bucket &Bk = Pair.second;
+      if (getenv("DEBUG_F"))
+        llvm::errs() << "[F] idx=" << Pair.first
+                     << " hasIsEmpty=" << !!Bk.IsEmpty
+                     << " hasInit=" << !!Bk.InitSet
+                     << " gets=" << Bk.Gets.size()
+                     << " regSets=" << Bk.RegularSets.size() << "\n";
       // Fall back to a synthesized name when LowerTensorOps's
       // matlab.call_builtin → llvm.call conversion drops the
       // persistent_name attr (it's preserved on _global_set_f64
@@ -563,12 +708,258 @@ bool runLowerPersistentFiArrays(mlir::ModuleOp M) {
         Bk.Name = "buf" + std::to_string(Pair.first);
       if (Bk.PersistentFn.empty())
         Bk.PersistentFn = F.getSymName().str();
-      if (!Bk.IsEmpty || !Bk.InitSet) continue;
+      if (!Bk.InitSet) continue;
       bool Ok = rewriteOne(F, Pair.first, Bk.Name, Bk.PersistentFn,
                            Bk.IsEmpty, Bk.InitSet, Bk.RegularSets,
                            Bk.Gets);
+      if (getenv("DEBUG_F"))
+        llvm::errs() << "[F]   rewriteOne idx=" << Pair.first
+                     << " ok=" << Ok << "\n";
       (void)Ok;
     }
+
+    // Original-guard cleanup: the `if isempty(delay_line) || reset`
+    // guard now contains scalar-persistent inits (reg_acc=0,
+    // reg_output=0) plus dead leftover ops. Pull each scalar
+    // `_global_set_f64(idx, val)` out and wrap it in its OWN
+    // `_persistent_isempty(idx) → cmpf → scf.if` chain so
+    // HWStateInfer's per-persistent matcher accepts each of them.
+    // Then erase the original guard (now structurally empty).
+    F.walk([&](mlir::scf::IfOp Guard) {
+      // Identify guards whose then-region only contains a chain
+      // of `_global_set_f64` calls + the implicit yield. Walk the
+      // condition to confirm it consumes a `_persistent_isempty`
+      // somewhere — direct cmpf or via a `matlab.short_or` /
+      // similar logical chain.
+      if (!Guard.getThenRegion().hasOneBlock()) return;
+      mlir::Block &TB = Guard.getThenRegion().front();
+      llvm::SmallVector<mlir::Operation *, 4> ScalarSets;
+      bool OnlyScalarSets = true;
+      for (mlir::Operation &TOp : TB) {
+        if (mlir::isa<mlir::scf::YieldOp>(TOp)) continue;
+        if (isCallTo(&TOp, "matlab_global_set_f64")) {
+          ScalarSets.push_back(&TOp);
+          continue;
+        }
+        OnlyScalarSets = false;
+        break;
+      }
+      if (!OnlyScalarSets) return;
+      // Skip guards that already have the canonical one-set shape —
+      // those are either the original simple `if isempty(c)` guard
+      // (which HWStateInfer accepts as-is) or a fresh per-element
+      // guard we built earlier in `rewriteOne`. Re-processing them
+      // here would extract & re-clone the single set into a new
+      // guard, leaving orphaned cmpf chains that fail
+      // HWStateInfer's `isempty result must feed an arith.cmpf
+      // with one use` matcher. Only multi-set guards (the FIR-
+      // asic-pipelined `if isempty(c) || reset` idiom that
+      // initializes 2+ sibling persistents in one block) need the
+      // per-set extraction.
+      if (ScalarSets.size() < 2) return;
+      // Confirm the condition involves an isempty call —
+      // otherwise leave the guard alone (it's a regular user
+      // `if`).
+      bool CondHasIsEmpty = false;
+      llvm::SmallVector<mlir::Operation *, 4> CondWork;
+      if (auto *Def = Guard.getCondition().getDefiningOp())
+        CondWork.push_back(Def);
+      while (!CondWork.empty()) {
+        mlir::Operation *Op = CondWork.pop_back_val();
+        if (isCallTo(Op, "matlab_persistent_isempty")) {
+          CondHasIsEmpty = true;
+          break;
+        }
+        for (mlir::Value V : Op->getOperands())
+          if (auto *D = V.getDefiningOp()) CondWork.push_back(D);
+      }
+      if (!CondHasIsEmpty) return;
+      // For each scalar set, build a fresh isempty/cmpf/scf.if
+      // chain right before the original guard.
+      mlir::OpBuilder OB(Guard);
+      mlir::Location GL = Guard.getLoc();
+      auto F64 = mlir::Float64Type::get(Guard.getContext());
+      auto I32 = mlir::IntegerType::get(Guard.getContext(), 32);
+      for (mlir::Operation *Set : ScalarSets) {
+        if (Set->getNumOperands() != 2) continue;
+        int32_t SetIdx;
+        if (!readI32Const(Set->getOperand(0), SetIdx)) continue;
+        // Read the init value's stored integer type and value
+        // (the scalar persistent's reset constant). Has to be
+        // fetched up front because the operand's defining op
+        // lives inside the original guard's then-region and
+        // dies when we erase Guard below.
+        mlir::Value OrigVal = Set->getOperand(1);
+        auto OrigValIT =
+            mlir::dyn_cast<mlir::IntegerType>(OrigVal.getType());
+        if (!OrigValIT) continue;
+        int64_t InitInt = 0;
+        if (auto C = OrigVal.getDefiningOp<mlir::arith::ConstantOp>()) {
+          if (auto IA =
+                  mlir::dyn_cast<mlir::IntegerAttr>(C.getValue()))
+            InitInt = IA.getInt();
+        }
+        // Capture the persistent_name / fi_* attrs so the cloned
+        // call carries the same metadata.
+        llvm::SmallVector<mlir::NamedAttribute, 8> SetAttrs;
+        for (auto &A : Set->getAttrs()) SetAttrs.push_back(A);
+
+        mlir::Value KConst = mlir::arith::ConstantOp::create(OB, GL, I32,
+            mlir::IntegerAttr::get(I32, SetIdx));
+        mlir::OperationState IES(GL, "matlab.call_builtin");
+        IES.addOperands({KConst});
+        IES.addTypes({F64});
+        IES.addAttribute("callee",
+            mlir::StringAttr::get(Guard.getContext(),
+                                   "matlab_persistent_isempty"));
+        auto *IECall = OB.create(IES);
+        mlir::Value FZero = mlir::arith::ConstantOp::create(OB, GL, F64,
+            mlir::FloatAttr::get(F64, 0.0));
+        auto Cmp = mlir::arith::CmpFOp::create(OB, GL,
+            mlir::arith::CmpFPredicate::ONE,
+            IECall->getResult(0), FZero);
+        auto NewGuard = mlir::scf::IfOp::create(OB, GL, Cmp.getResult(),
+            /*withElseRegion=*/false);
+        mlir::Block *Then = NewGuard.thenBlock();
+        // Build a fresh `_global_set_f64(idx_const, init_const)`
+        // inside the new guard's then-region. We can't move the
+        // original op because its operand const is defined
+        // inside the about-to-be-erased original guard.
+        mlir::OpBuilder TB(Then->getTerminator());
+        mlir::Value KVNew = mlir::arith::ConstantOp::create(TB, GL, I32,
+            mlir::IntegerAttr::get(I32, SetIdx));
+        mlir::Value VNew = mlir::arith::ConstantOp::create(TB, GL,
+            OrigValIT, mlir::IntegerAttr::get(OrigValIT, InitInt));
+        mlir::OperationState SS(GL, "matlab.call_builtin");
+        SS.addOperands({KVNew, VNew});
+        SS.addTypes({mlir::NoneType::get(Guard.getContext())});
+        for (auto &A : SetAttrs) SS.addAttribute(A.getName(), A.getValue());
+        (void)TB.create(SS);
+      }
+      Guard.erase();
+    });
+
+    // DCE + empty-guard cleanup, alternated to fixpoint. The two
+    // feed each other: erasing an empty `if (cmpf)` orphan-erases
+    // its cmpf + isempty, which then unblocks any other ops that
+    // still reference them. Without alternation, the original
+    // `if isempty(c)` guard (now empty after Stage F erased its
+    // body) stays alive on the first DCE pass — its cmpf has one
+    // use (the guard) so DCE skips it — and HWStateInfer later
+    // rejects the dangling cmpf with "isempty result must feed an
+    // arith.cmpf with one use" because by then the empty guard
+    // got erased without re-DCE'ing the cmpf.
+    bool Changed = true;
+    while (Changed) {
+      Changed = false;
+      // Empty-guard sweep first — frees up cmpf uses that the DCE
+      // walker can then reap.
+      llvm::SmallVector<mlir::scf::IfOp, 4> Empty;
+      F.walk([&](mlir::scf::IfOp If) {
+        if (!If.getThenRegion().hasOneBlock()) return;
+        mlir::Block &TB = If.getThenRegion().front();
+        for (mlir::Operation &TOp : TB) {
+          if (!mlir::isa<mlir::scf::YieldOp>(TOp)) return;
+        }
+        if (!If.getElseRegion().empty()) {
+          mlir::Block &EB = If.getElseRegion().front();
+          for (mlir::Operation &EOp : EB) {
+            if (!mlir::isa<mlir::scf::YieldOp>(EOp)) return;
+          }
+        }
+        if (If.getNumResults() != 0) return;
+        Empty.push_back(If);
+      });
+      for (auto If : Empty) {
+        If.erase();
+        Changed = true;
+      }
+      // DCE leftover orphan ops (cmpf / isempty / short_or chains
+      // whose only user was the just-erased guard).
+      llvm::SmallVector<mlir::Operation *, 8> Dead;
+      F.walk([&](mlir::Operation *Op) {
+        if (Op->getNumResults() != 1) return;
+        if (!Op->getResult(0).use_empty()) return;
+        if (mlir::isa<mlir::arith::CmpFOp, mlir::arith::CmpIOp,
+                      mlir::arith::ConstantOp>(Op)) {
+          Dead.push_back(Op);
+          return;
+        }
+        if (isCallTo(Op, "matlab_persistent_isempty")) {
+          Dead.push_back(Op);
+          return;
+        }
+        if (Op->getName().getStringRef() == "matlab.short_or" ||
+            Op->getName().getStringRef() == "matlab.short_and") {
+          Dead.push_back(Op);
+          return;
+        }
+      });
+      for (mlir::Operation *Op : Dead) {
+        Op->erase();
+        Changed = true;
+      }
+    }
+
+    // Final fixup: when a `_global_get_f64(idx)` result flows
+    // into a `matlab.store(f64, iN_slot)`, fold the slot away —
+    // the slot's loads are routed to the register signal name
+    // by the SV emitter through `exprFor`'s persistent-get
+    // recognition. Without this fixup the type mismatch on the
+    // store breaks SlotPromotion and the bare `matlab.alloc`
+    // survives to SV emit (unsupported op).
+    //
+    // Pattern (after Stage F's array→scalar rewrite):
+    //   %v = llvm.call @matlab_global_get_f64(%idx) : f64
+    //   matlab.store(%v, %slot : iN)
+    //   ... %ld = matlab.load(%slot) : iN ...
+    //
+    // Rewrite: forward each `matlab.load(%slot)` to the
+    // corresponding `_global_get_f64` result (matches what the
+    // SV emitter does for direct persistent-get reads). Erase
+    // the store + alloc.
+    llvm::SmallVector<mlir::Operation *, 4> DeadStores;
+    llvm::SmallVector<mlir::Operation *, 4> DeadAllocs;
+    F.walk([&](mlir::Operation *St) {
+      if (St->getName().getStringRef() != "matlab.store") return;
+      if (St->getNumOperands() != 2) return;
+      mlir::Value V = St->getOperand(0);
+      mlir::Value Slot = St->getOperand(1);
+      if (!mlir::isa<mlir::Float64Type>(V.getType())) return;
+      if (!mlir::isa<mlir::IntegerType>(Slot.getType())) return;
+      auto *Def = V.getDefiningOp();
+      if (!Def) return;
+      if (!isCallTo(Def, "matlab_global_get_f64")) return;
+      auto *SlotDef = Slot.getDefiningOp();
+      if (!SlotDef ||
+          SlotDef->getName().getStringRef() != "matlab.alloc")
+        return;
+      // Validate every other user of the slot is a matlab.load
+      // — anything else means the slot has multiple writers
+      // and the rewrite isn't safe.
+      bool Ok = true;
+      llvm::SmallVector<mlir::Operation *, 4> Loads;
+      for (mlir::Operation *U : SlotDef->getResult(0).getUsers()) {
+        if (U == St) continue;
+        if (U->getName().getStringRef() == "matlab.load" &&
+            U->getNumResults() == 1) {
+          Loads.push_back(U);
+          continue;
+        }
+        Ok = false;
+        break;
+      }
+      if (!Ok) return;
+      // Forward every load to the get's result.
+      for (mlir::Operation *L : Loads) {
+        L->getResult(0).replaceAllUsesWith(V);
+        L->erase();
+      }
+      DeadStores.push_back(St);
+      DeadAllocs.push_back(SlotDef);
+    });
+    for (mlir::Operation *Op : DeadStores) Op->erase();
+    for (mlir::Operation *Op : DeadAllocs) Op->erase();
   });
   return true;
 }

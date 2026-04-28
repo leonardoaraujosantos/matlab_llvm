@@ -265,7 +265,7 @@ Out of scope:
 | JIT / REPL | 🟡 | `matlabc -repl` with MLIR ExecutionEngine; state persists via a runtime workspace. No line editing / JIT cache / live user-function definitions yet. See `docs/repl.md`. |
 | Python emission | ✅ | `-emit-python`. NumPy-backed runtime in `runtime/matlab_runtime.py`; see `docs/emit_python.md`. Matrix display uses numpy's bracket repr (`.stdout-python` per-test goldens for the test lane). |
 | SystemC (synthesizable) emission | ❌ | See `docs/emit_systemc.md` |
-| SystemVerilog (ASIC, synthesizable) emission | ❌ | See `docs/emit_systemverilog.md` |
+| SystemVerilog (ASIC, synthesizable) emission | 🟡 | `-emit-systemverilog`. Vendor-neutral, synthesizable RTL targeting ASIC flows. Phases 1–5.6 shipped (scalar combinational + FSMs + fixed-point pipeline + persistent fi-arrays). 36 fixtures lint clean under Verilator (incl. `fir_asic_pipelined`, `sequential_processor`, `vector_processor`). Open: 2-D fi matrices, RAM inference, CORDIC for transcendentals. See `docs/emit_systemverilog.md` |
 
 ### MLIR passes (`lib/MLIR/Passes/`)
 
