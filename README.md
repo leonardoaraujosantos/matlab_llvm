@@ -329,6 +329,7 @@ Start here for the high-level index:
 
 Core docs:
 
+- [`docs/roadmap.md`](docs/roadmap.md): forward-looking work — block language, CocoTB verification, SV→MATLAB, runtime/REPL/HDL improvements
 - [`docs/feature_status.md`](docs/feature_status.md): feature inventory and known gaps
 - [`docs/repl.md`](docs/repl.md): REPL behavior and limits
 - [`docs/lsp.md`](docs/lsp.md): editor integration and LSP surface

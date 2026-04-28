@@ -6,6 +6,7 @@ Use this page as the entry point to the repo docs.
 
 - [`../README.md`](../README.md): project overview, build, CLI, and main features
 - [`feature_status.md`](feature_status.md): authoritative compatibility matrix
+- [`roadmap.md`](roadmap.md): forward-looking work tracker (block language, CocoTB verification, SV→MATLAB lift, runtime / REPL / HDL improvements)
 - [`../examples/README.md`](../examples/README.md): runnable sample programs
 
 ## Frontend And Sema
