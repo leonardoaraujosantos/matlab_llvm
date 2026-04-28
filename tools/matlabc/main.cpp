@@ -5483,6 +5483,7 @@ int main(int Argc, char **Argv) {
           // refinement (step 0) catches the leftover none → typed
           // gap so the verifier doesn't reject a stale func.call.
           mlirgen::runRefineFuncSigs(M);
+          if (getenv("DUMP_BEFORE_C")) mlirgen::printModule(std::cerr, M);
           // Verify the module right before emission so a malformed IR
           // state is surfaced with a clear error rather than as a cryptic
           // cc/c++ compile failure on the emitted source.

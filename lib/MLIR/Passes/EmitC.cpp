@@ -3040,18 +3040,96 @@ void Emitter::emitPersistentStaticsFor(mlir::Region &Body, int Indent) {
   });
   if (Names.empty()) return;
 
-  /* Emit the static decls. C and C++ share the same syntax. Initialise
-   * to 0.0 — that matches the runtime's matlab_global_get_f64 default
-   * (returns 0 for a never-stored slot), so the AOT-compiled binary
-   * has the same first-call semantics as the JIT. MATLAB's true
-   * semantic is `[]` (empty matrix), but our scalar-only persistent
-   * support already starts at 0.0 in the JIT path; this commit is
-   * about codegen quality, not changing that semantic. */
+  /* Tier 1: detect the canonical `if isempty(p); p = init; end` first-
+   * call init pattern. When found, use `init` as the static-decl's
+   * initializer (instead of the default 0.0) and suppress the entire
+   * isempty/cmpf/scf.if/set-call chain so it doesn't render at all.
+   * This is the standard MATLAB persistent-init idiom — the SV pipeline
+   * already lowers it to register reset values; doing the equivalent
+   * here makes scalar persistents work in software AOT for the same
+   * source code. */
+  llvm::DenseMap<llvm::StringRef, std::string> InitExprByName;
+  llvm::DenseSet<mlir::Operation *> InitChain;
+  Body.walk([&](mlir::LLVM::CallOp IECall) {
+    auto Callee = IECall.getCallee();
+    if (!Callee || *Callee != "matlab_persistent_isempty") return;
+    if (IECall.getNumResults() != 1) return;
+    if (!IECall.getResult().hasOneUse()) return;
+    // Expected user: `arith.cmpf one, <isempty>, 0.0`.
+    auto *CmpUser = IECall.getResult().use_begin()->getOwner();
+    auto Cmp = mlir::dyn_cast<mlir::arith::CmpFOp>(CmpUser);
+    if (!Cmp || !Cmp.getResult().hasOneUse()) return;
+    auto *IfUser = Cmp.getResult().use_begin()->getOwner();
+    auto Guard = mlir::dyn_cast<mlir::scf::IfOp>(IfUser);
+    if (!Guard) return;
+    if (!Guard.getThenRegion().hasOneBlock()) return;
+    // Find the init set call inside the then-region. It should carry
+    // the matching persistent_name on a `_global_set_f64` call.
+    // Accept both the LLVM::CallOp shape (post-LowerFixedPoint, on
+    // the SV path) and the matlab.call_builtin shape (the C/C++
+    // pipeline, where set calls aren't converted to llvm.call).
+    mlir::Operation *InitSet = nullptr;
+    llvm::StringRef PNStr;
+    auto matchSet = [](mlir::Operation &Op,
+                        llvm::StringRef &PnOut) -> bool {
+      llvm::StringRef Callee;
+      if (auto LC = mlir::dyn_cast<mlir::LLVM::CallOp>(&Op)) {
+        if (auto C = LC.getCallee()) Callee = *C;
+      } else if (Op.getName().getStringRef() == "matlab.call_builtin") {
+        if (auto CA = Op.getAttrOfType<mlir::StringAttr>("callee"))
+          Callee = CA.getValue();
+      } else {
+        return false;
+      }
+      if (Callee != "matlab_global_set_f64") return false;
+      auto PN = Op.getAttrOfType<mlir::StringAttr>("persistent_name");
+      if (!PN) return false;
+      PnOut = PN.getValue();
+      return true;
+    };
+    for (mlir::Operation &Op : Guard.getThenRegion().front()) {
+      llvm::StringRef PN;
+      if (matchSet(Op, PN)) { InitSet = &Op; PNStr = PN; break; }
+    }
+    if (!InitSet) return;
+    if (InitSet->getNumOperands() < 2) return;
+    // Render the init value's expression and stash it. exprFor handles
+    // the typical const-fold + cast chain (matlab.fi.const → arith.
+    // constant → sitofp / extsi-to-f64 etc.). Stripping outer parens
+    // keeps the static-decl readable.
+    std::string Init =
+        dropOuterParens(this->exprFor(InitSet->getOperand(1)));
+    InitExprByName[PNStr] = Init;
+    // Suppress the entire chain. Marking the scf.if suppresses its
+    // body via emitRegion's filter; we still mark the inner set call
+    // for completeness in case some callers walk past Suppress.
+    SuppressedOps.insert(IECall.getOperation());
+    SuppressedOps.insert(Cmp.getOperation());
+    SuppressedOps.insert(Guard.getOperation());
+    SuppressedOps.insert(InitSet);
+    InitChain.insert(IECall.getOperation());
+    InitChain.insert(Cmp.getOperation());
+    InitChain.insert(Guard.getOperation());
+    InitChain.insert(InitSet);
+  });
+
+  /* Emit the static decls. C and C++ share the same syntax. Use the
+   * Tier-1-detected init expression when available; fall back to 0.0
+   * for persistents that only have datapath updates (no isempty
+   * init). MATLAB's true semantic is `[]` (empty matrix), but our
+   * scalar-only persistent support already starts at 0 in the JIT
+   * path; this matches that. */
   llvm::SmallVector<llvm::StringRef, 4> Sorted(Names.begin(), Names.end());
   std::sort(Sorted.begin(), Sorted.end());
   for (llvm::StringRef N : Sorted) {
     indent(Indent);
-    OS << "static double " << N.str() << " = 0.0;\n";
+    auto It = InitExprByName.find(N);
+    if (It != InitExprByName.end() && !It->second.empty()) {
+      OS << "static double " << N.str() << " = "
+         << It->second << ";\n";
+    } else {
+      OS << "static double " << N.str() << " = 0.0;\n";
+    }
   }
 
   /* Second pass: re-bind every get-call's result to the bare name and
@@ -5181,6 +5259,27 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
     }
     emitBinF("^");
     return;
+  }
+
+  // --- Unregistered matlab.call_builtin sites that survive to emit
+  // time. The C/C++ pipeline doesn't run the LowerFixedPoint sweep
+  // that converts these to llvm.call (only the SV path does), so a
+  // few specific shapes need to be recognized here. The set on a
+  // persistent variable is the most common — `persistent x; x = v;`
+  // lowers to `matlab.call_builtin @matlab_global_set_f64` with the
+  // `persistent_name` attr, and we render it as `<name> = <v>;` to
+  // match the static-decl emitted by emitPersistentStaticsFor.
+  if (Name == "matlab.call_builtin") {
+    auto CA = Op.getAttrOfType<mlir::StringAttr>("callee");
+    if (CA && CA.getValue() == "matlab_global_set_f64" &&
+        Op.getNumOperands() == 2 && Op.getNumResults() <= 1) {
+      if (auto PN = Op.getAttrOfType<mlir::StringAttr>("persistent_name")) {
+        indent(Indent);
+        OS << PN.getValue().str() << " = "
+           << stmtExpr(Op.getOperand(1)) << ";\n";
+        return;
+      }
+    }
   }
 
   // --- Fallback: unknown op — refuse to emit rather than silently drop it.

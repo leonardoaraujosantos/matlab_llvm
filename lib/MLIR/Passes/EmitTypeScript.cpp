@@ -1747,24 +1747,77 @@ void Emitter::emitFuncFunc(mlir::func::FuncOp F) {
    * are rewritten to the mangled name; the verbatim runtime call is
    * suppressed. */
   llvm::SetVector<llvm::StringRef> PersistentNames;
+  llvm::DenseMap<llvm::StringRef, std::string> InitExprByName;
   std::string FnSym = F.getSymName().str();
-  F.getBody().walk([&](mlir::LLVM::CallOp C) {
-    auto PN = C->getAttrOfType<mlir::StringAttr>("persistent_name");
+  // Walk both LLVM::CallOp and matlab.call_builtin shapes — TS path
+  // doesn't run LowerFixedPoint's matlab_persistent_* → llvm.call
+  // sweep, so set calls survive as matlab.call_builtin.
+  F.getBody().walk([&](mlir::Operation *Op) {
+    auto PN = Op->getAttrOfType<mlir::StringAttr>("persistent_name");
     if (!PN) return;
     PersistentNames.insert(PN.getValue());
-    auto Callee = C.getCallee();
-    if (!Callee) return;
-    if (*Callee == "matlab_global_get_f64" && C.getNumResults() == 1) {
-      this->Names[C.getResult()] = FnSym + "_" + PN.getValue().str();
-      SuppressedOps.insert(C.getOperation());
+    llvm::StringRef Callee;
+    if (auto C = mlir::dyn_cast<mlir::LLVM::CallOp>(Op)) {
+      if (auto Sym = C.getCallee()) Callee = *Sym;
+    } else if (Op->getName().getStringRef() == "matlab.call_builtin") {
+      if (auto CA = Op->getAttrOfType<mlir::StringAttr>("callee"))
+        Callee = CA.getValue();
     }
+    if (Callee == "matlab_global_get_f64" && Op->getNumResults() == 1) {
+      this->Names[Op->getResult(0)] = FnSym + "_" + PN.getValue().str();
+      SuppressedOps.insert(Op);
+    }
+  });
+  // Tier 1: detect canonical isempty-init pattern. Init value
+  // becomes the mangled persistent's `let` initializer.
+  F.getBody().walk([&](mlir::LLVM::CallOp IECall) {
+    auto Callee = IECall.getCallee();
+    if (!Callee || *Callee != "matlab_persistent_isempty") return;
+    if (IECall.getNumResults() != 1) return;
+    if (!IECall.getResult().hasOneUse()) return;
+    auto *CmpUser = IECall.getResult().use_begin()->getOwner();
+    auto Cmp = mlir::dyn_cast<mlir::arith::CmpFOp>(CmpUser);
+    if (!Cmp || !Cmp.getResult().hasOneUse()) return;
+    auto *IfUser = Cmp.getResult().use_begin()->getOwner();
+    auto Guard = mlir::dyn_cast<mlir::scf::IfOp>(IfUser);
+    if (!Guard || !Guard.getThenRegion().hasOneBlock()) return;
+    mlir::Operation *InitSet = nullptr;
+    llvm::StringRef PNStr;
+    for (mlir::Operation &Op : Guard.getThenRegion().front()) {
+      llvm::StringRef Cl;
+      if (auto LC = mlir::dyn_cast<mlir::LLVM::CallOp>(&Op)) {
+        if (auto C = LC.getCallee()) Cl = *C;
+      } else if (Op.getName().getStringRef() == "matlab.call_builtin") {
+        if (auto CA = Op.getAttrOfType<mlir::StringAttr>("callee"))
+          Cl = CA.getValue();
+      } else continue;
+      if (Cl != "matlab_global_set_f64") continue;
+      auto PN = Op.getAttrOfType<mlir::StringAttr>("persistent_name");
+      if (!PN) continue;
+      InitSet = &Op;
+      PNStr = PN.getValue();
+      break;
+    }
+    if (!InitSet || InitSet->getNumOperands() < 2) return;
+    InitExprByName[PNStr] =
+        dropOuterParens(this->exprFor(InitSet->getOperand(1)));
+    SuppressedOps.insert(IECall.getOperation());
+    SuppressedOps.insert(Cmp.getOperation());
+    SuppressedOps.insert(Guard.getOperation());
+    SuppressedOps.insert(InitSet);
   });
   if (!PersistentNames.empty()) {
     llvm::SmallVector<llvm::StringRef, 4> Sorted(
         PersistentNames.begin(), PersistentNames.end());
     std::sort(Sorted.begin(), Sorted.end());
-    for (llvm::StringRef PN : Sorted)
-      OS << "let " << FnSym << "_" << PN.str() << ": number = 0.0;\n";
+    for (llvm::StringRef PN : Sorted) {
+      auto It = InitExprByName.find(PN);
+      std::string Init = (It != InitExprByName.end() && !It->second.empty())
+                             ? It->second
+                             : "0.0";
+      OS << "let " << FnSym << "_" << PN.str() << ": number = "
+         << Init << ";\n";
+    }
     OS << "\n";
   }
 
@@ -2940,6 +2993,25 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
       emitOp(Inner, Indent + 1);
     indent(Indent); OS << "}\n";
     return;
+  }
+
+  // --- Unregistered matlab.call_builtin sites that survive to emit
+  // time. The TS pipeline doesn't run LowerFixedPoint's matlab_*
+  // → llvm.call sweep, so persistent set calls survive as
+  // matlab.call_builtin and need explicit handling.
+  if (Name == "matlab.call_builtin") {
+    auto CA = Op.getAttrOfType<mlir::StringAttr>("callee");
+    if (CA && CA.getValue() == "matlab_global_set_f64" &&
+        Op.getNumOperands() == 2) {
+      auto PN = Op.getAttrOfType<mlir::StringAttr>("persistent_name");
+      auto PF = Op.getAttrOfType<mlir::StringAttr>("persistent_fn");
+      if (PN && PF) {
+        indent(Indent);
+        OS << PF.getValue().str() << "_" << PN.getValue().str()
+           << " = " << this->stmtExpr(Op.getOperand(1)) << ";\n";
+        return;
+      }
+    }
   }
 
   // --- Fallback -------------------------------------------------------
