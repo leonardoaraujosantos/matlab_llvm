@@ -23,6 +23,7 @@ Use this page as the entry point to the repo docs.
 - [`emit_python.md`](emit_python.md): Python emission status, workflow, and limits
 - [`complex.md`](complex.md): complex numbers, FFT, and DSP-oriented runtime support
 - [`emit_systemverilog.md`](emit_systemverilog.md): direct RTL/SystemVerilog backend plan, including combinational, register, counter, and FSM inference
+- [`emit_cocotb.md`](emit_cocotb.md): `-emit-cocotb` harness — open-source HDL Verifier alternative; cycle-by-cycle co-simulation of the SV DUT against the Python reference, with HDL-Verifier-style `Latency` parameter
 - [`emit_fixed_point.md`](emit_fixed_point.md): Fixed-Point Designer (`fi`) support — Phase 1 scalar arithmetic shipped, Phase 3 arrays / FIR planned
 
 ## Interactive Tooling
