@@ -22,4 +22,10 @@ namespace matlab {
 ///     otherwise.
 void formatAST(std::ostream &OS, const TranslationUnit &TU);
 
+/// Pretty-print a single expression. Used by the `.mflow` emitter to
+/// fill `data.cond` / `data.iter` / `data.expression` / `data.rhs` /
+/// `data.value` fields with the canonical MATLAB textual form of an
+/// AST `Expr`. The output has no trailing semicolon or newline.
+void formatExpr(std::ostream &OS, const Expr &E);
+
 } // namespace matlab

@@ -3,6 +3,7 @@
 #include "matlab/AST/Formatter.h"
 #include "matlab/Basic/Diagnostic.h"
 #include "matlab/Basic/SourceManager.h"
+#include "matlab/Flowchart/ASTToGraph.h"
 #include "matlab/Flowchart/GraphToAST.h"
 #include "matlab/Flowchart/Loader.h"
 #include "matlab/Lex/Lexer.h"
@@ -82,7 +83,7 @@ struct Options {
                     EmitLLVM, EmitC, EmitCpp, EmitPython, EmitTypeScript,
                     EmitFiReport, EmitSystemVerilog, CheckSynthesizable,
                     EmitHardwareReport,
-                    DumpFlow, EmitMatlab,
+                    DumpFlow, EmitMatlab, EmitMflow,
                     Check, Repl, Format, Dap };
   Mode Mode = Mode::Check;
   bool Opt = false;
@@ -180,6 +181,8 @@ bool parseArgs(int Argc, char **Argv, Options &Opts, const char *&Prog) {
     else if (A == "-dump-flow") Opts.Mode = Options::Mode::DumpFlow;
     else if (A == "-emit-matlab" || A == "-emit-m")
       Opts.Mode = Options::Mode::EmitMatlab;
+    else if (A == "-emit-mflow" || A == "-emit-flow")
+      Opts.Mode = Options::Mode::EmitMflow;
     else if (A == "-repl") Opts.Mode = Options::Mode::Repl;
     else if (A == "-format") Opts.Mode = Options::Mode::Format;
     else if (A == "-dap") Opts.Mode = Options::Mode::Dap;
@@ -5402,6 +5405,12 @@ int main(int Argc, char **Argv) {
   if (Opts.Mode == Options::Mode::Format ||
       Opts.Mode == Options::Mode::EmitMatlab) {
     if (TU) formatAST(std::cout, *TU);
+    Diag.printAll();
+    return Diag.hasErrors() ? 1 : 0;
+  }
+
+  if (Opts.Mode == Options::Mode::EmitMflow) {
+    if (TU) matlab::flowchart::emitMflow(std::cout, *TU);
     Diag.printAll();
     return Diag.hasErrors() ? 1 : 0;
   }

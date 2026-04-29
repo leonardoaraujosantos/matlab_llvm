@@ -1,56 +1,254 @@
 {
-  "schema": "matforge.flowchart",
-  "version": "0.1.0",
-  "entry": "main",
-  "settings": {
-    "columnMajor": true,
-    "defaultNumericType": "double",
-    "sourceLanguage": "matforge"
-  },
-  "flows": [
+  "entry" : "main",
+  "flows" : [
     {
-      "id": "flow_main",
-      "kind": "program",
-      "name": "main",
-      "signature": { "inputs": [], "outputs": [] },
-      "nodes": [
-        { "id": "s",   "kind": "start",
-          "ports": { "in": [], "out": [{"id": "out"}] } },
-        { "id": "v1",  "kind": "variable",
-          "data": { "name": "sample", "value": "12" },
-          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
-        { "id": "cb",  "kind": "custom",
-          "data": {
-            "name": "gain_plus_bias",
-            "callee": "gain_plus_bias",
-            "args": "sample, 4, 1",
-            "lhs": "scaled",
-            "source": "function y = gain_plus_bias(x, k, b)\n    y = k * x + b;\nend\n",
-            "inputs": ["x", "k", "b"],
-            "outputs": ["y"]
+      "edges" : [
+        {
+          "from" : {
+            "node" : "s",
+            "port" : "out"
           },
-          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
-        { "id": "lbl", "kind": "display",
-          "data": { "expression": "'gain_plus_bias(12, 4, 1) ='" },
-          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
-        { "id": "d1",  "kind": "display",
-          "data": { "expression": "scaled" },
-          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
-        { "id": "e",   "kind": "end",
-          "ports": { "in": [{"id": "in"}], "out": [] } }
+          "id" : "e_1",
+          "kind" : "control",
+          "to" : {
+            "node" : "v1",
+            "port" : "in"
+          }
+        },
+        {
+          "from" : {
+            "node" : "v1",
+            "port" : "out"
+          },
+          "id" : "e_2",
+          "kind" : "control",
+          "to" : {
+            "node" : "cb",
+            "port" : "in"
+          }
+        },
+        {
+          "from" : {
+            "node" : "cb",
+            "port" : "out"
+          },
+          "id" : "e_3",
+          "kind" : "control",
+          "to" : {
+            "node" : "lbl",
+            "port" : "in"
+          }
+        },
+        {
+          "from" : {
+            "node" : "lbl",
+            "port" : "out"
+          },
+          "id" : "e_4",
+          "kind" : "control",
+          "to" : {
+            "node" : "d1",
+            "port" : "in"
+          }
+        },
+        {
+          "from" : {
+            "node" : "d1",
+            "port" : "out"
+          },
+          "id" : "e_5",
+          "kind" : "control",
+          "to" : {
+            "node" : "e",
+            "port" : "in"
+          }
+        }
       ],
-      "edges": [
-        { "id": "e_1", "kind": "control",
-          "from": {"node": "s",   "port": "out"}, "to": {"node": "v1",  "port": "in"} },
-        { "id": "e_2", "kind": "control",
-          "from": {"node": "v1",  "port": "out"}, "to": {"node": "cb",  "port": "in"} },
-        { "id": "e_3", "kind": "control",
-          "from": {"node": "cb",  "port": "out"}, "to": {"node": "lbl", "port": "in"} },
-        { "id": "e_4", "kind": "control",
-          "from": {"node": "lbl", "port": "out"}, "to": {"node": "d1",  "port": "in"} },
-        { "id": "e_5", "kind": "control",
-          "from": {"node": "d1",  "port": "out"}, "to": {"node": "e",   "port": "in"} }
-      ]
+      "id" : "flow_main",
+      "kind" : "program",
+      "name" : "main",
+      "nodes" : [
+        {
+          "data" : {
+
+          },
+          "id" : "s",
+          "kind" : "start",
+          "label" : "",
+          "ports" : {
+            "in" : [
+
+            ],
+            "out" : [
+              {
+                "id" : "out"
+              }
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 310,
+              "y" : 60
+            }
+          }
+        },
+        {
+          "data" : {
+            "name" : "sample",
+            "value" : "12"
+          },
+          "id" : "v1",
+          "kind" : "variable",
+          "label" : "",
+          "ports" : {
+            "in" : [
+              {
+                "id" : "in"
+              }
+            ],
+            "out" : [
+              {
+                "id" : "out"
+              }
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 310,
+              "y" : 180
+            }
+          }
+        },
+        {
+          "data" : {
+            "args" : "sample, 4, 1",
+            "callee" : "gain_plus_bias",
+            "inputs" : [
+              "x",
+              "k",
+              "b"
+            ],
+            "lhs" : "scaled",
+            "name" : "gain_plus_bias",
+            "outputs" : [
+              "y"
+            ],
+            "source" : "function y = gain_plus_bias(x, k, b)\n    y = k * x + b;\nend\n"
+          },
+          "id" : "cb",
+          "kind" : "custom",
+          "label" : "",
+          "ports" : {
+            "in" : [
+              {
+                "id" : "in"
+              }
+            ],
+            "out" : [
+              {
+                "id" : "out"
+              }
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 310,
+              "y" : 300
+            }
+          }
+        },
+        {
+          "data" : {
+            "expression" : "'gain_plus_bias(12, 4, 1) ='"
+          },
+          "id" : "lbl",
+          "kind" : "display",
+          "label" : "",
+          "ports" : {
+            "in" : [
+              {
+                "id" : "in"
+              }
+            ],
+            "out" : [
+              {
+                "id" : "out"
+              }
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 310,
+              "y" : 420
+            }
+          }
+        },
+        {
+          "data" : {
+            "expression" : "scaled"
+          },
+          "id" : "d1",
+          "kind" : "display",
+          "label" : "",
+          "ports" : {
+            "in" : [
+              {
+                "id" : "in"
+              }
+            ],
+            "out" : [
+              {
+                "id" : "out"
+              }
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 310,
+              "y" : 540
+            }
+          }
+        },
+        {
+          "data" : {
+
+          },
+          "id" : "e",
+          "kind" : "end",
+          "label" : "",
+          "ports" : {
+            "in" : [
+              {
+                "id" : "in"
+              }
+            ],
+            "out" : [
+
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 310,
+              "y" : 660
+            }
+          }
+        }
+      ],
+      "signature" : {
+        "inputs" : [
+
+        ],
+        "outputs" : [
+
+        ]
+      }
     }
-  ]
+  ],
+  "schema" : "matforge.flowchart",
+  "settings" : {
+    "columnMajor" : true,
+    "defaultNumericType" : "double",
+    "sourceLanguage" : "matforge"
+  },
+  "version" : "0.1.0"
 }

@@ -71,6 +71,7 @@ target_link_libraries(MatlabParse PUBLIC MatlabLex MatlabAST)
 add_library(MatlabFlowchart STATIC
   lib/Flowchart/Loader.cpp
   lib/Flowchart/GraphToAST.cpp
+  lib/Flowchart/ASTToGraph.cpp
 )
 target_link_libraries(MatlabFlowchart PUBLIC MatlabParse MatlabBasic)
 
@@ -217,6 +218,12 @@ add_test(
   COMMAND python3 ${CMAKE_SOURCE_DIR}/test/Flowchart/Dap/run_tests.py
           $<TARGET_FILE:matlabc>
   WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Flowchart/Dap
+)
+add_test(
+  NAME flowchart-emit-mflow-tests
+  COMMAND ${CMAKE_SOURCE_DIR}/test/Flowchart/EmitMflow/run_tests.sh
+          $<TARGET_FILE:matlabc>
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Flowchart/EmitMflow
 )
 if(MATLAB_LLVM_WITH_MLIR)
   add_test(

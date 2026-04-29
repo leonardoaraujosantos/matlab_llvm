@@ -78,6 +78,8 @@ class Formatter {
 public:
   explicit Formatter(std::ostream &OS) : OS(OS) {}
   void run(const TranslationUnit &TU);
+  /* Public single-Expr entry point used by the `.mflow` emitter. */
+  void runExpr(const Expr &E) { emitExpr(E); }
 
 private:
   std::ostream &OS;
@@ -568,6 +570,11 @@ void Formatter::run(const TranslationUnit &TU) {
 void formatAST(std::ostream &OS, const TranslationUnit &TU) {
   Formatter F(OS);
   F.run(TU);
+}
+
+void formatExpr(std::ostream &OS, const Expr &E) {
+  Formatter F(OS);
+  F.runExpr(E);
 }
 
 } // namespace matlab

@@ -10,12 +10,14 @@ The core pipeline is:
 ```
 MATLAB source (.m)        ─► Lexer ─► Parser ────────┐
                                                      ├─► AST ─► Sema ─► MIR ─► MLIR ─► LLVM / C / C++ / Python / TypeScript / SystemVerilog
-Flowchart graph (.mflow)  ─► Loader ─► Graph→AST ────┘                         │
-                                                                               └─► .m source via formatter (`-emit-matlab`)
+Flowchart graph (.mflow)  ─► Loader ─► Graph→AST ────┘             │
+                                                                   ├─► .m source via formatter (`-emit-matlab`)
+                                                                   └─► .mflow via AST→Graph emitter (`-emit-mflow`)
 ```
 
-Both frontends produce the same `TranslationUnit`, so every existing
-backend works for either input shape.
+Both frontends produce the same `TranslationUnit`, and the AST has
+two reverse-direction emitters: `-emit-matlab` (any input → canonical
+`.m`) and `-emit-mflow` (any input → IDE-format `.mflow` diagram).
 
 The project is self-contained by design:
 
@@ -62,7 +64,7 @@ Current corpus size in-tree:
 - `37` SystemVerilog golden fixtures (Verilator lint-clean) in `test/EmitSV/`
 - `7` fi-spec port-declaration regression tests in `test/EmitSVPorts/`
 - `10` synthesizability-gate diagnostic tests in `test/EmitSVFail/`
-- `26` flowchart fixtures across 4 lanes in `test/Flowchart/`
+- `40` flowchart fixtures across 6 lanes in `test/Flowchart/` (loader / emit-matlab / cross-backend / lsp / dap / emit-mflow)
 
 For the authoritative compatibility inventory, see
 [`docs/feature_status.md`](docs/feature_status.md).
@@ -181,6 +183,7 @@ just llvm examples/matrix_mult.m
 | `-emit-hardware-report` | per-module synthesis budget summary (registers / FSMs / pipeline) |
 | `-emit-fixed-point-report` | per-`fi` summary of WL/FL/saturate sites |
 | `-emit-matlab` (alias `-emit-m`) | canonical MATLAB source from any input — `.m` formats in place; `.mflow` round-trips through the flowchart frontend |
+| `-emit-mflow` (alias `-emit-flow`) | reverse direction: emit a `.mflow` JSON diagram from any input. IDE-canonical formatting; idempotent on repeat emission |
 | `-dump-flow` | parsed `FlowDoc` for a `.mflow` input (loader + validation only; no AST build) |
 | `-format` | canonical source formatting (synonym of `-emit-matlab` for `.m` inputs) |
 | `-repl` | JIT-backed interactive interpreter |
@@ -326,6 +329,8 @@ flowchart LR
   FE --> MIR["MIR<br/>reference / diagnostics"]
   FE --> MLIR["MLIR<br/>matlab + func + scf + arith + llvm"]
   FE --> FMT["Formatter<br/>-emit-matlab / -format"]
+  FE --> MFL["Graph emitter<br/>-emit-mflow"]
+  MFL --> MOUT2["canonical .mflow"]
   MLIR --> Passes["Lowering / optimization passes"]
   Passes --> LLVM["LLVM IR"]
   Passes --> C["C / C++ emission"]

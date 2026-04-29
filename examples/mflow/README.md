@@ -21,6 +21,23 @@ emit backend (`-emit-c`, `-emit-cpp`, `-emit-python`,
 | [`custom_inline_gain.mflow`](custom_inline_gain.mflow) | — | `custom` block with **inline `source`** (function body lives in the JSON) |
 | [`custom_clamp.mflow`](custom_clamp.mflow) | — | `custom` block with **`path`** provenance (function body in `blocks/clamp.m`); three callers share one inserted Function |
 
+## Generating new `.mflow` examples
+
+Any `.m` file can be auto-converted to a `.mflow` diagram via the
+reverse-direction `-emit-mflow` mode:
+
+```bash
+matlabc -emit-mflow examples/factorial.m > examples/mflow/factorial.mflow
+just emit-mflow examples/for_loop.m  # via the justfile recipe
+```
+
+The output is in IDE-canonical JSON (alphabetical keys, 2-space
+indent, blank-line empty arrays) so it diffs cleanly against IDE
+re-saves. Auto-layout assigns column-shaped positions; the IDE
+re-layouts on first open. Round-trip is idempotent from the second
+iteration onward (`.m → .mflow → .m → .mflow` produces
+byte-identical second `.mflow`).
+
 ## Running
 
 ```bash

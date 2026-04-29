@@ -77,6 +77,14 @@ emit-matlab FILE: build
 dump-flow FILE: build
     {{BUILD_DIR}}/matlabc -dump-flow {{FILE}}
 
+# Emit a `.mflow` flowchart from any `.m` (or round-trip a `.mflow`).
+# Output is in IDE-canonical JSON format (alphabetical keys,
+# 2-space indent, blank-line empty arrays) so re-saves through the
+# MatForge IDE produce minimal diffs.
+# Example: `just emit-mflow examples/factorial.m > /tmp/factorial.mflow`
+emit-mflow FILE: build
+    {{BUILD_DIR}}/matlabc -emit-mflow {{FILE}}
+
 # Build and run every program in examples/. Stops at the first failure.
 examples: build
     #!/usr/bin/env bash
@@ -329,11 +337,13 @@ test-emitpython: build
 test-emitts: build
     ./test/Run/run_tests_emitts.sh ./{{BUILD_DIR}}/matlabc
 
-# Run all four flowchart (`.mflow`) ctest lanes:
+# Run every flowchart (`.mflow`) ctest lane:
 #   - flowchart-tests              (loader + validation, 9 fixtures)
 #   - flowchart-emit-matlab-tests  (linear / control / sub-flows / custom, 17 fixtures)
 #   - flowchart-cross-backend-tests (`.mflow` ≡ `.m` round-trip, 12 × 4 backends)
 #   - flowchart-lsp-tests          (`matlab-lsp` accepts .mflow, 3 cases)
+#   - flowchart-dap-tests          (`matlabc -dap` accepts .mflow, 3 cases)
+#   - flowchart-emit-mflow-tests   (`.m`/`.mflow` → `.mflow` idempotency, 11 fixtures)
 test-flowchart: build
     ctest --test-dir {{BUILD_DIR}} --output-on-failure -R "^flowchart-"
 

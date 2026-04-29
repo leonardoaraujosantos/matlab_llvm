@@ -617,6 +617,66 @@ What still doesn't work for `.mflow` debugging (deferred polish):
 - `--block-path` plumbed into the DAP launch surface (currently
   only `MATFORGE_BLOCK_PATH` reaches the DAP path).
 
+### Phase 7 — `-emit-mflow` (AST → flowchart) (shipped)
+
+Closes the asymmetry between the two frontends. Previously every
+existing `-emit-*` mode worked on `.mflow` inputs but the inverse
+direction wasn't available — the IDE was the only producer of
+`.mflow` files.
+
+- New module `lib/Flowchart/ASTToGraph.cpp` walks a `TranslationUnit`
+  and emits a `.mflow` JSON document. The walker is the structural
+  inverse of Phase 2-3's reducer:
+  - Linear `Stmt`s map 1:1 to block kinds (`AssignStmt(name = literal)`
+    → `variable`, `MatrixLiteral` RHS → `matrix_literal`,
+    `disp(EXPR)` → `display`, `name(args)` calls → `function_call`,
+    everything else → `assignment` or `expression`).
+  - `IfStmt` → `if` block with `true`/`false` ports;
+    `IfStmt::Elseifs` re-fold into a chain of nested `if` blocks on
+    the false branch (no `elseif` block kind needed in the schema).
+  - `ForStmt` / `WhileStmt` → loop blocks with `body`/`done` ports
+    and an explicit back-edge from the body's exit pad to the loop
+    head's `in` port.
+  - `BreakStmt` / `ContinueStmt` / `ReturnStmt` → terminator blocks
+    that produce an empty exit pad (subsequent statements in the
+    same block are unreachable and dropped).
+  - Each `Function` in `TU.Functions` becomes a `function`-kind
+    sub-flow; `Inputs` / `Outputs` populate the flow's `signature`.
+- A `Pad` abstraction (a vector of `(node_id, port_id)` source
+  endpoints) drives wiring. Linear stmts produce single-source pads;
+  if-branches produce multi-source pads (then-tail + else-tail) so
+  the next statement gets edges from BOTH branch tails. This
+  cleanly handles if-no-else (false-branch pad is just the if's
+  `false` port, propagated forward).
+- Output is byte-identical to the MatForge IDE's pretty-printed
+  format: 2-space indent, `" : "` around the colon, alphabetical
+  keys, blank-line empty arrays/objects. Successive `-emit-mflow`
+  runs of the same TU produce byte-identical output, suitable for
+  source-control diffs.
+- Auto-layout: each block gets `ui.position = (x=200, y=index*120)`.
+  The IDE re-layouts on first save; in the meantime the column-
+  shaped diagram is at least readable.
+- Idempotency property guaranteed: `.m → .mflow → .m → .mflow`
+  produces a byte-identical second `.mflow` from iteration 2 onward.
+- New `formatExpr(ostream&, const Expr&)` helper added to
+  `lib/AST/Formatter.cpp` so the emitter can render `data.cond` /
+  `data.iter` / `data.expression` etc. via the canonical formatter
+  rather than duplicating expression printing.
+- Test lane `flowchart-emit-mflow-tests`: 11 fixtures (canonical
+  examples + flowchart corpus). Each runs the
+  `input → -emit-mflow → -emit-matlab → -emit-mflow` pipeline and
+  asserts the second `.mflow` matches the first byte-for-byte.
+
+What's deferred:
+- Round-trip preservation of IDE-set `ui.position`: `-emit-mflow`
+  always writes its auto-layout x/y. A future "merge" mode could
+  preserve positions by reading the current `.mflow` and copying
+  its `ui.position` for any node whose id matches the new emission.
+- `switch` and `try`/`catch` block kinds: degraded to
+  `expression` blocks carrying the formatted source text. The
+  textual round-trip works, but the diagram doesn't represent the
+  branching shape.
+
 ---
 
 ## 8. Out of scope (for v1)
