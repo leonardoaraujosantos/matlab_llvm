@@ -9,13 +9,13 @@ the emitted SystemVerilog DUT and the emitted Python reference
 model in lockstep against random vectors, asserting cycle-by-cycle
 equality.
 
-**Status: v3.x / v3.1 / v3.3 shipped.** 7 of 8 `examples/hdl/`
-modules pass bit-exact under Verilator + CocoTB end-to-end. The
-remaining one (`sequential_processor`) is deferred pending a
-v3.2.x stimulus-shape extension (multi-stage pipeline + per-call
-reference need impulse-style stimulus, not random or per-cycle
-held). See the [Status](#status) and [Roadmap](#roadmap) sections
-for the full picture.
+**Status: v3.2.x shipped — `examples/hdl/` is 8/8.** Every
+synthesizable HDL example verifies bit-exact between the SV DUT
+and the matlab-emitted Python reference. The roadmap below
+tracks remaining nice-to-haves (auto-detect latency, CI lane,
+seed override, coverage report, multi-clock testbenches) but the
+core "open-source HDL Verifier alternative" is feature-complete
+for the supported MATLAB subset.
 
 ---
 
@@ -233,7 +233,7 @@ Sweep across `examples/hdl/*.m` (cocotb 2.0.1, Verilator 5.x):
 | `mux_4to_1_16bit`     | 0 | tester  | PASS 1/1   | from `test_mux.m`            |
 | `vector_processor`    | 0 | random  | PASS 100/100 | unpacked-array ports via v3.3 element-wise drive |
 | `fir_asic_pipelined`  | 2 | random  | PASS    | requires `-cocotb-latency=2` |
-| `sequential_processor`| any | random  | DEFERRED | multi-stage pipeline + per-call reference — needs impulse-style stimulus (v3.2.x) |
+| `sequential_processor`| 4 | impulse | PASS    | `% cocotb: stimulus(x, impulse, 1.0)` + `stimulus(gain, constant, 0.25)` (v3.2.x) |
 
 The "Mode" column reflects v3.2 behaviour: when a sibling
 `test_<stem>.m` exists, the harness replays its hand-picked
@@ -244,17 +244,22 @@ function is recognised, so the existing `examples/hdl/`
 naming (`test_mealy.m`, `test_fsm_moore.m`, `test_mux.m`,
 `test_counter.m`) all match cleanly without renaming.
 
-Only `sequential_processor` remains deferred. Its 4-stage
-persistent pipeline (`delay_line → reg_products → reg_acc →
-reg_output`) propagates one register per cycle, while the Python
-reference's per-call semantics evaluates the full chain in a
-single call. `% cocotb: hold(gain, 4)` aligns the input window
-(v3.1 ships that pragma — see below), but the per-call vs
-per-cycle structural mismatch needs an impulse-or-step stimulus
-shape (drive a non-zero input for 1 cycle, then zeros for L+
-cycles, then sample once the pipeline has fully settled). v3.2.x
-is the right place for that — auto-generated impulse / step /
-ramp test patterns alongside the existing random + tester modes.
+All 8 modules now PASS. The hardest case
+(`sequential_processor`, a 4-stage persistent FIR cascade)
+required v3.2.x's deterministic stimulus pragmas to align the
+DUT's per-cycle pipeline propagation with the per-call Python
+reference: an impulse on `x` plus a constant `gain` makes the
+DUT and the reference walk through the impulse response in
+lockstep — `ref(impulse).y` at call k matches `DUT.y` at cycle
+k+L for L = pipeline depth.
+
+Mode selection is automatic per-input from the source pragmas:
+
+- No `% cocotb:` stimulus pragma → random (with `% cocotb: hold`
+  honored) or replay (when a sibling `test_*.m` exists).
+- `% cocotb: stimulus(<name>, ...)` for any input → that input
+  uses the deterministic shape; other inputs keep their default
+  mode.
 
 ---
 
@@ -348,31 +353,42 @@ emitted at the top of `test_<stem>.py` keep the test body uniform
 across scalar and vector ports — most users will never need to
 touch them.
 
-### v3.2.x — Stimulus-shape extensions (impulse / step / ramp) 🔵
+### v3.2.x — Stimulus-shape extensions ✅ shipped
 
-**Problem.** Multi-stage pipelined DUTs (`sequential_processor`)
-where the SV propagates state one register per cycle and the
-Python reference evaluates the full chain in one call. Even with
-`-cocotb-latency=L` and `% cocotb: hold(_, L)`, the per-call vs
-per-cycle structural mismatch produces divergence with random
-or per-cycle held inputs. To verify the FIR's transfer function,
-the user really wants impulse / step / ramp stimulus and a
-single comparison once the pipeline settles.
+**Status.** Implemented. New pragmas:
 
-**Plan.** A new `% cocotb: stimulus(impulse | step | ramp)` (or
-inline list) pragma chooses a deterministic input shape:
+```matlab
+% cocotb: stimulus(<input>, impulse, <value>)        # value@0, zeros after
+% cocotb: stimulus(<input>, constant, <value>)       # same value every cycle
+% cocotb: stimulus(<input>, ramp, <start>, <stride>) # start, start+stride, ...
+```
 
-- **impulse.** Drive a non-zero value on the first cycle, then
-  zeros for L+ cycles. After settling, sample once and compare
-  against `ref(impulse)` evaluated by the reference function.
-- **step.** Drive 0, then constant non-zero. Compare
-  steady-state output against the reference's settled response.
-- **ramp.** Drive a linearly increasing input. Compare
-  cycle-by-cycle once the pipeline has filled.
+Each input is independently controlled — combine impulse on the
+data input with constant on a coefficient port to match
+`ref(impulse)` evaluated by the per-call reference against
+`DUT.y[k+L]` once the pipeline has settled.
 
-**Effort.** ~2 sessions. Adds ~50 lines of stimulus-pattern
-emit to the harness and a small expansion to the `% cocotb:`
-pragma scanner.
+`sequential_processor.m` now ships with:
+
+```matlab
+% cocotb: stimulus(x, impulse, 1.0)
+% cocotb: stimulus(gain, constant, 0.25)
+% cocotb: stimulus(reset, constant, 0)
+```
+
+…driving its 4-stage persistent pipeline through a clean
+impulse response with `-cocotb-latency=4`. The `just
+verify-cocotb examples/hdl/sequential_processor.m 4` flow exercises
+exactly that.
+
+The pragma also covers two adjacent use cases that fall out of
+the same machinery:
+- **Constant** lets the user pin a coefficient / mode-select port
+  while exercising the rest of the design. Useful for verifying
+  one operating mode of a multi-mode block at a time.
+- **Ramp** (`start, stride`) walks an input linearly through its
+  range. For ALU-style blocks this exercises every operand value
+  the port can hold, complementing random testing.
 
 ### v3.4 — Auto-detect pipeline latency 🔵
 

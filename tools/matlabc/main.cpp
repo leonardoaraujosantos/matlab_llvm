@@ -5545,6 +5545,17 @@ struct CocotbPortSpec {
    * reference receives a list. Detected from the SV port-list
    * `name [N]` suffix during port parsing. */
   int ArrayLen = 0;
+  /* `% cocotb: stimulus(<name>, <kind>, ...)` pragma — picks a
+   * deterministic per-cycle value generator for this input.
+   * Default `Random` keeps the v2 behaviour. The other kinds let
+   * users drive impulse / constant / ramp patterns through
+   * pipelined DUTs whose per-call reference can't keep up with
+   * random per-cycle inputs (the multi-stage cascade in
+   * sequential_processor / fir_asic_pipelined). */
+  enum class StimKind { Random, Impulse, Constant, Ramp };
+  StimKind Stim = StimKind::Random;
+  double StimArg1 = 0.0;   // impulse: value@0 / constant: value / ramp: start
+  double StimArg2 = 0.0;   // ramp: stride
 };
 
 struct CocotbFuncSpec {
@@ -5554,18 +5565,63 @@ struct CocotbFuncSpec {
   bool Sequential = false; // has clk/rst_n on the SV side
 };
 
-/* Scan the original .m source for `% cocotb: hold(<name>, <cycles>)`
- * lines and return the (name → cycles) map. Tolerant of leading
- * whitespace, optional spaces around the comma, single-line shape
- * only. The same scan picks up future `% cocotb:` directives —
- * this is the v3 pragma surface; future items extend it. */
-static std::map<std::string, int>
-scanCocotbPragmas(const std::string &SrcPath) {
+struct CocotbStim {
+  CocotbPortSpec::StimKind Kind = CocotbPortSpec::StimKind::Random;
+  double Arg1 = 0.0;
+  double Arg2 = 0.0;
+};
+
+struct CocotbPragmaScan {
   std::map<std::string, int> Holds;
+  std::map<std::string, CocotbStim> Stim;
+};
+
+/* Scan the original .m source for `% cocotb:` directives and
+ * collect the (input-name → spec) maps. Tolerant of leading
+ * whitespace and optional spaces around commas, single-line shape
+ * only. Recognised directives:
+ *
+ *   % cocotb: hold(<name>, <cycles>)
+ *   % cocotb: stimulus(<name>, impulse, <value>)
+ *   % cocotb: stimulus(<name>, constant, <value>)
+ *   % cocotb: stimulus(<name>, ramp, <start>, <stride>)
+ *
+ * Unrecognised directives are silently ignored (forward-compat
+ * with future v3 items). */
+static CocotbPragmaScan
+scanCocotbPragmas(const std::string &SrcPath) {
+  CocotbPragmaScan Out;
   std::ifstream F(SrcPath);
-  if (!F) return Holds;
+  if (!F) return Out;
   std::string Src((std::istreambuf_iterator<char>(F)),
                    std::istreambuf_iterator<char>());
+  auto skipWs = [](std::string &S) {
+    while (!S.empty() && std::isspace((unsigned char)S.front()))
+      S.erase(S.begin());
+  };
+  auto trim = [&](std::string &S) {
+    skipWs(S);
+    while (!S.empty() && std::isspace((unsigned char)S.back()))
+      S.pop_back();
+  };
+  /* Split a comma-separated argument list. Returns the trimmed
+   * tokens. No nesting / strings — sufficient for our pragma
+   * surface. */
+  auto splitArgs = [&trim](std::string Body) -> std::vector<std::string> {
+    std::vector<std::string> Args;
+    std::string Cur;
+    for (char C : Body) {
+      if (C == ',') {
+        std::string A = Cur; trim(A); Args.push_back(A);
+        Cur.clear();
+      } else Cur += C;
+    }
+    if (!Cur.empty() || !Body.empty()) {
+      std::string A = Cur; trim(A); Args.push_back(A);
+    }
+    return Args;
+  };
+
   size_t Pos = 0;
   while (Pos < Src.size()) {
     size_t LineEnd = Src.find('\n', Pos);
@@ -5575,34 +5631,46 @@ scanCocotbPragmas(const std::string &SrcPath) {
     auto Pct = Line.find('%');
     if (Pct == std::string::npos) continue;
     std::string Tail = Line.substr(Pct + 1);
-    auto skipWs = [](std::string &S) {
-      while (!S.empty() && std::isspace((unsigned char)S.front()))
-        S.erase(S.begin());
-    };
     skipWs(Tail);
     if (Tail.compare(0, 7, "cocotb:") != 0) continue;
     Tail.erase(0, 7);
     skipWs(Tail);
-    if (Tail.compare(0, 4, "hold") != 0) continue;
-    Tail.erase(0, 4);
-    skipWs(Tail);
-    if (Tail.empty() || Tail.front() != '(') continue;
-    Tail.erase(Tail.begin());
-    size_t Comma = Tail.find(',');
+
+    /* Identify the directive head (up to the open paren). */
+    size_t Open = Tail.find('(');
     size_t Close = Tail.find(')');
-    if (Comma == std::string::npos || Close == std::string::npos ||
-        Close < Comma) continue;
-    std::string Name = Tail.substr(0, Comma);
-    std::string CyStr = Tail.substr(Comma + 1, Close - Comma - 1);
-    skipWs(Name);
-    while (!Name.empty() && std::isspace((unsigned char)Name.back()))
-      Name.pop_back();
-    skipWs(CyStr);
-    int Cy = std::atoi(CyStr.c_str());
-    if (!Name.empty() && Cy >= 0)
-      Holds[Name] = Cy;
+    if (Open == std::string::npos || Close == std::string::npos ||
+        Close < Open)
+      continue;
+    std::string Head = Tail.substr(0, Open);
+    std::string Body = Tail.substr(Open + 1, Close - Open - 1);
+    trim(Head);
+    auto Args = splitArgs(Body);
+
+    if (Head == "hold" && Args.size() == 2) {
+      int Cy = std::atoi(Args[1].c_str());
+      if (!Args[0].empty() && Cy >= 0) Out.Holds[Args[0]] = Cy;
+      continue;
+    }
+    if (Head == "stimulus" && Args.size() >= 3) {
+      CocotbStim S;
+      const std::string &Kind = Args[1];
+      if (Kind == "impulse" && Args.size() >= 3) {
+        S.Kind = CocotbPortSpec::StimKind::Impulse;
+        S.Arg1 = std::strtod(Args[2].c_str(), nullptr);
+      } else if (Kind == "constant" && Args.size() >= 3) {
+        S.Kind = CocotbPortSpec::StimKind::Constant;
+        S.Arg1 = std::strtod(Args[2].c_str(), nullptr);
+      } else if (Kind == "ramp" && Args.size() >= 4) {
+        S.Kind = CocotbPortSpec::StimKind::Ramp;
+        S.Arg1 = std::strtod(Args[2].c_str(), nullptr);
+        S.Arg2 = std::strtod(Args[3].c_str(), nullptr);
+      } else continue;
+      if (!Args[0].empty()) Out.Stim[Args[0]] = S;
+      continue;
+    }
   }
-  return Holds;
+  return Out;
 }
 
 /* Parse the SV file's `module <name> (...)` port list and rebuild a
@@ -6307,17 +6375,71 @@ renderCocotbHarness(const CocotbFuncSpec &S, const std::string &Stem,
       append(std::to_string(H));
     }
     append("]\n");
+    /* Per-input stimulus shape from `% cocotb: stimulus(...)` pragmas.
+     * Tuple (kind, arg1, arg2) where kind is one of:
+     *   "random"   — fresh draw per cycle (default).
+     *   "impulse"  — arg1 at cycle 0, zeros after.
+     *   "constant" — arg1 every cycle.
+     *   "ramp"     — arg1 + cycle*arg2.
+     * Unblocks pipelined DUTs whose per-call reference doesn't
+     * agree with random per-cycle inputs (sequential_processor). */
+    append("    STIM = [\n");
+    for (auto &P : S.Inputs) {
+      const char *K = "random";
+      switch (P.Stim) {
+        case CocotbPortSpec::StimKind::Random:   K = "random"; break;
+        case CocotbPortSpec::StimKind::Impulse:  K = "impulse"; break;
+        case CocotbPortSpec::StimKind::Constant: K = "constant"; break;
+        case CocotbPortSpec::StimKind::Ramp:     K = "ramp"; break;
+      }
+      char Buf[128];
+      snprintf(Buf, sizeof Buf,
+               "        (\"%s\", %.17g, %.17g),\n",
+               K, P.StimArg1, P.StimArg2);
+      append(Buf);
+    }
+    append("    ]\n");
     append("    held_real = [None] * len(INPUTS)\n");
     append("    held_packed = [None] * len(INPUTS)\n");
     append("    cycles_left = [0] * len(INPUTS)\n");
+    append("    def _stim_value(i, kind, a1, a2, signed, wl, fl, alen):\n");
+    append("        if kind == 'impulse':\n");
+    append("            v = a1 if i == 0 else 0.0\n");
+    append("            if alen == 0:\n");
+    append("                p = pack_fi(v, signed, wl, fl)\n");
+    append("                return p, unpack_fi(p, signed, wl, fl)\n");
+    append("            packed = [pack_fi(v, signed, wl, fl) for _ in range(alen)]\n");
+    append("            return packed, [unpack_fi(p, signed, wl, fl) for p in packed]\n");
+    append("        if kind == 'constant':\n");
+    append("            v = a1\n");
+    append("            if alen == 0:\n");
+    append("                p = pack_fi(v, signed, wl, fl)\n");
+    append("                return p, unpack_fi(p, signed, wl, fl)\n");
+    append("            packed = [pack_fi(v, signed, wl, fl) for _ in range(alen)]\n");
+    append("            return packed, [unpack_fi(p, signed, wl, fl) for p in packed]\n");
+    append("        if kind == 'ramp':\n");
+    append("            v = a1 + i * a2\n");
+    append("            if alen == 0:\n");
+    append("                p = pack_fi(v, signed, wl, fl)\n");
+    append("                return p, unpack_fi(p, signed, wl, fl)\n");
+    append("            packed = [pack_fi(v + j * a2, signed, wl, fl) for j in range(alen)]\n");
+    append("            return packed, [unpack_fi(p, signed, wl, fl) for p in packed]\n");
+    append("        # default: random\n");
+    append("        return _gen_random(signed, wl, fl, alen)\n");
     append("    for i in range(N):\n");
     append("        py_args = []\n");
     append("        for k, (name, signed, wl, fl, alen) in enumerate(INPUTS):\n");
-    append("            if cycles_left[k] == 0:\n");
+    append("            kind, a1, a2 = STIM[k]\n");
+    append("            if kind != 'random':\n");
+    append("                # Deterministic stimulus — recompute every cycle.\n");
+    append("                held_packed[k], held_real[k] = _stim_value("
+           "i, kind, a1, a2, signed, wl, fl, alen)\n");
+    append("            elif cycles_left[k] == 0:\n");
     append("                held_packed[k], held_real[k] = "
            "_gen_random(signed, wl, fl, alen)\n");
     append("                cycles_left[k] = HOLD[k]\n");
-    append("            cycles_left[k] -= 1\n");
+    append("            if kind == 'random':\n");
+    append("                cycles_left[k] -= 1\n");
     /* Drive: scalar uses .value =, vector uses [k].value = per element. */
     append("            if alen == 0:\n");
     append("                getattr(dut, name).value = held_packed[k]\n");
@@ -6511,22 +6633,30 @@ int emitCocotbHarness(const char *Self, const Options &Opts,
     return 1;
   }
 
-  /* v3.1 — apply any `% cocotb: hold(<input>, <cycles>)` pragmas
-   * from the source onto the matching input port. Mismatched names
-   * are reported but ignored (stale pragma after a rename). */
-  auto Holds = scanCocotbPragmas(Input);
+  /* Apply any `% cocotb:` pragmas from the source onto the matching
+   * input port. Mismatched names are reported but ignored (stale
+   * pragma after a rename). */
+  auto Pragmas = scanCocotbPragmas(Input);
   for (auto &P : Spec->Inputs) {
-    auto It = Holds.find(P.Name);
-    if (It != Holds.end()) P.HoldCycles = It->second;
+    auto HIt = Pragmas.Holds.find(P.Name);
+    if (HIt != Pragmas.Holds.end()) P.HoldCycles = HIt->second;
+    auto SIt = Pragmas.Stim.find(P.Name);
+    if (SIt != Pragmas.Stim.end()) {
+      P.Stim = SIt->second.Kind;
+      P.StimArg1 = SIt->second.Arg1;
+      P.StimArg2 = SIt->second.Arg2;
+    }
   }
-  for (auto &Kv : Holds) {
+  auto warnOrphan = [&](const std::string &Name, const char *Tag) {
     bool Found = false;
     for (auto &P : Spec->Inputs)
-      if (P.Name == Kv.first) { Found = true; break; }
+      if (P.Name == Name) { Found = true; break; }
     if (!Found)
-      std::cerr << "warning: emit-cocotb: `% cocotb: hold(" << Kv.first
+      std::cerr << "warning: emit-cocotb: `% cocotb: " << Tag << "(" << Name
                 << ", ...)` doesn't match any input port; ignored.\n";
-  }
+  };
+  for (auto &Kv : Pragmas.Holds) warnOrphan(Kv.first, "hold");
+  for (auto &Kv : Pragmas.Stim)  warnOrphan(Kv.first, "stimulus");
 
   /* v3.2: when a sibling `test_<stem>.m` exists, replay its
    * stimulus instead of driving random vectors. The extractor is

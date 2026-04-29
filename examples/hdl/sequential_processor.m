@@ -3,7 +3,10 @@ function [y, ovfl] = sequential_processor(x, gain, reset)
     % hdl: port(x, fi, signed, 16, 14)
     % hdl: port(gain, fi, signed, 16, 12)
     % hdl: port(reset, bool)
-    
+    % cocotb: stimulus(x, impulse, 1.0)
+    % cocotb: stimulus(gain, constant, 0.25)
+    % cocotb: stimulus(reset, constant, 0)
+
     % --- Configurações de Ponto Fixo (Explícitas) ---
     % Entradas: x (16 bits, 14 frac), gain (16 bits, 12 frac)
     % Coeficientes internos: 16 bits, 15 frac

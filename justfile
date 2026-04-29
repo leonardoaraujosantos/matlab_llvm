@@ -290,7 +290,7 @@ test-cocotb: build
         "moore_fsm:0:pass"
         "mux_4to_1_16bit:0:pass"
         "vector_processor:0:pass"
-        "sequential_processor:0:deferred"
+        "sequential_processor:4:pass"
     )
     pass=0; fail=0; deferred=0; regressed=0
     for entry in "${tests[@]}"; do
