@@ -9,14 +9,13 @@ the emitted SystemVerilog DUT and the emitted Python reference
 model in lockstep against random vectors, asserting cycle-by-cycle
 equality.
 
-**Status: v3.2 shipped.** When a sibling `test_<stem>.m` exists,
-the harness replays its hand-picked stimulus instead of driving
-random vectors. 5 of 8 `examples/hdl/` modules pass bit-exact
-under Verilator + CocoTB end-to-end; 3 are deferred pending v3
-follow-ups (combinational-Mealy output timing, multi-stage
-pipeline input stability, vector-port driving). See the
-[Status](#status) and [Roadmap](#roadmap) sections for the
-running list of remaining work.
+**Status: v3.x / v3.1 / v3.3 shipped.** 7 of 8 `examples/hdl/`
+modules pass bit-exact under Verilator + CocoTB end-to-end. The
+remaining one (`sequential_processor`) is deferred pending a
+v3.2.x stimulus-shape extension (multi-stage pipeline + per-call
+reference need impulse-style stimulus, not random or per-cycle
+held). See the [Status](#status) and [Roadmap](#roadmap) sections
+for the full picture.
 
 ---
 
@@ -229,12 +228,12 @@ Sweep across `examples/hdl/*.m` (cocotb 2.0.1, Verilator 5.x):
 | --------------------- | - | ------- | ------ | ---------------------------- |
 | `alu_16bit`           | 0 | random  | PASS 100/100 | combinational                |
 | `counter_0_to_10`     | 0 | tester  | PASS 15/15 | from `test_counter.m`        |
+| `mealy_fsm`           | 0 | tester  | PASS 7/7   | from `test_mealy.m`; v3.x dual-edge sample resolves Mealy timing |
 | `moore_fsm`           | 0 | tester  | PASS 7/7   | from `test_fsm_moore.m`      |
 | `mux_4to_1_16bit`     | 0 | tester  | PASS 1/1   | from `test_mux.m`            |
+| `vector_processor`    | 0 | random  | PASS 100/100 | unpacked-array ports via v3.3 element-wise drive |
 | `fir_asic_pipelined`  | 2 | random  | PASS    | requires `-cocotb-latency=2` |
-| `mealy_fsm`           | 0 | tester  | DEFERRED | Mealy combinational output sampling — v3.x |
-| `sequential_processor`| any | random  | DEFERRED | multi-input pipeline — v3.1 |
-| `vector_processor`    | — | —       | DEFERRED (emit-skip) | unpacked-array ports — v3.3 |
+| `sequential_processor`| any | random  | DEFERRED | multi-stage pipeline + per-call reference — needs impulse-style stimulus (v3.2.x) |
 
 The "Mode" column reflects v3.2 behaviour: when a sibling
 `test_<stem>.m` exists, the harness replays its hand-picked
@@ -245,25 +244,17 @@ function is recognised, so the existing `examples/hdl/`
 naming (`test_mealy.m`, `test_fsm_moore.m`, `test_mux.m`,
 `test_counter.m`) all match cleanly without renaming.
 
-The three deferred entries each fail for a different reason:
-
-- **`mealy_fsm`** (v3.x): Mealy outputs are *combinational*
-  `f(state, input)`. The harness samples after the rising edge
-  (correct for Moore / counter / FIR), but Mealy's combinational
-  output reflects the **post-edge** state's response to the same
-  input — different from the reference's "compute output before
-  state advances" semantics. Fix would tag combinational outputs
-  per port (or sample twice per cycle) so the right alignment
-  applies per output type.
-- **`sequential_processor`** (v3.1): multi-stage pipeline samples
-  `gain` at cycle `k+L` while the Python reference at cycle `k`
-  consumes `gain[k]`; with random per-cycle gain values the two
-  paths legitimately diverge. Fix is the input-stability pragma
-  (`% cocotb: hold(gain, L)`) — drive each input stable for L
-  cycles to align the comparison.
-- **`vector_processor`** (v3.3): unpacked-array port driving
-  (`dut.vec_a[k].value = ...` per element). The current harness
-  short-circuits with a clear diagnostic.
+Only `sequential_processor` remains deferred. Its 4-stage
+persistent pipeline (`delay_line → reg_products → reg_acc →
+reg_output`) propagates one register per cycle, while the Python
+reference's per-call semantics evaluates the full chain in a
+single call. `% cocotb: hold(gain, 4)` aligns the input window
+(v3.1 ships that pragma — see below), but the per-call vs
+per-cycle structural mismatch needs an impulse-or-step stimulus
+shape (drive a non-zero input for 1 cycle, then zeros for L+
+cycles, then sample once the pipeline has fully settled). v3.2.x
+is the right place for that — auto-generated impulse / step /
+ramp test patterns alongside the existing random + tester modes.
 
 ---
 
@@ -273,23 +264,31 @@ Each item below is **concrete, sized, and not yet attempted**.
 Effort is calendar time at one focused implementation session per
 stage.
 
-### v3.1 — Input-stability semantics 🔵
+### v3.1 — Input-stability semantics ✅ shipped
 
-**Problem.** Multi-stage pipelined DUTs sample different inputs at
-different cycles. For `sequential_processor`, the SV samples `gain`
-at cycle `k+L` (after the pipeline propagates) while the Python
-reference at cycle `k` uses `gain[k]`. With random per-cycle gain,
-they don't match — even at the correct `L`.
+**Status.** Implemented. New `% cocotb: hold(<input>, <cycles>)`
+pragma — drop it inside the function body next to the `% hdl:
+port(...)` lines and the harness will pin the named input to the
+same random value for `<cycles>` consecutive iterations before
+drawing a fresh sample. Mismatched names emit a clear warning and
+are ignored (stale pragma after a rename).
 
-**Plan.** A new `% cocotb: hold(<input>, <cycles>)` pragma (or a
-top-level `-cocotb-hold-inputs=N` flag) tells the harness to hold a
-named input stable for `<cycles>` consecutive cycles before
-advancing. The reference-vs-DUT comparison still aligns at `k+L`,
-but every sample within the hold window agrees.
+```matlab
+function y = filter(x, gain)
+    %#codegen
+    % hdl: port(x, fi, signed, 16, 14)
+    % hdl: port(gain, fi, signed, 16, 12)
+    % cocotb: hold(gain, 4)        # gain stays stable for 4 cycles
+    ...
+```
 
-**Effort.** ~1 session. The SV port-list parser already knows port
-names; the harness emitter just needs to track per-input hold
-counters and skip the random-uniform call until the hold expires.
+The pragma covers the simple "input X must be stable across L
+cycles for the SV pipeline to converge" case. It does **not** by
+itself solve the multi-stage cascade reference divergence (that
+needs impulse-style stimulus shapes — v3.2.x). For that reason
+`sequential_processor` is still deferred; the pragma is shipped
+mechanically and ready for the cases where input stability alone
+is enough.
 
 ### v3.2 — `test_<stem>.m`-derived stimulus ✅ shipped
 
@@ -322,50 +321,58 @@ as set after import. Caught by the FSM testers under v3.2 —
 random vectors had been masking it because most uint8 inputs
 aren't `==1` so the FSM stayed in the reset arm regardless.
 
-### v3.x — Mealy combinational output sampling 🔵
+### v3.x — Mealy combinational output sampling ✅ shipped
 
-**Problem.** Mealy FSMs emit `out_signal = f(state, input)` as a
-combinational signal — its value depends on both the current
-register and the live input. The harness samples *after* the
-rising edge, which gives the **post-edge** state's response to the
-same input. For Moore / counter / FIR (registered outputs), that's
-correct: the new register value is what the user wants to read.
-For Mealy, the reference's "compute output for input k while
-still in state k" semantics produces a different value than the
-post-edge sample. `mealy_fsm` mismatches `#1` and `#4` of its
-test sequence as a consequence.
+**Status.** Implemented via dual-edge sampling. For sequential
+DUTs, the harness now samples every output *both* before the
+rising edge (combinational propagation of new inputs through the
+still-valid old state — Mealy-style alignment) and after (the
+just-latched register value — Moore / counter / FIR-style
+alignment). For each output the comparison accepts whichever
+sample matches the reference. No per-port metadata needed; the
+harness picks the correct alignment automatically.
 
-**Plan.** Two options; pick one:
+The pre-edge sample is captured after a 1 ns Timer settle (lets
+combinational signals propagate the new inputs against the still-
+valid old state); then `await RisingEdge` advances the state;
+then a second 1 ns settle yields the post-edge sample.
 
-1. **Tag outputs per kind.** Walk the SV emit (or the lowered IR)
-   to determine which output ports are registered (`always_ff`-
-   driven) vs combinational. For combinational ones whose value
-   depends on a live input, sample *before* the rising edge.
-2. **Sample twice per cycle.** Once pre-edge for combinational
-   outputs, once post-edge for registered. The harness picks the
-   right value based on the per-port tag from option (1).
+### v3.3 — Vector / unpacked-array port driving ✅ shipped
 
-Either way, the harness needs the per-output kind. Easy to
-extract from the SV port-list (output assignments inside
-`always_comb` vs `always_ff`).
+**Status.** Implemented. The SV port-list parser now captures the
+`[N]` array suffix (was previously a hard short-circuit). The
+generated harness drives unpacked-array inputs element-by-element
+(`dut.<name>[k].value = pack_fi(...)`) and reads outputs the same
+way. Helper functions `_drive` / `_read` / `_eq` / `_gen_random`
+emitted at the top of `test_<stem>.py` keep the test body uniform
+across scalar and vector ports — most users will never need to
+touch them.
 
-**Effort.** ~1 session.
+### v3.2.x — Stimulus-shape extensions (impulse / step / ramp) 🔵
 
-### v3.3 — Vector / unpacked-array port driving 🔵
+**Problem.** Multi-stage pipelined DUTs (`sequential_processor`)
+where the SV propagates state one register per cycle and the
+Python reference evaluates the full chain in one call. Even with
+`-cocotb-latency=L` and `% cocotb: hold(_, L)`, the per-call vs
+per-cycle structural mismatch produces divergence with random
+or per-cycle held inputs. To verify the FIR's transfer function,
+the user really wants impulse / step / ramp stimulus and a
+single comparison once the pipeline settles.
 
-**Problem.** `vector_processor` declares unpacked-array ports
-(`input logic signed [15:0] vec_a [3]`). The current harness bails
-with a warning because cocotb's `dut.vec_a.value = single_int`
-assignment doesn't work for arrays.
+**Plan.** A new `% cocotb: stimulus(impulse | step | ramp)` (or
+inline list) pragma chooses a deterministic input shape:
 
-**Plan.** Detect the `[N]` array suffix in the SV port-list parser
-(already done — used to bail). Generate per-element drive (`for k
-in range(N): dut.vec_a[k].value = pack_fi(...)`) and per-element
-sample on the read side. The reference Python model already takes
-list-shaped arguments for vector inputs.
+- **impulse.** Drive a non-zero value on the first cycle, then
+  zeros for L+ cycles. After settling, sample once and compare
+  against `ref(impulse)` evaluated by the reference function.
+- **step.** Drive 0, then constant non-zero. Compare
+  steady-state output against the reference's settled response.
+- **ramp.** Drive a linearly increasing input. Compare
+  cycle-by-cycle once the pipeline has filled.
 
-**Effort.** ~1 session. Mostly a code-generation change in
-`renderCocotbHarness`.
+**Effort.** ~2 sessions. Adds ~50 lines of stimulus-pattern
+emit to the harness and a small expansion to the `% cocotb:`
+pragma scanner.
 
 ### v3.4 — Auto-detect pipeline latency 🔵
 

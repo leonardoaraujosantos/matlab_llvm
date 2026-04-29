@@ -5531,6 +5531,20 @@ struct CocotbPortSpec {
   unsigned WL;
   unsigned FL;
   std::string Kind; // "fi" or "bool"
+  /* `% cocotb: hold(<name>, <cycles>)` from the source file pins
+   * this input's value across <cycles> stimulus iterations. Used
+   * for multi-stage pipelined DUTs (sequential_processor) where
+   * the SV samples a given input at cycle k+L while the reference
+   * consumes input[k] — without holding the input stable across
+   * those L cycles, the comparison legitimately diverges per random
+   * gain. 0 means "advance every cycle" (the default). */
+  int HoldCycles = 0;
+  /* Unpacked-array length. 0 = scalar port (the default), >0 =
+   * `logic [W-1:0] name [N]` shape. The harness drives /
+   * reads element-by-element via `dut.<name>[k]` and the Python
+   * reference receives a list. Detected from the SV port-list
+   * `name [N]` suffix during port parsing. */
+  int ArrayLen = 0;
 };
 
 struct CocotbFuncSpec {
@@ -5539,6 +5553,57 @@ struct CocotbFuncSpec {
   std::vector<CocotbPortSpec> Outputs;
   bool Sequential = false; // has clk/rst_n on the SV side
 };
+
+/* Scan the original .m source for `% cocotb: hold(<name>, <cycles>)`
+ * lines and return the (name → cycles) map. Tolerant of leading
+ * whitespace, optional spaces around the comma, single-line shape
+ * only. The same scan picks up future `% cocotb:` directives —
+ * this is the v3 pragma surface; future items extend it. */
+static std::map<std::string, int>
+scanCocotbPragmas(const std::string &SrcPath) {
+  std::map<std::string, int> Holds;
+  std::ifstream F(SrcPath);
+  if (!F) return Holds;
+  std::string Src((std::istreambuf_iterator<char>(F)),
+                   std::istreambuf_iterator<char>());
+  size_t Pos = 0;
+  while (Pos < Src.size()) {
+    size_t LineEnd = Src.find('\n', Pos);
+    if (LineEnd == std::string::npos) LineEnd = Src.size();
+    std::string Line = Src.substr(Pos, LineEnd - Pos);
+    Pos = LineEnd + 1;
+    auto Pct = Line.find('%');
+    if (Pct == std::string::npos) continue;
+    std::string Tail = Line.substr(Pct + 1);
+    auto skipWs = [](std::string &S) {
+      while (!S.empty() && std::isspace((unsigned char)S.front()))
+        S.erase(S.begin());
+    };
+    skipWs(Tail);
+    if (Tail.compare(0, 7, "cocotb:") != 0) continue;
+    Tail.erase(0, 7);
+    skipWs(Tail);
+    if (Tail.compare(0, 4, "hold") != 0) continue;
+    Tail.erase(0, 4);
+    skipWs(Tail);
+    if (Tail.empty() || Tail.front() != '(') continue;
+    Tail.erase(Tail.begin());
+    size_t Comma = Tail.find(',');
+    size_t Close = Tail.find(')');
+    if (Comma == std::string::npos || Close == std::string::npos ||
+        Close < Comma) continue;
+    std::string Name = Tail.substr(0, Comma);
+    std::string CyStr = Tail.substr(Comma + 1, Close - Comma - 1);
+    skipWs(Name);
+    while (!Name.empty() && std::isspace((unsigned char)Name.back()))
+      Name.pop_back();
+    skipWs(CyStr);
+    int Cy = std::atoi(CyStr.c_str());
+    if (!Name.empty() && Cy >= 0)
+      Holds[Name] = Cy;
+  }
+  return Holds;
+}
 
 /* Parse the SV file's `module <name> (...)` port list and rebuild a
  * CocotbFuncSpec from it. Source of truth for port types — the SV
@@ -5644,15 +5709,17 @@ parseCocotbSpecFromSv(const std::string &SvPath,
     }
     if (Name.empty()) continue;
     // Trailing whitespace then `[N]` → vector / unpacked-array port.
-    // v1 doesn't drive these; bail out so the caller can emit a clear
-    // diagnostic rather than a half-baked harness.
+    // v3.3: capture N and emit per-element drive / read.
+    int ArrayLen = 0;
     while (I < L.size() && std::isspace((unsigned char)L[I])) ++I;
     if (I < L.size() && L[I] == '[') {
-      std::cerr << "warning: emit-cocotb: port '" << Name
-                << "' is an unpacked array — vector ports aren't "
-                   "supported by the v1 random-vector harness; "
-                   "emitting a stub. Drive this DUT manually for now.\n";
-      return std::nullopt;
+      ++I;
+      std::string Num;
+      while (I < L.size() && std::isdigit((unsigned char)L[I]))
+        Num += L[I++];
+      if (I < L.size() && L[I] == ']') ++I;
+      ArrayLen = std::atoi(Num.c_str());
+      if (ArrayLen <= 0) ArrayLen = 0; // unparsable — fall back to scalar
     }
 
     // clk / rst_n are synthetic — flip Sequential and skip the port.
@@ -5666,6 +5733,7 @@ parseCocotbSpecFromSv(const std::string &SvPath,
     P.WL = WL;
     P.FL = 0;
     P.Kind = (WL == 1) ? "bool" : "fi";
+    P.ArrayLen = ArrayLen;
     if (IsInput) S.Inputs.push_back(P);
     else        S.Outputs.push_back(P);
   }
@@ -6097,8 +6165,12 @@ renderCocotbHarness(const CocotbFuncSpec &S, const std::string &Stem,
   auto append = [&](const std::string &S) { Out += S; };
   auto pyTuple = [](const CocotbPortSpec &P) -> std::string {
     bool Sn = P.Kind == "bool" ? false : P.Signed;
+    /* (name, signed, wl, fl, array_len). array_len = 0 means
+     * scalar; >0 means an unpacked array of that length, driven
+     * and sampled per-element via `dut.<name>[k]`. */
     return "(\"" + P.Name + "\", " + (Sn ? "True" : "False") + ", "
-         + std::to_string(P.WL) + ", " + std::to_string(P.FL) + ")";
+         + std::to_string(P.WL) + ", " + std::to_string(P.FL) + ", "
+         + std::to_string(P.ArrayLen) + ")";
   };
 
   append("# Generated by matlabc -emit-cocotb. Do not edit.\n");
@@ -6128,6 +6200,42 @@ renderCocotbHarness(const CocotbFuncSpec &S, const std::string &Stem,
   for (auto &P : S.Outputs) append("    " + pyTuple(P) + ",\n");
   append("]\n");
   append("\n");
+  /* Helper functions for scalar / unpacked-array port driving and
+   * sampling. Keeps the test body small and uniform regardless of
+   * whether a port is scalar (`alen == 0`) or a vector
+   * (`logic ... [N]`, `alen == N`). */
+  append("def _real(v):\n");
+  append("    if isinstance(v, bool): return 1.0 if v else 0.0\n");
+  append("    return float(v)\n\n");
+  append("def _drive(dut, name, val, signed, wl, fl, alen):\n");
+  append("    if alen == 0:\n");
+  append("        getattr(dut, name).value = pack_fi(_real(val), signed, wl, fl)\n");
+  append("    else:\n");
+  append("        for k in range(alen):\n");
+  append("            getattr(dut, name)[k].value = pack_fi(_real(val[k]), "
+         "signed, wl, fl)\n\n");
+  append("def _read(dut, name, signed, wl, fl, alen):\n");
+  append("    if alen == 0:\n");
+  append("        return unpack_fi(int(getattr(dut, name).value), signed, wl, fl)\n");
+  append("    return [unpack_fi(int(getattr(dut, name)[k].value), signed, wl, fl) "
+         "for k in range(alen)]\n\n");
+  append("def _eq(dut_val, ref_val, tol=1e-9):\n");
+  append("    if isinstance(dut_val, list):\n");
+  append("        ref_seq = ref_val if isinstance(ref_val, (list, tuple)) else [ref_val]\n");
+  append("        if len(dut_val) != len(ref_seq): return False\n");
+  append("        return all(abs(float(a) - float(b)) <= tol for a, b in zip(dut_val, ref_seq))\n");
+  append("    return abs(float(dut_val) - float(ref_val)) <= tol\n\n");
+  append("def _gen_random(signed, wl, fl, alen):\n");
+  append("    if alen == 0:\n");
+  append("        lo, hi = fi_range(signed, wl, fl)\n");
+  append("        v_packed = pack_fi(random.uniform(lo, hi), signed, wl, fl)\n");
+  append("        v_real = unpack_fi(v_packed, signed, wl, fl)\n");
+  append("        return v_packed, v_real\n");
+  append("    lo, hi = fi_range(signed, wl, fl)\n");
+  append("    packed = [pack_fi(random.uniform(lo, hi), signed, wl, fl) "
+         "for _ in range(alen)]\n");
+  append("    real = [unpack_fi(p, signed, wl, fl) for p in packed]\n");
+  append("    return packed, real\n\n");
 
   append("@cocotb.test()\n");
   append("async def test_" + S.Name + "(dut):\n");
@@ -6141,8 +6249,12 @@ renderCocotbHarness(const CocotbFuncSpec &S, const std::string &Stem,
     append("    dut.rst_n.value = 0\n");
     /* Initial inputs to known values so the always_ff doesn't sample
      * X / Z on the first pre-reset cycle. */
-    append("    for name, signed, wl, fl in INPUTS:\n");
-    append("        getattr(dut, name).value = 0\n");
+    append("    for name, signed, wl, fl, alen in INPUTS:\n");
+    append("        if alen == 0:\n");
+    append("            getattr(dut, name).value = 0\n");
+    append("        else:\n");
+    append("            for k in range(alen):\n");
+    append("                getattr(dut, name)[k].value = 0\n");
     append("    await RisingEdge(dut.clk)\n");
     append("    await RisingEdge(dut.clk)\n");
     append("    dut.rst_n.value = 1\n");
@@ -6180,32 +6292,71 @@ renderCocotbHarness(const CocotbFuncSpec &S, const std::string &Stem,
     append("    N = len(STIMULUS)\n");
     append("    for i, args in enumerate(STIMULUS):\n");
     append("        py_args = list(args)\n");
-    append("        for j, (name, signed, wl, fl) in enumerate(INPUTS):\n");
-    append("            v = float(py_args[j]) if not isinstance(py_args[j], bool) "
-           "else (1.0 if py_args[j] else 0.0)\n");
-    append("            getattr(dut, name).value = pack_fi(v, signed, wl, fl)\n");
+    append("        for j, (name, signed, wl, fl, alen) in enumerate(INPUTS):\n");
+    append("            _drive(dut, name, py_args[j], signed, wl, fl, alen)\n");
   } else {
+    /* Per-input hold cycles from `% cocotb: hold(<name>, N)` pragmas.
+     * `HOLD[k] = N` means input k stays at the same value for N
+     * consecutive iterations before a fresh random value is drawn.
+     * 0 / 1 both mean "advance every iteration" (the default). */
+    append("    HOLD = [");
+    for (size_t I = 0; I < S.Inputs.size(); ++I) {
+      if (I) append(", ");
+      int H = S.Inputs[I].HoldCycles;
+      if (H < 1) H = 1;
+      append(std::to_string(H));
+    }
+    append("]\n");
+    append("    held_real = [None] * len(INPUTS)\n");
+    append("    held_packed = [None] * len(INPUTS)\n");
+    append("    cycles_left = [0] * len(INPUTS)\n");
     append("    for i in range(N):\n");
     append("        py_args = []\n");
-    append("        for name, signed, wl, fl in INPUTS:\n");
-    append("            lo, hi = fi_range(signed, wl, fl)\n");
-    append("            v = random.uniform(lo, hi)\n");
-    append("            v_packed = pack_fi(v, signed, wl, fl)\n");
-    append("            v_real = unpack_fi(v_packed, signed, wl, fl)\n");
-    append("            getattr(dut, name).value = v_packed\n");
-    /* The Python reference treats Q.0 fi values as Python ints
-     * (so bitwise ops `a & b` etc. work) and Q.F values as floats
-     * (real arithmetic, saturation deferred to matlab_runtime).
-     * Pass each input in the shape its consumer expects. */
-    append("            py_args.append(int(v_real) if fl == 0 else v_real)\n");
+    append("        for k, (name, signed, wl, fl, alen) in enumerate(INPUTS):\n");
+    append("            if cycles_left[k] == 0:\n");
+    append("                held_packed[k], held_real[k] = "
+           "_gen_random(signed, wl, fl, alen)\n");
+    append("                cycles_left[k] = HOLD[k]\n");
+    append("            cycles_left[k] -= 1\n");
+    /* Drive: scalar uses .value =, vector uses [k].value = per element. */
+    append("            if alen == 0:\n");
+    append("                getattr(dut, name).value = held_packed[k]\n");
+    append("            else:\n");
+    append("                for kk in range(alen):\n");
+    append("                    getattr(dut, name)[kk].value = held_packed[k][kk]\n");
+    /* Reference args: scalar Q.0 → int, scalar Q.F → float, vector → list. */
+    append("            if alen > 0:\n");
+    append("                py_args.append([int(x) if fl == 0 else x "
+           "for x in held_real[k]])\n");
+    append("            else:\n");
+    append("                py_args.append(int(held_real[k]) if fl == 0 "
+           "else held_real[k])\n");
   }
   if (S.Sequential) {
-    /* Drive inputs, wait for the next posedge to latch them into
-     * the registers, then a small settle delay so the always_comb
-     * outputs propagate the new register values before we sample.
-     * Without the settle, getattr(dut, name).value reads the
-     * pre-edge register state and every comparison is off by one
-     * cycle. */
+    /* Sequential DUTs need TWO sample windows per cycle:
+     *   - pre-edge: combinational outputs reflecting f(old_state,
+     *     new_inputs). Mealy-style outputs match here (their value
+     *     for the cycle's input is computed with the still-valid
+     *     state).
+     *   - post-edge: registered outputs and Moore-style
+     *     combinational outputs (depend only on the just-latched
+     *     state). Most outputs match here.
+     * The harness samples both, then per-output accepts whichever
+     * matches the reference. Mealy alignment without per-output
+     * kind metadata.
+     *
+     * Drive inputs first, then a 1ns settle so always_comb
+     * propagates the new inputs through the still-valid old state
+     * — that's the pre-edge sample. await RisingEdge advances the
+     * state; another 1ns settle lets always_comb re-evaluate with
+     * the new state — that's the post-edge sample. */
+    append("        await Timer(1, units=\"ns\")\n");
+    append("        pre_samples = []\n");
+    append("        for j, (name, signed, wl, fl, alen) in enumerate(OUTPUTS):\n");
+    append("            try:\n");
+    append("                pre_samples.append(_read(dut, name, signed, wl, fl, alen))\n");
+    append("            except Exception:\n");
+    append("                pre_samples.append(None)\n");
     append("        await RisingEdge(dut.clk)\n");
     append("        await Timer(1, units=\"ns\")\n");
   } else {
@@ -6214,25 +6365,38 @@ renderCocotbHarness(const CocotbFuncSpec &S, const std::string &Stem,
   append("        ref = " + S.Name + "(*py_args)\n");
   append("        if not isinstance(ref, tuple):\n");
   append("            ref = (ref,)\n");
-  append("        pending_refs.append((i, ref, list(py_args)))\n");
+  if (S.Sequential)
+    append("        pending_refs.append((i, ref, list(py_args), "
+           "list(pre_samples)))\n");
+  else
+    append("        pending_refs.append((i, ref, list(py_args), None))\n");
   append("        if i >= LATENCY:\n");
-  append("            ref_cycle, ref, ref_args = pending_refs.pop(0)\n");
+  append("            popped = pending_refs.pop(0)\n");
+  append("            ref_cycle, ref, ref_args, pre_samp = popped\n");
   append("            compared += 1\n");
-  append("            for j, (name, signed, wl, fl) in enumerate(OUTPUTS):\n");
+  append("            for j, (name, signed, wl, fl, alen) in enumerate(OUTPUTS):\n");
   append("                try:\n");
-  append("                    dut_val = unpack_fi(int(getattr(dut, name).value), "
-         "signed, wl, fl)\n");
+  append("                    post_val = _read(dut, name, signed, wl, fl, alen)\n");
   append("                except Exception as exc:\n");
   append("                    cocotb.log.error(f\"#{ref_cycle} {name}: cannot "
          "read DUT signal: {exc}\")\n");
   append("                    failures += 1\n");
   append("                    continue\n");
-  append("                ref_val = float(ref[j])\n");
-  append("                if abs(dut_val - ref_val) > 1e-9:\n");
-  append("                    cocotb.log.error(\n");
-  append("                        f\"#{ref_cycle} {name}: dut={dut_val} "
-         "ref={ref_val} args={ref_args}\")\n");
-  append("                    failures += 1\n");
+  append("                ref_val = ref[j]\n");
+  /* For sequential modules, accept either the pre-edge or
+   * post-edge sample as a match. The pre-edge value is captured
+   * before the rising edge, post-edge after. Mealy outputs match
+   * pre-edge; Moore / counter / FIR outputs match post-edge. */
+  append("                pre_val = pre_samp[j] if pre_samp else None\n");
+  append("                post_match = _eq(post_val, ref_val)\n");
+  append("                pre_match = (pre_val is not None and "
+         "_eq(pre_val, ref_val))\n");
+  append("                if post_match or pre_match:\n");
+  append("                    continue\n");
+  append("                cocotb.log.error(\n");
+  append("                    f\"#{ref_cycle} {name}: post={post_val} "
+         "pre={pre_val} ref={ref_val} args={ref_args}\")\n");
+  append("                failures += 1\n");
   append("    assert failures == 0, "
          "f\"{failures} mismatch(es) across {compared} compared cycles "
          "(latency={LATENCY}, total stimulus N={N})\"\n");
@@ -6345,6 +6509,23 @@ int emitCocotbHarness(const char *Self, const Options &Opts,
     std::cerr << "error: emit-cocotb: failed to parse port list from "
               << SVPath << "\n";
     return 1;
+  }
+
+  /* v3.1 — apply any `% cocotb: hold(<input>, <cycles>)` pragmas
+   * from the source onto the matching input port. Mismatched names
+   * are reported but ignored (stale pragma after a rename). */
+  auto Holds = scanCocotbPragmas(Input);
+  for (auto &P : Spec->Inputs) {
+    auto It = Holds.find(P.Name);
+    if (It != Holds.end()) P.HoldCycles = It->second;
+  }
+  for (auto &Kv : Holds) {
+    bool Found = false;
+    for (auto &P : Spec->Inputs)
+      if (P.Name == Kv.first) { Found = true; break; }
+    if (!Found)
+      std::cerr << "warning: emit-cocotb: `% cocotb: hold(" << Kv.first
+                << ", ...)` doesn't match any input port; ignored.\n";
   }
 
   /* v3.2: when a sibling `test_<stem>.m` exists, replay its
