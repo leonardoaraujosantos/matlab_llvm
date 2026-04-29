@@ -1829,8 +1829,15 @@ bool compileProgram() {
    * runtime's debug table. Today only the entry-point is loaded;
    * once Sema starts pulling sibling .m files in to resolve
    * cross-file calls they'll appear here automatically and
-   * cross-file breakpoints will Just Work. */
+   * cross-file breakpoints will Just Work.
+   *
+   * Phase 6: synthesised per-block buffers added by the flowchart
+   * builder (`<flow:NODEID>` etc.) are filtered out — they're not
+   * real files the IDE can open, and the AST's source ranges have
+   * already been remapped to the .mflow's byte offsets so DAP
+   * breakpoints set on `.mflow` lines fire correctly. */
   auto registerSMFile = [](FileID Fid, const std::string &Name) {
+    if (!Name.empty() && Name.front() == '<') return;
     matlab_dbg_register_file((int32_t)Fid, Name.data(),
                               (int64_t)Name.size());
     G.PathToFileId[canonPath(Name)] = (int32_t)Fid;
@@ -1838,12 +1845,57 @@ bool compileProgram() {
   for (size_t i = 1; i <= SM.numFiles(); ++i)
     registerSMFile((FileID)i, SM.getName((FileID)i));
 
+  /* Detect .mflow inputs and route through the flowchart frontend
+   * instead of the MATLAB lexer/parser. The resulting TU feeds the
+   * same Sema + MLIR pipeline below, so every DAP capability that
+   * works on .m files (breakpoints, step in/out/over, evaluate,
+   * setVariable, multi-frame stack trace) works on .mflow files
+   * too — block-line breakpoints fire because GraphToAST tags
+   * each statement's Range.Begin with the originating block's
+   * .mflow byte offset (see lib/Flowchart/GraphToAST.cpp). */
+  auto endsWith = [](const std::string &S, std::string_view Suf) {
+    return S.size() >= Suf.size() &&
+           std::string_view(S).substr(S.size() - Suf.size()) == Suf;
+  };
+  bool IsFlow = endsWith(G.ProgramPath, ".mflow");
+
   DiagnosticEngine Diag(SM);
-  Lexer Lx(SM, F, Diag);
-  auto Toks = Lx.tokenize();
   ASTContext AstCtx;
-  Parser P(std::move(Toks), AstCtx, Diag);
-  TranslationUnit *TU = P.parseFile();
+  TranslationUnit *TU = nullptr;
+
+  if (IsFlow) {
+    matlab::flowchart::BuildOptions BO;
+    /* `data.path` on custom blocks resolves relative to the .mflow
+     * file's containing directory. */
+    auto Slash = G.ProgramPath.find_last_of("/\\");
+    if (Slash != std::string::npos)
+      BO.MflowDirectory = G.ProgramPath.substr(0, Slash);
+    /* `library_id` resolution honours the same env var the CLI
+     * accepts. CLI `--block-path` isn't reachable from the DAP
+     * launch surface yet — track via initializationOptions in a
+     * follow-up. */
+    if (const char *Env = std::getenv("MATFORGE_BLOCK_PATH")) {
+      std::string E = Env;
+      size_t Start = 0;
+      while (Start <= E.size()) {
+        size_t Sep = E.find(':', Start);
+        std::string Part = (Sep == std::string::npos)
+                               ? E.substr(Start)
+                               : E.substr(Start, Sep - Start);
+        if (!Part.empty()) BO.BlockSearchPath.push_back(std::move(Part));
+        if (Sep == std::string::npos) break;
+        Start = Sep + 1;
+      }
+    }
+    auto Doc = matlab::flowchart::loadMflow(SM, F, Diag);
+    if (Doc)
+      TU = matlab::flowchart::buildAST(*Doc, AstCtx, SM, Diag, BO);
+  } else {
+    Lexer Lx(SM, F, Diag);
+    auto Toks = Lx.tokenize();
+    Parser P(std::move(Toks), AstCtx, Diag);
+    TU = P.parseFile();
+  }
   if (!TU || Diag.hasErrors()) { Diag.printAll(); return false; }
 
   /* Multi-file breakpoints: walk the entry-point's directory for
@@ -1864,8 +1916,13 @@ bool compileProgram() {
    * Per-file diagnostics are dropped on parse failure so a malformed
    * sibling doesn't tank the launch — the entry point still
    * compiles. The same shared ASTContext is reused so node lifetimes
-   * align with the main TU. */
-  {
+   * align with the main TU.
+   *
+   * Skipped for .mflow entries — flowchart programs reference helper
+   * functions through `function`-kind sub-flows or `custom` blocks
+   * (with their own search-path resolution), not through ad-hoc
+   * sibling `.m` files in the same directory. */
+  if (!IsFlow) {
     namespace fs = std::filesystem;
     fs::path EntryPath = fs::path(G.ProgramPath);
     std::error_code EC;

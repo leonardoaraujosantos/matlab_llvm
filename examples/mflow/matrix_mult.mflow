@@ -1,88 +1,547 @@
 {
-  "schema": "matforge.flowchart",
-  "version": "0.1.0",
-  "entry": "main",
-  "settings": {
-    "columnMajor": true,
-    "defaultNumericType": "double",
-    "sourceLanguage": "matforge"
-  },
-  "flows": [
+  "entry" : "main",
+  "flows" : [
     {
-      "id": "flow_main",
-      "kind": "program",
-      "name": "main",
-      "signature": { "inputs": [], "outputs": [] },
-      "nodes": [
-        { "id": "s",     "kind": "start",
-          "ports": { "in": [], "out": [{"id": "out"}] } },
-        { "id": "matA",  "kind": "matrix_literal",
-          "data": { "name": "A", "rows": "1 2 3; 4 5 6; 7 8 10" },
-          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
-        { "id": "matB",  "kind": "matrix_literal",
-          "data": { "name": "B", "rows": "1 0 0; 0 2 0; 0 0 3" },
-          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
-        { "id": "lblA",  "kind": "display",
-          "data": { "expression": "'A ='" },
-          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
-        { "id": "showA", "kind": "display",
-          "data": { "expression": "A" },
-          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
-        { "id": "lblB",  "kind": "display",
-          "data": { "expression": "'B ='" },
-          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
-        { "id": "showB", "kind": "display",
-          "data": { "expression": "B" },
-          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
-        { "id": "lblM",  "kind": "display",
-          "data": { "expression": "'A * B ='" },
-          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
-        { "id": "showM", "kind": "display",
-          "data": { "expression": "A * B" },
-          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
-        { "id": "lblE",  "kind": "display",
-          "data": { "expression": "'A .* B ='" },
-          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
-        { "id": "showE", "kind": "display",
-          "data": { "expression": "A .* B" },
-          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
-        { "id": "lblT",  "kind": "display",
-          "data": { "expression": "'A'' ='" },
-          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
-        { "id": "showT", "kind": "display",
-          "data": { "expression": "A'" },
-          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
-        { "id": "e",     "kind": "end",
-          "ports": { "in": [{"id": "in"}], "out": [] } }
+      "edges" : [
+        {
+          "from" : {
+            "node" : "s",
+            "port" : "out"
+          },
+          "id" : "e_1",
+          "kind" : "control",
+          "to" : {
+            "node" : "matA",
+            "port" : "in"
+          }
+        },
+        {
+          "from" : {
+            "node" : "matA",
+            "port" : "out"
+          },
+          "id" : "e_2",
+          "kind" : "control",
+          "to" : {
+            "node" : "matB",
+            "port" : "in"
+          }
+        },
+        {
+          "from" : {
+            "node" : "matB",
+            "port" : "out"
+          },
+          "id" : "e_3",
+          "kind" : "control",
+          "to" : {
+            "node" : "lblA",
+            "port" : "in"
+          }
+        },
+        {
+          "from" : {
+            "node" : "lblA",
+            "port" : "out"
+          },
+          "id" : "e_4",
+          "kind" : "control",
+          "to" : {
+            "node" : "showA",
+            "port" : "in"
+          }
+        },
+        {
+          "from" : {
+            "node" : "showA",
+            "port" : "out"
+          },
+          "id" : "e_5",
+          "kind" : "control",
+          "to" : {
+            "node" : "lblB",
+            "port" : "in"
+          }
+        },
+        {
+          "from" : {
+            "node" : "lblB",
+            "port" : "out"
+          },
+          "id" : "e_6",
+          "kind" : "control",
+          "to" : {
+            "node" : "showB",
+            "port" : "in"
+          }
+        },
+        {
+          "from" : {
+            "node" : "showB",
+            "port" : "out"
+          },
+          "id" : "e_7",
+          "kind" : "control",
+          "to" : {
+            "node" : "lblM",
+            "port" : "in"
+          }
+        },
+        {
+          "from" : {
+            "node" : "lblM",
+            "port" : "out"
+          },
+          "id" : "e_8",
+          "kind" : "control",
+          "to" : {
+            "node" : "showM",
+            "port" : "in"
+          }
+        },
+        {
+          "from" : {
+            "node" : "showM",
+            "port" : "out"
+          },
+          "id" : "e_9",
+          "kind" : "control",
+          "to" : {
+            "node" : "lblE",
+            "port" : "in"
+          }
+        },
+        {
+          "from" : {
+            "node" : "lblE",
+            "port" : "out"
+          },
+          "id" : "e_10",
+          "kind" : "control",
+          "to" : {
+            "node" : "showE",
+            "port" : "in"
+          }
+        },
+        {
+          "from" : {
+            "node" : "showE",
+            "port" : "out"
+          },
+          "id" : "e_11",
+          "kind" : "control",
+          "to" : {
+            "node" : "lblT",
+            "port" : "in"
+          }
+        },
+        {
+          "from" : {
+            "node" : "lblT",
+            "port" : "out"
+          },
+          "id" : "e_12",
+          "kind" : "control",
+          "to" : {
+            "node" : "showT",
+            "port" : "in"
+          }
+        },
+        {
+          "from" : {
+            "node" : "showT",
+            "port" : "out"
+          },
+          "id" : "e_13",
+          "kind" : "control",
+          "to" : {
+            "node" : "e",
+            "port" : "in"
+          }
+        }
       ],
-      "edges": [
-        { "id": "e_1",  "kind": "control",
-          "from": {"node": "s",     "port": "out"}, "to": {"node": "matA",  "port": "in"} },
-        { "id": "e_2",  "kind": "control",
-          "from": {"node": "matA",  "port": "out"}, "to": {"node": "matB",  "port": "in"} },
-        { "id": "e_3",  "kind": "control",
-          "from": {"node": "matB",  "port": "out"}, "to": {"node": "lblA",  "port": "in"} },
-        { "id": "e_4",  "kind": "control",
-          "from": {"node": "lblA",  "port": "out"}, "to": {"node": "showA", "port": "in"} },
-        { "id": "e_5",  "kind": "control",
-          "from": {"node": "showA", "port": "out"}, "to": {"node": "lblB",  "port": "in"} },
-        { "id": "e_6",  "kind": "control",
-          "from": {"node": "lblB",  "port": "out"}, "to": {"node": "showB", "port": "in"} },
-        { "id": "e_7",  "kind": "control",
-          "from": {"node": "showB", "port": "out"}, "to": {"node": "lblM",  "port": "in"} },
-        { "id": "e_8",  "kind": "control",
-          "from": {"node": "lblM",  "port": "out"}, "to": {"node": "showM", "port": "in"} },
-        { "id": "e_9",  "kind": "control",
-          "from": {"node": "showM", "port": "out"}, "to": {"node": "lblE",  "port": "in"} },
-        { "id": "e_10", "kind": "control",
-          "from": {"node": "lblE",  "port": "out"}, "to": {"node": "showE", "port": "in"} },
-        { "id": "e_11", "kind": "control",
-          "from": {"node": "showE", "port": "out"}, "to": {"node": "lblT",  "port": "in"} },
-        { "id": "e_12", "kind": "control",
-          "from": {"node": "lblT",  "port": "out"}, "to": {"node": "showT", "port": "in"} },
-        { "id": "e_13", "kind": "control",
-          "from": {"node": "showT", "port": "out"}, "to": {"node": "e",     "port": "in"} }
-      ]
+      "id" : "flow_main",
+      "kind" : "program",
+      "name" : "main",
+      "nodes" : [
+        {
+          "data" : {
+
+          },
+          "id" : "s",
+          "kind" : "start",
+          "label" : "",
+          "ports" : {
+            "in" : [
+
+            ],
+            "out" : [
+              {
+                "id" : "out"
+              }
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 0,
+              "y" : 0
+            }
+          }
+        },
+        {
+          "data" : {
+            "name" : "A",
+            "rows" : "1 2 3; 4 5 6; 7 8 10"
+          },
+          "id" : "matA",
+          "kind" : "matrix_literal",
+          "label" : "",
+          "ports" : {
+            "in" : [
+              {
+                "id" : "in"
+              }
+            ],
+            "out" : [
+              {
+                "id" : "out"
+              }
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 498,
+              "y" : 168
+            }
+          }
+        },
+        {
+          "data" : {
+            "name" : "B",
+            "rows" : "1 0 0; 0 2 0; 0 0 3"
+          },
+          "id" : "matB",
+          "kind" : "matrix_literal",
+          "label" : "",
+          "ports" : {
+            "in" : [
+              {
+                "id" : "in"
+              }
+            ],
+            "out" : [
+              {
+                "id" : "out"
+              }
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 450,
+              "y" : 279
+            }
+          }
+        },
+        {
+          "data" : {
+            "expression" : "'A ='"
+          },
+          "id" : "lblA",
+          "kind" : "display",
+          "label" : "",
+          "ports" : {
+            "in" : [
+              {
+                "id" : "in"
+              }
+            ],
+            "out" : [
+              {
+                "id" : "out"
+              }
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 369,
+              "y" : 432
+            }
+          }
+        },
+        {
+          "data" : {
+            "expression" : "A"
+          },
+          "id" : "showA",
+          "kind" : "display",
+          "label" : "",
+          "ports" : {
+            "in" : [
+              {
+                "id" : "in"
+              }
+            ],
+            "out" : [
+              {
+                "id" : "out"
+              }
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 312,
+              "y" : 351
+            }
+          }
+        },
+        {
+          "data" : {
+            "expression" : "'B ='"
+          },
+          "id" : "lblB",
+          "kind" : "display",
+          "label" : "",
+          "ports" : {
+            "in" : [
+              {
+                "id" : "in"
+              }
+            ],
+            "out" : [
+              {
+                "id" : "out"
+              }
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 294,
+              "y" : 243
+            }
+          }
+        },
+        {
+          "data" : {
+            "expression" : "B"
+          },
+          "id" : "showB",
+          "kind" : "display",
+          "label" : "",
+          "ports" : {
+            "in" : [
+              {
+                "id" : "in"
+              }
+            ],
+            "out" : [
+              {
+                "id" : "out"
+              }
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 294,
+              "y" : 54
+            }
+          }
+        },
+        {
+          "data" : {
+            "expression" : "'A * B ='"
+          },
+          "id" : "lblM",
+          "kind" : "display",
+          "label" : "",
+          "ports" : {
+            "in" : [
+              {
+                "id" : "in"
+              }
+            ],
+            "out" : [
+              {
+                "id" : "out"
+              }
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 279,
+              "y" : 135
+            }
+          }
+        },
+        {
+          "data" : {
+            "expression" : "A * B"
+          },
+          "id" : "showM",
+          "kind" : "display",
+          "label" : "",
+          "ports" : {
+            "in" : [
+              {
+                "id" : "in"
+              }
+            ],
+            "out" : [
+              {
+                "id" : "out"
+              }
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 36,
+              "y" : 72
+            }
+          }
+        },
+        {
+          "data" : {
+            "expression" : "'A .* B ='"
+          },
+          "id" : "lblE",
+          "kind" : "display",
+          "label" : "",
+          "ports" : {
+            "in" : [
+              {
+                "id" : "in"
+              }
+            ],
+            "out" : [
+              {
+                "id" : "out"
+              }
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 51,
+              "y" : 147
+            }
+          }
+        },
+        {
+          "data" : {
+            "expression" : "A .* B"
+          },
+          "id" : "showE",
+          "kind" : "display",
+          "label" : "",
+          "ports" : {
+            "in" : [
+              {
+                "id" : "in"
+              }
+            ],
+            "out" : [
+              {
+                "id" : "out"
+              }
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 63,
+              "y" : 231
+            }
+          }
+        },
+        {
+          "data" : {
+            "expression" : "'A'' ='"
+          },
+          "id" : "lblT",
+          "kind" : "display",
+          "label" : "",
+          "ports" : {
+            "in" : [
+              {
+                "id" : "in"
+              }
+            ],
+            "out" : [
+              {
+                "id" : "out"
+              }
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 69,
+              "y" : 309
+            }
+          }
+        },
+        {
+          "data" : {
+            "expression" : "A'"
+          },
+          "id" : "showT",
+          "kind" : "display",
+          "label" : "",
+          "ports" : {
+            "in" : [
+              {
+                "id" : "in"
+              }
+            ],
+            "out" : [
+              {
+                "id" : "out"
+              }
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 72,
+              "y" : 390
+            }
+          }
+        },
+        {
+          "data" : {
+
+          },
+          "id" : "e",
+          "kind" : "end",
+          "label" : "",
+          "ports" : {
+            "in" : [
+              {
+                "id" : "in"
+              }
+            ],
+            "out" : [
+
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 75,
+              "y" : 474
+            }
+          }
+        }
+      ],
+      "signature" : {
+        "inputs" : [
+
+        ],
+        "outputs" : [
+
+        ]
+      }
     }
-  ]
+  ],
+  "schema" : "matforge.flowchart",
+  "settings" : {
+    "columnMajor" : true,
+    "defaultNumericType" : "double",
+    "sourceLanguage" : "matforge"
+  },
+  "version" : "0.1.0"
 }

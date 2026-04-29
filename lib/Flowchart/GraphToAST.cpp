@@ -455,7 +455,18 @@ private:
       if (Diag.hasErrors()) return "";
       auto Stmts = parseSynthesized(Src, "<flow:" + N->Id + ">");
       if (Diag.hasErrors()) return "";
-      for (auto *S : Stmts) Out.push_back(S);
+      for (auto *S : Stmts) {
+        // Phase 6: remap to the originating block's location in the
+        // .mflow source so DAP breakpoints set on a block's JSON
+        // line fire when execution reaches the synthesized
+        // statements. The synthetic per-block buffer keeps the
+        // parser's intra-field locations available for diagnostics
+        // that point inside `data.expression` text — only the
+        // outer Stmt range is overridden here.
+        S->Range.Begin = N->Loc;
+        if (!S->Range.End.isValid()) S->Range.End = N->Loc;
+        Out.push_back(S);
+      }
 
       Cur = singleOut(*N);
     }
@@ -644,7 +655,12 @@ private:
                                   : (Lhs + " = " + Call + ";\n");
     auto Stmts = parseSynthesized(Src, "<flow:" + N.Id + ":call>");
     if (Diag.hasErrors()) return "";
-    for (auto *S : Stmts) Out.push_back(S);
+    for (auto *S : Stmts) {
+      // Phase 6: see remap rationale above the linear-block path.
+      S->Range.Begin = N.Loc;
+      if (!S->Range.End.isValid()) S->Range.End = N.Loc;
+      Out.push_back(S);
+    }
 
     return singleOut(N);
   }

@@ -212,6 +212,12 @@ add_test(
           $<TARGET_FILE:matlab-lsp>
   WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Flowchart/Lsp
 )
+add_test(
+  NAME flowchart-dap-tests
+  COMMAND python3 ${CMAKE_SOURCE_DIR}/test/Flowchart/Dap/run_tests.py
+          $<TARGET_FILE:matlabc>
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Flowchart/Dap
+)
 if(MATLAB_LLVM_WITH_MLIR)
   add_test(
     NAME run-tests

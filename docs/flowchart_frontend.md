@@ -576,6 +576,47 @@ SV golden lives in the Phase 5 test corpus.
 
 **Exit criterion met.** Roadmap item #6 v1 scope is shipped.
 
+### Phase 6 — DAP support (shipped)
+
+- `matlabc -dap` accepts a `.mflow` entry point. The DAP
+  `compileProgram` path dispatches on the extension (the same
+  way `matlabc` and `matlab-lsp` do) and routes through the
+  flowchart loader + builder before Sema.
+- Source-location remap in `lib/Flowchart/GraphToAST.cpp`: every
+  per-block synthesized statement gets its `Range.Begin`
+  rewritten to the originating block's `.mflow` byte offset, so
+  breakpoints set on a block's JSON line resolve correctly via
+  the existing `G.PathToFileId` table and fire when execution
+  reaches the synthesized statements. Same fix benefits the LSP.
+- Synthesized per-block buffers (`<flow:NODEID>`) are filtered
+  from the DAP `loadedSources` registration so the IDE doesn't
+  see them as openable files.
+- Sibling-`.m` autoload is skipped for `.mflow` entries —
+  flowchart programs reference helpers through `function`-kind
+  sub-flows or `custom` blocks, not ad-hoc sibling files.
+- `MATFORGE_BLOCK_PATH` is honoured for `library_id` custom
+  blocks. (CLI `--block-path` is wired for `matlabc`-direct;
+  threading it through DAP launch arguments via
+  `initializationOptions` is a v2 polish.)
+- Test lane `flowchart-dap-tests`: drives a real DAP session
+  for three `.mflow` programs (`hello`, `for_loop`,
+  `nested_for_if`), verifies breakpoint registration, the
+  `stopped` event with `reason="breakpoint"`, and that the top
+  stack frame's `source.path` ends in `.mflow`.
+
+What still doesn't work for `.mflow` debugging (deferred polish):
+- Block-id surfacing in stack frames (today the frame shows the
+  `.mflow` path + line; the IDE has to map line → block on its
+  own). Block ids in the frame `name` field would let the IDE
+  highlight the active block on the canvas.
+- Per-block step granularity: stepping today goes per-statement,
+  so a block that synthesizes multiple statements steps multiple
+  times. Collapsing to per-block steps would require tagging
+  hooks with the block id and skipping when the id doesn't
+  change.
+- `--block-path` plumbed into the DAP launch surface (currently
+  only `MATFORGE_BLOCK_PATH` reaches the DAP path).
+
 ---
 
 ## 8. Out of scope (for v1)
