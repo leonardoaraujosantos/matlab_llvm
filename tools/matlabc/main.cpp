@@ -1419,6 +1419,21 @@ struct Shared {
    * a line breakpoint at the function's entry by name. */
   struct FnEntry { int32_t FileId = 0; int32_t Line = 0; };
   std::unordered_map<std::string, FnEntry> FunctionTable;
+  /* Phase 8a: `(file_id, line)` → originating block id, populated
+   * for `.mflow` entry points by `flowchart::buildAST`. The DAP
+   * `stackTrace` handler appends the block id to each frame's name
+   * so the IDE can highlight the active block on the canvas. Empty
+   * for `.m` entry points and unused outside `.mflow` programs. */
+  std::unordered_map<int64_t, std::string> BlockByLine;
+  /* Phase 8c: extra block-library search-path entries supplied by
+   * the IDE through DAP `initialize`'s `initializationOptions.blockPath`
+   * (a JSON array of strings). Threaded into
+   * `BuildOptions::BlockSearchPath` ahead of `MATFORGE_BLOCK_PATH`
+   * env-var entries when compiling `.mflow` programs, so a project
+   * can configure block libraries through its DAP launch
+   * configuration without setting environment variables on the
+   * matlabc subprocess. Empty for `.m` programs and unused. */
+  std::vector<std::string> BlockPathFromIDE;
   /* Breakpoints set against a path the runtime hasn't registered
    * yet (e.g. setBreakpoints arrived before launch / compileProgram).
    * Held here keyed by canonical path, replayed when the path
@@ -1825,6 +1840,7 @@ bool compileProgram() {
   G.PathToFileId.clear();
   G.BpLocations.clear();
   G.FunctionTable.clear();
+  G.BlockByLine.clear();
   G.ClassMethods.clear();
   G.ClassParent.clear();
 
@@ -1873,10 +1889,14 @@ bool compileProgram() {
     auto Slash = G.ProgramPath.find_last_of("/\\");
     if (Slash != std::string::npos)
       BO.MflowDirectory = G.ProgramPath.substr(0, Slash);
-    /* `library_id` resolution honours the same env var the CLI
-     * accepts. CLI `--block-path` isn't reachable from the DAP
-     * launch surface yet — track via initializationOptions in a
-     * follow-up. */
+    /* `library_id` block search path. Resolution order matches
+     * `matlabc -dap`'s symmetry with the standalone CLI:
+     *   1. IDE-supplied entries from `initialize`'s
+     *      `initializationOptions.blockPath` (Phase 8c).
+     *   2. `MATFORGE_BLOCK_PATH` env-var entries (colon-separated).
+     * First match wins; the loader walks the list in order. */
+    for (const auto &P : G.BlockPathFromIDE)
+      BO.BlockSearchPath.push_back(P);
     if (const char *Env = std::getenv("MATFORGE_BLOCK_PATH")) {
       std::string E = Env;
       size_t Start = 0;
@@ -1891,8 +1911,17 @@ bool compileProgram() {
       }
     }
     auto Doc = matlab::flowchart::loadMflow(SM, F, Diag);
-    if (Doc)
-      TU = matlab::flowchart::buildAST(*Doc, AstCtx, SM, Diag, BO);
+    if (Doc) {
+      // Phase 8a: collect the (file_id, line) → block-id map so
+      // stackTrace can surface the originating block id in each
+      // frame name. The map is shared in `G.BlockByLine` so the
+      // stackTrace handler can read it without re-running the
+      // builder.
+      matlab::flowchart::BlockLineMap BlockMap;
+      TU = matlab::flowchart::buildAST(*Doc, AstCtx, SM, Diag, BO,
+                                       &BlockMap);
+      G.BlockByLine = std::move(BlockMap.Lookup);
+    }
   } else {
     Lexer Lx(SM, F, Diag);
     auto Toks = Lx.tokenize();
@@ -3061,6 +3090,24 @@ bool handleRequest(const Object &Msg) {
   if (!Cmd) return true;
 
   if (*Cmd == "initialize") {
+    /* Phase 8c: read the IDE-supplied
+     * `initializationOptions.blockPath` (string array). Forwarded
+     * to `BuildOptions::BlockSearchPath` for `.mflow` programs at
+     * compileProgram time. The IDE typically sets this from a
+     * project setting (e.g. `${workspaceFolder}/blocks`). Stored
+     * on `G` rather than passed through the launch handler since
+     * `initializationOptions` arrives before `launch` and stays
+     * stable across compileProgram restarts. */
+    G.BlockPathFromIDE.clear();
+    if (const Object *InitOpts =
+            Args->getObject("initializationOptions")) {
+      if (const Array *BP = InitOpts->getArray("blockPath")) {
+        for (const auto &V : *BP) {
+          if (auto S = V.getAsString())
+            G.BlockPathFromIDE.emplace_back(*S);
+        }
+      }
+    }
     /* Exception-breakpoint filters drive the IDE's "Pause on Errors"
      * / "Pause on Caught Errors" toggles. We expose a single filter
      * `error` that maps to MATLAB's error() flag — when enabled, the
@@ -3402,9 +3449,25 @@ bool handleRequest(const Object &Msg) {
       int32_t Fid = 0, Ln = 0;
       const char *FnName = nullptr;
       if (!matlab_dbg_frame_at(i, &Fid, &Ln, &FnName)) break;
+      // Phase 8a: when the entry-point is a `.mflow`, append the
+      // originating block id to the frame name so the IDE can
+      // highlight the active block on the canvas. Format:
+      // `<frame> [block:n_kind_n]`. No-op for `.m` programs (the
+      // map is empty).
+      std::string Name = FnName ? FnName : "<frame>";
+      if (!G.BlockByLine.empty()) {
+        int64_t Key = (static_cast<int64_t>((uint32_t)Fid) << 32) |
+                      static_cast<int64_t>((uint32_t)Ln);
+        auto It = G.BlockByLine.find(Key);
+        if (It != G.BlockByLine.end()) {
+          Name += " [block:";
+          Name += It->second;
+          Name += "]";
+        }
+      }
       Object Fr{
         {"id", FrameId++},
-        {"name", FnName ? FnName : "<frame>"},
+        {"name", std::move(Name)},
         {"line", (int64_t)Ln},
         {"column", (int64_t)1},
         {"source", sourceObjForFile(Fid)},

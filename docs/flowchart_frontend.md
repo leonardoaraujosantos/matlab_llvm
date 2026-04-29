@@ -9,12 +9,25 @@ language). The high-level rationale lives in
 [`roadmap.md`](roadmap.md#6-block-language-visual-nodes--mlir-);
 this doc nails down architecture, schema, and phases.
 
-**Status: v1 shipped (Phases 1–5).** `matlabc` and `matlab-lsp`
-both accept `.mflow` files; every existing `-emit-*` backend works
-unchanged on flowcharts. Two ctest lanes
-(`flowchart-cross-backend-tests`, `flowchart-lsp-tests`) plus the
-two earlier lanes guard the surface; `feature_status.md` has the
-shipped row.
+**Status: v1 shipped (Phases 1–7).**
+
+- Phases 1–5 (loader / linear / structured control flow / sub-flows
+  / custom blocks / cross-backend round-trip / LSP).
+- Phase 6: `matlabc -dap` accepts `.mflow` programs; breakpoints set
+  on JSON lines fire correctly.
+- Phase 7: `-emit-mflow` is the inverse of the loader — any
+  TranslationUnit serialises back to a canonical `.mflow` document
+  (idempotent on repeat emission).
+
+Six ctest lanes guard the surface (loader / emit-matlab /
+cross-backend / LSP / DAP / emit-mflow). `feature_status.md` has
+the shipped row.
+
+**Phase 8 (in progress).** 8a (block-id stack frames) and 8c
+(`--block-path` via DAP / LSP `initializationOptions`) shipped.
+Remaining: 8b (per-block step granularity), 8d (`-emit-mflow
+--preserve-layout`), 8e (`switch` / `try`-`catch` block kinds).
+See §7 Phase 8 for the breakdown.
 
 > **Editor / IDE implementers:** the field-by-field contract for
 > the `.mflow` JSON format — every block kind, required data
@@ -677,67 +690,198 @@ What's deferred:
   textual round-trip works, but the diagram doesn't represent the
   branching shape.
 
+### Phase 8 — Debug UX polish + layout merging (planned)
+
+The `.mflow` frontend is functionally complete (compile + LSP + DAP
++ both round-trip directions ship), but the developer experience
+still has rough edges that this phase addresses. Each item is
+independent; pick by user pressure.
+
+**8a. Block-id stack frames + canvas highlight (shipped).**
+
+  - New `BlockLineMap` output parameter on `flowchart::buildAST`
+    populates a `(file_id, line) → block_id` table as each block
+    is emitted. `GraphToAST::recordBlock` is called from every
+    site that already tags `Stmt::Range.Begin = N.Loc` (linear
+    walk, handleIf, handleFor, handleWhile, handleCustom).
+  - DAP `compileProgram` allocates the map for `.mflow` entry
+    points and stashes it on `G.BlockByLine`. The `stackTrace`
+    handler appends `[block:<id>]` to each frame's `name` when
+    `(file_id, line)` is found in the map. No-op for `.m`
+    programs (the map stays empty).
+  - The IDE parses the block id from the frame name on each
+    `stopped` event and highlights the active block on the canvas
+    (out of scope for `matlabc`).
+  - Test: `flowchart-dap-tests` asserts every stop's top frame
+    name contains `[block:` so the IDE-facing surface stays
+    contractual.
+
+**8b. Per-block step granularity (~1 week).**
+Stepping today is per-statement. A `display` block lowers to one
+`disp(...)` call → one step. But:
+
+  - A `custom` block lowers to one call-site statement plus an
+    inserted `Function` definition. Stepping into the call follows
+    into the function — that's correct already.
+  - An `expression` block whose `data.expression` happens to be
+    multi-statement (`v = v + 1; w = v * 2`) lowers to two
+    `Stmt`s in the AST. Step-over visits each separately, which
+    breaks the "one block = one step" mental model.
+  - A `for` block with an empty body steps once on the loop head
+    and again on the back-edge — duplicate stops on what looks
+    like a single block.
+
+  Fix: tag each MLIR debug hook with the originating block id
+  (already known from the side-table in 8a); step-over walks
+  through hooks that share the same block id and only stops when
+  the id changes. New runtime helper
+  `matlab_dbg_step_over_block(...)` keyed off the tag.
+
+**8c. `--block-path` via DAP / LSP `initializationOptions` (shipped).**
+
+  - Both `matlabc -dap` and `matlab-lsp` now read
+    `initializationOptions.blockPath` (a JSON string array) on the
+    `initialize` request. The DAP path stores it on
+    `G.BlockPathFromIDE` and prepends entries to
+    `BuildOptions::BlockSearchPath` ahead of the
+    `MATFORGE_BLOCK_PATH` env-var entries on every `compileProgram`.
+    The LSP path holds the entries in a `ServerBlockPath` global
+    and forwards them on every `.mflow` reparse.
+  - Resolution order is consistent across both surfaces and the
+    standalone CLI: IDE-supplied entries first, env-var entries
+    second; first match wins.
+  - The IDE typically populates the array from a project setting
+    (e.g. `${workspaceFolder}/blocks`), so projects can configure
+    block libraries through their launch / LSP config without
+    setting environment variables on the spawned subprocess.
+
+**8d. `ui.position` merge on `-emit-mflow` (~3-4 days).**
+Currently `-emit-mflow` always writes column-shape auto-layout
+positions. Re-emitting an existing `.mflow` blows away whatever
+the user dragged around in the IDE. Need a "merge" mode.
+
+  - New flag `--preserve-layout PATH`: read PATH (an existing
+    `.mflow`), index its nodes by id, and when the new emission
+    produces a node with a matching id, copy its
+    `ui.position` from the old file. Unmatched nodes (newly added)
+    fall back to auto-layout.
+  - Stable id generation across runs is already guaranteed by
+    `n_<kind>_<counter>` ordering; the merge works as long as the
+    program shape is unchanged.
+  - When the program shape changes (a block was added / removed),
+    the merge degrades gracefully: matched nodes keep their
+    positions, new nodes are auto-laid in the column. The IDE will
+    fix up the layout on save.
+  - Stretch: `--preserve-layout` infers the previous `.mflow` from
+    the same path as the input when it's a `.mflow` file (i.e.
+    re-emitting in place picks up the file's own positions).
+
+**8e. `switch` and `try` / `catch` block kinds (~1 week).**
+Both are currently degraded to `expression` blocks carrying the
+formatted source text. Diagram doesn't show the branching shape;
+DAP can't set breakpoints on individual cases.
+
+  - Schema additions (also bumps to `flowchart_schema.md`):
+    - `switch`: `in` port + N `case` ports (one per case label) +
+      `default` port. `data.discriminant` carries the switch
+      expression.
+    - `try`: `in` port + `body` + `catch` ports.
+  - Reducer additions in `lib/Flowchart/GraphToAST.cpp`:
+    - `switch` reduces N+1 branches via the same
+      reconvergence detection used for `if` (multi-branch findJoin).
+    - `try` is structurally an `if-else` whose condition is "did an
+      error fire" — add `TryStmt` construction.
+  - Emitter additions in `lib/Flowchart/ASTToGraph.cpp`:
+    - `SwitchStmt` → `switch` block, one `case` port per case.
+    - `TryStmt` → `try` block.
+
+**Effort recap.** 8a–8c are the debug-UX polish pieces (~1.5 weeks
+total); 8d is the layout merging (~half a week); 8e is the
+control-flow expansion (~1 week). Each ships independently — the
+debug polish has the highest user impact, the layout merge keeps
+saved-then-emitted diagrams stable, and `switch`/`try` close the
+last semantic gaps in the schema.
+
 ---
 
-## 8. Out of scope (for v1)
+## 8. Out of scope (carried forward)
 
-These are deliberate deferrals, mirroring the roadmap entry:
+These v1 deferrals remain explicit non-goals. Items previously in
+this list that have shipped (one-way text → blocks via
+`-emit-mflow`, `.mflow` as an output target) are removed.
 
-- **Round-trip text → blocks.** v1 is one-way (blocks → MATLAB).
-  Going the other direction needs a layout heuristic that decides
-  where each generated block lands on the canvas.
 - **Continuous-time / sample-rate-different simulation.** Every
   `.mflow` program is sample-rate-fixed discrete, same as the SV
   pipeline.
 - **2-D / image-pipeline blocks.** Roadmap item #7 territory.
 - **Irreducible (unstructured) CFGs.** Refuse with a diagnostic;
   no synthetic loop / multi-entry handling.
-- **Data edges.** v1 ignores `kind: "data"`; the dataflow-style
-  block extension is a separate phase.
-- **`.mflow` as an output target.** No `-emit-mflow` — codegen
-  goes one way only, blocks → MLIR / MATLAB.
+- **Data edges.** `kind: "data"` is reserved in the schema and
+  ignored by the v1 loader; the dataflow-style block extension is
+  a separate phase, not v1+ work.
+- **MATLAB `classdef` as a flow shape.** Class definitions in the
+  AST currently emit through `-emit-mflow` as a top-level fallback
+  (text inside an `expression` block). A `classdef` flow kind would
+  let the IDE render properties / methods graphically, but it's
+  out of scope for the v1 surface.
 
 ---
 
 ## 9. Risks and open questions
 
-1. **JSON dependency.** Either vendor a small header (~3k LOC) or
-   hand-roll a recursive-descent reader. The repo currently has no
-   third-party deps; hand-rolling matches house style. Decide at
-   Phase 1 kickoff.
-2. **Source locations into block fields.** Diagnostics from the
-   inner `Lexer`/`Parser` need a `SourceRange` that points back
-   to the offending `.mflow` byte range, not just "node id +
-   field name". The `SourceManager` accepts byte offsets, so
-   tracking the JSON byte position of each `data.*` value during
-   load is enough — record it in the loader.
-3. **Layout preservation on round-trip.** v1 is one-way, so the
-   `ui.position` field is preserved through the loader but not
-   used. If we ever do MATLAB → blocks, layout becomes a first-
-   class problem.
-4. **Comment blocks.** The `comment` block kind is dropped today
-   (the formatter doesn't preserve comments either). Revisit
-   when the formatter learns comment retention.
+Resolved during v1 (kept here as design notes):
+
+1. **JSON dependency** — resolved by hand-rolling a recursive-descent
+   reader in `lib/Flowchart/Loader.cpp`. No third-party dep added.
+2. **Source locations into block fields** — resolved Phase 6. The
+   loader records every `data.*` field's byte offset in
+   `Node::DataLocs`, and `GraphToAST` rewrites synthesized
+   statements' `Range.Begin` to the originating block's byte
+   offset, so DAP / LSP diagnostics land on the offending block.
+
+Active open questions:
+
+3. **Layout preservation on round-trip.** Phase 7 shipped
+   `-emit-mflow` with auto-layout — repeat emission overwrites the
+   IDE's manual placements. Fix planned in Phase 8d
+   (`--preserve-layout` flag merging old `ui.position` into new
+   emission by node id).
+4. **Comment blocks.** The `comment` block kind is dropped during
+   compilation; the formatter doesn't preserve comments either, so
+   round-trip through `.m` would lose them anyway. Revisit when
+   the formatter learns comment retention.
 5. **Custom-block library trust boundary.** `library_id` resolves
    against a search path under user / project control —
-   essentially "include any `.m` file from this directory." This
-   is the same trust posture as `addpath` in MATLAB or `-I` in C,
-   so it's not a regression, but it's worth documenting that
-   block libraries execute as if their `.m` files were typed
-   directly into the user's program.
+   essentially "include any `.m` file from this directory." Same
+   trust posture as `addpath` in MATLAB or `-I` in C, so it's not
+   a regression, but worth documenting that block libraries
+   execute as if their `.m` files were typed directly into the
+   user's program.
 6. **Inline `source` size limit.** A custom block's `data.source`
    field can in principle hold an entire program. The IDE should
-   warn the user past some threshold (~200 lines) and suggest
-   converting to a `path` block, since a giant string inside JSON
-   is hard to diff and review. Compiler-side: no hard limit, but
-   the loader should refuse `source` fields above 1 MB to keep
+   warn past some threshold (~200 lines) and suggest converting
+   to a `path` block, since a giant string inside JSON is hard to
+   diff and review. Compiler-side: no hard limit shipped; the
+   loader should refuse `source` fields above 1 MB to keep
    parse-error blast radius bounded.
+7. **Multi-statement `expression` blocks vs. step granularity.**
+   Phase 8b — when the user writes `v = v + 1; w = v * 2` inside
+   a single `expression` block's `data.expression`, the parser
+   produces two `Stmt`s. Currently DAP step-over treats each as a
+   separate stop. The block-id tagging in Phase 8a/b is the fix.
 
 ---
 
 ## 10. Update cadence
 
-This doc gets demoted from "plan" to "design + behavior notes" once
-Phase 5 ships, at which point the implemented bits move to
-`feature_status.md` and the file becomes the canonical reference for
-the `.mflow` frontend.
+Phases 1–7 are shipped; this doc serves as the canonical
+design-and-behavior reference for the `.mflow` frontend. The
+shipped surface is mirrored in
+[`feature_status.md`](feature_status.md), and the IDE-facing
+schema contract is in [`flowchart_schema.md`](flowchart_schema.md).
+
+Remaining work is the Phase 8 polish list (§7). The phase
+boundaries there are independent — pick by user pressure rather
+than sequencing — and items get demoted from "planned" to
+"shipped" with a brief summary as each lands, matching the format
+already used for Phases 1–7.

@@ -55,6 +55,11 @@ struct TUContext {
   const BuildOptions &Opts;
   TranslationUnit &TU;
   std::set<std::string> InsertedFunctions; // by MATLAB function name
+  // Phase 8a: optional output map from .mflow (file_id, line) to the
+  // originating block id. Populated as each block is emitted so the
+  // DAP / LSP servers can surface block context on debug stops.
+  // nullptr when the caller doesn't need it.
+  BlockLineMap *BlockMap = nullptr;
 };
 
 class Builder {
@@ -119,6 +124,19 @@ private:
       return "";
     }
     return It->second[0]->To.Node;
+  }
+
+  // Phase 8a: record this block's `(file_id, line)` → block id in the
+  // optional output map. Called from every site that emits a block —
+  // the linear walk, handleIf / handleFor / handleWhile, and the
+  // custom-block call site. The DAP server reads the map back when
+  // formatting stack frames.
+  void recordBlock(const Node &N) {
+    if (!TUC.BlockMap) return;
+    if (!N.Loc.isValid()) return;
+    auto LC = SM.getLineColumn(N.Loc);
+    if (LC.Line == 0) return;
+    TUC.BlockMap->Lookup[BlockLineMap::key(N.Loc.File, LC.Line)] = N.Id;
   }
 
   std::string portOut(const Node &N, const std::string &PortId) {
@@ -455,6 +473,7 @@ private:
       if (Diag.hasErrors()) return "";
       auto Stmts = parseSynthesized(Src, "<flow:" + N->Id + ">");
       if (Diag.hasErrors()) return "";
+      recordBlock(*N);
       for (auto *S : Stmts) {
         // Phase 6: remap to the originating block's location in the
         // .mflow source so DAP breakpoints set on a block's JSON
@@ -492,6 +511,7 @@ private:
                                      N.Loc);
     if (!Cond) return "";
 
+    recordBlock(N);
     auto *S = Ctx.make<IfStmt>();
     S->Range.Begin = N.Loc;
     S->Cond = Cond;
@@ -540,6 +560,7 @@ private:
                                      N.Loc);
     if (!Iter) return "";
 
+    recordBlock(N);
     auto *S = Ctx.make<ForStmt>();
     S->Range.Begin = N.Loc;
     S->Var = Ctx.intern(*VarStr);
@@ -655,6 +676,7 @@ private:
                                   : (Lhs + " = " + Call + ";\n");
     auto Stmts = parseSynthesized(Src, "<flow:" + N.Id + ":call>");
     if (Diag.hasErrors()) return "";
+    recordBlock(N);
     for (auto *S : Stmts) {
       // Phase 6: see remap rationale above the linear-block path.
       S->Range.Begin = N.Loc;
@@ -777,6 +799,7 @@ private:
                                      N.Loc);
     if (!Cond) return "";
 
+    recordBlock(N);
     auto *S = Ctx.make<WhileStmt>();
     S->Range.Begin = N.Loc;
     S->Cond = Cond;
@@ -822,7 +845,8 @@ static Function *liftFunctionFlow(const Flow &F, const FlowDoc &Doc,
 
 TranslationUnit *buildAST(const FlowDoc &Doc, ASTContext &Ctx,
                           SourceManager &SM, DiagnosticEngine &Diag,
-                          const BuildOptions &Opts) {
+                          const BuildOptions &Opts,
+                          BlockLineMap *OutBlockMap) {
   const Flow *Entry = Doc.entryFlow();
   if (!Entry) {
     SourceLocation Invalid;
@@ -838,7 +862,8 @@ TranslationUnit *buildAST(const FlowDoc &Doc, ASTContext &Ctx,
   }
 
   auto *TU = Ctx.make<TranslationUnit>();
-  TUContext TUC{Opts, *TU, /*InsertedFunctions=*/{}};
+  TUContext TUC{Opts, *TU, /*InsertedFunctions=*/{},
+                /*BlockMap=*/OutBlockMap};
 
   // Lift every non-entry function-kind flow before the program walk.
   // Names must be unique across the TU (the textual MATLAB frontend

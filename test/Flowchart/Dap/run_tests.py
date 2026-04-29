@@ -17,15 +17,18 @@ import os
 import sys
 
 
-def find_block_line(mflow_path, marker):
+def find_block_line(mflow_path, markers):
     """Return the 1-based line number of the first line containing
-    `marker` in the .mflow file. Used to compute breakpoint targets
-    so the test stays robust to fixture edits."""
+    any of `markers` in the .mflow file. The list lets the test
+    tolerate both compact and IDE-pretty-printed JSON spacing."""
+    if isinstance(markers, str):
+        markers = [markers]
     with open(mflow_path, encoding="utf-8") as f:
         for i, line in enumerate(f, start=1):
-            if marker in line:
-                return i
-    raise RuntimeError(f"marker {marker!r} not found in {mflow_path}")
+            for m in markers:
+                if m in line:
+                    return i
+    raise RuntimeError(f"none of markers {markers!r} found in {mflow_path}")
 
 
 def _stop_event(client, timeout=5.0):
@@ -51,19 +54,24 @@ def main():
     # post-resume stdout — output forwarding through DAP `output`
     # events is exercised by the existing debug-dap-tests lane and
     # is independent of which frontend produced the TU.
+    # Marker substrings tolerate either compact (hand-written) or
+    # IDE-pretty-printed (`" : "` around the colon) JSON formats so
+    # the test stays robust regardless of whether the fixture was
+    # last saved by the IDE.
     cases = [
         # for_loop.mflow: bp on the `init` variable block (`name: total`).
         # When hit, execution should pause before the for loop runs.
         {
             "name": "for_loop_bp_on_init",
             "program": os.path.join(repo_root, "examples/mflow/for_loop.mflow"),
-            "marker": '"name": "total"',
+            "markers": ['"name" : "total"', '"name": "total"'],
         },
         # hello.mflow: bp on the display block.
         {
             "name": "hello_bp_on_display",
             "program": os.path.join(repo_root, "examples/mflow/hello.mflow"),
-            "marker": '"expression": "\'Hello, world!\'"',
+            "markers": ['"expression" : "\'Hello, world!\'"',
+                        '"expression": "\'Hello, world!\'"'],
         },
         # nested_for_if (control-flow block): bp on the inner `if`
         # block fires inside the for loop body.
@@ -71,7 +79,7 @@ def main():
             "name": "nested_if_bp",
             "program": os.path.join(repo_root,
                                     "test/Flowchart/EmitMatlab/nested_for_if.mflow"),
-            "marker": '"kind": "if"',
+            "markers": ['"kind" : "if"', '"kind": "if"'],
         },
     ]
 
@@ -80,7 +88,7 @@ def main():
         sys.stdout.write(f"  {case['name']} ... ")
         sys.stdout.flush()
         try:
-            line = find_block_line(case["program"], case["marker"])
+            line = find_block_line(case["program"], case["markers"])
             with DapClient(matlabc, case["program"]) as c:
                 initialize_and_launch(
                     c, stop_on_entry=False,
@@ -94,11 +102,18 @@ def main():
                 # Walk the stack: the top frame should point at the
                 # .mflow file, with a line at-or-near the breakpoint
                 # (the runtime may snap to the next executable line
-                # within the block).
+                # within the block). Phase 8a: the frame name carries
+                # the originating block id so the IDE can highlight
+                # the active block on the canvas.
                 st = c.request("stackTrace", {"threadId": 1})
                 frames = st.get("stackFrames") or []
                 if not frames:
                     raise DapError("empty stackTrace at breakpoint")
+                top_name = frames[0].get("name") or ""
+                if "[block:" not in top_name:
+                    raise DapError(
+                        f"top frame name missing block-id tag: "
+                        f"{top_name!r}")
                 src_path = (frames[0].get("source") or {}).get("path") or ""
                 if not src_path.endswith(".mflow"):
                     raise DapError(

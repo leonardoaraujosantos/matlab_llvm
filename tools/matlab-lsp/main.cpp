@@ -124,6 +124,15 @@ struct Document {
 
 std::unordered_map<std::string, std::unique_ptr<Document>> Docs;
 
+/* Phase 8c: project-wide block search path supplied through the
+ * LSP `initialize` request's `initializationOptions.blockPath`
+ * (a JSON array of strings). Forwarded into
+ * `BuildOptions::BlockSearchPath` for every `.mflow` reparse so
+ * `library_id` custom blocks resolve correctly inside the editor.
+ * Empty by default; set once on initialize and reused for the
+ * server's lifetime. */
+std::vector<std::string> ServerBlockPath;
+
 /* Strip a "file://" prefix from a URI and percent-decode any %XX
  * escapes so the name we hand to SourceManager matches what the
  * client expects to see back in diagnostics. A richer URI parser
@@ -173,6 +182,11 @@ void reparse(Document &D) {
       auto Slash = FsPath.find_last_of("/\\");
       if (Slash != std::string::npos)
         BO.MflowDirectory = FsPath.substr(0, Slash);
+      // Phase 8c: thread the project's block search path (set on
+      // LSP initialize via `initializationOptions.blockPath`) so
+      // `library_id` custom blocks resolve in the editor the same
+      // way they do under `matlabc --block-path`.
+      BO.BlockSearchPath = ServerBlockPath;
       D.TU = matlab::flowchart::buildAST(*Doc, *D.Ctx, *D.SM, *D.Diag, BO);
     }
   } else {
@@ -238,7 +252,21 @@ Value serverCapabilities() {
   };
 }
 
-Value handleInitialize(const Object &) {
+Value handleInitialize(const Object &Params) {
+  /* Phase 8c: read the IDE-supplied
+   * `initializationOptions.blockPath` (string array) into
+   * `ServerBlockPath`. Forwarded to `BuildOptions::BlockSearchPath`
+   * for every subsequent `.mflow` reparse so `library_id` custom
+   * blocks resolve correctly when editing inside the LSP. */
+  ServerBlockPath.clear();
+  if (const Object *InitOpts = Params.getObject("initializationOptions")) {
+    if (const Array *BP = InitOpts->getArray("blockPath")) {
+      for (const auto &V : *BP) {
+        if (auto S = V.getAsString())
+          ServerBlockPath.emplace_back(*S);
+      }
+    }
+  }
   return Object{
     {"capabilities", serverCapabilities()},
     {"serverInfo", Object{{"name", "matlab-lsp"}, {"version", "0.1"}}},

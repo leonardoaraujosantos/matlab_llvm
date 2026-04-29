@@ -106,61 +106,138 @@ BAD_IF = """{
 }"""
 
 
-def run(matlabc_lsp_path):
-    cases = [
-        ("file:///tmp/lsp_good.mflow", GOOD, 0, None),
-        ("file:///tmp/lsp_bad_schema.mflow", BAD_SCHEMA, 1, "schema"),
-        ("file:///tmp/lsp_bad_if.mflow", BAD_IF, 1, "cond"),
-    ]
+def run_session(matlabc_lsp_path, init_opts, cases):
+    """Drive a single LSP session: initialize → didOpen each case →
+    shutdown. Returns a dict { uri: [diagnostics, ...] }."""
+    init_params = {"capabilities": {}}
+    if init_opts is not None:
+        init_params["initializationOptions"] = init_opts
     msgs = [
         {"jsonrpc": "2.0", "id": 1, "method": "initialize",
-         "params": {"capabilities": {}}},
+         "params": init_params},
         {"jsonrpc": "2.0", "method": "initialized", "params": {}},
     ]
-    for uri, text, _, _ in cases:
+    for case in cases:
         msgs.append({
             "jsonrpc": "2.0", "method": "textDocument/didOpen",
             "params": {"textDocument": {
-                "uri": uri, "languageId": "json", "version": 1, "text": text,
+                "uri": case["uri"], "languageId": "json", "version": 1,
+                "text": case["text"],
             }},
         })
     msgs += [
         {"jsonrpc": "2.0", "id": 2, "method": "shutdown"},
         {"jsonrpc": "2.0", "method": "exit"},
     ]
-
     proc = subprocess.run(
         [matlabc_lsp_path],
         input=b"".join(frame(m) for m in msgs),
         capture_output=True, timeout=15)
-    events = parse_events(proc.stdout)
-
     diags_by_uri = {}
-    for ev in events:
+    for ev in parse_events(proc.stdout):
         if ev.get("method") == "textDocument/publishDiagnostics":
             p = ev["params"]
             diags_by_uri.setdefault(p["uri"], []).extend(p["diagnostics"])
+    return diags_by_uri
+
+
+# Phase 8c: a `.mflow` whose `custom` block uses a `library_id`. The
+# matching `dsp/scale.m` lives under test/Flowchart/EmitMatlab/lib/
+# (existing fixture from the EmitMatlab corpus). Without the IDE
+# supplying `blockPath` via `initializationOptions`, this should
+# produce a "could not resolve library_id" diagnostic. With it set,
+# the diagnostic clears.
+LIB_BLOCK = """{
+  "schema": "matforge.flowchart",
+  "version": "0.1.0",
+  "entry": "main",
+  "flows": [
+    { "id": "fm", "kind": "program", "name": "main",
+      "nodes": [
+        { "id": "s", "kind": "start",
+          "ports": {"in": [], "out": [{"id": "out"}]} },
+        { "id": "cb", "kind": "custom",
+          "data": {
+            "name": "scale", "callee": "scale",
+            "args": "10, 4", "lhs": "y",
+            "library_id": "dsp/scale"
+          },
+          "ports": {"in": [{"id": "in"}], "out": [{"id": "out"}]} },
+        { "id": "e", "kind": "end",
+          "ports": {"in": [{"id": "in"}], "out": []} }
+      ],
+      "edges": [
+        { "id": "e_1", "kind": "control",
+          "from": {"node": "s",  "port": "out"}, "to": {"node": "cb", "port": "in"} },
+        { "id": "e_2", "kind": "control",
+          "from": {"node": "cb", "port": "out"}, "to": {"node": "e",  "port": "in"} }
+      ]
+    }
+  ]
+}"""
+
+
+def run(matlabc_lsp_path):
+    here = os.path.dirname(os.path.abspath(__file__))
+    repo_root = os.path.normpath(os.path.join(here, "..", "..", ".."))
+    block_lib = os.path.join(repo_root, "test/Flowchart/EmitMatlab/lib")
+
+    base_cases = [
+        {"uri": "file:///tmp/lsp_good.mflow",       "text": GOOD,
+         "expected_count": 0, "expected_substr": None},
+        {"uri": "file:///tmp/lsp_bad_schema.mflow", "text": BAD_SCHEMA,
+         "expected_count": 1, "expected_substr": "schema"},
+        {"uri": "file:///tmp/lsp_bad_if.mflow",     "text": BAD_IF,
+         "expected_count": 1, "expected_substr": "cond"},
+    ]
+    no_blockpath_case = {
+        "uri": "file:///tmp/lsp_lib_no_path.mflow", "text": LIB_BLOCK,
+        "expected_count": 1, "expected_substr": "library_id",
+    }
+    with_blockpath_case = {
+        "uri": "file:///tmp/lsp_lib_with_path.mflow", "text": LIB_BLOCK,
+        "expected_count": 0, "expected_substr": None,
+    }
 
     failures = []
-    for uri, _, expected_count, expected_substr in cases:
-        diags = diags_by_uri.get(uri, [])
-        if len(diags) != expected_count:
-            failures.append(
-                f"{uri}: expected {expected_count} diagnostic(s), got "
-                f"{len(diags)}: {[d['message'] for d in diags]}")
-            continue
-        if expected_substr is not None:
-            if not any(expected_substr in d["message"] for d in diags):
-                failures.append(
-                    f"{uri}: no diagnostic mentioned '{expected_substr}': "
-                    f"{[d['message'] for d in diags]}")
 
+    # Session 1: no initializationOptions. Existing cases plus the
+    # Phase 8c "library_id can't resolve" negative case.
+    diags = run_session(matlabc_lsp_path, None,
+                        base_cases + [no_blockpath_case])
+    for case in base_cases + [no_blockpath_case]:
+        ds = diags.get(case["uri"], [])
+        if len(ds) != case["expected_count"]:
+            failures.append(
+                f"{case['uri']}: expected {case['expected_count']} "
+                f"diagnostic(s), got {len(ds)}: "
+                f"{[d['message'] for d in ds]}")
+            continue
+        if case["expected_substr"] is not None:
+            if not any(case["expected_substr"] in d["message"] for d in ds):
+                failures.append(
+                    f"{case['uri']}: no diagnostic mentioned "
+                    f"'{case['expected_substr']}': "
+                    f"{[d['message'] for d in ds]}")
+
+    # Session 2: initializationOptions.blockPath pointing at the
+    # block library — the `library_id` resolves and diagnostics clear.
+    diags = run_session(matlabc_lsp_path,
+                        {"blockPath": [block_lib]},
+                        [with_blockpath_case])
+    ds = diags.get(with_blockpath_case["uri"], [])
+    if len(ds) != 0:
+        failures.append(
+            f"{with_blockpath_case['uri']}: expected 0 diagnostics with "
+            f"blockPath set, got {len(ds)}: {[d['message'] for d in ds]}")
+
+    total = len(base_cases) + 1 + 1
     if failures:
         print("FAIL")
         for f in failures:
             print("  " + f)
         return 1
-    print(f"PASS ({len(cases)} cases)")
+    print(f"PASS ({total} cases)")
     return 0
 
 
