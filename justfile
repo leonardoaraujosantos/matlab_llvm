@@ -59,9 +59,23 @@ repl: build
     {{BUILD_DIR}}/matlabc -repl
 
 # Print a canonically-formatted version of a .m file to stdout.
+# Accepts both .m and .mflow inputs (the latter round-trips through
+# the flowchart frontend before formatting).
 # Example: `just format examples/factorial.m`
 format FILE: build
     {{BUILD_DIR}}/matlabc -format {{FILE}}
+
+# Same as `format`, but spelled `-emit-matlab` (the canonical name when
+# the input is a `.mflow` flowchart). Identical output for `.m` inputs.
+# Example: `just emit-matlab examples/mflow/factorial.mflow`
+emit-matlab FILE: build
+    {{BUILD_DIR}}/matlabc -emit-matlab {{FILE}}
+
+# Show the parsed FlowDoc for a .mflow file (loader + validation only;
+# no AST build). Useful for sanity-checking what the IDE saved.
+# Example: `just dump-flow examples/mflow/factorial.mflow`
+dump-flow FILE: build
+    {{BUILD_DIR}}/matlabc -dump-flow {{FILE}}
 
 # Build and run every program in examples/. Stops at the first failure.
 examples: build
@@ -72,6 +86,24 @@ examples: build
         out="/tmp/ex_$name"
         echo "=== $name ==="
         ./runtime/build_and_run.sh "$f" "$out" >/dev/null
+        "$out"
+        echo
+    done
+
+# Build and run every flowchart program in examples/mflow/ via the C
+# emitter. Stops at the first failure. Parallel to `examples` but for
+# the `.mflow` corpus.
+mflow-examples: build
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for f in examples/mflow/*.mflow; do
+        name=$(basename "$f" .mflow)
+        src=$(mktemp -t mlflow.XXXXXX).c
+        out="/tmp/ex_${name}_mflow"
+        echo "=== $name ==="
+        ./{{BUILD_DIR}}/matlabc -emit-c "$f" > "$src"
+        cc -w "$src" runtime/matlab_runtime.c -o "$out" -lm -lpthread
+        rm -f "$src"
         "$out"
         echo
     done
@@ -169,7 +201,7 @@ test-sv: build
 compile-sv FILE: build
     #!/usr/bin/env bash
     set -euo pipefail
-    name=$(basename {{FILE}} .m)
+    base=$(basename {{FILE}}); name="${base%.*}"
     out="./$name.sv"
     ./{{BUILD_DIR}}/matlabc -emit-systemverilog {{FILE}} > "$out"
     if command -v verilator >/dev/null 2>&1; then
@@ -208,30 +240,31 @@ compile-sv-multi DRIVER MODULE *EXTRA: build
         echo "built $out (verilator not on PATH; lint skipped)"
     fi
 
-# Compile a .m file via the C emitter: produces ./<name> using cc.
-# Example: `just compile-c examples/hello.m` -> ./hello
+# Compile a .m or .mflow file via the C emitter: produces ./<name>
+# using cc. Example: `just compile-c examples/hello.m` -> ./hello
+# (works equally for `examples/mflow/hello.mflow`).
 compile-c FILE: build
     #!/usr/bin/env bash
     set -euo pipefail
-    name=$(basename {{FILE}} .m)
+    base=$(basename {{FILE}}); name="${base%.*}"
     src=$(mktemp -t mlc.XXXXXX).c
     ./{{BUILD_DIR}}/matlabc -emit-c {{FILE}} > "$src"
     cc -w "$src" runtime/matlab_runtime.c -o "./$name" -lm -lpthread
     rm -f "$src"
     echo "built ./$name"
 
-# Compile a .m file via the C++ emitter.
+# Compile a .m or .mflow file via the C++ emitter.
 compile-cpp FILE: build
     #!/usr/bin/env bash
     set -euo pipefail
-    name=$(basename {{FILE}} .m)
+    base=$(basename {{FILE}}); name="${base%.*}"
     src=$(mktemp -t mlc.XXXXXX).cpp
     ./{{BUILD_DIR}}/matlabc -emit-cpp {{FILE}} > "$src"
     c++ -w -x c++ "$src" -x c runtime/matlab_runtime.c -o "./$name" -lm -lpthread
     rm -f "$src"
     echo "built ./$name"
 
-# Emit and immediately run a .m file via python3.
+# Emit and immediately run a .m or .mflow file via python3.
 # Example: `just compile-python examples/hello.m` -> prints hello
 compile-python FILE: build
     #!/usr/bin/env bash
@@ -241,9 +274,10 @@ compile-python FILE: build
     PYTHONPATH=runtime python3 "$src"
     rm -f "$src"
 
-# Emit and immediately run a .m file via a TypeScript runner (bun, tsx,
-# or ts-node — first one found on PATH). Drops the emitted .ts into
-# runtime/ so the relative imports of matlab_runtime / numpy_ts resolve.
+# Emit and immediately run a .m or .mflow file via a TypeScript runner
+# (bun, tsx, or ts-node — first one found on PATH). Drops the emitted
+# .ts into runtime/ so the relative imports of matlab_runtime / numpy_ts
+# resolve.
 # Example: `just compile-typescript examples/hello.m` -> prints hello
 compile-typescript FILE: build
     #!/usr/bin/env bash
@@ -252,7 +286,8 @@ compile-typescript FILE: build
     elif command -v tsx >/dev/null 2>&1; then runner="tsx";
     elif command -v ts-node >/dev/null 2>&1; then runner="ts-node --transpile-only";
     else echo "error: need bun, tsx, or ts-node on PATH" >&2; exit 1; fi
-    src="runtime/__just_compile_$(basename {{FILE}} .m).ts"
+    base=$(basename {{FILE}}); stem="${base%.*}"
+    src="runtime/__just_compile_${stem}.ts"
     ./{{BUILD_DIR}}/matlabc -emit-typescript {{FILE}} > "$src"
     trap 'rm -f "$src"' EXIT
     (cd runtime && $runner "$(basename "$src")")
@@ -293,6 +328,14 @@ test-emitpython: build
 # Run the TypeScript emission suite (uses bun/tsx/ts-node — first found).
 test-emitts: build
     ./test/Run/run_tests_emitts.sh ./{{BUILD_DIR}}/matlabc
+
+# Run all four flowchart (`.mflow`) ctest lanes:
+#   - flowchart-tests              (loader + validation, 9 fixtures)
+#   - flowchart-emit-matlab-tests  (linear / control / sub-flows / custom, 17 fixtures)
+#   - flowchart-cross-backend-tests (`.mflow` ≡ `.m` round-trip, 12 × 4 backends)
+#   - flowchart-lsp-tests          (`matlab-lsp` accepts .mflow, 3 cases)
+test-flowchart: build
+    ctest --test-dir {{BUILD_DIR}} --output-on-failure -R "^flowchart-"
 
 # Remove the build directory.
 clean:

@@ -7,7 +7,15 @@ all built on the same parser and semantic analysis.
 
 The core pipeline is:
 
-`MATLAB source -> Lexer -> Parser -> AST -> Sema -> MIR -> MLIR -> LLVM / C / C++ / Python / TypeScript / SystemVerilog`
+```
+MATLAB source (.m)        ─► Lexer ─► Parser ────────┐
+                                                     ├─► AST ─► Sema ─► MIR ─► MLIR ─► LLVM / C / C++ / Python / TypeScript / SystemVerilog
+Flowchart graph (.mflow)  ─► Loader ─► Graph→AST ────┘                         │
+                                                                               └─► .m source via formatter (`-emit-matlab`)
+```
+
+Both frontends produce the same `TranslationUnit`, so every existing
+backend works for either input shape.
 
 The project is self-contained by design:
 
@@ -24,6 +32,10 @@ The project also allows emission from the MLIR:
 - Python
 - TypeScript
 - SystemVerilog (ASIC, synthesizable; vendor-neutral RTL — Verilator lint-clean)
+
+Plus a frontend-side round-trip: any `.m` or `.mflow` input can emit
+canonical MATLAB source via `-emit-matlab` (pretty-prints from the AST,
+with classdef-attribute aware formatting and idempotent re-parse).
 
 ## What It Covers
 
@@ -100,6 +112,11 @@ build/matlabc -emit-sema foo.m
 build/matlabc -emit-mir foo.m
 build/matlabc -emit-mlir foo.m
 build/matlabc -emit-llvm foo.m
+
+# Flowchart frontend: same pipeline from a different source shape.
+build/matlabc -dump-flow   foo.mflow      # parsed FlowDoc / validation
+build/matlabc -emit-matlab foo.mflow      # round-trip to canonical .m
+build/matlabc -emit-c      foo.mflow      # any -emit-* works here too
 ```
 
 Compile through the different backends:
@@ -163,7 +180,9 @@ just llvm examples/matrix_mult.m
 | `-check-synthesizable` | gate-only mode for `-emit-systemverilog` (no output, only diagnostics) |
 | `-emit-hardware-report` | per-module synthesis budget summary (registers / FSMs / pipeline) |
 | `-emit-fixed-point-report` | per-`fi` summary of WL/FL/saturate sites |
-| `-format` | canonical source formatting |
+| `-emit-matlab` (alias `-emit-m`) | canonical MATLAB source from any input — `.m` formats in place; `.mflow` round-trips through the flowchart frontend |
+| `-dump-flow` | parsed `FlowDoc` for a `.mflow` input (loader + validation only; no AST build) |
+| `-format` | canonical source formatting (synonym of `-emit-matlab` for `.m` inputs) |
 | `-repl` | JIT-backed interactive interpreter |
 | `-dap` | Debug Adapter Protocol server over stdio |
 
@@ -177,9 +196,12 @@ Useful modifiers:
 | `-doxygen` | preserve function-leading comments as Doxygen blocks in `-emit-c` / `-emit-cpp` |
 | `-cpp-auto` | prefer `auto` in generated C++ locals |
 | `-g` / `--debug-hooks` | inject `matlab_dbg_hook(file_id, line)` at every statement (the same instrumentation `-dap` runs against; visible in `-emit-mlir` / `-emit-c` / `-emit-cpp` output) |
+| `--block-path DIR` | search path for `.mflow` `custom` block `library_id` resolution; repeatable. Pairs with the `MATFORGE_BLOCK_PATH` env var (colon-separated). |
 
 The repo also builds `matlab-lsp`, a lightweight Language Server that
-reuses the same frontend.
+reuses the same frontend. It accepts both `.m` and `.mflow` URIs —
+`.mflow` files surface loader / builder diagnostics inline on the
+offending block.
 
 ## Debugging
 
@@ -298,9 +320,12 @@ disp(y);
 
 ```mermaid
 flowchart LR
-  src["foo.m"] --> FE["Frontend<br/>Lexer · Parser · AST · Sema"]
+  src1["foo.m"] --> FE["Frontend<br/>Lexer · Parser · AST · Sema"]
+  src2["foo.mflow<br/>(MatForge IDE)"] --> FC["Flowchart frontend<br/>Loader · Graph→AST"]
+  FC --> FE
   FE --> MIR["MIR<br/>reference / diagnostics"]
   FE --> MLIR["MLIR<br/>matlab + func + scf + arith + llvm"]
+  FE --> FMT["Formatter<br/>-emit-matlab / -format"]
   MLIR --> Passes["Lowering / optimization passes"]
   Passes --> LLVM["LLVM IR"]
   Passes --> C["C / C++ emission"]
@@ -313,6 +338,7 @@ flowchart LR
   PY --> EXE3["python3 + runtime shim"]
   TS --> EXE4["node / deno / bun"]
   SV --> EXE5["Verilator / synth flow"]
+  FMT --> MOUT["canonical .m source"]
 ```
 
 Notes:
@@ -334,6 +360,7 @@ Core docs:
 - [`docs/roadmap.md`](docs/roadmap.md): forward-looking work — CocoTB verification, SV→MATLAB, runtime/REPL/HDL improvements
 - [`docs/feature_status.md`](docs/feature_status.md): feature inventory and known gaps
 - [`docs/flowchart_frontend.md`](docs/flowchart_frontend.md): graphical block-language frontend (`.mflow` JSON → AST → every backend)
+- [`docs/flowchart_schema.md`](docs/flowchart_schema.md): `.mflow` JSON schema reference — every block kind's required fields, port conventions, validation rules. Read this when implementing the IDE save/load.
 - [`docs/repl.md`](docs/repl.md): REPL behavior and limits
 - [`docs/lsp.md`](docs/lsp.md): editor integration and LSP surface
 - [`docs/debug.md`](docs/debug.md): DAP mode and built-in debugging aids
@@ -354,10 +381,10 @@ Program examples:
 
 | Path | Role |
 |---|---|
-| `include/matlab/` | public headers for frontend, MIR, MLIR, and tooling |
-| `lib/` | implementation of lexer, parser, Sema, MIR, MLIR lowering, and emitters |
+| `include/matlab/` | public headers for frontend, MIR, MLIR, Flowchart, and tooling |
+| `lib/` | implementation of lexer, parser, Sema, Flowchart loader+builder, MIR, MLIR lowering, and emitters |
 | `tools/matlabc/` | CLI driver, REPL, DAP entry point |
-| `tools/matlab-lsp/` | Language Server |
+| `tools/matlab-lsp/` | Language Server (accepts both `.m` and `.mflow`) |
 | `runtime/` | C runtime shim and Python runtime shim |
 | `examples/` | runnable sample programs |
 | `test/` | parser, sema, MIR, MLIR, emission, and execution tests |
@@ -387,3 +414,17 @@ Maturity by output path (most → least mature):
    `moore_fsm`, `mux_4to_1_16bit`, `vector_processor`,
    `sequential_processor`, `fir_asic_pipelined`).
 5. **TypeScript** — same scope as Python; least exercised in CI.
+
+The frontend itself has a second source surface alongside `.m` text:
+
+- **Flowchart (`.mflow`) frontend** — graphical block-language input
+  saved by the MatForge IDE. Supports linear chains, structured
+  control flow (`if`/`else`, `for`, `while`, `break`, `continue`,
+  `return`, arbitrary nesting), sub-flows lifted to top-level
+  `Function`s, and `custom` blocks (inline `source` / sibling
+  `path` / `library_id` from `--block-path` + `MATFORGE_BLOCK_PATH`)
+  with function-insertion dedup. Every `-emit-*` backend works on
+  `.mflow` inputs unchanged. A cross-backend round-trip CI lane
+  asserts `.mflow` ≡ round-tripped `.m` across C / C++ / Python /
+  TS. See [`docs/flowchart_frontend.md`](docs/flowchart_frontend.md)
+  and [`docs/flowchart_schema.md`](docs/flowchart_schema.md).
