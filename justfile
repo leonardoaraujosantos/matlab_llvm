@@ -208,6 +208,129 @@ lint-sv FILE: build
 test-sv: build
     ctest --test-dir {{BUILD_DIR}} --output-on-failure -R "emit-sv-(fail-)?tests"
 
+# Generate a CocoTB verification harness from a .m HDL file. The
+# output directory is `<input-dir>/<stem>_cocotb/` and is fully
+# self-contained (DUT, Python reference, harness, fi helpers,
+# matlab_runtime.py, Makefile). See docs/emit_cocotb.md for the
+# full feature description and roadmap. LATENCY is the HDL Verifier-
+# style pipeline-latency parameter (cycles between input k applied
+# and DUT output for input k surfacing); set it to the registered-
+# output depth for pipelined DUTs (e.g., 2 for fir_asic_pipelined),
+# 0 for combinational and FSM modules. VECTORS is the number of
+# random stimulus vectors driven (default 100). Example:
+#   just emit-cocotb examples/hdl/alu_16bit.m
+#   just emit-cocotb examples/hdl/fir_asic_pipelined.m 2
+emit-cocotb FILE LATENCY="0" VECTORS="100": build
+    ./{{BUILD_DIR}}/matlabc -emit-cocotb \
+        -cocotb-latency={{LATENCY}} \
+        -cocotb-vectors={{VECTORS}} \
+        {{FILE}}
+
+# Generate a CocoTB harness AND run it. Equivalent to running
+# `just emit-cocotb FILE LATENCY` followed by `make` inside the
+# generated directory. Requires verilator + cocotb on PATH; falls
+# through to the harness's own SIM= override if the user wants
+# a different simulator (e.g. `SIM=icarus just verify-cocotb ...`).
+# Example:
+#   just verify-cocotb examples/hdl/alu_16bit.m
+#   just verify-cocotb examples/hdl/fir_asic_pipelined.m 2
+verify-cocotb FILE LATENCY="0" VECTORS="100": build
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! command -v verilator >/dev/null 2>&1; then
+        echo "verify-cocotb: verilator not on PATH (brew install verilator)" >&2
+        exit 1
+    fi
+    if ! command -v cocotb-config >/dev/null 2>&1; then
+        echo "verify-cocotb: cocotb not installed (pip install cocotb)" >&2
+        exit 1
+    fi
+    ./{{BUILD_DIR}}/matlabc -emit-cocotb \
+        -cocotb-latency={{LATENCY}} \
+        -cocotb-vectors={{VECTORS}} \
+        {{FILE}}
+    name=$(basename {{FILE}} .m)
+    parent=$(dirname {{FILE}})
+    outdir="$parent/${name}_cocotb"
+    cd "$outdir"
+    # Use `${SIM:-verilator}` so the user can override the simulator
+    # without editing the generated Makefile.
+    SIM="${SIM:-verilator}" make
+
+# Run -emit-cocotb + verify-cocotb across every supported
+# examples/hdl/*.m and print a status table. Skips if verilator or
+# cocotb is missing — matches the policy used for other optional
+# dependencies. Per-module pipeline latency is hand-picked to match
+# the registered-output depth (auto-detect lands in v3.4 — see
+# docs/emit_cocotb.md). Modules whose ports the v1 harness can't
+# drive (vector_processor) and whose semantics need v3 input-stability
+# (sequential_processor) are surfaced as SKIP / KNOWN-MISMATCH.
+test-cocotb: build
+    #!/usr/bin/env bash
+    set -uo pipefail
+    if ! command -v verilator >/dev/null 2>&1; then
+        echo "test-cocotb: verilator missing (skipping)"
+        exit 0
+    fi
+    if ! command -v cocotb-config >/dev/null 2>&1; then
+        echo "test-cocotb: cocotb missing (skipping)"
+        exit 0
+    fi
+    # `<name>:<latency>:<expect>` — expect is one of:
+    #   pass     — must pass; counts toward exit-code failure
+    #   deferred — known-failing pending v3 (sequential_processor's
+    #              input-stability gap, vector_processor's vector-port
+    #              driving — see docs/emit_cocotb.md). Reported but
+    #              doesn't fail the recipe.
+    declare -a tests=(
+        "alu_16bit:0:pass"
+        "counter_0_to_10:0:pass"
+        "fir_asic_pipelined:2:pass"
+        "mealy_fsm:0:pass"
+        "moore_fsm:0:pass"
+        "mux_4to_1_16bit:0:pass"
+        "sequential_processor:0:deferred"
+        "vector_processor:0:deferred"
+    )
+    pass=0; fail=0; deferred=0; regressed=0
+    for entry in "${tests[@]}"; do
+        IFS=: read m L expect <<< "$entry"
+        printf "  %-26s L=%s  " "$m" "$L"
+        rm -rf "/tmp/test_cocotb/$m" 2>/dev/null || true
+        mkdir -p "/tmp/test_cocotb"
+        emit_log=$(./{{BUILD_DIR}}/matlabc -emit-cocotb \
+                   -cocotb-out="/tmp/test_cocotb/$m" \
+                   -cocotb-latency=$L \
+                   examples/hdl/$m.m 2>&1)
+        if [ $? -ne 0 ]; then
+            if [ "$expect" = "deferred" ]; then
+                echo "DEFERRED (emit not yet supported)"
+                deferred=$((deferred+1))
+            else
+                echo "FAIL (emit failed)"
+                regressed=$((regressed+1))
+            fi
+            continue
+        fi
+        run_log=$(cd "/tmp/test_cocotb/$m" && make 2>&1)
+        ok=$(echo "$run_log" | grep -oE "TESTS=1 PASS=[0-9]+ FAIL=[0-9]+" | head -1)
+        if echo "$ok" | grep -q "PASS=1 FAIL=0"; then
+            echo "PASS"
+            pass=$((pass+1))
+        else
+            if [ "$expect" = "deferred" ]; then
+                echo "DEFERRED ($ok — expected, see docs/emit_cocotb.md)"
+                deferred=$((deferred+1))
+            else
+                echo "FAIL ($ok) — REGRESSION"
+                regressed=$((regressed+1))
+            fi
+        fi
+    done
+    echo
+    echo "  cocotb: $pass passed, $deferred deferred (expected), $regressed regression(s)"
+    [ $regressed -eq 0 ]
+
 # Compile a .m file via the SystemVerilog emitter: writes ./<name>.sv
 # and lints with Verilator when available. Parallel to `compile-c` /
 # `compile-cpp` / `compile-python` / `compile-typescript`, except
