@@ -3,6 +3,8 @@
 #include "matlab/AST/Formatter.h"
 #include "matlab/Basic/Diagnostic.h"
 #include "matlab/Basic/SourceManager.h"
+#include "matlab/Flowchart/GraphToAST.h"
+#include "matlab/Flowchart/Loader.h"
 #include "matlab/Lex/Lexer.h"
 #include "matlab/Parse/Parser.h"
 #include "matlab/MIR/Lowering.h"
@@ -80,6 +82,7 @@ struct Options {
                     EmitLLVM, EmitC, EmitCpp, EmitPython, EmitTypeScript,
                     EmitFiReport, EmitSystemVerilog, CheckSynthesizable,
                     EmitHardwareReport,
+                    DumpFlow, EmitMatlab,
                     Check, Repl, Format, Dap };
   Mode Mode = Mode::Check;
   bool Opt = false;
@@ -129,6 +132,13 @@ struct Options {
    * referenced from the script. Lets a `test_<mod>.m` driver compile
    * together with its `<mod>.m` definition without manual splicing. */
   std::vector<std::string> ExtraInputs;
+  /* Block-library search path for `.mflow` custom blocks (Phase 4b).
+   * Resolution order: command-line `--block-path DIR` entries (in CLI
+   * order) followed by colon-separated entries from the
+   * `MATFORGE_BLOCK_PATH` environment variable. The first directory
+   * that contains a matching `.m` file wins. Ignored for non-`.mflow`
+   * inputs. */
+  std::vector<std::string> BlockPath;
 };
 
 int usage(const char *Prog) {
@@ -137,7 +147,8 @@ int usage(const char *Prog) {
                "             -emit-mlir | -emit-llvm | -emit-c | -emit-cpp |\n"
                "             -emit-python | -emit-typescript |\n"
                "             -emit-systemverilog | -check-synthesizable |\n"
-               "             -emit-hardware-report |\n"
+               "             -emit-hardware-report | -dump-flow |\n"
+               "             -emit-matlab |\n"
                "             -format | -repl | -dap]\n"
                "            [-no-line | -line] [-doxygen] [-cpp-auto] [-g]  FILE.m\n";
   return 64;
@@ -166,6 +177,9 @@ bool parseArgs(int Argc, char **Argv, Options &Opts, const char *&Prog) {
       Opts.Mode = Options::Mode::CheckSynthesizable;
     else if (A == "-emit-hardware-report" || A == "-emit-hw-report")
       Opts.Mode = Options::Mode::EmitHardwareReport;
+    else if (A == "-dump-flow") Opts.Mode = Options::Mode::DumpFlow;
+    else if (A == "-emit-matlab" || A == "-emit-m")
+      Opts.Mode = Options::Mode::EmitMatlab;
     else if (A == "-repl") Opts.Mode = Options::Mode::Repl;
     else if (A == "-format") Opts.Mode = Options::Mode::Format;
     else if (A == "-dap") Opts.Mode = Options::Mode::Dap;
@@ -194,6 +208,16 @@ bool parseArgs(int Argc, char **Argv, Options &Opts, const char *&Prog) {
              A == "-sv-const-mul=on")
       Opts.SvConstMulOpt = true;
     else if (A == "-h" || A == "--help") return false;
+    else if (A == "--block-path" || A == "-block-path") {
+      if (I + 1 >= Argc) {
+        std::cerr << "--block-path requires a directory argument\n";
+        return false;
+      }
+      Opts.BlockPath.push_back(Argv[++I]);
+    }
+    else if (A.size() > 13 && A.substr(0, 13) == "--block-path=") {
+      Opts.BlockPath.push_back(std::string(A.substr(13)));
+    }
     else if (!A.empty() && A[0] == '-') {
       std::cerr << "unknown flag: " << A << "\n";
       return false;
@@ -5201,6 +5225,16 @@ int main(int Argc, char **Argv) {
   }
 #endif
 
+  if (Opts.Mode == Options::Mode::DumpFlow) {
+    SourceManager FlowSM;
+    DiagnosticEngine FlowDiag(FlowSM);
+    auto Doc = matlab::flowchart::loadMflowFromPath(FlowSM, Opts.InputPath,
+                                                    FlowDiag);
+    if (Doc) matlab::flowchart::dumpFlowDoc(std::cout, *Doc);
+    FlowDiag.printAll();
+    return FlowDiag.hasErrors() ? 1 : 0;
+  }
+
   SourceManager SM;
   FileID F = 0;
   if (Opts.ExtraInputs.empty()) {
@@ -5239,18 +5273,68 @@ int main(int Argc, char **Argv) {
   }
 
   DiagnosticEngine Diag(SM);
-  Lexer Lx(SM, F, Diag);
-  auto Toks = Lx.tokenize();
 
-  if (Opts.Mode == Options::Mode::DumpTokens) {
-    dumpTokens(SM, Toks);
-    Diag.printAll();
-    return Diag.hasErrors() ? 1 : 0;
-  }
+  /* `.mflow` inputs (the MatForge IDE flowchart format) bypass the
+   * MATLAB lexer/parser and synthesize an AST directly from the
+   * flowchart graph — see docs/flowchart_frontend.md. The resulting
+   * TranslationUnit feeds the same Sema + MLIR pipeline below, so
+   * every existing `-emit-*` mode works on `.mflow` inputs too. */
+  auto endsWith = [](const std::string &S, std::string_view Suf) {
+    return S.size() >= Suf.size() &&
+           std::string_view(S).substr(S.size() - Suf.size()) == Suf;
+  };
+  bool IsFlow = endsWith(Opts.InputPath, ".mflow");
 
   ASTContext Ctx;
-  Parser P(std::move(Toks), Ctx, Diag);
-  TranslationUnit *TU = P.parseFile();
+  TranslationUnit *TU = nullptr;
+  std::vector<Token> Toks;
+
+  if (IsFlow) {
+    matlab::flowchart::BuildOptions BO;
+    BO.BlockSearchPath = Opts.BlockPath;
+    /* Append entries from MATFORGE_BLOCK_PATH (colon-separated). CLI
+     * `--block-path` wins on first hit since it's listed first. */
+    if (const char *Env = std::getenv("MATFORGE_BLOCK_PATH")) {
+      std::string E = Env;
+      size_t Start = 0;
+      while (Start <= E.size()) {
+        size_t Sep = E.find(':', Start);
+        std::string Part = (Sep == std::string::npos)
+                               ? E.substr(Start)
+                               : E.substr(Start, Sep - Start);
+        if (!Part.empty()) BO.BlockSearchPath.push_back(std::move(Part));
+        if (Sep == std::string::npos) break;
+        Start = Sep + 1;
+      }
+    }
+    /* Custom-block `data.path` is resolved relative to the .mflow
+     * file's containing directory. */
+    {
+      auto LastSlash = Opts.InputPath.find_last_of("/\\");
+      if (LastSlash != std::string::npos)
+        BO.MflowDirectory = Opts.InputPath.substr(0, LastSlash);
+    }
+    auto Doc = matlab::flowchart::loadMflow(SM, F, Diag);
+    if (Doc)
+      TU = matlab::flowchart::buildAST(*Doc, Ctx, SM, Diag, BO);
+    if (Opts.Mode == Options::Mode::DumpTokens) {
+      Diag.printAll();
+      std::cerr << "warning: -dump-tokens does not apply to .mflow input\n";
+      return Diag.hasErrors() ? 1 : 0;
+    }
+  } else {
+    Lexer Lx(SM, F, Diag);
+    Toks = Lx.tokenize();
+
+    if (Opts.Mode == Options::Mode::DumpTokens) {
+      dumpTokens(SM, Toks);
+      Diag.printAll();
+      return Diag.hasErrors() ? 1 : 0;
+    }
+
+    Parser P(std::move(Toks), Ctx, Diag);
+    TU = P.parseFile();
+  }
 
   if (Opts.Mode == Options::Mode::DumpAST) {
     if (TU) dumpAST(std::cout, *TU);
@@ -5258,7 +5342,8 @@ int main(int Argc, char **Argv) {
     return Diag.hasErrors() ? 1 : 0;
   }
 
-  if (Opts.Mode == Options::Mode::Format) {
+  if (Opts.Mode == Options::Mode::Format ||
+      Opts.Mode == Options::Mode::EmitMatlab) {
     if (TU) formatAST(std::cout, *TU);
     Diag.printAll();
     return Diag.hasErrors() ? 1 : 0;

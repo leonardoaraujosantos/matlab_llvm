@@ -1,0 +1,16 @@
+FlowDoc schema=matforge.flowchart version=0.1.0 entry=main
+  settings.columnMajor=true defaultNumericType=double sourceLanguage=
+Flow id=flow_main kind=program name=main
+  Node id=s kind=start
+    out:out
+  Node id=e kind=end
+    in:in
+  Node id=orphan kind=variable
+    data.name=x
+    data.value=42
+    in:in
+    out:out
+  Edge id=e_1 kind=control s:out -> e:in
+disconnected_palette.mflow:15:9: warning: node "orphan" (kind "variable") is not reachable from start; ignored
+          { "id": "orphan", "kind": "variable",
+          ^

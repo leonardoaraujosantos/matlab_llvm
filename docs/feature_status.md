@@ -262,6 +262,7 @@ Out of scope:
 | C emission (self-contained) | ✅ | `-emit-c`. Multi-return uses out-pointer params (`void f(args, T0 *out_0, ...)`); persistent + isempty-init pattern lowers to `static T x = <init>;`. `matlab.eq/ne/lt/le/gt/ge/short_or/short_and` and other unregistered MATLAB ops handled. |
 | C++ emission (classes + inheritance preserved) | ✅ | `-emit-cpp`. Same scope as `-emit-c` plus `std::tuple<...>` return for multi-return; `std::tie(a, b) = f(...)` at call sites. |
 | Source formatter (AST pretty-printer) | ✅ | `-format` |
+| Flowchart (`.mflow`) frontend | ✅ | `-dump-flow` loads + validates a MatForge IDE flowchart JSON file. `-emit-matlab` (alias `-emit-m`) and any `-emit-*` lower a `.mflow` through the existing pipeline by synthesizing an AST. Covers linear chains, structured control flow (`if`/`else`, `for`, `while`, `break`, `continue`, `return`, arbitrary nesting), sub-flows lifted to top-level `Function`s, `function_definition` / `subflow_call` blocks, and `custom` blocks with three provenance modes (`source` inline / `path` `.m` file / `library_id` resolved against `--block-path` + `MATFORGE_BLOCK_PATH`). Function-insertion dedup + optional arity validation. `matlab-lsp` accepts `.mflow` URIs and surfaces loader/builder diagnostics inline. Cross-backend round-trip lane (12 fixtures × 4 backends — C / C++ / Python / TS) confirms structural equivalence with text-source MATLAB. See `docs/flowchart_frontend.md`. |
 | JIT / REPL | 🟡 | `matlabc -repl` with MLIR ExecutionEngine; state persists via a runtime workspace. No line editing / JIT cache / live user-function definitions yet. See `docs/repl.md`. |
 | Python emission | ✅ | `-emit-python`. NumPy-backed runtime in `runtime/matlab_runtime.py`; see `docs/emit_python.md`. Matrix display uses numpy's bracket repr (`.stdout-python` per-test goldens for the test lane). Multi-return uses native tuple unpacking (`a, b = f(...)`); persistent + isempty-init lowers to `<fn>.<name> = <init>` at module scope. |
 | TypeScript emission | 🟡 | `-emit-typescript`. Same scope as Python; runtime in `runtime/matlab_runtime.ts`. Multi-return uses array destructuring (`const [a, b] = f(...)`); persistent + isempty lowers to `let <fn>_<name>: number = <init>;`. |
@@ -292,6 +293,10 @@ All implemented; see `docs/emit_c_cpp.md` for pipeline diagram.
 | `emit-sv-fail` synthesizability gate diagnostics | 10 | ✅ 10/10 |
 | `emit-sv-ports` fi-spec ↔ SV declaration regression | 7 | ✅ 7/7 |
 | `emitc-fail-tests` (diagnostic contract) | 1+ | ✅ |
+| `flowchart-tests` (`.mflow` loader: schema, validation, error paths) | 9 | ✅ 9/9 |
+| `flowchart-emit-matlab-tests` (linear / control / sub-flows / custom blocks) | 17 | ✅ 17/17 |
+| `flowchart-cross-backend-tests` (`.mflow` ≡ round-tripped `.m` across C / C++ / Python / TS) | 12 × 4 | ✅ 48/48 |
+| `flowchart-lsp-tests` (`matlab-lsp` accepts `.mflow`, surfaces diagnostics) | 3 | ✅ 3/3 |
 
 Examples gallery: 19 programs under `examples/` exercise matrix ops,
 recursion, anonymous functions, function handles, parfor, linear
@@ -299,7 +304,12 @@ algebra, logical masks, struct/cell usage, and OOP (`bank_account.m`
 — classdef with inheritance, `Dependent` properties, operator
 overloading). 8 synthesizable HDL modules under `examples/hdl/`
 cover ALU, counter, mux, FSMs (Mealy / Moore), vector dot product
-+ magnitude, sequential FIR processor, and pipelined FIR ASIC.
++ magnitude, sequential FIR processor, and pipelined FIR ASIC. 8
+flowchart programs under `examples/mflow/` (`hello`, `for_loop`,
+`matrix_mult`, `solve_linear`, `is_old`, `factorial`, plus two
+custom-block demos) showcase the `.mflow` JSON frontend; each
+mirrors a text counterpart and produces byte-identical output
+through every existing backend.
 
 ---
 
@@ -307,14 +317,14 @@ cover ALU, counter, mux, FSMs (Mealy / Moore), vector dot product
 
 | Feature | Status |
 |---|:-:|
-| Compiler CLI (`matlabc`) with 13 emit modes + `-format` + `-repl` + `-dap` | ✅ |
+| Compiler CLI (`matlabc`) with 16 emit modes (incl. `-emit-matlab`, `-dump-flow`) + `-format` + `-repl` + `-dap` | ✅ |
 | CMake + `just` build system | ✅ |
-| CTest integration (10+ lanes incl. SV golden, SV port-spec, SV diagnostics, Python, TS, DAP) | ✅ |
+| CTest integration (20 lanes — frontend, run-tests × 4 backends, SV golden / port-spec / diagnostics, debug-hook, debug-DAP, debug-DWARF, plus 4 flowchart lanes) | ✅ |
 | Diagnostics with source-location | ✅ |
 | `#line` directives in emitted C / C++ | ✅ |
 | Formatter (AST pretty-printer, idempotent) | ✅ | `matlabc -format` / `just format`. Drops comments (not in AST). |
 | REPL / interactive interpreter | 🟡 | JIT via MLIR ExecutionEngine, persistent workspace, implicit display, `who`/`whos`/`clear`. `matlabc -repl`. See `docs/repl.md`. |
-| Language Server (LSP) | 🟡 | `matlab-lsp` binary: initialize/shutdown, didOpen/didChange/didClose, publishDiagnostics, definition, documentSymbol. No completion / hover / rename / workspace-symbol yet. See `docs/lsp.md`. |
+| Language Server (LSP) | 🟡 | `matlab-lsp` binary: initialize/shutdown, didOpen/didChange/didClose, publishDiagnostics, definition, documentSymbol. Accepts both `.m` and `.mflow` URIs (the latter routes through the flowchart loader + builder before Sema). No completion / hover / rename / workspace-symbol yet. See `docs/lsp.md`. |
 | Debugger (DAP) | 🟡 | `matlabc -dap FILE.m` speaks the full Debug Adapter Protocol over stdio: breakpoints (`setBreakpoints`), step (`next`/`stepIn`/`stepOut`), stack trace, `Locals` scope via the workspace snapshot, stdout forwarded as `output` events, clean `disconnect`. Plus the lightweight aids: `dbg(x)` prints to stderr, `who`/`whos`/`clear` list and purge the workspace, `#line` directives in emitted C / C++ so gdb/lldb step `.m` source. Deferred: pushing a stack frame on user-function entry (single `<script>` frame for now), `setVariable`, `evaluate`, conditional breakpoints. See `docs/debug.md`. |
 | Unit-test framework (MATLAB `matlab.unittest`) | ❌ |
 | Live Scripts (`.mlx`) | ❌ |

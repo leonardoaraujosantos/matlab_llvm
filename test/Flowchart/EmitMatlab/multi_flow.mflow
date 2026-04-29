@@ -1,0 +1,63 @@
+{
+  "schema": "matforge.flowchart",
+  "version": "0.1.0",
+  "entry": "main",
+  "flows": [
+    {
+      "id": "flow_main",
+      "kind": "program",
+      "name": "main",
+      "nodes": [
+        { "id": "s",  "kind": "start",
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+        { "id": "fd", "kind": "function_definition",
+          "data": { "flow_id": "flow_helper" },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "v1", "kind": "variable",
+          "data": { "name": "x", "value": "10" },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "fc", "kind": "function_call",
+          "data": { "callee": "doubled", "args": "x", "lhs": "y" },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "d1", "kind": "display",
+          "data": { "expression": "y" },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "e",  "kind": "end",
+          "ports": { "in": [{"id": "in"}], "out": [] } }
+      ],
+      "edges": [
+        { "id": "e_1", "kind": "control",
+          "from": {"node": "s",  "port": "out"}, "to": {"node": "fd", "port": "in"} },
+        { "id": "e_2", "kind": "control",
+          "from": {"node": "fd", "port": "out"}, "to": {"node": "v1", "port": "in"} },
+        { "id": "e_3", "kind": "control",
+          "from": {"node": "v1", "port": "out"}, "to": {"node": "fc", "port": "in"} },
+        { "id": "e_4", "kind": "control",
+          "from": {"node": "fc", "port": "out"}, "to": {"node": "d1", "port": "in"} },
+        { "id": "e_5", "kind": "control",
+          "from": {"node": "d1", "port": "out"}, "to": {"node": "e",  "port": "in"} }
+      ]
+    },
+    {
+      "id": "flow_helper",
+      "kind": "function",
+      "name": "doubled",
+      "signature": { "inputs": ["a"], "outputs": ["b"] },
+      "nodes": [
+        { "id": "hs", "kind": "start",
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+        { "id": "ha", "kind": "assignment",
+          "data": { "lhs": "b", "rhs": "a * 2" },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "he", "kind": "end",
+          "ports": { "in": [{"id": "in"}], "out": [] } }
+      ],
+      "edges": [
+        { "id": "h_1", "kind": "control",
+          "from": {"node": "hs", "port": "out"}, "to": {"node": "ha", "port": "in"} },
+        { "id": "h_2", "kind": "control",
+          "from": {"node": "ha", "port": "out"}, "to": {"node": "he", "port": "in"} }
+      ]
+    }
+  ]
+}

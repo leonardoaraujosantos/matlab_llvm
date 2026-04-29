@@ -68,6 +68,12 @@ add_library(MatlabParse STATIC
 )
 target_link_libraries(MatlabParse PUBLIC MatlabLex MatlabAST)
 
+add_library(MatlabFlowchart STATIC
+  lib/Flowchart/Loader.cpp
+  lib/Flowchart/GraphToAST.cpp
+)
+target_link_libraries(MatlabFlowchart PUBLIC MatlabParse MatlabBasic)
+
 add_library(MatlabSema STATIC
   lib/Sema/Scope.cpp
   lib/Sema/Type.cpp
@@ -140,8 +146,10 @@ if(MATLAB_LLVM_WITH_MLIR)
 endif()
 
 add_executable(matlab-lsp tools/matlab-lsp/main.cpp)
+# MatlabFlowchart and MatlabSema PUBLIC-link the rest transitively;
+# don't list those again to avoid `ld: ignoring duplicate libraries`.
 target_link_libraries(matlab-lsp
-  PRIVATE MatlabParse MatlabSema MatlabAST MatlabLex MatlabBasic)
+  PRIVATE MatlabFlowchart MatlabSema)
 if(MATLAB_LLVM_WITH_MLIR)
   # The LSP binary only needs llvm::json from LLVMSupport — but since
   # MATLAB_LLVM_WITH_MLIR implies a usable llvm install, link against
@@ -154,7 +162,7 @@ add_executable(matlabc tools/matlabc/main.cpp)
 # listing them explicitly here would duplicate them on the link line
 # (ld64 warns "ignoring duplicate libraries").
 target_link_libraries(matlabc
-  PRIVATE MatlabMIR MatlabParse)
+  PRIVATE MatlabMIR MatlabFlowchart)
 if(MATLAB_LLVM_WITH_MLIR)
   target_link_libraries(matlabc PRIVATE MatlabMLIR)
   target_compile_definitions(matlabc PRIVATE MATLAB_LLVM_WITH_MLIR=1)
@@ -180,6 +188,29 @@ add_test(
   NAME frontend-tests
   COMMAND ${CMAKE_SOURCE_DIR}/test/run_tests.sh $<TARGET_FILE:matlabc>
   WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test
+)
+add_test(
+  NAME flowchart-tests
+  COMMAND ${CMAKE_SOURCE_DIR}/test/Flowchart/run_tests.sh $<TARGET_FILE:matlabc>
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Flowchart
+)
+add_test(
+  NAME flowchart-emit-matlab-tests
+  COMMAND ${CMAKE_SOURCE_DIR}/test/Flowchart/EmitMatlab/run_tests.sh
+          $<TARGET_FILE:matlabc>
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Flowchart/EmitMatlab
+)
+add_test(
+  NAME flowchart-cross-backend-tests
+  COMMAND ${CMAKE_SOURCE_DIR}/test/Flowchart/CrossBackend/run_tests.sh
+          $<TARGET_FILE:matlabc>
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Flowchart/CrossBackend
+)
+add_test(
+  NAME flowchart-lsp-tests
+  COMMAND python3 ${CMAKE_SOURCE_DIR}/test/Flowchart/Lsp/run_tests.py
+          $<TARGET_FILE:matlab-lsp>
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Flowchart/Lsp
 )
 if(MATLAB_LLVM_WITH_MLIR)
   add_test(

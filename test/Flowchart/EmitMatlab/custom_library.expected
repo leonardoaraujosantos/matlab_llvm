@@ -1,0 +1,7 @@
+a = scale(10, 4);
+b = scale(a, 2);
+disp(b);
+
+function y = scale(x, k)
+    y = k * x;
+end

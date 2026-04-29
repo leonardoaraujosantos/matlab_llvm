@@ -1,0 +1,24 @@
+FlowDoc schema=matforge.flowchart version=0.1.0 entry=main
+  settings.columnMajor=true defaultNumericType=double sourceLanguage=matforge
+Flow id=flow_main kind=program name=main
+  Node id=s kind=start
+    out:out
+  Node id=v1 kind=variable
+    data.name=v
+    data.value=1
+    in:in
+    out:out
+  Node id=e1 kind=expression
+    data.expression=v = v + 1
+    in:in
+    out:out
+  Node id=d1 kind=display
+    data.expression=v
+    in:in
+    out:out
+  Node id=e kind=end
+    in:in
+  Edge id=e_1 kind=control s:out -> v1:in
+  Edge id=e_2 kind=control v1:out -> e1:in
+  Edge id=e_3 kind=control e1:out -> d1:in
+  Edge id=e_4 kind=control d1:out -> e:in

@@ -1,0 +1,84 @@
+{
+  "schema": "matforge.flowchart",
+  "version": "0.1.0",
+  "entry": "main",
+  "settings": {
+    "columnMajor": true,
+    "defaultNumericType": "double",
+    "sourceLanguage": "matforge"
+  },
+  "flows": [
+    {
+      "id": "flow_main",
+      "kind": "program",
+      "name": "main",
+      "signature": { "inputs": [], "outputs": [] },
+      "nodes": [
+        { "id": "s",    "kind": "start",
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+        { "id": "fd",   "kind": "function_definition",
+          "data": { "flow_id": "flow_is_old" },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "lbl1", "kind": "display",
+          "data": { "expression": "'is_old(10):'" },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "d10",  "kind": "display",
+          "data": { "expression": "is_old(10)" },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "lbl2", "kind": "display",
+          "data": { "expression": "'is_old(18):'" },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "d18",  "kind": "display",
+          "data": { "expression": "is_old(18)" },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "lbl3", "kind": "display",
+          "data": { "expression": "'is_old(25):'" },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "d25",  "kind": "display",
+          "data": { "expression": "is_old(25)" },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "e",    "kind": "end",
+          "ports": { "in": [{"id": "in"}], "out": [] } }
+      ],
+      "edges": [
+        { "id": "e_1", "kind": "control",
+          "from": {"node": "s",    "port": "out"}, "to": {"node": "fd",   "port": "in"} },
+        { "id": "e_2", "kind": "control",
+          "from": {"node": "fd",   "port": "out"}, "to": {"node": "lbl1", "port": "in"} },
+        { "id": "e_3", "kind": "control",
+          "from": {"node": "lbl1", "port": "out"}, "to": {"node": "d10",  "port": "in"} },
+        { "id": "e_4", "kind": "control",
+          "from": {"node": "d10",  "port": "out"}, "to": {"node": "lbl2", "port": "in"} },
+        { "id": "e_5", "kind": "control",
+          "from": {"node": "lbl2", "port": "out"}, "to": {"node": "d18",  "port": "in"} },
+        { "id": "e_6", "kind": "control",
+          "from": {"node": "d18",  "port": "out"}, "to": {"node": "lbl3", "port": "in"} },
+        { "id": "e_7", "kind": "control",
+          "from": {"node": "lbl3", "port": "out"}, "to": {"node": "d25",  "port": "in"} },
+        { "id": "e_8", "kind": "control",
+          "from": {"node": "d25",  "port": "out"}, "to": {"node": "e",    "port": "in"} }
+      ]
+    },
+    {
+      "id": "flow_is_old",
+      "kind": "function",
+      "name": "is_old",
+      "signature": { "inputs": ["age"], "outputs": ["r"] },
+      "nodes": [
+        { "id": "fs", "kind": "start",
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+        { "id": "fa", "kind": "assignment",
+          "data": { "lhs": "r", "rhs": "age > 18" },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "fe", "kind": "end",
+          "ports": { "in": [{"id": "in"}], "out": [] } }
+      ],
+      "edges": [
+        { "id": "f_1", "kind": "control",
+          "from": {"node": "fs", "port": "out"}, "to": {"node": "fa", "port": "in"} },
+        { "id": "f_2", "kind": "control",
+          "from": {"node": "fa", "port": "out"}, "to": {"node": "fe", "port": "in"} }
+      ]
+    }
+  ]
+}

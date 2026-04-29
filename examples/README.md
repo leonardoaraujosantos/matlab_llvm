@@ -44,6 +44,17 @@ just examples
 | `fi_apply_gain.m` | Fixed-Point Designer (`fi`) constructor + `*` + `(:)` clamp + `disp` |
 | `fi_fir_filter.m` | fi arrays + vector concat + scalar MAC accumulator (Phase 3 gating shape) |
 
+## Flowchart (`.mflow`) examples
+
+The [`mflow/`](mflow/README.md) subdirectory holds counterparts of
+the canonical text examples expressed as MatForge IDE diagrams.
+Each `.mflow` is JSON the IDE saves; `matlabc` reads them through
+the same pipeline as `.m` source so every existing emit backend
+works unchanged. Includes `hello`, `for_loop`, `is_old`,
+`factorial`, plus two `custom`-block demos (inline `source` and
+sibling-`.m` `path` provenance). See
+[`mflow/README.md`](mflow/README.md) for usage.
+
 ## HDL examples
 
 The `hdl/` subdirectory holds 8 synthesizable modules targeting the

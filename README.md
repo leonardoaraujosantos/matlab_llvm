@@ -38,17 +38,19 @@ control flow, functions, basic OOP, and editor tooling.
 | State | `global`, `persistent`, REPL workspace variables, `who` / `whos` / `clear` |
 | Parallelism | `parfor` with reduction support |
 | OOP | `classdef`, inheritance, static methods, operator overloading, `Dependent` properties, enumerations |
-| Tooling | formatter, REPL, DAP server, LSP server |
+| Tooling | formatter, REPL, DAP server, LSP server, `.mflow` flowchart frontend (graph → AST → every backend) |
 | Outputs | LLVM IR, C, C++, experimental Python, native executables via helper scripts |
 
 Current corpus size in-tree:
 
 - `19` runnable programs in [`examples/`](examples/)
 - `8` synthesizable HDL example modules in [`examples/hdl/`](examples/hdl/)
+- `8` flowchart programs in [`examples/mflow/`](examples/mflow/)
 - `144` execution tests in `test/Run/`
 - `37` SystemVerilog golden fixtures (Verilator lint-clean) in `test/EmitSV/`
 - `7` fi-spec port-declaration regression tests in `test/EmitSVPorts/`
 - `10` synthesizability-gate diagnostic tests in `test/EmitSVFail/`
+- `26` flowchart fixtures across 4 lanes in `test/Flowchart/`
 
 For the authoritative compatibility inventory, see
 [`docs/feature_status.md`](docs/feature_status.md).
@@ -329,8 +331,9 @@ Start here for the high-level index:
 
 Core docs:
 
-- [`docs/roadmap.md`](docs/roadmap.md): forward-looking work — block language, CocoTB verification, SV→MATLAB, runtime/REPL/HDL improvements
+- [`docs/roadmap.md`](docs/roadmap.md): forward-looking work — CocoTB verification, SV→MATLAB, runtime/REPL/HDL improvements
 - [`docs/feature_status.md`](docs/feature_status.md): feature inventory and known gaps
+- [`docs/flowchart_frontend.md`](docs/flowchart_frontend.md): graphical block-language frontend (`.mflow` JSON → AST → every backend)
 - [`docs/repl.md`](docs/repl.md): REPL behavior and limits
 - [`docs/lsp.md`](docs/lsp.md): editor integration and LSP surface
 - [`docs/debug.md`](docs/debug.md): DAP mode and built-in debugging aids

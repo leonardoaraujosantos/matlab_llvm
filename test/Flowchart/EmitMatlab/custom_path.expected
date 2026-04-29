@@ -1,0 +1,12 @@
+y = clamp(42, 0, 10);
+disp(y);
+
+function y = clamp(x, lo, hi)
+    if x < lo
+        y = lo;
+    elseif x > hi
+        y = hi;
+    else
+        y = x;
+    end
+end

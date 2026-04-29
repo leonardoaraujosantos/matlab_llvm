@@ -8,6 +8,8 @@ Testing/
 
 # Native binaries built from examples/*.m by the helper scripts.
 # Keep the .m sources and any markdown; drop the compiled artifacts.
+# `.mflow` flowchart sources are also kept (examples/mflow/) along
+# with their `blocks/` sidecar `.m` files.
 examples/*
 !examples/*.m
 !examples/*.md
@@ -16,6 +18,20 @@ examples/*
 examples/*/*
 !examples/*/*.m
 !examples/*/*.md
+!examples/*/*.mflow
+!examples/*/*/
+examples/*/*/*
+!examples/*/*/*.m
+!examples/*/*/*.md
+!examples/*/*/*.mflow
+
+# Stray CMake artifacts if someone configures from the repo root
+# rather than build/ (canonical layout uses build/, see justfile).
+/CMakeCache.txt
+/CMakeFiles/
+/CTestTestfile.cmake
+/Makefile
+/cmake_install.cmake
 
 # Local Claude Code state (worktrees, transcripts, agent scratch)
 .claude/

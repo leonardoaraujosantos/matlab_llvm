@@ -1,0 +1,3 @@
+Errors/bad_json.mflow:4:3: error: expected ',' or '}' in object
+    "entry": "main"
+    ^

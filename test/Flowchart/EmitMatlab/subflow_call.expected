@@ -1,0 +1,8 @@
+a = 3;
+b = 4;
+h = hypot2(a, b);
+disp(h);
+
+function r = hypot2(x, y)
+    r = sqrt(x * x + y * y);
+end

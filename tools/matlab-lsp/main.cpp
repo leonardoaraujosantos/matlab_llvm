@@ -20,6 +20,8 @@
 #include "matlab/AST/AST.h"
 #include "matlab/Basic/Diagnostic.h"
 #include "matlab/Basic/SourceManager.h"
+#include "matlab/Flowchart/GraphToAST.h"
+#include "matlab/Flowchart/Loader.h"
 #include "matlab/Lex/Lexer.h"
 #include "matlab/Parse/Parser.h"
 #include "matlab/Sema/Resolver.h"
@@ -146,19 +148,40 @@ std::string uriToFsPath(llvm::StringRef URI) {
 }
 
 /* Rebuild the full parse + Sema pipeline for a document. Diagnostics
- * accumulate inside Diag; callers publish them after this returns. */
+ * accumulate inside Diag; callers publish them after this returns.
+ * Dispatches on the URI extension: `.mflow` files run the flowchart
+ * loader + graph-to-AST builder (Phase 5 of the block-language
+ * frontend; see docs/flowchart_frontend.md), everything else runs
+ * the regular MATLAB Lex+Parse path. Both produce a TranslationUnit
+ * fed to the same Sema pipeline. */
 void reparse(Document &D) {
   D.SM = std::make_unique<SourceManager>();
   D.Diag = std::make_unique<DiagnosticEngine>(*D.SM);
   D.Ctx = std::make_unique<ASTContext>();
   D.Sema = std::make_unique<SemaContext>();
   D.TC = std::make_unique<TypeContext>();
-  D.File = D.SM->addBuffer(uriToFsPath(D.URI), D.Content);
+  std::string FsPath = uriToFsPath(D.URI);
+  D.File = D.SM->addBuffer(FsPath, D.Content);
 
-  Lexer Lx(*D.SM, D.File, *D.Diag);
-  auto Toks = Lx.tokenize();
-  Parser P(std::move(Toks), *D.Ctx, *D.Diag);
-  D.TU = P.parseFile();
+  bool IsFlow = FsPath.size() >= 6 &&
+                std::string_view(FsPath).substr(FsPath.size() - 6) == ".mflow";
+
+  if (IsFlow) {
+    auto Doc = matlab::flowchart::loadMflow(*D.SM, D.File, *D.Diag);
+    if (Doc) {
+      matlab::flowchart::BuildOptions BO;
+      auto Slash = FsPath.find_last_of("/\\");
+      if (Slash != std::string::npos)
+        BO.MflowDirectory = FsPath.substr(0, Slash);
+      D.TU = matlab::flowchart::buildAST(*Doc, *D.Ctx, *D.SM, *D.Diag, BO);
+    }
+  } else {
+    Lexer Lx(*D.SM, D.File, *D.Diag);
+    auto Toks = Lx.tokenize();
+    Parser P(std::move(Toks), *D.Ctx, *D.Diag);
+    D.TU = P.parseFile();
+  }
+
   if (D.TU) {
     Resolver R(*D.Sema, *D.TC, *D.Diag);
     R.setReplMode(false);

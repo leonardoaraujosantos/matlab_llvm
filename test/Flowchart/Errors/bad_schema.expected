@@ -1,0 +1,3 @@
+Errors/bad_schema.mflow:1:1: error: expected schema "matforge.flowchart", got "wrong.schema"
+  {
+  ^

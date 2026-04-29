@@ -1,0 +1,21 @@
+{
+  "schema": "matforge.flowchart",
+  "version": "0.1.0",
+  "entry": "main",
+  "flows": [
+    {
+      "id": "flow_main",
+      "kind": "program",
+      "name": "main",
+      "nodes": [
+        { "id": "s", "kind": "start",
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+        { "id": "s", "kind": "start",
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+        { "id": "e", "kind": "end",
+          "ports": { "in": [{"id": "in"}], "out": [] } }
+      ],
+      "edges": []
+    }
+  ]
+}

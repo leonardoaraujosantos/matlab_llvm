@@ -1,0 +1,91 @@
+{
+  "schema": "matforge.flowchart",
+  "version": "0.1.0",
+  "entry": "main",
+  "settings": {
+    "columnMajor": true,
+    "defaultNumericType": "double",
+    "sourceLanguage": "matforge"
+  },
+  "flows": [
+    {
+      "id": "flow_main",
+      "kind": "program",
+      "name": "main",
+      "signature": { "inputs": [], "outputs": [] },
+      "nodes": [
+        { "id": "s",   "kind": "start",
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+        { "id": "cb1", "kind": "custom",
+          "data": {
+            "name": "clamp",
+            "callee": "clamp",
+            "args": "42, 0, 10",
+            "lhs": "high",
+            "path": "blocks/clamp.m"
+          },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "cb2", "kind": "custom",
+          "data": {
+            "name": "clamp",
+            "callee": "clamp",
+            "args": "-3, 0, 10",
+            "lhs": "low",
+            "path": "blocks/clamp.m"
+          },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "cb3", "kind": "custom",
+          "data": {
+            "name": "clamp",
+            "callee": "clamp",
+            "args": "5, 0, 10",
+            "lhs": "mid",
+            "path": "blocks/clamp.m"
+          },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "lbl1", "kind": "display",
+          "data": { "expression": "'clamp(42, 0, 10) ='" },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "d1",   "kind": "display",
+          "data": { "expression": "high" },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "lbl2", "kind": "display",
+          "data": { "expression": "'clamp(-3, 0, 10) ='" },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "d2",   "kind": "display",
+          "data": { "expression": "low" },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "lbl3", "kind": "display",
+          "data": { "expression": "'clamp(5, 0, 10) ='" },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "d3",   "kind": "display",
+          "data": { "expression": "mid" },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "e",    "kind": "end",
+          "ports": { "in": [{"id": "in"}], "out": [] } }
+      ],
+      "edges": [
+        { "id": "e_1",  "kind": "control",
+          "from": {"node": "s",    "port": "out"}, "to": {"node": "cb1",  "port": "in"} },
+        { "id": "e_2",  "kind": "control",
+          "from": {"node": "cb1",  "port": "out"}, "to": {"node": "cb2",  "port": "in"} },
+        { "id": "e_3",  "kind": "control",
+          "from": {"node": "cb2",  "port": "out"}, "to": {"node": "cb3",  "port": "in"} },
+        { "id": "e_4",  "kind": "control",
+          "from": {"node": "cb3",  "port": "out"}, "to": {"node": "lbl1", "port": "in"} },
+        { "id": "e_5",  "kind": "control",
+          "from": {"node": "lbl1", "port": "out"}, "to": {"node": "d1",   "port": "in"} },
+        { "id": "e_6",  "kind": "control",
+          "from": {"node": "d1",   "port": "out"}, "to": {"node": "lbl2", "port": "in"} },
+        { "id": "e_7",  "kind": "control",
+          "from": {"node": "lbl2", "port": "out"}, "to": {"node": "d2",   "port": "in"} },
+        { "id": "e_8",  "kind": "control",
+          "from": {"node": "d2",   "port": "out"}, "to": {"node": "lbl3", "port": "in"} },
+        { "id": "e_9",  "kind": "control",
+          "from": {"node": "lbl3", "port": "out"}, "to": {"node": "d3",   "port": "in"} },
+        { "id": "e_10", "kind": "control",
+          "from": {"node": "d3",   "port": "out"}, "to": {"node": "e",    "port": "in"} }
+      ]
+    }
+  ]
+}

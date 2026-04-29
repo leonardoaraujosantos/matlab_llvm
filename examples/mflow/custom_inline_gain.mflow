@@ -1,0 +1,56 @@
+{
+  "schema": "matforge.flowchart",
+  "version": "0.1.0",
+  "entry": "main",
+  "settings": {
+    "columnMajor": true,
+    "defaultNumericType": "double",
+    "sourceLanguage": "matforge"
+  },
+  "flows": [
+    {
+      "id": "flow_main",
+      "kind": "program",
+      "name": "main",
+      "signature": { "inputs": [], "outputs": [] },
+      "nodes": [
+        { "id": "s",   "kind": "start",
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+        { "id": "v1",  "kind": "variable",
+          "data": { "name": "sample", "value": "12" },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "cb",  "kind": "custom",
+          "data": {
+            "name": "gain_plus_bias",
+            "callee": "gain_plus_bias",
+            "args": "sample, 4, 1",
+            "lhs": "scaled",
+            "source": "function y = gain_plus_bias(x, k, b)\n    y = k * x + b;\nend\n",
+            "inputs": ["x", "k", "b"],
+            "outputs": ["y"]
+          },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "lbl", "kind": "display",
+          "data": { "expression": "'gain_plus_bias(12, 4, 1) ='" },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "d1",  "kind": "display",
+          "data": { "expression": "scaled" },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "e",   "kind": "end",
+          "ports": { "in": [{"id": "in"}], "out": [] } }
+      ],
+      "edges": [
+        { "id": "e_1", "kind": "control",
+          "from": {"node": "s",   "port": "out"}, "to": {"node": "v1",  "port": "in"} },
+        { "id": "e_2", "kind": "control",
+          "from": {"node": "v1",  "port": "out"}, "to": {"node": "cb",  "port": "in"} },
+        { "id": "e_3", "kind": "control",
+          "from": {"node": "cb",  "port": "out"}, "to": {"node": "lbl", "port": "in"} },
+        { "id": "e_4", "kind": "control",
+          "from": {"node": "lbl", "port": "out"}, "to": {"node": "d1",  "port": "in"} },
+        { "id": "e_5", "kind": "control",
+          "from": {"node": "d1",  "port": "out"}, "to": {"node": "e",   "port": "in"} }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,43 @@
+{
+  "schema": "matforge.flowchart",
+  "version": "0.1.0",
+  "entry": "main",
+  "settings": {
+    "columnMajor": true,
+    "defaultNumericType": "double",
+    "sourceLanguage": "matforge"
+  },
+  "flows": [
+    {
+      "id": "flow_main",
+      "kind": "program",
+      "name": "main",
+      "signature": { "inputs": [], "outputs": [] },
+      "nodes": [
+        { "id": "s",  "kind": "start",
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+        { "id": "v1", "kind": "variable",
+          "data": { "name": "v", "value": "1" },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "e1", "kind": "expression",
+          "data": { "expression": "v = v + 1" },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "d1", "kind": "display",
+          "data": { "expression": "v" },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "e",  "kind": "end",
+          "ports": { "in": [{"id": "in"}], "out": [] } }
+      ],
+      "edges": [
+        { "id": "e_1", "kind": "control",
+          "from": {"node": "s",  "port": "out"}, "to": {"node": "v1", "port": "in"} },
+        { "id": "e_2", "kind": "control",
+          "from": {"node": "v1", "port": "out"}, "to": {"node": "e1", "port": "in"} },
+        { "id": "e_3", "kind": "control",
+          "from": {"node": "e1", "port": "out"}, "to": {"node": "d1", "port": "in"} },
+        { "id": "e_4", "kind": "control",
+          "from": {"node": "d1", "port": "out"}, "to": {"node": "e",  "port": "in"} }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,45 @@
+{
+  "schema": "matforge.flowchart",
+  "version": "0.1.0",
+  "entry": "main",
+  "flows": [
+    {
+      "id": "flow_main",
+      "kind": "program",
+      "name": "main",
+      "nodes": [
+        { "id": "s",  "kind": "start",
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+        { "id": "v0", "kind": "variable",
+          "data": { "name": "x", "value": "10" },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "if1", "kind": "if",
+          "data": { "cond": "x > 5" },
+          "ports": { "in": [{"id": "in"}],
+                     "out": [{"id": "true"}, {"id": "false"}] } },
+        { "id": "tA", "kind": "expression",
+          "data": { "expression": "x = x * 2" },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "show", "kind": "display",
+          "data": { "expression": "x" },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "e",  "kind": "end",
+          "ports": { "in": [{"id": "in"}], "out": [] } }
+      ],
+      "edges": [
+        { "id": "e_1", "kind": "control",
+          "from": {"node": "s",   "port": "out"},   "to": {"node": "v0",   "port": "in"} },
+        { "id": "e_2", "kind": "control",
+          "from": {"node": "v0",  "port": "out"},   "to": {"node": "if1",  "port": "in"} },
+        { "id": "e_3", "kind": "control",
+          "from": {"node": "if1", "port": "true"},  "to": {"node": "tA",   "port": "in"} },
+        { "id": "e_4", "kind": "control",
+          "from": {"node": "if1", "port": "false"}, "to": {"node": "show", "port": "in"} },
+        { "id": "e_5", "kind": "control",
+          "from": {"node": "tA",  "port": "out"},   "to": {"node": "show", "port": "in"} },
+        { "id": "e_6", "kind": "control",
+          "from": {"node": "show","port": "out"},   "to": {"node": "e",    "port": "in"} }
+      ]
+    }
+  ]
+}

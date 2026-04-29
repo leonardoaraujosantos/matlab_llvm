@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# Golden-file test runner for the .mflow loader (Phase 1 of the
+# flowchart frontend; see docs/flowchart_frontend.md).
+#
+# For each *.mflow file under this directory, runs `matlabc -dump-flow`
+# and diffs the combined stdout+stderr against the matching *.expected
+# file. Files under Errors/ are expected to fail (non-zero exit); files
+# at the top level are expected to load cleanly (warnings allowed).
+#
+# Usage: run_tests.sh <path-to-matlabc>
+#        UPDATE=1 run_tests.sh <path-to-matlabc>   # refresh goldens
+set -u
+
+MATLABC="${1:-}"
+if [[ -z "$MATLABC" || ! -x "$MATLABC" ]]; then
+  echo "usage: $0 <path-to-matlabc>" >&2
+  exit 2
+fi
+
+TESTDIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$TESTDIR"
+
+pass=0
+fail=0
+failed_names=()
+
+run_one() {
+  local f="$1"
+  local exp="${f%.mflow}.expected"
+  # Replace the absolute path in diagnostics with a stable placeholder
+  # so the goldens are portable across checkouts.
+  local got
+  got="$("$MATLABC" -dump-flow "$f" 2>&1 | sed "s|$TESTDIR/||g")" || true
+  if [[ -n "${UPDATE:-}" || ! -e "$exp" ]]; then
+    printf '%s\n' "$got" > "$exp"
+    echo "UPDATED $f"
+    return
+  fi
+  if diff -u "$exp" <(printf '%s\n' "$got") >/dev/null; then
+    pass=$((pass+1))
+  else
+    fail=$((fail+1))
+    failed_names+=("$f")
+    echo "FAIL $f"
+    diff -u "$exp" <(printf '%s\n' "$got") | sed 's/^/  /'
+  fi
+}
+
+shopt -s nullglob
+for f in *.mflow Errors/*.mflow; do
+  run_one "$f"
+done
+
+echo "----"
+echo "passed: $pass    failed: $fail"
+exit $(( fail > 0 ? 1 : 0 ))

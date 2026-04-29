@@ -1,0 +1,5 @@
+acc = 0;
+for i = 1:10
+    acc = acc + i;
+end
+disp(acc);

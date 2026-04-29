@@ -1,0 +1,63 @@
+{
+  "schema": "matforge.flowchart",
+  "version": "0.1.0",
+  "entry": "main",
+  "flows": [
+    {
+      "id": "flow_main",
+      "kind": "program",
+      "name": "main",
+      "nodes": [
+        { "id": "s",  "kind": "start",
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+        { "id": "v1", "kind": "variable",
+          "data": { "name": "a", "value": "3" },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "v2", "kind": "variable",
+          "data": { "name": "b", "value": "4" },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "sc", "kind": "subflow_call",
+          "data": { "flow_id": "flow_hyp", "args": "a, b", "lhs": "h" },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "d1", "kind": "display",
+          "data": { "expression": "h" },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "e",  "kind": "end",
+          "ports": { "in": [{"id": "in"}], "out": [] } }
+      ],
+      "edges": [
+        { "id": "e_1", "kind": "control",
+          "from": {"node": "s",  "port": "out"}, "to": {"node": "v1", "port": "in"} },
+        { "id": "e_2", "kind": "control",
+          "from": {"node": "v1", "port": "out"}, "to": {"node": "v2", "port": "in"} },
+        { "id": "e_3", "kind": "control",
+          "from": {"node": "v2", "port": "out"}, "to": {"node": "sc", "port": "in"} },
+        { "id": "e_4", "kind": "control",
+          "from": {"node": "sc", "port": "out"}, "to": {"node": "d1", "port": "in"} },
+        { "id": "e_5", "kind": "control",
+          "from": {"node": "d1", "port": "out"}, "to": {"node": "e",  "port": "in"} }
+      ]
+    },
+    {
+      "id": "flow_hyp",
+      "kind": "function",
+      "name": "hypot2",
+      "signature": { "inputs": ["x", "y"], "outputs": ["r"] },
+      "nodes": [
+        { "id": "fs", "kind": "start",
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+        { "id": "fa", "kind": "assignment",
+          "data": { "lhs": "r", "rhs": "sqrt(x*x + y*y)" },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "fe", "kind": "end",
+          "ports": { "in": [{"id": "in"}], "out": [] } }
+      ],
+      "edges": [
+        { "id": "f_1", "kind": "control",
+          "from": {"node": "fs", "port": "out"}, "to": {"node": "fa", "port": "in"} },
+        { "id": "f_2", "kind": "control",
+          "from": {"node": "fa", "port": "out"}, "to": {"node": "fe", "port": "in"} }
+      ]
+    }
+  ]
+}

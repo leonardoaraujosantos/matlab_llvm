@@ -1,0 +1,102 @@
+{
+  "schema": "matforge.flowchart",
+  "version": "0.1.0",
+  "entry": "main",
+  "settings": {
+    "columnMajor": true,
+    "defaultNumericType": "double",
+    "sourceLanguage": "matforge"
+  },
+  "flows": [
+    {
+      "id": "flow_main",
+      "kind": "program",
+      "name": "main",
+      "signature": { "inputs": [], "outputs": [] },
+      "nodes": [
+        { "id": "s",   "kind": "start",
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+        { "id": "fd",  "kind": "function_definition",
+          "data": { "flow_id": "flow_fact" },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "lbl", "kind": "display",
+          "data": { "expression": "'fact(1..6):'" },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "d1",  "kind": "display",
+          "data": { "expression": "fact(1)" },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "d2",  "kind": "display",
+          "data": { "expression": "fact(2)" },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "d3",  "kind": "display",
+          "data": { "expression": "fact(3)" },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "d4",  "kind": "display",
+          "data": { "expression": "fact(4)" },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "d5",  "kind": "display",
+          "data": { "expression": "fact(5)" },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "d6",  "kind": "display",
+          "data": { "expression": "fact(6)" },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "e",   "kind": "end",
+          "ports": { "in": [{"id": "in"}], "out": [] } }
+      ],
+      "edges": [
+        { "id": "e_1", "kind": "control",
+          "from": {"node": "s",   "port": "out"}, "to": {"node": "fd",  "port": "in"} },
+        { "id": "e_2", "kind": "control",
+          "from": {"node": "fd",  "port": "out"}, "to": {"node": "lbl", "port": "in"} },
+        { "id": "e_3", "kind": "control",
+          "from": {"node": "lbl", "port": "out"}, "to": {"node": "d1",  "port": "in"} },
+        { "id": "e_4", "kind": "control",
+          "from": {"node": "d1",  "port": "out"}, "to": {"node": "d2",  "port": "in"} },
+        { "id": "e_5", "kind": "control",
+          "from": {"node": "d2",  "port": "out"}, "to": {"node": "d3",  "port": "in"} },
+        { "id": "e_6", "kind": "control",
+          "from": {"node": "d3",  "port": "out"}, "to": {"node": "d4",  "port": "in"} },
+        { "id": "e_7", "kind": "control",
+          "from": {"node": "d4",  "port": "out"}, "to": {"node": "d5",  "port": "in"} },
+        { "id": "e_8", "kind": "control",
+          "from": {"node": "d5",  "port": "out"}, "to": {"node": "d6",  "port": "in"} },
+        { "id": "e_9", "kind": "control",
+          "from": {"node": "d6",  "port": "out"}, "to": {"node": "e",   "port": "in"} }
+      ]
+    },
+    {
+      "id": "flow_fact",
+      "kind": "function",
+      "name": "fact",
+      "signature": { "inputs": ["n"], "outputs": ["y"] },
+      "nodes": [
+        { "id": "fs",  "kind": "start",
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+        { "id": "if1", "kind": "if",
+          "data": { "cond": "n <= 1" },
+          "ports": { "in": [{"id": "in"}],
+                     "out": [{"id": "true"}, {"id": "false"}] } },
+        { "id": "tA",  "kind": "assignment",
+          "data": { "lhs": "y", "rhs": "1" },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "fA",  "kind": "assignment",
+          "data": { "lhs": "y", "rhs": "n * fact(n - 1)" },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "fe",  "kind": "end",
+          "ports": { "in": [{"id": "in"}], "out": [] } }
+      ],
+      "edges": [
+        { "id": "f_1", "kind": "control",
+          "from": {"node": "fs",  "port": "out"},   "to": {"node": "if1", "port": "in"} },
+        { "id": "f_2", "kind": "control",
+          "from": {"node": "if1", "port": "true"},  "to": {"node": "tA",  "port": "in"} },
+        { "id": "f_3", "kind": "control",
+          "from": {"node": "if1", "port": "false"}, "to": {"node": "fA",  "port": "in"} },
+        { "id": "f_4", "kind": "control",
+          "from": {"node": "tA",  "port": "out"},   "to": {"node": "fe",  "port": "in"} },
+        { "id": "f_5", "kind": "control",
+          "from": {"node": "fA",  "port": "out"},   "to": {"node": "fe",  "port": "in"} }
+      ]
+    }
+  ]
+}

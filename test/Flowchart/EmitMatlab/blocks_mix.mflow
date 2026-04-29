@@ -1,0 +1,47 @@
+{
+  "schema": "matforge.flowchart",
+  "version": "0.1.0",
+  "entry": "main",
+  "flows": [
+    {
+      "id": "flow_main",
+      "kind": "program",
+      "name": "main",
+      "nodes": [
+        { "id": "s",  "kind": "start",
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+        { "id": "c1", "kind": "constant",
+          "data": { "name": "pi_approx", "value": "3.14" },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "ml", "kind": "matrix_literal",
+          "data": { "name": "M", "rows": "1 2 3; 4 5 6" },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "a1", "kind": "assignment",
+          "data": { "lhs": "x", "rhs": "pi_approx * 2" },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "fc", "kind": "function_call",
+          "data": { "callee": "max", "args": "M(1, :)", "lhs": "y" },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "d1", "kind": "display",
+          "data": { "expression": "x + y" },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "e",  "kind": "end",
+          "ports": { "in": [{"id": "in"}], "out": [] } }
+      ],
+      "edges": [
+        { "id": "e_1", "kind": "control",
+          "from": {"node": "s",  "port": "out"}, "to": {"node": "c1", "port": "in"} },
+        { "id": "e_2", "kind": "control",
+          "from": {"node": "c1", "port": "out"}, "to": {"node": "ml", "port": "in"} },
+        { "id": "e_3", "kind": "control",
+          "from": {"node": "ml", "port": "out"}, "to": {"node": "a1", "port": "in"} },
+        { "id": "e_4", "kind": "control",
+          "from": {"node": "a1", "port": "out"}, "to": {"node": "fc", "port": "in"} },
+        { "id": "e_5", "kind": "control",
+          "from": {"node": "fc", "port": "out"}, "to": {"node": "d1", "port": "in"} },
+        { "id": "e_6", "kind": "control",
+          "from": {"node": "d1", "port": "out"}, "to": {"node": "e",  "port": "in"} }
+      ]
+    }
+  ]
+}

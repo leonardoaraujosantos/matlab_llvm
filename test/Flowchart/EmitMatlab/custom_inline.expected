@@ -1,0 +1,7 @@
+x = 7;
+y = gain_plus_bias(x, 3, 1);
+disp(y);
+
+function y = gain_plus_bias(x, k, b)
+    y = k * x + b;
+end

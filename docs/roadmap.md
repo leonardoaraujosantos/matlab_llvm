@@ -172,63 +172,45 @@ ref-counting on some paths. Two pain points:
 
 ## Mid-term (~1–3 months)
 
-### 6. Block language (visual nodes → MLIR) 🔵
+### 6. Block language (visual nodes → AST → MLIR) 🟢
 
-A graphical programming layer where users drag-and-drop blocks
-that compile to the same MLIR the textual frontend produces.
-Conceptually similar to Simulink + HDL Coder, but built on the
-same MLIR backbone the textual MATLAB pipeline already uses.
+**v1 shipped.** The MatForge IDE now saves `.mflow` JSON files
+that `matlabc` and `matlab-lsp` both consume. The implementation
+chose graph → AST (rather than the originally planned graph →
+MLIR direct), which got every existing backend — LLVM / C / C++ /
+Python / TS / SV / fixed-point / hardware-report — for free, plus
+a free `-emit-matlab` round-trip via the existing `formatAST`.
 
-**Why it matters.**
-- DSP / control engineers prefer dataflow diagrams to MATLAB
-  text for filter / FSM / pipeline design.
-- Reusing the MLIR layer means every output path the textual
-  frontend has (LLVM, C, C++, Python, TS, SV) automatically
-  works for block-language programs too — no separate codegen
-  per visual primitive.
+Five phases shipped:
+- **1.** JSON loader + schema validation, byte-precise diagnostics
+  (`-dump-flow`).
+- **2.** Linear chain → AST: `variable`, `expression`, `display`,
+  `input`, `assignment`, `constant`, `function_call`,
+  `matrix_literal`.
+- **3.** Structured control flow: `if` / `for` / `while` /
+  `break` / `continue` / `return`, arbitrary nesting; refuses
+  irreducible CFGs.
+- **4.** Sub-flows lifted to top-level `Function`s;
+  `function_definition` and `subflow_call` blocks.
+- **4b.** `custom` blocks with three provenance modes: inline
+  `source` / sibling `path` / `library_id` (resolved via
+  `--block-path` + `MATFORGE_BLOCK_PATH`); function-insertion
+  dedup; arity validation.
+- **5.** Cross-backend round-trip lane (`.mflow` ≡
+  round-tripped `.m` across C / C++ / Python / TS); `matlab-lsp`
+  accepts `.mflow` URIs.
 
-**Scope.**
-- **Block library** (v1 seed):
-  - Source / sink: `Constant`, `Step`, `Display`, `Out`.
-  - Arithmetic: `+`, `-`, `*`, `/`, `gain`, `bias`.
-  - Filters: `Delay (z⁻¹)`, `FIR`, `IIR (Direct Form II)`.
-  - Logic: `Compare`, `Switch (mux)`, `Logical Op`.
-  - Stateful: `Counter`, `Accumulator`, `FSM (state diagram)`.
-  - Hierarchy: `Subsystem`.
-- **Schema**: a JSON-or-YAML file format describing the block
-  graph (nodes + ports + connections + per-block parameters).
-- **Lowering**: `tools/matlab-blocks/` reads the schema and
-  emits the same MLIR IR shape the textual frontend produces
-  (`matlab.add`, `matlab.fi.const`, `matlab.persistent` for
-  `Delay`, etc.). All existing passes (Stage F for `Delay`
-  chains, FSM cascade detection for `FSM`, fi-spec propagation
-  for `gain`) just work.
-- **Editor**: web UI (React + a small canvas lib) is one
-  reasonable surface; another is a plain JSON-editor feeding the
-  same compiler. Decide at design-doc time.
-- **CLI integration**: `matlabc -emit-systemverilog foo.blocks`
-  routes through the block-language parser instead of the
-  MATLAB lexer.
+8 examples under `examples/mflow/` and 4 ctest lanes.
+See [`flowchart_frontend.md`](flowchart_frontend.md) and the
+shipped row in [`feature_status.md`](feature_status.md).
 
-**Why this works on top of MLIR specifically.** The MLIR `matlab`
-dialect is already block-shaped: each MATLAB statement lowers to
-an SSA-typed op with named results. A visual block IS a `matlab.*`
-op with explicit operand and result ports. The block-language
-parser is essentially a graph → MLIR walker, much shorter than the
-textual frontend.
-
-**Out of scope (for v1).**
-- Round-trip text ↔ blocks editing (one-way blocks → MLIR).
-- Continuous-time simulation (everything is sample-rate-fixed
-  discrete).
-- 2-D / image-pipeline blocks (covered in Mid-term #7).
-
-**Dependencies.** Block library needs the textual frontend's
-MLIR layer to be stable — that's the case today.
-
-**Effort.** ~6 weeks for v1 (schema + lowering + 15 blocks +
-small JSON-editor seed UI). Web canvas UI is another 2-3 weeks
-on top of that.
+**Open follow-ups (v2 territory, not blocking).**
+- Richer block library: `Delay (z⁻¹)`, `FIR`, `IIR (DF-II)`,
+  `FSM (state diagram)`, `Counter`, `Accumulator` as primitive
+  block kinds rather than custom blocks. Each becomes a small
+  Phase-2/3-style render rule.
+- Round-trip text ↔ blocks editing (currently one-way).
+- 2-D / image-pipeline blocks — overlaps with item #7.
 
 ---
 

@@ -1,0 +1,38 @@
+{
+  "schema": "matforge.flowchart",
+  "version": "0.1.0",
+  "entry": "main",
+  "settings": {
+    "columnMajor": true,
+    "defaultNumericType": "double",
+    "sourceLanguage": "matforge"
+  },
+  "flows": [
+    {
+      "id": "flow_main",
+      "kind": "program",
+      "name": "main",
+      "signature": { "inputs": [], "outputs": [] },
+      "nodes": [
+        { "id": "s",  "kind": "start",
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+        { "id": "d1", "kind": "display",
+          "data": { "expression": "'Hello, world!'" },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "f1", "kind": "expression",
+          "data": { "expression": "fprintf('Greetings from matlab_llvm!\\n')" },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "e",  "kind": "end",
+          "ports": { "in": [{"id": "in"}], "out": [] } }
+      ],
+      "edges": [
+        { "id": "e_1", "kind": "control",
+          "from": {"node": "s",  "port": "out"}, "to": {"node": "d1", "port": "in"} },
+        { "id": "e_2", "kind": "control",
+          "from": {"node": "d1", "port": "out"}, "to": {"node": "f1", "port": "in"} },
+        { "id": "e_3", "kind": "control",
+          "from": {"node": "f1", "port": "out"}, "to": {"node": "e",  "port": "in"} }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,3 @@
+Errors/missing_field.mflow:13:9: error: block kind "variable" (id "v1") requires non-empty data field "value"
+          { "id": "v1", "kind": "variable",
+          ^

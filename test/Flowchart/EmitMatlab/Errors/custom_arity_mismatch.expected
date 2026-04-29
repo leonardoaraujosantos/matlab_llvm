@@ -1,0 +1,3 @@
+Errors/custom_arity_mismatch.mflow:13:9: error: custom block (id "cb") declares 2 input(s) but function "double_it" takes 1
+          { "id": "cb", "kind": "custom",
+          ^

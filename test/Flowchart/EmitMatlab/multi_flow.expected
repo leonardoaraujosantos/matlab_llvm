@@ -1,0 +1,7 @@
+x = 10;
+y = doubled(x);
+disp(y);
+
+function b = doubled(a)
+    b = a * 2;
+end
