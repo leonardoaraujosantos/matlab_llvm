@@ -85,6 +85,14 @@ dump-flow FILE: build
 emit-mflow FILE: build
     {{BUILD_DIR}}/matlabc -emit-mflow {{FILE}}
 
+# `emit-mflow` with `--preserve-layout`: copy `ui.position` from
+# REF for every node id that matches the new emission. Use after
+# editing the IDE canvas to keep your hand-placed positions stable
+# across regenerations from the source `.m`.
+# Example: `just emit-mflow-merge old.mflow examples/factorial.m`
+emit-mflow-merge REF FILE: build
+    {{BUILD_DIR}}/matlabc -emit-mflow --preserve-layout {{REF}} {{FILE}}
+
 # Build and run every program in examples/. Stops at the first failure.
 examples: build
     #!/usr/bin/env bash

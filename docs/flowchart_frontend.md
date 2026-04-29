@@ -23,11 +23,12 @@ Six ctest lanes guard the surface (loader / emit-matlab /
 cross-backend / LSP / DAP / emit-mflow). `feature_status.md` has
 the shipped row.
 
-**Phase 8 (in progress).** 8a (block-id stack frames) and 8c
-(`--block-path` via DAP / LSP `initializationOptions`) shipped.
-Remaining: 8b (per-block step granularity), 8d (`-emit-mflow
---preserve-layout`), 8e (`switch` / `try`-`catch` block kinds).
-See §7 Phase 8 for the breakdown.
+**Phase 8 (complete).** All five sub-items shipped:
+- 8a — block-id stack frames + canvas highlight.
+- 8b — per-block step granularity (multi-stmt blocks step as one).
+- 8c — `--block-path` via DAP / LSP `initializationOptions`.
+- 8d — `-emit-mflow --preserve-layout`.
+- 8e — `switch` / `try`-`catch` block kinds.
 
 > **Editor / IDE implementers:** the field-by-field contract for
 > the `.mflow` JSON format — every block kind, required data
@@ -716,26 +717,37 @@ independent; pick by user pressure.
     name contains `[block:` so the IDE-facing surface stays
     contractual.
 
-**8b. Per-block step granularity (~1 week).**
-Stepping today is per-statement. A `display` block lowers to one
-`disp(...)` call → one step. But:
+**8b. Per-block step granularity (shipped).**
 
-  - A `custom` block lowers to one call-site statement plus an
-    inserted `Function` definition. Stepping into the call follows
-    into the function — that's correct already.
-  - An `expression` block whose `data.expression` happens to be
-    multi-statement (`v = v + 1; w = v * 2`) lowers to two
-    `Stmt`s in the AST. Step-over visits each separately, which
-    breaks the "one block = one step" mental model.
-  - A `for` block with an empty body steps once on the loop head
-    and again on the back-edge — duplicate stops on what looks
-    like a single block.
+  Step-over (`next`) on a `.mflow` program now collapses a
+  multi-statement block into a single logical step. An
+  `expression` block whose `data.expression` parses to
+  `v = v + 1; w = v * 2; z = w - 3` previously needed three
+  `next` invocations to traverse; with 8b it's one.
 
-  Fix: tag each MLIR debug hook with the originating block id
-  (already known from the side-table in 8a); step-over walks
-  through hooks that share the same block id and only stops when
-  the id changes. New runtime helper
-  `matlab_dbg_step_over_block(...)` keyed off the tag.
+  Implementation is server-side only — no runtime ABI change:
+
+  - `Shared::StepOverBlockId` records the block id of the stop
+    where the user issued `next`. Set in the `next` handler
+    before `matlab_dbg_resume(STEP_OVER)`; cleared on `continue`,
+    `stepIn`, `stepOut` (those modes deliberately keep
+    per-statement granularity).
+  - The monitor thread, on every step pause (`BpIdx < 0`), looks
+    up the new `(file_id, line)` in `G.BlockByLine`. If it
+    matches `StepOverBlockId`, the monitor silently re-issues
+    `STEP_OVER` and waits for the next stop without delivering
+    a `stopped` event to the IDE. The loop ends when the new
+    block differs (or the program terminates).
+  - No-op for `.m` programs (the lookup map is empty) and for
+    breakpoint stops (`BpIdx >= 0`) — block-skip is a step-only
+    behaviour.
+
+  Test: `flowchart-dap-tests` adds `step_over_multi_stmt_block`
+  using a fixture (`test/Flowchart/Dap/multi_stmt.mflow`) whose
+  `expression` block carries three statements; the test asserts
+  that two `next` calls walk past the variable block and the
+  three-statement expression block to land on `show`, not on
+  intermediate stops within the expression block.
 
 **8c. `--block-path` via DAP / LSP `initializationOptions` (shipped).**
 
@@ -755,45 +767,71 @@ Stepping today is per-statement. A `display` block lowers to one
     block libraries through their launch / LSP config without
     setting environment variables on the spawned subprocess.
 
-**8d. `ui.position` merge on `-emit-mflow` (~3-4 days).**
-Currently `-emit-mflow` always writes column-shape auto-layout
-positions. Re-emitting an existing `.mflow` blows away whatever
-the user dragged around in the IDE. Need a "merge" mode.
+**8d. `ui.position` merge on `-emit-mflow` (shipped).**
 
-  - New flag `--preserve-layout PATH`: read PATH (an existing
-    `.mflow`), index its nodes by id, and when the new emission
-    produces a node with a matching id, copy its
-    `ui.position` from the old file. Unmatched nodes (newly added)
-    fall back to auto-layout.
-  - Stable id generation across runs is already guaranteed by
-    `n_<kind>_<counter>` ordering; the merge works as long as the
-    program shape is unchanged.
-  - When the program shape changes (a block was added / removed),
-    the merge degrades gracefully: matched nodes keep their
-    positions, new nodes are auto-laid in the column. The IDE will
-    fix up the layout on save.
-  - Stretch: `--preserve-layout` infers the previous `.mflow` from
-    the same path as the input when it's a `.mflow` file (i.e.
-    re-emitting in place picks up the file's own positions).
+  - New CLI flag `--preserve-layout PATH` (and `--preserve-layout=PATH`):
+    reads PATH as a `.mflow`, indexes its nodes by `(flow_id, node_id)`,
+    and when the new emission produces a matching node, copies its
+    `ui.position`. Unmatched nodes (newly added blocks) keep the
+    auto-layout column position from `layoutFlow`.
+  - Stable id generation across runs (`n_<kind>_<counter>`) makes
+    the merge work as long as the program shape is unchanged.
+  - When the shape changes (a block is added / removed), the merge
+    degrades gracefully: matched nodes keep their positions, new
+    nodes pick up auto-layout. The IDE will rebalance on save.
+  - Loader extension: `Node::HasUiPosition / UiX / UiY` populated
+    when `ui.position.{x, y}` is present in the source. The compile
+    path doesn't read these — they're round-trip-only.
+  - `flowchart::emitMflow` gains an optional
+    `const FlowDoc *PreserveLayoutFrom` parameter; the matlabc
+    driver loads the reference doc and threads it through.
+  - Test: `flowchart-emit-mflow-tests` extended with a
+    `preserve-layout` case — emit `factorial.m` to v1, hand-edit
+    `n_display_1`'s position to `(777, 999)`, re-emit with
+    `--preserve-layout`, assert `n_display_1` keeps the sentinel
+    while `n_variable_1` keeps its auto-layout default.
 
-**8e. `switch` and `try` / `catch` block kinds (~1 week).**
-Both are currently degraded to `expression` blocks carrying the
-formatted source text. Diagram doesn't show the branching shape;
-DAP can't set breakpoints on individual cases.
+**8e. `switch` and `try` / `catch` block kinds (shipped).**
 
-  - Schema additions (also bumps to `flowchart_schema.md`):
-    - `switch`: `in` port + N `case` ports (one per case label) +
-      `default` port. `data.discriminant` carries the switch
-      expression.
-    - `try`: `in` port + `body` + `catch` ports.
-  - Reducer additions in `lib/Flowchart/GraphToAST.cpp`:
-    - `switch` reduces N+1 branches via the same
-      reconvergence detection used for `if` (multi-branch findJoin).
-    - `try` is structurally an `if-else` whose condition is "did an
-      error fire" — add `TryStmt` construction.
-  - Emitter additions in `lib/Flowchart/ASTToGraph.cpp`:
-    - `SwitchStmt` → `switch` block, one `case` port per case.
-    - `TryStmt` → `try` block.
+  Both branching shapes are now first-class block kinds with full
+  schema support, reducer handling, and reverse-emit. Previously
+  the AST → `.mflow` direction degraded `SwitchStmt` / `TryStmt`
+  to `expression` blocks (lossy — the diagram couldn't represent
+  the branches and DAP couldn't break on individual cases).
+
+  Schema additions:
+
+  | Kind     | Ports                                    | Required `data` fields    |
+  |----------|------------------------------------------|----------------------------|
+  | `switch` | `in`; out: `case_0`...`case_<N-1>`, `default` | `discriminant`, `cases` (string array of case-value expressions) |
+  | `try`    | `in`; out: `body`, `catch`              | `catch_var` (optional — exception variable name) |
+
+  - Reducer (`GraphToAST::handleSwitch / handleTry`):
+    - `switch` reduces N+1 branches via iterated pairwise
+      `findJoin` (`J = findJoin(branch[0], branch[1]); J = findJoin(J,
+      branch[2]); ...`). O(N) walks for an N-case switch — fine for
+      realistic case counts.
+    - `try` is structurally an if-else whose condition is "did an
+      error fire"; the body and catch sub-chains reconverge at a
+      single join.
+    - `stepOver` extended so `findJoin`'s two-pointer walk treats a
+      `switch` / `try` as a single super-node by recursively
+      computing the inner join.
+  - Emitter (`ASTToGraph::walkSwitch / walkTry`):
+    - `SwitchStmt` → `switch` block. The non-`otherwise` cases
+      populate `data.cases` (string array of formatted Expr
+      sources); `otherwise` becomes the `default` port. Branch
+      tails merge into a single `Pad` so the next statement gets
+      edges from every case tail.
+    - `TryStmt` → `try` block, with `catch_var` written to
+      `data.catch_var` when set.
+  - Tests (verified end-to-end):
+    - `.m` with `switch x; case 1; ...; case 2; ...; otherwise;
+      end` round-trips byte-equivalent through
+      `-emit-mflow → -emit-matlab` and produces correct stdout
+      via `-emit-c`.
+    - `.m` with `try; x=1; disp(x); catch err; disp('caught'); end`
+      round-trips byte-equivalent and produces `1`.
 
 **Effort recap.** 8a–8c are the debug-UX polish pieces (~1.5 weeks
 total); 8d is the layout merging (~half a week); 8e is the

@@ -2,6 +2,7 @@
 
 #include "matlab/AST/AST.h"
 #include "matlab/AST/Formatter.h"
+#include "matlab/Flowchart/Loader.h"
 
 #include <algorithm>
 #include <map>
@@ -227,6 +228,10 @@ public:
       return walkFor(static_cast<const ForStmt &>(S), In);
     case NodeKind::WhileStmt:
       return walkWhile(static_cast<const WhileStmt &>(S), In);
+    case NodeKind::SwitchStmt:
+      return walkSwitch(static_cast<const SwitchStmt &>(S), In);
+    case NodeKind::TryStmt:
+      return walkTry(static_cast<const TryStmt &>(S), In);
     case NodeKind::BreakStmt:
       return walkSimple(In, "break", {});
     case NodeKind::ContinueStmt:
@@ -236,7 +241,7 @@ public:
     case NodeKind::Block:
       return walkBlock(static_cast<const Block &>(S), In);
     default:
-      // Switch / try / global / persistent / etc. — degrade to an
+      // global / persistent / command / etc. — degrade to an
       // expression block carrying the formatted source. Round-trip
       // is lossy here; the IDE rendering will show the raw text.
       return emitExpression(formatStmtFallback(S), In);
@@ -451,6 +456,81 @@ private:
     if (!BodyExit.empty()) FB.wire(BodyExit, Id, "in");
 
     return pad1(Id, "done");
+  }
+
+  // Phase 8e: SwitchStmt → `switch` block. Discriminant goes in
+  // `data.discriminant`; case values go in `data.cases` (string
+  // array, one per case in order, omitting the `otherwise` clause).
+  // Ports: `case_0`..`case_<N-1>` for the explicit cases, `default`
+  // for `otherwise`. Each case body emits as its own sub-chain
+  // wired from the matching port; all sub-chain tails merge into
+  // a single Pad so the next statement gets edges from every
+  // branch tail.
+  Pad walkSwitch(const SwitchStmt &Sw, Pad In) {
+    std::string Id;
+    {
+      auto &N = FB.addNode("switch");
+      N.InPorts.push_back(port("in"));
+      // Build the case-port list from the AST shape so the IDE
+      // sees one port per non-`otherwise` case plus `default`.
+      size_t NumCases = 0;
+      for (const SwitchCase &C : Sw.Cases) {
+        if (C.Value) {
+          N.OutPorts.push_back(port("case_" + std::to_string(NumCases)));
+          ++NumCases;
+        }
+      }
+      N.OutPorts.push_back(port("default"));
+      N.Data.Scalar["discriminant"] = formatExprStr(Sw.Discriminant);
+      std::vector<std::string> CaseValues;
+      for (const SwitchCase &C : Sw.Cases)
+        if (C.Value) CaseValues.push_back(formatExprStr(C.Value));
+      if (!CaseValues.empty())
+        N.Data.Arrays["cases"] = std::move(CaseValues);
+      Id = N.Id;
+    }
+    FB.wire(In, Id, "in");
+
+    Pad Joined;
+    size_t CaseIdx = 0;
+    bool SawDefault = false;
+    for (const SwitchCase &C : Sw.Cases) {
+      std::string Port = C.Value ? ("case_" + std::to_string(CaseIdx))
+                                 : "default";
+      Pad Branch = pad1(Id, Port);
+      if (C.Body) Branch = walkBlock(*C.Body, Branch);
+      Joined = mergePads(Joined, Branch);
+      if (C.Value) ++CaseIdx; else SawDefault = true;
+    }
+    // MATLAB allows `switch ... end` with no `otherwise` clause —
+    // synthesise an empty default branch so the `default` port is
+    // wired forward to the join (matches if-without-else handling).
+    if (!SawDefault) {
+      Joined = mergePads(Joined, pad1(Id, "default"));
+    }
+    return Joined;
+  }
+
+  // Phase 8e: TryStmt → `try` block with `body`/`catch` ports.
+  // `data.catch_var` (when set) is the exception variable name.
+  Pad walkTry(const TryStmt &T, Pad In) {
+    std::string Id;
+    {
+      auto &N = FB.addNode("try");
+      N.InPorts.push_back(port("in"));
+      N.OutPorts.push_back(port("body"));
+      N.OutPorts.push_back(port("catch"));
+      if (!T.CatchVar.empty())
+        N.Data.Scalar["catch_var"] = std::string(T.CatchVar);
+      Id = N.Id;
+    }
+    FB.wire(In, Id, "in");
+
+    Pad BodyExit = pad1(Id, "body");
+    if (T.TryBody) BodyExit = walkBlock(*T.TryBody, BodyExit);
+    Pad CatchExit = pad1(Id, "catch");
+    if (T.CatchBody) CatchExit = walkBlock(*T.CatchBody, CatchExit);
+    return mergePads(BodyExit, CatchExit);
   }
 
   Pad walkSimple(Pad In, const std::string &Kind, std::vector<Expr *>) {
@@ -820,7 +900,42 @@ OutFlow emitFunctionFlow(const Function &Fn) {
 // Public entry point
 //===----------------------------------------------------------------------===//
 
-void emitMflow(std::ostream &OS, const TranslationUnit &TU) {
+// Phase 8d: walk the reference FlowDoc and override `(X, Y)` on every
+// node in the freshly-emitted document whose id matches a node in
+// the reference. Unmatched nodes keep their auto-layout positions
+// from `layoutFlow`, so adding a new block to a previously-laid-out
+// program leaves the existing nodes in place and only the new block
+// gets a fresh position.
+void mergeLayoutFromRef(OutDoc &D, const FlowDoc &Ref) {
+  // Build a lookup keyed by (flow_id, node_id) so a node id reused
+  // across flows (rare but possible — e.g. the structural `s` /
+  // `e` ids) doesn't cross-contaminate.
+  struct Key {
+    std::string FlowId, NodeId;
+    bool operator<(const Key &O) const {
+      return FlowId < O.FlowId ||
+             (FlowId == O.FlowId && NodeId < O.NodeId);
+    }
+  };
+  std::map<Key, std::pair<int, int>> Pos;
+  for (const auto &F : Ref.Flows) {
+    for (const auto &N : F.Nodes) {
+      if (N.HasUiPosition) Pos[{F.Id, N.Id}] = {N.UiX, N.UiY};
+    }
+  }
+  for (auto &F : D.Flows) {
+    for (auto &N : F.Nodes) {
+      auto It = Pos.find({F.Id, N.Id});
+      if (It != Pos.end()) {
+        N.X = It->second.first;
+        N.Y = It->second.second;
+      }
+    }
+  }
+}
+
+void emitMflow(std::ostream &OS, const TranslationUnit &TU,
+               const FlowDoc *PreserveLayoutFrom) {
   OutDoc D;
   D.Entry = "main";
 
@@ -832,6 +947,8 @@ void emitMflow(std::ostream &OS, const TranslationUnit &TU) {
   for (const Function *Fn : TU.Functions) {
     if (Fn) D.Flows.push_back(emitFunctionFlow(*Fn));
   }
+
+  if (PreserveLayoutFrom) mergeLayoutFromRef(D, *PreserveLayoutFrom);
 
   JsonWriter W(OS);
   W.writeDoc(D);

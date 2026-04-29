@@ -140,6 +140,13 @@ struct Options {
    * that contains a matching `.m` file wins. Ignored for non-`.mflow`
    * inputs. */
   std::vector<std::string> BlockPath;
+  /* Phase 8d: when emitting a `.mflow` (`-emit-mflow` mode), copy
+   * `ui.position` from this reference file for every node whose id
+   * matches. Unmatched nodes (newly added blocks) fall back to the
+   * column auto-layout. Empty by default — re-emitting in place
+   * still produces auto-layout positions unless `--preserve-layout`
+   * is supplied. */
+  std::string PreserveLayoutPath;
 };
 
 int usage(const char *Prog) {
@@ -220,6 +227,16 @@ bool parseArgs(int Argc, char **Argv, Options &Opts, const char *&Prog) {
     }
     else if (A.size() > 13 && A.substr(0, 13) == "--block-path=") {
       Opts.BlockPath.push_back(std::string(A.substr(13)));
+    }
+    else if (A == "--preserve-layout" || A == "-preserve-layout") {
+      if (I + 1 >= Argc) {
+        std::cerr << "--preserve-layout requires a file argument\n";
+        return false;
+      }
+      Opts.PreserveLayoutPath = Argv[++I];
+    }
+    else if (A.size() > 18 && A.substr(0, 18) == "--preserve-layout=") {
+      Opts.PreserveLayoutPath = std::string(A.substr(18));
     }
     else if (!A.empty() && A[0] == '-') {
       std::cerr << "unknown flag: " << A << "\n";
@@ -1434,6 +1451,17 @@ struct Shared {
    * configuration without setting environment variables on the
    * matlabc subprocess. Empty for `.m` programs and unused. */
   std::vector<std::string> BlockPathFromIDE;
+  /* Phase 8b: the block id we were stopped on when the user
+   * issued the most recent `next` (step over). Set by the `next`
+   * handler before it calls `matlab_dbg_resume(STEP_OVER)`; the
+   * monitor thread reads it on every step-pause to suppress
+   * stops that landed inside the same block (e.g. an
+   * `expression` block whose `data.expression` parses to two
+   * Stmts steps once across both). Cleared on `continue` /
+   * `stepIn` / `stepOut` so per-statement granularity returns
+   * for those modes. Empty for `.m` programs (BlockByLine is
+   * empty and the monitor's lookup always misses). */
+  std::string StepOverBlockId;
   /* Breakpoints set against a path the runtime hasn't registered
    * yet (e.g. setBreakpoints arrived before launch / compileProgram).
    * Held here keyed by canonical path, replayed when the path
@@ -2336,6 +2364,36 @@ void *monitorMain(void *) {
                                     &CondDisabled);
 
       bool Suppress = false;
+
+      // Phase 8b: silently re-step while the step-over remains
+      // inside the same .mflow block. Only fires when:
+      //   - The runtime says this is a non-bp pause (BpIdx < 0).
+      //   - The user issued `next` (G.StepOverBlockId is set).
+      //   - The new (file_id, line) maps to the same block id we
+      //     started the step from.
+      // Re-issuing STEP_OVER walks one more statement; we loop via
+      // the outer `while (true)` because resume + cv broadcast
+      // wakes the worker, which fires another hook and re-enters
+      // this same monitor body.
+      if (BpIdx < 0 && !G.StepOverBlockId.empty()
+          && !G.BlockByLine.empty()) {
+        int64_t Key = (static_cast<int64_t>((uint32_t)Fid) << 32) |
+                      static_cast<int64_t>((uint32_t)Ln);
+        auto It = G.BlockByLine.find(Key);
+        if (It != G.BlockByLine.end() && It->second == G.StepOverBlockId) {
+          if (Debug) {
+            std::fprintf(stderr,
+                "[monitor] same-block step (block=%s line=%d) — "
+                "auto-stepping\n", G.StepOverBlockId.c_str(), (int)Ln);
+            std::fflush(stderr);
+          }
+          matlab_dbg_resume(STEP_OVER);
+          pthread_mutex_lock(&G.Mu);
+          pthread_cond_broadcast(&G.Cv);
+          pthread_mutex_unlock(&G.Mu);
+          continue;
+        }
+      }
 
       if (Log && LogLen > 0) {
         /* Log point: emit an output event with the interpolated
@@ -5137,6 +5195,7 @@ bool handleRequest(const Object &Msg) {
        * NOT re-trigger breakpoints on already-recorded lines;
        * once we're caught up the JIT will hit the next live bp. */
     }
+    G.StepOverBlockId.clear();
     matlab_dbg_resume(CONTINUE);
     nudgeMonitor();
     sendResponse(ReqSeq, *Cmd, true,
@@ -5162,6 +5221,20 @@ bool handleRequest(const Object &Msg) {
       }
       /* Rc == 0: caught up. Fall through to JIT resume. */
     }
+    /* Phase 8b: snapshot the current block id BEFORE issuing
+     * STEP_OVER. The monitor uses this to suppress per-statement
+     * stops that land in the same block (e.g. an `expression`
+     * block parsing to two Stmts produces two hooks but should
+     * present as one step). Empty for `.m` programs. */
+    G.StepOverBlockId.clear();
+    if (!G.BlockByLine.empty()) {
+      int32_t Fid = 0, Ln = 0;
+      matlab_dbg_get_pause(&Fid, &Ln);
+      int64_t Key = (static_cast<int64_t>((uint32_t)Fid) << 32) |
+                    static_cast<int64_t>((uint32_t)Ln);
+      auto It = G.BlockByLine.find(Key);
+      if (It != G.BlockByLine.end()) G.StepOverBlockId = It->second;
+    }
     matlab_dbg_resume(STEP_OVER); nudgeMonitor();
     sendResponse(ReqSeq, *Cmd, true, Object{});
     emitContinued();
@@ -5184,6 +5257,12 @@ bool handleRequest(const Object &Msg) {
         return true;
       }
     }
+    /* Phase 8b: stepIn / stepOut deliberately keep per-statement
+     * granularity. The block-skip behaviour is opt-in via STEP_OVER
+     * only — stepIn is for descending into a callee, stepOut for
+     * leaving the current frame; in both cases the user wants to
+     * see every statement they cross. */
+    G.StepOverBlockId.clear();
     matlab_dbg_resume(STEP_IN); nudgeMonitor();
     sendResponse(ReqSeq, *Cmd, true, Object{});
     emitContinued();
@@ -5206,6 +5285,7 @@ bool handleRequest(const Object &Msg) {
         return true;
       }
     }
+    G.StepOverBlockId.clear();
     matlab_dbg_resume(STEP_OUT); nudgeMonitor();
     sendResponse(ReqSeq, *Cmd, true, Object{});
     emitContinued();
@@ -5473,7 +5553,25 @@ int main(int Argc, char **Argv) {
   }
 
   if (Opts.Mode == Options::Mode::EmitMflow) {
-    if (TU) matlab::flowchart::emitMflow(std::cout, *TU);
+    /* Phase 8d: when `--preserve-layout PATH` is supplied, load the
+     * reference document (possibly the same file we're re-emitting)
+     * and pass it to the emitter so node `ui.position`s are
+     * preserved across re-emits for unchanged blocks. */
+    std::optional<matlab::flowchart::FlowDoc> RefDoc;
+    if (TU && !Opts.PreserveLayoutPath.empty()) {
+      SourceManager RefSM;
+      DiagnosticEngine RefDiag(RefSM);
+      RefDoc = matlab::flowchart::loadMflowFromPath(
+          RefSM, Opts.PreserveLayoutPath, RefDiag);
+      if (RefDiag.hasErrors()) {
+        RefDiag.printAll();
+        std::cerr << "warning: --preserve-layout target is malformed; "
+                     "falling back to auto-layout\n";
+        RefDoc.reset();
+      }
+    }
+    if (TU) matlab::flowchart::emitMflow(
+        std::cout, *TU, RefDoc ? &*RefDoc : nullptr);
     Diag.printAll();
     return Diag.hasErrors() ? 1 : 0;
   }

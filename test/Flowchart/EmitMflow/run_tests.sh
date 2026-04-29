@@ -92,5 +92,72 @@ for f in "${INPUTS[@]}"; do
 done
 
 echo "----"
+echo "(idempotency cases)"
 echo "passed: $pass    failed: $fail"
-exit $(( fail > 0 ? 1 : 0 ))
+
+# Phase 8d: --preserve-layout merges `ui.position` from a reference
+# file into the new emission for matching node ids. Build a v1 from
+# a known input, hand-edit one block's position, re-emit with
+# --preserve-layout, and assert the edited position survives in v2
+# while unrelated nodes keep their auto-layout.
+preserve_pass=0
+preserve_fail=0
+preserve_test() {
+  local input="$REPO_ROOT/examples/factorial.m"
+  local v1="/tmp/p8d_factorial_v1.mflow"
+  local edited="/tmp/p8d_factorial_edited.mflow"
+  local v2="/tmp/p8d_factorial_v2.mflow"
+
+  "$MATLABC" -emit-mflow "$input" > "$v1" 2>/dev/null
+  # Edit n_display_1's position in v1 to a sentinel (777, 999).
+  python3 -c "
+import json, sys
+with open('$v1') as f: d = json.load(f)
+hit = False
+for fl in d['flows']:
+    for n in fl['nodes']:
+        if n.get('id') == 'n_display_1':
+            n['ui']['position'] = {'x': 777, 'y': 999}
+            hit = True
+            break
+    if hit: break
+print(json.dumps(d, sort_keys=True, indent=2))
+sys.exit(0 if hit else 1)
+" > "$edited" || { echo "FAIL preserve-layout: couldn't find n_display_1 to edit"; preserve_fail=$((preserve_fail+1)); return; }
+
+  # Re-emit with --preserve-layout.
+  "$MATLABC" -emit-mflow --preserve-layout "$edited" "$input" > "$v2" 2>/dev/null
+
+  # Verify n_display_1 still has the sentinel position; verify another
+  # node (n_variable_1) does NOT have the sentinel (it should keep
+  # auto-layout since the edited file didn't change its position).
+  if python3 -c "
+import json, sys
+with open('$v2') as f: d = json.load(f)
+display_pos = None
+variable_pos = None
+for fl in d['flows']:
+    for n in fl['nodes']:
+        if n.get('id') == 'n_display_1':
+            display_pos = n['ui']['position']
+        elif n.get('id') == 'n_variable_1':
+            variable_pos = n['ui']['position']
+ok = True
+if display_pos != {'x': 777, 'y': 999}:
+    print(f'n_display_1 sentinel not preserved: {display_pos}'); ok = False
+if variable_pos == {'x': 777, 'y': 999}:
+    print(f'n_variable_1 incorrectly received sentinel'); ok = False
+sys.exit(0 if ok else 1)
+"; then
+    preserve_pass=$((preserve_pass+1))
+  else
+    echo "FAIL preserve-layout"
+    preserve_fail=$((preserve_fail+1))
+  fi
+}
+preserve_test
+echo "(--preserve-layout cases)"
+echo "passed: $preserve_pass    failed: $preserve_fail"
+
+total_fail=$(( fail + preserve_fail ))
+exit $(( total_fail > 0 ? 1 : 0 ))

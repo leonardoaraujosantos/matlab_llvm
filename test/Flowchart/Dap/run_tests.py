@@ -84,6 +84,40 @@ def main():
     ]
 
     failed = []
+
+    # Phase 8b: step-over collapses a multi-statement `expression`
+    # block to a single logical step. The fixture's `multi` block
+    # has `data.expression = "v = v + 1; w = v * 2; z = w - 3"`
+    # (three Stmts). Stop on `v0`, issue `next` twice, assert the
+    # second `next` lands on `show` (skipping all three multi-stmts
+    # as one block-step).
+    sys.stdout.write("  step_over_multi_stmt_block ... ")
+    sys.stdout.flush()
+    try:
+        prog = os.path.join(repo_root, "test/Flowchart/Dap/multi_stmt.mflow")
+        with open(prog) as f:
+            blob = f.read().splitlines()
+        v0_line   = next(i+1 for i, l in enumerate(blob) if '"id": "v0"' in l)
+        show_line = next(i+1 for i, l in enumerate(blob) if '"id": "show"' in l)
+        with DapClient(matlabc, prog) as c:
+            initialize_and_launch(c, breakpoints=[{"line": v0_line}])
+            _stop_event(c)  # stopped at v0
+            c.request("next")
+            _stop_event(c)  # stopped at multi
+            c.request("next")
+            body = _stop_event(c)  # should be at show, NOT inside multi
+            actual = body.get("line")
+            if actual != show_line:
+                raise DapError(
+                    f"expected next() to skip past multi block to show "
+                    f"(line {show_line}), got line {actual}")
+            c.request("continue")
+            c.wait_event("terminated", timeout=10.0)
+        print("ok")
+    except Exception as e:
+        print("FAIL")
+        failed.append(("step_over_multi_stmt_block", str(e)))
+
     for case in cases:
         sys.stdout.write(f"  {case['name']} ... ")
         sys.stdout.flush()
@@ -148,8 +182,10 @@ def main():
             print("FAIL")
             failed.append((case["name"], str(e)))
 
+    # +1 for the standalone Phase 8b case driven above.
+    total = len(cases) + 1
     print("----")
-    print(f"passed: {len(cases) - len(failed)}    failed: {len(failed)}")
+    print(f"passed: {total - len(failed)}    failed: {len(failed)}")
     for name, msg in failed:
         print(f"\n=== {name} ===\n  {msg}")
     return 1 if failed else 0

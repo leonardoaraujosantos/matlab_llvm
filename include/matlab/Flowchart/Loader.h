@@ -56,6 +56,15 @@ struct Node {
   std::vector<Port> InPorts;
   std::vector<Port> OutPorts;
   SourceLocation Loc;       // points at the node object
+  // `ui.position.{x, y}` from the IDE-saved file. The compile path
+  // doesn't use these — they're round-trip-only. The Phase 8d
+  // `-emit-mflow --preserve-layout` reads them so a re-emit keeps
+  // the user's hand-placed positions for unchanged blocks.
+  // `HasUiPosition` distinguishes "no position recorded in source"
+  // from "position is (0, 0)".
+  bool HasUiPosition = false;
+  int UiX = 0;
+  int UiY = 0;
 
   bool hasData(std::string_view Key) const {
     return Data.find(std::string(Key)) != Data.end();

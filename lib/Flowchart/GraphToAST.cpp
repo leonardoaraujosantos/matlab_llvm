@@ -191,6 +191,36 @@ private:
       }
       return "";
     }
+    if (N->Kind == "switch") {
+      // Phase 8e: stepOver for a switch jumps to the multi-branch
+      // join. Compute it the same way handleSwitch does so the
+      // findJoin two-pointer walk treats the switch as a single
+      // super-node. Cheap to recompute (no memoisation needed —
+      // the inputs are the node's port targets, all known here).
+      std::vector<std::string> AllTargets;
+      auto OutsIt = OutEdges.find(Id);
+      if (OutsIt != OutEdges.end()) {
+        for (auto *E : OutsIt->second) AllTargets.push_back(E->To.Node);
+      }
+      if (AllTargets.empty()) return "";
+      std::string J = AllTargets[0];
+      for (size_t I = 1; I < AllTargets.size() && !J.empty(); ++I) {
+        J = findJoin(J, AllTargets[I], /*OuterStop=*/{});
+      }
+      return J;
+    }
+    if (N->Kind == "try") {
+      // Phase 8e: stepOver for a try jumps to the body/catch join.
+      std::string Body, Catch;
+      auto OutsIt = OutEdges.find(Id);
+      if (OutsIt != OutEdges.end()) {
+        for (auto *E : OutsIt->second) {
+          if (E->From.Port == "body") Body = E->To.Node;
+          else if (E->From.Port == "catch") Catch = E->To.Node;
+        }
+      }
+      return findJoin(Body, Catch, /*OuterStop=*/{});
+    }
     // Linear: follow the single out edge. Don't fail loudly here —
     // findJoin tolerates dead-ends.
     auto OutsIt = OutEdges.find(Id);
@@ -459,9 +489,12 @@ private:
         return "";
       }
       if (N->Kind == "switch") {
-        Diag.error(N->Loc, "block kind \"switch\" is post-v1 (use a chain "
-                            "of if blocks instead)");
-        return "";
+        Cur = handleSwitch(*N, Stop, Out);
+        continue;
+      }
+      if (N->Kind == "try") {
+        Cur = handleTry(*N, Stop, Out);
+        continue;
       }
       if (N->Kind == "custom") {
         Cur = handleCustom(*N, Out);
@@ -780,6 +813,134 @@ private:
 
     TUC.TU.Functions.push_back(Found);
     return true;
+  }
+
+  // Phase 8e: switch reduction. The block's `data.discriminant`
+  // names the switch expression and `data.cases` (string array)
+  // names one expression per case in port order. Ports are
+  // `case_0`..`case_<N-1>` plus `default`. Each case's chain
+  // reconverges at a single join (the next statement after the
+  // switch). The join is computed by pairwise-reducing all
+  // outgoing branch heads through the existing two-pointer
+  // `findJoin` — iteratively folding the running result against
+  // each next branch keeps the implementation small at the cost
+  // of O(N) extra walks for an N-case switch (acceptable: real
+  // switches rarely exceed a handful of cases).
+  std::string handleSwitch(const Node &N,
+                           const std::unordered_set<std::string> &OuterStop,
+                           std::vector<Stmt *> &Out) {
+    auto *DiscStr = N.getData("discriminant");
+    if (!DiscStr || DiscStr->empty()) {
+      Diag.error(N.Loc,
+                 "block kind \"switch\" (id \"" + N.Id +
+                     "\") requires non-empty data field \"discriminant\"");
+      return "";
+    }
+    auto *CaseValues = N.getDataArray("cases");
+    if (!CaseValues || CaseValues->empty()) {
+      Diag.error(N.Loc,
+                 "block kind \"switch\" (id \"" + N.Id +
+                     "\") requires non-empty data array \"cases\"");
+      return "";
+    }
+
+    // Collect each case branch's first node id from the matching
+    // port. `case_<i>` for the i-th case, plus `default`.
+    std::vector<std::string> CaseTargets;
+    for (size_t I = 0; I < CaseValues->size(); ++I) {
+      std::string Port = "case_" + std::to_string(I);
+      std::string T = portOut(N, Port);
+      if (Diag.hasErrors()) return "";
+      CaseTargets.push_back(T);
+    }
+    std::string DefaultTarget = portOut(N, "default");
+    if (Diag.hasErrors()) return "";
+
+    // Multi-branch join via iterated pairwise reduction.
+    std::vector<std::string> AllTargets = CaseTargets;
+    AllTargets.push_back(DefaultTarget);
+    std::string J;
+    if (!AllTargets.empty()) {
+      J = AllTargets[0];
+      for (size_t I = 1; I < AllTargets.size(); ++I) {
+        J = findJoin(J, AllTargets[I], OuterStop);
+        if (J.empty()) break;
+      }
+    }
+
+    Expr *Disc = parseExprFromString(*DiscStr,
+                                     "<flow:" + N.Id + ":discriminant>",
+                                     N.Loc);
+    if (!Disc) return "";
+
+    recordBlock(N);
+    auto *S = Ctx.make<SwitchStmt>();
+    S->Range.Begin = N.Loc;
+    S->Discriminant = Disc;
+
+    auto InnerStop = OuterStop;
+    if (!J.empty()) InnerStop.insert(J);
+
+    for (size_t I = 0; I < CaseValues->size(); ++I) {
+      Expr *V = parseExprFromString((*CaseValues)[I],
+                                    "<flow:" + N.Id + ":case" +
+                                        std::to_string(I) + ">",
+                                    N.Loc);
+      if (!V) return "";
+      SwitchCase SC;
+      SC.Value = V;
+      SC.Body = Ctx.make<Block>();
+      walk(CaseTargets[I], InnerStop, SC.Body->Stmts);
+      if (Diag.hasErrors()) return "";
+      S->Cases.push_back(std::move(SC));
+    }
+
+    // `default` lowers to a Case with Value = nullptr (MATLAB's
+    // `otherwise` clause).
+    {
+      SwitchCase SC;
+      SC.Value = nullptr;
+      SC.Body = Ctx.make<Block>();
+      walk(DefaultTarget, InnerStop, SC.Body->Stmts);
+      if (Diag.hasErrors()) return "";
+      S->Cases.push_back(std::move(SC));
+    }
+
+    Out.push_back(S);
+    return J;
+  }
+
+  // Phase 8e: try / catch reduction. The block has `body` and
+  // `catch` ports; both branches reconverge after the try.
+  // `data.catch_var` (optional) is the exception variable name
+  // in the catch body's scope.
+  std::string handleTry(const Node &N,
+                        const std::unordered_set<std::string> &OuterStop,
+                        std::vector<Stmt *> &Out) {
+    std::string BodyTarget = portOut(N, "body");
+    std::string CatchTarget = portOut(N, "catch");
+    if (Diag.hasErrors()) return "";
+
+    std::string J = findJoin(BodyTarget, CatchTarget, OuterStop);
+
+    recordBlock(N);
+    auto *S = Ctx.make<TryStmt>();
+    S->Range.Begin = N.Loc;
+    if (auto *CV = N.getData("catch_var"); CV && !CV->empty())
+      S->CatchVar = Ctx.intern(*CV);
+    S->TryBody = Ctx.make<Block>();
+    S->CatchBody = Ctx.make<Block>();
+
+    auto InnerStop = OuterStop;
+    if (!J.empty()) InnerStop.insert(J);
+
+    walk(BodyTarget, InnerStop, S->TryBody->Stmts);
+    if (Diag.hasErrors()) return "";
+    walk(CatchTarget, InnerStop, S->CatchBody->Stmts);
+    if (Diag.hasErrors()) return "";
+
+    Out.push_back(S);
+    return J;
   }
 
   std::string handleWhile(const Node &N,

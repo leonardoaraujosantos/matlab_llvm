@@ -173,6 +173,8 @@ ignored. Per-block port id conventions are in §5.
 | `if`                                                                                                                           | `in`       | `true`, `false` |
 | `for`, `while`                                                                                                                 | `in`       | `body`, `done` |
 | `break`, `continue`, `return`                                                                                                  | `in`       | `out` *(unused — control transfer is implicit)* |
+| `switch`                                                                                                                       | `in`       | `case_0`, `case_1`, …, `case_<N-1>`, `default` |
+| `try`                                                                                                                          | `in`       | `body`, `catch` |
 
 The IDE SHOULD enforce these counts and names at edit time so the
 saved file is loader-clean. The compiler also validates them at
@@ -377,6 +379,55 @@ Loop / function exit.
   `continue`) or function body (`return`). Statements after a
   `break`/`continue`/`return` in the same chain are dropped.
 
+#### `switch`
+Multi-way branch on a discriminant. Each case body is its own
+sub-chain wired from a numbered case port; `otherwise` wires from
+the `default` port.
+
+- **Ports:** in=`in`; out=`case_0`, `case_1`, … `case_<N-1>`,
+  `default` (one `case_<i>` for each entry in `data.cases`, plus
+  always a `default`).
+- **Data:** **`discriminant`** (any MATLAB expression),
+  **`cases`** (string array of case-value expressions, one per
+  `case_<i>` port in order).
+- **Branch contract:** all branches reconverge at a single join.
+  The IDE may route the `default` port directly to the join when
+  the user's MATLAB has no `otherwise` clause — the emitter
+  handles either shape.
+- **Lowers to:**
+  ```matlab
+  switch discriminant
+  case <cases[0]>
+      <case_0 branch statements>
+  case <cases[1]>
+      <case_1 branch statements>
+  ...
+  otherwise
+      <default branch statements>
+  end
+  ```
+
+#### `try`
+Two-branch error-handling block. The `body` chain runs first; if
+any statement fires `error()`, control transfers to the `catch`
+chain.
+
+- **Ports:** in=`in`, out=`body`, `catch`.
+- **Data:** `catch_var` (optional — name of the exception object
+  bound in the catch body's scope; corresponds to MATLAB's
+  `catch err`).
+- **Branch contract:** both `body` and `catch` chains must
+  reconverge at a single join (or both must reach `end` /
+  `break` / `continue` / `return`).
+- **Lowers to:**
+  ```matlab
+  try
+      <body branch statements>
+  catch <catch_var?>
+      <catch branch statements>
+  end
+  ```
+
 ### 6.4 Multi-flow
 
 #### `function_definition`
@@ -545,7 +596,6 @@ unreducible.
 
 ### Currently rejected even when structurally valid
 
-- `switch` block kind (post-v1 — express as if/elseif chain).
 - Irreducible CFGs (the reducer's `findJoin` returns "no join").
 - Multi-back-edge loops.
 - Goto-style jumps to unrelated nodes.

@@ -519,6 +519,40 @@ private:
         }
       }
     }
+
+    // Phase 8d: capture `ui.position.{x, y}` so `-emit-mflow
+    // --preserve-layout` can restore IDE-set positions on re-emit.
+    // Forgiving: numeric values are stored as the parser's raw text
+    // (strtol-on-demand) so trailing decimals or large coordinates
+    // don't error out.
+    if (auto *Ui = asObject(NJ.find("ui"))) {
+      if (auto *Pos = asObject(JValue{}.ObjVal.empty() ? nullptr : nullptr)) {
+        (void)Pos;
+      }
+      for (auto &P : *Ui) {
+        if (P.first != "position") continue;
+        auto *PosObj = asObject(&P.second);
+        if (!PosObj) continue;
+        auto readCoord = [](const JValue *V, int &Out) {
+          if (!V) return false;
+          if (V->Kind == JKind::Number) {
+            try { Out = std::stoi(V->StrVal); return true; }
+            catch (...) { return false; }
+          }
+          if (V->Kind == JKind::String) {
+            try { Out = std::stoi(V->StrVal); return true; }
+            catch (...) { return false; }
+          }
+          return false;
+        };
+        bool GotX = false, GotY = false;
+        for (auto &PP : *PosObj) {
+          if (PP.first == "x") GotX = readCoord(&PP.second, N.UiX);
+          else if (PP.first == "y") GotY = readCoord(&PP.second, N.UiY);
+        }
+        if (GotX || GotY) N.HasUiPosition = true;
+      }
+    }
     return N;
   }
 
