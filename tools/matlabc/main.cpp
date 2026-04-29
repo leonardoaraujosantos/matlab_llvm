@@ -156,9 +156,20 @@ struct Options {
    * alongside the input file when CocotbOutDir is empty. Vector
    * count is the number of stimulus samples the testbench drives
    * before signing off; combinational modules use one sample per
-   * cycle, sequential modules one sample per posedge. */
+   * cycle, sequential modules one sample per posedge.
+   *
+   * `CocotbLatency` aligns the comparison window for pipelined
+   * modules: DUT output at cycle k+L is compared against the
+   * reference's output for cycle k. Mirrors MathWorks HDL Verifier's
+   * `Latency` parameter — same role, same effect. Pre-fill cycles
+   * (0..L-1) drive inputs but skip comparison; post-fill cycles
+   * (N..N+L-1) drive zeros to flush the pipeline so every recorded
+   * reference output gets matched against a DUT sample. Default 0
+   * matches the v1 behaviour (combinational + immediate-update
+   * sequential). */
   std::string CocotbOutDir;
   int CocotbVectors = 100;
+  int CocotbLatency = 0;
 };
 
 int usage(const char *Prog) {
@@ -213,6 +224,13 @@ bool parseArgs(int Argc, char **Argv, Options &Opts, const char *&Prog) {
     }
     else if (A.size() > 12 && A.substr(0, 12) == "-cocotb-out=")
       Opts.CocotbOutDir = std::string(A.substr(12));
+    else if (A.size() > 16 && A.substr(0, 16) == "-cocotb-latency=") {
+      Opts.CocotbLatency = std::atoi(std::string(A.substr(16)).c_str());
+      if (Opts.CocotbLatency < 0) {
+        std::cerr << "-cocotb-latency must be a non-negative integer\n";
+        return false;
+      }
+    }
     else if (A == "-repl") Opts.Mode = Options::Mode::Repl;
     else if (A == "-format") Opts.Mode = Options::Mode::Format;
     else if (A == "-dap") Opts.Mode = Options::Mode::Dap;
@@ -5654,15 +5672,22 @@ parseCocotbSpecFromSv(const std::string &SvPath,
 }
 
 
-/* Render the harness Python source from a single function spec. v1
- * uses a simple random-vector lockstep loop. Combinational modules
- * sample after a 1ns settle; sequential modules drive a 10ns clock,
- * pulse `rst_n` low for 2 cycles at startup, then sample on every
- * posedge against the reference model whose own per-call state
- * (Python function-attribute persistents) tracks the DUT's. */
+/* Render the harness Python source from a single function spec.
+ * Combinational modules sample after a 1ns settle; sequential
+ * modules drive a 10ns clock, pulse `rst_n` low for 2 cycles at
+ * startup, then sample on every posedge against the reference
+ * model whose own per-call state (Python function-attribute
+ * persistents) tracks the DUT's.
+ *
+ * `Latency` (>=0) aligns the comparison for pipelined DUTs: the
+ * reference is called at cycle k, but DUT outputs aren't sampled
+ * for comparison until cycle k+L. The loop runs N+L iterations —
+ * the trailing L cycles drive zero inputs (pipeline flush) so
+ * every recorded reference output gets matched against a DUT
+ * sample. L=0 reproduces the v1 lockstep behaviour. */
 static std::string
 renderCocotbHarness(const CocotbFuncSpec &S, const std::string &Stem,
-                    int Vectors) {
+                    int Vectors, int Latency) {
   std::string Out;
   auto append = [&](const std::string &S) { Out += S; };
   auto pyTuple = [](const CocotbPortSpec &P) -> std::string {
@@ -5717,7 +5742,20 @@ renderCocotbHarness(const CocotbFuncSpec &S, const std::string &Stem,
     append("    await RisingEdge(dut.clk)\n");
     append("    dut.rst_n.value = 1\n");
   }
+  append("    LATENCY = " + std::to_string(Latency) + "\n");
   append("    failures = 0\n");
+  append("    compared = 0\n");
+  /* The reference is called at cycle k; the DUT's response to that
+   * cycle's inputs surfaces L cycles later. Recorded refs sit in
+   * a FIFO until their corresponding DUT sample comes due. We do
+   * NOT flush the pipeline with zero inputs at the tail — for
+   * stateful DUTs (FIR with feedback through delay_line, etc.)
+   * driving zeros would corrupt the late-cycle DUT samples.
+   * Instead we just skip comparison for the first L cycles
+   * (pipeline warm-up) and run for N cycles total, yielding
+   * N-L valid comparisons. Mirrors HDL Verifier's `Latency`
+   * parameter contract: drive N stimulus, compare from cycle L. */
+  append("    pending_refs = []  # FIFO of (cycle, ref_tuple, args)\n");
   append("    for i in range(N):\n");
   append("        py_args = []\n");
   append("        for name, signed, wl, fl in INPUTS:\n");
@@ -5746,23 +5784,28 @@ renderCocotbHarness(const CocotbFuncSpec &S, const std::string &Stem,
   append("        ref = " + S.Name + "(*py_args)\n");
   append("        if not isinstance(ref, tuple):\n");
   append("            ref = (ref,)\n");
-  append("        for j, (name, signed, wl, fl) in enumerate(OUTPUTS):\n");
-  append("            try:\n");
-  append("                dut_val = unpack_fi(int(getattr(dut, name).value), "
+  append("        pending_refs.append((i, ref, list(py_args)))\n");
+  append("        if i >= LATENCY:\n");
+  append("            ref_cycle, ref, ref_args = pending_refs.pop(0)\n");
+  append("            compared += 1\n");
+  append("            for j, (name, signed, wl, fl) in enumerate(OUTPUTS):\n");
+  append("                try:\n");
+  append("                    dut_val = unpack_fi(int(getattr(dut, name).value), "
          "signed, wl, fl)\n");
-  append("            except Exception as exc:\n");
-  append("                cocotb.log.error(f\"#{i} {name}: cannot read "
-         "DUT signal: {exc}\")\n");
-  append("                failures += 1\n");
-  append("                continue\n");
-  append("            ref_val = float(ref[j])\n");
-  append("            if abs(dut_val - ref_val) > 1e-9:\n");
-  append("                cocotb.log.error(\n");
-  append("                    f\"#{i} {name}: dut={dut_val} ref={ref_val} "
-         "args={py_args}\")\n");
-  append("                failures += 1\n");
+  append("                except Exception as exc:\n");
+  append("                    cocotb.log.error(f\"#{ref_cycle} {name}: cannot "
+         "read DUT signal: {exc}\")\n");
+  append("                    failures += 1\n");
+  append("                    continue\n");
+  append("                ref_val = float(ref[j])\n");
+  append("                if abs(dut_val - ref_val) > 1e-9:\n");
+  append("                    cocotb.log.error(\n");
+  append("                        f\"#{ref_cycle} {name}: dut={dut_val} "
+         "ref={ref_val} args={ref_args}\")\n");
+  append("                    failures += 1\n");
   append("    assert failures == 0, "
-         "f\"{failures} / {N * len(OUTPUTS)} mismatch(es)\"\n");
+         "f\"{failures} mismatch(es) across {compared} compared cycles "
+         "(latency={LATENCY}, total stimulus N={N})\"\n");
   return Out;
 }
 
@@ -5874,7 +5917,8 @@ int emitCocotbHarness(const char *Self, const Options &Opts,
     return 1;
   }
 
-  std::string Harness = renderCocotbHarness(*Spec, Stem, Opts.CocotbVectors);
+  std::string Harness = renderCocotbHarness(*Spec, Stem, Opts.CocotbVectors,
+                                             Opts.CocotbLatency);
   std::string Makefile = renderCocotbMakefile(Stem, Spec->Name);
 
   if (writeStringToFile(OutDir + "/test_" + Stem + ".py", Harness) != 0)
@@ -5932,7 +5976,10 @@ int emitCocotbHarness(const char *Self, const Options &Opts,
             << " (" << Spec->Inputs.size() << " inputs, "
             << Spec->Outputs.size() << " outputs, "
             << (Spec->Sequential ? "sequential" : "combinational")
-            << ", " << Opts.CocotbVectors << " vectors)\n";
+            << ", " << Opts.CocotbVectors << " vectors";
+  if (Opts.CocotbLatency > 0)
+    std::cerr << ", latency=" << Opts.CocotbLatency;
+  std::cerr << ")\n";
   return 0;
 }
 #endif // MATLAB_LLVM_WITH_MLIR
