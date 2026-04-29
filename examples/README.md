@@ -31,6 +31,7 @@ just examples
 | `logical_mask.m` | logical indexing and reductions |
 | `stats.m` | `numel`, `sum`, `mean`, `min`, `max`, derived scalar math |
 | `for_loop.m` | nested `for`, non-unit step, negative step |
+| `even_odd.m` | simple `if`/`else` inside a `for` loop with branch-conditional accumulators |
 | `while_loop.m` | `while` loops |
 | `fibonacci.m` | loop-carried state and iterative control flow |
 | `factorial.m` | recursion and user-defined functions |

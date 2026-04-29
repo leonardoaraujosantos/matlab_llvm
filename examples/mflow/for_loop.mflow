@@ -1,56 +1,296 @@
 {
-  "schema": "matforge.flowchart",
-  "version": "0.1.0",
-  "entry": "main",
-  "settings": {
-    "columnMajor": true,
-    "defaultNumericType": "double",
-    "sourceLanguage": "matforge"
-  },
-  "flows": [
+  "entry" : "main",
+  "flows" : [
     {
-      "id": "flow_main",
-      "kind": "program",
-      "name": "main",
-      "signature": { "inputs": [], "outputs": [] },
-      "nodes": [
-        { "id": "s",    "kind": "start",
-          "ports": { "in": [], "out": [{"id": "out"}] } },
-        { "id": "init", "kind": "variable",
-          "data": { "name": "total", "value": "0" },
-          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
-        { "id": "for1", "kind": "for",
-          "data": { "var": "i", "iter": "1:10" },
-          "ports": { "in": [{"id": "in"}],
-                     "out": [{"id": "body"}, {"id": "done"}] } },
-        { "id": "step", "kind": "expression",
-          "data": { "expression": "total = total + i" },
-          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
-        { "id": "lbl",  "kind": "display",
-          "data": { "expression": "'sum(1..10) ='" },
-          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
-        { "id": "show", "kind": "display",
-          "data": { "expression": "total" },
-          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
-        { "id": "e",    "kind": "end",
-          "ports": { "in": [{"id": "in"}], "out": [] } }
+      "edges" : [
+        {
+          "from" : {
+            "node" : "s",
+            "port" : "out"
+          },
+          "id" : "e_1",
+          "kind" : "control",
+          "to" : {
+            "node" : "init",
+            "port" : "in"
+          }
+        },
+        {
+          "from" : {
+            "node" : "init",
+            "port" : "out"
+          },
+          "id" : "e_2",
+          "kind" : "control",
+          "to" : {
+            "node" : "for1",
+            "port" : "in"
+          }
+        },
+        {
+          "from" : {
+            "node" : "for1",
+            "port" : "body"
+          },
+          "id" : "e_3",
+          "kind" : "control",
+          "to" : {
+            "node" : "step",
+            "port" : "in"
+          }
+        },
+        {
+          "from" : {
+            "node" : "step",
+            "port" : "out"
+          },
+          "id" : "e_4",
+          "kind" : "control",
+          "to" : {
+            "node" : "for1",
+            "port" : "in"
+          }
+        },
+        {
+          "from" : {
+            "node" : "for1",
+            "port" : "done"
+          },
+          "id" : "e_5",
+          "kind" : "control",
+          "to" : {
+            "node" : "lbl",
+            "port" : "in"
+          }
+        },
+        {
+          "from" : {
+            "node" : "lbl",
+            "port" : "out"
+          },
+          "id" : "e_6",
+          "kind" : "control",
+          "to" : {
+            "node" : "show",
+            "port" : "in"
+          }
+        },
+        {
+          "from" : {
+            "node" : "show",
+            "port" : "out"
+          },
+          "id" : "e_7",
+          "kind" : "control",
+          "to" : {
+            "node" : "e",
+            "port" : "in"
+          }
+        }
       ],
-      "edges": [
-        { "id": "e_1", "kind": "control",
-          "from": {"node": "s",    "port": "out"},  "to": {"node": "init", "port": "in"} },
-        { "id": "e_2", "kind": "control",
-          "from": {"node": "init", "port": "out"},  "to": {"node": "for1", "port": "in"} },
-        { "id": "e_3", "kind": "control",
-          "from": {"node": "for1", "port": "body"}, "to": {"node": "step", "port": "in"} },
-        { "id": "e_4", "kind": "control",
-          "from": {"node": "step", "port": "out"},  "to": {"node": "for1", "port": "in"} },
-        { "id": "e_5", "kind": "control",
-          "from": {"node": "for1", "port": "done"}, "to": {"node": "lbl",  "port": "in"} },
-        { "id": "e_6", "kind": "control",
-          "from": {"node": "lbl",  "port": "out"},  "to": {"node": "show", "port": "in"} },
-        { "id": "e_7", "kind": "control",
-          "from": {"node": "show", "port": "out"},  "to": {"node": "e",    "port": "in"} }
-      ]
+      "id" : "flow_main",
+      "kind" : "program",
+      "name" : "main",
+      "nodes" : [
+        {
+          "data" : {
+
+          },
+          "id" : "s",
+          "kind" : "start",
+          "label" : "",
+          "ports" : {
+            "in" : [
+
+            ],
+            "out" : [
+              {
+                "id" : "out"
+              }
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 310,
+              "y" : 60
+            }
+          }
+        },
+        {
+          "data" : {
+            "name" : "total",
+            "value" : "0"
+          },
+          "id" : "init",
+          "kind" : "variable",
+          "label" : "",
+          "ports" : {
+            "in" : [
+              {
+                "id" : "in"
+              }
+            ],
+            "out" : [
+              {
+                "id" : "out"
+              }
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 310,
+              "y" : 180
+            }
+          }
+        },
+        {
+          "data" : {
+            "iter" : "1:10",
+            "var" : "i"
+          },
+          "id" : "for1",
+          "kind" : "for",
+          "label" : "",
+          "ports" : {
+            "in" : [
+              {
+                "id" : "in"
+              }
+            ],
+            "out" : [
+              {
+                "id" : "body"
+              },
+              {
+                "id" : "done"
+              }
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 290,
+              "y" : 300
+            }
+          }
+        },
+        {
+          "data" : {
+            "expression" : "total = total + i"
+          },
+          "id" : "step",
+          "kind" : "expression",
+          "label" : "",
+          "ports" : {
+            "in" : [
+              {
+                "id" : "in"
+              }
+            ],
+            "out" : [
+              {
+                "id" : "out"
+              }
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 190,
+              "y" : 420
+            }
+          }
+        },
+        {
+          "data" : {
+            "expression" : "'sum(1..10) ='"
+          },
+          "id" : "lbl",
+          "kind" : "display",
+          "label" : "",
+          "ports" : {
+            "in" : [
+              {
+                "id" : "in"
+              }
+            ],
+            "out" : [
+              {
+                "id" : "out"
+              }
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 430,
+              "y" : 420
+            }
+          }
+        },
+        {
+          "data" : {
+            "expression" : "total"
+          },
+          "id" : "show",
+          "kind" : "display",
+          "label" : "",
+          "ports" : {
+            "in" : [
+              {
+                "id" : "in"
+              }
+            ],
+            "out" : [
+              {
+                "id" : "out"
+              }
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 310,
+              "y" : 540
+            }
+          }
+        },
+        {
+          "data" : {
+
+          },
+          "id" : "e",
+          "kind" : "end",
+          "label" : "",
+          "ports" : {
+            "in" : [
+              {
+                "id" : "in"
+              }
+            ],
+            "out" : [
+
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 310,
+              "y" : 660
+            }
+          }
+        }
+      ],
+      "signature" : {
+        "inputs" : [
+
+        ],
+        "outputs" : [
+
+        ]
+      }
     }
-  ]
+  ],
+  "schema" : "matforge.flowchart",
+  "settings" : {
+    "columnMajor" : true,
+    "defaultNumericType" : "double",
+    "sourceLanguage" : "matforge"
+  },
+  "version" : "0.1.0"
 }

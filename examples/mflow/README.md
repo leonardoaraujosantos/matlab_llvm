@@ -14,6 +14,7 @@ emit backend (`-emit-c`, `-emit-cpp`, `-emit-python`,
 |---|---|---|
 | [`hello.mflow`](hello.mflow) | [`../hello.m`](../hello.m) | Linear chain: `display` + `expression` blocks |
 | [`for_loop.mflow`](for_loop.mflow) | [`../for_loop.m`](../for_loop.m) | `for` loop with body + back-edge → `disp(total)` |
+| [`even_odd.mflow`](even_odd.mflow) | [`../even_odd.m`](../even_odd.m) | `if`/`else` inside a `for` loop — branch reconvergence + branch-conditional accumulators (auto-generated via `-emit-mflow`) |
 | [`matrix_mult.mflow`](matrix_mult.mflow) | [`../matrix_mult.m`](../matrix_mult.m) | `matrix_literal` blocks + `*`, `.*`, transpose displayed inline |
 | [`solve_linear.mflow`](solve_linear.mflow) | [`../solve_linear.m`](../solve_linear.m) | Solve Ax = b via the left-divide operator (`assignment` block with `rhs: "A \\ b"`) |
 | [`is_old.mflow`](is_old.mflow) | [`../is_old.m`](../is_old.m) | Multi-flow: program calls a `function`-kind sub-flow |

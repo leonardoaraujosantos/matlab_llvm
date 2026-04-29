@@ -1,0 +1,621 @@
+{
+  "entry" : "main",
+  "flows" : [
+    {
+      "edges" : [
+        {
+          "from" : {
+            "node" : "s",
+            "port" : "out"
+          },
+          "id" : "e_1",
+          "kind" : "control",
+          "to" : {
+            "node" : "n_variable_1",
+            "port" : "in"
+          }
+        },
+        {
+          "from" : {
+            "node" : "n_variable_1",
+            "port" : "out"
+          },
+          "id" : "e_2",
+          "kind" : "control",
+          "to" : {
+            "node" : "n_variable_2",
+            "port" : "in"
+          }
+        },
+        {
+          "from" : {
+            "node" : "n_variable_2",
+            "port" : "out"
+          },
+          "id" : "e_3",
+          "kind" : "control",
+          "to" : {
+            "node" : "n_variable_3",
+            "port" : "in"
+          }
+        },
+        {
+          "from" : {
+            "node" : "n_variable_3",
+            "port" : "out"
+          },
+          "id" : "e_4",
+          "kind" : "control",
+          "to" : {
+            "node" : "n_for_1",
+            "port" : "in"
+          }
+        },
+        {
+          "from" : {
+            "node" : "n_for_1",
+            "port" : "body"
+          },
+          "id" : "e_5",
+          "kind" : "control",
+          "to" : {
+            "node" : "n_if_1",
+            "port" : "in"
+          }
+        },
+        {
+          "from" : {
+            "node" : "n_if_1",
+            "port" : "true"
+          },
+          "id" : "e_6",
+          "kind" : "control",
+          "to" : {
+            "node" : "n_function_call_1",
+            "port" : "in"
+          }
+        },
+        {
+          "from" : {
+            "node" : "n_function_call_1",
+            "port" : "out"
+          },
+          "id" : "e_7",
+          "kind" : "control",
+          "to" : {
+            "node" : "n_assignment_1",
+            "port" : "in"
+          }
+        },
+        {
+          "from" : {
+            "node" : "n_if_1",
+            "port" : "false"
+          },
+          "id" : "e_8",
+          "kind" : "control",
+          "to" : {
+            "node" : "n_function_call_2",
+            "port" : "in"
+          }
+        },
+        {
+          "from" : {
+            "node" : "n_function_call_2",
+            "port" : "out"
+          },
+          "id" : "e_9",
+          "kind" : "control",
+          "to" : {
+            "node" : "n_assignment_2",
+            "port" : "in"
+          }
+        },
+        {
+          "from" : {
+            "node" : "n_assignment_1",
+            "port" : "out"
+          },
+          "id" : "e_10",
+          "kind" : "control",
+          "to" : {
+            "node" : "n_for_1",
+            "port" : "in"
+          }
+        },
+        {
+          "from" : {
+            "node" : "n_assignment_2",
+            "port" : "out"
+          },
+          "id" : "e_11",
+          "kind" : "control",
+          "to" : {
+            "node" : "n_for_1",
+            "port" : "in"
+          }
+        },
+        {
+          "from" : {
+            "node" : "n_for_1",
+            "port" : "done"
+          },
+          "id" : "e_12",
+          "kind" : "control",
+          "to" : {
+            "node" : "n_display_1",
+            "port" : "in"
+          }
+        },
+        {
+          "from" : {
+            "node" : "n_display_1",
+            "port" : "out"
+          },
+          "id" : "e_13",
+          "kind" : "control",
+          "to" : {
+            "node" : "n_display_2",
+            "port" : "in"
+          }
+        },
+        {
+          "from" : {
+            "node" : "n_display_2",
+            "port" : "out"
+          },
+          "id" : "e_14",
+          "kind" : "control",
+          "to" : {
+            "node" : "n_display_3",
+            "port" : "in"
+          }
+        },
+        {
+          "from" : {
+            "node" : "n_display_3",
+            "port" : "out"
+          },
+          "id" : "e_15",
+          "kind" : "control",
+          "to" : {
+            "node" : "n_display_4",
+            "port" : "in"
+          }
+        },
+        {
+          "from" : {
+            "node" : "n_display_4",
+            "port" : "out"
+          },
+          "id" : "e_16",
+          "kind" : "control",
+          "to" : {
+            "node" : "e",
+            "port" : "in"
+          }
+        }
+      ],
+      "id" : "flow_main",
+      "kind" : "program",
+      "name" : "main",
+      "nodes" : [
+        {
+          "data" : {
+
+          },
+          "id" : "s",
+          "kind" : "start",
+          "label" : "",
+          "ports" : {
+            "in" : [
+
+            ],
+            "out" : [
+              {
+                "id" : "out"
+              }
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 200,
+              "y" : 0
+            }
+          }
+        },
+        {
+          "data" : {
+
+          },
+          "id" : "e",
+          "kind" : "end",
+          "label" : "",
+          "ports" : {
+            "in" : [
+              {
+                "id" : "in"
+              }
+            ],
+            "out" : [
+
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 200,
+              "y" : 180
+            }
+          }
+        },
+        {
+          "data" : {
+            "name" : "N",
+            "value" : "6"
+          },
+          "id" : "n_variable_1",
+          "kind" : "variable",
+          "label" : "",
+          "ports" : {
+            "in" : [
+              {
+                "id" : "in"
+              }
+            ],
+            "out" : [
+              {
+                "id" : "out"
+              }
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 200,
+              "y" : 240
+            }
+          }
+        },
+        {
+          "data" : {
+            "name" : "even_count",
+            "value" : "0"
+          },
+          "id" : "n_variable_2",
+          "kind" : "variable",
+          "label" : "",
+          "ports" : {
+            "in" : [
+              {
+                "id" : "in"
+              }
+            ],
+            "out" : [
+              {
+                "id" : "out"
+              }
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 200,
+              "y" : 360
+            }
+          }
+        },
+        {
+          "data" : {
+            "name" : "odd_count",
+            "value" : "0"
+          },
+          "id" : "n_variable_3",
+          "kind" : "variable",
+          "label" : "",
+          "ports" : {
+            "in" : [
+              {
+                "id" : "in"
+              }
+            ],
+            "out" : [
+              {
+                "id" : "out"
+              }
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 200,
+              "y" : 480
+            }
+          }
+        },
+        {
+          "data" : {
+            "iter" : "1:N",
+            "var" : "i"
+          },
+          "id" : "n_for_1",
+          "kind" : "for",
+          "label" : "",
+          "ports" : {
+            "in" : [
+              {
+                "id" : "in"
+              }
+            ],
+            "out" : [
+              {
+                "id" : "body"
+              },
+              {
+                "id" : "done"
+              }
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 200,
+              "y" : 600
+            }
+          }
+        },
+        {
+          "data" : {
+            "cond" : "mod(i, 2) == 0"
+          },
+          "id" : "n_if_1",
+          "kind" : "if",
+          "label" : "",
+          "ports" : {
+            "in" : [
+              {
+                "id" : "in"
+              }
+            ],
+            "out" : [
+              {
+                "id" : "true"
+              },
+              {
+                "id" : "false"
+              }
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 200,
+              "y" : 720
+            }
+          }
+        },
+        {
+          "data" : {
+            "args" : "'%g is even\\n', i",
+            "callee" : "fprintf"
+          },
+          "id" : "n_function_call_1",
+          "kind" : "function_call",
+          "label" : "",
+          "ports" : {
+            "in" : [
+              {
+                "id" : "in"
+              }
+            ],
+            "out" : [
+              {
+                "id" : "out"
+              }
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 200,
+              "y" : 840
+            }
+          }
+        },
+        {
+          "data" : {
+            "lhs" : "even_count",
+            "rhs" : "even_count + 1"
+          },
+          "id" : "n_assignment_1",
+          "kind" : "assignment",
+          "label" : "",
+          "ports" : {
+            "in" : [
+              {
+                "id" : "in"
+              }
+            ],
+            "out" : [
+              {
+                "id" : "out"
+              }
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 200,
+              "y" : 960
+            }
+          }
+        },
+        {
+          "data" : {
+            "args" : "'%g is odd\\n', i",
+            "callee" : "fprintf"
+          },
+          "id" : "n_function_call_2",
+          "kind" : "function_call",
+          "label" : "",
+          "ports" : {
+            "in" : [
+              {
+                "id" : "in"
+              }
+            ],
+            "out" : [
+              {
+                "id" : "out"
+              }
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 200,
+              "y" : 1080
+            }
+          }
+        },
+        {
+          "data" : {
+            "lhs" : "odd_count",
+            "rhs" : "odd_count + 1"
+          },
+          "id" : "n_assignment_2",
+          "kind" : "assignment",
+          "label" : "",
+          "ports" : {
+            "in" : [
+              {
+                "id" : "in"
+              }
+            ],
+            "out" : [
+              {
+                "id" : "out"
+              }
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 200,
+              "y" : 1200
+            }
+          }
+        },
+        {
+          "data" : {
+            "expression" : "'even count:'"
+          },
+          "id" : "n_display_1",
+          "kind" : "display",
+          "label" : "",
+          "ports" : {
+            "in" : [
+              {
+                "id" : "in"
+              }
+            ],
+            "out" : [
+              {
+                "id" : "out"
+              }
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 200,
+              "y" : 1320
+            }
+          }
+        },
+        {
+          "data" : {
+            "expression" : "even_count"
+          },
+          "id" : "n_display_2",
+          "kind" : "display",
+          "label" : "",
+          "ports" : {
+            "in" : [
+              {
+                "id" : "in"
+              }
+            ],
+            "out" : [
+              {
+                "id" : "out"
+              }
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 200,
+              "y" : 1440
+            }
+          }
+        },
+        {
+          "data" : {
+            "expression" : "'odd count:'"
+          },
+          "id" : "n_display_3",
+          "kind" : "display",
+          "label" : "",
+          "ports" : {
+            "in" : [
+              {
+                "id" : "in"
+              }
+            ],
+            "out" : [
+              {
+                "id" : "out"
+              }
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 200,
+              "y" : 1560
+            }
+          }
+        },
+        {
+          "data" : {
+            "expression" : "odd_count"
+          },
+          "id" : "n_display_4",
+          "kind" : "display",
+          "label" : "",
+          "ports" : {
+            "in" : [
+              {
+                "id" : "in"
+              }
+            ],
+            "out" : [
+              {
+                "id" : "out"
+              }
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 200,
+              "y" : 1680
+            }
+          }
+        }
+      ],
+      "signature" : {
+        "inputs" : [
+
+        ],
+        "outputs" : [
+
+        ]
+      }
+    }
+  ],
+  "schema" : "matforge.flowchart",
+  "settings" : {
+    "columnMajor" : true,
+    "defaultNumericType" : "double",
+    "sourceLanguage" : "matforge"
+  },
+  "version" : "0.1.0"
+}
