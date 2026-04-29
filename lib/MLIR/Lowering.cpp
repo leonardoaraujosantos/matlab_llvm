@@ -783,18 +783,33 @@ mlir::Value Lowerer::loadBinding(Binding *Bnd, const Type *ValTy,
    * body writes into it per iteration, and reading the workspace
    * would miss the in-flight updates.
    *
-   * We always call matlab_ws_get_mat (not _get_f64) because at this
-   * point Sema usually can't tell whether the workspace cell holds
-   * a scalar or a matrix — the runtime auto-boxes a stored scalar
-   * into a 1x1 matrix on _get_mat, so the single PtrTy return type
-   * covers both cases. Downstream arithmetic sees a matrix and
-   * takes the runtime matrix-op path; `disp` of a 1x1 matrix
-   * prints the scalar value. A small overhead for the scalar case
-   * but negligible for a human-paced REPL. */
+   * Routing rule: when Sema concretely typed the read as a scalar
+   * Double, fetch via matlab_ws_get_f64 so downstream consumers that
+   * require an f64 (matlab.range bounds, scf.if conditions, scalar
+   * arith) see a native f64 value. Otherwise — including the common
+   * "Sema can't tell scalar vs matrix" case — fall back to
+   * matlab_ws_get_mat returning ptr; the runtime auto-boxes stored
+   * scalars into a 1x1 matrix so disp / matrix-op paths still work.
+   * Without this split, `for i = 1:N` (with N a script-level Var)
+   * left a matlab.range with a !llvm.ptr operand that LowerSeqLoops
+   * refused to lower, surviving into the JIT as an unconvertible
+   * matlab.* op. */
   if (ReplMode && InScriptBody && Bnd->Kind == BindingKind::Var &&
       Slots.find(Bnd) == Slots.end()) {
-    auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+    bool ScalarDouble = false;
+    if (ValTy && ValTy->K == Type::Kind::Array) {
+      auto &VA = static_cast<const ArrayType &>(*ValTy);
+      ScalarDouble = VA.Elt == Dtype::Double && VA.S.K == Shape::Rank::Scalar;
+    }
     mlir::Value NameV = emitFieldNameChar(Bnd->Name, L);
+    if (ScalarDouble) {
+      auto F64 = mlir::Float64Type::get(&MCtx);
+      mlir::NamedAttribute Cal(
+          mlir::StringAttr::get(&MCtx, "callee"),
+          mlir::StringAttr::get(&MCtx, "matlab_ws_get_f64"));
+      return emitUnreg("matlab.call_builtin", {NameV}, F64, L, {Cal});
+    }
+    auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
     mlir::NamedAttribute Cal(
         mlir::StringAttr::get(&MCtx, "callee"),
         mlir::StringAttr::get(&MCtx, "matlab_ws_get_mat"));

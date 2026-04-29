@@ -81,6 +81,23 @@ def main():
                                     "test/Flowchart/EmitMatlab/nested_for_if.mflow"),
             "markers": ['"kind" : "if"', '"kind": "if"'],
         },
+        # even_odd.mflow: for-loop iter is "1:N" where N is a
+        # script-level variable. Regression for the case where REPL
+        # mode boxed N through matlab_ws_get_mat (returning ptr) and
+        # the resulting matlab.range with a !llvm.ptr operand survived
+        # all lowering passes, surfacing as
+        # `missing LLVMTranslationDialectInterface for op: matlab.range`
+        # at JIT time. A breakpoint on the body's if block proves the
+        # loop actually executed (i.e. matlab.range/matlab.for were
+        # lowered cleanly). The find_block_line helper picks the FIRST
+        # `mod(i, 2) == 0` occurrence, which is the if-block's `cond`
+        # field — the inside-the-loop breakpoint.
+        {
+            "name": "var_range_bp_in_loop_body",
+            "program": os.path.join(repo_root, "examples/mflow/even_odd.mflow"),
+            "markers": ['"cond" : "mod(i, 2) == 0"',
+                        '"cond": "mod(i, 2) == 0"'],
+        },
     ]
 
     failed = []

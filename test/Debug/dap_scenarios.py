@@ -3046,6 +3046,50 @@ def scn_log_point(matlabc, program):
         c.wait_event("terminated", timeout=5.0)
 
 
+def scn_var_range_for_bound(matlabc, program):
+    """For-loop range bound is a script-level variable: `for i = 1:N`.
+
+    Regression for the case where REPL-mode loadBinding always routed
+    script-level Var reads through matlab_ws_get_mat (returning ptr).
+    The matlab.range op then carried a (f64, !llvm.ptr) signature that
+    LowerSeqLoops::extractRange refused, leaving matlab.range and
+    matlab.for in the IR until the LLVM conversion stage barfed with
+    `missing LLVMTranslationDialectInterface ... for op: matlab.range`.
+
+    Asserts the loop actually executes (breakpoint inside the body
+    fires three times for N=3) and that the accumulator `total`
+    carries the correct value at each pause. The induction variable
+    `i` lives in a loop-frame slot rather than the script workspace,
+    so it isn't asserted here. Uses dap_var_range_program.m as a
+    sibling fixture so dap_program.m line numbers stay stable for
+    the other scenarios.
+    """
+    import os
+    var_range = os.path.join(
+        os.path.dirname(os.path.abspath(program)),
+        "dap_var_range_program.m",
+    )
+    with DapClient(matlabc, var_range) as c:
+        initialize_and_launch(c, breakpoints=[{"line": 12}])
+        # total at the breakpoint is pre-increment for that iteration:
+        # iter 1 sees 0, iter 2 sees 1, iter 3 sees 3.
+        for iteration, expected_total in [(1, "0"), (2, "1"), (3, "3")]:
+            body = _stop_event(c)
+            assert body.get("reason") == "breakpoint", \
+                f"iter {iteration}: stop reason should be 'breakpoint', " \
+                f"got {body!r}"
+            assert body.get("line") == 12, \
+                f"iter {iteration}: should stop on line 12, got {body!r}"
+            vars_ = _vars_by_name(c)
+            assert vars_.get("N") == "3", \
+                f"iter {iteration}: N should be 3, got {vars_!r}"
+            assert vars_.get("total") == expected_total, \
+                f"iter {iteration}: total should be {expected_total} " \
+                f"pre-increment, got {vars_!r}"
+            c.request("continue")
+        c.wait_event("terminated", timeout=5.0)
+
+
 # --- entry point -------------------------------------------------------------
 
 def all_scenarios():
