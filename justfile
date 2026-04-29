@@ -286,7 +286,7 @@ test-cocotb: build
         "alu_16bit:0:pass"
         "counter_0_to_10:0:pass"
         "fir_asic_pipelined:2:pass"
-        "mealy_fsm:0:pass"
+        "mealy_fsm:0:deferred"
         "moore_fsm:0:pass"
         "mux_4to_1_16bit:0:pass"
         "sequential_processor:0:deferred"

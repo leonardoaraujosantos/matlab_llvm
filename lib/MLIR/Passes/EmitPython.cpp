@@ -19,6 +19,7 @@
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/Matchers.h"
 #include "mlir/IR/Operation.h"
 #include "mlir/IR/Value.h"
 #include "mlir/IR/Verifier.h"
@@ -1994,6 +1995,26 @@ void Emitter::emitFuncFunc(mlir::func::FuncOp F) {
    * the first time the function is called. */
   llvm::SetVector<llvm::StringRef> PersistentNames;
   llvm::DenseMap<llvm::StringRef, std::string> InitExprByName;
+  /* Per-function mapping from persistent name → id used by the
+   * runtime's `persistent_isempty(id)` check. Captured during the
+   * body walk so the module-level init can mark the runtime's
+   * "seen" flag — without it, `persistent_isempty` would always
+   * return True for scalar persistents (which use Python function-
+   * attribute storage instead of `_persistent_ptr`), causing the
+   * `if isempty(p) || reset` reset arm to fire on every call and
+   * resetting state every cycle. The bug is invisible under
+   * random vectors (most uint8 inputs aren't `==1` so the FSM
+   * stays in S0 either way) but obvious under tester-driven
+   * stimulus that intentionally exercises state transitions. */
+  llvm::DenseMap<llvm::StringRef, int64_t> PersistentIdByName;
+  /* True when the persistent is scalar — accessed via
+   * `matlab_global_{get,set}_f64` (function-attribute storage in
+   * the emitted Python). False for fi-array persistents accessed via
+   * `matlab_persistent_{get,set}_ptr` (runtime-managed pointer).
+   * Only scalars need the module-level "seen" marker; fi-arrays
+   * already get a real pointer stored on first call so
+   * `persistent_isempty` flips correctly without our help. */
+  llvm::DenseMap<llvm::StringRef, bool> IsScalarPersistent;
   std::string FnSym = F.getSymName().str();
   // Walk both LLVM::CallOp and matlab.call_builtin shapes — the
   // C/Python pipelines don't run LowerFixedPoint's matlab_persistent_*
@@ -2008,6 +2029,25 @@ void Emitter::emitFuncFunc(mlir::func::FuncOp F) {
     } else if (Op->getName().getStringRef() == "matlab.call_builtin") {
       if (auto CA = Op->getAttrOfType<mlir::StringAttr>("callee"))
         Callee = CA.getValue();
+    }
+    /* Capture (name → id) from any persistent runtime call; the id
+     * is always operand 0 (an i32 constant). */
+    if (!Callee.empty() && Op->getNumOperands() >= 1) {
+      mlir::APInt IdVal;
+      if (mlir::matchPattern(Op->getOperand(0),
+                              mlir::m_ConstantInt(&IdVal))) {
+        PersistentIdByName[PN.getValue()] = IdVal.getSExtValue();
+      }
+    }
+    /* Tag the persistent's kind (scalar vs fi-array) by which
+     * runtime call shape touched it. Scalars use the f64-table
+     * routes; fi-arrays use the ptr-table routes. */
+    if (Callee == "matlab_global_get_f64" ||
+        Callee == "matlab_global_set_f64") {
+      IsScalarPersistent[PN.getValue()] = true;
+    } else if (Callee == "matlab_persistent_get_ptr" ||
+               Callee == "matlab_persistent_set_ptr") {
+      IsScalarPersistent[PN.getValue()] = false;
     }
     if (Callee == "matlab_global_get_f64" && Op->getNumResults() == 1) {
       this->Names[Op->getResult(0)] = FnSym + "." + PN.getValue().str();
@@ -2068,6 +2108,20 @@ void Emitter::emitFuncFunc(mlir::func::FuncOp F) {
         OS << FnSym << "." << PN.str() << " = " << It->second << "\n";
       else
         OS << FnSym << "." << PN.str() << " = 0.0\n";
+      /* Mark scalar persistents' ids as seen in the runtime's
+       * `_persistent_ptr` table so `rt.persistent_isempty(id)`
+       * returns False for them from now on. The Python emit uses
+       * function-attribute storage for scalar persistents, which
+       * the runtime can't see directly; this is the bridge. We
+       * skip fi-array persistents — their first call sets the
+       * real pointer, which would be clobbered by a sentinel
+       * `True` (and `persistent_isempty` flips correctly there
+       * without our help). */
+      auto KindIt = IsScalarPersistent.find(PN);
+      auto IdIt = PersistentIdByName.find(PN);
+      bool IsScalar = (KindIt != IsScalarPersistent.end() && KindIt->second);
+      if (IsScalar && IdIt != PersistentIdByName.end())
+        OS << "rt.persistent_set_ptr(" << IdIt->second << ", True)\n";
     }
     OS << "\n";
   }

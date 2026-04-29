@@ -51,6 +51,7 @@
 #include "llvm/Support/JSON.h"
 #include "llvm/Support/TargetSelect.h"
 #include <climits>
+#include <dirent.h>
 #include <fcntl.h>
 #include <pthread.h>
 #include <sys/stat.h>
@@ -5672,6 +5673,409 @@ parseCocotbSpecFromSv(const std::string &SvPath,
 }
 
 
+/* ===========================================================================
+ * v3.2 — Tester-driven stimulus extraction (`test_<stem>.m`)
+ *
+ * When `-emit-cocotb FILE.m` finds a sibling `test_<stem>.m`, the
+ * harness can replay the tester's hand-picked stimulus instead of
+ * driving random vectors. This is the open-source equivalent of
+ * MathWorks's "Simulink Coder Test Bench" workflow: the same
+ * MATLAB test driver that the user runs by hand also drives the
+ * SV DUT.
+ *
+ * Approach: AST-walk `test_<stem>.m` and unroll the stimulus loop
+ * into a flat list of input tuples. The harness then replays them
+ * cycle-by-cycle, calling the Python reference with the same
+ * tuple to compute the expected output (no double-implementation
+ * — the tester's MATLAB code is the spec; the device's own
+ * `<stem>_ref.py` is what evaluates it).
+ *
+ * Recognised tester shapes (covers test_mealy / test_fsm_moore /
+ * test_counter / test_mux):
+ *
+ *   1. Single device call, no loop:
+ *        a = fi(...); b = uint8(...); ...
+ *        result = device(a, b, ...);
+ *
+ *   2. Vector-driven loop:
+ *        bits = [<row literal>]; reset = false;
+ *        for i = 1:length(bits)
+ *            r = device(bits(i), reset);
+ *        end
+ *
+ *   3. Fixed-count loop with conditional inputs:
+ *        for i = 1:N
+ *            if i == K, reset = true;
+ *            else      reset = false;
+ *            end
+ *            r = device(reset);
+ *        end
+ *
+ * Anything outside this set returns std::nullopt and the caller
+ * falls back to random vectors with a diagnostic. Adding more
+ * shapes is the v3 follow-up — start small. The four existing
+ * `test_*.m` fixtures all extract cleanly.
+ * =========================================================================*/
+
+namespace {
+
+struct EvalVal {
+  enum class K { None, Num, Bool, Vec } Kind = K::None;
+  double Num = 0.0;
+  bool Bool = false;
+  std::vector<double> Vec;
+};
+
+/* Format a Python literal from an evaluated value. Bools render as
+ * Python `True` / `False`; integers render without a decimal point so
+ * `pack_fi` doesn't have to round trivial cases; non-integer doubles
+ * use full precision. */
+static std::string pyLit(const EvalVal &V) {
+  switch (V.Kind) {
+    case EvalVal::K::Bool: return V.Bool ? "True" : "False";
+    case EvalVal::K::Num: {
+      if (V.Num == std::trunc(V.Num) &&
+          std::abs(V.Num) < 1e15) {
+        char Buf[64];
+        snprintf(Buf, sizeof Buf, "%lld", (long long)V.Num);
+        return Buf;
+      }
+      char Buf[64];
+      snprintf(Buf, sizeof Buf, "%.17g", V.Num);
+      return Buf;
+    }
+    default: return "0";
+  }
+}
+
+class TesterStimulus {
+public:
+  std::optional<std::vector<std::vector<std::string>>>
+  extract(matlab::TranslationUnit *TU, llvm::StringRef DeviceName) {
+    DeviceName_ = DeviceName.str();
+    if (!TU || !TU->ScriptNode || !TU->ScriptNode->Body) return std::nullopt;
+    Tuples_.clear();
+    Sym_.clear();
+    if (!walkBlock(TU->ScriptNode->Body)) return std::nullopt;
+    if (Tuples_.empty()) return std::nullopt;
+    return Tuples_;
+  }
+
+private:
+  std::string DeviceName_;
+  std::vector<std::vector<std::string>> Tuples_;
+  std::map<std::string, EvalVal> Sym_;
+
+  bool walkBlock(matlab::Block *B) {
+    if (!B) return false;
+    for (auto *S : B->Stmts) {
+      if (!walkStmt(S)) return false;
+    }
+    return true;
+  }
+
+  bool walkStmt(matlab::Stmt *S) {
+    using namespace matlab;
+    if (auto *AS = dynamic_cast<AssignStmt *>(S)) {
+      /* Both `r = device(...)` and `[a, b] = device(...)` shapes
+       * record the same stimulus tuple — only the call args matter
+       * for driving the DUT. Single-LHS assignments may also bind a
+       * literal value to a name, which we capture for later
+       * substitution in the loop body. */
+      if (auto *RC = dynamic_cast<CallOrIndex *>(AS->RHS)) {
+        if (auto *Cn = dynamic_cast<NameExpr *>(RC->Callee)) {
+          if (Cn->Name == DeviceName_) {
+            return recordCall(RC);
+          }
+        }
+      }
+      if (AS->LHS.size() == 1) {
+        if (auto *LN = dynamic_cast<NameExpr *>(AS->LHS[0])) {
+          EvalVal V;
+          if (evalExpr(AS->RHS, V))
+            Sym_[std::string(LN->Name)] = V;
+        }
+      }
+      return true;
+    }
+    if (auto *ES = dynamic_cast<ExprStmt *>(S)) {
+      if (auto *RC = dynamic_cast<CallOrIndex *>(ES->E)) {
+        if (auto *Cn = dynamic_cast<NameExpr *>(RC->Callee)) {
+          if (Cn->Name == DeviceName_) {
+            return recordCall(RC);
+          }
+        }
+      }
+      return true; // ignore fprintf / disp / etc.
+    }
+    if (auto *FS = dynamic_cast<ForStmt *>(S)) {
+      auto *RE = dynamic_cast<RangeExpr *>(FS->Iter);
+      if (!RE) return false;
+      double Lo, Hi;
+      if (!evalNumber(RE->Start, Lo)) return false;
+      if (!evalNumber(RE->End, Hi)) return false;
+      double Step = 1.0;
+      if (RE->Step && !evalNumber(RE->Step, Step)) return false;
+      if (Step == 0.0) return false;
+      std::string IvName(FS->Var);
+      EvalVal SavedI; bool HadI = Sym_.count(IvName);
+      if (HadI) SavedI = Sym_[IvName];
+      for (double i = Lo;
+           (Step > 0) ? (i <= Hi + 1e-9) : (i >= Hi - 1e-9);
+           i += Step) {
+        EvalVal IV; IV.Kind = EvalVal::K::Num; IV.Num = i;
+        Sym_[IvName] = IV;
+        if (!walkBlock(FS->Body)) return false;
+      }
+      if (HadI) Sym_[IvName] = SavedI;
+      else Sym_.erase(IvName);
+      return true;
+    }
+    if (auto *IS = dynamic_cast<IfStmt *>(S)) {
+      EvalVal CV;
+      if (!evalExpr(IS->Cond, CV)) return false;
+      bool Truthy = (CV.Kind == EvalVal::K::Bool && CV.Bool) ||
+                    (CV.Kind == EvalVal::K::Num && CV.Num != 0.0);
+      if (Truthy) return walkBlock(IS->Then);
+      for (auto &EI : IS->Elseifs) {
+        EvalVal EV;
+        if (!evalExpr(EI.Cond, EV)) return false;
+        bool ET = (EV.Kind == EvalVal::K::Bool && EV.Bool) ||
+                  (EV.Kind == EvalVal::K::Num && EV.Num != 0.0);
+        if (ET) return walkBlock(EI.Body);
+      }
+      if (IS->Else) return walkBlock(IS->Else);
+      return true;
+    }
+    /* Anything else in the body: ignore but proceed (e.g. a stray
+     * disp or whatever). The extraction is best-effort — we only
+     * fail when we can't even recognise the structure. */
+    return true;
+  }
+
+  bool recordCall(matlab::CallOrIndex *C) {
+    std::vector<std::string> Tuple;
+    Tuple.reserve(C->Args.size());
+    for (auto *Arg : C->Args) {
+      EvalVal V;
+      if (!evalExpr(Arg, V)) return false;
+      Tuple.push_back(pyLit(V));
+    }
+    Tuples_.push_back(std::move(Tuple));
+    return true;
+  }
+
+  bool evalNumber(matlab::Expr *E, double &Out) {
+    EvalVal V;
+    if (!evalExpr(E, V)) return false;
+    if (V.Kind == EvalVal::K::Num) { Out = V.Num; return true; }
+    if (V.Kind == EvalVal::K::Bool) { Out = V.Bool ? 1.0 : 0.0; return true; }
+    return false;
+  }
+
+  bool evalExpr(matlab::Expr *E, EvalVal &Out) {
+    using namespace matlab;
+    if (!E) return false;
+    if (auto *I = dynamic_cast<IntegerLiteral *>(E)) {
+      Out.Kind = EvalVal::K::Num;
+      Out.Num = std::strtod(std::string(I->Text).c_str(), nullptr);
+      return true;
+    }
+    if (auto *F = dynamic_cast<FPLiteral *>(E)) {
+      Out.Kind = EvalVal::K::Num;
+      Out.Num = std::strtod(std::string(F->Text).c_str(), nullptr);
+      return true;
+    }
+    if (auto *N = dynamic_cast<NameExpr *>(E)) {
+      if (N->Name == "true") { Out.Kind = EvalVal::K::Bool; Out.Bool = true; return true; }
+      if (N->Name == "false") { Out.Kind = EvalVal::K::Bool; Out.Bool = false; return true; }
+      auto It = Sym_.find(std::string(N->Name));
+      if (It == Sym_.end()) return false;
+      Out = It->second;
+      return true;
+    }
+    if (auto *U = dynamic_cast<UnaryOpExpr *>(E)) {
+      EvalVal V;
+      if (!evalExpr(U->Operand, V)) return false;
+      if (V.Kind != EvalVal::K::Num) return false;
+      switch (U->Op) {
+        case UnOp::Plus:  Out = V; return true;
+        case UnOp::Minus: Out.Kind = EvalVal::K::Num; Out.Num = -V.Num; return true;
+        case UnOp::Not:   Out.Kind = EvalVal::K::Bool; Out.Bool = (V.Num == 0.0); return true;
+      }
+      return false;
+    }
+    if (auto *B = dynamic_cast<BinaryOpExpr *>(E)) {
+      EvalVal L, R;
+      if (!evalExpr(B->LHS, L) || !evalExpr(B->RHS, R)) return false;
+      auto N = [](const EvalVal &V) -> double {
+        if (V.Kind == EvalVal::K::Num) return V.Num;
+        if (V.Kind == EvalVal::K::Bool) return V.Bool ? 1.0 : 0.0;
+        return 0.0;
+      };
+      switch (B->Op) {
+        case BinOp::Add: Out.Kind = EvalVal::K::Num; Out.Num = N(L) + N(R); return true;
+        case BinOp::Sub: Out.Kind = EvalVal::K::Num; Out.Num = N(L) - N(R); return true;
+        case BinOp::Mul: Out.Kind = EvalVal::K::Num; Out.Num = N(L) * N(R); return true;
+        case BinOp::Div: Out.Kind = EvalVal::K::Num; Out.Num = (N(R)==0?0:N(L)/N(R)); return true;
+        case BinOp::Eq: Out.Kind = EvalVal::K::Bool; Out.Bool = (N(L) == N(R)); return true;
+        case BinOp::Ne: Out.Kind = EvalVal::K::Bool; Out.Bool = (N(L) != N(R)); return true;
+        case BinOp::Lt: Out.Kind = EvalVal::K::Bool; Out.Bool = (N(L) <  N(R)); return true;
+        case BinOp::Le: Out.Kind = EvalVal::K::Bool; Out.Bool = (N(L) <= N(R)); return true;
+        case BinOp::Gt: Out.Kind = EvalVal::K::Bool; Out.Bool = (N(L) >  N(R)); return true;
+        case BinOp::Ge: Out.Kind = EvalVal::K::Bool; Out.Bool = (N(L) >= N(R)); return true;
+        default: return false;
+      }
+    }
+    if (auto *M = dynamic_cast<MatrixLiteral *>(E)) {
+      Out.Kind = EvalVal::K::Vec;
+      Out.Vec.clear();
+      for (auto &Row : M->Rows) {
+        for (auto *Cell : Row) {
+          EvalVal CV;
+          if (!evalExpr(Cell, CV)) return false;
+          if (CV.Kind == EvalVal::K::Num) Out.Vec.push_back(CV.Num);
+          else if (CV.Kind == EvalVal::K::Bool) Out.Vec.push_back(CV.Bool ? 1.0 : 0.0);
+          else return false;
+        }
+      }
+      return true;
+    }
+    if (auto *C = dynamic_cast<CallOrIndex *>(E)) {
+      auto *Cn = dynamic_cast<NameExpr *>(C->Callee);
+      if (!Cn) return false;
+      llvm::StringRef Cname = Cn->Name;
+      /* `length(vec)` → vector size as a Num. */
+      if (Cname == "length" && C->Args.size() == 1) {
+        EvalVal Inner;
+        if (!evalExpr(C->Args[0], Inner)) return false;
+        if (Inner.Kind != EvalVal::K::Vec) return false;
+        Out.Kind = EvalVal::K::Num;
+        Out.Num = (double)Inner.Vec.size();
+        return true;
+      }
+      /* Type-cast / fi-constructor calls: just take the first arg's
+       * numeric value. The harness does its own pack_fi based on the
+       * SV port spec, so the wrapper's WL/FL args here are vestigial. */
+      if (Cname == "fi" || Cname == "int8" || Cname == "int16" ||
+          Cname == "int32" || Cname == "int64" || Cname == "uint8" ||
+          Cname == "uint16" || Cname == "uint32" || Cname == "uint64" ||
+          Cname == "double" || Cname == "single" || Cname == "logical") {
+        if (C->Args.empty()) return false;
+        return evalExpr(C->Args[0], Out);
+      }
+      /* `vec(i)` — index a known vector by a 1-based scalar. */
+      auto It = Sym_.find(std::string(Cname));
+      if (It != Sym_.end() && It->second.Kind == EvalVal::K::Vec &&
+          C->Args.size() == 1) {
+        EvalVal Idx;
+        if (!evalExpr(C->Args[0], Idx)) return false;
+        if (Idx.Kind != EvalVal::K::Num) return false;
+        int64_t K = (int64_t)Idx.Num - 1;
+        if (K < 0 || (size_t)K >= It->second.Vec.size()) return false;
+        Out.Kind = EvalVal::K::Num;
+        Out.Num = It->second.Vec[K];
+        return true;
+      }
+      return false;
+    }
+    return false;
+  }
+};
+
+/* True when `B` (or any nested block) contains a top-level call to
+ * the named device function. Used to disambiguate between multiple
+ * `test_*.m` scripts in the same directory. */
+static bool blockCallsDevice(matlab::Block *B,
+                              const std::string &DeviceName) {
+  using namespace matlab;
+  if (!B) return false;
+  for (auto *S : B->Stmts) {
+    auto matchesCall = [&](Expr *E) -> bool {
+      auto *C = dynamic_cast<CallOrIndex *>(E);
+      if (!C) return false;
+      auto *N = dynamic_cast<NameExpr *>(C->Callee);
+      return N && std::string(N->Name) == DeviceName;
+    };
+    if (auto *AS = dynamic_cast<AssignStmt *>(S)) {
+      if (matchesCall(AS->RHS)) return true;
+    } else if (auto *ES = dynamic_cast<ExprStmt *>(S)) {
+      if (matchesCall(ES->E)) return true;
+    } else if (auto *IS = dynamic_cast<IfStmt *>(S)) {
+      if (blockCallsDevice(IS->Then, DeviceName)) return true;
+      for (auto &EI : IS->Elseifs)
+        if (blockCallsDevice(EI.Body, DeviceName)) return true;
+      if (blockCallsDevice(IS->Else, DeviceName)) return true;
+    } else if (auto *FS = dynamic_cast<ForStmt *>(S)) {
+      if (blockCallsDevice(FS->Body, DeviceName)) return true;
+    }
+  }
+  return false;
+}
+
+/* Locate a tester `.m` file next to the input and parse it into a
+ * fresh TU. Strategy:
+ *   1. Try the strict convention: `<input-dir>/test_<stem>.m`.
+ *   2. If missing, scan `<input-dir>/test_*.m` and pick the first
+ *      whose script body contains a call to the DUT function name —
+ *      handles the existing examples/hdl/ naming that doesn't strictly
+ *      mirror the function name (test_mealy.m for mealy_fsm.m,
+ *      test_mux.m for mux_4to_1_16bit.m, etc.).
+ * Returns nullptr on miss. Parse failures fall through silently —
+ * the harness emit then falls back to random vectors with a
+ * diagnostic. */
+static matlab::TranslationUnit *
+loadTesterTU(matlab::SourceManager &SM, matlab::ASTContext &AstCtx,
+             const std::string &InputPath,
+             const std::string &Stem,
+             const std::string &DeviceName) {
+  auto Slash = InputPath.find_last_of('/');
+  std::string Parent = (Slash == std::string::npos) ? "."
+                       : InputPath.substr(0, Slash);
+
+  auto tryParse = [&](const std::string &Path) -> matlab::TranslationUnit * {
+    struct stat St;
+    if (stat(Path.c_str(), &St) != 0 || !S_ISREG(St.st_mode))
+      return nullptr;
+    matlab::FileID FID = SM.loadFile(Path);
+    if (FID == 0) return nullptr;
+    matlab::DiagnosticEngine Diag(SM);
+    matlab::Lexer Lx(SM, FID, Diag);
+    auto Toks = Lx.tokenize();
+    matlab::Parser P(std::move(Toks), AstCtx, Diag);
+    auto *TU = P.parseFile();
+    if (!TU || Diag.hasErrors()) return nullptr;
+    return TU;
+  };
+
+  /* (1) Strict convention. */
+  if (auto *TU = tryParse(Parent + "/test_" + Stem + ".m"))
+    return TU;
+
+  /* (2) Heuristic: any `test_*.m` whose body calls our device. */
+  DIR *D = opendir(Parent.c_str());
+  if (!D) return nullptr;
+  std::vector<std::string> Candidates;
+  while (auto *Ent = readdir(D)) {
+    std::string Name = Ent->d_name;
+    if (Name.size() < 7 || Name.substr(0, 5) != "test_") continue;
+    if (Name.size() < 3 || Name.substr(Name.size() - 2) != ".m") continue;
+    Candidates.push_back(Name);
+  }
+  closedir(D);
+  std::sort(Candidates.begin(), Candidates.end());
+  for (auto &Name : Candidates) {
+    auto *TU = tryParse(Parent + "/" + Name);
+    if (!TU) continue;
+    if (TU->ScriptNode &&
+        blockCallsDevice(TU->ScriptNode->Body, DeviceName))
+      return TU;
+  }
+  return nullptr;
+}
+
+} // namespace
+
 /* Render the harness Python source from a single function spec.
  * Combinational modules sample after a 1ns settle; sequential
  * modules drive a 10ns clock, pulse `rst_n` low for 2 cycles at
@@ -5687,7 +6091,8 @@ parseCocotbSpecFromSv(const std::string &SvPath,
  * sample. L=0 reproduces the v1 lockstep behaviour. */
 static std::string
 renderCocotbHarness(const CocotbFuncSpec &S, const std::string &Stem,
-                    int Vectors, int Latency) {
+                    int Vectors, int Latency,
+                    const std::vector<std::vector<std::string>> *Stimulus) {
   std::string Out;
   auto append = [&](const std::string &S) { Out += S; };
   auto pyTuple = [](const CocotbPortSpec &P) -> std::string {
@@ -5756,19 +6161,44 @@ renderCocotbHarness(const CocotbFuncSpec &S, const std::string &Stem,
    * N-L valid comparisons. Mirrors HDL Verifier's `Latency`
    * parameter contract: drive N stimulus, compare from cycle L. */
   append("    pending_refs = []  # FIFO of (cycle, ref_tuple, args)\n");
-  append("    for i in range(N):\n");
-  append("        py_args = []\n");
-  append("        for name, signed, wl, fl in INPUTS:\n");
-  append("            lo, hi = fi_range(signed, wl, fl)\n");
-  append("            v = random.uniform(lo, hi)\n");
-  append("            v_packed = pack_fi(v, signed, wl, fl)\n");
-  append("            v_real = unpack_fi(v_packed, signed, wl, fl)\n");
-  append("            getattr(dut, name).value = v_packed\n");
-  /* The Python reference treats Q.0 fi values as Python ints
-   * (so bitwise ops `a & b` etc. work) and Q.F values as floats
-   * (real arithmetic, saturation deferred to matlab_runtime).
-   * Pass each input in the shape its consumer expects. */
-  append("            py_args.append(int(v_real) if fl == 0 else v_real)\n");
+  if (Stimulus) {
+    /* Tester-driven mode (v3.2): the input vector list was extracted
+     * from a sibling `test_<stem>.m` and embedded as STIMULUS below.
+     * Each iteration drives the next tuple instead of generating
+     * random values. */
+    append("    STIMULUS = [\n");
+    for (auto &Tup : *Stimulus) {
+      append("        (");
+      for (size_t I = 0; I < Tup.size(); ++I) {
+        if (I) append(", ");
+        append(Tup[I]);
+      }
+      if (Tup.size() == 1) append(",");
+      append("),\n");
+    }
+    append("    ]\n");
+    append("    N = len(STIMULUS)\n");
+    append("    for i, args in enumerate(STIMULUS):\n");
+    append("        py_args = list(args)\n");
+    append("        for j, (name, signed, wl, fl) in enumerate(INPUTS):\n");
+    append("            v = float(py_args[j]) if not isinstance(py_args[j], bool) "
+           "else (1.0 if py_args[j] else 0.0)\n");
+    append("            getattr(dut, name).value = pack_fi(v, signed, wl, fl)\n");
+  } else {
+    append("    for i in range(N):\n");
+    append("        py_args = []\n");
+    append("        for name, signed, wl, fl in INPUTS:\n");
+    append("            lo, hi = fi_range(signed, wl, fl)\n");
+    append("            v = random.uniform(lo, hi)\n");
+    append("            v_packed = pack_fi(v, signed, wl, fl)\n");
+    append("            v_real = unpack_fi(v_packed, signed, wl, fl)\n");
+    append("            getattr(dut, name).value = v_packed\n");
+    /* The Python reference treats Q.0 fi values as Python ints
+     * (so bitwise ops `a & b` etc. work) and Q.F values as floats
+     * (real arithmetic, saturation deferred to matlab_runtime).
+     * Pass each input in the shape its consumer expects. */
+    append("            py_args.append(int(v_real) if fl == 0 else v_real)\n");
+  }
   if (S.Sequential) {
     /* Drive inputs, wait for the next posedge to latch them into
      * the registers, then a small settle delay so the always_comb
@@ -5917,8 +6347,32 @@ int emitCocotbHarness(const char *Self, const Options &Opts,
     return 1;
   }
 
+  /* v3.2: when a sibling `test_<stem>.m` exists, replay its
+   * stimulus instead of driving random vectors. The extractor is
+   * best-effort — if the tester uses a shape outside the recognised
+   * patterns (loop with literal-vector indexing, fixed-count loop
+   * with iv conditionals, single device call) it returns nullopt
+   * and we fall back to random with a diagnostic. */
+  std::optional<std::vector<std::vector<std::string>>> Stimulus;
+  {
+    matlab::SourceManager TesterSM;
+    matlab::ASTContext TesterCtx;
+    auto *TTU = loadTesterTU(TesterSM, TesterCtx, Input, Stem, Spec->Name);
+    if (TTU) {
+      TesterStimulus Ext;
+      Stimulus = Ext.extract(TTU, Spec->Name);
+      if (!Stimulus) {
+        std::cerr << "warning: emit-cocotb: found test_" << Stem
+                  << ".m but couldn't extract its stimulus shape — "
+                     "falling back to random vectors. Recognised shapes "
+                     "are documented in docs/emit_cocotb.md (v3.2).\n";
+      }
+    }
+  }
+
   std::string Harness = renderCocotbHarness(*Spec, Stem, Opts.CocotbVectors,
-                                             Opts.CocotbLatency);
+                                             Opts.CocotbLatency,
+                                             Stimulus ? &*Stimulus : nullptr);
   std::string Makefile = renderCocotbMakefile(Stem, Spec->Name);
 
   if (writeStringToFile(OutDir + "/test_" + Stem + ".py", Harness) != 0)
@@ -5975,8 +6429,12 @@ int emitCocotbHarness(const char *Self, const Options &Opts,
   std::cerr << "matlabc: wrote CocoTB harness to " << OutDir
             << " (" << Spec->Inputs.size() << " inputs, "
             << Spec->Outputs.size() << " outputs, "
-            << (Spec->Sequential ? "sequential" : "combinational")
-            << ", " << Opts.CocotbVectors << " vectors";
+            << (Spec->Sequential ? "sequential" : "combinational");
+  if (Stimulus)
+    std::cerr << ", " << Stimulus->size() << " vectors from test_"
+              << Stem << ".m";
+  else
+    std::cerr << ", " << Opts.CocotbVectors << " random vectors";
   if (Opts.CocotbLatency > 0)
     std::cerr << ", latency=" << Opts.CocotbLatency;
   std::cerr << ")\n";

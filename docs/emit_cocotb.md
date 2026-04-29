@@ -9,11 +9,14 @@ the emitted SystemVerilog DUT and the emitted Python reference
 model in lockstep against random vectors, asserting cycle-by-cycle
 equality.
 
-**Status: v2 shipped.** 6 of 7 supported `examples/hdl/` modules
-pass bit-exact under Verilator + CocoTB; the 7th (`vector_processor`)
-is intentionally deferred pending vector-port driving (v3). See the
-[Status](#status) and [Roadmap](#roadmap) sections for the running
-list of remaining work.
+**Status: v3.2 shipped.** When a sibling `test_<stem>.m` exists,
+the harness replays its hand-picked stimulus instead of driving
+random vectors. 5 of 8 `examples/hdl/` modules pass bit-exact
+under Verilator + CocoTB end-to-end; 3 are deferred pending v3
+follow-ups (combinational-Mealy output timing, multi-stage
+pipeline input stability, vector-port driving). See the
+[Status](#status) and [Roadmap](#roadmap) sections for the
+running list of remaining work.
 
 ---
 
@@ -222,23 +225,45 @@ gives the right alignment.
 
 Sweep across `examples/hdl/*.m` (cocotb 2.0.1, Verilator 5.x):
 
-| Module                | L | Result | Notes                        |
-| --------------------- | - | ------ | ---------------------------- |
-| `alu_16bit`           | 0 | PASS 100/100 | combinational                |
-| `counter_0_to_10`     | 0 | PASS 100/100 | sequential, persistent       |
-| `mealy_fsm`           | 0 | PASS 100/100 | sequential FSM               |
-| `moore_fsm`           | 0 | PASS 100/100 | sequential FSM               |
-| `mux_4to_1_16bit`     | 0 | PASS 100/100 | combinational                |
-| `fir_asic_pipelined`  | 2 | PASS    | requires `-cocotb-latency=2` |
-| `sequential_processor`| any | mismatch | multi-input pipeline (see roadmap) |
-| `vector_processor`    | — | SKIP w/ warning | unpacked-array ports (see roadmap) |
+| Module                | L | Mode    | Result | Notes                        |
+| --------------------- | - | ------- | ------ | ---------------------------- |
+| `alu_16bit`           | 0 | random  | PASS 100/100 | combinational                |
+| `counter_0_to_10`     | 0 | tester  | PASS 15/15 | from `test_counter.m`        |
+| `moore_fsm`           | 0 | tester  | PASS 7/7   | from `test_fsm_moore.m`      |
+| `mux_4to_1_16bit`     | 0 | tester  | PASS 1/1   | from `test_mux.m`            |
+| `fir_asic_pipelined`  | 2 | random  | PASS    | requires `-cocotb-latency=2` |
+| `mealy_fsm`           | 0 | tester  | DEFERRED | Mealy combinational output sampling — v3.x |
+| `sequential_processor`| any | random  | DEFERRED | multi-input pipeline — v3.1 |
+| `vector_processor`    | — | —       | DEFERRED (emit-skip) | unpacked-array ports — v3.3 |
 
-`sequential_processor` is the one supported-shape module where v2's
-random-vector strategy doesn't suffice. Its pipeline samples `gain`
-at cycle `k+L` while the Python reference at cycle `k` consumes
-`gain[k]`; with random per-cycle gain values the two paths
-legitimately diverge. The fix is in v3 (input-stability — see
-below), not in the harness internals.
+The "Mode" column reflects v3.2 behaviour: when a sibling
+`test_<stem>.m` exists, the harness replays its hand-picked
+stimulus (`tester` mode); otherwise it falls back to random
+(`random` mode). The discovery is name-flexible — any
+`test_*.m` whose script body contains a call to the DUT
+function is recognised, so the existing `examples/hdl/`
+naming (`test_mealy.m`, `test_fsm_moore.m`, `test_mux.m`,
+`test_counter.m`) all match cleanly without renaming.
+
+The three deferred entries each fail for a different reason:
+
+- **`mealy_fsm`** (v3.x): Mealy outputs are *combinational*
+  `f(state, input)`. The harness samples after the rising edge
+  (correct for Moore / counter / FIR), but Mealy's combinational
+  output reflects the **post-edge** state's response to the same
+  input — different from the reference's "compute output before
+  state advances" semantics. Fix would tag combinational outputs
+  per port (or sample twice per cycle) so the right alignment
+  applies per output type.
+- **`sequential_processor`** (v3.1): multi-stage pipeline samples
+  `gain` at cycle `k+L` while the Python reference at cycle `k`
+  consumes `gain[k]`; with random per-cycle gain values the two
+  paths legitimately diverge. Fix is the input-stability pragma
+  (`% cocotb: hold(gain, L)`) — drive each input stable for L
+  cycles to align the comparison.
+- **`vector_processor`** (v3.3): unpacked-array port driving
+  (`dut.vec_a[k].value = ...` per element). The current harness
+  short-circuits with a clear diagnostic.
 
 ---
 
@@ -266,24 +291,65 @@ but every sample within the hold window agrees.
 names; the harness emitter just needs to track per-input hold
 counters and skip the random-uniform call until the hold expires.
 
-### v3.2 — `test_<stem>.m`-derived stimulus 🔵
+### v3.2 — `test_<stem>.m`-derived stimulus ✅ shipped
 
-**Problem.** Random vectors don't exercise corner cases (state
-transitions, saturation boundaries, reset sequences) reliably. The
-existing `examples/hdl/test_*.m` driver scripts already encode
-hand-picked stimulus sequences (e.g.,
-`bits = [1 0 1 1 0 0 1]; for i = 1:length(bits): mealy_fsm(bits(i))`).
+**Status.** Implemented. When `-emit-cocotb FILE.m` finds a sibling
+`test_*.m` whose script body calls the DUT function, the harness
+extracts the stimulus sequence via AST walk and embeds it as a
+deterministic vector list. Recognised tester shapes:
 
-**Plan.** When `-emit-cocotb` finds a sibling `test_<stem>.m`
-alongside `<stem>.m`, replace the random-vector loop with the
-sequence the test driver feeds the function. The reference Python
-model already runs that sequence (it's just the
-`-emit-python` of `test_<stem>.m`); the harness drives the same
-sequence into the DUT.
+1. **Single device call, no loop** — `result = device(a, b, ...)`.
+2. **Vector-driven loop** — `vec = [...]; for i = 1:length(vec):
+   device(vec(i), other)`.
+3. **Fixed-count loop with conditionals** — `for i = 1:N: if i ==
+   K, x = a; else x = b; end; device(x)`.
 
-**Effort.** ~2 sessions. Needs a small AST / IR walk to extract the
-stimulus loop's iteration count and per-cycle input expressions
-from the driver script.
+Tester discovery is name-flexible: tries the strict
+`test_<stem>.m` first, then any `test_*.m` in the same directory
+whose body calls the DUT function. The existing `examples/hdl/`
+naming (`test_mealy.m`, `test_fsm_moore.m`, `test_mux.m`,
+`test_counter.m`) all match cleanly. Falls back to random vectors
+with a diagnostic when the tester uses a shape outside the
+recognised set.
+
+**Side effect.** v3.2 also exposed and fixed a bug in
+`-emit-python` where `rt.persistent_isempty(id)` returned True
+forever for scalar persistents (function-attribute storage was
+invisible to the runtime's `_persistent_ptr` table). The fix
+emits a `rt.persistent_set_ptr(<id>, True)` marker alongside
+each scalar's module-level init, so the runtime sees the slot
+as set after import. Caught by the FSM testers under v3.2 —
+random vectors had been masking it because most uint8 inputs
+aren't `==1` so the FSM stayed in the reset arm regardless.
+
+### v3.x — Mealy combinational output sampling 🔵
+
+**Problem.** Mealy FSMs emit `out_signal = f(state, input)` as a
+combinational signal — its value depends on both the current
+register and the live input. The harness samples *after* the
+rising edge, which gives the **post-edge** state's response to the
+same input. For Moore / counter / FIR (registered outputs), that's
+correct: the new register value is what the user wants to read.
+For Mealy, the reference's "compute output for input k while
+still in state k" semantics produces a different value than the
+post-edge sample. `mealy_fsm` mismatches `#1` and `#4` of its
+test sequence as a consequence.
+
+**Plan.** Two options; pick one:
+
+1. **Tag outputs per kind.** Walk the SV emit (or the lowered IR)
+   to determine which output ports are registered (`always_ff`-
+   driven) vs combinational. For combinational ones whose value
+   depends on a live input, sample *before* the rising edge.
+2. **Sample twice per cycle.** Once pre-edge for combinational
+   outputs, once post-edge for registered. The harness picks the
+   right value based on the per-port tag from option (1).
+
+Either way, the harness needs the per-output kind. Easy to
+extract from the SV port-list (output assignments inside
+`always_comb` vs `always_ff`).
+
+**Effort.** ~1 session.
 
 ### v3.3 — Vector / unpacked-array port driving 🔵
 
