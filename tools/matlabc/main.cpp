@@ -32,6 +32,9 @@
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/TargetParser/Host.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+#include "mlir/Dialect/LLVMIR/LLVMTypes.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinTypes.h"
@@ -5704,17 +5707,17 @@ int main(int Argc, char **Argv) {
                               Opts.Mode == Options::Mode::CheckSynthesizable ||
                               Opts.Mode == Options::Mode::EmitHardwareReport;
       bool WantClean = Opts.Opt || WantFullPipeline;
-      bool IsSVPath = Opts.Mode == Options::Mode::EmitSystemVerilog ||
-                      Opts.Mode == Options::Mode::CheckSynthesizable ||
-                      Opts.Mode == Options::Mode::EmitHardwareReport;
-      if (IsSVPath) {
-        // Phase 5.6.1: scan `% hdl: port(...)` pragmas + apply them
-        // to func signatures BEFORE the refinement iteration so a
-        // function-only `.m` file (no typed driver) gets its port
-        // widths from the pragma and the rest of the pipeline sees
-        // typed args naturally. ScanHWPragmas is idempotent; the
-        // SV-specific re-scan further down picks up the rest of the
-        // pragma surface (fsm_encoding, input_pipeline, ...).
+      // `% hdl: port(...)` pragmas were originally an SV-only mechanism
+      // for typing function-only files without a driver. The same
+      // information is also useful to the C / C++ / Python /
+      // TypeScript paths — without it, a function-only `.m` file
+      // emits as a function with `none`-typed args that none of the
+      // downstream emitters can lower (matlab.alloc survives). Run
+      // the scan + apply for every WantFullPipeline mode; it's
+      // idempotent and a no-op on files without `% hdl:` comments.
+      // The SV-specific pragma surface (fsm_encoding, input_pipeline,
+      // ...) is re-scanned further down in the SV branch.
+      if (WantFullPipeline) {
         mlirgen::runScanHWPragmas(M, &SM);
         if (!mlirgen::runApplyPortTypePragmas(M)) {
           Diag.printAll();
@@ -5902,6 +5905,125 @@ int main(int Argc, char **Argv) {
             Opts.Mode == Options::Mode::EmitCpp ||
             Opts.Mode == Options::Mode::EmitPython ||
             Opts.Mode == Options::Mode::EmitTypeScript) {
+          // For HDL files that use a `persistent` fi-array (e.g.
+          // `persistent delay_line; ...; delay_line = [x, delay_line(1:3)]`),
+          // the runtime ptr semantics survive into the C/Python/TS
+          // backends. Reuse Stage F (originally written for SV) to
+          // rewrite the array into N parallel scalar persistents,
+          // each handled cleanly by the existing per-emitter
+          // `matlab_global_{get,set}_f64 + persistent_name` paths.
+          // Bit-identical output to the SV version, which matches
+          // what a CocoTB harness needs for its reference model.
+          // The same per-element __subscript_store sites the SV
+          // path consumes are also rewritten — without it, those
+          // ops would survive untranslated into the emitter.
+          mlirgen::runHWUnrollFor(M);
+          mlirgen::runLowerPersistentFiArrays(M);
+          mlirgen::runRefineSlotTypes(M);
+          mlirgen::runLowerScalarSlots(M);
+          // DCE dead `matlab.alloc` chains. Stage F's rewrite (and
+          // some lowering shapes) can leave a matlab.alloc whose
+          // only users are matlab.store / matlab.load with all load
+          // results unused — a synthetic slot wrapping a return port
+          // that's also written through a separate llvm.alloca.
+          // LowerScalarSlots refuses to promote these when the
+          // store's value type drifts from the alloc's elem type
+          // (e.g. f64 stored into an iN slot). Erase them outright
+          // so the emitter doesn't trip on the surviving matlab.alloc.
+          {
+            llvm::SmallVector<mlir::Operation *, 8> Dead;
+            M.walk([&](mlir::Operation *Op) {
+              if (Op->getName().getStringRef() != "matlab.alloc") return;
+              if (Op->getNumResults() != 1) return;
+              for (mlir::Operation *U : Op->getResult(0).getUsers()) {
+                auto N = U->getName().getStringRef();
+                if (N != "matlab.store" && N != "matlab.load") return;
+                if (N == "matlab.load" && !U->getResult(0).use_empty())
+                  return;
+              }
+              Dead.push_back(Op);
+            });
+            for (mlir::Operation *Op : Dead) {
+              llvm::SmallVector<mlir::Operation *, 4> Users;
+              for (mlir::Operation *U : Op->getResult(0).getUsers())
+                Users.push_back(U);
+              for (mlir::Operation *U : Users) U->erase();
+              Op->erase();
+            }
+          }
+          // Stage F doesn't catch every persistent fi-array shape
+          // (e.g. fir_asic_pipelined's `reg_products(i) = ...` write-
+          // through chain when the array isn't an isempty-initialised
+          // shift register). Any surviving `matlab.call_builtin
+          // @__subscript_store(arr, idx_f64, val_intN)` site here is
+          // a runtime-managed array element write — lower it to
+          // `llvm.call @matlab_mat_{i,u}64_set1_s(arr, idx_f64,
+          // sext/zext val to i64)` so the C / Python / TS backends
+          // emit a concrete runtime call rather than tripping the
+          // unsupported-op fallback. The SV path doesn't need this
+          // (it never gets here — its branch handles Stage F's
+          // misses through HWLegalize's diagnostic).
+          {
+            auto &Ctx = *M.getContext();
+            auto F64 = mlir::Float64Type::get(&Ctx);
+            auto I64 = mlir::IntegerType::get(&Ctx, 64);
+            auto VoidTy = mlir::LLVM::LLVMVoidType::get(&Ctx);
+            auto PtrTy = mlir::LLVM::LLVMPointerType::get(&Ctx);
+            auto getOrInsert = [&](llvm::StringRef Name)
+                -> mlir::LLVM::LLVMFuncOp {
+              if (auto E = M.lookupSymbol<mlir::LLVM::LLVMFuncOp>(Name))
+                return E;
+              mlir::OpBuilder MB(&Ctx);
+              MB.setInsertionPointToStart(M.getBody());
+              auto Ty = mlir::LLVM::LLVMFunctionType::get(
+                  VoidTy, {PtrTy, F64, I64});
+              auto Fn = mlir::LLVM::LLVMFuncOp::create(
+                  MB, M.getLoc(), Name, Ty);
+              Fn.setLinkage(mlir::LLVM::Linkage::External);
+              return Fn;
+            };
+            llvm::SmallVector<mlir::Operation *, 8> Survivors;
+            M.walk([&](mlir::Operation *Op) {
+              if (Op->getName().getStringRef() != "matlab.call_builtin")
+                return;
+              auto C = Op->getAttrOfType<mlir::StringAttr>("callee");
+              if (!C || C.getValue() != "__subscript_store") return;
+              if (Op->getNumOperands() != 3) return;
+              if (Op->getOperand(0).getType() != PtrTy) return;
+              if (Op->getOperand(1).getType() != F64) return;
+              if (!mlir::isa<mlir::IntegerType>(
+                      Op->getOperand(2).getType())) return;
+              Survivors.push_back(Op);
+            });
+            for (mlir::Operation *Op : Survivors) {
+              mlir::Value Base = Op->getOperand(0);
+              mlir::Value Idx  = Op->getOperand(1);
+              mlir::Value Val  = Op->getOperand(2);
+              auto VIT = mlir::cast<mlir::IntegerType>(Val.getType());
+              bool Signed = true;
+              if (auto SA = Op->getAttrOfType<mlir::IntegerAttr>(
+                      "fi_signed"))
+                Signed = SA.getInt() != 0;
+              mlir::OpBuilder OB(Op);
+              mlir::Value V64 = Val;
+              if (VIT.getWidth() < 64) {
+                V64 = Signed
+                    ? (mlir::Value)mlir::arith::ExtSIOp::create(
+                          OB, Op->getLoc(), I64, Val)
+                    : (mlir::Value)mlir::arith::ExtUIOp::create(
+                          OB, Op->getLoc(), I64, Val);
+              } else if (VIT.getWidth() > 64) {
+                V64 = mlir::arith::TruncIOp::create(
+                    OB, Op->getLoc(), I64, Val);
+              }
+              auto Fn = getOrInsert(Signed ? "matlab_mat_i64_set1_s"
+                                           : "matlab_mat_u64_set1_s");
+              mlir::LLVM::CallOp::create(
+                  OB, Op->getLoc(), Fn,
+                  mlir::ValueRange{Base, Idx, V64});
+              Op->erase();
+            }
+          }
           // Fold `if/else/store-to-same-slot` into `arith.select` first,
           // then squash single-store allocas back into SSA so the emitted
           // C doesn't drag a `T slot = 0; void* p = &slot;` prelude for
