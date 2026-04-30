@@ -547,12 +547,10 @@ static void fft_bluestein(double *re, double *im, int64_t N, int inverse) {
     int64_t M = 1;
     while (M < 2 * N - 1) M <<= 1;
 
-    double *chirp_r = (double *)calloc((size_t)N, sizeof(double));
-    double *chirp_i = (double *)calloc((size_t)N, sizeof(double));
-    double *a_r = (double *)calloc((size_t)M, sizeof(double));
-    double *a_i = (double *)calloc((size_t)M, sizeof(double));
-    double *b_r = (double *)calloc((size_t)M, sizeof(double));
-    double *b_i = (double *)calloc((size_t)M, sizeof(double));
+    /* Phase-4 RAII: six manual calloc/free pairs go to value-initialised
+     * std::vectors (zero-fill is implicit). */
+    std::vector<double> chirp_r(N), chirp_i(N);
+    std::vector<double> a_r(M), a_i(M), b_r(M), b_i(M);
 
     double sign = inverse ? 1.0 : -1.0;
     /* chirp[n] = exp(sign * i * pi * n^2 / N). Precompute for n in [0, N).
@@ -577,14 +575,14 @@ static void fft_bluestein(double *re, double *im, int64_t N, int inverse) {
         b_r[M - n] = chirp_r[n]; b_i[M - n] = chirp_i[n];
     }
     /* Convolution via FFT(a) * FFT(b), then IFFT. */
-    fft_radix2_inplace(a_r, a_i, M, 0);
-    fft_radix2_inplace(b_r, b_i, M, 0);
+    fft_radix2_inplace(a_r.data(), a_i.data(), M, 0);
+    fft_radix2_inplace(b_r.data(), b_i.data(), M, 0);
     for (int64_t k = 0; k < M; ++k) {
         double pr = a_r[k] * b_r[k] - a_i[k] * b_i[k];
         double pi = a_r[k] * b_i[k] + a_i[k] * b_r[k];
         a_r[k] = pr; a_i[k] = pi;
     }
-    fft_radix2_inplace(a_r, a_i, M, 1);
+    fft_radix2_inplace(a_r.data(), a_i.data(), M, 1);
     /* Scale the inverse-FFT result by 1/M and multiply by conj(chirp). */
     for (int64_t n = 0; n < N; ++n) {
         double yr = a_r[n] / (double)M;
@@ -592,31 +590,27 @@ static void fft_bluestein(double *re, double *im, int64_t N, int inverse) {
         re[n] = yr * chirp_r[n] + yi * chirp_i[n];
         im[n] = yi * chirp_r[n] - yr * chirp_i[n];
     }
-    free(chirp_r); free(chirp_i);
-    free(a_r); free(a_i);
-    free(b_r); free(b_i);
 }
 
 /* Apply 1-D FFT to each column of the caller's matrix in place. */
 static void fft_columns_inplace(double *re, double *im,
                                  int64_t rows, int64_t cols, int inverse) {
-    double *col_r = (double *)malloc((size_t)rows * sizeof(double));
-    double *col_i = (double *)malloc((size_t)rows * sizeof(double));
+    /* Phase-4 RAII: scratch column buffers via std::vector. */
+    std::vector<double> col_r(rows), col_i(rows);
     for (int64_t c = 0; c < cols; ++c) {
         for (int64_t r = 0; r < rows; ++r) {
             col_r[r] = re[r * cols + c];
             col_i[r] = im[r * cols + c];
         }
         if (is_power_of_two(rows))
-            fft_radix2_inplace(col_r, col_i, rows, inverse);
+            fft_radix2_inplace(col_r.data(), col_i.data(), rows, inverse);
         else
-            fft_bluestein(col_r, col_i, rows, inverse);
+            fft_bluestein(col_r.data(), col_i.data(), rows, inverse);
         for (int64_t r = 0; r < rows; ++r) {
             re[r * cols + c] = col_r[r];
             im[r * cols + c] = col_i[r];
         }
     }
-    free(col_r); free(col_i);
 }
 
 /* Apply 1-D FFT to each row. */

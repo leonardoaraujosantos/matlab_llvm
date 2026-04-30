@@ -118,6 +118,7 @@ Initial cut landed alongside Phase 0. Five C harnesses live under
 | `test/Runtime/test_stats.c`   | Tier-1/2: `any`, `all`, `tril`, `triu`, `std`, `var`, `median`, `meshgrid`, `ndgrid`, `polyval`, `polyfit`, `roots`, `interp1`, `interp2`, `trapz`, `cumtrapz`, `gradient` — 75 assertions |
 | `test/Runtime/test_image.c`   | Tier-3: `imfilter`, `padarray`, `rank`, `cond`, `null`, `orth` — 30 assertions |
 | `test/Runtime/test_more.c`    | Phase-4-touched + 0%-allocator catch-up: `chol`, `lu_L`, `lu_U`, `qr_Q`, `qr_R`, `pinv`, `kron`, `intersect`, `union`, `setdiff`, `repmat`, `linspace`, `find`, `horzcat`, `vertcat`, `squeeze`, `slice2`, `matpow` — 67 assertions |
+| `test/Runtime/test_fft.c`     | FFT family (both radix-2 and Bluestein paths): `matlab_fft_c`, `matlab_ifft_c`, `matlab_fft2_c`, `matlab_ifft2_c` — 79 assertions |
 
 CMake glue is the `foreach(_rt_test IN ITEMS linalg shape rng complex
 reduce signal stats image)` block in `CMakeLists.txt`, which compiles
@@ -467,18 +468,20 @@ set/sort scratch users are migrated:
 5. ✅ Tier-1/2/3 scratch users: `matlab_filter`, `matlab_polyfit`,
    `matlab_roots`, `matlab_median`, `matlab_trapz`, `matlab_trapz_xy`,
    `matlab_gradient`, `set_op` (drives `setdiff`/`intersect`/`union`).
-6. ⏭ Complex / FFT family (`matlab_fft_c`, `matlab_fft2_c`,
-   `fft_radix2_inplace`, `fft_bluestein`) — still on raw `malloc`.
-7. ⏭ Misc: `matlab_kron`, `matlab_repmat`, `matlab_horzcat`,
-   `matlab_vertcat`, `matlab_permute`, `matlab_squeeze` — these
-   currently use only `mat_alloc` (no scratch buffers), so the
-   migration there is purely cosmetic. Defer until Phase 5
-   shape-op-template lands.
+6. ✅ Complex / FFT family: `fft_bluestein` (6 calloc/free pairs →
+   6 std::vectors) and `fft_columns_inplace` (2 mallocs → 2
+   std::vectors). The `matlab_fft_c` / `matlab_ifft_c` / `matlab_fft2_c`
+   / `matlab_ifft2_c` wrappers only call `mat_c_alloc` and have no
+   manual scratch.
+7. ⏭ Misc: `matlab_kron`, `matlab_horzcat`, `matlab_vertcat` — these
+   use only `mat_alloc` (no scratch buffers); migration is purely
+   cosmetic and deferred. `matlab_repmat`, `matlab_permute`,
+   `matlab_squeeze` already migrated as part of Phase 5 shape-op
+   work.
 
-Per-turn migration tally: ~24 manual `malloc`/`free` pairs eliminated
-across 13 functions in this round. Combined with the prior `matlab_inv`
-exemplar that's about 28 of the 178 manual calls retired (~16%),
-focused on the highest-traffic numerical paths.
+Cumulative tally: about 36 of the 178 manual `malloc`/`free` calls
+retired (~20%), focused on the highest-traffic numerical paths
+(linalg, polynomial, numeric calculus, set ops, FFT).
 
 Each migration follows the `matlab_inv` template — replace
 `malloc`/`free` pairs with `std::vector` for raw scratch and `MatPtr`
@@ -517,7 +520,7 @@ inline MatPtr shape_op(int64_t m_out, int64_t n_out, IndexFn idx) {
 } }
 ```
 
-**Migrations landed (4 ops):**
+**Migrations landed (4 ops via shape_op + 3 via MatPtr):**
 
 ```cpp
 matlab_mat *matlab_transpose(matlab_mat *A) {
@@ -541,17 +544,34 @@ saves ~5-7 lines vs the manual form, and crucially eliminates the
 "alloc-then-fill-then-return" boilerplate so the per-op interesting
 content is just the index expression.
 
+`repmat` migrated next (4-deep tile loop → modulo-arithmetic
+one-liner via `shape_op`):
+
+```cpp
+matlab_mat *matlab_repmat(matlab_mat *A, double m, double n) {
+    int64_t tm = (int64_t)m, tn = (int64_t)n;
+    int64_t am = A->rows, an = A->cols;
+    return matlab::runtime::shape_op(am * tm, an * tn,
+        [&](int64_t i, int64_t j) {
+            return A->data[(i % am) * an + (j % an)];
+        }).release();
+}
+```
+
+`permute` (identity path) and `squeeze` adopted `MatPtr` for RAII
+consistency; their bodies are pure copies that are no faster via
+`shape_op`, so the lambda form was skipped.
+
 **Still on the docket.**
 
-- ⏭ `repmat`, `permute`, `squeeze` — also fit `shape_op` cleanly.
-  Defer to a follow-up after their existing test coverage is firm.
 - ⏭ `diag` (vector path is sparse — only diagonal cells nonzero) and
   `reshape` (the index expression is the trivial identity, so
   `shape_op` adds nothing) — keep manual.
 - ⏭ Constructor family (`zeros`/`ones`/`eye`/`magic`/`mat_from_buf`)
   — same shape but the index expression doesn't reference an input
   matrix. A separate `fill_mat<Lambda>` helper would unify them; not
-  yet done.
+  yet done. Note `zeros` already short-circuits to `calloc` so the
+  helper would only win on `ones`/`eye`/`magic`.
 
 **Exit criteria.** The shape-op section in `matlab_runtime.cpp` is
 ~30% shorter; further dedup requires the constructor-family helper.

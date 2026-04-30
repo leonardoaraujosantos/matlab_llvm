@@ -827,19 +827,15 @@ matlab_mat *matlab_range(double start, double step, double end) {
     return A;
 }
 
+/* Phase-5: shape_op brings the 4-deep tile loop down to one
+ * modulo-arithmetic lambda. */
 matlab_mat *matlab_repmat(matlab_mat *A, double m, double n) {
     int64_t tm = (int64_t)m, tn = (int64_t)n;
-    int64_t nr = A->rows * tm, nc = A->cols * tn;
-    matlab_mat *B = mat_alloc(nr, nc);
-    for (int64_t bi = 0; bi < tm; ++bi)
-        for (int64_t bj = 0; bj < tn; ++bj)
-            for (int64_t i = 0; i < A->rows; ++i)
-                for (int64_t j = 0; j < A->cols; ++j) {
-                    int64_t r = bi * A->rows + i;
-                    int64_t c = bj * A->cols + j;
-                    B->data[r * nc + c] = A->data[i * A->cols + j];
-                }
-    return B;
+    int64_t am = A->rows, an = A->cols;
+    int64_t nr = am * tm, nc = an * tn;
+    return matlab::runtime::shape_op(nr, nc, [&](int64_t i, int64_t j) {
+        return A->data[(i % am) * an + (j % an)];
+    }).release();
 }
 
 /*---------- Reductions ----------------------------------------------------
@@ -1181,9 +1177,11 @@ matlab_mat *matlab_permute(matlab_mat *A, matlab_mat *perm) {
     int Identity = (total >= 2 &&
                     perm->data[0] == 1.0 && perm->data[1] == 2.0);
     if (Identity) {
-        matlab_mat *R = mat_alloc(A->rows, A->cols);
+        /* Phase-5 RAII: identity copy via MatPtr. */
+        matlab::runtime::MatPtr R =
+            matlab::runtime::make_mat(A->rows, A->cols);
         memcpy(R->data, A->data, (size_t)(A->rows * A->cols) * sizeof(double));
-        return R;
+        return R.release();
     }
     return matlab_transpose(A);
 }
@@ -1194,9 +1192,11 @@ matlab_mat *matlab_permute(matlab_mat *A, matlab_mat *perm) {
 matlab_mat *matlab_squeeze(matlab_mat *A) {
     if (!A) return mat_alloc(0, 0);
     int64_t m = A->rows, n = A->cols;
-    matlab_mat *R = mat_alloc(m, n);
+    /* Phase-5 RAII: pure copy. shape_op fits but is no faster than
+     * memcpy here, so keep memcpy and just adopt MatPtr. */
+    matlab::runtime::MatPtr R = matlab::runtime::make_mat(m, n);
     memcpy(R->data, A->data, (size_t)(m * n) * sizeof(double));
-    return R;
+    return R.release();
 }
 
 /* Phase-5: fliplr / flipud / rot90 collapse into one-line lambdas
