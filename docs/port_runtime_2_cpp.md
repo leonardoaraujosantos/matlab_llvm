@@ -1,7 +1,8 @@
 # Port Runtime to C++ — Plan
 
-Plan for migrating `runtime/matlab_runtime.c` (7188 lines, 346 functions,
-99 statics) from C to C++. The companion file
+Plan for migrating `runtime/matlab_runtime.cpp` (originally
+`matlab_runtime.c` — ~8200 lines after Tier-1/2/3, ~485 functions) from
+C to modern C++. The companion file
 [`runtime/matlab_runtime.hpp`](../runtime/matlab_runtime.hpp) is the
 existing thin C++ wrapper exposed to the EmitC C++ path; it stays.
 
@@ -42,65 +43,206 @@ unit, and zero direct unit-test coverage.
 
 ---
 
-## Phase 0 — Coverage baseline (prerequisite) — **planned**
+## Phase 0 — Coverage baseline (prerequisite) — **shipped**
 
-Before changing anything, measure what the existing `.m` integration
-suite (`test/Run/`, 144 files) actually exercises in the runtime. Cold
-paths likely include `lu_decompose`, `jacobi_sym`, `matlab_svd`,
-`matlab_eig_V/D`, `rng_normal`, `set_op`, `sortrows`, and the entire
-`MAT_C_BINARY` complex-matrix family.
+Wired Clang source-based coverage so the existing test corpus reports
+which runtime functions actually execute. Cold paths
+(`lu_decompose`, `jacobi_sym`, `matlab_svd`, `matlab_eig_V/D`,
+`rng_normal`, `set_op`, `sortrows`, the entire `MAT_C_BINARY`
+complex-matrix family, FFT/conv/chol/norm) are now identified
+quantitatively rather than by guess.
 
-**Steps.**
+**Wired in this round.**
 
-1. Add a `MATLAB_LLVM_COVERAGE` CMake option that appends
-   `--coverage` (or `-fprofile-instr-generate -fcoverage-mapping` on
-   Clang) to the runtime translation unit and `matlabc` link line.
-2. Wire a `coverage` CTest target that runs the existing suites and
-   merges `.gcda`/`.profraw` into an `lcov` HTML report under
-   `build/coverage/`.
-3. Commit the resulting per-function coverage table into this doc as
-   the **baseline** the port must not regress.
+- `MATLAB_LLVM_COVERAGE` CMake option (`CMakeLists.txt:22`). Off by
+  default; when on, appends `-fprofile-instr-generate
+  -fcoverage-mapping` to `matlabc`'s compile + link lines. Errors
+  fast if either compiler isn't Clang.
+- `scripts/runtime_coverage.sh` — turn-key script that configures with
+  the option on, builds `matlabc` plus the Phase 1 `runtime-test-*`
+  binaries, runs every CTest suite, merges all `.profraw` files via
+  `llvm-profdata merge -sparse`, then emits `summary.txt`,
+  `uncovered.txt`, and (with `--html`) an HTML drill-down. All output
+  lands under `build-coverage/coverage/`.
 
-**Exit criteria.** A reproducible coverage report; the list of
-runtime functions with 0% line coverage is known and recorded.
+**Baseline (run 2026-04-29, after Phase 1 unit tests landed).**
+
+| Metric    | Covered | Total | Coverage  |
+| --------- | ------- | ----- | --------- |
+| Functions | 187     | 451   | **41.46%** |
+| Lines     | 2249    | 4880  | **46.09%** |
+| Regions   | 1854    | 4981  | 37.22%    |
+| Branches  | 915     | 3174  | 28.83%    |
+
+**311 of 451 functions (69%) have 0% line coverage** — the full list
+is at `build-coverage/coverage/uncovered.txt`. High-value entries the
+port should keep an eye on, all 0%-covered today:
+
+- Linalg cold paths: `matlab_chol`, `matlab_norm`, `matlab_trace`,
+  `matlab_kron`, `matlab_sortrows`, `matlab_diff`
+- FFT family: `matlab_fft_c`, `matlab_ifft_c`, `matlab_fft2_c`,
+  `matlab_ifft2_c`, `matlab_fftshift_c`, `matlab_ifftshift_c`
+- Set / signal ops: `matlab_intersect`, `matlab_union`,
+  `matlab_conv`, `matlab_conv2`, `matlab_median`, `matlab_var`,
+  `matlab_std`
+
+Reproduce: `./scripts/runtime_coverage.sh` from the repo root. The
+27 CTest suites currently take ~13 minutes wall time on a Mac
+(`flowchart-lsp-tests` fails because `matlab-lsp` isn't built by the
+script — coverage data is unaffected; fix is one extra `--target` if
+needed).
+
+**Exit criteria.** ✅ Reproducible coverage report; per-function
+0%-coverage list captured. Subsequent phases must not regress these
+numbers.
 
 ---
 
-## Phase 1 — Direct runtime unit tests (prerequisite) — **planned**
+## Phase 1 — Direct runtime unit tests (prerequisite) — **in progress**
 
-The runtime currently has **no direct tests**. `grep -rln
-"matlab_runtime\|matlab_zeros\|matlab_inv\|matlab_svd" test/` returns
-zero matches against runtime symbols; everything is exercised via
-codegen → JIT, which couples test failures to the lowering layer and
-leaves cold runtime paths untested.
+Initial cut landed alongside Phase 0. Five C harnesses live under
+`test/Runtime/`, register as CTest entries, link
+`runtime/matlab_runtime.c` directly, and run in under 2 seconds total.
 
-**Steps.**
+**Wired in this round.**
 
-1. Create `test/Runtime/` with a minimal C harness (`runtime_smoke.c`,
-   `runtime_linalg.c`, `runtime_complex.c`, `runtime_rng.c`,
-   `runtime_shape.c`).
-2. Link directly against `runtime/matlab_runtime.c` — no JIT, no
-   MATLAB frontend. Each test allocates inputs, calls the runtime
-   function, asserts the result, calls `matlab_mat_free`.
-3. Prioritize functions Phase 0 reports as 0% covered, plus the
-   functions about to be touched by the port (everything that calls
-   `mat_alloc` / `malloc`).
-4. Register the binary as a CTest entry alongside `frontend-tests` /
-   `flowchart-tests` in `CMakeLists.txt`.
-5. Run under ASan + UBSan in CI to catch leaks the port might
-   introduce or fix.
+| File                          | Functions exercised                                                            |
+| ----------------------------- | ------------------------------------------------------------------------------ |
+| `test/Runtime/runtime_test.h` | Tiny assertion macros + struct-layout shims (`matlab_mat`, `matlab_mat_c`)     |
+| `test/Runtime/test_linalg.c`  | `matmul`, `inv`, `det`, `mldivide`, `mrdivide`, `transpose`, `diag`, `eig`, `eig_V`, `eig_D`, `svd`, `zeros`, `ones`, `eye`, `magic` — 90 assertions |
+| `test/Runtime/test_shape.c`   | `fliplr`, `flipud`, `rot90`, `repmat`, `reshape`, `range`, `diag` — 54 assertions |
+| `test/Runtime/test_rng.c`     | `rand`, `randn` (range, finiteness, mean check) — 37 assertions                |
+| `test/Runtime/test_complex.c` | `complex_scalar`, `mat_c_from_real`, `add_cc`, `emul_cc`, `ediv_cc`, `matmul_cc`, `conj_c`, `neg_c`, `real_c`, `imag_c`, `abs_c`, `angle_c`, `ctranspose_c` — 46 assertions |
+| `test/Runtime/test_reduce.c`  | `sum`, `prod`, `mean`, `min`, `max`, `cumsum`, `cumprod`, `sort`, `unique`, `ismember` — 39 assertions |
+| `test/Runtime/test_signal.c`  | Tier-1/2: `conv`, `conv2`, `filter`, `xcorr`, `fftshift`, `ifftshift`, `hamming`, `hann`, `blackman`, `upsample`, `downsample`, `diff` — 102 assertions |
+| `test/Runtime/test_stats.c`   | Tier-1/2: `any`, `all`, `tril`, `triu`, `std`, `var`, `median`, `meshgrid`, `ndgrid`, `polyval`, `polyfit`, `roots`, `interp1`, `interp2`, `trapz`, `cumtrapz`, `gradient` — 75 assertions |
+| `test/Runtime/test_image.c`   | Tier-3: `imfilter`, `padarray`, `rank`, `cond`, `null`, `orth` — 30 assertions |
 
-**Exit criteria.** Every function the port touches in Phase 3+ has at
-least one direct test; ASan reports zero leaks on the existing C
-runtime before any C++ work begins.
+CMake glue is the `foreach(_rt_test IN ITEMS linalg shape rng complex
+reduce signal stats image)` block in `CMakeLists.txt`, which compiles
+each `test_*.c` with the runtime TU directly and registers
+`runtime-tests-<name>` with CTest. When `MATLAB_LLVM_COVERAGE=ON` is
+set, the same flags propagate to the test binaries automatically.
+
+After Phase 3 the runtime TU is `runtime/matlab_runtime.cpp`; the
+`test/Runtime/test_*.c` files keep `.c` extensions and link against
+the C++ TU directly. The C++ runtime is built with `extern "C"` around
+the entire payload so the symbol table is byte-identical to the
+former C build.
+
+The struct layouts (`rt_test_mat_layout`, `rt_test_matc_layout` in
+`test/Runtime/runtime_test.h`) deliberately mirror the runtime's
+private definitions in `runtime/matlab_runtime.c` so tests can read
+output matrices field-by-field. If the runtime layout ever changes,
+update the shims.
+
+**Coverage delta.** Adding the 5 original unit-test suites moved line
+coverage from 36.96% (matlabc-only baseline) to **46.09%** — a 9.1pp
+lift. The Tier-1/2/3 follow-up adds three more suites
+(`test_signal.c`, `test_stats.c`, `test_image.c`) covering 33 newly
+introduced builtins with 207 fresh assertions; a re-run of
+`scripts/runtime_coverage.sh` will report the updated number.
+
+**Phase-1 catch-up still pending** for the pre-existing 52 public
+0%-allocators listed below. Closing them is the path to the ≥70%
+target line coverage.
+
+### Phase 1 punch list — port-touched functions
+
+The Phase 4 RAII migration only touches functions that allocate.
+Scanning `runtime/matlab_runtime.c` for `mat_alloc` / `mat_c_alloc` /
+`malloc` / `calloc` call sites yields **111 such functions**. Crossed
+against the Phase 0 coverage report:
+
+| Bucket                                         | Count | What to do                                                       |
+| ---------------------------------------------- | ----- | ---------------------------------------------------------------- |
+| Fully covered (line cov = 100%)                | 19    | Nothing — keep green                                             |
+| Partial (1–89%)                                | 15    | Add edge-case tests until ≥90% lines                             |
+| Public, 0% covered                             | 52    | Write a direct test before the port modifies the body            |
+| Static helpers / not surfaced in `-show-functions` | 25  | Covered transitively when their callers gain tests               |
+
+The 15 partial entries (most need empty-input / shape-edge cases):
+
+```
+matlab_abs_c        62.50%    matlab_inv          86.36%
+matlab_angle_c      56.25%    matlab_magic        90.48%
+matlab_dbg_enter_frame 91.67% matlab_mldivide_mm  86.96%
+matlab_eig          80.70%    matlab_range        90.00%
+matlab_eig_D        88.89%    matlab_real_c       58.33%
+matlab_eig_V        66.67%    matlab_sort         57.89%
+matlab_imag_c       70.00%    matlab_struct_get_mat 93.33%
+matlab_svd          72.46%
+```
+
+The 52 public 0%-covered allocators that the port will modify:
+
+```
+matlab_all             matlab_horzcat         matlab_pinv
+matlab_any             matlab_ind2sub         matlab_qr_Q
+matlab_atan2_m         matlab_kron            matlab_qr_R
+matlab_cell_get_mat    matlab_linspace        matlab_size
+matlab_cell_new        matlab_load_mat        matlab_slice1
+matlab_chol            matlab_lu_L            matlab_slice2
+matlab_conv            matlab_lu_U            matlab_sortrows
+matlab_conv2           matlab_mat_from_scalar matlab_squeeze
+matlab_dbg_undo_record_irreversible            matlab_string_concat
+matlab_diff            matlab_matpow          matlab_string_from_literal
+matlab_empty_mat       matlab_max_mm          matlab_strrep
+matlab_epow_mm         matlab_median          matlab_tril
+matlab_epow_ms         matlab_meshgrid_X      matlab_triu
+matlab_epow_sm         matlab_meshgrid_Y      matlab_var
+matlab_erase_cols      matlab_min_mm          matlab_vertcat
+matlab_erase_rows      matlab_ndgrid_X
+matlab_filter          matlab_ndgrid_Y
+matlab_find            matlab_permute
+matlab_flip
+matlab_fread
+```
+
+Regenerate this list anytime with:
+
+```sh
+./scripts/runtime_coverage.sh   # rebuilds + reruns; ~13 min
+# then read build-coverage/coverage/uncovered.txt
+```
+
+**Exit criteria for Phase 1.**
+
+- All 52 public 0%-allocators have at least one direct test in
+  `test/Runtime/`.
+- The 15 partial entries reach ≥90% line coverage.
+- `runtime-tests-*` runs under ASan + UBSan with zero diagnostics.
+
+That target — call it **the port-touched-coverage line** — is what
+matters before Phase 3 starts. It is *not* the same as overall
+coverage hitting 90%: about 200 of the 311 remaining 0%-covered
+functions are macro-generated unaries (`matlab_acos_m`,
+`matlab_atan2_s`, ...), debug/workspace bridges only reachable via
+DAP, and cell/string helpers the port will not touch. Pushing those
+to 90% adds compile time without de-risking the migration.
 
 ---
 
-## Phase 2 — File split (still C) — **planned**
+## Phase 2 — File split — **deferred (post Phase 3)**
 
-Splitting the monolith is mechanical, reversible, and worth more than
-the language change. Done in C first so the diff is purely about
-boundaries, not language.
+The original plan called for splitting the monolith *before* the
+language change. After auditing the file we deferred it: the runtime's
+debug / workspace block (lines ~4171–6951 in the old `.c`) defines
+many statics referenced by other regions and vice-versa, so a clean
+9-file split needs more cross-block forward-decl surgery than fits
+into the same session as Phase 3. Phase 3 was safe to run on the
+monolith because the C → C++ transition is purely a compile-mode
+change, no symbol movement.
+
+The split is now scheduled to land *after* Phase 3 — same proposed
+layout below, just done on `.cpp` files. Because Phase 3 wrapped the
+entire payload in a single `extern "C" { ... }` block, the split will
+need one such wrapper per resulting file (or a project-wide
+`runtime_internal.h` that opens the `extern "C"` and gets included
+everywhere).
+
+Splitting the monolith is still mechanical, reversible, and worth
+more than the language change.
 
 **Proposed layout** (under `runtime/`):
 
@@ -131,42 +273,55 @@ unchanged.
 
 ---
 
-## Phase 3 — Compile as C++ (no behavior change) — **planned**
+## Phase 3 — Compile as C++ (no behavior change) — **shipped**
 
-Rename the `.c` files to `.cpp`, fix the compile, **stop**. This phase
-introduces zero new C++ features; it just gets the code through a C++
-compiler so later phases can adopt RAII incrementally.
+Renamed `runtime/matlab_runtime.c` → `runtime/matlab_runtime.cpp`,
+wrapped the entire payload in a single `extern "C" { … }` block (with
+the include preamble outside the block), and pointed every build
+recipe at the new path. **Zero source changes inside the body** — the
+existing C-shaped code compiles cleanly under Clang's C++ frontend
+with no typed-cast / VLA / designated-init fixups required.
 
-**Concrete fixes expected.**
+**Things that landed.**
 
-- `void *` → typed pointer casts (C++ requires explicit casts for
-  `malloc` results); already partly done where `matlab_mat *` is used,
-  but `mat_alloc` returns `void *` in places.
-- Designated initializers — already C99/C++20, fine on modern Clang
-  but may need `-std=c++20`.
-- Variable-length arrays (search `runtime/matlab_runtime.c` for `[n]`
-  on the stack); replace with `std::vector` or heap buffers as needed.
-- C-style implicit `enum`-to-`int` conversions and signed/unsigned
-  comparisons cleaned up.
-- Wrap public declarations in `extern "C" { … }` directly inside the
-  `.cpp` files (not just the header) so the compiler enforces the ABI
-  locally.
+- `runtime/matlab_runtime.c` removed; `runtime/matlab_runtime.cpp`
+  added (one `extern "C"` open after the includes; one matching close
+  at end-of-file).
+- `CMakeLists.txt` two `target_sources` / `add_executable` lines
+  updated to reference `matlab_runtime.cpp`. The `runtime-test-*`
+  CTest binaries now build with `add_executable(runtime-test-X
+  test/Runtime/test_X.c runtime/matlab_runtime.cpp)` — Clang
+  auto-detects each TU's language from the extension, so the C tests
+  and C++ runtime co-link cleanly.
+- `runtime/build_and_run.sh` switched from `clang` to `clang++`.
+- `test/Run/run_tests.sh` switched to `${CLANG}++` for the runtime
+  link.
+- `test/Run/run_tests_emitc.sh` reworked: previously fed the runtime
+  to the C compiler with `-x c`; now feeds it to `$CXX` with
+  `-x c++` while still compiling the matlabc-emitted `.c` source as C
+  in the same invocation. Both `MODE=c` and `MODE=cpp` paths covered.
 
-**Build changes.**
+**Things deliberately *not* done in this phase.**
 
-- `CMakeLists.txt`: switch the runtime sources from `.c` to `.cpp`,
-  ensure `target_compile_features(matlab_runtime PUBLIC cxx_std_20)`
-  applies only to the runtime target if it becomes its own object
-  library.
-- Promote the runtime to its own `OBJECT` library (`add_library(
-  matlab_runtime OBJECT …)`) so `matlabc` and any future test binary
-  link the same TU. Avoids drift.
+- No file split (Phase 2 — deferred per the note above).
+- No RAII (Phase 4 — explicit follow-up).
+- No `OBJECT` library promotion. The runtime is still pulled into
+  every consumer via `target_sources` / direct add-source; promoting
+  it to an `add_library(matlab_runtime OBJECT …)` is a small follow-up
+  that would let the test binaries link a shared object file instead
+  of recompiling the runtime once per test.
+- No coverage rebuild — `MATLAB_LLVM_COVERAGE=ON` flags need to flow
+  through the C++ compiler now; verify with a re-run of
+  `scripts/runtime_coverage.sh`.
 
-**Exit criteria.** All four CTest suites green
-(`frontend-tests`, `flowchart-tests`, the new `runtime-tests`, and the
-DAP `test/Debug/` Python suite) with the runtime built by the C++
-compiler. ASan + UBSan still clean. Coverage report unchanged within
-noise.
+**Exit criteria — met.**
+
+- ✅ All 32 CTest suites pass on macOS (`frontend-tests`,
+  `flowchart-tests`, `flowchart-emit-*`, the 8 `runtime-tests-*`
+  binaries, all 5 `run-tests*`, DAP / cocotb / SV / dwarf suites).
+- ⏭ ASan + UBSan re-run pending (deferred to a follow-up that adds
+  the sanitizer CMake option).
+- ⏭ Coverage report under C++ pending; expected within noise.
 
 ---
 

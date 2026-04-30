@@ -14,7 +14,10 @@ fi
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 CLANG="${CLANG:-/opt/homebrew/opt/llvm/bin/clang}"
-RUNTIME="$ROOT/runtime/matlab_runtime.c"
+# Runtime is C++ since Phase 3 of docs/port_runtime_2_cpp.md — drive the
+# link line with clang++ so the .cpp is compiled as C++.
+RUNTIME="$ROOT/runtime/matlab_runtime.cpp"
+CXX="${CXX:-${CLANG}++}"
 TESTDIR="$(cd "$(dirname "$0")" && pwd)"
 
 pass=0; fail=0
@@ -33,7 +36,7 @@ for m in "$TESTDIR"/*.m; do
     fail=$((fail+1))
     rm -f "$tmpll" "$tmpbin"; continue
   fi
-  if ! "$CLANG" -Wno-override-module "$tmpll" "$RUNTIME" -o "$tmpbin" 2>/dev/null; then
+  if ! "$CXX" -Wno-override-module "$tmpll" "$RUNTIME" -o "$tmpbin" 2>/dev/null; then
     echo "FAIL $base: clang link failed"
     fail=$((fail+1))
     rm -f "$tmpll" "$tmpbin"; continue

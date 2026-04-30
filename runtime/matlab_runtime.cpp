@@ -3,6 +3,13 @@
  *
  * All functions use a leading `matlab_` prefix to avoid collision with libc
  * and to make the calling convention explicit to the compiler frontend.
+ *
+ * Built as C++ (Phase 3 of docs/port_runtime_2_cpp.md). The body keeps
+ * its C structure end-to-end — no STL types in signatures, no exceptions
+ * crossing the JIT boundary — but compiling under a C++ compiler unlocks
+ * RAII migrations in subsequent phases. The single `extern "C"` block
+ * around the entire payload preserves the exported symbol names so
+ * JIT-emitted code resolves matlab_* by C name unchanged.
  */
 
 #include <math.h>
@@ -17,6 +24,8 @@
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
+
+extern "C" {
 
 /* A single global mutex serializes all stdout I/O so parfor bodies that call
  * disp/fprintf don't interleave mid-line. This is a tiny concession to
@@ -8142,3 +8151,5 @@ matlab_mat *matlab_load_mat(matlab_string *path) {
     fclose(f);
     return A;
 }
+
+} /* extern "C" */

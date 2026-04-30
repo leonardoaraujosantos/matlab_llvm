@@ -188,7 +188,10 @@ if(MATLAB_LLVM_WITH_MLIR)
   # Link the runtime into matlabc so the JIT-backed -repl mode can
   # resolve matlab_* and matlab_ws_* symbols from the running process
   # via LLJIT's DynamicLibrarySearchGenerator::GetForCurrentProcess.
-  target_sources(matlabc PRIVATE runtime/matlab_runtime.c)
+  # The runtime now compiles as C++ (Phase 3 of docs/port_runtime_2_cpp.md);
+  # its body stays C-shaped and is wrapped in extern "C" so the exported
+  # symbols match the names JIT-emitted code looks up.
+  target_sources(matlabc PRIVATE runtime/matlab_runtime.cpp)
   # Export the matlab_* symbols so the JIT's dynamic lookup finds them
   # (by default executables hide symbols not referenced internally).
   if(APPLE)
@@ -215,11 +218,11 @@ enable_testing()
 # Direct C tests for runtime/matlab_runtime.c — no JIT, no MATLAB
 # frontend. Each test_*.c links the runtime TU directly. See
 # docs/port_runtime_2_cpp.md (Phase 1).
-foreach(_rt_test IN ITEMS linalg shape rng complex reduce)
+foreach(_rt_test IN ITEMS linalg shape rng complex reduce signal stats image)
   set(_rt_target "runtime-test-${_rt_test}")
   add_executable(${_rt_target}
     test/Runtime/test_${_rt_test}.c
-    runtime/matlab_runtime.c)
+    runtime/matlab_runtime.cpp)
   target_include_directories(${_rt_target} PRIVATE
     ${CMAKE_SOURCE_DIR}/runtime
     ${CMAKE_SOURCE_DIR}/test/Runtime)

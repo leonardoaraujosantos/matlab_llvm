@@ -11,7 +11,7 @@ set -euo pipefail
 
 MATLABC="${MATLABC:-$(cd "$(dirname "$0")/.." && pwd)/build/matlabc}"
 CLANG="${CLANG:-/opt/homebrew/opt/llvm/bin/clang}"
-RUNTIME="$(cd "$(dirname "$0")" && pwd)/matlab_runtime.c"
+RUNTIME="$(cd "$(dirname "$0")" && pwd)/matlab_runtime.cpp"
 
 if [[ ! -x "$MATLABC" ]]; then
   echo "error: matlabc not found at $MATLABC" >&2
@@ -27,6 +27,9 @@ OUT="${2:-$(basename "${INPUT%.m}")}"
 TMP="$(mktemp -t matlabc.XXXXXX).ll"
 trap 'rm -f "$TMP"' EXIT
 
+# Runtime is C++ since Phase 3 of docs/port_runtime_2_cpp.md. Drive
+# the link line with clang++ so the .cpp gets compiled as C++; the
+# matlabc-emitted .ll is still C-compatible.
 "$MATLABC" -emit-llvm "$INPUT" > "$TMP"
-"$CLANG" -Wno-override-module "$TMP" "$RUNTIME" -o "$OUT"
+"${CLANG}++" -Wno-override-module "$TMP" "$RUNTIME" -o "$OUT"
 echo "built $OUT"
