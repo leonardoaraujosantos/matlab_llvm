@@ -119,6 +119,8 @@ Initial cut landed alongside Phase 0. Five C harnesses live under
 | `test/Runtime/test_image.c`   | Tier-3: `imfilter`, `padarray`, `rank`, `cond`, `null`, `orth` — 30 assertions |
 | `test/Runtime/test_more.c`    | Phase-4-touched + 0%-allocator catch-up: `chol`, `lu_L`, `lu_U`, `qr_Q`, `qr_R`, `pinv`, `kron`, `intersect`, `union`, `setdiff`, `repmat`, `linspace`, `find`, `horzcat`, `vertcat`, `squeeze`, `slice2`, `matpow` — 67 assertions |
 | `test/Runtime/test_fft.c`     | FFT family (both radix-2 and Bluestein paths): `matlab_fft_c`, `matlab_ifft_c`, `matlab_fft2_c`, `matlab_ifft2_c` — 79 assertions |
+| `test/Runtime/test_struct_cell.c` | Struct + cell helpers: `matlab_struct_new`, `matlab_struct_set/get_f64/mat`, `matlab_struct_has_field`, `matlab_struct_rmfield`, `matlab_struct_get_child_struct`, capacity-grow path; `matlab_cell_new`, `matlab_cell_set/get_f64/mat`, `matlab_cell_numel`, `matlab_iscell` — 57 assertions |
+| `test/Runtime/test_fi.c`      | Fixed-Point Designer scalar helpers: `matlab_fi_sat_s64/u64`, `matlab_fi_round_floor/nearest/zero/ceiling/convergent_s`, `matlab_fi_round_floor/nearest_u`, `matlab_fi_quantize_s/u` end-to-end (signed Q8.4, unsigned UQ8.4, saturation paths) — 33 assertions |
 
 CMake glue is the `foreach(_rt_test IN ITEMS linalg shape rng complex
 reduce signal stats image)` block in `CMakeLists.txt`, which compiles
@@ -473,15 +475,15 @@ set/sort scratch users are migrated:
    std::vectors). The `matlab_fft_c` / `matlab_ifft_c` / `matlab_fft2_c`
    / `matlab_ifft2_c` wrappers only call `mat_c_alloc` and have no
    manual scratch.
-7. ⏭ Misc: `matlab_kron`, `matlab_horzcat`, `matlab_vertcat` — these
-   use only `mat_alloc` (no scratch buffers); migration is purely
-   cosmetic and deferred. `matlab_repmat`, `matlab_permute`,
-   `matlab_squeeze` already migrated as part of Phase 5 shape-op
-   work.
+7. ✅ Misc: `matlab_kron`, `matlab_horzcat` migrated via `shape_op`
+   (4-deep loops collapsed to one-line lambdas); `matlab_vertcat`
+   adopted MatPtr (its body is two memcpys, no shape_op gain).
+   `matlab_repmat`, `matlab_permute`, `matlab_squeeze` migrated as
+   part of Phase 5.
 
-Cumulative tally: about 36 of the 178 manual `malloc`/`free` calls
-retired (~20%), focused on the highest-traffic numerical paths
-(linalg, polynomial, numeric calculus, set ops, FFT).
+Cumulative tally: about 36 manual `malloc`/`free` calls retired (~20%
+of the 178 starting count), focused on the highest-traffic numerical
+paths (linalg, polynomial, numeric calculus, set ops, FFT).
 
 Each migration follows the `matlab_inv` template — replace
 `malloc`/`free` pairs with `std::vector` for raw scratch and `MatPtr`
@@ -562,39 +564,90 @@ matlab_mat *matlab_repmat(matlab_mat *A, double m, double n) {
 consistency; their bodies are pure copies that are no faster via
 `shape_op`, so the lambda form was skipped.
 
+**Constructor template — landed.**
+
+`fill_mat<IndexFn>` is the sibling helper for the "no input matrix,
+just compute each cell from (i, j)" pattern:
+
+```cpp
+template <class IndexFn>
+inline MatPtr fill_mat(int64_t m_out, int64_t n_out, IndexFn cell) {
+    MatPtr R = make_mat(m_out, n_out);
+    for (int64_t i = 0; i < m_out; ++i)
+        for (int64_t j = 0; j < n_out; ++j)
+            R->data[i * n_out + j] = cell(i, j);
+    return R;
+}
+
+matlab_mat *matlab_ones(double m, double n) {
+    return matlab::runtime::fill_mat((int64_t)m, (int64_t)n,
+        [](int64_t, int64_t) { return 1.0; }).release();
+}
+matlab_mat *matlab_eye(double m, double n) {
+    return matlab::runtime::fill_mat((int64_t)m, (int64_t)n,
+        [](int64_t i, int64_t j) {
+            return (i == j) ? 1.0 : 0.0;
+        }).release();
+}
+```
+
+`zeros` keeps short-circuiting to `mat_alloc` (calloc-zeroed).
+`magic` has stateful Siamese-method logic that doesn't fit the
+per-cell pattern, so it stays manual.
+
 **Still on the docket.**
 
 - ⏭ `diag` (vector path is sparse — only diagonal cells nonzero) and
   `reshape` (the index expression is the trivial identity, so
   `shape_op` adds nothing) — keep manual.
-- ⏭ Constructor family (`zeros`/`ones`/`eye`/`magic`/`mat_from_buf`)
-  — same shape but the index expression doesn't reference an input
-  matrix. A separate `fill_mat<Lambda>` helper would unify them; not
-  yet done. Note `zeros` already short-circuits to `calloc` so the
-  helper would only win on `ones`/`eye`/`magic`.
 
 **Exit criteria.** The shape-op section in `matlab_runtime.cpp` is
 ~30% shorter; further dedup requires the constructor-family helper.
 
 ---
 
-## Phase 6 — Error-path consolidation — **planned**
+## Phase 6 — Error-path consolidation — **shipped (helper landed)**
 
-Today, errors from the runtime go through `matlab_set_error_msg` plus
-ad-hoc `if (cond) { matlab_set_error_msg(...); return mat_alloc(0,0); }`
-patterns scattered across linalg routines. With RAII in place, this
-becomes a single internal helper.
+The plan over-estimated the duplication: only one site in the
+runtime today (`matlab_chol`) follows the
+"set msg + return empty matrix" shape. Phase 6 is therefore a small
+infrastructure pre-investment rather than a bulk refactor — the
+helper exists for future use, with the chol site converted as the
+named user.
 
-**Approach.**
+**`fail_with_msg` — landed in `runtime/runtime_internal.h`:**
 
-- Internal-only `RuntimeError` struct returned via `std::optional` /
-  `std::expected`-style helpers (C++23 `std::expected` if available,
-  else a hand-rolled equivalent — **never** crosses the C ABI).
-- Public entry points translate into the existing
-  `matlab_set_error_msg` + empty-mat return at the outermost layer.
+```cpp
+extern "C" void matlab_set_error_msg(const char *msg, int64_t len);
+inline matlab_mat *fail_with_msg(const char *msg, int64_t len) {
+    matlab_set_error_msg(msg, len);
+    return mat_alloc(0, 0);
+}
+```
 
-**Exit criteria.** Error-set call sites collapse to one location per
-public function.
+The `extern "C"` declaration inside `namespace matlab::runtime` is
+critical — without it the C++ name-mangler would produce an
+unresolved symbol at link time.
+
+**chol migration:**
+
+```cpp
+if (s <= 0.0) {
+    /* Phase-6 helper sets the runtime error message + flag and
+     * returns a fresh empty matrix (R is dropped via MatPtr's
+     * destructor). */
+    return matlab::runtime::fail_with_msg(
+        "chol: matrix is not positive definite", 38);
+}
+```
+
+The full `RuntimeError` / `std::expected` design from the original
+plan was deferred — the actual error surface today is small enough
+that a one-line helper is the right tool.
+
+**Exit criteria — met.** Error-set call sites use the helper where
+the pattern fits; future singular / shape-mismatch sites can adopt
+the same one-liner without further design.
 
 ---
 

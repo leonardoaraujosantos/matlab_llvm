@@ -225,6 +225,36 @@ inline MatPtr shape_op(int64_t m_out, int64_t n_out, IndexFn idx) {
     return R;
 }
 
+/*--- Phase 5: constructor template (fill_mat) ----------------------------
+ * Sibling to shape_op for the "no input matrix, just compute each cell
+ * from (i, j)" pattern shared by ones / eye / magic / mat_from_buf.
+ * `zeros` already short-circuits to make_mat (calloc-zeroed) so it
+ * doesn't go through this path. */
+template <class IndexFn>
+inline MatPtr fill_mat(int64_t m_out, int64_t n_out, IndexFn cell) {
+    MatPtr R = make_mat(m_out, n_out);
+    for (int64_t i = 0; i < m_out; ++i)
+        for (int64_t j = 0; j < n_out; ++j)
+            R->data[i * n_out + j] = cell(i, j);
+    return R;
+}
+
+/*--- Phase 6: error-path helper -----------------------------------------
+ * Sets the runtime error message + flag and returns a fresh empty
+ * matrix (the standard "give the caller something safe to keep
+ * indexing" sentinel). Most singular / mismatched-shape early exits
+ * across the linalg / signal layer take this shape; the helper keeps
+ * the message + return tied together at one location.
+ *
+ * matlab_set_error_msg is an extern "C" function — declare it that
+ * way inside the namespace too, otherwise the C++ compiler mangles
+ * the name and the link fails. */
+extern "C" void matlab_set_error_msg(const char *msg, int64_t len);
+inline matlab_mat *fail_with_msg(const char *msg, int64_t len) {
+    matlab_set_error_msg(msg, len);
+    return mat_alloc(0, 0);
+}
+
 } }  /* namespace matlab::runtime */
 
 #endif /* __cplusplus */

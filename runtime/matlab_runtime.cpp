@@ -232,17 +232,15 @@ matlab_mat *matlab_zeros(double m, double n) {
 
 matlab_mat *matlab_ones(double m, double n) {
     int64_t rm = (int64_t)m, cn = (int64_t)n;
-    matlab_mat *A = mat_alloc(rm, cn);
-    for (int64_t k = 0; k < rm * cn; ++k) A->data[k] = 1.0;
-    return A;
+    /* Phase-5: fill_mat collapses the alloc-then-loop boilerplate. */
+    return matlab::runtime::fill_mat(rm, cn,
+        [](int64_t, int64_t) { return 1.0; }).release();
 }
 
 matlab_mat *matlab_eye(double m, double n) {
     int64_t rm = (int64_t)m, cn = (int64_t)n;
-    matlab_mat *A = mat_alloc(rm, cn);
-    int64_t d = rm < cn ? rm : cn;
-    for (int64_t i = 0; i < d; ++i) A->data[i * cn + i] = 1.0;
-    return A;
+    return matlab::runtime::fill_mat(rm, cn,
+        [](int64_t i, int64_t j) { return (i == j) ? 1.0 : 0.0; }).release();
 }
 
 /* Siamese method for odd-order magic squares. For even n we fall back to a
@@ -1141,19 +1139,18 @@ matlab_mat *matlab_sortrows(matlab_mat *A) {
  * flip family; rot90.
  *------------------------------------------------------------------*/
 
+/* Phase-4: horzcat/vertcat adopt MatPtr for RAII consistency. */
 matlab_mat *matlab_horzcat(matlab_mat *A, matlab_mat *B) {
     if (!A) return B;
     if (!B) return A;
     if (A->rows != B->rows) return mat_alloc(0, 0);
     int64_t m = A->rows, na = A->cols, nb = B->cols;
-    matlab_mat *R = mat_alloc(m, na + nb);
-    for (int64_t i = 0; i < m; ++i) {
-        for (int64_t j = 0; j < na; ++j)
-            R->data[i * (na + nb) + j] = A->data[i * na + j];
-        for (int64_t j = 0; j < nb; ++j)
-            R->data[i * (na + nb) + na + j] = B->data[i * nb + j];
-    }
-    return R;
+    matlab_mat *_a = A, *_b = B;
+    return matlab::runtime::shape_op(m, na + nb,
+        [&](int64_t i, int64_t j) {
+            return j < na ? _a->data[i * na + j]
+                          : _b->data[i * nb + (j - na)];
+        }).release();
 }
 
 matlab_mat *matlab_vertcat(matlab_mat *A, matlab_mat *B) {
@@ -1161,10 +1158,10 @@ matlab_mat *matlab_vertcat(matlab_mat *A, matlab_mat *B) {
     if (!B) return A;
     if (A->cols != B->cols) return mat_alloc(0, 0);
     int64_t n = A->cols, ma = A->rows, mb = B->rows;
-    matlab_mat *R = mat_alloc(ma + mb, n);
-    memcpy(R->data, A->data, (size_t)(ma * n) * sizeof(double));
-    memcpy(R->data + ma * n, B->data, (size_t)(mb * n) * sizeof(double));
-    return R;
+    matlab::runtime::MatPtr R = matlab::runtime::make_mat(ma + mb, n);
+    memcpy(R->data,            A->data, (size_t)(ma * n) * sizeof(double));
+    memcpy(R->data + ma * n,   B->data, (size_t)(mb * n) * sizeof(double));
+    return R.release();
 }
 
 /* permute(A, [p1 p2]) for 2-D matrices. p = [1 2] is identity;
@@ -3083,20 +3080,18 @@ double matlab_trace(matlab_mat *A) {
 
 /* kron(A, B): Kronecker product. Result is (Am*Bm) x (An*Bn) and
  * the (i*Bm+p, j*Bn+q) entry is A[i,j] * B[p,q]. */
+/* Phase-5: 4-deep loop collapses to a shape_op lambda. R[r, c] indexes
+ * back into A[r/bm, c/bn] * B[r%bm, c%bn] — the canonical Kronecker
+ * product in 2-D. */
 matlab_mat *matlab_kron(matlab_mat *A, matlab_mat *B) {
     if (!A || !B) return mat_alloc(0, 0);
     int64_t am = A->rows, an = A->cols;
     int64_t bm = B->rows, bn = B->cols;
-    matlab_mat *R = mat_alloc(am * bm, an * bn);
-    for (int64_t i = 0; i < am; ++i)
-        for (int64_t p = 0; p < bm; ++p)
-            for (int64_t j = 0; j < an; ++j)
-                for (int64_t q = 0; q < bn; ++q) {
-                    double av = A->data[i * an + j];
-                    double bv = B->data[p * bn + q];
-                    R->data[(i * bm + p) * (an * bn) + (j * bn + q)] = av * bv;
-                }
-    return R;
+    return matlab::runtime::shape_op(am * bm, an * bn,
+        [&](int64_t r, int64_t c) {
+            return A->data[(r / bm) * an + (c / bn)] *
+                   B->data[(r % bm) * bn + (c % bn)];
+        }).release();
 }
 
 /* conv(u, v) — full 1-D convolution. MATLAB treats u and v as vectors
@@ -3733,10 +3728,11 @@ matlab_mat *matlab_chol(matlab_mat *A) {
                 s -= R->data[k * n + i] * R->data[k * n + j];
             if (i == j) {
                 if (s <= 0.0) {
-                    /* Not SPD — zero out and bail out. */
-                    for (int64_t k = 0; k < n * n; ++k) R->data[k] = 0.0;
-                    matlab_set_error_msg("chol: matrix is not positive definite", 38);
-                    return R.release();
+                    /* Not SPD — Phase-6 helper sets the runtime error
+                     * message + flag and returns a fresh empty matrix
+                     * (R is dropped via MatPtr's destructor). */
+                    return matlab::runtime::fail_with_msg(
+                        "chol: matrix is not positive definite", 38);
                 }
                 R->data[i * n + j] = sqrt(s);
             } else {
