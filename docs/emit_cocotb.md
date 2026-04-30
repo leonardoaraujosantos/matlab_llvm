@@ -54,7 +54,8 @@ two emissions, one harness.
 matlabc -emit-cocotb FILE.m \
     [-cocotb-out=DIR] \
     [-cocotb-vectors=N] \
-    [-cocotb-latency=L]
+    [-cocotb-latency=L] \
+    [-cocotb-seed=N]
 ```
 
 | Flag | Default | Meaning |
@@ -130,8 +131,8 @@ output ... (same forms)
 
 Synthetic `clk` / `rst_n` are filtered into a `Sequential` flag
 rather than appearing as harness-driven INPUTS. Vector / unpacked-
-array ports (`logic ... [N]`) currently short-circuit harness
-generation with a clear diagnostic.
+array ports (`logic ... [N]`) capture the array length and are
+driven element-by-element via `dut.<name>[k].value` (v3.3).
 
 ### `cocotb_fi.py` — fi pack / unpack
 
@@ -449,20 +450,231 @@ random / tester vectors actually exercised. Sample output:
        ...
 ```
 
-### v3.8 — Multi-clock testbenches 🔵
+### v3.8 — Multi-clock testbenches 🔵 (deferred — see scope below)
 
-**Problem.** Today the harness assumes a single `clk` input. The SV
-backend doesn't currently emit multi-clock designs, but if it ever
-does (CDC support, async-FIFO style modules), the harness needs to
-match.
+**Status.** Deferred. The cocotb harness today assumes a single
+`clk` / `rst_n` pair. Multi-clock support is meaningful only once
+the upstream `-emit-systemverilog` backend produces multi-clock
+designs and the MATLAB source language has a way to express them.
+Both are missing today; this section scopes the cross-cutting
+work needed end-to-end so the right pieces ship together when a
+real user need surfaces.
 
-**Plan.** Detect multiple `input logic clk_*` ports in the parsed
-SV port list and emit one `cocotb.start_soon(Clock(...))` per
-clock with configurable per-clock periods.
+#### What "multi-clock" actually means
 
-**Effort.** ~3 sessions. Deferred until a real user need —
-no current `examples/hdl/` module has multi-clock and the SV
-backend doesn't currently emit one.
+A multi-clock DUT has more than one independent clock signal,
+each driving its own register set (a "clock domain"). Typical
+shapes:
+
+- **CDC across distinct clocks.** Two functional units running on
+  unrelated clocks (a slow sensor capture domain at 100 MHz, a
+  fast DSP pipeline at 500 MHz). Cross-domain signals need
+  synchronizers.
+- **Multi-rate processing.** Decimation / interpolation filters
+  where input rate != output rate, expressed as different clock
+  periods on the same DUT.
+- **Async FIFO bridges.** Producer and consumer on different
+  clocks, FIFO with read / write pointers in their own domains
+  and gray-coded across.
+
+Each scenario has different verification needs. The cocotb
+harness side is the smallest piece; the real lift is in the
+language and SV backend.
+
+#### Layer 1 — MATLAB source language
+
+**Currently missing.** No way to express clock domains in MATLAB
+source today.
+
+**What's needed.**
+
+1. **Per-function clock declaration.** A `% hdl: clock(<name>,
+   <period_ns>)` pragma at the function level, repeatable. First
+   declaration is the primary clock; subsequent ones are
+   additional domains.
+
+   ```matlab
+   function y = foo(x_a, x_b)
+       %#codegen
+       % hdl: clock(clk_fast, 2)        # 500 MHz
+       % hdl: clock(clk_slow, 10)       # 100 MHz
+       % hdl: port(x_a, fi, signed, 16, 14)  % implicitly on clk_fast (default = primary)
+       % hdl: port(x_b, fi, signed, 16, 14, clock=clk_slow)
+       ...
+   ```
+
+2. **Per-persistent clock binding.** A `% hdl: clock_domain(<name>)`
+   on each `persistent` so the SV emit knows which `always_ff`
+   block latches it.
+
+   ```matlab
+   persistent fast_acc;
+   % hdl: clock_domain(clk_fast)
+   persistent slow_state;
+   % hdl: clock_domain(clk_slow)
+   ```
+
+3. **CDC marking.** A `% hdl: cdc(<src_clk>, <dst_clk>)` annotation
+   on cross-domain reads, driving the SV emit to insert a
+   double-flop synchronizer (or similar) at that crossing.
+
+**Effort.** ~2 sessions for the pragma surface + AST plumbing.
+Bigger lift is the type-system implication: every value carries
+an implicit clock-domain tag, and the inference rules need to
+catch unmarked CDC crossings as a synthesizability error.
+
+#### Layer 2 — SV backend (`-emit-systemverilog`)
+
+**Currently missing.** Single hardcoded `clk` / `rst_n`. Stage F
+(`LowerPersistentFiArrays`) and `HWStateInfer` produce one
+`always_ff @(posedge clk or negedge rst_n)` block.
+
+**What's needed.**
+
+1. **Per-domain register grouping.** Stage F + HWStateInfer pass
+   the clock-domain tag through and emit one `always_ff` per
+   distinct clock. Module port list gains one input per declared
+   clock (and optionally per-clock reset signals — async-low
+   default per the SV style guide).
+
+2. **Synchronizer cells.** For each `% hdl: cdc(...)` crossing,
+   emit a 2-flop synchronizer in the destination domain:
+
+   ```sv
+   logic sync_meta, sync_q;
+   always_ff @(posedge clk_dst or negedge rst_n_dst) begin
+     if (!rst_n_dst) begin sync_meta <= 0; sync_q <= 0; end
+     else            begin sync_meta <= signal_src; sync_q <= sync_meta; end
+   end
+   ```
+
+3. **Lint cleanliness.** `verilator --lint-only` rules tighten in
+   multi-clock designs (CLKDATA, MULTIDRIVEN, CMPCONST). The
+   golden-diff lane needs to keep passing once these emit.
+
+**Effort.** ~5 sessions. Touches every SV-emit pass that knows
+about clocks. The current single-clock assumption is baked into
+the reset arm logic, the FSM-encoding emit, and the
+`HWStateInfer` matcher.
+
+#### Layer 3 — Python reference (`-emit-python`)
+
+**Mostly OK as-is.** The Python reference already runs as a
+synchronous function call — cycle accuracy isn't a concept there.
+Each call advances all persistents, regardless of which "clock"
+they conceptually belong to.
+
+**What's needed for tight verification.**
+
+1. **Synchronizer modeling.** The reference needs to emit at
+   least a 2-cycle delay on signals tagged as CDC crossings, so
+   the harness comparison (DUT[k+L_dst] vs ref[k]) matches the
+   SV's synchronizer latency. Implementable as a per-CDC FIFO in
+   the emitted Python.
+
+2. **Optional: per-clock-domain stepping.** Instead of one ref
+   call per "compound cycle", the reference exposes
+   `step_clk_fast()` / `step_clk_slow()` so the harness can
+   simulate the actual interleaving. Heavier, only needed if
+   single-stepping isn't bit-exact (it isn't, in general).
+
+**Effort.** ~3 sessions for the synchronizer modeling. The
+per-clock stepping option doubles that and is probably not worth
+it before a real user case demands it.
+
+#### Layer 4 — Cocotb harness (`-emit-cocotb`)
+
+**Most of the work happens here, and most of it is already
+sketched.**
+
+1. **Clock detection in the SV port-list parser.** Today only
+   `clk` / `rst_n` are recognised. Extend to any input named
+   `clk*` (and `rst_n*` / `reset_n*`). Build a per-clock spec:
+   `(name, period_ns, reset_name)`.
+
+2. **Per-clock `Clock` instances.** One `cocotb.start_soon(
+   Clock(dut.<name>, <period>, "ns").start())` per detected
+   clock. Default period 10 ns; per-clock override via
+   `% cocotb: clock(<name>, <period_ns>)`.
+
+3. **Reset sequencing.** Hold each clock's reset low for 2 of its
+   own clock cycles, then deassert. Multi-clock systems may need
+   to coordinate reset deassertion across domains — typically
+   the slowest clock's deassertion is the synchronization
+   point.
+
+4. **Per-output clock binding.** Each output port carries its
+   "this signal is valid on posedge clk_<X>" tag. The harness
+   uses `await RisingEdge(dut.clk_<X>)` for that output's sample
+   window. Today the harness samples on the single `clk`'s
+   posedge for everything.
+
+5. **Per-clock latency.** The HDL Verifier-equivalent `Latency`
+   parameter becomes a map: `{clk_a: L_a, clk_b: L_b}`. CLI
+   form: `-cocotb-latency=clk_a:2,clk_b:1` (or repeated
+   `-cocotb-latency=clk_a:2 -cocotb-latency=clk_b:1`).
+
+6. **Frequency-ratio bookkeeping.** Cycles aren't 1:1 across
+   clocks. The harness's outer loop drives stimulus at the
+   rate of the slowest clock; faster clocks tick in between.
+   Sampling and reference advancement happen at slow-clock
+   posedges by default (override via pragma).
+
+**Effort.** ~3 sessions. Mostly mechanical once Layer 2
+provides multi-clock SV to parse against.
+
+#### Layer 5 — Verification methodology
+
+**The hardest piece, for the user.** Multi-clock equivalence
+between an SV DUT and a single-call Python reference isn't
+mechanical the way single-clock is. Even with synchronizer
+modeling, true async clocks have **timing nondeterminism** —
+the relative phase of the two clocks at simulation start
+affects which cycle a CDC sample lands. Verification flow
+options:
+
+1. **Constrained equivalence.** Drive both clocks at known
+   integer ratios (e.g., 2:1) with deterministic phase. The
+   reference walks at the slow rate; the harness samples
+   outputs at the slow-clock posedge. Easy to verify; doesn't
+   exercise the actual async behavior.
+
+2. **Bounded-skew sweep.** Run multiple phases of the fast
+   clock relative to the slow clock; assert all produce
+   semantically-equivalent output (allowing for +/- 1 cycle
+   slip on CDC paths). Closer to a real CDC test; expensive
+   and not bit-exact.
+
+3. **Formal CDC checking.** Out of scope for this harness —
+   would need a formal tool (JasperGold's CDC App, etc.).
+
+For the v3.8 "shipped" definition, **option 1 is the target.**
+Options 2 and 3 are explicitly "use a real verification
+toolchain".
+
+#### Trigger to ship
+
+v3.8 is reasonable to schedule when **any one** of the following
+becomes a real user need:
+
+- A user files a request with a multi-clock MATLAB program they
+  want to verify.
+- The roadmap picks up CDC-aware DSP examples (multi-rate FIR,
+  decimation, etc.).
+- The SV backend lands its own multi-clock support for an
+  unrelated reason (asic-flow improvements, formal lint
+  expansion).
+
+Until then, all the pieces above stay shipped-but-unwritten in
+their respective backends. The cost of building multi-clock
+without a real consumer is high — every layer's design choices
+get locked in by whatever first synthetic example we pick, and
+real users will want different shapes.
+
+**Total effort if all five layers ship together.** ~13 focused
+sessions (~3 weeks). The cocotb-harness slice (Layer 4) is a
+~3-session subset and could ship first as a forward-looking
+stub, but without Layers 1–2 it has nothing to test against.
 
 ### Out of scope (intentionally)
 
@@ -491,14 +703,29 @@ If you want to read the code:
   the SV port list, walks the module for the function-name match,
   renders the harness, and stages the output directory.
 - **Port-list parser** — `parseCocotbSpecFromSv()`. Pure text parser
-  on the SV file just emitted; ~80 lines.
+  on the SV file just emitted; ~100 lines including v3.3's
+  unpacked-array suffix capture.
+- **Pragma scanner** — `scanCocotbPragmas()`. Walks the source for
+  `% cocotb:` lines and returns the (name → `hold` cycles, name →
+  `stimulus` spec) maps. Extending the pragma surface (multi-clock
+  v3.8, future v3.9 items) starts here.
 - **Harness template** — `renderCocotbHarness()`. Plain
-  `std::string` concatenation; no template engine. Combinational vs
-  sequential branching is inline.
+  `std::string` concatenation; no template engine. Emits per-port
+  helper functions (`_drive` / `_read` / `_eq` / `_gen_random` /
+  `_stim_value`) plus the `_Coverage` class at the top so the
+  test body stays compact regardless of port shape.
+- **Tester-stimulus extractor** — `TesterStimulus::extract()`. AST
+  walks a sibling `test_<stem>.m`'s script body, evaluates the
+  recognised loop / single-call shapes, returns a flat list of
+  per-cycle input tuples. Returns `nullopt` when the tester uses
+  a shape outside the recognised set; caller falls back to random.
 - **fi helpers** — `runtime/cocotb_fi.py`, mirrored as the embedded
   string `kCocotbFiHelperPy` in `main.cpp`. The mirror is regenerated
   by hand when the canonical file changes; the embed exists so the
   harness directory is portable across machines.
+- **CI lane** — `test/EmitCocoTB/run_tests.sh` + `add_test(NAME
+  cocotb-tests ...)` in `CMakeLists.txt`. Skip-if-missing on
+  verilator / cocotb (returns 77, ctest's `Skipped` code).
 
 ---
 
