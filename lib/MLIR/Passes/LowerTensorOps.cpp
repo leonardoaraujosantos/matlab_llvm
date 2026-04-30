@@ -1318,7 +1318,8 @@ bool TensorLowering::rewriteBuiltinCalls() {
       mlir::Type VT = Val.getType();
       bool IsF64 = mlir::isa<mlir::Float64Type>(VT);
       bool IsPtr = mlir::isa<LLVM::LLVMPointerType>(VT);
-      if (!IsF64 && !IsPtr) continue; /* still none-typed, retry */
+      bool IsInt = mlir::isa<mlir::IntegerType>(VT);
+      if (!IsF64 && !IsPtr && !IsInt) continue; /* still none-typed, retry */
       bool IsObj = IsPtr && Call->hasAttr("matlab.class_id");
       int64_t Len = 0;
       Value Ptr = fieldNameAddr(NameV, Len);
@@ -1326,6 +1327,30 @@ bool TensorLowering::rewriteBuiltinCalls() {
       B.setInsertionPoint(Call);
       Value LenV = LLVM::ConstantOp::create(
           B, Call->getLoc(), I64, B.getI64IntegerAttr(Len));
+      /* Integer-typed mirror values (i1 from `r = age > 18`, i8/i16/i32
+       * from fixed-point or integer arith) don't have a dedicated
+       * runtime variant. Cast to f64 and reuse matlab_dbg_frame_set_f64
+       * — bool maps to 0.0/1.0, narrow ints round-trip exactly, i64
+       * loses precision past 2^53 but that's fine for a debug mirror.
+       * Without this, the matlab.call_builtin survives all subsequent
+       * passes and the func-to-llvm conversion fails on the residual
+       * matlab.const_char operand. Guarded by
+       * test/Debug/run_jit_userfn_tests.py (logical_return_gt_const). */
+      if (IsInt) {
+        auto IT = mlir::cast<mlir::IntegerType>(VT);
+        if (IT.getWidth() == 1) {
+          Value One = LLVM::ConstantOp::create(
+              B, Call->getLoc(), F64, B.getF64FloatAttr(1.0));
+          Value Zero = LLVM::ConstantOp::create(
+              B, Call->getLoc(), F64, B.getF64FloatAttr(0.0));
+          Val = LLVM::SelectOp::create(B, Call->getLoc(), Val, One, Zero);
+        } else if (IT.isSigned() || IT.isSignless()) {
+          Val = LLVM::SIToFPOp::create(B, Call->getLoc(), F64, Val);
+        } else {
+          Val = LLVM::UIToFPOp::create(B, Call->getLoc(), F64, Val);
+        }
+        IsF64 = true;
+      }
       const char *Callee = IsF64 ? "matlab_dbg_frame_set_f64"
                                  : (IsObj ? "matlab_dbg_frame_set_obj"
                                           : "matlab_dbg_frame_set_mat");
@@ -1377,11 +1402,34 @@ bool TensorLowering::rewriteBuiltinCalls() {
        * downgrade to set_mat even if the value is a generic ptr. */
       bool IsObj = (Name == "matlab_ws_set_obj");
       bool IsMat;
+      bool IsInt = mlir::isa<mlir::IntegerType>(Val.getType());
       if (IsObj) IsMat = true;
       else if (Val.getType() == PtrTy)      IsMat = true;
       else if (Val.getType() == F64)         IsMat = false;
-      else continue;   /* neither ptr nor f64 yet — wait for another iter */
+      else if (IsInt)                         IsMat = false;
+      else continue;   /* neither ptr nor f64 nor int yet — wait for another iter */
       if (IsObj && Val.getType() != PtrTy) continue; /* retry once Val lowers */
+      /* Cast int → f64 for the workspace mirror. Same logic as
+       * matlab_dbg_frame_set above: i1 from `x = age > 18` at script
+       * scope (REPL/DAP) needs to flow through matlab_ws_set_f64.
+       * Without this, the matlab.call_builtin would survive into
+       * func-to-llvm conversion and the JIT would refuse the module.
+       * Guarded by run_jit_userfn_tests.py (script_scope_bool_var). */
+      if (IsInt) {
+        auto IT = mlir::cast<mlir::IntegerType>(Val.getType());
+        B.setInsertionPoint(Call);
+        if (IT.getWidth() == 1) {
+          Value One = LLVM::ConstantOp::create(
+              B, Call->getLoc(), F64, B.getF64FloatAttr(1.0));
+          Value Zero = LLVM::ConstantOp::create(
+              B, Call->getLoc(), F64, B.getF64FloatAttr(0.0));
+          Val = LLVM::SelectOp::create(B, Call->getLoc(), Val, One, Zero);
+        } else if (IT.isSigned() || IT.isSignless()) {
+          Val = LLVM::SIToFPOp::create(B, Call->getLoc(), F64, Val);
+        } else {
+          Val = LLVM::UIToFPOp::create(B, Call->getLoc(), F64, Val);
+        }
+      }
       /* Call fieldNameAddr AFTER the Val type check. fieldNameAddr
        * has a side effect (materialises a global + addressof and
        * replaces the const_char's uses with the addressof); once
@@ -1950,6 +1998,9 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"ifft",       "matlab_ifft_c",     1, "p"},
       {"fft2",       "matlab_fft2_c",     1, "p"},
       {"ifft2",      "matlab_ifft2_c",    1, "p"},
+      /* Convolution. Both operands are matrices (vector layout for conv). */
+      {"conv",       "matlab_conv",       1, "pp"},
+      {"conv2",      "matlab_conv2",      1, "pp"},
     };
 
     // Pick the first entry with name + arity + TYPE match so overloaded

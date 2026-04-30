@@ -312,6 +312,19 @@ if(MATLAB_LLVM_WITH_MLIR)
             $<TARGET_FILE:matlabc>
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Debug
   )
+  # JIT/static parity: every shape that the static -emit-* paths
+  # accept must also compile cleanly through `matlabc -dap` (which
+  # JITs via mlir::ExecutionEngine + DebugMode mirror calls). Covers
+  # the matrix of user-function shapes (logical return, recursive,
+  # void, multi-return, ...) and end-to-end DAP runs of every program
+  # in examples/mflow/. Guards the regression where the JIT silently
+  # bailed on programs whose user functions returned/mirrored an i1.
+  add_test(
+    NAME debug-dap-jit-userfn-tests
+    COMMAND python3 ${CMAKE_SOURCE_DIR}/test/Debug/run_jit_userfn_tests.py
+            $<TARGET_FILE:matlabc>
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Debug
+  )
   # SystemVerilog emission shape test (Phase 1 scope, ASIC target).
   # Diffs the emitted .sv against per-input goldens and — when
   # Verilator is on PATH — runs `verilator --lint-only -Wall` on each
