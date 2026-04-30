@@ -117,6 +117,7 @@ Initial cut landed alongside Phase 0. Five C harnesses live under
 | `test/Runtime/test_signal.c`  | Tier-1/2: `conv`, `conv2`, `filter`, `xcorr`, `fftshift`, `ifftshift`, `hamming`, `hann`, `blackman`, `upsample`, `downsample`, `diff` — 102 assertions |
 | `test/Runtime/test_stats.c`   | Tier-1/2: `any`, `all`, `tril`, `triu`, `std`, `var`, `median`, `meshgrid`, `ndgrid`, `polyval`, `polyfit`, `roots`, `interp1`, `interp2`, `trapz`, `cumtrapz`, `gradient` — 75 assertions |
 | `test/Runtime/test_image.c`   | Tier-3: `imfilter`, `padarray`, `rank`, `cond`, `null`, `orth` — 30 assertions |
+| `test/Runtime/test_more.c`    | Phase-4-touched + 0%-allocator catch-up: `chol`, `lu_L`, `lu_U`, `qr_Q`, `qr_R`, `pinv`, `kron`, `intersect`, `union`, `setdiff`, `repmat`, `linspace`, `find`, `horzcat`, `vertcat`, `squeeze`, `slice2`, `matpow` — 67 assertions |
 
 CMake glue is the `foreach(_rt_test IN ITEMS linalg shape rng complex
 reduce signal stats image)` block in `CMakeLists.txt`, which compiles
@@ -363,7 +364,7 @@ with no typed-cast / VLA / designated-init fixups required.
 
 ---
 
-## Phase 4 — RAII for the array/struct/cell handles — **in progress (exemplar shipped)**
+## Phase 4 — RAII for the array/struct/cell handles — **in progress (linalg + Tier-1/2/3 sweep landed)**
 
 The first migration landed as a named exemplar: **`matlab_inv`** in
 `runtime/matlab_runtime.cpp`. The smart-pointer types and the
@@ -426,20 +427,33 @@ the public ABI is byte-identical (`work.release()` returns the same
 
 **What's left for Phase 4 sweep.**
 
-The runtime today has 178 manual `malloc`/`free` calls and 189
-alloc/free pair sites. Migrating them in priority order:
+The runtime today had 178 manual `malloc`/`free` calls and 189
+alloc/free pair sites at the start of the project. After this round
+the linalg core, the polynomial / numeric-calculus tail, and the
+set/sort scratch users are migrated:
 
 1. ✅ `matlab_inv` (linalg exemplar)
-2. ⏭ `matlab_mldivide_mm`, `matlab_mrdivide_mm` (same LU machinery,
-   identical scratch shape)
-3. ⏭ `matlab_svd`, `matlab_eig`, `matlab_eig_V`, `matlab_eig_D` —
-   the heaviest scratch users
-4. ⏭ `matlab_chol`, `matlab_pinv`, `matlab_lu_L`, `matlab_lu_U`,
-   `matlab_qr_Q`, `matlab_qr_R`
-5. ⏭ Tier-1/2/3 routines that allocate scratch buffers (`filter`,
-   `polyfit`, `roots`, `interp1`, `trapz`, `gradient`, `imfilter`)
+2. ✅ `matlab_mldivide_mm` (same LU machinery; `mrdivide` reuses it)
+3. ✅ `matlab_svd`, `matlab_eig`, `matlab_eig_V`, `matlab_eig_D`,
+   `jacobi_sym` — heaviest scratch users
+4. ✅ `matlab_chol`, `matlab_lu_L`, `matlab_lu_U`, `matlab_qr_Q`,
+   `matlab_qr_R`. `matlab_pinv` builds on `matmul`/`inv` so it gains
+   leak-free behaviour transitively.
+5. ✅ Tier-1/2/3 scratch users: `matlab_filter`, `matlab_polyfit`,
+   `matlab_roots`, `matlab_median`, `matlab_trapz`, `matlab_trapz_xy`,
+   `matlab_gradient`, `set_op` (drives `setdiff`/`intersect`/`union`).
 6. ⏭ Complex / FFT family (`matlab_fft_c`, `matlab_fft2_c`,
-   `fft_radix2_inplace`, `fft_bluestein`)
+   `fft_radix2_inplace`, `fft_bluestein`) — still on raw `malloc`.
+7. ⏭ Misc: `matlab_kron`, `matlab_repmat`, `matlab_horzcat`,
+   `matlab_vertcat`, `matlab_permute`, `matlab_squeeze` — these
+   currently use only `mat_alloc` (no scratch buffers), so the
+   migration there is purely cosmetic. Defer until Phase 5
+   shape-op-template lands.
+
+Per-turn migration tally: ~24 manual `malloc`/`free` pairs eliminated
+across 13 functions in this round. Combined with the prior `matlab_inv`
+exemplar that's about 28 of the 178 manual calls retired (~16%),
+focused on the highest-traffic numerical paths.
 
 Each migration follows the `matlab_inv` template — replace
 `malloc`/`free` pairs with `std::vector` for raw scratch and `MatPtr`

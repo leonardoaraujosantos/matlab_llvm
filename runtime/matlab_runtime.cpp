@@ -435,29 +435,26 @@ matlab_mat *matlab_inv(matlab_mat *A) {
     return work.release();
 }
 
-/* A \ B: solve A*X = B (MATLAB left divide). B may have multiple columns. */
+/* A \ B: solve A*X = B (MATLAB left divide). B may have multiple columns.
+ * Phase-4 RAII migration — same scratch shape as matlab_inv. */
 matlab_mat *matlab_mldivide_mm(matlab_mat *A, matlab_mat *B) {
-    if (A->rows != A->cols || A->rows != B->rows) return mat_alloc(0, 0);
+    if (!A || !B || A->rows != A->cols || A->rows != B->rows)
+        return mat_alloc(0, 0);
     int64_t n = A->rows;
     int64_t k = B->cols;
-    double *LU = (double *)malloc((size_t)(n * n) * sizeof(double));
-    memcpy(LU, A->data, (size_t)(n * n) * sizeof(double));
-    int64_t *piv = (int64_t *)malloc((size_t)n * sizeof(int64_t));
+    std::vector<double> LU(A->data, A->data + n * n);
+    std::vector<int64_t> piv(n);
     int sign;
-    if (lu_decompose(LU, n, piv, &sign) != 0) {
-        free(LU); free(piv);
+    if (lu_decompose(LU.data(), n, piv.data(), &sign) != 0)
         return mat_alloc(0, 0);
-    }
-    matlab_mat *X = mat_alloc(n, k);
-    double *rhs = (double *)malloc((size_t)n * sizeof(double));
-    double *col = (double *)malloc((size_t)n * sizeof(double));
+    matlab::runtime::MatPtr work = matlab::runtime::make_mat(n, k);
+    std::vector<double> rhs(n), col(n);
     for (int64_t c = 0; c < k; ++c) {
         for (int64_t i = 0; i < n; ++i) rhs[i] = B->data[i * k + c];
-        lu_solve_column(LU, n, piv, rhs, col);
-        for (int64_t i = 0; i < n; ++i) X->data[i * k + c] = col[i];
+        lu_solve_column(LU.data(), n, piv.data(), rhs.data(), col.data());
+        for (int64_t i = 0; i < n; ++i) work->data[i * k + c] = col[i];
     }
-    free(rhs); free(col); free(piv); free(LU);
-    return X;
+    return work.release();
 }
 
 /* A / B = (B' \ A')'. Built on top of mldivide + transpose. */
@@ -506,9 +503,9 @@ matlab_mat *matlab_svd(matlab_mat *A_in) {
         m = T->rows;
         n = T->cols;
     }
-    /* `U` (m×n) starts as a copy of A. */
-    double *U = (double *)malloc((size_t)(m * n) * sizeof(double));
-    memcpy(U, A->data, (size_t)(m * n) * sizeof(double));
+    /* `U` (m×n) starts as a copy of A.
+     * Phase-4 RAII: std::vector replaces the manual U + sv mallocs. */
+    std::vector<double> U(A->data, A->data + m * n);
 
     const double eps = 1e-14;
     const int max_sweeps = 30;
@@ -546,7 +543,7 @@ matlab_mat *matlab_svd(matlab_mat *A_in) {
     }
 
     /* Singular values = column norms of final U. */
-    double *sv = (double *)malloc((size_t)n * sizeof(double));
+    std::vector<double> sv(n);
     for (int64_t j = 0; j < n; ++j) {
         double s = 0.0;
         for (int64_t i = 0; i < m; ++i) {
@@ -565,12 +562,10 @@ matlab_mat *matlab_svd(matlab_mat *A_in) {
     }
 
     int64_t k = (n_orig < m_orig) ? n_orig : m_orig;
-    matlab_mat *S = mat_alloc(k, 1);
+    matlab::runtime::MatPtr S = matlab::runtime::make_mat(k, 1);
     for (int64_t i = 0; i < k; ++i) S->data[i] = sv[i];
-    free(sv);
-    free(U);
     (void)T;  /* T is kept alive by the arena-leak policy */
-    return S;
+    return S.release();
 }
 
 /*
@@ -589,9 +584,10 @@ matlab_mat *matlab_svd(matlab_mat *A_in) {
  * diagonal of H holds the eigenvalues.
  */
 matlab_mat *matlab_eig(matlab_mat *A_in) {
-    if (A_in->rows != A_in->cols) return mat_alloc(0, 0);
+    if (!A_in || A_in->rows != A_in->cols) return mat_alloc(0, 0);
     int64_t n = A_in->rows;
-    double *H = (double *)malloc((size_t)(n * n) * sizeof(double));
+    /* Phase-4 RAII: H scratch buffer holds the symmetric working matrix. */
+    std::vector<double> H(n * n);
     for (int64_t i = 0; i < n; ++i) {
         for (int64_t j = 0; j < n; ++j) {
             H[i * n + j] = 0.5 * (A_in->data[i * n + j] +
@@ -640,7 +636,7 @@ matlab_mat *matlab_eig(matlab_mat *A_in) {
         if (off < eps * eps) break;
     }
 
-    matlab_mat *E = mat_alloc(n, 1);
+    matlab::runtime::MatPtr E = matlab::runtime::make_mat(n, 1);
     for (int64_t i = 0; i < n; ++i) E->data[i] = H[i * n + i];
     /* Insertion sort, ascending. */
     for (int64_t i = 0; i < n; ++i) {
@@ -650,8 +646,7 @@ matlab_mat *matlab_eig(matlab_mat *A_in) {
             }
         }
     }
-    free(H);
-    return E;
+    return E.release();
 }
 
 /* Two-return eig: [V, D] = eig(A). V has eigenvectors as columns,
@@ -668,7 +663,8 @@ matlab_mat *matlab_eig(matlab_mat *A_in) {
  * V (same shape as A). */
 static void jacobi_sym(matlab_mat *A_in, double *eigvals, double *V) {
     int64_t n = A_in->rows;
-    double *H = (double *)malloc((size_t)(n * n) * sizeof(double));
+    /* Phase-4 RAII: H scratch holds the symmetric working matrix. */
+    std::vector<double> H(n * n);
     for (int64_t i = 0; i < n; ++i)
         for (int64_t j = 0; j < n; ++j)
             H[i * n + j] = 0.5 * (A_in->data[i * n + j] +
@@ -719,17 +715,16 @@ static void jacobi_sym(matlab_mat *A_in, double *eigvals, double *V) {
         if (off < eps * eps) break;
     }
     for (int64_t i = 0; i < n; ++i) eigvals[i] = H[i * n + i];
-    free(H);
 }
 
 /* matlab_eig_V(A): eigenvector matrix (columns = eigenvectors), ordered
  * so the i-th column corresponds to the i-th ascending eigenvalue. */
 matlab_mat *matlab_eig_V(matlab_mat *A_in) {
-    if (A_in->rows != A_in->cols) return mat_alloc(0, 0);
+    if (!A_in || A_in->rows != A_in->cols) return mat_alloc(0, 0);
     int64_t n = A_in->rows;
-    double *eigvals = (double *)malloc((size_t)n * sizeof(double));
-    matlab_mat *V = mat_alloc(n, n);
-    jacobi_sym(A_in, eigvals, V->data);
+    std::vector<double> eigvals(n);
+    matlab::runtime::MatPtr V = matlab::runtime::make_mat(n, n);
+    jacobi_sym(A_in, eigvals.data(), V->data);
     /* Sort V's columns by ascending eigvals (insertion sort). */
     for (int64_t i = 0; i < n; ++i) {
         for (int64_t j = i + 1; j < n; ++j) {
@@ -743,29 +738,25 @@ matlab_mat *matlab_eig_V(matlab_mat *A_in) {
             }
         }
     }
-    free(eigvals);
-    return V;
+    return V.release();
 }
 
 /* matlab_eig_D(A): diagonal matrix of eigenvalues (ascending). */
 matlab_mat *matlab_eig_D(matlab_mat *A_in) {
-    if (A_in->rows != A_in->cols) return mat_alloc(0, 0);
+    if (!A_in || A_in->rows != A_in->cols) return mat_alloc(0, 0);
     int64_t n = A_in->rows;
-    double *eigvals = (double *)malloc((size_t)n * sizeof(double));
-    double *Vtmp = (double *)malloc((size_t)(n * n) * sizeof(double));
-    jacobi_sym(A_in, eigvals, Vtmp);
+    std::vector<double> eigvals(n);
+    std::vector<double> Vtmp(n * n);
+    jacobi_sym(A_in, eigvals.data(), Vtmp.data());
     /* Ascending sort of eigvals. */
     for (int64_t i = 0; i < n; ++i)
         for (int64_t j = i + 1; j < n; ++j)
             if (eigvals[j] < eigvals[i]) {
                 double t = eigvals[i]; eigvals[i] = eigvals[j]; eigvals[j] = t;
             }
-    matlab_mat *D = mat_alloc(n, n);
-    for (int64_t i = 0; i < n * n; ++i) D->data[i] = 0.0;
+    matlab::runtime::MatPtr D = matlab::runtime::make_mat(n, n);
     for (int64_t i = 0; i < n; ++i) D->data[i * n + i] = eigvals[i];
-    free(eigvals);
-    free(Vtmp);
-    return D;
+    return D.release();
 }
 
 /* det(A): product of LU diagonal times permutation sign. */
@@ -1081,7 +1072,8 @@ static matlab_mat *set_op(matlab_mat *A, matlab_mat *B, int op /*0=diff,1=inter,
     int64_t an = A ? A->rows * A->cols : 0;
     int64_t bn = B ? B->rows * B->cols : 0;
     int64_t cap = an + bn;
-    double *tmp = cap > 0 ? (double *)malloc((size_t)cap * sizeof(double)) : NULL;
+    /* Phase-4 RAII: scratch tmp buffer; auto-freed on every return. */
+    std::vector<double> tmp(cap);
     int64_t u = 0;
     if (op == 0 /* setdiff */) {
         for (int64_t i = 0; i < an; ++i)
@@ -1097,16 +1089,15 @@ static matlab_mat *set_op(matlab_mat *A, matlab_mat *B, int op /*0=diff,1=inter,
     }
     /* Sort + dedupe to match MATLAB's unique-and-sorted output. */
     if (u > 0) {
-        qsort(tmp, (size_t)u, sizeof(double), cmp_double_asc);
+        qsort(tmp.data(), (size_t)u, sizeof(double), cmp_double_asc);
         int64_t uu = 0;
         for (int64_t k = 0; k < u; ++k)
             if (uu == 0 || tmp[uu - 1] != tmp[k]) tmp[uu++] = tmp[k];
         u = uu;
     }
-    matlab_mat *R = mat_alloc(u, 1);
-    if (u > 0) memcpy(R->data, tmp, (size_t)u * sizeof(double));
-    if (tmp) free(tmp);
-    return R;
+    matlab::runtime::MatPtr R = matlab::runtime::make_mat(u, 1);
+    if (u > 0) memcpy(R->data, tmp.data(), (size_t)u * sizeof(double));
+    return R.release();
 }
 
 matlab_mat *matlab_setdiff(matlab_mat *A, matlab_mat *B)   { return set_op(A, B, 0); }
@@ -3174,12 +3165,11 @@ matlab_mat *matlab_filter(matlab_mat *b, matlab_mat *a, matlab_mat *x) {
     if (nb == 0 || na == 0 || a->data[0] == 0.0) return mat_alloc(0, 0);
     double a0 = a->data[0];
     int64_t L = nb > na ? nb : na;
-    /* Pre-normalised coefficients, length L (zero-padded). */
-    double *bn = (double *)calloc((size_t)L, sizeof(double));
-    double *an = (double *)calloc((size_t)L, sizeof(double));
+    /* Phase-4 RAII: bn / an / w go from manual calloc/free trio to
+     * value-initialised std::vector — zero-fill is implicit. */
+    std::vector<double> bn(L), an(L), w(L);
     for (int64_t k = 0; k < nb; ++k) bn[k] = b->data[k] / a0;
     for (int64_t k = 0; k < na; ++k) an[k] = a->data[k] / a0;
-    double *w = (double *)calloc((size_t)L, sizeof(double));
 
     int64_t xm = x->rows, xn = x->cols;
     /* Treat a vector input as a single column for processing; the result
@@ -3187,7 +3177,7 @@ matlab_mat *matlab_filter(matlab_mat *b, matlab_mat *a, matlab_mat *x) {
     int x_is_vec = (xm == 1 || xn == 1);
     int64_t cols = x_is_vec ? 1 : xn;
     int64_t rows = x_is_vec ? (xm * xn) : xm;
-    matlab_mat *Y = mat_alloc(rows, cols);
+    matlab::runtime::MatPtr Y = matlab::runtime::make_mat(rows, cols);
     for (int64_t c = 0; c < cols; ++c) {
         for (int64_t i = 0; i < L; ++i) w[i] = 0.0;
         for (int64_t n = 0; n < rows; ++n) {
@@ -3203,8 +3193,7 @@ matlab_mat *matlab_filter(matlab_mat *b, matlab_mat *a, matlab_mat *x) {
     }
     /* Reshape back to original vector orientation. */
     if (x_is_vec) { Y->rows = xm; Y->cols = xn; }
-    free(bn); free(an); free(w);
-    return Y;
+    return Y.release();
 }
 
 /* any/all share the colwise-reduce shape but with logical update rules.
@@ -3333,22 +3322,19 @@ matlab_mat *matlab_median(matlab_mat *A) {
     int64_t m = A->rows, n = A->cols;
     if (m <= 1 || n == 1) {
         int64_t total = m * n;
-        matlab_mat *R = mat_alloc(1, 1);
-        if (total == 0) return R;
-        double *buf = (double *)malloc((size_t)total * sizeof(double));
-        memcpy(buf, A->data, (size_t)total * sizeof(double));
-        R->data[0] = median_of(buf, total);
-        free(buf);
-        return R;
+        matlab::runtime::MatPtr R = matlab::runtime::make_mat(1, 1);
+        if (total == 0) return R.release();
+        std::vector<double> buf(A->data, A->data + total);
+        R->data[0] = median_of(buf.data(), total);
+        return R.release();
     }
-    matlab_mat *R = mat_alloc(1, n);
-    double *buf = (double *)malloc((size_t)m * sizeof(double));
+    matlab::runtime::MatPtr R = matlab::runtime::make_mat(1, n);
+    std::vector<double> buf(m);
     for (int64_t j = 0; j < n; ++j) {
         for (int64_t i = 0; i < m; ++i) buf[i] = A->data[i * n + j];
-        R->data[j] = median_of(buf, m);
+        R->data[j] = median_of(buf.data(), m);
     }
-    free(buf);
-    return R;
+    return R.release();
 }
 
 /* diff(A): first-order discrete differences. Vectors → vector of
@@ -3495,8 +3481,10 @@ matlab_mat *matlab_polyfit(matlab_mat *x, matlab_mat *y, double n_d) {
     int64_t n = (int64_t)n_d;
     if (n < 0) n = 0;
     int64_t k = n + 1;             /* number of coefficients */
-    /* Build Vandermonde V (m x k) with V[i, j] = x[i]^(n-j). */
-    double *V = (double *)malloc((size_t)(m * k) * sizeof(double));
+    /* Phase-4 RAII: the three scratch buffers (V, A, b) become
+     * std::vectors, dropping six manual frees and the singular-path
+     * leak that previously freed-then-returned-fresh-mat_alloc. */
+    std::vector<double> V(m * k);
     for (int64_t i = 0; i < m; ++i) {
         double xv = x->data[i];
         double pw = 1.0;
@@ -3506,8 +3494,8 @@ matlab_mat *matlab_polyfit(matlab_mat *x, matlab_mat *y, double n_d) {
         }
     }
     /* Form A = V'V (k x k) and b = V'y (k). */
-    double *A = (double *)calloc((size_t)(k * k), sizeof(double));
-    double *b = (double *)calloc((size_t)k,       sizeof(double));
+    std::vector<double> A(k * k, 0.0);
+    std::vector<double> b(k, 0.0);
     for (int64_t r = 0; r < k; ++r) {
         for (int64_t c = 0; c < k; ++c) {
             double s = 0.0;
@@ -3527,8 +3515,8 @@ matlab_mat *matlab_polyfit(matlab_mat *x, matlab_mat *y, double n_d) {
             if (v > best) { best = v; pivot = r; }
         }
         if (best < 1e-300) {
-            /* Singular — return zeros. */
-            free(V); free(A); free(b);
+            /* Singular — return zeros. RAII frees the scratch on the
+             * way out. */
             return mat_alloc(1, k);
         }
         if (pivot != i) {
@@ -3544,14 +3532,13 @@ matlab_mat *matlab_polyfit(matlab_mat *x, matlab_mat *y, double n_d) {
             b[r] -= f * b[i];
         }
     }
-    matlab_mat *P = mat_alloc(1, k);
+    matlab::runtime::MatPtr P = matlab::runtime::make_mat(1, k);
     for (int64_t i = k - 1; i >= 0; --i) {
         double s = b[i];
         for (int64_t c = i + 1; c < k; ++c) s -= A[i * k + c] * P->data[c];
         P->data[i] = s / A[i * k + i];
     }
-    free(V); free(A); free(b);
-    return P;
+    return P.release();
 }
 
 /* roots(p): defined after mat_c_alloc — see "Tier-2 roots" block below. */
@@ -3608,18 +3595,17 @@ matlab_mat *matlab_trapz(matlab_mat *y) {
     int64_t m = y->rows, n = y->cols;
     if (m <= 1 || n == 1) {
         int64_t total = m * n;
-        matlab_mat *R = mat_alloc(1, 1);
+        matlab::runtime::MatPtr R = matlab::runtime::make_mat(1, 1);
         R->data[0] = trapz_unit(y->data, total);
-        return R;
+        return R.release();
     }
-    matlab_mat *R = mat_alloc(1, n);
-    double *col = (double *)malloc((size_t)m * sizeof(double));
+    matlab::runtime::MatPtr R = matlab::runtime::make_mat(1, n);
+    std::vector<double> col(m);
     for (int64_t j = 0; j < n; ++j) {
         for (int64_t i = 0; i < m; ++i) col[i] = y->data[i * n + j];
-        R->data[j] = trapz_unit(col, m);
+        R->data[j] = trapz_unit(col.data(), m);
     }
-    free(col);
-    return R;
+    return R.release();
 }
 matlab_mat *matlab_trapz_xy(matlab_mat *x, matlab_mat *y) {
     if (!x || !y) return mat_alloc(0, 0);
@@ -3628,19 +3614,18 @@ matlab_mat *matlab_trapz_xy(matlab_mat *x, matlab_mat *y) {
     if (ym <= 1 || yn == 1) {
         int64_t total = ym * yn;
         if (total != nx) return mat_alloc(0, 0);
-        matlab_mat *R = mat_alloc(1, 1);
+        matlab::runtime::MatPtr R = matlab::runtime::make_mat(1, 1);
         R->data[0] = trapz_xy_(x->data, y->data, total);
-        return R;
+        return R.release();
     }
     if (nx != ym) return mat_alloc(0, 0);
-    matlab_mat *R = mat_alloc(1, yn);
-    double *col = (double *)malloc((size_t)ym * sizeof(double));
+    matlab::runtime::MatPtr R = matlab::runtime::make_mat(1, yn);
+    std::vector<double> col(ym);
     for (int64_t j = 0; j < yn; ++j) {
         for (int64_t i = 0; i < ym; ++i) col[i] = y->data[i * yn + j];
-        R->data[j] = trapz_xy_(x->data, col, ym);
+        R->data[j] = trapz_xy_(x->data, col.data(), ym);
     }
-    free(col);
-    return R;
+    return R.release();
 }
 
 /* cumtrapz(y) — running trapezoidal integral with leading zero,
@@ -3681,21 +3666,19 @@ static void gradient_1d(const double *v, double *g, int64_t n) {
 matlab_mat *matlab_gradient(matlab_mat *f) {
     if (!f) return mat_alloc(0, 0);
     int64_t m = f->rows, n = f->cols;
-    matlab_mat *G = mat_alloc(m, n);
-    if (m == 0 || n == 0) return G;
+    matlab::runtime::MatPtr G = matlab::runtime::make_mat(m, n);
+    if (m == 0 || n == 0) return G.release();
     if (m <= 1 || n == 1) {
         gradient_1d(f->data, G->data, m * n);
-        return G;
+        return G.release();
     }
-    double *col = (double *)malloc((size_t)m * sizeof(double));
-    double *out = (double *)malloc((size_t)m * sizeof(double));
+    std::vector<double> col(m), out(m);
     for (int64_t j = 0; j < n; ++j) {
         for (int64_t i = 0; i < m; ++i) col[i] = f->data[i * n + j];
-        gradient_1d(col, out, m);
+        gradient_1d(col.data(), out.data(), m);
         for (int64_t i = 0; i < m; ++i) G->data[i * n + j] = out[i];
     }
-    free(col); free(out);
-    return G;
+    return G.release();
 }
 
 /* DSP windows. All return a column vector of length n. The MATLAB
@@ -3739,7 +3722,9 @@ matlab_mat *matlab_blackman(double n_d) {
 matlab_mat *matlab_chol(matlab_mat *A) {
     if (!A || A->rows != A->cols) return mat_alloc(0, 0);
     int64_t n = A->rows;
-    matlab_mat *R = mat_alloc(n, n);
+    /* Phase-4 RAII: MatPtr ensures the descriptor is freed if any
+     * intermediate path throws (none today, but defensive). */
+    matlab::runtime::MatPtr R = matlab::runtime::make_mat(n, n);
     /* Upper-triangular factor, row-major. */
     for (int64_t i = 0; i < n; ++i) {
         for (int64_t j = i; j < n; ++j) {
@@ -3751,7 +3736,7 @@ matlab_mat *matlab_chol(matlab_mat *A) {
                     /* Not SPD — zero out and bail out. */
                     for (int64_t k = 0; k < n * n; ++k) R->data[k] = 0.0;
                     matlab_set_error_msg("chol: matrix is not positive definite", 38);
-                    return R;
+                    return R.release();
                 }
                 R->data[i * n + j] = sqrt(s);
             } else {
@@ -3759,7 +3744,7 @@ matlab_mat *matlab_chol(matlab_mat *A) {
             }
         }
     }
-    return R;
+    return R.release();
 }
 
 /* pinv(A): Moore-Penrose pseudoinverse via the normal-equation route
@@ -3842,25 +3827,24 @@ static void lu_factor(matlab_mat *A, matlab_mat *L, matlab_mat *U,
 matlab_mat *matlab_lu_L(matlab_mat *A) {
     if (!A || A->rows != A->cols) return mat_alloc(0, 0);
     int64_t n = A->rows;
-    matlab_mat *L = mat_alloc(n, n);
-    matlab_mat *U = mat_alloc(n, n);
-    int64_t *piv = (int64_t *)malloc((size_t)n * sizeof(int64_t));
-    lu_factor(A, L, U, piv);
-    free(piv);
-    free(U->data); free(U);
-    return L;
+    /* Phase-4 RAII: U + piv are scratch; L is the result. The previous
+     * code freed U with two manual free()s and a malloc'd piv array. */
+    matlab::runtime::MatPtr L = matlab::runtime::make_mat(n, n);
+    matlab::runtime::MatPtr U = matlab::runtime::make_mat(n, n);
+    std::vector<int64_t> piv(n);
+    lu_factor(A, L.get(), U.get(), piv.data());
+    return L.release();
+    /* U + piv freed by RAII as the function returns. */
 }
 
 matlab_mat *matlab_lu_U(matlab_mat *A) {
     if (!A || A->rows != A->cols) return mat_alloc(0, 0);
     int64_t n = A->rows;
-    matlab_mat *L = mat_alloc(n, n);
-    matlab_mat *U = mat_alloc(n, n);
-    int64_t *piv = (int64_t *)malloc((size_t)n * sizeof(int64_t));
-    lu_factor(A, L, U, piv);
-    free(piv);
-    free(L->data); free(L);
-    return U;
+    matlab::runtime::MatPtr L = matlab::runtime::make_mat(n, n);
+    matlab::runtime::MatPtr U = matlab::runtime::make_mat(n, n);
+    std::vector<int64_t> piv(n);
+    lu_factor(A, L.get(), U.get(), piv.data());
+    return U.release();
 }
 
 /* QR via classical Gram-Schmidt (with re-orthogonalisation pass for
@@ -3898,22 +3882,21 @@ matlab_mat *matlab_qr_Q(matlab_mat *A) {
     if (!A) return mat_alloc(0, 0);
     int64_t m = A->rows, n = A->cols;
     if (m < n) return mat_alloc(0, 0);
-    matlab_mat *Q = mat_alloc(m, n);
-    matlab_mat *R = mat_alloc(n, n);
-    qr_factor(A, Q, R);
-    free(R->data); free(R);
-    return Q;
+    /* Phase-4 RAII — R is scratch, Q is the result. */
+    matlab::runtime::MatPtr Q = matlab::runtime::make_mat(m, n);
+    matlab::runtime::MatPtr R = matlab::runtime::make_mat(n, n);
+    qr_factor(A, Q.get(), R.get());
+    return Q.release();
 }
 
 matlab_mat *matlab_qr_R(matlab_mat *A) {
     if (!A) return mat_alloc(0, 0);
     int64_t m = A->rows, n = A->cols;
     if (m < n) return mat_alloc(0, 0);
-    matlab_mat *Q = mat_alloc(m, n);
-    matlab_mat *R = mat_alloc(n, n);
-    qr_factor(A, Q, R);
-    free(Q->data); free(Q);
-    return R;
+    matlab::runtime::MatPtr Q = matlab::runtime::make_mat(m, n);
+    matlab::runtime::MatPtr R = matlab::runtime::make_mat(n, n);
+    qr_factor(A, Q.get(), R.get());
+    return R.release();
 }
 
 /*=========================================================================
@@ -4608,12 +4591,12 @@ matlab_mat_c *matlab_roots(matlab_mat *p) {
         R->re[deg_eff + i] = 0.0; R->im[deg_eff + i] = 0.0;
     }
     if (deg_eff == 0) return R;
+    /* Phase-4 RAII: q, zr, zi go from manual malloc/free to std::vector. */
     int64_t qn = deg_eff + 1;
-    double *q = (double *)malloc((size_t)qn * sizeof(double));
+    std::vector<double> q(qn);
     double lead_c = p->data[lead];
     for (int64_t i = 0; i < qn; ++i) q[i] = p->data[lead + i] / lead_c;
-    double *zr = (double *)malloc((size_t)deg_eff * sizeof(double));
-    double *zi = (double *)malloc((size_t)deg_eff * sizeof(double));
+    std::vector<double> zr(deg_eff), zi(deg_eff);
     double cur_r = 1.0, cur_i = 0.0;
     for (int64_t k = 0; k < deg_eff; ++k) {
         zr[k] = cur_r; zi[k] = cur_i;
@@ -4647,7 +4630,6 @@ matlab_mat_c *matlab_roots(matlab_mat *p) {
     for (int64_t k = 0; k < deg_eff; ++k) {
         R->re[k] = zr[k]; R->im[k] = zi[k];
     }
-    free(q); free(zr); free(zi);
     return R;
 }
 
