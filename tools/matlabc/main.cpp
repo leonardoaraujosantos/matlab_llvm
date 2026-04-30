@@ -20,6 +20,8 @@
 #include "mlir/IR/Diagnostics.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/IR/Location.h"
+
+#include <cerrno>
 /* MC layer for the DAP `disassemble` request — host-triple's
  * disassembler tables turn JIT-emitted bytes back into text
  * without a full lldb integration. */
@@ -1574,6 +1576,32 @@ struct Shared {
    * inside the wait window — without the counter we'd see paused
    * flip 1→0→1 and conclude the resume hadn't happened. */
   uint64_t ResumeGen = 0;
+  /* Serialise step requests against monitor delivery.
+   *
+   * StepsRequested counts step (next/stepIn/stepOut) requests
+   * issued by the server to the runtime. StopsEmitted counts
+   * `stopped` events the monitor has actually published to the
+   * client. The handler waits for StopsEmitted >= StepsRequested
+   * before bumping StepsRequested and issuing a new resume — this
+   * prevents back-to-back step clicks (faster than the worker can
+   * pause + the monitor can emit) from coalescing into fewer
+   * stops and leaving the IDE thinking the program is still
+   * running. Continue/pause/breakpoint stops bump StopsEmitted
+   * too; that is intentional and harmless (the handler condition
+   * is "monitor has caught up to my requests"). */
+  uint64_t StepsRequested = 0;
+  uint64_t StopsEmitted = 0;
+  /* Set by the monitor under G.Mu the moment it observes a pause
+   * (between exiting the outer wait and dispatching the stopped
+   * event), cleared after the stopped event has been sent and
+   * StopsEmitted bumped. The step handler's wait predicate also
+   * tests this flag, so a `next` arriving mid-delivery cannot
+   * race ahead of the monitor and resume the worker before the
+   * IDE has been told about the pause. Without this, the monitor
+   * would re-check is_paused() outside the lock, see 0 (because
+   * the racing handler had already resumed), and silently skip
+   * the stopped event — losing one step per race. */
+  bool MonitorBusy = false;
 };
 
 Shared G;
@@ -2450,9 +2478,16 @@ void *monitorMain(void *) {
     while (!G.WorkerExited && !matlab_dbg_is_paused())
       pthread_cond_wait(&G.Cv, &G.Mu);
     bool Exited = G.WorkerExited;
+    bool Paused = matlab_dbg_is_paused();
+    /* Claim the pause atomically: server-side step handlers gate on
+     * MonitorBusy in waitForStepReady, so once we set this flag no
+     * `next` can race ahead and resume the worker before we've
+     * sent the stopped event for the current pause. Set/cleared
+     * strictly under G.Mu — see the Shared::MonitorBusy comment. */
+    if (Paused && !Exited) G.MonitorBusy = true;
     pthread_mutex_unlock(&G.Mu);
 
-    if (matlab_dbg_is_paused()) {
+    if (Paused && !Exited) {
       int32_t Fid = 0, Ln = 0;
       matlab_dbg_get_pause(&Fid, &Ln);
       int BpIdx = matlab_dbg_get_pause_bp();
@@ -2489,6 +2524,10 @@ void *monitorMain(void *) {
           }
           matlab_dbg_resume(STEP_OVER);
           pthread_mutex_lock(&G.Mu);
+          /* No stopped event will fire for this auto-stepped pause,
+           * so clear MonitorBusy here — leaving it set would keep
+           * the server's waitForStepReady blocked forever. */
+          G.MonitorBusy = false;
           pthread_cond_broadcast(&G.Cv);
           pthread_mutex_unlock(&G.Mu);
           continue;
@@ -2541,6 +2580,10 @@ void *monitorMain(void *) {
         }
         matlab_dbg_resume(CONTINUE);
         pthread_mutex_lock(&G.Mu);
+        /* Suppressed pauses (logpoint, conditional-bp false) don't
+         * emit a stopped event — clear MonitorBusy here so the
+         * server's step waiters aren't held up indefinitely. */
+        G.MonitorBusy = false;
         pthread_cond_broadcast(&G.Cv);
         pthread_mutex_unlock(&G.Mu);
       } else {
@@ -2614,6 +2657,13 @@ void *monitorMain(void *) {
         }
         sendEvent("stopped", Value(std::move(Body)));
         pthread_mutex_lock(&G.Mu);
+        /* Mark the stop as delivered so any step handler that's
+         * blocked in waitForStepReady wakes up and proceeds. The
+         * counter is monotonic and cumulative across all stop
+         * sources (step / breakpoint / pause). */
+        G.StopsEmitted++;
+        G.MonitorBusy = false;
+        pthread_cond_broadcast(&G.Cv);
         while (G.ResumeGen == MyGen && !G.WorkerExited)
           pthread_cond_wait(&G.Cv, &G.Mu);
         pthread_mutex_unlock(&G.Mu);
@@ -4317,6 +4367,69 @@ bool handleRequest(const Object &Msg) {
     pthread_cond_broadcast(&G.Cv);
     pthread_mutex_unlock(&G.Mu);
   };
+
+  /* Serialise the next step request against the monitor's
+   * delivery of the *previous* step's `stopped` event.
+   *
+   * Why: the IDE may pipeline `next` clicks faster than the
+   * worker can pause + the monitor can emit a `stopped` event.
+   * Without serialisation, a second `next` arriving while the
+   * worker is still mid-step from the first issues a redundant
+   * `matlab_dbg_resume` (paused was already 0; no-op) but still
+   * bumps `ResumeGen`. The monitor's stopped/resume accounting
+   * drifts: fewer `stopped` events fire than the IDE expects,
+   * and the user sees "click Step Over a few times — eventually
+   * it stops pausing, I have to hit Pause manually."
+   *
+   * Fix: count step requests issued (`StepsRequested`) and
+   * stops the monitor has actually delivered (`StopsEmitted`).
+   * A new step request waits until `StopsEmitted` has caught up
+   * — i.e. the previous step's `stopped` event has been sent —
+   * before bumping its own counter and issuing the resume. One
+   * step request maps to exactly one `stopped` event.
+   *
+   * The pauseWatcher broadcasts `G.Cv` every 20 ms, so the wait
+   * also wakes promptly on pause-state transitions; the timeout
+   * is a safety bound for malformed sequences (e.g. a step
+   * issued against a worker that has already exited).
+   *
+   * Returns true if a step slot was acquired (the step handler
+   * should proceed); false if the worker exited or the wait
+   * timed out (the handler should bail with an error response). */
+  auto waitForStepReady = [](int timeoutMs = 5000) -> bool {
+    struct timespec deadline;
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    deadline.tv_sec += timeoutMs / 1000;
+    deadline.tv_nsec += (long)(timeoutMs % 1000) * 1000000L;
+    if (deadline.tv_nsec >= 1000000000L) {
+      deadline.tv_sec += 1;
+      deadline.tv_nsec -= 1000000000L;
+    }
+    pthread_mutex_lock(&G.Mu);
+    /* Invariant: at rest (between steps), StopsEmitted is exactly
+     * one more than StepsRequested — the +1 accounts for the
+     * stop that brought us back from the previous step (or the
+     * initial breakpoint / stopOnEntry stop). Waiting for
+     * `StopsEmitted > StepsRequested` ensures the monitor has
+     * delivered the stopped event for the previous step before
+     * we issue a new resume. Using `>` instead of `>=` is the
+     * difference between "this step has paused" and "the
+     * stopped event has actually been sent." */
+    while (!G.WorkerExited &&
+           (G.MonitorBusy ||
+            G.StopsEmitted <= G.StepsRequested ||
+            !matlab_dbg_is_paused())) {
+      int rc = pthread_cond_timedwait(&G.Cv, &G.Mu, &deadline);
+      if (rc == ETIMEDOUT) break;
+    }
+    bool ready = !G.WorkerExited &&
+                 !G.MonitorBusy &&
+                 G.StopsEmitted > G.StepsRequested &&
+                 matlab_dbg_is_paused();
+    if (ready) G.StepsRequested++;
+    pthread_mutex_unlock(&G.Mu);
+    return ready;
+  };
   /* --- Source / file inspection --------------------------------------- */
 
   if (*Cmd == "loadedSources") {
@@ -5304,6 +5417,12 @@ bool handleRequest(const Object &Msg) {
     return true;
   }
   if (*Cmd == "next") {
+    /* Serialise rapid-fire next clicks against monitor delivery
+     * so each click produces exactly one stopped event. See
+     * waitForStepReady above. If the wait fails (worker exited
+     * or timeout) we still send a success response — the IDE will
+     * notice via the missing stopped / via a `terminated` event. */
+    waitForStepReady();
     if (matlab_dbg_is_rewound()) {
       int32_t Fid = 0, Ln = 0;
       char Msg[256]; Msg[0] = '\0';
@@ -5341,6 +5460,8 @@ bool handleRequest(const Object &Msg) {
     return true;
   }
   if (*Cmd == "stepIn") {
+    /* See waitForStepReady above — same rationale as `next`. */
+    waitForStepReady();
     if (matlab_dbg_is_rewound()) {
       int32_t Fid = 0, Ln = 0;
       char Msg[256]; Msg[0] = '\0';
@@ -5369,6 +5490,8 @@ bool handleRequest(const Object &Msg) {
     return true;
   }
   if (*Cmd == "stepOut") {
+    /* See waitForStepReady above — same rationale as `next`. */
+    waitForStepReady();
     if (matlab_dbg_is_rewound()) {
       int32_t Fid = 0, Ln = 0;
       char Msg[256]; Msg[0] = '\0';

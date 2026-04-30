@@ -92,6 +92,60 @@ def scn_basic_breakpoint(matlabc, program):
         c.wait_event("terminated", timeout=5.0)
 
 
+def scn_rapid_fire_step_no_lost_stops(matlabc, program):
+    """N back-to-back `next` requests must produce N stopped events.
+
+    Regression: the IDE pipelines `next` clicks as the user presses
+    Step Over rapidly. Earlier the DAP server's step handler issued
+    matlab_dbg_resume + nudgeMonitor unconditionally — when a second
+    `next` arrived while the worker was still mid-step from the
+    first, the redundant resume was a no-op (paused=0 already) but
+    nudgeMonitor still bumped ResumeGen. The worker took ONE step;
+    the monitor's outer-wait re-check raced against the server's
+    resume of the next request and silently skipped the pause for
+    that step. Result: N nexts → N-1 (or fewer) stopped events,
+    visible to the user as "Step Over stopped pausing — I had to
+    hit Pause manually."
+
+    The fix tracks StepsRequested vs StopsEmitted under G.Mu plus a
+    MonitorBusy flag spanning the monitor's pause-detect →
+    sendEvent → StopsEmitted++ window. waitForStepReady gates new
+    step requests on `StopsEmitted > StepsRequested`, so each
+    request maps to exactly one stop.
+
+    This test sends 6 `next` frames back-to-back to the DAP server
+    without waiting for stopped between them, then asserts exactly
+    6 stopped events arrive.
+    """
+    import json as _json
+    with DapClient(matlabc, program) as c:
+        initialize_and_launch(c, stop_on_entry=True)
+        # Drain the entry stop.
+        _stop_event(c)
+        # Pipeline 6 next requests without inter-frame waits.
+        n = 6
+        for k in range(n):
+            msg = _json.dumps({"seq": 1000 + k, "type": "request",
+                                "command": "next",
+                                "arguments": {"threadId": 1}})
+            frame = ("Content-Length: " + str(len(msg)) +
+                     "\r\n\r\n" + msg).encode()
+            c.proc.stdin.write(frame)
+            c.proc.stdin.flush()
+        # Collect stops with a generous per-event timeout. Each next
+        # must produce one stop; the program (dap_program.m) has more
+        # than 6 hookable lines so we won't run off the end.
+        stops = 0
+        for _ in range(n):
+            body = _stop_event(c, timeout=4.0)
+            assert body.get("reason") in ("step", "breakpoint"), \
+                f"unexpected stop reason {body!r}"
+            stops += 1
+        assert stops == n, f"expected {n} stops, got {stops}"
+        c.request("continue")
+        c.wait_event("terminated", timeout=5.0)
+
+
 def scn_step_reason(matlabc, program):
     """Stepping must surface as reason='step', not 'breakpoint'.
 
