@@ -356,4 +356,15 @@ if(MATLAB_LLVM_WITH_MLIR)
             $<TARGET_FILE:matlabc>
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Debug
   )
+  # CocoTB co-simulation lane. Drives the SV DUT and the emitted
+  # Python reference in lockstep through every supported
+  # examples/hdl/*.m module and asserts bit-exact equivalence.
+  # Skip-if-missing on verilator / cocotb absence (rc=77).
+  add_test(
+    NAME cocotb-tests
+    COMMAND ${CMAKE_SOURCE_DIR}/test/EmitCocoTB/run_tests.sh
+            $<TARGET_FILE:matlabc>
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/EmitCocoTB
+  )
+  set_tests_properties(cocotb-tests PROPERTIES SKIP_RETURN_CODE 77)
 endif()

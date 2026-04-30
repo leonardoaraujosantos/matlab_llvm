@@ -63,6 +63,7 @@ matlabc -emit-cocotb FILE.m \
 | `-cocotb-out=DIR` | `<input-dir>/<stem>_cocotb` | Output directory. Created if missing. |
 | `-cocotb-vectors=N` | 100 | Number of random stimulus vectors driven. |
 | `-cocotb-latency=L` | 0 | Pipeline latency. DUT output at cycle `k+L` is compared against the reference's response to cycle `k`'s inputs. See [Pipeline latency](#pipeline-latency-cocotb-latencyl). |
+| `-cocotb-seed=N` | 42 | Seed for the harness's `random` calls. Override to explore different randomization schedules without editing the generated file. |
 
 ### Output directory layout
 
@@ -390,63 +391,63 @@ the same machinery:
   range. For ALU-style blocks this exercises every operand value
   the port can hold, complementing random testing.
 
-### v3.4 — Auto-detect pipeline latency 🔵
+### v3.4 — Pipeline-latency hint ✅ shipped
 
-**Problem.** Today the user has to know `L` per fixture (`L=2` for
-`fir_asic_pipelined`, `L=0` for everything else that passes).
-Mistakes silently produce mismatches.
+**Status.** Implemented as a soft hint. When the source has more
+than one `persistent` declaration and the user didn't pass
+`-cocotb-latency`, the matlabc emit message prints a one-line
+suggestion: `hint: <N> persistent decls — pipelined; if outputs
+are registered, try -cocotb-latency=<N-1>`.
 
-**Plan.** During the in-process module walk used to render the
-harness, count the longest persistent-update chain reaching each
-output — that's a tight upper bound on pipeline latency. Set the
-default `L` from that count when `-cocotb-latency` isn't passed
-explicitly. A diagnostic line in the matlabc emit message reports
-the inferred value so the user can override if it's wrong.
+The user still picks the right L explicitly. Inferring it
+precisely from MATLAB sources is harder than it looks (some
+DUTs have parallel non-pipelined persistents — counter, FSMs —
+where L=0 is correct despite having state); the hint nudges
+without overstepping. For the 8 fixtures this matches: counter
+(1 persistent → no hint, L=0 correct), fsm modules (1 → L=0),
+sequential_processor (1 surface persistent, but the FIR pipeline
+internally chains via the array — L=4 set by user via stimulus
+pragma), fir_asic_pipelined (4 persistents → hint suggests L=3,
+user knows L=2 is right for `ovfl`).
 
-**Effort.** ~1 session. Reuses the same pass that decides whether
-the DUT is sequential.
+### v3.5 — CI lane (`cocotb-tests`) ✅ shipped
 
-### v3.5 — CI lane (`cocotb-tests`) 🔵
+**Status.** Implemented. `ctest --test-dir build -R cocotb-tests`
+runs the sweep across every supported `examples/hdl/*.m` module
+and asserts each reports `TESTS=1 PASS=1 FAIL=0`. The lane is
+gated on `verilator` + `cocotb` being on `PATH`; missing either
+yields ctest's `Skipped` status (return code 77), matching how
+the emit-typescript lane handles a missing Node. Driver script:
+`test/EmitCocoTB/run_tests.sh`.
 
-**Problem.** No automatic regression check exists today. The user
-runs the sweep manually after changes.
+### v3.6 — `-cocotb-seed=N` knob ✅ shipped
 
-**Plan.** New ctest entry `cocotb-tests` that:
+**Status.** Implemented. `-cocotb-seed=N` plumbs through to
+`random.seed(N)` in the harness; default 42 keeps existing
+goldens byte-stable.
 
-1. Probes for `cocotb-config` and `verilator` on `PATH`.
-2. If either is missing, **skips** rather than fails (matches the
-   policy used for `emit-typescript` skips on platforms missing
-   Node).
-3. Otherwise runs `-emit-cocotb` + `make` for every supported
-   `examples/hdl/*.m` and asserts each prints `PASS=1 FAIL=0`.
+### v3.7 — Coverage report ✅ shipped
 
-**Effort.** ~1 session. Driver script in `test/EmitCocoTB/` mirroring
-the existing `test/EmitSV/` lane.
+**Status.** Implemented. The harness now writes `coverage.txt`
+to its own directory at the end of every run — best-effort, a
+write failure (read-only fs / permissions) doesn't fail the
+test. Per-port stats: count, min, max, mean. Narrow ports
+(WL ≤ 8 bits, e.g. mux selectors and FSM inputs) also include
+a value histogram so the user can see which input states the
+random / tester vectors actually exercised. Sample output:
 
-### v3.6 — `-cocotb-seed=N` knob 🔵
-
-**Problem.** The harness hard-codes `random.seed(42)`. Useful for
-reproducibility, but doesn't let the user explore different
-randomization schedules without editing the generated file.
-
-**Plan.** `-cocotb-seed=N` flag plumbed through to `random.seed(N)`
-in the harness. Default still 42 for byte-stable test output.
-
-**Effort.** ~15 minutes. Trivial.
-
-### v3.7 — Coverage report 🔵
-
-**Problem.** Pass / fail tells the user equality holds for the
-random vectors driven; it doesn't tell them which input ranges,
-state transitions, or output values were actually exercised.
-
-**Plan.** A second testbench helper that records per-cycle
-(input, output) tuples and prints a histogram-style summary at the
-end: input-range coverage per port, output-range coverage per port,
-and (for FSMs) state-transition coverage. Saves to a `coverage.txt`
-alongside the test results.
-
-**Effort.** ~2 sessions. Pure Python; no C++ changes.
+```
+## Inputs
+  a : signed 16 bits, FL=0
+    samples=100  min=-32134.0  max=32720.0  mean=2036.92
+  sel : unsigned 8 bits, FL=0
+    samples=100  min=1.0  max=255.0  mean=127.02
+    histogram:
+        1   1  #
+        2   1  #
+       12   2  ##
+       ...
+```
 
 ### v3.8 — Multi-clock testbenches 🔵
 
@@ -459,8 +460,9 @@ match.
 SV port list and emit one `cocotb.start_soon(Clock(...))` per
 clock with configurable per-clock periods.
 
-**Effort.** ~3 sessions. Needs SV emitter coordination on naming
-conventions.
+**Effort.** ~3 sessions. Deferred until a real user need —
+no current `examples/hdl/` module has multi-clock and the SV
+backend doesn't currently emit one.
 
 ### Out of scope (intentionally)
 

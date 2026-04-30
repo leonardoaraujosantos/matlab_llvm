@@ -17,6 +17,9 @@
 #include "matlab/MLIR/Passes/Passes.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/ExecutionEngine/ExecutionEngine.h"
+#include "mlir/IR/Diagnostics.h"
+#include "mlir/IR/MLIRContext.h"
+#include "mlir/IR/Location.h"
 /* MC layer for the DAP `disassemble` request — host-triple's
  * disassembler tables turn JIT-emitted bytes back into text
  * without a full lldb integration. */
@@ -171,6 +174,12 @@ struct Options {
   std::string CocotbOutDir;
   int CocotbVectors = 100;
   int CocotbLatency = 0;
+  /* Seed for the harness's `random.seed(...)` call. Default 42 so
+   * the harness output is byte-stable across runs (golden-diff
+   * friendly). User overrides via `-cocotb-seed=N` to explore
+   * different randomization schedules without editing the
+   * generated harness. */
+  int CocotbSeed = 42;
 };
 
 int usage(const char *Prog) {
@@ -231,6 +240,9 @@ bool parseArgs(int Argc, char **Argv, Options &Opts, const char *&Prog) {
         std::cerr << "-cocotb-latency must be a non-negative integer\n";
         return false;
       }
+    }
+    else if (A.size() > 13 && A.substr(0, 13) == "-cocotb-seed=") {
+      Opts.CocotbSeed = std::atoi(std::string(A.substr(13)).c_str());
     }
     else if (A == "-repl") Opts.Mode = Options::Mode::Repl;
     else if (A == "-format") Opts.Mode = Options::Mode::Format;
@@ -429,6 +441,13 @@ int runReplInput(mlirgen::Context &MCtx, const std::string &Src, int Id,
   mlirgen::runLowerFixedPoint(M);
   mlirgen::runLowerScalarsToArith(M);
   mlirgen::runSlotPromotion(M);
+  // Patch func.func signatures from refined return-op types so the
+  // verifier (and the func-to-llvm conversion) doesn't trip on user
+  // functions whose body now produces e.g. `i1` while the signature
+  // still declares `-> none`. The static -emit-* paths already run
+  // this; without it, JIT silently fails to convert any user function
+  // that returns a logical / boolean comparison. Idempotent.
+  mlirgen::runRefineFuncSigs(M);
   mlirgen::runOutlineParfor(M);
   mlirgen::runLowerSeqLoops(M);
   mlirgen::runLowerAnonCalls(M);
@@ -450,6 +469,12 @@ int runReplInput(mlirgen::Context &MCtx, const std::string &Src, int Id,
   mlirgen::runLowerFixedPoint(M);
   mlirgen::runLowerNarginNargout(M);
   mlirgen::runLowerScalarSlots(M);
+  // Final signature catch-up: late retypings (RefineSlotTypes /
+  // LowerScalarSlots) may have just rewritten call-site operand
+  // types; refresh func signatures + restamp stale func.call ops so
+  // the func-to-llvm conversion sees consistent types. Same as the
+  // static -emit-* pipeline.
+  mlirgen::runRefineFuncSigs(M);
   mlirgen::runLowerIO(M);
 
   if (mlir::failed(mlir::verify(M))) {
@@ -1684,6 +1709,21 @@ mlirgen::Context &sharedDapContext() {
   if (!Inited) {
     mlir::registerBuiltinDialectTranslation(Ctx.get());
     mlir::registerLLVMDialectTranslation(Ctx.get());
+    /* Without an explicit handler MLIR drops diagnostics on the floor,
+     * so a failed verification or conversion becomes a silent
+     * "failed to compile program" with an empty stderr. Forward every
+     * MLIR diagnostic to std::cerr so future regressions are
+     * actually debuggable. */
+    Ctx.get().getDiagEngine().registerHandler(
+        [](mlir::Diagnostic &D) {
+          std::cerr << "matlabc: ";
+          if (auto FLC = mlir::dyn_cast<mlir::FileLineColLoc>(D.getLocation()))
+            std::cerr << FLC.getFilename().str() << ':' << FLC.getLine()
+                      << ':' << FLC.getColumn() << ": ";
+          std::cerr << D.str() << '\n';
+          for (auto &N : D.getNotes()) std::cerr << "  note: " << N.str() << '\n';
+          return mlir::success();
+        });
     Inited = true;
   }
   return Ctx;
@@ -2234,7 +2274,6 @@ bool compileProgram() {
     return false;
   }
 
-
   mlirgen::runSlotPromotion(M);
   // Rewrite Fixed-Point Designer (`fi`) ops into integer-shift sequences
   // BEFORE the generic scalar-to-arith pass — otherwise the matlab.add /
@@ -2243,6 +2282,13 @@ bool compileProgram() {
   mlirgen::runLowerFixedPoint(M);
   mlirgen::runLowerScalarsToArith(M);
   mlirgen::runSlotPromotion(M);
+  // Patch func.func signatures from refined return-op types so the
+  // verifier (and the func-to-llvm conversion) doesn't trip on user
+  // functions whose body now produces e.g. `i1` while the signature
+  // still declares `-> none`. The static -emit-* paths already run
+  // this; without it, JIT silently fails to convert any user function
+  // that returns a logical / boolean comparison. Idempotent.
+  mlirgen::runRefineFuncSigs(M);
   mlirgen::runOutlineParfor(M);
   mlirgen::runLowerSeqLoops(M);
   mlirgen::runLowerAnonCalls(M);
@@ -2264,9 +2310,20 @@ bool compileProgram() {
   mlirgen::runLowerFixedPoint(M);
   mlirgen::runLowerNarginNargout(M);
   mlirgen::runLowerScalarSlots(M);
+  // Final signature catch-up — see comment in the REPL path above.
+  mlirgen::runRefineFuncSigs(M);
   mlirgen::runLowerIO(M);
 
   if (getenv("MATLABC_DAP_DUMP")) mlirgen::printModule(std::cerr, M);
+  /* Verify after the matlab-pass batch. The check that used to live
+   * after the LLVM-conversion pipeline could only catch failures the
+   * conversion attributed cleanly; surfacing a verifier error here
+   * pinpoints which matlab pass left a stale op or signature. */
+  if (mlir::failed(mlir::verify(M))) {
+    std::cerr << "matlabc -dap: MLIR verification failed after matlab passes\n";
+    if (!getenv("MATLABC_DAP_DUMP")) mlirgen::printModule(std::cerr, M);
+    return false;
+  }
 
   mlir::PassManager PM(&MCtx.get());
   PM.addPass(mlir::createCanonicalizerPass());
@@ -2277,6 +2334,7 @@ bool compileProgram() {
   PM.addPass(mlir::createReconcileUnrealizedCastsPass());
   if (mlir::failed(PM.run(M))) {
     std::cerr << "matlabc -dap: MLIR-to-LLVM conversion pipeline failed\n";
+    if (!getenv("MATLABC_DAP_DUMP")) mlirgen::printModule(std::cerr, M);
     return false;
   }
 
@@ -5428,6 +5486,20 @@ int runDap(const std::string &CLIPath) {
     DebuggeeErrFd = ErrPipe[0];
   }
 
+  /* Spawn the stderr-pipe reader BEFORE we accept any DAP requests so
+   * compile-time diagnostics emitted during `launch` (which runs
+   * before configurationDone) make it back to the IDE as `output`
+   * events and to the parent's stderr — instead of sitting in the
+   * pipe buffer until the worker thread is started. Without this
+   * early spawn a `failed to compile program` response was effectively
+   * undebuggable because the actual MLIR / verifier error never
+   * surfaced. */
+  if (DebuggeeErrFd >= 0) {
+    pthread_t EarlyErrRdr;
+    pthread_create(&EarlyErrRdr, nullptr, stderrReaderMain, nullptr);
+    pthread_detach(EarlyErrRdr);
+  }
+
   G.ProgramPath = CLIPath;
   std::ios::sync_with_stdio(false);
 
@@ -6227,7 +6299,7 @@ loadTesterTU(matlab::SourceManager &SM, matlab::ASTContext &AstCtx,
  * sample. L=0 reproduces the v1 lockstep behaviour. */
 static std::string
 renderCocotbHarness(const CocotbFuncSpec &S, const std::string &Stem,
-                    int Vectors, int Latency,
+                    int Vectors, int Latency, int Seed,
                     const std::vector<std::vector<std::string>> *Stimulus) {
   std::string Out;
   auto append = [&](const std::string &S) { Out += S; };
@@ -6304,13 +6376,86 @@ renderCocotbHarness(const CocotbFuncSpec &S, const std::string &Stem,
          "for _ in range(alen)]\n");
   append("    real = [unpack_fi(p, signed, wl, fl) for p in packed]\n");
   append("    return packed, real\n\n");
+  /* v3.7 — coverage tracker. Records per-port min / max / count /
+   * mean over the run, plus a value histogram for ports narrow
+   * enough that one bucket per value is reasonable (WL <= 8). At
+   * test end the harness writes `coverage.txt` next to cocotb's
+   * own results — a quick "did the random vectors actually
+   * exercise the input space" check, useful when chasing
+   * unexpected coverage holes. */
+  append("class _Coverage:\n");
+  append("    def __init__(self, INPUTS, OUTPUTS):\n");
+  append("        self.in_specs = INPUTS\n");
+  append("        self.out_specs = OUTPUTS\n");
+  append("        self.in_stat = [self._fresh() for _ in INPUTS]\n");
+  append("        self.out_stat = [self._fresh() for _ in OUTPUTS]\n");
+  append("    def _fresh(self):\n");
+  append("        return {'count': 0, 'min': None, 'max': None, "
+         "'sum': 0.0, 'hist': {}}\n");
+  append("    def _record(self, stat, val, narrow):\n");
+  append("        stat['count'] += 1\n");
+  append("        stat['sum'] += float(val)\n");
+  append("        if stat['min'] is None or val < stat['min']: "
+         "stat['min'] = val\n");
+  append("        if stat['max'] is None or val > stat['max']: "
+         "stat['max'] = val\n");
+  append("        if narrow:\n");
+  append("            key = float(val)\n");
+  append("            stat['hist'][key] = stat['hist'].get(key, 0) + 1\n");
+  append("    def record_input(self, k, value):\n");
+  append("        name, signed, wl, fl, alen = self.in_specs[k]\n");
+  append("        narrow = wl <= 8\n");
+  append("        if alen > 0:\n");
+  append("            for v in value: self._record(self.in_stat[k], v, narrow)\n");
+  append("        else:\n");
+  append("            self._record(self.in_stat[k], value, narrow)\n");
+  append("    def record_output(self, j, value):\n");
+  append("        name, signed, wl, fl, alen = self.out_specs[j]\n");
+  append("        narrow = wl <= 8\n");
+  append("        if alen > 0:\n");
+  append("            for v in value: self._record(self.out_stat[j], v, narrow)\n");
+  append("        else:\n");
+  append("            self._record(self.out_stat[j], value, narrow)\n");
+  append("    def write(self, path):\n");
+  append("        try:\n");
+  append("            with open(path, 'w') as f:\n");
+  append("                self._write(f)\n");
+  append("        except OSError:\n");
+  append("            pass  # coverage is best-effort, never fail the test\n");
+  append("    def _write(self, f):\n");
+  append("        f.write('# matlabc -emit-cocotb coverage report\\n')\n");
+  append("        f.write('# Generated by test_<stem>.py at end of run.\\n\\n')\n");
+  append("        f.write('## Inputs\\n')\n");
+  append("        self._write_section(f, self.in_specs, self.in_stat)\n");
+  append("        f.write('\\n## Outputs\\n')\n");
+  append("        self._write_section(f, self.out_specs, self.out_stat)\n");
+  append("    def _write_section(self, f, specs, stats):\n");
+  append("        for spec, stat in zip(specs, stats):\n");
+  append("            name, signed, wl, fl, alen = spec\n");
+  append("            shape = f'[{alen}]' if alen > 0 else ''\n");
+  append("            sign = 'signed' if signed else 'unsigned'\n");
+  append("            f.write(f'\\n  {name}{shape} : {sign} {wl} bits, FL={fl}\\n')\n");
+  append("            if stat['count'] == 0:\n");
+  append("                f.write('    (no samples)\\n')\n");
+  append("                continue\n");
+  append("            mean = stat['sum'] / stat['count']\n");
+  append("            f.write(f'    samples={stat[\"count\"]}  '\n");
+  append("                    f'min={stat[\"min\"]}  max={stat[\"max\"]}  '\n");
+  append("                    f'mean={mean:.6g}\\n')\n");
+  append("            if stat['hist']:\n");
+  append("                items = sorted(stat['hist'].items())\n");
+  append("                f.write('    histogram:\\n')\n");
+  append("                for k, v in items:\n");
+  append("                    bar = '#' * min(40, max(1, v))\n");
+  append("                    f.write(f'      {k:>10g}  {v:>5d}  {bar}\\n')\n");
+  append("\n");
 
   append("@cocotb.test()\n");
   append("async def test_" + S.Name + "(dut):\n");
   append("    \"\"\"Random-vector lockstep verification of " + S.Name +
          " against the reference Python model. Generated by "
          "matlabc -emit-cocotb.\"\"\"\n");
-  append("    random.seed(42)\n");
+  append("    random.seed(" + std::to_string(Seed) + ")\n");
   append("    N = " + std::to_string(Vectors) + "\n");
   if (S.Sequential) {
     append("    cocotb.start_soon(Clock(dut.clk, 10, units=\"ns\").start())\n");
@@ -6329,6 +6474,7 @@ renderCocotbHarness(const CocotbFuncSpec &S, const std::string &Stem,
   }
   append("    LATENCY = " + std::to_string(Latency) + "\n");
   append("    failures = 0\n");
+  append("    coverage = _Coverage(INPUTS, OUTPUTS)\n");
   append("    compared = 0\n");
   /* The reference is called at cycle k; the DUT's response to that
    * cycle's inputs surfaces L cycles later. Recorded refs sit in
@@ -6362,6 +6508,8 @@ renderCocotbHarness(const CocotbFuncSpec &S, const std::string &Stem,
     append("        py_args = list(args)\n");
     append("        for j, (name, signed, wl, fl, alen) in enumerate(INPUTS):\n");
     append("            _drive(dut, name, py_args[j], signed, wl, fl, alen)\n");
+    append("            coverage.record_input(j, _real(py_args[j]) "
+           "if alen == 0 else [_real(x) for x in py_args[j]])\n");
   } else {
     /* Per-input hold cycles from `% cocotb: hold(<name>, N)` pragmas.
      * `HOLD[k] = N` means input k stays at the same value for N
@@ -6453,6 +6601,7 @@ renderCocotbHarness(const CocotbFuncSpec &S, const std::string &Stem,
     append("            else:\n");
     append("                py_args.append(int(held_real[k]) if fl == 0 "
            "else held_real[k])\n");
+    append("            coverage.record_input(k, held_real[k])\n");
   }
   if (S.Sequential) {
     /* Sequential DUTs need TWO sample windows per cycle:
@@ -6504,6 +6653,7 @@ renderCocotbHarness(const CocotbFuncSpec &S, const std::string &Stem,
          "read DUT signal: {exc}\")\n");
   append("                    failures += 1\n");
   append("                    continue\n");
+  append("                coverage.record_output(j, post_val)\n");
   append("                ref_val = ref[j]\n");
   /* For sequential modules, accept either the pre-edge or
    * post-edge sample as a match. The pre-edge value is captured
@@ -6519,6 +6669,14 @@ renderCocotbHarness(const CocotbFuncSpec &S, const std::string &Stem,
   append("                    f\"#{ref_cycle} {name}: post={post_val} "
          "pre={pre_val} ref={ref_val} args={ref_args}\")\n");
   append("                failures += 1\n");
+  /* v3.7 — write coverage report next to the cocotb run output.
+   * Best-effort: a write failure (read-only fs, permissions)
+   * doesn't fail the test. Filename is fixed (`coverage.txt`) in
+   * the harness directory so the Makefile's per-stem layout
+   * keeps multiple harnesses' reports from clobbering each
+   * other for the standard `just test-cocotb` workflow. */
+  append("    coverage.write(os.path.join(os.path.dirname("
+         "os.path.abspath(__file__)), 'coverage.txt'))\n");
   append("    assert failures == 0, "
          "f\"{failures} mismatch(es) across {compared} compared cycles "
          "(latency={LATENCY}, total stimulus N={N})\"\n");
@@ -6683,6 +6841,7 @@ int emitCocotbHarness(const char *Self, const Options &Opts,
 
   std::string Harness = renderCocotbHarness(*Spec, Stem, Opts.CocotbVectors,
                                              Opts.CocotbLatency,
+                                             Opts.CocotbSeed,
                                              Stimulus ? &*Stimulus : nullptr);
   std::string Makefile = renderCocotbMakefile(Stem, Spec->Name);
 
@@ -6749,6 +6908,36 @@ int emitCocotbHarness(const char *Self, const Options &Opts,
   if (Opts.CocotbLatency > 0)
     std::cerr << ", latency=" << Opts.CocotbLatency;
   std::cerr << ")\n";
+
+  /* v3.4: auto-detect a pipeline-depth hint by counting `persistent`
+   * declarations in the source. The full register-chain depth is
+   * harder to reason about (some DUTs have non-pipelined parallel
+   * persistents), so this is informational only — printed when
+   * the user didn't pass `-cocotb-latency` explicitly and the
+   * count suggests a pipelined design. The user still picks the
+   * right L; this just nudges them toward "non-zero L is
+   * probably needed". */
+  if (Spec->Sequential && Opts.CocotbLatency == 0) {
+    std::ifstream Sf(Input);
+    std::string Body((std::istreambuf_iterator<char>(Sf)),
+                      std::istreambuf_iterator<char>());
+    int PersistCount = 0;
+    size_t P = 0;
+    while ((P = Body.find("persistent", P)) != std::string::npos) {
+      bool At = (P == 0 || !std::isalnum((unsigned char)Body[P-1]));
+      bool Brk = (P + 10 >= Body.size() ||
+                  !std::isalnum((unsigned char)Body[P+10]));
+      if (At && Brk) ++PersistCount;
+      P += 10;
+    }
+    if (PersistCount >= 2) {
+      std::cerr << "       hint: " << PersistCount
+                << " `persistent` decls — pipelined; if outputs are "
+                   "registered, try `-cocotb-latency=" << (PersistCount - 1)
+                << "` (or run `just verify-cocotb FILE " << (PersistCount - 1)
+                << "` to test).\n";
+    }
+  }
   return 0;
 }
 #endif // MATLAB_LLVM_WITH_MLIR
