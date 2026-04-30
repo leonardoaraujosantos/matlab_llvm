@@ -49,7 +49,9 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # Runtime is C++ since Phase 3 of docs/port_runtime_2_cpp.md. The C
 # emit-c path still emits valid C but links against the C++ runtime;
 # we force the runtime side through the C++ compiler with -x c++.
-RUNTIME="$ROOT/runtime/matlab_runtime.cpp"
+# Phase-2 split: two .cpp files share private layouts.
+RUNTIME_MAIN="$ROOT/runtime/matlab_runtime.cpp"
+RUNTIME_DEBUG="$ROOT/runtime/runtime_debug.cpp"
 TESTDIR="$(cd "$(dirname "$0")" && pwd)"
 
 pass=0; fail=0
@@ -75,7 +77,8 @@ for m in "$TESTDIR"/*.m; do
   # explicitly with -x.
   cc_err="$(mktemp -t mlc.XXXXXX).err"
   if [[ "$MODE" == cpp ]]; then
-    if ! "$CXX" "${WFLAGS[@]}" "-I$ROOT/runtime" -x c++ "$tmpsrc" -x c++ "$RUNTIME" \
+    if ! "$CXX" "${WFLAGS[@]}" "-I$ROOT/runtime" -x c++ "$tmpsrc" \
+           -x c++ "$RUNTIME_MAIN" "$RUNTIME_DEBUG" \
            -o "$tmpbin" -lm -lpthread 2>"$cc_err"; then
       echo "FAIL $base: $LABEL compile failed"
       [[ "$STRICT" == "1" ]] && sed 's/^/  /' "$cc_err" | head -5
@@ -83,7 +86,8 @@ for m in "$TESTDIR"/*.m; do
       rm -f "$tmpsrc" "$tmpbin" "$cc_err"; continue
     fi
   else
-    if ! "$CXX" "${WFLAGS[@]}" "-I$ROOT/runtime" -x c "$tmpsrc" -x c++ "$RUNTIME" \
+    if ! "$CXX" "${WFLAGS[@]}" "-I$ROOT/runtime" -x c "$tmpsrc" \
+           -x c++ "$RUNTIME_MAIN" "$RUNTIME_DEBUG" \
            -o "$tmpbin" -lm -lpthread 2>"$cc_err"; then
       echo "FAIL $base: $LABEL compile failed"
       [[ "$STRICT" == "1" ]] && sed 's/^/  /' "$cc_err" | head -5

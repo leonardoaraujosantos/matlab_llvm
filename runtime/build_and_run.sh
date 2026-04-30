@@ -11,7 +11,13 @@ set -euo pipefail
 
 MATLABC="${MATLABC:-$(cd "$(dirname "$0")/.." && pwd)/build/matlabc}"
 CLANG="${CLANG:-/opt/homebrew/opt/llvm/bin/clang}"
-RUNTIME="$(cd "$(dirname "$0")" && pwd)/matlab_runtime.cpp"
+RUNTIME_DIR="$(cd "$(dirname "$0")" && pwd)"
+# Phase-2 split (docs/port_runtime_2_cpp.md): runtime is two .cpp files
+# sharing private layouts via runtime_internal.h.
+RUNTIME_SRCS=(
+  "$RUNTIME_DIR/matlab_runtime.cpp"
+  "$RUNTIME_DIR/runtime_debug.cpp"
+)
 
 if [[ ! -x "$MATLABC" ]]; then
   echo "error: matlabc not found at $MATLABC" >&2
@@ -31,5 +37,5 @@ trap 'rm -f "$TMP"' EXIT
 # the link line with clang++ so the .cpp gets compiled as C++; the
 # matlabc-emitted .ll is still C-compatible.
 "$MATLABC" -emit-llvm "$INPUT" > "$TMP"
-"${CLANG}++" -Wno-override-module "$TMP" "$RUNTIME" -o "$OUT"
+"${CLANG}++" -Wno-override-module "$TMP" "${RUNTIME_SRCS[@]}" -I"$RUNTIME_DIR" -o "$OUT"
 echo "built $OUT"

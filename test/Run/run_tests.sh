@@ -16,7 +16,12 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 CLANG="${CLANG:-/opt/homebrew/opt/llvm/bin/clang}"
 # Runtime is C++ since Phase 3 of docs/port_runtime_2_cpp.md — drive the
 # link line with clang++ so the .cpp is compiled as C++.
-RUNTIME="$ROOT/runtime/matlab_runtime.cpp"
+# Phase-2 split: two .cpp files share private layouts via
+# runtime_internal.h. Both must appear on every link line.
+RUNTIME_SRCS=(
+  "$ROOT/runtime/matlab_runtime.cpp"
+  "$ROOT/runtime/runtime_debug.cpp"
+)
 CXX="${CXX:-${CLANG}++}"
 TESTDIR="$(cd "$(dirname "$0")" && pwd)"
 
@@ -36,7 +41,7 @@ for m in "$TESTDIR"/*.m; do
     fail=$((fail+1))
     rm -f "$tmpll" "$tmpbin"; continue
   fi
-  if ! "$CXX" -Wno-override-module "$tmpll" "$RUNTIME" -o "$tmpbin" 2>/dev/null; then
+  if ! "$CXX" -Wno-override-module "$tmpll" "${RUNTIME_SRCS[@]}" -I"$ROOT/runtime" -o "$tmpbin" 2>/dev/null; then
     echo "FAIL $base: clang link failed"
     fail=$((fail+1))
     rm -f "$tmpll" "$tmpbin"; continue

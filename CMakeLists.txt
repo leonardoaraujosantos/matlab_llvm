@@ -191,7 +191,12 @@ if(MATLAB_LLVM_WITH_MLIR)
   # The runtime now compiles as C++ (Phase 3 of docs/port_runtime_2_cpp.md);
   # its body stays C-shaped and is wrapped in extern "C" so the exported
   # symbols match the names JIT-emitted code looks up.
-  target_sources(matlabc PRIVATE runtime/matlab_runtime.cpp)
+  # Phase 2 split: REPL/DAP debug machinery lives in runtime_debug.cpp,
+  # everything else stays in matlab_runtime.cpp. Both share private
+  # layouts via runtime/runtime_internal.h.
+  target_sources(matlabc PRIVATE
+    runtime/matlab_runtime.cpp
+    runtime/runtime_debug.cpp)
   # Export the matlab_* symbols so the JIT's dynamic lookup finds them
   # (by default executables hide symbols not referenced internally).
   if(APPLE)
@@ -222,7 +227,8 @@ foreach(_rt_test IN ITEMS linalg shape rng complex reduce signal stats image)
   set(_rt_target "runtime-test-${_rt_test}")
   add_executable(${_rt_target}
     test/Runtime/test_${_rt_test}.c
-    runtime/matlab_runtime.cpp)
+    runtime/matlab_runtime.cpp
+    runtime/runtime_debug.cpp)
   target_include_directories(${_rt_target} PRIVATE
     ${CMAKE_SOURCE_DIR}/runtime
     ${CMAKE_SOURCE_DIR}/test/Runtime)

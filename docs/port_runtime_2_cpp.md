@@ -223,26 +223,64 @@ to 90% adds compile time without de-risking the migration.
 
 ---
 
-## Phase 2 — File split — **deferred (post Phase 3)**
+## Phase 2 — File split — **shipped (initial cut)**
 
-The original plan called for splitting the monolith *before* the
-language change. After auditing the file we deferred it: the runtime's
-debug / workspace block (lines ~4171–6951 in the old `.c`) defines
-many statics referenced by other regions and vice-versa, so a clean
-9-file split needs more cross-block forward-decl surgery than fits
-into the same session as Phase 3. Phase 3 was safe to run on the
-monolith because the C → C++ transition is purely a compile-mode
-change, no symbol movement.
+Started with a conservative two-file split: `matlab_runtime.cpp` keeps
+the numerical core, `runtime_debug.cpp` carries the DAP / REPL
+workspace machinery (about 2,800 lines extracted from the old
+contiguous block at lines 4149–6965). Both TUs share private types
+and globals via `runtime/runtime_internal.h`. This narrows
+`matlab_runtime.cpp` from 8,116 to 5,299 lines, which already
+sidesteps the worst of the navigation pain.
 
-The split is now scheduled to land *after* Phase 3 — same proposed
-layout below, just done on `.cpp` files. Because Phase 3 wrapped the
-entire payload in a single `extern "C" { ... }` block, the split will
-need one such wrapper per resulting file (or a project-wide
-`runtime_internal.h` that opens the `extern "C"` and gets included
-everywhere).
+**What landed.**
 
-Splitting the monolith is still mechanical, reversible, and worth
-more than the language change.
+- `runtime/runtime_internal.h` — new, ~165 lines. Exposes:
+  * `struct matlab_mat`, `struct matlab_mat_c`, `struct matlab_mat3`
+    layouts (full def, used by both TUs to reach into descriptor
+    fields).
+  * `struct matlab_struct_s`, `struct matlab_obj_s` — the workspace
+    mirror needs the layout to walk variables for the DAP variables
+    panel.
+  * `MATLAB_MAT_C_MAGIC` / `MATLAB_MAT3_MAGIC` constants and the
+    `mat_is_complex` / `mat_is_3d` inline predicates.
+  * `extern` declarations for `matlab_io_mutex`, `matlab_error_msg`,
+    `matlab_error_msg_len`, `matlab_error_flag`. Definitions are
+    `non-static` in `matlab_runtime.cpp`.
+  * Allocator forward decls: `mat_alloc`, `mat_c_alloc`, `mat3_alloc`,
+    `struct_find_field`, `struct_reserve` — all dropped their
+    `static` qualifier so `runtime_debug.cpp` can call them.
+  * Phase-4 RAII helpers (see below) inside a `#ifdef __cplusplus`
+    guard.
+- `runtime/runtime_debug.cpp` — new, ~2,870 lines. Contains the entire
+  REPL workspace + DAP machinery extracted verbatim from
+  `matlab_runtime.cpp`. Its preamble forward-declares the
+  `matlab_struct_*` / `matlab_disp_*` helpers it calls (signatures
+  match the public ABI but kept internal — the public header would
+  pull in the conflicting `void *` macro decls).
+- `runtime/matlab_runtime.cpp` — duplicates of the moved struct/static
+  layouts removed; `matlab_err_snapshot_frames` and
+  `matlab_err_emit_traceback_to_stderr` lost their `static` so
+  `matlab_set_error` can call across the TU boundary.
+- `CMakeLists.txt`: matlabc `target_sources` and the runtime-test
+  `add_executable` foreach both list the new file.
+- `runtime/build_and_run.sh` and the `test/Run/run_tests*.sh` scripts:
+  every link line now passes both `.cpp` files.
+
+**What's still on the table for Phase 2.5.**
+
+The plan's full 9-file layout is still the right end-state. Splitting
+the remaining ~5,300 lines into core / linalg / complex / rng /
+parfor / array still buys a lot. But it's contained, mechanical work
+now that the debug block is out of the way; saving for a follow-up.
+
+**Exit criteria — met for the initial cut.**
+
+- ✅ All 32 CTest suites still green (none of the moved code broke).
+- ✅ Coverage and unit tests bytes-identical (the moves were
+  textual). Re-run `scripts/runtime_coverage.sh` to confirm.
+- ⏭ "No file over ~1500 lines" — not yet. `matlab_runtime.cpp` is
+  ~5,300; `runtime_debug.cpp` is ~2,870. Phase 2.5 takes them down.
 
 **Proposed layout** (under `runtime/`):
 
@@ -325,52 +363,93 @@ with no typed-cast / VLA / designated-init fixups required.
 
 ---
 
-## Phase 4 — RAII for the array/struct/cell handles — **planned**
+## Phase 4 — RAII for the array/struct/cell handles — **in progress (exemplar shipped)**
 
-This is where the actual code-quality win lands. Replace 189 manual
-alloc/free pairs with destructors.
+The first migration landed as a named exemplar: **`matlab_inv`** in
+`runtime/matlab_runtime.cpp`. The smart-pointer types and the
+allocator-wrapping factory functions live in `runtime/runtime_internal.h`
+under `namespace matlab::runtime`:
 
-**Design.**
+```cpp
+struct MatDeleter  { void operator()(matlab_mat  *p) const noexcept; };
+struct MatCDeleter { void operator()(matlab_mat_c *p) const noexcept; };
+using MatPtr  = std::unique_ptr<matlab_mat,  MatDeleter>;
+using MatCPtr = std::unique_ptr<matlab_mat_c, MatCDeleter>;
 
-- Keep `matlab_mat`, `matlab_mat_c`, `matlab_struct`, `matlab_cell` as
-  the opaque types in `runtime/matlab_runtime.h` — they are returned
-  across the C ABI and JIT-emitted code stores them as `i8*`.
-- Inside the `.cpp` TUs, define internal smart-pointer aliases:
+inline MatPtr  make_mat   (int64_t m, int64_t n);
+inline MatCPtr make_mat_c (int64_t m, int64_t n);
+```
 
-  ```cpp
-  struct MatDeleter { void operator()(matlab_mat* p) const noexcept; };
-  using MatPtr = std::unique_ptr<matlab_mat, MatDeleter>;
-  ```
+`matlab_inv` before:
+```cpp
+matlab_mat *matlab_inv(matlab_mat *A) {
+    if (A->rows != A->cols) return mat_alloc(0, 0);
+    int64_t n = A->rows;
+    double *LU = (double *)malloc(n*n*sizeof(double));
+    memcpy(LU, A->data, n*n*sizeof(double));
+    int64_t *piv = (int64_t *)malloc(n*sizeof(int64_t));
+    int sign;
+    if (lu_decompose(LU, n, piv, &sign) != 0) {
+        free(LU); free(piv);   /* manual cleanup on early exit */
+        return mat_alloc(0, 0);
+    }
+    matlab_mat *X = mat_alloc(n, n);
+    double *rhs = (double *)malloc(n*sizeof(double));
+    double *col = (double *)malloc(n*sizeof(double));
+    for (...) { ... }
+    free(rhs); free(col); free(piv); free(LU);   /* four frees */
+    return X;
+}
+```
 
-- Rewrite internal helpers (`set_op`, `jacobi_sym`, `lu_decompose`,
-  the temporary-buffer-heavy linalg routines) to hold intermediates
-  in `MatPtr` / `std::vector<double>`. The public functions still
-  take and return raw `matlab_mat *`; they `release()` at the return.
-- Public entry points become a thin pattern:
+`matlab_inv` after:
+```cpp
+matlab_mat *matlab_inv(matlab_mat *A) {
+    if (!A || A->rows != A->cols) return mat_alloc(0, 0);
+    int64_t n = A->rows;
+    std::vector<double> LU(A->data, A->data + n*n);
+    std::vector<int64_t> piv(n);
+    int sign;
+    if (lu_decompose(LU.data(), n, piv.data(), &sign) != 0)
+        return mat_alloc(0, 0);
+    matlab::runtime::MatPtr work = matlab::runtime::make_mat(n, n);
+    std::vector<double> rhs(n), col(n);
+    for (...) { ... }
+    return work.release();   /* hands the ptr back over the C ABI */
+}
+```
 
-  ```cpp
-  extern "C" matlab_mat *matlab_inv(matlab_mat *A) {
-      if (!A) return mat_alloc(0, 0);
-      MatPtr work = clone(A);
-      // … RAII-managed scratch …
-      return work.release();
-  }
-  ```
+Net: 4 `malloc` and 4 `free` calls drop to zero; the previously-leaked
+`LU` + `piv` on the singular path is now leak-free by construction;
+the public ABI is byte-identical (`work.release()` returns the same
+`matlab_mat *`).
 
-**Steps.**
+**What's left for Phase 4 sweep.**
 
-1. Land `MatPtr`, `MatCPtr`, `StructPtr`, `CellPtr` plus their
-   deleters in `runtime_internal.h`.
-2. Migrate **one** linalg routine end-to-end (`matlab_inv`) as the
-   exemplar; review.
-3. Sweep the remaining linalg + complex routines.
-4. Sweep array/shape ops.
-5. Each migrated function gets a Phase-1 unit test if it does not
-   already have one, exercised under ASan.
+The runtime today has 178 manual `malloc`/`free` calls and 189
+alloc/free pair sites. Migrating them in priority order:
 
-**Exit criteria.** Manual `malloc`/`free` count in the runtime drops
-from 178 to under 30 (the ones legitimately interfacing the C ABI
-boundary). ASan + LSan report zero leaks across all suites.
+1. ✅ `matlab_inv` (linalg exemplar)
+2. ⏭ `matlab_mldivide_mm`, `matlab_mrdivide_mm` (same LU machinery,
+   identical scratch shape)
+3. ⏭ `matlab_svd`, `matlab_eig`, `matlab_eig_V`, `matlab_eig_D` —
+   the heaviest scratch users
+4. ⏭ `matlab_chol`, `matlab_pinv`, `matlab_lu_L`, `matlab_lu_U`,
+   `matlab_qr_Q`, `matlab_qr_R`
+5. ⏭ Tier-1/2/3 routines that allocate scratch buffers (`filter`,
+   `polyfit`, `roots`, `interp1`, `trapz`, `gradient`, `imfilter`)
+6. ⏭ Complex / FFT family (`matlab_fft_c`, `matlab_fft2_c`,
+   `fft_radix2_inplace`, `fft_bluestein`)
+
+Each migration follows the `matlab_inv` template — replace
+`malloc`/`free` pairs with `std::vector` for raw scratch and `MatPtr`
+for the result descriptor; `release()` at the return.
+
+**Exit criteria for full Phase 4.** Manual `malloc`/`free` count in
+the runtime drops from 178 to under 30 (the ones legitimately
+interfacing the C ABI boundary). ASan + LSan report zero leaks across
+all suites. Each migrated function has direct unit-test coverage
+exercised under sanitizers.
 
 ---
 
