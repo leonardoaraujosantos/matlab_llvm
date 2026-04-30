@@ -1388,7 +1388,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
       continue;
     }
     if ((Name == "matlab_ws_set_f64" || Name == "matlab_ws_set_mat" ||
-         Name == "matlab_ws_set_obj") &&
+         Name == "matlab_ws_set_obj" || Name == "matlab_ws_set_string") &&
         Call->getNumOperands() == 2) {
       Value NameV = Call->getOperand(0);
       Value Val = Call->getOperand(1);
@@ -1398,18 +1398,21 @@ bool TensorLowering::rewriteBuiltinCalls() {
        * from f64 to ptr (e.g. `x * 2` where x is a workspace matrix).
        * When the initial choice doesn't match the final value type,
        * flip to the correct variant so the store uses the right
-       * runtime entry. The set_obj choice is sticky: it carries the
-       * Sema-pinned class info, so we trust the frontend and don't
-       * downgrade to set_mat even if the value is a generic ptr. */
+       * runtime entry. The set_obj / set_string choices are sticky:
+       * they carry Sema-pinned class / string-binding info, so we
+       * trust the frontend and don't downgrade to set_mat even if
+       * the value is a generic ptr. */
       bool IsObj = (Name == "matlab_ws_set_obj");
+      bool IsString = (Name == "matlab_ws_set_string");
       bool IsMat;
       bool IsInt = mlir::isa<mlir::IntegerType>(Val.getType());
-      if (IsObj) IsMat = true;
+      if (IsObj || IsString) IsMat = true;
       else if (Val.getType() == PtrTy)      IsMat = true;
       else if (Val.getType() == F64)         IsMat = false;
       else if (IsInt)                         IsMat = false;
       else continue;   /* neither ptr nor f64 nor int yet — wait for another iter */
-      if (IsObj && Val.getType() != PtrTy) continue; /* retry once Val lowers */
+      if ((IsObj || IsString) && Val.getType() != PtrTy)
+        continue; /* retry once Val lowers */
       /* Cast int → f64 for the workspace mirror. Same logic as
        * matlab_dbg_frame_set above: i1 from `x = age > 18` at script
        * scope (REPL/DAP) needs to flow through matlab_ws_set_f64.
@@ -1440,9 +1443,11 @@ bool TensorLowering::rewriteBuiltinCalls() {
       int64_t Len = 0;
       Value Ptr = fieldNameAddr(NameV, Len);
       if (!Ptr) continue;
-      StringRef RuntimeName = IsObj ? "matlab_ws_set_obj"
-                                    : (IsMat ? "matlab_ws_set_mat"
-                                             : "matlab_ws_set_f64");
+      StringRef RuntimeName =
+          IsString ? "matlab_ws_set_string"
+                   : (IsObj ? "matlab_ws_set_obj"
+                            : (IsMat ? "matlab_ws_set_mat"
+                                     : "matlab_ws_set_f64"));
       B.setInsertionPoint(Call);
       Value LenV = LLVM::ConstantOp::create(
           B, Call->getLoc(), I64, B.getI64IntegerAttr(Len));

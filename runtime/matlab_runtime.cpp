@@ -2064,6 +2064,16 @@ matlab_mat *matlab_struct_get_mat(matlab_struct *s, const char *name, int64_t le
      * carry kind=2. */
     if (s->kinds[idx] == 2 && s->ptr_vals[idx])
         return (matlab_mat *)s->ptr_vals[idx];
+    /* kind=3 is a matlab_string* (script-level "..." binding). The
+     * caller is the lowered code reading a script-scope variable
+     * through the uniformly ptr-typed _get_mat entry; pass the
+     * pointer through verbatim so the string-aware sites
+     * downstream (matlab_string_disp, etc.) see the descriptor.
+     * Without this, the historical mat_alloc(0, 0) fallback would
+     * make `t` (where t is a string) silently print as nothing
+     * after we route assignments through matlab_ws_set_string. */
+    if (s->kinds[idx] == 3 && s->ptr_vals[idx])
+        return (matlab_mat *)s->ptr_vals[idx];
     /* Box a scalar field into a 1x1 matrix. */
     if (s->kinds[idx] == 0) {
         matlab_mat *m = mat_alloc(1, 1);
@@ -2877,6 +2887,26 @@ double matlab_string_len(matlab_string *s) {
 }
 
 double matlab_isstring(matlab_string *s) { return s ? 1.0 : 0.0; }
+
+/* Opaque accessors for the runtime_debug TU (and the DAP/REPL frontend
+ * via tools/matlabc/main.cpp). The matlab_string_s layout is private
+ * to this TU; callers go through these helpers so the descriptor's
+ * fields can move without breaking the workspace inspector. NULL-safe
+ * — a missing string reads as a zero-length empty literal. */
+const char *matlab_string_get_data(void *s, int64_t *len_out) {
+    matlab_string *ms = (matlab_string *)s;
+    if (!ms) {
+        if (len_out) *len_out = 0;
+        return "";
+    }
+    if (len_out) *len_out = ms->len;
+    return ms->data ? ms->data : "";
+}
+
+int64_t matlab_string_get_len(void *s) {
+    matlab_string *ms = (matlab_string *)s;
+    return ms ? ms->len : 0;
+}
 
 /* sprintf(fmt, v) -> matlab_string. Only the one-f64 form is wired
  * for now, matching the other fprintf family variants. The expand-

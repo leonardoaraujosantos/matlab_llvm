@@ -1530,8 +1530,30 @@ void Lowerer::lowerStmt(const Stmt &St) {
         mlir::StringAttr::get(&MCtx, "disp"));
     emitUnregOp("matlab.call_builtin", {LabelV},
                 {mlir::NoneType::get(&MCtx)}, loc(E.Range), {DispCal});
-    emitUnregOp("matlab.call_builtin", {V},
-                {mlir::NoneType::get(&MCtx)}, loc(E.Range), {DispCal});
+    /* For string-typed bare expressions (`"Test"`, `upper(s)`, ...)
+     * route the value-disp through matlab_string_disp directly. The
+     * generic "disp" callee otherwise survives into LowerTensorOps's
+     * matrix-disp lowering and prints the matlab_string descriptor's
+     * bytes as a matrix. Detect via Sema's StringArray type or a bare
+     * StringLiteral. */
+    {
+      bool DispIsString = (E.E->Ty &&
+                           E.E->Ty->K == Type::Kind::StringArray) ||
+                          E.E->Kind == NodeKind::StringLiteral;
+      if (auto *NE = dynamic_cast<const NameExpr *>(E.E))
+        if (NE->Ref && StringBindings.count(NE->Ref))
+          DispIsString = true;
+      if (DispIsString) {
+        mlir::NamedAttribute SCal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "matlab_string_disp"));
+        emitUnregOp("matlab.call_builtin", {V},
+                    {mlir::NoneType::get(&MCtx)}, loc(E.Range), {SCal});
+      } else {
+        emitUnregOp("matlab.call_builtin", {V},
+                    {mlir::NoneType::get(&MCtx)}, loc(E.Range), {DispCal});
+      }
+    }
     /* In REPL mode, bind non-named-expression results to `ans` in the
      * workspace so subsequent inputs can reference them. A bare
      * NameExpr already has its value stored under its own name, so
@@ -1541,8 +1563,17 @@ void Lowerer::lowerStmt(const Stmt &St) {
       bool IsMat = V.getType() == PtrTy ||
                     mlir::isa<mlir::RankedTensorType,
                               mlir::UnrankedTensorType>(V.getType());
-      llvm::StringRef Callee = IsMat ? "matlab_ws_set_mat"
-                                      : "matlab_ws_set_f64";
+      /* Same string-aware guard as the AssignStmt path: a bare
+       * `"Test"` at the REPL produces a matlab_string* (LLVM ptr)
+       * which would otherwise route through matlab_ws_set_mat and
+       * have its descriptor reinterpreted as matlab_mat. Detect via
+       * Sema's inferred type on the expression. */
+      bool IsString = (E.E->Ty &&
+                       E.E->Ty->K == Type::Kind::StringArray) ||
+                      E.E->Kind == NodeKind::StringLiteral;
+      llvm::StringRef Callee = IsString ? "matlab_ws_set_string"
+                                        : (IsMat ? "matlab_ws_set_mat"
+                                                 : "matlab_ws_set_f64");
       mlir::NamedAttribute WsCal(
           mlir::StringAttr::get(&MCtx, "callee"),
           mlir::StringAttr::get(&MCtx, Callee));
@@ -1766,8 +1797,23 @@ void Lowerer::lowerStmt(const Stmt &St) {
           mlir::StringAttr::get(&MCtx, "disp"));
       emitUnregOp("matlab.call_builtin", {LabelV},
                   {mlir::NoneType::get(&MCtx)}, loc(A.Range), {Cal});
-      emitUnregOp("matlab.call_builtin", {Rhs},
-                  {mlir::NoneType::get(&MCtx)}, loc(A.Range), {Cal});
+      /* The implicit-display path bypasses the explicit disp(...) call
+       * dispatcher below (which sees the AST and routes string args to
+       * matlab_string_disp). At lowering time we already know whether
+       * the RHS is a string binding — if it is, emit the string-disp
+       * call directly so the value renders as text instead of being
+       * pushed through matlab_disp_mat (which would matrix-print the
+       * string descriptor's bytes). */
+      if (RhsIsString) {
+        mlir::NamedAttribute SCal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "matlab_string_disp"));
+        emitUnregOp("matlab.call_builtin", {Rhs},
+                    {mlir::NoneType::get(&MCtx)}, loc(A.Range), {SCal});
+      } else {
+        emitUnregOp("matlab.call_builtin", {Rhs},
+                    {mlir::NoneType::get(&MCtx)}, loc(A.Range), {Cal});
+      }
     }
     return;
   }
@@ -2239,9 +2285,28 @@ void Lowerer::lowerLValueStore(const Expr &LHS, mlir::Value Rhs) {
        * tracks kind=2; the DAP server uses that to render the
        * variable as `1x1 ClassName` and to expose its properties. */
       bool IsObj = N.Ref->PinnedClass != nullptr && IsMat;
-      llvm::StringRef Callee = IsObj ? "matlab_ws_set_obj"
-                                     : (IsMat ? "matlab_ws_set_mat"
-                                              : "matlab_ws_set_f64");
+      /* Strings are LLVM pointer-typed too (matlab_string*), so an
+       * unguarded IsMat check would route them to matlab_ws_set_mat
+       * — which then aliases matlab_string::data into matlab_mat::data
+       * and matlab_string::len into matlab_mat::rows, making the
+       * REPL workspace render `text = "Test"` as a 4 x <heap-garbage>
+       * double matrix and crash any inspector that dereferences the
+       * cooked-up shape. Honour the AssignStmt's StringBindings
+       * tracking (and StringArrayType-typed LHSs that arrive here
+       * from elsewhere) and route to matlab_ws_set_string so the
+       * workspace records kind=3. */
+      bool IsString = false;
+      if (StringBindings.count(N.Ref)) IsString = true;
+      else if (N.Ref->InferredType &&
+               N.Ref->InferredType->K == Type::Kind::StringArray)
+        IsString = true;
+      else if (N.Ty && N.Ty->K == Type::Kind::StringArray)
+        IsString = true;
+      llvm::StringRef Callee =
+          IsString ? "matlab_ws_set_string"
+                   : (IsObj ? "matlab_ws_set_obj"
+                            : (IsMat ? "matlab_ws_set_mat"
+                                     : "matlab_ws_set_f64"));
       mlir::NamedAttribute Cal(
           mlir::StringAttr::get(&MCtx, "callee"),
           mlir::StringAttr::get(&MCtx, Callee));

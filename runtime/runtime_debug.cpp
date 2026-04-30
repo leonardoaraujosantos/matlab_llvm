@@ -51,6 +51,11 @@ matlab_mat    *matlab_struct_get_mat(matlab_struct *s,
 void           matlab_disp_obj(matlab_obj *o);
 void           matlab_disp_mat(void *Aptr);
 void           matlab_set_error_msg(const char *msg, int64_t n);
+/* matlab_string accessors. The struct layout lives in matlab_runtime.cpp;
+ * the runtime_debug TU only ever holds the pointer and reads bytes
+ * through these helpers so the layout stays opaque across the file split. */
+const char    *matlab_string_get_data(void *s, int64_t *len_out);
+int64_t        matlab_string_get_len (void *s);
 
 /* -------- REPL workspace -------------------------------------------------
  *
@@ -137,6 +142,33 @@ matlab_mat *matlab_ws_get_mat(const char *name, int64_t len) {
     return m;
 }
 
+/* Reads a string variable from the script workspace. Mirrors the
+ * read shape of matlab_ws_get_mat — returns a borrowed pointer (the
+ * workspace owns the string descriptor; no caller free) or NULL when
+ * the binding doesn't exist or holds a non-string kind. The lowering
+ * routes a script-level NameExpr read through this entry whenever
+ * StringBindings (or Sema's StringArrayType) tagged the variable, so
+ * `t` alone or `disp(t)` see the matlab_string* the assign stamped
+ * with kind=3 instead of an empty 0x0 matlab_mat. */
+void *matlab_ws_get_string(const char *name, int64_t len) {
+    matlab_ws_init_if_needed();
+    matlab_ws_lock();
+    void *out = NULL;
+    if (matlab_ws) {
+        for (int32_t i = 0; i < matlab_ws->nfields; ++i) {
+            if (matlab_ws->kinds[i] != 3) continue;
+            const char *fn = matlab_ws->names[i];
+            if ((int64_t)strlen(fn) != len) continue;
+            if (memcmp(fn, name, (size_t)len) != 0) continue;
+            out = matlab_ws->ptr_vals[i];
+            break;
+        }
+    }
+    matlab_ws_unlock();
+    matlab_ws_check_read_watch(name, len);
+    return out;
+}
+
 void matlab_ws_set_mat(const char *name, int64_t len, matlab_mat *m) {
     matlab_ws_init_if_needed();
     matlab_ws_lock();
@@ -163,6 +195,32 @@ void matlab_ws_set_obj(const char *name, int64_t len, matlab_obj *o) {
     matlab_ws->f64_vals[idx] = 0.0;
     matlab_ws->ptr_vals[idx] = o;
     matlab_dbg_undo_record_set_new_ptr(r, /*new_kind=*/2, o);
+    matlab_ws_unlock();
+    matlab_ws_check_watch(name, len);
+}
+
+/* String assignment to the script-level workspace. Stores a
+ * matlab_string* with kind=3 so the DAP formatter can render it as
+ * `string` / "abc" instead of pointer-casting the descriptor to
+ * matlab_mat* (which previously aliased matlab_string::data into
+ * matlab_mat::data and matlab_string::len into matlab_mat::rows,
+ * making `text = "Test"` show up as a 4 x <heap-garbage> double).
+ *
+ * The undo machinery's prev_kind / new_kind enum gains a new value
+ * (3 = string); apply_ws_undo at the rewind/redo sites restores it
+ * via the same struct_reserve + ptr-store shape used for kind=2.
+ * The meta record's `kind` field stays in the kind==2 bucket since
+ * the rewind dispatch keys off prev_kind, not the meta kind. */
+void matlab_ws_set_string(const char *name, int64_t len, void *s) {
+    matlab_ws_init_if_needed();
+    matlab_ws_lock();
+    struct matlab_dbg_undo_rec *r =
+        matlab_ws_push_undo_locked(name, len, /*kind=*/2);
+    int32_t idx = struct_reserve(matlab_ws, name, (int32_t)len);
+    matlab_ws->kinds[idx] = 3;
+    matlab_ws->f64_vals[idx] = 0.0;
+    matlab_ws->ptr_vals[idx] = s;
+    matlab_dbg_undo_record_set_new_ptr(r, /*new_kind=*/3, s);
     matlab_ws_unlock();
     matlab_ws_check_watch(name, len);
 }
@@ -218,6 +276,8 @@ void matlab_ws_whos(void) {
                             (long long)m->rows, (long long)m->cols);
             else    snprintf(shape, sizeof shape, "-");
             printf("  %-16s %-16s %-8s\n", name, shape, "double");
+        } else if (matlab_ws->kinds[i] == 3) {
+            printf("  %-16s %-16s %-8s\n", name, "1x1", "string");
         } else {
             printf("  %-16s %-16s %-8s\n", name, "?", "?");
         }
@@ -1371,10 +1431,10 @@ int matlab_dbg_step_back(int32_t *out_file_id, int32_t *out_line,
                 } else if (r->prev_kind == 1) {
                     matlab_struct_set_mat(matlab_ws, r->name, r->name_len,
                                            (matlab_mat *)r->prev_ptr);
-                } else if (r->prev_kind == 2) {
+                } else if (r->prev_kind == 2 || r->prev_kind == 3) {
                     int32_t i = struct_reserve(matlab_ws, r->name,
                                                 (int32_t)r->name_len);
-                    matlab_ws->kinds[i] = 2;
+                    matlab_ws->kinds[i] = r->prev_kind;
                     matlab_ws->f64_vals[i] = 0.0;
                     matlab_ws->ptr_vals[i] = r->prev_ptr;
                 }
@@ -1596,10 +1656,10 @@ int matlab_dbg_step_forward_redo(int32_t *out_file_id, int32_t *out_line,
             } else if (r->new_kind == 1) {
                 matlab_struct_set_mat(matlab_ws, r->name, r->name_len,
                                        (matlab_mat *)r->new_ptr);
-            } else if (r->new_kind == 2) {
+            } else if (r->new_kind == 2 || r->new_kind == 3) {
                 int32_t i = struct_reserve(matlab_ws, r->name,
                                              (int32_t)r->name_len);
-                matlab_ws->kinds[i] = 2;
+                matlab_ws->kinds[i] = r->new_kind;
                 matlab_ws->f64_vals[i] = 0.0;
                 matlab_ws->ptr_vals[i] = r->new_ptr;
             }

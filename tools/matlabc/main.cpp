@@ -1260,7 +1260,13 @@ double matlab_dbg_ws_f64(int i);
 void  *matlab_dbg_ws_ptr(int i);
 void  matlab_ws_set_f64(const char *name, int64_t len, double v);
 void  matlab_ws_set_mat(const char *name, int64_t len, struct matlab_mat *m);
+void  matlab_ws_set_string(const char *name, int64_t len, void *s);
 void  matlab_ws_clear_one(const char *name, int64_t len);
+/* matlab_string accessors. The descriptor layout is private to the
+ * runtime; the REPL/DAP side reads bytes through these helpers so
+ * formatVar / typeForVar stay layout-agnostic. */
+const char *matlab_string_get_data(void *s, int64_t *len_out);
+int64_t     matlab_string_get_len (void *s);
 int  matlab_dbg_add_breakpoint_ex(int32_t file_id, int32_t line,
                                    const char *cond, int64_t cond_len,
                                    const char *log,  int64_t log_len);
@@ -1824,7 +1830,7 @@ struct FrameBridge {
           int K = matlab_dbg_ws_kind(j);
           WsBackup B{Nstr, K, 0.0, nullptr};
           if (K == 0) B.f64 = matlab_dbg_ws_f64(j);
-          else if (K == 1 || K == 2) B.ptr = matlab_dbg_ws_ptr(j);
+          else if (K == 1 || K == 2 || K == 3) B.ptr = matlab_dbg_ws_ptr(j);
           Backup.push_back(std::move(B));
           break;
         }
@@ -1839,6 +1845,9 @@ struct FrameBridge {
                 RtFrameIdx, i));
       } else if (K == 2) {
         matlab_ws_set_obj(Nstr.data(), (int64_t)Nstr.size(),
+            matlab_dbg_frame_local_ptr(RtFrameIdx, i));
+      } else if (K == 3) {
+        matlab_ws_set_string(Nstr.data(), (int64_t)Nstr.size(),
             matlab_dbg_frame_local_ptr(RtFrameIdx, i));
       }
       Stamped.push_back(std::move(Nstr));
@@ -1858,6 +1867,8 @@ struct FrameBridge {
                            (struct matlab_mat *)B.ptr);
       else if (B.kind == 2)
         matlab_ws_set_obj(B.name.data(), (int64_t)B.name.size(), B.ptr);
+      else if (B.kind == 3)
+        matlab_ws_set_string(B.name.data(), (int64_t)B.name.size(), B.ptr);
     }
     Backup.clear();
     PreExisting.clear();
@@ -3248,9 +3259,10 @@ std::string formatObj(void *obj) {
 
 /* DAP `type` field. Drives the IDE's TYPE column and hover tooltips.
  * MATLAB-style canonical names: scalar/matrix as `double`, classes as
- * the class name. The runtime kind enum (0=f64, 1=mat, 2=obj) maps
- * directly. */
+ * the class name, "..." literals as `string`. The runtime kind enum
+ * (0=f64, 1=mat, 2=obj, 3=string) maps directly. */
 std::string typeForVar(int Kind, void *Ptr) {
+  (void)Ptr;
   if (Kind == 0) return "double";
   if (Kind == 1) return "double";
   if (Kind == 2) {
@@ -3261,6 +3273,7 @@ std::string typeForVar(int Kind, void *Ptr) {
     if (cn && cnLen > 0) return std::string(cn, (size_t)cnLen);
     return "object";
   }
+  if (Kind == 3) return "string";
   return "any";
 }
 
@@ -3282,6 +3295,20 @@ std::string formatVar(int Kind, int WsIdx) {
   }
   if (Kind == 2) {
     return formatObj(matlab_dbg_ws_ptr(WsIdx));
+  }
+  if (Kind == 3) {
+    /* Render `"abc"` for string vars, with the actual bytes drawn
+     * through the opaque accessor so this side never has to know
+     * the matlab_string_s layout. Empty / NULL renders as `""`. */
+    void *S = matlab_dbg_ws_ptr(WsIdx);
+    int64_t SL = 0;
+    const char *SD = matlab_string_get_data(S, &SL);
+    std::string Out;
+    Out.reserve((size_t)SL + 2);
+    Out.push_back('"');
+    Out.append(SD, (size_t)SL);
+    Out.push_back('"');
+    return Out;
   }
   return "<unknown>";
 }
