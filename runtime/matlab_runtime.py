@@ -1517,6 +1517,114 @@ def conv2(A, B):
     return c
 
 
+def filter(b, a, x):
+    bv = np.asarray(b, dtype=float).ravel()
+    av = np.asarray(a, dtype=float).ravel()
+    if av.size == 0 or bv.size == 0 or av[0] == 0.0:
+        return np.zeros((0, 0))
+    bn = bv / av[0]; an = av / av[0]
+    xa = np.asarray(x, dtype=float)
+    if xa.ndim == 1 or 1 in xa.shape:
+        flat = xa.ravel()
+        from scipy.signal import lfilter
+        try:
+            y = lfilter(bn, an, flat)
+        except Exception:
+            # Fallback DF-II-T without scipy.
+            L = max(bn.size, an.size)
+            bp = np.zeros(L); bp[:bn.size] = bn
+            ap = np.zeros(L); ap[:an.size] = an
+            w = np.zeros(L); y = np.zeros(flat.size)
+            for n in range(flat.size):
+                yn = bp[0] * flat[n] + w[0]
+                w = np.concatenate([bp[1:] * flat[n] - ap[1:] * yn + w[1:],
+                                    [0.0]])
+                y[n] = yn
+        if xa.ndim == 2 and xa.shape[1] == 1:
+            return y.reshape((-1, 1))
+        return y.reshape((1, -1)) if xa.ndim <= 1 else y.reshape(xa.shape)
+    # column-wise on a matrix
+    out = np.zeros_like(xa)
+    for j in range(xa.shape[1]):
+        out[:, j] = filter(b, a, xa[:, j]).ravel()
+    return out
+
+
+def any(A):
+    a = np.asarray(A)
+    if a.ndim <= 1 or 1 in a.shape:
+        return np.array([[1.0 if (a != 0).any() else 0.0]])
+    return (a != 0).any(axis=0).astype(float).reshape((1, -1))
+
+
+def all(A):
+    a = np.asarray(A)
+    if a.ndim <= 1 or 1 in a.shape:
+        return np.array([[1.0 if (a != 0).all() else 0.0]])
+    return (a != 0).all(axis=0).astype(float).reshape((1, -1))
+
+
+def tril(A):  return np.tril(np.asarray(A, dtype=float))
+def triu(A):  return np.triu(np.asarray(A, dtype=float))
+
+
+def fftshift_c(A):  return np.fft.fftshift(np.asarray(A))
+def ifftshift_c(A): return np.fft.ifftshift(np.asarray(A))
+
+
+def std(A):
+    a = np.asarray(A, dtype=float)
+    if a.ndim <= 1 or 1 in a.shape:
+        return np.array([[float(np.std(a.ravel(), ddof=1)) if a.size > 1 else 0.0]])
+    return np.std(a, axis=0, ddof=1).reshape((1, -1))
+
+
+def var(A):
+    a = np.asarray(A, dtype=float)
+    if a.ndim <= 1 or 1 in a.shape:
+        return np.array([[float(np.var(a.ravel(), ddof=1)) if a.size > 1 else 0.0]])
+    return np.var(a, axis=0, ddof=1).reshape((1, -1))
+
+
+def median(A):
+    a = np.asarray(A, dtype=float)
+    if a.ndim <= 1 or 1 in a.shape:
+        return np.array([[float(np.median(a.ravel())) if a.size > 0 else 0.0]])
+    return np.median(a, axis=0).reshape((1, -1))
+
+
+def diff(A):
+    a = np.asarray(A, dtype=float)
+    if a.ndim <= 1 or 1 in a.shape:
+        flat = a.ravel()
+        if flat.size < 2: return np.zeros((0, 0))
+        d = np.diff(flat)
+        if a.ndim == 2 and a.shape[1] == 1: return d.reshape((-1, 1))
+        return d.reshape((1, -1))
+    return np.diff(a, axis=0)
+
+
+def meshgrid_X(x, y=None):
+    xv = np.asarray(x, dtype=float).ravel()
+    yv = xv if y is None else np.asarray(y, dtype=float).ravel()
+    return np.tile(xv, (yv.size, 1))
+
+def meshgrid_Y(x, y=None):
+    xv = np.asarray(x, dtype=float).ravel()
+    yv = xv if y is None else np.asarray(y, dtype=float).ravel()
+    return np.tile(yv.reshape((-1, 1)), (1, xv.size))
+
+def ndgrid_X(x, y=None):
+    xv = np.asarray(x, dtype=float).ravel()
+    yv = xv if y is None else np.asarray(y, dtype=float).ravel()
+    return np.tile(xv.reshape((-1, 1)), (1, yv.size))
+
+def ndgrid_Y(x, y=None):
+    xv = np.asarray(x, dtype=float).ravel()
+    yv = xv if y is None else np.asarray(y, dtype=float).ravel()
+    return np.tile(yv, (xv.size, 1))
+
+
 # --- remaining stubs ------------------------------------------------------
 # Programs that exercise these symbols without a real implementation will
 # produce wrong output, but won't crash — good enough for coverage.

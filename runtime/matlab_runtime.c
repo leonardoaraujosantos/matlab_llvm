@@ -3190,6 +3190,581 @@ matlab_mat *matlab_conv2(matlab_mat *A, matlab_mat *B) {
     return C;
 }
 
+/* filter(b, a, x) — direct-form II transposed.
+ *   a(1)*y[n] = sum_k b[k]*x[n-k] - sum_k a[k+1]*y[n-k-1]
+ *
+ * b and a are flattened to vectors; their order in MATLAB is [b0 b1 ... bN]
+ * and [a0 a1 ... aM]. a(1) (i.e. a->data[0]) must be non-zero — we return
+ * 0x0 otherwise. b/a are normalized by a0 once, then the loop is the
+ * canonical DF-II-T form (one state vector w of length max(N,M)). x can
+ * be a vector (the result mirrors x's orientation) or a matrix (filtered
+ * column-wise). */
+matlab_mat *matlab_filter(matlab_mat *b, matlab_mat *a, matlab_mat *x) {
+    if (!b || !a || !x) return mat_alloc(0, 0);
+    int64_t nb = b->rows * b->cols;
+    int64_t na = a->rows * a->cols;
+    if (nb == 0 || na == 0 || a->data[0] == 0.0) return mat_alloc(0, 0);
+    double a0 = a->data[0];
+    int64_t L = nb > na ? nb : na;
+    /* Pre-normalised coefficients, length L (zero-padded). */
+    double *bn = (double *)calloc((size_t)L, sizeof(double));
+    double *an = (double *)calloc((size_t)L, sizeof(double));
+    for (int64_t k = 0; k < nb; ++k) bn[k] = b->data[k] / a0;
+    for (int64_t k = 0; k < na; ++k) an[k] = a->data[k] / a0;
+    double *w = (double *)calloc((size_t)L, sizeof(double));
+
+    int64_t xm = x->rows, xn = x->cols;
+    /* Treat a vector input as a single column for processing; the result
+     * is reshaped back to the input's orientation at the end. */
+    int x_is_vec = (xm == 1 || xn == 1);
+    int64_t cols = x_is_vec ? 1 : xn;
+    int64_t rows = x_is_vec ? (xm * xn) : xm;
+    matlab_mat *Y = mat_alloc(rows, cols);
+    for (int64_t c = 0; c < cols; ++c) {
+        for (int64_t i = 0; i < L; ++i) w[i] = 0.0;
+        for (int64_t n = 0; n < rows; ++n) {
+            double xn_val = x_is_vec ? x->data[n] : x->data[n * xn + c];
+            double yn = bn[0] * xn_val + w[0];
+            /* Shift the state register and inject the cross-coupled terms. */
+            for (int64_t i = 1; i < L; ++i)
+                w[i - 1] = bn[i] * xn_val - an[i] * yn + w[i];
+            w[L - 1] = 0.0;
+            if (x_is_vec) Y->data[n] = yn;
+            else          Y->data[n * cols + c] = yn;
+        }
+    }
+    /* Reshape back to original vector orientation. */
+    if (x_is_vec) { Y->rows = xm; Y->cols = xn; }
+    free(bn); free(an); free(w);
+    return Y;
+}
+
+/* any/all share the colwise-reduce shape but with logical update rules.
+ * The result is a 1x1 matrix on a vector input, or a 1xN row of bools
+ * (stored as 0.0 / 1.0 doubles) on a matrix input. */
+matlab_mat *matlab_any(matlab_mat *A) {
+    if (!A) return mat_alloc(0, 0);
+    int64_t m = A->rows, n = A->cols;
+    if (m <= 1 || n == 1) {
+        int64_t total = m * n;
+        double r = 0.0;
+        for (int64_t k = 0; k < total; ++k)
+            if (A->data[k] != 0.0) { r = 1.0; break; }
+        matlab_mat *R = mat_alloc(1, 1);
+        R->data[0] = r;
+        return R;
+    }
+    matlab_mat *R = mat_alloc(1, n);
+    for (int64_t j = 0; j < n; ++j) {
+        double r = 0.0;
+        for (int64_t i = 0; i < m; ++i)
+            if (A->data[i * n + j] != 0.0) { r = 1.0; break; }
+        R->data[j] = r;
+    }
+    return R;
+}
+
+matlab_mat *matlab_all(matlab_mat *A) {
+    if (!A) return mat_alloc(0, 0);
+    int64_t m = A->rows, n = A->cols;
+    if (m <= 1 || n == 1) {
+        int64_t total = m * n;
+        double r = 1.0;
+        for (int64_t k = 0; k < total; ++k)
+            if (A->data[k] == 0.0) { r = 0.0; break; }
+        matlab_mat *R = mat_alloc(1, 1);
+        R->data[0] = total > 0 ? r : 1.0;  /* all([]) is true in MATLAB */
+        return R;
+    }
+    matlab_mat *R = mat_alloc(1, n);
+    for (int64_t j = 0; j < n; ++j) {
+        double r = 1.0;
+        for (int64_t i = 0; i < m; ++i)
+            if (A->data[i * n + j] == 0.0) { r = 0.0; break; }
+        R->data[j] = r;
+    }
+    return R;
+}
+
+matlab_mat *matlab_tril(matlab_mat *A) {
+    if (!A) return mat_alloc(0, 0);
+    int64_t m = A->rows, n = A->cols;
+    matlab_mat *R = mat_alloc(m, n);
+    for (int64_t i = 0; i < m; ++i)
+        for (int64_t j = 0; j <= i && j < n; ++j)
+            R->data[i * n + j] = A->data[i * n + j];
+    return R;
+}
+
+matlab_mat *matlab_triu(matlab_mat *A) {
+    if (!A) return mat_alloc(0, 0);
+    int64_t m = A->rows, n = A->cols;
+    matlab_mat *R = mat_alloc(m, n);
+    for (int64_t i = 0; i < m; ++i)
+        for (int64_t j = i; j < n; ++j)
+            R->data[i * n + j] = A->data[i * n + j];
+    return R;
+}
+
+/* var(A): sample variance (N-1 denominator). std(A) = sqrt(var(A)). For
+ * a vector, returns a 1x1; for a matrix, returns a 1xN row. */
+matlab_mat *matlab_var(matlab_mat *A) {
+    if (!A) return mat_alloc(0, 0);
+    int64_t m = A->rows, n = A->cols;
+    if (m <= 1 || n == 1) {
+        int64_t total = m * n;
+        matlab_mat *R = mat_alloc(1, 1);
+        if (total < 2) { R->data[0] = 0.0; return R; }
+        double mean = 0.0;
+        for (int64_t k = 0; k < total; ++k) mean += A->data[k];
+        mean /= (double)total;
+        double s = 0.0;
+        for (int64_t k = 0; k < total; ++k) {
+            double d = A->data[k] - mean;
+            s += d * d;
+        }
+        R->data[0] = s / (double)(total - 1);
+        return R;
+    }
+    matlab_mat *R = mat_alloc(1, n);
+    for (int64_t j = 0; j < n; ++j) {
+        double mean = 0.0;
+        for (int64_t i = 0; i < m; ++i) mean += A->data[i * n + j];
+        mean /= (double)m;
+        double s = 0.0;
+        for (int64_t i = 0; i < m; ++i) {
+            double d = A->data[i * n + j] - mean;
+            s += d * d;
+        }
+        R->data[j] = (m > 1) ? s / (double)(m - 1) : 0.0;
+    }
+    return R;
+}
+
+matlab_mat *matlab_std(matlab_mat *A) {
+    matlab_mat *V = matlab_var(A);
+    int64_t total = V->rows * V->cols;
+    for (int64_t k = 0; k < total; ++k) V->data[k] = sqrt(V->data[k]);
+    return V;
+}
+
+/* Median by sort-and-pick on a scratch buffer. n*log(n) per column —
+ * fine for the ~thousands-of-elements scripts the runtime targets. */
+static int dbl_cmp(const void *a, const void *b) {
+    double da = *(const double *)a, db = *(const double *)b;
+    return (da > db) - (da < db);
+}
+static double median_of(double *buf, int64_t n) {
+    if (n == 0) return 0.0;
+    qsort(buf, (size_t)n, sizeof(double), dbl_cmp);
+    if (n & 1) return buf[n / 2];
+    return 0.5 * (buf[n / 2 - 1] + buf[n / 2]);
+}
+matlab_mat *matlab_median(matlab_mat *A) {
+    if (!A) return mat_alloc(0, 0);
+    int64_t m = A->rows, n = A->cols;
+    if (m <= 1 || n == 1) {
+        int64_t total = m * n;
+        matlab_mat *R = mat_alloc(1, 1);
+        if (total == 0) return R;
+        double *buf = (double *)malloc((size_t)total * sizeof(double));
+        memcpy(buf, A->data, (size_t)total * sizeof(double));
+        R->data[0] = median_of(buf, total);
+        free(buf);
+        return R;
+    }
+    matlab_mat *R = mat_alloc(1, n);
+    double *buf = (double *)malloc((size_t)m * sizeof(double));
+    for (int64_t j = 0; j < n; ++j) {
+        for (int64_t i = 0; i < m; ++i) buf[i] = A->data[i * n + j];
+        R->data[j] = median_of(buf, m);
+    }
+    free(buf);
+    return R;
+}
+
+/* diff(A): first-order discrete differences. Vectors → vector of
+ * length n-1 with the same orientation; matrices → diff down each
+ * column, result is (m-1)xN. Empty if length < 2. */
+matlab_mat *matlab_diff(matlab_mat *A) {
+    if (!A) return mat_alloc(0, 0);
+    int64_t m = A->rows, n = A->cols;
+    if (m <= 1 || n == 1) {
+        int64_t total = m * n;
+        if (total < 2) return mat_alloc(0, 0);
+        int is_col = (n == 1 && m > 1);
+        matlab_mat *R = is_col ? mat_alloc(total - 1, 1)
+                               : mat_alloc(1, total - 1);
+        for (int64_t k = 0; k < total - 1; ++k)
+            R->data[k] = A->data[k + 1] - A->data[k];
+        return R;
+    }
+    if (m < 2) return mat_alloc(0, n);
+    matlab_mat *R = mat_alloc(m - 1, n);
+    for (int64_t i = 0; i < m - 1; ++i)
+        for (int64_t j = 0; j < n; ++j)
+            R->data[i * n + j] = A->data[(i + 1) * n + j] - A->data[i * n + j];
+    return R;
+}
+
+/* meshgrid(x, y): X(i,j) = x(j), Y(i,j) = y(i). Each output is
+ * length(y) x length(x). ndgrid is the transpose convention:
+ * X(i,j) = x(i), Y(i,j) = y(j); each output is length(x) x length(y).
+ * The lowering pass splits [X,Y] = meshgrid(...) into two calls so
+ * each runtime entry returns one matrix. */
+static int64_t numel_(matlab_mat *v) { return v ? v->rows * v->cols : 0; }
+matlab_mat *matlab_meshgrid_X(matlab_mat *x, matlab_mat *y) {
+    int64_t nx = numel_(x), ny = numel_(y ? y : x);
+    if (nx == 0) return mat_alloc(0, 0);
+    if (!y) y = x;
+    matlab_mat *X = mat_alloc(ny, nx);
+    for (int64_t i = 0; i < ny; ++i)
+        for (int64_t j = 0; j < nx; ++j)
+            X->data[i * nx + j] = x->data[j];
+    return X;
+}
+matlab_mat *matlab_meshgrid_Y(matlab_mat *x, matlab_mat *y) {
+    int64_t nx = numel_(x);
+    matlab_mat *src_y = y ? y : x;
+    int64_t ny = numel_(src_y);
+    if (nx == 0 || ny == 0) return mat_alloc(0, 0);
+    matlab_mat *Y = mat_alloc(ny, nx);
+    for (int64_t i = 0; i < ny; ++i)
+        for (int64_t j = 0; j < nx; ++j)
+            Y->data[i * nx + j] = src_y->data[i];
+    return Y;
+}
+matlab_mat *matlab_ndgrid_X(matlab_mat *x, matlab_mat *y) {
+    int64_t nx = numel_(x);
+    matlab_mat *src_y = y ? y : x;
+    int64_t ny = numel_(src_y);
+    if (nx == 0) return mat_alloc(0, 0);
+    matlab_mat *X = mat_alloc(nx, ny);
+    for (int64_t i = 0; i < nx; ++i)
+        for (int64_t j = 0; j < ny; ++j)
+            X->data[i * ny + j] = x->data[i];
+    return X;
+}
+matlab_mat *matlab_ndgrid_Y(matlab_mat *x, matlab_mat *y) {
+    int64_t nx = numel_(x);
+    matlab_mat *src_y = y ? y : x;
+    int64_t ny = numel_(src_y);
+    if (nx == 0 || ny == 0) return mat_alloc(0, 0);
+    matlab_mat *Y = mat_alloc(nx, ny);
+    for (int64_t i = 0; i < nx; ++i)
+        for (int64_t j = 0; j < ny; ++j)
+            Y->data[i * ny + j] = src_y->data[j];
+    return Y;
+}
+
+/*=========================================================================
+ * Tier-2 builtins: xcorr, polyval, polyfit, roots, interp1, trapz,
+ * cumtrapz, gradient, hamming, hann, blackman.
+ *=========================================================================*/
+
+/* xcorr(u, v) — full cross-correlation as a row vector of length 2L-1
+ * with L = max(numel(u), numel(v)) and lag-zero at index L (1-based).
+ *
+ * Definition: r[k] = sum_n u[n+k] * v[n], k in {-(L-1)..(L-1)}.
+ * Equivalent to conv(u, fliplr(v)) of full shape, after promoting both
+ * to length L by zero-padding the shorter one. The shorter side is
+ * padded so the output index 0 corresponds to the most negative lag,
+ * matching MATLAB's lag-axis convention. */
+matlab_mat *matlab_xcorr(matlab_mat *u, matlab_mat *v) {
+    if (!u || !v) return mat_alloc(0, 0);
+    int64_t nu = u->rows * u->cols;
+    int64_t nv = v->rows * v->cols;
+    if (nu == 0 || nv == 0) return mat_alloc(0, 0);
+    int64_t L = nu > nv ? nu : nv;
+    int64_t out_n = 2 * L - 1;
+    matlab_mat *R = mat_alloc(1, out_n);
+    /* k = lag, ranging over [-(L-1), L-1]. r[k+L-1] is the output cell. */
+    for (int64_t k = -(L - 1); k <= L - 1; ++k) {
+        double s = 0.0;
+        /* Sum over n where both u[n+k] and v[n] are in range. The vectors
+         * are treated as length-L sequences (the shorter one padded with
+         * zeros above its actual length). */
+        int64_t n_lo = k > 0 ? 0 : -k;
+        int64_t n_hi_u = (nu - 1) - k;          /* n+k must be < nu */
+        int64_t n_hi_v = nv - 1;                /* n   must be < nv */
+        int64_t n_hi = n_hi_u < n_hi_v ? n_hi_u : n_hi_v;
+        for (int64_t n = n_lo; n <= n_hi; ++n)
+            s += u->data[n + k] * v->data[n];
+        R->data[k + L - 1] = s;
+    }
+    return R;
+}
+
+/* polyval(p, x) — Horner's method, applied elementwise. p is a vector
+ * of coefficients with p[0] the highest power. Output mirrors x's
+ * shape. Empty p or empty x returns 0×0. */
+matlab_mat *matlab_polyval(matlab_mat *p, matlab_mat *x) {
+    if (!p || !x) return mat_alloc(0, 0);
+    int64_t np = p->rows * p->cols;
+    int64_t nx = x->rows * x->cols;
+    if (np == 0 || nx == 0) return mat_alloc(0, 0);
+    matlab_mat *Y = mat_alloc(x->rows, x->cols);
+    for (int64_t i = 0; i < nx; ++i) {
+        double acc = p->data[0];
+        for (int64_t k = 1; k < np; ++k)
+            acc = acc * x->data[i] + p->data[k];
+        Y->data[i] = acc;
+    }
+    return Y;
+}
+
+/* polyfit(x, y, n) — least-squares polynomial fit of degree n via
+ * normal equations on the Vandermonde matrix. Returns a row vector
+ * of length n+1, in MATLAB's highest-power-first order.
+ *
+ * Solves (V'V) p = V'y where V[i, k] = x[i]^(n-k). Direct LU on the
+ * (n+1)×(n+1) normal-equation matrix is fine for the degrees this
+ * runtime targets (typically n <= 8). */
+matlab_mat *matlab_polyfit(matlab_mat *x, matlab_mat *y, double n_d) {
+    if (!x || !y) return mat_alloc(0, 0);
+    int64_t m = x->rows * x->cols;
+    if (m == 0 || (y->rows * y->cols) != m) return mat_alloc(0, 0);
+    int64_t n = (int64_t)n_d;
+    if (n < 0) n = 0;
+    int64_t k = n + 1;             /* number of coefficients */
+    /* Build Vandermonde V (m x k) with V[i, j] = x[i]^(n-j). */
+    double *V = (double *)malloc((size_t)(m * k) * sizeof(double));
+    for (int64_t i = 0; i < m; ++i) {
+        double xv = x->data[i];
+        double pw = 1.0;
+        for (int64_t j = k - 1; j >= 0; --j) {
+            V[i * k + j] = pw;
+            pw *= xv;
+        }
+    }
+    /* Form A = V'V (k x k) and b = V'y (k). */
+    double *A = (double *)calloc((size_t)(k * k), sizeof(double));
+    double *b = (double *)calloc((size_t)k,       sizeof(double));
+    for (int64_t r = 0; r < k; ++r) {
+        for (int64_t c = 0; c < k; ++c) {
+            double s = 0.0;
+            for (int64_t i = 0; i < m; ++i) s += V[i * k + r] * V[i * k + c];
+            A[r * k + c] = s;
+        }
+        double s = 0.0;
+        for (int64_t i = 0; i < m; ++i) s += V[i * k + r] * y->data[i];
+        b[r] = s;
+    }
+    /* Gaussian elimination with partial pivoting (k <= ~10 in practice). */
+    for (int64_t i = 0; i < k; ++i) {
+        int64_t pivot = i;
+        double best = fabs(A[i * k + i]);
+        for (int64_t r = i + 1; r < k; ++r) {
+            double v = fabs(A[r * k + i]);
+            if (v > best) { best = v; pivot = r; }
+        }
+        if (best < 1e-300) {
+            /* Singular — return zeros. */
+            free(V); free(A); free(b);
+            return mat_alloc(1, k);
+        }
+        if (pivot != i) {
+            for (int64_t c = 0; c < k; ++c) {
+                double t = A[i * k + c]; A[i * k + c] = A[pivot * k + c];
+                A[pivot * k + c] = t;
+            }
+            double t = b[i]; b[i] = b[pivot]; b[pivot] = t;
+        }
+        for (int64_t r = i + 1; r < k; ++r) {
+            double f = A[r * k + i] / A[i * k + i];
+            for (int64_t c = i; c < k; ++c) A[r * k + c] -= f * A[i * k + c];
+            b[r] -= f * b[i];
+        }
+    }
+    matlab_mat *P = mat_alloc(1, k);
+    for (int64_t i = k - 1; i >= 0; --i) {
+        double s = b[i];
+        for (int64_t c = i + 1; c < k; ++c) s -= A[i * k + c] * P->data[c];
+        P->data[i] = s / A[i * k + i];
+    }
+    free(V); free(A); free(b);
+    return P;
+}
+
+/* roots(p): defined after mat_c_alloc — see "Tier-2 roots" block below. */
+
+/* interp1(x, y, xi) — 1-D linear interpolation. x must be sorted
+ * ascending. Out-of-range xi values produce NaN (MATLAB default). */
+matlab_mat *matlab_interp1(matlab_mat *x, matlab_mat *y, matlab_mat *xi) {
+    if (!x || !y || !xi) return mat_alloc(0, 0);
+    int64_t n = x->rows * x->cols;
+    int64_t ny = y->rows * y->cols;
+    int64_t m = xi->rows * xi->cols;
+    if (n == 0 || n != ny || m == 0) return mat_alloc(0, 0);
+    matlab_mat *Yi = mat_alloc(xi->rows, xi->cols);
+    double xmin = x->data[0], xmax = x->data[n - 1];
+    for (int64_t i = 0; i < m; ++i) {
+        double q = xi->data[i];
+        if (q < xmin || q > xmax) {
+            Yi->data[i] = NAN;
+            continue;
+        }
+        /* Binary search for the bracket. */
+        int64_t lo = 0, hi = n - 1;
+        while (hi - lo > 1) {
+            int64_t mid = (lo + hi) / 2;
+            if (x->data[mid] <= q) lo = mid;
+            else hi = mid;
+        }
+        double x0 = x->data[lo], x1 = x->data[hi];
+        double y0 = y->data[lo], y1 = y->data[hi];
+        if (x1 == x0) Yi->data[i] = y0;
+        else          Yi->data[i] = y0 + (y1 - y0) * (q - x0) / (x1 - x0);
+    }
+    return Yi;
+}
+
+/* trapz(y) — assumes unit spacing. trapz(x, y) — uses x. For a
+ * vector input the result is a 1×1; for a matrix it's a 1×N row
+ * (one integral per column). */
+static double trapz_unit(const double *v, int64_t n) {
+    if (n < 2) return 0.0;
+    double s = 0.5 * (v[0] + v[n - 1]);
+    for (int64_t i = 1; i < n - 1; ++i) s += v[i];
+    return s;
+}
+static double trapz_xy_(const double *x, const double *y, int64_t n) {
+    if (n < 2) return 0.0;
+    double s = 0.0;
+    for (int64_t i = 0; i < n - 1; ++i)
+        s += 0.5 * (x[i + 1] - x[i]) * (y[i] + y[i + 1]);
+    return s;
+}
+matlab_mat *matlab_trapz(matlab_mat *y) {
+    if (!y) return mat_alloc(0, 0);
+    int64_t m = y->rows, n = y->cols;
+    if (m <= 1 || n == 1) {
+        int64_t total = m * n;
+        matlab_mat *R = mat_alloc(1, 1);
+        R->data[0] = trapz_unit(y->data, total);
+        return R;
+    }
+    matlab_mat *R = mat_alloc(1, n);
+    double *col = (double *)malloc((size_t)m * sizeof(double));
+    for (int64_t j = 0; j < n; ++j) {
+        for (int64_t i = 0; i < m; ++i) col[i] = y->data[i * n + j];
+        R->data[j] = trapz_unit(col, m);
+    }
+    free(col);
+    return R;
+}
+matlab_mat *matlab_trapz_xy(matlab_mat *x, matlab_mat *y) {
+    if (!x || !y) return mat_alloc(0, 0);
+    int64_t nx = x->rows * x->cols;
+    int64_t ym = y->rows, yn = y->cols;
+    if (ym <= 1 || yn == 1) {
+        int64_t total = ym * yn;
+        if (total != nx) return mat_alloc(0, 0);
+        matlab_mat *R = mat_alloc(1, 1);
+        R->data[0] = trapz_xy_(x->data, y->data, total);
+        return R;
+    }
+    if (nx != ym) return mat_alloc(0, 0);
+    matlab_mat *R = mat_alloc(1, yn);
+    double *col = (double *)malloc((size_t)ym * sizeof(double));
+    for (int64_t j = 0; j < yn; ++j) {
+        for (int64_t i = 0; i < ym; ++i) col[i] = y->data[i * yn + j];
+        R->data[j] = trapz_xy_(x->data, col, ym);
+    }
+    free(col);
+    return R;
+}
+
+/* cumtrapz(y) — running trapezoidal integral with leading zero,
+ * unit spacing. Same shape as input. */
+matlab_mat *matlab_cumtrapz(matlab_mat *y) {
+    if (!y) return mat_alloc(0, 0);
+    int64_t m = y->rows, n = y->cols;
+    if (m <= 1 || n == 1) {
+        int64_t total = m * n;
+        matlab_mat *R = mat_alloc(y->rows, y->cols);
+        if (total == 0) return R;
+        R->data[0] = 0.0;
+        for (int64_t i = 1; i < total; ++i)
+            R->data[i] = R->data[i - 1] + 0.5 * (y->data[i - 1] + y->data[i]);
+        return R;
+    }
+    matlab_mat *R = mat_alloc(m, n);
+    for (int64_t j = 0; j < n; ++j) {
+        R->data[0 * n + j] = 0.0;
+        for (int64_t i = 1; i < m; ++i)
+            R->data[i * n + j] = R->data[(i - 1) * n + j] +
+                0.5 * (y->data[(i - 1) * n + j] + y->data[i * n + j]);
+    }
+    return R;
+}
+
+/* gradient(f) — central differences in the interior, one-sided at
+ * the endpoints. Same shape as the input. For matrices, takes the
+ * gradient down each column (matching MATLAB's single-output form). */
+static void gradient_1d(const double *v, double *g, int64_t n) {
+    if (n == 0) return;
+    if (n == 1) { g[0] = 0.0; return; }
+    g[0]     = v[1] - v[0];
+    g[n - 1] = v[n - 1] - v[n - 2];
+    for (int64_t i = 1; i < n - 1; ++i)
+        g[i] = 0.5 * (v[i + 1] - v[i - 1]);
+}
+matlab_mat *matlab_gradient(matlab_mat *f) {
+    if (!f) return mat_alloc(0, 0);
+    int64_t m = f->rows, n = f->cols;
+    matlab_mat *G = mat_alloc(m, n);
+    if (m == 0 || n == 0) return G;
+    if (m <= 1 || n == 1) {
+        gradient_1d(f->data, G->data, m * n);
+        return G;
+    }
+    double *col = (double *)malloc((size_t)m * sizeof(double));
+    double *out = (double *)malloc((size_t)m * sizeof(double));
+    for (int64_t j = 0; j < n; ++j) {
+        for (int64_t i = 0; i < m; ++i) col[i] = f->data[i * n + j];
+        gradient_1d(col, out, m);
+        for (int64_t i = 0; i < m; ++i) G->data[i * n + j] = out[i];
+    }
+    free(col); free(out);
+    return G;
+}
+
+/* DSP windows. All return a column vector of length n. The MATLAB
+ * reference uses the symmetric (non-periodic) form. */
+matlab_mat *matlab_hamming(double n_d) {
+    int64_t n = (int64_t)n_d;
+    if (n < 1) n = 1;
+    matlab_mat *W = mat_alloc(n, 1);
+    if (n == 1) { W->data[0] = 1.0; return W; }
+    double denom = (double)(n - 1);
+    for (int64_t i = 0; i < n; ++i)
+        W->data[i] = 0.54 - 0.46 * cos(2.0 * M_PI * (double)i / denom);
+    return W;
+}
+matlab_mat *matlab_hann(double n_d) {
+    int64_t n = (int64_t)n_d;
+    if (n < 1) n = 1;
+    matlab_mat *W = mat_alloc(n, 1);
+    if (n == 1) { W->data[0] = 1.0; return W; }
+    double denom = (double)(n - 1);
+    for (int64_t i = 0; i < n; ++i)
+        W->data[i] = 0.5 - 0.5 * cos(2.0 * M_PI * (double)i / denom);
+    return W;
+}
+matlab_mat *matlab_blackman(double n_d) {
+    int64_t n = (int64_t)n_d;
+    if (n < 1) n = 1;
+    matlab_mat *W = mat_alloc(n, 1);
+    if (n == 1) { W->data[0] = 1.0; return W; }
+    double denom = (double)(n - 1);
+    for (int64_t i = 0; i < n; ++i) {
+        double a = 2.0 * M_PI * (double)i / denom;
+        W->data[i] = 0.42 - 0.5 * cos(a) + 0.08 * cos(2.0 * a);
+    }
+    return W;
+}
+
 /* chol(A): upper-triangular Cholesky factor R such that R'*R = A,
  * for a symmetric positive-definite A. Returns a zero matrix if A
  * is not SPD (i.e. a negative diagonal appears). */
@@ -3370,6 +3945,226 @@ matlab_mat *matlab_qr_R(matlab_mat *A) {
     matlab_mat *R = mat_alloc(n, n);
     qr_factor(A, Q, R);
     free(Q->data); free(Q);
+    return R;
+}
+
+/*=========================================================================
+ * Tier-3 builtins: rank, cond, null, orth, imfilter, padarray, interp2,
+ * upsample, downsample.
+ *
+ * These build on the existing SVD / EIG / QR / conv2 primitives — none
+ * of them implement new core numeric kernels, so the failure modes of
+ * the underlying routines (Jacobi eig only handles symmetric inputs,
+ * Gram-Schmidt QR is unpivoted, SVD returns σ-values only) propagate
+ * directly. See docs/runtime.md "Tier 3" for the implications.
+ *=========================================================================*/
+
+double matlab_rank(matlab_mat *A) {
+    if (!A) return 0.0;
+    int64_t m = A->rows, n = A->cols;
+    if (m == 0 || n == 0) return 0.0;
+    matlab_mat *S = matlab_svd(A);
+    int64_t k = S->rows * S->cols;
+    if (k == 0) return 0.0;
+    double smax = S->data[0];
+    double tol = (double)(m > n ? m : n) * smax * 2.220446049250313e-16;
+    int64_t r = 0;
+    for (int64_t i = 0; i < k; ++i) if (S->data[i] > tol) r++;
+    return (double)r;
+}
+
+double matlab_cond(matlab_mat *A) {
+    if (!A) return 0.0;
+    matlab_mat *S = matlab_svd(A);
+    int64_t k = S->rows * S->cols;
+    if (k == 0) return 0.0;
+    double smax = S->data[0];
+    double smin = S->data[k - 1];
+    if (smin == 0.0) return INFINITY;
+    return smax / smin;
+}
+
+/* null(A): orthonormal basis for ker(A). Symmetric eig of A'*A —
+ * eigenvectors with eigenvalue ≈ 0 form the null-space basis. Tolerance
+ * is max-eig * n * eps (matches MATLAB's default rtol). */
+matlab_mat *matlab_null(matlab_mat *A) {
+    if (!A) return mat_alloc(0, 0);
+    int64_t m = A->rows, n = A->cols;
+    if (m == 0 || n == 0) return mat_alloc(n, n);
+    matlab_mat *AT = matlab_transpose(A);
+    matlab_mat *ATA = matlab_matmul_mm(AT, A);   /* n x n, symmetric */
+    matlab_mat *V = matlab_eig_V(ATA);            /* n x n */
+    matlab_mat *D = matlab_eig_D(ATA);            /* n x n diag */
+    double lmax = 0.0;
+    for (int64_t i = 0; i < n; ++i) {
+        double d = D->data[i * n + i];
+        if (d > lmax) lmax = d;
+    }
+    double tol = lmax * (double)n * 2.220446049250313e-16;
+    int64_t cnt = 0;
+    for (int64_t i = 0; i < n; ++i)
+        if (D->data[i * n + i] <= tol) cnt++;
+    matlab_mat *N = mat_alloc(n, cnt);
+    int64_t col = 0;
+    for (int64_t i = 0; i < n; ++i) {
+        if (D->data[i * n + i] > tol) continue;
+        for (int64_t r = 0; r < n; ++r)
+            N->data[r * cnt + col] = V->data[r * n + i];
+        col++;
+    }
+    return N;
+}
+
+/* orth(A): orthonormal basis for col(A). For m >= n, QR + rank
+ * truncation (assumes the leading columns are linearly independent
+ * — true for typical full-rank inputs but a known limitation for
+ * rank-deficient matrices with non-leading dependent columns). For
+ * m < n, eig of A*A' is reliable. */
+matlab_mat *matlab_orth(matlab_mat *A) {
+    if (!A) return mat_alloc(0, 0);
+    int64_t m = A->rows, n = A->cols;
+    if (m == 0 || n == 0) return mat_alloc(m, 0);
+    int64_t r = (int64_t)matlab_rank(A);
+    if (r == 0) return mat_alloc(m, 0);
+    if (m >= n) {
+        matlab_mat *Q = matlab_qr_Q(A);
+        if (r == n) return Q;
+        matlab_mat *Qr = mat_alloc(m, r);
+        for (int64_t i = 0; i < m; ++i)
+            for (int64_t j = 0; j < r; ++j)
+                Qr->data[i * r + j] = Q->data[i * n + j];
+        return Qr;
+    }
+    /* m < n: eig of A*A' (m x m, symmetric). */
+    matlab_mat *AT = matlab_transpose(A);
+    matlab_mat *AAT = matlab_matmul_mm(A, AT);
+    matlab_mat *V = matlab_eig_V(AAT);
+    matlab_mat *D = matlab_eig_D(AAT);
+    double lmax = 0.0;
+    for (int64_t i = 0; i < m; ++i) {
+        double d = D->data[i * m + i];
+        if (d > lmax) lmax = d;
+    }
+    double tol = lmax * (double)m * 2.220446049250313e-16;
+    matlab_mat *Q = mat_alloc(m, r);
+    int64_t col = 0;
+    for (int64_t i = 0; i < m; ++i) {
+        if (D->data[i * m + i] <= tol) continue;
+        if (col >= r) break;
+        for (int64_t row = 0; row < m; ++row)
+            Q->data[row * r + col] = V->data[row * m + i];
+        col++;
+    }
+    return Q;
+}
+
+/* imfilter(A, h): conv2(A, h) cropped to A's size. Centre-aligned —
+ * the kernel's centre is floor(size(h)/2). */
+matlab_mat *matlab_imfilter(matlab_mat *A, matlab_mat *h) {
+    if (!A || !h) return mat_alloc(0, 0);
+    int64_t am = A->rows, an = A->cols;
+    int64_t bm = h->rows, bn = h->cols;
+    if (am == 0 || an == 0 || bm == 0 || bn == 0) return mat_alloc(0, 0);
+    matlab_mat *full = matlab_conv2(A, h);
+    int64_t cn = an + bn - 1;
+    int64_t off_r = (bm - 1) / 2;
+    int64_t off_c = (bn - 1) / 2;
+    matlab_mat *R = mat_alloc(am, an);
+    for (int64_t i = 0; i < am; ++i)
+        for (int64_t j = 0; j < an; ++j)
+            R->data[i * an + j] = full->data[(i + off_r) * cn + (j + off_c)];
+    return R;
+}
+
+/* padarray(A, padsize): zero-pad. padsize is [pre_rows pre_cols] or a
+ * scalar applied to both. Symmetric (same padding before / after). */
+matlab_mat *matlab_padarray(matlab_mat *A, matlab_mat *padsize) {
+    if (!A || !padsize) return mat_alloc(0, 0);
+    int64_t ps_n = padsize->rows * padsize->cols;
+    int64_t pad_r, pad_c;
+    if (ps_n >= 2)      { pad_r = (int64_t)padsize->data[0];
+                           pad_c = (int64_t)padsize->data[1]; }
+    else if (ps_n == 1) { pad_r = pad_c = (int64_t)padsize->data[0]; }
+    else                  return mat_alloc(0, 0);
+    if (pad_r < 0) pad_r = 0;
+    if (pad_c < 0) pad_c = 0;
+    int64_t am = A->rows, an = A->cols;
+    int64_t out_m = am + 2 * pad_r;
+    int64_t out_n = an + 2 * pad_c;
+    matlab_mat *R = mat_alloc(out_m, out_n);
+    for (int64_t i = 0; i < am; ++i)
+        for (int64_t j = 0; j < an; ++j)
+            R->data[(i + pad_r) * out_n + (j + pad_c)] = A->data[i * an + j];
+    return R;
+}
+
+/* interp2(X, Y, V, Xq, Yq): bilinear interpolation. X is a sorted 1xN
+ * row, Y a sorted Mx1 column, V is MxN. Out-of-range queries → NaN. */
+matlab_mat *matlab_interp2(matlab_mat *X, matlab_mat *Y, matlab_mat *V,
+                           matlab_mat *Xq, matlab_mat *Yq) {
+    if (!X || !Y || !V || !Xq || !Yq) return mat_alloc(0, 0);
+    int64_t nx = X->rows * X->cols;
+    int64_t ny = Y->rows * Y->cols;
+    if (nx == 0 || ny == 0 || V->rows != ny || V->cols != nx)
+        return mat_alloc(0, 0);
+    int64_t m = Xq->rows * Xq->cols;
+    if (m != Yq->rows * Yq->cols) return mat_alloc(0, 0);
+    matlab_mat *R = mat_alloc(Xq->rows, Xq->cols);
+    double xmin = X->data[0], xmax = X->data[nx - 1];
+    double ymin = Y->data[0], ymax = Y->data[ny - 1];
+    for (int64_t i = 0; i < m; ++i) {
+        double xq = Xq->data[i], yq = Yq->data[i];
+        if (xq < xmin || xq > xmax || yq < ymin || yq > ymax) {
+            R->data[i] = NAN; continue;
+        }
+        int64_t xlo = 0, xhi = nx - 1;
+        while (xhi - xlo > 1) {
+            int64_t mid = (xlo + xhi) / 2;
+            if (X->data[mid] <= xq) xlo = mid; else xhi = mid;
+        }
+        int64_t ylo = 0, yhi = ny - 1;
+        while (yhi - ylo > 1) {
+            int64_t mid = (ylo + yhi) / 2;
+            if (Y->data[mid] <= yq) ylo = mid; else yhi = mid;
+        }
+        double x0 = X->data[xlo], x1 = X->data[xhi];
+        double y0 = Y->data[ylo], y1 = Y->data[yhi];
+        double tx = (x1 == x0) ? 0.0 : (xq - x0) / (x1 - x0);
+        double ty = (y1 == y0) ? 0.0 : (yq - y0) / (y1 - y0);
+        double v00 = V->data[ylo * nx + xlo];
+        double v01 = V->data[ylo * nx + xhi];
+        double v10 = V->data[yhi * nx + xlo];
+        double v11 = V->data[yhi * nx + xhi];
+        double v_top    = v00 * (1.0 - tx) + v01 * tx;
+        double v_bottom = v10 * (1.0 - tx) + v11 * tx;
+        R->data[i] = v_top * (1.0 - ty) + v_bottom * ty;
+    }
+    return R;
+}
+
+/* upsample / downsample. Output orientation mirrors the input; works
+ * on 1-D vectors only (matrix inputs are flattened). */
+matlab_mat *matlab_upsample(matlab_mat *x, double n_d) {
+    if (!x) return mat_alloc(0, 0);
+    int64_t n = (int64_t)n_d;
+    if (n < 1) n = 1;
+    int64_t L = x->rows * x->cols;
+    int64_t outL = L * n;
+    int is_col = (x->cols == 1 && x->rows > 1);
+    matlab_mat *R = is_col ? mat_alloc(outL, 1) : mat_alloc(1, outL);
+    for (int64_t i = 0; i < L; ++i) R->data[i * n] = x->data[i];
+    return R;
+}
+
+matlab_mat *matlab_downsample(matlab_mat *x, double n_d) {
+    if (!x) return mat_alloc(0, 0);
+    int64_t n = (int64_t)n_d;
+    if (n < 1) n = 1;
+    int64_t L = x->rows * x->cols;
+    int64_t outL = (L + n - 1) / n;
+    int is_col = (x->cols == 1 && x->rows > 1);
+    matlab_mat *R = is_col ? mat_alloc(outL, 1) : mat_alloc(1, outL);
+    for (int64_t i = 0; i < outL; ++i) R->data[i] = x->data[i * n];
     return R;
 }
 
@@ -6590,6 +7385,117 @@ matlab_mat_c *matlab_neg_c(matlab_mat_c *A) {
         C->im[k] = -A->im[k];
     }
     return C;
+}
+
+/* fftshift / ifftshift — circular shift that moves DC to the centre
+ * (fftshift) or back (ifftshift). Polymorphic on real/complex inputs;
+ * always returns a complex descriptor so chained spectra survive.
+ * Shift amount per axis: floor((d+1)/2) forward, floor(d/2) inverse.
+ * On a vector axis the singleton dim is left alone. */
+static matlab_mat_c *fftshift_impl(void *Aptr, int forward) {
+    if (!Aptr) return mat_c_alloc(0, 0);
+    int complex_in = mat_is_complex(Aptr);
+    int64_t m, n;
+    const double *re_in, *im_in;
+    if (complex_in) {
+        matlab_mat_c *A = (matlab_mat_c *)Aptr;
+        m = A->rows; n = A->cols; re_in = A->re; im_in = A->im;
+    } else {
+        matlab_mat *A = (matlab_mat *)Aptr;
+        m = A->rows; n = A->cols; re_in = A->data; im_in = NULL;
+    }
+    matlab_mat_c *C = mat_c_alloc(m, n);
+    if (m == 0 || n == 0) return C;
+    int64_t sr = (m == 1) ? 0 : (forward ? (m + 1) / 2 : m / 2);
+    int64_t sc = (n == 1) ? 0 : (forward ? (n + 1) / 2 : n / 2);
+    for (int64_t i = 0; i < m; ++i)
+        for (int64_t j = 0; j < n; ++j) {
+            int64_t ii = (i + sr) % m;
+            int64_t jj = (j + sc) % n;
+            C->re[ii * n + jj] = re_in[i * n + j];
+            if (im_in) C->im[ii * n + jj] = im_in[i * n + j];
+        }
+    return C;
+}
+
+matlab_mat_c *matlab_fftshift_c(void *A)  { return fftshift_impl(A, 1); }
+matlab_mat_c *matlab_ifftshift_c(void *A) { return fftshift_impl(A, 0); }
+
+/* Tier-2 roots — Durand-Kerner (Weierstrass) iteration. Simultaneously
+ * refines n initial complex guesses on a circle, converging to all n
+ * roots of the polynomial. Returns a complex column vector.
+ *
+ * p is in MATLAB's highest-power-first order. Leading zeros are
+ * stripped (polynomial degree drops accordingly). Trailing zeros
+ * become explicit roots at the origin. */
+static void cmul_(double ar, double ai, double br, double bi,
+                  double *rr, double *ri) {
+    *rr = ar * br - ai * bi;
+    *ri = ar * bi + ai * br;
+}
+static void cdiv_(double ar, double ai, double br, double bi,
+                  double *rr, double *ri) {
+    double d = br * br + bi * bi;
+    *rr = (ar * br + ai * bi) / d;
+    *ri = (ai * br - ar * bi) / d;
+}
+matlab_mat_c *matlab_roots(matlab_mat *p) {
+    if (!p) return mat_c_alloc(0, 0);
+    int64_t np = p->rows * p->cols;
+    int64_t lead = 0;
+    while (lead < np && p->data[lead] == 0.0) lead++;
+    if (lead == np) return mat_c_alloc(0, 0);
+    int64_t deg = (np - 1) - lead;
+    if (deg == 0) return mat_c_alloc(0, 0);
+    int64_t trail = 0;
+    while (trail < deg && p->data[np - 1 - trail] == 0.0) trail++;
+    int64_t deg_eff = deg - trail;
+    matlab_mat_c *R = mat_c_alloc(deg, 1);
+    for (int64_t i = 0; i < trail; ++i) {
+        R->re[deg_eff + i] = 0.0; R->im[deg_eff + i] = 0.0;
+    }
+    if (deg_eff == 0) return R;
+    int64_t qn = deg_eff + 1;
+    double *q = (double *)malloc((size_t)qn * sizeof(double));
+    double lead_c = p->data[lead];
+    for (int64_t i = 0; i < qn; ++i) q[i] = p->data[lead + i] / lead_c;
+    double *zr = (double *)malloc((size_t)deg_eff * sizeof(double));
+    double *zi = (double *)malloc((size_t)deg_eff * sizeof(double));
+    double cur_r = 1.0, cur_i = 0.0;
+    for (int64_t k = 0; k < deg_eff; ++k) {
+        zr[k] = cur_r; zi[k] = cur_i;
+        double nr, ni; cmul_(cur_r, cur_i, 0.4, 0.9, &nr, &ni);
+        cur_r = nr; cur_i = ni;
+    }
+    for (int iter = 0; iter < 200; ++iter) {
+        double max_delta = 0.0;
+        for (int64_t k = 0; k < deg_eff; ++k) {
+            double pr = q[0], pi = 0.0;
+            for (int64_t j = 1; j < qn; ++j) {
+                double nr, ni;
+                cmul_(pr, pi, zr[k], zi[k], &nr, &ni);
+                pr = nr + q[j]; pi = ni;
+            }
+            double dr = 1.0, di = 0.0;
+            for (int64_t j = 0; j < deg_eff; ++j) {
+                if (j == k) continue;
+                double nr, ni;
+                cmul_(dr, di, zr[k] - zr[j], zi[k] - zi[j], &nr, &ni);
+                dr = nr; di = ni;
+            }
+            double sr, si;
+            cdiv_(pr, pi, dr, di, &sr, &si);
+            zr[k] -= sr; zi[k] -= si;
+            double mag = sqrt(sr * sr + si * si);
+            if (mag > max_delta) max_delta = mag;
+        }
+        if (max_delta < 1e-12) break;
+    }
+    for (int64_t k = 0; k < deg_eff; ++k) {
+        R->re[k] = zr[k]; R->im[k] = zi[k];
+    }
+    free(q); free(zr); free(zi);
+    return R;
 }
 
 matlab_mat *matlab_real_c(void *Aptr) {

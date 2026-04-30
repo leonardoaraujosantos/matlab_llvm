@@ -44,6 +44,7 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/ADT/StringSet.h"
 
 namespace matlab {
 namespace mlirgen {
@@ -1859,6 +1860,49 @@ bool TensorLowering::rewriteBuiltinCalls() {
         Changed = true;
         continue;
       }
+    }
+    /* [X, Y] = meshgrid(x[, y]) / ndgrid(x[, y]): two ptr results, one
+     * or two ptr inputs. Mirror the single-arg form (meshgrid(x) ==
+     * meshgrid(x, x)) when only one operand was supplied — the runtime
+     * entries accept y == NULL and re-use x. Two single-output calls
+     * keep the runtime ABI uniform with the rest of the multi-return
+     * builtins above. */
+    if (NA && NA.getValue().getSExtValue() == 2 &&
+        Call->getNumResults() == 2 &&
+        (Name == "meshgrid" || Name == "ndgrid") &&
+        (Call->getNumOperands() == 1 || Call->getNumOperands() == 2)) {
+      bool TypesOK = true;
+      for (unsigned i = 0; i < Call->getNumOperands(); ++i)
+        if (Call->getOperand(i).getType() != PtrTy &&
+            !isTensorLike(Call->getOperand(i).getType())) {
+          TypesOK = false; break;
+        }
+      if (TypesOK) {
+        StringRef F0 = (Name == "meshgrid") ? StringRef("matlab_meshgrid_X")
+                                            : StringRef("matlab_ndgrid_X");
+        StringRef F1 = (Name == "meshgrid") ? StringRef("matlab_meshgrid_Y")
+                                            : StringRef("matlab_ndgrid_Y");
+        B.setInsertionPoint(Call);
+        Value X = Call->getOperand(0);
+        Value Y;
+        if (Call->getNumOperands() == 2) Y = Call->getOperand(1);
+        else Y = LLVM::ZeroOp::create(B, Call->getLoc(), PtrTy);
+        auto Fn0 = rt(F0, PtrTy, {PtrTy, PtrTy});
+        auto Fn1 = rt(F1, PtrTy, {PtrTy, PtrTy});
+        auto C0 = LLVM::CallOp::create(B, Call->getLoc(), Fn0,
+                                        ValueRange{X, Y});
+        auto C1 = LLVM::CallOp::create(B, Call->getLoc(), Fn1,
+                                        ValueRange{X, Y});
+        Call->getResult(0).replaceAllUsesWith(C0.getResult());
+        Call->getResult(1).replaceAllUsesWith(C1.getResult());
+        Call->erase();
+        Changed = true;
+        continue;
+      }
+    }
+    if (NA && NA.getValue().getSExtValue() == 2 &&
+        Call->getNumOperands() == 1 && Call->getNumResults() == 2 &&
+        Call->getOperand(0).getType() == PtrTy) {
       /* [r, c] = size(A): two f64 results, one ptr input. Split into
        * two matlab_size_dim(A, 1) / matlab_size_dim(A, 2) calls —
        * cheaper than a multi-return runtime entry, and reuses the
@@ -2001,6 +2045,47 @@ bool TensorLowering::rewriteBuiltinCalls() {
       /* Convolution. Both operands are matrices (vector layout for conv). */
       {"conv",       "matlab_conv",       1, "pp"},
       {"conv2",      "matlab_conv2",      1, "pp"},
+      /* Tier-1 builtins added alongside conv. filter is the IIR/FIR
+       * difference equation (3 ptr args). The fftshift pair is
+       * polymorphic on real/complex via the matlab_mat_c magic. */
+      {"filter",     "matlab_filter",     1, "ppp"},
+      {"any",        "matlab_any",        1, "p"},
+      {"all",        "matlab_all",        1, "p"},
+      {"tril",       "matlab_tril",       1, "p"},
+      {"triu",       "matlab_triu",       1, "p"},
+      {"fftshift",   "matlab_fftshift_c", 1, "p"},
+      {"ifftshift",  "matlab_ifftshift_c",1, "p"},
+      {"std",        "matlab_std",        1, "p"},
+      {"var",        "matlab_var",        1, "p"},
+      {"median",     "matlab_median",     1, "p"},
+      {"diff",       "matlab_diff",       1, "p"},
+      /* meshgrid/ndgrid one-arg form: meshgrid(x) == meshgrid(x, x).
+       * The multi-return [X,Y]=... form has its own splitter above. */
+      {"meshgrid",   "matlab_meshgrid_X", 1, "p"},
+      {"ndgrid",     "matlab_ndgrid_X",   1, "p"},
+      /* Tier-2: signal-processing, polynomial, numeric calculus. */
+      {"xcorr",      "matlab_xcorr",      1, "pp"},
+      {"polyval",    "matlab_polyval",    1, "pp"},
+      {"polyfit",    "matlab_polyfit",    1, "ppf"},
+      {"roots",      "matlab_roots",      1, "p"},
+      {"interp1",    "matlab_interp1",    1, "ppp"},
+      {"trapz",      "matlab_trapz",      1, "p"},
+      {"trapz",      "matlab_trapz_xy",   1, "pp"},
+      {"cumtrapz",   "matlab_cumtrapz",   1, "p"},
+      {"gradient",   "matlab_gradient",   1, "p"},
+      {"hamming",    "matlab_hamming",    1, "f"},
+      {"hann",       "matlab_hann",       1, "f"},
+      {"blackman",   "matlab_blackman",   1, "f"},
+      /* Tier-3: SVD-derived linalg + image-processing wrappers + interp2. */
+      {"rank",       "matlab_rank",       0, "p"},
+      {"cond",       "matlab_cond",       0, "p"},
+      {"null",       "matlab_null",       1, "p"},
+      {"orth",       "matlab_orth",       1, "p"},
+      {"imfilter",   "matlab_imfilter",   1, "pp"},
+      {"padarray",   "matlab_padarray",   1, "pp"},
+      {"interp2",    "matlab_interp2",    1, "ppppp"},
+      {"upsample",   "matlab_upsample",   1, "pf"},
+      {"downsample", "matlab_downsample", 1, "pf"},
     };
 
     // Pick the first entry with name + arity + TYPE match so overloaded
@@ -2032,6 +2117,53 @@ bool TensorLowering::rewriteBuiltinCalls() {
     };
     for (auto &E : Table)
       if (E.MLName == Name && argTypesMatch(E)) { S = &E; break; }
+
+    /* Scalar-promotion fallback. If no strict match was found, try to
+     * pick a Spec where the only mismatches are 'p' slots receiving
+     * f64 values — those get auto-boxed via matlab_mat_from_scalar at
+     * the call site below. Limited to an explicit allowlist so calls
+     * like mean(5.0) still fall through to the scalar `Scalar` map
+     * below instead of getting wrapped into a 1x1 matrix. The list
+     * covers the Tier 1/2/3 builtins where scalar args are idiomatic
+     * MATLAB (conv(u, gain), filter(b, 1, x), polyval(p, scalar), ...).
+     * See docs/runtime.md "Scalar-arg overloads". */
+    SmallVector<unsigned, 3> BoxIdx;
+    if (!S) {
+      static const llvm::StringSet<> AutoBoxNames = {
+        "conv", "conv2", "filter", "xcorr",
+        "polyval", "polyfit", "interp1", "interp2",
+        "trapz", "cumtrapz", "imfilter", "padarray",
+      };
+      if (AutoBoxNames.contains(Name)) {
+        for (auto &E : Table) {
+          if (E.MLName != Name) continue;
+          if (E.ArgKinds.size() != NOps) continue;
+          bool can_box = true;
+          SmallVector<unsigned, 3> idx;
+          for (unsigned i = 0; i < NOps; ++i) {
+            char K = E.ArgKinds[i];
+            Type Got = Call->getOperand(i).getType();
+            if (K == 'f') {
+              if (Got != F64) { can_box = false; break; }
+            } else { /* 'p' */
+              if (Got == PtrTy || isTensorLike(Got)) {
+                /* already matches strictly */
+              } else if (Got == F64) {
+                idx.push_back(i);
+              } else {
+                can_box = false; break;
+              }
+            }
+          }
+          if (can_box && !idx.empty()) {
+            S = &E;
+            BoxIdx = std::move(idx);
+            break;
+          }
+        }
+      }
+    }
+
     if (!S) {
       // Scalar variants of exp/log/sin/cos/tan/sqrt/abs when the arg is f64
       // already. Fall through to scalar-path below.
@@ -2101,11 +2233,20 @@ bool TensorLowering::rewriteBuiltinCalls() {
     // Check argument count / types.
     if ((int)Call->getNumOperands() != (int)S->ArgKinds.size()) continue;
     SmallVector<Type, 3> ExpTys;
+    /* Operand indices that need boxing skip the strict type check; we'll
+     * materialize matlab_mat_from_scalar(f64) for each before the call.
+     * BoxIdx is small (<= NOps, typically 1–3) so a linear scan beats
+     * pulling in DenseSet. */
+    auto BoxSet_count = [&](unsigned i) -> bool {
+      for (unsigned x : BoxIdx) if (x == i) return true;
+      return false;
+    };
     bool OK = true;
     for (unsigned i = 0; i < S->ArgKinds.size(); ++i) {
       Type Exp = S->ArgKinds[i] == 'f' ? F64 : PtrTy;
       ExpTys.push_back(Exp);
       Type Got = Call->getOperand(i).getType();
+      if (BoxSet_count(i)) continue;  /* will be boxed below */
       // Accept tensor-typed args where we expect ptr (we'll convert via a
       // subsequent retype — but only if the value is actually a ptr at
       // runtime). We'll be strict and require ptr now; tensor-typed inputs
@@ -2118,9 +2259,20 @@ bool TensorLowering::rewriteBuiltinCalls() {
 
     Type ResTy = S->ResultKind == 0 ? F64 : PtrTy;
     B.setInsertionPoint(Call);
+    SmallVector<Value, 3> CallOps;
+    for (unsigned i = 0; i < Call->getNumOperands(); ++i) {
+      Value V = Call->getOperand(i);
+      if (BoxSet_count(i)) {
+        auto FnBox = rt("matlab_mat_from_scalar", PtrTy, {F64});
+        auto Box = LLVM::CallOp::create(B, Call->getLoc(), FnBox,
+                                         ValueRange{V});
+        CallOps.push_back(Box.getResult());
+      } else {
+        CallOps.push_back(V);
+      }
+    }
     auto Fn = rt(S->RTName, ResTy, ExpTys);
-    auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
-                                    Call->getOperands());
+    auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn, ValueRange{CallOps});
     carryName(Call, NC);
     Call->getResult(0).replaceAllUsesWith(NC.getResult());
     Call->erase();

@@ -54,7 +54,7 @@ void Resolver::registerBuiltins() {
     "sprintf", "num2str", "str2double",
     "upper", "lower", "startsWith", "endsWith", "contains",
     "strtrim", "strrep", "strcat",
-    "svd", "eig", "inv", "pinv", "det", "rank",
+    "svd", "eig", "inv", "pinv", "det", "rank", "cond",
     "qr", "lu", "chol", "norm", "trace", "kron",
     "arrayfun", "cellfun",
     "nargin", "nargout", "varargin", "varargout",
@@ -64,6 +64,17 @@ void Resolver::registerBuiltins() {
     "conj", "real", "imag", "angle",
     "fft", "ifft", "fft2", "ifft2",
     "conv", "conv2",
+    "filter", "any", "all", "tril", "triu",
+    "fftshift", "ifftshift",
+    "std", "var", "median", "diff",
+    "meshgrid", "ndgrid",
+    /* Tier 2 — signal/poly/numeric. */
+    "xcorr", "polyval", "polyfit", "roots",
+    "interp1", "trapz", "cumtrapz", "gradient",
+    "hamming", "hann", "blackman",
+    /* Tier 3 — SVD-derived linalg + image-processing wrappers. */
+    "null", "orth", "imfilter", "padarray",
+    "interp2", "upsample", "downsample",
     /* Bitwise builtins. Lower to MATLAB's standard `&` / `|` / `^` /
      * `~` semantics on integer / fi-typed operands. The SV emitter
      * recognizes the matlab.call_builtin sites and renders them as

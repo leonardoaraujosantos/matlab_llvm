@@ -3850,7 +3850,7 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
           auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
           static const llvm::StringSet<> F64Ret = {
             "det", "norm", "trace", "length", "numel", "ndims",
-            "isempty", "isequal", "rank", "sub2ind", "mod", "rem",
+            "isempty", "isequal", "rank", "cond", "sub2ind", "mod", "rem",
             "fix", "round", "floor", "ceil",
           };
           static const llvm::StringSet<> PtrRet = {
@@ -3867,6 +3867,17 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             "conj", "real", "imag", "angle",
             "fft", "ifft", "fft2", "ifft2",
             "conv", "conv2",
+            "filter", "any", "all", "tril", "triu",
+            "fftshift", "ifftshift",
+            "std", "var", "median", "diff",
+            "meshgrid", "ndgrid",
+            "xcorr", "polyval", "polyfit", "roots",
+            "interp1", "trapz", "cumtrapz", "gradient",
+            "hamming", "hann", "blackman",
+            /* Tier-3: linalg helpers + image-processing wrappers + interp2.
+             * rank/cond return f64 (not ptr), so they live in F64Ret above. */
+            "null", "orth", "imfilter", "padarray",
+            "interp2", "upsample", "downsample",
           };
           if (F64Ret.contains(N->Name)) ResTy = F64;
           else if (PtrRet.contains(N->Name)) ResTy = PtrTy;

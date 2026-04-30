@@ -75,6 +75,125 @@ matlab_mat *matlab_matpow(matlab_mat *A, double n);
 matlab_mat *matlab_conv(matlab_mat *u, matlab_mat *v);
 matlab_mat *matlab_conv2(matlab_mat *A, matlab_mat *B);
 
+/* IIR/FIR filter — y = filter(b, a, x). Implements the difference equation
+ *   a(1)*y[n] = sum_k b[k]*x[n-k] - sum_k a[k+1]*y[n-k-1]
+ * via direct-form II transposed. b and a are vectors; x can be a vector
+ * (filtered as a vector) or a matrix (filtered column-wise). a(1) must be
+ * non-zero (returns 0x0 otherwise). */
+matlab_mat *matlab_filter(matlab_mat *b, matlab_mat *a, matlab_mat *x);
+
+/* Logical reductions. MATLAB rule (matches sum/mean/min/max):
+ *   - vector → 1x1 logical (0 or 1, stored as a double).
+ *   - matrix → 1xN row, one bool per column. */
+matlab_mat *matlab_any(matlab_mat *A);
+matlab_mat *matlab_all(matlab_mat *A);
+
+/* Triangular extraction: tril(A) zeroes everything strictly above the
+ * main diagonal; triu(A) zeroes everything strictly below. */
+matlab_mat *matlab_tril(matlab_mat *A);
+matlab_mat *matlab_triu(matlab_mat *A);
+
+/* Spectral shift — moves the zero-frequency bin to the centre of the
+ * spectrum (fftshift) or back (ifftshift). Polymorphic on real and
+ * complex inputs. For 2-D inputs with both rows>1 and cols>1, swaps
+ * quadrants; for vectors, swaps halves. */
+matlab_mat_c *matlab_fftshift_c(void *A);
+matlab_mat_c *matlab_ifftshift_c(void *A);
+
+/* Dispersion + median. std/var follow the same shape rule as mean
+ * (vector→scalar, matrix→1xN row). N-1 normalisation (sample variance),
+ * to match MATLAB's default. median uses linear-time quickselect on a
+ * scratch copy. */
+matlab_mat *matlab_std(matlab_mat *A);
+matlab_mat *matlab_var(matlab_mat *A);
+matlab_mat *matlab_median(matlab_mat *A);
+
+/* First-order discrete differences. On a vector, returns a vector of
+ * length n-1 with v(i+1) - v(i). On a matrix, differences are taken
+ * down each column. */
+matlab_mat *matlab_diff(matlab_mat *A);
+
+/* Coordinate matrices. meshgrid uses image (xy) ordering — X varies
+ * along columns, Y along rows. ndgrid uses array (ij) ordering —
+ * X varies along rows, Y along columns. Both accept either two
+ * vectors or one (used for both axes). The compiler splits a
+ * `[X,Y] = meshgrid(...)` site into two single-output runtime calls. */
+matlab_mat *matlab_meshgrid_X(matlab_mat *x, matlab_mat *y);
+matlab_mat *matlab_meshgrid_Y(matlab_mat *x, matlab_mat *y);
+matlab_mat *matlab_ndgrid_X(matlab_mat *x, matlab_mat *y);
+matlab_mat *matlab_ndgrid_Y(matlab_mat *x, matlab_mat *y);
+
+/* Cross-correlation. xcorr(u, v) treats both as vectors and returns
+ * a vector of length 2*max(numel(u), numel(v)) - 1, with lag-zero at
+ * index max(N,M) (1-based: max(N,M)). For real inputs it equals
+ * conv(u, fliplr(v)) shifted to the standard lag origin. */
+matlab_mat *matlab_xcorr(matlab_mat *u, matlab_mat *v);
+
+/* Polynomial helpers. MATLAB stores coefficients highest-power-first:
+ *   p = [a_n, a_(n-1), ..., a_1, a_0]
+ *   polyval(p, x) -> a_n*x^n + ... + a_0, evaluated elementwise on x.
+ *   polyfit(x, y, n) -> least-squares fit of degree n (returns a
+ *     row vector of length n+1 in the same coefficient order).
+ *   roots(p) -> column vector with the n roots of p (complex layout). */
+matlab_mat   *matlab_polyval(matlab_mat *p, matlab_mat *x);
+matlab_mat   *matlab_polyfit(matlab_mat *x, matlab_mat *y, double n);
+matlab_mat_c *matlab_roots(matlab_mat *p);
+
+/* 1-D linear interpolation. interp1(x, y, xi) requires x to be sorted
+ * and the same length as y. xi can be any shape; the output mirrors
+ * xi's shape. Out-of-range xi values produce NaN (MATLAB default). */
+matlab_mat *matlab_interp1(matlab_mat *x, matlab_mat *y, matlab_mat *xi);
+
+/* Trapezoidal integration / differentiation. trapz(y) assumes unit
+ * spacing; trapz(x, y) uses x. cumtrapz(y) returns a running integral
+ * of the same length as y, leading 0. gradient(f) is central-difference
+ * in the interior, one-sided at the endpoints. All three follow the
+ * vector-vs-matrix shape rule (matrix → column-wise, result is 1xN
+ * for trapz, same-shape for cumtrapz / gradient). */
+matlab_mat *matlab_trapz(matlab_mat *y);
+matlab_mat *matlab_trapz_xy(matlab_mat *x, matlab_mat *y);
+matlab_mat *matlab_cumtrapz(matlab_mat *y);
+matlab_mat *matlab_gradient(matlab_mat *f);
+
+/* DSP windows. n must be >= 1; returns a column vector of length n. */
+matlab_mat *matlab_hamming(double n);
+matlab_mat *matlab_hann(double n);
+matlab_mat *matlab_blackman(double n);
+
+/*--- Tier 3: SVD-derived linalg + image-processing wrappers + 2-D interp ---*/
+
+/* rank(A): count of singular values larger than max(m,n)*sigma_max*eps.
+ * cond(A): sigma_max / sigma_min (Inf if rank-deficient). */
+double matlab_rank(matlab_mat *A);
+double matlab_cond(matlab_mat *A);
+
+/* null(A): orthonormal basis for ker(A). Computed via eigendecomposition
+ * of A'*A — eigenvectors with eigenvalue ≈ 0 form the null-space basis.
+ * orth(A): orthonormal basis for col(A). For m >= n uses QR + rank
+ * truncation; for m < n falls back to eig of A*A'. */
+matlab_mat *matlab_null(matlab_mat *A);
+matlab_mat *matlab_orth(matlab_mat *A);
+
+/* imfilter(A, h): 2-D filtering with 'same' output size — applies h
+ * to A then crops the conv2 'full' result by floor(size(h)/2) on
+ * each side. Boundary handling is implicit zero (same as conv2).
+ * padarray(A, padsize): zero-pad an image by [pre_rows pre_cols]
+ * (or scalar applied to both dims); returns
+ * (rows + 2*pad_r) x (cols + 2*pad_c). */
+matlab_mat *matlab_imfilter(matlab_mat *A, matlab_mat *h);
+matlab_mat *matlab_padarray(matlab_mat *A, matlab_mat *padsize);
+
+/* interp2(X, Y, V, Xq, Yq): bilinear interpolation. X is a sorted
+ * 1xN row, Y is a sorted Mx1 column, V is MxN. Xq / Yq must have the
+ * same shape; output mirrors that shape. Out-of-range queries → NaN. */
+matlab_mat *matlab_interp2(matlab_mat *X, matlab_mat *Y, matlab_mat *V,
+                           matlab_mat *Xq, matlab_mat *Yq);
+
+/* upsample(x, n): insert n-1 zeros between samples (length L*n).
+ * downsample(x, n): take every n-th sample starting at index 1. */
+matlab_mat *matlab_upsample(matlab_mat *x, double n);
+matlab_mat *matlab_downsample(matlab_mat *x, double n);
+
 // Element-wise binary ops (matrix/matrix, matrix/scalar, scalar/matrix).
 matlab_mat *matlab_add_mm(matlab_mat *A, matlab_mat *B);
 matlab_mat *matlab_sub_mm(matlab_mat *A, matlab_mat *B);
