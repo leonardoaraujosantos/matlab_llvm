@@ -135,6 +135,61 @@ def main():
         print("FAIL")
         failed.append(("step_over_multi_stmt_block", str(e)))
 
+    # Regression: a breakpoint set on a JSON line INSIDE a `display`
+    # block (e.g. the `data.expression` line) must resolve to that
+    # block, not snap forward to the next one. Pre-fix only the line
+    # of the opening `{` was registered for each block, so a click on
+    # any other line of the block was forward-snapped to the next
+    # block's `{` — making it look as if `display` blocks couldn't
+    # be broken on at all. The fix tags every Stmt's range with the
+    # closing `}` and aliases interior lines back to the begin line.
+    sys.stdout.write("  display_bp_on_inner_line ... ")
+    sys.stdout.flush()
+    try:
+        prog = os.path.join(repo_root, "examples/mflow/hello.mflow")
+        with open(prog) as f:
+            blob = f.read().splitlines()
+        # Line of the display block's expression field — NOT the
+        # block's opening `{`. Tolerates compact + IDE-pretty JSON.
+        markers = ['"expression" : "\'Hello, world!\'"',
+                   '"expression": "\'Hello, world!\'"']
+        expr_line = None
+        for i, l in enumerate(blob, start=1):
+            if any(m in l for m in markers):
+                expr_line = i
+                break
+        if expr_line is None:
+            raise DapError(f"expression line not found in {prog}")
+        # Sanity: the block's `{` is on the line above, so the bp
+        # we're about to set is genuinely on a non-canonical row.
+        d1_open = next(i+1 for i, l in enumerate(blob)
+                       if '"id": "d1"' in l or '"id" : "d1"' in l)
+        if expr_line == d1_open:
+            raise DapError("test fixture changed: expression and `{` "
+                           f"now share line {expr_line}; pick a "
+                           "different fixture")
+        with DapClient(matlabc, prog) as c:
+            initialize_and_launch(
+                c, stop_on_entry=False,
+                breakpoints=[{"line": expr_line}])
+            body = _stop_event(c)
+            if body.get("reason") != "breakpoint":
+                raise DapError(f"expected reason=breakpoint, got {body!r}")
+            st = c.request("stackTrace", {"threadId": 1})
+            frames = st.get("stackFrames") or []
+            top_name = (frames[0] if frames else {}).get("name") or ""
+            if "[block:d1]" not in top_name:
+                raise DapError(
+                    f"expected break on display block d1, top frame "
+                    f"name was {top_name!r} (likely snapped forward "
+                    "to the next block — alias rewrite is broken)")
+            c.request("continue")
+            c.wait_event("terminated", timeout=10.0)
+        print("ok")
+    except Exception as e:
+        print("FAIL")
+        failed.append(("display_bp_on_inner_line", str(e)))
+
     for case in cases:
         sys.stdout.write(f"  {case['name']} ... ")
         sys.stdout.flush()

@@ -28,12 +28,28 @@ public:
   // its own isolated compilation unit.
   void setReplMode(bool V) { ReplMode = V; }
 
+  // REPL workspace kind hook — when ReplMode is on, the Resolver calls
+  // this for every newly auto-declared binding to learn the kind of
+  // the value previously stored under that name (0=f64, 1=mat, 2=obj,
+  // 3=string, -1=missing). The result seeds the binding's
+  // InferredType so the dispatch sites that key on type (string disp,
+  // strlen, isstring, etc.) light up across compilation boundaries —
+  // without this hook a fresh-input `disp(t)` can't see that `t` was
+  // assigned a "..." in a prior compile.
+  //
+  // matlabc/main.cpp installs the hook before each REPL compile;
+  // other Sema clients that don't need workspace introspection
+  // simply leave it null.
+  using WorkspaceKindHookT = int (*)(const char *name, int64_t len);
+  void setWorkspaceKindHook(WorkspaceKindHookT H) { WorkspaceKindHook = H; }
+
 private:
   SemaContext &Sema;
   TypeContext &TC;
   DiagnosticEngine &Diag;
   Scope *Global = nullptr;
   bool ReplMode = false;
+  WorkspaceKindHookT WorkspaceKindHook = nullptr;
 
   void registerBuiltins();
   void registerBuiltin(std::string_view Name);

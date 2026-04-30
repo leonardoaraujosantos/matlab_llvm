@@ -55,7 +55,12 @@ struct Node {
   std::map<std::string, SourceLocation> DataLocs; // per-field byte location
   std::vector<Port> InPorts;
   std::vector<Port> OutPorts;
-  SourceLocation Loc;       // points at the node object
+  SourceLocation Loc;       // points at the opening `{` of the node object
+  // Points at the closing `}` of the node object. Together with Loc
+  // this gives the Stmt range a synthesised .mflow block covers, so
+  // every line the block spans gets registered as a valid breakpoint
+  // row (not just the line of the opening brace).
+  SourceLocation LocEnd;
   // `ui.position.{x, y}` from the IDE-saved file. The compile path
   // doesn't use these — they're round-trip-only. The Phase 8d
   // `-emit-mflow --preserve-layout` reads them so a re-emit keeps

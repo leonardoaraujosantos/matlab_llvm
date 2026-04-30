@@ -61,7 +61,7 @@ void Resolver::registerBuiltins() {
     "fopen", "fclose", "fgetl", "feof",
     "fread", "fwrite",
     "save", "load",
-    "conj", "real", "imag", "angle",
+    "conj", "real", "imag", "angle", "complex",
     "fft", "ifft", "fft2", "ifft2",
     "conv", "conv2",
     "filter", "any", "all", "tril", "triu",
@@ -595,6 +595,19 @@ void Resolver::resolveExpr(Expr &E, Scope *S) {
       if (ReplMode) {
         Binding *NB = Sema.newBinding();
         B = S->getOrDeclareVar(N.Name, NB);
+        /* REPL cross-input persistence: when the resolver auto-declares
+         * a name that wasn't assigned in this TU, query the live
+         * workspace for the kind under which a prior input bound it.
+         * Stamping InferredType lets every downstream dispatch site
+         * (string disp, strlen, isstring, the workspace load path
+         * itself) see the correct shape — without this, a fresh
+         * `disp(t)` after an earlier `t = "..."` couldn't tell
+         * matrix from string and either silently dropped the read or
+         * matrix-cast the descriptor's bytes. */
+        if (WorkspaceKindHook) {
+          int K = WorkspaceKindHook(N.Name.data(), (int64_t)N.Name.size());
+          if (K == 3) NB->InferredType = TC.stringScalar();
+        }
       } else {
         Diag.error(N.Range.Begin,
                    std::string("undefined name '") + std::string(N.Name) + "'");

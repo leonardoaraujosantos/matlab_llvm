@@ -396,6 +396,11 @@ std::string formatDiagnostics(const SourceManager &SM,
  * stderr — used by the DAP evaluate handler to surface compile
  * errors in the watch box without forcing the user to scan the
  * debug console. */
+/* Resolver workspace-kind hook — defined further down (after the
+ * runtime-introspection externs), forward-declared here so the REPL
+ * compile entries below can install it on their Resolver. */
+extern "C" int replWorkspaceKindHook(const char *name, int64_t len);
+
 int runReplInput(mlirgen::Context &MCtx, const std::string &Src, int Id,
                  std::string *DiagOut = nullptr) {
   SourceManager SM;
@@ -420,6 +425,7 @@ int runReplInput(mlirgen::Context &MCtx, const std::string &Src, int Id,
   TypeContext TC;
   Resolver R(Sema, TC, Diag);
   R.setReplMode(true);
+  R.setWorkspaceKindHook(&replWorkspaceKindHook);
   R.resolve(*TU);
   TypeInference Inf(Sema, TC, Diag);
   Inf.run(*TU);
@@ -1267,6 +1273,25 @@ void  matlab_ws_clear_one(const char *name, int64_t len);
  * formatVar / typeForVar stay layout-agnostic. */
 const char *matlab_string_get_data(void *s, int64_t *len_out);
 int64_t     matlab_string_get_len (void *s);
+
+/* Resolver workspace-kind hook (Resolver::WorkspaceKindHookT). Used
+ * to seed cross-input REPL bindings: when the resolver auto-declares
+ * a name that wasn't assigned in the current TU, this returns the
+ * kind under which a prior input bound it (or -1 if absent). The
+ * Resolver maps kind=3 to InferredType=stringScalar so disp/strlen/
+ * isstring dispatch fires across compilation boundaries. Defined
+ * after main.cpp's runtime-introspection externs because it has to
+ * walk matlab_dbg_ws_count/_name/_kind. */
+extern "C" int replWorkspaceKindHook(const char *name, int64_t len) {
+  int n = matlab_dbg_ws_count();
+  for (int i = 0; i < n; ++i) {
+    int64_t got = 0;
+    const char *gn = matlab_dbg_ws_name(i, &got);
+    if (got == len && gn && memcmp(gn, name, (size_t)len) == 0)
+      return matlab_dbg_ws_kind(i);
+  }
+  return -1;
+}
 int  matlab_dbg_add_breakpoint_ex(int32_t file_id, int32_t line,
                                    const char *cond, int64_t cond_len,
                                    const char *log,  int64_t log_len);
@@ -1505,6 +1530,20 @@ struct Shared {
    * install (`setBreakpoints`) is still authoritative for whether a
    * given line resolves. */
   std::unordered_map<int32_t, std::set<int32_t>> BpLocations;
+  /* Per-file alias map: lines a Stmt covers but doesn't START on,
+   * pointing back to the Stmt's canonical begin line (where the
+   * runtime hook actually fires). Populated alongside `BpLocations`
+   * during the AST walk in compileProgram. Used by:
+   *   - `breakpointLocations` — alias keys are returned as valid bp
+   *     candidates, so the IDE highlights every line a `.mflow`
+   *     block's JSON spans (not just the line of its `{`).
+   *   - `setBreakpoints` — when the user clicks an alias line, we
+   *     install the bp at the canonical line so the runtime hook can
+   *     match it. Without this, a click on `data.expression` of a
+   *     `display` block would either silently snap forward to the
+   *     next block (pre-fix) or register a never-firing bp (after
+   *     expanding BpLocations alone).  */
+  std::unordered_map<int32_t, std::unordered_map<int32_t, int32_t>> BpAliases;
   /* Function name -> (file_id, first body line). Built at
    * compileProgram time from the TU's Function list (top-level +
    * nested) so the DAP `setFunctionBreakpoints` request can install
@@ -1988,6 +2027,7 @@ bool compileProgram() {
   G.FileId = (int32_t)F;
   G.PathToFileId.clear();
   G.BpLocations.clear();
+  G.BpAliases.clear();
   G.FunctionTable.clear();
   G.BlockByLine.clear();
   G.ClassMethods.clear();
@@ -2169,10 +2209,43 @@ bool compileProgram() {
       auto LC = SM.getLineColumn(S->Range.Begin);
       return {(int32_t)S->Range.Begin.File, (int32_t)LC.Line};
     };
+    /* Register the Stmt's canonical begin line in `BpLocations` and
+     * any intermediate lines (Begin.Line, End.Line] in `BpAliases`,
+     * pointing back to the begin line. Two-tier on purpose:
+     *   - The runtime hook fires once per Stmt, on Range.Begin's
+     *     line, so the breakpoint INSTALL has to use that line or
+     *     the bp will never match.
+     *   - But the IDE still wants to let users click any line a
+     *     Stmt spans (especially the human-readable `data.expression`
+     *     line of a `.mflow` block, not its anonymous opening `{`).
+     * The aliases bridge the gap: setBreakpoints rewrites a clicked
+     * alias line to its canonical begin line at install time.
+     *
+     * Constrained to the case where Begin and End share a file id —
+     * synthetic `<flow:NODEID>` buffers and any other cross-file
+     * Range.End fall back to begin-only behaviour. Capped at 1024
+     * lines defensively so a runaway range can't balloon the maps. */
     auto recordStmt = [&](Stmt *S) {
       auto FL = stmtLine(S);
-      if (FL.first != 0 && FL.second != 0)
-        G.BpLocations[FL.first].insert(FL.second);
+      if (FL.first == 0 || FL.second == 0) return;
+      G.BpLocations[FL.first].insert(FL.second);
+      if (!S || !S->Range.End.isValid()) return;
+      if (S->Range.End.File != S->Range.Begin.File) return;
+      uint32_t EndLine = SM.getLineColumn(S->Range.End).Line;
+      if (EndLine <= (uint32_t)FL.second) return;
+      uint32_t Span = EndLine - (uint32_t)FL.second;
+      if (Span > 1024) return;
+      auto &AliasMap = G.BpAliases[FL.first];
+      for (uint32_t L = (uint32_t)FL.second + 1; L <= EndLine; ++L) {
+        /* Don't overwrite an alias already pointing at a closer
+         * (later) Stmt: nested control-flow blocks share lines with
+         * their outer block, and the inner Stmt's canonical line is
+         * what the user expects to break on. AST walk order is
+         * outer-then-inner, so the inner write wins via this guard. */
+        auto It = AliasMap.find((int32_t)L);
+        if (It == AliasMap.end() || It->second < FL.second)
+          AliasMap[(int32_t)L] = FL.second;
+      }
     };
     std::function<void(Block *)> walkBlock;
     walkBlock = [&](Block *B) {
@@ -2294,6 +2367,7 @@ bool compileProgram() {
   TypeContext TC;
   Resolver R(Sema, TC, Diag);
   R.setReplMode(true);
+  R.setWorkspaceKindHook(&replWorkspaceKindHook);
   R.resolve(*TU);
   TypeInference Inf(Sema, TC, Diag);
   Inf.run(*TU);
@@ -3482,6 +3556,11 @@ bool handleRequest(const Object &Msg) {
       auto BL = G.BpLocations.find(Fid);
       if (BL != G.BpLocations.end()) ExecLines = &BL->second;
     }
+    const std::unordered_map<int32_t, int32_t> *AliasLines = nullptr;
+    if (Fid != 0) {
+      auto AL = G.BpAliases.find(Fid);
+      if (AL != G.BpAliases.end()) AliasLines = &AL->second;
+    }
     const Array *Bps = Args->getArray("breakpoints");
     Array Verified;
     if (Bps) {
@@ -3498,17 +3577,32 @@ bool handleRequest(const Object &Msg) {
           Msg = "source not loaded by compileProgram";
         } else if (ExecLines) {
           if (ExecLines->count(Requested) == 0) {
-            /* Snap forward to the next executable line. Forward
-             * only — snapping backward would land before the user's
-             * intent for a click in a blank-line gap between two
-             * statements. */
-            auto It = ExecLines->lower_bound(Requested);
-            if (It != ExecLines->end()) {
-              Resolved = *It;
+            /* Aliased line first: a click inside a Stmt's span (most
+             * commonly a `.mflow` block's body lines) maps back to
+             * the Stmt's canonical begin line, which is where the
+             * runtime hook actually fires. */
+            int32_t Alias = 0;
+            if (AliasLines) {
+              auto AI = AliasLines->find(Requested);
+              if (AI != AliasLines->end()) Alias = AI->second;
+            }
+            if (Alias != 0) {
+              Resolved = Alias;
               Snapped = true;
-              Msg = "snapped to next executable line";
+              Msg = "snapped to start of enclosing block";
             } else {
-              Msg = "no executable line at or after this row";
+              /* Snap forward to the next executable line. Forward
+               * only — snapping backward would land before the
+               * user's intent for a click in a blank-line gap
+               * between two statements. */
+              auto It = ExecLines->lower_bound(Requested);
+              if (It != ExecLines->end()) {
+                Resolved = *It;
+                Snapped = true;
+                Msg = "snapped to next executable line";
+              } else {
+                Msg = "no executable line at or after this row";
+              }
             }
           }
         }
@@ -4541,12 +4635,29 @@ bool handleRequest(const Object &Msg) {
     int64_t Start = StartLineOpt.value_or(1);
     int64_t End = EndLineOpt.value_or(Start);
     Array Locs;
+    std::set<int32_t> Reported;
     auto It = G.BpLocations.find(Fid);
     if (It != G.BpLocations.end()) {
       for (int32_t L : It->second) {
         if ((int64_t)L >= Start && (int64_t)L <= End) {
-          Locs.push_back(Object{{"line", (int64_t)L},
-                                {"column", (int64_t)1}});
+          if (Reported.insert(L).second)
+            Locs.push_back(Object{{"line", (int64_t)L},
+                                  {"column", (int64_t)1}});
+        }
+      }
+    }
+    /* Alias keys: lines a Stmt covers but doesn't start on. The IDE
+     * highlights every JSON line of a `.mflow` block (not just the
+     * line of the opening `{`); setBreakpoints rewrites these back
+     * to the canonical begin line at install time. */
+    auto AIt = G.BpAliases.find(Fid);
+    if (AIt != G.BpAliases.end()) {
+      for (auto &P : AIt->second) {
+        int32_t L = P.first;
+        if ((int64_t)L >= Start && (int64_t)L <= End) {
+          if (Reported.insert(L).second)
+            Locs.push_back(Object{{"line", (int64_t)L},
+                                  {"column", (int64_t)1}});
         }
       }
     }

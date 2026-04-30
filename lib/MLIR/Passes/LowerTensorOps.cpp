@@ -853,6 +853,21 @@ bool TensorLowering::rewriteBuiltinCalls() {
       Changed = true;
       continue;
     }
+    /* matlab_string_size_scalar() — emitted by the lowering's
+     * size("...") fold for string scalars. Returns a fresh 1x2 row
+     * vector [1 1] so downstream consumers (assignment to ans, disp,
+     * arith) see a proper matlab_mat* instead of a misrouted call. */
+    if (Name == "matlab_string_size_scalar" &&
+        Call->getNumOperands() == 0 && Call->getNumResults() == 1) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt("matlab_string_size_scalar", PtrTy, {});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn, ValueRange{});
+      carryName(Call, NC);
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
 
     /* --- String-builtin dispatchers ------------------------------
      * All operate on matlab_string* values (the runtime wraps
@@ -1163,11 +1178,39 @@ bool TensorLowering::rewriteBuiltinCalls() {
      * arm. */
     if ((Name == "matlab_ws_who" || Name == "matlab_ws_whos" ||
          Name == "matlab_ws_clear" ||
-         Name == "matlab_dbg_keyboard_hook") &&
+         Name == "matlab_dbg_keyboard_hook" ||
+         Name == "matlab_tic" || Name == "matlab_toc_print" ||
+         Name == "matlab_pause_keypress") &&
         Call->getNumOperands() == 0) {
       B.setInsertionPoint(Call);
       auto Fn = rt(Name, VoidTy, {});
       LLVM::CallOp::create(B, Call->getLoc(), Fn, ValueRange{});
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+    /* matlab_toc() — zero operands, single f64 result. Separate from
+     * the void arm above because callers consume the elapsed value
+     * (e.g. `t = toc()`). */
+    if (Name == "matlab_toc" && Call->getNumOperands() == 0 &&
+        Call->getNumResults() == 1) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt("matlab_toc", F64, {});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn, ValueRange{});
+      carryName(Call, NC);
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+    /* matlab_pause(seconds) — one f64 operand, no result. Mirrors the
+     * tic/toc shape but accepts the sleep duration. */
+    if (Name == "matlab_pause" && Call->getNumOperands() == 1) {
+      Value Secs = Call->getOperand(0);
+      if (Secs.getType() != F64) continue;
+      B.setInsertionPoint(Call);
+      auto Fn = rt("matlab_pause", VoidTy, {F64});
+      LLVM::CallOp::create(B, Call->getLoc(), Fn, ValueRange{Secs});
       Call->erase();
       Changed = true;
       continue;
@@ -1367,13 +1410,15 @@ bool TensorLowering::rewriteBuiltinCalls() {
     /* REPL workspace accessors. Shape is the same as struct_* but
      * without a base ptr (the workspace is a singleton inside the
      * runtime). Used only when matlabc is invoked with -repl. */
-    if ((Name == "matlab_ws_get_f64" || Name == "matlab_ws_get_mat") &&
+    if ((Name == "matlab_ws_get_f64" || Name == "matlab_ws_get_mat" ||
+         Name == "matlab_ws_get_string") &&
         Call->getNumOperands() == 1 && Call->getNumResults() == 1) {
       Value NameV = Call->getOperand(0);
       int64_t Len = 0;
       Value Ptr = fieldNameAddr(NameV, Len);
       if (!Ptr) continue;
-      bool IsMat = (Name == "matlab_ws_get_mat");
+      bool IsMat = (Name == "matlab_ws_get_mat" ||
+                    Name == "matlab_ws_get_string");
       Type Ret = IsMat ? (Type)PtrTy : (Type)F64;
       B.setInsertionPoint(Call);
       Value LenV = LLVM::ConstantOp::create(
@@ -1962,7 +2007,9 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"mean",       "matlab_mean",       1, "p"},
       {"mean",       "matlab_mean_dim",   1, "pf"},
       {"min",        "matlab_min",        1, "p"},
+      {"min",        "matlab_min_mm",     1, "pp"},  /* min(A, B) elementwise */
       {"max",        "matlab_max",        1, "p"},
+      {"max",        "matlab_max_mm",     1, "pp"},  /* max(A, B) elementwise */
       {"cumsum",     "matlab_cumsum",     1, "p"},
       {"cumsum",     "matlab_cumsum_dim", 1, "pf"},
       {"cumprod",    "matlab_cumprod",    1, "p"},
@@ -2039,6 +2086,9 @@ bool TensorLowering::rewriteBuiltinCalls() {
        * or a matlab_mat_c* — the runtime side dispatches on the layout.
        * conj / fft / ifft / fft2 / ifft2 return complex (ptr); real /
        * imag / angle return a real matrix (also ptr but matlab_mat*). */
+      /* complex(re, im): build a 1x1 matlab_mat_c from two scalars,
+       * mirroring the literal `re + im*i` lowering at line ~361. */
+      {"complex",    "matlab_complex_scalar", 1, "ff"},
       {"conj",       "matlab_conj_c",     1, "p"},
       {"real",       "matlab_real_c",     1, "p"},
       {"imag",       "matlab_imag_c",     1, "p"},

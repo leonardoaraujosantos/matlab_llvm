@@ -19,6 +19,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>    /* clock_gettime / nanosleep — pause/tic/toc */
 #include <unistd.h>  /* for write(2), used by matlab_err_emit_traceback_to_stderr */
 
 #include <vector>    /* Phase-4 RAII scratch buffers */
@@ -1560,6 +1561,66 @@ double matlab_input_num(const char *prompt, int64_t plen) {
     return v;
 }
 
+/*---------- Timing & sleep ----------------------------------------------*/
+
+/* Per-thread default tic/toc slot. INT64_MIN sentinels "tic never called",
+ * which makes toc return 0.0 — matches the MATLAB convention of not warning
+ * on a bare toc, while distinguishing the case from "tic'd at t=0". */
+static thread_local int64_t matlab_tic_ns = INT64_MIN;
+
+static int64_t monotonic_now_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000000000LL + (int64_t)ts.tv_nsec;
+}
+
+void matlab_pause(double seconds) {
+    /* Match MATLAB: non-positive / NaN → return immediately. */
+    if (!(seconds > 0.0)) return;
+    /* Cap at ~10^9 seconds to keep the conversion to timespec defined. */
+    if (seconds > 1e9) seconds = 1e9;
+    struct timespec req;
+    req.tv_sec  = (time_t)seconds;
+    double frac = seconds - (double)req.tv_sec;
+    long ns = (long)(frac * 1e9);
+    if (ns < 0) ns = 0;
+    if (ns > 999999999L) ns = 999999999L;
+    req.tv_nsec = ns;
+    /* Resume on EINTR — pthread cond signals from the debugger thread can
+     * wake nanosleep early; the loop preserves the requested duration. */
+    struct timespec rem;
+    while (nanosleep(&req, &rem) == -1) {
+        if (rem.tv_sec == 0 && rem.tv_nsec == 0) break;
+        req = rem;
+    }
+}
+
+void matlab_pause_keypress(void) {
+    /* Non-interactive run: bail out instead of hanging on a closed stdin.
+     * Matches the behaviour of MATLAB scripts running with -nodesktop in
+     * a redirected pipe (effectively a no-op). */
+    if (!isatty(fileno(stdin))) return;
+    int c = getchar();
+    (void)c;
+}
+
+void matlab_tic(void) {
+    matlab_tic_ns = monotonic_now_ns();
+}
+
+double matlab_toc(void) {
+    if (matlab_tic_ns == INT64_MIN) return 0.0;
+    int64_t dt = monotonic_now_ns() - matlab_tic_ns;
+    return (double)dt * 1e-9;
+}
+
+void matlab_toc_print(void) {
+    double s = matlab_toc();
+    pthread_mutex_lock(&matlab_io_mutex);
+    printf("Elapsed time is %.6f seconds.\n", s);
+    pthread_mutex_unlock(&matlab_io_mutex);
+}
+
 /*---------- Predicates ---------------------------------------------------*/
 
 double matlab_isempty(matlab_mat *A) {
@@ -2855,12 +2916,58 @@ struct matlab_string_s {
 };
 typedef struct matlab_string_s matlab_string;
 
+/* Pointer registry — same shape as matlab_obj_registry above. matlab_mat
+ * and matlab_string both start with `<heap-pointer> + int64_t fields`,
+ * so polymorphic entries (matlab_disp_mat) can't tell them apart by
+ * peeking the descriptor alone. The REPL's `disp(t)` path lowers to
+ * matlab_disp_mat(matlab_ws_get_mat(...)) regardless of the binding's
+ * actual kind because Sema can't see the persisted workspace state
+ * across compilations; matlab_disp_mat consults this registry to
+ * detect string descriptors and route to matlab_string_disp instead
+ * of dereferencing the descriptor's bytes as a numeric matrix. */
+static struct {
+    pthread_mutex_t mu;
+    void **ptrs;
+    int count;
+    int cap;
+} matlab_string_registry = { PTHREAD_MUTEX_INITIALIZER, NULL, 0, 0 };
+
+static void matlab_string_registry_add(void *p) {
+    if (!p) return;
+    pthread_mutex_lock(&matlab_string_registry.mu);
+    if (matlab_string_registry.count == matlab_string_registry.cap) {
+        int ncap = matlab_string_registry.cap ? matlab_string_registry.cap * 2 : 16;
+        void **nptrs = (void **)realloc(matlab_string_registry.ptrs,
+                                        (size_t)ncap * sizeof(void *));
+        if (nptrs) {
+            matlab_string_registry.ptrs = nptrs;
+            matlab_string_registry.cap = ncap;
+        }
+    }
+    if (matlab_string_registry.count < matlab_string_registry.cap) {
+        matlab_string_registry.ptrs[matlab_string_registry.count++] = p;
+    }
+    pthread_mutex_unlock(&matlab_string_registry.mu);
+}
+
+int matlab_string_is_known(const void *p) {
+    if (!p) return 0;
+    int found = 0;
+    pthread_mutex_lock(&matlab_string_registry.mu);
+    for (int i = 0; i < matlab_string_registry.count; ++i) {
+        if (matlab_string_registry.ptrs[i] == p) { found = 1; break; }
+    }
+    pthread_mutex_unlock(&matlab_string_registry.mu);
+    return found;
+}
+
 matlab_string *matlab_string_from_literal(const char *src, int64_t len) {
     matlab_string *s = (matlab_string *)calloc(1, sizeof(*s));
     s->len = len < 0 ? 0 : len;
     s->data = (char *)malloc((size_t)s->len + 1);
     if (src && s->len > 0) memcpy(s->data, src, (size_t)s->len);
     s->data[s->len] = '\0';
+    matlab_string_registry_add(s);
     return s;
 }
 
@@ -2873,6 +2980,7 @@ matlab_string *matlab_string_concat(matlab_string *a, matlab_string *b) {
     if (a && la > 0) memcpy(s->data, a->data, (size_t)la);
     if (b && lb > 0) memcpy(s->data + la, b->data, (size_t)lb);
     s->data[s->len] = '\0';
+    matlab_string_registry_add(s);
     return s;
 }
 
@@ -2887,6 +2995,20 @@ double matlab_string_len(matlab_string *s) {
 }
 
 double matlab_isstring(matlab_string *s) { return s ? 1.0 : 0.0; }
+
+/* Returns a fresh 1x2 row vector [1 1] — the size of a string scalar.
+ * Used by the lowering's length/numel/size fold for string bindings:
+ * MATLAB treats `"Test"` as a 1x1 string array (one element whose value
+ * is the text), so size(s) is `[1 1]`. The fold has to return a
+ * matlab_mat* (because callers feed the result into the generic
+ * `disp` / arith path); allocating it here keeps the lowering free
+ * of inline matrix-construction. */
+matlab_mat *matlab_string_size_scalar(void) {
+    matlab_mat *m = mat_alloc(1, 2);
+    m->data[0] = 1.0;
+    m->data[1] = 1.0;
+    return m;
+}
 
 /* Opaque accessors for the runtime_debug TU (and the DAP/REPL frontend
  * via tools/matlabc/main.cpp). The matlab_string_s layout is private
@@ -4407,6 +4529,17 @@ void matlab_disp_mat(void *Aptr) {
     if (!Aptr) return;
     if (matlab_obj_is_known(Aptr)) {
         matlab_disp_obj((matlab_obj *)Aptr);
+        return;
+    }
+    /* String descriptor arriving through the matrix-disp path. The
+     * REPL JIT lowers `disp(t)` / bare `t` as matlab_disp_mat(
+     * matlab_ws_get_mat(...)) for any pointer-typed binding the
+     * fresh-Sema can't classify; route registered string descriptors
+     * to matlab_string_disp so the user sees the text instead of a
+     * matrix-cast of the descriptor bytes (which used to render as
+     * `4 x <heap-garbage>` doubles). */
+    if (matlab_string_is_known(Aptr)) {
+        matlab_string_disp((matlab_string *)Aptr);
         return;
     }
     if (mat_is_complex(Aptr)) {

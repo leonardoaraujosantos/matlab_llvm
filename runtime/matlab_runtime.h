@@ -33,6 +33,24 @@ void matlab_fprintf_f64_4(const char *fmt, int64_t n,
                           double a, double b, double c, double d);
 double matlab_input_num(const char *prompt, int64_t plen);
 
+/* Timing & sleep.
+ *   matlab_pause(s)        — sleep s seconds. s<=0 / NaN returns immediately.
+ *   matlab_pause_keypress() — block until any byte arrives on stdin (matches
+ *                             MATLAB's no-arg `pause`). No-op if stdin is
+ *                             not a tty so non-interactive runs don't hang.
+ *   matlab_tic()            — record the monotonic-clock start for the
+ *                             default tic/toc slot (per-thread).
+ *   matlab_toc()            — return seconds elapsed since the last tic
+ *                             on this thread (0.0 if tic never called).
+ *   matlab_toc_print()      — same elapsed read, printed as MATLAB does:
+ *                             "Elapsed time is X.YYY seconds."
+ */
+void   matlab_pause(double seconds);
+void   matlab_pause_keypress(void);
+void   matlab_tic(void);
+double matlab_toc(void);
+void   matlab_toc_print(void);
+
 // Parallel / reductions.
 void matlab_parfor_dispatch(double start, double step, double end,
                             matlab_parfor_body_t body, void *state);

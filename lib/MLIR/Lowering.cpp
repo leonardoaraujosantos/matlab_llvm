@@ -801,7 +801,30 @@ mlir::Value Lowerer::loadBinding(Binding *Bnd, const Type *ValTy,
       auto &VA = static_cast<const ArrayType &>(*ValTy);
       ScalarDouble = VA.Elt == Dtype::Double && VA.S.K == Shape::Rank::Scalar;
     }
+    /* String-typed bindings need a dedicated read entry: the workspace
+     * stores them under kind=3, and matlab_ws_get_mat falls back to an
+     * empty 0x0 matrix for non-mat kinds (after the kind=3 patch in
+     * matlab_struct_get_mat it now passes through, but keeping the
+     * dedicated entry isolates string reads from any future struct
+     * helper changes and lets the DAP read-watchpoint path key on
+     * "this is a string read"). Without this, a bare `t` or `disp(t)`
+     * silently rendered as nothing because the load returned a fresh
+     * empty matrix instead of the matlab_string* the assign stored. */
+    bool IsString = false;
+    if (StringBindings.count(Bnd)) IsString = true;
+    else if (Bnd->InferredType &&
+             Bnd->InferredType->K == Type::Kind::StringArray)
+      IsString = true;
+    else if (ValTy && ValTy->K == Type::Kind::StringArray)
+      IsString = true;
     mlir::Value NameV = emitFieldNameChar(Bnd->Name, L);
+    if (IsString) {
+      auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+      mlir::NamedAttribute Cal(
+          mlir::StringAttr::get(&MCtx, "callee"),
+          mlir::StringAttr::get(&MCtx, "matlab_ws_get_string"));
+      return emitUnreg("matlab.call_builtin", {NameV}, PtrTy, L, {Cal});
+    }
     if (ScalarDouble) {
       auto F64 = mlir::Float64Type::get(&MCtx);
       mlir::NamedAttribute Cal(
@@ -1491,6 +1514,14 @@ void Lowerer::lowerStmt(const Stmt &St) {
          * a release-mode binary does nothing — same posture as
          * the breakpoint hook itself. */
         else if (NE->Name == "keyboard") RN = "matlab_dbg_keyboard_hook";
+        /* `tic` / `toc` / `pause` typed bare (no parens) — MATLAB
+         * command-syntax form. Bare `pause` blocks until a keypress
+         * (matched by matlab_pause_keypress); bare `toc` prints the
+         * formatted "Elapsed time is X seconds." line that MATLAB
+         * emits when toc is used as a statement. */
+        else if (NE->Name == "tic")   RN = "matlab_tic";
+        else if (NE->Name == "toc")   RN = "matlab_toc_print";
+        else if (NE->Name == "pause") RN = "matlab_pause_keypress";
         if (!RN.empty()) {
           mlir::NamedAttribute Cal(
               mlir::StringAttr::get(&MCtx, "callee"),
@@ -1540,9 +1571,16 @@ void Lowerer::lowerStmt(const Stmt &St) {
       bool DispIsString = (E.E->Ty &&
                            E.E->Ty->K == Type::Kind::StringArray) ||
                           E.E->Kind == NodeKind::StringLiteral;
-      if (auto *NE = dynamic_cast<const NameExpr *>(E.E))
+      if (auto *NE = dynamic_cast<const NameExpr *>(E.E)) {
         if (NE->Ref && StringBindings.count(NE->Ref))
           DispIsString = true;
+        /* Cross-REPL-input case: a fresh translation unit that just
+         * mentions `t` doesn't repopulate StringBindings; rely on the
+         * binding's persisted InferredType. */
+        else if (NE->Ref && NE->Ref->InferredType &&
+                 NE->Ref->InferredType->K == Type::Kind::StringArray)
+          DispIsString = true;
+      }
       if (DispIsString) {
         mlir::NamedAttribute SCal(
             mlir::StringAttr::get(&MCtx, "callee"),
@@ -3453,6 +3491,52 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
         }
       }
 
+      /* length / numel / size on a string scalar — MATLAB treats a
+       * "..."-style string as a 1x1 string array (one element whose
+       * value is the text), so length/numel are 1 and size is [1 1].
+       * Without this fold the call survives as matlab.call_builtin
+       * over a matlab_string* pointer; the generic matrix lowering
+       * downstream then casts the descriptor to matlab_mat and reads
+       * its length field as `rows` (the user saw `4 × <heap-garbage>`
+       * for size("Test")). Detect via StringBindings or the binding's
+       * persisted InferredType; literals fall through StringLiteral. */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          (N->Name == "length" || N->Name == "numel" ||
+           N->Name == "size") &&
+          !C.Args.empty() && C.Args[0]) {
+        bool IsStr = (C.Args[0]->Kind == NodeKind::StringLiteral);
+        if (auto *AN = dynamic_cast<const NameExpr *>(C.Args[0])) {
+          if (AN->Ref &&
+              (StringBindings.count(AN->Ref) ||
+               (AN->Ref->InferredType &&
+                AN->Ref->InferredType->K == Type::Kind::StringArray)))
+            IsStr = true;
+        }
+        if (C.Args[0]->Ty &&
+            C.Args[0]->Ty->K == Type::Kind::StringArray)
+          IsStr = true;
+        if (IsStr) {
+          auto F64 = mlir::Float64Type::get(&MCtx);
+          if (N->Name == "length" || N->Name == "numel") {
+            return mlir::arith::ConstantOp::create(
+                B, L, F64, mlir::FloatAttr::get(F64, 1.0));
+          }
+          /* size("..."): single-arg returns [1 1]; size(s, k) returns 1
+           * for any k since strings are 1x1. */
+          if (C.Args.size() == 1) {
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx,
+                                       "matlab_string_size_scalar"));
+            return emitUnreg("matlab.call_builtin", {},
+                             mlir::LLVM::LLVMPointerType::get(&MCtx),
+                             L, {Cal});
+          }
+          /* size(s, dim) — for any dim, a string scalar reports 1. */
+          return mlir::arith::ConstantOp::create(
+              B, L, F64, mlir::FloatAttr::get(F64, 1.0));
+        }
+      }
       /* length/numel/size on fi arrays — route to the typed-int matrix
        * shape helpers. Sema already returns scalar Double, so the result
        * type stays f64. */
@@ -3586,8 +3670,15 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
           N->Name == "disp" && C.Args.size() == 1) {
         bool IsStr = false;
         if (C.Args[0]->Kind == NodeKind::StringLiteral) IsStr = true;
-        else if (auto *AN = dynamic_cast<const NameExpr *>(C.Args[0]))
-          IsStr = AN->Ref && StringBindings.count(AN->Ref) > 0;
+        else if (auto *AN = dynamic_cast<const NameExpr *>(C.Args[0])) {
+          if (AN->Ref && StringBindings.count(AN->Ref) > 0) IsStr = true;
+          /* Cross-REPL-input fallback: this compilation may not have
+           * seen the assigning input that populated StringBindings;
+           * use the binding's persisted InferredType. */
+          else if (AN->Ref && AN->Ref->InferredType &&
+                   AN->Ref->InferredType->K == Type::Kind::StringArray)
+            IsStr = true;
+        }
         else if (auto *CC = dynamic_cast<const CallOrIndex *>(C.Args[0])) {
           if (auto *CN = dynamic_cast<const NameExpr *>(CC->Callee)) {
             if (CN->Ref && CN->Ref->Kind == BindingKind::Builtin) {
@@ -3609,11 +3700,20 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
                            mlir::NoneType::get(&MCtx), L, {Cal});
         }
       }
-      /* strlen(s) on a string binding -> matlab_string_len. */
+      /* strlen(s) on a string binding -> matlab_string_len. The
+       * cross-REPL-input fallback consults the binding's
+       * InferredType (seeded by the resolver's workspace hook) so
+       * a fresh-input `strlen(t)` after an earlier `t = "..."` still
+       * routes to the string runtime instead of leaving an
+       * unconvertible matlab.call_builtin in the JIT module. */
       if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
           N->Name == "strlen" && C.Args.size() == 1) {
         auto *AN = dynamic_cast<const NameExpr *>(C.Args[0]);
-        if (AN && AN->Ref && StringBindings.count(AN->Ref)) {
+        bool IsStr = AN && AN->Ref &&
+                     (StringBindings.count(AN->Ref) ||
+                      (AN->Ref->InferredType &&
+                       AN->Ref->InferredType->K == Type::Kind::StringArray));
+        if (IsStr) {
           auto F64 = mlir::Float64Type::get(&MCtx);
           mlir::Value V = lowerExpr(*C.Args[0]);
           mlir::NamedAttribute Cal(
@@ -3622,7 +3722,8 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
           return emitUnreg("matlab.call_builtin", {V}, F64, L, {Cal});
         }
       }
-      /* isstring(x) compile-time fold. */
+      /* isstring(x) compile-time fold. Same cross-input fallback as
+       * strlen above. */
       if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
           N->Name == "isstring" && C.Args.size() == 1) {
         auto *AN = dynamic_cast<const NameExpr *>(C.Args[0]);
@@ -3630,6 +3731,9 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
         double Val = 0.0;
         if (C.Args[0]->Kind == NodeKind::StringLiteral) Val = 1.0;
         else if (AN && AN->Ref && StringBindings.count(AN->Ref)) Val = 1.0;
+        else if (AN && AN->Ref && AN->Ref->InferredType &&
+                 AN->Ref->InferredType->K == Type::Kind::StringArray)
+          Val = 1.0;
         return mlir::arith::ConstantOp::create(
             B, L, F64, mlir::FloatAttr::get(F64, Val));
       }
@@ -3749,6 +3853,57 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             mlir::StringAttr::get(&MCtx, "matlab_ws_whos"));
         return emitUnreg("matlab.call_builtin", {},
                          mlir::NoneType::get(&MCtx), L, {Cal});
+      }
+      /* keyboard() — call form drops into the debugger pause same as the
+       * bare `keyboard` statement. No-op in release (-g not set). */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          N->Name == "keyboard" && C.Args.empty()) {
+        mlir::NamedAttribute Cal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "matlab_dbg_keyboard_hook"));
+        return emitUnreg("matlab.call_builtin", {},
+                         mlir::NoneType::get(&MCtx), L, {Cal});
+      }
+      /* tic() — call form. Same effect as bare `tic`: starts the
+       * thread-local timer slot. Returns no value. */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          N->Name == "tic" && C.Args.empty()) {
+        mlir::NamedAttribute Cal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "matlab_tic"));
+        return emitUnreg("matlab.call_builtin", {},
+                         mlir::NoneType::get(&MCtx), L, {Cal});
+      }
+      /* toc() — call form returns elapsed seconds (f64). Used in
+       * expressions like `t = toc()` or `disp(toc())`. The bare-name
+       * `toc` statement form prints "Elapsed time is ..." instead. */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          N->Name == "toc" && C.Args.empty()) {
+        auto F64 = mlir::Float64Type::get(&MCtx);
+        mlir::NamedAttribute Cal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "matlab_toc"));
+        return emitUnreg("matlab.call_builtin", {}, F64, L, {Cal});
+      }
+      /* pause() / pause(n) — call form. With no args, blocks for a
+       * keypress; with one numeric arg, sleeps for that many seconds. */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          N->Name == "pause") {
+        if (C.Args.empty()) {
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_pause_keypress"));
+          return emitUnreg("matlab.call_builtin", {},
+                           mlir::NoneType::get(&MCtx), L, {Cal});
+        }
+        if (C.Args.size() == 1) {
+          mlir::Value SecsV = lowerExpr(*C.Args[0]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_pause"));
+          return emitUnreg("matlab.call_builtin", {SecsV},
+                           mlir::NoneType::get(&MCtx), L, {Cal});
+        }
       }
       if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
           N->Name == "clear") {
@@ -3929,7 +4084,7 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             "find", "ind2sub", "linspace",
             /* Complex: all return a matrix descriptor (matlab_mat* or
              * matlab_mat_c*), uniformly ptr at MLIR level. */
-            "conj", "real", "imag", "angle",
+            "conj", "real", "imag", "angle", "complex",
             "fft", "ifft", "fft2", "ifft2",
             "conv", "conv2",
             "filter", "any", "all", "tril", "triu",

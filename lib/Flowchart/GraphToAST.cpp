@@ -514,9 +514,13 @@ private:
         // statements. The synthetic per-block buffer keeps the
         // parser's intra-field locations available for diagnostics
         // that point inside `data.expression` text — only the
-        // outer Stmt range is overridden here.
+        // outer Stmt range is overridden here. Both endpoints land in
+        // the .mflow file so the AST walker that populates DAP
+        // BpLocations can register every JSON line the block spans
+        // (otherwise a click on `data.expression` would snap forward
+        // past the block onto the next one).
         S->Range.Begin = N->Loc;
-        if (!S->Range.End.isValid()) S->Range.End = N->Loc;
+        S->Range.End   = N->LocEnd.isValid() ? N->LocEnd : N->Loc;
         Out.push_back(S);
       }
 
@@ -547,6 +551,7 @@ private:
     recordBlock(N);
     auto *S = Ctx.make<IfStmt>();
     S->Range.Begin = N.Loc;
+    S->Range.End   = N.LocEnd.isValid() ? N.LocEnd : N.Loc;
     S->Cond = Cond;
     S->Then = Ctx.make<Block>();
     S->Else = Ctx.make<Block>();
@@ -596,6 +601,7 @@ private:
     recordBlock(N);
     auto *S = Ctx.make<ForStmt>();
     S->Range.Begin = N.Loc;
+    S->Range.End   = N.LocEnd.isValid() ? N.LocEnd : N.Loc;
     S->Var = Ctx.intern(*VarStr);
     S->Iter = Iter;
     S->Body = Ctx.make<Block>();
@@ -713,7 +719,7 @@ private:
     for (auto *S : Stmts) {
       // Phase 6: see remap rationale above the linear-block path.
       S->Range.Begin = N.Loc;
-      if (!S->Range.End.isValid()) S->Range.End = N.Loc;
+      S->Range.End   = N.LocEnd.isValid() ? N.LocEnd : N.Loc;
       Out.push_back(S);
     }
 
@@ -876,6 +882,7 @@ private:
     recordBlock(N);
     auto *S = Ctx.make<SwitchStmt>();
     S->Range.Begin = N.Loc;
+    S->Range.End   = N.LocEnd.isValid() ? N.LocEnd : N.Loc;
     S->Discriminant = Disc;
 
     auto InnerStop = OuterStop;
@@ -926,6 +933,7 @@ private:
     recordBlock(N);
     auto *S = Ctx.make<TryStmt>();
     S->Range.Begin = N.Loc;
+    S->Range.End   = N.LocEnd.isValid() ? N.LocEnd : N.Loc;
     if (auto *CV = N.getData("catch_var"); CV && !CV->empty())
       S->CatchVar = Ctx.intern(*CV);
     S->TryBody = Ctx.make<Block>();
@@ -963,6 +971,7 @@ private:
     recordBlock(N);
     auto *S = Ctx.make<WhileStmt>();
     S->Range.Begin = N.Loc;
+    S->Range.End   = N.LocEnd.isValid() ? N.LocEnd : N.Loc;
     S->Cond = Cond;
     S->Body = Ctx.make<Block>();
 

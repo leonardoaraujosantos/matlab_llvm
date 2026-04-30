@@ -32,6 +32,13 @@ enum class JKind {
 struct JValue {
   JKind Kind = JKind::Null;
   uint32_t Offset = 0;                       // byte offset of first char
+  // Byte offset of the LAST character of the value (inclusive): the
+  // closing `}` / `]` / `"`, the last digit of a number, or the last
+  // letter of `true` / `false` / `null`. Used so callers can derive
+  // a SourceLocation that points at the end of a JSON value — the
+  // breakpoint plumbing relies on this to register every line a
+  // .mflow block spans, not just the line of its opening `{`.
+  uint32_t EndOffset = 0;
   // The variant payload — flat fields keep this header-free.
   bool BoolVal = false;
   std::string StrVal;                        // for String / Number (raw text)
@@ -96,6 +103,13 @@ private:
     return false;
   }
 
+  // Stamp V.EndOffset with the position of the last character we just
+  // consumed (Pos_ is one past it, so subtract one). Called from each
+  // successful return path in the parse* helpers below.
+  void setEnd(JValue &V) {
+    V.EndOffset = Pos_ > 0 ? static_cast<uint32_t>(Pos_ - 1) : V.Offset;
+  }
+
   JValue parseValue() {
     skipWs();
     if (Failed_ || Pos_ >= Src_.size()) {
@@ -119,7 +133,7 @@ private:
     V.Kind = JKind::Object;
     ++Pos_;                  // consume '{'
     skipWs();
-    if (consume('}')) return V;
+    if (consume('}')) { setEnd(V); return V; }
     while (!Failed_) {
       skipWs();
       if (Pos_ >= Src_.size() || Src_[Pos_] != '"') {
@@ -140,7 +154,7 @@ private:
       V.ObjVal.emplace_back(std::move(K.StrVal), std::move(Val));
       skipWs();
       if (consume(',')) continue;
-      if (consume('}')) return V;
+      if (consume('}')) { setEnd(V); return V; }
       err(Pos_, "expected ',' or '}' in object");
       return V;
     }
@@ -151,14 +165,14 @@ private:
     V.Kind = JKind::Array;
     ++Pos_;                  // consume '['
     skipWs();
-    if (consume(']')) return V;
+    if (consume(']')) { setEnd(V); return V; }
     while (!Failed_) {
       JValue E = parseValue();
       if (Failed_) return V;
       V.ArrVal.push_back(std::move(E));
       skipWs();
       if (consume(',')) continue;
-      if (consume(']')) return V;
+      if (consume(']')) { setEnd(V); return V; }
       err(Pos_, "expected ',' or ']' in array");
       return V;
     }
@@ -175,7 +189,7 @@ private:
     std::string Out;
     while (Pos_ < Src_.size()) {
       char C = Src_[Pos_++];
-      if (C == '"') { V.StrVal = std::move(Out); return V; }
+      if (C == '"') { V.StrVal = std::move(Out); setEnd(V); return V; }
       if (C == '\\') {
         if (Pos_ >= Src_.size()) {
           err(Pos_, "unterminated escape sequence");
@@ -248,20 +262,21 @@ private:
       while (Pos_ < Src_.size() && std::isdigit(static_cast<unsigned char>(Src_[Pos_]))) ++Pos_;
     }
     V.StrVal.assign(Src_.substr(Start, Pos_ - Start));
+    setEnd(V);
     return V;
   }
 
   JValue parseBool(JValue V) {
     V.Kind = JKind::Bool;
-    if (Src_.substr(Pos_, 4) == "true")   { Pos_ += 4; V.BoolVal = true;  return V; }
-    if (Src_.substr(Pos_, 5) == "false")  { Pos_ += 5; V.BoolVal = false; return V; }
+    if (Src_.substr(Pos_, 4) == "true")   { Pos_ += 4; V.BoolVal = true;  setEnd(V); return V; }
+    if (Src_.substr(Pos_, 5) == "false")  { Pos_ += 5; V.BoolVal = false; setEnd(V); return V; }
     err(Pos_, "expected 'true' or 'false'");
     return V;
   }
 
   JValue parseNull(JValue V) {
     V.Kind = JKind::Null;
-    if (Src_.substr(Pos_, 4) == "null")   { Pos_ += 4; return V; }
+    if (Src_.substr(Pos_, 4) == "null")   { Pos_ += 4; setEnd(V); return V; }
     err(Pos_, "expected 'null'");
     return V;
   }
@@ -292,6 +307,18 @@ SourceLocation locOf(const JValue &V, FileID File) {
   SourceLocation L;
   L.File = File;
   L.Offset = V.Offset;
+  return L;
+}
+
+// Location pointing AT the last character of the JSON value (the
+// closing `}` / `]` / `"` for compound types, the last digit/letter
+// for scalars). Used to derive `Node::LocEnd` so the Stmt range a
+// .mflow block synthesises spans every line of its JSON object — the
+// AST walker in matlabc registers each line as breakpoint-eligible.
+SourceLocation endLocOf(const JValue &V, FileID File) {
+  SourceLocation L;
+  L.File = File;
+  L.Offset = V.EndOffset != 0 ? V.EndOffset : V.Offset;
   return L;
 }
 
@@ -453,6 +480,7 @@ private:
     }
     Node N;
     N.Loc = locOf(NJ, File_);
+    N.LocEnd = endLocOf(NJ, File_);
     if (auto *S = asString(NJ.find("id"))) N.Id = *S;
     if (auto *S = asString(NJ.find("kind"))) N.Kind = *S;
     if (auto *S = asString(NJ.find("label"))) N.Label = *S;
