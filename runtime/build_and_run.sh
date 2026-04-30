@@ -12,11 +12,12 @@ set -euo pipefail
 MATLABC="${MATLABC:-$(cd "$(dirname "$0")/.." && pwd)/build/matlabc}"
 CLANG="${CLANG:-/opt/homebrew/opt/llvm/bin/clang}"
 RUNTIME_DIR="$(cd "$(dirname "$0")" && pwd)"
-# Phase-2 split (docs/port_runtime_2_cpp.md): runtime is two .cpp files
-# sharing private layouts via runtime_internal.h.
+# Phase-2 + 2.5 split (docs/port_runtime_2_cpp.md): runtime is three
+# .cpp files sharing private layouts via runtime_internal.h.
 RUNTIME_SRCS=(
   "$RUNTIME_DIR/matlab_runtime.cpp"
   "$RUNTIME_DIR/runtime_debug.cpp"
+  "$RUNTIME_DIR/runtime_complex.cpp"
 )
 
 if [[ ! -x "$MATLABC" ]]; then

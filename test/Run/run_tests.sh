@@ -16,11 +16,12 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 CLANG="${CLANG:-/opt/homebrew/opt/llvm/bin/clang}"
 # Runtime is C++ since Phase 3 of docs/port_runtime_2_cpp.md — drive the
 # link line with clang++ so the .cpp is compiled as C++.
-# Phase-2 split: two .cpp files share private layouts via
-# runtime_internal.h. Both must appear on every link line.
+# Phase-2 + 2.5 split: three .cpp files share private layouts via
+# runtime_internal.h. All three must appear on every link line.
 RUNTIME_SRCS=(
   "$ROOT/runtime/matlab_runtime.cpp"
   "$ROOT/runtime/runtime_debug.cpp"
+  "$ROOT/runtime/runtime_complex.cpp"
 )
 CXX="${CXX:-${CLANG}++}"
 TESTDIR="$(cd "$(dirname "$0")" && pwd)"

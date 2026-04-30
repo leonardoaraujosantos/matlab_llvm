@@ -198,6 +198,33 @@ using MatCPtr = std::unique_ptr<matlab_mat_c, MatCDeleter>;
 inline MatPtr  make_mat   (int64_t m, int64_t n) { return MatPtr (mat_alloc  (m, n)); }
 inline MatCPtr make_mat_c (int64_t m, int64_t n) { return MatCPtr(mat_c_alloc(m, n)); }
 
+/*--- Phase 5: shape-op template -----------------------------------------
+ *
+ * Collapses the "alloc m_out x n_out, double for-loop, one differing
+ * index expression, return" pattern shared by transpose / fliplr /
+ * flipud / flip / rot90 / diag (vector path) / repmat / permute /
+ * squeeze into a one-liner. Each op provides only the per-cell index
+ * expression as a lambda:
+ *
+ *     matlab_mat *matlab_fliplr(matlab_mat *A) {
+ *         if (!A) return mat_alloc(0, 0);
+ *         int64_t m = A->rows, n = A->cols;
+ *         return matlab::runtime::shape_op(m, n, [&](int64_t i, int64_t j) {
+ *             return A->data[i * n + (n - 1 - j)];
+ *         }).release();
+ *     }
+ *
+ * The lambda runs inside shape_op only — no escape — so [&] capture
+ * of the input matrix and its dimensions is safe and zero-cost. */
+template <class IndexFn>
+inline MatPtr shape_op(int64_t m_out, int64_t n_out, IndexFn idx) {
+    MatPtr R = make_mat(m_out, n_out);
+    for (int64_t i = 0; i < m_out; ++i)
+        for (int64_t j = 0; j < n_out; ++j)
+            R->data[i * n_out + j] = idx(i, j);
+    return R;
+}
+
 } }  /* namespace matlab::runtime */
 
 #endif /* __cplusplus */
