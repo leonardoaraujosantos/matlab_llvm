@@ -19,6 +19,24 @@ include_directories(${CMAKE_SOURCE_DIR}/include)
 # llvm isn't installed or for CI machines that only build the frontend stack).
 option(MATLAB_LLVM_WITH_MLIR "Enable MLIR-based lowering stack" ON)
 
+# --- Coverage ---------------------------------------------------------------
+# Off by default; turn on with -DMATLAB_LLVM_COVERAGE=ON to instrument the
+# matlabc binary (and therefore runtime/matlab_runtime.c) with Clang's
+# source-based coverage. Drives the runtime-coverage baseline used by
+# docs/port_runtime_2_cpp.md. See scripts/runtime_coverage.sh.
+option(MATLAB_LLVM_COVERAGE "Build matlabc with Clang source-based coverage" OFF)
+if(MATLAB_LLVM_COVERAGE)
+  if(NOT CMAKE_C_COMPILER_ID MATCHES "Clang"
+     OR NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    message(FATAL_ERROR
+      "MATLAB_LLVM_COVERAGE requires Clang for both C and C++ "
+      "(found C=${CMAKE_C_COMPILER_ID}, CXX=${CMAKE_CXX_COMPILER_ID}).")
+  endif()
+  set(MATLAB_LLVM_COVERAGE_FLAGS -fprofile-instr-generate -fcoverage-mapping)
+  message(STATUS "Coverage build enabled "
+                 "(flags: ${MATLAB_LLVM_COVERAGE_FLAGS})")
+endif()
+
 if(MATLAB_LLVM_WITH_MLIR)
   # Prefer Homebrew's keg-only llvm on macOS if the user hasn't set LLVM_DIR.
   if(APPLE AND NOT DEFINED LLVM_DIR AND EXISTS "/opt/homebrew/opt/llvm")
@@ -184,7 +202,36 @@ if(MATLAB_LLVM_WITH_MLIR)
     LLVMOrcJIT LLVMExecutionEngine)
 endif()
 
+# Instrument matlabc (which absorbs runtime/matlab_runtime.c via
+# target_sources above) for Clang source-based coverage.
+if(MATLAB_LLVM_COVERAGE)
+  target_compile_options(matlabc PRIVATE ${MATLAB_LLVM_COVERAGE_FLAGS})
+  target_link_options(matlabc PRIVATE ${MATLAB_LLVM_COVERAGE_FLAGS})
+endif()
+
 enable_testing()
+
+# --- Runtime unit tests -----------------------------------------------------
+# Direct C tests for runtime/matlab_runtime.c — no JIT, no MATLAB
+# frontend. Each test_*.c links the runtime TU directly. See
+# docs/port_runtime_2_cpp.md (Phase 1).
+foreach(_rt_test IN ITEMS linalg shape rng complex reduce)
+  set(_rt_target "runtime-test-${_rt_test}")
+  add_executable(${_rt_target}
+    test/Runtime/test_${_rt_test}.c
+    runtime/matlab_runtime.c)
+  target_include_directories(${_rt_target} PRIVATE
+    ${CMAKE_SOURCE_DIR}/runtime
+    ${CMAKE_SOURCE_DIR}/test/Runtime)
+  target_link_libraries(${_rt_target} PRIVATE m)
+  if(MATLAB_LLVM_COVERAGE)
+    target_compile_options(${_rt_target} PRIVATE ${MATLAB_LLVM_COVERAGE_FLAGS})
+    target_link_options(${_rt_target}    PRIVATE ${MATLAB_LLVM_COVERAGE_FLAGS})
+  endif()
+  add_test(NAME runtime-tests-${_rt_test}
+           COMMAND $<TARGET_FILE:${_rt_target}>)
+endforeach()
+
 add_test(
   NAME frontend-tests
   COMMAND ${CMAKE_SOURCE_DIR}/test/run_tests.sh $<TARGET_FILE:matlabc>
