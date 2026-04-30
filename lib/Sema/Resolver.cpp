@@ -606,7 +606,16 @@ void Resolver::resolveExpr(Expr &E, Scope *S) {
          * matrix-cast the descriptor's bytes. */
         if (WorkspaceKindHook) {
           int K = WorkspaceKindHook(N.Name.data(), (int64_t)N.Name.size());
-          if (K == 3) NB->InferredType = TC.stringScalar();
+          /* Kind encoding (matches matlab_dbg_ws_kind):
+           *   0 = f64 scalar, 1 = matlab_mat*, 2 = matlab_obj*,
+           *   3 = matlab_string*. Stamp InferredType for the kinds
+           *   the lowering can specialise on — without a scalar-double
+           *   stamp, the workspace load path falls back to
+           *   matlab_ws_get_mat (returns ptr) and downstream consumers
+           *   that need an f64 (num2str / arithmetic / range bounds)
+           *   silently misbehave. */
+          if (K == 0) NB->InferredType = TC.scalar(Dtype::Double);
+          else if (K == 3) NB->InferredType = TC.stringScalar();
         }
       } else {
         Diag.error(N.Range.Begin,

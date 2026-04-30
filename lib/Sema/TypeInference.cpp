@@ -571,6 +571,16 @@ const Type *TypeInference::visit(Expr &E, Env &Env) {
       } else if (N.Ref->Kind == BindingKind::Function ||
                  N.Ref->Kind == BindingKind::Builtin) {
         T = TC.funcHandle();
+      } else if (N.Ref->InferredType) {
+        /* REPL cross-input persistence: the workspace-kind hook may
+         * have already stamped a concrete InferredType for an auto-
+         * declared name (kind=0 -> scalar double, kind=3 -> string).
+         * Seed Env with it so this read-side visit, which runs before
+         * any in-TU assign, sees the right shape. Without this, the
+         * load falls through to `any` and the lowering picks the
+         * generic matlab_ws_get_mat path even when we know the
+         * binding holds an f64. */
+        T = N.Ref->InferredType;
       } else {
         T = TC.any();
       }

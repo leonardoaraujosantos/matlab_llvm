@@ -469,6 +469,15 @@ private:
   unsigned CurFnNargout = 0;
   mlir::Value getOrCreateSlot(Binding *Bnd, const Type *T, llvm::StringRef N,
                               mlir::Location L);
+  /* True for an Expr whose runtime value is a matlab_string*. Sees:
+   * "..." literals, NameExprs in StringBindings, calls to string-
+   * returning builtins (num2str / sprintf / upper / lower / strtrim /
+   * strrep / strcat / fgetl / bin / hex / dec), and any `+` whose
+   * either operand satisfies the predicate (the other side is
+   * coerced via num2str at lowering time). */
+  bool isStringExpr(const Expr *E) const;
+  /* True for the names of string-returning builtins listed above. */
+  static bool isStringReturningBuiltin(llvm::StringRef N);
 };
 
 //===----------------------------------------------------------------------===//
@@ -507,6 +516,42 @@ mlir::Value Lowerer::emitUnreg(llvm::StringRef OpName,
                                llvm::ArrayRef<mlir::NamedAttribute> Attrs) {
   mlir::Operation *Op = emitUnregOp(OpName, Operands, {ResultType}, Loc, Attrs);
   return Op->getResult(0);
+}
+
+bool Lowerer::isStringReturningBuiltin(llvm::StringRef N) {
+  return N == "fgetl" || N == "sprintf" || N == "num2str" ||
+         N == "upper" || N == "lower" || N == "strtrim" ||
+         N == "strrep" || N == "strcat" ||
+         N == "bin" || N == "hex" || N == "dec";
+}
+
+bool Lowerer::isStringExpr(const Expr *E) const {
+  if (!E) return false;
+  if (E->Kind == NodeKind::StringLiteral) return true;
+  if (auto *N = dynamic_cast<const NameExpr *>(E))
+    return N->Ref && StringBindings.count(N->Ref) > 0;
+  if (auto *C = dynamic_cast<const CallOrIndex *>(E)) {
+    if (auto *NX = dynamic_cast<const NameExpr *>(C->Callee))
+      if (NX->Ref && NX->Ref->Kind == BindingKind::Builtin &&
+          isStringReturningBuiltin(NX->Name))
+        return true;
+  }
+  if (auto *Bi = dynamic_cast<const BinaryOpExpr *>(E))
+    if (Bi->Op == BinOp::Add)
+      return isStringExpr(Bi->LHS) || isStringExpr(Bi->RHS);
+  /* Single-row bracket literals containing any char/string element are
+   * char-array concatenations (MATLAB's classic `['x = ', num2str(v)]`
+   * idiom) — the MatrixLiteral lowering reroutes them to a chain of
+   * matlab_string_concat calls and the result is a matlab_string*. */
+  if (auto *M = dynamic_cast<const MatrixLiteral *>(E)) {
+    if (M->Rows.size() == 1)
+      for (const Expr *Cx : M->Rows[0])
+        if (Cx && (Cx->Kind == NodeKind::CharLiteral ||
+                   Cx->Kind == NodeKind::StringLiteral ||
+                   isStringExpr(Cx)))
+          return true;
+  }
+  return false;
 }
 
 mlir::Value Lowerer::emitAlloc(const Type *T, llvm::StringRef Name,
@@ -1632,40 +1677,11 @@ void Lowerer::lowerStmt(const Stmt &St) {
      * CellLiteral and calls to known cell-producing builtins qualify;
      * for v1 we cover the literal case. */
     bool RhsIsCellLit = A.RHS && A.RHS->Kind == NodeKind::CellLiteral;
-    /* Track string-typed bindings (from "..." literals or string ops)
-     * so `+` / disp / strlen / isstring can dispatch correctly.
-     * Recursively sees through nested `+` chains so `u = s + " " + t`
-     * is recognised. */
-    std::function<bool(const Expr *)> isStringExpr =
-        [this, &isStringExpr](const Expr *E) -> bool {
-      if (!E) return false;
-      if (E->Kind == NodeKind::StringLiteral) return true;
-      if (auto *N = dynamic_cast<const NameExpr *>(E))
-        return N->Ref && StringBindings.count(N->Ref) > 0;
-      if (auto *Bi = dynamic_cast<const BinaryOpExpr *>(E))
-        if (Bi->Op == BinOp::Add)
-          return isStringExpr(Bi->LHS) && isStringExpr(Bi->RHS);
-      return false;
-    };
+    /* Track string-typed bindings (from "..." literals, string-
+     * returning builtins, or `+` chains where either operand is a
+     * string) so `+` / disp / strlen / isstring can dispatch
+     * correctly. See Lowerer::isStringExpr. */
     bool RhsIsString = isStringExpr(A.RHS);
-    /* String-producing builtins also turn the LHS into a string
-     * binding: fgetl, sprintf, num2str, upper, lower, strtrim,
-     * strrep, strcat all return matlab_string*, so subsequent
-     * disp(s) / strlen(s) / isstring(s) route through the string
-     * runtime. */
-    if (!RhsIsString && A.RHS && A.RHS->Kind == NodeKind::CallOrIndex) {
-      auto *CX = static_cast<const CallOrIndex *>(A.RHS);
-      if (auto *NX = dynamic_cast<const NameExpr *>(CX->Callee)) {
-        if (NX->Ref && NX->Ref->Kind == BindingKind::Builtin) {
-          auto N = NX->Name;
-          if (N == "fgetl" || N == "sprintf" || N == "num2str" ||
-              N == "upper" || N == "lower" || N == "strtrim" ||
-              N == "strrep" || N == "strcat" ||
-              N == "bin" || N == "hex" || N == "dec")
-            RhsIsString = true;
-        }
-      }
-    }
 
     /* Track 3-D bindings: RHS is a call to zeros/ones with 3 args. */
     bool RhsIsThreeD = false;
@@ -2620,27 +2636,53 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
     return emitUnreg("matlab.colon", {}, RT, L);
   case NodeKind::BinaryOp: {
     auto &Bi = static_cast<const BinaryOpExpr &>(E);
-    /* String concatenation: `"a" + "b"` or `s1 + s2` where both
-     * operands are known strings (or themselves string-producing
-     * subexpressions). Detect BEFORE lowering operands so we pick
-     * the right runtime call and attach the ptr result type up
-     * front (the generic matlab.add path would produce f64). */
-    std::function<bool(const Expr *)> isStringOperand =
-        [this, &isStringOperand](const Expr *X) -> bool {
-      if (!X) return false;
-      if (X->Kind == NodeKind::StringLiteral) return true;
-      if (auto *N = dynamic_cast<const NameExpr *>(X))
-        return N->Ref && StringBindings.count(N->Ref) > 0;
-      if (auto *Bi2 = dynamic_cast<const BinaryOpExpr *>(X))
-        if (Bi2->Op == BinOp::Add)
-          return isStringOperand(Bi2->LHS) && isStringOperand(Bi2->RHS);
-      return false;
-    };
+    /* String concatenation: `"a" + "b"`, `s1 + s2`, or `s + n` /
+     * `n + s` where one side is a known string (literal, binding,
+     * or string-returning builtin call) and the other is a scalar.
+     * Detect BEFORE lowering operands so we pick the right runtime
+     * call and attach the ptr result type up front (the generic
+     * matlab.add path would produce f64). When exactly one side is
+     * a string and the other is a scalar, the scalar is coerced via
+     * matlab_num2str so `"x = " + 25` produces "x = 25". */
     if (Bi.Op == BinOp::Add &&
-        isStringOperand(Bi.LHS) && isStringOperand(Bi.RHS)) {
+        (isStringExpr(Bi.LHS) || isStringExpr(Bi.RHS))) {
       auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+      auto F64 = mlir::Float64Type::get(&MCtx);
       mlir::Value LHS = lowerExpr(*Bi.LHS);
       mlir::Value RHS = lowerExpr(*Bi.RHS);
+      /* The lowered MLIR type for a num2str/upper/sprintf/... call
+       * may come back as `none` (the builtin's result type isn't
+       * always refined). When the AST tells us it's a string, force
+       * the type to ptr so matlab_string_concat sees PtrTy operands. */
+      if (isStringExpr(Bi.LHS) && LHS.getType() != PtrTy)
+        LHS.setType(PtrTy);
+      if (isStringExpr(Bi.RHS) && RHS.getType() != PtrTy)
+        RHS.setType(PtrTy);
+      auto coerce = [&](mlir::Value V) -> mlir::Value {
+        if (V.getType() == PtrTy) return V;
+        /* Integer scalars (i8/i16/i32/i64) — extend to f64 first. */
+        if (auto IT = mlir::dyn_cast<mlir::IntegerType>(V.getType())) {
+          if (IT.getWidth() == 1)
+            V = mlir::arith::UIToFPOp::create(B, L, F64, V);
+          else
+            V = mlir::arith::SIToFPOp::create(B, L, F64, V);
+        } else if (V.getType() != F64) {
+          /* Unknown scalar shape (e.g. f32) — best-effort: bitcast
+           * isn't right, so fall back to a runtime cast via fptrunc/
+           * fpext when possible. For now, only f64 is wired. */
+          if (mlir::isa<mlir::FloatType>(V.getType())) {
+            V = mlir::arith::ExtFOp::create(B, L, F64, V);
+          } else {
+            return V; /* leave as-is; downstream will error loudly */
+          }
+        }
+        mlir::NamedAttribute Cal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "num2str"));
+        return emitUnreg("matlab.call_builtin", {V}, PtrTy, L, {Cal});
+      };
+      LHS = coerce(LHS);
+      RHS = coerce(RHS);
       mlir::NamedAttribute Cal(
           mlir::StringAttr::get(&MCtx, "callee"),
           mlir::StringAttr::get(&MCtx, "matlab_string_concat"));
@@ -4404,6 +4446,77 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
   case NodeKind::MatrixLiteral: {
     auto &M = static_cast<const MatrixLiteral &>(E);
     bool SingleRow = M.Rows.size() == 1;
+    /* Char-array / string bracket concat: `['x = ', num2str(v), ' kg']`
+     * is MATLAB's classic "build a string from pieces" idiom. If any
+     * element of a single-row literal is a char/string, treat the
+     * whole bracket as string concatenation: each element is coerced
+     * to a matlab_string* (chars via matlab_string_from_literal,
+     * scalars via num2str, ptrs passed through) and chained through
+     * matlab_string_concat. The result type is a matlab_string*
+     * (LLVM ptr) so subsequent disp/strlen/+ route to the string
+     * runtime. */
+    if (SingleRow) {
+      bool HasStringy = false;
+      for (const Expr *Cx : M.Rows[0])
+        if (Cx && (Cx->Kind == NodeKind::CharLiteral ||
+                   Cx->Kind == NodeKind::StringLiteral ||
+                   isStringExpr(Cx))) { HasStringy = true; break; }
+      if (HasStringy) {
+        auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+        auto F64 = mlir::Float64Type::get(&MCtx);
+        auto charToString = [&](llvm::StringRef Text) -> mlir::Value {
+          mlir::NamedAttribute VA(
+              mlir::StringAttr::get(&MCtx, "value"),
+              mlir::StringAttr::get(&MCtx, Text));
+          mlir::Value Ch = emitUnreg("matlab.const_char", {},
+                                      mlir::NoneType::get(&MCtx), L, {VA});
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_string_from_literal"));
+          return emitUnreg("matlab.call_builtin", {Ch}, PtrTy, L, {Cal});
+        };
+        auto toString = [&](const Expr *Cx) -> mlir::Value {
+          if (auto *CL = dynamic_cast<const CharLiteral *>(Cx))
+            return charToString(CL->Value);
+          mlir::Value V = lowerExpr(*Cx);
+          /* AST-side this is already a string (StringLiteral, string
+           * binding, or a string-returning builtin call). The lowered
+           * type may still be `none` for builtin calls whose result
+           * type wasn't refined (num2str/upper/...); upgrade to ptr
+           * so downstream matlab_string_concat picks it up. */
+          if (isStringExpr(Cx)) {
+            if (V.getType() != PtrTy) V.setType(PtrTy);
+            return V;
+          }
+          if (V.getType() == PtrTy) return V;
+          if (auto IT = mlir::dyn_cast<mlir::IntegerType>(V.getType())) {
+            if (IT.getWidth() == 1)
+              V = mlir::arith::UIToFPOp::create(B, L, F64, V);
+            else
+              V = mlir::arith::SIToFPOp::create(B, L, F64, V);
+          } else if (mlir::isa<mlir::FloatType>(V.getType()) &&
+                     V.getType() != F64) {
+            V = mlir::arith::ExtFOp::create(B, L, F64, V);
+          }
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "num2str"));
+          return emitUnreg("matlab.call_builtin", {V}, PtrTy, L, {Cal});
+        };
+        mlir::Value Acc;
+        for (const Expr *Cx : M.Rows[0]) {
+          if (!Cx) continue;
+          mlir::Value V = toString(Cx);
+          if (!Acc) { Acc = V; continue; }
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_string_concat"));
+          Acc = emitUnreg("matlab.call_builtin", {Acc, V}, PtrTy, L, {Cal});
+        }
+        if (Acc) return Acc;
+        /* All-empty row — fall through to the generic path. */
+      }
+    }
     /* fi-typed row vector: route every element through matlab_mat_i64
      * (or _u64) helpers and chain concat calls. We accept scalar fi
      * elements (wrap via matlab_mat_i64_from_scalar) and existing fi

@@ -2735,6 +2735,45 @@ def scn_evaluate_repl(matlabc, program):
         c.wait_event("terminated", timeout=5.0)
 
 
+def scn_evaluate_string_concat(matlabc, program):
+    """`evaluate` covers the three MATLAB string-concat idioms:
+
+      1. `"..." + scalar + "..."`     (string operator+ with scalar coercion)
+      2. `sprintf("...%.2f...", v)`   (format-string)
+      3. `['...', num2str(v), '...']` (bracket char-array concat)
+
+    All three go through the JIT pipeline (runReplInput); regression
+    guard for the lowering paths in lib/MLIR/Lowering.cpp:BinaryOp +
+    string-bracket MatrixLiteral, plus the LowerTensorOps wiring for
+    matlab_string_concat / matlab_string_from_literal / sprintf_f64 /
+    num2str. Uses dap_program.m so we have a live `x = 10` workspace
+    binding to mix into the formatted output.
+    """
+    with DapClient(matlabc, program) as c:
+        initialize_and_launch(c, breakpoints=[{"line": 8}])
+        _stop_event(c)
+
+        # The DAP variable formatter wraps string values in double quotes
+        # (matching how MATLAB renders `"..."` in the workspace inspector).
+        resp = c.request("evaluate",
+                         {"expression": '"x = " + x + "!"'})
+        assert resp.get("result") == '"x = 10!"', \
+            f'string + scalar should be "x = 10!", got {resp!r}'
+
+        resp = c.request("evaluate",
+                         {"expression": 'sprintf("v=%.2f", x)'})
+        assert resp.get("result") == '"v=10.00"', \
+            f'sprintf should be "v=10.00", got {resp!r}'
+
+        resp = c.request("evaluate",
+                         {"expression": "['x=', num2str(x)]"})
+        assert resp.get("result") == '"x=10"', \
+            f'bracket concat should be "x=10", got {resp!r}'
+
+        c.request("continue")
+        c.wait_event("terminated", timeout=5.0)
+
+
 def scn_multifile_breakpoint(matlabc, program):
     """Breakpoints on a sibling .m file resolve and fire.
 
