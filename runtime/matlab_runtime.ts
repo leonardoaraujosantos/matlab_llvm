@@ -1620,6 +1620,42 @@ export function kron(A: any, B: any): NDArray {
   return new NDArray(out, [m, n]);
 }
 
+export function conv(U: any, V: any): NDArray {
+  const u = asArray(U); const v = asArray(V);
+  const nu = u.size, nv = v.size;
+  if (nu === 0 || nv === 0) return new NDArray(new Float64Array(0), [0, 0]);
+  const nw = nu + nv - 1;
+  const out = new Float64Array(nw);
+  for (let k = 0; k < nw; k++) {
+    let s = 0;
+    const jlo = Math.max(0, k - (nv - 1));
+    const jhi = Math.min(nu - 1, k);
+    for (let j = jlo; j <= jhi; j++) s += u.data[j] * v.data[k - j];
+    out[k] = s;
+  }
+  const uCol = u.cols === 1 && u.rows > 1;
+  const vCol = v.cols === 1 && v.rows > 1;
+  return new NDArray(out, (uCol || vCol) ? [nw, 1] : [1, nw]);
+}
+
+export function conv2(A: any, B: any): NDArray {
+  const a = asArray(A); const b = asArray(B);
+  const am = a.rows, an = a.cols, bm = b.rows, bn = b.cols;
+  if (am === 0 || an === 0 || bm === 0 || bn === 0)
+    return new NDArray(new Float64Array(0), [0, 0]);
+  const cm = am + bm - 1, cn = an + bn - 1;
+  const out = new Float64Array(cm * cn);
+  for (let p = 0; p < am; p++)
+    for (let q = 0; q < an; q++) {
+      const av = a.data[p * an + q];
+      if (av === 0) continue;
+      for (let r = 0; r < bm; r++)
+        for (let s = 0; s < bn; s++)
+          out[(p + r) * cn + q + s] += av * b.data[r * bn + s];
+    }
+  return new NDArray(out, [cm, cn]);
+}
+
 export function cumsum(A: any): NDArray {
   const a = asArray(A);
   const out = new Float64Array(a.size);

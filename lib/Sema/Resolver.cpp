@@ -63,6 +63,7 @@ void Resolver::registerBuiltins() {
     "save", "load",
     "conj", "real", "imag", "angle",
     "fft", "ifft", "fft2", "ifft2",
+    "conv", "conv2",
     /* Bitwise builtins. Lower to MATLAB's standard `&` / `|` / `^` /
      * `~` semantics on integer / fi-typed operands. The SV emitter
      * recognizes the matlab.call_builtin sites and renders them as

@@ -1487,6 +1487,36 @@ def fft2_c(A): return np.fft.fft2(np.asarray(A))
 def ifft2_c(A): return np.fft.ifft2(np.asarray(A))
 
 
+def conv(u, v):
+    a = np.asarray(u, dtype=float).ravel()
+    b = np.asarray(v, dtype=float).ravel()
+    if a.size == 0 or b.size == 0:
+        return np.zeros((0, 0))
+    r = np.convolve(a, b)
+    ua = np.asarray(u); va = np.asarray(v)
+    u_col = ua.ndim == 2 and ua.shape[1] == 1 and ua.shape[0] > 1
+    v_col = va.ndim == 2 and va.shape[1] == 1 and va.shape[0] > 1
+    return r.reshape((-1, 1)) if (u_col or v_col) else r.reshape((1, -1))
+
+
+def conv2(A, B):
+    a = np.asarray(A, dtype=float)
+    b = np.asarray(B, dtype=float)
+    if a.size == 0 or b.size == 0:
+        return np.zeros((0, 0))
+    if a.ndim == 1: a = a.reshape((1, -1))
+    if b.ndim == 1: b = b.reshape((1, -1))
+    am, an = a.shape; bm, bn = b.shape
+    cm, cn = am + bm - 1, an + bn - 1
+    c = np.zeros((cm, cn))
+    for p in range(am):
+        for q in range(an):
+            v = a[p, q]
+            if v == 0.0: continue
+            c[p:p+bm, q:q+bn] += v * b
+    return c
+
+
 # --- remaining stubs ------------------------------------------------------
 # Programs that exercise these symbols without a real implementation will
 # produce wrong output, but won't crash — good enough for coverage.

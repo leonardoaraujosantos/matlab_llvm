@@ -3866,6 +3866,7 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
              * matlab_mat_c*), uniformly ptr at MLIR level. */
             "conj", "real", "imag", "angle",
             "fft", "ifft", "fft2", "ifft2",
+            "conv", "conv2",
           };
           if (F64Ret.contains(N->Name)) ResTy = F64;
           else if (PtrRet.contains(N->Name)) ResTy = PtrTy;

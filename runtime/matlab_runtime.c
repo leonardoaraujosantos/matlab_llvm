@@ -3140,6 +3140,56 @@ matlab_mat *matlab_kron(matlab_mat *A, matlab_mat *B) {
     return R;
 }
 
+/* conv(u, v) — full 1-D convolution. MATLAB treats u and v as vectors
+ * regardless of shape. The output orientation follows MATLAB: if either
+ * input is a column vector, the result is a column; otherwise (both row
+ * or scalar), the result is a row. Empty input yields an empty matrix. */
+matlab_mat *matlab_conv(matlab_mat *u, matlab_mat *v) {
+    if (!u || !v) return mat_alloc(0, 0);
+    int64_t nu = u->rows * u->cols;
+    int64_t nv = v->rows * v->cols;
+    if (nu == 0 || nv == 0) return mat_alloc(0, 0);
+    int64_t nw = nu + nv - 1;
+    int u_is_col = (u->cols == 1 && u->rows > 1);
+    int v_is_col = (v->cols == 1 && v->rows > 1);
+    int as_col = u_is_col || v_is_col;
+    matlab_mat *W = as_col ? mat_alloc(nw, 1) : mat_alloc(1, nw);
+    for (int64_t k = 0; k < nw; ++k) {
+        double s = 0.0;
+        int64_t jlo = k - (nv - 1); if (jlo < 0) jlo = 0;
+        int64_t jhi = k;            if (jhi > nu - 1) jhi = nu - 1;
+        for (int64_t j = jlo; j <= jhi; ++j)
+            s += u->data[j] * v->data[k - j];
+        W->data[k] = s;
+    }
+    return W;
+}
+
+/* conv2(A, B) — full 2-D convolution. C[i,j] = sum_{p,q} A[p,q] * B[i-p,j-q]
+ * for valid (p,q). Result size is (m1+m2-1) x (n1+n2-1). Returns 0x0 for
+ * empty inputs. */
+matlab_mat *matlab_conv2(matlab_mat *A, matlab_mat *B) {
+    if (!A || !B) return mat_alloc(0, 0);
+    int64_t am = A->rows, an = A->cols;
+    int64_t bm = B->rows, bn = B->cols;
+    if (am == 0 || an == 0 || bm == 0 || bn == 0) return mat_alloc(0, 0);
+    int64_t cm = am + bm - 1, cn = an + bn - 1;
+    matlab_mat *C = mat_alloc(cm, cn);
+    for (int64_t p = 0; p < am; ++p) {
+        for (int64_t q = 0; q < an; ++q) {
+            double a = A->data[p * an + q];
+            if (a == 0.0) continue;
+            for (int64_t r = 0; r < bm; ++r) {
+                double *crow = C->data + (p + r) * cn + q;
+                const double *brow = B->data + r * bn;
+                for (int64_t s = 0; s < bn; ++s)
+                    crow[s] += a * brow[s];
+            }
+        }
+    }
+    return C;
+}
+
 /* chol(A): upper-triangular Cholesky factor R such that R'*R = A,
  * for a symmetric positive-definite A. Returns a zero matrix if A
  * is not SPD (i.e. a negative diagonal appears). */

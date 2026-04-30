@@ -68,6 +68,13 @@ matlab_mat *matlab_diag(matlab_mat *A);
 matlab_mat *matlab_reshape(matlab_mat *A, double m, double n);
 matlab_mat *matlab_matpow(matlab_mat *A, double n);
 
+/* Convolution (full shape — MATLAB default). conv(u,v) treats u and v as
+ * vectors and returns a vector of length numel(u)+numel(v)-1, oriented as
+ * a row if both inputs are rows (or scalar), otherwise as a column.
+ * conv2(A,B) returns an (m1+m2-1)x(n1+n2-1) matrix. */
+matlab_mat *matlab_conv(matlab_mat *u, matlab_mat *v);
+matlab_mat *matlab_conv2(matlab_mat *A, matlab_mat *B);
+
 // Element-wise binary ops (matrix/matrix, matrix/scalar, scalar/matrix).
 matlab_mat *matlab_add_mm(matlab_mat *A, matlab_mat *B);
 matlab_mat *matlab_sub_mm(matlab_mat *A, matlab_mat *B);
