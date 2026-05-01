@@ -778,6 +778,169 @@ def uint16_s(x): return int(x) & 0xffff
 def logical_s(x): return 1.0 if float(x) != 0 else 0.0
 
 
+# ---------------------------------------------------------------------------
+# Phase 1.1.E — typed-int matrix runtime (i32 / u8). Mirrors the C runtime
+# entry points used by `matlabc -emit-python` for non-scalar Int32 / UInt8
+# arrays. Storage is numpy ndarray with dtype=int32 / uint8 — saturation is
+# explicit at every op boundary so overflow matches the C lane bit-exactly
+# (numpy's native int dtype overflow wraps, MATLAB's saturates).
+# ---------------------------------------------------------------------------
+
+_I32_MIN, _I32_MAX = -2147483648, 2147483647
+_U8_MIN,  _U8_MAX  =  0,           255
+
+def d_to_i32_sat(v):
+    """Scalar double -> int32 with round-half-away-from-zero + saturate."""
+    x = float(v)
+    if x != x:                      return 0
+    if x <= float(_I32_MIN):        return _I32_MIN
+    if x >= float(_I32_MAX):        return _I32_MAX
+    return int(x + 0.5) if x >= 0 else int(x - 0.5)
+
+def d_to_u8_sat(v):
+    x = float(v)
+    if x != x:        return 0
+    if x <= 0.0:      return 0
+    if x >= 255.0:    return 255
+    return int(x + 0.5)
+
+def _round_haz_arr(arr):
+    """Element-wise round half-away-from-zero, NaN -> 0 (MATLAB rule)."""
+    a = np.asarray(arr, dtype=float)
+    nz = ~np.isnan(a)
+    rounded = np.where(a >= 0, np.floor(a + 0.5), np.ceil(a - 0.5))
+    return np.where(nz, rounded, 0.0)
+
+def mat_i32_from_double(A):
+    rounded = _round_haz_arr(A)
+    return np.clip(rounded, _I32_MIN, _I32_MAX).astype(np.int32)
+
+def mat_u8_from_double(A):
+    rounded = _round_haz_arr(A)
+    return np.clip(rounded, _U8_MIN, _U8_MAX).astype(np.uint8)
+
+def mat_i32_to_double(A): return np.asarray(A, dtype=float)
+def mat_u8_to_double(A):  return np.asarray(A, dtype=float)
+def mat_u8_from_i32(A):
+    return np.clip(np.asarray(A, dtype=np.int64), _U8_MIN, _U8_MAX).astype(np.uint8)
+def mat_i32_from_u8(A):
+    return np.asarray(A, dtype=np.int32)
+
+def _disp_int_grid(A, width):
+    """Print an int matrix with three leading spaces and a fixed column."""
+    arr = np.asarray(A)
+    if arr.ndim == 1: arr = arr.reshape(1, -1)
+    if arr.size == 0:
+        print(); return
+    m, n = arr.shape[0], arr.shape[1] if arr.ndim > 1 else 1
+    for i in _pyrange(m):
+        row = ["   " + f"{int(arr[i, j]):>{width}d}" for j in _pyrange(n)]
+        print("".join(row))
+
+def mat_i32_disp(A): _disp_int_grid(A, 11)
+def mat_u8_disp (A): _disp_int_grid(A,  4)
+
+# --- saturating arithmetic. We accumulate in int64 to avoid numpy's
+# silent wrap on overflow before clipping back to the lane's range. ---
+
+def _sat_i32(arr_i64): return np.clip(arr_i64, _I32_MIN, _I32_MAX).astype(np.int32)
+def _sat_u8 (arr_i64): return np.clip(arr_i64, _U8_MIN,  _U8_MAX).astype(np.uint8)
+
+def _as_i64(A): return np.asarray(A, dtype=np.int64)
+
+def mat_i32_add_mm(A, B): return _sat_i32(_as_i64(A) + _as_i64(B))
+def mat_i32_add_ms(A, s): return _sat_i32(_as_i64(A) + int(s))
+def mat_i32_add_sm(s, A): return _sat_i32(int(s)     + _as_i64(A))
+def mat_i32_sub_mm(A, B): return _sat_i32(_as_i64(A) - _as_i64(B))
+def mat_i32_sub_ms(A, s): return _sat_i32(_as_i64(A) - int(s))
+def mat_i32_sub_sm(s, A): return _sat_i32(int(s)     - _as_i64(A))
+def mat_i32_emul_mm(A, B): return _sat_i32(_as_i64(A) * _as_i64(B))
+def mat_i32_emul_ms(A, s): return _sat_i32(_as_i64(A) * int(s))
+def mat_i32_emul_sm(s, A): return _sat_i32(int(s)     * _as_i64(A))
+
+def mat_u8_add_mm(A, B): return _sat_u8(_as_i64(A) + _as_i64(B))
+def mat_u8_add_ms(A, s): return _sat_u8(_as_i64(A) + int(s))
+def mat_u8_add_sm(s, A): return _sat_u8(int(s)     + _as_i64(A))
+def mat_u8_sub_mm(A, B): return _sat_u8(_as_i64(A) - _as_i64(B))
+def mat_u8_sub_ms(A, s): return _sat_u8(_as_i64(A) - int(s))
+def mat_u8_sub_sm(s, A): return _sat_u8(int(s)     - _as_i64(A))
+def mat_u8_emul_mm(A, B): return _sat_u8(_as_i64(A) * _as_i64(B))
+def mat_u8_emul_ms(A, s): return _sat_u8(_as_i64(A) * int(s))
+def mat_u8_emul_sm(s, A): return _sat_u8(int(s)     * _as_i64(A))
+
+def _round_div_int(num, den, lo, hi):
+    """Element-wise round-half-away-from-zero division with MATLAB's
+    int-zero rule: 0/0 = 0, x/0 = ±max with the sign of x."""
+    n = np.asarray(num, dtype=np.int64)
+    d = np.asarray(den, dtype=np.int64)
+    if d.shape == ():
+        d = np.full(n.shape, int(d), dtype=np.int64)
+    if n.shape == ():
+        n = np.full(d.shape, int(n), dtype=np.int64)
+    out = np.zeros(n.shape, dtype=np.int64)
+    nz = d != 0
+    sign = np.where((n < 0) ^ (d < 0), -1, 1)
+    abs_n, abs_d = np.abs(n), np.abs(d)
+    safe_d = np.where(d == 0, 1, abs_d)
+    q = abs_n // safe_d
+    r = abs_n - q * safe_d
+    q = np.where(r * 2 >= safe_d, q + 1, q)
+    out = np.where(nz, sign * q, np.where(n == 0, 0, np.where(n > 0, hi, lo)))
+    return out
+
+def mat_i32_ediv_mm(A, B): return _sat_i32(_round_div_int(A, B, _I32_MIN, _I32_MAX))
+def mat_i32_ediv_ms(A, s): return _sat_i32(_round_div_int(A, np.int64(int(s)), _I32_MIN, _I32_MAX))
+def mat_i32_ediv_sm(s, A): return _sat_i32(_round_div_int(np.int64(int(s)), A, _I32_MIN, _I32_MAX))
+def mat_u8_ediv_mm(A, B): return _sat_u8(_round_div_int(A, B, _U8_MIN, _U8_MAX))
+def mat_u8_ediv_ms(A, s): return _sat_u8(_round_div_int(A, np.int64(int(s)), _U8_MIN, _U8_MAX))
+def mat_u8_ediv_sm(s, A): return _sat_u8(_round_div_int(np.int64(int(s)), A, _U8_MIN, _U8_MAX))
+
+# Comparisons return f64 logical (0.0 / 1.0) — same encoding as the rest
+# of the runtime so downstream `if`/`while`/disp_mat consume them uniformly.
+def _cmp(A, B, op):
+    a = np.asarray(A, dtype=np.int64)
+    b = np.asarray(B, dtype=np.int64)
+    return op(a, b).astype(float)
+
+def mat_i32_gt_mm(A, B): return _cmp(A, B, np.greater)
+def mat_i32_gt_ms(A, s): return _cmp(A, int(s), np.greater)
+def mat_i32_gt_sm(s, A): return _cmp(int(s), A, np.greater)
+def mat_i32_ge_mm(A, B): return _cmp(A, B, np.greater_equal)
+def mat_i32_ge_ms(A, s): return _cmp(A, int(s), np.greater_equal)
+def mat_i32_ge_sm(s, A): return _cmp(int(s), A, np.greater_equal)
+def mat_i32_lt_mm(A, B): return _cmp(A, B, np.less)
+def mat_i32_lt_ms(A, s): return _cmp(A, int(s), np.less)
+def mat_i32_lt_sm(s, A): return _cmp(int(s), A, np.less)
+def mat_i32_le_mm(A, B): return _cmp(A, B, np.less_equal)
+def mat_i32_le_ms(A, s): return _cmp(A, int(s), np.less_equal)
+def mat_i32_le_sm(s, A): return _cmp(int(s), A, np.less_equal)
+def mat_i32_eq_mm(A, B): return _cmp(A, B, np.equal)
+def mat_i32_eq_ms(A, s): return _cmp(A, int(s), np.equal)
+def mat_i32_eq_sm(s, A): return _cmp(int(s), A, np.equal)
+def mat_i32_ne_mm(A, B): return _cmp(A, B, np.not_equal)
+def mat_i32_ne_ms(A, s): return _cmp(A, int(s), np.not_equal)
+def mat_i32_ne_sm(s, A): return _cmp(int(s), A, np.not_equal)
+
+def mat_u8_gt_mm(A, B): return _cmp(A, B, np.greater)
+def mat_u8_gt_ms(A, s): return _cmp(A, int(s), np.greater)
+def mat_u8_gt_sm(s, A): return _cmp(int(s), A, np.greater)
+def mat_u8_ge_mm(A, B): return _cmp(A, B, np.greater_equal)
+def mat_u8_ge_ms(A, s): return _cmp(A, int(s), np.greater_equal)
+def mat_u8_ge_sm(s, A): return _cmp(int(s), A, np.greater_equal)
+def mat_u8_lt_mm(A, B): return _cmp(A, B, np.less)
+def mat_u8_lt_ms(A, s): return _cmp(A, int(s), np.less)
+def mat_u8_lt_sm(s, A): return _cmp(int(s), A, np.less)
+def mat_u8_le_mm(A, B): return _cmp(A, B, np.less_equal)
+def mat_u8_le_ms(A, s): return _cmp(A, int(s), np.less_equal)
+def mat_u8_le_sm(s, A): return _cmp(int(s), A, np.less_equal)
+def mat_u8_eq_mm(A, B): return _cmp(A, B, np.equal)
+def mat_u8_eq_ms(A, s): return _cmp(A, int(s), np.equal)
+def mat_u8_eq_sm(s, A): return _cmp(int(s), A, np.equal)
+def mat_u8_ne_mm(A, B): return _cmp(A, B, np.not_equal)
+def mat_u8_ne_ms(A, s): return _cmp(A, int(s), np.not_equal)
+def mat_u8_ne_sm(s, A): return _cmp(int(s), A, np.not_equal)
+
+
 # --- Fixed-Point Designer (fi) — see docs/emit_fixed_point.md §6.2 -------
 # Python ints are arbitrary precision, so high-WL fi values stay bit-exact
 # regardless of Python's 53-bit float mantissa. The shim mirrors the C

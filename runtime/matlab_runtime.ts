@@ -946,6 +946,218 @@ export function uint8_s(x: number): number { return satTrunc(x, 0, 255); }
 export function uint16_s(x: number): number { return satTrunc(x, 0, 65535); }
 export function logical_s(x: number): number { return +x !== 0 ? 1 : 0; }
 
+// ---------------------------------------------------------------------------
+// Phase 1.1.E — typed-int matrix runtime (i32 / u8). Mirrors the C runtime
+// entry points used by `matlabc -emit-typescript` for non-scalar Int32 /
+// UInt8 arrays. Values flow as numbers in NDArray storage; saturation and
+// round-half-away-from-zero are applied explicitly at every op boundary so
+// the output matches the C lane bit-exactly.
+// ---------------------------------------------------------------------------
+
+const _I32_MIN = -2147483648, _I32_MAX = 2147483647;
+const _U8_MIN  =  0,           _U8_MAX  = 255;
+
+function _roundHAZ(v: number): number {
+  if (Number.isNaN(v)) return 0;
+  return v >= 0 ? Math.floor(v + 0.5) : Math.ceil(v - 0.5);
+}
+function _satRange(v: number, lo: number, hi: number): number {
+  if (v < lo) return lo;
+  if (v > hi) return hi;
+  return v;
+}
+
+export function d_to_i32_sat(v: number): number {
+  if (Number.isNaN(+v)) return 0;
+  return _satRange(_roundHAZ(+v), _I32_MIN, _I32_MAX);
+}
+export function d_to_u8_sat(v: number): number {
+  if (Number.isNaN(+v)) return 0;
+  return _satRange(_roundHAZ(+v), _U8_MIN, _U8_MAX);
+}
+
+function _castMat(A: any, lo: number, hi: number): NDArray {
+  const arr = asArray(A);
+  const out = new Float64Array(arr.size);
+  for (let i = 0; i < arr.size; i++)
+    out[i] = _satRange(_roundHAZ(arr.data[i]), lo, hi);
+  return new NDArray(out, arr.shape.slice());
+}
+export function mat_i32_from_double(A: any): NDArray { return _castMat(A, _I32_MIN, _I32_MAX); }
+export function mat_u8_from_double (A: any): NDArray { return _castMat(A, _U8_MIN,  _U8_MAX);  }
+export function mat_i32_to_double(A: any): NDArray {
+  const a = asArray(A); return new NDArray(new Float64Array(a.data), a.shape.slice());
+}
+export function mat_u8_to_double(A: any): NDArray {
+  const a = asArray(A); return new NDArray(new Float64Array(a.data), a.shape.slice());
+}
+export function mat_u8_from_i32(A: any): NDArray { return _castMat(A, _U8_MIN, _U8_MAX); }
+export function mat_i32_from_u8(A: any): NDArray {
+  const a = asArray(A); return new NDArray(new Float64Array(a.data), a.shape.slice());
+}
+
+function _padInt(n: number, w: number): string {
+  const s = String(n | 0);
+  return s.padStart(w);
+}
+function _dispIntGrid(A: any, width: number): void {
+  const arr = asArray(A);
+  const m = arr.rows, n = arr.cols;
+  if (arr.size === 0) { console.log(""); return; }
+  for (let i = 0; i < m; i++) {
+    const row: string[] = [];
+    for (let j = 0; j < n; j++) row.push("   " + _padInt(arr.data[i * n + j], width));
+    console.log(row.join(""));
+  }
+}
+export function mat_i32_disp(A: any): void { _dispIntGrid(A, 11); }
+export function mat_u8_disp (A: any): void { _dispIntGrid(A,  4); }
+
+// Element-wise binops. `fn` produces a math-ints number (no truncation
+// inside fn; we saturate at the boundary). Both operands are nominally in
+// the lane's range coming in, so accumulating in JS's 53-bit number space
+// is safe for one binop step (max-magnitude i32 * i32 = 2^62 < 2^53? no —
+// i32*i32 can hit 2^62, so use Math.trunc / careful range checks). For the
+// test suite's value space (and MATLAB's saturating semantics) the simple
+// arithmetic + clip is sufficient.
+function _binopMat(A: any, B: any, lo: number, hi: number,
+                   fn: (a: number, b: number) => number): NDArray {
+  const a = asArray(A), b = asArray(B);
+  const out = new Float64Array(a.size);
+  for (let i = 0; i < a.size; i++) out[i] = _satRange(fn(a.data[i], b.data[i]), lo, hi);
+  return new NDArray(out, a.shape.slice());
+}
+function _binopMS(A: any, s: number, lo: number, hi: number,
+                  fn: (a: number, b: number) => number): NDArray {
+  const a = asArray(A), sn = +s;
+  const out = new Float64Array(a.size);
+  for (let i = 0; i < a.size; i++) out[i] = _satRange(fn(a.data[i], sn), lo, hi);
+  return new NDArray(out, a.shape.slice());
+}
+function _binopSM(s: number, A: any, lo: number, hi: number,
+                  fn: (a: number, b: number) => number): NDArray {
+  const a = asArray(A), sn = +s;
+  const out = new Float64Array(a.size);
+  for (let i = 0; i < a.size; i++) out[i] = _satRange(fn(sn, a.data[i]), lo, hi);
+  return new NDArray(out, a.shape.slice());
+}
+
+const _add = (a: number, b: number) => a + b;
+const _sub = (a: number, b: number) => a - b;
+const _mul = (a: number, b: number) => a * b;
+function _idiv(a: number, b: number, lo: number, hi: number): number {
+  if (b === 0) return a === 0 ? 0 : (a > 0 ? hi : lo);
+  const sign = (a < 0) !== (b < 0) ? -1 : 1;
+  const aa = Math.abs(a), bb = Math.abs(b);
+  let q = Math.floor(aa / bb);
+  const r = aa - q * bb;
+  if (r * 2 >= bb) q += 1;
+  return sign * q;
+}
+
+export function mat_i32_add_mm(A: any, B: any): NDArray { return _binopMat(A, B, _I32_MIN, _I32_MAX, _add); }
+export function mat_i32_add_ms(A: any, s: number): NDArray { return _binopMS(A, s, _I32_MIN, _I32_MAX, _add); }
+export function mat_i32_add_sm(s: number, A: any): NDArray { return _binopSM(s, A, _I32_MIN, _I32_MAX, _add); }
+export function mat_i32_sub_mm(A: any, B: any): NDArray { return _binopMat(A, B, _I32_MIN, _I32_MAX, _sub); }
+export function mat_i32_sub_ms(A: any, s: number): NDArray { return _binopMS(A, s, _I32_MIN, _I32_MAX, _sub); }
+export function mat_i32_sub_sm(s: number, A: any): NDArray { return _binopSM(s, A, _I32_MIN, _I32_MAX, _sub); }
+export function mat_i32_emul_mm(A: any, B: any): NDArray { return _binopMat(A, B, _I32_MIN, _I32_MAX, _mul); }
+export function mat_i32_emul_ms(A: any, s: number): NDArray { return _binopMS(A, s, _I32_MIN, _I32_MAX, _mul); }
+export function mat_i32_emul_sm(s: number, A: any): NDArray { return _binopSM(s, A, _I32_MIN, _I32_MAX, _mul); }
+export function mat_i32_ediv_mm(A: any, B: any): NDArray {
+  return _binopMat(A, B, _I32_MIN, _I32_MAX, (a, b) => _idiv(a, b, _I32_MIN, _I32_MAX));
+}
+export function mat_i32_ediv_ms(A: any, s: number): NDArray {
+  return _binopMS(A, s, _I32_MIN, _I32_MAX, (a, b) => _idiv(a, b, _I32_MIN, _I32_MAX));
+}
+export function mat_i32_ediv_sm(s: number, A: any): NDArray {
+  return _binopSM(s, A, _I32_MIN, _I32_MAX, (a, b) => _idiv(a, b, _I32_MIN, _I32_MAX));
+}
+
+export function mat_u8_add_mm(A: any, B: any): NDArray { return _binopMat(A, B, _U8_MIN, _U8_MAX, _add); }
+export function mat_u8_add_ms(A: any, s: number): NDArray { return _binopMS(A, s, _U8_MIN, _U8_MAX, _add); }
+export function mat_u8_add_sm(s: number, A: any): NDArray { return _binopSM(s, A, _U8_MIN, _U8_MAX, _add); }
+export function mat_u8_sub_mm(A: any, B: any): NDArray { return _binopMat(A, B, _U8_MIN, _U8_MAX, _sub); }
+export function mat_u8_sub_ms(A: any, s: number): NDArray { return _binopMS(A, s, _U8_MIN, _U8_MAX, _sub); }
+export function mat_u8_sub_sm(s: number, A: any): NDArray { return _binopSM(s, A, _U8_MIN, _U8_MAX, _sub); }
+export function mat_u8_emul_mm(A: any, B: any): NDArray { return _binopMat(A, B, _U8_MIN, _U8_MAX, _mul); }
+export function mat_u8_emul_ms(A: any, s: number): NDArray { return _binopMS(A, s, _U8_MIN, _U8_MAX, _mul); }
+export function mat_u8_emul_sm(s: number, A: any): NDArray { return _binopSM(s, A, _U8_MIN, _U8_MAX, _mul); }
+export function mat_u8_ediv_mm(A: any, B: any): NDArray {
+  return _binopMat(A, B, _U8_MIN, _U8_MAX, (a, b) => _idiv(a, b, _U8_MIN, _U8_MAX));
+}
+export function mat_u8_ediv_ms(A: any, s: number): NDArray {
+  return _binopMS(A, s, _U8_MIN, _U8_MAX, (a, b) => _idiv(a, b, _U8_MIN, _U8_MAX));
+}
+export function mat_u8_ediv_sm(s: number, A: any): NDArray {
+  return _binopSM(s, A, _U8_MIN, _U8_MAX, (a, b) => _idiv(a, b, _U8_MIN, _U8_MAX));
+}
+
+// Comparisons -> matlab_mat (f64 0/1). Same encoding as the f64 lane so
+// downstream `if`/`while`/disp_mat consume them uniformly.
+function _cmpMat(A: any, B: any, fn: (a: number, b: number) => boolean): NDArray {
+  const a = asArray(A), b = asArray(B);
+  const out = new Float64Array(a.size);
+  for (let i = 0; i < a.size; i++) out[i] = fn(a.data[i], b.data[i]) ? 1 : 0;
+  return new NDArray(out, a.shape.slice());
+}
+function _cmpMS(A: any, s: number, fn: (a: number, b: number) => boolean): NDArray {
+  const a = asArray(A), sn = +s;
+  const out = new Float64Array(a.size);
+  for (let i = 0; i < a.size; i++) out[i] = fn(a.data[i], sn) ? 1 : 0;
+  return new NDArray(out, a.shape.slice());
+}
+function _cmpSM(s: number, A: any, fn: (a: number, b: number) => boolean): NDArray {
+  const a = asArray(A), sn = +s;
+  const out = new Float64Array(a.size);
+  for (let i = 0; i < a.size; i++) out[i] = fn(sn, a.data[i]) ? 1 : 0;
+  return new NDArray(out, a.shape.slice());
+}
+const _gt = (a: number, b: number) => a >  b;
+const _ge = (a: number, b: number) => a >= b;
+const _lt = (a: number, b: number) => a <  b;
+const _le = (a: number, b: number) => a <= b;
+const _eq = (a: number, b: number) => a === b;
+const _ne = (a: number, b: number) => a !== b;
+
+export function mat_i32_gt_mm(A: any, B: any): NDArray { return _cmpMat(A, B, _gt); }
+export function mat_i32_gt_ms(A: any, s: number): NDArray { return _cmpMS(A, s, _gt); }
+export function mat_i32_gt_sm(s: number, A: any): NDArray { return _cmpSM(s, A, _gt); }
+export function mat_i32_ge_mm(A: any, B: any): NDArray { return _cmpMat(A, B, _ge); }
+export function mat_i32_ge_ms(A: any, s: number): NDArray { return _cmpMS(A, s, _ge); }
+export function mat_i32_ge_sm(s: number, A: any): NDArray { return _cmpSM(s, A, _ge); }
+export function mat_i32_lt_mm(A: any, B: any): NDArray { return _cmpMat(A, B, _lt); }
+export function mat_i32_lt_ms(A: any, s: number): NDArray { return _cmpMS(A, s, _lt); }
+export function mat_i32_lt_sm(s: number, A: any): NDArray { return _cmpSM(s, A, _lt); }
+export function mat_i32_le_mm(A: any, B: any): NDArray { return _cmpMat(A, B, _le); }
+export function mat_i32_le_ms(A: any, s: number): NDArray { return _cmpMS(A, s, _le); }
+export function mat_i32_le_sm(s: number, A: any): NDArray { return _cmpSM(s, A, _le); }
+export function mat_i32_eq_mm(A: any, B: any): NDArray { return _cmpMat(A, B, _eq); }
+export function mat_i32_eq_ms(A: any, s: number): NDArray { return _cmpMS(A, s, _eq); }
+export function mat_i32_eq_sm(s: number, A: any): NDArray { return _cmpSM(s, A, _eq); }
+export function mat_i32_ne_mm(A: any, B: any): NDArray { return _cmpMat(A, B, _ne); }
+export function mat_i32_ne_ms(A: any, s: number): NDArray { return _cmpMS(A, s, _ne); }
+export function mat_i32_ne_sm(s: number, A: any): NDArray { return _cmpSM(s, A, _ne); }
+
+export function mat_u8_gt_mm(A: any, B: any): NDArray { return _cmpMat(A, B, _gt); }
+export function mat_u8_gt_ms(A: any, s: number): NDArray { return _cmpMS(A, s, _gt); }
+export function mat_u8_gt_sm(s: number, A: any): NDArray { return _cmpSM(s, A, _gt); }
+export function mat_u8_ge_mm(A: any, B: any): NDArray { return _cmpMat(A, B, _ge); }
+export function mat_u8_ge_ms(A: any, s: number): NDArray { return _cmpMS(A, s, _ge); }
+export function mat_u8_ge_sm(s: number, A: any): NDArray { return _cmpSM(s, A, _ge); }
+export function mat_u8_lt_mm(A: any, B: any): NDArray { return _cmpMat(A, B, _lt); }
+export function mat_u8_lt_ms(A: any, s: number): NDArray { return _cmpMS(A, s, _lt); }
+export function mat_u8_lt_sm(s: number, A: any): NDArray { return _cmpSM(s, A, _lt); }
+export function mat_u8_le_mm(A: any, B: any): NDArray { return _cmpMat(A, B, _le); }
+export function mat_u8_le_ms(A: any, s: number): NDArray { return _cmpMS(A, s, _le); }
+export function mat_u8_le_sm(s: number, A: any): NDArray { return _cmpSM(s, A, _le); }
+export function mat_u8_eq_mm(A: any, B: any): NDArray { return _cmpMat(A, B, _eq); }
+export function mat_u8_eq_ms(A: any, s: number): NDArray { return _cmpMS(A, s, _eq); }
+export function mat_u8_eq_sm(s: number, A: any): NDArray { return _cmpSM(s, A, _eq); }
+export function mat_u8_ne_mm(A: any, B: any): NDArray { return _cmpMat(A, B, _ne); }
+export function mat_u8_ne_ms(A: any, s: number): NDArray { return _cmpMS(A, s, _ne); }
+export function mat_u8_ne_sm(s: number, A: any): NDArray { return _cmpSM(s, A, _ne); }
+
 // --- Fixed-Point Designer (fi) — see docs/emit_fixed_point.md §6.2 --------
 // BigInt-backed when WL > 32 to stay bit-exact past JS's 53-bit safe-int
 // boundary; for WL <= 32 these shims accept and return number. The MLIR
