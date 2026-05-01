@@ -51,6 +51,9 @@ matlab_mat    *matlab_struct_get_mat(matlab_struct *s,
 void           matlab_disp_obj(matlab_obj *o);
 void           matlab_disp_mat(void *Aptr);
 void           matlab_set_error_msg(const char *msg, int64_t n);
+/* Phase 1.1.F: typed-int descriptor kind lookup (defined in
+ * matlab_runtime.cpp). Returns -1 / 0 (u8) / 1 (i32). */
+int            matlab_mat_intlane_kind(const void *p);
 /* matlab_string accessors. The struct layout lives in matlab_runtime.cpp;
  * the runtime_debug TU only ever holds the pointer and reads bytes
  * through these helpers so the layout stays opaque across the file split. */
@@ -172,10 +175,29 @@ void *matlab_ws_get_string(const char *name, int64_t len) {
 void matlab_ws_set_mat(const char *name, int64_t len, matlab_mat *m) {
     matlab_ws_init_if_needed();
     matlab_ws_lock();
+    /* Phase 1.1.F: typed-int matrices (matlab_mat_u8 *, matlab_mat_i32 *)
+     * arrive here through the same matlab_ws_set_mat entry the f64 lane
+     * uses — the Lowering doesn't keep separate workspace setters per
+     * dtype. Consult the intlane registry to recover the actual lane and
+     * tag the workspace slot with a sub-kind (4 = u8 mat, 5 = i32 mat).
+     * Resolver.cpp reads this kind on cross-REPL-input lookups and
+     * stamps InferredType=Array(UInt8/Int32, ...), letting the next
+     * input's BinaryOp emission pick the typed runtime entry points
+     * instead of running f64 arith over typed-int storage. */
+    int kind = 1;
+    int intlane = matlab_mat_intlane_kind(m);
+    if (intlane == 0) kind = 4;        /* matlab_mat_u8 */
+    else if (intlane == 1) kind = 5;   /* matlab_mat_i32 */
     struct matlab_dbg_undo_rec *r =
-        matlab_ws_push_undo_locked(name, len, /*kind=*/1);
+        matlab_ws_push_undo_locked(name, len, kind);
     matlab_struct_set_mat(matlab_ws, name, len, m);
-    matlab_dbg_undo_record_set_new_ptr(r, /*new_kind=*/1, m);
+    /* matlab_struct_set_mat normalises kinds[idx] to 1 (mat); restore
+     * the lane-aware kind for the typed-int case. */
+    if (kind != 1) {
+        int32_t idx = struct_reserve(matlab_ws, name, (int32_t)len);
+        matlab_ws->kinds[idx] = (uint8_t)kind;
+    }
+    matlab_dbg_undo_record_set_new_ptr(r, /*new_kind=*/kind, m);
     matlab_ws_unlock();
     matlab_ws_check_watch(name, len);
 }

@@ -2135,6 +2135,16 @@ matlab_mat *matlab_struct_get_mat(matlab_struct *s, const char *name, int64_t le
      * after we route assignments through matlab_ws_set_string. */
     if (s->kinds[idx] == 3 && s->ptr_vals[idx])
         return (matlab_mat *)s->ptr_vals[idx];
+    /* Phase 1.1.F: typed-int matrices (kind=4 / 5 = matlab_mat_u8 *,
+     * matlab_mat_i32 *). Same pass-through shape as kind=2/3 — the
+     * uniformly-ptr-typed _get_mat entry returns the descriptor pointer
+     * verbatim; downstream sites that special-case typed ints
+     * (matlab_disp_mat, the binop dispatch) consult the intlane registry
+     * to recover the lane. Without this branch the kind=4/5 lookup
+     * fell through to `mat_alloc(0, 0)`, which is why bare-name display
+     * of an int32/uint8 matrix in the REPL silently printed nothing. */
+    if ((s->kinds[idx] == 4 || s->kinds[idx] == 5) && s->ptr_vals[idx])
+        return (matlab_mat *)s->ptr_vals[idx];
     /* Box a scalar field into a 1x1 matrix. */
     if (s->kinds[idx] == 0) {
         matlab_mat *m = mat_alloc(1, 1);
@@ -2730,12 +2740,71 @@ typedef struct matlab_mat_i32 {
     int64_t  cols;
 } matlab_mat_i32;
 
+/* Phase 1.1.F: typed-int descriptor pointer registry. The matlab_mat_u8
+ * and matlab_mat_i32 layouts have data at offset 0 (no magic word, unlike
+ * matlab_mat_c) — adding a magic field would break the existing fast path
+ * that the binop loops rely on. Instead, every typed-int alloc registers
+ * its pointer here so the polymorphic matlab_disp_mat can detect typed-
+ * int descriptors arriving through the f64 disp path (REPL, DAP) and
+ * reroute them to matlab_mat_u8_disp / matlab_mat_i32_disp. The same
+ * registry is also queried by matlab_dbg_ws_kind so the DAP variable
+ * inspector labels typed-int bindings as "MxN int32" rather than
+ * "MxN double". Mirrors the matlab_string_registry pattern. */
+static struct {
+    pthread_mutex_t mu;
+    void   **ptrs;
+    uint8_t *kinds;   /* 0 = u8, 1 = i32 */
+    int      count;
+    int      cap;
+} matlab_intlane_registry = { PTHREAD_MUTEX_INITIALIZER, NULL, NULL, 0, 0 };
+
+static void mat_intlane_registry_add(void *p, uint8_t kind) {
+    if (!p) return;
+    pthread_mutex_lock(&matlab_intlane_registry.mu);
+    if (matlab_intlane_registry.count == matlab_intlane_registry.cap) {
+        int ncap = matlab_intlane_registry.cap ? matlab_intlane_registry.cap * 2 : 16;
+        void   **np = (void **)realloc(matlab_intlane_registry.ptrs,
+                                       (size_t)ncap * sizeof(void *));
+        uint8_t *nk = (uint8_t *)realloc(matlab_intlane_registry.kinds,
+                                         (size_t)ncap * sizeof(uint8_t));
+        if (np && nk) {
+            matlab_intlane_registry.ptrs  = np;
+            matlab_intlane_registry.kinds = nk;
+            matlab_intlane_registry.cap   = ncap;
+        }
+    }
+    if (matlab_intlane_registry.count < matlab_intlane_registry.cap) {
+        int i = matlab_intlane_registry.count++;
+        matlab_intlane_registry.ptrs[i]  = p;
+        matlab_intlane_registry.kinds[i] = kind;
+    }
+    pthread_mutex_unlock(&matlab_intlane_registry.mu);
+}
+
+/* Public ABI: returns -1 if p is not a registered typed-int pointer,
+ * 0 for u8, 1 for i32. Used by matlab_disp_mat (in this TU) and by
+ * matlab_dbg_ws_kind in runtime_debug.cpp. */
+extern "C" int matlab_mat_intlane_kind(const void *p) {
+    if (!p) return -1;
+    int kind = -1;
+    pthread_mutex_lock(&matlab_intlane_registry.mu);
+    for (int i = 0; i < matlab_intlane_registry.count; ++i) {
+        if (matlab_intlane_registry.ptrs[i] == p) {
+            kind = matlab_intlane_registry.kinds[i];
+            break;
+        }
+    }
+    pthread_mutex_unlock(&matlab_intlane_registry.mu);
+    return kind;
+}
+
 static matlab_mat_u8 *mat_u8_alloc(int64_t m, int64_t n) {
     if (m < 0) m = 0;
     if (n < 0) n = 0;
     matlab_mat_u8 *A = (matlab_mat_u8 *)calloc(1, sizeof(*A));
     A->rows = m; A->cols = n;
     A->data = (uint8_t *)calloc((size_t)(m * n + 1), sizeof(uint8_t));
+    mat_intlane_registry_add(A, /*kind=*/0);
     return A;
 }
 
@@ -2745,6 +2814,7 @@ static matlab_mat_i32 *mat_i32_alloc(int64_t m, int64_t n) {
     matlab_mat_i32 *A = (matlab_mat_i32 *)calloc(1, sizeof(*A));
     A->rows = m; A->cols = n;
     A->data = (int32_t *)calloc((size_t)(m * n + 1), sizeof(int32_t));
+    mat_intlane_registry_add(A, /*kind=*/1);
     return A;
 }
 
@@ -5177,6 +5247,15 @@ void matlab_disp_mat(void *Aptr) {
     if (matlab_string_is_known(Aptr)) {
         matlab_string_disp((matlab_string *)Aptr);
         return;
+    }
+    /* Typed-int descriptors (Phase 1.1.F). The REPL / DAP path arrives
+     * here with the typed-int pointer because the workspace stores
+     * everything as matlab_ws_set_mat. The intlane registry tells us
+     * the actual lane so we can route to the right disp formatter. */
+    {
+        int kind = matlab_mat_intlane_kind(Aptr);
+        if (kind == 0) { matlab_mat_u8_disp ((matlab_mat_u8  *)Aptr); return; }
+        if (kind == 1) { matlab_mat_i32_disp((matlab_mat_i32 *)Aptr); return; }
     }
     if (mat_is_complex(Aptr)) {
         matlab_disp_mat_c((matlab_mat_c *)Aptr);

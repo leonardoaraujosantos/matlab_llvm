@@ -1452,9 +1452,15 @@ int  matlab_err_traceback_at(int i, int32_t *file_id, int32_t *line,
 struct matlab_mat;
 struct matlab_mat_c;
 struct matlab_mat3;
+struct matlab_mat_u8;
+struct matlab_mat_i32;
 extern "C" int64_t matlab_dbg_mat_rows(struct matlab_mat *m);
 extern "C" int64_t matlab_dbg_mat_cols(struct matlab_mat *m);
 extern "C" double matlab_dbg_mat_get(struct matlab_mat *m, int64_t i, int64_t j);
+extern "C" int64_t matlab_mat_u8_rows (struct matlab_mat_u8  *m);
+extern "C" int64_t matlab_mat_u8_cols (struct matlab_mat_u8  *m);
+extern "C" int64_t matlab_mat_i32_rows(struct matlab_mat_i32 *m);
+extern "C" int64_t matlab_mat_i32_cols(struct matlab_mat_i32 *m);
 /* Discriminator: 1 = real 2-D matlab_mat, 2 = matlab_mat_c (complex),
  * 3 = matlab_mat3 (3-D). The DAP server stores a kind=1 ws/frame
  * value as a `void *` because all three share the same LLVM type;
@@ -3348,6 +3354,8 @@ std::string typeForVar(int Kind, void *Ptr) {
     return "object";
   }
   if (Kind == 3) return "string";
+  if (Kind == 4) return "uint8";
+  if (Kind == 5) return "int32";
   return "any";
 }
 
@@ -3366,6 +3374,25 @@ std::string formatVar(int Kind, int WsIdx) {
   }
   if (Kind == 1) {
     return formatMatShape((struct matlab_mat *)matlab_dbg_ws_ptr(WsIdx));
+  }
+  if (Kind == 4 || Kind == 5) {
+    /* Phase 1.1.F: typed-int matrices show as "MxN uint8" / "MxN int32"
+     * in the DAP variable view. The IDE row label keeps the lane visible
+     * even though the values format identically (no "double" trailing). */
+    void *Ptr = matlab_dbg_ws_ptr(WsIdx);
+    int64_t R = 0, C = 0;
+    if (Kind == 4) {
+      auto *M = (matlab_mat_u8 *)Ptr;
+      R = matlab_mat_u8_rows(M); C = matlab_mat_u8_cols(M);
+    } else {
+      auto *M = (matlab_mat_i32 *)Ptr;
+      R = matlab_mat_i32_rows(M); C = matlab_mat_i32_cols(M);
+    }
+    char Buf[64];
+    snprintf(Buf, sizeof Buf, "%lldx%lld %s",
+             (long long)R, (long long)C,
+             Kind == 4 ? "uint8" : "int32");
+    return Buf;
   }
   if (Kind == 2) {
     return formatObj(matlab_dbg_ws_ptr(WsIdx));

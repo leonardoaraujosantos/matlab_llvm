@@ -608,14 +608,19 @@ void Resolver::resolveExpr(Expr &E, Scope *S) {
           int K = WorkspaceKindHook(N.Name.data(), (int64_t)N.Name.size());
           /* Kind encoding (matches matlab_dbg_ws_kind):
            *   0 = f64 scalar, 1 = matlab_mat*, 2 = matlab_obj*,
-           *   3 = matlab_string*. Stamp InferredType for the kinds
-           *   the lowering can specialise on — without a scalar-double
-           *   stamp, the workspace load path falls back to
-           *   matlab_ws_get_mat (returns ptr) and downstream consumers
-           *   that need an f64 (num2str / arithmetic / range bounds)
-           *   silently misbehave. */
+           *   3 = matlab_string*, 4 = matlab_mat_u8*, 5 = matlab_mat_i32*.
+           *   Stamp InferredType for the kinds the lowering can
+           *   specialise on — without a scalar-double stamp, the
+           *   workspace load path falls back to matlab_ws_get_mat
+           *   (returns ptr) and downstream consumers that need an f64
+           *   (num2str / arithmetic / range bounds) silently misbehave.
+           *   Kinds 4/5 (typed-int matrices) are stamped with a non-
+           *   scalar Array(UInt8/Int32, unknown) so the BinaryOp emit
+           *   site picks the typed runtime entry points. */
           if (K == 0) NB->InferredType = TC.scalar(Dtype::Double);
           else if (K == 3) NB->InferredType = TC.stringScalar();
+          else if (K == 4) NB->InferredType = TC.arrayOf(Dtype::UInt8, Shape::unknown());
+          else if (K == 5) NB->InferredType = TC.arrayOf(Dtype::Int32, Shape::unknown());
         }
       } else {
         Diag.error(N.Range.Begin,

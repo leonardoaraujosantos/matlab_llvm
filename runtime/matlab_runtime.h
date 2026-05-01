@@ -453,6 +453,12 @@ matlab_mat_i32 *matlab_mat_i32_from_u8    (matlab_mat_u8 *A);
 int32_t matlab_d_to_i32_sat(double v);
 uint8_t matlab_d_to_u8_sat (double v);
 
+// Typed-int descriptor pointer registry (Phase 1.1.F). Returns -1 if p is
+// not a registered typed-int matrix pointer, 0 for matlab_mat_u8 *, 1 for
+// matlab_mat_i32 *. The polymorphic matlab_disp_mat / matlab_dbg_ws_kind
+// consult this so REPL / DAP display picks the right lane.
+int matlab_mat_intlane_kind(const void *p);
+
 // Element-wise arithmetic with MATLAB saturation semantics.
 matlab_mat_u8  *matlab_mat_u8_add_mm (matlab_mat_u8 *A, matlab_mat_u8 *B);
 matlab_mat_u8  *matlab_mat_u8_add_ms (matlab_mat_u8 *A, uint8_t s);
