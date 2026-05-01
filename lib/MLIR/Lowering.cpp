@@ -485,6 +485,7 @@ private:
    * lowering reaches the typed runtime entry points (matlab_mat_i32_disp
    * etc.) without needing to thread attributes through opaque ptr SSA. */
   static llvm::StringRef intDtypeSuffixOf(const Expr *E);
+  static llvm::StringRef intDtypeSuffixOfType(const Type *T);
 };
 
 //===----------------------------------------------------------------------===//
@@ -532,9 +533,9 @@ bool Lowerer::isStringReturningBuiltin(llvm::StringRef N) {
          N == "bin" || N == "hex" || N == "dec";
 }
 
-llvm::StringRef Lowerer::intDtypeSuffixOf(const Expr *E) {
-  if (!E || !E->Ty || E->Ty->K != Type::Kind::Array) return {};
-  auto &A = static_cast<const ArrayType &>(*E->Ty);
+llvm::StringRef Lowerer::intDtypeSuffixOfType(const Type *T) {
+  if (!T || T->K != Type::Kind::Array) return {};
+  auto &A = static_cast<const ArrayType &>(*T);
   /* Scalar typed ints are represented at MLIR level as native i32 / i8
    * values, which the existing scalar-disp path handles via SIToFP /
    * UIToFP -> matlab_disp_f64. Only matrix-shaped values need the typed
@@ -543,6 +544,10 @@ llvm::StringRef Lowerer::intDtypeSuffixOf(const Expr *E) {
   if (A.Elt == Dtype::Int32) return "i32";
   if (A.Elt == Dtype::UInt8) return "u8";
   return {};
+}
+
+llvm::StringRef Lowerer::intDtypeSuffixOf(const Expr *E) {
+  return intDtypeSuffixOfType(E ? E->Ty : nullptr);
 }
 
 bool Lowerer::isStringExpr(const Expr *E) const {
@@ -2924,6 +2929,22 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
       mlir::Type FiResTy = mirTy(Bi.Ty);
       if (mlir::isa<mlir::IntegerType>(FiResTy)) ResTy = FiResTy;
       return emitUnreg(binOpName(Bi.Op), {LHS, RHS}, ResTy, L, A);
+    }
+    /* Phase 1.1.D: typed-int matrix dispatch. When either operand is a
+     * non-scalar Int32 / UInt8 array, attach a `dtype` StringAttr to the
+     * matlab.{add,sub,emul,ediv,...} op. LowerTensorOps reads this attr
+     * to route the call to the typed runtime ABI (matlab_mat_i32_add_mm
+     * vs matlab_add_mm). The attribute is the only signal — by the time
+     * the rewrite runs both lanes look like opaque !llvm.ptr operands. */
+    llvm::StringRef IntSuf = intDtypeSuffixOf(Bi.LHS);
+    if (IntSuf.empty()) IntSuf = intDtypeSuffixOf(Bi.RHS);
+    /* Comparisons fold to Logical at Sema, so Bi.Ty itself is no longer
+     * Int32/UInt8; operand types remain the source of truth. */
+    if (!IntSuf.empty()) {
+      mlir::NamedAttribute Dt(
+          mlir::StringAttr::get(&MCtx, "dtype"),
+          mlir::StringAttr::get(&MCtx, IntSuf));
+      return emitUnreg(binOpName(Bi.Op), {LHS, RHS}, ResTy, L, {Dt});
     }
     return emitUnreg(binOpName(Bi.Op), {LHS, RHS}, ResTy, L);
   }

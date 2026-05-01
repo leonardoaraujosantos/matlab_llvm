@@ -368,6 +368,26 @@ const Type *TypeContext::broadcastNumeric(const Type *A, const Type *B) {
   auto &AA = static_cast<const ArrayType &>(*A);
   auto &BB = static_cast<const ArrayType &>(*B);
   Dtype D = promoteDtype(AA.Elt, BB.Elt);
+  /* MATLAB's native-int rule: when one side is a typed integer array and
+   * the other is a double / single, the integer type wins (the f64 side
+   * gets saturating-cast at the binop site). Apply only when at least
+   * one side is non-scalar — scalar+scalar arithmetic stays on the f64
+   * lane to match the existing scalar test fixtures. The Lowering layer
+   * uses Bi.Ty (this result) plus operand expr types to pick the typed
+   * runtime entry points (matlab_mat_i32_add_ms, etc.). */
+  auto isIntElt = [](Dtype DD) {
+    return DD == Dtype::Int8  || DD == Dtype::Int16 ||
+           DD == Dtype::Int32 || DD == Dtype::Int64 ||
+           DD == Dtype::UInt8 || DD == Dtype::UInt16 ||
+           DD == Dtype::UInt32|| DD == Dtype::UInt64;
+  };
+  bool ANonScalar = AA.S.K != Shape::Rank::Scalar;
+  bool BNonScalar = BB.S.K != Shape::Rank::Scalar;
+  if ((ANonScalar || BNonScalar) &&
+      (D == Dtype::Double || D == Dtype::Single)) {
+    if (isIntElt(AA.Elt) && !isIntElt(BB.Elt)) D = AA.Elt;
+    else if (isIntElt(BB.Elt) && !isIntElt(AA.Elt)) D = BB.Elt;
+  }
   if (D == Dtype::Unknown) return any();
   Shape Out = broadcastShape(AA.S, BB.S);
   if (D == Dtype::Fixed) {

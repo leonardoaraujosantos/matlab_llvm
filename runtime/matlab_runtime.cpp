@@ -3171,6 +3171,13 @@ matlab_mat_i32 *matlab_mat_i32_from_u8(matlab_mat_u8 *A) {
     return R;
 }
 
+/* Scalar saturating casts — public wrappers around the static helpers
+ * above. Used at MLIR lowering time when a typed-int matrix is mixed
+ * with a double scalar in a binop (`A + 2.5`); the lowering coerces the
+ * f64 here before calling the typed _ms / _sm runtime entry. */
+extern "C" int32_t matlab_d_to_i32_sat(double v) { return sat_d_to_i32(v); }
+extern "C" uint8_t matlab_d_to_u8_sat (double v) { return sat_d_to_u8(v); }
+
 /* ===== Element-wise arithmetic ===== */
 
 /* Macro generates _mm / _ms / _sm trio for one (lane, op) pair. The lane

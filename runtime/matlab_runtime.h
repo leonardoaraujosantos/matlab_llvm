@@ -447,6 +447,12 @@ matlab_mat     *matlab_mat_i32_to_double  (matlab_mat_i32 *A);
 matlab_mat_u8  *matlab_mat_u8_from_i32    (matlab_mat_i32 *A);
 matlab_mat_i32 *matlab_mat_i32_from_u8    (matlab_mat_u8 *A);
 
+// Scalar saturating casts — used when a typed-int matrix is mixed with a
+// double scalar in a binop (`A + 2.5`); the lowering coerces the scalar
+// here before calling the typed _ms / _sm runtime entry.
+int32_t matlab_d_to_i32_sat(double v);
+uint8_t matlab_d_to_u8_sat (double v);
+
 // Element-wise arithmetic with MATLAB saturation semantics.
 matlab_mat_u8  *matlab_mat_u8_add_mm (matlab_mat_u8 *A, matlab_mat_u8 *B);
 matlab_mat_u8  *matlab_mat_u8_add_ms (matlab_mat_u8 *A, uint8_t s);

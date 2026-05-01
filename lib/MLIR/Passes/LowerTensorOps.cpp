@@ -2432,7 +2432,45 @@ bool TensorLowering::rewriteBinaryOps() {
     LLVM::LLVMFuncOp Fn;
     SmallVector<Value, 2> Args;
 
+    /* Phase 1.1.D: typed-int matrix lane (i32 / u8). Lowering attaches
+     * a "dtype" StringAttr when either operand is a non-scalar Int32 /
+     * UInt8 array. The runtime layer keeps separate descriptors and the
+     * dispatch needs to pick matlab_mat_<lane>_<base>_<mm|ms|sm>. ms/sm
+     * scalars are coerced from f64 via the public matlab_d_to_<lane>_sat
+     * helpers so MATLAB's saturating cast semantics are preserved. */
+    StringRef IntLane;
+    if (auto DA = Op->getAttrOfType<StringAttr>("dtype"))
+      IntLane = DA.getValue();
+
+    auto coerceScalar = [&](Value V) -> Value {
+      assert(!IntLane.empty());
+      StringRef Helper = (IntLane == "i32") ? "matlab_d_to_i32_sat"
+                                            : "matlab_d_to_u8_sat";
+      Type IT = (IntLane == "i32") ? (Type)IntegerType::get(B.getContext(), 32)
+                                   : (Type)IntegerType::get(B.getContext(), 8);
+      auto Hf = rt(Helper.str(), IT, {F64});
+      return LLVM::CallOp::create(B, Op->getLoc(), Hf, ValueRange{V})
+          .getResult();
+    };
+
     auto emitElem = [&](StringRef Base) {
+      if (!IntLane.empty()) {
+        std::string Pre = ("matlab_mat_" + IntLane + "_" + Base).str();
+        Type IT = (IntLane == "i32")
+                      ? (Type)IntegerType::get(B.getContext(), 32)
+                      : (Type)IntegerType::get(B.getContext(), 8);
+        if (AP && BP) {
+          Fn = rt(Pre + "_mm", PtrTy, {PtrTy, PtrTy});
+          Args = {A, BVal};
+        } else if (AP && BF) {
+          Fn = rt(Pre + "_ms", PtrTy, {PtrTy, IT});
+          Args = {A, coerceScalar(BVal)};
+        } else if (AF && BP) {
+          Fn = rt(Pre + "_sm", PtrTy, {IT, PtrTy});
+          Args = {coerceScalar(A), BVal};
+        }
+        return;
+      }
       if (AP && BP) {
         Fn = rt(("matlab_" + Base + "_mm").str(), PtrTy, {PtrTy, PtrTy});
         Args = {A, BVal};
@@ -2444,6 +2482,13 @@ bool TensorLowering::rewriteBinaryOps() {
         Args = {A, BVal};
       }
     };
+
+    /* matmul/matdiv/matldiv on typed-int matrices fall back to f64 for
+     * now (no native int LU solve / mtimes in the runtime); silence the
+     * IntLane on those so the f64 branches below take effect. */
+    if (ML == "matlab.matmul" || ML == "matlab.matdiv" ||
+        ML == "matlab.matldiv")
+      IntLane = "";
 
     if (ML == "matlab.matmul") {
       if (AP && BP) {
