@@ -3149,6 +3149,43 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
         }
       }
 
+      /* Phase 1.1.G — typed-int matrix cross-lane / to-double casts.
+       * `int32(uint8_matrix)`, `uint8(int32_matrix)`, `double(int32_matrix)`,
+       * and `double(uint8_matrix)` need to consult the operand's type
+       * because the Spec-table dispatch in LowerTensorOps is shape-blind
+       * (every matrix arg is opaque !llvm.ptr by then). Route to the
+       * lane-aware runtime entry point directly so the typed storage
+       * isn't reinterpreted as f64. */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          (N->Name == "int32" || N->Name == "uint8" || N->Name == "double") &&
+          C.Args.size() == 1 && C.Args[0] &&
+          C.Args[0]->Ty && C.Args[0]->Ty->K == Type::Kind::Array) {
+        llvm::StringRef SrcSuf = intDtypeSuffixOf(C.Args[0]);
+        if (!SrcSuf.empty()) {
+          /* Source is a non-scalar Int32 / UInt8 array. Pick the runtime
+           * entry that takes the typed source. */
+          std::string Callee;
+          if (N->Name == "double")
+            Callee = ("matlab_mat_" + SrcSuf + "_to_double").str();
+          else if (N->Name == "int32" && SrcSuf == "u8")
+            Callee = "matlab_mat_i32_from_u8";
+          else if (N->Name == "uint8" && SrcSuf == "i32")
+            Callee = "matlab_mat_u8_from_i32";
+          /* Same-lane casts (int32(int32_matrix) / uint8(uint8_matrix))
+           * fall through to the default Spec dispatch — those are no-ops
+           * in MATLAB and the from_double path is harmless because Sema
+           * collapses them; let LowerTensorOps see the call. */
+          if (!Callee.empty()) {
+            auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+            mlir::Value V = lowerExpr(*C.Args[0]);
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, Callee));
+            return emitUnreg("matlab.call_builtin", {V}, PtrTy, L, {Cal});
+          }
+        }
+      }
+
       /* storedIntegerToDouble(fi) / double(fi) — render the real-world
        * value. We multiply the stored int by 2^-FL at runtime; for now
        * we route through the runtime helper matlab_fi_to_double_*, which

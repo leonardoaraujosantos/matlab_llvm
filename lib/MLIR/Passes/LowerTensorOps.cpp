@@ -856,6 +856,26 @@ bool TensorLowering::rewriteBuiltinCalls() {
       Changed = true;
       continue;
     }
+    /* Phase 1.1.G — cross-lane / to-double matrix casts. Lowering.cpp
+     * picks the lane-aware callee when it sees `int32(uint8_matrix)` /
+     * `uint8(int32_matrix)` / `double(typed_int_matrix)`; these all
+     * take one ptr operand and return one ptr (the target descriptor). */
+    if ((Name == "matlab_mat_i32_from_u8"  ||
+         Name == "matlab_mat_u8_from_i32"  ||
+         Name == "matlab_mat_i32_to_double" ||
+         Name == "matlab_mat_u8_to_double") &&
+        Call->getNumOperands() == 1 && Call->getNumResults() == 1 &&
+        Call->getOperand(0).getType() == PtrTy) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt(Name, PtrTy, {PtrTy});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                      ValueRange{Call->getOperand(0)});
+      carryName(Call, NC);
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
     if (Name == "matlab_string_len" && Call->getNumResults() == 1 &&
         Call->getNumOperands() == 1 &&
         Call->getOperand(0).getType() == PtrTy) {
