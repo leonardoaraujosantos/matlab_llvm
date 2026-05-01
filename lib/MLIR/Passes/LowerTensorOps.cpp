@@ -1106,6 +1106,99 @@ bool TensorLowering::rewriteBuiltinCalls() {
       Changed = true;
       continue;
     }
+    /* Phase 1.3: 2-D cell ops. matlab_cell_new_2d takes (rows, cols)
+     * f64 and returns ptr; set_*_2d takes (cell, r, k, value); get_*_2d
+     * takes (cell, r, k); cell_size_dim (cell, dim) -> f64; concat_*
+     * takes (cell, cell) -> cell ptr. */
+    if (Name == "matlab_cell_new_2d" && Call->getNumResults() == 1 &&
+        Call->getNumOperands() == 2 &&
+        Call->getOperand(0).getType() == F64 &&
+        Call->getOperand(1).getType() == F64) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt("matlab_cell_new_2d", PtrTy, {F64, F64});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                      ValueRange{Call->getOperand(0),
+                                                 Call->getOperand(1)});
+      carryName(Call, NC);
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+    if ((Name == "matlab_cell_set_f64_2d" ||
+         Name == "matlab_cell_set_mat_2d") &&
+        Call->getNumOperands() == 4 &&
+        Call->getOperand(0).getType() == PtrTy &&
+        Call->getOperand(1).getType() == F64 &&
+        Call->getOperand(2).getType() == F64) {
+      bool IsMat = Name == "matlab_cell_set_mat_2d";
+      Value V = Call->getOperand(3);
+      if (IsMat && V.getType() != PtrTy) continue;
+      if (!IsMat && V.getType() != F64) continue;
+      B.setInsertionPoint(Call);
+      auto Fn = rt(Name, VoidTy, {PtrTy, F64, F64,
+                                  IsMat ? (Type)PtrTy : (Type)F64});
+      LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                            ValueRange{Call->getOperand(0),
+                                       Call->getOperand(1),
+                                       Call->getOperand(2), V});
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+    if ((Name == "matlab_cell_get_f64_2d" ||
+         Name == "matlab_cell_get_mat_2d") &&
+        Call->getNumResults() == 1 &&
+        Call->getNumOperands() == 3 &&
+        Call->getOperand(0).getType() == PtrTy &&
+        Call->getOperand(1).getType() == F64 &&
+        Call->getOperand(2).getType() == F64) {
+      B.setInsertionPoint(Call);
+      bool IsMat = Name == "matlab_cell_get_mat_2d";
+      auto Fn = rt(Name, IsMat ? (Type)PtrTy : (Type)F64,
+                   {PtrTy, F64, F64});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                      ValueRange{Call->getOperand(0),
+                                                 Call->getOperand(1),
+                                                 Call->getOperand(2)});
+      carryName(Call, NC);
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+    if (Name == "matlab_cell_size_dim" && Call->getNumResults() == 1 &&
+        Call->getNumOperands() == 2 &&
+        Call->getOperand(0).getType() == PtrTy &&
+        Call->getOperand(1).getType() == F64) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt("matlab_cell_size_dim", F64, {PtrTy, F64});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                      ValueRange{Call->getOperand(0),
+                                                 Call->getOperand(1)});
+      carryName(Call, NC);
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+    if ((Name == "matlab_cell_concat_row" ||
+         Name == "matlab_cell_concat_col") &&
+        Call->getNumResults() == 1 &&
+        Call->getNumOperands() == 2 &&
+        Call->getOperand(0).getType() == PtrTy &&
+        Call->getOperand(1).getType() == PtrTy) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt(Name, PtrTy, {PtrTy, PtrTy});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                      ValueRange{Call->getOperand(0),
+                                                 Call->getOperand(1)});
+      carryName(Call, NC);
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
     if ((Name == "matlab_cell_get_f64" ||
          Name == "matlab_cell_get_mat" ||
          Name == "matlab_cell_numel" ||

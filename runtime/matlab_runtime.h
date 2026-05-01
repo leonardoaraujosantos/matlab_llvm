@@ -570,6 +570,21 @@ matlab_mat *matlab_cell_get_mat(matlab_cell *c, double i1);
 double matlab_cell_numel(matlab_cell *c);
 double matlab_iscell(matlab_cell *c);
 
+/* Phase 1.3 — 2-D cells. Row-major layout; the legacy 1-D accessors
+ * keep working on cells of any shape (linear index across the
+ * row-major buffer). Bracket cell-concat builds a fresh cell that
+ * borrows the source elements' pointers. */
+matlab_cell *matlab_cell_new_2d(double rows, double cols);
+double  matlab_cell_rows(matlab_cell *c);
+double  matlab_cell_cols(matlab_cell *c);
+double  matlab_cell_size_dim(matlab_cell *c, double dim);
+void    matlab_cell_set_f64_2d(matlab_cell *c, double r1, double k1, double v);
+void    matlab_cell_set_mat_2d(matlab_cell *c, double r1, double k1, matlab_mat *m);
+double  matlab_cell_get_f64_2d(matlab_cell *c, double r1, double k1);
+matlab_mat *matlab_cell_get_mat_2d(matlab_cell *c, double r1, double k1);
+matlab_cell *matlab_cell_concat_row(matlab_cell *a, matlab_cell *b);
+matlab_cell *matlab_cell_concat_col(matlab_cell *a, matlab_cell *b);
+
 // Global / persistent.
 double matlab_global_get_f64(int32_t id);
 void   matlab_global_set_f64(int32_t id, double v);

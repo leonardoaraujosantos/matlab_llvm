@@ -203,8 +203,8 @@ Out of scope:
 | Struct arrays (`s(i).x`) | ❌ | Scalar struct only |
 | `fieldnames(s)` | 🟡 | Needs char-matrix dtype |
 | Cell: 1-D literal, read/write, `numel`, `iscell` | ✅ | Auto-grows on OOB write |
-| Cell: 2-D | ❌ | |
-| Cell: concatenation (`{C{:}, x}`) | ❌ | |
+| Cell: 2-D literals + `C{r, k}` indexing | ✅ shipped (Phase 1.3) | `{a, b; c, d}` -> `matlab_cell_new_2d` + per-cell `matlab_cell_set_<f64\|mat>_2d`; `C{r, k}` reads / writes via the matching get / set entries. `size(C, dim)` routes to `matlab_cell_size_dim`. Python (`cell_*_2d`) and TypeScript (`Cell2D` wrapper) runtimes ship with byte-identical output. |
+| Cell: concatenation (`[A, B]`, `[A; B]`) | ✅ shipped (Phase 1.3) | Bracket-concat of all-cell elements chains `matlab_cell_concat_row` / `_col`; assignment auto-tags the LHS as a cell binding so `size` / `iscell` keep dispatching through the cell runtime. Spread-into-cell (`{C{:}, x}`) still missing — needs `varargin`-style unpacking at the literal site. |
 | `cellfun`, `arrayfun` (beyond trivial cases) | 🟡 | Registered; not all wired |
 | Containers.Map | ❌ | |
 

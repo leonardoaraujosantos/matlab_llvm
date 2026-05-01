@@ -1330,6 +1330,85 @@ def cell_numel(c):
 def iscell(c):
     return 1.0 if isinstance(c, list) else 0.0
 
+# Phase 1.3 — 2-D cells. The legacy 1-D representation is a flat Python
+# list (one element per slot). The 2-D form keeps the same flat list and
+# tracks rows/cols on the dict-style `_meta` attribute via a wrapper. We
+# avoid threading a class through here by using a dict { 'data': [...],
+# 'rows': r, 'cols': c }; iscell / numel / cell_get_* / cell_set_* now
+# accept either form.
+
+def _is_cell2d(c): return isinstance(c, dict) and 'data' in c and 'rows' in c
+
+def cell_new_2d(rows, cols):
+    r = int(rows); k = int(cols)
+    return {'data': [None] * (r * k), 'rows': r, 'cols': k}
+
+def cell_rows(c):
+    if _is_cell2d(c): return float(c['rows'])
+    return 1.0 if c else 0.0
+
+def cell_cols(c):
+    if _is_cell2d(c): return float(c['cols'])
+    return float(len(c)) if isinstance(c, list) else 0.0
+
+def cell_size_dim(c, d):
+    d = int(d)
+    if d == 1: return cell_rows(c)
+    if d == 2: return cell_cols(c)
+    return 1.0
+
+def _cell2d_lin(c, r, k):
+    return (int(r) - 1) * c['cols'] + (int(k) - 1)
+
+def cell_set_f64_2d(c, r, k, v):
+    if not _is_cell2d(c): return
+    c['data'][_cell2d_lin(c, r, k)] = float(v)
+
+def cell_set_mat_2d(c, r, k, m):
+    if not _is_cell2d(c): return
+    c['data'][_cell2d_lin(c, r, k)] = m
+
+def cell_get_f64_2d(c, r, k):
+    if not _is_cell2d(c): return 0.0
+    v = c['data'][_cell2d_lin(c, r, k)]
+    try: return float(v)
+    except Exception: return 0.0
+
+def cell_get_mat_2d(c, r, k):
+    if not _is_cell2d(c): return None
+    return c['data'][_cell2d_lin(c, r, k)]
+
+def cell_concat_row(a, b):
+    """[a, b] horizontal concat: rows must match; cols sum."""
+    ar = int(cell_rows(a)); ac = int(cell_cols(a))
+    br = int(cell_rows(b)); bc = int(cell_cols(b))
+    if ar != br: return cell_new(0)
+    nc = ac + bc
+    out = cell_new_2d(ar, nc)
+    a_data = a['data'] if _is_cell2d(a) else a
+    b_data = b['data'] if _is_cell2d(b) else b
+    for r in _pyrange(ar):
+        for kk in _pyrange(ac):
+            out['data'][r * nc + kk] = a_data[r * ac + kk]
+        for kk in _pyrange(bc):
+            out['data'][r * nc + ac + kk] = b_data[r * bc + kk]
+    return out
+
+def cell_concat_col(a, b):
+    """[a; b] vertical concat: cols must match; rows sum."""
+    ar = int(cell_rows(a)); ac = int(cell_cols(a))
+    br = int(cell_rows(b)); bc = int(cell_cols(b))
+    if ac != bc: return cell_new(0)
+    nr = ar + br
+    out = cell_new_2d(nr, ac)
+    a_data = a['data'] if _is_cell2d(a) else a
+    b_data = b['data'] if _is_cell2d(b) else b
+    for i in _pyrange(ar * ac):
+        out['data'][i] = a_data[i]
+    for i in _pyrange(br * bc):
+        out['data'][ar * ac + i] = b_data[i]
+    return out
+
 
 # --- object / class -------------------------------------------------------
 #

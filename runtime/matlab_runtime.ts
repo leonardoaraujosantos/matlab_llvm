@@ -1576,7 +1576,91 @@ export function cell_get_mat(c: any[], i: number): any {
   return c[(i | 0) - 1];
 }
 export function cell_numel(c: any[]): number { return c.length; }
-export function iscell(c: any): number { return Array.isArray(c) ? 1 : 0; }
+export function iscell(c: any): number {
+  return (Array.isArray(c) ||
+          (c && typeof c === "object" && "data" in c && "rows" in c)) ? 1 : 0;
+}
+
+// Phase 1.3 — 2-D cells. The 1-D form keeps the legacy plain-array
+// representation; 2-D cells use a small wrapper { data, rows, cols }
+// where data is the row-major flat array. iscell, cell_numel, and the
+// 2-D accessors all accept either form so existing 1-D tests stay
+// untouched.
+type Cell2D = { data: any[]; rows: number; cols: number };
+function isCell2D(c: any): c is Cell2D {
+  return c && typeof c === "object" && "data" in c && "rows" in c;
+}
+
+export function cell_new_2d(rows: number, cols: number): Cell2D {
+  const r = rows | 0, k = cols | 0;
+  return { data: new Array(r * k).fill(null), rows: r, cols: k };
+}
+
+export function cell_rows(c: any): number {
+  if (isCell2D(c)) return c.rows;
+  return Array.isArray(c) && c.length > 0 ? 1 : 0;
+}
+export function cell_cols(c: any): number {
+  if (isCell2D(c)) return c.cols;
+  return Array.isArray(c) ? c.length : 0;
+}
+export function cell_size_dim(c: any, d: number): number {
+  const dn = d | 0;
+  if (dn === 1) return cell_rows(c);
+  if (dn === 2) return cell_cols(c);
+  return 1;
+}
+
+function cell2dLin(c: Cell2D, r: number, k: number): number {
+  return ((r | 0) - 1) * c.cols + ((k | 0) - 1);
+}
+
+export function cell_set_f64_2d(c: Cell2D, r: number, k: number, v: number): void {
+  if (!isCell2D(c)) return;
+  c.data[cell2dLin(c, r, k)] = +v;
+}
+export function cell_set_mat_2d(c: Cell2D, r: number, k: number, m: any): void {
+  if (!isCell2D(c)) return;
+  c.data[cell2dLin(c, r, k)] = m;
+}
+export function cell_get_f64_2d(c: Cell2D, r: number, k: number): number {
+  if (!isCell2D(c)) return 0;
+  const v = c.data[cell2dLin(c, r, k)];
+  const f = Number(v);
+  return Number.isNaN(f) ? 0 : f;
+}
+export function cell_get_mat_2d(c: Cell2D, r: number, k: number): any {
+  if (!isCell2D(c)) return null;
+  return c.data[cell2dLin(c, r, k)];
+}
+
+function cellData(c: any): any[] { return isCell2D(c) ? c.data : c as any[]; }
+
+export function cell_concat_row(a: any, b: any): Cell2D {
+  const ar = cell_rows(a), ac = cell_cols(a);
+  const br = cell_rows(b), bc = cell_cols(b);
+  if (ar !== br) return cell_new_2d(0, 0);
+  const nc = ac + bc;
+  const out = cell_new_2d(ar, nc);
+  const ad = cellData(a), bd = cellData(b);
+  for (let r = 0; r < ar; r++) {
+    for (let k = 0; k < ac; k++) out.data[r * nc + k] = ad[r * ac + k];
+    for (let k = 0; k < bc; k++) out.data[r * nc + ac + k] = bd[r * bc + k];
+  }
+  return out;
+}
+
+export function cell_concat_col(a: any, b: any): Cell2D {
+  const ar = cell_rows(a), ac = cell_cols(a);
+  const br = cell_rows(b), bc = cell_cols(b);
+  if (ac !== bc) return cell_new_2d(0, 0);
+  const nr = ar + br;
+  const out = cell_new_2d(nr, ac);
+  const ad = cellData(a), bd = cellData(b);
+  for (let i = 0; i < ar * ac; i++) out.data[i] = ad[i];
+  for (let i = 0; i < br * bc; i++) out.data[ar * ac + i] = bd[i];
+  return out;
+}
 
 // --- object / class -------------------------------------------------------
 //

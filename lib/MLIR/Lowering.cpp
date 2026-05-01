@@ -1748,7 +1748,31 @@ void Lowerer::lowerStmt(const Stmt &St) {
      * calls can route to the matlab_cell_* runtime. Both bare
      * CellLiteral and calls to known cell-producing builtins qualify;
      * for v1 we cover the literal case. */
+    /* Phase 1.3: a MatrixLiteral whose elements are all cell-bound names
+     * or CellLiterals is a cell concatenation expression — treat the LHS
+     * as cell-bound just like a direct CellLiteral RHS. Without this,
+     * `R = [A, B]` (A, B cells) would not flag R in CellBindings, so the
+     * subsequent `size(R, 1)` would route through the matrix runtime
+     * and read garbage from the cell layout. */
+    auto isCellExprForAssign = [&](const Expr *X) -> bool {
+      if (!X) return false;
+      if (X->Kind == NodeKind::CellLiteral) return true;
+      if (auto *NE = dynamic_cast<const NameExpr *>(X))
+        if (NE->Ref && CellBindings.count(NE->Ref)) return true;
+      return false;
+    };
     bool RhsIsCellLit = A.RHS && A.RHS->Kind == NodeKind::CellLiteral;
+    if (!RhsIsCellLit && A.RHS && A.RHS->Kind == NodeKind::MatrixLiteral) {
+      auto *MM = static_cast<const MatrixLiteral *>(A.RHS);
+      bool All = !MM->Rows.empty();
+      for (auto &R : MM->Rows) {
+        if (R.empty()) { All = false; break; }
+        for (const Expr *X : R)
+          if (!isCellExprForAssign(X)) { All = false; break; }
+        if (!All) break;
+      }
+      if (All) RhsIsCellLit = true;
+    }
     /* Track string-typed bindings (from "..." literals, string-
      * returning builtins, or `+` chains where either operand is a
      * string) so `+` / disp / strlen / isstring can dispatch
@@ -2703,23 +2727,36 @@ void Lowerer::lowerLValueStore(const Expr &LHS, mlir::Value Rhs) {
     return;
   }
   case NodeKind::CellIndex: {
-    /* C{i} = Rhs. Evaluate the cell ptr, the index, and Rhs; route
-     * to matlab_cell_set_f64 or matlab_cell_set_mat based on value
-     * kind. Single 1-D index for v1. */
+    /* C{i} = Rhs (1-D) routes to matlab_cell_set_<f64|mat>.
+     * C{r, k} = Rhs (2-D, Phase 1.3) routes to matlab_cell_set_<f64|mat>_2d.
+     * Kind is picked from Rhs's MLIR type — ptr / tensor -> _mat,
+     * everything else -> _f64. */
     auto &C = static_cast<const CellIndex &>(LHS);
-    if (C.Args.size() != 1 || !C.Callee) return;
+    if (C.Args.empty() || C.Args.size() > 2 || !C.Callee) return;
     mlir::Value Cell = lowerExpr(*C.Callee);
-    mlir::Value Idx = lowerExpr(*C.Args[0]);
     auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
     bool IsMat = Rhs && (Rhs.getType() == PtrTy ||
                          mlir::isa<mlir::RankedTensorType,
                                    mlir::UnrankedTensorType>(Rhs.getType()));
-    llvm::StringRef Callee = IsMat ? "matlab_cell_set_mat"
-                                    : "matlab_cell_set_f64";
+    if (C.Args.size() == 1) {
+      mlir::Value Idx = lowerExpr(*C.Args[0]);
+      llvm::StringRef Callee = IsMat ? "matlab_cell_set_mat"
+                                      : "matlab_cell_set_f64";
+      mlir::NamedAttribute Cal(
+          mlir::StringAttr::get(&MCtx, "callee"),
+          mlir::StringAttr::get(&MCtx, Callee));
+      emitUnregOp("matlab.call_builtin", {Cell, Idx, Rhs},
+                  {mlir::NoneType::get(&MCtx)}, loc(C.Range), {Cal});
+      return;
+    }
+    mlir::Value R = lowerExpr(*C.Args[0]);
+    mlir::Value K = lowerExpr(*C.Args[1]);
+    llvm::StringRef Callee = IsMat ? "matlab_cell_set_mat_2d"
+                                    : "matlab_cell_set_f64_2d";
     mlir::NamedAttribute Cal(
         mlir::StringAttr::get(&MCtx, "callee"),
         mlir::StringAttr::get(&MCtx, Callee));
-    emitUnregOp("matlab.call_builtin", {Cell, Idx, Rhs},
+    emitUnregOp("matlab.call_builtin", {Cell, R, K, Rhs},
                 {mlir::NoneType::get(&MCtx)}, loc(C.Range), {Cal});
     return;
   }
@@ -4333,6 +4370,22 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             return emitUnreg("matlab.call_builtin", {Arg}, F64, L, {Cal});
           }
       }
+      /* Phase 1.3: size(C, dim) on a known cell -> matlab_cell_size_dim.
+       * Without this, size would route through the matrix runtime and
+       * read garbage from the cell layout. */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          N->Name == "size" && C.Args.size() == 2) {
+        if (auto *ArgN = dynamic_cast<const NameExpr *>(C.Args[0]))
+          if (ArgN->Ref && CellBindings.count(ArgN->Ref)) {
+            auto F64 = mlir::Float64Type::get(&MCtx);
+            mlir::Value A = lowerExpr(*C.Args[0]);
+            mlir::Value D = lowerExpr(*C.Args[1]);
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_cell_size_dim"));
+            return emitUnreg("matlab.call_builtin", {A, D}, F64, L, {Cal});
+          }
+      }
       /* size(A, dim) / numel(A) / ndims(A) on a 3-D binding route to
        * the matlab_mat3 runtime; the 2-D variants treat the descriptor
        * as a matlab_mat* and would read wrong fields. */
@@ -4629,25 +4682,37 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
     return emitUnreg("matlab.subscript", Idx, SubRT, L, {NA});
   }
   case NodeKind::CellIndex: {
-    /* C{i} read — routes to matlab_cell_get_f64 by default, or
-     * matlab_cell_get_mat when Sema concretely says matrix. Single
-     * 1-D index for v1. */
+    /* C{i} read (1-D) — routes to matlab_cell_get_f64 by default, or
+     * matlab_cell_get_mat when Sema concretely says matrix.
+     * C{r, k} read (2-D, Phase 1.3) — same dispatch but on the _2d
+     * runtime entry.
+     */
     auto &C = static_cast<const CellIndex &>(E);
-    if (C.Args.size() != 1)
+    if (C.Args.empty() || C.Args.size() > 2)
       return emitUnreg("matlab.undef", {}, RT, L);
     mlir::Value Arr = C.Callee ? lowerExpr(*C.Callee) : mlir::Value{};
-    mlir::Value Idx = lowerExpr(*C.Args[0]);
     auto F64 = mlir::Float64Type::get(&MCtx);
     auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
     bool WantMat = mlir::isa<mlir::RankedTensorType,
                               mlir::UnrankedTensorType>(RT);
-    llvm::StringRef Callee = WantMat ? "matlab_cell_get_mat"
-                                      : "matlab_cell_get_f64";
+    mlir::Type ResTy = WantMat ? (mlir::Type)PtrTy : (mlir::Type)F64;
+    if (C.Args.size() == 1) {
+      mlir::Value Idx = lowerExpr(*C.Args[0]);
+      llvm::StringRef Callee = WantMat ? "matlab_cell_get_mat"
+                                        : "matlab_cell_get_f64";
+      mlir::NamedAttribute Cal(
+          mlir::StringAttr::get(&MCtx, "callee"),
+          mlir::StringAttr::get(&MCtx, Callee));
+      return emitUnreg("matlab.call_builtin", {Arr, Idx}, ResTy, L, {Cal});
+    }
+    mlir::Value R = lowerExpr(*C.Args[0]);
+    mlir::Value K = lowerExpr(*C.Args[1]);
+    llvm::StringRef Callee = WantMat ? "matlab_cell_get_mat_2d"
+                                      : "matlab_cell_get_f64_2d";
     mlir::NamedAttribute Cal(
         mlir::StringAttr::get(&MCtx, "callee"),
         mlir::StringAttr::get(&MCtx, Callee));
-    mlir::Type ResTy = WantMat ? (mlir::Type)PtrTy : (mlir::Type)F64;
-    return emitUnreg("matlab.call_builtin", {Arr, Idx}, ResTy, L, {Cal});
+    return emitUnreg("matlab.call_builtin", {Arr, R, K}, ResTy, L, {Cal});
   }
   case NodeKind::FieldAccess: {
     /* s.x read  OR  s.a.b read. resolveStructBase walks a nested
@@ -4854,6 +4919,54 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
         /* All-empty row — fall through to the generic path. */
       }
     }
+    /* Phase 1.3 — cell concatenation. `[a, b]` / `[a; b]` where every
+     * element is a cell-bound NameExpr or a CellLiteral chains
+     * matlab_cell_concat_row / _concat_col into a fresh cell. The
+     * runtime helpers borrow element pointers (no deep copy).
+     *
+     * Detection: each AST element is either a CellLiteral or a
+     * NameExpr whose binding is in CellBindings. If any element fails
+     * the check, fall through to the generic numeric concat path. */
+    auto isCellElem = [&](const Expr *X) -> bool {
+      if (!X) return false;
+      if (X->Kind == NodeKind::CellLiteral) return true;
+      if (auto *NE = dynamic_cast<const NameExpr *>(X))
+        if (NE->Ref && CellBindings.count(NE->Ref)) return true;
+      return false;
+    };
+    bool AllCells = !M.Rows.empty();
+    for (auto &R : M.Rows) {
+      if (R.empty()) { AllCells = false; break; }
+      for (const Expr *X : R)
+        if (!isCellElem(X)) { AllCells = false; break; }
+      if (!AllCells) break;
+    }
+    if (AllCells) {
+      auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+      llvm::SmallVector<mlir::Value, 4> RowAccs;
+      for (auto &R : M.Rows) {
+        mlir::Value Acc;
+        for (const Expr *X : R) {
+          mlir::Value V = lowerExpr(*X);
+          if (!Acc) { Acc = V; continue; }
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_cell_concat_row"));
+          Acc = emitUnreg("matlab.call_builtin", {Acc, V}, PtrTy, L, {Cal});
+        }
+        RowAccs.push_back(Acc);
+      }
+      mlir::Value Out = RowAccs.front();
+      for (size_t i = 1; i < RowAccs.size(); ++i) {
+        mlir::NamedAttribute Cal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "matlab_cell_concat_col"));
+        Out = emitUnreg("matlab.call_builtin", {Out, RowAccs[i]},
+                        PtrTy, L, {Cal});
+      }
+      return Out;
+    }
+
     /* fi-typed row vector: route every element through matlab_mat_i64
      * (or _u64) helpers and chain concat calls. We accept scalar fi
      * elements (wrap via matlab_mat_i64_from_scalar) and existing fi
@@ -4927,12 +5040,55 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
   }
   case NodeKind::CellLiteral: {
     /* {a, b, c, ...} creates a matlab_cell and sets slot i = expr_i.
-     * v1: 1-D only (flattens multi-row literals into a single row).
+     * Single-row literals: 1-D shape (rows=1, cols=N). Multi-row
+     * literals (Phase 1.3): 2-D shape with explicit
+     * matlab_cell_new_2d(rows, cols) and per-cell
+     * matlab_cell_set_<f64|mat>_2d(c, r, k, v). All rows must have the
+     * same length — the parser enforces that for the matrix grammar
+     * and the same shape carries here.
+     *
      * Kind is picked from each element's MLIR type at the call site:
      * ptr -> matlab_cell_set_mat, else -> matlab_cell_set_f64. */
     auto &M = static_cast<const CellLiteral &>(E);
     auto F64 = mlir::Float64Type::get(&MCtx);
     auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+    bool TwoD = M.Rows.size() > 1;
+    if (TwoD) {
+      size_t Rcount = M.Rows.size();
+      size_t Ccount = M.Rows[0].size();
+      mlir::Value RC = mlir::arith::ConstantOp::create(
+          B, L, F64, mlir::FloatAttr::get(F64, (double)Rcount));
+      mlir::Value CC = mlir::arith::ConstantOp::create(
+          B, L, F64, mlir::FloatAttr::get(F64, (double)Ccount));
+      mlir::NamedAttribute New(
+          mlir::StringAttr::get(&MCtx, "callee"),
+          mlir::StringAttr::get(&MCtx, "matlab_cell_new_2d"));
+      mlir::Value Cell = emitUnreg("matlab.call_builtin", {RC, CC},
+                                    PtrTy, L, {New});
+      for (size_t r = 0; r < Rcount; ++r) {
+        for (size_t k = 0; k < M.Rows[r].size() && k < Ccount; ++k) {
+          const Expr *El = M.Rows[r][k];
+          if (!El) continue;
+          mlir::Value V = lowerExpr(*El);
+          mlir::Value Ri = mlir::arith::ConstantOp::create(
+              B, L, F64, mlir::FloatAttr::get(F64, (double)(r + 1)));
+          mlir::Value Ki = mlir::arith::ConstantOp::create(
+              B, L, F64, mlir::FloatAttr::get(F64, (double)(k + 1)));
+          bool IsMat = V && (V.getType() == PtrTy ||
+                             mlir::isa<mlir::RankedTensorType,
+                                       mlir::UnrankedTensorType>(V.getType()));
+          llvm::StringRef Callee = IsMat ? "matlab_cell_set_mat_2d"
+                                          : "matlab_cell_set_f64_2d";
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, Callee));
+          emitUnregOp("matlab.call_builtin", {Cell, Ri, Ki, V},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+        }
+      }
+      return Cell;
+    }
+    /* 1-D path. */
     llvm::SmallVector<mlir::Value, 8> Elems;
     for (auto &R : M.Rows)
       for (const Expr *El : R)

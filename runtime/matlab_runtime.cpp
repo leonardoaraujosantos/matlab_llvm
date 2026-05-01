@@ -5009,9 +5009,15 @@ matlab_struct *matlab_struct_rmfield(matlab_struct *s, const char *name,
  * 1-based to match MATLAB. Out-of-range get returns 0.0 (f64) or an
  * empty matrix (mat). Autogrows on set past end.
  */
+/* Phase 1.3: 2-D cells. The legacy n-only descriptor is preserved as
+ * the 1-D / "row vector" shape (rows=1, cols=n). 2-D cells track rows
+ * and cols explicitly; element layout is row-major so the 1-D
+ * accessors keep working over the linear backing arrays. */
 struct matlab_cell_s {
-    int32_t n;
+    int32_t n;        /* total element count (rows * cols) */
     int32_t cap;
+    int32_t rows;     /* Phase 1.3 */
+    int32_t cols;     /* Phase 1.3 */
     int32_t *kinds;
     double *f64_vals;
     void **ptr_vals;
@@ -5037,6 +5043,26 @@ matlab_cell *matlab_cell_new(double n) {
     matlab_cell *c = (matlab_cell *)calloc(1, sizeof(*c));
     int32_t cap0 = n > 0 ? (int32_t)n : 4;
     cell_grow_to(c, cap0);
+    /* 1-D: a row vector (1 x n). The 1-D accessors set c->n directly,
+     * which is treated as the column count when rows==1. */
+    c->rows = 1;
+    c->cols = (int32_t)(n > 0 ? n : 0);
+    return c;
+}
+
+/* Phase 1.3: 2-D cell construction. Allocates a rows*cols backing,
+ * sets the shape fields, and pre-populates n = rows*cols so the
+ * existing 1-D accessors (cell_numel, cell_get_*) work over the
+ * row-major linear layout. */
+matlab_cell *matlab_cell_new_2d(double rows, double cols) {
+    matlab_cell *c = (matlab_cell *)calloc(1, sizeof(*c));
+    int32_t r = rows > 0 ? (int32_t)rows : 0;
+    int32_t k = cols > 0 ? (int32_t)cols : 0;
+    int32_t need = r * k;
+    cell_grow_to(c, need > 0 ? need : 1);
+    c->rows = r;
+    c->cols = k;
+    c->n = need;
     return c;
 }
 
@@ -5096,6 +5122,145 @@ double matlab_cell_numel(matlab_cell *c) {
 
 double matlab_iscell(matlab_cell *c) {
     return c ? 1.0 : 0.0;
+}
+
+/* ===== Phase 1.3 — 2-D cell accessors and shape ===== */
+
+double matlab_cell_rows(matlab_cell *c) {
+    if (!c) return 0.0;
+    /* Legacy 1-D cells default rows=1 / cols=n in matlab_cell_new; an
+     * old-school cell that was constructed via direct n-grow still has
+     * rows=0 and cols=0, in which case we fall back to (1, n). */
+    return c->rows > 0 ? (double)c->rows : (c->n > 0 ? 1.0 : 0.0);
+}
+
+double matlab_cell_cols(matlab_cell *c) {
+    if (!c) return 0.0;
+    return c->cols > 0 ? (double)c->cols : (double)c->n;
+}
+
+double matlab_cell_size_dim(matlab_cell *c, double dim) {
+    if (!c) return 0.0;
+    int d = (int)dim;
+    if (d == 1) return matlab_cell_rows(c);
+    if (d == 2) return matlab_cell_cols(c);
+    return 1.0;
+}
+
+static int32_t cell_lin_2d(matlab_cell *c, double r1, double k1) {
+    /* Row-major: idx = (r-1)*cols + (k-1). */
+    int32_t r = (int32_t)r1 - 1;
+    int32_t k = (int32_t)k1 - 1;
+    int32_t cols = c->cols > 0 ? c->cols : c->n;
+    if (r < 0 || k < 0 || cols <= 0) return -1;
+    return r * cols + k;
+}
+
+void matlab_cell_set_f64_2d(matlab_cell *c, double r1, double k1, double v) {
+    if (!c) return;
+    int32_t i = cell_lin_2d(c, r1, k1);
+    if (i < 0) return;
+    if (i >= c->cap) cell_grow_to(c, i + 1);
+    if (i >= c->n) c->n = i + 1;
+    c->kinds[i] = 0;
+    c->f64_vals[i] = v;
+    c->ptr_vals[i] = NULL;
+}
+
+void matlab_cell_set_mat_2d(matlab_cell *c, double r1, double k1, matlab_mat *m) {
+    if (!c) return;
+    int32_t i = cell_lin_2d(c, r1, k1);
+    if (i < 0) return;
+    if (i >= c->cap) cell_grow_to(c, i + 1);
+    if (i >= c->n) c->n = i + 1;
+    c->kinds[i] = 1;
+    c->f64_vals[i] = 0.0;
+    c->ptr_vals[i] = m;
+}
+
+double matlab_cell_get_f64_2d(matlab_cell *c, double r1, double k1) {
+    if (!c) return 0.0;
+    int32_t i = cell_lin_2d(c, r1, k1);
+    if (i < 0 || i >= c->n) return 0.0;
+    if (c->kinds[i] == 0) return c->f64_vals[i];
+    if (c->kinds[i] == 1 && c->ptr_vals[i]) {
+        matlab_mat *m = (matlab_mat *)c->ptr_vals[i];
+        if (m->rows == 1 && m->cols == 1) return m->data[0];
+    }
+    return 0.0;
+}
+
+matlab_mat *matlab_cell_get_mat_2d(matlab_cell *c, double r1, double k1) {
+    if (!c) return mat_alloc(0, 0);
+    int32_t i = cell_lin_2d(c, r1, k1);
+    if (i < 0 || i >= c->n) return mat_alloc(0, 0);
+    if (c->kinds[i] == 1 && c->ptr_vals[i])
+        return (matlab_mat *)c->ptr_vals[i];
+    if (c->kinds[i] == 0) {
+        matlab_mat *m = mat_alloc(1, 1);
+        m->data[0] = c->f64_vals[i];
+        return m;
+    }
+    return mat_alloc(0, 0);
+}
+
+/* Cell concat: [a, b] (horizontal) requires matching row counts;
+ * [a; b] (vertical) requires matching col counts. The result is a
+ * fresh cell that reuses the source cells' element pointers (cells
+ * own descriptors via the original allocs, not via copies). */
+matlab_cell *matlab_cell_concat_row(matlab_cell *a, matlab_cell *b) {
+    if (!a) return b;
+    if (!b) return a;
+    int32_t ar = a->rows > 0 ? a->rows : 1;
+    int32_t br = b->rows > 0 ? b->rows : 1;
+    int32_t ac = a->cols > 0 ? a->cols : a->n;
+    int32_t bc = b->cols > 0 ? b->cols : b->n;
+    if (ar != br) return matlab_cell_new(0);
+    int32_t nc = ac + bc;
+    matlab_cell *c = matlab_cell_new_2d((double)ar, (double)nc);
+    for (int32_t r = 0; r < ar; ++r) {
+        for (int32_t kk = 0; kk < ac; ++kk) {
+            int32_t src = r * ac + kk;
+            int32_t dst = r * nc + kk;
+            c->kinds[dst]    = a->kinds[src];
+            c->f64_vals[dst] = a->f64_vals[src];
+            c->ptr_vals[dst] = a->ptr_vals[src];
+        }
+        for (int32_t kk = 0; kk < bc; ++kk) {
+            int32_t src = r * bc + kk;
+            int32_t dst = r * nc + ac + kk;
+            c->kinds[dst]    = b->kinds[src];
+            c->f64_vals[dst] = b->f64_vals[src];
+            c->ptr_vals[dst] = b->ptr_vals[src];
+        }
+    }
+    return c;
+}
+
+matlab_cell *matlab_cell_concat_col(matlab_cell *a, matlab_cell *b) {
+    if (!a) return b;
+    if (!b) return a;
+    int32_t ar = a->rows > 0 ? a->rows : 1;
+    int32_t br = b->rows > 0 ? b->rows : 1;
+    int32_t ac = a->cols > 0 ? a->cols : a->n;
+    int32_t bc = b->cols > 0 ? b->cols : b->n;
+    if (ac != bc) return matlab_cell_new(0);
+    int32_t nr = ar + br;
+    matlab_cell *c = matlab_cell_new_2d((double)nr, (double)ac);
+    /* Top: copy a row-major into rows [0, ar). */
+    for (int32_t i = 0; i < ar * ac; ++i) {
+        c->kinds[i]    = a->kinds[i];
+        c->f64_vals[i] = a->f64_vals[i];
+        c->ptr_vals[i] = a->ptr_vals[i];
+    }
+    /* Bottom: copy b row-major into rows [ar, ar+br). */
+    for (int32_t i = 0; i < br * bc; ++i) {
+        int32_t dst = ar * ac + i;
+        c->kinds[dst]    = b->kinds[i];
+        c->f64_vals[dst] = b->f64_vals[i];
+        c->ptr_vals[dst] = b->ptr_vals[i];
+    }
+    return c;
 }
 
 /* ---------------------------------------------------------------------- */
