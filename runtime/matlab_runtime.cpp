@@ -2707,6 +2707,635 @@ void matlab_mat_u64_disp(matlab_mat_u64 *A, uint8_t WL, int8_t FL) {
 }
 
 /* ---------------------------------------------------------------------- */
+/* Native integer matrix descriptors (Phase 1.1, Option B).
+ *
+ * Two narrow lanes — uint8 (image data, byte buffers) and int32 (default
+ * MATLAB integer for non-double arithmetic). Same row-major layout as
+ * matlab_mat / matlab_mat_i64. Saturating semantics live at the cast
+ * + arithmetic boundary (Phase 1.1.B); the constructors / indexers /
+ * set / slice / disp here are pure storage primitives.
+ *
+ * Future narrow lanes (i8, i16, u16, u32) follow the same template and
+ * land mechanically once this pair is plumbed through lowering. */
+
+typedef struct matlab_mat_u8 {
+    uint8_t *data;
+    int64_t  rows;
+    int64_t  cols;
+} matlab_mat_u8;
+
+typedef struct matlab_mat_i32 {
+    int32_t *data;
+    int64_t  rows;
+    int64_t  cols;
+} matlab_mat_i32;
+
+static matlab_mat_u8 *mat_u8_alloc(int64_t m, int64_t n) {
+    if (m < 0) m = 0;
+    if (n < 0) n = 0;
+    matlab_mat_u8 *A = (matlab_mat_u8 *)calloc(1, sizeof(*A));
+    A->rows = m; A->cols = n;
+    A->data = (uint8_t *)calloc((size_t)(m * n + 1), sizeof(uint8_t));
+    return A;
+}
+
+static matlab_mat_i32 *mat_i32_alloc(int64_t m, int64_t n) {
+    if (m < 0) m = 0;
+    if (n < 0) n = 0;
+    matlab_mat_i32 *A = (matlab_mat_i32 *)calloc(1, sizeof(*A));
+    A->rows = m; A->cols = n;
+    A->data = (int32_t *)calloc((size_t)(m * n + 1), sizeof(int32_t));
+    return A;
+}
+
+/* Constructors. */
+matlab_mat_u8 *matlab_mat_u8_zeros(double rows, double cols) {
+    return mat_u8_alloc((int64_t)rows, (int64_t)cols);
+}
+matlab_mat_i32 *matlab_mat_i32_zeros(double rows, double cols) {
+    return mat_i32_alloc((int64_t)rows, (int64_t)cols);
+}
+
+matlab_mat_u8 *matlab_mat_u8_ones(double rows, double cols) {
+    matlab_mat_u8 *A = mat_u8_alloc((int64_t)rows, (int64_t)cols);
+    int64_t n = A->rows * A->cols;
+    for (int64_t k = 0; k < n; ++k) A->data[k] = 1;
+    return A;
+}
+matlab_mat_i32 *matlab_mat_i32_ones(double rows, double cols) {
+    matlab_mat_i32 *A = mat_i32_alloc((int64_t)rows, (int64_t)cols);
+    int64_t n = A->rows * A->cols;
+    for (int64_t k = 0; k < n; ++k) A->data[k] = 1;
+    return A;
+}
+
+matlab_mat_u8 *matlab_mat_u8_eye(double rows, double cols) {
+    matlab_mat_u8 *A = mat_u8_alloc((int64_t)rows, (int64_t)cols);
+    int64_t d = A->rows < A->cols ? A->rows : A->cols;
+    for (int64_t k = 0; k < d; ++k) A->data[k * A->cols + k] = 1;
+    return A;
+}
+matlab_mat_i32 *matlab_mat_i32_eye(double rows, double cols) {
+    matlab_mat_i32 *A = mat_i32_alloc((int64_t)rows, (int64_t)cols);
+    int64_t d = A->rows < A->cols ? A->rows : A->cols;
+    for (int64_t k = 0; k < d; ++k) A->data[k * A->cols + k] = 1;
+    return A;
+}
+
+matlab_mat_u8 *matlab_mat_u8_from_buf(const uint8_t *buf,
+                                      double rows, double cols) {
+    int64_t m = (int64_t)rows, n = (int64_t)cols;
+    matlab_mat_u8 *A = mat_u8_alloc(m, n);
+    if (buf && m * n > 0)
+        memcpy(A->data, buf, (size_t)(m * n) * sizeof(uint8_t));
+    return A;
+}
+matlab_mat_i32 *matlab_mat_i32_from_buf(const int32_t *buf,
+                                        double rows, double cols) {
+    int64_t m = (int64_t)rows, n = (int64_t)cols;
+    matlab_mat_i32 *A = mat_i32_alloc(m, n);
+    if (buf && m * n > 0)
+        memcpy(A->data, buf, (size_t)(m * n) * sizeof(int32_t));
+    return A;
+}
+
+matlab_mat_u8 *matlab_mat_u8_from_scalar(uint8_t v) {
+    matlab_mat_u8 *A = mat_u8_alloc(1, 1);
+    A->data[0] = v;
+    return A;
+}
+matlab_mat_i32 *matlab_mat_i32_from_scalar(int32_t v) {
+    matlab_mat_i32 *A = mat_i32_alloc(1, 1);
+    A->data[0] = v;
+    return A;
+}
+
+/* Shape / predicates. */
+double matlab_mat_u8_length(matlab_mat_u8 *A) {
+    if (!A) return 0.0;
+    return (double)(A->rows > A->cols ? A->rows : A->cols);
+}
+double matlab_mat_u8_numel(matlab_mat_u8 *A) {
+    if (!A) return 0.0;
+    return (double)(A->rows * A->cols);
+}
+double matlab_mat_u8_size_dim(matlab_mat_u8 *A, double dim) {
+    if (!A) return 0.0;
+    int d = (int)dim;
+    if (d == 1) return (double)A->rows;
+    if (d == 2) return (double)A->cols;
+    return 1.0;
+}
+int64_t matlab_mat_u8_rows(matlab_mat_u8 *A) { return A ? A->rows : 0; }
+int64_t matlab_mat_u8_cols(matlab_mat_u8 *A) { return A ? A->cols : 0; }
+
+double matlab_mat_i32_length(matlab_mat_i32 *A) {
+    if (!A) return 0.0;
+    return (double)(A->rows > A->cols ? A->rows : A->cols);
+}
+double matlab_mat_i32_numel(matlab_mat_i32 *A) {
+    if (!A) return 0.0;
+    return (double)(A->rows * A->cols);
+}
+double matlab_mat_i32_size_dim(matlab_mat_i32 *A, double dim) {
+    if (!A) return 0.0;
+    int d = (int)dim;
+    if (d == 1) return (double)A->rows;
+    if (d == 2) return (double)A->cols;
+    return 1.0;
+}
+int64_t matlab_mat_i32_rows(matlab_mat_i32 *A) { return A ? A->rows : 0; }
+int64_t matlab_mat_i32_cols(matlab_mat_i32 *A) { return A ? A->cols : 0; }
+
+/* Indexing. Both subscript1 (linear) and subscript2 (row,col) follow
+ * MATLAB's 1-based convention; out-of-range indices clamp to the
+ * boundary, matching the matlab_mat / matlab_mat_i64 idiom. */
+uint8_t matlab_mat_u8_subscript1_s(matlab_mat_u8 *A, double i) {
+    if (!A || A->rows * A->cols == 0) return 0;
+    return A->data[mat_lin_idx(A->rows, A->cols, i)];
+}
+uint8_t matlab_mat_u8_subscript2_s(matlab_mat_u8 *A, double i, double j) {
+    if (!A || A->rows * A->cols == 0) return 0;
+    int64_t r = (int64_t)i - 1, c = (int64_t)j - 1;
+    if (r < 0) r = 0; if (r >= A->rows) r = A->rows - 1;
+    if (c < 0) c = 0; if (c >= A->cols) c = A->cols - 1;
+    return A->data[r * A->cols + c];
+}
+int32_t matlab_mat_i32_subscript1_s(matlab_mat_i32 *A, double i) {
+    if (!A || A->rows * A->cols == 0) return 0;
+    return A->data[mat_lin_idx(A->rows, A->cols, i)];
+}
+int32_t matlab_mat_i32_subscript2_s(matlab_mat_i32 *A, double i, double j) {
+    if (!A || A->rows * A->cols == 0) return 0;
+    int64_t r = (int64_t)i - 1, c = (int64_t)j - 1;
+    if (r < 0) r = 0; if (r >= A->rows) r = A->rows - 1;
+    if (c < 0) c = 0; if (c >= A->cols) c = A->cols - 1;
+    return A->data[r * A->cols + c];
+}
+
+/* Stores — caller is expected to pre-saturate via the cast helpers
+ * (Phase 1.1.B). Stores here are raw assignment, no clamp. */
+void matlab_mat_u8_set1_s(matlab_mat_u8 *A, double i, uint8_t v) {
+    if (!A || A->rows * A->cols == 0) return;
+    A->data[mat_lin_idx(A->rows, A->cols, i)] = v;
+}
+void matlab_mat_u8_set2_s(matlab_mat_u8 *A, double i, double j, uint8_t v) {
+    if (!A || A->rows * A->cols == 0) return;
+    int64_t r = (int64_t)i - 1, c = (int64_t)j - 1;
+    if (r < 0) r = 0; if (r >= A->rows) r = A->rows - 1;
+    if (c < 0) c = 0; if (c >= A->cols) c = A->cols - 1;
+    A->data[r * A->cols + c] = v;
+}
+void matlab_mat_i32_set1_s(matlab_mat_i32 *A, double i, int32_t v) {
+    if (!A || A->rows * A->cols == 0) return;
+    A->data[mat_lin_idx(A->rows, A->cols, i)] = v;
+}
+void matlab_mat_i32_set2_s(matlab_mat_i32 *A, double i, double j, int32_t v) {
+    if (!A || A->rows * A->cols == 0) return;
+    int64_t r = (int64_t)i - 1, c = (int64_t)j - 1;
+    if (r < 0) r = 0; if (r >= A->rows) r = A->rows - 1;
+    if (c < 0) c = 0; if (c >= A->cols) c = A->cols - 1;
+    A->data[r * A->cols + c] = v;
+}
+
+/* slice1 — 1-D gather along an index vector (matlab_mat of doubles). */
+matlab_mat_u8 *matlab_mat_u8_slice1(matlab_mat_u8 *A, matlab_mat *idx) {
+    int64_t n = idx ? idx->rows * idx->cols : 0;
+    int64_t rr = (A && A->rows == 1) ? 1 : (n > 0 ? n : 0);
+    int64_t cc = (A && A->rows == 1) ? n : 1;
+    matlab_mat_u8 *R = mat_u8_alloc(rr, cc);
+    for (int64_t k = 0; k < n; ++k)
+        R->data[k] = matlab_mat_u8_subscript1_s(A, idx->data[k]);
+    return R;
+}
+matlab_mat_i32 *matlab_mat_i32_slice1(matlab_mat_i32 *A, matlab_mat *idx) {
+    int64_t n = idx ? idx->rows * idx->cols : 0;
+    int64_t rr = (A && A->rows == 1) ? 1 : (n > 0 ? n : 0);
+    int64_t cc = (A && A->rows == 1) ? n : 1;
+    matlab_mat_i32 *R = mat_i32_alloc(rr, cc);
+    for (int64_t k = 0; k < n; ++k)
+        R->data[k] = matlab_mat_i32_subscript1_s(A, idx->data[k]);
+    return R;
+}
+
+/* slice2 — 2-D gather along (rows, cols) index vectors. */
+matlab_mat_u8 *matlab_mat_u8_slice2(matlab_mat_u8 *A,
+                                    matlab_mat *rows, matlab_mat *cols) {
+    int64_t nr = rows ? rows->rows * rows->cols : 0;
+    int64_t nc = cols ? cols->rows * cols->cols : 0;
+    matlab_mat_u8 *R = mat_u8_alloc(nr, nc);
+    for (int64_t i = 0; i < nr; ++i) {
+        double ri = rows->data[i];
+        for (int64_t j = 0; j < nc; ++j) {
+            double cj = cols->data[j];
+            R->data[i * nc + j] = matlab_mat_u8_subscript2_s(A, ri, cj);
+        }
+    }
+    return R;
+}
+matlab_mat_i32 *matlab_mat_i32_slice2(matlab_mat_i32 *A,
+                                      matlab_mat *rows, matlab_mat *cols) {
+    int64_t nr = rows ? rows->rows * rows->cols : 0;
+    int64_t nc = cols ? cols->rows * cols->cols : 0;
+    matlab_mat_i32 *R = mat_i32_alloc(nr, nc);
+    for (int64_t i = 0; i < nr; ++i) {
+        double ri = rows->data[i];
+        for (int64_t j = 0; j < nc; ++j) {
+            double cj = cols->data[j];
+            R->data[i * nc + j] = matlab_mat_i32_subscript2_s(A, ri, cj);
+        }
+    }
+    return R;
+}
+
+/* fill — every element to a constant. */
+void matlab_mat_u8_fill(matlab_mat_u8 *A, uint8_t v) {
+    if (!A) return;
+    int64_t n = A->rows * A->cols;
+    for (int64_t k = 0; k < n; ++k) A->data[k] = v;
+}
+void matlab_mat_i32_fill(matlab_mat_i32 *A, int32_t v) {
+    if (!A) return;
+    int64_t n = A->rows * A->cols;
+    for (int64_t k = 0; k < n; ++k) A->data[k] = v;
+}
+
+/* Row concat — `[A, B]` along columns when both are row vectors.
+ * Col concat — `[A; B]` along rows when both have matching cols. */
+matlab_mat_u8 *matlab_mat_u8_concat_row(matlab_mat_u8 *A, matlab_mat_u8 *B) {
+    int64_t na = A ? A->rows * A->cols : 0;
+    int64_t nb = B ? B->rows * B->cols : 0;
+    matlab_mat_u8 *R = mat_u8_alloc(1, na + nb);
+    if (A && A->data) memcpy(R->data,      A->data, (size_t)na);
+    if (B && B->data) memcpy(R->data + na, B->data, (size_t)nb);
+    return R;
+}
+matlab_mat_u8 *matlab_mat_u8_concat_col(matlab_mat_u8 *A, matlab_mat_u8 *B) {
+    int64_t ar = A ? A->rows : 0, ac = A ? A->cols : 0;
+    int64_t br = B ? B->rows : 0, bc = B ? B->cols : 0;
+    int64_t cc = ac > bc ? ac : bc;
+    matlab_mat_u8 *R = mat_u8_alloc(ar + br, cc);
+    if (A && A->data)
+        for (int64_t r = 0; r < ar; ++r)
+            memcpy(R->data + r * cc, A->data + r * ac, (size_t)ac);
+    if (B && B->data)
+        for (int64_t r = 0; r < br; ++r)
+            memcpy(R->data + (ar + r) * cc, B->data + r * bc, (size_t)bc);
+    return R;
+}
+matlab_mat_i32 *matlab_mat_i32_concat_row(matlab_mat_i32 *A,
+                                          matlab_mat_i32 *B) {
+    int64_t na = A ? A->rows * A->cols : 0;
+    int64_t nb = B ? B->rows * B->cols : 0;
+    matlab_mat_i32 *R = mat_i32_alloc(1, na + nb);
+    if (A && A->data)
+        memcpy(R->data,      A->data, (size_t)na * sizeof(int32_t));
+    if (B && B->data)
+        memcpy(R->data + na, B->data, (size_t)nb * sizeof(int32_t));
+    return R;
+}
+matlab_mat_i32 *matlab_mat_i32_concat_col(matlab_mat_i32 *A,
+                                          matlab_mat_i32 *B) {
+    int64_t ar = A ? A->rows : 0, ac = A ? A->cols : 0;
+    int64_t br = B ? B->rows : 0, bc = B ? B->cols : 0;
+    int64_t cc = ac > bc ? ac : bc;
+    matlab_mat_i32 *R = mat_i32_alloc(ar + br, cc);
+    if (A && A->data)
+        for (int64_t r = 0; r < ar; ++r)
+            memcpy(R->data + r * cc,
+                   A->data + r * ac, (size_t)ac * sizeof(int32_t));
+    if (B && B->data)
+        for (int64_t r = 0; r < br; ++r)
+            memcpy(R->data + (ar + r) * cc,
+                   B->data + r * bc, (size_t)bc * sizeof(int32_t));
+    return R;
+}
+
+/* disp — integer formatting (no decimal point, MATLAB native-int style).
+ * Width matches matlab_disp_mat_f64 column padding so mixed displays
+ * line up reasonably. */
+void matlab_mat_u8_disp(matlab_mat_u8 *A) {
+    if (!A) { matlab_disp_str("(null)", 6); return; }
+    int64_t n = A->rows * A->cols;
+    pthread_mutex_lock(&matlab_io_mutex);
+    for (int64_t r = 0; r < A->rows; ++r) {
+        for (int64_t c = 0; c < A->cols; ++c)
+            printf("   %4u", (unsigned)A->data[r * A->cols + c]);
+        putchar('\n');
+    }
+    if (n == 0) putchar('\n');
+    pthread_mutex_unlock(&matlab_io_mutex);
+}
+void matlab_mat_i32_disp(matlab_mat_i32 *A) {
+    if (!A) { matlab_disp_str("(null)", 6); return; }
+    int64_t n = A->rows * A->cols;
+    pthread_mutex_lock(&matlab_io_mutex);
+    for (int64_t r = 0; r < A->rows; ++r) {
+        for (int64_t c = 0; c < A->cols; ++c)
+            printf("   %11d", (int)A->data[r * A->cols + c]);
+        putchar('\n');
+    }
+    if (n == 0) putchar('\n');
+    pthread_mutex_unlock(&matlab_io_mutex);
+}
+
+/* ---------------------------------------------------------------------- */
+/* Phase 1.1.B — saturating arithmetic, comparisons, casts.
+ *
+ * MATLAB integer arithmetic saturates by default (intmath default = 'on');
+ * division rounds half-away-from-zero, matching MATLAB's native-int cast
+ * convention. NaN inputs to a cast produce 0 (MATLAB rule).
+ *
+ * Comparisons return matlab_mat (double 0/1) — the same logical-encoding
+ * that the rest of the runtime uses; downstream `if`/`while` already know
+ * how to consume it. */
+
+/* Saturation helpers — kept inline so the binop loops stay tight. */
+static inline uint8_t sat_d_to_u8(double v) {
+    if (v != v)        return 0;          /* NaN */
+    if (v <= 0.0)      return 0;
+    if (v >= 255.0)    return 255;
+    /* Round half-away-from-zero (MATLAB native-int cast rule). */
+    return (uint8_t)(v + 0.5);
+}
+static inline int32_t sat_d_to_i32(double v) {
+    if (v != v) return 0;
+    if (v <= -2147483648.0) return INT32_MIN;
+    if (v >=  2147483647.0) return INT32_MAX;
+    return (int32_t)(v >= 0 ? v + 0.5 : v - 0.5);
+}
+static inline uint8_t sat_i32_to_u8(int32_t v) {
+    if (v < 0)   return 0;
+    if (v > 255) return 255;
+    return (uint8_t)v;
+}
+
+/* Saturating arith primitives. */
+static inline uint8_t sat_add_u8(uint8_t a, uint8_t b) {
+    int r = (int)a + (int)b;
+    return r > 255 ? 255 : (uint8_t)r;
+}
+static inline uint8_t sat_sub_u8(uint8_t a, uint8_t b) {
+    return a > b ? (uint8_t)(a - b) : 0;
+}
+static inline uint8_t sat_mul_u8(uint8_t a, uint8_t b) {
+    int r = (int)a * (int)b;
+    return r > 255 ? 255 : (uint8_t)r;
+}
+static inline int32_t sat_add_i32(int32_t a, int32_t b) {
+    int64_t r = (int64_t)a + (int64_t)b;
+    if (r > INT32_MAX) return INT32_MAX;
+    if (r < INT32_MIN) return INT32_MIN;
+    return (int32_t)r;
+}
+static inline int32_t sat_sub_i32(int32_t a, int32_t b) {
+    int64_t r = (int64_t)a - (int64_t)b;
+    if (r > INT32_MAX) return INT32_MAX;
+    if (r < INT32_MIN) return INT32_MIN;
+    return (int32_t)r;
+}
+static inline int32_t sat_mul_i32(int32_t a, int32_t b) {
+    int64_t r = (int64_t)a * (int64_t)b;
+    if (r > INT32_MAX) return INT32_MAX;
+    if (r < INT32_MIN) return INT32_MIN;
+    return (int32_t)r;
+}
+
+/* Integer division with MATLAB's round-half-away-from-zero semantics.
+ * Divide-by-zero saturates to ±max (or 0 when numerator is zero), matching
+ * `int32(1)/int32(0)` → INT32_MAX in MATLAB. */
+static inline uint8_t round_div_u8(uint8_t a, uint8_t b) {
+    if (b == 0) return a == 0 ? 0 : 255;
+    unsigned q = (unsigned)a / (unsigned)b;
+    unsigned r = (unsigned)a % (unsigned)b;
+    if (r * 2u >= (unsigned)b) q += 1u;
+    return q > 255u ? 255u : (uint8_t)q;
+}
+static inline int32_t round_div_i32(int32_t a, int32_t b) {
+    if (b == 0) return a == 0 ? 0 : (a > 0 ? INT32_MAX : INT32_MIN);
+    int64_t aa = a, bb = b;
+    int sign = ((aa < 0) ^ (bb < 0)) ? -1 : 1;
+    int64_t abs_a = aa < 0 ? -aa : aa;
+    int64_t abs_b = bb < 0 ? -bb : bb;
+    int64_t q = abs_a / abs_b;
+    int64_t r = abs_a % abs_b;
+    if (r * 2 >= abs_b) q += 1;
+    int64_t out = sign * q;
+    if (out > INT32_MAX) return INT32_MAX;
+    if (out < INT32_MIN) return INT32_MIN;
+    return (int32_t)out;
+}
+
+/* ===== Casts (matrix forms) ===== */
+
+matlab_mat_u8 *matlab_mat_u8_from_double(matlab_mat *A) {
+    if (!A) return mat_u8_alloc(0, 0);
+    int64_t m = A->rows, n = A->cols;
+    matlab_mat_u8 *R = mat_u8_alloc(m, n);
+    for (int64_t k = 0; k < m * n; ++k) R->data[k] = sat_d_to_u8(A->data[k]);
+    return R;
+}
+matlab_mat_i32 *matlab_mat_i32_from_double(matlab_mat *A) {
+    if (!A) return mat_i32_alloc(0, 0);
+    int64_t m = A->rows, n = A->cols;
+    matlab_mat_i32 *R = mat_i32_alloc(m, n);
+    for (int64_t k = 0; k < m * n; ++k) R->data[k] = sat_d_to_i32(A->data[k]);
+    return R;
+}
+matlab_mat *matlab_mat_u8_to_double(matlab_mat_u8 *A) {
+    if (!A) return mat_alloc(0, 0);
+    int64_t m = A->rows, n = A->cols;
+    matlab_mat *R = mat_alloc(m, n);
+    for (int64_t k = 0; k < m * n; ++k) R->data[k] = (double)A->data[k];
+    return R;
+}
+matlab_mat *matlab_mat_i32_to_double(matlab_mat_i32 *A) {
+    if (!A) return mat_alloc(0, 0);
+    int64_t m = A->rows, n = A->cols;
+    matlab_mat *R = mat_alloc(m, n);
+    for (int64_t k = 0; k < m * n; ++k) R->data[k] = (double)A->data[k];
+    return R;
+}
+matlab_mat_u8 *matlab_mat_u8_from_i32(matlab_mat_i32 *A) {
+    if (!A) return mat_u8_alloc(0, 0);
+    int64_t m = A->rows, n = A->cols;
+    matlab_mat_u8 *R = mat_u8_alloc(m, n);
+    for (int64_t k = 0; k < m * n; ++k) R->data[k] = sat_i32_to_u8(A->data[k]);
+    return R;
+}
+matlab_mat_i32 *matlab_mat_i32_from_u8(matlab_mat_u8 *A) {
+    if (!A) return mat_i32_alloc(0, 0);
+    int64_t m = A->rows, n = A->cols;
+    matlab_mat_i32 *R = mat_i32_alloc(m, n);
+    for (int64_t k = 0; k < m * n; ++k) R->data[k] = (int32_t)A->data[k];
+    return R;
+}
+
+/* ===== Element-wise arithmetic ===== */
+
+/* Macro generates _mm / _ms / _sm trio for one (lane, op) pair. The lane
+ * type T and the op functor OP are concatenated into the entry-point
+ * symbol name so the public ABI is matlab_mat_<lane>_<op>_(mm|ms|sm). */
+#define DEF_INT_BINOP(LANE, T, ALLOC, OP, OPNAME)                              \
+extern "C" matlab_mat_##LANE *matlab_mat_##LANE##_##OPNAME##_mm(               \
+        matlab_mat_##LANE *A, matlab_mat_##LANE *B) {                          \
+    if (!A || !B || A->rows != B->rows || A->cols != B->cols)                  \
+        return ALLOC(0, 0);                                                    \
+    int64_t m = A->rows, n = A->cols;                                          \
+    matlab_mat_##LANE *R = ALLOC(m, n);                                        \
+    for (int64_t k = 0; k < m * n; ++k) R->data[k] = OP(A->data[k], B->data[k]); \
+    return R;                                                                  \
+}                                                                              \
+extern "C" matlab_mat_##LANE *matlab_mat_##LANE##_##OPNAME##_ms(               \
+        matlab_mat_##LANE *A, T s) {                                           \
+    if (!A) return ALLOC(0, 0);                                                \
+    int64_t m = A->rows, n = A->cols;                                          \
+    matlab_mat_##LANE *R = ALLOC(m, n);                                        \
+    for (int64_t k = 0; k < m * n; ++k) R->data[k] = OP(A->data[k], s);        \
+    return R;                                                                  \
+}                                                                              \
+extern "C" matlab_mat_##LANE *matlab_mat_##LANE##_##OPNAME##_sm(               \
+        T s, matlab_mat_##LANE *A) {                                           \
+    if (!A) return ALLOC(0, 0);                                                \
+    int64_t m = A->rows, n = A->cols;                                          \
+    matlab_mat_##LANE *R = ALLOC(m, n);                                        \
+    for (int64_t k = 0; k < m * n; ++k) R->data[k] = OP(s, A->data[k]);        \
+    return R;                                                                  \
+}
+
+DEF_INT_BINOP(u8,  uint8_t, mat_u8_alloc,  sat_add_u8,    add)
+DEF_INT_BINOP(u8,  uint8_t, mat_u8_alloc,  sat_sub_u8,    sub)
+DEF_INT_BINOP(u8,  uint8_t, mat_u8_alloc,  sat_mul_u8,    emul)
+DEF_INT_BINOP(u8,  uint8_t, mat_u8_alloc,  round_div_u8,  ediv)
+
+DEF_INT_BINOP(i32, int32_t, mat_i32_alloc, sat_add_i32,   add)
+DEF_INT_BINOP(i32, int32_t, mat_i32_alloc, sat_sub_i32,   sub)
+DEF_INT_BINOP(i32, int32_t, mat_i32_alloc, sat_mul_i32,   emul)
+DEF_INT_BINOP(i32, int32_t, mat_i32_alloc, round_div_i32, ediv)
+
+#undef DEF_INT_BINOP
+
+/* ===== Comparisons (return matlab_mat with 0/1 doubles) ===== */
+
+#define DEF_INT_CMP(LANE, T, OP, OPNAME)                                       \
+extern "C" matlab_mat *matlab_mat_##LANE##_##OPNAME##_mm(                      \
+        matlab_mat_##LANE *A, matlab_mat_##LANE *B) {                          \
+    if (!A || !B || A->rows != B->rows || A->cols != B->cols)                  \
+        return mat_alloc(0, 0);                                                \
+    int64_t m = A->rows, n = A->cols;                                          \
+    matlab_mat *R = mat_alloc(m, n);                                           \
+    for (int64_t k = 0; k < m * n; ++k)                                        \
+        R->data[k] = (A->data[k] OP B->data[k]) ? 1.0 : 0.0;                   \
+    return R;                                                                  \
+}                                                                              \
+extern "C" matlab_mat *matlab_mat_##LANE##_##OPNAME##_ms(                      \
+        matlab_mat_##LANE *A, T s) {                                           \
+    if (!A) return mat_alloc(0, 0);                                            \
+    int64_t m = A->rows, n = A->cols;                                          \
+    matlab_mat *R = mat_alloc(m, n);                                           \
+    for (int64_t k = 0; k < m * n; ++k)                                        \
+        R->data[k] = (A->data[k] OP s) ? 1.0 : 0.0;                            \
+    return R;                                                                  \
+}                                                                              \
+extern "C" matlab_mat *matlab_mat_##LANE##_##OPNAME##_sm(                      \
+        T s, matlab_mat_##LANE *A) {                                           \
+    if (!A) return mat_alloc(0, 0);                                            \
+    int64_t m = A->rows, n = A->cols;                                          \
+    matlab_mat *R = mat_alloc(m, n);                                           \
+    for (int64_t k = 0; k < m * n; ++k)                                        \
+        R->data[k] = (s OP A->data[k]) ? 1.0 : 0.0;                            \
+    return R;                                                                  \
+}
+
+DEF_INT_CMP(u8,  uint8_t, >,  gt)
+DEF_INT_CMP(u8,  uint8_t, >=, ge)
+DEF_INT_CMP(u8,  uint8_t, <,  lt)
+DEF_INT_CMP(u8,  uint8_t, <=, le)
+DEF_INT_CMP(u8,  uint8_t, ==, eq)
+DEF_INT_CMP(u8,  uint8_t, !=, ne)
+
+DEF_INT_CMP(i32, int32_t, >,  gt)
+DEF_INT_CMP(i32, int32_t, >=, ge)
+DEF_INT_CMP(i32, int32_t, <,  lt)
+DEF_INT_CMP(i32, int32_t, <=, le)
+DEF_INT_CMP(i32, int32_t, ==, eq)
+DEF_INT_CMP(i32, int32_t, !=, ne)
+
+#undef DEF_INT_CMP
+
+/* ===== Reductions =====
+ * sum/min/max return same-type scalar (1x1); mean rounds the result back
+ * to the lane type with saturation, matching MATLAB. For Phase 1.1.B we
+ * implement the vector / matrix-as-vector form (single scalar out); the
+ * column-wise variant lands when needed. */
+
+uint8_t matlab_mat_u8_sum(matlab_mat_u8 *A) {
+    if (!A) return 0;
+    int64_t n = A->rows * A->cols;
+    int64_t acc = 0;
+    for (int64_t k = 0; k < n; ++k) {
+        acc += A->data[k];
+        if (acc > 255) { acc = 255; }   /* saturate during accumulation */
+    }
+    return (uint8_t)acc;
+}
+int32_t matlab_mat_i32_sum(matlab_mat_i32 *A) {
+    if (!A) return 0;
+    int64_t n = A->rows * A->cols;
+    int64_t acc = 0;
+    for (int64_t k = 0; k < n; ++k) {
+        acc += A->data[k];
+        if (acc > INT32_MAX) acc = INT32_MAX;
+        if (acc < INT32_MIN) acc = INT32_MIN;
+    }
+    return (int32_t)acc;
+}
+uint8_t matlab_mat_u8_mean(matlab_mat_u8 *A) {
+    if (!A) return 0;
+    int64_t n = A->rows * A->cols;
+    if (n == 0) return 0;
+    double acc = 0.0;
+    for (int64_t k = 0; k < n; ++k) acc += (double)A->data[k];
+    return sat_d_to_u8(acc / (double)n);
+}
+int32_t matlab_mat_i32_mean(matlab_mat_i32 *A) {
+    if (!A) return 0;
+    int64_t n = A->rows * A->cols;
+    if (n == 0) return 0;
+    double acc = 0.0;
+    for (int64_t k = 0; k < n; ++k) acc += (double)A->data[k];
+    return sat_d_to_i32(acc / (double)n);
+}
+uint8_t matlab_mat_u8_min(matlab_mat_u8 *A) {
+    if (!A || A->rows * A->cols == 0) return 0;
+    int64_t n = A->rows * A->cols;
+    uint8_t m = A->data[0];
+    for (int64_t k = 1; k < n; ++k) if (A->data[k] < m) m = A->data[k];
+    return m;
+}
+uint8_t matlab_mat_u8_max(matlab_mat_u8 *A) {
+    if (!A || A->rows * A->cols == 0) return 0;
+    int64_t n = A->rows * A->cols;
+    uint8_t m = A->data[0];
+    for (int64_t k = 1; k < n; ++k) if (A->data[k] > m) m = A->data[k];
+    return m;
+}
+int32_t matlab_mat_i32_min(matlab_mat_i32 *A) {
+    if (!A || A->rows * A->cols == 0) return 0;
+    int64_t n = A->rows * A->cols;
+    int32_t m = A->data[0];
+    for (int64_t k = 1; k < n; ++k) if (A->data[k] < m) m = A->data[k];
+    return m;
+}
+int32_t matlab_mat_i32_max(matlab_mat_i32 *A) {
+    if (!A || A->rows * A->cols == 0) return 0;
+    int64_t n = A->rows * A->cols;
+    int32_t m = A->data[0];
+    for (int64_t k = 1; k < n; ++k) if (A->data[k] > m) m = A->data[k];
+    return m;
+}
+
+/* ---------------------------------------------------------------------- */
 /* Minimal 3-D arrays.
  *
  * A separate matlab_mat3 descriptor {data, rows, cols, depth} so

@@ -378,6 +378,149 @@ uint64_t matlab_mat_u64_sum(matlab_mat_u64 *A);
 void matlab_mat_i64_disp(matlab_mat_i64 *A, uint8_t WL, int8_t FL);
 void matlab_mat_u64_disp(matlab_mat_u64 *A, uint8_t WL, int8_t FL);
 
+// Native integer matrix descriptors (Phase 1.1, Option B).
+// Storage is row-major. Saturation lives at the cast/arith boundary
+// (Phase 1.1.B); these primitives are pure storage ops.
+typedef struct matlab_mat_u8  matlab_mat_u8;
+typedef struct matlab_mat_i32 matlab_mat_i32;
+
+// Constructors.
+matlab_mat_u8  *matlab_mat_u8_zeros (double rows, double cols);
+matlab_mat_u8  *matlab_mat_u8_ones  (double rows, double cols);
+matlab_mat_u8  *matlab_mat_u8_eye   (double rows, double cols);
+matlab_mat_u8  *matlab_mat_u8_from_buf   (const uint8_t *buf, double r, double c);
+matlab_mat_u8  *matlab_mat_u8_from_scalar(uint8_t v);
+matlab_mat_i32 *matlab_mat_i32_zeros(double rows, double cols);
+matlab_mat_i32 *matlab_mat_i32_ones (double rows, double cols);
+matlab_mat_i32 *matlab_mat_i32_eye  (double rows, double cols);
+matlab_mat_i32 *matlab_mat_i32_from_buf   (const int32_t *buf, double r, double c);
+matlab_mat_i32 *matlab_mat_i32_from_scalar(int32_t v);
+
+// Shape / predicates.
+double  matlab_mat_u8_length  (matlab_mat_u8 *A);
+double  matlab_mat_u8_numel   (matlab_mat_u8 *A);
+double  matlab_mat_u8_size_dim(matlab_mat_u8 *A, double dim);
+int64_t matlab_mat_u8_rows    (matlab_mat_u8 *A);
+int64_t matlab_mat_u8_cols    (matlab_mat_u8 *A);
+double  matlab_mat_i32_length  (matlab_mat_i32 *A);
+double  matlab_mat_i32_numel   (matlab_mat_i32 *A);
+double  matlab_mat_i32_size_dim(matlab_mat_i32 *A, double dim);
+int64_t matlab_mat_i32_rows    (matlab_mat_i32 *A);
+int64_t matlab_mat_i32_cols    (matlab_mat_i32 *A);
+
+// Indexing (read).
+uint8_t matlab_mat_u8_subscript1_s (matlab_mat_u8 *A, double i);
+uint8_t matlab_mat_u8_subscript2_s (matlab_mat_u8 *A, double i, double j);
+int32_t matlab_mat_i32_subscript1_s(matlab_mat_i32 *A, double i);
+int32_t matlab_mat_i32_subscript2_s(matlab_mat_i32 *A, double i, double j);
+
+// Indexing (write — caller pre-saturates).
+void matlab_mat_u8_set1_s (matlab_mat_u8 *A, double i, uint8_t v);
+void matlab_mat_u8_set2_s (matlab_mat_u8 *A, double i, double j, uint8_t v);
+void matlab_mat_i32_set1_s(matlab_mat_i32 *A, double i, int32_t v);
+void matlab_mat_i32_set2_s(matlab_mat_i32 *A, double i, double j, int32_t v);
+
+// Slicing.
+matlab_mat_u8  *matlab_mat_u8_slice1 (matlab_mat_u8 *A, matlab_mat *idx);
+matlab_mat_u8  *matlab_mat_u8_slice2 (matlab_mat_u8 *A, matlab_mat *rows, matlab_mat *cols);
+matlab_mat_i32 *matlab_mat_i32_slice1(matlab_mat_i32 *A, matlab_mat *idx);
+matlab_mat_i32 *matlab_mat_i32_slice2(matlab_mat_i32 *A, matlab_mat *rows, matlab_mat *cols);
+
+// Fill + concat.
+void matlab_mat_u8_fill (matlab_mat_u8 *A, uint8_t v);
+void matlab_mat_i32_fill(matlab_mat_i32 *A, int32_t v);
+matlab_mat_u8  *matlab_mat_u8_concat_row (matlab_mat_u8 *A, matlab_mat_u8 *B);
+matlab_mat_u8  *matlab_mat_u8_concat_col (matlab_mat_u8 *A, matlab_mat_u8 *B);
+matlab_mat_i32 *matlab_mat_i32_concat_row(matlab_mat_i32 *A, matlab_mat_i32 *B);
+matlab_mat_i32 *matlab_mat_i32_concat_col(matlab_mat_i32 *A, matlab_mat_i32 *B);
+
+// disp — native integer formatting (no decimal).
+void matlab_mat_u8_disp (matlab_mat_u8 *A);
+void matlab_mat_i32_disp(matlab_mat_i32 *A);
+
+// Casts (matrix forms). Saturating where the destination is narrower
+// or signedness changes; widening to double is exact.
+matlab_mat_u8  *matlab_mat_u8_from_double (matlab_mat *A);
+matlab_mat_i32 *matlab_mat_i32_from_double(matlab_mat *A);
+matlab_mat     *matlab_mat_u8_to_double   (matlab_mat_u8 *A);
+matlab_mat     *matlab_mat_i32_to_double  (matlab_mat_i32 *A);
+matlab_mat_u8  *matlab_mat_u8_from_i32    (matlab_mat_i32 *A);
+matlab_mat_i32 *matlab_mat_i32_from_u8    (matlab_mat_u8 *A);
+
+// Element-wise arithmetic with MATLAB saturation semantics.
+matlab_mat_u8  *matlab_mat_u8_add_mm (matlab_mat_u8 *A, matlab_mat_u8 *B);
+matlab_mat_u8  *matlab_mat_u8_add_ms (matlab_mat_u8 *A, uint8_t s);
+matlab_mat_u8  *matlab_mat_u8_add_sm (uint8_t s, matlab_mat_u8 *A);
+matlab_mat_u8  *matlab_mat_u8_sub_mm (matlab_mat_u8 *A, matlab_mat_u8 *B);
+matlab_mat_u8  *matlab_mat_u8_sub_ms (matlab_mat_u8 *A, uint8_t s);
+matlab_mat_u8  *matlab_mat_u8_sub_sm (uint8_t s, matlab_mat_u8 *A);
+matlab_mat_u8  *matlab_mat_u8_emul_mm(matlab_mat_u8 *A, matlab_mat_u8 *B);
+matlab_mat_u8  *matlab_mat_u8_emul_ms(matlab_mat_u8 *A, uint8_t s);
+matlab_mat_u8  *matlab_mat_u8_emul_sm(uint8_t s, matlab_mat_u8 *A);
+matlab_mat_u8  *matlab_mat_u8_ediv_mm(matlab_mat_u8 *A, matlab_mat_u8 *B);
+matlab_mat_u8  *matlab_mat_u8_ediv_ms(matlab_mat_u8 *A, uint8_t s);
+matlab_mat_u8  *matlab_mat_u8_ediv_sm(uint8_t s, matlab_mat_u8 *A);
+matlab_mat_i32 *matlab_mat_i32_add_mm (matlab_mat_i32 *A, matlab_mat_i32 *B);
+matlab_mat_i32 *matlab_mat_i32_add_ms (matlab_mat_i32 *A, int32_t s);
+matlab_mat_i32 *matlab_mat_i32_add_sm (int32_t s, matlab_mat_i32 *A);
+matlab_mat_i32 *matlab_mat_i32_sub_mm (matlab_mat_i32 *A, matlab_mat_i32 *B);
+matlab_mat_i32 *matlab_mat_i32_sub_ms (matlab_mat_i32 *A, int32_t s);
+matlab_mat_i32 *matlab_mat_i32_sub_sm (int32_t s, matlab_mat_i32 *A);
+matlab_mat_i32 *matlab_mat_i32_emul_mm(matlab_mat_i32 *A, matlab_mat_i32 *B);
+matlab_mat_i32 *matlab_mat_i32_emul_ms(matlab_mat_i32 *A, int32_t s);
+matlab_mat_i32 *matlab_mat_i32_emul_sm(int32_t s, matlab_mat_i32 *A);
+matlab_mat_i32 *matlab_mat_i32_ediv_mm(matlab_mat_i32 *A, matlab_mat_i32 *B);
+matlab_mat_i32 *matlab_mat_i32_ediv_ms(matlab_mat_i32 *A, int32_t s);
+matlab_mat_i32 *matlab_mat_i32_ediv_sm(int32_t s, matlab_mat_i32 *A);
+
+// Element-wise comparisons (return matlab_mat with 0/1 doubles).
+matlab_mat *matlab_mat_u8_gt_mm(matlab_mat_u8 *A, matlab_mat_u8 *B);
+matlab_mat *matlab_mat_u8_gt_ms(matlab_mat_u8 *A, uint8_t s);
+matlab_mat *matlab_mat_u8_gt_sm(uint8_t s, matlab_mat_u8 *A);
+matlab_mat *matlab_mat_u8_ge_mm(matlab_mat_u8 *A, matlab_mat_u8 *B);
+matlab_mat *matlab_mat_u8_ge_ms(matlab_mat_u8 *A, uint8_t s);
+matlab_mat *matlab_mat_u8_ge_sm(uint8_t s, matlab_mat_u8 *A);
+matlab_mat *matlab_mat_u8_lt_mm(matlab_mat_u8 *A, matlab_mat_u8 *B);
+matlab_mat *matlab_mat_u8_lt_ms(matlab_mat_u8 *A, uint8_t s);
+matlab_mat *matlab_mat_u8_lt_sm(uint8_t s, matlab_mat_u8 *A);
+matlab_mat *matlab_mat_u8_le_mm(matlab_mat_u8 *A, matlab_mat_u8 *B);
+matlab_mat *matlab_mat_u8_le_ms(matlab_mat_u8 *A, uint8_t s);
+matlab_mat *matlab_mat_u8_le_sm(uint8_t s, matlab_mat_u8 *A);
+matlab_mat *matlab_mat_u8_eq_mm(matlab_mat_u8 *A, matlab_mat_u8 *B);
+matlab_mat *matlab_mat_u8_eq_ms(matlab_mat_u8 *A, uint8_t s);
+matlab_mat *matlab_mat_u8_eq_sm(uint8_t s, matlab_mat_u8 *A);
+matlab_mat *matlab_mat_u8_ne_mm(matlab_mat_u8 *A, matlab_mat_u8 *B);
+matlab_mat *matlab_mat_u8_ne_ms(matlab_mat_u8 *A, uint8_t s);
+matlab_mat *matlab_mat_u8_ne_sm(uint8_t s, matlab_mat_u8 *A);
+matlab_mat *matlab_mat_i32_gt_mm(matlab_mat_i32 *A, matlab_mat_i32 *B);
+matlab_mat *matlab_mat_i32_gt_ms(matlab_mat_i32 *A, int32_t s);
+matlab_mat *matlab_mat_i32_gt_sm(int32_t s, matlab_mat_i32 *A);
+matlab_mat *matlab_mat_i32_ge_mm(matlab_mat_i32 *A, matlab_mat_i32 *B);
+matlab_mat *matlab_mat_i32_ge_ms(matlab_mat_i32 *A, int32_t s);
+matlab_mat *matlab_mat_i32_ge_sm(int32_t s, matlab_mat_i32 *A);
+matlab_mat *matlab_mat_i32_lt_mm(matlab_mat_i32 *A, matlab_mat_i32 *B);
+matlab_mat *matlab_mat_i32_lt_ms(matlab_mat_i32 *A, int32_t s);
+matlab_mat *matlab_mat_i32_lt_sm(int32_t s, matlab_mat_i32 *A);
+matlab_mat *matlab_mat_i32_le_mm(matlab_mat_i32 *A, matlab_mat_i32 *B);
+matlab_mat *matlab_mat_i32_le_ms(matlab_mat_i32 *A, int32_t s);
+matlab_mat *matlab_mat_i32_le_sm(int32_t s, matlab_mat_i32 *A);
+matlab_mat *matlab_mat_i32_eq_mm(matlab_mat_i32 *A, matlab_mat_i32 *B);
+matlab_mat *matlab_mat_i32_eq_ms(matlab_mat_i32 *A, int32_t s);
+matlab_mat *matlab_mat_i32_eq_sm(int32_t s, matlab_mat_i32 *A);
+matlab_mat *matlab_mat_i32_ne_mm(matlab_mat_i32 *A, matlab_mat_i32 *B);
+matlab_mat *matlab_mat_i32_ne_ms(matlab_mat_i32 *A, int32_t s);
+matlab_mat *matlab_mat_i32_ne_sm(int32_t s, matlab_mat_i32 *A);
+
+// Reductions returning same-type scalars.
+uint8_t matlab_mat_u8_sum (matlab_mat_u8 *A);
+uint8_t matlab_mat_u8_mean(matlab_mat_u8 *A);
+uint8_t matlab_mat_u8_min (matlab_mat_u8 *A);
+uint8_t matlab_mat_u8_max (matlab_mat_u8 *A);
+int32_t matlab_mat_i32_sum (matlab_mat_i32 *A);
+int32_t matlab_mat_i32_mean(matlab_mat_i32 *A);
+int32_t matlab_mat_i32_min (matlab_mat_i32 *A);
+int32_t matlab_mat_i32_max (matlab_mat_i32 *A);
+
 // bin(n) / hex(n) / dec(n) — render the stored integer as a matlab_string.
 // Each helper allocates a heap-owned descriptor; the caller passes it on
 // to disp/strlen/etc. through the regular string-binding path.
