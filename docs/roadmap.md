@@ -23,6 +23,33 @@ docs.
 
 ---
 
+## Recently shipped (data-container + multi-return arc)
+
+A focused arc of nine phases closed since the last roadmap refresh.
+Authoritative status is in [`feature_status.md`](feature_status.md);
+roadmap-side summary:
+
+| Phase | What | Gating test |
+|---|---|---|
+| 1.1 | Typed `int32` / `uint8` matrix runtime — saturating arith, comparisons, casts, REPL+DAP display, Python+TS parity | `int_matrix_binops.m`, `int_image_filter.m`, `int_pixel_math.m` |
+| 1.2 | `varargout` (pure + mixed forms) and plain user-fn multi-return (was broken — both LHS got the same value) | `varargout_basic.m` |
+| 1.3 | 2-D cell literals + `C{r,k}` indexing + `[A,B]` / `[A;B]` cell concat | `cell_2d.m` |
+| 2 | Struct arrays (`s(i).x`) with auto-grow, `length`/`numel`/`size` | `struct_arr_basic.m` |
+| 3 | OOP value-class copy-on-assign for non-`< handle` classes | `value_class_copy.m` |
+| 4 | `containers.Map` / `dictionary` — string + numeric keys, f64 + matrix values | `dict_basic.m` |
+| 5.1 | scalar `datetime` / `duration` with constructors, display, arithmetic | `datetime_basic.m` |
+| 5.2 | 1-D `categorical` from string array — disp / length / iscategory / categories | `categorical_basic.m` |
+| 5.3 | `table` — auto-named + `'VariableNames'`, dot column access, dynamic add, `height`/`width`/`disp` | `table_basic.m` |
+
+Open follow-ups carried forward (still on the roadmap):
+
+- **Phase 5.4 — `timetable`.** Builds on `table` + `datetime` row index.
+- **Narrower / wider int lanes** — i8 / i16 / i64 / u16 / u32 / u64 matrix descriptors against the same template as Phase 1.1.
+- **Full method-dispatch value semantics** for OOP — needs test-corpus migration to either rebind or `< handle`-annotate the existing class fixtures.
+- **Heterogeneous table columns** — string / categorical / datetime columns alongside numeric.
+
+---
+
 ## Near-term (~1 month)
 
 ### 1. HDL Verification with CocoTB 🔵
@@ -391,9 +418,10 @@ work as it lands:
 ## Update cadence
 
 This file is updated at the end of each multi-week implementation
-arc — most recently after the SystemVerilog Phase 5.6 closure,
-the multi-backend persistent + isempty Tier 1, and the docs sync
-that produced this file.
+arc — most recently after the data-container + multi-return arc
+(Phases 1.1 / 1.2 / 1.3 / 2 / 3 / 4 / 5.1 / 5.2 / 5.3 — see
+"Recently shipped" above), prior to that the SystemVerilog Phase 5.6
+closure and the multi-backend persistent + isempty Tier 1.
 
 Items get demoted from this roadmap to `feature_status.md` /
 the relevant `emit_*.md` once shipped. Items get retired (no

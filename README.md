@@ -48,19 +48,21 @@ control flow, functions, basic OOP, and editor tooling.
 |---|---|
 | Core language | scripts, functions, recursion, multi-return, `if` / `switch` / `for` / `while` / `try` / `catch`, `break`, `continue`, `return` |
 | Numeric runtime | dense matrices, slicing, broadcasting, reductions, `eig`, `svd` (values), `qr`, `chol`, `fft`, `ifft`, `fft2`, `ifft2` |
-| MATLAB data types | strings, chars, structs, 1-D cell arrays, function handles, anonymous functions with captures |
+| MATLAB data types | strings, chars, structs, **struct arrays** (`s(i).x`), 1-D and 2-D cell arrays + bracket-concat, function handles, anonymous functions with captures, **dictionaries** (`containers.Map` / `dictionary`), **datetime** / **duration**, **categorical**, **table** |
+| Numeric typed lanes | `int32` / `uint8` matrix descriptors with saturating arithmetic, comparisons, casts, REPL+DAP display; narrower / wider int lanes still f64-shadowed |
 | State | `global`, `persistent`, REPL workspace variables, `who` / `whos` / `clear` |
 | Parallelism | `parfor` with reduction support |
-| OOP | `classdef`, inheritance, static methods, operator overloading, `Dependent` properties, enumerations |
+| OOP | `classdef`, inheritance, static methods, operator overloading, `Dependent` properties, enumerations, **value-class copy-on-assign** for non-handle classes |
+| Multi-return | full `[a, b] = f(x)` plus `varargout` (pure and mixed `function [first, varargout] = f(...)`) |
 | Tooling | formatter, REPL, DAP server, LSP server, `.mflow` flowchart frontend (graph → AST → every backend) |
 | Outputs | LLVM IR, C, C++, experimental Python, native executables via helper scripts |
 
 Current corpus size in-tree:
 
-- `19` runnable programs in [`examples/`](examples/)
-- `8` synthesizable HDL example modules in [`examples/hdl/`](examples/hdl/)
-- `8` flowchart programs in [`examples/mflow/`](examples/mflow/)
-- `144` execution tests in `test/Run/`
+- `26` runnable programs in [`examples/`](examples/)
+- `18` synthesizable HDL example modules in [`examples/hdl/`](examples/hdl/)
+- `10` flowchart programs in [`examples/mflow/`](examples/mflow/)
+- `156` execution tests in `test/Run/`
 - `37` SystemVerilog golden fixtures (Verilator lint-clean) in `test/EmitSV/`
 - `7` fi-spec port-declaration regression tests in `test/EmitSVPorts/`
 - `10` synthesizability-gate diagnostic tests in `test/EmitSVFail/`

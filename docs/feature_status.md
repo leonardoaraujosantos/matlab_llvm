@@ -52,7 +52,7 @@ Out of scope:
 | Comparison, logical, short-circuit (`== ~= < <= > >= & | && || ~`) | ✅ | |
 | Transpose and conjugate-transpose (`'`, `.'`) | ✅ | |
 | Function handle operator (`@`) | ✅ | |
-| OOP keywords (`classdef properties methods events enumeration`) | 🟡 | Tokenized; no parser/sema |
+| OOP keywords (`classdef properties methods events enumeration`) | ✅ | `classdef`, `properties`, `methods`, `enumeration` all parse and lower end-to-end (see §3 / §8 OOP rows). `events` parses but is ignored at runtime. |
 | `spmd`, `import` | 🟡 | Tokenized; `import` parses but is ignored |
 
 ### Parser — expressions (`include/matlab/AST/`)
@@ -286,12 +286,12 @@ All implemented; see `docs/emit_c_cpp.md` for pipeline diagram.
 | Suite | Count | Status |
 |---|--:|:-:|
 | `frontend-tests` (Lexer, Parser, Sema, MIR, MLIR, Opt, Programs, Errors) | 77 | ✅ 77/77 |
-| `run-tests` (`-emit-llvm` + clang) | 144 | ✅ |
-| `run-tests-emit-c` (`-emit-c` + cc) | 144 | ✅ 140/144 (4 pre-existing) |
-| `run-tests-emit-cpp` (`-emit-cpp` + c++) | 144 | ✅ |
-| `run-tests-emit-c-strict` / `-cpp-strict` (-Wall -Wextra -Werror) | 144 | ✅ |
-| `run-tests-emit-python` (`-emit-python` + python3) | 144 | ✅ 130/144 (3 pre-existing, 11 skipped) |
-| `run-tests-emit-typescript` (`-emit-typescript` + node) | 144 | ✅ 122/144 (2 pre-existing, 20 skipped) |
+| `run-tests` (`-emit-llvm` + clang) | 156 | ✅ |
+| `run-tests-emit-c` (`-emit-c` + cc) | 156 | ✅ |
+| `run-tests-emit-cpp` (`-emit-cpp` + c++) | 156 | 🟡 1 pre-existing (`string_concat_mixed`) |
+| `run-tests-emit-c-strict` / `-cpp-strict` (-Wall -Wextra -Werror) | 156 | ✅ |
+| `run-tests-emit-python` (`-emit-python` + python3) | 156 | ✅ (some `.stdout-python` overrides for numpy repr) |
+| `run-tests-emit-typescript` (`-emit-typescript` + bun) | 156 | 🟡 1 pre-existing (`string_concat_mixed`), ~20 skipped |
 | `emit-sv` golden tests + Verilator lint | 37 | ✅ 37/37 |
 | `emit-sv-fail` synthesizability gate diagnostics | 10 | ✅ 10/10 |
 | `emit-sv-ports` fi-spec ↔ SV declaration regression | 7 | ✅ 7/7 |
@@ -358,7 +358,7 @@ deliberate non-goals; see "Out of scope."
 | **Struct arrays** (`s(i).x`) | ✅ shipped (Phase 2) | Scalar fields work end-to-end; matrix-valued fields share the pre-existing tensor->ptr conversion gap with scalar structs and are deferred. |
 | **Sparse matrices** | Large | ~3–4 weeks. Sparse representation + sparse-aware linalg; or lean on SuiteSparse. |
 | **`varargout`** | ✅ shipped (Phase 1.2) | Pure (`function varargout = f(...)`) and mixed (`function [first, varargout] = f(...)`) forms; caller unpacks any LHS beyond the declared boundary from the matlab_cell* via `matlab_cell_get_mat`. Plain user-function multi-return (`[a, b] = swap(x, y)`) was also broken before this slice — both LHS got the same value — and is now wired through the same `matlab.call` (N results, `nargout` attr) shape the builtin path uses. Gating test: `test/Run/varargout_basic.m`. |
-| **`classdef` dependent types** (`table`, `datetime`, `categorical`) | Large | Built on OOP; add after value semantics land. |
+| **`classdef` dependent types** (`datetime`, `categorical`, `table`) | ✅ shipped (Phase 5.1–5.3) | datetime / duration / categorical / table all backed by dedicated runtime descriptors; see the per-type rows above. `timetable` (5.4) still missing. |
 | **`eval`, `evalin`, `assignin`** | Small | ~2–3 days. Evaluator already exists in `-repl`; hook it. |
 
 ### Built-in library breadth (incremental, each ~0.5–2 days)
@@ -402,12 +402,12 @@ sort / linalg tail, strings, REPL, file I/O, basic OOP, tooling —
 
 | Priority | Item | Effort | Unlocks |
 |:-:|---|--:|---|
-| 1 | Struct arrays (`s(i).x`) | 1 week | Data-in-records patterns |
-| 2 | Integer runtime (typed `matlab_mat_i32` / `_u8` / …) — **partially shipped (Phase 1.1)**: `int32` and `uint8` matrix lanes complete (runtime, lowering, Python+TS, REPL+DAP). Remaining lanes (i8/i16/i64/u16/u32/u64 matrices) drop in against the same template. | ~1 week left | Image processing pixel code. (Note: 64-bit lanes already exist as a side effect of the fi-array work — `matlab_mat_i64` / `_u64` ship with Phase 3 of fi.) |
-| 2b | Fixed-Point Designer (`fi`) — Phases 1–5 shipped (scalar + 1-D arrays + numerictype/fimath + reinterpretcast + report). **Open follow-ups**: function-internal fi typing (~1 week), 2-D fi matrices (~1.5 weeks), fi parfor reductions, reductions tail. See [`emit_fixed_point.md`](emit_fixed_point.md) §10.1. | 2 weeks total | DSP simulation, hardware-faithful integer math, full `function y = fir(x)` form |
+| ~~1~~ | ~~Struct arrays (`s(i).x`)~~ — **shipped Phase 2** | — | Data-in-records patterns |
+| 2 | Integer runtime — `int32` + `uint8` matrix lanes complete (runtime, lowering, Python+TS, REPL+DAP). Remaining lanes (i8/i16/i64/u16/u32/u64 matrices) drop in against the same template. | ~1 week left | Image processing pixel code. (Note: 64-bit lanes already exist via fi-array work.) |
+| 2b | Fixed-Point Designer (`fi`) — Phases 1–5 shipped. **Open**: function-internal fi typing (~1 week), 2-D fi matrices (~1.5 weeks), fi parfor reductions, reductions tail. See [`emit_fixed_point.md`](emit_fixed_point.md) §10.1. | 2 weeks total | DSP simulation, hardware-faithful integer math |
 | 3 | ~~`varargout`~~ (shipped Phase 1.2) + 3-D vector slicing (`A(:,:,k)`) | ~3 days remaining | Library-style + volumetric code |
 | 4 | Complex linalg tail (`inv` / `det` / `svd` / `eig`) | 1 week | Complete DSP / scientific code |
-| 5 | OOP value-class copy semantics + property validators | 2 weeks | Modern MATLAB code |
+| 5 | OOP value-class copy semantics — **partially shipped (Phase 3)**: copy-on-assign works; method-dispatch value semantics still requires test-corpus migration. + property validators. | ~1 week left | Modern MATLAB code |
 | 6 | DAP user-function frames + `evaluate` | 1 week | Stepping into user functions shows their frames; watch expressions |
 | 7 | `regexp` / `regexprep` + string tail | 1–2 weeks | Text-processing scripts |
 | 8 | Full non-symmetric `eig` + `[U, S, V] = svd` | 1 week | Scientific computing |
@@ -415,7 +415,9 @@ sort / linalg tail, strings, REPL, file I/O, basic OOP, tooling —
 | 10 | N-dim arrays (>3D, full indexing) | 2–3 weeks | Batch dims, tensor code |
 | 11 | OOP events / listeners | 1 week | Callback-heavy code |
 | 12 | Sparse matrices | 3–4 weeks | Large-scale linalg |
-| 13 | `classdef` table / datetime / categorical | 3–4 weeks | Data-analysis idioms |
+| ~~13~~ | ~~`classdef` table / datetime / categorical~~ — **shipped Phase 5.1–5.3** (timetable still pending) | ~1 week (timetable only) | Data-analysis idioms |
+| 14 | `containers.Map` / `dictionary` — **shipped Phase 4** | — | Key-value patterns |
+| 15 | 2-D cells and cell concatenation — **shipped Phase 1.3** | — | Heterogeneous data |
 
 Items 1–3 are the immediate-leverage path for generic MATLAB
 compatibility. Items 4–9 round out the "serious numeric work"
@@ -451,14 +453,24 @@ covering the scalar / dense-matrix / classdef subset of MATLAB.
 - **Linear algebra**: LU, QR, Cholesky, pseudo-inverse, norm,
   trace, kron, symmetric eig, SVD singular values — all pure-C,
   no BLAS / LAPACK dependency.
-- **~3100-line single-file C runtime** that compiles stand-alone.
+- **~6500-line C runtime** (split across `matlab_runtime.cpp`,
+  `runtime_debug.cpp`, `runtime_complex.cpp`) that compiles
+  stand-alone.
+- **`containers.Map` / `dictionary`, 2-D cell arrays, struct arrays
+  (`s(i).x`), datetime / duration, categorical, table** — heterogeneous
+  data containers shipped Phases 1.3 / 2 / 4 / 5.1 / 5.2 / 5.3.
+- **Typed `int32` / `uint8` matrix lanes** (Phase 1.1) with saturating
+  arithmetic, REPL / DAP display, Python + TypeScript runtime parity.
 
-**Biggest gaps to a "general-purpose MATLAB replacement":** struct
-arrays, typed integer runtime, complex numbers, 3-D vector slicing,
-full DAP, and MATLAB `.mat`-format compatibility. Each is tractable
-(Section 9 lays out the order); none is blocking any of the above.
+**Biggest gaps to a "general-purpose MATLAB replacement":** narrower /
+wider integer lanes (i8/i16/i64/u16/u32/u64 matrices — same template
+as the shipped 1.1), `timetable` (5.4), 3-D vector slicing
+(`A(:,:,k)`), full method-dispatch value-class semantics, complex
+linalg tail (`inv` / `det` / `eig` / `svd` for complex), and MATLAB
+`.mat`-format compatibility. Each is tractable; none is blocking any
+of the above.
 
-**Biggest architectural asks:** value-class copy semantics for
-OOP, sparse matrices, and true N-D (>3D) arrays. Each is multi-week
-work and their priority depends on which direction the project
-pushes next.
+**Biggest architectural asks:** sparse matrices, true N-D (>3D)
+arrays, and full method-dispatch value semantics for OOP. Each is
+multi-week work and their priority depends on which direction the
+project pushes next.
