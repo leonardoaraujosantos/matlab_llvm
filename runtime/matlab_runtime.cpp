@@ -3602,6 +3602,148 @@ struct matlab_cell_s_fwd_ {
 
 
 /* ====================================================================== */
+/* Phase 5.3 — table.
+ *
+ * A MATLAB table is a record of named columns where each column is a
+ * homogeneous matlab_mat (column vector for v1). Columns can have
+ * different element kinds in principle; the v1 lowering produces an
+ * f64 column per scalar / vector argument. Auto-named columns get
+ * "Var1", "Var2", ...
+ *
+ * The descriptor:
+ *   nvars   # of columns
+ *   nrows   row count (taken from the first column at construction)
+ *   names   per-column variable name (strdup'd)
+ *   data    per-column matlab_mat * (column vector)
+ *
+ * Surfaces:
+ *   T = table(col1, col2, ...)
+ *   T.<name>             column read  (returns matlab_mat *)
+ *   T.<name> = vec       column write
+ *   height(T) / width(T) / numel(T) / size(T, dim)
+ *   disp(T)              MATLAB-style table display
+ * ====================================================================== */
+
+struct matlab_table_s {
+    int32_t  nvars;
+    int32_t  cap;
+    int32_t  nrows;
+    char   **names;
+    void   **data;     /* per-column matlab_mat * */
+};
+typedef struct matlab_table_s matlab_table;
+
+static void table_grow(matlab_table *t, int32_t need) {
+    if (t->cap >= need) return;
+    int32_t nc = t->cap ? t->cap * 2 : 4;
+    while (nc < need) nc *= 2;
+    t->names = (char **)realloc(t->names, (size_t)nc * sizeof(char *));
+    t->data  = (void **)realloc(t->data,  (size_t)nc * sizeof(void *));
+    for (int32_t i = t->cap; i < nc; ++i) {
+        t->names[i] = NULL;
+        t->data[i]  = NULL;
+    }
+    t->cap = nc;
+}
+
+extern "C" matlab_table *matlab_table_new(void) {
+    return (matlab_table *)calloc(1, sizeof(matlab_table));
+}
+
+/* Find the index of a named column; -1 on miss. */
+static int32_t table_find(matlab_table *t, const char *name, int64_t len) {
+    if (!t) return -1;
+    for (int32_t i = 0; i < t->nvars; ++i) {
+        if (!t->names[i]) continue;
+        if ((int64_t)strlen(t->names[i]) == len &&
+            memcmp(t->names[i], name, (size_t)len) == 0) return i;
+    }
+    return -1;
+}
+
+/* Add or replace a column. The runtime takes ownership of the
+ * matlab_mat *; the caller must not free it. */
+extern "C" void matlab_table_add_column(matlab_table *t,
+                                         const char *name, int64_t namelen,
+                                         matlab_mat *col) {
+    if (!t) return;
+    int32_t i = table_find(t, name, namelen);
+    if (i < 0) {
+        if (t->nvars == t->cap) table_grow(t, t->nvars + 1);
+        i = t->nvars++;
+        t->names[i] = (char *)malloc((size_t)namelen + 1);
+        memcpy(t->names[i], name, (size_t)namelen);
+        t->names[i][namelen] = '\0';
+        if (col && t->nrows == 0) {
+            int64_t r = col->rows * col->cols;
+            t->nrows = (int32_t)r;
+        }
+    }
+    t->data[i] = col;
+}
+
+extern "C" matlab_mat *matlab_table_get_column(matlab_table *t,
+                                                const char *name,
+                                                int64_t namelen) {
+    int32_t i = table_find(t, name, namelen);
+    if (i < 0 || !t->data[i]) return mat_alloc(0, 0);
+    return (matlab_mat *)t->data[i];
+}
+
+extern "C" double matlab_table_height(matlab_table *t) {
+    return t ? (double)t->nrows : 0.0;
+}
+extern "C" double matlab_table_width(matlab_table *t) {
+    return t ? (double)t->nvars : 0.0;
+}
+extern "C" double matlab_table_numel(matlab_table *t) {
+    return t ? (double)(t->nrows * t->nvars) : 0.0;
+}
+extern "C" double matlab_table_size_dim(matlab_table *t, double dim) {
+    if (!t) return 0.0;
+    int d = (int)dim;
+    if (d == 1) return (double)t->nrows;
+    if (d == 2) return (double)t->nvars;
+    return 1.0;
+}
+
+extern "C" void matlab_table_disp(matlab_table *t) {
+    if (!t) { matlab_disp_str("(empty table)", 13); return; }
+    pthread_mutex_lock(&matlab_io_mutex);
+    /* Header row: column names with two-space separator. Use a fixed
+     * column width so the body lines up. */
+    const int W = 12;
+    /* Print header. */
+    for (int32_t i = 0; i < t->nvars; ++i)
+        printf("    %*s", W, t->names[i] ? t->names[i] : "");
+    putchar('\n');
+    /* Underline. */
+    for (int32_t i = 0; i < t->nvars; ++i) {
+        printf("    ");
+        for (int j = 0; j < W; ++j) putchar('_');
+    }
+    putchar('\n');
+    /* Body — each row, one element per column. */
+    for (int32_t r = 0; r < t->nrows; ++r) {
+        for (int32_t c = 0; c < t->nvars; ++c) {
+            matlab_mat *col = (matlab_mat *)t->data[c];
+            if (col && r < col->rows * col->cols) {
+                double v = col->data[r];
+                /* Round-trip integer-valued doubles as %d for cleanliness. */
+                if (v == (double)(int64_t)v && fabs(v) < 1e15)
+                    printf("    %*lld", W, (long long)v);
+                else
+                    printf("    %*.*g", W, 6, v);
+            } else {
+                printf("    %*s", W, "");
+            }
+        }
+        putchar('\n');
+    }
+    pthread_mutex_unlock(&matlab_io_mutex);
+}
+
+/* ====================================================================== */
 /* Phase 5.2 — categorical arrays.
  *
  * matlab_categorical wraps a 1-D vector of int32 category codes (1-based,

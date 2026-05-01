@@ -1472,6 +1472,94 @@ def obj_new(*_ignored):
     _obj_store[oid] = obj  # keep a strong ref + a lookup path for legacy callers
     return obj
 
+# Phase 5.3 — table. Mirrors the C runtime: dict-of-named-columns
+# with column-vector storage. Each column is a numpy array (or list);
+# the public API matches the C ABI's column-add / column-get / shape /
+# disp surface.
+
+def table_new():
+    return {'_kind': 'table', 'names': [], 'cols': []}
+
+def _table_idx(t, name):
+    for i, n in enumerate(t['names']):
+        if n == name: return i
+    return -1
+
+def table_add_column(t, name, *rest):
+    """The C ABI is `add_column(t, name_ptr, name_len, col)`; the
+    -emit-python lane drops name_len, but accepts either form. We
+    take *rest to absorb a (len, col) pair or just (col)."""
+    if t is None: return
+    if len(rest) == 2:
+        col = rest[1]
+    elif len(rest) == 1:
+        col = rest[0]
+    else:
+        return
+    nm = name if isinstance(name, str) else str(name)
+    i = _table_idx(t, nm)
+    if i >= 0:
+        t['cols'][i] = col
+    else:
+        t['names'].append(nm)
+        t['cols'].append(col)
+
+def table_get_column(t, name, *_unused):
+    if t is None: return None
+    nm = name if isinstance(name, str) else str(name)
+    i = _table_idx(t, nm)
+    return t['cols'][i] if i >= 0 else None
+
+def _column_len(c):
+    try: return len(c)
+    except Exception:
+        try: return c.size
+        except Exception: return 0
+
+def table_height(t):
+    if t is None or not t['cols']: return 0.0
+    return float(_column_len(t['cols'][0]))
+
+def table_width(t):
+    return float(len(t['names'])) if t else 0.0
+
+def table_numel(t):
+    return table_height(t) * table_width(t)
+
+def table_size_dim(t, dim):
+    d = int(dim)
+    if d == 1: return table_height(t)
+    if d == 2: return table_width(t)
+    return 1.0
+
+def _fmt_table_cell(v):
+    try:
+        f = float(v)
+        if f == int(f) and abs(f) < 1e15:
+            return f"{int(f):>12d}"
+        return f"{f:>12.6g}"
+    except Exception:
+        return str(v).rjust(12)
+
+def table_disp(t):
+    if t is None: print("(empty table)"); return
+    nrows = int(table_height(t))
+    # Header.
+    parts = ["    " + n.rjust(12) for n in t['names']]
+    print("".join(parts))
+    underline = ["    " + ("_" * 12) for _ in t['names']]
+    print("".join(underline))
+    for r in _pyrange(nrows):
+        row = []
+        for c in t['cols']:
+            try:
+                v = c[r] if hasattr(c, '__getitem__') else None
+            except Exception:
+                v = None
+            row.append("    " + _fmt_table_cell(v))
+        print("".join(row))
+
+
 # Phase 5.2 — categorical. Mirrors the C runtime: each instance has a
 # list of per-element codes (1-based, 0 = <undefined>) and a list of
 # category-name strings (sorted alphabetically). Lookup is O(N).

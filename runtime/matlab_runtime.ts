@@ -1708,6 +1708,90 @@ export function cell_concat_col(a: any, b: any): Cell2D {
 
 export function obj_new(): any { return {}; }
 
+/* Phase 5.3 — table. Dict-of-named-columns; same API as the C ABI. */
+
+type TableT = { _kind: 'table'; names: string[]; cols: any[] };
+
+export function table_new(): TableT {
+  return { _kind: 'table', names: [], cols: [] };
+}
+
+function tableIdx(t: TableT, name: string): number {
+  return t ? t.names.indexOf(name) : -1;
+}
+
+export function table_add_column(t: TableT, name: any, ...rest: any[]): void {
+  /* C ABI: (t, name_ptr, name_len, col). emit-typescript drops
+   * name_len; either form works here. */
+  if (!t) return;
+  const col = rest.length === 2 ? rest[1] : rest[0];
+  const nm = typeof name === 'string' ? name : String(name);
+  const i = tableIdx(t, nm);
+  if (i >= 0) t.cols[i] = col;
+  else { t.names.push(nm); t.cols.push(col); }
+}
+
+export function table_get_column(t: TableT, name: any, ..._rest: any[]): any {
+  if (!t) return null;
+  const nm = typeof name === 'string' ? name : String(name);
+  const i = tableIdx(t, nm);
+  return i >= 0 ? t.cols[i] : null;
+}
+
+function colLen(c: any): number {
+  if (c == null) return 0;
+  if (typeof c.size === 'number') return c.size;       // NDArray
+  if (Array.isArray(c)) return c.length;
+  if (typeof c.length === 'number') return c.length;
+  return 0;
+}
+
+function colCell(c: any, r: number): any {
+  if (c == null) return null;
+  if (Array.isArray(c)) return c[r];
+  if (c.data) return c.data[r];                          // NDArray flat data
+  return c[r];
+}
+
+export function table_height(t: TableT): number {
+  return t && t.cols.length ? colLen(t.cols[0]) : 0;
+}
+export function table_width(t: TableT): number {
+  return t ? t.names.length : 0;
+}
+export function table_numel(t: TableT): number {
+  return table_height(t) * table_width(t);
+}
+export function table_size_dim(t: TableT, dim: number): number {
+  const d = dim | 0;
+  if (d === 1) return table_height(t);
+  if (d === 2) return table_width(t);
+  return 1;
+}
+
+function fmtTableCell(v: any): string {
+  const f = Number(v);
+  if (Number.isFinite(f)) {
+    if (f === Math.floor(f) && Math.abs(f) < 1e15)
+      return String(Math.trunc(f)).padStart(12);
+    return formatG(f, 6).padStart(12);
+  }
+  return String(v).padStart(12);
+}
+
+export function table_disp(t: TableT): void {
+  if (!t) { console.log("(empty table)"); return; }
+  const nrows = table_height(t);
+  const header = t.names.map(n => "    " + n.padStart(12)).join("");
+  console.log(header);
+  const underline = t.names.map(_ => "    " + "_".repeat(12)).join("");
+  console.log(underline);
+  for (let r = 0; r < nrows; r++) {
+    const row = t.cols.map(c => "    " + fmtTableCell(colCell(c, r))).join("");
+    console.log(row);
+  }
+}
+
 /* Phase 5.2 — categorical. Mirrors the C runtime: 1-D vector of
  * 1-based category codes plus a sorted list of category names. */
 

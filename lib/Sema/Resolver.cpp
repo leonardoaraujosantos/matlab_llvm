@@ -58,6 +58,8 @@ void Resolver::registerBuiltins() {
     "calendarDuration",
     /* Phase 5.2 — categorical. */
     "categorical", "iscategorical", "categories", "iscategory",
+    /* Phase 5.3 — table. */
+    "table", "istable", "height", "width", "rows2vars", "varfun",
     "sprintf", "num2str", "str2double",
     "upper", "lower", "startsWith", "endsWith", "contains",
     "strtrim", "strrep", "strcat",

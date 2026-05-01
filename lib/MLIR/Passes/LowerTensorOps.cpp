@@ -1889,6 +1889,86 @@ bool TensorLowering::rewriteBuiltinCalls() {
       continue;
     }
 
+    /* Phase 5.3: table runtime. */
+    if (Name == "matlab_table_new" && Call->getNumResults() == 1 &&
+        Call->getNumOperands() == 0) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt(Name, PtrTy, {});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn, ValueRange{});
+      carryName(Call, NC);
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase(); Changed = true; continue;
+    }
+    if (Name == "matlab_table_add_column" && Call->getNumOperands() == 3 &&
+        Call->getOperand(0).getType() == PtrTy &&
+        Call->getOperand(2).getType() == PtrTy) {
+      Value Base = Call->getOperand(0);
+      Value NameV = Call->getOperand(1);
+      Value Col = Call->getOperand(2);
+      int64_t Len = 0;
+      Value Ptr = fieldNameAddr(NameV, Len);
+      if (!Ptr) continue;
+      B.setInsertionPoint(Call);
+      Value LenV = LLVM::ConstantOp::create(
+          B, Call->getLoc(), I64, B.getI64IntegerAttr(Len));
+      auto Fn = rt(Name, VoidTy, {PtrTy, PtrTy, I64, PtrTy});
+      LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                            ValueRange{Base, Ptr, LenV, Col});
+      Call->erase(); Changed = true; continue;
+    }
+    if (Name == "matlab_table_get_column" && Call->getNumResults() == 1 &&
+        Call->getNumOperands() == 2 &&
+        Call->getOperand(0).getType() == PtrTy) {
+      Value Base = Call->getOperand(0);
+      Value NameV = Call->getOperand(1);
+      int64_t Len = 0;
+      Value Ptr = fieldNameAddr(NameV, Len);
+      if (!Ptr) continue;
+      B.setInsertionPoint(Call);
+      Value LenV = LLVM::ConstantOp::create(
+          B, Call->getLoc(), I64, B.getI64IntegerAttr(Len));
+      auto Fn = rt(Name, PtrTy, {PtrTy, PtrTy, I64});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                      ValueRange{Base, Ptr, LenV});
+      carryName(Call, NC);
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase(); Changed = true; continue;
+    }
+    if ((Name == "matlab_table_height" ||
+         Name == "matlab_table_width" ||
+         Name == "matlab_table_numel") &&
+        Call->getNumResults() == 1 && Call->getNumOperands() == 1 &&
+        Call->getOperand(0).getType() == PtrTy) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt(Name, F64, {PtrTy});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                      ValueRange{Call->getOperand(0)});
+      carryName(Call, NC);
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase(); Changed = true; continue;
+    }
+    if (Name == "matlab_table_size_dim" && Call->getNumResults() == 1 &&
+        Call->getNumOperands() == 2 &&
+        Call->getOperand(0).getType() == PtrTy &&
+        Call->getOperand(1).getType() == F64) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt(Name, F64, {PtrTy, F64});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                      ValueRange{Call->getOperand(0),
+                                                 Call->getOperand(1)});
+      carryName(Call, NC);
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase(); Changed = true; continue;
+    }
+    if (Name == "matlab_table_disp" && Call->getNumOperands() == 1 &&
+        Call->getOperand(0).getType() == PtrTy) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt(Name, VoidTy, {PtrTy});
+      LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                            ValueRange{Call->getOperand(0)});
+      Call->erase(); Changed = true; continue;
+    }
+
     /* Phase 5.2: categorical runtime. */
     if (Name == "matlab_categorical_from_cell" &&
         Call->getNumResults() == 1 && Call->getNumOperands() == 2 &&

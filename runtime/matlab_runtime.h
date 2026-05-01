@@ -558,6 +558,21 @@ double matlab_struct_get_f64(matlab_struct *s, const char *name, int64_t len);
 matlab_mat *matlab_struct_get_mat(matlab_struct *s, const char *name,
                                   int64_t len);
 double matlab_struct_has_field(matlab_struct *s, const char *name, int64_t len);
+/* Phase 5.3 — table. A record of named columns where each column is
+ * a matlab_mat * (column vector for v1). Constructors and column
+ * accessors below; display and shape introspection follow. */
+typedef struct matlab_table_s matlab_table;
+matlab_table *matlab_table_new(void);
+void          matlab_table_add_column(matlab_table *t, const char *name,
+                                       int64_t namelen, matlab_mat *col);
+matlab_mat   *matlab_table_get_column(matlab_table *t, const char *name,
+                                       int64_t namelen);
+double        matlab_table_height(matlab_table *t);
+double        matlab_table_width(matlab_table *t);
+double        matlab_table_numel(matlab_table *t);
+double        matlab_table_size_dim(matlab_table *t, double dim);
+void          matlab_table_disp(matlab_table *t);
+
 /* Phase 5.2 — categorical. 1-D vector of category indices with a
  * deduplicated, alphabetically-sorted category-name table. */
 typedef struct matlab_categorical_s matlab_categorical;

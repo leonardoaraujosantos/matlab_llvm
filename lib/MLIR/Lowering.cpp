@@ -462,6 +462,9 @@ private:
    * dispatch disp / categories / iscategory / equality through the
    * dedicated runtime entries. */
   std::unordered_set<Binding *> CategoricalBindings;
+  /* Phase 5.3: bindings holding a matlab_table * — used to dispatch
+   * column accessors (`T.x`), shape (height/width/size), and disp(T). */
+  std::unordered_set<Binding *> TableBindings;
   /* Per-struct-array binding: the slot was already initialised with
    * matlab_struct_arr_new() at function entry. Avoids re-initialising
    * on every `s(i).x = ...` assignment. */
@@ -1818,11 +1821,12 @@ void Lowerer::lowerStmt(const Stmt &St) {
       /* Phase 5.1: datetime / duration disp dispatch.
        * Phase 5.2: categorical disp dispatch. */
       bool DispIsDatetime = false, DispIsDuration = false;
-      bool DispIsCategorical = false;
+      bool DispIsCategorical = false, DispIsTable = false;
       if (auto *NE = dynamic_cast<const NameExpr *>(E.E)) {
         if (NE->Ref && DatetimeBindings.count(NE->Ref)) DispIsDatetime = true;
         if (NE->Ref && DurationBindings.count(NE->Ref)) DispIsDuration = true;
         if (NE->Ref && CategoricalBindings.count(NE->Ref)) DispIsCategorical = true;
+        if (NE->Ref && TableBindings.count(NE->Ref)) DispIsTable = true;
       }
       llvm::StringRef IntSuf = Lowerer::intDtypeSuffixOf(E.E);
       if (DispIsString) {
@@ -1847,6 +1851,12 @@ void Lowerer::lowerStmt(const Stmt &St) {
         mlir::NamedAttribute Cal(
             mlir::StringAttr::get(&MCtx, "callee"),
             mlir::StringAttr::get(&MCtx, "matlab_categorical_disp"));
+        emitUnregOp("matlab.call_builtin", {V},
+                    {mlir::NoneType::get(&MCtx)}, loc(E.Range), {Cal});
+      } else if (DispIsTable) {
+        mlir::NamedAttribute Cal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "matlab_table_disp"));
         emitUnregOp("matlab.call_builtin", {V},
                     {mlir::NoneType::get(&MCtx)}, loc(E.Range), {Cal});
       } else if (!IntSuf.empty()) {
@@ -1924,14 +1934,19 @@ void Lowerer::lowerStmt(const Stmt &St) {
     bool RhsIsDatetime = false;
     bool RhsIsDuration = false;
     bool RhsIsCategorical = false;
+    bool RhsIsTable = false;
     if (A.RHS && A.RHS->Kind == NodeKind::CallOrIndex) {
       auto *Cx = static_cast<const CallOrIndex *>(A.RHS);
-      if (auto *NE = dynamic_cast<const NameExpr *>(Cx->Callee))
+      if (auto *NE = dynamic_cast<const NameExpr *>(Cx->Callee)) {
         if (NE->Name == "categorical") RhsIsCategorical = true;
+        if (NE->Name == "table") RhsIsTable = true;
+      }
     } else if (A.RHS && A.RHS->Kind == NodeKind::NameExpr) {
       auto *NE = static_cast<const NameExpr *>(A.RHS);
       if (NE->Ref && CategoricalBindings.count(NE->Ref))
         RhsIsCategorical = true;
+      if (NE->Ref && TableBindings.count(NE->Ref))
+        RhsIsTable = true;
     }
     if (A.RHS && A.RHS->Kind == NodeKind::CallOrIndex) {
       auto *Cx = static_cast<const CallOrIndex *>(A.RHS);
@@ -2326,6 +2341,11 @@ void Lowerer::lowerStmt(const Stmt &St) {
       for (const Expr *L : A.LHS)
         if (auto *N = dynamic_cast<const NameExpr *>(L))
           if (N->Ref) CategoricalBindings.insert(N->Ref);
+    }
+    if (RhsIsTable) {
+      for (const Expr *L : A.LHS)
+        if (auto *N = dynamic_cast<const NameExpr *>(L))
+          if (N->Ref) TableBindings.insert(N->Ref);
     }
     if (RhsIsString) {
       for (const Expr *L : A.LHS)
@@ -3090,6 +3110,20 @@ void Lowerer::lowerLValueStore(const Expr &LHS, mlir::Value Rhs) {
      * matlab_struct_arr_get_or_create + matlab_struct_set_*. */
     auto &F = static_cast<const FieldAccess &>(LHS);
     auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+    /* Phase 5.3: T.<name> = Rhs — Base is a NameExpr in TableBindings.
+     * Route to matlab_table_add_column (which auto-creates the column
+     * on first write or replaces an existing one). */
+    if (auto *BN = dynamic_cast<const NameExpr *>(F.Base))
+      if (BN->Ref && TableBindings.count(BN->Ref)) {
+        mlir::Value Tv = lowerExpr(*F.Base);
+        mlir::Value NameV = emitFieldNameChar(F.Field, loc(F.Range));
+        mlir::NamedAttribute Cal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "matlab_table_add_column"));
+        emitUnregOp("matlab.call_builtin", {Tv, NameV, Rhs},
+                    {mlir::NoneType::get(&MCtx)}, loc(F.Range), {Cal});
+        return;
+      }
     if (auto *CI = dynamic_cast<const CallOrIndex *>(F.Base)) {
       auto *NE = dynamic_cast<const NameExpr *>(CI->Callee);
       if (NE && NE->Ref &&
@@ -4619,6 +4653,38 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
         return mlir::arith::ConstantOp::create(
             B, L, F64, mlir::FloatAttr::get(F64, Val));
       }
+      /* Phase 5.3: height(T), width(T), numel(T), size(T, dim) on a
+       * table binding — dispatch through the matlab_table_* runtime. */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          (N->Name == "height" || N->Name == "width" ||
+           N->Name == "numel"  || N->Name == "length") &&
+          C.Args.size() == 1 && C.Args[0])
+        if (auto *ArgN = dynamic_cast<const NameExpr *>(C.Args[0]))
+          if (ArgN->Ref && TableBindings.count(ArgN->Ref)) {
+            auto F64 = mlir::Float64Type::get(&MCtx);
+            mlir::Value V = lowerExpr(*C.Args[0]);
+            llvm::StringRef Callee;
+            if (N->Name == "height") Callee = "matlab_table_height";
+            else if (N->Name == "width") Callee = "matlab_table_width";
+            else if (N->Name == "numel") Callee = "matlab_table_numel";
+            else /* length */ Callee = "matlab_table_height";
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, std::string(Callee)));
+            return emitUnreg("matlab.call_builtin", {V}, F64, L, {Cal});
+          }
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          N->Name == "size" && C.Args.size() == 2 && C.Args[0])
+        if (auto *ArgN = dynamic_cast<const NameExpr *>(C.Args[0]))
+          if (ArgN->Ref && TableBindings.count(ArgN->Ref)) {
+            auto F64 = mlir::Float64Type::get(&MCtx);
+            mlir::Value V = lowerExpr(*C.Args[0]);
+            mlir::Value D = lowerExpr(*C.Args[1]);
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_table_size_dim"));
+            return emitUnreg("matlab.call_builtin", {V, D}, F64, L, {Cal});
+          }
       /* Phase 5.1: disp(t) where t is a datetime / duration binding —
        * dispatch to the typed runtime.
        * Phase 5.2: disp(c) for categorical too. */
@@ -4646,6 +4712,14 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             mlir::NamedAttribute Cal(
                 mlir::StringAttr::get(&MCtx, "callee"),
                 mlir::StringAttr::get(&MCtx, "matlab_categorical_disp"));
+            return emitUnreg("matlab.call_builtin", {V},
+                             mlir::NoneType::get(&MCtx), L, {Cal});
+          }
+          if (ArgN->Ref && TableBindings.count(ArgN->Ref)) {
+            mlir::Value V = lowerExpr(*C.Args[0]);
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_table_disp"));
             return emitUnreg("matlab.call_builtin", {V},
                              mlir::NoneType::get(&MCtx), L, {Cal});
           }
@@ -4946,6 +5020,64 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
           return emitUnreg("matlab.call_builtin", {Y, M, D, H, Mn, S},
                            PtrTy, L, {Cal});
         }
+      }
+      /* Phase 5.3: table(col1, col2, ..., 'VariableNames', {n1, n2}).
+       * v1 supports auto-named (Var1..VarN) and explicit
+       * 'VariableNames' tail-arg forms. Each column-arg is lowered
+       * as a matrix value and added via matlab_table_add_column. */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          N->Name == "table") {
+        auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+        /* Locate an optional `'VariableNames', {...}` pair at the end. */
+        size_t NCol = C.Args.size();
+        const CellLiteral *NamesCell = nullptr;
+        for (size_t i = 0; i + 1 < C.Args.size(); ++i) {
+          const Expr *AE = C.Args[i];
+          if (!AE) continue;
+          if (auto *CL = dynamic_cast<const CharLiteral *>(AE)) {
+            if (CL->Value == "VariableNames") {
+              if (auto *NL = dynamic_cast<const CellLiteral *>(C.Args[i + 1])) {
+                NamesCell = NL;
+                NCol = i;
+                break;
+              }
+            }
+          }
+          if (auto *SL = dynamic_cast<const StringLiteral *>(AE)) {
+            if (SL->Value == "VariableNames") {
+              if (auto *NL = dynamic_cast<const CellLiteral *>(C.Args[i + 1])) {
+                NamesCell = NL;
+                NCol = i;
+                break;
+              }
+            }
+          }
+        }
+        mlir::NamedAttribute NewC(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "matlab_table_new"));
+        mlir::Value T = emitUnreg("matlab.call_builtin", {}, PtrTy, L, {NewC});
+        for (size_t i = 0; i < NCol; ++i) {
+          if (!C.Args[i]) continue;
+          /* Resolve the column name. */
+          std::string ColName;
+          if (NamesCell && i < NamesCell->Rows[0].size()) {
+            const Expr *NE = NamesCell->Rows[0][i];
+            if (auto *CL = dynamic_cast<const CharLiteral *>(NE))
+              ColName = std::string(CL->Value);
+            else if (auto *SL = dynamic_cast<const StringLiteral *>(NE))
+              ColName = std::string(SL->Value);
+          }
+          if (ColName.empty()) ColName = "Var" + std::to_string(i + 1);
+          mlir::Value Col = lowerExpr(*C.Args[i]);
+          mlir::Value NameV = emitFieldNameChar(ColName, L);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_table_add_column"));
+          emitUnregOp("matlab.call_builtin", {T, NameV, Col},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+        }
+        return T;
       }
       /* Phase 5.2: categorical([str, str, ...]) — construct from a
        * single argument that's a 1-row MatrixLiteral of string /
@@ -5592,6 +5724,19 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
         }
       }
     }
+    /* Phase 5.3: T.<name> read — Base is a NameExpr in TableBindings.
+     * Returns the column matlab_mat *. */
+    if (auto *BN = dynamic_cast<const NameExpr *>(F.Base))
+      if (BN->Ref && TableBindings.count(BN->Ref)) {
+        auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+        mlir::Value Tv = lowerExpr(*F.Base);
+        mlir::Value NameV = emitFieldNameChar(F.Field, L);
+        mlir::NamedAttribute Cal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "matlab_table_get_column"));
+        return emitUnreg("matlab.call_builtin", {Tv, NameV},
+                         PtrTy, L, {Cal});
+      }
     /* Phase 2: s(i).x read — Base is `CallOrIndex(NameExpr s, [i])`
      * where s is a struct-array binding. Pull the i-th element via
      * matlab_struct_arr_get and field-get on the result. */
