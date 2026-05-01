@@ -3583,6 +3583,218 @@ double matlab_obj_class_id(matlab_obj *o) {
     return o ? (double)o->class_id : 0.0;
 }
 
+/* Forward decl matching the matlab_string layout — defined later in
+ * the same TU. Phase 5.2 / Phase 4 reach into the layout for fast key
+ * compare without needing the public accessors. */
+struct matlab_string_s_fwd_ {
+    char *data;
+    int64_t len;
+};
+
+/* matlab_cell layout is also defined later; phase 5.2 categorical
+ * accesses ptr_vals directly to read the per-element string pointers. */
+struct matlab_cell_s_fwd_ {
+    int32_t n, cap, rows, cols;
+    int32_t *kinds;
+    double  *f64_vals;
+    void   **ptr_vals;
+};
+
+
+/* ====================================================================== */
+/* Phase 5.2 — categorical arrays.
+ *
+ * matlab_categorical wraps a 1-D vector of int32 category codes (1-based,
+ * 0 = <undefined>) and a separate vector of category-name pointers
+ * (matlab_string *). Categories are deduplicated on construction and
+ * stored in alphabetical order — matches MATLAB's default behaviour
+ * for categorical(strvec) without an explicit valueset.
+ *
+ * Indices and category names share the same descriptor; copies on
+ * assignment are shallow (the lowering may add a clone helper if
+ * value-semantics need is later). Display: each element prints on
+ * its own line with the category name, "<undefined>" for code=0.
+ * ====================================================================== */
+
+struct matlab_categorical_s {
+    int32_t   n;          /* number of elements */
+    int32_t   ncat;       /* number of categories */
+    int32_t   cap;
+    int32_t   ccap;
+    int32_t  *codes;      /* per-element category code (1-based) */
+    void    **cats;       /* per-category matlab_string * */
+};
+typedef struct matlab_categorical_s matlab_categorical;
+
+static int categorical_find_cat(matlab_categorical *c,
+                                 const char *s, int64_t len) {
+    for (int i = 0; i < c->ncat; ++i) {
+        auto *ks = (struct matlab_string_s_fwd_ *)c->cats[i];
+        if (!ks) continue;
+        if (ks->len == len && ks->data &&
+            memcmp(ks->data, s, (size_t)len) == 0) return i;
+    }
+    return -1;
+}
+
+static int categorical_add_cat(matlab_categorical *c, void *str) {
+    auto *ks = (struct matlab_string_s_fwd_ *)str;
+    int idx = categorical_find_cat(c, ks ? ks->data : "", ks ? ks->len : 0);
+    if (idx >= 0) return idx;
+    if (c->ncat == c->ccap) {
+        int nc = c->ccap ? c->ccap * 2 : 4;
+        c->cats = (void **)realloc(c->cats, (size_t)nc * sizeof(void *));
+        c->ccap = nc;
+    }
+    c->cats[c->ncat] = str;
+    return c->ncat++;
+}
+
+/* Build a categorical from a cell of matlab_string * pointers (the
+ * lowering builds the cell up front so the variable-arity path is
+ * representable as a single call). */
+extern "C" matlab_categorical *matlab_categorical_from_cell(
+        struct matlab_cell_s_fwd_ *cell, double n_strs);
+
+extern "C" matlab_categorical *matlab_categorical_from_strs(
+        void **strs, int64_t n_strs) {
+    matlab_categorical *c = (matlab_categorical *)calloc(1, sizeof(*c));
+    c->n = (int32_t)n_strs;
+    c->cap = c->n > 0 ? c->n : 1;
+    c->codes = (int32_t *)calloc((size_t)c->cap, sizeof(int32_t));
+    /* Insert each unique string. We then sort categories alphabetically
+     * and remap codes — matches MATLAB's default sort. */
+    for (int32_t i = 0; i < c->n; ++i) {
+        int32_t code = (int32_t)categorical_add_cat(c, strs[i]) + 1;
+        c->codes[i] = code;
+    }
+    /* Sort categories + remap codes. */
+    int32_t *order = (int32_t *)calloc((size_t)c->ncat, sizeof(int32_t));
+    for (int32_t i = 0; i < c->ncat; ++i) order[i] = i;
+    /* Insertion sort on c->cats by string compare (small N). */
+    for (int32_t i = 1; i < c->ncat; ++i) {
+        for (int32_t j = i; j > 0; --j) {
+            auto *aa = (struct matlab_string_s_fwd_ *)c->cats[order[j]];
+            auto *bb = (struct matlab_string_s_fwd_ *)c->cats[order[j-1]];
+            int cmp = strcmp(aa ? aa->data : "", bb ? bb->data : "");
+            if (cmp < 0) {
+                int32_t t = order[j]; order[j] = order[j-1]; order[j-1] = t;
+            } else break;
+        }
+    }
+    /* Build the inverse map: rank[old] = new (0-based). */
+    int32_t *rank = (int32_t *)calloc((size_t)c->ncat, sizeof(int32_t));
+    void   **newcats = (void **)calloc((size_t)c->ncat, sizeof(void *));
+    for (int32_t i = 0; i < c->ncat; ++i) {
+        rank[order[i]] = i;
+        newcats[i] = c->cats[order[i]];
+    }
+    free(c->cats); c->cats = newcats;
+    for (int32_t i = 0; i < c->n; ++i) {
+        if (c->codes[i] >= 1)
+            c->codes[i] = rank[c->codes[i] - 1] + 1;
+    }
+    free(rank);
+    free(order);
+    return c;
+}
+
+extern "C" matlab_categorical *matlab_categorical_from_cell(
+        struct matlab_cell_s_fwd_ *cell, double n_strs) {
+    int n = (int)n_strs;
+    if (n < 0) n = 0;
+    void **strs = (void **)calloc((size_t)(n > 0 ? n : 1), sizeof(void *));
+    for (int i = 0; i < n; ++i) {
+        /* Reach into the cell directly — we own it (it was built
+         * inline by the lowering for this call site). */
+        strs[i] = cell ? cell->ptr_vals[i] : NULL;
+    }
+    matlab_categorical *r = matlab_categorical_from_strs(strs, n);
+    free(strs);
+    return r;
+}
+
+extern "C" double matlab_categorical_length(matlab_categorical *c) {
+    return c ? (double)c->n : 0.0;
+}
+
+extern "C" double matlab_categorical_numcats(matlab_categorical *c) {
+    return c ? (double)c->ncat : 0.0;
+}
+
+extern "C" double matlab_categorical_iscategory(
+        matlab_categorical *c, void *key) {
+    if (!c || !key) return 0.0;
+    auto *ks = (struct matlab_string_s_fwd_ *)key;
+    return categorical_find_cat(c, ks ? ks->data : "",
+                                  ks ? ks->len : 0) >= 0 ? 1.0 : 0.0;
+}
+
+extern "C" struct matlab_cell_s_fwd_ *matlab_categorical_categories(
+        matlab_categorical *c) {
+    /* Build a small matlab_cell-shaped record by hand using the
+     * forward-declared layout — the cell helpers themselves live
+     * later in this TU and aren't visible at this point. The
+     * downstream cell accessors only read ptr_vals[k] / kinds[k]
+     * via the same layout, so this is ABI-correct. */
+    struct matlab_cell_s_fwd_ *cell =
+        (struct matlab_cell_s_fwd_ *)calloc(1, sizeof(*cell));
+    int32_t n = c ? c->ncat : 0;
+    cell->n = n;
+    cell->cap = n > 0 ? n : 1;
+    cell->rows = 1;
+    cell->cols = n;
+    cell->kinds    = (int32_t *)calloc((size_t)cell->cap, sizeof(int32_t));
+    cell->f64_vals = (double  *)calloc((size_t)cell->cap, sizeof(double));
+    cell->ptr_vals = (void   **)calloc((size_t)cell->cap, sizeof(void *));
+    for (int32_t i = 0; i < n; ++i) {
+        cell->kinds[i] = 1;            /* matrix-pointer kind */
+        cell->ptr_vals[i] = c->cats[i];
+    }
+    return cell;
+}
+
+extern "C" void matlab_categorical_disp(matlab_categorical *c) {
+    if (!c) { matlab_disp_str("(empty categorical)", 19); return; }
+    pthread_mutex_lock(&matlab_io_mutex);
+    if (c->n == 0) {
+        printf("     [0x0 categorical]\n");
+    } else {
+        for (int32_t i = 0; i < c->n; ++i) {
+            const char *name = "<undefined>";
+            int64_t len = 11;
+            if (c->codes[i] >= 1 && c->codes[i] <= c->ncat) {
+                auto *ks = (struct matlab_string_s_fwd_ *)c->cats[c->codes[i] - 1];
+                if (ks && ks->data) { name = ks->data; len = ks->len; }
+            }
+            printf("     %.*s\n", (int)len, name);
+        }
+    }
+    pthread_mutex_unlock(&matlab_io_mutex);
+}
+
+/* Compare two categoricals element-wise; returns a matlab_mat with
+ * 0/1 logical values. The compare uses category index after a
+ * cross-walk: an element is equal iff both sides have the same
+ * category name (so categoricals built with disjoint label spaces
+ * still compare correctly). */
+extern "C" matlab_mat *matlab_categorical_eq(
+        matlab_categorical *a, matlab_categorical *b) {
+    int n = a && b ? (a->n < b->n ? a->n : b->n) : 0;
+    matlab_mat *r = mat_alloc(1, n);
+    for (int i = 0; i < n; ++i) {
+        if (a->codes[i] == 0 || b->codes[i] == 0) {
+            r->data[i] = 0.0; continue;
+        }
+        auto *as = (struct matlab_string_s_fwd_ *)a->cats[a->codes[i] - 1];
+        auto *bs = (struct matlab_string_s_fwd_ *)b->cats[b->codes[i] - 1];
+        bool eq = as && bs && as->len == bs->len &&
+                  memcmp(as->data, bs->data, (size_t)as->len) == 0;
+        r->data[i] = eq ? 1.0 : 0.0;
+    }
+    return r;
+}
+
 /* ====================================================================== */
 /* Phase 5.1 — datetime / duration.
  *
@@ -3804,13 +4016,8 @@ extern "C" matlab_dict *matlab_dict_new(void) {
     return (matlab_dict *)calloc(1, sizeof(matlab_dict));
 }
 
-/* Inline accessors so this code compiles before matlab_string_s is
- * defined later in the TU. matlab_string layout = { char *data,
- * int64_t len }. */
-struct matlab_string_s_fwd_ {
-    char *data;
-    int64_t len;
-};
+/* The matlab_string_s_fwd_ helper layout was already defined further
+ * up (it's used by Phase 5.2 categorical too). */
 static int32_t dict_find_str(matlab_dict *d, const char *s, int64_t len) {
     if (!d) return -1;
     for (int32_t i = 0; i < d->n; ++i) {

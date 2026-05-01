@@ -458,6 +458,10 @@ private:
    * pointer. Used by disp / arithmetic dispatch. */
   std::unordered_set<Binding *> DatetimeBindings;
   std::unordered_set<Binding *> DurationBindings;
+  /* Phase 5.2: bindings holding a matlab_categorical * — used to
+   * dispatch disp / categories / iscategory / equality through the
+   * dedicated runtime entries. */
+  std::unordered_set<Binding *> CategoricalBindings;
   /* Per-struct-array binding: the slot was already initialised with
    * matlab_struct_arr_new() at function entry. Avoids re-initialising
    * on every `s(i).x = ...` assignment. */
@@ -1811,11 +1815,14 @@ void Lowerer::lowerStmt(const Stmt &St) {
                  NE->Ref->InferredType->K == Type::Kind::StringArray)
           DispIsString = true;
       }
-      /* Phase 5.1: datetime / duration disp dispatch. */
+      /* Phase 5.1: datetime / duration disp dispatch.
+       * Phase 5.2: categorical disp dispatch. */
       bool DispIsDatetime = false, DispIsDuration = false;
+      bool DispIsCategorical = false;
       if (auto *NE = dynamic_cast<const NameExpr *>(E.E)) {
         if (NE->Ref && DatetimeBindings.count(NE->Ref)) DispIsDatetime = true;
         if (NE->Ref && DurationBindings.count(NE->Ref)) DispIsDuration = true;
+        if (NE->Ref && CategoricalBindings.count(NE->Ref)) DispIsCategorical = true;
       }
       llvm::StringRef IntSuf = Lowerer::intDtypeSuffixOf(E.E);
       if (DispIsString) {
@@ -1834,6 +1841,12 @@ void Lowerer::lowerStmt(const Stmt &St) {
         mlir::NamedAttribute Cal(
             mlir::StringAttr::get(&MCtx, "callee"),
             mlir::StringAttr::get(&MCtx, "matlab_duration_disp"));
+        emitUnregOp("matlab.call_builtin", {V},
+                    {mlir::NoneType::get(&MCtx)}, loc(E.Range), {Cal});
+      } else if (DispIsCategorical) {
+        mlir::NamedAttribute Cal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "matlab_categorical_disp"));
         emitUnregOp("matlab.call_builtin", {V},
                     {mlir::NoneType::get(&MCtx)}, loc(E.Range), {Cal});
       } else if (!IntSuf.empty()) {
@@ -1910,6 +1923,16 @@ void Lowerer::lowerStmt(const Stmt &St) {
      * respective sets via the BinaryOp emission below. */
     bool RhsIsDatetime = false;
     bool RhsIsDuration = false;
+    bool RhsIsCategorical = false;
+    if (A.RHS && A.RHS->Kind == NodeKind::CallOrIndex) {
+      auto *Cx = static_cast<const CallOrIndex *>(A.RHS);
+      if (auto *NE = dynamic_cast<const NameExpr *>(Cx->Callee))
+        if (NE->Name == "categorical") RhsIsCategorical = true;
+    } else if (A.RHS && A.RHS->Kind == NodeKind::NameExpr) {
+      auto *NE = static_cast<const NameExpr *>(A.RHS);
+      if (NE->Ref && CategoricalBindings.count(NE->Ref))
+        RhsIsCategorical = true;
+    }
     if (A.RHS && A.RHS->Kind == NodeKind::CallOrIndex) {
       auto *Cx = static_cast<const CallOrIndex *>(A.RHS);
       if (auto *NE = dynamic_cast<const NameExpr *>(Cx->Callee)) {
@@ -2298,6 +2321,11 @@ void Lowerer::lowerStmt(const Stmt &St) {
       for (const Expr *L : A.LHS)
         if (auto *N = dynamic_cast<const NameExpr *>(L))
           if (N->Ref) DurationBindings.insert(N->Ref);
+    }
+    if (RhsIsCategorical) {
+      for (const Expr *L : A.LHS)
+        if (auto *N = dynamic_cast<const NameExpr *>(L))
+          if (N->Ref) CategoricalBindings.insert(N->Ref);
     }
     if (RhsIsString) {
       for (const Expr *L : A.LHS)
@@ -4592,7 +4620,8 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             B, L, F64, mlir::FloatAttr::get(F64, Val));
       }
       /* Phase 5.1: disp(t) where t is a datetime / duration binding —
-       * dispatch to the typed runtime. */
+       * dispatch to the typed runtime.
+       * Phase 5.2: disp(c) for categorical too. */
       if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
           N->Name == "disp" && C.Args.size() == 1 && C.Args[0]) {
         if (auto *ArgN = dynamic_cast<const NameExpr *>(C.Args[0])) {
@@ -4612,8 +4641,70 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             return emitUnreg("matlab.call_builtin", {V},
                              mlir::NoneType::get(&MCtx), L, {Cal});
           }
+          if (ArgN->Ref && CategoricalBindings.count(ArgN->Ref)) {
+            mlir::Value V = lowerExpr(*C.Args[0]);
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_categorical_disp"));
+            return emitUnreg("matlab.call_builtin", {V},
+                             mlir::NoneType::get(&MCtx), L, {Cal});
+          }
         }
       }
+      /* Phase 5.2: length(c) / numel(c) / categories(c) /
+       * iscategory(c, name) on a categorical binding. */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          (N->Name == "length" || N->Name == "numel") &&
+          C.Args.size() == 1 && C.Args[0])
+        if (auto *ArgN = dynamic_cast<const NameExpr *>(C.Args[0]))
+          if (ArgN->Ref && CategoricalBindings.count(ArgN->Ref)) {
+            auto F64 = mlir::Float64Type::get(&MCtx);
+            mlir::Value V = lowerExpr(*C.Args[0]);
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_categorical_length"));
+            return emitUnreg("matlab.call_builtin", {V}, F64, L, {Cal});
+          }
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          N->Name == "categories" && C.Args.size() == 1 && C.Args[0])
+        if (auto *ArgN = dynamic_cast<const NameExpr *>(C.Args[0]))
+          if (ArgN->Ref && CategoricalBindings.count(ArgN->Ref)) {
+            auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+            mlir::Value V = lowerExpr(*C.Args[0]);
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_categorical_categories"));
+            return emitUnreg("matlab.call_builtin", {V}, PtrTy, L, {Cal});
+          }
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          N->Name == "iscategory" && C.Args.size() == 2)
+        if (auto *ArgN = dynamic_cast<const NameExpr *>(C.Args[0]))
+          if (ArgN->Ref && CategoricalBindings.count(ArgN->Ref)) {
+            auto F64 = mlir::Float64Type::get(&MCtx);
+            auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+            mlir::Value Carg = lowerExpr(*C.Args[0]);
+            const Expr *KE = C.Args[1];
+            mlir::Value K;
+            if (auto *CL = dynamic_cast<const CharLiteral *>(KE)) {
+              mlir::NamedAttribute VA(
+                  mlir::StringAttr::get(&MCtx, "value"),
+                  mlir::StringAttr::get(&MCtx, std::string(CL->Value)));
+              mlir::Value Ch = emitUnreg("matlab.const_char", {},
+                                          mlir::NoneType::get(&MCtx),
+                                          L, {VA});
+              mlir::NamedAttribute SCal(
+                  mlir::StringAttr::get(&MCtx, "callee"),
+                  mlir::StringAttr::get(&MCtx, "matlab_string_from_literal"));
+              K = emitUnreg("matlab.call_builtin", {Ch}, PtrTy, L, {SCal});
+            } else {
+              K = lowerExpr(*KE);
+            }
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_categorical_iscategory"));
+            return emitUnreg("matlab.call_builtin", {Carg, K},
+                             F64, L, {Cal});
+          }
       /* disp(ME.message) inside a catch body — route to the dedicated
        * matlab_err_disp_message runtime that prints the stored error
        * text. We only recognise the single-arg 'message' field on a
@@ -4853,6 +4944,88 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
               mlir::StringAttr::get(&MCtx, "callee"),
               mlir::StringAttr::get(&MCtx, "matlab_datetime_ymdhms"));
           return emitUnreg("matlab.call_builtin", {Y, M, D, H, Mn, S},
+                           PtrTy, L, {Cal});
+        }
+      }
+      /* Phase 5.2: categorical([str, str, ...]) — construct from a
+       * single argument that's a 1-row MatrixLiteral of string /
+       * char literals (the natural `categorical(["a","b","a"])`
+       * idiom). Each element is materialised as a matlab_string *
+       * via matlab_string_from_literal, packed into a stack array,
+       * and passed with an i64 length to matlab_categorical_from_strs. */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          N->Name == "categorical" && C.Args.size() == 1 && C.Args[0]) {
+        auto *ML = dynamic_cast<const MatrixLiteral *>(C.Args[0]);
+        if (ML && ML->Rows.size() == 1) {
+          auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+          auto F64 = mlir::Float64Type::get(&MCtx);
+          /* Build each string descriptor and store into a cell, then
+           * pass the cell's storage pointer + count. We piggyback on
+           * matlab_cell as a temporary array of ptrs since it already
+           * has set_mat semantics for ptr-typed values. The runtime
+           * is given a void** + int64_t — we'll wire that via a tiny
+           * dedicated bridge built inline using matlab.const_char +
+           * matlab_string_from_literal + matlab_cell_set_mat into a
+           * cell, then extract via matlab_cell_get_mat at runtime
+           * (avoiding a new ABI). For v1 we use a simpler approach:
+           * emit one matlab_categorical_from_str call per element... no.
+           * Simpler still: pass the cell as a void**-ish pointer and
+           * teach the runtime helper to walk it. */
+          size_t N0 = ML->Rows[0].size();
+          mlir::Value Cnt = mlir::arith::ConstantOp::create(
+              B, L, F64, mlir::FloatAttr::get(F64, (double)N0));
+          mlir::NamedAttribute NewC(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_cell_new"));
+          mlir::Value Cell = emitUnreg("matlab.call_builtin", {Cnt},
+                                         PtrTy, L, {NewC});
+          for (size_t i = 0; i < N0; ++i) {
+            const Expr *Ei = ML->Rows[0][i];
+            if (!Ei) continue;
+            mlir::Value SV;
+            if (auto *CL = dynamic_cast<const CharLiteral *>(Ei)) {
+              mlir::NamedAttribute VA(
+                  mlir::StringAttr::get(&MCtx, "value"),
+                  mlir::StringAttr::get(&MCtx, std::string(CL->Value)));
+              mlir::Value Ch = emitUnreg("matlab.const_char", {},
+                                          mlir::NoneType::get(&MCtx),
+                                          L, {VA});
+              mlir::NamedAttribute Cal(
+                  mlir::StringAttr::get(&MCtx, "callee"),
+                  mlir::StringAttr::get(&MCtx, "matlab_string_from_literal"));
+              SV = emitUnreg("matlab.call_builtin", {Ch}, PtrTy, L, {Cal});
+            } else if (auto *SL = dynamic_cast<const StringLiteral *>(Ei)) {
+              mlir::NamedAttribute VA(
+                  mlir::StringAttr::get(&MCtx, "value"),
+                  mlir::StringAttr::get(&MCtx, std::string(SL->Value)));
+              mlir::Value Ch = emitUnreg("matlab.const_char", {},
+                                          mlir::NoneType::get(&MCtx),
+                                          L, {VA});
+              mlir::NamedAttribute Cal(
+                  mlir::StringAttr::get(&MCtx, "callee"),
+                  mlir::StringAttr::get(&MCtx, "matlab_string_from_literal"));
+              SV = emitUnreg("matlab.call_builtin", {Ch}, PtrTy, L, {Cal});
+            } else {
+              SV = lowerExpr(*Ei);
+            }
+            mlir::Value Idx = mlir::arith::ConstantOp::create(
+                B, L, F64, mlir::FloatAttr::get(F64, (double)(i + 1)));
+            mlir::NamedAttribute SCal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_cell_set_mat"));
+            emitUnregOp("matlab.call_builtin", {Cell, Idx, SV},
+                        {mlir::NoneType::get(&MCtx)}, L, {SCal});
+          }
+          /* The runtime entry takes (void **strs, int64 n). We pass
+           * the cell's `.ptr_vals` field — which we expose via a thin
+           * accessor. Easiest: have the runtime entry take the cell
+           * and an integer count, and walk via cell_get_mat. */
+          mlir::Value CntF = mlir::arith::ConstantOp::create(
+              B, L, F64, mlir::FloatAttr::get(F64, (double)N0));
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_categorical_from_cell"));
+          return emitUnreg("matlab.call_builtin", {Cell, CntF},
                            PtrTy, L, {Cal});
         }
       }

@@ -1708,6 +1708,61 @@ export function cell_concat_col(a: any, b: any): Cell2D {
 
 export function obj_new(): any { return {}; }
 
+/* Phase 5.2 — categorical. Mirrors the C runtime: 1-D vector of
+ * 1-based category codes plus a sorted list of category names. */
+
+type Categorical = { _kind: 'categorical'; codes: number[]; cats: string[] };
+
+export function categorical_from_cell(cell: any, n: number): Categorical {
+  const N = n | 0;
+  let items: any[];
+  if (Array.isArray(cell)) items = cell.slice(0, N);
+  else if (cell && cell.data) items = (cell.data as any[]).slice(0, N);
+  else items = [];
+  const set = new Set<string>();
+  for (const x of items) set.add(x == null ? "" : String(x));
+  const cats = Array.from(set).sort();
+  const idx = new Map<string, number>();
+  cats.forEach((c, i) => idx.set(c, i + 1));
+  const codes = items.map(x => idx.get(x == null ? "" : String(x)) ?? 0);
+  return { _kind: 'categorical', codes, cats };
+}
+
+export function categorical_length(c: Categorical): number {
+  return c ? c.codes.length : 0;
+}
+export function categorical_numcats(c: Categorical): number {
+  return c ? c.cats.length : 0;
+}
+export function categorical_iscategory(c: Categorical, key: any): number {
+  if (!c) return 0;
+  const k = typeof key === 'string' ? key : String(key);
+  return c.cats.indexOf(k) >= 0 ? 1 : 0;
+}
+export function categorical_categories(c: Categorical): string[] {
+  return c ? c.cats.slice() : [];
+}
+export function categorical_disp(c: Categorical): void {
+  if (!c) { console.log("(empty categorical)"); return; }
+  if (c.codes.length === 0) { console.log("     [0x0 categorical]"); return; }
+  for (const code of c.codes) {
+    if (code >= 1 && code <= c.cats.length)
+      console.log(`     ${c.cats[code - 1]}`);
+    else
+      console.log("     <undefined>");
+  }
+}
+export function categorical_eq(a: Categorical, b: Categorical): number[] {
+  if (!a || !b) return [];
+  const n = Math.min(a.codes.length, b.codes.length);
+  const out: number[] = [];
+  for (let i = 0; i < n; i++) {
+    if (a.codes[i] === 0 || b.codes[i] === 0) { out.push(0); continue; }
+    out.push(a.cats[a.codes[i] - 1] === b.cats[b.codes[i] - 1] ? 1 : 0);
+  }
+  return out;
+}
+
 /* Phase 5.1 — datetime / duration. Each is a small object carrying a
  * single `seconds` field. We use a manual UTC civil/epoch conversion
  * (Howard Hinnant's algorithm) so output matches the C runtime

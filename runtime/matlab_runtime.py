@@ -1472,6 +1472,65 @@ def obj_new(*_ignored):
     _obj_store[oid] = obj  # keep a strong ref + a lookup path for legacy callers
     return obj
 
+# Phase 5.2 — categorical. Mirrors the C runtime: each instance has a
+# list of per-element codes (1-based, 0 = <undefined>) and a list of
+# category-name strings (sorted alphabetically). Lookup is O(N).
+
+def categorical_from_cell(cell, n):
+    """Build a categorical from a cell-shaped object (we accept the
+    1-D cell list form). The lowering in matlabc emits this entry
+    with a freshly-built cell containing matlab_string-shaped Python
+    strings."""
+    n = int(n)
+    pairs = []
+    if isinstance(cell, list):
+        items = cell[:n]
+    else:
+        items = list(cell.get('data', cell)) if hasattr(cell, 'get') else cell
+        items = items[:n]
+    cats = sorted({str(x) if x is not None else "" for x in items})
+    cat_index = {c: i + 1 for i, c in enumerate(cats)}
+    codes = [cat_index.get(str(x) if x is not None else "", 0) for x in items]
+    return {'_kind': 'categorical', 'codes': codes, 'cats': cats}
+
+def categorical_length(c):
+    return float(len(c['codes'])) if c else 0.0
+
+def categorical_numcats(c):
+    return float(len(c['cats'])) if c else 0.0
+
+def categorical_iscategory(c, key):
+    if c is None: return 0.0
+    k = key if isinstance(key, str) else str(key)
+    return 1.0 if k in c['cats'] else 0.0
+
+def categorical_categories(c):
+    if c is None: return []
+    return list(c['cats'])
+
+def categorical_disp(c):
+    if c is None: print("(empty categorical)"); return
+    if not c['codes']:
+        print("     [0x0 categorical]"); return
+    for code in c['codes']:
+        if code >= 1 and code <= len(c['cats']):
+            print(f"     {c['cats'][code - 1]}")
+        else:
+            print("     <undefined>")
+
+def categorical_eq(a, b):
+    if a is None or b is None: return None
+    n = min(len(a['codes']), len(b['codes']))
+    out = []
+    for i in range(n):
+        if a['codes'][i] == 0 or b['codes'][i] == 0:
+            out.append(0.0); continue
+        an = a['cats'][a['codes'][i] - 1]
+        bn = b['cats'][b['codes'][i] - 1]
+        out.append(1.0 if an == bn else 0.0)
+    return out
+
+
 # Phase 5.1 — datetime / duration. Mirrors the C runtime's wrapping
 # style: each is a small dict carrying a single `seconds` field. We
 # avoid Python's datetime module to keep the surface independent of

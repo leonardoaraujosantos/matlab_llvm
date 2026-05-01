@@ -56,6 +56,8 @@ void Resolver::registerBuiltins() {
     /* Phase 5.1 — datetime / duration. */
     "datetime", "duration", "seconds", "minutes", "hours", "days", "years",
     "calendarDuration",
+    /* Phase 5.2 — categorical. */
+    "categorical", "iscategorical", "categories", "iscategory",
     "sprintf", "num2str", "str2double",
     "upper", "lower", "startsWith", "endsWith", "contains",
     "strtrim", "strrep", "strcat",

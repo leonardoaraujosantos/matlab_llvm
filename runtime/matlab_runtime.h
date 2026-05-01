@@ -558,6 +558,21 @@ double matlab_struct_get_f64(matlab_struct *s, const char *name, int64_t len);
 matlab_mat *matlab_struct_get_mat(matlab_struct *s, const char *name,
                                   int64_t len);
 double matlab_struct_has_field(matlab_struct *s, const char *name, int64_t len);
+/* Phase 5.2 — categorical. 1-D vector of category indices with a
+ * deduplicated, alphabetically-sorted category-name table. */
+typedef struct matlab_categorical_s matlab_categorical;
+matlab_categorical *matlab_categorical_from_strs(void **strs, int64_t n);
+matlab_categorical *matlab_categorical_from_cell(matlab_cell *cell, double n);
+double              matlab_categorical_length(matlab_categorical *c);
+double              matlab_categorical_numcats(matlab_categorical *c);
+double              matlab_categorical_iscategory(matlab_categorical *c, void *key);
+/* Returns a matlab_cell *-compatible pointer holding the category
+ * names (matlab_string * per slot). The opaque void * keeps the
+ * declaration order tolerant of the runtime split. */
+void               *matlab_categorical_categories(matlab_categorical *c);
+void                matlab_categorical_disp(matlab_categorical *c);
+matlab_mat         *matlab_categorical_eq(matlab_categorical *a, matlab_categorical *b);
+
 /* Phase 5.1 — datetime / duration. Both descriptors wrap a double:
  * datetime carries seconds-since-Unix-epoch, duration is a relative
  * span. Display uses MATLAB's default formats; arithmetic forms
