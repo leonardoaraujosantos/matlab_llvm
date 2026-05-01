@@ -1599,14 +1599,15 @@ bool TensorLowering::rewriteBuiltinCalls() {
      * without a base ptr (the workspace is a singleton inside the
      * runtime). Used only when matlabc is invoked with -repl. */
     if ((Name == "matlab_ws_get_f64" || Name == "matlab_ws_get_mat" ||
-         Name == "matlab_ws_get_string") &&
+         Name == "matlab_ws_get_string" || Name == "matlab_ws_get_sym") &&
         Call->getNumOperands() == 1 && Call->getNumResults() == 1) {
       Value NameV = Call->getOperand(0);
       int64_t Len = 0;
       Value Ptr = fieldNameAddr(NameV, Len);
       if (!Ptr) continue;
       bool IsMat = (Name == "matlab_ws_get_mat" ||
-                    Name == "matlab_ws_get_string");
+                    Name == "matlab_ws_get_string" ||
+                    Name == "matlab_ws_get_sym");
       Type Ret = IsMat ? (Type)PtrTy : (Type)F64;
       B.setInsertionPoint(Call);
       Value LenV = LLVM::ConstantOp::create(
@@ -1621,7 +1622,8 @@ bool TensorLowering::rewriteBuiltinCalls() {
       continue;
     }
     if ((Name == "matlab_ws_set_f64" || Name == "matlab_ws_set_mat" ||
-         Name == "matlab_ws_set_obj" || Name == "matlab_ws_set_string") &&
+         Name == "matlab_ws_set_obj" || Name == "matlab_ws_set_string" ||
+         Name == "matlab_ws_set_sym") &&
         Call->getNumOperands() == 2) {
       Value NameV = Call->getOperand(0);
       Value Val = Call->getOperand(1);
@@ -1637,14 +1639,15 @@ bool TensorLowering::rewriteBuiltinCalls() {
        * the value is a generic ptr. */
       bool IsObj = (Name == "matlab_ws_set_obj");
       bool IsString = (Name == "matlab_ws_set_string");
+      bool IsSym = (Name == "matlab_ws_set_sym");
       bool IsMat;
       bool IsInt = mlir::isa<mlir::IntegerType>(Val.getType());
-      if (IsObj || IsString) IsMat = true;
+      if (IsObj || IsString || IsSym) IsMat = true;
       else if (Val.getType() == PtrTy)      IsMat = true;
       else if (Val.getType() == F64)         IsMat = false;
       else if (IsInt)                         IsMat = false;
       else continue;   /* neither ptr nor f64 nor int yet — wait for another iter */
-      if ((IsObj || IsString) && Val.getType() != PtrTy)
+      if ((IsObj || IsString || IsSym) && Val.getType() != PtrTy)
         continue; /* retry once Val lowers */
       /* Cast int → f64 for the workspace mirror. Same logic as
        * matlab_dbg_frame_set above: i1 from `x = age > 18` at script
@@ -1677,10 +1680,11 @@ bool TensorLowering::rewriteBuiltinCalls() {
       Value Ptr = fieldNameAddr(NameV, Len);
       if (!Ptr) continue;
       StringRef RuntimeName =
-          IsString ? "matlab_ws_set_string"
-                   : (IsObj ? "matlab_ws_set_obj"
-                            : (IsMat ? "matlab_ws_set_mat"
-                                     : "matlab_ws_set_f64"));
+          IsSym      ? "matlab_ws_set_sym"
+                     : (IsString ? "matlab_ws_set_string"
+                                 : (IsObj ? "matlab_ws_set_obj"
+                                          : (IsMat ? "matlab_ws_set_mat"
+                                                   : "matlab_ws_set_f64")));
       B.setInsertionPoint(Call);
       Value LenV = LLVM::ConstantOp::create(
           B, Call->getLoc(), I64, B.getI64IntegerAttr(Len));
@@ -2144,6 +2148,181 @@ bool TensorLowering::rewriteBuiltinCalls() {
       carryName(Call, NC);
       Call->getResult(0).replaceAllUsesWith(NC.getResult());
       Call->erase(); Changed = true; continue;
+    }
+
+    /* Phase 6 — Symbolic Math Toolbox. All matlab_sym_* runtime entries
+     * follow a small set of signatures determined by the callee suffix.
+     * Rather than spelling each out (~25 entries), pattern-match the
+     * prefix and dispatch on the suffix. The (name, len) shape used by
+     * matlab_sym_named / _from_str / _str2sym needs the same const_char
+     * materialisation as matlab_string_from_literal above. */
+    if (Name.starts_with("matlab_sym_")) {
+      llvm::StringRef Suf = Name.substr(strlen("matlab_sym_"));
+      auto materialiseConstChar = [&](Value Ch, Value &OutPtr,
+                                        Value &OutLen) -> bool {
+        Operation *Def = Ch.getDefiningOp();
+        if (!isMatlabOp(Def, "matlab.const_char")) return false;
+        auto VA = Def->getAttrOfType<StringAttr>("value");
+        if (!VA) return false;
+        StringRef Text = VA.getValue();
+        LLVM::GlobalOp Found;
+        for (auto G : Mod.getOps<LLVM::GlobalOp>()) {
+          if (!G.getConstant()) continue;
+          auto Attr = mlir::dyn_cast_or_null<StringAttr>(G.getValueAttr());
+          if (Attr && Attr.getValue() == Text) { Found = G; break; }
+        }
+        if (!Found) {
+          OpBuilder::InsertionGuard G(B);
+          B.setInsertionPointToStart(Mod.getBody());
+          auto ArrayTy = LLVM::LLVMArrayType::get(
+              IntegerType::get(Ctx, 8),
+              static_cast<unsigned>(Text.size()));
+          unsigned N = 0;
+          std::string SymName;
+          do { SymName = ("__matlab_str_s" + std::to_string(N++)); }
+          while (Mod.lookupSymbol(SymName));
+          Found = LLVM::GlobalOp::create(
+              B, Mod.getLoc(), ArrayTy, /*isConstant=*/true,
+              LLVM::Linkage::Internal, SymName,
+              StringAttr::get(Ctx, Text));
+        }
+        B.setInsertionPoint(Call);
+        OutPtr = LLVM::AddressOfOp::create(
+            B, Call->getLoc(), PtrTy, Found.getSymName());
+        OutLen = LLVM::ConstantOp::create(
+            B, Call->getLoc(), I64,
+            B.getI64IntegerAttr((int64_t)Text.size()));
+        return true;
+      };
+      /* Group A: (const char*, int64_t) → matlab_sym* */
+      if (Suf == "named" || Suf == "from_str" || Suf == "str2sym") {
+        if (Call->getNumOperands() != 1 || Call->getNumResults() != 1)
+          continue;
+        Value PtrA, LenA;
+        if (!materialiseConstChar(Call->getOperand(0), PtrA, LenA))
+          continue;
+        auto Fn = rt(Name, PtrTy, {PtrTy, I64});
+        auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                        ValueRange{PtrA, LenA});
+        carryName(Call, NC);
+        Call->getResult(0).replaceAllUsesWith(NC.getResult());
+        Call->erase();
+        Changed = true;
+        continue;
+      }
+      /* Group A2: (matlab_sym*, const char*, int64_t) → matlab_sym*
+       * — assume / assumeAlso. Same materialisation shape as Group A
+       * but the const_char is the second operand. */
+      if (Suf == "assume" || Suf == "assumeAlso") {
+        if (Call->getNumOperands() != 2 || Call->getNumResults() != 1)
+          continue;
+        Value SymA = Call->getOperand(0);
+        if (SymA.getType() != PtrTy) continue;
+        Value PtrA, LenA;
+        if (!materialiseConstChar(Call->getOperand(1), PtrA, LenA))
+          continue;
+        auto Fn = rt(Name, PtrTy, {PtrTy, PtrTy, I64});
+        auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                        ValueRange{SymA, PtrA, LenA});
+        carryName(Call, NC);
+        Call->getResult(0).replaceAllUsesWith(NC.getResult());
+        Call->erase();
+        Changed = true;
+        continue;
+      }
+      /* Group B: scalar producers — (f64) → ptr, (i64) → ptr. */
+      if (Suf == "from_double" && Call->getNumOperands() == 1 &&
+          Call->getNumResults() == 1 &&
+          Call->getOperand(0).getType() == F64) {
+        B.setInsertionPoint(Call);
+        auto Fn = rt(Name, PtrTy, {F64});
+        auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                        Call->getOperands());
+        carryName(Call, NC);
+        Call->getResult(0).replaceAllUsesWith(NC.getResult());
+        Call->erase();
+        Changed = true;
+        continue;
+      }
+      if (Suf == "from_i64" && Call->getNumOperands() == 1 &&
+          Call->getNumResults() == 1 &&
+          mlir::isa<mlir::IntegerType>(Call->getOperand(0).getType())) {
+        B.setInsertionPoint(Call);
+        auto Fn = rt(Name, PtrTy, {I64});
+        auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                        Call->getOperands());
+        carryName(Call, NC);
+        Call->getResult(0).replaceAllUsesWith(NC.getResult());
+        Call->erase();
+        Changed = true;
+        continue;
+      }
+      /* Group C: matlab_sym_disp(ptr) → void. */
+      if (Suf == "disp" && Call->getNumOperands() == 1 &&
+          Call->getOperand(0).getType() == PtrTy) {
+        B.setInsertionPoint(Call);
+        auto Fn = rt(Name, VoidTy, {PtrTy});
+        LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                              ValueRange{Call->getOperand(0)});
+        Call->erase();
+        Changed = true;
+        continue;
+      }
+      /* Group D: matlab_sym_double(ptr) → f64. */
+      if (Suf == "double" && Call->getNumOperands() == 1 &&
+          Call->getOperand(0).getType() == PtrTy &&
+          Call->getNumResults() == 1) {
+        B.setInsertionPoint(Call);
+        auto Fn = rt(Name, F64, {PtrTy});
+        auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                        ValueRange{Call->getOperand(0)});
+        if (Call->getResult(0).getType() != F64)
+          Call->getResult(0).setType(F64);
+        carryName(Call, NC);
+        Call->getResult(0).replaceAllUsesWith(NC.getResult());
+        Call->erase();
+        Changed = true;
+        continue;
+      }
+      /* Group E: catch-all for any other matlab_sym_* — derive arg
+       * types from operands at the call site, output is ptr. Covers
+       * add/sub/mul/div/pow/neg/eq/diff/diff_n/int/int_def/simplify/
+       * expand/factor/subs/solve_one and the _d / d_ mixed-mode
+       * variants without enumerating each. */
+      if (Call->getNumResults() == 1) {
+        bool AllReady = true;
+        llvm::SmallVector<Type, 6> Sig;
+        for (auto V : Call->getOperands()) {
+          mlir::Type T = V.getType();
+          if (T == PtrTy || T == F64 ||
+              mlir::isa<mlir::IntegerType>(T)) {
+            Sig.push_back(T == F64 ? F64
+                                    : (mlir::isa<mlir::IntegerType>(T)
+                                           ? (Type)I64 : (Type)PtrTy));
+          } else {
+            AllReady = false; break;
+          }
+        }
+        if (!AllReady) continue;
+        B.setInsertionPoint(Call);
+        auto Fn = rt(Name, PtrTy, Sig);
+        /* Cast any non-i64 integer operand up to i64 to match the C ABI. */
+        llvm::SmallVector<Value, 6> CallArgs;
+        for (auto V : Call->getOperands()) {
+          if (auto IT = mlir::dyn_cast<mlir::IntegerType>(V.getType()))
+            if (IT.getWidth() != 64)
+              V = LLVM::SExtOp::create(B, Call->getLoc(), I64, V);
+          CallArgs.push_back(V);
+        }
+        auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn, CallArgs);
+        carryName(Call, NC);
+        if (Call->getResult(0).getType() != PtrTy)
+          Call->getResult(0).setType(PtrTy);
+        Call->getResult(0).replaceAllUsesWith(NC.getResult());
+        Call->erase();
+        Changed = true;
+        continue;
+      }
     }
 
     /* Phase 3: matlab_obj_clone takes a single ptr (the source obj)

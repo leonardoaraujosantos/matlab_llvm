@@ -1272,6 +1272,11 @@ void  matlab_ws_clear_one(const char *name, int64_t len);
  * runtime; the REPL/DAP side reads bytes through these helpers so
  * formatVar / typeForVar stay layout-agnostic. */
 const char *matlab_string_get_data(void *s, int64_t *len_out);
+/* Phase 6 — Symbolic Math Toolbox. matlab_dbg_sym_str pretty-prints a
+ * matlab_sym* via SymPP and caches the buffer thread-locally. Returns
+ * NULL/0-len when the build wasn't configured with MATLAB_LLVM_WITH_SYM
+ * (the runtime ships a stub that returns NULL in that case). */
+const char *matlab_dbg_sym_str(void *s, int64_t *len_out);
 int64_t     matlab_string_get_len (void *s);
 
 /* Resolver workspace-kind hook (Resolver::WorkspaceKindHookT). Used
@@ -3356,6 +3361,7 @@ std::string typeForVar(int Kind, void *Ptr) {
   if (Kind == 3) return "string";
   if (Kind == 4) return "uint8";
   if (Kind == 5) return "int32";
+  if (Kind == 7) return "sym";
   return "any";
 }
 
@@ -3410,6 +3416,17 @@ std::string formatVar(int Kind, int WsIdx) {
     Out.append(SD, (size_t)SL);
     Out.push_back('"');
     return Out;
+  }
+  if (Kind == 7) {
+    /* Symbolic Math Toolbox — render via matlab_dbg_sym_str (a thin
+     * wrapper around matlab_sym_str that returns SymPP's pretty form).
+     * Returns "<unset sym>" if the runtime wasn't built with sym
+     * support, mirroring the static-analysis-friendly fallback. */
+    void *S = matlab_dbg_ws_ptr(WsIdx);
+    int64_t SL = 0;
+    const char *SD = matlab_dbg_sym_str(S, &SL);
+    if (!SD || SL == 0) return "<unset sym>";
+    return std::string(SD, (size_t)SL);
   }
   return "<unknown>";
 }

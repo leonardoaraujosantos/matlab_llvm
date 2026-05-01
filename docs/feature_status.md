@@ -129,6 +129,37 @@ Out of scope:
 | `table` | ✅ shipped (Phase 5.3) | Column-major record with named variables; constructors `table(c1, c2, ...)` (auto-named Var1..VarN) and `table(c1, c2, ..., 'VariableNames', {n1, n2})`. Surfaces: `T.<name>` column read / write (with dynamic column add), `height(T)`, `width(T)`, `numel(T)`, `size(T, dim)`, `disp(T)` (right-aligned column body with header + underline). Each column stored as a `matlab_mat *`. C / Python / TypeScript runtimes byte-identical on the C/TS lanes; Python ships a `.stdout-python` override (numpy 2-D array repr for column print). Gating test: `test/Run/table_basic.m`. **Open follow-up**: heterogeneous columns (mixed numeric / string / categorical), row indexing `T(i,:)`, sub-table extraction, `readtable`/`writetable`. |
 | `timetable` | ❌ | Builds on `table` + `datetime` row index. |
 
+### Symbolic Math Toolbox (`sym` / `syms`)
+
+Opt-in via `-DMATLAB_LLVM_WITH_SYM=ON` — requires [SymPP](https://github.com/leonardoaraujosantos/SymPP).
+See [`docs/sym.md`](sym.md) for the full surface.
+
+| Function | Status | Notes |
+|---|:-:|---|
+| `syms x y z`, `sym('expr')`, `str2sym` | ✅ | Workspace kind=7; cross-input REPL persistence |
+| `+ - * / ^ ==` arithmetic dispatch | ✅ | Pure sym + mixed-mode (sym op double) |
+| `diff(f, x, [n])`, `int(f, x, [a, b])` | ✅ | |
+| `simplify`, `expand`, `factor`, `subs` | ✅ | `simplify` is structural — does not auto-honour assumptions |
+| `solve(eq, x)` | ✅ | Single eq, single var; multi-eq returns string-rendered list |
+| `taylor(f, x, a, n)`, `limit(f, x, target)` | ✅ | |
+| `vpa(s, dps)`, `double(s)` | ✅ | |
+| `dsolve(eq, y, yp, x)` (1st-order) | ✅ | SymPP's plain-symbol convention; no AppliedFunction lifting |
+| `dsolve(eq, y, yp, ypp, x)` (2nd-order) | ✅ | Auto-classifies const-coeff vs Cauchy-Euler |
+| `dsolve(A, x)` (linear system) | ❌ | SymPP supports it; not yet wired |
+| `pdsolve(a, b, c, x, y)`, `pdsolve_heat`, `pdsolve_wave` | ✅ | First-order linear, heat, wave |
+| `laplace`/`ilaplace`, `fourier`/`ifourier`, `ztrans`/`iztrans` | ✅ | |
+| `assume(x, 'prop')`, `assumeAlso`, `clearAssumptions` | ✅ | 10 properties (real, integer, positive, …); rebinds the variable |
+| `latex`, `pretty`, `ccode` | ✅ | Returns char* via `matlab_sym_*` |
+| `matlabFunction(...)` | 🟡 | SymPP emits Octave source; not wrapped into a function handle |
+| Symbolic matrices, `linsolve` | ❌ | SymPP has the engine; not yet wired |
+| Multi-eq `solve([eq1, eq2], [x, y])` | 🟡 | Lowered to single-arg form via flattening |
+| Elementary functions on sym (`sin(sym)`, `exp(sym)`, …) | ✅ | Auto-dispatch when the operand is sym |
+
+Backend matrix: `-emit-cpp` / `-emit-llvm` / REPL JIT / DAP all support sym.
+`-emit-c` emits valid C (compile as C++ to link SymPP). `-emit-python`,
+`-emit-typescript`, and `-emit-systemverilog` diagnose unsupported sym usage
+at emit time with a clear error.
+
 ---
 
 ## 4. Built-in functions (runtime: `runtime/matlab_runtime.c`)

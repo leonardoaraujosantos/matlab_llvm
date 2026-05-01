@@ -19,6 +19,32 @@ include_directories(${CMAKE_SOURCE_DIR}/include)
 # llvm isn't installed or for CI machines that only build the frontend stack).
 option(MATLAB_LLVM_WITH_MLIR "Enable MLIR-based lowering stack" ON)
 
+# --- Symbolic Math Toolbox via SymPP ---------------------------------------
+# Off by default; flip on with -DMATLAB_LLVM_WITH_SYM=ON. Pulls in SymPP
+# (https://github.com/leonardoaraujosantos/SymPP) plus its GMP + MPFR
+# transitive deps. Adds the matlab_sym opaque runtime type and the
+# corresponding sym/syms/diff/int/simplify/solve builtins. Point at a
+# specific SymPP install with -DSymPP_DIR=/path/to/SymPP/build.
+option(MATLAB_LLVM_WITH_SYM "Enable Symbolic Math Toolbox via SymPP" OFF)
+if(MATLAB_LLVM_WITH_SYM)
+  if(NOT DEFINED SymPP_DIR)
+    # Prefer the install tree (ships FindGMP / FindMPFR alongside the
+    # config) over the build tree (which doesn't, since those modules
+    # only get copied into <prefix>/lib/cmake/SymPP at install time).
+    foreach(_h IN ITEMS
+        "/tmp/sympp_install/lib/cmake/SymPP"
+        "/opt/homebrew/lib/cmake/SymPP"
+        "/Users/leonardoaraujo/work/SymPP/build")
+      if(EXISTS "${_h}/SymPPConfig.cmake")
+        set(SymPP_DIR "${_h}" CACHE PATH "" FORCE)
+        break()
+      endif()
+    endforeach()
+  endif()
+  find_package(SymPP CONFIG REQUIRED)
+  message(STATUS "Found SymPP — Symbolic Math Toolbox enabled")
+endif()
+
 # --- Coverage ---------------------------------------------------------------
 # Off by default; turn on with -DMATLAB_LLVM_COVERAGE=ON to instrument the
 # matlabc binary (and therefore runtime/matlab_runtime.c) with Clang's
@@ -200,6 +226,11 @@ if(MATLAB_LLVM_WITH_MLIR)
     runtime/matlab_runtime.cpp
     runtime/runtime_debug.cpp
     runtime/runtime_complex.cpp)
+  if(MATLAB_LLVM_WITH_SYM)
+    target_sources(matlabc PRIVATE runtime/runtime_sym.cpp)
+    target_link_libraries(matlabc PRIVATE SymPP::sympp)
+    target_compile_definitions(matlabc PRIVATE MATLAB_LLVM_WITH_SYM=1)
+  endif()
   # Export the matlab_* symbols so the JIT's dynamic lookup finds them
   # (by default executables hide symbols not referenced internally).
   if(APPLE)
@@ -440,4 +471,15 @@ if(MATLAB_LLVM_WITH_MLIR)
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/EmitCocoTB
   )
   set_tests_properties(cocotb-tests PROPERTIES SKIP_RETURN_CODE 77)
+  if(MATLAB_LLVM_WITH_SYM)
+    # Symbolic Math Toolbox end-to-end tests. Drives -emit-cpp through
+    # clang + libsympp + the matlab runtime; compares stdout to per-
+    # fixture .stdout files. Skip-if-missing on absent SymPP install.
+    add_test(
+      NAME run-tests-sym
+      COMMAND ${CMAKE_SOURCE_DIR}/test/RunSym/run_tests.sh $<TARGET_FILE:matlabc>
+      WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/RunSym
+    )
+    set_tests_properties(run-tests-sym PROPERTIES SKIP_RETURN_CODE 77)
+  endif()
 endif()

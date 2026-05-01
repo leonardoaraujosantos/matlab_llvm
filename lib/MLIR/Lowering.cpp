@@ -465,6 +465,22 @@ private:
   /* Phase 5.3: bindings holding a matlab_table * — used to dispatch
    * column accessors (`T.x`), shape (height/width/size), and disp(T). */
   std::unordered_set<Binding *> TableBindings;
+  /* Phase 6: bindings holding a matlab_sym * (Symbolic Math Toolbox
+   * via SymPP). Triggers sym-typed arithmetic dispatch + disp routing,
+   * mirrors how DatetimeBindings drive the datetime arithmetic family. */
+  std::unordered_set<Binding *> SymBindings;
+
+  /* Recursive sym-typed expression predicate. Returns true if the
+   * expression's value is a matlab_sym* at runtime — covers:
+   *   - NameExpr referencing a SymBindings/IsSym binding
+   *   - CallOrIndex to a sym-producing builtin or sym-overloaded one
+   *     (diff/int) where the first arg is sym
+   *   - BinaryOp / UnaryOp where any operand is sym (transitive)
+   * Used at every dispatch site that needs to know "should I route
+   * through matlab_sym_*?": disp dispatch, RhsIsSym tagging, BinaryOp
+   * lowering, sym-overloaded call detection. Same predicate everywhere
+   * so the rules don't drift between sites. */
+  bool exprIsSym(const Expr *X) const;
   /* Per-struct-array binding: the slot was already initialised with
    * matlab_struct_arr_new() at function entry. Avoids re-initialising
    * on every `s(i).x = ...` assignment. */
@@ -741,6 +757,46 @@ llvm::StringRef Lowerer::postfixName(PostfixOp O) {
 // Slot handling
 //===----------------------------------------------------------------------===//
 
+bool Lowerer::exprIsSym(const Expr *X) const {
+  if (!X) return false;
+  if (auto *NE = dynamic_cast<const NameExpr *>(X))
+    return NE->Ref &&
+           (SymBindings.count(NE->Ref) || NE->Ref->IsSym);
+  if (auto *CX = dynamic_cast<const CallOrIndex *>(X)) {
+    if (auto *CN = dynamic_cast<const NameExpr *>(CX->Callee)) {
+      llvm::StringRef Nm = CN->Name;
+      static const llvm::StringSet<> Producers = {
+          "sym", "syms", "str2sym", "simplify", "expand", "factor",
+          "subs", "solve", "vpa", "taylor", "limit",
+          "dsolve", "pdsolve", "pdsolve_heat", "pdsolve_wave",
+          "laplace", "ilaplace", "fourier", "ifourier",
+          "ztrans", "iztrans",
+          "assume", "assumeAlso", "clearAssumptions"};
+      if (Producers.contains(Nm)) return true;
+      /* Type-overloaded sym builtins — sym only when first arg is sym.
+       * Covers diff/int/sin/cos/exp/log/sqrt/abs and the rest of the
+       * elementary functions; when the first arg is sym, the result is
+       * sym. The matlab.call_builtin's emitted callee is rewritten by
+       * the call dispatch (NameExpr CallOrIndex path below) into the
+       * matlab_sym_* variant — but the type predicate has to know
+       * about it ahead of dispatch. */
+      static const llvm::StringSet<> Overloaded = {
+          "diff", "int",
+          "sin", "cos", "tan", "asin", "acos", "atan",
+          "sinh", "cosh", "tanh",
+          "exp", "log", "sqrt", "abs"};
+      if (Overloaded.contains(Nm) && !CX->Args.empty())
+        return exprIsSym(CX->Args[0]);
+    }
+    return false;
+  }
+  if (auto *B2 = dynamic_cast<const BinaryOpExpr *>(X))
+    return exprIsSym(B2->LHS) || exprIsSym(B2->RHS);
+  if (auto *U = dynamic_cast<const UnaryOpExpr *>(X))
+    return exprIsSym(U->Operand);
+  return false;
+}
+
 mlir::Value Lowerer::getOrCreateSlot(Binding *Bnd, const Type *T,
                                      llvm::StringRef N, mlir::Location L) {
   auto It = Slots.find(Bnd);
@@ -1005,7 +1061,21 @@ mlir::Value Lowerer::loadBinding(Binding *Bnd, const Type *ValTy,
       IsString = true;
     else if (ValTy && ValTy->K == Type::Kind::StringArray)
       IsString = true;
+    /* Phase 6 — sym binding read. Routes to matlab_ws_get_sym so the
+     * stored matlab_sym* pointer comes back unmodified (matlab_ws_get_mat
+     * would treat the descriptor as a matrix and return an empty
+     * fallback). The IsSym flag is stamped on first declaration via the
+     * Resolver hook (kind=7) for cross-input REPL persistence; the
+     * SymBindings set covers same-TU references. */
+    bool IsSymRead = SymBindings.count(Bnd) || Bnd->IsSym;
     mlir::Value NameV = emitFieldNameChar(Bnd->Name, L);
+    if (IsSymRead) {
+      auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+      mlir::NamedAttribute Cal(
+          mlir::StringAttr::get(&MCtx, "callee"),
+          mlir::StringAttr::get(&MCtx, "matlab_ws_get_sym"));
+      return emitUnreg("matlab.call_builtin", {NameV}, PtrTy, L, {Cal});
+    }
     if (IsString) {
       auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
       mlir::NamedAttribute Cal(
@@ -1822,6 +1892,7 @@ void Lowerer::lowerStmt(const Stmt &St) {
        * Phase 5.2: categorical disp dispatch. */
       bool DispIsDatetime = false, DispIsDuration = false;
       bool DispIsCategorical = false, DispIsTable = false;
+      bool DispIsSym = exprIsSym(E.E);
       if (auto *NE = dynamic_cast<const NameExpr *>(E.E)) {
         if (NE->Ref && DatetimeBindings.count(NE->Ref)) DispIsDatetime = true;
         if (NE->Ref && DurationBindings.count(NE->Ref)) DispIsDuration = true;
@@ -1857,6 +1928,12 @@ void Lowerer::lowerStmt(const Stmt &St) {
         mlir::NamedAttribute Cal(
             mlir::StringAttr::get(&MCtx, "callee"),
             mlir::StringAttr::get(&MCtx, "matlab_table_disp"));
+        emitUnregOp("matlab.call_builtin", {V},
+                    {mlir::NoneType::get(&MCtx)}, loc(E.Range), {Cal});
+      } else if (DispIsSym) {
+        mlir::NamedAttribute Cal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "matlab_sym_disp"));
         emitUnregOp("matlab.call_builtin", {V},
                     {mlir::NoneType::get(&MCtx)}, loc(E.Range), {Cal});
       } else if (!IntSuf.empty()) {
@@ -1935,6 +2012,12 @@ void Lowerer::lowerStmt(const Stmt &St) {
     bool RhsIsDuration = false;
     bool RhsIsCategorical = false;
     bool RhsIsTable = false;
+    /* Phase 6 — Symbolic Math Toolbox. RHS is sym-typed when:
+     *  - direct call to a sym-producing builtin
+     *  - NameExpr already in SymBindings (re-assignment)
+     *  - BinaryOp where either operand is sym (handled below)
+     *  - UnaryOp with sym operand */
+    bool RhsIsSym = exprIsSym(A.RHS);
     if (A.RHS && A.RHS->Kind == NodeKind::CallOrIndex) {
       auto *Cx = static_cast<const CallOrIndex *>(A.RHS);
       if (auto *NE = dynamic_cast<const NameExpr *>(Cx->Callee)) {
@@ -2346,6 +2429,11 @@ void Lowerer::lowerStmt(const Stmt &St) {
       for (const Expr *L : A.LHS)
         if (auto *N = dynamic_cast<const NameExpr *>(L))
           if (N->Ref) TableBindings.insert(N->Ref);
+    }
+    if (RhsIsSym) {
+      for (const Expr *L : A.LHS)
+        if (auto *N = dynamic_cast<const NameExpr *>(L))
+          if (N->Ref) SymBindings.insert(N->Ref);
     }
     if (RhsIsString) {
       for (const Expr *L : A.LHS)
@@ -2791,6 +2879,104 @@ void Lowerer::lowerStmt(const Stmt &St) {
       return;
     }
 
+    /* `syms x y z` (Phase 6 — Symbolic Math Toolbox) declares each
+     * identifier as a fresh matlab_sym in the current scope. The
+     * Resolver already pre-declared the names; here we (a) build a
+     * matlab_sym_named for each and (b) bind it via the appropriate
+     * write path — workspace setter at REPL/script body, local slot
+     * inside a function. SymBindings is populated so subsequent reads
+     * route through the sym dispatch. */
+    if (C.Name == "syms") {
+      auto isIdent = [](const std::string &s) {
+        if (s.empty()) return false;
+        char c = s.front();
+        return c == '_' || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
+      };
+      auto PtrT = mlir::LLVM::LLVMPointerType::get(&MCtx);
+      mlir::NamedAttribute NamedCal(
+          mlir::StringAttr::get(&MCtx, "callee"),
+          mlir::StringAttr::get(&MCtx, "matlab_sym_named"));
+      mlir::NamedAttribute WsCal(
+          mlir::StringAttr::get(&MCtx, "callee"),
+          mlir::StringAttr::get(&MCtx, "matlab_ws_set_sym"));
+      auto findBindingByName = [&](std::string_view Nm) -> Binding * {
+        /* The script scope binding for each `syms` arg lives in the
+         * Resolver's <script> scope — which isn't directly reachable
+         * from the lowering. Walk every NameExpr in CurTU's script
+         * body and grab the .Ref of the first one matching this name.
+         * The Resolver populated NameExpr.Ref before lowering ran,
+         * so this is reliable. Skip when there are no functions /
+         * script (impossible at this stack frame, but defensive). */
+        if (!CurTU || !CurTU->ScriptNode || !CurTU->ScriptNode->Body)
+          return nullptr;
+        Binding *Found = nullptr;
+        std::function<void(const Block &)> walkBlock;
+        std::function<void(const Expr &)> walkExpr;
+        std::function<void(const Stmt &)> walkStmt;
+        walkExpr = [&](const Expr &E) {
+          if (Found) return;
+          if (auto *N = dynamic_cast<const NameExpr *>(&E)) {
+            if (N->Name == Nm && N->Ref) Found = N->Ref;
+            return;
+          }
+          if (auto *Ci = dynamic_cast<const CallOrIndex *>(&E)) {
+            if (Ci->Callee) walkExpr(*Ci->Callee);
+            for (Expr *A2 : Ci->Args) if (A2) walkExpr(*A2);
+            return;
+          }
+          if (auto *B2 = dynamic_cast<const BinaryOpExpr *>(&E)) {
+            if (B2->LHS) walkExpr(*B2->LHS);
+            if (B2->RHS) walkExpr(*B2->RHS);
+            return;
+          }
+          if (auto *U = dynamic_cast<const UnaryOpExpr *>(&E)) {
+            if (U->Operand) walkExpr(*U->Operand);
+            return;
+          }
+        };
+        walkStmt = [&](const Stmt &St) {
+          if (Found) return;
+          if (auto *Es = dynamic_cast<const ExprStmt *>(&St)) {
+            if (Es->E) walkExpr(*Es->E);
+            return;
+          }
+          if (auto *As = dynamic_cast<const AssignStmt *>(&St)) {
+            for (Expr *Lh : As->LHS) if (Lh) walkExpr(*Lh);
+            if (As->RHS) walkExpr(*As->RHS);
+            return;
+          }
+        };
+        walkBlock = [&](const Block &Bk) {
+          for (Stmt *St : Bk.Stmts) if (St) walkStmt(*St);
+        };
+        walkBlock(*CurTU->ScriptNode->Body);
+        return Found;
+      };
+
+      for (auto &Arg : C.Args) {
+        if (!isIdent(Arg)) continue;  /* skip 'real', 'positive', etc. */
+        mlir::Value NameV = emitFieldNameChar(Arg, loc(C.Range));
+        mlir::Value SymV = emitUnreg("matlab.call_builtin", {NameV},
+                                       PtrT, loc(C.Range), {NamedCal});
+        Binding *Bnd = findBindingByName(Arg);
+        if (Bnd) {
+          SymBindings.insert(Bnd);
+          Bnd->IsSym = true;
+          if (!(ReplMode && InScriptBody)) {
+            mlir::Value Slot =
+                getOrCreateSlot(Bnd, TC.any(), Arg, loc(C.Range));
+            emitStore(SymV, Slot, loc(C.Range));
+          }
+        }
+        if (ReplMode && InScriptBody) {
+          mlir::Value WName = emitFieldNameChar(Arg, loc(C.Range));
+          emitUnregOp("matlab.call_builtin", {WName, SymV},
+                      {mlir::NoneType::get(&MCtx)}, loc(C.Range), {WsCal});
+        }
+      }
+      return;
+    }
+
     llvm::SmallVector<mlir::Value, 4> Args;
     for (auto &A : C.Args) {
       mlir::NamedAttribute VA(
@@ -2919,11 +3105,13 @@ void Lowerer::lowerLValueStore(const Expr &LHS, mlir::Value Rhs) {
         IsString = true;
       else if (N.Ty && N.Ty->K == Type::Kind::StringArray)
         IsString = true;
+      bool IsSym = SymBindings.count(N.Ref) != 0;
       llvm::StringRef Callee =
-          IsString ? "matlab_ws_set_string"
-                   : (IsObj ? "matlab_ws_set_obj"
-                            : (IsMat ? "matlab_ws_set_mat"
-                                     : "matlab_ws_set_f64"));
+          IsSym      ? "matlab_ws_set_sym"
+                     : (IsString ? "matlab_ws_set_string"
+                                 : (IsObj ? "matlab_ws_set_obj"
+                                          : (IsMat ? "matlab_ws_set_mat"
+                                                   : "matlab_ws_set_f64")));
       mlir::NamedAttribute Cal(
           mlir::StringAttr::get(&MCtx, "callee"),
           mlir::StringAttr::get(&MCtx, Callee));
@@ -3600,6 +3788,48 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
                          PtrTy2, L, {Cal});
       }
     }
+    /* Phase 6: symbolic arithmetic dispatch. When either operand is a
+     * sym-bound NameExpr or a sym-producing call, route the binary
+     * operators (+, -, mul, div, pow, ==) to the matlab_sym_* runtime.
+     * Mixed-mode arithmetic (sym op double) goes through the _d variants
+     * without boxing the literal. */
+    {
+      bool LhsIsSym = exprIsSym(Bi.LHS);
+      bool RhsIsSym2 = exprIsSym(Bi.RHS);
+      if (LhsIsSym || RhsIsSym2) {
+        auto F64 = mlir::Float64Type::get(&MCtx);
+        auto PtrTy3 = mlir::LLVM::LLVMPointerType::get(&MCtx);
+        const char *Pure = nullptr;     /* sym <op> sym */
+        const char *MixR = nullptr;     /* sym <op> double */
+        const char *MixL = nullptr;     /* double <op> sym */
+        switch (Bi.Op) {
+          case BinOp::Add: Pure = "matlab_sym_add"; MixR = "matlab_sym_add_d"; MixL = "matlab_sym_add_d"; break;
+          case BinOp::Sub: Pure = "matlab_sym_sub"; MixR = "matlab_sym_sub_d"; MixL = "matlab_sym_d_sub"; break;
+          case BinOp::Mul: Pure = "matlab_sym_mul"; MixR = "matlab_sym_mul_d"; MixL = "matlab_sym_mul_d"; break;
+          case BinOp::ElemMul: Pure = "matlab_sym_mul"; MixR = "matlab_sym_mul_d"; MixL = "matlab_sym_mul_d"; break;
+          case BinOp::Div: Pure = "matlab_sym_div"; MixR = "matlab_sym_div_d"; MixL = "matlab_sym_d_div"; break;
+          case BinOp::ElemDiv: Pure = "matlab_sym_div"; MixR = "matlab_sym_div_d"; MixL = "matlab_sym_d_div"; break;
+          case BinOp::Pow: Pure = "matlab_sym_pow"; MixR = "matlab_sym_pow_d"; MixL = "matlab_sym_d_pow"; break;
+          case BinOp::ElemPow: Pure = "matlab_sym_pow"; MixR = "matlab_sym_pow_d"; MixL = "matlab_sym_d_pow"; break;
+          case BinOp::Eq: Pure = "matlab_sym_eq"; MixR = "matlab_sym_eq_d"; MixL = nullptr; break;
+          default: break;
+        }
+        if (Pure) {
+          llvm::StringRef Callee;
+          mlir::Value Lo = LHS, Ro = RHS;
+          if (LhsIsSym && RhsIsSym2) Callee = Pure;
+          else if (LhsIsSym && RHS && RHS.getType() == F64) Callee = MixR;
+          else if (RhsIsSym2 && LHS && LHS.getType() == F64) Callee = MixL;
+          if (!Callee.empty()) {
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, Callee.str()));
+            return emitUnreg("matlab.call_builtin", {Lo, Ro},
+                             PtrTy3, L, {Cal});
+          }
+        }
+      }
+    }
     /* Phase 1.1.D: typed-int matrix dispatch. When either operand is a
      * non-scalar Int32 / UInt8 array, attach a `dtype` StringAttr to the
      * matlab.{add,sub,emul,ediv,...} op. LowerTensorOps reads this attr
@@ -3621,6 +3851,21 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
   case NodeKind::UnaryOp: {
     auto &U = static_cast<const UnaryOpExpr &>(E);
     mlir::Value A = U.Operand ? lowerExpr(*U.Operand) : mlir::Value{};
+    /* Phase 6: unary minus on a sym-bound name routes to matlab_sym_neg. */
+    if (U.Op == UnOp::Minus && U.Operand) {
+      auto isSymU = [&](const Expr *X) -> bool {
+        if (auto *NE = dynamic_cast<const NameExpr *>(X))
+          return NE->Ref && (SymBindings.count(NE->Ref) || NE->Ref->IsSym);
+        return false;
+      };
+      if (isSymU(U.Operand) && A) {
+        auto PtrTyU = mlir::LLVM::LLVMPointerType::get(&MCtx);
+        mlir::NamedAttribute Cal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "matlab_sym_neg"));
+        return emitUnreg("matlab.call_builtin", {A}, PtrTyU, L, {Cal});
+      }
+    }
     /* Same refinement as BinaryOp/PostfixOp: a unary op on a matrix
      * returns a matrix, on a scalar returns the same scalar type. */
     auto MLPtr = mlir::LLVM::LLVMPointerType::get(&MCtx);
@@ -3714,6 +3959,321 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
           mlir::Type ResTy = WantMat ? (mlir::Type)PtrTy : (mlir::Type)F64;
           return emitUnreg("matlab.call_builtin", {D, K}, ResTy, L, {Cal});
         }
+    /* Phase 6 — Symbolic Math Toolbox dispatch. Recognise direct calls
+     * to the MATLAB-named sym builtins and route to the matlab_sym_*
+     * runtime. Type-overloaded calls (diff / int / double / disp / +
+     * etc.) are dispatched separately based on operand kind. */
+    if (auto *NS = dynamic_cast<const NameExpr *>(C.Callee)) {
+      auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+      auto F64Ty = mlir::Float64Type::get(&MCtx);
+      auto isSymExpr = [&](const Expr *X) -> bool {
+        return exprIsSym(X);
+      };
+      auto emitSymCall = [&](llvm::StringRef Callee,
+                              llvm::ArrayRef<mlir::Value> Args,
+                              mlir::Type Res = {}) -> mlir::Value {
+        mlir::NamedAttribute Cal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, Callee.str()));
+        return emitUnreg("matlab.call_builtin", Args,
+                         Res ? Res : (mlir::Type)PtrTy, L, {Cal});
+      };
+      auto emitConstStr = [&](std::string_view s) -> mlir::Value {
+        return emitFieldNameChar(s, L);
+      };
+      const auto &Nm = NS->Name;
+
+      /* str2sym('expr') — argument must be a string literal at parse time. */
+      if (Nm == "str2sym" && C.Args.size() == 1 && C.Args[0]) {
+        if (auto *CL = dynamic_cast<const CharLiteral *>(C.Args[0])) {
+          mlir::Value SV = emitConstStr(CL->Value);
+          return emitSymCall("matlab_sym_str2sym", {SV});
+        }
+        if (auto *SL = dynamic_cast<const StringLiteral *>(C.Args[0])) {
+          mlir::Value SV = emitConstStr(SL->Value);
+          return emitSymCall("matlab_sym_str2sym", {SV});
+        }
+      }
+      /* sym('expr') / sym("expr") / sym(numeric) / sym(name). String
+       * argument routes through matlab_sym_from_str; numeric → from_double. */
+      if (Nm == "sym" && C.Args.size() == 1 && C.Args[0]) {
+        if (auto *CL = dynamic_cast<const CharLiteral *>(C.Args[0]))
+          return emitSymCall("matlab_sym_from_str", {emitConstStr(CL->Value)});
+        if (auto *SL = dynamic_cast<const StringLiteral *>(C.Args[0]))
+          return emitSymCall("matlab_sym_from_str", {emitConstStr(SL->Value)});
+        /* Numeric argument → matlab_sym_from_double. */
+        mlir::Value V = lowerExpr(*C.Args[0]);
+        if (V && V.getType() == F64Ty)
+          return emitSymCall("matlab_sym_from_double", {V});
+      }
+      /* simplify / expand / clearAssumptions — single-sym-arg → sym. */
+      if ((Nm == "simplify" || Nm == "expand" || Nm == "clearAssumptions") &&
+          C.Args.size() == 1 && C.Args[0] && isSymExpr(C.Args[0])) {
+        std::string Callee = "matlab_sym_" + std::string(Nm);
+        mlir::Value V = lowerExpr(*C.Args[0]);
+        return emitSymCall(Callee, {V});
+      }
+      /* Elementary functions on sym — sin / cos / tan / etc. The numeric
+       * matrix lowering would route to matlab_sin_m / cos_m / etc. for a
+       * matlab_mat*; here we override when the operand is a sym so we
+       * call matlab_sym_<name> instead. */
+      {
+        static const llvm::StringSet<> Elementary = {
+            "sin", "cos", "tan", "asin", "acos", "atan",
+            "sinh", "cosh", "tanh",
+            "exp", "log", "sqrt", "abs"};
+        if (Elementary.contains(Nm) && C.Args.size() == 1 &&
+            C.Args[0] && isSymExpr(C.Args[0])) {
+          mlir::Value V = lowerExpr(*C.Args[0]);
+          std::string Callee = "matlab_sym_" + std::string(Nm);
+          return emitSymCall(Callee, {V});
+        }
+      }
+      /* assume(x, "prop") / assumeAlso(x, "prop") — sym + char-literal.
+       * MATLAB semantics: the side-effect applies to the named symbol
+       * for future references. SymPP returns a fresh sym carrying the
+       * registered mask; we rebind it back to the original name so
+       * `simplify` / `refine` downstream sees the new (masked) symbol.
+       *
+       * The property argument must be a string literal at parse time
+       * so the const_char lowering can flow through (same shape as
+       * str2sym). */
+      if ((Nm == "assume" || Nm == "assumeAlso") &&
+          C.Args.size() == 2 && C.Args[0] && C.Args[1] &&
+          isSymExpr(C.Args[0])) {
+        std::string Callee = "matlab_sym_" + std::string(Nm);
+        mlir::Value SymV = lowerExpr(*C.Args[0]);
+        mlir::Value PropV;
+        if (auto *CL = dynamic_cast<const CharLiteral *>(C.Args[1]))
+          PropV = emitConstStr(CL->Value);
+        else if (auto *SL = dynamic_cast<const StringLiteral *>(C.Args[1]))
+          PropV = emitConstStr(SL->Value);
+        if (PropV) {
+          mlir::Value Fresh = emitSymCall(Callee, {SymV, PropV});
+          /* Rebind the fresh sym onto the original name so subsequent
+           * reads pick up the assumption mask. The arg must be a
+           * NameExpr for MATLAB's `assume(x, ...)` shape — anything
+           * else (a sub-expression) doesn't have a stable name to
+           * write back to. */
+          if (auto *NE0 = dynamic_cast<const NameExpr *>(C.Args[0])) {
+            mlir::Value NameV = emitFieldNameChar(NE0->Name, L);
+            mlir::NamedAttribute WsCal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_ws_set_sym"));
+            emitUnregOp("matlab.call_builtin", {NameV, Fresh},
+                        {mlir::NoneType::get(&MCtx)}, L, {WsCal});
+            /* Also update the local slot if one exists so non-REPL
+             * scripts see the rebinding too. */
+            if (NE0->Ref) {
+              auto It = Slots.find(NE0->Ref);
+              if (It != Slots.end()) emitStore(Fresh, It->second, L);
+            }
+          }
+          return Fresh;
+        }
+      }
+      /* clearAssumptions(x) — same rebinding shape, no property arg. */
+      if (Nm == "clearAssumptions" && C.Args.size() == 1 &&
+          C.Args[0] && isSymExpr(C.Args[0])) {
+        mlir::Value SymV = lowerExpr(*C.Args[0]);
+        mlir::Value Fresh = emitSymCall("matlab_sym_clearAssumptions", {SymV});
+        if (auto *NE0 = dynamic_cast<const NameExpr *>(C.Args[0])) {
+          mlir::Value NameV = emitFieldNameChar(NE0->Name, L);
+          mlir::NamedAttribute WsCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_ws_set_sym"));
+          emitUnregOp("matlab.call_builtin", {NameV, Fresh},
+                      {mlir::NoneType::get(&MCtx)}, L, {WsCal});
+          if (NE0->Ref) {
+            auto It = Slots.find(NE0->Ref);
+            if (It != Slots.end()) emitStore(Fresh, It->second, L);
+          }
+        }
+        return Fresh;
+      }
+      /* assumptions(x) — returns a string (matlab_string*-shaped sym).
+       * Phase A: the C ABI returns a malloc'd char*; we return a sym
+       * for type uniformity at the language level. */
+      if (Nm == "assumptions" && C.Args.size() == 1 &&
+          C.Args[0] && isSymExpr(C.Args[0])) {
+        mlir::Value V = lowerExpr(*C.Args[0]);
+        /* Returns a char* (raw); for now, route through an opaque ptr
+         * — language-level use is tested via matlab_sym_assumptions
+         * directly. Skip for now and let it fall through. */
+        (void)V;
+      }
+      /* vpa(e, dps) — variable-precision evaluation. */
+      if (Nm == "vpa" && C.Args.size() >= 1 &&
+          C.Args[0] && isSymExpr(C.Args[0])) {
+        mlir::Value V = lowerExpr(*C.Args[0]);
+        mlir::Value Dps;
+        if (C.Args.size() >= 2 && C.Args[1])
+          Dps = lowerExpr(*C.Args[1]);
+        else
+          Dps = mlir::arith::ConstantOp::create(
+              B, L, mlir::Float64Type::get(&MCtx),
+              mlir::FloatAttr::get(mlir::Float64Type::get(&MCtx), 32.0));
+        /* matlab_sym_vpa takes (sym*, i64). Cast f64 → i64. */
+        if (Dps && Dps.getType() == F64Ty)
+          Dps = mlir::arith::FPToSIOp::create(
+              B, L, mlir::IntegerType::get(&MCtx, 64), Dps);
+        return emitSymCall("matlab_sym_vpa", {V, Dps});
+      }
+      /* taylor(f, x, a, n). MATLAB's signature is taylor(f, x, a, 'Order',n)
+       * but the simpler 4-arg form is more common. */
+      if (Nm == "taylor" && C.Args.size() == 4 &&
+          C.Args[0] && isSymExpr(C.Args[0])) {
+        mlir::Value F = lowerExpr(*C.Args[0]);
+        mlir::Value Vv = lowerExpr(*C.Args[1]);
+        mlir::Value Av = lowerExpr(*C.Args[2]);
+        mlir::Value Nv = lowerExpr(*C.Args[3]);
+        if (Av && Av.getType() == F64Ty)
+          Av = emitSymCall("matlab_sym_from_double", {Av});
+        if (Nv && Nv.getType() == F64Ty)
+          Nv = mlir::arith::FPToSIOp::create(
+              B, L, mlir::IntegerType::get(&MCtx, 64), Nv);
+        return emitSymCall("matlab_sym_taylor", {F, Vv, Av, Nv});
+      }
+      /* limit(f, x, target). */
+      if (Nm == "limit" && C.Args.size() == 3 &&
+          C.Args[0] && isSymExpr(C.Args[0])) {
+        mlir::Value F = lowerExpr(*C.Args[0]);
+        mlir::Value Vv = lowerExpr(*C.Args[1]);
+        mlir::Value Tg = lowerExpr(*C.Args[2]);
+        if (Tg && Tg.getType() == F64Ty)
+          Tg = emitSymCall("matlab_sym_from_double", {Tg});
+        return emitSymCall("matlab_sym_limit", {F, Vv, Tg});
+      }
+      /* dsolve(eq, y, yp, x) / dsolve_2(eq, y, yp, ypp, x). */
+      if (Nm == "dsolve" && C.Args.size() == 4 &&
+          C.Args[0] && isSymExpr(C.Args[0])) {
+        mlir::Value E = lowerExpr(*C.Args[0]);
+        mlir::Value Y = lowerExpr(*C.Args[1]);
+        mlir::Value Yp = lowerExpr(*C.Args[2]);
+        mlir::Value X = lowerExpr(*C.Args[3]);
+        return emitSymCall("matlab_sym_dsolve", {E, Y, Yp, X});
+      }
+      if (Nm == "dsolve" && C.Args.size() == 5 &&
+          C.Args[0] && isSymExpr(C.Args[0])) {
+        mlir::Value E = lowerExpr(*C.Args[0]);
+        mlir::Value Y = lowerExpr(*C.Args[1]);
+        mlir::Value Yp = lowerExpr(*C.Args[2]);
+        mlir::Value Ypp = lowerExpr(*C.Args[3]);
+        mlir::Value X = lowerExpr(*C.Args[4]);
+        return emitSymCall("matlab_sym_dsolve_2", {E, Y, Yp, Ypp, X});
+      }
+      /* pdsolve(a, b, c, x, y). */
+      if (Nm == "pdsolve" && C.Args.size() == 5 &&
+          C.Args[0] && isSymExpr(C.Args[0])) {
+        mlir::Value A = lowerExpr(*C.Args[0]);
+        mlir::Value B2 = lowerExpr(*C.Args[1]);
+        mlir::Value Cc = lowerExpr(*C.Args[2]);
+        mlir::Value X = lowerExpr(*C.Args[3]);
+        mlir::Value Y = lowerExpr(*C.Args[4]);
+        return emitSymCall("matlab_sym_pdsolve", {A, B2, Cc, X, Y});
+      }
+      if (Nm == "pdsolve_heat" && C.Args.size() == 4 &&
+          C.Args[0] && isSymExpr(C.Args[0])) {
+        mlir::Value K2 = lowerExpr(*C.Args[0]);
+        mlir::Value Lam = lowerExpr(*C.Args[1]);
+        mlir::Value X = lowerExpr(*C.Args[2]);
+        mlir::Value T = lowerExpr(*C.Args[3]);
+        return emitSymCall("matlab_sym_pdsolve_heat", {K2, Lam, X, T});
+      }
+      if (Nm == "pdsolve_wave" && C.Args.size() == 3 &&
+          C.Args[0] && isSymExpr(C.Args[0])) {
+        mlir::Value Cc = lowerExpr(*C.Args[0]);
+        mlir::Value X = lowerExpr(*C.Args[1]);
+        mlir::Value T = lowerExpr(*C.Args[2]);
+        return emitSymCall("matlab_sym_pdsolve_wave", {Cc, X, T});
+      }
+      /* Integral transforms — all (f, var1, var2) → sym. */
+      if ((Nm == "laplace" || Nm == "ilaplace" ||
+           Nm == "fourier" || Nm == "ifourier" ||
+           Nm == "ztrans" || Nm == "iztrans") &&
+          C.Args.size() == 3 && C.Args[0] && isSymExpr(C.Args[0])) {
+        mlir::Value F = lowerExpr(*C.Args[0]);
+        mlir::Value V1 = lowerExpr(*C.Args[1]);
+        mlir::Value V2 = lowerExpr(*C.Args[2]);
+        std::string Callee = "matlab_sym_" + std::string(Nm);
+        return emitSymCall(Callee, {F, V1, V2});
+      }
+      /* factor(expr, var). */
+      if (Nm == "factor" && C.Args.size() == 2 &&
+          C.Args[0] && isSymExpr(C.Args[0])) {
+        mlir::Value E = lowerExpr(*C.Args[0]);
+        mlir::Value V = lowerExpr(*C.Args[1]);
+        return emitSymCall("matlab_sym_factor", {E, V});
+      }
+      /* subs(expr, old, new). */
+      if (Nm == "subs" && C.Args.size() == 3 &&
+          C.Args[0] && isSymExpr(C.Args[0])) {
+        mlir::Value Ea = lowerExpr(*C.Args[0]);
+        mlir::Value Eo = lowerExpr(*C.Args[1]);
+        mlir::Value En = lowerExpr(*C.Args[2]);
+        /* If `new` is a numeric literal, box it into a sym first. */
+        if (En && En.getType() == F64Ty)
+          En = emitSymCall("matlab_sym_from_double", {En});
+        return emitSymCall("matlab_sym_subs", {Ea, Eo, En});
+      }
+      /* solve(eq, var). Routes to the single-root variant for Phase A. */
+      if (Nm == "solve" && C.Args.size() == 2 &&
+          C.Args[0] && isSymExpr(C.Args[0])) {
+        mlir::Value Eq = lowerExpr(*C.Args[0]);
+        mlir::Value V = lowerExpr(*C.Args[1]);
+        return emitSymCall("matlab_sym_solve_one", {Eq, V});
+      }
+      /* diff(f, x) / diff(f, x, n) — sym overload. */
+      if (Nm == "diff" && C.Args.size() >= 2 &&
+          C.Args[0] && isSymExpr(C.Args[0])) {
+        mlir::Value F = lowerExpr(*C.Args[0]);
+        mlir::Value Vv = lowerExpr(*C.Args[1]);
+        if (C.Args.size() == 2)
+          return emitSymCall("matlab_sym_diff", {F, Vv});
+      }
+      /* int(f, x) / int(f, x, a, b) — sym overload. */
+      if (Nm == "int" && (C.Args.size() == 2 || C.Args.size() == 4) &&
+          C.Args[0] && isSymExpr(C.Args[0])) {
+        mlir::Value F = lowerExpr(*C.Args[0]);
+        mlir::Value Vv = lowerExpr(*C.Args[1]);
+        if (C.Args.size() == 2)
+          return emitSymCall("matlab_sym_int", {F, Vv});
+        mlir::Value Aa = lowerExpr(*C.Args[2]);
+        mlir::Value Bb = lowerExpr(*C.Args[3]);
+        if (Aa && Aa.getType() == F64Ty)
+          Aa = emitSymCall("matlab_sym_from_double", {Aa});
+        if (Bb && Bb.getType() == F64Ty)
+          Bb = emitSymCall("matlab_sym_from_double", {Bb});
+        return emitSymCall("matlab_sym_int_def", {F, Vv, Aa, Bb});
+      }
+      /* double(s) — numeric eval of a sym. Returns f64. */
+      if (Nm == "double" && C.Args.size() == 1 &&
+          C.Args[0] && isSymExpr(C.Args[0])) {
+        mlir::Value V = lowerExpr(*C.Args[0]);
+        return emitSymCall("matlab_sym_double", {V}, F64Ty);
+      }
+      /* disp(s) — user wrote disp(sym) explicitly. Mirrors the bare-
+       * expression disp dispatch above; routes to matlab_sym_disp so
+       * the value is pretty-printed via SymPP rather than f64-formatted
+       * via matlab_disp_*. Returns void. */
+      if (Nm == "disp" && C.Args.size() == 1 &&
+          C.Args[0] && isSymExpr(C.Args[0])) {
+        mlir::Value V = lowerExpr(*C.Args[0]);
+        mlir::NamedAttribute Cal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "matlab_sym_disp"));
+        return emitUnreg("matlab.call_builtin", {V},
+                         mlir::NoneType::get(&MCtx), L, {Cal});
+      }
+      /* latex / pretty / ccode — char-returning printers. Result is a
+       * matlab_string* (matches matlab_num2str shape). */
+      if ((Nm == "latex" || Nm == "pretty" || Nm == "ccode") &&
+          C.Args.size() == 1 && C.Args[0] && isSymExpr(C.Args[0])) {
+        mlir::Value V = lowerExpr(*C.Args[0]);
+        std::string Callee = "matlab_sym_" + std::string(Nm);
+        return emitSymCall(Callee, {V});
+      }
+    }
     if (C.Resolved == CallKind::Call) {
       auto *N = dynamic_cast<const NameExpr *>(C.Callee);
       auto PtrTyConst = mlir::LLVM::LLVMPointerType::get(&MCtx);

@@ -44,6 +44,12 @@ struct Binding {
   matlab::ClassDef *PinnedClass = nullptr;
   bool WrittenTo = false;
   bool ReadFrom = false;
+  /* Phase 6 — Symbolic Math Toolbox. Stamped by the Resolver when the
+   * REPL workspace-kind hook reports kind=7 (matlab_sym*). Read by the
+   * MLIR lowering's NameExpr / BinaryOp / disp dispatch sites so a
+   * cross-TU sym binding (declared in an earlier REPL input) routes
+   * through matlab_sym_* the same as same-TU SymBindings tracking. */
+  bool IsSym = false;
 };
 
 class Scope {

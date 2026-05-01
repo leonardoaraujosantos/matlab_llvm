@@ -2973,6 +2973,25 @@ bool Emitter::run(mlir::ModuleOp M) {
 std::string emitSystemVerilog(mlir::ModuleOp M,
                               const matlab::SourceManager *SM,
                               HWResetKind Reset, HWFSMEncoding FSMEnc) {
+  /* Phase 6: symbolic computation is fundamentally unsynthesizable —
+   * matlab_sym_* expects an MPFR/GMP runtime that has no FPGA mapping.
+   * Diagnose at the start with a clear hardware-context error so the
+   * user gets the right hint (drop the sym, use fi). */
+  bool HasSym = false;
+  M.walk([&](mlir::Operation *Op) {
+    if (HasSym) return;
+    if (auto Cal = Op->getAttrOfType<mlir::StringAttr>("callee"))
+      if (Cal.getValue().starts_with("matlab_sym_")) { HasSym = true; return; }
+    if (auto F = mlir::dyn_cast<mlir::LLVM::LLVMFuncOp>(Op))
+      if (F.getName().starts_with("matlab_sym_")) HasSym = true;
+  });
+  if (HasSym) {
+    llvm::errs() << "error: Symbolic Math Toolbox operations "
+                 << "(matlab_sym_*) are not synthesizable — use fi for "
+                 << "fixed-point hardware models, or remove the "
+                 << "symbolic operations\n";
+    return {};
+  }
   std::ostringstream OS;
   Emitter E(OS, SM, Reset, FSMEnc);
   if (!E.run(M)) return std::string();

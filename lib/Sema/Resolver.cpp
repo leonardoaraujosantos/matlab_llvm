@@ -60,6 +60,17 @@ void Resolver::registerBuiltins() {
     "categorical", "iscategorical", "categories", "iscategory",
     /* Phase 5.3 — table. */
     "table", "istable", "height", "width", "rows2vars", "varfun",
+    /* Phase 6 — Symbolic Math Toolbox via SymPP. The link target
+     * (matlab_sym_* runtime) is only present when the build was
+     * configured -DMATLAB_LLVM_WITH_SYM=ON; without that the JIT/-emit-c
+     * paths will fail to resolve at link time, mirroring how a missing
+     * BLAS would manifest. */
+    "sym", "syms", "str2sym", "simplify", "expand", "factor", "subs",
+    "solve", "vpa", "latex", "pretty", "ccode", "matlabFunction",
+    "assume", "assumeAlso", "assumptions", "clearAssumptions",
+    "taylor", "limit",
+    "dsolve", "pdsolve", "pdsolve_heat", "pdsolve_wave",
+    "laplace", "ilaplace", "fourier", "ifourier", "ztrans", "iztrans",
     "sprintf", "num2str", "str2double",
     "upper", "lower", "startsWith", "endsWith", "contains",
     "strtrim", "strrep", "strcat",
@@ -321,7 +332,28 @@ void Resolver::collectAssignmentsInStmt(Stmt &S, Scope *FnScope) {
     break;
   }
   case NodeKind::CommandStmt: {
-    // Commands don't introduce variables.
+    /* Most commands don't introduce variables — but `syms x y z` does,
+     * matching MATLAB's Symbolic Math Toolbox semantics where the
+     * names are declared as fresh symbolic variables in the current
+     * workspace. Treat each argument as a variable name and declare
+     * it; lowering will emit matlab_sym_named + matlab_ws_set_sym. */
+    auto &C = static_cast<CommandStmt &>(S);
+    if (C.Name == "syms") {
+      for (auto &Arg : C.Args) {
+        /* Skip option-like tokens MATLAB accepts (real, integer,
+         * positive, ...) — those are assumption modifiers handled in
+         * Phase B. Heuristic: an argument is a name iff it's a
+         * MATLAB-shaped identifier. */
+        if (Arg.empty()) continue;
+        char c = Arg.front();
+        bool isIdent = (c == '_' ||
+                        (c >= 'A' && c <= 'Z') ||
+                        (c >= 'a' && c <= 'z'));
+        if (!isIdent) continue;
+        Binding *B = Sema.newBinding();
+        FnScope->getOrDeclareVar(Arg, B);
+      }
+    }
     break;
   }
   default:
@@ -630,6 +662,11 @@ void Resolver::resolveExpr(Expr &E, Scope *S) {
           else if (K == 3) NB->InferredType = TC.stringScalar();
           else if (K == 4) NB->InferredType = TC.arrayOf(Dtype::UInt8, Shape::unknown());
           else if (K == 5) NB->InferredType = TC.arrayOf(Dtype::Int32, Shape::unknown());
+          /* Kind 7 = matlab_sym* (Phase 6 — Symbolic Math Toolbox).
+           * No InferredType is set (Sema has no SymType yet), but the
+           * binding is tagged so the MLIR lowering's BinaryOp / disp /
+           * workspace-store dispatch sees it as sym across TUs. */
+          else if (K == 7) NB->IsSym = true;
         }
       } else {
         Diag.error(N.Range.Begin,

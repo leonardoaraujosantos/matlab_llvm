@@ -3434,6 +3434,28 @@ static bool bodyReferencesSymbol(llvm::StringRef Body,
 
 std::string emitPython(mlir::ModuleOp M, bool NoLine,
                        const matlab::SourceManager *SM) {
+  /* Phase 6: the Python runtime ships no Symbolic Math Toolbox bridge
+   * — it would route through SymPy but the emitter doesn't translate
+   * the matlab_sym_* call shape to SymPy yet. Diagnose at the start
+   * rather than silently emit code that fails at import. */
+  bool HasSym = false;
+  M.walk([&](mlir::Operation *Op) {
+    if (HasSym) return;
+    /* Pre-LLVM dialect: matlab.call_builtin carries the callee as a
+     * StringAttr. Post-LLVM-conversion: llvm.func declarations carry
+     * the runtime name as the symbol name. Check both so the
+     * diagnostic fires regardless of where in the pipeline we run. */
+    if (auto Cal = Op->getAttrOfType<mlir::StringAttr>("callee"))
+      if (Cal.getValue().starts_with("matlab_sym_")) { HasSym = true; return; }
+    if (auto F = mlir::dyn_cast<mlir::LLVM::LLVMFuncOp>(Op))
+      if (F.getName().starts_with("matlab_sym_")) HasSym = true;
+  });
+  if (HasSym) {
+    llvm::errs() << "error: -emit-python does not support the Symbolic "
+                 << "Math Toolbox (matlab_sym_*) — use -emit-cpp / "
+                 << "-emit-llvm or remove the symbolic operations\n";
+    return {};
+  }
   std::ostringstream OSS;
   Emitter E(OSS, NoLine, SM);
   if (!E.run(M)) return {};

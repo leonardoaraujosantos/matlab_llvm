@@ -40,6 +40,7 @@ roadmap-side summary:
 | 5.1 | scalar `datetime` / `duration` with constructors, display, arithmetic | `datetime_basic.m` |
 | 5.2 | 1-D `categorical` from string array — disp / length / iscategory / categories | `categorical_basic.m` |
 | 5.3 | `table` — auto-named + `'VariableNames'`, dot column access, dynamic add, `height`/`width`/`disp` | `table_basic.m` |
+| 6   | **Symbolic Math Toolbox** via [SymPP](https://github.com/leonardoaraujosantos/SymPP) — `syms`, `diff`, `int`, `simplify`, `expand`, `factor`, `subs`, `solve`, `vpa`, `taylor`, `limit`, `dsolve`, `pdsolve`, `laplace`/`fourier`/`ztrans` (+ inverses), `assume`, sym arithmetic dispatch on `+ - * / ^ ==`, sym-typed elementary functions, REPL JIT + DAP variable inspector, opt-in via `-DMATLAB_LLVM_WITH_SYM=ON` | `test/RunSym/sym_phase_a.m`, `sym_phase_b.m` |
 
 Open follow-ups carried forward (still on the roadmap):
 
@@ -47,6 +48,7 @@ Open follow-ups carried forward (still on the roadmap):
 - **Narrower / wider int lanes** — i8 / i16 / i64 / u16 / u32 / u64 matrix descriptors against the same template as Phase 1.1.
 - **Full method-dispatch value semantics** for OOP — needs test-corpus migration to either rebind or `< handle`-annotate the existing class fixtures.
 - **Heterogeneous table columns** — string / categorical / datetime columns alongside numeric.
+- **Phase 6.x — symbolic matrices + `linsolve(A, b)`** (SymPP has the engine, not yet wired). Multi-equation `solve([eq1, eq2], [x, y])` returning a real solution vector. `matlabFunction(...)` wrapping the SymPP-emitted Octave source into a callable function handle. `simplify` honouring assumptions via auto-`refine`. Symbolic constant resolution (`sym('pi')` → Pi singleton).
 
 ---
 

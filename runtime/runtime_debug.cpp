@@ -247,6 +247,67 @@ void matlab_ws_set_string(const char *name, int64_t len, void *s) {
     matlab_ws_check_watch(name, len);
 }
 
+/* Symbolic Math Toolbox — matlab_sym* assignment to the script-level
+ * workspace. Stores with kind=7 so matlab_dbg_ws_kind / the Resolver
+ * workspace-kind hook / the DAP variable formatter all recognise the
+ * descriptor as a symbolic expression. The DAP renders the value via
+ * matlab_dbg_sym_str (defined below), the Resolver stamps the binding
+ * for cross-input REPL persistence. */
+void matlab_ws_set_sym(const char *name, int64_t len, void *s) {
+    matlab_ws_init_if_needed();
+    matlab_ws_lock();
+    struct matlab_dbg_undo_rec *r =
+        matlab_ws_push_undo_locked(name, len, /*kind=*/2);
+    int32_t idx = struct_reserve(matlab_ws, name, (int32_t)len);
+    matlab_ws->kinds[idx] = 7;
+    matlab_ws->f64_vals[idx] = 0.0;
+    matlab_ws->ptr_vals[idx] = s;
+    matlab_dbg_undo_record_set_new_ptr(r, /*new_kind=*/7, s);
+    matlab_ws_unlock();
+    matlab_ws_check_watch(name, len);
+}
+
+/* matlab_ws_get_sym(name) — reverse direction. Returns the stored
+ * pointer (typed as void* so the C ABI in runtime_sym.h doesn't have
+ * to leak SymBox-knowledge here). The caller (lowering's workspace
+ * load path) re-types as matlab_sym* via the C ABI. */
+void *matlab_ws_get_sym(const char *name, int64_t len) {
+    matlab_ws_init_if_needed();
+    /* Linear scan — workspace is small (REPL-scale). Mirrors the
+     * matlab_dbg_ws_* iteration used by the DAP server. */
+    for (int32_t i = 0; i < matlab_ws->nfields; ++i) {
+        const char *gn = matlab_ws->names[i];
+        if (!gn) continue;
+        size_t glen = strlen(gn);
+        if (glen != (size_t)len) continue;
+        if (memcmp(gn, name, (size_t)len) != 0) continue;
+        if (matlab_ws->kinds[i] != 7) return nullptr;
+        return matlab_ws->ptr_vals[i];
+    }
+    return nullptr;
+}
+
+/* DAP variable formatter — pretty-prints a matlab_sym* into a stable
+ * static buffer and returns it. The DAP server reads the result via
+ * the value column of `variables` requests. Returns NULL on miss.
+ * Only available when the build was configured with MATLAB_LLVM_WITH_SYM
+ * (otherwise the runtime can't link matlab_sym_str from runtime_sym.cpp). */
+#ifdef MATLAB_LLVM_WITH_SYM
+extern "C" char *matlab_sym_str(const void *e, int64_t *len_out);
+const char *matlab_dbg_sym_str(void *s, int64_t *len_out) {
+    static thread_local char *Cached = nullptr;
+    if (Cached) { free(Cached); Cached = nullptr; }
+    Cached = matlab_sym_str(s, len_out);
+    return Cached;
+}
+#else
+const char *matlab_dbg_sym_str(void *s, int64_t *len_out) {
+    (void)s;
+    if (len_out) *len_out = 0;
+    return nullptr;
+}
+#endif
+
 double matlab_ws_has(const char *name, int64_t len) {
     matlab_ws_init_if_needed();
     return matlab_struct_has_field(matlab_ws, name, len);
