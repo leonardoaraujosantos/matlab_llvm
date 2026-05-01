@@ -354,7 +354,7 @@ deliberate non-goals; see "Out of scope."
 | **Complex numbers — linalg tail** | Small | Scalars / matrix arithmetic / FFT shipped. Remaining: complex `inv` / `det` / `svd` / `eig` / `chol` / `qr`. |
 | **Struct arrays** (`s(i).x`) | Medium | ~1 week. Runtime struct-array descriptor; slicing over struct fields. |
 | **Sparse matrices** | Large | ~3–4 weeks. Sparse representation + sparse-aware linalg; or lean on SuiteSparse. |
-| **`varargout`** | Small | ~2–3 days. `varargin` ships; `varargout` needs multi-return unpacking at call site. |
+| **`varargout`** | ✅ shipped (Phase 1.2) | Pure (`function varargout = f(...)`) and mixed (`function [first, varargout] = f(...)`) forms; caller unpacks any LHS beyond the declared boundary from the matlab_cell* via `matlab_cell_get_mat`. Plain user-function multi-return (`[a, b] = swap(x, y)`) was also broken before this slice — both LHS got the same value — and is now wired through the same `matlab.call` (N results, `nargout` attr) shape the builtin path uses. Gating test: `test/Run/varargout_basic.m`. |
 | **`classdef` dependent types** (`table`, `datetime`, `categorical`) | Large | Built on OOP; add after value semantics land. |
 | **`eval`, `evalin`, `assignin`** | Small | ~2–3 days. Evaluator already exists in `-repl`; hook it. |
 
@@ -402,7 +402,7 @@ sort / linalg tail, strings, REPL, file I/O, basic OOP, tooling —
 | 1 | Struct arrays (`s(i).x`) | 1 week | Data-in-records patterns |
 | 2 | Integer runtime (typed `matlab_mat_i32` / `_u8` / …) — **partially shipped (Phase 1.1)**: `int32` and `uint8` matrix lanes complete (runtime, lowering, Python+TS, REPL+DAP). Remaining lanes (i8/i16/i64/u16/u32/u64 matrices) drop in against the same template. | ~1 week left | Image processing pixel code. (Note: 64-bit lanes already exist as a side effect of the fi-array work — `matlab_mat_i64` / `_u64` ship with Phase 3 of fi.) |
 | 2b | Fixed-Point Designer (`fi`) — Phases 1–5 shipped (scalar + 1-D arrays + numerictype/fimath + reinterpretcast + report). **Open follow-ups**: function-internal fi typing (~1 week), 2-D fi matrices (~1.5 weeks), fi parfor reductions, reductions tail. See [`emit_fixed_point.md`](emit_fixed_point.md) §10.1. | 2 weeks total | DSP simulation, hardware-faithful integer math, full `function y = fir(x)` form |
-| 3 | `varargout` + 3-D vector slicing (`A(:,:,k)`) | 1 week | Library-style + volumetric code |
+| 3 | ~~`varargout`~~ (shipped Phase 1.2) + 3-D vector slicing (`A(:,:,k)`) | ~3 days remaining | Library-style + volumetric code |
 | 4 | Complex linalg tail (`inv` / `det` / `svd` / `eig`) | 1 week | Complete DSP / scientific code |
 | 5 | OOP value-class copy semantics + property validators | 2 weeks | Modern MATLAB code |
 | 6 | DAP user-function frames + `evaluate` | 1 week | Stepping into user functions shows their frames; watch expressions |

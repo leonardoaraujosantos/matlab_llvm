@@ -1115,9 +1115,15 @@ void Lowerer::lowerFunction(const Function &F, mlir::ModuleOp M,
       InTys.push_back(mirTy(P && P->InferredType ? P->InferredType : TC.any()));
     }
   }
+  bool FnHasVarargout = !F.Outputs.empty() && F.Outputs.back() == "varargout";
   for (size_t i = 0; i < F.OutputRefs.size(); ++i) {
     Binding *O = F.OutputRefs[i];
     if (IsCtor && i == 0) {
+      OutTys.push_back(PtrTyArg);
+    } else if (FnHasVarargout && i + 1 == F.OutputRefs.size()) {
+      /* Phase 1.2: varargout output is a matlab_cell* (ptr). The body
+       * holds it in a ptr-typed slot and the implicit-return loads
+       * the cell pointer; the call site unpacks per-LHS. */
       OutTys.push_back(PtrTyArg);
     } else {
       OutTys.push_back(mirTy(O && O->InferredType ? O->InferredType : TC.any()));
@@ -1272,12 +1278,41 @@ void Lowerer::lowerFunction(const Function &F, mlir::ModuleOp M,
     Slots[Bnd] = Slot;
     emitStore(Entry->getArgument(i), Slot, loc(F.Range));
   }
+  /* Phase 1.2: a function declared with `varargout` in its outputs
+   * holds a matlab_cell* in the varargout slot. The body writes via
+   * `varargout{k} = ...` (cell-store) and the call site unpacks. */
+  bool HasVarargout = !F.Outputs.empty() && F.Outputs.back() == "varargout";
   // Pre-allocate output slots.
   for (size_t i = 0; i < F.OutputRefs.size(); ++i) {
     Binding *Bnd = F.OutputRefs[i];
     if (!Bnd) continue;
     bool IsCtorObj = IsCtor && i == 0;
+    bool IsVarargoutSlot = HasVarargout && i + 1 == F.OutputRefs.size();
     mlir::Value Slot;
+    if (IsVarargoutSlot) {
+      /* Phase 1.2: varargout slot — cell pointer, initialised to an
+       * empty cell so the first `varargout{k} = ...` has somewhere to
+       * write. Tagged in CellBindings so numel/length/iscell route
+       * through the cell runtime, and so the implicit-return packs
+       * its contents into the call site's result tuple. */
+      mlir::NamedAttribute NA(
+          mlir::StringAttr::get(&MCtx, "name"),
+          mlir::FlatSymbolRefAttr::get(&MCtx, std::string(Bnd->Name)));
+      Slot = emitUnreg("matlab.alloc", {}, PtrTyArg,
+                       loc(F.Range), {NA});
+      auto F64 = mlir::Float64Type::get(&MCtx);
+      mlir::Value Zero = mlir::arith::ConstantOp::create(
+          B, loc(F.Range), F64, mlir::FloatAttr::get(F64, 0.0));
+      mlir::NamedAttribute Cal(
+          mlir::StringAttr::get(&MCtx, "callee"),
+          mlir::StringAttr::get(&MCtx, "matlab_cell_new"));
+      mlir::Value EmptyCell = emitUnreg("matlab.call_builtin", {Zero},
+                                         PtrTyArg, loc(F.Range), {Cal});
+      emitStore(EmptyCell, Slot, loc(F.Range));
+      CellBindings.insert(Bnd);
+      Slots[Bnd] = Slot;
+      continue;
+    }
     if (IsCtorObj) {
       /* The constructor's first output is the newly-built object. Emit
        * a ptr-typed slot, then initialise it with matlab_obj_new(class_id)
@@ -1736,13 +1771,26 @@ void Lowerer::lowerStmt(const Stmt &St) {
      * the RHS is a call to a builtin that has a multi-return variant,
      * emit a matlab.call_builtin with N result types and a nargout
      * attribute so LowerTensorOps can dispatch to the right runtime
-     * entry. Each LHS then gets its own result. */
+     * entry. Each LHS then gets its own result.
+     *
+     * Phase 1.2: same shape applies to user functions declared with
+     * multiple outputs (`function [a, b] = swap(x, y)`). Without this
+     * branch the call returned a single none-typed value that got
+     * stored into every LHS slot — `[p, q] = swap(10, 20)` gave p == q.
+     * varargout-using callees go through the cell-unpack path further
+     * down. */
     if (A.LHS.size() > 1 && A.RHS &&
         A.RHS->Kind == NodeKind::CallOrIndex) {
       auto *C = static_cast<const CallOrIndex *>(A.RHS);
       auto *Callee = dynamic_cast<const NameExpr *>(C->Callee);
-      if (Callee && Callee->Ref &&
-          Callee->Ref->Kind == BindingKind::Builtin) {
+      bool IsBuiltin = Callee && Callee->Ref &&
+                       Callee->Ref->Kind == BindingKind::Builtin;
+      bool IsUserFn = Callee && Callee->Ref &&
+                      Callee->Ref->Kind == BindingKind::Function &&
+                      Callee->Ref->FuncDef;
+      bool HasVarargout = IsUserFn && !Callee->Ref->FuncDef->Outputs.empty() &&
+                          Callee->Ref->FuncDef->Outputs.back() == "varargout";
+      if (IsBuiltin) {
         llvm::SmallVector<mlir::Value, 4> Args;
         for (const Expr *Arg : C->Args)
           if (Arg) Args.push_back(lowerExpr(*Arg));
@@ -1824,6 +1872,158 @@ void Lowerer::lowerStmt(const Stmt &St) {
           lowerLValueStore(*A.LHS[i], Op->getResult(i));
         }
         return;
+      }
+      /* Phase 1.2: user-function multi-return. The declared output
+       * arity (Outputs.size()) tells us how many values the function
+       * actually returns; emit matlab.call with that many result
+       * slots and unpack into each LHS. The varargout case packs
+       * everything into a single matlab_cell* and is handled below. */
+      if (IsUserFn && !HasVarargout) {
+        size_t DeclOuts = Callee->Ref->FuncDef->Outputs.size();
+        size_t N = std::min(A.LHS.size(), DeclOuts);
+        if (N >= 2) {
+          llvm::SmallVector<mlir::Value, 4> Args;
+          for (const Expr *Arg : C->Args)
+            if (Arg) Args.push_back(lowerExpr(*Arg));
+          auto F64 = mlir::Float64Type::get(&MCtx);
+          auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+          /* Result type per declared output, taken from Sema's
+           * inferred type for the OutputRef binding when set, else
+           * fall back to ptr (the matrix lane is the safer default
+           * for unrefined results — f64 scalars are still happy to
+           * be stored into a ptr slot via auto-boxing later). */
+          llvm::SmallVector<mlir::Type, 4> Rtys;
+          Rtys.reserve(N);
+          for (size_t i = 0; i < N; ++i) {
+            const Type *OT = nullptr;
+            if (i < Callee->Ref->FuncDef->OutputRefs.size())
+              OT = Callee->Ref->FuncDef->OutputRefs[i]
+                      ? Callee->Ref->FuncDef->OutputRefs[i]->InferredType
+                      : nullptr;
+            mlir::Type RT0 = OT ? mirTy(OT)
+                                : (mlir::Type)mlir::NoneType::get(&MCtx);
+            if (mlir::isa<mlir::NoneType>(RT0)) RT0 = F64;
+            Rtys.push_back(RT0);
+          }
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, std::string(Callee->Name)));
+          mlir::NamedAttribute NO(
+              mlir::StringAttr::get(&MCtx, "nargout"),
+              mlir::IntegerAttr::get(
+                  mlir::IntegerType::get(&MCtx, 64), (int64_t)N));
+          mlir::Operation *Op = emitUnregOp("matlab.call", Args, Rtys,
+                                             loc(A.Range), {Cal, NO});
+          for (size_t i = 0; i < N; ++i) {
+            if (!A.LHS[i]) continue;
+            auto ResTy = Op->getResult(i).getType();
+            if (auto *NE = dynamic_cast<const NameExpr *>(A.LHS[i]);
+                NE && NE->Ref &&
+                !(ReplMode && InScriptBody &&
+                  NE->Ref->Kind == BindingKind::Var) &&
+                (mlir::isa<mlir::Float64Type>(ResTy) || ResTy == PtrTy)) {
+              if (Slots.find(NE->Ref) == Slots.end()) {
+                mlir::OpBuilder::InsertionGuard G(B);
+                auto *InsBlock = B.getInsertionBlock();
+                mlir::Operation *P = InsBlock ? InsBlock->getParentOp() : nullptr;
+                while (P && !mlir::isa<mlir::func::FuncOp>(P)) {
+                  auto *PB = P->getBlock();
+                  P = PB ? PB->getParentOp() : nullptr;
+                }
+                mlir::Block *Entry = P
+                    ? &mlir::cast<mlir::func::FuncOp>(P).getBody().front()
+                    : InsBlock;
+                B.setInsertionPointToStart(Entry);
+                mlir::NamedAttribute NameA(
+                    mlir::StringAttr::get(&MCtx, "name"),
+                    mlir::StringAttr::get(&MCtx, std::string(NE->Name)));
+                mlir::Value Slot = emitUnreg(
+                    "matlab.alloc", {}, ResTy, loc(NE->Range), {NameA});
+                Slots[NE->Ref] = Slot;
+              }
+              emitUnregOp("matlab.store",
+                          {Op->getResult(i), Slots[NE->Ref]}, {},
+                          loc(A.Range));
+              continue;
+            }
+            lowerLValueStore(*A.LHS[i], Op->getResult(i));
+          }
+          return;
+        }
+      }
+      /* Phase 1.2: varargout unpack at call site. Function declared as
+       *   `function [a, ..., varargout] = f(...)`
+       * returns (DeclOuts - 1) declared outputs followed by a
+       * matlab_cell* holding the varargout entries. The call site
+       * receives DeclOuts result values (the cell at the tail) and
+       * unpacks any LHS beyond the declared boundary from the cell
+       * via matlab_cell_get_<f64|mat>. */
+      if (IsUserFn && HasVarargout) {
+        size_t DeclOuts = Callee->Ref->FuncDef->Outputs.size();
+        if (DeclOuts >= 1 && A.LHS.size() >= 1) {
+          llvm::SmallVector<mlir::Value, 4> Args;
+          for (const Expr *Arg : C->Args)
+            if (Arg) Args.push_back(lowerExpr(*Arg));
+          auto F64 = mlir::Float64Type::get(&MCtx);
+          auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+          /* Result types: one per declared output. Last is ptr (the
+           * varargout cell); earlier ones come from Sema's inferred
+           * type, falling back to f64 if unrefined. */
+          llvm::SmallVector<mlir::Type, 4> Rtys;
+          Rtys.reserve(DeclOuts);
+          for (size_t i = 0; i + 1 < DeclOuts; ++i) {
+            const Type *OT = nullptr;
+            if (i < Callee->Ref->FuncDef->OutputRefs.size())
+              OT = Callee->Ref->FuncDef->OutputRefs[i]
+                      ? Callee->Ref->FuncDef->OutputRefs[i]->InferredType
+                      : nullptr;
+            mlir::Type RT0 = OT ? mirTy(OT)
+                                : (mlir::Type)mlir::NoneType::get(&MCtx);
+            if (mlir::isa<mlir::NoneType>(RT0)) RT0 = F64;
+            Rtys.push_back(RT0);
+          }
+          Rtys.push_back(PtrTy); /* varargout cell */
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, std::string(Callee->Name)));
+          mlir::NamedAttribute NO(
+              mlir::StringAttr::get(&MCtx, "nargout"),
+              mlir::IntegerAttr::get(
+                  mlir::IntegerType::get(&MCtx, 64),
+                  (int64_t)A.LHS.size()));
+          mlir::Operation *Op = emitUnregOp("matlab.call", Args, Rtys,
+                                             loc(A.Range), {Cal, NO});
+          mlir::Value VarargoutCell = Op->getResult(DeclOuts - 1);
+          /* Store each LHS:
+           *   - i in [0, DeclOuts - 1): use Op->getResult(i).
+           *   - i in [DeclOuts - 1, A.LHS.size()): unpack from the cell
+           *     at index (i - (DeclOuts - 1) + 1). */
+          for (size_t i = 0; i < A.LHS.size(); ++i) {
+            if (!A.LHS[i]) continue;
+            mlir::Value Val;
+            if (i + 1 < DeclOuts) {
+              Val = Op->getResult(i);
+            } else {
+              /* Cell unpack: matlab_cell_get_mat returns ptr; for f64
+               * cells matlab_cell_get_f64 returns f64. We default to
+               * the matrix entry — scalar f64s ride through ptr-typed
+               * slots fine because LowerScalarsToArith / disp paths
+               * handle the unbox at use time. */
+              size_t CellIdx = i - (DeclOuts - 1) + 1;
+              mlir::Value Idx = mlir::arith::ConstantOp::create(
+                  B, loc(A.Range), F64,
+                  mlir::FloatAttr::get(F64, (double)CellIdx));
+              mlir::NamedAttribute GetCal(
+                  mlir::StringAttr::get(&MCtx, "callee"),
+                  mlir::StringAttr::get(&MCtx, "matlab_cell_get_mat"));
+              Val = emitUnreg("matlab.call_builtin",
+                              {VarargoutCell, Idx}, PtrTy,
+                              loc(A.Range), {GetCal});
+            }
+            lowerLValueStore(*A.LHS[i], Val);
+          }
+          return;
+        }
       }
     }
 
