@@ -1472,6 +1472,24 @@ def obj_new(*_ignored):
     _obj_store[oid] = obj  # keep a strong ref + a lookup path for legacy callers
     return obj
 
+def obj_clone(o):
+    """Phase 3 — value-class shallow clone. Mirrors the C runtime's
+    matlab_obj_clone: a fresh object with independent property
+    storage, but shared matrix-pointer fields. The copy gets its own
+    _oid registration so identity tests don't conflate the two."""
+    global _obj_next_id
+    if o is None: return obj_new()
+    src = _resolve_obj(o)
+    new = obj_new()
+    if hasattr(src, '__dict__'):
+        for k, v in src.__dict__.items():
+            if k.startswith('_'): continue
+            new.__dict__[k] = v
+    elif isinstance(src, dict):
+        for k, v in src.items():
+            new.__dict__[k] = v
+    return new
+
 def _resolve_obj(oid_or_obj):
     """Accept either a `_MatObj` instance or the legacy integer oid."""
     if isinstance(oid_or_obj, _MatObj): return oid_or_obj

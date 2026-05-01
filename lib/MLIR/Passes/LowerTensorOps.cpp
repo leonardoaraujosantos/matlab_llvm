@@ -1757,6 +1757,25 @@ bool TensorLowering::rewriteBuiltinCalls() {
       Changed = true;
       continue;
     }
+    /* Phase 3: matlab_obj_clone takes a single ptr (the source obj)
+     * and returns a fresh ptr. Used at value-class assignment sites
+     * to give each binding its own copy. The operand type may still
+     * be `none` at this point — class-instance slots haven't been
+     * retyped yet — so we wait for the operand to settle into ptr
+     * before lowering. */
+    if (Name == "matlab_obj_clone" && Call->getNumOperands() == 1 &&
+        Call->getNumResults() == 1) {
+      Value Arg = Call->getOperand(0);
+      if (Arg.getType() != PtrTy) continue;
+      B.setInsertionPoint(Call);
+      auto Fn = rt("matlab_obj_clone", PtrTy, {PtrTy});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn, ValueRange{Arg});
+      carryName(Call, NC);
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
 
     /* File I/O. fopen takes two matlab_string* pointers (the frontend
      * wraps raw char/string literals for us); fclose / feof take an f64

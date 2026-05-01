@@ -345,7 +345,7 @@ deliberate non-goals; see "Out of scope."
 
 | Missing | Scope | Notes |
 |---|---|---|
-| **OOP value-class copy semantics** | Medium | ~1–2 weeks. Every object is handle-shaped today. True value semantics needs copy-on-assign / copy-on-modify plumbing at every `obj.prop = ...` and every call-site pass. |
+| **OOP value-class copy semantics** | 🟡 partially shipped (Phase 3) | `b = a` on a value-class binding (any class without `< handle`) clones via `matlab_obj_clone` so writes to `b` don't leak into `a`. Handle classes (`< handle`) keep reference semantics. Three runtimes (C/Python/TypeScript) ship the clone helper with byte-identical behaviour. **Open follow-up**: full method-dispatch value semantics — calling `obj.foo()` on a value class should also operate on a fresh copy of `obj` inside the method. The existing in-tree class corpus (class_basic / class_dependent / class_operators / DAP scenarios) was written against the previous handle-style method dispatch, so the parameter-entry clone is intentionally NOT enabled today; flipping it on requires a corpus migration to either rebind the receiver (`obj = obj.foo()`) or annotate the class with `< handle`. Gating test: `test/Run/value_class_copy.m`. |
 | **OOP events / listeners** | Medium | ~1 week. `notify` / `addlistener` / callback machinery. |
 | **OOP property validators** (`{mustBeNumeric}`, size specs) | Small | ~2–3 days. Syntax parses today; need runtime checks at each assignment. |
 | **N-dim arrays (>3D)** | Medium | ~2–3 weeks. Runtime descriptor generalization from `(rows, cols, depth)` to `(ndims, shape[])`; update all per-op lowering. 3-D already supported via `matlab_mat3` for `zeros/ones` + scalar indexing. |

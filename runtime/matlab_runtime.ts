@@ -1708,6 +1708,15 @@ export function cell_concat_col(a: any, b: any): Cell2D {
 
 export function obj_new(): any { return {}; }
 
+/* Phase 3 — value-class shallow clone. Fresh object with the same own-
+ * properties as the source. Mirror the C and Python runtimes. */
+export function obj_clone(o: any): any {
+  if (o == null) return {};
+  const out: Record<string, any> = {};
+  for (const k of Object.keys(o)) out[k] = o[k];
+  return out;
+}
+
 export function obj_set_f64(obj: any, name: string, ...rest: any[]): void {
   // The C ABI is `obj_set_f64(obj, name_ptr, name_len, value)`. The
   // `-emit-typescript` backend drops `name_len`, so the natural call

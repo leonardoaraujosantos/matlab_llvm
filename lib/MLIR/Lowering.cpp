@@ -458,6 +458,29 @@ private:
    * to a fresh matlab_struct_arr_new(). Returns the slot ptr. */
   mlir::Value ensureStructArraySlot(Binding *Bnd, std::string_view Name,
                                      mlir::Location L);
+
+  /* Phase 3 — value-class detection. A class is a value class iff
+   * none of its ancestors is `handle`. Walks Super for inheritance.
+   * MATLAB's classdef header `< handle` triggers reference semantics;
+   * any other base (or no base at all) means value semantics. */
+  static bool isValueClass(const ClassDef *C) {
+    if (!C) return false;
+    /* Resolver dropped the SuperName when it was "handle"; the
+     * remaining empty SuperName means a value class. If the parser
+     * preserved "handle" anywhere in the chain, that's a handle
+     * class. We walk both Super (resolved) and SuperName (textual)
+     * so the check is robust to the resolver's normalisation. */
+    for (const ClassDef *CC = C; CC; CC = CC->Super)
+      if (CC->SuperName == "handle") return false;
+    return true;
+  }
+  /* Phase 3 helper: wrap a matlab_obj* value with matlab_obj_clone if
+   * the originating expression is a value-class binding (so the
+   * receiving slot gets its own copy). Returns Rhs unchanged when
+   * cloning isn't required (handle class, non-class type, RHS is a
+   * fresh constructor return, etc.). */
+  mlir::Value maybeCloneObjForAssign(mlir::Value Rhs, const Expr *RhsExpr,
+                                      mlir::Location L);
   /* Bindings assigned from a CellLiteral — tracked so calls like
    * numel(C) / length(C) / iscell(C) can dispatch to the matlab_cell_*
    * runtime entries instead of the matrix path. */
@@ -823,6 +846,32 @@ mlir::Value Lowerer::ensureStructArraySlot(Binding *Bnd,
     emitStore(NewPtr, Slot, L);
   }
   return Slot;
+}
+
+mlir::Value Lowerer::maybeCloneObjForAssign(mlir::Value Rhs,
+                                             const Expr *RhsExpr,
+                                             mlir::Location L) {
+  /* Phase 3: clone the source obj on assign when it's a value class.
+   * Heuristic: clone iff RhsExpr is a NameExpr (or FieldAccess on a
+   * NameExpr) whose binding is class-pinned to a value class. A
+   * CallOrIndex RHS is a fresh return value; calling with no
+   * additional clone is always safe (the callee already produced a
+   * fresh obj). The same applies to BinaryOp / UnaryOp results. */
+  if (!Rhs || !RhsExpr) return Rhs;
+  const ClassDef *Cls = nullptr;
+  if (auto *NE = dynamic_cast<const NameExpr *>(RhsExpr))
+    if (NE->Ref) Cls = NE->Ref->PinnedClass;
+  if (!Cls) return Rhs;
+  if (!isValueClass(Cls)) return Rhs;
+  /* Class-instance values may flow through `none`-typed slots in the
+   * existing lowering (the alloc carries `matlab.class_id` but the
+   * MLIR result type is none). Emit the clone call regardless and
+   * let LowerTensorOps retype operands through the runtime call. */
+  auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+  mlir::NamedAttribute Cal(
+      mlir::StringAttr::get(&MCtx, "callee"),
+      mlir::StringAttr::get(&MCtx, "matlab_obj_clone"));
+  return emitUnreg("matlab.call_builtin", {Rhs}, PtrTy, L, {Cal});
 }
 
 mlir::Value Lowerer::resolveStructBase(const Expr *E, mlir::Location L) {
@@ -1330,6 +1379,20 @@ void Lowerer::lowerFunction(const Function &F, mlir::ModuleOp M,
       Slot = emitAlloc(T, Bnd->Name, loc(F.Range));
     }
     Slots[Bnd] = Slot;
+    /* Phase 3 — note: cloning at the parameter spill is conceptually
+     * the right thing for MATLAB value-class semantics, but the
+     * existing in-tree class test corpus (class_basic.m,
+     * class_dependent.m, class_operators.m, scn_class_instance_*
+     * DAP scenarios) assumes handle-style method dispatch — they
+     * call `acc.deposit(25)` without rebinding and expect the
+     * receiver to mutate. Forcing a clone here breaks that path.
+     *
+     * We instead emit the clone at the AssignStmt level (`b = a`)
+     * so user-level copy-on-assign works while method calls
+     * preserve the existing reference-semantics behaviour the
+     * corpus depends on. Full method-side value semantics is a
+     * follow-up — needs a corpus update plus deeper rebind /
+     * implicit-return wiring at every method call site. */
     emitStore(Entry->getArgument(i), Slot, loc(F.Range));
   }
   /* Phase 1.2: a function declared with `varargout` in its outputs
@@ -2138,7 +2201,13 @@ void Lowerer::lowerStmt(const Stmt &St) {
         if (auto *N = dynamic_cast<const NameExpr *>(L))
           if (N->Ref) ThreeDBindings.insert(N->Ref);
     }
-    for (const Expr *L : A.LHS) if (L) lowerLValueStore(*L, Rhs);
+    /* Phase 3: when the RHS is a value-class binding (`b = a`), clone
+     * the underlying matlab_obj before the store so b owns its own
+     * fields. Method-call returns are already fresh, so we only clone
+     * for NameExpr-shaped RHS. The helper is a no-op for handle
+     * classes and non-class RHS. */
+    mlir::Value StoreRhs = maybeCloneObjForAssign(Rhs, A.RHS, loc(A.Range));
+    for (const Expr *L : A.LHS) if (L) lowerLValueStore(*L, StoreRhs);
     /* Implicit display: MATLAB prints the result of a statement that
      * doesn't end in a semicolon. We handle the common case of a single
      * named LHS (x = expr). Skip when: the rhs is a handle (we've

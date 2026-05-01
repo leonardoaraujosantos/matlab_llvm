@@ -3583,6 +3583,42 @@ double matlab_obj_class_id(matlab_obj *o) {
     return o ? (double)o->class_id : 0.0;
 }
 
+/* Phase 3 — value-class copy semantics. matlab_obj_clone produces a
+ * fresh matlab_obj that owns independent name / kinds / ptr arrays
+ * but shares property *values* (matrix-pointer fields are not deep-
+ * copied; the obj's own class_id is preserved). MATLAB's value-class
+ * rule is "copy-on-assign + mutations are local to the holder";
+ * since each property write goes through matlab_obj_set_*, which
+ * overwrites the slot in place, the shallow-copy here is sufficient
+ * for the read/write field semantics. Nested obj-fields are NOT
+ * cloned — those are handle-style references and would need a
+ * recursive clone if Phase 4 wants stricter value semantics. */
+extern "C" matlab_obj *matlab_obj_clone(matlab_obj *o) {
+    if (!o) return matlab_obj_new(0);
+    matlab_obj *c = matlab_obj_new(o->class_id);
+    /* Reserve enough capacity. */
+    while (c->capacity < o->nfields) {
+        int32_t newcap = c->capacity ? c->capacity * 2 : MATLAB_STRUCT_CAP_INIT;
+        c->names    = (char **)realloc(c->names,    (size_t)newcap * sizeof(char *));
+        c->kinds    = (int32_t *)realloc(c->kinds,  (size_t)newcap * sizeof(int32_t));
+        c->f64_vals = (double *)realloc(c->f64_vals,(size_t)newcap * sizeof(double));
+        c->ptr_vals = (void **)realloc(c->ptr_vals, (size_t)newcap * sizeof(void *));
+        for (int32_t i = c->capacity; i < newcap; ++i) {
+            c->names[i] = NULL; c->kinds[i] = 0;
+            c->f64_vals[i] = 0.0; c->ptr_vals[i] = NULL;
+        }
+        c->capacity = newcap;
+    }
+    for (int32_t i = 0; i < o->nfields; ++i) {
+        c->names[i]    = strdup(o->names[i] ? o->names[i] : "");
+        c->kinds[i]    = o->kinds[i];
+        c->f64_vals[i] = o->f64_vals[i];
+        c->ptr_vals[i] = o->ptr_vals[i];
+    }
+    c->nfields = o->nfields;
+    return c;
+}
+
 /* Each accessor just forwards to the matlab_struct_* variant, because
  * the layout is identical through the struct prefix. Keeping these
  * as distinct symbols lets the frontend pick the name that reflects
