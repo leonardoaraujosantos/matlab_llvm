@@ -1551,6 +1551,41 @@ export function struct_rmfield(s: any, name: string, _n?: number): any {
   return s;
 }
 
+// Phase 2 — struct arrays. A vector of plain objects, 1-based indexing,
+// auto-grow on write to mirror the C ABI. iscell / iscell_2d / numel /
+// size all accept either a struct array or a struct.
+
+export function struct_arr_new(): any[] { return []; }
+
+export function struct_arr_get_or_create(a: any[], i: number): any {
+  const idx = (i | 0) - 1;
+  if (idx < 0) return {};
+  while (a.length <= idx) a.push({});
+  return a[idx];
+}
+
+export function struct_arr_get(a: any[], i: number): any {
+  const idx = (i | 0) - 1;
+  if (idx < 0 || idx >= a.length) return {};
+  return a[idx];
+}
+
+export function struct_arr_length(a: any[]): number {
+  return a ? a.length : 0;
+}
+
+export function struct_arr_numel(a: any[]): number {
+  return struct_arr_length(a);
+}
+
+export function struct_arr_size_dim(a: any[], d: number): number {
+  const dn = d | 0;
+  const n = a ? a.length : 0;
+  if (dn === 1) return n > 0 ? 1 : 0;
+  if (dn === 2) return n;
+  return 1;
+}
+
 // --- cells ----------------------------------------------------------------
 
 export function cell_new(n: number): any[] {

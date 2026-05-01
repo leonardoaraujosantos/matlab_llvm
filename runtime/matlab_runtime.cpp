@@ -5282,6 +5282,91 @@ matlab_struct *matlab_struct_get_child_struct(matlab_struct *s,
     return child;
 }
 
+/* ====================================================================== */
+/* Phase 2 — Struct arrays.
+ *
+ * `s(i).x = v` and `s(i).x` read. A matlab_struct_arr is a 1-D vector of
+ * matlab_struct* pointers; element 1..N each hold their own field set.
+ * Auto-grows on OOB write (MATLAB fills the gap with empty structs);
+ * reads OOB return an empty struct so the field-get path silently
+ * returns 0 / NULL rather than dereferencing garbage.
+ *
+ * The DAP / scope inspector treats struct_arr as a separate "kind" via
+ * matlab_dbg_ws_kind == 6 (handled by the Lowering side: workspace
+ * stores/loads use matlab_ws_set_struct_arr / _get_struct_arr).
+ * ====================================================================== */
+
+struct matlab_struct_arr_s {
+    int32_t n;
+    int32_t cap;
+    matlab_struct **elems;
+};
+typedef struct matlab_struct_arr_s matlab_struct_arr;
+
+static void struct_arr_grow_to(matlab_struct_arr *a, int32_t need) {
+    if (a->cap >= need) return;
+    int32_t NewCap = a->cap ? a->cap : 4;
+    while (NewCap < need) NewCap *= 2;
+    a->elems = (matlab_struct **)realloc(a->elems,
+                                          (size_t)NewCap * sizeof(matlab_struct *));
+    for (int32_t i = a->cap; i < NewCap; ++i) a->elems[i] = NULL;
+    a->cap = NewCap;
+}
+
+extern "C" matlab_struct_arr *matlab_struct_arr_new(void) {
+    return (matlab_struct_arr *)calloc(1, sizeof(matlab_struct_arr));
+}
+
+/* Auto-grows to index i (1-based) and returns the element struct
+ * pointer, creating empty structs at any newly-reachable indices. */
+extern "C" matlab_struct *matlab_struct_arr_get_or_create(
+        matlab_struct_arr *a, double i1) {
+    if (!a) return matlab_struct_new();
+    int32_t i = (int32_t)i1 - 1;
+    if (i < 0) return matlab_struct_new();
+    if (i >= a->cap) struct_arr_grow_to(a, i + 1);
+    /* Fill any gap (and the slot itself) with empty structs so reads
+     * via matlab_struct_arr_get on intermediate indices return a real
+     * struct rather than NULL. */
+    for (int32_t k = a->n; k <= i; ++k) {
+        if (!a->elems[k]) a->elems[k] = matlab_struct_new();
+    }
+    if (i >= a->n) a->n = i + 1;
+    if (!a->elems[i]) a->elems[i] = matlab_struct_new();
+    return a->elems[i];
+}
+
+/* Read-only access; OOB returns a fresh empty struct (so the
+ * downstream matlab_struct_get_* call returns 0 / NULL cleanly
+ * instead of segfaulting). The empty struct is leaked here, which
+ * is fine for the test corpus and matches the leak shape of
+ * matlab_struct_get_mat / mat_alloc(0,0) on missing fields. */
+extern "C" matlab_struct *matlab_struct_arr_get(matlab_struct_arr *a, double i1) {
+    if (!a) return matlab_struct_new();
+    int32_t i = (int32_t)i1 - 1;
+    if (i < 0 || i >= a->n) return matlab_struct_new();
+    if (!a->elems[i]) return matlab_struct_new();
+    return a->elems[i];
+}
+
+extern "C" double matlab_struct_arr_length(matlab_struct_arr *a) {
+    if (!a) return 0.0;
+    return (double)a->n;
+}
+
+extern "C" double matlab_struct_arr_numel(matlab_struct_arr *a) {
+    return matlab_struct_arr_length(a);
+}
+
+extern "C" double matlab_struct_arr_size_dim(matlab_struct_arr *a, double dim) {
+    /* MATLAB struct arrays default to a row vector (1 x N). */
+    if (!a) return 0.0;
+    int d = (int)dim;
+    if (d == 1) return a->n > 0 ? 1.0 : 0.0;
+    if (d == 2) return (double)a->n;
+    return 1.0;
+}
+
 /* ---------------------------------------------------------------------- */
 /* Global / persistent storage.
  *

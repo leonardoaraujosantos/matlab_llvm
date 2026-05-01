@@ -1297,6 +1297,38 @@ def struct_rmfield(s, name, n=None):
     return s
 
 
+# Phase 2 — struct arrays. Mirrors the C runtime: a vector of structs
+# with auto-grow on write and 1-based indexing.
+
+def struct_arr_new():
+    return []
+
+def struct_arr_get_or_create(a, i):
+    idx = int(i) - 1
+    if idx < 0: return _Struct()
+    while len(a) <= idx:
+        a.append(_Struct())
+    return a[idx]
+
+def struct_arr_get(a, i):
+    idx = int(i) - 1
+    if idx < 0 or idx >= len(a): return _Struct()
+    return a[idx]
+
+def struct_arr_length(a):
+    return float(len(a)) if a is not None else 0.0
+
+def struct_arr_numel(a):
+    return struct_arr_length(a)
+
+def struct_arr_size_dim(a, d):
+    d = int(d)
+    n = len(a) if a is not None else 0
+    if d == 1: return 1.0 if n > 0 else 0.0
+    if d == 2: return float(n)
+    return 1.0
+
+
 # --- cells ----------------------------------------------------------------
 
 def cell_new(n):

@@ -1296,6 +1296,65 @@ bool TensorLowering::rewriteBuiltinCalls() {
       Changed = true;
       continue;
     }
+    /* Phase 2: struct array runtime. _new takes no operands; _get and
+     * _get_or_create take (arr, i) f64; _length / _numel take one
+     * arg; _size_dim takes (arr, dim). */
+    if (Name == "matlab_struct_arr_new" && Call->getNumResults() == 1 &&
+        Call->getNumOperands() == 0) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt(Name, PtrTy, {});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn, ValueRange{});
+      carryName(Call, NC);
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+    if ((Name == "matlab_struct_arr_get" ||
+         Name == "matlab_struct_arr_get_or_create") &&
+        Call->getNumResults() == 1 && Call->getNumOperands() == 2 &&
+        Call->getOperand(0).getType() == PtrTy &&
+        Call->getOperand(1).getType() == F64) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt(Name, PtrTy, {PtrTy, F64});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                      ValueRange{Call->getOperand(0),
+                                                 Call->getOperand(1)});
+      carryName(Call, NC);
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+    if ((Name == "matlab_struct_arr_length" ||
+         Name == "matlab_struct_arr_numel") &&
+        Call->getNumResults() == 1 && Call->getNumOperands() == 1 &&
+        Call->getOperand(0).getType() == PtrTy) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt(Name, F64, {PtrTy});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                      ValueRange{Call->getOperand(0)});
+      carryName(Call, NC);
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+    if (Name == "matlab_struct_arr_size_dim" &&
+        Call->getNumResults() == 1 && Call->getNumOperands() == 2 &&
+        Call->getOperand(0).getType() == PtrTy &&
+        Call->getOperand(1).getType() == F64) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt(Name, F64, {PtrTy, F64});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                      ValueRange{Call->getOperand(0),
+                                                 Call->getOperand(1)});
+      carryName(Call, NC);
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
 
     /* Workspace management commands: who / whos / clear take no
      * operands; clear_one takes a single const_char name. Delegate

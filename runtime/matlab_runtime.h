@@ -558,6 +558,18 @@ double matlab_struct_get_f64(matlab_struct *s, const char *name, int64_t len);
 matlab_mat *matlab_struct_get_mat(matlab_struct *s, const char *name,
                                   int64_t len);
 double matlab_struct_has_field(matlab_struct *s, const char *name, int64_t len);
+/* Phase 2 — struct arrays (`s(i).x`). matlab_struct_arr* holds a
+ * vector of matlab_struct* elements; the 1-based indexing path
+ * auto-grows on write and returns empty structs on OOB read. */
+typedef struct matlab_struct_arr_s matlab_struct_arr;
+matlab_struct_arr *matlab_struct_arr_new(void);
+matlab_struct    *matlab_struct_arr_get_or_create(matlab_struct_arr *a,
+                                                  double i1);
+matlab_struct    *matlab_struct_arr_get(matlab_struct_arr *a, double i1);
+double            matlab_struct_arr_length(matlab_struct_arr *a);
+double            matlab_struct_arr_numel(matlab_struct_arr *a);
+double            matlab_struct_arr_size_dim(matlab_struct_arr *a, double dim);
+
 matlab_struct *matlab_struct_get_child_struct(matlab_struct *s,
                                               const char *name, int64_t len);
 

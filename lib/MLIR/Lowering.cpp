@@ -445,6 +445,19 @@ private:
    * entries instead of the generic struct-get path, since the error
    * info lives outside a real matlab_struct. */
   std::unordered_set<Binding *> CatchBindings;
+  /* Phase 2: bindings that hold a matlab_struct_arr * (any binding
+   * that has been the base of an `s(i).x = ...` assignment). The
+   * presence in this set switches read paths (`s(i).x`, `length(s)`,
+   * `numel(s)`) over to the struct_arr runtime entries. */
+  std::unordered_set<Binding *> StructArrayBindings;
+  /* Per-struct-array binding: the slot was already initialised with
+   * matlab_struct_arr_new() at function entry. Avoids re-initialising
+   * on every `s(i).x = ...` assignment. */
+  std::unordered_set<Binding *> StructArrayInitialised;
+  /* Phase 2 helper: ensure the binding has a ptr slot pre-initialised
+   * to a fresh matlab_struct_arr_new(). Returns the slot ptr. */
+  mlir::Value ensureStructArraySlot(Binding *Bnd, std::string_view Name,
+                                     mlir::Location L);
   /* Bindings assigned from a CellLiteral — tracked so calls like
    * numel(C) / length(C) / iscell(C) can dispatch to the matlab_cell_*
    * runtime entries instead of the matrix path. */
@@ -765,6 +778,47 @@ mlir::Value Lowerer::ensureStructSlot(Binding *Bnd, std::string_view Name,
     mlir::NamedAttribute Cal(
         mlir::StringAttr::get(&MCtx, "callee"),
         mlir::StringAttr::get(&MCtx, "matlab_struct_new"));
+    mlir::Value NewPtr = emitUnreg("matlab.call_builtin", {}, PtrTy, L, {Cal});
+    emitStore(NewPtr, Slot, L);
+  }
+  return Slot;
+}
+
+mlir::Value Lowerer::ensureStructArraySlot(Binding *Bnd,
+                                            std::string_view Name,
+                                            mlir::Location L) {
+  /* Phase 2: a slot for a matlab_struct_arr*, initialised once with
+   * matlab_struct_arr_new() at the function's entry. Mirrors
+   * ensureStructSlot but uses the struct_arr runtime constructor. */
+  auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+  auto It = Slots.find(Bnd);
+  mlir::Value Slot;
+  if (It != Slots.end()) {
+    Slot = It->second;
+  } else {
+    mlir::OpBuilder::InsertionGuard G(B);
+    auto *InsBlock = B.getInsertionBlock();
+    mlir::Operation *P = InsBlock ? InsBlock->getParentOp() : nullptr;
+    while (P && !mlir::isa<mlir::func::FuncOp>(P)) {
+      auto *PB = P->getBlock();
+      P = PB ? PB->getParentOp() : nullptr;
+    }
+    if (P) B.setInsertionPointToStart(
+        &mlir::cast<mlir::func::FuncOp>(P).getBody().front());
+    mlir::NamedAttribute NA(
+        mlir::StringAttr::get(&MCtx, "name"),
+        mlir::FlatSymbolRefAttr::get(&MCtx, std::string(Name)));
+    Slot = emitUnreg("matlab.alloc", {}, PtrTy, L, {NA});
+    Slots[Bnd] = Slot;
+  }
+  if (!StructArrayInitialised.count(Bnd)) {
+    StructArrayInitialised.insert(Bnd);
+    mlir::OpBuilder::InsertionGuard G(B);
+    auto *SlotOp = Slot.getDefiningOp();
+    if (SlotOp) B.setInsertionPointAfter(SlotOp);
+    mlir::NamedAttribute Cal(
+        mlir::StringAttr::get(&MCtx, "callee"),
+        mlir::StringAttr::get(&MCtx, "matlab_struct_arr_new"));
     mlir::Value NewPtr = emitUnreg("matlab.call_builtin", {}, PtrTy, L, {Cal});
     emitStore(NewPtr, Slot, L);
   }
@@ -2768,9 +2822,43 @@ void Lowerer::lowerLValueStore(const Expr &LHS, mlir::Value Rhs) {
      * s.a didn't exist yet.
      *
      * If the base is a class-pinned variable, route to matlab_obj_set_*
-     * instead so class_id + property table is preserved. */
+     * instead so class_id + property table is preserved.
+     *
+     * Phase 2: s(i).x = Rhs — Base is `CallOrIndex(NameExpr s, [i])`.
+     * Auto-promote `s` to a struct array; route to
+     * matlab_struct_arr_get_or_create + matlab_struct_set_*. */
     auto &F = static_cast<const FieldAccess &>(LHS);
     auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+    if (auto *CI = dynamic_cast<const CallOrIndex *>(F.Base)) {
+      auto *NE = dynamic_cast<const NameExpr *>(CI->Callee);
+      if (NE && NE->Ref &&
+          NE->Ref->Kind == BindingKind::Var &&
+          !CellBindings.count(NE->Ref) &&
+          CI->Args.size() == 1 && CI->Args[0]) {
+        StructArrayBindings.insert(NE->Ref);
+        mlir::Value Slot = ensureStructArraySlot(NE->Ref, NE->Name,
+                                                  loc(F.Range));
+        mlir::Value Arr = emitLoad(Slot, PtrTy, loc(F.Range));
+        mlir::Value Idx = lowerExpr(*CI->Args[0]);
+        mlir::NamedAttribute GCal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "matlab_struct_arr_get_or_create"));
+        mlir::Value Elem = emitUnreg("matlab.call_builtin", {Arr, Idx},
+                                      PtrTy, loc(F.Range), {GCal});
+        mlir::Value NameV = emitFieldNameChar(F.Field, loc(F.Range));
+        bool IsMat = Rhs && (Rhs.getType() == PtrTy ||
+                             mlir::isa<mlir::RankedTensorType,
+                                       mlir::UnrankedTensorType>(Rhs.getType()));
+        llvm::StringRef Callee = IsMat ? "matlab_struct_set_mat"
+                                        : "matlab_struct_set_f64";
+        mlir::NamedAttribute SCal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, Callee));
+        emitUnregOp("matlab.call_builtin", {Elem, NameV, Rhs},
+                    {mlir::NoneType::get(&MCtx)}, loc(F.Range), {SCal});
+        return;
+      }
+    }
     const ClassDef *PinnedCls = nullptr;
     if (auto *BN = dynamic_cast<const NameExpr *>(F.Base))
       if (BN->Ref && BN->Ref->PinnedClass) PinnedCls = BN->Ref->PinnedClass;
@@ -4370,6 +4458,42 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             return emitUnreg("matlab.call_builtin", {Arg}, F64, L, {Cal});
           }
       }
+      /* Phase 2: numel(S) / length(S) on a struct-array binding ->
+       * matlab_struct_arr_length. */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          (N->Name == "numel" || N->Name == "length") &&
+          C.Args.size() == 1) {
+        if (auto *ArgN = dynamic_cast<const NameExpr *>(C.Args[0]))
+          if (ArgN->Ref && StructArrayBindings.count(ArgN->Ref)) {
+            auto F64 = mlir::Float64Type::get(&MCtx);
+            mlir::Value Slot = ensureStructArraySlot(ArgN->Ref,
+                                                     ArgN->Name, L);
+            auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+            mlir::Value Arr = emitLoad(Slot, PtrTy, L);
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_struct_arr_length"));
+            return emitUnreg("matlab.call_builtin", {Arr}, F64, L, {Cal});
+          }
+      }
+      /* size(S, dim) on a struct-array binding -> matlab_struct_arr_size_dim. */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          N->Name == "size" && C.Args.size() == 2) {
+        if (auto *ArgN = dynamic_cast<const NameExpr *>(C.Args[0]))
+          if (ArgN->Ref && StructArrayBindings.count(ArgN->Ref)) {
+            auto F64 = mlir::Float64Type::get(&MCtx);
+            auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+            mlir::Value Slot = ensureStructArraySlot(ArgN->Ref,
+                                                     ArgN->Name, L);
+            mlir::Value Arr = emitLoad(Slot, PtrTy, L);
+            mlir::Value D = lowerExpr(*C.Args[1]);
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_struct_arr_size_dim"));
+            return emitUnreg("matlab.call_builtin", {Arr, D},
+                             F64, L, {Cal});
+          }
+      }
       /* Phase 1.3: size(C, dim) on a known cell -> matlab_cell_size_dim.
        * Without this, size would route through the matrix runtime and
        * read garbage from the cell layout. */
@@ -4746,6 +4870,34 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
               mlir::FloatAttr::get(F64, Val));
           return emitUnreg("matlab.const_float", {}, F64, L, {VA});
         }
+      }
+    }
+    /* Phase 2: s(i).x read — Base is `CallOrIndex(NameExpr s, [i])`
+     * where s is a struct-array binding. Pull the i-th element via
+     * matlab_struct_arr_get and field-get on the result. */
+    if (auto *CI = dynamic_cast<const CallOrIndex *>(F.Base)) {
+      auto *NE = dynamic_cast<const NameExpr *>(CI->Callee);
+      if (NE && NE->Ref && StructArrayBindings.count(NE->Ref) &&
+          CI->Args.size() == 1 && CI->Args[0]) {
+        mlir::Value Slot = ensureStructArraySlot(NE->Ref, NE->Name, L);
+        mlir::Value Arr = emitLoad(Slot, PtrTy, L);
+        mlir::Value Idx = lowerExpr(*CI->Args[0]);
+        mlir::NamedAttribute GCal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "matlab_struct_arr_get"));
+        mlir::Value Elem = emitUnreg("matlab.call_builtin", {Arr, Idx},
+                                      PtrTy, L, {GCal});
+        mlir::Value NameV = emitFieldNameChar(F.Field, L);
+        bool WantMat = mlir::isa<mlir::RankedTensorType,
+                                  mlir::UnrankedTensorType>(RT);
+        llvm::StringRef Callee = WantMat ? "matlab_struct_get_mat"
+                                          : "matlab_struct_get_f64";
+        mlir::NamedAttribute SCal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, Callee));
+        mlir::Type ResTy = WantMat ? (mlir::Type)PtrTy : (mlir::Type)F64;
+        return emitUnreg("matlab.call_builtin", {Elem, NameV},
+                         ResTy, L, {SCal});
       }
     }
     const ClassDef *PinnedCls = nullptr;
