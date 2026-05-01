@@ -558,6 +558,26 @@ double matlab_struct_get_f64(matlab_struct *s, const char *name, int64_t len);
 matlab_mat *matlab_struct_get_mat(matlab_struct *s, const char *name,
                                   int64_t len);
 double matlab_struct_has_field(matlab_struct *s, const char *name, int64_t len);
+/* Phase 4 — containers.Map / dictionary. A flat key/value table with
+ * mixed key types (f64 or matlab_string *) and value types (f64 or
+ * matlab_mat *). v1 backs both `containers.Map` and `dictionary` with
+ * the same descriptor. */
+typedef struct matlab_dict_s matlab_dict;
+matlab_dict *matlab_dict_new(void);
+void         matlab_dict_set_str_f64(matlab_dict *d, void *key, double v);
+void         matlab_dict_set_str_mat(matlab_dict *d, void *key, matlab_mat *m);
+void         matlab_dict_set_num_f64(matlab_dict *d, double k, double v);
+void         matlab_dict_set_num_mat(matlab_dict *d, double k, matlab_mat *m);
+double       matlab_dict_get_str_f64(matlab_dict *d, void *key);
+matlab_mat  *matlab_dict_get_str_mat(matlab_dict *d, void *key);
+double       matlab_dict_get_num_f64(matlab_dict *d, double k);
+matlab_mat  *matlab_dict_get_num_mat(matlab_dict *d, double k);
+double       matlab_dict_has_str(matlab_dict *d, void *key);
+double       matlab_dict_has_num(matlab_dict *d, double k);
+double       matlab_dict_length(matlab_dict *d);
+double       matlab_dict_remove_str(matlab_dict *d, void *key);
+double       matlab_dict_remove_num(matlab_dict *d, double k);
+
 /* Phase 2 — struct arrays (`s(i).x`). matlab_struct_arr* holds a
  * vector of matlab_struct* elements; the 1-based indexing path
  * auto-grows on write and returns empty structs on OOB read. */

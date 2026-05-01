@@ -206,7 +206,7 @@ Out of scope:
 | Cell: 2-D literals + `C{r, k}` indexing | ✅ shipped (Phase 1.3) | `{a, b; c, d}` -> `matlab_cell_new_2d` + per-cell `matlab_cell_set_<f64\|mat>_2d`; `C{r, k}` reads / writes via the matching get / set entries. `size(C, dim)` routes to `matlab_cell_size_dim`. Python (`cell_*_2d`) and TypeScript (`Cell2D` wrapper) runtimes ship with byte-identical output. |
 | Cell: concatenation (`[A, B]`, `[A; B]`) | ✅ shipped (Phase 1.3) | Bracket-concat of all-cell elements chains `matlab_cell_concat_row` / `_col`; assignment auto-tags the LHS as a cell binding so `size` / `iscell` keep dispatching through the cell runtime. Spread-into-cell (`{C{:}, x}`) still missing — needs `varargin`-style unpacking at the literal site. |
 | `cellfun`, `arrayfun` (beyond trivial cases) | 🟡 | Registered; not all wired |
-| Containers.Map | ❌ | |
+| `containers.Map` / `dictionary` | ✅ shipped (Phase 4) | New `matlab_dict` runtime descriptor: a flat key/value table where keys may be f64 scalars or matlab_string * and values may be f64 scalars or matlab_mat *. Surfaces: `containers.Map()`, `dictionary()`, `dictionary(k1,v1,k2,v2,...)`, indexed read / write `m(k) / m(k) = v` (with CharLiteral keys auto-coerced to matlab_string), `length(m)`, `isKey(m,k)`, `remove(m,k)`. Python (list-of-tuples) and TypeScript (typed pairs array) runtimes ship parity. Lookup is O(N) — fine for the small dictionaries typical MATLAB programs build. Gating test: `test/Run/dict_basic.m`. |
 
 ### I/O
 

@@ -3583,6 +3583,237 @@ double matlab_obj_class_id(matlab_obj *o) {
     return o ? (double)o->class_id : 0.0;
 }
 
+/* ====================================================================== */
+/* Phase 4 — containers.Map / dictionary.
+ *
+ * A simple key/value map. Keys are either f64 scalars or strings
+ * (matlab_string *). Values are either f64 scalars or matrix pointers
+ * (matlab_mat *). Internally a flat parallel-array structure with O(N)
+ * lookup — fine for the test corpus and the typical small dictionaries
+ * MATLAB programs build.
+ *
+ * MATLAB exposes two surface APIs (containers.Map predates dictionary)
+ * but the lowering / runtime treats them identically. Constructors:
+ *   containers.Map()
+ *   containers.Map(KeyType, ValueType)            -- keys/values typed
+ *   dictionary()
+ *   dictionary(k1, v1, k2, v2, ...)               -- inline init
+ *
+ * Indexing: m(k) read / m(k) = v write.
+ * ====================================================================== */
+
+struct matlab_dict_s {
+    int32_t n;
+    int32_t cap;
+    /* Per-slot key kind: 0 = f64, 1 = matlab_string *. */
+    int32_t *key_kinds;
+    double  *key_f64;
+    void   **key_str;
+    /* Per-slot value kind: 0 = f64, 1 = matlab_mat *. */
+    int32_t *val_kinds;
+    double  *val_f64;
+    void   **val_ptr;
+};
+typedef struct matlab_dict_s matlab_dict;
+
+static void dict_grow(matlab_dict *d, int32_t need) {
+    if (d->cap >= need) return;
+    int32_t newcap = d->cap ? d->cap : 4;
+    while (newcap < need) newcap *= 2;
+    d->key_kinds = (int32_t *)realloc(d->key_kinds, (size_t)newcap * sizeof(int32_t));
+    d->key_f64   = (double  *)realloc(d->key_f64,   (size_t)newcap * sizeof(double));
+    d->key_str   = (void   **)realloc(d->key_str,   (size_t)newcap * sizeof(void *));
+    d->val_kinds = (int32_t *)realloc(d->val_kinds, (size_t)newcap * sizeof(int32_t));
+    d->val_f64   = (double  *)realloc(d->val_f64,   (size_t)newcap * sizeof(double));
+    d->val_ptr   = (void   **)realloc(d->val_ptr,   (size_t)newcap * sizeof(void *));
+    for (int32_t i = d->cap; i < newcap; ++i) {
+        d->key_kinds[i] = 0; d->key_f64[i] = 0.0; d->key_str[i] = NULL;
+        d->val_kinds[i] = 0; d->val_f64[i] = 0.0; d->val_ptr[i] = NULL;
+    }
+    d->cap = newcap;
+}
+
+extern "C" matlab_dict *matlab_dict_new(void) {
+    return (matlab_dict *)calloc(1, sizeof(matlab_dict));
+}
+
+/* Inline accessors so this code compiles before matlab_string_s is
+ * defined later in the TU. matlab_string layout = { char *data,
+ * int64_t len }. */
+struct matlab_string_s_fwd_ {
+    char *data;
+    int64_t len;
+};
+static int32_t dict_find_str(matlab_dict *d, const char *s, int64_t len) {
+    if (!d) return -1;
+    for (int32_t i = 0; i < d->n; ++i) {
+        if (d->key_kinds[i] != 1) continue;
+        auto *ks = (struct matlab_string_s_fwd_ *)d->key_str[i];
+        if (!ks) continue;
+        if (ks->len == len && ks->data &&
+            memcmp(ks->data, s, (size_t)len) == 0) return i;
+    }
+    return -1;
+}
+
+static int32_t dict_find_f64(matlab_dict *d, double k) {
+    if (!d) return -1;
+    for (int32_t i = 0; i < d->n; ++i) {
+        if (d->key_kinds[i] == 0 && d->key_f64[i] == k) return i;
+    }
+    return -1;
+}
+
+static int32_t dict_reserve_str(matlab_dict *d, void *key) {
+    auto *ks = (struct matlab_string_s_fwd_ *)key;
+    int64_t kl = ks ? ks->len : 0;
+    const char *kd = ks ? ks->data : "";
+    int32_t idx = dict_find_str(d, kd, kl);
+    if (idx >= 0) return idx;
+    dict_grow(d, d->n + 1);
+    idx = d->n++;
+    d->key_kinds[idx] = 1;
+    d->key_str[idx] = key;
+    return idx;
+}
+
+static int32_t dict_reserve_f64(matlab_dict *d, double k) {
+    int32_t idx = dict_find_f64(d, k);
+    if (idx >= 0) return idx;
+    dict_grow(d, d->n + 1);
+    idx = d->n++;
+    d->key_kinds[idx] = 0;
+    d->key_f64[idx] = k;
+    return idx;
+}
+
+extern "C" void matlab_dict_set_str_f64(matlab_dict *d, void *key, double v) {
+    if (!d) return;
+    int32_t i = dict_reserve_str(d, key);
+    d->val_kinds[i] = 0; d->val_f64[i] = v; d->val_ptr[i] = NULL;
+}
+
+extern "C" void matlab_dict_set_str_mat(matlab_dict *d, void *key, matlab_mat *m) {
+    if (!d) return;
+    int32_t i = dict_reserve_str(d, key);
+    d->val_kinds[i] = 1; d->val_f64[i] = 0.0; d->val_ptr[i] = m;
+}
+
+extern "C" void matlab_dict_set_num_f64(matlab_dict *d, double k, double v) {
+    if (!d) return;
+    int32_t i = dict_reserve_f64(d, k);
+    d->val_kinds[i] = 0; d->val_f64[i] = v; d->val_ptr[i] = NULL;
+}
+
+extern "C" void matlab_dict_set_num_mat(matlab_dict *d, double k, matlab_mat *m) {
+    if (!d) return;
+    int32_t i = dict_reserve_f64(d, k);
+    d->val_kinds[i] = 1; d->val_f64[i] = 0.0; d->val_ptr[i] = m;
+}
+
+extern "C" double matlab_dict_get_str_f64(matlab_dict *d, void *key) {
+    if (!d) return 0.0;
+    auto *ks = (struct matlab_string_s_fwd_ *)key;
+    int32_t i = dict_find_str(d, ks ? ks->data : "", ks ? ks->len : 0);
+    if (i < 0) return 0.0;
+    if (d->val_kinds[i] == 0) return d->val_f64[i];
+    if (d->val_kinds[i] == 1 && d->val_ptr[i]) {
+        matlab_mat *m = (matlab_mat *)d->val_ptr[i];
+        if (m->rows == 1 && m->cols == 1) return m->data[0];
+    }
+    return 0.0;
+}
+
+extern "C" matlab_mat *matlab_dict_get_str_mat(matlab_dict *d, void *key) {
+    if (!d) return mat_alloc(0, 0);
+    auto *ks = (struct matlab_string_s_fwd_ *)key;
+    int32_t i = dict_find_str(d, ks ? ks->data : "", ks ? ks->len : 0);
+    if (i < 0) return mat_alloc(0, 0);
+    if (d->val_kinds[i] == 1 && d->val_ptr[i])
+        return (matlab_mat *)d->val_ptr[i];
+    if (d->val_kinds[i] == 0) {
+        matlab_mat *m = mat_alloc(1, 1);
+        m->data[0] = d->val_f64[i];
+        return m;
+    }
+    return mat_alloc(0, 0);
+}
+
+extern "C" double matlab_dict_get_num_f64(matlab_dict *d, double k) {
+    if (!d) return 0.0;
+    int32_t i = dict_find_f64(d, k);
+    if (i < 0) return 0.0;
+    if (d->val_kinds[i] == 0) return d->val_f64[i];
+    if (d->val_kinds[i] == 1 && d->val_ptr[i]) {
+        matlab_mat *m = (matlab_mat *)d->val_ptr[i];
+        if (m->rows == 1 && m->cols == 1) return m->data[0];
+    }
+    return 0.0;
+}
+
+extern "C" matlab_mat *matlab_dict_get_num_mat(matlab_dict *d, double k) {
+    if (!d) return mat_alloc(0, 0);
+    int32_t i = dict_find_f64(d, k);
+    if (i < 0) return mat_alloc(0, 0);
+    if (d->val_kinds[i] == 1 && d->val_ptr[i])
+        return (matlab_mat *)d->val_ptr[i];
+    if (d->val_kinds[i] == 0) {
+        matlab_mat *m = mat_alloc(1, 1);
+        m->data[0] = d->val_f64[i];
+        return m;
+    }
+    return mat_alloc(0, 0);
+}
+
+extern "C" double matlab_dict_has_str(matlab_dict *d, void *key) {
+    if (!d) return 0.0;
+    auto *ks = (struct matlab_string_s_fwd_ *)key;
+    return dict_find_str(d, ks ? ks->data : "", ks ? ks->len : 0) >= 0 ? 1.0 : 0.0;
+}
+
+extern "C" double matlab_dict_has_num(matlab_dict *d, double k) {
+    if (!d) return 0.0;
+    return dict_find_f64(d, k) >= 0 ? 1.0 : 0.0;
+}
+
+extern "C" double matlab_dict_length(matlab_dict *d) {
+    return d ? (double)d->n : 0.0;
+}
+
+extern "C" double matlab_dict_remove_str(matlab_dict *d, void *key) {
+    if (!d) return 0.0;
+    auto *ks = (struct matlab_string_s_fwd_ *)key;
+    int32_t i = dict_find_str(d, ks ? ks->data : "", ks ? ks->len : 0);
+    if (i < 0) return 0.0;
+    /* Shift down. */
+    for (int32_t k = i; k < d->n - 1; ++k) {
+        d->key_kinds[k] = d->key_kinds[k+1];
+        d->key_f64[k]   = d->key_f64[k+1];
+        d->key_str[k]   = d->key_str[k+1];
+        d->val_kinds[k] = d->val_kinds[k+1];
+        d->val_f64[k]   = d->val_f64[k+1];
+        d->val_ptr[k]   = d->val_ptr[k+1];
+    }
+    d->n--;
+    return 1.0;
+}
+
+extern "C" double matlab_dict_remove_num(matlab_dict *d, double k) {
+    if (!d) return 0.0;
+    int32_t i = dict_find_f64(d, k);
+    if (i < 0) return 0.0;
+    for (int32_t kk = i; kk < d->n - 1; ++kk) {
+        d->key_kinds[kk] = d->key_kinds[kk+1];
+        d->key_f64[kk]   = d->key_f64[kk+1];
+        d->key_str[kk]   = d->key_str[kk+1];
+        d->val_kinds[kk] = d->val_kinds[kk+1];
+        d->val_f64[kk]   = d->val_f64[kk+1];
+        d->val_ptr[kk]   = d->val_ptr[kk+1];
+    }
+    d->n--;
+    return 1.0;
+}
+
 /* Phase 3 — value-class copy semantics. matlab_obj_clone produces a
  * fresh matlab_obj that owns independent name / kinds / ptr arrays
  * but shares property *values* (matrix-pointer fields are not deep-

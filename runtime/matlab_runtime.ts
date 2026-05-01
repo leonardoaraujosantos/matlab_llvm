@@ -1708,6 +1708,100 @@ export function cell_concat_col(a: any, b: any): Cell2D {
 
 export function obj_new(): any { return {}; }
 
+/* Phase 4 — containers.Map / dictionary. A simple [key, value] array
+ * with O(N) lookup, mirroring the C runtime. Keys can be string
+ * (representing matlab_string *) or number; values can be number or
+ * NDArray-like (matrix). */
+type Dict = { pairs: Array<[any, any]> };
+
+export function dict_new(): Dict { return { pairs: [] }; }
+
+function dictFind(d: Dict, key: any): number {
+  if (!d || !d.pairs) return -1;
+  for (let i = 0; i < d.pairs.length; i++) if (d.pairs[i][0] === key) return i;
+  return -1;
+}
+
+export function dict_set_str_f64(d: Dict, key: any, v: number): void {
+  if (!d) return;
+  const k = typeof key === 'string' ? key : String(key);
+  const i = dictFind(d, k);
+  if (i >= 0) d.pairs[i] = [k, +v]; else d.pairs.push([k, +v]);
+}
+export function dict_set_str_mat(d: Dict, key: any, m: any): void {
+  if (!d) return;
+  const k = typeof key === 'string' ? key : String(key);
+  const i = dictFind(d, k);
+  if (i >= 0) d.pairs[i] = [k, m]; else d.pairs.push([k, m]);
+}
+export function dict_set_num_f64(d: Dict, key: number, v: number): void {
+  if (!d) return;
+  const k = +key;
+  const i = dictFind(d, k);
+  if (i >= 0) d.pairs[i] = [k, +v]; else d.pairs.push([k, +v]);
+}
+export function dict_set_num_mat(d: Dict, key: number, m: any): void {
+  if (!d) return;
+  const k = +key;
+  const i = dictFind(d, k);
+  if (i >= 0) d.pairs[i] = [k, m]; else d.pairs.push([k, m]);
+}
+export function dict_get_str_f64(d: Dict, key: any): number {
+  if (!d) return 0;
+  const k = typeof key === 'string' ? key : String(key);
+  const i = dictFind(d, k);
+  if (i < 0) return 0;
+  const v = d.pairs[i][1];
+  const f = Number(v);
+  return Number.isNaN(f) ? 0 : f;
+}
+export function dict_get_str_mat(d: Dict, key: any): any {
+  if (!d) return null;
+  const k = typeof key === 'string' ? key : String(key);
+  const i = dictFind(d, k);
+  return i < 0 ? null : d.pairs[i][1];
+}
+export function dict_get_num_f64(d: Dict, key: number): number {
+  if (!d) return 0;
+  const i = dictFind(d, +key);
+  if (i < 0) return 0;
+  const v = d.pairs[i][1];
+  const f = Number(v);
+  return Number.isNaN(f) ? 0 : f;
+}
+export function dict_get_num_mat(d: Dict, key: number): any {
+  if (!d) return null;
+  const i = dictFind(d, +key);
+  return i < 0 ? null : d.pairs[i][1];
+}
+export function dict_has_str(d: Dict, key: any): number {
+  if (!d) return 0;
+  const k = typeof key === 'string' ? key : String(key);
+  return dictFind(d, k) >= 0 ? 1 : 0;
+}
+export function dict_has_num(d: Dict, key: number): number {
+  if (!d) return 0;
+  return dictFind(d, +key) >= 0 ? 1 : 0;
+}
+export function dict_length(d: Dict): number {
+  return d ? d.pairs.length : 0;
+}
+export function dict_remove_str(d: Dict, key: any): number {
+  if (!d) return 0;
+  const k = typeof key === 'string' ? key : String(key);
+  const i = dictFind(d, k);
+  if (i < 0) return 0;
+  d.pairs.splice(i, 1);
+  return 1;
+}
+export function dict_remove_num(d: Dict, key: number): number {
+  if (!d) return 0;
+  const i = dictFind(d, +key);
+  if (i < 0) return 0;
+  d.pairs.splice(i, 1);
+  return 1;
+}
+
 /* Phase 3 — value-class shallow clone. Fresh object with the same own-
  * properties as the source. Mirror the C and Python runtimes. */
 export function obj_clone(o: any): any {

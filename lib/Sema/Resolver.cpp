@@ -51,6 +51,8 @@ void Resolver::registerBuiltins() {
     "bin", "hex", "dec",
     "struct", "cell", "fieldnames", "isstruct", "isfield", "iscell",
     "rmfield", "string", "strlen", "isstring",
+    /* Phase 4 — containers.Map / dictionary (key/value maps). */
+    "containers", "dictionary", "isKey", "remove", "keys",
     "sprintf", "num2str", "str2double",
     "upper", "lower", "startsWith", "endsWith", "contains",
     "strtrim", "strrep", "strcat",

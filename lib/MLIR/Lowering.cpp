@@ -450,6 +450,10 @@ private:
    * presence in this set switches read paths (`s(i).x`, `length(s)`,
    * `numel(s)`) over to the struct_arr runtime entries. */
   std::unordered_set<Binding *> StructArrayBindings;
+  /* Phase 4: bindings holding a matlab_dict * (assigned from
+   * `containers.Map()` or `dictionary(...)`). Indexing reads /
+   * writes route through the matlab_dict_* runtime entries. */
+  std::unordered_set<Binding *> DictBindings;
   /* Per-struct-array binding: the slot was already initialised with
    * matlab_struct_arr_new() at function entry. Avoids re-initialising
    * on every `s(i).x = ...` assignment. */
@@ -1878,6 +1882,21 @@ void Lowerer::lowerStmt(const Stmt &St) {
         if (NE->Ref && CellBindings.count(NE->Ref)) return true;
       return false;
     };
+    /* Phase 4: dict-producing RHS forms — `containers.Map()` /
+     * `dictionary(...)`. Tag the LHS so subsequent `m(k)` reads /
+     * writes route through the matlab_dict_* runtime. */
+    bool RhsIsDict = false;
+    if (A.RHS && A.RHS->Kind == NodeKind::CallOrIndex) {
+      auto *Cx = static_cast<const CallOrIndex *>(A.RHS);
+      if (auto *FA = dynamic_cast<const FieldAccess *>(Cx->Callee))
+        if (auto *BN = dynamic_cast<const NameExpr *>(FA->Base))
+          if (BN->Name == "containers" && FA->Field == "Map")
+            RhsIsDict = true;
+      if (!RhsIsDict)
+        if (auto *NE = dynamic_cast<const NameExpr *>(Cx->Callee))
+          if (NE->Name == "dictionary")
+            RhsIsDict = true;
+    }
     bool RhsIsCellLit = A.RHS && A.RHS->Kind == NodeKind::CellLiteral;
     if (!RhsIsCellLit && A.RHS && A.RHS->Kind == NodeKind::MatrixLiteral) {
       auto *MM = static_cast<const MatrixLiteral *>(A.RHS);
@@ -2190,6 +2209,11 @@ void Lowerer::lowerStmt(const Stmt &St) {
       for (const Expr *L : A.LHS)
         if (auto *N = dynamic_cast<const NameExpr *>(L))
           if (N->Ref) CellBindings.insert(N->Ref);
+    }
+    if (RhsIsDict) {
+      for (const Expr *L : A.LHS)
+        if (auto *N = dynamic_cast<const NameExpr *>(L))
+          if (N->Ref) DictBindings.insert(N->Ref);
     }
     if (RhsIsString) {
       for (const Expr *L : A.LHS)
@@ -2770,6 +2794,50 @@ void Lowerer::lowerLValueStore(const Expr &LHS, mlir::Value Rhs) {
   }
   case NodeKind::CallOrIndex: {
     auto &C = static_cast<const CallOrIndex &>(LHS);
+    /* Phase 4: m(k) = rhs on a dict binding. Detect via DictBindings,
+     * dispatch to matlab_dict_set_<str|num>_<f64|mat>. Single key
+     * arg only for v1 (multi-dim keying isn't a MATLAB idiom).
+     * CharLiteral / StringLiteral keys are coerced to matlab_string*
+     * via matlab_string_from_literal before the call. */
+    if (C.Args.size() == 1 && C.Args[0]) {
+      if (auto *N = dynamic_cast<const NameExpr *>(C.Callee))
+        if (N->Ref && DictBindings.count(N->Ref)) {
+          auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+          mlir::Value D = lowerExpr(*C.Callee);
+          const Expr *KeyExpr = C.Args[0];
+          mlir::Value K;
+          bool KeyIsStr = false;
+          if (auto *CL = dynamic_cast<const CharLiteral *>(KeyExpr)) {
+            mlir::NamedAttribute VA(
+                mlir::StringAttr::get(&MCtx, "value"),
+                mlir::StringAttr::get(&MCtx, std::string(CL->Value)));
+            mlir::Value Ch = emitUnreg("matlab.const_char", {},
+                                        mlir::NoneType::get(&MCtx),
+                                        loc(C.Range), {VA});
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_string_from_literal"));
+            K = emitUnreg("matlab.call_builtin", {Ch}, PtrTy,
+                          loc(C.Range), {Cal});
+            KeyIsStr = true;
+          } else {
+            K = lowerExpr(*KeyExpr);
+            KeyIsStr = K && (K.getType() == PtrTy || isStringExpr(KeyExpr));
+          }
+          bool ValIsMat = Rhs && (Rhs.getType() == PtrTy ||
+                                  mlir::isa<mlir::RankedTensorType,
+                                            mlir::UnrankedTensorType>(Rhs.getType()));
+          std::string Callee = "matlab_dict_set_";
+          Callee += KeyIsStr ? "str_" : "num_";
+          Callee += ValIsMat ? "mat" : "f64";
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, Callee));
+          emitUnregOp("matlab.call_builtin", {D, K, Rhs},
+                      {mlir::NoneType::get(&MCtx)}, loc(C.Range), {Cal});
+          return;
+        }
+    }
     /* `name(:) = rhs` for an fi-typed scalar `name` is the type-preserving
      * idiom that holds `name`'s FixedSpec across iterations of an
      * accumulator loop (see plan §11). At Sema time we already kept the
@@ -3386,6 +3454,58 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
   }
   case NodeKind::CallOrIndex: {
     auto &C = static_cast<const CallOrIndex &>(E);
+    /* Phase 4: containers.Map(...) — runs before the CallKind::Call
+     * gate because the resolver doesn't classify `containers.Map`
+     * as a call (it's a FieldAccess on a builtin namespace). */
+    if (auto *FAEarly = dynamic_cast<const FieldAccess *>(C.Callee))
+      if (auto *BNEarly = dynamic_cast<const NameExpr *>(FAEarly->Base))
+        if (BNEarly->Name == "containers" && FAEarly->Field == "Map") {
+          auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_dict_new"));
+          return emitUnreg("matlab.call_builtin", {}, PtrTy, L, {Cal});
+        }
+    /* Phase 4: m(k) read on a dict binding. Detect via DictBindings,
+     * dispatch to matlab_dict_get_<str|num>_<f64|mat>. The expected
+     * value type comes from the call site's expected type RT (ptr =
+     * matrix, anything else = f64). CharLiteral / StringLiteral
+     * keys are coerced to matlab_string* via matlab_string_from_literal. */
+    if (C.Args.size() == 1 && C.Args[0])
+      if (auto *N = dynamic_cast<const NameExpr *>(C.Callee))
+        if (N->Ref && DictBindings.count(N->Ref)) {
+          auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+          auto F64 = mlir::Float64Type::get(&MCtx);
+          mlir::Value D = lowerExpr(*C.Callee);
+          const Expr *KeyExpr = C.Args[0];
+          mlir::Value K;
+          bool KeyIsStr = false;
+          if (auto *CL = dynamic_cast<const CharLiteral *>(KeyExpr)) {
+            mlir::NamedAttribute VA(
+                mlir::StringAttr::get(&MCtx, "value"),
+                mlir::StringAttr::get(&MCtx, std::string(CL->Value)));
+            mlir::Value Ch = emitUnreg("matlab.const_char", {},
+                                        mlir::NoneType::get(&MCtx), L, {VA});
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_string_from_literal"));
+            K = emitUnreg("matlab.call_builtin", {Ch}, PtrTy, L, {Cal});
+            KeyIsStr = true;
+          } else {
+            K = lowerExpr(*KeyExpr);
+            KeyIsStr = K && (K.getType() == PtrTy || isStringExpr(KeyExpr));
+          }
+          bool WantMat = mlir::isa<mlir::RankedTensorType,
+                                    mlir::UnrankedTensorType>(RT);
+          std::string Callee = "matlab_dict_get_";
+          Callee += KeyIsStr ? "str_" : "num_";
+          Callee += WantMat ? "mat" : "f64";
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, Callee));
+          mlir::Type ResTy = WantMat ? (mlir::Type)PtrTy : (mlir::Type)F64;
+          return emitUnreg("matlab.call_builtin", {D, K}, ResTy, L, {Cal});
+        }
     if (C.Resolved == CallKind::Call) {
       auto *N = dynamic_cast<const NameExpr *>(C.Callee);
       auto PtrTyConst = mlir::LLVM::LLVMPointerType::get(&MCtx);
@@ -3890,6 +4010,21 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
         return {nullptr, nullptr};
       };
       if (auto *FA = dynamic_cast<const FieldAccess *>(C.Callee)) {
+        /* Phase 4: containers.Map(...) and containers.Map() — produce
+         * an empty matlab_dict. We accept the optional KeyType /
+         * ValueType arguments but ignore them (the runtime stores any
+         * mix of key/value kinds dynamically). The user calls this
+         * once at the start of the binding, so a fresh empty dict is
+         * the right thing. */
+        if (auto *BN = dynamic_cast<const NameExpr *>(FA->Base)) {
+          if (BN->Name == "containers" && FA->Field == "Map") {
+            auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_dict_new"));
+            return emitUnreg("matlab.call_builtin", {}, PtrTy, L, {Cal});
+          }
+        }
         const ClassDef *PCls = nullptr;
         if (auto *BN = dynamic_cast<const NameExpr *>(FA->Base))
           if (BN->Ref && BN->Ref->PinnedClass) PCls = BN->Ref->PinnedClass;
@@ -4503,6 +4638,58 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
         return emitUnreg("matlab.undef", {},
                          mlir::NoneType::get(&MCtx), L);
       }
+      /* Phase 4: dictionary() / dictionary(k1, v1, k2, v2, ...) ->
+       * matlab_dict_new + per-pair set. v1 supports zero-arg and an
+       * even number of trailing key/value pairs; the constructor
+       * mirrors containers.Map(). */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          N->Name == "dictionary") {
+        auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+        auto F64 = mlir::Float64Type::get(&MCtx);
+        auto coerceKey = [&](const Expr *KeyExpr,
+                             bool &KeyIsStr) -> mlir::Value {
+          if (auto *CL = dynamic_cast<const CharLiteral *>(KeyExpr)) {
+            mlir::NamedAttribute VA(
+                mlir::StringAttr::get(&MCtx, "value"),
+                mlir::StringAttr::get(&MCtx, std::string(CL->Value)));
+            mlir::Value Ch = emitUnreg("matlab.const_char", {},
+                                        mlir::NoneType::get(&MCtx), L, {VA});
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_string_from_literal"));
+            KeyIsStr = true;
+            return emitUnreg("matlab.call_builtin", {Ch}, PtrTy, L, {Cal});
+          }
+          mlir::Value Kv = lowerExpr(*KeyExpr);
+          KeyIsStr = Kv && (Kv.getType() == PtrTy || isStringExpr(KeyExpr));
+          return Kv;
+        };
+        mlir::NamedAttribute NewCal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "matlab_dict_new"));
+        mlir::Value D = emitUnreg("matlab.call_builtin", {},
+                                   PtrTy, L, {NewCal});
+        if (C.Args.size() % 2 == 0) {
+          for (size_t i = 0; i + 1 < C.Args.size(); i += 2) {
+            if (!C.Args[i] || !C.Args[i+1]) continue;
+            bool KeyIsStr = false;
+            mlir::Value K = coerceKey(C.Args[i], KeyIsStr);
+            mlir::Value V = lowerExpr(*C.Args[i+1]);
+            bool ValIsMat = V && (V.getType() == PtrTy ||
+                                  mlir::isa<mlir::RankedTensorType,
+                                            mlir::UnrankedTensorType>(V.getType()));
+            std::string Callee = "matlab_dict_set_";
+            Callee += KeyIsStr ? "str_" : "num_";
+            Callee += ValIsMat ? "mat" : "f64";
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, Callee));
+            emitUnregOp("matlab.call_builtin", {D, K, V},
+                        {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          }
+        }
+        return D;
+      }
       /* iscell(x): compile-time fold. */
       if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
           N->Name == "iscell" && C.Args.size() == 1) {
@@ -4527,6 +4714,64 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             return emitUnreg("matlab.call_builtin", {Arg}, F64, L, {Cal});
           }
       }
+      /* Phase 4: numel(d) / length(d) on a dict binding ->
+       * matlab_dict_length. */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          (N->Name == "numel" || N->Name == "length") &&
+          C.Args.size() == 1) {
+        if (auto *ArgN = dynamic_cast<const NameExpr *>(C.Args[0]))
+          if (ArgN->Ref && DictBindings.count(ArgN->Ref)) {
+            auto F64 = mlir::Float64Type::get(&MCtx);
+            mlir::Value D = lowerExpr(*C.Args[0]);
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_dict_length"));
+            return emitUnreg("matlab.call_builtin", {D}, F64, L, {Cal});
+          }
+      }
+      /* isKey(d, k) -> matlab_dict_has_<str|num>.
+       * remove(d, k) -> matlab_dict_remove_<str|num>.
+       * CharLiteral keys coerce to matlab_string* via from_literal. */
+      auto dictBuiltin2 = [&](llvm::StringRef Op) -> mlir::Value {
+        auto F64 = mlir::Float64Type::get(&MCtx);
+        auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+        mlir::Value D = lowerExpr(*C.Args[0]);
+        const Expr *KeyExpr = C.Args[1];
+        mlir::Value K;
+        bool KeyIsStr = false;
+        if (auto *CL = dynamic_cast<const CharLiteral *>(KeyExpr)) {
+          mlir::NamedAttribute VA(
+              mlir::StringAttr::get(&MCtx, "value"),
+              mlir::StringAttr::get(&MCtx, std::string(CL->Value)));
+          mlir::Value Ch = emitUnreg("matlab.const_char", {},
+                                      mlir::NoneType::get(&MCtx), L, {VA});
+          mlir::NamedAttribute SCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_string_from_literal"));
+          K = emitUnreg("matlab.call_builtin", {Ch}, PtrTy, L, {SCal});
+          KeyIsStr = true;
+        } else {
+          K = lowerExpr(*KeyExpr);
+          KeyIsStr = K && (K.getType() == PtrTy || isStringExpr(KeyExpr));
+        }
+        std::string Callee = "matlab_dict_";
+        Callee += std::string(Op) + "_";
+        Callee += KeyIsStr ? "str" : "num";
+        mlir::NamedAttribute Cal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, Callee));
+        return emitUnreg("matlab.call_builtin", {D, K}, F64, L, {Cal});
+      };
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          N->Name == "isKey" && C.Args.size() == 2)
+        if (auto *ArgN = dynamic_cast<const NameExpr *>(C.Args[0]))
+          if (ArgN->Ref && DictBindings.count(ArgN->Ref))
+            return dictBuiltin2("has");
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          N->Name == "remove" && C.Args.size() == 2)
+        if (auto *ArgN = dynamic_cast<const NameExpr *>(C.Args[0]))
+          if (ArgN->Ref && DictBindings.count(ArgN->Ref))
+            return dictBuiltin2("remove");
       /* Phase 2: numel(S) / length(S) on a struct-array binding ->
        * matlab_struct_arr_length. */
       if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&

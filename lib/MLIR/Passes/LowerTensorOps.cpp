@@ -1757,6 +1757,138 @@ bool TensorLowering::rewriteBuiltinCalls() {
       Changed = true;
       continue;
     }
+    /* Phase 4: containers.Map / dictionary runtime. */
+    if (Name == "matlab_dict_new" && Call->getNumResults() == 1 &&
+        Call->getNumOperands() == 0) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt("matlab_dict_new", PtrTy, {});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn, ValueRange{});
+      carryName(Call, NC);
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+    if ((Name == "matlab_dict_set_str_f64" ||
+         Name == "matlab_dict_set_str_mat") &&
+        Call->getNumOperands() == 3 &&
+        Call->getOperand(0).getType() == PtrTy &&
+        Call->getOperand(1).getType() == PtrTy) {
+      bool IsMat = Name == "matlab_dict_set_str_mat";
+      Value V = Call->getOperand(2);
+      if (IsMat && V.getType() != PtrTy) continue;
+      if (!IsMat && V.getType() != F64) continue;
+      B.setInsertionPoint(Call);
+      auto Fn = rt(Name, VoidTy, {PtrTy, PtrTy,
+                                  IsMat ? (Type)PtrTy : (Type)F64});
+      LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                            ValueRange{Call->getOperand(0),
+                                       Call->getOperand(1), V});
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+    if ((Name == "matlab_dict_set_num_f64" ||
+         Name == "matlab_dict_set_num_mat") &&
+        Call->getNumOperands() == 3 &&
+        Call->getOperand(0).getType() == PtrTy &&
+        Call->getOperand(1).getType() == F64) {
+      bool IsMat = Name == "matlab_dict_set_num_mat";
+      Value V = Call->getOperand(2);
+      if (IsMat && V.getType() != PtrTy) continue;
+      if (!IsMat && V.getType() != F64) continue;
+      B.setInsertionPoint(Call);
+      auto Fn = rt(Name, VoidTy, {PtrTy, F64,
+                                  IsMat ? (Type)PtrTy : (Type)F64});
+      LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                            ValueRange{Call->getOperand(0),
+                                       Call->getOperand(1), V});
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+    if ((Name == "matlab_dict_get_str_f64" ||
+         Name == "matlab_dict_get_str_mat") &&
+        Call->getNumResults() == 1 && Call->getNumOperands() == 2 &&
+        Call->getOperand(0).getType() == PtrTy &&
+        Call->getOperand(1).getType() == PtrTy) {
+      bool IsMat = Name == "matlab_dict_get_str_mat";
+      B.setInsertionPoint(Call);
+      auto Fn = rt(Name, IsMat ? (Type)PtrTy : (Type)F64,
+                   {PtrTy, PtrTy});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                      ValueRange{Call->getOperand(0),
+                                                 Call->getOperand(1)});
+      carryName(Call, NC);
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+    if ((Name == "matlab_dict_get_num_f64" ||
+         Name == "matlab_dict_get_num_mat") &&
+        Call->getNumResults() == 1 && Call->getNumOperands() == 2 &&
+        Call->getOperand(0).getType() == PtrTy &&
+        Call->getOperand(1).getType() == F64) {
+      bool IsMat = Name == "matlab_dict_get_num_mat";
+      B.setInsertionPoint(Call);
+      auto Fn = rt(Name, IsMat ? (Type)PtrTy : (Type)F64,
+                   {PtrTy, F64});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                      ValueRange{Call->getOperand(0),
+                                                 Call->getOperand(1)});
+      carryName(Call, NC);
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+    if ((Name == "matlab_dict_has_str" ||
+         Name == "matlab_dict_remove_str") &&
+        Call->getNumResults() == 1 && Call->getNumOperands() == 2 &&
+        Call->getOperand(0).getType() == PtrTy &&
+        Call->getOperand(1).getType() == PtrTy) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt(Name, F64, {PtrTy, PtrTy});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                      ValueRange{Call->getOperand(0),
+                                                 Call->getOperand(1)});
+      carryName(Call, NC);
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+    if ((Name == "matlab_dict_has_num" ||
+         Name == "matlab_dict_remove_num") &&
+        Call->getNumResults() == 1 && Call->getNumOperands() == 2 &&
+        Call->getOperand(0).getType() == PtrTy &&
+        Call->getOperand(1).getType() == F64) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt(Name, F64, {PtrTy, F64});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                      ValueRange{Call->getOperand(0),
+                                                 Call->getOperand(1)});
+      carryName(Call, NC);
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+    if (Name == "matlab_dict_length" && Call->getNumResults() == 1 &&
+        Call->getNumOperands() == 1 &&
+        Call->getOperand(0).getType() == PtrTy) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt("matlab_dict_length", F64, {PtrTy});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                      ValueRange{Call->getOperand(0)});
+      carryName(Call, NC);
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+
     /* Phase 3: matlab_obj_clone takes a single ptr (the source obj)
      * and returns a fresh ptr. Used at value-class assignment sites
      * to give each binding its own copy. The operand type may still

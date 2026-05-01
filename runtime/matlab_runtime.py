@@ -1472,6 +1472,108 @@ def obj_new(*_ignored):
     _obj_store[oid] = obj  # keep a strong ref + a lookup path for legacy callers
     return obj
 
+def dict_new():
+    """Phase 4 — containers.Map / dictionary. Backed by a list of
+    (key, value) pairs to mirror the C runtime's slot model. Keys can
+    be either f64 floats or Python strings (representing
+    matlab_string *). Lookup is O(N) — fine for the test corpus."""
+    return {'_pairs': []}
+
+def _dict_find(d, key):
+    pairs = d.get('_pairs', [])
+    for i, (k, _) in enumerate(pairs):
+        if k == key: return i
+    return -1
+
+def dict_set_str_f64(d, key, v):
+    if d is None: return
+    k = key if isinstance(key, str) else str(key)
+    i = _dict_find(d, k)
+    if i >= 0: d['_pairs'][i] = (k, float(v))
+    else: d['_pairs'].append((k, float(v)))
+
+def dict_set_str_mat(d, key, m):
+    if d is None: return
+    k = key if isinstance(key, str) else str(key)
+    i = _dict_find(d, k)
+    if i >= 0: d['_pairs'][i] = (k, m)
+    else: d['_pairs'].append((k, m))
+
+def dict_set_num_f64(d, key, v):
+    if d is None: return
+    k = float(key)
+    i = _dict_find(d, k)
+    if i >= 0: d['_pairs'][i] = (k, float(v))
+    else: d['_pairs'].append((k, float(v)))
+
+def dict_set_num_mat(d, key, m):
+    if d is None: return
+    k = float(key)
+    i = _dict_find(d, k)
+    if i >= 0: d['_pairs'][i] = (k, m)
+    else: d['_pairs'].append((k, m))
+
+def dict_get_str_f64(d, key):
+    if d is None: return 0.0
+    k = key if isinstance(key, str) else str(key)
+    i = _dict_find(d, k)
+    if i < 0: return 0.0
+    v = d['_pairs'][i][1]
+    try: return float(v)
+    except Exception: return 0.0
+
+def dict_get_str_mat(d, key):
+    if d is None: return None
+    k = key if isinstance(key, str) else str(key)
+    i = _dict_find(d, k)
+    if i < 0: return None
+    return d['_pairs'][i][1]
+
+def dict_get_num_f64(d, key):
+    if d is None: return 0.0
+    k = float(key)
+    i = _dict_find(d, k)
+    if i < 0: return 0.0
+    v = d['_pairs'][i][1]
+    try: return float(v)
+    except Exception: return 0.0
+
+def dict_get_num_mat(d, key):
+    if d is None: return None
+    k = float(key)
+    i = _dict_find(d, k)
+    if i < 0: return None
+    return d['_pairs'][i][1]
+
+def dict_has_str(d, key):
+    if d is None: return 0.0
+    k = key if isinstance(key, str) else str(key)
+    return 1.0 if _dict_find(d, k) >= 0 else 0.0
+
+def dict_has_num(d, key):
+    if d is None: return 0.0
+    return 1.0 if _dict_find(d, float(key)) >= 0 else 0.0
+
+def dict_length(d):
+    if d is None: return 0.0
+    return float(len(d.get('_pairs', [])))
+
+def dict_remove_str(d, key):
+    if d is None: return 0.0
+    k = key if isinstance(key, str) else str(key)
+    i = _dict_find(d, k)
+    if i < 0: return 0.0
+    d['_pairs'].pop(i)
+    return 1.0
+
+def dict_remove_num(d, key):
+    if d is None: return 0.0
+    k = float(key)
+    i = _dict_find(d, k)
+    if i < 0: return 0.0
+    d['_pairs'].pop(i)
+    return 1.0
+
 def obj_clone(o):
     """Phase 3 — value-class shallow clone. Mirrors the C runtime's
     matlab_obj_clone: a fresh object with independent property
