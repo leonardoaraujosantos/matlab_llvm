@@ -454,6 +454,10 @@ private:
    * `containers.Map()` or `dictionary(...)`). Indexing reads /
    * writes route through the matlab_dict_* runtime entries. */
   std::unordered_set<Binding *> DictBindings;
+  /* Phase 5.1: bindings holding a matlab_datetime * / matlab_duration *
+   * pointer. Used by disp / arithmetic dispatch. */
+  std::unordered_set<Binding *> DatetimeBindings;
+  std::unordered_set<Binding *> DurationBindings;
   /* Per-struct-array binding: the slot was already initialised with
    * matlab_struct_arr_new() at function entry. Avoids re-initialising
    * on every `s(i).x = ...` assignment. */
@@ -1807,6 +1811,12 @@ void Lowerer::lowerStmt(const Stmt &St) {
                  NE->Ref->InferredType->K == Type::Kind::StringArray)
           DispIsString = true;
       }
+      /* Phase 5.1: datetime / duration disp dispatch. */
+      bool DispIsDatetime = false, DispIsDuration = false;
+      if (auto *NE = dynamic_cast<const NameExpr *>(E.E)) {
+        if (NE->Ref && DatetimeBindings.count(NE->Ref)) DispIsDatetime = true;
+        if (NE->Ref && DurationBindings.count(NE->Ref)) DispIsDuration = true;
+      }
       llvm::StringRef IntSuf = Lowerer::intDtypeSuffixOf(E.E);
       if (DispIsString) {
         mlir::NamedAttribute SCal(
@@ -1814,6 +1824,18 @@ void Lowerer::lowerStmt(const Stmt &St) {
             mlir::StringAttr::get(&MCtx, "matlab_string_disp"));
         emitUnregOp("matlab.call_builtin", {V},
                     {mlir::NoneType::get(&MCtx)}, loc(E.Range), {SCal});
+      } else if (DispIsDatetime) {
+        mlir::NamedAttribute Cal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "matlab_datetime_disp"));
+        emitUnregOp("matlab.call_builtin", {V},
+                    {mlir::NoneType::get(&MCtx)}, loc(E.Range), {Cal});
+      } else if (DispIsDuration) {
+        mlir::NamedAttribute Cal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "matlab_duration_disp"));
+        emitUnregOp("matlab.call_builtin", {V},
+                    {mlir::NoneType::get(&MCtx)}, loc(E.Range), {Cal});
       } else if (!IntSuf.empty()) {
         /* Phase 1.1.C — typed int matrix disp. Sema marks the expression
          * as Int32 / UInt8 array so we can emit the typed callee directly
@@ -1882,6 +1904,58 @@ void Lowerer::lowerStmt(const Stmt &St) {
         if (NE->Ref && CellBindings.count(NE->Ref)) return true;
       return false;
     };
+    /* Phase 5.1: datetime / duration RHS detection. Either a direct
+     * builtin call (`datetime(...)`, `seconds(n)`, etc.) or a
+     * NameExpr that's already tagged. Binop results land in their
+     * respective sets via the BinaryOp emission below. */
+    bool RhsIsDatetime = false;
+    bool RhsIsDuration = false;
+    if (A.RHS && A.RHS->Kind == NodeKind::CallOrIndex) {
+      auto *Cx = static_cast<const CallOrIndex *>(A.RHS);
+      if (auto *NE = dynamic_cast<const NameExpr *>(Cx->Callee)) {
+        if (NE->Name == "datetime") RhsIsDatetime = true;
+        else if (NE->Name == "seconds" || NE->Name == "minutes" ||
+                 NE->Name == "hours"   || NE->Name == "days"    ||
+                 NE->Name == "years"   || NE->Name == "duration")
+          RhsIsDuration = true;
+      }
+    } else if (A.RHS && A.RHS->Kind == NodeKind::NameExpr) {
+      auto *NE = static_cast<const NameExpr *>(A.RHS);
+      if (NE->Ref && DatetimeBindings.count(NE->Ref)) RhsIsDatetime = true;
+      if (NE->Ref && DurationBindings.count(NE->Ref)) RhsIsDuration = true;
+    } else if (A.RHS && A.RHS->Kind == NodeKind::BinaryOp) {
+      auto *BX = static_cast<const BinaryOpExpr *>(A.RHS);
+      auto isDt = [&](const Expr *X) -> bool {
+        if (auto *NE = dynamic_cast<const NameExpr *>(X))
+          return NE->Ref && DatetimeBindings.count(NE->Ref);
+        if (auto *CX = dynamic_cast<const CallOrIndex *>(X))
+          if (auto *NE = dynamic_cast<const NameExpr *>(CX->Callee))
+            if (NE->Name == "datetime") return true;
+        return false;
+      };
+      auto isDur = [&](const Expr *X) -> bool {
+        if (auto *NE = dynamic_cast<const NameExpr *>(X))
+          return NE->Ref && DurationBindings.count(NE->Ref);
+        if (auto *CX = dynamic_cast<const CallOrIndex *>(X))
+          if (auto *NE = dynamic_cast<const NameExpr *>(CX->Callee))
+            if (NE->Name == "seconds" || NE->Name == "minutes" ||
+                NE->Name == "hours"   || NE->Name == "days"    ||
+                NE->Name == "years"   || NE->Name == "duration")
+              return true;
+        return false;
+      };
+      if (BX->Op == BinOp::Sub && isDt(BX->LHS) && isDt(BX->RHS))
+        RhsIsDuration = true;
+      else if (BX->Op == BinOp::Add &&
+               ((isDt(BX->LHS) && isDur(BX->RHS)) ||
+                (isDur(BX->LHS) && isDt(BX->RHS))))
+        RhsIsDatetime = true;
+      else if (BX->Op == BinOp::Sub && isDt(BX->LHS) && isDur(BX->RHS))
+        RhsIsDatetime = true;
+      else if ((BX->Op == BinOp::Add || BX->Op == BinOp::Sub) &&
+               isDur(BX->LHS) && isDur(BX->RHS))
+        RhsIsDuration = true;
+    }
     /* Phase 4: dict-producing RHS forms — `containers.Map()` /
      * `dictionary(...)`. Tag the LHS so subsequent `m(k)` reads /
      * writes route through the matlab_dict_* runtime. */
@@ -2215,6 +2289,16 @@ void Lowerer::lowerStmt(const Stmt &St) {
         if (auto *N = dynamic_cast<const NameExpr *>(L))
           if (N->Ref) DictBindings.insert(N->Ref);
     }
+    if (RhsIsDatetime) {
+      for (const Expr *L : A.LHS)
+        if (auto *N = dynamic_cast<const NameExpr *>(L))
+          if (N->Ref) DatetimeBindings.insert(N->Ref);
+    }
+    if (RhsIsDuration) {
+      for (const Expr *L : A.LHS)
+        if (auto *N = dynamic_cast<const NameExpr *>(L))
+          if (N->Ref) DurationBindings.insert(N->Ref);
+    }
     if (RhsIsString) {
       for (const Expr *L : A.LHS)
         if (auto *N = dynamic_cast<const NameExpr *>(L))
@@ -2273,6 +2357,18 @@ void Lowerer::lowerStmt(const Stmt &St) {
             mlir::StringAttr::get(&MCtx, "matlab_string_disp"));
         emitUnregOp("matlab.call_builtin", {Rhs},
                     {mlir::NoneType::get(&MCtx)}, loc(A.Range), {SCal});
+      } else if (RhsIsDatetime) {
+        mlir::NamedAttribute Cal2(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "matlab_datetime_disp"));
+        emitUnregOp("matlab.call_builtin", {Rhs},
+                    {mlir::NoneType::get(&MCtx)}, loc(A.Range), {Cal2});
+      } else if (RhsIsDuration) {
+        mlir::NamedAttribute Cal2(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "matlab_duration_disp"));
+        emitUnregOp("matlab.call_builtin", {Rhs},
+                    {mlir::NoneType::get(&MCtx)}, loc(A.Range), {Cal2});
       } else if (!IntSuf.empty()) {
         /* Phase 1.1.C — typed int matrix disp on `A = int32(...)` style
          * implicit display. Skip the matlab_disp_mat polymorphic path and
@@ -3392,6 +3488,56 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
       if (mlir::isa<mlir::IntegerType>(FiResTy)) ResTy = FiResTy;
       return emitUnreg(binOpName(Bi.Op), {LHS, RHS}, ResTy, L, A);
     }
+    /* Phase 5.1: datetime / duration arithmetic. Detect the operand
+     * kinds via DatetimeBindings / DurationBindings (NameExpr LHS /
+     * RHS only — chained binops are out of scope for v1) and route
+     * to the correct runtime entry. */
+    auto isDtName = [&](const Expr *X) -> bool {
+      if (auto *NE = dynamic_cast<const NameExpr *>(X))
+        return NE->Ref && DatetimeBindings.count(NE->Ref);
+      if (auto *CX = dynamic_cast<const CallOrIndex *>(X))
+        if (auto *NE = dynamic_cast<const NameExpr *>(CX->Callee))
+          if (NE->Name == "datetime") return true;
+      return false;
+    };
+    auto isDurName = [&](const Expr *X) -> bool {
+      if (auto *NE = dynamic_cast<const NameExpr *>(X))
+        return NE->Ref && DurationBindings.count(NE->Ref);
+      if (auto *CX = dynamic_cast<const CallOrIndex *>(X))
+        if (auto *NE = dynamic_cast<const NameExpr *>(CX->Callee))
+          if (NE->Name == "seconds" || NE->Name == "minutes" ||
+              NE->Name == "hours"   || NE->Name == "days"    ||
+              NE->Name == "years"   || NE->Name == "duration")
+            return true;
+      return false;
+    };
+    {
+      auto PtrTy2 = mlir::LLVM::LLVMPointerType::get(&MCtx);
+      llvm::StringRef DtCallee;
+      if (Bi.Op == BinOp::Sub && isDtName(Bi.LHS) && isDtName(Bi.RHS))
+        DtCallee = "matlab_datetime_sub_datetime";
+      else if (Bi.Op == BinOp::Add && isDtName(Bi.LHS) && isDurName(Bi.RHS))
+        DtCallee = "matlab_datetime_add_duration";
+      else if (Bi.Op == BinOp::Add && isDurName(Bi.LHS) && isDtName(Bi.RHS))
+        /* duration + datetime: swap operands. */
+        DtCallee = "matlab_datetime_add_duration";
+      else if (Bi.Op == BinOp::Sub && isDtName(Bi.LHS) && isDurName(Bi.RHS))
+        DtCallee = "matlab_datetime_sub_duration";
+      else if (Bi.Op == BinOp::Add && isDurName(Bi.LHS) && isDurName(Bi.RHS))
+        DtCallee = "matlab_duration_add";
+      else if (Bi.Op == BinOp::Sub && isDurName(Bi.LHS) && isDurName(Bi.RHS))
+        DtCallee = "matlab_duration_sub";
+      if (!DtCallee.empty()) {
+        mlir::Value LO = LHS, RO = RHS;
+        if (Bi.Op == BinOp::Add && isDurName(Bi.LHS) && isDtName(Bi.RHS))
+          std::swap(LO, RO);
+        mlir::NamedAttribute Cal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, std::string(DtCallee)));
+        return emitUnreg("matlab.call_builtin", {LO, RO},
+                         PtrTy2, L, {Cal});
+      }
+    }
     /* Phase 1.1.D: typed-int matrix dispatch. When either operand is a
      * non-scalar Int32 / UInt8 array, attach a `dtype` StringAttr to the
      * matlab.{add,sub,emul,ediv,...} op. LowerTensorOps reads this attr
@@ -4445,6 +4591,29 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
         return mlir::arith::ConstantOp::create(
             B, L, F64, mlir::FloatAttr::get(F64, Val));
       }
+      /* Phase 5.1: disp(t) where t is a datetime / duration binding —
+       * dispatch to the typed runtime. */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          N->Name == "disp" && C.Args.size() == 1 && C.Args[0]) {
+        if (auto *ArgN = dynamic_cast<const NameExpr *>(C.Args[0])) {
+          if (ArgN->Ref && DatetimeBindings.count(ArgN->Ref)) {
+            mlir::Value V = lowerExpr(*C.Args[0]);
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_datetime_disp"));
+            return emitUnreg("matlab.call_builtin", {V},
+                             mlir::NoneType::get(&MCtx), L, {Cal});
+          }
+          if (ArgN->Ref && DurationBindings.count(ArgN->Ref)) {
+            mlir::Value V = lowerExpr(*C.Args[0]);
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_duration_disp"));
+            return emitUnreg("matlab.call_builtin", {V},
+                             mlir::NoneType::get(&MCtx), L, {Cal});
+          }
+        }
+      }
       /* disp(ME.message) inside a catch body — route to the dedicated
        * matlab_err_disp_message runtime that prints the stored error
        * text. We only recognise the single-arg 'message' field on a
@@ -4637,6 +4806,70 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
         }
         return emitUnreg("matlab.undef", {},
                          mlir::NoneType::get(&MCtx), L);
+      }
+      /* Phase 5.1: datetime / duration constructors. Each maps to a
+       * dedicated runtime entry that returns a fresh ptr-typed
+       * descriptor. Arithmetic and display dispatch live further
+       * down (via DatetimeBindings / DurationBindings tags). */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          N->Name == "datetime") {
+        auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+        if (C.Args.empty()) {
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_datetime_now"));
+          return emitUnreg("matlab.call_builtin", {}, PtrTy, L, {Cal});
+        }
+        if (C.Args.size() == 1) {
+          /* datetime("now") — string arg, accepted only as the literal
+           * "now" for v1. Other string forms (ISO date, format) are
+           * deferred. Treat any string arg as "now" for now. */
+          if (isStringExpr(C.Args[0]) ||
+              (C.Args[0] && C.Args[0]->Kind == NodeKind::CharLiteral)) {
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_datetime_now"));
+            return emitUnreg("matlab.call_builtin", {}, PtrTy, L, {Cal});
+          }
+        }
+        if (C.Args.size() == 3) {
+          mlir::Value Y = lowerExpr(*C.Args[0]);
+          mlir::Value M = lowerExpr(*C.Args[1]);
+          mlir::Value D = lowerExpr(*C.Args[2]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_datetime_ymd"));
+          return emitUnreg("matlab.call_builtin", {Y, M, D},
+                           PtrTy, L, {Cal});
+        }
+        if (C.Args.size() == 6) {
+          mlir::Value Y = lowerExpr(*C.Args[0]);
+          mlir::Value M = lowerExpr(*C.Args[1]);
+          mlir::Value D = lowerExpr(*C.Args[2]);
+          mlir::Value H = lowerExpr(*C.Args[3]);
+          mlir::Value Mn = lowerExpr(*C.Args[4]);
+          mlir::Value S = lowerExpr(*C.Args[5]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_datetime_ymdhms"));
+          return emitUnreg("matlab.call_builtin", {Y, M, D, H, Mn, S},
+                           PtrTy, L, {Cal});
+        }
+      }
+      /* duration unit constructors: seconds(n), minutes(n), hours(n),
+       * days(n), years(n) — each takes one f64 and returns a duration. */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          (N->Name == "seconds" || N->Name == "minutes" ||
+           N->Name == "hours"   || N->Name == "days"    ||
+           N->Name == "years") &&
+          C.Args.size() == 1 && C.Args[0]) {
+        auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+        mlir::Value V = lowerExpr(*C.Args[0]);
+        std::string Callee = "matlab_duration_" + std::string(N->Name);
+        mlir::NamedAttribute Cal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, Callee));
+        return emitUnreg("matlab.call_builtin", {V}, PtrTy, L, {Cal});
       }
       /* Phase 4: dictionary() / dictionary(k1, v1, k2, v2, ...) ->
        * matlab_dict_new + per-pair set. v1 supports zero-arg and an

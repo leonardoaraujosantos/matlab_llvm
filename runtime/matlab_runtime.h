@@ -558,6 +558,34 @@ double matlab_struct_get_f64(matlab_struct *s, const char *name, int64_t len);
 matlab_mat *matlab_struct_get_mat(matlab_struct *s, const char *name,
                                   int64_t len);
 double matlab_struct_has_field(matlab_struct *s, const char *name, int64_t len);
+/* Phase 5.1 — datetime / duration. Both descriptors wrap a double:
+ * datetime carries seconds-since-Unix-epoch, duration is a relative
+ * span. Display uses MATLAB's default formats; arithmetic forms
+ * (datetime - datetime, datetime ± duration, duration ± duration)
+ * land via dedicated entries below. */
+typedef struct matlab_datetime_s matlab_datetime;
+typedef struct matlab_duration_s matlab_duration;
+matlab_datetime *matlab_datetime_now(void);
+matlab_datetime *matlab_datetime_ymd(double y, double m, double d);
+matlab_datetime *matlab_datetime_ymdhms(double y, double m, double d,
+                                         double h, double mn, double s);
+void             matlab_datetime_disp(matlab_datetime *t);
+matlab_duration *matlab_duration_seconds(double n);
+matlab_duration *matlab_duration_minutes(double n);
+matlab_duration *matlab_duration_hours  (double n);
+matlab_duration *matlab_duration_days   (double n);
+matlab_duration *matlab_duration_years  (double n);
+double           matlab_duration_to_seconds(matlab_duration *d);
+double           matlab_duration_to_minutes(matlab_duration *d);
+double           matlab_duration_to_hours  (matlab_duration *d);
+double           matlab_duration_to_days   (matlab_duration *d);
+void             matlab_duration_disp(matlab_duration *d);
+matlab_duration *matlab_datetime_sub_datetime(matlab_datetime *a, matlab_datetime *b);
+matlab_datetime *matlab_datetime_add_duration(matlab_datetime *a, matlab_duration *d);
+matlab_datetime *matlab_datetime_sub_duration(matlab_datetime *a, matlab_duration *d);
+matlab_duration *matlab_duration_add(matlab_duration *a, matlab_duration *b);
+matlab_duration *matlab_duration_sub(matlab_duration *a, matlab_duration *b);
+
 /* Phase 4 — containers.Map / dictionary. A flat key/value table with
  * mixed key types (f64 or matlab_string *) and value types (f64 or
  * matlab_mat *). v1 backs both `containers.Map` and `dictionary` with

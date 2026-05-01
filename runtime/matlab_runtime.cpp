@@ -3584,6 +3584,173 @@ double matlab_obj_class_id(matlab_obj *o) {
 }
 
 /* ====================================================================== */
+/* Phase 5.1 — datetime / duration.
+ *
+ * matlab_datetime stores a single Unix-epoch second count as f64.
+ * matlab_duration is a relative second count as f64. The descriptors
+ * are heap-allocated so the lowering can pass ptr-typed values around;
+ * the runtime exposes constructors, display, and arithmetic.
+ *
+ * Display: datetime renders as "DD-Mon-YYYY HH:MM:SS" (MATLAB's
+ * default); duration as "X seconds" (smart-unit picking is a follow-up).
+ * ====================================================================== */
+
+#include <time.h>
+
+struct matlab_datetime_s { double seconds; };
+typedef struct matlab_datetime_s matlab_datetime;
+
+struct matlab_duration_s { double seconds; };
+typedef struct matlab_duration_s matlab_duration;
+
+extern "C" matlab_datetime *matlab_datetime_now(void) {
+    matlab_datetime *d = (matlab_datetime *)calloc(1, sizeof(*d));
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    d->seconds = (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+    return d;
+}
+
+/* Compute Unix-epoch seconds from civil date (UTC). Uses Howard Hinnant's
+ * date algorithm, which avoids OS time library limits and locale quirks. */
+static double civil_to_epoch(int y, int m, int d, int hh, int mm, double ss) {
+    /* Normalise so that March is month 1. */
+    int ny = m <= 2 ? y - 1 : y;
+    int nm = m + (m <= 2 ? 9 : -3);
+    long era = (ny >= 0 ? ny : ny - 399) / 400;
+    unsigned yoe = (unsigned)(ny - era * 400);
+    unsigned doy = (153u * (unsigned)nm + 2u) / 5u + (unsigned)d - 1u;
+    unsigned doe = yoe * 365u + yoe / 4u - yoe / 100u + doy;
+    long days = era * 146097L + (long)doe - 719468L;
+    return (double)days * 86400.0 +
+           (double)hh * 3600.0 + (double)mm * 60.0 + ss;
+}
+
+extern "C" matlab_datetime *matlab_datetime_ymd(double y, double m, double d) {
+    matlab_datetime *t = (matlab_datetime *)calloc(1, sizeof(*t));
+    t->seconds = civil_to_epoch((int)y, (int)m, (int)d, 0, 0, 0.0);
+    return t;
+}
+
+extern "C" matlab_datetime *matlab_datetime_ymdhms(
+        double y, double m, double d, double h, double mn, double s) {
+    matlab_datetime *t = (matlab_datetime *)calloc(1, sizeof(*t));
+    t->seconds = civil_to_epoch((int)y, (int)m, (int)d,
+                                 (int)h, (int)mn, s);
+    return t;
+}
+
+static void epoch_to_civil(double secs,
+                            int *y, int *m, int *d,
+                            int *hh, int *mm, double *ss) {
+    long total = (long)secs;
+    double frac = secs - (double)total;
+    long days = total >= 0 ? total / 86400 : -((-total + 86399) / 86400);
+    long sod = total - days * 86400;
+    *hh = (int)(sod / 3600);
+    *mm = (int)((sod / 60) % 60);
+    *ss = (double)(sod % 60) + frac;
+    /* Inverse of civil_to_epoch using Howard Hinnant's algorithm. */
+    long z = days + 719468L;
+    long era = (z >= 0 ? z : z - 146096) / 146097;
+    unsigned doe = (unsigned)(z - era * 146097);
+    unsigned yoe = (doe - doe / 1460u + doe / 36524u - doe / 146096u) / 365u;
+    int ny = (int)yoe + (int)(era * 400);
+    unsigned doy = doe - (365u * yoe + yoe / 4u - yoe / 100u);
+    unsigned mp = (5u * doy + 2u) / 153u;
+    *d = (int)(doy - (153u * mp + 2u) / 5u + 1u);
+    *m = (int)mp + (mp < 10u ? 3 : -9);
+    *y = ny + (*m <= 2 ? 1 : 0);
+}
+
+extern "C" void matlab_datetime_disp(matlab_datetime *t) {
+    if (!t) { matlab_disp_str("(empty datetime)", 16); return; }
+    int y, m, d, hh, mm; double ss;
+    epoch_to_civil(t->seconds, &y, &m, &d, &hh, &mm, &ss);
+    static const char *months[] = {"Jan","Feb","Mar","Apr","May","Jun",
+                                    "Jul","Aug","Sep","Oct","Nov","Dec"};
+    char buf[64];
+    int mi = (m - 1) % 12; if (mi < 0) mi += 12;
+    int isec = (int)ss;
+    int n = snprintf(buf, sizeof buf, "%02d-%s-%04d %02d:%02d:%02d",
+                     d, months[mi], y, hh, mm, isec);
+    pthread_mutex_lock(&matlab_io_mutex);
+    fwrite(buf, 1, (size_t)n, stdout); putchar('\n');
+    pthread_mutex_unlock(&matlab_io_mutex);
+}
+
+/* Internal helpers shared between the datetime / duration entries. */
+static matlab_duration *dur_make(double s) {
+    matlab_duration *d = (matlab_duration *)calloc(1, sizeof(*d));
+    d->seconds = s;
+    return d;
+}
+
+extern "C" matlab_duration *matlab_duration_seconds(double n) { return dur_make(n); }
+extern "C" matlab_duration *matlab_duration_minutes(double n) { return dur_make(n * 60.0); }
+extern "C" matlab_duration *matlab_duration_hours  (double n) { return dur_make(n * 3600.0); }
+extern "C" matlab_duration *matlab_duration_days   (double n) { return dur_make(n * 86400.0); }
+extern "C" matlab_duration *matlab_duration_years  (double n) { return dur_make(n * 365.25 * 86400.0); }
+
+extern "C" double matlab_duration_to_seconds(matlab_duration *d) {
+    return d ? d->seconds : 0.0;
+}
+extern "C" double matlab_duration_to_minutes(matlab_duration *d) {
+    return d ? d->seconds / 60.0 : 0.0;
+}
+extern "C" double matlab_duration_to_hours  (matlab_duration *d) {
+    return d ? d->seconds / 3600.0 : 0.0;
+}
+extern "C" double matlab_duration_to_days   (matlab_duration *d) {
+    return d ? d->seconds / 86400.0 : 0.0;
+}
+
+extern "C" void matlab_duration_disp(matlab_duration *d) {
+    if (!d) { matlab_disp_str("(empty duration)", 16); return; }
+    double s = d->seconds;
+    char buf[64];
+    int n;
+    /* Smart-unit pick: hours / minutes / seconds. */
+    if (fabs(s) >= 86400.0)
+        n = snprintf(buf, sizeof buf, "%.4f days", s / 86400.0);
+    else if (fabs(s) >= 3600.0)
+        n = snprintf(buf, sizeof buf, "%.4f hr", s / 3600.0);
+    else if (fabs(s) >= 60.0)
+        n = snprintf(buf, sizeof buf, "%.4f min", s / 60.0);
+    else
+        n = snprintf(buf, sizeof buf, "%.6f sec", s);
+    pthread_mutex_lock(&matlab_io_mutex);
+    fwrite(buf, 1, (size_t)n, stdout); putchar('\n');
+    pthread_mutex_unlock(&matlab_io_mutex);
+}
+
+/* Arithmetic. All return fresh descriptors. */
+extern "C" matlab_duration *matlab_datetime_sub_datetime(
+        matlab_datetime *a, matlab_datetime *b) {
+    return dur_make((a ? a->seconds : 0.0) - (b ? b->seconds : 0.0));
+}
+extern "C" matlab_datetime *matlab_datetime_add_duration(
+        matlab_datetime *a, matlab_duration *d) {
+    matlab_datetime *r = (matlab_datetime *)calloc(1, sizeof(*r));
+    r->seconds = (a ? a->seconds : 0.0) + (d ? d->seconds : 0.0);
+    return r;
+}
+extern "C" matlab_datetime *matlab_datetime_sub_duration(
+        matlab_datetime *a, matlab_duration *d) {
+    matlab_datetime *r = (matlab_datetime *)calloc(1, sizeof(*r));
+    r->seconds = (a ? a->seconds : 0.0) - (d ? d->seconds : 0.0);
+    return r;
+}
+extern "C" matlab_duration *matlab_duration_add(
+        matlab_duration *a, matlab_duration *b) {
+    return dur_make((a ? a->seconds : 0.0) + (b ? b->seconds : 0.0));
+}
+extern "C" matlab_duration *matlab_duration_sub(
+        matlab_duration *a, matlab_duration *b) {
+    return dur_make((a ? a->seconds : 0.0) - (b ? b->seconds : 0.0));
+}
+
+/* ====================================================================== */
 /* Phase 4 — containers.Map / dictionary.
  *
  * A simple key/value map. Keys are either f64 scalars or strings

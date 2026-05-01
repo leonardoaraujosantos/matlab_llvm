@@ -124,7 +124,8 @@ Out of scope:
 | N-D arrays (3-D) | 🟡 | `zeros(m,n,p)` / `ones(m,n,p)` + scalar `A(i,j,k)` read/write, `size(A, 3)`, `numel`, `ndims` |
 | N-D arrays (>3D) | ❌ | |
 | Sparse matrices | ❌ | |
-| `categorical`, `datetime`, `duration`, `table`, `timetable` | ❌ | |
+| `datetime` / `duration` | ✅ shipped (Phase 5.1) | Scalar `datetime` (Unix-epoch seconds) and `duration` descriptors with constructors (`datetime(y,m,d)`, `datetime(y,m,d,h,mn,s)`, `datetime("now")`, `seconds/minutes/hours/days/years(n)`), MATLAB-default display formatting, and arithmetic (`dt + dur → dt`, `dt - dt → dur`, `dur ± dur → dur`). UTC; civil-date math via Howard Hinnant's algorithm. C / Python / TypeScript runtimes byte-identical. Gating test: `test/Run/datetime_basic.m`. **Open follow-up**: vector / array forms, calendar arithmetic (months, years), zoned datetimes, `between`/`caldays`/`calmonths`/`calyears`. |
+| `categorical`, `table`, `timetable` | 🟡 partial / ❌ | categorical: shipped Phase 5.2 (see row above for status). table / timetable still missing. |
 
 ---
 

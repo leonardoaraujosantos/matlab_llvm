@@ -1708,6 +1708,102 @@ export function cell_concat_col(a: any, b: any): Cell2D {
 
 export function obj_new(): any { return {}; }
 
+/* Phase 5.1 — datetime / duration. Each is a small object carrying a
+ * single `seconds` field. We use a manual UTC civil/epoch conversion
+ * (Howard Hinnant's algorithm) so output matches the C runtime
+ * byte-for-byte regardless of the host's timezone. */
+
+const _MONTHS = ["Jan","Feb","Mar","Apr","May","Jun",
+                 "Jul","Aug","Sep","Oct","Nov","Dec"];
+
+function civilToEpoch(y: number, m: number, d: number,
+                       hh = 0, mn = 0, ss = 0.0): number {
+  const ny = m <= 2 ? y - 1 : y;
+  const nm = m + (m <= 2 ? 9 : -3);
+  const era = ny >= 0 ? Math.floor(ny / 400) : Math.floor((ny - 399) / 400);
+  const yoe = ny - era * 400;
+  const doy = Math.floor((153 * nm + 2) / 5) + d - 1;
+  const doe = yoe * 365 + Math.floor(yoe / 4) - Math.floor(yoe / 100) + doy;
+  const days = era * 146097 + doe - 719468;
+  return days * 86400.0 + hh * 3600.0 + mn * 60.0 + ss;
+}
+function epochToCivil(secs: number) {
+  const total = Math.floor(secs);
+  const frac = secs - total;
+  const days = Math.floor(total / 86400);
+  const sod = total - days * 86400;
+  const hh = Math.floor(sod / 3600);
+  const mn = Math.floor(sod / 60) % 60;
+  const ss = (sod % 60) + frac;
+  const z = days + 719468;
+  const era = z >= 0 ? Math.floor(z / 146097) : Math.floor((z - 146096) / 146097);
+  const doe = z - era * 146097;
+  const yoe = Math.floor((doe - Math.floor(doe / 1460) + Math.floor(doe / 36524) - Math.floor(doe / 146096)) / 365);
+  const ny = yoe + era * 400;
+  const doy = doe - (365 * yoe + Math.floor(yoe / 4) - Math.floor(yoe / 100));
+  const mp = Math.floor((5 * doy + 2) / 153);
+  const d = doy - Math.floor((153 * mp + 2) / 5) + 1;
+  const m = mp + (mp < 10 ? 3 : -9);
+  const y = ny + (m <= 2 ? 1 : 0);
+  return { y, m, d, hh, mn, ss };
+}
+
+export function datetime_now(): any {
+  return { _kind: 'datetime', seconds: Date.now() / 1000.0 };
+}
+export function datetime_ymd(y: number, m: number, d: number): any {
+  return { _kind: 'datetime', seconds: civilToEpoch(y | 0, m | 0, d | 0) };
+}
+export function datetime_ymdhms(y: number, m: number, d: number,
+                                  h: number, mn: number, s: number): any {
+  return { _kind: 'datetime',
+           seconds: civilToEpoch(y | 0, m | 0, d | 0,
+                                  h | 0, mn | 0, +s) };
+}
+function pad2(n: number): string { return String(n | 0).padStart(2, '0'); }
+function pad4(n: number): string { return String(n | 0).padStart(4, '0'); }
+export function datetime_disp(t: any): void {
+  if (t == null) { console.log("(empty datetime)"); return; }
+  const c = epochToCivil(+t.seconds);
+  const mi = ((c.m - 1) % 12 + 12) % 12;
+  console.log(`${pad2(c.d)}-${_MONTHS[mi]}-${pad4(c.y)} ${pad2(c.hh)}:${pad2(c.mn)}:${pad2(Math.floor(c.ss))}`);
+}
+
+export function duration_seconds(n: number): any { return { _kind: 'duration', seconds: +n }; }
+export function duration_minutes(n: number): any { return { _kind: 'duration', seconds: +n * 60.0 }; }
+export function duration_hours(n: number):   any { return { _kind: 'duration', seconds: +n * 3600.0 }; }
+export function duration_days(n: number):    any { return { _kind: 'duration', seconds: +n * 86400.0 }; }
+export function duration_years(n: number):   any { return { _kind: 'duration', seconds: +n * 365.25 * 86400.0 }; }
+export function duration_to_seconds(d: any): number { return d ? +d.seconds : 0; }
+export function duration_to_minutes(d: any): number { return d ? +d.seconds / 60 : 0; }
+export function duration_to_hours(d: any):   number { return d ? +d.seconds / 3600 : 0; }
+export function duration_to_days(d: any):    number { return d ? +d.seconds / 86400 : 0; }
+export function duration_disp(d: any): void {
+  if (d == null) { console.log("(empty duration)"); return; }
+  const s = +d.seconds;
+  if (Math.abs(s) >= 86400) console.log(`${(s / 86400).toFixed(4)} days`);
+  else if (Math.abs(s) >= 3600) console.log(`${(s / 3600).toFixed(4)} hr`);
+  else if (Math.abs(s) >= 60) console.log(`${(s / 60).toFixed(4)} min`);
+  else console.log(`${s.toFixed(6)} sec`);
+}
+export function datetime_sub_datetime(a: any, b: any): any {
+  return duration_seconds((a ? +a.seconds : 0) - (b ? +b.seconds : 0));
+}
+export function datetime_add_duration(a: any, d: any): any {
+  return { _kind: 'datetime',
+           seconds: (a ? +a.seconds : 0) + (d ? +d.seconds : 0) };
+}
+export function datetime_sub_duration(a: any, d: any): any {
+  return { _kind: 'datetime',
+           seconds: (a ? +a.seconds : 0) - (d ? +d.seconds : 0) };
+}
+export function duration_add(a: any, b: any): any {
+  return duration_seconds((a ? +a.seconds : 0) + (b ? +b.seconds : 0));
+}
+export function duration_sub(a: any, b: any): any {
+  return duration_seconds((a ? +a.seconds : 0) - (b ? +b.seconds : 0));
+}
+
 /* Phase 4 — containers.Map / dictionary. A simple [key, value] array
  * with O(N) lookup, mirroring the C runtime. Keys can be string
  * (representing matlab_string *) or number; values can be number or

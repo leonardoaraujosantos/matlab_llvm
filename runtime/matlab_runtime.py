@@ -1472,6 +1472,107 @@ def obj_new(*_ignored):
     _obj_store[oid] = obj  # keep a strong ref + a lookup path for legacy callers
     return obj
 
+# Phase 5.1 — datetime / duration. Mirrors the C runtime's wrapping
+# style: each is a small dict carrying a single `seconds` field. We
+# avoid Python's datetime module to keep the surface independent of
+# the target's locale + timezone settings (the C runtime treats the
+# datetime as UTC seconds-since-epoch and renders DD-Mon-YYYY HH:MM:SS).
+
+import time as _time
+_MONTHS = ["Jan","Feb","Mar","Apr","May","Jun",
+           "Jul","Aug","Sep","Oct","Nov","Dec"]
+
+def _civil_to_epoch(y, m, d, hh=0, mn=0, ss=0.0):
+    """Howard Hinnant civil-to-epoch (UTC). Same algorithm as the C
+    runtime so output matches byte-for-byte."""
+    ny = y - 1 if m <= 2 else y
+    nm = m + 9 if m <= 2 else m - 3
+    era = ny // 400 if ny >= 0 else (ny - 399) // 400
+    yoe = ny - era * 400
+    doy = (153 * nm + 2) // 5 + d - 1
+    doe = yoe * 365 + yoe // 4 - yoe // 100 + doy
+    days = era * 146097 + doe - 719468
+    return float(days) * 86400.0 + hh * 3600.0 + mn * 60.0 + float(ss)
+
+def _epoch_to_civil(secs):
+    total = int(secs)
+    frac = secs - float(total)
+    days = total // 86400
+    sod = total - days * 86400
+    hh = sod // 3600
+    mn = (sod // 60) % 60
+    ss = float(sod % 60) + frac
+    z = days + 719468
+    era = z // 146097
+    doe = z - era * 146097
+    yoe = (doe - doe // 1460 + doe // 36524 - doe // 146096) // 365
+    ny = yoe + era * 400
+    doy = doe - (365 * yoe + yoe // 4 - yoe // 100)
+    mp = (5 * doy + 2) // 153
+    d = doy - (153 * mp + 2) // 5 + 1
+    m = mp + (3 if mp < 10 else -9)
+    y = ny + (1 if m <= 2 else 0)
+    return y, m, d, hh, mn, ss
+
+def datetime_now():
+    return {'_kind': 'datetime', 'seconds': _time.time()}
+
+def datetime_ymd(y, m, d):
+    return {'_kind': 'datetime', 'seconds': _civil_to_epoch(int(y), int(m), int(d))}
+
+def datetime_ymdhms(y, m, d, h, mn, s):
+    return {'_kind': 'datetime',
+            'seconds': _civil_to_epoch(int(y), int(m), int(d),
+                                        int(h), int(mn), float(s))}
+
+def datetime_disp(t):
+    if t is None: print("(empty datetime)"); return
+    y, m, d, hh, mn, ss = _epoch_to_civil(t['seconds'])
+    print(f"{int(d):02d}-{_MONTHS[(m-1) % 12]}-{int(y):04d} "
+          f"{int(hh):02d}:{int(mn):02d}:{int(ss):02d}")
+
+def duration_seconds(n): return {'_kind': 'duration', 'seconds': float(n)}
+def duration_minutes(n): return {'_kind': 'duration', 'seconds': float(n) * 60.0}
+def duration_hours(n):   return {'_kind': 'duration', 'seconds': float(n) * 3600.0}
+def duration_days(n):    return {'_kind': 'duration', 'seconds': float(n) * 86400.0}
+def duration_years(n):   return {'_kind': 'duration', 'seconds': float(n) * 365.25 * 86400.0}
+
+def duration_to_seconds(d): return float(d['seconds']) if d else 0.0
+def duration_to_minutes(d): return float(d['seconds']) / 60.0 if d else 0.0
+def duration_to_hours(d):   return float(d['seconds']) / 3600.0 if d else 0.0
+def duration_to_days(d):    return float(d['seconds']) / 86400.0 if d else 0.0
+
+def duration_disp(d):
+    if d is None: print("(empty duration)"); return
+    s = float(d['seconds'])
+    if abs(s) >= 86400.0:  print(f"{s/86400.0:.4f} days")
+    elif abs(s) >= 3600.0: print(f"{s/3600.0:.4f} hr")
+    elif abs(s) >= 60.0:   print(f"{s/60.0:.4f} min")
+    else:                  print(f"{s:.6f} sec")
+
+def datetime_sub_datetime(a, b):
+    return duration_seconds((a['seconds'] if a else 0.0) -
+                             (b['seconds'] if b else 0.0))
+
+def datetime_add_duration(a, d):
+    return {'_kind': 'datetime',
+            'seconds': (a['seconds'] if a else 0.0) +
+                        (d['seconds'] if d else 0.0)}
+
+def datetime_sub_duration(a, d):
+    return {'_kind': 'datetime',
+            'seconds': (a['seconds'] if a else 0.0) -
+                        (d['seconds'] if d else 0.0)}
+
+def duration_add(a, b):
+    return duration_seconds((a['seconds'] if a else 0.0) +
+                             (b['seconds'] if b else 0.0))
+
+def duration_sub(a, b):
+    return duration_seconds((a['seconds'] if a else 0.0) -
+                             (b['seconds'] if b else 0.0))
+
+
 def dict_new():
     """Phase 4 — containers.Map / dictionary. Backed by a list of
     (key, value) pairs to mirror the C runtime's slot model. Keys can

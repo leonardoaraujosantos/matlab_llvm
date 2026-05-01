@@ -53,6 +53,9 @@ void Resolver::registerBuiltins() {
     "rmfield", "string", "strlen", "isstring",
     /* Phase 4 — containers.Map / dictionary (key/value maps). */
     "containers", "dictionary", "isKey", "remove", "keys",
+    /* Phase 5.1 — datetime / duration. */
+    "datetime", "duration", "seconds", "minutes", "hours", "days", "years",
+    "calendarDuration",
     "sprintf", "num2str", "str2double",
     "upper", "lower", "startsWith", "endsWith", "contains",
     "strtrim", "strrep", "strcat",
