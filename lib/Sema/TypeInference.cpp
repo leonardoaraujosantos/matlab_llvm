@@ -1085,13 +1085,19 @@ const Type *TypeInference::visitBuiltinCall(std::string_view Name,
     return TC.any();
   }
 
-  // Dtype-cast builtins
-  if (Name == "double")  return ArgTys.empty() ? TC.scalar(Dtype::Double) :
-    ArgTys[0] && ArgTys[0]->K == Type::Kind::Array ?
-      TC.arrayOf(Dtype::Double, static_cast<const ArrayType &>(*ArgTys[0]).S)
-      : (const Type *)TC.scalar(Dtype::Double);
-  if (Name == "single")  return TC.scalar(Dtype::Single);
-  if (Name == "int32")   return TC.scalar(Dtype::Int32);
+  // Dtype-cast builtins. Shape-preserving for the cases that have a
+  // matrix-aware runtime path; the others fall back to a scalar result.
+  // Phase 1.1 (Option B) wires int32/uint8 matrix descriptors; the other
+  // widths still go scalar until their typed runtime lands.
+  auto castShape = [&](Dtype D) -> const Type * {
+    if (!ArgTys.empty() && ArgTys[0] && ArgTys[0]->K == Type::Kind::Array)
+      return TC.arrayOf(D, static_cast<const ArrayType &>(*ArgTys[0]).S);
+    return TC.scalar(D);
+  };
+  if (Name == "double")  return castShape(Dtype::Double);
+  if (Name == "single")  return castShape(Dtype::Single);
+  if (Name == "int32")   return castShape(Dtype::Int32);
+  if (Name == "uint8")   return castShape(Dtype::UInt8);
   if (Name == "int64")   return TC.scalar(Dtype::Int64);
   if (Name == "logical") return TC.scalar(Dtype::Logical);
   if (Name == "char")    return TC.arrayOf(Dtype::Char, Shape::unknown());

@@ -840,6 +840,22 @@ bool TensorLowering::rewriteBuiltinCalls() {
       Changed = true;
       continue;
     }
+    /* Phase 1.1.C — typed int matrix disp. Lowering.cpp swaps the
+     * callee on disp(typed_matrix) sites so the runtime entry hits
+     * matlab_mat_i32_disp / matlab_mat_u8_disp directly. Mirror the
+     * matlab_string_disp dispatch above; both consume one ptr operand
+     * and return void. */
+    if ((Name == "matlab_mat_i32_disp" || Name == "matlab_mat_u8_disp") &&
+        Call->getNumOperands() == 1 &&
+        Call->getOperand(0).getType() == PtrTy) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt(Name, VoidTy, {PtrTy});
+      LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                            ValueRange{Call->getOperand(0)});
+      Call->erase();
+      Changed = true;
+      continue;
+    }
     if (Name == "matlab_string_len" && Call->getNumResults() == 1 &&
         Call->getNumOperands() == 1 &&
         Call->getOperand(0).getType() == PtrTy) {
@@ -2041,6 +2057,12 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"numel",      "matlab_numel",      0, "p"},
       {"ndims",      "matlab_ndims",      0, "p"},
       {"isempty",    "matlab_isempty",    0, "p"},
+      /* Phase 1.1.C — native int matrix casts.
+       * Scalar forms (matlab_int32_s etc., handled by the Scalar map
+       * above) operate on f64 and stay f64. Matrix forms produce
+       * typed matlab_mat_i32* / matlab_mat_u8* descriptors. */
+      {"int32",      "matlab_mat_i32_from_double", 1, "p"},
+      {"uint8",      "matlab_mat_u8_from_double",  1, "p"},
       {"transpose",  "matlab_transpose",  1, "p"},
       {"ctranspose", "matlab_transpose",  1, "p"},
       {"diag",       "matlab_diag",       1, "p"},

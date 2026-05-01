@@ -478,6 +478,13 @@ private:
   bool isStringExpr(const Expr *E) const;
   /* True for the names of string-returning builtins listed above. */
   static bool isStringReturningBuiltin(llvm::StringRef N);
+  /* Phase 1.1.C: pick the typed-int matrix runtime suffix for an
+   * expression. Returns "i32" when E is a non-scalar Int32 array, "u8"
+   * for non-scalar UInt8 array, empty otherwise. Used by the disp /
+   * matrix-builtin emission sites to swap callee names so downstream
+   * lowering reaches the typed runtime entry points (matlab_mat_i32_disp
+   * etc.) without needing to thread attributes through opaque ptr SSA. */
+  static llvm::StringRef intDtypeSuffixOf(const Expr *E);
 };
 
 //===----------------------------------------------------------------------===//
@@ -523,6 +530,19 @@ bool Lowerer::isStringReturningBuiltin(llvm::StringRef N) {
          N == "upper" || N == "lower" || N == "strtrim" ||
          N == "strrep" || N == "strcat" ||
          N == "bin" || N == "hex" || N == "dec";
+}
+
+llvm::StringRef Lowerer::intDtypeSuffixOf(const Expr *E) {
+  if (!E || !E->Ty || E->Ty->K != Type::Kind::Array) return {};
+  auto &A = static_cast<const ArrayType &>(*E->Ty);
+  /* Scalar typed ints are represented at MLIR level as native i32 / i8
+   * values, which the existing scalar-disp path handles via SIToFP /
+   * UIToFP -> matlab_disp_f64. Only matrix-shaped values need the typed
+   * runtime descriptor entry points. */
+  if (A.S.K == Shape::Rank::Scalar) return {};
+  if (A.Elt == Dtype::Int32) return "i32";
+  if (A.Elt == Dtype::UInt8) return "u8";
+  return {};
 }
 
 bool Lowerer::isStringExpr(const Expr *E) const {
@@ -1626,12 +1646,24 @@ void Lowerer::lowerStmt(const Stmt &St) {
                  NE->Ref->InferredType->K == Type::Kind::StringArray)
           DispIsString = true;
       }
+      llvm::StringRef IntSuf = Lowerer::intDtypeSuffixOf(E.E);
       if (DispIsString) {
         mlir::NamedAttribute SCal(
             mlir::StringAttr::get(&MCtx, "callee"),
             mlir::StringAttr::get(&MCtx, "matlab_string_disp"));
         emitUnregOp("matlab.call_builtin", {V},
                     {mlir::NoneType::get(&MCtx)}, loc(E.Range), {SCal});
+      } else if (!IntSuf.empty()) {
+        /* Phase 1.1.C — typed int matrix disp. Sema marks the expression
+         * as Int32 / UInt8 array so we can emit the typed callee directly
+         * and avoid the polymorphic matlab_disp_mat path (which expects
+         * the f64 layout). */
+        std::string TyCallee = ("matlab_mat_" + IntSuf + "_disp").str();
+        mlir::NamedAttribute TCal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, TyCallee));
+        emitUnregOp("matlab.call_builtin", {V},
+                    {mlir::NoneType::get(&MCtx)}, loc(E.Range), {TCal});
       } else {
         emitUnregOp("matlab.call_builtin", {V},
                     {mlir::NoneType::get(&MCtx)}, loc(E.Range), {DispCal});
@@ -1858,12 +1890,23 @@ void Lowerer::lowerStmt(const Stmt &St) {
        * call directly so the value renders as text instead of being
        * pushed through matlab_disp_mat (which would matrix-print the
        * string descriptor's bytes). */
+      llvm::StringRef IntSuf = Lowerer::intDtypeSuffixOf(A.RHS);
       if (RhsIsString) {
         mlir::NamedAttribute SCal(
             mlir::StringAttr::get(&MCtx, "callee"),
             mlir::StringAttr::get(&MCtx, "matlab_string_disp"));
         emitUnregOp("matlab.call_builtin", {Rhs},
                     {mlir::NoneType::get(&MCtx)}, loc(A.Range), {SCal});
+      } else if (!IntSuf.empty()) {
+        /* Phase 1.1.C — typed int matrix disp on `A = int32(...)` style
+         * implicit display. Skip the matlab_disp_mat polymorphic path and
+         * call the typed disp directly. */
+        std::string TyCallee = ("matlab_mat_" + IntSuf + "_disp").str();
+        mlir::NamedAttribute TCal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, TyCallee));
+        emitUnregOp("matlab.call_builtin", {Rhs},
+                    {mlir::NoneType::get(&MCtx)}, loc(A.Range), {TCal});
       } else {
         emitUnregOp("matlab.call_builtin", {Rhs},
                     {mlir::NoneType::get(&MCtx)}, loc(A.Range), {Cal});
@@ -3740,6 +3783,42 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
               mlir::StringAttr::get(&MCtx, "matlab_string_disp"));
           return emitUnreg("matlab.call_builtin", {V},
                            mlir::NoneType::get(&MCtx), L, {Cal});
+        }
+      }
+      /* Phase 1.1.C — disp(typed_int_matrix). When the arg's Sema
+       * type is a non-scalar Int32 / UInt8 array, route through the
+       * typed disp entry (matlab_mat_i32_disp / matlab_mat_u8_disp)
+       * instead of the polymorphic matlab_disp_mat path which expects
+       * f64 layout. The check works for both NameExpr (binding's
+       * InferredType is propagated to the AST node) and direct
+       * `disp(int32(M))` because Sema annotates the CallOrIndex's
+       * inferred type when the cast result is well-typed. */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          N->Name == "disp" && C.Args.size() == 1) {
+        const Expr *Arg = C.Args[0];
+        const Type *ArgTy = Arg ? Arg->Ty : nullptr;
+        /* NameExpr cross-REPL fallback: when the AST didn't get a
+         * fresh Ty in this compile, fall back to the binding's
+         * persisted InferredType. */
+        if ((!ArgTy || ArgTy->K != Type::Kind::Array)) {
+          if (auto *AN = dynamic_cast<const NameExpr *>(Arg))
+            if (AN->Ref && AN->Ref->InferredType)
+              ArgTy = AN->Ref->InferredType;
+        }
+        if (ArgTy && ArgTy->K == Type::Kind::Array) {
+          auto &AT = static_cast<const ArrayType &>(*ArgTy);
+          if (AT.S.K != Shape::Rank::Scalar &&
+              (AT.Elt == Dtype::Int32 || AT.Elt == Dtype::UInt8)) {
+            mlir::Value V = lowerExpr(*Arg);
+            llvm::StringRef Suf =
+                (AT.Elt == Dtype::Int32) ? "i32" : "u8";
+            std::string Callee = ("matlab_mat_" + Suf + "_disp").str();
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, Callee));
+            return emitUnreg("matlab.call_builtin", {V},
+                             mlir::NoneType::get(&MCtx), L, {Cal});
+          }
         }
       }
       /* strlen(s) on a string binding -> matlab_string_len. The
