@@ -257,7 +257,7 @@ enable_testing()
 # Direct C tests for runtime/matlab_runtime.c — no JIT, no MATLAB
 # frontend. Each test_*.c links the runtime TU directly. See
 # docs/port_runtime_2_cpp.md (Phase 1).
-foreach(_rt_test IN ITEMS linalg shape rng complex reduce signal stats image more fft struct_cell fi elementwise unary fi_arrays int_arrays strings)
+foreach(_rt_test IN ITEMS linalg shape rng complex reduce signal stats image more fft struct_cell fi elementwise unary fi_arrays int_arrays strings ode)
   set(_rt_target "runtime-test-${_rt_test}")
   add_executable(${_rt_target}
     test/Runtime/test_${_rt_test}.c

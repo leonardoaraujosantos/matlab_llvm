@@ -2246,6 +2246,211 @@ def diff(A):
     return np.diff(a, axis=0)
 
 
+# --- ODE solvers ----------------------------------------------------------
+# Dormand-Prince 5(4) and Bogacki-Shampine 3(2). Scalar y only. Cached
+# across the paired _t / _y calls so the second call returns the other
+# half without re-integrating. Tolerances and step control match the C
+# runtime so cross-backend output stays in lockstep.
+
+_ode_cache = {"key": None, "t": None, "y": None}
+
+def _ode_hermite(y, y1, k, k1, h, th):
+    th2 = th * th
+    th3 = th2 * th
+    return ((2*th3 - 3*th2 + 1) * y
+            + (-2*th3 + 3*th2)  * y1
+            + h * (th3 - 2*th2 + th) * k
+            + h * (th3 - th2)        * k1)
+
+def _ode_solve_dp45(f, t0, tf, y0, rtol=1e-3, atol=1e-6,
+                    max_step=0.0, init_step=0.0, refine=4):
+    max_steps = 100000
+    if refine < 1: refine = 1
+    T = [t0]; Y = [y0]
+    t, y = t0, y0
+    span = tf - t0
+    if init_step > 0.0:
+        h = init_step if span >= 0 else (0.0 - init_step)
+    else:
+        h = span * 0.01
+    if h == 0.0 or span == 0.0:
+        return T, Y
+    forward = h > 0
+    if max_step > 0.0:
+        if h >  max_step: h =  max_step
+        if h < (0.0 - max_step): h = 0.0 - max_step
+    k1 = f(t, y)
+    steps = 0
+    while ((t < tf) if forward else (t > tf)) and steps < max_steps:
+        steps += 1
+        if (forward and t + h > tf) or ((not forward) and t + h < tf):
+            h = tf - t
+        k2 = f(t + h*(1/5),  y + h*(k1*(1/5)))
+        k3 = f(t + h*(3/10), y + h*(k1*(3/40) + k2*(9/40)))
+        k4 = f(t + h*(4/5),  y + h*(k1*(44/45) - k2*(56/15) + k3*(32/9)))
+        k5 = f(t + h*(8/9),  y + h*(k1*(19372/6561) - k2*(25360/2187)
+                                    + k3*(64448/6561) - k4*(212/729)))
+        k6 = f(t + h,        y + h*(k1*(9017/3168) - k2*(355/33)
+                                    + k3*(46732/5247) + k4*(49/176)
+                                    - k5*(5103/18656)))
+        y5 = y + h*(k1*(35/384) + k3*(500/1113) + k4*(125/192)
+                    - k5*(2187/6784) + k6*(11/84))
+        k7 = f(t + h, y5)
+        err = h*(k1*(71/57600) - k3*(71/16695) + k4*(71/1920)
+                 - k5*(17253/339200) + k6*(22/525) - k7*(1/40))
+        scale = atol + rtol * (abs(y) if abs(y) > abs(y5) else abs(y5))
+        normerr = abs(err)/scale if scale > 0 else 0.0
+        if normerr <= 1.0:
+            j = 1
+            while j <= refine:
+                th = j / refine
+                ti = t + h * th
+                yi = y5 if j == refine else _ode_hermite(y, y5, k1, k7, h, th)
+                T.append(ti); Y.append(yi)
+                j += 1
+            t += h
+            y = y5
+            k1 = k7
+        fac = 5.0 if normerr == 0.0 else 0.9 * (normerr ** (-1/5))
+        if fac < 0.2: fac = 0.2
+        if fac > 5.0: fac = 5.0
+        h *= fac
+        if max_step > 0.0:
+            if h >  max_step: h =  max_step
+            if h < (0.0 - max_step): h = 0.0 - max_step
+    return T, Y
+
+def _ode_solve_bs23(f, t0, tf, y0, rtol=1e-3, atol=1e-6,
+                    max_step=0.0, init_step=0.0, refine=1):
+    max_steps = 100000
+    if refine < 1: refine = 1
+    T = [t0]; Y = [y0]
+    t, y = t0, y0
+    span = tf - t0
+    if init_step > 0.0:
+        h = init_step if span >= 0 else (0.0 - init_step)
+    else:
+        h = span * 0.01
+    if h == 0.0 or span == 0.0:
+        return T, Y
+    forward = h > 0
+    if max_step > 0.0:
+        if h >  max_step: h =  max_step
+        if h < (0.0 - max_step): h = 0.0 - max_step
+    k1 = f(t, y)
+    steps = 0
+    while ((t < tf) if forward else (t > tf)) and steps < max_steps:
+        steps += 1
+        if (forward and t + h > tf) or ((not forward) and t + h < tf):
+            h = tf - t
+        k2 = f(t + h*0.5,  y + h*(k1*0.5))
+        k3 = f(t + h*0.75, y + h*(k2*0.75))
+        y3 = y + h*(k1*(2/9) + k2*(1/3) + k3*(4/9))
+        k4 = f(t + h, y3)
+        err = h*(k1*(-5/72) + k2*(1/12) + k3*(1/9) - k4*(1/8))
+        scale = atol + rtol * (abs(y) if abs(y) > abs(y3) else abs(y3))
+        normerr = abs(err)/scale if scale > 0 else 0.0
+        if normerr <= 1.0:
+            j = 1
+            while j <= refine:
+                th = j / refine
+                ti = t + h * th
+                yi = y3 if j == refine else _ode_hermite(y, y3, k1, k4, h, th)
+                T.append(ti); Y.append(yi)
+                j += 1
+            t += h
+            y = y3
+            k1 = k4
+        fac = 5.0 if normerr == 0.0 else 0.9 * (normerr ** (-1/3))
+        if fac < 0.2: fac = 0.2
+        if fac > 5.0: fac = 5.0
+        h *= fac
+        if max_step > 0.0:
+            if h >  max_step: h =  max_step
+            if h < (0.0 - max_step): h = 0.0 - max_step
+    return T, Y
+
+def _ode_compute(kind, f, tspan, y0, rtol=1e-3, atol=1e-6,
+                 max_step=0.0, init_step=0.0, refine=None):
+    if refine is None:
+        refine = 4 if kind == 45 else 1
+    ts = np.asarray(tspan, dtype=float).ravel()
+    if ts.size < 2:
+        t0, tf = 0.0, 0.0
+    else:
+        t0, tf = float(ts[0]), float(ts[-1])
+    key = (kind, id(f), float(t0), float(tf), float(y0),
+           float(rtol), float(atol), float(max_step), float(init_step),
+           int(refine))
+    if _ode_cache["key"] == key:
+        return
+    solver = _ode_solve_dp45 if kind == 45 else _ode_solve_bs23
+    T, Y = solver(f, t0, tf, y0, rtol, atol, max_step, init_step, refine)
+    _ode_cache["key"] = key
+    _ode_cache["t"] = np.asarray(T, dtype=float).reshape((-1, 1))
+    _ode_cache["y"] = np.asarray(Y, dtype=float).reshape((-1, 1))
+
+def _ode_opts_resolve(opts, default_refine):
+    """Pull RelTol / AbsTol / MaxStep / InitialStep / Refine from a
+    struct-shaped dict; fall back to MATLAB defaults when fields are
+    missing or opts is None."""
+    rtol, atol = 1e-3, 1e-6
+    max_step, init_step = 0.0, 0.0
+    refine = default_refine
+    if opts is not None:
+        try:
+            if "RelTol"      in opts: rtol      = float(opts["RelTol"])
+            if "AbsTol"      in opts: atol      = float(opts["AbsTol"])
+            if "MaxStep"     in opts: max_step  = float(opts["MaxStep"])
+            if "InitialStep" in opts: init_step = float(opts["InitialStep"])
+            if "Refine"      in opts:
+                r = int(opts["Refine"])
+                if r >= 1: refine = r
+        except (TypeError, KeyError):
+            pass
+    return rtol, atol, max_step, init_step, refine
+
+def ode45_t(f, tspan, y0):
+    _ode_compute(45, f, tspan, float(y0))
+    return _ode_cache["t"].copy()
+
+def ode45_y(f, tspan, y0):
+    _ode_compute(45, f, tspan, float(y0))
+    return _ode_cache["y"].copy()
+
+def ode23_t(f, tspan, y0):
+    _ode_compute(23, f, tspan, float(y0))
+    return _ode_cache["t"].copy()
+
+def ode23_y(f, tspan, y0):
+    _ode_compute(23, f, tspan, float(y0))
+    return _ode_cache["y"].copy()
+
+def ode45_t_opts(f, tspan, y0, opts):
+    rtol, atol, max_step, init_step, refine = _ode_opts_resolve(opts, 4)
+    _ode_compute(45, f, tspan, float(y0), rtol, atol,
+                 max_step, init_step, refine)
+    return _ode_cache["t"].copy()
+
+def ode45_y_opts(f, tspan, y0, opts):
+    rtol, atol, max_step, init_step, refine = _ode_opts_resolve(opts, 4)
+    _ode_compute(45, f, tspan, float(y0), rtol, atol,
+                 max_step, init_step, refine)
+    return _ode_cache["y"].copy()
+
+def ode23_t_opts(f, tspan, y0, opts):
+    rtol, atol, max_step, init_step, refine = _ode_opts_resolve(opts, 1)
+    _ode_compute(23, f, tspan, float(y0), rtol, atol,
+                 max_step, init_step, refine)
+    return _ode_cache["t"].copy()
+
+def ode23_y_opts(f, tspan, y0, opts):
+    rtol, atol, max_step, init_step, refine = _ode_opts_resolve(opts, 1)
+    _ode_compute(23, f, tspan, float(y0), rtol, atol,
+                 max_step, init_step, refine)
+    return _ode_cache["y"].copy()
+
+
 def meshgrid_X(x, y=None):
     xv = np.asarray(x, dtype=float).ravel()
     yv = xv if y is None else np.asarray(y, dtype=float).ravel()

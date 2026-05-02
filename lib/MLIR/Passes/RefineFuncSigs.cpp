@@ -18,6 +18,7 @@
 #include "matlab/MLIR/Passes/Passes.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/LLVMIR/LLVMTypes.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/BuiltinTypes.h"
@@ -68,10 +69,24 @@ bool runRefineFuncSigs(mlir::ModuleOp M) {
     bool Changed = false;
     Fn.walk([&](mlir::func::ReturnOp Ret) {
       if (Ret.getNumOperands() != NewResults.size()) return;
+      auto PtrTy = mlir::LLVM::LLVMPointerType::get(Fn.getContext());
       for (unsigned i = 0; i < Ret.getNumOperands(); ++i) {
         auto Old = NewResults[i];
         auto New = Ret.getOperand(i).getType();
-        if (mlir::isa<mlir::NoneType>(Old) && Old != New) {
+        if (Old == New) continue;
+        if (mlir::isa<mlir::NoneType>(Old)) {
+          NewResults[i] = New;
+          Changed = true;
+          continue;
+        }
+        /* LowerTensorOps converts tensor matrix values inside function
+         * bodies to !llvm.ptr but doesn't update the function's declared
+         * return type. The verifier then rejects the func.return because
+         * the operand type no longer matches the signature. Patch the
+         * declaration to follow the body. */
+        bool OldIsTensor = mlir::isa<mlir::RankedTensorType,
+                                     mlir::UnrankedTensorType>(Old);
+        if (OldIsTensor && New == PtrTy) {
           NewResults[i] = New;
           Changed = true;
         }

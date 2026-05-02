@@ -4966,7 +4966,7 @@ bool handleRequest(const Object &Msg) {
       "abs", "ceil", "clear", "cos", "det", "diag", "disp", "eig",
       "exp", "eye", "fft", "find", "floor", "fprintf", "imag", "inv",
       "isempty", "isequal", "length", "log", "max", "mean", "min",
-      "ndims", "numel", "ones", "prod", "rand", "randn", "real",
+      "ndims", "numel", "ode23", "ode45", "ones", "prod", "rand", "randn", "real",
       "reshape", "round", "sin", "size", "sort", "sqrt", "sum", "svd",
       "tan", "transpose", "who", "whos", "zeros",
     };
