@@ -214,6 +214,19 @@ matlab_mat *matlab_ode23_t_opts(matlab_ode_rhs f, matlab_mat *tspan,
 matlab_mat *matlab_ode23_y_opts(matlab_ode_rhs f, matlab_mat *tspan,
                                  double y0, matlab_struct *opts);
 
+/* 3-return form: `[t, y, stats] = ode45(@f, tspan, y0[, opts])`.
+ * `stats` is a freshly-allocated struct with fields nsteps / nfailed /
+ * nfevals (matching MATLAB's solver-stats output). The companion
+ * matlab_ode*_stats_opts variants take an opts struct as the 4th arg. */
+matlab_struct *matlab_ode45_stats(matlab_ode_rhs f, matlab_mat *tspan,
+                                    double y0);
+matlab_struct *matlab_ode45_stats_opts(matlab_ode_rhs f, matlab_mat *tspan,
+                                         double y0, matlab_struct *opts);
+matlab_struct *matlab_ode23_stats(matlab_ode_rhs f, matlab_mat *tspan,
+                                    double y0);
+matlab_struct *matlab_ode23_stats_opts(matlab_ode_rhs f, matlab_mat *tspan,
+                                         double y0, matlab_struct *opts);
+
 /* DSP windows. n must be >= 1; returns a column vector of length n. */
 matlab_mat *matlab_hamming(double n);
 matlab_mat *matlab_hann(double n);

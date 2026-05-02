@@ -2873,6 +2873,41 @@ bool TensorLowering::rewriteBuiltinCalls() {
       Changed = true;
       continue;
     }
+    /* 3-return form: `[t, y, stats] = ode45(@f, tspan, y0[, opts])`.
+     * The third result is a fresh matlab_struct* with nsteps/nfailed/
+     * nfevals fields. All three calls share the cache, so only the
+     * first solve runs. */
+    if (NA && NA.getValue().getSExtValue() == 3 &&
+        Call->getNumResults() == 3 &&
+        (Name == "ode45" || Name == "ode23") &&
+        Call->getOperand(0).getType() == PtrTy &&
+        Call->getOperand(1).getType() == PtrTy &&
+        Call->getOperand(2).getType() == F64 &&
+        (Call->getNumOperands() == 3 ||
+         (Call->getNumOperands() == 4 &&
+          Call->getOperand(3).getType() == PtrTy))) {
+      bool HaveOpts = (Call->getNumOperands() == 4);
+      const char *Suffix = HaveOpts ? "_opts" : "";
+      std::string F0n = "matlab_" + Name.str() + "_t"     + Suffix;
+      std::string F1n = "matlab_" + Name.str() + "_y"     + Suffix;
+      std::string F2n = "matlab_" + Name.str() + "_stats" + Suffix;
+      llvm::SmallVector<Type, 4> ArgTys = {PtrTy, PtrTy, F64};
+      if (HaveOpts) ArgTys.push_back(PtrTy);
+      B.setInsertionPoint(Call);
+      auto Fn0 = rt(F0n, PtrTy, ArgTys);
+      auto Fn1 = rt(F1n, PtrTy, ArgTys);
+      auto Fn2 = rt(F2n, PtrTy, ArgTys);
+      ValueRange Args = Call->getOperands();
+      auto C0 = LLVM::CallOp::create(B, Call->getLoc(), Fn0, Args);
+      auto C1 = LLVM::CallOp::create(B, Call->getLoc(), Fn1, Args);
+      auto C2 = LLVM::CallOp::create(B, Call->getLoc(), Fn2, Args);
+      Call->getResult(0).replaceAllUsesWith(C0.getResult());
+      Call->getResult(1).replaceAllUsesWith(C1.getResult());
+      Call->getResult(2).replaceAllUsesWith(C2.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
     if (NA && NA.getValue().getSExtValue() == 2 &&
         Call->getNumOperands() == 1 && Call->getNumResults() == 2 &&
         Call->getOperand(0).getType() == PtrTy) {

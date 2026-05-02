@@ -132,6 +132,28 @@ static void test_ode45_user_grid(void) {
     RT_NEAR(rt_data(Y)[5], 0.00673794700, 1e-4, "y(5) ~ exp(-5)");
 }
 
+/* ---- 3-return form: stats struct ---- */
+matlab_struct *matlab_ode45_stats(ode_rhs_t f, matlab_mat *tspan, double y0);
+
+static void test_ode45_stats_struct(void) {
+    matlab_mat *ts = mk_tspan(0.0, 1.0);
+    matlab_mat *T = matlab_ode45_t(rhs_decay, ts, 1.0);
+    matlab_mat *Y = matlab_ode45_y(rhs_decay, ts, 1.0);
+    matlab_struct *s = matlab_ode45_stats(rhs_decay, ts, 1.0);
+    /* The cache means the second & third calls reuse the first's solve. */
+    int64_t n = (int64_t)matlab_struct_get_f64(s, "nsteps", 6);
+    int64_t fail = (int64_t)matlab_struct_get_f64(s, "nfailed", 7);
+    int64_t fev = (int64_t)matlab_struct_get_f64(s, "nfevals", 7);
+    RT_CHECK(n > 0, "stats.nsteps positive");
+    RT_CHECK(fail >= 0, "stats.nfailed non-negative");
+    RT_CHECK(fev > n, "stats.nfevals greater than step count");
+    /* RK45 does 6 fevals per step plus an initial k1 (FSAL keeps subsequent
+     * step starts free). With ~5 steps, ~31 fevals — bounds. */
+    RT_CHECK(fev >= 6 * n, "stats.nfevals >= 6 * nsteps");
+    /* T, Y untouched. */
+    RT_CHECK(rt_rows(T) == rt_rows(Y), "T and Y same length after stats call");
+}
+
 /* ---- cache hit: paired _t / _y same args ---- */
 static void test_ode45_cache(void) {
     matlab_mat *ts = mk_tspan(0.0, 1.0);
@@ -160,6 +182,7 @@ int main(void) {
     RT_RUN(test_ode45_opts_tol);
     RT_RUN(test_ode45_opts_maxstep);
     RT_RUN(test_ode45_user_grid);
+    RT_RUN(test_ode45_stats_struct);
     RT_RUN(test_ode45_cache);
     RT_DONE();
 }

@@ -2441,6 +2441,9 @@ def _ode_compute(kind, f, tspan, y0, rtol=1e-3, atol=1e-6,
     _ode_cache["key"] = key
     _ode_cache["t"] = np.asarray(T, dtype=float).reshape((-1, 1))
     _ode_cache["y"] = np.asarray(Y, dtype=float).reshape((-1, 1))
+    _ode_cache["n_acc"] = n_acc
+    _ode_cache["n_rej"] = n_rej
+    _ode_cache["n_fev"] = n_fev
     if print_stats:
         print(f"{n_acc} successful steps")
         print(f"{n_rej} failed attempts")
@@ -2509,6 +2512,38 @@ def ode23_y_opts(f, tspan, y0, opts):
     _ode_compute(23, f, tspan, float(y0), rtol, atol,
                  max_step, init_step, refine, print_stats=ps)
     return _ode_cache["y"].copy()
+
+
+# --- 3-return [t, y, stats] form ----------------------------------------
+# `stats` is a dict (struct-shaped) with nsteps / nfailed / nfevals.
+# Cache stores the counts on solve so the third call just packages.
+
+def _ode_stats_struct():
+    s = struct_new()
+    s["nsteps"]  = float(_ode_cache.get("n_acc", 0))
+    s["nfailed"] = float(_ode_cache.get("n_rej", 0))
+    s["nfevals"] = float(_ode_cache.get("n_fev", 0))
+    return s
+
+def ode45_stats(f, tspan, y0):
+    _ode_compute(45, f, tspan, float(y0))
+    return _ode_stats_struct()
+
+def ode45_stats_opts(f, tspan, y0, opts):
+    rtol, atol, max_step, init_step, refine, ps = _ode_opts_resolve(opts, 4)
+    _ode_compute(45, f, tspan, float(y0), rtol, atol,
+                 max_step, init_step, refine, print_stats=ps)
+    return _ode_stats_struct()
+
+def ode23_stats(f, tspan, y0):
+    _ode_compute(23, f, tspan, float(y0))
+    return _ode_stats_struct()
+
+def ode23_stats_opts(f, tspan, y0, opts):
+    rtol, atol, max_step, init_step, refine, ps = _ode_opts_resolve(opts, 1)
+    _ode_compute(23, f, tspan, float(y0), rtol, atol,
+                 max_step, init_step, refine, print_stats=ps)
+    return _ode_stats_struct()
 
 
 def meshgrid_X(x, y=None):

@@ -6544,6 +6544,9 @@ struct ode_cache_slot {
     int kind;          /* 45 or 23 — solvers don't share grids */
     matlab_mat *t;
     matlab_mat *y;
+    int n_acc;          /* solver stats — read by matlab_ode*_stats     */
+    int n_rej;
+    int n_fev;
     int valid;
 };
 
@@ -6910,6 +6913,9 @@ static void ode_compute(int kind, ode_rhs_t f, matlab_mat *tspan, double y0,
     if (!f || n_tgt < 2 || !tspan->data) {
         ode_cache_.t = mat_alloc(0, 1);
         ode_cache_.y = mat_alloc(0, 1);
+        ode_cache_.n_acc = 0;
+        ode_cache_.n_rej = 0;
+        ode_cache_.n_fev = 0;
     } else {
         double *Tb = NULL, *Yb = NULL;
         int64_t n = 0;
@@ -6924,6 +6930,9 @@ static void ode_compute(int kind, ode_rhs_t f, matlab_mat *tspan, double y0,
                                        &n_acc, &n_rej, &n_fev);
         ode_buffers_to_mats(Tb, Yb, n, &ode_cache_.t, &ode_cache_.y);
         free(Tb); free(Yb);
+        ode_cache_.n_acc = n_acc;
+        ode_cache_.n_rej = n_rej;
+        ode_cache_.n_fev = n_fev;
         if (print_stats) {
             fprintf(stdout, "%d successful steps\n", n_acc);
             fprintf(stdout, "%d failed attempts\n",  n_rej);
@@ -7044,6 +7053,46 @@ matlab_mat *matlab_ode23_y_opts(ode_rhs_t f, matlab_mat *tspan, double y0,
     ode_opts_resolve(opts, &rtol, &atol, &mxs, &ins, &rfn, 1, &ps);
     ode_compute(23, f, tspan, y0, rtol, atol, mxs, ins, rfn, ps);
     return mat_clone_col(ode_cache_.y);
+}
+
+/* Build a fresh stats struct from the cache slot. Field names match
+ * MATLAB's `[t,y,sol] = ode45(...)` solver-stats fields. */
+static matlab_struct *ode_stats_struct_from_cache(void) {
+    matlab_struct *s = matlab_struct_new();
+    matlab_struct_set_f64(s, "nsteps",  6, (double)ode_cache_.n_acc);
+    matlab_struct_set_f64(s, "nfailed", 7, (double)ode_cache_.n_rej);
+    matlab_struct_set_f64(s, "nfevals", 7, (double)ode_cache_.n_fev);
+    return s;
+}
+
+/* 3-return form: `[t, y, stats] = ode45(@f, tspan, y0[, opts])`. The
+ * lowering splits the site into matlab_ode45_t / _y / _stats. The
+ * cache memoises (n_acc, n_rej, n_fev) on solve so the third call
+ * just packages them into a struct. */
+matlab_struct *matlab_ode45_stats(ode_rhs_t f, matlab_mat *tspan, double y0) {
+    ode_compute(45, f, tspan, y0, 1e-3, 1e-6, 0.0, 0.0, 4, 0);
+    return ode_stats_struct_from_cache();
+}
+
+matlab_struct *matlab_ode45_stats_opts(ode_rhs_t f, matlab_mat *tspan,
+                                        double y0, matlab_struct *opts) {
+    double rtol, atol, mxs, ins; int rfn, ps;
+    ode_opts_resolve(opts, &rtol, &atol, &mxs, &ins, &rfn, /*default*/ 4, &ps);
+    ode_compute(45, f, tspan, y0, rtol, atol, mxs, ins, rfn, ps);
+    return ode_stats_struct_from_cache();
+}
+
+matlab_struct *matlab_ode23_stats(ode_rhs_t f, matlab_mat *tspan, double y0) {
+    ode_compute(23, f, tspan, y0, 1e-3, 1e-6, 0.0, 0.0, 1, 0);
+    return ode_stats_struct_from_cache();
+}
+
+matlab_struct *matlab_ode23_stats_opts(ode_rhs_t f, matlab_mat *tspan,
+                                        double y0, matlab_struct *opts) {
+    double rtol, atol, mxs, ins; int rfn, ps;
+    ode_opts_resolve(opts, &rtol, &atol, &mxs, &ins, &rfn, /*default*/ 1, &ps);
+    ode_compute(23, f, tspan, y0, rtol, atol, mxs, ins, rfn, ps);
+    return ode_stats_struct_from_cache();
 }
 
 } /* extern "C" */

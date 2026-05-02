@@ -2598,7 +2598,8 @@ export function matpow(A: any, n: number): NDArray {
 
 type OdeRhs = (t: number, y: number) => number;
 
-let _odeCache: { key: string; t: NDArray; y: NDArray } | null = null;
+let _odeCache: { key: string; t: NDArray; y: NDArray;
+                  nAcc: number; nRej: number; nFev: number } | null = null;
 
 function _odeHermite(y: number, y1: number, k: number, k1: number,
                      h: number, th: number): number {
@@ -2792,7 +2793,8 @@ function _odeCompute(kind: number, f: OdeRhs, tspan: any, y0: number,
     key,
     t: new NDArray(Tarr, [r.T.length, 1]),
     y: new NDArray(Yarr, [r.Y.length, 1]),
-  };
+    nAcc: r.nAcc, nRej: r.nRej, nFev: r.nFev,
+  } as any;
   if (printStats) {
     console.log(`${r.nAcc} successful steps`);
     console.log(`${r.nRej} failed attempts`);
@@ -2862,6 +2864,36 @@ export function ode23_y_opts(f: OdeRhs, tspan: any, y0: number, opts: any): NDAr
   const { rtol, atol, maxStep, initStep, refine, printStats } = _odeOptsResolve(opts, 1);
   _odeCompute(23, f, tspan, +y0, rtol, atol, maxStep, initStep, refine, printStats);
   return _cloneCol(_odeCache!.y);
+}
+
+// --- 3-return [t, y, stats] form -----------------------------------------
+// `stats` is a plain object (struct-shaped) with nsteps/nfailed/nfevals.
+
+function _odeStatsStruct(): Record<string, number> {
+  return {
+    nsteps:  _odeCache!.nAcc,
+    nfailed: _odeCache!.nRej,
+    nfevals: _odeCache!.nFev,
+  };
+}
+
+export function ode45_stats(f: OdeRhs, tspan: any, y0: number) {
+  _odeCompute(45, f, tspan, +y0);
+  return _odeStatsStruct();
+}
+export function ode45_stats_opts(f: OdeRhs, tspan: any, y0: number, opts: any) {
+  const { rtol, atol, maxStep, initStep, refine, printStats } = _odeOptsResolve(opts, 4);
+  _odeCompute(45, f, tspan, +y0, rtol, atol, maxStep, initStep, refine, printStats);
+  return _odeStatsStruct();
+}
+export function ode23_stats(f: OdeRhs, tspan: any, y0: number) {
+  _odeCompute(23, f, tspan, +y0);
+  return _odeStatsStruct();
+}
+export function ode23_stats_opts(f: OdeRhs, tspan: any, y0: number, opts: any) {
+  const { rtol, atol, maxStep, initStep, refine, printStats } = _odeOptsResolve(opts, 1);
+  _odeCompute(23, f, tspan, +y0, rtol, atol, maxStep, initStep, refine, printStats);
+  return _odeStatsStruct();
 }
 
 // Numpy namespace re-export — `import * as np from "./matlab_runtime"`
