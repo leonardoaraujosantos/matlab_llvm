@@ -41,6 +41,7 @@ roadmap-side summary:
 | 5.2 | 1-D `categorical` from string array — disp / length / iscategory / categories | `categorical_basic.m` |
 | 5.3 | `table` — auto-named + `'VariableNames'`, dot column access, dynamic add, `height`/`width`/`disp` | `table_basic.m` |
 | 6   | **Symbolic Math Toolbox** via [SymPP](https://github.com/leonardoaraujosantos/SymPP) — `syms`, `diff`, `int`, `simplify`, `expand`, `factor`, `subs`, `solve`, `vpa`, `taylor`, `limit`, `dsolve`, `pdsolve`, `laplace`/`fourier`/`ztrans` (+ inverses), `assume`, sym arithmetic dispatch on `+ - * / ^ ==`, sym-typed elementary functions, REPL JIT + DAP variable inspector, opt-in via `-DMATLAB_LLVM_WITH_SYM=ON` | `test/RunSym/sym_phase_a.m`, `sym_phase_b.m` |
+| 6.1 | **Symbolic matrices + multi-eq + IVP + numeric solve** — new `matlab_symmat` opaque type (kind=8) with cross-TU REPL persistence + DAP rendering; `sym_matrix`, `sym_eye`, `sym_zeros`, `sym_det`, `sym_inv`, `sym_transpose`, `sym_trace`, `sym_rank`, `sym_linsolve`, `sym_dsolve_system`; fixed-arity multi-eq solvers `sym_solve_2x2` / `sym_solve_3x3` returning a symmat (one row per joint solution); `nsolve`, `vpasolve`, `dsolve_ivp` (1-cond), `apply_ivp` (1-cond), `checkodesol` | `test/RunSym/sym_phase_b1.m` |
 
 Open follow-ups carried forward (still on the roadmap):
 
@@ -48,7 +49,7 @@ Open follow-ups carried forward (still on the roadmap):
 - **Narrower / wider int lanes** — i8 / i16 / i64 / u16 / u32 / u64 matrix descriptors against the same template as Phase 1.1.
 - **Full method-dispatch value semantics** for OOP — needs test-corpus migration to either rebind or `< handle`-annotate the existing class fixtures.
 - **Heterogeneous table columns** — string / categorical / datetime columns alongside numeric.
-- **Phase 6.x — symbolic matrices + `linsolve(A, b)`** (SymPP has the engine, not yet wired). Multi-equation `solve([eq1, eq2], [x, y])` returning a real solution vector. `matlabFunction(...)` wrapping the SymPP-emitted Octave source into a callable function handle. `simplify` honouring assumptions via auto-`refine`. Symbolic constant resolution (`sym('pi')` → Pi singleton).
+- **Phase 6.2** — Standard `[a 1; 2 b]` matrix-literal syntax routing through `matlab_symmat_*` when entries are sym (currently uses the explicit `sym_matrix(R, C, e11, ...)` constructor); variadic `sym_solve_sys` with cell-array integration; multi-condition `dsolve_ivp` / `apply_ivp`; `matlabFunction(...)` wrapping the SymPP-emitted Octave source into a callable function handle; `simplify` honouring assumptions via auto-`refine`; symbolic constant resolution (`sym('pi')` → Pi singleton); array-arg builtins `rsolve` / `groebner` / `pythagorean_triples` / `linear_diophantine` language-level wiring.
 
 ---
 

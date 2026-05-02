@@ -71,6 +71,16 @@ void Resolver::registerBuiltins() {
     "taylor", "limit",
     "dsolve", "pdsolve", "pdsolve_heat", "pdsolve_wave",
     "laplace", "ilaplace", "fourier", "ifourier", "ztrans", "iztrans",
+    "nsolve", "vpasolve", "checkodesol",
+    "dsolve_ivp", "apply_ivp",
+    /* Phase 6.1 — symbolic matrices. Constructed via the language-level
+     * sym_matrix(rows, cols, e1, e2, ...) builtin since the standard
+     * `[a 1; 2 b]` literal syntax doesn't yet detect sym entries to
+     * route through matlab_symmat_new. */
+    "sym_matrix", "sym_eye", "sym_zeros",
+    "sym_det", "sym_inv", "sym_transpose", "sym_trace", "sym_rank",
+    "sym_eigenvals", "sym_linsolve", "sym_dsolve_system",
+    "sym_solve_sys", "sym_solve_2x2", "sym_solve_3x3",
     "sprintf", "num2str", "str2double",
     "upper", "lower", "startsWith", "endsWith", "contains",
     "strtrim", "strrep", "strcat",
@@ -667,6 +677,8 @@ void Resolver::resolveExpr(Expr &E, Scope *S) {
            * binding is tagged so the MLIR lowering's BinaryOp / disp /
            * workspace-store dispatch sees it as sym across TUs. */
           else if (K == 7) NB->IsSym = true;
+          /* Kind 8 = matlab_symmat* (Phase 6.1 — symbolic matrix). */
+          else if (K == 8) NB->IsSymmat = true;
         }
       } else {
         Diag.error(N.Range.Begin,

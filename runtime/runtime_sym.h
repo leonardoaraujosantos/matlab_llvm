@@ -35,6 +35,11 @@ extern "C" {
 #endif
 
 typedef struct matlab_sym_s matlab_sym;
+/* Symbolic matrix — wraps sympp::Matrix. Distinct from matlab_sym
+ * because SymPP's Matrix sits one level above Expr (it's not a Basic
+ * node). Linear-algebra entries (det / inv / linsolve / eig / dsolve_
+ * system) take and return matlab_symmat*. */
+typedef struct matlab_symmat_s matlab_symmat;
 
 /* --- Construction --------------------------------------------------------- */
 
@@ -137,6 +142,23 @@ matlab_sym **matlab_sym_solve(const matlab_sym *eq,
  * Phase A simplification — proper sym vector returns land in Phase B. */
 matlab_sym *matlab_sym_solve_one(const matlab_sym *eq, const matlab_sym *var);
 
+/* Phase 6.1 — multi-equation solve. Returns a symmat with K rows
+ * (one per joint solution) and N cols (one per variable). Routes to
+ * sympp::nonlinsolve when N == 2, otherwise to nonlinsolve_groebner.
+ * eqs and vars are flat pointer arrays of length n_eqs / n_vars. */
+matlab_symmat *matlab_sym_solve_sys(const matlab_sym *const *eqs, int64_t n_eqs,
+                                    const matlab_sym *const *vars, int64_t n_vars);
+
+/* Fixed-arity convenience entries — language-level dispatch builds
+ * stack arrays and calls these directly. Avoids generating runtime
+ * alloca + gep + store sequences for the common small cases. */
+matlab_symmat *matlab_sym_solve_2x2(const matlab_sym *eq1, const matlab_sym *eq2,
+                                    const matlab_sym *var1, const matlab_sym *var2);
+matlab_symmat *matlab_sym_solve_3x3(const matlab_sym *eq1, const matlab_sym *eq2,
+                                    const matlab_sym *eq3,
+                                    const matlab_sym *var1, const matlab_sym *var2,
+                                    const matlab_sym *var3);
+
 /* --- Conversion / display ------------------------------------------------- */
 
 /* double(sym) — numeric evaluation. NaN if the expression still has
@@ -235,6 +257,140 @@ matlab_sym *matlab_sym_pdsolve_heat(const matlab_sym *k,
 matlab_sym *matlab_sym_pdsolve_wave(const matlab_sym *c,
                                     const matlab_sym *x,
                                     const matlab_sym *t);
+
+/* --- Phase 6.1: symbolic matrices ---------------------------------------- */
+
+/* Constructors. */
+matlab_symmat *matlab_symmat_new(int64_t rows, int64_t cols,
+                                 const matlab_sym *const *data);
+matlab_symmat *matlab_symmat_zeros(int64_t rows, int64_t cols);
+matlab_symmat *matlab_symmat_eye(int64_t n);
+
+/* Shape + element access. */
+int64_t matlab_symmat_rows(const matlab_symmat *m);
+int64_t matlab_symmat_cols(const matlab_symmat *m);
+matlab_sym *matlab_symmat_get(const matlab_symmat *m, int64_t r, int64_t c);
+void       matlab_symmat_set(matlab_symmat *m, int64_t r, int64_t c,
+                             const matlab_sym *v);
+
+/* Algebra. Each operation returns a fresh matrix; inputs are not consumed. */
+matlab_symmat *matlab_symmat_add(const matlab_symmat *a, const matlab_symmat *b);
+matlab_symmat *matlab_symmat_sub(const matlab_symmat *a, const matlab_symmat *b);
+matlab_symmat *matlab_symmat_mul(const matlab_symmat *a, const matlab_symmat *b);
+matlab_symmat *matlab_symmat_scalar_mul(const matlab_symmat *a,
+                                        const matlab_sym *s);
+matlab_symmat *matlab_symmat_transpose(const matlab_symmat *a);
+matlab_symmat *matlab_symmat_inverse(const matlab_symmat *a);
+matlab_sym    *matlab_symmat_det(const matlab_symmat *a);
+matlab_sym    *matlab_symmat_trace(const matlab_symmat *a);
+int64_t        matlab_symmat_rank(const matlab_symmat *a);
+
+/* Eigenvalues — returns a flat sym array of length *n_out. */
+matlab_sym **matlab_symmat_eigenvals(const matlab_symmat *a, int64_t *n_out);
+
+/* LU / QR / Cholesky — multiple-return shape via out-params. Returns
+ * 0 on success (and writes into out_*), non-zero on failure. */
+int matlab_symmat_lu(const matlab_symmat *a,
+                     matlab_symmat **L_out, matlab_symmat **U_out);
+int matlab_symmat_qr(const matlab_symmat *a,
+                     matlab_symmat **Q_out, matlab_symmat **R_out);
+matlab_symmat *matlab_symmat_cholesky(const matlab_symmat *a);
+
+/* linsolve(A, b) — A·x = b. Returns x as a column matrix. */
+matlab_symmat *matlab_symmat_linsolve(const matlab_symmat *A,
+                                      const matlab_symmat *b);
+
+/* dsolve_system(A, x) — y' = A·y returns a column vector matrix. */
+matlab_symmat *matlab_symmat_dsolve_system(const matlab_symmat *A,
+                                           const matlab_sym *x);
+
+/* Display + lifecycle. */
+void  matlab_symmat_disp(const matlab_symmat *m);
+char *matlab_symmat_str(const matlab_symmat *m, int64_t *len_out);
+void  matlab_symmat_free(matlab_symmat *m);
+
+/* --- Phase 6.1: easy-win extras (no matrix dep) -------------------------- */
+
+/* nsolve(eq, var, x0, dps) — Newton's method root in MPFR. Returns a
+ * Float-bearing sym at the requested precision. */
+matlab_sym *matlab_sym_nsolve(const matlab_sym *eq, const matlab_sym *var,
+                              const matlab_sym *x0, int64_t dps);
+
+/* vpasolve(eq, var, x0, dps) — same as nsolve, MATLAB-named alias. */
+matlab_sym *matlab_sym_vpasolve(const matlab_sym *eq, const matlab_sym *var,
+                                const matlab_sym *x0, int64_t dps);
+
+/* rsolve(coeffs, n) — closed-form solution of a linear constant-
+ * coefficient recurrence c_k y(n+k) + ... + c_0 y(n) = 0. coeffs is
+ * passed as a flat list of N sym* (lowest-index first), N is the
+ * coefficient count. Returns the general solution as a sym. */
+matlab_sym *matlab_sym_rsolve(const matlab_sym *const *coeffs, int64_t n_coef,
+                              const matlab_sym *n);
+
+/* checkodesol(eq, sol, y, yp, x) — residual after substitution; should
+ * be 0 when sol satisfies eq. */
+matlab_sym *matlab_sym_checkodesol(const matlab_sym *eq, const matlab_sym *sol,
+                                   const matlab_sym *y, const matlab_sym *yp,
+                                   const matlab_sym *x);
+
+/* dsolve_ivp(eq, y, yp, x, n_conds, x_vals, y_vals) — IVP applied. The
+ * conditions list comes in as parallel arrays of length n_conds. */
+matlab_sym *matlab_sym_dsolve_ivp(const matlab_sym *eq, const matlab_sym *y,
+                                  const matlab_sym *yp, const matlab_sym *x,
+                                  int64_t n_conds,
+                                  const matlab_sym *const *x_vals,
+                                  const matlab_sym *const *y_vals);
+
+/* apply_ivp(general_solution, x, n_conds, x_vals, y_vals) — same IVP
+ * application but takes an already-computed general solution. */
+matlab_sym *matlab_sym_apply_ivp(const matlab_sym *general_solution,
+                                 const matlab_sym *x, int64_t n_conds,
+                                 const matlab_sym *const *x_vals,
+                                 const matlab_sym *const *y_vals);
+
+/* Fixed-arity 1-condition convenience entries. The general
+ * variadic form ships in the runtime; the language-level lowering
+ * for it lands in Phase 6.2 alongside the cell-array integration. */
+matlab_sym *matlab_sym_dsolve_ivp_1(const matlab_sym *eq, const matlab_sym *y,
+                                    const matlab_sym *yp, const matlab_sym *x,
+                                    const matlab_sym *x0, const matlab_sym *y0);
+matlab_sym *matlab_sym_apply_ivp_1(const matlab_sym *general_solution,
+                                   const matlab_sym *x,
+                                   const matlab_sym *x0, const matlab_sym *y0);
+
+/* solve_univariate_inequality(lhs, rhs, op, var) — `lhs op rhs` over
+ * the reals. op is one of "<", "<=", ">", ">=", "!=". Result is a
+ * sym whose pretty form renders the SetPtr (e.g. "Union(Interval(...))").
+ *
+ * reduce_inequalities is the MATLAB-named variant taking a single
+ * Relational-shaped sym; routes to the same SymPP entry. */
+matlab_sym *matlab_sym_solve_inequality(const matlab_sym *lhs,
+                                        const matlab_sym *rhs,
+                                        const char *op, int64_t op_len,
+                                        const matlab_sym *var);
+matlab_sym *matlab_sym_reduce_inequalities(const matlab_sym *rel,
+                                           const matlab_sym *var);
+
+/* groebner(eqs, vars) — Buchberger's basis. Returns a flat list of
+ * basis polynomials. n_eqs / n_vars give the array lengths; n_basis
+ * comes back via *n_basis_out. Caller frees both the array and each
+ * matlab_sym* via matlab_sym_free. */
+matlab_sym **matlab_sym_groebner(const matlab_sym *const *eqs, int64_t n_eqs,
+                                 const matlab_sym *const *vars, int64_t n_vars,
+                                 int64_t *n_basis_out);
+
+/* linear_diophantine(a, b, c) — integer (x, y) such that a*x + b*y = c.
+ * Returns 0 (no solution) or 1; on success writes x* and y* through
+ * the out params (caller-allocated). */
+int matlab_sym_linear_diophantine(const matlab_sym *a, const matlab_sym *b,
+                                  const matlab_sym *c,
+                                  matlab_sym **x_out, matlab_sym **y_out);
+
+/* pythagorean_triples(max_z) — primitive triples with z <= max_z.
+ * Returns a flat sym array of length 3*K where K is *n_triples_out;
+ * triple i is (out[3*i], out[3*i+1], out[3*i+2]). */
+matlab_sym **matlab_sym_pythagorean_triples(int64_t max_z,
+                                            int64_t *n_triples_out);
 
 /* --- Phase C: integral transforms ---------------------------------------- */
 

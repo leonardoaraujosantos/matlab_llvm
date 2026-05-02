@@ -33,7 +33,10 @@
 #include <sympp/core/symbol.hpp>
 #include <sympp/core/type_id.hpp>
 #include <sympp/matlab/matlab.hpp>
+#include <sympp/matrices/matrix.hpp>
 #include <sympp/printing/printing.hpp>
+#include <sympp/solvers/solve.hpp>
+#include <sympp/ode/dsolve.hpp>
 
 namespace {
 
@@ -43,6 +46,24 @@ namespace {
 struct SymBox {
     sympp::Expr expr;
 };
+
+/* Heap-owned wrapper around sympp::Matrix. Same lifecycle model as
+ * SymBox: the matlab_symmat C ABI hands out new MatBox*'s and the
+ * caller frees via matlab_symmat_free. */
+struct MatBox {
+    sympp::Matrix mat;
+};
+
+inline matlab_symmat *boxm(sympp::Matrix m) {
+    auto *b = new MatBox{std::move(m)};
+    return reinterpret_cast<matlab_symmat *>(b);
+}
+inline const sympp::Matrix &unboxm(const matlab_symmat *p) {
+    return reinterpret_cast<const MatBox *>(p)->mat;
+}
+inline sympp::Matrix &unboxm_mut(matlab_symmat *p) {
+    return reinterpret_cast<MatBox *>(p)->mat;
+}
 
 inline matlab_sym *box(sympp::Expr e) {
     auto *b = new SymBox{std::move(e)};
@@ -240,6 +261,57 @@ matlab_sym *matlab_sym_solve_one(const matlab_sym *eq, const matlab_sym *var) {
     return box(sympp::symbol(buf));
 }
 
+matlab_symmat *matlab_sym_solve_sys(const matlab_sym *const *eqs, int64_t n_eqs,
+                                    const matlab_sym *const *vars, int64_t n_vars) {
+    std::vector<sympp::Expr> ev, vv;
+    ev.reserve(static_cast<size_t>(n_eqs > 0 ? n_eqs : 0));
+    vv.reserve(static_cast<size_t>(n_vars > 0 ? n_vars : 0));
+    for (int64_t i = 0; i < n_eqs; ++i) {
+        /* Like the single-eq path: lift Relational to lhs - rhs. */
+        const auto &E = unbox(eqs[i]);
+        if (E && E->type_id() == sympp::TypeId::Relational) {
+            const auto *rel = static_cast<const sympp::Relational *>(E.get());
+            ev.push_back(rel->lhs() - rel->rhs());
+        } else {
+            ev.push_back(E);
+        }
+    }
+    for (int64_t i = 0; i < n_vars; ++i) vv.push_back(unbox(vars[i]));
+    /* Pick the algorithm: 2x2 polynomial → resultant nonlinsolve;
+     * everything else → Gröbner triangularisation. Both return a list
+     * of joint solution vectors (each vector has n_vars entries). */
+    std::vector<std::vector<sympp::Expr>> sols;
+    if (n_eqs == 2 && n_vars == 2) {
+        sols = sympp::nonlinsolve(ev, vv);
+    } else {
+        sols = sympp::nonlinsolve_groebner(ev, vv);
+    }
+    auto k = sols.size();
+    auto n = static_cast<size_t>(n_vars > 0 ? n_vars : 0);
+    sympp::Matrix M(k, n);
+    for (size_t i = 0; i < k; ++i) {
+        for (size_t j = 0; j < n && j < sols[i].size(); ++j) {
+            M.set(i, j, sols[i][j]);
+        }
+    }
+    return boxm(std::move(M));
+}
+
+matlab_symmat *matlab_sym_solve_2x2(const matlab_sym *eq1, const matlab_sym *eq2,
+                                    const matlab_sym *var1, const matlab_sym *var2) {
+    const matlab_sym *eqs[2] = {eq1, eq2};
+    const matlab_sym *vars[2] = {var1, var2};
+    return matlab_sym_solve_sys(eqs, 2, vars, 2);
+}
+matlab_symmat *matlab_sym_solve_3x3(const matlab_sym *eq1, const matlab_sym *eq2,
+                                    const matlab_sym *eq3,
+                                    const matlab_sym *var1, const matlab_sym *var2,
+                                    const matlab_sym *var3) {
+    const matlab_sym *eqs[3] = {eq1, eq2, eq3};
+    const matlab_sym *vars[3] = {var1, var2, var3};
+    return matlab_sym_solve_sys(eqs, 3, vars, 3);
+}
+
 matlab_sym **matlab_sym_solve(const matlab_sym *eq, const matlab_sym *var,
                               int64_t *n_out) {
     /* MATLAB's solve(f == 0, x) passes a Relational. SymPP's solve takes
@@ -393,6 +465,305 @@ matlab_sym *matlab_sym_pdsolve_wave(const matlab_sym *c,
                                     const matlab_sym *x,
                                     const matlab_sym *t) {
     return box(sympp::matlab::pdsolve_wave(unbox(c), unbox(x), unbox(t)));
+}
+
+/* --- Phase 6.1: symbolic matrices ----------------------------------------- */
+
+matlab_symmat *matlab_symmat_new(int64_t rows, int64_t cols,
+                                 const matlab_sym *const *data) {
+    if (rows < 0) rows = 0;
+    if (cols < 0) cols = 0;
+    auto r = static_cast<std::size_t>(rows);
+    auto c = static_cast<std::size_t>(cols);
+    std::vector<sympp::Expr> flat;
+    flat.reserve(r * c);
+    for (std::size_t i = 0; i < r * c; ++i)
+        flat.push_back(data && data[i] ? unbox(data[i]) : sympp::integer(0));
+    return boxm(sympp::Matrix(r, c, std::move(flat)));
+}
+
+matlab_symmat *matlab_symmat_zeros(int64_t rows, int64_t cols) {
+    if (rows < 0) rows = 0;
+    if (cols < 0) cols = 0;
+    return boxm(sympp::Matrix::zeros(static_cast<std::size_t>(rows),
+                                       static_cast<std::size_t>(cols)));
+}
+
+matlab_symmat *matlab_symmat_eye(int64_t n) {
+    if (n < 0) n = 0;
+    return boxm(sympp::Matrix::identity(static_cast<std::size_t>(n)));
+}
+
+int64_t matlab_symmat_rows(const matlab_symmat *m) {
+    return m ? static_cast<int64_t>(unboxm(m).rows()) : 0;
+}
+int64_t matlab_symmat_cols(const matlab_symmat *m) {
+    return m ? static_cast<int64_t>(unboxm(m).cols()) : 0;
+}
+
+matlab_sym *matlab_symmat_get(const matlab_symmat *m, int64_t r, int64_t c) {
+    if (!m) return nullptr;
+    return box(unboxm(m).at(static_cast<std::size_t>(r),
+                              static_cast<std::size_t>(c)));
+}
+void matlab_symmat_set(matlab_symmat *m, int64_t r, int64_t c,
+                       const matlab_sym *v) {
+    if (!m || !v) return;
+    unboxm_mut(m).set(static_cast<std::size_t>(r),
+                       static_cast<std::size_t>(c), unbox(v));
+}
+
+matlab_symmat *matlab_symmat_add(const matlab_symmat *a, const matlab_symmat *b) {
+    return boxm(unboxm(a) + unboxm(b));
+}
+matlab_symmat *matlab_symmat_sub(const matlab_symmat *a, const matlab_symmat *b) {
+    return boxm(unboxm(a) - unboxm(b));
+}
+matlab_symmat *matlab_symmat_mul(const matlab_symmat *a, const matlab_symmat *b) {
+    return boxm(unboxm(a) * unboxm(b));
+}
+matlab_symmat *matlab_symmat_scalar_mul(const matlab_symmat *a,
+                                        const matlab_sym *s) {
+    return boxm(unboxm(a).scalar_mul(unbox(s)));
+}
+matlab_symmat *matlab_symmat_transpose(const matlab_symmat *a) {
+    return boxm(unboxm(a).transpose());
+}
+matlab_symmat *matlab_symmat_inverse(const matlab_symmat *a) {
+    return boxm(unboxm(a).inverse());
+}
+matlab_sym *matlab_symmat_det(const matlab_symmat *a) {
+    return box(unboxm(a).det());
+}
+matlab_sym *matlab_symmat_trace(const matlab_symmat *a) {
+    return box(unboxm(a).trace());
+}
+int64_t matlab_symmat_rank(const matlab_symmat *a) {
+    return a ? static_cast<int64_t>(unboxm(a).rank()) : 0;
+}
+
+matlab_sym **matlab_symmat_eigenvals(const matlab_symmat *a, int64_t *n_out) {
+    auto eig = unboxm(a).eigenvals();
+    auto k = static_cast<int64_t>(eig.size());
+    if (n_out) *n_out = k;
+    if (k == 0) return nullptr;
+    auto **out = static_cast<matlab_sym **>(
+        std::malloc(static_cast<size_t>(k) * sizeof(matlab_sym *)));
+    if (!out) {
+        if (n_out) *n_out = 0;
+        return nullptr;
+    }
+    for (int64_t i = 0; i < k; ++i) out[i] = box(std::move(eig[i]));
+    return out;
+}
+
+int matlab_symmat_lu(const matlab_symmat *a,
+                     matlab_symmat **L_out, matlab_symmat **U_out) {
+    try {
+        auto pr = unboxm(a).lu();
+        if (L_out) *L_out = boxm(std::move(pr.first));
+        if (U_out) *U_out = boxm(std::move(pr.second));
+        return 0;
+    } catch (...) {
+        if (L_out) *L_out = nullptr;
+        if (U_out) *U_out = nullptr;
+        return 1;
+    }
+}
+int matlab_symmat_qr(const matlab_symmat *a,
+                     matlab_symmat **Q_out, matlab_symmat **R_out) {
+    try {
+        auto pr = unboxm(a).qr();
+        if (Q_out) *Q_out = boxm(std::move(pr.first));
+        if (R_out) *R_out = boxm(std::move(pr.second));
+        return 0;
+    } catch (...) {
+        if (Q_out) *Q_out = nullptr;
+        if (R_out) *R_out = nullptr;
+        return 1;
+    }
+}
+matlab_symmat *matlab_symmat_cholesky(const matlab_symmat *a) {
+    try { return boxm(unboxm(a).cholesky()); }
+    catch (...) { return nullptr; }
+}
+
+matlab_symmat *matlab_symmat_linsolve(const matlab_symmat *A,
+                                      const matlab_symmat *b) {
+    return boxm(sympp::linsolve(unboxm(A), unboxm(b)));
+}
+
+matlab_symmat *matlab_symmat_dsolve_system(const matlab_symmat *A,
+                                           const matlab_sym *x) {
+    return boxm(sympp::dsolve_system(unboxm(A), unbox(x)));
+}
+
+void matlab_symmat_disp(const matlab_symmat *m) {
+    if (!m) { std::printf("\n"); return; }
+    auto s = unboxm(m).str();
+    std::fwrite(s.data(), 1, s.size(), stdout);
+    std::printf("\n");
+}
+char *matlab_symmat_str(const matlab_symmat *m, int64_t *len_out) {
+    if (!m) return dup_to_c({}, len_out);
+    return dup_to_c(unboxm(m).str(), len_out);
+}
+void matlab_symmat_free(matlab_symmat *m) {
+    if (!m) return;
+    delete reinterpret_cast<MatBox *>(m);
+}
+
+/* --- Phase 6.1: easy-win extras ------------------------------------------- */
+
+matlab_sym *matlab_sym_nsolve(const matlab_sym *eq, const matlab_sym *var,
+                              const matlab_sym *x0, int64_t dps) {
+    return box(sympp::nsolve(unbox(eq), unbox(var), unbox(x0),
+                              static_cast<int>(dps > 0 ? dps : 15)));
+}
+
+matlab_sym *matlab_sym_vpasolve(const matlab_sym *eq, const matlab_sym *var,
+                                const matlab_sym *x0, int64_t dps) {
+    /* MATLAB's vpasolve is a numeric Newton solve at variable precision —
+     * SymPP's nsolve is the closest match. The default dps is 32 (matches
+     * MATLAB's default vpa precision). */
+    return matlab_sym_nsolve(eq, var, x0, dps > 0 ? dps : 32);
+}
+
+matlab_sym *matlab_sym_rsolve(const matlab_sym *const *coeffs, int64_t n_coef,
+                              const matlab_sym *n) {
+    std::vector<sympp::Expr> coef_vec;
+    coef_vec.reserve(static_cast<size_t>(n_coef > 0 ? n_coef : 0));
+    for (int64_t i = 0; i < n_coef; ++i) coef_vec.push_back(unbox(coeffs[i]));
+    return box(sympp::rsolve(coef_vec, unbox(n)));
+}
+
+matlab_sym *matlab_sym_checkodesol(const matlab_sym *eq, const matlab_sym *sol,
+                                   const matlab_sym *y, const matlab_sym *yp,
+                                   const matlab_sym *x) {
+    return box(sympp::checkodesol(unbox(eq), unbox(sol), unbox(y), unbox(yp),
+                                    unbox(x)));
+}
+
+/* Pair-up two parallel matlab_sym* arrays into the SymPP IVP shape.
+ * Implementation detail of dsolve_ivp / apply_ivp; declared static so
+ * the C-linkage diagnostic doesn't fire on its non-C return type. */
+static std::vector<std::pair<sympp::Expr, sympp::Expr>>
+collect_ivp_pairs_impl(int64_t n, const matlab_sym *const *xs,
+                       const matlab_sym *const *ys) {
+    std::vector<std::pair<sympp::Expr, sympp::Expr>> out;
+    out.reserve(static_cast<size_t>(n > 0 ? n : 0));
+    for (int64_t i = 0; i < n; ++i)
+        out.emplace_back(unbox(xs[i]), unbox(ys[i]));
+    return out;
+}
+
+matlab_sym *matlab_sym_dsolve_ivp(const matlab_sym *eq, const matlab_sym *y,
+                                  const matlab_sym *yp, const matlab_sym *x,
+                                  int64_t n_conds,
+                                  const matlab_sym *const *x_vals,
+                                  const matlab_sym *const *y_vals) {
+    auto conds = collect_ivp_pairs_impl(n_conds, x_vals, y_vals);
+    return box(sympp::matlab::dsolve_ivp(unbox(eq), unbox(y), unbox(yp),
+                                            unbox(x), conds));
+}
+
+matlab_sym *matlab_sym_apply_ivp(const matlab_sym *general_solution,
+                                 const matlab_sym *x, int64_t n_conds,
+                                 const matlab_sym *const *x_vals,
+                                 const matlab_sym *const *y_vals) {
+    auto conds = collect_ivp_pairs_impl(n_conds, x_vals, y_vals);
+    return box(sympp::apply_ivp(unbox(general_solution), unbox(x), conds));
+}
+
+matlab_sym *matlab_sym_dsolve_ivp_1(const matlab_sym *eq, const matlab_sym *y,
+                                    const matlab_sym *yp, const matlab_sym *x,
+                                    const matlab_sym *x0, const matlab_sym *y0) {
+    const matlab_sym *xs[1] = {x0};
+    const matlab_sym *ys[1] = {y0};
+    return matlab_sym_dsolve_ivp(eq, y, yp, x, 1, xs, ys);
+}
+matlab_sym *matlab_sym_apply_ivp_1(const matlab_sym *general_solution,
+                                   const matlab_sym *x,
+                                   const matlab_sym *x0, const matlab_sym *y0) {
+    const matlab_sym *xs[1] = {x0};
+    const matlab_sym *ys[1] = {y0};
+    return matlab_sym_apply_ivp(general_solution, x, 1, xs, ys);
+}
+
+matlab_sym *matlab_sym_solve_inequality(const matlab_sym *lhs,
+                                        const matlab_sym *rhs,
+                                        const char *op, int64_t op_len,
+                                        const matlab_sym *var) {
+    /* The SymPP entry takes the relation as an Expr (Symbol) carrying
+     * the operator string — the call site builds that from the borrowed
+     * char buffer. Result is a SetPtr; we render its str() into a
+     * Symbol so the matlab_sym layer stays uniform. */
+    sympp::Expr op_sym = sympp::symbol(borrow(op, op_len));
+    sympp::SetPtr s = sympp::solve_univariate_inequality(
+        unbox(lhs), op_sym, unbox(rhs), unbox(var));
+    return box(sympp::symbol(s ? s->str() : std::string("EmptySet")));
+}
+
+matlab_sym *matlab_sym_reduce_inequalities(const matlab_sym *rel,
+                                           const matlab_sym *var) {
+    sympp::SetPtr s = sympp::reduce_inequalities(unbox(rel), unbox(var));
+    return box(sympp::symbol(s ? s->str() : std::string("EmptySet")));
+}
+
+matlab_sym **matlab_sym_groebner(const matlab_sym *const *eqs, int64_t n_eqs,
+                                 const matlab_sym *const *vars, int64_t n_vars,
+                                 int64_t *n_basis_out) {
+    std::vector<sympp::Expr> eq_vec, var_vec;
+    eq_vec.reserve(static_cast<size_t>(n_eqs > 0 ? n_eqs : 0));
+    var_vec.reserve(static_cast<size_t>(n_vars > 0 ? n_vars : 0));
+    for (int64_t i = 0; i < n_eqs; ++i) eq_vec.push_back(unbox(eqs[i]));
+    for (int64_t i = 0; i < n_vars; ++i) var_vec.push_back(unbox(vars[i]));
+    auto basis = sympp::groebner(eq_vec, var_vec);
+    auto k = static_cast<int64_t>(basis.size());
+    if (n_basis_out) *n_basis_out = k;
+    if (k == 0) return nullptr;
+    auto **out = static_cast<matlab_sym **>(
+        std::malloc(static_cast<size_t>(k) * sizeof(matlab_sym *)));
+    if (!out) {
+        if (n_basis_out) *n_basis_out = 0;
+        return nullptr;
+    }
+    for (int64_t i = 0; i < k; ++i) out[i] = box(std::move(basis[i]));
+    return out;
+}
+
+int matlab_sym_linear_diophantine(const matlab_sym *a, const matlab_sym *b,
+                                  const matlab_sym *c,
+                                  matlab_sym **x_out, matlab_sym **y_out) {
+    auto pair = sympp::linear_diophantine(unbox(a), unbox(b), unbox(c));
+    if (!pair) {
+        if (x_out) *x_out = nullptr;
+        if (y_out) *y_out = nullptr;
+        return 0;
+    }
+    if (x_out) *x_out = box(pair->first);
+    if (y_out) *y_out = box(pair->second);
+    return 1;
+}
+
+matlab_sym **matlab_sym_pythagorean_triples(int64_t max_z,
+                                            int64_t *n_triples_out) {
+    auto triples = sympp::pythagorean_triples(static_cast<long>(max_z));
+    auto k = static_cast<int64_t>(triples.size());
+    if (n_triples_out) *n_triples_out = k;
+    if (k == 0) return nullptr;
+    auto **out = static_cast<matlab_sym **>(
+        std::malloc(static_cast<size_t>(k) * 3 * sizeof(matlab_sym *)));
+    if (!out) {
+        if (n_triples_out) *n_triples_out = 0;
+        return nullptr;
+    }
+    for (int64_t i = 0; i < k; ++i) {
+        out[3 * i + 0] = box(triples[i][0]);
+        out[3 * i + 1] = box(triples[i][1]);
+        out[3 * i + 2] = box(triples[i][2]);
+    }
+    return out;
 }
 
 /* --- Phase C: integral transforms ----------------------------------------- */

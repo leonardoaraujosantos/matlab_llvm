@@ -52,11 +52,13 @@ Mirrors MATLAB's Symbolic Math Toolbox User's Guide (R2026a).
 | Declaration | `syms x y z`, `sym(name)`, `sym(expr_string)`, `sym(numeric)`, `str2sym('expr')` |
 | Calculus | `diff(f, x)`, `diff(f, x, n)`, `int(f, x)`, `int(f, x, a, b)`, `taylor(f, x, a, n)`, `limit(f, x, target)` |
 | Algebra | `simplify`, `expand`, `factor(e, x)`, `subs(e, old, new)` |
-| Solvers | `solve(eq, x)` (single eq, single var), `solve(f == 0, x)` |
+| Single-eq solvers | `solve(eq, x)`, `solve(f == 0, x)`, `vpasolve(eq, x, x0, dps)`, `nsolve(eq, x, x0, dps)` |
+| Multi-eq solvers | `sym_solve_2x2(eq1, eq2, var1, var2)`, `sym_solve_3x3(eq1, eq2, eq3, var1, var2, var3)` — return symmat (one row per joint solution) |
 | Numeric eval | `double(s)`, `vpa(s, dps)` |
-| ODE / PDE | `dsolve(eq, y, yp, x)` (1st-order), `dsolve(eq, y, yp, ypp, x)` (2nd-order auto-classify), `pdsolve(a, b, c, x, y)`, `pdsolve_heat(k, lambda, x, t)`, `pdsolve_wave(c, x, t)` |
+| ODE / PDE | `dsolve(eq, y, yp, x)` (1st-order), `dsolve(eq, y, yp, ypp, x)` (2nd-order auto-classify), `dsolve_ivp(eq, y, yp, x, x0, y0)`, `apply_ivp(general, x, x0, y0)`, `checkodesol(eq, sol, y, yp, x)`, `pdsolve(a, b, c, x, y)`, `pdsolve_heat(k, lambda, x, t)`, `pdsolve_wave(c, x, t)` |
 | Transforms | `laplace(f, t, s)`, `ilaplace(F, s, t)`, `fourier(f, t, w)`, `ifourier(F, w, t)`, `ztrans(f, n, z)`, `iztrans(F, z, n)` |
 | Assumptions | `assume(x, 'positive')`, `assumeAlso(x, 'integer')`, `clearAssumptions(x)` |
+| Symbolic matrices | `sym_matrix(R, C, e11, e12, …, eRC)` (R, C must be integer literals), `sym_eye(n)`, `sym_zeros(R, C)`, `sym_det(M)`, `sym_inv(M)`, `sym_transpose(M)`, `sym_trace(M)`, `sym_rank(M)`, `sym_linsolve(A, b)`, `sym_dsolve_system(A, x)` |
 | Display / codegen | `disp(s)`, `latex(s)`, `pretty(s)`, `ccode(s)`, `matlabFunction(...)` |
 | Elementary | `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `sinh`, `cosh`, `tanh`, `exp`, `log`, `sqrt`, `abs` (all dispatch to sym variants when the argument is sym) |
 
@@ -112,15 +114,48 @@ pass that lifts MATLAB's `diff(y(x), x)` syntax into the (y, yp, x) form.
 The CTest target `run-tests-sym` is gated on `MATLAB_LLVM_WITH_SYM=ON` and
 skips with rc=77 when SymPP isn't found at the configured prefix.
 
-## What's not in scope yet
+## Symbolic matrix usage
 
-- Symbolic matrices and `linsolve` of a symbolic matrix
-- Multi-equation `solve([eq1, eq2], [x, y])` returning a real solution vector
-  (currently flattens to a string-rendered single sym)
-- `matlabFunction` returning a callable handle (the SymPP facade returns
-  emitted Octave source as a string; matlab_llvm doesn't yet wrap that into
-  a function handle)
-- `simplify` honouring assumptions automatically (use `refine` explicitly
-  on SymPP's C++ side)
-- Symbolic constant resolution: `sym('pi')` creates a Symbol named "pi" rather
-  than the Pi singleton — workaround: `sym(pi)` (boxes the f64 constant)
+```matlab
+syms a b
+M = sym_matrix(2, 2, a, sym(1), sym(2), b);   % row-major literal entries
+disp(M)            % Matrix([[a, 1], [2, b]])
+disp(sym_det(M))   % b*a - 2
+
+A = sym_matrix(2, 2, sym(1), sym(2), sym(3), sym(4));
+bv = sym_matrix(2, 1, sym(1), sym(2));
+xs = sym_linsolve(A, bv);    % Matrix([[0], [1/2]])
+
+% Multi-equation system:
+syms x y
+sols = sym_solve_2x2(x^2 + y^2 - 1, y - x, x, y);
+% Returns a 2x2 symmat — each row is a joint solution (x, y).
+```
+
+The `sym_matrix(R, C, e11, e12, ..., eRC)` constructor takes integer
+literal R, C (so the row-major flattening is resolved at compile time)
+followed by R×C scalar sym entries. Standard `[a 1; 2 b]` matrix literal
+syntax doesn't yet detect sym entries — extending matrix-literal lowering
+to route sym entries through `matlab_symmat_*` is Phase 6.2.
+
+## What's not in scope yet (Phase 6.2)
+
+- **Standard matrix literal syntax** for sym entries — currently `[a 1; 2 b]`
+  routes through the f64 matrix path; need `sym_matrix(...)` explicit form
+- **Variadic system solvers** — `sym_solve_sys` ships in the runtime but the
+  language-level lowering only wires the fixed 2×2 / 3×3 entries
+- **Variadic IVP** — `dsolve_ivp` / `apply_ivp` ship single-condition
+  forms (`dsolve_ivp(eq, y, yp, x, x0, y0)`); multi-condition needs
+  cell-array integration
+- **`matlabFunction(f, vars)` returning a callable handle** — SymPP returns
+  Octave source as a string; matlab_llvm doesn't yet parse-and-bind that
+- **`simplify` honouring assumptions** — use `refine` explicitly on SymPP's
+  C++ side; SymPP's Phase 5 `simplify` is structural only
+- **`sym('pi')` → Pi singleton** — currently creates a Symbol named "pi";
+  workaround is `sym(pi)` which boxes the f64 constant
+- **Assumption properties beyond the 10 in SymPP's mask** — `even`, `odd`,
+  `prime`, `algebraic`, `complex` throw; SymPP-side phase
+- **Array-arg builtins**: `rsolve`, `groebner`, `pythagorean_triples`,
+  `linear_diophantine` ship in the runtime but the cell-array language
+  lowering for them is not yet wired
+

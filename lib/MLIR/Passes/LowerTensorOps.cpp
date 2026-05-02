@@ -1599,7 +1599,8 @@ bool TensorLowering::rewriteBuiltinCalls() {
      * without a base ptr (the workspace is a singleton inside the
      * runtime). Used only when matlabc is invoked with -repl. */
     if ((Name == "matlab_ws_get_f64" || Name == "matlab_ws_get_mat" ||
-         Name == "matlab_ws_get_string" || Name == "matlab_ws_get_sym") &&
+         Name == "matlab_ws_get_string" || Name == "matlab_ws_get_sym" ||
+         Name == "matlab_ws_get_symmat") &&
         Call->getNumOperands() == 1 && Call->getNumResults() == 1) {
       Value NameV = Call->getOperand(0);
       int64_t Len = 0;
@@ -1607,7 +1608,8 @@ bool TensorLowering::rewriteBuiltinCalls() {
       if (!Ptr) continue;
       bool IsMat = (Name == "matlab_ws_get_mat" ||
                     Name == "matlab_ws_get_string" ||
-                    Name == "matlab_ws_get_sym");
+                    Name == "matlab_ws_get_sym" ||
+                    Name == "matlab_ws_get_symmat");
       Type Ret = IsMat ? (Type)PtrTy : (Type)F64;
       B.setInsertionPoint(Call);
       Value LenV = LLVM::ConstantOp::create(
@@ -1623,7 +1625,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
     }
     if ((Name == "matlab_ws_set_f64" || Name == "matlab_ws_set_mat" ||
          Name == "matlab_ws_set_obj" || Name == "matlab_ws_set_string" ||
-         Name == "matlab_ws_set_sym") &&
+         Name == "matlab_ws_set_sym" || Name == "matlab_ws_set_symmat") &&
         Call->getNumOperands() == 2) {
       Value NameV = Call->getOperand(0);
       Value Val = Call->getOperand(1);
@@ -1640,14 +1642,15 @@ bool TensorLowering::rewriteBuiltinCalls() {
       bool IsObj = (Name == "matlab_ws_set_obj");
       bool IsString = (Name == "matlab_ws_set_string");
       bool IsSym = (Name == "matlab_ws_set_sym");
+      bool IsSymmat = (Name == "matlab_ws_set_symmat");
       bool IsMat;
       bool IsInt = mlir::isa<mlir::IntegerType>(Val.getType());
-      if (IsObj || IsString || IsSym) IsMat = true;
+      if (IsObj || IsString || IsSym || IsSymmat) IsMat = true;
       else if (Val.getType() == PtrTy)      IsMat = true;
       else if (Val.getType() == F64)         IsMat = false;
       else if (IsInt)                         IsMat = false;
       else continue;   /* neither ptr nor f64 nor int yet — wait for another iter */
-      if ((IsObj || IsString || IsSym) && Val.getType() != PtrTy)
+      if ((IsObj || IsString || IsSym || IsSymmat) && Val.getType() != PtrTy)
         continue; /* retry once Val lowers */
       /* Cast int → f64 for the workspace mirror. Same logic as
        * matlab_dbg_frame_set above: i1 from `x = age > 18` at script
@@ -1680,11 +1683,12 @@ bool TensorLowering::rewriteBuiltinCalls() {
       Value Ptr = fieldNameAddr(NameV, Len);
       if (!Ptr) continue;
       StringRef RuntimeName =
-          IsSym      ? "matlab_ws_set_sym"
-                     : (IsString ? "matlab_ws_set_string"
-                                 : (IsObj ? "matlab_ws_set_obj"
-                                          : (IsMat ? "matlab_ws_set_mat"
-                                                   : "matlab_ws_set_f64")));
+          IsSymmat   ? "matlab_ws_set_symmat"
+                     : (IsSym ? "matlab_ws_set_sym"
+                              : (IsString ? "matlab_ws_set_string"
+                                          : (IsObj ? "matlab_ws_set_obj"
+                                                   : (IsMat ? "matlab_ws_set_mat"
+                                                            : "matlab_ws_set_f64"))));
       B.setInsertionPoint(Call);
       Value LenV = LLVM::ConstantOp::create(
           B, Call->getLoc(), I64, B.getI64IntegerAttr(Len));
@@ -2150,6 +2154,55 @@ bool TensorLowering::rewriteBuiltinCalls() {
       Call->erase(); Changed = true; continue;
     }
 
+    /* Phase 6.1 — Symbolic matrices (matlab_symmat_*). Separate from
+     * matlab_sym_* because the prefix collides ("matlab_sym" + "mat_*"
+     * vs "matlab_sym" + "_*"). Pattern: ptr/i64/f64 operands, return
+     * is ptr (matrix or sym), i64 (rank), or void/none (disp/set).
+     * The catch-all below handles every signature the runtime ships. */
+    if (Name.starts_with("matlab_symmat_")) {
+      bool AllReady = true;
+      llvm::SmallVector<Type, 6> Sig;
+      for (auto V : Call->getOperands()) {
+        mlir::Type T = V.getType();
+        if (T == PtrTy || T == F64 ||
+            mlir::isa<mlir::IntegerType>(T)) {
+          Sig.push_back(T == F64 ? F64
+                                  : (mlir::isa<mlir::IntegerType>(T)
+                                         ? (Type)I64 : (Type)PtrTy));
+        } else { AllReady = false; break; }
+      }
+      if (!AllReady) continue;
+      auto isVoidLike = [](mlir::Operation *Op) {
+        if (Op->getNumResults() == 0) return true;
+        return Op->getNumResults() == 1 &&
+               mlir::isa<mlir::NoneType>(Op->getResult(0).getType());
+      };
+      bool Void = isVoidLike(Call);
+      /* Result type: i64 for matlab_symmat_rank; ptr for everything
+       * else that returns. */
+      Type Ret = VoidTy;
+      if (!Void) Ret = (Name == "matlab_symmat_rank") ? (Type)I64 : (Type)PtrTy;
+      B.setInsertionPoint(Call);
+      auto Fn = rt(Name, Ret, Sig);
+      llvm::SmallVector<Value, 6> CallArgs;
+      for (auto V : Call->getOperands()) {
+        if (auto IT = mlir::dyn_cast<mlir::IntegerType>(V.getType()))
+          if (IT.getWidth() != 64)
+            V = LLVM::SExtOp::create(B, Call->getLoc(), I64, V);
+        CallArgs.push_back(V);
+      }
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn, CallArgs);
+      if (!Void) {
+        if (Call->getResult(0).getType() != Ret)
+          Call->getResult(0).setType(Ret);
+        carryName(Call, NC);
+        Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      }
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+
     /* Phase 6 — Symbolic Math Toolbox. All matlab_sym_* runtime entries
      * follow a small set of signatures determined by the callee suffix.
      * Rather than spelling each out (~25 entries), pattern-match the
@@ -2283,6 +2336,48 @@ bool TensorLowering::rewriteBuiltinCalls() {
         Call->erase();
         Changed = true;
         continue;
+      }
+      /* Group F: void-returning matlab_symmat_disp / matlab_symmat_set.
+       * Group E gates on NumResults == 1 so void calls fall through;
+       * handle the symmat side-effect ops here. matlab.call_builtin
+       * carries a NoneType result for void calls (the unregistered op
+       * always has at least one result slot), so we accept either
+       * "no result" or "single NoneType result". */
+      auto isVoidResult = [](mlir::Operation *Op) {
+        if (Op->getNumResults() == 0) return true;
+        return Op->getNumResults() == 1 &&
+               mlir::isa<mlir::NoneType>(Op->getResult(0).getType());
+      };
+      if (isVoidResult(Call)) {
+        bool AllReady = true;
+        llvm::SmallVector<Type, 6> Sig;
+        for (auto V : Call->getOperands()) {
+          mlir::Type T = V.getType();
+          if (T == PtrTy || T == F64 ||
+              mlir::isa<mlir::IntegerType>(T)) {
+            Sig.push_back(T == F64 ? F64
+                                    : (mlir::isa<mlir::IntegerType>(T)
+                                           ? (Type)I64 : (Type)PtrTy));
+          } else { AllReady = false; break; }
+        }
+        if (AllReady) {
+          B.setInsertionPoint(Call);
+          auto Fn = rt(Name, VoidTy, Sig);
+          llvm::SmallVector<Value, 6> CallArgs;
+          for (auto V : Call->getOperands()) {
+            if (auto IT = mlir::dyn_cast<mlir::IntegerType>(V.getType()))
+              if (IT.getWidth() != 64)
+                V = LLVM::SExtOp::create(B, Call->getLoc(), I64, V);
+            CallArgs.push_back(V);
+          }
+          LLVM::CallOp::create(B, Call->getLoc(), Fn, CallArgs);
+          /* If the call had a NoneType result slot, leave it dangling —
+           * any consumer would already have failed verification. The
+           * matlab.call_builtin op itself goes away with the erase. */
+          Call->erase();
+          Changed = true;
+          continue;
+        }
       }
       /* Group E: catch-all for any other matlab_sym_* — derive arg
        * types from operands at the call site, output is ptr. Covers

@@ -1277,6 +1277,8 @@ const char *matlab_string_get_data(void *s, int64_t *len_out);
  * NULL/0-len when the build wasn't configured with MATLAB_LLVM_WITH_SYM
  * (the runtime ships a stub that returns NULL in that case). */
 const char *matlab_dbg_sym_str(void *s, int64_t *len_out);
+/* Phase 6.1 — symbolic matrix variant; pretty-prints a matlab_symmat*. */
+const char *matlab_dbg_symmat_str(void *m, int64_t *len_out);
 int64_t     matlab_string_get_len (void *s);
 
 /* Resolver workspace-kind hook (Resolver::WorkspaceKindHookT). Used
@@ -3362,6 +3364,7 @@ std::string typeForVar(int Kind, void *Ptr) {
   if (Kind == 4) return "uint8";
   if (Kind == 5) return "int32";
   if (Kind == 7) return "sym";
+  if (Kind == 8) return "sym matrix";
   return "any";
 }
 
@@ -3426,6 +3429,15 @@ std::string formatVar(int Kind, int WsIdx) {
     int64_t SL = 0;
     const char *SD = matlab_dbg_sym_str(S, &SL);
     if (!SD || SL == 0) return "<unset sym>";
+    return std::string(SD, (size_t)SL);
+  }
+  if (Kind == 8) {
+    /* Phase 6.1 — symbolic matrix. Same shape as kind=7 but routed
+     * through matlab_dbg_symmat_str (wraps matlab_symmat_str). */
+    void *M = matlab_dbg_ws_ptr(WsIdx);
+    int64_t SL = 0;
+    const char *SD = matlab_dbg_symmat_str(M, &SL);
+    if (!SD || SL == 0) return "<unset sym matrix>";
     return std::string(SD, (size_t)SL);
   }
   return "<unknown>";

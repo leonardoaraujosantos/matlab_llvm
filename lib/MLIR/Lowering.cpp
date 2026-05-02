@@ -469,6 +469,11 @@ private:
    * via SymPP). Triggers sym-typed arithmetic dispatch + disp routing,
    * mirrors how DatetimeBindings drive the datetime arithmetic family. */
   std::unordered_set<Binding *> SymBindings;
+  /* Phase 6.1: bindings holding a matlab_symmat * (symbolic matrix).
+   * Distinct from SymBindings because the runtime entries are a
+   * separate set (matlab_symmat_*) and disp routes to a different
+   * pretty-printer. */
+  std::unordered_set<Binding *> SymmatBindings;
 
   /* Recursive sym-typed expression predicate. Returns true if the
    * expression's value is a matlab_sym* at runtime — covers:
@@ -481,6 +486,11 @@ private:
    * lowering, sym-overloaded call detection. Same predicate everywhere
    * so the rules don't drift between sites. */
   bool exprIsSym(const Expr *X) const;
+  /* Same predicate for matlab_symmat* — symbolic matrix. Distinct
+   * dispatch path: disp routes to matlab_symmat_disp. Operator
+   * arithmetic on symmat is not yet wired (would need detecting
+   * symmat-typed BinaryOp). */
+  bool exprIsSymmat(const Expr *X) const;
   /* Per-struct-array binding: the slot was already initialised with
    * matlab_struct_arr_new() at function entry. Avoids re-initialising
    * on every `s(i).x = ...` assignment. */
@@ -771,7 +781,11 @@ bool Lowerer::exprIsSym(const Expr *X) const {
           "dsolve", "pdsolve", "pdsolve_heat", "pdsolve_wave",
           "laplace", "ilaplace", "fourier", "ifourier",
           "ztrans", "iztrans",
-          "assume", "assumeAlso", "clearAssumptions"};
+          "assume", "assumeAlso", "clearAssumptions",
+          "nsolve", "vpasolve", "checkodesol",
+          "dsolve_ivp", "apply_ivp",
+          /* Phase 6.1 — symmat reductions returning sym scalars. */
+          "sym_det", "sym_trace"};
       if (Producers.contains(Nm)) return true;
       /* Type-overloaded sym builtins — sym only when first arg is sym.
        * Covers diff/int/sin/cos/exp/log/sqrt/abs and the rest of the
@@ -794,6 +808,26 @@ bool Lowerer::exprIsSym(const Expr *X) const {
     return exprIsSym(B2->LHS) || exprIsSym(B2->RHS);
   if (auto *U = dynamic_cast<const UnaryOpExpr *>(X))
     return exprIsSym(U->Operand);
+  return false;
+}
+
+bool Lowerer::exprIsSymmat(const Expr *X) const {
+  if (!X) return false;
+  /* NameExpr referencing a binding tagged via SymmatBindings — set by
+   * the AssignStmt path when the RHS is a symmat-producer. Plus the
+   * cross-TU REPL flag IsSymmat (kind=8 stamp from the Resolver hook). */
+  if (auto *NE = dynamic_cast<const NameExpr *>(X))
+    return NE->Ref &&
+           (SymmatBindings.count(NE->Ref) || NE->Ref->IsSymmat);
+  if (auto *CX = dynamic_cast<const CallOrIndex *>(X))
+    if (auto *CN = dynamic_cast<const NameExpr *>(CX->Callee)) {
+      static const llvm::StringSet<> MatProducers = {
+          "sym_matrix", "sym_eye", "sym_zeros",
+          "sym_inv", "sym_transpose", "sym_linsolve",
+          "sym_dsolve_system",
+          "sym_solve_2x2", "sym_solve_3x3"};
+      return MatProducers.contains(CN->Name);
+    }
   return false;
 }
 
@@ -1068,7 +1102,15 @@ mlir::Value Lowerer::loadBinding(Binding *Bnd, const Type *ValTy,
      * Resolver hook (kind=7) for cross-input REPL persistence; the
      * SymBindings set covers same-TU references. */
     bool IsSymRead = SymBindings.count(Bnd) || Bnd->IsSym;
+    bool IsSymmatRead = SymmatBindings.count(Bnd) || Bnd->IsSymmat;
     mlir::Value NameV = emitFieldNameChar(Bnd->Name, L);
+    if (IsSymmatRead) {
+      auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+      mlir::NamedAttribute Cal(
+          mlir::StringAttr::get(&MCtx, "callee"),
+          mlir::StringAttr::get(&MCtx, "matlab_ws_get_symmat"));
+      return emitUnreg("matlab.call_builtin", {NameV}, PtrTy, L, {Cal});
+    }
     if (IsSymRead) {
       auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
       mlir::NamedAttribute Cal(
@@ -1893,6 +1935,7 @@ void Lowerer::lowerStmt(const Stmt &St) {
       bool DispIsDatetime = false, DispIsDuration = false;
       bool DispIsCategorical = false, DispIsTable = false;
       bool DispIsSym = exprIsSym(E.E);
+      bool DispIsSymmat = exprIsSymmat(E.E);
       if (auto *NE = dynamic_cast<const NameExpr *>(E.E)) {
         if (NE->Ref && DatetimeBindings.count(NE->Ref)) DispIsDatetime = true;
         if (NE->Ref && DurationBindings.count(NE->Ref)) DispIsDuration = true;
@@ -1934,6 +1977,12 @@ void Lowerer::lowerStmt(const Stmt &St) {
         mlir::NamedAttribute Cal(
             mlir::StringAttr::get(&MCtx, "callee"),
             mlir::StringAttr::get(&MCtx, "matlab_sym_disp"));
+        emitUnregOp("matlab.call_builtin", {V},
+                    {mlir::NoneType::get(&MCtx)}, loc(E.Range), {Cal});
+      } else if (DispIsSymmat) {
+        mlir::NamedAttribute Cal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "matlab_symmat_disp"));
         emitUnregOp("matlab.call_builtin", {V},
                     {mlir::NoneType::get(&MCtx)}, loc(E.Range), {Cal});
       } else if (!IntSuf.empty()) {
@@ -2018,6 +2067,7 @@ void Lowerer::lowerStmt(const Stmt &St) {
      *  - BinaryOp where either operand is sym (handled below)
      *  - UnaryOp with sym operand */
     bool RhsIsSym = exprIsSym(A.RHS);
+    bool RhsIsSymmat = exprIsSymmat(A.RHS);
     if (A.RHS && A.RHS->Kind == NodeKind::CallOrIndex) {
       auto *Cx = static_cast<const CallOrIndex *>(A.RHS);
       if (auto *NE = dynamic_cast<const NameExpr *>(Cx->Callee)) {
@@ -2434,6 +2484,11 @@ void Lowerer::lowerStmt(const Stmt &St) {
       for (const Expr *L : A.LHS)
         if (auto *N = dynamic_cast<const NameExpr *>(L))
           if (N->Ref) SymBindings.insert(N->Ref);
+    }
+    if (RhsIsSymmat) {
+      for (const Expr *L : A.LHS)
+        if (auto *N = dynamic_cast<const NameExpr *>(L))
+          if (N->Ref) SymmatBindings.insert(N->Ref);
     }
     if (RhsIsString) {
       for (const Expr *L : A.LHS)
@@ -3106,12 +3161,14 @@ void Lowerer::lowerLValueStore(const Expr &LHS, mlir::Value Rhs) {
       else if (N.Ty && N.Ty->K == Type::Kind::StringArray)
         IsString = true;
       bool IsSym = SymBindings.count(N.Ref) != 0;
+      bool IsSymmat = SymmatBindings.count(N.Ref) != 0;
       llvm::StringRef Callee =
-          IsSym      ? "matlab_ws_set_sym"
-                     : (IsString ? "matlab_ws_set_string"
-                                 : (IsObj ? "matlab_ws_set_obj"
-                                          : (IsMat ? "matlab_ws_set_mat"
-                                                   : "matlab_ws_set_f64")));
+          IsSymmat   ? "matlab_ws_set_symmat"
+                     : (IsSym ? "matlab_ws_set_sym"
+                              : (IsString ? "matlab_ws_set_string"
+                                          : (IsObj ? "matlab_ws_set_obj"
+                                                   : (IsMat ? "matlab_ws_set_mat"
+                                                            : "matlab_ws_set_f64"))));
       mlir::NamedAttribute Cal(
           mlir::StringAttr::get(&MCtx, "callee"),
           mlir::StringAttr::get(&MCtx, Callee));
@@ -4198,6 +4255,168 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
         std::string Callee = "matlab_sym_" + std::string(Nm);
         return emitSymCall(Callee, {F, V1, V2});
       }
+      /* nsolve(eq, var, x0, dps) / vpasolve(...) — Newton + variable-
+       * precision numeric solve. dps optional, defaults to 15 / 32. */
+      if ((Nm == "nsolve" || Nm == "vpasolve") && C.Args.size() >= 3 &&
+          C.Args[0] && isSymExpr(C.Args[0])) {
+        mlir::Value E = lowerExpr(*C.Args[0]);
+        mlir::Value V = lowerExpr(*C.Args[1]);
+        mlir::Value X0 = lowerExpr(*C.Args[2]);
+        if (X0 && X0.getType() == F64Ty)
+          X0 = emitSymCall("matlab_sym_from_double", {X0});
+        mlir::Value Dps;
+        if (C.Args.size() >= 4 && C.Args[3])
+          Dps = lowerExpr(*C.Args[3]);
+        else
+          Dps = mlir::arith::ConstantOp::create(
+              B, L, mlir::Float64Type::get(&MCtx),
+              mlir::FloatAttr::get(mlir::Float64Type::get(&MCtx),
+                                     Nm == "vpasolve" ? 32.0 : 15.0));
+        if (Dps && Dps.getType() == F64Ty)
+          Dps = mlir::arith::FPToSIOp::create(
+              B, L, mlir::IntegerType::get(&MCtx, 64), Dps);
+        std::string Callee = "matlab_sym_" + std::string(Nm);
+        return emitSymCall(Callee, {E, V, X0, Dps});
+      }
+      /* checkodesol(eq, sol, y, yp, x) → sym (residual). */
+      if (Nm == "checkodesol" && C.Args.size() == 5 &&
+          C.Args[0] && isSymExpr(C.Args[0])) {
+        mlir::Value E = lowerExpr(*C.Args[0]);
+        mlir::Value S = lowerExpr(*C.Args[1]);
+        mlir::Value Y = lowerExpr(*C.Args[2]);
+        mlir::Value Yp = lowerExpr(*C.Args[3]);
+        mlir::Value X = lowerExpr(*C.Args[4]);
+        return emitSymCall("matlab_sym_checkodesol", {E, S, Y, Yp, X});
+      }
+      /* dsolve_ivp(eq, y, yp, x, x0, y0) — first-order with one IC. */
+      if (Nm == "dsolve_ivp" && C.Args.size() == 6 &&
+          C.Args[0] && isSymExpr(C.Args[0])) {
+        llvm::SmallVector<mlir::Value, 6> A;
+        for (auto *X : C.Args) A.push_back(lowerExpr(*X));
+        return emitSymCall("matlab_sym_dsolve_ivp_1", A);
+      }
+      /* apply_ivp(general_solution, x, x0, y0). */
+      if (Nm == "apply_ivp" && C.Args.size() == 4 &&
+          C.Args[0] && isSymExpr(C.Args[0])) {
+        llvm::SmallVector<mlir::Value, 4> A;
+        for (auto *X : C.Args) A.push_back(lowerExpr(*X));
+        return emitSymCall("matlab_sym_apply_ivp_1", A);
+      }
+      /* --- Phase 6.1 symbolic-matrix builtins. -------------------------
+       * sym_matrix(R, C, e11, e12, ..., eRC) — construct a symbolic
+       * matrix from scalar sym entries. R and C must be integer
+       * literals so the row-major flattening is resolved at compile
+       * time. Emits sym_matrix_zeros(R, C) followed by R*C set calls.
+       * Result is a matlab_symmat*.
+       *
+       * This bypasses the standard `[a 1; 2 b]` matrix-literal syntax —
+       * extending matrix literals to detect sym entries is bigger work
+       * (the literal lowering currently routes through the f64 path).
+       * `sym_matrix` gives users an explicit constructor in the
+       * meantime; same shape as `containers.Map(...)`. */
+      auto foldI64 = [&](const Expr *X, int64_t &Out) -> bool {
+        if (!X) return false;
+        if (auto *IL = dynamic_cast<const IntegerLiteral *>(X)) {
+          Out = std::strtoll(std::string(IL->Text).c_str(), nullptr, 10);
+          return true;
+        }
+        if (auto *FL = dynamic_cast<const FPLiteral *>(X)) {
+          Out = static_cast<int64_t>(
+              std::strtod(std::string(FL->Text).c_str(), nullptr));
+          return true;
+        }
+        return false;
+      };
+      auto I64Ty = mlir::IntegerType::get(&MCtx, 64);
+      auto i64Const = [&](int64_t v) {
+        return mlir::arith::ConstantOp::create(
+            B, L, I64Ty, mlir::IntegerAttr::get(I64Ty, v)).getResult();
+      };
+      if (Nm == "sym_matrix" && C.Args.size() >= 2) {
+        int64_t R = 0, Cc = 0;
+        if (!foldI64(C.Args[0], R) || !foldI64(C.Args[1], Cc))
+          return mlir::Value{};
+        if (static_cast<int64_t>(C.Args.size()) != 2 + R * Cc)
+          return mlir::Value{};
+        mlir::Value M = emitSymCall("matlab_symmat_zeros",
+                                      {i64Const(R), i64Const(Cc)});
+        for (int64_t i = 0; i < R; ++i)
+          for (int64_t j = 0; j < Cc; ++j) {
+            mlir::Value V = lowerExpr(*C.Args[2 + i * Cc + j]);
+            if (V && V.getType() == F64Ty)
+              V = emitSymCall("matlab_sym_from_double", {V});
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_symmat_set"));
+            emitUnregOp("matlab.call_builtin",
+                        {M, i64Const(i), i64Const(j), V},
+                        {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          }
+        return M;
+      }
+      if ((Nm == "sym_eye" || Nm == "sym_zeros") && C.Args.size() >= 1) {
+        if (Nm == "sym_eye" && C.Args.size() == 1) {
+          mlir::Value N = lowerExpr(*C.Args[0]);
+          if (N && N.getType() == F64Ty)
+            N = mlir::arith::FPToSIOp::create(B, L, I64Ty, N);
+          return emitSymCall("matlab_symmat_eye", {N});
+        }
+        if (Nm == "sym_zeros" && C.Args.size() == 2) {
+          mlir::Value R = lowerExpr(*C.Args[0]);
+          mlir::Value Cc2 = lowerExpr(*C.Args[1]);
+          if (R && R.getType() == F64Ty)
+            R = mlir::arith::FPToSIOp::create(B, L, I64Ty, R);
+          if (Cc2 && Cc2.getType() == F64Ty)
+            Cc2 = mlir::arith::FPToSIOp::create(B, L, I64Ty, Cc2);
+          return emitSymCall("matlab_symmat_zeros", {R, Cc2});
+        }
+      }
+      /* sym_det / sym_inv / sym_transpose / sym_trace / sym_rank — single-
+       * matrix operations. Result is sym (det/trace) or symmat. */
+      if ((Nm == "sym_det" || Nm == "sym_trace") && C.Args.size() == 1) {
+        mlir::Value M = lowerExpr(*C.Args[0]);
+        std::string Callee = "matlab_symmat_" + std::string(Nm).substr(4);
+        return emitSymCall(Callee, {M});
+      }
+      if ((Nm == "sym_inv" || Nm == "sym_transpose") && C.Args.size() == 1) {
+        mlir::Value M = lowerExpr(*C.Args[0]);
+        std::string Callee = "matlab_symmat_" +
+            std::string(Nm == "sym_inv" ? "inverse" : "transpose");
+        return emitSymCall(Callee, {M});
+      }
+      if (Nm == "sym_rank" && C.Args.size() == 1) {
+        mlir::Value M = lowerExpr(*C.Args[0]);
+        return emitSymCall("matlab_symmat_rank", {M}, I64Ty);
+      }
+      /* sym_linsolve(A, b) — A·x = b. Returns symmat column. */
+      if (Nm == "sym_linsolve" && C.Args.size() == 2) {
+        mlir::Value A = lowerExpr(*C.Args[0]);
+        mlir::Value Bv = lowerExpr(*C.Args[1]);
+        return emitSymCall("matlab_symmat_linsolve", {A, Bv});
+      }
+      /* sym_dsolve_system(A, x) — y' = A·y. Returns symmat. */
+      if (Nm == "sym_dsolve_system" && C.Args.size() == 2 &&
+          C.Args[1] && isSymExpr(C.Args[1])) {
+        mlir::Value A = lowerExpr(*C.Args[0]);
+        mlir::Value X = lowerExpr(*C.Args[1]);
+        return emitSymCall("matlab_symmat_dsolve_system", {A, X});
+      }
+      /* sym_solve_2x2 / sym_solve_3x3 — fixed-arity multi-equation
+       * solve. Returns a symmat with one row per joint solution and
+       * one column per variable. The variadic-array form
+       * (sym_solve_sys) ships in the runtime but the language-level
+       * lowering for it lands in Phase 6.2 — until then, callers use
+       * these explicit small-system entries. */
+      if (Nm == "sym_solve_2x2" && C.Args.size() == 4) {
+        llvm::SmallVector<mlir::Value, 4> A;
+        for (auto *X : C.Args) A.push_back(lowerExpr(*X));
+        return emitSymCall("matlab_sym_solve_2x2", A);
+      }
+      if (Nm == "sym_solve_3x3" && C.Args.size() == 6) {
+        llvm::SmallVector<mlir::Value, 6> A;
+        for (auto *X : C.Args) A.push_back(lowerExpr(*X));
+        return emitSymCall("matlab_sym_solve_3x3", A);
+      }
       /* factor(expr, var). */
       if (Nm == "factor" && C.Args.size() == 2 &&
           C.Args[0] && isSymExpr(C.Args[0])) {
@@ -4262,6 +4481,16 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
         mlir::NamedAttribute Cal(
             mlir::StringAttr::get(&MCtx, "callee"),
             mlir::StringAttr::get(&MCtx, "matlab_sym_disp"));
+        return emitUnreg("matlab.call_builtin", {V},
+                         mlir::NoneType::get(&MCtx), L, {Cal});
+      }
+      /* disp(symmat) — same shape, different runtime entry. */
+      if (Nm == "disp" && C.Args.size() == 1 &&
+          C.Args[0] && exprIsSymmat(C.Args[0])) {
+        mlir::Value V = lowerExpr(*C.Args[0]);
+        mlir::NamedAttribute Cal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "matlab_symmat_disp"));
         return emitUnreg("matlab.call_builtin", {V},
                          mlir::NoneType::get(&MCtx), L, {Cal});
       }

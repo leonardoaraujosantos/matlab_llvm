@@ -287,6 +287,37 @@ void *matlab_ws_get_sym(const char *name, int64_t len) {
     return nullptr;
 }
 
+/* Symbolic Math Toolbox — symbolic matrix workspace setter / getter
+ * (kind=8). Mirrors matlab_ws_set_sym (kind=7) shape. The DAP variable
+ * formatter renders symmat values via matlab_dbg_symmat_str. */
+void matlab_ws_set_symmat(const char *name, int64_t len, void *m) {
+    matlab_ws_init_if_needed();
+    matlab_ws_lock();
+    struct matlab_dbg_undo_rec *r =
+        matlab_ws_push_undo_locked(name, len, /*kind=*/2);
+    int32_t idx = struct_reserve(matlab_ws, name, (int32_t)len);
+    matlab_ws->kinds[idx] = 8;
+    matlab_ws->f64_vals[idx] = 0.0;
+    matlab_ws->ptr_vals[idx] = m;
+    matlab_dbg_undo_record_set_new_ptr(r, /*new_kind=*/8, m);
+    matlab_ws_unlock();
+    matlab_ws_check_watch(name, len);
+}
+
+void *matlab_ws_get_symmat(const char *name, int64_t len) {
+    matlab_ws_init_if_needed();
+    for (int32_t i = 0; i < matlab_ws->nfields; ++i) {
+        const char *gn = matlab_ws->names[i];
+        if (!gn) continue;
+        size_t glen = strlen(gn);
+        if (glen != (size_t)len) continue;
+        if (memcmp(gn, name, (size_t)len) != 0) continue;
+        if (matlab_ws->kinds[i] != 8) return nullptr;
+        return matlab_ws->ptr_vals[i];
+    }
+    return nullptr;
+}
+
 /* DAP variable formatter — pretty-prints a matlab_sym* into a stable
  * static buffer and returns it. The DAP server reads the result via
  * the value column of `variables` requests. Returns NULL on miss.
@@ -294,15 +325,27 @@ void *matlab_ws_get_sym(const char *name, int64_t len) {
  * (otherwise the runtime can't link matlab_sym_str from runtime_sym.cpp). */
 #ifdef MATLAB_LLVM_WITH_SYM
 extern "C" char *matlab_sym_str(const void *e, int64_t *len_out);
+extern "C" char *matlab_symmat_str(const void *m, int64_t *len_out);
 const char *matlab_dbg_sym_str(void *s, int64_t *len_out) {
     static thread_local char *Cached = nullptr;
     if (Cached) { free(Cached); Cached = nullptr; }
     Cached = matlab_sym_str(s, len_out);
     return Cached;
 }
+const char *matlab_dbg_symmat_str(void *m, int64_t *len_out) {
+    static thread_local char *Cached = nullptr;
+    if (Cached) { free(Cached); Cached = nullptr; }
+    Cached = matlab_symmat_str(m, len_out);
+    return Cached;
+}
 #else
 const char *matlab_dbg_sym_str(void *s, int64_t *len_out) {
     (void)s;
+    if (len_out) *len_out = 0;
+    return nullptr;
+}
+const char *matlab_dbg_symmat_str(void *m, int64_t *len_out) {
+    (void)m;
     if (len_out) *len_out = 0;
     return nullptr;
 }

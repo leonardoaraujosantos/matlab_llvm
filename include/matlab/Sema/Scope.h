@@ -50,6 +50,9 @@ struct Binding {
    * cross-TU sym binding (declared in an earlier REPL input) routes
    * through matlab_sym_* the same as same-TU SymBindings tracking. */
   bool IsSym = false;
+  /* Phase 6.1 — symbolic matrix (kind=8). Same cross-TU REPL story as
+   * IsSym, but routes through matlab_ws_get_symmat / matlab_symmat_*. */
+  bool IsSymmat = false;
 };
 
 class Scope {

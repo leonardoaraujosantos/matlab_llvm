@@ -145,14 +145,17 @@ See [`docs/sym.md`](sym.md) for the full surface.
 | `vpa(s, dps)`, `double(s)` | ✅ | |
 | `dsolve(eq, y, yp, x)` (1st-order) | ✅ | SymPP's plain-symbol convention; no AppliedFunction lifting |
 | `dsolve(eq, y, yp, ypp, x)` (2nd-order) | ✅ | Auto-classifies const-coeff vs Cauchy-Euler |
-| `dsolve(A, x)` (linear system) | ❌ | SymPP supports it; not yet wired |
+| `dsolve(A, x)` (linear system) | ✅ | `sym_dsolve_system(A, x)` — explicit symmat constructor |
+| `dsolve_ivp(eq, y, yp, x, x0, y0)`, `apply_ivp(...)` | 🟡 | Single-condition form; multi-condition needs cell-array integration |
+| `checkodesol(eq, sol, y, yp, x)` | ✅ | Returns residual sym |
 | `pdsolve(a, b, c, x, y)`, `pdsolve_heat`, `pdsolve_wave` | ✅ | First-order linear, heat, wave |
 | `laplace`/`ilaplace`, `fourier`/`ifourier`, `ztrans`/`iztrans` | ✅ | |
 | `assume(x, 'prop')`, `assumeAlso`, `clearAssumptions` | ✅ | 10 properties (real, integer, positive, …); rebinds the variable |
 | `latex`, `pretty`, `ccode` | ✅ | Returns char* via `matlab_sym_*` |
 | `matlabFunction(...)` | 🟡 | SymPP emits Octave source; not wrapped into a function handle |
-| Symbolic matrices, `linsolve` | ❌ | SymPP has the engine; not yet wired |
-| Multi-eq `solve([eq1, eq2], [x, y])` | 🟡 | Lowered to single-arg form via flattening |
+| Symbolic matrices: `sym_matrix`, `sym_eye`, `sym_zeros`, `sym_det`, `sym_inv`, `sym_transpose`, `sym_trace`, `sym_rank`, `sym_linsolve`, `sym_dsolve_system` | ✅ | Distinct opaque type (kind=8) with cross-input REPL persistence + DAP rendering |
+| Multi-eq `solve([eq1, eq2], [x, y])` | 🟡 | Fixed-arity `sym_solve_2x2` / `sym_solve_3x3` ship; variadic + matrix-literal forms in 6.2 |
+| `nsolve`, `vpasolve` | ✅ | Newton's method in MPFR |
 | Elementary functions on sym (`sin(sym)`, `exp(sym)`, …) | ✅ | Auto-dispatch when the operand is sym |
 
 Backend matrix: `-emit-cpp` / `-emit-llvm` / REPL JIT / DAP all support sym.
