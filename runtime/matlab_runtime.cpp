@@ -6514,4 +6514,436 @@ matlab_mat *matlab_load_mat(matlab_string *path) {
     return A;
 }
 
+/*=========================================================================
+ * Initial-value ODE solvers.
+ *
+ * ode45  — Dormand–Prince 5(4), seven-stage FSAL embedded RK pair.
+ * ode23  — Bogacki–Shampine 3(2), four-stage FSAL embedded RK pair.
+ *
+ * Phase 1 supports scalar y only: f has signature `double(double, double)`.
+ * Output grid is the set of accepted step endpoints (no dense interpolation
+ * yet). Tolerances and step-control are MATLAB's defaults: rtol = 1e-3,
+ * atol = 1e-6, fac = 0.9, fac in [0.2, 5.0], max 100 000 steps.
+ *
+ * The lowering splits `[t,y] = ode45(...)` into back-to-back
+ * matlab_ode45_t / matlab_ode45_y calls sharing the same operands. We
+ * memoise the last solve in a thread-local slot so the second call hits
+ * the cache instead of re-integrating. */
+typedef double (*ode_rhs_t)(double, double);
+
+struct ode_cache_slot {
+    void *fp;
+    matlab_mat *tspan;
+    double y0;
+    double rtol;
+    double atol;
+    double max_step;
+    double init_step;
+    int refine;
+    int kind;          /* 45 or 23 — solvers don't share grids */
+    matlab_mat *t;
+    matlab_mat *y;
+    int valid;
+};
+
+#if defined(__GNUC__) || defined(__clang__)
+__thread struct ode_cache_slot ode_cache_;
+#else
+struct ode_cache_slot ode_cache_;
+#endif
+
+/* Append (tv, yv) to a growing pair of buffers. Doubles capacity as
+ * needed; caller frees both buffers via matlab_mat ownership. */
+static void ode_push(double **T, double **Y, int64_t *n, int64_t *cap,
+                     double tv, double yv) {
+    if (*n == *cap) {
+        *cap = (*cap) * 2;
+        *T = (double *)realloc(*T, (size_t)(*cap) * sizeof(double));
+        *Y = (double *)realloc(*Y, (size_t)(*cap) * sizeof(double));
+    }
+    (*T)[*n] = tv;
+    (*Y)[*n] = yv;
+    ++(*n);
+}
+
+/* Wrap two heap buffers of length n each into freshly-allocated column
+ * matlab_mat descriptors, copying so the caller can free the buffers. */
+static void ode_buffers_to_mats(double *T, double *Y, int64_t n,
+                                matlab_mat **out_t, matlab_mat **out_y) {
+    matlab_mat *Tm = mat_alloc(n, 1);
+    matlab_mat *Ym = mat_alloc(n, 1);
+    if (n > 0) {
+        memcpy(Tm->data, T, (size_t)n * sizeof(double));
+        memcpy(Ym->data, Y, (size_t)n * sizeof(double));
+    }
+    *out_t = Tm;
+    *out_y = Ym;
+}
+
+/* Cubic Hermite interpolation between (t_n, y_n) and (t_n+1, y_n+1)
+ * with derivatives k_n=f(t_n,y_n) and k_n1=f(t_n+1,y_n+1).
+ * θ ∈ [0, 1]; returns y at t_n + θ*h. 3rd-order accurate, sufficient for
+ * smooth-looking plot output between RK45 step endpoints. */
+static inline double ode_hermite(double y, double y1, double k, double k1,
+                                  double h, double th) {
+    double th2 = th * th;
+    double th3 = th2 * th;
+    return (2.0*th3 - 3.0*th2 + 1.0) * y
+         + (-2.0*th3 + 3.0*th2)     * y1
+         + h * (th3 - 2.0*th2 + th) * k
+         + h * (th3 - th2)          * k1;
+}
+
+static void rk_solve_dp45(ode_rhs_t f, double t0, double tf, double y0,
+                           double rtol, double atol,
+                           double max_step, double init_step, int refine,
+                           double **T, double **Y, int64_t *N) {
+    const int max_steps = 100000;
+    /* refine = 1 → only the step endpoint is emitted; refine = N → N-1
+     * Hermite-interpolated interior samples plus the endpoint. MATLAB's
+     * ode45 default is 4, ode23's default is 1. */
+    if (refine < 1) refine = 1;
+    int64_t cap = 256;
+    double *Tb = (double *)malloc((size_t)cap * sizeof(double));
+    double *Yb = (double *)malloc((size_t)cap * sizeof(double));
+    int64_t n = 0;
+
+    double t = t0, y = y0;
+    ode_push(&Tb, &Yb, &n, &cap, t, y);
+
+    /* Initial step: small fraction of the interval, signed so backward
+     * integration also terminates. Zero span just emits the seed point.
+     * `init_step` overrides the heuristic when > 0; we still negate it
+     * for backward integration so the user passes a magnitude. */
+    double span = tf - t0;
+    double h = (init_step > 0.0) ? (span >= 0.0 ? init_step : -init_step)
+                                 : span * 0.01;
+    if (h == 0.0 || span == 0.0) {
+        *T = Tb; *Y = Yb; *N = n;
+        return;
+    }
+    int forward = h > 0;
+    /* Cap the initial step at MaxStep too — otherwise a user-provided
+     * InitialStep > MaxStep would be silently honoured for one step. */
+    if (max_step > 0.0) {
+        if (h >  max_step) h =  max_step;
+        if (h < -max_step) h = -max_step;
+    }
+
+    double k1 = f(t, y);
+    int steps = 0;
+    while ((forward ? t < tf : t > tf) && steps < max_steps) {
+        ++steps;
+        if (forward ? (t + h > tf) : (t + h < tf)) h = tf - t;
+
+        double k2 = f(t + h * (1.0/5.0),
+                      y + h * (k1 * (1.0/5.0)));
+        double k3 = f(t + h * (3.0/10.0),
+                      y + h * (k1 * (3.0/40.0) + k2 * (9.0/40.0)));
+        double k4 = f(t + h * (4.0/5.0),
+                      y + h * (k1 * (44.0/45.0) - k2 * (56.0/15.0)
+                              + k3 * (32.0/9.0)));
+        double k5 = f(t + h * (8.0/9.0),
+                      y + h * (k1 * (19372.0/6561.0)
+                              - k2 * (25360.0/2187.0)
+                              + k3 * (64448.0/6561.0)
+                              - k4 * (212.0/729.0)));
+        double k6 = f(t + h,
+                      y + h * (k1 * (9017.0/3168.0)
+                              - k2 * (355.0/33.0)
+                              + k3 * (46732.0/5247.0)
+                              + k4 * (49.0/176.0)
+                              - k5 * (5103.0/18656.0)));
+        double y5 = y + h * (k1 * (35.0/384.0)
+                            + k3 * (500.0/1113.0)
+                            + k4 * (125.0/192.0)
+                            - k5 * (2187.0/6784.0)
+                            + k6 * (11.0/84.0));
+        double k7 = f(t + h, y5);
+
+        /* Embedded 4th-order error estimate: e = h * sum((b5 - b4) * k_i). */
+        double err = h * (k1 * (71.0/57600.0)
+                         - k3 * (71.0/16695.0)
+                         + k4 * (71.0/1920.0)
+                         - k5 * (17253.0/339200.0)
+                         + k6 * (22.0/525.0)
+                         - k7 * (1.0/40.0));
+        double scale = atol + rtol * fmax(fabs(y), fabs(y5));
+        double normerr = (scale > 0) ? fabs(err) / scale : 0.0;
+
+        if (normerr <= 1.0) {
+            /* Emit refine-1 interior samples then the step endpoint via
+             * cubic Hermite. y_old/k_old are pre-step values; (y5, k7)
+             * are the step-end values used as the right-hand Hermite
+             * anchor. */
+            for (int j = 1; j <= refine; ++j) {
+                double th = (double)j / (double)refine;
+                double ti = t + h * th;
+                double yi = (j == refine)
+                    ? y5
+                    : ode_hermite(y, y5, k1, k7, h, th);
+                ode_push(&Tb, &Yb, &n, &cap, ti, yi);
+            }
+            t += h;
+            y  = y5;
+            k1 = k7;                                     /* FSAL */
+        }
+
+        double fac = (normerr == 0.0) ? 5.0
+                                      : 0.9 * pow(normerr, -1.0/5.0);
+        if (fac < 0.2) fac = 0.2;
+        if (fac > 5.0) fac = 5.0;
+        h *= fac;
+        if (max_step > 0.0) {
+            if (h >  max_step) h =  max_step;
+            if (h < -max_step) h = -max_step;
+        }
+    }
+
+    *T = Tb; *Y = Yb; *N = n;
+}
+
+static void rk_solve_bs23(ode_rhs_t f, double t0, double tf, double y0,
+                           double rtol, double atol,
+                           double max_step, double init_step, int refine,
+                           double **T, double **Y, int64_t *N) {
+    const int max_steps = 100000;
+    if (refine < 1) refine = 1;
+    int64_t cap = 256;
+    double *Tb = (double *)malloc((size_t)cap * sizeof(double));
+    double *Yb = (double *)malloc((size_t)cap * sizeof(double));
+    int64_t n = 0;
+
+    double t = t0, y = y0;
+    ode_push(&Tb, &Yb, &n, &cap, t, y);
+
+    double span = tf - t0;
+    double h = (init_step > 0.0) ? (span >= 0.0 ? init_step : -init_step)
+                                 : span * 0.01;
+    if (h == 0.0 || span == 0.0) {
+        *T = Tb; *Y = Yb; *N = n;
+        return;
+    }
+    int forward = h > 0;
+    if (max_step > 0.0) {
+        if (h >  max_step) h =  max_step;
+        if (h < -max_step) h = -max_step;
+    }
+
+    double k1 = f(t, y);
+    int steps = 0;
+    while ((forward ? t < tf : t > tf) && steps < max_steps) {
+        ++steps;
+        if (forward ? (t + h > tf) : (t + h < tf)) h = tf - t;
+
+        double k2 = f(t + h * 0.5,
+                      y + h * (k1 * 0.5));
+        double k3 = f(t + h * 0.75,
+                      y + h * (k2 * 0.75));
+        double y3 = y + h * (k1 * (2.0/9.0)
+                           + k2 * (1.0/3.0)
+                           + k3 * (4.0/9.0));
+        double k4 = f(t + h, y3);
+
+        /* Error: 3rd-order minus 2nd-order combo. b3 - b2 is
+         *   [-5/72, 1/12, 1/9, -1/8] over (k1, k2, k3, k4). */
+        double err = h * (k1 * (-5.0/72.0)
+                         + k2 * (1.0/12.0)
+                         + k3 * (1.0/9.0)
+                         - k4 * (1.0/8.0));
+        double scale = atol + rtol * fmax(fabs(y), fabs(y3));
+        double normerr = (scale > 0) ? fabs(err) / scale : 0.0;
+
+        if (normerr <= 1.0) {
+            for (int j = 1; j <= refine; ++j) {
+                double th = (double)j / (double)refine;
+                double ti = t + h * th;
+                double yi = (j == refine)
+                    ? y3
+                    : ode_hermite(y, y3, k1, k4, h, th);
+                ode_push(&Tb, &Yb, &n, &cap, ti, yi);
+            }
+            t += h;
+            y  = y3;
+            k1 = k4;                                     /* FSAL */
+        }
+
+        double fac = (normerr == 0.0) ? 5.0
+                                      : 0.9 * pow(normerr, -1.0/3.0);
+        if (fac < 0.2) fac = 0.2;
+        if (fac > 5.0) fac = 5.0;
+        h *= fac;
+        if (max_step > 0.0) {
+            if (h >  max_step) h =  max_step;
+            if (h < -max_step) h = -max_step;
+        }
+    }
+
+    *T = Tb; *Y = Yb; *N = n;
+}
+
+/* Resolve tspan into (t0, tf). Accepts a 1×2 row, 2×1 column, or any
+ * 2-element vector. Returns 1 on success. */
+static int ode_tspan(matlab_mat *tspan, double *t0, double *tf) {
+    if (!tspan) return 0;
+    int64_t n = tspan->rows * tspan->cols;
+    if (n < 2) return 0;
+    *t0 = tspan->data[0];
+    *tf = tspan->data[n - 1];
+    return 1;
+}
+
+/* Cache-aware dispatch: integrate once per (kind, fp, tspan, y0, opts)
+ * tuple and stash the result so the paired _t / _y call returns the
+ * other half without re-running the solver. */
+static void ode_compute(int kind, ode_rhs_t f, matlab_mat *tspan, double y0,
+                        double rtol, double atol,
+                        double max_step, double init_step, int refine) {
+    if (ode_cache_.valid &&
+        ode_cache_.fp == (void *)f &&
+        ode_cache_.tspan == tspan &&
+        ode_cache_.y0 == y0 &&
+        ode_cache_.rtol == rtol &&
+        ode_cache_.atol == atol &&
+        ode_cache_.max_step == max_step &&
+        ode_cache_.init_step == init_step &&
+        ode_cache_.refine == refine &&
+        ode_cache_.kind == kind) {
+        return;
+    }
+    /* New solve: drop any previously-cached matrices. The compiler
+     * generally consumes both _t and _y of the prior call before issuing
+     * a new pair, so freeing here is safe. */
+    if (ode_cache_.valid) {
+        if (ode_cache_.t) {
+            free(ode_cache_.t->data); free(ode_cache_.t);
+        }
+        if (ode_cache_.y) {
+            free(ode_cache_.y->data); free(ode_cache_.y);
+        }
+        ode_cache_.t = NULL;
+        ode_cache_.y = NULL;
+        ode_cache_.valid = 0;
+    }
+
+    double t0 = 0.0, tf = 0.0;
+    if (!f || !ode_tspan(tspan, &t0, &tf)) {
+        ode_cache_.t = mat_alloc(0, 1);
+        ode_cache_.y = mat_alloc(0, 1);
+    } else {
+        double *Tb = NULL, *Yb = NULL;
+        int64_t n = 0;
+        if (kind == 45) rk_solve_dp45(f, t0, tf, y0, rtol, atol,
+                                       max_step, init_step, refine,
+                                       &Tb, &Yb, &n);
+        else            rk_solve_bs23(f, t0, tf, y0, rtol, atol,
+                                       max_step, init_step, refine,
+                                       &Tb, &Yb, &n);
+        ode_buffers_to_mats(Tb, Yb, n, &ode_cache_.t, &ode_cache_.y);
+        free(Tb); free(Yb);
+    }
+    ode_cache_.fp        = (void *)f;
+    ode_cache_.tspan     = tspan;
+    ode_cache_.y0        = y0;
+    ode_cache_.rtol      = rtol;
+    ode_cache_.atol      = atol;
+    ode_cache_.max_step  = max_step;
+    ode_cache_.init_step = init_step;
+    ode_cache_.refine    = refine;
+    ode_cache_.kind      = kind;
+    ode_cache_.valid     = 1;
+}
+
+/* Pull RelTol / AbsTol / MaxStep / InitialStep / Refine from an options
+ * struct, with MATLAB defaults (1e-3 / 1e-6) for the tolerances, 0
+ * (= use built-in heuristics) for the step bounds, and a kind-specific
+ * Refine default supplied by the caller (4 for ode45, 1 for ode23). */
+static void ode_opts_resolve(matlab_struct *opts,
+                              double *rtol, double *atol,
+                              double *max_step, double *init_step,
+                              int *refine, int default_refine) {
+    *rtol = 1e-3; *atol = 1e-6;
+    *max_step = 0.0; *init_step = 0.0;
+    *refine = default_refine;
+    if (!opts) return;
+    if (matlab_struct_has_field(opts, "RelTol", 6) != 0.0)
+        *rtol = matlab_struct_get_f64(opts, "RelTol", 6);
+    if (matlab_struct_has_field(opts, "AbsTol", 6) != 0.0)
+        *atol = matlab_struct_get_f64(opts, "AbsTol", 6);
+    if (matlab_struct_has_field(opts, "MaxStep", 7) != 0.0)
+        *max_step = matlab_struct_get_f64(opts, "MaxStep", 7);
+    if (matlab_struct_has_field(opts, "InitialStep", 11) != 0.0)
+        *init_step = matlab_struct_get_f64(opts, "InitialStep", 11);
+    if (matlab_struct_has_field(opts, "Refine", 6) != 0.0) {
+        int r = (int)matlab_struct_get_f64(opts, "Refine", 6);
+        if (r >= 1) *refine = r;
+    }
+}
+
+/* Clone a column matrix so the caller owns the returned pointer
+ * independently of the cache slot. */
+static matlab_mat *mat_clone_col(matlab_mat *src) {
+    if (!src) return mat_alloc(0, 1);
+    matlab_mat *out = mat_alloc(src->rows, src->cols);
+    int64_t n = src->rows * src->cols;
+    if (n > 0) memcpy(out->data, src->data, (size_t)n * sizeof(double));
+    return out;
+}
+
+matlab_mat *matlab_ode45_t(ode_rhs_t f, matlab_mat *tspan, double y0) {
+    ode_compute(45, f, tspan, y0, 1e-3, 1e-6, 0.0, 0.0, 4);
+    return mat_clone_col(ode_cache_.t);
+}
+
+matlab_mat *matlab_ode45_y(ode_rhs_t f, matlab_mat *tspan, double y0) {
+    ode_compute(45, f, tspan, y0, 1e-3, 1e-6, 0.0, 0.0, 4);
+    return mat_clone_col(ode_cache_.y);
+}
+
+matlab_mat *matlab_ode23_t(ode_rhs_t f, matlab_mat *tspan, double y0) {
+    ode_compute(23, f, tspan, y0, 1e-3, 1e-6, 0.0, 0.0, 1);
+    return mat_clone_col(ode_cache_.t);
+}
+
+matlab_mat *matlab_ode23_y(ode_rhs_t f, matlab_mat *tspan, double y0) {
+    ode_compute(23, f, tspan, y0, 1e-3, 1e-6, 0.0, 0.0, 1);
+    return mat_clone_col(ode_cache_.y);
+}
+
+/* 4-arg form: ode45(@f, tspan, y0, opts). `opts` is a struct with
+ * optional RelTol / AbsTol / MaxStep / InitialStep fields. Other
+ * MATLAB fields (Refine, OutputFcn, …) are silently ignored —
+ * defaults remain MATLAB-compatible. */
+matlab_mat *matlab_ode45_t_opts(ode_rhs_t f, matlab_mat *tspan, double y0,
+                                 matlab_struct *opts) {
+    double rtol, atol, mxs, ins; int rfn;
+    ode_opts_resolve(opts, &rtol, &atol, &mxs, &ins, &rfn, /*default*/ 4);
+    ode_compute(45, f, tspan, y0, rtol, atol, mxs, ins, rfn);
+    return mat_clone_col(ode_cache_.t);
+}
+
+matlab_mat *matlab_ode45_y_opts(ode_rhs_t f, matlab_mat *tspan, double y0,
+                                 matlab_struct *opts) {
+    double rtol, atol, mxs, ins; int rfn;
+    ode_opts_resolve(opts, &rtol, &atol, &mxs, &ins, &rfn, 4);
+    ode_compute(45, f, tspan, y0, rtol, atol, mxs, ins, rfn);
+    return mat_clone_col(ode_cache_.y);
+}
+
+matlab_mat *matlab_ode23_t_opts(ode_rhs_t f, matlab_mat *tspan, double y0,
+                                 matlab_struct *opts) {
+    double rtol, atol, mxs, ins; int rfn;
+    ode_opts_resolve(opts, &rtol, &atol, &mxs, &ins, &rfn, /*default*/ 1);
+    ode_compute(23, f, tspan, y0, rtol, atol, mxs, ins, rfn);
+    return mat_clone_col(ode_cache_.t);
+}
+
+matlab_mat *matlab_ode23_y_opts(ode_rhs_t f, matlab_mat *tspan, double y0,
+                                 matlab_struct *opts) {
+    double rtol, atol, mxs, ins; int rfn;
+    ode_opts_resolve(opts, &rtol, &atol, &mxs, &ins, &rfn, 1);
+    ode_compute(23, f, tspan, y0, rtol, atol, mxs, ins, rfn);
+    return mat_clone_col(ode_cache_.y);
+}
+
 } /* extern "C" */

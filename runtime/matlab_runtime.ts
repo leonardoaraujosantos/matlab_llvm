@@ -2591,6 +2591,219 @@ export function matpow(A: any, n: number): NDArray {
   return acc;
 }
 
+// --- ODE solvers ---------------------------------------------------------
+// Dormand-Prince 5(4) and Bogacki-Shampine 3(2). Scalar y; arithmetic
+// order matches the C and Python runtimes so the output stays in lockstep
+// across backends.
+
+type OdeRhs = (t: number, y: number) => number;
+
+let _odeCache: { key: string; t: NDArray; y: NDArray } | null = null;
+
+function _odeHermite(y: number, y1: number, k: number, k1: number,
+                     h: number, th: number): number {
+  const th2 = th * th;
+  const th3 = th2 * th;
+  return (2*th3 - 3*th2 + 1) * y
+       + (-2*th3 + 3*th2)    * y1
+       + h * (th3 - 2*th2 + th) * k
+       + h * (th3 - th2)        * k1;
+}
+
+function _odeSolveDp45(f: OdeRhs, t0: number, tf: number, y0: number,
+                       rtol = 1e-3, atol = 1e-6,
+                       maxStep = 0, initStep = 0, refine = 4)
+    : { T: number[]; Y: number[] } {
+  const maxSteps = 100000;
+  if (refine < 1) refine = 1;
+  const T: number[] = [t0];
+  const Y: number[] = [y0];
+  let t = t0, y = y0;
+  const span = tf - t0;
+  let h = initStep > 0 ? (span >= 0 ? initStep : -initStep) : span * 0.01;
+  if (h === 0 || span === 0) return { T, Y };
+  const forward = h > 0;
+  if (maxStep > 0) {
+    if (h >  maxStep) h =  maxStep;
+    if (h < -maxStep) h = -maxStep;
+  }
+  let k1 = f(t, y);
+  let steps = 0;
+  while ((forward ? t < tf : t > tf) && steps < maxSteps) {
+    steps++;
+    if (forward ? (t + h > tf) : (t + h < tf)) h = tf - t;
+    const k2 = f(t + h*(1/5),  y + h*(k1*(1/5)));
+    const k3 = f(t + h*(3/10), y + h*(k1*(3/40) + k2*(9/40)));
+    const k4 = f(t + h*(4/5),  y + h*(k1*(44/45) - k2*(56/15) + k3*(32/9)));
+    const k5 = f(t + h*(8/9),  y + h*(k1*(19372/6561) - k2*(25360/2187)
+                                       + k3*(64448/6561) - k4*(212/729)));
+    const k6 = f(t + h,        y + h*(k1*(9017/3168) - k2*(355/33)
+                                       + k3*(46732/5247) + k4*(49/176)
+                                       - k5*(5103/18656)));
+    const y5 = y + h*(k1*(35/384) + k3*(500/1113) + k4*(125/192)
+                      - k5*(2187/6784) + k6*(11/84));
+    const k7 = f(t + h, y5);
+    const err = h*(k1*(71/57600) - k3*(71/16695) + k4*(71/1920)
+                   - k5*(17253/339200) + k6*(22/525) - k7*(1/40));
+    const ay = Math.abs(y), ay5 = Math.abs(y5);
+    const scale = atol + rtol * (ay > ay5 ? ay : ay5);
+    const normerr = scale > 0 ? Math.abs(err)/scale : 0;
+    if (normerr <= 1) {
+      for (let j = 1; j <= refine; j++) {
+        const th = j / refine;
+        const ti = t + h * th;
+        const yi = j === refine ? y5 : _odeHermite(y, y5, k1, k7, h, th);
+        T.push(ti); Y.push(yi);
+      }
+      t += h; y = y5; k1 = k7;
+    }
+    let fac = normerr === 0 ? 5 : 0.9 * Math.pow(normerr, -1/5);
+    if (fac < 0.2) fac = 0.2;
+    if (fac > 5)   fac = 5;
+    h *= fac;
+    if (maxStep > 0) {
+      if (h >  maxStep) h =  maxStep;
+      if (h < -maxStep) h = -maxStep;
+    }
+  }
+  return { T, Y };
+}
+
+function _odeSolveBs23(f: OdeRhs, t0: number, tf: number, y0: number,
+                       rtol = 1e-3, atol = 1e-6,
+                       maxStep = 0, initStep = 0, refine = 1)
+    : { T: number[]; Y: number[] } {
+  const maxSteps = 100000;
+  if (refine < 1) refine = 1;
+  const T: number[] = [t0];
+  const Y: number[] = [y0];
+  let t = t0, y = y0;
+  const span = tf - t0;
+  let h = initStep > 0 ? (span >= 0 ? initStep : -initStep) : span * 0.01;
+  if (h === 0 || span === 0) return { T, Y };
+  const forward = h > 0;
+  if (maxStep > 0) {
+    if (h >  maxStep) h =  maxStep;
+    if (h < -maxStep) h = -maxStep;
+  }
+  let k1 = f(t, y);
+  let steps = 0;
+  while ((forward ? t < tf : t > tf) && steps < maxSteps) {
+    steps++;
+    if (forward ? (t + h > tf) : (t + h < tf)) h = tf - t;
+    const k2 = f(t + h*0.5,  y + h*(k1*0.5));
+    const k3 = f(t + h*0.75, y + h*(k2*0.75));
+    const y3 = y + h*(k1*(2/9) + k2*(1/3) + k3*(4/9));
+    const k4 = f(t + h, y3);
+    const err = h*(k1*(-5/72) + k2*(1/12) + k3*(1/9) - k4*(1/8));
+    const ay = Math.abs(y), ay3 = Math.abs(y3);
+    const scale = atol + rtol * (ay > ay3 ? ay : ay3);
+    const normerr = scale > 0 ? Math.abs(err)/scale : 0;
+    if (normerr <= 1) {
+      for (let j = 1; j <= refine; j++) {
+        const th = j / refine;
+        const ti = t + h * th;
+        const yi = j === refine ? y3 : _odeHermite(y, y3, k1, k4, h, th);
+        T.push(ti); Y.push(yi);
+      }
+      t += h; y = y3; k1 = k4;
+    }
+    let fac = normerr === 0 ? 5 : 0.9 * Math.pow(normerr, -1/3);
+    if (fac < 0.2) fac = 0.2;
+    if (fac > 5)   fac = 5;
+    h *= fac;
+    if (maxStep > 0) {
+      if (h >  maxStep) h =  maxStep;
+      if (h < -maxStep) h = -maxStep;
+    }
+  }
+  return { T, Y };
+}
+
+function _odeCompute(kind: number, f: OdeRhs, tspan: any, y0: number,
+                     rtol = 1e-3, atol = 1e-6,
+                     maxStep = 0, initStep = 0,
+                     refine = -1): void {
+  if (refine < 0) refine = kind === 45 ? 4 : 1;
+  const ts = asArray(tspan).data;
+  const t0 = ts.length >= 2 ? +ts[0] : 0;
+  const tf = ts.length >= 2 ? +ts[ts.length - 1] : 0;
+  const key = `${kind}|${t0}|${tf}|${y0}|${rtol}|${atol}|${maxStep}|${initStep}|${refine}|${(f as any).name ?? ""}`;
+  if (_odeCache && _odeCache.key === key) return;
+  const { T, Y } = kind === 45
+      ? _odeSolveDp45(f, t0, tf, y0, rtol, atol, maxStep, initStep, refine)
+      : _odeSolveBs23(f, t0, tf, y0, rtol, atol, maxStep, initStep, refine);
+  const Tarr = new Float64Array(T);
+  const Yarr = new Float64Array(Y);
+  _odeCache = {
+    key,
+    t: new NDArray(Tarr, [T.length, 1]),
+    y: new NDArray(Yarr, [Y.length, 1]),
+  };
+}
+
+function _odeOptsResolve(opts: any, defaultRefine: number)
+    : { rtol: number; atol: number; maxStep: number; initStep: number;
+        refine: number } {
+  let rtol = 1e-3, atol = 1e-6;
+  let maxStep = 0, initStep = 0;
+  let refine = defaultRefine;
+  if (opts && typeof opts === "object") {
+    if (typeof opts.RelTol      === "number") rtol     = opts.RelTol;
+    if (typeof opts.AbsTol      === "number") atol     = opts.AbsTol;
+    if (typeof opts.MaxStep     === "number") maxStep  = opts.MaxStep;
+    if (typeof opts.InitialStep === "number") initStep = opts.InitialStep;
+    if (typeof opts.Refine      === "number" && opts.Refine >= 1) {
+      refine = opts.Refine | 0;
+    }
+  }
+  return { rtol, atol, maxStep, initStep, refine };
+}
+
+function _cloneCol(src: NDArray): NDArray {
+  const buf = new Float64Array(src.data.length);
+  buf.set(src.data);
+  return new NDArray(buf, src.shape.slice());
+}
+
+export function ode45_t(f: OdeRhs, tspan: any, y0: number): NDArray {
+  _odeCompute(45, f, tspan, +y0);
+  return _cloneCol(_odeCache!.t);
+}
+export function ode45_y(f: OdeRhs, tspan: any, y0: number): NDArray {
+  _odeCompute(45, f, tspan, +y0);
+  return _cloneCol(_odeCache!.y);
+}
+export function ode23_t(f: OdeRhs, tspan: any, y0: number): NDArray {
+  _odeCompute(23, f, tspan, +y0);
+  return _cloneCol(_odeCache!.t);
+}
+export function ode23_y(f: OdeRhs, tspan: any, y0: number): NDArray {
+  _odeCompute(23, f, tspan, +y0);
+  return _cloneCol(_odeCache!.y);
+}
+
+export function ode45_t_opts(f: OdeRhs, tspan: any, y0: number, opts: any): NDArray {
+  const { rtol, atol, maxStep, initStep, refine } = _odeOptsResolve(opts, 4);
+  _odeCompute(45, f, tspan, +y0, rtol, atol, maxStep, initStep, refine);
+  return _cloneCol(_odeCache!.t);
+}
+export function ode45_y_opts(f: OdeRhs, tspan: any, y0: number, opts: any): NDArray {
+  const { rtol, atol, maxStep, initStep, refine } = _odeOptsResolve(opts, 4);
+  _odeCompute(45, f, tspan, +y0, rtol, atol, maxStep, initStep, refine);
+  return _cloneCol(_odeCache!.y);
+}
+export function ode23_t_opts(f: OdeRhs, tspan: any, y0: number, opts: any): NDArray {
+  const { rtol, atol, maxStep, initStep, refine } = _odeOptsResolve(opts, 1);
+  _odeCompute(23, f, tspan, +y0, rtol, atol, maxStep, initStep, refine);
+  return _cloneCol(_odeCache!.t);
+}
+export function ode23_y_opts(f: OdeRhs, tspan: any, y0: number, opts: any): NDArray {
+  const { rtol, atol, maxStep, initStep, refine } = _odeOptsResolve(opts, 1);
+  _odeCompute(23, f, tspan, +y0, rtol, atol, maxStep, initStep, refine);
+  return _cloneCol(_odeCache!.y);
+}
+
 // Numpy namespace re-export — `import * as np from "./matlab_runtime"`
 // won't pick this up, but `import { np } from "./matlab_runtime"` will.
 // The TypeScript emitter prefers the explicit `import * as np from

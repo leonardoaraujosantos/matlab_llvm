@@ -2094,6 +2094,9 @@ void Lowerer::lowerStmt(const Stmt &St) {
           else if ((CN == "eig" || CN == "qr" || CN == "lu" ||
                     CN == "svd") && A.LHS.size() >= 2)
             Rtys.assign(A.LHS.size(), PtrTy);
+          /* [t, y] = ode45(@f, tspan, y0) / ode23 — both column matrices. */
+          else if ((CN == "ode45" || CN == "ode23") && A.LHS.size() == 2)
+            Rtys.assign(A.LHS.size(), PtrTy);
           /* [row, col] = ind2sub(sz, i) — scalar f64s. */
           else if (CN == "ind2sub" && A.LHS.size() == 2)
             Rtys.assign(A.LHS.size(), F64);

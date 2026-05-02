@@ -173,6 +173,43 @@ matlab_mat *matlab_trapz_xy(matlab_mat *x, matlab_mat *y);
 matlab_mat *matlab_cumtrapz(matlab_mat *y);
 matlab_mat *matlab_gradient(matlab_mat *f);
 
+/* Initial-value ODE solvers — adaptive single-step methods on scalar y.
+ * Both ode45 (Dormand–Prince 5(4)) and ode23 (Bogacki–Shampine 3(2))
+ * follow the MATLAB call shape:
+ *   [t, y] = ode45(@f, [t0 tf], y0)        % scalar y0 only (Phase 1)
+ * `f` is a function handle with signature `double f(double t, double y)`.
+ * `tspan` is a 1×2 row vector with the integration endpoints; `y0` is a
+ * scalar initial condition. Output `t` and `y` are column vectors of the
+ * same length holding the integration grid.
+ *
+ * Defaults match MATLAB: rtol = 1e-3, atol = 1e-6, max-steps = 100000.
+ * Vector y is a planned follow-up (would change the handle ABI).
+ *
+ * Each [t,y] = ode45(...) site is split by the lowering pass into two
+ * single-output runtime calls (matlab_ode45_t / matlab_ode45_y). The
+ * implementation memoises the most-recent (handle, tspan, y0) call so
+ * the second leg returns the cached y without re-integrating. */
+typedef double (*matlab_ode_rhs)(double t, double y);
+matlab_mat *matlab_ode45_t(matlab_ode_rhs f, matlab_mat *tspan, double y0);
+matlab_mat *matlab_ode45_y(matlab_ode_rhs f, matlab_mat *tspan, double y0);
+matlab_mat *matlab_ode23_t(matlab_ode_rhs f, matlab_mat *tspan, double y0);
+matlab_mat *matlab_ode23_y(matlab_ode_rhs f, matlab_mat *tspan, double y0);
+
+/* 4-arg form: `[t,y] = ode45(@f, tspan, y0, opts)`. `opts` is a struct
+ * built MATLAB-style (`opts.RelTol = 1e-6; opts.AbsTol = 1e-9;`); a
+ * subset of MATLAB's odeset is honoured: RelTol, AbsTol, MaxStep,
+ * InitialStep, Refine. Missing fields fall back to the 3-arg defaults
+ * (1e-3 / 1e-6) and the built-in step heuristics. Default Refine is
+ * 4 for ode45, 1 for ode23 (matching MATLAB). */
+matlab_mat *matlab_ode45_t_opts(matlab_ode_rhs f, matlab_mat *tspan,
+                                 double y0, matlab_struct *opts);
+matlab_mat *matlab_ode45_y_opts(matlab_ode_rhs f, matlab_mat *tspan,
+                                 double y0, matlab_struct *opts);
+matlab_mat *matlab_ode23_t_opts(matlab_ode_rhs f, matlab_mat *tspan,
+                                 double y0, matlab_struct *opts);
+matlab_mat *matlab_ode23_y_opts(matlab_ode_rhs f, matlab_mat *tspan,
+                                 double y0, matlab_struct *opts);
+
 /* DSP windows. n must be >= 1; returns a column vector of length n. */
 matlab_mat *matlab_hamming(double n);
 matlab_mat *matlab_hann(double n);

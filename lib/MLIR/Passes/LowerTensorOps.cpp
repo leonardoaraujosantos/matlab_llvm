@@ -2546,6 +2546,59 @@ bool TensorLowering::rewriteBuiltinCalls() {
         continue;
       }
     }
+    /* [t, y] = ode45(@f, tspan, y0) / ode23: handle is a ptr (function
+     * pointer materialised by LowerAnonCalls or rewriteMakeHandle), tspan
+     * is a ptr (matrix), y0 is f64. Two single-output runtime entries
+     * (matlab_ode45_t / matlab_ode45_y) share a thread-local cache so the
+     * second call returns the paired column without re-integrating. */
+    if (NA && NA.getValue().getSExtValue() == 2 &&
+        Call->getNumOperands() == 3 && Call->getNumResults() == 2 &&
+        (Name == "ode45" || Name == "ode23") &&
+        Call->getOperand(0).getType() == PtrTy &&
+        Call->getOperand(1).getType() == PtrTy &&
+        Call->getOperand(2).getType() == F64) {
+      StringRef F0 = (Name == "ode45") ? StringRef("matlab_ode45_t")
+                                       : StringRef("matlab_ode23_t");
+      StringRef F1 = (Name == "ode45") ? StringRef("matlab_ode45_y")
+                                       : StringRef("matlab_ode23_y");
+      B.setInsertionPoint(Call);
+      auto Fn0 = rt(F0, PtrTy, {PtrTy, PtrTy, F64});
+      auto Fn1 = rt(F1, PtrTy, {PtrTy, PtrTy, F64});
+      ValueRange Args = Call->getOperands();
+      auto C0 = LLVM::CallOp::create(B, Call->getLoc(), Fn0, Args);
+      auto C1 = LLVM::CallOp::create(B, Call->getLoc(), Fn1, Args);
+      Call->getResult(0).replaceAllUsesWith(C0.getResult());
+      Call->getResult(1).replaceAllUsesWith(C1.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+    /* 4-arg form: `[t,y] = ode45(@f, tspan, y0, opts)` where opts is a
+     * struct (ptr) carrying RelTol / AbsTol. Routes to the _opts runtime
+     * entries which dereference the struct and override the defaults. */
+    if (NA && NA.getValue().getSExtValue() == 2 &&
+        Call->getNumOperands() == 4 && Call->getNumResults() == 2 &&
+        (Name == "ode45" || Name == "ode23") &&
+        Call->getOperand(0).getType() == PtrTy &&
+        Call->getOperand(1).getType() == PtrTy &&
+        Call->getOperand(2).getType() == F64 &&
+        Call->getOperand(3).getType() == PtrTy) {
+      StringRef F0 = (Name == "ode45") ? StringRef("matlab_ode45_t_opts")
+                                       : StringRef("matlab_ode23_t_opts");
+      StringRef F1 = (Name == "ode45") ? StringRef("matlab_ode45_y_opts")
+                                       : StringRef("matlab_ode23_y_opts");
+      B.setInsertionPoint(Call);
+      auto Fn0 = rt(F0, PtrTy, {PtrTy, PtrTy, F64, PtrTy});
+      auto Fn1 = rt(F1, PtrTy, {PtrTy, PtrTy, F64, PtrTy});
+      ValueRange Args = Call->getOperands();
+      auto C0 = LLVM::CallOp::create(B, Call->getLoc(), Fn0, Args);
+      auto C1 = LLVM::CallOp::create(B, Call->getLoc(), Fn1, Args);
+      Call->getResult(0).replaceAllUsesWith(C0.getResult());
+      Call->getResult(1).replaceAllUsesWith(C1.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
     if (NA && NA.getValue().getSExtValue() == 2 &&
         Call->getNumOperands() == 1 && Call->getNumResults() == 2 &&
         Call->getOperand(0).getType() == PtrTy) {
