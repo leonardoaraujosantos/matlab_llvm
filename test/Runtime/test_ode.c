@@ -117,6 +117,21 @@ static void test_ode45_opts_maxstep(void) {
     RT_CHECK(n_cap > 5 * n_def, "MaxStep forces more output points");
 }
 
+/* ---- user-specified output grid ---- */
+static void test_ode45_user_grid(void) {
+    double grid[6] = {0.0, 1.0, 2.0, 3.0, 4.0, 5.0};
+    matlab_mat *ts = matlab_mat_from_buf(grid, 1.0, 6.0);
+    matlab_mat *T = matlab_ode45_t(rhs_decay, ts, 1.0);
+    matlab_mat *Y = matlab_ode45_y(rhs_decay, ts, 1.0);
+    RT_CHECK(rt_rows(T) == 6, "user-grid t length matches input");
+    RT_CHECK(rt_rows(Y) == 6, "user-grid y length matches input");
+    for (int i = 0; i < 6; ++i)
+        RT_NEAR(rt_data(T)[i], grid[i], 1e-12, "user-grid t entry exact");
+    RT_NEAR(rt_data(Y)[0], 1.0, 1e-12, "y(0) seed");
+    RT_NEAR(rt_data(Y)[3], 0.0497870684, 1e-3, "y(3) ~ exp(-3)");
+    RT_NEAR(rt_data(Y)[5], 0.00673794700, 1e-4, "y(5) ~ exp(-5)");
+}
+
 /* ---- cache hit: paired _t / _y same args ---- */
 static void test_ode45_cache(void) {
     matlab_mat *ts = mk_tspan(0.0, 1.0);
@@ -144,6 +159,7 @@ int main(void) {
     RT_RUN(test_ode23_forward);
     RT_RUN(test_ode45_opts_tol);
     RT_RUN(test_ode45_opts_maxstep);
+    RT_RUN(test_ode45_user_grid);
     RT_RUN(test_ode45_cache);
     RT_DONE();
 }

@@ -2262,11 +2262,18 @@ def _ode_hermite(y, y1, k, k1, h, th):
             + h * (th3 - 2*th2 + th) * k
             + h * (th3 - th2)        * k1)
 
-def _ode_solve_dp45(f, t0, tf, y0, rtol=1e-3, atol=1e-6,
+def _ode_solve_dp45(f, targets, y0, rtol=1e-3, atol=1e-6,
                     max_step=0.0, init_step=0.0, refine=4):
     max_steps = 100000
     if refine < 1: refine = 1
+    n_targets = len(targets)
+    if n_targets < 2:
+        return [], []
+    t0 = float(targets[0])
+    tf = float(targets[n_targets - 1])
+    user_grid = (n_targets > 2)
     T = [t0]; Y = [y0]
+    next_tgt = 1
     t, y = t0, y0
     span = tf - t0
     if init_step > 0.0:
@@ -2301,16 +2308,29 @@ def _ode_solve_dp45(f, t0, tf, y0, rtol=1e-3, atol=1e-6,
         scale = atol + rtol * (abs(y) if abs(y) > abs(y5) else abs(y5))
         normerr = abs(err)/scale if scale > 0 else 0.0
         if normerr <= 1.0:
-            j = 1
-            while j <= refine:
-                th = j / refine
-                ti = t + h * th
-                yi = y5 if j == refine else _ode_hermite(y, y5, k1, k7, h, th)
-                T.append(ti); Y.append(yi)
-                j += 1
+            if user_grid:
+                while next_tgt < n_targets:
+                    tt = float(targets[next_tgt])
+                    in_range = (tt <= t + h) if forward else (tt >= t + h)
+                    if not in_range: break
+                    th = 0.0 if h == 0.0 else (tt - t) / h
+                    yi = y5 if next_tgt == n_targets - 1 \
+                            else _ode_hermite(y, y5, k1, k7, h, th)
+                    T.append(tt); Y.append(yi)
+                    next_tgt += 1
+            else:
+                j = 1
+                while j <= refine:
+                    th = j / refine
+                    ti = t + h * th
+                    yi = y5 if j == refine else _ode_hermite(y, y5, k1, k7, h, th)
+                    T.append(ti); Y.append(yi)
+                    j += 1
             t += h
             y = y5
             k1 = k7
+            if user_grid and next_tgt >= n_targets:
+                break
         fac = 5.0 if normerr == 0.0 else 0.9 * (normerr ** (-1/5))
         if fac < 0.2: fac = 0.2
         if fac > 5.0: fac = 5.0
@@ -2320,11 +2340,18 @@ def _ode_solve_dp45(f, t0, tf, y0, rtol=1e-3, atol=1e-6,
             if h < (0.0 - max_step): h = 0.0 - max_step
     return T, Y
 
-def _ode_solve_bs23(f, t0, tf, y0, rtol=1e-3, atol=1e-6,
+def _ode_solve_bs23(f, targets, y0, rtol=1e-3, atol=1e-6,
                     max_step=0.0, init_step=0.0, refine=1):
     max_steps = 100000
     if refine < 1: refine = 1
+    n_targets = len(targets)
+    if n_targets < 2:
+        return [], []
+    t0 = float(targets[0])
+    tf = float(targets[n_targets - 1])
+    user_grid = (n_targets > 2)
     T = [t0]; Y = [y0]
+    next_tgt = 1
     t, y = t0, y0
     span = tf - t0
     if init_step > 0.0:
@@ -2351,16 +2378,29 @@ def _ode_solve_bs23(f, t0, tf, y0, rtol=1e-3, atol=1e-6,
         scale = atol + rtol * (abs(y) if abs(y) > abs(y3) else abs(y3))
         normerr = abs(err)/scale if scale > 0 else 0.0
         if normerr <= 1.0:
-            j = 1
-            while j <= refine:
-                th = j / refine
-                ti = t + h * th
-                yi = y3 if j == refine else _ode_hermite(y, y3, k1, k4, h, th)
-                T.append(ti); Y.append(yi)
-                j += 1
+            if user_grid:
+                while next_tgt < n_targets:
+                    tt = float(targets[next_tgt])
+                    in_range = (tt <= t + h) if forward else (tt >= t + h)
+                    if not in_range: break
+                    th = 0.0 if h == 0.0 else (tt - t) / h
+                    yi = y3 if next_tgt == n_targets - 1 \
+                            else _ode_hermite(y, y3, k1, k4, h, th)
+                    T.append(tt); Y.append(yi)
+                    next_tgt += 1
+            else:
+                j = 1
+                while j <= refine:
+                    th = j / refine
+                    ti = t + h * th
+                    yi = y3 if j == refine else _ode_hermite(y, y3, k1, k4, h, th)
+                    T.append(ti); Y.append(yi)
+                    j += 1
             t += h
             y = y3
             k1 = k4
+            if user_grid and next_tgt >= n_targets:
+                break
         fac = 5.0 if normerr == 0.0 else 0.9 * (normerr ** (-1/3))
         if fac < 0.2: fac = 0.2
         if fac > 5.0: fac = 5.0
@@ -2375,17 +2415,14 @@ def _ode_compute(kind, f, tspan, y0, rtol=1e-3, atol=1e-6,
     if refine is None:
         refine = 4 if kind == 45 else 1
     ts = np.asarray(tspan, dtype=float).ravel()
-    if ts.size < 2:
-        t0, tf = 0.0, 0.0
-    else:
-        t0, tf = float(ts[0]), float(ts[-1])
-    key = (kind, id(f), float(t0), float(tf), float(y0),
+    targets = ts.tolist()
+    key = (kind, id(f), tuple(targets), float(y0),
            float(rtol), float(atol), float(max_step), float(init_step),
            int(refine))
     if _ode_cache["key"] == key:
         return
     solver = _ode_solve_dp45 if kind == 45 else _ode_solve_bs23
-    T, Y = solver(f, t0, tf, y0, rtol, atol, max_step, init_step, refine)
+    T, Y = solver(f, targets, y0, rtol, atol, max_step, init_step, refine)
     _ode_cache["key"] = key
     _ode_cache["t"] = np.asarray(T, dtype=float).reshape((-1, 1))
     _ode_cache["y"] = np.asarray(Y, dtype=float).reshape((-1, 1))

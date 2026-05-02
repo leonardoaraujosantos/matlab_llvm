@@ -178,9 +178,13 @@ matlab_mat *matlab_gradient(matlab_mat *f);
  * follow the MATLAB call shape:
  *   [t, y] = ode45(@f, [t0 tf], y0)        % scalar y0 only (Phase 1)
  * `f` is a function handle with signature `double f(double t, double y)`.
- * `tspan` is a 1×2 row vector with the integration endpoints; `y0` is a
- * scalar initial condition. Output `t` and `y` are column vectors of the
- * same length holding the integration grid.
+ * `tspan` is a row vector with at least the two integration endpoints;
+ * `y0` is a scalar initial condition. Output `t` and `y` are column
+ * vectors of the same length.
+ *
+ * If tspan has more than two elements (`[t0 t1 t2 ... tN]`) the
+ * integrator emits y at *exactly* those times via cubic-Hermite dense
+ * output, matching MATLAB. The Refine option is ignored in this mode.
  *
  * Defaults match MATLAB: rtol = 1e-3, atol = 1e-6, max-steps = 100000.
  * Vector y is a planned follow-up (would change the handle ABI).

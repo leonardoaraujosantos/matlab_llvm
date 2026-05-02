@@ -6594,22 +6594,38 @@ static inline double ode_hermite(double y, double y1, double k, double k1,
          + h * (th3 - th2)          * k1;
 }
 
-static void rk_solve_dp45(ode_rhs_t f, double t0, double tf, double y0,
+static void rk_solve_dp45(ode_rhs_t f,
+                           const double *targets, int64_t n_targets,
+                           double y0,
                            double rtol, double atol,
                            double max_step, double init_step, int refine,
                            double **T, double **Y, int64_t *N) {
     const int max_steps = 100000;
     /* refine = 1 → only the step endpoint is emitted; refine = N → N-1
      * Hermite-interpolated interior samples plus the endpoint. MATLAB's
-     * ode45 default is 4, ode23's default is 1. */
+     * ode45 default is 4, ode23's default is 1.
+     *
+     * When n_targets > 2 we ignore Refine and emit at exactly the
+     * supplied target times — matches MATLAB's behaviour for
+     * `tspan = [t0 t1 t2 ... tN]`. The integrator still chooses its
+     * own adaptive step; targets are filled in by Hermite from the
+     * accepted-step bracket. */
     if (refine < 1) refine = 1;
-    int64_t cap = 256;
+    if (n_targets < 2) { *T = NULL; *Y = NULL; *N = 0; return; }
+    double t0 = targets[0];
+    double tf = targets[n_targets - 1];
+    int user_grid = (n_targets > 2);
+
+    int64_t cap = user_grid ? n_targets : 256;
     double *Tb = (double *)malloc((size_t)cap * sizeof(double));
     double *Yb = (double *)malloc((size_t)cap * sizeof(double));
     int64_t n = 0;
 
     double t = t0, y = y0;
     ode_push(&Tb, &Yb, &n, &cap, t, y);
+    /* In user-grid mode the seed at targets[0] is already emitted; the
+     * next target to fill is index 1. */
+    int64_t next_tgt = 1;
 
     /* Initial step: small fraction of the interval, signed so backward
      * integration also terminates. Zero span just emits the seed point.
@@ -6672,21 +6688,42 @@ static void rk_solve_dp45(ode_rhs_t f, double t0, double tf, double y0,
         double normerr = (scale > 0) ? fabs(err) / scale : 0.0;
 
         if (normerr <= 1.0) {
-            /* Emit refine-1 interior samples then the step endpoint via
-             * cubic Hermite. y_old/k_old are pre-step values; (y5, k7)
-             * are the step-end values used as the right-hand Hermite
-             * anchor. */
-            for (int j = 1; j <= refine; ++j) {
-                double th = (double)j / (double)refine;
-                double ti = t + h * th;
-                double yi = (j == refine)
-                    ? y5
-                    : ode_hermite(y, y5, k1, k7, h, th);
-                ode_push(&Tb, &Yb, &n, &cap, ti, yi);
+            if (user_grid) {
+                /* Emit at every target time that fell inside this step.
+                 * The bracket is [t, t+h] for forward, [t+h, t] for
+                 * backward; the targets array is monotonic in the
+                 * integration direction. The final target is the step
+                 * endpoint by construction (we clamped h above), so we
+                 * use y5 directly to dodge round-off. */
+                while (next_tgt < n_targets) {
+                    double tt = targets[next_tgt];
+                    int in_range = forward ? (tt <= t + h) : (tt >= t + h);
+                    if (!in_range) break;
+                    double th = (h == 0.0) ? 0.0 : (tt - t) / h;
+                    double yi = (next_tgt == n_targets - 1)
+                        ? y5
+                        : ode_hermite(y, y5, k1, k7, h, th);
+                    ode_push(&Tb, &Yb, &n, &cap, tt, yi);
+                    ++next_tgt;
+                }
+            } else {
+                /* Emit refine-1 interior samples then the step endpoint
+                 * via cubic Hermite. y/k1 are pre-step values; (y5, k7)
+                 * are the step-end values used as the right-hand Hermite
+                 * anchor. */
+                for (int j = 1; j <= refine; ++j) {
+                    double th = (double)j / (double)refine;
+                    double ti = t + h * th;
+                    double yi = (j == refine)
+                        ? y5
+                        : ode_hermite(y, y5, k1, k7, h, th);
+                    ode_push(&Tb, &Yb, &n, &cap, ti, yi);
+                }
             }
             t += h;
             y  = y5;
             k1 = k7;                                     /* FSAL */
+            if (user_grid && next_tgt >= n_targets) break;
         }
 
         double fac = (normerr == 0.0) ? 5.0
@@ -6703,19 +6740,27 @@ static void rk_solve_dp45(ode_rhs_t f, double t0, double tf, double y0,
     *T = Tb; *Y = Yb; *N = n;
 }
 
-static void rk_solve_bs23(ode_rhs_t f, double t0, double tf, double y0,
+static void rk_solve_bs23(ode_rhs_t f,
+                           const double *targets, int64_t n_targets,
+                           double y0,
                            double rtol, double atol,
                            double max_step, double init_step, int refine,
                            double **T, double **Y, int64_t *N) {
     const int max_steps = 100000;
     if (refine < 1) refine = 1;
-    int64_t cap = 256;
+    if (n_targets < 2) { *T = NULL; *Y = NULL; *N = 0; return; }
+    double t0 = targets[0];
+    double tf = targets[n_targets - 1];
+    int user_grid = (n_targets > 2);
+
+    int64_t cap = user_grid ? n_targets : 256;
     double *Tb = (double *)malloc((size_t)cap * sizeof(double));
     double *Yb = (double *)malloc((size_t)cap * sizeof(double));
     int64_t n = 0;
 
     double t = t0, y = y0;
     ode_push(&Tb, &Yb, &n, &cap, t, y);
+    int64_t next_tgt = 1;
 
     double span = tf - t0;
     double h = (init_step > 0.0) ? (span >= 0.0 ? init_step : -init_step)
@@ -6755,17 +6800,32 @@ static void rk_solve_bs23(ode_rhs_t f, double t0, double tf, double y0,
         double normerr = (scale > 0) ? fabs(err) / scale : 0.0;
 
         if (normerr <= 1.0) {
-            for (int j = 1; j <= refine; ++j) {
-                double th = (double)j / (double)refine;
-                double ti = t + h * th;
-                double yi = (j == refine)
-                    ? y3
-                    : ode_hermite(y, y3, k1, k4, h, th);
-                ode_push(&Tb, &Yb, &n, &cap, ti, yi);
+            if (user_grid) {
+                while (next_tgt < n_targets) {
+                    double tt = targets[next_tgt];
+                    int in_range = forward ? (tt <= t + h) : (tt >= t + h);
+                    if (!in_range) break;
+                    double th = (h == 0.0) ? 0.0 : (tt - t) / h;
+                    double yi = (next_tgt == n_targets - 1)
+                        ? y3
+                        : ode_hermite(y, y3, k1, k4, h, th);
+                    ode_push(&Tb, &Yb, &n, &cap, tt, yi);
+                    ++next_tgt;
+                }
+            } else {
+                for (int j = 1; j <= refine; ++j) {
+                    double th = (double)j / (double)refine;
+                    double ti = t + h * th;
+                    double yi = (j == refine)
+                        ? y3
+                        : ode_hermite(y, y3, k1, k4, h, th);
+                    ode_push(&Tb, &Yb, &n, &cap, ti, yi);
+                }
             }
             t += h;
             y  = y3;
             k1 = k4;                                     /* FSAL */
+            if (user_grid && next_tgt >= n_targets) break;
         }
 
         double fac = (normerr == 0.0) ? 5.0
@@ -6780,17 +6840,6 @@ static void rk_solve_bs23(ode_rhs_t f, double t0, double tf, double y0,
     }
 
     *T = Tb; *Y = Yb; *N = n;
-}
-
-/* Resolve tspan into (t0, tf). Accepts a 1×2 row, 2×1 column, or any
- * 2-element vector. Returns 1 on success. */
-static int ode_tspan(matlab_mat *tspan, double *t0, double *tf) {
-    if (!tspan) return 0;
-    int64_t n = tspan->rows * tspan->cols;
-    if (n < 2) return 0;
-    *t0 = tspan->data[0];
-    *tf = tspan->data[n - 1];
-    return 1;
 }
 
 /* Cache-aware dispatch: integrate once per (kind, fp, tspan, y0, opts)
@@ -6826,19 +6875,19 @@ static void ode_compute(int kind, ode_rhs_t f, matlab_mat *tspan, double y0,
         ode_cache_.valid = 0;
     }
 
-    double t0 = 0.0, tf = 0.0;
-    if (!f || !ode_tspan(tspan, &t0, &tf)) {
+    int64_t n_tgt = tspan ? tspan->rows * tspan->cols : 0;
+    if (!f || n_tgt < 2 || !tspan->data) {
         ode_cache_.t = mat_alloc(0, 1);
         ode_cache_.y = mat_alloc(0, 1);
     } else {
         double *Tb = NULL, *Yb = NULL;
         int64_t n = 0;
-        if (kind == 45) rk_solve_dp45(f, t0, tf, y0, rtol, atol,
-                                       max_step, init_step, refine,
-                                       &Tb, &Yb, &n);
-        else            rk_solve_bs23(f, t0, tf, y0, rtol, atol,
-                                       max_step, init_step, refine,
-                                       &Tb, &Yb, &n);
+        if (kind == 45) rk_solve_dp45(f, tspan->data, n_tgt, y0,
+                                       rtol, atol, max_step, init_step,
+                                       refine, &Tb, &Yb, &n);
+        else            rk_solve_bs23(f, tspan->data, n_tgt, y0,
+                                       rtol, atol, max_step, init_step,
+                                       refine, &Tb, &Yb, &n);
         ode_buffers_to_mats(Tb, Yb, n, &ode_cache_.t, &ode_cache_.y);
         free(Tb); free(Yb);
     }

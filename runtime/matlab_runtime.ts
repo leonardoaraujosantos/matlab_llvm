@@ -2610,14 +2610,20 @@ function _odeHermite(y: number, y1: number, k: number, k1: number,
        + h * (th3 - th2)        * k1;
 }
 
-function _odeSolveDp45(f: OdeRhs, t0: number, tf: number, y0: number,
+function _odeSolveDp45(f: OdeRhs, targets: number[], y0: number,
                        rtol = 1e-3, atol = 1e-6,
                        maxStep = 0, initStep = 0, refine = 4)
     : { T: number[]; Y: number[] } {
   const maxSteps = 100000;
   if (refine < 1) refine = 1;
+  const nTargets = targets.length;
+  if (nTargets < 2) return { T: [], Y: [] };
+  const t0 = +targets[0];
+  const tf = +targets[nTargets - 1];
+  const userGrid = nTargets > 2;
   const T: number[] = [t0];
   const Y: number[] = [y0];
+  let nextTgt = 1;
   let t = t0, y = y0;
   const span = tf - t0;
   let h = initStep > 0 ? (span >= 0 ? initStep : -initStep) : span * 0.01;
@@ -2649,13 +2655,28 @@ function _odeSolveDp45(f: OdeRhs, t0: number, tf: number, y0: number,
     const scale = atol + rtol * (ay > ay5 ? ay : ay5);
     const normerr = scale > 0 ? Math.abs(err)/scale : 0;
     if (normerr <= 1) {
-      for (let j = 1; j <= refine; j++) {
-        const th = j / refine;
-        const ti = t + h * th;
-        const yi = j === refine ? y5 : _odeHermite(y, y5, k1, k7, h, th);
-        T.push(ti); Y.push(yi);
+      if (userGrid) {
+        while (nextTgt < nTargets) {
+          const tt = +targets[nextTgt];
+          const inRange = forward ? (tt <= t + h) : (tt >= t + h);
+          if (!inRange) break;
+          const th = h === 0 ? 0 : (tt - t) / h;
+          const yi = nextTgt === nTargets - 1
+              ? y5
+              : _odeHermite(y, y5, k1, k7, h, th);
+          T.push(tt); Y.push(yi);
+          nextTgt++;
+        }
+      } else {
+        for (let j = 1; j <= refine; j++) {
+          const th = j / refine;
+          const ti = t + h * th;
+          const yi = j === refine ? y5 : _odeHermite(y, y5, k1, k7, h, th);
+          T.push(ti); Y.push(yi);
+        }
       }
       t += h; y = y5; k1 = k7;
+      if (userGrid && nextTgt >= nTargets) break;
     }
     let fac = normerr === 0 ? 5 : 0.9 * Math.pow(normerr, -1/5);
     if (fac < 0.2) fac = 0.2;
@@ -2669,14 +2690,20 @@ function _odeSolveDp45(f: OdeRhs, t0: number, tf: number, y0: number,
   return { T, Y };
 }
 
-function _odeSolveBs23(f: OdeRhs, t0: number, tf: number, y0: number,
+function _odeSolveBs23(f: OdeRhs, targets: number[], y0: number,
                        rtol = 1e-3, atol = 1e-6,
                        maxStep = 0, initStep = 0, refine = 1)
     : { T: number[]; Y: number[] } {
   const maxSteps = 100000;
   if (refine < 1) refine = 1;
+  const nTargets = targets.length;
+  if (nTargets < 2) return { T: [], Y: [] };
+  const t0 = +targets[0];
+  const tf = +targets[nTargets - 1];
+  const userGrid = nTargets > 2;
   const T: number[] = [t0];
   const Y: number[] = [y0];
+  let nextTgt = 1;
   let t = t0, y = y0;
   const span = tf - t0;
   let h = initStep > 0 ? (span >= 0 ? initStep : -initStep) : span * 0.01;
@@ -2700,13 +2727,28 @@ function _odeSolveBs23(f: OdeRhs, t0: number, tf: number, y0: number,
     const scale = atol + rtol * (ay > ay3 ? ay : ay3);
     const normerr = scale > 0 ? Math.abs(err)/scale : 0;
     if (normerr <= 1) {
-      for (let j = 1; j <= refine; j++) {
-        const th = j / refine;
-        const ti = t + h * th;
-        const yi = j === refine ? y3 : _odeHermite(y, y3, k1, k4, h, th);
-        T.push(ti); Y.push(yi);
+      if (userGrid) {
+        while (nextTgt < nTargets) {
+          const tt = +targets[nextTgt];
+          const inRange = forward ? (tt <= t + h) : (tt >= t + h);
+          if (!inRange) break;
+          const th = h === 0 ? 0 : (tt - t) / h;
+          const yi = nextTgt === nTargets - 1
+              ? y3
+              : _odeHermite(y, y3, k1, k4, h, th);
+          T.push(tt); Y.push(yi);
+          nextTgt++;
+        }
+      } else {
+        for (let j = 1; j <= refine; j++) {
+          const th = j / refine;
+          const ti = t + h * th;
+          const yi = j === refine ? y3 : _odeHermite(y, y3, k1, k4, h, th);
+          T.push(ti); Y.push(yi);
+        }
       }
       t += h; y = y3; k1 = k4;
+      if (userGrid && nextTgt >= nTargets) break;
     }
     let fac = normerr === 0 ? 5 : 0.9 * Math.pow(normerr, -1/3);
     if (fac < 0.2) fac = 0.2;
@@ -2726,13 +2768,12 @@ function _odeCompute(kind: number, f: OdeRhs, tspan: any, y0: number,
                      refine = -1): void {
   if (refine < 0) refine = kind === 45 ? 4 : 1;
   const ts = asArray(tspan).data;
-  const t0 = ts.length >= 2 ? +ts[0] : 0;
-  const tf = ts.length >= 2 ? +ts[ts.length - 1] : 0;
-  const key = `${kind}|${t0}|${tf}|${y0}|${rtol}|${atol}|${maxStep}|${initStep}|${refine}|${(f as any).name ?? ""}`;
+  const targets: number[] = Array.from(ts);
+  const key = `${kind}|${targets.join(",")}|${y0}|${rtol}|${atol}|${maxStep}|${initStep}|${refine}|${(f as any).name ?? ""}`;
   if (_odeCache && _odeCache.key === key) return;
   const { T, Y } = kind === 45
-      ? _odeSolveDp45(f, t0, tf, y0, rtol, atol, maxStep, initStep, refine)
-      : _odeSolveBs23(f, t0, tf, y0, rtol, atol, maxStep, initStep, refine);
+      ? _odeSolveDp45(f, targets, y0, rtol, atol, maxStep, initStep, refine)
+      : _odeSolveBs23(f, targets, y0, rtol, atol, maxStep, initStep, refine);
   const Tarr = new Float64Array(T);
   const Yarr = new Float64Array(Y);
   _odeCache = {
