@@ -2264,11 +2264,13 @@ def _ode_hermite(y, y1, k, k1, h, th):
 
 def _ode_solve_dp45(f, targets, y0, rtol=1e-3, atol=1e-6,
                     max_step=0.0, init_step=0.0, refine=4):
+    """Returns (T, Y, n_acc, n_rej, n_fev). Stats fields zero on the
+    early-exit paths; non-zero on successful integration."""
     max_steps = 100000
     if refine < 1: refine = 1
     n_targets = len(targets)
     if n_targets < 2:
-        return [], []
+        return [], [], 0, 0, 0
     t0 = float(targets[0])
     tf = float(targets[n_targets - 1])
     user_grid = (n_targets > 2)
@@ -2281,12 +2283,13 @@ def _ode_solve_dp45(f, targets, y0, rtol=1e-3, atol=1e-6,
     else:
         h = span * 0.01
     if h == 0.0 or span == 0.0:
-        return T, Y
+        return T, Y, 0, 0, 0
     forward = h > 0
     if max_step > 0.0:
         if h >  max_step: h =  max_step
         if h < (0.0 - max_step): h = 0.0 - max_step
     k1 = f(t, y)
+    n_acc = 0; n_rej = 0; n_fev = 1
     steps = 0
     while ((t < tf) if forward else (t > tf)) and steps < max_steps:
         steps += 1
@@ -2303,11 +2306,13 @@ def _ode_solve_dp45(f, targets, y0, rtol=1e-3, atol=1e-6,
         y5 = y + h*(k1*(35/384) + k3*(500/1113) + k4*(125/192)
                     - k5*(2187/6784) + k6*(11/84))
         k7 = f(t + h, y5)
+        n_fev += 6
         err = h*(k1*(71/57600) - k3*(71/16695) + k4*(71/1920)
                  - k5*(17253/339200) + k6*(22/525) - k7*(1/40))
         scale = atol + rtol * (abs(y) if abs(y) > abs(y5) else abs(y5))
         normerr = abs(err)/scale if scale > 0 else 0.0
         if normerr <= 1.0:
+            n_acc += 1
             if user_grid:
                 while next_tgt < n_targets:
                     tt = float(targets[next_tgt])
@@ -2331,6 +2336,8 @@ def _ode_solve_dp45(f, targets, y0, rtol=1e-3, atol=1e-6,
             k1 = k7
             if user_grid and next_tgt >= n_targets:
                 break
+        else:
+            n_rej += 1
         fac = 5.0 if normerr == 0.0 else 0.9 * (normerr ** (-1/5))
         if fac < 0.2: fac = 0.2
         if fac > 5.0: fac = 5.0
@@ -2338,15 +2345,16 @@ def _ode_solve_dp45(f, targets, y0, rtol=1e-3, atol=1e-6,
         if max_step > 0.0:
             if h >  max_step: h =  max_step
             if h < (0.0 - max_step): h = 0.0 - max_step
-    return T, Y
+    return T, Y, n_acc, n_rej, n_fev
 
 def _ode_solve_bs23(f, targets, y0, rtol=1e-3, atol=1e-6,
                     max_step=0.0, init_step=0.0, refine=1):
+    """Returns (T, Y, n_acc, n_rej, n_fev)."""
     max_steps = 100000
     if refine < 1: refine = 1
     n_targets = len(targets)
     if n_targets < 2:
-        return [], []
+        return [], [], 0, 0, 0
     t0 = float(targets[0])
     tf = float(targets[n_targets - 1])
     user_grid = (n_targets > 2)
@@ -2359,12 +2367,13 @@ def _ode_solve_bs23(f, targets, y0, rtol=1e-3, atol=1e-6,
     else:
         h = span * 0.01
     if h == 0.0 or span == 0.0:
-        return T, Y
+        return T, Y, 0, 0, 0
     forward = h > 0
     if max_step > 0.0:
         if h >  max_step: h =  max_step
         if h < (0.0 - max_step): h = 0.0 - max_step
     k1 = f(t, y)
+    n_acc = 0; n_rej = 0; n_fev = 1
     steps = 0
     while ((t < tf) if forward else (t > tf)) and steps < max_steps:
         steps += 1
@@ -2374,10 +2383,12 @@ def _ode_solve_bs23(f, targets, y0, rtol=1e-3, atol=1e-6,
         k3 = f(t + h*0.75, y + h*(k2*0.75))
         y3 = y + h*(k1*(2/9) + k2*(1/3) + k3*(4/9))
         k4 = f(t + h, y3)
+        n_fev += 3
         err = h*(k1*(-5/72) + k2*(1/12) + k3*(1/9) - k4*(1/8))
         scale = atol + rtol * (abs(y) if abs(y) > abs(y3) else abs(y3))
         normerr = abs(err)/scale if scale > 0 else 0.0
         if normerr <= 1.0:
+            n_acc += 1
             if user_grid:
                 while next_tgt < n_targets:
                     tt = float(targets[next_tgt])
@@ -2401,6 +2412,8 @@ def _ode_solve_bs23(f, targets, y0, rtol=1e-3, atol=1e-6,
             k1 = k4
             if user_grid and next_tgt >= n_targets:
                 break
+        else:
+            n_rej += 1
         fac = 5.0 if normerr == 0.0 else 0.9 * (normerr ** (-1/3))
         if fac < 0.2: fac = 0.2
         if fac > 5.0: fac = 5.0
@@ -2408,32 +2421,40 @@ def _ode_solve_bs23(f, targets, y0, rtol=1e-3, atol=1e-6,
         if max_step > 0.0:
             if h >  max_step: h =  max_step
             if h < (0.0 - max_step): h = 0.0 - max_step
-    return T, Y
+    return T, Y, n_acc, n_rej, n_fev
 
 def _ode_compute(kind, f, tspan, y0, rtol=1e-3, atol=1e-6,
-                 max_step=0.0, init_step=0.0, refine=None):
+                 max_step=0.0, init_step=0.0, refine=None,
+                 print_stats=False):
     if refine is None:
         refine = 4 if kind == 45 else 1
     ts = np.asarray(tspan, dtype=float).ravel()
     targets = ts.tolist()
     key = (kind, id(f), tuple(targets), float(y0),
            float(rtol), float(atol), float(max_step), float(init_step),
-           int(refine))
+           int(refine), bool(print_stats))
     if _ode_cache["key"] == key:
         return
     solver = _ode_solve_dp45 if kind == 45 else _ode_solve_bs23
-    T, Y = solver(f, targets, y0, rtol, atol, max_step, init_step, refine)
+    T, Y, n_acc, n_rej, n_fev = solver(
+        f, targets, y0, rtol, atol, max_step, init_step, refine)
     _ode_cache["key"] = key
     _ode_cache["t"] = np.asarray(T, dtype=float).reshape((-1, 1))
     _ode_cache["y"] = np.asarray(Y, dtype=float).reshape((-1, 1))
+    if print_stats:
+        print(f"{n_acc} successful steps")
+        print(f"{n_rej} failed attempts")
+        print(f"{n_fev} function evaluations")
 
 def _ode_opts_resolve(opts, default_refine):
-    """Pull RelTol / AbsTol / MaxStep / InitialStep / Refine from a
-    struct-shaped dict; fall back to MATLAB defaults when fields are
-    missing or opts is None."""
+    """Pull RelTol / AbsTol / MaxStep / InitialStep / Refine / Stats from
+    a struct-shaped dict; fall back to MATLAB defaults when fields are
+    missing or opts is None. Stats is a numeric flag (non-zero = on);
+    see header doc for the MATLAB-string deviation."""
     rtol, atol = 1e-3, 1e-6
     max_step, init_step = 0.0, 0.0
     refine = default_refine
+    print_stats = False
     if opts is not None:
         try:
             if "RelTol"      in opts: rtol      = float(opts["RelTol"])
@@ -2443,9 +2464,11 @@ def _ode_opts_resolve(opts, default_refine):
             if "Refine"      in opts:
                 r = int(opts["Refine"])
                 if r >= 1: refine = r
+            if "Stats"       in opts:
+                print_stats = bool(float(opts["Stats"]))
         except (TypeError, KeyError):
             pass
-    return rtol, atol, max_step, init_step, refine
+    return rtol, atol, max_step, init_step, refine, print_stats
 
 def ode45_t(f, tspan, y0):
     _ode_compute(45, f, tspan, float(y0))
@@ -2464,27 +2487,27 @@ def ode23_y(f, tspan, y0):
     return _ode_cache["y"].copy()
 
 def ode45_t_opts(f, tspan, y0, opts):
-    rtol, atol, max_step, init_step, refine = _ode_opts_resolve(opts, 4)
+    rtol, atol, max_step, init_step, refine, ps = _ode_opts_resolve(opts, 4)
     _ode_compute(45, f, tspan, float(y0), rtol, atol,
-                 max_step, init_step, refine)
+                 max_step, init_step, refine, print_stats=ps)
     return _ode_cache["t"].copy()
 
 def ode45_y_opts(f, tspan, y0, opts):
-    rtol, atol, max_step, init_step, refine = _ode_opts_resolve(opts, 4)
+    rtol, atol, max_step, init_step, refine, ps = _ode_opts_resolve(opts, 4)
     _ode_compute(45, f, tspan, float(y0), rtol, atol,
-                 max_step, init_step, refine)
+                 max_step, init_step, refine, print_stats=ps)
     return _ode_cache["y"].copy()
 
 def ode23_t_opts(f, tspan, y0, opts):
-    rtol, atol, max_step, init_step, refine = _ode_opts_resolve(opts, 1)
+    rtol, atol, max_step, init_step, refine, ps = _ode_opts_resolve(opts, 1)
     _ode_compute(23, f, tspan, float(y0), rtol, atol,
-                 max_step, init_step, refine)
+                 max_step, init_step, refine, print_stats=ps)
     return _ode_cache["t"].copy()
 
 def ode23_y_opts(f, tspan, y0, opts):
-    rtol, atol, max_step, init_step, refine = _ode_opts_resolve(opts, 1)
+    rtol, atol, max_step, init_step, refine, ps = _ode_opts_resolve(opts, 1)
     _ode_compute(23, f, tspan, float(y0), rtol, atol,
-                 max_step, init_step, refine)
+                 max_step, init_step, refine, print_stats=ps)
     return _ode_cache["y"].copy()
 
 
