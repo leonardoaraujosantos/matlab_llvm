@@ -105,9 +105,12 @@ trap 'rm -f "$TMP"' EXIT
 # the link line with clang++ so the .cpp gets compiled as C++; the
 # matlabc-emitted .ll is still C-compatible.
 "$MATLABC" -emit-llvm "$INPUT" > "$TMP"
+# Note the `${arr[@]+"${arr[@]}"}` dance: macOS ships bash 3.2 which
+# treats an empty array as unset under `set -u`, so a bare expansion of
+# SYM_LINK_FLAGS would error out for non-sym programs (the common case).
 "${CLANG}++" -std=c++20 -Wno-override-module \
   "$TMP" "${RUNTIME_SRCS[@]}" \
   -I"$RUNTIME_DIR" \
-  "${SYM_LINK_FLAGS[@]}" \
+  ${SYM_LINK_FLAGS[@]+"${SYM_LINK_FLAGS[@]}"} \
   -o "$OUT"
 echo "built $OUT"
