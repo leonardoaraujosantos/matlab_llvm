@@ -5,13 +5,23 @@
 # Usage: build_and_run.sh <input.m> [output-name]
 #
 # Environment:
-#   MATLABC   path to the matlabc binary (default: build/matlabc)
-#   CLANG     path to clang             (default: clang in PATH)
+#   MATLABC      path to the matlabc binary
+#                (default: build-sym/matlabc if it exists, else build/matlabc)
+#   CLANG        path to clang
+#                (default: /opt/homebrew/opt/llvm/bin/clang)
+#   SYMPP_PREFIX SymPP install prefix
+#                (default: /tmp/sympp_install if it exists, else /opt/homebrew)
+#
+# Symbolic Math Toolbox detection:
+#   The script greps the input for `syms`/`sym(`/`str2sym`/etc. If the
+#   program uses sym, it falls back to the sym-enabled matlabc and links
+#   runtime/runtime_sym.cpp + libsympp + GMP/MPFR. Without sym usage, it
+#   uses the regular matlabc + the 3-file base runtime.
 set -euo pipefail
 
-MATLABC="${MATLABC:-$(cd "$(dirname "$0")/.." && pwd)/build/matlabc}"
-CLANG="${CLANG:-/opt/homebrew/opt/llvm/bin/clang}"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RUNTIME_DIR="$(cd "$(dirname "$0")" && pwd)"
+
 # Phase-2 + 2.5 split (docs/port_runtime_2_cpp.md): runtime is three
 # .cpp files sharing private layouts via runtime_internal.h.
 RUNTIME_SRCS=(
@@ -20,10 +30,8 @@ RUNTIME_SRCS=(
   "$RUNTIME_DIR/runtime_complex.cpp"
 )
 
-if [[ ! -x "$MATLABC" ]]; then
-  echo "error: matlabc not found at $MATLABC" >&2
-  exit 2
-fi
+CLANG="${CLANG:-/opt/homebrew/opt/llvm/bin/clang}"
+
 if [[ $# -lt 1 ]]; then
   echo "usage: $0 <input.m> [output]" >&2
   exit 64
@@ -31,6 +39,65 @@ fi
 
 INPUT="$1"
 OUT="${2:-$(basename "${INPUT%.m}")}"
+
+# --- Auto-detect Symbolic Math Toolbox usage --------------------------------
+# Match `syms` declarators, `sym(` / `str2sym(` / `vpa(` constructors, and
+# the sym_* matrix builtins. False positives (e.g. a comment containing
+# `syms`) link a few extra libs but don't break the build.
+USES_SYM=0
+if grep -qE '\b(syms|sym\(|str2sym|vpa|vpasolve|nsolve|simplify|expand|factor|solve|dsolve|pdsolve|laplace|ilaplace|fourier|ifourier|ztrans|iztrans|taylor|limit|assume|assumeAlso|clearAssumptions|checkodesol|sym_matrix|sym_eye|sym_zeros|sym_det|sym_inv|sym_transpose|sym_trace|sym_rank|sym_eigenvals|sym_linsolve|sym_dsolve_system|sym_solve_2x2|sym_solve_3x3|dsolve_ivp|apply_ivp)\b' "$INPUT"; then
+  USES_SYM=1
+fi
+
+# --- Pick the matlabc binary -----------------------------------------------
+if [[ -z "${MATLABC:-}" ]]; then
+  if [[ "$USES_SYM" == 1 && -x "$ROOT/build-sym/matlabc" ]]; then
+    MATLABC="$ROOT/build-sym/matlabc"
+  elif [[ -x "$ROOT/build/matlabc" ]]; then
+    MATLABC="$ROOT/build/matlabc"
+  else
+    echo "error: no matlabc found at $ROOT/build/matlabc or $ROOT/build-sym/matlabc" >&2
+    exit 2
+  fi
+fi
+if [[ ! -x "$MATLABC" ]]; then
+  echo "error: matlabc not found at $MATLABC" >&2
+  exit 2
+fi
+
+if [[ "$USES_SYM" == 1 && "$MATLABC" != *"build-sym/"* ]]; then
+  echo "warning: input uses Symbolic Math Toolbox builtins but MATLABC=$MATLABC is the no-sym build" >&2
+  echo "         (re-run with MATLABC=$ROOT/build-sym/matlabc, or build that target with MATLAB_LLVM_WITH_SYM=ON)" >&2
+fi
+
+# --- SymPP discovery + extra link line for sym programs --------------------
+SYM_LINK_FLAGS=()
+if [[ "$USES_SYM" == 1 ]]; then
+  SYMPP_PREFIX="${SYMPP_PREFIX:-}"
+  if [[ -z "$SYMPP_PREFIX" ]]; then
+    for _p in "/tmp/sympp_install" "/opt/homebrew"; do
+      if [[ -e "$_p/include/sympp/sympp.hpp" ]]; then
+        SYMPP_PREFIX="$_p"; break
+      fi
+    done
+  fi
+  if [[ -z "$SYMPP_PREFIX" ]]; then
+    echo "error: SymPP install not found (tried /tmp/sympp_install, /opt/homebrew)" >&2
+    echo "       set SYMPP_PREFIX to override" >&2
+    exit 2
+  fi
+  RUNTIME_SRCS+=("$RUNTIME_DIR/runtime_sym.cpp")
+  SYM_LINK_FLAGS=(
+    -DMATLAB_LLVM_WITH_SYM=1
+    "-I$SYMPP_PREFIX/include"
+    "-L$SYMPP_PREFIX/lib" -lsympp
+    -I/opt/homebrew/include
+    -L/opt/homebrew/lib -lgmp -lgmpxx -lmpfr
+    "-Wl,-rpath,$SYMPP_PREFIX/lib"
+  )
+fi
+
+# --- Compile + link --------------------------------------------------------
 TMP="$(mktemp -t matlabc.XXXXXX).ll"
 trap 'rm -f "$TMP"' EXIT
 
@@ -38,5 +105,9 @@ trap 'rm -f "$TMP"' EXIT
 # the link line with clang++ so the .cpp gets compiled as C++; the
 # matlabc-emitted .ll is still C-compatible.
 "$MATLABC" -emit-llvm "$INPUT" > "$TMP"
-"${CLANG}++" -Wno-override-module "$TMP" "${RUNTIME_SRCS[@]}" -I"$RUNTIME_DIR" -o "$OUT"
+"${CLANG}++" -std=c++20 -Wno-override-module \
+  "$TMP" "${RUNTIME_SRCS[@]}" \
+  -I"$RUNTIME_DIR" \
+  "${SYM_LINK_FLAGS[@]}" \
+  -o "$OUT"
 echo "built $OUT"

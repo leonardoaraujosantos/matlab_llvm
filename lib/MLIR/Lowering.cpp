@@ -4452,6 +4452,13 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
         mlir::Value Vv = lowerExpr(*C.Args[1]);
         if (C.Args.size() == 2)
           return emitSymCall("matlab_sym_diff", {F, Vv});
+        if (C.Args.size() == 3) {
+          mlir::Value Nv = lowerExpr(*C.Args[2]);
+          if (Nv && Nv.getType() == F64Ty)
+            Nv = mlir::arith::FPToSIOp::create(
+                B, L, mlir::IntegerType::get(&MCtx, 64), Nv);
+          return emitSymCall("matlab_sym_diff_n", {F, Vv, Nv});
+        }
       }
       /* int(f, x) / int(f, x, a, b) — sym overload. */
       if (Nm == "int" && (C.Args.size() == 2 || C.Args.size() == 4) &&
