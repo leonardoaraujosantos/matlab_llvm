@@ -79,3 +79,16 @@ disp('  point count (capped step → many points):');
 disp(length(t5));
 disp('  y(end):');
 disp(y5(end));
+
+% --- 6. 3-return form: solver-stats struct -----------------------------
+% MATLAB's `[t, y, stats] = ode45(...)` packs the step counts into a
+% struct with fields nsteps / nfailed / nfevals.
+
+disp('6. 3-return [t, y, stats]');
+[t6, y6, stats] = ode45(f, [0 10], 1);
+disp('  nsteps:');
+disp(stats.nsteps);
+disp('  nfailed:');
+disp(stats.nfailed);
+disp('  nfevals (~6 * nsteps for RK45):');
+disp(stats.nfevals);
