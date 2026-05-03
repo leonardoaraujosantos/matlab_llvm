@@ -1,3 +1,9 @@
+## ODE / PDE Numerical Solvers
+
+This page covers both the initial-value ODE solvers (`ode45`, `ode23`,
+`ode23s`) and the 1-D parabolic-elliptic PDE solver (`pdepe`) that
+sits on top of them via method-of-lines.
+
 ## Initial-Value ODE Solvers
 
 `matlab_llvm` ships MATLAB-compatible initial-value problem (IVP)
@@ -161,6 +167,78 @@ Bit-identical output across all three runtimes on the smoke ODEs.
 - `math_ode45_vector.m` — system of ODEs via vector `y0`.
 - [`test/Runtime/test_ode.c`](../test/Runtime/test_ode.c) — 44 direct
   runtime checks (no JIT, no compiler frontend).
+
+## 1-D Parabolic PDE — `pdepe`
+
+MATLAB-compatible call shape:
+
+```matlab
+sol = pdepe(m, @pdefun, @icfun, @bcfun, xmesh, tspan)
+```
+
+Solves PDEs of the form
+
+```
+c(x, t, u, ∂u/∂x) ∂u/∂t = ∂/∂x f(x, t, u, ∂u/∂x) + s(x, t, u, ∂u/∂x)
+```
+
+on `xmesh = [a, x1, x2, …, b]` over `tspan`. The implementation is a
+classic method-of-lines wrapper: spatial derivatives via finite
+differences on the user mesh, the resulting interior ODE system handed
+to `ode23s` (so stiff parabolic problems work without manual tuning).
+
+### Quick start — 1-D heat equation
+
+```matlab
+% u_t = u_xx on [0, 1] with u(0,t) = u(1,t) = 0, u(x,0) = sin(πx).
+% Analytic: u(x, t) = exp(-π²t) · sin(πx).
+
+m       = 0;
+pdefun  = @(x,t,u,dudx) [1; dudx; 0];          % c=1, f=du/dx, s=0
+icfun   = @(x) sin(pi * x);
+bcfun   = @(xl,ul,xr,ur,t) [ul; 0; ur; 0];     % Dirichlet zero
+
+xmesh = linspace(0, 1, 21);
+tspan = [0 0.1];
+sol   = pdepe(m, pdefun, icfun, bcfun, xmesh, tspan);
+
+% sol(end, 11) ≈ 0.3725 — analytic value at x = 0.5, t = 0.1.
+```
+
+### v1 scope
+
+| | Status |
+|---|:-:|
+| `m = 0` (Cartesian) | ✅ |
+| `m = 1, 2` (cylindrical, spherical) | ❌ — returns 0×0 |
+| Scalar PDE (one component) | ✅ |
+| System of PDEs (multi-component, MATLAB's `npde > 1`) | ❌ |
+| Dirichlet BCs (`ql = qr = 0`) | ✅ |
+| Neumann / Robin BCs | ❌ — returns 0×0 |
+| Non-uniform mesh | ✅ — discretisation honours per-cell `dx` |
+| Stiff parabolic problems (heat eq, diffusion) | ✅ — uses `ode23s` |
+| `odeset` plumbed through to the time integrator | ❌ — uses `ode23s` defaults |
+
+### How the BC is decoded
+
+`bcfun` returns `[pl, ql, pr, qr]` such that `pl + ql·f = 0` at each
+boundary (MATLAB's convention). For Dirichlet BCs (`ql = qr = 0`) the
+typical user-supplied form is `pl = ul - g(t)`. The implementation
+exploits that linearity: it calls `bcfun` with `ul = 0` and reads
+`g(t) = -pl`. Anything fancier than Dirichlet trips the
+`ql ≠ 0` guard and returns an empty solution.
+
+### Output
+
+Output `sol` is `N_t × N_x` — `sol(i, j)` is `u(t_i, x_j)`. MATLAB's
+canonical 3-D layout `sol(t, x, k)` collapses to 2-D for our scalar-
+PDE-only v1.
+
+### What's next
+
+`m ≠ 0`, Neumann/Robin BCs, and multi-component systems are the natural
+follow-ups. Once `ode15s` lands (Phase 7.3), `pdepe` will route to it
+for tighter tolerance on stiff problems.
 
 ## What's missing
 

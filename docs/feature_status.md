@@ -234,7 +234,10 @@ See [`docs/ode.md`](ode.md) for the full surface, ABI notes, and call shapes.
 | Higher-order stiff (`ode15s`, `ode23t`, `ode23tb`, `ode15i`) | ❌ | `ode15s` (variable-order BDF + Newton) is the natural next step on top of the shipped `ode23s` infrastructure. |
 | Non-stiff multistep (`ode113`) and high-order (`ode78`, `ode89`) | ❌ | |
 | BVP (`bvp4c`, `bvp5c`), DDE (`dde23`) | ❌ | |
-| Numerical PDE (`pdepe`, FEM) | ❌ | The symbolic `pdsolve` family ships separately — closed-form, not numerical (see [`sym.md`](sym.md)). |
+| `pdepe` — 1-D parabolic-elliptic PDE via method-of-lines | ✅ | v1: `m = 0` (Cartesian), scalar PDE, Dirichlet BCs only. Wraps `ode23s_v` for stiff time integration. Output `sol` is N_t × N_x. See [`ode.md`](ode.md). |
+| `pdepe` extensions — `m = 1, 2`, Neumann/Robin BCs, multi-component systems | ❌ | Tracked in roadmap. |
+| 2-D / 3-D FEM (`createpde`, mesh generation, `solvepde`) | ❌ | Multi-month scope. |
+| Symbolic `pdsolve` family (closed-form heat / wave / 1st-order linear) | ✅ | In symbolic toolbox — see [`sym.md`](sym.md). |
 
 ### Indexing / search
 

@@ -2831,6 +2831,107 @@ def ode23s_v_stats_opts(f, tspan, y0, opts):
     return _ode_v_stats()
 
 
+# --- pdepe — 1-D parabolic-elliptic PDE via method-of-lines --------------
+# v1: m=0 (Cartesian), scalar PDE, Dirichlet BCs. Spatial discretisation
+# on the user xmesh + ode23s_v under the hood.
+
+_pdepe_ctx = {"pdefn": None, "bcfn": None, "xmesh": None, "Nx": 0,
+              "err": 0}
+
+def _pdepe_get_bc(t):
+    xl = _pdepe_ctx["xmesh"][0]
+    xr = _pdepe_ctx["xmesh"][_pdepe_ctx["Nx"] - 1]
+    r = _pdepe_ctx["bcfn"](xl, 0.0, xr, 0.0, t)
+    arr = np.asarray(r, dtype=float).ravel()
+    if arr.size < 4:
+        _pdepe_ctx["err"] = 1
+        return 0.0, 0.0
+    pl0, ql_, pr0, qr_ = float(arr[0]), float(arr[1]), float(arr[2]), float(arr[3])
+    if ql_ != 0.0 or qr_ != 0.0:
+        _pdepe_ctx["err"] = 2
+        return 0.0, 0.0
+    return -pl0, -pr0
+
+def _pdepe_rhs(t, Uint):
+    Nx = _pdepe_ctx["Nx"]
+    Ni = Nx - 2
+    xmesh = _pdepe_ctx["xmesh"]
+    pdefn = _pdepe_ctx["pdefn"]
+    Uflat = np.asarray(Uint, dtype=float).ravel()
+    if Uflat.size != Ni:
+        return np.zeros((Ni, 1))
+    gl, gr = _pdepe_get_bc(t)
+    if _pdepe_ctx["err"]:
+        return np.zeros((Ni, 1))
+    u = np.empty(Nx)
+    u[0] = gl
+    u[1:Nx-1] = Uflat
+    u[Nx - 1] = gr
+    flx = np.empty(Nx - 1)
+    i = 0
+    while i < Nx - 1:
+        xL = xmesh[i]; xR = xmesh[i + 1]
+        dx = xR - xL
+        if dx == 0.0: dx = 1e-30
+        xm = 0.5 * (xL + xR)
+        um = 0.5 * (u[i] + u[i + 1])
+        dudx = (u[i + 1] - u[i]) / dx
+        rr = pdefn(xm, t, um, dudx)
+        rrarr = np.asarray(rr, dtype=float).ravel()
+        flx[i] = rrarr[1] if rrarr.size >= 2 else 0.0
+        i += 1
+    out = np.empty((Ni, 1))
+    i = 1
+    while i < Nx - 1:
+        xi = xmesh[i]
+        ui = u[i]
+        dudx = (u[i + 1] - u[i - 1]) / (xmesh[i + 1] - xmesh[i - 1])
+        rr = pdefn(xi, t, ui, dudx)
+        rrarr = np.asarray(rr, dtype=float).ravel()
+        c = rrarr[0] if rrarr.size >= 1 else 1.0
+        s = rrarr[2] if rrarr.size >= 3 else 0.0
+        if c == 0.0: c = 1e-30
+        dx_avg = 0.5 * (xmesh[i + 1] - xmesh[i - 1])
+        dflux = flx[i] - flx[i - 1]
+        out[i - 1, 0] = (dflux / dx_avg + s) / c
+        i += 1
+    return out
+
+def pdepe(m, pdefn, icfn, bcfn, xmesh, tspan):
+    if pdefn is None or icfn is None or bcfn is None:
+        return np.zeros((0, 0))
+    xs = np.asarray(xmesh, dtype=float).ravel()
+    ts = np.asarray(tspan, dtype=float).ravel()
+    Nx = int(xs.size); Nt = int(ts.size)
+    if Nx < 3 or Nt < 2: return np.zeros((0, 0))
+    if float(m) != 0.0:  return np.zeros((0, 0))
+    _pdepe_ctx["pdefn"] = pdefn
+    _pdepe_ctx["bcfn"]  = bcfn
+    _pdepe_ctx["xmesh"] = xs
+    _pdepe_ctx["Nx"]    = Nx
+    _pdepe_ctx["err"]   = 0
+    Ni = Nx - 2
+    u0 = np.zeros(Ni)
+    j = 0
+    while j < Ni:
+        u0[j] = float(icfn(xs[j + 1]))
+        j += 1
+    T = ode23s_v_t(_pdepe_rhs, ts, u0)
+    Uint = ode23s_v_y(_pdepe_rhs, ts, u0)
+    Tflat = np.asarray(T, dtype=float).ravel()
+    Nt_out = Tflat.size
+    sol = np.zeros((Nt_out, Nx))
+    Uflat = np.asarray(Uint, dtype=float).reshape((Nt_out, Ni))
+    k = 0
+    while k < Nt_out:
+        gl, gr = _pdepe_get_bc(float(Tflat[k]))
+        sol[k, 0] = gl
+        sol[k, 1:Nx-1] = Uflat[k, :]
+        sol[k, Nx - 1] = gr
+        k += 1
+    return sol
+
+
 # --- Vector-y solvers ----------------------------------------------------
 # Same Dormand-Prince / Bogacki-Shampine pair as the scalar path, but
 # operating on D-component vectors. The user RHS takes a Dx1 column

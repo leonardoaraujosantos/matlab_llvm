@@ -45,6 +45,7 @@ just examples
 | `fi_apply_gain.m` | Fixed-Point Designer (`fi`) constructor + `*` + `(:)` clamp + `disp` |
 | `fi_fir_filter.m` | fi arrays + vector concat + scalar MAC accumulator (Phase 3 gating shape) |
 | `ode_solver.m` | `ode45` / `ode23` / **`ode23s`** (Rosenbrock stiff) — scalar and vector `y`, 2-element and user-grid `tspan`, `odeset` (`RelTol`, `AbsTol`, `MaxStep`, `Refine`, `Stats`), backward-time integration, 3-return `[t, y, stats]`, Robertson stiff-system demo |
+| `heat_eq.m` | **`pdepe`** — 1-D heat equation `u_t = u_xx` via method-of-lines on a 21-point mesh, Dirichlet zero BCs, user-grid `tspan`. Numerical solution tracks `exp(-π²t)·sin(πx)` to 4-5 significant digits. |
 | `symbolic_demo.m` | Symbolic Math Toolbox via SymPP — `syms` / `diff` / `int` / `simplify` / `solve` / `dsolve` / `pdsolve` / `laplace` / `fourier` / `ztrans` / `assume` / `vpa` / `taylor` / `limit` / symbolic matrices (`sym_matrix`, `sym_det`, `sym_inv`, `sym_linsolve`, `sym_dsolve_system`, `sym_solve_2x2`). Requires `-DMATLAB_LLVM_WITH_SYM=ON` at configure time |
 
 ## Flowchart (`.mflow`) examples

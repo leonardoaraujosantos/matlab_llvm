@@ -3562,6 +3562,100 @@ export function ode23s_v_stats_opts(f: OdeRhsV, tspan: any, y0: any, opts: any) 
   return _odeVStats();
 }
 
+// --- pdepe — 1-D parabolic-elliptic PDE via method-of-lines ---------------
+// v1: m=0 (Cartesian), scalar PDE, Dirichlet BCs. Spatial discretisation
+// on the user xmesh + ode23s_v under the hood.
+
+type PdePdefn = (x: number, t: number, u: number, dudx: number) => any;
+type PdeIcfn  = (x: number) => number;
+type PdeBcfn  = (xl: number, ul: number, xr: number, ur: number, t: number) => any;
+
+let _pdepeCtx: { pdefn: PdePdefn; bcfn: PdeBcfn; xmesh: Float64Array;
+                  Nx: number; err: number } | null = null;
+
+function _pdepeArr(r: any): Float64Array {
+  if (r == null) return new Float64Array(0);
+  if (r.data instanceof Float64Array) return r.data;
+  if (r instanceof Float64Array) return r;
+  return Float64Array.from(r);
+}
+
+function _pdepeGetBC(t: number): { gl: number; gr: number } {
+  const ctx = _pdepeCtx!;
+  const xl = ctx.xmesh[0], xr = ctx.xmesh[ctx.Nx - 1];
+  const r = _pdepeArr(ctx.bcfn(xl, 0, xr, 0, t));
+  if (r.length < 4) { ctx.err = 1; return { gl: 0, gr: 0 }; }
+  const pl0 = r[0], ql_ = r[1], pr0 = r[2], qr_ = r[3];
+  if (ql_ !== 0 || qr_ !== 0) { ctx.err = 2; return { gl: 0, gr: 0 }; }
+  return { gl: -pl0, gr: -pr0 };
+}
+
+function _pdepeRhs(t: number, Uint: NDArray): NDArray {
+  const ctx = _pdepeCtx!;
+  const Nx = ctx.Nx, Ni = Nx - 2;
+  const Uflat = (Uint as any).data as Float64Array;
+  const out = new Float64Array(Ni);
+  if (Uflat.length !== Ni) return new NDArray(out, [Ni, 1]);
+  const { gl, gr } = _pdepeGetBC(t);
+  if (ctx.err) return new NDArray(out, [Ni, 1]);
+  const u = new Float64Array(Nx);
+  u[0] = gl;
+  for (let i = 0; i < Ni; i++) u[i + 1] = Uflat[i];
+  u[Nx - 1] = gr;
+  const flx = new Float64Array(Nx - 1);
+  for (let i = 0; i < Nx - 1; i++) {
+    const xL = ctx.xmesh[i], xR = ctx.xmesh[i + 1];
+    let dx = xR - xL; if (dx === 0) dx = 1e-30;
+    const xm = 0.5 * (xL + xR);
+    const um = 0.5 * (u[i] + u[i + 1]);
+    const dudx = (u[i + 1] - u[i]) / dx;
+    const rr = _pdepeArr(ctx.pdefn(xm, t, um, dudx));
+    flx[i] = rr.length >= 2 ? rr[1] : 0;
+  }
+  for (let i = 1; i < Nx - 1; i++) {
+    const xi = ctx.xmesh[i];
+    const ui = u[i];
+    const dudx = (u[i + 1] - u[i - 1]) / (ctx.xmesh[i + 1] - ctx.xmesh[i - 1]);
+    const rr = _pdepeArr(ctx.pdefn(xi, t, ui, dudx));
+    let c = rr.length >= 1 ? rr[0] : 1;
+    const s = rr.length >= 3 ? rr[2] : 0;
+    if (c === 0) c = 1e-30;
+    const dx_avg = 0.5 * (ctx.xmesh[i + 1] - ctx.xmesh[i - 1]);
+    const dflux = flx[i] - flx[i - 1];
+    out[i - 1] = (dflux / dx_avg + s) / c;
+  }
+  return new NDArray(out, [Ni, 1]);
+}
+
+export function pdepe(m: number, pdefn: PdePdefn, icfn: PdeIcfn,
+                       bcfn: PdeBcfn, xmesh: any, tspan: any): NDArray {
+  const xs = asArray(xmesh).data;
+  const ts = asArray(tspan).data;
+  const Nx = xs.length, Nt = ts.length;
+  if (Nx < 3 || Nt < 2) return new NDArray(new Float64Array(0), [0, 0]);
+  if (+m !== 0) return new NDArray(new Float64Array(0), [0, 0]);
+  _pdepeCtx = {
+    pdefn, bcfn, xmesh: xs as Float64Array, Nx, err: 0,
+  };
+  const Ni = Nx - 2;
+  const u0buf = new Float64Array(Ni);
+  for (let j = 0; j < Ni; j++) u0buf[j] = +icfn(+xs[j + 1]);
+  const u0 = new NDArray(u0buf, [Ni, 1]);
+  const T = ode23s_v_t(_pdepeRhs, tspan, u0);
+  const Uint = ode23s_v_y(_pdepeRhs, tspan, u0);
+  const Tflat = (T as any).data as Float64Array;
+  const Uflat = (Uint as any).data as Float64Array;
+  const Nt_out = Tflat.length;
+  const sol = new Float64Array(Nt_out * Nx);
+  for (let k = 0; k < Nt_out; k++) {
+    const { gl, gr } = _pdepeGetBC(Tflat[k]);
+    sol[k * Nx + 0] = gl;
+    for (let j = 0; j < Ni; j++) sol[k * Nx + (j + 1)] = Uflat[k * Ni + j];
+    sol[k * Nx + (Nx - 1)] = gr;
+  }
+  return new NDArray(sol, [Nt_out, Nx]);
+}
+
 // Numpy namespace re-export — `import * as np from "./matlab_runtime"`
 // won't pick this up, but `import { np } from "./matlab_runtime"` will.
 // The TypeScript emitter prefers the explicit `import * as np from

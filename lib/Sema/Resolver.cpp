@@ -88,8 +88,10 @@ void Resolver::registerBuiltins() {
     "qr", "lu", "chol", "norm", "trace", "kron",
     "arrayfun", "cellfun",
     /* Initial-value ODE solvers — see runtime/matlab_runtime.cpp.
-     * ode23s is the Rosenbrock stiff solver (scalar y only). */
-    "ode45", "ode23", "ode23s",
+     * ode23s is the Rosenbrock stiff solver. pdepe is the 1-D
+     * parabolic-elliptic PDE solver via method-of-lines (uses
+     * ode23s under the hood). */
+    "ode45", "ode23", "ode23s", "pdepe",
     "nargin", "nargout", "varargin", "varargout",
     "fopen", "fclose", "fgetl", "feof",
     "fread", "fwrite",

@@ -262,6 +262,26 @@ matlab_struct *matlab_ode23s_v_stats(matlab_ode_rhs_v f, matlab_mat *tspan,
 matlab_struct *matlab_ode23s_v_stats_opts(matlab_ode_rhs_v f, matlab_mat *tspan,
                                             matlab_mat *y0, matlab_struct *opts);
 
+/* pdepe — 1-D parabolic-elliptic PDE solver via method-of-lines.
+ *   sol = pdepe(m, @pdefun, @icfun, @bcfun, xmesh, tspan)
+ *
+ * v1 scope: m = 0 (Cartesian), scalar PDE, Dirichlet BCs (ql = qr = 0).
+ * Spatial discretisation runs on the user-supplied (possibly non-
+ * uniform) xmesh; the resulting interior ODE system is integrated by
+ * ode23s_v, so stiff parabolic problems work without manual tuning.
+ *
+ * Function-pointer ABIs (the anon-function shapes our outliner emits):
+ *   pdefn:  matlab_mat *(*)(double x, double t, double u, double dudx)
+ *           returning [c; f; s] as a 3×1 column.
+ *   icfn:   double (*)(double x)
+ *   bcfn:   matlab_mat *(*)(double xl, double ul, double xr, double ur, double t)
+ *           returning [pl; ql; pr; qr]; ql == qr == 0 required.
+ *
+ * Output sol is N_t × N_x with sol(i, j) = u(t_i, x_j). For unsupported
+ * cases (m ≠ 0, or Neumann/Robin BCs) returns a 0×0 matrix. */
+matlab_mat *matlab_pdepe(double m, void *pdefn, void *icfn, void *bcfn,
+                          matlab_mat *xmesh, matlab_mat *tspan);
+
 matlab_mat *matlab_ode45_v_t(matlab_ode_rhs_v f, matlab_mat *tspan,
                               matlab_mat *y0);
 matlab_mat *matlab_ode45_v_y(matlab_ode_rhs_v f, matlab_mat *tspan,

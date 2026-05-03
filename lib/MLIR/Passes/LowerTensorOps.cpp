@@ -2820,6 +2820,29 @@ bool TensorLowering::rewriteBuiltinCalls() {
         continue;
       }
     }
+    /* pdepe — 1-D parabolic-elliptic PDE solver. Single-result (sol
+     * matrix), 6 operands: (f64 m, ptr pdefn, ptr icfn, ptr bcfn,
+     * ptr xmesh, ptr tspan). Routes directly to matlab_pdepe; single-
+     * return so this lives outside the multi-return refinement path. */
+    if (Name == "pdepe" &&
+        Call->getNumOperands() == 6 && Call->getNumResults() == 1 &&
+        Call->getOperand(0).getType() == F64 &&
+        Call->getOperand(1).getType() == PtrTy &&
+        Call->getOperand(2).getType() == PtrTy &&
+        Call->getOperand(3).getType() == PtrTy &&
+        Call->getOperand(4).getType() == PtrTy &&
+        Call->getOperand(5).getType() == PtrTy) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt("matlab_pdepe", PtrTy,
+                   {F64, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy});
+      auto C0 = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                      Call->getOperands());
+      Call->getResult(0).replaceAllUsesWith(C0.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+
     /* Vector-y form: y0 is a ptr (matrix) instead of f64. Routes to the
      * matlab_ode{45,23}_v_* runtime entries which take a matrix RHS. */
     if (NA && (NA.getValue().getSExtValue() == 2 ||
