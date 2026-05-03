@@ -3239,6 +3239,329 @@ export function ode23_v_stats_opts(f: OdeRhsV, tspan: any, y0: any, opts: any) {
   return _odeVStats();
 }
 
+// --- ode23s — Rosenbrock 2(3) stiff solver --------------------------------
+// Same Shampine pair as the C runtime. Scalar y → division by W; vector
+// y → Gaussian-elimination LU at each step + three back-solves.
+
+const _ROSEN_D    = 1.0 / (2.0 + Math.SQRT2);
+const _ROSEN_E32  = 6.0 + Math.SQRT2;
+const _SQRT_EPS   = 1.4901161193847656e-8;
+
+function _luFactorPP(A: Float64Array, perm: Int32Array, D: number): boolean {
+  for (let i = 0; i < D; i++) perm[i] = i;
+  for (let k = 0; k < D; k++) {
+    let piv = k, maxv = Math.abs(A[k * D + k]);
+    for (let r = k + 1; r < D; r++) {
+      const v = Math.abs(A[r * D + k]);
+      if (v > maxv) { maxv = v; piv = r; }
+    }
+    if (maxv < 1e-300) return false;
+    if (piv !== k) {
+      for (let c = 0; c < D; c++) {
+        const t = A[k*D+c]; A[k*D+c] = A[piv*D+c]; A[piv*D+c] = t;
+      }
+      const tp = perm[k]; perm[k] = perm[piv]; perm[piv] = tp;
+    }
+    const diag = A[k * D + k];
+    for (let r = k + 1; r < D; r++) {
+      const m = A[r * D + k] / diag;
+      A[r * D + k] = m;
+      for (let c = k + 1; c < D; c++)
+        A[r * D + c] -= m * A[k * D + c];
+    }
+  }
+  return true;
+}
+
+function _luSolve(A: Float64Array, perm: Int32Array, b: Float64Array,
+                  x: Float64Array, D: number): void {
+  for (let i = 0; i < D; i++) x[i] = b[perm[i]];
+  for (let i = 1; i < D; i++) {
+    let s = x[i];
+    for (let j = 0; j < i; j++) s -= A[i*D + j] * x[j];
+    x[i] = s;
+  }
+  for (let i = D - 1; i >= 0; i--) {
+    let s = x[i];
+    for (let j = i + 1; j < D; j++) s -= A[i*D + j] * x[j];
+    x[i] = s / A[i*D + i];
+  }
+}
+
+function _rosenSolve23sScalar(f: OdeRhs, targets: number[], y0: number,
+                               rtol = 1e-3, atol = 1e-6,
+                               maxStep = 0, initStep = 0, refine = 1)
+    : { T: number[]; Y: number[]; nAcc: number; nRej: number; nFev: number } {
+  if (refine < 1) refine = 1;
+  const nT = targets.length;
+  if (nT < 2) return { T: [], Y: [], nAcc: 0, nRej: 0, nFev: 0 };
+  const t0 = +targets[0], tf = +targets[nT - 1];
+  const userGrid = nT > 2;
+  const T: number[] = [t0]; const Y: number[] = [y0];
+  let nextTgt = 1;
+  let y = y0; let t = t0;
+  const span = tf - t0;
+  let h = initStep > 0 ? (span >= 0 ? initStep : -initStep) : span * 0.01;
+  if (h === 0 || span === 0) return { T, Y, nAcc: 0, nRej: 0, nFev: 0 };
+  const forward = h > 0;
+  if (maxStep > 0) { if (h > maxStep) h = maxStep; if (h < -maxStep) h = -maxStep; }
+  let nAcc = 0, nRej = 0, nFev = 0;
+  let steps = 0; const maxSteps = 100000;
+  while ((forward ? t < tf : t > tf) && steps < maxSteps) {
+    steps++;
+    if (forward ? (t + h > tf) : (t + h < tf)) h = tf - t;
+    const F0 = f(t, y); nFev++;
+    const eps = _SQRT_EPS * (Math.abs(y) > 1 ? Math.abs(y) : 1);
+    const Jp = f(t, y + eps), Jm = f(t, y - eps); nFev += 2;
+    const J = (Jp - Jm) / (2 * eps);
+    let W = 1 - h * _ROSEN_D * J;
+    if (W === 0) W = 1e-30;
+    const k1 = F0 / W;
+    const F1 = f(t + 0.5*h, y + 0.5*h*k1); nFev++;
+    const k2 = (F1 - k1) / W + k1;
+    const yNew = y + h * k2;
+    const F2 = f(t + h, yNew); nFev++;
+    const k3 = (F2 - _ROSEN_E32*(k2 - F1) - 2*(k1 - F0)) / W;
+    const err = (h/6) * (k1 - 2*k2 + k3);
+    const ay = Math.abs(y), ayN = Math.abs(yNew);
+    const scale = atol + rtol * (ay > ayN ? ay : ayN);
+    const normerr = scale > 0 ? Math.abs(err)/scale : 0;
+    if (normerr <= 1) {
+      nAcc++;
+      if (userGrid) {
+        while (nextTgt < nT) {
+          const tt = +targets[nextTgt];
+          const inRange = forward ? (tt <= t + h) : (tt >= t + h);
+          if (!inRange) break;
+          const th_ = h === 0 ? 0 : (tt - t) / h;
+          const yi = nextTgt === nT - 1 ? yNew : _odeHermite(y, yNew, F0, F2, h, th_);
+          T.push(tt); Y.push(yi); nextTgt++;
+        }
+      } else {
+        for (let j = 1; j <= refine; j++) {
+          const th_ = j / refine;
+          const ti = t + h * th_;
+          const yi = j === refine ? yNew : _odeHermite(y, yNew, F0, F2, h, th_);
+          T.push(ti); Y.push(yi);
+        }
+      }
+      t += h; y = yNew;
+      if (userGrid && nextTgt >= nT) break;
+    } else { nRej++; }
+    let fac = normerr === 0 ? 5 : 0.9 * Math.pow(normerr, -1/3);
+    if (fac < 0.2) fac = 0.2;
+    if (fac > 5) fac = 5;
+    h *= fac;
+    if (maxStep > 0) { if (h > maxStep) h = maxStep; if (h < -maxStep) h = -maxStep; }
+  }
+  return { T, Y, nAcc, nRej, nFev };
+}
+
+function _rosenSolve23sVector(f: OdeRhsV, targets: number[], y0: number[],
+                                rtol = 1e-3, atol = 1e-6,
+                                maxStep = 0, initStep = 0, refine = 1): OdeStatsV {
+  if (refine < 1) refine = 1;
+  const D = y0.length;
+  const nT = targets.length;
+  if (nT < 2 || D <= 0) return { T: [], Y: [], D, nAcc: 0, nRej: 0, nFev: 0 };
+  const t0 = +targets[0], tf = +targets[nT - 1];
+  const userGrid = nT > 2;
+  const T: number[] = [t0];
+  const Yflat: number[] = Array.from(y0);
+  let nextTgt = 1;
+  const y = new Float64Array(y0);
+  const yNew = new Float64Array(D);
+  const F0 = new Float64Array(D), F1 = new Float64Array(D), F2 = new Float64Array(D);
+  const Fp = new Float64Array(D), Fm = new Float64Array(D);
+  const k1 = new Float64Array(D), k2 = new Float64Array(D), k3 = new Float64Array(D);
+  const stg = new Float64Array(D), rhs = new Float64Array(D), err = new Float64Array(D);
+  const W = new Float64Array(D * D);
+  const perm = new Int32Array(D);
+  let t = t0;
+  const span = tf - t0;
+  let h = initStep > 0 ? (span >= 0 ? initStep : -initStep) : span * 0.01;
+  if (h === 0 || span === 0) return { T, Y: Yflat, D, nAcc: 0, nRej: 0, nFev: 0 };
+  const forward = h > 0;
+  if (maxStep > 0) { if (h > maxStep) h = maxStep; if (h < -maxStep) h = -maxStep; }
+  let nAcc = 0, nRej = 0, nFev = 0;
+  let steps = 0; const maxSteps = 100000;
+  while ((forward ? t < tf : t > tf) && steps < maxSteps) {
+    steps++;
+    if (forward ? (t + h > tf) : (t + h < tf)) h = tf - t;
+    _odeVCall(f, t, y, D, F0); nFev++;
+    for (let j = 0; j < D; j++) {
+      const yj = y[j];
+      const dj = _SQRT_EPS * (Math.abs(yj) > 1 ? Math.abs(yj) : 1);
+      stg.set(y); stg[j] = yj + dj;
+      _odeVCall(f, t, stg, D, Fp);
+      stg[j] = yj - dj;
+      _odeVCall(f, t, stg, D, Fm);
+      nFev += 2;
+      const inv2dj = 1 / (2 * dj);
+      for (let i = 0; i < D; i++) W[i*D + j] = -h * _ROSEN_D * (Fp[i] - Fm[i]) * inv2dj;
+    }
+    for (let i = 0; i < D; i++) W[i*D + i] += 1;
+    if (!_luFactorPP(W, perm, D)) {
+      nRej++; h *= 0.5;
+      if (forward ? h <= 0 : h >= 0) break;
+      continue;
+    }
+    _luSolve(W, perm, F0, k1, D);
+    for (let i = 0; i < D; i++) stg[i] = y[i] + 0.5 * h * k1[i];
+    _odeVCall(f, t + 0.5*h, stg, D, F1); nFev++;
+    for (let i = 0; i < D; i++) rhs[i] = F1[i] - k1[i];
+    _luSolve(W, perm, rhs, k2, D);
+    for (let i = 0; i < D; i++) k2[i] += k1[i];
+    for (let i = 0; i < D; i++) yNew[i] = y[i] + h * k2[i];
+    _odeVCall(f, t + h, yNew, D, F2); nFev++;
+    for (let i = 0; i < D; i++)
+      rhs[i] = F2[i] - _ROSEN_E32 * (k2[i] - F1[i]) - 2 * (k1[i] - F0[i]);
+    _luSolve(W, perm, rhs, k3, D);
+    let normerr = 0;
+    for (let i = 0; i < D; i++) {
+      err[i] = (h/6) * (k1[i] - 2*k2[i] + k3[i]);
+      const ay = Math.abs(y[i]), ayN = Math.abs(yNew[i]);
+      const scale = atol + rtol * (ay > ayN ? ay : ayN);
+      const e = scale > 0 ? Math.abs(err[i])/scale : 0;
+      if (e > normerr) normerr = e;
+    }
+    if (normerr <= 1) {
+      nAcc++;
+      if (userGrid) {
+        while (nextTgt < nT) {
+          const tt = +targets[nextTgt];
+          const inRange = forward ? (tt <= t + h) : (tt >= t + h);
+          if (!inRange) break;
+          const th_ = h === 0 ? 0 : (tt - t) / h;
+          const row = new Float64Array(D);
+          if (nextTgt === nT - 1) row.set(yNew);
+          else _odeVHermite(y, yNew, F0, F2, h, th_, D, row);
+          T.push(tt);
+          for (let q = 0; q < D; q++) Yflat.push(row[q]);
+          nextTgt++;
+        }
+      } else {
+        for (let j = 1; j <= refine; j++) {
+          const th_ = j / refine;
+          const ti = t + h * th_;
+          const row = new Float64Array(D);
+          if (j === refine) row.set(yNew);
+          else _odeVHermite(y, yNew, F0, F2, h, th_, D, row);
+          T.push(ti);
+          for (let q = 0; q < D; q++) Yflat.push(row[q]);
+        }
+      }
+      t += h; y.set(yNew);
+      if (userGrid && nextTgt >= nT) break;
+    } else { nRej++; }
+    let fac = normerr === 0 ? 5 : 0.9 * Math.pow(normerr, -1/3);
+    if (fac < 0.2) fac = 0.2;
+    if (fac > 5) fac = 5;
+    h *= fac;
+    if (maxStep > 0) { if (h > maxStep) h = maxStep; if (h < -maxStep) h = -maxStep; }
+  }
+  return { T, Y: Yflat, D, nAcc, nRej, nFev };
+}
+
+function _ode23sCompute(f: OdeRhs, tspan: any, y0: number,
+                         rtol = 1e-3, atol = 1e-6,
+                         maxStep = 0, initStep = 0, refine = 1,
+                         printStats = false): void {
+  const ts = asArray(tspan).data;
+  const targets: number[] = Array.from(ts);
+  const key = `235|${targets.join(",")}|${y0}|${rtol}|${atol}|${maxStep}|${initStep}|${refine}|${printStats?1:0}|${(f as any).name ?? ""}`;
+  if (_odeCache && _odeCache.key === key) return;
+  const r = _rosenSolve23sScalar(f, targets, y0, rtol, atol, maxStep, initStep, refine);
+  _odeCache = {
+    key,
+    t: new NDArray(new Float64Array(r.T), [r.T.length, 1]),
+    y: new NDArray(new Float64Array(r.Y), [r.Y.length, 1]),
+    nAcc: r.nAcc, nRej: r.nRej, nFev: r.nFev,
+  } as any;
+  if (printStats) {
+    console.log(`${r.nAcc} successful steps`);
+    console.log(`${r.nRej} failed attempts`);
+    console.log(`${r.nFev} function evaluations`);
+  }
+}
+
+function _ode23sVCompute(f: OdeRhsV, tspan: any, y0: any,
+                          rtol = 1e-3, atol = 1e-6,
+                          maxStep = 0, initStep = 0, refine = 1,
+                          printStats = false): void {
+  const ts = asArray(tspan).data;
+  const targets: number[] = Array.from(ts);
+  const y0arr = Array.from(asArray(y0).data);
+  const key = `235|${targets.join(",")}|${y0arr.join(",")}|${rtol}|${atol}|${maxStep}|${initStep}|${refine}|${printStats?1:0}|${(f as any).name ?? ""}`;
+  if (_odeVCache && _odeVCache.key === key) return;
+  const r = _rosenSolve23sVector(f, targets, y0arr, rtol, atol, maxStep, initStep, refine);
+  _odeVCache = {
+    key,
+    t: new NDArray(new Float64Array(r.T), [r.T.length, 1]),
+    y: new NDArray(new Float64Array(r.Y), [r.T.length, r.D]),
+    D: r.D, nAcc: r.nAcc, nRej: r.nRej, nFev: r.nFev,
+  };
+  if (printStats) {
+    console.log(`${r.nAcc} successful steps`);
+    console.log(`${r.nRej} failed attempts`);
+    console.log(`${r.nFev} function evaluations`);
+  }
+}
+
+export function ode23s_t(f: OdeRhs, tspan: any, y0: number): NDArray {
+  _ode23sCompute(f, tspan, +y0); return _cloneCol(_odeCache!.t);
+}
+export function ode23s_y(f: OdeRhs, tspan: any, y0: number): NDArray {
+  _ode23sCompute(f, tspan, +y0); return _cloneCol(_odeCache!.y);
+}
+export function ode23s_t_opts(f: OdeRhs, tspan: any, y0: number, opts: any): NDArray {
+  const { rtol, atol, maxStep, initStep, refine, printStats } = _odeOptsResolve(opts, 1);
+  _ode23sCompute(f, tspan, +y0, rtol, atol, maxStep, initStep, refine, printStats);
+  return _cloneCol(_odeCache!.t);
+}
+export function ode23s_y_opts(f: OdeRhs, tspan: any, y0: number, opts: any): NDArray {
+  const { rtol, atol, maxStep, initStep, refine, printStats } = _odeOptsResolve(opts, 1);
+  _ode23sCompute(f, tspan, +y0, rtol, atol, maxStep, initStep, refine, printStats);
+  return _cloneCol(_odeCache!.y);
+}
+export function ode23s_stats(f: OdeRhs, tspan: any, y0: number) {
+  _ode23sCompute(f, tspan, +y0); return _odeStatsStruct();
+}
+export function ode23s_stats_opts(f: OdeRhs, tspan: any, y0: number, opts: any) {
+  const { rtol, atol, maxStep, initStep, refine, printStats } = _odeOptsResolve(opts, 1);
+  _ode23sCompute(f, tspan, +y0, rtol, atol, maxStep, initStep, refine, printStats);
+  return _odeStatsStruct();
+}
+export function ode23s_v_t(f: OdeRhsV, tspan: any, y0: any): NDArray {
+  _ode23sVCompute(f, tspan, y0); return _cloneCol(_odeVCache!.t);
+}
+export function ode23s_v_y(f: OdeRhsV, tspan: any, y0: any): NDArray {
+  _ode23sVCompute(f, tspan, y0);
+  const c = _odeVCache!.y;
+  const buf = new Float64Array(c.data.length); buf.set(c.data);
+  return new NDArray(buf, c.shape.slice());
+}
+export function ode23s_v_t_opts(f: OdeRhsV, tspan: any, y0: any, opts: any): NDArray {
+  const { rtol, atol, maxStep, initStep, refine, printStats } = _odeOptsResolve(opts, 1);
+  _ode23sVCompute(f, tspan, y0, rtol, atol, maxStep, initStep, refine, printStats);
+  return _cloneCol(_odeVCache!.t);
+}
+export function ode23s_v_y_opts(f: OdeRhsV, tspan: any, y0: any, opts: any): NDArray {
+  const { rtol, atol, maxStep, initStep, refine, printStats } = _odeOptsResolve(opts, 1);
+  _ode23sVCompute(f, tspan, y0, rtol, atol, maxStep, initStep, refine, printStats);
+  const c = _odeVCache!.y;
+  const buf = new Float64Array(c.data.length); buf.set(c.data);
+  return new NDArray(buf, c.shape.slice());
+}
+export function ode23s_v_stats(f: OdeRhsV, tspan: any, y0: any) {
+  _ode23sVCompute(f, tspan, y0); return _odeVStats();
+}
+export function ode23s_v_stats_opts(f: OdeRhsV, tspan: any, y0: any, opts: any) {
+  const { rtol, atol, maxStep, initStep, refine, printStats } = _odeOptsResolve(opts, 1);
+  _ode23sVCompute(f, tspan, y0, rtol, atol, maxStep, initStep, refine, printStats);
+  return _odeVStats();
+}
+
 // Numpy namespace re-export — `import * as np from "./matlab_runtime"`
 // won't pick this up, but `import { np } from "./matlab_runtime"` will.
 // The TypeScript emitter prefers the explicit `import * as np from

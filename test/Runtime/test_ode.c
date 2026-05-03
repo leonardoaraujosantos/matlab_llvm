@@ -23,6 +23,10 @@ matlab_mat *matlab_ode45_v_y(ode_rhs_v_t f, matlab_mat *tspan,
                               matlab_mat *y0);
 matlab_mat *matlab_ode23_v_y(ode_rhs_v_t f, matlab_mat *tspan,
                               matlab_mat *y0);
+matlab_mat *matlab_ode23s_t(ode_rhs_t f, matlab_mat *tspan, double y0);
+matlab_mat *matlab_ode23s_y(ode_rhs_t f, matlab_mat *tspan, double y0);
+matlab_mat *matlab_ode23s_v_y(ode_rhs_v_t f, matlab_mat *tspan,
+                               matlab_mat *y0);
 
 /* Test RHSes. dy/dt = -y has analytic solution y(t) = y0 * exp(-t). */
 static double rhs_decay(double t, double y) { (void)t; return -y; }
@@ -184,6 +188,48 @@ static void test_ode23_vector_oscillator(void) {
     RT_NEAR(rt_data(Y)[(N-1)*2 + 1], 0.0, 5e-2, "ode23 y(end,2)");
 }
 
+/* ---- ode23s scalar (stiff) ---- */
+static double rhs_stiff_decay(double t, double y) { (void)t; return -100.0 * y; }
+
+static void test_ode23s_scalar_stiff(void) {
+    matlab_mat *ts = mk_tspan(0.0, 1.0);
+    matlab_mat *T = matlab_ode23s_t(rhs_stiff_decay, ts, 1.0);
+    matlab_mat *Y = matlab_ode23s_y(rhs_stiff_decay, ts, 1.0);
+    int64_t N = rt_rows(T);
+    /* ode23s should converge for dy/dt = -100*y in tens of steps. */
+    RT_CHECK(N > 5,  "ode23s steady-state run produced output");
+    RT_CHECK(N < 80, "ode23s used reasonable step count on stiff problem");
+    /* y(1) ≈ exp(-100) ≈ 3.7e-44 — effectively 0. */
+    RT_NEAR(last(Y), 0.0, 1e-6, "ode23s reaches stiff steady state");
+}
+
+/* ---- ode23s vector (Robertson) ---- */
+static matlab_mat *rhs_robertson(double t, matlab_mat *y) {
+    (void)t;
+    double y1 = rt_data(y)[0], y2 = rt_data(y)[1], y3 = rt_data(y)[2];
+    double buf[3];
+    buf[0] = -0.04*y1 + 1e4*y2*y3;
+    buf[1] =  0.04*y1 - 1e4*y2*y3 - 3e7*y2*y2;
+    buf[2] =                        3e7*y2*y2;
+    return matlab_mat_from_buf(buf, 3.0, 1.0);
+}
+
+static void test_ode23s_vector_robertson(void) {
+    double y0buf[3] = {1.0, 0.0, 0.0};
+    matlab_mat *y0 = matlab_mat_from_buf(y0buf, 3.0, 1.0);
+    matlab_mat *ts = mk_tspan(0.0, 1.0);
+    matlab_mat *Y = matlab_ode23s_v_y(rhs_robertson, ts, y0);
+    int64_t N = rt_rows(Y);
+    RT_CHECK(N > 3,    "Robertson stiff system integrates");
+    /* Conservation: y1 + y2 + y3 = 1 throughout. */
+    double total = rt_data(Y)[(N-1)*3 + 0]
+                 + rt_data(Y)[(N-1)*3 + 1]
+                 + rt_data(Y)[(N-1)*3 + 2];
+    RT_NEAR(total, 1.0, 1e-6, "Robertson mass conserved");
+    /* y2 is a fast transient — small at t=1 (steady-state ~1e-5). */
+    RT_CHECK(rt_data(Y)[(N-1)*3 + 1] < 1e-3, "Robertson y2 decayed");
+}
+
 /* ---- 3-return form: stats struct ---- */
 matlab_struct *matlab_ode45_stats(ode_rhs_t f, matlab_mat *tspan, double y0);
 
@@ -236,6 +282,8 @@ int main(void) {
     RT_RUN(test_ode45_user_grid);
     RT_RUN(test_ode45_vector_oscillator);
     RT_RUN(test_ode23_vector_oscillator);
+    RT_RUN(test_ode23s_scalar_stiff);
+    RT_RUN(test_ode23s_vector_robertson);
     RT_RUN(test_ode45_stats_struct);
     RT_RUN(test_ode45_cache);
     RT_DONE();

@@ -2824,7 +2824,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
      * matlab_ode{45,23}_v_* runtime entries which take a matrix RHS. */
     if (NA && (NA.getValue().getSExtValue() == 2 ||
                NA.getValue().getSExtValue() == 3) &&
-        (Name == "ode45" || Name == "ode23") &&
+        (Name == "ode45" || Name == "ode23" || Name == "ode23s") &&
         (Call->getNumOperands() == 3 || Call->getNumOperands() == 4) &&
         Call->getOperand(0).getType() == PtrTy &&
         Call->getOperand(1).getType() == PtrTy &&
@@ -2864,14 +2864,16 @@ bool TensorLowering::rewriteBuiltinCalls() {
      * second call returns the paired column without re-integrating. */
     if (NA && NA.getValue().getSExtValue() == 2 &&
         Call->getNumOperands() == 3 && Call->getNumResults() == 2 &&
-        (Name == "ode45" || Name == "ode23") &&
+        (Name == "ode45" || Name == "ode23" || Name == "ode23s") &&
         Call->getOperand(0).getType() == PtrTy &&
         Call->getOperand(1).getType() == PtrTy &&
         Call->getOperand(2).getType() == F64) {
-      StringRef F0 = (Name == "ode45") ? StringRef("matlab_ode45_t")
-                                       : StringRef("matlab_ode23_t");
-      StringRef F1 = (Name == "ode45") ? StringRef("matlab_ode45_y")
-                                       : StringRef("matlab_ode23_y");
+      StringRef F0 = (Name == "ode45") ? StringRef("matlab_ode45_t") :
+                     (Name == "ode23s") ? StringRef("matlab_ode23s_t")
+                                        : StringRef("matlab_ode23_t");
+      StringRef F1 = (Name == "ode45") ? StringRef("matlab_ode45_y") :
+                     (Name == "ode23s") ? StringRef("matlab_ode23s_y")
+                                        : StringRef("matlab_ode23_y");
       B.setInsertionPoint(Call);
       auto Fn0 = rt(F0, PtrTy, {PtrTy, PtrTy, F64});
       auto Fn1 = rt(F1, PtrTy, {PtrTy, PtrTy, F64});
@@ -2889,15 +2891,17 @@ bool TensorLowering::rewriteBuiltinCalls() {
      * entries which dereference the struct and override the defaults. */
     if (NA && NA.getValue().getSExtValue() == 2 &&
         Call->getNumOperands() == 4 && Call->getNumResults() == 2 &&
-        (Name == "ode45" || Name == "ode23") &&
+        (Name == "ode45" || Name == "ode23" || Name == "ode23s") &&
         Call->getOperand(0).getType() == PtrTy &&
         Call->getOperand(1).getType() == PtrTy &&
         Call->getOperand(2).getType() == F64 &&
         Call->getOperand(3).getType() == PtrTy) {
-      StringRef F0 = (Name == "ode45") ? StringRef("matlab_ode45_t_opts")
-                                       : StringRef("matlab_ode23_t_opts");
-      StringRef F1 = (Name == "ode45") ? StringRef("matlab_ode45_y_opts")
-                                       : StringRef("matlab_ode23_y_opts");
+      StringRef F0 = (Name == "ode45") ? StringRef("matlab_ode45_t_opts") :
+                     (Name == "ode23s") ? StringRef("matlab_ode23s_t_opts")
+                                        : StringRef("matlab_ode23_t_opts");
+      StringRef F1 = (Name == "ode45") ? StringRef("matlab_ode45_y_opts") :
+                     (Name == "ode23s") ? StringRef("matlab_ode23s_y_opts")
+                                        : StringRef("matlab_ode23_y_opts");
       B.setInsertionPoint(Call);
       auto Fn0 = rt(F0, PtrTy, {PtrTy, PtrTy, F64, PtrTy});
       auto Fn1 = rt(F1, PtrTy, {PtrTy, PtrTy, F64, PtrTy});
@@ -2916,7 +2920,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
      * first solve runs. */
     if (NA && NA.getValue().getSExtValue() == 3 &&
         Call->getNumResults() == 3 &&
-        (Name == "ode45" || Name == "ode23") &&
+        (Name == "ode45" || Name == "ode23" || Name == "ode23s") &&
         Call->getOperand(0).getType() == PtrTy &&
         Call->getOperand(1).getType() == PtrTy &&
         Call->getOperand(2).getType() == F64 &&

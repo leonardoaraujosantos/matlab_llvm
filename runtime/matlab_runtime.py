@@ -2546,6 +2546,291 @@ def ode23_stats_opts(f, tspan, y0, opts):
     return _ode_stats_struct()
 
 
+# --- ode23s — Rosenbrock 2(3) stiff solver --------------------------------
+# Same Shampine pair as the C runtime. Scalar y → division by W;
+# vector y → numpy.linalg.solve(W, ·) at each stage. Refine default = 1.
+
+import math as _math
+
+def _rosen_solve_23s_scalar(f, targets, y0, rtol=1e-3, atol=1e-6,
+                              max_step=0.0, init_step=0.0, refine=1):
+    if refine < 1: refine = 1
+    targets = list(map(float, targets))
+    n_targets = len(targets)
+    if n_targets < 2:
+        return [], [], 0, 0, 0
+    t0 = targets[0]; tf = targets[n_targets - 1]
+    user_grid = (n_targets > 2)
+    T = [t0]; Y = [y0]; next_tgt = 1
+    y = y0; t = t0
+    span = tf - t0
+    h = init_step if init_step > 0 else span * 0.01
+    if span < 0 and init_step > 0: h = -h
+    if h == 0.0 or span == 0.0:
+        return T, Y, 0, 0, 0
+    forward = h > 0
+    if max_step > 0:
+        if h >  max_step: h = max_step
+        if h < -max_step: h = -max_step
+    SQRT2 = _math.sqrt(2.0)
+    d_   = 1.0 / (2.0 + SQRT2)
+    e32  = 6.0 + SQRT2
+    SQRT_EPS = 1.4901161193847656e-8
+    n_acc = 0; n_rej = 0; n_fev = 0
+    steps = 0; max_steps = 100000
+    while ((t < tf) if forward else (t > tf)) and steps < max_steps:
+        steps += 1
+        if (forward and t + h > tf) or ((not forward) and t + h < tf):
+            h = tf - t
+        F0 = f(t, y); n_fev += 1
+        eps = SQRT_EPS * (abs(y) if abs(y) > 1.0 else 1.0)
+        Jp = f(t, y + eps); Jm = f(t, y - eps); n_fev += 2
+        J = (Jp - Jm) / (2.0 * eps)
+        W = 1.0 - h * d_ * J
+        if W == 0.0: W = 1e-30
+        k1 = F0 / W
+        F1 = f(t + 0.5*h, y + 0.5*h*k1); n_fev += 1
+        k2 = (F1 - k1) / W + k1
+        y_new = y + h * k2
+        F2 = f(t + h, y_new); n_fev += 1
+        k3 = (F2 - e32*(k2 - F1) - 2.0*(k1 - F0)) / W
+        err = (h / 6.0) * (k1 - 2.0*k2 + k3)
+        scale = atol + rtol * (abs(y) if abs(y) > abs(y_new) else abs(y_new))
+        normerr = abs(err) / scale if scale > 0 else 0.0
+        if normerr <= 1.0:
+            n_acc += 1
+            if user_grid:
+                while next_tgt < n_targets:
+                    tt = float(targets[next_tgt])
+                    in_range = (tt <= t + h) if forward else (tt >= t + h)
+                    if not in_range: break
+                    th = 0.0 if h == 0.0 else (tt - t) / h
+                    if next_tgt == n_targets - 1:
+                        Y.append(y_new)
+                    else:
+                        Y.append(_ode_hermite(y, y_new, F0, F2, h, th))
+                    T.append(tt); next_tgt += 1
+            else:
+                j = 1
+                while j <= refine:
+                    th = j / refine
+                    ti = t + h * th
+                    if j == refine:
+                        Y.append(y_new)
+                    else:
+                        Y.append(_ode_hermite(y, y_new, F0, F2, h, th))
+                    T.append(ti); j += 1
+            t += h; y = y_new
+            if user_grid and next_tgt >= n_targets: break
+        else:
+            n_rej += 1
+        fac = 5.0 if normerr == 0.0 else 0.9 * (normerr ** (-1/3))
+        if fac < 0.2: fac = 0.2
+        if fac > 5.0: fac = 5.0
+        h *= fac
+        if max_step > 0:
+            if h >  max_step: h = max_step
+            if h < -max_step: h = -max_step
+    return T, Y, n_acc, n_rej, n_fev
+
+def _rosen_solve_23s_vector(f, targets, y0, rtol=1e-3, atol=1e-6,
+                              max_step=0.0, init_step=0.0, refine=1):
+    if refine < 1: refine = 1
+    targets = list(map(float, targets))
+    n_targets = len(targets)
+    D = len(y0)
+    if n_targets < 2 or D <= 0:
+        return [], np.zeros((0, D)), 0, 0, 0
+    t0 = targets[0]; tf = targets[n_targets - 1]
+    user_grid = (n_targets > 2)
+    T = [t0]; Y_rows = [np.asarray(y0, dtype=float).copy()]
+    next_tgt = 1
+    y = np.asarray(y0, dtype=float).copy()
+    t = t0
+    span = tf - t0
+    h = init_step if init_step > 0 else span * 0.01
+    if span < 0 and init_step > 0: h = -h
+    if h == 0.0 or span == 0.0:
+        return T, np.array(Y_rows), 0, 0, 0
+    forward = h > 0
+    if max_step > 0:
+        if h >  max_step: h = max_step
+        if h < -max_step: h = -max_step
+    SQRT2 = _math.sqrt(2.0)
+    d_   = 1.0 / (2.0 + SQRT2)
+    e32  = 6.0 + SQRT2
+    SQRT_EPS = 1.4901161193847656e-8
+    n_acc = 0; n_rej = 0; n_fev = 0
+    steps = 0; max_steps = 100000
+    eyeD = np.eye(D)
+    while ((t < tf) if forward else (t > tf)) and steps < max_steps:
+        steps += 1
+        if (forward and t + h > tf) or ((not forward) and t + h < tf):
+            h = tf - t
+        F0 = _ode_v_call(f, t, y, D); n_fev += 1
+        # Build Jacobian column-by-column (central FD). Manual loop —
+        # `range` is the MATLAB-runtime symbol in this module.
+        Jmat = np.zeros((D, D))
+        j = 0
+        while j < D:
+            yj = y[j]
+            dj = SQRT_EPS * (abs(yj) if abs(yj) > 1.0 else 1.0)
+            yp = y.copy(); yp[j] = yj + dj
+            ym = y.copy(); ym[j] = yj - dj
+            Fp = _ode_v_call(f, t, yp, D)
+            Fm = _ode_v_call(f, t, ym, D)
+            n_fev += 2
+            Jmat[:, j] = (Fp - Fm) / (2.0 * dj)
+            j += 1
+        W = eyeD - h * d_ * Jmat
+        try:
+            Wlu = np.linalg.lu_factor(W) if hasattr(np.linalg, "lu_factor") \
+                  else None
+        except Exception:
+            Wlu = None
+        # numpy.linalg has no lu_factor in the public API; just call solve.
+        try:
+            k1 = np.linalg.solve(W, F0)
+            F1 = _ode_v_call(f, t + 0.5*h, y + 0.5*h*k1, D); n_fev += 1
+            k2 = np.linalg.solve(W, F1 - k1) + k1
+            y_new = y + h * k2
+            F2 = _ode_v_call(f, t + h, y_new, D); n_fev += 1
+            k3 = np.linalg.solve(W, F2 - e32*(k2 - F1) - 2.0*(k1 - F0))
+        except np.linalg.LinAlgError:
+            n_rej += 1
+            h *= 0.5
+            continue
+        err = (h / 6.0) * (k1 - 2.0*k2 + k3)
+        ay = np.abs(y); ayN = np.abs(y_new)
+        scale = atol + rtol * np.maximum(ay, ayN)
+        e = np.where(scale > 0, np.abs(err) / np.maximum(scale, 1e-300), 0.0)
+        normerr = float(np.max(e)) if e.size else 0.0
+        if normerr <= 1.0:
+            n_acc += 1
+            if user_grid:
+                while next_tgt < n_targets:
+                    tt = float(targets[next_tgt])
+                    in_range = (tt <= t + h) if forward else (tt >= t + h)
+                    if not in_range: break
+                    th_ = 0.0 if h == 0.0 else (tt - t) / h
+                    if next_tgt == n_targets - 1:
+                        Y_rows.append(y_new.copy())
+                    else:
+                        Y_rows.append(_ode_v_hermite(y, y_new, F0, F2, h, th_))
+                    T.append(tt); next_tgt += 1
+            else:
+                j = 1
+                while j <= refine:
+                    th_ = j / refine
+                    ti = t + h * th_
+                    if j == refine:
+                        Y_rows.append(y_new.copy())
+                    else:
+                        Y_rows.append(_ode_v_hermite(y, y_new, F0, F2, h, th_))
+                    T.append(ti); j += 1
+            t += h
+            y = y_new.copy()
+            if user_grid and next_tgt >= n_targets: break
+        else:
+            n_rej += 1
+        fac = 5.0 if normerr == 0.0 else 0.9 * (normerr ** (-1/3))
+        if fac < 0.2: fac = 0.2
+        if fac > 5.0: fac = 5.0
+        h *= fac
+        if max_step > 0:
+            if h >  max_step: h = max_step
+            if h < -max_step: h = -max_step
+    return T, np.array(Y_rows), n_acc, n_rej, n_fev
+
+def _ode23s_compute(f, tspan, y0, rtol=1e-3, atol=1e-6,
+                     max_step=0.0, init_step=0.0, refine=1, print_stats=False):
+    ts = np.asarray(tspan, dtype=float).ravel()
+    targets = ts.tolist()
+    key = (235, id(f), tuple(targets), float(y0),
+           float(rtol), float(atol), float(max_step), float(init_step),
+           int(refine), bool(print_stats))
+    if _ode_cache["key"] == key:
+        return
+    T, Y, n_acc, n_rej, n_fev = _rosen_solve_23s_scalar(
+        f, targets, y0, rtol, atol, max_step, init_step, refine)
+    _ode_cache["key"] = key
+    _ode_cache["t"] = np.asarray(T, dtype=float).reshape((-1, 1))
+    _ode_cache["y"] = np.asarray(Y, dtype=float).reshape((-1, 1))
+    _ode_cache["n_acc"] = n_acc
+    _ode_cache["n_rej"] = n_rej
+    _ode_cache["n_fev"] = n_fev
+    if print_stats:
+        print(f"{n_acc} successful steps")
+        print(f"{n_rej} failed attempts")
+        print(f"{n_fev} function evaluations")
+
+def ode23s_t(f, tspan, y0):
+    _ode23s_compute(f, tspan, float(y0))
+    return _ode_cache["t"].copy()
+def ode23s_y(f, tspan, y0):
+    _ode23s_compute(f, tspan, float(y0))
+    return _ode_cache["y"].copy()
+def ode23s_t_opts(f, tspan, y0, opts):
+    rtol, atol, mxs, ins, rfn, ps = _ode_opts_resolve(opts, 1)
+    _ode23s_compute(f, tspan, float(y0), rtol, atol, mxs, ins, rfn, print_stats=ps)
+    return _ode_cache["t"].copy()
+def ode23s_y_opts(f, tspan, y0, opts):
+    rtol, atol, mxs, ins, rfn, ps = _ode_opts_resolve(opts, 1)
+    _ode23s_compute(f, tspan, float(y0), rtol, atol, mxs, ins, rfn, print_stats=ps)
+    return _ode_cache["y"].copy()
+def ode23s_stats(f, tspan, y0):
+    _ode23s_compute(f, tspan, float(y0))
+    return _ode_stats_struct()
+def ode23s_stats_opts(f, tspan, y0, opts):
+    rtol, atol, mxs, ins, rfn, ps = _ode_opts_resolve(opts, 1)
+    _ode23s_compute(f, tspan, float(y0), rtol, atol, mxs, ins, rfn, print_stats=ps)
+    return _ode_stats_struct()
+
+def _ode23s_v_compute(f, tspan, y0, rtol=1e-3, atol=1e-6,
+                       max_step=0.0, init_step=0.0, refine=1, print_stats=False):
+    ts = np.asarray(tspan, dtype=float).ravel()
+    targets = ts.tolist()
+    y0v = np.asarray(y0, dtype=float).ravel()
+    D = int(y0v.size)
+    key = (235, id(f), tuple(targets), tuple(y0v.tolist()),
+           float(rtol), float(atol), float(max_step), float(init_step),
+           int(refine), bool(print_stats))
+    if _ode_v_cache["key"] == key:
+        return
+    T, Y, n_acc, n_rej, n_fev = _rosen_solve_23s_vector(
+        f, targets, y0v, rtol, atol, max_step, init_step, refine)
+    _ode_v_cache["key"] = key
+    _ode_v_cache["t"] = np.asarray(T, dtype=float).reshape((-1, 1))
+    _ode_v_cache["y"] = Y if Y.size else np.zeros((0, D))
+    _ode_v_cache["n_acc"] = n_acc
+    _ode_v_cache["n_rej"] = n_rej
+    _ode_v_cache["n_fev"] = n_fev
+    _ode_v_cache["D"] = D
+    if print_stats:
+        print(f"{n_acc} successful steps")
+        print(f"{n_rej} failed attempts")
+        print(f"{n_fev} function evaluations")
+
+def ode23s_v_t(f, tspan, y0):
+    _ode23s_v_compute(f, tspan, y0); return _ode_v_cache["t"].copy()
+def ode23s_v_y(f, tspan, y0):
+    _ode23s_v_compute(f, tspan, y0); return _ode_v_cache["y"].copy()
+def ode23s_v_t_opts(f, tspan, y0, opts):
+    rtol, atol, mxs, ins, rfn, ps = _ode_opts_resolve(opts, 1)
+    _ode23s_v_compute(f, tspan, y0, rtol, atol, mxs, ins, rfn, print_stats=ps)
+    return _ode_v_cache["t"].copy()
+def ode23s_v_y_opts(f, tspan, y0, opts):
+    rtol, atol, mxs, ins, rfn, ps = _ode_opts_resolve(opts, 1)
+    _ode23s_v_compute(f, tspan, y0, rtol, atol, mxs, ins, rfn, print_stats=ps)
+    return _ode_v_cache["y"].copy()
+def ode23s_v_stats(f, tspan, y0):
+    _ode23s_v_compute(f, tspan, y0); return _ode_v_stats()
+def ode23s_v_stats_opts(f, tspan, y0, opts):
+    rtol, atol, mxs, ins, rfn, ps = _ode_opts_resolve(opts, 1)
+    _ode23s_v_compute(f, tspan, y0, rtol, atol, mxs, ins, rfn, print_stats=ps)
+    return _ode_v_stats()
+
+
 # --- Vector-y solvers ----------------------------------------------------
 # Same Dormand-Prince / Bogacki-Shampine pair as the scalar path, but
 # operating on D-component vectors. The user RHS takes a Dx1 column

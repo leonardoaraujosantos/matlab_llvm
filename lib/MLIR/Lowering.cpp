@@ -2237,9 +2237,10 @@ void Lowerer::lowerStmt(const Stmt &St) {
           else if ((CN == "eig" || CN == "qr" || CN == "lu" ||
                     CN == "svd") && A.LHS.size() >= 2)
             Rtys.assign(A.LHS.size(), PtrTy);
-          /* [t, y] = ode45(@f, tspan, y0) / ode23 — both column matrices.
-           * The 3-return form `[t, y, stats]` adds a struct (also ptr). */
-          else if ((CN == "ode45" || CN == "ode23") &&
+          /* [t, y] = ode45(@f, tspan, y0) / ode23 / ode23s — all column
+           * matrices. The 3-return form `[t, y, stats]` adds a struct
+           * (also ptr). */
+          else if ((CN == "ode45" || CN == "ode23" || CN == "ode23s") &&
                    (A.LHS.size() == 2 || A.LHS.size() == 3))
             Rtys.assign(A.LHS.size(), PtrTy);
           /* [row, col] = ind2sub(sz, i) — scalar f64s. */

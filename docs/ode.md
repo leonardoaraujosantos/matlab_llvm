@@ -1,9 +1,17 @@
 ## Initial-Value ODE Solvers
 
 `matlab_llvm` ships MATLAB-compatible initial-value problem (IVP)
-solvers as runtime builtins. Both `ode45` (Dormand–Prince 5(4)) and
-`ode23` (Bogacki–Shampine 3(2)) are first-class — no opt-in flag, they
-land in the standard runtime alongside `eig` / `fft` / `linspace`.
+solvers as runtime builtins. Three methods are first-class — no opt-in
+flag, they land in the standard runtime alongside `eig` / `fft` /
+`linspace`:
+
+- **`ode45`** — Dormand–Prince 5(4). Default non-stiff solver.
+- **`ode23`** — Bogacki–Shampine 3(2). Lower order, fewer stages.
+- **`ode23s`** — Rosenbrock 2(3) (Shampine). **Stiff solver.** Uses one
+  numerical-FD Jacobian per accepted step plus three linear solves; the
+  implicit factor `(I − h·d·J)` absorbs stiff modes that would force
+  tiny explicit steps. Use when `ode45` collapses to micro-steps or
+  blows up on a stiff system.
 
 ## Quick start
 
@@ -27,6 +35,16 @@ disp(y(end, 2));     % 0.00108095 ≈ sin(2π)
 ```
 
 `Y` is laid out N rows × D cols — `y(i, :)` is the state at `t(i)`.
+
+Stiff system — Robertson reaction kinetics:
+
+```matlab
+f = @(t,y) [(0 - 0.04*y(1) + 1e4*y(2)*y(3));
+            (0.04*y(1) - 1e4*y(2)*y(3) - 3e7*y(2)*y(2));
+            (3e7*y(2)*y(2))];
+[t, y, stats] = ode23s(f, [0 1], [1; 0; 0]);
+disp(stats.nsteps);   % ~9 — ode45 would need thousands or diverge
+```
 
 ## Call shapes
 
@@ -149,12 +167,18 @@ Bit-identical output across all three runtimes on the smoke ODEs.
 Tracked separately in [`feature_status.md`](feature_status.md) and
 [`roadmap.md`](roadmap.md). Highlights:
 
-- Stiff solvers (`ode15s`, `ode23s`, `ode23t`, `ode23tb`, `ode15i`).
+- Higher-order BDF stiff solver (`ode15s`) — `ode23s` is now shipped;
+  `ode15s` is the next stiff-solver step (variable-order BDF + Newton
+  iteration), more efficient than Rosenbrock on the very stiff end.
+- Other stiff variants (`ode23t`, `ode23tb`, `ode15i` for DAEs).
 - Non-stiff multistep (`ode113`) and high-order (`ode78`, `ode89`).
 - BVP (`bvp4c`, `bvp5c`), DDE (`dde23`), DAE-with-mass-matrix.
 - `Events` (root-finding + 5-return form).
 - `OutputFcn` callback.
-- Numerical PDE (`pdepe`, finite-element). The shipped `pdsolve` family
-  lives in the symbolic toolbox and returns closed-form expressions, not
-  numerical grids — see [`sym.md`](sym.md).
-- Vector `y` via *named* user functions (anon-only today).
+- Numerical PDE (`pdepe`, finite-element). With `ode23s` shipped, a
+  method-of-lines `pdepe` wrapper becomes feasible; `ode15s` would make
+  it more efficient on stiff parabolic problems. The shipped `pdsolve`
+  family lives in the symbolic toolbox and returns closed-form
+  expressions, not numerical grids — see [`sym.md`](sym.md).
+- Vector `y` via *named* user functions (anon-only today; works for
+  every solver).

@@ -109,3 +109,20 @@ disp(y7(1, 2));
 disp('  final state y(end, :) — should be ≈ [1; 0] (cos/sin of 2π):');
 disp(y7(end, 1));
 disp(y7(end, 2));
+
+% --- 8. Stiff system: ode23s (Rosenbrock 2(3)) -------------------------
+% Robertson reaction kinetics — three-component system with rate
+% constants 0.04, 1e4, 3e7 (eight orders of magnitude apart). ode45
+% would either take thousands of micro-steps or diverge; ode23s
+% absorbs the stiff modes via the implicit (I - h*d*J) factor and
+% finishes in tens of steps with mass conservation y1+y2+y3 = 1.
+
+disp('8. ode23s — Robertson stiff system');
+fr = @(t,y) [(0 - 0.04*y(1) + 1e4*y(2)*y(3));
+             (0.04*y(1) - 1e4*y(2)*y(3) - 3e7*y(2)*y(2));
+             (3e7*y(2)*y(2))];
+[t8, y8, s8] = ode23s(fr, [0 1], [1; 0; 0]);
+disp('  number of accepted steps:');
+disp(s8.nsteps);
+disp('  conservation y1+y2+y3 at t=1 (should be 1):');
+disp(y8(end, 1) + y8(end, 2) + y8(end, 3));

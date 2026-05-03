@@ -6877,6 +6877,14 @@ static void rk_solve_bs23(ode_rhs_t f,
  * other half without re-running the solver. `print_stats` triggers a
  * MATLAB-style summary at the end of integration; only fires on the
  * actual-solve path so the paired _t/_y calls don't print twice. */
+static void rosen_solve_23s(ode_rhs_t f,
+                             const double *targets, int64_t n_targets,
+                             double y0,
+                             double rtol, double atol,
+                             double max_step, double init_step, int refine,
+                             double **T, double **Y, int64_t *N,
+                             int *out_n_acc, int *out_n_rej, int *out_n_fev);
+
 static void ode_compute(int kind, ode_rhs_t f, matlab_mat *tspan, double y0,
                         double rtol, double atol,
                         double max_step, double init_step, int refine,
@@ -6924,6 +6932,11 @@ static void ode_compute(int kind, ode_rhs_t f, matlab_mat *tspan, double y0,
                                        rtol, atol, max_step, init_step,
                                        refine, &Tb, &Yb, &n,
                                        &n_acc, &n_rej, &n_fev);
+        else if (kind == 235)
+                        rosen_solve_23s(f, tspan->data, n_tgt, y0,
+                                        rtol, atol, max_step, init_step,
+                                        refine, &Tb, &Yb, &n,
+                                        &n_acc, &n_rej, &n_fev);
         else            rk_solve_bs23(f, tspan->data, n_tgt, y0,
                                        rtol, atol, max_step, init_step,
                                        refine, &Tb, &Yb, &n,
@@ -7479,6 +7492,14 @@ static void rk_solve_bs23_v(ode_rhs_v_t f,
     mat_free_(yt);
 }
 
+static void rosen_solve_23s_v(ode_rhs_v_t f,
+                               const double *targets, int64_t n_targets,
+                               const double *y0, int64_t D,
+                               double rtol, double atol,
+                               double max_step, double init_step, int refine,
+                               double **T, double **Y, int64_t *N,
+                               int *out_n_acc, int *out_n_rej, int *out_n_fev);
+
 /* Vector cache-aware dispatch. Mirrors ode_compute. The cache is a
  * separate slot from the scalar one (different ABI); both can be live
  * simultaneously since the user picks a path by y0 type. */
@@ -7522,6 +7543,12 @@ static void ode_v_compute(int kind, ode_rhs_v_t f, matlab_mat *tspan,
         int64_t n = 0;
         int n_acc = 0, n_rej = 0, n_fev = 0;
         if (kind == 45) rk_solve_dp45_v(f, tspan->data, n_tgt,
+                                          y0->data, D,
+                                          rtol, atol, max_step, init_step,
+                                          refine, &Tb, &Yb, &n,
+                                          &n_acc, &n_rej, &n_fev);
+        else if (kind == 235)
+                        rosen_solve_23s_v(f, tspan->data, n_tgt,
                                           y0->data, D,
                                           rtol, atol, max_step, init_step,
                                           refine, &Tb, &Yb, &n,
@@ -7652,6 +7679,42 @@ matlab_struct *matlab_ode23_v_stats_opts(ode_rhs_v_t f, matlab_mat *tspan,
     return ode_v_stats_struct_from_cache();
 }
 
+/* Vector ode23s public entries. */
+matlab_mat *matlab_ode23s_v_t(ode_rhs_v_t f, matlab_mat *tspan, matlab_mat *y0) {
+    ode_v_compute(235, f, tspan, y0, 1e-3, 1e-6, 0.0, 0.0, 1, 0);
+    return mat_clone_(ode_v_cache_.t);
+}
+matlab_mat *matlab_ode23s_v_y(ode_rhs_v_t f, matlab_mat *tspan, matlab_mat *y0) {
+    ode_v_compute(235, f, tspan, y0, 1e-3, 1e-6, 0.0, 0.0, 1, 0);
+    return mat_clone_(ode_v_cache_.y);
+}
+matlab_mat *matlab_ode23s_v_t_opts(ode_rhs_v_t f, matlab_mat *tspan,
+                                     matlab_mat *y0, matlab_struct *opts) {
+    double rtol, atol, mxs, ins; int rfn, ps;
+    ode_opts_resolve(opts, &rtol, &atol, &mxs, &ins, &rfn, 1, &ps);
+    ode_v_compute(235, f, tspan, y0, rtol, atol, mxs, ins, rfn, ps);
+    return mat_clone_(ode_v_cache_.t);
+}
+matlab_mat *matlab_ode23s_v_y_opts(ode_rhs_v_t f, matlab_mat *tspan,
+                                     matlab_mat *y0, matlab_struct *opts) {
+    double rtol, atol, mxs, ins; int rfn, ps;
+    ode_opts_resolve(opts, &rtol, &atol, &mxs, &ins, &rfn, 1, &ps);
+    ode_v_compute(235, f, tspan, y0, rtol, atol, mxs, ins, rfn, ps);
+    return mat_clone_(ode_v_cache_.y);
+}
+matlab_struct *matlab_ode23s_v_stats(ode_rhs_v_t f, matlab_mat *tspan,
+                                      matlab_mat *y0) {
+    ode_v_compute(235, f, tspan, y0, 1e-3, 1e-6, 0.0, 0.0, 1, 0);
+    return ode_v_stats_struct_from_cache();
+}
+matlab_struct *matlab_ode23s_v_stats_opts(ode_rhs_v_t f, matlab_mat *tspan,
+                                            matlab_mat *y0, matlab_struct *opts) {
+    double rtol, atol, mxs, ins; int rfn, ps;
+    ode_opts_resolve(opts, &rtol, &atol, &mxs, &ins, &rfn, 1, &ps);
+    ode_v_compute(235, f, tspan, y0, rtol, atol, mxs, ins, rfn, ps);
+    return ode_v_stats_struct_from_cache();
+}
+
 /* Build a fresh stats struct from the cache slot. Field names match
  * MATLAB's `[t,y,sol] = ode45(...)` solver-stats fields. */
 static matlab_struct *ode_stats_struct_from_cache(void) {
@@ -7690,6 +7753,454 @@ matlab_struct *matlab_ode23_stats_opts(ode_rhs_t f, matlab_mat *tspan,
     ode_opts_resolve(opts, &rtol, &atol, &mxs, &ins, &rfn, /*default*/ 1, &ps);
     ode_compute(23, f, tspan, y0, rtol, atol, mxs, ins, rfn, ps);
     return ode_stats_struct_from_cache();
+}
+
+/* ode23s public entries (scalar y). Refine default = 1 matches MATLAB;
+ * users can request denser output via `opts.Refine = N`. */
+matlab_mat *matlab_ode23s_t(ode_rhs_t f, matlab_mat *tspan, double y0) {
+    ode_compute(235, f, tspan, y0, 1e-3, 1e-6, 0.0, 0.0, 1, 0);
+    return mat_clone_col(ode_cache_.t);
+}
+
+matlab_mat *matlab_ode23s_y(ode_rhs_t f, matlab_mat *tspan, double y0) {
+    ode_compute(235, f, tspan, y0, 1e-3, 1e-6, 0.0, 0.0, 1, 0);
+    return mat_clone_col(ode_cache_.y);
+}
+
+matlab_mat *matlab_ode23s_t_opts(ode_rhs_t f, matlab_mat *tspan, double y0,
+                                  matlab_struct *opts) {
+    double rtol, atol, mxs, ins; int rfn, ps;
+    ode_opts_resolve(opts, &rtol, &atol, &mxs, &ins, &rfn, /*default*/ 1, &ps);
+    ode_compute(235, f, tspan, y0, rtol, atol, mxs, ins, rfn, ps);
+    return mat_clone_col(ode_cache_.t);
+}
+
+matlab_mat *matlab_ode23s_y_opts(ode_rhs_t f, matlab_mat *tspan, double y0,
+                                  matlab_struct *opts) {
+    double rtol, atol, mxs, ins; int rfn, ps;
+    ode_opts_resolve(opts, &rtol, &atol, &mxs, &ins, &rfn, /*default*/ 1, &ps);
+    ode_compute(235, f, tspan, y0, rtol, atol, mxs, ins, rfn, ps);
+    return mat_clone_col(ode_cache_.y);
+}
+
+matlab_struct *matlab_ode23s_stats(ode_rhs_t f, matlab_mat *tspan, double y0) {
+    ode_compute(235, f, tspan, y0, 1e-3, 1e-6, 0.0, 0.0, 1, 0);
+    return ode_stats_struct_from_cache();
+}
+
+matlab_struct *matlab_ode23s_stats_opts(ode_rhs_t f, matlab_mat *tspan,
+                                         double y0, matlab_struct *opts) {
+    double rtol, atol, mxs, ins; int rfn, ps;
+    ode_opts_resolve(opts, &rtol, &atol, &mxs, &ins, &rfn, /*default*/ 1, &ps);
+    ode_compute(235, f, tspan, y0, rtol, atol, mxs, ins, rfn, ps);
+    return ode_stats_struct_from_cache();
+}
+
+/* =====================================================================
+ * ode23s — Rosenbrock 2(3) stiff solver (Shampine).
+ *
+ * Uses one Jacobian per accepted step (numerical via central finite-
+ * difference) and three "linear" stages — for scalar y the linear
+ * system reduces to a division by W = 1 - h*d*J. Where ode45/ode23
+ * blow up on stiff systems (eigenvalues of J with large negative real
+ * parts force tiny explicit steps), the Rosenbrock W-method stays
+ * stable because the implicit factor (I - h*d*J) absorbs the stiff
+ * modes.
+ *
+ * MATLAB's ode23s uses these same coefficients; output should match
+ * to within accept tolerance. Refine defaults to 1 (matches MATLAB).
+ * ===================================================================== */
+static void rosen_solve_23s(ode_rhs_t f,
+                             const double *targets, int64_t n_targets,
+                             double y0,
+                             double rtol, double atol,
+                             double max_step, double init_step, int refine,
+                             double **T, double **Y, int64_t *N,
+                             int *out_n_acc, int *out_n_rej, int *out_n_fev) {
+    const int max_steps = 100000;
+    int n_acc = 0, n_rej = 0, n_fev = 0;
+    if (refine < 1) refine = 1;
+    if (n_targets < 2) {
+        *T = NULL; *Y = NULL; *N = 0;
+        if (out_n_acc) *out_n_acc = 0;
+        if (out_n_rej) *out_n_rej = 0;
+        if (out_n_fev) *out_n_fev = 0;
+        return;
+    }
+    double t0 = targets[0], tf = targets[n_targets - 1];
+    int user_grid = (n_targets > 2);
+
+    int64_t cap = user_grid ? n_targets : 256;
+    double *Tb = (double *)malloc((size_t)cap * sizeof(double));
+    double *Yb = (double *)malloc((size_t)cap * sizeof(double));
+    int64_t n = 0;
+
+    double t = t0, y = y0;
+    ode_push(&Tb, &Yb, &n, &cap, t, y);
+    int64_t next_tgt = 1;
+
+    double span = tf - t0;
+    double h = (init_step > 0.0) ? (span >= 0.0 ? init_step : -init_step)
+                                 : span * 0.01;
+    if (h == 0.0 || span == 0.0) {
+        *T = Tb; *Y = Yb; *N = n;
+        if (out_n_acc) *out_n_acc = 0;
+        if (out_n_rej) *out_n_rej = 0;
+        if (out_n_fev) *out_n_fev = 0;
+        return;
+    }
+    int forward = h > 0;
+    if (max_step > 0.0) {
+        if (h >  max_step) h =  max_step;
+        if (h < -max_step) h = -max_step;
+    }
+
+    /* Rosenbrock-Shampine 2(3) coefficients. d = 1/(2+√2), e32 = 6+√2. */
+    const double SQRT2 = 1.41421356237309504880;
+    const double d_   = 1.0 / (2.0 + SQRT2);
+    const double e32  = 6.0 + SQRT2;
+    /* sqrt(eps) for the FD Jacobian step size. */
+    const double SQRT_EPS = 1.490116119384765625e-8;
+
+    int steps = 0;
+    while ((forward ? t < tf : t > tf) && steps < max_steps) {
+        ++steps;
+        if (forward ? (t + h > tf) : (t + h < tf)) h = tf - t;
+
+        double F0 = f(t, y);                                /* +1 fev */
+        /* Central-FD Jacobian: J = (f(t,y+δ) - f(t,y-δ)) / (2δ). */
+        double eps_step = SQRT_EPS * fmax(fabs(y), 1.0);
+        double Jp = f(t, y + eps_step);
+        double Jm = f(t, y - eps_step);                     /* +2 fevs */
+        n_fev += 3;
+        double J = (Jp - Jm) / (2.0 * eps_step);
+
+        double W = 1.0 - h * d_ * J;
+        if (W == 0.0) W = 1e-30;
+
+        /* Stage 1: W*k1 = F0  → scalar division. */
+        double k1 = F0 / W;
+
+        /* Stage 2: F1 = f(t+h/2, y+h*k1/2);  W*k2 = F1 - k1; k2 += k1. */
+        double F1 = f(t + 0.5*h, y + 0.5*h*k1);
+        ++n_fev;
+        double k2 = (F1 - k1) / W + k1;
+
+        /* Provisional solution (2nd order). */
+        double y_new = y + h * k2;
+
+        /* Stage 3 (for the embedded error estimate). */
+        double F2 = f(t + h, y_new);
+        ++n_fev;
+        double k3 = (F2 - e32 * (k2 - F1) - 2.0 * (k1 - F0)) / W;
+
+        double err   = (h / 6.0) * (k1 - 2.0 * k2 + k3);
+        double scale = atol + rtol * fmax(fabs(y), fabs(y_new));
+        double normerr = (scale > 0) ? fabs(err) / scale : 0.0;
+
+        if (normerr <= 1.0) {
+            ++n_acc;
+            /* Cubic-Hermite dense output using F0 (slope at t) and F2
+             * (slope at t+h). Same Hermite formula as the explicit
+             * solvers — works for any RK-style method as long as we
+             * have endpoint slopes. */
+            if (user_grid) {
+                while (next_tgt < n_targets) {
+                    double tt = targets[next_tgt];
+                    int in_range = forward ? (tt <= t + h) : (tt >= t + h);
+                    if (!in_range) break;
+                    double th = (h == 0.0) ? 0.0 : (tt - t) / h;
+                    double yi = (next_tgt == n_targets - 1)
+                        ? y_new
+                        : ode_hermite(y, y_new, F0, F2, h, th);
+                    ode_push(&Tb, &Yb, &n, &cap, tt, yi);
+                    ++next_tgt;
+                }
+            } else {
+                for (int j = 1; j <= refine; ++j) {
+                    double th = (double)j / (double)refine;
+                    double ti = t + h * th;
+                    double yi = (j == refine)
+                        ? y_new
+                        : ode_hermite(y, y_new, F0, F2, h, th);
+                    ode_push(&Tb, &Yb, &n, &cap, ti, yi);
+                }
+            }
+            t += h;
+            y  = y_new;
+            if (user_grid && next_tgt >= n_targets) break;
+        } else {
+            ++n_rej;
+        }
+
+        /* Order p = 2 for Rosenbrock23 → exponent -1/(p+1) = -1/3. */
+        double fac = (normerr == 0.0) ? 5.0
+                                      : 0.9 * pow(normerr, -1.0/3.0);
+        if (fac < 0.2) fac = 0.2;
+        if (fac > 5.0) fac = 5.0;
+        h *= fac;
+        if (max_step > 0.0) {
+            if (h >  max_step) h =  max_step;
+            if (h < -max_step) h = -max_step;
+        }
+    }
+
+    *T = Tb; *Y = Yb; *N = n;
+    if (out_n_acc) *out_n_acc = n_acc;
+    if (out_n_rej) *out_n_rej = n_rej;
+    if (out_n_fev) *out_n_fev = n_fev;
+}
+
+/* ---- Vector ode23s: Rosenbrock 2(3) for systems ----------------------
+ * Same Shampine pair; instead of dividing by W = 1 - h*d*J we factor
+ * the DxD matrix W = I - h*d*J once per step (LU + partial pivot) and
+ * back-solve three times — one per Rosenbrock stage. The Jacobian is
+ * built column-by-column via central FD: 2D extra f-evals per accepted
+ * step on top of the three stage evals. This is the same cost MATLAB's
+ * ode23s pays. */
+
+/* Doolittle LU with partial pivoting in-place on a DxD row-major buffer.
+ * perm[i] is the row that ends up at position i. Returns 0 on success,
+ * 1 on singular. */
+static int lu_factor_pp(double *A, int *perm, int D) {
+    for (int i = 0; i < D; ++i) perm[i] = i;
+    for (int k = 0; k < D; ++k) {
+        /* Pivot: find row r >= k with largest |A[r][k]|. */
+        int piv = k;
+        double maxv = fabs(A[k * D + k]);
+        for (int r = k + 1; r < D; ++r) {
+            double v = fabs(A[r * D + k]);
+            if (v > maxv) { maxv = v; piv = r; }
+        }
+        if (maxv < 1e-300) return 1;       /* effectively singular */
+        if (piv != k) {
+            for (int c = 0; c < D; ++c) {
+                double t = A[k * D + c]; A[k * D + c] = A[piv * D + c]; A[piv * D + c] = t;
+            }
+            int tp = perm[k]; perm[k] = perm[piv]; perm[piv] = tp;
+        }
+        double diag = A[k * D + k];
+        for (int r = k + 1; r < D; ++r) {
+            double m = A[r * D + k] / diag;
+            A[r * D + k] = m;
+            for (int c = k + 1; c < D; ++c)
+                A[r * D + c] -= m * A[k * D + c];
+        }
+    }
+    return 0;
+}
+
+/* Solve LU * x = b given the factorization in A and the row permutation.
+ * b is permuted in place; x receives the result. */
+static void lu_solve(const double *A, const int *perm, const double *b,
+                      double *x, int D) {
+    /* Apply permutation: y_perm[i] = b[perm[i]]. */
+    for (int i = 0; i < D; ++i) x[i] = b[perm[i]];
+    /* Forward substitute L (unit diagonal). */
+    for (int i = 1; i < D; ++i) {
+        double s = x[i];
+        for (int j = 0; j < i; ++j) s -= A[i * D + j] * x[j];
+        x[i] = s;
+    }
+    /* Back substitute U. */
+    for (int i = D - 1; i >= 0; --i) {
+        double s = x[i];
+        for (int j = i + 1; j < D; ++j) s -= A[i * D + j] * x[j];
+        x[i] = s / A[i * D + i];
+    }
+}
+
+static void rosen_solve_23s_v(ode_rhs_v_t f,
+                               const double *targets, int64_t n_targets,
+                               const double *y0, int64_t D,
+                               double rtol, double atol,
+                               double max_step, double init_step, int refine,
+                               double **T, double **Y, int64_t *N,
+                               int *out_n_acc, int *out_n_rej, int *out_n_fev) {
+    const int max_steps = 100000;
+    int n_acc = 0, n_rej = 0, n_fev = 0;
+    if (refine < 1) refine = 1;
+    if (n_targets < 2 || D <= 0) {
+        *T = NULL; *Y = NULL; *N = 0;
+        if (out_n_acc) *out_n_acc = 0;
+        if (out_n_rej) *out_n_rej = 0;
+        if (out_n_fev) *out_n_fev = 0;
+        return;
+    }
+    double t0 = targets[0], tf = targets[n_targets - 1];
+    int user_grid = (n_targets > 2);
+
+    int64_t cap = user_grid ? n_targets : 256;
+    double *Tb = (double *)malloc((size_t)cap * sizeof(double));
+    double *Yb = (double *)malloc((size_t)cap * (size_t)D * sizeof(double));
+    int64_t n = 0;
+
+    /* Working buffers. */
+    double *y    = (double *)malloc((size_t)D * sizeof(double));
+    double *y_new = (double *)malloc((size_t)D * sizeof(double));
+    double *F0 = (double *)malloc((size_t)D * sizeof(double));
+    double *F1 = (double *)malloc((size_t)D * sizeof(double));
+    double *F2 = (double *)malloc((size_t)D * sizeof(double));
+    double *Fp = (double *)malloc((size_t)D * sizeof(double));
+    double *Fm = (double *)malloc((size_t)D * sizeof(double));
+    double *k1 = (double *)malloc((size_t)D * sizeof(double));
+    double *k2 = (double *)malloc((size_t)D * sizeof(double));
+    double *k3 = (double *)malloc((size_t)D * sizeof(double));
+    double *stg = (double *)malloc((size_t)D * sizeof(double));
+    double *rhs = (double *)malloc((size_t)D * sizeof(double));
+    double *err = (double *)malloc((size_t)D * sizeof(double));
+    double *W   = (double *)malloc((size_t)D * (size_t)D * sizeof(double));
+    int    *perm = (int *)   malloc((size_t)D * sizeof(int));
+    matlab_mat *yt = mat_alloc(D, 1);
+
+    memcpy(y, y0, (size_t)D * sizeof(double));
+    double t = t0;
+    ode_v_push(&Tb, &Yb, &n, &cap, D, t, y);
+    int64_t next_tgt = 1;
+
+    double span = tf - t0;
+    double h = (init_step > 0.0) ? (span >= 0.0 ? init_step : -init_step)
+                                 : span * 0.01;
+    if (h == 0.0 || span == 0.0) {
+        *T = Tb; *Y = Yb; *N = n;
+        free(y); free(y_new); free(F0); free(F1); free(F2);
+        free(Fp); free(Fm); free(k1); free(k2); free(k3);
+        free(stg); free(rhs); free(err); free(W); free(perm);
+        mat_free_(yt);
+        if (out_n_acc) *out_n_acc = 0;
+        if (out_n_rej) *out_n_rej = 0;
+        if (out_n_fev) *out_n_fev = 0;
+        return;
+    }
+    int forward = h > 0;
+    if (max_step > 0.0) {
+        if (h >  max_step) h =  max_step;
+        if (h < -max_step) h = -max_step;
+    }
+
+    const double SQRT2 = 1.41421356237309504880;
+    const double d_   = 1.0 / (2.0 + SQRT2);
+    const double e32  = 6.0 + SQRT2;
+    const double SQRT_EPS = 1.490116119384765625e-8;
+
+    int steps = 0;
+    while ((forward ? t < tf : t > tf) && steps < max_steps) {
+        ++steps;
+        if (forward ? (t + h > tf) : (t + h < tf)) h = tf - t;
+
+        /* F0 = f(t, y). */
+        ode_v_call(f, t, y, D, yt, F0);
+        ++n_fev;
+
+        /* Build Jacobian column-by-column via central FD. */
+        for (int64_t j = 0; j < D; ++j) {
+            double yj = y[j];
+            double dj = SQRT_EPS * fmax(fabs(yj), 1.0);
+            memcpy(stg, y, (size_t)D * sizeof(double));
+            stg[j] = yj + dj;
+            ode_v_call(f, t, stg, D, yt, Fp);
+            stg[j] = yj - dj;
+            ode_v_call(f, t, stg, D, yt, Fm);
+            n_fev += 2;
+            double inv2dj = 1.0 / (2.0 * dj);
+            for (int64_t i = 0; i < D; ++i)
+                W[i * D + j] = -h * d_ * (Fp[i] - Fm[i]) * inv2dj;
+        }
+        for (int64_t i = 0; i < D; ++i) W[i * D + i] += 1.0;
+
+        /* Factor W = I - h*d*J once. */
+        if (lu_factor_pp(W, perm, (int)D) != 0) {
+            /* Singular: shrink step and reject. */
+            ++n_rej;
+            h *= 0.5;
+            if (forward ? (h <= 0) : (h >= 0)) break;
+            continue;
+        }
+
+        /* Stage 1: W * k1 = F0. */
+        lu_solve(W, perm, F0, k1, (int)D);
+
+        /* Stage 2: F1 = f(t + h/2, y + h*k1/2);  W * k2 = F1 - k1; k2 += k1. */
+        for (int64_t i = 0; i < D; ++i) stg[i] = y[i] + 0.5 * h * k1[i];
+        ode_v_call(f, t + 0.5 * h, stg, D, yt, F1);
+        ++n_fev;
+        for (int64_t i = 0; i < D; ++i) rhs[i] = F1[i] - k1[i];
+        lu_solve(W, perm, rhs, k2, (int)D);
+        for (int64_t i = 0; i < D; ++i) k2[i] += k1[i];
+
+        /* Provisional solution. */
+        for (int64_t i = 0; i < D; ++i) y_new[i] = y[i] + h * k2[i];
+
+        /* Stage 3 (for error). */
+        ode_v_call(f, t + h, y_new, D, yt, F2);
+        ++n_fev;
+        for (int64_t i = 0; i < D; ++i)
+            rhs[i] = F2[i] - e32 * (k2[i] - F1[i]) - 2.0 * (k1[i] - F0[i]);
+        lu_solve(W, perm, rhs, k3, (int)D);
+
+        /* Error: (h/6) * (k1 - 2*k2 + k3). Inf-norm of err / scale. */
+        double normerr = 0.0;
+        for (int64_t i = 0; i < D; ++i) {
+            err[i] = (h / 6.0) * (k1[i] - 2.0 * k2[i] + k3[i]);
+            double scale = atol + rtol * fmax(fabs(y[i]), fabs(y_new[i]));
+            double e = (scale > 0) ? fabs(err[i]) / scale : 0.0;
+            if (e > normerr) normerr = e;
+        }
+
+        if (normerr <= 1.0) {
+            ++n_acc;
+            if (user_grid) {
+                while (next_tgt < n_targets) {
+                    double tt = targets[next_tgt];
+                    int in_range = forward ? (tt <= t + h) : (tt >= t + h);
+                    if (!in_range) break;
+                    double th = (h == 0.0) ? 0.0 : (tt - t) / h;
+                    if (next_tgt == n_targets - 1) {
+                        ode_v_push(&Tb, &Yb, &n, &cap, D, tt, y_new);
+                    } else {
+                        ode_v_hermite(y, y_new, F0, F2, h, th, D, stg);
+                        ode_v_push(&Tb, &Yb, &n, &cap, D, tt, stg);
+                    }
+                    ++next_tgt;
+                }
+            } else {
+                for (int j = 1; j <= refine; ++j) {
+                    double th = (double)j / (double)refine;
+                    double ti = t + h * th;
+                    if (j == refine) {
+                        ode_v_push(&Tb, &Yb, &n, &cap, D, ti, y_new);
+                    } else {
+                        ode_v_hermite(y, y_new, F0, F2, h, th, D, stg);
+                        ode_v_push(&Tb, &Yb, &n, &cap, D, ti, stg);
+                    }
+                }
+            }
+            t += h;
+            memcpy(y, y_new, (size_t)D * sizeof(double));
+            if (user_grid && next_tgt >= n_targets) break;
+        } else {
+            ++n_rej;
+        }
+
+        double fac = (normerr == 0.0) ? 5.0
+                                      : 0.9 * pow(normerr, -1.0/3.0);
+        if (fac < 0.2) fac = 0.2;
+        if (fac > 5.0) fac = 5.0;
+        h *= fac;
+        if (max_step > 0.0) {
+            if (h >  max_step) h =  max_step;
+            if (h < -max_step) h = -max_step;
+        }
+    }
+
+    *T = Tb; *Y = Yb; *N = n;
+    if (out_n_acc) *out_n_acc = n_acc;
+    if (out_n_rej) *out_n_rej = n_rej;
+    if (out_n_fev) *out_n_fev = n_fev;
+    free(y); free(y_new); free(F0); free(F1); free(F2);
+    free(Fp); free(Fm); free(k1); free(k2); free(k3);
+    free(stg); free(rhs); free(err); free(W); free(perm);
+    mat_free_(yt);
 }
 
 } /* extern "C" */

@@ -223,6 +223,7 @@ See [`docs/ode.md`](ode.md) for the full surface, ABI notes, and call shapes.
 |---|:-:|---|
 | `ode45` (Dormand–Prince 5(4)) | ✅ | Adaptive FSAL; cubic-Hermite dense output (Refine = 4 default). |
 | `ode23` (Bogacki–Shampine 3(2)) | ✅ | Same shape as `ode45`; Refine = 1 default. |
+| `ode23s` (Rosenbrock 2(3), Shampine — **stiff solver**) | ✅ | One numerical-FD Jacobian per accepted step + three linear solves; the `(I − h·d·J)` factor absorbs stiff modes. Solves Robertson kinetics in ~9 steps where `ode45` would diverge. Scalar and vector `y`; same odeset surface; same call shapes. |
 | Scalar `y` — `[t, y] = ode45(@(t,y) -2*y + sin(t), [0 10], 1)` | ✅ | |
 | Vector `y` — `[t, y] = ode45(@(t,y) [-y(2); y(1)], [0 2*pi], [1; 0])` | ✅ | Anon-handle path only (the `LowerAnonCalls` pre-pass retypes the `y` block arg from f64 to ptr when the call site has matrix `y0`). Named-function handles (`@oscillator`) still blocked by the LowerUserCalls signature gate. |
 | Backward integration (`tspan = [t1 t0]` with `t1 > t0`) | ✅ | |
@@ -230,7 +231,7 @@ See [`docs/ode.md`](ode.md) for the full surface, ABI notes, and call shapes.
 | 3-return form `[t, y, stats] = ode45(...)` | ✅ | `stats` is a struct with `nsteps` / `nfailed` / `nfevals`. |
 | `odeset` fields: `RelTol`, `AbsTol`, `MaxStep`, `InitialStep`, `Refine`, `Stats` | ✅ | `Stats = 1` numeric flag (deviates from MATLAB's `'on'` string — see [`ode.md`](ode.md)). |
 | `odeset` fields: `Events`, `OutputFcn`, `Jacobian`, `Mass`, `NonNegative`, `NormControl` | ❌ | Silently ignored. |
-| Stiff solvers (`ode15s`, `ode23s`, `ode23t`, `ode23tb`, `ode15i`) | ❌ | |
+| Higher-order stiff (`ode15s`, `ode23t`, `ode23tb`, `ode15i`) | ❌ | `ode15s` (variable-order BDF + Newton) is the natural next step on top of the shipped `ode23s` infrastructure. |
 | Non-stiff multistep (`ode113`) and high-order (`ode78`, `ode89`) | ❌ | |
 | BVP (`bvp4c`, `bvp5c`), DDE (`dde23`) | ❌ | |
 | Numerical PDE (`pdepe`, FEM) | ❌ | The symbolic `pdsolve` family ships separately — closed-form, not numerical (see [`sym.md`](sym.md)). |

@@ -582,7 +582,7 @@ static bool retypeAnonsForVectorODE(ModuleOp M) {
     auto Cn = Op->getAttrOfType<StringAttr>("callee");
     if (!Cn) return;
     StringRef Name = Cn.getValue();
-    if (Name != "ode45" && Name != "ode23") return;
+    if (Name != "ode45" && Name != "ode23" && Name != "ode23s") return;
     if (Op->getNumOperands() < 3) return;
     Calls.push_back(Op);
   });

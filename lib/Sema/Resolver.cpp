@@ -87,8 +87,9 @@ void Resolver::registerBuiltins() {
     "svd", "eig", "inv", "pinv", "det", "rank", "cond",
     "qr", "lu", "chol", "norm", "trace", "kron",
     "arrayfun", "cellfun",
-    /* Initial-value ODE solvers — see runtime/matlab_runtime.cpp. */
-    "ode45", "ode23",
+    /* Initial-value ODE solvers — see runtime/matlab_runtime.cpp.
+     * ode23s is the Rosenbrock stiff solver (scalar y only). */
+    "ode45", "ode23", "ode23s",
     "nargin", "nargout", "varargin", "varargout",
     "fopen", "fclose", "fgetl", "feof",
     "fread", "fwrite",
