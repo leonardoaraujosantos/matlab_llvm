@@ -2836,7 +2836,13 @@ def ode23s_v_stats_opts(f, tspan, y0, opts):
 # on the user xmesh + ode23s_v under the hood.
 
 _pdepe_ctx = {"pdefn": None, "bcfn": None, "xmesh": None, "Nx": 0,
-              "err": 0}
+              "m": 0, "err": 0}
+
+def _pdepe_xpow(x, m):
+    if m == 0: return 1.0
+    if m == 1: return x
+    if m == 2: return x * x
+    return x ** m
 
 def _pdepe_eval_bc(t, ul, ur):
     """Evaluate the user's bcfun at current boundary values; return
@@ -2883,6 +2889,13 @@ def _pdepe_rhs(t, Ufull):
         rrarr = np.asarray(rr, dtype=float).ravel()
         flx[i] = rrarr[1] if rrarr.size >= 2 else 0.0
         i += 1
+    mm = _pdepe_ctx["m"]
+    if mm != 0:
+        i = 0
+        while i < Nx - 1:
+            xm = 0.5 * (xmesh[i] + xmesh[i + 1])
+            flx[i] *= _pdepe_xpow(xm, mm)
+            i += 1
     out = np.zeros((Nx, 1))
     # Left boundary node 0.
     if dirichlet_left:
@@ -2896,7 +2909,10 @@ def _pdepe_rhs(t, Ufull):
         s = rrarr[2] if rrarr.size >= 3 else 0.0
         if c == 0.0: c = 1e-30
         cell_w = 0.5 * (xmesh[1] - xmesh[0])
-        out[0, 0] = ((flx[0] - f_left_bdy) / cell_w + s) / c
+        xpow_l = _pdepe_xpow(xi, mm)
+        f_l_bdy_w = f_left_bdy * xpow_l if mm != 0 else f_left_bdy
+        inv_xpow = 0.0 if xpow_l == 0.0 else (1.0 / xpow_l)
+        out[0, 0] = (((flx[0] - f_l_bdy_w) / cell_w) * inv_xpow + s) / c
     # Interior nodes.
     i = 1
     while i < Nx - 1:
@@ -2909,7 +2925,9 @@ def _pdepe_rhs(t, Ufull):
         if c == 0.0: c = 1e-30
         dx_avg = 0.5 * (xmesh[i + 1] - xmesh[i - 1])
         dflux = flx[i] - flx[i - 1]
-        out[i, 0] = (dflux / dx_avg + s) / c
+        xpow_i = _pdepe_xpow(xi, mm)
+        inv_xpow = 0.0 if xpow_i == 0.0 else (1.0 / xpow_i)
+        out[i, 0] = ((dflux / dx_avg) * inv_xpow + s) / c
         i += 1
     # Right boundary node Nx-1.
     if dirichlet_right:
@@ -2923,7 +2941,10 @@ def _pdepe_rhs(t, Ufull):
         s = rrarr[2] if rrarr.size >= 3 else 0.0
         if c == 0.0: c = 1e-30
         cell_w = 0.5 * (xmesh[Nx - 1] - xmesh[Nx - 2])
-        out[Nx - 1, 0] = ((f_right_bdy - flx[Nx - 2]) / cell_w + s) / c
+        xpow_r = _pdepe_xpow(xi, mm)
+        f_r_bdy_w = f_right_bdy * xpow_r if mm != 0 else f_right_bdy
+        inv_xpow = 0.0 if xpow_r == 0.0 else (1.0 / xpow_r)
+        out[Nx - 1, 0] = (((f_r_bdy_w - flx[Nx - 2]) / cell_w) * inv_xpow + s) / c
     return out
 
 def pdepe(m, pdefn, icfn, bcfn, xmesh, tspan):
@@ -2933,12 +2954,19 @@ def pdepe(m, pdefn, icfn, bcfn, xmesh, tspan):
     ts = np.asarray(tspan, dtype=float).ravel()
     Nx = int(xs.size); Nt = int(ts.size)
     if Nx < 3 or Nt < 2: return np.zeros((0, 0))
-    if float(m) != 0.0:  return np.zeros((0, 0))
+    mi = int(m)
+    if mi < 0 or mi > 2 or float(mi) != float(m): return np.zeros((0, 0))
+    if mi != 0 and xs[0] <= 0.0: return np.zeros((0, 0))
     _pdepe_ctx["pdefn"] = pdefn
     _pdepe_ctx["bcfn"]  = bcfn
     _pdepe_ctx["xmesh"] = xs
     _pdepe_ctx["Nx"]    = Nx
+    _pdepe_ctx["m"]     = mi
     _pdepe_ctx["err"]   = 0
+    # Invalidate the ode23s_v cache: same _pdepe_rhs / y0 across pdepe
+    # calls would otherwise return a stale solution when only the
+    # pdepe context (m, bcfn, …) changed.
+    _ode_v_cache["key"] = None
     # Initial state covers ALL mesh points.
     u0 = np.zeros(Nx)
     j = 0

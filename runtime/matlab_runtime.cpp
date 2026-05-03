@@ -8240,8 +8240,18 @@ struct pdepe_ctx {
     pdepe_bcfn_t  bcfn;
     const double *xmesh;
     int64_t Nx;
-    int err_flag;       /* 0 ok; 1 BC eval failed; 2 Neumann not supported */
+    int m;              /* 0 = Cartesian, 1 = cylindrical, 2 = spherical */
+    int err_flag;       /* 0 ok; 1 BC eval failed                       */
 };
+
+/* x^m for the supported symmetry settings. Avoids pow() overhead for the
+ * three common values. */
+static inline double pdepe_xpow(double x, int m) {
+    if (m == 0) return 1.0;
+    if (m == 1) return x;
+    if (m == 2) return x * x;
+    return pow(x, (double)m);
+}
 #if defined(__GNUC__) || defined(__clang__)
 __thread struct pdepe_ctx pdepe_ctx_;
 #else
@@ -8325,6 +8335,18 @@ static matlab_mat *pdepe_rhs(double t, matlab_mat *Ufull) {
 
     matlab_mat *out = mat_alloc(Nx, 1);
 
+    /* For m > 0 (cylindrical / spherical), weight fluxes by x^m at
+     * midpoints and divide the divergence by x_i^m at nodes. m = 0 is
+     * a no-op (xpow ≡ 1). */
+    int mm = pdepe_ctx_.m;
+    /* Pre-multiply midpoint fluxes by x_{i+1/2}^m. */
+    if (mm != 0) {
+        for (int64_t i = 0; i < Nx - 1; ++i) {
+            double xm = 0.5 * (pdepe_ctx_.xmesh[i] + pdepe_ctx_.xmesh[i + 1]);
+            flx[i] *= pdepe_xpow(xm, mm);
+        }
+    }
+
     /* Left boundary node 0. */
     if (dirichlet_left) {
         out->data[0] = 0.0;
@@ -8339,7 +8361,10 @@ static matlab_mat *pdepe_rhs(double t, matlab_mat *Ufull) {
         if (r) mat_free_(r);
         if (c == 0.0) c = 1e-30;
         double cell_w = 0.5 * (pdepe_ctx_.xmesh[1] - pdepe_ctx_.xmesh[0]);
-        out->data[0] = ((flx[0] - f_left_bdy) / cell_w + s) / c;
+        double xpow_l = pdepe_xpow(xi, mm);
+        double f_l_bdy_w = (mm != 0) ? f_left_bdy * xpow_l : f_left_bdy;
+        double inv_xpow = (xpow_l == 0.0) ? 0.0 : (1.0 / xpow_l);
+        out->data[0] = (((flx[0] - f_l_bdy_w) / cell_w) * inv_xpow + s) / c;
     }
 
     /* Interior nodes i = 1 .. Nx-2. */
@@ -8355,7 +8380,9 @@ static matlab_mat *pdepe_rhs(double t, matlab_mat *Ufull) {
         if (c == 0.0) c = 1e-30;
         double dx_avg = 0.5 * (pdepe_ctx_.xmesh[i + 1] - pdepe_ctx_.xmesh[i - 1]);
         double dflux  = flx[i] - flx[i - 1];
-        out->data[i] = (dflux / dx_avg + s) / c;
+        double xpow_i = pdepe_xpow(xi, mm);
+        double inv_xpow = (xpow_i == 0.0) ? 0.0 : (1.0 / xpow_i);
+        out->data[i] = ((dflux / dx_avg) * inv_xpow + s) / c;
     }
 
     /* Right boundary node Nx-1. */
@@ -8372,7 +8399,10 @@ static matlab_mat *pdepe_rhs(double t, matlab_mat *Ufull) {
         if (r) mat_free_(r);
         if (c == 0.0) c = 1e-30;
         double cell_w = 0.5 * (pdepe_ctx_.xmesh[Nx - 1] - pdepe_ctx_.xmesh[Nx - 2]);
-        out->data[Nx - 1] = ((f_right_bdy - flx[Nx - 2]) / cell_w + s) / c;
+        double xpow_r = pdepe_xpow(xi, mm);
+        double f_r_bdy_w = (mm != 0) ? f_right_bdy * xpow_r : f_right_bdy;
+        double inv_xpow = (xpow_r == 0.0) ? 0.0 : (1.0 / xpow_r);
+        out->data[Nx - 1] = (((f_r_bdy_w - flx[Nx - 2]) / cell_w) * inv_xpow + s) / c;
     }
 
     free(u);
@@ -8387,10 +8417,12 @@ matlab_mat *matlab_pdepe(double m, void *pdefn_p, void *icfn_p, void *bcfn_p,
     int64_t Nx = xmesh->rows * xmesh->cols;
     int64_t Nt = tspan->rows * tspan->cols;
     if (Nx < 3 || Nt < 2) return mat_alloc(0, 0);
-    if (m != 0.0) {
-        /* m != 0 (cylindrical/spherical) deferred to follow-up. */
-        return mat_alloc(0, 0);
-    }
+    int mi = (int)m;
+    if (mi < 0 || mi > 2 || (double)mi != m) return mat_alloc(0, 0);
+    /* For m > 0 the discretization divides by x^m at each node — the
+     * mesh must be strictly positive. (MATLAB allows xmesh[0] = 0 with
+     * a special axis-of-symmetry treatment; deferred to follow-up.) */
+    if (mi != 0 && xmesh->data[0] <= 0.0) return mat_alloc(0, 0);
 
     pdepe_pdefn_t pdefn = (pdepe_pdefn_t)pdefn_p;
     pdepe_icfn_t  icfn  = (pdepe_icfn_t)icfn_p;
@@ -8400,7 +8432,19 @@ matlab_mat *matlab_pdepe(double m, void *pdefn_p, void *icfn_p, void *bcfn_p,
     pdepe_ctx_.bcfn  = bcfn;
     pdepe_ctx_.xmesh = xmesh->data;
     pdepe_ctx_.Nx    = Nx;
+    pdepe_ctx_.m     = mi;
     pdepe_ctx_.err_flag = 0;
+    /* Invalidate the ode23s_v cache: successive pdepe calls share the
+     * same _pdepe_rhs fn pointer and may share the same y0 values, so
+     * the cache key would otherwise hit stale solutions when only the
+     * pdepe context (m, bcfn, …) changed. */
+    if (ode_v_cache_.valid) {
+        if (ode_v_cache_.t) { free(ode_v_cache_.t->data); free(ode_v_cache_.t); }
+        if (ode_v_cache_.y) { free(ode_v_cache_.y->data); free(ode_v_cache_.y); }
+        ode_v_cache_.t = NULL;
+        ode_v_cache_.y = NULL;
+        ode_v_cache_.valid = 0;
+    }
 
     /* Initial state covers ALL mesh points (boundaries included). */
     matlab_mat *u0 = mat_alloc(Nx, 1);

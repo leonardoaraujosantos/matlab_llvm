@@ -3571,7 +3571,14 @@ type PdeIcfn  = (x: number) => number;
 type PdeBcfn  = (xl: number, ul: number, xr: number, ur: number, t: number) => any;
 
 let _pdepeCtx: { pdefn: PdePdefn; bcfn: PdeBcfn; xmesh: Float64Array;
-                  Nx: number; err: number } | null = null;
+                  Nx: number; m: number; err: number } | null = null;
+
+function _pdepeXpow(x: number, m: number): number {
+  if (m === 0) return 1;
+  if (m === 1) return x;
+  if (m === 2) return x * x;
+  return Math.pow(x, m);
+}
 
 function _pdepeArr(r: any): Float64Array {
   if (r == null) return new Float64Array(0);
@@ -3615,6 +3622,13 @@ function _pdepeRhs(t: number, Ufull: NDArray): NDArray {
     const rr = _pdepeArr(ctx.pdefn(xm, t, um, dudx));
     flx[i] = rr.length >= 2 ? rr[1] : 0;
   }
+  const mm = ctx.m;
+  if (mm !== 0) {
+    for (let i = 0; i < Nx - 1; i++) {
+      const xm = 0.5 * (ctx.xmesh[i] + ctx.xmesh[i + 1]);
+      flx[i] *= _pdepeXpow(xm, mm);
+    }
+  }
   // Left boundary.
   if (dirichletL) {
     out[0] = 0;
@@ -3626,7 +3640,10 @@ function _pdepeRhs(t: number, Ufull: NDArray): NDArray {
     const s = rr.length >= 3 ? rr[2] : 0;
     if (c === 0) c = 1e-30;
     const cell_w = 0.5 * (ctx.xmesh[1] - ctx.xmesh[0]);
-    out[0] = ((flx[0] - fLeftBdy) / cell_w + s) / c;
+    const xpowL = _pdepeXpow(xi, mm);
+    const fLBdyW = mm !== 0 ? fLeftBdy * xpowL : fLeftBdy;
+    const invXpow = xpowL === 0 ? 0 : 1 / xpowL;
+    out[0] = (((flx[0] - fLBdyW) / cell_w) * invXpow + s) / c;
   }
   // Interior.
   for (let i = 1; i < Nx - 1; i++) {
@@ -3638,7 +3655,9 @@ function _pdepeRhs(t: number, Ufull: NDArray): NDArray {
     if (c === 0) c = 1e-30;
     const dx_avg = 0.5 * (ctx.xmesh[i + 1] - ctx.xmesh[i - 1]);
     const dflux = flx[i] - flx[i - 1];
-    out[i] = (dflux / dx_avg + s) / c;
+    const xpowI = _pdepeXpow(xi, mm);
+    const invXpow = xpowI === 0 ? 0 : 1 / xpowI;
+    out[i] = ((dflux / dx_avg) * invXpow + s) / c;
   }
   // Right boundary.
   if (dirichletR) {
@@ -3651,7 +3670,10 @@ function _pdepeRhs(t: number, Ufull: NDArray): NDArray {
     const s = rr.length >= 3 ? rr[2] : 0;
     if (c === 0) c = 1e-30;
     const cell_w = 0.5 * (ctx.xmesh[Nx - 1] - ctx.xmesh[Nx - 2]);
-    out[Nx - 1] = ((fRightBdy - flx[Nx - 2]) / cell_w + s) / c;
+    const xpowR = _pdepeXpow(xi, mm);
+    const fRBdyW = mm !== 0 ? fRightBdy * xpowR : fRightBdy;
+    const invXpow = xpowR === 0 ? 0 : 1 / xpowR;
+    out[Nx - 1] = (((fRBdyW - flx[Nx - 2]) / cell_w) * invXpow + s) / c;
   }
   return new NDArray(out, [Nx, 1]);
 }
@@ -3662,10 +3684,16 @@ export function pdepe(m: number, pdefn: PdePdefn, icfn: PdeIcfn,
   const ts = asArray(tspan).data;
   const Nx = xs.length, Nt = ts.length;
   if (Nx < 3 || Nt < 2) return new NDArray(new Float64Array(0), [0, 0]);
-  if (+m !== 0) return new NDArray(new Float64Array(0), [0, 0]);
+  const mi = (+m) | 0;
+  if (mi < 0 || mi > 2 || mi !== +m) return new NDArray(new Float64Array(0), [0, 0]);
+  if (mi !== 0 && +xs[0] <= 0) return new NDArray(new Float64Array(0), [0, 0]);
   _pdepeCtx = {
-    pdefn, bcfn, xmesh: xs as Float64Array, Nx, err: 0,
+    pdefn, bcfn, xmesh: xs as Float64Array, Nx, m: mi, err: 0,
   };
+  // Invalidate the ode23s_v cache: same _pdepeRhs / y0 across pdepe
+  // calls would otherwise return a stale solution when only the
+  // pdepe context (m, bcfn, …) changed.
+  _odeVCache = null;
   // Initial state covers ALL mesh points.
   const u0buf = new Float64Array(Nx);
   for (let j = 0; j < Nx; j++) u0buf[j] = +icfn(+xs[j]);

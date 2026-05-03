@@ -205,16 +205,16 @@ sol   = pdepe(m, pdefun, icfun, bcfun, xmesh, tspan);
 % sol(end, 11) ≈ 0.3725 — analytic value at x = 0.5, t = 0.1.
 ```
 
-### v1 scope
+### Scope
 
 | | Status |
 |---|:-:|
 | `m = 0` (Cartesian) | ✅ |
-| `m = 1, 2` (cylindrical, spherical) | ❌ — returns 0×0 |
+| `m = 1` (cylindrical), `m = 2` (spherical) | ✅ — requires `xmesh(1) > 0` (axis-of-symmetry singularity not yet handled) |
 | Scalar PDE (one component) | ✅ |
 | System of PDEs (multi-component, MATLAB's `npde > 1`) | ❌ |
 | Dirichlet BCs (`ql = qr = 0`) | ✅ |
-| Neumann / Robin BCs | ❌ — returns 0×0 |
+| Neumann / Robin BCs (`ql ≠ 0`) | ✅ |
 | Non-uniform mesh | ✅ — discretisation honours per-cell `dx` |
 | Stiff parabolic problems (heat eq, diffusion) | ✅ — uses `ode23s` |
 | `odeset` plumbed through to the time integrator | ❌ — uses `ode23s` defaults |
@@ -222,11 +222,41 @@ sol   = pdepe(m, pdefun, icfun, bcfun, xmesh, tspan);
 ### How the BC is decoded
 
 `bcfun` returns `[pl, ql, pr, qr]` such that `pl + ql·f = 0` at each
-boundary (MATLAB's convention). For Dirichlet BCs (`ql = qr = 0`) the
-typical user-supplied form is `pl = ul - g(t)`. The implementation
-exploits that linearity: it calls `bcfun` with `ul = 0` and reads
-`g(t) = -pl`. Anything fancier than Dirichlet trips the
-`ql ≠ 0` guard and returns an empty solution.
+boundary (MATLAB's convention). The runtime keeps every mesh point in
+the state vector and at each time-derivative call:
+
+- **Dirichlet (`ql = 0`)**: snaps the boundary `u` to `g(t) = u_current − pl`
+  (exploiting the standard linear form `pl = ul − g(t)`) and forces the
+  boundary's `dU/dt = 0`. Re-snapped at each output time so any minor
+  drift inside the integrator doesn't appear in `sol`.
+- **Neumann / Robin (`ql ≠ 0`)**: derives the boundary flux as
+  `f_boundary = −pl/ql` and uses it in a half-cell discretisation at
+  the boundary node. Pure Neumann (`pl = 0, ql = 1`) gives the no-flux
+  / insulated-wall condition; convective Robin (`pl = h(u − u_∞)`,
+  `ql = 1`) and prescribed-flux Neumann all fall out of the same code
+  path.
+
+Mixed left/right BCs (Dirichlet at one end, Neumann at the other) are
+handled.
+
+### Cylindrical / spherical (`m = 1, 2`)
+
+For non-Cartesian symmetries, the conservation form picks up `x^m`
+factors:
+
+```
+c · ∂u/∂t = (1/x^m) · ∂/∂x [x^m · f(x, t, u, ∂u/∂x)] + s
+```
+
+The discretisation multiplies fluxes by `x^m` at midpoints and divides
+the divergence by `x_i^m` at nodes (Skeel-Berzins integration). This
+means `xmesh(1)` must be `> 0` — the axis-of-symmetry singularity at
+`x = 0` (which MATLAB handles via L'Hôpital's rule + a Neumann zero
+condition) is deferred to a follow-up.
+
+Worked example (cylindrical Laplacian on annulus `r ∈ [1, 2]` with
+Dirichlet `u(1) = 0, u(2) = 1`): the steady state `u(r) = log(r)/log(2)`
+is recovered to ~2e-5 on a 21-point mesh.
 
 ### Output
 
