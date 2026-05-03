@@ -3580,28 +3580,31 @@ function _pdepeArr(r: any): Float64Array {
   return Float64Array.from(r);
 }
 
-function _pdepeGetBC(t: number): { gl: number; gr: number } {
+function _pdepeEvalBC(t: number, ul: number, ur: number)
+    : [number, number, number, number] | null {
   const ctx = _pdepeCtx!;
   const xl = ctx.xmesh[0], xr = ctx.xmesh[ctx.Nx - 1];
-  const r = _pdepeArr(ctx.bcfn(xl, 0, xr, 0, t));
-  if (r.length < 4) { ctx.err = 1; return { gl: 0, gr: 0 }; }
-  const pl0 = r[0], ql_ = r[1], pr0 = r[2], qr_ = r[3];
-  if (ql_ !== 0 || qr_ !== 0) { ctx.err = 2; return { gl: 0, gr: 0 }; }
-  return { gl: -pl0, gr: -pr0 };
+  const r = _pdepeArr(ctx.bcfn(xl, ul, xr, ur, t));
+  if (r.length < 4) { ctx.err = 1; return null; }
+  return [+r[0], +r[1], +r[2], +r[3]];
 }
 
-function _pdepeRhs(t: number, Uint: NDArray): NDArray {
+function _pdepeRhs(t: number, Ufull: NDArray): NDArray {
   const ctx = _pdepeCtx!;
-  const Nx = ctx.Nx, Ni = Nx - 2;
-  const Uflat = (Uint as any).data as Float64Array;
-  const out = new Float64Array(Ni);
-  if (Uflat.length !== Ni) return new NDArray(out, [Ni, 1]);
-  const { gl, gr } = _pdepeGetBC(t);
-  if (ctx.err) return new NDArray(out, [Ni, 1]);
-  const u = new Float64Array(Nx);
-  u[0] = gl;
-  for (let i = 0; i < Ni; i++) u[i + 1] = Uflat[i];
-  u[Nx - 1] = gr;
+  const Nx = ctx.Nx;
+  const Uflat = (Ufull as any).data as Float64Array;
+  const out = new Float64Array(Nx);
+  if (Uflat.length !== Nx) return new NDArray(out, [Nx, 1]);
+  const u = new Float64Array(Uflat);
+  const bc = _pdepeEvalBC(t, u[0], u[Nx - 1]);
+  if (!bc) return new NDArray(out, [Nx, 1]);
+  const [pl, ql_, pr, qr_] = bc;
+  const dirichletL = ql_ === 0;
+  const dirichletR = qr_ === 0;
+  if (dirichletL) u[0]      = u[0]      - pl;
+  if (dirichletR) u[Nx - 1] = u[Nx - 1] - pr;
+  const fLeftBdy  = dirichletL ? 0 : -pl / ql_;
+  const fRightBdy = dirichletR ? 0 : -pr / qr_;
   const flx = new Float64Array(Nx - 1);
   for (let i = 0; i < Nx - 1; i++) {
     const xL = ctx.xmesh[i], xR = ctx.xmesh[i + 1];
@@ -3612,9 +3615,22 @@ function _pdepeRhs(t: number, Uint: NDArray): NDArray {
     const rr = _pdepeArr(ctx.pdefn(xm, t, um, dudx));
     flx[i] = rr.length >= 2 ? rr[1] : 0;
   }
+  // Left boundary.
+  if (dirichletL) {
+    out[0] = 0;
+  } else {
+    const xi = ctx.xmesh[0], ui = u[0];
+    const dudx = (u[1] - u[0]) / (ctx.xmesh[1] - ctx.xmesh[0]);
+    const rr = _pdepeArr(ctx.pdefn(xi, t, ui, dudx));
+    let c = rr.length >= 1 ? rr[0] : 1;
+    const s = rr.length >= 3 ? rr[2] : 0;
+    if (c === 0) c = 1e-30;
+    const cell_w = 0.5 * (ctx.xmesh[1] - ctx.xmesh[0]);
+    out[0] = ((flx[0] - fLeftBdy) / cell_w + s) / c;
+  }
+  // Interior.
   for (let i = 1; i < Nx - 1; i++) {
-    const xi = ctx.xmesh[i];
-    const ui = u[i];
+    const xi = ctx.xmesh[i], ui = u[i];
     const dudx = (u[i + 1] - u[i - 1]) / (ctx.xmesh[i + 1] - ctx.xmesh[i - 1]);
     const rr = _pdepeArr(ctx.pdefn(xi, t, ui, dudx));
     let c = rr.length >= 1 ? rr[0] : 1;
@@ -3622,9 +3638,22 @@ function _pdepeRhs(t: number, Uint: NDArray): NDArray {
     if (c === 0) c = 1e-30;
     const dx_avg = 0.5 * (ctx.xmesh[i + 1] - ctx.xmesh[i - 1]);
     const dflux = flx[i] - flx[i - 1];
-    out[i - 1] = (dflux / dx_avg + s) / c;
+    out[i] = (dflux / dx_avg + s) / c;
   }
-  return new NDArray(out, [Ni, 1]);
+  // Right boundary.
+  if (dirichletR) {
+    out[Nx - 1] = 0;
+  } else {
+    const xi = ctx.xmesh[Nx - 1], ui = u[Nx - 1];
+    const dudx = (u[Nx - 1] - u[Nx - 2]) / (ctx.xmesh[Nx - 1] - ctx.xmesh[Nx - 2]);
+    const rr = _pdepeArr(ctx.pdefn(xi, t, ui, dudx));
+    let c = rr.length >= 1 ? rr[0] : 1;
+    const s = rr.length >= 3 ? rr[2] : 0;
+    if (c === 0) c = 1e-30;
+    const cell_w = 0.5 * (ctx.xmesh[Nx - 1] - ctx.xmesh[Nx - 2]);
+    out[Nx - 1] = ((fRightBdy - flx[Nx - 2]) / cell_w + s) / c;
+  }
+  return new NDArray(out, [Nx, 1]);
 }
 
 export function pdepe(m: number, pdefn: PdePdefn, icfn: PdeIcfn,
@@ -3637,21 +3666,25 @@ export function pdepe(m: number, pdefn: PdePdefn, icfn: PdeIcfn,
   _pdepeCtx = {
     pdefn, bcfn, xmesh: xs as Float64Array, Nx, err: 0,
   };
-  const Ni = Nx - 2;
-  const u0buf = new Float64Array(Ni);
-  for (let j = 0; j < Ni; j++) u0buf[j] = +icfn(+xs[j + 1]);
-  const u0 = new NDArray(u0buf, [Ni, 1]);
+  // Initial state covers ALL mesh points.
+  const u0buf = new Float64Array(Nx);
+  for (let j = 0; j < Nx; j++) u0buf[j] = +icfn(+xs[j]);
+  const u0 = new NDArray(u0buf, [Nx, 1]);
   const T = ode23s_v_t(_pdepeRhs, tspan, u0);
-  const Uint = ode23s_v_y(_pdepeRhs, tspan, u0);
+  const U = ode23s_v_y(_pdepeRhs, tspan, u0);
   const Tflat = (T as any).data as Float64Array;
-  const Uflat = (Uint as any).data as Float64Array;
+  const Uflat = (U as any).data as Float64Array;
   const Nt_out = Tflat.length;
-  const sol = new Float64Array(Nt_out * Nx);
+  const sol = new Float64Array(Uflat);   // copy
+  // Re-snap Dirichlet boundaries.
   for (let k = 0; k < Nt_out; k++) {
-    const { gl, gr } = _pdepeGetBC(Tflat[k]);
-    sol[k * Nx + 0] = gl;
-    for (let j = 0; j < Ni; j++) sol[k * Nx + (j + 1)] = Uflat[k * Ni + j];
-    sol[k * Nx + (Nx - 1)] = gr;
+    const ul = sol[k * Nx + 0];
+    const ur = sol[k * Nx + (Nx - 1)];
+    const bc = _pdepeEvalBC(Tflat[k], ul, ur);
+    if (!bc) continue;
+    const [pl, ql_, pr, qr_] = bc;
+    if (ql_ === 0) sol[k * Nx + 0]        = ul - pl;
+    if (qr_ === 0) sol[k * Nx + (Nx - 1)] = ur - pr;
   }
   return new NDArray(sol, [Nt_out, Nx]);
 }

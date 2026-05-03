@@ -8248,65 +8248,101 @@ __thread struct pdepe_ctx pdepe_ctx_;
 struct pdepe_ctx pdepe_ctx_;
 #endif
 
-/* Evaluate boundary conditions at time t. Uses the linearity of the
- * standard Dirichlet form `pl = ul - g(t)`: calling bcfn with ul=0
- * gives pl = -g(t), and similarly for the right boundary. */
-static int pdepe_get_bc(double t, double *gl, double *gr) {
+/* Evaluate the user's bcfun at the current boundary u-values and
+ * return the four BC scalars. Returns 1 on shape failure. */
+static int pdepe_eval_bc(double t, double ul, double ur,
+                         double *pl, double *ql,
+                         double *pr, double *qr) {
     double xl = pdepe_ctx_.xmesh[0];
     double xr = pdepe_ctx_.xmesh[pdepe_ctx_.Nx - 1];
-    matlab_mat *r = pdepe_ctx_.bcfn(xl, 0.0, xr, 0.0, t);
+    matlab_mat *r = pdepe_ctx_.bcfn(xl, ul, xr, ur, t);
     if (!r || r->rows * r->cols < 4) {
         if (r) mat_free_(r);
         return 1;
     }
-    double pl_0 = r->data[0];
-    double ql_  = r->data[1];
-    double pr_0 = r->data[2];
-    double qr_  = r->data[3];
+    *pl = r->data[0];
+    *ql = r->data[1];
+    *pr = r->data[2];
+    *qr = r->data[3];
     mat_free_(r);
-    if (ql_ != 0.0 || qr_ != 0.0) return 2;
-    *gl = -pl_0;
-    *gr = -pr_0;
     return 0;
 }
 
-/* RHS handed to ode23s_v. State vector U has dimension Ni = Nx-2
- * (interior points only). Returns a fresh Ni×1 matlab_mat with dU/dt. */
-static matlab_mat *pdepe_rhs(double t, matlab_mat *Uint) {
+/* Full-state RHS handed to ode23s_v. State vector U has dimension Nx
+ * (every mesh point is part of the state). Each F call:
+ *   - Evaluates bcfn at the current u[0], u[Nx-1].
+ *   - For Dirichlet (ql == 0): snaps u to g(t) = u - pl (linear form),
+ *     and forces F[boundary] = 0 so the integrator doesn't drift.
+ *   - For Neumann/Robin (ql ≠ 0): computes f at the boundary as
+ *     f = -pl/ql and uses it in the boundary-cell discretisation.
+ *
+ * The Cartesian (m = 0) form treats every cell with width dx_i; the
+ * boundary cell width is dx_first / 2 (and dx_last / 2). For m ≠ 0 we
+ * weight fluxes by x^m at midpoints and divide by x_i^m at nodes
+ * (Skeel-Berzins integration). */
+static matlab_mat *pdepe_rhs(double t, matlab_mat *Ufull) {
     int64_t Nx = pdepe_ctx_.Nx;
-    int64_t Ni = Nx - 2;
-    if (!Uint || Uint->rows * Uint->cols != Ni) return mat_alloc(Ni, 1);
+    if (!Ufull || Ufull->rows * Ufull->cols != Nx) return mat_alloc(Nx, 1);
 
-    double gl, gr;
-    int berr = pdepe_get_bc(t, &gl, &gr);
-    if (berr) {
-        pdepe_ctx_.err_flag = berr;
-        return mat_alloc(Ni, 1);
-    }
-
-    /* Build full u (length Nx). */
     double *u = (double *)malloc((size_t)Nx * sizeof(double));
-    u[0] = gl;
-    for (int64_t i = 0; i < Ni; ++i) u[i + 1] = Uint->data[i];
-    u[Nx - 1] = gr;
+    memcpy(u, Ufull->data, (size_t)Nx * sizeof(double));
 
-    /* Compute fluxes f at midpoints i+1/2 for i = 0..Nx-2. */
+    /* Evaluate BC at current boundary values. */
+    double pl, ql, pr, qr;
+    if (pdepe_eval_bc(t, u[0], u[Nx - 1], &pl, &ql, &pr, &qr) != 0) {
+        pdepe_ctx_.err_flag = 1;
+        free(u);
+        return mat_alloc(Nx, 1);
+    }
+    int dirichlet_left  = (ql == 0.0);
+    int dirichlet_right = (qr == 0.0);
+
+    /* Snap Dirichlet boundary values: for the standard linear form
+     *   pl = ul - g(t),
+     * we have g(t) = ul_current - pl_current. For nonlinear forms
+     * this is a 1-step Newton-like correction. */
+    if (dirichlet_left)  u[0]      = u[0]      - pl;
+    if (dirichlet_right) u[Nx - 1] = u[Nx - 1] - pr;
+
+    /* Boundary fluxes for Neumann/Robin: f_bdy = -pl/ql. */
+    double f_left_bdy  = dirichlet_left  ? 0.0 : -pl / ql;
+    double f_right_bdy = dirichlet_right ? 0.0 : -pr / qr;
+
+    /* Compute interior fluxes f_{i+1/2} for i = 0 .. Nx-2. */
     double *flx = (double *)malloc((size_t)(Nx - 1) * sizeof(double));
     for (int64_t i = 0; i < Nx - 1; ++i) {
         double xL = pdepe_ctx_.xmesh[i];
         double xR = pdepe_ctx_.xmesh[i + 1];
         double dx = xR - xL;
         if (dx == 0.0) dx = 1e-30;
-        double xm = 0.5 * (xL + xR);
-        double um = 0.5 * (u[i] + u[i + 1]);
+        double xm   = 0.5 * (xL + xR);
+        double um   = 0.5 * (u[i] + u[i + 1]);
         double dudx = (u[i + 1] - u[i]) / dx;
         matlab_mat *r = pdepe_ctx_.pdefn(xm, t, um, dudx);
         flx[i] = (r && r->rows * r->cols >= 2) ? r->data[1] : 0.0;
         if (r) mat_free_(r);
     }
 
-    /* Compute interior dU/dt[i] for i = 1..Nx-2. */
-    matlab_mat *out = mat_alloc(Ni, 1);
+    matlab_mat *out = mat_alloc(Nx, 1);
+
+    /* Left boundary node 0. */
+    if (dirichlet_left) {
+        out->data[0] = 0.0;
+    } else {
+        double xi = pdepe_ctx_.xmesh[0];
+        double ui = u[0];
+        double dudx = (u[1] - u[0]) /
+                      (pdepe_ctx_.xmesh[1] - pdepe_ctx_.xmesh[0]);
+        matlab_mat *r = pdepe_ctx_.pdefn(xi, t, ui, dudx);
+        double c = (r && r->rows * r->cols >= 1) ? r->data[0] : 1.0;
+        double s = (r && r->rows * r->cols >= 3) ? r->data[2] : 0.0;
+        if (r) mat_free_(r);
+        if (c == 0.0) c = 1e-30;
+        double cell_w = 0.5 * (pdepe_ctx_.xmesh[1] - pdepe_ctx_.xmesh[0]);
+        out->data[0] = ((flx[0] - f_left_bdy) / cell_w + s) / c;
+    }
+
+    /* Interior nodes i = 1 .. Nx-2. */
     for (int64_t i = 1; i < Nx - 1; ++i) {
         double xi = pdepe_ctx_.xmesh[i];
         double ui = u[i];
@@ -8319,7 +8355,24 @@ static matlab_mat *pdepe_rhs(double t, matlab_mat *Uint) {
         if (c == 0.0) c = 1e-30;
         double dx_avg = 0.5 * (pdepe_ctx_.xmesh[i + 1] - pdepe_ctx_.xmesh[i - 1]);
         double dflux  = flx[i] - flx[i - 1];
-        out->data[i - 1] = (dflux / dx_avg + s) / c;
+        out->data[i] = (dflux / dx_avg + s) / c;
+    }
+
+    /* Right boundary node Nx-1. */
+    if (dirichlet_right) {
+        out->data[Nx - 1] = 0.0;
+    } else {
+        double xi = pdepe_ctx_.xmesh[Nx - 1];
+        double ui = u[Nx - 1];
+        double dudx = (u[Nx - 1] - u[Nx - 2]) /
+                      (pdepe_ctx_.xmesh[Nx - 1] - pdepe_ctx_.xmesh[Nx - 2]);
+        matlab_mat *r = pdepe_ctx_.pdefn(xi, t, ui, dudx);
+        double c = (r && r->rows * r->cols >= 1) ? r->data[0] : 1.0;
+        double s = (r && r->rows * r->cols >= 3) ? r->data[2] : 0.0;
+        if (r) mat_free_(r);
+        if (c == 0.0) c = 1e-30;
+        double cell_w = 0.5 * (pdepe_ctx_.xmesh[Nx - 1] - pdepe_ctx_.xmesh[Nx - 2]);
+        out->data[Nx - 1] = ((f_right_bdy - flx[Nx - 2]) / cell_w + s) / c;
     }
 
     free(u);
@@ -8335,7 +8388,7 @@ matlab_mat *matlab_pdepe(double m, void *pdefn_p, void *icfn_p, void *bcfn_p,
     int64_t Nt = tspan->rows * tspan->cols;
     if (Nx < 3 || Nt < 2) return mat_alloc(0, 0);
     if (m != 0.0) {
-        /* m != 0 (cylindrical/spherical) not supported in v1. */
+        /* m != 0 (cylindrical/spherical) deferred to follow-up. */
         return mat_alloc(0, 0);
     }
 
@@ -8349,26 +8402,30 @@ matlab_mat *matlab_pdepe(double m, void *pdefn_p, void *icfn_p, void *bcfn_p,
     pdepe_ctx_.Nx    = Nx;
     pdepe_ctx_.err_flag = 0;
 
-    /* Initial interior state from the user's icfn. */
-    int64_t Ni = Nx - 2;
-    matlab_mat *u0 = mat_alloc(Ni, 1);
-    for (int64_t i = 0; i < Ni; ++i) u0->data[i] = icfn(xmesh->data[i + 1]);
+    /* Initial state covers ALL mesh points (boundaries included). */
+    matlab_mat *u0 = mat_alloc(Nx, 1);
+    for (int64_t i = 0; i < Nx; ++i) u0->data[i] = icfn(xmesh->data[i]);
 
     /* Integrate via ode23s_v (handles stiff parabolic problems). */
-    matlab_mat *T    = matlab_ode23s_v_t(pdepe_rhs, tspan, u0);
-    matlab_mat *Uint = matlab_ode23s_v_y(pdepe_rhs, tspan, u0);
+    matlab_mat *T = matlab_ode23s_v_t(pdepe_rhs, tspan, u0);
+    matlab_mat *U = matlab_ode23s_v_y(pdepe_rhs, tspan, u0);
     int64_t Nt_out = T->rows;
 
-    /* Reconstruct full u at each output time and pack into Nt_out × Nx. */
+    /* Re-snap Dirichlet boundary values at each output time so any
+     * minor drift inside the integrator doesn't appear in `sol`. */
     matlab_mat *sol = mat_alloc(Nt_out, Nx);
-    for (int64_t k = 0; k < Nt_out; ++k) {
-        double t = T->data[k];
-        double gl, gr;
-        if (pdepe_get_bc(t, &gl, &gr) != 0) { gl = 0.0; gr = 0.0; }
-        sol->data[k * Nx + 0] = gl;
-        for (int64_t i = 0; i < Ni; ++i)
-            sol->data[k * Nx + (i + 1)] = Uint->data[k * Ni + i];
-        sol->data[k * Nx + (Nx - 1)] = gr;
+    if (Nt_out > 0) {
+        memcpy(sol->data, U->data,
+               (size_t)Nt_out * (size_t)Nx * sizeof(double));
+        for (int64_t k = 0; k < Nt_out; ++k) {
+            double t = T->data[k];
+            double pl, ql, pr, qr;
+            double ul = sol->data[k * Nx + 0];
+            double ur = sol->data[k * Nx + (Nx - 1)];
+            if (pdepe_eval_bc(t, ul, ur, &pl, &ql, &pr, &qr) != 0) continue;
+            if (ql == 0.0) sol->data[k * Nx + 0]      = ul - pl;
+            if (qr == 0.0) sol->data[k * Nx + (Nx - 1)] = ur - pr;
+        }
     }
     return sol;
 }

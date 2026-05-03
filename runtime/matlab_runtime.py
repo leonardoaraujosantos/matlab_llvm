@@ -2838,35 +2838,38 @@ def ode23s_v_stats_opts(f, tspan, y0, opts):
 _pdepe_ctx = {"pdefn": None, "bcfn": None, "xmesh": None, "Nx": 0,
               "err": 0}
 
-def _pdepe_get_bc(t):
+def _pdepe_eval_bc(t, ul, ur):
+    """Evaluate the user's bcfun at current boundary values; return
+    (pl, ql, pr, qr) or None on shape failure."""
     xl = _pdepe_ctx["xmesh"][0]
     xr = _pdepe_ctx["xmesh"][_pdepe_ctx["Nx"] - 1]
-    r = _pdepe_ctx["bcfn"](xl, 0.0, xr, 0.0, t)
+    r = _pdepe_ctx["bcfn"](xl, ul, xr, ur, t)
     arr = np.asarray(r, dtype=float).ravel()
     if arr.size < 4:
         _pdepe_ctx["err"] = 1
-        return 0.0, 0.0
-    pl0, ql_, pr0, qr_ = float(arr[0]), float(arr[1]), float(arr[2]), float(arr[3])
-    if ql_ != 0.0 or qr_ != 0.0:
-        _pdepe_ctx["err"] = 2
-        return 0.0, 0.0
-    return -pl0, -pr0
+        return None
+    return float(arr[0]), float(arr[1]), float(arr[2]), float(arr[3])
 
-def _pdepe_rhs(t, Uint):
+def _pdepe_rhs(t, Ufull):
     Nx = _pdepe_ctx["Nx"]
-    Ni = Nx - 2
     xmesh = _pdepe_ctx["xmesh"]
     pdefn = _pdepe_ctx["pdefn"]
-    Uflat = np.asarray(Uint, dtype=float).ravel()
-    if Uflat.size != Ni:
-        return np.zeros((Ni, 1))
-    gl, gr = _pdepe_get_bc(t)
-    if _pdepe_ctx["err"]:
-        return np.zeros((Ni, 1))
-    u = np.empty(Nx)
-    u[0] = gl
-    u[1:Nx-1] = Uflat
-    u[Nx - 1] = gr
+    Uflat = np.asarray(Ufull, dtype=float).ravel()
+    if Uflat.size != Nx:
+        return np.zeros((Nx, 1))
+    u = Uflat.copy()
+    bc = _pdepe_eval_bc(t, float(u[0]), float(u[Nx - 1]))
+    if bc is None:
+        return np.zeros((Nx, 1))
+    pl, ql_, pr, qr_ = bc
+    dirichlet_left  = (ql_ == 0.0)
+    dirichlet_right = (qr_ == 0.0)
+    # Snap Dirichlet boundaries: linear pl = ul - g(t) → g(t) = ul - pl.
+    if dirichlet_left:  u[0]      = u[0]      - pl
+    if dirichlet_right: u[Nx - 1] = u[Nx - 1] - pr
+    f_left_bdy  = 0.0 if dirichlet_left  else (-pl / ql_)
+    f_right_bdy = 0.0 if dirichlet_right else (-pr / qr_)
+    # Compute interior fluxes f_{i+1/2}.
     flx = np.empty(Nx - 1)
     i = 0
     while i < Nx - 1:
@@ -2880,11 +2883,24 @@ def _pdepe_rhs(t, Uint):
         rrarr = np.asarray(rr, dtype=float).ravel()
         flx[i] = rrarr[1] if rrarr.size >= 2 else 0.0
         i += 1
-    out = np.empty((Ni, 1))
+    out = np.zeros((Nx, 1))
+    # Left boundary node 0.
+    if dirichlet_left:
+        out[0, 0] = 0.0
+    else:
+        xi = xmesh[0]; ui = u[0]
+        dudx = (u[1] - u[0]) / (xmesh[1] - xmesh[0])
+        rr = pdefn(xi, t, ui, dudx)
+        rrarr = np.asarray(rr, dtype=float).ravel()
+        c = rrarr[0] if rrarr.size >= 1 else 1.0
+        s = rrarr[2] if rrarr.size >= 3 else 0.0
+        if c == 0.0: c = 1e-30
+        cell_w = 0.5 * (xmesh[1] - xmesh[0])
+        out[0, 0] = ((flx[0] - f_left_bdy) / cell_w + s) / c
+    # Interior nodes.
     i = 1
     while i < Nx - 1:
-        xi = xmesh[i]
-        ui = u[i]
+        xi = xmesh[i]; ui = u[i]
         dudx = (u[i + 1] - u[i - 1]) / (xmesh[i + 1] - xmesh[i - 1])
         rr = pdefn(xi, t, ui, dudx)
         rrarr = np.asarray(rr, dtype=float).ravel()
@@ -2893,8 +2909,21 @@ def _pdepe_rhs(t, Uint):
         if c == 0.0: c = 1e-30
         dx_avg = 0.5 * (xmesh[i + 1] - xmesh[i - 1])
         dflux = flx[i] - flx[i - 1]
-        out[i - 1, 0] = (dflux / dx_avg + s) / c
+        out[i, 0] = (dflux / dx_avg + s) / c
         i += 1
+    # Right boundary node Nx-1.
+    if dirichlet_right:
+        out[Nx - 1, 0] = 0.0
+    else:
+        xi = xmesh[Nx - 1]; ui = u[Nx - 1]
+        dudx = (u[Nx - 1] - u[Nx - 2]) / (xmesh[Nx - 1] - xmesh[Nx - 2])
+        rr = pdefn(xi, t, ui, dudx)
+        rrarr = np.asarray(rr, dtype=float).ravel()
+        c = rrarr[0] if rrarr.size >= 1 else 1.0
+        s = rrarr[2] if rrarr.size >= 3 else 0.0
+        if c == 0.0: c = 1e-30
+        cell_w = 0.5 * (xmesh[Nx - 1] - xmesh[Nx - 2])
+        out[Nx - 1, 0] = ((f_right_bdy - flx[Nx - 2]) / cell_w + s) / c
     return out
 
 def pdepe(m, pdefn, icfn, bcfn, xmesh, tspan):
@@ -2910,24 +2939,26 @@ def pdepe(m, pdefn, icfn, bcfn, xmesh, tspan):
     _pdepe_ctx["xmesh"] = xs
     _pdepe_ctx["Nx"]    = Nx
     _pdepe_ctx["err"]   = 0
-    Ni = Nx - 2
-    u0 = np.zeros(Ni)
+    # Initial state covers ALL mesh points.
+    u0 = np.zeros(Nx)
     j = 0
-    while j < Ni:
-        u0[j] = float(icfn(xs[j + 1]))
+    while j < Nx:
+        u0[j] = float(icfn(xs[j]))
         j += 1
     T = ode23s_v_t(_pdepe_rhs, ts, u0)
-    Uint = ode23s_v_y(_pdepe_rhs, ts, u0)
+    U = ode23s_v_y(_pdepe_rhs, ts, u0)
     Tflat = np.asarray(T, dtype=float).ravel()
     Nt_out = Tflat.size
-    sol = np.zeros((Nt_out, Nx))
-    Uflat = np.asarray(Uint, dtype=float).reshape((Nt_out, Ni))
+    sol = np.asarray(U, dtype=float).reshape((Nt_out, Nx)).copy()
+    # Re-snap Dirichlet boundaries at output time.
     k = 0
     while k < Nt_out:
-        gl, gr = _pdepe_get_bc(float(Tflat[k]))
-        sol[k, 0] = gl
-        sol[k, 1:Nx-1] = Uflat[k, :]
-        sol[k, Nx - 1] = gr
+        bc = _pdepe_eval_bc(float(Tflat[k]),
+                             float(sol[k, 0]), float(sol[k, Nx - 1]))
+        if bc is not None:
+            pl, ql_, pr, qr_ = bc
+            if ql_ == 0.0: sol[k, 0]      = sol[k, 0]      - pl
+            if qr_ == 0.0: sol[k, Nx - 1] = sol[k, Nx - 1] - pr
         k += 1
     return sol
 
