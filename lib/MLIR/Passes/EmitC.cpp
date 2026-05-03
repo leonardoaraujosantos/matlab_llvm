@@ -1942,7 +1942,15 @@ bool Emitter::tryRewriteAsMatrixCall(llvm::StringRef Callee,
     if (Callee == "matlab_emul_sm")   { Out = bin("*"); return true; }
     if (Callee == "matlab_ediv_sm")   { Out = bin("/"); return true; }
   }
-  if (Operands.size() == 1) {
+  /* Method-style rewrites below dot-call into the operand as a Matrix
+   * wrapper instance (`opnd.sum()`, `opnd.t()`, ...). When the operand
+   * is a raw void* (typed-int matrix from matlab_mat_i32_*, table
+   * column from matlab_table_get_column, etc.) the dot-call generates
+   * "void* . method()" — a C++ compile error. Bail out and let the
+   * caller emit the plain runtime function call instead. The binop /
+   * scalar rewrites above use C operators on opnds and don't need this
+   * gate (they work on either Matrix or void* alike). */
+  if (Operands.size() == 1 && firstIsMatrix()) {
     if (Callee == "matlab_transpose") { Out = m1("t"); return true; }
     if (Callee == "matlab_inv")       { Out = m1("inv"); return true; }
     if (Callee == "matlab_diag")      { Out = m1("diag"); return true; }
@@ -4094,7 +4102,42 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
       // Matrix-runtime statement-level rewrites.
       if (Cpp && *Callee == "matlab_disp_mat" &&
           Call.getNumOperands() == 1 && Call.getNumResults() == 0) {
-        OS << "std::cout << " << exprFor(Call.getOperand(0)) << ";\n";
+        /* When the operand is a raw void* coming from a runtime call
+         * (matlab_string_concat, matlab_table_get_column, matlab_num2str,
+         * matlab_sprintf_*, matlab_string_from_literal — anything that
+         * returns a non-Matrix-wrapped pointer), `std::cout << void*`
+         * prints the pointer address. Route to the right disp by call-
+         * site:
+         *   - string-producing callees → matlab_string_disp
+         *   - generic matrix-pointer callees → matlab_disp_mat directly
+         * The std::cout path stays for Matrix-wrapped values that the
+         * C++ emitter constructs as Matrix(...). */
+        mlir::Value Op = Call.getOperand(0);
+        if (auto *Def = Op.getDefiningOp())
+          if (auto Pred = mlir::dyn_cast<mlir::LLVM::CallOp>(Def))
+            if (auto PCallee = Pred.getCallee()) {
+              llvm::StringRef PN = *PCallee;
+              if (PN == "matlab_string_concat" ||
+                  PN == "matlab_string_from_literal" ||
+                  PN == "matlab_num2str" ||
+                  PN.starts_with("matlab_sprintf")) {
+                OS << "matlab_string_disp(" << exprFor(Op) << ");\n";
+                return;
+              }
+              if (PN.starts_with("matlab_table_") ||
+                  PN.starts_with("matlab_categorical_") ||
+                  PN.starts_with("matlab_datetime_") ||
+                  PN.starts_with("matlab_duration_") ||
+                  PN.starts_with("matlab_struct_") ||
+                  PN.starts_with("matlab_cell_") ||
+                  PN.starts_with("matlab_dict_") ||
+                  PN.starts_with("matlab_mat_u8") ||
+                  PN.starts_with("matlab_mat_i32")) {
+                OS << "matlab_disp_mat(" << exprFor(Op) << ");\n";
+                return;
+              }
+            }
+        OS << "std::cout << " << exprFor(Op) << ";\n";
         return;
       }
       {

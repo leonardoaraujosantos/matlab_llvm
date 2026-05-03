@@ -48,7 +48,6 @@ module moore_fsm (
             end
         endcase
         out_signal = (current_state == S2) ? 1'b1 : 1'b0;
-        state_display = 8'(current_state);
     end
 
     always_ff @(posedge clk or negedge rst_n) begin

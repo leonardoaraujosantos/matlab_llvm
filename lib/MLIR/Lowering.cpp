@@ -825,9 +825,19 @@ bool Lowerer::exprIsSymmat(const Expr *X) const {
           "sym_matrix", "sym_eye", "sym_zeros",
           "sym_inv", "sym_transpose", "sym_linsolve",
           "sym_dsolve_system",
-          "sym_solve_2x2", "sym_solve_3x3"};
+          "sym_solve_2x2", "sym_solve_3x3", "sym_solve_sys"};
       return MatProducers.contains(CN->Name);
     }
+  /* Phase 6.2 — `[a 1; 2 b]` matrix literal where any entry is sym is
+   * lowered via matlab_symmat_zeros + matlab_symmat_set. The result
+   * type is matlab_symmat*, so Sema's MatrixLiteral lowering must
+   * advertise symmat for the AssignStmt LHS-tagging + disp dispatch
+   * to route through the right runtime. */
+  if (auto *ML = dynamic_cast<const MatrixLiteral *>(X)) {
+    for (auto &Row : ML->Rows)
+      for (const Expr *Cx : Row)
+        if (Cx && exprIsSym(Cx)) return true;
+  }
   return false;
 }
 
@@ -2993,6 +3003,16 @@ void Lowerer::lowerStmt(const Stmt &St) {
             if (U->Operand) walkExpr(*U->Operand);
             return;
           }
+          /* Phase 6.2 — recurse into MatrixLiteral so the AST walk
+           * finds NameExprs inside `[u^2 + v^2 - w, ...]` literals.
+           * Without this, sym_solve_sys-style array args left the
+           * `syms u v w` slot unstored, surfacing as "unsupported op"
+           * in the C++ emitter. */
+          if (auto *M = dynamic_cast<const MatrixLiteral *>(&E)) {
+            for (auto &Row : M->Rows)
+              for (Expr *Cx : Row) if (Cx) walkExpr(*Cx);
+            return;
+          }
         };
         walkStmt = [&](const Stmt &St) {
           if (Found) return;
@@ -4293,16 +4313,81 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
         mlir::Value X = lowerExpr(*C.Args[4]);
         return emitSymCall("matlab_sym_checkodesol", {E, S, Y, Yp, X});
       }
-      /* dsolve_ivp(eq, y, yp, x, x0, y0) — first-order with one IC. */
+      /* dsolve_ivp(eq, y, yp, x, x0, y0) — first-order with one IC.
+       * Multi-condition shape: dsolve_ivp(eq, y, yp, x, [x0, x1, ...],
+       * [y0, y1, ...]) where the last two args are 1-row MatrixLiterals
+       * of equal length. Routes to the runtime's variadic
+       * matlab_sym_dsolve_ivp by building two parallel stack arrays. */
+      auto buildSymArr = [&](llvm::SmallVectorImpl<mlir::Value> &vals) -> mlir::Value {
+        auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+        auto I32 = mlir::IntegerType::get(&MCtx, 32);
+        auto I64 = mlir::IntegerType::get(&MCtx, 64);
+        auto ArrTy = mlir::LLVM::LLVMArrayType::get(PtrTy, vals.size());
+        mlir::Value One = mlir::LLVM::ConstantOp::create(
+            B, L, I64, mlir::IntegerAttr::get(I64, 1)).getResult();
+        mlir::Value Arr = mlir::LLVM::AllocaOp::create(
+            B, L, PtrTy, ArrTy, One, /*alignment=*/0).getResult();
+        for (size_t k = 0; k < vals.size(); ++k) {
+          mlir::Value V = vals[k];
+          if (V.getType() != PtrTy) V.setType(PtrTy);
+          mlir::Value Z = mlir::LLVM::ConstantOp::create(
+              B, L, I32, mlir::IntegerAttr::get(I32, 0)).getResult();
+          mlir::Value Idx = mlir::LLVM::ConstantOp::create(
+              B, L, I32, mlir::IntegerAttr::get(I32, (int)k)).getResult();
+          auto Gep = mlir::LLVM::GEPOp::create(
+              B, L, PtrTy, ArrTy, Arr, mlir::ValueRange{Z, Idx});
+          mlir::LLVM::StoreOp::create(B, L, V, Gep);
+        }
+        return Arr;
+      };
+      auto i64ConstA = [&](int64_t v) -> mlir::Value {
+        auto I64 = mlir::IntegerType::get(&MCtx, 64);
+        return mlir::LLVM::ConstantOp::create(
+            B, L, I64, mlir::IntegerAttr::get(I64, v)).getResult();
+      };
       if (Nm == "dsolve_ivp" && C.Args.size() == 6 &&
           C.Args[0] && isSymExpr(C.Args[0])) {
+        /* Detect multi-condition: args 4 and 5 are MatrixLiterals. */
+        auto *XML = dynamic_cast<const MatrixLiteral *>(C.Args[4]);
+        auto *YML = dynamic_cast<const MatrixLiteral *>(C.Args[5]);
+        if (XML && YML &&
+            XML->Rows.size() == 1 && YML->Rows.size() == 1 &&
+            XML->Rows[0].size() == YML->Rows[0].size() &&
+            XML->Rows[0].size() >= 1) {
+          mlir::Value E = lowerExpr(*C.Args[0]);
+          mlir::Value Y = lowerExpr(*C.Args[1]);
+          mlir::Value Yp = lowerExpr(*C.Args[2]);
+          mlir::Value X = lowerExpr(*C.Args[3]);
+          llvm::SmallVector<mlir::Value, 4> Xs, Ys;
+          for (const Expr *Xi : XML->Rows[0]) Xs.push_back(lowerExpr(*Xi));
+          for (const Expr *Yi : YML->Rows[0]) Ys.push_back(lowerExpr(*Yi));
+          return emitSymCall("matlab_sym_dsolve_ivp",
+                             {E, Y, Yp, X, i64ConstA((int64_t)Xs.size()),
+                              buildSymArr(Xs), buildSymArr(Ys)});
+        }
         llvm::SmallVector<mlir::Value, 6> A;
         for (auto *X : C.Args) A.push_back(lowerExpr(*X));
         return emitSymCall("matlab_sym_dsolve_ivp_1", A);
       }
-      /* apply_ivp(general_solution, x, x0, y0). */
+      /* apply_ivp(general_solution, x, x0, y0) — single-cond.
+       * Multi-cond shape: apply_ivp(general, x, [x0, x1, ...], [y0, y1, ...]). */
       if (Nm == "apply_ivp" && C.Args.size() == 4 &&
           C.Args[0] && isSymExpr(C.Args[0])) {
+        auto *XML = dynamic_cast<const MatrixLiteral *>(C.Args[2]);
+        auto *YML = dynamic_cast<const MatrixLiteral *>(C.Args[3]);
+        if (XML && YML &&
+            XML->Rows.size() == 1 && YML->Rows.size() == 1 &&
+            XML->Rows[0].size() == YML->Rows[0].size() &&
+            XML->Rows[0].size() >= 1) {
+          mlir::Value G = lowerExpr(*C.Args[0]);
+          mlir::Value X = lowerExpr(*C.Args[1]);
+          llvm::SmallVector<mlir::Value, 4> Xs, Ys;
+          for (const Expr *Xi : XML->Rows[0]) Xs.push_back(lowerExpr(*Xi));
+          for (const Expr *Yi : YML->Rows[0]) Ys.push_back(lowerExpr(*Yi));
+          return emitSymCall("matlab_sym_apply_ivp",
+                             {G, X, i64ConstA((int64_t)Xs.size()),
+                              buildSymArr(Xs), buildSymArr(Ys)});
+        }
         llvm::SmallVector<mlir::Value, 4> A;
         for (auto *X : C.Args) A.push_back(lowerExpr(*X));
         return emitSymCall("matlab_sym_apply_ivp_1", A);
@@ -4421,6 +4506,62 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
         llvm::SmallVector<mlir::Value, 6> A;
         for (auto *X : C.Args) A.push_back(lowerExpr(*X));
         return emitSymCall("matlab_sym_solve_3x3", A);
+      }
+      /* Phase 6.2 — variadic sym_solve_sys for systems of any size.
+       * Shape: sym_solve_sys([eq1, eq2, ...], [x1, x2, ...]) where
+       * each argument must be a 1-row MatrixLiteral of sym entries.
+       * Lowers to: alloca [N x ptr] for eqs, fill, alloca [M x ptr]
+       * for vars, fill, call matlab_sym_solve_sys(eqs, N, vars, M).
+       *
+       * Each sym arg already lowers to !llvm.ptr; we materialise the
+       * arrays as llvm.alloca + per-element llvm.getelementptr +
+       * llvm.store, then pass the array base pointers. */
+      if (Nm == "sym_solve_sys" && C.Args.size() == 2 && C.Args[0] && C.Args[1]) {
+        auto *EqsML = dynamic_cast<const MatrixLiteral *>(C.Args[0]);
+        auto *VarsML = dynamic_cast<const MatrixLiteral *>(C.Args[1]);
+        if (EqsML && VarsML &&
+            EqsML->Rows.size() == 1 && VarsML->Rows.size() == 1) {
+          auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+          auto I32 = mlir::IntegerType::get(&MCtx, 32);
+          auto I64 = mlir::IntegerType::get(&MCtx, 64);
+          auto i32Const = [&](int v) -> mlir::Value {
+            return mlir::LLVM::ConstantOp::create(
+                B, L, I32, mlir::IntegerAttr::get(I32, v)).getResult();
+          };
+          auto i64Const = [&](int64_t v) -> mlir::Value {
+            return mlir::LLVM::ConstantOp::create(
+                B, L, I64, mlir::IntegerAttr::get(I64, v)).getResult();
+          };
+          /* Build a stack array of `count` ptr slots, fill from `vals`,
+           * return the base pointer. The `vals` may have NoneType
+           * placeholders from upstream lowering paths that haven't
+           * settled — coerce by setting the value's type to PtrTy
+           * since downstream we know they're sym ptrs. */
+          auto buildArr = [&](llvm::SmallVectorImpl<mlir::Value> &vals) -> mlir::Value {
+            auto ArrTy = mlir::LLVM::LLVMArrayType::get(PtrTy, vals.size());
+            mlir::Value One = i64Const(1);
+            mlir::Value Arr = mlir::LLVM::AllocaOp::create(
+                B, L, PtrTy, ArrTy, One, /*alignment=*/0).getResult();
+            for (size_t k = 0; k < vals.size(); ++k) {
+              mlir::Value V = vals[k];
+              if (V.getType() != PtrTy) V.setType(PtrTy);
+              auto Gep = mlir::LLVM::GEPOp::create(
+                  B, L, PtrTy, ArrTy, Arr,
+                  mlir::ValueRange{i32Const(0), i32Const((int)k)});
+              mlir::LLVM::StoreOp::create(B, L, V, Gep);
+            }
+            return Arr;
+          };
+          llvm::SmallVector<mlir::Value, 4> Eqs;
+          for (const Expr *X : EqsML->Rows[0]) Eqs.push_back(lowerExpr(*X));
+          llvm::SmallVector<mlir::Value, 4> Vars;
+          for (const Expr *X : VarsML->Rows[0]) Vars.push_back(lowerExpr(*X));
+          mlir::Value EqArr = buildArr(Eqs);
+          mlir::Value VarArr = buildArr(Vars);
+          return emitSymCall("matlab_sym_solve_sys",
+                             {EqArr, i64Const((int64_t)Eqs.size()),
+                              VarArr, i64Const((int64_t)Vars.size())});
+        }
       }
       /* factor(expr, var). */
       if (Nm == "factor" && C.Args.size() == 2 &&
@@ -6783,6 +6924,69 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
                         PtrTy, L, {Cal});
       }
       return Out;
+    }
+
+    /* Phase 6.2 — symbolic matrix literal. `[a 1; 2 b]` where any
+     * element is sym-typed routes through matlab_symmat_zeros +
+     * per-cell matlab_symmat_set, producing a matlab_symmat* (kind=8).
+     * Without this, the f64 matrix path would call matlab_mat_from_buf
+     * with the sym* pointers as data — at runtime, those reinterpret as
+     * f64 garbage. Each cell is boxed via matlab_sym_from_double for
+     * numeric literals; sym entries flow through directly. */
+    {
+      bool AnySymCell = false;
+      bool AllSymCells = !M.Rows.empty();
+      for (auto &Row : M.Rows) {
+        if (Row.empty()) { AllSymCells = false; break; }
+        for (const Expr *Cx : Row) {
+          if (Cx && exprIsSym(Cx)) { AnySymCell = true; }
+        }
+      }
+      if (AnySymCell) {
+        auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+        auto F64 = mlir::Float64Type::get(&MCtx);
+        auto I64 = mlir::IntegerType::get(&MCtx, 64);
+        size_t Rows = M.Rows.size();
+        size_t Cols = 0;
+        for (auto &Row : M.Rows) Cols = std::max(Cols, Row.size());
+        auto i64Const = [&](int64_t v) -> mlir::Value {
+          return mlir::arith::ConstantOp::create(
+              B, L, I64, mlir::IntegerAttr::get(I64, v)).getResult();
+        };
+        mlir::NamedAttribute ZerosCal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "matlab_symmat_zeros"));
+        mlir::Value Mat = emitUnreg("matlab.call_builtin",
+                                     {i64Const((int64_t)Rows),
+                                      i64Const((int64_t)Cols)},
+                                     PtrTy, L, {ZerosCal});
+        mlir::NamedAttribute SetCal(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "matlab_symmat_set"));
+        mlir::NamedAttribute FromDouble(
+            mlir::StringAttr::get(&MCtx, "callee"),
+            mlir::StringAttr::get(&MCtx, "matlab_sym_from_double"));
+        for (size_t i = 0; i < Rows; ++i) {
+          for (size_t j = 0; j < M.Rows[i].size(); ++j) {
+            const Expr *Cx = M.Rows[i][j];
+            if (!Cx) continue;
+            mlir::Value V = lowerExpr(*Cx);
+            /* Box numeric scalars into a sym; sym values flow directly. */
+            if (V && V.getType() == F64)
+              V = emitUnreg("matlab.call_builtin", {V},
+                            PtrTy, L, {FromDouble});
+            /* Sym-typed loads (e.g. NameExpr referencing a `syms`
+             * binding) may come back none-typed from the slot load
+             * before RefineSlotTypes runs. Force the type to PtrTy
+             * since exprIsSym already verified the source is sym. */
+            if (V && V.getType() != PtrTy) V.setType(PtrTy);
+            emitUnregOp("matlab.call_builtin",
+                        {Mat, i64Const((int64_t)i), i64Const((int64_t)j), V},
+                        {mlir::NoneType::get(&MCtx)}, L, {SetCal});
+          }
+        }
+        return Mat;
+      }
     }
 
     /* fi-typed row vector: route every element through matlab_mat_i64
