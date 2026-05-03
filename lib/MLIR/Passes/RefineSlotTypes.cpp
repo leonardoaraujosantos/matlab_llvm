@@ -14,6 +14,7 @@
 
 #include "matlab/MLIR/Passes/Passes.h"
 
+#include "mlir/Dialect/LLVMIR/LLVMTypes.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Operation.h"
@@ -29,6 +30,12 @@ namespace {
 bool isScalarPrim(mlir::Type T) {
   if (mlir::isa<mlir::IntegerType>(T)) return true;
   if (mlir::isa<mlir::FloatType>(T)) return true;
+  /* Phase 6 — sym values are !llvm.ptr (matlab_sym* / matlab_symmat*).
+   * Treat as scalar primitives so RefineSlotTypes can promote slots
+   * that store sym/symmat values stored from Symbolic Math Toolbox
+   * builtins. Without this, slots created by `syms x` lowering stay
+   * none-typed forever and survive to EmitC as unsupported matlab.alloc. */
+  if (mlir::isa<mlir::LLVM::LLVMPointerType>(T)) return true;
   return false;
 }
 

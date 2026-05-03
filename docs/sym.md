@@ -138,24 +138,38 @@ followed by R×C scalar sym entries. Standard `[a 1; 2 b]` matrix literal
 syntax doesn't yet detect sym entries — extending matrix-literal lowering
 to route sym entries through `matlab_symmat_*` is Phase 6.2.
 
-## What's not in scope yet (Phase 6.2)
+## Phase 6.2 — what shipped
 
-- **Standard matrix literal syntax** for sym entries — currently `[a 1; 2 b]`
-  routes through the f64 matrix path; need `sym_matrix(...)` explicit form
-- **Variadic system solvers** — `sym_solve_sys` ships in the runtime but the
-  language-level lowering only wires the fixed 2×2 / 3×3 entries
-- **Variadic IVP** — `dsolve_ivp` / `apply_ivp` ship single-condition
-  forms (`dsolve_ivp(eq, y, yp, x, x0, y0)`); multi-condition needs
-  cell-array integration
+- **Standard `[a 1; 2 b]` matrix literal syntax** — sym entries detected at
+  lowering time; routes through `matlab_symmat_*` instead of the f64 matrix
+  path. `sym_matrix(R, C, ...)` is no longer required for the common case.
+- **Variadic `sym_solve_sys`** — `sym_solve_sys([eq1, eq2, eq3], [x, y, z])`
+  for systems of any size. Lowers to LLVM stack arrays of sym pointers
+  passed to the existing variadic runtime entry. The fixed-arity
+  `sym_solve_2x2` / `sym_solve_3x3` remain as shortcuts.
+- **Multi-condition `dsolve_ivp` / `apply_ivp`** — pass parallel arrays:
+  `apply_ivp(sol, x, [x0, x1, ...], [y0, y1, ...])`. Single-condition form
+  `apply_ivp(sol, x, x0, y0)` still works as before.
+- **`simplify` auto-honours assumptions** — chains `refine()` before the
+  structural simplify so masked symbols' properties propagate. After
+  `assume(y, 'positive')`, `simplify(sqrt(y*y))` → `y`.
+- **`sym('pi')` → Pi singleton** — recognises `pi` / `Pi` / `exp1` /
+  `EulerGamma` / `Catalan` / `I` / `true` / `false` as SymPP singletons.
+  `vpa(sym('pi'), 32)` returns the digits of π.
+
+## What's not in scope yet (Phase 6.3+)
+
 - **`matlabFunction(f, vars)` returning a callable handle** — SymPP returns
   Octave source as a string; matlab_llvm doesn't yet parse-and-bind that
-- **`simplify` honouring assumptions** — use `refine` explicitly on SymPP's
-  C++ side; SymPP's Phase 5 `simplify` is structural only
-- **`sym('pi')` → Pi singleton** — currently creates a Symbol named "pi";
-  workaround is `sym(pi)` which boxes the f64 constant
 - **Assumption properties beyond the 10 in SymPP's mask** — `even`, `odd`,
   `prime`, `algebraic`, `complex` throw; SymPP-side phase
 - **Array-arg builtins**: `rsolve`, `groebner`, `pythagorean_triples`,
   `linear_diophantine` ship in the runtime but the cell-array language
   lowering for them is not yet wired
+- **SV emitter `state_display`-style output drop** (introduced in
+  3622f10): the const-fold pass eliminates assignments to output-port
+  slots when the value comes from a persistent register read. Pre-Phase
+  6.2 attempts to fix it surface as a cocotb timing divergence between
+  the Python and SV references — needs lockstep pipeline-equivalence
+  work in a Phase 7 effort.
 

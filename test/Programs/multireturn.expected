@@ -2,7 +2,7 @@ module {
   func.func @script() {
     %cst = arith.constant 1.000000e+01 : f64
     %cst_0 = arith.constant 3.000000e+00 : f64
-    %0 = "matlab.call"(%cst, %cst_0) {callee = "sumdiff", matlab.name = "y"} : (f64, f64) -> none
+    %0:2 = "matlab.call"(%cst, %cst_0) {callee = "sumdiff", matlab.name = "y", nargout = 2 : i64} : (f64, f64) -> (f64, f64)
     return
   }
   func.func @sumdiff(%arg0: none {matlab.name = "a"}, %arg1: none {matlab.name = "b"}) -> (none {matlab.name = "s"}, none {matlab.name = "d"}) {

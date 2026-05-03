@@ -2275,7 +2275,25 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
       }
       if (*Callee == "matlab_disp_mat" && Call.getNumResults() == 0 &&
           Call.getNumOperands() == 1) {
-        OS << "rt.disp_mat(" << this->stmtExpr(Call.getOperand(0)) << ");\n";
+        /* Same predecessor-pattern fix as EmitC: when the operand is
+         * a string-producing call (concat/from_literal/num2str/sprintf)
+         * the value is a string, not a matrix. rt.disp_mat would
+         * coerce the string through asArray and throw. Route to
+         * rt.string_disp instead. */
+        mlir::Value Op = Call.getOperand(0);
+        if (auto *Def = Op.getDefiningOp())
+          if (auto Pred = mlir::dyn_cast<mlir::LLVM::CallOp>(Def))
+            if (auto PCallee = Pred.getCallee()) {
+              llvm::StringRef PN = *PCallee;
+              if (PN == "matlab_string_concat" ||
+                  PN == "matlab_string_from_literal" ||
+                  PN == "matlab_num2str" ||
+                  PN.starts_with("matlab_sprintf")) {
+                OS << "rt.string_disp(" << this->stmtExpr(Op) << ");\n";
+                return;
+              }
+            }
+        OS << "rt.disp_mat(" << this->stmtExpr(Op) << ");\n";
         return;
       }
       {

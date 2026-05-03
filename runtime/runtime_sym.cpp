@@ -32,6 +32,8 @@
 #include <sympp/core/operators.hpp>
 #include <sympp/core/symbol.hpp>
 #include <sympp/core/type_id.hpp>
+#include <sympp/core/refine.hpp>
+#include <sympp/core/singletons.hpp>
 #include <sympp/matlab/matlab.hpp>
 #include <sympp/matrices/matrix.hpp>
 #include <sympp/printing/printing.hpp>
@@ -108,7 +110,20 @@ extern "C" {
 /* --- Construction --------------------------------------------------------- */
 
 matlab_sym *matlab_sym_from_str(const char *s, int64_t n) {
-    return box(sympp::matlab::sym(borrow(s, n)));
+    /* Recognize MATLAB's named-constant strings as SymPP singletons.
+     * sympp::matlab::sym treats a bare identifier as a fresh Symbol —
+     * `sym('pi')` would create Symbol("pi"), not the Pi constant. Map
+     * known names to their canonical singleton so vpa(sym('pi'), 32)
+     * gives the digits of π and not the literal symbol "pi". */
+    auto name = borrow(s, n);
+    if (name == "pi" || name == "Pi") return box(sympp::S::Pi());
+    if (name == "exp1") return box(sympp::S::E());
+    if (name == "EulerGamma") return box(sympp::S::EulerGamma());
+    if (name == "Catalan") return box(sympp::S::Catalan());
+    if (name == "I" || name == "1i" || name == "1j") return box(sympp::S::I());
+    if (name == "true" || name == "True") return box(sympp::S::True());
+    if (name == "false" || name == "False") return box(sympp::S::False());
+    return box(sympp::matlab::sym(name));
 }
 
 matlab_sym *matlab_sym_str2sym(const char *s, int64_t n) {
@@ -215,7 +230,14 @@ matlab_sym *matlab_sym_int_def(const matlab_sym *f, const matlab_sym *var,
 /* --- Manipulation --------------------------------------------------------- */
 
 matlab_sym *matlab_sym_simplify(const matlab_sym *e) {
-    return box(sympp::matlab::simplify(unbox(e)));
+    /* MATLAB's simplify is expected to honour assumptions — i.e.
+     * simplify(sqrt(x*x)) → x when x is positive. SymPP's simplify is
+     * structural only (matches SymPy behaviour); chain refine() first
+     * so any registered assumption masks on the input's symbols
+     * propagate before the structural pass runs. refine is a no-op on
+     * symbols without registered assumptions, so this costs nothing
+     * for unmasked inputs. */
+    return box(sympp::matlab::simplify(sympp::refine(unbox(e))));
 }
 matlab_sym *matlab_sym_expand(const matlab_sym *e) {
     return box(sympp::matlab::expand(unbox(e)));
