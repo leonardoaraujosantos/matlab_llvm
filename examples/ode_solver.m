@@ -92,3 +92,20 @@ disp('  nfailed:');
 disp(stats.nfailed);
 disp('  nfevals (~6 * nsteps for RK45):');
 disp(stats.nfevals);
+
+% --- 7. Systems of ODEs (vector y) -------------------------------------
+% Linear oscillator: dy/dt = [-y(2); y(1)] with y(0) = [1; 0]. Closed
+% form is y(t) = [cos(t); sin(t)]. The output Y is N rows × D cols
+% (MATLAB convention: Y(i, :) is the state at t(i)).
+
+disp('7. vector y — linear oscillator');
+y0vec = [1; 0];
+[t7, y7] = ode45(@(t,yy) [(0 - yy(2)); yy(1)], [0 6.283185307179586], y0vec);
+disp('  number of samples:');
+disp(length(t7));
+disp('  initial state y(1, :):');
+disp(y7(1, 1));
+disp(y7(1, 2));
+disp('  final state y(end, :) — should be ≈ [1; 0] (cos/sin of 2π):');
+disp(y7(end, 1));
+disp(y7(end, 2));
