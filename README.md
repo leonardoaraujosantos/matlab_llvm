@@ -50,6 +50,7 @@ control flow, functions, basic OOP, and editor tooling.
 | Numeric runtime | dense matrices, slicing, broadcasting, reductions, `eig`, `svd` (values), `qr`, `chol`, `fft`, `ifft`, `fft2`, `ifft2` |
 | MATLAB data types | strings, chars, structs, **struct arrays** (`s(i).x`), 1-D and 2-D cell arrays + bracket-concat, function handles, anonymous functions with captures, **dictionaries** (`containers.Map` / `dictionary`), **datetime** / **duration**, **categorical**, **table**, **symbolic** (`sym` / `syms` via SymPP) |
 | Symbolic Math Toolbox | `syms`, `sym`, `str2sym`, `diff`, `int`, `simplify`, `expand`, `factor`, `subs`, `solve`, `vpa`, `taylor`, `limit`, `dsolve`, `pdsolve`, `pdsolve_heat`, `pdsolve_wave`, `laplace`, `ilaplace`, `fourier`, `ifourier`, `ztrans`, `iztrans`, `assume`, `assumeAlso`, `clearAssumptions`, `double`, `latex`, `pretty`, `ccode` — opt-in via `-DMATLAB_LLVM_WITH_SYM=ON`, backed by [SymPP](https://github.com/leonardoaraujosantos/SymPP) |
+| ODE / IVP solvers | `ode45` (Dormand–Prince 5(4)) and `ode23` (Bogacki–Shampine 3(2)) for **scalar and vector `y`**, with adaptive FSAL + cubic-Hermite dense output. Full `odeset` surface — `RelTol`, `AbsTol`, `MaxStep`, `InitialStep`, `Refine`, `Stats`. 2-return `[t, y]` and 3-return `[t, y, stats]` forms, forward / backward integration, user-time-grid `tspan = [t0 t1 … tN]`. See [`docs/ode.md`](docs/ode.md). |
 | Numeric typed lanes | `int32` / `uint8` matrix descriptors with saturating arithmetic, comparisons, casts, REPL+DAP display; narrower / wider int lanes still f64-shadowed |
 | State | `global`, `persistent`, REPL workspace variables, `who` / `whos` / `clear` |
 | Parallelism | `parfor` with reduction support |
@@ -60,10 +61,10 @@ control flow, functions, basic OOP, and editor tooling.
 
 Current corpus size in-tree:
 
-- `26` runnable programs in [`examples/`](examples/)
+- `28` runnable programs in [`examples/`](examples/)
 - `18` synthesizable HDL example modules in [`examples/hdl/`](examples/hdl/)
 - `10` flowchart programs in [`examples/mflow/`](examples/mflow/)
-- `156` execution tests in `test/Run/`
+- `166` execution tests in `test/Run/`
 - `37` SystemVerilog golden fixtures (Verilator lint-clean) in `test/EmitSV/`
 - `7` fi-spec port-declaration regression tests in `test/EmitSVPorts/`
 - `10` synthesizability-gate diagnostic tests in `test/EmitSVFail/`

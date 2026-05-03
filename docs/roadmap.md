@@ -42,6 +42,7 @@ roadmap-side summary:
 | 5.3 | `table` — auto-named + `'VariableNames'`, dot column access, dynamic add, `height`/`width`/`disp` | `table_basic.m` |
 | 6   | **Symbolic Math Toolbox** via [SymPP](https://github.com/leonardoaraujosantos/SymPP) — `syms`, `diff`, `int`, `simplify`, `expand`, `factor`, `subs`, `solve`, `vpa`, `taylor`, `limit`, `dsolve`, `pdsolve`, `laplace`/`fourier`/`ztrans` (+ inverses), `assume`, sym arithmetic dispatch on `+ - * / ^ ==`, sym-typed elementary functions, REPL JIT + DAP variable inspector, opt-in via `-DMATLAB_LLVM_WITH_SYM=ON` | `test/RunSym/sym_phase_a.m`, `sym_phase_b.m` |
 | 6.1 | **Symbolic matrices + multi-eq + IVP + numeric solve** — new `matlab_symmat` opaque type (kind=8) with cross-TU REPL persistence + DAP rendering; `sym_matrix`, `sym_eye`, `sym_zeros`, `sym_det`, `sym_inv`, `sym_transpose`, `sym_trace`, `sym_rank`, `sym_linsolve`, `sym_dsolve_system`; fixed-arity multi-eq solvers `sym_solve_2x2` / `sym_solve_3x3` returning a symmat (one row per joint solution); `nsolve`, `vpasolve`, `dsolve_ivp` (1-cond), `apply_ivp` (1-cond), `checkodesol` | `test/RunSym/sym_phase_b1.m` |
+| 7   | **Initial-value ODE solvers** — `ode45` (Dormand–Prince 5(4)) and `ode23` (Bogacki–Shampine 3(2)) with adaptive FSAL step + cubic-Hermite dense output; scalar and **vector `y`** (system of ODEs via anon-handle retyping pre-pass in `LowerAnonCalls`); forward / backward / user-time-grid `tspan`; full odeset surface — `RelTol`, `AbsTol`, `MaxStep`, `InitialStep`, `Refine`, `Stats`; 2-return `[t, y]`, 3-return `[t, y, stats]`. C++ / Python / TypeScript runtimes bit-identical. See [`docs/ode.md`](ode.md). | `test/Run/math_ode45_*.m`, `test/Runtime/test_ode.c` |
 
 Open follow-ups carried forward (still on the roadmap):
 
@@ -50,6 +51,9 @@ Open follow-ups carried forward (still on the roadmap):
 - **Full method-dispatch value semantics** for OOP — needs test-corpus migration to either rebind or `< handle`-annotate the existing class fixtures.
 - **Heterogeneous table columns** — string / categorical / datetime columns alongside numeric.
 - **Phase 6.2** — Standard `[a 1; 2 b]` matrix-literal syntax routing through `matlab_symmat_*` when entries are sym (currently uses the explicit `sym_matrix(R, C, e11, ...)` constructor); variadic `sym_solve_sys` with cell-array integration; multi-condition `dsolve_ivp` / `apply_ivp`; `matlabFunction(...)` wrapping the SymPP-emitted Octave source into a callable function handle; `simplify` honouring assumptions via auto-`refine`; symbolic constant resolution (`sym('pi')` → Pi singleton); array-arg builtins `rsolve` / `groebner` / `pythagorean_triples` / `linear_diophantine` language-level wiring.
+- **Phase 7.1 — Stiff solvers.** `ode15s` (variable-order BDF + Newton iteration + Jacobian) is the load-bearing follow-up; pulls in `ode23s` (Rosenbrock), `ode23t` / `ode23tb`, and `ode15i` (DAE) on the same machinery. Unlocks numerical PDE via `pdepe` (method-of-lines).
+- **Phase 7.2 — Event functions.** `Events` odeset field with Brent root-finding on a user-supplied event function; 5-return form `[t, y, te, ye, ie] = ode45(...)`. Also `OutputFcn` callback for live plotting / progress.
+- **Vector `y` via *named* user functions** — currently anon-only; the LowerUserCalls signature-refinement gate rejects `tensor<Nxf64>` ↔ `tensor<Nx1xf64>` shape mismatches and needs widening.
 
 ---
 

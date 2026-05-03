@@ -26,6 +26,7 @@ Use this page as the entry point to the repo docs.
 - [`emit_cocotb.md`](emit_cocotb.md): `-emit-cocotb` harness — open-source HDL Verifier alternative; cycle-by-cycle co-simulation of the SV DUT against the Python reference, with HDL-Verifier-style `Latency` parameter
 - [`emit_fixed_point.md`](emit_fixed_point.md): Fixed-Point Designer (`fi`) support — Phase 1 scalar arithmetic shipped, Phase 3 arrays / FIR planned
 - [`sym.md`](sym.md): Symbolic Math Toolbox (`sym` / `syms`) backed by [SymPP](https://github.com/leonardoaraujosantos/SymPP) — diff/int/simplify/solve/dsolve/pdsolve/transforms/assume/vpa/taylor/limit; opt-in via `-DMATLAB_LLVM_WITH_SYM=ON`
+- [`ode.md`](ode.md): Initial-value ODE solvers — `ode45`, `ode23` (Dormand–Prince / Bogacki–Shampine, scalar and **vector `y`**) with adaptive FSAL, cubic-Hermite dense output, full odeset (`RelTol`, `AbsTol`, `MaxStep`, `InitialStep`, `Refine`, `Stats`), 2-/3-return forms, forward and backward integration, user-time-grid `tspan`
 
 ## Interactive Tooling
 

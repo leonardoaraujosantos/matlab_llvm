@@ -127,6 +127,13 @@ Legend: ✓ supported, — not implemented, ◇ partial (see notes).
 | `trapz(y)`, `trapz(x,y)` | ✓         | —             | —         | builtin |
 | `cumtrapz` (running, leading 0) | ✓  | —             | —         | builtin |
 | `gradient` (central diff + one-sided ends) | ✓ | —   | —         | builtin |
+| **ODE / IVP solvers**    |           |               |           |                     |
+| `ode45` (Dormand–Prince 5(4)) — scalar `y` | ✓ | ✓        | ✓         | `matlab_ode45_t`/`_y` (+ `_opts`, `_stats`) |
+| `ode45` — **vector `y`** (system of ODEs) | ✓ | ✓         | ✓         | `matlab_ode45_v_t`/`_y` (+ `_opts`, `_stats`) |
+| `ode23` (Bogacki–Shampine 3(2)) — scalar / vector | ✓ | ✓ | ✓        | `matlab_ode23_*` family |
+| `odeset` fields: `RelTol`, `AbsTol`, `MaxStep`, `InitialStep`, `Refine`, `Stats` | ✓ | ✓ | ✓ | accepted via `_opts` runtime entries; see [`ode.md`](ode.md) |
+| User-time grid `tspan = [t0 t1 … tN]`; backward `[t1 t0]`; 3-return `[t, y, stats]` | ✓ | ✓ | ✓ | |
+| Stiff (`ode15s` etc.), `Events`, `OutputFcn`, `pdepe` | — | — | —     | tracked in [`feature_status.md`](feature_status.md) |
 | **Image processing**     |           |               |           |                     |
 | `imfilter` (same-size conv2 wrapper) | ✓ | —         | —         | builtin |
 | `padarray` (zero pad, [pre_r pre_c]) | ✓ | —         | —         | builtin |
