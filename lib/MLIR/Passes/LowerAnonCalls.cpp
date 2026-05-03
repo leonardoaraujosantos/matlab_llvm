@@ -540,12 +540,95 @@ bool runLowerAnonCallsPost(ModuleOp M) {
   return Changed;
 }
 
+/* Trace a value back to a matlab.make_anon op. The anon may either be
+ * the value's direct defining op, or stored into a slot whose load
+ * defines the value. Returns nullptr if the value doesn't trace to a
+ * unique make_anon. */
+static Operation *traceToMakeAnon(Value V) {
+  Operation *Def = V.getDefiningOp();
+  if (!Def) return nullptr;
+  if (isMatlabOp(Def, "matlab.make_anon")) return Def;
+  if (isMatlabOp(Def, "matlab.load") && Def->getNumOperands() == 1) {
+    Value Slot = Def->getOperand(0);
+    Operation *Found = nullptr;
+    for (Operation *U : Slot.getUsers()) {
+      if (!isMatlabOp(U, "matlab.store")) continue;
+      if (U->getNumOperands() != 2 || U->getOperand(1) != Slot) continue;
+      Operation *Src = U->getOperand(0).getDefiningOp();
+      if (!isMatlabOp(Src, "matlab.make_anon")) return nullptr;
+      if (Found && Found != Src) return nullptr;
+      Found = Src;
+    }
+    return Found;
+  }
+  return nullptr;
+}
+
+/* Pre-pass for vector-y ode45/ode23. Sema types anonymous-function block
+ * args as f64 by default. When the anon is passed to ode45 / ode23 with
+ * a matrix-typed y0, retype the second block arg (y) to ptr so the
+ * outlined function correctly takes a matrix and the vector-dispatch
+ * path in LowerTensorOps fires. The y-slot alloc and any loads of that
+ * slot are cascade-retyped so the body's printed type signatures stay
+ * consistent. */
+static bool retypeAnonsForVectorODE(ModuleOp M) {
+  MLIRContext *Ctx = M.getContext();
+  auto F64 = Float64Type::get(Ctx);
+  auto PtrTy = LLVM::LLVMPointerType::get(Ctx);
+  bool Changed = false;
+  SmallVector<Operation *> Calls;
+  M.walk([&](Operation *Op) {
+    if (!isMatlabOp(Op, "matlab.call_builtin")) return;
+    auto Cn = Op->getAttrOfType<StringAttr>("callee");
+    if (!Cn) return;
+    StringRef Name = Cn.getValue();
+    if (Name != "ode45" && Name != "ode23") return;
+    if (Op->getNumOperands() < 3) return;
+    Calls.push_back(Op);
+  });
+  for (Operation *Call : Calls) {
+    Type Y0Ty = Call->getOperand(2).getType();
+    bool Y0IsMatrix = mlir::isa<RankedTensorType>(Y0Ty) ||
+                      mlir::isa<UnrankedTensorType>(Y0Ty) ||
+                      Y0Ty == PtrTy;
+    if (!Y0IsMatrix) continue;
+    Operation *Anon = traceToMakeAnon(Call->getOperand(0));
+    if (!Anon || Anon->getNumRegions() != 1) continue;
+    Region &Body = Anon->getRegion(0);
+    if (!Body.hasOneBlock()) continue;
+    Block &Entry = Body.front();
+    if (Entry.getNumArguments() < 2) continue;
+    BlockArgument YArg = Entry.getArgument(1);
+    if (YArg.getType() != F64) continue;       /* already retyped or wrong shape */
+
+    YArg.setType(PtrTy);
+    /* Cascade: retype the slot the arg gets stored into, plus loads. */
+    for (Operation *U : YArg.getUsers()) {
+      if (!isMatlabOp(U, "matlab.store") || U->getNumOperands() != 2) continue;
+      if (U->getOperand(0) != YArg) continue;
+      Value Slot = U->getOperand(1);
+      Operation *SlotDef = Slot.getDefiningOp();
+      if (isMatlabOp(SlotDef, "matlab.alloc"))
+        SlotDef->getResult(0).setType(PtrTy);
+      for (Operation *SU : Slot.getUsers()) {
+        if (isMatlabOp(SU, "matlab.load") && SU->getNumResults() == 1)
+          SU->getResult(0).setType(PtrTy);
+      }
+    }
+    Changed = true;
+  }
+  return Changed;
+}
+
 bool runLowerAnonCalls(ModuleOp M) {
   /* User-function handles (`f = @sq; f(3)`) — rewrite to direct
    * matlab.call so the LowerUserCalls fixpoint refines sq's signature
    * the same way it handles a syntactic sq(3). Must run before the
    * scalar-math handle rewrite so those remain addressof+llvm.call. */
   bool Changed = rewriteUserCallIndirect(M);
+
+  /* Vector-y ode45/ode23: retype anon `y` block args before outlining. */
+  Changed |= retypeAnonsForVectorODE(M);
 
   /* make_handle first so @sin-style handles resolve to addressof before the
    * anon outliner inspects call_indirect sites. */

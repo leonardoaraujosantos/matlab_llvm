@@ -7055,6 +7055,603 @@ matlab_mat *matlab_ode23_y_opts(ode_rhs_t f, matlab_mat *tspan, double y0,
     return mat_clone_col(ode_cache_.y);
 }
 
+/* =====================================================================
+ * Vector-y solvers.
+ *
+ * Same Dormand-Prince / Bogacki-Shampine adaptive integration as the
+ * scalar path, but operating on D-component vectors. The user's RHS
+ * has signature `matlab_mat *(*f)(double t, matlab_mat *y)` — accepts
+ * a Dx1 column matrix, returns a fresh Dx1 column with dy/dt.
+ *
+ * Output `Y` is laid out row-major as N rows × D cols (the MATLAB
+ * convention: Y(i, :) is the state at t(i)).
+ * ===================================================================== */
+typedef matlab_mat *(*ode_rhs_v_t)(double, matlab_mat *);
+
+struct ode_v_cache_slot {
+    void *fp;
+    matlab_mat *tspan;
+    matlab_mat *y0;
+    double rtol;
+    double atol;
+    double max_step;
+    double init_step;
+    int refine;
+    int print_stats;
+    int kind;
+    int64_t D;          /* state dimension */
+    matlab_mat *t;      /* Nx1 time grid */
+    matlab_mat *y;      /* NxD state matrix */
+    int n_acc;
+    int n_rej;
+    int n_fev;
+    int valid;
+};
+
+#if defined(__GNUC__) || defined(__clang__)
+__thread struct ode_v_cache_slot ode_v_cache_;
+#else
+struct ode_v_cache_slot ode_v_cache_;
+#endif
+
+static void mat_free_(matlab_mat *m) {
+    if (!m) return;
+    free(m->data);
+    free(m);
+}
+
+/* Call f with a fresh-looking (Dx1 column) matlab_mat copying y, get a
+ * matlab_mat result, copy its first D entries into out, and free the
+ * result (it was allocated fresh by the user code). The yt scratch is
+ * reused across stages to avoid per-call descriptor allocation. */
+static void ode_v_call(ode_rhs_v_t f, double t, const double *y, int64_t D,
+                        matlab_mat *yt, double *out) {
+    memcpy(yt->data, y, (size_t)D * sizeof(double));
+    matlab_mat *dy = f(t, yt);
+    if (dy && dy->data) {
+        int64_t nd = dy->rows * dy->cols;
+        if (nd > D) nd = D;
+        memcpy(out, dy->data, (size_t)nd * sizeof(double));
+        if (nd < D) memset(out + nd, 0, (size_t)(D - nd) * sizeof(double));
+    } else {
+        memset(out, 0, (size_t)D * sizeof(double));
+    }
+    mat_free_(dy);
+}
+
+/* Cubic Hermite per-component. y0/y1 are vectors at the bracket
+ * endpoints; k0/k1 are the corresponding derivatives. */
+static void ode_v_hermite(const double *y0, const double *y1,
+                           const double *k0, const double *k1,
+                           double h, double th, int64_t D, double *out) {
+    double th2 = th * th;
+    double th3 = th2 * th;
+    double a = 2.0*th3 - 3.0*th2 + 1.0;
+    double b = -2.0*th3 + 3.0*th2;
+    double c = h * (th3 - 2.0*th2 + th);
+    double d = h * (th3 - th2);
+    for (int64_t j = 0; j < D; ++j)
+        out[j] = a*y0[j] + b*y1[j] + c*k0[j] + d*k1[j];
+}
+
+/* Push a (t, y[0..D]) row to the growing Tb / Yb buffers. Yb is
+ * row-major NxD. */
+static void ode_v_push(double **Tb, double **Yb, int64_t *n, int64_t *cap,
+                        int64_t D, double tv, const double *yv) {
+    if (*n == *cap) {
+        *cap = (*cap) * 2;
+        *Tb = (double *)realloc(*Tb, (size_t)(*cap) * sizeof(double));
+        *Yb = (double *)realloc(*Yb, (size_t)(*cap) * (size_t)D * sizeof(double));
+    }
+    (*Tb)[*n] = tv;
+    memcpy(*Yb + (*n) * D, yv, (size_t)D * sizeof(double));
+    ++(*n);
+}
+
+/* Vector Dormand-Prince 5(4). Mirror of rk_solve_dp45 with vector
+ * arithmetic. The scratch buffers k1..k7, y_new, err, and y are all
+ * length D. The yt mat is a single Dx1 descriptor reused per f-call. */
+static void rk_solve_dp45_v(ode_rhs_v_t f,
+                              const double *targets, int64_t n_targets,
+                              const double *y0, int64_t D,
+                              double rtol, double atol,
+                              double max_step, double init_step, int refine,
+                              double **T, double **Y, int64_t *N,
+                              int *out_n_acc, int *out_n_rej, int *out_n_fev) {
+    const int max_steps = 100000;
+    int n_acc = 0, n_rej = 0, n_fev = 0;
+    if (refine < 1) refine = 1;
+    if (n_targets < 2 || D <= 0) {
+        *T = NULL; *Y = NULL; *N = 0;
+        if (out_n_acc) *out_n_acc = 0;
+        if (out_n_rej) *out_n_rej = 0;
+        if (out_n_fev) *out_n_fev = 0;
+        return;
+    }
+    double t0 = targets[0], tf = targets[n_targets - 1];
+    int user_grid = (n_targets > 2);
+
+    int64_t cap = user_grid ? n_targets : 256;
+    double *Tb = (double *)malloc((size_t)cap * sizeof(double));
+    double *Yb = (double *)malloc((size_t)cap * (size_t)D * sizeof(double));
+    int64_t n = 0;
+
+    double *y    = (double *)malloc((size_t)D * sizeof(double));
+    double *y_new = (double *)malloc((size_t)D * sizeof(double));
+    double *k1 = (double *)malloc((size_t)D * sizeof(double));
+    double *k2 = (double *)malloc((size_t)D * sizeof(double));
+    double *k3 = (double *)malloc((size_t)D * sizeof(double));
+    double *k4 = (double *)malloc((size_t)D * sizeof(double));
+    double *k5 = (double *)malloc((size_t)D * sizeof(double));
+    double *k6 = (double *)malloc((size_t)D * sizeof(double));
+    double *k7 = (double *)malloc((size_t)D * sizeof(double));
+    double *stg = (double *)malloc((size_t)D * sizeof(double));
+    double *err = (double *)malloc((size_t)D * sizeof(double));
+
+    matlab_mat *yt = mat_alloc(D, 1);    /* reusable input scratch */
+
+    memcpy(y, y0, (size_t)D * sizeof(double));
+    double t = t0;
+    ode_v_push(&Tb, &Yb, &n, &cap, D, t, y);
+    int64_t next_tgt = 1;
+
+    double span = tf - t0;
+    double h = (init_step > 0.0) ? (span >= 0.0 ? init_step : -init_step)
+                                 : span * 0.01;
+    if (h == 0.0 || span == 0.0) {
+        *T = Tb; *Y = Yb; *N = n;
+        free(y); free(y_new); free(k1); free(k2); free(k3);
+        free(k4); free(k5); free(k6); free(k7); free(stg); free(err);
+        mat_free_(yt);
+        if (out_n_acc) *out_n_acc = 0;
+        if (out_n_rej) *out_n_rej = 0;
+        if (out_n_fev) *out_n_fev = 0;
+        return;
+    }
+    int forward = h > 0;
+    if (max_step > 0.0) {
+        if (h >  max_step) h =  max_step;
+        if (h < -max_step) h = -max_step;
+    }
+
+    ode_v_call(f, t, y, D, yt, k1);
+    ++n_fev;
+    int steps = 0;
+    while ((forward ? t < tf : t > tf) && steps < max_steps) {
+        ++steps;
+        if (forward ? (t + h > tf) : (t + h < tf)) h = tf - t;
+
+        for (int64_t j = 0; j < D; ++j) stg[j] = y[j] + h * k1[j] * (1.0/5.0);
+        ode_v_call(f, t + h * (1.0/5.0), stg, D, yt, k2);
+
+        for (int64_t j = 0; j < D; ++j)
+            stg[j] = y[j] + h * (k1[j] * (3.0/40.0) + k2[j] * (9.0/40.0));
+        ode_v_call(f, t + h * (3.0/10.0), stg, D, yt, k3);
+
+        for (int64_t j = 0; j < D; ++j)
+            stg[j] = y[j] + h * (k1[j] * (44.0/45.0) - k2[j] * (56.0/15.0)
+                                 + k3[j] * (32.0/9.0));
+        ode_v_call(f, t + h * (4.0/5.0), stg, D, yt, k4);
+
+        for (int64_t j = 0; j < D; ++j)
+            stg[j] = y[j] + h * (k1[j] * (19372.0/6561.0)
+                                 - k2[j] * (25360.0/2187.0)
+                                 + k3[j] * (64448.0/6561.0)
+                                 - k4[j] * (212.0/729.0));
+        ode_v_call(f, t + h * (8.0/9.0), stg, D, yt, k5);
+
+        for (int64_t j = 0; j < D; ++j)
+            stg[j] = y[j] + h * (k1[j] * (9017.0/3168.0)
+                                 - k2[j] * (355.0/33.0)
+                                 + k3[j] * (46732.0/5247.0)
+                                 + k4[j] * (49.0/176.0)
+                                 - k5[j] * (5103.0/18656.0));
+        ode_v_call(f, t + h, stg, D, yt, k6);
+
+        for (int64_t j = 0; j < D; ++j)
+            y_new[j] = y[j] + h * (k1[j] * (35.0/384.0)
+                                  + k3[j] * (500.0/1113.0)
+                                  + k4[j] * (125.0/192.0)
+                                  - k5[j] * (2187.0/6784.0)
+                                  + k6[j] * (11.0/84.0));
+        ode_v_call(f, t + h, y_new, D, yt, k7);
+        n_fev += 6;
+
+        /* Per-component error & componentwise scale. Inf-norm. */
+        double normerr = 0.0;
+        for (int64_t j = 0; j < D; ++j) {
+            err[j] = h * (k1[j] * (71.0/57600.0)
+                         - k3[j] * (71.0/16695.0)
+                         + k4[j] * (71.0/1920.0)
+                         - k5[j] * (17253.0/339200.0)
+                         + k6[j] * (22.0/525.0)
+                         - k7[j] * (1.0/40.0));
+            double scale = atol + rtol * fmax(fabs(y[j]), fabs(y_new[j]));
+            double e = (scale > 0) ? fabs(err[j]) / scale : 0.0;
+            if (e > normerr) normerr = e;
+        }
+
+        if (normerr <= 1.0) {
+            ++n_acc;
+            if (user_grid) {
+                while (next_tgt < n_targets) {
+                    double tt = targets[next_tgt];
+                    int in_range = forward ? (tt <= t + h) : (tt >= t + h);
+                    if (!in_range) break;
+                    double th = (h == 0.0) ? 0.0 : (tt - t) / h;
+                    if (next_tgt == n_targets - 1) {
+                        ode_v_push(&Tb, &Yb, &n, &cap, D, tt, y_new);
+                    } else {
+                        double *interp = stg;  /* reuse stg as scratch */
+                        ode_v_hermite(y, y_new, k1, k7, h, th, D, interp);
+                        ode_v_push(&Tb, &Yb, &n, &cap, D, tt, interp);
+                    }
+                    ++next_tgt;
+                }
+            } else {
+                for (int j = 1; j <= refine; ++j) {
+                    double th = (double)j / (double)refine;
+                    double ti = t + h * th;
+                    if (j == refine) {
+                        ode_v_push(&Tb, &Yb, &n, &cap, D, ti, y_new);
+                    } else {
+                        double *interp = stg;
+                        ode_v_hermite(y, y_new, k1, k7, h, th, D, interp);
+                        ode_v_push(&Tb, &Yb, &n, &cap, D, ti, interp);
+                    }
+                }
+            }
+            t += h;
+            memcpy(y,  y_new, (size_t)D * sizeof(double));
+            memcpy(k1, k7,    (size_t)D * sizeof(double));        /* FSAL */
+            if (user_grid && next_tgt >= n_targets) break;
+        } else {
+            ++n_rej;
+        }
+
+        double fac = (normerr == 0.0) ? 5.0
+                                      : 0.9 * pow(normerr, -1.0/5.0);
+        if (fac < 0.2) fac = 0.2;
+        if (fac > 5.0) fac = 5.0;
+        h *= fac;
+        if (max_step > 0.0) {
+            if (h >  max_step) h =  max_step;
+            if (h < -max_step) h = -max_step;
+        }
+    }
+
+    *T = Tb; *Y = Yb; *N = n;
+    if (out_n_acc) *out_n_acc = n_acc;
+    if (out_n_rej) *out_n_rej = n_rej;
+    if (out_n_fev) *out_n_fev = n_fev;
+    free(y); free(y_new); free(k1); free(k2); free(k3);
+    free(k4); free(k5); free(k6); free(k7); free(stg); free(err);
+    mat_free_(yt);
+}
+
+/* Vector Bogacki-Shampine 3(2). Same shape as the scalar version but
+ * working on D-component vectors. */
+static void rk_solve_bs23_v(ode_rhs_v_t f,
+                              const double *targets, int64_t n_targets,
+                              const double *y0, int64_t D,
+                              double rtol, double atol,
+                              double max_step, double init_step, int refine,
+                              double **T, double **Y, int64_t *N,
+                              int *out_n_acc, int *out_n_rej, int *out_n_fev) {
+    const int max_steps = 100000;
+    int n_acc = 0, n_rej = 0, n_fev = 0;
+    if (refine < 1) refine = 1;
+    if (n_targets < 2 || D <= 0) {
+        *T = NULL; *Y = NULL; *N = 0;
+        if (out_n_acc) *out_n_acc = 0;
+        if (out_n_rej) *out_n_rej = 0;
+        if (out_n_fev) *out_n_fev = 0;
+        return;
+    }
+    double t0 = targets[0], tf = targets[n_targets - 1];
+    int user_grid = (n_targets > 2);
+
+    int64_t cap = user_grid ? n_targets : 256;
+    double *Tb = (double *)malloc((size_t)cap * sizeof(double));
+    double *Yb = (double *)malloc((size_t)cap * (size_t)D * sizeof(double));
+    int64_t n = 0;
+
+    double *y    = (double *)malloc((size_t)D * sizeof(double));
+    double *y_new = (double *)malloc((size_t)D * sizeof(double));
+    double *k1 = (double *)malloc((size_t)D * sizeof(double));
+    double *k2 = (double *)malloc((size_t)D * sizeof(double));
+    double *k3 = (double *)malloc((size_t)D * sizeof(double));
+    double *k4 = (double *)malloc((size_t)D * sizeof(double));
+    double *stg = (double *)malloc((size_t)D * sizeof(double));
+    double *err = (double *)malloc((size_t)D * sizeof(double));
+    matlab_mat *yt = mat_alloc(D, 1);
+
+    memcpy(y, y0, (size_t)D * sizeof(double));
+    double t = t0;
+    ode_v_push(&Tb, &Yb, &n, &cap, D, t, y);
+    int64_t next_tgt = 1;
+
+    double span = tf - t0;
+    double h = (init_step > 0.0) ? (span >= 0.0 ? init_step : -init_step)
+                                 : span * 0.01;
+    if (h == 0.0 || span == 0.0) {
+        *T = Tb; *Y = Yb; *N = n;
+        free(y); free(y_new); free(k1); free(k2); free(k3);
+        free(k4); free(stg); free(err);
+        mat_free_(yt);
+        if (out_n_acc) *out_n_acc = 0;
+        if (out_n_rej) *out_n_rej = 0;
+        if (out_n_fev) *out_n_fev = 0;
+        return;
+    }
+    int forward = h > 0;
+    if (max_step > 0.0) {
+        if (h >  max_step) h =  max_step;
+        if (h < -max_step) h = -max_step;
+    }
+
+    ode_v_call(f, t, y, D, yt, k1);
+    ++n_fev;
+    int steps = 0;
+    while ((forward ? t < tf : t > tf) && steps < max_steps) {
+        ++steps;
+        if (forward ? (t + h > tf) : (t + h < tf)) h = tf - t;
+
+        for (int64_t j = 0; j < D; ++j) stg[j] = y[j] + h * k1[j] * 0.5;
+        ode_v_call(f, t + h * 0.5, stg, D, yt, k2);
+
+        for (int64_t j = 0; j < D; ++j) stg[j] = y[j] + h * k2[j] * 0.75;
+        ode_v_call(f, t + h * 0.75, stg, D, yt, k3);
+
+        for (int64_t j = 0; j < D; ++j)
+            y_new[j] = y[j] + h * (k1[j] * (2.0/9.0)
+                                  + k2[j] * (1.0/3.0)
+                                  + k3[j] * (4.0/9.0));
+        ode_v_call(f, t + h, y_new, D, yt, k4);
+        n_fev += 3;
+
+        double normerr = 0.0;
+        for (int64_t j = 0; j < D; ++j) {
+            err[j] = h * (k1[j] * (-5.0/72.0)
+                         + k2[j] * (1.0/12.0)
+                         + k3[j] * (1.0/9.0)
+                         - k4[j] * (1.0/8.0));
+            double scale = atol + rtol * fmax(fabs(y[j]), fabs(y_new[j]));
+            double e = (scale > 0) ? fabs(err[j]) / scale : 0.0;
+            if (e > normerr) normerr = e;
+        }
+
+        if (normerr <= 1.0) {
+            ++n_acc;
+            if (user_grid) {
+                while (next_tgt < n_targets) {
+                    double tt = targets[next_tgt];
+                    int in_range = forward ? (tt <= t + h) : (tt >= t + h);
+                    if (!in_range) break;
+                    double th = (h == 0.0) ? 0.0 : (tt - t) / h;
+                    if (next_tgt == n_targets - 1) {
+                        ode_v_push(&Tb, &Yb, &n, &cap, D, tt, y_new);
+                    } else {
+                        double *interp = stg;
+                        ode_v_hermite(y, y_new, k1, k4, h, th, D, interp);
+                        ode_v_push(&Tb, &Yb, &n, &cap, D, tt, interp);
+                    }
+                    ++next_tgt;
+                }
+            } else {
+                for (int j = 1; j <= refine; ++j) {
+                    double th = (double)j / (double)refine;
+                    double ti = t + h * th;
+                    if (j == refine) {
+                        ode_v_push(&Tb, &Yb, &n, &cap, D, ti, y_new);
+                    } else {
+                        double *interp = stg;
+                        ode_v_hermite(y, y_new, k1, k4, h, th, D, interp);
+                        ode_v_push(&Tb, &Yb, &n, &cap, D, ti, interp);
+                    }
+                }
+            }
+            t += h;
+            memcpy(y,  y_new, (size_t)D * sizeof(double));
+            memcpy(k1, k4,    (size_t)D * sizeof(double));
+            if (user_grid && next_tgt >= n_targets) break;
+        } else {
+            ++n_rej;
+        }
+
+        double fac = (normerr == 0.0) ? 5.0
+                                      : 0.9 * pow(normerr, -1.0/3.0);
+        if (fac < 0.2) fac = 0.2;
+        if (fac > 5.0) fac = 5.0;
+        h *= fac;
+        if (max_step > 0.0) {
+            if (h >  max_step) h =  max_step;
+            if (h < -max_step) h = -max_step;
+        }
+    }
+
+    *T = Tb; *Y = Yb; *N = n;
+    if (out_n_acc) *out_n_acc = n_acc;
+    if (out_n_rej) *out_n_rej = n_rej;
+    if (out_n_fev) *out_n_fev = n_fev;
+    free(y); free(y_new); free(k1); free(k2); free(k3);
+    free(k4); free(stg); free(err);
+    mat_free_(yt);
+}
+
+/* Vector cache-aware dispatch. Mirrors ode_compute. The cache is a
+ * separate slot from the scalar one (different ABI); both can be live
+ * simultaneously since the user picks a path by y0 type. */
+static void ode_v_compute(int kind, ode_rhs_v_t f, matlab_mat *tspan,
+                           matlab_mat *y0,
+                           double rtol, double atol,
+                           double max_step, double init_step, int refine,
+                           int print_stats) {
+    if (ode_v_cache_.valid &&
+        ode_v_cache_.fp == (void *)f &&
+        ode_v_cache_.tspan == tspan &&
+        ode_v_cache_.y0 == y0 &&
+        ode_v_cache_.rtol == rtol &&
+        ode_v_cache_.atol == atol &&
+        ode_v_cache_.max_step == max_step &&
+        ode_v_cache_.init_step == init_step &&
+        ode_v_cache_.refine == refine &&
+        ode_v_cache_.print_stats == print_stats &&
+        ode_v_cache_.kind == kind) {
+        return;
+    }
+    if (ode_v_cache_.valid) {
+        if (ode_v_cache_.t) { free(ode_v_cache_.t->data); free(ode_v_cache_.t); }
+        if (ode_v_cache_.y) { free(ode_v_cache_.y->data); free(ode_v_cache_.y); }
+        ode_v_cache_.t = NULL;
+        ode_v_cache_.y = NULL;
+        ode_v_cache_.valid = 0;
+    }
+
+    int64_t n_tgt = tspan ? tspan->rows * tspan->cols : 0;
+    int64_t D = y0 ? y0->rows * y0->cols : 0;
+    if (!f || n_tgt < 2 || D <= 0) {
+        ode_v_cache_.t = mat_alloc(0, 1);
+        ode_v_cache_.y = mat_alloc(0, D > 0 ? D : 1);
+        ode_v_cache_.D = D;
+        ode_v_cache_.n_acc = 0;
+        ode_v_cache_.n_rej = 0;
+        ode_v_cache_.n_fev = 0;
+    } else {
+        double *Tb = NULL, *Yb = NULL;
+        int64_t n = 0;
+        int n_acc = 0, n_rej = 0, n_fev = 0;
+        if (kind == 45) rk_solve_dp45_v(f, tspan->data, n_tgt,
+                                          y0->data, D,
+                                          rtol, atol, max_step, init_step,
+                                          refine, &Tb, &Yb, &n,
+                                          &n_acc, &n_rej, &n_fev);
+        else            rk_solve_bs23_v(f, tspan->data, n_tgt,
+                                          y0->data, D,
+                                          rtol, atol, max_step, init_step,
+                                          refine, &Tb, &Yb, &n,
+                                          &n_acc, &n_rej, &n_fev);
+        /* Wrap into matlab_mat descriptors. */
+        matlab_mat *Tm = mat_alloc(n, 1);
+        matlab_mat *Ym = mat_alloc(n, D);
+        if (n > 0) {
+            memcpy(Tm->data, Tb, (size_t)n * sizeof(double));
+            memcpy(Ym->data, Yb, (size_t)n * (size_t)D * sizeof(double));
+        }
+        ode_v_cache_.t = Tm;
+        ode_v_cache_.y = Ym;
+        ode_v_cache_.D = D;
+        ode_v_cache_.n_acc = n_acc;
+        ode_v_cache_.n_rej = n_rej;
+        ode_v_cache_.n_fev = n_fev;
+        free(Tb); free(Yb);
+        if (print_stats) {
+            fprintf(stdout, "%d successful steps\n", n_acc);
+            fprintf(stdout, "%d failed attempts\n",  n_rej);
+            fprintf(stdout, "%d function evaluations\n", n_fev);
+            fflush(stdout);
+        }
+    }
+    ode_v_cache_.fp         = (void *)f;
+    ode_v_cache_.tspan      = tspan;
+    ode_v_cache_.y0         = y0;
+    ode_v_cache_.rtol       = rtol;
+    ode_v_cache_.atol       = atol;
+    ode_v_cache_.max_step   = max_step;
+    ode_v_cache_.init_step  = init_step;
+    ode_v_cache_.refine     = refine;
+    ode_v_cache_.print_stats = print_stats;
+    ode_v_cache_.kind       = kind;
+    ode_v_cache_.valid      = 1;
+}
+
+static matlab_mat *mat_clone_(matlab_mat *src) {
+    if (!src) return mat_alloc(0, 1);
+    matlab_mat *out = mat_alloc(src->rows, src->cols);
+    int64_t n = src->rows * src->cols;
+    if (n > 0) memcpy(out->data, src->data, (size_t)n * sizeof(double));
+    return out;
+}
+
+matlab_mat *matlab_ode45_v_t(ode_rhs_v_t f, matlab_mat *tspan, matlab_mat *y0) {
+    ode_v_compute(45, f, tspan, y0, 1e-3, 1e-6, 0.0, 0.0, 4, 0);
+    return mat_clone_(ode_v_cache_.t);
+}
+matlab_mat *matlab_ode45_v_y(ode_rhs_v_t f, matlab_mat *tspan, matlab_mat *y0) {
+    ode_v_compute(45, f, tspan, y0, 1e-3, 1e-6, 0.0, 0.0, 4, 0);
+    return mat_clone_(ode_v_cache_.y);
+}
+matlab_mat *matlab_ode23_v_t(ode_rhs_v_t f, matlab_mat *tspan, matlab_mat *y0) {
+    ode_v_compute(23, f, tspan, y0, 1e-3, 1e-6, 0.0, 0.0, 1, 0);
+    return mat_clone_(ode_v_cache_.t);
+}
+matlab_mat *matlab_ode23_v_y(ode_rhs_v_t f, matlab_mat *tspan, matlab_mat *y0) {
+    ode_v_compute(23, f, tspan, y0, 1e-3, 1e-6, 0.0, 0.0, 1, 0);
+    return mat_clone_(ode_v_cache_.y);
+}
+
+matlab_mat *matlab_ode45_v_t_opts(ode_rhs_v_t f, matlab_mat *tspan,
+                                    matlab_mat *y0, matlab_struct *opts) {
+    double rtol, atol, mxs, ins; int rfn, ps;
+    ode_opts_resolve(opts, &rtol, &atol, &mxs, &ins, &rfn, 4, &ps);
+    ode_v_compute(45, f, tspan, y0, rtol, atol, mxs, ins, rfn, ps);
+    return mat_clone_(ode_v_cache_.t);
+}
+matlab_mat *matlab_ode45_v_y_opts(ode_rhs_v_t f, matlab_mat *tspan,
+                                    matlab_mat *y0, matlab_struct *opts) {
+    double rtol, atol, mxs, ins; int rfn, ps;
+    ode_opts_resolve(opts, &rtol, &atol, &mxs, &ins, &rfn, 4, &ps);
+    ode_v_compute(45, f, tspan, y0, rtol, atol, mxs, ins, rfn, ps);
+    return mat_clone_(ode_v_cache_.y);
+}
+matlab_mat *matlab_ode23_v_t_opts(ode_rhs_v_t f, matlab_mat *tspan,
+                                    matlab_mat *y0, matlab_struct *opts) {
+    double rtol, atol, mxs, ins; int rfn, ps;
+    ode_opts_resolve(opts, &rtol, &atol, &mxs, &ins, &rfn, 1, &ps);
+    ode_v_compute(23, f, tspan, y0, rtol, atol, mxs, ins, rfn, ps);
+    return mat_clone_(ode_v_cache_.t);
+}
+matlab_mat *matlab_ode23_v_y_opts(ode_rhs_v_t f, matlab_mat *tspan,
+                                    matlab_mat *y0, matlab_struct *opts) {
+    double rtol, atol, mxs, ins; int rfn, ps;
+    ode_opts_resolve(opts, &rtol, &atol, &mxs, &ins, &rfn, 1, &ps);
+    ode_v_compute(23, f, tspan, y0, rtol, atol, mxs, ins, rfn, ps);
+    return mat_clone_(ode_v_cache_.y);
+}
+
+static matlab_struct *ode_v_stats_struct_from_cache(void) {
+    matlab_struct *s = matlab_struct_new();
+    matlab_struct_set_f64(s, "nsteps",  6, (double)ode_v_cache_.n_acc);
+    matlab_struct_set_f64(s, "nfailed", 7, (double)ode_v_cache_.n_rej);
+    matlab_struct_set_f64(s, "nfevals", 7, (double)ode_v_cache_.n_fev);
+    return s;
+}
+
+matlab_struct *matlab_ode45_v_stats(ode_rhs_v_t f, matlab_mat *tspan,
+                                      matlab_mat *y0) {
+    ode_v_compute(45, f, tspan, y0, 1e-3, 1e-6, 0.0, 0.0, 4, 0);
+    return ode_v_stats_struct_from_cache();
+}
+matlab_struct *matlab_ode45_v_stats_opts(ode_rhs_v_t f, matlab_mat *tspan,
+                                           matlab_mat *y0, matlab_struct *opts) {
+    double rtol, atol, mxs, ins; int rfn, ps;
+    ode_opts_resolve(opts, &rtol, &atol, &mxs, &ins, &rfn, 4, &ps);
+    ode_v_compute(45, f, tspan, y0, rtol, atol, mxs, ins, rfn, ps);
+    return ode_v_stats_struct_from_cache();
+}
+matlab_struct *matlab_ode23_v_stats(ode_rhs_v_t f, matlab_mat *tspan,
+                                      matlab_mat *y0) {
+    ode_v_compute(23, f, tspan, y0, 1e-3, 1e-6, 0.0, 0.0, 1, 0);
+    return ode_v_stats_struct_from_cache();
+}
+matlab_struct *matlab_ode23_v_stats_opts(ode_rhs_v_t f, matlab_mat *tspan,
+                                           matlab_mat *y0, matlab_struct *opts) {
+    double rtol, atol, mxs, ins; int rfn, ps;
+    ode_opts_resolve(opts, &rtol, &atol, &mxs, &ins, &rfn, 1, &ps);
+    ode_v_compute(23, f, tspan, y0, rtol, atol, mxs, ins, rfn, ps);
+    return ode_v_stats_struct_from_cache();
+}
+
 /* Build a fresh stats struct from the cache slot. Field names match
  * MATLAB's `[t,y,sol] = ode45(...)` solver-stats fields. */
 static matlab_struct *ode_stats_struct_from_cache(void) {

@@ -2546,6 +2546,290 @@ def ode23_stats_opts(f, tspan, y0, opts):
     return _ode_stats_struct()
 
 
+# --- Vector-y solvers ----------------------------------------------------
+# Same Dormand-Prince / Bogacki-Shampine pair as the scalar path, but
+# operating on D-component vectors. The user RHS takes a Dx1 column
+# matrix (numpy array) and returns the same shape.
+
+_ode_v_cache = {"key": None, "t": None, "y": None,
+                "n_acc": 0, "n_rej": 0, "n_fev": 0, "D": 0}
+
+def _ode_v_call(f, t, y, D):
+    """Call user RHS with a Dx1 column. Return numpy 1D array of length D."""
+    yv = np.asarray(y, dtype=float).reshape((D, 1))
+    dy = f(t, yv)
+    arr = np.asarray(dy, dtype=float).ravel()
+    if arr.size < D:
+        out = np.zeros(D)
+        out[:arr.size] = arr
+        return out
+    return arr[:D].copy()
+
+def _ode_v_hermite(y0, y1, k0, k1, h, th):
+    th2 = th * th
+    th3 = th2 * th
+    return ((2*th3 - 3*th2 + 1) * y0
+            + (-2*th3 + 3*th2)  * y1
+            + h * (th3 - 2*th2 + th) * k0
+            + h * (th3 - th2)        * k1)
+
+def _ode_v_solve_dp45(f, targets, y0, rtol=1e-3, atol=1e-6,
+                       max_step=0.0, init_step=0.0, refine=4):
+    max_steps = 100000
+    if refine < 1: refine = 1
+    targets = list(map(float, targets))
+    n_targets = len(targets)
+    D = len(y0)
+    if n_targets < 2 or D <= 0:
+        return [], np.zeros((0, D)), 0, 0, 0
+    t0 = targets[0]; tf = targets[n_targets - 1]
+    user_grid = (n_targets > 2)
+    T = [t0]
+    Y_rows = [np.asarray(y0, dtype=float).copy()]
+    next_tgt = 1
+    y = np.asarray(y0, dtype=float).copy()
+    span = tf - t0
+    if init_step > 0.0:
+        h = init_step if span >= 0 else (0.0 - init_step)
+    else:
+        h = span * 0.01
+    if h == 0.0 or span == 0.0:
+        return T, np.array(Y_rows), 0, 0, 0
+    forward = h > 0
+    if max_step > 0.0:
+        if h >  max_step: h = max_step
+        if h < -max_step: h = -max_step
+    k1 = _ode_v_call(f, t0, y, D)
+    n_acc = 0; n_rej = 0; n_fev = 1
+    t = t0
+    steps = 0
+    while ((t < tf) if forward else (t > tf)) and steps < max_steps:
+        steps += 1
+        if (forward and t + h > tf) or ((not forward) and t + h < tf):
+            h = tf - t
+        k2 = _ode_v_call(f, t + h*(1/5),  y + h*(k1*(1/5)), D)
+        k3 = _ode_v_call(f, t + h*(3/10), y + h*(k1*(3/40) + k2*(9/40)), D)
+        k4 = _ode_v_call(f, t + h*(4/5),  y + h*(k1*(44/45) - k2*(56/15) + k3*(32/9)), D)
+        k5 = _ode_v_call(f, t + h*(8/9),  y + h*(k1*(19372/6561) - k2*(25360/2187)
+                                                + k3*(64448/6561) - k4*(212/729)), D)
+        k6 = _ode_v_call(f, t + h,        y + h*(k1*(9017/3168) - k2*(355/33)
+                                                + k3*(46732/5247) + k4*(49/176)
+                                                - k5*(5103/18656)), D)
+        y5 = y + h*(k1*(35/384) + k3*(500/1113) + k4*(125/192)
+                    - k5*(2187/6784) + k6*(11/84))
+        k7 = _ode_v_call(f, t + h, y5, D)
+        n_fev += 6
+        err = h*(k1*(71/57600) - k3*(71/16695) + k4*(71/1920)
+                 - k5*(17253/339200) + k6*(22/525) - k7*(1/40))
+        ay = np.abs(y); ay5 = np.abs(y5)
+        scale = atol + rtol * np.maximum(ay, ay5)
+        e = np.where(scale > 0, np.abs(err) / np.maximum(scale, 1e-300), 0.0)
+        normerr = float(np.max(e)) if e.size else 0.0
+        if normerr <= 1.0:
+            n_acc += 1
+            if user_grid:
+                while next_tgt < n_targets:
+                    tt = targets[next_tgt]
+                    in_range = (tt <= t + h) if forward else (tt >= t + h)
+                    if not in_range: break
+                    th_ = 0.0 if h == 0.0 else (tt - t) / h
+                    if next_tgt == n_targets - 1:
+                        Y_rows.append(y5.copy())
+                    else:
+                        Y_rows.append(_ode_v_hermite(y, y5, k1, k7, h, th_))
+                    T.append(tt)
+                    next_tgt += 1
+            else:
+                j = 1
+                while j <= refine:
+                    th_ = j / refine
+                    ti = t + h * th_
+                    if j == refine:
+                        Y_rows.append(y5.copy())
+                    else:
+                        Y_rows.append(_ode_v_hermite(y, y5, k1, k7, h, th_))
+                    T.append(ti)
+                    j += 1
+            t += h
+            y = y5.copy()
+            k1 = k7
+            if user_grid and next_tgt >= n_targets: break
+        else:
+            n_rej += 1
+        fac = 5.0 if normerr == 0.0 else 0.9 * (normerr ** (-1/5))
+        if fac < 0.2: fac = 0.2
+        if fac > 5.0: fac = 5.0
+        h *= fac
+        if max_step > 0.0:
+            if h >  max_step: h = max_step
+            if h < -max_step: h = -max_step
+    return T, np.array(Y_rows), n_acc, n_rej, n_fev
+
+def _ode_v_solve_bs23(f, targets, y0, rtol=1e-3, atol=1e-6,
+                       max_step=0.0, init_step=0.0, refine=1):
+    max_steps = 100000
+    if refine < 1: refine = 1
+    targets = list(map(float, targets))
+    n_targets = len(targets)
+    D = len(y0)
+    if n_targets < 2 or D <= 0:
+        return [], np.zeros((0, D)), 0, 0, 0
+    t0 = targets[0]; tf = targets[n_targets - 1]
+    user_grid = (n_targets > 2)
+    T = [t0]; Y_rows = [np.asarray(y0, dtype=float).copy()]
+    next_tgt = 1
+    y = np.asarray(y0, dtype=float).copy()
+    span = tf - t0
+    if init_step > 0.0:
+        h = init_step if span >= 0 else (0.0 - init_step)
+    else:
+        h = span * 0.01
+    if h == 0.0 or span == 0.0:
+        return T, np.array(Y_rows), 0, 0, 0
+    forward = h > 0
+    if max_step > 0.0:
+        if h >  max_step: h = max_step
+        if h < -max_step: h = -max_step
+    k1 = _ode_v_call(f, t0, y, D)
+    n_acc = 0; n_rej = 0; n_fev = 1
+    t = t0
+    steps = 0
+    while ((t < tf) if forward else (t > tf)) and steps < max_steps:
+        steps += 1
+        if (forward and t + h > tf) or ((not forward) and t + h < tf):
+            h = tf - t
+        k2 = _ode_v_call(f, t + h*0.5,  y + h*(k1*0.5), D)
+        k3 = _ode_v_call(f, t + h*0.75, y + h*(k2*0.75), D)
+        y3 = y + h*(k1*(2/9) + k2*(1/3) + k3*(4/9))
+        k4 = _ode_v_call(f, t + h, y3, D)
+        n_fev += 3
+        err = h*(k1*(-5/72) + k2*(1/12) + k3*(1/9) - k4*(1/8))
+        ay = np.abs(y); ay3 = np.abs(y3)
+        scale = atol + rtol * np.maximum(ay, ay3)
+        e = np.where(scale > 0, np.abs(err) / np.maximum(scale, 1e-300), 0.0)
+        normerr = float(np.max(e)) if e.size else 0.0
+        if normerr <= 1.0:
+            n_acc += 1
+            if user_grid:
+                while next_tgt < n_targets:
+                    tt = targets[next_tgt]
+                    in_range = (tt <= t + h) if forward else (tt >= t + h)
+                    if not in_range: break
+                    th_ = 0.0 if h == 0.0 else (tt - t) / h
+                    if next_tgt == n_targets - 1:
+                        Y_rows.append(y3.copy())
+                    else:
+                        Y_rows.append(_ode_v_hermite(y, y3, k1, k4, h, th_))
+                    T.append(tt)
+                    next_tgt += 1
+            else:
+                j = 1
+                while j <= refine:
+                    th_ = j / refine
+                    ti = t + h * th_
+                    if j == refine:
+                        Y_rows.append(y3.copy())
+                    else:
+                        Y_rows.append(_ode_v_hermite(y, y3, k1, k4, h, th_))
+                    T.append(ti)
+                    j += 1
+            t += h
+            y = y3.copy()
+            k1 = k4
+            if user_grid and next_tgt >= n_targets: break
+        else:
+            n_rej += 1
+        fac = 5.0 if normerr == 0.0 else 0.9 * (normerr ** (-1/3))
+        if fac < 0.2: fac = 0.2
+        if fac > 5.0: fac = 5.0
+        h *= fac
+        if max_step > 0.0:
+            if h >  max_step: h = max_step
+            if h < -max_step: h = -max_step
+    return T, np.array(Y_rows), n_acc, n_rej, n_fev
+
+def _ode_v_compute(kind, f, tspan, y0,
+                    rtol=1e-3, atol=1e-6, max_step=0.0, init_step=0.0,
+                    refine=None, print_stats=False):
+    if refine is None:
+        refine = 4 if kind == 45 else 1
+    ts = np.asarray(tspan, dtype=float).ravel()
+    targets = ts.tolist()
+    y0v = np.asarray(y0, dtype=float).ravel()
+    D = int(y0v.size)
+    key = (kind, id(f), tuple(targets), tuple(y0v.tolist()),
+           float(rtol), float(atol), float(max_step), float(init_step),
+           int(refine), bool(print_stats))
+    if _ode_v_cache["key"] == key:
+        return
+    solver = _ode_v_solve_dp45 if kind == 45 else _ode_v_solve_bs23
+    T, Y, n_acc, n_rej, n_fev = solver(
+        f, targets, y0v, rtol, atol, max_step, init_step, refine)
+    _ode_v_cache["key"] = key
+    _ode_v_cache["t"] = np.asarray(T, dtype=float).reshape((-1, 1))
+    _ode_v_cache["y"] = Y if Y.size else np.zeros((0, D))
+    _ode_v_cache["n_acc"] = n_acc
+    _ode_v_cache["n_rej"] = n_rej
+    _ode_v_cache["n_fev"] = n_fev
+    _ode_v_cache["D"] = D
+    if print_stats:
+        print(f"{n_acc} successful steps")
+        print(f"{n_rej} failed attempts")
+        print(f"{n_fev} function evaluations")
+
+def _ode_v_stats():
+    s = struct_new()
+    s["nsteps"]  = float(_ode_v_cache.get("n_acc", 0))
+    s["nfailed"] = float(_ode_v_cache.get("n_rej", 0))
+    s["nfevals"] = float(_ode_v_cache.get("n_fev", 0))
+    return s
+
+def ode45_v_t(f, tspan, y0):
+    _ode_v_compute(45, f, tspan, y0)
+    return _ode_v_cache["t"].copy()
+def ode45_v_y(f, tspan, y0):
+    _ode_v_compute(45, f, tspan, y0)
+    return _ode_v_cache["y"].copy()
+def ode23_v_t(f, tspan, y0):
+    _ode_v_compute(23, f, tspan, y0)
+    return _ode_v_cache["t"].copy()
+def ode23_v_y(f, tspan, y0):
+    _ode_v_compute(23, f, tspan, y0)
+    return _ode_v_cache["y"].copy()
+
+def ode45_v_t_opts(f, tspan, y0, opts):
+    rtol, atol, max_step, init_step, refine, ps = _ode_opts_resolve(opts, 4)
+    _ode_v_compute(45, f, tspan, y0, rtol, atol, max_step, init_step, refine, print_stats=ps)
+    return _ode_v_cache["t"].copy()
+def ode45_v_y_opts(f, tspan, y0, opts):
+    rtol, atol, max_step, init_step, refine, ps = _ode_opts_resolve(opts, 4)
+    _ode_v_compute(45, f, tspan, y0, rtol, atol, max_step, init_step, refine, print_stats=ps)
+    return _ode_v_cache["y"].copy()
+def ode23_v_t_opts(f, tspan, y0, opts):
+    rtol, atol, max_step, init_step, refine, ps = _ode_opts_resolve(opts, 1)
+    _ode_v_compute(23, f, tspan, y0, rtol, atol, max_step, init_step, refine, print_stats=ps)
+    return _ode_v_cache["t"].copy()
+def ode23_v_y_opts(f, tspan, y0, opts):
+    rtol, atol, max_step, init_step, refine, ps = _ode_opts_resolve(opts, 1)
+    _ode_v_compute(23, f, tspan, y0, rtol, atol, max_step, init_step, refine, print_stats=ps)
+    return _ode_v_cache["y"].copy()
+
+def ode45_v_stats(f, tspan, y0):
+    _ode_v_compute(45, f, tspan, y0)
+    return _ode_v_stats()
+def ode45_v_stats_opts(f, tspan, y0, opts):
+    rtol, atol, max_step, init_step, refine, ps = _ode_opts_resolve(opts, 4)
+    _ode_v_compute(45, f, tspan, y0, rtol, atol, max_step, init_step, refine, print_stats=ps)
+    return _ode_v_stats()
+def ode23_v_stats(f, tspan, y0):
+    _ode_v_compute(23, f, tspan, y0)
+    return _ode_v_stats()
+def ode23_v_stats_opts(f, tspan, y0, opts):
+    rtol, atol, max_step, init_step, refine, ps = _ode_opts_resolve(opts, 1)
+    _ode_v_compute(23, f, tspan, y0, rtol, atol, max_step, init_step, refine, print_stats=ps)
+    return _ode_v_stats()
+
+
 def meshgrid_X(x, y=None):
     xv = np.asarray(x, dtype=float).ravel()
     yv = xv if y is None else np.asarray(y, dtype=float).ravel()

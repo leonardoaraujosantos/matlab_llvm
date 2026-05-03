@@ -8,6 +8,7 @@
 /* Forward decls for entries declared in matlab_runtime.h, repeated
  * here for clarity at the call sites below. */
 typedef double (*ode_rhs_t)(double, double);
+typedef matlab_mat *(*ode_rhs_v_t)(double, matlab_mat *);
 matlab_mat *matlab_ode45_t(ode_rhs_t f, matlab_mat *tspan, double y0);
 matlab_mat *matlab_ode45_y(ode_rhs_t f, matlab_mat *tspan, double y0);
 matlab_mat *matlab_ode23_t(ode_rhs_t f, matlab_mat *tspan, double y0);
@@ -16,6 +17,12 @@ matlab_mat *matlab_ode45_t_opts(ode_rhs_t f, matlab_mat *tspan,
                                  double y0, matlab_struct *opts);
 matlab_mat *matlab_ode45_y_opts(ode_rhs_t f, matlab_mat *tspan,
                                  double y0, matlab_struct *opts);
+matlab_mat *matlab_ode45_v_t(ode_rhs_v_t f, matlab_mat *tspan,
+                              matlab_mat *y0);
+matlab_mat *matlab_ode45_v_y(ode_rhs_v_t f, matlab_mat *tspan,
+                              matlab_mat *y0);
+matlab_mat *matlab_ode23_v_y(ode_rhs_v_t f, matlab_mat *tspan,
+                              matlab_mat *y0);
 
 /* Test RHSes. dy/dt = -y has analytic solution y(t) = y0 * exp(-t). */
 static double rhs_decay(double t, double y) { (void)t; return -y; }
@@ -132,6 +139,51 @@ static void test_ode45_user_grid(void) {
     RT_NEAR(rt_data(Y)[5], 0.00673794700, 1e-4, "y(5) ~ exp(-5)");
 }
 
+/* ---- vector-y oscillator ---- */
+/* dy/dt = [-y(2); y(1)] — linear oscillator. y(t) = [cos(t); sin(t)] for
+ * y(0) = [1; 0]. At t = 2π the state returns to the initial. */
+static matlab_mat *rhs_oscillator(double t, matlab_mat *y) {
+    (void)t;
+    /* matlab_mat is opaque in the public header; build the result via
+     * matlab_mat_from_buf and the rt_test layout for read access. */
+    double buf[2];
+    buf[0] = -rt_data(y)[1];
+    buf[1] =  rt_data(y)[0];
+    return matlab_mat_from_buf(buf, 2.0, 1.0);
+}
+
+static void test_ode45_vector_oscillator(void) {
+    double y0buf[2] = {1.0, 0.0};
+    matlab_mat *y0 = matlab_mat_from_buf(y0buf, 2.0, 1.0);
+    double tsbuf[2] = {0.0, 6.283185307179586};   /* 0 to 2π */
+    matlab_mat *ts = matlab_mat_from_buf(tsbuf, 1.0, 2.0);
+
+    matlab_mat *T = matlab_ode45_v_t(rhs_oscillator, ts, y0);
+    matlab_mat *Y = matlab_ode45_v_y(rhs_oscillator, ts, y0);
+    int64_t N = rt_rows(T);
+    RT_CHECK(N >= 5, "oscillator emits multiple steps");
+    RT_NEAR(rt_data(T)[0], 0.0, 1e-12, "t(1) == 0");
+    RT_NEAR(rt_data(T)[N-1], 6.283185307179586, 1e-12, "t(end) == 2π");
+    /* Y is row-major NxD with D = 2: Y[i*2 + 0] = cos(t_i), [+1] = sin(t_i). */
+    RT_NEAR(rt_data(Y)[0], 1.0, 1e-12, "y(0,1) seed cos(0) = 1");
+    RT_NEAR(rt_data(Y)[1], 0.0, 1e-12, "y(0,2) seed sin(0) = 0");
+    /* At t = 2π, expect cos = 1, sin = 0 (within rtol = 1e-3). */
+    RT_NEAR(rt_data(Y)[(N-1)*2 + 0],  1.0, 5e-3, "y(end,1) ~ cos(2π)");
+    RT_NEAR(rt_data(Y)[(N-1)*2 + 1],  0.0, 5e-3, "y(end,2) ~ sin(2π)");
+}
+
+static void test_ode23_vector_oscillator(void) {
+    double y0buf[2] = {1.0, 0.0};
+    matlab_mat *y0 = matlab_mat_from_buf(y0buf, 2.0, 1.0);
+    double tsbuf[2] = {0.0, 6.283185307179586};
+    matlab_mat *ts = matlab_mat_from_buf(tsbuf, 1.0, 2.0);
+    matlab_mat *Y = matlab_ode23_v_y(rhs_oscillator, ts, y0);
+    int64_t N = rt_rows(Y);
+    /* ode23 is lower order — looser tolerance. */
+    RT_NEAR(rt_data(Y)[(N-1)*2 + 0], 1.0, 5e-2, "ode23 y(end,1)");
+    RT_NEAR(rt_data(Y)[(N-1)*2 + 1], 0.0, 5e-2, "ode23 y(end,2)");
+}
+
 /* ---- 3-return form: stats struct ---- */
 matlab_struct *matlab_ode45_stats(ode_rhs_t f, matlab_mat *tspan, double y0);
 
@@ -182,6 +234,8 @@ int main(void) {
     RT_RUN(test_ode45_opts_tol);
     RT_RUN(test_ode45_opts_maxstep);
     RT_RUN(test_ode45_user_grid);
+    RT_RUN(test_ode45_vector_oscillator);
+    RT_RUN(test_ode23_vector_oscillator);
     RT_RUN(test_ode45_stats_struct);
     RT_RUN(test_ode45_cache);
     RT_DONE();

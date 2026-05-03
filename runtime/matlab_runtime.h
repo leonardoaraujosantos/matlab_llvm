@@ -227,6 +227,36 @@ matlab_struct *matlab_ode23_stats(matlab_ode_rhs f, matlab_mat *tspan,
 matlab_struct *matlab_ode23_stats_opts(matlab_ode_rhs f, matlab_mat *tspan,
                                          double y0, matlab_struct *opts);
 
+/* Vector-y solvers — system of ODEs. Same Dormand-Prince / Bogacki-
+ * Shampine pair as the scalar path; user RHS takes a Dx1 column matrix
+ * and returns a Dx1 column with dy/dt. Output `y` is N rows × D cols
+ * (MATLAB convention: y(i, :) is the state at t(i)). */
+typedef matlab_mat *(*matlab_ode_rhs_v)(double t, matlab_mat *y);
+matlab_mat *matlab_ode45_v_t(matlab_ode_rhs_v f, matlab_mat *tspan,
+                              matlab_mat *y0);
+matlab_mat *matlab_ode45_v_y(matlab_ode_rhs_v f, matlab_mat *tspan,
+                              matlab_mat *y0);
+matlab_mat *matlab_ode23_v_t(matlab_ode_rhs_v f, matlab_mat *tspan,
+                              matlab_mat *y0);
+matlab_mat *matlab_ode23_v_y(matlab_ode_rhs_v f, matlab_mat *tspan,
+                              matlab_mat *y0);
+matlab_mat *matlab_ode45_v_t_opts(matlab_ode_rhs_v f, matlab_mat *tspan,
+                                   matlab_mat *y0, matlab_struct *opts);
+matlab_mat *matlab_ode45_v_y_opts(matlab_ode_rhs_v f, matlab_mat *tspan,
+                                   matlab_mat *y0, matlab_struct *opts);
+matlab_mat *matlab_ode23_v_t_opts(matlab_ode_rhs_v f, matlab_mat *tspan,
+                                   matlab_mat *y0, matlab_struct *opts);
+matlab_mat *matlab_ode23_v_y_opts(matlab_ode_rhs_v f, matlab_mat *tspan,
+                                   matlab_mat *y0, matlab_struct *opts);
+matlab_struct *matlab_ode45_v_stats(matlab_ode_rhs_v f, matlab_mat *tspan,
+                                     matlab_mat *y0);
+matlab_struct *matlab_ode45_v_stats_opts(matlab_ode_rhs_v f, matlab_mat *tspan,
+                                           matlab_mat *y0, matlab_struct *opts);
+matlab_struct *matlab_ode23_v_stats(matlab_ode_rhs_v f, matlab_mat *tspan,
+                                     matlab_mat *y0);
+matlab_struct *matlab_ode23_v_stats_opts(matlab_ode_rhs_v f, matlab_mat *tspan,
+                                           matlab_mat *y0, matlab_struct *opts);
+
 /* DSP windows. n must be >= 1; returns a column vector of length n. */
 matlab_mat *matlab_hamming(double n);
 matlab_mat *matlab_hann(double n);

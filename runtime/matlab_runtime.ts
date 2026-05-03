@@ -2896,6 +2896,349 @@ export function ode23_stats_opts(f: OdeRhs, tspan: any, y0: number, opts: any) {
   return _odeStatsStruct();
 }
 
+// --- Vector-y solvers ---------------------------------------------------
+// Same RK45/RK23 pair as the scalar path, but operating on D-component
+// vectors. The user RHS receives an NDArray (Dx1 column) and returns the
+// same shape.
+
+type OdeRhsV = (t: number, y: NDArray) => any;
+type OdeStatsV = { T: number[]; Y: number[]; D: number;
+                    nAcc: number; nRej: number; nFev: number };
+
+let _odeVCache: { key: string; t: NDArray; y: NDArray; D: number;
+                   nAcc: number; nRej: number; nFev: number } | null = null;
+
+function _odeVCall(f: OdeRhsV, t: number, y: Float64Array, D: number,
+                   out: Float64Array): void {
+  const yview = new NDArray(y, [D, 1]);
+  const r = f(t, yview);
+  const arr = (r && (r as any).data) ? (r as any).data : r;
+  const src = arr instanceof Float64Array ? arr : Float64Array.from(arr ?? []);
+  for (let i = 0; i < D; i++) out[i] = i < src.length ? src[i] : 0;
+}
+
+function _odeVHermite(y0: Float64Array, y1: Float64Array,
+                      k0: Float64Array, k1: Float64Array,
+                      h: number, th: number, D: number,
+                      out: Float64Array): void {
+  const th2 = th * th, th3 = th2 * th;
+  const a = 2*th3 - 3*th2 + 1;
+  const b = -2*th3 + 3*th2;
+  const c = h * (th3 - 2*th2 + th);
+  const d = h * (th3 - th2);
+  for (let j = 0; j < D; j++)
+    out[j] = a*y0[j] + b*y1[j] + c*k0[j] + d*k1[j];
+}
+
+function _odeVSolveDp45(f: OdeRhsV, targets: number[], y0: number[],
+                         rtol = 1e-3, atol = 1e-6,
+                         maxStep = 0, initStep = 0, refine = 4): OdeStatsV {
+  const maxSteps = 100000;
+  if (refine < 1) refine = 1;
+  const D = y0.length;
+  const nT = targets.length;
+  if (nT < 2 || D <= 0) return { T: [], Y: [], D, nAcc: 0, nRej: 0, nFev: 0 };
+  const t0 = +targets[0], tf = +targets[nT - 1];
+  const userGrid = nT > 2;
+  const T: number[] = [t0];
+  const Yflat: number[] = Array.from(y0);
+  let nextTgt = 1;
+  const y    = new Float64Array(y0);
+  const yNew = new Float64Array(D);
+  const k1   = new Float64Array(D);
+  const k2   = new Float64Array(D);
+  const k3   = new Float64Array(D);
+  const k4   = new Float64Array(D);
+  const k5   = new Float64Array(D);
+  const k6   = new Float64Array(D);
+  const k7   = new Float64Array(D);
+  const stg  = new Float64Array(D);
+  const err  = new Float64Array(D);
+  let t = t0;
+  const span = tf - t0;
+  let h = initStep > 0 ? (span >= 0 ? initStep : -initStep) : span * 0.01;
+  if (h === 0 || span === 0) return { T, Y: Yflat, D, nAcc: 0, nRej: 0, nFev: 0 };
+  const forward = h > 0;
+  if (maxStep > 0) {
+    if (h >  maxStep) h =  maxStep;
+    if (h < -maxStep) h = -maxStep;
+  }
+  _odeVCall(f, t, y, D, k1);
+  let nAcc = 0, nRej = 0, nFev = 1;
+  let steps = 0;
+  while ((forward ? t < tf : t > tf) && steps < maxSteps) {
+    steps++;
+    if (forward ? (t + h > tf) : (t + h < tf)) h = tf - t;
+
+    for (let j = 0; j < D; j++) stg[j] = y[j] + h * k1[j] * (1/5);
+    _odeVCall(f, t + h*(1/5), stg, D, k2);
+    for (let j = 0; j < D; j++) stg[j] = y[j] + h*(k1[j]*(3/40) + k2[j]*(9/40));
+    _odeVCall(f, t + h*(3/10), stg, D, k3);
+    for (let j = 0; j < D; j++) stg[j] = y[j] + h*(k1[j]*(44/45) - k2[j]*(56/15) + k3[j]*(32/9));
+    _odeVCall(f, t + h*(4/5), stg, D, k4);
+    for (let j = 0; j < D; j++) stg[j] = y[j] + h*(k1[j]*(19372/6561) - k2[j]*(25360/2187)
+                                                    + k3[j]*(64448/6561) - k4[j]*(212/729));
+    _odeVCall(f, t + h*(8/9), stg, D, k5);
+    for (let j = 0; j < D; j++) stg[j] = y[j] + h*(k1[j]*(9017/3168) - k2[j]*(355/33)
+                                                    + k3[j]*(46732/5247) + k4[j]*(49/176)
+                                                    - k5[j]*(5103/18656));
+    _odeVCall(f, t + h, stg, D, k6);
+    for (let j = 0; j < D; j++) yNew[j] = y[j] + h*(k1[j]*(35/384) + k3[j]*(500/1113)
+                                                    + k4[j]*(125/192) - k5[j]*(2187/6784)
+                                                    + k6[j]*(11/84));
+    _odeVCall(f, t + h, yNew, D, k7);
+    nFev += 6;
+
+    let normerr = 0;
+    for (let j = 0; j < D; j++) {
+      err[j] = h * (k1[j]*(71/57600) - k3[j]*(71/16695) + k4[j]*(71/1920)
+                    - k5[j]*(17253/339200) + k6[j]*(22/525) - k7[j]*(1/40));
+      const ay = Math.abs(y[j]), ayN = Math.abs(yNew[j]);
+      const scale = atol + rtol * (ay > ayN ? ay : ayN);
+      const e = scale > 0 ? Math.abs(err[j]) / scale : 0;
+      if (e > normerr) normerr = e;
+    }
+
+    if (normerr <= 1) {
+      nAcc++;
+      if (userGrid) {
+        while (nextTgt < nT) {
+          const tt = +targets[nextTgt];
+          const inRange = forward ? (tt <= t + h) : (tt >= t + h);
+          if (!inRange) break;
+          const th_ = h === 0 ? 0 : (tt - t) / h;
+          const row = new Float64Array(D);
+          if (nextTgt === nT - 1) row.set(yNew);
+          else _odeVHermite(y, yNew, k1, k7, h, th_, D, row);
+          T.push(tt);
+          for (let j = 0; j < D; j++) Yflat.push(row[j]);
+          nextTgt++;
+        }
+      } else {
+        for (let j = 1; j <= refine; j++) {
+          const th_ = j / refine;
+          const ti = t + h * th_;
+          const row = new Float64Array(D);
+          if (j === refine) row.set(yNew);
+          else _odeVHermite(y, yNew, k1, k7, h, th_, D, row);
+          T.push(ti);
+          for (let q = 0; q < D; q++) Yflat.push(row[q]);
+        }
+      }
+      t += h;
+      y.set(yNew);
+      k1.set(k7);
+      if (userGrid && nextTgt >= nT) break;
+    } else {
+      nRej++;
+    }
+    let fac = normerr === 0 ? 5 : 0.9 * Math.pow(normerr, -1/5);
+    if (fac < 0.2) fac = 0.2;
+    if (fac > 5)   fac = 5;
+    h *= fac;
+    if (maxStep > 0) {
+      if (h >  maxStep) h =  maxStep;
+      if (h < -maxStep) h = -maxStep;
+    }
+  }
+  return { T, Y: Yflat, D, nAcc, nRej, nFev };
+}
+
+function _odeVSolveBs23(f: OdeRhsV, targets: number[], y0: number[],
+                         rtol = 1e-3, atol = 1e-6,
+                         maxStep = 0, initStep = 0, refine = 1): OdeStatsV {
+  const maxSteps = 100000;
+  if (refine < 1) refine = 1;
+  const D = y0.length;
+  const nT = targets.length;
+  if (nT < 2 || D <= 0) return { T: [], Y: [], D, nAcc: 0, nRej: 0, nFev: 0 };
+  const t0 = +targets[0], tf = +targets[nT - 1];
+  const userGrid = nT > 2;
+  const T: number[] = [t0];
+  const Yflat: number[] = Array.from(y0);
+  let nextTgt = 1;
+  const y    = new Float64Array(y0);
+  const yNew = new Float64Array(D);
+  const k1   = new Float64Array(D);
+  const k2   = new Float64Array(D);
+  const k3   = new Float64Array(D);
+  const k4   = new Float64Array(D);
+  const stg  = new Float64Array(D);
+  const err  = new Float64Array(D);
+  let t = t0;
+  const span = tf - t0;
+  let h = initStep > 0 ? (span >= 0 ? initStep : -initStep) : span * 0.01;
+  if (h === 0 || span === 0) return { T, Y: Yflat, D, nAcc: 0, nRej: 0, nFev: 0 };
+  const forward = h > 0;
+  if (maxStep > 0) {
+    if (h >  maxStep) h =  maxStep;
+    if (h < -maxStep) h = -maxStep;
+  }
+  _odeVCall(f, t, y, D, k1);
+  let nAcc = 0, nRej = 0, nFev = 1;
+  let steps = 0;
+  while ((forward ? t < tf : t > tf) && steps < maxSteps) {
+    steps++;
+    if (forward ? (t + h > tf) : (t + h < tf)) h = tf - t;
+    for (let j = 0; j < D; j++) stg[j] = y[j] + h * k1[j] * 0.5;
+    _odeVCall(f, t + h*0.5, stg, D, k2);
+    for (let j = 0; j < D; j++) stg[j] = y[j] + h * k2[j] * 0.75;
+    _odeVCall(f, t + h*0.75, stg, D, k3);
+    for (let j = 0; j < D; j++) yNew[j] = y[j] + h*(k1[j]*(2/9) + k2[j]*(1/3) + k3[j]*(4/9));
+    _odeVCall(f, t + h, yNew, D, k4);
+    nFev += 3;
+
+    let normerr = 0;
+    for (let j = 0; j < D; j++) {
+      err[j] = h*(k1[j]*(-5/72) + k2[j]*(1/12) + k3[j]*(1/9) - k4[j]*(1/8));
+      const ay = Math.abs(y[j]), ayN = Math.abs(yNew[j]);
+      const scale = atol + rtol * (ay > ayN ? ay : ayN);
+      const e = scale > 0 ? Math.abs(err[j]) / scale : 0;
+      if (e > normerr) normerr = e;
+    }
+
+    if (normerr <= 1) {
+      nAcc++;
+      if (userGrid) {
+        while (nextTgt < nT) {
+          const tt = +targets[nextTgt];
+          const inRange = forward ? (tt <= t + h) : (tt >= t + h);
+          if (!inRange) break;
+          const th_ = h === 0 ? 0 : (tt - t) / h;
+          const row = new Float64Array(D);
+          if (nextTgt === nT - 1) row.set(yNew);
+          else _odeVHermite(y, yNew, k1, k4, h, th_, D, row);
+          T.push(tt);
+          for (let q = 0; q < D; q++) Yflat.push(row[q]);
+          nextTgt++;
+        }
+      } else {
+        for (let j = 1; j <= refine; j++) {
+          const th_ = j / refine;
+          const ti = t + h * th_;
+          const row = new Float64Array(D);
+          if (j === refine) row.set(yNew);
+          else _odeVHermite(y, yNew, k1, k4, h, th_, D, row);
+          T.push(ti);
+          for (let q = 0; q < D; q++) Yflat.push(row[q]);
+        }
+      }
+      t += h;
+      y.set(yNew);
+      k1.set(k4);
+      if (userGrid && nextTgt >= nT) break;
+    } else {
+      nRej++;
+    }
+    let fac = normerr === 0 ? 5 : 0.9 * Math.pow(normerr, -1/3);
+    if (fac < 0.2) fac = 0.2;
+    if (fac > 5)   fac = 5;
+    h *= fac;
+    if (maxStep > 0) {
+      if (h >  maxStep) h =  maxStep;
+      if (h < -maxStep) h = -maxStep;
+    }
+  }
+  return { T, Y: Yflat, D, nAcc, nRej, nFev };
+}
+
+function _odeVCompute(kind: number, f: OdeRhsV, tspan: any, y0: any,
+                      rtol = 1e-3, atol = 1e-6,
+                      maxStep = 0, initStep = 0, refine = -1,
+                      printStats = false): void {
+  if (refine < 0) refine = kind === 45 ? 4 : 1;
+  const ts = asArray(tspan).data;
+  const targets: number[] = Array.from(ts);
+  const y0arr = Array.from(asArray(y0).data);
+  const D = y0arr.length;
+  const key = `${kind}|${targets.join(",")}|${y0arr.join(",")}|${rtol}|${atol}|${maxStep}|${initStep}|${refine}|${printStats?1:0}|${(f as any).name ?? ""}`;
+  if (_odeVCache && _odeVCache.key === key) return;
+  const r = kind === 45
+    ? _odeVSolveDp45(f, targets, y0arr, rtol, atol, maxStep, initStep, refine)
+    : _odeVSolveBs23(f, targets, y0arr, rtol, atol, maxStep, initStep, refine);
+  const Tarr = new Float64Array(r.T);
+  const Yarr = new Float64Array(r.Y);
+  _odeVCache = {
+    key,
+    t: new NDArray(Tarr, [r.T.length, 1]),
+    y: new NDArray(Yarr, [r.T.length, r.D]),
+    D: r.D,
+    nAcc: r.nAcc, nRej: r.nRej, nFev: r.nFev,
+  };
+  if (printStats) {
+    console.log(`${r.nAcc} successful steps`);
+    console.log(`${r.nRej} failed attempts`);
+    console.log(`${r.nFev} function evaluations`);
+  }
+}
+
+function _odeVStats(): Record<string, number> {
+  return {
+    nsteps:  _odeVCache!.nAcc,
+    nfailed: _odeVCache!.nRej,
+    nfevals: _odeVCache!.nFev,
+  };
+}
+
+export function ode45_v_t(f: OdeRhsV, tspan: any, y0: any): NDArray {
+  _odeVCompute(45, f, tspan, y0); return _cloneCol(_odeVCache!.t);
+}
+export function ode45_v_y(f: OdeRhsV, tspan: any, y0: any): NDArray {
+  _odeVCompute(45, f, tspan, y0);
+  const c = _odeVCache!.y;
+  const buf = new Float64Array(c.data.length); buf.set(c.data);
+  return new NDArray(buf, c.shape.slice());
+}
+export function ode23_v_t(f: OdeRhsV, tspan: any, y0: any): NDArray {
+  _odeVCompute(23, f, tspan, y0); return _cloneCol(_odeVCache!.t);
+}
+export function ode23_v_y(f: OdeRhsV, tspan: any, y0: any): NDArray {
+  _odeVCompute(23, f, tspan, y0);
+  const c = _odeVCache!.y;
+  const buf = new Float64Array(c.data.length); buf.set(c.data);
+  return new NDArray(buf, c.shape.slice());
+}
+export function ode45_v_t_opts(f: OdeRhsV, tspan: any, y0: any, opts: any): NDArray {
+  const { rtol, atol, maxStep, initStep, refine, printStats } = _odeOptsResolve(opts, 4);
+  _odeVCompute(45, f, tspan, y0, rtol, atol, maxStep, initStep, refine, printStats);
+  return _cloneCol(_odeVCache!.t);
+}
+export function ode45_v_y_opts(f: OdeRhsV, tspan: any, y0: any, opts: any): NDArray {
+  const { rtol, atol, maxStep, initStep, refine, printStats } = _odeOptsResolve(opts, 4);
+  _odeVCompute(45, f, tspan, y0, rtol, atol, maxStep, initStep, refine, printStats);
+  const c = _odeVCache!.y;
+  const buf = new Float64Array(c.data.length); buf.set(c.data);
+  return new NDArray(buf, c.shape.slice());
+}
+export function ode23_v_t_opts(f: OdeRhsV, tspan: any, y0: any, opts: any): NDArray {
+  const { rtol, atol, maxStep, initStep, refine, printStats } = _odeOptsResolve(opts, 1);
+  _odeVCompute(23, f, tspan, y0, rtol, atol, maxStep, initStep, refine, printStats);
+  return _cloneCol(_odeVCache!.t);
+}
+export function ode23_v_y_opts(f: OdeRhsV, tspan: any, y0: any, opts: any): NDArray {
+  const { rtol, atol, maxStep, initStep, refine, printStats } = _odeOptsResolve(opts, 1);
+  _odeVCompute(23, f, tspan, y0, rtol, atol, maxStep, initStep, refine, printStats);
+  const c = _odeVCache!.y;
+  const buf = new Float64Array(c.data.length); buf.set(c.data);
+  return new NDArray(buf, c.shape.slice());
+}
+export function ode45_v_stats(f: OdeRhsV, tspan: any, y0: any) {
+  _odeVCompute(45, f, tspan, y0); return _odeVStats();
+}
+export function ode45_v_stats_opts(f: OdeRhsV, tspan: any, y0: any, opts: any) {
+  const { rtol, atol, maxStep, initStep, refine, printStats } = _odeOptsResolve(opts, 4);
+  _odeVCompute(45, f, tspan, y0, rtol, atol, maxStep, initStep, refine, printStats);
+  return _odeVStats();
+}
+export function ode23_v_stats(f: OdeRhsV, tspan: any, y0: any) {
+  _odeVCompute(23, f, tspan, y0); return _odeVStats();
+}
+export function ode23_v_stats_opts(f: OdeRhsV, tspan: any, y0: any, opts: any) {
+  const { rtol, atol, maxStep, initStep, refine, printStats } = _odeOptsResolve(opts, 1);
+  _odeVCompute(23, f, tspan, y0, rtol, atol, maxStep, initStep, refine, printStats);
+  return _odeVStats();
+}
+
 // Numpy namespace re-export — `import * as np from "./matlab_runtime"`
 // won't pick this up, but `import { np } from "./matlab_runtime"` will.
 // The TypeScript emitter prefers the explicit `import * as np from

@@ -2820,6 +2820,43 @@ bool TensorLowering::rewriteBuiltinCalls() {
         continue;
       }
     }
+    /* Vector-y form: y0 is a ptr (matrix) instead of f64. Routes to the
+     * matlab_ode{45,23}_v_* runtime entries which take a matrix RHS. */
+    if (NA && (NA.getValue().getSExtValue() == 2 ||
+               NA.getValue().getSExtValue() == 3) &&
+        (Name == "ode45" || Name == "ode23") &&
+        (Call->getNumOperands() == 3 || Call->getNumOperands() == 4) &&
+        Call->getOperand(0).getType() == PtrTy &&
+        Call->getOperand(1).getType() == PtrTy &&
+        Call->getOperand(2).getType() == PtrTy) {
+      bool HaveOpts = (Call->getNumOperands() == 4);
+      if (HaveOpts && Call->getOperand(3).getType() != PtrTy) {
+        /* fall through */
+      } else {
+        const char *Suffix = HaveOpts ? "_opts" : "";
+        std::string F0n = "matlab_" + Name.str() + "_v_t"     + Suffix;
+        std::string F1n = "matlab_" + Name.str() + "_v_y"     + Suffix;
+        std::string F2n = "matlab_" + Name.str() + "_v_stats" + Suffix;
+        llvm::SmallVector<Type, 4> ArgTys = {PtrTy, PtrTy, PtrTy};
+        if (HaveOpts) ArgTys.push_back(PtrTy);
+        B.setInsertionPoint(Call);
+        auto Fn0 = rt(F0n, PtrTy, ArgTys);
+        auto Fn1 = rt(F1n, PtrTy, ArgTys);
+        ValueRange Args = Call->getOperands();
+        auto C0 = LLVM::CallOp::create(B, Call->getLoc(), Fn0, Args);
+        auto C1 = LLVM::CallOp::create(B, Call->getLoc(), Fn1, Args);
+        Call->getResult(0).replaceAllUsesWith(C0.getResult());
+        Call->getResult(1).replaceAllUsesWith(C1.getResult());
+        if (NA.getValue().getSExtValue() == 3) {
+          auto Fn2 = rt(F2n, PtrTy, ArgTys);
+          auto C2 = LLVM::CallOp::create(B, Call->getLoc(), Fn2, Args);
+          Call->getResult(2).replaceAllUsesWith(C2.getResult());
+        }
+        Call->erase();
+        Changed = true;
+        continue;
+      }
+    }
     /* [t, y] = ode45(@f, tspan, y0) / ode23: handle is a ptr (function
      * pointer materialised by LowerAnonCalls or rewriteMakeHandle), tspan
      * is a ptr (matrix), y0 is f64. Two single-output runtime entries
