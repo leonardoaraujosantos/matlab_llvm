@@ -1,0 +1,1 @@
+input port 'reset' is 8 bits wide but only used as a boolean

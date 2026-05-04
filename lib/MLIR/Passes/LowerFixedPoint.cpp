@@ -498,6 +498,15 @@ bool rewriteFiCallBuiltin(Operation *Op, ModuleOp M) {
     Call->setAttr("persistent_name", PN);
   if (auto PF = Op->getAttrOfType<StringAttr>("persistent_fn"))
     Call->setAttr("persistent_fn", PF);
+  // C1 — also carry `matlab.name` so SlotPromotion's name transfer
+  // (which sets `matlab.name` on the stored value's defining op
+  // before erasing the slot) survives the matlab.call_builtin →
+  // llvm.call conversion. Without this, runtime-call producers
+  // like `matlab_mat_i64_zeros` lose the source-level array name
+  // (`v` / `h`) before LowerStaticFiArrays runs, and the SV
+  // emitter falls back to anonymous `vN_1` for the new alloca.
+  if (auto MN = Op->getAttrOfType<StringAttr>("matlab.name"))
+    Call->setAttr("matlab.name", MN);
   if (Op->getNumResults() == 1 && !isa<LLVM::LLVMVoidType>(ResTy)) {
     Op->getResult(0).replaceAllUsesWith(Call.getResult());
   }

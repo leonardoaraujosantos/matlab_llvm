@@ -2,34 +2,31 @@
 // Target: ASIC, vendor-neutral synthesizable SystemVerilog.
 // Reset convention: async-low (assert async, deassert sync).
 
-module counter (
+module persist_to_output (
     input  logic clk,
     input  logic rst_n,
-    input  logic [7:0] en,
-    input  logic [7:0] rst,
-    output logic [7:0] count
+    input  logic reset,
+    output logic [7:0] display
 );
 
-    logic [7:0] c;
-    logic [7:0] c_next;
+    logic [7:0] counter;
+    logic [7:0] counter_next;
 
     always_comb begin
-        c_next = c;
-        if (rst > 8'sd0) begin
-            c_next = 8'sd0;
+        counter_next = counter;
+        if (reset) begin
+            counter_next = 8'sd0;
         end else begin
-            if (en > 8'sd0) begin
-                c_next = 8'(c + 8'sd1);
-            end
+            counter_next = counter + 8'sd1;
         end
-        count = c;
+        display = counter;
     end
 
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            c <= 8'sd0;
+            counter <= 8'sd0;
         end else begin
-            c <= c_next;
+            counter <= counter_next;
         end
     end
 

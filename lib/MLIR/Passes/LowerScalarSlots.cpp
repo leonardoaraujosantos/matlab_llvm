@@ -11,6 +11,7 @@
 
 #include "matlab/MLIR/Passes/Passes.h"
 
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/LLVMIR/LLVMTypes.h"
 #include "mlir/IR/Builders.h"
@@ -85,9 +86,36 @@ bool runLowerScalarSlots(ModuleOp M) {
                  U->getOperand(1) == Alloc->getResult(0)) {
         Value V = U->getOperand(0);
         if (V.getType() != ElemTy) {
-          // Operand type drift after earlier refinements — skip this slot.
-          ToErase.clear();
-          goto NextAlloc;
+          // Operand type drift after earlier refinements — for the
+          // common pattern `slot_iN = matlab_global_get_f64(reg)`
+          // (the runtime ABI returns f64 regardless of the
+          // register's actual width), or sibling iM→iN width
+          // mismatches, insert an explicit conversion here so the
+          // store survives. The previous behaviour (skip the slot)
+          // silently dropped the body-level assignment, leaving
+          // outputs hardwired to their prelude `'0` value — see
+          // moore_fsm's `state_display` and fir's `y` regressions.
+          B.setInsertionPoint(U);
+          Value Conv;
+          auto VIT = mlir::dyn_cast<IntegerType>(V.getType());
+          auto SIT = mlir::dyn_cast<IntegerType>(ElemTy);
+          if (mlir::isa<Float64Type, Float32Type>(V.getType()) && SIT) {
+            Conv = mlir::arith::FPToSIOp::create(B, U->getLoc(),
+                                                 ElemTy, V);
+          } else if (VIT && SIT && VIT.getWidth() > SIT.getWidth()) {
+            Conv = mlir::arith::TruncIOp::create(B, U->getLoc(),
+                                                  ElemTy, V);
+          } else if (VIT && SIT && VIT.getWidth() < SIT.getWidth()) {
+            Conv = mlir::arith::ExtSIOp::create(B, U->getLoc(),
+                                                 ElemTy, V);
+          } else {
+            // Unknown shape — fall back to the prior conservative
+            // behaviour and skip the slot rather than emit invalid
+            // IR.
+            ToErase.clear();
+            goto NextAlloc;
+          }
+          V = Conv;
         }
         B.setInsertionPoint(U);
         LLVM::StoreOp::create(B, U->getLoc(), V, Ptr);

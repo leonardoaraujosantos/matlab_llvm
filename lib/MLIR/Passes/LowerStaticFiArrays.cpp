@@ -28,6 +28,7 @@
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Operation.h"
 #include "mlir/IR/Value.h"
+#include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 
@@ -320,17 +321,72 @@ bool tryRewrite(mlir::LLVM::CallOp Zeros) {
   auto One = mlir::LLVM::ConstantOp::create(B, L, I64,
       mlir::IntegerAttr::get(I64, 1));
   auto Alloca = mlir::LLVM::AllocaOp::create(B, L, PtrTy, ArrTy, One, 0);
-  // Zero-init: emit `arr[i] = 0` for every i. (memset.intrinsic
-  // would also work but adds an LLVM intrinsic dependency.)
-  auto Zero = mlir::arith::ConstantOp::create(B, L, ElemTy,
-      mlir::IntegerAttr::get(ElemTy, 0));
-  for (int64_t I = 0; I < S.N; ++I) {
-    auto IdxC = mlir::LLVM::ConstantOp::create(B, L, I32,
-        mlir::IntegerAttr::get(I32, I));
-    auto Gep = mlir::LLVM::GEPOp::create(
-        B, L, PtrTy, ArrTy, Alloca.getRes(),
-        mlir::ArrayRef<mlir::LLVM::GEPArg>{0, IdxC.getRes()});
-    mlir::LLVM::StoreOp::create(B, L, Zero, Gep.getRes());
+  // C1 — surface the source-level array name. Two sources:
+  //   1. The pre-pass annotation on the zeros call itself
+  //      (`matlab.name` set by the side-table walk in
+  //      `runLowerStaticFiArrays`'s entry — handles fixtures where
+  //      the matlab.store-to-slot is DCE'd before this rewrite
+  //      runs).
+  //   2. A live `matlab.store(zeros_call, named_slot)` user
+  //      (handles fir-style sources where the slot still has
+  //      loads keeping it alive).
+  // Either way, lift the name onto the new alloca so the SV
+  // emitter renders `h [4]` / `v [4]` instead of `v0_1 [4]`.
+  if (auto N = Zeros->getAttrOfType<mlir::StringAttr>("matlab.name")) {
+    Alloca->setAttr("matlab.name", N);
+  } else {
+    for (mlir::Operation *U : Zeros.getResult().getUsers()) {
+      mlir::Value Tgt;
+      if (auto St = mlir::dyn_cast<mlir::LLVM::StoreOp>(U))
+        Tgt = St.getAddr();
+      else if (U->getName().getStringRef() == "matlab.store" &&
+               U->getNumOperands() >= 2)
+        Tgt = U->getOperand(1);
+      if (!Tgt) continue;
+      if (auto *TOp = Tgt.getDefiningOp()) {
+        mlir::StringAttr N =
+            TOp->getAttrOfType<mlir::StringAttr>("matlab.name");
+        if (!N) N = TOp->getAttrOfType<mlir::StringAttr>("name");
+        if (N) {
+          Alloca->setAttr("matlab.name", N);
+          break;
+        }
+      }
+    }
+  }
+  // S4 — skip the zero-init for elements that are also covered by
+  // a downstream constant-index store. When `h = fi([0.1, 0.2, ...
+  // ], ...)` lowers to a literal-init, every element is overwritten
+  // before any read, so the zero stores are dead. Only zero-init
+  // the elements that have no constant-index __subscript_store
+  // covering them in the original Stores worklist.
+  llvm::SmallSet<int64_t, 8> CoveredByLiteralStore;
+  for (mlir::Operation *St : S.Stores) {
+    if (St->getNumOperands() < 3) continue;
+    int64_t IdxV;
+    if (!readIntConst(St->getOperand(1), IdxV)) continue;
+    // Indices in the source are 1-based; the static-array fold
+    // subtracts 1 when emitting the GEP. Track 0-based here so
+    // the comparison against the zero-loop's `I` is consistent.
+    int64_t Zero = IdxV - 1;
+    if (Zero >= 0 && Zero < S.N) CoveredByLiteralStore.insert(Zero);
+  }
+  bool AllCovered = (int64_t)CoveredByLiteralStore.size() == S.N;
+  // Zero-init: emit `arr[i] = 0` for every i NOT later overwritten
+  // by a literal-init. (memset.intrinsic would also work but adds
+  // an LLVM intrinsic dependency.)
+  if (!AllCovered) {
+    auto Zero = mlir::arith::ConstantOp::create(B, L, ElemTy,
+        mlir::IntegerAttr::get(ElemTy, 0));
+    for (int64_t I = 0; I < S.N; ++I) {
+      if (CoveredByLiteralStore.count(I)) continue;
+      auto IdxC = mlir::LLVM::ConstantOp::create(B, L, I32,
+          mlir::IntegerAttr::get(I32, I));
+      auto Gep = mlir::LLVM::GEPOp::create(
+          B, L, PtrTy, ArrTy, Alloca.getRes(),
+          mlir::ArrayRef<mlir::LLVM::GEPArg>{0, IdxC.getRes()});
+      mlir::LLVM::StoreOp::create(B, L, Zero, Gep.getRes());
+    }
   }
 
   // Helper: build the 0-based integer index value for a GEP, from
@@ -935,6 +991,39 @@ bool tryRewriteConcat(mlir::LLVM::CallOp Concat) {
 }
 
 bool runLowerStaticFiArrays(mlir::ModuleOp M) {
+  // C1 — preserve the source-level array name on the zeros-call op
+  // before any rewrite step runs. Earlier passes (LowerScalarsToArith,
+  // LowerUserCalls, RefineSlotTypes) and downstream DCE may erase
+  // the `matlab.store(zeros_call_result, named_slot)` link by the
+  // time `tryRewrite` walks the call's users — for fixtures whose
+  // source slot has no remaining loads (`fi_array_literal.m`, where
+  // `v` is read only via array subscripts on the loaded pointer),
+  // the slot's `matlab.alloc` is gone before we get here. Side-
+  // table the link as a `matlab.name` attribute on the zeros call
+  // itself: every later rewrite step reads it back, so the alloca
+  // we synthesize keeps the user-visible name even after the
+  // intervening DCE.
+  M.walk([&](mlir::Operation *St) {
+    llvm::StringRef N = St->getName().getStringRef();
+    bool IsStore =
+        N == "matlab.store" || mlir::isa<mlir::LLVM::StoreOp>(St);
+    if (!IsStore) return;
+    if (St->getNumOperands() < 2) return;
+    mlir::Value Val = St->getOperand(0);
+    mlir::Value Tgt = St->getOperand(1);
+    auto Call = Val.getDefiningOp<mlir::LLVM::CallOp>();
+    if (!Call) return;
+    auto Callee = Call.getCallee();
+    if (!Callee || (*Callee != "matlab_mat_i64_zeros" &&
+                    *Callee != "matlab_mat_u64_zeros"))
+      return;
+    if (Call->hasAttr("matlab.name")) return;
+    auto *TOp = Tgt.getDefiningOp();
+    if (!TOp) return;
+    auto Name = TOp->getAttrOfType<mlir::StringAttr>("matlab.name");
+    if (!Name) Name = TOp->getAttrOfType<mlir::StringAttr>("name");
+    if (Name) Call->setAttr("matlab.name", Name);
+  });
   // Phase 5.6 Stage E: pre-fold concat-of-statically-shaped-
   // operands into a `matlab_mat_i64_zeros + N __subscript_store`
   // chain so the standard zeros-folding path below picks them up.

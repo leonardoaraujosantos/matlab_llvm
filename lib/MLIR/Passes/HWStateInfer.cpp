@@ -269,6 +269,16 @@ bool gatherHWPersistentState(mlir::Operation *FuncOp,
             SignedOut = BA;
           if (auto WLA = Cur->getAttrOfType<mlir::IntegerAttr>("fi_wl"))
             WLOut = WLA;
+          // T1 — `matlab.unsigned` is set by IntCastConstantFold on
+          // arith.constant ops produced from `uint8(K)` /
+          // `uint16(K)` / etc. literal casts. The fi_* attrs aren't
+          // present on those (the cast doesn't go through the
+          // fi pipeline), so we infer signedness from this unit
+          // attr instead. Only sets the result when fi_signed
+          // hasn't already been resolved (fi attrs win when both
+          // are present).
+          if (!SignedOut && Cur->hasAttr("matlab.unsigned"))
+            SignedOut = mlir::BoolAttr::get(Cur->getContext(), false);
           if (SignedOut && WLOut) return;
           // Adapter chain: trunci / extsi / extui pass-through.
           if (mlir::isa<mlir::arith::TruncIOp, mlir::arith::ExtSIOp,

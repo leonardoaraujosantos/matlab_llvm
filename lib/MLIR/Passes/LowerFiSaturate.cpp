@@ -24,11 +24,13 @@
 #include "matlab/MLIR/Passes/Passes.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Operation.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 
 namespace matlab {
@@ -101,6 +103,19 @@ void rewriteOne(mlir::LLVM::CallOp Call, bool Signed) {
           NB, L, mlir::arith::CmpIPredicate::slt, Narrow, NMin);
       auto Inner = mlir::arith::SelectOp::create(NB, L, Lt, NMin, Narrow);
       auto Clamped = mlir::arith::SelectOp::create(NB, L, Gt, NMax, Inner);
+      // Tag the outer (final) SelectOp so the SV emitter can hoist
+      // a per-(input-width, sat-width) helper function instead of
+      // rendering the cmp/cmp/select/select chain inline. The
+      // inner SelectOp is left bare — emitter walks the operand
+      // structure to extract the original input. See the matching
+      // render path in EmitSystemVerilog (B1).
+      Clamped->setAttr(
+          "matlab.fi_sat_w",
+          mlir::IntegerAttr::get(
+              mlir::IntegerType::get(Call.getContext(), 32), W));
+      Clamped->setAttr(
+          "matlab.fi_sat_signed",
+          mlir::BoolAttr::get(Call.getContext(), Signed));
       // Sign-extend back to the original wide type. Downstream
       // `trunci wide→narrow'` chains collapse via the
       // extsi/trunci fold.
@@ -144,8 +159,162 @@ void rewriteOne(mlir::LLVM::CallOp Call, bool Signed) {
         B, L, mlir::arith::CmpIPredicate::ugt, Val, MaxV);
     Out = mlir::arith::SelectOp::create(B, L, GtMax, MaxV, Val);
   }
+  // Tag the outer SelectOp(s) so the SV emitter can hoist a
+  // per-(input-width, sat-width) helper. Skip when W <= 0 (Out is
+  // a constant) or W >= 64 (Out is the input passed through);
+  // those cases produce no SelectOp.
+  if (W > 0 && W < 64) {
+    if (auto Sel = Out.getDefiningOp<mlir::arith::SelectOp>()) {
+      Sel->setAttr(
+          "matlab.fi_sat_w",
+          mlir::IntegerAttr::get(
+              mlir::IntegerType::get(Call.getContext(), 32), W));
+      Sel->setAttr(
+          "matlab.fi_sat_signed",
+          mlir::BoolAttr::get(Call.getContext(), Signed));
+    }
+  }
   Call.getResult().replaceAllUsesWith(Out);
   Call.erase();
+}
+
+/// Walk forward from a tagged saturation `Sel` looking for a
+/// destination value with a `matlab.name` (or `name`) attr — a
+/// store-target slot or a func.return result. Handles two
+/// transparent forwarding shapes that show up in the LowerFiSaturate
+/// output: `arith.extsi` (the narrow-peel wrapper) and chained
+/// saturations (this Sel's Out is the input of the next Sel).
+/// Returns the first base name found, or empty if the chain ends
+/// at an anonymous consumer.
+std::string walkSatDest(mlir::arith::SelectOp Sel) {
+  llvm::SmallPtrSet<mlir::Operation *, 16> Visited;
+  llvm::SmallVector<mlir::Value, 4> Frontier;
+  Frontier.push_back(Sel.getResult());
+  while (!Frontier.empty()) {
+    mlir::Value Cur = Frontier.pop_back_val();
+    for (mlir::Operation *U : Cur.getUsers()) {
+      if (!Visited.insert(U).second) continue;
+      if (auto St = mlir::dyn_cast<mlir::LLVM::StoreOp>(U)) {
+        if (auto *Addr = St.getAddr().getDefiningOp()) {
+          if (auto N = Addr->getAttrOfType<mlir::StringAttr>("matlab.name"))
+            return N.getValue().str();
+          if (auto N = Addr->getAttrOfType<mlir::StringAttr>("name"))
+            return N.getValue().str();
+        }
+        continue;
+      }
+      // Persistent set runtime call → use the persistent register
+      // name as the destination. Both the LLVM-typed
+      // `matlab_persistent_set_*` and the matlab.call_builtin
+      // `matlab_global_set_*` shapes carry a `persistent_name`
+      // string attr from earlier lowering.
+      {
+        auto getStrAttr = [&](const char *Name) -> mlir::StringAttr {
+          return U->getAttrOfType<mlir::StringAttr>(Name);
+        };
+        llvm::StringRef Callee;
+        if (auto C = mlir::dyn_cast<mlir::LLVM::CallOp>(U)) {
+          if (auto S = C.getCallee()) Callee = *S;
+        } else if (auto C2 = U->getAttrOfType<mlir::StringAttr>("callee")) {
+          Callee = C2.getValue();
+        }
+        if (Callee.starts_with("matlab_persistent_set") ||
+            Callee.starts_with("matlab_global_set")) {
+          if (auto N = getStrAttr("persistent_name"))
+            return N.getValue().str();
+        }
+      }
+      if (auto R = mlir::dyn_cast<mlir::func::ReturnOp>(U)) {
+        for (unsigned I = 0; I < R.getNumOperands(); ++I) {
+          if (R.getOperand(I) != Cur) continue;
+          auto F = R->getParentOfType<mlir::func::FuncOp>();
+          if (!F) continue;
+          if (auto N = F.getResultAttrOfType<mlir::StringAttr>(
+                  I, "matlab.name"))
+            return N.getValue().str();
+        }
+        continue;
+      }
+      // Pass through ExtSI (narrow-peel wrapper) and any SelectOp
+      // (tagged outer of a chained sat, OR untagged Inner whose
+      // own user is the chain's outer). CmpI is sat-internal too —
+      // walking through its result lands on the SelectOp that
+      // consumes it, which is the chain outer.
+      if (mlir::isa<mlir::arith::ExtSIOp, mlir::arith::ExtUIOp,
+                    mlir::arith::TruncIOp, mlir::arith::SelectOp,
+                    mlir::arith::CmpIOp>(U)) {
+        for (mlir::Value R : U->getResults()) Frontier.push_back(R);
+        continue;
+      }
+      // Shifts are the canonical "fractional re-quantize" the fi
+      // pipeline emits between cascaded saturations (`sat → >>> N
+      // → sat`). Walk through when Cur is the shifted value
+      // (operand 0); shift-amount uses lead off a different chain.
+      if (mlir::isa<mlir::arith::ShRSIOp, mlir::arith::ShRUIOp,
+                    mlir::arith::ShLIOp>(U)) {
+        if (U->getOperand(0) == Cur)
+          for (mlir::Value R : U->getResults()) Frontier.push_back(R);
+        continue;
+      }
+      // Pure arith binops in a fi datapath chain — `add+sat+add+
+      // sat` (vector_processor's dot product / mag_sq) lifts the
+      // destination name across the binop joins so upstream
+      // intermediates inherit the eventual `<dest>_pre` naming
+      // instead of staying as `vN_1` placeholders.
+      if (mlir::isa<mlir::arith::AddIOp, mlir::arith::SubIOp,
+                    mlir::arith::MulIOp, mlir::arith::AndIOp,
+                    mlir::arith::OrIOp, mlir::arith::XOrIOp>(U)) {
+        for (mlir::Value R : U->getResults()) Frontier.push_back(R);
+        continue;
+      }
+      // Same idea for the unregistered matlab.* binops that
+      // survive through to the SV emitter.
+      llvm::StringRef N = U->getName().getStringRef();
+      if (N == "matlab.add" || N == "matlab.sub" ||
+          N == "matlab.matmul" || N == "matlab.emul") {
+        for (mlir::Value R : U->getResults()) Frontier.push_back(R);
+        continue;
+      }
+    }
+  }
+  return "";
+}
+
+/// Attach context-derived `matlab.name` attrs to each tagged
+/// saturating SelectOp and to its pre-clamp input value's defining
+/// op. Skips ops that already carry a name.
+void nameSatChains(mlir::ModuleOp M) {
+  M.walk([&](mlir::arith::SelectOp Sel) {
+    if (!Sel->hasAttr("matlab.fi_sat_w")) return;
+    std::string Base = walkSatDest(Sel);
+    if (Base.empty()) return;
+    auto Sgn = Sel->getAttrOfType<mlir::BoolAttr>("matlab.fi_sat_signed");
+    bool Signed = Sgn && Sgn.getValue();
+    // Sat output: only set when the SelectOp itself doesn't have
+    // a source name yet (e.g. inherited from a pre-existing matlab
+    // attribute upstream).
+    if (!Sel->hasAttr("matlab.name") && !Sel->hasAttr("name")) {
+      Sel->setAttr("matlab.name",
+                   mlir::StringAttr::get(Sel.getContext(), Base + "_sat"));
+    }
+    // Walk to the pre-clamp input value.
+    mlir::Value In;
+    if (Signed) {
+      if (auto Inner =
+              Sel.getFalseValue().getDefiningOp<mlir::arith::SelectOp>())
+        In = Inner.getFalseValue();
+    } else {
+      In = Sel.getFalseValue();
+    }
+    if (!In) return;
+    if (auto *VOp = In.getDefiningOp()) {
+      if (!VOp->hasAttr("matlab.name") && !VOp->hasAttr("name")) {
+        VOp->setAttr("matlab.name",
+                     mlir::StringAttr::get(VOp->getContext(),
+                                           Base + "_pre"));
+      }
+    }
+  });
 }
 
 } // namespace
@@ -213,6 +382,11 @@ bool runLowerFiSaturate(mlir::ModuleOp M) {
       ChangedFold = true;
     }
   }
+  // C1 — propagate destination names onto tagged saturating
+  // SelectOps and their pre-clamp input ops. Runs after the DCE
+  // and trunci/extsi fold so the forward walk follows the final
+  // shape of the IR (no dead ExtSI links to confuse the chain).
+  nameSatChains(M);
   return true;
 }
 

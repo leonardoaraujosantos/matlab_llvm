@@ -1,4 +1,4 @@
-function y = mux_4to1_16bit(in0, in1, in2, in3, sel)
+function y = mux_4to_1_16bit(in0, in1, in2, in3, sel)
     %#codegen
     % hdl: port(in0, fi, signed, 16, 0)
     % hdl: port(in1, fi, signed, 16, 0)
