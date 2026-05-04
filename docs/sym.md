@@ -58,7 +58,8 @@ Mirrors MATLAB's Symbolic Math Toolbox User's Guide (R2026a).
 | ODE / PDE | `dsolve(eq, y, yp, x)` (1st-order), `dsolve(eq, y, yp, ypp, x)` (2nd-order auto-classify), `dsolve_ivp(eq, y, yp, x, x0, y0)`, `apply_ivp(general, x, x0, y0)`, `checkodesol(eq, sol, y, yp, x)`, `pdsolve(a, b, c, x, y)`, `pdsolve_heat(k, lambda, x, t)`, `pdsolve_wave(c, x, t)` |
 | Transforms | `laplace(f, t, s)`, `ilaplace(F, s, t)`, `fourier(f, t, w)`, `ifourier(F, w, t)`, `ztrans(f, n, z)`, `iztrans(F, z, n)` |
 | Assumptions | `assume(x, 'positive')`, `assumeAlso(x, 'integer')`, `clearAssumptions(x)` |
-| Symbolic matrices | `sym_matrix(R, C, e11, e12, …, eRC)` (R, C must be integer literals), `sym_eye(n)`, `sym_zeros(R, C)`, `sym_det(M)`, `sym_inv(M)`, `sym_transpose(M)`, `sym_trace(M)`, `sym_rank(M)`, `sym_linsolve(A, b)`, `sym_dsolve_system(A, x)` |
+| Symbolic matrices | Standard `[a 1; 2 b]` matrix literal (sym entries auto-detected at lowering time, routes through `matlab_symmat_*`), `sym_matrix(R, C, e11, e12, …, eRC)` (R, C must be integer literals), `sym_eye(n)`, `sym_zeros(R, C)`, `sym_det(M)`, `sym_inv(M)`, `sym_transpose(M)`, `sym_trace(M)`, `sym_rank(M)`, `sym_linsolve(A, b)`, `sym_dsolve_system(A, x)` |
+| Multi-eq variadic solver | `sym_solve_sys([eq1, eq2, …], [v1, v2, …])` — N-equation, N-unknown, lowered through an `llvm.alloca`+GEP+store stack-array ABI |
 | Display / codegen | `disp(s)`, `latex(s)`, `pretty(s)`, `ccode(s)`, `matlabFunction(...)` |
 | Elementary | `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `sinh`, `cosh`, `tanh`, `exp`, `log`, `sqrt`, `abs` (all dispatch to sym variants when the argument is sym) |
 

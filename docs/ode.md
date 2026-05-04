@@ -327,9 +327,11 @@ Tracked separately in [`feature_status.md`](feature_status.md) and
   routing it through `odeset` is gated on the function-handle-in-
   struct ABI work that also unblocks `OutputFcn` / `Mass`.
 - `OutputFcn` callback.
-- Numerical PDE (`pdepe`, finite-element). With `ode23s` shipped, a
-  method-of-lines `pdepe` wrapper becomes feasible; `ode15s` would make
-  it more efficient on stiff parabolic problems. The shipped `pdsolve`
+- Higher-order numerical PDE: `pdepe` ships today (method-of-lines
+  wrapper around `ode23s`, with planar / cylindrical / spherical
+  symmetry `m=0,1,2`). Future work: finite-element discretisation,
+  full Jacobian path through `ode15s` for very stiff parabolic
+  problems, multi-PDE systems with coupling. The shipped `pdsolve`
   family lives in the symbolic toolbox and returns closed-form
   expressions, not numerical grids — see [`sym.md`](sym.md).
 - Vector `y` via *named* user functions (anon-only today; works for

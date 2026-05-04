@@ -65,7 +65,7 @@ Current corpus size in-tree:
 - `29` runnable programs in [`examples/`](examples/)
 - `18` synthesizable HDL example modules in [`examples/hdl/`](examples/hdl/)
 - `10` flowchart programs in [`examples/mflow/`](examples/mflow/)
-- `171` execution tests in `test/Run/`
+- `172` execution tests in `test/Run/` plus `4` opt-in symbolic tests in `test/RunSym/`
 - `37` SystemVerilog golden fixtures (Verilator lint-clean) in `test/EmitSV/`
 - `7` fi-spec port-declaration regression tests in `test/EmitSVPorts/`
 - `10` synthesizability-gate diagnostic tests in `test/EmitSVFail/`
@@ -378,8 +378,11 @@ Core docs:
 - [`docs/emit_cpp_classdef.md`](docs/emit_cpp_classdef.md): MATLAB classdef → C++ class lowering
 - [`docs/emit_python.md`](docs/emit_python.md): Python backend status and behavior
 - [`docs/emit_systemverilog.md`](docs/emit_systemverilog.md): SystemVerilog (ASIC, synthesizable) backend
+- [`docs/emit_cocotb.md`](docs/emit_cocotb.md): `-emit-cocotb` cycle-by-cycle co-simulation harness
 - [`docs/emit_fixed_point.md`](docs/emit_fixed_point.md): Fixed-Point Designer (`fi`) lowering
 - [`docs/complex.md`](docs/complex.md): complex numbers and FFT
+- [`docs/sym.md`](docs/sym.md): Symbolic Math Toolbox via SymPP — `syms`/diff/int/simplify/solve/dsolve/pdsolve/transforms/assume/vpa/taylor/limit + symbolic matrices and `[a 1; 2 b]` literal syntax
+- [`docs/ode.md`](docs/ode.md): ODE / PDE numerical solvers — `ode45`, `ode23`, `ode23s` (stiff), `ode_events`, `pdepe`
 - [`docs/sema.md`](docs/sema.md): semantic analysis and type inference
 - [`docs/save_load_compat.md`](docs/save_load_compat.md): `save` / `load` `.mat` compatibility
 

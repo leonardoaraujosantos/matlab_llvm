@@ -139,22 +139,23 @@ See [`docs/sym.md`](sym.md) for the full surface.
 | `syms x y z`, `sym('expr')`, `str2sym` | ✅ | Workspace kind=7; cross-input REPL persistence |
 | `+ - * / ^ ==` arithmetic dispatch | ✅ | Pure sym + mixed-mode (sym op double) |
 | `diff(f, x, [n])`, `int(f, x, [a, b])` | ✅ | |
-| `simplify`, `expand`, `factor`, `subs` | ✅ | `simplify` is structural — does not auto-honour assumptions |
-| `solve(eq, x)` | ✅ | Single eq, single var; multi-eq returns string-rendered list |
+| `simplify`, `expand`, `factor`, `subs` | ✅ | `simplify` chains `refine()` so registered assumptions propagate (Phase 6.2): after `assume(y,'positive')`, `simplify(sqrt(y*y))` → `y` |
+| `solve(eq, x)` | ✅ | Single eq, single var; multi-eq via `sym_solve_sys` (variadic) below |
 | `taylor(f, x, a, n)`, `limit(f, x, target)` | ✅ | |
 | `vpa(s, dps)`, `double(s)` | ✅ | |
+| `sym('pi')`, `sym('exp1')`, `sym('I')` | ✅ | Phase 6.2 — recognises `pi`/`Pi`/`exp1`/`EulerGamma`/`Catalan`/`I`/`true`/`false` as SymPP singletons; `vpa(sym('pi'),32)` returns the digits of π |
 | `dsolve(eq, y, yp, x)` (1st-order) | ✅ | SymPP's plain-symbol convention; no AppliedFunction lifting |
 | `dsolve(eq, y, yp, ypp, x)` (2nd-order) | ✅ | Auto-classifies const-coeff vs Cauchy-Euler |
 | `dsolve(A, x)` (linear system) | ✅ | `sym_dsolve_system(A, x)` — explicit symmat constructor |
-| `dsolve_ivp(eq, y, yp, x, x0, y0)`, `apply_ivp(...)` | 🟡 | Single-condition form; multi-condition needs cell-array integration |
+| `dsolve_ivp(eq, y, yp, x, x0, y0)`, `apply_ivp(...)` | ✅ | Phase 6.2 — single-condition AND multi-condition forms (parallel sym vectors `[x0, x1, …]`, `[y0, y1, …]`) both wired |
 | `checkodesol(eq, sol, y, yp, x)` | ✅ | Returns residual sym |
 | `pdsolve(a, b, c, x, y)`, `pdsolve_heat`, `pdsolve_wave` | ✅ | First-order linear, heat, wave |
 | `laplace`/`ilaplace`, `fourier`/`ifourier`, `ztrans`/`iztrans` | ✅ | |
 | `assume(x, 'prop')`, `assumeAlso`, `clearAssumptions` | ✅ | 10 properties (real, integer, positive, …); rebinds the variable |
 | `latex`, `pretty`, `ccode` | ✅ | Returns char* via `matlab_sym_*` |
 | `matlabFunction(...)` | 🟡 | SymPP emits Octave source; not wrapped into a function handle |
-| Symbolic matrices: `sym_matrix`, `sym_eye`, `sym_zeros`, `sym_det`, `sym_inv`, `sym_transpose`, `sym_trace`, `sym_rank`, `sym_linsolve`, `sym_dsolve_system` | ✅ | Distinct opaque type (kind=8) with cross-input REPL persistence + DAP rendering |
-| Multi-eq `solve([eq1, eq2], [x, y])` | 🟡 | Fixed-arity `sym_solve_2x2` / `sym_solve_3x3` ship; variadic + matrix-literal forms in 6.2 |
+| Symbolic matrices: `[a 1; 2 b]` literal syntax (Phase 6.2), `sym_matrix`, `sym_eye`, `sym_zeros`, `sym_det`, `sym_inv`, `sym_transpose`, `sym_trace`, `sym_rank`, `sym_linsolve`, `sym_dsolve_system` | ✅ | Distinct opaque type (kind=8) with cross-input REPL persistence + DAP rendering. The standard MATLAB `[a 1; 2 b]` matrix literal detects sym entries and routes through `matlab_symmat_*`; `sym_matrix(R, C, …)` stays as an explicit constructor |
+| Multi-eq `sym_solve_sys([eq…], [var…])`, `sym_solve_2x2`, `sym_solve_3x3` | ✅ | Variadic + fixed-arity (Phase 6.2). Returns symmat with one row per joint solution |
 | `nsolve`, `vpasolve` | ✅ | Newton's method in MPFR |
 | Elementary functions on sym (`sin(sym)`, `exp(sym)`, …) | ✅ | Auto-dispatch when the operand is sym |
 
@@ -345,12 +346,13 @@ All implemented; see `docs/emit_c_cpp.md` for pipeline diagram.
 | Suite | Count | Status |
 |---|--:|:-:|
 | `frontend-tests` (Lexer, Parser, Sema, MIR, MLIR, Opt, Programs, Errors) | 77 | ✅ 77/77 |
-| `run-tests` (`-emit-llvm` + clang) | 156 | ✅ |
-| `run-tests-emit-c` (`-emit-c` + cc) | 156 | ✅ |
-| `run-tests-emit-cpp` (`-emit-cpp` + c++) | 156 | 🟡 1 pre-existing (`string_concat_mixed`) |
-| `run-tests-emit-c-strict` / `-cpp-strict` (-Wall -Wextra -Werror) | 156 | ✅ |
-| `run-tests-emit-python` (`-emit-python` + python3) | 156 | ✅ (some `.stdout-python` overrides for numpy repr) |
-| `run-tests-emit-typescript` (`-emit-typescript` + bun) | 156 | 🟡 1 pre-existing (`string_concat_mixed`), ~20 skipped |
+| `run-tests` (`-emit-llvm` + clang) | 172 | ✅ |
+| `run-tests-emit-c` (`-emit-c` + cc) | 172 | ✅ |
+| `run-tests-emit-cpp` (`-emit-cpp` + c++) | 172 | ✅ (`string_concat_mixed` + table / typed-int matrix issues fixed in Phase 6.2 emit-cpp pass) |
+| `run-tests-emit-c-strict` / `-cpp-strict` (-Wall -Wextra -Werror) | 172 | ✅ |
+| `run-tests-emit-python` (`-emit-python` + python3) | 172 | ✅ (some `.stdout-python` overrides for numpy repr) |
+| `run-tests-emit-typescript` (`-emit-typescript` + bun) | 172 | ✅ (`string_concat_mixed` fixed in Phase 6.2; ~20 skipped for BigInt-vs-number coercion) |
+| `run-tests-sym` (`-emit-cpp` + SymPP, opt-in via `-DMATLAB_LLVM_WITH_SYM=ON`) | 4 | ✅ — Phase 6.2 sym_phase_a/b/b1/b2 fixtures; skip-if-missing-SymPP via rc=77 |
 | `emit-sv` golden tests + Verilator lint | 37 | ✅ 37/37 |
 | `emit-sv-fail` synthesizability gate diagnostics | 10 | ✅ 10/10 |
 | `emit-sv-ports` fi-spec ↔ SV declaration regression | 7 | ✅ 7/7 |
@@ -362,17 +364,18 @@ All implemented; see `docs/emit_c_cpp.md` for pipeline diagram.
 | `flowchart-dap-tests` (`matlabc -dap` on `.mflow`: bp verify, stop, frame source) | 3 | ✅ 3/3 |
 | `flowchart-emit-mflow-tests` (`-emit-mflow` idempotency: `.m` → `.mflow` → `.m` → `.mflow` byte-identical) | 11 | ✅ 11/11 |
 
-Examples gallery: 19 programs under `examples/` exercise matrix ops,
+Examples gallery: 29 programs under `examples/` exercise matrix ops,
 recursion, anonymous functions, function handles, parfor, linear
-algebra, logical masks, struct/cell usage, and OOP (`bank_account.m`
+algebra, logical masks, struct/cell usage, OOP (`bank_account.m`
 — classdef with inheritance, `Dependent` properties, operator
-overloading). 8 synthesizable HDL modules under `examples/hdl/`
-cover ALU, counter, mux, FSMs (Mealy / Moore), vector dot product
-+ magnitude, sequential FIR processor, and pipelined FIR ASIC. 8
-flowchart programs under `examples/mflow/` (`hello`, `for_loop`,
-`matrix_mult`, `solve_linear`, `is_old`, `factorial`, plus two
-custom-block demos) showcase the `.mflow` JSON frontend; each
-mirrors a text counterpart and produces byte-identical output
+overloading), Symbolic Math Toolbox (`symbolic_demo.m` — full
+sym surface incl. matrix literals, multi-eq solve, dsolve/pdsolve,
+transforms), and ODE / PDE solvers (`ode_solver.m`). 18 synthesizable
+HDL modules under `examples/hdl/` cover ALU, counter, mux, FSMs
+(Mealy / Moore), vector dot product + magnitude, sequential FIR
+processor, pipelined FIR ASIC, and several variants. 10 flowchart
+programs under `examples/mflow/` showcase the `.mflow` JSON frontend;
+each mirrors a text counterpart and produces byte-identical output
 through every existing backend.
 
 ---
@@ -491,7 +494,8 @@ which direction the project pushes next.
 covering the scalar / dense-matrix / classdef subset of MATLAB.
 
 - **Three compiled backends** (LLVM IR, portable C, portable C++)
-  producing byte-identical stdout on a 118-program run-test corpus.
+  producing byte-identical stdout on a 172-program run-test corpus,
+  with Python and TypeScript ports tracking the same surface.
 - **JIT-backed REPL** (`matlabc -repl`) with a persistent workspace,
   implicit display, operator-overloading / indexing / transpose all
   auto-showing, plus `who` / `whos` / `clear`.
