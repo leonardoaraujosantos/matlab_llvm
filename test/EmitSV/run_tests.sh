@@ -22,9 +22,31 @@ if [[ -z "$MATLABC" || ! -x "$MATLABC" ]]; then
 fi
 
 UPDATE="${UPDATE:-0}"
+# Bless-size guard. When UPDATE=1 rewrites the goldens, accumulate
+# the before/after total line counts; if the delta exceeds 5% of
+# the original total, print a warning so a careless `UPDATE=1` run
+# can't silently drift the corpus. Set BLESS_LIMIT=N to override
+# the threshold (percent), or BLESS_LIMIT=off to disable the
+# guard.
+BLESS_LIMIT="${BLESS_LIMIT:-5}"
+bless_old_lines=0
+bless_new_lines=0
 VERILATOR="${VERILATOR-$(command -v verilator || true)}"
+# Yosys is an optional second-opinion synth lint that complements
+# Verilator's `-Wall` style checks: it parses each emitted module
+# through a real synthesis frontend and runs the `synth` flow,
+# which catches inferable-latch hazards, multi-driver nets, and
+# elaboration-time constructs Verilator is lenient about. Yosys
+# 0.x's SV frontend has limited LRM coverage (e.g. `'{default: '0}`
+# array literals trip it), so the lint is informational by
+# default — failures are tallied separately and don't gate the
+# suite. Set YOSYS_STRICT=1 to make Yosys-detected failures count
+# as suite failures (useful in CI once the corpus is curated).
+YOSYS="${YOSYS-$(command -v yosys || true)}"
+YOSYS_STRICT="${YOSYS_STRICT:-0}"
 TESTDIR="$(cd "$(dirname "$0")" && pwd)"
 pass=0; fail=0; miss=0; lint_skip=0
+yosys_pass=0; yosys_skip=0; yosys_fail=0
 
 for m in "$TESTDIR"/*.m; do
   [[ -e "$m" ]] || continue
@@ -45,6 +67,10 @@ for m in "$TESTDIR"/*.m; do
   fi
 
   if [[ "$UPDATE" == "1" ]]; then
+    if [[ -e "$exp" ]]; then
+      bless_old_lines=$(( bless_old_lines + $(wc -l < "$exp") ))
+    fi
+    bless_new_lines=$(( bless_new_lines + $(wc -l < "$tmp") ))
     mv "$tmp" "$exp"
     echo "UPDATE $base"
     pass=$((pass+1))
@@ -78,6 +104,33 @@ for m in "$TESTDIR"/*.m; do
     fi
   else
     lint_skip=$((lint_skip+1))
+  fi
+
+  # Yosys synth-flow lint (informational). Yosys's SV frontend can
+  # reject constructs Verilator accepts (most commonly the
+  # `'{default: '0}` array literal — Yosys 0.x doesn't parse it).
+  # Capture the result without gating: track pass / skip / fail so
+  # the summary line surfaces coverage without breaking the suite
+  # when a fixture trips a known frontend gap. YOSYS_STRICT=1
+  # promotes failures into suite failures.
+  if [[ -n "$YOSYS" && -x "$YOSYS" ]]; then
+    if "$YOSYS" -p "read_verilog -sv $tmp; synth -top $base" \
+         > "$tmpdir/yosys.log" 2>&1; then
+      yosys_pass=$((yosys_pass+1))
+    else
+      if grep -qE "syntax error|Unknown.*type|Failed to" "$tmpdir/yosys.log"; then
+        yosys_skip=$((yosys_skip+1))
+      else
+        yosys_fail=$((yosys_fail+1))
+        if [[ "$YOSYS_STRICT" == "1" ]]; then
+          echo "FAIL $base: yosys synth"
+          tail -10 "$tmpdir/yosys.log" | sed 's/^/  /'
+          fail=$((fail+1))
+          rm -rf "$tmpdir"
+          continue
+        fi
+      fi
+    fi
   fi
 
   pass=$((pass+1))
@@ -123,6 +176,15 @@ if [[ -n "$VERILATOR" && -x "$VERILATOR" ]]; then
 fi
 
 echo "----"
+# Bless-size guard report (UPDATE=1 only).
+if [[ "$UPDATE" == "1" && "$BLESS_LIMIT" != "off" && $bless_old_lines -gt 0 ]]; then
+  delta=$(( bless_new_lines - bless_old_lines ))
+  abs_delta=${delta#-}
+  pct=$(( abs_delta * 100 / bless_old_lines ))
+  if [[ $pct -gt $BLESS_LIMIT ]]; then
+    echo "WARNING: golden corpus changed by ${pct}% (was $bless_old_lines lines, now $bless_new_lines, delta $delta) — review the diffs manually before committing. Set BLESS_LIMIT=$pct to silence." >&2
+  fi
+fi
 if [[ $lint_skip -gt 0 ]]; then
   echo "emit-sv passed: $pass    failed: $fail    missing: $miss    (verilator skipped on $lint_skip)"
 else
@@ -130,5 +192,12 @@ else
 fi
 if [[ $enc_pass -gt 0 || $enc_fail -gt 0 ]]; then
   echo "fsm-encoding sweep: passed: $enc_pass    failed: $enc_fail"
+fi
+if [[ -n "$YOSYS" ]] && [[ $yosys_pass -gt 0 || $yosys_skip -gt 0 || $yosys_fail -gt 0 ]]; then
+  if [[ "$YOSYS_STRICT" == "1" ]]; then
+    echo "yosys synth: passed: $yosys_pass    skipped: $yosys_skip    failed: $yosys_fail (strict)"
+  else
+    echo "yosys synth: passed: $yosys_pass    skipped: $yosys_skip    failed: $yosys_fail (informational)"
+  fi
 fi
 exit $(( fail > 0 || miss > 0 || enc_fail > 0 ? 1 : 0 ))

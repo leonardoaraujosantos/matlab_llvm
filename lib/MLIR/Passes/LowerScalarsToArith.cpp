@@ -308,6 +308,54 @@ struct BinaryBitwiseBuiltin : public NameMatch {
   }
 };
 
+/// Lowers `matlab.call_builtin @bitshift(a, k)` (k a compile-time
+/// constant) to `arith.shli` (k > 0) or `arith.shrui` (k < 0).
+/// The original call_builtin's result type is `none` because Sema
+/// doesn't propagate; the lowered op picks up the value operand's
+/// integer type so downstream passes see a concrete-typed result.
+struct BitshiftBuiltin : public NameMatch {
+  BitshiftBuiltin(mlir::MLIRContext *Ctx)
+      : NameMatch("matlab.call_builtin", Ctx) {}
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *Op,
+                  mlir::PatternRewriter &R) const override {
+    auto C = Op->getAttrOfType<mlir::StringAttr>("callee");
+    if (!C || C.getValue() != "bitshift") return mlir::failure();
+    if (Op->getNumOperands() != 2 || Op->getNumResults() != 1)
+      return mlir::failure();
+    mlir::Type Ty = Op->getOperand(0).getType();
+    if (!isScalarInt(Ty)) return mlir::failure();
+    // Read the shift amount as a compile-time constant.
+    mlir::Value Amt = Op->getOperand(1);
+    int64_t K = 0;
+    bool Known = false;
+    if (auto Cst = Amt.getDefiningOp<mlir::arith::ConstantOp>()) {
+      if (auto IA = mlir::dyn_cast<mlir::IntegerAttr>(Cst.getValue())) {
+        K = IA.getInt();
+        Known = true;
+      } else if (auto FA = mlir::dyn_cast<mlir::FloatAttr>(Cst.getValue())) {
+        K = (int64_t)FA.getValueAsDouble();
+        Known = true;
+      }
+    }
+    if (!Known) return mlir::failure();
+    bool Left = (K >= 0);
+    int64_t Mag = Left ? K : -K;
+    auto Cst = mlir::arith::ConstantOp::create(
+        R, Op->getLoc(), Ty, mlir::IntegerAttr::get(Ty, Mag));
+    if (Left) {
+      R.replaceOpWithNewOp<mlir::arith::ShLIOp>(
+          Op, Op->getOperand(0), Cst);
+    } else {
+      // Phase 1 SV target: unsigned right shift. Could split into
+      // arith vs logical based on operand signedness if needed.
+      R.replaceOpWithNewOp<mlir::arith::ShRUIOp>(
+          Op, Op->getOperand(0), Cst);
+    }
+    return mlir::success();
+  }
+};
+
 /// Lowers `matlab.call_builtin @bitcmp(a)` (bitwise NOT) to
 /// `arith.xori a, -1`. Single-operand on a scalar integer.
 struct BitCmpBuiltin : public NameMatch {
@@ -446,6 +494,7 @@ bool runLowerScalarsToArith(mlir::ModuleOp M) {
   Patterns.add<BinaryBitwiseBuiltin<mlir::arith::OrIOp>>("bitor", Ctx);
   Patterns.add<BinaryBitwiseBuiltin<mlir::arith::XOrIOp>>("bitxor", Ctx);
   Patterns.add<BitCmpBuiltin>(Ctx);
+  Patterns.add<BitshiftBuiltin>(Ctx);
 
   using namespace mlir::arith;
   Patterns.add<CmpToArith<CmpFPredicate::OEQ, CmpIPredicate::eq>>(

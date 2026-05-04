@@ -2142,19 +2142,30 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
       // a constant value renders as the enum literal (e.g. `S1`),
       // not a raw integer literal. Drops out cleanly because the
       // const came from the matched cascade case-label.
-      const HWFSMInfo *Fsm = nullptr;
-      for (auto &FI : FSMs) {
-        if (FI.RegIndex == It->second) { Fsm = &FI; break; }
-      }
-      if (Fsm) {
+      // A function may have multiple FSM cascades on the same
+      // register; search all of them for the case-name that
+      // matches the constant assigned here. Without the broader
+      // search a wider FSM (e.g. 11-state UART RX) where the
+      // first matched cascade only captured a subset would
+      // render `state_next = 8'sd5` for cases the first cascade
+      // missed, but the typedef union (now aggregated across all
+      // cascades) HAS literal `S5` — and the case body also
+      // uses `S5`, so the assignment must too.
+      bool IsFSM = false;
+      for (auto &FI : FSMs)
+        if (FI.RegIndex == It->second) { IsFSM = true; break; }
+      if (IsFSM) {
         if (auto C = Val.getDefiningOp<mlir::arith::ConstantOp>()) {
           if (auto IA = mlir::dyn_cast<mlir::IntegerAttr>(C.getValue())) {
             int64_t V = IA.getInt();
-            for (size_t i = 0; i < Fsm->Cases.size(); ++i) {
-              if (Fsm->Cases[i].first == V) {
-                indent(Indent);
-                OS << P.Name << "_next = " << Fsm->CaseNames[i] << ";\n";
-                return;
+            for (auto &FI : FSMs) {
+              if (FI.RegIndex != It->second) continue;
+              for (size_t i = 0; i < FI.Cases.size(); ++i) {
+                if (FI.Cases[i].first == V) {
+                  indent(Indent);
+                  OS << P.Name << "_next = " << FI.CaseNames[i] << ";\n";
+                  return;
+                }
               }
             }
           }
@@ -3321,10 +3332,32 @@ void Emitter::emitFSMTypedefs() {
   // ...` after the state-transition cascade). Each is rendered as
   // its own `unique case`, but they share the underlying enum
   // type, so emit each typedef only once per register.
+  //
+  // Aggregate every distinct case value across ALL FSM cascades on
+  // the same register. The original code only walked the FIRST
+  // cascade's Info.Cases, so a wider FSM (e.g. UART RX with 11
+  // states) whose case-emission body found all 11 arms but whose
+  // first FSM-info struct only captured a subset would emit a
+  // typedef missing literals — the body then references undefined
+  // enum names like `S5`. Walking every FSM info per register
+  // ensures the typedef covers every case label the body emits.
   llvm::DenseSet<unsigned> Emitted;
-  for (auto &F : FSMs) {
-    if (!Emitted.insert(F.RegIndex).second) continue;
-    unsigned N = (unsigned)F.Cases.size();
+  for (auto &Head : FSMs) {
+    if (!Emitted.insert(Head.RegIndex).second) continue;
+    // Collect the union of (value, name) pairs from every FSM
+    // cascade on this register. Preserve first-seen order so the
+    // enum literal layout stays stable across runs.
+    llvm::SmallVector<std::pair<int64_t, std::string>, 16> Pairs;
+    llvm::SmallSet<int64_t, 16> Seen;
+    for (auto &F2 : FSMs) {
+      if (F2.RegIndex != Head.RegIndex) continue;
+      for (size_t i = 0; i < F2.Cases.size(); ++i) {
+        int64_t V = F2.Cases[i].first;
+        if (Seen.insert(V).second)
+          Pairs.push_back({V, F2.CaseNames[i]});
+      }
+    }
+    unsigned N = (unsigned)Pairs.size();
 
     // Compute encoded value per state and the underlying width.
     // - Binary  : sequential, width = ⌈log2(N)⌉ (≥1).
@@ -3351,14 +3384,14 @@ void Emitter::emitFSMTypedefs() {
     if (W > 1) OS << " [" << (W - 1) << ":0]";
     OS << " {";
     bool ExplicitVals = (FSMEnc != HWFSMEncoding::Binary);
-    for (unsigned i = 0; i < F.CaseNames.size(); ++i) {
+    for (unsigned i = 0; i < N; ++i) {
       if (i) OS << ", ";
-      OS << F.CaseNames[i];
+      OS << Pairs[i].second;
       if (ExplicitVals) {
         OS << " = " << W << "'d" << Values[i];
       }
     }
-    OS << "} " << F.EnumType << ";\n";
+    OS << "} " << Head.EnumType << ";\n";
   }
 }
 
