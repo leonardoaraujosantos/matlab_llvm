@@ -570,7 +570,8 @@ bool Emitter::isInlineable(mlir::Value V) {
       N == "matlab.eq" || N == "matlab.ne" ||
       N == "matlab.lt" || N == "matlab.le" ||
       N == "matlab.gt" || N == "matlab.ge" ||
-      N == "matlab.short_or" || N == "matlab.short_and")
+      N == "matlab.short_or" || N == "matlab.short_and" ||
+      N == "matlab.not")
     return true;
   // Plain LLVM scalar load of a slot — single-use loads inline as
   // the slot name (or `<arr>[<idx>]` for GEP-based loads). Keeps
@@ -875,6 +876,18 @@ std::string Emitter::renderInlineExpr(mlir::Operation *Op) {
       return "~" + exprFor(Op->getOperand(0));
     if (isAllOnesIntConst(Op->getOperand(0)))
       return "~" + exprFor(Op->getOperand(1));
+  }
+  // `matlab.not` is the unregistered op the frontend emits for
+  // logical/bitwise NOT (`~x` in MATLAB). Render as `!x` for i1
+  // (logical context) and `~x` for wider integers (bitwise).
+  // Use the rendered width (which traces persist-get f64 ABI back
+  // to the register's actual width) so a `~bool_reg` reads as
+  // `!bool_reg`, not the bitwise i64 form.
+  if (N == "matlab.not" && Op->getNumOperands() == 1) {
+    unsigned W = renderedWidthOf(Op->getOperand(0));
+    if (W == 0) W = widthOf(Op->getOperand(0).getType());
+    std::string Inner = exprFor(Op->getOperand(0));
+    return std::string(W == 1 ? "!" : "~") + Inner;
   }
   // Const-fold integer arithmetic on two integer constants. The
   // pipeline often leaves `(N - 1)` style 1-based-to-0-based index
@@ -2027,15 +2040,30 @@ void Emitter::emitGEP(mlir::LLVM::GEPOp G, int Indent) {
   // to the SV indexed-access expression `<arr>[<idx>]`. We don't
   // emit a statement for it — instead we record the address-string
   // in `GepAddr` so the consuming load/store renders the indexed
-  // access directly.
+  // access directly. Two layouts are supported:
+  //   - one dynamic index (the legacy shape from
+  //     LowerStaticFiArrays before greedy const-folding kicks in),
+  //     `<arr>[<expr>]`.
+  //   - all-constant indices (`%arr[0, 3]`), `<arr>[3]`. Greedy
+  //     pattern application post-Stage F can fold dynamic
+  //     constant SSA values into the GEP's static index list, so
+  //     we have to handle this case too.
   (void)Indent;
-  if (G.getDynamicIndices().empty()) return;  // unexpected shape
-  // Two indices total: the array's "outer" 0 (compile-time) plus
-  // the per-element index. Our static-array lowering only ever
-  // emits exactly that shape; bail otherwise.
-  if (G.getDynamicIndices().size() != 1) return;
   std::string Arr = name(G.getBase());
-  std::string Idx = exprFor(G.getDynamicIndices()[0]);
+  std::string Idx;
+  if (G.getDynamicIndices().size() == 1) {
+    Idx = exprFor(G.getDynamicIndices()[0]);
+  } else if (G.getDynamicIndices().empty()) {
+    // All-constant index path. The static array lowering always
+    // emits exactly two indices: the outer 0 (alloca deref) plus
+    // the element index. Read the element index from the GEP's
+    // raw indices attribute.
+    auto Raw = G.getRawConstantIndices();
+    if (Raw.size() != 2) return;
+    std::ostringstream S; S << Raw[1]; Idx = S.str();
+  } else {
+    return;
+  }
   std::string Expr = Arr + "[" + Idx + "]";
   GepAddr[G.getOperation()] = Expr;
 }
@@ -2323,6 +2351,19 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
     // canonical `(x > hi) || (x < lo)` overflow-check idiom.
     else if (OpName == "matlab.short_or") Sv = "||";
     else if (OpName == "matlab.short_and") Sv = "&&";
+    // Unary `matlab.not` — handle separately since it has one
+    // operand. Renders as `!x` for i1, `~x` for wider integers.
+    if (OpName == "matlab.not" && Op.getNumOperands() == 1 &&
+        Op.getNumResults() == 1) {
+      if (isInlineable(Op.getResult(0))) return;
+      indent(Indent);
+      unsigned W = renderedWidthOf(Op.getOperand(0));
+      if (W == 0) W = widthOf(Op.getOperand(0).getType());
+      OS << name(Op.getResult(0)) << " = "
+         << (W == 1 ? "!" : "~") << exprFor(Op.getOperand(0))
+         << ";\n";
+      return;
+    }
     if (!Sv.empty()) {
       if (Op.getNumOperands() != 2 || Op.getNumResults() != 1) {
         fail(("unsupported arity on " + OpName + " in SV emitter").str());

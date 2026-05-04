@@ -99,10 +99,10 @@ module fir_asic_pipelined (
         delay_line_1_next = 16'(delay_line_0);
         delay_line_2_next = 16'(delay_line_1);
         delay_line_3_next = 16'(delay_line_2);
-        reg_products_0_next = (32'(delay_line_0) * 32'($signed(h[32'sd0])));
-        reg_products_1_next = (32'(delay_line_1) * 32'($signed(h[32'sd1])));
-        reg_products_2_next = (32'(delay_line_2) * 32'($signed(h[32'sd2])));
-        reg_products_3_next = (32'(delay_line_3) * 32'($signed(h[32'sd3])));
+        reg_products_0_next = (32'(delay_line_0) * 32'($signed(h[0])));
+        reg_products_1_next = (32'(delay_line_1) * 32'($signed(h[1])));
+        reg_products_2_next = (32'(delay_line_2) * 32'($signed(h[2])));
+        reg_products_3_next = (32'(delay_line_3) * 32'($signed(h[3])));
         // --- ESTÁGIO 2: Acumulação (Soma) ---
         // O valor de 'acc' é guardado em um registrador para o próximo ciclo
         acc_temp = 64'sd0;

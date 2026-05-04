@@ -424,14 +424,33 @@ struct ScalarMatMulToMulf : public NameMatch {
     mlir::Value A = Op->getOperand(0);
     mlir::Value B = Op->getOperand(1);
     mlir::Type Ty = Op->getResult(0).getType();
-    if (A.getType() != Ty || B.getType() != Ty) return mlir::failure();
-    if (isScalarFloat(Ty)) {
-      R.replaceOpWithNewOp<mlir::arith::MulFOp>(Op, A, B);
-      return mlir::success();
+    // Original strict path: result type must already match both
+    // operands. Common after the user-call refinement loop.
+    if (A.getType() == Ty && B.getType() == Ty) {
+      if (isScalarFloat(Ty)) {
+        R.replaceOpWithNewOp<mlir::arith::MulFOp>(Op, A, B);
+        return mlir::success();
+      }
+      if (isScalarInt(Ty)) {
+        R.replaceOpWithNewOp<mlir::arith::MulIOp>(Op, A, B);
+        return mlir::success();
+      }
+      return mlir::failure();
     }
-    if (isScalarInt(Ty)) {
-      R.replaceOpWithNewOp<mlir::arith::MulIOp>(Op, A, B);
-      return mlir::success();
+    // Relaxed path: the result type may still be `none` (the
+    // frontend doesn't propagate result types for matlab.* ops);
+    // if both operands are the same scalar primitive type, use
+    // that as the result. Catches the common post-Stage-F shape
+    // where typed loads feed a still-`none`-typed matmul.
+    if (A.getType() == B.getType()) {
+      if (isScalarFloat(A.getType())) {
+        R.replaceOpWithNewOp<mlir::arith::MulFOp>(Op, A, B);
+        return mlir::success();
+      }
+      if (isScalarInt(A.getType())) {
+        R.replaceOpWithNewOp<mlir::arith::MulIOp>(Op, A, B);
+        return mlir::success();
+      }
     }
     return mlir::failure();
   }

@@ -7962,6 +7962,20 @@ int main(int Argc, char **Argv) {
           // signatures consistent before LowerScalarSlots
           // materializes the alloca.
           mlirgen::runRefineFuncSigs(M);
+          // Re-run a slot-type / scalar-lowering fixpoint after
+          // Stage F. Each iteration: refine slots from typed
+          // stores, run scalar lowering (which now sees newly-
+          // typed loads), refresh slots again. Without this
+          // interleave, `matlab.call_builtin @bitxor (i8, none)`
+          // stays a runtime call because the second operand's
+          // load was still `none`-typed during LSE2A's first
+          // pass. Bounded — convergence is usually 2 rounds.
+          for (int Iter = 0; Iter < 4; ++Iter) {
+            bool A = mlirgen::runLowerScalarsToArith(M);
+            bool B = mlirgen::runRefineSlotTypes(M);
+            if (!A && !B) break;
+          }
+          mlirgen::runRefineFuncSigs(M);
           mlirgen::runLowerScalarSlots(M);
           mlirgen::runMem2RegLite(M);
           if (getenv("DUMP_AFTER_F")) mlirgen::printModule(std::cerr, M);

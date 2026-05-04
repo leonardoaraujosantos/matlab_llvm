@@ -152,16 +152,98 @@ Each compiles, lints clean, and demonstrates a category:
 | `barrel_shifter` | `bitshift(x, K)` with constant K → `arith.shli` |
 | `cic_decimator` | Multi-stage CIC filter, downsample counter, sat at output |
 | `counter_0_to_10` | Persistent register with reset and modulo wraparound |
+| `crc8` | LFSR with XOR feedback into persistent state |
+| `edge_detector` | Single-FF + bool NOT (`matlab.not` rendering) |
 | `fir_asic_pipelined` | 3-stage pipelined FIR with persistent fi-arrays |
-| `hier_adder` (deferred) | Was meant to test hierarchical; gap remains |
 | `mealy_fsm` | 2-state Mealy with output dependence on input |
 | `moore_fsm` | 3-state Moore, output decode from state register |
 | `mux_4to_1_16bit` | Combinational case mux |
+| `popcount` | Bit-extraction via shift+mask, conditional accumulator |
+| `priority_encoder` | 8-input priority encoder via long if/elseif chain |
+| `pwm` | Counter + comparator output gating |
 | `regfile` | Multi-source persistent read (post type-unification fix) |
 | `sequential_processor` | MAC pipeline with explicit `acc(:)` pattern |
+| `sync_2ff` | Classic 2-FF clock domain crossing synchronizer |
 | `uart_rx` | 11-state FSM (post FSM-cascade aggregation fix) |
 | `up_down_counter` | Conditional persistent set with direction control |
 | `vector_processor` | Vector arg ports + dot-product + magnitude squared |
+
+## Source-side patterns that need restructuring
+
+These work in MATLAB but currently need to be rewritten before
+the SV backend accepts them:
+
+### `uint8(bool_value)` cast — runtime call, not synthesizable
+
+The frontend lowers `uint8(some_bool)` to a runtime call
+(`matlab_uint8_s`) which the SV backend can't unwind for runtime
+operands (only literal-constant casts get folded in
+`IntCastConstantFold`). Workaround: branch.
+
+```matlab
+% NOT supported:
+%   x_u8 = uint8(rx);   % rx is bool
+
+% Use a branch:
+x_u8 = uint8(0);
+if rx
+    x_u8 = uint8(1);
+end
+```
+
+The same applies to `int8(bool)`, `uint16(bool)`, etc.
+
+### Persistent-get + bitwise op chain — needs typed snapshot
+
+The runtime ABI's `matlab_global_get_f64` returns f64 regardless
+of the register's actual width. Bitwise lowering (`bitand`,
+`bitor`, `bitxor`, `bitshift`) requires both operands to share
+the same scalar integer type. Without a snapshot, the f64 from
+the get-call defeats the lowering.
+
+```matlab
+% NOT supported:
+%   msb = bitand(bitshift(crc_reg, -7), uint8(1));
+
+% Snapshot first to coerce to the register's i8 width:
+cur = crc_reg + uint8(0);
+msb = bitand(bitshift(cur, -7), uint8(1));
+```
+
+The `+ uint8(0)` is free at synthesis but anchors the SSA value
+at i8 (matlab.add propagates through the lowering).
+
+### Multi-source slot writes with mixed types
+
+When a slot is written from multiple branches with different IR
+result types (e.g. one branch produces an `arith` result, another
+a `matlab.call_builtin` result), the slot's type stays `none` and
+HW legalize rejects it. Workaround: pre-seed the slot with a
+single-source typed expression and use mutually-exclusive
+conditional adds.
+
+```matlab
+% Often fails:
+%   if cond
+%       y = bitxor(a, uint8(1));
+%   else
+%       y = a;
+%   end
+
+% Works:
+y_default = a;
+y_xor1 = bitxor(a, uint8(1));
+if cond
+    y = y_xor1;
+else
+    y = y_default;
+end
+```
+
+(In practice, hoisting BOTH branches to compute concrete-typed
+values at top-level avoids the conditional store mixing types.
+See `examples/hdl/crc8.m` for the additive-zero pattern that
+sidesteps this.)
 
 ## Workarounds for unsupported patterns
 
