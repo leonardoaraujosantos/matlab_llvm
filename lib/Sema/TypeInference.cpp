@@ -1096,9 +1096,14 @@ const Type *TypeInference::visitBuiltinCall(std::string_view Name,
   };
   if (Name == "double")  return castShape(Dtype::Double);
   if (Name == "single")  return castShape(Dtype::Single);
+  if (Name == "int8")    return TC.scalar(Dtype::Int8);
+  if (Name == "int16")   return TC.scalar(Dtype::Int16);
   if (Name == "int32")   return castShape(Dtype::Int32);
-  if (Name == "uint8")   return castShape(Dtype::UInt8);
   if (Name == "int64")   return TC.scalar(Dtype::Int64);
+  if (Name == "uint8")   return castShape(Dtype::UInt8);
+  if (Name == "uint16")  return TC.scalar(Dtype::UInt16);
+  if (Name == "uint32")  return TC.scalar(Dtype::UInt32);
+  if (Name == "uint64")  return TC.scalar(Dtype::UInt64);
   if (Name == "logical") return TC.scalar(Dtype::Logical);
   if (Name == "char")    return TC.arrayOf(Dtype::Char, Shape::unknown());
 

@@ -3159,6 +3159,41 @@ void Emitter::gatherFSMs(mlir::func::FuncOp F) {
 
     if (Info.Cases.size() < 2) return;  // not really a cascade
 
+    // FSM-vs-counter disambiguation. The persistent register might
+    // be a real FSM (every set assigns a const → enum literal) OR
+    // a counter that happens to have a single-switch-case access
+    // pattern (`head = head + 1` arithmetic updates outside the
+    // cascade). Walk every set site for the register and require
+    // each value to be either a literal constant or a register
+    // self-assignment (i.e. the cascade's reset/idle case). If any
+    // set site stores a non-constant arithmetic expression, the
+    // register is a counter and treating it as an FSM would
+    // produce invalid SV (`tail_next = tail + 8'sd1` against an
+    // enum-typed signal). FIFO and similar register-with-pointer
+    // designs rely on this.
+    {
+      auto &P = Persists[RegIdx];
+      bool HasArith = false;
+      for (mlir::Operation *Set : P.Sets) {
+        if (Set->getNumOperands() < 2) continue;
+        mlir::Value Val = Set->getOperand(1);
+        auto *VOp = Val.getDefiningOp();
+        if (!VOp) continue;
+        // Constant: OK (case-arm assignment).
+        if (mlir::isa<mlir::arith::ConstantOp,
+                      mlir::LLVM::ConstantOp>(VOp))
+          continue;
+        // Recognize self-get (e.g. `r0 = r0;` in the no-op
+        // default arm) — the source's `name = name` pattern.
+        auto It = GetSiteToReg.find(VOp);
+        if (It != GetSiteToReg.end() && It->second == RegIdx)
+          continue;
+        HasArith = true;
+        break;
+      }
+      if (HasArith) return;  // counter, not FSM
+    }
+
     // Phase 4 v2.3 — ambiguity diagnostics. Three checks, each
     // with low false-positive rate and high real-bug rate.
     //
@@ -3215,13 +3250,28 @@ void Emitter::gatherFSMs(mlir::func::FuncOp F) {
       }
     }
 
-    // Generate enum-literal names. v1 uses S0/S1/.../SN based on the
-    // order constants appear; the case constants are remembered so we
-    // can map the persistent's reset value to the right name.
+    // Generate enum-literal names. Default to the short `S<N>`
+    // form for single-FSM modules; switch to the prefixed form
+    // `<reg>_S<N>` when another FSM has already been gathered in
+    // this function (their literal-name scopes would otherwise
+    // collide). The first FSM seen in a function always wins the
+    // short form; subsequent FSMs that share an enum scope use
+    // the prefixed form. SystemVerilog enum literals live in a
+    // single module-scope namespace, so this prevents the
+    // multi-FSM clash without bloating the common single-FSM
+    // case.
     auto &P = Persists[Info.RegIndex];
     Info.EnumType = P.Name + "_t";
+    bool NeedPrefix = false;
+    for (const auto &Other : FSMs) {
+      if (Other.RegIndex != Info.RegIndex) {
+        NeedPrefix = true;
+        break;
+      }
+    }
+    std::string Prefix = NeedPrefix ? (P.Name + "_S") : "S";
     for (auto &[Val, Region] : Info.Cases) {
-      Info.CaseNames.push_back("S" + std::to_string(Val));
+      Info.CaseNames.push_back(Prefix + std::to_string(Val));
     }
     // If the default region exists but no case matched the reset
     // value, add a synthetic enum literal for the reset state too —
@@ -3240,9 +3290,9 @@ void Emitter::gatherFSMs(mlir::func::FuncOp F) {
     if (!Found) {
       Info.Cases.insert(Info.Cases.begin(), {ResetVal, nullptr});
       Info.CaseNames.insert(Info.CaseNames.begin(),
-                            "S" + std::to_string(ResetVal));
+                            Prefix + std::to_string(ResetVal));
     }
-    Info.ResetName = "S" + std::to_string(ResetVal);
+    Info.ResetName = Prefix + std::to_string(ResetVal);
 
     unsigned Idx = (unsigned)FSMs.size();
     CascadeOp[Info.Head] = Idx;

@@ -149,14 +149,19 @@ Each compiles, lints clean, and demonstrates a category:
 | Module | Demonstrates |
 |---|---|
 | `alu_16bit` | Combinational arithmetic + bitwise ops + signed overflow |
+| `axi_handshake` | AXI-Stream-style register slice (valid/ready handshake) |
 | `barrel_shifter` | `bitshift(x, K)` with constant K → `arith.shli` |
 | `cic_decimator` | Multi-stage CIC filter, downsample counter, sat at output |
 | `counter_0_to_10` | Persistent register with reset and modulo wraparound |
 | `crc8` | LFSR with XOR feedback into persistent state |
 | `edge_detector` | Single-FF + bool NOT (`matlab.not` rendering) |
+| `fifo` | 4-deep synchronous FIFO with full/empty + counter pointers |
 | `fir_asic_pipelined` | 3-stage pipelined FIR with persistent fi-arrays |
+| `hamming74` | Hamming(7,4) parity-XOR network + bit-pack output |
+| `leading_zero_detector` | 16-input LZD via reverse-priority chain |
 | `mealy_fsm` | 2-state Mealy with output dependence on input |
 | `moore_fsm` | 3-state Moore, output decode from state register |
+| `multi_cycle_mul` | 16x8 shift-add multiplier with 3-state FSM |
 | `mux_4to_1_16bit` | Combinational case mux |
 | `popcount` | Bit-extraction via shift+mask, conditional accumulator |
 | `priority_encoder` | 8-input priority encoder via long if/elseif chain |

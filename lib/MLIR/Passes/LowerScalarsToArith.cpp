@@ -142,15 +142,35 @@ struct IntCastConstantFold : public NameMatch {
     else return mlir::failure();
     if (Op->getNumOperands() != 1 || Op->getNumResults() != 1)
       return mlir::failure();
-    auto CstOp = Op->getOperand(0).getDefiningOp<mlir::arith::ConstantOp>();
+    // Accept arith.constant or any frontend constant op carrying a
+    // `value` attribute (matlab.const_int, matlab.const_real, the
+    // unregistered uint*-cast leaves the original frontend
+    // constant intact). Without this, `uint16(0)` fed by a
+    // `matlab.const_real 0.0` would survive as a runtime call
+    // because the operand isn't an arith.constant — only `uint8`
+    // happens to fold today, so multi-cycle multiplier-style
+    // designs that need wider casts trip on un-typed adds.
+    mlir::Operation *CstOp = Op->getOperand(0).getDefiningOp();
     if (!CstOp) return mlir::failure();
     int64_t Val;
-    if (auto IA = mlir::dyn_cast<mlir::IntegerAttr>(CstOp.getValue()))
-      Val = IA.getInt();
-    else if (auto FA = mlir::dyn_cast<mlir::FloatAttr>(CstOp.getValue()))
-      Val = (int64_t)FA.getValueAsDouble();
-    else
-      return mlir::failure();
+    bool Got = false;
+    if (auto AC = mlir::dyn_cast<mlir::arith::ConstantOp>(CstOp)) {
+      if (auto IA = mlir::dyn_cast<mlir::IntegerAttr>(AC.getValue())) {
+        Val = IA.getInt(); Got = true;
+      } else if (auto FA = mlir::dyn_cast<mlir::FloatAttr>(AC.getValue())) {
+        Val = (int64_t)FA.getValueAsDouble(); Got = true;
+      }
+    }
+    if (!Got) {
+      // Frontend const op with a `value` attribute (matlab.const_int,
+      // matlab.const_real). Read directly from the attribute.
+      if (auto IA = CstOp->getAttrOfType<mlir::IntegerAttr>("value")) {
+        Val = IA.getInt(); Got = true;
+      } else if (auto FA = CstOp->getAttrOfType<mlir::FloatAttr>("value")) {
+        Val = (int64_t)FA.getValueAsDouble(); Got = true;
+      }
+    }
+    if (!Got) return mlir::failure();
     // Saturate to the target width — matches the runtime helpers
     // (matlab_int8_s / matlab_uint8_s / ...), which clamp rather than
     // wrap. uint8(-5) is 0, uint8(300) is 255, int8(200) is 127.
