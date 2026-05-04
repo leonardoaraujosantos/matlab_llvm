@@ -3562,6 +3562,177 @@ export function ode23s_v_stats_opts(f: OdeRhsV, tspan: any, y0: any, opts: any) 
   return _odeVStats();
 }
 
+// --- ode_events — IVP solver with event detection -------------------------
+// v1: scalar y, single event. Event function returns 3-vector
+// [value; isterminal; direction]. Bisection on Hermite-interpolated
+// state between accepted RK45 steps.
+
+type OdeEvtFn = (t: number, y: number) => any;
+
+let _odeEventsCache: { key: string; T: NDArray; Y: NDArray;
+                        TE: NDArray; YE: NDArray; IE: NDArray } | null = null;
+
+function _odeEvtArr(r: any): Float64Array {
+  if (r == null) return new Float64Array(0);
+  if (r.data instanceof Float64Array) return r.data;
+  if (r instanceof Float64Array) return r;
+  return Float64Array.from(r);
+}
+
+function _odeEvtEval(evt: OdeEvtFn, t: number, y: number)
+    : { v: number; term: number; dir: number } {
+  const r = _odeEvtArr(evt(t, y));
+  if (r.length < 1) return { v: 0, term: 0, dir: 0 };
+  return {
+    v: +r[0],
+    term: r.length >= 2 ? +r[1] | 0 : 0,
+    dir:  r.length >= 3 ? +r[2] | 0 : 0,
+  };
+}
+
+function _odeEvtBisect(evt: OdeEvtFn, t: number, h: number,
+                       y: number, yNew: number, k1: number, k7: number,
+                       v0: number): number {
+  let lo = 0, hi = 1;
+  let vlo = v0;
+  for (let it = 0; it < 50; it++) {
+    const mid = 0.5 * (lo + hi);
+    const yMid = _odeHermite(y, yNew, k1, k7, h, mid);
+    const { v } = _odeEvtEval(evt, t + mid * h, yMid);
+    if (Math.abs(v) < 1e-12 || (hi - lo) < 1e-15) return mid;
+    if ((vlo < 0 && v > 0) || (vlo > 0 && v < 0)) {
+      hi = mid;
+    } else {
+      lo = mid; vlo = v;
+    }
+  }
+  return 0.5 * (lo + hi);
+}
+
+function _rkSolveDp45Events(f: OdeRhs, evt: OdeEvtFn, targets: number[],
+                             y0: number, rtol = 1e-3, atol = 1e-6,
+                             maxStep = 0, initStep = 0, refine = 4)
+    : { T: number[]; Y: number[]; TE: number[]; YE: number[]; IE: number[] } {
+  const nT = targets.length;
+  if (nT < 2) return { T: [], Y: [], TE: [], YE: [], IE: [] };
+  if (refine < 1) refine = 1;
+  const t0 = +targets[0], tf = +targets[nT - 1];
+  const userGrid = nT > 2;
+  const T: number[] = [t0]; const Y: number[] = [y0];
+  let nextTgt = 1;
+  const TE: number[] = []; const YE: number[] = []; const IE: number[] = [];
+  let y = y0; let t = t0;
+  const span = tf - t0;
+  let h = initStep > 0 ? (span >= 0 ? initStep : -initStep) : span * 0.01;
+  if (h === 0 || span === 0) return { T, Y, TE, YE, IE };
+  const forward = h > 0;
+  if (maxStep > 0) { if (h > maxStep) h = maxStep; if (h < -maxStep) h = -maxStep; }
+  let k1 = f(t, y);
+  let { v: vPrev } = _odeEvtEval(evt, t, y);
+  let steps = 0; const maxSteps = 100000;
+  let halted = false;
+  while ((forward ? t < tf : t > tf) && steps < maxSteps && !halted) {
+    steps++;
+    if (forward ? (t + h > tf) : (t + h < tf)) h = tf - t;
+    const k2 = f(t + h*(1/5),  y + h*(k1*(1/5)));
+    const k3 = f(t + h*(3/10), y + h*(k1*(3/40) + k2*(9/40)));
+    const k4 = f(t + h*(4/5),  y + h*(k1*(44/45) - k2*(56/15) + k3*(32/9)));
+    const k5 = f(t + h*(8/9),  y + h*(k1*(19372/6561) - k2*(25360/2187)
+                                       + k3*(64448/6561) - k4*(212/729)));
+    const k6 = f(t + h,        y + h*(k1*(9017/3168) - k2*(355/33)
+                                       + k3*(46732/5247) + k4*(49/176)
+                                       - k5*(5103/18656)));
+    const y5 = y + h*(k1*(35/384) + k3*(500/1113) + k4*(125/192)
+                      - k5*(2187/6784) + k6*(11/84));
+    const k7 = f(t + h, y5);
+    const err = h*(k1*(71/57600) - k3*(71/16695) + k4*(71/1920)
+                   - k5*(17253/339200) + k6*(22/525) - k7*(1/40));
+    const ay = Math.abs(y), ay5 = Math.abs(y5);
+    const scale = atol + rtol * (ay > ay5 ? ay : ay5);
+    const normerr = scale > 0 ? Math.abs(err) / scale : 0;
+    if (normerr <= 1) {
+      const { v: vNew, term: termNew, dir: dirSet } = _odeEvtEval(evt, t + h, y5);
+      let crossed = false;
+      if (vPrev * vNew < 0) {
+        const rising = (vNew > vPrev);
+        if (dirSet === 0) crossed = true;
+        else if (dirSet > 0 && rising) crossed = true;
+        else if (dirSet < 0 && !rising) crossed = true;
+      }
+      if (crossed) {
+        const thStar = _odeEvtBisect(evt, t, h, y, y5, k1, k7, vPrev);
+        const te = t + thStar * h;
+        const ye = _odeHermite(y, y5, k1, k7, h, thStar);
+        TE.push(te); YE.push(ye); IE.push(1);
+        if (termNew) {
+          T.push(te); Y.push(ye);
+          halted = true;
+          break;
+        }
+      }
+      vPrev = vNew;
+      if (userGrid) {
+        while (nextTgt < nT) {
+          const tt = +targets[nextTgt];
+          const inRange = forward ? (tt <= t + h) : (tt >= t + h);
+          if (!inRange) break;
+          const th = h === 0 ? 0 : (tt - t) / h;
+          const yi = nextTgt === nT - 1 ? y5 : _odeHermite(y, y5, k1, k7, h, th);
+          T.push(tt); Y.push(yi); nextTgt++;
+        }
+      } else {
+        for (let j = 1; j <= refine; j++) {
+          const th = j / refine;
+          const ti = t + h * th;
+          const yi = j === refine ? y5 : _odeHermite(y, y5, k1, k7, h, th);
+          T.push(ti); Y.push(yi);
+        }
+      }
+      t += h; y = y5; k1 = k7;
+      if (userGrid && nextTgt >= nT) break;
+    }
+    let fac = normerr === 0 ? 5 : 0.9 * Math.pow(normerr, -1/5);
+    if (fac < 0.2) fac = 0.2;
+    if (fac > 5)   fac = 5;
+    h *= fac;
+    if (maxStep > 0) { if (h > maxStep) h = maxStep; if (h < -maxStep) h = -maxStep; }
+  }
+  return { T, Y, TE, YE, IE };
+}
+
+function _odeEventsCompute(f: OdeRhs, evt: OdeEvtFn, tspan: any, y0: number): void {
+  const ts = asArray(tspan).data;
+  const targets: number[] = Array.from(ts);
+  const key = `${(f as any).name ?? ""}|${(evt as any).name ?? ""}|${targets.join(",")}|${y0}`;
+  if (_odeEventsCache && _odeEventsCache.key === key) return;
+  const r = _rkSolveDp45Events(f, evt, targets, +y0);
+  _odeEventsCache = {
+    key,
+    T:  new NDArray(new Float64Array(r.T),  [r.T.length, 1]),
+    Y:  new NDArray(new Float64Array(r.Y),  [r.Y.length, 1]),
+    TE: new NDArray(new Float64Array(r.TE), [r.TE.length, 1]),
+    YE: new NDArray(new Float64Array(r.YE), [r.YE.length, 1]),
+    IE: new NDArray(new Float64Array(r.IE), [r.IE.length, 1]),
+  };
+}
+
+export function ode_events_t (f: OdeRhs, tspan: any, y0: number, evt: OdeEvtFn): NDArray {
+  _odeEventsCompute(f, evt, tspan, +y0); return _cloneCol(_odeEventsCache!.T);
+}
+export function ode_events_y (f: OdeRhs, tspan: any, y0: number, evt: OdeEvtFn): NDArray {
+  _odeEventsCompute(f, evt, tspan, +y0); return _cloneCol(_odeEventsCache!.Y);
+}
+export function ode_events_te(f: OdeRhs, tspan: any, y0: number, evt: OdeEvtFn): NDArray {
+  _odeEventsCompute(f, evt, tspan, +y0); return _cloneCol(_odeEventsCache!.TE);
+}
+export function ode_events_ye(f: OdeRhs, tspan: any, y0: number, evt: OdeEvtFn): NDArray {
+  _odeEventsCompute(f, evt, tspan, +y0); return _cloneCol(_odeEventsCache!.YE);
+}
+export function ode_events_ie(f: OdeRhs, tspan: any, y0: number, evt: OdeEvtFn): NDArray {
+  _odeEventsCompute(f, evt, tspan, +y0); return _cloneCol(_odeEventsCache!.IE);
+}
+
+
 // --- pdepe — 1-D parabolic-elliptic PDE via method-of-lines ---------------
 // v1: m=0 (Cartesian), scalar PDE, Dirichlet BCs. Spatial discretisation
 // on the user xmesh + ode23s_v under the hood.

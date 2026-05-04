@@ -8474,4 +8474,338 @@ matlab_mat *matlab_pdepe(double m, void *pdefn_p, void *icfn_p, void *bcfn_p,
     return sol;
 }
 
+/* =====================================================================
+ * ode_events — IVP solver with event detection.
+ *
+ * Compromise API: `[t, y, te, ye, ie] = ode_events(@f, tspan, y0, @evt)`.
+ * Non-MATLAB syntax (MATLAB's canonical form is
+ * `ode45(@f, tspan, y0, odeset('Events', @evt))`); the explicit @evt
+ * argument avoids the function-handle-in-struct ABI question.
+ *
+ * v1 scope:
+ *   - Scalar y only (vector y is the natural follow-up).
+ *   - Single event, returned as a 3×1 column [value; isterminal; direction].
+ *   - direction = 0  → fire on any sign change (default for most users)
+ *   - direction = +1 → fire only on rising crossings
+ *   - direction = -1 → fire only on falling crossings
+ *   - Cubic-Hermite dense output between accepted RK45 steps.
+ *   - Bisection root-finder (50 iterations, |v| < 1e-12 stop).
+ *
+ * The 5-result dispatch in LowerTensorOps wires this to runtime entries
+ * matlab_ode_events_{t,y,te,ye,ie} sharing a thread-local cache.
+ * ===================================================================== */
+typedef matlab_mat *(*ode_evt_t)(double t, double y);
+
+struct ode_events_cache_slot {
+    void *fp;
+    void *evt;
+    matlab_mat *tspan;
+    double y0;
+    matlab_mat *t;
+    matlab_mat *y;
+    matlab_mat *te;
+    matlab_mat *ye;
+    matlab_mat *ie;
+    int valid;
+};
+
+#if defined(__GNUC__) || defined(__clang__)
+__thread struct ode_events_cache_slot ode_events_cache_;
+#else
+struct ode_events_cache_slot ode_events_cache_;
+#endif
+
+static int ode_evt_eval(ode_evt_t evt, double t, double y,
+                         double *value, int *isterminal, int *direction) {
+    matlab_mat *r = evt(t, y);
+    if (!r || r->rows * r->cols < 1) {
+        if (r) mat_free_(r);
+        *value = 0.0; *isterminal = 0; *direction = 0;
+        return 1;
+    }
+    int64_t nd = r->rows * r->cols;
+    *value      = r->data[0];
+    *isterminal = (nd >= 2) ? (int)r->data[1] : 0;
+    *direction  = (nd >= 3) ? (int)r->data[2] : 0;
+    mat_free_(r);
+    return 0;
+}
+
+static double ode_evt_bisect(ode_evt_t evt, double t, double h,
+                              double y, double y_new, double k1, double k7,
+                              double v0, double v1) {
+    (void)v1;
+    double lo = 0.0, hi = 1.0;
+    double vlo = v0;
+    for (int it = 0; it < 50; ++it) {
+        double mid = 0.5 * (lo + hi);
+        double y_mid = ode_hermite(y, y_new, k1, k7, h, mid);
+        double v; int term, dir;
+        if (ode_evt_eval(evt, t + mid * h, y_mid, &v, &term, &dir) != 0) return mid;
+        if (fabs(v) < 1e-12 || (hi - lo) < 1e-15) return mid;
+        if ((vlo < 0.0 && v > 0.0) || (vlo > 0.0 && v < 0.0)) {
+            hi = mid;
+        } else {
+            lo = mid; vlo = v;
+        }
+    }
+    return 0.5 * (lo + hi);
+}
+
+static void rk_solve_dp45_events(ode_rhs_t f, ode_evt_t evt,
+                                  const double *targets, int64_t n_targets,
+                                  double y0,
+                                  double rtol, double atol,
+                                  double max_step, double init_step,
+                                  int refine,
+                                  double **T, double **Y, int64_t *N,
+                                  double **TE, double **YE, int **IE,
+                                  int64_t *NE) {
+    const int max_steps = 100000;
+    if (refine < 1) refine = 1;
+    if (n_targets < 2) {
+        *T = NULL; *Y = NULL; *N = 0;
+        *TE = NULL; *YE = NULL; *IE = NULL; *NE = 0;
+        return;
+    }
+    double t0 = targets[0], tf = targets[n_targets - 1];
+    int user_grid = (n_targets > 2);
+    int64_t cap = user_grid ? n_targets : 256;
+    double *Tb = (double *)malloc((size_t)cap * sizeof(double));
+    double *Yb = (double *)malloc((size_t)cap * sizeof(double));
+    int64_t n = 0;
+    int64_t ev_cap = 16;
+    double *TEb = (double *)malloc((size_t)ev_cap * sizeof(double));
+    double *YEb = (double *)malloc((size_t)ev_cap * sizeof(double));
+    int    *IEb = (int *)   malloc((size_t)ev_cap * sizeof(int));
+    int64_t ne = 0;
+
+    double t = t0, y = y0;
+    ode_push(&Tb, &Yb, &n, &cap, t, y);
+    int64_t next_tgt = 1;
+
+    double span = tf - t0;
+    double h = (init_step > 0.0) ? (span >= 0.0 ? init_step : -init_step)
+                                 : span * 0.01;
+    if (h == 0.0 || span == 0.0) {
+        *T = Tb; *Y = Yb; *N = n;
+        *TE = TEb; *YE = YEb; *IE = IEb; *NE = ne;
+        return;
+    }
+    int forward = h > 0;
+    if (max_step > 0.0) {
+        if (h >  max_step) h =  max_step;
+        if (h < -max_step) h = -max_step;
+    }
+
+    double k1 = f(t, y);
+    double v_prev; int term_prev, dir_prev;
+    ode_evt_eval(evt, t, y, &v_prev, &term_prev, &dir_prev);
+
+    int steps = 0;
+    int halted = 0;
+    while ((forward ? t < tf : t > tf) && steps < max_steps && !halted) {
+        ++steps;
+        if (forward ? (t + h > tf) : (t + h < tf)) h = tf - t;
+
+        double k2 = f(t + h * (1.0/5.0),
+                      y + h * (k1 * (1.0/5.0)));
+        double k3 = f(t + h * (3.0/10.0),
+                      y + h * (k1 * (3.0/40.0) + k2 * (9.0/40.0)));
+        double k4 = f(t + h * (4.0/5.0),
+                      y + h * (k1 * (44.0/45.0) - k2 * (56.0/15.0)
+                              + k3 * (32.0/9.0)));
+        double k5 = f(t + h * (8.0/9.0),
+                      y + h * (k1 * (19372.0/6561.0)
+                              - k2 * (25360.0/2187.0)
+                              + k3 * (64448.0/6561.0)
+                              - k4 * (212.0/729.0)));
+        double k6 = f(t + h,
+                      y + h * (k1 * (9017.0/3168.0)
+                              - k2 * (355.0/33.0)
+                              + k3 * (46732.0/5247.0)
+                              + k4 * (49.0/176.0)
+                              - k5 * (5103.0/18656.0)));
+        double y5 = y + h * (k1 * (35.0/384.0)
+                            + k3 * (500.0/1113.0)
+                            + k4 * (125.0/192.0)
+                            - k5 * (2187.0/6784.0)
+                            + k6 * (11.0/84.0));
+        double k7 = f(t + h, y5);
+        double err = h * (k1 * (71.0/57600.0)
+                         - k3 * (71.0/16695.0)
+                         + k4 * (71.0/1920.0)
+                         - k5 * (17253.0/339200.0)
+                         + k6 * (22.0/525.0)
+                         - k7 * (1.0/40.0));
+        double scale = atol + rtol * fmax(fabs(y), fabs(y5));
+        double normerr = (scale > 0) ? fabs(err) / scale : 0.0;
+
+        if (normerr <= 1.0) {
+            double v_new; int term_new, dir_setting;
+            ode_evt_eval(evt, t + h, y5, &v_new, &term_new, &dir_setting);
+            int crossed = 0;
+            if (v_prev * v_new < 0.0) {
+                int rising = (v_new > v_prev);
+                if (dir_setting == 0) crossed = 1;
+                else if (dir_setting > 0 && rising) crossed = 1;
+                else if (dir_setting < 0 && !rising) crossed = 1;
+            }
+            if (crossed) {
+                double th_star = ode_evt_bisect(evt, t, h, y, y5, k1, k7,
+                                                 v_prev, v_new);
+                double te = t + th_star * h;
+                double ye = ode_hermite(y, y5, k1, k7, h, th_star);
+                if (ne == ev_cap) {
+                    ev_cap *= 2;
+                    TEb = (double *)realloc(TEb, (size_t)ev_cap * sizeof(double));
+                    YEb = (double *)realloc(YEb, (size_t)ev_cap * sizeof(double));
+                    IEb = (int *)   realloc(IEb, (size_t)ev_cap * sizeof(int));
+                }
+                TEb[ne] = te;
+                YEb[ne] = ye;
+                IEb[ne] = 1;
+                ++ne;
+                if (term_new) {
+                    ode_push(&Tb, &Yb, &n, &cap, te, ye);
+                    halted = 1;
+                    break;
+                }
+            }
+            v_prev = v_new;
+
+            if (user_grid) {
+                while (next_tgt < n_targets) {
+                    double tt = targets[next_tgt];
+                    int in_range = forward ? (tt <= t + h) : (tt >= t + h);
+                    if (!in_range) break;
+                    double th = (h == 0.0) ? 0.0 : (tt - t) / h;
+                    double yi = (next_tgt == n_targets - 1)
+                        ? y5
+                        : ode_hermite(y, y5, k1, k7, h, th);
+                    ode_push(&Tb, &Yb, &n, &cap, tt, yi);
+                    ++next_tgt;
+                }
+            } else {
+                for (int j = 1; j <= refine; ++j) {
+                    double th = (double)j / (double)refine;
+                    double ti = t + h * th;
+                    double yi = (j == refine)
+                        ? y5
+                        : ode_hermite(y, y5, k1, k7, h, th);
+                    ode_push(&Tb, &Yb, &n, &cap, ti, yi);
+                }
+            }
+            t += h;
+            y  = y5;
+            k1 = k7;
+            if (user_grid && next_tgt >= n_targets) break;
+        }
+
+        double fac = (normerr == 0.0) ? 5.0
+                                      : 0.9 * pow(normerr, -1.0/5.0);
+        if (fac < 0.2) fac = 0.2;
+        if (fac > 5.0) fac = 5.0;
+        h *= fac;
+        if (max_step > 0.0) {
+            if (h >  max_step) h =  max_step;
+            if (h < -max_step) h = -max_step;
+        }
+    }
+
+    *T = Tb; *Y = Yb; *N = n;
+    *TE = TEb; *YE = YEb; *IE = IEb; *NE = ne;
+}
+
+static void ode_events_compute(ode_rhs_t f, ode_evt_t evt,
+                                matlab_mat *tspan, double y0) {
+    if (ode_events_cache_.valid &&
+        ode_events_cache_.fp == (void *)f &&
+        ode_events_cache_.evt == (void *)evt &&
+        ode_events_cache_.tspan == tspan &&
+        ode_events_cache_.y0 == y0) {
+        return;
+    }
+    if (ode_events_cache_.valid) {
+        if (ode_events_cache_.t)  { free(ode_events_cache_.t->data);  free(ode_events_cache_.t);  }
+        if (ode_events_cache_.y)  { free(ode_events_cache_.y->data);  free(ode_events_cache_.y);  }
+        if (ode_events_cache_.te) { free(ode_events_cache_.te->data); free(ode_events_cache_.te); }
+        if (ode_events_cache_.ye) { free(ode_events_cache_.ye->data); free(ode_events_cache_.ye); }
+        if (ode_events_cache_.ie) { free(ode_events_cache_.ie->data); free(ode_events_cache_.ie); }
+        ode_events_cache_.t = ode_events_cache_.y = NULL;
+        ode_events_cache_.te = ode_events_cache_.ye = ode_events_cache_.ie = NULL;
+        ode_events_cache_.valid = 0;
+    }
+    int64_t n_tgt = tspan ? tspan->rows * tspan->cols : 0;
+    if (!f || !evt || n_tgt < 2 || !tspan->data) {
+        ode_events_cache_.t  = mat_alloc(0, 1);
+        ode_events_cache_.y  = mat_alloc(0, 1);
+        ode_events_cache_.te = mat_alloc(0, 1);
+        ode_events_cache_.ye = mat_alloc(0, 1);
+        ode_events_cache_.ie = mat_alloc(0, 1);
+    } else {
+        double *Tb = NULL, *Yb = NULL;
+        double *TEb = NULL, *YEb = NULL;
+        int    *IEb = NULL;
+        int64_t n = 0, ne = 0;
+        rk_solve_dp45_events(f, evt, tspan->data, n_tgt, y0,
+                              1e-3, 1e-6, 0.0, 0.0, 4,
+                              &Tb, &Yb, &n, &TEb, &YEb, &IEb, &ne);
+        ode_buffers_to_mats(Tb, Yb, n, &ode_events_cache_.t,
+                             &ode_events_cache_.y);
+        free(Tb); free(Yb);
+        matlab_mat *Te = mat_alloc(ne, 1);
+        matlab_mat *Ye = mat_alloc(ne, 1);
+        matlab_mat *Ie = mat_alloc(ne, 1);
+        if (ne > 0) {
+            memcpy(Te->data, TEb, (size_t)ne * sizeof(double));
+            memcpy(Ye->data, YEb, (size_t)ne * sizeof(double));
+            for (int64_t k = 0; k < ne; ++k) Ie->data[k] = (double)IEb[k];
+        }
+        ode_events_cache_.te = Te;
+        ode_events_cache_.ye = Ye;
+        ode_events_cache_.ie = Ie;
+        free(TEb); free(YEb); free(IEb);
+    }
+    ode_events_cache_.fp    = (void *)f;
+    ode_events_cache_.evt   = (void *)evt;
+    ode_events_cache_.tspan = tspan;
+    ode_events_cache_.y0    = y0;
+    ode_events_cache_.valid = 1;
+}
+
+static matlab_mat *mat_clone_col_e(matlab_mat *src) {
+    if (!src) return mat_alloc(0, 1);
+    matlab_mat *out = mat_alloc(src->rows, src->cols);
+    int64_t n = src->rows * src->cols;
+    if (n > 0) memcpy(out->data, src->data, (size_t)n * sizeof(double));
+    return out;
+}
+
+matlab_mat *matlab_ode_events_t(ode_rhs_t f, matlab_mat *tspan,
+                                 double y0, void *evt_p) {
+    ode_events_compute(f, (ode_evt_t)evt_p, tspan, y0);
+    return mat_clone_col_e(ode_events_cache_.t);
+}
+matlab_mat *matlab_ode_events_y(ode_rhs_t f, matlab_mat *tspan,
+                                 double y0, void *evt_p) {
+    ode_events_compute(f, (ode_evt_t)evt_p, tspan, y0);
+    return mat_clone_col_e(ode_events_cache_.y);
+}
+matlab_mat *matlab_ode_events_te(ode_rhs_t f, matlab_mat *tspan,
+                                  double y0, void *evt_p) {
+    ode_events_compute(f, (ode_evt_t)evt_p, tspan, y0);
+    return mat_clone_col_e(ode_events_cache_.te);
+}
+matlab_mat *matlab_ode_events_ye(ode_rhs_t f, matlab_mat *tspan,
+                                  double y0, void *evt_p) {
+    ode_events_compute(f, (ode_evt_t)evt_p, tspan, y0);
+    return mat_clone_col_e(ode_events_cache_.ye);
+}
+matlab_mat *matlab_ode_events_ie(ode_rhs_t f, matlab_mat *tspan,
+                                  double y0, void *evt_p) {
+    ode_events_compute(f, (ode_evt_t)evt_p, tspan, y0);
+    return mat_clone_col_e(ode_events_cache_.ie);
+}
+
 } /* extern "C" */

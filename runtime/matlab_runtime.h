@@ -262,6 +262,22 @@ matlab_struct *matlab_ode23s_v_stats(matlab_ode_rhs_v f, matlab_mat *tspan,
 matlab_struct *matlab_ode23s_v_stats_opts(matlab_ode_rhs_v f, matlab_mat *tspan,
                                             matlab_mat *y0, matlab_struct *opts);
 
+/* ode_events — IVP solver with event detection. v1: scalar y, single
+ * event. The event function returns a 3×1 column [value; isterminal;
+ * direction]. The 5-result form is split by the lowering pass into
+ * five paired runtime calls (matlab_ode_events_{t,y,te,ye,ie}) sharing
+ * a thread-local cache. */
+matlab_mat *matlab_ode_events_t (matlab_ode_rhs f, matlab_mat *tspan,
+                                  double y0, void *evt);
+matlab_mat *matlab_ode_events_y (matlab_ode_rhs f, matlab_mat *tspan,
+                                  double y0, void *evt);
+matlab_mat *matlab_ode_events_te(matlab_ode_rhs f, matlab_mat *tspan,
+                                  double y0, void *evt);
+matlab_mat *matlab_ode_events_ye(matlab_ode_rhs f, matlab_mat *tspan,
+                                  double y0, void *evt);
+matlab_mat *matlab_ode_events_ie(matlab_ode_rhs f, matlab_mat *tspan,
+                                  double y0, void *evt);
+
 /* pdepe — 1-D parabolic-elliptic PDE solver via method-of-lines.
  *   sol = pdepe(m, @pdefun, @icfun, @bcfun, xmesh, tspan)
  *

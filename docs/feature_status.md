@@ -230,7 +230,8 @@ See [`docs/ode.md`](ode.md) for the full surface, ABI notes, and call shapes.
 | User-time grid (`tspan = [t0 t1 … tN]`, N > 2) | ✅ | Output at exactly the supplied times via Hermite; `Refine` ignored in this mode. |
 | 3-return form `[t, y, stats] = ode45(...)` | ✅ | `stats` is a struct with `nsteps` / `nfailed` / `nfevals`. |
 | `odeset` fields: `RelTol`, `AbsTol`, `MaxStep`, `InitialStep`, `Refine`, `Stats` | ✅ | `Stats = 1` numeric flag (deviates from MATLAB's `'on'` string — see [`ode.md`](ode.md)). |
-| `odeset` fields: `Events`, `OutputFcn`, `Jacobian`, `Mass`, `NonNegative`, `NormControl` | ❌ | Silently ignored. |
+| Event detection — `[t, y, te, ye, ie] = ode_events(@f, tspan, y0, @evt)` | ✅ | Bracket-then-bisect over each accepted DP45 step. `evt` returns 3×1 `[value; isterminal; direction]`; `isterminal = 1` halts integration at the event. Non-MATLAB call shape — wired as a dedicated builtin since the function-handle-in-struct ABI for `opts.Events` is still TBD. |
+| `odeset` fields: `Events`, `OutputFcn`, `Jacobian`, `Mass`, `NonNegative`, `NormControl` | ❌ | Silently ignored. `Events` ships separately as the `ode_events` builtin (above). |
 | Higher-order stiff (`ode15s`, `ode23t`, `ode23tb`, `ode15i`) | ❌ | `ode15s` (variable-order BDF + Newton) is the natural next step on top of the shipped `ode23s` infrastructure. |
 | Non-stiff multistep (`ode113`) and high-order (`ode78`, `ode89`) | ❌ | |
 | BVP (`bvp4c`, `bvp5c`), DDE (`dde23`) | ❌ | |

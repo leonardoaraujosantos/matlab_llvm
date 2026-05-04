@@ -134,6 +134,45 @@ options, different y0, different RHS). Stats prints fire only on the
 real-solve path, so calling with `Stats = 1` always prints exactly
 once per integration.
 
+## Events — root-finding during integration
+
+Event detection lets the solver halt (or simply log) the moment a
+user-supplied scalar function of `(t, y)` crosses zero. The wired
+form is a 5-return builtin called `ode_events`:
+
+```matlab
+f   = @(t,y) -10;                 % constant velocity downward
+y0  = 100;
+evt = @(t,y) [y; 1; -1];          % [value; isterminal; direction]
+
+[t, y, te, ye, ie] = ode_events(f, [0 20], y0, evt);
+```
+
+Semantics:
+
+- `evt(t, y)` returns a 3×1 column `[value; isterminal; direction]`.
+- A zero crossing of `value` triggers an event. `direction` filters:
+  `+1` accepts only rising crossings, `-1` only falling, `0` either.
+- `isterminal = 1` halts integration at the event; the integration
+  arrays `t` and `y` end at the event point. `isterminal = 0` records
+  the event and continues.
+- `te`, `ye`, `ie` are the per-event time, state, and event-component
+  index. `ie` is always `1` in v1 (single scalar event channel).
+- The runtime uses bracket-then-bisect over the accepted DP45 step:
+  cheap, robust, and within the step's local accuracy (Hermite-style
+  refinement on `y` is good enough for the ball-drop class of tests).
+
+### Deviation: non-MATLAB call shape
+
+MATLAB takes events through `opts.Events = @evt` and reads the
+`isterminal` / `direction` arrays from the event function's vector
+return. Our struct-of-handles ABI is still TBD, so v1 exposes
+events through a dedicated builtin `ode_events` rather than threading
+them through `odeset`. Once the function-handle-in-struct ABI is
+nailed down (same blocker as `OutputFcn` and `Mass`), `ode45` /
+`ode23` / `ode23s` will route through the same event machinery via
+`opts.Events`.
+
 ## Backend matrix
 
 Bit-identical output across all three runtimes on the smoke ODEs.
@@ -165,6 +204,8 @@ Bit-identical output across all three runtimes on the smoke ODEs.
 - `math_ode45_stats.m` — `Stats = 1` summary.
 - `math_ode45_three_return.m` — `[t, y, stats]` 3-return form.
 - `math_ode45_vector.m` — system of ODEs via vector `y0`.
+- `math_ode_events_ball.m` — ball-drop with terminal event,
+  exercises bracket+bisect root-finding and integration halt.
 - [`test/Runtime/test_ode.c`](../test/Runtime/test_ode.c) — 44 direct
   runtime checks (no JIT, no compiler frontend).
 
@@ -281,7 +322,10 @@ Tracked separately in [`feature_status.md`](feature_status.md) and
 - Other stiff variants (`ode23t`, `ode23tb`, `ode15i` for DAEs).
 - Non-stiff multistep (`ode113`) and high-order (`ode78`, `ode89`).
 - BVP (`bvp4c`, `bvp5c`), DDE (`dde23`), DAE-with-mass-matrix.
-- `Events` (root-finding + 5-return form).
+- `Events` through `opts.Events` — the dedicated `ode_events` builtin
+  ships today with bracket+bisect root-finding and the 5-return form;
+  routing it through `odeset` is gated on the function-handle-in-
+  struct ABI work that also unblocks `OutputFcn` / `Mass`.
 - `OutputFcn` callback.
 - Numerical PDE (`pdepe`, finite-element). With `ode23s` shipped, a
   method-of-lines `pdepe` wrapper becomes feasible; `ode15s` would make

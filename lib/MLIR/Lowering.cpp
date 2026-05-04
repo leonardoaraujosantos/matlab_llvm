@@ -2243,6 +2243,9 @@ void Lowerer::lowerStmt(const Stmt &St) {
           else if ((CN == "ode45" || CN == "ode23" || CN == "ode23s") &&
                    (A.LHS.size() == 2 || A.LHS.size() == 3))
             Rtys.assign(A.LHS.size(), PtrTy);
+          /* [t, y, te, ye, ie] = ode_events(@f, tspan, y0, @evt). */
+          else if (CN == "ode_events" && A.LHS.size() == 5)
+            Rtys.assign(A.LHS.size(), PtrTy);
           /* [row, col] = ind2sub(sz, i) — scalar f64s. */
           else if (CN == "ind2sub" && A.LHS.size() == 2)
             Rtys.assign(A.LHS.size(), F64);

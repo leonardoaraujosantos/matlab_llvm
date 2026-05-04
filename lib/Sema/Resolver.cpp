@@ -91,7 +91,7 @@ void Resolver::registerBuiltins() {
      * ode23s is the Rosenbrock stiff solver. pdepe is the 1-D
      * parabolic-elliptic PDE solver via method-of-lines (uses
      * ode23s under the hood). */
-    "ode45", "ode23", "ode23s", "pdepe",
+    "ode45", "ode23", "ode23s", "ode_events", "pdepe",
     "nargin", "nargout", "varargin", "varargout",
     "fopen", "fclose", "fgetl", "feof",
     "fread", "fwrite",

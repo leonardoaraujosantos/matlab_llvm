@@ -2820,6 +2820,33 @@ bool TensorLowering::rewriteBuiltinCalls() {
         continue;
       }
     }
+    /* ode_events — IVP solver with event detection. 5-result form
+     * `[t, y, te, ye, ie] = ode_events(@f, tspan, y0, @evt)`.
+     * 4 operands: ptr (f), ptr (tspan), f64 (y0), ptr (evt).
+     * Splits into five matlab_ode_events_{t,y,te,ye,ie} runtime calls
+     * sharing a thread-local cache. */
+    if (NA && NA.getValue().getSExtValue() == 5 &&
+        Name == "ode_events" &&
+        Call->getNumOperands() == 4 && Call->getNumResults() == 5 &&
+        Call->getOperand(0).getType() == PtrTy &&
+        Call->getOperand(1).getType() == PtrTy &&
+        Call->getOperand(2).getType() == F64 &&
+        Call->getOperand(3).getType() == PtrTy) {
+      static const char *Suffixes[] = { "t", "y", "te", "ye", "ie" };
+      B.setInsertionPoint(Call);
+      for (int i = 0; i < 5; ++i) {
+        std::string FnName =
+            std::string("matlab_ode_events_") + Suffixes[i];
+        auto Fn = rt(FnName, PtrTy, {PtrTy, PtrTy, F64, PtrTy});
+        auto Ci = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                        Call->getOperands());
+        Call->getResult(i).replaceAllUsesWith(Ci.getResult());
+      }
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+
     /* pdepe — 1-D parabolic-elliptic PDE solver. Single-result (sol
      * matrix), 6 operands: (f64 m, ptr pdefn, ptr icfn, ptr bcfn,
      * ptr xmesh, ptr tspan). Routes directly to matlab_pdepe; single-

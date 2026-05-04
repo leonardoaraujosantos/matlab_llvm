@@ -126,3 +126,21 @@ disp('  number of accepted steps:');
 disp(s8.nsteps);
 disp('  conservation y1+y2+y3 at t=1 (should be 1):');
 disp(y8(end, 1) + y8(end, 2) + y8(end, 3));
+
+% --- 9. Events: ball drop ----------------------------------------------
+% dy/dt = -10 (constant downward velocity), y(0) = 100. Event "y == 0"
+% on a falling crossing halts integration. Closed form: t* = 10.
+%
+% Non-MATLAB call shape: ode_events(@f, tspan, y0, @evt). The event
+% function returns a 3x1 column [value; isterminal; direction].
+
+disp('9. ode_events — ball drop with terminal event');
+fb  = @(t,y) -10;
+evt = @(t,y) [y; 1; -1];
+[t9, y9, te, ye, ie] = ode_events(fb, [0 20], 100, evt);
+disp('  number of events captured:');
+disp(numel(te));
+disp('  event time (analytic = 10):');
+disp(te(1));
+disp('  integration halted at t (= event time):');
+disp(t9(end));

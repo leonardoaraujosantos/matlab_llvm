@@ -2831,6 +2831,157 @@ def ode23s_v_stats_opts(f, tspan, y0, opts):
     return _ode_v_stats()
 
 
+# --- ode_events — IVP solver with event detection ------------------------
+# v1: scalar y, single event. The event function returns a 3-vector
+# [value; isterminal; direction]. Bisection on Hermite-interpolated
+# state between accepted RK45 steps.
+
+_ode_events_cache = {"key": None, "T": None, "Y": None,
+                     "TE": None, "YE": None, "IE": None}
+
+def _ode_evt_eval(evt, t, y):
+    r = evt(t, y)
+    arr = np.asarray(r, dtype=float).ravel()
+    if arr.size < 1:
+        return 0.0, 0, 0
+    value = float(arr[0])
+    term  = int(arr[1]) if arr.size >= 2 else 0
+    direction = int(arr[2]) if arr.size >= 3 else 0
+    return value, term, direction
+
+def _ode_evt_bisect(evt, t, h, y, y_new, k1, k7, v0):
+    lo, hi = 0.0, 1.0
+    vlo = v0
+    it = 0
+    while it < 50:
+        mid = 0.5 * (lo + hi)
+        y_mid = _ode_hermite(y, y_new, k1, k7, h, mid)
+        v, _, _ = _ode_evt_eval(evt, t + mid * h, y_mid)
+        if abs(v) < 1e-12 or (hi - lo) < 1e-15:
+            return mid
+        if (vlo < 0.0 and v > 0.0) or (vlo > 0.0 and v < 0.0):
+            hi = mid
+        else:
+            lo = mid; vlo = v
+        it += 1
+    return 0.5 * (lo + hi)
+
+def _rk_solve_dp45_events(f, evt, targets, y0, rtol=1e-3, atol=1e-6,
+                           max_step=0.0, init_step=0.0, refine=4):
+    n_targets = len(targets)
+    if n_targets < 2:
+        return [], [], [], [], []
+    if refine < 1: refine = 1
+    t0 = float(targets[0]); tf = float(targets[n_targets - 1])
+    user_grid = (n_targets > 2)
+    T = [t0]; Y = [y0]; next_tgt = 1
+    TE = []; YE = []; IE = []
+    y, t = y0, t0
+    span = tf - t0
+    h = init_step if init_step > 0 else span * 0.01
+    if span < 0 and init_step > 0: h = -h
+    if h == 0.0 or span == 0.0:
+        return T, Y, TE, YE, IE
+    forward = h > 0
+    if max_step > 0:
+        if h >  max_step: h =  max_step
+        if h < -max_step: h = -max_step
+    k1 = f(t, y)
+    v_prev, _, _ = _ode_evt_eval(evt, t, y)
+    steps = 0; max_steps = 100000
+    halted = False
+    while ((t < tf) if forward else (t > tf)) and steps < max_steps and not halted:
+        steps += 1
+        if (forward and t + h > tf) or ((not forward) and t + h < tf):
+            h = tf - t
+        k2 = f(t + h*(1/5),  y + h*(k1*(1/5)))
+        k3 = f(t + h*(3/10), y + h*(k1*(3/40) + k2*(9/40)))
+        k4 = f(t + h*(4/5),  y + h*(k1*(44/45) - k2*(56/15) + k3*(32/9)))
+        k5 = f(t + h*(8/9),  y + h*(k1*(19372/6561) - k2*(25360/2187)
+                                    + k3*(64448/6561) - k4*(212/729)))
+        k6 = f(t + h,        y + h*(k1*(9017/3168) - k2*(355/33)
+                                    + k3*(46732/5247) + k4*(49/176)
+                                    - k5*(5103/18656)))
+        y5 = y + h*(k1*(35/384) + k3*(500/1113) + k4*(125/192)
+                    - k5*(2187/6784) + k6*(11/84))
+        k7 = f(t + h, y5)
+        err = h*(k1*(71/57600) - k3*(71/16695) + k4*(71/1920)
+                 - k5*(17253/339200) + k6*(22/525) - k7*(1/40))
+        scale = atol + rtol * (abs(y) if abs(y) > abs(y5) else abs(y5))
+        normerr = abs(err) / scale if scale > 0 else 0.0
+        if normerr <= 1.0:
+            v_new, term_new, dir_setting = _ode_evt_eval(evt, t + h, y5)
+            crossed = False
+            if v_prev * v_new < 0.0:
+                rising = (v_new > v_prev)
+                if dir_setting == 0: crossed = True
+                elif dir_setting > 0 and rising: crossed = True
+                elif dir_setting < 0 and not rising: crossed = True
+            if crossed:
+                th_star = _ode_evt_bisect(evt, t, h, y, y5, k1, k7, v_prev)
+                te = t + th_star * h
+                ye = _ode_hermite(y, y5, k1, k7, h, th_star)
+                TE.append(te); YE.append(ye); IE.append(1)
+                if term_new:
+                    T.append(te); Y.append(ye)
+                    halted = True
+                    break
+            v_prev = v_new
+            if user_grid:
+                while next_tgt < n_targets:
+                    tt = float(targets[next_tgt])
+                    in_range = (tt <= t + h) if forward else (tt >= t + h)
+                    if not in_range: break
+                    th = 0.0 if h == 0.0 else (tt - t) / h
+                    yi = y5 if next_tgt == n_targets - 1 \
+                            else _ode_hermite(y, y5, k1, k7, h, th)
+                    T.append(tt); Y.append(yi)
+                    next_tgt += 1
+            else:
+                j = 1
+                while j <= refine:
+                    th = j / refine
+                    ti = t + h * th
+                    yi = y5 if j == refine else _ode_hermite(y, y5, k1, k7, h, th)
+                    T.append(ti); Y.append(yi)
+                    j += 1
+            t += h; y = y5; k1 = k7
+            if user_grid and next_tgt >= n_targets: break
+        fac = 5.0 if normerr == 0.0 else 0.9 * (normerr ** (-1/5))
+        if fac < 0.2: fac = 0.2
+        if fac > 5.0: fac = 5.0
+        h *= fac
+        if max_step > 0:
+            if h >  max_step: h =  max_step
+            if h < -max_step: h = -max_step
+    return T, Y, TE, YE, IE
+
+def _ode_events_compute(f, evt, tspan, y0):
+    ts = np.asarray(tspan, dtype=float).ravel()
+    targets = ts.tolist()
+    key = (id(f), id(evt), tuple(targets), float(y0))
+    if _ode_events_cache["key"] == key:
+        return
+    T, Y, TE, YE, IE = _rk_solve_dp45_events(f, evt, targets, float(y0))
+    _ode_events_cache["key"] = key
+    _ode_events_cache["T"]  = np.asarray(T,  dtype=float).reshape((-1, 1))
+    _ode_events_cache["Y"]  = np.asarray(Y,  dtype=float).reshape((-1, 1))
+    _ode_events_cache["TE"] = np.asarray(TE, dtype=float).reshape((-1, 1))
+    _ode_events_cache["YE"] = np.asarray(YE, dtype=float).reshape((-1, 1))
+    _ode_events_cache["IE"] = np.asarray(IE, dtype=float).reshape((-1, 1))
+
+def ode_events_t (f, tspan, y0, evt):
+    _ode_events_compute(f, evt, tspan, y0); return _ode_events_cache["T"].copy()
+def ode_events_y (f, tspan, y0, evt):
+    _ode_events_compute(f, evt, tspan, y0); return _ode_events_cache["Y"].copy()
+def ode_events_te(f, tspan, y0, evt):
+    _ode_events_compute(f, evt, tspan, y0); return _ode_events_cache["TE"].copy()
+def ode_events_ye(f, tspan, y0, evt):
+    _ode_events_compute(f, evt, tspan, y0); return _ode_events_cache["YE"].copy()
+def ode_events_ie(f, tspan, y0, evt):
+    _ode_events_compute(f, evt, tspan, y0); return _ode_events_cache["IE"].copy()
+
+
 # --- pdepe — 1-D parabolic-elliptic PDE via method-of-lines --------------
 # v1: m=0 (Cartesian), scalar PDE, Dirichlet BCs. Spatial discretisation
 # on the user xmesh + ode23s_v under the hood.
