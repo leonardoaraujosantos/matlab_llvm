@@ -7955,6 +7955,13 @@ int main(int Argc, char **Argv) {
           // LowerScalarSlots + Mem2RegLite so those slots end
           // up as llvm.alloca / get folded out.
           mlirgen::runRefineSlotTypes(M);
+          // RefineSlotTypes' HW-aware second pass may retype a
+          // slot from f64 to iN (the typed register width); the
+          // function's result type and any func.return need to
+          // pick up the change. Re-run RefineFuncSigs to keep
+          // signatures consistent before LowerScalarSlots
+          // materializes the alloca.
+          mlirgen::runRefineFuncSigs(M);
           mlirgen::runLowerScalarSlots(M);
           mlirgen::runMem2RegLite(M);
           if (getenv("DUMP_AFTER_F")) mlirgen::printModule(std::cerr, M);

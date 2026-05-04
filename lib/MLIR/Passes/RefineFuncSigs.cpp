@@ -90,6 +90,17 @@ bool runRefineFuncSigs(mlir::ModuleOp M) {
           NewResults[i] = New;
           Changed = true;
         }
+        /* HW-aware slot retyping (RefineSlotTypes' second pass)
+         * narrows an f64 slot to its underlying integer width when
+         * every store traces back to a typed persistent get. The
+         * function's declared result type was f64 from the slot's
+         * original ABI shape; follow it down to the new integer
+         * type so the verifier accepts the func.return. */
+        if (mlir::isa<mlir::Float64Type, mlir::Float32Type>(Old) &&
+            mlir::isa<mlir::IntegerType>(New)) {
+          NewResults[i] = New;
+          Changed = true;
+        }
       }
     });
     if (Changed) {
