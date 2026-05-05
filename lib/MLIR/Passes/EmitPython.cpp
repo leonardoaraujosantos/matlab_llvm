@@ -2088,9 +2088,43 @@ void Emitter::emitFuncFunc(mlir::func::FuncOp F) {
     if (IECall->getNumResults() != 1) return;
     if (!IECall->getResult(0).hasOneUse()) return;
     auto *CmpUser = IECall->getResult(0).use_begin()->getOwner();
+    /* Two recognised condition shapes feed the scf.if:
+     *
+     *   1. `isempty(p) → cmpf one, _, 0.0 → scf.if` — the canonical
+     *      first-call init when the source is `if isempty(p)`.
+     *   2. `isempty(p) → matlab.short_or(_, X) → scf.if` — the
+     *      `if isempty(p) || reset` form. The C / Python pipeline
+     *      doesn't run SplitIsEmptyOr (which would canonicalise it
+     *      to shape 1), so we have to recognise the OR shape too;
+     *      otherwise the InitExprByName capture misses, the
+     *      module-level decl falls back to `0.0`, and downstream
+     *      bitwise ops on the persistent see a float.
+     *
+     * In both cases the scf.if's then-region carries the init
+     * `_global_set_f64` we want; the body-side guard stays put
+     * (with shape 2 we can't suppress it, since the OR branch
+     * still needs the runtime reset check).
+     */
     auto Cmp = mlir::dyn_cast<mlir::arith::CmpFOp>(CmpUser);
-    if (!Cmp || !Cmp.getResult().hasOneUse()) return;
-    auto *IfUser = Cmp.getResult().use_begin()->getOwner();
+    bool IsOrShape = false;
+    mlir::Operation *Or = nullptr;
+    if (!Cmp) {
+      if (CmpUser->getName().getStringRef() == "matlab.short_or" &&
+          CmpUser->getNumResults() == 1) {
+        Or = CmpUser;
+        IsOrShape = true;
+      } else {
+        return;
+      }
+    }
+    auto *IfUser = IsOrShape
+        ? (Or->getResult(0).hasOneUse()
+            ? Or->getResult(0).use_begin()->getOwner()
+            : nullptr)
+        : (Cmp.getResult().hasOneUse()
+            ? Cmp.getResult().use_begin()->getOwner()
+            : nullptr);
+    if (!IfUser) return;
     auto Guard = mlir::dyn_cast<mlir::scf::IfOp>(IfUser);
     if (!Guard || !Guard.getThenRegion().hasOneBlock()) return;
     mlir::Operation *InitSet = nullptr;
@@ -2113,10 +2147,16 @@ void Emitter::emitFuncFunc(mlir::func::FuncOp F) {
     if (!InitSet || InitSet->getNumOperands() < 2) return;
     InitExprByName[PNStr] =
         dropOuterParens(this->exprFor(InitSet->getOperand(1)));
-    SuppressedOps.insert(IECall);
-    SuppressedOps.insert(Cmp.getOperation());
-    SuppressedOps.insert(Guard.getOperation());
-    SuppressedOps.insert(InitSet);
+    /* Suppress the whole isempty-cmpf-if chain only for shape 1 —
+     * shape 2 (`isempty || reset`) needs the if's runtime reset
+     * branch to still fire on body emit. The InitExprByName
+     * capture is enough by itself to fix the module-level decl. */
+    if (!IsOrShape) {
+      SuppressedOps.insert(IECall);
+      SuppressedOps.insert(Cmp.getOperation());
+      SuppressedOps.insert(Guard.getOperation());
+      SuppressedOps.insert(InitSet);
+    }
   });
 
   emitRegion(F.getBody(), 1);

@@ -79,6 +79,13 @@ declare -a CASES=(
   fifo
   manchester_enc
   sync_2ff                  # `% cocotb: latency(1)` in source — see B1
+  # Tier-4 — added after the Python-emit persistent-init recognizer
+  # learned the `isempty(p) || reset` shape. Capturing the in-body
+  # init expr makes the module-level decl carry the right value
+  # (e.g. `state = 1` instead of the `0.0` fallback), which fixes
+  # downstream bitwise-on-float TypeErrors.
+  async_fifo
+  galois_lfsr
 )
 
 pass=0; fail=0
