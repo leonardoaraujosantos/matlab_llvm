@@ -66,22 +66,45 @@ static llvm::StringMap<PersistInfo> gatherPersistInfo(mlir::func::FuncOp F) {
   F.walk([&](mlir::Operation *Op) {
     auto Name = Op->getAttrOfType<mlir::StringAttr>("persistent_name");
     if (!Name) return;
-    // The set-site call has the register's `fi_wl` and
-    // `fi_signed` attributes (Lowering / LowerFixedPoint forward
-    // them onto the typed-set call). Skip is-empty / get sites
-    // (no fi_wl).
-    auto WL = Op->getAttrOfType<mlir::IntegerAttr>("fi_wl");
-    if (!WL) return;
-    auto Sgn = Op->getAttrOfType<mlir::IntegerAttr>("fi_signed");
+    // Only set-call shapes carry width info — must have at least
+    // 2 operands (idx, value). The is-empty / get sites have just
+    // (idx) and don't carry width.
+    if (Op->getNumOperands() < 2) return;
+    // Determine the register's storage width:
+    //  - Preferred: `fi_wl` attribute set by Lowering /
+    //    LowerFixedPoint when the source uses fi types.
+    //  - Fallback: the value operand's MLIR integer width when
+    //    the source uses uint8/uint16/etc casts (no fi_wl, but
+    //    the operand is concretely typed).
+    unsigned Width = 0;
+    bool Signed = true;
+    if (auto WL = Op->getAttrOfType<mlir::IntegerAttr>("fi_wl")) {
+      Width = (unsigned)WL.getInt();
+      if (auto Sgn = Op->getAttrOfType<mlir::IntegerAttr>("fi_signed"))
+        Signed = Sgn.getInt() != 0;
+    } else {
+      mlir::Value V = Op->getOperand(1);
+      if (auto IT = mlir::dyn_cast<mlir::IntegerType>(V.getType())) {
+        Width = IT.getWidth();
+        // Heuristic: trace the value back to a `matlab.unsigned`-
+        // tagged constant (the IntCastConstantFold marker for
+        // uint{8,16,32,64} literals) and pick unsigned. Default
+        // to signed otherwise.
+        if (auto *VOp = V.getDefiningOp())
+          if (VOp->hasAttr("matlab.unsigned")) Signed = false;
+      } else {
+        return;
+      }
+    }
+    if (Width == 0) return;
     PersistInfo PI;
-    PI.Width = (unsigned)WL.getInt();
-    PI.Signed = Sgn ? Sgn.getInt() != 0 : true;
+    PI.Width = Width;
+    PI.Signed = Signed;
     auto It = Map.find(Name.getValue());
     if (It == Map.end()) {
       Map[Name.getValue()] = PI;
     } else if (It->second.Width != PI.Width) {
-      // Inconsistent width across set sites — leave unresolved
-      // (downstream legalize will diagnose).
+      // Inconsistent width across set sites — leave unresolved.
       It->second.Width = 0;
     }
   });
@@ -108,20 +131,14 @@ static bool refineHWSlotsFromPersists(mlir::ModuleOp M) {
     if (F.empty()) return;
     auto PMap = gatherPersistInfo(F);
     if (PMap.empty()) return;
-    F.walk([&](mlir::Operation *Op) {
-      // Operate on `matlab.alloc` whose declared type is f64 (the
-      // post-RefineSlotTypes shape: every store was f64 so the
-      // slot got refined to f64). This pass tightens to the
-      // common-source register's integer width.
-      if (!isMatlabOp(Op, "matlab.alloc")) return;
-      if (Op->getNumResults() != 1) return;
-      mlir::Value Slot = Op->getResult(0);
-      if (!mlir::isa<mlir::Float64Type>(Slot.getType())) return;
+    // Helper: check a slot value (matlab.alloc result or
+    // llvm.alloca with f64 element type) and try to retype to the
+    // unifying integer width derived from its store sources.
+    auto tryRefine = [&](mlir::Value Slot, mlir::Type ElemTy,
+                         bool IsMatlabSlot) {
+      if (!mlir::isa<mlir::Float64Type>(ElemTy)) return false;
       // Walk every store; require that each store's value is the
-      // result of a `matlab_global_get_f64` call (or an arith.add
-      // / mul / sub of such values — the typical mux-out pattern
-      // doesn't go through arithmetic so we keep it strict).
-      // Collect the union of register widths referenced.
+      // result of a `matlab_global_get_f64` call.
       llvm::SmallVector<mlir::Operation *, 4> Stores;
       llvm::SmallVector<mlir::Operation *, 4> Loads;
       bool Compatible = true;
@@ -129,10 +146,27 @@ static bool refineHWSlotsFromPersists(mlir::ModuleOp M) {
       bool Signed = true;
       for (mlir::OpOperand &Use : Slot.getUses()) {
         mlir::Operation *U = Use.getOwner();
-        if (isMatlabOp(U, "matlab.store") && U->getOperand(1) == Slot) {
+        bool IsStore = false;
+        bool IsLoad = false;
+        mlir::Value StVal;
+        if (IsMatlabSlot) {
+          if (isMatlabOp(U, "matlab.store") && U->getOperand(1) == Slot) {
+            IsStore = true; StVal = U->getOperand(0);
+          } else if (isMatlabOp(U, "matlab.load")) {
+            IsLoad = true;
+          }
+        } else {
+          if (auto St = mlir::dyn_cast<mlir::LLVM::StoreOp>(U)) {
+            if (St.getAddr() == Slot) {
+              IsStore = true; StVal = St.getValue();
+            }
+          } else if (mlir::isa<mlir::LLVM::LoadOp>(U)) {
+            IsLoad = true;
+          }
+        }
+        if (IsStore) {
           Stores.push_back(U);
-          mlir::Value V = U->getOperand(0);
-          auto *VOp = V.getDefiningOp();
+          auto *VOp = StVal.getDefiningOp();
           if (!VOp) { Compatible = false; break; }
           auto C = mlir::dyn_cast<mlir::LLVM::CallOp>(VOp);
           if (!C) { Compatible = false; break; }
@@ -153,28 +187,37 @@ static bool refineHWSlotsFromPersists(mlir::ModuleOp M) {
             Width = It->second.Width;
             Signed = It->second.Signed;
           } else if (Width != It->second.Width) {
-            // Mixed widths feeding this slot — keep f64 and let
-            // downstream pick up.
             Compatible = false;
             break;
           }
           continue;
         }
-        if (isMatlabOp(U, "matlab.load")) { Loads.push_back(U); continue; }
+        if (IsLoad) { Loads.push_back(U); continue; }
         Compatible = false;
         break;
       }
-      if (!Compatible || Stores.empty() || Width == 0) return;
+      if (!Compatible || Stores.empty() || Width == 0) return false;
       auto NewTy =
           mlir::IntegerType::get(F.getContext(), Width);
-      Slot.setType(NewTy);
-      // Retype each store's value: replace the f64 with an
-      // arith.fptosi (or fptoui) of the f64. Downstream the
-      // emitter's existing arith.fptosi-of-persist-get path
-      // unwraps to the typed register signal.
+      // For matlab.alloc, retype the slot's result. For
+      // llvm.alloca, retype the alloca's element type and result
+      // (the result remains an !llvm.ptr; element type drives
+      // load/store typing).
+      if (IsMatlabSlot) {
+        Slot.setType(NewTy);
+      } else {
+        // Update the alloca's element type attribute via its
+        // ElemType property and re-set the load result types.
+        auto Alloca =
+            mlir::cast<mlir::LLVM::AllocaOp>(Slot.getDefiningOp());
+        Alloca.setElemType(NewTy);
+      }
+      // Retype each store's value with a fptosi/fptoui cast.
       mlir::OpBuilder B(F.getContext());
       for (mlir::Operation *St : Stores) {
-        mlir::Value V = St->getOperand(0);
+        mlir::Value V = IsMatlabSlot ? St->getOperand(0)
+                                     : mlir::cast<mlir::LLVM::StoreOp>(St)
+                                           .getValue();
         B.setInsertionPoint(St);
         mlir::Value Cast;
         if (Signed)
@@ -183,18 +226,40 @@ static bool refineHWSlotsFromPersists(mlir::ModuleOp M) {
         else
           Cast = mlir::arith::FPToUIOp::create(B, St->getLoc(),
                                                 NewTy, V);
-        St->setOperand(0, Cast);
+        if (IsMatlabSlot)
+          St->setOperand(0, Cast);
+        else
+          mlir::cast<mlir::LLVM::StoreOp>(St).getValueMutable()
+              .assign(Cast);
       }
-      // Retype every load result; the f64 result type was
-      // synchronized with the slot. Downstream consumers expect
-      // an integer.
       for (mlir::Operation *Ld : Loads) {
         if (Ld->getNumResults() != 1) continue;
         mlir::Value R = Ld->getResult(0);
         if (mlir::isa<mlir::Float64Type>(R.getType()))
           R.setType(NewTy);
       }
-      Changed = true;
+      return true;
+    };
+
+    F.walk([&](mlir::Operation *Op) {
+      if (isMatlabOp(Op, "matlab.alloc") && Op->getNumResults() == 1) {
+        if (tryRefine(Op->getResult(0), Op->getResult(0).getType(),
+                      /*IsMatlabSlot=*/true))
+          Changed = true;
+        return;
+      }
+      // Also handle llvm.alloca whose element type is f64 — when
+      // the matlab.alloc was promoted to llvm.alloca by an
+      // earlier `runLowerScalarSlots` (the SV pipeline runs it
+      // pre-Stage-F as well), the matlab.alloc form is gone by
+      // the time the HW-aware pass gets a chance. Walking the
+      // llvm.alloca shape lets us still catch the regfile /
+      // mmap_periph read-mux case.
+      if (auto A = mlir::dyn_cast<mlir::LLVM::AllocaOp>(Op)) {
+        if (tryRefine(A.getResult(), A.getElemType(),
+                      /*IsMatlabSlot=*/false))
+          Changed = true;
+      }
     });
   });
   return Changed;

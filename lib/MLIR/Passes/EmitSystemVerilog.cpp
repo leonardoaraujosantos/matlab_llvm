@@ -2249,9 +2249,17 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
 
       indent(Indent);
       OS << P.Name << "_next = ";
-      if (VW > P.Width) OS << P.Width << "'(";
+      // Wrap with an explicit `<W>'(...)` size cast whenever the
+      // value's IR width differs from the register's declared
+      // width — both directions: truncate when wider (the canonical
+      // i9 → i16 add result) and sign/zero-extend when narrower
+      // (i8 source into i16 register, common when latching a
+      // narrow input into a wider state). SV's `<W>'(EXPR)` is the
+      // standard width-conversion idiom; Verilator otherwise
+      // flags WIDTHEXPAND.
+      if (VW != 0 && VW != P.Width) OS << P.Width << "'(";
       OS << ValExpr;
-      if (VW > P.Width) OS << ")";
+      if (VW != 0 && VW != P.Width) OS << ")";
       OS << ";\n";
       return;
     }
