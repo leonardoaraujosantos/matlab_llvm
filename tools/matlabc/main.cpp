@@ -5975,6 +5975,13 @@ struct CocotbPragmaScan {
    * `-cocotb-latency=N` on the command line. The CLI flag wins
    * when the user passes it explicitly (Options::CocotbLatencyExplicit). */
   std::optional<int> Latency;
+  /* `% cocotb: cover(<port>, min_bins=N)` — fail the test when the
+   * named port hit fewer than N distinct values across the random
+   * stimulus. Catches "vectors only exercised half the FSM
+   * states" silently. Per-port; multiple coverage pragmas allowed.
+   * Output ports also accepted — applies to whichever side the
+   * port name matches. */
+  std::map<std::string, int> CoverMinBins;
 };
 
 /* Scan the original .m source for `% cocotb:` directives and
@@ -6074,6 +6081,17 @@ scanCocotbPragmas(const std::string &SrcPath) {
     if (Head == "latency" && Args.size() == 1) {
       int L = std::atoi(Args[0].c_str());
       if (L >= 0) Out.Latency = L;
+      continue;
+    }
+    if (Head == "cover" && Args.size() >= 2) {
+      // Accept `cover(<port>, N)` and `cover(<port>, min_bins=N)`.
+      // Strip an optional `min_bins=` prefix from the second arg.
+      std::string Spec = Args[1];
+      const std::string Key = "min_bins=";
+      if (Spec.compare(0, Key.size(), Key) == 0)
+        Spec.erase(0, Key.size());
+      int N = std::atoi(Spec.c_str());
+      if (!Args[0].empty() && N > 0) Out.CoverMinBins[Args[0]] = N;
       continue;
     }
   }
@@ -6635,7 +6653,8 @@ loadTesterTU(matlab::SourceManager &SM, matlab::ASTContext &AstCtx,
 static std::string
 renderCocotbHarness(const CocotbFuncSpec &S, const std::string &Stem,
                     int Vectors, int Latency, int Seed,
-                    const std::vector<std::vector<std::string>> *Stimulus) {
+                    const std::vector<std::vector<std::string>> *Stimulus,
+                    const std::map<std::string, int> &CoverMinBins) {
   std::string Out;
   auto append = [&](const std::string &S) { Out += S; };
   auto pyTuple = [](const CocotbPortSpec &P) -> std::string {
@@ -7087,6 +7106,37 @@ renderCocotbHarness(const CocotbFuncSpec &S, const std::string &Stem,
   append("    assert failures == 0, "
          "f\"{failures} mismatch(es) across {compared} compared cycles "
          "(latency={LATENCY}, total stimulus N={N})\"\n");
+  // Coverage gate (`% cocotb: cover(<port>, min_bins=N)`). After
+  // the comparison sweep, count distinct values seen on each
+  // covered port and assert the count meets the threshold. Catches
+  // "random vectors only exercised half the FSM states" silently.
+  if (!CoverMinBins.empty()) {
+    append("    cover_failures = []\n");
+    for (auto &Kv : CoverMinBins) {
+      const std::string &Nm = Kv.first;
+      int Min = Kv.second;
+      append("    for k, spec in enumerate(INPUTS):\n");
+      append("        if spec[0] == \"" + Nm + "\":\n");
+      append("            seen = len(coverage.in_stat[k]['hist']) "
+             "if coverage.in_stat[k]['hist'] else "
+             "(coverage.in_stat[k]['count'] and 1 or 0)\n");
+      append("            if seen < " + std::to_string(Min) + ":\n");
+      append("                cover_failures.append("
+             "f\"input '" + Nm + "' hit {seen} bin(s), expected >= "
+             + std::to_string(Min) + "\")\n");
+      append("    for j, spec in enumerate(OUTPUTS):\n");
+      append("        if spec[0] == \"" + Nm + "\":\n");
+      append("            seen = len(coverage.out_stat[j]['hist']) "
+             "if coverage.out_stat[j]['hist'] else "
+             "(coverage.out_stat[j]['count'] and 1 or 0)\n");
+      append("            if seen < " + std::to_string(Min) + ":\n");
+      append("                cover_failures.append("
+             "f\"output '" + Nm + "' hit {seen} bin(s), expected >= "
+             + std::to_string(Min) + "\")\n");
+    }
+    append("    assert not cover_failures, "
+           "\"coverage gate failed:\\n  \" + \"\\n  \".join(cover_failures)\n");
+  }
   return Out;
 }
 
@@ -7222,6 +7272,18 @@ int emitCocotbHarness(const char *Self, const Options &Opts,
   };
   for (auto &Kv : Pragmas.Holds) warnOrphan(Kv.first, "hold");
   for (auto &Kv : Pragmas.Stim)  warnOrphan(Kv.first, "stimulus");
+  for (auto &Kv : Pragmas.CoverMinBins) {
+    bool Found = false;
+    for (auto &P : Spec->Inputs)
+      if (P.Name == Kv.first) { Found = true; break; }
+    if (!Found)
+      for (auto &P : Spec->Outputs)
+        if (P.Name == Kv.first) { Found = true; break; }
+    if (!Found)
+      std::cerr << "warning: emit-cocotb: `% cocotb: cover(" << Kv.first
+                << ", ...)` doesn't match any input or output port; "
+                   "ignored.\n";
+  }
 
   /* `% cocotb: latency(N)` applies when the user didn't pass
    * `-cocotb-latency=` on the command line — same convention the
@@ -7259,7 +7321,8 @@ int emitCocotbHarness(const char *Self, const Options &Opts,
   std::string Harness = renderCocotbHarness(*Spec, Stem, Opts.CocotbVectors,
                                              EffectiveLatency,
                                              Opts.CocotbSeed,
-                                             Stimulus ? &*Stimulus : nullptr);
+                                             Stimulus ? &*Stimulus : nullptr,
+                                             Pragmas.CoverMinBins);
   std::string Makefile = renderCocotbMakefile(Stem, Spec->Name);
 
   if (writeStringToFile(OutDir + "/test_" + Stem + ".py", Harness) != 0)
