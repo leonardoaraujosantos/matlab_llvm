@@ -7015,9 +7015,66 @@ renderCocotbHarness(const CocotbFuncSpec &S, const std::string &Stem,
          "_eq(pre_val, ref_val, wl=wl, fl=fl))\n");
   append("                if post_match or pre_match:\n");
   append("                    continue\n");
+  /* A2: enriched mismatch diagnostics. Decode each value as fi
+   * (so signed widths show their effective range, e.g. `42 [i16
+   * range -32768..32767]`), and surface canonical fault hints
+   * when the divergence shape matches a known root cause. The
+   * raw post/pre/ref/args line stays first for easy grep / log
+   * scraping; the hint lines follow indented for readability. */
+  append("                fi_tag = (lambda v: f\"{int(v)} ["
+         "{'signed' if signed else 'unsigned'} {wl}b "
+         "0x{int(v) & ((1<<wl)-1):X}]\" if isinstance(v, (int, float)) "
+         "and abs(float(v)) < (1<<63) else str(v))\n");
+  append("                hints = []\n");
+  /* Sign-interpretation hint — DUT and ref are bit-equivalent
+   * modulo 2^WL but the harness reads them with different
+   * signedness. Already auto-equated by the modulo-WL fallback
+   * in _eq, but if it hits and still fails, surface the bits. */
+  append("                try:\n");
+  append("                    if wl and 1 <= wl <= 64:\n");
+  append("                        m = (1 << wl) - 1\n");
+  append("                        if (int(post_val) & m) == (int(ref_val) & m):\n");
+  append("                            hints.append(\"sign-interpretation: "
+         "bits match modulo 2^{wl}\")\n");
+  append("                except (TypeError, ValueError): pass\n");
+  /* Saturation-suspected hint — DUT pinned to ±max while ref
+   * is well outside the legal range. */
+  append("                try:\n");
+  append("                    if wl and 2 <= wl <= 64:\n");
+  append("                        if signed:\n");
+  append("                            hi = (1 << (wl - 1)) - 1\n");
+  append("                            lo = -(1 << (wl - 1))\n");
+  append("                        else:\n");
+  append("                            hi = (1 << wl) - 1\n");
+  append("                            lo = 0\n");
+  append("                        if int(post_val) in (hi, lo) and "
+         "(int(ref_val) > hi or int(ref_val) < lo):\n");
+  append("                            hints.append(\"saturation suspected: "
+         "DUT pinned to {hi if int(post_val) == hi else lo}, ref outside "
+         "[{lo}..{hi}]\")\n");
+  append("                except (TypeError, ValueError): pass\n");
+  /* Latency-suspected hint — ref pre value (pre_samp) matches
+   * post (i.e. DUT lagged one cycle behind). */
+  append("                if pre_val is not None and pre_val == ref_val and "
+         "pre_val != post_val:\n");
+  append("                    hints.append(\"latency suspected: pre-edge "
+         "sample matched ref; consider increasing latency by 1\")\n");
   append("                cocotb.log.error(\n");
   append("                    f\"#{ref_cycle} {name}: post={post_val} "
          "pre={pre_val} ref={ref_val} args={ref_args}\")\n");
+  append("                cocotb.log.error(\"  decoded: post=\" + "
+         "fi_tag(post_val) + \" ref=\" + fi_tag(ref_val))\n");
+  append("                for h in hints:\n");
+  append("                    cocotb.log.error(\"  hint: \" + h)\n");
+  /* VCD pointer — the Makefile already enables --trace, so
+   * dump.vcd lives next to the run. Print on first failure so
+   * the user sees the path immediately rather than digging it
+   * out of the cocotb working dir. */
+  append("                if failures == 0:\n");
+  append("                    _dut_path = os.path.dirname("
+         "os.path.abspath(__file__))\n");
+  append("                    cocotb.log.error(\"  trace: \" + "
+         "_dut_path + \"/dump.vcd (open in GTKWave / Surfer)\")\n");
   append("                failures += 1\n");
   /* v3.7 — write coverage report next to the cocotb run output.
    * Best-effort: a write failure (read-only fs, permissions)
