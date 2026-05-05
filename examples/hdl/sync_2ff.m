@@ -3,6 +3,7 @@ function y = sync_2ff(async_in, reset)
     % hdl: port(async_in, bool)
     % hdl: port(reset, bool)
     % cocotb: stimulus(reset, constant, 0)
+    % cocotb: latency(1)
     %
     % Classic 2-flop synchronizer. Async input gets registered
     % twice before the rest of the design sees it, suppressing

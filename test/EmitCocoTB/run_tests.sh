@@ -78,6 +78,7 @@ declare -a CASES=(
   edge_detector
   fifo
   manchester_enc
+  sync_2ff                  # `% cocotb: latency(1)` in source — see B1
 )
 
 pass=0; fail=0
