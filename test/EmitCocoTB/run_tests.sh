@@ -104,36 +104,64 @@ declare -a CASES=(
   multi_cycle_mul
 )
 
-pass=0; fail=0
-for m in "${CASES[@]}"; do
-  out_dir="$WORK_DIR/$m"
-  printf "  %-26s " "$m"
+# Run each fixture in parallel via xargs -P. Default to up to 8
+# workers (about the right shape for a typical laptop / CI runner);
+# override with COCOTB_PARALLEL=N. Each worker writes a per-fixture
+# status line to a result file; the summary collates them after the
+# parallel block finishes so the output stays deterministic
+# regardless of which fixture finishes first.
+PARALLEL="${COCOTB_PARALLEL:-8}"
+RESULTS="$WORK_DIR/_results.txt"
+: > "$RESULTS"
+
+run_one() {
+  local m=$1
+  local out_dir="$WORK_DIR/$m"
   if ! "$MATLABC" -emit-cocotb \
                   -cocotb-out="$out_dir" \
                   "$ROOT/examples/hdl/$m.m" \
                   > "$out_dir.emit.log" 2>&1; then
-    echo "EMIT FAIL"
-    cat "$out_dir.emit.log" | sed 's/^/    /'
-    fail=$((fail+1))
-    continue
+    echo "$m EMIT-FAIL" >> "$RESULTS"
+    return
   fi
   if (cd "$out_dir" && make > "$out_dir.run.log" 2>&1); then
+    local ok
     ok=$(grep -oE "TESTS=1 PASS=[0-9]+ FAIL=[0-9]+" "$out_dir.run.log" | head -1)
     if [[ "$ok" == "TESTS=1 PASS=1 FAIL=0" ]]; then
-      echo "PASS"
-      pass=$((pass+1))
+      echo "$m PASS" >> "$RESULTS"
     else
-      echo "FAIL ($ok)"
-      tail -20 "$out_dir.run.log" | sed 's/^/    /'
-      fail=$((fail+1))
+      echo "$m FAIL ($ok)" >> "$RESULTS"
     fi
   else
-    echo "MAKE FAIL"
-    tail -20 "$out_dir.run.log" | sed 's/^/    /'
-    fail=$((fail+1))
+    echo "$m MAKE-FAIL" >> "$RESULTS"
   fi
+}
+
+export -f run_one
+export MATLABC ROOT WORK_DIR RESULTS
+
+printf '%s\n' "${CASES[@]}" | xargs -n1 -P"$PARALLEL" -I{} bash -c 'run_one "$@"' _ {}
+
+# Reorder the results into the same order as CASES for stable output
+# regardless of completion order, then summarise.
+pass=0; fail=0
+for m in "${CASES[@]}"; do
+  line=$(grep -m1 "^$m " "$RESULTS" || echo "$m UNKNOWN")
+  status=${line#* }
+  printf "  %-26s %s\n" "$m" "$status"
+  case "$status" in
+    PASS) pass=$((pass+1)) ;;
+    *) fail=$((fail+1))
+       # Print failure tail under the entry for easier triage.
+       if [[ -f "$WORK_DIR/$m.run.log" ]]; then
+         tail -10 "$WORK_DIR/$m.run.log" | sed 's/^/    /'
+       elif [[ -f "$WORK_DIR/$m.emit.log" ]]; then
+         cat "$WORK_DIR/$m.emit.log" | sed 's/^/    /'
+       fi
+       ;;
+  esac
 done
 
 echo "----"
-echo "cocotb-tests: $pass passed, $fail failed"
+echo "cocotb-tests: $pass passed, $fail failed (parallel=$PARALLEL)"
 [[ $fail -eq 0 ]]
