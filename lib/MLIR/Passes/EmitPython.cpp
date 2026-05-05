@@ -2071,12 +2071,23 @@ void Emitter::emitFuncFunc(mlir::func::FuncOp F) {
   // Tier 1: detect canonical `if isempty(p); p = init; end` first-
   // call init pattern and suppress the entire chain. The init value
   // becomes the initializer for the module-level persistent decl.
-  F.getBody().walk([&](mlir::LLVM::CallOp IECall) {
-    auto Callee = IECall.getCallee();
-    if (!Callee || *Callee != "matlab_persistent_isempty") return;
-    if (IECall.getNumResults() != 1) return;
-    if (!IECall.getResult().hasOneUse()) return;
-    auto *CmpUser = IECall.getResult().use_begin()->getOwner();
+  // Walks both LLVM::CallOp and matlab.call_builtin shapes — modules
+  // that exit the SV pipeline (or land here without LowerTensorOps's
+  // matlab_persistent_* → llvm.call sweep) keep the matlab.call_builtin
+  // form. Without this dual walk, a module like cic_decimator surfaces
+  // its isempty as an unsupported op at emit time.
+  F.getBody().walk([&](mlir::Operation *IECall) {
+    llvm::StringRef IECallee;
+    if (auto C = mlir::dyn_cast<mlir::LLVM::CallOp>(IECall)) {
+      if (auto Sym = C.getCallee()) IECallee = *Sym;
+    } else if (IECall->getName().getStringRef() == "matlab.call_builtin") {
+      if (auto CA = IECall->getAttrOfType<mlir::StringAttr>("callee"))
+        IECallee = CA.getValue();
+    } else return;
+    if (IECallee != "matlab_persistent_isempty") return;
+    if (IECall->getNumResults() != 1) return;
+    if (!IECall->getResult(0).hasOneUse()) return;
+    auto *CmpUser = IECall->getResult(0).use_begin()->getOwner();
     auto Cmp = mlir::dyn_cast<mlir::arith::CmpFOp>(CmpUser);
     if (!Cmp || !Cmp.getResult().hasOneUse()) return;
     auto *IfUser = Cmp.getResult().use_begin()->getOwner();
@@ -2102,7 +2113,7 @@ void Emitter::emitFuncFunc(mlir::func::FuncOp F) {
     if (!InitSet || InitSet->getNumOperands() < 2) return;
     InitExprByName[PNStr] =
         dropOuterParens(this->exprFor(InitSet->getOperand(1)));
-    SuppressedOps.insert(IECall.getOperation());
+    SuppressedOps.insert(IECall);
     SuppressedOps.insert(Cmp.getOperation());
     SuppressedOps.insert(Guard.getOperation());
     SuppressedOps.insert(InitSet);
