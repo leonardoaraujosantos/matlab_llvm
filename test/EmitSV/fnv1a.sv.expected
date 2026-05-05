@@ -30,7 +30,7 @@ module fnv1a (
             // uint32(byte_in) runtime cast isn't synthesizable on a
             // runtime operand).
             b32 = 32'sd0;
-            if ((byte_in & 8'sd1) != 0) begin
+            if (8'(byte_in[0:0]) != 0) begin
                 b32 = b32 + 32'sd1;
             end
             if ((byte_in & 8'sd2) != 0) begin

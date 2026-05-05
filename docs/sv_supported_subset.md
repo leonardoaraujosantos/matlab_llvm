@@ -27,12 +27,12 @@ Yosys synthesis.
 | Static fi-arrays | ✅ | `fi(zeros(1, N), ...)` with constant indices |
 | Persistent fi-arrays | ✅ | Lowers to N parallel scalar persistents (Stage F) |
 | Boolean ports declared `bool` | ✅ | Renders as `logic` |
+| Bit-slicing `x(hi:lo)` | ✅ | Constant range on scalar int; result widens to next native size |
 | `% hdl: port(...)` pragmas | ✅ | Drives port type/width on function-only files |
 | Multi-source persistent reads (regfile) | ✅ | New: HW-aware slot type-unification (B-workstream) |
 | Verbatim source comments preserved | ✅ | Forwarded as `// ...` SV comments |
 | Hierarchical multi-module | ⚠️ | `matlab.call` to user fn; return-type refinement gap |
 | Dynamic indexing on persistent arrays | ❌ | `mem(i) = v` with runtime `i` not lowered |
-| Bit slicing / range select | ❌ | No `x(7:0)` syntax support |
 | `for` loop with runtime trip count | ❌ | Only constant-bound loops, get fully unrolled |
 | `while` | ❌ | Rejected at HW legalize |
 | Recursion | ❌ | Rejected at HW legalize |
@@ -295,14 +295,40 @@ Inline the sub-function body into the parent. The optimizer will
 deduplicate logic at synthesis. Until the multi-module emission
 gap is closed, this is the recommended pattern.
 
-### Need a bit slice (`x(7:0)`)?
+### Bit-slicing — `x(hi:lo)` syntax
 
-Use bitwise mask + shift:
+Constant-range indexing on a scalar integer extracts a bit-slice. The
+result is an unsigned scalar of the rounded-up next-native width
+(1, 8, 16, 32, or 64). MATLAB itself treats `x(7:0)` on a scalar as
+an empty array, so this overlay doesn't shadow valid MATLAB code —
+it's strictly an HDL extension.
 
 ```matlab
-low_byte = bitand(x, uint16(255));     % x[7:0]
-high_byte = bitshift(bitand(x, uint16(65280)), -8); % x[15:8]
+% hdl: port(x, fi, unsigned, 32, 0)
+low_byte   = x(7:0);     % uint8: bits 7..0    → SV `x[7:0]`
+high_byte  = x(31:24);   % uint8: high byte    → SV `x[31:24]`
+top_bit    = x(31:31);   % logical: MSB        → SV `x[31:31]`
+low_word   = x(15:0);    % uint16: low half    → SV `x[15:0]`
+three_bit  = x(6:4);     % 3-bit slice → uint8 → SV `8'(x[6:4])`
+twelve_bit = x(23:12);   % 12-bit  → uint16    → SV `16'(x[23:12])`
 ```
+
+Constraints:
+  - The range must be a literal `hi:lo` (no explicit step) with
+    `hi >= lo >= 0` and `hi < bitwidth(x)`.
+  - The source must be a typed scalar integer (port pragma, function
+    parameter, or anchored via the `+ uint8(0)` snapshot pattern for
+    persistent reads).
+  - Slice width must be 1..64.
+  - Bit-select rendering as a clean `x[hi:lo]` only fires when the
+    source is a function port (its SV-level width matches its MLIR
+    width). Slices on intermediate values lower to `arith.shrui` /
+    `arith.trunci` / `arith.andi` and render via the generic
+    `<W>'(...)` size cast — same gates, slightly noisier syntax.
+
+For non-constant or LHS-side slicing (`y(7:0) = v`), use the
+bitand+bitshift workaround — full bit-vector concatenation and
+write-side slicing aren't yet supported.
 
 ## See also
 

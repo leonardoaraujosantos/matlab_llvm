@@ -772,6 +772,39 @@ std::string Emitter::renderInlineExpr(mlir::Operation *Op) {
         << exprFor(S.getFalseValue()) << ")";
     return Out.str();
   }
+  // Bit-slice peephole: render `trunci(shrui(x, K))` as `x[K+W-1:K]`
+  // and `trunci(x)` (i.e. lo==0) as `x[W-1:0]`. Pure cosmetic — the
+  // generic `W'(...)` cast below is also correct, but bit-select reads
+  // as the canonical HDL idiom for byte/word/bit extraction. The
+  // peephole only fires when `Src` is a `mlir::BlockArgument` (i.e. a
+  // function port) — its SV-level width is the MLIR width, so the
+  // bit-select bound check using `SrcITy.getWidth()` matches the
+  // signal's actual SV declaration. Other sources (persistent register
+  // reads via the f64/i64 runtime ABI, intermediate computations) get
+  // the generic `W'(...)` rendering since their MLIR width can differ
+  // from their SV-level width.
+  if (N == "arith.trunci") {
+    mlir::Value Src = Op->getOperand(0);
+    unsigned W = widthOf(Op->getResult(0).getType());
+    int64_t Lo = -1;
+    if (auto *Sh = Src.getDefiningOp())
+      if (Sh->getName().getStringRef() == "arith.shrui")
+        if (auto C = Sh->getOperand(1).getDefiningOp<mlir::arith::ConstantOp>())
+          if (auto IA = mlir::dyn_cast<mlir::IntegerAttr>(C.getValue())) {
+            Lo = IA.getInt();
+            Src = Sh->getOperand(0);
+          }
+    if (Lo < 0) Lo = 0;  // direct trunci with implicit lo=0
+    auto SrcITy = mlir::dyn_cast<mlir::IntegerType>(Src.getType());
+    bool SrcIsPort = mlir::isa<mlir::BlockArgument>(Src);
+    if (SrcITy && W >= 1 && Lo >= 0 && SrcIsPort &&
+        (uint64_t)Lo + W <= SrcITy.getWidth()) {
+      std::ostringstream Out;
+      Out << exprFor(Src)
+          << "[" << (Lo + (int64_t)W - 1) << ":" << Lo << "]";
+      return Out.str();
+    }
+  }
   if (N == "arith.extsi" || N == "arith.extui" || N == "arith.trunci") {
     bool Signed = (N == "arith.extsi");
     unsigned W = widthOf(Op->getResult(0).getType());
@@ -888,6 +921,60 @@ std::string Emitter::renderInlineExpr(mlir::Operation *Op) {
     if (W == 0) W = widthOf(Op->getOperand(0).getType());
     std::string Inner = exprFor(Op->getOperand(0));
     return std::string(W == 1 ? "!" : "~") + Inner;
+  }
+  // Bit-slice peephole 2: `andi(trunci(shrui(x, lo)), (1<<W)-1)` is
+  // the unaligned bit-slice idiom — slice_w bits starting at position
+  // lo, zero-extended to the next native width. Render as
+  // `resW'(x[lo+slice_w-1:lo])`. The size cast handles zero-extension;
+  // the mask becomes implicit in the width-cast wrapping.
+  if (N == "arith.andi" && Op->getNumOperands() == 2) {
+    auto MaskC = Op->getOperand(1).getDefiningOp<mlir::arith::ConstantOp>();
+    auto ResI = mlir::dyn_cast<mlir::IntegerType>(
+        Op->getResult(0).getType());
+    mlir::Value LhsV = Op->getOperand(0);
+    if (MaskC && ResI) {
+      auto IA = mlir::dyn_cast<mlir::IntegerAttr>(MaskC.getValue());
+      if (IA) {
+        uint64_t Mask = (uint64_t)IA.getInt() & ((ResI.getWidth() == 64)
+            ? ~0ULL : ((1ULL << ResI.getWidth()) - 1ULL));
+        // Mask must be all-ones in the low `slice_w` bits.
+        if (Mask != 0 && ((Mask + 1) & Mask) == 0) {
+          int SliceW = 0;
+          uint64_t M = Mask;
+          while (M) { ++SliceW; M >>= 1; }
+          if ((unsigned)SliceW < ResI.getWidth()) {
+            // Walk the LHS: optional trunci, then optional shrui.
+            mlir::Value Cur = LhsV;
+            if (auto *T = Cur.getDefiningOp())
+              if (T->getName().getStringRef() == "arith.trunci")
+                Cur = T->getOperand(0);
+            int64_t Lo = 0;
+            if (auto *S = Cur.getDefiningOp())
+              if (S->getName().getStringRef() == "arith.shrui")
+                if (auto C = S->getOperand(1)
+                                 .getDefiningOp<mlir::arith::ConstantOp>())
+                  if (auto SA =
+                          mlir::dyn_cast<mlir::IntegerAttr>(C.getValue())) {
+                    Lo = SA.getInt();
+                    Cur = S->getOperand(0);
+                  }
+            auto SrcITy = mlir::dyn_cast<mlir::IntegerType>(Cur.getType());
+            // Same restriction as the trunci peephole — only fire when
+            // the source is a function port (BlockArgument) whose
+            // SV-level width matches its MLIR width.
+            bool SrcIsPort = mlir::isa<mlir::BlockArgument>(Cur);
+            if (SrcITy && Lo >= 0 && SrcIsPort &&
+                (uint64_t)Lo + SliceW <= SrcITy.getWidth()) {
+              std::ostringstream Out;
+              Out << ResI.getWidth() << "'("
+                  << exprFor(Cur)
+                  << "[" << (Lo + SliceW - 1) << ":" << Lo << "])";
+              return Out.str();
+            }
+          }
+        }
+      }
+    }
   }
   // Const-fold integer arithmetic on two integer constants. The
   // pipeline often leaves `(N - 1)` style 1-based-to-0-based index

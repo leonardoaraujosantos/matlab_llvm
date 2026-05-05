@@ -6482,6 +6482,17 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
       }
 
     mlir::Value Arr = C.Callee ? lowerExpr(*C.Callee) : mlir::Value{};
+    /* Bit-slice extension: `x(hi:lo)` on a scalar integer with a
+     * constant descending range. Sema annotated the result type as
+     * a uint scalar of the rounded-up slice width. We emit a
+     * matlab.call_builtin @bitslice with hi/lo as i64 attrs; the
+     * LowerScalarsToArith pass converts it to arith.shrui /
+     * arith.trunci / arith.andi when the operand has a typed scalar
+     * int (which the HW pipeline anchors via the snapshot pattern).
+     *
+     * Detected BEFORE lowering args, since lowering a RangeExpr emits
+     * a `matlab_range(...)` runtime call that the HW pipeline rejects.
+     */
     llvm::SmallVector<mlir::Value, 4> Idx;
     Idx.push_back(Arr);
     /* For an anon call with captures, the outlined function's signature

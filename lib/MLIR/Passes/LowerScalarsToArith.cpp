@@ -11,6 +11,7 @@
 #include <limits>
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -376,6 +377,175 @@ struct BitshiftBuiltin : public NameMatch {
   }
 };
 
+/// Lowers `matlab.subscript(typed_int, matlab.range(hi_const, lo_const))`
+/// — the bit-slice extension `x(hi:lo)` — to `arith.shrui` +
+/// `arith.trunci` + `arith.andi`. Fires only when:
+///   - the value operand has a typed scalar integer type (the snapshot
+///     pattern + RefineSlotTypes anchors this in the HW pipeline), and
+///   - the index is a `matlab.range` op with two folded i/f constant
+///     bounds and no step, with hi >= lo >= 0 and hi < bitwidth(src).
+/// The result type is the rounded-up next-native width (1, 8, 16, 32,
+/// or 64); the andi mask collapses when slice_w is one of these widths.
+struct BitsliceFromSubscript : public NameMatch {
+  BitsliceFromSubscript(mlir::MLIRContext *Ctx)
+      : NameMatch("matlab.subscript", Ctx) {}
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *Op,
+                  mlir::PatternRewriter &R) const override {
+    if (Op->getNumOperands() != 2 || Op->getNumResults() != 1)
+      return mlir::failure();
+    auto NA = Op->getAttrOfType<mlir::IntegerAttr>("nindices");
+    if (!NA || NA.getInt() != 1) return mlir::failure();
+    mlir::Value V = Op->getOperand(0);
+    auto SrcTy = mlir::dyn_cast<mlir::IntegerType>(V.getType());
+    if (!SrcTy) return mlir::failure();
+    mlir::Value Idx = Op->getOperand(1);
+    auto *RangeOp = Idx.getDefiningOp();
+    if (!RangeOp) return mlir::failure();
+    auto foldOpInt = [](mlir::Value V) -> std::optional<int64_t> {
+      auto *D = V.getDefiningOp();
+      if (!D) return std::nullopt;
+      if (auto C = mlir::dyn_cast<mlir::arith::ConstantOp>(D)) {
+        if (auto IA = mlir::dyn_cast<mlir::IntegerAttr>(C.getValue()))
+          return IA.getInt();
+        if (auto FA = mlir::dyn_cast<mlir::FloatAttr>(C.getValue()))
+          return (int64_t)FA.getValueAsDouble();
+      }
+      // matlab.const_int / matlab.const_float (pre-arith form).
+      if (auto VA = D->getAttrOfType<mlir::IntegerAttr>("value"))
+        return VA.getInt();
+      if (auto VA = D->getAttrOfType<mlir::FloatAttr>("value"))
+        return (int64_t)VA.getValueAsDouble();
+      // mlir::LLVM::ConstantOp (post-arith-to-LLVM form).
+      if (auto C = mlir::dyn_cast<mlir::LLVM::ConstantOp>(D)) {
+        if (auto IA = mlir::dyn_cast<mlir::IntegerAttr>(C.getValue()))
+          return IA.getInt();
+        if (auto FA = mlir::dyn_cast<mlir::FloatAttr>(C.getValue()))
+          return (int64_t)FA.getValueAsDouble();
+      }
+      return std::nullopt;
+    };
+    int64_t Hi = 0, Lo = 0;
+    auto N = RangeOp->getName().getStringRef();
+    if (N == "matlab.range") {
+      if (RangeOp->getNumOperands() < 2) return mlir::failure();
+      if (auto HasStep =
+              RangeOp->getAttrOfType<mlir::BoolAttr>("has_step"))
+        if (HasStep.getValue()) return mlir::failure();
+      auto FH = foldOpInt(RangeOp->getOperand(0));
+      auto FL = foldOpInt(RangeOp->getOperand(1));
+      if (!FH || !FL) return mlir::failure();
+      Hi = *FH; Lo = *FL;
+    } else if (N == "llvm.call") {
+      auto Cal = RangeOp->getAttrOfType<mlir::FlatSymbolRefAttr>("callee");
+      if (!Cal || Cal.getValue() != "matlab_range") return mlir::failure();
+      if (RangeOp->getNumOperands() != 3) return mlir::failure();
+      auto FH = foldOpInt(RangeOp->getOperand(0));
+      auto FStep = foldOpInt(RangeOp->getOperand(1));
+      auto FL = foldOpInt(RangeOp->getOperand(2));
+      if (!FH || !FStep || !FL) return mlir::failure();
+      // Implicit (no-step) ranges are emitted with step=1 by
+      // LowerTensorOps. Anything else means the user wrote an
+      // explicit step — not the bit-slice idiom.
+      if (*FStep != 1) return mlir::failure();
+      Hi = *FH; Lo = *FL;
+    } else {
+      return mlir::failure();
+    }
+    int64_t SliceW = Hi - Lo + 1;
+    unsigned SrcW = SrcTy.getWidth();
+    if (Hi < Lo || Lo < 0 || Hi >= (int64_t)SrcW ||
+        SliceW < 1 || SliceW > 64)
+      return mlir::failure();
+    unsigned ResW;
+    if      (SliceW == 1)  ResW = 1;
+    else if (SliceW <= 8)  ResW = 8;
+    else if (SliceW <= 16) ResW = 16;
+    else if (SliceW <= 32) ResW = 32;
+    else                   ResW = 64;
+    auto L = Op->getLoc();
+    mlir::Value Cur = V;
+    if (Lo > 0) {
+      auto Sh = mlir::arith::ConstantOp::create(
+          R, L, SrcTy, mlir::IntegerAttr::get(SrcTy, Lo));
+      Cur = mlir::arith::ShRUIOp::create(R, L, Cur, Sh);
+    }
+    auto ResTy = mlir::IntegerType::get(R.getContext(), ResW);
+    if (ResW < SrcW)
+      Cur = mlir::arith::TruncIOp::create(R, L, ResTy, Cur);
+    else if (ResW > SrcW)
+      Cur = mlir::arith::ExtUIOp::create(R, L, ResTy, Cur);
+    if ((unsigned)SliceW < ResW) {
+      uint64_t Mask = (SliceW == 64) ? ~0ULL : ((1ULL << SliceW) - 1ULL);
+      auto MaskC = mlir::arith::ConstantOp::create(
+          R, L, ResTy, mlir::IntegerAttr::get(ResTy, (int64_t)Mask));
+      Cur = mlir::arith::AndIOp::create(R, L, Cur, MaskC);
+    }
+    R.replaceOp(Op, Cur);
+    return mlir::success();
+  }
+};
+
+/// Lowers `matlab.call_builtin @bitslice(value) {hi, lo, src_width}`
+/// (the bit-slice extension `x(hi:lo)`) to `arith.shrui` +
+/// `arith.trunci` + `arith.andi`. Result type is the rounded-up
+/// next-native width (1, 8, 16, 32, or 64). When slice_w is one of
+/// the native widths, the andi mask collapses (mask = all-ones)
+/// and is skipped. When lo == 0, the shrui collapses too.
+struct BitsliceBuiltin : public NameMatch {
+  BitsliceBuiltin(mlir::MLIRContext *Ctx)
+      : NameMatch("matlab.call_builtin", Ctx) {}
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *Op,
+                  mlir::PatternRewriter &R) const override {
+    auto C = Op->getAttrOfType<mlir::StringAttr>("callee");
+    if (!C || C.getValue() != "bitslice") return mlir::failure();
+    if (Op->getNumOperands() != 1 || Op->getNumResults() != 1)
+      return mlir::failure();
+    mlir::Value V = Op->getOperand(0);
+    auto SrcTy = mlir::dyn_cast<mlir::IntegerType>(V.getType());
+    if (!SrcTy) return mlir::failure();
+    auto HiA = Op->getAttrOfType<mlir::IntegerAttr>("hi");
+    auto LoA = Op->getAttrOfType<mlir::IntegerAttr>("lo");
+    if (!HiA || !LoA) return mlir::failure();
+    int64_t Hi = HiA.getInt();
+    int64_t Lo = LoA.getInt();
+    int64_t SliceW = Hi - Lo + 1;
+    if (SliceW < 1 || SliceW > 64) return mlir::failure();
+    // Pick the result width: round up to next native size.
+    unsigned ResW;
+    if      (SliceW == 1)  ResW = 1;
+    else if (SliceW <= 8)  ResW = 8;
+    else if (SliceW <= 16) ResW = 16;
+    else if (SliceW <= 32) ResW = 32;
+    else                   ResW = 64;
+    auto L = Op->getLoc();
+    mlir::Value Cur = V;
+    // shrui by lo if lo > 0; the source-width carries through.
+    if (Lo > 0) {
+      auto Sh = mlir::arith::ConstantOp::create(
+          R, L, SrcTy, mlir::IntegerAttr::get(SrcTy, Lo));
+      Cur = mlir::arith::ShRUIOp::create(R, L, Cur, Sh);
+    }
+    // Truncate (or extend / no-op) to result width. Trunci only
+    // narrows; extui widens; if widths match, skip.
+    auto ResTy = mlir::IntegerType::get(R.getContext(), ResW);
+    if (ResW < SrcTy.getWidth())
+      Cur = mlir::arith::TruncIOp::create(R, L, ResTy, Cur);
+    else if (ResW > SrcTy.getWidth())
+      Cur = mlir::arith::ExtUIOp::create(R, L, ResTy, Cur);
+    // Mask if slice_w is narrower than result_w (non-aligned slice).
+    if ((unsigned)SliceW < ResW) {
+      uint64_t Mask = (SliceW == 64) ? ~0ULL : ((1ULL << SliceW) - 1ULL);
+      auto MaskC = mlir::arith::ConstantOp::create(
+          R, L, ResTy, mlir::IntegerAttr::get(ResTy, (int64_t)Mask));
+      Cur = mlir::arith::AndIOp::create(R, L, Cur, MaskC);
+    }
+    R.replaceOp(Op, Cur);
+    return mlir::success();
+  }
+};
+
 /// Lowers `matlab.call_builtin @bitcmp(a)` (bitwise NOT) to
 /// `arith.xori a, -1`. Single-operand on a scalar integer.
 struct BitCmpBuiltin : public NameMatch {
@@ -534,6 +704,8 @@ bool runLowerScalarsToArith(mlir::ModuleOp M) {
   Patterns.add<BinaryBitwiseBuiltin<mlir::arith::XOrIOp>>("bitxor", Ctx);
   Patterns.add<BitCmpBuiltin>(Ctx);
   Patterns.add<BitshiftBuiltin>(Ctx);
+  Patterns.add<BitsliceBuiltin>(Ctx);
+  Patterns.add<BitsliceFromSubscript>(Ctx);
 
   using namespace mlir::arith;
   Patterns.add<CmpToArith<CmpFPredicate::OEQ, CmpIPredicate::eq>>(

@@ -25,7 +25,7 @@ module priority_encoder (
         // come from the chain order, not from the conditions)
         // - dual-output design where both outputs are always written
         // under each branch
-        if ((req & 8'sd1) != 0) begin
+        if (8'(req[0:0]) != 0) begin
             idx = 8'sd0;
             valid = 1'b1;
         end else begin

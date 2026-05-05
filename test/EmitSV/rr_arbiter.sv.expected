@@ -29,7 +29,7 @@ module rr_arbiter (
         // `prio` value are unrolled — the synth tool collapses
         // redundant terms into one mux.
         if (p == 0) begin
-            if ((req & 8'sd1) != 0) begin
+            if (8'(req[0:0]) != 0) begin
                 grant = 8'sd0;
             end else begin
                 if ((req & 8'sd2) != 0) begin
@@ -55,7 +55,7 @@ module rr_arbiter (
                         if ((req & 8'sd8) != 0) begin
                             grant = 8'sd3;
                         end else begin
-                            if ((req & 8'sd1) != 0) begin
+                            if (8'(req[0:0]) != 0) begin
                                 grant = 8'sd0;
                             end
                         end
@@ -69,7 +69,7 @@ module rr_arbiter (
                         if ((req & 8'sd8) != 0) begin
                             grant = 8'sd3;
                         end else begin
-                            if ((req & 8'sd1) != 0) begin
+                            if (8'(req[0:0]) != 0) begin
                                 grant = 8'sd0;
                             end else begin
                                 if ((req & 8'sd2) != 0) begin
@@ -82,7 +82,7 @@ module rr_arbiter (
                     if ((req & 8'sd8) != 0) begin
                         grant = 8'sd3;
                     end else begin
-                        if ((req & 8'sd1) != 0) begin
+                        if (8'(req[0:0]) != 0) begin
                             grant = 8'sd0;
                         end else begin
                             if ((req & 8'sd2) != 0) begin

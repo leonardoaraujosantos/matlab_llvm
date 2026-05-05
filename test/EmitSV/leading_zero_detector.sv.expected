@@ -80,7 +80,7 @@ module leading_zero_detector (
                                                                     pos = 8'sd1;
                                                                     valid = 1'b1;
                                                                 end else begin
-                                                                    if ((x & 16'sd1) != 0) begin
+                                                                    if (16'(x[0:0]) != 0) begin
                                                                         pos = 8'sd0;
                                                                         valid = 1'b1;
                                                                     end else begin

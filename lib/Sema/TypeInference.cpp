@@ -1351,6 +1351,49 @@ const Type *TypeInference::visitCallOrIndex(CallOrIndex &C, Env &Env) {
         return TC.arrayOf(Arr.Elt, std::move(S));
       };
 
+      // Bit-slice extension: `x(hi:lo)` on a scalar integer with constant
+      // descending range. Only the form `x(hi:lo)` (no explicit step) with
+      // hi >= lo >= 0 and hi < bitwidth(x) is recognized. The result type
+      // rounds the slice width up to the next native int {1,8,16,32,64};
+      // bits above the slice are zero in the result. MATLAB itself treats
+      // `x(7:0)` on a scalar as an empty array, so this overlay doesn't
+      // shadow valid MATLAB code.
+      if (Arr.S.K == Shape::Rank::Scalar && isInteger(Arr.Elt) &&
+          C.Args.size() == 1) {
+        if (auto *R = dynamic_cast<const RangeExpr *>(C.Args[0])) {
+          if (!R->Step) {
+            auto FS = foldIntExpr(R->Start);
+            auto FE = foldIntExpr(R->End);
+            if (FS && FE) {
+              int64_t Hi = *FS, Lo = *FE;
+              int SrcW = 0;
+              switch (Arr.Elt) {
+              case Dtype::Int8: case Dtype::UInt8: SrcW = 8; break;
+              case Dtype::Int16: case Dtype::UInt16: SrcW = 16; break;
+              case Dtype::Int32: case Dtype::UInt32: SrcW = 32; break;
+              case Dtype::Int64: case Dtype::UInt64: SrcW = 64; break;
+              case Dtype::Logical: SrcW = 1; break;
+              case Dtype::Fixed:
+                if (Arr.FxSpec) SrcW = (int)Arr.FxSpec->WordLength;
+                break;
+              default: break;
+              }
+              int64_t SliceW = Hi - Lo + 1;
+              if (SrcW > 0 && Hi >= Lo && Lo >= 0 && Hi < SrcW &&
+                  SliceW >= 1 && SliceW <= 64) {
+                Dtype RD;
+                if      (SliceW == 1)  RD = Dtype::Logical;
+                else if (SliceW <= 8)  RD = Dtype::UInt8;
+                else if (SliceW <= 16) RD = Dtype::UInt16;
+                else if (SliceW <= 32) RD = Dtype::UInt32;
+                else                    RD = Dtype::UInt64;
+                return TC.scalar(RD);
+              }
+            }
+          }
+        }
+      }
+
       // All scalar indices collapse to a scalar element.
       bool AllScalar = true;
       for (const Expr *Arg : C.Args) {
