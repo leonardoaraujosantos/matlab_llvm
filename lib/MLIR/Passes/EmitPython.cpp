@@ -223,6 +223,13 @@ private:
   // pointer indirection collapses to a plain Python variable. Maps
   // alloca-op -> the Python identifier of the backing slot.
   llvm::DenseMap<mlir::Operation *, std::string> DirectSlots;
+  // Per-function (persistent_name → wrap-spec) for scalar persistents.
+  // Populated by the early walk below; consumed at every
+  // matlab_global_set_f64 emit site so the wrap call uses a stable
+  // (WL, signed) regardless of whether the local store carries the
+  // fi attrs or even a typed operand.
+  struct WrapSpec { int WL = 0; bool Signed = false; };
+  llvm::StringMap<WrapSpec> PersistWrapSpec;
   // Alloca ops that hold arrays (from matrix-literal materialization);
   // they render as `name = [0.0] * N`, with stores/loads going via
   // indexing.
@@ -1947,6 +1954,7 @@ void Emitter::emitFuncFunc(mlir::func::FuncOp F) {
   InlineExprs.clear();
   InlinedOps.clear();
   DirectSlots.clear();
+  PersistWrapSpec.clear();
   ArraySlots.clear();
   SuppressedOps.clear();
   BreakFlagSlots.clear();
@@ -2080,6 +2088,30 @@ void Emitter::emitFuncFunc(mlir::func::FuncOp F) {
     } else if (Callee == "matlab_persistent_get_ptr" ||
                Callee == "matlab_persistent_set_ptr") {
       IsScalarPersistent[PN.getValue()] = false;
+    }
+    /* Capture (name → wrap-spec) for every scalar persistent so
+     * later set sites can use a consistent (WL, signed) regardless
+     * of whether the local set has fi_wl attrs or even a typed
+     * operand. The first reliably-typed set wins. Signedness is
+     * recovered from (in order) the fi_signed attr, then the value
+     * operand's `matlab.unsigned` marker (set on uintN constants),
+     * and defaults to signed for plain iN integers. */
+    if (Callee == "matlab_global_set_f64" && Op->getNumOperands() == 2) {
+      auto WLA = Op->getAttrOfType<mlir::IntegerAttr>("fi_wl");
+      auto SgnA = Op->getAttrOfType<mlir::IntegerAttr>("fi_signed");
+      auto It = PersistWrapSpec.find(PN.getValue());
+      if (It == PersistWrapSpec.end()) {
+        if (WLA && SgnA) {
+          PersistWrapSpec[PN.getValue()] = {(int)WLA.getInt(),
+                                             SgnA.getInt() != 0};
+        } else if (auto IT = mlir::dyn_cast<mlir::IntegerType>(
+                       Op->getOperand(1).getType())) {
+          bool Sgn = true;
+          if (auto *Def = Op->getOperand(1).getDefiningOp())
+            if (Def->getAttr("matlab.unsigned")) Sgn = false;
+          PersistWrapSpec[PN.getValue()] = {(int)IT.getWidth(), Sgn};
+        }
+      }
     }
     if (Callee == "matlab_global_get_f64" && Op->getNumResults() == 1) {
       this->Names[Op->getResult(0)] = FnSym + "." + PN.getValue().str();
@@ -2231,6 +2263,7 @@ void Emitter::emitClassMethod(const ClassMethodInfo &CMI, int Indent) {
   InlineExprs.clear();
   InlinedOps.clear();
   DirectSlots.clear();
+  PersistWrapSpec.clear();
   ArraySlots.clear();
   SuppressedOps.clear();
   BreakFlagSlots.clear();
@@ -2384,6 +2417,7 @@ void Emitter::emitLLVMFunc(mlir::LLVM::LLVMFuncOp F) {
   InlineExprs.clear();
   InlinedOps.clear();
   DirectSlots.clear();
+  PersistWrapSpec.clear();
   ArraySlots.clear();
   SuppressedOps.clear();
   BreakFlagSlots.clear();
@@ -2526,6 +2560,55 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
       // as the script's exit status is dropped with it.
       return;
     }
+    // Wrap each integer-typed return operand to the operand's
+    // declared bit width so the Python ref matches the SV DUT's
+    // two's-complement output truncation. HDL-targeted code expects
+    // the SV emitter's `output logic [W-1:0]` to wrap-on-overflow;
+    // without the wrap, mathematical results that exceed W bits
+    // leak through to the harness and mismatch the DUT's truncated
+    // sample. Default signed (the SV emitter's default for
+    // multi-bit ports); the `matlab.unsigned` marker on a uintN
+    // cast flips it to unsigned wrap.
+    // Walk back through transparent ops (loads, casts, persistent
+    // gets) looking for a `matlab.unsigned` marker. The marker
+    // tracks back to a uintN literal / cast in source; absence
+    // defaults to signed.
+    auto isUnsignedRoot = [&](mlir::Value V) -> bool {
+      mlir::Value Cur = V;
+      for (int Hops = 0; Hops < 8; ++Hops) {
+        auto *Def = Cur.getDefiningOp();
+        if (!Def) return false;
+        if (Def->getAttr("matlab.unsigned")) return true;
+        if (auto LC = mlir::dyn_cast<mlir::LLVM::CallOp>(Def))
+          if (auto S = LC.getCallee())
+            if (*S == "matlab_global_get_f64") {
+              auto It = PersistWrapSpec.find(
+                  Def->getAttrOfType<mlir::StringAttr>("persistent_name")
+                      .getValue());
+              if (It != PersistWrapSpec.end()) return !It->second.Signed;
+              return false;
+            }
+        if (mlir::isa<mlir::arith::ExtUIOp, mlir::arith::TruncIOp,
+                      mlir::arith::ShRUIOp, mlir::arith::AndIOp>(Def))
+          return true;
+        if (mlir::isa<mlir::arith::ExtSIOp, mlir::arith::ShRSIOp>(Def))
+          return false;
+        if (Def->getNumOperands() == 0) return false;
+        Cur = Def->getOperand(0);
+      }
+      return false;
+    };
+    auto wrapRet = [&](mlir::Value V) -> std::string {
+      std::string Body = this->stmtExpr(V);
+      auto IT = mlir::dyn_cast<mlir::IntegerType>(V.getType());
+      // Skip i1 — booleans don't need wrap (and fi_wrap_s on
+      // 1-bit converts 1 → -1 which the harness then mismatches).
+      if (!IT || IT.getWidth() < 2 || IT.getWidth() > 64) return Body;
+      bool Sgn = !isUnsignedRoot(V);
+      return std::string(Sgn ? "rt.fi_wrap_s(" : "rt.fi_wrap_u(") +
+             dropOuterParens(Body) + ", " +
+             std::to_string(IT.getWidth()) + ")";
+    };
     if (R.getNumOperands() == 0) {
       // Void return at the end of the body is the implicit Python
       // function exit; only emit `return` when it sits before more code.
@@ -2535,14 +2618,14 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
       indent(Indent); OS << "return\n";
     } else if (R.getNumOperands() == 1) {
       indent(Indent);
-      OS << "return " << this->stmtExpr(R.getOperand(0)) << "\n";
+      OS << "return " << wrapRet(R.getOperand(0)) << "\n";
     } else {
       // Multi-return: `return a, b, c` (Python tuple).
       indent(Indent);
       OS << "return ";
       for (unsigned i = 0; i < R.getNumOperands(); ++i) {
         if (i) OS << ", ";
-        OS << this->stmtExpr(R.getOperand(i));
+        OS << wrapRet(R.getOperand(i));
       }
       OS << "\n";
     }
@@ -3506,8 +3589,49 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
       auto PF = Op.getAttrOfType<mlir::StringAttr>("persistent_fn");
       if (PN && PF) {
         indent(Indent);
+        // Wrap to the declared fi width when the call carries
+        // fi_wl / fi_signed attrs so the Python ref matches the SV
+        // DUT's two's-complement overflow behaviour. HDL-style
+        // designs (CRC, FNV, LFSR, integrators) routinely depend on
+        // wrap-on-overflow and would diverge under MATLAB's default
+        // saturate semantics. Bare global_set_f64 (no fi attrs)
+        // emits the value as-is.
+        std::string V = this->stmtExpr(Op.getOperand(1));
+        // First try the local set's fi attrs, then this persistent's
+        // pre-computed wrap-spec from the early walk (covers cases
+        // where the body's set has a `none`-typed operand because
+        // some intermediate matlab.* op stripped the type but the
+        // init or another set anchored the spec). Fallback to the
+        // operand's MLIR type with a default-unsigned guess for
+        // bare iN stores.
+        auto WLA = Op.getAttrOfType<mlir::IntegerAttr>("fi_wl");
+        auto SgnA = Op.getAttrOfType<mlir::IntegerAttr>("fi_signed");
+        int WL = 0;
+        bool Signed = false;
+        bool HasSpec = false;
+        if (WLA && SgnA) {
+          WL = (int)WLA.getInt();
+          Signed = SgnA.getInt() != 0;
+          HasSpec = true;
+        } else {
+          auto It = PersistWrapSpec.find(PN.getValue());
+          if (It != PersistWrapSpec.end()) {
+            WL = It->second.WL;
+            Signed = It->second.Signed;
+            HasSpec = true;
+          } else if (auto IT = mlir::dyn_cast<mlir::IntegerType>(
+                         Op.getOperand(1).getType())) {
+            WL = (int)IT.getWidth();
+            Signed = false;
+            if (WL >= 1 && WL <= 64) HasSpec = true;
+          }
+        }
+        if (HasSpec) {
+          V = std::string(Signed ? "rt.fi_wrap_s(" : "rt.fi_wrap_u(") +
+              dropOuterParens(V) + ", " + std::to_string(WL) + ")";
+        }
         OS << PF.getValue().str() << "." << PN.getValue().str()
-           << " = " << this->stmtExpr(Op.getOperand(1)) << "\n";
+           << " = " << V << "\n";
         return;
       }
     }

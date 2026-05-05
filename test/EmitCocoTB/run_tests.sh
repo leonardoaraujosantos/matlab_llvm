@@ -88,10 +88,20 @@ declare -a CASES=(
   galois_lfsr
   # Tier-5 — added after the Python-emit slot-triplet handler shipped.
   # `matlab.alloc / matlab.store / matlab.load` now collapse to plain
-  # Python variable reads/writes via DirectSlots. crc8 clears
-  # cleanly; crc32 / cordic_step still trip on saturation divergence
-  # (class 3) — they emit fine now but math overflows uint32 / int16.
+  # Python variable reads/writes via DirectSlots.
   crc8
+  # Tier-6 — added after the saturation pass: persistent stores +
+  # function returns wrap to declared widths via rt.fi_wrap_*, and
+  # _eq tolerates sign-interpretation mismatch (compares modulo
+  # 2^WL when both values are integer-typed). Three of the eight
+  # original class-3 modules still fail because their SV does
+  # mid-computation wrap on every i16 op — needs per-op wrap
+  # rather than just at register / return boundaries.
+  aes_round
+  barrel_shifter
+  crc32
+  fnv1a
+  multi_cycle_mul
 )
 
 pass=0; fail=0

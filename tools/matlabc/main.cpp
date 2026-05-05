@@ -6694,12 +6694,27 @@ renderCocotbHarness(const CocotbFuncSpec &S, const std::string &Stem,
   append("        return unpack_fi(int(getattr(dut, name).value), signed, wl, fl)\n");
   append("    return [unpack_fi(int(getattr(dut, name)[k].value), signed, wl, fl) "
          "for k in range(alen)]\n\n");
-  append("def _eq(dut_val, ref_val, tol=1e-9):\n");
+  append("def _eq(dut_val, ref_val, tol=1e-9, wl=0, fl=0):\n");
   append("    if isinstance(dut_val, list):\n");
   append("        ref_seq = ref_val if isinstance(ref_val, (list, tuple)) else [ref_val]\n");
   append("        if len(dut_val) != len(ref_seq): return False\n");
-  append("        return all(abs(float(a) - float(b)) <= tol for a, b in zip(dut_val, ref_seq))\n");
-  append("    return abs(float(dut_val) - float(ref_val)) <= tol\n\n");
+  append("        return all(_eq(a, b, tol, wl, fl) for a, b in zip(dut_val, ref_seq))\n");
+  append("    if abs(float(dut_val) - float(ref_val)) <= tol:\n");
+  append("        return True\n");
+  /* Sign-interpretation tolerance. The SV emitter doesn't carry the
+   * source-side signedness for output ports — its default is
+   * `output logic signed [W-1:0]`, while the Python ref's wrap may
+   * choose unsigned. The bit pattern is identical; only the
+   * harness-side decode differs. Compare the two values modulo
+   * 2^WL when both are integer-typed and FL = 0 (the common case
+   * for HDL ports), which collapses sign ambiguity. */
+  append("    if wl and 1 <= wl <= 64 and fl == 0:\n");
+  append("        try:\n");
+  append("            mask = (1 << wl) - 1\n");
+  append("            return (int(dut_val) & mask) == (int(ref_val) & mask)\n");
+  append("        except (TypeError, ValueError):\n");
+  append("            return False\n");
+  append("    return False\n\n");
   append("def _gen_random(signed, wl, fl, alen):\n");
   append("    if alen == 0:\n");
   append("        lo, hi = fi_range(signed, wl, fl)\n");
@@ -6995,9 +7010,9 @@ renderCocotbHarness(const CocotbFuncSpec &S, const std::string &Stem,
    * before the rising edge, post-edge after. Mealy outputs match
    * pre-edge; Moore / counter / FIR outputs match post-edge. */
   append("                pre_val = pre_samp[j] if pre_samp else None\n");
-  append("                post_match = _eq(post_val, ref_val)\n");
+  append("                post_match = _eq(post_val, ref_val, wl=wl, fl=fl)\n");
   append("                pre_match = (pre_val is not None and "
-         "_eq(pre_val, ref_val))\n");
+         "_eq(pre_val, ref_val, wl=wl, fl=fl))\n");
   append("                if post_match or pre_match:\n");
   append("                    continue\n");
   append("                cocotb.log.error(\n");

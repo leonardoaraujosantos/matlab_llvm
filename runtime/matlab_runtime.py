@@ -964,6 +964,33 @@ def fi_sat_u64(x, WL):
     hi = (1 << WL) - 1
     return _fi_builtins.max(0, _fi_builtins.min(hi, int(x)))
 
+def fi_wrap_u(x, WL):
+    """Two's-complement-style wrap to WL unsigned bits.
+
+    SV-faithful counterpart to fi_sat_u64: HDL designs that intentionally
+    overflow (CRC accumulators, FNV hashes, LFSRs) need wrap, not
+    saturate. Cocotb harnesses route persistent stores through this
+    helper when the source declares the register as fi(_, _, WL, F)
+    and the SV DUT uses non-saturating arithmetic."""
+    if WL == 0: return 0
+    if WL >= 64: return int(x) & ((1 << 64) - 1)
+    return int(x) & ((1 << WL) - 1)
+
+def fi_wrap_s(x, WL):
+    """Two's-complement-style wrap to WL signed bits.
+
+    SV-faithful counterpart to fi_sat_s64. Stores into signed fi
+    registers whose values overflow get wrapped to two's complement
+    (the SV behaviour) rather than saturated (the MATLAB default).
+    """
+    if WL == 0: return 0
+    if WL >= 64: return int(x)
+    mask = (1 << WL) - 1
+    v = int(x) & mask
+    if v & (1 << (WL - 1)):
+        v -= (1 << WL)
+    return v
+
 def fi_round_floor_s(x, shift):
     if shift == 0: return int(x)
     if shift >= 64: return -1 if int(x) < 0 else 0
