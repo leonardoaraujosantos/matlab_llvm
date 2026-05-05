@@ -7410,12 +7410,71 @@ int emitCocotbHarness(const char *Self, const Options &Opts,
       if (At && Brk) ++PersistCount;
       P += 10;
     }
-    if (PersistCount >= 2) {
-      std::cerr << "       hint: " << PersistCount
-                << " `persistent` decls — pipelined; if outputs are "
-                   "registered, add `% cocotb: latency("
-                << (PersistCount - 1) << ")` near the `% hdl: port(...)` "
-                   "lines, or pass `-cocotb-latency=" << (PersistCount - 1)
+    /* B4 — precise auto-latency. Two complementary hints:
+     *
+     * 1. Scalar-persistent chain. N independent persistents that
+     *    feed each other in source order produce a visible delay
+     *    of N - 1 cycles (MATLAB blocking semantics: the body's
+     *    `stage1 = in; stage2 = stage1` reads stage1's same-cycle
+     *    written value, so the SV's two-flop chain shows up as a
+     *    one-cycle delay against the Python ref).
+     *
+     * 2. fi-array shift register. `fi(zeros(1, N), ...)` declares
+     *    an N-element shift register; Stage F splits it into N
+     *    parallel scalar persistents, and the natural pipeline
+     *    depth from input to the last tap is N. Scan source for
+     *    `zeros(1, N)` (or `zeros(1,N)`) literals and pick the
+     *    largest N as the shift-register depth.
+     *
+     * The hint reports the larger of the two estimates — fixtures
+     * with both shapes (sync_2ff is shape 1, sequential_processor
+     * is shape 2, fir_asic_pipelined is shape 2 with reinforcing
+     * shape 1) end up with the right L. */
+    int ZerosDepth = 0;
+    {
+      size_t Q = 0;
+      while ((Q = Body.find("zeros(", Q)) != std::string::npos) {
+        Q += 6;  // skip "zeros("
+        // Look for `1,` (with optional whitespace) and pick out N.
+        size_t Cur = Q;
+        while (Cur < Body.size() && std::isspace((unsigned char)Body[Cur]))
+          ++Cur;
+        if (Cur < Body.size() && Body[Cur] == '1') {
+          ++Cur;
+          while (Cur < Body.size() && std::isspace((unsigned char)Body[Cur]))
+            ++Cur;
+          if (Cur < Body.size() && Body[Cur] == ',') {
+            ++Cur;
+            while (Cur < Body.size() &&
+                   std::isspace((unsigned char)Body[Cur]))
+              ++Cur;
+            int N = 0;
+            while (Cur < Body.size() &&
+                   std::isdigit((unsigned char)Body[Cur])) {
+              N = N * 10 + (Body[Cur] - '0');
+              ++Cur;
+            }
+            if (N > 1 && N > ZerosDepth) ZerosDepth = N;
+          }
+        }
+      }
+    }
+    int ChainEstimate = (PersistCount >= 2) ? (PersistCount - 1) : 0;
+    int Suggested = std::max(ChainEstimate, ZerosDepth);
+    if (Suggested >= 1) {
+      std::cerr << "       hint: ";
+      if (ZerosDepth > 0)
+        std::cerr << ZerosDepth << "-tap fi-array shift register"
+                  << (PersistCount >= 2
+                      ? std::string(" (+ ") + std::to_string(PersistCount)
+                          + " scalar persistents)"
+                      : std::string())
+                  << " — pipelined";
+      else
+        std::cerr << PersistCount << " `persistent` decls — pipelined";
+      std::cerr << "; if outputs are registered, add `% cocotb: latency("
+                << Suggested << ")` near the `% hdl: port(...)` "
+                   "lines, or pass `-cocotb-latency=" << Suggested
                 << "` on the CLI.\n";
     }
   }

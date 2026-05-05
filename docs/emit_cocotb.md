@@ -437,21 +437,32 @@ the same machinery:
   range. For ALU-style blocks this exercises every operand value
   the port can hold, complementing random testing.
 
-### v3.4 — Pipeline-latency hint ✅ shipped
+### v3.4 / B4 — Precise pipeline-latency hint ✅ shipped
 
-**Status.** Implemented as a soft hint. When the source has more
-than one `persistent` declaration and neither the CLI flag nor a
+**Status.** Implemented. When neither the CLI flag nor a
 `% cocotb: latency(N)` pragma supplied a value, the matlabc emit
-message prints a one-line suggestion pointing at both surfaces:
-`hint: <N> persistent decls — pipelined; if outputs are
-registered, add % cocotb: latency(<N-1>) near the % hdl: port(...)
-lines, or pass -cocotb-latency=<N-1> on the CLI`.
+message prints a per-fixture suggestion based on two complementary
+signals:
 
-The user still picks the right L explicitly. Inferring it
-precisely from MATLAB sources is harder than it looks (some
-DUTs have parallel non-pipelined persistents — counter, FSMs —
-where L=0 is correct despite having state); the hint nudges
-without overstepping.
+1. **Scalar-persistent chain.** N independent `persistent <var>;`
+   declarations that feed each other in source order produce a
+   visible delay of N-1 cycles (MATLAB blocking semantics: the
+   body's `stage1 = in; stage2 = stage1` reads stage1's same-cycle
+   written value, so the SV's two-flop chain shows up as a
+   one-cycle delay against the Python ref). Source: `sync_2ff` →
+   hint L=1.
+2. **fi-array shift register.** `fi(zeros(1, N), ...)` declares an
+   N-element shift register; Stage F splits it into N parallel
+   scalar persistents and the natural pipeline depth from input to
+   the last tap is N. Source: `sequential_processor` (`zeros(1,
+   4)` → hint L=4) and `fir_asic_pipelined` (multi-stage with N=4
+   → hint L=4).
+
+The hint reports the larger of the two estimates, so designs that
+mix shapes (FIR-style pipelined fixtures with a few extra scalar
+state registers alongside the fi-array shift register) get the
+right value too. Counter / FSM modules with a single self-feeding
+persistent get no hint — L=0 is correct despite having state.
 
 ### v3.4.x — `% cocotb: latency(N)` source pragma ✅ shipped
 
