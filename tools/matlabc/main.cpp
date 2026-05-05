@@ -176,6 +176,11 @@ struct Options {
   std::string CocotbOutDir;
   int CocotbVectors = 100;
   int CocotbLatency = 0;
+  /* True iff the user passed `-cocotb-latency=N` on the command
+   * line (any value, including 0). Lets a `% cocotb: latency(N)`
+   * source pragma supply a default per-fixture value while still
+   * letting the CLI override when the user knows better. */
+  bool CocotbLatencyExplicit = false;
   /* Seed for the harness's `random.seed(...)` call. Default 42 so
    * the harness output is byte-stable across runs (golden-diff
    * friendly). User overrides via `-cocotb-seed=N` to explore
@@ -242,6 +247,7 @@ bool parseArgs(int Argc, char **Argv, Options &Opts, const char *&Prog) {
         std::cerr << "-cocotb-latency must be a non-negative integer\n";
         return false;
       }
+      Opts.CocotbLatencyExplicit = true;
     }
     else if (A.size() > 13 && A.substr(0, 13) == "-cocotb-seed=") {
       Opts.CocotbSeed = std::atoi(std::string(A.substr(13)).c_str());
@@ -5963,6 +5969,12 @@ struct CocotbStim {
 struct CocotbPragmaScan {
   std::map<std::string, int> Holds;
   std::map<std::string, CocotbStim> Stim;
+  /* `% cocotb: latency(N)` — the harness's pipeline-latency value
+   * lifted into the source so a fixture's right-by-default L
+   * lives next to the design. Equivalent to passing
+   * `-cocotb-latency=N` on the command line. The CLI flag wins
+   * when the user passes it explicitly (Options::CocotbLatencyExplicit). */
+  std::optional<int> Latency;
 };
 
 /* Scan the original .m source for `% cocotb:` directives and
@@ -5974,6 +5986,7 @@ struct CocotbPragmaScan {
  *   % cocotb: stimulus(<name>, impulse, <value>)
  *   % cocotb: stimulus(<name>, constant, <value>)
  *   % cocotb: stimulus(<name>, ramp, <start>, <stride>)
+ *   % cocotb: latency(<cycles>)
  *
  * Unrecognised directives are silently ignored (forward-compat
  * with future v3 items). */
@@ -6056,6 +6069,11 @@ scanCocotbPragmas(const std::string &SrcPath) {
         S.Arg2 = std::strtod(Args[3].c_str(), nullptr);
       } else continue;
       if (!Args[0].empty()) Out.Stim[Args[0]] = S;
+      continue;
+    }
+    if (Head == "latency" && Args.size() == 1) {
+      int L = std::atoi(Args[0].c_str());
+      if (L >= 0) Out.Latency = L;
       continue;
     }
   }
@@ -7133,6 +7151,16 @@ int emitCocotbHarness(const char *Self, const Options &Opts,
   for (auto &Kv : Pragmas.Holds) warnOrphan(Kv.first, "hold");
   for (auto &Kv : Pragmas.Stim)  warnOrphan(Kv.first, "stimulus");
 
+  /* `% cocotb: latency(N)` applies when the user didn't pass
+   * `-cocotb-latency=` on the command line — same convention the
+   * rest of the pragma surface uses (CLI wins for explicit overrides,
+   * pragma fills the per-fixture default). The effective latency is
+   * threaded through the rest of this function; `Opts` is const so
+   * we keep a local. */
+  int EffectiveLatency = Opts.CocotbLatency;
+  if (!Opts.CocotbLatencyExplicit && Pragmas.Latency)
+    EffectiveLatency = *Pragmas.Latency;
+
   /* v3.2: when a sibling `test_<stem>.m` exists, replay its
    * stimulus instead of driving random vectors. The extractor is
    * best-effort — if the tester uses a shape outside the recognised
@@ -7157,7 +7185,7 @@ int emitCocotbHarness(const char *Self, const Options &Opts,
   }
 
   std::string Harness = renderCocotbHarness(*Spec, Stem, Opts.CocotbVectors,
-                                             Opts.CocotbLatency,
+                                             EffectiveLatency,
                                              Opts.CocotbSeed,
                                              Stimulus ? &*Stimulus : nullptr);
   std::string Makefile = renderCocotbMakefile(Stem, Spec->Name);
@@ -7222,19 +7250,19 @@ int emitCocotbHarness(const char *Self, const Options &Opts,
               << Stem << ".m";
   else
     std::cerr << ", " << Opts.CocotbVectors << " random vectors";
-  if (Opts.CocotbLatency > 0)
-    std::cerr << ", latency=" << Opts.CocotbLatency;
+  if (EffectiveLatency > 0)
+    std::cerr << ", latency=" << EffectiveLatency;
   std::cerr << ")\n";
 
   /* v3.4: auto-detect a pipeline-depth hint by counting `persistent`
    * declarations in the source. The full register-chain depth is
    * harder to reason about (some DUTs have non-pipelined parallel
    * persistents), so this is informational only — printed when
-   * the user didn't pass `-cocotb-latency` explicitly and the
+   * neither the CLI flag nor a pragma supplied a latency and the
    * count suggests a pipelined design. The user still picks the
    * right L; this just nudges them toward "non-zero L is
    * probably needed". */
-  if (Spec->Sequential && Opts.CocotbLatency == 0) {
+  if (Spec->Sequential && EffectiveLatency == 0) {
     std::ifstream Sf(Input);
     std::string Body((std::istreambuf_iterator<char>(Sf)),
                       std::istreambuf_iterator<char>());
@@ -7250,9 +7278,10 @@ int emitCocotbHarness(const char *Self, const Options &Opts,
     if (PersistCount >= 2) {
       std::cerr << "       hint: " << PersistCount
                 << " `persistent` decls — pipelined; if outputs are "
-                   "registered, try `-cocotb-latency=" << (PersistCount - 1)
-                << "` (or run `just verify-cocotb FILE " << (PersistCount - 1)
-                << "` to test).\n";
+                   "registered, add `% cocotb: latency("
+                << (PersistCount - 1) << ")` near the `% hdl: port(...)` "
+                   "lines, or pass `-cocotb-latency=" << (PersistCount - 1)
+                << "` on the CLI.\n";
     }
   }
   return 0;

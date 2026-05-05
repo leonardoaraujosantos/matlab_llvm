@@ -65,7 +65,7 @@ matlabc -emit-cocotb FILE.m \
 | `-emit-cocotb` | — | Selects the harness-emit mode. |
 | `-cocotb-out=DIR` | `<input-dir>/<stem>_cocotb` | Output directory. Created if missing. |
 | `-cocotb-vectors=N` | 100 | Number of random stimulus vectors driven. |
-| `-cocotb-latency=L` | 0 | Pipeline latency. DUT output at cycle `k+L` is compared against the reference's response to cycle `k`'s inputs. See [Pipeline latency](#pipeline-latency-cocotb-latencyl). |
+| `-cocotb-latency=L` | 0 | Pipeline latency. DUT output at cycle `k+L` is compared against the reference's response to cycle `k`'s inputs. See [Pipeline latency](#pipeline-latency-cocotb-latencyl). The same value can live in the source as `% cocotb: latency(L)`; the CLI flag wins when both are present. |
 | `-cocotb-seed=N` | 42 | Seed for the harness's `random` calls. Override to explore different randomization schedules without editing the generated file. |
 
 ### Output directory layout
@@ -439,21 +439,47 @@ the same machinery:
 ### v3.4 — Pipeline-latency hint ✅ shipped
 
 **Status.** Implemented as a soft hint. When the source has more
-than one `persistent` declaration and the user didn't pass
-`-cocotb-latency`, the matlabc emit message prints a one-line
-suggestion: `hint: <N> persistent decls — pipelined; if outputs
-are registered, try -cocotb-latency=<N-1>`.
+than one `persistent` declaration and neither the CLI flag nor a
+`% cocotb: latency(N)` pragma supplied a value, the matlabc emit
+message prints a one-line suggestion pointing at both surfaces:
+`hint: <N> persistent decls — pipelined; if outputs are
+registered, add % cocotb: latency(<N-1>) near the % hdl: port(...)
+lines, or pass -cocotb-latency=<N-1> on the CLI`.
 
 The user still picks the right L explicitly. Inferring it
 precisely from MATLAB sources is harder than it looks (some
 DUTs have parallel non-pipelined persistents — counter, FSMs —
 where L=0 is correct despite having state); the hint nudges
-without overstepping. For the 8 fixtures this matches: counter
-(1 persistent → no hint, L=0 correct), fsm modules (1 → L=0),
-sequential_processor (1 surface persistent, but the FIR pipeline
-internally chains via the array — L=4 set by user via stimulus
-pragma), fir_asic_pipelined (4 persistents → hint suggests L=3,
-user knows L=2 is right for `ovfl`).
+without overstepping.
+
+### v3.4.x — `% cocotb: latency(N)` source pragma ✅ shipped
+
+**Status.** Implemented. The same value the `-cocotb-latency` CLI
+flag carries can now live in the source next to the `% hdl:
+port(...)` lines:
+
+```matlab
+function [y, ovfl] = fir_asic_pipelined(x, gain, reset)
+    %#codegen
+    % hdl: port(x, fi, signed, 16, 14)
+    % hdl: port(gain, fi, signed, 16, 12)
+    % hdl: port(reset, bool)
+    % cocotb: stimulus(gain, constant, 0.25)
+    % cocotb: stimulus(reset, constant, 0)
+    % cocotb: latency(4)
+    ...
+```
+
+Resolution rules:
+- If the user passes `-cocotb-latency=N` (any N, including 0), the
+  CLI flag wins — explicit override semantics.
+- Else, if the source has `% cocotb: latency(N)`, that's used.
+- Else, default 0.
+
+This lets the CI lane drop hardcoded `(module, latency)` tuples and
+just sweep every fixture by name. The matching fixtures
+(`fir_asic_pipelined`, `sequential_processor`) carry the pragma
+in-source.
 
 ### v3.5 — CI lane (`cocotb-tests`) ✅ shipped
 

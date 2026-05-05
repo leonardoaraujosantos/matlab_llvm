@@ -38,72 +38,54 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 WORK_DIR="$(mktemp -d -t matlabc_cocotb.XXXXXX)"
 trap 'rm -rf "$WORK_DIR"' EXIT
 
-# (module, latency) pairs. The latency mirrors what
-# `just test-cocotb` uses; mismatches here mean a fixture
-# regression, not a missing toolchain.
-#
-# fir_asic_pipelined runs at latency=4 with gain held constant
-# (via `% cocotb: stimulus(gain, constant, 0.25)` in the source).
-# The 4-cycle latency reflects the actual pipeline depth:
-# delay_line → reg_products → reg_acc → reg_output. Holding gain
-# constant ensures the SV's per-cycle gain×reg_acc multiplication
-# matches the Python reference's single-call full-pipe computation
-# (otherwise the SV multiplies x0's accumulator by gain at cycle
-# 3, while Python pairs them at the same call).
+# Module list. Per-fixture latency lives in the source via
+# `% cocotb: latency(N)` pragmas — the runner just walks every
+# entry here without needing a hardcoded latency value. Modules
+# blocked by Python-emit gaps (matlab.alloc / matlab.call_builtin
+# handlers, SV-vs-Python fi saturation divergence, float-vs-int
+# bitwise typing) are tracked separately — see
+# docs/emit_cocotb.md "Python-emit gaps" — and not in this sweep.
 declare -a CASES=(
-  # Tier-1 modules — verified since v3.5 ship.
-  "alu_16bit:0"
-  "counter_0_to_10:0"
-  "fir_asic_pipelined:4"
-  "mealy_fsm:0"
-  "moore_fsm:0"
-  "mux_4to_1_16bit:0"
-  "vector_processor:0"
-  "sequential_processor:4"
+  # Tier-1 — verified since v3.5 ship.
+  alu_16bit
+  counter_0_to_10
+  fir_asic_pipelined        # `% cocotb: latency(4)` in source
+  mealy_fsm
+  moore_fsm
+  mux_4to_1_16bit
+  vector_processor
+  sequential_processor      # `% cocotb: latency(4)` in source
   # Tier-2 — added after the 39-module sweep classified each
   # against the cocotb harness (random vectors at L=0). Every
-  # module here passed without fixture-side tuning. Modules whose
-  # reference path runs into Python-emitter gaps (matlab.not /
-  # matlab.alloc / matlab.call_builtin handlers, SV-vs-Python fi
-  # saturation divergence, float-vs-int bitwise typing) are
-  # tracked separately — see docs/emit_cocotb.md "Python-emit
-  # gaps" — and not yet in this sweep.
-  "computed_state_fsm:0"
-  "hamming74:0"
-  "i2c_bit_bang:0"
-  "leading_zero_detector:0"
-  "median3:0"
-  "mmap_periph:0"
-  "popcount:0"
-  "priority_encoder:0"
-  "pwm:0"
-  "regfile:0"
-  "rr_arbiter:0"
-  "spi_master:0"
-  "uart_rx:0"
-  "up_down_counter:0"
+  # module here passed without fixture-side tuning.
+  computed_state_fsm
+  hamming74
+  i2c_bit_bang
+  leading_zero_detector
+  median3
+  mmap_periph
+  popcount
+  priority_encoder
+  pwm
+  regfile
+  rr_arbiter
+  spi_master
+  uart_rx
+  up_down_counter
   # Tier-3 — added after the Python-emit `matlab.not` handler shipped.
-  # Five of the six "matlab.not unhandled" modules from the original
-  # sweep clear after the handler. async_fifo also unblocks at the
-  # emit stage but then trips on float-vs-int bitwise typing in the
-  # ref (`wp ^ rp` where wp/rp come from f64 ABI loads); deferred to
-  # the float-vs-int fix.
-  "axi_handshake:0"
-  "booth_mul:0"
-  "edge_detector:0"
-  "fifo:0"
-  "manchester_enc:0"
+  axi_handshake
+  booth_mul
+  edge_detector
+  fifo
+  manchester_enc
 )
 
 pass=0; fail=0
-for entry in "${CASES[@]}"; do
-  m=${entry%%:*}
-  L=${entry##*:}
+for m in "${CASES[@]}"; do
   out_dir="$WORK_DIR/$m"
-  printf "  %-26s L=%s  " "$m" "$L"
+  printf "  %-26s " "$m"
   if ! "$MATLABC" -emit-cocotb \
                   -cocotb-out="$out_dir" \
-                  -cocotb-latency=$L \
                   "$ROOT/examples/hdl/$m.m" \
                   > "$out_dir.emit.log" 2>&1; then
     echo "EMIT FAIL"

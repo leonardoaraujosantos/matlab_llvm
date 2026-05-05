@@ -5,6 +5,7 @@ function [y, ovfl] = fir_asic_pipelined(x, gain, reset)
     % hdl: port(reset, bool)
     % cocotb: stimulus(gain, constant, 0.25)
     % cocotb: stimulus(reset, constant, 0)
+    % cocotb: latency(4)
 
     % Tipos de dados constantes
     h = fi([0.1, 0.2, 0.3, 0.4], 1, 16, 15);
