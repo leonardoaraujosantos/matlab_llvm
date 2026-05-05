@@ -12,14 +12,8 @@ module persistent_shift (
     logic signed [31:0] r_pre;
     logic signed [31:0] r_pre_1;
     logic signed [31:0] r_pre_2;
-    logic signed [15:0] buf_0;
-    logic signed [15:0] buf_0_next;
-    logic signed [15:0] buf_2;
-    logic signed [15:0] buf_2_next;
-    logic signed [15:0] buf_1;
-    logic signed [15:0] buf_1_next;
-    logic signed [15:0] buf_3;
-    logic signed [15:0] buf_3_next;
+    logic signed [15:0] buf_ [4];
+    logic signed [15:0] buf__next [4];
 
 
     function automatic logic signed [31:0] sat_s32_b17(input logic signed [31:0] arg);
@@ -41,31 +35,31 @@ module persistent_shift (
     endfunction
 
     always_comb begin
-        buf_0_next = buf_0;
-        buf_2_next = buf_2;
-        buf_1_next = buf_1;
-        buf_3_next = buf_3;
-        buf_0_next = x;
-        buf_1_next = 16'(buf_0);
-        buf_2_next = 16'(buf_1);
-        buf_3_next = 16'(buf_2);
-        r_pre = 32'(buf_0) + 32'(buf_1);
-        r_pre_1 = sat_s32_b17(r_pre) + 32'(buf_2);
-        r_pre_2 = sat_s32_b18(r_pre_1) + 32'(buf_3);
+        buf__next[0] = buf_[0];
+        buf__next[2] = buf_[2];
+        buf__next[1] = buf_[1];
+        buf__next[3] = buf_[3];
+        buf__next[0] = x;
+        buf__next[1] = 16'(buf_[0]);
+        buf__next[2] = 16'(buf_[1]);
+        buf__next[3] = 16'(buf_[2]);
+        r_pre = 32'(buf_[0]) + 32'(buf_[1]);
+        r_pre_1 = sat_s32_b17(r_pre) + 32'(buf_[2]);
+        r_pre_2 = sat_s32_b18(r_pre_1) + 32'(buf_[3]);
         r = 19'(sat_s32_b19(r_pre_2));
     end
 
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            buf_0 <= 16'sd0;
-            buf_2 <= 16'sd0;
-            buf_1 <= 16'sd0;
-            buf_3 <= 16'sd0;
+            buf_[0] <= 16'sd0;
+            buf_[2] <= 16'sd0;
+            buf_[1] <= 16'sd0;
+            buf_[3] <= 16'sd0;
         end else begin
-            buf_0 <= buf_0_next;
-            buf_2 <= buf_2_next;
-            buf_1 <= buf_1_next;
-            buf_3 <= buf_3_next;
+            buf_[0] <= buf__next[0];
+            buf_[2] <= buf__next[2];
+            buf_[1] <= buf__next[1];
+            buf_[3] <= buf__next[3];
         end
     end
 

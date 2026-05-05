@@ -262,6 +262,19 @@ private:
   // functions. Each entry carries the recognized get/set sites the
   // emitter routes through register signals.
   llvm::SmallVector<HWPersistentInfo, 4> Persists;
+  // RAM inference. After the per-register name reservation, the
+  // post-Stage-F shape often has N persistents named
+  // `<base>_0`..`<base>_{N-1}` from splitting a `fi(zeros(1, N))`
+  // shift-register / regfile. Collapse them into a single SV
+  // unpacked-array memory at emit time so the synthesis tool sees
+  // `logic [W-1:0] <base> [N];` + per-element next-state writes
+  // (which it recognises as memory) rather than N independent flops
+  // + a decoded write-enable network. Each member's Name / NextSig
+  // is rewritten to `<base>[K]` / `<base>_next[K]`. Maps:
+  //   RegArrayGroups: `<base>` → array length
+  //   RegArrayMember: persistent index → `<base>` (group it belongs to)
+  llvm::StringMap<unsigned> RegArrayGroups;
+  llvm::DenseMap<unsigned, std::string> RegArrayMember;
   // Quick lookup: get-call op → index into Persists. The result of
   // each recognized get_f64 renders as the register's current-value
   // signal name.
@@ -1646,8 +1659,33 @@ void Emitter::declarePrelude(mlir::func::FuncOp F) {
       auto T = mlir::IntegerType::get(F.getContext(), P.Width);
       Ty = svType(T, P.Signed);
     }
+    // RAM inference: array members render as `<base> [N]` once
+    // for the whole group. Skip the per-element decl here; the
+    // group decl is emitted below in a single line per group.
+    if (RegArrayMember.count(R)) continue;
     OS << "    " << Ty << " " << P.Name << ";\n";
-    OS << "    " << Ty << " " << P.Name << "_next;\n";
+    OS << "    " << Ty << " " << P.NextSig << ";\n";
+  }
+  // RAM-inferred groups: one `logic [W-1:0] <base> [N];` decl per
+  // group + matching `<base>_next [N]`. Emitted after individual
+  // persistents so register-style and array-style decls cluster
+  // separately in the prelude. Pick the first member of each
+  // group to recover (Width, Signed) — uniformity verified during
+  // group construction.
+  for (auto &Kv : RegArrayGroups) {
+    llvm::StringRef Base = Kv.first();
+    unsigned N = Kv.second;
+    // Find first member's persistent index to recover type info.
+    unsigned FirstR = 0;
+    for (auto &MK : RegArrayMember)
+      if (MK.second == Base) {
+        if (FirstR == 0 || MK.first < FirstR) FirstR = MK.first;
+      }
+    auto &P = Persists[FirstR];
+    auto T = mlir::IntegerType::get(F.getContext(), P.Width);
+    std::string Ty = svType(T, P.Signed);
+    OS << "    " << Ty << " " << Base.str() << " [" << N << "];\n";
+    OS << "    " << Ty << " " << Base.str() << "_next [" << N << "];\n";
   }
   if (!PreludeDecls.empty() || !Persists.empty()) OS << "\n";
 }
@@ -2326,7 +2364,7 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
               for (size_t i = 0; i < FI.Cases.size(); ++i) {
                 if (FI.Cases[i].first == V) {
                   indent(Indent);
-                  OS << P.Name << "_next = " << FI.CaseNames[i] << ";\n";
+                  OS << P.NextSig << " = " << FI.CaseNames[i] << ";\n";
                   return;
                 }
               }
@@ -2376,14 +2414,14 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
       if (ValExpr.empty() && VW > P.Width) {
         if (auto Lit = tryReemitConstAtWidth(Val, P.Width, P.Signed)) {
           indent(Indent);
-          OS << P.Name << "_next = " << *Lit << ";\n";
+          OS << P.NextSig << " = " << *Lit << ";\n";
           return;
         }
       }
       if (ValExpr.empty()) ValExpr = exprFor(Val);
 
       indent(Indent);
-      OS << P.Name << "_next = ";
+      OS << P.NextSig << " = ";
       // Wrap with an explicit `<W>'(...)` size cast whenever the
       // value's IR width differs from the register's declared
       // width — both directions: truncate when wider (the canonical
@@ -2924,7 +2962,7 @@ void Emitter::emitBody(mlir::func::FuncOp F) {
   // that don't assign `_next` would infer a latch.
   for (auto &P : Persists) {
     indent(2);
-    OS << P.Name << "_next = " << P.Name << ";\n";
+    OS << P.NextSig << " = " << P.Name << ";\n";
   }
   // Likewise drive every output port to 0 by default — `func.return`
   // will overwrite later, but if the function has any conditional
@@ -3096,14 +3134,9 @@ bool Emitter::emitModuleForFunc(mlir::func::FuncOp F) {
     while (Used.contains(Base)) Base += "_";
     Used.insert(Base);
     P.Name = Base;
-    std::string NextSig = Base + "_next";
-    while (Used.contains(NextSig)) NextSig += "_";
-    Used.insert(NextSig);
-    // Stash the chosen `_next` name in a side-channel via the get/set
-    // tables: GetSiteToReg/SetSiteToReg map to the register index, and
-    // we look up `Persists[idx].Name` / `Persists[idx].Name + "_next"`
-    // at emit time. (We keep `_next` implicit — `Name + "_next"` is
-    // computed as needed.)
+    P.NextSig = Base + "_next";
+    while (Used.contains(P.NextSig)) P.NextSig += "_";
+    Used.insert(P.NextSig);
     for (auto *Op : P.Gets) GetSiteToReg[Op] = R;
     for (auto *Op : P.Sets) SetSiteToReg[Op] = R;
     // The isempty guard is suppressed during always_comb emission
@@ -3132,6 +3165,105 @@ bool Emitter::emitModuleForFunc(mlir::func::FuncOp F) {
           Suppress.insert(Op);
       }
     });
+  }
+
+  // RAM inference v1. Detect groups of persistents whose names
+  // match `<base>_<digit>` for consecutive indices 0..N-1 (the
+  // shape Stage F produces when splitting an `fi(zeros(1, N), ...)`
+  // persistent fi-array into N parallel scalar registers). Rewrite
+  // each member's Name to `<base>[K]` and NextSig to
+  // `<base>_next[K]`, and remember the group so the prelude emits
+  // a single SV unpacked-array decl instead of N individual
+  // decls. Synth tools recognize the resulting pattern and infer a
+  // memory rather than N flops + decoded write enables.
+  //
+  // Only runs when N >= 4 — below that the per-flop form is
+  // smaller and the synth tool's memory-vs-flops heuristic
+  // typically picks flops anyway. The `<base>` is preserved as the
+  // SV array name; collisions against existing identifiers (a
+  // signal also named `<base>`) bump the array name to a fresh
+  // form before claiming it.
+  RegArrayGroups.clear();
+  {
+    llvm::StringMap<llvm::SmallVector<unsigned, 4>> Groups;
+    auto trailingDigit = [](llvm::StringRef N,
+                            std::string &Base, int &Idx) -> bool {
+      auto Last = N.find_last_of('_');
+      if (Last == llvm::StringRef::npos || Last == 0 ||
+          Last + 1 == N.size()) return false;
+      llvm::StringRef Tail = N.substr(Last + 1);
+      for (char C : Tail) if (!std::isdigit((unsigned char)C)) return false;
+      try {
+        Idx = std::stoi(Tail.str());
+      } catch (...) { return false; }
+      Base = N.substr(0, Last).str();
+      return true;
+    };
+    for (unsigned R = 0; R < Persists.size(); ++R) {
+      std::string Base; int Idx = 0;
+      if (!trailingDigit(Persists[R].Name, Base, Idx)) continue;
+      Groups[Base].push_back(R);
+    }
+    for (auto &Kv : Groups) {
+      const auto &Idxs = Kv.second;
+      if (Idxs.size() < 4) continue;
+      // Sort by the trailing digit and verify a contiguous 0..N-1
+      // sequence with consistent width / signedness.
+      llvm::SmallVector<std::pair<int, unsigned>, 8> Sorted;
+      for (unsigned R : Idxs) {
+        std::string Base; int Idx = 0;
+        trailingDigit(Persists[R].Name, Base, Idx);
+        Sorted.push_back({Idx, R});
+      }
+      std::sort(Sorted.begin(), Sorted.end());
+      bool Contiguous = true;
+      for (unsigned I = 0; I < Sorted.size(); ++I)
+        if (Sorted[I].first != (int)I) { Contiguous = false; break; }
+      if (!Contiguous) continue;
+      auto &P0 = Persists[Sorted[0].second];
+      bool UniformShape = true;
+      for (auto &S : Sorted) {
+        auto &P = Persists[S.second];
+        if (P.Width != P0.Width || P.Signed != P0.Signed) {
+          UniformShape = false; break;
+        }
+      }
+      if (!UniformShape) continue;
+      // Pick a fresh array name. The base might already be in
+      // `Used` (e.g. a signal coincidentally named `regs`) or
+      // collide with a SV reserved word (`buf`, `bit`, etc.); bump
+      // until it's free.
+      std::string ArrName = sanitize(Kv.first());
+      static const llvm::StringSet<> SvReserved = {
+        "buf", "bit", "byte", "int", "integer", "logic", "wire",
+        "reg", "real", "shortint", "shortreal", "longint", "module",
+        "endmodule", "begin", "end", "if", "else", "case", "endcase",
+        "default", "while", "for", "do", "always", "always_comb",
+        "always_ff", "always_latch", "input", "output", "inout",
+        "function", "endfunction", "task", "endtask", "return",
+        "signed", "unsigned", "static", "automatic", "const",
+        "typedef", "struct", "union", "enum", "package", "endpackage",
+        "import", "export", "interface", "endinterface", "class",
+        "endclass", "extends", "virtual", "pure", "rand", "randc",
+        "constraint", "solve", "before", "soft", "disable", "fork",
+        "join", "join_any", "join_none", "wait", "assign", "force",
+        "release", "deassign", "posedge", "negedge", "edge", "in",
+        "is", "this", "super", "null", "new"};
+      while (Used.contains(ArrName) || SvReserved.contains(ArrName))
+        ArrName += "_";
+      Used.insert(ArrName);
+      std::string NextArrName = ArrName + "_next";
+      while (Used.contains(NextArrName)) NextArrName += "_";
+      Used.insert(NextArrName);
+      RegArrayGroups[ArrName] = (unsigned)Sorted.size();
+      // Rewrite each member's Name + NextSig to the array form.
+      for (auto &S : Sorted) {
+        auto &P = Persists[S.second];
+        P.Name = ArrName + "[" + std::to_string(S.first) + "]";
+        P.NextSig = NextArrName + "[" + std::to_string(S.first) + "]";
+        RegArrayMember[S.second] = ArrName;
+      }
+    }
   }
 
   // Phase 4 v2 — recognize FSM cascades on persistent registers
@@ -4056,7 +4188,7 @@ void Emitter::emitAlwaysFF() {
   OS << "        end else begin\n";
   for (auto &P : Persists) {
     indent(3);
-    OS << P.Name << " <= " << P.Name << "_next;\n";
+    OS << P.Name << " <= " << P.NextSig << ";\n";
   }
   OS << "        end\n";
   OS << "    end\n";

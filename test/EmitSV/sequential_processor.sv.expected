@@ -26,14 +26,8 @@ module sequential_processor (
     logic signed [63:0] y_pre;
     logic signed [63:0] y_sat;
     logic signed [63:0] y_pre_1;
-    logic signed [15:0] delay_line_0;
-    logic signed [15:0] delay_line_0_next;
-    logic signed [15:0] delay_line_2;
-    logic signed [15:0] delay_line_2_next;
-    logic signed [15:0] delay_line_1;
-    logic signed [15:0] delay_line_1_next;
-    logic signed [15:0] delay_line_3;
-    logic signed [15:0] delay_line_3_next;
+    logic signed [15:0] delay_line [4];
+    logic signed [15:0] delay_line_next [4];
 
 
     function automatic logic signed [63:0] sat_s64_b16(input logic signed [63:0] arg);
@@ -62,38 +56,38 @@ module sequential_processor (
 
     always_comb begin
         h = '{default: '0};
-        delay_line_0_next = delay_line_0;
-        delay_line_2_next = delay_line_2;
-        delay_line_1_next = delay_line_1;
-        delay_line_3_next = delay_line_3;
+        delay_line_next[0] = delay_line[0];
+        delay_line_next[2] = delay_line[2];
+        delay_line_next[1] = delay_line[1];
+        delay_line_next[3] = delay_line[3];
         h[0] = 16'sd3276;
         h[1] = 16'sd6553;
         h[2] = 16'sd9830;
         h[3] = 16'sd13107;
         if (reset) begin
-            delay_line_0_next = 16'sd0;
-            delay_line_1_next = 16'sd0;
-            delay_line_2_next = 16'sd0;
-            delay_line_3_next = 16'sd0;
+            delay_line_next[0] = 16'sd0;
+            delay_line_next[1] = 16'sd0;
+            delay_line_next[2] = 16'sd0;
+            delay_line_next[3] = 16'sd0;
         end
-        delay_line_0_next = x;
-        delay_line_1_next = 16'(delay_line_0);
-        delay_line_2_next = 16'(delay_line_1);
-        delay_line_3_next = 16'(delay_line_2);
+        delay_line_next[0] = x;
+        delay_line_next[1] = 16'(delay_line[0]);
+        delay_line_next[2] = 16'(delay_line[1]);
+        delay_line_next[3] = 16'(delay_line[2]);
         acc = 64'sd0;
-        prod = 32'(delay_line_0) * 32'($signed(h[0]));
+        prod = 32'(delay_line[0]) * 32'($signed(h[0]));
         acc_pre = acc + 64'($signed(prod));
         acc_sat = sat_s64_b37(acc_pre);
         acc = sat_s64_b36(acc_sat);
-        prod = 32'(delay_line_1) * 32'($signed(h[1]));
+        prod = 32'(delay_line[1]) * 32'($signed(h[1]));
         acc_pre_1 = acc + 64'($signed(prod));
         acc_sat_1 = sat_s64_b37(acc_pre_1);
         acc = sat_s64_b36(acc_sat_1);
-        prod = 32'(delay_line_2) * 32'($signed(h[2]));
+        prod = 32'(delay_line[2]) * 32'($signed(h[2]));
         acc_pre_2 = acc + 64'($signed(prod));
         acc_sat_2 = sat_s64_b37(acc_pre_2);
         acc = sat_s64_b36(acc_sat_2);
-        prod = 32'(delay_line_3) * 32'($signed(h[3]));
+        prod = 32'(delay_line[3]) * 32'($signed(h[3]));
         acc_pre_3 = acc + 64'($signed(prod));
         acc_sat_3 = sat_s64_b37(acc_pre_3);
         acc = sat_s64_b36(acc_sat_3);
@@ -106,15 +100,15 @@ module sequential_processor (
 
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            delay_line_0 <= 16'sd0;
-            delay_line_2 <= 16'sd0;
-            delay_line_1 <= 16'sd0;
-            delay_line_3 <= 16'sd0;
+            delay_line[0] <= 16'sd0;
+            delay_line[2] <= 16'sd0;
+            delay_line[1] <= 16'sd0;
+            delay_line[3] <= 16'sd0;
         end else begin
-            delay_line_0 <= delay_line_0_next;
-            delay_line_2 <= delay_line_2_next;
-            delay_line_1 <= delay_line_1_next;
-            delay_line_3 <= delay_line_3_next;
+            delay_line[0] <= delay_line_next[0];
+            delay_line[2] <= delay_line_next[2];
+            delay_line[1] <= delay_line_next[1];
+            delay_line[3] <= delay_line_next[3];
         end
     end
 

@@ -551,6 +551,15 @@ struct HWPersistentInfo {
   // isempty guard). The emitter renders these as assignments to the
   // register's `_next` signal.
   llvm::SmallVector<mlir::Operation *, 4> Sets;
+  // Explicit next-state signal name. Defaults to `Name + "_next"`
+  // for ordinary scalar persistents, but the SV emitter overrides
+  // both Name and NextSig when a group of persistents is coalesced
+  // into a single SV unpacked-array memory: e.g. `regs_0` / `regs_1`
+  // become `regs[0]` / `regs[1]` (Name) with NextSig
+  // `regs_next[0]` / `regs_next[1]`. Storing it explicitly avoids
+  // string-concat surprises (`regs[0]` + `_next` would emit
+  // `regs[0]_next`, which isn't valid SV).
+  std::string NextSig;
 };
 
 /// Walk a func.func and gather every recognized persistent variable.

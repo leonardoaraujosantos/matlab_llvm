@@ -24,26 +24,14 @@ module fir_asic_pipelined (
     logic signed [63:0] acc_temp_sat_3;
     logic signed [63:0] full_res;
     logic signed [63:0] reg_output_pre;
-    logic signed [31:0] reg_products_2;
-    logic signed [31:0] reg_products_2_next;
-    logic signed [15:0] delay_line_0;
-    logic signed [15:0] delay_line_0_next;
     logic signed [35:0] reg_acc;
     logic signed [35:0] reg_acc_next;
-    logic signed [15:0] delay_line_2;
-    logic signed [15:0] delay_line_2_next;
-    logic signed [31:0] reg_products_1;
-    logic signed [31:0] reg_products_1_next;
-    logic signed [31:0] reg_products_3;
-    logic signed [31:0] reg_products_3_next;
-    logic signed [15:0] delay_line_1;
-    logic signed [15:0] delay_line_1_next;
     logic signed [15:0] reg_output;
     logic signed [15:0] reg_output_next;
-    logic signed [15:0] delay_line_3;
-    logic signed [15:0] delay_line_3_next;
-    logic signed [31:0] reg_products_0;
-    logic signed [31:0] reg_products_0_next;
+    logic signed [15:0] delay_line [4];
+    logic signed [15:0] delay_line_next [4];
+    logic signed [31:0] reg_products [4];
+    logic signed [31:0] reg_products_next [4];
 
 
     function automatic logic signed [63:0] sat_s64_b16(input logic signed [63:0] arg);
@@ -66,16 +54,16 @@ module fir_asic_pipelined (
 
     always_comb begin
         h = '{default: '0};
-        reg_products_2_next = reg_products_2;
-        delay_line_0_next = delay_line_0;
+        reg_products_next[2] = reg_products[2];
+        delay_line_next[0] = delay_line[0];
         reg_acc_next = reg_acc;
-        delay_line_2_next = delay_line_2;
-        reg_products_1_next = reg_products_1;
-        reg_products_3_next = reg_products_3;
-        delay_line_1_next = delay_line_1;
+        delay_line_next[2] = delay_line[2];
+        reg_products_next[1] = reg_products[1];
+        reg_products_next[3] = reg_products[3];
+        delay_line_next[1] = delay_line[1];
         reg_output_next = reg_output;
-        delay_line_3_next = delay_line_3;
-        reg_products_0_next = reg_products_0;
+        delay_line_next[3] = delay_line[3];
+        reg_products_next[0] = reg_products[0];
         // Tipos de dados constantes
         h[0] = 16'sd3276;
         h[1] = 16'sd6553;
@@ -83,39 +71,39 @@ module fir_asic_pipelined (
         h[3] = 16'sd13107;
         // Estágio 3: Após Ganho e Saturação
         if (reset) begin
-            delay_line_0_next = 16'sd0;
-            delay_line_1_next = 16'sd0;
-            delay_line_2_next = 16'sd0;
-            delay_line_3_next = 16'sd0;
-            reg_products_0_next = 32'sd0;
-            reg_products_1_next = 32'sd0;
-            reg_products_2_next = 32'sd0;
-            reg_products_3_next = 32'sd0;
+            delay_line_next[0] = 16'sd0;
+            delay_line_next[1] = 16'sd0;
+            delay_line_next[2] = 16'sd0;
+            delay_line_next[3] = 16'sd0;
+            reg_products_next[0] = 32'sd0;
+            reg_products_next[1] = 32'sd0;
+            reg_products_next[2] = 32'sd0;
+            reg_products_next[3] = 32'sd0;
             reg_acc_next = 36'sd0;
             reg_output_next = 16'sd0;
         end
         // --- ESTÁGIO 1: Shift Register e Multiplicação ---
-        delay_line_0_next = x;
-        delay_line_1_next = 16'(delay_line_0);
-        delay_line_2_next = 16'(delay_line_1);
-        delay_line_3_next = 16'(delay_line_2);
-        reg_products_0_next = (32'(delay_line_0) * 32'($signed(h[0])));
-        reg_products_1_next = (32'(delay_line_1) * 32'($signed(h[1])));
-        reg_products_2_next = (32'(delay_line_2) * 32'($signed(h[2])));
-        reg_products_3_next = (32'(delay_line_3) * 32'($signed(h[3])));
+        delay_line_next[0] = x;
+        delay_line_next[1] = 16'(delay_line[0]);
+        delay_line_next[2] = 16'(delay_line[1]);
+        delay_line_next[3] = 16'(delay_line[2]);
+        reg_products_next[0] = (32'(delay_line[0]) * 32'($signed(h[0])));
+        reg_products_next[1] = (32'(delay_line[1]) * 32'($signed(h[1])));
+        reg_products_next[2] = (32'(delay_line[2]) * 32'($signed(h[2])));
+        reg_products_next[3] = (32'(delay_line[3]) * 32'($signed(h[3])));
         // --- ESTÁGIO 2: Acumulação (Soma) ---
         // O valor de 'acc' é guardado em um registrador para o próximo ciclo
         acc_temp = 64'sd0;
-        acc_temp_pre = acc_temp + 64'($signed(reg_products_0));
+        acc_temp_pre = acc_temp + 64'($signed(reg_products[0]));
         acc_temp_sat = sat_s64_b37(acc_temp_pre);
         acc_temp = sat_s64_b36(acc_temp_sat);
-        acc_temp_pre_1 = acc_temp + 64'($signed(reg_products_1));
+        acc_temp_pre_1 = acc_temp + 64'($signed(reg_products[1]));
         acc_temp_sat_1 = sat_s64_b37(acc_temp_pre_1);
         acc_temp = sat_s64_b36(acc_temp_sat_1);
-        acc_temp_pre_2 = acc_temp + 64'($signed(reg_products_2));
+        acc_temp_pre_2 = acc_temp + 64'($signed(reg_products[2]));
         acc_temp_sat_2 = sat_s64_b37(acc_temp_pre_2);
         acc_temp = sat_s64_b36(acc_temp_sat_2);
-        acc_temp_pre_3 = acc_temp + 64'($signed(reg_products_3));
+        acc_temp_pre_3 = acc_temp + 64'($signed(reg_products[3]));
         acc_temp_sat_3 = sat_s64_b37(acc_temp_pre_3);
         acc_temp = sat_s64_b36(acc_temp_sat_3);
         reg_acc_next = 36'(acc_temp);
@@ -129,27 +117,27 @@ module fir_asic_pipelined (
 
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            reg_products_2 <= 32'sd0;
-            delay_line_0 <= 16'sd0;
+            reg_products[2] <= 32'sd0;
+            delay_line[0] <= 16'sd0;
             reg_acc <= 36'sd0;
-            delay_line_2 <= 16'sd0;
-            reg_products_1 <= 32'sd0;
-            reg_products_3 <= 32'sd0;
-            delay_line_1 <= 16'sd0;
+            delay_line[2] <= 16'sd0;
+            reg_products[1] <= 32'sd0;
+            reg_products[3] <= 32'sd0;
+            delay_line[1] <= 16'sd0;
             reg_output <= 16'sd0;
-            delay_line_3 <= 16'sd0;
-            reg_products_0 <= 32'sd0;
+            delay_line[3] <= 16'sd0;
+            reg_products[0] <= 32'sd0;
         end else begin
-            reg_products_2 <= reg_products_2_next;
-            delay_line_0 <= delay_line_0_next;
+            reg_products[2] <= reg_products_next[2];
+            delay_line[0] <= delay_line_next[0];
             reg_acc <= reg_acc_next;
-            delay_line_2 <= delay_line_2_next;
-            reg_products_1 <= reg_products_1_next;
-            reg_products_3 <= reg_products_3_next;
-            delay_line_1 <= delay_line_1_next;
+            delay_line[2] <= delay_line_next[2];
+            reg_products[1] <= reg_products_next[1];
+            reg_products[3] <= reg_products_next[3];
+            delay_line[1] <= delay_line_next[1];
             reg_output <= reg_output_next;
-            delay_line_3 <= delay_line_3_next;
-            reg_products_0 <= reg_products_0_next;
+            delay_line[3] <= delay_line_next[3];
+            reg_products[0] <= reg_products_next[0];
         end
     end
 
