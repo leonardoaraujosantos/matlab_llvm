@@ -276,29 +276,24 @@ lockstep — `ref(impulse).y` at call k matches `DUT.y` at cycle
 
 ### Python-emit gaps blocking cocotb expansion
 
-The remaining 12 modules in `examples/hdl/` aren't in the lane
-because the **Python emitter** (the source of truth for the
-reference model) has gaps that surface only on HDL-style code.
-These aren't cocotb-harness defects — `-emit-systemverilog`
-ships clean RTL for every one — but the harness compares against
-a Python reference, so a broken reference blocks verification.
-
 | Class | Modules | Root cause |
 |---|---|---|
-| ~~`matlab.not` not handled~~ | ~~6~~ → 0 | ✅ Fixed; see Tier-3 above. |
-| ~~Harness-side CDC timing~~ | ~~1~~ → 0 | ✅ False alarm — `sync_2ff` just needed `% cocotb: latency(1)`. The MATLAB-source's blocking-assignment semantics (`stage1=async_in; stage2=stage1` reads stage1 post-write) collapses the visible delay from 2 cycles to 1 against an SV DUT that uses non-blocking assignment. The Persist-count hint already pointed at L=1 (`PersistCount-1`); the fix was wiring it via the new `% cocotb: latency(N)` source pragma. |
-| `matlab.alloc` not handled | `crc8`, `crc32`, `cordic_step` | Specific slot patterns produced by Stage F / RefineSlotTypes survive into the Python lowering with `matlab.alloc` ops the emitter doesn't recognise. |
-| `matlab.call_builtin` unhandled | `cic_decimator` | A builtin (likely `bitshift` in a specific operand shape) isn't in the Python emitter's dispatch table. |
-| Float-vs-int bitwise ops | `async_fifo`, `cordic_pipe`, `fnv1a`, `galois_lfsr` | The Python ref emits `wp ^ rp` / `s2y >> 1` / `h ^ b32` / `state & 1` where the LHS is a Python `float` (the `+ 0` snapshot of an f64 ABI load). Python (unlike MATLAB / C / SV) doesn't auto-coerce — it raises `TypeError: unsupported operand type(s) for >>: 'float' and 'int'`. Fix: wrap fi-typed values in `int(...)` before bitwise ops. |
-| SV vs Python fi-saturation divergence | `aes_round`, `barrel_shifter`, `multi_cycle_mul` | The SV DUT correctly truncates / saturates `uint{8,16,32}` results on overflow. The Python ref computes the unbounded mathematical result. E.g. `bitshift(uint16(41905), 6)` → SV: 60480 (saturated / truncated), Python: 2681920 (unbounded). |
+| ~~`matlab.not` not handled~~ | ~~6~~ → 0 | ✅ Fixed. |
+| ~~Harness-side CDC timing~~ | ~~1~~ → 0 | ✅ Fixed via `% cocotb: latency(1)` for `sync_2ff`. |
+| ~~`matlab.alloc` not handled~~ | ~~3~~ → 0 | ✅ Fixed by slot-triplet handler. |
+| ~~`matlab.call_builtin` unhandled~~ | ~~1~~ → 0 | ✅ Fixed by `bitshift` / `bitand` / `bitxor` / `matlab_persistent_isempty` matlab.call_builtin handlers. |
+| ~~Float-vs-int bitwise ops~~ | ~~4~~ → 0 | ✅ Fixed via per-op wrap + logical-right-shift mask. |
+| ~~SV vs Python fi-saturation divergence~~ | ~~3~~ → 0 | ✅ Fixed via `rt.fi_wrap_*` on persistent stores + function returns + sign-modulo `_eq` fallback. |
+| **Integrator-chain blocking-vs-nonblocking** | `cic_decimator` | The MATLAB source `int1 = int1 + x; int2 = int2 + int1` reads `int1`'s same-cycle written value (MATLAB blocking semantics), but the equivalent SV with non-blocking `int2_next = int2 + int1` reads `int1`'s pre-edge value. Each integrator stage adds one cycle of delay in SV that's invisible to the Python ref. **Source-side workaround**: snapshot every persistent into a local at the top of the body (`int1_s = int1 + fi(0, 1, WL, 0)`, ...) and use the locals everywhere afterward. **Architectural fix**: pre-snapshot all persistent reads at function entry in the Python emitter for `hdl.ports`-marked functions. The architectural fix changes Python execution semantics for all HDL-marked code and would need careful regression testing across the full corpus. |
 
-The float-vs-int cluster (4 modules) is the next-cheapest unblock
-— wrap operands of `arith.shrui` / `arith.shli` / `arith.andi` /
-`arith.ori` / `arith.xori` in `int(...)` whenever the operand
-type traces back to an f64 ABI load. The saturation cluster (3
-modules) needs a per-fi-spec wrap-and-clamp helper inserted at
-each backend-narrow op (trunci / shrui / shli that crosses a
-declared width).
+39 of 39 synthesizable HDL modules emit clean RTL via
+`-emit-systemverilog`. 38 of 39 verify cycle-exact under the
+cocotb lockstep harness. The lone holdout, `cic_decimator`, has
+an integrator chain that surfaces a fundamental MATLAB-vs-SV
+semantic divergence — its source is correct MATLAB but doesn't
+match the SV's non-blocking-assignment integrator-chain delay.
+Tracked as a known limitation; the source-side workaround is
+documented but not applied to keep the example readable.
 
 Mode selection is automatic per-input from the source pragmas:
 
