@@ -148,6 +148,7 @@ Each compiles, lints clean, and demonstrates a category:
 
 | Module | Demonstrates |
 |---|---|
+| `aes_round` | AES MixColumns + AddRoundKey on a 32-bit word (xtime XOR network) |
 | `alu_16bit` | Combinational arithmetic + bitwise ops + signed overflow |
 | `async_fifo` | Single-clock approximation of an async FIFO with gray pointers |
 | `axi_handshake` | AXI-Stream-style register slice (valid/ready handshake) |
@@ -155,8 +156,10 @@ Each compiles, lints clean, and demonstrates a category:
 | `booth_mul` | Signed 8x8 Booth multiplier (signed counterpart to `multi_cycle_mul`) |
 | `cic_decimator` | Multi-stage CIC filter, downsample counter, sat at output |
 | `computed_state_fsm` | FSM/counter hybrid (post computed-vs-constant gatherFSMs fix) |
+| `cordic_step` | Single CORDIC iteration in rotation mode (signed shift + cond add/sub) |
 | `counter_0_to_10` | Persistent register with reset and modulo wraparound |
 | `crc8` | LFSR with XOR feedback into persistent state |
+| `crc32` | CRC-32 LFSR (IEEE 802.3 polynomial) — 32-bit XOR feedback |
 | `edge_detector` | Single-FF + bool NOT (`matlab.not` rendering) |
 | `fifo` | 4-deep synchronous FIFO with full/empty + counter pointers |
 | `fir_asic_pipelined` | 3-stage pipelined FIR with persistent fi-arrays |
@@ -164,6 +167,7 @@ Each compiles, lints clean, and demonstrates a category:
 | `hamming74` | Hamming(7,4) parity-XOR network + bit-pack output |
 | `leading_zero_detector` | 16-input LZD via reverse-priority chain |
 | `mealy_fsm` | 2-state Mealy with output dependence on input |
+| `median3` | 3-input median filter via min/max compare-select network |
 | `mmap_periph` | 4-register memory-mapped peripheral with read/write decode |
 | `moore_fsm` | 3-state Moore, output decode from state register |
 | `multi_cycle_mul` | 16x8 shift-add multiplier with 3-state FSM |
@@ -172,6 +176,7 @@ Each compiles, lints clean, and demonstrates a category:
 | `priority_encoder` | 8-input priority encoder via long if/elseif chain |
 | `pwm` | Counter + comparator output gating |
 | `regfile` | Multi-source persistent read (post type-unification fix) |
+| `rr_arbiter` | 4-input round-robin arbiter with rotating priority pointer |
 | `sequential_processor` | MAC pipeline with explicit `acc(:)` pattern |
 | `sync_2ff` | Classic 2-FF clock domain crossing synchronizer |
 | `uart_rx` | 11-state FSM (post FSM-cascade aggregation fix) |
