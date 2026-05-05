@@ -637,19 +637,96 @@ bool Emitter::buildInlineExpr(mlir::Operation &Op, std::string &Expr) {
          + exprFor(Op.getOperand(1)) + ")";
     return true;
   };
+  // Per-op wrap for integer overflow. Python's int has unbounded
+  // precision, so chained arith on iN values diverges from the SV
+  // DUT's mid-computation truncation: `(a + b) * c` in i16 wraps
+  // twice in SV (after `+`, after `*`), but Python keeps the
+  // intermediate at full precision and only the final wrap fires.
+  // Wrap each addi / subi / muli / shli result here so the Python
+  // ref matches SV's two's-complement semantics on every overflow-
+  // capable op. Bitwise ops (and / or / xor) and right shifts
+  // can't overflow and skip the wrap. i1 booleans skip too.
+  auto wrapForResult = [&](std::string E) -> std::string {
+    // For matlab.* unregistered binops the result type is often
+    // `none`; fall back to the operand type so the wrap width
+    // still matches the underlying datapath. Both arith.* and
+    // matlab.* shapes go through this same path.
+    mlir::IntegerType IT;
+    if (auto T = mlir::dyn_cast<mlir::IntegerType>(
+            Op.getResult(0).getType()))
+      IT = T;
+    else if (Op.getNumOperands() >= 1) {
+      if (auto T = mlir::dyn_cast<mlir::IntegerType>(
+              Op.getOperand(0).getType()))
+        IT = T;
+      else if (Op.getNumOperands() >= 2)
+        if (auto T = mlir::dyn_cast<mlir::IntegerType>(
+                Op.getOperand(1).getType()))
+          IT = T;
+    }
+    if (!IT || IT.getWidth() < 2 || IT.getWidth() > 64) return E;
+    // Signedness inference for the wrap helper. Walk one operand
+    // back through transparent ops looking for a matlab.unsigned
+    // marker — same heuristic as the func-return wrap. Default
+    // signed (the SV emitter's default for multi-bit values).
+    auto unsignedRoot = [&](mlir::Value V) -> bool {
+      mlir::Value Cur = V;
+      for (int Hops = 0; Hops < 4; ++Hops) {
+        auto *Def = Cur.getDefiningOp();
+        if (!Def) return false;
+        if (Def->getAttr("matlab.unsigned")) return true;
+        if (mlir::isa<mlir::arith::ExtUIOp, mlir::arith::ShRUIOp,
+                      mlir::arith::AndIOp>(Def))
+          return true;
+        if (mlir::isa<mlir::arith::ExtSIOp, mlir::arith::ShRSIOp>(Def))
+          return false;
+        if (Def->getNumOperands() == 0) return false;
+        Cur = Def->getOperand(0);
+      }
+      return false;
+    };
+    bool Sgn = !(unsignedRoot(Op.getOperand(0)) ||
+                 unsignedRoot(Op.getOperand(1)));
+    return std::string(Sgn ? "rt.fi_wrap_s(" : "rt.fi_wrap_u(") +
+           dropOuterParens(std::move(E)) + ", " +
+           std::to_string(IT.getWidth()) + ")";
+  };
+  auto binWrap = [&](const char *cc) {
+    bin(cc);
+    Expr = wrapForResult(std::move(Expr));
+    return true;
+  };
   if (isa<arith::AddFOp>(Op)) return bin("+");
   if (isa<arith::SubFOp>(Op)) return bin("-");
   if (isa<arith::MulFOp>(Op)) return bin("*");
   if (isa<arith::DivFOp>(Op)) return bin("/");
-  if (isa<arith::AddIOp>(Op)) return bin("+");
-  if (isa<arith::SubIOp>(Op)) return bin("-");
-  if (isa<arith::MulIOp>(Op)) return bin("*");
+  if (isa<arith::AddIOp>(Op)) return binWrap("+");
+  if (isa<arith::SubIOp>(Op)) return binWrap("-");
+  if (isa<arith::MulIOp>(Op)) return binWrap("*");
   // arith.shli / shrsi / shrui from LowerFixedPoint. Python `>>` on int
   // is arithmetic (sign-preserving) and floors toward -inf — exactly what
-  // matlab_fi_round_floor_s does on the C side.
-  if (isa<arith::ShLIOp>(Op))  return bin("<<");
+  // matlab_fi_round_floor_s does on the C side. Left shift can lose
+  // bits at the top; wrap the result to the declared width. Right
+  // shifts can't overflow and skip the wrap.
+  if (isa<arith::ShLIOp>(Op))  return binWrap("<<");
   if (isa<arith::ShRSIOp>(Op)) return bin(">>");
-  if (isa<arith::ShRUIOp>(Op)) return bin(">>");
+  // Logical right shift — Python's `>>` is arithmetic (sign-
+  // preserving) but SV's `>>` is logical (zero-fill). Mask the
+  // operand to its unsigned bit pattern first so the shifted
+  // bits come back as zero rather than the sign extension.
+  if (isa<arith::ShRUIOp>(Op)) {
+    auto IT = mlir::dyn_cast<mlir::IntegerType>(
+        Op.getOperand(0).getType());
+    if (IT && IT.getWidth() >= 1 && IT.getWidth() <= 64) {
+      uint64_t Mask = (IT.getWidth() == 64) ? ~uint64_t(0)
+                                            : (uint64_t(1) << IT.getWidth()) - 1;
+      Expr = "((" + exprFor(Op.getOperand(0)) + " & " +
+             std::to_string(Mask) + ") >> " +
+             exprFor(Op.getOperand(1)) + ")";
+      return true;
+    }
+    return bin(">>");
+  }
   // Bitwise vs logical split on i1. `and`/`or` on bools is shorter;
   // `^` doesn't have a short logical form, so emit `!=` (works because
   // `True != False`).
@@ -709,9 +786,12 @@ bool Emitter::buildInlineExpr(mlir::Operation &Op, std::string &Expr) {
     StringRef MN = Op.getName().getStringRef();
     if (Op.getNumOperands() == 2 && Op.getNumResults() == 1) {
       const char *cc = nullptr;
-      if (MN == "matlab.add") cc = "+";
-      else if (MN == "matlab.sub") cc = "-";
-      else if (MN == "matlab.emul" || MN == "matlab.matmul") cc = "*";
+      bool Overflow = false;
+      if (MN == "matlab.add") { cc = "+"; Overflow = true; }
+      else if (MN == "matlab.sub") { cc = "-"; Overflow = true; }
+      else if (MN == "matlab.emul" || MN == "matlab.matmul") {
+        cc = "*"; Overflow = true;
+      }
       else if (MN == "matlab.ediv" || MN == "matlab.matdiv") cc = "/";
       else if (MN == "matlab.eq") cc = "==";
       else if (MN == "matlab.ne") cc = "!=";
@@ -721,7 +801,10 @@ bool Emitter::buildInlineExpr(mlir::Operation &Op, std::string &Expr) {
       else if (MN == "matlab.ge") cc = ">=";
       else if (MN == "matlab.short_or") cc = "or";
       else if (MN == "matlab.short_and") cc = "and";
-      if (cc) return bin(cc);
+      if (cc) {
+        if (Overflow) return binWrap(cc);
+        return bin(cc);
+      }
     }
     // `matlab.not` — bool NOT. The op's i1 result coerces from any
     // integer / float operand the same way `if` would in MATLAB
@@ -2827,22 +2910,88 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
   }
 
   // --- arith binary ops ------------------------------------------------
+  // For overflow-capable integer ops (addi / subi / muli / shli) wrap
+  // the result to its declared bit width so the Python ref matches
+  // the SV DUT's two's-complement mid-computation truncation. See
+  // the buildInlineExpr counterpart for the rationale; this is the
+  // statement-emit shape (when the result needs a separate name
+  // rather than being inlined into a single-line consumer).
+  auto unsignedRoot = [&](mlir::Value V) -> bool {
+    mlir::Value Cur = V;
+    for (int Hops = 0; Hops < 4; ++Hops) {
+      auto *Def = Cur.getDefiningOp();
+      if (!Def) return false;
+      if (Def->getAttr("matlab.unsigned")) return true;
+      if (mlir::isa<mlir::arith::ExtUIOp, mlir::arith::ShRUIOp,
+                    mlir::arith::AndIOp>(Def))
+        return true;
+      if (mlir::isa<mlir::arith::ExtSIOp, mlir::arith::ShRSIOp>(Def))
+        return false;
+      if (Def->getNumOperands() == 0) return false;
+      Cur = Def->getOperand(0);
+    }
+    return false;
+  };
   auto emitBin = [&](const char *CC) {
     indent(Indent);
     std::string N = this->name(Op.getResult(0));
     OS << N << " = " << this->exprFor(Op.getOperand(0)) << " " << CC << " "
        << this->exprFor(Op.getOperand(1)) << "\n";
   };
+  auto emitBinWrapInt = [&](const char *CC) {
+    mlir::IntegerType IT;
+    if (auto T = mlir::dyn_cast<mlir::IntegerType>(
+            Op.getResult(0).getType()))
+      IT = T;
+    else if (Op.getNumOperands() >= 1) {
+      if (auto T = mlir::dyn_cast<mlir::IntegerType>(
+              Op.getOperand(0).getType()))
+        IT = T;
+      else if (Op.getNumOperands() >= 2)
+        if (auto T = mlir::dyn_cast<mlir::IntegerType>(
+                Op.getOperand(1).getType()))
+          IT = T;
+    }
+    if (!IT || IT.getWidth() < 2 || IT.getWidth() > 64) {
+      emitBin(CC);
+      return;
+    }
+    bool Sgn = !(unsignedRoot(Op.getOperand(0)) ||
+                 unsignedRoot(Op.getOperand(1)));
+    indent(Indent);
+    std::string N = this->name(Op.getResult(0));
+    OS << N << " = "
+       << (Sgn ? "rt.fi_wrap_s(" : "rt.fi_wrap_u(")
+       << this->exprFor(Op.getOperand(0)) << " " << CC << " "
+       << this->exprFor(Op.getOperand(1)) << ", "
+       << IT.getWidth() << ")\n";
+  };
   if (mlir::isa<mlir::arith::AddFOp>(Op)) { emitBin("+"); return; }
   if (mlir::isa<mlir::arith::SubFOp>(Op)) { emitBin("-"); return; }
   if (mlir::isa<mlir::arith::MulFOp>(Op)) { emitBin("*"); return; }
   if (mlir::isa<mlir::arith::DivFOp>(Op)) { emitBin("/"); return; }
-  if (mlir::isa<mlir::arith::AddIOp>(Op)) { emitBin("+"); return; }
-  if (mlir::isa<mlir::arith::SubIOp>(Op)) { emitBin("-"); return; }
-  if (mlir::isa<mlir::arith::MulIOp>(Op)) { emitBin("*"); return; }
-  if (mlir::isa<mlir::arith::ShLIOp>(Op))  { emitBin("<<"); return; }
+  if (mlir::isa<mlir::arith::AddIOp>(Op)) { emitBinWrapInt("+"); return; }
+  if (mlir::isa<mlir::arith::SubIOp>(Op)) { emitBinWrapInt("-"); return; }
+  if (mlir::isa<mlir::arith::MulIOp>(Op)) { emitBinWrapInt("*"); return; }
+  if (mlir::isa<mlir::arith::ShLIOp>(Op))  { emitBinWrapInt("<<"); return; }
   if (mlir::isa<mlir::arith::ShRSIOp>(Op)) { emitBin(">>"); return; }
-  if (mlir::isa<mlir::arith::ShRUIOp>(Op)) { emitBin(">>"); return; }
+  if (mlir::isa<mlir::arith::ShRUIOp>(Op)) {
+    // Logical right shift — Python `>>` is arithmetic; mask to
+    // unsigned bit pattern first so the shifted bits come back as
+    // zero. Mirrors the inline-expr path's handling.
+    auto IT = mlir::dyn_cast<mlir::IntegerType>(Op.getOperand(0).getType());
+    if (IT && IT.getWidth() >= 1 && IT.getWidth() <= 64) {
+      uint64_t Mask = (IT.getWidth() == 64) ? ~uint64_t(0)
+                                            : (uint64_t(1) << IT.getWidth()) - 1;
+      indent(Indent);
+      std::string N = this->name(Op.getResult(0));
+      OS << N << " = ((" << this->exprFor(Op.getOperand(0)) << " & "
+         << Mask << ") >> " << this->exprFor(Op.getOperand(1)) << ")\n";
+      return;
+    }
+    emitBin(">>");
+    return;
+  }
   if (mlir::isa<mlir::arith::BitcastOp>(Op)) {
     indent(Indent);
     std::string N = this->name(Op.getResult(0));
@@ -2918,9 +3067,12 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
     llvm::StringRef MN = Op.getName().getStringRef();
     if (Op.getNumOperands() == 2 && Op.getNumResults() == 1) {
       const char *CC = nullptr;
-      if (MN == "matlab.add") CC = "+";
-      else if (MN == "matlab.sub") CC = "-";
-      else if (MN == "matlab.emul" || MN == "matlab.matmul") CC = "*";
+      bool Overflow = false;
+      if (MN == "matlab.add") { CC = "+"; Overflow = true; }
+      else if (MN == "matlab.sub") { CC = "-"; Overflow = true; }
+      else if (MN == "matlab.emul" || MN == "matlab.matmul") {
+        CC = "*"; Overflow = true;
+      }
       else if (MN == "matlab.ediv" || MN == "matlab.matdiv") CC = "/";
       else if (MN == "matlab.eq") CC = "==";
       else if (MN == "matlab.ne") CC = "!=";
@@ -2930,7 +3082,11 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
       else if (MN == "matlab.ge") CC = ">=";
       else if (MN == "matlab.short_or") CC = "or";
       else if (MN == "matlab.short_and") CC = "and";
-      if (CC) { emitBin(CC); return; }
+      if (CC) {
+        if (Overflow) emitBinWrapInt(CC);
+        else emitBin(CC);
+        return;
+      }
     }
     // Unary `matlab.not` — bool NOT (HDL idiom: `~rst`, `~en`, etc.).
     // The op's i1 result coerces from any integer / float operand;
@@ -3597,34 +3753,35 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
         // saturate semantics. Bare global_set_f64 (no fi attrs)
         // emits the value as-is.
         std::string V = this->stmtExpr(Op.getOperand(1));
-        // First try the local set's fi attrs, then this persistent's
-        // pre-computed wrap-spec from the early walk (covers cases
-        // where the body's set has a `none`-typed operand because
-        // some intermediate matlab.* op stripped the type but the
-        // init or another set anchored the spec). Fallback to the
-        // operand's MLIR type with a default-unsigned guess for
-        // bare iN stores.
+        // Prefer the persistent's pre-computed wrap-spec captured
+        // by the early walk. The early walk anchors on the FIRST
+        // reliably-typed set (typically the init `<reg> = init_value`
+        // pattern), which carries the source-level declared width.
+        // Later body-side sets carry MATLAB's bit-growth tracking
+        // attrs (e.g. `fi_wl=23` on `int1 + x` where int1 is i22) —
+        // those are operation-natural widths, not the storage width.
+        // The SV reg is sized to the source-declared width and the
+        // implicit assignment truncates; the Python ref needs the
+        // same truncation to match.
         auto WLA = Op.getAttrOfType<mlir::IntegerAttr>("fi_wl");
         auto SgnA = Op.getAttrOfType<mlir::IntegerAttr>("fi_signed");
         int WL = 0;
         bool Signed = false;
         bool HasSpec = false;
-        if (WLA && SgnA) {
+        auto It = PersistWrapSpec.find(PN.getValue());
+        if (It != PersistWrapSpec.end()) {
+          WL = It->second.WL;
+          Signed = It->second.Signed;
+          HasSpec = true;
+        } else if (WLA && SgnA) {
           WL = (int)WLA.getInt();
           Signed = SgnA.getInt() != 0;
           HasSpec = true;
-        } else {
-          auto It = PersistWrapSpec.find(PN.getValue());
-          if (It != PersistWrapSpec.end()) {
-            WL = It->second.WL;
-            Signed = It->second.Signed;
-            HasSpec = true;
-          } else if (auto IT = mlir::dyn_cast<mlir::IntegerType>(
-                         Op.getOperand(1).getType())) {
-            WL = (int)IT.getWidth();
-            Signed = false;
-            if (WL >= 1 && WL <= 64) HasSpec = true;
-          }
+        } else if (auto IT = mlir::dyn_cast<mlir::IntegerType>(
+                       Op.getOperand(1).getType())) {
+          WL = (int)IT.getWidth();
+          Signed = false;
+          if (WL >= 1 && WL <= 64) HasSpec = true;
         }
         if (HasSpec) {
           V = std::string(Signed ? "rt.fi_wrap_s(" : "rt.fi_wrap_u(") +

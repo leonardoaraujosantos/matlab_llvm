@@ -102,6 +102,16 @@ declare -a CASES=(
   crc32
   fnv1a
   multi_cycle_mul
+  # Tier-7 — added after the per-op wrap pass: every overflow-capable
+  # arith op (addi / subi / muli / shli) and the matlab.* binop
+  # equivalents wrap to their declared bit width, mirroring SV's
+  # mid-computation truncation. Also fixes shrui to mask the
+  # operand to its unsigned bit pattern before shifting (Python's
+  # `>>` is arithmetic, SV's `>>` is logical). PersistWrapSpec
+  # prefers the init's declared width over later body-side
+  # bit-growth attrs.
+  cordic_pipe
+  cordic_step
 )
 
 # Run each fixture in parallel via xargs -P. Default to up to 8
