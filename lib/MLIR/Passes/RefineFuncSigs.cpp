@@ -101,6 +101,18 @@ bool runRefineFuncSigs(mlir::ModuleOp M) {
           NewResults[i] = New;
           Changed = true;
         }
+        /* Stage F's runtime-k array read replaces a slice1 call
+         * (which returned !llvm.ptr) with a select-cascade i64.
+         * The output slot was allocated as !llvm.ptr (Sema saw the
+         * fi-array indexing as opaque) but Stage F retyped it to
+         * the cascade's integer width; the function signature
+         * needs to follow. Same shape as the f64→int rule above
+         * but with ptr as the old type. */
+        if (mlir::isa<mlir::LLVM::LLVMPointerType>(Old) &&
+            mlir::isa<mlir::IntegerType>(New)) {
+          NewResults[i] = New;
+          Changed = true;
+        }
       }
     });
     if (Changed) {

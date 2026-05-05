@@ -28,11 +28,11 @@ Yosys synthesis.
 | Persistent fi-arrays | ✅ | Lowers to N parallel scalar persistents (Stage F) |
 | Boolean ports declared `bool` | ✅ | Renders as `logic` |
 | Bit-slicing `x(hi:lo)` | ✅ | Constant range on scalar int; result widens to next native size |
+| Runtime-indexed persistent arrays | ✅ | `arr(addr+1) = v` / `y = arr(addr+1)` auto-decode to mux + decoded enables |
 | `% hdl: port(...)` pragmas | ✅ | Drives port type/width on function-only files |
 | Multi-source persistent reads (regfile) | ✅ | New: HW-aware slot type-unification (B-workstream) |
 | Verbatim source comments preserved | ✅ | Forwarded as `// ...` SV comments |
 | Hierarchical multi-module | ⚠️ | `matlab.call` to user fn; return-type refinement gap |
-| Dynamic indexing on persistent arrays | ❌ | `mem(i) = v` with runtime `i` not lowered |
 | `for` loop with runtime trip count | ❌ | Only constant-bound loops, get fully unrolled |
 | `while` | ❌ | Rejected at HW legalize |
 | Recursion | ❌ | Rejected at HW legalize |
@@ -269,25 +269,32 @@ sidesteps this.)
 
 ### Need a register file with N entries?
 
-Use the case-decoded write port + multi-source mux read pattern from
-`examples/hdl/regfile.m`. Scales to 8-16 entries cleanly; for larger
-files (32+), the per-cell flop count is excessive and a memory
-macro is the right answer (out of this backend's scope today).
+Two equivalent forms work — pick whichever reads cleaner:
 
-### Need dynamic-index reads on a small array?
-
-Generate a switch/case manually:
+**Persistent fi-array with runtime indexing** (preferred for >4
+entries):
 
 ```matlab
-% NOT this (gap):
-%   y = arr(idx);
-% Instead:
-switch idx
-    case 0; y = arr(1);
-    case 1; y = arr(2);
-    ...
+persistent regs;
+if isempty(regs) || reset
+    regs = fi(zeros(1, 8), 1, 16, 0);
 end
+if we
+    regs(waddr + 1) = wdata;     % runtime addr
+end
+rdata = regs(raddr + 1);
 ```
+
+Stage F expands each runtime-indexed read into an N-input mux and
+each runtime-indexed write into N decoded write enables (one per
+register, gated on `addr_int == k`). The synth tool sees the
+canonical regfile pattern. See `test/EmitSV/regfile_dyn.m` for a
+worked 4-entry example. Scales cleanly to 8–16 entries; larger
+files (32+) may want a memory macro instead.
+
+**Manual scalar persistents + switch decode** (the older idiom — see
+`examples/hdl/regfile.m`). Compiles to identical RTL but the source
+gets verbose past 4 entries.
 
 ### Need hierarchical sub-modules?
 

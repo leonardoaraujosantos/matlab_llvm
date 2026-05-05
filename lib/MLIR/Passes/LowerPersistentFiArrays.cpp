@@ -423,79 +423,271 @@ bool rewriteOne(mlir::func::FuncOp F, int32_t Idx,
       }
       return false;
     }
-    for (mlir::Operation *Sub : SubReads) {
-      if (Sub->getNumOperands() != 2 || Sub->getNumResults() != 1) {
+    auto I64 = mlir::IntegerType::get(Ctx, 64);
+    // Detect `add(int_val, const 1)` pattern (the canonical 1-based
+    // index `addr + 1` from user code). Returns the int_val operand,
+    // skipping the +1 — comparisons against the 0-based register
+    // index `k` then need no offset adjustment. Accepts both
+    // `matlab.add` (operand types may differ — e.g. i8 + f64) and
+    // already-lowered `arith.addi` / `arith.addf`.
+    auto extractZeroBased = [](mlir::Value KRT) -> mlir::Value {
+      auto *D = KRT.getDefiningOp();
+      if (!D) return mlir::Value{};
+      llvm::StringRef N = D->getName().getStringRef();
+      bool IsAdd = N == "matlab.add" || N == "arith.addi" ||
+                   N == "arith.addf";
+      if (!IsAdd || D->getNumOperands() != 2) return mlir::Value{};
+      auto isConstOne = [](mlir::Value V) -> bool {
+        auto *C = V.getDefiningOp();
+        if (!C) return false;
+        if (auto Co = mlir::dyn_cast<mlir::arith::ConstantOp>(C)) {
+          if (auto IA = mlir::dyn_cast<mlir::IntegerAttr>(Co.getValue()))
+            return IA.getInt() == 1;
+          if (auto FA = mlir::dyn_cast<mlir::FloatAttr>(Co.getValue()))
+            return FA.getValueAsDouble() == 1.0;
+        }
+        if (auto Co = mlir::dyn_cast<mlir::LLVM::ConstantOp>(C)) {
+          if (auto IA = mlir::dyn_cast<mlir::IntegerAttr>(Co.getValue()))
+            return IA.getInt() == 1;
+          if (auto FA = mlir::dyn_cast<mlir::FloatAttr>(Co.getValue()))
+            return FA.getValueAsDouble() == 1.0;
+        }
+        if (auto VA = C->getAttrOfType<mlir::IntegerAttr>("value"))
+          return VA.getInt() == 1;
+        if (auto VA = C->getAttrOfType<mlir::FloatAttr>("value"))
+          return VA.getValueAsDouble() == 1.0;
         return false;
+      };
+      if (isConstOne(D->getOperand(1))) return D->getOperand(0);
+      if (isConstOne(D->getOperand(0))) return D->getOperand(1);
+      return mlir::Value{};
+    };
+    // Coerce a 1-based index value to i32. Accepts f64 (the runtime
+    // ABI), any IntegerType, or `none`-typed values whose defining
+    // op is `matlab.add(typed_int, 1)` (the canonical user pattern).
+    // Returns null on unsupported types. Records the original 1-based
+    // op so the caller can erase it after the expansion if it becomes
+    // dead (otherwise the orphan `matlab.add(i8, f64) -> none` trips
+    // HWBitWidthInfer's "value of type 'none' is not synthesizable"
+    // gate).
+    auto coerceKToI32 = [&](mlir::OpBuilder &SB, mlir::Location Loc,
+                            mlir::Value KRT,
+                            int64_t &OffsetOut,
+                            mlir::Operation *&PeeledAddOut) -> mlir::Value {
+      OffsetOut = 1;  // default: source is 1-based; compare against (k+1)
+      PeeledAddOut = nullptr;
+      // Try to peel off `+ 1` first — keeps the comparison constants
+      // matching the user-visible 0-based register indices and
+      // typically gives a typed integer source we can use directly.
+      if (mlir::Value Z = extractZeroBased(KRT)) {
+        PeeledAddOut = KRT.getDefiningOp();
+        OffsetOut = 0;
+        KRT = Z;
       }
-      double KD;
-      if (!readF64Const(Sub->getOperand(1), KD)) {
-        return false;
+      if (auto IT = mlir::dyn_cast<mlir::IntegerType>(KRT.getType())) {
+        if (IT.getWidth() == 32) return KRT;
+        if (IT.getWidth() < 32)
+          return mlir::arith::ExtUIOp::create(SB, Loc, I32, KRT);
+        return mlir::arith::TruncIOp::create(SB, Loc, I32, KRT);
       }
-      int64_t K = (int64_t)KD;
-      if (K < 1 || K > N) {
-        return false;
-      }
-      int32_t IdxK = kSyntheticBase + Idx * 100 + (int32_t)(K - 1);
-      mlir::OpBuilder SB(Sub);
-      mlir::Value KConst = mlir::arith::ConstantOp::create(SB,
-          Sub->getLoc(), I32, mlir::IntegerAttr::get(I32, IdxK));
-      // Emit `_global_get_f64` with i64 return type matching the
-      // original `subscript1_s` shape so downstream `arith.trunci`
-      // consumers fold without an explicit fp→int cast. The SV
-      // emitter doesn't care about the declared return type — it
-      // routes the call's result through the register's signal
-      // name regardless.
-      auto I64 = mlir::IntegerType::get(Ctx, 64);
-      mlir::OperationState GS(Sub->getLoc(), "matlab.call_builtin");
+      if (mlir::isa<mlir::Float64Type>(KRT.getType()))
+        return mlir::arith::FPToUIOp::create(SB, Loc, I32, KRT);
+      return mlir::Value{};
+    };
+    auto buildGet = [&](mlir::OpBuilder &SB, mlir::Location Loc,
+                        int64_t k) -> mlir::Value {
+      int32_t IdxK = kSyntheticBase + Idx * 100 + (int32_t)k;
+      mlir::Value KConst = mlir::arith::ConstantOp::create(SB, Loc, I32,
+          mlir::IntegerAttr::get(I32, IdxK));
+      mlir::OperationState GS(Loc, "matlab.call_builtin");
       GS.addOperands({KConst});
       GS.addTypes({I64});
       GS.addAttribute("callee", stringAttr("matlab_global_get_f64"));
       GS.addAttribute("persistent_fn", stringAttr(PersistentFn));
       GS.addAttribute("persistent_name",
-          stringAttr((Name.str() + "_" + std::to_string(K - 1)).c_str()));
+          stringAttr((Name.str() + "_" + std::to_string(k)).c_str()));
       attachFiAttrs(GS);
-      auto *NewGet = SB.create(GS);
-      Sub->getResult(0).replaceAllUsesWith(NewGet->getResult(0));
-      Sub->erase();
-      (void)F64;
-    }
-    // Phase 5.6 closure: per-element WRITES on the get-ptr
-    // (`reg_products(i) = ...`). Each becomes a fresh
-    // `_global_set_f64(idx_k, val)`.
-    for (mlir::Operation *Sub : SubWrites) {
-      if (Sub->getNumOperands() != 3) return false;
-      double KD;
-      if (!readF64Const(Sub->getOperand(1), KD)) return false;
-      int64_t K = (int64_t)KD;
-      if (K < 1 || K > N) return false;
-      int32_t IdxK = kSyntheticBase + Idx * 100 + (int32_t)(K - 1);
-      mlir::OpBuilder SB(Sub);
-      mlir::Value Val = Sub->getOperand(2);
-      // Trunc / extend the value to match the register's storage
-      // class — same rule as the regular-set path above.
-      if (Val.getType() != ElemTy) {
-        if (auto VIT =
-                mlir::dyn_cast<mlir::IntegerType>(Val.getType())) {
-          if (VIT.getWidth() > ElemW)
-            Val = mlir::arith::TruncIOp::create(SB, Sub->getLoc(),
-                ElemTy, Val);
-          else if (VIT.getWidth() < ElemW)
-            Val = mlir::arith::ExtSIOp::create(SB, Sub->getLoc(),
-                ElemTy, Val);
-        } else return false;
-      }
-      mlir::Value KConst = mlir::arith::ConstantOp::create(SB,
-          Sub->getLoc(), I32, mlir::IntegerAttr::get(I32, IdxK));
-      mlir::OperationState SS(Sub->getLoc(), "matlab.call_builtin");
+      return SB.create(GS)->getResult(0);
+    };
+    auto buildSet = [&](mlir::OpBuilder &SB, mlir::Location Loc,
+                        int64_t k, mlir::Value Val) {
+      int32_t IdxK = kSyntheticBase + Idx * 100 + (int32_t)k;
+      mlir::Value KConst = mlir::arith::ConstantOp::create(SB, Loc, I32,
+          mlir::IntegerAttr::get(I32, IdxK));
+      mlir::OperationState SS(Loc, "matlab.call_builtin");
       SS.addOperands({KConst, Val});
       SS.addTypes({mlir::NoneType::get(Ctx)});
       SS.addAttribute("callee", stringAttr("matlab_global_set_f64"));
       SS.addAttribute("persistent_fn", stringAttr(PersistentFn));
       SS.addAttribute("persistent_name",
-          stringAttr((Name.str() + "_" + std::to_string(K - 1)).c_str()));
+          stringAttr((Name.str() + "_" + std::to_string(k)).c_str()));
       attachFiAttrs(SS);
       (void)SB.create(SS);
+    };
+
+    for (mlir::Operation *Sub : SubReads) {
+      if (Sub->getNumOperands() != 2 || Sub->getNumResults() != 1)
+        return false;
+      mlir::OpBuilder SB(Sub);
+      auto Loc = Sub->getLoc();
+      double KD;
+      if (readF64Const(Sub->getOperand(1), KD)) {
+        // Constant-k fast path: single _global_get_f64.
+        int64_t K = (int64_t)KD;
+        if (K < 1 || K > N) return false;
+        mlir::Value Val = buildGet(SB, Loc, K - 1);
+        Sub->getResult(0).replaceAllUsesWith(Val);
+        Sub->erase();
+        continue;
+      }
+      // Runtime-k read: emit a select cascade fed by N parallel
+      // _global_get_f64 reads. Comparisons use either the 0-based
+      // source index (when `+1` was peeled off) or the 1-based index
+      // against (k_const + 1). The select chain folds back to a
+      // single SV `case`/`if-elseif` block.
+      int64_t Offset = 1;
+      mlir::Operation *PeeledAdd = nullptr;
+      mlir::Value KInt = coerceKToI32(SB, Loc, Sub->getOperand(1),
+                                       Offset, PeeledAdd);
+      if (!KInt) return false;
+      // Build the cascade at ElemTy width — trunci every per-element
+      // get from i64 (the runtime ABI) first so the final cascade and
+      // the consumer slot end up at the register's actual width
+      // (otherwise Mem2Reg propagates i64 all the way to the function
+      // return and `rdata` shows up as `[63:0]` instead of the user's
+      // declared fi width).
+      llvm::SmallVector<mlir::Value, 8> Elems;
+      for (int64_t k = 0; k < N; ++k) {
+        mlir::Value V = buildGet(SB, Loc, k);
+        if (V.getType() != ElemTy) {
+          if (auto IT = mlir::dyn_cast<mlir::IntegerType>(V.getType())) {
+            if (IT.getWidth() > ElemW)
+              V = mlir::arith::TruncIOp::create(SB, Loc, ElemTy, V);
+            else if (IT.getWidth() < ElemW)
+              V = mlir::arith::ExtSIOp::create(SB, Loc, ElemTy, V);
+          }
+        }
+        Elems.push_back(V);
+      }
+      mlir::Value Result = Elems[N - 1];
+      for (int64_t k = N - 2; k >= 0; --k) {
+        mlir::Value KCmp = mlir::arith::ConstantOp::create(SB, Loc, I32,
+            mlir::IntegerAttr::get(I32, (int64_t)(k + Offset)));
+        mlir::Value Eq = mlir::arith::CmpIOp::create(SB, Loc,
+            mlir::arith::CmpIPredicate::eq, KInt, KCmp);
+        Result = mlir::arith::SelectOp::create(SB, Loc, Eq,
+            Elems[k], Result);
+      }
+      // Replace Sub's i64-typed result with our narrower-typed cascade.
+      // Existing consumers (a downstream `arith.trunci` from i64 to
+      // ElemW, or a typed slot store) will pick up the new type via
+      // RAUW; the slot retype loop below handles the alloc/load
+      // signatures.
+      mlir::Value Bridge = Result;
+      Sub->getResult(0).replaceAllUsesWith(Bridge);
+      // Retype any matlab.alloc / llvm.alloca consumer slot if it
+      // was allocated as `!llvm.ptr` (Sema saw the fi-array slice
+      // as opaque) and now sees a uniformly typed integer store.
+      // RefineSlotTypes only handles None / f64 baseline, not ptr.
+      for (mlir::OpOperand &Use : Bridge.getUses()) {
+        mlir::Operation *U = Use.getOwner();
+        if (U->getName().getStringRef() != "matlab.store") continue;
+        if (U->getNumOperands() != 2 || U->getOperand(0) != Bridge) continue;
+        mlir::Value Slot = U->getOperand(1);
+        if (Slot.getType() == Bridge.getType()) continue;
+        if (auto *AOp = Slot.getDefiningOp()) {
+          if (AOp->getName().getStringRef() != "matlab.alloc") continue;
+          bool Uniform = true;
+          for (mlir::OpOperand &SU : Slot.getUses()) {
+            mlir::Operation *SOp = SU.getOwner();
+            if (SOp->getName().getStringRef() == "matlab.store" &&
+                SOp->getOperand(0).getType() != Bridge.getType()) {
+              Uniform = false; break;
+            }
+          }
+          if (!Uniform) continue;
+          Slot.setType(Bridge.getType());
+          for (mlir::OpOperand &SU : Slot.getUses()) {
+            mlir::Operation *SOp = SU.getOwner();
+            if (SOp->getName().getStringRef() == "matlab.load" &&
+                SOp->getNumResults() == 1)
+              SOp->getResult(0).setType(Bridge.getType());
+          }
+        }
+      }
       Sub->erase();
+      // Drop the now-dead `matlab.add(typed_int, 1)` we peeled off —
+      // it has no users after Sub erased its only consumer, and its
+      // `none` result type would otherwise fail HWBitWidthInfer's
+      // "value of type 'none' is not synthesizable" gate.
+      if (PeeledAdd && PeeledAdd->use_empty()) PeeledAdd->erase();
+      (void)F64;
+    }
+    // Phase 5.6 closure: per-element WRITES on the get-ptr
+    // (`reg_products(i) = ...`). Each becomes a fresh
+    // `_global_set_f64(idx_k, val)` — or an N-way decoded write
+    // when k is a runtime expression.
+    auto coerceVal = [&](mlir::OpBuilder &SB, mlir::Location Loc,
+                         mlir::Value Val) -> mlir::Value {
+      if (Val.getType() == ElemTy) return Val;
+      if (auto VIT = mlir::dyn_cast<mlir::IntegerType>(Val.getType())) {
+        if (VIT.getWidth() > ElemW)
+          return mlir::arith::TruncIOp::create(SB, Loc, ElemTy, Val);
+        if (VIT.getWidth() < ElemW)
+          return mlir::arith::ExtSIOp::create(SB, Loc, ElemTy, Val);
+        return Val;
+      }
+      return mlir::Value{};
+    };
+    for (mlir::Operation *Sub : SubWrites) {
+      if (Sub->getNumOperands() != 3) return false;
+      mlir::OpBuilder SB(Sub);
+      auto Loc = Sub->getLoc();
+      double KD;
+      if (readF64Const(Sub->getOperand(1), KD)) {
+        // Constant-k fast path: single _global_set_f64.
+        int64_t K = (int64_t)KD;
+        if (K < 1 || K > N) return false;
+        mlir::Value Val = coerceVal(SB, Loc, Sub->getOperand(2));
+        if (!Val) return false;
+        buildSet(SB, Loc, K - 1, Val);
+        Sub->erase();
+        continue;
+      }
+      // Runtime-k write: emit N decoded writes. Each register k
+      // gets `next_k = (k_int == k+offset) ? val : cur_k` followed by
+      // an unconditional set. The SV emitter renders this as a
+      // 2-way mux feeding each register's always_ff. Synthesis
+      // tools recognize the pattern and infer per-register decode.
+      int64_t Offset = 1;
+      mlir::Operation *PeeledAdd = nullptr;
+      mlir::Value KInt = coerceKToI32(SB, Loc, Sub->getOperand(1),
+                                       Offset, PeeledAdd);
+      if (!KInt) return false;
+      mlir::Value Val = coerceVal(SB, Loc, Sub->getOperand(2));
+      if (!Val) return false;
+      for (int64_t k = 0; k < N; ++k) {
+        mlir::Value Cur = buildGet(SB, Loc, k);
+        // Trunc the i64 ABI return down to ElemTy so the select
+        // operand types match.
+        if (Cur.getType() != ElemTy) {
+          if (auto IT = mlir::dyn_cast<mlir::IntegerType>(Cur.getType())) {
+            if (IT.getWidth() > ElemW)
+              Cur = mlir::arith::TruncIOp::create(SB, Loc, ElemTy, Cur);
+            else if (IT.getWidth() < ElemW)
+              Cur = mlir::arith::ExtSIOp::create(SB, Loc, ElemTy, Cur);
+          } else return false;
+        }
+        mlir::Value KCmp = mlir::arith::ConstantOp::create(SB, Loc, I32,
+            mlir::IntegerAttr::get(I32, (int64_t)(k + Offset)));
+        mlir::Value Eq = mlir::arith::CmpIOp::create(SB, Loc,
+            mlir::arith::CmpIPredicate::eq, KInt, KCmp);
+        mlir::Value Next = mlir::arith::SelectOp::create(SB, Loc, Eq,
+            Val, Cur);
+        buildSet(SB, Loc, k, Next);
+      }
+      Sub->erase();
+      if (PeeledAdd && PeeledAdd->use_empty()) PeeledAdd->erase();
     }
     Get->erase();
   }

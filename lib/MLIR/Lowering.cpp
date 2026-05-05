@@ -6532,10 +6532,19 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
           auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
           auto I64 = mlir::IntegerType::get(&MCtx, 64);
           // Idx[0] is the base (already lowered above).
-          // Per-element subscript: every index is an f64 scalar.
+          // Per-element subscript: every index is an f64 scalar — or
+          // `none`-typed, which the HDL flow produces for `arg + 1`
+          // where `arg` is pragma-typed (the matlab.add result type
+          // doesn't propagate at lowering time and gets refined by
+          // RefineSlotTypes later). Vectors and ranges always come
+          // through as tensor / ptr types, so accepting `none` here
+          // doesn't conflict with the slice path.
           bool AllScalarF64 = true;
-          for (size_t i = 1; i < Idx.size(); ++i)
-            if (Idx[i].getType() != F64) { AllScalarF64 = false; break; }
+          for (size_t i = 1; i < Idx.size(); ++i) {
+            mlir::Type T = Idx[i].getType();
+            if (T == F64 || mlir::isa<mlir::NoneType>(T)) continue;
+            AllScalarF64 = false; break;
+          }
           if (AllScalarF64 && (C.Args.size() == 1 || C.Args.size() == 2)) {
             std::string Cn = std::string("matlab_mat_") +
                 (BA.FxSpec->Signed ? "i64_" : "u64_") +
