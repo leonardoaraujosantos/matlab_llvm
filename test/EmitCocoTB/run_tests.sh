@@ -51,6 +51,7 @@ trap 'rm -rf "$WORK_DIR"' EXIT
 # (otherwise the SV multiplies x0's accumulator by gain at cycle
 # 3, while Python pairs them at the same call).
 declare -a CASES=(
+  # Tier-1 modules — verified since v3.5 ship.
   "alu_16bit:0"
   "counter_0_to_10:0"
   "fir_asic_pipelined:4"
@@ -59,6 +60,28 @@ declare -a CASES=(
   "mux_4to_1_16bit:0"
   "vector_processor:0"
   "sequential_processor:4"
+  # Tier-2 — added after the 39-module sweep classified each
+  # against the cocotb harness (random vectors at L=0). Every
+  # module here passed without fixture-side tuning. Modules whose
+  # reference path runs into Python-emitter gaps (matlab.not /
+  # matlab.alloc / matlab.call_builtin handlers, SV-vs-Python fi
+  # saturation divergence, float-vs-int bitwise typing) are
+  # tracked separately — see docs/emit_cocotb.md "Python-emit
+  # gaps" — and not yet in this sweep.
+  "computed_state_fsm:0"
+  "hamming74:0"
+  "i2c_bit_bang:0"
+  "leading_zero_detector:0"
+  "median3:0"
+  "mmap_periph:0"
+  "popcount:0"
+  "priority_encoder:0"
+  "pwm:0"
+  "regfile:0"
+  "rr_arbiter:0"
+  "spi_master:0"
+  "uart_rx:0"
+  "up_down_counter:0"
 )
 
 pass=0; fail=0

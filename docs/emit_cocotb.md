@@ -9,13 +9,15 @@ the emitted SystemVerilog DUT and the emitted Python reference
 model in lockstep against random vectors, asserting cycle-by-cycle
 equality.
 
-**Status: v3.2.x shipped — `examples/hdl/` is 8/8.** Every
-synthesizable HDL example verifies bit-exact between the SV DUT
-and the matlab-emitted Python reference. The roadmap below
-tracks remaining nice-to-haves (auto-detect latency, CI lane,
-seed override, coverage report, multi-clock testbenches) but the
-core "open-source HDL Verifier alternative" is feature-complete
-for the supported MATLAB subset.
+**Status: shipped — CI lane is 22/22.** The lane sweeps 22 of the
+39 synthesizable HDL examples and asserts each verifies bit-exact
+between the SV DUT and the matlab-emitted Python reference. The
+remaining 17 fixtures hit Python-emitter gaps (not cocotb-harness
+gaps) — see [Python-emit gaps blocking cocotb expansion](#python-emit-gaps-blocking-cocotb-expansion)
+below. The roadmap tracks the cocotb-side nice-to-haves
+(`% cocotb: latency(N)` source pragma, auto-latency inference,
+multi-clock testbenches) but the core "open-source HDL Verifier
+alternative" is feature-complete for the supported MATLAB subset.
 
 ---
 
@@ -224,36 +226,73 @@ gives the right alignment.
 
 ## Status
 
-Sweep across `examples/hdl/*.m` (cocotb 2.0.1, Verilator 5.x):
+CI sweep across the 39 synthesizable HDL examples (cocotb 2.0.1,
+Verilator 5.x). 22 modules pass cleanly at `L=0` against random
+vectors and are exercised by the `cocotb-tests` lane:
 
-| Module                | L | Mode    | Result | Notes                        |
-| --------------------- | - | ------- | ------ | ---------------------------- |
-| `alu_16bit`           | 0 | random  | PASS 100/100 | combinational                |
-| `counter_0_to_10`     | 0 | tester  | PASS 15/15 | from `test_counter.m`        |
-| `mealy_fsm`           | 0 | tester  | PASS 7/7   | from `test_mealy.m`; v3.x dual-edge sample resolves Mealy timing |
-| `moore_fsm`           | 0 | tester  | PASS 7/7   | from `test_fsm_moore.m`      |
-| `mux_4to_1_16bit`     | 0 | tester  | PASS 1/1   | from `test_mux.m`            |
-| `vector_processor`    | 0 | random  | PASS 100/100 | unpacked-array ports via v3.3 element-wise drive |
-| `fir_asic_pipelined`  | 2 | random  | PASS    | requires `-cocotb-latency=2` |
-| `sequential_processor`| 4 | impulse | PASS    | `% cocotb: stimulus(x, impulse, 1.0)` + `stimulus(gain, constant, 0.25)` (v3.2.x) |
+| Tier-1 (8) | Tier-2 (14) |
+|---|---|
+| `alu_16bit` (L=0)   | `computed_state_fsm` (L=0) |
+| `counter_0_to_10` (L=0) | `hamming74` (L=0) |
+| `fir_asic_pipelined` (L=4) | `i2c_bit_bang` (L=0) |
+| `mealy_fsm` (L=0)   | `leading_zero_detector` (L=0) |
+| `moore_fsm` (L=0)   | `median3` (L=0) |
+| `mux_4to_1_16bit` (L=0) | `mmap_periph` (L=0) |
+| `vector_processor` (L=0) | `popcount` (L=0) |
+| `sequential_processor` (L=4) | `priority_encoder` (L=0) |
+|                     | `pwm` (L=0) |
+|                     | `regfile` (L=0) |
+|                     | `rr_arbiter` (L=0) |
+|                     | `spi_master` (L=0) |
+|                     | `uart_rx` (L=0) |
+|                     | `up_down_counter` (L=0) |
 
-The "Mode" column reflects v3.2 behaviour: when a sibling
-`test_<stem>.m` exists, the harness replays its hand-picked
-stimulus (`tester` mode); otherwise it falls back to random
-(`random` mode). The discovery is name-flexible — any
-`test_*.m` whose script body contains a call to the DUT
-function is recognised, so the existing `examples/hdl/`
-naming (`test_mealy.m`, `test_fsm_moore.m`, `test_mux.m`,
-`test_counter.m`) all match cleanly without renaming.
+Mode selection is automatic per-input from the source pragmas:
 
-All 8 modules now PASS. The hardest case
-(`sequential_processor`, a 4-stage persistent FIR cascade)
-required v3.2.x's deterministic stimulus pragmas to align the
-DUT's per-cycle pipeline propagation with the per-call Python
-reference: an impulse on `x` plus a constant `gain` makes the
-DUT and the reference walk through the impulse response in
+- No `% cocotb:` stimulus pragma → random (with `% cocotb: hold`
+  honored) or replay (when a sibling `test_*.m` exists).
+- `% cocotb: stimulus(<name>, ...)` for any input → that input
+  uses the deterministic shape; other inputs keep their default
+  mode.
+
+The hardest case (`sequential_processor`, a 4-stage persistent
+FIR cascade) required v3.2.x's deterministic stimulus pragmas to
+align the DUT's per-cycle pipeline propagation with the per-call
+Python reference: an impulse on `x` plus a constant `gain` makes
+the DUT and the reference walk through the impulse response in
 lockstep — `ref(impulse).y` at call k matches `DUT.y` at cycle
-k+L for L = pipeline depth.
+`k+L` for L = pipeline depth.
+
+### Python-emit gaps blocking cocotb expansion
+
+The remaining 17 modules in `examples/hdl/` aren't in the lane
+because the **Python emitter** (the source of truth for the
+reference model) has gaps that surface only on HDL-style code.
+These aren't cocotb-harness defects — `-emit-systemverilog`
+ships clean RTL for every one — but the harness compares against
+a Python reference, so a broken reference blocks verification.
+
+| Class | Modules | Root cause |
+|---|---|---|
+| `matlab.not` not handled | `async_fifo`, `axi_handshake`, `booth_mul`, `edge_detector`, `fifo`, `manchester_enc` | `-emit-python` doesn't emit a Python form for `matlab.not` (bool NOT). Common in HDL designs but rare in numeric MATLAB scripts, hence the gap. |
+| `matlab.alloc` not handled | `crc8`, `crc32`, `cordic_step` | Specific slot patterns produced by Stage F / RefineSlotTypes survive into the Python lowering with `matlab.alloc` ops the emitter doesn't recognise. |
+| `matlab.call_builtin` unhandled | `cic_decimator` | A builtin (likely `bitshift` in a specific operand shape) isn't in the Python emitter's dispatch table. |
+| Float-vs-int bitwise ops | `cordic_pipe`, `fnv1a`, `galois_lfsr` | The Python ref emits `s2y >> 1` / `h ^ b32` / `state & 1` where the LHS is a Python `float`. Python (unlike MATLAB / C / SV) doesn't auto-coerce — it raises `TypeError: unsupported operand type(s) for >>: 'float' and 'int'`. Fix: wrap fi-typed values in `int(...)` before bitwise ops. |
+| SV vs Python fi-saturation divergence | `aes_round`, `barrel_shifter`, `multi_cycle_mul` | The SV DUT correctly truncates / saturates `uint{8,16,32}` results on overflow. The Python ref computes the unbounded mathematical result. E.g. `bitshift(uint16(41905), 6)` → SV: 60480 (saturated / truncated), Python: 2681920 (unbounded). |
+| Harness-side timing (single case) | `sync_2ff` | Even at `L=2`, dual-edge sampling logic doesn't align for this CDC shape. Likely a real harness gap, not a Python-emit gap. |
+
+The biggest cluster (`matlab.not`) is the cheapest fix —
+roughly the same shape as the existing `matlab.bxor` /
+`matlab.band` handlers in `lib/MLIR/Passes/EmitPython.cpp`,
+just inverted. Closing it would unblock 6 modules in one
+session. The float-vs-int and saturation classes need a
+narrower fix (wrap-and-clamp helper + per-fi-spec saturation
+post-op) and would unblock another 6 between them.
+
+`sync_2ff` is the lone harness-side bug. Worth investigating
+once the Python-emit clusters land: with most modules verified,
+the dual-edge-sampling logic gets exercised across more shapes
+and the bug pattern becomes easier to characterise.
 
 Mode selection is automatic per-input from the source pragmas:
 
