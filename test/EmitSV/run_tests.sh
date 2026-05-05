@@ -93,11 +93,15 @@ for m in "$TESTDIR"/*.m; do
   fi
 
   # Verilator lint smoke. Top module name = file basename so the
-  # DECLFILENAME warning is silenced when they match.
+  # DECLFILENAME warning is silenced when they match. -Wno-DECLFILENAME
+  # additionally suppresses the warning for hierarchical fixtures
+  # where multiple modules share the file (the convention of
+  # one-module-per-file is a verilator preference, not an SV
+  # requirement; HDL workflow tools split modules at synth time).
   if [[ -n "$VERILATOR" && -x "$VERILATOR" ]]; then
-    if ! "$VERILATOR" --lint-only -Wall --top-module "$base" "$tmp" >/dev/null 2>&1; then
+    if ! "$VERILATOR" --lint-only -Wall -Wno-DECLFILENAME --top-module "$base" "$tmp" >/dev/null 2>&1; then
       echo "FAIL $base: verilator lint"
-      "$VERILATOR" --lint-only -Wall --top-module "$base" "$tmp" 2>&1 | sed 's/^/  /'
+      "$VERILATOR" --lint-only -Wall -Wno-DECLFILENAME --top-module "$base" "$tmp" 2>&1 | sed 's/^/  /'
       fail=$((fail+1))
       rm -rf "$tmpdir"
       continue

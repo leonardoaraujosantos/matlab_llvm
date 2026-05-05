@@ -32,7 +32,7 @@ Yosys synthesis.
 | `% hdl: port(...)` pragmas | ✅ | Drives port type/width on function-only files |
 | Multi-source persistent reads (regfile) | ✅ | New: HW-aware slot type-unification (B-workstream) |
 | Verbatim source comments preserved | ✅ | Forwarded as `// ...` SV comments |
-| Hierarchical multi-module | ⚠️ | `matlab.call` to user fn; return-type refinement gap |
+| Hierarchical multi-module | ✅ | `func.call` to user fn becomes a SV module instantiation; clk/rst_n auto-wire when callee is sequential |
 | `for` loop with runtime trip count | ❌ | Only constant-bound loops, get fully unrolled |
 | `while` | ❌ | Rejected at HW legalize |
 | Recursion | ❌ | Rejected at HW legalize |
@@ -296,11 +296,48 @@ files (32+) may want a memory macro instead.
 `examples/hdl/regfile.m`). Compiles to identical RTL but the source
 gets verbose past 4 entries.
 
-### Need hierarchical sub-modules?
+### Hierarchical sub-modules
 
-Inline the sub-function body into the parent. The optimizer will
-deduplicate logic at synthesis. Until the multi-module emission
-gap is closed, this is the recommended pattern.
+A user-defined function called from another function becomes a SV
+module instantiation in the caller. Each call site gets a unique
+instance name (`u_<callee>_<idx>`) and a wire per result that flows
+back into the caller's `always_comb`.
+
+```matlab
+function y = top(a, b, c, d)
+    %#codegen
+    % hdl: port(a, fi, signed, 16, 0)
+    % hdl: port(b, fi, signed, 16, 0)
+    % hdl: port(c, fi, signed, 16, 0)
+    % hdl: port(d, fi, signed, 16, 0)
+    s1 = add2(a, b);
+    s2 = add2(c, d);
+    y = s1 + s2;
+end
+
+function s = add2(x, y)
+    %#codegen
+    s = x + y;
+end
+```
+
+Sequential helpers (`persistent` registers, FSMs, port pipelining)
+get `clk` + `rst_n` ports auto-added. The instantiation site wires
+both through, and the caller is itself promoted to a sequential
+module if any of its callees needs a clock — the SV emitter computes
+the transitive closure across the module's call graph before
+emission.
+
+Constraints:
+  - Each callee must be present in the same file (or visible in
+    the same MLIR module). Cross-file inclusion isn't supported.
+  - Recursion is rejected at HW legalize (`hasCycleFrom`).
+  - All port types are inferred from the callee's pragmas / function
+    signature. Hierarchical type propagation runs as part of the
+    standard `LowerScalarsToArith` + `LowerUserCalls` fixpoint.
+
+See `test/EmitSV/hier_combinational.m` and `hier_sequential.m` for
+worked examples.
 
 ### Bit-slicing — `x(hi:lo)` syntax
 

@@ -351,6 +351,25 @@ private:
   // index. Inner ifs are also added to `Suppress` so they don't
   // get rendered twice.
   llvm::DenseMap<mlir::Operation *, unsigned> CascadeOp;
+
+  // Hierarchical multi-module emission: every `func.call` in the
+  // body is rendered as a SV module instantiation at module scope
+  // (outside `always_comb`). We collect call sites in a pre-pass
+  // so the instance + result-wire names are stable, then emit the
+  // instantiations between the prelude and `always_comb`. Inside
+  // the body, the call op itself is suppressed; consumers of the
+  // call's results read the wire by `name(call.result)`.
+  llvm::SmallVector<mlir::Operation *, 4> ModuleCalls;
+  llvm::DenseMap<mlir::Operation *, std::string> ModuleCallInstName;
+  // Set of function symbols that need clk + rst_n ports — either
+  // because they have persistent state / pipelining themselves, or
+  // because they (transitively) call a function that does. Computed
+  // by `precomputeClockNeeders` once per module before emission.
+  llvm::DenseSet<llvm::StringRef> ClockNeeders;
+  void collectModuleInstances(mlir::func::FuncOp F);
+  void emitModuleInstances();
+  void precomputeClockNeeders(mlir::ModuleOp M);
+  bool funcNeedsClock(mlir::func::FuncOp F);
   // B1 — per-function set of saturation-helper specs needed by the
   // body. Populated by `collectSatHelpers` from
   // `matlab.fi_sat_w` attrs on `arith.select`. Each entry is
@@ -1117,8 +1136,12 @@ void Emitter::emitPortList(mlir::func::FuncOp F) {
   // name resolution so a user arg named `rst` / `rst_n` / `clk` gets
   // suffixed (`rst_`) and doesn't shadow the system port. Phase 5.2
   // adds port-pipeline registers as another reason to need a clock.
+  // Hierarchical: a function also needs clk + rst_n if it
+  // (transitively) instantiates a sequential submodule. ClockNeeders
+  // is precomputed across the whole module by run().
   bool NeedsClock = !Persists.empty() ||
-                    InputPipelineN > 0 || OutputPipelineN > 0;
+                    InputPipelineN > 0 || OutputPipelineN > 0 ||
+                    ClockNeeders.contains(F.getSymName());
   if (NeedsClock) {
     Used.insert("clk");
     if (Reset == HWResetKind::AsyncLow || Reset == HWResetKind::SyncLow)
@@ -1557,6 +1580,10 @@ void Emitter::declarePrelude(mlir::func::FuncOp F) {
       // never appears in the datapath, so no prelude entry.
       return;
     }
+    // Hierarchical multi-module: `func.call` results are wires
+    // declared by `emitModuleInstances` next to the instantiation,
+    // not as prelude `logic` decls.
+    if (mlir::isa<mlir::func::CallOp>(Op)) return;
     for (mlir::Value V : Op->getResults()) {
       // Phase 5.6.3: inlineable values render at use site; no
       // top-level `logic` declaration and no prelude pre-init.
@@ -2573,6 +2600,13 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
   if (auto S = dyn_cast<LLVM::StoreOp>(Op)) { emitStore(S, Indent); return; }
   if (auto R = dyn_cast<func::ReturnOp>(Op)) { emitReturn(R, Indent); return; }
 
+  // Hierarchical multi-module: `func.call` is rendered as a SV
+  // module instantiation at module scope (handled by
+  // `emitModuleInstances` before the always_comb block). Inside
+  // the body it has no executable form — consumers reading the
+  // call's result already get the wire name via `name()`.
+  if (mlir::isa<mlir::func::CallOp>(Op)) return;
+
   // `llvm.mlir.constant` is produced as the size operand of an alloca
   // (always 1 in our pipeline, scalar slot). It has no datapath
   // semantics — the slot's `logic` declaration carries everything.
@@ -2943,6 +2977,8 @@ bool Emitter::emitModuleForFunc(mlir::func::FuncOp F) {
   GepAddr.clear();
   FSMs.clear();
   CascadeOp.clear();
+  ModuleCalls.clear();
+  ModuleCallInstName.clear();
   LastEmittedLine.clear();
   LastTailEmittedLine.clear();
   SlotMergedToOut.clear();
@@ -3115,6 +3151,11 @@ bool Emitter::emitModuleForFunc(mlir::func::FuncOp F) {
     OS << "\n";
     emitSatHelpers();
   }
+  // Hierarchical multi-module emission: instantiate every callee
+  // before always_comb so the call's result wires are visible
+  // throughout the body.
+  collectModuleInstances(F);
+  emitModuleInstances();
   emitBody(F);
   emitAlwaysFF();
   // Phase 5.2 — pipeline shift register + assign-out drivers.
@@ -3509,6 +3550,187 @@ void Emitter::emitSatHelpers() {
     indent(1);
     OS << "endfunction\n\n";
   }
+}
+
+// Compute the set of user functions that need clk + rst_n ports.
+// A function needs them if it has persistent state, port pipelining,
+// or calls (transitively) another function that does. Iterates the
+// call graph to a fixpoint; bounded since each iteration only adds.
+void Emitter::precomputeClockNeeders(mlir::ModuleOp M) {
+  ClockNeeders.clear();
+  llvm::SmallVector<mlir::func::FuncOp, 8> Funcs;
+  M.walk([&](mlir::func::FuncOp F) {
+    if (F.empty()) return;
+    Funcs.push_back(F);
+    if (funcNeedsClock(F))
+      ClockNeeders.insert(F.getSymName());
+  });
+  bool Changed = true;
+  while (Changed) {
+    Changed = false;
+    for (mlir::func::FuncOp F : Funcs) {
+      if (ClockNeeders.contains(F.getSymName())) continue;
+      bool Touches = false;
+      F.walk([&](mlir::func::CallOp Call) {
+        if (Touches) return;
+        if (ClockNeeders.contains(Call.getCallee())) Touches = true;
+      });
+      if (Touches) {
+        ClockNeeders.insert(F.getSymName());
+        Changed = true;
+      }
+    }
+  }
+}
+
+// Per-function check for clock-need: true if the function declares
+// any persistent register, has port pipelining, or recognizes any
+// matlab_global_get_f64 / set_f64 / persistent_isempty call shape
+// (the runtime-ABI form of persistent state). Walked once per
+// function during precomputeClockNeeders.
+bool Emitter::funcNeedsClock(mlir::func::FuncOp F) {
+  // Read pipeline pragmas the same way emitModuleForFunc does.
+  int InP = 0, OutP = 0;
+  auto parsePipe = [&](llvm::StringRef Name, int &O) {
+    if (auto A = F->getAttrOfType<mlir::StringAttr>(Name))
+      try { O = std::stoi(A.getValue().str()); } catch (...) {}
+  };
+  parsePipe("hdl.input_pipeline", InP);
+  parsePipe("hdl.output_pipeline", OutP);
+  if (InP > 0 || OutP > 0) return true;
+  bool Found = false;
+  F.walk([&](mlir::Operation *Op) {
+    if (Found) return;
+    auto name = [&]() -> llvm::StringRef {
+      if (auto S = Op->getAttrOfType<mlir::StringAttr>("callee"))
+        return S.getValue();
+      if (auto C = mlir::dyn_cast<mlir::LLVM::CallOp>(Op))
+        if (auto N = C.getCallee()) return *N;
+      return {};
+    }();
+    if (name == "matlab_persistent_isempty" ||
+        name == "matlab_global_get_f64" ||
+        name == "matlab_global_set_f64")
+      Found = true;
+  });
+  return Found;
+}
+
+// Hierarchical multi-module emission — gather every `func.call` in
+// the function body, allocate stable SV instance names + naming for
+// the result wires.
+void Emitter::collectModuleInstances(mlir::func::FuncOp F) {
+  ModuleCalls.clear();
+  ModuleCallInstName.clear();
+  llvm::DenseMap<llvm::StringRef, unsigned> PerCallee;
+  F.walk([&](mlir::func::CallOp Call) {
+    ModuleCalls.push_back(Call.getOperation());
+    llvm::StringRef Callee = Call.getCallee();
+    unsigned &K = PerCallee[Callee];
+    std::string Inst = "u_" + sanitize(Callee) + "_" + std::to_string(K++);
+    ModuleCallInstName[Call.getOperation()] = Inst;
+    // Pre-allocate stable names for each result wire so consumers
+    // reading the call's result via `name()` get the wire's name.
+    auto Callee2 = mlir::SymbolTable::lookupNearestSymbolFrom<
+        mlir::func::FuncOp>(F, mlir::StringAttr::get(F.getContext(), Callee));
+    for (unsigned I = 0; I < Call.getNumResults(); ++I) {
+      mlir::Value R = Call.getResult(I);
+      // Use the callee's result name if available, otherwise the
+      // result index. Prefix with the instance name so multiple
+      // calls to the same callee don't collide.
+      std::string PortName;
+      if (Callee2)
+        if (auto NA = Callee2.getResultAttrOfType<mlir::StringAttr>(
+                I, "matlab.name"))
+          PortName = sanitize(NA.getValue());
+      if (PortName.empty()) PortName = "ret" + std::to_string(I);
+      std::string Wire = Inst + "_" + PortName;
+      // Ensure uniqueness against the live identifier set.
+      if (Used.contains(Wire)) {
+        std::string Base = Wire;
+        unsigned J = 1;
+        while (Used.contains(Wire))
+          Wire = Base + "_" + std::to_string(J++);
+      }
+      Used.insert(Wire);
+      Names[R] = Wire;
+    }
+  });
+}
+
+// Emit module instantiations + result-wire declarations between the
+// prelude and `always_comb`. Each call becomes:
+//
+//   logic signed [W-1:0] u_callee_0_ret;
+//   callee u_callee_0 (.arg0(x_expr), ..., .ret0(u_callee_0_ret));
+//
+// Argument expressions are evaluated via `exprFor` so they may
+// reference module ports, internal logic signals, or wire results
+// from other instantiations. SV's concurrent-process semantics let
+// the always_comb block read the wire as needed.
+void Emitter::emitModuleInstances() {
+  if (ModuleCalls.empty()) return;
+  // 1. Declare result wires.
+  for (mlir::Operation *Op : ModuleCalls) {
+    auto Call = mlir::cast<mlir::func::CallOp>(Op);
+    for (unsigned I = 0; I < Call.getNumResults(); ++I) {
+      mlir::Value R = Call.getResult(I);
+      indent(1);
+      OS << svType(R.getType()) << " " << name(R) << ";\n";
+    }
+  }
+  OS << "\n";
+  // 2. Module instantiations.
+  for (mlir::Operation *Op : ModuleCalls) {
+    auto Call = mlir::cast<mlir::func::CallOp>(Op);
+    auto It = ModuleCallInstName.find(Op);
+    if (It == ModuleCallInstName.end()) continue;
+    auto Callee = mlir::SymbolTable::lookupNearestSymbolFrom<
+        mlir::func::FuncOp>(Call, Call.getCalleeAttr().getAttr());
+    indent(1);
+    OS << sanitize(Call.getCallee()) << " " << It->second << " (\n";
+    bool First = true;
+    // Sequential callees get clk + rst_n at the head of the port
+    // list — same convention as their declared port order.
+    if (ClockNeeders.contains(Call.getCallee())) {
+      indent(2);
+      OS << ".clk(clk),\n";
+      indent(2);
+      if (Reset == HWResetKind::AsyncLow || Reset == HWResetKind::SyncLow)
+        OS << ".rst_n(rst_n)";
+      else
+        OS << ".rst(rst)";
+      First = false;
+    }
+    // Inputs.
+    for (unsigned I = 0; I < Call.getNumOperands(); ++I) {
+      std::string PortName = "arg" + std::to_string(I);
+      if (Callee)
+        if (auto NA = Callee.getArgAttrOfType<mlir::StringAttr>(
+                I, "matlab.name"))
+          PortName = sanitize(NA.getValue());
+      if (!First) OS << ",\n";
+      First = false;
+      indent(2);
+      OS << "." << PortName << "(" << exprFor(Call.getOperand(I)) << ")";
+    }
+    // Outputs.
+    for (unsigned I = 0; I < Call.getNumResults(); ++I) {
+      std::string PortName = "ret" + std::to_string(I);
+      if (Callee)
+        if (auto NA = Callee.getResultAttrOfType<mlir::StringAttr>(
+                I, "matlab.name"))
+          PortName = sanitize(NA.getValue());
+      if (!First) OS << ",\n";
+      First = false;
+      indent(2);
+      OS << "." << PortName << "(" << name(Call.getResult(I)) << ")";
+    }
+    OS << "\n";
+    indent(1);
+    OS << ");\n";
+  }
+  OS << "\n";
 }
 
 void Emitter::emitFSMTypedefs() {
@@ -3949,6 +4171,7 @@ void Emitter::emitPortHints(mlir::func::FuncOp F) {
 
 bool Emitter::run(mlir::ModuleOp M) {
   emitProlog();
+  precomputeClockNeeders(M);
   bool First = true;
   M.walk([&](mlir::func::FuncOp F) {
     if (Failed) return;
