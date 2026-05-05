@@ -3,6 +3,7 @@ function crc = crc32(data_in, en, reset)
     % hdl: port(data_in, bool)
     % hdl: port(en, bool)
     % hdl: port(reset, bool)
+    % hdl: port(crc, fi, unsigned, 32, 0)
     % cocotb: stimulus(reset, constant, 0)
     %
     % CRC-32 LFSR with the IEEE 802.3 polynomial 0x04C11DB7. One

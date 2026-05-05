@@ -122,14 +122,24 @@ bool runApplyPortTypePragmas(mlir::ModuleOp M) {
       }
       int RIdx = findResByName(NameAttr.getValue());
       if (RIdx >= 0) {
-        // Result-port pragmas are accepted as type *hints* but not
-        // applied to the function signature here. The body's
-        // return op is still `none`-typed at this stage; we let
-        // RefineFuncSigs (which runs right after) infer result
-        // types from the typed body so the verifier stays happy.
-        // The pragma still serves as a check downstream — a
-        // future pass can compare the inferred result type against
-        // the pragma and warn on mismatch.
+        // Result-port pragma. Tag the result with `matlab.fi_signed`
+        // and `matlab.fi_wl` so the SV emitter renders the output
+        // port at the user-declared signedness/width — overriding
+        // the default-signed-multi-bit rule for `% hdl: port(_,
+        // fi, unsigned, _, _)` outputs. The result type itself
+        // stays as inferred by RefineFuncSigs from the typed body
+        // (matching the pragma if the user got it right; a later
+        // verify catches conflicts).
+        if (auto SignedA = Entry.getAs<mlir::BoolAttr>("signed")) {
+          auto I32 = mlir::IntegerType::get(&Ctx, 32);
+          F.setResultAttr((unsigned)RIdx, "matlab.fi_signed",
+              mlir::IntegerAttr::get(I32, SignedA.getValue() ? 1 : 0));
+        }
+        if (auto WAttr = Entry.getAs<mlir::IntegerAttr>("width")) {
+          auto I32 = mlir::IntegerType::get(&Ctx, 32);
+          F.setResultAttr((unsigned)RIdx, "matlab.fi_wl",
+              mlir::IntegerAttr::get(I32, WAttr.getInt()));
+        }
         (void)OutTys[RIdx];
         continue;
       }

@@ -2,6 +2,7 @@ function [out_word, ovfl] = aes_round(state_word, round_key)
     %#codegen
     % hdl: port(state_word, fi, unsigned, 32, 0)
     % hdl: port(round_key, fi, unsigned, 32, 0)
+    % hdl: port(out_word, fi, unsigned, 32, 0)
     %
     % AES MixColumns + AddRoundKey for one 32-bit word (one column
     % of the 4x4 state). The full AES round also has SubBytes

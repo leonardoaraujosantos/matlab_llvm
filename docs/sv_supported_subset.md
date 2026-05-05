@@ -29,7 +29,7 @@ Yosys synthesis.
 | Boolean ports declared `bool` | ✅ | Renders as `logic` |
 | Bit-slicing `x(hi:lo)` | ✅ | Constant range on scalar int; result widens to next native size |
 | Runtime-indexed persistent arrays | ✅ | `arr(addr+1) = v` / `y = arr(addr+1)` auto-decode to mux + decoded enables |
-| `% hdl: port(...)` pragmas | ✅ | Drives port type/width on function-only files |
+| `% hdl: port(...)` pragmas | ✅ | Drives port type/width/signedness on **inputs and outputs** |
 | Multi-source persistent reads (regfile) | ✅ | New: HW-aware slot type-unification (B-workstream) |
 | Verbatim source comments preserved | ✅ | Forwarded as `// ...` SV comments |
 | Hierarchical multi-module | ✅ | `func.call` to user fn becomes a SV module instantiation; clk/rst_n auto-wire when callee is sequential |
@@ -73,6 +73,33 @@ Fixed-point fractional positions (`F` in `fi(_, S, W, F)`) are NOT
 preserved in the SV output. The backend renders integer storage at
 width `W` only; the user manages scaling externally. The fi spec
 remains useful for compile-time saturation bounds.
+
+### Output port pragmas
+
+`% hdl: port(<output_name>, fi, signed/unsigned, W, F)` works for
+output port names too — the pragma name resolves against the
+function's result attribute (`matlab.name`). The pragma controls
+the SV port declaration's signedness and width, overriding the
+default-signed-multi-bit rule for output ports whose source
+expression doesn't clearly trace back to a typed input or
+persistent.
+
+```matlab
+function crc = crc32(data_in, en, reset)
+    %#codegen
+    % hdl: port(data_in, bool)
+    % hdl: port(en, bool)
+    % hdl: port(reset, bool)
+    % hdl: port(crc, fi, unsigned, 32, 0)   <-- output pragma
+    ...
+```
+
+Without the output pragma, `crc` would render as
+`output logic signed [31:0] crc` (the SV emitter's default for
+multi-bit values whose chain doesn't reach a fi-tagged source).
+With the pragma, it renders as `output logic [31:0] crc`,
+matching the user's intent and aligning the cocotb harness's
+DUT-side decode with the Python ref's value.
 
 ### Boolean ports
 

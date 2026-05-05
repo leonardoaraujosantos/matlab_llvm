@@ -3,6 +3,7 @@ function hash_out = fnv1a(byte_in, en, reset)
     % hdl: port(byte_in, fi, unsigned, 8, 0)
     % hdl: port(en, bool)
     % hdl: port(reset, bool)
+    % hdl: port(hash_out, fi, unsigned, 32, 0)
     % cocotb: stimulus(reset, constant, 0)
     %
     % FNV-1a 32-bit hash (RFC 6234 algorithm). Streaming variant:

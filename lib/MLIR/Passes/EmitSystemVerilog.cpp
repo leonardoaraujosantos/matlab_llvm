@@ -1255,6 +1255,27 @@ void Emitter::emitPortList(mlir::func::FuncOp F) {
     mlir::Type T = FT.getResult(I);
     bool ResSigned = true;
     bool SawPersist = false;
+    // Output port pragma — `% hdl: port(<out>, fi, signed/unsigned,
+    // W, F)` writes `matlab.fi_signed` + `matlab.fi_wl` result
+    // attrs in ApplyPortTypePragmas. Highest priority: the user
+    // explicitly declared the output's signedness/width, so the
+    // port renders that way regardless of what the body's chain
+    // looks like. Width override only fires when it matches an
+    // integer result (avoids stomping on a non-integer return
+    // shape; conflicting types are a separate verify-time error).
+    if (auto SgnA = F.getResultAttrOfType<mlir::IntegerAttr>(
+            I, "matlab.fi_signed")) {
+      ResSigned = SgnA.getInt() != 0;
+      SawPersist = true;
+      // Prefer the pragma-declared width; fall back to the
+      // function's declared result type if no width attr.
+      if (auto WLA = F.getResultAttrOfType<mlir::IntegerAttr>(
+              I, "matlab.fi_wl")) {
+        unsigned W = (unsigned)WLA.getInt();
+        if (W >= 1 && W <= 64)
+          T = mlir::IntegerType::get(F.getContext(), W);
+      }
+    }
     // T3 — narrow the port to the user's saturation cap when the
     // return value's defining chain culminates in a tagged
     // saturating SelectOp. The runtime ABI's i64 result type
