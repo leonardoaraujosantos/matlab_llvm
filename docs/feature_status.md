@@ -329,7 +329,7 @@ See [`docs/ode.md`](ode.md) for the full surface, ABI notes, and call shapes.
 | JIT / REPL | 🟡 | `matlabc -repl` with MLIR ExecutionEngine; state persists via a runtime workspace. No line editing / JIT cache / live user-function definitions yet. See `docs/repl.md`. |
 | Python emission | ✅ | `-emit-python`. NumPy-backed runtime in `runtime/matlab_runtime.py`; see `docs/emit_python.md`. Matrix display uses numpy's bracket repr (`.stdout-python` per-test goldens for the test lane). Multi-return uses native tuple unpacking (`a, b = f(...)`); persistent + isempty-init lowers to `<fn>.<name> = <init>` at module scope. |
 | TypeScript emission | 🟡 | `-emit-typescript`. Same scope as Python; runtime in `runtime/matlab_runtime.ts`. Multi-return uses array destructuring (`const [a, b] = f(...)`); persistent + isempty lowers to `let <fn>_<name>: number = <init>;`. |
-| SystemVerilog (ASIC, synthesizable) emission | 🟡 | `-emit-systemverilog`. Vendor-neutral, synthesizable RTL targeting ASIC flows. Phases 1–5.6 shipped (scalar combinational + FSMs + fixed-point pipeline + persistent fi-arrays + readability polish: persistent register names from source, const-fold of dead index arithmetic, `unique case` lowering of `switch` chains, comment hoisting onto adjacent ops, unsigned port pragma). 37 golden fixtures lint clean under Verilator (incl. `alu_16bit`, `counter_0_to_10`, `fir_asic_pipelined`, `mealy_fsm`, `moore_fsm`, `mux_4to_1_16bit`, `sequential_processor`, `vector_processor`). 7 fi-spec ↔ SV declaration regression tests in `test/EmitSVPorts/`, 10 synthesizability-gate diagnostic tests in `test/EmitSVFail/`. Open: 2-D fi matrices, RAM inference, CORDIC for transcendentals. See `docs/emit_systemverilog.md` |
+| SystemVerilog (ASIC, synthesizable) emission | ✅ | `-emit-systemverilog`. Vendor-neutral, synthesizable RTL targeting ASIC flows. Tier-1 closure shipped: scalar combinational + FSMs + fixed-point pipeline + persistent fi-arrays + readability polish + bit-slicing `x(hi:lo)` (any width 1..64) + runtime-indexed persistent fi-arrays (auto-decoded regfile pattern) + hierarchical multi-module emission (`func.call` → SV instance with auto-wired clk/rst_n). 76 golden fixtures lint clean under Verilator (incl. `aes_round`, `cic_decimator`, `cordic_pipe`, `crc32`, `fir_asic_pipelined`, `i2c_bit_bang`, `regfile_dyn`, `spi_master`, `uart_rx`, `vector_processor`, plus `hier_combinational` / `hier_sequential` for multi-module). 7 fi-spec ↔ SV declaration regression tests in `test/EmitSVPorts/`, 2 boolean-port lint-hint tests in `test/EmitSVHint/`, 10 synthesizability-gate diagnostic tests in `test/EmitSVFail/`. Open: 2-D fi matrices, RAM inference, CORDIC for transcendentals. See `docs/sv_supported_subset.md` (supported-subset reference) and `docs/emit_systemverilog.md` (backend architecture). |
 
 ### MLIR passes (`lib/MLIR/Passes/`)
 
@@ -353,9 +353,10 @@ All implemented; see `docs/emit_c_cpp.md` for pipeline diagram.
 | `run-tests-emit-python` (`-emit-python` + python3) | 172 | ✅ (some `.stdout-python` overrides for numpy repr) |
 | `run-tests-emit-typescript` (`-emit-typescript` + bun) | 172 | ✅ (`string_concat_mixed` fixed in Phase 6.2; ~20 skipped for BigInt-vs-number coercion) |
 | `run-tests-sym` (`-emit-cpp` + SymPP, opt-in via `-DMATLAB_LLVM_WITH_SYM=ON`) | 4 | ✅ — Phase 6.2 sym_phase_a/b/b1/b2 fixtures; skip-if-missing-SymPP via rc=77 |
-| `emit-sv` golden tests + Verilator lint | 37 | ✅ 37/37 |
+| `emit-sv` golden tests + Verilator lint + Yosys synth | 76 | ✅ 76/76 |
 | `emit-sv-fail` synthesizability gate diagnostics | 10 | ✅ 10/10 |
 | `emit-sv-ports` fi-spec ↔ SV declaration regression | 7 | ✅ 7/7 |
+| `emit-sv-hint` boolean-port lint hints | 2 | ✅ 2/2 |
 | `emitc-fail-tests` (diagnostic contract) | 1+ | ✅ |
 | `flowchart-tests` (`.mflow` loader: schema, validation, error paths) | 9 | ✅ 9/9 |
 | `flowchart-emit-matlab-tests` (linear / control / sub-flows / custom blocks) | 17 | ✅ 17/17 |
@@ -370,10 +371,17 @@ algebra, logical masks, struct/cell usage, OOP (`bank_account.m`
 — classdef with inheritance, `Dependent` properties, operator
 overloading), Symbolic Math Toolbox (`symbolic_demo.m` — full
 sym surface incl. matrix literals, multi-eq solve, dsolve/pdsolve,
-transforms), and ODE / PDE solvers (`ode_solver.m`). 18 synthesizable
-HDL modules under `examples/hdl/` cover ALU, counter, mux, FSMs
-(Mealy / Moore), vector dot product + magnitude, sequential FIR
-processor, pipelined FIR ASIC, and several variants. 10 flowchart
+transforms), and ODE / PDE solvers (`ode_solver.m`). 39 synthesizable
+HDL modules under `examples/hdl/` cover combinational primitives (ALU,
+mux, priority encoder, leading-zero detector, popcount), FSMs (Mealy,
+Moore, computed-state, UART RX, SPI master, I2C bit-banger), pipelined
+DSP (FIR ASIC, CIC decimator, sequential processor, 4-stage CORDIC),
+arithmetic engines (multi-cycle / Booth multiplier, AES round, CRC8 /
+CRC32, FNV-1a, Galois LFSR, Hamming(7,4)), memory and dataflow
+patterns (FIFO, async FIFO, register file with both static and runtime
+indexing, AXI handshake, memory-mapped peripheral, sync 2-FF CDC,
+Manchester encoder, barrel shifter), and the bit-slice / hierarchical-
+module reference fixtures. 10 flowchart
 programs under `examples/mflow/` showcase the `.mflow` JSON frontend;
 each mirrors a text counterpart and produces byte-identical output
 through every existing backend.

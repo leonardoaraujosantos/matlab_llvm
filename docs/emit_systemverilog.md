@@ -3,12 +3,17 @@
 This document scopes the SystemVerilog backend, which lowers a
 constrained MATLAB subset into **synthesizable SystemVerilog**.
 
-**Status: shipped.** Phases 1–5.6 are landed. 37 golden fixtures pass
-under Verilator lint; all 8 modules in `examples/hdl/` (`alu_16bit`,
-`counter_0_to_10`, `fir_asic_pipelined`, `mealy_fsm`, `moore_fsm`,
-`mux_4to_1_16bit`, `sequential_processor`, `vector_processor`) emit
-clean lint-passing RTL. See the "Test corpus" / "Phase 5.6 closure"
-sections below for the running status of remaining work.
+**Status: shipped.** Tier-1 closure is landed: scalar combinational +
+FSMs + fixed-point pipeline + persistent fi-arrays + readability polish +
+bit-slicing `x(hi:lo)` (any width 1..64) + runtime-indexed persistent
+fi-arrays (auto-decoded regfile pattern) + hierarchical multi-module
+emission (`func.call` → SV instance with auto-wired clk/rst_n). 76
+golden fixtures pass under Verilator lint; 39 reference modules in
+`examples/hdl/` cover combinational primitives, FSMs, pipelined DSP,
+arithmetic engines, memory and dataflow patterns. See
+`docs/sv_supported_subset.md` for the supported-subset reference, and
+the "Test corpus" / "Tier-1 closure" sections below for the running
+status of remaining work.
 
 The key requirement is not just emission. The tool must also decide
 whether the MATLAB source is **hardware-inferable** at all:
@@ -703,7 +708,7 @@ piece the next stage builds on.
 | E | ✅ shipped | Vector concat with static shapes (`[x, delay(1:end-1)]`) | ~3 days | shift-register pattern in fir / seq |
 | F | ✅ shipped (v3) | Persistent fi-arrays — N parallel scalar persistents. v3 adds: subscript-store on persistent get-ptr (`reg_products(i) = delay_line(i) * h(i)` from inside an unrolled for-loop body — Stage F's SubWrites path on the get's `__subscript_store` users); per-element idx encoding shifted to a `1000 + Idx*100 + k` base offset so synthetic per-element ids never collide with the user's original scalar persistents (the FIR-asic-pipelined idiom has 4 persistents at idx 0..3, where the old `Idx*100+k` scheme would have aliased delay_line[2]/[3] with reg_acc/reg_output); ElemW probe from the IR data shape (alloca elem type / `__subscript_store` val type) since the matlab.call_builtin → llvm.call lowering strips `fi_wl` before Stage F sees the zeros init; SV emitter sign-extends persistent gets when the IR-level result type is wider than the storage class AND a non-trunc/-ext consumer would otherwise see a width-mismatched signal (Verilator WIDTHEXPAND fix). Closes both `sequential_processor.m` and `fir_asic_pipelined.m` standalone. | ~6 days | shift-register + sequential_processor + fir_asic_pipelined ✅ |
 | Polish | ✅ shipped | Readability + correctness polish across all examples: persistent register names preserved from source (`delay_line_0..3` / `reg_products_0..3` instead of synthetic `buf<idx>_<k>`); const-fold of dead index arithmetic (`v0_1[(32'sd1 - 32'sd1)] → v0_1[0]`); `unique case` lowering of `switch` chains (incl. the IfStoreToSelect-folded last arm pattern from `mux_4to_1_16bit`); comment hoisting limited to ops that emit visible RTL (skips suppressed isempty / cmpf / FSM-cascade scf.ifs); `% hdl: port(_, fi, unsigned, _, _)` pragma now correctly emits `logic [W-1:0]` (was `logic signed [W-1:0]`); fi-spec sign + width threading on the typed-driver-call refinement path (operand-side refinement in `RefineFuncSigs`). | ~2 days | quality of all 8 examples/hdl/ modules |
-| Tests | ✅ shipped | Three CI lanes: `emit-sv` (37 golden-diff fixtures, all Verilator lint-clean); `emit-sv-fail` (10 synthesizability-gate diagnostic tests — `while-loop`, recursion, dynamic loop bound, `disp`, float param, persistent without init, FSM duplicate-case, FSM empty arm, no user funcs, iv used in body); `emit-sv-ports` (7 fi-spec ↔ SV declaration regression tests covering `{pragma, typed-driver-call} × {signed, unsigned} × {4, 8, 16, 32}` widths). | ~1 day | regression coverage for sign / width / declaration shapes |
+| Tests | ✅ shipped | Four CI lanes: `emit-sv` (76 golden-diff fixtures, all Verilator lint-clean + Yosys generic synth); `emit-sv-fail` (10 synthesizability-gate diagnostic tests — `while-loop`, recursion, dynamic loop bound, `disp`, float param, persistent without init, FSM duplicate-case, FSM empty arm, no user funcs, iv used in body); `emit-sv-ports` (7 fi-spec ↔ SV declaration regression tests covering `{pragma, typed-driver-call} × {signed, unsigned} × {4, 8, 16, 32}` widths); `emit-sv-hint` (2 boolean-port lint-hint tests). | ~1 day | regression coverage for sign / width / declaration shapes |
 
 Total: ~4–5 weeks of focused work, **one stage per
 implementation session** (the existing Phase 5.6.x cadence). The

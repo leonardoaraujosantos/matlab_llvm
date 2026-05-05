@@ -75,7 +75,8 @@ the MATLAB reference (run via the existing C/C++/Python emission of
 the same source).
 
 **Why it matters.** Today the SV pipeline is verified by
-Verilator's lint pass (37 fixtures lint-clean). Lint catches
+Verilator's lint pass (76 fixtures lint-clean) + Yosys generic
+synth on the non-FSM subset. Lint catches
 syntax / signedness / width issues but doesn't prove the RTL
 *behaves* the same as the MATLAB source. CocoTB closes that gap:
 the same MATLAB program is the golden reference and the

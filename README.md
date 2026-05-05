@@ -63,11 +63,12 @@ control flow, functions, basic OOP, and editor tooling.
 Current corpus size in-tree:
 
 - `29` runnable programs in [`examples/`](examples/)
-- `18` synthesizable HDL example modules in [`examples/hdl/`](examples/hdl/)
+- `39` synthesizable HDL example modules in [`examples/hdl/`](examples/hdl/) (plus driver scripts)
 - `10` flowchart programs in [`examples/mflow/`](examples/mflow/)
 - `172` execution tests in `test/Run/` plus `4` opt-in symbolic tests in `test/RunSym/`
-- `37` SystemVerilog golden fixtures (Verilator lint-clean) in `test/EmitSV/`
+- `76` SystemVerilog golden fixtures (Verilator lint-clean) in `test/EmitSV/`
 - `7` fi-spec port-declaration regression tests in `test/EmitSVPorts/`
+- `2` boolean-port lint-hint tests in `test/EmitSVHint/`
 - `10` synthesizability-gate diagnostic tests in `test/EmitSVFail/`
 - `40` flowchart fixtures across 6 lanes in `test/Flowchart/` (loader / emit-matlab / cross-backend / lsp / dap / emit-mflow)
 
@@ -418,14 +419,16 @@ Maturity by output path (most → least mature):
    x = init; end` pattern lower to `static T x = <init>;`.
 3. **Python** — multi-return uses native tuple unpacking; class /
    anon-handle path still has rough edges on a few edge fixtures.
-4. **SystemVerilog** (ASIC, synthesizable) — Phase 5.6 closure shipped:
+4. **SystemVerilog** (ASIC, synthesizable) — Tier-1 closure shipped:
    FSMs, persistent registers (scalar + fi-array shift registers), full
    fixed-point lowering with quantize/saturate, `% hdl: port(...)`
-   pragmas. 37 fixtures lint clean under Verilator. See
-   `docs/emit_systemverilog.md` and `examples/hdl/` for the canonical
-   ASIC examples (`alu_16bit`, `counter_0_to_10`, `mealy_fsm`,
-   `moore_fsm`, `mux_4to_1_16bit`, `vector_processor`,
-   `sequential_processor`, `fir_asic_pipelined`).
+   pragmas, bit-slicing `x(hi:lo)` syntax (any width 1..64), runtime-
+   indexed persistent fi-arrays (auto-decoded regfile pattern), and
+   hierarchical multi-module emission (`func.call` → SV instance with
+   auto-wired clk/rst_n). 76 fixtures lint clean under Verilator. See
+   `docs/sv_supported_subset.md` for the supported-subset reference,
+   `docs/emit_systemverilog.md` for backend architecture, and
+   `examples/hdl/` for the canonical ASIC examples.
 5. **TypeScript** — same scope as Python; least exercised in CI.
 
 The frontend itself has a second source surface alongside `.m` text:
