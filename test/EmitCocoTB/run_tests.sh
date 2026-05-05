@@ -82,6 +82,17 @@ declare -a CASES=(
   "spi_master:0"
   "uart_rx:0"
   "up_down_counter:0"
+  # Tier-3 — added after the Python-emit `matlab.not` handler shipped.
+  # Five of the six "matlab.not unhandled" modules from the original
+  # sweep clear after the handler. async_fifo also unblocks at the
+  # emit stage but then trips on float-vs-int bitwise typing in the
+  # ref (`wp ^ rp` where wp/rp come from f64 ABI loads); deferred to
+  # the float-vs-int fix.
+  "axi_handshake:0"
+  "booth_mul:0"
+  "edge_detector:0"
+  "fifo:0"
+  "manchester_enc:0"
 )
 
 pass=0; fail=0

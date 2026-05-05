@@ -502,6 +502,11 @@ bool Emitter::canInline(mlir::Operation &Op) {
          MN == "matlab.gt" || MN == "matlab.ge" ||
          MN == "matlab.short_or" || MN == "matlab.short_and"))
       return true;
+    // Unary `matlab.not` — bool NOT, common in HDL code (`~data_in`,
+    // `if ~rst`, etc.) and emitted by the frontend with i1 result.
+    if (MN == "matlab.not" && Op.getNumOperands() == 1 &&
+        Op.getNumResults() == 1)
+      return true;
   }
 
   // Is this LLVM call to a runtime helper that's known to be a pure
@@ -704,6 +709,15 @@ bool Emitter::buildInlineExpr(mlir::Operation &Op, std::string &Expr) {
       else if (MN == "matlab.short_or") cc = "or";
       else if (MN == "matlab.short_and") cc = "and";
       if (cc) return bin(cc);
+    }
+    // `matlab.not` — bool NOT. The op's i1 result coerces from any
+    // integer / float operand the same way `if` would in MATLAB
+    // (non-zero → true, zero → false). Render as `(not <operand>)`
+    // so the Python operand precedence is unambiguous.
+    if (MN == "matlab.not" && Op.getNumOperands() == 1 &&
+        Op.getNumResults() == 1) {
+      Expr = "(not " + dropOuterParens(exprFor(Op.getOperand(0))) + ")";
+      return true;
     }
   }
   if (auto S = dyn_cast<arith::SelectOp>(Op)) {
@@ -2765,6 +2779,16 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
       else if (MN == "matlab.short_or") CC = "or";
       else if (MN == "matlab.short_and") CC = "and";
       if (CC) { emitBin(CC); return; }
+    }
+    // Unary `matlab.not` — bool NOT (HDL idiom: `~rst`, `~en`, etc.).
+    // The op's i1 result coerces from any integer / float operand;
+    // Python's `not` does the truthiness coercion automatically.
+    if (MN == "matlab.not" && Op.getNumOperands() == 1 &&
+        Op.getNumResults() == 1) {
+      indent(Indent);
+      std::string N = this->name(Op.getResult(0));
+      OS << N << " = (not " << this->stmtExpr(Op.getOperand(0)) << ")\n";
+      return;
     }
   }
 

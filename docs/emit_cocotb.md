@@ -9,10 +9,10 @@ the emitted SystemVerilog DUT and the emitted Python reference
 model in lockstep against random vectors, asserting cycle-by-cycle
 equality.
 
-**Status: shipped — CI lane is 22/22.** The lane sweeps 22 of the
+**Status: shipped — CI lane is 27/27.** The lane sweeps 27 of the
 39 synthesizable HDL examples and asserts each verifies bit-exact
 between the SV DUT and the matlab-emitted Python reference. The
-remaining 17 fixtures hit Python-emitter gaps (not cocotb-harness
+remaining 12 fixtures hit Python-emitter gaps (not cocotb-harness
 gaps) — see [Python-emit gaps blocking cocotb expansion](#python-emit-gaps-blocking-cocotb-expansion)
 below. The roadmap tracks the cocotb-side nice-to-haves
 (`% cocotb: latency(N)` source pragma, auto-latency inference,
@@ -227,25 +227,33 @@ gives the right alignment.
 ## Status
 
 CI sweep across the 39 synthesizable HDL examples (cocotb 2.0.1,
-Verilator 5.x). 22 modules pass cleanly at `L=0` against random
-vectors and are exercised by the `cocotb-tests` lane:
+Verilator 5.x). 27 modules pass cleanly at `L=0` (or the noted
+pipeline depth) against random vectors and are exercised by the
+`cocotb-tests` lane:
 
-| Tier-1 (8) | Tier-2 (14) |
-|---|---|
-| `alu_16bit` (L=0)   | `computed_state_fsm` (L=0) |
-| `counter_0_to_10` (L=0) | `hamming74` (L=0) |
-| `fir_asic_pipelined` (L=4) | `i2c_bit_bang` (L=0) |
-| `mealy_fsm` (L=0)   | `leading_zero_detector` (L=0) |
-| `moore_fsm` (L=0)   | `median3` (L=0) |
-| `mux_4to_1_16bit` (L=0) | `mmap_periph` (L=0) |
-| `vector_processor` (L=0) | `popcount` (L=0) |
-| `sequential_processor` (L=4) | `priority_encoder` (L=0) |
-|                     | `pwm` (L=0) |
-|                     | `regfile` (L=0) |
-|                     | `rr_arbiter` (L=0) |
-|                     | `spi_master` (L=0) |
-|                     | `uart_rx` (L=0) |
-|                     | `up_down_counter` (L=0) |
+| Tier-1 (8) | Tier-2 (14) | Tier-3 (5) |
+|---|---|---|
+| `alu_16bit` (L=0)   | `computed_state_fsm` (L=0) | `axi_handshake` (L=0) |
+| `counter_0_to_10` (L=0) | `hamming74` (L=0) | `booth_mul` (L=0) |
+| `fir_asic_pipelined` (L=4) | `i2c_bit_bang` (L=0) | `edge_detector` (L=0) |
+| `mealy_fsm` (L=0)   | `leading_zero_detector` (L=0) | `fifo` (L=0) |
+| `moore_fsm` (L=0)   | `median3` (L=0) | `manchester_enc` (L=0) |
+| `mux_4to_1_16bit` (L=0) | `mmap_periph` (L=0) | |
+| `vector_processor` (L=0) | `popcount` (L=0) | |
+| `sequential_processor` (L=4) | `priority_encoder` (L=0) | |
+|                     | `pwm` (L=0) | |
+|                     | `regfile` (L=0) | |
+|                     | `rr_arbiter` (L=0) | |
+|                     | `spi_master` (L=0) | |
+|                     | `uart_rx` (L=0) | |
+|                     | `up_down_counter` (L=0) | |
+
+Tier-3 modules cleared after the Python emitter learned to handle
+`matlab.not` (the bool-NOT op the frontend emits for `~rst`-style
+expressions). The handler is the same shape as the existing
+`matlab.bxor` / `matlab.band` lowerings — `(not <operand>)` for
+i1 results, with the operand's truthiness coercion handled by
+Python's standard semantics.
 
 Mode selection is automatic per-input from the source pragmas:
 
@@ -265,7 +273,7 @@ lockstep — `ref(impulse).y` at call k matches `DUT.y` at cycle
 
 ### Python-emit gaps blocking cocotb expansion
 
-The remaining 17 modules in `examples/hdl/` aren't in the lane
+The remaining 12 modules in `examples/hdl/` aren't in the lane
 because the **Python emitter** (the source of truth for the
 reference model) has gaps that surface only on HDL-style code.
 These aren't cocotb-harness defects — `-emit-systemverilog`
@@ -274,25 +282,22 @@ a Python reference, so a broken reference blocks verification.
 
 | Class | Modules | Root cause |
 |---|---|---|
-| `matlab.not` not handled | `async_fifo`, `axi_handshake`, `booth_mul`, `edge_detector`, `fifo`, `manchester_enc` | `-emit-python` doesn't emit a Python form for `matlab.not` (bool NOT). Common in HDL designs but rare in numeric MATLAB scripts, hence the gap. |
+| ~~`matlab.not` not handled~~ | ~~6~~ → 0 | ✅ Fixed; see Tier-3 above. |
 | `matlab.alloc` not handled | `crc8`, `crc32`, `cordic_step` | Specific slot patterns produced by Stage F / RefineSlotTypes survive into the Python lowering with `matlab.alloc` ops the emitter doesn't recognise. |
 | `matlab.call_builtin` unhandled | `cic_decimator` | A builtin (likely `bitshift` in a specific operand shape) isn't in the Python emitter's dispatch table. |
-| Float-vs-int bitwise ops | `cordic_pipe`, `fnv1a`, `galois_lfsr` | The Python ref emits `s2y >> 1` / `h ^ b32` / `state & 1` where the LHS is a Python `float`. Python (unlike MATLAB / C / SV) doesn't auto-coerce — it raises `TypeError: unsupported operand type(s) for >>: 'float' and 'int'`. Fix: wrap fi-typed values in `int(...)` before bitwise ops. |
+| Float-vs-int bitwise ops | `async_fifo`, `cordic_pipe`, `fnv1a`, `galois_lfsr` | The Python ref emits `wp ^ rp` / `s2y >> 1` / `h ^ b32` / `state & 1` where the LHS is a Python `float` (the `+ 0` snapshot of an f64 ABI load). Python (unlike MATLAB / C / SV) doesn't auto-coerce — it raises `TypeError: unsupported operand type(s) for >>: 'float' and 'int'`. Fix: wrap fi-typed values in `int(...)` before bitwise ops. |
 | SV vs Python fi-saturation divergence | `aes_round`, `barrel_shifter`, `multi_cycle_mul` | The SV DUT correctly truncates / saturates `uint{8,16,32}` results on overflow. The Python ref computes the unbounded mathematical result. E.g. `bitshift(uint16(41905), 6)` → SV: 60480 (saturated / truncated), Python: 2681920 (unbounded). |
 | Harness-side timing (single case) | `sync_2ff` | Even at `L=2`, dual-edge sampling logic doesn't align for this CDC shape. Likely a real harness gap, not a Python-emit gap. |
 
-The biggest cluster (`matlab.not`) is the cheapest fix —
-roughly the same shape as the existing `matlab.bxor` /
-`matlab.band` handlers in `lib/MLIR/Passes/EmitPython.cpp`,
-just inverted. Closing it would unblock 6 modules in one
-session. The float-vs-int and saturation classes need a
-narrower fix (wrap-and-clamp helper + per-fi-spec saturation
-post-op) and would unblock another 6 between them.
-
-`sync_2ff` is the lone harness-side bug. Worth investigating
-once the Python-emit clusters land: with most modules verified,
-the dual-edge-sampling logic gets exercised across more shapes
-and the bug pattern becomes easier to characterise.
+The float-vs-int cluster (4 modules) is the next-cheapest unblock
+— wrap operands of `arith.shrui` / `arith.shli` / `arith.andi` /
+`arith.ori` / `arith.xori` in `int(...)` whenever the operand
+type traces back to an f64 ABI load. The saturation cluster (3
+modules) needs a per-fi-spec wrap-and-clamp helper inserted at
+each backend-narrow op (trunci / shrui / shli that crosses a
+declared width). `sync_2ff` is the lone harness-side bug; worth
+investigating once the Python-emit clusters land so the dual-
+edge-sampling logic gets exercised across more shapes.
 
 Mode selection is automatic per-input from the source pragmas:
 
