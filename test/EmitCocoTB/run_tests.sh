@@ -86,6 +86,12 @@ declare -a CASES=(
   # downstream bitwise-on-float TypeErrors.
   async_fifo
   galois_lfsr
+  # Tier-5 — added after the Python-emit slot-triplet handler shipped.
+  # `matlab.alloc / matlab.store / matlab.load` now collapse to plain
+  # Python variable reads/writes via DirectSlots. crc8 clears
+  # cleanly; crc32 / cordic_step still trip on saturation divergence
+  # (class 3) — they emit fine now but math overflows uint32 / int16.
+  crc8
 )
 
 pass=0; fail=0

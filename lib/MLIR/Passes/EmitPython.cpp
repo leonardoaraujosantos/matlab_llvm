@@ -507,6 +507,12 @@ bool Emitter::canInline(mlir::Operation &Op) {
     if (MN == "matlab.not" && Op.getNumOperands() == 1 &&
         Op.getNumResults() == 1)
       return true;
+    // matlab.load — slot triplet for HDL-targeted code that didn't
+    // promote to llvm.alloca. Resolves through DirectSlots in
+    // tryInlineExpr.
+    if (MN == "matlab.load" && Op.getNumOperands() == 1 &&
+        Op.getNumResults() == 1)
+      return true;
   }
 
   // Is this LLVM call to a runtime helper that's known to be a pure
@@ -769,6 +775,18 @@ bool Emitter::buildInlineExpr(mlir::Operation &Op, std::string &Expr) {
     // resolves to `base[idx]` syntax; the GEP's inline expression
     // already carries that form.
     Expr = exprFor(L.getAddr());
+    return true;
+  }
+  // matlab.load — symmetric with LLVM::LoadOp for slot triplets that
+  // survived as unregistered ops (matlab.alloc → matlab.store /
+  // matlab.load, all `none`-typed) on HDL-targeted code.
+  if (Op.getName().getStringRef() == "matlab.load" &&
+      Op.getNumOperands() == 1 && Op.getNumResults() == 1) {
+    if (auto *D = Op.getOperand(0).getDefiningOp()) {
+      auto It = DirectSlots.find(D);
+      if (It != DirectSlots.end()) { Expr = It->second; return true; }
+    }
+    Expr = exprFor(Op.getOperand(0));
     return true;
   }
   if (auto G = dyn_cast<LLVM::GEPOp>(Op)) {
@@ -3444,6 +3462,37 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
     return;
   }
 
+  // --- Slot triplet (matlab.alloc / matlab.store / matlab.load) ----
+  // Survive into Python emit on HDL-targeted code where the slot's
+  // type stays `none` (RefineSlotTypes leaves conditionally-stored
+  // slots unrefined; LowerScalarSlots doesn't promote them either).
+  // For Python, an unrefined slot is harmless — bind the alloc's
+  // SSA value to its source-level name and the load/store ops
+  // collapse to plain Python variable reads / writes.
+  if (Name == "matlab.alloc" && Op.getNumResults() == 1) {
+    if (auto NA = Op.getAttrOfType<mlir::StringAttr>("name")) {
+      std::string SlotName = sanitizeIdent(NA.getValue());
+      Names[Op.getResult(0)] = SlotName;
+      DirectSlots[&Op] = SlotName;
+    }
+    return;
+  }
+  if (Name == "matlab.store" && Op.getNumOperands() == 2) {
+    auto *AddrDef = Op.getOperand(1).getDefiningOp();
+    if (AddrDef && DirectSlots.count(AddrDef)) {
+      indent(Indent);
+      OS << DirectSlots[AddrDef] << " = "
+         << this->stmtExpr(Op.getOperand(0)) << "\n";
+      return;
+    }
+  }
+  if (Name == "matlab.load" && Op.getNumOperands() == 1 &&
+      Op.getNumResults() == 1) {
+    // Loads inline at use site via exprFor (which resolves through
+    // DirectSlots). No statement to emit.
+    return;
+  }
+
   // --- Unregistered matlab.call_builtin sites that survive to emit
   // time (Python pipeline doesn't run LowerFixedPoint). Render the
   // persistent-set form as `<fn>.<name> = <v>` to match the static
@@ -3459,6 +3508,56 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
         indent(Indent);
         OS << PF.getValue().str() << "." << PN.getValue().str()
            << " = " << this->stmtExpr(Op.getOperand(1)) << "\n";
+        return;
+      }
+    }
+    // Bitwise builtins that stayed at the matlab.call_builtin level
+    // because LowerScalarsToArith didn't lower them (typed-int
+    // dispatch missed because some operand was none-typed). Render
+    // as the equivalent Python expression and bind to the result
+    // SSA name so consumers see a stable Python identifier.
+    if (CA && Op.getNumResults() == 1) {
+      llvm::StringRef Cn = CA.getValue();
+      auto emitBin = [&](const char *Cc) {
+        indent(Indent);
+        std::string N = this->name(Op.getResult(0));
+        OS << N << " = " << this->stmtExpr(Op.getOperand(0)) << " " << Cc
+           << " " << this->stmtExpr(Op.getOperand(1)) << "\n";
+      };
+      if (Cn == "bitand" && Op.getNumOperands() == 2) { emitBin("&"); return; }
+      if (Cn == "bitor"  && Op.getNumOperands() == 2) { emitBin("|"); return; }
+      if (Cn == "bitxor" && Op.getNumOperands() == 2) { emitBin("^"); return; }
+      if (Cn == "bitshift" && Op.getNumOperands() == 2) {
+        // bitshift(a, k): k > 0 left-shift, k < 0 right-shift.
+        // Python doesn't have a sign-driven bitshift, so render as
+        // a conditional. The amount is almost always a folded
+        // constant; we emit the chosen direction directly when so.
+        indent(Indent);
+        std::string N = this->name(Op.getResult(0));
+        mlir::APInt KVal;
+        if (mlir::matchPattern(Op.getOperand(1),
+                                mlir::m_ConstantInt(&KVal))) {
+          int64_t K = KVal.getSExtValue();
+          if (K >= 0)
+            OS << N << " = " << this->stmtExpr(Op.getOperand(0))
+               << " << " << K << "\n";
+          else
+            OS << N << " = " << this->stmtExpr(Op.getOperand(0))
+               << " >> " << -K << "\n";
+        } else {
+          // Variable shift: emit a runtime select on the sign.
+          OS << N << " = (" << this->stmtExpr(Op.getOperand(0))
+             << " << " << this->stmtExpr(Op.getOperand(1))
+             << ") if " << this->stmtExpr(Op.getOperand(1))
+             << " >= 0 else (" << this->stmtExpr(Op.getOperand(0))
+             << " >> -(" << this->stmtExpr(Op.getOperand(1)) << "))\n";
+        }
+        return;
+      }
+      if (Cn == "bitcmp" && Op.getNumOperands() == 1) {
+        indent(Indent);
+        std::string N = this->name(Op.getResult(0));
+        OS << N << " = ~" << this->stmtExpr(Op.getOperand(0)) << "\n";
         return;
       }
     }
