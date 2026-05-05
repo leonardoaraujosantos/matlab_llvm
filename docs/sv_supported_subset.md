@@ -156,6 +156,7 @@ Each compiles, lints clean, and demonstrates a category:
 | `booth_mul` | Signed 8x8 Booth multiplier (signed counterpart to `multi_cycle_mul`) |
 | `cic_decimator` | Multi-stage CIC filter, downsample counter, sat at output |
 | `computed_state_fsm` | FSM/counter hybrid (post computed-vs-constant gatherFSMs fix) |
+| `cordic_pipe` | 4-stage pipelined CORDIC (12 chained persistent registers) |
 | `cordic_step` | Single CORDIC iteration in rotation mode (signed shift + cond add/sub) |
 | `counter_0_to_10` | Persistent register with reset and modulo wraparound |
 | `crc8` | LFSR with XOR feedback into persistent state |
@@ -163,9 +164,12 @@ Each compiles, lints clean, and demonstrates a category:
 | `edge_detector` | Single-FF + bool NOT (`matlab.not` rendering) |
 | `fifo` | 4-deep synchronous FIFO with full/empty + counter pointers |
 | `fir_asic_pipelined` | 3-stage pipelined FIR with persistent fi-arrays |
+| `fnv1a` | FNV-1a 32-bit streaming hash (XOR + multiply on persistent i32) |
 | `galois_lfsr` | 16-bit Galois LFSR with polynomial XOR feedback |
 | `hamming74` | Hamming(7,4) parity-XOR network + bit-pack output |
+| `i2c_bit_bang` | I2C master bit-banger — 6-state FSM with phase sub-counter |
 | `leading_zero_detector` | 16-input LZD via reverse-priority chain |
+| `manchester_enc` | Manchester encoder — 2-state phase FSM + bool XOR/NOT |
 | `mealy_fsm` | 2-state Mealy with output dependence on input |
 | `median3` | 3-input median filter via min/max compare-select network |
 | `mmap_periph` | 4-register memory-mapped peripheral with read/write decode |
@@ -178,6 +182,7 @@ Each compiles, lints clean, and demonstrates a category:
 | `regfile` | Multi-source persistent read (post type-unification fix) |
 | `rr_arbiter` | 4-input round-robin arbiter with rotating priority pointer |
 | `sequential_processor` | MAC pipeline with explicit `acc(:)` pattern |
+| `spi_master` | SPI master mode 0 — 4-state FSM driving MOSI/SCLK/CS#/done |
 | `sync_2ff` | Classic 2-FF clock domain crossing synchronizer |
 | `uart_rx` | 11-state FSM (post FSM-cascade aggregation fix) |
 | `up_down_counter` | Conditional persistent set with direction control |
