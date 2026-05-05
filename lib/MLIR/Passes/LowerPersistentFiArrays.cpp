@@ -200,10 +200,12 @@ bool rewriteOne(mlir::func::FuncOp F, int32_t Idx,
   if (!readF64Const(InitDef->getOperand(1), Cols)) {
     return false;
   }
-  if (Rows != 1.0 || Cols < 1.0) {
+  if (Rows < 1.0 || Cols < 1.0) {
     return false;
   }
-  int64_t N = (int64_t)Cols;
+  int64_t Nr = (int64_t)Rows;
+  int64_t Nc = (int64_t)Cols;
+  int64_t N = Nr * Nc;
 
   // Element width / sign from the `fi_*` attrs the frontend
   // attached to the zeros call. (Same convention as Stage C/D/E.)
@@ -413,7 +415,9 @@ bool rewriteOne(mlir::func::FuncOp F, int32_t Idx,
     llvm::SmallVector<mlir::Operation *, 4> SubWrites;
     for (mlir::Operation *U : Get->getResult(0).getUsers()) {
       if (isCallTo(U, "matlab_mat_i64_subscript1_s") ||
-          isCallTo(U, "matlab_mat_u64_subscript1_s")) {
+          isCallTo(U, "matlab_mat_u64_subscript1_s") ||
+          isCallTo(U, "matlab_mat_i64_subscript2_s") ||
+          isCallTo(U, "matlab_mat_u64_subscript2_s")) {
         SubReads.push_back(U);
         continue;
       }
@@ -526,10 +530,28 @@ bool rewriteOne(mlir::func::FuncOp F, int32_t Idx,
     };
 
     for (mlir::Operation *Sub : SubReads) {
-      if (Sub->getNumOperands() != 2 || Sub->getNumResults() != 1)
-        return false;
+      if (Sub->getNumResults() != 1) return false;
+      bool Is2D = Sub->getNumOperands() == 3;
+      if (!Is2D && Sub->getNumOperands() != 2) return false;
       mlir::OpBuilder SB(Sub);
       auto Loc = Sub->getLoc();
+      // 2-D constant access: `arr(i, j)` with both i and j folding
+      // to integer constants. Flatten to 1-D row-major (1-based):
+      // flat = (i - 1) * Nc + (j - 1). Currently only constant 2-D
+      // access is supported; runtime 2-D would need an N-input
+      // mux per dimension and is deferred.
+      if (Is2D) {
+        double ID, JD;
+        if (!readF64Const(Sub->getOperand(1), ID)) return false;
+        if (!readF64Const(Sub->getOperand(2), JD)) return false;
+        int64_t I = (int64_t)ID, J = (int64_t)JD;
+        if (I < 1 || I > Nr || J < 1 || J > Nc) return false;
+        int64_t Flat = (I - 1) * Nc + (J - 1);
+        mlir::Value Val = buildGet(SB, Loc, Flat);
+        Sub->getResult(0).replaceAllUsesWith(Val);
+        Sub->erase();
+        continue;
+      }
       double KD;
       if (readF64Const(Sub->getOperand(1), KD)) {
         // Constant-k fast path: single _global_get_f64.
@@ -640,9 +662,26 @@ bool rewriteOne(mlir::func::FuncOp F, int32_t Idx,
       return mlir::Value{};
     };
     for (mlir::Operation *Sub : SubWrites) {
-      if (Sub->getNumOperands() != 3) return false;
+      // 3-arg: __subscript_store(p, k, val) — 1-D
+      // 4-arg: __subscript_store(p, i, j, val) — 2-D
+      bool Is2DWrite = Sub->getNumOperands() == 4;
+      if (!Is2DWrite && Sub->getNumOperands() != 3) return false;
       mlir::OpBuilder SB(Sub);
       auto Loc = Sub->getLoc();
+      // 2-D constant write: flatten (i, j) to row-major index.
+      if (Is2DWrite) {
+        double ID, JD;
+        if (!readF64Const(Sub->getOperand(1), ID)) return false;
+        if (!readF64Const(Sub->getOperand(2), JD)) return false;
+        int64_t I = (int64_t)ID, J = (int64_t)JD;
+        if (I < 1 || I > Nr || J < 1 || J > Nc) return false;
+        int64_t Flat = (I - 1) * Nc + (J - 1);
+        mlir::Value Val = coerceVal(SB, Loc, Sub->getOperand(3));
+        if (!Val) return false;
+        buildSet(SB, Loc, Flat, Val);
+        Sub->erase();
+        continue;
+      }
       double KD;
       if (readF64Const(Sub->getOperand(1), KD)) {
         // Constant-k fast path: single _global_set_f64.

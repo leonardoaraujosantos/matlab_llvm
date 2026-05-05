@@ -25,7 +25,8 @@ Yosys synthesis.
 | `persistent` registers | ✅ | Each needs an `if isempty(reg) ... end` initializer |
 | FSM cascades | ✅ | Up to ~16 states; auto-typedef enum, encoding-aware |
 | Static fi-arrays | ✅ | `fi(zeros(1, N), ...)` with constant indices |
-| Persistent fi-arrays | ✅ | Lowers to N parallel scalar persistents (Stage F) |
+| Persistent fi-arrays (1-D) | ✅ | Lowers to N parallel scalar persistents (Stage F); RAM-inferred (collapsed to SV `logic [W-1:0] arr [N]`) for groups of ≥ 4 |
+| Persistent fi-matrices (2-D, constant indices) | ✅ | `fi(zeros(M, N), ...)` flattens to M·N row-major; `mat(i, j)` with constant i, j |
 | Boolean ports declared `bool` | ✅ | Renders as `logic` |
 | Bit-slicing `x(hi:lo)` | ✅ | Constant range on scalar int; result widens to next native size |
 | Runtime-indexed persistent arrays | ✅ | `arr(addr+1) = v` / `y = arr(addr+1)` auto-decode to mux + decoded enables |
