@@ -9,15 +9,17 @@ the emitted SystemVerilog DUT and the emitted Python reference
 model in lockstep against random vectors, asserting cycle-by-cycle
 equality.
 
-**Status: shipped — CI lane is 28/28.** The lane sweeps 28 of the
+**Status: shipped — CI lane is 36/36.** The lane sweeps 36 of the
 39 synthesizable HDL examples and asserts each verifies bit-exact
 between the SV DUT and the matlab-emitted Python reference. The
-remaining 11 fixtures hit Python-emitter gaps (not cocotb-harness
-gaps) — see [Python-emit gaps blocking cocotb expansion](#python-emit-gaps-blocking-cocotb-expansion)
-below. The roadmap tracks the cocotb-side nice-to-haves
-(auto-latency inference, multi-clock testbenches) but the core
-"open-source HDL Verifier alternative" is feature-complete for
-the supported MATLAB subset.
+remaining 3 fixtures (`cordic_pipe`, `cordic_step`, `cic_decimator`)
+need per-op wrap insertion in the Python emitter — every binary
+arith op result wraps to the result type's width, mirroring SV's
+mid-computation truncation. Quality-of-life additions in this
+ship: `% cocotb: latency(N)` source pragma, parallel CI runner
+(~6.5× speedup), enriched mismatch diagnostics with fi-decoded
+values + canonical fault hints + VCD pointer on first failure,
+and `% cocotb: cover(<port>, min_bins=N)` coverage gates.
 
 ---
 
