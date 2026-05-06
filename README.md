@@ -378,7 +378,9 @@ Core docs:
 - [`docs/emit_c_cpp.md`](docs/emit_c_cpp.md): C and C++ backends
 - [`docs/emit_cpp_classdef.md`](docs/emit_cpp_classdef.md): MATLAB classdef → C++ class lowering
 - [`docs/emit_python.md`](docs/emit_python.md): Python backend status and behavior
+- [`docs/tutorial_hdl.md`](docs/tutorial_hdl.md): **end-to-end HDL tutorial** — write MATLAB, emit SV, verify with cocotb (start here for HDL flow)
 - [`docs/emit_systemverilog.md`](docs/emit_systemverilog.md): SystemVerilog (ASIC, synthesizable) backend
+- [`docs/sv_supported_subset.md`](docs/sv_supported_subset.md): SV supported subset — every pragma + every limitation
 - [`docs/emit_cocotb.md`](docs/emit_cocotb.md): `-emit-cocotb` cycle-by-cycle co-simulation harness
 - [`docs/emit_fixed_point.md`](docs/emit_fixed_point.md): Fixed-Point Designer (`fi`) lowering
 - [`docs/complex.md`](docs/complex.md): complex numbers and FFT
