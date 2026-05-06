@@ -269,6 +269,20 @@ private:
   // alloca itself is suppressed and the slot name is the loop's IV name.
   llvm::DenseSet<mlir::Operation *> FusedForSlots;
   llvm::DenseMap<mlir::Operation *, std::string> FusedForSlotName;
+  /* Per-function tracking for the persistent-snapshot prelude.
+   * When the body has one or more `if isempty(p) || reset` arms
+   * (shape 2 in the recognizer), the snap captures must run
+   * AFTER every reset arm has executed — otherwise on a reset
+   * cycle the snapshot would hold the pre-reset value while
+   * the persistent's actual storage holds the reset value.
+   * `ResetArmGuards` collects those scf.if ops; the scf.if emit
+   * path checks the set after emitting and, when the set drains,
+   * flushes `PendingSnapshotPrelude`. If no reset arm is present
+   * (shape 1, the canonical isempty-only init that gets fully
+   * suppressed), the prelude is emitted at function start
+   * immediately, since there's no arm to wait for. */
+  llvm::DenseSet<mlir::Operation *> ResetArmGuards;
+  std::string PendingSnapshotPrelude;
   // Classdef registry. Classes maps the class name to its method list;
   // CalleeIndex maps every class-method symbol (`BankAccount__deposit`)
   // to its info so call-site rewriting can resolve it without scanning.
@@ -2074,6 +2088,11 @@ void Emitter::emitFuncFunc(mlir::func::FuncOp F) {
   computeInlines(F.getBody());
   scanBreakContinueFlags(F.getBody());
   scanForLoopPatterns(F.getBody());
+  /* Per-function snapshot state — clear leftovers from prior
+   * functions in the same module emit. Mandatory for correctness
+   * since the class members are reused across functions. */
+  ResetArmGuards.clear();
+  PendingSnapshotPrelude.clear();
   auto FT = F.getFunctionType();
 
   // Hoist @main's body to module scope — mirrors the behaviour of
@@ -2349,17 +2368,29 @@ void Emitter::emitFuncFunc(mlir::func::FuncOp F) {
         NeedSnap.insert(PN.getValue());
       }
     });
+    /* Build the snapshot prelude text now (Names already point at
+     * `_<name>_snap`), but defer the emit-or-defer decision to
+     * after the Tier-1 recognizer below — that's where
+     * ResetArmGuards gets populated for shape-2 isempty arms.
+     * The decision must come after, otherwise we'd always emit
+     * at function start regardless of whether a runtime reset
+     * arm is present. */
     if (!NeedSnap.empty()) {
       llvm::SmallVector<llvm::StringRef, 4> Sorted(
           NeedSnap.begin(), NeedSnap.end());
       std::sort(Sorted.begin(), Sorted.end());
-      indent(1);
-      OS << "# Persistent snapshots — match SV non-blocking "
-            "semantics for reads that flow to next-state writes\n";
+      PendingSnapshotPrelude.clear();
+      PendingSnapshotPrelude +=
+          "    # Persistent snapshots — match SV non-blocking "
+          "semantics for reads that flow to next-state writes\n";
       for (llvm::StringRef PN : Sorted) {
-        indent(1);
-        OS << "_" << PN.str() << "_snap = " << FnSym << "."
-           << PN.str() << "\n";
+        PendingSnapshotPrelude += "    _";
+        PendingSnapshotPrelude += PN.str();
+        PendingSnapshotPrelude += "_snap = ";
+        PendingSnapshotPrelude += FnSym;
+        PendingSnapshotPrelude += ".";
+        PendingSnapshotPrelude += PN.str();
+        PendingSnapshotPrelude += "\n";
       }
     }
   }
@@ -2451,8 +2482,24 @@ void Emitter::emitFuncFunc(mlir::func::FuncOp F) {
       SuppressedOps.insert(Cmp.getOperation());
       SuppressedOps.insert(Guard.getOperation());
       SuppressedOps.insert(InitSet);
+    } else {
+      /* Shape 2 (`isempty(p) || reset`): the Guard scf.if emits
+       * as a runtime reset arm. Track it so the snapshot prelude
+       * is flushed AFTER all such arms have written to their
+       * persistents — see ResetArmGuards definition. */
+      ResetArmGuards.insert(Guard.getOperation());
     }
   });
+
+  /* Snapshot prelude emit-or-defer decision: now that the Tier-1
+   * recognizer has populated ResetArmGuards for shape-2 arms,
+   * decide whether to flush the pending prelude at function start
+   * (no reset arm to wait for) or leave it pending for the scf.if
+   * emit path to flush after the last reset arm closes. */
+  if (!PendingSnapshotPrelude.empty() && ResetArmGuards.empty()) {
+    OS << PendingSnapshotPrelude;
+    PendingSnapshotPrelude.clear();
+  }
 
   emitRegion(F.getBody(), 1);
   OS << "\n";
@@ -2688,6 +2735,11 @@ void Emitter::emitLLVMFunc(mlir::LLVM::LLVMFuncOp F) {
   computeInlines(F.getBody());
   scanBreakContinueFlags(F.getBody());
   scanForLoopPatterns(F.getBody());
+  /* Per-function snapshot state — clear leftovers from prior
+   * functions in the same module emit. Mandatory for correctness
+   * since the class members are reused across functions. */
+  ResetArmGuards.clear();
+  PendingSnapshotPrelude.clear();
   auto FT = F.getFunctionType();
   OS << "def " << F.getSymName().str() << "(";
   auto &Entry = F.getBody().front();
@@ -3703,6 +3755,19 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
       indent(Indent);
       OS << "else:\n";
       emitRegion(Cur.getElseRegion(), Indent + 1);
+    }
+    /* Flush deferred snapshot prelude after the last reset arm
+     * closes. ResetArmGuards is populated for shape-2 isempty/
+     * reset arms (see persistent-read snapshot pass). On reset
+     * cycles this guarantees the snapshot captures the
+     * post-reset register value, matching SV's async-low reset
+     * propagation through always_comb. */
+    if (auto It = ResetArmGuards.find(&Op); It != ResetArmGuards.end()) {
+      ResetArmGuards.erase(It);
+      if (ResetArmGuards.empty() && !PendingSnapshotPrelude.empty()) {
+        OS << PendingSnapshotPrelude;
+        PendingSnapshotPrelude.clear();
+      }
     }
     return;
   }
