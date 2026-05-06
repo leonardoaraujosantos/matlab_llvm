@@ -2201,6 +2201,168 @@ void Emitter::emitFuncFunc(mlir::func::FuncOp F) {
       SuppressedOps.insert(Op);
     }
   });
+  /* SV-faithful persistent-read semantics: snapshot every
+   * persistent at function entry, and route every persistent
+   * read whose value flows ONLY into another persistent's write
+   * (not into the function's outputs) through the snapshot. This
+   * matches SV always_comb semantics where reads always see
+   * pre-edge register values, regardless of how many writes have
+   * happened earlier in the block. Reads that flow to outputs
+   * (via func.return operands or stores into output-named
+   * allocas) keep the post-edge view (`<fn>.<name>`), since
+   * cocotb post-samples the output after the clock has latched.
+   *
+   * Closes the cic_decimator-style integrator-chain divergence:
+   *
+   *   int1 = int1 + x;       // SV: reads pre-edge int1
+   *   int2 = int2 + int1;    // SV: reads pre-edge int1, NOT int1_next
+   *
+   * Without snapshots the Python ref blocking-assigns int1 then
+   * uses the new int1 to compute int2, producing one extra
+   * cycle of pipeline depth per chained stage relative to SV.
+   *
+   * Reachability: a load "reaches output" if its result, walked
+   * forward through SSA def-use, eventually hits either a
+   * `func.return` or a `matlab.store`/`llvm.store` value-source.
+   * The latter covers MATLAB's output-named allocas (the front
+   * end materialises `function [y, ...] = f(...)` outputs as
+   * named allocas; assignments `y = expr` lower to stores into
+   * those allocas, then a final load → return). */
+  if (!PersistentNames.empty()) {
+    /* Collect function output names from the result attributes;
+     * MATLAB's `function [y, ...] = f(...)` stores each result
+     * variable's source name as `matlab.name` on the function's
+     * result attrs. The front end materialises these as
+     * `matlab.alloc {name = <out>}` allocas inside the body —
+     * stores into those allocas are the canonical "value flows
+     * to output" markers, since the function's terminating
+     * return loads from them. */
+    llvm::DenseSet<llvm::StringRef> OutputNames;
+    auto FT = F.getFunctionType();
+    for (unsigned i = 0; i < FT.getNumResults(); ++i) {
+      if (auto NA = F.getResultAttrOfType<mlir::StringAttr>(
+              i, "matlab.name"))
+        OutputNames.insert(NA.getValue());
+    }
+    llvm::DenseSet<mlir::Value> OutputAllocas;
+    F.getBody().walk([&](mlir::Operation *Op) {
+      auto Nm = Op->getName().getStringRef();
+      if (Nm != "matlab.alloc" && Nm != "llvm.alloca") return;
+      if (Op->getNumResults() != 1) return;
+      auto NA = Op->getAttrOfType<mlir::StringAttr>("name");
+      if (NA && OutputNames.contains(NA.getValue()))
+        OutputAllocas.insert(Op->getResult(0));
+    });
+    /* Forward-propagated reachability set: a value V is in
+     * ReachesOutput iff there's a def-use (or alloca-mediated)
+     * path from V to either a func.return operand or a store
+     * into an output-named alloca. Iterated to fixpoint to
+     * follow through scf.if yields and intermediate-alloca
+     * store/load chains (the latter common when MATLAB locals
+     * survive Mem2Reg). */
+    llvm::DenseSet<mlir::Value> ReachesOutput;
+    auto isStoreOp = [](llvm::StringRef N) {
+      return N == "matlab.store" || N == "llvm.store";
+    };
+    auto isLoadOp = [](llvm::StringRef N) {
+      return N == "matlab.load" || N == "llvm.load";
+    };
+    /* Seeds */
+    F.getBody().walk([&](mlir::Operation *Op) {
+      if (auto Ret = mlir::dyn_cast<mlir::func::ReturnOp>(Op)) {
+        for (auto V : Ret.getOperands()) ReachesOutput.insert(V);
+        return;
+      }
+      auto Nm = Op->getName().getStringRef();
+      if (isStoreOp(Nm) && Op->getNumOperands() >= 2 &&
+          OutputAllocas.contains(Op->getOperand(1)))
+        ReachesOutput.insert(Op->getOperand(0));
+    });
+    /* Fixed-point iteration */
+    bool Changed = true;
+    while (Changed) {
+      Changed = false;
+      F.getBody().walk([&](mlir::Operation *Op) {
+        /* (a) any result in set → all operands enter set */
+        bool AnyResultIn = false;
+        for (auto R : Op->getResults())
+          if (ReachesOutput.contains(R)) { AnyResultIn = true; break; }
+        if (AnyResultIn) {
+          for (auto Operand : Op->getOperands())
+            if (ReachesOutput.insert(Operand).second) Changed = true;
+        }
+        /* (b) load(alloca) result in set → all values stored
+         * into the same alloca enter set (alloca-mediated) */
+        auto Nm = Op->getName().getStringRef();
+        if (isLoadOp(Nm) && Op->getNumOperands() >= 1 &&
+            Op->getNumResults() >= 1 &&
+            ReachesOutput.contains(Op->getResult(0))) {
+          mlir::Value Alloca = Op->getOperand(0);
+          for (auto *AU : Alloca.getUsers()) {
+            auto AUNm = AU->getName().getStringRef();
+            if (isStoreOp(AUNm) && AU->getNumOperands() >= 2 &&
+                AU->getOperand(1) == Alloca)
+              if (ReachesOutput.insert(AU->getOperand(0)).second)
+                Changed = true;
+          }
+        }
+        /* (c) scf.if result in set → its yield operands enter
+         * set (region-internal control-flow that produces the
+         * if's value via scf.yield) */
+        if (auto If = mlir::dyn_cast<mlir::scf::IfOp>(Op)) {
+          bool Any = false;
+          for (auto R : If.getResults())
+            if (ReachesOutput.contains(R)) { Any = true; break; }
+          if (Any) {
+            for (auto *Region :
+                 {&If.getThenRegion(), &If.getElseRegion()}) {
+              for (auto &Blk : *Region) {
+                if (auto Y = mlir::dyn_cast<mlir::scf::YieldOp>(
+                        Blk.back()))
+                  for (auto Operand : Y.getOperands())
+                    if (ReachesOutput.insert(Operand).second)
+                      Changed = true;
+              }
+            }
+          }
+        }
+      });
+    }
+    /* Apply: any persistent load whose result is NOT in
+     * ReachesOutput gets routed through the snapshot. */
+    llvm::SetVector<llvm::StringRef> NeedSnap;
+    F.getBody().walk([&](mlir::Operation *Op) {
+      auto PN = Op->getAttrOfType<mlir::StringAttr>("persistent_name");
+      if (!PN) return;
+      llvm::StringRef Callee;
+      if (auto C = mlir::dyn_cast<mlir::LLVM::CallOp>(Op)) {
+        if (auto Sym = C.getCallee()) Callee = *Sym;
+      } else if (Op->getName().getStringRef() == "matlab.call_builtin") {
+        if (auto CA = Op->getAttrOfType<mlir::StringAttr>("callee"))
+          Callee = CA.getValue();
+      }
+      if (Callee != "matlab_global_get_f64") return;
+      if (Op->getNumResults() != 1) return;
+      if (!ReachesOutput.contains(Op->getResult(0))) {
+        this->Names[Op->getResult(0)] =
+            "_" + PN.getValue().str() + "_snap";
+        NeedSnap.insert(PN.getValue());
+      }
+    });
+    if (!NeedSnap.empty()) {
+      llvm::SmallVector<llvm::StringRef, 4> Sorted(
+          NeedSnap.begin(), NeedSnap.end());
+      std::sort(Sorted.begin(), Sorted.end());
+      indent(1);
+      OS << "# Persistent snapshots — match SV non-blocking "
+            "semantics for reads that flow to next-state writes\n";
+      for (llvm::StringRef PN : Sorted) {
+        indent(1);
+        OS << "_" << PN.str() << "_snap = " << FnSym << "."
+           << PN.str() << "\n";
+      }
+    }
+  }
   // Tier 1: detect canonical `if isempty(p); p = init; end` first-
   // call init pattern and suppress the entire chain. The init value
   // becomes the initializer for the module-level persistent decl.

@@ -3,13 +3,15 @@ function y = sync_2ff(async_in, reset)
     % hdl: port(async_in, bool)
     % hdl: port(reset, bool)
     % cocotb: stimulus(reset, constant, 0)
-    % cocotb: latency(1)
     %
     % Classic 2-flop synchronizer. Async input gets registered
     % twice before the rest of the design sees it, suppressing
     % metastability. The pattern is "stage1 = input; stage2 =
-    % stage1; output = stage2" — sequential register chain in
-    % MATLAB's blocking semantics, parallel FFs in the SV.
+    % stage1; output = stage2" — chained register reads. The
+    % Python ref's pre-edge snapshot semantics align with the
+    % SV non-blocking model so no explicit latency offset is
+    % needed: ref(k) and DUT post-sample at k both produce
+    % x_{k-1}.
 
     persistent stage1; persistent stage2;
     if isempty(stage1) || reset

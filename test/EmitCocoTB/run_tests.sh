@@ -78,7 +78,7 @@ declare -a CASES=(
   edge_detector
   fifo
   manchester_enc
-  sync_2ff                  # `% cocotb: latency(1)` in source — see B1
+  sync_2ff                  # 2-flop synchronizer; latency=0 under snapshot-ref semantics
   # Tier-4 — added after the Python-emit persistent-init recognizer
   # learned the `isempty(p) || reset` shape. Capturing the in-body
   # init expr makes the module-level decl carry the right value
@@ -112,6 +112,13 @@ declare -a CASES=(
   # bit-growth attrs.
   cordic_pipe
   cordic_step
+  # Tier-8 — added after the Python-emit pre-snapshot persistent-read
+  # pass. Reads of persistents whose value flows to next-state writes
+  # (not function outputs) route through `_<name>_snap` captured at
+  # function entry, matching SV's always_comb non-blocking behaviour.
+  # Closes the integrator-chain divergence that previously kept
+  # cic_decimator out of the sweep.
+  cic_decimator
 )
 
 # Run each fixture in parallel via xargs -P. Default to up to 8
