@@ -278,6 +278,135 @@ CLI flag. The CLI wins when both are present.
 
 ---
 
+## Building an FSM
+
+State machines are the second common shape (after counters) you'll
+hit. The emitter recognises a `switch`-on-persistent pattern and
+lowers it to a clean `typedef enum` + `unique case`, which is what
+synthesis tools want to see.
+
+Save as `moore_fsm.m`:
+
+```matlab
+function [out_signal, state_display] = moore_fsm(input_bit, reset)
+    %#codegen
+    % hdl: port(input_bit, fi, unsigned, 8, 0)
+    % hdl: port(reset, fi, unsigned, 8, 0)
+
+    S0 = uint8(0);
+    S1 = uint8(1);
+    S2 = uint8(2);
+
+    persistent current_state;
+    if isempty(current_state) || reset
+        current_state = S0;
+    end
+
+    switch current_state
+        case S0
+            if input_bit == 1; current_state = S1; end
+        case S1
+            if input_bit == 0; current_state = S2;
+            else;              current_state = S0; end
+        case S2
+            if input_bit == 1; current_state = S1;
+            else;              current_state = S0; end
+        otherwise
+            current_state = S0;
+    end
+
+    if current_state == S2
+        out_signal = true;
+    else
+        out_signal = false;
+    end
+    state_display = current_state;
+end
+```
+
+After `matlabc -emit-systemverilog moore_fsm.m`, the relevant SV:
+
+```sv
+typedef enum logic [1:0] {S0, S1, S2} current_state_t;
+
+current_state_t current_state;
+current_state_t current_state_next;
+
+always_comb begin
+    current_state_next = current_state;
+    if (reset != 8'sd0) begin
+        current_state_next = S0;
+    end
+    unique case (current_state)
+        S0: begin
+            if (input_bit == 1) current_state_next = S1;
+        end
+        S1: begin
+            if (input_bit == 0) current_state_next = S2;
+            else                current_state_next = S0;
+        end
+        S2: begin
+            if (input_bit == 1) current_state_next = S1;
+            else                current_state_next = S0;
+        end
+        default: current_state_next = S0;
+    endcase
+    out_signal    = (current_state == S2) ? 1'b1 : 1'b0;
+    state_display = 8'(current_state);
+end
+
+always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n) current_state <= S0;
+    else        current_state <= current_state_next;
+end
+```
+
+What the emitter did automatically:
+
+- **Discovered the enum.** The constant set `{S0=0, S1=1, S2=2}` is
+  small and contiguous, so the persistent's storage type became a
+  `typedef enum logic [1:0]` — width sized to fit the largest
+  state. If you'd used non-contiguous values (`S0=0, S1=5, S2=9`),
+  the emitter falls back to `logic [7:0]` and you lose the
+  `unique case` synthesis benefit.
+- **Generated `current_state_next`.** All persistent assignments
+  inside the body write `current_state_next`; the `always_ff`
+  registers it on the clock edge. This is the canonical
+  next-state-logic / state-register split.
+- **Made `case` `unique`.** Tells synth that the cases are
+  mutually exclusive. The `otherwise` branch becomes the
+  `default` (required for `unique` synthesis).
+- **Output decoder is combinational.** `out_signal` and
+  `state_display` are pure functions of `current_state` — no flop,
+  no extra latency. That's Moore semantics. (For a Mealy machine,
+  the same source pattern works but the output expression involves
+  inputs, not just `current_state`.)
+
+Verify under cocotb:
+
+```sh
+matlabc -emit-cocotb moore_fsm.m
+cd moore_fsm_cocotb && make
+```
+
+One pragma worth adding for FSMs: state coverage.
+
+```matlab
+% cocotb: cover(state_display, min_bins=3)
+```
+
+This makes the harness assert that random stimulus exercised at
+least 3 distinct values on `state_display` — catches the silent
+case where 100 random `input_bit` vectors only ever drive S0↔S1
+and never reach S2. See [`emit_cocotb.md`](emit_cocotb.md) for the
+full coverage syntax.
+
+The Mealy variant lives in `examples/hdl/mealy_fsm.m`; a
+computed-state form (state expression on the RHS instead of
+`switch`) lives in `examples/hdl/computed_state_fsm.m`.
+
+---
+
 ## Output port pragmas
 
 Source pragmas can also declare output port types, not just
@@ -377,6 +506,136 @@ int3 = int3_s + int2_s;
 This makes Python and SV agree. The pattern is documented in the
 [supported subset reference](sv_supported_subset.md) under
 "Source-side patterns that need restructuring."
+
+---
+
+## Debugging cocotb mismatches
+
+When cocotb fails, the harness prints a structured error block.
+Reading it correctly is faster than diving for the VCD. Anatomy:
+
+```
+ERROR    cocotb.regression  #17 y: post=-32768 pre=42 ref=12345 args={'x': 12345}
+ERROR    cocotb.regression    decoded: post=-32768 [signed 16b 0x8000] ref=12345 [signed 16b 0x3039]
+ERROR    cocotb.regression    hint: saturation suspected: DUT pinned to -32768, ref outside [-32768..32767]
+ERROR    cocotb.regression    trace: /path/to/dut_cocotb/dump.vcd (open in GTKWave / Surfer)
+```
+
+Field by field:
+
+- **`#17`** — cycle number where the divergence happened. The
+  harness keeps going past the first failure; this lets you spot
+  whether failures cluster (state bug) or scatter (saturation
+  edge cases, sign issue).
+- **`y`** — the output port that mismatched.
+- **`post=` / `pre=`** — the DUT's value sampled *after* and
+  *before* the rising edge. If `pre` matches `ref` but `post`
+  doesn't, the DUT is one cycle behind — that's the latency hint.
+- **`ref=`** — the Python reference's value for the same input.
+- **`args={...}`** — the input vector that produced this cycle.
+  Reproducing by hand: feed these into the Python ref directly.
+- **`decoded:`** — both values unpacked as fi-typed, with the raw
+  bit pattern in hex. Useful when the decimal value lies but the
+  bits agree (sign-interpretation case).
+- **`hint:`** — the harness recognised the failure shape. Three
+  hints exist today; each maps to a specific knob.
+
+### Triage by hint
+
+| Hint | What it means | Fix |
+|---|---|---|
+| `latency suspected: pre-edge sample matched ref; consider increasing latency by 1` | DUT lags one cycle behind the reference. Common when you add a register and forget to bump `% cocotb: latency(N)`. | Bump `% cocotb: latency(N)` by 1 (or pass `-cocotb-latency=N` on the CLI). The matlabc emit also prints a hint with a precise count when no latency is declared. |
+| `sign-interpretation: bits match modulo 2^WL` | DUT and ref are bit-equivalent but the harness reads them with different signedness. The fallback `_eq` already handles this, so seeing this hint at all means a deeper width/sign disagreement. | Add an output port pragma — `% hdl: port(<out>, fi, unsigned, WL, 0)` (or `signed`) — to lock the SV port shape. |
+| `saturation suspected: DUT pinned to <hi/lo>, ref outside [lo..hi]` | DUT is saturating; ref isn't. Either the DUT is using saturating arithmetic where the reference is using wrap, or vice-versa. | Check the source: are you mixing `fi(_, _, ..., 'OverflowAction', 'Saturate')` and plain ops? Either widen the result type (more headroom) or unify both sides on the same overflow policy. |
+
+### When there's no hint
+
+Three frequent shapes that don't auto-classify:
+
+1. **First-cycle-only failures.** Cycle `#0` or `#1` mismatches
+   alone almost always mean the persistent's reset value disagrees
+   between SV and ref. Check the `if isempty(p) || reset` block —
+   a `uint8(0)` init renders as `8'd0`, but `int16(0)` renders as
+   `16'sd0`. Type-mismatch on the init constant propagates.
+2. **Failures cluster on a specific input value.** Often a
+   saturation edge case where the policy doesn't quite match. Grep
+   the failing `args` value across cycles; if it repeats, it's
+   data-dependent.
+3. **Every cycle fails.** Almost always a missed pragma — output
+   sign, latency, or stimulus. Re-read the SV emit and diff the
+   port shapes against what `mux2_ref.py` expects.
+
+### When the hint isn't enough — go to the VCD
+
+Open `dump.vcd` in GTKWave or Surfer. The `trace:` line in the
+error block prints the full path. What to look at:
+
+- The mismatched output port at the failing cycle (`#17` in the
+  example above).
+- Walk *backward* one cycle at a time on the `*_next` combinational
+  signals — that's where the wrong value first appears. Once it
+  hits a flop, it sticks for a cycle.
+- Compare the `current_state`/`*_reg` registers against what you
+  expect from the args trail.
+
+### Sweeping seeds
+
+The default seed is `42` (baked in at emit time so golden runs
+are byte-stable). The harness honours two env overrides without
+re-emitting:
+
+```sh
+COCOTB_SEED=7    make           # replay one alternate seed
+COCOTB_VECTORS=20 make          # shrink the run
+COCOTB_SEED=7 COCOTB_VECTORS=20 make   # both
+```
+
+The first log line in the run echoes the values used:
+
+```
+INFO test  matlabc harness: seed=7 vectors=20
+```
+
+For coverage of the seed space — useful when chasing a flake or
+just gaining confidence that the design isn't seed-sensitive —
+the generated Makefile ships with a `sweep` target:
+
+```sh
+make sweep             # 20 seeds (1..20)
+make sweep N=50        # 50 seeds
+```
+
+Output is one line per seed (`PASS` / `FAIL`) plus a summary. On
+any failure the sweep exits 1 and prints the failing seed list:
+
+```
+sweep: 20 seeds on counter
+  seed=1    PASS
+  seed=2    PASS
+  seed=3    FAIL
+  ...
+sweep: FAIL on seeds: 3 11
+replay one with: COCOTB_SEED=<n> make
+```
+
+Replay one of those with `COCOTB_SEED=3 make` to get the full
+mismatch dump. With a single failing seed pinned, shrink further
+with `COCOTB_SEED=3 COCOTB_VECTORS=20 make` until the failing
+cycle is the first one — then transcribe `args=...` from the
+error block into a hand-written stimulus and step through in
+GTKWave.
+
+### Re-emitting from scratch
+
+If anything in the harness looks stale (you edited the source but
+the SV didn't change), nuke the directory and re-emit:
+
+```sh
+rm -rf moore_fsm_cocotb && matlabc -emit-cocotb moore_fsm.m
+```
+
+The harness directory is single-source-of-truth — there are no
+side files outside it that need cleaning.
 
 ---
 
