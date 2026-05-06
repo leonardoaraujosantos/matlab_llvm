@@ -527,6 +527,85 @@ random / tester vectors actually exercised. Sample output:
        ...
 ```
 
+### v3.7.x — Transition + range coverage gates ✅ shipped
+
+**Status.** Implemented. `cover(port, min_bins=N)` checks distinct
+value count; for FSMs that's necessary but not sufficient — a Moore
+machine can hit every state and still miss specific transitions.
+Two complementary gate pragmas close the gap:
+
+- **`% cocotb: cover_pairs(<port>, min_pairs=N)`** — fail when the
+  named port saw fewer than N distinct `(prev, curr)` consecutive
+  value pairs across the run. Empty pairs (first cycle has no
+  prev) are not counted; only scalar ports tracked.
+- **`% cocotb: cover_range(<port>)`** — fail when the named port
+  did not see every value in `[lo..hi]` of its full fi range.
+  Build-time enforced cap: `WL ≤ 8` and `FL == 0`; wider or
+  fractional ports trip a runtime assertion in the harness rather
+  than silently passing.
+
+Pair coverage is stored as a `set[(float,float)]` per port; the
+narrow-port histogram already maintained for `cover()` doubles as
+the seen-set for `cover_range()`. The new fields surface in
+`coverage.txt`:
+
+```
+state_display : unsigned 8 bits, FL=0
+  samples=100  min=0.0  max=2.0  mean=0.5
+  histogram:
+            0     60  ########################################
+            1     30  ##############################
+            2     10  ##########
+  transition pairs: 6
+```
+
+Failure messages match the pre-existing `cover()` format and name
+the missing values when the universe is small (range coverage
+shows the first 8 missing values plus an ellipsis). Multiple
+gates per fixture are allowed; gates run in the order
+`cover → cover_pairs → cover_range` and short-circuit on the
+first failed one.
+
+### v3.7.y — Args trail capture + replay ✅ shipped
+
+**Status.** Implemented. Every harness run drops a per-cycle
+JSONL stimulus trail next to `coverage.txt` and `dump.vcd`:
+
+```
+args_trail.jsonl
+  {"cycle": 0, "args": {"a": 9137, "b": -31129, "sel": 0}}
+  {"cycle": 1, "args": {"a": -18140, "b": 15497, "sel": 1}}
+  ...
+```
+
+Captured **after** any per-cycle replay-override, so the trail is
+always the canonical "exact inputs the DUT saw." The trail is
+written best-effort (mirror of `coverage.txt`) — a write failure
+on the host fs doesn't fail the test.
+
+Two consumption paths:
+
+- **Env override.** `COCOTB_REPLAY_ARGS=<path> make` re-runs the
+  harness driving the trail's values cycle-by-cycle, overriding
+  random / stim / tester sources. `N` becomes the trail length so
+  the run exits cleanly when the trail ends.
+- **Makefile target.** `make replay` (uses local
+  `args_trail.jsonl`) or `make replay TRAIL=<path>` wraps the env
+  override. Logs both the seed/vectors that would have been used
+  and the trail being driven.
+
+Replay is bit-deterministic across seeds — capturing a failing
+trail under one seed and replaying it under any other produces an
+identical input sequence. That makes the trail the right artifact
+for permanent regression pins (commit `regress_<bug>.jsonl` next
+to the source, replay on every CI run) and diff-driven debugging
+(replay the same trail across two source variants, diff the
+cocotb output to isolate the behavioural change).
+
+The trail is plain JSONL — trim by hand to a minimal repro, edit
+specific cycles, or convert to a unit-test stimulus block. No
+binary format, no version pinning required.
+
 ### v3.8 — Multi-clock testbenches 🔵 (deferred — see scope below)
 
 **Status.** Deferred. The cocotb harness today assumes a single

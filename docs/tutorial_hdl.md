@@ -389,17 +389,27 @@ matlabc -emit-cocotb moore_fsm.m
 cd moore_fsm_cocotb && make
 ```
 
-One pragma worth adding for FSMs: state coverage.
+Two pragmas worth adding for FSMs:
 
 ```matlab
 % cocotb: cover(state_display, min_bins=3)
+% cocotb: cover_pairs(state_display, min_pairs=4)
 ```
 
-This makes the harness assert that random stimulus exercised at
-least 3 distinct values on `state_display` — catches the silent
-case where 100 random `input_bit` vectors only ever drive S0↔S1
-and never reach S2. See [`emit_cocotb.md`](emit_cocotb.md) for the
-full coverage syntax.
+`cover` checks that random stimulus visited at least 3 distinct
+values on `state_display` — catches the silent case where 100
+random `input_bit` vectors only ever drive S0↔S1 and never reach
+S2. `cover_pairs` checks **transitions**: at least 4 distinct
+`(prev, curr)` state edges. A 3-state FSM can pass the bins gate
+with `{S0, S1, S2}` while never traversing one specific edge
+(`S2 → S1`, say) — the pairs gate catches that. For a complete
+Moore exhaustive check, use `min_pairs = number of legal
+transitions`.
+
+A third gate, `% cocotb: cover_range(<port>)`, asserts every
+value in a port's fi range was seen — useful for narrow inputs
+(WL ≤ 8) where you want to gate on full-input-space coverage.
+See [`emit_cocotb.md`](emit_cocotb.md) for the full syntax.
 
 The Mealy variant lives in `examples/hdl/mealy_fsm.m`; a
 computed-state form (state expression on the RHS instead of
@@ -624,6 +634,57 @@ with `COCOTB_SEED=3 COCOTB_VECTORS=20 make` until the failing
 cycle is the first one — then transcribe `args=...` from the
 error block into a hand-written stimulus and step through in
 GTKWave.
+
+### Replay-from-trail
+
+Every harness run drops `args_trail.jsonl` next to `coverage.txt`
+and `dump.vcd`. One JSON record per cycle:
+
+```
+{"cycle": 0, "args": {"a": 9137, "b": -31129, "sel": 0}}
+{"cycle": 1, "args": {"a": -18140, "b": 15497, "sel": 1}}
+...
+```
+
+Two ways this is useful:
+
+```sh
+# 1. Pin a known-good or known-bad run as a regression. Save the
+# trail, edit the source, replay deterministically — same inputs
+# even after a re-emit:
+cp args_trail.jsonl saved/repro_42.jsonl
+make replay TRAIL=saved/repro_42.jsonl
+
+# 2. Default-trail replay — reproduces whatever last ran:
+make replay
+```
+
+`make replay` reads `args_trail.jsonl` (override with `TRAIL=…`)
+and sets `COCOTB_REPLAY_ARGS=<file>` for the cocotb run. The
+harness logs both the seed/vectors it would have used **and**
+the trail it's actually driving:
+
+```
+INFO test  matlabc harness: seed=42 vectors=100
+INFO test  matlabc harness: replaying 100 cycle(s) from .../args_trail.jsonl
+```
+
+Replay overrides random / stim / tester values cycle-by-cycle, so
+the input sequence is bit-identical to the captured run regardless
+of seed. That makes it the right tool for:
+
+- **Permanent regression repros.** Save the failing trail as
+  `regress_<bug>.jsonl`, commit it, replay on every CI run.
+- **Diff-driven debugging.** Run twice with different source
+  variants under the same trail; diff `coverage.txt` or the
+  cocotb log to isolate the change in DUT behaviour.
+- **Hand-edited minimal repros.** The trail is plain JSONL —
+  trim it to the failing cycle plus enough warmup, edit args by
+  hand if needed, replay.
+
+The replay path doesn't need the seed sweep first; combine the
+two when you have a flake — sweep to find a failing seed, capture
+that run's `args_trail.jsonl`, then replay forever.
 
 ### Re-emitting from scratch
 

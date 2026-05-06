@@ -5982,6 +5982,20 @@ struct CocotbPragmaScan {
    * Output ports also accepted — applies to whichever side the
    * port name matches. */
   std::map<std::string, int> CoverMinBins;
+  /* `% cocotb: cover_pairs(<port>, min_pairs=N)` — fail the test
+   * when the named port saw fewer than N distinct (prev, curr)
+   * consecutive value pairs. Transition coverage for FSMs and
+   * any port whose semantics depend on edges, not just static
+   * value distribution. Empty pairs (first cycle has no prev)
+   * are not counted. */
+  std::map<std::string, int> CoverPairsMin;
+  /* `% cocotb: cover_range(<port>)` — fail the test when the
+   * named port did not see every value in its full fi range
+   * [lo..hi]. Only meaningful for narrow ports (WL <= 8); for
+   * wider ports the universe is too large to be exhaustive.
+   * Stored as a set (no per-pragma threshold; the threshold is
+   * the full range size). */
+  std::set<std::string> CoverRange;
 };
 
 /* Scan the original .m source for `% cocotb:` directives and
@@ -6092,6 +6106,22 @@ scanCocotbPragmas(const std::string &SrcPath) {
         Spec.erase(0, Key.size());
       int N = std::atoi(Spec.c_str());
       if (!Args[0].empty() && N > 0) Out.CoverMinBins[Args[0]] = N;
+      continue;
+    }
+    if (Head == "cover_pairs" && Args.size() >= 2) {
+      // `cover_pairs(<port>, N)` or `cover_pairs(<port>, min_pairs=N)`
+      std::string Spec = Args[1];
+      const std::string Key = "min_pairs=";
+      if (Spec.compare(0, Key.size(), Key) == 0)
+        Spec.erase(0, Key.size());
+      int N = std::atoi(Spec.c_str());
+      if (!Args[0].empty() && N > 0) Out.CoverPairsMin[Args[0]] = N;
+      continue;
+    }
+    if (Head == "cover_range" && Args.size() >= 1) {
+      // `cover_range(<port>)` — no threshold, the range size is
+      // implied by the port's fi width.
+      if (!Args[0].empty()) Out.CoverRange.insert(Args[0]);
       continue;
     }
   }
@@ -6654,7 +6684,9 @@ static std::string
 renderCocotbHarness(const CocotbFuncSpec &S, const std::string &Stem,
                     int Vectors, int Latency, int Seed,
                     const std::vector<std::vector<std::string>> *Stimulus,
-                    const std::map<std::string, int> &CoverMinBins) {
+                    const std::map<std::string, int> &CoverMinBins,
+                    const std::map<std::string, int> &CoverPairsMin,
+                    const std::set<std::string> &CoverRange) {
   std::string Out;
   auto append = [&](const std::string &S) { Out += S; };
   auto pyTuple = [](const CocotbPortSpec &P) -> std::string {
@@ -6671,6 +6703,7 @@ renderCocotbHarness(const CocotbFuncSpec &S, const std::string &Stem,
   append("# DUT: " + S.Name + "  ");
   append(S.Sequential ? "[sequential]\n" : "[combinational]\n");
   append("\n");
+  append("import json\n");
   append("import os\n");
   append("import random\n");
   append("import sys\n");
@@ -6760,7 +6793,13 @@ renderCocotbHarness(const CocotbFuncSpec &S, const std::string &Stem,
   append("        self.out_stat = [self._fresh() for _ in OUTPUTS]\n");
   append("    def _fresh(self):\n");
   append("        return {'count': 0, 'min': None, 'max': None, "
-         "'sum': 0.0, 'hist': {}}\n");
+         "'sum': 0.0, 'hist': {}, 'pairs': set(), 'prev': None}\n");
+  /* `pairs` holds distinct (prev, curr) tuples for transition
+   * (cover_pairs) coverage; `prev` holds the previous scalar
+   * value seen on the port so each new sample produces one new
+   * candidate pair. Only scalar ports get pair tracking — for
+   * unpacked-array ports we'd need to pair element-wise per slot
+   * which is rarely useful; can be added if a fixture wants it. */
   append("    def _record(self, stat, val, narrow):\n");
   append("        stat['count'] += 1\n");
   append("        stat['sum'] += float(val)\n");
@@ -6771,6 +6810,9 @@ renderCocotbHarness(const CocotbFuncSpec &S, const std::string &Stem,
   append("        if narrow:\n");
   append("            key = float(val)\n");
   append("            stat['hist'][key] = stat['hist'].get(key, 0) + 1\n");
+  append("        if stat['prev'] is not None:\n");
+  append("            stat['pairs'].add((float(stat['prev']), float(val)))\n");
+  append("        stat['prev'] = val\n");
   append("    def record_input(self, k, value):\n");
   append("        name, signed, wl, fl, alen = self.in_specs[k]\n");
   append("        narrow = wl <= 8\n");
@@ -6817,6 +6859,8 @@ renderCocotbHarness(const CocotbFuncSpec &S, const std::string &Stem,
   append("                for k, v in items:\n");
   append("                    bar = '#' * min(40, max(1, v))\n");
   append("                    f.write(f'      {k:>10g}  {v:>5d}  {bar}\\n')\n");
+  append("            if stat['pairs']:\n");
+  append("                f.write(f'    transition pairs: {len(stat[\"pairs\"])}\\n')\n");
   append("\n");
 
   append("@cocotb.test()\n");
@@ -6836,6 +6880,27 @@ renderCocotbHarness(const CocotbFuncSpec &S, const std::string &Stem,
   append("    N = _N\n");
   append("    cocotb.log.info(f\"matlabc harness: seed={_seed} "
          "vectors={N}\")\n");
+  /* Replay-from-trail mode. When COCOTB_REPLAY_ARGS is set, load
+   * the JSONL trail and use its values for every cycle (overriding
+   * random / stim / tester values). The per-cycle override happens
+   * right before the comparator runs — see the inner loop. N is
+   * forced to len(REPLAY) so the harness exits cleanly when the
+   * trail ends; latency / sequential bookkeeping continue to work
+   * unchanged. */
+  append("    REPLAY = None\n");
+  append("    _replay_path = os.environ.get(\"COCOTB_REPLAY_ARGS\")\n");
+  append("    if _replay_path and os.path.exists(_replay_path):\n");
+  append("        with open(_replay_path) as _rf:\n");
+  append("            REPLAY = [json.loads(_l) for _l in _rf "
+         "if _l.strip()]\n");
+  append("        N = len(REPLAY)\n");
+  append("        cocotb.log.info(f\"matlabc harness: replaying "
+         "{N} cycle(s) from {_replay_path}\")\n");
+  /* args_trail accumulates per-cycle (cycle, args dict) for
+   * dumping at end-of-test. Always populated, even on
+   * non-failing runs — gives users a deterministic trail to
+   * convert into a regression test or seed a manual stimulus. */
+  append("    args_trail = []\n");
   if (S.Sequential) {
     append("    cocotb.start_soon(Clock(dut.clk, 10, units=\"ns\").start())\n");
     append("    dut.rst_n.value = 0\n");
@@ -6982,6 +7047,36 @@ renderCocotbHarness(const CocotbFuncSpec &S, const std::string &Stem,
            "else held_real[k])\n");
     append("            coverage.record_input(k, held_real[k])\n");
   }
+  /* Replay-mode override + args trail capture. After the per-input
+   * loop has built py_args (in either branch) and driven the DUT,
+   * if REPLAY is set we re-pack the recorded values for this
+   * cycle and re-drive — slight redundancy but keeps the override
+   * logic in one spot rather than tangled across both branches.
+   * args_trail captures the final py_args (post-override) for
+   * dump at end-of-test. */
+  append("        if REPLAY is not None and i < len(REPLAY):\n");
+  append("            _rec = REPLAY[i].get(\"args\", {})\n");
+  append("            for k, (name, signed, wl, fl, alen) in enumerate(INPUTS):\n");
+  append("                if name not in _rec: continue\n");
+  append("                v = _rec[name]\n");
+  append("                if alen == 0:\n");
+  append("                    py_args[k] = (int(v) if fl == 0 else float(v))\n");
+  append("                    getattr(dut, name).value = "
+         "pack_fi(_real(v), signed, wl, fl)\n");
+  append("                else:\n");
+  append("                    py_args[k] = list(v)\n");
+  append("                    for kk in range(alen):\n");
+  append("                        getattr(dut, name)[kk].value = "
+         "pack_fi(_real(v[kk]), signed, wl, fl)\n");
+  append("        _trail_args = {}\n");
+  append("        for k, (name, signed, wl, fl, alen) in enumerate(INPUTS):\n");
+  append("            if alen > 0:\n");
+  append("                _trail_args[name] = [int(x) if fl == 0 "
+         "else float(x) for x in py_args[k]]\n");
+  append("            else:\n");
+  append("                _trail_args[name] = (int(py_args[k]) if fl == 0 "
+         "else float(py_args[k]))\n");
+  append("        args_trail.append({\"cycle\": i, \"args\": _trail_args})\n");
   if (S.Sequential) {
     /* Sequential DUTs need TWO sample windows per cycle:
      *   - pre-edge: combinational outputs reflecting f(old_state,
@@ -7113,6 +7208,21 @@ renderCocotbHarness(const CocotbFuncSpec &S, const std::string &Stem,
    * other for the standard `just test-cocotb` workflow. */
   append("    coverage.write(os.path.join(os.path.dirname("
          "os.path.abspath(__file__)), 'coverage.txt'))\n");
+  /* args_trail dump — best-effort, mirrors coverage.txt. The
+   * trail is the canonical reproducer for any failure: feed it
+   * back via COCOTB_REPLAY_ARGS to drive the same input sequence
+   * deterministically, even after editing the source or
+   * regenerating with a different seed. Always written, not just
+   * on failure, so a successful run also captures a known-good
+   * regression pin. */
+  append("    try:\n");
+  append("        _tp = os.path.join(os.path.dirname("
+         "os.path.abspath(__file__)), 'args_trail.jsonl')\n");
+  append("        with open(_tp, 'w') as _tf:\n");
+  append("            for _r in args_trail:\n");
+  append("                _tf.write(json.dumps(_r) + '\\n')\n");
+  append("    except OSError:\n");
+  append("        pass\n");
   append("    assert failures == 0, "
          "f\"{failures} mismatch(es) across {compared} compared cycles "
          "(latency={LATENCY}, total stimulus N={N})\"\n");
@@ -7146,6 +7256,84 @@ renderCocotbHarness(const CocotbFuncSpec &S, const std::string &Stem,
     }
     append("    assert not cover_failures, "
            "\"coverage gate failed:\\n  \" + \"\\n  \".join(cover_failures)\n");
+  }
+  /* cover_pairs(<port>, min_pairs=N): assert >= N distinct
+   * (prev, curr) consecutive pairs were seen on the named port.
+   * Transition coverage — what FSMs need beyond raw bin counts. */
+  if (!CoverPairsMin.empty()) {
+    append("    pair_failures = []\n");
+    for (auto &Kv : CoverPairsMin) {
+      const std::string &Nm = Kv.first;
+      int Min = Kv.second;
+      append("    for k, spec in enumerate(INPUTS):\n");
+      append("        if spec[0] == \"" + Nm + "\":\n");
+      append("            seen = len(coverage.in_stat[k]['pairs'])\n");
+      append("            if seen < " + std::to_string(Min) + ":\n");
+      append("                pair_failures.append("
+             "f\"input '" + Nm + "' hit {seen} pair(s), expected >= "
+             + std::to_string(Min) + "\")\n");
+      append("    for j, spec in enumerate(OUTPUTS):\n");
+      append("        if spec[0] == \"" + Nm + "\":\n");
+      append("            seen = len(coverage.out_stat[j]['pairs'])\n");
+      append("            if seen < " + std::to_string(Min) + ":\n");
+      append("                pair_failures.append("
+             "f\"output '" + Nm + "' hit {seen} pair(s), expected >= "
+             + std::to_string(Min) + "\")\n");
+    }
+    append("    assert not pair_failures, "
+           "\"transition coverage gate failed:\\n  \" + "
+           "\"\\n  \".join(pair_failures)\n");
+  }
+  /* cover_range(<port>): assert every value in the port's full
+   * fi range [lo..hi] was observed. Only meaningful for narrow
+   * ports; we cap at WL <= 8 (256 values) and produce a build-
+   * time-equivalent runtime check (the harness asserts the WL
+   * limit so a misuse fails loudly instead of silently passing). */
+  if (!CoverRange.empty()) {
+    append("    range_failures = []\n");
+    for (auto &Nm : CoverRange) {
+      append("    for k, spec in enumerate(INPUTS):\n");
+      append("        if spec[0] == \"" + Nm + "\":\n");
+      append("            _, _signed, _wl, _fl, _ = spec\n");
+      append("            assert _wl <= 8, "
+             "\"cover_range only supported for WL <= 8 ports "
+             "(port '" + Nm + "' is wider)\"\n");
+      append("            assert _fl == 0, "
+             "\"cover_range only supported for integer ports "
+             "(port '" + Nm + "' has FL != 0)\"\n");
+      append("            lo, hi = fi_range(_signed, _wl, _fl)\n");
+      append("            seen = set(coverage.in_stat[k]['hist'].keys())\n");
+      append("            expected = set(float(v) for v in "
+             "range(int(lo), int(hi) + 1))\n");
+      append("            missing = sorted(expected - seen)\n");
+      append("            if missing:\n");
+      append("                range_failures.append("
+             "f\"input '" + Nm + "' missing {len(missing)} value(s) "
+             "in [{int(lo)}..{int(hi)}]: \" + str(missing[:8]) + "
+             "(' ...' if len(missing) > 8 else ''))\n");
+      append("    for j, spec in enumerate(OUTPUTS):\n");
+      append("        if spec[0] == \"" + Nm + "\":\n");
+      append("            _, _signed, _wl, _fl, _ = spec\n");
+      append("            assert _wl <= 8, "
+             "\"cover_range only supported for WL <= 8 ports "
+             "(port '" + Nm + "' is wider)\"\n");
+      append("            assert _fl == 0, "
+             "\"cover_range only supported for integer ports "
+             "(port '" + Nm + "' has FL != 0)\"\n");
+      append("            lo, hi = fi_range(_signed, _wl, _fl)\n");
+      append("            seen = set(coverage.out_stat[j]['hist'].keys())\n");
+      append("            expected = set(float(v) for v in "
+             "range(int(lo), int(hi) + 1))\n");
+      append("            missing = sorted(expected - seen)\n");
+      append("            if missing:\n");
+      append("                range_failures.append("
+             "f\"output '" + Nm + "' missing {len(missing)} value(s) "
+             "in [{int(lo)}..{int(hi)}]: \" + str(missing[:8]) + "
+             "(' ...' if len(missing) > 8 else ''))\n");
+    }
+    append("    assert not range_failures, "
+           "\"range coverage gate failed:\\n  \" + "
+           "\"\\n  \".join(range_failures)\n");
   }
   return Out;
 }
@@ -7185,6 +7373,21 @@ static std::string renderCocotbMakefile(const std::string &Stem,
   M += "\t  echo \"\"; echo \"sweep: FAIL on seeds:$$FAIL\"; \\\n";
   M += "\t  echo \"replay one with: COCOTB_SEED=<n> make\"; exit 1; \\\n";
   M += "\telse echo \"sweep: $$PASS/$$N seeds passed\"; fi\n";
+  M += "\n";
+  /* Replay target: drive the exact stimulus sequence captured in
+   * args_trail.jsonl from the previous run. Useful for: turning a
+   * failing run into a deterministic regression repro, or pinning
+   * a known-good trail before editing the source. Override the
+   * trail file with `make replay TRAIL=other_trail.jsonl`. */
+  M += ".PHONY: replay\n";
+  M += "replay:\n";
+  M += "\t@TRAIL=$${TRAIL:-args_trail.jsonl}; \\\n";
+  M += "\tif [ ! -f \"$$TRAIL\" ]; then \\\n";
+  M += "\t  echo \"replay: $$TRAIL not found; run \\`make\\` first to "
+       "produce one\"; exit 1; \\\n";
+  M += "\tfi; \\\n";
+  M += "\techo \"replay: driving stimulus from $$TRAIL\"; \\\n";
+  M += "\tCOCOTB_REPLAY_ARGS=$$PWD/$$TRAIL $(MAKE) -s\n";
   return M;
 }
 
@@ -7355,7 +7558,9 @@ int emitCocotbHarness(const char *Self, const Options &Opts,
                                              EffectiveLatency,
                                              Opts.CocotbSeed,
                                              Stimulus ? &*Stimulus : nullptr,
-                                             Pragmas.CoverMinBins);
+                                             Pragmas.CoverMinBins,
+                                             Pragmas.CoverPairsMin,
+                                             Pragmas.CoverRange);
   std::string Makefile = renderCocotbMakefile(Stem, Spec->Name);
 
   if (writeStringToFile(OutDir + "/test_" + Stem + ".py", Harness) != 0)
