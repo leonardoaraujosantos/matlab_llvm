@@ -298,6 +298,31 @@ See [`docs/ode.md`](ode.md) for the full surface, ABI notes, and call shapes.
 | `eval`, `evalin`, `assignin` | ❌ |
 | `feval` | 🟡 | Via function handles |
 
+### Signal Processing Toolbox (subset)
+
+Per-toolbox roadmap in [`signal_toolbox_roadmap.md`](signal_toolbox_roadmap.md).
+Carved out: apps, GUI tools, deep-learning entries, Simulink Data Inspector,
+MATLAB Coder integration, Python coexecution.
+
+| Group | Function | Status | Notes |
+|---|---|:-:|---|
+| Convolution / correlation | `conv`, `conv2`, `xcorr` | ✅ | |
+| Filter | `filter(b, a, x)` | ✅ | Direct-form II transposed; scalar IIR / FIR. |
+| FFT / shift | `fft`, `ifft`, `fft2`, `ifft2`, `fftshift`, `ifftshift` | ✅ | See `complex.md`. |
+| Multirate stubs | `upsample(x, n)`, `downsample(x, n)` | 🟡 | Zero-stuff / decimate; **no** anti-aliasing filter. Real `resample`/`decimate`/`interp`/`upfirdn` tracked in roadmap §4.1. |
+| Windows tail (Tier-1 §2.3) | `hamming`, `hann`, `blackman`, `rectwin`, `triang`, `bartlett`, `barthannwin`, `bohmanwin`, `parzenwin`, `nuttallwin`, `blackmanharris`, `flattopwin`, `kaiser`, `tukeywin`, `gausswin`, `chebwin`, `taylorwin` | ✅ shipped | All return an `n × 1` column. Two-arg parametric windows take their shape parameter as the second double; `taylorwin` takes `(n, nbar, sll)`. Symmetric (non-periodic) form. C / C++ / Python / TS runtimes byte-identical. Gating tests: `test/Run/sig_windows.m` (4-lane), `test/Runtime/test_signal.c` (15 reference-value checks: `rectwin` all-ones, `bartlett` triangular peak at midpoint, `kaiser(N, 0)` ≡ `rectwin(N)`, `tukeywin(N, 1)` ≡ `hann(N)`, etc.). |
+| Filter design — IIR (`butter`, `cheby1/2`, `ellip`, `besself`, prototypes, `bilinear`, `*ord`) | 🔵 | Tier-1 §2.1 — next slice. |
+| Filter design — FIR (`fir1`, `fir2`, `firls`, `sgolay`, `sgolayfilt`, `firrcos`, `kaiserord`) | 🔵 | Tier-1 §2.2. |
+| Polynomial helpers (`roots`, `poly`, `residue`, `polyder`, `polyint`) | 🟡 | `roots` partly via current `eig`; correct non-symmetric eig still open. Tier-1 §2.4. |
+| Filter implementation (`filtfilt`, `sosfilt`, `freqz`, `impz`, `stepz`, `grpdelay`, `phasez`) | 🔵 | Tier-1 §2.5 — closes the design loop. |
+| Nonparametric spectral (`periodogram`, `pwelch`, `dpss`, `pmtm`, `cpsd`, `mscohere`, `tfestimate`) | 🔵 | Tier-2 §3.1. |
+| Time-frequency (`spectrogram`, `stft`, `istft`, `pspectrum`, `instfreq`, `instbw`) | 🔵 | Tier-2 §3.3. |
+| Other transforms (`dct`, `idct`, `dst`, `idst`, `hilbert`, `cceps`, `rceps`, `czt`, `goertzel`, `fwht`) | 🔵 | Tier-2 §3.4. |
+| Multirate, complete (`resample`, `decimate`, `interp`, `upfirdn`, `polyphase`) | 🔵 | Tier-3 §4.1. |
+| Pulse / waveform measurements (`findpeaks`, `risetime`, `falltime`, `slewrate`, `dutycycle`, …) | 🔵 | Tier-3 §4.3. |
+| Wavelets / Wigner-Ville / synchrosqueezed (`cwt`, `dwt`, `wvd`, `fsst`) | 🔵 | Tier-4 §5.4. |
+| `digitalFilter` / `designfilt` system object | 🔵 | Tier-4 §5.1 — needs Tier-1 IIR/FIR shipped first. |
+
 ### Strings
 
 | Feature | Status |

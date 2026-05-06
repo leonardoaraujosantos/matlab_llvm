@@ -5352,6 +5352,325 @@ matlab_mat *matlab_blackman(double n_d) {
     return W;
 }
 
+/* Helper: parameterized cosine-sum window with up to 5 cosine terms.
+ * w[i] = a0 - a1 cos(x) + a2 cos(2x) - a3 cos(3x) + a4 cos(4x),
+ * x = 2*pi*i / (n-1). Used by nuttall, blackman-harris, flattop. */
+static matlab_mat *cos_sum_window(int64_t n, const double a[5]) {
+    matlab_mat *W = mat_alloc(n, 1);
+    if (n == 1) { W->data[0] = 1.0; return W; }
+    double denom = (double)(n - 1);
+    for (int64_t i = 0; i < n; ++i) {
+        double x = 2.0 * M_PI * (double)i / denom;
+        W->data[i] = a[0]
+                   - a[1] * cos(x)
+                   + a[2] * cos(2.0 * x)
+                   - a[3] * cos(3.0 * x)
+                   + a[4] * cos(4.0 * x);
+    }
+    return W;
+}
+
+matlab_mat *matlab_rectwin(double n_d) {
+    int64_t n = (int64_t)n_d;
+    if (n < 1) n = 1;
+    matlab_mat *W = mat_alloc(n, 1);
+    for (int64_t i = 0; i < n; ++i) W->data[i] = 1.0;
+    return W;
+}
+
+/* triang(n): symmetric triangular window. MATLAB's `triang` differs from
+ * `bartlett` in that triang's endpoints are non-zero. */
+matlab_mat *matlab_triang(double n_d) {
+    int64_t n = (int64_t)n_d;
+    if (n < 1) n = 1;
+    matlab_mat *W = mat_alloc(n, 1);
+    if (n == 1) { W->data[0] = 1.0; return W; }
+    double half = (double)(n + 1) / 2.0;
+    if (n % 2 == 1) {
+        /* odd n */
+        for (int64_t i = 0; i < n; ++i) {
+            double k = (double)(i + 1);
+            double v = (k <= half) ? (2.0 * k / (double)(n + 1))
+                                   : (2.0 * ((double)(n + 1) - k) / (double)(n + 1));
+            W->data[i] = v;
+        }
+    } else {
+        /* even n */
+        for (int64_t i = 0; i < n; ++i) {
+            double k = (double)(i + 1);
+            double v = (k <= (double)n / 2.0)
+                          ? ((2.0 * k - 1.0) / (double)n)
+                          : ((2.0 * ((double)n - k) + 1.0) / (double)n);
+            W->data[i] = v;
+        }
+    }
+    return W;
+}
+
+/* bartlett(n): triangular with zero endpoints. */
+matlab_mat *matlab_bartlett(double n_d) {
+    int64_t n = (int64_t)n_d;
+    if (n < 1) n = 1;
+    matlab_mat *W = mat_alloc(n, 1);
+    if (n == 1) { W->data[0] = 1.0; return W; }
+    double denom = (double)(n - 1);
+    for (int64_t i = 0; i < n; ++i) {
+        double k = (double)i;
+        W->data[i] = (k <= denom / 2.0) ? (2.0 * k / denom)
+                                        : (2.0 * (denom - k) / denom);
+    }
+    return W;
+}
+
+/* barthannwin(n): modified Bartlett-Hann window. */
+matlab_mat *matlab_barthannwin(double n_d) {
+    int64_t n = (int64_t)n_d;
+    if (n < 1) n = 1;
+    matlab_mat *W = mat_alloc(n, 1);
+    if (n == 1) { W->data[0] = 1.0; return W; }
+    double denom = (double)(n - 1);
+    for (int64_t i = 0; i < n; ++i) {
+        double t = (double)i / denom - 0.5;
+        W->data[i] = 0.62 - 0.48 * fabs(t) + 0.38 * cos(2.0 * M_PI * t);
+    }
+    return W;
+}
+
+/* bohmanwin(n). */
+matlab_mat *matlab_bohmanwin(double n_d) {
+    int64_t n = (int64_t)n_d;
+    if (n < 1) n = 1;
+    matlab_mat *W = mat_alloc(n, 1);
+    if (n == 1) { W->data[0] = 1.0; return W; }
+    double denom = (double)(n - 1);
+    for (int64_t i = 0; i < n; ++i) {
+        double x = fabs(2.0 * (double)i / denom - 1.0);
+        W->data[i] = (1.0 - x) * cos(M_PI * x) + sin(M_PI * x) / M_PI;
+    }
+    /* MATLAB forces the endpoints to 0 to remove FP noise. */
+    W->data[0] = 0.0;
+    W->data[n - 1] = 0.0;
+    return W;
+}
+
+/* parzenwin(n): de la Vallée Poussin window. */
+matlab_mat *matlab_parzenwin(double n_d) {
+    int64_t n = (int64_t)n_d;
+    if (n < 1) n = 1;
+    matlab_mat *W = mat_alloc(n, 1);
+    if (n == 1) { W->data[0] = 1.0; return W; }
+    double N = (double)n;
+    for (int64_t i = 0; i < n; ++i) {
+        double k = (double)i - (N - 1.0) / 2.0;   /* centred index */
+        double a = fabs(k);
+        double v;
+        if (a <= N / 4.0) {
+            double r = a / (N / 2.0);
+            v = 1.0 - 6.0 * r * r + 6.0 * r * r * r;
+        } else {
+            double r = a / (N / 2.0);
+            double t = 1.0 - r;
+            v = 2.0 * t * t * t;
+        }
+        W->data[i] = v;
+    }
+    return W;
+}
+
+matlab_mat *matlab_nuttallwin(double n_d) {
+    int64_t n = (int64_t)n_d;
+    if (n < 1) n = 1;
+    /* Nuttall's continuous-first-derivative coefficients. */
+    const double a[5] = { 0.3635819, 0.4891775, 0.1365995, 0.0106411, 0.0 };
+    return cos_sum_window(n, a);
+}
+
+matlab_mat *matlab_blackmanharris(double n_d) {
+    int64_t n = (int64_t)n_d;
+    if (n < 1) n = 1;
+    const double a[5] = { 0.35875, 0.48829, 0.14128, 0.01168, 0.0 };
+    return cos_sum_window(n, a);
+}
+
+matlab_mat *matlab_flattopwin(double n_d) {
+    int64_t n = (int64_t)n_d;
+    if (n < 1) n = 1;
+    /* MATLAB flattopwin coefficients (symmetric). */
+    const double a[5] = { 0.21557895, 0.41663158, 0.277263158,
+                          0.083578947, 0.006947368 };
+    return cos_sum_window(n, a);
+}
+
+/* Modified Bessel I_0 via the standard series — converges fast for the
+ * range relevant to Kaiser windows (|x| up to ~beta * pi). */
+static double bessel_i0(double x) {
+    double sum = 1.0;
+    double term = 1.0;
+    double y = x * x / 4.0;
+    for (int k = 1; k < 60; ++k) {
+        term *= y / ((double)k * (double)k);
+        sum += term;
+        if (term < 1e-16 * sum) break;
+    }
+    return sum;
+}
+
+matlab_mat *matlab_kaiser(double n_d, double beta) {
+    int64_t n = (int64_t)n_d;
+    if (n < 1) n = 1;
+    matlab_mat *W = mat_alloc(n, 1);
+    if (n == 1) { W->data[0] = 1.0; return W; }
+    double denom = (double)(n - 1);
+    double Ib = bessel_i0(beta);
+    for (int64_t i = 0; i < n; ++i) {
+        double r = 2.0 * (double)i / denom - 1.0;       /* in [-1, 1] */
+        double arg = beta * sqrt(1.0 - r * r);
+        W->data[i] = bessel_i0(arg) / Ib;
+    }
+    return W;
+}
+
+matlab_mat *matlab_tukeywin(double n_d, double r) {
+    int64_t n = (int64_t)n_d;
+    if (n < 1) n = 1;
+    matlab_mat *W = mat_alloc(n, 1);
+    if (n == 1) { W->data[0] = 1.0; return W; }
+    if (r <= 0.0) {
+        for (int64_t i = 0; i < n; ++i) W->data[i] = 1.0;
+        return W;
+    }
+    if (r >= 1.0) {
+        /* r = 1 -> Hann window. */
+        double denom = (double)(n - 1);
+        for (int64_t i = 0; i < n; ++i)
+            W->data[i] = 0.5 - 0.5 * cos(2.0 * M_PI * (double)i / denom);
+        return W;
+    }
+    double denom = (double)(n - 1);
+    for (int64_t i = 0; i < n; ++i) {
+        double x = (double)i / denom;
+        double v;
+        if (x < r / 2.0) {
+            v = 0.5 * (1.0 + cos(2.0 * M_PI / r * (x - r / 2.0)));
+        } else if (x <= 1.0 - r / 2.0) {
+            v = 1.0;
+        } else {
+            v = 0.5 * (1.0 + cos(2.0 * M_PI / r * (x - 1.0 + r / 2.0)));
+        }
+        W->data[i] = v;
+    }
+    return W;
+}
+
+matlab_mat *matlab_gausswin(double n_d, double alpha) {
+    int64_t n = (int64_t)n_d;
+    if (n < 1) n = 1;
+    matlab_mat *W = mat_alloc(n, 1);
+    if (n == 1) { W->data[0] = 1.0; return W; }
+    double half = (double)(n - 1) / 2.0;
+    for (int64_t i = 0; i < n; ++i) {
+        double t = ((double)i - half) / half;
+        W->data[i] = exp(-0.5 * (alpha * t) * (alpha * t));
+    }
+    return W;
+}
+
+/* Chebyshev (Dolph-Chebyshev) window. r is the desired sidelobe
+ * attenuation in dB. Implementation: evaluate the closed-form
+ * frequency-domain response on the N-point grid and inverse-FFT
+ * the result, then normalise. We piggyback on the runtime FFT —
+ * but since we only have radix-2 / Bluestein for complex inputs,
+ * we synthesise the spectrum as real and take a direct DFT
+ * (O(N^2)) for portability. N is small in practice (window
+ * lengths rarely exceed a few thousand) so this is acceptable. */
+matlab_mat *matlab_chebwin(double n_d, double r) {
+    int64_t n = (int64_t)n_d;
+    if (n < 1) n = 1;
+    matlab_mat *W = mat_alloc(n, 1);
+    if (n == 1) { W->data[0] = 1.0; return W; }
+    double atten = pow(10.0, r / 20.0);  /* linear sidelobe ratio */
+    double beta  = cosh(acosh(atten) / (double)(n - 1));
+    /* Spectral samples W[k] = T_{N-1}( beta * cos(pi*k/N) ) / atten,
+     * with T_m(x) = cos(m*acos(x)) when |x|<=1, cosh(m*acosh(x)) when |x|>1. */
+    std::vector<double> spec(n);
+    int N = (int)n;
+    int M = N - 1;
+    for (int k = 0; k < N; ++k) {
+        double x = beta * cos(M_PI * (double)k / (double)N);
+        double Tm;
+        if (x > 1.0) Tm = cosh((double)M * acosh(x));
+        else if (x < -1.0) Tm = ((M & 1) ? -1.0 : 1.0) * cosh((double)M * acosh(-x));
+        else Tm = cos((double)M * acos(x));
+        /* Apply alternating sign (frequency-shift) so the window is
+         * centred — matches MATLAB's even/odd-N convention. */
+        spec[k] = ((k & 1) ? -1.0 : 1.0) * Tm / atten;
+    }
+    /* Inverse real DFT via direct sum (O(N^2)). */
+    for (int64_t i = 0; i < n; ++i) {
+        double sum = spec[0];
+        for (int k = 1; k < N; ++k)
+            sum += 2.0 * spec[k] * cos(2.0 * M_PI * (double)k *
+                                       ((double)i - (double)(N - 1) / 2.0)
+                                       / (double)N);
+        W->data[i] = sum;
+    }
+    /* MATLAB normalises so max(W) == 1. */
+    double mx = W->data[0];
+    for (int64_t i = 1; i < n; ++i) if (W->data[i] > mx) mx = W->data[i];
+    if (mx > 0.0)
+        for (int64_t i = 0; i < n; ++i) W->data[i] /= mx;
+    return W;
+}
+
+/* Taylor window. nbar is the number of nearly-constant-level sidelobes;
+ * sll is the desired sidelobe level in dB (negative number, e.g. -30). */
+matlab_mat *matlab_taylorwin(double n_d, double nbar_d, double sll_d) {
+    int64_t n = (int64_t)n_d;
+    if (n < 1) n = 1;
+    int nbar = (int)nbar_d;
+    if (nbar < 1) nbar = 4;     /* MATLAB default */
+    double sll = sll_d != 0.0 ? sll_d : -30.0;  /* MATLAB default */
+    matlab_mat *W = mat_alloc(n, 1);
+    if (n == 1) { W->data[0] = 1.0; return W; }
+    double R  = pow(10.0, -sll / 20.0);   /* linear */
+    double A  = acosh(R) / M_PI;
+    double s2 = (double)(nbar * nbar) / (A * A + ((double)nbar - 0.5) *
+                                                  ((double)nbar - 0.5));
+    /* Compute Taylor coefficients F_m for m = 1..nbar-1. */
+    std::vector<double> F((size_t)nbar, 0.0);
+    for (int m = 1; m < nbar; ++m) {
+        double num = 1.0, den = 1.0;
+        for (int i = 1; i < nbar; ++i) {
+            double t1 = 1.0 - (double)(m * m) /
+                              (s2 * (A * A + ((double)i - 0.5) *
+                                              ((double)i - 0.5)));
+            num *= t1;
+            if (i != m) {
+                double t2 = 1.0 - (double)(m * m) / (double)(i * i);
+                den *= t2;
+            }
+        }
+        double sign = (m & 1) ? -1.0 : 1.0;
+        F[(size_t)m] = sign * 0.5 * num / den;
+    }
+    /* Sample the Taylor window: w[k] = 1 + 2*sum_{m=1..nbar-1} F_m
+     *                                          * cos(2*pi*m*(k-(N-1)/2)/N). */
+    for (int64_t k = 0; k < n; ++k) {
+        double sum = 1.0;
+        double centred = (double)k - (double)(n - 1) / 2.0;
+        for (int m = 1; m < nbar; ++m)
+            sum += 2.0 * F[(size_t)m] *
+                   cos(2.0 * M_PI * (double)m * centred / (double)n);
+        W->data[k] = sum;
+    }
+    /* Normalise to unit peak. */
+    double mx = W->data[0];
+    for (int64_t i = 1; i < n; ++i) if (W->data[i] > mx) mx = W->data[i];
+    if (mx > 0.0)
+        for (int64_t i = 0; i < n; ++i) W->data[i] /= mx;
+    return W;
+}
+
 /* chol(A): upper-triangular Cholesky factor R such that R'*R = A,
  * for a symmetric positive-definite A. Returns a zero matrix if A
  * is not SPD (i.e. a negative diagonal appears). */

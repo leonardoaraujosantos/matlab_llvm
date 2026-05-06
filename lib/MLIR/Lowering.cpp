@@ -6448,6 +6448,11 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             "xcorr", "polyval", "polyfit", "roots",
             "interp1", "trapz", "cumtrapz", "gradient",
             "hamming", "hann", "blackman",
+            /* Tier-1 windows tail (signal_toolbox_roadmap §2.3) — all
+             * return a column vector descriptor. */
+            "rectwin", "triang", "bartlett", "barthannwin", "bohmanwin",
+            "parzenwin", "nuttallwin", "blackmanharris", "flattopwin",
+            "kaiser", "tukeywin", "gausswin", "chebwin", "taylorwin",
             /* Tier-3: linalg helpers + image-processing wrappers + interp2.
              * rank/cond return f64 (not ptr), so they live in F64Ret above. */
             "null", "orth", "imfilter", "padarray",

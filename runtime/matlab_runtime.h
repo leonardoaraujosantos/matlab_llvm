@@ -323,10 +323,27 @@ matlab_struct *matlab_ode23_v_stats(matlab_ode_rhs_v f, matlab_mat *tspan,
 matlab_struct *matlab_ode23_v_stats_opts(matlab_ode_rhs_v f, matlab_mat *tspan,
                                            matlab_mat *y0, matlab_struct *opts);
 
-/* DSP windows. n must be >= 1; returns a column vector of length n. */
+/* DSP windows. n must be >= 1; returns a column vector of length n.
+ * All use the symmetric (non-periodic) form, matching MATLAB's default.
+ * Two-arg windows (kaiser, tukeywin, gausswin, chebwin) take their
+ * shape parameter as the second double; taylorwin takes (n, nbar, sll). */
 matlab_mat *matlab_hamming(double n);
 matlab_mat *matlab_hann(double n);
 matlab_mat *matlab_blackman(double n);
+matlab_mat *matlab_rectwin(double n);
+matlab_mat *matlab_triang(double n);
+matlab_mat *matlab_bartlett(double n);
+matlab_mat *matlab_barthannwin(double n);
+matlab_mat *matlab_bohmanwin(double n);
+matlab_mat *matlab_parzenwin(double n);
+matlab_mat *matlab_nuttallwin(double n);
+matlab_mat *matlab_blackmanharris(double n);
+matlab_mat *matlab_flattopwin(double n);
+matlab_mat *matlab_kaiser(double n, double beta);
+matlab_mat *matlab_tukeywin(double n, double r);
+matlab_mat *matlab_gausswin(double n, double alpha);
+matlab_mat *matlab_chebwin(double n, double r);
+matlab_mat *matlab_taylorwin(double n, double nbar, double sll);
 
 /*--- Tier 3: SVD-derived linalg + image-processing wrappers + 2-D interp ---*/
 

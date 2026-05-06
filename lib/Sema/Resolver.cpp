@@ -107,6 +107,10 @@ void Resolver::registerBuiltins() {
     "xcorr", "polyval", "polyfit", "roots",
     "interp1", "trapz", "cumtrapz", "gradient",
     "hamming", "hann", "blackman",
+    /* Tier-1 (Signal Processing Toolbox roadmap §2.3) — windows tail. */
+    "rectwin", "triang", "bartlett", "barthannwin", "bohmanwin",
+    "parzenwin", "nuttallwin", "blackmanharris", "flattopwin",
+    "kaiser", "tukeywin", "gausswin", "chebwin", "taylorwin",
     /* Tier 3 — SVD-derived linalg + image-processing wrappers. */
     "null", "orth", "imfilter", "padarray",
     "interp2", "upsample", "downsample",

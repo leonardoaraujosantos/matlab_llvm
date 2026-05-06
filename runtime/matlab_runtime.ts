@@ -2533,6 +2533,267 @@ export function disp_mat_c(A: any): void {
 export function fft2_c(A: any): NDArray { return fft_c(A); }
 export function ifft_c(A: any): NDArray { return fft_c(A); }
 export function ifft2_c(A: any): NDArray { return fft_c(A); }
+
+// --- DSP windows. All return an (n, 1) column vector matching the C
+//     runtime byte-identical. Symmetric (non-periodic) form. -----------
+function _winCol(buf: Float64Array): NDArray { return new NDArray(buf, [buf.length, 1]); }
+function _trivialN(n: number): NDArray | null {
+  const N = n | 0;
+  if (N <= 1) {
+    const buf = new Float64Array(Math.max(N, 1));
+    buf[0] = 1.0;
+    return _winCol(buf);
+  }
+  return null;
+}
+
+export function hamming(n: number): NDArray {
+  const t = _trivialN(n); if (t) return t;
+  const N = n | 0;
+  const out = new Float64Array(N);
+  for (let i = 0; i < N; i++)
+    out[i] = 0.54 - 0.46 * Math.cos(2 * Math.PI * i / (N - 1));
+  return _winCol(out);
+}
+
+export function hann(n: number): NDArray {
+  const t = _trivialN(n); if (t) return t;
+  const N = n | 0;
+  const out = new Float64Array(N);
+  for (let i = 0; i < N; i++)
+    out[i] = 0.5 - 0.5 * Math.cos(2 * Math.PI * i / (N - 1));
+  return _winCol(out);
+}
+
+export function blackman(n: number): NDArray {
+  const t = _trivialN(n); if (t) return t;
+  const N = n | 0;
+  const out = new Float64Array(N);
+  for (let i = 0; i < N; i++) {
+    const a = 2 * Math.PI * i / (N - 1);
+    out[i] = 0.42 - 0.5 * Math.cos(a) + 0.08 * Math.cos(2 * a);
+  }
+  return _winCol(out);
+}
+
+function _cosSum(n: number, a: number[]): NDArray {
+  const t = _trivialN(n); if (t) return t;
+  const N = n | 0;
+  const out = new Float64Array(N);
+  for (let i = 0; i < N; i++) {
+    const x = 2 * Math.PI * i / (N - 1);
+    out[i] = a[0] - a[1] * Math.cos(x) + a[2] * Math.cos(2 * x)
+                   - a[3] * Math.cos(3 * x) + a[4] * Math.cos(4 * x);
+  }
+  return _winCol(out);
+}
+
+export function rectwin(n: number): NDArray {
+  const N = Math.max((n | 0), 1);
+  const out = new Float64Array(N);
+  out.fill(1.0);
+  return _winCol(out);
+}
+
+export function triang(n: number): NDArray {
+  const t = _trivialN(n); if (t) return t;
+  const N = n | 0;
+  const out = new Float64Array(N);
+  if (N % 2 === 1) {
+    for (let i = 0; i < N; i++) {
+      const k = i + 1;
+      out[i] = (k <= (N + 1) / 2) ? (2 * k / (N + 1))
+                                  : (2 * (N + 1 - k) / (N + 1));
+    }
+  } else {
+    for (let i = 0; i < N; i++) {
+      const k = i + 1;
+      out[i] = (k <= N / 2) ? ((2 * k - 1) / N)
+                            : ((2 * (N - k) + 1) / N);
+    }
+  }
+  return _winCol(out);
+}
+
+export function bartlett(n: number): NDArray {
+  const t = _trivialN(n); if (t) return t;
+  const N = n | 0;
+  const out = new Float64Array(N);
+  for (let i = 0; i < N; i++)
+    out[i] = (i <= (N - 1) / 2) ? (2 * i / (N - 1))
+                                : (2 * ((N - 1) - i) / (N - 1));
+  return _winCol(out);
+}
+
+export function barthannwin(n: number): NDArray {
+  const t = _trivialN(n); if (t) return t;
+  const N = n | 0;
+  const out = new Float64Array(N);
+  for (let i = 0; i < N; i++) {
+    const tt = i / (N - 1) - 0.5;
+    out[i] = 0.62 - 0.48 * Math.abs(tt) + 0.38 * Math.cos(2 * Math.PI * tt);
+  }
+  return _winCol(out);
+}
+
+export function bohmanwin(n: number): NDArray {
+  const t = _trivialN(n); if (t) return t;
+  const N = n | 0;
+  const out = new Float64Array(N);
+  for (let i = 0; i < N; i++) {
+    const x = Math.abs(2 * i / (N - 1) - 1);
+    out[i] = (1 - x) * Math.cos(Math.PI * x) + Math.sin(Math.PI * x) / Math.PI;
+  }
+  out[0] = 0;
+  out[N - 1] = 0;
+  return _winCol(out);
+}
+
+export function parzenwin(n: number): NDArray {
+  const t = _trivialN(n); if (t) return t;
+  const N = n | 0;
+  const out = new Float64Array(N);
+  for (let i = 0; i < N; i++) {
+    const k = i - (N - 1) / 2;
+    const a = Math.abs(k);
+    if (a <= N / 4) {
+      const r = a / (N / 2);
+      out[i] = 1 - 6 * r * r + 6 * r * r * r;
+    } else {
+      const r = a / (N / 2);
+      const tt = 1 - r;
+      out[i] = 2 * tt * tt * tt;
+    }
+  }
+  return _winCol(out);
+}
+
+export function nuttallwin(n: number): NDArray {
+  return _cosSum(n | 0, [0.3635819, 0.4891775, 0.1365995, 0.0106411, 0.0]);
+}
+
+export function blackmanharris(n: number): NDArray {
+  return _cosSum(n | 0, [0.35875, 0.48829, 0.14128, 0.01168, 0.0]);
+}
+
+export function flattopwin(n: number): NDArray {
+  return _cosSum(n | 0, [0.21557895, 0.41663158, 0.277263158,
+                          0.083578947, 0.006947368]);
+}
+
+function _besselI0(x: number): number {
+  let s = 1.0, term = 1.0;
+  const y = x * x / 4;
+  for (let k = 1; k < 60; k++) {
+    term *= y / (k * k);
+    s += term;
+    if (term < 1e-16 * s) break;
+  }
+  return s;
+}
+
+export function kaiser(n: number, beta: number): NDArray {
+  const t = _trivialN(n); if (t) return t;
+  const N = n | 0;
+  const out = new Float64Array(N);
+  const Ib = _besselI0(beta);
+  for (let i = 0; i < N; i++) {
+    const r = 2 * i / (N - 1) - 1;
+    out[i] = _besselI0(beta * Math.sqrt(1 - r * r)) / Ib;
+  }
+  return _winCol(out);
+}
+
+export function tukeywin(n: number, r: number): NDArray {
+  const t = _trivialN(n); if (t) return t;
+  const N = n | 0;
+  if (r <= 0) return rectwin(N);
+  if (r >= 1) return hann(N);
+  const out = new Float64Array(N);
+  for (let i = 0; i < N; i++) {
+    const x = i / (N - 1);
+    if (x < r / 2)
+      out[i] = 0.5 * (1 + Math.cos(2 * Math.PI / r * (x - r / 2)));
+    else if (x <= 1 - r / 2)
+      out[i] = 1.0;
+    else
+      out[i] = 0.5 * (1 + Math.cos(2 * Math.PI / r * (x - 1 + r / 2)));
+  }
+  return _winCol(out);
+}
+
+export function gausswin(n: number, alpha: number): NDArray {
+  const t = _trivialN(n); if (t) return t;
+  const N = n | 0;
+  const half = (N - 1) / 2;
+  const out = new Float64Array(N);
+  for (let i = 0; i < N; i++) {
+    const tt = (i - half) / half;
+    out[i] = Math.exp(-0.5 * (alpha * tt) * (alpha * tt));
+  }
+  return _winCol(out);
+}
+
+function _acosh(x: number): number { return Math.log(x + Math.sqrt(x * x - 1)); }
+
+export function chebwin(n: number, r: number): NDArray {
+  const t = _trivialN(n); if (t) return t;
+  const N = n | 0;
+  const atten = Math.pow(10, r / 20);
+  const beta = Math.cosh(_acosh(atten) / (N - 1));
+  const M = N - 1;
+  const spec = new Float64Array(N);
+  for (let k = 0; k < N; k++) {
+    const x = beta * Math.cos(Math.PI * k / N);
+    let Tm: number;
+    if (x > 1) Tm = Math.cosh(M * _acosh(x));
+    else if (x < -1) Tm = ((M & 1) ? -1 : 1) * Math.cosh(M * _acosh(-x));
+    else Tm = Math.cos(M * Math.acos(x));
+    spec[k] = ((k & 1) ? -1 : 1) * Tm / atten;
+  }
+  const out = new Float64Array(N);
+  for (let i = 0; i < N; i++) {
+    let s = spec[0];
+    for (let k = 1; k < N; k++)
+      s += 2 * spec[k] * Math.cos(2 * Math.PI * k * (i - (N - 1) / 2) / N);
+    out[i] = s;
+  }
+  let mx = out[0];
+  for (let i = 1; i < N; i++) if (out[i] > mx) mx = out[i];
+  if (mx > 0) for (let i = 0; i < N; i++) out[i] /= mx;
+  return _winCol(out);
+}
+
+export function taylorwin(n: number, nbar: number, sll: number): NDArray {
+  const t = _trivialN(n); if (t) return t;
+  const N = n | 0;
+  const NB = (nbar | 0) || 4;
+  const SLL = sll || -30.0;
+  const R = Math.pow(10, -SLL / 20);
+  const A = _acosh(R) / Math.PI;
+  const s2 = (NB * NB) / (A * A + (NB - 0.5) * (NB - 0.5));
+  const F = new Float64Array(NB);
+  for (let m = 1; m < NB; m++) {
+    let num = 1, den = 1;
+    for (let i = 1; i < NB; i++) {
+      num *= 1 - (m * m) / (s2 * (A * A + (i - 0.5) * (i - 0.5)));
+      if (i !== m) den *= 1 - (m * m) / (i * i);
+    }
+    F[m] = ((m & 1) ? -1 : 1) * 0.5 * num / den;
+  }
+  const out = new Float64Array(N);
+  for (let k = 0; k < N; k++) {
+    let s = 1.0;
+    const c = k - (N - 1) / 2;
+    for (let m = 1; m < NB; m++)
+      s += 2 * F[m] * Math.cos(2 * Math.PI * m * c / N);
+    out[k] = s;
+  }
+  let mx = out[0];
+  for (let i = 1; i < N; i++) if (out[i] > mx) mx = out[i];
+  if (mx > 0) for (let i = 0; i < N; i++) out[i] /= mx;
+  return _winCol(out);
+}
 export function conj_c(A: any): NDArray { return asArray(A); }
 export function neg_c(A: any): NDArray { return asArray(A).neg(); }
 export function real_c(A: any): NDArray { return asArray(A); }

@@ -15,6 +15,20 @@ matlab_mat_c *matlab_ifftshift_c(void *A);
 matlab_mat   *matlab_hamming   (double n);
 matlab_mat   *matlab_hann      (double n);
 matlab_mat   *matlab_blackman  (double n);
+matlab_mat   *matlab_rectwin   (double n);
+matlab_mat   *matlab_triang    (double n);
+matlab_mat   *matlab_bartlett  (double n);
+matlab_mat   *matlab_barthannwin(double n);
+matlab_mat   *matlab_bohmanwin (double n);
+matlab_mat   *matlab_parzenwin (double n);
+matlab_mat   *matlab_nuttallwin(double n);
+matlab_mat   *matlab_blackmanharris(double n);
+matlab_mat   *matlab_flattopwin(double n);
+matlab_mat   *matlab_kaiser    (double n, double beta);
+matlab_mat   *matlab_tukeywin  (double n, double r);
+matlab_mat   *matlab_gausswin  (double n, double alpha);
+matlab_mat   *matlab_chebwin   (double n, double r);
+matlab_mat   *matlab_taylorwin (double n, double nbar, double sll);
 matlab_mat   *matlab_upsample  (matlab_mat *x, double n);
 matlab_mat   *matlab_downsample(matlab_mat *x, double n);
 matlab_mat   *matlab_diff      (matlab_mat *A);
@@ -219,6 +233,111 @@ static void test_window_n_eq_1(void) {
     rt_free(W);
 }
 
+static void test_rectwin_all_ones(void) {
+    matlab_mat *W = matlab_rectwin(7);
+    RT_CHECK(rt_rows(W) == 7 && rt_cols(W) == 1, "rectwin 7x1");
+    for (int i = 0; i < 7; ++i)
+        RT_NEAR(rt_at(W, i, 0), 1.0, 0.0, "rectwin entry");
+    rt_free(W);
+}
+
+static void test_bartlett_triangular(void) {
+    /* bartlett(5) = [0, 0.5, 1, 0.5, 0]. */
+    matlab_mat *W = matlab_bartlett(5);
+    RT_NEAR(rt_at(W, 0, 0), 0.0, 1e-12, "bartlett endpoint zero");
+    RT_NEAR(rt_at(W, 1, 0), 0.5, 1e-12, "bartlett quarter");
+    RT_NEAR(rt_at(W, 2, 0), 1.0, 1e-12, "bartlett peak");
+    RT_NEAR(rt_at(W, 4, 0), 0.0, 1e-12, "bartlett symmetric end");
+    rt_free(W);
+}
+
+static void test_triang_nonzero_endpoints(void) {
+    /* triang differs from bartlett: endpoints are non-zero. */
+    matlab_mat *W = matlab_triang(5);
+    /* For odd n=5: w = [2/6, 4/6, 1, 4/6, 2/6]. */
+    RT_NEAR(rt_at(W, 0, 0), 2.0/6.0, 1e-12, "triang odd endpoint");
+    RT_NEAR(rt_at(W, 2, 0), 1.0,     1e-12, "triang odd peak");
+    rt_free(W);
+}
+
+static void test_kaiser_beta0_is_rectwin(void) {
+    /* kaiser(N, 0) is identically the rectangular window because
+     * I_0(0) = 1 and the argument to the numerator is also zero. */
+    matlab_mat *W = matlab_kaiser(8, 0.0);
+    for (int i = 0; i < 8; ++i)
+        RT_NEAR(rt_at(W, i, 0), 1.0, 1e-12, "kaiser beta=0 entry");
+    rt_free(W);
+}
+
+static void test_kaiser_symmetric(void) {
+    matlab_mat *W = matlab_kaiser(11, 6.0);
+    RT_CHECK(rt_rows(W) == 11, "kaiser shape");
+    for (int i = 0; i < 5; ++i)
+        RT_NEAR(rt_at(W, i, 0), rt_at(W, 10 - i, 0), 1e-12, "kaiser symmetric");
+    /* Centre is the peak (== 1.0 because I_0(beta)/I_0(beta) = 1). */
+    RT_NEAR(rt_at(W, 5, 0), 1.0, 1e-12, "kaiser centre peak");
+    rt_free(W);
+}
+
+static void test_gausswin_centre_peak(void) {
+    /* gausswin centred at the midpoint, value 1 there. */
+    matlab_mat *W = matlab_gausswin(7, 2.5);
+    RT_NEAR(rt_at(W, 3, 0), 1.0, 1e-12, "gausswin centre");
+    /* Symmetric. */
+    RT_NEAR(rt_at(W, 0, 0), rt_at(W, 6, 0), 1e-12, "gausswin symmetric");
+    rt_free(W);
+}
+
+static void test_tukeywin_zero_is_rectwin(void) {
+    /* r=0 -> rectangular. */
+    matlab_mat *W = matlab_tukeywin(6, 0.0);
+    for (int i = 0; i < 6; ++i)
+        RT_NEAR(rt_at(W, i, 0), 1.0, 1e-12, "tukeywin r=0 entry");
+    rt_free(W);
+}
+
+static void test_tukeywin_one_is_hann(void) {
+    /* r=1 -> Hann window. */
+    matlab_mat *W1 = matlab_tukeywin(7, 1.0);
+    matlab_mat *W2 = matlab_hann(7);
+    for (int i = 0; i < 7; ++i)
+        RT_NEAR(rt_at(W1, i, 0), rt_at(W2, i, 0), 1e-12, "tukeywin r=1 == hann");
+    rt_free(W1); rt_free(W2);
+}
+
+static void test_blackmanharris_normalisation(void) {
+    /* Coefficients sum to a0 + a2 + a4 - a1 - a3 at the endpoints
+     * for our convention. Just check shape + symmetry + bounded. */
+    matlab_mat *W = matlab_blackmanharris(9);
+    RT_CHECK(rt_rows(W) == 9, "shape");
+    for (int i = 0; i < 4; ++i)
+        RT_NEAR(rt_at(W, i, 0), rt_at(W, 8 - i, 0), 1e-12, "bh symmetric");
+    /* Centre is the peak; w[c] = a0 + a1 + a2 + a3 + a4 = 1. */
+    RT_NEAR(rt_at(W, 4, 0), 1.0, 1e-9, "bh centre peak ~1");
+    rt_free(W);
+}
+
+static void test_chebwin_normalised_to_one(void) {
+    /* MATLAB normalises chebwin so max == 1. */
+    matlab_mat *W = matlab_chebwin(11, 60.0);
+    double mx = 0;
+    for (int i = 0; i < 11; ++i) {
+        double v = rt_at(W, i, 0);
+        if (v > mx) mx = v;
+    }
+    RT_NEAR(mx, 1.0, 1e-12, "chebwin peak normalised");
+    rt_free(W);
+}
+
+static void test_taylorwin_normalised(void) {
+    matlab_mat *W = matlab_taylorwin(10, 4, -30);
+    double mx = 0;
+    for (int i = 0; i < 10; ++i)
+        if (rt_at(W, i, 0) > mx) mx = rt_at(W, i, 0);
+    RT_NEAR(mx, 1.0, 1e-12, "taylorwin peak normalised");
+    rt_free(W);
+}
+
 static void test_upsample_inserts_zeros(void) {
     double a[] = {1, 2, 3, 4};
     matlab_mat *A = mk(a, 1, 4);
@@ -282,6 +401,17 @@ int main(void) {
     RT_RUN(test_hann_window);
     RT_RUN(test_blackman_window);
     RT_RUN(test_window_n_eq_1);
+    RT_RUN(test_rectwin_all_ones);
+    RT_RUN(test_bartlett_triangular);
+    RT_RUN(test_triang_nonzero_endpoints);
+    RT_RUN(test_kaiser_beta0_is_rectwin);
+    RT_RUN(test_kaiser_symmetric);
+    RT_RUN(test_gausswin_centre_peak);
+    RT_RUN(test_tukeywin_zero_is_rectwin);
+    RT_RUN(test_tukeywin_one_is_hann);
+    RT_RUN(test_blackmanharris_normalisation);
+    RT_RUN(test_chebwin_normalised_to_one);
+    RT_RUN(test_taylorwin_normalised);
     RT_RUN(test_upsample_inserts_zeros);
     RT_RUN(test_downsample_takes_every_nth);
     RT_RUN(test_diff_vector);

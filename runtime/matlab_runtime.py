@@ -2273,6 +2273,228 @@ def diff(A):
     return np.diff(a, axis=0)
 
 
+# --- DSP windows. All return an (n, 1) column vector, byte-identical
+#     to the C runtime. Symmetric (non-periodic) form. -----------------
+def _win_col(values):
+    return np.asarray(values, dtype=float).reshape((-1, 1))
+
+
+def hamming(n):
+    n = int(n)
+    if n <= 1: return _win_col([1.0] * _pymax(n, 1))
+    k = np.arange(n, dtype=float)
+    return _win_col(0.54 - 0.46 * np.cos(2.0 * np.pi * k / (n - 1)))
+
+
+def hann(n):
+    n = int(n)
+    if n <= 1: return _win_col([1.0] * _pymax(n, 1))
+    k = np.arange(n, dtype=float)
+    return _win_col(0.5 - 0.5 * np.cos(2.0 * np.pi * k / (n - 1)))
+
+
+def blackman(n):
+    n = int(n)
+    if n <= 1: return _win_col([1.0] * _pymax(n, 1))
+    k = np.arange(n, dtype=float)
+    a = 2.0 * np.pi * k / (n - 1)
+    return _win_col(0.42 - 0.5 * np.cos(a) + 0.08 * np.cos(2.0 * a))
+
+
+def _cos_sum(n, a):
+    if n <= 1: return _win_col([1.0] * _pymax(n, 1))
+    k = np.arange(n, dtype=float)
+    x = 2.0 * np.pi * k / (n - 1)
+    return _win_col(a[0] - a[1] * np.cos(x) + a[2] * np.cos(2 * x)
+                    - a[3] * np.cos(3 * x) + a[4] * np.cos(4 * x))
+
+
+def rectwin(n):
+    n = int(n)
+    return _win_col([1.0] * _pymax(n, 1))
+
+
+def triang(n):
+    n = int(n)
+    if n <= 1: return _win_col([1.0] * _pymax(n, 1))
+    out = np.zeros(n)
+    if n % 2 == 1:
+        for i in _pyrange(n):
+            k = i + 1.0
+            out[i] = (2.0 * k / (n + 1)) if k <= (n + 1) / 2.0 \
+                     else (2.0 * (n + 1 - k) / (n + 1))
+    else:
+        for i in _pyrange(n):
+            k = i + 1.0
+            out[i] = ((2.0 * k - 1.0) / n) if k <= n / 2.0 \
+                     else ((2.0 * (n - k) + 1.0) / n)
+    return _win_col(out)
+
+
+def bartlett(n):
+    n = int(n)
+    if n <= 1: return _win_col([1.0] * _pymax(n, 1))
+    k = np.arange(n, dtype=float)
+    out = np.where(k <= (n - 1) / 2.0,
+                   2.0 * k / (n - 1),
+                   2.0 * ((n - 1) - k) / (n - 1))
+    return _win_col(out)
+
+
+def barthannwin(n):
+    n = int(n)
+    if n <= 1: return _win_col([1.0] * _pymax(n, 1))
+    k = np.arange(n, dtype=float)
+    t = k / (n - 1) - 0.5
+    return _win_col(0.62 - 0.48 * np.abs(t) + 0.38 * np.cos(2.0 * np.pi * t))
+
+
+def bohmanwin(n):
+    n = int(n)
+    if n <= 1: return _win_col([1.0] * _pymax(n, 1))
+    k = np.arange(n, dtype=float)
+    x = np.abs(2.0 * k / (n - 1) - 1.0)
+    out = (1.0 - x) * np.cos(np.pi * x) + np.sin(np.pi * x) / np.pi
+    out[0] = 0.0
+    out[-1] = 0.0
+    return _win_col(out)
+
+
+def parzenwin(n):
+    n = int(n)
+    if n <= 1: return _win_col([1.0] * _pymax(n, 1))
+    out = np.zeros(n)
+    N = float(n)
+    for i in _pyrange(n):
+        kk = i - (N - 1.0) / 2.0
+        a = _pyabs(kk)
+        if a <= N / 4.0:
+            r = a / (N / 2.0)
+            out[i] = 1.0 - 6.0 * r * r + 6.0 * r * r * r
+        else:
+            r = a / (N / 2.0)
+            t = 1.0 - r
+            out[i] = 2.0 * t * t * t
+    return _win_col(out)
+
+
+def nuttallwin(n):
+    return _cos_sum(int(n), [0.3635819, 0.4891775, 0.1365995, 0.0106411, 0.0])
+
+
+def blackmanharris(n):
+    return _cos_sum(int(n), [0.35875, 0.48829, 0.14128, 0.01168, 0.0])
+
+
+def flattopwin(n):
+    return _cos_sum(int(n), [0.21557895, 0.41663158, 0.277263158,
+                             0.083578947, 0.006947368])
+
+
+def _bessel_i0(x):
+    s = 1.0
+    term = 1.0
+    y = x * x / 4.0
+    for k in _pyrange(1, 60):
+        term *= y / (k * k)
+        s += term
+        if term < 1e-16 * s: break
+    return s
+
+
+def kaiser(n, beta):
+    n = int(n)
+    if n <= 1: return _win_col([1.0] * _pymax(n, 1))
+    k = np.arange(n, dtype=float)
+    r = 2.0 * k / (n - 1) - 1.0
+    Ib = _bessel_i0(beta)
+    out = np.array([_bessel_i0(beta * np.sqrt(1.0 - rk * rk)) / Ib for rk in r])
+    return _win_col(out)
+
+
+def tukeywin(n, r):
+    n = int(n)
+    if n <= 1: return _win_col([1.0] * _pymax(n, 1))
+    if r <= 0.0: return rectwin(n)
+    if r >= 1.0: return hann(n)
+    k = np.arange(n, dtype=float)
+    x = k / (n - 1)
+    out = np.ones(n)
+    left = x < r / 2.0
+    right = x > 1.0 - r / 2.0
+    out[left]  = 0.5 * (1.0 + np.cos(2.0 * np.pi / r * (x[left]  - r / 2.0)))
+    out[right] = 0.5 * (1.0 + np.cos(2.0 * np.pi / r * (x[right] - 1.0 + r / 2.0)))
+    return _win_col(out)
+
+
+def gausswin(n, alpha):
+    n = int(n)
+    if n <= 1: return _win_col([1.0] * _pymax(n, 1))
+    half = (n - 1) / 2.0
+    k = np.arange(n, dtype=float)
+    t = (k - half) / half
+    return _win_col(np.exp(-0.5 * (alpha * t) ** 2))
+
+
+def chebwin(n, r):
+    n = int(n)
+    if n <= 1: return _win_col([1.0] * _pymax(n, 1))
+    atten = 10.0 ** (r / 20.0)
+    beta  = np.cosh(np.arccosh(atten) / (n - 1))
+    M = n - 1
+    spec = np.zeros(n)
+    for k in _pyrange(n):
+        x = beta * np.cos(np.pi * k / n)
+        if x > 1.0:
+            Tm = np.cosh(M * np.arccosh(x))
+        elif x < -1.0:
+            Tm = (-1.0 if (M & 1) else 1.0) * np.cosh(M * np.arccosh(-x))
+        else:
+            Tm = np.cos(M * np.arccos(x))
+        spec[k] = (-1.0 if (k & 1) else 1.0) * Tm / atten
+    out = np.zeros(n)
+    for i in _pyrange(n):
+        s = spec[0]
+        for k in _pyrange(1, n):
+            s += 2.0 * spec[k] * np.cos(2.0 * np.pi * k *
+                                        (i - (n - 1) / 2.0) / n)
+        out[i] = s
+    mx = float(np.max(out))
+    if mx > 0.0:
+        out /= mx
+    return _win_col(out)
+
+
+def taylorwin(n, nbar, sll):
+    n = int(n)
+    nbar = int(nbar) if nbar else 4
+    sll  = float(sll) if sll else -30.0
+    if n <= 1: return _win_col([1.0] * _pymax(n, 1))
+    R = 10.0 ** (-sll / 20.0)
+    A = np.arccosh(R) / np.pi
+    s2 = (nbar * nbar) / (A * A + (nbar - 0.5) ** 2)
+    F = np.zeros(nbar)
+    for m in _pyrange(1, nbar):
+        num = 1.0
+        den = 1.0
+        for i in _pyrange(1, nbar):
+            num *= 1.0 - (m * m) / (s2 * (A * A + (i - 0.5) ** 2))
+            if i != m:
+                den *= 1.0 - (m * m) / (i * i)
+        F[m] = (-1.0 if (m & 1) else 1.0) * 0.5 * num / den
+    out = np.zeros(n)
+    for k in _pyrange(n):
+        s = 1.0
+        c = k - (n - 1) / 2.0
+        for m in _pyrange(1, nbar):
+            s += 2.0 * F[m] * np.cos(2.0 * np.pi * m * c / n)
+        out[k] = s
+    mx = float(np.max(out))
+    if mx > 0.0:
+        out /= mx
+    return _win_col(out)
+
+
 # --- ODE solvers ----------------------------------------------------------
 # Dormand-Prince 5(4) and Bogacki-Shampine 3(2). Scalar y only. Cached
 # across the paired _t / _y calls so the second call returns the other

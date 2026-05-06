@@ -27,6 +27,7 @@ Use this page as the entry point to the repo docs.
 - [`emit_fixed_point.md`](emit_fixed_point.md): Fixed-Point Designer (`fi`) support — Phase 1 scalar arithmetic shipped, Phase 3 arrays / FIR planned
 - [`sym.md`](sym.md): Symbolic Math Toolbox (`sym` / `syms`) backed by [SymPP](https://github.com/leonardoaraujosantos/SymPP) — diff/int/simplify/solve/dsolve/pdsolve/transforms/assume/vpa/taylor/limit; opt-in via `-DMATLAB_LLVM_WITH_SYM=ON`
 - [`ode.md`](ode.md): Initial-value ODE solvers — `ode45`, `ode23` (Dormand–Prince / Bogacki–Shampine, scalar and **vector `y`**) with adaptive FSAL, cubic-Hermite dense output, full odeset (`RelTol`, `AbsTol`, `MaxStep`, `InitialStep`, `Refine`, `Stats`), 2-/3-return forms, forward and backward integration, user-time-grid `tspan`
+- [`signal_toolbox_roadmap.md`](signal_toolbox_roadmap.md): tiered plan for Signal Processing Toolbox compatibility — what's shipped today (conv/filter/xcorr/fft/windows tail), the IIR/FIR design + filtfilt + freqz close-the-loop tier, spectral / time-frequency tier, multirate / measurement / alignment tier, and the heavy lifts (digitalFilter system object, wavelets, vibration). REPL / DAP cross-cutting work called out
 
 ## Interactive Tooling
 
