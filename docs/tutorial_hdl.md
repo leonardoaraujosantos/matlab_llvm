@@ -237,9 +237,7 @@ common case.
 
 ## Pipelined designs (`% cocotb: latency(N)`)
 
-When the SV has a register chain between an input and an output,
-the cocotb harness needs to know the depth so it can compare
-`DUT.y[k+L]` against `ref(input[k])`. Declare it in source:
+A staged pipeline in MATLAB is just chained persistent writes:
 
 ```matlab
 function y = pipe2(x, reset)
@@ -247,24 +245,27 @@ function y = pipe2(x, reset)
     % hdl: port(x, fi, signed, 16, 0)
     % hdl: port(reset, bool)
     % cocotb: stimulus(reset, constant, 0)
-    % cocotb: latency(2)              <-- two flops between x and y
 
     persistent stage1;
     persistent stage2;
     if isempty(stage1) || reset; stage1 = int16(0); end
     if isempty(stage2) || reset; stage2 = int16(0); end
 
-    s1 = stage1 + int16(0);   % snapshot pattern; see Common gotchas
-    s2 = stage2 + int16(0);
-
     stage1 = x;
-    stage2 = s1;
-    y = s2;
+    stage2 = stage1;   % auto-routed through pre-edge snapshot
+    y = stage2;        % output read: post-edge value
 end
 ```
 
-`matlabc -emit-cocotb pipe2.m` will print a hint if no latency is
-declared:
+No explicit snapshot pattern needed — the Python emitter
+inserts the pre-edge captures automatically (see [Chained
+persistent writes](#chained-persistent-writes--auto-handled-was-blocking-semantics)
+under Common gotchas). The cocotb harness then compares
+`ref(x[k])` against `DUT.y` at the same cycle (`L=0`), and
+both report `x[k-1]` — bit-exact match.
+
+`matlabc -emit-cocotb pipe2.m` still prints a latency hint based
+on the persistent count:
 
 ```
 hint: 2 `persistent` decls — pipelined; if outputs are registered, add `% cocotb: latency(1)` near the `% hdl: port(...)` lines, or pass `-cocotb-latency=1` on the CLI.
@@ -273,8 +274,16 @@ hint: 2 `persistent` decls — pipelined; if outputs are registered, add `% coco
 (For shift-register-style fi-arrays, the hint reads the array
 length: `hint: 4-tap fi-array shift register — pipelined; ...`.)
 
-Pass the value via either the source pragma (preferred) or the
-CLI flag. The CLI wins when both are present.
+The hint is **conservative** — under the snapshot semantics in
+effect today, most designs work at `L=0` and the hint over-counts.
+You can ignore it if your cocotb run passes without an explicit
+pragma. Pass `% cocotb: latency(N)` only when:
+
+- The design has additional pipeline registers introduced by the
+  SV emit that aren't `persistent` declarations in MATLAB (rare).
+- You want the harness to skip the first N cycles of comparison
+  as warm-up — useful for designs where the initial output
+  values are deliberately undefined.
 
 ---
 
@@ -485,37 +494,81 @@ ready, valid, etc.). It renders as `logic name` (single-bit,
 unsigned). Declaring 1-bit ports as `fi(_, _, 1, 0)` works but
 the compiler emits a hint suggesting `bool` instead.
 
-### MATLAB blocking semantics on chained writes
+### Chained persistent writes — auto-handled (was: blocking semantics)
 
-This MATLAB code is technically correct but produces different
-behaviour in SV:
+**Status: auto-handled.** This section used to describe a real
+divergence; now it documents what's behind the curtain so you
+recognise the pattern when reading other people's code.
+
+MATLAB uses blocking-assignment semantics:
 
 ```matlab
 int1 = int1 + x;
 int2 = int2 + int1;   % reads int1's just-written value (MATLAB)
-int3 = int3 + int2;   %                                  (MATLAB)
+int3 = int3 + int2;   % reads int2's just-written value (MATLAB)
 ```
 
-In SV, the equivalent `int1_next = int1 + x; int2_next = int2 +
-int1` reads `int1`'s pre-edge value — each integrator stage
-adds a one-cycle pipeline delay that's invisible to the Python
-reference. The cocotb lockstep comparison will mismatch.
+The equivalent SV is non-blocking: `int1_next = int1 + x;
+int2_next = int2 + int1;` — each `int2_next` reads `int1`'s
+**pre-edge** register value, **not** `int1_next`. So a literal
+MATLAB-to-SV translation produces a one-cycle pipeline shift
+per chained stage between the Python reference and the SV DUT.
 
-**Workaround**: snapshot every persistent at the top of the body
-and use the snapshots in expressions:
+The Python emitter handles this automatically. Every persistent
+read whose value flows to another persistent's write (rather
+than to a function output) routes through a snapshot captured
+at function entry:
 
-```matlab
-int1_s = int1 + fi(0, 1, 22, 0);   % pre-cycle snapshots
-int2_s = int2 + fi(0, 1, 22, 0);
-int3_s = int3 + fi(0, 1, 22, 0);
-int1 = int1_s + x;
-int2 = int2_s + int1_s;
-int3 = int3_s + int2_s;
+```python
+def f(x, reset):
+    if isempty or reset:
+        f.int1 = 0; f.int2 = 0; f.int3 = 0
+    _int1_snap = f.int1
+    _int2_snap = f.int2
+    _int3_snap = f.int3
+    f.int1 = _int1_snap + x
+    f.int2 = _int2_snap + _int1_snap   # reads pre-edge int1, matches SV
+    f.int3 = _int3_snap + _int2_snap   # reads pre-edge int2, matches SV
+    return ...                          # output reads use post-edge directly
 ```
 
-This makes Python and SV agree. The pattern is documented in the
-[supported subset reference](sv_supported_subset.md) under
-"Source-side patterns that need restructuring."
+What's preserved (you don't need to do anything):
+
+- Reads in next-state computations → use the snapshot. Matches
+  SV's always_comb register reads.
+- Reads in output assignments → use the post-edge actual storage.
+  Matches what cocotb sees when sampling the output after the
+  clock edge.
+- Snapshots are captured **after** the `if isempty(p) || reset`
+  arm, so on a reset cycle the snapshot reflects the post-reset
+  value (matches SV's async-low reset propagation).
+
+What this means for you:
+
+- The "snapshot" workaround pattern (`int1_s = int1 + fi(0, 1,
+  22, 0)`) is no longer required. Old code that uses it still
+  works, but new code should use the natural blocking form.
+- Old `% cocotb: latency(N)` pragmas added as workarounds for
+  this divergence are now over-counts. The snapshot ref aligns
+  with the DUT at `L=0` for most designs. Existing fixtures
+  with `latency(N)` still pass — cocotb's L-cycle warm-up just
+  skips comparison for the first N cycles, then both sides have
+  identical state. New designs typically don't need a latency
+  pragma.
+
+What still needs care:
+
+- **Mid-run reset cycles** (`reset=1` after the harness deassert
+  and outside the multi-persistent-init lowering's range) aren't
+  modelled in the Python ref today; the cocotb fixtures all pin
+  `reset=0` after init. Don't drive `reset` high in stimulus
+  pragmas.
+- **Output reads of persistents** that haven't been written this
+  call are read at post-edge — same value as pre-edge. No issue.
+- **Output-routed reads** see the post-edge value. If you write
+  `n = count + 1` (where `count` is persistent), `n` reflects
+  `count + 1`, not the snapshot. That's the desired behaviour
+  for output ports.
 
 ---
 

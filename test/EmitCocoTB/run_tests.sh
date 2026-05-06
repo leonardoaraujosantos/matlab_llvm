@@ -131,6 +131,22 @@ PARALLEL="${COCOTB_PARALLEL:-8}"
 RESULTS="$WORK_DIR/_results.txt"
 : > "$RESULTS"
 
+# Per-fixture timeout. A hung verilator/cocotb run would otherwise
+# pin one of the parallel workers indefinitely. Default 120s — well
+# above the slowest fixture's normal runtime — overridable via
+# COCOTB_FIXTURE_TIMEOUT. Falls back to no timeout if neither
+# `timeout` nor `gtimeout` is on PATH (rare; both ship with GNU
+# coreutils on Linux and via brew on macOS).
+TIMEOUT_S="${COCOTB_FIXTURE_TIMEOUT:-120}"
+if command -v timeout >/dev/null 2>&1; then
+  TIMEOUT_CMD="timeout $TIMEOUT_S"
+elif command -v gtimeout >/dev/null 2>&1; then
+  TIMEOUT_CMD="gtimeout $TIMEOUT_S"
+else
+  TIMEOUT_CMD=""
+  echo "warning: no timeout binary found; fixture runs are unbounded" >&2
+fi
+
 run_one() {
   local m=$1
   local out_dir="$WORK_DIR/$m"
@@ -141,7 +157,14 @@ run_one() {
     echo "$m EMIT-FAIL" >> "$RESULTS"
     return
   fi
-  if (cd "$out_dir" && make > "$out_dir.run.log" 2>&1); then
+  # `timeout` exits 124 when the wrapped command was killed for
+  # exceeding the limit. Distinguishing TIMEOUT from MAKE-FAIL in
+  # the status output makes triage faster — a hung sim is a
+  # different bug from a make-step error.
+  local rc
+  (cd "$out_dir" && $TIMEOUT_CMD make > "$out_dir.run.log" 2>&1)
+  rc=$?
+  if [[ $rc -eq 0 ]]; then
     local ok
     ok=$(grep -oE "TESTS=1 PASS=[0-9]+ FAIL=[0-9]+" "$out_dir.run.log" | head -1)
     if [[ "$ok" == "TESTS=1 PASS=1 FAIL=0" ]]; then
@@ -149,13 +172,15 @@ run_one() {
     else
       echo "$m FAIL ($ok)" >> "$RESULTS"
     fi
+  elif [[ $rc -eq 124 ]]; then
+    echo "$m TIMEOUT (>${TIMEOUT_S}s)" >> "$RESULTS"
   else
     echo "$m MAKE-FAIL" >> "$RESULTS"
   fi
 }
 
 export -f run_one
-export MATLABC ROOT WORK_DIR RESULTS
+export MATLABC ROOT WORK_DIR RESULTS TIMEOUT_CMD TIMEOUT_S
 
 printf '%s\n' "${CASES[@]}" | xargs -n1 -P"$PARALLEL" -I{} bash -c 'run_one "$@"' _ {}
 
@@ -174,6 +199,14 @@ for m in "${CASES[@]}"; do
          tail -10 "$WORK_DIR/$m.run.log" | sed 's/^/    /'
        elif [[ -f "$WORK_DIR/$m.emit.log" ]]; then
          cat "$WORK_DIR/$m.emit.log" | sed 's/^/    /'
+       fi
+       # Replay hint — every harness drops args_trail.jsonl, so a
+       # one-shell-line repro is always available regardless of
+       # whether the failure was deterministic or a flake. The hint
+       # is most useful when CI fails and the developer wants to
+       # reproduce locally without re-running the whole sweep.
+       if [[ -f "$WORK_DIR/$m/args_trail.jsonl" ]]; then
+         echo "    repro: cd $WORK_DIR/$m && make replay"
        fi
        ;;
   esac
