@@ -9,17 +9,32 @@ the emitted SystemVerilog DUT and the emitted Python reference
 model in lockstep against random vectors, asserting cycle-by-cycle
 equality.
 
-**Status: shipped — CI lane is 36/36.** The lane sweeps 36 of the
-39 synthesizable HDL examples and asserts each verifies bit-exact
-between the SV DUT and the matlab-emitted Python reference. The
-remaining 3 fixtures (`cordic_pipe`, `cordic_step`, `cic_decimator`)
-need per-op wrap insertion in the Python emitter — every binary
-arith op result wraps to the result type's width, mirroring SV's
-mid-computation truncation. Quality-of-life additions in this
-ship: `% cocotb: latency(N)` source pragma, parallel CI runner
-(~6.5× speedup), enriched mismatch diagnostics with fi-decoded
-values + canonical fault hints + VCD pointer on first failure,
-and `% cocotb: cover(<port>, min_bins=N)` coverage gates.
+**Status: shipped — CI lane is 39/39.** The lane sweeps every
+synthesizable HDL example in `examples/hdl/` and asserts each
+verifies bit-exact between the SV DUT and the matlab-emitted
+Python reference. Reaching full coverage took several
+quality-of-life and architectural additions:
+
+- `% cocotb: latency(N)` source pragma, parallel CI runner
+  (~6.5× speedup), enriched mismatch diagnostics with fi-decoded
+  values + canonical fault hints + VCD pointer on first failure.
+- `% cocotb: cover(<port>, min_bins=N)` plus the transition /
+  range coverage gates `cover_pairs(<port>, min_pairs=N)` and
+  `cover_range(<port>)` (see v3.7.x).
+- Per-op wrap pass: every overflow-capable arith op wraps to its
+  declared bit width, mirroring SV's mid-computation truncation
+  (closes `cordic_pipe`, `cordic_step`, and the wrap-sensitive
+  shift-register fixtures).
+- Pre-snapshot persistent-read pass in the Python emitter:
+  reads whose value flows to next-state writes route through a
+  snapshot captured at function entry, matching SV's always_comb
+  non-blocking behaviour. Closes `cic_decimator` (the 3rd-order
+  CIC's integrator chain — the longest-standing holdout).
+- Args-trail capture + replay (`COCOTB_REPLAY_ARGS`,
+  `make replay`) for deterministic regression repros without
+  re-emit; seed sweep (`make sweep`) for catching seed-sensitive
+  edge cases. Per-fixture timeout in the parallel runner so a
+  hung fixture can't block the sweep.
 
 ---
 
@@ -228,35 +243,38 @@ gives the right alignment.
 
 ## Status
 
-CI sweep across the 39 synthesizable HDL examples (cocotb 2.0.1,
-Verilator 5.x). 28 modules pass cleanly at `L=0` (or the noted
-pipeline depth) against random vectors and are exercised by the
-`cocotb-tests` lane. Per-fixture latency lives in source as
-`% cocotb: latency(N)` — the runner just walks fixture names.
+CI sweep across all 39 synthesizable HDL examples (cocotb 2.0.1,
+Verilator 5.x). **39/39 PASS** — every fixture in `examples/hdl/`
+verifies bit-exact between the SV DUT and the Python reference.
+Per-fixture latency lives in source as `% cocotb: latency(N)`
+when needed (most designs work at `L=0` under the snapshot-ref
+semantics; a few deeper pipelines like `fir_asic_pipelined` and
+`sequential_processor` retain explicit `latency(4)` pragmas as
+documentation, though they also pass at `L=0` since the snapshot
+ref tracks the SV pipeline cycle-for-cycle).
 
-| Tier-1 (8) | Tier-2 (14) | Tier-3 (6) |
-|---|---|---|
-| `alu_16bit` (L=0)   | `computed_state_fsm` (L=0) | `axi_handshake` (L=0) |
-| `counter_0_to_10` (L=0) | `hamming74` (L=0) | `booth_mul` (L=0) |
-| `fir_asic_pipelined` (L=4) | `i2c_bit_bang` (L=0) | `edge_detector` (L=0) |
-| `mealy_fsm` (L=0)   | `leading_zero_detector` (L=0) | `fifo` (L=0) |
-| `moore_fsm` (L=0)   | `median3` (L=0) | `manchester_enc` (L=0) |
-| `mux_4to_1_16bit` (L=0) | `mmap_periph` (L=0) | `sync_2ff` (L=1) |
-| `vector_processor` (L=0) | `popcount` (L=0) | |
-| `sequential_processor` (L=4) | `priority_encoder` (L=0) | |
-|                     | `pwm` (L=0) | |
-|                     | `regfile` (L=0) | |
-|                     | `rr_arbiter` (L=0) | |
-|                     | `spi_master` (L=0) | |
-|                     | `uart_rx` (L=0) | |
-|                     | `up_down_counter` (L=0) | |
+The runner walks the `CASES=( … )` list in
+[`test/EmitCocoTB/run_tests.sh`](../test/EmitCocoTB/run_tests.sh)
+in parallel (default 8 workers; override with
+`COCOTB_PARALLEL=N`). Each fixture is bounded by a per-run
+timeout (default 120s, override `COCOTB_FIXTURE_TIMEOUT`) so a
+hung sim can't pin a worker. Failing fixtures get a one-line
+replay hint (`repro: cd <dir> && make replay`) in the summary
+output for fast triage.
 
-Tier-3 modules cleared after the Python emitter learned to handle
-`matlab.not` (the bool-NOT op the frontend emits for `~rst`-style
-expressions). The handler is the same shape as the existing
-`matlab.bxor` / `matlab.band` lowerings — `(not <operand>)` for
-i1 results, with the operand's truthiness coercion handled by
-Python's standard semantics.
+The CI lane closures over time were:
+
+- v3.5: 28/39 — Tier-1 (combinational + simple FSMs), Tier-2
+  (control-flow), Tier-3 (bool-NOT-only fixtures cleared after
+  the `matlab.not` Python emitter handler).
+- v3.6: 33/39 — added matlab.alloc slot triplets, persistent-init
+  recognizer for `isempty(p) || reset` shape, slot-triplet
+  handler.
+- v3.7: 38/39 — closed wrap-sensitive shifters via per-op wrap
+  + logical-right-shift mask, fi-saturation symmetry.
+- v3.8: **39/39** — closed `cic_decimator` via the pre-snapshot
+  persistent-read pass in EmitPython (matches SV always_comb
+  non-blocking semantics for chained-write idioms).
 
 Mode selection is automatic per-input from the source pragmas:
 
@@ -284,16 +302,11 @@ lockstep — `ref(impulse).y` at call k matches `DUT.y` at cycle
 | ~~`matlab.call_builtin` unhandled~~ | ~~1~~ → 0 | ✅ Fixed by `bitshift` / `bitand` / `bitxor` / `matlab_persistent_isempty` matlab.call_builtin handlers. |
 | ~~Float-vs-int bitwise ops~~ | ~~4~~ → 0 | ✅ Fixed via per-op wrap + logical-right-shift mask. |
 | ~~SV vs Python fi-saturation divergence~~ | ~~3~~ → 0 | ✅ Fixed via `rt.fi_wrap_*` on persistent stores + function returns + sign-modulo `_eq` fallback. |
-| **Integrator-chain blocking-vs-nonblocking** | `cic_decimator` | The MATLAB source `int1 = int1 + x; int2 = int2 + int1` reads `int1`'s same-cycle written value (MATLAB blocking semantics), but the equivalent SV with non-blocking `int2_next = int2 + int1` reads `int1`'s pre-edge value. Each integrator stage adds one cycle of delay in SV that's invisible to the Python ref. **Source-side workaround**: snapshot every persistent into a local at the top of the body (`int1_s = int1 + fi(0, 1, WL, 0)`, ...) and use the locals everywhere afterward. **Architectural fix**: pre-snapshot all persistent reads at function entry in the Python emitter for `hdl.ports`-marked functions. The architectural fix changes Python execution semantics for all HDL-marked code and would need careful regression testing across the full corpus. |
+| ~~Integrator-chain blocking-vs-nonblocking~~ | ~~`cic_decimator`~~ → 0 | ✅ Fixed by the pre-snapshot persistent-read pass in EmitPython. Reads whose value flows to next-state writes route through `_<name>_snap` captured at function entry; reads that flow to function outputs keep the post-edge view. Matches SV's `always_comb` non-blocking semantics. The snapshot is taken **after** the `if isempty(p) || reset` arm so reset cycles see the post-reset register value. Closed `cic_decimator`'s 3-stage integrator chain plus all other multi-persistent shapes that previously needed the explicit `int1_s = int1 + fi(0, 1, WL, 0)` workaround. |
 
 39 of 39 synthesizable HDL modules emit clean RTL via
-`-emit-systemverilog`. 38 of 39 verify cycle-exact under the
-cocotb lockstep harness. The lone holdout, `cic_decimator`, has
-an integrator chain that surfaces a fundamental MATLAB-vs-SV
-semantic divergence — its source is correct MATLAB but doesn't
-match the SV's non-blocking-assignment integrator-chain delay.
-Tracked as a known limitation; the source-side workaround is
-documented but not applied to keep the example readable.
+`-emit-systemverilog` AND verify cycle-exact under the cocotb
+lockstep harness. No known mismatches remaining.
 
 Mode selection is automatic per-input from the source pragmas:
 

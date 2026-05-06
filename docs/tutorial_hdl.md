@@ -756,8 +756,8 @@ side files outside it that need cleaning.
 ## Just-run-everything
 
 The repository ships 39 reference HDL designs under
-`examples/hdl/`. Run the cocotb sweep over the 38 verified
-modules in parallel:
+`examples/hdl/`. Run the cocotb sweep over all 39 modules in
+parallel — every one verifies bit-exact:
 
 ```sh
 ctest --test-dir build -R cocotb-tests        # CI form
@@ -812,7 +812,9 @@ waveform inspection.
   `sync_2ff`, `manchester_enc`
 - Hierarchy: `hier_combinational`, `hier_sequential`
 
-Each one compiles, lints clean, and (with one documented
-exception — `cic_decimator` — see
-[`emit_cocotb.md`](emit_cocotb.md) for the integrator-chain
-caveat) verifies cycle-exact under cocotb.
+Every one compiles, lints clean under Verilator `-Wall`, and
+verifies cycle-exact under cocotb. The integrator-chain
+divergence that used to keep `cic_decimator` out of the sweep
+is now auto-handled by the Python emitter's pre-snapshot
+persistent-read pass — see [Chained persistent writes —
+auto-handled](#chained-persistent-writes--auto-handled-was-blocking-semantics).

@@ -66,7 +66,7 @@ Current corpus size in-tree:
 - `39` synthesizable HDL example modules in [`examples/hdl/`](examples/hdl/) (plus driver scripts)
 - `10` flowchart programs in [`examples/mflow/`](examples/mflow/)
 - `172` execution tests in `test/Run/` plus `4` opt-in symbolic tests in `test/RunSym/`
-- `76` SystemVerilog golden fixtures (Verilator lint-clean) in `test/EmitSV/`
+- `77` SystemVerilog golden fixtures (Verilator lint-clean) in `test/EmitSV/`
 - `7` fi-spec port-declaration regression tests in `test/EmitSVPorts/`
 - `2` boolean-port lint-hint tests in `test/EmitSVHint/`
 - `10` synthesizability-gate diagnostic tests in `test/EmitSVFail/`
@@ -427,7 +427,8 @@ Maturity by output path (most → least mature):
    pragmas, bit-slicing `x(hi:lo)` syntax (any width 1..64), runtime-
    indexed persistent fi-arrays (auto-decoded regfile pattern), and
    hierarchical multi-module emission (`func.call` → SV instance with
-   auto-wired clk/rst_n). 76 fixtures lint clean under Verilator. See
+   auto-wired clk/rst_n). 77 fixtures lint clean under Verilator, and
+   all 39 standalone HDL examples verify bit-exact under cocotb. See
    `docs/sv_supported_subset.md` for the supported-subset reference,
    `docs/emit_systemverilog.md` for backend architecture, and
    `examples/hdl/` for the canonical ASIC examples.
