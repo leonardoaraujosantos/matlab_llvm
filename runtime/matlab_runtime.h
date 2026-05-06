@@ -323,6 +323,19 @@ matlab_struct *matlab_ode23_v_stats(matlab_ode_rhs_v f, matlab_mat *tspan,
 matlab_struct *matlab_ode23_v_stats_opts(matlab_ode_rhs_v f, matlab_mat *tspan,
                                            matlab_mat *y0, matlab_struct *opts);
 
+/* polyder(p), polyint(p[, k]) — derivative / antiderivative of a
+ * polynomial whose coefficients are p (highest-power-first). Both
+ * return a row vector. polyint without a constant treats k = 0. */
+matlab_mat *matlab_polyder(matlab_mat *p);
+matlab_mat *matlab_polyint(matlab_mat *p);
+matlab_mat *matlab_polyint_k(matlab_mat *p, double k);
+
+/* poly(r) — coefficients of the monic polynomial with roots r. Accepts
+ * either a real or complex vector of roots; the returned coefficients
+ * are real with any residual imaginary part dropped. Output is a
+ * 1 × (n+1) row vector. */
+matlab_mat *matlab_poly(void *r);
+
 /* DSP windows. n must be >= 1; returns a column vector of length n.
  * All use the symmetric (non-periodic) form, matching MATLAB's default.
  * Two-arg windows (kaiser, tukeywin, gausswin, chebwin) take their

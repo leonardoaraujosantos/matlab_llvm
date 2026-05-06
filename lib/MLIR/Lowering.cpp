@@ -6445,7 +6445,8 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             "fftshift", "ifftshift",
             "std", "var", "median", "diff",
             "meshgrid", "ndgrid",
-            "xcorr", "polyval", "polyfit", "roots",
+            "xcorr", "polyval", "polyfit", "roots", "poly",
+            "polyder", "polyint",
             "interp1", "trapz", "cumtrapz", "gradient",
             "hamming", "hann", "blackman",
             /* Tier-1 windows tail (signal_toolbox_roadmap §2.3) — all

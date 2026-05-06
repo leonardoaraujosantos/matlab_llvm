@@ -32,6 +32,11 @@ matlab_mat   *matlab_taylorwin (double n, double nbar, double sll);
 matlab_mat   *matlab_upsample  (matlab_mat *x, double n);
 matlab_mat   *matlab_downsample(matlab_mat *x, double n);
 matlab_mat   *matlab_diff      (matlab_mat *A);
+matlab_mat   *matlab_poly      (void *r);
+matlab_mat   *matlab_polyder   (matlab_mat *p);
+matlab_mat   *matlab_polyint   (matlab_mat *p);
+matlab_mat   *matlab_polyint_k (matlab_mat *p, double k);
+matlab_mat_c *matlab_roots     (matlab_mat *p);
 
 static matlab_mat *mk(const double *buf, int64_t m, int64_t n) {
     return matlab_mat_from_buf(buf, (double)m, (double)n);
@@ -372,6 +377,73 @@ static void test_diff_vector(void) {
     rt_free(A); rt_free(D);
 }
 
+static void test_polyder_basic(void) {
+    /* d/dx (x^3 + 2x^2 - x + 5) = 3x^2 + 4x - 1. */
+    double a[] = {1, 2, -1, 5};
+    matlab_mat *P = mk(a, 1, 4);
+    matlab_mat *D = matlab_polyder(P);
+    RT_CHECK(rt_cols(D) == 3, "polyder len n-1");
+    RT_NEAR(rt_data(D)[0], 3.0,  1e-12, "polyder[0]");
+    RT_NEAR(rt_data(D)[1], 4.0,  1e-12, "polyder[1]");
+    RT_NEAR(rt_data(D)[2], -1.0, 1e-12, "polyder[2]");
+    rt_free(P); rt_free(D);
+}
+
+static void test_polyder_constant_returns_zero(void) {
+    double a[] = {7};
+    matlab_mat *P = mk(a, 1, 1);
+    matlab_mat *D = matlab_polyder(P);
+    RT_CHECK(rt_cols(D) == 1 && rt_rows(D) == 1, "polyder of constant is [0]");
+    RT_NEAR(rt_data(D)[0], 0.0, 0.0, "polyder constant");
+    rt_free(P); rt_free(D);
+}
+
+static void test_polyint_basic(void) {
+    /* integral(x^2) = x^3 / 3, so polyint([1 0 0]) = [1/3 0 0 0]. */
+    double a[] = {1, 0, 0};
+    matlab_mat *P = mk(a, 1, 3);
+    matlab_mat *I = matlab_polyint(P);
+    RT_CHECK(rt_cols(I) == 4, "polyint len n+1");
+    RT_NEAR(rt_data(I)[0], 1.0/3.0, 1e-12, "polyint x^3 coef");
+    RT_NEAR(rt_data(I)[1], 0.0,     1e-12, "polyint zero");
+    RT_NEAR(rt_data(I)[2], 0.0,     1e-12, "polyint zero");
+    RT_NEAR(rt_data(I)[3], 0.0,     1e-12, "polyint constant of integration");
+    rt_free(P); rt_free(I);
+}
+
+static void test_polyint_k_constant(void) {
+    /* integral(2x) + 7 = x^2 + 7  -->  [1 0 7]. */
+    double a[] = {2, 0};
+    matlab_mat *P = mk(a, 1, 2);
+    matlab_mat *I = matlab_polyint_k(P, 7.0);
+    RT_CHECK(rt_cols(I) == 3, "polyint_k len");
+    RT_NEAR(rt_data(I)[0], 1.0, 1e-12, "x^2");
+    RT_NEAR(rt_data(I)[1], 0.0, 1e-12, "x^1");
+    RT_NEAR(rt_data(I)[2], 7.0, 1e-12, "constant");
+    rt_free(P); rt_free(I);
+}
+
+static void test_poly_roots_round_trip(void) {
+    /* poly([1 2]) = (x-1)(x-2) = x^2 - 3x + 2. */
+    double a[] = {1, 2};
+    matlab_mat *R = mk(a, 1, 2);
+    matlab_mat *P = matlab_poly((void *)R);
+    RT_CHECK(rt_cols(P) == 3 && rt_rows(P) == 1, "poly returns row 1xn+1");
+    RT_NEAR(rt_data(P)[0], 1.0,  1e-12, "monic leading");
+    RT_NEAR(rt_data(P)[1], -3.0, 1e-12, "p[1]");
+    RT_NEAR(rt_data(P)[2], 2.0,  1e-12, "p[2]");
+    rt_free(R); rt_free(P);
+}
+
+static void test_poly_empty_is_one(void) {
+    /* poly of empty vector is [1]. */
+    matlab_mat *R = mk(NULL, 0, 0);
+    matlab_mat *P = matlab_poly((void *)R);
+    RT_CHECK(rt_rows(P) == 1 && rt_cols(P) == 1, "poly([]) = [1]");
+    RT_NEAR(rt_data(P)[0], 1.0, 0.0, "scalar one");
+    rt_free(R); rt_free(P);
+}
+
 static void test_diff_matrix_columnwise(void) {
     double a[] = {1,2,3, 4,5,6, 7,8,9};
     matlab_mat *A = mk(a, 3, 3);
@@ -416,5 +488,11 @@ int main(void) {
     RT_RUN(test_downsample_takes_every_nth);
     RT_RUN(test_diff_vector);
     RT_RUN(test_diff_matrix_columnwise);
+    RT_RUN(test_polyder_basic);
+    RT_RUN(test_polyder_constant_returns_zero);
+    RT_RUN(test_polyint_basic);
+    RT_RUN(test_polyint_k_constant);
+    RT_RUN(test_poly_roots_round_trip);
+    RT_RUN(test_poly_empty_is_one);
     RT_DONE();
 }

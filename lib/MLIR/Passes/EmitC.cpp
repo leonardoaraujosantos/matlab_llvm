@@ -1775,6 +1775,24 @@ static llvm::StringRef MatrixReturningFns[] = {
     "matlab_add_cc", "matlab_sub_cc", "matlab_emul_cc", "matlab_ediv_cc",
     "matlab_matmul_cc", "matlab_transpose_c", "matlab_ctranspose_c",
     "matlab_fft_c", "matlab_ifft_c", "matlab_fft2_c", "matlab_ifft2_c",
+    "matlab_fftshift_c", "matlab_ifftshift_c",
+    // Tier-2 numeric helpers + Tier-1 SPT polynomial helpers — all
+    // return matlab_mat * (real) or matlab_mat_c * (complex), both
+    // representable as Matrix wrappers.
+    "matlab_xcorr", "matlab_polyval", "matlab_polyfit", "matlab_roots",
+    "matlab_poly", "matlab_polyder", "matlab_polyint", "matlab_polyint_k",
+    "matlab_interp1", "matlab_interp2", "matlab_trapz", "matlab_trapz_xy",
+    "matlab_cumtrapz", "matlab_gradient", "matlab_diff",
+    "matlab_conv", "matlab_conv2", "matlab_filter",
+    "matlab_upsample", "matlab_downsample",
+    "matlab_imfilter", "matlab_padarray", "matlab_null", "matlab_orth",
+    // Tier-1 SPT windows tail.
+    "matlab_hamming", "matlab_hann", "matlab_blackman",
+    "matlab_rectwin", "matlab_triang", "matlab_bartlett",
+    "matlab_barthannwin", "matlab_bohmanwin", "matlab_parzenwin",
+    "matlab_nuttallwin", "matlab_blackmanharris", "matlab_flattopwin",
+    "matlab_kaiser", "matlab_tukeywin", "matlab_gausswin",
+    "matlab_chebwin", "matlab_taylorwin",
 };
 
 bool Emitter::isMatrixReturningRuntimeFn(llvm::StringRef Name) const {

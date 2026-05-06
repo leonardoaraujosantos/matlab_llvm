@@ -5179,6 +5179,46 @@ matlab_mat *matlab_polyfit(matlab_mat *x, matlab_mat *y, double n_d) {
 
 /* roots(p): defined after mat_c_alloc — see "Tier-2 roots" block below. */
 
+/* polyder(p) — derivative of the polynomial whose coefficients (highest
+ * power first) are p. Returns a row vector of length max(np-1, 1). For a
+ * scalar input (constant), returns [0]. */
+matlab_mat *matlab_polyder(matlab_mat *p) {
+    if (!p) return mat_alloc(0, 0);
+    int64_t np = p->rows * p->cols;
+    if (np == 0) return mat_alloc(0, 0);
+    if (np == 1) {
+        matlab_mat *D = mat_alloc(1, 1);
+        D->data[0] = 0.0;
+        return D;
+    }
+    matlab_mat *D = mat_alloc(1, np - 1);
+    /* p[0] is x^(np-1); derivative coefficient is (np-1)*p[0], etc. */
+    for (int64_t i = 0; i < np - 1; ++i) {
+        double power = (double)(np - 1 - i);
+        D->data[i] = power * p->data[i];
+    }
+    return D;
+}
+
+/* polyint(p, k) — antiderivative of p, with constant-of-integration k
+ * appended as the new x^0 term. Returns a row vector of length np+1.
+ * polyint(p) sets k = 0. */
+static matlab_mat *polyint_impl(matlab_mat *p, double k) {
+    if (!p) return mat_alloc(0, 0);
+    int64_t np = p->rows * p->cols;
+    if (np == 0) return mat_alloc(0, 0);
+    matlab_mat *I = mat_alloc(1, np + 1);
+    /* p[0] is x^(np-1); integral coefficient is p[0] / np for x^np, etc. */
+    for (int64_t i = 0; i < np; ++i) {
+        double newpow = (double)(np - i);
+        I->data[i] = p->data[i] / newpow;
+    }
+    I->data[np] = k;
+    return I;
+}
+matlab_mat *matlab_polyint(matlab_mat *p)             { return polyint_impl(p, 0.0); }
+matlab_mat *matlab_polyint_k(matlab_mat *p, double k) { return polyint_impl(p, k); }
+
 /* interp1(x, y, xi) — 1-D linear interpolation. x must be sorted
  * ascending. Out-of-range xi values produce NaN (MATLAB default). */
 matlab_mat *matlab_interp1(matlab_mat *x, matlab_mat *y, matlab_mat *xi) {

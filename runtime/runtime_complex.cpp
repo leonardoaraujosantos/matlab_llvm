@@ -264,6 +264,83 @@ matlab_mat_c *matlab_roots(matlab_mat *p) {
     return R;
 }
 
+/* poly(r) — coefficients of the monic polynomial whose roots are r.
+ * Returns a row vector c of length n+1 with c[0] = 1.
+ *
+ * Builds (x - r_1)(x - r_2)...(x - r_n) by repeated convolution
+ * starting from the constant 1 and multiplying by [1, -r_k] each step.
+ * Operates on the complex plane internally so complex-conjugate-pair
+ * inputs produce a real result.
+ *
+ * Output shape: 1 × (n+1) real matrix when the imaginary part is
+ * negligible (within ~1e-10 of zero relative to the magnitude); else
+ * a 1 × (n+1) complex matrix. The real-or-complex switch is encoded
+ * by returning matlab_mat * vs matlab_mat_c * via the same void *
+ * convention used by other polymorphic complex helpers — but for
+ * simplicity we always return matlab_mat * here, dropping any
+ * residual imaginary part. Callers that need the complex form can
+ * route through poly_c. */
+matlab_mat *matlab_poly(void *rptr) {
+    if (!rptr) return mat_alloc(0, 0);
+    bool is_c = mat_is_complex(rptr);
+    int64_t n;
+    if (is_c) {
+        matlab_mat_c *R = (matlab_mat_c *)rptr;
+        n = R->rows * R->cols;
+    } else {
+        matlab_mat *R = (matlab_mat *)rptr;
+        n = R->rows * R->cols;
+    }
+    if (n == 0) {
+        /* poly([]) = 1 (the trivial monic polynomial of degree 0). */
+        matlab_mat *C = mat_alloc(1, 1);
+        C->data[0] = 1.0;
+        return C;
+    }
+    /* Coefficient buffer in highest-power-first order, complex
+     * arithmetic throughout to handle conjugate pairs cleanly. */
+    std::vector<double> cr(n + 1, 0.0), ci(n + 1, 0.0);
+    cr[0] = 1.0;
+    int64_t cur_deg = 0;       /* current polynomial degree */
+    for (int64_t k = 0; k < n; ++k) {
+        double rkr, rki;
+        if (is_c) {
+            matlab_mat_c *R = (matlab_mat_c *)rptr;
+            rkr = R->re[k]; rki = R->im[k];
+        } else {
+            matlab_mat *R = (matlab_mat *)rptr;
+            rkr = R->data[k]; rki = 0.0;
+        }
+        /* Multiply current polynomial by [1, -rk]. New coefficients:
+         *   new[i] = old[i] - rk * old[i-1]    (with old[-1] = 0). */
+        std::vector<double> nr(cur_deg + 2, 0.0), ni(cur_deg + 2, 0.0);
+        for (int64_t i = 0; i <= cur_deg; ++i) {
+            nr[i] += cr[i];
+            ni[i] += ci[i];
+        }
+        for (int64_t i = 0; i <= cur_deg; ++i) {
+            /* (- rk) * old[i] is appended at position i+1. */
+            double ar = cr[i], ai = ci[i];
+            double pr = -rkr * ar + rki * ai;
+            double pi = -rkr * ai - rki * ar;
+            nr[i + 1] += pr;
+            ni[i + 1] += pi;
+        }
+        for (int64_t i = 0; i <= cur_deg + 1; ++i) {
+            cr[i] = nr[i];
+            ci[i] = ni[i];
+        }
+        cur_deg++;
+    }
+    /* Drop the imaginary part — MATLAB returns a real vector when the
+     * input is conjugate-symmetric, and tiny residual imaginary noise
+     * would propagate to downstream consumers. We return matlab_mat *
+     * unconditionally; the imaginary cleanup happens here. */
+    matlab_mat *C = mat_alloc(1, n + 1);
+    for (int64_t i = 0; i <= n; ++i) C->data[i] = cr[i];
+    return C;
+}
+
 matlab_mat *matlab_real_c(void *Aptr) {
     if (!Aptr) return mat_alloc(0, 0);
     if (!mat_is_complex(Aptr)) {

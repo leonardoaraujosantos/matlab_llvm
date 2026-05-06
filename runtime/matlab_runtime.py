@@ -2273,6 +2273,69 @@ def diff(A):
     return np.diff(a, axis=0)
 
 
+# --- Polynomial helpers (Tier-1 §2.4). All MATLAB convention: p[0]
+#     is the highest-power coefficient. -----------------------------
+def roots(p):
+    """Return the roots of polynomial p as a complex column vector."""
+    a = np.asarray(p, dtype=float).ravel()
+    # MATLAB strips leading zeros and treats trailing zeros as a 0 root
+    # at the origin. numpy.roots already strips leading zeros; we match
+    # the trailing-zero behaviour explicitly so the output length is
+    # deg(p) (i.e. n - 1 where n is the trimmed length).
+    while a.size > 0 and a[0] == 0.0:
+        a = a[1:]
+    if a.size == 0:
+        return np.zeros((0, 1), dtype=complex)
+    deg = a.size - 1
+    if deg == 0:
+        return np.zeros((0, 1), dtype=complex)
+    trail = 0
+    while trail < deg and a[-1 - trail] == 0.0:
+        trail += 1
+    if trail == deg:
+        return np.zeros((deg, 1), dtype=complex)
+    a_eff = a[: deg - trail + 1]
+    r = np.roots(a_eff).astype(complex)
+    out = np.zeros(deg, dtype=complex)
+    out[: r.size] = r
+    return out.reshape((-1, 1))
+
+
+def poly(r):
+    """Coefficients of the monic polynomial with roots r."""
+    a = np.asarray(r).ravel()
+    if a.size == 0:
+        return np.array([[1.0]])
+    c = np.poly(a)
+    # MATLAB returns a real row vector when the imaginary part is
+    # numerically zero (conjugate-symmetric input).
+    if np.iscomplexobj(c) and np.allclose(c.imag, 0, atol=1e-10):
+        c = c.real
+    return np.asarray(c, dtype=float).reshape((1, -1))
+
+
+def polyder(p):
+    a = np.asarray(p, dtype=float).ravel()
+    if a.size == 0:
+        return np.zeros((0, 0))
+    if a.size == 1:
+        return np.array([[0.0]])
+    d = np.polyder(a)
+    return d.reshape((1, -1))
+
+
+def polyint(p, k=0.0):
+    a = np.asarray(p, dtype=float).ravel()
+    if a.size == 0:
+        return np.zeros((0, 0))
+    i = np.polyint(a, k=float(k))
+    return i.reshape((1, -1))
+
+
+def polyint_k(p, k):
+    return polyint(p, k)
+
+
 # --- DSP windows. All return an (n, 1) column vector, byte-identical
 #     to the C runtime. Symmetric (non-periodic) form. -----------------
 def _win_col(values):
