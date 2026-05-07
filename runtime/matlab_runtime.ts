@@ -3179,6 +3179,242 @@ export function arburg(x: any, p: number): NDArray {
   return new NDArray(a, [1, pp + 1]);
 }
 
+// --- §4.3 pulse measurements + scalar reductions ----------------------
+export function findpeaks_pks(x: any): NDArray {
+  const a = asArray(x).data;
+  const N = a.length;
+  const pks: number[] = [];
+  for (let i = 1; i < N - 1; i++)
+    if (a[i - 1] < a[i] && a[i] > a[i + 1]) pks.push(a[i]);
+  if (pks.length === 0) return new NDArray(new Float64Array(0), [0, 1]);
+  return new NDArray(Float64Array.from(pks), [pks.length, 1]);
+}
+
+export function findpeaks_locs(x: any): NDArray {
+  const a = asArray(x).data;
+  const N = a.length;
+  const locs: number[] = [];
+  for (let i = 1; i < N - 1; i++)
+    if (a[i - 1] < a[i] && a[i] > a[i + 1]) locs.push(i + 1);
+  if (locs.length === 0) return new NDArray(new Float64Array(0), [0, 1]);
+  return new NDArray(Float64Array.from(locs), [locs.length, 1]);
+}
+
+export function rms_s(x: any): number {
+  const a = asArray(x).data;
+  if (a.length === 0) return 0;
+  let s = 0;
+  for (let i = 0; i < a.length; i++) s += a[i] * a[i];
+  return Math.sqrt(s / a.length);
+}
+
+export function peak2peak_s(x: any): number {
+  const a = asArray(x).data;
+  if (a.length === 0) return 0;
+  let mn = a[0], mx = a[0];
+  for (let i = 1; i < a.length; i++) {
+    if (a[i] < mn) mn = a[i];
+    if (a[i] > mx) mx = a[i];
+  }
+  return mx - mn;
+}
+
+export function peak2rms_s(x: any): number {
+  const a = asArray(x).data;
+  if (a.length === 0) return 0;
+  let s = 0, peak = 0;
+  for (let i = 0; i < a.length; i++) {
+    s += a[i] * a[i];
+    const m = Math.abs(a[i]);
+    if (m > peak) peak = m;
+  }
+  const rms = Math.sqrt(s / a.length);
+  return rms > 0 ? peak / rms : 0;
+}
+
+export function rssq_s(x: any): number {
+  const a = asArray(x).data;
+  let s = 0;
+  for (let i = 0; i < a.length; i++) s += a[i] * a[i];
+  return Math.sqrt(s);
+}
+
+function _medianTS(buf: Float64Array): number {
+  const a = Array.from(buf).sort((x, y) => x - y);
+  const n = a.length;
+  if (n === 0) return 0;
+  return n % 2 === 1 ? a[(n - 1) >> 1] : 0.5 * (a[n / 2 - 1] + a[n / 2]);
+}
+
+export function medfilt1(x: any, n: number): NDArray {
+  const xa = asArray(x);
+  const flat = xa.data;
+  const N = flat.length;
+  let nn = (n | 0);
+  if (nn < 1) nn = 1;
+  if (nn % 2 === 0) nn++;
+  const half = (nn - 1) >> 1;
+  const out = new Float64Array(N);
+  const buf = new Float64Array(nn);
+  for (let i = 0; i < N; i++) {
+    for (let j = 0; j < nn; j++) {
+      const k = i - half + j;
+      buf[j] = (k >= 0 && k < N) ? flat[k] : 0;
+    }
+    out[i] = _medianTS(buf);
+  }
+  return new NDArray(out, xa.shape.slice());
+}
+
+export function hampel(x: any, k: number): NDArray {
+  const xa = asArray(x);
+  const flat = xa.data;
+  const N = flat.length;
+  let kk = (k | 0);
+  if (kk < 1) kk = 1;
+  const out = new Float64Array(N);
+  for (let i = 0; i < N; i++) {
+    const lo = Math.max(0, i - kk);
+    const hi = Math.min(N, i + kk + 1);
+    const win = new Float64Array(hi - lo);
+    for (let j = 0; j < hi - lo; j++) win[j] = flat[lo + j];
+    const med = _medianTS(win);
+    const dev = new Float64Array(win.length);
+    for (let j = 0; j < win.length; j++) dev[j] = Math.abs(win[j] - med);
+    const sigma = 1.4826 * _medianTS(dev);
+    out[i] = (Math.abs(flat[i] - med) > 3 * sigma) ? med : flat[i];
+  }
+  return new NDArray(out, xa.shape.slice());
+}
+
+function _subSampleCrossTS(a: Float64Array, i: number, level: number): number {
+  const A = a[i - 1], B = a[i];
+  if (B === A) return i;
+  const t = (level - A) / (B - A);
+  return i + t;
+}
+
+export function midcross(x: any): NDArray {
+  const a = asArray(x).data;
+  const N = a.length;
+  if (N < 2) return new NDArray(new Float64Array(0), [0, 1]);
+  let mn = a[0], mx = a[0];
+  for (let i = 1; i < N; i++) {
+    if (a[i] < mn) mn = a[i];
+    if (a[i] > mx) mx = a[i];
+  }
+  const mid = mn + 0.5 * (mx - mn);
+  const out: number[] = [];
+  for (let i = 1; i < N; i++) {
+    const prev = a[i - 1], cur = a[i];
+    if ((prev <= mid && cur > mid) || (prev >= mid && cur < mid))
+      out.push(_subSampleCrossTS(a as Float64Array, i, mid));
+  }
+  if (out.length === 0) return new NDArray(new Float64Array(0), [0, 1]);
+  return new NDArray(Float64Array.from(out), [out.length, 1]);
+}
+
+function _meanTransitTS(x: any, loPct: number, hiPct: number,
+                         direction: number): number {
+  const a = asArray(x).data;
+  const N = a.length;
+  if (N < 2) return 0;
+  let mn = a[0], mx = a[0];
+  for (let i = 1; i < N; i++) {
+    if (a[i] < mn) mn = a[i];
+    if (a[i] > mx) mx = a[i];
+  }
+  const rng = mx - mn;
+  const aPct = direction > 0 ? loPct : hiPct;
+  const bPct = direction > 0 ? hiPct : loPct;
+  const aLvl = mn + aPct * rng;
+  const bLvl = mn + bPct * rng;
+  let total = 0, count = 0, state = 0, aTime = 0;
+  for (let i = 1; i < N; i++) {
+    const prev = a[i - 1], cur = a[i];
+    if (direction > 0) {
+      if (state === 0 && prev <= aLvl && cur > aLvl) {
+        aTime = _subSampleCrossTS(a as Float64Array, i, aLvl); state = 1;
+      } else if (state === 1 && prev <= bLvl && cur > bLvl) {
+        const bTime = _subSampleCrossTS(a as Float64Array, i, bLvl);
+        total += bTime - aTime; count++; state = 0;
+      }
+    } else {
+      if (state === 0 && prev >= aLvl && cur < aLvl) {
+        aTime = _subSampleCrossTS(a as Float64Array, i, aLvl); state = 1;
+      } else if (state === 1 && prev >= bLvl && cur < bLvl) {
+        const bTime = _subSampleCrossTS(a as Float64Array, i, bLvl);
+        total += bTime - aTime; count++; state = 0;
+      }
+    }
+  }
+  return count > 0 ? total / count : 0;
+}
+
+export function risetime_s(x: any): number { return _meanTransitTS(x, 0.1, 0.9, +1); }
+export function falltime_s(x: any): number { return _meanTransitTS(x, 0.1, 0.9, -1); }
+
+export function dutycycle_s(x: any): number {
+  const m = midcross(x).data;
+  const M = m.length;
+  if (M < 2) return 0;
+  const a = asArray(x).data;
+  const N = a.length;
+  let mn = a[0], mx = a[0];
+  for (let i = 1; i < N; i++) {
+    if (a[i] < mn) mn = a[i];
+    if (a[i] > mx) mx = a[i];
+  }
+  const mid = mn + 0.5 * (mx - mn);
+  const dirs: number[] = [];
+  for (let i = 1; i < N && dirs.length < M; i++) {
+    const prev = a[i - 1], cur = a[i];
+    if (prev <= mid && cur > mid) dirs.push(+1);
+    else if (prev >= mid && cur < mid) dirs.push(-1);
+  }
+  let on = 0, period = 0;
+  for (let i = 0; i + 2 < M; i++) {
+    if (dirs[i] === +1 && dirs[i + 1] === -1 && dirs[i + 2] === +1) {
+      on     += m[i + 1] - m[i];
+      period += m[i + 2] - m[i];
+    }
+  }
+  return period > 0 ? on / period : 0;
+}
+
+export function envelope(x: any): NDArray {
+  const xa = asArray(x);
+  const flat = xa.data;
+  const N = flat.length;
+  const out = new Float64Array(N);
+  if (N < 3) {
+    for (let i = 0; i < N; i++) out[i] = Math.abs(flat[i]);
+    return new NDArray(out, xa.shape.slice());
+  }
+  const idx: number[] = [], val: number[] = [];
+  for (let i = 1; i < N - 1; i++)
+    if (flat[i - 1] < flat[i] && flat[i] > flat[i + 1]) {
+      idx.push(i); val.push(flat[i]);
+    }
+  if (idx.length === 0) {
+    let mx = flat[0];
+    for (let i = 1; i < N; i++) if (flat[i] > mx) mx = flat[i];
+    for (let i = 0; i < N; i++) out[i] = mx;
+    return new NDArray(out, xa.shape.slice());
+  }
+  for (let i = 0; i <= idx[0]; i++) out[i] = val[0];
+  for (let s = 0; s + 1 < idx.length; s++) {
+    const a = idx[s], b = idx[s + 1];
+    const va = val[s], vb = val[s + 1];
+    for (let i = a + 1; i <= b; i++) {
+      const t = (i - a) / (b - a);
+      out[i] = va + t * (vb - va);
+    }
+  }
+  for (let i = idx[idx.length - 1] + 1; i < N; i++) out[i] = val[val.length - 1];
+  return new NDArray(out, xa.shape.slice());
+}
+
 // --- §3.1 cross-spectral helpers (real-only output on TS) ------------
 function _dftAtComplex(x: Float64Array, k: number, N: number): [number, number] {
   let re = 0, im = 0;

@@ -2843,6 +2843,195 @@ def arburg(x, p):
     return a.reshape((1, -1))
 
 
+# --- §4.3 pulse measurements + scalar reductions --------------------
+def findpeaks_pks(x):
+    a = np.asarray(x, dtype=float).ravel()
+    N = a.size
+    if N < 3: return np.zeros((0, 1))
+    pks = []
+    for i in _pyrange(1, N - 1):
+        if a[i - 1] < a[i] and a[i] > a[i + 1]:
+            pks.append(a[i])
+    return np.array(pks).reshape((-1, 1)) if pks else np.zeros((0, 1))
+
+
+def findpeaks_locs(x):
+    a = np.asarray(x, dtype=float).ravel()
+    N = a.size
+    if N < 3: return np.zeros((0, 1))
+    locs = []
+    for i in _pyrange(1, N - 1):
+        if a[i - 1] < a[i] and a[i] > a[i + 1]:
+            locs.append(i + 1)
+    return np.array(locs, dtype=float).reshape((-1, 1)) if locs else np.zeros((0, 1))
+
+
+def rms_s(x):
+    a = np.asarray(x, dtype=float).ravel()
+    return float(np.sqrt(np.mean(a * a))) if a.size else 0.0
+
+
+def peak2peak_s(x):
+    a = np.asarray(x, dtype=float).ravel()
+    return float(a.max() - a.min()) if a.size else 0.0
+
+
+def peak2rms_s(x):
+    a = np.asarray(x, dtype=float).ravel()
+    if a.size == 0: return 0.0
+    rms = float(np.sqrt(np.mean(a * a)))
+    return float(np.max(np.abs(a)) / rms) if rms > 0 else 0.0
+
+
+def rssq_s(x):
+    a = np.asarray(x, dtype=float).ravel()
+    return float(np.sqrt(np.sum(a * a))) if a.size else 0.0
+
+
+def medfilt1(x, n):
+    xa = np.asarray(x, dtype=float)
+    flat = xa.ravel()
+    N = flat.size
+    n = int(n)
+    if n < 1: n = 1
+    if n % 2 == 0: n += 1
+    half = (n - 1) // 2
+    out = np.zeros(N)
+    for i in _pyrange(N):
+        buf = np.zeros(n)
+        for j in _pyrange(n):
+            k = i - half + j
+            buf[j] = flat[k] if 0 <= k < N else 0.0
+        out[i] = float(np.median(buf))
+    if xa.ndim == 2 and xa.shape[1] == 1: return out.reshape((-1, 1))
+    return out.reshape((1, -1)) if xa.ndim <= 1 else out.reshape(xa.shape)
+
+
+def hampel(x, k):
+    xa = np.asarray(x, dtype=float)
+    flat = xa.ravel()
+    N = flat.size
+    k = int(k)
+    if k < 1: k = 1
+    out = np.zeros(N)
+    for i in _pyrange(N):
+        lo = _pymax(0, i - k); hi = _pymin(N, i + k + 1)
+        win = flat[lo:hi]
+        med = float(np.median(win))
+        mad = float(np.median(np.abs(win - med)))
+        sigma = 1.4826 * mad
+        out[i] = med if abs(flat[i] - med) > 3.0 * sigma else flat[i]
+    if xa.ndim == 2 and xa.shape[1] == 1: return out.reshape((-1, 1))
+    return out.reshape((1, -1)) if xa.ndim <= 1 else out.reshape(xa.shape)
+
+
+def _sub_sample_cross(arr, i, level):
+    a = arr[i - 1]; b = arr[i]
+    if b == a: return float(i)
+    t = (level - a) / (b - a)
+    return float(i) + t
+
+
+def midcross(x):
+    a = np.asarray(x, dtype=float).ravel()
+    N = a.size
+    if N < 2: return np.zeros((0, 1))
+    mn, mx = float(a.min()), float(a.max())
+    mid = mn + 0.5 * (mx - mn)
+    crosses = []
+    for i in _pyrange(1, N):
+        prev = a[i - 1]; cur = a[i]
+        if (prev <= mid and cur > mid) or (prev >= mid and cur < mid):
+            crosses.append(_sub_sample_cross(a, i, mid))
+    if not crosses: return np.zeros((0, 1))
+    return np.array(crosses).reshape((-1, 1))
+
+
+def _mean_transit(x, lo_pct, hi_pct, direction):
+    a = np.asarray(x, dtype=float).ravel()
+    N = a.size
+    if N < 2: return 0.0
+    mn, mx = float(a.min()), float(a.max())
+    rng = mx - mn
+    if direction > 0:
+        a_pct, b_pct = lo_pct, hi_pct
+    else:
+        a_pct, b_pct = hi_pct, lo_pct
+    a_lvl = mn + a_pct * rng
+    b_lvl = mn + b_pct * rng
+    total = 0.0; count = 0; state = 0; a_time = 0.0
+    for i in _pyrange(1, N):
+        prev = a[i - 1]; cur = a[i]
+        if direction > 0:
+            if state == 0 and prev <= a_lvl and cur > a_lvl:
+                a_time = _sub_sample_cross(a, i, a_lvl); state = 1
+            elif state == 1 and prev <= b_lvl and cur > b_lvl:
+                b_time = _sub_sample_cross(a, i, b_lvl)
+                total += b_time - a_time; count += 1; state = 0
+        else:
+            if state == 0 and prev >= a_lvl and cur < a_lvl:
+                a_time = _sub_sample_cross(a, i, a_lvl); state = 1
+            elif state == 1 and prev >= b_lvl and cur < b_lvl:
+                b_time = _sub_sample_cross(a, i, b_lvl)
+                total += b_time - a_time; count += 1; state = 0
+    return total / count if count > 0 else 0.0
+
+
+def risetime_s(x):  return _mean_transit(x, 0.1, 0.9, +1)
+def falltime_s(x):  return _mean_transit(x, 0.1, 0.9, -1)
+
+
+def dutycycle_s(x):
+    m = midcross(x).ravel()
+    M = m.size
+    if M < 2: return 0.0
+    a = np.asarray(x, dtype=float).ravel()
+    N = a.size
+    mn, mx = float(a.min()), float(a.max())
+    mid = mn + 0.5 * (mx - mn)
+    dirs = []
+    for i in _pyrange(1, N):
+        prev = a[i - 1]; cur = a[i]
+        if prev <= mid and cur > mid: dirs.append(+1)
+        elif prev >= mid and cur < mid: dirs.append(-1)
+        if len(dirs) >= M: break
+    on = 0.0; period = 0.0
+    for i in _pyrange(M - 2):
+        if dirs[i] == +1 and dirs[i + 1] == -1 and dirs[i + 2] == +1:
+            on += m[i + 1] - m[i]
+            period += m[i + 2] - m[i]
+    return on / period if period > 0 else 0.0
+
+
+def envelope(x):
+    xa = np.asarray(x, dtype=float)
+    flat = xa.ravel()
+    N = flat.size
+    if N < 3:
+        out = np.abs(flat)
+    else:
+        idx = []; val = []
+        for i in _pyrange(1, N - 1):
+            if flat[i - 1] < flat[i] and flat[i] > flat[i + 1]:
+                idx.append(i); val.append(flat[i])
+        out = np.zeros(N)
+        if not idx:
+            out[:] = float(flat.max())
+        else:
+            for i in _pyrange(idx[0] + 1):
+                out[i] = val[0]
+            for s in _pyrange(len(idx) - 1):
+                a = idx[s]; b = idx[s + 1]
+                va = val[s]; vb = val[s + 1]
+                for i in _pyrange(a + 1, b + 1):
+                    t = (i - a) / (b - a)
+                    out[i] = va + t * (vb - va)
+            for i in _pyrange(idx[-1] + 1, N):
+                out[i] = val[-1]
+    if xa.ndim == 2 and xa.shape[1] == 1: return out.reshape((-1, 1))
+    return out.reshape((1, -1)) if xa.ndim <= 1 else out.reshape(xa.shape)
+
+
 # --- §3.1 cross-spectral helpers ------------------------------------
 def cpsd(x, y, win, noverlap):
     xa = np.asarray(x, dtype=float).ravel()

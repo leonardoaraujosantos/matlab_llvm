@@ -2250,6 +2250,9 @@ void Lowerer::lowerStmt(const Stmt &St) {
            * r and p, real row for k; uniform ptr at the MLIR level). */
           else if (CN == "residue" && A.LHS.size() == 3)
             Rtys.assign(A.LHS.size(), PtrTy);
+          /* [pks, locs] = findpeaks(x) — both ptr (column matrices). */
+          else if (CN == "findpeaks" && A.LHS.size() == 2)
+            Rtys.assign(A.LHS.size(), PtrTy);
           /* [b, a] = butter(n, Wn) / cheby1(n, Rp, Wn) / cheby2(n, Rs, Wn)
            * — both real row vectors (ptr at MLIR level). */
           else if ((CN == "butter" || CN == "cheby1" || CN == "cheby2") &&
@@ -6449,6 +6452,9 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
              * form. Multi-LHS `[n, Wn] = buttord(...)` splits in the
              * dedicated multi-return dispatch in LowerTensorOps. */
             "buttord", "cheb1ord",
+            /* Tier-3 §4.3 scalar reductions. */
+            "rms", "peak2peak", "peak2rms", "rssq",
+            "risetime", "falltime", "dutycycle",
           };
           static const llvm::StringSet<> PtrRet = {
             "zeros", "ones", "eye", "magic", "rand", "randn",
@@ -6490,6 +6496,11 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             "levinson", "lpc", "aryule", "arburg", "pyulear", "pburg",
             /* Tier-2 §3.1 cross-spectral helpers. */
             "cpsd", "mscohere", "tfestimate",
+            /* Tier-3 §4.3 — findpeaks (single-LHS = peaks-only). The
+             * scalar reductions rms/peak2peak/peak2rms/rssq are in
+             * F64Ret below. */
+            "findpeaks",
+            "medfilt1", "hampel", "envelope", "midcross",
             "interp1", "trapz", "cumtrapz", "gradient",
             "hamming", "hann", "blackman",
             /* Tier-1 windows tail (signal_toolbox_roadmap §2.3) — all

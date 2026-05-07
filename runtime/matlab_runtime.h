@@ -373,6 +373,21 @@ matlab_mat   *matlab_pwelch(matlab_mat *x, matlab_mat *win, double noverlap);
  * STFT per (freq, frame). Default fs = 1 (normalised). */
 matlab_mat   *matlab_spectrogram(matlab_mat *x, matlab_mat *win, double noverlap);
 
+/* Tier-3 §4.3 pulse measurements — findpeaks + scalar reductions. */
+matlab_mat *matlab_findpeaks_pks(matlab_mat *x);
+matlab_mat *matlab_findpeaks_locs(matlab_mat *x);
+double      matlab_rms_s(matlab_mat *x);
+double      matlab_peak2peak_s(matlab_mat *x);
+double      matlab_peak2rms_s(matlab_mat *x);
+double      matlab_rssq_s(matlab_mat *x);
+matlab_mat *matlab_medfilt1(matlab_mat *x, double n);
+matlab_mat *matlab_hampel(matlab_mat *x, double k);
+matlab_mat *matlab_envelope(matlab_mat *x);
+matlab_mat *matlab_midcross(matlab_mat *x);
+double      matlab_risetime_s(matlab_mat *x);
+double      matlab_falltime_s(matlab_mat *x);
+double      matlab_dutycycle_s(matlab_mat *x);
+
 /* Tier-2 §3.2 linear prediction. */
 matlab_mat   *matlab_levinson(matlab_mat *r, double p);
 matlab_mat   *matlab_lpc(matlab_mat *x, double p);

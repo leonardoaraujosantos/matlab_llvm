@@ -2959,6 +2959,27 @@ bool TensorLowering::rewriteBuiltinCalls() {
       }
     }
 
+    /* findpeaks — 2-result form `[pks, locs] = findpeaks(x)` splits
+     * into matlab_findpeaks_pks / _locs. Single-LHS `pks = ...` goes
+     * through the regular Spec table below. */
+    if (NA && NA.getValue().getSExtValue() == 2 &&
+        Name == "findpeaks" && Call->getNumOperands() == 1 &&
+        Call->getNumResults() == 2 &&
+        Call->getOperand(0).getType() == PtrTy) {
+      B.setInsertionPoint(Call);
+      auto Fp = rt("matlab_findpeaks_pks",  PtrTy, {PtrTy});
+      auto Fl = rt("matlab_findpeaks_locs", PtrTy, {PtrTy});
+      auto Cp = LLVM::CallOp::create(B, Call->getLoc(), Fp,
+                                      Call->getOperands());
+      auto Cl = LLVM::CallOp::create(B, Call->getLoc(), Fl,
+                                      Call->getOperands());
+      Call->getResult(0).replaceAllUsesWith(Cp.getResult());
+      Call->getResult(1).replaceAllUsesWith(Cl.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+
     /* residue — partial-fraction expansion. 3-result form
      * `[r, p, k] = residue(b, a)`. 2 operands. Splits into
      * matlab_residue_{r,p,k}(b, a) — same eig_V/eig_D precedent as
@@ -3396,6 +3417,19 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"cpsd",        "matlab_cpsd",        1, "pppf"},
       {"mscohere",    "matlab_mscohere",    1, "pppf"},
       {"tfestimate",  "matlab_tfestimate",  1, "pppf"},
+      /* §4.3 pulse measurements — single-result forms. */
+      {"findpeaks",   "matlab_findpeaks_pks", 1, "p"},
+      {"rms",         "matlab_rms_s",         0, "p"},
+      {"peak2peak",   "matlab_peak2peak_s",   0, "p"},
+      {"peak2rms",    "matlab_peak2rms_s",    0, "p"},
+      {"rssq",        "matlab_rssq_s",        0, "p"},
+      {"medfilt1",    "matlab_medfilt1",      1, "pf"},
+      {"hampel",      "matlab_hampel",        1, "pf"},
+      {"envelope",    "matlab_envelope",      1, "p"},
+      {"midcross",    "matlab_midcross",      1, "p"},
+      {"risetime",    "matlab_risetime_s",    0, "p"},
+      {"falltime",    "matlab_falltime_s",    0, "p"},
+      {"dutycycle",   "matlab_dutycycle_s",   0, "p"},
       {"interp1",    "matlab_interp1",    1, "ppp"},
       {"trapz",      "matlab_trapz",      1, "p"},
       {"trapz",      "matlab_trapz_xy",   1, "pp"},

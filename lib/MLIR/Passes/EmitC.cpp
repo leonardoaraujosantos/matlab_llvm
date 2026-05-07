@@ -1804,6 +1804,10 @@ static llvm::StringRef MatrixReturningFns[] = {
     "matlab_pyulear", "matlab_pburg",
     /* §3.1 cross-spectral helpers. */
     "matlab_cpsd", "matlab_mscohere", "matlab_tfestimate",
+    /* §4.3 pulse measurements (matrix-returning entries). */
+    "matlab_findpeaks_pks", "matlab_findpeaks_locs",
+    "matlab_medfilt1", "matlab_hampel", "matlab_envelope",
+    "matlab_midcross",
     "matlab_interp1", "matlab_interp2", "matlab_trapz", "matlab_trapz_xy",
     "matlab_cumtrapz", "matlab_gradient", "matlab_diff",
     "matlab_conv", "matlab_conv2", "matlab_filter",

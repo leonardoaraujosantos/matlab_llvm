@@ -123,6 +123,10 @@ void Resolver::registerBuiltins() {
     "levinson", "lpc", "aryule", "arburg", "pyulear", "pburg",
     /* Tier-2 §3.1 cross-spectral helpers. */
     "cpsd", "mscohere", "tfestimate",
+    /* Tier-3 §4.3 pulse measurements. */
+    "findpeaks", "rms", "peak2peak", "peak2rms", "rssq",
+    "medfilt1", "hampel", "envelope",
+    "midcross", "risetime", "falltime", "dutycycle",
     "interp1", "trapz", "cumtrapz", "gradient",
     "hamming", "hann", "blackman",
     /* Tier-1 (Signal Processing Toolbox roadmap §2.3) — windows tail. */

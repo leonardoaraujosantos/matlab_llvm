@@ -23,6 +23,7 @@
 #include <unistd.h>  /* for write(2), used by matlab_err_emit_traceback_to_stderr */
 
 #include <vector>    /* Phase-4 RAII scratch buffers */
+#include <algorithm> /* std::sort — used by §4.3 medfilt1 / hampel */
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -5891,6 +5892,342 @@ matlab_mat *matlab_sgolayfilt(matlab_mat *x, double k_d, double f_d) {
             s += Bm[(size_t)row * f + j] * x->data[N - f + j];
         Y->data[N - half + i] = s;
     }
+    return Y;
+}
+
+/*===========================================================================
+ * Tier-3 SPT §4.3 pulse measurements — findpeaks + scalar reductions.
+ *
+ *   pks      = findpeaks(x)        local maxima (1-return)
+ *   [p, lc]  = findpeaks(x)        peaks + locations (2-return)
+ *   rms(x), peak2peak(x), peak2rms(x), rssq(x)   scalar reductions.
+ *
+ * findpeaks: a sample x[i] (1-based MATLAB index) is a peak iff
+ * 1 < i < N AND x[i-1] < x[i] AND x[i] > x[i+1]. Endpoints and
+ * plateaus are excluded — matches MATLAB's strict-monotonic
+ * definition. Output column lengths = number of peaks found.
+ *
+ * MinPeakHeight, MinPeakDistance, MinPeakProminence, Threshold,
+ * SortStr — name-value pairs deferred to a follow-on slice.
+ */
+matlab_mat *matlab_findpeaks_pks(matlab_mat *x) {
+    if (!x) return mat_alloc(0, 0);
+    int64_t N = x->rows * x->cols;
+    if (N < 3) return mat_alloc(0, 1);
+    std::vector<double> pks;
+    for (int64_t i = 1; i < N - 1; ++i)
+        if (x->data[i - 1] < x->data[i] && x->data[i] > x->data[i + 1])
+            pks.push_back(x->data[i]);
+    int64_t M = (int64_t)pks.size();
+    matlab_mat *P = mat_alloc(M, M > 0 ? 1 : 0);
+    for (int64_t i = 0; i < M; ++i) P->data[i] = pks[i];
+    return P;
+}
+
+matlab_mat *matlab_findpeaks_locs(matlab_mat *x) {
+    if (!x) return mat_alloc(0, 0);
+    int64_t N = x->rows * x->cols;
+    if (N < 3) return mat_alloc(0, 1);
+    std::vector<double> locs;
+    for (int64_t i = 1; i < N - 1; ++i)
+        if (x->data[i - 1] < x->data[i] && x->data[i] > x->data[i + 1])
+            locs.push_back((double)(i + 1));    /* MATLAB 1-based */
+    int64_t M = (int64_t)locs.size();
+    matlab_mat *L = mat_alloc(M, M > 0 ? 1 : 0);
+    for (int64_t i = 0; i < M; ++i) L->data[i] = locs[i];
+    return L;
+}
+
+double matlab_rms_s(matlab_mat *x) {
+    if (!x) return 0.0;
+    int64_t N = x->rows * x->cols;
+    if (N == 0) return 0.0;
+    double s = 0.0;
+    for (int64_t i = 0; i < N; ++i) s += x->data[i] * x->data[i];
+    return sqrt(s / (double)N);
+}
+
+double matlab_peak2peak_s(matlab_mat *x) {
+    if (!x) return 0.0;
+    int64_t N = x->rows * x->cols;
+    if (N == 0) return 0.0;
+    double mn = x->data[0], mx = x->data[0];
+    for (int64_t i = 1; i < N; ++i) {
+        if (x->data[i] < mn) mn = x->data[i];
+        if (x->data[i] > mx) mx = x->data[i];
+    }
+    return mx - mn;
+}
+
+double matlab_peak2rms_s(matlab_mat *x) {
+    if (!x) return 0.0;
+    int64_t N = x->rows * x->cols;
+    if (N == 0) return 0.0;
+    double s = 0.0, peak = 0.0;
+    for (int64_t i = 0; i < N; ++i) {
+        s += x->data[i] * x->data[i];
+        double a = fabs(x->data[i]);
+        if (a > peak) peak = a;
+    }
+    double rms = sqrt(s / (double)N);
+    return rms > 0 ? peak / rms : 0.0;
+}
+
+double matlab_rssq_s(matlab_mat *x) {
+    if (!x) return 0.0;
+    int64_t N = x->rows * x->cols;
+    double s = 0.0;
+    for (int64_t i = 0; i < N; ++i) s += x->data[i] * x->data[i];
+    return sqrt(s);
+}
+
+/*===========================================================================
+ * Tier-3 SPT §4.3 — pulse statistics (risetime/falltime/dutycycle/midcross).
+ *
+ *   t = midcross(x)      mid-reference (50%) crossing sample indices
+ *                        (1-based, with sub-sample linear interp).
+ *   r = risetime(x)      mean 10%→90% rise time across rising
+ *                        transitions, in samples.
+ *   f = falltime(x)      mean 90%→10% fall time across falling
+ *                        transitions, in samples.
+ *   d = dutycycle(x)     fraction of period above the 50% level,
+ *                        averaged across full periods.
+ *
+ * State levels auto-detected as `min(x)` and `max(x)` (simple
+ * estimator — histogram-based statelevels is a follow-on). Default
+ * reference percentages are 10%, 50%, 90%. Returns scalar averages;
+ * per-transition vector outputs are deferred.
+ */
+
+/* Linear-interpolate the sample index where the signal crosses
+ * `level` between samples i-1 and i. Caller must verify a crossing
+ * occurred in that interval. Returns 1-based sample index (fractional). */
+static double sub_sample_cross_(const double *x, int64_t i, double level) {
+    double a = x[i - 1], b = x[i];
+    if (b == a) return (double)i;
+    double t = (level - a) / (b - a);
+    return (double)i + t;       /* 1-based: i is the after-cross sample */
+}
+
+matlab_mat *matlab_midcross(matlab_mat *x) {
+    if (!x) return mat_alloc(0, 0);
+    int64_t N = x->rows * x->cols;
+    if (N < 2) return mat_alloc(0, 1);
+    double mn = x->data[0], mx = x->data[0];
+    for (int64_t i = 1; i < N; ++i) {
+        if (x->data[i] < mn) mn = x->data[i];
+        if (x->data[i] > mx) mx = x->data[i];
+    }
+    double mid = mn + 0.5 * (mx - mn);
+    std::vector<double> crosses;
+    for (int64_t i = 1; i < N; ++i) {
+        double a = x->data[i - 1], b = x->data[i];
+        if ((a <= mid && b > mid) || (a >= mid && b < mid))
+            crosses.push_back(sub_sample_cross_(x->data, i, mid));
+    }
+    int64_t M = (int64_t)crosses.size();
+    matlab_mat *T = mat_alloc(M, M > 0 ? 1 : 0);
+    for (int64_t i = 0; i < M; ++i) T->data[i] = crosses[i];
+    return T;
+}
+
+/* Compute average sample-distance between low_pct% and high_pct%
+ * crossings, measured during transitions in the requested direction
+ * (rising = +1, falling = -1). Returns 0 if no transitions found. */
+static double mean_transit_(matlab_mat *x, double low_pct, double high_pct,
+                            int direction) {
+    if (!x) return 0.0;
+    int64_t N = x->rows * x->cols;
+    if (N < 2) return 0.0;
+    double mn = x->data[0], mx = x->data[0];
+    for (int64_t i = 1; i < N; ++i) {
+        if (x->data[i] < mn) mn = x->data[i];
+        if (x->data[i] > mx) mx = x->data[i];
+    }
+    double rng = mx - mn;
+    /* MATLAB's sense: low_pct < high_pct for risetime, low_pct >
+     * high_pct for falltime. Internal `lo`/`hi` are reordered by
+     * direction so we always look for low → high in the iteration. */
+    double a_pct, b_pct;
+    if (direction > 0) { a_pct = low_pct; b_pct = high_pct; }
+    else               { a_pct = high_pct; b_pct = low_pct; }
+    double a_lvl = mn + a_pct * rng;
+    double b_lvl = mn + b_pct * rng;
+    /* Find each transition crossing first a_lvl then b_lvl in the
+     * requested direction. */
+    double total = 0.0;
+    int    count = 0;
+    int    state = 0;          /* 0=before a_lvl, 1=passed a_lvl */
+    double a_time = 0.0;
+    for (int64_t i = 1; i < N; ++i) {
+        double prev = x->data[i - 1], cur = x->data[i];
+        if (direction > 0) {
+            if (state == 0 && prev <= a_lvl && cur > a_lvl) {
+                a_time = sub_sample_cross_(x->data, i, a_lvl);
+                state = 1;
+            } else if (state == 1 && prev <= b_lvl && cur > b_lvl) {
+                double b_time = sub_sample_cross_(x->data, i, b_lvl);
+                total += (b_time - a_time);
+                count++;
+                state = 0;
+            }
+        } else {
+            if (state == 0 && prev >= a_lvl && cur < a_lvl) {
+                a_time = sub_sample_cross_(x->data, i, a_lvl);
+                state = 1;
+            } else if (state == 1 && prev >= b_lvl && cur < b_lvl) {
+                double b_time = sub_sample_cross_(x->data, i, b_lvl);
+                total += (b_time - a_time);
+                count++;
+                state = 0;
+            }
+        }
+    }
+    return count > 0 ? total / (double)count : 0.0;
+}
+
+double matlab_risetime_s(matlab_mat *x) {
+    return mean_transit_(x, 0.1, 0.9, +1);
+}
+
+double matlab_falltime_s(matlab_mat *x) {
+    return mean_transit_(x, 0.1, 0.9, -1);
+}
+
+double matlab_dutycycle_s(matlab_mat *x) {
+    matlab_mat *m = matlab_midcross(x);
+    int64_t M = m->rows * m->cols;
+    if (M < 2) { free(m->data); free(m); return 0.0; }
+    /* Pair up midcrosses into rising/falling halves. We need the
+     * direction at each crossing — re-derive from the data. */
+    int64_t N = x->rows * x->cols;
+    double mn = x->data[0], mx = x->data[0];
+    for (int64_t i = 1; i < N; ++i) {
+        if (x->data[i] < mn) mn = x->data[i];
+        if (x->data[i] > mx) mx = x->data[i];
+    }
+    double mid = mn + 0.5 * (mx - mn);
+    std::vector<int> dirs((size_t)M, 0);
+    int j = 0;
+    for (int64_t i = 1; i < N && j < (int)M; ++i) {
+        double a = x->data[i - 1], b = x->data[i];
+        if ((a <= mid && b > mid)) { dirs[(size_t)j++] = +1; }
+        else if ((a >= mid && b < mid)) { dirs[(size_t)j++] = -1; }
+    }
+    /* Sum of (next-rising − rising) midcross widths and divide by
+     * sum of full periods. */
+    double on = 0.0, period = 0.0;
+    for (int64_t i = 0; i + 2 < M; ++i) {
+        if (dirs[(size_t)i] == +1 && dirs[(size_t)(i + 1)] == -1
+            && dirs[(size_t)(i + 2)] == +1) {
+            on     += m->data[i + 1] - m->data[i];
+            period += m->data[i + 2] - m->data[i];
+        }
+    }
+    free(m->data); free(m);
+    return period > 0.0 ? on / period : 0.0;
+}
+
+/*===========================================================================
+ * Tier-3 SPT §4.3 — envelope / hampel / medfilt1.
+ *
+ *   y = medfilt1(x, n)   1-D median filter (length-n sliding window,
+ *                        zero-padded edges, n must be odd — coerced).
+ *   y = hampel(x, k)     outlier replace via running-median + MAD test
+ *                        (window length 2k+1, threshold 3·1.4826·MAD).
+ *   y = envelope(x)      upper envelope via linear interpolation between
+ *                        local maxima. Same shape as input.
+ */
+matlab_mat *matlab_medfilt1(matlab_mat *x, double n_d) {
+    if (!x) return mat_alloc(0, 0);
+    int64_t N = x->rows * x->cols;
+    int n = (int)n_d;
+    if (n < 1) n = 1;
+    if ((n & 1) == 0) n++;       /* coerce to odd */
+    int half = (n - 1) / 2;
+    matlab_mat *Y = mat_alloc(x->rows, x->cols);
+    if (N == 0) return Y;
+    std::vector<double> buf((size_t)n);
+    for (int64_t i = 0; i < N; ++i) {
+        for (int j = 0; j < n; ++j) {
+            int64_t k = i - half + j;
+            buf[(size_t)j] = (k >= 0 && k < N) ? x->data[k] : 0.0;
+        }
+        std::sort(buf.begin(), buf.end());
+        Y->data[i] = buf[(size_t)half];
+    }
+    return Y;
+}
+
+matlab_mat *matlab_hampel(matlab_mat *x, double k_d) {
+    if (!x) return mat_alloc(0, 0);
+    int64_t N = x->rows * x->cols;
+    int k = (int)k_d;
+    if (k < 1) k = 1;
+    matlab_mat *Y = mat_alloc(x->rows, x->cols);
+    if (N == 0) return Y;
+    int n = 2 * k + 1;
+    std::vector<double> win((size_t)n);
+    for (int64_t i = 0; i < N; ++i) {
+        int len = 0;
+        for (int j = -k; j <= k; ++j) {
+            int64_t idx = i + j;
+            if (idx >= 0 && idx < N) win[(size_t)len++] = x->data[idx];
+        }
+        std::vector<double> w(win.begin(), win.begin() + len);
+        std::sort(w.begin(), w.end());
+        double med = w[(size_t)(len / 2)];
+        if (len > 1 && (len % 2 == 0))
+            med = 0.5 * (w[(size_t)(len / 2 - 1)] + w[(size_t)(len / 2)]);
+        std::vector<double> dev((size_t)len);
+        for (int j = 0; j < len; ++j) dev[(size_t)j] = fabs(w[(size_t)j] - med);
+        std::sort(dev.begin(), dev.end());
+        double mad = dev[(size_t)(len / 2)];
+        if (len > 1 && (len % 2 == 0))
+            mad = 0.5 * (dev[(size_t)(len / 2 - 1)] + dev[(size_t)(len / 2)]);
+        double sigma = 1.4826 * mad;
+        Y->data[i] = (fabs(x->data[i] - med) > 3.0 * sigma) ? med : x->data[i];
+    }
+    return Y;
+}
+
+matlab_mat *matlab_envelope(matlab_mat *x) {
+    if (!x) return mat_alloc(0, 0);
+    int64_t N = x->rows * x->cols;
+    matlab_mat *Y = mat_alloc(x->rows, x->cols);
+    if (N == 0) return Y;
+    if (N < 3) {
+        for (int64_t i = 0; i < N; ++i) Y->data[i] = fabs(x->data[i]);
+        return Y;
+    }
+    /* Find local maxima of x. Linear-interpolate between them; clamp
+     * the endpoints to the closest interior maximum value. */
+    std::vector<int64_t> idx;
+    std::vector<double>  val;
+    for (int64_t i = 1; i < N - 1; ++i)
+        if (x->data[i - 1] < x->data[i] && x->data[i] > x->data[i + 1]) {
+            idx.push_back(i); val.push_back(x->data[i]);
+        }
+    if (idx.empty()) {
+        /* No interior peak: fall back to global max held flat. */
+        double mx = x->data[0];
+        for (int64_t i = 1; i < N; ++i) if (x->data[i] > mx) mx = x->data[i];
+        for (int64_t i = 0; i < N; ++i) Y->data[i] = mx;
+        return Y;
+    }
+    /* Left tail: hold first peak's value. */
+    for (int64_t i = 0; i <= idx[0]; ++i) Y->data[i] = val[0];
+    /* Interior interpolation. */
+    for (size_t s = 0; s + 1 < idx.size(); ++s) {
+        int64_t a = idx[s], b = idx[s + 1];
+        double  va = val[s], vb = val[s + 1];
+        for (int64_t i = a + 1; i <= b; ++i) {
+            double t = (double)(i - a) / (double)(b - a);
+            Y->data[i] = va + t * (vb - va);
+        }
+    }
+    /* Right tail: hold last peak's value. */
+    for (int64_t i = idx.back() + 1; i < N; ++i) Y->data[i] = val.back();
     return Y;
 }
 
