@@ -351,9 +351,18 @@ matlab_mat   *matlab_butter_b(double n, double Wn);
 matlab_mat   *matlab_butter_a(double n, double Wn);
 matlab_mat   *matlab_cheby1_b(double n, double Rp, double Wn);
 matlab_mat   *matlab_cheby1_a(double n, double Rp, double Wn);
+matlab_mat   *matlab_cheby2_b(double n, double Rs, double Wn);
+matlab_mat   *matlab_cheby2_a(double n, double Rs, double Wn);
 matlab_mat_c *matlab_freqz(matlab_mat *b, matlab_mat *a, double N);
 matlab_mat_c *matlab_freqz_h(matlab_mat *b, matlab_mat *a, double N);
 matlab_mat   *matlab_freqz_w(matlab_mat *b, matlab_mat *a, double N);
+
+/* Order-selection helpers — return [n, Wn] via paired *_n / *_Wn
+ * entries (each computes the full result internally). Lowpass scope. */
+double matlab_buttord_n(double Wp, double Ws, double Rp, double Rs);
+double matlab_buttord_Wn(double Wp, double Ws, double Rp, double Rs);
+double matlab_cheb1ord_n(double Wp, double Ws, double Rp, double Rs);
+double matlab_cheb1ord_Wn(double Wp, double Ws, double Rp, double Rs);
 
 /* [r, p, k] = residue(b, a) — partial-fraction expansion of B(s)/A(s).
  * Distinct-pole scope (Tier-1): repeated poles produce numerically

@@ -2497,6 +2497,108 @@ def cheby1_a(n, Rp, Wn):
     return a.reshape((1, -1))
 
 
+def _lowpass_from_analog_pz(p_analog, z_analog, n):
+    """Same as _lowpass_from_analog_poles but with explicit finite zeros.
+    Pads the zero list with z = -1 if fewer zeros than poles are given."""
+    p_z = [_bilinear_pole(p) for p in p_analog]
+    z_z = [_bilinear_pole(z) for z in z_analog]
+    while len(z_z) < n:
+        z_z.append(-1.0 + 0j)
+    a = _poly_from_complex_roots(p_z)
+    b = _poly_from_complex_roots(z_z)
+    sb, sa = float(np.sum(b)), float(np.sum(a))
+    if sb != 0.0:
+        b = b * (sa / sb)
+    return b, a
+
+
+def _cheby2_design(n, Rs, Wn):
+    n = int(n)
+    if n < 1: n = 1
+    Rs = float(Rs); Wn = float(Wn)
+    if Rs <= 0.0: Rs = 1e-12
+    if Wn <= 0.0: Wn = 1e-12
+    if Wn >= 1.0: Wn = 1.0 - 1e-12
+    Wa = 2.0 * np.tan(np.pi * Wn / 2.0)
+    eps = 1.0 / np.sqrt(10.0 ** (Rs / 10.0) - 1.0)
+    mu = np.arcsinh(1.0 / eps) / n
+    sh, ch = np.sinh(mu), np.cosh(mu)
+    poles = []
+    zeros = []
+    for k in _pyrange(n):
+        theta = np.pi * (2 * (k + 1) - 1) / (2.0 * n)
+        cr = -sh * np.sin(theta)
+        ci =  ch * np.cos(theta)
+        m2 = cr * cr + ci * ci
+        poles.append(Wa * (cr / m2 + 1j * (-ci / m2)))
+        ct = np.cos(theta)
+        if abs(ct) > 1e-12:
+            zeros.append(0.0 + 1j * (Wa / ct))
+    return _lowpass_from_analog_pz(poles, zeros, n)
+
+
+def cheby2_b(n, Rs, Wn):
+    b, _ = _cheby2_design(n, Rs, Wn)
+    return b.reshape((1, -1))
+
+
+def cheby2_a(n, Rs, Wn):
+    _, a = _cheby2_design(n, Rs, Wn)
+    return a.reshape((1, -1))
+
+
+def _buttord_compute(Wp, Ws, Rp, Rs):
+    if Wp <= 0.0: Wp = 1e-12
+    if Ws <= 0.0: Ws = 1e-12
+    if Wp >= 1.0: Wp = 1.0 - 1e-12
+    if Ws >= 1.0: Ws = 1.0 - 1e-12
+    Wpa = 2.0 * np.tan(np.pi * Wp / 2.0)
+    Wsa = 2.0 * np.tan(np.pi * Ws / 2.0)
+    num = np.log10((10.0 ** (Rs / 10.0) - 1.0)
+                 / (10.0 ** (Rp / 10.0) - 1.0))
+    den = 2.0 * np.log10(Wsa / Wpa)
+    n = int(np.ceil(num / den))
+    if n < 1: n = 1
+    Wna = Wpa / (10.0 ** (Rp / 10.0) - 1.0) ** (1.0 / (2.0 * n))
+    Wn = (2.0 / np.pi) * np.arctan(Wna / 2.0)
+    return float(n), float(Wn)
+
+
+def buttord_n(Wp, Ws, Rp, Rs):
+    n, _ = _buttord_compute(Wp, Ws, Rp, Rs)
+    return n
+
+
+def buttord_Wn(Wp, Ws, Rp, Rs):
+    _, w = _buttord_compute(Wp, Ws, Rp, Rs)
+    return w
+
+
+def _cheb1ord_compute(Wp, Ws, Rp, Rs):
+    if Wp <= 0.0: Wp = 1e-12
+    if Ws <= 0.0: Ws = 1e-12
+    if Wp >= 1.0: Wp = 1.0 - 1e-12
+    if Ws >= 1.0: Ws = 1.0 - 1e-12
+    Wpa = 2.0 * np.tan(np.pi * Wp / 2.0)
+    Wsa = 2.0 * np.tan(np.pi * Ws / 2.0)
+    num = np.arccosh(np.sqrt((10.0 ** (Rs / 10.0) - 1.0)
+                          / (10.0 ** (Rp / 10.0) - 1.0)))
+    den = np.arccosh(Wsa / Wpa)
+    n = int(np.ceil(num / den))
+    if n < 1: n = 1
+    return float(n), float(Wp)
+
+
+def cheb1ord_n(Wp, Ws, Rp, Rs):
+    n, _ = _cheb1ord_compute(Wp, Ws, Rp, Rs)
+    return n
+
+
+def cheb1ord_Wn(Wp, Ws, Rp, Rs):
+    _, w = _cheb1ord_compute(Wp, Ws, Rp, Rs)
+    return w
+
+
 def _freqz_compute(b, a, N):
     bv = np.asarray(b, dtype=float).ravel()
     av = np.asarray(a, dtype=float).ravel()

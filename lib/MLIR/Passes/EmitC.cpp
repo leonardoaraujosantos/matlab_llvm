@@ -1785,6 +1785,7 @@ static llvm::StringRef MatrixReturningFns[] = {
     /* Tier-1 §2.1 — IIR design + freqz. */
     "matlab_butter_b", "matlab_butter_a",
     "matlab_cheby1_b", "matlab_cheby1_a",
+    "matlab_cheby2_b", "matlab_cheby2_a",
     "matlab_freqz", "matlab_freqz_h", "matlab_freqz_w",
     "matlab_interp1", "matlab_interp2", "matlab_trapz", "matlab_trapz_xy",
     "matlab_cumtrapz", "matlab_gradient", "matlab_diff",

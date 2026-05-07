@@ -2854,6 +2854,114 @@ export function cheby1_a(n: number, Rp: number, Wn: number): NDArray {
   return new NDArray(a, [1, a.length]);
 }
 
+function _lowpassFromAnalogPZ(pR: Float64Array, pI: Float64Array,
+                               zR: number[], zI: number[], n: number):
+    { b: Float64Array; a: Float64Array } {
+  const pdR = new Float64Array(n), pdI = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    const [r, im] = _bilinearPoleTS(pR[i], pI[i]);
+    pdR[i] = r; pdI[i] = im;
+  }
+  const zdR: number[] = [], zdI: number[] = [];
+  for (let i = 0; i < zR.length; i++) {
+    const [r, im] = _bilinearPoleTS(zR[i], zI[i]);
+    zdR.push(r); zdI.push(im);
+  }
+  while (zdR.length < n) { zdR.push(-1); zdI.push(0); }
+  const a = _polyFromComplexRoots(Array.from(pdR), Array.from(pdI));
+  const b = _polyFromComplexRoots(zdR, zdI);
+  let sumb = 0, suma = 0;
+  for (let i = 0; i <= n; i++) { sumb += b[i]; suma += a[i]; }
+  if (sumb !== 0) {
+    const g = suma / sumb;
+    for (let i = 0; i <= n; i++) b[i] *= g;
+  }
+  return { b, a };
+}
+
+function _cheby2Design(n: number, Rs: number, Wn: number):
+    { b: Float64Array; a: Float64Array } {
+  n = (n | 0) || 1;
+  if (Rs <= 0) Rs = 1e-12;
+  if (Wn <= 0) Wn = 1e-12;
+  if (Wn >= 1) Wn = 1 - 1e-12;
+  const Wa  = 2 * Math.tan(Math.PI * Wn / 2);
+  const eps = 1 / Math.sqrt(Math.pow(10, Rs / 10) - 1);
+  const mu  = Math.log(1 / eps + Math.sqrt(1 / (eps * eps) + 1)) / n;
+  const sh  = Math.sinh(mu), ch = Math.cosh(mu);
+  const pR = new Float64Array(n), pI = new Float64Array(n);
+  const zR: number[] = [], zI: number[] = [];
+  for (let k = 0; k < n; k++) {
+    const theta = Math.PI * (2 * (k + 1) - 1) / (2 * n);
+    const cr = -sh * Math.sin(theta);
+    const ci =  ch * Math.cos(theta);
+    const m2 = cr * cr + ci * ci;
+    pR[k] = Wa * ( cr / m2);
+    pI[k] = Wa * (-ci / m2);
+    const ct = Math.cos(theta);
+    if (Math.abs(ct) > 1e-12) {
+      zR.push(0); zI.push(Wa / ct);
+    }
+  }
+  return _lowpassFromAnalogPZ(pR, pI, zR, zI, n);
+}
+
+export function cheby2_b(n: number, Rs: number, Wn: number): NDArray {
+  const { b } = _cheby2Design(+n, +Rs, +Wn);
+  return new NDArray(b, [1, b.length]);
+}
+export function cheby2_a(n: number, Rs: number, Wn: number): NDArray {
+  const { a } = _cheby2Design(+n, +Rs, +Wn);
+  return new NDArray(a, [1, a.length]);
+}
+
+function _buttordCompute(Wp: number, Ws: number, Rp: number, Rs: number):
+    [number, number] {
+  if (Wp <= 0) Wp = 1e-12;
+  if (Ws <= 0) Ws = 1e-12;
+  if (Wp >= 1) Wp = 1 - 1e-12;
+  if (Ws >= 1) Ws = 1 - 1e-12;
+  const Wpa = 2 * Math.tan(Math.PI * Wp / 2);
+  const Wsa = 2 * Math.tan(Math.PI * Ws / 2);
+  const num = Math.log10((Math.pow(10, Rs / 10) - 1)
+                       / (Math.pow(10, Rp / 10) - 1));
+  const den = 2 * Math.log10(Wsa / Wpa);
+  const n = Math.max(1, Math.ceil(num / den));
+  const Wna = Wpa / Math.pow(Math.pow(10, Rp / 10) - 1, 1 / (2 * n));
+  const Wn = (2 / Math.PI) * Math.atan(Wna / 2);
+  return [n, Wn];
+}
+
+export function buttord_n(Wp: number, Ws: number, Rp: number, Rs: number): number {
+  return _buttordCompute(+Wp, +Ws, +Rp, +Rs)[0];
+}
+export function buttord_Wn(Wp: number, Ws: number, Rp: number, Rs: number): number {
+  return _buttordCompute(+Wp, +Ws, +Rp, +Rs)[1];
+}
+
+function _cheb1ordCompute(Wp: number, Ws: number, Rp: number, Rs: number):
+    [number, number] {
+  if (Wp <= 0) Wp = 1e-12;
+  if (Ws <= 0) Ws = 1e-12;
+  if (Wp >= 1) Wp = 1 - 1e-12;
+  if (Ws >= 1) Ws = 1 - 1e-12;
+  const Wpa = 2 * Math.tan(Math.PI * Wp / 2);
+  const Wsa = 2 * Math.tan(Math.PI * Ws / 2);
+  const _acoshTS = (x: number) => Math.log(x + Math.sqrt(x * x - 1));
+  const num = _acoshTS(Math.sqrt((Math.pow(10, Rs / 10) - 1)
+                              / (Math.pow(10, Rp / 10) - 1)));
+  const den = _acoshTS(Wsa / Wpa);
+  const n = Math.max(1, Math.ceil(num / den));
+  return [n, Wp];
+}
+
+export function cheb1ord_n(Wp: number, Ws: number, Rp: number, Rs: number): number {
+  return _cheb1ordCompute(+Wp, +Ws, +Rp, +Rs)[0];
+}
+export function cheb1ord_Wn(Wp: number, Ws: number, Rp: number, Rs: number): number {
+  return _cheb1ordCompute(+Wp, +Ws, +Rp, +Rs)[1];
+}
+
 function _freqzCompute(B: any, A: any, N: number):
     { hR: Float64Array; hI: Float64Array; w: Float64Array } {
   const bv = asArray(B).data;

@@ -613,6 +613,40 @@ static void lowpass_from_analog_poles_(const std::vector<double> &pr_,
     }
 }
 
+/* Generalized lowpass-from-analog-{poles, zeros}. Used by Chebyshev II
+ * which has finite j-axis zeros. Padding: if fewer zeros than poles
+ * are supplied, the remainder are treated as zeros at infinity and
+ * map to z = -1 after bilinear (matches the analog lowpass response
+ * tail). Output is normalized for unit DC gain. */
+static void lowpass_from_analog_pz_(const std::vector<double> &ppr,
+                                    const std::vector<double> &ppi,
+                                    const std::vector<double> &zpr,
+                                    const std::vector<double> &zpi,
+                                    std::vector<double> &b,
+                                    std::vector<double> &a) {
+    int64_t n  = (int64_t)ppr.size();
+    int64_t nz = (int64_t)zpr.size();
+    /* Bilinear-transform poles. */
+    std::vector<double> pdr(n), pdi(n);
+    for (int64_t k = 0; k < n; ++k)
+        bilinear_pole_(ppr[k], ppi[k], pdr[k], pdi[k]);
+    /* Bilinear-transform finite zeros + pad infinity-zeros at z = -1. */
+    std::vector<double> zdr(n), zdi(n);
+    for (int64_t k = 0; k < nz; ++k)
+        bilinear_pole_(zpr[k], zpi[k], zdr[k], zdi[k]);
+    for (int64_t k = nz; k < n; ++k) { zdr[k] = -1.0; zdi[k] = 0.0; }
+    /* Build coefficients. */
+    poly_from_complex_(pdr, pdi, a);
+    poly_from_complex_(zdr, zdi, b);
+    /* Normalize for unit DC gain. */
+    double sumb = 0.0, suma = 0.0;
+    for (int64_t i = 0; i <= n; ++i) { sumb += b[i]; suma += a[i]; }
+    if (sumb != 0.0) {
+        double g = suma / sumb;
+        for (int64_t i = 0; i <= n; ++i) b[i] *= g;
+    }
+}
+
 /* Internal: run the full Butterworth design and produce (b, a). */
 static void compute_butter_(int n, double Wn,
                             std::vector<double> &b,
@@ -659,6 +693,144 @@ static void compute_cheby1_(int n, double Rp, double Wn,
         pi_[k] = Wa * ( ch * cos(theta));
     }
     lowpass_from_analog_poles_(pr_, pi_, b, a);
+}
+
+/* Internal: run the full Chebyshev II design and produce (b, a).
+ * Rs is the stopband attenuation in dB (positive number, e.g. 40). */
+static void compute_cheby2_(int n, double Rs, double Wn,
+                            std::vector<double> &b,
+                            std::vector<double> &a) {
+    if (n < 1) n = 1;
+    if (Rs <= 0.0) Rs = 1e-12;
+    if (Wn <= 0.0) Wn = 1e-12;
+    if (Wn >= 1.0) Wn = 1.0 - 1e-12;
+    double Wa = 2.0 * tan(M_PI * Wn / 2.0);
+    /* Chebyshev II analog poles + zeros.
+     *
+     *   eps = 1 / sqrt(10^(Rs/10) - 1)   (inverse of cheby1's eps)
+     *   mu  = (1/n) * asinh(1/eps)
+     *
+     * For k = 1..n at theta_k = π(2k-1)/(2n):
+     *
+     *   chord_pole_k = -sinh(mu)*sin(theta_k) + j*cosh(mu)*cos(theta_k)
+     *   cheby2_pole_k = 1 / chord_pole_k        (reciprocal — j-axis flip)
+     *   cheby2_zero_k = j / cos(theta_k)        if cos(theta_k) != 0
+     *
+     * For odd n, the middle theta_k = π/2 produces cos = 0 so that
+     * "zero" is at infinity (handled by the lowpass_from_analog_pz_
+     * padding rule). For even n, all n zeros are finite j-axis pairs.
+     */
+    double eps = 1.0 / sqrt(pow(10.0, Rs / 10.0) - 1.0);
+    double mu  = asinh(1.0 / eps) / (double)n;
+    double sh  = sinh(mu), ch = cosh(mu);
+    std::vector<double> ppr(n), ppi(n);
+    std::vector<double> zpr, zpi;
+    for (int k = 0; k < n; ++k) {
+        double theta = M_PI * (double)(2 * (k + 1) - 1) / (2.0 * (double)n);
+        double cr = -sh * sin(theta);
+        double ci =  ch * cos(theta);
+        double m2 = cr * cr + ci * ci;
+        /* Reciprocal: 1 / (cr + j*ci) = (cr - j*ci) / |c|^2. */
+        ppr[k] = Wa * ( cr / m2);
+        ppi[k] = Wa * (-ci / m2);
+        double ct = cos(theta);
+        if (fabs(ct) > 1e-12) {
+            zpr.push_back(0.0);
+            zpi.push_back(Wa / ct);
+        }
+    }
+    lowpass_from_analog_pz_(ppr, ppi, zpr, zpi, b, a);
+}
+
+matlab_mat *matlab_cheby2_b(double n_d, double Rs, double Wn) {
+    std::vector<double> b, a;
+    compute_cheby2_((int)n_d, Rs, Wn, b, a);
+    int64_t L = (int64_t)b.size();
+    matlab_mat *B = mat_alloc(1, L);
+    for (int64_t i = 0; i < L; ++i) B->data[i] = b[i];
+    return B;
+}
+matlab_mat *matlab_cheby2_a(double n_d, double Rs, double Wn) {
+    std::vector<double> b, a;
+    compute_cheby2_((int)n_d, Rs, Wn, b, a);
+    int64_t L = (int64_t)a.size();
+    matlab_mat *A = mat_alloc(1, L);
+    for (int64_t i = 0; i < L; ++i) A->data[i] = a[i];
+    return A;
+}
+
+/* buttord(Wp, Ws, Rp, Rs) — minimum order for Butterworth lowpass to
+ * meet specs. Returns (n, Wn) where n is the order and Wn the natural
+ * (3 dB) cutoff in normalised digital frequency.
+ *
+ * Algorithm:
+ *   1. Pre-warp digital specs to analog: Wpa = 2*tan(π*Wp/2), same Ws.
+ *   2. n = ceil(log10((10^(Rs/10) − 1)/(10^(Rp/10) − 1))
+ *               / (2 * log10(Wsa / Wpa)))
+ *   3. Wn (analog) = Wpa / (10^(Rp/10) − 1)^(1/(2n))
+ *   4. Convert back: Wn = (2/π) * atan(Wn_analog / 2)
+ *
+ * Lowpass scope only — band variants and highpass use different
+ * geometric formulas (a follow-on slice). */
+static void compute_buttord_(double Wp, double Ws, double Rp, double Rs,
+                             double &n_out, double &Wn_out) {
+    if (Wp <= 0.0) Wp = 1e-12;
+    if (Ws <= 0.0) Ws = 1e-12;
+    if (Wp >= 1.0) Wp = 1.0 - 1e-12;
+    if (Ws >= 1.0) Ws = 1.0 - 1e-12;
+    double Wpa = 2.0 * tan(M_PI * Wp / 2.0);
+    double Wsa = 2.0 * tan(M_PI * Ws / 2.0);
+    double num = log10((pow(10.0, Rs / 10.0) - 1.0)
+                     / (pow(10.0, Rp / 10.0) - 1.0));
+    double den = 2.0 * log10(Wsa / Wpa);
+    int n = (int)ceil(num / den);
+    if (n < 1) n = 1;
+    double Wna = Wpa / pow(pow(10.0, Rp / 10.0) - 1.0, 1.0 / (2.0 * (double)n));
+    n_out  = (double)n;
+    Wn_out = (2.0 / M_PI) * atan(Wna / 2.0);
+}
+double matlab_buttord_n(double Wp, double Ws, double Rp, double Rs) {
+    double n_out, Wn_out;
+    compute_buttord_(Wp, Ws, Rp, Rs, n_out, Wn_out);
+    return n_out;
+}
+double matlab_buttord_Wn(double Wp, double Ws, double Rp, double Rs) {
+    double n_out, Wn_out;
+    compute_buttord_(Wp, Ws, Rp, Rs, n_out, Wn_out);
+    return Wn_out;
+}
+
+/* cheb1ord(Wp, Ws, Rp, Rs) — minimum order for Chebyshev I lowpass.
+ * Algorithm:
+ *   n = ceil(acosh(sqrt((10^(Rs/10)−1)/(10^(Rp/10)−1)))
+ *           / acosh(Wsa / Wpa))
+ *   Wn = Wp                (Cheby I always meets passband at Wp)
+ */
+static void compute_cheb1ord_(double Wp, double Ws, double Rp, double Rs,
+                              double &n_out, double &Wn_out) {
+    if (Wp <= 0.0) Wp = 1e-12;
+    if (Ws <= 0.0) Ws = 1e-12;
+    if (Wp >= 1.0) Wp = 1.0 - 1e-12;
+    if (Ws >= 1.0) Ws = 1.0 - 1e-12;
+    double Wpa = 2.0 * tan(M_PI * Wp / 2.0);
+    double Wsa = 2.0 * tan(M_PI * Ws / 2.0);
+    double num = acosh(sqrt((pow(10.0, Rs / 10.0) - 1.0)
+                          / (pow(10.0, Rp / 10.0) - 1.0)));
+    double den = acosh(Wsa / Wpa);
+    int n = (int)ceil(num / den);
+    if (n < 1) n = 1;
+    n_out  = (double)n;
+    Wn_out = Wp;
+}
+double matlab_cheb1ord_n(double Wp, double Ws, double Rp, double Rs) {
+    double n_out, Wn_out;
+    compute_cheb1ord_(Wp, Ws, Rp, Rs, n_out, Wn_out);
+    return n_out;
+}
+double matlab_cheb1ord_Wn(double Wp, double Ws, double Rp, double Rs) {
+    double n_out, Wn_out;
+    compute_cheb1ord_(Wp, Ws, Rp, Rs, n_out, Wn_out);
+    return Wn_out;
 }
 
 matlab_mat *matlab_butter_b(double n_d, double Wn) {

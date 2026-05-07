@@ -2891,6 +2891,51 @@ bool TensorLowering::rewriteBuiltinCalls() {
       continue;
     }
     if (NA && NA.getValue().getSExtValue() == 2 &&
+        Name == "cheby2" && Call->getNumOperands() == 3 &&
+        Call->getNumResults() == 2 &&
+        Call->getOperand(0).getType() == F64 &&
+        Call->getOperand(1).getType() == F64 &&
+        Call->getOperand(2).getType() == F64) {
+      B.setInsertionPoint(Call);
+      auto Fb = rt("matlab_cheby2_b", PtrTy, {F64, F64, F64});
+      auto Fa = rt("matlab_cheby2_a", PtrTy, {F64, F64, F64});
+      auto Cb = LLVM::CallOp::create(B, Call->getLoc(), Fb,
+                                      Call->getOperands());
+      auto Ca = LLVM::CallOp::create(B, Call->getLoc(), Fa,
+                                      Call->getOperands());
+      Call->getResult(0).replaceAllUsesWith(Cb.getResult());
+      Call->getResult(1).replaceAllUsesWith(Ca.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+    /* [n, Wn] = buttord(Wp, Ws, Rp, Rs) / cheb1ord(...). 4 f64 args,
+     * 2 f64 results. Splits into matlab_<name>_n / _Wn. */
+    if (NA && NA.getValue().getSExtValue() == 2 &&
+        (Name == "buttord" || Name == "cheb1ord") &&
+        Call->getNumOperands() == 4 && Call->getNumResults() == 2 &&
+        Call->getOperand(0).getType() == F64 &&
+        Call->getOperand(1).getType() == F64 &&
+        Call->getOperand(2).getType() == F64 &&
+        Call->getOperand(3).getType() == F64) {
+      B.setInsertionPoint(Call);
+      std::string Fn_n  = (Name == "buttord") ? "matlab_buttord_n"
+                                              : "matlab_cheb1ord_n";
+      std::string Fn_Wn = (Name == "buttord") ? "matlab_buttord_Wn"
+                                              : "matlab_cheb1ord_Wn";
+      auto Fnn  = rt(Fn_n,  F64, {F64, F64, F64, F64});
+      auto Fnwn = rt(Fn_Wn, F64, {F64, F64, F64, F64});
+      auto Cn  = LLVM::CallOp::create(B, Call->getLoc(), Fnn,
+                                       Call->getOperands());
+      auto Cwn = LLVM::CallOp::create(B, Call->getLoc(), Fnwn,
+                                       Call->getOperands());
+      Call->getResult(0).replaceAllUsesWith(Cn.getResult());
+      Call->getResult(1).replaceAllUsesWith(Cwn.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+    if (NA && NA.getValue().getSExtValue() == 2 &&
         Name == "freqz" && Call->getNumOperands() == 3 &&
         Call->getNumResults() == 2 &&
         Call->getOperand(2).getType() == F64) {
@@ -3312,7 +3357,13 @@ bool TensorLowering::rewriteBuiltinCalls() {
        * returns just the complex H. */
       {"butter",     "matlab_butter_b",   1, "ff"},
       {"cheby1",     "matlab_cheby1_b",   1, "fff"},
+      {"cheby2",     "matlab_cheby2_b",   1, "fff"},
       {"freqz",      "matlab_freqz",      1, "ppf"},
+      /* Order helpers — single-LHS form returns just n (the order)
+       * as a scalar f64. Multi-LHS `[n, Wn] = ...` is handled by the
+       * dedicated multi-return dispatch above. */
+      {"buttord",    "matlab_buttord_n",  0, "ffff"},
+      {"cheb1ord",   "matlab_cheb1ord_n", 0, "ffff"},
       {"interp1",    "matlab_interp1",    1, "ppp"},
       {"trapz",      "matlab_trapz",      1, "p"},
       {"trapz",      "matlab_trapz_xy",   1, "pp"},

@@ -107,7 +107,8 @@ void Resolver::registerBuiltins() {
     "xcorr", "polyval", "polyfit", "roots", "poly",
     "polyder", "polyint", "residue",
     /* Tier-1 §2.1 — IIR lowpass design + frequency response. */
-    "butter", "cheby1", "freqz",
+    "butter", "cheby1", "cheby2", "freqz",
+    "buttord", "cheb1ord",
     "interp1", "trapz", "cumtrapz", "gradient",
     "hamming", "hann", "blackman",
     /* Tier-1 (Signal Processing Toolbox roadmap §2.3) — windows tail. */

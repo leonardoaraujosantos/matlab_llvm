@@ -2250,10 +2250,17 @@ void Lowerer::lowerStmt(const Stmt &St) {
            * r and p, real row for k; uniform ptr at the MLIR level). */
           else if (CN == "residue" && A.LHS.size() == 3)
             Rtys.assign(A.LHS.size(), PtrTy);
-          /* [b, a] = butter(n, Wn) / cheby1(n, Rp, Wn) — both real
-           * row vectors (ptr at MLIR level). */
-          else if ((CN == "butter" || CN == "cheby1") && A.LHS.size() == 2)
+          /* [b, a] = butter(n, Wn) / cheby1(n, Rp, Wn) / cheby2(n, Rs, Wn)
+           * — both real row vectors (ptr at MLIR level). */
+          else if ((CN == "butter" || CN == "cheby1" || CN == "cheby2") &&
+                   A.LHS.size() == 2)
             Rtys.assign(A.LHS.size(), PtrTy);
+          /* [n, Wn] = buttord/cheb1ord(Wp, Ws, Rp, Rs) — both scalar
+           * f64 (n is integer-valued but stored as double, matching
+           * MATLAB's idiom). */
+          else if ((CN == "buttord" || CN == "cheb1ord") &&
+                   A.LHS.size() == 2)
+            Rtys.assign(A.LHS.size(), F64);
           /* [H, w] = freqz(b, a, N) — H complex column, w real column;
            * uniform ptr. */
           else if (CN == "freqz" && A.LHS.size() == 2)
@@ -6438,6 +6445,10 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             "det", "norm", "trace", "length", "numel", "ndims",
             "isempty", "isequal", "rank", "cond", "sub2ind", "mod", "rem",
             "fix", "round", "floor", "ceil",
+            /* SPT order helpers — return scalar f64 in single-result
+             * form. Multi-LHS `[n, Wn] = buttord(...)` splits in the
+             * dedicated multi-return dispatch in LowerTensorOps. */
+            "buttord", "cheb1ord",
           };
           static const llvm::StringSet<> PtrRet = {
             "zeros", "ones", "eye", "magic", "rand", "randn",
@@ -6460,7 +6471,11 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             "xcorr", "polyval", "polyfit", "roots", "poly",
             "polyder", "polyint", "residue",
             /* Tier-1 §2.1 — IIR lowpass design + frequency response. */
-            "butter", "cheby1", "freqz",
+            "butter", "cheby1", "cheby2", "freqz",
+            /* Note: buttord, cheb1ord return scalar f64 (multi-LHS form
+             * splits into n -> f64 and Wn -> f64) — they're not in
+             * PtrRet. Sema's default-typing does not type them; the
+             * F64Ret list below covers them. */
             "interp1", "trapz", "cumtrapz", "gradient",
             "hamming", "hann", "blackman",
             /* Tier-1 windows tail (signal_toolbox_roadmap §2.3) — all
