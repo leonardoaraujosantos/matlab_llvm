@@ -1782,6 +1782,10 @@ static llvm::StringRef MatrixReturningFns[] = {
     "matlab_xcorr", "matlab_polyval", "matlab_polyfit", "matlab_roots",
     "matlab_poly", "matlab_polyder", "matlab_polyint", "matlab_polyint_k",
     "matlab_residue_r", "matlab_residue_p", "matlab_residue_k",
+    /* Tier-1 §2.1 — IIR design + freqz. */
+    "matlab_butter_b", "matlab_butter_a",
+    "matlab_cheby1_b", "matlab_cheby1_a",
+    "matlab_freqz", "matlab_freqz_h", "matlab_freqz_w",
     "matlab_interp1", "matlab_interp2", "matlab_trapz", "matlab_trapz_xy",
     "matlab_cumtrapz", "matlab_gradient", "matlab_diff",
     "matlab_conv", "matlab_conv2", "matlab_filter",

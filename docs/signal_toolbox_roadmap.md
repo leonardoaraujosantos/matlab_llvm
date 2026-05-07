@@ -44,16 +44,20 @@ today. Locations are in `runtime/matlab_runtime.cpp`.
 | Convolution | `conv`, `conv2`, `xcorr` | Polynomial product + 2-D outer-product + linear cross-correlation. Tests in `test/Runtime/test_signal.c`. |
 | Filter | `filter(b, a, x)` | Direct-form II transposed; scalar IIR / FIR. |
 | FFT / shift | `fft`, `ifft`, `fft2`, `ifft2`, `fftshift`, `ifftshift` | Pure-C Cooley-Tukey radix-2 + Bluestein for general N. See `complex.md`. |
-| Windows | `hamming`, `hann`, `blackman` | Length-N column vectors. |
+| Windows tail (§2.3) | `hamming`, `hann`, `blackman`, `rectwin`, `triang`, `bartlett`, `barthannwin`, `bohmanwin`, `parzenwin`, `nuttallwin`, `blackmanharris`, `flattopwin`, `kaiser`, `tukeywin`, `gausswin`, `chebwin`, `taylorwin` | Symmetric (non-periodic) form. Two-arg parametric windows take their shape parameter as the second double; `taylorwin` takes `(n, nbar, sll)`. |
+| Polynomial helpers (§2.4) | `roots`, `poly`, `polyder`, `polyint`, `polyint(p, k)`, `[r, p, k] = residue(b, a)` | Distinct-pole `residue`; multi-return shape mirrors `[V, D] = eig`. |
+| IIR design + frequency response (§2.1, lowpass scope) | `[b, a] = butter(n, Wn)`, `[b, a] = cheby1(n, Rp, Wn)`, `H = freqz(b, a, N)`, `[H, w] = freqz(b, a, N)` | Bilinear-transform design; unit DC gain. TS lane gates with `.skip-emit-typescript` because `NDArray` has no native complex (same as `roots`/`fft_c`). |
 | Multirate stubs | `upsample(x, n)`, `downsample(x, n)` | Zero-stuff / decimate; **no** anti-aliasing filter (raw `decimate`/`resample` still TODO). |
 | Numeric utilities used by SPT | `diff`, `polyfit`, `polyval`, `interp1`, `interp2`, `trapz`, `gradient` | |
 | Complex scalar / matrix arithmetic | `conj`, `real`, `imag`, `angle`, complex `+ - .* ./ * /` | Required for any spectrum / transfer-function math. |
 
-Coverage today is enough to write toy FIR filters
-(`filter(b, 1, x)`), simple convolutional smoothers, and to do an
-FFT-based magnitude spectrum by hand. It is **not** enough to run any
-realistic Signal Processing Toolbox program — designing a filter, a
-PSD, or a spectrogram all need work below.
+Coverage today closes the smallest end-to-end IIR loop a signal-
+processing user needs: design a Butterworth or Chebyshev I lowpass
+filter, apply it via `filter`, and inspect the response with `freqz`.
+It is **not** yet enough to run a realistic toolbox program that
+needs highpass / bandpass / bandstop variants, elliptic / Bessel
+designs, FIR design, `filtfilt`, spectral analysis, or time-frequency
+analysis — those are tracked in the tiers below.
 
 ---
 
@@ -64,33 +68,53 @@ needs: *design a filter, apply it, look at its response*. All Tier-1
 items are pure-numeric and slot into the existing `matlab_mat *`
 runtime; no new dialect or descriptor work is needed.
 
-### 2.1 Filter design — IIR (1 week) 🔵
+### 2.1 Filter design — IIR
 
-| Function | Form | Notes |
-|---|---|---|
-| `butter(n, Wn)` / `butter(n, Wn, 'high'/'bandpass'/'stop')` | `[b,a] = butter(...)` | Bilinear-transform design from analog Butterworth prototype. |
-| `cheby1(n, Rp, Wn, ...)` | same | Type-I Chebyshev prototype. |
-| `cheby2(n, Rs, Wn, ...)` | same | Type-II Chebyshev prototype. |
-| `ellip(n, Rp, Rs, Wn, ...)` | same | Elliptic / Cauer; needs Jacobi elliptic functions. |
-| `besself(n, Wo)` | `[b,a]` | Continuous-time only; bilinear transform changes magnitude. |
-| `buttap` / `cheb1ap` / `cheb2ap` / `ellipap` / `besselap` | `[z,p,k]` | Analog prototypes — the building blocks for the design entries above. |
-| `bilinear(b, a, fs)` | `[bz,az]` | Analog→digital. |
-| `freqs(b, a, w)` / `freqz(b, a, n[, fs])` | `[h, w]` | Frequency response evaluator. `freqz` reuses the existing FFT runtime if `n` is power-of-two; otherwise direct evaluation `sum(b .* exp(-j*w*k))`. |
-| `tf2zp` / `zp2tf`, `tf2sos` / `sos2tf`, `tf2ss` / `ss2tf`, `zp2sos` | conversions | Wraps over `roots` / `poly` (need `roots` first — see Tier 1.4). |
-| `buttord` / `cheb1ord` / `cheb2ord` / `ellipord` | `[n, Wn]` | Order-selection helpers; pure scalar math on the analog spec. |
+| Function | Form | Status |
+|---|---|:-:|
+| `butter(n, Wn)` lowpass + `[b, a]` multi-return | `[b,a] = butter(...)` | ✅ shipped |
+| `cheby1(n, Rp, Wn)` lowpass + `[b, a]` multi-return | `[b,a] = cheby1(...)` | ✅ shipped |
+| `freqz(b, a, N)` + 2-return `[H, w] = freqz(...)` | scalar N | ✅ shipped |
+| `butter(n, Wn, 'high'/'bandpass'/'stop')` band variants | requires multi-band Wn parsing | 🔵 follow-on |
+| `cheby2(n, Rs, Wn, ...)` | needs j-axis zero handling | 🔵 follow-on |
+| `ellip(n, Rp, Rs, Wn, ...)` | needs Jacobi elliptic functions | 🔵 follow-on |
+| `besself(n, Wo)` | continuous-time only | 🔵 follow-on |
+| `buttap` / `cheb1ap` / `cheb2ap` / `ellipap` / `besselap` | analog prototypes — building blocks | 🔵 follow-on |
+| `bilinear(b, a, fs)` | analog→digital, exposed as a builtin | 🔵 follow-on |
+| `freqs(b, a, w)` | analog frequency response | 🔵 follow-on |
+| `tf2zp` / `zp2tf`, `tf2sos` / `sos2tf`, `tf2ss` / `ss2tf`, `zp2sos` | form conversions | 🔵 follow-on |
+| `buttord` / `cheb1ord` / `cheb2ord` / `ellipord` | order-selection helpers | 🔵 follow-on |
 
-**Scope**:
-- `Wn` is a normalized cutoff in `[0, 1]` (1 = Nyquist), as MATLAB.
-- Multi-band (vector `Wn`) is in scope.
-- `'high'`, `'low'`, `'bandpass'`, `'stop'` strings — already supported as `CharLiteral` tokens.
-- Output is `[b, a]` (transfer function), `[z, p, k]` (zero-pole-gain), or `sos` matrix forms.
+**What shipped (lowpass core)**:
+- Bilinear-transform design from analog Butterworth / Chebyshev I
+  prototypes; n complex poles (conjugate-symmetric in s-plane) → n
+  complex z-plane poles (conjugate-symmetric in unit disk) → real
+  `(b, a)` of length n+1 each, normalized to unit DC gain.
+- Bilinear is **inlined** in `compute_butter_` / `compute_cheby1_`;
+  exposing it as a separate builtin is a follow-on.
+- `freqz` evaluates `H(e^{jw})` at N equally spaced points on
+  `[0, π)` via direct loop (O(N·M)). Reusing the FFT runtime for
+  power-of-two N is a possible optimization.
 
-**REPL / Debug**: outputs are plain `matlab_mat` row vectors / SOS
-matrices — display + DAP variable inspector work transparently.
+**TS-lane caveat**: `freqz` returns a complex column on the C / C++ /
+LLVM / Python lanes (via `matlab_mat_c`) so polymorphic `abs(H)` /
+`real(H)` / `imag(H)` work. The TS `NDArray` has no native complex
+shape — same friction as the existing `roots` and `fft_c` TS
+behaviour — so `sig_iir.m` carries `.skip-emit-typescript`. Gating:
+`test/Run/sig_iir.m` (3-lane: C/C++/LLVM + Python with bracket-repr
+`.stdout-python` override) + 5 direct C unit tests.
 
-**Gating tests**: `test/Run/sig_iir_butter.m`,
-`sig_iir_cheby1_bandpass.m`, `sig_iir_freqz.m`,
-`sig_iir_tf2sos.m`. C / C++ / Python / TS lanes byte-identical.
+**Follow-on slices** (in expected order):
+1. `cheby2` + `ellip` (separate j-axis-zero handling, Jacobi elliptic
+   functions for `ellip`).
+2. High / band / stop variants of `butter` / `cheby1` (frequency
+   transformations on the analog prototype before bilinear).
+3. `besself` continuous-time prototype.
+4. Analog prototypes (`buttap` / `cheb1ap` / …) as standalone
+   builtins — useful for users wanting custom designs.
+5. `bilinear` and `freqs` as standalone builtins.
+6. Order helpers (`buttord` and friends).
+7. Form conversions (`tf2zp` / `tf2sos` / etc.).
 
 ### 2.2 Filter design — FIR (3 sessions) 🔵
 
@@ -397,11 +421,11 @@ a paused debug frame works as soon as the new builtins ship.
 A pragmatic order that keeps each landing self-contained and
 gates the next on user-visible output:
 
-1. **2.3 Windows tail** (1 session) — unblocks every FIR design.
-2. **2.4 `roots` / `poly` / `residue`** (3 sessions) — unblocks tf↔zp↔sos.
-3. **2.1 IIR design (`butter`, `cheby1/2`, `ellip`, `besself`, prototypes, `bilinear`, ord helpers)** (1 week).
+1. ~~**2.3 Windows tail** (1 session)~~ ✅ shipped — unblocks every FIR design.
+2. ~~**2.4 `roots` / `poly` / `polyder` / `polyint` / `residue`** (4 sessions)~~ ✅ shipped — unblocks tf↔zp↔sos. (residue distinct-pole only; repeated-pole grouping is a follow-on.)
+3. **2.1 IIR design — lowpass core** ✅ shipped (`butter`, `cheby1`, `freqz`). **Follow-on**: `cheby2`, `ellip`, `besself`, analog prototypes, `bilinear` standalone, `freqs`, high/band/stop variants, order helpers, form conversions.
 4. **2.2 FIR design (`fir1`, `fir2`, `firls`, `sgolay`)** (3 sessions).
-5. **2.5 `filtfilt`, `sosfilt`, `freqz`, `impz`, `grpdelay`** (3 sessions) — closes the design loop.
+5. **2.5 `filtfilt`, `sosfilt`, `impz`, `grpdelay`** (3 sessions) — closes the design loop. (`freqz` already shipped in §2.1.)
 6. **3.1 `periodogram`, `pwelch`, `dpss`, `pmtm`, `cpsd`, `mscohere`** (1 week).
 7. **3.4 `dct`/`idct`, `hilbert`, `czt`, `goertzel`, `fwht`** (3 sessions).
 8. **3.3 `spectrogram`, `stft`, `istft`** (3 sessions).

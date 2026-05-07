@@ -336,6 +336,25 @@ matlab_mat *matlab_polyint_k(matlab_mat *p, double k);
  * 1 × (n+1) row vector. */
 matlab_mat *matlab_poly(void *r);
 
+/* IIR filter design (Tier-1 SPT §2.1) — lowpass scope.
+ *
+ *   [b, a] = butter(n, Wn)         digital Butterworth lowpass
+ *   [b, a] = cheby1(n, Rp, Wn)     digital Chebyshev I lowpass
+ *   H      = freqz(b, a, N)        complex frequency response (Nx1)
+ *   [H, w] = freqz(b, a, N)        + frequency-axis vector
+ *
+ * Multi-return is split into independent runtime entries
+ * matlab_<filt>_b / _a (eig precedent). Wn is normalized in [0, 1]
+ * with 1 = Nyquist. cheby1 takes the passband ripple Rp in dB.
+ */
+matlab_mat   *matlab_butter_b(double n, double Wn);
+matlab_mat   *matlab_butter_a(double n, double Wn);
+matlab_mat   *matlab_cheby1_b(double n, double Rp, double Wn);
+matlab_mat   *matlab_cheby1_a(double n, double Rp, double Wn);
+matlab_mat_c *matlab_freqz(matlab_mat *b, matlab_mat *a, double N);
+matlab_mat_c *matlab_freqz_h(matlab_mat *b, matlab_mat *a, double N);
+matlab_mat   *matlab_freqz_w(matlab_mat *b, matlab_mat *a, double N);
+
 /* [r, p, k] = residue(b, a) — partial-fraction expansion of B(s)/A(s).
  * Distinct-pole scope (Tier-1): repeated poles produce numerically
  * degraded residues. r and p are complex column vectors of length

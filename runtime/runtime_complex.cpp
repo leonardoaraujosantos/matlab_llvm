@@ -505,6 +505,258 @@ matlab_mat *matlab_residue_k(matlab_mat *b, matlab_mat *a) {
     return K;
 }
 
+/*===========================================================================
+ * IIR filter design (Tier-1 SPT §2.1) — lowpass scope.
+ *
+ * butter(n, Wn) and cheby1(n, Rp, Wn) build a digital lowpass IIR filter
+ * via the standard chain:
+ *
+ *   1. Analog prototype poles on the s-plane (Butterworth: unit-circle
+ *      arc; Chebyshev I: ellipse via the cosh/sinh closed form).
+ *   2. Frequency pre-warp: Wa = 2 * tan(pi * Wn / 2). The factor of 2
+ *      matches MATLAB's T = 2 normalization for the bilinear transform.
+ *   3. Scale poles to the cutoff: p_warped = p_analog * Wa.
+ *   4. Bilinear transform: each pole p maps to z = (1 + p) / (1 - p);
+ *      analog zeros at infinity map to z = -1 (n zeros at Nyquist for
+ *      both Butterworth and Chebyshev I lowpass).
+ *   5. Build (b, a) = (real(poly(zeros)), real(poly(poles))). Imaginary
+ *      noise vanishes because the poles come in conjugate pairs.
+ *   6. Normalize: scale b so |H(z=1)| matches MATLAB's convention
+ *      (unit DC gain; for even-order Chebyshev I, MATLAB's |H(1)| =
+ *      10^(-Rp/20) — this slice uses unit DC gain across the board,
+ *      matching MATLAB's odd-order behavior on both filter types).
+ *
+ * The output is two real row vectors, b (numerator, length n+1) and a
+ * (denominator, length n+1). Multi-return is split into independent
+ * runtime entries matlab_<filt>_b / _a, mirroring the eig precedent.
+ */
+
+/* Multiply complex (ar, ai) and (br, bi); store result in (rr, ri). */
+static inline void cmul2(double ar, double ai, double br, double bi,
+                         double &rr, double &ri) {
+    rr = ar * br - ai * bi;
+    ri = ar * bi + ai * br;
+}
+static inline void cdiv2(double ar, double ai, double br, double bi,
+                         double &rr, double &ri) {
+    double d = br * br + bi * bi;
+    rr = (ar * br + ai * bi) / d;
+    ri = (ai * br - ar * bi) / d;
+}
+
+/* Build the n+1 real coefficients of poly(roots) where roots is a
+ * complex set assumed conjugate-symmetric. Repeated convolution by
+ * [1, -r_k] in the complex plane; imaginary part is dropped at the
+ * end. Output is highest-power-first. */
+static void poly_from_complex_(const std::vector<double> &rr,
+                               const std::vector<double> &ri,
+                               std::vector<double> &out) {
+    int64_t n = (int64_t)rr.size();
+    std::vector<double> cr(n + 1, 0.0), ci(n + 1, 0.0);
+    cr[0] = 1.0;
+    int64_t cur_deg = 0;
+    for (int64_t k = 0; k < n; ++k) {
+        std::vector<double> nr(cur_deg + 2, 0.0), ni(cur_deg + 2, 0.0);
+        for (int64_t i = 0; i <= cur_deg; ++i) {
+            nr[i] += cr[i];
+            ni[i] += ci[i];
+        }
+        for (int64_t i = 0; i <= cur_deg; ++i) {
+            double pr_ = -rr[k] * cr[i] + ri[k] * ci[i];
+            double pi_ = -rr[k] * ci[i] - ri[k] * cr[i];
+            nr[i + 1] += pr_;
+            ni[i + 1] += pi_;
+        }
+        cr = nr; ci = ni;
+        cur_deg++;
+    }
+    out.resize(n + 1);
+    for (int64_t i = 0; i <= n; ++i) out[i] = cr[i];
+}
+
+/* Bilinear transform of a single complex pole p. Returns (zr, zi) =
+ * (1 + p) / (1 - p). T = 2 normalization absorbed into the prewarp. */
+static inline void bilinear_pole_(double pr_, double pi_,
+                                  double &zr_, double &zi_) {
+    double num_r = 1.0 + pr_, num_i = pi_;
+    double den_r = 1.0 - pr_, den_i = -pi_;
+    cdiv2(num_r, num_i, den_r, den_i, zr_, zi_);
+}
+
+/* Compute (b, a) for a digital lowpass IIR designed from a set of
+ * analog poles. Caller supplies the (already scaled to Wa) pole list.
+ * For Butterworth and Chebyshev I lowpass, all n zeros map to z = -1
+ * after bilinear, so we hard-code that here. Output b and a have
+ * length n+1 each. */
+static void lowpass_from_analog_poles_(const std::vector<double> &pr_,
+                                       const std::vector<double> &pi_,
+                                       std::vector<double> &b,
+                                       std::vector<double> &a) {
+    int64_t n = (int64_t)pr_.size();
+    /* Bilinear-transform each pole to the z-plane. */
+    std::vector<double> zr(n), zi(n);
+    for (int64_t k = 0; k < n; ++k)
+        bilinear_pole_(pr_[k], pi_[k], zr[k], zi[k]);
+    /* a(z) = poly(z-poles). */
+    poly_from_complex_(zr, zi, a);
+    /* b(z) = (1 + z^-1)^n — n zeros at z = -1. The poly() of n -1's
+     * gives binomial coefficients. */
+    std::vector<double> nzr(n, -1.0), nzi(n, 0.0);
+    poly_from_complex_(nzr, nzi, b);
+    /* Normalize for unit DC gain: H(z=1) = sum(b)/sum(a) -> 1.
+     * Multiply b by sum(a)/sum(b). */
+    double sumb = 0.0, suma = 0.0;
+    for (int64_t i = 0; i <= n; ++i) { sumb += b[i]; suma += a[i]; }
+    if (sumb != 0.0) {
+        double g = suma / sumb;
+        for (int64_t i = 0; i <= n; ++i) b[i] *= g;
+    }
+}
+
+/* Internal: run the full Butterworth design and produce (b, a). */
+static void compute_butter_(int n, double Wn,
+                            std::vector<double> &b,
+                            std::vector<double> &a) {
+    if (n < 1) n = 1;
+    if (Wn <= 0.0) Wn = 1e-12;
+    if (Wn >= 1.0) Wn = 1.0 - 1e-12;
+    /* Pre-warp the digital cutoff to the analog frequency. */
+    double Wa = 2.0 * tan(M_PI * Wn / 2.0);
+    /* Analog Butterworth prototype: poles on the unit circle, evenly
+     * spaced on the LHS arc. p_k = exp(j * π * (2k + n - 1) / (2n))
+     * for k = 1..n. Scale by Wa. */
+    std::vector<double> pr_(n), pi_(n);
+    for (int k = 0; k < n; ++k) {
+        double theta = M_PI * (double)(2 * (k + 1) + n - 1) / (2.0 * (double)n);
+        pr_[k] = Wa * cos(theta);
+        pi_[k] = Wa * sin(theta);
+    }
+    lowpass_from_analog_poles_(pr_, pi_, b, a);
+}
+
+/* Internal: run the full Chebyshev I design and produce (b, a).
+ * Rp is the passband ripple in dB. */
+static void compute_cheby1_(int n, double Rp, double Wn,
+                            std::vector<double> &b,
+                            std::vector<double> &a) {
+    if (n < 1) n = 1;
+    if (Rp <= 0.0) Rp = 1e-12;
+    if (Wn <= 0.0) Wn = 1e-12;
+    if (Wn >= 1.0) Wn = 1.0 - 1e-12;
+    double Wa = 2.0 * tan(M_PI * Wn / 2.0);
+    /* Chebyshev I closed-form analog poles. */
+    double eps = sqrt(pow(10.0, Rp / 10.0) - 1.0);
+    double mu  = asinh(1.0 / eps) / (double)n;
+    double sh  = sinh(mu), ch = cosh(mu);
+    std::vector<double> pr_(n), pi_(n);
+    for (int k = 0; k < n; ++k) {
+        double theta = M_PI * (double)(2 * (k + 1) - 1) / (2.0 * (double)n);
+        /* The s-plane pole is on an ellipse with half-axes (sh, ch)
+         * about the origin. The standard form is
+         *   s_k = -sh * sin(theta) + j * ch * cos(theta)
+         * which already lies in the LHS for theta ∈ (0, π). */
+        pr_[k] = Wa * (-sh * sin(theta));
+        pi_[k] = Wa * ( ch * cos(theta));
+    }
+    lowpass_from_analog_poles_(pr_, pi_, b, a);
+}
+
+matlab_mat *matlab_butter_b(double n_d, double Wn) {
+    std::vector<double> b, a;
+    compute_butter_((int)n_d, Wn, b, a);
+    int64_t L = (int64_t)b.size();
+    matlab_mat *B = mat_alloc(1, L);
+    for (int64_t i = 0; i < L; ++i) B->data[i] = b[i];
+    return B;
+}
+matlab_mat *matlab_butter_a(double n_d, double Wn) {
+    std::vector<double> b, a;
+    compute_butter_((int)n_d, Wn, b, a);
+    int64_t L = (int64_t)a.size();
+    matlab_mat *A = mat_alloc(1, L);
+    for (int64_t i = 0; i < L; ++i) A->data[i] = a[i];
+    return A;
+}
+matlab_mat *matlab_cheby1_b(double n_d, double Rp, double Wn) {
+    std::vector<double> b, a;
+    compute_cheby1_((int)n_d, Rp, Wn, b, a);
+    int64_t L = (int64_t)b.size();
+    matlab_mat *B = mat_alloc(1, L);
+    for (int64_t i = 0; i < L; ++i) B->data[i] = b[i];
+    return B;
+}
+matlab_mat *matlab_cheby1_a(double n_d, double Rp, double Wn) {
+    std::vector<double> b, a;
+    compute_cheby1_((int)n_d, Rp, Wn, b, a);
+    int64_t L = (int64_t)a.size();
+    matlab_mat *A = mat_alloc(1, L);
+    for (int64_t i = 0; i < L; ++i) A->data[i] = a[i];
+    return A;
+}
+
+/* freqz(b, a, n) — discrete-time frequency response.
+ * Evaluates H(e^{jw}) at n equally spaced points w_k on [0, π) and
+ * returns a complex column of length n (matching MATLAB's default
+ * 'whole' = false behavior). The 2-return form also produces the
+ * frequency-axis vector w. */
+static void compute_freqz_(matlab_mat *bp, matlab_mat *ap, int N,
+                           std::vector<double> &h_re,
+                           std::vector<double> &h_im,
+                           std::vector<double> &w_out) {
+    h_re.clear(); h_im.clear(); w_out.clear();
+    if (!bp || !ap || N <= 0) return;
+    int64_t nb = bp->rows * bp->cols;
+    int64_t na = ap->rows * ap->cols;
+    if (na == 0 || ap->data[0] == 0.0) return;
+    /* Normalize a so a[0] = 1. */
+    std::vector<double> bn(nb), an(na);
+    double a0 = ap->data[0];
+    for (int64_t i = 0; i < nb; ++i) bn[i] = bp->data[i] / a0;
+    for (int64_t i = 0; i < na; ++i) an[i] = ap->data[i] / a0;
+    h_re.resize(N); h_im.resize(N); w_out.resize(N);
+    for (int k = 0; k < N; ++k) {
+        double w = M_PI * (double)k / (double)N;     /* 0..π exclusive */
+        w_out[k] = w;
+        /* Numerator: sum b_n * e^{-jwn} for n = 0..nb-1. */
+        double num_r = 0.0, num_i = 0.0;
+        for (int64_t i = 0; i < nb; ++i) {
+            double a_ = -w * (double)i;
+            num_r += bn[i] * cos(a_);
+            num_i += bn[i] * sin(a_);
+        }
+        /* Denominator: same shape. */
+        double den_r = 0.0, den_i = 0.0;
+        for (int64_t i = 0; i < na; ++i) {
+            double a_ = -w * (double)i;
+            den_r += an[i] * cos(a_);
+            den_i += an[i] * sin(a_);
+        }
+        double hr, hi;
+        cdiv2(num_r, num_i, den_r, den_i, hr, hi);
+        h_re[k] = hr; h_im[k] = hi;
+    }
+}
+
+matlab_mat_c *matlab_freqz(matlab_mat *b, matlab_mat *a, double N_d) {
+    std::vector<double> hr, hi, w;
+    compute_freqz_(b, a, (int)N_d, hr, hi, w);
+    int64_t L = (int64_t)hr.size();
+    matlab_mat_c *H = mat_c_alloc(L, L > 0 ? 1 : 0);
+    for (int64_t i = 0; i < L; ++i) { H->re[i] = hr[i]; H->im[i] = hi[i]; }
+    return H;
+}
+matlab_mat_c *matlab_freqz_h(matlab_mat *b, matlab_mat *a, double N_d) {
+    return matlab_freqz(b, a, N_d);
+}
+matlab_mat *matlab_freqz_w(matlab_mat *b, matlab_mat *a, double N_d) {
+    std::vector<double> hr, hi, w;
+    compute_freqz_(b, a, (int)N_d, hr, hi, w);
+    int64_t L = (int64_t)w.size();
+    matlab_mat *W = mat_alloc(L, L > 0 ? 1 : 0);
+    for (int64_t i = 0; i < L; ++i) W->data[i] = w[i];
+    return W;
+}
+
 matlab_mat *matlab_real_c(void *Aptr) {
     if (!Aptr) return mat_alloc(0, 0);
     if (!mat_is_complex(Aptr)) {

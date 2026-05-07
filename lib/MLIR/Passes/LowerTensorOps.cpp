@@ -2847,6 +2847,73 @@ bool TensorLowering::rewriteBuiltinCalls() {
       continue;
     }
 
+    /* IIR design — multi-return forms. Lowpass scope.
+     *
+     *   [b, a] = butter(n, Wn)        -> matlab_butter_{b,a}(n, Wn)
+     *   [b, a] = cheby1(n, Rp, Wn)    -> matlab_cheby1_{b,a}(n, Rp, Wn)
+     *   [H, w] = freqz(b, a, N)       -> matlab_freqz_{h,w}(b, a, N)
+     */
+    if (NA && NA.getValue().getSExtValue() == 2 &&
+        Name == "butter" && Call->getNumOperands() == 2 &&
+        Call->getNumResults() == 2 &&
+        Call->getOperand(0).getType() == F64 &&
+        Call->getOperand(1).getType() == F64) {
+      B.setInsertionPoint(Call);
+      auto Fb = rt("matlab_butter_b", PtrTy, {F64, F64});
+      auto Fa = rt("matlab_butter_a", PtrTy, {F64, F64});
+      auto Cb = LLVM::CallOp::create(B, Call->getLoc(), Fb,
+                                      Call->getOperands());
+      auto Ca = LLVM::CallOp::create(B, Call->getLoc(), Fa,
+                                      Call->getOperands());
+      Call->getResult(0).replaceAllUsesWith(Cb.getResult());
+      Call->getResult(1).replaceAllUsesWith(Ca.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+    if (NA && NA.getValue().getSExtValue() == 2 &&
+        Name == "cheby1" && Call->getNumOperands() == 3 &&
+        Call->getNumResults() == 2 &&
+        Call->getOperand(0).getType() == F64 &&
+        Call->getOperand(1).getType() == F64 &&
+        Call->getOperand(2).getType() == F64) {
+      B.setInsertionPoint(Call);
+      auto Fb = rt("matlab_cheby1_b", PtrTy, {F64, F64, F64});
+      auto Fa = rt("matlab_cheby1_a", PtrTy, {F64, F64, F64});
+      auto Cb = LLVM::CallOp::create(B, Call->getLoc(), Fb,
+                                      Call->getOperands());
+      auto Ca = LLVM::CallOp::create(B, Call->getLoc(), Fa,
+                                      Call->getOperands());
+      Call->getResult(0).replaceAllUsesWith(Cb.getResult());
+      Call->getResult(1).replaceAllUsesWith(Ca.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+    if (NA && NA.getValue().getSExtValue() == 2 &&
+        Name == "freqz" && Call->getNumOperands() == 3 &&
+        Call->getNumResults() == 2 &&
+        Call->getOperand(2).getType() == F64) {
+      /* b and a may arrive as ptr or tensor; defer until both are ptr
+       * (matrix-slot lowering handles tensor → ptr). */
+      auto t0 = Call->getOperand(0).getType();
+      auto t1 = Call->getOperand(1).getType();
+      if (t0 == PtrTy && t1 == PtrTy) {
+        B.setInsertionPoint(Call);
+        auto Fh = rt("matlab_freqz_h", PtrTy, {PtrTy, PtrTy, F64});
+        auto Fw = rt("matlab_freqz_w", PtrTy, {PtrTy, PtrTy, F64});
+        auto Ch = LLVM::CallOp::create(B, Call->getLoc(), Fh,
+                                        Call->getOperands());
+        auto Cw = LLVM::CallOp::create(B, Call->getLoc(), Fw,
+                                        Call->getOperands());
+        Call->getResult(0).replaceAllUsesWith(Ch.getResult());
+        Call->getResult(1).replaceAllUsesWith(Cw.getResult());
+        Call->erase();
+        Changed = true;
+        continue;
+      }
+    }
+
     /* residue — partial-fraction expansion. 3-result form
      * `[r, p, k] = residue(b, a)`. 2 operands. Splits into
      * matlab_residue_{r,p,k}(b, a) — same eig_V/eig_D precedent as
@@ -3236,6 +3303,16 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"polyder",    "matlab_polyder",    1, "p"},
       {"polyint",    "matlab_polyint",    1, "p"},
       {"polyint",    "matlab_polyint_k",  1, "pf"},
+      /* Tier-1 §2.1 IIR — single-return forms. The multi-return
+       * `[b, a] = butter(...)` / `[b, a] = cheby1(...)` /
+       * `[H, w] = freqz(...)` shapes are handled separately by the
+       * dedicated multi-return dispatch above. The single-return
+       * `B = butter(...)` form returns just b (matches MATLAB's
+       * `[b, a] = butter(n, Wn); B = b;` shorthand). `H = freqz(...)`
+       * returns just the complex H. */
+      {"butter",     "matlab_butter_b",   1, "ff"},
+      {"cheby1",     "matlab_cheby1_b",   1, "fff"},
+      {"freqz",      "matlab_freqz",      1, "ppf"},
       {"interp1",    "matlab_interp1",    1, "ppp"},
       {"trapz",      "matlab_trapz",      1, "p"},
       {"trapz",      "matlab_trapz_xy",   1, "pp"},

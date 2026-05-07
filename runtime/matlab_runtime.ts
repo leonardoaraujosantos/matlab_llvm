@@ -2751,6 +2751,159 @@ export function residue_k(B: any, A: any): NDArray {
   return new NDArray(k, [1, k.length]);
 }
 
+// --- IIR filter design (Tier-1 §2.1) — lowpass scope -----------------
+function _polyFromComplexRoots(rsR: number[], rsI: number[]): Float64Array {
+  const n = rsR.length;
+  const cr = new Float64Array(n + 1);
+  const ci = new Float64Array(n + 1);
+  cr[0] = 1;
+  let cur = 0;
+  for (let k = 0; k < n; k++) {
+    const rkr = rsR[k], rki = rsI[k];
+    const nr = new Float64Array(cur + 2);
+    const ni = new Float64Array(cur + 2);
+    for (let i = 0; i <= cur; i++) { nr[i] += cr[i]; ni[i] += ci[i]; }
+    for (let i = 0; i <= cur; i++) {
+      const pr = -rkr * cr[i] + rki * ci[i];
+      const pi = -rkr * ci[i] - rki * cr[i];
+      nr[i + 1] += pr; ni[i + 1] += pi;
+    }
+    for (let i = 0; i <= cur + 1; i++) { cr[i] = nr[i]; ci[i] = ni[i]; }
+    cur++;
+  }
+  return cr.slice(0, n + 1);
+}
+
+function _bilinearPoleTS(pr: number, pi: number): [number, number] {
+  const numR = 1 + pr, numI = pi;
+  const denR = 1 - pr, denI = -pi;
+  const d = denR * denR + denI * denI;
+  return [(numR * denR + numI * denI) / d,
+          (numI * denR - numR * denI) / d];
+}
+
+function _lowpassFromAnalogPoles(pR: Float64Array, pI: Float64Array):
+    { b: Float64Array; a: Float64Array } {
+  const n = pR.length;
+  const zR = new Float64Array(n), zI = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    const [r, im] = _bilinearPoleTS(pR[i], pI[i]);
+    zR[i] = r; zI[i] = im;
+  }
+  const a = _polyFromComplexRoots(Array.from(zR), Array.from(zI));
+  const negOnesR = new Array(n).fill(-1);
+  const negOnesI = new Array(n).fill(0);
+  const b = _polyFromComplexRoots(negOnesR, negOnesI);
+  let sumb = 0, suma = 0;
+  for (let i = 0; i <= n; i++) { sumb += b[i]; suma += a[i]; }
+  if (sumb !== 0) {
+    const g = suma / sumb;
+    for (let i = 0; i <= n; i++) b[i] *= g;
+  }
+  return { b, a };
+}
+
+function _butterDesign(n: number, Wn: number):
+    { b: Float64Array; a: Float64Array } {
+  n = (n | 0) || 1;
+  if (Wn <= 0) Wn = 1e-12;
+  if (Wn >= 1) Wn = 1 - 1e-12;
+  const Wa = 2 * Math.tan(Math.PI * Wn / 2);
+  const pR = new Float64Array(n), pI = new Float64Array(n);
+  for (let k = 0; k < n; k++) {
+    const theta = Math.PI * (2 * (k + 1) + n - 1) / (2 * n);
+    pR[k] = Wa * Math.cos(theta);
+    pI[k] = Wa * Math.sin(theta);
+  }
+  return _lowpassFromAnalogPoles(pR, pI);
+}
+
+function _cheby1Design(n: number, Rp: number, Wn: number):
+    { b: Float64Array; a: Float64Array } {
+  n = (n | 0) || 1;
+  if (Rp <= 0) Rp = 1e-12;
+  if (Wn <= 0) Wn = 1e-12;
+  if (Wn >= 1) Wn = 1 - 1e-12;
+  const Wa = 2 * Math.tan(Math.PI * Wn / 2);
+  const eps = Math.sqrt(Math.pow(10, Rp / 10) - 1);
+  const mu  = Math.log(1 / eps + Math.sqrt(1 / (eps * eps) + 1)) / n;
+  const sh  = Math.sinh(mu), ch = Math.cosh(mu);
+  const pR  = new Float64Array(n), pI = new Float64Array(n);
+  for (let k = 0; k < n; k++) {
+    const theta = Math.PI * (2 * (k + 1) - 1) / (2 * n);
+    pR[k] = Wa * (-sh * Math.sin(theta));
+    pI[k] = Wa * ( ch * Math.cos(theta));
+  }
+  return _lowpassFromAnalogPoles(pR, pI);
+}
+
+export function butter_b(n: number, Wn: number): NDArray {
+  const { b } = _butterDesign(+n, +Wn);
+  return new NDArray(b, [1, b.length]);
+}
+export function butter_a(n: number, Wn: number): NDArray {
+  const { a } = _butterDesign(+n, +Wn);
+  return new NDArray(a, [1, a.length]);
+}
+export function cheby1_b(n: number, Rp: number, Wn: number): NDArray {
+  const { b } = _cheby1Design(+n, +Rp, +Wn);
+  return new NDArray(b, [1, b.length]);
+}
+export function cheby1_a(n: number, Rp: number, Wn: number): NDArray {
+  const { a } = _cheby1Design(+n, +Rp, +Wn);
+  return new NDArray(a, [1, a.length]);
+}
+
+function _freqzCompute(B: any, A: any, N: number):
+    { hR: Float64Array; hI: Float64Array; w: Float64Array } {
+  const bv = asArray(B).data;
+  const av = asArray(A).data;
+  N = (N | 0);
+  if (av.length === 0 || av[0] === 0 || N <= 0) {
+    return { hR: new Float64Array(0), hI: new Float64Array(0),
+             w: new Float64Array(0) };
+  }
+  const a0 = av[0];
+  const bn = new Float64Array(bv.length);
+  const an = new Float64Array(av.length);
+  for (let i = 0; i < bv.length; i++) bn[i] = bv[i] / a0;
+  for (let i = 0; i < av.length; i++) an[i] = av[i] / a0;
+  const hR = new Float64Array(N), hI = new Float64Array(N);
+  const w  = new Float64Array(N);
+  for (let k = 0; k < N; k++) {
+    const wk = Math.PI * k / N;
+    w[k] = wk;
+    let nR = 0, nI = 0;
+    for (let i = 0; i < bn.length; i++) {
+      const a_ = -wk * i;
+      nR += bn[i] * Math.cos(a_);
+      nI += bn[i] * Math.sin(a_);
+    }
+    let dR = 0, dI = 0;
+    for (let i = 0; i < an.length; i++) {
+      const a_ = -wk * i;
+      dR += an[i] * Math.cos(a_);
+      dI += an[i] * Math.sin(a_);
+    }
+    const denom = dR * dR + dI * dI;
+    hR[k] = (nR * dR + nI * dI) / denom;
+    hI[k] = (nI * dR - nR * dI) / denom;
+  }
+  return { hR, hI, w };
+}
+
+export function freqz(b: any, a: any, N: number): NDArray {
+  const { hR } = _freqzCompute(b, a, +N);
+  // Real-only TS NDArray — drop the imaginary part to match how the
+  // existing roots() handles complex outputs in this lane.
+  return new NDArray(hR, [hR.length, hR.length > 0 ? 1 : 0]);
+}
+export function freqz_h(b: any, a: any, N: number): NDArray { return freqz(b, a, N); }
+export function freqz_w(b: any, a: any, N: number): NDArray {
+  const { w } = _freqzCompute(b, a, +N);
+  return new NDArray(w, [w.length, w.length > 0 ? 1 : 0]);
+}
+
 // --- DSP windows. All return an (n, 1) column vector matching the C
 //     runtime byte-identical. Symmetric (non-periodic) form. -----------
 function _winCol(buf: Float64Array): NDArray { return new NDArray(buf, [buf.length, 1]); }

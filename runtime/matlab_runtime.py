@@ -2409,6 +2409,125 @@ def residue_k(b, a):
     return k.reshape((1, -1))
 
 
+# --- IIR filter design (Tier-1 §2.1) — lowpass scope ----------------
+def _poly_from_complex_roots(rs):
+    """np.poly equivalent that drops the imaginary part for conjugate-
+    symmetric inputs. rs is a list/array of complex roots."""
+    n = len(rs)
+    cr = np.zeros(n + 1, dtype=complex)
+    cr[0] = 1.0
+    cur = 0
+    for k in _pyrange(n):
+        rk = rs[k]
+        nr = np.zeros(cur + 2, dtype=complex)
+        for i in _pyrange(cur + 1):
+            nr[i] += cr[i]
+            nr[i + 1] += -rk * cr[i]
+        cr[: cur + 2] = nr
+        cur += 1
+    return cr[: n + 1].real.copy()
+
+
+def _bilinear_pole(p):
+    return (1.0 + p) / (1.0 - p)
+
+
+def _lowpass_from_analog_poles(p_analog):
+    n = len(p_analog)
+    z_poles = [_bilinear_pole(p) for p in p_analog]
+    a = _poly_from_complex_roots(z_poles)
+    # n zeros at z = -1
+    b = _poly_from_complex_roots([-1.0 + 0j] * n)
+    sb = float(np.sum(b))
+    sa = float(np.sum(a))
+    if sb != 0.0:
+        b = b * (sa / sb)
+    return b, a
+
+
+def _butter_design(n, Wn):
+    n = int(n)
+    if n < 1: n = 1
+    Wn = float(Wn)
+    if Wn <= 0.0: Wn = 1e-12
+    if Wn >= 1.0: Wn = 1.0 - 1e-12
+    Wa = 2.0 * np.tan(np.pi * Wn / 2.0)
+    poles = []
+    for k in _pyrange(n):
+        theta = np.pi * (2 * (k + 1) + n - 1) / (2.0 * n)
+        poles.append(Wa * (np.cos(theta) + 1j * np.sin(theta)))
+    return _lowpass_from_analog_poles(poles)
+
+
+def _cheby1_design(n, Rp, Wn):
+    n = int(n)
+    if n < 1: n = 1
+    Rp = float(Rp); Wn = float(Wn)
+    if Rp <= 0.0: Rp = 1e-12
+    if Wn <= 0.0: Wn = 1e-12
+    if Wn >= 1.0: Wn = 1.0 - 1e-12
+    Wa = 2.0 * np.tan(np.pi * Wn / 2.0)
+    eps = np.sqrt(10.0 ** (Rp / 10.0) - 1.0)
+    mu = np.arcsinh(1.0 / eps) / n
+    sh, ch = np.sinh(mu), np.cosh(mu)
+    poles = []
+    for k in _pyrange(n):
+        theta = np.pi * (2 * (k + 1) - 1) / (2.0 * n)
+        poles.append(Wa * (-sh * np.sin(theta) + 1j * ch * np.cos(theta)))
+    return _lowpass_from_analog_poles(poles)
+
+
+def butter_b(n, Wn):
+    b, _ = _butter_design(n, Wn)
+    return b.reshape((1, -1))
+
+
+def butter_a(n, Wn):
+    _, a = _butter_design(n, Wn)
+    return a.reshape((1, -1))
+
+
+def cheby1_b(n, Rp, Wn):
+    b, _ = _cheby1_design(n, Rp, Wn)
+    return b.reshape((1, -1))
+
+
+def cheby1_a(n, Rp, Wn):
+    _, a = _cheby1_design(n, Rp, Wn)
+    return a.reshape((1, -1))
+
+
+def _freqz_compute(b, a, N):
+    bv = np.asarray(b, dtype=float).ravel()
+    av = np.asarray(a, dtype=float).ravel()
+    N = int(N)
+    if av.size == 0 or av[0] == 0.0 or N <= 0:
+        empty = np.zeros((0, 1))
+        return empty.astype(complex), empty
+    bn = bv / av[0]
+    an = av / av[0]
+    w = np.pi * np.arange(N, dtype=float) / float(N)
+    e_b = np.exp(-1j * np.outer(w, np.arange(bn.size, dtype=float)))
+    e_a = np.exp(-1j * np.outer(w, np.arange(an.size, dtype=float)))
+    H = (e_b @ bn) / (e_a @ an)
+    return H.reshape((-1, 1)), w.reshape((-1, 1))
+
+
+def freqz(b, a, N):
+    H, _ = _freqz_compute(b, a, N)
+    return H
+
+
+def freqz_h(b, a, N):
+    H, _ = _freqz_compute(b, a, N)
+    return H
+
+
+def freqz_w(b, a, N):
+    _, w = _freqz_compute(b, a, N)
+    return w
+
+
 # --- DSP windows. All return an (n, 1) column vector, byte-identical
 #     to the C runtime. Symmetric (non-periodic) form. -----------------
 def _win_col(values):

@@ -40,6 +40,12 @@ matlab_mat_c *matlab_roots     (matlab_mat *p);
 matlab_mat_c *matlab_residue_r (matlab_mat *b, matlab_mat *a);
 matlab_mat_c *matlab_residue_p (matlab_mat *b, matlab_mat *a);
 matlab_mat   *matlab_residue_k (matlab_mat *b, matlab_mat *a);
+matlab_mat   *matlab_butter_b  (double n, double Wn);
+matlab_mat   *matlab_butter_a  (double n, double Wn);
+matlab_mat   *matlab_cheby1_b  (double n, double Rp, double Wn);
+matlab_mat   *matlab_cheby1_a  (double n, double Rp, double Wn);
+matlab_mat_c *matlab_freqz     (matlab_mat *b, matlab_mat *a, double N);
+matlab_mat   *matlab_freqz_w   (matlab_mat *b, matlab_mat *a, double N);
 
 static matlab_mat *mk(const double *buf, int64_t m, int64_t n) {
     return matlab_mat_from_buf(buf, (double)m, (double)n);
@@ -464,6 +470,86 @@ static void test_residue_distinct_poles(void) {
     rt_free(b); rt_free(a); rt_c_free(R); rt_c_free(P); rt_free(K);
 }
 
+static void test_butter_unit_dc_gain(void) {
+    /* Order-4 Butterworth lowpass at Wn = 0.4. The runtime normalizes
+     * b so H(z=1) = sum(b)/sum(a) = 1 exactly. */
+    matlab_mat *b = matlab_butter_b(4, 0.4);
+    matlab_mat *a = matlab_butter_a(4, 0.4);
+    RT_CHECK(rt_cols(b) == 5 && rt_cols(a) == 5,
+             "order-4 -> 5 coefficients each");
+    double sb = 0, sa = 0;
+    for (int i = 0; i < 5; ++i) { sb += rt_data(b)[i]; sa += rt_data(a)[i]; }
+    RT_NEAR(sb / sa, 1.0, 1e-12, "DC gain unity");
+    /* Numerator is symmetric for a Butterworth lowpass via bilinear
+     * (zeros all at z = -1, so b is the binomial expansion of (1+z^-1)^n
+     * scaled by the gain factor). Check the inner symmetry. */
+    RT_NEAR(rt_data(b)[0], rt_data(b)[4], 1e-12, "symm b[0]==b[4]");
+    RT_NEAR(rt_data(b)[1], rt_data(b)[3], 1e-12, "symm b[1]==b[3]");
+    /* a[0] == 1 (denominator is monic). */
+    RT_NEAR(rt_data(a)[0], 1.0, 1e-12, "monic denominator");
+    rt_free(b); rt_free(a);
+}
+
+static void test_butter_freqz_at_dc(void) {
+    /* freqz at w = 0 (DC): H(1) = sum(b) / sum(a) for any IIR. The
+     * Butterworth filter is normalized to give |H(0)| = 1. */
+    matlab_mat *b = matlab_butter_b(3, 0.3);
+    matlab_mat *a = matlab_butter_a(3, 0.3);
+    matlab_mat_c *H = matlab_freqz(b, a, 8);
+    RT_CHECK(rt_c_rows(H) == 8, "8 frequency bins");
+    /* w = 0 is the first bin. */
+    RT_NEAR(rt_c_re(H, 0, 0), 1.0, 1e-10, "H(0) real == 1");
+    RT_NEAR(rt_c_im(H, 0, 0), 0.0, 1e-10, "H(0) imag == 0");
+    rt_free(b); rt_free(a); rt_c_free(H);
+}
+
+static void test_butter_high_frequency_attenuation(void) {
+    /* Order-6 Butterworth at Wn = 0.2 should attenuate strongly past
+     * the cutoff. Sample at w near π and check |H| << 1. */
+    matlab_mat *b = matlab_butter_b(6, 0.2);
+    matlab_mat *a = matlab_butter_a(6, 0.2);
+    matlab_mat_c *H = matlab_freqz(b, a, 16);
+    /* Pick w ~ 3π/4 (3/4 of the way from DC to Nyquist). */
+    int idx = 12;
+    double mag = sqrt(rt_c_re(H, idx, 0) * rt_c_re(H, idx, 0) +
+                      rt_c_im(H, idx, 0) * rt_c_im(H, idx, 0));
+    RT_CHECK(mag < 0.01, "deep-stopband attenuation");
+    rt_free(b); rt_free(a); rt_c_free(H);
+}
+
+static void test_cheby1_passband_ripple(void) {
+    /* Order-4 Chebyshev I with 0.5 dB ripple. The passband peak should
+     * exceed unity by ~0.5 dB / 20 = ~1.0593 max. Since the slice
+     * normalizes to unit DC gain (matching MATLAB's odd-N convention
+     * uniformly), the peak in the passband is allowed to exceed 1. */
+    matlab_mat *b = matlab_cheby1_b(4, 0.5, 0.4);
+    matlab_mat *a = matlab_cheby1_a(4, 0.5, 0.4);
+    matlab_mat_c *H = matlab_freqz(b, a, 32);
+    /* Find max magnitude in the first 12 bins (well within passband). */
+    double mx = 0;
+    for (int i = 0; i < 12; ++i) {
+        double m = sqrt(rt_c_re(H, i, 0) * rt_c_re(H, i, 0) +
+                        rt_c_im(H, i, 0) * rt_c_im(H, i, 0));
+        if (m > mx) mx = m;
+    }
+    RT_CHECK(mx > 1.0, "passband ripple exceeds unity");
+    RT_CHECK(mx < 1.10, "passband ripple bounded above");
+    rt_free(b); rt_free(a); rt_c_free(H);
+}
+
+static void test_freqz_w_grid(void) {
+    /* w spans [0, π) at N equally spaced points. */
+    double bd[] = {1};
+    double ad[] = {1};
+    matlab_mat *b = mk(bd, 1, 1);
+    matlab_mat *a = mk(ad, 1, 1);
+    matlab_mat *W = matlab_freqz_w(b, a, 8);
+    RT_CHECK(rt_rows(W) == 8, "8 frequency points");
+    RT_NEAR(rt_data(W)[0], 0.0,        1e-12, "w[0] = 0");
+    RT_NEAR(rt_data(W)[4], M_PI / 2.0, 1e-12, "w[4] = π/2");
+    rt_free(b); rt_free(a); rt_free(W);
+}
+
 static void test_residue_with_direct_term(void) {
     /* H(s) = (s^2 + 1) / (s - 1) = s + 1 + 2/(s - 1).
      * One pole at s = 1 with residue 2; direct term k = [1, 1]. */
@@ -544,5 +630,10 @@ int main(void) {
     RT_RUN(test_poly_empty_is_one);
     RT_RUN(test_residue_distinct_poles);
     RT_RUN(test_residue_with_direct_term);
+    RT_RUN(test_butter_unit_dc_gain);
+    RT_RUN(test_butter_freqz_at_dc);
+    RT_RUN(test_butter_high_frequency_attenuation);
+    RT_RUN(test_cheby1_passband_ripple);
+    RT_RUN(test_freqz_w_grid);
     RT_DONE();
 }

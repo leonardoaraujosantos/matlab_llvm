@@ -2250,6 +2250,14 @@ void Lowerer::lowerStmt(const Stmt &St) {
            * r and p, real row for k; uniform ptr at the MLIR level). */
           else if (CN == "residue" && A.LHS.size() == 3)
             Rtys.assign(A.LHS.size(), PtrTy);
+          /* [b, a] = butter(n, Wn) / cheby1(n, Rp, Wn) — both real
+           * row vectors (ptr at MLIR level). */
+          else if ((CN == "butter" || CN == "cheby1") && A.LHS.size() == 2)
+            Rtys.assign(A.LHS.size(), PtrTy);
+          /* [H, w] = freqz(b, a, N) — H complex column, w real column;
+           * uniform ptr. */
+          else if (CN == "freqz" && A.LHS.size() == 2)
+            Rtys.assign(A.LHS.size(), PtrTy);
           /* [row, col] = ind2sub(sz, i) — scalar f64s. */
           else if (CN == "ind2sub" && A.LHS.size() == 2)
             Rtys.assign(A.LHS.size(), F64);
@@ -6451,6 +6459,8 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             "meshgrid", "ndgrid",
             "xcorr", "polyval", "polyfit", "roots", "poly",
             "polyder", "polyint", "residue",
+            /* Tier-1 §2.1 — IIR lowpass design + frequency response. */
+            "butter", "cheby1", "freqz",
             "interp1", "trapz", "cumtrapz", "gradient",
             "hamming", "hann", "blackman",
             /* Tier-1 windows tail (signal_toolbox_roadmap §2.3) — all
