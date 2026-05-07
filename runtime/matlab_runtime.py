@@ -2742,6 +2742,97 @@ def stepz(b, a, N):
     return _filter_flat(bn, an, np.ones(N)).reshape((-1, 1))
 
 
+# --- §3.4 transforms tail -------------------------------------------
+def dct(x):
+    a = np.asarray(x, dtype=float).ravel()
+    N = a.size
+    if N == 0: return np.zeros((0, 0))
+    out = np.zeros(N)
+    s0 = np.sqrt(1.0 / N)
+    s1 = np.sqrt(2.0 / N)
+    for k in _pyrange(N):
+        s = 0.0
+        for n in _pyrange(N):
+            s += a[n] * np.cos(np.pi * (2 * n + 1) * k / (2.0 * N))
+        out[k] = (s0 if k == 0 else s1) * s
+    xa = np.asarray(x)
+    if xa.ndim == 2 and xa.shape[1] == 1: return out.reshape((-1, 1))
+    return out.reshape(xa.shape) if xa.ndim > 0 else out
+
+
+def idct(X):
+    a = np.asarray(X, dtype=float).ravel()
+    N = a.size
+    if N == 0: return np.zeros((0, 0))
+    out = np.zeros(N)
+    s0 = np.sqrt(1.0 / N)
+    s1 = np.sqrt(2.0 / N)
+    for n in _pyrange(N):
+        s = a[0] * s0
+        for k in _pyrange(1, N):
+            s += a[k] * s1 * np.cos(np.pi * (2 * n + 1) * k / (2.0 * N))
+        out[n] = s
+    xa = np.asarray(X)
+    if xa.ndim == 2 and xa.shape[1] == 1: return out.reshape((-1, 1))
+    return out.reshape(xa.shape) if xa.ndim > 0 else out
+
+
+def fwht(x):
+    a = np.asarray(x, dtype=float).ravel()
+    Nin = a.size
+    if Nin == 0: return np.zeros((0, 0))
+    N = 1
+    while N < Nin: N <<= 1
+    buf = np.zeros(N); buf[:Nin] = a
+    half = 1
+    while half < N:
+        for i in _pyrange(0, N, 2 * half):
+            for j in _pyrange(half):
+                A = buf[i + j]; B = buf[i + j + half]
+                buf[i + j] = A + B
+                buf[i + j + half] = A - B
+        half <<= 1
+    out = buf / N
+    xa = np.asarray(x)
+    if xa.ndim == 2 and xa.shape[1] == 1: return out.reshape((-1, 1))
+    return out.reshape((1, -1)) if xa.ndim <= 1 else out.reshape(xa.shape)
+
+
+def hilbert(x):
+    a = np.asarray(x, dtype=float).ravel()
+    N = a.size
+    if N == 0: return np.zeros((0, 0), dtype=complex)
+    X = np.fft.fft(a)
+    H = np.zeros(N)
+    H[0] = 1
+    if N % 2 == 0:
+        H[1 : N // 2] = 2
+        H[N // 2] = 1
+    else:
+        H[1 : (N + 1) // 2] = 2
+    Y = np.fft.ifft(X * H)
+    xa = np.asarray(x)
+    if xa.ndim == 2 and xa.shape[1] == 1: return Y.reshape((-1, 1))
+    return Y.reshape((1, -1))
+
+
+def goertzel(x, k):
+    a = np.asarray(x, dtype=float).ravel()
+    N = a.size
+    kk = int(k) - 1
+    if N == 0 or kk < 0:
+        return np.array([[0.0 + 0j]])
+    w = 2 * np.pi * kk / N
+    cw, sw = np.cos(w), np.sin(w)
+    s_prev = 0.0
+    s_prev2 = 0.0
+    for n in _pyrange(N):
+        s = a[n] + 2 * cw * s_prev - s_prev2
+        s_prev2 = s_prev
+        s_prev = s
+    return np.array([[(s_prev - cw * s_prev2) + 1j * (sw * s_prev2)]])
+
+
 def grpdelay(b, a, N):
     bv = np.asarray(b, dtype=float).ravel()
     av = np.asarray(a, dtype=float).ravel()

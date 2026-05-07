@@ -264,6 +264,62 @@ matlab_mat_c *matlab_roots(matlab_mat *p) {
     return R;
 }
 
+/* Forward decls of FFT entries defined later in this file. Used by
+ * hilbert immediately below. */
+matlab_mat_c *matlab_fft_c(void *Aptr);
+matlab_mat_c *matlab_ifft_c(void *Aptr);
+
+/*===========================================================================
+ * Tier-2 SPT §3.4 transforms — hilbert + goertzel.
+ *
+ *   y = hilbert(x)        analytic signal: complex output with the
+ *                         same magnitude as x in the FFT positive
+ *                         half, zero in the negative half.
+ *   X = goertzel(x, k)    single-bin DFT at index k (1-based, MATLAB
+ *                         convention). Returns a 1×1 complex.
+ */
+matlab_mat_c *matlab_hilbert(matlab_mat *x) {
+    if (!x) return mat_c_alloc(0, 0);
+    int64_t N = x->rows * x->cols;
+    if (N == 0) return mat_c_alloc(x->rows, x->cols);
+    /* Compute FFT of x via the existing complex-FFT runtime. */
+    matlab_mat_c *X = matlab_fft_c((void *)x);
+    /* Apply the hilbert mask: H[0] = 1; H[1..N/2-1] = 2; H[N/2] = 1
+     * (only when N is even); H[N/2+1..N-1] = 0. */
+    for (int64_t k = 0; k < N; ++k) {
+        double m;
+        if (k == 0) m = 1.0;
+        else if (k < N / 2) m = 2.0;
+        else if (k == N / 2 && (N & 1) == 0) m = 1.0;
+        else m = 0.0;
+        X->re[k] *= m;
+        X->im[k] *= m;
+    }
+    /* Inverse FFT. matlab_ifft_c expects a complex matrix descriptor. */
+    matlab_mat_c *Y = matlab_ifft_c((void *)X);
+    return Y;
+}
+
+matlab_mat_c *matlab_goertzel(matlab_mat *x, double k_d) {
+    if (!x) return mat_c_alloc(0, 0);
+    int64_t N = x->rows * x->cols;
+    int k = (int)k_d - 1;            /* MATLAB 1-based -> 0-based */
+    matlab_mat_c *Y = mat_c_alloc(1, 1);
+    if (N == 0 || k < 0) return Y;
+    double w = 2.0 * M_PI * (double)k / (double)N;
+    double cw = cos(w), sw = sin(w);
+    double s_prev = 0.0, s_prev2 = 0.0;
+    for (int64_t n = 0; n < N; ++n) {
+        double s = x->data[n] + 2.0 * cw * s_prev - s_prev2;
+        s_prev2 = s_prev;
+        s_prev  = s;
+    }
+    /* Final complex output: y = s[N-1] - exp(-jw) * s[N-2]. */
+    Y->re[0] = s_prev - cw * s_prev2;
+    Y->im[0] = sw * s_prev2;
+    return Y;
+}
+
 /* poly(r) — coefficients of the monic polynomial whose roots are r.
  * Returns a row vector c of length n+1 with c[0] = 1.
  *

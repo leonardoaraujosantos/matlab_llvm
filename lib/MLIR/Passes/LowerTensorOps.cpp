@@ -3374,6 +3374,12 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"impz",       "matlab_impz",       1, "ppf"},
       {"stepz",      "matlab_stepz",      1, "ppf"},
       {"grpdelay",   "matlab_grpdelay",   1, "ppf"},
+      /* §3.4 transforms tail. */
+      {"dct",        "matlab_dct",        1, "p"},
+      {"idct",       "matlab_idct",       1, "p"},
+      {"fwht",       "matlab_fwht",       1, "p"},
+      {"hilbert",    "matlab_hilbert",    1, "p"},
+      {"goertzel",   "matlab_goertzel",   1, "pf"},
       {"interp1",    "matlab_interp1",    1, "ppp"},
       {"trapz",      "matlab_trapz",      1, "p"},
       {"trapz",      "matlab_trapz_xy",   1, "pp"},

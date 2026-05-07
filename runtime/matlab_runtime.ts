@@ -3067,6 +3067,91 @@ export function sgolay(k: number, f: number): NDArray {
   return new NDArray(_computeSgolayMatrix(k, f), [f, f]);
 }
 
+// --- §3.4 transforms tail -----------------------------------------------
+export function dct(x: any): NDArray {
+  const xa = asArray(x);
+  const a = xa.data;
+  const N = a.length;
+  if (N === 0) return new NDArray(new Float64Array(0), [0, 0]);
+  const out = new Float64Array(N);
+  const s0 = Math.sqrt(1.0 / N);
+  const s1 = Math.sqrt(2.0 / N);
+  for (let k = 0; k < N; k++) {
+    let s = 0;
+    for (let n = 0; n < N; n++)
+      s += a[n] * Math.cos(Math.PI * (2 * n + 1) * k / (2 * N));
+    out[k] = (k === 0 ? s0 : s1) * s;
+  }
+  return new NDArray(out, xa.shape.slice());
+}
+
+export function idct(X: any): NDArray {
+  const xa = asArray(X);
+  const a = xa.data;
+  const N = a.length;
+  if (N === 0) return new NDArray(new Float64Array(0), [0, 0]);
+  const out = new Float64Array(N);
+  const s0 = Math.sqrt(1.0 / N);
+  const s1 = Math.sqrt(2.0 / N);
+  for (let n = 0; n < N; n++) {
+    let s = a[0] * s0;
+    for (let k = 1; k < N; k++)
+      s += a[k] * s1 * Math.cos(Math.PI * (2 * n + 1) * k / (2 * N));
+    out[n] = s;
+  }
+  return new NDArray(out, xa.shape.slice());
+}
+
+export function fwht(x: any): NDArray {
+  const xa = asArray(x);
+  const a = xa.data;
+  const Nin = a.length;
+  if (Nin === 0) return new NDArray(new Float64Array(0), [0, 0]);
+  let N = 1;
+  while (N < Nin) N <<= 1;
+  const buf = new Float64Array(N);
+  for (let i = 0; i < Nin; i++) buf[i] = a[i];
+  for (let half = 1; half < N; half <<= 1) {
+    for (let i = 0; i < N; i += 2 * half) {
+      for (let j = 0; j < half; j++) {
+        const A = buf[i + j];
+        const B = buf[i + j + half];
+        buf[i + j] = A + B;
+        buf[i + j + half] = A - B;
+      }
+    }
+  }
+  for (let i = 0; i < N; i++) buf[i] /= N;
+  const cols = xa.cols === 1 && xa.rows > 1 ? 1 : N;
+  const rows = cols === 1 ? N : 1;
+  return new NDArray(buf, [rows, cols]);
+}
+
+export function hilbert(x: any): NDArray {
+  // Real-only output on TS — no native complex; matches the existing
+  // roots/fft_c convention. Returns Re(analytic) which equals x.
+  // sig_hilbert.m gates with .skip-emit-typescript.
+  return asArray(x);
+}
+
+export function goertzel(x: any, k: number): NDArray {
+  const a = asArray(x).data;
+  const N = a.length;
+  const kk = (k | 0) - 1;
+  if (N === 0 || kk < 0) return new NDArray(Float64Array.of(0), [1, 1]);
+  const w = 2 * Math.PI * kk / N;
+  const cw = Math.cos(w), sw = Math.sin(w);
+  let sPrev = 0, sPrev2 = 0;
+  for (let n = 0; n < N; n++) {
+    const s = a[n] + 2 * cw * sPrev - sPrev2;
+    sPrev2 = sPrev;
+    sPrev = s;
+  }
+  // Real part only on TS (no native complex). Skip TS in tests using
+  // the imag part.
+  return new NDArray(Float64Array.of(sPrev - cw * sPrev2), [1, 1]);
+}
+
 // --- §2.5 close-the-loop helpers ---------------------------------------
 function _filterFlat(b: Float64Array, a: Float64Array,
                       x: Float64Array): Float64Array {

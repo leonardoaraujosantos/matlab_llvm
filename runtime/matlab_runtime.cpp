@@ -5895,6 +5895,83 @@ matlab_mat *matlab_sgolayfilt(matlab_mat *x, double k_d, double f_d) {
 }
 
 /*===========================================================================
+ * Tier-2 SPT §3.4 transforms — DCT-II / DCT-III / Walsh-Hadamard.
+ *
+ *   y = dct(x)      MATLAB-orthonormal DCT-II (forward DCT).
+ *   y = idct(X)     MATLAB-orthonormal DCT-III (inverse DCT-II).
+ *   y = fwht(x)     Walsh-Hadamard transform, natural / Hadamard
+ *                   ordering, divided by N (matches MATLAB default).
+ *
+ * dct/idct use direct O(N²) sums — fine at the lengths SPT users
+ * typically apply (≤ a few thousand). The N-point FFT trick is a
+ * future optimization.
+ */
+matlab_mat *matlab_dct(matlab_mat *x) {
+    if (!x) return mat_alloc(0, 0);
+    int64_t N = x->rows * x->cols;
+    if (N == 0) return mat_alloc(x->rows, x->cols);
+    matlab_mat *Y = mat_alloc(x->rows, x->cols);
+    double s0 = sqrt(1.0 / (double)N);
+    double s1 = sqrt(2.0 / (double)N);
+    for (int64_t k = 0; k < N; ++k) {
+        double sum = 0.0;
+        for (int64_t n = 0; n < N; ++n)
+            sum += x->data[n] *
+                   cos(M_PI * (double)(2 * n + 1) * (double)k / (2.0 * (double)N));
+        Y->data[k] = (k == 0 ? s0 : s1) * sum;
+    }
+    return Y;
+}
+
+matlab_mat *matlab_idct(matlab_mat *X) {
+    if (!X) return mat_alloc(0, 0);
+    int64_t N = X->rows * X->cols;
+    if (N == 0) return mat_alloc(X->rows, X->cols);
+    matlab_mat *Y = mat_alloc(X->rows, X->cols);
+    double s0 = sqrt(1.0 / (double)N);
+    double s1 = sqrt(2.0 / (double)N);
+    for (int64_t n = 0; n < N; ++n) {
+        double sum = X->data[0] * s0;
+        for (int64_t k = 1; k < N; ++k)
+            sum += X->data[k] * s1 *
+                   cos(M_PI * (double)(2 * n + 1) * (double)k / (2.0 * (double)N));
+        Y->data[n] = sum;
+    }
+    return Y;
+}
+
+/* Walsh-Hadamard via butterfly. Length must be power-of-2; otherwise
+ * we round up by zero-padding. Output is divided by N (MATLAB
+ * default normalization, matching the doc's "WH = HW * w / N"). */
+matlab_mat *matlab_fwht(matlab_mat *x) {
+    if (!x) return mat_alloc(0, 0);
+    int64_t Nin = x->rows * x->cols;
+    if (Nin == 0) return mat_alloc(x->rows, x->cols);
+    /* Round up to power of 2. */
+    int64_t N = 1;
+    while (N < Nin) N <<= 1;
+    matlab_mat *Y = mat_alloc(x->rows == 1 ? 1 : N,
+                              x->rows == 1 ? N : 1);
+    /* Copy + zero-pad. */
+    std::vector<double> buf((size_t)N, 0.0);
+    for (int64_t i = 0; i < Nin; ++i) buf[i] = x->data[i];
+    /* In-place butterfly. */
+    for (int64_t half = 1; half < N; half <<= 1) {
+        for (int64_t i = 0; i < N; i += 2 * half) {
+            for (int64_t j = 0; j < half; ++j) {
+                double a = buf[i + j];
+                double b = buf[i + j + half];
+                buf[i + j]        = a + b;
+                buf[i + j + half] = a - b;
+            }
+        }
+    }
+    /* Normalize by N (MATLAB default). */
+    for (int64_t i = 0; i < N; ++i) Y->data[i] = buf[i] / (double)N;
+    return Y;
+}
+
+/*===========================================================================
  * Close-the-loop helpers (Tier-1 SPT §2.5).
  *
  *   y = filtfilt(b, a, x)   forward-backward zero-phase IIR filtering

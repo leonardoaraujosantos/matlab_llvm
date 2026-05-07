@@ -6480,6 +6480,8 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             "fir1", "sgolay", "sgolayfilt",
             /* Tier-1 §2.5 — close-the-loop filter helpers. */
             "filtfilt", "sosfilt", "impz", "stepz", "grpdelay",
+            /* Tier-2 §3.4 — transforms tail. */
+            "dct", "idct", "fwht", "hilbert", "goertzel",
             "interp1", "trapz", "cumtrapz", "gradient",
             "hamming", "hann", "blackman",
             /* Tier-1 windows tail (signal_toolbox_roadmap §2.3) — all

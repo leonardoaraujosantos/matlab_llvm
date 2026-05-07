@@ -113,6 +113,8 @@ void Resolver::registerBuiltins() {
     "fir1", "sgolay", "sgolayfilt",
     /* Tier-1 §2.5 — close-the-loop filter helpers. */
     "filtfilt", "sosfilt", "impz", "stepz", "grpdelay",
+    /* Tier-2 §3.4 — transforms tail. */
+    "dct", "idct", "fwht", "hilbert", "goertzel",
     "interp1", "trapz", "cumtrapz", "gradient",
     "hamming", "hann", "blackman",
     /* Tier-1 (Signal Processing Toolbox roadmap §2.3) — windows tail. */

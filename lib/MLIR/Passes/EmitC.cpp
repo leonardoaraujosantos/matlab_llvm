@@ -1792,6 +1792,9 @@ static llvm::StringRef MatrixReturningFns[] = {
     /* §2.5 close-the-loop filter helpers. */
     "matlab_filtfilt", "matlab_sosfilt",
     "matlab_impz", "matlab_stepz", "matlab_grpdelay",
+    /* §3.4 transforms tail. */
+    "matlab_dct", "matlab_idct", "matlab_fwht",
+    "matlab_hilbert", "matlab_goertzel",
     "matlab_interp1", "matlab_interp2", "matlab_trapz", "matlab_trapz_xy",
     "matlab_cumtrapz", "matlab_gradient", "matlab_diff",
     "matlab_conv", "matlab_conv2", "matlab_filter",

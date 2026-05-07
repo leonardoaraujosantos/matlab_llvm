@@ -364,6 +364,14 @@ double matlab_buttord_Wn(double Wp, double Ws, double Rp, double Rs);
 double matlab_cheb1ord_n(double Wp, double Ws, double Rp, double Rs);
 double matlab_cheb1ord_Wn(double Wp, double Ws, double Rp, double Rs);
 
+/* Tier-2 §3.4 transforms — DCT-II / DCT-III / Walsh-Hadamard /
+ * Hilbert (analytic signal) / Goertzel (single-bin DFT). */
+matlab_mat   *matlab_dct(matlab_mat *x);
+matlab_mat   *matlab_idct(matlab_mat *X);
+matlab_mat   *matlab_fwht(matlab_mat *x);
+matlab_mat_c *matlab_hilbert(matlab_mat *x);
+matlab_mat_c *matlab_goertzel(matlab_mat *x, double k);
+
 /* Close-the-loop helpers (Tier-1 §2.5).
  *   filtfilt(b, a, x)  — forward-backward zero-phase IIR filtering
  *   sosfilt(sos, x)    — cascade of biquad second-order sections
