@@ -48,6 +48,38 @@ roadmap-side summary:
 | 7.2 | **Numerical PDE — `pdepe`** (1-D parabolic-elliptic, method-of-lines). MATLAB-compatible call shape `pdepe(m, @pdefun, @icfun, @bcfun, xmesh, tspan)`. Coverage: Cartesian / cylindrical / spherical (`m = 0, 1, 2`); Dirichlet, Neumann, Robin BCs; non-uniform mesh; scalar PDE. Spatial finite-difference discretisation; resulting full-state ODE system handed to `ode23s_v` for stiff time integration. Heat-equation gating `u_t = u_xx` on a 21-point mesh recovers the analytic `exp(-π²t)·sin(πx)` to ~1e-3. Cylindrical Laplacian on annulus recovers the log-profile steady state to ~2e-5. Bit-identical across C++ / Python / TS. | `test/Run/math_pdepe_heat.m`, `math_pdepe_neumann.m`, `math_pdepe_radial.m` |
 | 7.3 | **Event detection — `ode_events`.** 5-return builtin `[t, y, te, ye, ie] = ode_events(@f, tspan, y0, @evt)`. The event function returns a 3×1 column `[value; isterminal; direction]`; the integrator brackets each accepted DP45 step on `value`, then bisects within the bracket to localize the crossing. `direction` filters rising / falling / either; `isterminal = 1` halts integration at the event. Wired through Resolver + LowerTensorOps as a 5-result builtin (4 operands: rhs handle, tspan, y0, evt handle). Mirrored across C++ / Python / TS — ball-drop event reproduces to ~2e-13 across all three. Non-MATLAB call shape: routing through `opts.Events` is gated on the function-handle-in-struct ABI (same blocker as `OutputFcn` / `Mass`). | `test/Run/math_ode_events_ball.m` |
 
+---
+
+## Recently shipped (Signal Processing Toolbox arc, 2026-05-06 → 2026-05-07)
+
+A second focused arc closing the practical SPT user surface across
+Tier-1 (design / apply / inspect), Tier-2 (spectral / parametric /
+time-frequency), and Tier-3 (multirate / measurements / alignment).
+Drafted from the R2026a Signal Processing Toolbox User's Guide
+(2048 pages, 27 chapters). Per-toolbox plan in
+[`signal_toolbox_roadmap.md`](signal_toolbox_roadmap.md);
+authoritative status in [`feature_status.md`](feature_status.md).
+
+| Phase | What | Gating test |
+|---|---|---|
+| SPT 1 (§2.3) | **Windows tail** — 14 new windows (`rectwin`, `triang`, `bartlett`, `barthannwin`, `bohmanwin`, `parzenwin`, `nuttallwin`, `blackmanharris`, `flattopwin`, `kaiser`, `tukeywin`, `gausswin`, `chebwin`, `taylorwin`) plus retrofit of pre-existing `hamming`/`hann`/`blackman` into Python / TS for parity. Symmetric (non-periodic) form throughout. | `test/Run/sig_windows.m`, `test/Runtime/test_signal.c` |
+| SPT 2 (§2.4) | **Polynomial helpers** — `roots` (Durand-Kerner / Weierstrass simultaneous iteration; the long-standing eig dependency the roadmap had flagged turned out to be moot — DK was already shipped), `poly` (repeated convolution by `[1, −r_i]`), `polyder`, `polyint`, `polyint(p, k)`, plus `[r, p, k] = residue(b, a)` distinct-pole expansion via cover-up rule (multi-return shape mirrors `[V, D] = eig`). | `test/Run/sig_poly.m`, `sig_residue.m` |
+| SPT 3 (§2.1) | **IIR lowpass design** — `[b, a] = butter(n, Wn)`, `[b, a] = cheby1(n, Rp, Wn)`, `[b, a] = cheby2(n, Rs, Wn)` via bilinear-transform from analog prototypes (cheby2 needs the generalised `lowpass_from_analog_pz_` helper for j-axis zeros). `freqz(b, a, N)` + `[H, w] = freqz(...)`. Order helpers `[n, Wn] = buttord(...)` / `cheb1ord(...)`. Lowpass scope only — band variants attempted as a separate slice but discarded (peak normalisation off, deferred). | `test/Run/sig_iir.m`, `sig_iir_more.m` |
+| SPT 4 (§2.2) | **FIR design** — `fir1(n, Wn)` windowed-sinc with default Hamming, `sgolay(k, f)` returning the projection matrix `B = V (V'V)⁻¹ V'`, `sgolayfilt(x, k, f)` applying it with proper boundary-row handling. | `test/Run/sig_fir.m` |
+| SPT 5 (§2.5) | **Close-the-loop filter helpers** — `filtfilt(b, a, x)` forward-backward zero-phase (reflection padding + zero ICs; Gustafsson IC trick deferred), `sosfilt(sos, x)` cascade biquad, `impz`/`stepz`/`grpdelay` response inspection. All five share the internal `filter_flat_` direct-form-II-transposed helper. | `test/Run/sig_filt.m` |
+| SPT 6 (§3.4) | **Transforms tail** — `dct`/`idct` (orthonormal, direct O(N²)), `fwht` (in-place butterfly, Hadamard ordering, divided by N), `hilbert` (FFT zero-negative-half + IFFT, returns `matlab_mat_c`), `goertzel` (single-bin DFT, 1×1 complex). | `test/Run/sig_xform.m` |
+| SPT 7 (§3.1) | **Nonparametric spectral** — `periodogram(x)`, `pwelch(x, win, noverlap)`, `cpsd(x, y, win, noverlap)`, `mscohere(x, y, win, noverlap)`, `tfestimate(x, y, win, noverlap)`. Single-output, default `fs = 1`. cpsd / tfestimate return `matlab_mat_c`; the TS lane returns magnitude only (no native complex shape — same precedent as `roots` / `fft_c`). | `test/Run/sig_psd.m`, `sig_xspec.m` |
+| SPT 8 (§3.2) | **Linear prediction + parametric PSD** — `levinson(r, p)` Levinson-Durbin recursion, `lpc(x, p)` (biased-autocorr + Levinson), `aryule(x, p)`, `arburg(x, p)` Burg forward+backward minimization, plus AR-based PSD `pyulear(x, p, N)` and `pburg(x, p, N)`. | `test/Run/sig_lp.m`, `sig_xspec.m` |
+| SPT 9 (§3.3) | **Time-frequency** — `S = spectrogram(x, win, noverlap)` single-output `\|STFT\|²` per (freq, frame). 2-/3-return forms and `stft`/`istft` deferred. | `test/Run/sig_spec.m` |
+| SPT 10 (§4.3) | **Pulse measurements core** — `findpeaks` (1-return + multi-return `[pks, locs]`, strict-monotonic), scalar reductions `rms`/`peak2peak`/`peak2rms`/`rssq`, signal cleanup `medfilt1`/`hampel`/`envelope`, pulse statistics `midcross`/`risetime`/`falltime`/`dutycycle` with auto-detected min/max state levels and 10/50/90% reference percentages. MinPeak* options + slewrate/pulseperiod/pulsewidth/overshoot/undershoot/settlingtime deferred. | `test/Run/sig_peaks.m`, `sig_pulse.m`, `sig_stat.m` |
+| SPT 11 (§4.1) | **Real multirate** — `upfirdn(x, h, p, q)` (direct algorithm, no zero-stuffed buffer), `decimate(x, r)`, `interp(x, r)`, `resample(x, p, q)`. Replaces the toy `upsample`/`downsample` stubs. Default lowpass via `fir1`. Output lengths match MATLAB: `decimate` ⌈N/r⌉, `interp` N·r, `resample` ⌈N·p/q⌉. | `test/Run/sig_resample.m` |
+| SPT 12 (§4.2) | **Waveform generators** — `chirp(t, f0, t1, f1)` linear method, `sawtooth(t, w)`, `square(t, duty)`, `gauspuls(t, fc, bw)`, `rectpuls(t, w)`, `tripuls(t, w)`, `sinc(x)`. | `test/Run/sig_wfmalign.m` |
+| SPT 13 (§4.4) | **Alignment helpers** — `xcov(x, y)` mean-removed cross-correlation, `finddelay(x, y)` argmax of `\|xcorr\|`, `dtw(x, y)` dynamic time warping (scalar distance). `alignsignals` multi-return + `gccphat` deferred. | `test/Run/sig_wfmalign.m` |
+
+Cumulative test deltas vs. `e812c3f` (pre-SPT baseline): **+17 run-tests** on the LLVM/C/C++/-strict lanes (172 → 189), **+17** on emit-python (161 → 178 + 11 skip), **+14** on emit-typescript (152 → 166, with 3 new skips for complex-valued tests where TS NDArray drops the imaginary part). All 42 ctest lanes regression-clean. ~80 new SPT runtime entries wired end-to-end.
+
+---
+
 Open follow-ups carried forward (still on the roadmap):
 
 - **Phase 5.4 — `timetable`.** Builds on `table` + `datetime` row index.
@@ -60,6 +92,15 @@ Open follow-ups carried forward (still on the roadmap):
 - **Phase 7.6 — Events through `odeset`.** Bracket+bisect event detection ships today as the dedicated `ode_events` builtin (Phase 7.3); promoting it onto `opts.Events = @evt` for `ode45` / `ode23` / `ode23s` is gated on the function-handle-in-struct ABI work that also unblocks `OutputFcn` (live progress callback) and `Mass` (mass-matrix DAEs).
 - **Vector `y` via *named* user functions** — currently anon-only; the LowerUserCalls signature-refinement gate rejects `tensor<Nxf64>` ↔ `tensor<Nx1xf64>` shape mismatches and needs widening.
 - **Phase 8 — SV `state_display` regression** (commit `3622f10`): the const-fold pass eliminates assignments to output-port slots when the value comes from a persistent register read. A Phase-6.2 attempt to fix it via `LowerScalarSlots` cast insertion + EmitSV `arith.fptosi` rendering surfaced a cocotb timing divergence between the Python and SV references for `fir_asic_pipelined`; needs lockstep pipeline-equivalence work.
+- **SPT §2.1 follow-on — IIR family completion.** Ship `ellip` (Jacobi elliptic), `besself` (continuous-time Bessel prototype), high/band/stop variants of `butter`/`cheby1`/`cheby2` (band variants attempted in this arc but the bandpass peak-normalisation came out wrong; deferred for a fresh debugging pass), `cheb2ord`/`ellipord`, standalone `bilinear` and `freqs`, analog prototype builtins (`buttap`/`cheb1ap`/etc.), form conversions (`tf2zp`/`zp2tf`/`tf2sos`/`sos2tf`/`tf2ss`/`ss2tf`/`zp2sos`).
+- **SPT §2.2 follow-on — richer FIR design.** `fir2` (frequency sampling), `firls` (least-squares), `firpm` (Parks-McClellan / Remez exchange), `firrcos` (raised-cosine), `kaiserord`.
+- **SPT §2.5 follow-on — zero-edge-transient `filtfilt`.** Gustafsson 1996 initial-condition trick. Plus `phasez` and `zerophase` real-valued response helpers.
+- **SPT Tier-2 follow-on — multitaper + STFT + subspace methods.** `dpss` (Slepian sequences via tridiagonal eig), `pmtm`, `stft`/`istft` (with COLA inversion for `istft`), `pspectrum`, `instfreq`, `instbw`, `czt` (chirp Z-transform via Bluestein), `cceps`/`rceps`/`icceps`, `pcov`/`pmcov`, `pmusic`/`peig`/`rootmusic`/`rooteig`, `prony`/`stmcb`.
+- **SPT §4.1/§4.2/§4.4 follow-ons.** Polyphase decomposition (`polyphase`); chirp non-linear methods (quadratic / log / hyperbolic), `pulstran`, `diric`, `gmonopuls`, `vco`; `alignsignals` (multi-return), `gccphat`, `xcorr` scaling-option strings (`'biased'`/`'unbiased'`/`'normalized'`/`'coeff'`).
+- **SPT §4.3 follow-on.** `findpeaks` name-value options (`MinPeakHeight`/`MinPeakDistance`/`MinPeakProminence`/`Threshold`/`SortStr`); `slewrate`, `pulseperiod`, `pulsewidth`, `overshoot`, `undershoot`, `settlingtime`, `statelevels` (histogram-based state-level detection).
+- **SPT Tier-4 — `digitalFilter` system object.** `designfilt`-style entry returning a filter handle that `filter`/`filtfilt`/`freqz` can polymorphically accept. Needs a new descriptor type alongside `matlab_dict` / `matlab_symmat`. Plus `dsp.SOSFilter` / `dsp.FIRFilter` HDL system objects for hooking the SystemVerilog backend onto the filter design path.
+- **SPT Tier-4 — wavelets.** `cwt`, `dwt`/`idwt`, `wavedec`/`waverec`, `wvd` (Wigner-Ville), `fsst`/`ifsst` (Fourier synchrosqueezed). 2–3 weeks each, stand-alone algorithmic work.
+- **Sema follow-on — user functions shadow builtins.** Currently `Scope::declare` first-wins for builtins: `function y = sin(x)` (or any builtin name) silently shadows nothing. Added during the SPT §4.2 slice when `square` collided with a `debug-dap-jit-userfn-tests` user function (worked around by renaming the test fixture to `squarem`). Fix is a 2-line Resolver change to allow `Builtin → Function` overrides plus a small fixture-style audit.
 
 ---
 
@@ -190,7 +231,42 @@ SV-only assumption.
 
 ---
 
-### 5. Runtime: arena allocator + leak audit 🟡
+### 5. SPT follow-ons (highest-leverage gaps) 🔵
+
+The SPT arc closed the practical "design / apply / inspect / measure"
+surface; the highest-leverage open items, in priority order:
+
+- **§2.1 IIR family completion.** Band variants of `butter`/`cheby1`/
+  `cheby2` (revisit the discarded bandpass slice — peak normalisation
+  via the analog-prototype gain chain rather than at-centre rescaling),
+  `ellip` (Jacobi elliptic), `besself`, analog prototypes, `cheb2ord`/
+  `ellipord`, form conversions (`tf2zp`/`tf2sos`/etc.), standalone
+  `bilinear` / `freqs`. **Effort:** ~1 week.
+- **§2.5 Gustafsson IC for `filtfilt`.** True zero-edge-transient
+  forward-backward filtering. Plus `phasez` / `zerophase` real-valued
+  response helpers. **Effort:** ~3 sessions.
+- **§4.3 follow-on — `findpeaks` name-value options.** `MinPeakHeight`,
+  `MinPeakDistance`, `MinPeakProminence`, `Threshold`, `SortStr`. The
+  pulse-statistics tail (`slewrate`, `pulseperiod`, `pulsewidth`,
+  `overshoot`, `undershoot`, `settlingtime`, `statelevels`) shares
+  the same edge-detection scaffolding. **Effort:** ~3 sessions.
+- **§3 multitaper + STFT.** `dpss` + `pmtm` for high-resolution
+  spectral estimation; `stft` / `istft` (with COLA inversion) to close
+  the time-frequency tail alongside the existing `spectrogram`.
+  **Effort:** ~1 week.
+- **Sema — user functions shadow builtins.** 2-line `Scope::declare`
+  fix to allow `function y = sin(x)` to override the builtin (matches
+  MATLAB). Workaround in place today (the §4.2 `square` builtin
+  collided with a test-fixture function; renamed the fixture). The
+  proper fix is small but needs a fixture audit afterward.
+  **Effort:** 2 sessions.
+
+These are independent and can land in any order; pick by what
+unblocks real workflows.
+
+---
+
+### 6. Runtime: arena allocator + leak audit 🟡
 
 The C runtime currently uses `malloc`/`free` per matrix +
 ref-counting on some paths. Two pain points:
@@ -213,7 +289,7 @@ ref-counting on some paths. Two pain points:
 
 ## Mid-term (~1–3 months)
 
-### 6. Block language (visual nodes → AST → MLIR) 🟢
+### 7. Block language (visual nodes → AST → MLIR) 🟢
 
 **v1 shipped.** The MatForge IDE now saves `.mflow` JSON files
 that `matlabc` and `matlab-lsp` both consume. The implementation
@@ -255,7 +331,7 @@ shipped row in [`feature_status.md`](feature_status.md).
 
 ---
 
-### 7. Improve HDL codegen: 2-D fi matrices + RAM inference 🔵
+### 8. Improve HDL codegen: 2-D fi matrices + RAM inference 🔵
 
 The biggest remaining SV scope gap. Today the pipeline supports
 1-D fi arrays (shipped via Stage E + Stage F); 2-D matrices are
@@ -276,7 +352,7 @@ needed for image-processing pipelines and matrix-multiply HDL.
 
 ---
 
-### 8. SystemVerilog → MATLAB (reverse direction) 🔵
+### 9. SystemVerilog → MATLAB (reverse direction) 🔵
 
 Take legacy synthesizable SV (or simple sequential RTL with
 clocked persistent state) and lift it into MATLAB source for
@@ -318,7 +394,7 @@ verification, simulation, or porting.
 
 ---
 
-### 9. REPL: line editing + history + JIT cache 🟡
+### 10. REPL: line editing + history + JIT cache 🟡
 
 Today `matlabc -repl` is a minimal stdin loop. The major missing
 ergonomics:
@@ -336,7 +412,7 @@ integration; the rest is JIT cache wiring).
 
 ---
 
-### 10. Improve HDL codegen: pipelining + retiming 🔵
+### 11. Improve HDL codegen: pipelining + retiming 🔵
 
 Beyond the v1 stage-F register split, the pipeline doesn't
 automatically rebalance critical paths. For DSP designs that need
@@ -359,7 +435,7 @@ across logic). Just insertion at safe boundaries.
 
 ## Long-term / exploratory
 
-### 11. MATLAB graphics / `plot` (limited) 🔵
+### 12. MATLAB graphics / `plot` (limited) 🔵
 
 For demos and tutorials. Render `plot(x, y)`, `bar(...)`,
 `imagesc(...)` to PNG / SVG via a small wrapper around matplotlib
@@ -371,7 +447,7 @@ of compiled programs.
 
 ---
 
-### 12. `.mat` file save / load 🔵
+### 13. `.mat` file save / load 🔵
 
 Already documented in [`docs/save_load_compat.md`](save_load_compat.md).
 Goal: read MATLAB v7.3 (HDF5-based) `.mat` files into the runtime
@@ -383,7 +459,7 @@ just the common cases (`save('out.mat', '-v7.3')` followed by
 
 ---
 
-### 13. Toolbox stubs for symbolic / optimization 🔵
+### 14. Toolbox stubs for symbolic / optimization 🔵
 
 Single-file stubs that route to the equivalent open-source
 library (`sympy` for Symbolic Math Toolbox, `scipy.optimize`
@@ -418,7 +494,7 @@ toolbox.
 These don't fit a single roadmap slot but get folded into other
 work as it lands:
 
-- **Test corpus growth.** Aim for ≥150 run-tests + 50 SV goldens.
+- **Test corpus growth.** Original ≥150 run-tests + 50 SV goldens target met during the data-container arc; current corpus is **189 run-tests** + **77 SV goldens**. Next milestone: ≥300 run-tests as Tier-2 SPT follow-ons + multirate / waveform exercise more of the surface, and growing the SV-cocotb cycle-by-cycle lane (item #1) to cover all 39 HDL examples rather than just 8.
 - **Formatter idempotency** verified by a fixed-point CI lane
   (parse → format → parse → format → identical).
 - **Doc-up-to-dateness check** as a CI step (parse `feature_status.md`,
@@ -432,9 +508,12 @@ work as it lands:
 ## Update cadence
 
 This file is updated at the end of each multi-week implementation
-arc — most recently after the data-container + multi-return arc
-(Phases 1.1 / 1.2 / 1.3 / 2 / 3 / 4 / 5.1 / 5.2 / 5.3 — see
-"Recently shipped" above), prior to that the SystemVerilog Phase 5.6
+arc — most recently after the **Signal Processing Toolbox arc**
+(SPT 1–13: windows, polynomial helpers, IIR/FIR design, close-the-loop,
+transforms, spectral, LP, time-frequency, pulse measurements, multirate,
+waveform generators, alignment — see "Recently shipped" above), prior
+to that the data-container + multi-return arc (Phases 1.1 / 1.2 / 1.3 /
+2 / 3 / 4 / 5.1 / 5.2 / 5.3), prior to that the SystemVerilog Phase 5.6
 closure and the multi-backend persistent + isempty Tier 1.
 
 Items get demoted from this roadmap to `feature_status.md` /
