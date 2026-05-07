@@ -127,6 +127,13 @@ void Resolver::registerBuiltins() {
     "findpeaks", "rms", "peak2peak", "peak2rms", "rssq",
     "medfilt1", "hampel", "envelope",
     "midcross", "risetime", "falltime", "dutycycle",
+    /* Tier-3 §4.1 multirate. */
+    "upfirdn", "decimate", "interp", "resample",
+    /* Tier-3 §4.2 waveform generators. */
+    "chirp", "sawtooth", "square", "gauspuls",
+    "rectpuls", "tripuls", "sinc",
+    /* Tier-3 §4.4 alignment helpers. */
+    "xcov", "finddelay", "dtw",
     "interp1", "trapz", "cumtrapz", "gradient",
     "hamming", "hann", "blackman",
     /* Tier-1 (Signal Processing Toolbox roadmap §2.3) — windows tail. */

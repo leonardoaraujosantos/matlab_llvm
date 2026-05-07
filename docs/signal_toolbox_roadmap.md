@@ -54,6 +54,9 @@ today. Locations are in `runtime/matlab_runtime.cpp`.
 | Tier-2 §3.2 linear prediction + parametric PSD — `levinson`, `lpc`, `aryule`, `arburg`, `pyulear`, `pburg` | ✅ shipped | Levinson-Durbin + Burg recursion; AR PSD via σ²·\|1/A(e^{jω})\|² evaluation. **Open**: pcov/pmcov, subspace methods (pmusic/peig/rootmusic/rooteig), prony/stmcb. |
 | Tier-2 §3.3 time-frequency — `spectrogram(x, win, noverlap)` | ✅ shipped (single-output) | \|STFT\|² per (freq, frame). **Open**: stft/istft, pspectrum, instfreq, instbw, cwt (Tier-4 wavelets), wvd/fsst (Tier-4). |
 | Tier-3 §4.3 pulse measurements — `findpeaks`, `rms`, `peak2peak`, `peak2rms`, `rssq`, `medfilt1`, `hampel`, `envelope`, `midcross`, `risetime`, `falltime`, `dutycycle` | ✅ shipped (core surface) | Strict-monotonic findpeaks; MAD-based hampel; peak-interpolation envelope; 10/50/90% pulse statistics. **Open**: MinPeak* options for findpeaks; slewrate, pulseperiod, pulsewidth, overshoot, undershoot, settlingtime, statelevels. |
+| Tier-3 §4.1 real multirate — `upfirdn`, `decimate`, `interp`, `resample` | ✅ shipped | Anti-aliased; replaces the toy upsample/downsample stubs. **Open**: polyphase, group-delay correction. |
+| Tier-3 §4.2 waveform generators — `chirp`, `sawtooth`, `square`, `gauspuls`, `rectpuls`, `tripuls`, `sinc` | ✅ shipped | chirp linear method only. **Open**: chirp quadratic/log/hyperbolic, `pulstran`, `diric`, `gmonopuls`, `vco`. |
+| Tier-3 §4.4 alignment helpers — `xcov`, `finddelay`, `dtw` | ✅ shipped | **Open**: `alignsignals` (multi-return), `gccphat`, xcorr scaling-options. |
 | Multirate stubs | `upsample(x, n)`, `downsample(x, n)` | Zero-stuff / decimate; **no** anti-aliasing filter (raw `decimate`/`resample` still TODO). |
 | Numeric utilities used by SPT | `diff`, `polyfit`, `polyval`, `interp1`, `interp2`, `trapz`, `gradient` | |
 | Complex scalar / matrix arithmetic | `conj`, `real`, `imag`, `angle`, complex `+ - .* ./ * /` | Required for any spectrum / transfer-function math. |
@@ -460,6 +463,9 @@ gates the next on user-visible output:
 9. ~~**Tier 2 §3.2 — linear prediction + parametric PSD**~~ ✅ shipped (`levinson`, `lpc`, `aryule`, `arburg`, `pyulear`, `pburg`). **Open**: pcov/pmcov, subspace methods, prony/stmcb.
 10. ~~**Tier 2 §3.3 — time-frequency**~~ ✅ shipped (`spectrogram` single-output). **Open**: stft/istft, pspectrum, instfreq/instbw.
 11. ~~**Tier 3 §4.3 — pulse measurements core**~~ ✅ shipped (`findpeaks`, `rms`/`peak2peak`/`peak2rms`/`rssq`, `medfilt1`/`hampel`/`envelope`, `midcross`/`risetime`/`falltime`/`dutycycle`). **Open**: MinPeak* options, slewrate/pulseperiod/pulsewidth/overshoot/undershoot/settlingtime/statelevels.
+12. ~~**Tier 3 §4.1 — real multirate**~~ ✅ shipped (`upfirdn`, `decimate`, `interp`, `resample`). **Open**: polyphase, group-delay correction.
+13. ~~**Tier 3 §4.2 — waveform generators**~~ ✅ shipped (`chirp`, `sawtooth`, `square`, `gauspuls`, `rectpuls`, `tripuls`, `sinc`). **Open**: chirp non-linear methods, pulstran, diric, gmonopuls, vco.
+14. ~~**Tier 3 §4.4 — alignment helpers**~~ ✅ shipped (`xcov`, `finddelay`, `dtw`). **Open**: alignsignals, gccphat, xcorr scaling-option strings.
 6. **3.1 `periodogram`, `pwelch`, `dpss`, `pmtm`, `cpsd`, `mscohere`** (1 week).
 7. **3.4 `dct`/`idct`, `hilbert`, `czt`, `goertzel`, `fwht`** (3 sessions).
 8. **3.3 `spectrogram`, `stft`, `istft`** (3 sessions).

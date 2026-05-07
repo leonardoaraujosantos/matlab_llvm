@@ -373,6 +373,29 @@ matlab_mat   *matlab_pwelch(matlab_mat *x, matlab_mat *win, double noverlap);
  * STFT per (freq, frame). Default fs = 1 (normalised). */
 matlab_mat   *matlab_spectrogram(matlab_mat *x, matlab_mat *win, double noverlap);
 
+/* Tier-3 §4.4 alignment helpers — xcov / finddelay / dtw.
+ * alignsignals (multi-return) is a follow-on. */
+matlab_mat *matlab_xcov(matlab_mat *x, matlab_mat *y);
+double      matlab_finddelay_s(matlab_mat *x, matlab_mat *y);
+double      matlab_dtw_s(matlab_mat *x, matlab_mat *y);
+
+/* Tier-3 §4.2 waveform generators — chirp / sawtooth / square / pulses /
+ * sinc. All take a time-vector argument and return same-shape signal. */
+matlab_mat *matlab_chirp(matlab_mat *t, double f0, double t1, double f1);
+matlab_mat *matlab_sawtooth(matlab_mat *t, double w);
+matlab_mat *matlab_square(matlab_mat *t, double duty);
+matlab_mat *matlab_gauspuls(matlab_mat *t, double fc, double bw);
+matlab_mat *matlab_rectpuls(matlab_mat *t, double w);
+matlab_mat *matlab_tripuls(matlab_mat *t, double w);
+matlab_mat *matlab_sinc(matlab_mat *x);
+
+/* Tier-3 §4.1 real multirate — proper anti-aliased versions
+ * complementing the toy upsample / downsample stubs. */
+matlab_mat *matlab_upfirdn(matlab_mat *x, matlab_mat *h, double p, double q);
+matlab_mat *matlab_decimate(matlab_mat *x, double r);
+matlab_mat *matlab_interp(matlab_mat *x, double r);
+matlab_mat *matlab_resample(matlab_mat *x, double p, double q);
+
 /* Tier-3 §4.3 pulse measurements — findpeaks + scalar reductions. */
 matlab_mat *matlab_findpeaks_pks(matlab_mat *x);
 matlab_mat *matlab_findpeaks_locs(matlab_mat *x);

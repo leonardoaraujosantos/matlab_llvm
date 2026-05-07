@@ -1808,6 +1808,13 @@ static llvm::StringRef MatrixReturningFns[] = {
     "matlab_findpeaks_pks", "matlab_findpeaks_locs",
     "matlab_medfilt1", "matlab_hampel", "matlab_envelope",
     "matlab_midcross",
+    /* §4.1 multirate. */
+    "matlab_upfirdn", "matlab_decimate", "matlab_interp", "matlab_resample",
+    /* §4.2 waveform generators. */
+    "matlab_chirp", "matlab_sawtooth", "matlab_square", "matlab_gauspuls",
+    "matlab_rectpuls", "matlab_tripuls", "matlab_sinc",
+    /* §4.4 alignment helpers (matrix-returning entry only). */
+    "matlab_xcov",
     "matlab_interp1", "matlab_interp2", "matlab_trapz", "matlab_trapz_xy",
     "matlab_cumtrapz", "matlab_gradient", "matlab_diff",
     "matlab_conv", "matlab_conv2", "matlab_filter",

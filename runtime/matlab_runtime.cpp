@@ -5895,6 +5895,342 @@ matlab_mat *matlab_sgolayfilt(matlab_mat *x, double k_d, double f_d) {
     return Y;
 }
 
+/* Forward decl — filter_flat_ is defined later in this file (§2.5 helpers). */
+static void filter_flat_(const double *b, int64_t nb,
+                         const double *a, int64_t na,
+                         const double *x, int64_t nx,
+                         double *y);
+
+/*===========================================================================
+ * Tier-3 SPT §4.4 alignment helpers — xcov / finddelay / dtw.
+ *
+ *   c = xcov(x, y)         mean-removed cross-correlation
+ *   d = finddelay(x, y)    integer lag d s.t. y[n] ≈ x[n − d]
+ *   D = dtw(x, y)          dynamic-time-warping distance (scalar)
+ *
+ * alignsignals (multi-return) and gccphat are deferred to follow-on.
+ * xcorr scaling-option strings ('biased'/'unbiased'/'normalized'/...)
+ * also deferred — needs string-flag dispatch.
+ */
+matlab_mat *matlab_xcov(matlab_mat *x, matlab_mat *y);   /* fwd decl */
+matlab_mat *matlab_xcorr(matlab_mat *u, matlab_mat *v);  /* shipped earlier */
+
+matlab_mat *matlab_xcov(matlab_mat *x, matlab_mat *y) {
+    if (!x || !y) return mat_alloc(0, 0);
+    int64_t Nx = x->rows * x->cols;
+    int64_t Ny = y->rows * y->cols;
+    if (Nx == 0 || Ny == 0) return mat_alloc(0, 0);
+    /* Compute means and a copy of x/y with mean subtracted. */
+    double mx = 0, my = 0;
+    for (int64_t i = 0; i < Nx; ++i) mx += x->data[i];
+    for (int64_t i = 0; i < Ny; ++i) my += y->data[i];
+    mx /= (double)Nx; my /= (double)Ny;
+    matlab_mat *xm = mat_alloc(x->rows, x->cols);
+    matlab_mat *ym = mat_alloc(y->rows, y->cols);
+    for (int64_t i = 0; i < Nx; ++i) xm->data[i] = x->data[i] - mx;
+    for (int64_t i = 0; i < Ny; ++i) ym->data[i] = y->data[i] - my;
+    matlab_mat *C = matlab_xcorr(xm, ym);
+    free(xm->data); free(xm);
+    free(ym->data); free(ym);
+    return C;
+}
+
+double matlab_finddelay_s(matlab_mat *x, matlab_mat *y) {
+    if (!x || !y) return 0.0;
+    int64_t Nx = x->rows * x->cols;
+    int64_t Ny = y->rows * y->cols;
+    if (Nx == 0 || Ny == 0) return 0.0;
+    matlab_mat *C = matlab_xcorr(x, y);
+    int64_t Nc = C->rows * C->cols;
+    int64_t imax = 0;
+    double  vmax = fabs(C->data[0]);
+    for (int64_t i = 1; i < Nc; ++i) {
+        double v = fabs(C->data[i]);
+        if (v > vmax) { vmax = v; imax = i; }
+    }
+    free(C->data); free(C);
+    /* Lag = imax − (N − 1) where N is the larger of (Nx, Ny). */
+    int64_t N = Nx > Ny ? Nx : Ny;
+    return (double)(imax - (N - 1));
+}
+
+double matlab_dtw_s(matlab_mat *x, matlab_mat *y) {
+    if (!x || !y) return 0.0;
+    int64_t Nx = x->rows * x->cols;
+    int64_t Ny = y->rows * y->cols;
+    if (Nx == 0 || Ny == 0) return 0.0;
+    /* DP grid: D[i][j] = |x[i] − y[j]| + min(D[i−1][j], D[i][j−1], D[i−1][j−1]). */
+    std::vector<double> D((size_t)(Nx * Ny), 0.0);
+    auto IDX = [&](int64_t i, int64_t j) { return (size_t)(i * Ny + j); };
+    D[IDX(0, 0)] = fabs(x->data[0] - y->data[0]);
+    for (int64_t j = 1; j < Ny; ++j)
+        D[IDX(0, j)] = D[IDX(0, j - 1)] + fabs(x->data[0] - y->data[j]);
+    for (int64_t i = 1; i < Nx; ++i)
+        D[IDX(i, 0)] = D[IDX(i - 1, 0)] + fabs(x->data[i] - y->data[0]);
+    for (int64_t i = 1; i < Nx; ++i) {
+        for (int64_t j = 1; j < Ny; ++j) {
+            double a = D[IDX(i - 1, j)];
+            double b = D[IDX(i, j - 1)];
+            double c = D[IDX(i - 1, j - 1)];
+            double m = a < b ? a : b;
+            if (c < m) m = c;
+            D[IDX(i, j)] = m + fabs(x->data[i] - y->data[j]);
+        }
+    }
+    return D[IDX(Nx - 1, Ny - 1)];
+}
+
+/*===========================================================================
+ * Tier-3 SPT §4.2 waveform generators — chirp / sawtooth / square / pulses.
+ *
+ *   y = chirp(t, f0, t1, f1)  linear-method chirp (cosine)
+ *   y = sawtooth(t, w)        sawtooth wave of period 2π, width w (0..1)
+ *   y = square(t, duty)       square wave, duty in percent (0..100)
+ *   y = gauspuls(t, fc, bw)   Gaussian-modulated sinusoidal pulse
+ *   y = rectpuls(t, w)        rectangular pulse of width w (centred at 0)
+ *   y = tripuls(t, w)         triangular pulse of width w (centred at 0)
+ *   y = sinc(x)               sin(π·x) / (π·x), sinc(0) = 1
+ *
+ * Output is same-shape as t/x. Default-arg shorthands (e.g. sawtooth(t)
+ * with implicit w=1) are deferred to a follow-on slice.
+ */
+matlab_mat *matlab_chirp(matlab_mat *t, double f0, double t1, double f1) {
+    if (!t) return mat_alloc(0, 0);
+    int64_t N = t->rows * t->cols;
+    matlab_mat *Y = mat_alloc(t->rows, t->cols);
+    if (t1 <= 0.0) t1 = 1.0;
+    double k = (f1 - f0) / t1;
+    for (int64_t i = 0; i < N; ++i) {
+        double tau = t->data[i];
+        double phi = 2.0 * M_PI * (f0 * tau + 0.5 * k * tau * tau);
+        Y->data[i] = cos(phi);
+    }
+    return Y;
+}
+
+matlab_mat *matlab_sawtooth(matlab_mat *t, double w) {
+    if (!t) return mat_alloc(0, 0);
+    int64_t N = t->rows * t->cols;
+    matlab_mat *Y = mat_alloc(t->rows, t->cols);
+    if (w < 0.0) w = 0.0;
+    if (w > 1.0) w = 1.0;
+    for (int64_t i = 0; i < N; ++i) {
+        /* Map t to [0, 2π) modulo period. */
+        double tau = t->data[i] / (2.0 * M_PI);
+        tau -= floor(tau);
+        if (tau < w) {
+            Y->data[i] = (w > 0.0) ? (-1.0 + 2.0 * tau / w) : 0.0;
+        } else {
+            Y->data[i] = (w < 1.0) ? (1.0 - 2.0 * (tau - w) / (1.0 - w)) : 0.0;
+        }
+    }
+    return Y;
+}
+
+matlab_mat *matlab_square(matlab_mat *t, double duty) {
+    if (!t) return mat_alloc(0, 0);
+    int64_t N = t->rows * t->cols;
+    matlab_mat *Y = mat_alloc(t->rows, t->cols);
+    double dfrac = duty / 100.0;
+    if (dfrac < 0.0) dfrac = 0.0;
+    if (dfrac > 1.0) dfrac = 1.0;
+    for (int64_t i = 0; i < N; ++i) {
+        double tau = t->data[i] / (2.0 * M_PI);
+        tau -= floor(tau);
+        Y->data[i] = (tau < dfrac) ? 1.0 : -1.0;
+    }
+    return Y;
+}
+
+matlab_mat *matlab_gauspuls(matlab_mat *t, double fc, double bw) {
+    if (!t) return mat_alloc(0, 0);
+    int64_t N = t->rows * t->cols;
+    matlab_mat *Y = mat_alloc(t->rows, t->cols);
+    /* Standard MATLAB gauspuls: alpha set so the spectrum has -6dB
+     * fractional bandwidth bw. alpha = (π·fc·bw)² / (4·log(2)). */
+    double a = (M_PI * fc * bw);
+    a = (a * a) / (4.0 * log(2.0));
+    for (int64_t i = 0; i < N; ++i) {
+        double tau = t->data[i];
+        Y->data[i] = exp(-a * tau * tau) * cos(2.0 * M_PI * fc * tau);
+    }
+    return Y;
+}
+
+matlab_mat *matlab_rectpuls(matlab_mat *t, double w) {
+    if (!t) return mat_alloc(0, 0);
+    int64_t N = t->rows * t->cols;
+    matlab_mat *Y = mat_alloc(t->rows, t->cols);
+    double half = w * 0.5;
+    for (int64_t i = 0; i < N; ++i) {
+        double a = fabs(t->data[i]);
+        Y->data[i] = (a < half) ? 1.0 : (a == half ? 0.5 : 0.0);
+    }
+    return Y;
+}
+
+matlab_mat *matlab_tripuls(matlab_mat *t, double w) {
+    if (!t) return mat_alloc(0, 0);
+    int64_t N = t->rows * t->cols;
+    matlab_mat *Y = mat_alloc(t->rows, t->cols);
+    double half = w * 0.5;
+    for (int64_t i = 0; i < N; ++i) {
+        double a = fabs(t->data[i]);
+        Y->data[i] = (a < half) ? (1.0 - a / half) : 0.0;
+    }
+    return Y;
+}
+
+matlab_mat *matlab_sinc(matlab_mat *x) {
+    if (!x) return mat_alloc(0, 0);
+    int64_t N = x->rows * x->cols;
+    matlab_mat *Y = mat_alloc(x->rows, x->cols);
+    for (int64_t i = 0; i < N; ++i) {
+        double v = x->data[i];
+        if (v == 0.0) Y->data[i] = 1.0;
+        else { double a = M_PI * v; Y->data[i] = sin(a) / a; }
+    }
+    return Y;
+}
+
+/*===========================================================================
+ * Tier-3 SPT §4.1 real multirate — upfirdn / decimate / interp / resample.
+ *
+ *   y = upfirdn(x, h, p, q)   upsample-by-p → FIR-filter-with-h → downsample-by-q
+ *   y = decimate(x, r)        lowpass + downsample-by-r (FIR default)
+ *   y = interp(x, r)          upsample-by-r + lowpass (unit-gain interpolation)
+ *   y = resample(x, p, q)     polyphase resampling (combined direct algo)
+ *
+ * decimate / interp / resample build a default lowpass FIR via fir1
+ * (Hamming-windowed sinc). Output lengths match MATLAB convention:
+ *   decimate: ceil(N / r)      take every r-th of filtered signal
+ *   interp:   N * r            r-1 zero-stuffing + lowpass × r gain
+ *   resample: ceil(N · p / q)  upsample × p, lowpass, downsample × q
+ *
+ * The toy `upsample` / `downsample` stubs (zero-stuff / decimate without
+ * anti-aliasing) remain for backwards-compat — these are the proper
+ * anti-aliased versions. Polyphase decomposition (`polyphase(b, m)`)
+ * is a follow-on.
+ */
+matlab_mat *matlab_upfirdn(matlab_mat *x, matlab_mat *h,
+                           double p_d, double q_d) {
+    if (!x || !h) return mat_alloc(0, 0);
+    int p = (int)p_d, q = (int)q_d;
+    if (p < 1) p = 1;
+    if (q < 1) q = 1;
+    int64_t Nx = x->rows * x->cols;
+    int64_t Nh = h->rows * h->cols;
+    if (Nx == 0 || Nh == 0) return mat_alloc(1, 0);
+    /* Output length: full convolution Nx*p + Nh - 1, then ceil-div by q. */
+    int64_t N_filtered = Nx * p + Nh - 1;
+    int64_t Ny = (N_filtered + q - 1) / q;
+    /* Preserve column-shape if input was column. */
+    matlab_mat *Y = (x->cols == 1 && x->rows > 1) ? mat_alloc(Ny, 1)
+                                                   : mat_alloc(1, Ny);
+    for (int64_t m = 0; m < Ny; ++m) {
+        double sum = 0.0;
+        int64_t k = m * q;
+        for (int64_t n = 0; n < Nx; ++n) {
+            int64_t hi = k - n * p;
+            if (hi >= 0 && hi < Nh) sum += x->data[n] * h->data[hi];
+        }
+        Y->data[m] = sum;
+    }
+    return Y;
+}
+
+matlab_mat *matlab_decimate(matlab_mat *x, double r_d) {
+    if (!x) return mat_alloc(0, 0);
+    int r = (int)r_d;
+    if (r < 1) r = 1;
+    int64_t Nx = x->rows * x->cols;
+    int64_t Ny = (Nx + r - 1) / r;
+    matlab_mat *Y = (x->cols == 1 && x->rows > 1) ? mat_alloc(Ny, 1)
+                                                   : mat_alloc(1, Ny);
+    if (r == 1) {
+        memcpy(Y->data, x->data, (size_t)Nx * sizeof(double));
+        return Y;
+    }
+    if (Nx == 0) return Y;
+    /* Default: 30-tap Hamming-windowed lowpass at 0.8/r (safety margin
+     * below the new Nyquist of 1/r). */
+    matlab_mat *b = matlab_fir1(30.0, 0.8 / (double)r);
+    int64_t Nb = b->rows * b->cols;
+    std::vector<double> bn((size_t)Nb), an(1, 1.0);
+    for (int64_t i = 0; i < Nb; ++i) bn[(size_t)i] = b->data[i];
+    free(b->data); free(b);
+    /* Apply causal filter via the existing direct-form-II-T helper. */
+    std::vector<double> y_filt((size_t)Nx);
+    filter_flat_(bn.data(), Nb, an.data(), 1, x->data, Nx, y_filt.data());
+    /* Take every r-th sample starting from index 0. */
+    for (int64_t i = 0; i < Ny; ++i) Y->data[i] = y_filt[(size_t)(i * r)];
+    return Y;
+}
+
+matlab_mat *matlab_interp(matlab_mat *x, double r_d) {
+    if (!x) return mat_alloc(0, 0);
+    int r = (int)r_d;
+    if (r < 1) r = 1;
+    int64_t Nx = x->rows * x->cols;
+    int64_t Ny = Nx * r;
+    matlab_mat *Y = (x->cols == 1 && x->rows > 1) ? mat_alloc(Ny, 1)
+                                                   : mat_alloc(1, Ny);
+    if (r == 1) {
+        memcpy(Y->data, x->data, (size_t)Nx * sizeof(double));
+        return Y;
+    }
+    if (Nx == 0) return Y;
+    /* Zero-stuff to length Nx·r. */
+    std::vector<double> y_up((size_t)Ny, 0.0);
+    for (int64_t i = 0; i < Nx; ++i) y_up[(size_t)(i * r)] = x->data[i];
+    /* MATLAB's interp default is a length-(2·4·r+1) Hamming-windowed
+     * lowpass at Wn = 1/r, scaled by r for unit-gain interpolation. */
+    int filt_order = 8 * r;
+    matlab_mat *b = matlab_fir1((double)filt_order, 1.0 / (double)r);
+    int64_t Nb = b->rows * b->cols;
+    std::vector<double> bn((size_t)Nb), an(1, 1.0);
+    for (int64_t i = 0; i < Nb; ++i) bn[(size_t)i] = (double)r * b->data[i];
+    free(b->data); free(b);
+    filter_flat_(bn.data(), Nb, an.data(), 1, y_up.data(), Ny, Y->data);
+    return Y;
+}
+
+matlab_mat *matlab_resample(matlab_mat *x, double p_d, double q_d) {
+    if (!x) return mat_alloc(0, 0);
+    int p = (int)p_d, q = (int)q_d;
+    if (p < 1) p = 1;
+    if (q < 1) q = 1;
+    int64_t Nx = x->rows * x->cols;
+    int64_t Ny = (Nx * p + q - 1) / q;
+    matlab_mat *Y = (x->cols == 1 && x->rows > 1) ? mat_alloc(Ny, 1)
+                                                   : mat_alloc(1, Ny);
+    if (p == 1 && q == 1) {
+        memcpy(Y->data, x->data, (size_t)Nx * sizeof(double));
+        return Y;
+    }
+    if (Nx == 0) return Y;
+    /* Anti-alias filter at the lower of the two Nyquist limits. */
+    double Wn = (p >= q) ? (1.0 / (double)p) : (1.0 / (double)q);
+    int M = (p > q) ? p : q;
+    int filt_order = 8 * M;
+    matlab_mat *b = matlab_fir1((double)filt_order, Wn);
+    int64_t Nb = b->rows * b->cols;
+    std::vector<double> hn((size_t)Nb);
+    for (int64_t i = 0; i < Nb; ++i) hn[(size_t)i] = (double)p * b->data[i];
+    free(b->data); free(b);
+    /* Direct upfirdn-style algorithm: y[m] = sum_n x[n] · h[m·q − n·p]. */
+    for (int64_t m = 0; m < Ny; ++m) {
+        double sum = 0.0;
+        int64_t k = m * q;
+        for (int64_t n = 0; n < Nx; ++n) {
+            int64_t hi = k - n * p;
+            if (hi >= 0 && hi < Nb) sum += hn[(size_t)hi] * x->data[n];
+        }
+        Y->data[m] = sum;
+    }
+    return Y;
+}
+
 /*===========================================================================
  * Tier-3 SPT §4.3 pulse measurements — findpeaks + scalar reductions.
  *

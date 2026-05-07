@@ -2844,6 +2844,248 @@ def arburg(x, p):
 
 
 # --- §4.3 pulse measurements + scalar reductions --------------------
+# --- §4.4 alignment helpers --------------------------------------------
+def xcov(x, y):
+    xa = np.asarray(x, dtype=float).ravel()
+    ya = np.asarray(y, dtype=float).ravel()
+    if xa.size == 0 or ya.size == 0: return np.zeros((0, 0))
+    return _xcorr_helper(xa - xa.mean(), ya - ya.mean())
+
+
+def _xcorr_helper(xa, ya):
+    """Linear cross-correlation, biased / no scaling. Mirrors xcorr.
+    Returns row vector to match the C runtime's matlab_xcorr shape."""
+    Nx = xa.size; Ny = ya.size
+    nlags = Nx + Ny - 1
+    out = np.zeros(nlags)
+    for k in _pyrange(nlags):
+        lag = k - (Nx - 1)
+        s = 0.0
+        for n in _pyrange(Nx):
+            m = n - lag
+            if 0 <= m < Ny:
+                s += xa[n] * ya[m]
+        out[k] = s
+    return out.reshape((1, -1))
+
+
+def finddelay_s(x, y):
+    xa = np.asarray(x, dtype=float).ravel()
+    ya = np.asarray(y, dtype=float).ravel()
+    if xa.size == 0 or ya.size == 0: return 0.0
+    c = _xcorr_helper(xa, ya).ravel()
+    imax = int(np.argmax(np.abs(c)))
+    N = _pymax(xa.size, ya.size)
+    return float(imax - (N - 1))
+
+
+def dtw_s(x, y):
+    xa = np.asarray(x, dtype=float).ravel()
+    ya = np.asarray(y, dtype=float).ravel()
+    Nx = xa.size; Ny = ya.size
+    if Nx == 0 or Ny == 0: return 0.0
+    D = np.zeros((Nx, Ny))
+    D[0, 0] = abs(xa[0] - ya[0])
+    for j in _pyrange(1, Ny):
+        D[0, j] = D[0, j - 1] + abs(xa[0] - ya[j])
+    for i in _pyrange(1, Nx):
+        D[i, 0] = D[i - 1, 0] + abs(xa[i] - ya[0])
+    for i in _pyrange(1, Nx):
+        for j in _pyrange(1, Ny):
+            m = _pymin(D[i - 1, j], D[i, j - 1], D[i - 1, j - 1])
+            D[i, j] = m + abs(xa[i] - ya[j])
+    return float(D[Nx - 1, Ny - 1])
+
+
+# --- §4.2 waveform generators ------------------------------------------
+def chirp(t, f0, t1, f1):
+    a = np.asarray(t, dtype=float).ravel()
+    if t1 <= 0: t1 = 1.0
+    k = (f1 - f0) / t1
+    phi = 2.0 * np.pi * (f0 * a + 0.5 * k * a * a)
+    out = np.cos(phi)
+    xa = np.asarray(t)
+    if xa.ndim == 2 and xa.shape[1] == 1: return out.reshape((-1, 1))
+    return out.reshape((1, -1)) if xa.ndim <= 1 else out.reshape(xa.shape)
+
+
+def sawtooth(t, w):
+    a = np.asarray(t, dtype=float).ravel()
+    if w < 0: w = 0.0
+    if w > 1: w = 1.0
+    out = np.zeros(a.size)
+    for i in _pyrange(a.size):
+        tau = a[i] / (2.0 * np.pi)
+        tau -= np.floor(tau)
+        if tau < w:
+            out[i] = (-1.0 + 2.0 * tau / w) if w > 0.0 else 0.0
+        else:
+            out[i] = (1.0 - 2.0 * (tau - w) / (1.0 - w)) if w < 1.0 else 0.0
+    xa = np.asarray(t)
+    if xa.ndim == 2 and xa.shape[1] == 1: return out.reshape((-1, 1))
+    return out.reshape((1, -1)) if xa.ndim <= 1 else out.reshape(xa.shape)
+
+
+def square(t, duty):
+    a = np.asarray(t, dtype=float).ravel()
+    dfrac = duty / 100.0
+    if dfrac < 0: dfrac = 0.0
+    if dfrac > 1: dfrac = 1.0
+    out = np.zeros(a.size)
+    for i in _pyrange(a.size):
+        tau = a[i] / (2.0 * np.pi)
+        tau -= np.floor(tau)
+        out[i] = 1.0 if tau < dfrac else -1.0
+    xa = np.asarray(t)
+    if xa.ndim == 2 and xa.shape[1] == 1: return out.reshape((-1, 1))
+    return out.reshape((1, -1)) if xa.ndim <= 1 else out.reshape(xa.shape)
+
+
+def gauspuls(t, fc, bw):
+    a = np.asarray(t, dtype=float).ravel()
+    alpha = (np.pi * fc * bw)
+    alpha = (alpha * alpha) / (4.0 * np.log(2.0))
+    out = np.exp(-alpha * a * a) * np.cos(2.0 * np.pi * fc * a)
+    xa = np.asarray(t)
+    if xa.ndim == 2 and xa.shape[1] == 1: return out.reshape((-1, 1))
+    return out.reshape((1, -1)) if xa.ndim <= 1 else out.reshape(xa.shape)
+
+
+def rectpuls(t, w):
+    a = np.asarray(t, dtype=float).ravel()
+    half = w * 0.5
+    out = np.zeros(a.size)
+    for i in _pyrange(a.size):
+        v = abs(a[i])
+        out[i] = 1.0 if v < half else (0.5 if v == half else 0.0)
+    xa = np.asarray(t)
+    if xa.ndim == 2 and xa.shape[1] == 1: return out.reshape((-1, 1))
+    return out.reshape((1, -1)) if xa.ndim <= 1 else out.reshape(xa.shape)
+
+
+def tripuls(t, w):
+    a = np.asarray(t, dtype=float).ravel()
+    half = w * 0.5
+    out = np.zeros(a.size)
+    for i in _pyrange(a.size):
+        v = abs(a[i])
+        out[i] = (1.0 - v / half) if v < half else 0.0
+    xa = np.asarray(t)
+    if xa.ndim == 2 and xa.shape[1] == 1: return out.reshape((-1, 1))
+    return out.reshape((1, -1)) if xa.ndim <= 1 else out.reshape(xa.shape)
+
+
+def sinc(x):
+    a = np.asarray(x, dtype=float).ravel()
+    with np.errstate(divide="ignore", invalid="ignore"):
+        out = np.where(a == 0.0, 1.0, np.sin(np.pi * a) / (np.pi * a))
+    xa = np.asarray(x)
+    if xa.ndim == 2 and xa.shape[1] == 1: return out.reshape((-1, 1))
+    return out.reshape((1, -1)) if xa.ndim <= 1 else out.reshape(xa.shape)
+
+
+# --- §4.1 real multirate ----------------------------------------------
+def upfirdn(x, h, p, q):
+    xa = np.asarray(x, dtype=float).ravel()
+    ha = np.asarray(h, dtype=float).ravel()
+    p = int(p); q = int(q)
+    if p < 1: p = 1
+    if q < 1: q = 1
+    Nx = xa.size; Nh = ha.size
+    if Nx == 0 or Nh == 0: return np.zeros((1, 0))
+    Nf = Nx * p + Nh - 1
+    Ny = (Nf + q - 1) // q
+    out = np.zeros(Ny)
+    for m in _pyrange(Ny):
+        k = m * q
+        s = 0.0
+        for n in _pyrange(Nx):
+            hi = k - n * p
+            if 0 <= hi < Nh:
+                s += xa[n] * ha[hi]
+        out[m] = s
+    xa_orig = np.asarray(x)
+    if xa_orig.ndim == 2 and xa_orig.shape[1] == 1:
+        return out.reshape((-1, 1))
+    return out.reshape((1, -1))
+
+
+def decimate(x, r):
+    xa = np.asarray(x, dtype=float).ravel()
+    Nx = xa.size
+    r = int(r)
+    if r < 1: r = 1
+    Ny = (Nx + r - 1) // r
+    if r == 1 or Nx == 0:
+        out = xa.copy()
+        xa_orig = np.asarray(x)
+        if xa_orig.ndim == 2 and xa_orig.shape[1] == 1: return out.reshape((-1, 1))
+        return out.reshape((1, -1))
+    b = fir1(30, 0.8 / r).ravel()
+    a = np.array([1.0])
+    y = _filter_flat(b, a, xa)
+    out = np.zeros(Ny)
+    for i in _pyrange(Ny): out[i] = y[i * r]
+    xa_orig = np.asarray(x)
+    if xa_orig.ndim == 2 and xa_orig.shape[1] == 1: return out.reshape((-1, 1))
+    return out.reshape((1, -1))
+
+
+def interp(x, r):
+    xa = np.asarray(x, dtype=float).ravel()
+    Nx = xa.size
+    r = int(r)
+    if r < 1: r = 1
+    Ny = Nx * r
+    if r == 1 or Nx == 0:
+        out = xa.copy()
+        xa_orig = np.asarray(x)
+        if xa_orig.ndim == 2 and xa_orig.shape[1] == 1: return out.reshape((-1, 1))
+        return out.reshape((1, -1))
+    y_up = np.zeros(Ny)
+    for i in _pyrange(Nx): y_up[i * r] = xa[i]
+    filt_order = 8 * r
+    b = fir1(filt_order, 1.0 / r).ravel()
+    bn = b * r
+    a = np.array([1.0])
+    out = _filter_flat(bn, a, y_up)
+    xa_orig = np.asarray(x)
+    if xa_orig.ndim == 2 and xa_orig.shape[1] == 1: return out.reshape((-1, 1))
+    return out.reshape((1, -1))
+
+
+def resample(x, p, q):
+    xa = np.asarray(x, dtype=float).ravel()
+    Nx = xa.size
+    p = int(p); q = int(q)
+    if p < 1: p = 1
+    if q < 1: q = 1
+    Ny = (Nx * p + q - 1) // q
+    if (p == 1 and q == 1) or Nx == 0:
+        out = xa.copy()
+        xa_orig = np.asarray(x)
+        if xa_orig.ndim == 2 and xa_orig.shape[1] == 1: return out.reshape((-1, 1))
+        return out.reshape((1, -1))
+    Wn = (1.0 / p) if p >= q else (1.0 / q)
+    M = _pymax(p, q)
+    filt_order = 8 * M
+    b = fir1(filt_order, Wn).ravel()
+    bn = b * p
+    Nb = bn.size
+    out = np.zeros(Ny)
+    for m in _pyrange(Ny):
+        k = m * q
+        s = 0.0
+        for n in _pyrange(Nx):
+            hi = k - n * p
+            if 0 <= hi < Nb:
+                s += bn[hi] * xa[n]
+        out[m] = s
+    xa_orig = np.asarray(x)
+    if xa_orig.ndim == 2 and xa_orig.shape[1] == 1: return out.reshape((-1, 1))
+    return out.reshape((1, -1))
+
+
 def findpeaks_pks(x):
     a = np.asarray(x, dtype=float).ravel()
     N = a.size

@@ -3179,6 +3179,270 @@ export function arburg(x: any, p: number): NDArray {
   return new NDArray(a, [1, pp + 1]);
 }
 
+// --- §4.4 alignment helpers ---------------------------------------------
+function _xcorrHelperTS(xa: Float64Array, ya: Float64Array): Float64Array {
+  const Nx = xa.length, Ny = ya.length;
+  const N = Nx + Ny - 1;
+  const out = new Float64Array(N);
+  for (let k = 0; k < N; k++) {
+    const lag = k - (Nx - 1);
+    let s = 0;
+    for (let n = 0; n < Nx; n++) {
+      const m = n - lag;
+      if (m >= 0 && m < Ny) s += xa[n] * ya[m];
+    }
+    out[k] = s;
+  }
+  return out;
+}
+
+export function xcov(x: any, y: any): NDArray {
+  const xa = asArray(x).data;
+  const ya = asArray(y).data;
+  if (xa.length === 0 || ya.length === 0)
+    return new NDArray(new Float64Array(0), [0, 0]);
+  let mx = 0, my = 0;
+  for (let i = 0; i < xa.length; i++) mx += xa[i];
+  for (let i = 0; i < ya.length; i++) my += ya[i];
+  mx /= xa.length; my /= ya.length;
+  const xm = new Float64Array(xa.length);
+  const ym = new Float64Array(ya.length);
+  for (let i = 0; i < xa.length; i++) xm[i] = xa[i] - mx;
+  for (let i = 0; i < ya.length; i++) ym[i] = ya[i] - my;
+  const c = _xcorrHelperTS(xm, ym);
+  return new NDArray(c, [1, c.length]);
+}
+
+export function finddelay_s(x: any, y: any): number {
+  const xa = asArray(x).data;
+  const ya = asArray(y).data;
+  if (xa.length === 0 || ya.length === 0) return 0;
+  const c = _xcorrHelperTS(xa as Float64Array, ya as Float64Array);
+  let imax = 0, vmax = Math.abs(c[0]);
+  for (let i = 1; i < c.length; i++) {
+    const v = Math.abs(c[i]);
+    if (v > vmax) { vmax = v; imax = i; }
+  }
+  const N = Math.max(xa.length, ya.length);
+  return imax - (N - 1);
+}
+
+export function dtw_s(x: any, y: any): number {
+  const xa = asArray(x).data;
+  const ya = asArray(y).data;
+  const Nx = xa.length, Ny = ya.length;
+  if (Nx === 0 || Ny === 0) return 0;
+  const D = new Float64Array(Nx * Ny);
+  D[0] = Math.abs(xa[0] - ya[0]);
+  for (let j = 1; j < Ny; j++)
+    D[j] = D[j - 1] + Math.abs(xa[0] - ya[j]);
+  for (let i = 1; i < Nx; i++)
+    D[i * Ny] = D[(i - 1) * Ny] + Math.abs(xa[i] - ya[0]);
+  for (let i = 1; i < Nx; i++) {
+    for (let j = 1; j < Ny; j++) {
+      const a = D[(i - 1) * Ny + j];
+      const b = D[i * Ny + (j - 1)];
+      const c = D[(i - 1) * Ny + (j - 1)];
+      let m = a < b ? a : b;
+      if (c < m) m = c;
+      D[i * Ny + j] = m + Math.abs(xa[i] - ya[j]);
+    }
+  }
+  return D[(Nx - 1) * Ny + (Ny - 1)];
+}
+
+// --- §4.2 waveform generators -------------------------------------------
+function _shapeLikeTS(xa: NDArray, out: Float64Array): NDArray {
+  return new NDArray(out, xa.shape.slice());
+}
+
+export function chirp(t: any, f0: number, t1: number, f1: number): NDArray {
+  const xa = asArray(t); const a = xa.data;
+  if (t1 <= 0) t1 = 1;
+  const k = (f1 - f0) / t1;
+  const out = new Float64Array(a.length);
+  for (let i = 0; i < a.length; i++) {
+    const tau = a[i];
+    const phi = 2 * Math.PI * (f0 * tau + 0.5 * k * tau * tau);
+    out[i] = Math.cos(phi);
+  }
+  return _shapeLikeTS(xa, out);
+}
+
+export function sawtooth(t: any, w: number): NDArray {
+  const xa = asArray(t); const a = xa.data;
+  if (w < 0) w = 0;
+  if (w > 1) w = 1;
+  const out = new Float64Array(a.length);
+  for (let i = 0; i < a.length; i++) {
+    let tau = a[i] / (2 * Math.PI);
+    tau -= Math.floor(tau);
+    if (tau < w)
+      out[i] = (w > 0) ? (-1 + 2 * tau / w) : 0;
+    else
+      out[i] = (w < 1) ? (1 - 2 * (tau - w) / (1 - w)) : 0;
+  }
+  return _shapeLikeTS(xa, out);
+}
+
+export function square(t: any, duty: number): NDArray {
+  const xa = asArray(t); const a = xa.data;
+  let dfrac = duty / 100;
+  if (dfrac < 0) dfrac = 0;
+  if (dfrac > 1) dfrac = 1;
+  const out = new Float64Array(a.length);
+  for (let i = 0; i < a.length; i++) {
+    let tau = a[i] / (2 * Math.PI);
+    tau -= Math.floor(tau);
+    out[i] = tau < dfrac ? 1 : -1;
+  }
+  return _shapeLikeTS(xa, out);
+}
+
+export function gauspuls(t: any, fc: number, bw: number): NDArray {
+  const xa = asArray(t); const a = xa.data;
+  let alpha = Math.PI * fc * bw;
+  alpha = (alpha * alpha) / (4 * Math.log(2));
+  const out = new Float64Array(a.length);
+  for (let i = 0; i < a.length; i++)
+    out[i] = Math.exp(-alpha * a[i] * a[i]) * Math.cos(2 * Math.PI * fc * a[i]);
+  return _shapeLikeTS(xa, out);
+}
+
+export function rectpuls(t: any, w: number): NDArray {
+  const xa = asArray(t); const a = xa.data;
+  const half = w * 0.5;
+  const out = new Float64Array(a.length);
+  for (let i = 0; i < a.length; i++) {
+    const v = Math.abs(a[i]);
+    out[i] = v < half ? 1 : (v === half ? 0.5 : 0);
+  }
+  return _shapeLikeTS(xa, out);
+}
+
+export function tripuls(t: any, w: number): NDArray {
+  const xa = asArray(t); const a = xa.data;
+  const half = w * 0.5;
+  const out = new Float64Array(a.length);
+  for (let i = 0; i < a.length; i++) {
+    const v = Math.abs(a[i]);
+    out[i] = v < half ? (1 - v / half) : 0;
+  }
+  return _shapeLikeTS(xa, out);
+}
+
+export function sinc(x: any): NDArray {
+  const xa = asArray(x); const a = xa.data;
+  const out = new Float64Array(a.length);
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] === 0) out[i] = 1;
+    else { const arg = Math.PI * a[i]; out[i] = Math.sin(arg) / arg; }
+  }
+  return _shapeLikeTS(xa, out);
+}
+
+// --- §4.1 real multirate ------------------------------------------------
+export function upfirdn(x: any, h: any, p: number, q: number): NDArray {
+  const xa = asArray(x).data, ha = asArray(h).data;
+  const pp = Math.max(1, p | 0);
+  const qq = Math.max(1, q | 0);
+  const Nx = xa.length, Nh = ha.length;
+  if (Nx === 0 || Nh === 0) return new NDArray(new Float64Array(0), [1, 0]);
+  const Nf = Nx * pp + Nh - 1;
+  const Ny = Math.ceil(Nf / qq);
+  const out = new Float64Array(Ny);
+  for (let m = 0; m < Ny; m++) {
+    let s = 0;
+    const k = m * qq;
+    for (let n = 0; n < Nx; n++) {
+      const hi = k - n * pp;
+      if (hi >= 0 && hi < Nh) s += xa[n] * ha[hi];
+    }
+    out[m] = s;
+  }
+  const xshape = asArray(x);
+  return (xshape.cols === 1 && xshape.rows > 1)
+       ? new NDArray(out, [Ny, 1])
+       : new NDArray(out, [1, Ny]);
+}
+
+export function decimate(x: any, r: number): NDArray {
+  const xa = asArray(x).data;
+  const Nx = xa.length;
+  const rr = Math.max(1, r | 0);
+  const Ny = Math.ceil(Nx / rr);
+  const xshape = asArray(x);
+  if (rr === 1 || Nx === 0) {
+    return (xshape.cols === 1 && xshape.rows > 1)
+         ? new NDArray(Float64Array.from(xa), [Nx, 1])
+         : new NDArray(Float64Array.from(xa), [1, Nx]);
+  }
+  const b = fir1(30, 0.8 / rr).data as Float64Array;
+  const a = Float64Array.of(1.0);
+  const y = _filterFlat(b, a, Float64Array.from(xa));
+  const out = new Float64Array(Ny);
+  for (let i = 0; i < Ny; i++) out[i] = y[i * rr];
+  return (xshape.cols === 1 && xshape.rows > 1)
+       ? new NDArray(out, [Ny, 1])
+       : new NDArray(out, [1, Ny]);
+}
+
+export function interp(x: any, r: number): NDArray {
+  const xa = asArray(x).data;
+  const Nx = xa.length;
+  const rr = Math.max(1, r | 0);
+  const Ny = Nx * rr;
+  const xshape = asArray(x);
+  if (rr === 1 || Nx === 0) {
+    return (xshape.cols === 1 && xshape.rows > 1)
+         ? new NDArray(Float64Array.from(xa), [Nx, 1])
+         : new NDArray(Float64Array.from(xa), [1, Nx]);
+  }
+  const yUp = new Float64Array(Ny);
+  for (let i = 0; i < Nx; i++) yUp[i * rr] = xa[i];
+  const b = fir1(8 * rr, 1.0 / rr).data as Float64Array;
+  const bn = new Float64Array(b.length);
+  for (let i = 0; i < b.length; i++) bn[i] = rr * b[i];
+  const a = Float64Array.of(1.0);
+  const out = _filterFlat(bn, a, yUp);
+  return (xshape.cols === 1 && xshape.rows > 1)
+       ? new NDArray(out, [Ny, 1])
+       : new NDArray(out, [1, Ny]);
+}
+
+export function resample(x: any, p: number, q: number): NDArray {
+  const xa = asArray(x).data;
+  const Nx = xa.length;
+  const pp = Math.max(1, p | 0);
+  const qq = Math.max(1, q | 0);
+  const Ny = Math.ceil(Nx * pp / qq);
+  const xshape = asArray(x);
+  if ((pp === 1 && qq === 1) || Nx === 0) {
+    return (xshape.cols === 1 && xshape.rows > 1)
+         ? new NDArray(Float64Array.from(xa), [Nx, 1])
+         : new NDArray(Float64Array.from(xa), [1, Nx]);
+  }
+  const Wn = pp >= qq ? (1 / pp) : (1 / qq);
+  const M = Math.max(pp, qq);
+  const b = fir1(8 * M, Wn).data as Float64Array;
+  const Nb = b.length;
+  const hn = new Float64Array(Nb);
+  for (let i = 0; i < Nb; i++) hn[i] = pp * b[i];
+  const out = new Float64Array(Ny);
+  for (let m = 0; m < Ny; m++) {
+    let s = 0;
+    const k = m * qq;
+    for (let n = 0; n < Nx; n++) {
+      const hi = k - n * pp;
+      if (hi >= 0 && hi < Nb) s += hn[hi] * xa[n];
+    }
+    out[m] = s;
+  }
+  return (xshape.cols === 1 && xshape.rows > 1)
+       ? new NDArray(out, [Ny, 1])
+       : new NDArray(out, [1, Ny]);
+}
+
 // --- §4.3 pulse measurements + scalar reductions ----------------------
 export function findpeaks_pks(x: any): NDArray {
   const a = asArray(x).data;

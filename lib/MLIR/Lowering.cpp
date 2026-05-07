@@ -6455,6 +6455,8 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             /* Tier-3 §4.3 scalar reductions. */
             "rms", "peak2peak", "peak2rms", "rssq",
             "risetime", "falltime", "dutycycle",
+            /* Tier-3 §4.4 scalar reductions. */
+            "finddelay", "dtw",
           };
           static const llvm::StringSet<> PtrRet = {
             "zeros", "ones", "eye", "magic", "rand", "randn",
@@ -6501,6 +6503,13 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
              * F64Ret below. */
             "findpeaks",
             "medfilt1", "hampel", "envelope", "midcross",
+            /* Tier-3 §4.1 multirate. */
+            "upfirdn", "decimate", "interp", "resample",
+            /* Tier-3 §4.2 waveform generators. */
+            "chirp", "sawtooth", "square", "gauspuls",
+            "rectpuls", "tripuls", "sinc",
+            /* Tier-3 §4.4 — xcov returns a matrix; finddelay/dtw scalars. */
+            "xcov",
             "interp1", "trapz", "cumtrapz", "gradient",
             "hamming", "hann", "blackman",
             /* Tier-1 windows tail (signal_toolbox_roadmap §2.3) — all

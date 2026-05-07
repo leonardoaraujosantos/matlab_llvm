@@ -3430,6 +3430,23 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"risetime",    "matlab_risetime_s",    0, "p"},
       {"falltime",    "matlab_falltime_s",    0, "p"},
       {"dutycycle",   "matlab_dutycycle_s",   0, "p"},
+      /* §4.1 multirate. */
+      {"upfirdn",     "matlab_upfirdn",       1, "ppff"},
+      {"decimate",    "matlab_decimate",      1, "pf"},
+      {"interp",      "matlab_interp",        1, "pf"},
+      {"resample",    "matlab_resample",      1, "pff"},
+      /* §4.2 waveform generators. */
+      {"chirp",       "matlab_chirp",         1, "pfff"},
+      {"sawtooth",    "matlab_sawtooth",      1, "pf"},
+      {"square",      "matlab_square",        1, "pf"},
+      {"gauspuls",    "matlab_gauspuls",      1, "pff"},
+      {"rectpuls",    "matlab_rectpuls",      1, "pf"},
+      {"tripuls",     "matlab_tripuls",       1, "pf"},
+      {"sinc",        "matlab_sinc",          1, "p"},
+      /* §4.4 alignment helpers. */
+      {"xcov",        "matlab_xcov",          1, "pp"},
+      {"finddelay",   "matlab_finddelay_s",   0, "pp"},
+      {"dtw",         "matlab_dtw_s",         0, "pp"},
       {"interp1",    "matlab_interp1",    1, "ppp"},
       {"trapz",      "matlab_trapz",      1, "p"},
       {"trapz",      "matlab_trapz_xy",   1, "pp"},
