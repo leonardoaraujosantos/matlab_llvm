@@ -3380,6 +3380,9 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"fwht",       "matlab_fwht",       1, "p"},
       {"hilbert",    "matlab_hilbert",    1, "p"},
       {"goertzel",   "matlab_goertzel",   1, "pf"},
+      /* §3.1 nonparametric spectral. */
+      {"periodogram", "matlab_periodogram", 1, "p"},
+      {"pwelch",      "matlab_pwelch",      1, "ppf"},
       {"interp1",    "matlab_interp1",    1, "ppp"},
       {"trapz",      "matlab_trapz",      1, "p"},
       {"trapz",      "matlab_trapz_xy",   1, "pp"},

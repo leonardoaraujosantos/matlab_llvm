@@ -265,9 +265,83 @@ matlab_mat_c *matlab_roots(matlab_mat *p) {
 }
 
 /* Forward decls of FFT entries defined later in this file. Used by
- * hilbert immediately below. */
+ * hilbert / periodogram / pwelch immediately below. */
 matlab_mat_c *matlab_fft_c(void *Aptr);
 matlab_mat_c *matlab_ifft_c(void *Aptr);
+
+/*===========================================================================
+ * Tier-2 SPT §3.1 nonparametric spectral estimation.
+ *
+ *   P = periodogram(x)              |FFT(x)|² / N, single-sided
+ *   P = pwelch(x, win, noverlap)    Welch's averaged-modified-periodogram
+ *
+ * Single-output form. The 2-return [P, f] form would also give the
+ * frequency vector — deferable. Default fs = 1; we use unit fs
+ * throughout this slice. (Two-arg form `pwelch(x, win, noverlap, nfft, fs)`
+ * is a Tier-2 follow-on — needs the multi-arg dispatch wired.)
+ */
+matlab_mat *matlab_periodogram(matlab_mat *x) {
+    if (!x) return mat_alloc(0, 0);
+    int64_t N = x->rows * x->cols;
+    if (N == 0) return mat_alloc(0, 0);
+    matlab_mat_c *X = matlab_fft_c((void *)x);
+    int64_t M = N / 2 + 1;
+    matlab_mat *P = mat_alloc(M, 1);
+    auto sq = [&](int k) {
+        return X->re[k] * X->re[k] + X->im[k] * X->im[k];
+    };
+    P->data[0] = sq(0) / (double)N;
+    int64_t mid_end = (N % 2 == 0) ? (M - 1) : M;
+    for (int64_t k = 1; k < mid_end; ++k)
+        P->data[k] = 2.0 * sq((int)k) / (double)N;
+    if (N % 2 == 0)
+        P->data[M - 1] = sq((int)(N / 2)) / (double)N;
+    free(X->re); free(X->im); free(X);
+    return P;
+}
+
+matlab_mat *matlab_pwelch(matlab_mat *x, matlab_mat *win, double noverlap_d) {
+    if (!x || !win) return mat_alloc(0, 0);
+    int64_t N  = x->rows * x->cols;
+    int64_t L  = win->rows * win->cols;
+    int     no = (int)noverlap_d;
+    if (no < 0) no = 0;
+    if (no >= L) no = L - 1;
+    int step = (int)L - no;
+    if (step < 1) step = 1;
+    if (N < L) {
+        matlab_mat *P = mat_alloc(L / 2 + 1, 1);
+        return P;          /* not enough data — return zeros. */
+    }
+    int K = (int)((N - L) / step) + 1;
+    int64_t M = L / 2 + 1;
+    /* Window energy U = sum(win^2). */
+    double U = 0.0;
+    for (int64_t i = 0; i < L; ++i) U += win->data[i] * win->data[i];
+    matlab_mat *Pxx = mat_alloc(M, 1);
+    matlab_mat seg = { /*data*/ nullptr, /*rows*/ 1, /*cols*/ L };
+    std::vector<double> xseg((size_t)L);
+    seg.data = xseg.data();
+    for (int s = 0; s < K; ++s) {
+        for (int64_t i = 0; i < L; ++i)
+            xseg[(size_t)i] = x->data[s * step + i] * win->data[i];
+        matlab_mat_c *X = matlab_fft_c((void *)&seg);
+        auto sq = [&](int k) {
+            return X->re[k] * X->re[k] + X->im[k] * X->im[k];
+        };
+        Pxx->data[0] += sq(0);
+        int64_t mid_end = (L % 2 == 0) ? (M - 1) : M;
+        for (int64_t k = 1; k < mid_end; ++k)
+            Pxx->data[k] += 2.0 * sq((int)k);
+        if (L % 2 == 0)
+            Pxx->data[M - 1] += sq((int)(L / 2));
+        free(X->re); free(X->im); free(X);
+    }
+    double denom = (double)K * U;
+    if (denom > 0.0)
+        for (int64_t k = 0; k < M; ++k) Pxx->data[k] /= denom;
+    return Pxx;
+}
 
 /*===========================================================================
  * Tier-2 SPT §3.4 transforms — hilbert + goertzel.

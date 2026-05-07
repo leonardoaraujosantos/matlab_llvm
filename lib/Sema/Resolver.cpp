@@ -115,6 +115,8 @@ void Resolver::registerBuiltins() {
     "filtfilt", "sosfilt", "impz", "stepz", "grpdelay",
     /* Tier-2 §3.4 — transforms tail. */
     "dct", "idct", "fwht", "hilbert", "goertzel",
+    /* Tier-2 §3.1 — nonparametric spectral estimation. */
+    "periodogram", "pwelch",
     "interp1", "trapz", "cumtrapz", "gradient",
     "hamming", "hann", "blackman",
     /* Tier-1 (Signal Processing Toolbox roadmap §2.3) — windows tail. */

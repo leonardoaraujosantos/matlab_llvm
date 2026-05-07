@@ -3067,6 +3067,64 @@ export function sgolay(k: number, f: number): NDArray {
   return new NDArray(_computeSgolayMatrix(k, f), [f, f]);
 }
 
+// --- §3.1 nonparametric spectral ----------------------------------------
+// Real-only TS — uses a manual Goertzel-style sum since fft_c on TS
+// drops the imaginary part. For magnitude-squared output that's fine
+// (we compute |X[k]|² = Re² + Im² on the same reciprocal-sum recipe).
+function _dftMagSqr(x: Float64Array, k: number, N: number): number {
+  let re = 0, im = 0;
+  for (let n = 0; n < N; n++) {
+    const a = -2 * Math.PI * k * n / N;
+    re += x[n] * Math.cos(a);
+    im += x[n] * Math.sin(a);
+  }
+  return re * re + im * im;
+}
+
+export function periodogram(x: any): NDArray {
+  const a = asArray(x).data;
+  const N = a.length;
+  if (N === 0) return new NDArray(new Float64Array(0), [0, 0]);
+  const M = (N >> 1) + 1;
+  const P = new Float64Array(M);
+  P[0] = _dftMagSqr(a, 0, N) / N;
+  const midEnd = (N % 2 === 0) ? (M - 1) : M;
+  for (let k = 1; k < midEnd; k++)
+    P[k] = 2 * _dftMagSqr(a, k, N) / N;
+  if (N % 2 === 0)
+    P[M - 1] = _dftMagSqr(a, N >> 1, N) / N;
+  return new NDArray(P, [M, 1]);
+}
+
+export function pwelch(x: any, win: any, noverlap: number): NDArray {
+  const xa = asArray(x).data;
+  const wa = asArray(win).data;
+  const N = xa.length, L = wa.length;
+  let no = (noverlap | 0);
+  if (no < 0) no = 0;
+  if (no >= L) no = L - 1;
+  const step = Math.max(1, L - no);
+  const M = (L >> 1) + 1;
+  if (N < L) return new NDArray(new Float64Array(M), [M, 1]);
+  const K = Math.floor((N - L) / step) + 1;
+  let U = 0;
+  for (let i = 0; i < L; i++) U += wa[i] * wa[i];
+  const Pxx = new Float64Array(M);
+  const seg = new Float64Array(L);
+  for (let s = 0; s < K; s++) {
+    for (let i = 0; i < L; i++) seg[i] = xa[s * step + i] * wa[i];
+    Pxx[0] += _dftMagSqr(seg, 0, L);
+    const midEnd = (L % 2 === 0) ? (M - 1) : M;
+    for (let k = 1; k < midEnd; k++)
+      Pxx[k] += 2 * _dftMagSqr(seg, k, L);
+    if (L % 2 === 0)
+      Pxx[M - 1] += _dftMagSqr(seg, L >> 1, L);
+  }
+  const denom = K * U;
+  if (denom > 0) for (let k = 0; k < M; k++) Pxx[k] /= denom;
+  return new NDArray(Pxx, [M, 1]);
+}
+
 // --- §3.4 transforms tail -----------------------------------------------
 export function dct(x: any): NDArray {
   const xa = asArray(x);

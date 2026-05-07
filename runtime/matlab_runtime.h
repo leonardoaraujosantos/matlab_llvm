@@ -364,6 +364,12 @@ double matlab_buttord_Wn(double Wp, double Ws, double Rp, double Rs);
 double matlab_cheb1ord_n(double Wp, double Ws, double Rp, double Rs);
 double matlab_cheb1ord_Wn(double Wp, double Ws, double Rp, double Rs);
 
+/* Tier-2 §3.1 nonparametric spectral estimation. Single-output form,
+ * default fs = 1 (normalised). The 2-return [Pxx, f] form is a
+ * follow-on. */
+matlab_mat   *matlab_periodogram(matlab_mat *x);
+matlab_mat   *matlab_pwelch(matlab_mat *x, matlab_mat *win, double noverlap);
+
 /* Tier-2 §3.4 transforms — DCT-II / DCT-III / Walsh-Hadamard /
  * Hilbert (analytic signal) / Goertzel (single-bin DFT). */
 matlab_mat   *matlab_dct(matlab_mat *x);

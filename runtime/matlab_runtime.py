@@ -2742,6 +2742,55 @@ def stepz(b, a, N):
     return _filter_flat(bn, an, np.ones(N)).reshape((-1, 1))
 
 
+# --- §3.1 nonparametric spectral ----------------------------------------
+def periodogram(x):
+    a = np.asarray(x, dtype=float).ravel()
+    N = a.size
+    if N == 0:
+        return np.zeros((0, 0))
+    X = np.fft.fft(a)
+    M = N // 2 + 1
+    P = np.zeros(M)
+    P[0] = (X[0].real ** 2 + X[0].imag ** 2) / N
+    mid_end = M - 1 if (N % 2 == 0) else M
+    for k in _pyrange(1, mid_end):
+        P[k] = 2.0 * (X[k].real ** 2 + X[k].imag ** 2) / N
+    if N % 2 == 0:
+        P[M - 1] = (X[N // 2].real ** 2 + X[N // 2].imag ** 2) / N
+    return P.reshape((-1, 1))
+
+
+def pwelch(x, win, noverlap):
+    xa = np.asarray(x, dtype=float).ravel()
+    wa = np.asarray(win, dtype=float).ravel()
+    N = xa.size
+    L = wa.size
+    no = int(noverlap)
+    if no < 0: no = 0
+    if no >= L: no = L - 1
+    step = L - no
+    if step < 1: step = 1
+    if N < L:
+        return np.zeros((L // 2 + 1, 1))
+    K = (N - L) // step + 1
+    M = L // 2 + 1
+    U = float(np.sum(wa * wa))
+    Pxx = np.zeros(M)
+    for s in _pyrange(K):
+        seg = xa[s * step : s * step + L] * wa
+        X = np.fft.fft(seg)
+        Pxx[0] += X[0].real ** 2 + X[0].imag ** 2
+        mid_end = M - 1 if (L % 2 == 0) else M
+        for k in _pyrange(1, mid_end):
+            Pxx[k] += 2.0 * (X[k].real ** 2 + X[k].imag ** 2)
+        if L % 2 == 0:
+            Pxx[M - 1] += X[L // 2].real ** 2 + X[L // 2].imag ** 2
+    denom = K * U
+    if denom > 0:
+        Pxx /= denom
+    return Pxx.reshape((-1, 1))
+
+
 # --- §3.4 transforms tail -------------------------------------------
 def dct(x):
     a = np.asarray(x, dtype=float).ravel()
