@@ -364,6 +364,19 @@ double matlab_buttord_Wn(double Wp, double Ws, double Rp, double Rs);
 double matlab_cheb1ord_n(double Wp, double Ws, double Rp, double Rs);
 double matlab_cheb1ord_Wn(double Wp, double Ws, double Rp, double Rs);
 
+/* Close-the-loop helpers (Tier-1 §2.5).
+ *   filtfilt(b, a, x)  — forward-backward zero-phase IIR filtering
+ *   sosfilt(sos, x)    — cascade of biquad second-order sections
+ *   impz(b, a, N)      — impulse response (Nx1)
+ *   stepz(b, a, N)     — step response (Nx1)
+ *   grpdelay(b, a, N)  — group delay τ(ω) via finite-difference phase
+ */
+matlab_mat *matlab_filtfilt(matlab_mat *b, matlab_mat *a, matlab_mat *x);
+matlab_mat *matlab_sosfilt(matlab_mat *sos, matlab_mat *x);
+matlab_mat *matlab_impz(matlab_mat *b, matlab_mat *a, double N);
+matlab_mat *matlab_stepz(matlab_mat *b, matlab_mat *a, double N);
+matlab_mat *matlab_grpdelay(matlab_mat *b, matlab_mat *a, double N);
+
 /* FIR design (Tier-1 §2.2) — lowpass scope.
  *
  *   b = fir1(n, Wn)          windowed-sinc lowpass FIR (default Hamming

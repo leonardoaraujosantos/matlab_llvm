@@ -6478,6 +6478,8 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
              * F64Ret list below covers them. */
             /* Tier-1 §2.2 — FIR design + Savitzky-Golay. */
             "fir1", "sgolay", "sgolayfilt",
+            /* Tier-1 §2.5 — close-the-loop filter helpers. */
+            "filtfilt", "sosfilt", "impz", "stepz", "grpdelay",
             "interp1", "trapz", "cumtrapz", "gradient",
             "hamming", "hann", "blackman",
             /* Tier-1 windows tail (signal_toolbox_roadmap §2.3) — all

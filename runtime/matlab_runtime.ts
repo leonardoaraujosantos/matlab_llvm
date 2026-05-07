@@ -3067,6 +3067,153 @@ export function sgolay(k: number, f: number): NDArray {
   return new NDArray(_computeSgolayMatrix(k, f), [f, f]);
 }
 
+// --- §2.5 close-the-loop helpers ---------------------------------------
+function _filterFlat(b: Float64Array, a: Float64Array,
+                      x: Float64Array): Float64Array {
+  const nb = b.length, na = a.length, nx = x.length;
+  const L = Math.max(nb, na);
+  const w = new Float64Array(L);
+  const y = new Float64Array(nx);
+  for (let n = 0; n < nx; n++) {
+    const yn = (nb > 0 ? b[0] * x[n] : 0) + w[0];
+    for (let i = 0; i < L - 1; i++) {
+      const bi = (i + 1 < nb) ? b[i + 1] : 0;
+      const ai = (i + 1 < na) ? a[i + 1] : 0;
+      w[i] = bi * x[n] - ai * yn + w[i + 1];
+    }
+    if (L > 0) {
+      const bi = (L < nb) ? b[L] : 0;
+      const ai = (L < na) ? a[L] : 0;
+      w[L - 1] = bi * x[n] - ai * yn;
+    }
+    y[n] = yn;
+  }
+  return y;
+}
+
+export function filtfilt(b: any, a: any, x: any): NDArray {
+  const bv = asArray(b).data;
+  const av = asArray(a).data;
+  const xa = asArray(x);
+  const flat = xa.data;
+  const nx = flat.length;
+  if (av.length === 0 || av[0] === 0 || nx === 0)
+    return new NDArray(new Float64Array(0), [0, 0]);
+  const a0 = av[0];
+  const bn = new Float64Array(bv.length);
+  const an = new Float64Array(av.length);
+  for (let i = 0; i < bv.length; i++) bn[i] = bv[i] / a0;
+  for (let i = 0; i < av.length; i++) an[i] = av[i] / a0;
+  const L = Math.max(bn.length, an.length);
+  let pad = 3 * (L - 1);
+  if (pad < 0) pad = 0;
+  if (pad > nx - 1) pad = nx - 1;
+  const xp = new Float64Array(nx + 2 * pad);
+  for (let i = 0; i < pad; i++) xp[i] = 2 * flat[0] - flat[pad - i];
+  for (let i = 0; i < nx; i++) xp[pad + i] = flat[i];
+  for (let i = 0; i < pad; i++)
+    xp[pad + nx + i] = 2 * flat[nx - 1] - flat[nx - 2 - i];
+  const y1 = _filterFlat(bn, an, xp);
+  const rev = new Float64Array(y1.length);
+  for (let i = 0; i < y1.length; i++) rev[i] = y1[y1.length - 1 - i];
+  const y2 = _filterFlat(bn, an, rev);
+  const out = new Float64Array(nx);
+  for (let i = 0; i < nx; i++) out[i] = y2[y2.length - 1 - (pad + i)];
+  return new NDArray(out, xa.shape.slice());
+}
+
+export function sosfilt(sos: any, x: any): NDArray {
+  const sm = asArray(sos);
+  const xa = asArray(x);
+  const flat = xa.data;
+  const nx = flat.length;
+  const L = sm.rows, W = sm.cols;
+  if (W !== 6 || L === 0 || nx === 0)
+    return new NDArray(Float64Array.from(flat), xa.shape.slice());
+  let buf = Float64Array.from(flat);
+  for (let s = 0; s < L; s++) {
+    const r0 = s * 6;
+    const bsec = Float64Array.of(sm.data[r0], sm.data[r0 + 1], sm.data[r0 + 2]);
+    const asec = Float64Array.of(sm.data[r0 + 3], sm.data[r0 + 4], sm.data[r0 + 5]);
+    if (asec[0] === 0) continue;
+    for (let i = 0; i < 3; i++) bsec[i] /= asec[0];
+    for (let i = 0; i < 3; i++) asec[i] /= asec[0];
+    buf = _filterFlat(bsec, asec, buf);
+  }
+  return new NDArray(buf, xa.shape.slice());
+}
+
+export function impz(b: any, a: any, N: number): NDArray {
+  const bv = asArray(b).data;
+  const av = asArray(a).data;
+  N = (N | 0);
+  if (N <= 0 || av.length === 0 || av[0] === 0)
+    return new NDArray(new Float64Array(0), [0, 0]);
+  const a0 = av[0];
+  const bn = new Float64Array(bv.length);
+  const an = new Float64Array(av.length);
+  for (let i = 0; i < bv.length; i++) bn[i] = bv[i] / a0;
+  for (let i = 0; i < av.length; i++) an[i] = av[i] / a0;
+  const imp = new Float64Array(N); imp[0] = 1;
+  const h = _filterFlat(bn, an, imp);
+  return new NDArray(h, [N, 1]);
+}
+
+export function stepz(b: any, a: any, N: number): NDArray {
+  const bv = asArray(b).data;
+  const av = asArray(a).data;
+  N = (N | 0);
+  if (N <= 0 || av.length === 0 || av[0] === 0)
+    return new NDArray(new Float64Array(0), [0, 0]);
+  const a0 = av[0];
+  const bn = new Float64Array(bv.length);
+  const an = new Float64Array(av.length);
+  for (let i = 0; i < bv.length; i++) bn[i] = bv[i] / a0;
+  for (let i = 0; i < av.length; i++) an[i] = av[i] / a0;
+  const step = new Float64Array(N).fill(1);
+  return new NDArray(_filterFlat(bn, an, step), [N, 1]);
+}
+
+export function grpdelay(b: any, a: any, N: number): NDArray {
+  const bv = asArray(b).data;
+  const av = asArray(a).data;
+  N = (N | 0);
+  if (N <= 1 || av.length === 0 || av[0] === 0)
+    return new NDArray(new Float64Array(0), [0, 0]);
+  const a0 = av[0];
+  const bn = new Float64Array(bv.length);
+  const an = new Float64Array(av.length);
+  for (let i = 0; i < bv.length; i++) bn[i] = bv[i] / a0;
+  for (let i = 0; i < av.length; i++) an[i] = av[i] / a0;
+  const out = new Float64Array(N);
+  const dw = (Math.PI / N) * 1e-4;
+  const evalArg = (w: number) => {
+    let nr = 0, ni = 0;
+    for (let i = 0; i < bn.length; i++) {
+      const a_ = -w * i;
+      nr += bn[i] * Math.cos(a_);
+      ni += bn[i] * Math.sin(a_);
+    }
+    let dr = 0, di = 0;
+    for (let i = 0; i < an.length; i++) {
+      const a_ = -w * i;
+      dr += an[i] * Math.cos(a_);
+      di += an[i] * Math.sin(a_);
+    }
+    const denom = dr * dr + di * di;
+    return Math.atan2((ni * dr - nr * di) / denom,
+                       (nr * dr + ni * di) / denom);
+  };
+  for (let k = 0; k < N; k++) {
+    const w0 = Math.PI * k / N;
+    let d = evalArg(w0 + dw) - evalArg(w0);
+    while (d >  Math.PI) d -= 2 * Math.PI;
+    while (d < -Math.PI) d += 2 * Math.PI;
+    out[k] = -d / dw;
+  }
+  return new NDArray(out, [N, 1]);
+}
+
 export function sgolayfilt(x: any, k: number, f: number): NDArray {
   const xa = asArray(x);
   const a = xa.data;

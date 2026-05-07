@@ -5894,6 +5894,202 @@ matlab_mat *matlab_sgolayfilt(matlab_mat *x, double k_d, double f_d) {
     return Y;
 }
 
+/*===========================================================================
+ * Close-the-loop helpers (Tier-1 SPT §2.5).
+ *
+ *   y = filtfilt(b, a, x)   forward-backward zero-phase IIR filtering
+ *   y = sosfilt(sos, x)     cascade of second-order sections
+ *   h = impz(b, a, N)       impulse response of an IIR
+ *   s = stepz(b, a, N)      step response of an IIR
+ *   gd = grpdelay(b, a, N)  group delay τ(ω) = −d/dω arg(H(e^{jω}))
+ */
+
+/* Internal direct-form-II transposed filter on a flat double buffer.
+ * b and a are normalized so a[0] = 1; caller must pre-normalize. */
+static void filter_flat_(const double *b, int64_t nb,
+                         const double *a, int64_t na,
+                         const double *x, int64_t nx,
+                         double *y) {
+    int64_t L = nb > na ? nb : na;
+    std::vector<double> w((size_t)L, 0.0);
+    for (int64_t n = 0; n < nx; ++n) {
+        double yn = (nb > 0 ? b[0] * x[n] : 0.0) + w[0];
+        /* Shift the delay line: w[i] = b[i+1]*x[n] − a[i+1]*yn + w[i+1]. */
+        for (int64_t i = 0; i < L - 1; ++i) {
+            double bi = (i + 1 < nb) ? b[i + 1] : 0.0;
+            double ai = (i + 1 < na) ? a[i + 1] : 0.0;
+            w[i] = bi * x[n] - ai * yn + w[i + 1];
+        }
+        if (L > 0) {
+            double bi = (L < nb) ? b[L]     : 0.0;
+            double ai = (L < na) ? a[L]     : 0.0;
+            w[L - 1] = bi * x[n] - ai * yn;
+        }
+        y[n] = yn;
+    }
+}
+
+/* filtfilt(b, a, x) — forward-backward filter for zero-phase response.
+ * Reflection-pads x by L = max(nb, na) on each side, runs filter forward,
+ * reverses, runs filter on the reversed signal, reverses back, trims
+ * the padding. Reduces edge transients vs the no-padding shape. The
+ * proper Gustafsson initial-condition trick is a follow-on. */
+matlab_mat *matlab_filtfilt(matlab_mat *b, matlab_mat *a, matlab_mat *x) {
+    if (!b || !a || !x) return mat_alloc(0, 0);
+    int64_t nb = b->rows * b->cols;
+    int64_t na = a->rows * a->cols;
+    int64_t nx = x->rows * x->cols;
+    if (na == 0 || a->data[0] == 0.0 || nx == 0) return mat_alloc(0, 0);
+    /* Normalize for a[0] = 1. */
+    std::vector<double> bn(nb), an(na);
+    double a0 = a->data[0];
+    for (int64_t i = 0; i < nb; ++i) bn[i] = b->data[i] / a0;
+    for (int64_t i = 0; i < na; ++i) an[i] = a->data[i] / a0;
+    int64_t L = nb > na ? nb : na;
+    int64_t pad = 3 * (L - 1);
+    if (pad < 0) pad = 0;
+    if (pad > nx - 1) pad = nx - 1;          /* don't overrun the data */
+    /* Reflect-pad: x_pad = [2*x[0] − x[pad..1]; x; 2*x[N−1] − x[N−2..N−1−pad]]. */
+    int64_t total = nx + 2 * pad;
+    std::vector<double> xp((size_t)total);
+    for (int64_t i = 0; i < pad; ++i)
+        xp[i] = 2.0 * x->data[0] - x->data[pad - i];
+    for (int64_t i = 0; i < nx; ++i) xp[pad + i] = x->data[i];
+    for (int64_t i = 0; i < pad; ++i)
+        xp[pad + nx + i] = 2.0 * x->data[nx - 1] - x->data[nx - 2 - i];
+    /* Forward pass. */
+    std::vector<double> y1((size_t)total);
+    filter_flat_(bn.data(), nb, an.data(), na, xp.data(), total, y1.data());
+    /* Reverse, filter again, reverse. */
+    std::vector<double> rev((size_t)total);
+    for (int64_t i = 0; i < total; ++i) rev[i] = y1[total - 1 - i];
+    std::vector<double> y2((size_t)total);
+    filter_flat_(bn.data(), nb, an.data(), na, rev.data(), total, y2.data());
+    matlab_mat *Y = mat_alloc(x->rows, x->cols);
+    for (int64_t i = 0; i < nx; ++i) Y->data[i] = y2[total - 1 - (pad + i)];
+    return Y;
+}
+
+/* sosfilt(sos, x) — apply a cascade of second-order sections. sos is
+ * an L × 6 matrix [b0 b1 b2 a0 a1 a2] per row. Each section is filtered
+ * in series with its predecessor's output. Each row's a0 is implicitly
+ * normalized to 1 by the section coefficient layout. */
+matlab_mat *matlab_sosfilt(matlab_mat *sos, matlab_mat *x) {
+    if (!sos || !x) return mat_alloc(0, 0);
+    int64_t L = sos->rows;
+    int64_t W = sos->cols;
+    int64_t nx = x->rows * x->cols;
+    if (W != 6 || L == 0 || nx == 0) {
+        /* Degenerate: copy x through. */
+        matlab_mat *Y = mat_alloc(x->rows, x->cols);
+        for (int64_t i = 0; i < nx; ++i) Y->data[i] = x->data[i];
+        return Y;
+    }
+    std::vector<double> buf((size_t)nx);
+    for (int64_t i = 0; i < nx; ++i) buf[i] = x->data[i];
+    std::vector<double> next((size_t)nx);
+    for (int64_t s = 0; s < L; ++s) {
+        const double *r = sos->data + s * 6;
+        double bsec[3] = { r[0], r[1], r[2] };
+        double asec[3] = { r[3], r[4], r[5] };
+        if (asec[0] == 0.0) continue;
+        for (int i = 0; i < 3; ++i) bsec[i] /= asec[0];
+        for (int i = 0; i < 3; ++i) asec[i] /= asec[0];
+        filter_flat_(bsec, 3, asec, 3, buf.data(), nx, next.data());
+        for (int64_t i = 0; i < nx; ++i) buf[i] = next[i];
+    }
+    matlab_mat *Y = mat_alloc(x->rows, x->cols);
+    for (int64_t i = 0; i < nx; ++i) Y->data[i] = buf[i];
+    return Y;
+}
+
+/* impz(b, a, N) — impulse response. Drive the filter with [1 0 0 ...]. */
+matlab_mat *matlab_impz(matlab_mat *b, matlab_mat *a, double N_d) {
+    if (!b || !a) return mat_alloc(0, 0);
+    int64_t nb = b->rows * b->cols;
+    int64_t na = a->rows * a->cols;
+    int64_t N = (int64_t)N_d;
+    if (N <= 0 || na == 0 || a->data[0] == 0.0) return mat_alloc(0, 0);
+    std::vector<double> bn(nb), an(na);
+    double a0 = a->data[0];
+    for (int64_t i = 0; i < nb; ++i) bn[i] = b->data[i] / a0;
+    for (int64_t i = 0; i < na; ++i) an[i] = a->data[i] / a0;
+    std::vector<double> imp((size_t)N, 0.0);
+    imp[0] = 1.0;
+    matlab_mat *H = mat_alloc(N, 1);
+    filter_flat_(bn.data(), nb, an.data(), na, imp.data(), N, H->data);
+    return H;
+}
+
+/* stepz(b, a, N) — step response. Drive with all-ones. */
+matlab_mat *matlab_stepz(matlab_mat *b, matlab_mat *a, double N_d) {
+    if (!b || !a) return mat_alloc(0, 0);
+    int64_t nb = b->rows * b->cols;
+    int64_t na = a->rows * a->cols;
+    int64_t N = (int64_t)N_d;
+    if (N <= 0 || na == 0 || a->data[0] == 0.0) return mat_alloc(0, 0);
+    std::vector<double> bn(nb), an(na);
+    double a0 = a->data[0];
+    for (int64_t i = 0; i < nb; ++i) bn[i] = b->data[i] / a0;
+    for (int64_t i = 0; i < na; ++i) an[i] = a->data[i] / a0;
+    std::vector<double> step((size_t)N, 1.0);
+    matlab_mat *S = mat_alloc(N, 1);
+    filter_flat_(bn.data(), nb, an.data(), na, step.data(), N, S->data);
+    return S;
+}
+
+/* grpdelay(b, a, N) — group delay via finite difference on the
+ * unwrapped phase of H(e^{jω}). Returns an N-point real column at
+ * the same N frequency points freqz uses ([0, π) equally spaced).
+ * Algorithm: compute H at N points and at N points slightly offset;
+ * τ ≈ −Δarg / Δω, with arg unwrapped via cumulative atan2 unwrapping. */
+matlab_mat *matlab_grpdelay(matlab_mat *b, matlab_mat *a, double N_d) {
+    if (!b || !a) return mat_alloc(0, 0);
+    int N = (int)N_d;
+    if (N <= 1) return mat_alloc(0, 0);
+    int64_t nb = b->rows * b->cols;
+    int64_t na = a->rows * a->cols;
+    if (na == 0 || a->data[0] == 0.0) return mat_alloc(0, 0);
+    std::vector<double> bn(nb), an(na);
+    double a0 = a->data[0];
+    for (int64_t i = 0; i < nb; ++i) bn[i] = b->data[i] / a0;
+    for (int64_t i = 0; i < na; ++i) an[i] = a->data[i] / a0;
+    /* Evaluate H at the N freqz frequency grid and at a tiny offset
+     * to compute the local derivative of phase. */
+    matlab_mat *G = mat_alloc(N, 1);
+    double dw = (M_PI / (double)N) * 1e-4;        /* small offset */
+    for (int k = 0; k < N; ++k) {
+        double w0 = M_PI * (double)k / (double)N;
+        double w1 = w0 + dw;
+        auto evalArg = [&](double w) {
+            double nr = 0, ni = 0;
+            for (int64_t i = 0; i < nb; ++i) {
+                double a_ = -w * (double)i;
+                nr += bn[i] * cos(a_);
+                ni += bn[i] * sin(a_);
+            }
+            double dr = 0, di = 0;
+            for (int64_t i = 0; i < na; ++i) {
+                double a_ = -w * (double)i;
+                dr += an[i] * cos(a_);
+                di += an[i] * sin(a_);
+            }
+            double denom = dr * dr + di * di;
+            double hr = (nr * dr + ni * di) / denom;
+            double hi = (ni * dr - nr * di) / denom;
+            return atan2(hi, hr);
+        };
+        double arg0 = evalArg(w0);
+        double arg1 = evalArg(w1);
+        /* Unwrap one step: keep the difference in (-π, π]. */
+        double d = arg1 - arg0;
+        while (d >  M_PI) d -= 2.0 * M_PI;
+        while (d < -M_PI) d += 2.0 * M_PI;
+        G->data[k] = -d / dw;
+    }
+    return G;
+}
+
 /* chol(A): upper-triangular Cholesky factor R such that R'*R = A,
  * for a symmetric positive-definite A. Returns a zero matrix if A
  * is not SPD (i.e. a negative diagonal appears). */

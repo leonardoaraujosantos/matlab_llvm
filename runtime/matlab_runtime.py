@@ -2651,6 +2651,120 @@ def sgolay(k, f):
     return _compute_sgolay_matrix(k, f)
 
 
+def _filter_flat(b, a, x):
+    """Direct-form-II transposed filter on a flat numpy array."""
+    nb, na, nx = b.size, a.size, x.size
+    L = _pymax(nb, na)
+    w = np.zeros(L)
+    y = np.zeros(nx)
+    for n in _pyrange(nx):
+        yn = (b[0] * x[n] if nb > 0 else 0.0) + w[0]
+        for i in _pyrange(L - 1):
+            bi = b[i + 1] if i + 1 < nb else 0.0
+            ai = a[i + 1] if i + 1 < na else 0.0
+            w[i] = bi * x[n] - ai * yn + w[i + 1]
+        if L > 0:
+            bi = b[L] if L < nb else 0.0
+            ai = a[L] if L < na else 0.0
+            w[L - 1] = bi * x[n] - ai * yn
+        y[n] = yn
+    return y
+
+
+def filtfilt(b, a, x):
+    bv = np.asarray(b, dtype=float).ravel()
+    av = np.asarray(a, dtype=float).ravel()
+    xa = np.asarray(x, dtype=float)
+    flat = xa.ravel()
+    nx = flat.size
+    if av.size == 0 or av[0] == 0.0 or nx == 0:
+        return np.zeros((0, 0))
+    bn = bv / av[0]
+    an = av / av[0]
+    L = _pymax(bn.size, an.size)
+    pad = 3 * (L - 1)
+    if pad < 0: pad = 0
+    if pad > nx - 1: pad = nx - 1
+    xp = np.empty(nx + 2 * pad)
+    for i in _pyrange(pad):
+        xp[i] = 2.0 * flat[0] - flat[pad - i]
+    xp[pad : pad + nx] = flat
+    for i in _pyrange(pad):
+        xp[pad + nx + i] = 2.0 * flat[-1] - flat[-2 - i]
+    y1 = _filter_flat(bn, an, xp)
+    y2 = _filter_flat(bn, an, y1[::-1])[::-1]
+    out = y2[pad : pad + nx]
+    if xa.ndim == 2 and xa.shape[1] == 1:
+        return out.reshape((-1, 1))
+    return out.reshape((1, -1)) if xa.ndim <= 1 else out.reshape(xa.shape)
+
+
+def sosfilt(sos, x):
+    sm = np.asarray(sos, dtype=float)
+    xa = np.asarray(x, dtype=float)
+    flat = xa.ravel()
+    nx = flat.size
+    if sm.ndim != 2 or sm.shape[1] != 6 or sm.shape[0] == 0 or nx == 0:
+        return flat.reshape(xa.shape) if xa.ndim > 0 else flat
+    buf = flat.astype(float).copy()
+    for s in _pyrange(sm.shape[0]):
+        r = sm[s]
+        bsec = np.array([r[0], r[1], r[2]])
+        asec = np.array([r[3], r[4], r[5]])
+        if asec[0] == 0.0:
+            continue
+        bsec /= asec[0]
+        asec /= asec[0]
+        buf = _filter_flat(bsec, asec, buf)
+    if xa.ndim == 2 and xa.shape[1] == 1:
+        return buf.reshape((-1, 1))
+    return buf.reshape((1, -1)) if xa.ndim <= 1 else buf.reshape(xa.shape)
+
+
+def impz(b, a, N):
+    bv = np.asarray(b, dtype=float).ravel()
+    av = np.asarray(a, dtype=float).ravel()
+    N = int(N)
+    if N <= 0 or av.size == 0 or av[0] == 0.0:
+        return np.zeros((0, 0))
+    bn = bv / av[0]; an = av / av[0]
+    imp = np.zeros(N); imp[0] = 1.0
+    return _filter_flat(bn, an, imp).reshape((-1, 1))
+
+
+def stepz(b, a, N):
+    bv = np.asarray(b, dtype=float).ravel()
+    av = np.asarray(a, dtype=float).ravel()
+    N = int(N)
+    if N <= 0 or av.size == 0 or av[0] == 0.0:
+        return np.zeros((0, 0))
+    bn = bv / av[0]; an = av / av[0]
+    return _filter_flat(bn, an, np.ones(N)).reshape((-1, 1))
+
+
+def grpdelay(b, a, N):
+    bv = np.asarray(b, dtype=float).ravel()
+    av = np.asarray(a, dtype=float).ravel()
+    N = int(N)
+    if N <= 1 or av.size == 0 or av[0] == 0.0:
+        return np.zeros((0, 0))
+    bn = bv / av[0]; an = av / av[0]
+    dw = (np.pi / N) * 1e-4
+    out = np.zeros(N)
+    for k in _pyrange(N):
+        w0 = np.pi * k / N
+        w1 = w0 + dw
+        def evalArg(w):
+            jb = np.exp(-1j * w * np.arange(bn.size))
+            ja = np.exp(-1j * w * np.arange(an.size))
+            return np.angle((bn * jb).sum() / (an * ja).sum())
+        d = evalArg(w1) - evalArg(w0)
+        while d >  np.pi: d -= 2 * np.pi
+        while d < -np.pi: d += 2 * np.pi
+        out[k] = -d / dw
+    return out.reshape((-1, 1))
+
+
 def sgolayfilt(x, k, f):
     a = np.asarray(x, dtype=float).ravel()
     N = a.size

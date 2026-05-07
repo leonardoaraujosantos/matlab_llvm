@@ -3368,6 +3368,12 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"fir1",       "matlab_fir1",       1, "ff"},
       {"sgolay",     "matlab_sgolay",     1, "ff"},
       {"sgolayfilt", "matlab_sgolayfilt", 1, "pff"},
+      /* §2.5 close-the-loop filter helpers. */
+      {"filtfilt",   "matlab_filtfilt",   1, "ppp"},
+      {"sosfilt",    "matlab_sosfilt",    1, "pp"},
+      {"impz",       "matlab_impz",       1, "ppf"},
+      {"stepz",      "matlab_stepz",      1, "ppf"},
+      {"grpdelay",   "matlab_grpdelay",   1, "ppf"},
       {"interp1",    "matlab_interp1",    1, "ppp"},
       {"trapz",      "matlab_trapz",      1, "p"},
       {"trapz",      "matlab_trapz_xy",   1, "pp"},

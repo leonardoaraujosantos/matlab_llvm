@@ -1789,6 +1789,9 @@ static llvm::StringRef MatrixReturningFns[] = {
     "matlab_freqz", "matlab_freqz_h", "matlab_freqz_w",
     /* §2.2 FIR + Savitzky-Golay. */
     "matlab_fir1", "matlab_sgolay", "matlab_sgolayfilt",
+    /* §2.5 close-the-loop filter helpers. */
+    "matlab_filtfilt", "matlab_sosfilt",
+    "matlab_impz", "matlab_stepz", "matlab_grpdelay",
     "matlab_interp1", "matlab_interp2", "matlab_trapz", "matlab_trapz_xy",
     "matlab_cumtrapz", "matlab_gradient", "matlab_diff",
     "matlab_conv", "matlab_conv2", "matlab_filter",
