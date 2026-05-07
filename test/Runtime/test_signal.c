@@ -37,6 +37,9 @@ matlab_mat   *matlab_polyder   (matlab_mat *p);
 matlab_mat   *matlab_polyint   (matlab_mat *p);
 matlab_mat   *matlab_polyint_k (matlab_mat *p, double k);
 matlab_mat_c *matlab_roots     (matlab_mat *p);
+matlab_mat_c *matlab_residue_r (matlab_mat *b, matlab_mat *a);
+matlab_mat_c *matlab_residue_p (matlab_mat *b, matlab_mat *a);
+matlab_mat   *matlab_residue_k (matlab_mat *b, matlab_mat *a);
 
 static matlab_mat *mk(const double *buf, int64_t m, int64_t n) {
     return matlab_mat_from_buf(buf, (double)m, (double)n);
@@ -435,6 +438,51 @@ static void test_poly_roots_round_trip(void) {
     rt_free(R); rt_free(P);
 }
 
+static void test_residue_distinct_poles(void) {
+    /* H(s) = 1 / ((s - 1)(s - 2)). Residues at poles 1 and 2 are
+     * -1 and 1. Sum is 0; product is -1. */
+    double bd[] = {1};
+    double ad[] = {1, -3, 2};
+    matlab_mat *b = mk(bd, 1, 1);
+    matlab_mat *a = mk(ad, 1, 3);
+    matlab_mat_c *R = matlab_residue_r(b, a);
+    matlab_mat_c *P = matlab_residue_p(b, a);
+    matlab_mat   *K = matlab_residue_k(b, a);
+    RT_CHECK(rt_c_rows(R) == 2 && rt_c_cols(R) == 1, "r is 2x1");
+    RT_CHECK(rt_c_rows(P) == 2 && rt_c_cols(P) == 1, "p is 2x1");
+    RT_CHECK(rt_rows(K) == 0 || rt_cols(K) == 0,
+             "k empty when deg(b)<deg(a)");
+    double r0 = rt_c_re(R, 0, 0), r1 = rt_c_re(R, 1, 0);
+    double p0 = rt_c_re(P, 0, 0), p1 = rt_c_re(P, 1, 0);
+    /* Order is solver-dependent; assert symmetric functions only. */
+    RT_NEAR(r0 + r1, 0.0,  1e-10, "sum r");
+    RT_NEAR(p0 + p1, 3.0,  1e-10, "sum p");
+    RT_NEAR(r0 * r1, -1.0, 1e-10, "prod r");
+    RT_NEAR(p0 * p1, 2.0,  1e-10, "prod p");
+    RT_NEAR(rt_c_im(R, 0, 0), 0.0, 1e-10, "real residues");
+    RT_NEAR(rt_c_im(R, 1, 0), 0.0, 1e-10, "real residues");
+    rt_free(b); rt_free(a); rt_c_free(R); rt_c_free(P); rt_free(K);
+}
+
+static void test_residue_with_direct_term(void) {
+    /* H(s) = (s^2 + 1) / (s - 1) = s + 1 + 2/(s - 1).
+     * One pole at s = 1 with residue 2; direct term k = [1, 1]. */
+    double bd[] = {1, 0, 1};
+    double ad[] = {1, -1};
+    matlab_mat *b = mk(bd, 1, 3);
+    matlab_mat *a = mk(ad, 1, 2);
+    matlab_mat_c *R = matlab_residue_r(b, a);
+    matlab_mat_c *P = matlab_residue_p(b, a);
+    matlab_mat   *K = matlab_residue_k(b, a);
+    RT_CHECK(rt_c_rows(R) == 1, "single residue");
+    RT_NEAR(rt_c_re(R, 0, 0), 2.0, 1e-10, "residue 2");
+    RT_NEAR(rt_c_re(P, 0, 0), 1.0, 1e-10, "pole at 1");
+    RT_CHECK(rt_cols(K) == 2, "k has 2 entries");
+    RT_NEAR(rt_data(K)[0], 1.0, 1e-10, "k[0] = 1");
+    RT_NEAR(rt_data(K)[1], 1.0, 1e-10, "k[1] = 1");
+    rt_free(b); rt_free(a); rt_c_free(R); rt_c_free(P); rt_free(K);
+}
+
 static void test_poly_empty_is_one(void) {
     /* poly of empty vector is [1]. */
     matlab_mat *R = mk(NULL, 0, 0);
@@ -494,5 +542,7 @@ int main(void) {
     RT_RUN(test_polyint_k_constant);
     RT_RUN(test_poly_roots_round_trip);
     RT_RUN(test_poly_empty_is_one);
+    RT_RUN(test_residue_distinct_poles);
+    RT_RUN(test_residue_with_direct_term);
     RT_DONE();
 }

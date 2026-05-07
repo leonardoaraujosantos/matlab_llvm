@@ -2246,6 +2246,10 @@ void Lowerer::lowerStmt(const Stmt &St) {
           /* [t, y, te, ye, ie] = ode_events(@f, tspan, y0, @evt). */
           else if (CN == "ode_events" && A.LHS.size() == 5)
             Rtys.assign(A.LHS.size(), PtrTy);
+          /* [r, p, k] = residue(b, a) — all ptr (complex column for
+           * r and p, real row for k; uniform ptr at the MLIR level). */
+          else if (CN == "residue" && A.LHS.size() == 3)
+            Rtys.assign(A.LHS.size(), PtrTy);
           /* [row, col] = ind2sub(sz, i) — scalar f64s. */
           else if (CN == "ind2sub" && A.LHS.size() == 2)
             Rtys.assign(A.LHS.size(), F64);
@@ -6446,7 +6450,7 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             "std", "var", "median", "diff",
             "meshgrid", "ndgrid",
             "xcorr", "polyval", "polyfit", "roots", "poly",
-            "polyder", "polyint",
+            "polyder", "polyint", "residue",
             "interp1", "trapz", "cumtrapz", "gradient",
             "hamming", "hann", "blackman",
             /* Tier-1 windows tail (signal_toolbox_roadmap §2.3) — all

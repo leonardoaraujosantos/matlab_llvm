@@ -341,6 +341,170 @@ matlab_mat *matlab_poly(void *rptr) {
     return C;
 }
 
+/* residue(b, a) — partial-fraction expansion of B(s)/A(s).
+ *
+ * Returns three pieces via separate runtime entries (mirrors the
+ * eig_V/eig_D precedent so each MATLAB output slot maps to one
+ * independent runtime call):
+ *
+ *   matlab_residue_r(b, a)  -> matlab_mat_c *  (residues, complex column)
+ *   matlab_residue_p(b, a)  -> matlab_mat_c *  (poles,    complex column)
+ *   matlab_residue_k(b, a)  -> matlab_mat *    (direct term, real row)
+ *
+ * Algorithm:
+ *   1. If deg(b) >= deg(a), long-divide → quotient k (real row vector),
+ *      remainder b' (used in the residue formula).
+ *   2. Find poles p = roots(a) (complex column, length deg(a)).
+ *   3. Distinct-pole cover-up rule: r_i = b'(p_i) / a'(p_i)
+ *      where a'(s) is polyder(a) evaluated at p_i.
+ *
+ * Scope: Tier-1 ships only the distinct-pole case. Repeated poles
+ * fall through to the same formula with reduced numerical accuracy
+ * (a'(p_i) tends to zero for repeated p_i, so r_i blows up). The
+ * multiplicity-grouping path is a follow-on slice — its FP-tolerance
+ * choice is non-trivial and most DSP filter designs produce distinct
+ * poles by construction.
+ */
+
+/* Evaluate a real-coefficient polynomial at a complex point via
+ * Horner's method. p[0] is highest-power first. */
+static void polyval_c_at_(const double *p, int64_t np,
+                          double zr, double zi,
+                          double *out_re, double *out_im) {
+    double r = 0.0, i = 0.0;
+    for (int64_t k = 0; k < np; ++k) {
+        double nr, ni;
+        cmul_(r, i, zr, zi, &nr, &ni);
+        r = nr + p[k];
+        i = ni;
+    }
+    *out_re = r; *out_im = i;
+}
+
+/* Long-divide b by a (both highest-power-first). Returns
+ * quotient (length nb - na + 1) in *qout and remainder (length na - 1)
+ * in *rout. Caller owns both buffers. */
+static void poly_long_divide_(const double *b, int64_t nb,
+                              const double *a, int64_t na,
+                              std::vector<double> &qout,
+                              std::vector<double> &rout) {
+    if (nb < na) {
+        qout.clear();
+        rout.assign(b, b + nb);
+        return;
+    }
+    int64_t nq = nb - na + 1;
+    qout.assign(nq, 0.0);
+    std::vector<double> r(b, b + nb);
+    double a0 = a[0];
+    for (int64_t i = 0; i < nq; ++i) {
+        double c = r[i] / a0;
+        qout[i] = c;
+        for (int64_t j = 0; j < na; ++j) r[i + j] -= c * a[j];
+    }
+    /* Remainder is the last (na-1) entries. */
+    rout.assign(r.begin() + nq, r.end());
+}
+
+/* Internal: compute the full decomposition. Each output buffer is
+ * resized; complex outputs split into separate re/im vectors. */
+static void compute_residue_(matlab_mat *b, matlab_mat *a,
+                             std::vector<double> &rr,
+                             std::vector<double> &ri,
+                             std::vector<double> &pr,
+                             std::vector<double> &pi,
+                             std::vector<double> &k) {
+    rr.clear(); ri.clear(); pr.clear(); pi.clear(); k.clear();
+    if (!b || !a) return;
+    int64_t nb = b->rows * b->cols;
+    int64_t na = a->rows * a->cols;
+    if (na == 0) return;
+    /* Strip leading zeros from a. */
+    int64_t a_lead = 0;
+    while (a_lead < na && a->data[a_lead] == 0.0) a_lead++;
+    if (a_lead == na) return;        /* a is all zero */
+    const double *a_eff = a->data + a_lead;
+    int64_t na_eff = na - a_lead;
+    if (na_eff == 1) {
+        /* Constant a: H(s) = b/a is itself a polynomial; no poles. */
+        k.assign(nb, 0.0);
+        for (int64_t i = 0; i < nb; ++i) k[i] = b->data[i] / a_eff[0];
+        return;
+    }
+    /* Long-divide b / a. */
+    std::vector<double> rem;
+    poly_long_divide_(b->data, nb, a_eff, na_eff, k, rem);
+    /* Find poles via roots(a_eff). Build a temporary matlab_mat * to
+     * call into the existing matlab_roots — avoids duplicating the
+     * Durand-Kerner core. RAII frees both the input and the complex
+     * roots descriptor regardless of which path returns. */
+    matlab::runtime::MatPtr atmp = matlab::runtime::make_mat(1, na_eff);
+    memcpy(atmp->data, a_eff, (size_t)na_eff * sizeof(double));
+    matlab::runtime::MatCPtr poles(matlab_roots(atmp.get()));
+    int64_t nP = poles ? (poles->rows * poles->cols) : 0;
+    /* Compute polyder(a) — coefficients of a'(s). */
+    int64_t nad = na_eff - 1;
+    std::vector<double> ad(nad);
+    for (int64_t i = 0; i < nad; ++i) {
+        double power = (double)(na_eff - 1 - i);
+        ad[i] = power * a_eff[i];
+    }
+    /* Pad remainder to a fixed length so polyval_c_at_ sees the right
+     * leading zeros. The remainder has length na_eff-1; that already
+     * matches polyval's expected length when we evaluate it as-is. */
+    pr.resize(nP); pi.resize(nP);
+    rr.resize(nP); ri.resize(nP);
+    for (int64_t j = 0; j < nP; ++j) {
+        double zr = poles->re[j], zi = poles->im[j];
+        pr[j] = zr; pi[j] = zi;
+        double br_at = 0.0, bi_at = 0.0;
+        if (!rem.empty())
+            polyval_c_at_(rem.data(), (int64_t)rem.size(), zr, zi,
+                          &br_at, &bi_at);
+        double dr_at = 0.0, di_at = 0.0;
+        if (nad > 0)
+            polyval_c_at_(ad.data(), nad, zr, zi, &dr_at, &di_at);
+        if (dr_at == 0.0 && di_at == 0.0) {
+            /* Repeated-pole or numeric singularity: leave residue 0
+             * and tag with zero. The Tier-1 distinct-pole scope
+             * doesn't claim correctness here; downstream tests skip. */
+            rr[j] = 0.0; ri[j] = 0.0;
+            continue;
+        }
+        double v_re, v_im;
+        cdiv_(br_at, bi_at, dr_at, di_at, &v_re, &v_im);
+        rr[j] = v_re; ri[j] = v_im;
+    }
+    /* atmp + poles freed by RAII on scope exit. */
+}
+
+matlab_mat_c *matlab_residue_r(matlab_mat *b, matlab_mat *a) {
+    std::vector<double> rr, ri, pr, pi, k;
+    compute_residue_(b, a, rr, ri, pr, pi, k);
+    int64_t n = (int64_t)rr.size();
+    matlab_mat_c *R = mat_c_alloc(n, n > 0 ? 1 : 0);
+    for (int64_t i = 0; i < n; ++i) { R->re[i] = rr[i]; R->im[i] = ri[i]; }
+    return R;
+}
+
+matlab_mat_c *matlab_residue_p(matlab_mat *b, matlab_mat *a) {
+    std::vector<double> rr, ri, pr, pi, k;
+    compute_residue_(b, a, rr, ri, pr, pi, k);
+    int64_t n = (int64_t)pr.size();
+    matlab_mat_c *P = mat_c_alloc(n, n > 0 ? 1 : 0);
+    for (int64_t i = 0; i < n; ++i) { P->re[i] = pr[i]; P->im[i] = pi[i]; }
+    return P;
+}
+
+matlab_mat *matlab_residue_k(matlab_mat *b, matlab_mat *a) {
+    std::vector<double> rr, ri, pr, pi, k;
+    compute_residue_(b, a, rr, ri, pr, pi, k);
+    int64_t n = (int64_t)k.size();
+    matlab_mat *K = mat_alloc(n > 0 ? 1 : 0, n);
+    for (int64_t i = 0; i < n; ++i) K->data[i] = k[i];
+    return K;
+}
+
 matlab_mat *matlab_real_c(void *Aptr) {
     if (!Aptr) return mat_alloc(0, 0);
     if (!mat_is_complex(Aptr)) {

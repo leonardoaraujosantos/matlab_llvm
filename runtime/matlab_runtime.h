@@ -336,6 +336,16 @@ matlab_mat *matlab_polyint_k(matlab_mat *p, double k);
  * 1 × (n+1) row vector. */
 matlab_mat *matlab_poly(void *r);
 
+/* [r, p, k] = residue(b, a) — partial-fraction expansion of B(s)/A(s).
+ * Distinct-pole scope (Tier-1): repeated poles produce numerically
+ * degraded residues. r and p are complex column vectors of length
+ * deg(a); k is a real row vector with the polynomial direct term
+ * (empty if deg(b) < deg(a)). Each MATLAB output slot binds to its
+ * own runtime entry — mirrors the [V, D] = eig(A) precedent. */
+matlab_mat_c *matlab_residue_r(matlab_mat *b, matlab_mat *a);
+matlab_mat_c *matlab_residue_p(matlab_mat *b, matlab_mat *a);
+matlab_mat   *matlab_residue_k(matlab_mat *b, matlab_mat *a);
+
 /* DSP windows. n must be >= 1; returns a column vector of length n.
  * All use the symmetric (non-periodic) form, matching MATLAB's default.
  * Two-arg windows (kaiser, tukeywin, gausswin, chebwin) take their

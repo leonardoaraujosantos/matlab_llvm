@@ -2847,6 +2847,60 @@ bool TensorLowering::rewriteBuiltinCalls() {
       continue;
     }
 
+    /* residue — partial-fraction expansion. 3-result form
+     * `[r, p, k] = residue(b, a)`. 2 operands. Splits into
+     * matlab_residue_{r,p,k}(b, a) — same eig_V/eig_D precedent as
+     * the 2-result `[V, D] = eig(A)` path above. r and p are complex
+     * column vectors; k is a real row vector (possibly empty).
+     *
+     * Operand promotion mirrors the single-result AutoBoxNames path:
+     *   ptr      → pass through
+     *   tensor   → defer (the matrix-slot lowering pass converts
+     *              tensor → ptr in a later fixpoint iteration)
+     *   f64      → auto-box via matlab_mat_from_scalar
+     */
+    if (NA && NA.getValue().getSExtValue() == 3 &&
+        Name == "residue" &&
+        Call->getNumOperands() == 2 && Call->getNumResults() == 3) {
+      auto okOrDefer = [&](mlir::Value V) -> int {
+        /* 0 = pass-through ptr, 1 = needs box (f64), -1 = defer
+         * (tensor not yet converted), -2 = type mismatch (skip). */
+        auto T = V.getType();
+        if (T == PtrTy) return 0;
+        if (T == F64)   return 1;
+        if (isTensorLike(T)) return -1;
+        return -2;
+      };
+      int s0 = okOrDefer(Call->getOperand(0));
+      int s1 = okOrDefer(Call->getOperand(1));
+      if (s0 != -2 && s1 != -2 && s0 != -1 && s1 != -1) {
+        B.setInsertionPoint(Call);
+        auto FromScalar = rt("matlab_mat_from_scalar", PtrTy, {F64});
+        Value B0 = (s0 == 1)
+            ? LLVM::CallOp::create(B, Call->getLoc(), FromScalar,
+                                    ValueRange{Call->getOperand(0)})
+                  .getResult()
+            : Call->getOperand(0);
+        Value B1 = (s1 == 1)
+            ? LLVM::CallOp::create(B, Call->getLoc(), FromScalar,
+                                    ValueRange{Call->getOperand(1)})
+                  .getResult()
+            : Call->getOperand(1);
+        static const char *Suffixes[] = { "r", "p", "k" };
+        for (int i = 0; i < 3; ++i) {
+          std::string FnName =
+              std::string("matlab_residue_") + Suffixes[i];
+          auto Fn = rt(FnName, PtrTy, {PtrTy, PtrTy});
+          auto Ci = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                          ValueRange{B0, B1});
+          Call->getResult(i).replaceAllUsesWith(Ci.getResult());
+        }
+        Call->erase();
+        Changed = true;
+        continue;
+      }
+    }
+
     /* pdepe — 1-D parabolic-elliptic PDE solver. Single-result (sol
      * matrix), 6 operands: (f64 m, ptr pdefn, ptr icfn, ptr bcfn,
      * ptr xmesh, ptr tspan). Routes directly to matlab_pdepe; single-

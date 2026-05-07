@@ -2336,6 +2336,79 @@ def polyint_k(p, k):
     return polyint(p, k)
 
 
+def _poly_long_divide(b, a):
+    """Return (quotient, remainder) for b / a in highest-power-first order."""
+    nb, na = b.size, a.size
+    if nb < na:
+        return np.zeros(0), b.copy()
+    nq = nb - na + 1
+    q = np.zeros(nq)
+    r = b.astype(float).copy()
+    a0 = a[0]
+    for i in _pyrange(nq):
+        c = r[i] / a0
+        q[i] = c
+        for j in _pyrange(na):
+            r[i + j] -= c * a[j]
+    return q, r[nq:]
+
+
+def _residue_compute(b_in, a_in):
+    """Return (r, p, k) as numpy arrays. r and p are complex; k is real."""
+    b = np.asarray(b_in, dtype=float).ravel()
+    a = np.asarray(a_in, dtype=float).ravel()
+    na = a.size
+    if na == 0:
+        return (np.zeros(0, dtype=complex),
+                np.zeros(0, dtype=complex),
+                np.zeros(0))
+    lead = 0
+    while lead < na and a[lead] == 0.0:
+        lead += 1
+    if lead == na:
+        return (np.zeros(0, dtype=complex),
+                np.zeros(0, dtype=complex),
+                np.zeros(0))
+    a_eff = a[lead:]
+    na_eff = a_eff.size
+    if na_eff == 1:
+        # Constant a: H(s) is itself a polynomial.
+        return (np.zeros(0, dtype=complex),
+                np.zeros(0, dtype=complex),
+                b / a_eff[0])
+    k, rem = _poly_long_divide(b, a_eff)
+    poles = np.roots(a_eff).astype(complex)
+    nP = poles.size
+    ad = np.array([(na_eff - 1 - i) * a_eff[i] for i in _pyrange(na_eff - 1)])
+    r_out = np.zeros(nP, dtype=complex)
+    for j in _pyrange(nP):
+        z = poles[j]
+        b_at = np.polyval(rem, z) if rem.size else 0+0j
+        d_at = np.polyval(ad, z) if ad.size else 0+0j
+        if d_at == 0+0j:
+            r_out[j] = 0+0j
+            continue
+        r_out[j] = b_at / d_at
+    return r_out, poles, k
+
+
+def residue_r(b, a):
+    r, _, _ = _residue_compute(b, a)
+    return r.reshape((-1, 1))
+
+
+def residue_p(b, a):
+    _, p, _ = _residue_compute(b, a)
+    return p.reshape((-1, 1))
+
+
+def residue_k(b, a):
+    _, _, k = _residue_compute(b, a)
+    if k.size == 0:
+        return np.zeros((0, 0))
+    return k.reshape((1, -1))
+
+
 # --- DSP windows. All return an (n, 1) column vector, byte-identical
 #     to the C runtime. Symmetric (non-periodic) form. -----------------
 def _win_col(values):

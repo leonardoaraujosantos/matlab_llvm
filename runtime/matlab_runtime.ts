@@ -2653,6 +2653,104 @@ export function polyint_k(P: any, k: number): NDArray {
   return out;
 }
 
+// --- residue: partial-fraction expansion of B(s)/A(s).
+//     Distinct-pole scope. Three separate matlab_residue_{r,p,k} entry
+//     points mirror the eig_V / eig_D precedent. Real-only TS (the
+//     NDArray descriptor has no native complex), so the imaginary parts
+//     of poles / residues are dropped on the way out — matches the
+//     real-only treatment used by `roots` above.
+function _polyLongDivideTS(b: Float64Array,
+                            a: Float64Array): [Float64Array, Float64Array] {
+  const nb = b.length, na = a.length;
+  if (nb < na) return [new Float64Array(0), Float64Array.from(b)];
+  const nq = nb - na + 1;
+  const q = new Float64Array(nq);
+  const r = Float64Array.from(b);
+  const a0 = a[0];
+  for (let i = 0; i < nq; i++) {
+    const c = r[i] / a0;
+    q[i] = c;
+    for (let j = 0; j < na; j++) r[i + j] -= c * a[j];
+  }
+  return [q, r.slice(nq)];
+}
+
+function _polyvalAtComplex(p: Float64Array, zr: number, zi: number):
+    [number, number] {
+  let r = 0, i = 0;
+  for (let k = 0; k < p.length; k++) {
+    const nr = r * zr - i * zi;
+    const ni = r * zi + i * zr;
+    r = nr + p[k];
+    i = ni;
+  }
+  return [r, i];
+}
+
+function _residueCompute(B: any, A: any):
+    { rr: Float64Array; ri: Float64Array;
+      pr: Float64Array; pi: Float64Array;
+      k:  Float64Array } {
+  const b = asArray(B).data;
+  const a = asArray(A).data;
+  const na = a.length;
+  const empty = new Float64Array(0);
+  if (na === 0) return { rr: empty, ri: empty, pr: empty, pi: empty, k: empty };
+  let lead = 0;
+  while (lead < na && a[lead] === 0) lead++;
+  if (lead === na) return { rr: empty, ri: empty, pr: empty, pi: empty, k: empty };
+  const aEff = a.slice(lead);
+  const naEff = aEff.length;
+  if (naEff === 1) {
+    const k = new Float64Array(b.length);
+    for (let i = 0; i < b.length; i++) k[i] = b[i] / aEff[0];
+    return { rr: empty, ri: empty, pr: empty, pi: empty, k };
+  }
+  const [k, rem] = _polyLongDivideTS(b, aEff);
+  // Reuse our roots() — it returns real-only column vector; we treat
+  // each entry as a complex with zero imaginary part since the TS
+  // lane already drops the imaginary part of complex roots.
+  const polesND = roots(new NDArray(aEff, [1, naEff]));
+  const nP = polesND.size;
+  const pr = new Float64Array(nP);
+  const pi = new Float64Array(nP);
+  for (let i = 0; i < nP; i++) { pr[i] = polesND.data[i]; pi[i] = 0; }
+  const nad = naEff - 1;
+  const ad = new Float64Array(nad);
+  for (let i = 0; i < nad; i++) ad[i] = (naEff - 1 - i) * aEff[i];
+  const rr = new Float64Array(nP);
+  const ri = new Float64Array(nP);
+  for (let j = 0; j < nP; j++) {
+    const [bAtR, bAtI] = rem.length > 0
+        ? _polyvalAtComplex(rem, pr[j], pi[j])
+        : [0, 0];
+    const [dAtR, dAtI] = nad > 0
+        ? _polyvalAtComplex(ad, pr[j], pi[j])
+        : [0, 0];
+    if (dAtR === 0 && dAtI === 0) { rr[j] = 0; ri[j] = 0; continue; }
+    const denom = dAtR * dAtR + dAtI * dAtI;
+    rr[j] = (bAtR * dAtR + bAtI * dAtI) / denom;
+    ri[j] = (bAtI * dAtR - bAtR * dAtI) / denom;
+  }
+  return { rr, ri, pr, pi, k };
+}
+
+export function residue_r(B: any, A: any): NDArray {
+  const { rr } = _residueCompute(B, A);
+  return new NDArray(rr, [rr.length, rr.length > 0 ? 1 : 0]);
+}
+
+export function residue_p(B: any, A: any): NDArray {
+  const { pr } = _residueCompute(B, A);
+  return new NDArray(pr, [pr.length, pr.length > 0 ? 1 : 0]);
+}
+
+export function residue_k(B: any, A: any): NDArray {
+  const { k } = _residueCompute(B, A);
+  if (k.length === 0) return new NDArray(new Float64Array(0), [0, 0]);
+  return new NDArray(k, [1, k.length]);
+}
+
 // --- DSP windows. All return an (n, 1) column vector matching the C
 //     runtime byte-identical. Symmetric (non-periodic) form. -----------
 function _winCol(buf: Float64Array): NDArray { return new NDArray(buf, [buf.length, 1]); }

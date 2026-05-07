@@ -105,7 +105,7 @@ void Resolver::registerBuiltins() {
     "meshgrid", "ndgrid",
     /* Tier 2 — signal/poly/numeric. */
     "xcorr", "polyval", "polyfit", "roots", "poly",
-    "polyder", "polyint",
+    "polyder", "polyint", "residue",
     "interp1", "trapz", "cumtrapz", "gradient",
     "hamming", "hann", "blackman",
     /* Tier-1 (Signal Processing Toolbox roadmap §2.3) — windows tail. */
