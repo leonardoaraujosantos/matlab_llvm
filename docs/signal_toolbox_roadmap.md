@@ -46,18 +46,41 @@ today. Locations are in `runtime/matlab_runtime.cpp`.
 | FFT / shift | `fft`, `ifft`, `fft2`, `ifft2`, `fftshift`, `ifftshift` | Pure-C Cooley-Tukey radix-2 + Bluestein for general N. See `complex.md`. |
 | Windows tail (§2.3) | `hamming`, `hann`, `blackman`, `rectwin`, `triang`, `bartlett`, `barthannwin`, `bohmanwin`, `parzenwin`, `nuttallwin`, `blackmanharris`, `flattopwin`, `kaiser`, `tukeywin`, `gausswin`, `chebwin`, `taylorwin` | Symmetric (non-periodic) form. Two-arg parametric windows take their shape parameter as the second double; `taylorwin` takes `(n, nbar, sll)`. |
 | Polynomial helpers (§2.4) | `roots`, `poly`, `polyder`, `polyint`, `polyint(p, k)`, `[r, p, k] = residue(b, a)` | Distinct-pole `residue`; multi-return shape mirrors `[V, D] = eig`. |
-| IIR design + frequency response (§2.1, lowpass scope) | `[b, a] = butter(n, Wn)`, `[b, a] = cheby1(n, Rp, Wn)`, `H = freqz(b, a, N)`, `[H, w] = freqz(b, a, N)` | Bilinear-transform design; unit DC gain. TS lane gates with `.skip-emit-typescript` because `NDArray` has no native complex (same as `roots`/`fft_c`). |
+| IIR design + frequency response (§2.1, lowpass scope) | `[b, a] = butter(n, Wn)`, `[b, a] = cheby1(n, Rp, Wn)`, `[b, a] = cheby2(n, Rs, Wn)`, `H = freqz(b, a, N)`, `[H, w] = freqz(b, a, N)`, `[n, Wn] = buttord(Wp, Ws, Rp, Rs)`, `[n, Wn] = cheb1ord(Wp, Ws, Rp, Rs)` | Bilinear-transform design; unit DC gain. cheby2 has finite j-axis zeros via the generalized `lowpass_from_analog_pz_` helper. Order helpers split via paired `_n` / `_Wn` runtime entries. TS lane gates `freqz` tests with `.skip-emit-typescript` because `NDArray` has no native complex (same as `roots`/`fft_c`). |
+| FIR design (§2.2, lowpass scope) | `b = fir1(n, Wn)`, `B = sgolay(k, f)`, `y = sgolayfilt(x, k, f)` | `fir1` is windowed-sinc with default Hamming, normalized to unit DC gain. `sgolay` returns the standard `B = V (V'V)^-1 V'` projection matrix; `sgolayfilt` applies B's middle row in steady state and the matching boundary rows at the first/last `(f-1)/2` samples. |
+| Filter implementation (§2.5) | `y = filtfilt(b, a, x)`, `y = sosfilt(sos, x)`, `h = impz(b, a, N)`, `s = stepz(b, a, N)`, `gd = grpdelay(b, a, N)` | Internal direct-form-II-transposed `filter_flat_` helper. `filtfilt` uses reflection padding + zero ICs (Gustafsson initial-condition trick is a follow-on). `grpdelay` is finite-difference on `arg(H(e^{jω}))`. |
 | Multirate stubs | `upsample(x, n)`, `downsample(x, n)` | Zero-stuff / decimate; **no** anti-aliasing filter (raw `decimate`/`resample` still TODO). |
 | Numeric utilities used by SPT | `diff`, `polyfit`, `polyval`, `interp1`, `interp2`, `trapz`, `gradient` | |
 | Complex scalar / matrix arithmetic | `conj`, `real`, `imag`, `angle`, complex `+ - .* ./ * /` | Required for any spectrum / transfer-function math. |
 
-Coverage today closes the smallest end-to-end IIR loop a signal-
-processing user needs: design a Butterworth or Chebyshev I lowpass
-filter, apply it via `filter`, and inspect the response with `freqz`.
-It is **not** yet enough to run a realistic toolbox program that
-needs highpass / bandpass / bandstop variants, elliptic / Bessel
-designs, FIR design, `filtfilt`, spectral analysis, or time-frequency
-analysis — those are tracked in the tiers below.
+**Coverage today** closes the full Tier-1 design-and-apply loop for
+*lowpass* filters:
+
+- **Design**: `butter` / `cheby1` / `cheby2` (IIR), `fir1` (FIR),
+  `sgolay`/`sgolayfilt` (Savitzky-Golay), order helpers `buttord` /
+  `cheb1ord` for picking n.
+- **Apply**: `filter` (causal IIR), `filtfilt` (zero-phase), `sosfilt`
+  (cascade biquad).
+- **Inspect**: `freqz` (frequency response), `impz` (impulse), `stepz`
+  (step), `grpdelay` (group delay).
+
+Polynomial helpers `roots` / `poly` / `polyder` / `polyint` /
+`residue` plus the 17-entry windows tail round out the §2.3 / §2.4
+mathematical infrastructure.
+
+What's still **open**:
+
+- Highpass / bandpass / bandstop variants of `butter` / `cheby1` / `cheby2`.
+- `ellip`, `besself`, analog prototypes (`buttap` etc.) as
+  standalone builtins, standalone `bilinear`, analog `freqs`,
+  `cheb2ord` / `ellipord`, form conversions (`tf2zp` / `tf2sos` /
+  etc.).
+- `fir2`, `firls`, `firpm`, `firrcos`, `kaiserord` (richer FIR design).
+- `phasez`, `zerophase`, true zero-edge-transient `filtfilt`
+  (Gustafsson 1996 IC trick).
+
+Beyond Tier-1: spectral / time-frequency / multirate / measurement /
+linear-prediction tiers — see §3 / §4 below.
 
 ---
 
@@ -421,11 +444,12 @@ a paused debug frame works as soon as the new builtins ship.
 A pragmatic order that keeps each landing self-contained and
 gates the next on user-visible output:
 
-1. ~~**2.3 Windows tail** (1 session)~~ ✅ shipped — unblocks every FIR design.
-2. ~~**2.4 `roots` / `poly` / `polyder` / `polyint` / `residue`** (4 sessions)~~ ✅ shipped — unblocks tf↔zp↔sos. (residue distinct-pole only; repeated-pole grouping is a follow-on.)
-3. **2.1 IIR design — lowpass core** ✅ shipped (`butter`, `cheby1`, `freqz`). **Follow-on**: `cheby2`, `ellip`, `besself`, analog prototypes, `bilinear` standalone, `freqs`, high/band/stop variants, order helpers, form conversions.
-4. **2.2 FIR design (`fir1`, `fir2`, `firls`, `sgolay`)** (3 sessions).
-5. **2.5 `filtfilt`, `sosfilt`, `impz`, `grpdelay`** (3 sessions) — closes the design loop. (`freqz` already shipped in §2.1.)
+1. ~~**2.3 Windows tail**~~ ✅ shipped — unblocks every FIR design.
+2. ~~**2.4 `roots` / `poly` / `polyder` / `polyint` / `residue`**~~ ✅ shipped — unblocks tf↔zp↔sos. (residue distinct-pole only; repeated-pole grouping is a follow-on.)
+3. ~~**2.1 IIR design — lowpass core**~~ ✅ shipped (`butter`, `cheby1`, `freqz`).
+4. ~~**2.1 IIR follow-on — cheby2 + buttord + cheb1ord**~~ ✅ shipped. **Still open**: `ellip`, `besself`, analog prototypes, standalone `bilinear`, `freqs`, high/band/stop variants, `cheb2ord`/`ellipord`, form conversions.
+5. ~~**2.2 FIR design (lowpass core: `fir1`, `sgolay`, `sgolayfilt`)**~~ ✅ shipped. **Still open**: `fir2`, `firls`, `firpm`, `firrcos`, `kaiserord`.
+6. ~~**2.5 `filtfilt`, `sosfilt`, `impz`, `stepz`, `grpdelay`**~~ ✅ shipped — design loop closed. **Still open**: `phasez`, `zerophase`, Gustafsson initial conditions for `filtfilt`.
 6. **3.1 `periodogram`, `pwelch`, `dpss`, `pmtm`, `cpsd`, `mscohere`** (1 week).
 7. **3.4 `dct`/`idct`, `hilbert`, `czt`, `goertzel`, `fwht`** (3 sessions).
 8. **3.3 `spectrogram`, `stft`, `istft`** (3 sessions).

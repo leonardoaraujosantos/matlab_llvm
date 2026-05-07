@@ -48,7 +48,7 @@ control flow, functions, basic OOP, and editor tooling.
 |---|---|
 | Core language | scripts, functions, recursion, multi-return, `if` / `switch` / `for` / `while` / `try` / `catch`, `break`, `continue`, `return` |
 | Numeric runtime | dense matrices, slicing, broadcasting, reductions, `eig`, `svd` (values), `qr`, `chol`, `fft`, `ifft`, `fft2`, `ifft2` |
-| Signal Processing Toolbox (subset) | windows tail (`hamming`, `hann`, `blackman`, `rectwin`, `triang`, `bartlett`, `barthannwin`, `bohmanwin`, `parzenwin`, `nuttallwin`, `blackmanharris`, `flattopwin`, `kaiser`, `tukeywin`, `gausswin`, `chebwin`, `taylorwin`); polynomial helpers (`roots` / `poly` / `polyder` / `polyint` / `residue`); IIR lowpass design (`butter`, `cheby1`) + frequency response (`freqz`); plus pre-existing `conv`, `conv2`, `xcorr`, `filter`, `fft`, `fftshift` etc. See [`docs/signal_toolbox_roadmap.md`](docs/signal_toolbox_roadmap.md). |
+| Signal Processing Toolbox (subset) | **Tier-1 lowpass design loop closed.** Windows tail (17 entries: `hamming`, `hann`, `blackman`, `rectwin`, `triang`, `bartlett`, `barthannwin`, `bohmanwin`, `parzenwin`, `nuttallwin`, `blackmanharris`, `flattopwin`, `kaiser`, `tukeywin`, `gausswin`, `chebwin`, `taylorwin`); polynomial helpers (`roots`, `poly`, `polyder`, `polyint`, `residue`); IIR lowpass design (`butter`, `cheby1`, `cheby2`, order helpers `buttord`/`cheb1ord`); FIR design (`fir1`, `sgolay`, `sgolayfilt`); filter implementation (`filter`, `filtfilt`, `sosfilt`); response inspection (`freqz`, `impz`, `stepz`, `grpdelay`); plus pre-existing `conv`, `conv2`, `xcorr`, `fft`, `fftshift`. See [`docs/signal_toolbox_roadmap.md`](docs/signal_toolbox_roadmap.md). |
 | MATLAB data types | strings, chars, structs, **struct arrays** (`s(i).x`), 1-D and 2-D cell arrays + bracket-concat, function handles, anonymous functions with captures, **dictionaries** (`containers.Map` / `dictionary`), **datetime** / **duration**, **categorical**, **table**, **symbolic** (`sym` / `syms` via SymPP) |
 | Symbolic Math Toolbox | `syms`, `sym`, `str2sym`, `diff`, `int`, `simplify`, `expand`, `factor`, `subs`, `solve`, `vpa`, `taylor`, `limit`, `dsolve`, `pdsolve`, `pdsolve_heat`, `pdsolve_wave`, `laplace`, `ilaplace`, `fourier`, `ifourier`, `ztrans`, `iztrans`, `assume`, `assumeAlso`, `clearAssumptions`, `double`, `latex`, `pretty`, `ccode` — opt-in via `-DMATLAB_LLVM_WITH_SYM=ON`, backed by [SymPP](https://github.com/leonardoaraujosantos/SymPP) |
 | ODE / IVP solvers | `ode45` (Dormand–Prince 5(4)) and `ode23` (Bogacki–Shampine 3(2)) non-stiff, plus `ode23s` (Rosenbrock 2(3) **stiff solver** — handles Robertson-style kinetics where `ode45` diverges). All three for **scalar and vector `y`**, with adaptive FSAL + cubic-Hermite dense output, full `odeset` surface (`RelTol`, `AbsTol`, `MaxStep`, `InitialStep`, `Refine`, `Stats`), 2- and 3-return forms, forward/backward integration, user-time-grid `tspan = [t0 t1 … tN]`. **Event detection** via the dedicated `[t, y, te, ye, ie] = ode_events(@f, tspan, y0, @evt)` builtin — bracket-then-bisect over each accepted step on a user `value` function with `isterminal` halt and `direction` filter. See [`docs/ode.md`](docs/ode.md). |
@@ -66,7 +66,7 @@ Current corpus size in-tree:
 - `29` runnable programs in [`examples/`](examples/)
 - `39` synthesizable HDL example modules in [`examples/hdl/`](examples/hdl/) (plus driver scripts)
 - `10` flowchart programs in [`examples/mflow/`](examples/mflow/)
-- `176` execution tests in `test/Run/` plus `4` opt-in symbolic tests in `test/RunSym/`
+- `179` execution tests in `test/Run/` plus `4` opt-in symbolic tests in `test/RunSym/`
 - `77` SystemVerilog golden fixtures (Verilator lint-clean) in `test/EmitSV/`
 - `7` fi-spec port-declaration regression tests in `test/EmitSVPorts/`
 - `2` boolean-port lint-hint tests in `test/EmitSVHint/`
@@ -387,7 +387,7 @@ Core docs:
 - [`docs/complex.md`](docs/complex.md): complex numbers and FFT
 - [`docs/sym.md`](docs/sym.md): Symbolic Math Toolbox via SymPP — `syms`/diff/int/simplify/solve/dsolve/pdsolve/transforms/assume/vpa/taylor/limit + symbolic matrices and `[a 1; 2 b]` literal syntax
 - [`docs/ode.md`](docs/ode.md): ODE / PDE numerical solvers — `ode45`, `ode23`, `ode23s` (stiff), `ode_events`, `pdepe`
-- [`docs/signal_toolbox_roadmap.md`](docs/signal_toolbox_roadmap.md): Signal Processing Toolbox compatibility plan — what's shipped (windows, polynomial helpers, IIR lowpass, `freqz`), what's deferred per chapter, and the explicit GUI / deep-learning / Simulink carve-outs
+- [`docs/signal_toolbox_roadmap.md`](docs/signal_toolbox_roadmap.md): Signal Processing Toolbox compatibility plan — Tier-1 lowpass design loop is closed (windows, polynomial helpers, IIR `butter`/`cheby1`/`cheby2` + order helpers, FIR `fir1`/`sgolay`, `freqz`/`filtfilt`/`sosfilt`/`impz`/`stepz`/`grpdelay`); spectral / time-frequency / multirate / measurement / linear-prediction tiers and the band variants are still open; explicit GUI / deep-learning / Simulink carve-outs documented
 - [`docs/sema.md`](docs/sema.md): semantic analysis and type inference
 - [`docs/save_load_compat.md`](docs/save_load_compat.md): `save` / `load` `.mat` compatibility
 
