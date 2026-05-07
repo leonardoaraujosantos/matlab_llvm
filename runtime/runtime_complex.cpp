@@ -300,6 +300,141 @@ matlab_mat *matlab_periodogram(matlab_mat *x) {
     return P;
 }
 
+/* Forward decl — pwelch is defined later in this file. */
+matlab_mat *matlab_pwelch(matlab_mat *x, matlab_mat *win, double noverlap);
+
+/* Cross-spectral density via Welch averaging. Returns a single-sided
+ * complex column of length L/2+1. The averaging step over K segments
+ * is identical to pwelch but multiplies X·conj(Y) instead of |X|². */
+matlab_mat_c *matlab_cpsd(matlab_mat *x, matlab_mat *y, matlab_mat *win,
+                          double noverlap_d) {
+    if (!x || !y || !win) return mat_c_alloc(0, 0);
+    int64_t Nx = x->rows * x->cols;
+    int64_t Ny = y->rows * y->cols;
+    int64_t L  = win->rows * win->cols;
+    int64_t N  = Nx < Ny ? Nx : Ny;
+    int     no = (int)noverlap_d;
+    if (no < 0) no = 0;
+    if (no >= L) no = L - 1;
+    int step = (int)L - no;
+    if (step < 1) step = 1;
+    int64_t M = L / 2 + 1;
+    if (N < L) return mat_c_alloc(M, 1);
+    int K = (int)((N - L) / step) + 1;
+    double U = 0.0;
+    for (int64_t i = 0; i < L; ++i) U += win->data[i] * win->data[i];
+    matlab_mat_c *Pxy = mat_c_alloc(M, 1);
+    matlab_mat segx = { /*data*/ nullptr, /*rows*/ 1, /*cols*/ L };
+    matlab_mat segy = { /*data*/ nullptr, /*rows*/ 1, /*cols*/ L };
+    std::vector<double> xseg((size_t)L), yseg((size_t)L);
+    segx.data = xseg.data();
+    segy.data = yseg.data();
+    for (int s = 0; s < K; ++s) {
+        for (int64_t i = 0; i < L; ++i) {
+            xseg[(size_t)i] = x->data[s * step + i] * win->data[i];
+            yseg[(size_t)i] = y->data[s * step + i] * win->data[i];
+        }
+        matlab_mat_c *X = matlab_fft_c((void *)&segx);
+        matlab_mat_c *Y = matlab_fft_c((void *)&segy);
+        for (int64_t k = 0; k < M; ++k) {
+            /* Pxy = X·conj(Y) summed; one-sided doubling on mid bins. */
+            double xr = X->re[k], xi = X->im[k];
+            double yr = Y->re[k], yi = Y->im[k];
+            double cr = xr * yr + xi * yi;
+            double ci = xi * yr - xr * yi;
+            double s_ = ((k != 0 && (L % 2 == 0 ? k != L / 2 : 1))) ? 2.0 : 1.0;
+            Pxy->re[k] += s_ * cr;
+            Pxy->im[k] += s_ * ci;
+        }
+        free(X->re); free(X->im); free(X);
+        free(Y->re); free(Y->im); free(Y);
+    }
+    double denom = (double)K * U;
+    if (denom > 0.0) {
+        for (int64_t k = 0; k < M; ++k) {
+            Pxy->re[k] /= denom;
+            Pxy->im[k] /= denom;
+        }
+    }
+    return Pxy;
+}
+
+/* mscohere(x, y, win, noverlap) = |Pxy|² / (Pxx · Pyy). Returns a real
+ * single-sided column. */
+matlab_mat *matlab_mscohere(matlab_mat *x, matlab_mat *y, matlab_mat *win,
+                            double noverlap_d) {
+    matlab_mat   *Pxx = matlab_pwelch(x, win, noverlap_d);
+    matlab_mat   *Pyy = matlab_pwelch(y, win, noverlap_d);
+    matlab_mat_c *Pxy = matlab_cpsd  (x, y, win, noverlap_d);
+    int64_t M = Pxx->rows * Pxx->cols;
+    matlab_mat *C = mat_alloc(M, 1);
+    for (int64_t k = 0; k < M; ++k) {
+        double pmag2 = Pxy->re[k] * Pxy->re[k] + Pxy->im[k] * Pxy->im[k];
+        double denom = Pxx->data[k] * Pyy->data[k];
+        C->data[k] = denom > 0 ? pmag2 / denom : 0.0;
+    }
+    free(Pxx->data); free(Pxx);
+    free(Pyy->data); free(Pyy);
+    free(Pxy->re); free(Pxy->im); free(Pxy);
+    return C;
+}
+
+/* tfestimate(x, y, win, noverlap) = Pxy / Pxx — complex transfer
+ * function estimate. */
+matlab_mat_c *matlab_tfestimate(matlab_mat *x, matlab_mat *y,
+                                matlab_mat *win, double noverlap_d) {
+    matlab_mat   *Pxx = matlab_pwelch(x, win, noverlap_d);
+    matlab_mat_c *Pxy = matlab_cpsd  (x, y, win, noverlap_d);
+    int64_t M = Pxx->rows * Pxx->cols;
+    matlab_mat_c *T = mat_c_alloc(M, 1);
+    for (int64_t k = 0; k < M; ++k) {
+        double d = Pxx->data[k];
+        if (d > 0) {
+            T->re[k] = Pxy->re[k] / d;
+            T->im[k] = Pxy->im[k] / d;
+        }
+    }
+    free(Pxx->data); free(Pxx);
+    free(Pxy->re); free(Pxy->im); free(Pxy);
+    return T;
+}
+
+/* spectrogram(x, win, noverlap) — single-output |STFT|² per (freq, frame).
+ *
+ * Returns a (M × K) matrix where M = L/2 + 1 is the single-sided
+ * frequency-bin count and K is the number of frames. Each column is
+ * the magnitude-squared periodogram of one windowed segment. Matches
+ * MATLAB's default 1-output `S = spectrogram(x, win, noverlap)` shape. */
+matlab_mat *matlab_spectrogram(matlab_mat *x, matlab_mat *win, double noverlap_d) {
+    if (!x || !win) return mat_alloc(0, 0);
+    int64_t N  = x->rows * x->cols;
+    int64_t L  = win->rows * win->cols;
+    int     no = (int)noverlap_d;
+    if (no < 0) no = 0;
+    if (no >= L) no = L - 1;
+    int step = (int)L - no;
+    if (step < 1) step = 1;
+    int64_t M = L / 2 + 1;
+    if (N < L) return mat_alloc(M, 0);
+    int K = (int)((N - L) / step) + 1;
+    matlab_mat *S = mat_alloc(M, K);
+    matlab_mat seg = { /*data*/ nullptr, /*rows*/ 1, /*cols*/ L };
+    std::vector<double> xseg((size_t)L);
+    seg.data = xseg.data();
+    for (int s = 0; s < K; ++s) {
+        for (int64_t i = 0; i < L; ++i)
+            xseg[(size_t)i] = x->data[s * step + i] * win->data[i];
+        matlab_mat_c *X = matlab_fft_c((void *)&seg);
+        for (int64_t k = 0; k < M; ++k) {
+            double re = X->re[k];
+            double im = X->im[k];
+            S->data[k * K + s] = re * re + im * im;
+        }
+        free(X->re); free(X->im); free(X);
+    }
+    return S;
+}
+
 matlab_mat *matlab_pwelch(matlab_mat *x, matlab_mat *win, double noverlap_d) {
     if (!x || !win) return mat_alloc(0, 0);
     int64_t N  = x->rows * x->cols;

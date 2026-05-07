@@ -369,6 +369,22 @@ double matlab_cheb1ord_Wn(double Wp, double Ws, double Rp, double Rs);
  * follow-on. */
 matlab_mat   *matlab_periodogram(matlab_mat *x);
 matlab_mat   *matlab_pwelch(matlab_mat *x, matlab_mat *win, double noverlap);
+/* spectrogram (Tier-2 §3.3) — single-output (M × K) magnitude-squared
+ * STFT per (freq, frame). Default fs = 1 (normalised). */
+matlab_mat   *matlab_spectrogram(matlab_mat *x, matlab_mat *win, double noverlap);
+
+/* Tier-2 §3.2 linear prediction. */
+matlab_mat   *matlab_levinson(matlab_mat *r, double p);
+matlab_mat   *matlab_lpc(matlab_mat *x, double p);
+matlab_mat   *matlab_aryule(matlab_mat *x, double p);
+matlab_mat   *matlab_arburg(matlab_mat *x, double p);
+matlab_mat   *matlab_pyulear(matlab_mat *x, double p, double N);
+matlab_mat   *matlab_pburg(matlab_mat *x, double p, double N);
+
+/* Tier-2 §3.1 cross-spectral helpers (Welch-based). */
+matlab_mat_c *matlab_cpsd(matlab_mat *x, matlab_mat *y, matlab_mat *win, double noverlap);
+matlab_mat   *matlab_mscohere(matlab_mat *x, matlab_mat *y, matlab_mat *win, double noverlap);
+matlab_mat_c *matlab_tfestimate(matlab_mat *x, matlab_mat *y, matlab_mat *win, double noverlap);
 
 /* Tier-2 §3.4 transforms — DCT-II / DCT-III / Walsh-Hadamard /
  * Hilbert (analytic signal) / Goertzel (single-bin DFT). */

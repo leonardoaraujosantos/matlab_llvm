@@ -3383,6 +3383,19 @@ bool TensorLowering::rewriteBuiltinCalls() {
       /* §3.1 nonparametric spectral. */
       {"periodogram", "matlab_periodogram", 1, "p"},
       {"pwelch",      "matlab_pwelch",      1, "ppf"},
+      /* §3.3 time-frequency. */
+      {"spectrogram", "matlab_spectrogram", 1, "ppf"},
+      /* §3.2 linear prediction + parametric PSD. */
+      {"levinson",    "matlab_levinson",    1, "pf"},
+      {"lpc",         "matlab_lpc",         1, "pf"},
+      {"aryule",      "matlab_aryule",      1, "pf"},
+      {"arburg",      "matlab_arburg",      1, "pf"},
+      {"pyulear",     "matlab_pyulear",     1, "pff"},
+      {"pburg",       "matlab_pburg",       1, "pff"},
+      /* §3.1 cross-spectral helpers. */
+      {"cpsd",        "matlab_cpsd",        1, "pppf"},
+      {"mscohere",    "matlab_mscohere",    1, "pppf"},
+      {"tfestimate",  "matlab_tfestimate",  1, "pppf"},
       {"interp1",    "matlab_interp1",    1, "ppp"},
       {"trapz",      "matlab_trapz",      1, "p"},
       {"trapz",      "matlab_trapz_xy",   1, "pp"},

@@ -2760,6 +2760,192 @@ def periodogram(x):
     return P.reshape((-1, 1))
 
 
+# --- §3.2 linear prediction ----------------------------------------
+def levinson(r, p):
+    rv = np.asarray(r, dtype=float).ravel()
+    p = int(p)
+    if p < 1: p = 1
+    if rv.size < p + 1: p = rv.size - 1
+    if p < 0: return np.zeros((0, 0))
+    a = np.zeros(p + 1); a[0] = 1.0
+    E = float(rv[0])
+    if E == 0.0:
+        out = np.zeros(p + 1); out[0] = 1.0
+        return out.reshape((1, -1))
+    for m in _pyrange(1, p + 1):
+        k = -float(rv[m])
+        for j in _pyrange(1, m):
+            k -= a[j] * rv[m - j]
+        k /= E
+        aprev = a.copy()
+        for j in _pyrange(1, m):
+            a[j] = aprev[j] + k * aprev[m - j]
+        a[m] = k
+        E *= (1.0 - k * k)
+        if E <= 0.0: break
+    return a.reshape((1, -1))
+
+
+def _biased_autocorr(x, p):
+    N = x.size
+    r = np.zeros(p + 1)
+    for k in _pyrange(p + 1):
+        s = 0.0
+        for n in _pyrange(N - k):
+            s += x[n] * x[n + k]
+        r[k] = s / N
+    return r
+
+
+def lpc(x, p):
+    a = np.asarray(x, dtype=float).ravel()
+    p = int(p)
+    if p < 1: p = 1
+    N = a.size
+    if N < p + 1:
+        out = np.zeros(p + 1); out[0] = 1.0
+        return out.reshape((1, -1))
+    r = _biased_autocorr(a, p)
+    return levinson(r, p)
+
+
+def aryule(x, p):
+    return lpc(x, p)
+
+
+def arburg(x, p):
+    a_in = np.asarray(x, dtype=float).ravel()
+    p = int(p)
+    if p < 1: p = 1
+    N = a_in.size
+    if N < p + 1:
+        out = np.zeros(p + 1); out[0] = 1.0
+        return out.reshape((1, -1))
+    f = a_in.astype(float).copy()
+    b = a_in.astype(float).copy()
+    a = np.zeros(p + 1); a[0] = 1.0
+    for m in _pyrange(1, p + 1):
+        num = 0.0
+        den = 0.0
+        for i in _pyrange(m, N):
+            num += f[i] * b[i - 1]
+            den += f[i] * f[i] + b[i - 1] * b[i - 1]
+        k = (-2.0 * num / den) if den != 0.0 else 0.0
+        aprev = a.copy()
+        for j in _pyrange(1, m):
+            a[j] = aprev[j] + k * aprev[m - j]
+        a[m] = k
+        fnew = f.copy(); bnew = b.copy()
+        for i in _pyrange(m, N):
+            fnew[i] = f[i] + k * b[i - 1]
+            bnew[i] = b[i - 1] + k * f[i]
+        f = fnew; b = bnew
+    return a.reshape((1, -1))
+
+
+# --- §3.1 cross-spectral helpers ------------------------------------
+def cpsd(x, y, win, noverlap):
+    xa = np.asarray(x, dtype=float).ravel()
+    ya = np.asarray(y, dtype=float).ravel()
+    wa = np.asarray(win, dtype=float).ravel()
+    Nx = xa.size; Ny = ya.size
+    L = wa.size
+    N = _pymin(Nx, Ny)
+    no = int(noverlap)
+    if no < 0: no = 0
+    if no >= L: no = L - 1
+    step = _pymax(1, L - no)
+    M = L // 2 + 1
+    if N < L:
+        return np.zeros((M, 1), dtype=complex)
+    K = (N - L) // step + 1
+    U = float(np.sum(wa * wa))
+    Pxy = np.zeros(M, dtype=complex)
+    for s in _pyrange(K):
+        xs = xa[s * step : s * step + L] * wa
+        ys = ya[s * step : s * step + L] * wa
+        X = np.fft.fft(xs)
+        Y = np.fft.fft(ys)
+        for k in _pyrange(M):
+            scale = 2.0 if (k != 0 and (L % 2 != 0 or k != L // 2)) else 1.0
+            Pxy[k] += scale * X[k] * np.conj(Y[k])
+    denom = K * U
+    if denom > 0:
+        Pxy /= denom
+    return Pxy.reshape((-1, 1))
+
+
+def mscohere(x, y, win, noverlap):
+    Pxx = pwelch(x, win, noverlap).ravel()
+    Pyy = pwelch(y, win, noverlap).ravel()
+    Pxy = cpsd(x, y, win, noverlap).ravel()
+    M = Pxx.size
+    out = np.zeros(M)
+    for k in _pyrange(M):
+        denom = Pxx[k] * Pyy[k]
+        out[k] = (np.abs(Pxy[k]) ** 2 / denom) if denom > 0 else 0.0
+    return out.reshape((-1, 1))
+
+
+def tfestimate(x, y, win, noverlap):
+    Pxx = pwelch(x, win, noverlap).ravel()
+    Pxy = cpsd(x, y, win, noverlap).ravel()
+    M = Pxx.size
+    out = np.zeros(M, dtype=complex)
+    for k in _pyrange(M):
+        if Pxx[k] > 0:
+            out[k] = Pxy[k] / Pxx[k]
+    return out.reshape((-1, 1))
+
+
+def _ar_psd(a_coefs, sigma2, Ng):
+    out = np.zeros(int(Ng))
+    a = np.asarray(a_coefs, dtype=float).ravel()
+    for k in _pyrange(int(Ng)):
+        w = np.pi * k / Ng
+        v = np.sum(a * np.exp(-1j * w * np.arange(a.size)))
+        mag2 = (v.real ** 2 + v.imag ** 2)
+        out[k] = sigma2 / mag2 if mag2 > 0 else 0.0
+    return out
+
+
+def pyulear(x, p, N):
+    a = aryule(x, p).ravel()
+    xa = np.asarray(x, dtype=float).ravel()
+    sigma2 = float(np.sum(xa * xa) / xa.size) if xa.size else 1.0
+    return _ar_psd(a, sigma2, N).reshape((-1, 1))
+
+
+def pburg(x, p, N):
+    a = arburg(x, p).ravel()
+    xa = np.asarray(x, dtype=float).ravel()
+    sigma2 = float(np.sum(xa * xa) / xa.size) if xa.size else 1.0
+    return _ar_psd(a, sigma2, N).reshape((-1, 1))
+
+
+def spectrogram(x, win, noverlap):
+    """Single-output spectrogram: |STFT|² per (freq, frame)."""
+    xa = np.asarray(x, dtype=float).ravel()
+    wa = np.asarray(win, dtype=float).ravel()
+    N = xa.size
+    L = wa.size
+    no = int(noverlap)
+    if no < 0: no = 0
+    if no >= L: no = L - 1
+    step = _pymax(1, L - no)
+    M = L // 2 + 1
+    if N < L:
+        return np.zeros((M, 0))
+    K = (N - L) // step + 1
+    S = np.zeros((M, K))
+    for s in _pyrange(K):
+        seg = xa[s * step : s * step + L] * wa
+        X = np.fft.fft(seg)
+        for k in _pyrange(M):
+            S[k, s] = X[k].real ** 2 + X[k].imag ** 2
+    return S
+
+
 def pwelch(x, win, noverlap):
     xa = np.asarray(x, dtype=float).ravel()
     wa = np.asarray(win, dtype=float).ravel()

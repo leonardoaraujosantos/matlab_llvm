@@ -3096,6 +3096,224 @@ export function periodogram(x: any): NDArray {
   return new NDArray(P, [M, 1]);
 }
 
+// --- §3.2 linear prediction ----------------------------------------
+export function levinson(r: any, p: number): NDArray {
+  const rv = asArray(r).data;
+  let pp = (p | 0);
+  if (pp < 1) pp = 1;
+  if (rv.length < pp + 1) pp = rv.length - 1;
+  if (pp < 0) return new NDArray(new Float64Array(0), [0, 0]);
+  const a = new Float64Array(pp + 1);
+  a[0] = 1;
+  let E = rv[0];
+  if (E === 0) { a[0] = 1; return new NDArray(a, [1, pp + 1]); }
+  for (let m = 1; m <= pp; m++) {
+    let k = -rv[m];
+    for (let j = 1; j < m; j++) k -= a[j] * rv[m - j];
+    k /= E;
+    const aprev = Float64Array.from(a);
+    for (let j = 1; j < m; j++) a[j] = aprev[j] + k * aprev[m - j];
+    a[m] = k;
+    E *= (1 - k * k);
+    if (E <= 0) break;
+  }
+  return new NDArray(a, [1, pp + 1]);
+}
+
+function _biasedAutocorrTS(x: Float64Array, p: number): Float64Array {
+  const N = x.length;
+  const r = new Float64Array(p + 1);
+  for (let k = 0; k <= p; k++) {
+    let s = 0;
+    for (let n = 0; n < N - k; n++) s += x[n] * x[n + k];
+    r[k] = s / N;
+  }
+  return r;
+}
+
+export function lpc(x: any, p: number): NDArray {
+  const a = asArray(x).data;
+  let pp = (p | 0);
+  if (pp < 1) pp = 1;
+  const N = a.length;
+  if (N < pp + 1) {
+    const out = new Float64Array(pp + 1); out[0] = 1;
+    return new NDArray(out, [1, pp + 1]);
+  }
+  const r = _biasedAutocorrTS(a as Float64Array, pp);
+  return levinson(new NDArray(r, [1, r.length]), pp);
+}
+
+export function aryule(x: any, p: number): NDArray { return lpc(x, p); }
+
+export function arburg(x: any, p: number): NDArray {
+  const xa = asArray(x).data;
+  let pp = (p | 0);
+  if (pp < 1) pp = 1;
+  const N = xa.length;
+  if (N < pp + 1) {
+    const out = new Float64Array(pp + 1); out[0] = 1;
+    return new NDArray(out, [1, pp + 1]);
+  }
+  let f = Float64Array.from(xa);
+  let b = Float64Array.from(xa);
+  const a = new Float64Array(pp + 1); a[0] = 1;
+  for (let m = 1; m <= pp; m++) {
+    let num = 0, den = 0;
+    for (let i = m; i < N; i++) {
+      num += f[i] * b[i - 1];
+      den += f[i] * f[i] + b[i - 1] * b[i - 1];
+    }
+    const k = (den !== 0) ? (-2 * num / den) : 0;
+    const aprev = Float64Array.from(a);
+    for (let j = 1; j < m; j++) a[j] = aprev[j] + k * aprev[m - j];
+    a[m] = k;
+    const fnew = Float64Array.from(f);
+    const bnew = Float64Array.from(b);
+    for (let i = m; i < N; i++) {
+      fnew[i] = f[i] + k * b[i - 1];
+      bnew[i] = b[i - 1] + k * f[i];
+    }
+    f = fnew; b = bnew;
+  }
+  return new NDArray(a, [1, pp + 1]);
+}
+
+// --- §3.1 cross-spectral helpers (real-only output on TS) ------------
+function _dftAtComplex(x: Float64Array, k: number, N: number): [number, number] {
+  let re = 0, im = 0;
+  for (let n = 0; n < N; n++) {
+    const a = -2 * Math.PI * k * n / N;
+    re += x[n] * Math.cos(a);
+    im += x[n] * Math.sin(a);
+  }
+  return [re, im];
+}
+
+export function cpsd(x: any, y: any, win: any, noverlap: number): NDArray {
+  // TS lane: returns the magnitude of Pxy (real-only) since NDArray
+  // has no native complex shape.
+  const xa = asArray(x).data;
+  const ya = asArray(y).data;
+  const wa = asArray(win).data;
+  const Nx = xa.length, Ny = ya.length, L = wa.length;
+  const N = Math.min(Nx, Ny);
+  let no = (noverlap | 0);
+  if (no < 0) no = 0;
+  if (no >= L) no = L - 1;
+  const step = Math.max(1, L - no);
+  const M = (L >> 1) + 1;
+  if (N < L) return new NDArray(new Float64Array(M), [M, 1]);
+  const K = Math.floor((N - L) / step) + 1;
+  let U = 0;
+  for (let i = 0; i < L; i++) U += wa[i] * wa[i];
+  const PxyR = new Float64Array(M), PxyI = new Float64Array(M);
+  const xseg = new Float64Array(L), yseg = new Float64Array(L);
+  for (let s = 0; s < K; s++) {
+    for (let i = 0; i < L; i++) {
+      xseg[i] = xa[s * step + i] * wa[i];
+      yseg[i] = ya[s * step + i] * wa[i];
+    }
+    for (let k = 0; k < M; k++) {
+      const [xr, xi] = _dftAtComplex(xseg, k, L);
+      const [yr, yi] = _dftAtComplex(yseg, k, L);
+      const scale = (k !== 0 && (L % 2 !== 0 || k !== L / 2)) ? 2 : 1;
+      PxyR[k] += scale * (xr * yr + xi * yi);
+      PxyI[k] += scale * (xi * yr - xr * yi);
+    }
+  }
+  const denom = K * U;
+  const out = new Float64Array(M);
+  for (let k = 0; k < M; k++) {
+    const r = denom > 0 ? PxyR[k] / denom : 0;
+    const i = denom > 0 ? PxyI[k] / denom : 0;
+    out[k] = Math.sqrt(r * r + i * i);
+  }
+  return new NDArray(out, [M, 1]);
+}
+
+export function mscohere(x: any, y: any, win: any, noverlap: number): NDArray {
+  const Pxx = pwelch(x, win, noverlap).data;
+  const Pyy = pwelch(y, win, noverlap).data;
+  const PxyMag = cpsd(x, y, win, noverlap).data;
+  const M = Pxx.length;
+  const out = new Float64Array(M);
+  for (let k = 0; k < M; k++) {
+    const d = Pxx[k] * Pyy[k];
+    out[k] = d > 0 ? (PxyMag[k] * PxyMag[k]) / d : 0;
+  }
+  return new NDArray(out, [M, 1]);
+}
+
+export function tfestimate(x: any, y: any, win: any, noverlap: number): NDArray {
+  // Real-only on TS — return |H| = |Pxy| / Pxx.
+  const Pxx = pwelch(x, win, noverlap).data;
+  const PxyMag = cpsd(x, y, win, noverlap).data;
+  const M = Pxx.length;
+  const out = new Float64Array(M);
+  for (let k = 0; k < M; k++)
+    out[k] = Pxx[k] > 0 ? PxyMag[k] / Pxx[k] : 0;
+  return new NDArray(out, [M, 1]);
+}
+
+function _arPsdTS(a: Float64Array, sigma2: number, Ng: number): Float64Array {
+  const out = new Float64Array(Ng);
+  for (let k = 0; k < Ng; k++) {
+    const w = Math.PI * k / Ng;
+    let re = 0, im = 0;
+    for (let i = 0; i < a.length; i++) {
+      const ar = -w * i;
+      re += a[i] * Math.cos(ar);
+      im += a[i] * Math.sin(ar);
+    }
+    const mag2 = re * re + im * im;
+    out[k] = mag2 > 0 ? sigma2 / mag2 : 0;
+  }
+  return out;
+}
+
+export function pyulear(x: any, p: number, N: number): NDArray {
+  const a = aryule(x, p).data;
+  const xa = asArray(x).data;
+  let s = 0;
+  for (let i = 0; i < xa.length; i++) s += xa[i] * xa[i];
+  const sigma2 = xa.length > 0 ? s / xa.length : 1;
+  const Ng = N | 0;
+  const out = _arPsdTS(a as Float64Array, sigma2, Ng);
+  return new NDArray(out, [Ng, 1]);
+}
+
+export function pburg(x: any, p: number, N: number): NDArray {
+  const a = arburg(x, p).data;
+  const xa = asArray(x).data;
+  let s = 0;
+  for (let i = 0; i < xa.length; i++) s += xa[i] * xa[i];
+  const sigma2 = xa.length > 0 ? s / xa.length : 1;
+  const Ng = N | 0;
+  const out = _arPsdTS(a as Float64Array, sigma2, Ng);
+  return new NDArray(out, [Ng, 1]);
+}
+
+export function spectrogram(x: any, win: any, noverlap: number): NDArray {
+  const xa = asArray(x).data;
+  const wa = asArray(win).data;
+  const N = xa.length, L = wa.length;
+  let no = (noverlap | 0);
+  if (no < 0) no = 0;
+  if (no >= L) no = L - 1;
+  const step = Math.max(1, L - no);
+  const M = (L >> 1) + 1;
+  if (N < L) return new NDArray(new Float64Array(0), [M, 0]);
+  const K = Math.floor((N - L) / step) + 1;
+  const S = new Float64Array(M * K);
+  const seg = new Float64Array(L);
+  for (let s = 0; s < K; s++) {
+    for (let i = 0; i < L; i++) seg[i] = xa[s * step + i] * wa[i];
+    for (let k = 0; k < M; k++) S[k * K + s] = _dftMagSqr(seg, k, L);
+  }
+  return new NDArray(S, [M, K]);
+}
+
 export function pwelch(x: any, win: any, noverlap: number): NDArray {
   const xa = asArray(x).data;
   const wa = asArray(win).data;

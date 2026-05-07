@@ -1797,6 +1797,13 @@ static llvm::StringRef MatrixReturningFns[] = {
     "matlab_hilbert", "matlab_goertzel",
     /* §3.1 nonparametric spectral. */
     "matlab_periodogram", "matlab_pwelch",
+    /* §3.3 time-frequency. */
+    "matlab_spectrogram",
+    /* §3.2 linear prediction + parametric PSD. */
+    "matlab_levinson", "matlab_lpc", "matlab_aryule", "matlab_arburg",
+    "matlab_pyulear", "matlab_pburg",
+    /* §3.1 cross-spectral helpers. */
+    "matlab_cpsd", "matlab_mscohere", "matlab_tfestimate",
     "matlab_interp1", "matlab_interp2", "matlab_trapz", "matlab_trapz_xy",
     "matlab_cumtrapz", "matlab_gradient", "matlab_diff",
     "matlab_conv", "matlab_conv2", "matlab_filter",

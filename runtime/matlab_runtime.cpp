@@ -5895,6 +5895,185 @@ matlab_mat *matlab_sgolayfilt(matlab_mat *x, double k_d, double f_d) {
 }
 
 /*===========================================================================
+ * Tier-2 SPT §3.2 linear prediction — Levinson + LPC + AR estimators.
+ *
+ *   a = levinson(r, p)   AR coefficients from autocorrelation via the
+ *                        Levinson-Durbin recursion.
+ *   a = lpc(x, p)        biased-autocorr LPC: r = autocorr(x); levinson(r, p).
+ *   a = aryule(x, p)     same shape as lpc but uses Yule-Walker biased
+ *                        autocorrelation; output is mathematically equal
+ *                        to lpc(x, p) for our scope (single-output form).
+ *   a = arburg(x, p)     Burg's method — minimises forward + backward
+ *                        prediction errors recursively.
+ *
+ * All return a (1 × (p+1)) row vector. The reflection coefficients
+ * and final prediction-error variance (3-return forms) are deferred.
+ */
+matlab_mat *matlab_levinson(matlab_mat *r, double p_d) {
+    if (!r) return mat_alloc(0, 0);
+    int p = (int)p_d;
+    if (p < 1) p = 1;
+    int64_t nr = r->rows * r->cols;
+    if (nr < p + 1) p = (int)nr - 1;
+    if (p < 0) return mat_alloc(0, 0);
+    /* Levinson-Durbin: solves the p×p Toeplitz system.
+     * a[0] = 1; recursion through orders 1..p. */
+    std::vector<double> a((size_t)(p + 1), 0.0);
+    std::vector<double> aprev((size_t)(p + 1), 0.0);
+    a[0] = 1.0;
+    double E = r->data[0];
+    if (E == 0.0) {
+        matlab_mat *A = mat_alloc(1, p + 1);
+        A->data[0] = 1.0;
+        return A;
+    }
+    for (int m = 1; m <= p; ++m) {
+        double k = -r->data[m];
+        for (int j = 1; j < m; ++j) k -= a[j] * r->data[m - j];
+        k /= E;
+        aprev = a;
+        for (int j = 1; j < m; ++j) a[j] = aprev[j] + k * aprev[m - j];
+        a[m] = k;
+        E *= (1.0 - k * k);
+        if (E <= 0.0) break;        /* numerical / non-PSD r */
+    }
+    matlab_mat *A = mat_alloc(1, p + 1);
+    for (int i = 0; i <= p; ++i) A->data[i] = a[i];
+    return A;
+}
+
+/* Biased autocorrelation of x at lags 0..p. Returns a (p+1)-length
+ * vector. Used internally by lpc / aryule. */
+static void biased_autocorr_(const double *x, int64_t N, int p,
+                             std::vector<double> &r) {
+    r.assign((size_t)(p + 1), 0.0);
+    for (int k = 0; k <= p; ++k) {
+        double s = 0.0;
+        for (int64_t n = 0; n < N - k; ++n) s += x[n] * x[n + k];
+        r[(size_t)k] = s / (double)N;
+    }
+}
+
+matlab_mat *matlab_lpc(matlab_mat *x, double p_d) {
+    if (!x) return mat_alloc(0, 0);
+    int p = (int)p_d;
+    if (p < 1) p = 1;
+    int64_t N = x->rows * x->cols;
+    if (N < (int64_t)p + 1) {
+        matlab_mat *A = mat_alloc(1, p + 1);
+        A->data[0] = 1.0;
+        return A;
+    }
+    std::vector<double> r;
+    biased_autocorr_(x->data, N, p, r);
+    /* Build a temporary matlab_mat for r and call levinson. */
+    matlab_mat rm = { /*data*/ r.data(), /*rows*/ 1, /*cols*/ (int64_t)r.size() };
+    return matlab_levinson(&rm, (double)p);
+}
+
+matlab_mat *matlab_aryule(matlab_mat *x, double p_d) {
+    /* Single-output form; same as lpc for our scope. */
+    return matlab_lpc(x, p_d);
+}
+
+matlab_mat *matlab_arburg(matlab_mat *x, double p_d) {
+    if (!x) return mat_alloc(0, 0);
+    int p = (int)p_d;
+    if (p < 1) p = 1;
+    int64_t N = x->rows * x->cols;
+    if (N < (int64_t)p + 1) {
+        matlab_mat *A = mat_alloc(1, p + 1);
+        A->data[0] = 1.0;
+        return A;
+    }
+    /* Burg recursion: f and b are forward/backward prediction errors;
+     * a is the AR coefficient vector (with a[0] = 1). */
+    std::vector<double> f((size_t)N), b((size_t)N);
+    for (int64_t i = 0; i < N; ++i) { f[(size_t)i] = b[(size_t)i] = x->data[i]; }
+    std::vector<double> a((size_t)(p + 1), 0.0);
+    a[0] = 1.0;
+    std::vector<double> aprev = a;
+    for (int m = 1; m <= p; ++m) {
+        /* Reflection coefficient k = -2 sum f·b / (sum f² + sum b²),
+         * over the valid index range. */
+        double num = 0.0, den = 0.0;
+        for (int64_t i = m; i < N; ++i) {
+            num += f[(size_t)i] * b[(size_t)(i - 1)];
+            den += f[(size_t)i] * f[(size_t)i] +
+                   b[(size_t)(i - 1)] * b[(size_t)(i - 1)];
+        }
+        double k = (den != 0.0) ? (-2.0 * num / den) : 0.0;
+        /* Update AR coefficients. */
+        aprev = a;
+        for (int j = 1; j < m; ++j) a[j] = aprev[j] + k * aprev[m - j];
+        a[m] = k;
+        /* Update forward / backward errors in place. */
+        std::vector<double> fnew = f, bnew = b;
+        for (int64_t i = m; i < N; ++i) {
+            fnew[(size_t)i] = f[(size_t)i] + k * b[(size_t)(i - 1)];
+            bnew[(size_t)i] = b[(size_t)(i - 1)] + k * f[(size_t)i];
+        }
+        f = fnew; b = bnew;
+    }
+    matlab_mat *A = mat_alloc(1, p + 1);
+    for (int i = 0; i <= p; ++i) A->data[i] = a[i];
+    return A;
+}
+
+/* pyulear(x, p, N) / pburg(x, p, N) — AR-based PSD estimators.
+ *
+ * Algorithm: design an AR(p) model via Yule-Walker (pyulear) or Burg
+ * (pburg), then evaluate |1 / A(e^{jω})|² · σ² on an N-point grid.
+ * The error variance σ² is approximated by r[0]·prod(1 − k_i²) for
+ * Yule-Walker; for Burg we use r[0] directly (acceptable for the
+ * single-output PSD shape).
+ *
+ * Returns (M × 1) where M = N (full grid, normalised fs = 1).
+ */
+static matlab_mat *ar_psd_(matlab_mat *a_coefs, double sigma2, int Ng) {
+    if (!a_coefs || Ng <= 0) return mat_alloc(0, 0);
+    int64_t na = a_coefs->rows * a_coefs->cols;
+    matlab_mat *P = mat_alloc(Ng, 1);
+    for (int k = 0; k < Ng; ++k) {
+        double w = M_PI * (double)k / (double)Ng;
+        double re = 0, im = 0;
+        for (int64_t i = 0; i < na; ++i) {
+            double a_ = -w * (double)i;
+            re += a_coefs->data[i] * cos(a_);
+            im += a_coefs->data[i] * sin(a_);
+        }
+        double mag2 = re * re + im * im;
+        P->data[k] = (mag2 > 0) ? sigma2 / mag2 : 0.0;
+    }
+    return P;
+}
+
+matlab_mat *matlab_pyulear(matlab_mat *x, double p_d, double N_d) {
+    if (!x) return mat_alloc(0, 0);
+    matlab_mat *a = matlab_aryule(x, p_d);
+    /* sigma² estimate: biased autocorr at lag 0. */
+    double s = 0;
+    int64_t Nx = x->rows * x->cols;
+    for (int64_t i = 0; i < Nx; ++i) s += x->data[i] * x->data[i];
+    double sigma2 = (Nx > 0) ? s / (double)Nx : 1.0;
+    matlab_mat *P = ar_psd_(a, sigma2, (int)N_d);
+    free(a->data); free(a);
+    return P;
+}
+
+matlab_mat *matlab_pburg(matlab_mat *x, double p_d, double N_d) {
+    if (!x) return mat_alloc(0, 0);
+    matlab_mat *a = matlab_arburg(x, p_d);
+    double s = 0;
+    int64_t Nx = x->rows * x->cols;
+    for (int64_t i = 0; i < Nx; ++i) s += x->data[i] * x->data[i];
+    double sigma2 = (Nx > 0) ? s / (double)Nx : 1.0;
+    matlab_mat *P = ar_psd_(a, sigma2, (int)N_d);
+    free(a->data); free(a);
+    return P;
+}
+
+/*===========================================================================
  * Tier-2 SPT §3.4 transforms — DCT-II / DCT-III / Walsh-Hadamard.
  *
  *   y = dct(x)      MATLAB-orthonormal DCT-II (forward DCT).

@@ -6484,6 +6484,12 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             "dct", "idct", "fwht", "hilbert", "goertzel",
             /* Tier-2 §3.1 — nonparametric spectral estimation. */
             "periodogram", "pwelch",
+            /* Tier-2 §3.3 — time-frequency. */
+            "spectrogram",
+            /* Tier-2 §3.2 — linear prediction + parametric PSD. */
+            "levinson", "lpc", "aryule", "arburg", "pyulear", "pburg",
+            /* Tier-2 §3.1 cross-spectral helpers. */
+            "cpsd", "mscohere", "tfestimate",
             "interp1", "trapz", "cumtrapz", "gradient",
             "hamming", "hann", "blackman",
             /* Tier-1 windows tail (signal_toolbox_roadmap §2.3) — all
