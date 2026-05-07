@@ -49,6 +49,10 @@ today. Locations are in `runtime/matlab_runtime.cpp`.
 | IIR design + frequency response (§2.1, lowpass scope) | `[b, a] = butter(n, Wn)`, `[b, a] = cheby1(n, Rp, Wn)`, `[b, a] = cheby2(n, Rs, Wn)`, `H = freqz(b, a, N)`, `[H, w] = freqz(b, a, N)`, `[n, Wn] = buttord(Wp, Ws, Rp, Rs)`, `[n, Wn] = cheb1ord(Wp, Ws, Rp, Rs)` | Bilinear-transform design; unit DC gain. cheby2 has finite j-axis zeros via the generalized `lowpass_from_analog_pz_` helper. Order helpers split via paired `_n` / `_Wn` runtime entries. TS lane gates `freqz` tests with `.skip-emit-typescript` because `NDArray` has no native complex (same as `roots`/`fft_c`). |
 | FIR design (§2.2, lowpass scope) | `b = fir1(n, Wn)`, `B = sgolay(k, f)`, `y = sgolayfilt(x, k, f)` | `fir1` is windowed-sinc with default Hamming, normalized to unit DC gain. `sgolay` returns the standard `B = V (V'V)^-1 V'` projection matrix; `sgolayfilt` applies B's middle row in steady state and the matching boundary rows at the first/last `(f-1)/2` samples. |
 | Filter implementation (§2.5) | `y = filtfilt(b, a, x)`, `y = sosfilt(sos, x)`, `h = impz(b, a, N)`, `s = stepz(b, a, N)`, `gd = grpdelay(b, a, N)` | Internal direct-form-II-transposed `filter_flat_` helper. `filtfilt` uses reflection padding + zero ICs (Gustafsson initial-condition trick is a follow-on). `grpdelay` is finite-difference on `arg(H(e^{jω}))`. |
+| Tier-2 §3.4 transforms — `dct`, `idct`, `fwht`, `hilbert`, `goertzel` | ✅ shipped | DCT-II/III direct O(N²); fwht in-place butterfly (Hadamard ordering, /N); hilbert via FFT zero-negative-half; goertzel single-bin (1×1 complex). **Open**: czt, dst/idst, cceps/rceps. |
+| Tier-2 §3.1 nonparametric spectral — `periodogram`, `pwelch`, `cpsd`, `mscohere`, `tfestimate` | ✅ shipped | Single-output, fs = 1. `cpsd`/`tfestimate` return complex (matlab_mat_c). **Open**: dpss + pmtm (multitaper); 2-/3-return `[P, f, …]` forms. |
+| Tier-2 §3.2 linear prediction + parametric PSD — `levinson`, `lpc`, `aryule`, `arburg`, `pyulear`, `pburg` | ✅ shipped | Levinson-Durbin + Burg recursion; AR PSD via σ²·\|1/A(e^{jω})\|² evaluation. **Open**: pcov/pmcov, subspace methods (pmusic/peig/rootmusic/rooteig), prony/stmcb. |
+| Tier-2 §3.3 time-frequency — `spectrogram(x, win, noverlap)` | ✅ shipped (single-output) | \|STFT\|² per (freq, frame). **Open**: stft/istft, pspectrum, instfreq, instbw, cwt (Tier-4 wavelets), wvd/fsst (Tier-4). |
 | Multirate stubs | `upsample(x, n)`, `downsample(x, n)` | Zero-stuff / decimate; **no** anti-aliasing filter (raw `decimate`/`resample` still TODO). |
 | Numeric utilities used by SPT | `diff`, `polyfit`, `polyval`, `interp1`, `interp2`, `trapz`, `gradient` | |
 | Complex scalar / matrix arithmetic | `conj`, `real`, `imag`, `angle`, complex `+ - .* ./ * /` | Required for any spectrum / transfer-function math. |
@@ -450,6 +454,10 @@ gates the next on user-visible output:
 4. ~~**2.1 IIR follow-on — cheby2 + buttord + cheb1ord**~~ ✅ shipped. **Still open**: `ellip`, `besself`, analog prototypes, standalone `bilinear`, `freqs`, high/band/stop variants, `cheb2ord`/`ellipord`, form conversions.
 5. ~~**2.2 FIR design (lowpass core: `fir1`, `sgolay`, `sgolayfilt`)**~~ ✅ shipped. **Still open**: `fir2`, `firls`, `firpm`, `firrcos`, `kaiserord`.
 6. ~~**2.5 `filtfilt`, `sosfilt`, `impz`, `stepz`, `grpdelay`**~~ ✅ shipped — design loop closed. **Still open**: `phasez`, `zerophase`, Gustafsson initial conditions for `filtfilt`.
+7. ~~**Tier 2 §3.4 — transforms tail**~~ ✅ shipped (`dct`, `idct`, `fwht`, `hilbert`, `goertzel`). **Open**: czt, dst/idst, cceps/rceps.
+8. ~~**Tier 2 §3.1 — nonparametric spectral**~~ ✅ shipped (`periodogram`, `pwelch`, `cpsd`, `mscohere`, `tfestimate`). **Open**: dpss + pmtm.
+9. ~~**Tier 2 §3.2 — linear prediction + parametric PSD**~~ ✅ shipped (`levinson`, `lpc`, `aryule`, `arburg`, `pyulear`, `pburg`). **Open**: pcov/pmcov, subspace methods, prony/stmcb.
+10. ~~**Tier 2 §3.3 — time-frequency**~~ ✅ shipped (`spectrogram` single-output). **Open**: stft/istft, pspectrum, instfreq/instbw.
 6. **3.1 `periodogram`, `pwelch`, `dpss`, `pmtm`, `cpsd`, `mscohere`** (1 week).
 7. **3.4 `dct`/`idct`, `hilbert`, `czt`, `goertzel`, `fwht`** (3 sessions).
 8. **3.3 `spectrogram`, `stft`, `istft`** (3 sessions).
