@@ -75,8 +75,8 @@ def main():
          "function y = get_pi()\n  y = 3.14;\nend\n",
          False),
         ("scalar_double_one_arg",
-         "disp(square(4));\n"
-         "function y = square(x)\n  y = x * x;\nend\n",
+         "disp(squarem(4));\n"
+         "function y = squarem(x)\n  y = x * x;\nend\n",
          False),
         ("scalar_double_two_args",
          "disp(add(2, 3));\n"
