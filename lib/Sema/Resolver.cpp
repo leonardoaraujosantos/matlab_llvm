@@ -109,6 +109,8 @@ void Resolver::registerBuiltins() {
     /* Tier-1 §2.1 — IIR lowpass design + frequency response. */
     "butter", "cheby1", "cheby2", "freqz",
     "buttord", "cheb1ord",
+    /* Tier-1 §2.2 — FIR design + Savitzky-Golay. */
+    "fir1", "sgolay", "sgolayfilt",
     "interp1", "trapz", "cumtrapz", "gradient",
     "hamming", "hann", "blackman",
     /* Tier-1 (Signal Processing Toolbox roadmap §2.3) — windows tail. */

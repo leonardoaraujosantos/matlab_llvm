@@ -2962,6 +2962,143 @@ export function cheb1ord_Wn(Wp: number, Ws: number, Rp: number, Rs: number): num
   return _cheb1ordCompute(+Wp, +Ws, +Rp, +Rs)[1];
 }
 
+// --- FIR design (Tier-1 §2.2) ---------------------------------------
+export function fir1(n: number, Wn: number): NDArray {
+  n = (n | 0);
+  if (n < 0) n = 0;
+  if (Wn <= 0) Wn = 1e-12;
+  if (Wn >= 1) Wn = 1 - 1e-12;
+  const L = n + 1;
+  const centre = n / 2;
+  const b = new Float64Array(L);
+  for (let k = 0; k < L; k++) {
+    const m = k - centre;
+    if (m === 0) {
+      b[k] = Wn;
+    } else {
+      const arg = Math.PI * Wn * m;
+      b[k] = Wn * Math.sin(arg) / arg;
+    }
+  }
+  if (L > 1) {
+    for (let k = 0; k < L; k++)
+      b[k] *= 0.54 - 0.46 * Math.cos(2 * Math.PI * k / (L - 1));
+  }
+  let s = 0;
+  for (let k = 0; k < L; k++) s += b[k];
+  if (s !== 0)
+    for (let k = 0; k < L; k++) b[k] /= s;
+  return new NDArray(b, [1, L]);
+}
+
+function _sgolayLuSolve(A: Float64Array, b: Float64Array, n: number): boolean {
+  for (let i = 0; i < n; i++) {
+    let piv = i, best = Math.abs(A[i * n + i]);
+    for (let r = i + 1; r < n; r++) {
+      const v = Math.abs(A[r * n + i]);
+      if (v > best) { best = v; piv = r; }
+    }
+    if (best < 1e-300) return false;
+    if (piv !== i) {
+      for (let c = 0; c < n; c++) {
+        const t = A[i * n + c]; A[i * n + c] = A[piv * n + c];
+        A[piv * n + c] = t;
+      }
+      const t = b[i]; b[i] = b[piv]; b[piv] = t;
+    }
+    for (let r = i + 1; r < n; r++) {
+      const f = A[r * n + i] / A[i * n + i];
+      for (let c = i; c < n; c++) A[r * n + c] -= f * A[i * n + c];
+      b[r] -= f * b[i];
+    }
+  }
+  for (let i = n - 1; i >= 0; i--) {
+    let s = b[i];
+    for (let c = i + 1; c < n; c++) s -= A[i * n + c] * b[c];
+    b[i] = s / A[i * n + i];
+  }
+  return true;
+}
+
+function _computeSgolayMatrix(k: number, f: number): Float64Array {
+  const K = k + 1;
+  const V = new Float64Array(f * K);
+  const centre = (f - 1) / 2;
+  for (let i = 0; i < f; i++) {
+    const t = i - centre;
+    let pw = 1;
+    for (let j = 0; j < K; j++) {
+      V[i * K + j] = pw;
+      pw *= t;
+    }
+  }
+  const G = new Float64Array(K * K);
+  for (let a = 0; a < K; a++)
+    for (let b = 0; b < K; b++) {
+      let s = 0;
+      for (let i = 0; i < f; i++) s += V[i * K + a] * V[i * K + b];
+      G[a * K + b] = s;
+    }
+  const X = new Float64Array(K * f);
+  const Gtmp = new Float64Array(K * K);
+  const rhs = new Float64Array(K);
+  for (let j = 0; j < f; j++) {
+    Gtmp.set(G);
+    for (let a = 0; a < K; a++) rhs[a] = V[j * K + a];
+    _sgolayLuSolve(Gtmp, rhs, K);
+    for (let a = 0; a < K; a++) X[a * f + j] = rhs[a];
+  }
+  const B = new Float64Array(f * f);
+  for (let i = 0; i < f; i++)
+    for (let j = 0; j < f; j++) {
+      let s = 0;
+      for (let a = 0; a < K; a++) s += V[i * K + a] * X[a * f + j];
+      B[i * f + j] = s;
+    }
+  return B;
+}
+
+export function sgolay(k: number, f: number): NDArray {
+  k = (k | 0); f = (f | 0);
+  if (f < 1) f = 1;
+  if (k < 0) k = 0;
+  if (k >= f) k = f - 1;
+  if ((f & 1) === 0) f++;
+  return new NDArray(_computeSgolayMatrix(k, f), [f, f]);
+}
+
+export function sgolayfilt(x: any, k: number, f: number): NDArray {
+  const xa = asArray(x);
+  const a = xa.data;
+  const N = a.length;
+  k = (k | 0); f = (f | 0);
+  if (f < 1) f = 1;
+  if (k < 0) k = 0;
+  if (k >= f) k = f - 1;
+  if ((f & 1) === 0) f++;
+  const y = new Float64Array(N);
+  if (N < f) { y.set(a); return new NDArray(y, xa.shape.slice()); }
+  const B = _computeSgolayMatrix(k, f);
+  const half = (f - 1) >> 1;
+  for (let i = 0; i < half; i++) {
+    let s = 0;
+    for (let j = 0; j < f; j++) s += B[i * f + j] * a[j];
+    y[i] = s;
+  }
+  for (let i = half; i < N - half; i++) {
+    let s = 0;
+    for (let j = 0; j < f; j++) s += B[half * f + j] * a[i - half + j];
+    y[i] = s;
+  }
+  for (let i = 0; i < half; i++) {
+    const row = half + 1 + i;
+    let s = 0;
+    for (let j = 0; j < f; j++) s += B[row * f + j] * a[N - f + j];
+    y[N - half + i] = s;
+  }
+  return new NDArray(y, xa.shape.slice());
+}
+
 function _freqzCompute(B: any, A: any, N: number):
     { hR: Float64Array; hI: Float64Array; w: Float64Array } {
   const bv = asArray(B).data;

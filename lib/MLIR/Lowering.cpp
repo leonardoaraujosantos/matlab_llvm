@@ -6476,6 +6476,8 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
              * splits into n -> f64 and Wn -> f64) — they're not in
              * PtrRet. Sema's default-typing does not type them; the
              * F64Ret list below covers them. */
+            /* Tier-1 §2.2 — FIR design + Savitzky-Golay. */
+            "fir1", "sgolay", "sgolayfilt",
             "interp1", "trapz", "cumtrapz", "gradient",
             "hamming", "hann", "blackman",
             /* Tier-1 windows tail (signal_toolbox_roadmap §2.3) — all

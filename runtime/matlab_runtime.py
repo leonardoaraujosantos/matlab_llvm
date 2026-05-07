@@ -2599,6 +2599,85 @@ def cheb1ord_Wn(Wp, Ws, Rp, Rs):
     return w
 
 
+# --- FIR design (Tier-1 §2.2) ---------------------------------------
+def fir1(n, Wn):
+    n = int(n)
+    if n < 0: n = 0
+    Wn = float(Wn)
+    if Wn <= 0.0: Wn = 1e-12
+    if Wn >= 1.0: Wn = 1.0 - 1e-12
+    L = n + 1
+    centre = n / 2.0
+    b = np.zeros(L)
+    for k in _pyrange(L):
+        m = k - centre
+        if m == 0.0:
+            b[k] = Wn
+        else:
+            arg = np.pi * Wn * m
+            b[k] = Wn * np.sin(arg) / arg
+    if L > 1:
+        kk = np.arange(L, dtype=float)
+        w = 0.54 - 0.46 * np.cos(2.0 * np.pi * kk / (L - 1))
+        b = b * w
+    s = float(np.sum(b))
+    if s != 0.0:
+        b = b / s
+    return b.reshape((1, -1))
+
+
+def _compute_sgolay_matrix(k, f):
+    K = k + 1
+    centre = (f - 1) / 2.0
+    V = np.zeros((f, K))
+    for i in _pyrange(f):
+        t = i - centre
+        pw = 1.0
+        for j in _pyrange(K):
+            V[i, j] = pw
+            pw *= t
+    G = V.T @ V
+    X = np.linalg.solve(G, V.T)
+    B = V @ X
+    return B
+
+
+def sgolay(k, f):
+    k = int(k); f = int(f)
+    if f < 1: f = 1
+    if k < 0: k = 0
+    if k >= f: k = f - 1
+    if (f & 1) == 0: f += 1
+    return _compute_sgolay_matrix(k, f)
+
+
+def sgolayfilt(x, k, f):
+    a = np.asarray(x, dtype=float).ravel()
+    N = a.size
+    k = int(k); f = int(f)
+    if f < 1: f = 1
+    if k < 0: k = 0
+    if k >= f: k = f - 1
+    if (f & 1) == 0: f += 1
+    y = np.zeros(N)
+    if N < f:
+        y[:] = a
+        return y.reshape(np.asarray(x).shape) if np.asarray(x).ndim > 0 else y
+    B = _compute_sgolay_matrix(k, f)
+    half = (f - 1) // 2
+    for i in _pyrange(half):
+        y[i] = float(np.dot(B[i, :], a[:f]))
+    for i in _pyrange(half, N - half):
+        y[i] = float(np.dot(B[half, :], a[i - half : i + half + 1]))
+    for i in _pyrange(half):
+        row = half + 1 + i
+        y[N - half + i] = float(np.dot(B[row, :], a[N - f:]))
+    xa = np.asarray(x)
+    if xa.ndim == 2 and xa.shape[1] == 1:
+        return y.reshape((-1, 1))
+    return y.reshape((1, -1))
+
+
 def _freqz_compute(b, a, N):
     bv = np.asarray(b, dtype=float).ravel()
     av = np.asarray(a, dtype=float).ravel()

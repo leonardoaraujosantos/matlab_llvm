@@ -1787,6 +1787,8 @@ static llvm::StringRef MatrixReturningFns[] = {
     "matlab_cheby1_b", "matlab_cheby1_a",
     "matlab_cheby2_b", "matlab_cheby2_a",
     "matlab_freqz", "matlab_freqz_h", "matlab_freqz_w",
+    /* §2.2 FIR + Savitzky-Golay. */
+    "matlab_fir1", "matlab_sgolay", "matlab_sgolayfilt",
     "matlab_interp1", "matlab_interp2", "matlab_trapz", "matlab_trapz_xy",
     "matlab_cumtrapz", "matlab_gradient", "matlab_diff",
     "matlab_conv", "matlab_conv2", "matlab_filter",

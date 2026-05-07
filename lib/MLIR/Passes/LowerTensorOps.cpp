@@ -3364,6 +3364,10 @@ bool TensorLowering::rewriteBuiltinCalls() {
        * dedicated multi-return dispatch above. */
       {"buttord",    "matlab_buttord_n",  0, "ffff"},
       {"cheb1ord",   "matlab_cheb1ord_n", 0, "ffff"},
+      /* §2.2 FIR design + Savitzky-Golay. */
+      {"fir1",       "matlab_fir1",       1, "ff"},
+      {"sgolay",     "matlab_sgolay",     1, "ff"},
+      {"sgolayfilt", "matlab_sgolayfilt", 1, "pff"},
       {"interp1",    "matlab_interp1",    1, "ppp"},
       {"trapz",      "matlab_trapz",      1, "p"},
       {"trapz",      "matlab_trapz_xy",   1, "pp"},

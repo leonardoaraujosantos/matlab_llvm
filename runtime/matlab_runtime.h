@@ -364,6 +364,18 @@ double matlab_buttord_Wn(double Wp, double Ws, double Rp, double Rs);
 double matlab_cheb1ord_n(double Wp, double Ws, double Rp, double Rs);
 double matlab_cheb1ord_Wn(double Wp, double Ws, double Rp, double Rs);
 
+/* FIR design (Tier-1 §2.2) — lowpass scope.
+ *
+ *   b = fir1(n, Wn)          windowed-sinc lowpass FIR (default Hamming
+ *                            window). Returns 1×(n+1) impulse response.
+ *   B = sgolay(k, f)         Savitzky-Golay (f × f) projection matrix.
+ *                            f must be odd; coerced if even.
+ *   y = sgolayfilt(x, k, f)  Apply Savitzky-Golay smoothing to x.
+ */
+matlab_mat *matlab_fir1(double n, double Wn);
+matlab_mat *matlab_sgolay(double k, double f);
+matlab_mat *matlab_sgolayfilt(matlab_mat *x, double k, double f);
+
 /* [r, p, k] = residue(b, a) — partial-fraction expansion of B(s)/A(s).
  * Distinct-pole scope (Tier-1): repeated poles produce numerically
  * degraded residues. r and p are complex column vectors of length

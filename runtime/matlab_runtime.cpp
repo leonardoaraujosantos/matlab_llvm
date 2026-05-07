@@ -5711,6 +5711,189 @@ matlab_mat *matlab_taylorwin(double n_d, double nbar_d, double sll_d) {
     return W;
 }
 
+/*===========================================================================
+ * FIR design (Tier-1 SPT §2.2) — lowpass scope.
+ *
+ *   b = fir1(n, Wn)         windowed-sinc lowpass FIR (default Hamming)
+ *   B = sgolay(k, f)        Savitzky-Golay projection matrix
+ *   y = sgolayfilt(x, k, f) Savitzky-Golay smoothing filter
+ *
+ * fir1 returns a length-(n+1) row vector of impulse-response taps,
+ * normalized for unit DC gain. sgolay/sgolayfilt use the standard
+ * polynomial-fit approach: V is the (f × (k+1)) Vandermonde matrix
+ * of centred indices, B = V (V'V)^-1 V' is the (f × f) projection
+ * matrix onto the polynomial-fit space; sgolayfilt applies B's middle
+ * row in steady state and the corresponding boundary rows at the edges.
+ */
+matlab_mat *matlab_fir1(double n_d, double Wn) {
+    int n = (int)n_d;
+    if (n < 0) n = 0;
+    if (Wn <= 0.0) Wn = 1e-12;
+    if (Wn >= 1.0) Wn = 1.0 - 1e-12;
+    int L = n + 1;                          /* tap count */
+    matlab_mat *B = mat_alloc(1, L);
+    /* Ideal lowpass impulse response: h_d[k] = Wn * sinc(Wn * (k - n/2)).
+     * Use MATLAB's normalized sinc(x) = sin(π·x)/(π·x), with the limit
+     * sinc(0) = 1. */
+    double centre = (double)n / 2.0;
+    for (int k = 0; k < L; ++k) {
+        double m = (double)k - centre;
+        if (m == 0.0) {
+            B->data[k] = Wn;
+        } else {
+            double arg = M_PI * Wn * m;
+            B->data[k] = Wn * sin(arg) / arg;
+        }
+    }
+    /* Default window: Hamming. Multiply elementwise. */
+    if (L > 1) {
+        double denom = (double)(L - 1);
+        for (int k = 0; k < L; ++k) {
+            double w = 0.54 - 0.46 * cos(2.0 * M_PI * (double)k / denom);
+            B->data[k] *= w;
+        }
+    }
+    /* Normalize for unit DC gain: sum(b) = 1. */
+    double s = 0.0;
+    for (int k = 0; k < L; ++k) s += B->data[k];
+    if (s != 0.0)
+        for (int k = 0; k < L; ++k) B->data[k] /= s;
+    return B;
+}
+
+/* Solve a small linear system A x = b in place via Gaussian elimination
+ * with partial pivoting. A is (n × n) row-major, b is (n) — both
+ * mutated. Returns false if singular within tolerance. */
+static bool sgolay_lu_solve_(double *A, double *b, int n) {
+    for (int i = 0; i < n; ++i) {
+        int piv = i;
+        double best = fabs(A[i * n + i]);
+        for (int r = i + 1; r < n; ++r) {
+            double v = fabs(A[r * n + i]);
+            if (v > best) { best = v; piv = r; }
+        }
+        if (best < 1e-300) return false;
+        if (piv != i) {
+            for (int c = 0; c < n; ++c) {
+                double t = A[i * n + c];
+                A[i * n + c] = A[piv * n + c];
+                A[piv * n + c] = t;
+            }
+            double t = b[i]; b[i] = b[piv]; b[piv] = t;
+        }
+        for (int r = i + 1; r < n; ++r) {
+            double f = A[r * n + i] / A[i * n + i];
+            for (int c = i; c < n; ++c) A[r * n + c] -= f * A[i * n + c];
+            b[r] -= f * b[i];
+        }
+    }
+    /* Back-substitute. */
+    for (int i = n - 1; i >= 0; --i) {
+        double s = b[i];
+        for (int c = i + 1; c < n; ++c) s -= A[i * n + c] * b[c];
+        b[i] = s / A[i * n + i];
+    }
+    return true;
+}
+
+/* Compute the (f × f) Savitzky-Golay projection matrix B such that
+ * B applied to a length-f window of input gives the polynomial-fit
+ * smoothed value. Caller-supplied buffer must be (f × f) row-major. */
+static void compute_sgolay_matrix_(int k, int f, double *B) {
+    int K = k + 1;
+    /* Vandermonde V (f × K), centred at t = -(f-1)/2 .. (f-1)/2. */
+    std::vector<double> V((size_t)f * (size_t)K);
+    for (int i = 0; i < f; ++i) {
+        double t = (double)i - (double)(f - 1) / 2.0;
+        double pw = 1.0;
+        for (int j = 0; j < K; ++j) {
+            V[(size_t)i * (size_t)K + (size_t)j] = pw;
+            pw *= t;
+        }
+    }
+    /* G = V'V (K × K). */
+    std::vector<double> G((size_t)K * (size_t)K, 0.0);
+    for (int a = 0; a < K; ++a)
+        for (int b = 0; b < K; ++b) {
+            double s = 0.0;
+            for (int i = 0; i < f; ++i)
+                s += V[(size_t)i * K + a] * V[(size_t)i * K + b];
+            G[(size_t)a * K + b] = s;
+        }
+    /* Solve G X = V' column-by-column to get X = (V'V)^-1 V'
+     * (K × f). Then B = V * X (f × f). */
+    std::vector<double> X((size_t)K * (size_t)f);
+    std::vector<double> Gtmp((size_t)K * (size_t)K);
+    std::vector<double> rhs((size_t)K);
+    for (int j = 0; j < f; ++j) {
+        memcpy(Gtmp.data(), G.data(), (size_t)K * K * sizeof(double));
+        for (int a = 0; a < K; ++a) rhs[a] = V[(size_t)j * K + a];
+        sgolay_lu_solve_(Gtmp.data(), rhs.data(), K);
+        for (int a = 0; a < K; ++a) X[(size_t)a * f + j] = rhs[a];
+    }
+    /* B = V (f × K) * X (K × f) -> (f × f). */
+    for (int i = 0; i < f; ++i)
+        for (int j = 0; j < f; ++j) {
+            double s = 0.0;
+            for (int a = 0; a < K; ++a)
+                s += V[(size_t)i * K + a] * X[(size_t)a * f + j];
+            B[(size_t)i * f + j] = s;
+        }
+}
+
+matlab_mat *matlab_sgolay(double k_d, double f_d) {
+    int k = (int)k_d, f = (int)f_d;
+    if (f < 1) f = 1;
+    if (k < 0) k = 0;
+    if (k >= f) k = f - 1;
+    /* Frame length must be odd. */
+    if ((f & 1) == 0) f++;
+    matlab_mat *B = mat_alloc(f, f);
+    compute_sgolay_matrix_(k, f, B->data);
+    return B;
+}
+
+matlab_mat *matlab_sgolayfilt(matlab_mat *x, double k_d, double f_d) {
+    if (!x) return mat_alloc(0, 0);
+    int k = (int)k_d, f = (int)f_d;
+    if (f < 1) f = 1;
+    if (k < 0) k = 0;
+    if (k >= f) k = f - 1;
+    if ((f & 1) == 0) f++;
+    int64_t N = x->rows * x->cols;
+    matlab_mat *Y = mat_alloc(x->rows, x->cols);
+    if (N < f) {
+        /* Frame longer than data: just copy through. */
+        memcpy(Y->data, x->data, (size_t)N * sizeof(double));
+        return Y;
+    }
+    std::vector<double> Bm((size_t)f * (size_t)f);
+    compute_sgolay_matrix_(k, f, Bm.data());
+    int half = (f - 1) / 2;
+    /* Edges: rows 0..half-1 of B applied to x[0..f-1].
+     * Steady state: middle row applied to a sliding f-window. */
+    for (int i = 0; i < half; ++i) {
+        double s = 0.0;
+        for (int j = 0; j < f; ++j) s += Bm[(size_t)i * f + j] * x->data[j];
+        Y->data[i] = s;
+    }
+    for (int64_t i = half; i < N - half; ++i) {
+        double s = 0.0;
+        for (int j = 0; j < f; ++j)
+            s += Bm[(size_t)half * f + j] * x->data[i - half + j];
+        Y->data[i] = s;
+    }
+    /* Right-edge rows: half+1..f-1 applied to x[N-f..N-1]. */
+    for (int i = 0; i < half; ++i) {
+        int row = half + 1 + i;
+        double s = 0.0;
+        for (int j = 0; j < f; ++j)
+            s += Bm[(size_t)row * f + j] * x->data[N - f + j];
+        Y->data[N - half + i] = s;
+    }
+    return Y;
+}
+
 /* chol(A): upper-triangular Cholesky factor R such that R'*R = A,
  * for a symmetric positive-definite A. Returns a zero matrix if A
  * is not SPD (i.e. a negative diagonal appears). */
