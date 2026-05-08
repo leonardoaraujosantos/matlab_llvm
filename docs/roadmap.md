@@ -100,7 +100,7 @@ Open follow-ups carried forward (still on the roadmap):
 - **SPT §4.3 follow-on.** `findpeaks` name-value options (`MinPeakHeight`/`MinPeakDistance`/`MinPeakProminence`/`Threshold`/`SortStr`); `slewrate`, `pulseperiod`, `pulsewidth`, `overshoot`, `undershoot`, `settlingtime`, `statelevels` (histogram-based state-level detection).
 - **SPT Tier-4 — `digitalFilter` system object.** `designfilt`-style entry returning a filter handle that `filter`/`filtfilt`/`freqz` can polymorphically accept. Needs a new descriptor type alongside `matlab_dict` / `matlab_symmat`. Plus `dsp.SOSFilter` / `dsp.FIRFilter` HDL system objects for hooking the SystemVerilog backend onto the filter design path.
 - **SPT Tier-4 — wavelets.** `cwt`, `dwt`/`idwt`, `wavedec`/`waverec`, `wvd` (Wigner-Ville), `fsst`/`ifsst` (Fourier synchrosqueezed). 2–3 weeks each, stand-alone algorithmic work.
-- **Sema follow-on — user functions shadow builtins.** Currently `Scope::declare` first-wins for builtins: `function y = sin(x)` (or any builtin name) silently shadows nothing. Added during the SPT §4.2 slice when `square` collided with a `debug-dap-jit-userfn-tests` user function (worked around by renaming the test fixture to `squarem`). Fix is a 2-line Resolver change to allow `Builtin → Function` overrides plus a small fixture-style audit.
+- ~~**Sema follow-on — user functions shadow builtins.**~~ ✅ shipped in `5125af0` — `Scope::declare` now allows `Builtin → Function` and `Builtin → Class` promotion, so `function y = sin(x)` / `classdef filter` / etc. correctly override the same-name builtin in the current TU. The `square` user-fn fixture renamed to `squarem` in the SPT §4.2 slice (commit `39111c5`) can stay as-is — the rename is harmless and the fix works regardless.
 
 ---
 
@@ -254,15 +254,11 @@ surface; the highest-leverage open items, in priority order:
   spectral estimation; `stft` / `istft` (with COLA inversion) to close
   the time-frequency tail alongside the existing `spectrogram`.
   **Effort:** ~1 week.
-- **Sema — user functions shadow builtins.** 2-line `Scope::declare`
-  fix to allow `function y = sin(x)` to override the builtin (matches
-  MATLAB). Workaround in place today (the §4.2 `square` builtin
-  collided with a test-fixture function; renamed the fixture). The
-  proper fix is small but needs a fixture audit afterward.
-  **Effort:** 2 sessions.
-
 These are independent and can land in any order; pick by what
 unblocks real workflows.
+
+The Sema "user-functions shadow builtins" follow-on that previously
+appeared here landed in `5125af0` and is no longer open.
 
 ---
 

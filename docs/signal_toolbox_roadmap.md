@@ -92,12 +92,17 @@ linear-prediction tiers — see §3 / §4 below.
 
 ---
 
-## 2. Tier 1 — close the FIR/IIR design loop (~3–4 weeks)
+## 2. Tier 1 — close the FIR/IIR design loop (lowpass core ✅, band variants 🔵)
 
 This tier closes the smallest end-to-end loop a signal-processing user
 needs: *design a filter, apply it, look at its response*. All Tier-1
 items are pure-numeric and slot into the existing `matlab_mat *`
 runtime; no new dialect or descriptor work is needed.
+
+**Status snapshot**: lowpass design + apply + inspect surface is
+shipped (see §1 above). The remaining 🔵 items in §2.1–§2.5 are the
+band variants, the analog-prototype builtins / form conversions, the
+richer FIR designers, and the Gustafsson zero-edge `filtfilt` IC trick.
 
 ### 2.1 Filter design — IIR
 
@@ -147,7 +152,7 @@ behaviour — so `sig_iir.m` carries `.skip-emit-typescript`. Gating:
 6. Order helpers (`buttord` and friends).
 7. Form conversions (`tf2zp` / `tf2sos` / etc.).
 
-### 2.2 Filter design — FIR (3 sessions) 🔵
+### 2.2 Filter design — FIR (lowpass core ✅; richer designers 🔵)
 
 | Function | Notes |
 |---|---|
@@ -162,7 +167,7 @@ behaviour — so `sig_iir.m` carries `.skip-emit-typescript`. Gating:
 **Gating tests**: `sig_fir1_lp.m`, `sig_fir2_arbitrary.m`,
 `sig_sgolay_smooth.m`.
 
-### 2.3 More windows (1 session) 🔵
+### 2.3 More windows (1 session) ✅
 
 Used by every spectral / FIR design entry above.
 
@@ -181,7 +186,7 @@ straight loops in the runtime, mirrored across Python / TS.
 
 **REPL / Debug**: column vectors; nothing new.
 
-### 2.4 Polynomial / rational helpers (3 sessions) 🔵
+### 2.4 Polynomial / rational helpers ✅ (distinct-pole `residue`; repeated-pole grouping 🔵)
 
 Tier-1 filter conversions all flow through `roots` / `poly`. These
 also unblock arbitrary `polyval`-style work:
@@ -200,7 +205,7 @@ critical blocker. If general non-symmetric eig isn't ready, ship a
 matrix shape (Hessenberg by construction, so QR with implicit
 shifts converges robustly).
 
-### 2.5 Tier-1 closure: zero-phase + filtfilt (3 sessions) 🔵
+### 2.5 Tier-1 closure: zero-phase + filtfilt ✅ (Gustafsson IC + `phasez`/`zerophase` 🔵)
 
 | Function | Notes |
 |---|---|
@@ -226,7 +231,7 @@ the REPL with cross-input persistence.
 
 ## 3. Tier 2 — spectral analysis & time-frequency (~4 weeks)
 
-### 3.1 Nonparametric spectral analysis (1 week) 🔵
+### 3.1 Nonparametric spectral analysis ✅ (`periodogram`/`pwelch`/`cpsd`/`mscohere`/`tfestimate`); multitaper 🔵
 
 | Function | Notes |
 |---|---|
@@ -247,7 +252,7 @@ display.
 **Gating tests**: `sig_periodogram_basic.m`,
 `sig_pwelch_white_noise.m`, `sig_mscohere_two_sin.m`.
 
-### 3.2 Parametric / model-based PSD (3 sessions) 🔵
+### 3.2 Parametric / model-based PSD ✅ (`lpc`/`levinson`/`aryule`/`arburg`/`pyulear`/`pburg`); subspace + `prony`/`stmcb` 🔵
 
 Builds on Tier 1.4 polynomial helpers + a small set of LP routines.
 
@@ -263,7 +268,7 @@ Builds on Tier 1.4 polynomial helpers + a small set of LP routines.
 | `pmusic` / `peig` / `rooteig` / `rootmusic` | Subspace methods. Need eigendecomposition of the autocorrelation matrix — leverages shipped `eig`. |
 | `prony(h, nb, na)` / `stmcb(x, nb, na)` | IIR design from impulse response / time-domain. |
 
-### 3.3 Time-frequency analysis (1 week) 🔵
+### 3.3 Time-frequency analysis ✅ (`spectrogram` single-output); STFT/`pspectrum`/`instfreq`/`instbw` 🔵
 
 | Function | Notes |
 |---|---|
@@ -282,7 +287,7 @@ and time vectors. Display works as-is. The user-facing
 emit a message + return invisibly, matching how other
 plot-only entries are handled.
 
-### 3.4 Other transforms — close the chapter-17 surface (3 sessions) 🔵
+### 3.4 Other transforms — close the chapter-17 surface ✅ (`dct`/`idct`/`fwht`/`hilbert`/`goertzel`); `czt`/`dst`/cepstrum 🔵
 
 | Function | Notes |
 |---|---|
@@ -298,7 +303,7 @@ plot-only entries are handled.
 
 ## 4. Tier 3 — measurements, multirate, vibration (~4 weeks)
 
-### 4.1 Multirate, completed (3 sessions) 🔵
+### 4.1 Multirate ✅ (`upfirdn`/`decimate`/`interp`/`resample`); polyphase + group-delay correction 🔵
 
 | Function | Notes |
 |---|---|
@@ -311,7 +316,7 @@ plot-only entries are handled.
 `resample`/`decimate`/`interp` together replace the toy
 `upsample`/`downsample` we ship today.
 
-### 4.2 Pulse / waveform generators (2 sessions) 🔵
+### 4.2 Pulse / waveform generators ✅ (`chirp` linear, `sawtooth`/`square`/`gauspuls`/`rectpuls`/`tripuls`/`sinc`); `pulstran`/`diric`/`gmonopuls`/`vco` + non-linear chirp 🔵
 
 | Function | Notes |
 |---|---|
@@ -323,7 +328,7 @@ plot-only entries are handled.
 | `sinc(x)`, `diric(x, n)` | (sinc already ships as a math identity — verify normalized vs unnormalized convention.) |
 | `vco(x, fc, fs)` | Voltage-controlled oscillator. Built on `cumsum`. |
 
-### 4.3 Pulse / waveform measurements (3 sessions) 🔵
+### 4.3 Pulse / waveform measurements ✅ (`findpeaks`, `rms`/`peak2peak`/`peak2rms`/`rssq`, `medfilt1`/`hampel`/`envelope`, `midcross`/`risetime`/`falltime`/`dutycycle`); MinPeak* options + `slewrate`/`pulseperiod`/`pulsewidth`/`overshoot`/`undershoot`/`settlingtime`/`statelevels` 🔵
 
 These power chapters 18 and 24 (Signal Measurement, Common
 Applications) — they also feed `findpeaks` workflows.
@@ -337,7 +342,7 @@ Applications) — they also feed `findpeaks` workflows.
 | `hampel(x, k)` | Hampel outlier identifier. |
 | `medfilt1(x, n)` | 1-D median filter (already partly in mind under image; signal-toolbox version is 1-D). |
 
-### 4.4 Cross-correlation / alignment (2 sessions) 🔵
+### 4.4 Cross-correlation / alignment ✅ (`xcov`/`finddelay`/`dtw`); `alignsignals`/`gccphat` + `xcorr` scaling-options 🔵
 
 | Function | Notes |
 |---|---|
@@ -466,20 +471,33 @@ gates the next on user-visible output:
 12. ~~**Tier 3 §4.1 — real multirate**~~ ✅ shipped (`upfirdn`, `decimate`, `interp`, `resample`). **Open**: polyphase, group-delay correction.
 13. ~~**Tier 3 §4.2 — waveform generators**~~ ✅ shipped (`chirp`, `sawtooth`, `square`, `gauspuls`, `rectpuls`, `tripuls`, `sinc`). **Open**: chirp non-linear methods, pulstran, diric, gmonopuls, vco.
 14. ~~**Tier 3 §4.4 — alignment helpers**~~ ✅ shipped (`xcov`, `finddelay`, `dtw`). **Open**: alignsignals, gccphat, xcorr scaling-option strings.
-6. **3.1 `periodogram`, `pwelch`, `dpss`, `pmtm`, `cpsd`, `mscohere`** (1 week).
-7. **3.4 `dct`/`idct`, `hilbert`, `czt`, `goertzel`, `fwht`** (3 sessions).
-8. **3.3 `spectrogram`, `stft`, `istft`** (3 sessions).
-9. **4.1 `resample`, `decimate`, `interp`, `upfirdn`** (3 sessions).
-10. **4.3 `findpeaks`, pulse measurements, `envelope`, `hampel`, `medfilt1`** (3 sessions).
-11. **4.4 `xcorr` scaling extension, `xcov`, `finddelay`, `alignsignals`, `dtw`, `gccphat`** (2 sessions).
-12. **3.2 LP / parametric PSD (`lpc`, `levinson`, `aryule`, `arburg`, `pyulear`, `pburg`, `pmusic`, `peig`)** (3 sessions).
-13. **4.2 Pulse / waveform generators (`chirp`, `sawtooth`, `square`, `gauspuls`, `pulstran`)** (2 sessions).
-14. **5.1 `designfilt` / `digitalFilter` system object** (1 week).
-15. **5.4 + 4.6** wavelets and vibration tail — open-ended; schedule after 1–14.
 
-That's roughly **5–6 weeks** of focused implementation to close
-the practical Signal Processing surface (items 1–13), with
-items 14–15 as follow-on.
+**Remaining open work** (queued in priority order):
+
+15. **§2.1 IIR family completion** — band variants (high/bandpass/stop)
+    of `butter`/`cheby1`/`cheby2`, `ellip`, `besself`, analog
+    prototypes (`buttap`/`cheb1ap`/`cheb2ap`/`ellipap`/`besselap`),
+    standalone `bilinear`/`freqs`, `cheb2ord`/`ellipord`, form
+    conversions (`tf2zp`/`zp2tf`/`tf2sos`/`sos2tf`/`tf2ss`/`ss2tf`/`zp2sos`).
+    Bandpass peak-normalization is the known-bug entry that needs
+    an analytical re-derivation pass before relanding.
+16. **§2.2 richer FIR design** — `fir2`, `firls`, `firpm` (Parks-McClellan / Remez), `firrcos`, `kaiserord`.
+17. **§2.5 zero-phase tail** — Gustafsson 1996 IC trick for `filtfilt`, `phasez`, `zerophase`.
+18. **§3.1 multitaper** — `dpss` (Slepian sequences via tridiagonal eig), `pmtm`.
+19. **§3.3 STFT family** — `stft`/`istft` (with COLA inversion), `pspectrum`, `instfreq`, `instbw`.
+20. **§3.4 transforms tail** — `czt` (Bluestein on chirped grid), `dst`/`idst`, `cceps`/`rceps`/`icceps`.
+21. **§3.2 covariance + subspace** — `pcov`/`pmcov`, `pmusic`/`peig`/`rootmusic`/`rooteig`, `prony`/`stmcb`.
+22. **§4.3 pulse measurements tail** — `slewrate`, `pulseperiod`, `pulsewidth`, `overshoot`, `undershoot`, `settlingtime`, `statelevels`; `MinPeakHeight`/`MinPeakDistance`/`MinPeakProminence`/`Threshold`/`SortStr` options for `findpeaks`.
+23. **§4.2 waveform tail** — `chirp` quadratic/log/hyperbolic, `pulstran`, `diric`, `gmonopuls`, `vco`.
+24. **§4.4 alignment tail** — `alignsignals` (multi-return), `gccphat`, `xcorr` scaling-option strings.
+25. **5.1 `designfilt` / `digitalFilter` system object** (~1 week; needs new descriptor type).
+26. **5.4 + 4.6** wavelets and vibration tail — open-ended; schedule after 15–25.
+
+Items 1–14 closed the practical day-to-day Signal Processing surface
+(filter design, apply, inspect; spectral; LP/parametric PSD; multirate;
+generators; pulse measurements; alignment). Items 15–24 round out the
+toolbox to per-function MATLAB parity. Items 25–26 are descriptor /
+algorithmic heavy lifts.
 
 ---
 
