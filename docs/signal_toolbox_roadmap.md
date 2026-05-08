@@ -125,12 +125,13 @@ method='gust') alongside `phasez` / `zerophase`.
 | `bilinear(b, a, fs)` | analog→digital, exposed as a builtin | ✅ shipped |
 | `freqs(b, a, w)` | analog frequency response | ✅ shipped |
 | `tf2zp` / `zp2tf` | polynomial ↔ zero/pole/gain | ✅ shipped |
+| `tf2sos` / `sos2tf` | polynomial ↔ cascade-of-biquads | ✅ shipped |
 | `besself(n, Wo)` | analog Bessel (norm='phase') | ✅ shipped |
 | `buttord` / `cheb1ord` / `cheb2ord` | order-selection helpers | ✅ shipped |
 | `ellip(n, Rp, Rs, Wn, ...)` | needs Jacobi elliptic functions | 🔵 follow-on |
 | `ellipord` | needs Jacobi elliptic functions | 🔵 follow-on |
 | `buttap` / `cheb1ap` / `cheb2ap` / `ellipap` / `besselap` | analog prototypes (standalone 3-return) | 🔵 follow-on |
-| `tf2sos` / `sos2tf`, `tf2ss` / `ss2tf`, `zp2sos` | form conversions tail | 🔵 follow-on |
+| `tf2ss` / `ss2tf`, `zp2sos` | state-space + zp/sos conversion | 🔵 follow-on |
 
 **What shipped (lowpass core)**:
 - Bilinear-transform design from analog Butterworth / Chebyshev I
@@ -488,14 +489,14 @@ gates the next on user-visible output:
 15. **§2.1 IIR family completion (tail)** — `ellip` + `ellipord` (Jacobi
     elliptic functions), the analog prototype builtins as standalone
     3-return entries (`buttap` / `cheb1ap` / `cheb2ap` / `ellipap` /
-    `besselap`), and the SOS / state-space form-conversions tail
-    (`tf2sos` / `sos2tf` / `tf2ss` / `ss2tf` / `zp2sos`). The big
-    band-variants + `besself` + standalone `bilinear` / `freqs` /
-    `cheb2ord` / `tf2zp` / `zp2tf` slice shipped in commits 4722dd0
-    and afc4581 (the bandpass peak-normalisation bug from the previous
-    attempt was rooted in the prewarp-vs-bilinear T-convention mismatch;
-    fixing `bilinear_pole_` to (2+s)/(2-s) made all four filter types
-    reproduce scipy / MATLAB to floating-point precision).
+    `besselap`), and the state-space conversions (`tf2ss` / `ss2tf` /
+    `zp2sos`). The big band-variants + `besself` + standalone
+    `bilinear` / `freqs` / `cheb2ord` / `tf2zp` / `zp2tf` /
+    `tf2sos` / `sos2tf` slice shipped in commits 4722dd0, afc4581,
+    and 73c47a3 (the bandpass peak-normalisation bug from the previous
+    attempt was rooted in the prewarp-vs-bilinear T-convention
+    mismatch; fixing `bilinear_pole_` to (2+s)/(2-s) made all four
+    filter types reproduce scipy / MATLAB to floating-point precision).
 16. **§2.2 richer FIR design** — `fir2`, `firls`, `firpm` (Parks-McClellan / Remez), `firrcos`, `kaiserord`.
 17. **§2.5 zero-phase tail** — strict Gustafsson 1996 method (scipy's
     method='gust'); `phasez` / `zerophase` real-valued response helpers.

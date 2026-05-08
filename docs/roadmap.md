@@ -98,12 +98,12 @@ Open follow-ups carried forward (still on the roadmap):
   prewarp-vs-bilinear T-convention mismatch — `bilinear_pole_` now
   uses `(2+s)/(2-s)` so all four filter types reproduce scipy / MATLAB
   exactly); `besself` (analog Bessel-Thomson, MATLAB's norm='phase');
-  standalone `bilinear` / `freqs`; `cheb2ord`; `tf2zp` / `zp2tf` form
-  conversions. Still open: `ellip` + `ellipord` (Jacobi elliptic),
-  the analog prototype builtins as standalone 3-return entries
-  (`buttap` / `cheb1ap` / `cheb2ap` / `ellipap` / `besselap`), and the
-  SOS / state-space form-conversions tail (`tf2sos` / `sos2tf` /
-  `tf2ss` / `ss2tf` / `zp2sos`).
+  standalone `bilinear` / `freqs`; `cheb2ord`; `tf2zp` / `zp2tf` /
+  `tf2sos` / `sos2tf` form conversions. Still open: `ellip` +
+  `ellipord` (Jacobi elliptic), the analog prototype builtins as
+  standalone 3-return entries (`buttap` / `cheb1ap` / `cheb2ap` /
+  `ellipap` / `besselap`), and the remaining state-space / zp-to-sos
+  conversions (`tf2ss` / `ss2tf` / `zp2sos`).
 - **SPT §2.2 follow-on — richer FIR design.** `fir2` (frequency sampling), `firls` (least-squares), `firpm` (Parks-McClellan / Remez exchange), `firrcos` (raised-cosine), `kaiserord`.
 - **SPT §2.5 follow-on — strict Gustafsson `filtfilt`.** The
   lfilter_zi-based steady-state IC path that scipy uses by default
@@ -254,11 +254,11 @@ surface; the highest-leverage open items, in priority order:
 
 - **§2.1 IIR family completion (tail).** The bulk of §2.1 shipped:
   band variants HP/BP/BS for `butter`/`cheby1`/`cheby2`, `besself`,
-  standalone `bilinear`/`freqs`, `cheb2ord`, `tf2zp`/`zp2tf` form
-  conversions. Open: `ellip` + `ellipord` (Jacobi elliptic functions),
-  the analog prototype builtins (`buttap`/`cheb1ap`/etc.) as
-  standalone 3-return entries, and the SOS / state-space conversions
-  tail (`tf2sos`/`sos2tf`/`tf2ss`/`ss2tf`/`zp2sos`). **Effort:** ~3 sessions.
+  standalone `bilinear`/`freqs`, `cheb2ord`, `tf2zp`/`zp2tf` /
+  `tf2sos`/`sos2tf` form conversions. Open: `ellip` + `ellipord`
+  (Jacobi elliptic functions), the analog prototype builtins
+  (`buttap`/`cheb1ap`/etc.) as standalone 3-return entries, and
+  `tf2ss` / `ss2tf` / `zp2sos`. **Effort:** ~2 sessions.
 - **§2.5 strict Gustafsson `filtfilt`.** The lfilter_zi-based
   steady-state IC path (scipy's pad-method default) shipped — constant
   signals now preserved exactly. The strict 1996 Gustafsson method
