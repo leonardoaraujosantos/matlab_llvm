@@ -2775,8 +2775,11 @@ function _polyFromComplexRoots(rsR: number[], rsI: number[]): Float64Array {
 }
 
 function _bilinearPoleTS(pr: number, pi: number): [number, number] {
-  const numR = 1 + pr, numI = pi;
-  const denR = 1 - pr, denI = -pi;
+  // T = 2 convention paired with the prewarp Wa = 2*tan(pi*Wn/2);
+  // together they place the digital cutoff at the requested omega
+  // (matches MATLAB / scipy.signal).
+  const numR = 2 + pr, numI = pi;
+  const denR = 2 - pr, denI = -pi;
   const d = denR * denR + denI * denI;
   return [(numR * denR + numI * denI) / d,
           (numI * denR - numR * denI) / d];
@@ -2912,6 +2915,315 @@ export function cheby2_b(n: number, Rs: number, Wn: number): NDArray {
 }
 export function cheby2_a(n: number, Rs: number, Wn: number): NDArray {
   const { a } = _cheby2Design(+n, +Rs, +Wn);
+  return new NDArray(a, [1, a.length]);
+}
+
+// IIR family completion — band variants. Refactored design pipeline as
+// in the C++ / Python lanes: build the analog LP prototype with Wn=1,
+// apply analog frequency transformation, bilinear + gain normalise.
+
+function _prewarp(Wn: number): number {
+  if (Wn <= 0) Wn = 1e-12;
+  if (Wn >= 1) Wn = 1 - 1e-12;
+  return 2 * Math.tan(Math.PI * Wn / 2);
+}
+
+function _csqrtTS(xr: number, xi: number): [number, number] {
+  const m = Math.sqrt(xr * xr + xi * xi);
+  const sr = Math.sqrt((m + xr) * 0.5);
+  const si = (xi >= 0 ? 1 : -1) * Math.sqrt((m - xr) * 0.5);
+  return [sr, si];
+}
+
+function _buttapProto(n: number): { pr: number[]; pi: number[];
+                                     zr: number[]; zi: number[]; nInf: number } {
+  const pr: number[] = [], pi: number[] = [];
+  for (let k = 0; k < n; k++) {
+    const theta = Math.PI * (2 * (k + 1) + n - 1) / (2 * n);
+    pr.push(Math.cos(theta));
+    pi.push(Math.sin(theta));
+  }
+  return { pr, pi, zr: [], zi: [], nInf: n };
+}
+
+function _cheb1apProto(n: number, Rp: number) {
+  if (Rp <= 0) Rp = 1e-12;
+  const eps = Math.sqrt(Math.pow(10, Rp / 10) - 1);
+  const mu  = Math.log(1 / eps + Math.sqrt(1 / (eps * eps) + 1)) / n;
+  const sh  = Math.sinh(mu), ch = Math.cosh(mu);
+  const pr: number[] = [], pi: number[] = [];
+  for (let k = 0; k < n; k++) {
+    const theta = Math.PI * (2 * (k + 1) - 1) / (2 * n);
+    pr.push(-sh * Math.sin(theta));
+    pi.push( ch * Math.cos(theta));
+  }
+  return { pr, pi, zr: [] as number[], zi: [] as number[], nInf: n };
+}
+
+function _cheb2apProto(n: number, Rs: number) {
+  if (Rs <= 0) Rs = 1e-12;
+  const eps = 1 / Math.sqrt(Math.pow(10, Rs / 10) - 1);
+  const mu  = Math.log(1 / eps + Math.sqrt(1 / (eps * eps) + 1)) / n;
+  const sh  = Math.sinh(mu), ch = Math.cosh(mu);
+  const pr: number[] = [], pi: number[] = [];
+  const zr: number[] = [], zi: number[] = [];
+  let nInf = 0;
+  for (let k = 0; k < n; k++) {
+    const theta = Math.PI * (2 * (k + 1) - 1) / (2 * n);
+    const cr = -sh * Math.sin(theta);
+    const ci =  ch * Math.cos(theta);
+    const m2 = cr * cr + ci * ci;
+    pr.push( cr / m2);
+    pi.push(-ci / m2);
+    const ct = Math.cos(theta);
+    if (Math.abs(ct) > 1e-12) { zr.push(0); zi.push(1 / ct); }
+    else                       { nInf++; }
+  }
+  return { pr, pi, zr, zi, nInf };
+}
+
+function _lp2hp(Wa: number, lp: ReturnType<typeof _buttapProto>) {
+  const np = lp.pr.length;
+  const pr: number[] = [], pi: number[] = [];
+  for (let k = 0; k < np; k++) {
+    const m2 = lp.pr[k] * lp.pr[k] + lp.pi[k] * lp.pi[k];
+    pr.push( Wa * lp.pr[k] / m2);
+    pi.push(-Wa * lp.pi[k] / m2);
+  }
+  const zr: number[] = [], zi: number[] = [];
+  for (let k = 0; k < lp.zr.length; k++) {
+    const m2 = lp.zr[k] * lp.zr[k] + lp.zi[k] * lp.zi[k];
+    if (m2 === 0) continue;
+    zr.push( Wa * lp.zr[k] / m2);
+    zi.push(-Wa * lp.zi[k] / m2);
+  }
+  for (let k = 0; k < lp.nInf; k++) { zr.push(0); zi.push(0); }
+  while (zr.length < np) { zr.push(0); zi.push(0); }
+  return { pr, pi, zr, zi, nInf: 0 };
+}
+
+function _lp2bp(Wa1: number, Wa2: number, lp: ReturnType<typeof _buttapProto>) {
+  const BW = Wa2 - Wa1, W0sq = Wa1 * Wa2;
+  const pr: number[] = [], pi: number[] = [];
+  const zr: number[] = [], zi: number[] = [];
+  for (let k = 0; k < lp.pr.length; k++) {
+    const pbr = lp.pr[k] * BW, pbi = lp.pi[k] * BW;
+    const dr = pbr * pbr - pbi * pbi - 4 * W0sq;
+    const di = 2 * pbr * pbi;
+    const [sr, si] = _csqrtTS(dr, di);
+    pr.push((pbr + sr) * 0.5); pi.push((pbi + si) * 0.5);
+    pr.push((pbr - sr) * 0.5); pi.push((pbi - si) * 0.5);
+  }
+  for (let k = 0; k < lp.zr.length; k++) {
+    const zbr = lp.zr[k] * BW, zbi = lp.zi[k] * BW;
+    const dr = zbr * zbr - zbi * zbi - 4 * W0sq;
+    const di = 2 * zbr * zbi;
+    const [sr, si] = _csqrtTS(dr, di);
+    zr.push((zbr + sr) * 0.5); zi.push((zbi + si) * 0.5);
+    zr.push((zbr - sr) * 0.5); zi.push((zbi - si) * 0.5);
+  }
+  for (let k = 0; k < lp.nInf; k++) { zr.push(0); zi.push(0); }
+  return { pr, pi, zr, zi, nInf: lp.nInf };
+}
+
+function _lp2bs(Wa1: number, Wa2: number, lp: ReturnType<typeof _buttapProto>) {
+  const BW = Wa2 - Wa1, W0sq = Wa1 * Wa2, W0 = Math.sqrt(W0sq);
+  const pr: number[] = [], pi: number[] = [];
+  const zr: number[] = [], zi: number[] = [];
+  for (let k = 0; k < lp.pr.length; k++) {
+    const p_r = lp.pr[k], p_i = lp.pi[k];
+    const p2r = p_r * p_r - p_i * p_i;
+    const p2i = 2 * p_r * p_i;
+    const dr = BW * BW - 4 * W0sq * p2r;
+    const di =          - 4 * W0sq * p2i;
+    const [sr, si] = _csqrtTS(dr, di);
+    const m2 = p_r * p_r + p_i * p_i;
+    if (m2 === 0) continue;
+    for (const sign of [+1, -1]) {
+      const nr = BW + sign * sr;
+      const ni =      sign * si;
+      const dnr = 2 * p_r, dni = 2 * p_i;
+      const dm2 = dnr * dnr + dni * dni;
+      pr.push((nr * dnr + ni * dni) / dm2);
+      pi.push((ni * dnr - nr * dni) / dm2);
+    }
+  }
+  for (let k = 0; k < lp.nInf; k++) {
+    zr.push(0); zi.push( W0);
+    zr.push(0); zi.push(-W0);
+  }
+  for (let k = 0; k < lp.zr.length; k++) {
+    const z_r = lp.zr[k], z_i = lp.zi[k];
+    const z2r = z_r * z_r - z_i * z_i;
+    const z2i = 2 * z_r * z_i;
+    const dr = BW * BW - 4 * W0sq * z2r;
+    const di =          - 4 * W0sq * z2i;
+    const [sr, si] = _csqrtTS(dr, di);
+    const m2 = z_r * z_r + z_i * z_i;
+    if (m2 === 0) continue;
+    for (const sign of [+1, -1]) {
+      const nr = BW + sign * sr;
+      const ni =      sign * si;
+      const dnr = 2 * z_r, dni = 2 * z_i;
+      const dm2 = dnr * dnr + dni * dni;
+      zr.push((nr * dnr + ni * dni) / dm2);
+      zi.push((ni * dnr - nr * dni) / dm2);
+    }
+  }
+  return { pr, pi, zr, zi, nInf: 0 };
+}
+
+function _digitizePZ(pr: number[], pi: number[], zr: number[], zi: number[],
+                      nInf: number, omegaNorm: number):
+    { b: Float64Array; a: Float64Array } {
+  const dpr: number[] = [], dpi: number[] = [];
+  for (let k = 0; k < pr.length; k++) {
+    const [r, im] = _bilinearPoleTS(pr[k], pi[k]);
+    dpr.push(r); dpi.push(im);
+  }
+  const dzr: number[] = [], dzi: number[] = [];
+  for (let k = 0; k < zr.length; k++) {
+    const [r, im] = _bilinearPoleTS(zr[k], zi[k]);
+    dzr.push(r); dzi.push(im);
+  }
+  for (let k = 0; k < nInf; k++) { dzr.push(-1); dzi.push(0); }
+  const a = _polyFromComplexRoots(dpr, dpi);
+  let b = Array.from(_polyFromComplexRoots(dzr, dzi));
+  while (b.length < a.length) b = [0, ...b];
+  // Horner-evaluate at e^{j*omegaNorm}.
+  const zN_r = Math.cos(omegaNorm), zN_i = Math.sin(omegaNorm);
+  let br = b[0], bi = 0;
+  for (let i = 1; i < b.length; i++) {
+    const nr = br * zN_r - bi * zN_i + b[i];
+    const ni = br * zN_i + bi * zN_r;
+    br = nr; bi = ni;
+  }
+  let ar = a[0], ai = 0;
+  for (let i = 1; i < a.length; i++) {
+    const nr = ar * zN_r - ai * zN_i + a[i];
+    const ni = ar * zN_i + ai * zN_r;
+    ar = nr; ai = ni;
+  }
+  const mag2b = br * br + bi * bi;
+  const mag2a = ar * ar + ai * ai;
+  if (mag2b > 0 && mag2a > 0) {
+    const g = Math.sqrt(mag2a / mag2b);
+    for (let i = 0; i < b.length; i++) b[i] *= g;
+  }
+  return { b: Float64Array.from(b), a };
+}
+
+type IIRFamily = "butter" | "cheby1" | "cheby2";
+type IIRType   = "lp" | "hp" | "bp" | "bs";
+
+function _iirDesign(family: IIRFamily, ftype: IIRType, n: number,
+                     r1: number, Wn1: number, Wn2: number):
+    { b: Float64Array; a: Float64Array } {
+  n = (n | 0) || 1;
+  let lp;
+  if (family === "butter")      lp = _buttapProto(n);
+  else if (family === "cheby1") lp = _cheb1apProto(n, r1);
+  else                          lp = _cheb2apProto(n, r1);
+  const Wa1 = _prewarp(Wn1);
+  let an, omegaNorm = 0;
+  if (ftype === "lp") {
+    an = {
+      pr: lp.pr.map(p => Wa1 * p),
+      pi: lp.pi.map(p => Wa1 * p),
+      zr: lp.zr.map(z => Wa1 * z),
+      zi: lp.zi.map(z => Wa1 * z),
+      nInf: lp.nInf,
+    };
+    omegaNorm = 0;
+  } else if (ftype === "hp") {
+    an = _lp2hp(Wa1, lp);
+    omegaNorm = Math.PI;
+  } else {
+    let Wa2 = _prewarp(Wn2);
+    let lo = Wa1, hi = Wa2;
+    if (lo > hi) { const t = lo; lo = hi; hi = t; }
+    if (ftype === "bp") {
+      an = _lp2bp(lo, hi, lp);
+      const W0 = Math.sqrt(lo * hi);
+      omegaNorm = 2 * Math.atan(W0 / 2);
+    } else {
+      an = _lp2bs(lo, hi, lp);
+      omegaNorm = 0;
+    }
+  }
+  return _digitizePZ(an.pr, an.pi, an.zr, an.zi, an.nInf, omegaNorm);
+}
+
+export function butter_hp_b(n: number, Wn: number): NDArray {
+  const { b } = _iirDesign("butter", "hp", +n, 0, +Wn, 0);
+  return new NDArray(b, [1, b.length]);
+}
+export function butter_hp_a(n: number, Wn: number): NDArray {
+  const { a } = _iirDesign("butter", "hp", +n, 0, +Wn, 0);
+  return new NDArray(a, [1, a.length]);
+}
+export function butter_bp_b(n: number, W1: number, W2: number): NDArray {
+  const { b } = _iirDesign("butter", "bp", +n, 0, +W1, +W2);
+  return new NDArray(b, [1, b.length]);
+}
+export function butter_bp_a(n: number, W1: number, W2: number): NDArray {
+  const { a } = _iirDesign("butter", "bp", +n, 0, +W1, +W2);
+  return new NDArray(a, [1, a.length]);
+}
+export function butter_bs_b(n: number, W1: number, W2: number): NDArray {
+  const { b } = _iirDesign("butter", "bs", +n, 0, +W1, +W2);
+  return new NDArray(b, [1, b.length]);
+}
+export function butter_bs_a(n: number, W1: number, W2: number): NDArray {
+  const { a } = _iirDesign("butter", "bs", +n, 0, +W1, +W2);
+  return new NDArray(a, [1, a.length]);
+}
+export function cheby1_hp_b(n: number, Rp: number, Wn: number): NDArray {
+  const { b } = _iirDesign("cheby1", "hp", +n, +Rp, +Wn, 0);
+  return new NDArray(b, [1, b.length]);
+}
+export function cheby1_hp_a(n: number, Rp: number, Wn: number): NDArray {
+  const { a } = _iirDesign("cheby1", "hp", +n, +Rp, +Wn, 0);
+  return new NDArray(a, [1, a.length]);
+}
+export function cheby1_bp_b(n: number, Rp: number, W1: number, W2: number): NDArray {
+  const { b } = _iirDesign("cheby1", "bp", +n, +Rp, +W1, +W2);
+  return new NDArray(b, [1, b.length]);
+}
+export function cheby1_bp_a(n: number, Rp: number, W1: number, W2: number): NDArray {
+  const { a } = _iirDesign("cheby1", "bp", +n, +Rp, +W1, +W2);
+  return new NDArray(a, [1, a.length]);
+}
+export function cheby1_bs_b(n: number, Rp: number, W1: number, W2: number): NDArray {
+  const { b } = _iirDesign("cheby1", "bs", +n, +Rp, +W1, +W2);
+  return new NDArray(b, [1, b.length]);
+}
+export function cheby1_bs_a(n: number, Rp: number, W1: number, W2: number): NDArray {
+  const { a } = _iirDesign("cheby1", "bs", +n, +Rp, +W1, +W2);
+  return new NDArray(a, [1, a.length]);
+}
+export function cheby2_hp_b(n: number, Rs: number, Wn: number): NDArray {
+  const { b } = _iirDesign("cheby2", "hp", +n, +Rs, +Wn, 0);
+  return new NDArray(b, [1, b.length]);
+}
+export function cheby2_hp_a(n: number, Rs: number, Wn: number): NDArray {
+  const { a } = _iirDesign("cheby2", "hp", +n, +Rs, +Wn, 0);
+  return new NDArray(a, [1, a.length]);
+}
+export function cheby2_bp_b(n: number, Rs: number, W1: number, W2: number): NDArray {
+  const { b } = _iirDesign("cheby2", "bp", +n, +Rs, +W1, +W2);
+  return new NDArray(b, [1, b.length]);
+}
+export function cheby2_bp_a(n: number, Rs: number, W1: number, W2: number): NDArray {
+  const { a } = _iirDesign("cheby2", "bp", +n, +Rs, +W1, +W2);
+  return new NDArray(a, [1, a.length]);
+}
+export function cheby2_bs_b(n: number, Rs: number, W1: number, W2: number): NDArray {
+  const { b } = _iirDesign("cheby2", "bs", +n, +Rs, +W1, +W2);
+  return new NDArray(b, [1, b.length]);
+}
+export function cheby2_bs_a(n: number, Rs: number, W1: number, W2: number): NDArray {
+  const { a } = _iirDesign("cheby2", "bs", +n, +Rs, +W1, +W2);
   return new NDArray(a, [1, a.length]);
 }
 

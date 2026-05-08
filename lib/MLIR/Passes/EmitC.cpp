@@ -1786,6 +1786,16 @@ static llvm::StringRef MatrixReturningFns[] = {
     "matlab_butter_b", "matlab_butter_a",
     "matlab_cheby1_b", "matlab_cheby1_a",
     "matlab_cheby2_b", "matlab_cheby2_a",
+    /* §2.1 follow-on — band variants (high/bandpass/stop). */
+    "matlab_butter_hp_b", "matlab_butter_hp_a",
+    "matlab_butter_bp_b", "matlab_butter_bp_a",
+    "matlab_butter_bs_b", "matlab_butter_bs_a",
+    "matlab_cheby1_hp_b", "matlab_cheby1_hp_a",
+    "matlab_cheby1_bp_b", "matlab_cheby1_bp_a",
+    "matlab_cheby1_bs_b", "matlab_cheby1_bs_a",
+    "matlab_cheby2_hp_b", "matlab_cheby2_hp_a",
+    "matlab_cheby2_bp_b", "matlab_cheby2_bp_a",
+    "matlab_cheby2_bs_b", "matlab_cheby2_bs_a",
     "matlab_freqz", "matlab_freqz_h", "matlab_freqz_w",
     /* §2.2 FIR + Savitzky-Golay. */
     "matlab_fir1", "matlab_sgolay", "matlab_sgolayfilt",

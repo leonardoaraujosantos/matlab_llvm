@@ -2429,7 +2429,10 @@ def _poly_from_complex_roots(rs):
 
 
 def _bilinear_pole(p):
-    return (1.0 + p) / (1.0 - p)
+    # T = 2 convention paired with the prewarp Wa = 2*tan(pi*Wn/2);
+    # together they place the digital cutoff at the requested omega
+    # (matches MATLAB / scipy.signal).
+    return (2.0 + p) / (2.0 - p)
 
 
 def _lowpass_from_analog_poles(p_analog):
@@ -2545,6 +2548,202 @@ def cheby2_b(n, Rs, Wn):
 def cheby2_a(n, Rs, Wn):
     _, a = _cheby2_design(n, Rs, Wn)
     return a.reshape((1, -1))
+
+
+# IIR family completion — band variants. Refactored design pipeline:
+# (1) build the analog LP prototype with Wn = 1, (2) apply analog
+# frequency transformation, (3) bilinear + gain normalise.
+
+def _prewarp(Wn):
+    if Wn <= 0.0: Wn = 1e-12
+    if Wn >= 1.0: Wn = 1.0 - 1e-12
+    return 2.0 * np.tan(np.pi * Wn / 2.0)
+
+
+def _buttap_proto(n):
+    return [np.exp(1j * np.pi * (2 * (k + 1) + n - 1) / (2.0 * n))
+            for k in _pyrange(n)], [], n  # poles, finite zeros, n_zeros_at_inf
+
+
+def _cheb1ap_proto(n, Rp):
+    if Rp <= 0.0: Rp = 1e-12
+    eps = np.sqrt(10.0 ** (Rp / 10.0) - 1.0)
+    mu = np.arcsinh(1.0 / eps) / n
+    sh, ch = np.sinh(mu), np.cosh(mu)
+    poles = []
+    for k in _pyrange(n):
+        theta = np.pi * (2 * (k + 1) - 1) / (2.0 * n)
+        poles.append(-sh * np.sin(theta) + 1j * ch * np.cos(theta))
+    return poles, [], n
+
+
+def _cheb2ap_proto(n, Rs):
+    if Rs <= 0.0: Rs = 1e-12
+    eps = 1.0 / np.sqrt(10.0 ** (Rs / 10.0) - 1.0)
+    mu = np.arcsinh(1.0 / eps) / n
+    sh, ch = np.sinh(mu), np.cosh(mu)
+    poles, zeros = [], []
+    n_inf = 0
+    for k in _pyrange(n):
+        theta = np.pi * (2 * (k + 1) - 1) / (2.0 * n)
+        cr = -sh * np.sin(theta)
+        ci =  ch * np.cos(theta)
+        m2 = cr * cr + ci * ci
+        poles.append(cr / m2 + 1j * (-ci / m2))
+        ct = np.cos(theta)
+        if _pyabs(ct) > 1e-12:
+            zeros.append(0.0 + 1j * (1.0 / ct))
+        else:
+            n_inf += 1
+    return poles, zeros, n_inf
+
+
+def _lp2hp(Wa, lp_poles, lp_zeros, lp_n_inf):
+    hp_poles = [Wa / p for p in lp_poles]
+    hp_zeros = [Wa / z for z in lp_zeros if z != 0]
+    # LP zeros at infinity become HP zeros at 0
+    hp_zeros = hp_zeros + [0.0 + 0j] * lp_n_inf
+    # Pad if fewer finite zeros than poles
+    while len(hp_zeros) < len(hp_poles):
+        hp_zeros.append(0.0 + 0j)
+    return hp_poles, hp_zeros, 0
+
+
+def _csqrt(x):
+    return np.sqrt(complex(x))
+
+
+def _lp2bp(Wa1, Wa2, lp_poles, lp_zeros, lp_n_inf):
+    BW = Wa2 - Wa1
+    W0sq = Wa1 * Wa2
+    bp_poles, bp_zeros = [], []
+    # Each LP pole p produces 2 BP poles: s^2 - p*BW*s + W0^2 = 0
+    for p in lp_poles:
+        pb = p * BW
+        d = pb * pb - 4.0 * W0sq
+        s = _csqrt(d)
+        bp_poles.append((pb + s) * 0.5)
+        bp_poles.append((pb - s) * 0.5)
+    for z in lp_zeros:
+        zb = z * BW
+        d = zb * zb - 4.0 * W0sq
+        s = _csqrt(d)
+        bp_zeros.append((zb + s) * 0.5)
+        bp_zeros.append((zb - s) * 0.5)
+    # LP zeros at infinity -> n at s=0 + n at infinity
+    bp_zeros = bp_zeros + [0.0 + 0j] * lp_n_inf
+    return bp_poles, bp_zeros, lp_n_inf
+
+
+def _lp2bs(Wa1, Wa2, lp_poles, lp_zeros, lp_n_inf):
+    BW = Wa2 - Wa1
+    W0sq = Wa1 * Wa2
+    W0 = np.sqrt(W0sq)
+    bs_poles, bs_zeros = [], []
+    for p in lp_poles:
+        d = BW * BW - 4.0 * W0sq * (p * p)
+        s = _csqrt(d)
+        bs_poles.append((BW + s) / (2.0 * p))
+        bs_poles.append((BW - s) / (2.0 * p))
+    # LP zeros at infinity -> 2 BS zeros at +-j*W0
+    for _ in _pyrange(lp_n_inf):
+        bs_zeros.append(0.0 + 1j * W0)
+        bs_zeros.append(0.0 - 1j * W0)
+    for z in lp_zeros:
+        d = BW * BW - 4.0 * W0sq * (z * z)
+        s = _csqrt(d)
+        bs_zeros.append((BW + s) / (2.0 * z))
+        bs_zeros.append((BW - s) / (2.0 * z))
+    return bs_poles, bs_zeros, 0
+
+
+def _digitize_pz(an_poles, an_zeros, n_zeros_at_inf, omega_norm):
+    d_poles = [_bilinear_pole(p) for p in an_poles]
+    d_zeros = [_bilinear_pole(z) for z in an_zeros]
+    d_zeros = d_zeros + [-1.0 + 0j] * n_zeros_at_inf
+    a = _poly_from_complex_roots(d_poles)
+    b = _poly_from_complex_roots(d_zeros)
+    while len(b) < len(a):
+        b = np.concatenate([np.array([0.0]), b])
+    z_n = np.exp(1j * omega_norm)
+    bv = 0j
+    for c in b:
+        bv = bv * z_n + c
+    av = 0j
+    for c in a:
+        av = av * z_n + c
+    if _pyabs(bv) > 0 and _pyabs(av) > 0:
+        g = _pyabs(av) / _pyabs(bv)
+        b = b * g
+    return b, a
+
+
+def _iir_design(family, ftype, n, r1, Wn1, Wn2):
+    n = int(n) if n >= 1 else 1
+    if family == "butter":
+        lp_poles, lp_zeros, lp_n_inf = _buttap_proto(n)
+    elif family == "cheby1":
+        lp_poles, lp_zeros, lp_n_inf = _cheb1ap_proto(n, r1)
+    else:  # cheby2
+        lp_poles, lp_zeros, lp_n_inf = _cheb2ap_proto(n, r1)
+    Wa1 = _prewarp(Wn1)
+    if ftype == "lp":
+        an_poles = [Wa1 * p for p in lp_poles]
+        an_zeros = [Wa1 * z for z in lp_zeros]
+        n_inf = lp_n_inf
+        omega_norm = 0.0
+    elif ftype == "hp":
+        an_poles, an_zeros, n_inf = _lp2hp(Wa1, lp_poles, lp_zeros, lp_n_inf)
+        omega_norm = np.pi
+    else:
+        Wa2 = _prewarp(Wn2)
+        if Wa1 > Wa2: Wa1, Wa2 = Wa2, Wa1
+        if ftype == "bp":
+            an_poles, an_zeros, n_inf = _lp2bp(Wa1, Wa2, lp_poles, lp_zeros, lp_n_inf)
+            W0 = np.sqrt(Wa1 * Wa2)
+            omega_norm = 2.0 * np.arctan(W0 / 2.0)
+        else:
+            an_poles, an_zeros, n_inf = _lp2bs(Wa1, Wa2, lp_poles, lp_zeros, lp_n_inf)
+            omega_norm = 0.0
+    return _digitize_pz(an_poles, an_zeros, n_inf, omega_norm)
+
+
+def butter_hp_b(n, Wn):
+    b, _ = _iir_design("butter", "hp", n, 0.0, Wn, 0.0); return b.reshape((1, -1))
+def butter_hp_a(n, Wn):
+    _, a = _iir_design("butter", "hp", n, 0.0, Wn, 0.0); return a.reshape((1, -1))
+def butter_bp_b(n, W1, W2):
+    b, _ = _iir_design("butter", "bp", n, 0.0, W1, W2); return b.reshape((1, -1))
+def butter_bp_a(n, W1, W2):
+    _, a = _iir_design("butter", "bp", n, 0.0, W1, W2); return a.reshape((1, -1))
+def butter_bs_b(n, W1, W2):
+    b, _ = _iir_design("butter", "bs", n, 0.0, W1, W2); return b.reshape((1, -1))
+def butter_bs_a(n, W1, W2):
+    _, a = _iir_design("butter", "bs", n, 0.0, W1, W2); return a.reshape((1, -1))
+def cheby1_hp_b(n, Rp, Wn):
+    b, _ = _iir_design("cheby1", "hp", n, Rp, Wn, 0.0); return b.reshape((1, -1))
+def cheby1_hp_a(n, Rp, Wn):
+    _, a = _iir_design("cheby1", "hp", n, Rp, Wn, 0.0); return a.reshape((1, -1))
+def cheby1_bp_b(n, Rp, W1, W2):
+    b, _ = _iir_design("cheby1", "bp", n, Rp, W1, W2); return b.reshape((1, -1))
+def cheby1_bp_a(n, Rp, W1, W2):
+    _, a = _iir_design("cheby1", "bp", n, Rp, W1, W2); return a.reshape((1, -1))
+def cheby1_bs_b(n, Rp, W1, W2):
+    b, _ = _iir_design("cheby1", "bs", n, Rp, W1, W2); return b.reshape((1, -1))
+def cheby1_bs_a(n, Rp, W1, W2):
+    _, a = _iir_design("cheby1", "bs", n, Rp, W1, W2); return a.reshape((1, -1))
+def cheby2_hp_b(n, Rs, Wn):
+    b, _ = _iir_design("cheby2", "hp", n, Rs, Wn, 0.0); return b.reshape((1, -1))
+def cheby2_hp_a(n, Rs, Wn):
+    _, a = _iir_design("cheby2", "hp", n, Rs, Wn, 0.0); return a.reshape((1, -1))
+def cheby2_bp_b(n, Rs, W1, W2):
+    b, _ = _iir_design("cheby2", "bp", n, Rs, W1, W2); return b.reshape((1, -1))
+def cheby2_bp_a(n, Rs, W1, W2):
+    _, a = _iir_design("cheby2", "bp", n, Rs, W1, W2); return a.reshape((1, -1))
+def cheby2_bs_b(n, Rs, W1, W2):
+    b, _ = _iir_design("cheby2", "bs", n, Rs, W1, W2); return b.reshape((1, -1))
+def cheby2_bs_a(n, Rs, W1, W2):
+    _, a = _iir_design("cheby2", "bs", n, Rs, W1, W2); return a.reshape((1, -1))
 
 
 def _buttord_compute(Wp, Ws, Rp, Rs):

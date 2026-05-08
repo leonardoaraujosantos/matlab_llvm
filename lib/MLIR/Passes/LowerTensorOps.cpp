@@ -2847,68 +2847,102 @@ bool TensorLowering::rewriteBuiltinCalls() {
       continue;
     }
 
-    /* IIR design — multi-return forms. Lowpass scope.
+    /* IIR design — multi-return forms (lowpass + band variants).
      *
-     *   [b, a] = butter(n, Wn)        -> matlab_butter_{b,a}(n, Wn)
-     *   [b, a] = cheby1(n, Rp, Wn)    -> matlab_cheby1_{b,a}(n, Rp, Wn)
-     *   [H, w] = freqz(b, a, N)       -> matlab_freqz_{h,w}(b, a, N)
+     *   [b, a] = butter(n, Wn)              LP   (Wn scalar)
+     *   [b, a] = butter(n, [W1 W2])         BP   (Wn 2-elem vector)
+     *   [b, a] = butter(n, Wn, 'high')      HP   (Wn scalar + 'high')
+     *   [b, a] = butter(n, [W1 W2], 'stop') BS   (Wn 2-elem + 'stop')
+     *   ...same shape pattern for cheby1 (extra Rp at position 1) and
+     *      cheby2 (extra Rs at position 1).
+     *
+     * Bandpass / bandstop `[W1 W2]` is matched against the
+     * `matlab.concat_row` defining op so we can extract two scalar
+     * f64s and call the runtime entry directly. The optional
+     * 'high' / 'stop' trailing string is parsed via the const_char op.
      */
-    if (NA && NA.getValue().getSExtValue() == 2 &&
-        Name == "butter" && Call->getNumOperands() == 2 &&
-        Call->getNumResults() == 2 &&
-        Call->getOperand(0).getType() == F64 &&
-        Call->getOperand(1).getType() == F64) {
+    auto isIIRFamily = (Name == "butter" || Name == "cheby1" ||
+                       Name == "cheby2");
+    auto tryIIRDispatch = [&]() -> bool {
+      if (!(NA && NA.getValue().getSExtValue() == 2 && isIIRFamily &&
+            Call->getNumResults() == 2)) return false;
+      bool isButter = (Name == "butter");
+      int nopOk = Call->getNumOperands();
+      bool nopShapeOk = isButter ? (nopOk == 2 || nopOk == 3)
+                                  : (nopOk == 3 || nopOk == 4);
+      if (!nopShapeOk) return false;
+      if (Call->getOperand(0).getType() != F64) return false;
+      Value RArg, WnArg, StrArg;
+      if (isButter) {
+        WnArg = Call->getOperand(1);
+        if (nopOk == 3) StrArg = Call->getOperand(2);
+      } else {
+        if (Call->getOperand(1).getType() != F64) return false;
+        RArg  = Call->getOperand(1);
+        WnArg = Call->getOperand(2);
+        if (nopOk == 4) StrArg = Call->getOperand(3);
+      }
+      bool wnIsScalar = (WnArg.getType() == F64);
+      bool wnIsVec2   = false;
+      Value W1, W2;
+      if (auto Tt = mlir::dyn_cast<RankedTensorType>(WnArg.getType())) {
+        if (Tt.getElementType().isF64() && Tt.getNumElements() == 2) {
+          Operation *D = WnArg.getDefiningOp();
+          if (!D || D->getName().getStringRef() != "matlab.concat_row" ||
+              D->getNumOperands() != 2 ||
+              D->getOperand(0).getType() != F64 ||
+              D->getOperand(1).getType() != F64)
+            return false;          /* variable [W1 W2] not yet wired */
+          wnIsVec2 = true;
+          W1 = D->getOperand(0);
+          W2 = D->getOperand(1);
+        }
+      }
+      if (!wnIsScalar && !wnIsVec2) return false;
+      StringRef Tag;
+      if (StrArg) {
+        auto Tt = mlir::dyn_cast<RankedTensorType>(StrArg.getType());
+        if (!Tt || !Tt.getElementType().isInteger(8)) return false;
+        Operation *D = StrArg.getDefiningOp();
+        if (!D || D->getName().getStringRef() != "matlab.const_char")
+          return false;
+        auto VA = D->getAttrOfType<StringAttr>("value");
+        if (!VA) return false;
+        Tag = VA.getValue();
+      }
+      enum { LP_T, HP_T, BP_T, BS_T } ft;
+      if      (wnIsScalar && Tag.empty())   ft = LP_T;
+      else if (wnIsVec2   && Tag.empty())   ft = BP_T;
+      else if (wnIsScalar && Tag == "high") ft = HP_T;
+      else if (wnIsVec2   && Tag == "stop") ft = BS_T;
+      else                                  return false;
+      const char *suf = (ft == LP_T) ? ""
+                       : (ft == HP_T) ? "_hp"
+                       : (ft == BP_T) ? "_bp"
+                                      : "_bs";
+      std::string Fb = "matlab_" + Name.str() + suf + "_b";
+      std::string Fa = "matlab_" + Name.str() + suf + "_a";
+      llvm::SmallVector<Value, 4> Args;
+      llvm::SmallVector<Type, 4>  Sig;
+      Args.push_back(Call->getOperand(0)); Sig.push_back(F64);
+      if (!isButter) { Args.push_back(RArg); Sig.push_back(F64); }
+      if (ft == LP_T || ft == HP_T) {
+        Args.push_back(WnArg); Sig.push_back(F64);
+      } else {
+        Args.push_back(W1); Args.push_back(W2);
+        Sig.push_back(F64); Sig.push_back(F64);
+      }
       B.setInsertionPoint(Call);
-      auto Fb = rt("matlab_butter_b", PtrTy, {F64, F64});
-      auto Fa = rt("matlab_butter_a", PtrTy, {F64, F64});
-      auto Cb = LLVM::CallOp::create(B, Call->getLoc(), Fb,
-                                      Call->getOperands());
-      auto Ca = LLVM::CallOp::create(B, Call->getLoc(), Fa,
-                                      Call->getOperands());
+      auto Fb_fn = rt(Fb, PtrTy, Sig);
+      auto Fa_fn = rt(Fa, PtrTy, Sig);
+      auto Cb = LLVM::CallOp::create(B, Call->getLoc(), Fb_fn, Args);
+      auto Ca = LLVM::CallOp::create(B, Call->getLoc(), Fa_fn, Args);
       Call->getResult(0).replaceAllUsesWith(Cb.getResult());
       Call->getResult(1).replaceAllUsesWith(Ca.getResult());
       Call->erase();
-      Changed = true;
-      continue;
-    }
-    if (NA && NA.getValue().getSExtValue() == 2 &&
-        Name == "cheby1" && Call->getNumOperands() == 3 &&
-        Call->getNumResults() == 2 &&
-        Call->getOperand(0).getType() == F64 &&
-        Call->getOperand(1).getType() == F64 &&
-        Call->getOperand(2).getType() == F64) {
-      B.setInsertionPoint(Call);
-      auto Fb = rt("matlab_cheby1_b", PtrTy, {F64, F64, F64});
-      auto Fa = rt("matlab_cheby1_a", PtrTy, {F64, F64, F64});
-      auto Cb = LLVM::CallOp::create(B, Call->getLoc(), Fb,
-                                      Call->getOperands());
-      auto Ca = LLVM::CallOp::create(B, Call->getLoc(), Fa,
-                                      Call->getOperands());
-      Call->getResult(0).replaceAllUsesWith(Cb.getResult());
-      Call->getResult(1).replaceAllUsesWith(Ca.getResult());
-      Call->erase();
-      Changed = true;
-      continue;
-    }
-    if (NA && NA.getValue().getSExtValue() == 2 &&
-        Name == "cheby2" && Call->getNumOperands() == 3 &&
-        Call->getNumResults() == 2 &&
-        Call->getOperand(0).getType() == F64 &&
-        Call->getOperand(1).getType() == F64 &&
-        Call->getOperand(2).getType() == F64) {
-      B.setInsertionPoint(Call);
-      auto Fb = rt("matlab_cheby2_b", PtrTy, {F64, F64, F64});
-      auto Fa = rt("matlab_cheby2_a", PtrTy, {F64, F64, F64});
-      auto Cb = LLVM::CallOp::create(B, Call->getLoc(), Fb,
-                                      Call->getOperands());
-      auto Ca = LLVM::CallOp::create(B, Call->getLoc(), Fa,
-                                      Call->getOperands());
-      Call->getResult(0).replaceAllUsesWith(Cb.getResult());
-      Call->getResult(1).replaceAllUsesWith(Ca.getResult());
-      Call->erase();
-      Changed = true;
-      continue;
-    }
+      return true;
+    };
+    if (tryIIRDispatch()) { Changed = true; continue; }
     /* [n, Wn] = buttord(Wp, Ws, Rp, Rs) / cheb1ord(...). 4 f64 args,
      * 2 f64 results. Splits into matlab_<name>_n / _Wn. */
     if (NA && NA.getValue().getSExtValue() == 2 &&

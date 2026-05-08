@@ -353,6 +353,27 @@ matlab_mat   *matlab_cheby1_b(double n, double Rp, double Wn);
 matlab_mat   *matlab_cheby1_a(double n, double Rp, double Wn);
 matlab_mat   *matlab_cheby2_b(double n, double Rs, double Wn);
 matlab_mat   *matlab_cheby2_a(double n, double Rs, double Wn);
+/* Band variants — high/bandpass/stop. Bandpass / bandstop take W1 / W2
+ * as separate doubles (the LowerTensorOps dispatch unpacks the matrix
+ * Wn = [W1 W2] before the call). */
+matlab_mat   *matlab_butter_hp_b(double n, double Wn);
+matlab_mat   *matlab_butter_hp_a(double n, double Wn);
+matlab_mat   *matlab_butter_bp_b(double n, double W1, double W2);
+matlab_mat   *matlab_butter_bp_a(double n, double W1, double W2);
+matlab_mat   *matlab_butter_bs_b(double n, double W1, double W2);
+matlab_mat   *matlab_butter_bs_a(double n, double W1, double W2);
+matlab_mat   *matlab_cheby1_hp_b(double n, double Rp, double Wn);
+matlab_mat   *matlab_cheby1_hp_a(double n, double Rp, double Wn);
+matlab_mat   *matlab_cheby1_bp_b(double n, double Rp, double W1, double W2);
+matlab_mat   *matlab_cheby1_bp_a(double n, double Rp, double W1, double W2);
+matlab_mat   *matlab_cheby1_bs_b(double n, double Rp, double W1, double W2);
+matlab_mat   *matlab_cheby1_bs_a(double n, double Rp, double W1, double W2);
+matlab_mat   *matlab_cheby2_hp_b(double n, double Rs, double Wn);
+matlab_mat   *matlab_cheby2_hp_a(double n, double Rs, double Wn);
+matlab_mat   *matlab_cheby2_bp_b(double n, double Rs, double W1, double W2);
+matlab_mat   *matlab_cheby2_bp_a(double n, double Rs, double W1, double W2);
+matlab_mat   *matlab_cheby2_bs_b(double n, double Rs, double W1, double W2);
+matlab_mat   *matlab_cheby2_bs_a(double n, double Rs, double W1, double W2);
 matlab_mat_c *matlab_freqz(matlab_mat *b, matlab_mat *a, double N);
 matlab_mat_c *matlab_freqz_h(matlab_mat *b, matlab_mat *a, double N);
 matlab_mat   *matlab_freqz_w(matlab_mat *b, matlab_mat *a, double N);

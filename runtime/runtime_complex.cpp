@@ -840,11 +840,14 @@ static void poly_from_complex_(const std::vector<double> &rr,
 }
 
 /* Bilinear transform of a single complex pole p. Returns (zr, zi) =
- * (1 + p) / (1 - p). T = 2 normalization absorbed into the prewarp. */
+ * (2 + p) / (2 - p). The T = 2 convention here pairs with the prewarp
+ * Wa = 2·tan(π·Wn/2): together they make the digital cutoff land exactly
+ * at the requested ω = π·Wn (this is the standard MATLAB/Octave/scipy
+ * convention). */
 static inline void bilinear_pole_(double pr_, double pi_,
                                   double &zr_, double &zi_) {
-    double num_r = 1.0 + pr_, num_i = pi_;
-    double den_r = 1.0 - pr_, den_i = -pi_;
+    double num_r = 2.0 + pr_, num_i = pi_;
+    double den_r = 2.0 - pr_, den_i = -pi_;
     cdiv2(num_r, num_i, den_r, den_i, zr_, zi_);
 }
 
@@ -911,6 +914,415 @@ static void lowpass_from_analog_pz_(const std::vector<double> &ppr,
         for (int64_t i = 0; i <= n; ++i) b[i] *= g;
     }
 }
+
+/*===========================================================================
+ * IIR family-completion infrastructure — band variants (high/bandpass/stop)
+ * + ellip / besself / analog prototypes / form conversions for §2.1.
+ *
+ * The design pipeline is now factored into three stages:
+ *   1.  Build the analog lowpass prototype (Wn = 1) for the chosen family
+ *       (Butterworth / Chebyshev I / Chebyshev II / elliptic / Bessel).
+ *       The prototype is described as (finite poles, finite zeros,
+ *       n_zeros_at_infinity).
+ *   2.  Apply the analog frequency transformation for the requested filter
+ *       type:
+ *         lp2lp(Wa)            scale poles/zeros by Wa
+ *         lp2hp(Wa)            replace s with Wa/s; LP zeros at ∞ become
+ *                              finite HP zeros at s=0; LP zeros at finite z
+ *                              become Wa/z; same shape conversion for poles.
+ *         lp2bp(Wa1, Wa2)      replace s with (s²+W0²)/(s·BW); each LP pole
+ *                              produces 2 BP poles via a quadratic; LP zeros
+ *                              at ∞ become n finite BP zeros at s=0 + n BP
+ *                              zeros at ∞.
+ *         lp2bs(Wa1, Wa2)      replace s with (s·BW)/(s²+W0²); each LP pole
+ *                              produces 2 BS poles via a quadratic; LP zeros
+ *                              at ∞ become 2n BS finite zeros at ±j·W0.
+ *   3.  Bilinear-transform poles + finite zeros, append n_zeros_at_∞ digital
+ *       zeros at z = -1, build (b, a) polynomials, and normalise gain at
+ *       the appropriate digital frequency (DC for LP / BS, Nyquist for HP,
+ *       2·atan(W0) for BP).
+ *
+ * The earlier `lowpass_from_analog_poles_` / `lowpass_from_analog_pz_`
+ * helpers stay as-is so existing lowpass entries don't shift; the new code
+ * lives alongside.
+ */
+
+/* Pre-warp a normalised digital cutoff to the analog frequency. Matches
+ * the convention of compute_butter_ / compute_cheby1_ — `Wa = 2·tan(...)`. */
+static inline double prewarp_(double Wn) {
+    if (Wn <= 0.0) Wn = 1e-12;
+    if (Wn >= 1.0) Wn = 1.0 - 1e-12;
+    return 2.0 * tan(M_PI * Wn / 2.0);
+}
+
+/* Complex sqrt with conventional branch (Re ≥ 0). */
+static inline void csqrt_(double xr, double xi, double &yr, double &yi) {
+    double m = sqrt(xr * xr + xi * xi);
+    yr = sqrt((m + xr) * 0.5);
+    yi = (xi >= 0.0 ? 1.0 : -1.0) * sqrt((m - xr) * 0.5);
+}
+
+/* Build digital (b, a) from analog poles + finite zeros + count of
+ * zeros at infinity, then normalise so |H(e^{j·omega_norm})| = 1. */
+static void digitize_pz_(const std::vector<double> &apr,
+                         const std::vector<double> &api,
+                         const std::vector<double> &azr,
+                         const std::vector<double> &azi,
+                         int n_zeros_at_inf,
+                         double omega_norm,
+                         std::vector<double> &b,
+                         std::vector<double> &a) {
+    int n_poles    = (int)apr.size();
+    int n_finite_z = (int)azr.size();
+    /* Bilinear poles. */
+    std::vector<double> dpr(n_poles), dpi(n_poles);
+    for (int k = 0; k < n_poles; ++k)
+        bilinear_pole_(apr[k], api[k], dpr[k], dpi[k]);
+    /* Bilinear finite zeros, then append n_zeros_at_inf copies of -1. */
+    std::vector<double> dzr, dzi;
+    dzr.reserve(n_finite_z + n_zeros_at_inf);
+    dzi.reserve(n_finite_z + n_zeros_at_inf);
+    for (int k = 0; k < n_finite_z; ++k) {
+        double zr_d, zi_d;
+        bilinear_pole_(azr[k], azi[k], zr_d, zi_d);
+        dzr.push_back(zr_d); dzi.push_back(zi_d);
+    }
+    for (int k = 0; k < n_zeros_at_inf; ++k) {
+        dzr.push_back(-1.0); dzi.push_back(0.0);
+    }
+    /* Polynomials. */
+    poly_from_complex_(dpr, dpi, a);
+    poly_from_complex_(dzr, dzi, b);
+    /* Pad b with leading zeros if total digital zeros < poles (pure-IIR). */
+    while ((int)b.size() < n_poles + 1) b.insert(b.begin(), 0.0);
+    /* Normalise. Horner-evaluate b(z) and a(z) at z = e^{j·omega_norm}. */
+    double zr_n = cos(omega_norm), zi_n = sin(omega_norm);
+    auto eval = [&](const std::vector<double> &p,
+                    double &out_r, double &out_i) {
+        out_r = p[0]; out_i = 0.0;
+        for (size_t i = 1; i < p.size(); ++i) {
+            double new_r = out_r * zr_n - out_i * zi_n + p[i];
+            double new_i = out_r * zi_n + out_i * zr_n;
+            out_r = new_r; out_i = new_i;
+        }
+    };
+    double br, bi, ar, ai;
+    eval(b, br, bi);
+    eval(a, ar, ai);
+    double mag2_b = br * br + bi * bi;
+    double mag2_a = ar * ar + ai * ai;
+    if (mag2_b > 0.0 && mag2_a > 0.0) {
+        double g = sqrt(mag2_a / mag2_b);
+        for (auto &v : b) v *= g;
+    }
+}
+
+/* Build the analog Butterworth lowpass prototype (Wn = 1).
+ * Output: n finite poles on the LHS unit circle, 0 finite zeros,
+ * n_zeros_at_inf = n. */
+static void buttap_proto_(int n,
+                          std::vector<double> &pr_,
+                          std::vector<double> &pi_) {
+    pr_.resize(n); pi_.resize(n);
+    for (int k = 0; k < n; ++k) {
+        double theta = M_PI * (double)(2 * (k + 1) + n - 1) / (2.0 * (double)n);
+        pr_[k] = cos(theta);
+        pi_[k] = sin(theta);
+    }
+}
+
+/* Chebyshev I lowpass prototype (Wn = 1). n poles on an LHS ellipse with
+ * half-axes (sinh(mu), cosh(mu)); 0 finite zeros; n zeros at infinity. */
+static void cheb1ap_proto_(int n, double Rp,
+                           std::vector<double> &pr_,
+                           std::vector<double> &pi_) {
+    if (Rp <= 0.0) Rp = 1e-12;
+    double eps = sqrt(pow(10.0, Rp / 10.0) - 1.0);
+    double mu  = asinh(1.0 / eps) / (double)n;
+    double sh  = sinh(mu), ch = cosh(mu);
+    pr_.resize(n); pi_.resize(n);
+    for (int k = 0; k < n; ++k) {
+        double theta = M_PI * (double)(2 * (k + 1) - 1) / (2.0 * (double)n);
+        pr_[k] = -sh * sin(theta);
+        pi_[k] =  ch * cos(theta);
+    }
+}
+
+/* Chebyshev II lowpass prototype (Ws = 1, finite j-axis zeros). n poles
+ * via reciprocal of Chebyshev I; n−1 finite zeros for odd n, n for even n;
+ * n_zeros_at_inf = 1 if odd, 0 if even. */
+static void cheb2ap_proto_(int n, double Rs,
+                           std::vector<double> &pr_,
+                           std::vector<double> &pi_,
+                           std::vector<double> &zr_,
+                           std::vector<double> &zi_,
+                           int &n_zeros_at_inf) {
+    if (Rs <= 0.0) Rs = 1e-12;
+    double eps = 1.0 / sqrt(pow(10.0, Rs / 10.0) - 1.0);
+    double mu  = asinh(1.0 / eps) / (double)n;
+    double sh  = sinh(mu), ch = cosh(mu);
+    pr_.resize(n); pi_.resize(n);
+    zr_.clear();   zi_.clear();
+    n_zeros_at_inf = 0;
+    for (int k = 0; k < n; ++k) {
+        double theta = M_PI * (double)(2 * (k + 1) - 1) / (2.0 * (double)n);
+        double cr = -sh * sin(theta);
+        double ci =  ch * cos(theta);
+        double m2 = cr * cr + ci * ci;
+        pr_[k] =  cr / m2;
+        pi_[k] = -ci / m2;
+        double ct = cos(theta);
+        if (fabs(ct) > 1e-12) {
+            zr_.push_back(0.0);
+            zi_.push_back(1.0 / ct);
+        } else {
+            n_zeros_at_inf++;
+        }
+    }
+}
+
+/* Apply lowpass-to-highpass to an analog prototype. New finite poles =
+ * Wa / old_poles. Each LP zero at infinity becomes a finite HP zero at
+ * s = 0; finite LP zeros become Wa / z. n_zeros_at_inf is set to 0 (HP
+ * has no zeros at ∞). */
+static void lp2hp_(double Wa,
+                   const std::vector<double> &lp_pr,
+                   const std::vector<double> &lp_pi,
+                   const std::vector<double> &lp_zr,
+                   const std::vector<double> &lp_zi,
+                   int lp_n_zeros_at_inf,
+                   std::vector<double> &hp_pr,
+                   std::vector<double> &hp_pi,
+                   std::vector<double> &hp_zr,
+                   std::vector<double> &hp_zi,
+                   int &hp_n_zeros_at_inf) {
+    int np = (int)lp_pr.size();
+    hp_pr.resize(np); hp_pi.resize(np);
+    for (int k = 0; k < np; ++k) {
+        double m2 = lp_pr[k] * lp_pr[k] + lp_pi[k] * lp_pi[k];
+        hp_pr[k] =  Wa * lp_pr[k] / m2;
+        hp_pi[k] = -Wa * lp_pi[k] / m2;
+    }
+    int nz_in = (int)lp_zr.size();
+    hp_zr.clear(); hp_zi.clear();
+    for (int k = 0; k < nz_in; ++k) {
+        double m2 = lp_zr[k] * lp_zr[k] + lp_zi[k] * lp_zi[k];
+        if (m2 == 0.0) continue;
+        hp_zr.push_back(Wa * lp_zr[k] / m2);
+        hp_zi.push_back(-Wa * lp_zi[k] / m2);
+    }
+    /* LP zeros at ∞ become HP zeros at 0. */
+    for (int k = 0; k < lp_n_zeros_at_inf; ++k) {
+        hp_zr.push_back(0.0); hp_zi.push_back(0.0);
+    }
+    hp_n_zeros_at_inf = 0;
+    /* If HP has fewer finite zeros than poles after the conversion (e.g.
+     * Cheby2 odd-n ellipordering), pad to match. */
+    while ((int)hp_zr.size() < np) {
+        hp_zr.push_back(0.0); hp_zi.push_back(0.0);
+    }
+}
+
+/* Apply lowpass-to-bandpass. */
+static void lp2bp_(double Wa1, double Wa2,
+                   const std::vector<double> &lp_pr,
+                   const std::vector<double> &lp_pi,
+                   const std::vector<double> &lp_zr,
+                   const std::vector<double> &lp_zi,
+                   int lp_n_zeros_at_inf,
+                   std::vector<double> &bp_pr,
+                   std::vector<double> &bp_pi,
+                   std::vector<double> &bp_zr,
+                   std::vector<double> &bp_zi,
+                   int &bp_n_zeros_at_inf) {
+    double BW   = Wa2 - Wa1;
+    double W0sq = Wa1 * Wa2;
+    int np = (int)lp_pr.size();
+    bp_pr.clear(); bp_pi.clear();
+    bp_zr.clear(); bp_zi.clear();
+    /* Each LP pole p produces 2 BP poles satisfying s² - p·BW·s + W0² = 0. */
+    for (int k = 0; k < np; ++k) {
+        double pbr = lp_pr[k] * BW;
+        double pbi = lp_pi[k] * BW;
+        double dr  = pbr * pbr - pbi * pbi - 4.0 * W0sq;
+        double di  = 2.0 * pbr * pbi;
+        double sr, si; csqrt_(dr, di, sr, si);
+        bp_pr.push_back((pbr + sr) * 0.5);
+        bp_pi.push_back((pbi + si) * 0.5);
+        bp_pr.push_back((pbr - sr) * 0.5);
+        bp_pi.push_back((pbi - si) * 0.5);
+    }
+    /* Each finite LP zero z → 2 BP zeros via the same quadratic. */
+    int nz_in = (int)lp_zr.size();
+    for (int k = 0; k < nz_in; ++k) {
+        double zbr = lp_zr[k] * BW;
+        double zbi = lp_zi[k] * BW;
+        double dr  = zbr * zbr - zbi * zbi - 4.0 * W0sq;
+        double di  = 2.0 * zbr * zbi;
+        double sr, si; csqrt_(dr, di, sr, si);
+        bp_zr.push_back((zbr + sr) * 0.5);
+        bp_zi.push_back((zbi + si) * 0.5);
+        bp_zr.push_back((zbr - sr) * 0.5);
+        bp_zi.push_back((zbi - si) * 0.5);
+    }
+    /* Each LP zero at ∞ becomes 1 BP zero at s=0 + 1 BP zero at ∞. */
+    for (int k = 0; k < lp_n_zeros_at_inf; ++k) {
+        bp_zr.push_back(0.0); bp_zi.push_back(0.0);
+    }
+    bp_n_zeros_at_inf = lp_n_zeros_at_inf;
+}
+
+/* Apply lowpass-to-bandstop. */
+static void lp2bs_(double Wa1, double Wa2,
+                   const std::vector<double> &lp_pr,
+                   const std::vector<double> &lp_pi,
+                   const std::vector<double> &lp_zr,
+                   const std::vector<double> &lp_zi,
+                   int lp_n_zeros_at_inf,
+                   std::vector<double> &bs_pr,
+                   std::vector<double> &bs_pi,
+                   std::vector<double> &bs_zr,
+                   std::vector<double> &bs_zi,
+                   int &bs_n_zeros_at_inf) {
+    double BW   = Wa2 - Wa1;
+    double W0sq = Wa1 * Wa2;
+    int np = (int)lp_pr.size();
+    bs_pr.clear(); bs_pi.clear();
+    bs_zr.clear(); bs_zi.clear();
+    /* Each LP pole p → 2 BS poles satisfying p·s² - BW·s + p·W0² = 0,
+     * i.e. s = (BW ± sqrt(BW² - 4·p²·W0²)) / (2·p). */
+    for (int k = 0; k < np; ++k) {
+        double pr_ = lp_pr[k], pi_ = lp_pi[k];
+        /* p² */
+        double p2r = pr_ * pr_ - pi_ * pi_;
+        double p2i = 2.0 * pr_ * pi_;
+        /* BW² - 4·p²·W0² */
+        double dr = BW * BW - 4.0 * W0sq * p2r;
+        double di =          - 4.0 * W0sq * p2i;
+        double sr, si; csqrt_(dr, di, sr, si);
+        /* (BW ± (sr+j·si)) / (2·p) */
+        double m2 = pr_ * pr_ + pi_ * pi_;
+        if (m2 == 0.0) continue;
+        for (int sign = +1; sign >= -1; sign -= 2) {
+            double nr = BW + sign * sr;
+            double ni =      sign * si;
+            /* divide by 2·p = 2·(pr + j·pi) */
+            double dnr = 2.0 * pr_, dni = 2.0 * pi_;
+            double dm2 = dnr * dnr + dni * dni;
+            double sx = (nr * dnr + ni * dni) / dm2;
+            double sy = (ni * dnr - nr * dni) / dm2;
+            bs_pr.push_back(sx);
+            bs_pi.push_back(sy);
+        }
+    }
+    /* Each LP zero at ∞ → 2 BS zeros at ±j·W0. */
+    double W0 = sqrt(W0sq);
+    for (int k = 0; k < lp_n_zeros_at_inf; ++k) {
+        bs_zr.push_back(0.0); bs_zi.push_back( W0);
+        bs_zr.push_back(0.0); bs_zi.push_back(-W0);
+    }
+    /* Finite LP zeros: same quadratic transform as poles. */
+    int nz_in = (int)lp_zr.size();
+    for (int k = 0; k < nz_in; ++k) {
+        double zr_ = lp_zr[k], zi_ = lp_zi[k];
+        double z2r = zr_ * zr_ - zi_ * zi_;
+        double z2i = 2.0 * zr_ * zi_;
+        double dr = BW * BW - 4.0 * W0sq * z2r;
+        double di =          - 4.0 * W0sq * z2i;
+        double sr, si; csqrt_(dr, di, sr, si);
+        double m2 = zr_ * zr_ + zi_ * zi_;
+        if (m2 == 0.0) continue;
+        for (int sign = +1; sign >= -1; sign -= 2) {
+            double nr = BW + sign * sr;
+            double ni =      sign * si;
+            double dnr = 2.0 * zr_, dni = 2.0 * zi_;
+            double dm2 = dnr * dnr + dni * dni;
+            double sx = (nr * dnr + ni * dni) / dm2;
+            double sy = (ni * dnr - nr * dni) / dm2;
+            bs_zr.push_back(sx);
+            bs_zi.push_back(sy);
+        }
+    }
+    bs_n_zeros_at_inf = 0;     /* BS has no zeros at ∞. */
+}
+
+/* Per filter family + type, run the full design pipeline and produce
+ * digital (b, a). Wn1/Wn2 are normalised digital frequencies (0..1).
+ * For LP/HP only Wn1 is used. Family-specific Rp/Rs are passed via the
+ * `r1`/`r2` parameters (interpretation depends on family). */
+enum FilterType { FT_LP = 0, FT_HP, FT_BP, FT_BS };
+enum FilterFamily { FF_BUTTER = 0, FF_CHEBY1, FF_CHEBY2 };
+
+static void compute_iir_(FilterFamily fam, FilterType ft,
+                         int n, double r1,
+                         double Wn1, double Wn2,
+                         std::vector<double> &b,
+                         std::vector<double> &a) {
+    if (n < 1) n = 1;
+    /* 1. Build the LP prototype with normalised cutoff. */
+    std::vector<double> lp_pr, lp_pi, lp_zr, lp_zi;
+    int lp_n_zeros_at_inf = 0;
+    switch (fam) {
+    case FF_BUTTER:
+        buttap_proto_(n, lp_pr, lp_pi);
+        lp_n_zeros_at_inf = n;
+        break;
+    case FF_CHEBY1:
+        cheb1ap_proto_(n, r1, lp_pr, lp_pi);
+        lp_n_zeros_at_inf = n;
+        break;
+    case FF_CHEBY2:
+        /* The Cheby2 prototype is built normalised at the stopband edge
+         * Wn (where the analog ripple peaks live at j·1/cos(θ_k)). For
+         * Tier-1 lowpass scope we reuse `cheb2ap_proto_` directly. */
+        cheb2ap_proto_(n, r1, lp_pr, lp_pi, lp_zr, lp_zi, lp_n_zeros_at_inf);
+        break;
+    }
+    /* 2. Apply analog frequency transformation. */
+    double Wa1 = prewarp_(Wn1);
+    std::vector<double> ap, ai_p, az, ai_z;          /* finite analog poles + zeros */
+    int n_zeros_at_inf = 0;
+    double omega_norm = 0.0;                          /* digital ω where |H| = 1 */
+    if (ft == FT_LP) {
+        /* Scale prototype by Wa1. */
+        ap.resize(lp_pr.size()); ai_p.resize(lp_pi.size());
+        for (size_t k = 0; k < lp_pr.size(); ++k) {
+            ap[k]   = Wa1 * lp_pr[k];
+            ai_p[k] = Wa1 * lp_pi[k];
+        }
+        az.resize(lp_zr.size()); ai_z.resize(lp_zi.size());
+        for (size_t k = 0; k < lp_zr.size(); ++k) {
+            az[k]   = Wa1 * lp_zr[k];
+            ai_z[k] = Wa1 * lp_zi[k];
+        }
+        n_zeros_at_inf = lp_n_zeros_at_inf;
+        omega_norm     = 0.0;                         /* DC */
+    } else if (ft == FT_HP) {
+        lp2hp_(Wa1, lp_pr, lp_pi, lp_zr, lp_zi, lp_n_zeros_at_inf,
+               ap, ai_p, az, ai_z, n_zeros_at_inf);
+        omega_norm = M_PI;                            /* Nyquist */
+    } else {
+        double Wa2 = prewarp_(Wn2);
+        if (Wa1 > Wa2) std::swap(Wa1, Wa2);
+        if (ft == FT_BP) {
+            lp2bp_(Wa1, Wa2, lp_pr, lp_pi, lp_zr, lp_zi, lp_n_zeros_at_inf,
+                   ap, ai_p, az, ai_z, n_zeros_at_inf);
+            double W0 = sqrt(Wa1 * Wa2);
+            /* z = (2+s)/(2-s) maps s = j·W to angle 2·atan(W/2). */
+            omega_norm = 2.0 * atan(W0 / 2.0);
+        } else {
+            lp2bs_(Wa1, Wa2, lp_pr, lp_pi, lp_zr, lp_zi, lp_n_zeros_at_inf,
+                   ap, ai_p, az, ai_z, n_zeros_at_inf);
+            omega_norm = 0.0;                         /* DC (BS keeps DC) */
+        }
+    }
+    /* 3. Bilinear + gain normalise. */
+    digitize_pz_(ap, ai_p, az, ai_z, n_zeros_at_inf, omega_norm, b, a);
+}
+
+/*===========================================================================
+ * End of IIR family-completion infrastructure.
+ */
 
 /* Internal: run the full Butterworth design and produce (b, a). */
 static void compute_butter_(int n, double Wn,
@@ -1129,6 +1541,119 @@ matlab_mat *matlab_cheby1_a(double n_d, double Rp, double Wn) {
     matlab_mat *A = mat_alloc(1, L);
     for (int64_t i = 0; i < L; ++i) A->data[i] = a[i];
     return A;
+}
+
+/*===========================================================================
+ * Band-variant runtime entries (highpass / bandpass / bandstop) for
+ * butter / cheby1 / cheby2. Each pair (_b, _a) returns one polynomial of
+ * length n+1 (HP) or 2n+1 (BP, BS).
+ *
+ * Bandpass / bandstop entries take Wn1, Wn2 as separate doubles rather
+ * than a 2-element vector, to keep the runtime ABI scalar-only. The
+ * LowerTensorOps dispatch unpacks the matrix-shaped Wn into the two
+ * element loads at the call site.
+ */
+static matlab_mat *iir_pack_(const std::vector<double> &v) {
+    int64_t L = (int64_t)v.size();
+    matlab_mat *M = mat_alloc(1, L);
+    for (int64_t i = 0; i < L; ++i) M->data[i] = v[i];
+    return M;
+}
+
+/* Butterworth band variants. */
+matlab_mat *matlab_butter_hp_b(double n_d, double Wn) {
+    std::vector<double> b, a;
+    compute_iir_(FF_BUTTER, FT_HP, (int)n_d, 0.0, Wn, 0.0, b, a);
+    return iir_pack_(b);
+}
+matlab_mat *matlab_butter_hp_a(double n_d, double Wn) {
+    std::vector<double> b, a;
+    compute_iir_(FF_BUTTER, FT_HP, (int)n_d, 0.0, Wn, 0.0, b, a);
+    return iir_pack_(a);
+}
+matlab_mat *matlab_butter_bp_b(double n_d, double W1, double W2) {
+    std::vector<double> b, a;
+    compute_iir_(FF_BUTTER, FT_BP, (int)n_d, 0.0, W1, W2, b, a);
+    return iir_pack_(b);
+}
+matlab_mat *matlab_butter_bp_a(double n_d, double W1, double W2) {
+    std::vector<double> b, a;
+    compute_iir_(FF_BUTTER, FT_BP, (int)n_d, 0.0, W1, W2, b, a);
+    return iir_pack_(a);
+}
+matlab_mat *matlab_butter_bs_b(double n_d, double W1, double W2) {
+    std::vector<double> b, a;
+    compute_iir_(FF_BUTTER, FT_BS, (int)n_d, 0.0, W1, W2, b, a);
+    return iir_pack_(b);
+}
+matlab_mat *matlab_butter_bs_a(double n_d, double W1, double W2) {
+    std::vector<double> b, a;
+    compute_iir_(FF_BUTTER, FT_BS, (int)n_d, 0.0, W1, W2, b, a);
+    return iir_pack_(a);
+}
+
+/* Chebyshev I band variants. */
+matlab_mat *matlab_cheby1_hp_b(double n_d, double Rp, double Wn) {
+    std::vector<double> b, a;
+    compute_iir_(FF_CHEBY1, FT_HP, (int)n_d, Rp, Wn, 0.0, b, a);
+    return iir_pack_(b);
+}
+matlab_mat *matlab_cheby1_hp_a(double n_d, double Rp, double Wn) {
+    std::vector<double> b, a;
+    compute_iir_(FF_CHEBY1, FT_HP, (int)n_d, Rp, Wn, 0.0, b, a);
+    return iir_pack_(a);
+}
+matlab_mat *matlab_cheby1_bp_b(double n_d, double Rp, double W1, double W2) {
+    std::vector<double> b, a;
+    compute_iir_(FF_CHEBY1, FT_BP, (int)n_d, Rp, W1, W2, b, a);
+    return iir_pack_(b);
+}
+matlab_mat *matlab_cheby1_bp_a(double n_d, double Rp, double W1, double W2) {
+    std::vector<double> b, a;
+    compute_iir_(FF_CHEBY1, FT_BP, (int)n_d, Rp, W1, W2, b, a);
+    return iir_pack_(a);
+}
+matlab_mat *matlab_cheby1_bs_b(double n_d, double Rp, double W1, double W2) {
+    std::vector<double> b, a;
+    compute_iir_(FF_CHEBY1, FT_BS, (int)n_d, Rp, W1, W2, b, a);
+    return iir_pack_(b);
+}
+matlab_mat *matlab_cheby1_bs_a(double n_d, double Rp, double W1, double W2) {
+    std::vector<double> b, a;
+    compute_iir_(FF_CHEBY1, FT_BS, (int)n_d, Rp, W1, W2, b, a);
+    return iir_pack_(a);
+}
+
+/* Chebyshev II band variants. */
+matlab_mat *matlab_cheby2_hp_b(double n_d, double Rs, double Wn) {
+    std::vector<double> b, a;
+    compute_iir_(FF_CHEBY2, FT_HP, (int)n_d, Rs, Wn, 0.0, b, a);
+    return iir_pack_(b);
+}
+matlab_mat *matlab_cheby2_hp_a(double n_d, double Rs, double Wn) {
+    std::vector<double> b, a;
+    compute_iir_(FF_CHEBY2, FT_HP, (int)n_d, Rs, Wn, 0.0, b, a);
+    return iir_pack_(a);
+}
+matlab_mat *matlab_cheby2_bp_b(double n_d, double Rs, double W1, double W2) {
+    std::vector<double> b, a;
+    compute_iir_(FF_CHEBY2, FT_BP, (int)n_d, Rs, W1, W2, b, a);
+    return iir_pack_(b);
+}
+matlab_mat *matlab_cheby2_bp_a(double n_d, double Rs, double W1, double W2) {
+    std::vector<double> b, a;
+    compute_iir_(FF_CHEBY2, FT_BP, (int)n_d, Rs, W1, W2, b, a);
+    return iir_pack_(a);
+}
+matlab_mat *matlab_cheby2_bs_b(double n_d, double Rs, double W1, double W2) {
+    std::vector<double> b, a;
+    compute_iir_(FF_CHEBY2, FT_BS, (int)n_d, Rs, W1, W2, b, a);
+    return iir_pack_(b);
+}
+matlab_mat *matlab_cheby2_bs_a(double n_d, double Rs, double W1, double W2) {
+    std::vector<double> b, a;
+    compute_iir_(FF_CHEBY2, FT_BS, (int)n_d, Rs, W1, W2, b, a);
+    return iir_pack_(a);
 }
 
 /* freqz(b, a, n) — discrete-time frequency response.
