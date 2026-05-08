@@ -92,9 +92,25 @@ Open follow-ups carried forward (still on the roadmap):
 - **Phase 7.6 — Events through `odeset`.** Bracket+bisect event detection ships today as the dedicated `ode_events` builtin (Phase 7.3); promoting it onto `opts.Events = @evt` for `ode45` / `ode23` / `ode23s` is gated on the function-handle-in-struct ABI work that also unblocks `OutputFcn` (live progress callback) and `Mass` (mass-matrix DAEs).
 - **Vector `y` via *named* user functions** — currently anon-only; the LowerUserCalls signature-refinement gate rejects `tensor<Nxf64>` ↔ `tensor<Nx1xf64>` shape mismatches and needs widening.
 - **Phase 8 — SV `state_display` regression** (commit `3622f10`): the const-fold pass eliminates assignments to output-port slots when the value comes from a persistent register read. A Phase-6.2 attempt to fix it via `LowerScalarSlots` cast insertion + EmitSV `arith.fptosi` rendering surfaced a cocotb timing divergence between the Python and SV references for `fir_asic_pipelined`; needs lockstep pipeline-equivalence work.
-- **SPT §2.1 follow-on — IIR family completion.** Ship `ellip` (Jacobi elliptic), `besself` (continuous-time Bessel prototype), high/band/stop variants of `butter`/`cheby1`/`cheby2` (band variants attempted in this arc but the bandpass peak-normalisation came out wrong; deferred for a fresh debugging pass), `cheb2ord`/`ellipord`, standalone `bilinear` and `freqs`, analog prototype builtins (`buttap`/`cheb1ap`/etc.), form conversions (`tf2zp`/`zp2tf`/`tf2sos`/`sos2tf`/`tf2ss`/`ss2tf`/`zp2sos`).
+- **SPT §2.1 follow-on — IIR family completion (tail).** The big slice
+  shipped: band variants (HP/BP/BS) of `butter`/`cheby1`/`cheby2` (the
+  bandpass peak-normalisation bug from the previous attempt was the
+  prewarp-vs-bilinear T-convention mismatch — `bilinear_pole_` now
+  uses `(2+s)/(2-s)` so all four filter types reproduce scipy / MATLAB
+  exactly); `besself` (analog Bessel-Thomson, MATLAB's norm='phase');
+  standalone `bilinear` / `freqs`; `cheb2ord`; `tf2zp` / `zp2tf` form
+  conversions. Still open: `ellip` + `ellipord` (Jacobi elliptic),
+  the analog prototype builtins as standalone 3-return entries
+  (`buttap` / `cheb1ap` / `cheb2ap` / `ellipap` / `besselap`), and the
+  SOS / state-space form-conversions tail (`tf2sos` / `sos2tf` /
+  `tf2ss` / `ss2tf` / `zp2sos`).
 - **SPT §2.2 follow-on — richer FIR design.** `fir2` (frequency sampling), `firls` (least-squares), `firpm` (Parks-McClellan / Remez exchange), `firrcos` (raised-cosine), `kaiserord`.
-- **SPT §2.5 follow-on — zero-edge-transient `filtfilt`.** Gustafsson 1996 initial-condition trick. Plus `phasez` and `zerophase` real-valued response helpers.
+- **SPT §2.5 follow-on — strict Gustafsson `filtfilt`.** The
+  lfilter_zi-based steady-state IC path that scipy uses by default
+  (method='pad') shipped (constant signals now preserved exactly).
+  The strict 1996 Gustafsson method (scipy's method='gust') uses an
+  explicit edge-elimination linear system instead of padding; that's
+  still open. Plus `phasez` / `zerophase` real-valued response helpers.
 - **SPT Tier-2 follow-on — multitaper + STFT + subspace methods.** `dpss` (Slepian sequences via tridiagonal eig), `pmtm`, `stft`/`istft` (with COLA inversion for `istft`), `pspectrum`, `instfreq`, `instbw`, `czt` (chirp Z-transform via Bluestein), `cceps`/`rceps`/`icceps`, `pcov`/`pmcov`, `pmusic`/`peig`/`rootmusic`/`rooteig`, `prony`/`stmcb`.
 - **SPT §4.1/§4.2/§4.4 follow-ons.** Polyphase decomposition (`polyphase`); chirp non-linear methods (quadratic / log / hyperbolic), `pulstran`, `diric`, `gmonopuls`, `vco`; `alignsignals` (multi-return), `gccphat`, `xcorr` scaling-option strings (`'biased'`/`'unbiased'`/`'normalized'`/`'coeff'`).
 - **SPT §4.3 follow-on.** `findpeaks` name-value options (`MinPeakHeight`/`MinPeakDistance`/`MinPeakProminence`/`Threshold`/`SortStr`) — gated on Sema's name-value-arg parsing. The pulse-statistics tail (`statelevels`, `slewrate`, `pulseperiod`, `pulsewidth`, `overshoot`, `undershoot`, `settlingtime`) shipped in the §4.3 closure slice.
@@ -236,15 +252,19 @@ SV-only assumption.
 The SPT arc closed the practical "design / apply / inspect / measure"
 surface; the highest-leverage open items, in priority order:
 
-- **§2.1 IIR family completion.** Band variants of `butter`/`cheby1`/
-  `cheby2` (revisit the discarded bandpass slice — peak normalisation
-  via the analog-prototype gain chain rather than at-centre rescaling),
-  `ellip` (Jacobi elliptic), `besself`, analog prototypes, `cheb2ord`/
-  `ellipord`, form conversions (`tf2zp`/`tf2sos`/etc.), standalone
-  `bilinear` / `freqs`. **Effort:** ~1 week.
-- **§2.5 Gustafsson IC for `filtfilt`.** True zero-edge-transient
-  forward-backward filtering. Plus `phasez` / `zerophase` real-valued
-  response helpers. **Effort:** ~3 sessions.
+- **§2.1 IIR family completion (tail).** The bulk of §2.1 shipped:
+  band variants HP/BP/BS for `butter`/`cheby1`/`cheby2`, `besself`,
+  standalone `bilinear`/`freqs`, `cheb2ord`, `tf2zp`/`zp2tf` form
+  conversions. Open: `ellip` + `ellipord` (Jacobi elliptic functions),
+  the analog prototype builtins (`buttap`/`cheb1ap`/etc.) as
+  standalone 3-return entries, and the SOS / state-space conversions
+  tail (`tf2sos`/`sos2tf`/`tf2ss`/`ss2tf`/`zp2sos`). **Effort:** ~3 sessions.
+- **§2.5 strict Gustafsson `filtfilt`.** The lfilter_zi-based
+  steady-state IC path (scipy's pad-method default) shipped — constant
+  signals now preserved exactly. The strict 1996 Gustafsson method
+  (scipy's method='gust') uses an explicit edge-elimination linear
+  system instead of padding; that and `phasez` / `zerophase` are
+  still open. **Effort:** ~3 sessions.
 - **§4.3 follow-on — `findpeaks` name-value options.** `MinPeakHeight`,
   `MinPeakDistance`, `MinPeakProminence`, `Threshold`, `SortStr`. The
   pulse-statistics tail (`slewrate`, `pulseperiod`, `pulsewidth`,

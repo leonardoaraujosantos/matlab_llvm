@@ -99,10 +99,17 @@ needs: *design a filter, apply it, look at its response*. All Tier-1
 items are pure-numeric and slot into the existing `matlab_mat *`
 runtime; no new dialect or descriptor work is needed.
 
-**Status snapshot**: lowpass design + apply + inspect surface is
-shipped (see §1 above). The remaining 🔵 items in §2.1–§2.5 are the
-band variants, the analog-prototype builtins / form conversions, the
-richer FIR designers, and the Gustafsson zero-edge `filtfilt` IC trick.
+**Status snapshot**: full design + apply + inspect surface is
+shipped — lowpass + band variants (HP/BP/BS) for `butter` / `cheby1` /
+`cheby2`, plus `besself` (analog Bessel-Thomson), standalone
+`bilinear` and `freqs`, `cheb2ord`, and `tf2zp` / `zp2tf` form
+conversions. `filtfilt` now uses lfilter_zi-based steady-state ICs
+(scipy's pad-method default; constant signals preserved exactly).
+The remaining 🔵 items are `ellip` + `ellipord` (Jacobi elliptic),
+the analog prototype builtins as standalone 3-return entries, the
+SOS / state-space form conversions tail, the richer FIR designers
+in §2.2, and the strict 1996 Gustafsson `filtfilt` (scipy's
+method='gust') alongside `phasez` / `zerophase`.
 
 ### 2.1 Filter design — IIR
 
@@ -110,16 +117,20 @@ richer FIR designers, and the Gustafsson zero-edge `filtfilt` IC trick.
 |---|---|:-:|
 | `butter(n, Wn)` lowpass + `[b, a]` multi-return | `[b,a] = butter(...)` | ✅ shipped |
 | `cheby1(n, Rp, Wn)` lowpass + `[b, a]` multi-return | `[b,a] = cheby1(...)` | ✅ shipped |
+| `cheby2(n, Rs, Wn)` | finite j-axis zero handling | ✅ shipped |
 | `freqz(b, a, N)` + 2-return `[H, w] = freqz(...)` | scalar N | ✅ shipped |
-| `butter(n, Wn, 'high'/'bandpass'/'stop')` band variants | requires multi-band Wn parsing | 🔵 follow-on |
-| `cheby2(n, Rs, Wn, ...)` | needs j-axis zero handling | 🔵 follow-on |
+| `butter(n, Wn, 'high'/'bandpass'/'stop')` band variants | string-arg + 2-elem-Wn dispatch via LowerTensorOps | ✅ shipped |
+| `cheby1(n, Rp, Wn, 'high')` band variants | same dispatch | ✅ shipped |
+| `cheby2(n, Rs, Wn, 'high')` band variants | same dispatch | ✅ shipped |
+| `bilinear(b, a, fs)` | analog→digital, exposed as a builtin | ✅ shipped |
+| `freqs(b, a, w)` | analog frequency response | ✅ shipped |
+| `tf2zp` / `zp2tf` | polynomial ↔ zero/pole/gain | ✅ shipped |
+| `besself(n, Wo)` | analog Bessel (norm='phase') | ✅ shipped |
+| `buttord` / `cheb1ord` / `cheb2ord` | order-selection helpers | ✅ shipped |
 | `ellip(n, Rp, Rs, Wn, ...)` | needs Jacobi elliptic functions | 🔵 follow-on |
-| `besself(n, Wo)` | continuous-time only | 🔵 follow-on |
-| `buttap` / `cheb1ap` / `cheb2ap` / `ellipap` / `besselap` | analog prototypes — building blocks | 🔵 follow-on |
-| `bilinear(b, a, fs)` | analog→digital, exposed as a builtin | 🔵 follow-on |
-| `freqs(b, a, w)` | analog frequency response | 🔵 follow-on |
-| `tf2zp` / `zp2tf`, `tf2sos` / `sos2tf`, `tf2ss` / `ss2tf`, `zp2sos` | form conversions | 🔵 follow-on |
-| `buttord` / `cheb1ord` / `cheb2ord` / `ellipord` | order-selection helpers | 🔵 follow-on |
+| `ellipord` | needs Jacobi elliptic functions | 🔵 follow-on |
+| `buttap` / `cheb1ap` / `cheb2ap` / `ellipap` / `besselap` | analog prototypes (standalone 3-return) | 🔵 follow-on |
+| `tf2sos` / `sos2tf`, `tf2ss` / `ss2tf`, `zp2sos` | form conversions tail | 🔵 follow-on |
 
 **What shipped (lowpass core)**:
 - Bilinear-transform design from analog Butterworth / Chebyshev I
@@ -205,7 +216,7 @@ critical blocker. If general non-symmetric eig isn't ready, ship a
 matrix shape (Hessenberg by construction, so QR with implicit
 shifts converges robustly).
 
-### 2.5 Tier-1 closure: zero-phase + filtfilt ✅ (Gustafsson IC + `phasez`/`zerophase` 🔵)
+### 2.5 Tier-1 closure: zero-phase + filtfilt ✅ (steady-state ICs ✅; strict Gustafsson + `phasez`/`zerophase` 🔵)
 
 | Function | Notes |
 |---|---|
@@ -474,15 +485,22 @@ gates the next on user-visible output:
 
 **Remaining open work** (queued in priority order):
 
-15. **§2.1 IIR family completion** — band variants (high/bandpass/stop)
-    of `butter`/`cheby1`/`cheby2`, `ellip`, `besself`, analog
-    prototypes (`buttap`/`cheb1ap`/`cheb2ap`/`ellipap`/`besselap`),
-    standalone `bilinear`/`freqs`, `cheb2ord`/`ellipord`, form
-    conversions (`tf2zp`/`zp2tf`/`tf2sos`/`sos2tf`/`tf2ss`/`ss2tf`/`zp2sos`).
-    Bandpass peak-normalization is the known-bug entry that needs
-    an analytical re-derivation pass before relanding.
+15. **§2.1 IIR family completion (tail)** — `ellip` + `ellipord` (Jacobi
+    elliptic functions), the analog prototype builtins as standalone
+    3-return entries (`buttap` / `cheb1ap` / `cheb2ap` / `ellipap` /
+    `besselap`), and the SOS / state-space form-conversions tail
+    (`tf2sos` / `sos2tf` / `tf2ss` / `ss2tf` / `zp2sos`). The big
+    band-variants + `besself` + standalone `bilinear` / `freqs` /
+    `cheb2ord` / `tf2zp` / `zp2tf` slice shipped in commits 4722dd0
+    and afc4581 (the bandpass peak-normalisation bug from the previous
+    attempt was rooted in the prewarp-vs-bilinear T-convention mismatch;
+    fixing `bilinear_pole_` to (2+s)/(2-s) made all four filter types
+    reproduce scipy / MATLAB to floating-point precision).
 16. **§2.2 richer FIR design** — `fir2`, `firls`, `firpm` (Parks-McClellan / Remez), `firrcos`, `kaiserord`.
-17. **§2.5 zero-phase tail** — Gustafsson 1996 IC trick for `filtfilt`, `phasez`, `zerophase`.
+17. **§2.5 zero-phase tail** — strict Gustafsson 1996 method (scipy's
+    method='gust'); `phasez` / `zerophase` real-valued response helpers.
+    The lfilter_zi-based steady-state IC path that scipy uses by
+    default (method='pad') shipped in commit 5908404.
 18. **§3.1 multitaper** — `dpss` (Slepian sequences via tridiagonal eig), `pmtm`.
 19. **§3.3 STFT family** — `stft`/`istft` (with COLA inversion), `pspectrum`, `instfreq`, `instbw`.
 20. **§3.4 transforms tail** — `czt` (Bluestein on chirped grid), `dst`/`idst`, `cceps`/`rceps`/`icceps`.
