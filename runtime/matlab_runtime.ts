@@ -3459,6 +3459,91 @@ export function besself_a(n: number, Wo: number): NDArray {
   return new NDArray(a, [1, a.length]);
 }
 
+function _pairConjRoots(rArr: Float64Array): Array<[number, number]> {
+  // TS NDArray drops the imaginary part of complex roots, so true
+  // conjugate pairing isn't possible here — instead, walk the root
+  // list two-at-a-time and emit a quadratic with sum / product of
+  // each pair. For real-rooted polynomials this is exact; for
+  // conjugate-paired polynomials it matches the LLVM/Python lane's
+  // section count (ceil(N/2)) up to the magnitudes.
+  const out: Array<[number, number]> = [];
+  const n = rArr.length;
+  for (let i = 0; i < n; i += 2) {
+    if (i + 1 < n) {
+      // Pair as quadratic: (s - r1)(s - r2) = s² - (r1+r2)·s + r1·r2.
+      const r1 = rArr[i], r2 = rArr[i + 1];
+      out.push([-(r1 + r2), r1 * r2]);
+    } else {
+      out.push([-rArr[i], 0.0]);
+    }
+  }
+  return out;
+}
+
+export function tf2sos(b: any, a: any): NDArray {
+  const bv = asArray(b).data;
+  const av = asArray(a).data;
+  if (bv.length === 0 || av.length === 0 || av[0] === 0)
+    return new NDArray(new Float64Array(0), [0, 6]);
+  // TS NDArray has no native complex roots — fall back to using
+  // the real-part-only Durand-Kerner approximation, which gives
+  // imperfect SOS for filters with complex poles. The C/Python lanes
+  // do the proper conjugate-pair grouping.
+  const bRoots = (b as any) ? (asArray(roots(b)).data) : new Float64Array(0);
+  const aRoots = (a as any) ? (asArray(roots(a)).data) : new Float64Array(0);
+  const b_qs = _pairConjRoots(bRoots);
+  const a_qs = _pairConjRoots(aRoots);
+  while (b_qs.length < a_qs.length) b_qs.push([0, 0]);
+  while (a_qs.length < b_qs.length) a_qs.push([0, 0]);
+  const L = a_qs.length;
+  const g = bv[0] / av[0];
+  const out = new Float64Array(L * 6);
+  for (let i = 0; i < L; i++) {
+    const bg = i === 0 ? g : 1;
+    out[i * 6 + 0] = bg * 1;
+    out[i * 6 + 1] = bg * b_qs[i][0];
+    out[i * 6 + 2] = bg * b_qs[i][1];
+    out[i * 6 + 3] = 1;
+    out[i * 6 + 4] = a_qs[i][0];
+    out[i * 6 + 5] = a_qs[i][1];
+  }
+  return new NDArray(out, [L, 6]);
+}
+
+function _sos2tfCompute(sos: any): { b: Float64Array; a: Float64Array } {
+  const sm = asArray(sos);
+  if (sm.shape.length !== 2 || sm.shape[1] !== 6 || sm.rows === 0)
+    return { b: Float64Array.from([1]), a: Float64Array.from([1]) };
+  let b = [1.0];
+  let a = [1.0];
+  const conv = (p: number[], q: number[]) => {
+    const r = new Array(p.length + q.length - 1).fill(0);
+    for (let i = 0; i < p.length; i++)
+      for (let j = 0; j < q.length; j++)
+        r[i + j] += p[i] * q[j];
+    return r;
+  };
+  for (let s = 0; s < sm.rows; s++) {
+    const r = sm.data;
+    const bs = [r[s * 6 + 0], r[s * 6 + 1], r[s * 6 + 2]];
+    const as_ = [r[s * 6 + 3], r[s * 6 + 4], r[s * 6 + 5]];
+    while (bs.length > 1 && bs[bs.length - 1] === 0) bs.pop();
+    while (as_.length > 1 && as_[as_.length - 1] === 0) as_.pop();
+    b = conv(b, bs);
+    a = conv(a, as_);
+  }
+  return { b: Float64Array.from(b), a: Float64Array.from(a) };
+}
+
+export function sos2tf_b(sos: any): NDArray {
+  const { b } = _sos2tfCompute(sos);
+  return new NDArray(b, [1, b.length]);
+}
+export function sos2tf_a(sos: any): NDArray {
+  const { a } = _sos2tfCompute(sos);
+  return new NDArray(a, [1, a.length]);
+}
+
 // --- FIR design (Tier-1 §2.2) ---------------------------------------
 export function fir1(n: number, Wn: number): NDArray {
   n = (n | 0);

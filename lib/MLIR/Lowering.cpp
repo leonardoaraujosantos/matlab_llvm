@@ -2276,6 +2276,9 @@ void Lowerer::lowerStmt(const Stmt &St) {
           /* [b, a] = zp2tf(z, p, k) — both ptr. */
           else if (CN == "zp2tf" && A.LHS.size() == 2)
             Rtys.assign(A.LHS.size(), PtrTy);
+          /* [b, a] = sos2tf(sos) — both ptr. */
+          else if (CN == "sos2tf" && A.LHS.size() == 2)
+            Rtys.assign(A.LHS.size(), PtrTy);
           /* [H, w] = freqz(b, a, N) — H complex column, w real column;
            * uniform ptr. */
           else if (CN == "freqz" && A.LHS.size() == 2)
@@ -6497,6 +6500,7 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             "butter", "cheby1", "cheby2", "freqz",
             /* §2.1 follow-on — standalone bilinear + analog freqs. */
             "bilinear", "freqs", "tf2zp", "zp2tf", "besself",
+            "tf2sos", "sos2tf",
             /* Note: buttord, cheb1ord return scalar f64 (multi-LHS form
              * splits into n -> f64 and Wn -> f64) — they're not in
              * PtrRet. Sema's default-typing does not type them; the

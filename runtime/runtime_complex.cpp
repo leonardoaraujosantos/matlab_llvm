@@ -1922,6 +1922,142 @@ matlab_mat *matlab_besself_a(double n_d, double Wo) {
     return A;
 }
 
+/* tf2sos(b, a) — polynomial → second-order-section cascade.
+ *
+ * Output is an L × 6 matrix where each row is [b0 b1 b2 a0 a1 a2] for
+ * one biquad section. L = ceil(N/2) where N = max(deg b, deg a).
+ *
+ * Pairing strategy: walk the root list, pair each complex root with
+ * its conjugate, treat real roots as a quadratic (s - r)·1 → [1, -r, 0].
+ * One numerator pair + one denominator pair per section. Numerator pad
+ * with [0, 0] if there are fewer numerator pairs than denominator pairs
+ * (i.e., for a strictly-proper transfer function that is the all-pole
+ * case). The leading section absorbs the overall gain b[0]/a[0].
+ *
+ * Multi-return single-LHS only (no separate `g` output for now —
+ * MATLAB's `[sos, g] = tf2sos(...)` is a follow-on).
+ */
+static void pair_conj_roots_(matlab_mat_c *roots_c,
+                             std::vector<std::pair<double, double>> &out_quads) {
+    /* Each output entry is (linear_coef, constant_coef) of a real
+     * quadratic z^2 + linear·z + const. Real-paired conjugate (a+bi),
+     * (a-bi) gives (-2a, a²+b²). Lone real root r gives (-r, 0). */
+    out_quads.clear();
+    if (!roots_c) return;
+    int64_t n = roots_c->rows * roots_c->cols;
+    std::vector<bool> used((size_t)n, false);
+    for (int64_t i = 0; i < n; ++i) {
+        if (used[(size_t)i]) continue;
+        double rr = roots_c->re[i];
+        double ri = roots_c->im[i];
+        if (fabs(ri) < 1e-9) {
+            out_quads.push_back({-rr, 0.0});
+            used[(size_t)i] = true;
+            continue;
+        }
+        /* Find the conjugate (rr, -ri) among remaining unused roots. */
+        int64_t j = -1;
+        double best = 1e30;
+        for (int64_t k = i + 1; k < n; ++k) {
+            if (used[(size_t)k]) continue;
+            double dr = roots_c->re[k] - rr;
+            double di = roots_c->im[k] + ri;       /* conjugate match */
+            double d = dr * dr + di * di;
+            if (d < best) { best = d; j = k; }
+        }
+        if (j < 0) {
+            /* Unpaired complex — emit linear with the magnitude. */
+            out_quads.push_back({-rr, rr * rr + ri * ri});
+            used[(size_t)i] = true;
+        } else {
+            out_quads.push_back({-2.0 * rr, rr * rr + ri * ri});
+            used[(size_t)i] = used[(size_t)j] = true;
+        }
+    }
+}
+
+matlab_mat *matlab_tf2sos(matlab_mat *b, matlab_mat *a) {
+    if (!b || !a) return mat_alloc(0, 6);
+    int64_t nb = b->rows * b->cols;
+    int64_t na = a->rows * a->cols;
+    if (nb == 0 || na == 0 || a->data[0] == 0.0) return mat_alloc(0, 6);
+    matlab_mat_c *bz = matlab_roots(b);
+    matlab_mat_c *az = matlab_roots(a);
+    std::vector<std::pair<double, double>> b_qs, a_qs;
+    pair_conj_roots_(bz, b_qs);
+    pair_conj_roots_(az, a_qs);
+    /* Pad b_qs with (0, 0) sections if fewer than a_qs (all-pole or
+     * strictly-proper case). */
+    while (b_qs.size() < a_qs.size()) b_qs.push_back({0.0, 0.0});
+    while (a_qs.size() < b_qs.size()) a_qs.push_back({0.0, 0.0});
+    int64_t L = (int64_t)a_qs.size();
+    matlab_mat *S = mat_alloc(L, 6);
+    /* Overall gain: b[0]/a[0] absorbed into the first section's b. */
+    double g = b->data[0] / a->data[0];
+    for (int64_t i = 0; i < L; ++i) {
+        double *r = S->data + i * 6;
+        double bg = (i == 0) ? g : 1.0;
+        r[0] = bg * 1.0;
+        r[1] = bg * b_qs[(size_t)i].first;
+        r[2] = bg * b_qs[(size_t)i].second;
+        r[3] = 1.0;
+        r[4] = a_qs[(size_t)i].first;
+        r[5] = a_qs[(size_t)i].second;
+    }
+    if (bz) { free(bz->re); free(bz->im); free(bz); }
+    if (az) { free(az->re); free(az->im); free(az); }
+    return S;
+}
+
+/* sos2tf(sos) — convolve all sections' numerators and denominators
+ * into single (b, a) polynomials. Multi-LHS splits into _b / _a. */
+static void compute_sos2tf_(matlab_mat *sos,
+                            std::vector<double> &b,
+                            std::vector<double> &a) {
+    b = {1.0};
+    a = {1.0};
+    if (!sos) return;
+    int64_t L = sos->rows;
+    int64_t W = sos->cols;
+    if (W != 6 || L == 0) return;
+    auto convolve = [](const std::vector<double> &p,
+                       const std::vector<double> &q) -> std::vector<double> {
+        std::vector<double> r(p.size() + q.size() - 1, 0.0);
+        for (size_t i = 0; i < p.size(); ++i)
+            for (size_t j = 0; j < q.size(); ++j)
+                r[i + j] += p[i] * q[j];
+        return r;
+    };
+    for (int64_t s = 0; s < L; ++s) {
+        const double *r = sos->data + s * 6;
+        std::vector<double> bs = {r[0], r[1], r[2]};
+        std::vector<double> as = {r[3], r[4], r[5]};
+        /* Trim trailing zeros so 1st-order sections [1, -r, 0] don't
+         * inflate the convolution length needlessly. */
+        while (bs.size() > 1 && bs.back() == 0.0) bs.pop_back();
+        while (as.size() > 1 && as.back() == 0.0) as.pop_back();
+        b = convolve(b, bs);
+        a = convolve(a, as);
+    }
+}
+
+matlab_mat *matlab_sos2tf_b(matlab_mat *sos) {
+    std::vector<double> b, a;
+    compute_sos2tf_(sos, b, a);
+    int64_t L = (int64_t)b.size();
+    matlab_mat *B = mat_alloc(1, L);
+    for (int64_t i = 0; i < L; ++i) B->data[i] = b[i];
+    return B;
+}
+matlab_mat *matlab_sos2tf_a(matlab_mat *sos) {
+    std::vector<double> b, a;
+    compute_sos2tf_(sos, b, a);
+    int64_t L = (int64_t)a.size();
+    matlab_mat *A = mat_alloc(1, L);
+    for (int64_t i = 0; i < L; ++i) A->data[i] = a[i];
+    return A;
+}
+
 /* freqz(b, a, n) — discrete-time frequency response.
  * Evaluates H(e^{jw}) at n equally spaced points w_k on [0, π) and
  * returns a complex column of length n (matching MATLAB's default

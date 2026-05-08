@@ -111,6 +111,7 @@ void Resolver::registerBuiltins() {
     "buttord", "cheb1ord", "cheb2ord",
     /* §2.1 follow-on — analog↔digital + form conversions + Bessel. */
     "bilinear", "freqs", "tf2zp", "zp2tf", "besself",
+    "tf2sos", "sos2tf",
     /* Tier-1 §2.2 — FIR design + Savitzky-Golay. */
     "fir1", "sgolay", "sgolayfilt",
     /* Tier-1 §2.5 — close-the-loop filter helpers. */

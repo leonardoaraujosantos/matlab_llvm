@@ -2891,6 +2891,85 @@ def besself_a(n, Wo):
     return a.reshape((1, -1))
 
 
+def _pair_conj_roots(roots_arr):
+    """Return list of (linear_coef, const_coef) real-quadratic factors."""
+    out = []
+    used = [False] * len(roots_arr)
+    for i, r in enumerate(roots_arr):
+        if used[i]: continue
+        rr = r.real; ri = r.imag
+        if _pyabs(ri) < 1e-9:
+            out.append((-rr, 0.0))
+            used[i] = True
+            continue
+        # Find conjugate
+        j = -1; best = 1e30
+        for k in _pyrange(i + 1, len(roots_arr)):
+            if used[k]: continue
+            dr = roots_arr[k].real - rr
+            di = roots_arr[k].imag + ri
+            d = dr * dr + di * di
+            if d < best: best = d; j = k
+        if j < 0:
+            out.append((-rr, rr * rr + ri * ri))
+            used[i] = True
+        else:
+            out.append((-2.0 * rr, rr * rr + ri * ri))
+            used[i] = True; used[j] = True
+    return out
+
+
+def tf2sos(b, a):
+    bv = np.asarray(b, dtype=float).ravel()
+    av = np.asarray(a, dtype=float).ravel()
+    if bv.size == 0 or av.size == 0 or av[0] == 0:
+        return np.zeros((0, 6))
+    bz = np.roots(bv) if bv.size > 1 else np.array([], dtype=complex)
+    az = np.roots(av) if av.size > 1 else np.array([], dtype=complex)
+    b_qs = _pair_conj_roots(list(bz))
+    a_qs = _pair_conj_roots(list(az))
+    while len(b_qs) < len(a_qs): b_qs.append((0.0, 0.0))
+    while len(a_qs) < len(b_qs): a_qs.append((0.0, 0.0))
+    L = len(a_qs)
+    g = bv[0] / av[0]
+    out = np.zeros((L, 6))
+    for i in _pyrange(L):
+        bg = g if i == 0 else 1.0
+        out[i, 0] = bg * 1.0
+        out[i, 1] = bg * b_qs[i][0]
+        out[i, 2] = bg * b_qs[i][1]
+        out[i, 3] = 1.0
+        out[i, 4] = a_qs[i][0]
+        out[i, 5] = a_qs[i][1]
+    return out
+
+
+def _sos2tf_compute(sos):
+    sm = np.asarray(sos, dtype=float)
+    if sm.ndim != 2 or sm.shape[1] != 6 or sm.shape[0] == 0:
+        return np.array([1.0]), np.array([1.0])
+    b = np.array([1.0]); a = np.array([1.0])
+    for s in _pyrange(sm.shape[0]):
+        r = sm[s]
+        bs = list(r[0:3])
+        as_ = list(r[3:6])
+        while len(bs) > 1 and bs[-1] == 0.0: bs.pop()
+        while len(as_) > 1 and as_[-1] == 0.0: as_.pop()
+        b = np.convolve(b, bs)
+        a = np.convolve(a, as_)
+    return b, a
+
+
+def sos2tf_b(sos):
+    b, _ = _sos2tf_compute(sos)
+    return b.reshape((1, -1))
+
+
+def sos2tf_a(sos):
+    _, a = _sos2tf_compute(sos)
+    return a.reshape((1, -1))
+
+
 def _buttord_compute(Wp, Ws, Rp, Rs):
     if Wp <= 0.0: Wp = 1e-12
     if Ws <= 0.0: Ws = 1e-12

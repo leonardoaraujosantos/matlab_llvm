@@ -1802,6 +1802,8 @@ static llvm::StringRef MatrixReturningFns[] = {
     "matlab_tf2zp_z", "matlab_tf2zp_p",
     "matlab_zp2tf_b", "matlab_zp2tf_a",
     "matlab_besself_b", "matlab_besself_a",
+    "matlab_tf2sos",
+    "matlab_sos2tf_b", "matlab_sos2tf_a",
     "matlab_freqz", "matlab_freqz_h", "matlab_freqz_w",
     /* §2.2 FIR + Savitzky-Golay. */
     "matlab_fir1", "matlab_sgolay", "matlab_sgolayfilt",

@@ -3094,6 +3094,25 @@ bool TensorLowering::rewriteBuiltinCalls() {
         continue;
       }
     }
+    /* [b, a] = sos2tf(sos) — second-order sections → polynomial.
+     * Splits into matlab_sos2tf_{b,a}. */
+    if (NA && NA.getValue().getSExtValue() == 2 &&
+        Name == "sos2tf" && Call->getNumOperands() == 1 &&
+        Call->getNumResults() == 2) {
+      Value V0 = boxAsPtr(Call->getOperand(0));
+      if (V0) {
+        B.setInsertionPoint(Call);
+        auto Fb = rt("matlab_sos2tf_b", PtrTy, {PtrTy});
+        auto Fa = rt("matlab_sos2tf_a", PtrTy, {PtrTy});
+        auto Cb = LLVM::CallOp::create(B, Call->getLoc(), Fb, ValueRange{V0});
+        auto Ca = LLVM::CallOp::create(B, Call->getLoc(), Fa, ValueRange{V0});
+        Call->getResult(0).replaceAllUsesWith(Cb.getResult());
+        Call->getResult(1).replaceAllUsesWith(Ca.getResult());
+        Call->erase();
+        Changed = true;
+        continue;
+      }
+    }
 
     /* findpeaks — 2-result form `[pks, locs] = findpeaks(x)` splits
      * into matlab_findpeaks_pks / _locs. Single-LHS `pks = ...` goes
@@ -3531,6 +3550,8 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"tf2zp",      "matlab_tf2zp_z",    1, "pp"},
       {"zp2tf",      "matlab_zp2tf_b",    1, "ppf"},
       {"besself",    "matlab_besself_b",  1, "ff"},
+      {"tf2sos",     "matlab_tf2sos",     1, "pp"},
+      {"sos2tf",     "matlab_sos2tf_b",   1, "p"},
       /* §2.2 FIR design + Savitzky-Golay. */
       {"fir1",       "matlab_fir1",       1, "ff"},
       {"sgolay",     "matlab_sgolay",     1, "ff"},
@@ -3682,7 +3703,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
         "polyval", "polyfit", "interp1", "interp2",
         "trapz", "cumtrapz", "imfilter", "padarray",
         /* §2.1 follow-on — analog↔digital + form conversions. */
-        "bilinear", "freqs", "tf2zp", "zp2tf",
+        "bilinear", "freqs", "tf2zp", "zp2tf", "tf2sos", "sos2tf",
       };
       if (AutoBoxNames.contains(Name)) {
         for (auto &E : Table) {
