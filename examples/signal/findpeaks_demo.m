@@ -6,11 +6,14 @@
 %   statelevels → histogram-based low / high state estimation
 %   pulseperiod / pulsewidth / risetime / falltime / dutycycle
 
-% Three full cycles, period 20 samples (60 total).
+% Three full cycles, period 20 samples (60 total). Each period has a
+% 1-sample "0.5" transition on both the rising and falling edge so
+% risetime / falltime have a well-defined sub-sample crossing for the
+% 10 % and 90 % reference levels.
 hi = 1.0; lo = 0.0;
-x = [lo lo lo lo lo lo lo lo lo lo  0.5  hi hi hi hi hi hi hi hi hi  ...
-     lo lo lo lo lo lo lo lo lo lo  0.5  hi hi hi hi hi hi hi hi hi  ...
-     lo lo lo lo lo lo lo lo lo lo  0.5  hi hi hi hi hi hi hi hi lo];
+x = [lo lo lo lo lo lo lo lo lo  0.5  hi hi hi hi hi hi hi hi hi  0.5  ...
+     lo lo lo lo lo lo lo lo lo  0.5  hi hi hi hi hi hi hi hi hi  0.5  ...
+     lo lo lo lo lo lo lo lo lo  0.5  hi hi hi hi hi hi hi hi hi  0.5];
 
 % Local maxima: in this simple signal each "high" region has its
 % middle samples roughly equal — strict-monotonic findpeaks won't
