@@ -459,7 +459,5 @@ when the goldens you care about run through those backends.
   callers writing `[v]`).
 - **No `interp1` / `interp2` 'spline'** — only linear / bilinear is
   implemented. Cubic / spline methods aren't here yet.
-- **`decimate` / `resample`** — out of scope for Tier 3 (need filter
-  design machinery: `cheby1` / `firls` / etc.).
 - **`save` / `load`** support only a subset of the `.mat` format —
   see [`docs/save_load_compat.md`](save_load_compat.md).

@@ -48,7 +48,7 @@ today. Locations are in `runtime/matlab_runtime.cpp`.
 | Polynomial helpers (§2.4) | `roots`, `poly`, `polyder`, `polyint`, `polyint(p, k)`, `[r, p, k] = residue(b, a)` | Distinct-pole `residue`; multi-return shape mirrors `[V, D] = eig`. |
 | IIR design + frequency response (§2.1, lowpass scope) | `[b, a] = butter(n, Wn)`, `[b, a] = cheby1(n, Rp, Wn)`, `[b, a] = cheby2(n, Rs, Wn)`, `H = freqz(b, a, N)`, `[H, w] = freqz(b, a, N)`, `[n, Wn] = buttord(Wp, Ws, Rp, Rs)`, `[n, Wn] = cheb1ord(Wp, Ws, Rp, Rs)` | Bilinear-transform design; unit DC gain. cheby2 has finite j-axis zeros via the generalized `lowpass_from_analog_pz_` helper. Order helpers split via paired `_n` / `_Wn` runtime entries. TS lane gates `freqz` tests with `.skip-emit-typescript` because `NDArray` has no native complex (same as `roots`/`fft_c`). |
 | FIR design (§2.2, lowpass scope) | `b = fir1(n, Wn)`, `B = sgolay(k, f)`, `y = sgolayfilt(x, k, f)` | `fir1` is windowed-sinc with default Hamming, normalized to unit DC gain. `sgolay` returns the standard `B = V (V'V)^-1 V'` projection matrix; `sgolayfilt` applies B's middle row in steady state and the matching boundary rows at the first/last `(f-1)/2` samples. |
-| Filter implementation (§2.5) | `y = filtfilt(b, a, x)`, `y = sosfilt(sos, x)`, `h = impz(b, a, N)`, `s = stepz(b, a, N)`, `gd = grpdelay(b, a, N)` | Internal direct-form-II-transposed `filter_flat_` helper. `filtfilt` uses reflection padding + zero ICs (Gustafsson initial-condition trick is a follow-on). `grpdelay` is finite-difference on `arg(H(e^{jω}))`. |
+| Filter implementation (§2.5) | `y = filtfilt(b, a, x)`, `y = sosfilt(sos, x)`, `h = impz(b, a, N)`, `s = stepz(b, a, N)`, `gd = grpdelay(b, a, N)` | Internal direct-form-II-transposed `filter_flat_` helper. `filtfilt` uses lfilter_zi-based steady-state ICs (scipy's `method='pad'` default; constant signals preserved exactly). The strict 1996 Gustafsson method (scipy's `method='gust'`) is a follow-on. `grpdelay` is finite-difference on `arg(H(e^{jω}))`. |
 | Tier-2 §3.4 transforms — `dct`, `idct`, `fwht`, `hilbert`, `goertzel` | ✅ shipped | DCT-II/III direct O(N²); fwht in-place butterfly (Hadamard ordering, /N); hilbert via FFT zero-negative-half; goertzel single-bin (1×1 complex). **Open**: czt, dst/idst, cceps/rceps. |
 | Tier-2 §3.1 nonparametric spectral — `periodogram`, `pwelch`, `cpsd`, `mscohere`, `tfestimate` | ✅ shipped | Single-output, fs = 1. `cpsd`/`tfestimate` return complex (matlab_mat_c). **Open**: dpss + pmtm (multitaper); 2-/3-return `[P, f, …]` forms. |
 | Tier-2 §3.2 linear prediction + parametric PSD — `levinson`, `lpc`, `aryule`, `arburg`, `pyulear`, `pburg` | ✅ shipped | Levinson-Durbin + Burg recursion; AR PSD via σ²·\|1/A(e^{jω})\|² evaluation. **Open**: pcov/pmcov, subspace methods (pmusic/peig/rootmusic/rooteig), prony/stmcb. |
@@ -62,12 +62,16 @@ today. Locations are in `runtime/matlab_runtime.cpp`.
 | Complex scalar / matrix arithmetic | `conj`, `real`, `imag`, `angle`, complex `+ - .* ./ * /` | Required for any spectrum / transfer-function math. |
 
 **Coverage today** closes the full Tier-1 design-and-apply loop for
-*lowpass* filters:
+**lowpass + HP/BP/BS** filters:
 
-- **Design**: `butter` / `cheby1` / `cheby2` (IIR), `fir1` (FIR),
-  `sgolay`/`sgolayfilt` (Savitzky-Golay), order helpers `buttord` /
-  `cheb1ord` for picking n.
-- **Apply**: `filter` (causal IIR), `filtfilt` (zero-phase), `sosfilt`
+- **Design**: `butter` / `cheby1` / `cheby2` (IIR — LP + HP/BP/BS via
+  `'high'` / `'stop'` + 2-element-Wn dispatch), `besself` (analog
+  Bessel-Thomson), `fir1` (FIR), `sgolay`/`sgolayfilt` (Savitzky-Golay),
+  order helpers `buttord` / `cheb1ord` / `cheb2ord` for picking n.
+- **Standalone analog↔digital**: `bilinear(b, a, fs)`, `freqs(b, a, w)`.
+- **Form conversions**: `tf2zp` / `zp2tf`, `tf2sos` / `sos2tf`.
+- **Apply**: `filter` (causal IIR), `filtfilt` (zero-phase, with
+  steady-state ICs — scipy's `method='pad'` default), `sosfilt`
   (cascade biquad).
 - **Inspect**: `freqz` (frequency response), `impz` (impulse), `stepz`
   (step), `grpdelay` (group delay).
@@ -78,21 +82,22 @@ mathematical infrastructure.
 
 What's still **open**:
 
-- Highpass / bandpass / bandstop variants of `butter` / `cheby1` / `cheby2`.
-- `ellip`, `besself`, analog prototypes (`buttap` etc.) as
-  standalone builtins, standalone `bilinear`, analog `freqs`,
-  `cheb2ord` / `ellipord`, form conversions (`tf2zp` / `tf2sos` /
-  etc.).
+- `ellip` / `ellipord` (Jacobi elliptic functions).
+- Analog prototypes (`buttap` / `cheb1ap` / `cheb2ap` / `ellipap` /
+  `besselap`) as standalone 3-return builtins. The prototypes are
+  already used internally by butter / cheby1 / cheby2 designs;
+  exposing them user-callable needs the [z, p, k] multi-return shape.
+- State-space form conversions: `tf2ss` / `ss2tf` / `zp2sos`.
 - `fir2`, `firls`, `firpm`, `firrcos`, `kaiserord` (richer FIR design).
-- `phasez`, `zerophase`, true zero-edge-transient `filtfilt`
-  (Gustafsson 1996 IC trick).
+- `phasez`, `zerophase`, and the strict 1996 Gustafsson `filtfilt`
+  (scipy's `method='gust'`).
 
 Beyond Tier-1: spectral / time-frequency / multirate / measurement /
 linear-prediction tiers — see §3 / §4 below.
 
 ---
 
-## 2. Tier 1 — close the FIR/IIR design loop (lowpass core ✅, band variants 🔵)
+## 2. Tier 1 — close the FIR/IIR design loop (LP + HP/BP/BS ✅, ellip/ellipord 🔵)
 
 This tier closes the smallest end-to-end loop a signal-processing user
 needs: *design a filter, apply it, look at its response*. All Tier-1
