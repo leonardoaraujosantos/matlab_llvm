@@ -31,3 +31,17 @@ disp(undershoot(x));
 % settlingtime: samples until x stays within d of high level after
 % the rising midcross. d = 0.05 means ±5 % of (hi - lo).
 disp(settlingtime(x, 0.05));
+
+% Abrupt-edge regression — `mean_transit_` previously used `if/else if`
+% so a single-sample drop crossing both the 90 % and 10 % reference
+% levels in the same step was missed for the b_lvl branch (state was
+% set to 1 in the same iteration the a_lvl branch fired, but the b_lvl
+% branch couldn't run that iteration). Falltime then paired the 90 %
+% drop of one cycle with the 10 % drop of the *next* cycle, reporting
+% ~one period instead of the actual sub-sample fall. Switching to two
+% independent `if`s lets the same iteration finalise the transit.
+abrupt = [0 0 0 0 0 0 0 0 0 0 0.5 1 1 1 1 1 1 1 1 1  ...
+          0 0 0 0 0 0 0 0 0 0 0.5 1 1 1 1 1 1 1 1 1  ...
+          0 0 0 0 0 0 0 0 0 0 0.5 1 1 1 1 1 1 1 1 0];
+disp(risetime(abrupt));     % 1.6 — 0.5 ramp on the rising edge
+disp(falltime(abrupt));     % 0.8 — abrupt 1-sample fall, sub-sample 90→10 %

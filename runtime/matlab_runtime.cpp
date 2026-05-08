@@ -6390,7 +6390,14 @@ static double mean_transit_(matlab_mat *x, double low_pct, double high_pct,
     double a_lvl = mn + a_pct * rng;
     double b_lvl = mn + b_pct * rng;
     /* Find each transition crossing first a_lvl then b_lvl in the
-     * requested direction. */
+     * requested direction. The two branches are independent `if`s
+     * (not `if`/`else if`) so that an abrupt one-sample transition
+     * which crosses BOTH levels in a single step can finalize the
+     * transit in the same iteration: the a_lvl branch fires first
+     * and sets state=1, then the b_lvl branch's `state==1` guard
+     * passes and finalizes immediately. Without that, the b_lvl
+     * crossing was missed and the next transit's b_lvl was paired
+     * with the previous a_lvl, inflating the result by ~one period. */
     double total = 0.0;
     int    count = 0;
     int    state = 0;          /* 0=before a_lvl, 1=passed a_lvl */
@@ -6401,7 +6408,8 @@ static double mean_transit_(matlab_mat *x, double low_pct, double high_pct,
             if (state == 0 && prev <= a_lvl && cur > a_lvl) {
                 a_time = sub_sample_cross_(x->data, i, a_lvl);
                 state = 1;
-            } else if (state == 1 && prev <= b_lvl && cur > b_lvl) {
+            }
+            if (state == 1 && prev <= b_lvl && cur > b_lvl) {
                 double b_time = sub_sample_cross_(x->data, i, b_lvl);
                 total += (b_time - a_time);
                 count++;
@@ -6411,7 +6419,8 @@ static double mean_transit_(matlab_mat *x, double low_pct, double high_pct,
             if (state == 0 && prev >= a_lvl && cur < a_lvl) {
                 a_time = sub_sample_cross_(x->data, i, a_lvl);
                 state = 1;
-            } else if (state == 1 && prev >= b_lvl && cur < b_lvl) {
+            }
+            if (state == 1 && prev >= b_lvl && cur < b_lvl) {
                 double b_time = sub_sample_cross_(x->data, i, b_lvl);
                 total += (b_time - a_time);
                 count++;

@@ -4175,20 +4175,26 @@ function _meanTransitTS(x: any, loPct: number, hiPct: number,
   const bPct = direction > 0 ? hiPct : loPct;
   const aLvl = mn + aPct * rng;
   const bLvl = mn + bPct * rng;
+  // Two independent `if`s (not if/else if) so that an abrupt one-sample
+  // transition crossing both aLvl and bLvl in a single step finalises
+  // the transit in the same iteration. See the C runtime comment for
+  // the full reasoning.
   let total = 0, count = 0, state = 0, aTime = 0;
   for (let i = 1; i < N; i++) {
     const prev = a[i - 1], cur = a[i];
     if (direction > 0) {
       if (state === 0 && prev <= aLvl && cur > aLvl) {
         aTime = _subSampleCrossTS(a as Float64Array, i, aLvl); state = 1;
-      } else if (state === 1 && prev <= bLvl && cur > bLvl) {
+      }
+      if (state === 1 && prev <= bLvl && cur > bLvl) {
         const bTime = _subSampleCrossTS(a as Float64Array, i, bLvl);
         total += bTime - aTime; count++; state = 0;
       }
     } else {
       if (state === 0 && prev >= aLvl && cur < aLvl) {
         aTime = _subSampleCrossTS(a as Float64Array, i, aLvl); state = 1;
-      } else if (state === 1 && prev >= bLvl && cur < bLvl) {
+      }
+      if (state === 1 && prev >= bLvl && cur < bLvl) {
         const bTime = _subSampleCrossTS(a as Float64Array, i, bLvl);
         total += bTime - aTime; count++; state = 0;
       }

@@ -3671,19 +3671,23 @@ def _mean_transit(x, lo_pct, hi_pct, direction):
         a_pct, b_pct = hi_pct, lo_pct
     a_lvl = mn + a_pct * rng
     b_lvl = mn + b_pct * rng
+    # Two independent `if`s (not if/elif) so that an abrupt one-sample
+    # transition crossing both a_lvl and b_lvl in a single step finalises
+    # the transit in the same iteration. See the C runtime comment for
+    # the full reasoning.
     total = 0.0; count = 0; state = 0; a_time = 0.0
     for i in _pyrange(1, N):
         prev = a[i - 1]; cur = a[i]
         if direction > 0:
             if state == 0 and prev <= a_lvl and cur > a_lvl:
                 a_time = _sub_sample_cross(a, i, a_lvl); state = 1
-            elif state == 1 and prev <= b_lvl and cur > b_lvl:
+            if state == 1 and prev <= b_lvl and cur > b_lvl:
                 b_time = _sub_sample_cross(a, i, b_lvl)
                 total += b_time - a_time; count += 1; state = 0
         else:
             if state == 0 and prev >= a_lvl and cur < a_lvl:
                 a_time = _sub_sample_cross(a, i, a_lvl); state = 1
-            elif state == 1 and prev >= b_lvl and cur < b_lvl:
+            if state == 1 and prev >= b_lvl and cur < b_lvl:
                 b_time = _sub_sample_cross(a, i, b_lvl)
                 total += b_time - a_time; count += 1; state = 0
     return total / count if count > 0 else 0.0
