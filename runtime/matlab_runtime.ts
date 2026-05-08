@@ -4629,6 +4629,80 @@ function _filterFlat(b: Float64Array, a: Float64Array,
   return y;
 }
 
+function _filterSteadyStateIc(bn: Float64Array, an: Float64Array): Float64Array {
+  const L = Math.max(bn.length, an.length);
+  const N = L - 1;
+  if (N <= 0) return new Float64Array(0);
+  const b = new Float64Array(L), a = new Float64Array(L);
+  for (let i = 0; i < bn.length; i++) b[i] = bn[i];
+  for (let i = 0; i < an.length; i++) a[i] = an[i];
+  // Build (I - A) and rhs in row-major order, then Gauss-eliminate.
+  const M = new Float64Array(N * N);
+  const rhs = new Float64Array(N);
+  for (let i = 0; i < N; i++) {
+    for (let j = 0; j < N; j++) {
+      let Aij = 0;
+      if (j === 0)     Aij = -a[i + 1];
+      if (j === i + 1) Aij = 1;
+      M[i * N + j] = (i === j ? 1 : 0) - Aij;
+    }
+    rhs[i] = b[i + 1] - a[i + 1] * b[0];
+  }
+  for (let k = 0; k < N; k++) {
+    let piv = k, pv = Math.abs(M[k * N + k]);
+    for (let r = k + 1; r < N; r++) {
+      const v = Math.abs(M[r * N + k]);
+      if (v > pv) { pv = v; piv = r; }
+    }
+    if (pv < 1e-300) return new Float64Array(N);
+    if (piv !== k) {
+      for (let j = 0; j < N; j++) {
+        const tmp = M[k * N + j];
+        M[k * N + j] = M[piv * N + j];
+        M[piv * N + j] = tmp;
+      }
+      const tr = rhs[k]; rhs[k] = rhs[piv]; rhs[piv] = tr;
+    }
+    for (let r = k + 1; r < N; r++) {
+      const f = M[r * N + k] / M[k * N + k];
+      for (let j = k; j < N; j++) M[r * N + j] -= f * M[k * N + j];
+      rhs[r] -= f * rhs[k];
+    }
+  }
+  const zi = new Float64Array(N);
+  for (let i = N - 1; i >= 0; i--) {
+    let s = rhs[i];
+    for (let j = i + 1; j < N; j++) s -= M[i * N + j] * zi[j];
+    zi[i] = s / M[i * N + i];
+  }
+  return zi;
+}
+
+function _filterFlatZi(b: Float64Array, a: Float64Array, zi: Float64Array,
+                        x: Float64Array): Float64Array {
+  const nb = b.length, na = a.length, nx = x.length;
+  const L = Math.max(nb, na);
+  const w = new Float64Array(L);
+  const Nz = L - 1;
+  for (let i = 0; i < Nz && i < zi.length; i++) w[i] = zi[i];
+  const y = new Float64Array(nx);
+  for (let n = 0; n < nx; n++) {
+    const yn = (nb > 0 ? b[0] * x[n] : 0) + w[0];
+    for (let i = 0; i < L - 1; i++) {
+      const bi = (i + 1 < nb) ? b[i + 1] : 0;
+      const ai = (i + 1 < na) ? a[i + 1] : 0;
+      w[i] = bi * x[n] - ai * yn + w[i + 1];
+    }
+    if (L > 0) {
+      const bi = (L < nb) ? b[L] : 0;
+      const ai = (L < na) ? a[L] : 0;
+      w[L - 1] = bi * x[n] - ai * yn;
+    }
+    y[n] = yn;
+  }
+  return y;
+}
+
 export function filtfilt(b: any, a: any, x: any): NDArray {
   const bv = asArray(b).data;
   const av = asArray(a).data;
@@ -4651,10 +4725,15 @@ export function filtfilt(b: any, a: any, x: any): NDArray {
   for (let i = 0; i < nx; i++) xp[pad + i] = flat[i];
   for (let i = 0; i < pad; i++)
     xp[pad + nx + i] = 2 * flat[nx - 1] - flat[nx - 2 - i];
-  const y1 = _filterFlat(bn, an, xp);
+  const zi = _filterSteadyStateIc(bn, an);
+  const ziFwd = new Float64Array(zi.length);
+  for (let i = 0; i < zi.length; i++) ziFwd[i] = zi[i] * xp[0];
+  const y1 = _filterFlatZi(bn, an, ziFwd, xp);
   const rev = new Float64Array(y1.length);
   for (let i = 0; i < y1.length; i++) rev[i] = y1[y1.length - 1 - i];
-  const y2 = _filterFlat(bn, an, rev);
+  const ziBwd = new Float64Array(zi.length);
+  for (let i = 0; i < zi.length; i++) ziBwd[i] = zi[i] * rev[0];
+  const y2 = _filterFlatZi(bn, an, ziBwd, rev);
   const out = new Float64Array(nx);
   for (let i = 0; i < nx; i++) out[i] = y2[y2.length - 1 - (pad + i)];
   return new NDArray(out, xa.shape.slice());

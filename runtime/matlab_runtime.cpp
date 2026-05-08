@@ -7094,11 +7094,113 @@ static void filter_flat_(const double *b, int64_t nb,
     }
 }
 
+/* Compute the unit-step steady-state initial-condition vector for a
+ * direct-form II transposed IIR filter with normalised (b, a, a[0]=1).
+ * Solves (I - A) zi = B where:
+ *   A_ij = -a[i+1] if j == 0
+ *          1 if j == i+1
+ *          0 otherwise   (companion-form state transition)
+ *   B_i  = b[i+1] - a[i+1] * b[0]
+ * This is the canonical scipy.signal.lfilter_zi formulation. The
+ * returned vector has length N = max(nb, na) - 1. Multiply by the
+ * boundary input value (x[0] at the front, x[end] at the back) to
+ * use as a filter IC.
+ */
+static std::vector<double> filter_steady_state_ic_(
+    const std::vector<double> &bn, const std::vector<double> &an) {
+    int64_t L = (int64_t)(bn.size() > an.size() ? bn.size() : an.size());
+    int N = (int)(L - 1);
+    if (N <= 0) return {};
+    /* Pad bn / an out to length L so indices i = 1..N are well defined. */
+    std::vector<double> b((size_t)L, 0.0), a((size_t)L, 0.0);
+    for (size_t i = 0; i < bn.size(); ++i) b[i] = bn[i];
+    for (size_t i = 0; i < an.size(); ++i) a[i] = an[i];
+    /* Build (I - A) as an N×N matrix in row-major order. */
+    std::vector<double> M((size_t)(N * N), 0.0);
+    std::vector<double> rhs((size_t)N);
+    for (int i = 0; i < N; ++i) {
+        /* Row i of (I - A): identity minus A_ij. */
+        for (int j = 0; j < N; ++j) {
+            double Aij = 0.0;
+            if (j == 0)     Aij = -a[i + 1];
+            if (j == i + 1) Aij = 1.0;
+            M[(size_t)(i * N + j)] = (i == j ? 1.0 : 0.0) - Aij;
+        }
+        rhs[(size_t)i] = b[i + 1] - a[i + 1] * b[0];
+    }
+    /* Gaussian elimination with partial pivoting. */
+    for (int k = 0; k < N; ++k) {
+        int piv = k;
+        double pv = fabs(M[(size_t)(k * N + k)]);
+        for (int r = k + 1; r < N; ++r) {
+            double v = fabs(M[(size_t)(r * N + k)]);
+            if (v > pv) { pv = v; piv = r; }
+        }
+        if (pv < 1e-300) return std::vector<double>((size_t)N, 0.0);
+        if (piv != k) {
+            for (int j = 0; j < N; ++j)
+                std::swap(M[(size_t)(k * N + j)], M[(size_t)(piv * N + j)]);
+            std::swap(rhs[(size_t)k], rhs[(size_t)piv]);
+        }
+        for (int r = k + 1; r < N; ++r) {
+            double f = M[(size_t)(r * N + k)] / M[(size_t)(k * N + k)];
+            for (int j = k; j < N; ++j)
+                M[(size_t)(r * N + j)] -= f * M[(size_t)(k * N + j)];
+            rhs[(size_t)r] -= f * rhs[(size_t)k];
+        }
+    }
+    std::vector<double> zi((size_t)N);
+    for (int i = N - 1; i >= 0; --i) {
+        double s = rhs[(size_t)i];
+        for (int j = i + 1; j < N; ++j)
+            s -= M[(size_t)(i * N + j)] * zi[(size_t)j];
+        zi[(size_t)i] = s / M[(size_t)(i * N + i)];
+    }
+    return zi;
+}
+
+/* Direct-form II transposed filter with explicit initial-condition
+ * vector. Used by filtfilt's Gustafsson-IC path. */
+static void filter_flat_zi_(const double *b, int64_t nb,
+                            const double *a, int64_t na,
+                            const double *zi, int64_t nz,
+                            const double *x, int64_t nx, double *y) {
+    /* z[] is the DF-II-T state, length max(nb, na) - 1. */
+    int64_t L = nb > na ? nb : na;
+    int64_t Nz = L - 1;
+    if (Nz < 0) Nz = 0;
+    std::vector<double> z((size_t)Nz, 0.0);
+    for (int64_t i = 0; i < Nz && i < nz; ++i) z[(size_t)i] = zi[i];
+    for (int64_t n = 0; n < nx; ++n) {
+        double xn = x[n];
+        double yn = (nb > 0 ? b[0] : 0.0) * xn + (Nz > 0 ? z[0] : 0.0);
+        for (int64_t i = 0; i + 1 < Nz; ++i) {
+            double bi = (i + 1 < nb) ? b[i + 1] : 0.0;
+            double ai = (i + 1 < na) ? a[i + 1] : 0.0;
+            z[(size_t)i] = bi * xn + z[(size_t)(i + 1)] - ai * yn;
+        }
+        if (Nz > 0) {
+            double bi = (Nz < nb) ? b[Nz] : 0.0;
+            double ai = (Nz < na) ? a[Nz] : 0.0;
+            z[(size_t)(Nz - 1)] = bi * xn - ai * yn;
+        }
+        y[n] = yn;
+    }
+}
+
 /* filtfilt(b, a, x) — forward-backward filter for zero-phase response.
- * Reflection-pads x by L = max(nb, na) on each side, runs filter forward,
- * reverses, runs filter on the reversed signal, reverses back, trims
- * the padding. Reduces edge transients vs the no-padding shape. The
- * proper Gustafsson initial-condition trick is a follow-on. */
+ *
+ * Reflection-pads x by 3·(L-1) samples on each side (odd reflection,
+ * the same scheme MATLAB / scipy use), forward-filters from a steady-
+ * state IC (lfilter_zi multiplied by the boundary input value),
+ * reverses, forward-filters again from the matching IC, reverses, and
+ * trims the padding. This matches scipy.signal.filtfilt with its
+ * default method='pad' / padtype='odd' — the steady-state IC removes
+ * the transient that the previous zero-IC implementation produced for
+ * DC-like inputs (constant signals are now preserved exactly). The
+ * stricter 1996 Gustafsson method (scipy's method='gust') solves an
+ * explicit edge-elimination system instead of padding; that's a
+ * separate follow-on. */
 matlab_mat *matlab_filtfilt(matlab_mat *b, matlab_mat *a, matlab_mat *x) {
     if (!b || !a || !x) return mat_alloc(0, 0);
     int64_t nb = b->rows * b->cols;
@@ -7113,8 +7215,8 @@ matlab_mat *matlab_filtfilt(matlab_mat *b, matlab_mat *a, matlab_mat *x) {
     int64_t L = nb > na ? nb : na;
     int64_t pad = 3 * (L - 1);
     if (pad < 0) pad = 0;
-    if (pad > nx - 1) pad = nx - 1;          /* don't overrun the data */
-    /* Reflect-pad: x_pad = [2*x[0] − x[pad..1]; x; 2*x[N−1] − x[N−2..N−1−pad]]. */
+    if (pad > nx - 1) pad = nx - 1;
+    /* Reflect-pad. */
     int64_t total = nx + 2 * pad;
     std::vector<double> xp((size_t)total);
     for (int64_t i = 0; i < pad; ++i)
@@ -7122,14 +7224,25 @@ matlab_mat *matlab_filtfilt(matlab_mat *b, matlab_mat *a, matlab_mat *x) {
     for (int64_t i = 0; i < nx; ++i) xp[pad + i] = x->data[i];
     for (int64_t i = 0; i < pad; ++i)
         xp[pad + nx + i] = 2.0 * x->data[nx - 1] - x->data[nx - 2 - i];
+    /* Compute lfilter_zi (unit-step IC) once and scale by xp[0] /
+     * xp[end] for the two passes. */
+    std::vector<double> zi_unit = filter_steady_state_ic_(bn, an);
+    int64_t Nz = (int64_t)zi_unit.size();
+    std::vector<double> zi_fwd((size_t)Nz);
+    for (int64_t i = 0; i < Nz; ++i) zi_fwd[(size_t)i] = zi_unit[(size_t)i] * xp[0];
     /* Forward pass. */
     std::vector<double> y1((size_t)total);
-    filter_flat_(bn.data(), nb, an.data(), na, xp.data(), total, y1.data());
-    /* Reverse, filter again, reverse. */
+    filter_flat_zi_(bn.data(), nb, an.data(), na,
+                    zi_fwd.data(), Nz, xp.data(), total, y1.data());
+    /* Reverse, filter again starting from the matching IC at the new
+     * boundary value (last sample of y1). */
     std::vector<double> rev((size_t)total);
     for (int64_t i = 0; i < total; ++i) rev[i] = y1[total - 1 - i];
+    std::vector<double> zi_bwd((size_t)Nz);
+    for (int64_t i = 0; i < Nz; ++i) zi_bwd[(size_t)i] = zi_unit[(size_t)i] * rev[0];
     std::vector<double> y2((size_t)total);
-    filter_flat_(bn.data(), nb, an.data(), na, rev.data(), total, y2.data());
+    filter_flat_zi_(bn.data(), nb, an.data(), na,
+                    zi_bwd.data(), Nz, rev.data(), total, y2.data());
     matlab_mat *Y = mat_alloc(x->rows, x->cols);
     for (int64_t i = 0; i < nx; ++i) Y->data[i] = y2[total - 1 - (pad + i)];
     return Y;

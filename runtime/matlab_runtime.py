@@ -3015,6 +3015,51 @@ def _filter_flat(b, a, x):
     return y
 
 
+def _filter_steady_state_ic(bn, an):
+    """Solve (I - A)·zi = B for the unit-step IC vector. Same algorithm
+    as scipy.signal.lfilter_zi: A is the canonical companion-form state
+    transition, B is b[1:] - a[1:]·b[0]. Returned vector has length
+    max(nb, na) - 1."""
+    nb, na = bn.size, an.size
+    L = _pymax(nb, na)
+    N = L - 1
+    if N <= 0: return np.zeros(0)
+    b = np.zeros(L); a = np.zeros(L)
+    b[:nb] = bn; a[:na] = an
+    M = np.zeros((N, N))
+    rhs = np.zeros(N)
+    for i in _pyrange(N):
+        for j in _pyrange(N):
+            Aij = 0.0
+            if j == 0:     Aij = -a[i + 1]
+            if j == i + 1: Aij = 1.0
+            M[i, j] = (1.0 if i == j else 0.0) - Aij
+        rhs[i] = b[i + 1] - a[i + 1] * b[0]
+    return np.linalg.solve(M, rhs)
+
+
+def _filter_flat_zi(b, a, zi, x):
+    """DF-II-T filter with explicit initial state."""
+    nb, na, nx = b.size, a.size, x.size
+    L = _pymax(nb, na)
+    w = np.zeros(L)
+    Nz = L - 1
+    if Nz > 0: w[:Nz] = zi[:Nz] if zi.size >= Nz else np.concatenate([zi, np.zeros(Nz - zi.size)])
+    y = np.zeros(nx)
+    for n in _pyrange(nx):
+        yn = (b[0] * x[n] if nb > 0 else 0.0) + w[0]
+        for i in _pyrange(L - 1):
+            bi = b[i + 1] if i + 1 < nb else 0.0
+            ai = a[i + 1] if i + 1 < na else 0.0
+            w[i] = bi * x[n] - ai * yn + w[i + 1]
+        if L > 0:
+            bi = b[L] if L < nb else 0.0
+            ai = a[L] if L < na else 0.0
+            w[L - 1] = bi * x[n] - ai * yn
+        y[n] = yn
+    return y
+
+
 def filtfilt(b, a, x):
     bv = np.asarray(b, dtype=float).ravel()
     av = np.asarray(a, dtype=float).ravel()
@@ -3035,8 +3080,10 @@ def filtfilt(b, a, x):
     xp[pad : pad + nx] = flat
     for i in _pyrange(pad):
         xp[pad + nx + i] = 2.0 * flat[-1] - flat[-2 - i]
-    y1 = _filter_flat(bn, an, xp)
-    y2 = _filter_flat(bn, an, y1[::-1])[::-1]
+    zi = _filter_steady_state_ic(bn, an)
+    y1 = _filter_flat_zi(bn, an, zi * xp[0], xp)
+    rev = y1[::-1]
+    y2 = _filter_flat_zi(bn, an, zi * rev[0], rev)[::-1]
     out = y2[pad : pad + nx]
     if xa.ndim == 2 and xa.shape[1] == 1:
         return out.reshape((-1, 1))
