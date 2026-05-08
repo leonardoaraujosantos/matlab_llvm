@@ -2943,20 +2943,39 @@ bool TensorLowering::rewriteBuiltinCalls() {
       return true;
     };
     if (tryIIRDispatch()) { Changed = true; continue; }
+
+    /* [b, a] = besself(n, Wo) — analog Bessel. Two f64 args, two ptr
+     * results; splits into matlab_besself_{b,a}. */
+    if (NA && NA.getValue().getSExtValue() == 2 &&
+        Name == "besself" && Call->getNumOperands() == 2 &&
+        Call->getNumResults() == 2 &&
+        Call->getOperand(0).getType() == F64 &&
+        Call->getOperand(1).getType() == F64) {
+      B.setInsertionPoint(Call);
+      auto Fb = rt("matlab_besself_b", PtrTy, {F64, F64});
+      auto Fa = rt("matlab_besself_a", PtrTy, {F64, F64});
+      auto Cb = LLVM::CallOp::create(B, Call->getLoc(), Fb,
+                                      Call->getOperands());
+      auto Ca = LLVM::CallOp::create(B, Call->getLoc(), Fa,
+                                      Call->getOperands());
+      Call->getResult(0).replaceAllUsesWith(Cb.getResult());
+      Call->getResult(1).replaceAllUsesWith(Ca.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
     /* [n, Wn] = buttord(Wp, Ws, Rp, Rs) / cheb1ord(...). 4 f64 args,
      * 2 f64 results. Splits into matlab_<name>_n / _Wn. */
     if (NA && NA.getValue().getSExtValue() == 2 &&
-        (Name == "buttord" || Name == "cheb1ord") &&
+        (Name == "buttord" || Name == "cheb1ord" || Name == "cheb2ord") &&
         Call->getNumOperands() == 4 && Call->getNumResults() == 2 &&
         Call->getOperand(0).getType() == F64 &&
         Call->getOperand(1).getType() == F64 &&
         Call->getOperand(2).getType() == F64 &&
         Call->getOperand(3).getType() == F64) {
       B.setInsertionPoint(Call);
-      std::string Fn_n  = (Name == "buttord") ? "matlab_buttord_n"
-                                              : "matlab_cheb1ord_n";
-      std::string Fn_Wn = (Name == "buttord") ? "matlab_buttord_Wn"
-                                              : "matlab_cheb1ord_Wn";
+      std::string Fn_n  = "matlab_" + Name.str() + "_n";
+      std::string Fn_Wn = "matlab_" + Name.str() + "_Wn";
       auto Fnn  = rt(Fn_n,  F64, {F64, F64, F64, F64});
       auto Fnwn = rt(Fn_Wn, F64, {F64, F64, F64, F64});
       auto Cn  = LLVM::CallOp::create(B, Call->getLoc(), Fnn,
@@ -2987,6 +3006,89 @@ bool TensorLowering::rewriteBuiltinCalls() {
                                         Call->getOperands());
         Call->getResult(0).replaceAllUsesWith(Ch.getResult());
         Call->getResult(1).replaceAllUsesWith(Cw.getResult());
+        Call->erase();
+        Changed = true;
+        continue;
+      }
+    }
+    /* Helper for the §2.1 multi-LHS dispatchers below: take an operand
+     * that should arrive as a matrix ptr but might be f64 (scalar
+     * literal like `[1]` collapsed to scalar) or tensor<...xf64>; box
+     * f64 → matlab_mat * via matlab_mat_from_scalar; pass tensor through
+     * (the matrix-slot lowering converts to ptr later). Returns the
+     * boxed/unmodified value, or nullopt if the operand type is not
+     * acceptable. */
+    auto boxAsPtr = [&](Value V) -> Value {
+      Type T = V.getType();
+      if (T == PtrTy || isTensorLike(T)) return V;
+      if (T == F64) {
+        auto Fn = rt("matlab_mat_from_scalar", PtrTy, {F64});
+        B.setInsertionPoint(Call);
+        return LLVM::CallOp::create(B, Call->getLoc(), Fn, {V}).getResult();
+      }
+      return Value{};
+    };
+
+    /* [bd, ad] = bilinear(b, a, fs). Splits into matlab_bilinear_{b,a}. */
+    if (NA && NA.getValue().getSExtValue() == 2 &&
+        Name == "bilinear" && Call->getNumOperands() == 3 &&
+        Call->getNumResults() == 2 &&
+        Call->getOperand(2).getType() == F64) {
+      Value V0 = boxAsPtr(Call->getOperand(0));
+      Value V1 = boxAsPtr(Call->getOperand(1));
+      if (V0 && V1) {
+        B.setInsertionPoint(Call);
+        auto Fb = rt("matlab_bilinear_b", PtrTy, {PtrTy, PtrTy, F64});
+        auto Fa = rt("matlab_bilinear_a", PtrTy, {PtrTy, PtrTy, F64});
+        SmallVector<Value, 3> CA{V0, V1, Call->getOperand(2)};
+        auto Cb = LLVM::CallOp::create(B, Call->getLoc(), Fb, CA);
+        auto Ca = LLVM::CallOp::create(B, Call->getLoc(), Fa, CA);
+        Call->getResult(0).replaceAllUsesWith(Cb.getResult());
+        Call->getResult(1).replaceAllUsesWith(Ca.getResult());
+        Call->erase();
+        Changed = true;
+        continue;
+      }
+    }
+    /* [z, p, k] = tf2zp(b, a). Splits into matlab_tf2zp_{z,p,k}. */
+    if (NA && NA.getValue().getSExtValue() == 3 &&
+        Name == "tf2zp" && Call->getNumOperands() == 2 &&
+        Call->getNumResults() == 3) {
+      Value V0 = boxAsPtr(Call->getOperand(0));
+      Value V1 = boxAsPtr(Call->getOperand(1));
+      if (V0 && V1) {
+        B.setInsertionPoint(Call);
+        auto Fz = rt("matlab_tf2zp_z", PtrTy, {PtrTy, PtrTy});
+        auto Fp = rt("matlab_tf2zp_p", PtrTy, {PtrTy, PtrTy});
+        auto Fk = rt("matlab_tf2zp_k", F64,   {PtrTy, PtrTy});
+        SmallVector<Value, 2> CA{V0, V1};
+        auto Cz = LLVM::CallOp::create(B, Call->getLoc(), Fz, CA);
+        auto Cp = LLVM::CallOp::create(B, Call->getLoc(), Fp, CA);
+        auto Ck = LLVM::CallOp::create(B, Call->getLoc(), Fk, CA);
+        Call->getResult(0).replaceAllUsesWith(Cz.getResult());
+        Call->getResult(1).replaceAllUsesWith(Cp.getResult());
+        Call->getResult(2).replaceAllUsesWith(Ck.getResult());
+        Call->erase();
+        Changed = true;
+        continue;
+      }
+    }
+    /* [b, a] = zp2tf(z, p, k). Splits into matlab_zp2tf_{b,a}. */
+    if (NA && NA.getValue().getSExtValue() == 2 &&
+        Name == "zp2tf" && Call->getNumOperands() == 3 &&
+        Call->getNumResults() == 2 &&
+        Call->getOperand(2).getType() == F64) {
+      Value V0 = boxAsPtr(Call->getOperand(0));
+      Value V1 = boxAsPtr(Call->getOperand(1));
+      if (V0 && V1) {
+        B.setInsertionPoint(Call);
+        auto Fb = rt("matlab_zp2tf_b", PtrTy, {PtrTy, PtrTy, F64});
+        auto Fa = rt("matlab_zp2tf_a", PtrTy, {PtrTy, PtrTy, F64});
+        SmallVector<Value, 3> CA{V0, V1, Call->getOperand(2)};
+        auto Cb = LLVM::CallOp::create(B, Call->getLoc(), Fb, CA);
+        auto Ca = LLVM::CallOp::create(B, Call->getLoc(), Fa, CA);
+        Call->getResult(0).replaceAllUsesWith(Cb.getResult());
+        Call->getResult(1).replaceAllUsesWith(Ca.getResult());
         Call->erase();
         Changed = true;
         continue;
@@ -3419,6 +3521,16 @@ bool TensorLowering::rewriteBuiltinCalls() {
        * dedicated multi-return dispatch above. */
       {"buttord",    "matlab_buttord_n",  0, "ffff"},
       {"cheb1ord",   "matlab_cheb1ord_n", 0, "ffff"},
+      {"cheb2ord",   "matlab_cheb2ord_n", 0, "ffff"},
+      /* §2.1 follow-on — analog↔digital + form conversions. Single-LHS
+       * forms; multi-LHS `[bd, ad] = bilinear(...)`, `[z, p, k] = tf2zp(...)`,
+       * `[b, a] = zp2tf(z, p, k)` are handled by the multi-return dispatch
+       * above. */
+      {"bilinear",   "matlab_bilinear_b", 1, "ppf"},
+      {"freqs",      "matlab_freqs",      1, "ppp"},
+      {"tf2zp",      "matlab_tf2zp_z",    1, "pp"},
+      {"zp2tf",      "matlab_zp2tf_b",    1, "ppf"},
+      {"besself",    "matlab_besself_b",  1, "ff"},
       /* §2.2 FIR design + Savitzky-Golay. */
       {"fir1",       "matlab_fir1",       1, "ff"},
       {"sgolay",     "matlab_sgolay",     1, "ff"},
@@ -3569,6 +3681,8 @@ bool TensorLowering::rewriteBuiltinCalls() {
         "conv", "conv2", "filter", "xcorr",
         "polyval", "polyfit", "interp1", "interp2",
         "trapz", "cumtrapz", "imfilter", "padarray",
+        /* §2.1 follow-on — analog↔digital + form conversions. */
+        "bilinear", "freqs", "tf2zp", "zp2tf",
       };
       if (AutoBoxNames.contains(Name)) {
         for (auto &E : Table) {

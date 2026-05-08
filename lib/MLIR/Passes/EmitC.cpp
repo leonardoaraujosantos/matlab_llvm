@@ -1796,6 +1796,12 @@ static llvm::StringRef MatrixReturningFns[] = {
     "matlab_cheby2_hp_b", "matlab_cheby2_hp_a",
     "matlab_cheby2_bp_b", "matlab_cheby2_bp_a",
     "matlab_cheby2_bs_b", "matlab_cheby2_bs_a",
+    /* §2.1 follow-on — analog↔digital + form conversions. */
+    "matlab_bilinear_b", "matlab_bilinear_a",
+    "matlab_freqs",
+    "matlab_tf2zp_z", "matlab_tf2zp_p",
+    "matlab_zp2tf_b", "matlab_zp2tf_a",
+    "matlab_besself_b", "matlab_besself_a",
     "matlab_freqz", "matlab_freqz_h", "matlab_freqz_w",
     /* §2.2 FIR + Savitzky-Golay. */
     "matlab_fir1", "matlab_sgolay", "matlab_sgolayfilt",

@@ -108,7 +108,9 @@ void Resolver::registerBuiltins() {
     "polyder", "polyint", "residue",
     /* Tier-1 §2.1 — IIR lowpass design + frequency response. */
     "butter", "cheby1", "cheby2", "freqz",
-    "buttord", "cheb1ord",
+    "buttord", "cheb1ord", "cheb2ord",
+    /* §2.1 follow-on — analog↔digital + form conversions + Bessel. */
+    "bilinear", "freqs", "tf2zp", "zp2tf", "besself",
     /* Tier-1 §2.2 — FIR design + Savitzky-Golay. */
     "fir1", "sgolay", "sgolayfilt",
     /* Tier-1 §2.5 — close-the-loop filter helpers. */

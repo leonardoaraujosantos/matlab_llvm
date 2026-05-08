@@ -2746,6 +2746,151 @@ def cheby2_bs_a(n, Rs, W1, W2):
     _, a = _iir_design("cheby2", "bs", n, Rs, W1, W2); return a.reshape((1, -1))
 
 
+# §2.1 follow-on — cheb2ord, standalone bilinear, freqs, tf2zp/zp2tf.
+def _cheb2ord_compute(Wp, Ws, Rp, Rs):
+    if Wp <= 0.0: Wp = 1e-12
+    if Ws <= 0.0: Ws = 1e-12
+    if Wp >= 1.0: Wp = 1.0 - 1e-12
+    if Ws >= 1.0: Ws = 1.0 - 1e-12
+    Wpa = 2.0 * np.tan(np.pi * Wp / 2.0)
+    Wsa = 2.0 * np.tan(np.pi * Ws / 2.0)
+    num = np.arccosh(np.sqrt((10.0 ** (Rs / 10.0) - 1.0)
+                            / (10.0 ** (Rp / 10.0) - 1.0)))
+    den = np.arccosh(Wsa / Wpa)
+    n = _pymax(1, int(np.ceil(num / den)))
+    return float(n), float(Ws)
+
+
+def cheb2ord_n(Wp, Ws, Rp, Rs):
+    return _cheb2ord_compute(Wp, Ws, Rp, Rs)[0]
+
+
+def cheb2ord_Wn(Wp, Ws, Rp, Rs):
+    return _cheb2ord_compute(Wp, Ws, Rp, Rs)[1]
+
+
+def _bilinear_pole_fs(p, fs):
+    f2 = 2.0 * fs
+    return (f2 + p) / (f2 - p)
+
+
+def _bilinear_compute(b, a, fs):
+    bv = np.asarray(b, dtype=float).ravel()
+    av = np.asarray(a, dtype=float).ravel()
+    bz = np.roots(bv) if bv.size > 1 else np.array([], dtype=complex)
+    pz = np.roots(av) if av.size > 1 else np.array([], dtype=complex)
+    dpr = [_bilinear_pole_fs(complex(p), fs) for p in pz]
+    dzr = [_bilinear_pole_fs(complex(z), fs) for z in bz]
+    np_ = len(dpr)
+    while len(dzr) < np_:
+        dzr.append(complex(-1.0))
+    a_d = _poly_from_complex_roots(dpr)
+    b_d = _poly_from_complex_roots(dzr)
+    while b_d.size < a_d.size:
+        b_d = np.concatenate([np.array([0.0]), b_d])
+    sb, sa = float(np.sum(b_d)), float(np.sum(a_d))
+    an_dc = bv[-1] / av[-1] if av[-1] != 0 else 0.0
+    if sb != 0.0 and sa != 0.0:
+        g = an_dc * sa / sb
+        b_d = b_d * g
+    return b_d, a_d
+
+
+def bilinear_b(b, a, fs):
+    bd, _ = _bilinear_compute(b, a, fs)
+    return bd.reshape((1, -1))
+
+
+def bilinear_a(b, a, fs):
+    _, ad = _bilinear_compute(b, a, fs)
+    return ad.reshape((1, -1))
+
+
+def freqs(b, a, w):
+    bv = np.asarray(b, dtype=float).ravel()
+    av = np.asarray(a, dtype=float).ravel()
+    wv = np.asarray(w, dtype=float).ravel()
+    s = 1j * wv
+    num = np.zeros_like(s, dtype=complex); num[:] = bv[0]
+    for c in bv[1:]:
+        num = num * s + c
+    den = np.zeros_like(s, dtype=complex); den[:] = av[0]
+    for c in av[1:]:
+        den = den * s + c
+    H = num / den
+    return H.reshape((-1, 1))
+
+
+def tf2zp_z(b, a):
+    bv = np.asarray(b, dtype=float).ravel()
+    if bv.size <= 1:
+        return np.array([[]], dtype=complex).reshape((0, 1))
+    return np.roots(bv).reshape((-1, 1))
+
+
+def tf2zp_p(b, a):
+    av = np.asarray(a, dtype=float).ravel()
+    if av.size <= 1:
+        return np.array([[]], dtype=complex).reshape((0, 1))
+    return np.roots(av).reshape((-1, 1))
+
+
+def tf2zp_k(b, a):
+    bv = np.asarray(b, dtype=float).ravel()
+    av = np.asarray(a, dtype=float).ravel()
+    if bv.size == 0 or av.size == 0 or av[0] == 0:
+        return 0.0
+    return float(bv[0] / av[0])
+
+
+def zp2tf_b(z, p, k):
+    zv = np.asarray(z, dtype=complex).ravel().tolist()
+    coefs = _poly_from_complex_roots(zv) if zv else np.array([1.0])
+    return (coefs * float(k)).reshape((1, -1))
+
+
+def zp2tf_a(z, p, k):
+    pv = np.asarray(p, dtype=complex).ravel().tolist()
+    coefs = _poly_from_complex_roots(pv) if pv else np.array([1.0])
+    return coefs.reshape((1, -1))
+
+
+def _bessel_recur(n):
+    if n == 0: return [1.0]
+    Bm2 = [1.0]
+    Bm1 = [1.0, 1.0]
+    if n == 1: return Bm1
+    for k in _pyrange(2, n + 1):
+        Bk = [0.0] * (k + 1)
+        a = 2 * k - 1
+        for i in _pyrange(len(Bm1)):
+            Bk[i + 1] += a * Bm1[i]
+        for i in _pyrange(len(Bm2)):
+            Bk[i] += Bm2[i]
+        Bm2 = Bm1
+        Bm1 = Bk
+    return Bm1
+
+
+def _besself_design(n, Wo):
+    n = int(n) if n >= 1 else 1
+    if Wo <= 0: Wo = 1.0
+    Bn = _bessel_recur(n)
+    a = [Bn[i] * (Wo ** i) for i in _pyrange(len(Bn))]
+    b = [a[-1]]
+    return np.array(b), np.array(a)
+
+
+def besself_b(n, Wo):
+    b, _ = _besself_design(n, Wo)
+    return b.reshape((1, -1))
+
+
+def besself_a(n, Wo):
+    _, a = _besself_design(n, Wo)
+    return a.reshape((1, -1))
+
+
 def _buttord_compute(Wp, Ws, Rp, Rs):
     if Wp <= 0.0: Wp = 1e-12
     if Ws <= 0.0: Ws = 1e-12

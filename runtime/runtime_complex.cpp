@@ -1510,6 +1510,37 @@ double matlab_cheb1ord_Wn(double Wp, double Ws, double Rp, double Rs) {
     return Wn_out;
 }
 
+/* cheb2ord(Wp, Ws, Rp, Rs) — minimum order for Chebyshev II lowpass.
+ * Same Cheby formula as cheb1ord but the natural cutoff Wn is anchored
+ * at the **stopband** edge Ws (Cheby II meets the stopband attenuation
+ * exactly at Ws). */
+static void compute_cheb2ord_(double Wp, double Ws, double Rp, double Rs,
+                              double &n_out, double &Wn_out) {
+    if (Wp <= 0.0) Wp = 1e-12;
+    if (Ws <= 0.0) Ws = 1e-12;
+    if (Wp >= 1.0) Wp = 1.0 - 1e-12;
+    if (Ws >= 1.0) Ws = 1.0 - 1e-12;
+    double Wpa = 2.0 * tan(M_PI * Wp / 2.0);
+    double Wsa = 2.0 * tan(M_PI * Ws / 2.0);
+    double num = acosh(sqrt((pow(10.0, Rs / 10.0) - 1.0)
+                          / (pow(10.0, Rp / 10.0) - 1.0)));
+    double den = acosh(Wsa / Wpa);
+    int n = (int)ceil(num / den);
+    if (n < 1) n = 1;
+    n_out  = (double)n;
+    Wn_out = Ws;     /* Cheby II anchors at the stopband edge. */
+}
+double matlab_cheb2ord_n(double Wp, double Ws, double Rp, double Rs) {
+    double n_out, Wn_out;
+    compute_cheb2ord_(Wp, Ws, Rp, Rs, n_out, Wn_out);
+    return n_out;
+}
+double matlab_cheb2ord_Wn(double Wp, double Ws, double Rp, double Rs) {
+    double n_out, Wn_out;
+    compute_cheb2ord_(Wp, Ws, Rp, Rs, n_out, Wn_out);
+    return Wn_out;
+}
+
 matlab_mat *matlab_butter_b(double n_d, double Wn) {
     std::vector<double> b, a;
     compute_butter_((int)n_d, Wn, b, a);
@@ -1654,6 +1685,241 @@ matlab_mat *matlab_cheby2_bs_a(double n_d, double Rs, double W1, double W2) {
     std::vector<double> b, a;
     compute_iir_(FF_CHEBY2, FT_BS, (int)n_d, Rs, W1, W2, b, a);
     return iir_pack_(a);
+}
+
+/*===========================================================================
+ * Standalone analog→digital bilinear, analog frequency response, and
+ * tf↔zp form conversions.
+ *
+ *   [bd, ad] = bilinear(b, a, fs)   analog (b, a) → digital via z = (2fs+s)/(2fs-s)
+ *   H        = freqs(b, a, w)        analog frequency response B(jw)/A(jw)
+ *   [z, p, k]= tf2zp(b, a)           polynomial form → zero/pole/gain
+ *   [b, a]   = zp2tf(z, p, k)        zero/pole/gain → polynomial form
+ *
+ * tf2zp / zp2tf split via the eig precedent — separate `_z` / `_p` / `_k`
+ * (and `_b` / `_a`) runtime entries. Multi-LHS dispatch in
+ * LowerTensorOps.cpp.
+ */
+
+/* Bilinear transform with sample rate `fs` (T = 1/fs). For `fs = 1`
+ * this matches the internal bilinear used by butter/cheby designs. */
+static inline void bilinear_pole_fs_(double pr_, double pi_, double fs,
+                                     double &zr_, double &zi_) {
+    double f2 = 2.0 * fs;
+    double num_r = f2 + pr_, num_i = pi_;
+    double den_r = f2 - pr_, den_i = -pi_;
+    cdiv2(num_r, num_i, den_r, den_i, zr_, zi_);
+}
+
+static void compute_bilinear_(matlab_mat *bp, matlab_mat *ap, double fs,
+                              std::vector<double> &bd,
+                              std::vector<double> &ad) {
+    bd.clear(); ad.clear();
+    if (!bp || !ap) return;
+    int64_t nb = bp->rows * bp->cols;
+    int64_t na = ap->rows * ap->cols;
+    if (na == 0) return;
+    /* Use the existing matlab_roots to find analog zeros + poles. */
+    matlab_mat_c *bz = matlab_roots(bp);
+    matlab_mat_c *ap_roots = matlab_roots(ap);
+    int64_t nz = bz ? bz->rows * bz->cols : 0;
+    int64_t np = ap_roots ? ap_roots->rows * ap_roots->cols : 0;
+    /* Analog → digital roots. */
+    std::vector<double> dpr(np), dpi(np);
+    std::vector<double> dzr(nz), dzi(nz);
+    for (int64_t k = 0; k < np; ++k) {
+        bilinear_pole_fs_(ap_roots->re[k], ap_roots->im[k], fs,
+                          dpr[k], dpi[k]);
+    }
+    for (int64_t k = 0; k < nz; ++k) {
+        bilinear_pole_fs_(bz->re[k], bz->im[k], fs, dzr[k], dzi[k]);
+    }
+    /* Pad zeros at z = -1 if degree(b) < degree(a) (n_zeros_at_inf). */
+    while ((int64_t)dzr.size() < np) {
+        dzr.push_back(-1.0); dzi.push_back(0.0);
+    }
+    /* Build polynomials. */
+    poly_from_complex_(dpr, dpi, ad);
+    poly_from_complex_(dzr, dzi, bd);
+    while ((int64_t)bd.size() < (int64_t)ad.size()) bd.insert(bd.begin(), 0.0);
+    /* Scale by analog leading-coefficient ratio so that the digital
+     * filter preserves the analog gain at z = 1 (DC for low/lowband
+     * filters; for highpass-style analog filters the user typically
+     * post-scales). The analog gain factor at s = 0 is bp[end]/ap[end]
+     * (constant terms). The bilinear preserves the s = 0 ↔ z = 1 map. */
+    double sb = 0.0, sa = 0.0;
+    for (auto v : bd) sb += v;
+    for (auto v : ad) sa += v;
+    /* Match analog DC gain b(0)/a(0). For polynomials b(s) = b[0]s^n +
+     * ... + b[n], evaluation at s = 0 gives b[n] (the constant term). */
+    double an_dc = bp->data[nb - 1] / ap->data[na - 1];
+    if (sb != 0.0 && sa != 0.0) {
+        double g = an_dc * sa / sb;
+        for (auto &v : bd) v *= g;
+    }
+    if (bz) { free(bz->re); free(bz->im); free(bz); }
+    if (ap_roots) { free(ap_roots->re); free(ap_roots->im); free(ap_roots); }
+}
+
+matlab_mat *matlab_bilinear_b(matlab_mat *b, matlab_mat *a, double fs) {
+    std::vector<double> bd, ad;
+    compute_bilinear_(b, a, fs, bd, ad);
+    int64_t L = (int64_t)bd.size();
+    matlab_mat *B = mat_alloc(1, L);
+    for (int64_t i = 0; i < L; ++i) B->data[i] = bd[i];
+    return B;
+}
+matlab_mat *matlab_bilinear_a(matlab_mat *b, matlab_mat *a, double fs) {
+    std::vector<double> bd, ad;
+    compute_bilinear_(b, a, fs, bd, ad);
+    int64_t L = (int64_t)ad.size();
+    matlab_mat *A = mat_alloc(1, L);
+    for (int64_t i = 0; i < L; ++i) A->data[i] = ad[i];
+    return A;
+}
+
+/* Analog frequency response: H(jw) = B(jw) / A(jw). */
+matlab_mat_c *matlab_freqs(matlab_mat *b, matlab_mat *a, matlab_mat *w) {
+    if (!b || !a || !w) return mat_c_alloc(0, 0);
+    int64_t nb = b->rows * b->cols;
+    int64_t na = a->rows * a->cols;
+    int64_t N  = w->rows * w->cols;
+    matlab_mat_c *H = mat_c_alloc(N, 1);
+    for (int64_t k = 0; k < N; ++k) {
+        double wk = w->data[k];
+        /* Horner-evaluate b at jw: result = b[0], then result = result*jw + b[i]. */
+        double br_ = b->data[0], bi_ = 0.0;
+        for (int64_t i = 1; i < nb; ++i) {
+            double new_r = -bi_ * wk + b->data[i];
+            double new_i =  br_ * wk;
+            br_ = new_r; bi_ = new_i;
+        }
+        double ar_ = a->data[0], ai_ = 0.0;
+        for (int64_t i = 1; i < na; ++i) {
+            double new_r = -ai_ * wk + a->data[i];
+            double new_i =  ar_ * wk;
+            ar_ = new_r; ai_ = new_i;
+        }
+        double hr, hi;
+        cdiv2(br_, bi_, ar_, ai_, hr, hi);
+        H->re[k] = hr; H->im[k] = hi;
+    }
+    return H;
+}
+
+/* tf2zp(b, a) — polynomial → zero/pole/gain.
+ *   z = roots(b),  p = roots(a),  k = b[0] / a[0]
+ * Multi-return splits via three independent runtime entries. */
+matlab_mat_c *matlab_tf2zp_z(matlab_mat *b, matlab_mat *a) {
+    (void)a;
+    return matlab_roots(b);
+}
+matlab_mat_c *matlab_tf2zp_p(matlab_mat *b, matlab_mat *a) {
+    (void)b;
+    return matlab_roots(a);
+}
+double matlab_tf2zp_k(matlab_mat *b, matlab_mat *a) {
+    if (!b || !a || b->rows * b->cols == 0 || a->rows * a->cols == 0)
+        return 0.0;
+    if (a->data[0] == 0.0) return 0.0;
+    return b->data[0] / a->data[0];
+}
+
+/* zp2tf(z, p, k) — zero/pole/gain → polynomial.
+ *   b = k * poly(z),  a = poly(p)
+ * z and p are complex matrices (matlab_mat_c). */
+static void zp2tf_build_poly_(matlab_mat_c *roots_c,
+                              std::vector<double> &out) {
+    int64_t n = roots_c ? roots_c->rows * roots_c->cols : 0;
+    if (n == 0) { out = {1.0}; return; }
+    std::vector<double> rr(n), ri(n);
+    for (int64_t i = 0; i < n; ++i) { rr[i] = roots_c->re[i]; ri[i] = roots_c->im[i]; }
+    poly_from_complex_(rr, ri, out);
+}
+
+matlab_mat *matlab_zp2tf_b(matlab_mat_c *z, matlab_mat_c *p, double k) {
+    (void)p;
+    std::vector<double> coefs;
+    zp2tf_build_poly_(z, coefs);
+    int64_t L = (int64_t)coefs.size();
+    matlab_mat *B = mat_alloc(1, L);
+    for (int64_t i = 0; i < L; ++i) B->data[i] = k * coefs[i];
+    return B;
+}
+matlab_mat *matlab_zp2tf_a(matlab_mat_c *z, matlab_mat_c *p, double k) {
+    (void)z; (void)k;
+    std::vector<double> coefs;
+    zp2tf_build_poly_(p, coefs);
+    int64_t L = (int64_t)coefs.size();
+    matlab_mat *A = mat_alloc(1, L);
+    for (int64_t i = 0; i < L; ++i) A->data[i] = coefs[i];
+    return A;
+}
+
+/* besself(n, Wo) — analog Bessel-Thomson lowpass.
+ *
+ * MATLAB convention: poles of the unit Bessel polynomial scaled by Wo.
+ * The transfer function is H(s) = B_n(0)·Wo^n / B_n(s/Wo), normalised
+ * to unit DC gain. With the s → s/Wo substitution:
+ *   B_n,Wo(s) = sum_i Bn[i]·s^(n-i) / Wo^(n-i)
+ * Multiplying through by Wo^n to keep `a` monic gives
+ *   a[i] = Bn[i] · Wo^i           (MATLAB-order: i = 0..n)
+ * and b = [a(end)] so DC gain b/a(end) = 1.
+ *
+ * Returns (b, a) of length 1 / n+1 respectively. Multi-return splits
+ * via _b / _a entries (eig precedent).
+ */
+static void bessel_recur_(int n, std::vector<double> &coefs) {
+    /* coefs is in MATLAB order: coefs[0]·s^n + ... + coefs[n]. */
+    if (n == 0) { coefs = {1.0}; return; }
+    std::vector<double> Bm1 = {1.0, 1.0};       /* B_1 = s + 1 */
+    std::vector<double> Bm2 = {1.0};            /* B_0 = 1 */
+    if (n == 1) { coefs = Bm1; return; }
+    for (int k = 2; k <= n; ++k) {
+        std::vector<double> Bk((size_t)(k + 1), 0.0);
+        /* (2k-1) · Bm1, padded to degree k. */
+        double a = (double)(2 * k - 1);
+        /* Bm1 has degree k-1, so Bm1 has k entries; align to degree k. */
+        for (size_t i = 0; i < Bm1.size(); ++i)
+            Bk[i + 1] += a * Bm1[i];
+        /* s² · Bm2: shift Bm2 (degree k-2) up by 2 → degree k. */
+        for (size_t i = 0; i < Bm2.size(); ++i)
+            Bk[i] += Bm2[i];
+        Bm2 = Bm1;
+        Bm1 = Bk;
+    }
+    coefs = Bm1;
+}
+
+static void compute_besself_analog_(int n, double Wo,
+                                    std::vector<double> &b,
+                                    std::vector<double> &a) {
+    if (n < 1) n = 1;
+    if (Wo <= 0.0) Wo = 1.0;
+    std::vector<double> Bn;
+    bessel_recur_(n, Bn);
+    a.resize(Bn.size());
+    for (size_t i = 0; i < Bn.size(); ++i)
+        a[i] = Bn[i] * pow(Wo, (double)i);
+    b.clear();
+    b.push_back(a.back());
+}
+
+matlab_mat *matlab_besself_b(double n_d, double Wo) {
+    std::vector<double> b, a;
+    compute_besself_analog_((int)n_d, Wo, b, a);
+    int64_t L = (int64_t)b.size();
+    matlab_mat *B = mat_alloc(1, L);
+    for (int64_t i = 0; i < L; ++i) B->data[i] = b[i];
+    return B;
+}
+matlab_mat *matlab_besself_a(double n_d, double Wo) {
+    std::vector<double> b, a;
+    compute_besself_analog_((int)n_d, Wo, b, a);
+    int64_t L = (int64_t)a.size();
+    matlab_mat *A = mat_alloc(1, L);
+    for (int64_t i = 0; i < L; ++i) A->data[i] = a[i];
+    return A;
 }
 
 /* freqz(b, a, n) — discrete-time frequency response.

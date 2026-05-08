@@ -2255,15 +2255,27 @@ void Lowerer::lowerStmt(const Stmt &St) {
             Rtys.assign(A.LHS.size(), PtrTy);
           /* [b, a] = butter(n, Wn) / cheby1(n, Rp, Wn) / cheby2(n, Rs, Wn)
            * — both real row vectors (ptr at MLIR level). */
-          else if ((CN == "butter" || CN == "cheby1" || CN == "cheby2") &&
+          else if ((CN == "butter" || CN == "cheby1" || CN == "cheby2" ||
+                    CN == "besself") &&
                    A.LHS.size() == 2)
             Rtys.assign(A.LHS.size(), PtrTy);
           /* [n, Wn] = buttord/cheb1ord(Wp, Ws, Rp, Rs) — both scalar
            * f64 (n is integer-valued but stored as double, matching
            * MATLAB's idiom). */
-          else if ((CN == "buttord" || CN == "cheb1ord") &&
+          else if ((CN == "buttord" || CN == "cheb1ord" ||
+                    CN == "cheb2ord") &&
                    A.LHS.size() == 2)
             Rtys.assign(A.LHS.size(), F64);
+          /* [bd, ad] = bilinear(b, a, fs) — both ptr. */
+          else if (CN == "bilinear" && A.LHS.size() == 2)
+            Rtys.assign(A.LHS.size(), PtrTy);
+          /* [z, p, k] = tf2zp(b, a) — z, p ptr (complex columns), k scalar. */
+          else if (CN == "tf2zp" && A.LHS.size() == 3) {
+            Rtys[0] = PtrTy; Rtys[1] = PtrTy; Rtys[2] = F64;
+          }
+          /* [b, a] = zp2tf(z, p, k) — both ptr. */
+          else if (CN == "zp2tf" && A.LHS.size() == 2)
+            Rtys.assign(A.LHS.size(), PtrTy);
           /* [H, w] = freqz(b, a, N) — H complex column, w real column;
            * uniform ptr. */
           else if (CN == "freqz" && A.LHS.size() == 2)
@@ -6451,7 +6463,7 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             /* SPT order helpers — return scalar f64 in single-result
              * form. Multi-LHS `[n, Wn] = buttord(...)` splits in the
              * dedicated multi-return dispatch in LowerTensorOps. */
-            "buttord", "cheb1ord",
+            "buttord", "cheb1ord", "cheb2ord",
             /* Tier-3 §4.3 scalar reductions. */
             "rms", "peak2peak", "peak2rms", "rssq",
             "risetime", "falltime", "dutycycle",
@@ -6483,6 +6495,8 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             "polyder", "polyint", "residue",
             /* Tier-1 §2.1 — IIR lowpass design + frequency response. */
             "butter", "cheby1", "cheby2", "freqz",
+            /* §2.1 follow-on — standalone bilinear + analog freqs. */
+            "bilinear", "freqs", "tf2zp", "zp2tf", "besself",
             /* Note: buttord, cheb1ord return scalar f64 (multi-LHS form
              * splits into n -> f64 and Wn -> f64) — they're not in
              * PtrRet. Sema's default-typing does not type them; the
