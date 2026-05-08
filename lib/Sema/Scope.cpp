@@ -42,8 +42,20 @@ Binding *Scope::declare(std::string_view N, BindingKind K, Binding *Owned) {
   // for Function/Param etc.). If the prior was Var and caller is re-declaring
   // as something stronger (Param/Global/Persistent/Function), promote.
   Binding *Prev = It->second;
-  if (Prev->Kind == BindingKind::Var && K != BindingKind::Var)
+  if (Prev->Kind == BindingKind::Var && K != BindingKind::Var) {
     Prev->Kind = K;
+  } else if (Prev->Kind == BindingKind::Builtin &&
+             (K == BindingKind::Function || K == BindingKind::Class)) {
+    // MATLAB convention: a user-defined function or classdef in the
+    // current TU shadows the builtin of the same name. Resolver
+    // pre-registers ~250 builtins before user-side declarations run,
+    // so the override is necessary for any user code that happens
+    // to redefine a builtin name (commonly done in research scripts:
+    // `function y = filter(b, a, x); ... end`, `function y = square(x)`,
+    // etc.). Resolver::declareFn / declareClass attach FuncDef /
+    // ClassDef to the returned binding after this returns.
+    Prev->Kind = K;
+  }
   return Prev;
 }
 
