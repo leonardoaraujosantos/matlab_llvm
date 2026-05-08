@@ -410,6 +410,14 @@ matlab_mat *matlab_midcross(matlab_mat *x);
 double      matlab_risetime_s(matlab_mat *x);
 double      matlab_falltime_s(matlab_mat *x);
 double      matlab_dutycycle_s(matlab_mat *x);
+/* Tier-3 §4.3 tail — pulse-statistics follow-on. */
+matlab_mat *matlab_statelevels(matlab_mat *x);
+double      matlab_slewrate_s(matlab_mat *x);
+double      matlab_pulseperiod_s(matlab_mat *x);
+double      matlab_pulsewidth_s(matlab_mat *x);
+double      matlab_overshoot_s(matlab_mat *x);
+double      matlab_undershoot_s(matlab_mat *x);
+double      matlab_settlingtime_s(matlab_mat *x, double d);
 
 /* Tier-2 §3.2 linear prediction. */
 matlab_mat   *matlab_levinson(matlab_mat *r, double p);

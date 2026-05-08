@@ -3245,6 +3245,160 @@ def dutycycle_s(x):
     return on / period if period > 0 else 0.0
 
 
+# §4.3 pulse-statistics tail.
+def _state_levels(x):
+    a = np.asarray(x, dtype=float).ravel()
+    N = a.size
+    if N == 0: return 0.0, 0.0
+    mn, mx = float(a.min()), float(a.max())
+    if mx <= mn: return mn, mx
+    NBINS = 100
+    counts = [0] * NBINS
+    rng = mx - mn
+    for v in a:
+        b = int((v - mn) / rng * NBINS)
+        if b < 0: b = 0
+        if b >= NBINS: b = NBINS - 1
+        counts[b] += 1
+    half = NBINS // 2
+    lo_b = _pymax(_pyrange(0, half), key=lambda b: counts[b])
+    hi_b = _pymax(_pyrange(half, NBINS), key=lambda b: counts[b])
+    return mn + (lo_b + 0.5) * rng / NBINS, mn + (hi_b + 0.5) * rng / NBINS
+
+
+def statelevels(x):
+    lo, hi = _state_levels(x)
+    return np.array([[lo], [hi]])
+
+
+def slewrate_s(x):
+    a = np.asarray(x, dtype=float).ravel()
+    if a.size < 2: return 0.0
+    lo, hi = _state_levels(a)
+    rt = _mean_transit(a, 0.1, 0.9, +1)
+    if rt <= 0.0 or hi <= lo: return 0.0
+    return (0.8 * (hi - lo)) / rt
+
+
+def pulseperiod_s(x):
+    m = midcross(x).ravel()
+    M = m.size
+    if M < 2: return 0.0
+    a = np.asarray(x, dtype=float).ravel()
+    N = a.size
+    mn, mx = float(a.min()), float(a.max())
+    mid = mn + 0.5 * (mx - mn)
+    rising = []
+    j = 0
+    for i in _pyrange(1, N):
+        if j >= M: break
+        prev = a[i - 1]; cur = a[i]
+        if prev <= mid and cur > mid:
+            rising.append(m[j]); j += 1
+        elif prev >= mid and cur < mid:
+            j += 1
+    if len(rising) < 2: return 0.0
+    return _pysum(rising[i] - rising[i - 1] for i in _pyrange(1, len(rising))) / (len(rising) - 1)
+
+
+def pulsewidth_s(x):
+    m = midcross(x).ravel()
+    M = m.size
+    if M < 2: return 0.0
+    a = np.asarray(x, dtype=float).ravel()
+    N = a.size
+    mn, mx = float(a.min()), float(a.max())
+    mid = mn + 0.5 * (mx - mn)
+    dirs = []
+    for i in _pyrange(1, N):
+        if len(dirs) >= M: break
+        prev = a[i - 1]; cur = a[i]
+        if prev <= mid and cur > mid: dirs.append(+1)
+        elif prev >= mid and cur < mid: dirs.append(-1)
+    total = 0.0; cnt = 0
+    for i in _pyrange(M - 1):
+        if dirs[i] == +1 and dirs[i + 1] == -1:
+            total += m[i + 1] - m[i]; cnt += 1
+    return total / cnt if cnt > 0 else 0.0
+
+
+def overshoot_s(x):
+    a = np.asarray(x, dtype=float).ravel()
+    N = a.size
+    if N < 2: return 0.0
+    lo, hi = _state_levels(a)
+    if hi <= lo: return 0.0
+    rng = hi - lo
+    cnt = 0; total_pct = 0.0
+    above = False; max_after = lo
+    for v in a:
+        if not above and v >= hi:
+            above = True; max_after = v
+        elif above:
+            if v > max_after: max_after = v
+            if v < lo + 0.5 * rng:
+                if max_after > hi:
+                    total_pct += 100.0 * (max_after - hi) / rng
+                cnt += 1; above = False; max_after = lo
+    if above and max_after > hi:
+        total_pct += 100.0 * (max_after - hi) / rng
+        cnt += 1
+    return total_pct / cnt if cnt > 0 else 0.0
+
+
+def undershoot_s(x):
+    a = np.asarray(x, dtype=float).ravel()
+    N = a.size
+    if N < 2: return 0.0
+    lo, hi = _state_levels(a)
+    if hi <= lo: return 0.0
+    rng = hi - lo
+    cnt = 0; total_pct = 0.0
+    below = False; min_after = hi
+    for v in a:
+        if not below and v <= lo:
+            below = True; min_after = v
+        elif below:
+            if v < min_after: min_after = v
+            if v > lo + 0.5 * rng:
+                if min_after < lo:
+                    total_pct += 100.0 * (lo - min_after) / rng
+                cnt += 1; below = False; min_after = hi
+    if below and min_after < lo:
+        total_pct += 100.0 * (lo - min_after) / rng
+        cnt += 1
+    return total_pct / cnt if cnt > 0 else 0.0
+
+
+def settlingtime_s(x, d):
+    a = np.asarray(x, dtype=float).ravel()
+    N = a.size
+    if N < 2: return 0.0
+    if not (d > 0.0): d = 0.02
+    lo, hi = _state_levels(a)
+    if hi <= lo: return 0.0
+    rng = hi - lo
+    tol = d * rng
+    mid = lo + 0.5 * rng
+    total = 0.0; cnt = 0
+    i = 1
+    while i < N:
+        prev = a[i - 1]; cur = a[i]
+        if prev <= mid and cur > mid:
+            t_mid = _sub_sample_cross(a, i, mid)
+            last_violation = i
+            k = i
+            while k < N and a[k] >= mid:
+                if _pyabs(a[k] - hi) > tol: last_violation = k
+                k += 1
+            if last_violation + 1 < N:
+                total += (last_violation + 1) - t_mid; cnt += 1
+            i = k + 1
+        else:
+            i += 1
+    return total / cnt if cnt > 0 else 0.0
+
+
 def envelope(x):
     xa = np.asarray(x, dtype=float)
     flat = xa.ravel()

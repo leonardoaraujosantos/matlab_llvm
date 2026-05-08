@@ -3430,6 +3430,14 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"risetime",    "matlab_risetime_s",    0, "p"},
       {"falltime",    "matlab_falltime_s",    0, "p"},
       {"dutycycle",   "matlab_dutycycle_s",   0, "p"},
+      /* §4.3 pulse-statistics tail. */
+      {"statelevels", "matlab_statelevels",   1, "p"},
+      {"slewrate",    "matlab_slewrate_s",    0, "p"},
+      {"pulseperiod", "matlab_pulseperiod_s", 0, "p"},
+      {"pulsewidth",  "matlab_pulsewidth_s",  0, "p"},
+      {"overshoot",   "matlab_overshoot_s",   0, "p"},
+      {"undershoot",  "matlab_undershoot_s",  0, "p"},
+      {"settlingtime","matlab_settlingtime_s",0, "pf"},
       /* §4.1 multirate. */
       {"upfirdn",     "matlab_upfirdn",       1, "ppff"},
       {"decimate",    "matlab_decimate",      1, "pf"},

@@ -3646,6 +3646,186 @@ export function dutycycle_s(x: any): number {
   return period > 0 ? on / period : 0;
 }
 
+// §4.3 pulse-statistics tail.
+function _stateLevelsTS(x: any): [number, number] {
+  const a: Float64Array = (x instanceof Float64Array) ? x : asArray(x).data;
+  const N = a.length;
+  if (N === 0) return [0, 0];
+  let mn = a[0], mx = a[0];
+  for (let i = 1; i < N; i++) {
+    if (a[i] < mn) mn = a[i];
+    if (a[i] > mx) mx = a[i];
+  }
+  if (mx <= mn) return [mn, mx];
+  const NBINS = 100;
+  const counts = new Int32Array(NBINS);
+  const rng = mx - mn;
+  for (let i = 0; i < N; i++) {
+    let b = Math.floor((a[i] - mn) / rng * NBINS);
+    if (b < 0) b = 0;
+    if (b >= NBINS) b = NBINS - 1;
+    counts[b]++;
+  }
+  const half = NBINS / 2;
+  let loB = 0, hiB = NBINS - 1, loC = -1, hiC = -1;
+  for (let b = 0; b < half; b++) if (counts[b] > loC) { loC = counts[b]; loB = b; }
+  for (let b = half; b < NBINS; b++) if (counts[b] > hiC) { hiC = counts[b]; hiB = b; }
+  return [mn + (loB + 0.5) * rng / NBINS, mn + (hiB + 0.5) * rng / NBINS];
+}
+
+export function statelevels(x: any): NDArray {
+  const [lo, hi] = _stateLevelsTS(x);
+  return new NDArray(Float64Array.from([lo, hi]), [2, 1]);
+}
+
+export function slewrate_s(x: any): number {
+  const arr = asArray(x);
+  if (arr.data.length < 2) return 0;
+  const [lo, hi] = _stateLevelsTS(arr.data);
+  const rt = _meanTransitTS(arr, 0.1, 0.9, +1);
+  if (rt <= 0 || hi <= lo) return 0;
+  return (0.8 * (hi - lo)) / rt;
+}
+
+export function pulseperiod_s(x: any): number {
+  const m = midcross(x).data;
+  const M = m.length;
+  if (M < 2) return 0;
+  const a = asArray(x).data;
+  const N = a.length;
+  let mn = a[0], mx = a[0];
+  for (let i = 1; i < N; i++) {
+    if (a[i] < mn) mn = a[i];
+    if (a[i] > mx) mx = a[i];
+  }
+  const mid = mn + 0.5 * (mx - mn);
+  const rising: number[] = [];
+  let j = 0;
+  for (let i = 1; i < N && j < M; i++) {
+    const prev = a[i - 1], cur = a[i];
+    if (prev <= mid && cur > mid) { rising.push(m[j]); j++; }
+    else if (prev >= mid && cur < mid) j++;
+  }
+  if (rising.length < 2) return 0;
+  let s = 0;
+  for (let i = 1; i < rising.length; i++) s += rising[i] - rising[i - 1];
+  return s / (rising.length - 1);
+}
+
+export function pulsewidth_s(x: any): number {
+  const m = midcross(x).data;
+  const M = m.length;
+  if (M < 2) return 0;
+  const a = asArray(x).data;
+  const N = a.length;
+  let mn = a[0], mx = a[0];
+  for (let i = 1; i < N; i++) {
+    if (a[i] < mn) mn = a[i];
+    if (a[i] > mx) mx = a[i];
+  }
+  const mid = mn + 0.5 * (mx - mn);
+  const dirs: number[] = [];
+  for (let i = 1; i < N && dirs.length < M; i++) {
+    const prev = a[i - 1], cur = a[i];
+    if (prev <= mid && cur > mid) dirs.push(+1);
+    else if (prev >= mid && cur < mid) dirs.push(-1);
+  }
+  let total = 0, cnt = 0;
+  for (let i = 0; i + 1 < M; i++) {
+    if (dirs[i] === +1 && dirs[i + 1] === -1) {
+      total += m[i + 1] - m[i]; cnt++;
+    }
+  }
+  return cnt > 0 ? total / cnt : 0;
+}
+
+export function overshoot_s(x: any): number {
+  const a = asArray(x).data;
+  const N = a.length;
+  if (N < 2) return 0;
+  const [lo, hi] = _stateLevelsTS(a);
+  if (hi <= lo) return 0;
+  const rng = hi - lo;
+  let cnt = 0, totalPct = 0;
+  let above = false, maxAfter = lo;
+  for (let i = 0; i < N; i++) {
+    const v = a[i];
+    if (!above && v >= hi) { above = true; maxAfter = v; }
+    else if (above) {
+      if (v > maxAfter) maxAfter = v;
+      if (v < lo + 0.5 * rng) {
+        if (maxAfter > hi) totalPct += 100 * (maxAfter - hi) / rng;
+        cnt++; above = false; maxAfter = lo;
+      }
+    }
+  }
+  if (above && maxAfter > hi) {
+    totalPct += 100 * (maxAfter - hi) / rng;
+    cnt++;
+  }
+  return cnt > 0 ? totalPct / cnt : 0;
+}
+
+export function undershoot_s(x: any): number {
+  const a = asArray(x).data;
+  const N = a.length;
+  if (N < 2) return 0;
+  const [lo, hi] = _stateLevelsTS(a);
+  if (hi <= lo) return 0;
+  const rng = hi - lo;
+  let cnt = 0, totalPct = 0;
+  let below = false, minAfter = hi;
+  for (let i = 0; i < N; i++) {
+    const v = a[i];
+    if (!below && v <= lo) { below = true; minAfter = v; }
+    else if (below) {
+      if (v < minAfter) minAfter = v;
+      if (v > lo + 0.5 * rng) {
+        if (minAfter < lo) totalPct += 100 * (lo - minAfter) / rng;
+        cnt++; below = false; minAfter = hi;
+      }
+    }
+  }
+  if (below && minAfter < lo) {
+    totalPct += 100 * (lo - minAfter) / rng;
+    cnt++;
+  }
+  return cnt > 0 ? totalPct / cnt : 0;
+}
+
+export function settlingtime_s(x: any, d: number): number {
+  const a = asArray(x).data;
+  const N = a.length;
+  if (N < 2) return 0;
+  if (!(d > 0)) d = 0.02;
+  const [lo, hi] = _stateLevelsTS(a);
+  if (hi <= lo) return 0;
+  const rng = hi - lo;
+  const tol = d * rng;
+  const mid = lo + 0.5 * rng;
+  let total = 0, cnt = 0;
+  let i = 1;
+  while (i < N) {
+    const prev = a[i - 1], cur = a[i];
+    if (prev <= mid && cur > mid) {
+      const tMid = _subSampleCrossTS(a as Float64Array, i, mid);
+      let lastViolation = i;
+      let k = i;
+      while (k < N && a[k] >= mid) {
+        if (Math.abs(a[k] - hi) > tol) lastViolation = k;
+        k++;
+      }
+      if (lastViolation + 1 < N) {
+        total += (lastViolation + 1) - tMid; cnt++;
+      }
+      i = k + 1;
+    } else {
+      i++;
+    }
+  }
+  return cnt > 0 ? total / cnt : 0;
+}
+
 export function envelope(x: any): NDArray {
   const xa = asArray(x);
   const flat = xa.data;

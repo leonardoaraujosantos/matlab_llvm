@@ -127,6 +127,8 @@ void Resolver::registerBuiltins() {
     "findpeaks", "rms", "peak2peak", "peak2rms", "rssq",
     "medfilt1", "hampel", "envelope",
     "midcross", "risetime", "falltime", "dutycycle",
+    "statelevels", "slewrate", "pulseperiod", "pulsewidth",
+    "overshoot", "undershoot", "settlingtime",
     /* Tier-3 §4.1 multirate. */
     "upfirdn", "decimate", "interp", "resample",
     /* Tier-3 §4.2 waveform generators. */

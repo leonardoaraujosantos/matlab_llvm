@@ -6455,6 +6455,9 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             /* Tier-3 §4.3 scalar reductions. */
             "rms", "peak2peak", "peak2rms", "rssq",
             "risetime", "falltime", "dutycycle",
+            /* §4.3 pulse-statistics tail. */
+            "slewrate", "pulseperiod", "pulsewidth",
+            "overshoot", "undershoot", "settlingtime",
             /* Tier-3 §4.4 scalar reductions. */
             "finddelay", "dtw",
           };
@@ -6503,6 +6506,7 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
              * F64Ret below. */
             "findpeaks",
             "medfilt1", "hampel", "envelope", "midcross",
+            "statelevels",
             /* Tier-3 §4.1 multirate. */
             "upfirdn", "decimate", "interp", "resample",
             /* Tier-3 §4.2 waveform generators. */

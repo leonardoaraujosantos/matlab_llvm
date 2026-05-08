@@ -1807,7 +1807,7 @@ static llvm::StringRef MatrixReturningFns[] = {
     /* §4.3 pulse measurements (matrix-returning entries). */
     "matlab_findpeaks_pks", "matlab_findpeaks_locs",
     "matlab_medfilt1", "matlab_hampel", "matlab_envelope",
-    "matlab_midcross",
+    "matlab_midcross", "matlab_statelevels",
     /* §4.1 multirate. */
     "matlab_upfirdn", "matlab_decimate", "matlab_interp", "matlab_resample",
     /* §4.2 waveform generators. */

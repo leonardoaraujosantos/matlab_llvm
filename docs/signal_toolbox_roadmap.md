@@ -53,7 +53,7 @@ today. Locations are in `runtime/matlab_runtime.cpp`.
 | Tier-2 §3.1 nonparametric spectral — `periodogram`, `pwelch`, `cpsd`, `mscohere`, `tfestimate` | ✅ shipped | Single-output, fs = 1. `cpsd`/`tfestimate` return complex (matlab_mat_c). **Open**: dpss + pmtm (multitaper); 2-/3-return `[P, f, …]` forms. |
 | Tier-2 §3.2 linear prediction + parametric PSD — `levinson`, `lpc`, `aryule`, `arburg`, `pyulear`, `pburg` | ✅ shipped | Levinson-Durbin + Burg recursion; AR PSD via σ²·\|1/A(e^{jω})\|² evaluation. **Open**: pcov/pmcov, subspace methods (pmusic/peig/rootmusic/rooteig), prony/stmcb. |
 | Tier-2 §3.3 time-frequency — `spectrogram(x, win, noverlap)` | ✅ shipped (single-output) | \|STFT\|² per (freq, frame). **Open**: stft/istft, pspectrum, instfreq, instbw, cwt (Tier-4 wavelets), wvd/fsst (Tier-4). |
-| Tier-3 §4.3 pulse measurements — `findpeaks`, `rms`, `peak2peak`, `peak2rms`, `rssq`, `medfilt1`, `hampel`, `envelope`, `midcross`, `risetime`, `falltime`, `dutycycle` | ✅ shipped (core surface) | Strict-monotonic findpeaks; MAD-based hampel; peak-interpolation envelope; 10/50/90% pulse statistics. **Open**: MinPeak* options for findpeaks; slewrate, pulseperiod, pulsewidth, overshoot, undershoot, settlingtime, statelevels. |
+| Tier-3 §4.3 pulse measurements — `findpeaks`, `rms`, `peak2peak`, `peak2rms`, `rssq`, `medfilt1`, `hampel`, `envelope`, `midcross`, `risetime`, `falltime`, `dutycycle`, `statelevels`, `slewrate`, `pulseperiod`, `pulsewidth`, `overshoot`, `undershoot`, `settlingtime` | ✅ shipped (full §4.3 surface) | Strict-monotonic `findpeaks`; MAD-based `hampel`; peak-interpolation `envelope`; 10/50/90% pulse statistics; histogram-based `statelevels` (100 bins) feeds the rest of the tail (`slewrate` = 0.8·(hi−lo)/risetime, `overshoot`/`undershoot` in % of state range, `settlingtime(x, d)` with default `d = 0.02`). **Open** (Sema-side work): name-value options for `findpeaks` (`MinPeakHeight`/`MinPeakDistance`/`MinPeakProminence`/`Threshold`/`SortStr`). |
 | Tier-3 §4.1 real multirate — `upfirdn`, `decimate`, `interp`, `resample` | ✅ shipped | Anti-aliased; replaces the toy upsample/downsample stubs. **Open**: polyphase, group-delay correction. |
 | Tier-3 §4.2 waveform generators — `chirp`, `sawtooth`, `square`, `gauspuls`, `rectpuls`, `tripuls`, `sinc` | ✅ shipped | chirp linear method only. **Open**: chirp quadratic/log/hyperbolic, `pulstran`, `diric`, `gmonopuls`, `vco`. |
 | Tier-3 §4.4 alignment helpers — `xcov`, `finddelay`, `dtw` | ✅ shipped | **Open**: `alignsignals` (multi-return), `gccphat`, xcorr scaling-options. |
@@ -328,7 +328,7 @@ plot-only entries are handled.
 | `sinc(x)`, `diric(x, n)` | (sinc already ships as a math identity — verify normalized vs unnormalized convention.) |
 | `vco(x, fc, fs)` | Voltage-controlled oscillator. Built on `cumsum`. |
 
-### 4.3 Pulse / waveform measurements ✅ (`findpeaks`, `rms`/`peak2peak`/`peak2rms`/`rssq`, `medfilt1`/`hampel`/`envelope`, `midcross`/`risetime`/`falltime`/`dutycycle`); MinPeak* options + `slewrate`/`pulseperiod`/`pulsewidth`/`overshoot`/`undershoot`/`settlingtime`/`statelevels` 🔵
+### 4.3 Pulse / waveform measurements ✅ (`findpeaks`, `rms`/`peak2peak`/`peak2rms`/`rssq`, `medfilt1`/`hampel`/`envelope`, `midcross`/`risetime`/`falltime`/`dutycycle`, `statelevels`/`slewrate`/`pulseperiod`/`pulsewidth`/`overshoot`/`undershoot`/`settlingtime`); `findpeaks` name-value options 🔵
 
 These power chapters 18 and 24 (Signal Measurement, Common
 Applications) — they also feed `findpeaks` workflows.
@@ -467,7 +467,7 @@ gates the next on user-visible output:
 8. ~~**Tier 2 §3.1 — nonparametric spectral**~~ ✅ shipped (`periodogram`, `pwelch`, `cpsd`, `mscohere`, `tfestimate`). **Open**: dpss + pmtm.
 9. ~~**Tier 2 §3.2 — linear prediction + parametric PSD**~~ ✅ shipped (`levinson`, `lpc`, `aryule`, `arburg`, `pyulear`, `pburg`). **Open**: pcov/pmcov, subspace methods, prony/stmcb.
 10. ~~**Tier 2 §3.3 — time-frequency**~~ ✅ shipped (`spectrogram` single-output). **Open**: stft/istft, pspectrum, instfreq/instbw.
-11. ~~**Tier 3 §4.3 — pulse measurements core**~~ ✅ shipped (`findpeaks`, `rms`/`peak2peak`/`peak2rms`/`rssq`, `medfilt1`/`hampel`/`envelope`, `midcross`/`risetime`/`falltime`/`dutycycle`). **Open**: MinPeak* options, slewrate/pulseperiod/pulsewidth/overshoot/undershoot/settlingtime/statelevels.
+11. ~~**Tier 3 §4.3 — pulse measurements core + tail**~~ ✅ shipped (`findpeaks`, `rms`/`peak2peak`/`peak2rms`/`rssq`, `medfilt1`/`hampel`/`envelope`, `midcross`/`risetime`/`falltime`/`dutycycle`, `statelevels`/`slewrate`/`pulseperiod`/`pulsewidth`/`overshoot`/`undershoot`/`settlingtime`). **Open**: `findpeaks` name-value options.
 12. ~~**Tier 3 §4.1 — real multirate**~~ ✅ shipped (`upfirdn`, `decimate`, `interp`, `resample`). **Open**: polyphase, group-delay correction.
 13. ~~**Tier 3 §4.2 — waveform generators**~~ ✅ shipped (`chirp`, `sawtooth`, `square`, `gauspuls`, `rectpuls`, `tripuls`, `sinc`). **Open**: chirp non-linear methods, pulstran, diric, gmonopuls, vco.
 14. ~~**Tier 3 §4.4 — alignment helpers**~~ ✅ shipped (`xcov`, `finddelay`, `dtw`). **Open**: alignsignals, gccphat, xcorr scaling-option strings.
@@ -487,7 +487,7 @@ gates the next on user-visible output:
 19. **§3.3 STFT family** — `stft`/`istft` (with COLA inversion), `pspectrum`, `instfreq`, `instbw`.
 20. **§3.4 transforms tail** — `czt` (Bluestein on chirped grid), `dst`/`idst`, `cceps`/`rceps`/`icceps`.
 21. **§3.2 covariance + subspace** — `pcov`/`pmcov`, `pmusic`/`peig`/`rootmusic`/`rooteig`, `prony`/`stmcb`.
-22. **§4.3 pulse measurements tail** — `slewrate`, `pulseperiod`, `pulsewidth`, `overshoot`, `undershoot`, `settlingtime`, `statelevels`; `MinPeakHeight`/`MinPeakDistance`/`MinPeakProminence`/`Threshold`/`SortStr` options for `findpeaks`.
+22. **§4.3 `findpeaks` name-value options** — `MinPeakHeight`/`MinPeakDistance`/`MinPeakProminence`/`Threshold`/`SortStr`. The full pulse-statistics tail (`statelevels`, `slewrate`, `pulseperiod`, `pulsewidth`, `overshoot`, `undershoot`, `settlingtime`) shipped in the §4.3-tail slice; only the `findpeaks` kwarg surface is open and is gated on Sema's name-value-arg parsing.
 23. **§4.2 waveform tail** — `chirp` quadratic/log/hyperbolic, `pulstran`, `diric`, `gmonopuls`, `vco`.
 24. **§4.4 alignment tail** — `alignsignals` (multi-return), `gccphat`, `xcorr` scaling-option strings.
 25. **5.1 `designfilt` / `digitalFilter` system object** (~1 week; needs new descriptor type).
@@ -495,9 +495,10 @@ gates the next on user-visible output:
 
 Items 1–14 closed the practical day-to-day Signal Processing surface
 (filter design, apply, inspect; spectral; LP/parametric PSD; multirate;
-generators; pulse measurements; alignment). Items 15–24 round out the
-toolbox to per-function MATLAB parity. Items 25–26 are descriptor /
-algorithmic heavy lifts.
+generators; pulse measurements; alignment). The §4.3 tail (item 22's
+old scope: 7 pulse-statistics functions) closed in the same family of
+slices. Items 15–24 round out the toolbox to per-function MATLAB
+parity. Items 25–26 are descriptor / algorithmic heavy lifts.
 
 ---
 

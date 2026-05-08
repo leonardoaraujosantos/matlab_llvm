@@ -6465,6 +6465,242 @@ double matlab_dutycycle_s(matlab_mat *x) {
 }
 
 /*===========================================================================
+ * Tier-3 SPT §4.3 tail — statelevels / slewrate / pulseperiod / pulsewidth /
+ * overshoot / undershoot / settlingtime.
+ *
+ * statelevels uses the histogram-based estimator MATLAB ships: the
+ * signal range is split into NBINS uniform bins, the histogram is
+ * separated at its midpoint, and the highest-count bin in each half
+ * gives the corresponding state level (bin centre). Falls back to
+ * straight min/max when the histogram is too sparse.
+ *
+ * The remaining functions all sit on top of statelevels + the existing
+ * `mean_transit_` / `matlab_midcross` scaffolding.
+ */
+static void state_levels_(matlab_mat *x, double *lo, double *hi) {
+    int64_t N = x ? x->rows * x->cols : 0;
+    if (N == 0) { *lo = 0.0; *hi = 0.0; return; }
+    double mn = x->data[0], mx = x->data[0];
+    for (int64_t i = 1; i < N; ++i) {
+        if (x->data[i] < mn) mn = x->data[i];
+        if (x->data[i] > mx) mx = x->data[i];
+    }
+    if (mx <= mn) { *lo = mn; *hi = mx; return; }
+    constexpr int NBINS = 100;
+    int counts[NBINS] = {0};
+    double rng = mx - mn;
+    for (int64_t i = 0; i < N; ++i) {
+        int b = (int)((x->data[i] - mn) / rng * (double)NBINS);
+        if (b < 0) b = 0;
+        if (b >= NBINS) b = NBINS - 1;
+        counts[b]++;
+    }
+    int half = NBINS / 2;
+    int lo_b = 0, hi_b = NBINS - 1;
+    int lo_c = -1, hi_c = -1;
+    for (int b = 0; b < half; ++b)
+        if (counts[b] > lo_c) { lo_c = counts[b]; lo_b = b; }
+    for (int b = half; b < NBINS; ++b)
+        if (counts[b] > hi_c) { hi_c = counts[b]; hi_b = b; }
+    *lo = mn + (lo_b + 0.5) * rng / (double)NBINS;
+    *hi = mn + (hi_b + 0.5) * rng / (double)NBINS;
+}
+
+matlab_mat *matlab_statelevels(matlab_mat *x) {
+    matlab_mat *L = mat_alloc(2, 1);
+    state_levels_(x, &L->data[0], &L->data[1]);
+    return L;
+}
+
+/* slewrate: (high - low) / mean_risetime. With unit sample spacing the
+ * units come out as signal-units per sample. MATLAB returns one value
+ * per transition; we return the mean rising slewrate as a scalar
+ * (matches the risetime/falltime/dutycycle convention already shipped). */
+double matlab_slewrate_s(matlab_mat *x) {
+    if (!x || x->rows * x->cols < 2) return 0.0;
+    double lo, hi;
+    state_levels_(x, &lo, &hi);
+    double rt = mean_transit_(x, 0.1, 0.9, +1);
+    if (rt <= 0.0 || hi <= lo) return 0.0;
+    return (0.8 * (hi - lo)) / rt;          /* 10–90 % rise → 0.8·range */
+}
+
+/* Mean distance between consecutive rising midcrosses. */
+double matlab_pulseperiod_s(matlab_mat *x) {
+    matlab_mat *m = matlab_midcross(x);
+    int64_t M = m ? m->rows * m->cols : 0;
+    if (!x || M < 2) { if (m) { free(m->data); free(m); } return 0.0; }
+    /* Re-derive direction at each crossing. */
+    int64_t N = x->rows * x->cols;
+    double mn = x->data[0], mx = x->data[0];
+    for (int64_t i = 1; i < N; ++i) {
+        if (x->data[i] < mn) mn = x->data[i];
+        if (x->data[i] > mx) mx = x->data[i];
+    }
+    double mid = mn + 0.5 * (mx - mn);
+    std::vector<double> rising;
+    rising.reserve((size_t)M);
+    int j = 0;
+    for (int64_t i = 1; i < N && j < (int)M; ++i) {
+        double a = x->data[i - 1], b = x->data[i];
+        if (a <= mid && b > mid) rising.push_back(m->data[j++]);
+        else if (a >= mid && b < mid) j++;
+    }
+    free(m->data); free(m);
+    if (rising.size() < 2) return 0.0;
+    double sum = 0.0;
+    for (size_t i = 1; i < rising.size(); ++i)
+        sum += rising[i] - rising[i - 1];
+    return sum / (double)(rising.size() - 1);
+}
+
+/* Mean distance from each rising midcross to the next falling midcross. */
+double matlab_pulsewidth_s(matlab_mat *x) {
+    matlab_mat *m = matlab_midcross(x);
+    int64_t M = m ? m->rows * m->cols : 0;
+    if (!x || M < 2) { if (m) { free(m->data); free(m); } return 0.0; }
+    int64_t N = x->rows * x->cols;
+    double mn = x->data[0], mx = x->data[0];
+    for (int64_t i = 1; i < N; ++i) {
+        if (x->data[i] < mn) mn = x->data[i];
+        if (x->data[i] > mx) mx = x->data[i];
+    }
+    double mid = mn + 0.5 * (mx - mn);
+    std::vector<int> dirs((size_t)M, 0);
+    int j = 0;
+    for (int64_t i = 1; i < N && j < (int)M; ++i) {
+        double a = x->data[i - 1], b = x->data[i];
+        if (a <= mid && b > mid)      dirs[(size_t)j++] = +1;
+        else if (a >= mid && b < mid) dirs[(size_t)j++] = -1;
+    }
+    double sum = 0.0;
+    int    cnt = 0;
+    for (int64_t i = 0; i + 1 < M; ++i) {
+        if (dirs[(size_t)i] == +1 && dirs[(size_t)(i + 1)] == -1) {
+            sum += m->data[i + 1] - m->data[i];
+            cnt++;
+        }
+    }
+    free(m->data); free(m);
+    return cnt > 0 ? sum / (double)cnt : 0.0;
+}
+
+/* Mean overshoot above the high state level on rising transitions,
+ * expressed as percent of (high - low). Looks within one period after
+ * each rising midcross; returns 0 if no overshoot detected. */
+double matlab_overshoot_s(matlab_mat *x) {
+    if (!x) return 0.0;
+    int64_t N = x->rows * x->cols;
+    if (N < 2) return 0.0;
+    double lo, hi;
+    state_levels_(x, &lo, &hi);
+    if (hi <= lo) return 0.0;
+    double rng = hi - lo;
+    int    cnt = 0;
+    double total_pct = 0.0;
+    int    above = 0;       /* tracks "have we crossed into the high state since last reset" */
+    double max_after = lo;
+    for (int64_t i = 0; i < N; ++i) {
+        double v = x->data[i];
+        if (!above && v >= hi) {
+            above = 1;
+            max_after = v;
+        } else if (above) {
+            if (v > max_after) max_after = v;
+            if (v < lo + 0.5 * rng) {
+                /* Edge has fully fallen back below midpoint —
+                 * record overshoot and reset. */
+                if (max_after > hi)
+                    total_pct += 100.0 * (max_after - hi) / rng;
+                cnt++;
+                above = 0;
+                max_after = lo;
+            }
+        }
+    }
+    if (above && max_after > hi) {
+        total_pct += 100.0 * (max_after - hi) / rng;
+        cnt++;
+    }
+    return cnt > 0 ? total_pct / (double)cnt : 0.0;
+}
+
+/* Mean undershoot below the low state level on falling transitions. */
+double matlab_undershoot_s(matlab_mat *x) {
+    if (!x) return 0.0;
+    int64_t N = x->rows * x->cols;
+    if (N < 2) return 0.0;
+    double lo, hi;
+    state_levels_(x, &lo, &hi);
+    if (hi <= lo) return 0.0;
+    double rng = hi - lo;
+    int    cnt = 0;
+    double total_pct = 0.0;
+    int    below = 0;
+    double min_after = hi;
+    for (int64_t i = 0; i < N; ++i) {
+        double v = x->data[i];
+        if (!below && v <= lo) {
+            below = 1;
+            min_after = v;
+        } else if (below) {
+            if (v < min_after) min_after = v;
+            if (v > lo + 0.5 * rng) {
+                if (min_after < lo)
+                    total_pct += 100.0 * (lo - min_after) / rng;
+                cnt++;
+                below = 0;
+                min_after = hi;
+            }
+        }
+    }
+    if (below && min_after < lo) {
+        total_pct += 100.0 * (lo - min_after) / rng;
+        cnt++;
+    }
+    return cnt > 0 ? total_pct / (double)cnt : 0.0;
+}
+
+/* Mean settling time: from each rising midcross, the number of samples
+ * until x stays within `d` (fractional, e.g. 0.02 = ±2 %) of the high
+ * state level for the rest of the pulse. d defaults to 0.02 if non-positive. */
+double matlab_settlingtime_s(matlab_mat *x, double d) {
+    if (!x) return 0.0;
+    int64_t N = x->rows * x->cols;
+    if (N < 2) return 0.0;
+    if (!(d > 0.0)) d = 0.02;
+    double lo, hi;
+    state_levels_(x, &lo, &hi);
+    if (hi <= lo) return 0.0;
+    double rng = hi - lo;
+    double tol = d * rng;
+    double mid = lo + 0.5 * rng;
+    double total = 0.0;
+    int    cnt   = 0;
+    for (int64_t i = 1; i < N; ++i) {
+        double a = x->data[i - 1], b = x->data[i];
+        if (a <= mid && b > mid) {
+            double t_mid = sub_sample_cross_(x->data, i, mid);
+            /* Walk forward from i until x stays within ±tol of hi
+             * for the remainder of the rising pulse (i.e. until it
+             * falls back below mid). */
+            int64_t last_violation = i;
+            int64_t k = i;
+            while (k < N && x->data[k] >= mid) {
+                if (fabs(x->data[k] - hi) > tol) last_violation = k;
+                k++;
+            }
+            if (last_violation + 1 < N) {
+                total += (double)(last_violation + 1) - t_mid;
+                cnt++;
+            }
+            i = k;
+        }
+    }
+    return cnt > 0 ? total / (double)cnt : 0.0;
+}
+
+/*===========================================================================
  * Tier-3 SPT §4.3 — envelope / hampel / medfilt1.
  *
  *   y = medfilt1(x, n)   1-D median filter (length-n sliding window,
