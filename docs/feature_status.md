@@ -15,9 +15,14 @@ workflows:
 
 Out of scope:
 - toolboxes
-- plotting and GUI APIs
+- GUI APIs (interactive figures, App Designer, Live Editor inline plots,
+  ginput, pan/zoom/rotate)
 - full MATLAB compatibility
 - `.mat` file compatibility
+
+Now in scope (covered by dedicated docs):
+- **Plotting**: headless Cairo-backed `plot` / `bar` / `surf` / etc. with
+  PNG/SVG/PDF output. See [`plotting.md`](plotting.md).
 
 ## Reading Guide
 
@@ -485,7 +490,9 @@ deliberate non-goals; see "Out of scope."
 
 ### Out of scope (deliberate non-goals)
 
-- **Plotting / figures / UI** — no graphics backend planned. Reject cleanly.
+- **Interactive UI / GUIs** — no live windows, mouse picking, App Designer.
+  Headless plotting (`plot`, `surf`, `bar`, ... → PNG/SVG/PDF) is shipped;
+  see [`plotting.md`](plotting.md).
 - **Simulink and toolboxes** (Signal Processing, Image Processing, Control Systems, Statistics, Symbolic Math, etc.) — each is a separate MathWorks product; would require reimplementing thousands of functions.
 - **MEX interop** — loading compiled `.mex` files; deep binary-ABI lock-in with MathWorks.
 - **Live Scripts** (`.mlx`) — proprietary format; use Jupyter or a documentation toolchain instead.

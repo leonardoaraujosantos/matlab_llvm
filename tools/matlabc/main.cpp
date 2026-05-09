@@ -489,6 +489,9 @@ int runReplInput(mlirgen::Context &MCtx, const std::string &Src, int Id,
   // the func-to-llvm conversion sees consistent types. Same as the
   // static -emit-* pipeline.
   mlirgen::runRefineFuncSigs(M);
+#ifdef MATLAB_LLVM_WITH_PLOT
+  mlirgen::runLowerPlot(M);
+#endif
   mlirgen::runLowerIO(M);
 
   if (mlir::failed(mlir::verify(M))) {
@@ -2444,6 +2447,9 @@ bool compileProgram() {
   mlirgen::runLowerScalarSlots(M);
   // Final signature catch-up — see comment in the REPL path above.
   mlirgen::runRefineFuncSigs(M);
+#ifdef MATLAB_LLVM_WITH_PLOT
+  mlirgen::runLowerPlot(M);
+#endif
   mlirgen::runLowerIO(M);
 
   if (getenv("MATLABC_DAP_DUMP")) mlirgen::printModule(std::cerr, M);
@@ -8213,7 +8219,10 @@ int main(int Argc, char **Argv) {
         // llvm.alloca. This catches function-body locals that weren't
         // promoted by SlotPromotion (because they're used across blocks).
         mlirgen::runLowerScalarSlots(M);
-        mlirgen::runLowerIO(M);
+#ifdef MATLAB_LLVM_WITH_PLOT
+        mlirgen::runLowerPlot(M);
+#endif
+  mlirgen::runLowerIO(M);
         if (Opts.Mode == Options::Mode::EmitC ||
             Opts.Mode == Options::Mode::EmitCpp ||
             Opts.Mode == Options::Mode::EmitPython ||

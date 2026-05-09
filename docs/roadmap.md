@@ -451,15 +451,34 @@ across logic). Just insertion at safe boundaries.
 
 ## Long-term / exploratory
 
-### 12. MATLAB graphics / `plot` (limited) 🔵
+### 12. MATLAB graphics / `plot` ✅ (initial)
 
-For demos and tutorials. Render `plot(x, y)`, `bar(...)`,
-`imagesc(...)` to PNG / SVG via a small wrapper around matplotlib
-(Python path) or directly to PNG via stb_image_write (C path).
-Not pixel-perfect MATLAB; just enough for quick visualization
-of compiled programs.
+Headless Cairo-backed plot runtime under `runtime/plot/` plus a
+matlabc codegen pass (`lib/MLIR/Passes/LowerPlot.cpp`) lowering
+MATLAB calls to runtime symbols. Builds on macOS / Linux / iOS
+from one codebase; no subprocess, no display server.
 
-**Effort.** ~1 week per output target.
+**Shipped surface (≈50 % of MATLAB plot calls in the wild)**:
+plot / plot3 / scatter / bar / stem / stairs / area / errorbar /
+histogram / imshow / imagesc / pcolor / contour / contourf / quiver /
+mesh / surf, plus title / xlabel / ylabel / zlabel / text / legend
+(varargs) / colorbar / colormap (gray/parula/jet/viridis/hot/cool) /
+grid / hold / axis (string + numeric) / box / xlim / ylim / view /
+xline / yline / xticks / yticks / xticklabels / yticklabels / yyaxis /
+loglog / semilogx / semilogy / subplot / saveas / print / figure / gcf /
+close. Property/value pairs (`'LineWidth'`, `'Color'`, `'LineStyle'`,
+`'Marker'`, `'MarkerSize'`, `'DisplayName'`) honoured. Auto colour
+cycle (MATLAB R2014b+ palette). Output: PNG / SVG / PDF in memory or
+on disk.
+
+**Status & roadmap**: see [`plotting.md`](plotting.md). Open follow-ons
+include `legend({'a','b'})` cell form (needs `LowerTensorOps` work),
+`polarplot`, `tiledlayout`, TeX/LaTeX in labels, lighting / shading
+options, `boxplot` / `violinplot` / `pie`, the volume-rendering 3D
+family (`isosurface` / `slice` / `streamline`), `fplot` / `fmesh` /
+`fsurf` (need symbolic backend), animation, DPI-controlled output.
+
+Build with `-DMATLAB_LLVM_WITH_PLOT=ON` (requires Cairo via pkg-config).
 
 ---
 

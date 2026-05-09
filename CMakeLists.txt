@@ -45,6 +45,24 @@ if(MATLAB_LLVM_WITH_SYM)
   message(STATUS "Found SymPP — Symbolic Math Toolbox enabled")
 endif()
 
+# --- Plotting (Cairo backend) ----------------------------------------------
+# Off by default; turn on with -DMATLAB_LLVM_WITH_PLOT=ON. Adds runtime
+# plotting symbols (matlab_plot, matlab_figure, matlab_savefig, ...) backed
+# by Cairo's image/svg/pdf surfaces. Headless: no subprocess, no display
+# server, no temp files. Cross-platform target: macOS, Linux, iOS.
+option(MATLAB_LLVM_WITH_PLOT "Enable matlab_plot runtime (Cairo backend)" OFF)
+if(MATLAB_LLVM_WITH_PLOT)
+  find_package(PkgConfig REQUIRED)
+  pkg_check_modules(CAIRO REQUIRED IMPORTED_TARGET cairo cairo-svg cairo-pdf)
+  message(STATUS "Found Cairo ${CAIRO_VERSION} — matlab_plot enabled")
+  set(MATLAB_PLOT_SOURCES
+    runtime/plot/c_api.cpp
+    runtime/plot/figure.cpp
+    runtime/plot/cairo_render.cpp
+    runtime/plot/colormap.cpp
+    runtime/plot/contour.cpp)
+endif()
+
 # --- Coverage ---------------------------------------------------------------
 # Off by default; turn on with -DMATLAB_LLVM_COVERAGE=ON to instrument the
 # matlabc binary (and therefore runtime/matlab_runtime.c) with Clang's
@@ -146,6 +164,7 @@ if(MATLAB_LLVM_WITH_MLIR)
     lib/MLIR/Passes/LowerScalarsToArith.cpp
     lib/MLIR/Passes/LowerFixedPoint.cpp
     lib/MLIR/Passes/LowerIO.cpp
+    lib/MLIR/Passes/LowerPlot.cpp
     lib/MLIR/Passes/LowerParfor.cpp
     lib/MLIR/Passes/LowerSeqLoops.cpp
     lib/MLIR/Passes/LowerAnonCalls.cpp
@@ -231,6 +250,11 @@ if(MATLAB_LLVM_WITH_MLIR)
     target_link_libraries(matlabc PRIVATE SymPP::sympp)
     target_compile_definitions(matlabc PRIVATE MATLAB_LLVM_WITH_SYM=1)
   endif()
+  if(MATLAB_LLVM_WITH_PLOT)
+    target_sources(matlabc PRIVATE ${MATLAB_PLOT_SOURCES})
+    target_link_libraries(matlabc PRIVATE PkgConfig::CAIRO)
+    target_compile_definitions(matlabc PRIVATE MATLAB_LLVM_WITH_PLOT=1)
+  endif()
   # Export the matlab_* symbols so the JIT's dynamic lookup finds them
   # (by default executables hide symbols not referenced internally).
   if(APPLE)
@@ -275,6 +299,23 @@ foreach(_rt_test IN ITEMS linalg shape rng complex reduce signal stats image mor
   add_test(NAME runtime-tests-${_rt_test}
            COMMAND $<TARGET_FILE:${_rt_target}>)
 endforeach()
+
+if(MATLAB_LLVM_WITH_PLOT)
+  foreach(_plot_test IN ITEMS hello basic)
+    set(_plot_target "runtime-plot-${_plot_test}")
+    add_executable(${_plot_target}
+      test/Runtime/test_plot_${_plot_test}.cpp
+      runtime/matlab_runtime.cpp
+      runtime/runtime_debug.cpp
+      runtime/runtime_complex.cpp
+      ${MATLAB_PLOT_SOURCES})
+    target_include_directories(${_plot_target} PRIVATE
+      ${CMAKE_SOURCE_DIR}/runtime)
+    target_link_libraries(${_plot_target} PRIVATE m PkgConfig::CAIRO)
+    add_test(NAME runtime-plot-${_plot_test}
+             COMMAND $<TARGET_FILE:${_plot_target}>)
+  endforeach()
+endif()
 
 add_test(
   NAME frontend-tests
