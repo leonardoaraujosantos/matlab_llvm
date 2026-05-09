@@ -83,14 +83,37 @@ fi
 # --- Plot runtime sources + Cairo flags -------------------------------------
 PLOT_LINK_FLAGS=()
 if [[ "$USES_PLOT" == 1 ]]; then
-  if ! command -v pkg-config >/dev/null 2>&1; then
-    echo "error: input uses plotting builtins but pkg-config is not on PATH" >&2
+  # GUI launches on macOS (Xcode, IDE wrappers) inherit a stripped PATH
+  # that doesn't include /opt/homebrew/bin where Homebrew installs
+  # pkg-config / cairo. Look for pkg-config explicitly in known Homebrew
+  # prefixes before falling back to PATH lookup.
+  PKG_CONFIG="${PKG_CONFIG:-}"
+  if [[ -z "$PKG_CONFIG" ]]; then
+    if command -v pkg-config >/dev/null 2>&1; then
+      PKG_CONFIG="$(command -v pkg-config)"
+    else
+      for _p in /opt/homebrew/bin/pkg-config /usr/local/bin/pkg-config /usr/bin/pkg-config; do
+        if [[ -x "$_p" ]]; then PKG_CONFIG="$_p"; break; fi
+      done
+    fi
+  fi
+  if [[ -z "$PKG_CONFIG" || ! -x "$PKG_CONFIG" ]]; then
+    echo "error: input uses plotting builtins but pkg-config not found" >&2
     echo "       brew install pkg-config (macOS) or apt-get install pkg-config" >&2
+    echo "       (or set PKG_CONFIG=/full/path/to/pkg-config)" >&2
     exit 2
   fi
-  if ! pkg-config --exists cairo cairo-svg cairo-pdf; then
-    echo "error: cairo / cairo-svg / cairo-pdf not discoverable via pkg-config" >&2
+  # Make sure pkg-config can find Homebrew's .pc files when the GUI
+  # launched us with a stripped PKG_CONFIG_PATH.
+  for _hb in /opt/homebrew /usr/local; do
+    if [[ -d "$_hb/lib/pkgconfig" ]]; then
+      export PKG_CONFIG_PATH="${PKG_CONFIG_PATH:+$PKG_CONFIG_PATH:}$_hb/lib/pkgconfig"
+    fi
+  done
+  if ! "$PKG_CONFIG" --exists cairo cairo-svg cairo-pdf; then
+    echo "error: cairo / cairo-svg / cairo-pdf not discoverable via $PKG_CONFIG" >&2
     echo "       brew install cairo (macOS) or apt-get install libcairo2-dev" >&2
+    echo "       PKG_CONFIG_PATH=$PKG_CONFIG_PATH" >&2
     exit 2
   fi
   RUNTIME_SRCS+=(
@@ -103,8 +126,8 @@ if [[ "$USES_PLOT" == 1 ]]; then
   # shellcheck disable=SC2207
   PLOT_LINK_FLAGS=(
     -DMATLAB_LLVM_WITH_PLOT=1
-    $(pkg-config --cflags cairo cairo-svg cairo-pdf)
-    $(pkg-config --libs   cairo cairo-svg cairo-pdf)
+    $("$PKG_CONFIG" --cflags cairo cairo-svg cairo-pdf)
+    $("$PKG_CONFIG" --libs   cairo cairo-svg cairo-pdf)
   )
 fi
 
