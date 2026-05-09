@@ -667,6 +667,31 @@ def lqr(A, B, Q, R):
     return Rinv @ Bt @ X
 
 
+def lqr_e(A, B, Q, R):
+    """Closed-loop poles eig(A - B*K) for [K, S, e] = lqr(...)."""
+    K = lqr(A, B, Q, R)
+    if K.size == 0:
+        return np.zeros((0, 0))
+    Am = _m(A).astype(float); Bm = _m(B).astype(float)
+    Acl = Am - Bm @ K
+    e = np.linalg.eigvals(Acl)
+    # Sort ascending real, then imag (mirrors C-runtime convention).
+    order = np.lexsort((e.imag, e.real))
+    return e[order].reshape(-1, 1)
+
+
+def dlqr_e(Ad, Bd, Q, R):
+    """Closed-loop poles eig(Ad - Bd*K) for [K, S, e] = dlqr(...)."""
+    K = dlqr(Ad, Bd, Q, R)
+    if K.size == 0:
+        return np.zeros((0, 0))
+    Am = _m(Ad).astype(float); Bm = _m(Bd).astype(float)
+    Acl = Am - Bm @ K
+    e = np.linalg.eigvals(Acl)
+    order = np.lexsort((e.imag, e.real))
+    return e[order].reshape(-1, 1)
+
+
 def dare(Ad, Bd, Q, R):
     """Discrete algebraic Riccati - X = dare(Ad, Bd, Q, R).
     Newton-Kleinman iteration seeded from X_0 = dlyap(Ad', Q); requires
@@ -780,6 +805,33 @@ def damp(A):
     return out
 
 
+def d2c_tustin_A(Ad, Bd, Ts):
+    """Inverse Tustin A = (2/Ts) (Ad - I) (I + Ad)^-1."""
+    Am = _m(Ad).astype(float)
+    n = Am.shape[0]
+    if n == 0 or Am.shape[1] != n or Ts <= 0:
+        return np.zeros((0, 0))
+    try:
+        Inv = np.linalg.inv(np.eye(n) + Am)
+    except np.linalg.LinAlgError:
+        return np.zeros((0, 0))
+    return (2.0 / Ts) * ((Am - np.eye(n)) @ Inv)
+
+
+def d2c_tustin_B(Ad, Bd, Ts):
+    """Inverse Tustin B = (2/Ts) (I + Ad)^-1 Bd."""
+    Am = _m(Ad).astype(float)
+    Bm = _m(Bd).astype(float)
+    n = Am.shape[0]
+    if n == 0 or Am.shape[1] != n or Bm.shape[0] != n or Ts <= 0:
+        return np.zeros((0, 0))
+    try:
+        Inv = np.linalg.inv(np.eye(n) + Am)
+    except np.linalg.LinAlgError:
+        return np.zeros((0, 0))
+    return (2.0 / Ts) * (Inv @ Bm)
+
+
 def c2d_tustin_Ad(A, B, Ts):
     """Tustin discretisation Ad = (I − αA)⁻¹ (I + αA), α = Ts/2."""
     Am = _m(A).astype(float)
@@ -824,6 +876,209 @@ def norm_h2_d(A, B, C, D):
         return float('inf')
     tr = float(np.trace(Cm @ Wc @ Cm.T) + np.trace(Dm @ Dm.T))
     return math.sqrt(tr) if tr > 0 else 0.0
+
+
+def append_ss_A(A1, B1, C1, A2, B2, C2):
+    """Append Acl = blkdiag(A1, A2)."""
+    return parallel_ss_A(A1, B1, C1, A2, B2, C2)
+
+
+def append_ss_B(A1, B1, C1, A2, B2, C2):
+    """Append Bcl = blkdiag(B1, B2)."""
+    B1m = _m(B1).astype(float); B2m = _m(B2).astype(float)
+    n1, m1 = B1m.shape
+    n2, m2 = B2m.shape
+    out = np.zeros((n1 + n2, m1 + m2))
+    out[:n1, :m1] = B1m
+    out[n1:, m1:] = B2m
+    return out
+
+
+def append_ss_C(A1, B1, C1, A2, B2, C2):
+    """Append Ccl = blkdiag(C1, C2)."""
+    C1m = _m(C1).astype(float); C2m = _m(C2).astype(float)
+    p1, n1 = C1m.shape
+    p2, n2 = C2m.shape
+    out = np.zeros((p1 + p2, n1 + n2))
+    out[:p1, :n1] = C1m
+    out[p1:, n1:] = C2m
+    return out
+
+
+def series_ss_A(A1, B1, C1, A2, B2, C2):
+    """Series cascade Acl = [A1, 0; B2*C1, A2]."""
+    A1m = _m(A1).astype(float); C1m = _m(C1).astype(float)
+    A2m = _m(A2).astype(float); B2m = _m(B2).astype(float)
+    n1, n2 = A1m.shape[0], A2m.shape[0]
+    return np.block([[A1m,        np.zeros((n1, n2))],
+                     [B2m @ C1m,  A2m]])
+
+
+def series_ss_B(A1, B1, C1, A2, B2, C2):
+    """Series Bcl = [B1; 0]."""
+    A2m = _m(A2).astype(float); B1m = _m(B1).astype(float)
+    return np.vstack([B1m, np.zeros((A2m.shape[0], B1m.shape[1]))])
+
+
+def series_ss_C(A1, B1, C1, A2, B2, C2):
+    """Series Ccl = [0, C2]."""
+    A1m = _m(A1).astype(float); C2m = _m(C2).astype(float)
+    return np.hstack([np.zeros((C2m.shape[0], A1m.shape[0])), C2m])
+
+
+def parallel_ss_A(A1, B1, C1, A2, B2, C2):
+    """Parallel Acl = blkdiag(A1, A2)."""
+    A1m = _m(A1).astype(float); A2m = _m(A2).astype(float)
+    n1, n2 = A1m.shape[0], A2m.shape[0]
+    out = np.zeros((n1 + n2, n1 + n2))
+    out[:n1, :n1] = A1m
+    out[n1:, n1:] = A2m
+    return out
+
+
+def parallel_ss_B(A1, B1, C1, A2, B2, C2):
+    """Parallel Bcl = [B1; B2]."""
+    return np.vstack([_m(B1).astype(float), _m(B2).astype(float)])
+
+
+def parallel_ss_C(A1, B1, C1, A2, B2, C2):
+    """Parallel Ccl = [C1, C2]."""
+    return np.hstack([_m(C1).astype(float), _m(C2).astype(float)])
+
+
+def feedback_ss_A(A1, B1, C1, A2, B2, C2):
+    """Closed-loop A: [A1, -B1*C2; B2*C1, A2] (strictly proper plants)."""
+    A1m = _m(A1).astype(float); B1m = _m(B1).astype(float); C1m = _m(C1).astype(float)
+    A2m = _m(A2).astype(float); B2m = _m(B2).astype(float); C2m = _m(C2).astype(float)
+    return np.block([[A1m, -B1m @ C2m], [B2m @ C1m, A2m]])
+
+
+def feedback_ss_B(A1, B1, C1, A2, B2, C2):
+    """Closed-loop B: [B1; 0]."""
+    A1m = _m(A1).astype(float); B1m = _m(B1).astype(float)
+    A2m = _m(A2).astype(float)
+    return np.vstack([B1m, np.zeros((A2m.shape[0], B1m.shape[1]))])
+
+
+def feedback_ss_C(A1, B1, C1, A2, B2, C2):
+    """Closed-loop C: [C1, 0]."""
+    A1m = _m(A1).astype(float); C1m = _m(C1).astype(float)
+    A2m = _m(A2).astype(float)
+    return np.hstack([C1m, np.zeros((C1m.shape[0], A2m.shape[0]))])
+
+
+def pole(A):
+    """Alias for eig(A) — closed-loop poles."""
+    return np.linalg.eigvals(_m(A).astype(float)).reshape(-1, 1)
+
+
+def getPeakGain_ss(A, B, C, D):
+    """Approximate H∞ norm — max |H(jw)| over a log-spaced grid."""
+    Am = _m(A).astype(float); Bm = _m(B).astype(float)
+    Cm = _m(C).astype(float); Dm = _m(D).astype(float)
+    n = Am.shape[0]
+    if n == 0 or Am.shape[1] != n:
+        return 0.0
+    peak = 0.0
+    try:
+        Ainv = np.linalg.inv(Am)
+        dc = float(Dm[0, 0] - (Cm @ Ainv @ Bm)[0, 0])
+        peak = abs(dc)
+    except np.linalg.LinAlgError:
+        pass
+    for w in np.logspace(-3, 6, 200):
+        try:
+            M = np.linalg.inv(1j * w * np.eye(n) - Am)
+        except np.linalg.LinAlgError:
+            continue
+        H = (Cm @ M @ Bm + Dm)[0, 0]
+        mag = abs(H)
+        if mag > peak: peak = float(mag)
+    return peak
+
+
+def bandwidth_ss(A, B, C, D):
+    """SISO -3 dB bandwidth: lowest w where |H(jw)| < |H(j0)|/sqrt(2)."""
+    Am = _m(A).astype(float); Bm = _m(B).astype(float)
+    Cm = _m(C).astype(float); Dm = _m(D).astype(float)
+    n = Am.shape[0]
+    if n == 0 or Am.shape[1] != n:
+        return float('inf')
+    try:
+        Ainv = np.linalg.inv(Am)
+    except np.linalg.LinAlgError:
+        return float('inf')
+    G0 = float(Dm[0, 0] - (Cm @ Ainv @ Bm)[0, 0])
+    absG0 = abs(G0)
+    if absG0 <= 0:
+        return float('inf')
+    target = absG0 / math.sqrt(2.0)
+    Npts = 200
+    wgrid = np.logspace(-3, 6, Npts)
+    prev_w, prev_mag = wgrid[0], absG0
+    for i in _pyrange(Npts):
+        w = float(wgrid[i])
+        # H(jw) = C (jw I - A)^-1 B + D, scalar for SISO.
+        try:
+            M = np.linalg.inv(1j * w * np.eye(n) - Am)
+        except np.linalg.LinAlgError:
+            continue
+        H = (Cm @ M @ Bm + Dm)[0, 0]
+        mag = abs(H)
+        if mag < target and prev_mag >= target and i > 0:
+            t = (prev_mag - target) / (prev_mag - mag)
+            lw = math.log10(prev_w) + t * (math.log10(w) - math.log10(prev_w))
+            return float(10 ** lw)
+        prev_w, prev_mag = w, mag
+    return float('inf')
+
+
+def stepinfo(y, t):
+    """Step-response metrics: 1 x 5 row [Rise, Settle, Over, Peak, PeakTime]."""
+    ya = _m(y).astype(float).reshape(-1)
+    ta = _m(t).astype(float).reshape(-1)
+    if ya.size == 0 or ya.size != ta.size:
+        return np.zeros((0, 0))
+    Final = float(ya[-1])
+    absF = abs(Final)
+    abs_y = np.abs(ya)
+    peakIdx = int(np.argmax(abs_y))
+    Peak = float(abs_y[peakIdx])
+    PeakTime = float(ta[peakIdx])
+    Over = 0.0
+    if absF > 0.0:
+        v = (Peak - absF) / absF * 100.0
+        Over = v if v > 0.0 else 0.0
+    th10 = 0.1 * Final
+    th90 = 0.9 * Final
+    if Final >= 0:
+        i10 = next((i for i in _pyrange(ya.size) if ya[i] >= th10), -1)
+        i90 = next((i for i in _pyrange(ya.size) if ya[i] >= th90), -1)
+    else:
+        i10 = next((i for i in _pyrange(ya.size) if ya[i] <= th10), -1)
+        i90 = next((i for i in _pyrange(ya.size) if ya[i] <= th90), -1)
+    Rise = float(ta[i90] - ta[i10]) if (i10 >= 0 and i90 >= 0) else 0.0
+    band = 0.02 * absF
+    settleIdx = -1
+    for i in _pyrange(ya.size - 1, -1, -1):
+        if abs(ya[i] - Final) > band:
+            settleIdx = i; break
+    Settle = float(ta[settleIdx]) if settleIdx >= 0 else 0.0
+    return np.array([[Rise, Settle, Over, Peak, PeakTime]])
+
+
+def kalman_P(A, G, C, Qn, Rn):
+    """Steady-state Kalman covariance P = care(A', C', G Qn G', Rn)."""
+    Am = _m(A).astype(float); Gm = _m(G).astype(float)
+    Cm = _m(C).astype(float); Qm = _m(Qn).astype(float); Rm = _m(Rn).astype(float)
+    return care(Am.T, Cm.T, Gm @ Qm @ Gm.T, Rm)
+
+
+def kalmd_P(Ad, G, C, Qn, Rn):
+    """Discrete steady-state Kalman covariance via dare on the dual."""
+    Am = _m(Ad).astype(float); Gm = _m(G).astype(float)
+    Cm = _m(C).astype(float); Qm = _m(Qn).astype(float); Rm = _m(Rn).astype(float)
+    return dare(Am.T, Cm.T, Gm @ Qm @ Gm.T, Rm)
 
 
 def kalman_L(A, G, C, Qn, Rn):

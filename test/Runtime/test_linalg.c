@@ -1272,6 +1272,27 @@ static void test_c2d_tustin_preserves_stability(void) {
     rt_free(A); rt_free(B); rt_free(Ad);
 }
 
+/* d2c_tustin round-trips through c2d_tustin: c2d → d2c → original. */
+static void test_d2c_tustin_roundtrip(void) {
+    double a[] = {-1, 0.5, 0, -2};
+    double b[] = {1, 0.5};
+    matlab_mat *A = mk(a, 2, 2), *B = mk(b, 2, 1);
+    matlab_mat *Ad = matlab_c2d_tustin_Ad(A, B, 0.1);
+    matlab_mat *Bd = matlab_c2d_tustin_Bd(A, B, 0.1);
+    matlab_mat *A2 = matlab_d2c_tustin_A(Ad, Bd, 0.1);
+    matlab_mat *B2 = matlab_d2c_tustin_B(Ad, Bd, 0.1);
+    /* Must reproduce the original to machine precision. */
+    for (int i = 0; i < 4; ++i) {
+        double diff = rt_data(A2)[i] - a[i];
+        RT_NEAR(diff, 0.0, 1e-12, "d2c_tustin A round-trip");
+    }
+    for (int i = 0; i < 2; ++i) {
+        double diff = rt_data(B2)[i] - b[i];
+        RT_NEAR(diff, 0.0, 1e-12, "d2c_tustin B round-trip");
+    }
+    rt_free(A); rt_free(B); rt_free(Ad); rt_free(Bd); rt_free(A2); rt_free(B2);
+}
+
 /* c2d_tustin: small Ts makes the discrete poles approach z = 1 + s·Ts
  * (first-order Taylor of z = e^(s·Ts)). Use a real-pole plant and
  * verify the Tustin Ad eigenvalues track the closed-form mapping
@@ -1295,6 +1316,210 @@ static void test_c2d_tustin_pole_mapping(void) {
     RT_NEAR(rt_at(Re, 0, 0), e_lo, 1e-12, "tustin pole map [0]");
     RT_NEAR(rt_at(Re, 1, 0), e_hi, 1e-12, "tustin pole map [1]");
     rt_free(A); rt_free(B); rt_free(Ad); rt_free(Re);
+}
+
+/* matlab_lqr_e: eig(A - B*K) for the canonical double integrator.
+ * Closed form K = [1, sqrt(3)] places poles at -sqrt(3)/2 ± j*0.5. */
+static void test_lqr_e_double_integrator(void) {
+    double a[] = {0, 1, 0, 0};
+    double b[] = {0, 1};
+    double q[] = {1, 0, 0, 1};
+    double r[] = {1.0};
+    matlab_mat *A = mk(a, 2, 2), *B = mk(b, 2, 1);
+    matlab_mat *Q = mk(q, 2, 2), *R = mk(r, 1, 1);
+    matlab_mat *e = matlab_lqr_e(A, B, Q, R);
+    matlab_mat *Re = matlab_real_c(e);
+    matlab_mat *Im = matlab_imag_c(e);
+    /* Both poles have real part = -sqrt(3)/2; imag parts ±0.5 (sorted asc). */
+    RT_NEAR(rt_at(Re, 0, 0), -sqrt(3.0)/2.0, 1e-9, "lqr_e re[0]");
+    RT_NEAR(rt_at(Re, 1, 0), -sqrt(3.0)/2.0, 1e-9, "lqr_e re[1]");
+    RT_NEAR(rt_at(Im, 0, 0), -0.5,           1e-9, "lqr_e im[0]");
+    RT_NEAR(rt_at(Im, 1, 0),  0.5,           1e-9, "lqr_e im[1]");
+    rt_free(A); rt_free(B); rt_free(Q); rt_free(R); rt_free(Re); rt_free(Im);
+}
+
+/* getPeakGain_ss: 1st-order plant peaks at DC (G(0) = 1 for unit-gain). */
+static void test_getPeakGain_first_order(void) {
+    /* A = [-1, 0.5; 0, -2], B = [1; 0], C = [1, 0], D = 0.
+     * H(s) = C (sI - A)^-1 B = 1/(s+1). Peak |H| at s=0 is 1.0. */
+    double a[] = {-1, 0.5, 0, -2};
+    double b[] = {1, 0};
+    double c[] = {1, 0};
+    double d[] = {0};
+    matlab_mat *A = mk(a, 2, 2), *B = mk(b, 2, 1);
+    matlab_mat *C = mk(c, 1, 2), *D = mk(d, 1, 1);
+    double pk = matlab_getPeakGain_ss(A, B, C, D);
+    RT_NEAR(pk, 1.0, 1e-6, "getPeakGain 1st-order = 1");
+    rt_free(A); rt_free(B); rt_free(C); rt_free(D);
+}
+
+/* matlab_bandwidth_ss closed form: 1st-order H(s) = 1/(s+1) → BW = 1 rad/s. */
+static void test_bandwidth_ss_first_order(void) {
+    double a[] = {-1.0}, b[] = {1.0}, c[] = {1.0}, d[] = {0.0};
+    matlab_mat *A = mk(a, 1, 1), *B = mk(b, 1, 1);
+    matlab_mat *C = mk(c, 1, 1), *D = mk(d, 1, 1);
+    double bw = matlab_bandwidth_ss(A, B, C, D);
+    /* Grid is 200 log-spaced points 1e-3..1e6, so resolution at w=1 is
+     * about 0.1 (one decade ≈ 22 grid steps). 1% tolerance is generous. */
+    RT_NEAR(bw, 1.0, 0.01, "bandwidth 1st-order = 1");
+    rt_free(A); rt_free(B); rt_free(C); rt_free(D);
+}
+
+/* Unstable / zero-DC plant returns +Inf. */
+static void test_bandwidth_ss_unstable_inf(void) {
+    /* a = 0 (integrator) → A is singular, bandwidth undefined. */
+    double a[] = {0.0}, b[] = {1.0}, c[] = {1.0}, d[] = {0.0};
+    matlab_mat *A = mk(a, 1, 1), *B = mk(b, 1, 1);
+    matlab_mat *C = mk(c, 1, 1), *D = mk(d, 1, 1);
+    double bw = matlab_bandwidth_ss(A, B, C, D);
+    RT_CHECK(bw > 1e10, "bandwidth integrator → +Inf");
+    rt_free(A); rt_free(B); rt_free(C); rt_free(D);
+}
+
+/* matlab_stepinfo: closed-form on a first-order step.
+ *   y(t) = K * (1 - exp(-t/tau)) with K = 1, tau = 0.5.
+ *   RiseTime = tau * log(9) ≈ 1.0986
+ *   SettlingTime = -tau * log(0.02) ≈ 1.957
+ *   Overshoot = 0 (no overshoot for 1st order Hurwitz)
+ *   Peak ≈ K (1.0)
+ * Build a synthetic step response sample-by-sample. */
+static void test_stepinfo_first_order(void) {
+    int N = 1000;
+    double dt = 0.01;
+    double tau = 0.5;
+    /* y, t arrays. */
+    double *yd = (double *)calloc(N, sizeof(double));
+    double *td = (double *)calloc(N, sizeof(double));
+    for (int i = 0; i < N; ++i) {
+        td[i] = i * dt;
+        yd[i] = 1.0 - exp(-td[i] / tau);
+    }
+    matlab_mat *Y = mk(yd, N, 1);
+    matlab_mat *T = mk(td, N, 1);
+    matlab_mat *S = matlab_stepinfo(Y, T);
+    double Rise = rt_at(S, 0, 0);
+    double Settle = rt_at(S, 0, 1);
+    double Over = rt_at(S, 0, 2);
+    double Peak = rt_at(S, 0, 3);
+    /* Allow ±dt tolerance because the metrics are sample-grid quantised. */
+    RT_NEAR(Rise,   tau * log(9.0),     2 * dt, "stepinfo Rise");
+    RT_NEAR(Settle, -tau * log(0.02),   2 * dt, "stepinfo Settle");
+    RT_NEAR(Over,   0.0,                1e-12,  "stepinfo Over = 0");
+    RT_NEAR(Peak,   1.0,                1e-3,   "stepinfo Peak = 1");
+    free(yd); free(td);
+    rt_free(Y); rt_free(T); rt_free(S);
+}
+
+/* series_ss: Acl = [A1, 0; B2*C1, A2]. */
+static void test_series_ss_block_layout(void) {
+    double a1[] = {-1.0}, b1[] = {1.0}, c1[] = {1.0};
+    double a2[] = {-2.0}, b2[] = {1.0}, c2[] = {1.0};
+    matlab_mat *A1 = mk(a1, 1, 1), *B1 = mk(b1, 1, 1), *C1 = mk(c1, 1, 1);
+    matlab_mat *A2 = mk(a2, 1, 1), *B2 = mk(b2, 1, 1), *C2 = mk(c2, 1, 1);
+    matlab_mat *Acl = matlab_series_ss_A(A1, B1, C1, A2, B2, C2);
+    matlab_mat *Bcl = matlab_series_ss_B(A1, B1, C1, A2, B2, C2);
+    matlab_mat *Ccl = matlab_series_ss_C(A1, B1, C1, A2, B2, C2);
+    /* Acl = [-1, 0; 1, -2]. */
+    RT_NEAR(rt_at(Acl, 0, 0), -1.0, 1e-15, "series Acl[0,0]");
+    RT_NEAR(rt_at(Acl, 0, 1),  0.0, 1e-15, "series Acl[0,1]");
+    RT_NEAR(rt_at(Acl, 1, 0),  1.0, 1e-15, "series Acl[1,0]");
+    RT_NEAR(rt_at(Acl, 1, 1), -2.0, 1e-15, "series Acl[1,1]");
+    /* Bcl = [1; 0]. */
+    RT_NEAR(rt_at(Bcl, 0, 0), 1.0, 1e-15, "series Bcl[0]");
+    RT_NEAR(rt_at(Bcl, 1, 0), 0.0, 1e-15, "series Bcl[1]");
+    /* Ccl = [0, 1]. */
+    RT_NEAR(rt_at(Ccl, 0, 0), 0.0, 1e-15, "series Ccl[0]");
+    RT_NEAR(rt_at(Ccl, 0, 1), 1.0, 1e-15, "series Ccl[1]");
+    rt_free(A1); rt_free(B1); rt_free(C1); rt_free(A2); rt_free(B2); rt_free(C2);
+    rt_free(Acl); rt_free(Bcl); rt_free(Ccl);
+}
+
+/* parallel_ss: Acl = blkdiag(A1, A2), Bcl = [B1; B2], Ccl = [C1, C2]. */
+static void test_parallel_ss_block_layout(void) {
+    double a1[] = {-1.0}, b1[] = {1.0}, c1[] = {2.0};
+    double a2[] = {-2.0}, b2[] = {3.0}, c2[] = {4.0};
+    matlab_mat *A1 = mk(a1, 1, 1), *B1 = mk(b1, 1, 1), *C1 = mk(c1, 1, 1);
+    matlab_mat *A2 = mk(a2, 1, 1), *B2 = mk(b2, 1, 1), *C2 = mk(c2, 1, 1);
+    matlab_mat *Acl = matlab_parallel_ss_A(A1, B1, C1, A2, B2, C2);
+    matlab_mat *Bcl = matlab_parallel_ss_B(A1, B1, C1, A2, B2, C2);
+    matlab_mat *Ccl = matlab_parallel_ss_C(A1, B1, C1, A2, B2, C2);
+    RT_NEAR(rt_at(Acl, 0, 0), -1.0, 1e-15, "parallel Acl[0,0]");
+    RT_NEAR(rt_at(Acl, 0, 1),  0.0, 1e-15, "parallel Acl[0,1]");
+    RT_NEAR(rt_at(Acl, 1, 0),  0.0, 1e-15, "parallel Acl[1,0]");
+    RT_NEAR(rt_at(Acl, 1, 1), -2.0, 1e-15, "parallel Acl[1,1]");
+    RT_NEAR(rt_at(Bcl, 0, 0), 1.0, 1e-15, "parallel Bcl[0]");
+    RT_NEAR(rt_at(Bcl, 1, 0), 3.0, 1e-15, "parallel Bcl[1]");
+    RT_NEAR(rt_at(Ccl, 0, 0), 2.0, 1e-15, "parallel Ccl[0]");
+    RT_NEAR(rt_at(Ccl, 0, 1), 4.0, 1e-15, "parallel Ccl[1]");
+    rt_free(A1); rt_free(B1); rt_free(C1); rt_free(A2); rt_free(B2); rt_free(C2);
+    rt_free(Acl); rt_free(Bcl); rt_free(Ccl);
+}
+
+/* feedback_ss block layout: Acl = [A1, -B1*C2; B2*C1, A2]. */
+static void test_feedback_ss_block_layout(void) {
+    /* sys1 = (A1=-1, B1=1, C1=1) — 1×1 plant.
+     * sys2 = (A2=-2, B2=1, C2=1) — 1×1 compensator. */
+    double a1[] = {-1.0}, b1[] = {1.0}, c1[] = {1.0};
+    double a2[] = {-2.0}, b2[] = {1.0}, c2[] = {1.0};
+    matlab_mat *A1 = mk(a1, 1, 1), *B1 = mk(b1, 1, 1), *C1 = mk(c1, 1, 1);
+    matlab_mat *A2 = mk(a2, 1, 1), *B2 = mk(b2, 1, 1), *C2 = mk(c2, 1, 1);
+    matlab_mat *Acl = matlab_feedback_ss_A(A1, B1, C1, A2, B2, C2);
+    matlab_mat *Bcl = matlab_feedback_ss_B(A1, B1, C1, A2, B2, C2);
+    matlab_mat *Ccl = matlab_feedback_ss_C(A1, B1, C1, A2, B2, C2);
+    /* Acl = [-1, -B1*C2; B2*C1, -2] = [[-1, -1], [1, -2]]. */
+    RT_NEAR(rt_at(Acl, 0, 0), -1.0, 1e-15, "Acl[0,0]");
+    RT_NEAR(rt_at(Acl, 0, 1), -1.0, 1e-15, "Acl[0,1]");
+    RT_NEAR(rt_at(Acl, 1, 0),  1.0, 1e-15, "Acl[1,0]");
+    RT_NEAR(rt_at(Acl, 1, 1), -2.0, 1e-15, "Acl[1,1]");
+    /* Bcl = [B1; 0] = [1; 0]. */
+    RT_NEAR(rt_at(Bcl, 0, 0), 1.0, 1e-15, "Bcl[0]");
+    RT_NEAR(rt_at(Bcl, 1, 0), 0.0, 1e-15, "Bcl[1]");
+    /* Ccl = [C1, 0] = [1, 0]. */
+    RT_NEAR(rt_at(Ccl, 0, 0), 1.0, 1e-15, "Ccl[0]");
+    RT_NEAR(rt_at(Ccl, 0, 1), 0.0, 1e-15, "Ccl[1]");
+    rt_free(A1); rt_free(B1); rt_free(C1); rt_free(A2); rt_free(B2); rt_free(C2);
+    rt_free(Acl); rt_free(Bcl); rt_free(Ccl);
+}
+
+/* matlab_kalman_P: dual care result. For C = [1, 0], Rn = 1, the
+ * Kalman gain L = P · C' / Rn is the first column of P. */
+static void test_kalman_P_first_column_is_L(void) {
+    double a[]  = {1, 1, 0, -2};
+    double g[]  = {1, 0, 0, 1};
+    double c[]  = {1, 0};
+    double qn[] = {1, 0, 0, 1};
+    double rn[] = {1.0};
+    matlab_mat *A = mk(a, 2, 2), *G = mk(g, 2, 2), *C = mk(c, 1, 2);
+    matlab_mat *Qn = mk(qn, 2, 2), *Rn = mk(rn, 1, 1);
+    matlab_mat *L = matlab_kalman_L(A, G, C, Qn, Rn);
+    matlab_mat *P = matlab_kalman_P(A, G, C, Qn, Rn);
+    /* L (n×p) and P(:, 1) must agree for this single-output plant. */
+    RT_NEAR(rt_at(L, 0, 0), rt_at(P, 0, 0), 1e-10, "L[0] = P[0,0]");
+    RT_NEAR(rt_at(L, 1, 0), rt_at(P, 1, 0), 1e-10, "L[1] = P[1,0]");
+    /* P must be symmetric. */
+    RT_NEAR(rt_at(P, 0, 1), rt_at(P, 1, 0), 1e-10, "P symmetric");
+    rt_free(A); rt_free(G); rt_free(C); rt_free(Qn); rt_free(Rn);
+    rt_free(L); rt_free(P);
+}
+
+/* matlab_dlqr_e: closed-loop poles must be Schur-stable (|eig|<1). */
+static void test_dlqr_e_schur(void) {
+    double ad[] = {0.5, 0, 0, 0.6};
+    double bd[] = {1, 1};
+    double q[] = {1, 0, 0, 1};
+    double r[] = {1.0};
+    matlab_mat *Ad = mk(ad, 2, 2), *Bd = mk(bd, 2, 1);
+    matlab_mat *Q = mk(q, 2, 2), *R = mk(r, 1, 1);
+    matlab_mat *e = matlab_dlqr_e(Ad, Bd, Q, R);
+    matlab_mat *Re = matlab_real_c(e);
+    matlab_mat *Im = matlab_imag_c(e);
+    for (int i = 0; i < 2; ++i) {
+        double re = rt_at(Re, i, 0);
+        double im = rt_at(Im, i, 0);
+        double mag = sqrt(re * re + im * im);
+        RT_CHECK(mag < 1.0, "dlqr_e pole inside unit disk");
+    }
+    rt_free(Ad); rt_free(Bd); rt_free(Q); rt_free(R); rt_free(Re); rt_free(Im);
 }
 
 /* LQR closed-loop is Hurwitz: real(eig(A - B K)) < 0 elementwise. */
@@ -1727,6 +1952,17 @@ int main(void) {
     RT_RUN(test_c2d_tustin_first_order);
     RT_RUN(test_c2d_tustin_preserves_stability);
     RT_RUN(test_c2d_tustin_pole_mapping);
+    RT_RUN(test_d2c_tustin_roundtrip);
+    RT_RUN(test_lqr_e_double_integrator);
+    RT_RUN(test_dlqr_e_schur);
+    RT_RUN(test_kalman_P_first_column_is_L);
+    RT_RUN(test_feedback_ss_block_layout);
+    RT_RUN(test_series_ss_block_layout);
+    RT_RUN(test_parallel_ss_block_layout);
+    RT_RUN(test_bandwidth_ss_first_order);
+    RT_RUN(test_bandwidth_ss_unstable_inf);
+    RT_RUN(test_getPeakGain_first_order);
+    RT_RUN(test_stepinfo_first_order);
     RT_RUN(test_c2d_diagonal);
     RT_RUN(test_c2d_zero_Ts);
     RT_RUN(test_gram_c_diagonal);

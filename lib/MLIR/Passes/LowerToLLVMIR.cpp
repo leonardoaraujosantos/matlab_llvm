@@ -140,6 +140,55 @@ void attachDebugInfo(mlir::ModuleOp M) {
 
 } // namespace
 
+/* The MLIR LLVM-dialect translation rejects unknown parameter
+ * attributes on llvm.func with "Unhandled parameter attribute
+ * '<name>'". Our pipeline stamps `matlab.name` (and a few other
+ * `matlab.*` arg attrs for fi-spec / array-shape metadata) on
+ * func.func args/results so the EmitC / SystemVerilog backends can
+ * render readable signatures. Those attrs ride the conversion to
+ * llvm.func unchanged. The plain `-emit-llvm` translator tolerates
+ * them, but the JIT (ExecutionEngine::create, used by `-repl` and
+ * `-dap`) goes through a stricter path that errors on the same
+ * input. Strip every `matlab.*` arg/result attr after the conversion
+ * pipeline has run; the EmitC / SV emitters work off the source
+ * func.func ops earlier, so this strip is invisible to them. */
+void stripMatlabFuncAttrs(mlir::ModuleOp M) {
+  M.walk([](mlir::LLVM::LLVMFuncOp Fn) {
+    auto stripFromArrayAttr = [&](mlir::ArrayAttr Arr) -> mlir::ArrayAttr {
+      if (!Arr) return Arr;
+      llvm::SmallVector<mlir::Attribute> Filtered;
+      Filtered.reserve(Arr.size());
+      bool Changed = false;
+      for (mlir::Attribute A : Arr) {
+        auto Dict = mlir::dyn_cast<mlir::DictionaryAttr>(A);
+        if (!Dict) {
+          Filtered.push_back(A);
+          continue;
+        }
+        llvm::SmallVector<mlir::NamedAttribute> Kept;
+        Kept.reserve(Dict.size());
+        for (mlir::NamedAttribute NA : Dict.getValue()) {
+          if (NA.getName().getValue().starts_with("matlab.")) {
+            Changed = true;
+            continue;
+          }
+          Kept.push_back(NA);
+        }
+        if (Kept.size() == Dict.size())
+          Filtered.push_back(A);
+        else
+          Filtered.push_back(mlir::DictionaryAttr::get(Fn.getContext(), Kept));
+      }
+      if (!Changed) return Arr;
+      return mlir::ArrayAttr::get(Fn.getContext(), Filtered);
+    };
+    if (auto ArgAttrs = Fn.getArgAttrsAttr())
+      Fn.setArgAttrsAttr(stripFromArrayAttr(ArgAttrs));
+    if (auto ResAttrs = Fn.getResAttrsAttr())
+      Fn.setResAttrsAttr(stripFromArrayAttr(ResAttrs));
+  });
+}
+
 std::string lowerToLLVMIR(mlir::ModuleOp M, bool EmitDebugInfo) {
   mlir::MLIRContext *Ctx = M.getContext();
 
@@ -166,6 +215,13 @@ std::string lowerToLLVMIR(mlir::ModuleOp M, bool EmitDebugInfo) {
    * original func.func ops that get rewritten by ConvertFuncToLLVMPass. */
   if (EmitDebugInfo)
     attachDebugInfo(M);
+
+  /* Strip matlab.* arg/result attrs from llvm.func ops — see the
+   * comment on stripMatlabFuncAttrs above. The plain `-emit-llvm`
+   * path historically tolerated them but the JIT path doesn't, and
+   * the conversion is needed unconditionally now to share the same
+   * post-pipeline state across all three lowering callers. */
+  stripMatlabFuncAttrs(M);
 
   // Translate to LLVM IR.
   llvm::LLVMContext LLVMCtx;

@@ -80,6 +80,43 @@ Cumulative test deltas vs. `e812c3f` (pre-SPT baseline): **+17 run-tests** on th
 
 ---
 
+## Recently shipped (Control System Toolbox arc, 2026-05-08 → 2026-05-09)
+
+A third focused arc closing the practical CST user surface across
+Tier-1 (numeric prerequisites), Tier-2 (SISO design loop), Tier-3
+(state-space design + analysis), Tier-4 (model reduction), and the
+matrix-arg form of Tier-2 interconnection. Drafted from the R2026a
+Control System Toolbox User's Guide (1982 pages, ~24 chapters).
+Per-toolbox plan in
+[`control_toolbox_roadmap.md`](control_toolbox_roadmap.md);
+authoritative status in [`feature_status.md`](feature_status.md).
+
+| Phase | What | Gating test |
+|---|---|---|
+| CST 1.1 | **Non-symmetric `eig`** — 1-return polymorphic real/complex via Hessenberg reduction + Francis double-shift QR with deflation. Symmetric path retained on the Jacobi fast lane. Python lane reimplements Francis QR rather than deferring to scipy (macOS Anaconda numpy/scipy ABI mismatch). | `test/Run/linalg_eig_nonsym.m` |
+| CST 1.2 | **`hess` + `schur`** — Hessenberg reduction (in-place Householder reflections) and real Schur decomposition (1-return T and 2-return `[U, T]` via the eig_V/eig_D precedent). Same numerical core as non-sym eig with the orthogonal accumulator threaded through. | `test/Run/linalg_hess.m`, `linalg_schur.m` |
+| CST 1.3 | **`expm`** — scaling-and-squaring with [13/13] Padé (Higham 2005). Bit-identical across the 5 emit lanes; gates Tier-2 (`c2d` ZOH, `lsim`, `initial`, gramian time-domain forms). | `test/Run/linalg_expm.m`, `test/Runtime/test_linalg.c` |
+| CST 1.4 | **`lyap` + `dlyap`** — continuous Lyapunov + discrete (Stein) via vec + dense LU on the n²·n² Kronecker matrix. O(n^6) cost; Bartels-Stewart on Schur form is the large-plant follow-on. Gates `gram_c`/`gram_o`, the H₂ norm, balanced realisation. | `test/Run/linalg_lyap.m` |
+| CST 1.5 | **`care` + `dare`** — algebraic Riccati. `care` via matrix-sign Newton on the Hamiltonian (Roberts 1980); `dare` via Newton-Kleinman seeded from `dlyap(Ad', Q)` (Hewer 1971; requires Schur-stable Ad). 1-return + 3-return `[X, K, L]` shapes (X = Riccati, K = LQ gain, L = closed-loop spectrum) via splitter that fans out to `matlab_care/dare` + `matlab_lqr/dlqr` + `matlab_lqr_e/dlqr_e`. | `test/Run/linalg_care.m`, `ctrl_care_3ret.m` |
+| CST 2.2 | **`c2d` (ZOH) + `c2d_tustin` + `d2c_tustin`** — Van Loan augmented-matrix `expm` for ZOH, closed-form bilinear for Tustin / inverse Tustin. All three return 2-tuple `[Ad, Bd]` / `[A, B]` via dedicated splitters. | `test/Run/ctrl_c2d.m`, `ctrl_c2d_tustin.m`, `ctrl_d2c_tustin.m` |
+| CST 2.4 | **Frequency response** — SISO `bode_ss` (real 2n×2n decomposition of the complex linear solve), `bode_tf` (complex Horner on `(b, a)`), `gain_margin`/`phase_margin`, `bandwidth_ss`, `getPeakGain_ss` (rough H∞ approximation via log-spaced grid). 2-return splitters for `[mag, phase]`. | `test/Run/ctrl_bode.m`, `ctrl_bode_tf.m`, `ctrl_lsim_margin.m`, `ctrl_bandwidth.m`, `ctrl_pole_peak.m` |
+| CST 2.3 | **Time-domain simulation** — `step_ss(A, B, C, D, dt, N)` (ZOH discretise + recurrence), `lsim_ss` (generalised input simulation), `stepinfo(y, t)` (1×5 row `[Rise, Settle, Over, Peak, PeakTime]`). | `test/Run/ctrl_step_gram.m`, `ctrl_lsim_margin.m`, `ctrl_stepinfo.m` |
+| CST 4.1 | **`lqr` + `dlqr`** — 1-return form via `care`/`dare`. Plus 3-return `[K, S, e]` shape that returns gain + Riccati solution + closed-loop poles. | `test/Run/ctrl_lqr.m`, `ctrl_dlqr.m`, `ctrl_lqr_3ret.m` |
+| CST 4.2 | **Kalman / Kalmd** — `kalman_L` / `kalmd_L` via LQR/Kalman duality (`L = (lqr(A', C', G·Qn·G', Rn))'`). Plus 2-return `[L, P] = kalman(...)` shape returning gain + dual-care covariance. | `test/Run/ctrl_kalman.m`, `ctrl_kalman_2ret.m` |
+| CST 4.3 | **`place`** — SISO pole placement via Ackermann's formula `K = [0…01]·ctrb⁻¹·α(A)`; α expanded by complex polynomial multiplication (collapses to real for conjugate-paired roots). Multi-input Kautsky-Nichols-Van Dooren is a follow-on. | `test/Run/ctrl_place.m` |
+| CST 4.4 | **Controllability / observability** — structural-rank `ctrb`/`obsv` block matrices; energy-based `gram_c`/`gram_o` via lyap. | `test/Run/ctrl_step_gram.m`, `ctrl_place.m` |
+| CST 4.5 / 4.6 | **System metrics** — `norm_h2` (continuous, `sqrt(trace(C·Wc·C'))`), `norm_h2_d` (discrete, with D-feedthrough term), `dcgain_ss`, `isstable` / `isstable_d`, `damp`, `hsvd` (Hankel singular values). | `test/Run/ctrl_norm_h2.m`, `ctrl_norm_h2_d.m`, `ctrl_charac.m`, `ctrl_dcgain.m` |
+| CST 5.1 | **Model reduction** — `balreal_T(A, B, C)` (similarity transform via Laub 1980 eigendecomposition variant — sym-eig + lyap, no Cholesky); `balred_A` / `balred_B` / `balred_C` plus 3-return splitter `[Ar, Br, Cr] = balred(A, B, C, k)` for k-state truncation. H∞ error bound `2·sum(HSV[k+1:n])`. | `test/Run/ctrl_balreal.m`, `ctrl_balred.m` |
+| CST 2.6 (interconnection, matrix-arg) | **`feedback_ss` + `series_ss` + `parallel_ss` + `append_ss`** — closed-loop assembly for two strictly-proper plants. All four are 3-return splitters `[Acl, Bcl, Ccl] = name(A1, B1, C1, A2, B2, C2)`. Generalised splitter (one block recognises all four function names). | `test/Run/ctrl_feedback.m`, `ctrl_interconnect.m` |
+| CST bug fix | **meshgrid / ndgrid multi-return type inference** — `[xx, yy] = meshgrid(...)` typed both outputs as Any so downstream `exp(xx)` fell through to scalar Double, triggering an `arith.mulf(f64, !llvm.ptr)` LLVM lowering crash. Fixed in `lib/Sema/TypeInference.cpp` (per-LHS Array(Double, matrix) type) and `lib/MLIR/Lowering.cpp` (multi-return MLIR result-type table). Plus added `.skip-emit-c` / `.skip-emit-cpp` support to `run_tests_emitc.sh` mirroring the existing python/ts skip convention. | `test/Run/lang_multiret_meshgrid.m` |
+| CST §3.1 prep | **CST stdlib prelude wiring** in `tools/matlabc/main.cpp` — auto-prepends `runtime/cst_classdefs.m` (when present, located via the same `<bin>/../runtime/...` walk as `findRuntimePy`) so model-object classdefs like `tf` / `ss` / can land as a stdlib without per-test boilerplate. Plus a real bugfix to `lib/MLIR/Lowering.cpp:3539` field-store dispatch — tensor-typed RHS now routes to `matlab_obj_set_mat` / `matlab_struct_set_mat` (was always `_f64`). The classdef file ships empty pending the §3.1 monomorphization fix (see `control_toolbox_roadmap.md` §12 blocker note). | (infra; no behavioural test) |
+
+Cumulative test deltas vs. pre-CST baseline: **+36 run-tests** on the LLVM lane (189 → 225) with the same +36 on emit-c (and +34 on emit-cpp; 2 marked `.skip-emit-cpp`). Python lane: +36 with `.stdout-python` overrides for numpy bracket repr. TS lane: +31 with skips for tests that depend on the polymorphic eig (eig stub returns zeros on TS). Unit tests: +120 in `test/Runtime/test_linalg.c`. ~50 new CST runtime entries wired end-to-end. ~20 demonstration programs added under `examples/control/`, header-tagged with the tier they require.
+
+**Recommendation for the next slice**: row 1 of the priority list is *model objects* (`tf`/`ss`/`zpk`/`frd`/`pid` classdefs with operator overloads), but it's currently blocked on a class-method monomorphization bug (matrix-typed properties — see `control_toolbox_roadmap.md` §12). Until that's fixed, the highest-leverage drop-ins are the matrix-arg leftovers: `logm` (closes Tier 1 §2.3), `qz` (gates `zero(sys)` and generalised `eig(A, B)`), 2-return `[V, D] = eig` for non-sym A, and the H∞ norm via Boyd-Balakrishnan-Kabamba bisection (closes Tier 3 §4.5).
+
+---
+
 Open follow-ups carried forward (still on the roadmap):
 
 - **Phase 5.4 — `timetable`.** Builds on `table` + `datetime` row index.
@@ -543,13 +580,16 @@ work as it lands:
 ## Update cadence
 
 This file is updated at the end of each multi-week implementation
-arc — most recently after the **Signal Processing Toolbox arc**
+arc — most recently after the **Control System Toolbox arc**
+(CST 1.1–5.1: numerical stack, SISO design loop, state-space design,
+analysis, model reduction, matrix-arg interconnection — see "Recently
+shipped" above), prior to that the **Signal Processing Toolbox arc**
 (SPT 1–13: windows, polynomial helpers, IIR/FIR design, close-the-loop,
 transforms, spectral, LP, time-frequency, pulse measurements, multirate,
-waveform generators, alignment — see "Recently shipped" above), prior
-to that the data-container + multi-return arc (Phases 1.1 / 1.2 / 1.3 /
-2 / 3 / 4 / 5.1 / 5.2 / 5.3), prior to that the SystemVerilog Phase 5.6
-closure and the multi-backend persistent + isempty Tier 1.
+waveform generators, alignment), prior to that the data-container +
+multi-return arc (Phases 1.1 / 1.2 / 1.3 / 2 / 3 / 4 / 5.1 / 5.2 / 5.3),
+prior to that the SystemVerilog Phase 5.6 closure and the multi-backend
+persistent + isempty Tier 1.
 
 Items get demoted from this roadmap to `feature_status.md` /
 the relevant `emit_*.md` once shipped. Items get retired (no

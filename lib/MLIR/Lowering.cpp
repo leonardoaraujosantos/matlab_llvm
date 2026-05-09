@@ -2286,6 +2286,45 @@ void Lowerer::lowerStmt(const Stmt &St) {
           /* [row, col] = ind2sub(sz, i) — scalar f64s. */
           else if (CN == "ind2sub" && A.LHS.size() == 2)
             Rtys.assign(A.LHS.size(), F64);
+          /* [X, Y] = meshgrid(x, y) / [X, Y, Z] = meshgrid(x, y, z) and
+           * the corresponding ndgrid forms — all ptr (matrix) results.
+           * Without this, downstream `exp(X)` etc. saw a `none`-typed
+           * input, fell back to f64, and an arith.mulf(f64, ptr) op
+           * snuck through to LLVM lowering and crashed. */
+          else if ((CN == "meshgrid" || CN == "ndgrid") &&
+                   (A.LHS.size() == 2 || A.LHS.size() == 3))
+            Rtys.assign(A.LHS.size(), PtrTy);
+          /* [K, S, e] = lqr(A, B, Q, R) — K is the gain (m × n ptr),
+           * S is the Riccati solution (n × n ptr), e is the closed-loop
+           * spectrum (n × 1 ptr, possibly complex). Same for dlqr. */
+          else if ((CN == "lqr" || CN == "dlqr") &&
+                   (A.LHS.size() == 2 || A.LHS.size() == 3))
+            Rtys.assign(A.LHS.size(), PtrTy);
+          /* [X, K, L] = care(A, B, Q, R) — Riccati X (n × n), gain K
+           * (m × n), closed-loop poles L (n × 1, possibly complex).
+           * Same shape for dare. The 2-return [X, K] form drops L. */
+          else if ((CN == "care" || CN == "dare") &&
+                   (A.LHS.size() == 2 || A.LHS.size() == 3))
+            Rtys.assign(A.LHS.size(), PtrTy);
+          /* [Ar, Br, Cr] = balred(A, B, C, k) — k-state truncated
+           * balanced realisation. All three results are matrix ptrs. */
+          else if (CN == "balred" && A.LHS.size() == 3)
+            Rtys.assign(A.LHS.size(), PtrTy);
+          /* [L, P] = kalman(A, G, C, Qn, Rn) — gain (n × p ptr) +
+           * Riccati covariance (n × n ptr). Same for kalmd. */
+          else if ((CN == "kalman" || CN == "kalmd") && A.LHS.size() == 2)
+            Rtys.assign(A.LHS.size(), PtrTy);
+          /* [A, B] = d2c_tustin(Ad, Bd, Ts) — inverse Tustin reverse
+           * mapping. Same 2-ptr shape as c2d_tustin. */
+          else if (CN == "d2c_tustin" && A.LHS.size() == 2)
+            Rtys.assign(A.LHS.size(), PtrTy);
+          /* [Acl, Bcl, Ccl] = feedback_ss(A1, B1, C1, A2, B2, C2) —
+           * negative-feedback closed-loop assembly. All three results
+           * are matrix ptrs. Same shape for series_ss / parallel_ss. */
+          else if ((CN == "feedback_ss" || CN == "series_ss" ||
+                    CN == "parallel_ss" || CN == "append_ss") &&
+                   A.LHS.size() == 3)
+            Rtys.assign(A.LHS.size(), PtrTy);
         }
         mlir::Operation *Op = emitUnregOp("matlab.call_builtin", Args,
                                            Rtys, loc(A.Range), {Cal, NO});
@@ -3503,8 +3542,11 @@ void Lowerer::lowerLValueStore(const Expr &LHS, mlir::Value Rhs) {
       }
       mlir::Value Obj = lowerExpr(*F.Base);
       mlir::Value NameV = emitFieldNameChar(F.Field, loc(F.Range));
-      llvm::StringRef Callee = (Rhs && Rhs.getType() == PtrTy)
-          ? "matlab_obj_set_mat" : "matlab_obj_set_f64";
+      bool IsMatRhs = Rhs && (Rhs.getType() == PtrTy ||
+                              mlir::isa<mlir::RankedTensorType,
+                                        mlir::UnrankedTensorType>(Rhs.getType()));
+      llvm::StringRef Callee = IsMatRhs ? "matlab_obj_set_mat"
+                                         : "matlab_obj_set_f64";
       mlir::NamedAttribute Cal(
           mlir::StringAttr::get(&MCtx, "callee"),
           mlir::StringAttr::get(&MCtx, Callee));
@@ -3515,9 +3557,11 @@ void Lowerer::lowerLValueStore(const Expr &LHS, mlir::Value Rhs) {
     mlir::Value SPtr = resolveStructBase(F.Base, loc(F.Range));
     if (!SPtr) return;
     mlir::Value NameV = emitFieldNameChar(F.Field, loc(F.Range));
-    llvm::StringRef Callee = (Rhs && Rhs.getType() == PtrTy)
-        ? "matlab_struct_set_mat"
-        : "matlab_struct_set_f64";
+    bool IsMatRhs2 = Rhs && (Rhs.getType() == PtrTy ||
+                             mlir::isa<mlir::RankedTensorType,
+                                       mlir::UnrankedTensorType>(Rhs.getType()));
+    llvm::StringRef Callee = IsMatRhs2 ? "matlab_struct_set_mat"
+                                        : "matlab_struct_set_f64";
     mlir::NamedAttribute Cal(
         mlir::StringAttr::get(&MCtx, "callee"),
         mlir::StringAttr::get(&MCtx, Callee));
@@ -6486,8 +6530,11 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             "diag", "reshape", "repmat", "inv", "svd", "eig", "expm", "hess",
             "schur", "lyap", "dlyap", "care", "dare", "lqr", "dlqr",
             "ctrb", "obsv", "place", "damp", "hsvd", "balreal_T",
-            "balred_A", "balred_B", "balred_C", "dcgain_ss",
-            "kalman_L", "kalmd_L", "c2d", "c2d_tustin",
+            "balred", "balred_A", "balred_B", "balred_C", "dcgain_ss",
+            "stepinfo",
+            "kalman", "kalmd", "kalman_L", "kalmd_L",
+            "c2d", "c2d_tustin", "d2c_tustin", "pole",
+            "feedback_ss", "series_ss", "parallel_ss", "append_ss",
             "gram_c", "gram_o", "step_ss", "bode_ss", "lsim_ss", "bode_tf",
             "find", "ind2sub", "linspace",
             /* Complex: all return a matrix descriptor (matlab_mat* or

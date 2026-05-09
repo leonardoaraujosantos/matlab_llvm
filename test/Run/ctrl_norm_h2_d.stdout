@@ -1,0 +1,16 @@
+isstable_d(diag(0.5, 0.7)):
+1
+isstable_d(diag(1.5, 0.5)):
+0
+isstable_d([0 1; -1 0]) (eigs ±i):
+0
+discrete H2 norm (closed form 2/sqrt(3) = 1.154701):
+1.1547
+D-only H2 norm (||G||_2 = |D| = 3):
+3
+unstable plant H2 norm (must be +Inf):
+inf
+continuous ||G||_2:
+0.136083
+discretised (Ts = 0.1) ||G||_2 (small Ts → approaches continuous):
+0.0428734

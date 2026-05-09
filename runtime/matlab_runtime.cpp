@@ -3005,6 +3005,35 @@ matlab_mat *matlab_lqr(matlab_mat *A, matlab_mat *B,
 }
 
 /*-------------------------------------------------------------------------
+ * Closed-loop poles for the 3-return [K, S, e] = lqr(A, B, Q, R) shape.
+ *   e = eig(A - B*K)
+ * with K computed via matlab_lqr internally. Polymorphic real/complex
+ * (eig returns matlab_mat_c when the closed-loop spectrum has imaginary
+ * parts). Routes the third result of the multi-return splitter; the
+ * existing matlab_lqr / matlab_care entries cover K and S.
+ *-------------------------------------------------------------------------*/
+matlab_mat *matlab_lqr_e(matlab_mat *A, matlab_mat *B,
+                         matlab_mat *Q, matlab_mat *R) {
+    matlab_mat *K = matlab_lqr(A, B, Q, R);
+    if (!K || K->rows == 0) return mat_alloc(0, 0);
+    matlab_mat *BK   = matlab_matmul_mm(B, K);
+    matlab_mat *nBK  = matlab_neg_m(BK);
+    matlab_mat *Acl  = matlab_add_mm(A, nBK);
+    return matlab_eig(Acl);
+}
+
+/* Discrete companion: e = eig(Ad - Bd*K) where K = dlqr(...). */
+matlab_mat *matlab_dlqr_e(matlab_mat *Ad, matlab_mat *Bd,
+                          matlab_mat *Q, matlab_mat *R) {
+    matlab_mat *K = matlab_dlqr(Ad, Bd, Q, R);
+    if (!K || K->rows == 0) return mat_alloc(0, 0);
+    matlab_mat *BK   = matlab_matmul_mm(Bd, K);
+    matlab_mat *nBK  = matlab_neg_m(BK);
+    matlab_mat *Acl  = matlab_add_mm(Ad, nBK);
+    return matlab_eig(Acl);
+}
+
+/*-------------------------------------------------------------------------
  * Balancing similarity transformation (continuous LTI).
  *
  *   T = balreal_T(A, B, C)  returns an  n x n  similarity transform
@@ -3258,6 +3287,399 @@ matlab_mat *matlab_c2d_tustin_Bd(matlab_mat *A, matlab_mat *B, double Ts) {
 }
 
 /*-------------------------------------------------------------------------
+ * Closed-loop assembly for negative feedback (strictly proper).
+ *
+ *   [Acl, Bcl, Ccl] = feedback_ss(A1, B1, C1, A2, B2, C2)
+ *
+ * Builds the closed-loop state-space realisation for negative feedback
+ * `T = sys1 / (1 + sys2·sys1)`, both plants assumed strictly proper
+ * (D1 = D2 = 0). Block layout:
+ *
+ *   Acl = [A1,    -B1·C2;
+ *          B2·C1,  A2     ]
+ *   Bcl = [B1; 0]
+ *   Ccl = [C1, 0]
+ *
+ * For the static-gain feedback case (sys2 has zero states), users get
+ * better economy from `Acl = A1 - B1·K·C1` directly.
+ *
+ * Tier-2 of CST roadmap (System interconnection).  The MATLAB-faithful
+ * `feedback(sys1, sys2)` model-object form awaits §3.1.
+ *-------------------------------------------------------------------------*/
+matlab_mat *matlab_feedback_ss_A(matlab_mat *A1, matlab_mat *B1, matlab_mat *C1,
+                                 matlab_mat *A2, matlab_mat *B2, matlab_mat *C2) {
+    if (!A1 || !B1 || !C1 || !A2 || !B2 || !C2) return mat_alloc(0, 0);
+    int64_t n1 = A1->rows, n2 = A2->rows;
+    if (A1->cols != n1 || A2->cols != n2) return mat_alloc(0, 0);
+    int64_t n = n1 + n2;
+    /* B1 · C2 → n1 × n2. */
+    matlab_mat *B1C2 = matlab_matmul_mm(B1, C2);
+    /* B2 · C1 → n2 × n1. */
+    matlab_mat *B2C1 = matlab_matmul_mm(B2, C1);
+    matlab_mat *Acl = mat_alloc(n, n);
+    /* Top-left: A1 (n1 × n1). */
+    for (int64_t i = 0; i < n1; ++i)
+        for (int64_t j = 0; j < n1; ++j)
+            Acl->data[i * n + j] = A1->data[i * n1 + j];
+    /* Top-right: -B1 · C2 (n1 × n2). */
+    for (int64_t i = 0; i < n1; ++i)
+        for (int64_t j = 0; j < n2; ++j)
+            Acl->data[i * n + (n1 + j)] = -B1C2->data[i * n2 + j];
+    /* Bottom-left: B2 · C1 (n2 × n1). */
+    for (int64_t i = 0; i < n2; ++i)
+        for (int64_t j = 0; j < n1; ++j)
+            Acl->data[(n1 + i) * n + j] = B2C1->data[i * n1 + j];
+    /* Bottom-right: A2 (n2 × n2). */
+    for (int64_t i = 0; i < n2; ++i)
+        for (int64_t j = 0; j < n2; ++j)
+            Acl->data[(n1 + i) * n + (n1 + j)] = A2->data[i * n2 + j];
+    return Acl;
+}
+
+matlab_mat *matlab_feedback_ss_B(matlab_mat *A1, matlab_mat *B1, matlab_mat *C1,
+                                 matlab_mat *A2, matlab_mat *B2, matlab_mat *C2) {
+    (void)C1; (void)B2; (void)C2;
+    if (!A1 || !B1 || !A2) return mat_alloc(0, 0);
+    int64_t n1 = A1->rows, n2 = A2->rows;
+    int64_t m = B1->cols;
+    matlab_mat *Bcl = mat_alloc(n1 + n2, m);
+    for (int64_t i = 0; i < n1; ++i)
+        for (int64_t j = 0; j < m; ++j)
+            Bcl->data[i * m + j] = B1->data[i * m + j];
+    /* Bottom block already zero from mat_alloc. */
+    return Bcl;
+}
+
+matlab_mat *matlab_feedback_ss_C(matlab_mat *A1, matlab_mat *B1, matlab_mat *C1,
+                                 matlab_mat *A2, matlab_mat *B2, matlab_mat *C2) {
+    (void)B1; (void)B2; (void)C2;
+    if (!A1 || !C1 || !A2) return mat_alloc(0, 0);
+    int64_t n1 = A1->rows, n2 = A2->rows;
+    int64_t p = C1->rows;
+    matlab_mat *Ccl = mat_alloc(p, n1 + n2);
+    for (int64_t i = 0; i < p; ++i)
+        for (int64_t j = 0; j < n1; ++j)
+            Ccl->data[i * (n1 + n2) + j] = C1->data[i * n1 + j];
+    return Ccl;
+}
+
+/*-------------------------------------------------------------------------
+ * Block-diagonal append — sys = blkdiag(sys1, sys2). MIMO assembly
+ * with disjoint input/output channels.
+ *   Acl = blkdiag(A1, A2)
+ *   Bcl = blkdiag(B1, B2)
+ *   Ccl = blkdiag(C1, C2)
+ * (Same A as parallel; B and C are block-diagonal instead of stacked.)
+ *-------------------------------------------------------------------------*/
+/* Forward decl: parallel_ss_A is defined below. */
+matlab_mat *matlab_parallel_ss_A(matlab_mat *A1, matlab_mat *B1, matlab_mat *C1,
+                                 matlab_mat *A2, matlab_mat *B2, matlab_mat *C2);
+
+matlab_mat *matlab_append_ss_A(matlab_mat *A1, matlab_mat *B1, matlab_mat *C1,
+                               matlab_mat *A2, matlab_mat *B2, matlab_mat *C2) {
+    /* Same as parallel A — block diagonal of the state matrices. */
+    return matlab_parallel_ss_A(A1, B1, C1, A2, B2, C2);
+}
+
+matlab_mat *matlab_append_ss_B(matlab_mat *A1, matlab_mat *B1, matlab_mat *C1,
+                               matlab_mat *A2, matlab_mat *B2, matlab_mat *C2) {
+    (void)C1; (void)C2;
+    if (!A1 || !B1 || !A2 || !B2) return mat_alloc(0, 0);
+    int64_t n1 = A1->rows, n2 = A2->rows;
+    int64_t m1 = B1->cols, m2 = B2->cols;
+    matlab_mat *Bcl = mat_alloc(n1 + n2, m1 + m2);
+    int64_t M = m1 + m2;
+    for (int64_t i = 0; i < n1; ++i)
+        for (int64_t j = 0; j < m1; ++j)
+            Bcl->data[i * M + j] = B1->data[i * m1 + j];
+    for (int64_t i = 0; i < n2; ++i)
+        for (int64_t j = 0; j < m2; ++j)
+            Bcl->data[(n1 + i) * M + (m1 + j)] = B2->data[i * m2 + j];
+    return Bcl;
+}
+
+matlab_mat *matlab_append_ss_C(matlab_mat *A1, matlab_mat *B1, matlab_mat *C1,
+                               matlab_mat *A2, matlab_mat *B2, matlab_mat *C2) {
+    (void)B1; (void)B2;
+    if (!A1 || !C1 || !A2 || !C2) return mat_alloc(0, 0);
+    int64_t n1 = A1->rows, n2 = A2->rows;
+    int64_t p1 = C1->rows, p2 = C2->rows;
+    matlab_mat *Ccl = mat_alloc(p1 + p2, n1 + n2);
+    int64_t N = n1 + n2;
+    for (int64_t i = 0; i < p1; ++i)
+        for (int64_t j = 0; j < n1; ++j)
+            Ccl->data[i * N + j] = C1->data[i * n1 + j];
+    for (int64_t i = 0; i < p2; ++i)
+        for (int64_t j = 0; j < n2; ++j)
+            Ccl->data[(p1 + i) * N + (n1 + j)] = C2->data[i * n2 + j];
+    return Ccl;
+}
+
+/*-------------------------------------------------------------------------
+ * Series cascade — sys = sys2 * sys1, strictly proper.
+ *   Acl = [A1,    0;
+ *          B2·C1, A2]
+ *   Bcl = [B1; 0]
+ *   Ccl = [0, C2]
+ *-------------------------------------------------------------------------*/
+matlab_mat *matlab_series_ss_A(matlab_mat *A1, matlab_mat *B1, matlab_mat *C1,
+                               matlab_mat *A2, matlab_mat *B2, matlab_mat *C2) {
+    (void)B1; (void)C2;
+    if (!A1 || !C1 || !A2 || !B2) return mat_alloc(0, 0);
+    int64_t n1 = A1->rows, n2 = A2->rows;
+    if (A1->cols != n1 || A2->cols != n2) return mat_alloc(0, 0);
+    int64_t n = n1 + n2;
+    matlab_mat *B2C1 = matlab_matmul_mm(B2, C1);
+    matlab_mat *Acl = mat_alloc(n, n);
+    for (int64_t i = 0; i < n1; ++i)
+        for (int64_t j = 0; j < n1; ++j)
+            Acl->data[i * n + j] = A1->data[i * n1 + j];
+    for (int64_t i = 0; i < n2; ++i)
+        for (int64_t j = 0; j < n1; ++j)
+            Acl->data[(n1 + i) * n + j] = B2C1->data[i * n1 + j];
+    for (int64_t i = 0; i < n2; ++i)
+        for (int64_t j = 0; j < n2; ++j)
+            Acl->data[(n1 + i) * n + (n1 + j)] = A2->data[i * n2 + j];
+    return Acl;
+}
+
+matlab_mat *matlab_series_ss_B(matlab_mat *A1, matlab_mat *B1, matlab_mat *C1,
+                               matlab_mat *A2, matlab_mat *B2, matlab_mat *C2) {
+    (void)C1; (void)B2; (void)C2;
+    if (!A1 || !B1 || !A2) return mat_alloc(0, 0);
+    int64_t n1 = A1->rows, n2 = A2->rows;
+    int64_t m = B1->cols;
+    matlab_mat *Bcl = mat_alloc(n1 + n2, m);
+    for (int64_t i = 0; i < n1; ++i)
+        for (int64_t j = 0; j < m; ++j)
+            Bcl->data[i * m + j] = B1->data[i * m + j];
+    return Bcl;
+}
+
+matlab_mat *matlab_series_ss_C(matlab_mat *A1, matlab_mat *B1, matlab_mat *C1,
+                               matlab_mat *A2, matlab_mat *B2, matlab_mat *C2) {
+    (void)B1; (void)C1; (void)B2;
+    if (!A1 || !A2 || !C2) return mat_alloc(0, 0);
+    int64_t n1 = A1->rows, n2 = A2->rows;
+    int64_t p = C2->rows;
+    matlab_mat *Ccl = mat_alloc(p, n1 + n2);
+    /* Left block (n1 cols) zero by mat_alloc. Right block: C2 (p × n2). */
+    for (int64_t i = 0; i < p; ++i)
+        for (int64_t j = 0; j < n2; ++j)
+            Ccl->data[i * (n1 + n2) + (n1 + j)] = C2->data[i * n2 + j];
+    return Ccl;
+}
+
+/*-------------------------------------------------------------------------
+ * Parallel sum — sys = sys1 + sys2, strictly proper.
+ *   Acl = blkdiag(A1, A2)
+ *   Bcl = [B1; B2]
+ *   Ccl = [C1, C2]
+ *-------------------------------------------------------------------------*/
+matlab_mat *matlab_parallel_ss_A(matlab_mat *A1, matlab_mat *B1, matlab_mat *C1,
+                                 matlab_mat *A2, matlab_mat *B2, matlab_mat *C2) {
+    (void)B1; (void)C1; (void)B2; (void)C2;
+    if (!A1 || !A2) return mat_alloc(0, 0);
+    int64_t n1 = A1->rows, n2 = A2->rows;
+    if (A1->cols != n1 || A2->cols != n2) return mat_alloc(0, 0);
+    int64_t n = n1 + n2;
+    matlab_mat *Acl = mat_alloc(n, n);
+    for (int64_t i = 0; i < n1; ++i)
+        for (int64_t j = 0; j < n1; ++j)
+            Acl->data[i * n + j] = A1->data[i * n1 + j];
+    for (int64_t i = 0; i < n2; ++i)
+        for (int64_t j = 0; j < n2; ++j)
+            Acl->data[(n1 + i) * n + (n1 + j)] = A2->data[i * n2 + j];
+    return Acl;
+}
+
+matlab_mat *matlab_parallel_ss_B(matlab_mat *A1, matlab_mat *B1, matlab_mat *C1,
+                                 matlab_mat *A2, matlab_mat *B2, matlab_mat *C2) {
+    (void)C1; (void)C2;
+    if (!A1 || !B1 || !A2 || !B2) return mat_alloc(0, 0);
+    int64_t n1 = A1->rows, n2 = A2->rows;
+    int64_t m = B1->cols;
+    if (B2->cols != m) return mat_alloc(0, 0);
+    matlab_mat *Bcl = mat_alloc(n1 + n2, m);
+    for (int64_t i = 0; i < n1; ++i)
+        for (int64_t j = 0; j < m; ++j)
+            Bcl->data[i * m + j] = B1->data[i * m + j];
+    for (int64_t i = 0; i < n2; ++i)
+        for (int64_t j = 0; j < m; ++j)
+            Bcl->data[(n1 + i) * m + j] = B2->data[i * m + j];
+    return Bcl;
+}
+
+matlab_mat *matlab_parallel_ss_C(matlab_mat *A1, matlab_mat *B1, matlab_mat *C1,
+                                 matlab_mat *A2, matlab_mat *B2, matlab_mat *C2) {
+    (void)B1; (void)B2;
+    if (!A1 || !C1 || !A2 || !C2) return mat_alloc(0, 0);
+    int64_t n1 = A1->rows, n2 = A2->rows;
+    int64_t p = C1->rows;
+    if (C2->rows != p) return mat_alloc(0, 0);
+    matlab_mat *Ccl = mat_alloc(p, n1 + n2);
+    for (int64_t i = 0; i < p; ++i)
+        for (int64_t j = 0; j < n1; ++j)
+            Ccl->data[i * (n1 + n2) + j] = C1->data[i * n1 + j];
+    for (int64_t i = 0; i < p; ++i)
+        for (int64_t j = 0; j < n2; ++j)
+            Ccl->data[i * (n1 + n2) + (n1 + j)] = C2->data[i * n2 + j];
+    return Ccl;
+}
+
+/*-------------------------------------------------------------------------
+ * Peak gain over a frequency sweep (rough H∞ approximation).
+ *
+ *   getPeakGain_ss(A, B, C, D) = max_{w ∈ grid} |H(jw)|
+ * where the grid is 1e-3 → 1e6 rad/s, 200 log-spaced points. SISO only.
+ * Captures resonant peaks for typical 2nd-order plants; misses sharp
+ * resonances between grid points (within ~5% for ζ ≥ 0.05). The exact
+ * H∞ norm requires Boyd-Balakrishnan-Kabamba γ-bisection on
+ * Hamiltonian eigenvalues (separate slice).
+ *-------------------------------------------------------------------------*/
+double matlab_getPeakGain_ss(matlab_mat *A, matlab_mat *B,
+                             matlab_mat *C, matlab_mat *D) {
+    if (!A || !B || !C || !D) return INFINITY;
+    int64_t n = A->rows;
+    if (n == 0 || A->cols != n || B->rows != n || C->cols != n)
+        return 0.0;
+    const int Npts = 200;
+    const double log_lo = -3, log_hi = 6;
+    double peak = 0.0;
+    /* Include w = 0 if A is invertible (DC gain). */
+    matlab_mat *Ainv = matlab_inv(A);
+    if (Ainv && Ainv->rows > 0) {
+        matlab_mat *AinvB = matlab_matmul_mm(Ainv, B);
+        matlab_mat *CAinvB = matlab_matmul_mm(C, AinvB);
+        double dc = D->data[0] - CAinvB->data[0];
+        double absdc = dc < 0 ? -dc : dc;
+        if (absdc > peak) peak = absdc;
+    }
+    for (int i = 0; i < Npts; ++i) {
+        double w = pow(10.0, log_lo + (double)i / (Npts - 1) * (log_hi - log_lo));
+        double Hr = 0, Hi = 0;
+        if (bode_ss_at_freq_(A, B, C, D, w, &Hr, &Hi) != 0) continue;
+        double mag = sqrt(Hr * Hr + Hi * Hi);
+        if (mag > peak) peak = mag;
+    }
+    return peak;
+}
+
+/*-------------------------------------------------------------------------
+ * SISO −3 dB bandwidth.
+ *
+ *   bandwidth_ss(A, B, C, D) returns the lowest frequency w where
+ *   |H(jw)| crosses |H(j0)| / sqrt(2) from above. Scans a log-spaced
+ *   grid 1e-3 → 1e6 rad/s, linearly interpolates between adjacent
+ *   grid points for accuracy. Returns +Inf if no crossover (e.g.
+ *   all-pass or unstable plants where DC gain isn't bounded).
+ *
+ * Forward decls for the helpers used. */
+static int bode_ss_at_freq_(matlab_mat *A, matlab_mat *B,
+                            matlab_mat *C, matlab_mat *D,
+                            double w, double *Hr_out, double *Hi_out);
+
+double matlab_bandwidth_ss(matlab_mat *A, matlab_mat *B,
+                           matlab_mat *C, matlab_mat *D) {
+    if (!A || !B || !C || !D) return INFINITY;
+    int64_t n = A->rows;
+    if (n == 0 || A->cols != n || B->rows != n || C->cols != n)
+        return INFINITY;
+    /* DC gain magnitude. Use the matrix-side dcgain_ss formula (D − CA⁻¹B). */
+    matlab_mat *Ainv = matlab_inv(A);
+    if (!Ainv || Ainv->rows == 0) return INFINITY;
+    matlab_mat *AinvB = matlab_matmul_mm(Ainv, B);
+    matlab_mat *CAinvB = matlab_matmul_mm(C, AinvB);
+    /* SISO assumption: take (1, 1) entry. */
+    double G0 = D->data[0] - CAinvB->data[0];
+    double absG0 = G0 < 0 ? -G0 : G0;
+    if (absG0 <= 0.0) return INFINITY;   /* zero DC gain → bandwidth undefined */
+    double target = absG0 / sqrt(2.0);
+    /* Log-spaced grid from 1e-3 to 1e6 rad/s, 200 points (~10 per decade). */
+    const int Npts = 200;
+    const double w_lo = 1e-3, w_hi = 1e6;
+    const double log_lo = log10(w_lo), log_hi = log10(w_hi);
+    double prev_w = w_lo, prev_mag = absG0;
+    for (int i = 0; i < Npts; ++i) {
+        double frac = (double)i / (Npts - 1);
+        double w = pow(10.0, log_lo + frac * (log_hi - log_lo));
+        double Hr = 0, Hi = 0;
+        if (bode_ss_at_freq_(A, B, C, D, w, &Hr, &Hi) != 0) continue;
+        double mag = sqrt(Hr * Hr + Hi * Hi);
+        if (mag < target && prev_mag >= target && i > 0) {
+            /* Linear interpolation in log(w) for accuracy. */
+            double t = (prev_mag - target) / (prev_mag - mag);
+            double lw = log10(prev_w) + t * (log10(w) - log10(prev_w));
+            return pow(10.0, lw);
+        }
+        prev_w = w; prev_mag = mag;
+    }
+    return INFINITY;
+}
+
+/*-------------------------------------------------------------------------
+ * Discrete-to-continuous Tustin (bilinear) reverse mapping.
+ *
+ *   [A, B] = d2c_tustin(Ad, Bd, Ts)
+ *
+ * Inverts the Tustin discretisation of c2d_tustin by substituting
+ * z = (1 + αs)/(1 − αs), α = Ts/2:
+ *      A = (2/Ts)·(Ad − I)·(I + Ad)⁻¹
+ *      B = (2/Ts)·(I + Ad)⁻¹·Bd
+ *
+ * Requires (I + Ad) to be invertible — fails for plants with an Ad
+ * eigenvalue at z = -1 (impulse response with sample-period oscillation).
+ * Returns 0×0 if singular.
+ *-------------------------------------------------------------------------*/
+matlab_mat *matlab_d2c_tustin_A(matlab_mat *Ad, matlab_mat *Bd, double Ts) {
+    if (!Ad) return mat_alloc(0, 0);
+    int64_t n = Ad->rows;
+    if (n == 0 || Ad->cols != n || Ts <= 0) return mat_alloc(0, 0);
+    (void)Bd;
+    /* I + Ad. */
+    matlab_mat *IpAd = mat_alloc(n, n);
+    matlab_mat *AdmI = mat_alloc(n, n);
+    for (int64_t i = 0; i < n; ++i)
+        for (int64_t j = 0; j < n; ++j) {
+            double v = Ad->data[i * n + j];
+            IpAd->data[i * n + j] = v + (i == j ? 1.0 : 0.0);
+            AdmI->data[i * n + j] = v - (i == j ? 1.0 : 0.0);
+        }
+    matlab_mat *Inv = matlab_inv(IpAd);
+    if (!Inv || Inv->rows == 0) return mat_alloc(0, 0);
+    matlab_mat *Prod = matlab_matmul_mm(AdmI, Inv);
+    matlab_mat *A = mat_alloc(n, n);
+    double scale = 2.0 / Ts;
+    for (int64_t i = 0; i < n; ++i)
+        for (int64_t j = 0; j < n; ++j)
+            A->data[i * n + j] = scale * Prod->data[i * n + j];
+    return A;
+}
+
+matlab_mat *matlab_d2c_tustin_B(matlab_mat *Ad, matlab_mat *Bd, double Ts) {
+    if (!Ad || !Bd) return mat_alloc(0, 0);
+    int64_t n = Ad->rows;
+    if (n == 0 || Ad->cols != n || Bd->rows != n || Ts <= 0)
+        return mat_alloc(0, 0);
+    matlab_mat *IpAd = mat_alloc(n, n);
+    for (int64_t i = 0; i < n; ++i)
+        for (int64_t j = 0; j < n; ++j) {
+            double v = Ad->data[i * n + j];
+            IpAd->data[i * n + j] = v + (i == j ? 1.0 : 0.0);
+        }
+    matlab_mat *Inv = matlab_inv(IpAd);
+    if (!Inv || Inv->rows == 0) return mat_alloc(0, 0);
+    matlab_mat *InvBd = matlab_matmul_mm(Inv, Bd);
+    int64_t m = Bd->cols;
+    matlab_mat *B = mat_alloc(n, m);
+    double scale = 2.0 / Ts;
+    for (int64_t i = 0; i < n; ++i)
+        for (int64_t j = 0; j < m; ++j)
+            B->data[i * m + j] = scale * InvBd->data[i * m + j];
+    return B;
+}
+
+/*-------------------------------------------------------------------------
  * Discrete-time stability test: isstable_d(A) returns 1.0 if every
  * eigenvalue of A is strictly inside the unit disk (|λ| < 1, Schur-
  * stable), else 0.0. Marginal eigenvalues on |λ| = 1 fail (per MATLAB
@@ -3392,6 +3814,114 @@ matlab_mat *matlab_kalmd_L(matlab_mat *Ad, matlab_mat *G, matlab_mat *C,
     matlab_mat *Kdual = matlab_dlqr(At, Ct, GQGt, Rn);
     if (!Kdual || Kdual->rows == 0) return mat_alloc(0, 0);
     return matlab_transpose(Kdual);
+}
+
+/*-------------------------------------------------------------------------
+ * Steady-state Kalman covariance — the Riccati solution.
+ *
+ *   P = kalman_P(A, G, C, Qn, Rn) solves the dual continuous ARE:
+ *      A·P + P·A' − P·C'·Rn⁻¹·C·P + G·Qn·G' = 0
+ *   which is the same as `care(A', C', G·Qn·G', Rn)`.
+ *
+ * Routes the second result of the multi-return [L, P] = kalman(...) /
+ * [L, P] = kalmd(...) splitter; existing matlab_kalman_L / kalmd_L
+ * cover the gain.
+ *-------------------------------------------------------------------------*/
+matlab_mat *matlab_kalman_P(matlab_mat *A, matlab_mat *G, matlab_mat *C,
+                            matlab_mat *Qn, matlab_mat *Rn) {
+    if (!A || !G || !C || !Qn || !Rn) return mat_alloc(0, 0);
+    matlab_mat *Gt = matlab_transpose(G);
+    matlab_mat *GQ = matlab_matmul_mm(G, Qn);
+    matlab_mat *GQGt = matlab_matmul_mm(GQ, Gt);
+    matlab_mat *At = matlab_transpose(A);
+    matlab_mat *Ct = matlab_transpose(C);
+    return matlab_care(At, Ct, GQGt, Rn);
+}
+
+matlab_mat *matlab_kalmd_P(matlab_mat *Ad, matlab_mat *G, matlab_mat *C,
+                           matlab_mat *Qn, matlab_mat *Rn) {
+    if (!Ad || !G || !C || !Qn || !Rn) return mat_alloc(0, 0);
+    matlab_mat *Gt = matlab_transpose(G);
+    matlab_mat *GQ = matlab_matmul_mm(G, Qn);
+    matlab_mat *GQGt = matlab_matmul_mm(GQ, Gt);
+    matlab_mat *At = matlab_transpose(Ad);
+    matlab_mat *Ct = matlab_transpose(C);
+    return matlab_dare(At, Ct, GQGt, Rn);
+}
+
+/*-------------------------------------------------------------------------
+ * Step-response metrics.
+ *
+ *   stepinfo(y, t) returns a 1 × 5 row vector
+ *     [RiseTime, SettlingTime, Overshoot, Peak, PeakTime]
+ *
+ * Definitions (MATLAB convention):
+ *   - Final = y(end) (steady-state value, assumes the system has settled)
+ *   - Peak = max |y|, PeakTime = t at that index
+ *   - Overshoot = (Peak - |Final|) / |Final| * 100  (percent; 0 if Final==0)
+ *   - RiseTime = t(first index where |y| ≥ 0.9·|Final|) − t(first index where |y| ≥ 0.1·|Final|)
+ *   - SettlingTime = t(last index where |y - Final| > 0.02·|Final|), 0 if always within band
+ *
+ * The 6+ extra fields MATLAB's stepinfo struct exposes
+ * (`SettlingMin`/`SettlingMax`/`Undershoot`/`TransientTime`) are
+ * follow-ons; the five shipped here cover the common workflow.
+ *
+ * Tier-3 of CST roadmap. Pure post-processing — sits on top of any
+ * step-response producer (`step_ss`, future model-object `step`).
+ *-------------------------------------------------------------------------*/
+matlab_mat *matlab_stepinfo(matlab_mat *y, matlab_mat *t) {
+    if (!y || !t) return mat_alloc(0, 0);
+    int64_t n = y->rows * y->cols;
+    if (n == 0 || t->rows * t->cols != n) return mat_alloc(0, 0);
+    /* Final value = last sample. */
+    double Final = y->data[n - 1];
+    double absFinal = Final < 0 ? -Final : Final;
+    /* Peak |y| and its time. */
+    double Peak = 0.0;
+    int64_t peakIdx = 0;
+    for (int64_t i = 0; i < n; ++i) {
+        double v = y->data[i] < 0 ? -y->data[i] : y->data[i];
+        if (v > Peak) { Peak = v; peakIdx = i; }
+    }
+    double PeakTime = t->data[peakIdx];
+    /* Overshoot (percent). */
+    double Over = 0.0;
+    if (absFinal > 0.0) Over = (Peak - absFinal) / absFinal * 100.0;
+    if (Over < 0.0) Over = 0.0;   /* clip — overshoot is non-negative */
+    /* Rise time: first 10% crossing → first 90% crossing.
+     * Use signed Final to handle negative steady state correctly. */
+    double t10 = 0.0, t90 = 0.0;
+    int64_t i10 = -1, i90 = -1;
+    double thresh10 = 0.1 * Final;
+    double thresh90 = 0.9 * Final;
+    for (int64_t i = 0; i < n; ++i) {
+        double v = y->data[i];
+        if (i10 < 0 && ((Final >= 0 && v >= thresh10) || (Final < 0 && v <= thresh10)))
+            i10 = i;
+        if (i90 < 0 && ((Final >= 0 && v >= thresh90) || (Final < 0 && v <= thresh90))) {
+            i90 = i; break;
+        }
+    }
+    if (i10 >= 0) t10 = t->data[i10];
+    if (i90 >= 0) t90 = t->data[i90];
+    double Rise = (i10 >= 0 && i90 >= 0) ? (t90 - t10) : 0.0;
+    /* Settling time: last index where |y-Final| > 0.02 * |Final|. */
+    double band = 0.02 * absFinal;
+    int64_t settleIdx = -1;
+    for (int64_t i = n - 1; i >= 0; --i) {
+        double dev = y->data[i] - Final;
+        if (dev < 0) dev = -dev;
+        if (dev > band) { settleIdx = i; break; }
+    }
+    double Settle = settleIdx >= 0 ? t->data[settleIdx] : 0.0;
+    /* Pack into a 1 × 5 row vector. */
+    matlab_mat *out = mat_alloc(1, 5);
+    out->data[0] = Rise;
+    out->data[1] = Settle;
+    out->data[2] = Over;
+    out->data[3] = Peak;
+    out->data[4] = PeakTime;
+    return out;
 }
 
 /*-------------------------------------------------------------------------

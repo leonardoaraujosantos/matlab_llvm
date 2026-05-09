@@ -1,0 +1,15 @@
+original A:
+        -1       0.5
+         0        -2
+round-trip A2 (must match):
+        -1       0.5
+         0        -2
+original B:
+         1
+       0.5
+round-trip B2 (must match):
+         1
+       0.5
+1-return form A:
+        -1       0.5
+         0        -2

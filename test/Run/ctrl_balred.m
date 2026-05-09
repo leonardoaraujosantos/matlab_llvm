@@ -19,10 +19,10 @@ H = hsvd(A, B, C);
 disp('Hankel singular values (descending):');
 disp(H);
 
-% --- Truncate to 2 states.
-Ar = balred_A(A, B, C, 2);
-Br = balred_B(A, B, C, 2);
-Cr = balred_C(A, B, C, 2);
+% --- Truncate to 2 states. The 3-return shape is the MATLAB-faithful
+% form; the individual `balred_A` / `balred_B` / `balred_C` entries
+% remain available for users who only need one piece.
+[Ar, Br, Cr] = balred(A, B, C, 2);
 
 disp('reduced A (2x2):');
 disp(Ar);

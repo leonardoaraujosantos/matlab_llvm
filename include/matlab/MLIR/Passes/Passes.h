@@ -163,6 +163,17 @@ unsigned runOutlineParfor(mlir::ModuleOp M);
 /// gdb can step from the compiled binary into the user's `.m` file.
 std::string lowerToLLVMIR(mlir::ModuleOp M, bool EmitDebugInfo = false);
 
+/// Strip `matlab.*` arg/result attrs from every `llvm.func` op in `M`.
+/// Run after the standard LLVM-conversion pipeline (so func.func ops have
+/// already been rewritten to llvm.func) and before
+/// `mlir::translateModuleToLLVMIR` / `mlir::ExecutionEngine::create`. The
+/// LLVM-dialect translation rejects unknown parameter attributes — our
+/// pipeline stamps `matlab.name` (plus a few `matlab.fi_*` / shape
+/// attrs) on func args so EmitC / SystemVerilog can render named
+/// signatures, and those attrs survive the conversion to llvm.func
+/// otherwise.
+void stripMatlabFuncAttrs(mlir::ModuleOp M);
+
 /// Fold `scf.if` whose only effect is storing one of two externally-
 /// defined SSA values into the same slot down to a single `arith.select`
 /// plus one store. Chains nicely with Mem2RegLite so the slot disappears

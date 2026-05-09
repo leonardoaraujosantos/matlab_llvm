@@ -655,6 +655,40 @@ export function lqr(A: any, B: any, Q: any, R: any): NDArray {
   return np.matmul(np.matmul(Rinv, Bt), X);
 }
 
+// Closed-loop poles for [K, S, e] = lqr(...): degraded on TS via the
+// eig stub but kept for link-time compat.
+export function lqr_e(A: any, B: any, Q: any, R: any): NDArray {
+  const K = lqr(A, B, Q, R);
+  if (K.rows === 0) return np.zeros(0, 0);
+  const Am = asArray(A), Bm = asArray(B);
+  const BK = np.matmul(Bm, K);
+  const Acl = np.zeros(Am.rows, Am.cols);
+  for (let i = 0; i < Am.rows; ++i)
+    for (let j = 0; j < Am.cols; ++j)
+      Acl.set(i, j, Am.at(i, j) - BK.at(i, j));
+  const e: any = (np.linalg as any).eig ? (np.linalg as any).eig(Acl) : null;
+  if (!e || !e.at) return np.zeros(Am.rows, 1);
+  const out = np.zeros(Am.rows, 1);
+  for (let i = 0; i < Am.rows; ++i) out.set(i, 0, e.at(i, i));
+  return out;
+}
+
+export function dlqr_e(Ad: any, Bd: any, Q: any, R: any): NDArray {
+  const K = dlqr(Ad, Bd, Q, R);
+  if (K.rows === 0) return np.zeros(0, 0);
+  const Am = asArray(Ad), Bm = asArray(Bd);
+  const BK = np.matmul(Bm, K);
+  const Acl = np.zeros(Am.rows, Am.cols);
+  for (let i = 0; i < Am.rows; ++i)
+    for (let j = 0; j < Am.cols; ++j)
+      Acl.set(i, j, Am.at(i, j) - BK.at(i, j));
+  const e: any = (np.linalg as any).eig ? (np.linalg as any).eig(Acl) : null;
+  if (!e || !e.at) return np.zeros(Am.rows, 1);
+  const out = np.zeros(Am.rows, 1);
+  for (let i = 0; i < Am.rows; ++i) out.set(i, 0, e.at(i, i));
+  return out;
+}
+
 // Discrete algebraic Riccati equation - X = dare(Ad, Bd, Q, R) - Tier-2
 // follow-on. Newton-Kleinman iteration seeded from X_0 = dlyap(Ad', Q);
 // requires Schur-stable Ad. Mirrors the C runtime exactly.
@@ -801,6 +835,52 @@ export function damp(A: any): NDArray {
   return out;
 }
 
+// Inverse Tustin A = (2/Ts) (Ad - I) (I + Ad)^-1.
+export function d2c_tustin_A(Ad: any, Bd: any, Ts: number): NDArray {
+  const Am = asArray(Ad);
+  const n = Am.rows;
+  if (n === 0 || Am.cols !== n || Ts <= 0) return np.zeros(0, 0);
+  const IpAd = np.zeros(n, n), AdmI = np.zeros(n, n);
+  for (let i = 0; i < n; ++i)
+    for (let j = 0; j < n; ++j) {
+      const v = Am.at(i, j);
+      IpAd.set(i, j, v + (i === j ? 1 : 0));
+      AdmI.set(i, j, v - (i === j ? 1 : 0));
+    }
+  let Inv: NDArray;
+  try { Inv = np.linalg.inv(IpAd); }
+  catch { return np.zeros(0, 0); }
+  if (Inv.rows === 0) return np.zeros(0, 0);
+  const Prod = np.matmul(AdmI, Inv);
+  const out = np.zeros(n, n);
+  const s = 2 / Ts;
+  for (let i = 0; i < n; ++i)
+    for (let j = 0; j < n; ++j) out.set(i, j, s * Prod.at(i, j));
+  return out;
+}
+
+// Inverse Tustin B = (2/Ts) (I + Ad)^-1 Bd.
+export function d2c_tustin_B(Ad: any, Bd: any, Ts: number): NDArray {
+  const Am = asArray(Ad), Bm = asArray(Bd);
+  const n = Am.rows, m = Bm.cols;
+  if (n === 0 || Am.cols !== n || Bm.rows !== n || Ts <= 0)
+    return np.zeros(0, 0);
+  const IpAd = np.zeros(n, n);
+  for (let i = 0; i < n; ++i)
+    for (let j = 0; j < n; ++j)
+      IpAd.set(i, j, Am.at(i, j) + (i === j ? 1 : 0));
+  let Inv: NDArray;
+  try { Inv = np.linalg.inv(IpAd); }
+  catch { return np.zeros(0, 0); }
+  if (Inv.rows === 0) return np.zeros(0, 0);
+  const InvBd = np.matmul(Inv, Bm);
+  const out = np.zeros(n, m);
+  const s = 2 / Ts;
+  for (let i = 0; i < n; ++i)
+    for (let j = 0; j < m; ++j) out.set(i, j, s * InvBd.at(i, j));
+  return out;
+}
+
 // Tustin discretisation Ad = (I − αA)⁻¹ (I + αA), α = Ts/2.
 export function c2d_tustin_Ad(A: any, B: any, Ts: number): NDArray {
   const Am = asArray(A);
@@ -876,6 +956,346 @@ export function norm_h2_d(A: any, B: any, C: any, D: any): number {
   const DDt = np.matmul(Dm, Dt);
   for (let i = 0; i < p; ++i) tr += DDt.at(i, i);
   return tr > 0 ? Math.sqrt(tr) : 0;
+}
+
+// Append (block-diagonal) Acl = blkdiag(A1, A2).
+export function append_ss_A(A1: any, B1: any, C1: any,
+                            A2: any, B2: any, C2: any): NDArray {
+  return parallel_ss_A(A1, B1, C1, A2, B2, C2);
+}
+
+// Append Bcl = blkdiag(B1, B2).
+export function append_ss_B(_A1: any, B1: any, _C1: any,
+                            _A2: any, B2: any, _C2: any): NDArray {
+  const B1m = asArray(B1), B2m = asArray(B2);
+  const n1 = B1m.rows, n2 = B2m.rows;
+  const m1 = B1m.cols, m2 = B2m.cols;
+  const out = np.zeros(n1 + n2, m1 + m2);
+  for (let i = 0; i < n1; ++i)
+    for (let j = 0; j < m1; ++j) out.set(i, j, B1m.at(i, j));
+  for (let i = 0; i < n2; ++i)
+    for (let j = 0; j < m2; ++j) out.set(n1 + i, m1 + j, B2m.at(i, j));
+  return out;
+}
+
+// Append Ccl = blkdiag(C1, C2).
+export function append_ss_C(_A1: any, _B1: any, C1: any,
+                            _A2: any, _B2: any, C2: any): NDArray {
+  const C1m = asArray(C1), C2m = asArray(C2);
+  const p1 = C1m.rows, p2 = C2m.rows;
+  const n1 = C1m.cols, n2 = C2m.cols;
+  const out = np.zeros(p1 + p2, n1 + n2);
+  for (let i = 0; i < p1; ++i)
+    for (let j = 0; j < n1; ++j) out.set(i, j, C1m.at(i, j));
+  for (let i = 0; i < p2; ++i)
+    for (let j = 0; j < n2; ++j) out.set(p1 + i, n1 + j, C2m.at(i, j));
+  return out;
+}
+
+// Series cascade Acl = [A1, 0; B2*C1, A2].
+export function series_ss_A(A1: any, _B1: any, C1: any,
+                            A2: any, B2: any, _C2: any): NDArray {
+  const A1m = asArray(A1), C1m = asArray(C1), A2m = asArray(A2), B2m = asArray(B2);
+  const n1 = A1m.rows, n2 = A2m.rows, n = n1 + n2;
+  const out = np.zeros(n, n);
+  for (let i = 0; i < n1; ++i)
+    for (let j = 0; j < n1; ++j) out.set(i, j, A1m.at(i, j));
+  const B2C1 = np.matmul(B2m, C1m);
+  for (let i = 0; i < n2; ++i)
+    for (let j = 0; j < n1; ++j) out.set(n1 + i, j, B2C1.at(i, j));
+  for (let i = 0; i < n2; ++i)
+    for (let j = 0; j < n2; ++j) out.set(n1 + i, n1 + j, A2m.at(i, j));
+  return out;
+}
+
+export function series_ss_B(A1: any, B1: any, _C1: any,
+                            A2: any, _B2: any, _C2: any): NDArray {
+  const A1m = asArray(A1), B1m = asArray(B1), A2m = asArray(A2);
+  const n1 = A1m.rows, n2 = A2m.rows, m = B1m.cols;
+  const out = np.zeros(n1 + n2, m);
+  for (let i = 0; i < n1; ++i)
+    for (let j = 0; j < m; ++j) out.set(i, j, B1m.at(i, j));
+  return out;
+}
+
+export function series_ss_C(A1: any, _B1: any, _C1: any,
+                            A2: any, _B2: any, C2: any): NDArray {
+  const A1m = asArray(A1), C2m = asArray(C2), A2m = asArray(A2);
+  const n1 = A1m.rows, n2 = A2m.rows, p = C2m.rows;
+  const out = np.zeros(p, n1 + n2);
+  for (let i = 0; i < p; ++i)
+    for (let j = 0; j < n2; ++j) out.set(i, n1 + j, C2m.at(i, j));
+  return out;
+}
+
+// Parallel sum Acl = blkdiag(A1, A2), Bcl = [B1; B2], Ccl = [C1, C2].
+export function parallel_ss_A(A1: any, _B1: any, _C1: any,
+                              A2: any, _B2: any, _C2: any): NDArray {
+  const A1m = asArray(A1), A2m = asArray(A2);
+  const n1 = A1m.rows, n2 = A2m.rows, n = n1 + n2;
+  const out = np.zeros(n, n);
+  for (let i = 0; i < n1; ++i)
+    for (let j = 0; j < n1; ++j) out.set(i, j, A1m.at(i, j));
+  for (let i = 0; i < n2; ++i)
+    for (let j = 0; j < n2; ++j) out.set(n1 + i, n1 + j, A2m.at(i, j));
+  return out;
+}
+
+export function parallel_ss_B(_A1: any, B1: any, _C1: any,
+                              _A2: any, B2: any, _C2: any): NDArray {
+  const B1m = asArray(B1), B2m = asArray(B2);
+  const m = B1m.cols;
+  const out = np.zeros(B1m.rows + B2m.rows, m);
+  for (let i = 0; i < B1m.rows; ++i)
+    for (let j = 0; j < m; ++j) out.set(i, j, B1m.at(i, j));
+  for (let i = 0; i < B2m.rows; ++i)
+    for (let j = 0; j < m; ++j) out.set(B1m.rows + i, j, B2m.at(i, j));
+  return out;
+}
+
+export function parallel_ss_C(_A1: any, _B1: any, C1: any,
+                              _A2: any, _B2: any, C2: any): NDArray {
+  const C1m = asArray(C1), C2m = asArray(C2);
+  const p = C1m.rows;
+  const out = np.zeros(p, C1m.cols + C2m.cols);
+  for (let i = 0; i < p; ++i)
+    for (let j = 0; j < C1m.cols; ++j) out.set(i, j, C1m.at(i, j));
+  for (let i = 0; i < p; ++i)
+    for (let j = 0; j < C2m.cols; ++j) out.set(i, C1m.cols + j, C2m.at(i, j));
+  return out;
+}
+
+// Closed-loop A: [A1, -B1*C2; B2*C1, A2].
+export function feedback_ss_A(A1: any, B1: any, C1: any,
+                              A2: any, B2: any, C2: any): NDArray {
+  const A1m = asArray(A1), B1m = asArray(B1), C1m = asArray(C1);
+  const A2m = asArray(A2), B2m = asArray(B2), C2m = asArray(C2);
+  const n1 = A1m.rows, n2 = A2m.rows;
+  const n = n1 + n2;
+  const out = np.zeros(n, n);
+  // A1 top-left.
+  for (let i = 0; i < n1; ++i)
+    for (let j = 0; j < n1; ++j) out.set(i, j, A1m.at(i, j));
+  // -B1*C2 top-right.
+  const B1C2 = np.matmul(B1m, C2m);
+  for (let i = 0; i < n1; ++i)
+    for (let j = 0; j < n2; ++j) out.set(i, n1 + j, -B1C2.at(i, j));
+  // B2*C1 bottom-left.
+  const B2C1 = np.matmul(B2m, C1m);
+  for (let i = 0; i < n2; ++i)
+    for (let j = 0; j < n1; ++j) out.set(n1 + i, j, B2C1.at(i, j));
+  // A2 bottom-right.
+  for (let i = 0; i < n2; ++i)
+    for (let j = 0; j < n2; ++j) out.set(n1 + i, n1 + j, A2m.at(i, j));
+  return out;
+}
+
+export function feedback_ss_B(A1: any, B1: any, _C1: any,
+                              A2: any, _B2: any, _C2: any): NDArray {
+  const A1m = asArray(A1), B1m = asArray(B1), A2m = asArray(A2);
+  const n1 = A1m.rows, n2 = A2m.rows, m = B1m.cols;
+  const out = np.zeros(n1 + n2, m);
+  for (let i = 0; i < n1; ++i)
+    for (let j = 0; j < m; ++j) out.set(i, j, B1m.at(i, j));
+  return out;
+}
+
+export function feedback_ss_C(A1: any, _B1: any, C1: any,
+                              A2: any, _B2: any, _C2: any): NDArray {
+  const A1m = asArray(A1), C1m = asArray(C1), A2m = asArray(A2);
+  const n1 = A1m.rows, n2 = A2m.rows, p = C1m.rows;
+  const out = np.zeros(p, n1 + n2);
+  for (let i = 0; i < p; ++i)
+    for (let j = 0; j < n1; ++j) out.set(i, j, C1m.at(i, j));
+  return out;
+}
+
+// pole(A) — closed-loop poles. Alias for eig.
+export function pole(A: any): NDArray {
+  return (np.linalg as any).eig
+    ? (np.linalg as any).eig(asArray(A))
+    : np.zeros(0, 0);
+}
+
+// Approximate H∞ norm: max |H(jw)| over a log-spaced grid.
+export function getPeakGain_ss(A: any, B: any, C: any, D: any): number {
+  const Am = asArray(A), Bm = asArray(B);
+  const Cm = asArray(C), Dm = asArray(D);
+  const n = Am.rows;
+  if (n === 0 || Am.cols !== n) return 0;
+  let peak = 0;
+  try {
+    const Ainv = np.linalg.inv(Am);
+    const dc = Dm.at(0, 0) - np.matmul(Cm, np.matmul(Ainv, Bm)).at(0, 0);
+    peak = Math.abs(dc);
+  } catch { /* singular A — skip DC */ }
+  const Npts = 200, log_lo = -3, log_hi = 6;
+  for (let i = 0; i < Npts; ++i) {
+    const w = Math.pow(10, log_lo + (i / (Npts - 1)) * (log_hi - log_lo));
+    const N = 2 * n;
+    const M = np.zeros(N, N);
+    for (let r = 0; r < n; ++r)
+      for (let c = 0; c < n; ++c) {
+        const a = Am.at(r, c);
+        M.set(r,     c,     -a);
+        M.set(n + r, n + c, -a);
+      }
+    for (let k = 0; k < n; ++k) {
+      M.set(k,     n + k, -w);
+      M.set(n + k, k,      w);
+    }
+    const rhs = np.zeros(N, 1);
+    for (let r = 0; r < n; ++r) rhs.set(r, 0, Bm.at(r, 0));
+    let X: NDArray;
+    try { X = np.linalg.solve(M, rhs); } catch { continue; }
+    let Hr = Dm.at(0, 0), Hi = 0;
+    for (let k = 0; k < n; ++k) {
+      Hr += Cm.at(0, k) * X.at(k, 0);
+      Hi += Cm.at(0, k) * X.at(n + k, 0);
+    }
+    const mag = Math.sqrt(Hr * Hr + Hi * Hi);
+    if (mag > peak) peak = mag;
+  }
+  return peak;
+}
+
+// SISO -3 dB bandwidth: lowest w where |H(jw)| < |H(j0)|/sqrt(2).
+// Degraded approximation on TS (no complex inv); uses bode_ss-style
+// real 2n×2n decomposition. Kept compact since this lane rarely
+// exercises bandwidth.
+export function bandwidth_ss(A: any, B: any, C: any, D: any): number {
+  const Am = asArray(A), Bm = asArray(B);
+  const Cm = asArray(C), Dm = asArray(D);
+  const n = Am.rows;
+  if (n === 0 || Am.cols !== n) return Infinity;
+  let Ainv: NDArray;
+  try { Ainv = np.linalg.inv(Am); }
+  catch { return Infinity; }
+  if (Ainv.rows === 0) return Infinity;
+  const G0 = Dm.at(0, 0) - np.matmul(Cm, np.matmul(Ainv, Bm)).at(0, 0);
+  const absG0 = Math.abs(G0);
+  if (absG0 <= 0) return Infinity;
+  const target = absG0 / Math.sqrt(2);
+  const Npts = 200;
+  const log_lo = -3, log_hi = 6;
+  let prev_w = Math.pow(10, log_lo), prev_mag = absG0;
+  for (let i = 0; i < Npts; ++i) {
+    const w = Math.pow(10, log_lo + (i / (Npts - 1)) * (log_hi - log_lo));
+    // (jwI - A) X = B  via real 2n×2n block decomposition.
+    const N = 2 * n;
+    const M = np.zeros(N, N);
+    for (let r = 0; r < n; ++r)
+      for (let c = 0; c < n; ++c) {
+        const a = Am.at(r, c);
+        M.set(r,     c,     -a);
+        M.set(n + r, n + c, -a);
+      }
+    for (let k = 0; k < n; ++k) {
+      M.set(k,     n + k, -w);
+      M.set(n + k, k,      w);
+    }
+    const rhs = np.zeros(N, 1);
+    for (let r = 0; r < n; ++r) rhs.set(r, 0, Bm.at(r, 0));
+    let X: NDArray;
+    try { X = np.linalg.solve(M, rhs); }
+    catch { continue; }
+    let Hr = Dm.at(0, 0), Hi = 0;
+    for (let k = 0; k < n; ++k) {
+      Hr += Cm.at(0, k) * X.at(k, 0);
+      Hi += Cm.at(0, k) * X.at(n + k, 0);
+    }
+    const mag = Math.sqrt(Hr * Hr + Hi * Hi);
+    if (mag < target && prev_mag >= target && i > 0) {
+      const t = (prev_mag - target) / (prev_mag - mag);
+      const lw = Math.log10(prev_w) + t * (Math.log10(w) - Math.log10(prev_w));
+      return Math.pow(10, lw);
+    }
+    prev_w = w; prev_mag = mag;
+  }
+  return Infinity;
+}
+
+// Step-response metrics: 1 x 5 row [Rise, Settle, Over, Peak, PeakTime].
+export function stepinfo(y: any, t: any): NDArray {
+  const ya = asArray(y), ta = asArray(t);
+  const n = ya.rows * ya.cols;
+  if (n === 0 || ta.rows * ta.cols !== n) return np.zeros(0, 0);
+  // Linearise (treat row or column equivalently).
+  const yflat: number[] = [], tflat: number[] = [];
+  for (let i = 0; i < ya.rows; ++i)
+    for (let j = 0; j < ya.cols; ++j) yflat.push(ya.at(i, j));
+  for (let i = 0; i < ta.rows; ++i)
+    for (let j = 0; j < ta.cols; ++j) tflat.push(ta.at(i, j));
+  const Final = yflat[n - 1];
+  const absF = Math.abs(Final);
+  let peakIdx = 0, Peak = 0;
+  for (let i = 0; i < n; ++i) {
+    const v = Math.abs(yflat[i]);
+    if (v > Peak) { Peak = v; peakIdx = i; }
+  }
+  const PeakTime = tflat[peakIdx];
+  let Over = 0;
+  if (absF > 0) Over = Math.max((Peak - absF) / absF * 100, 0);
+  const th10 = 0.1 * Final, th90 = 0.9 * Final;
+  let i10 = -1, i90 = -1;
+  if (Final >= 0) {
+    for (let i = 0; i < n; ++i) {
+      if (i10 < 0 && yflat[i] >= th10) i10 = i;
+      if (i90 < 0 && yflat[i] >= th90) { i90 = i; break; }
+    }
+  } else {
+    for (let i = 0; i < n; ++i) {
+      if (i10 < 0 && yflat[i] <= th10) i10 = i;
+      if (i90 < 0 && yflat[i] <= th90) { i90 = i; break; }
+    }
+  }
+  const Rise = (i10 >= 0 && i90 >= 0) ? (tflat[i90] - tflat[i10]) : 0;
+  const band = 0.02 * absF;
+  let settleIdx = -1;
+  for (let i = n - 1; i >= 0; --i) {
+    if (Math.abs(yflat[i] - Final) > band) { settleIdx = i; break; }
+  }
+  const Settle = settleIdx >= 0 ? tflat[settleIdx] : 0;
+  const out = np.zeros(1, 5);
+  out.set(0, 0, Rise);
+  out.set(0, 1, Settle);
+  out.set(0, 2, Over);
+  out.set(0, 3, Peak);
+  out.set(0, 4, PeakTime);
+  return out;
+}
+
+// Steady-state Kalman covariance: P = care(A', C', G Qn G', Rn).
+export function kalman_P(A: any, G: any, C: any, Qn: any, Rn: any): NDArray {
+  const Am = asArray(A), Gm = asArray(G), Cm = asArray(C);
+  const Qm = asArray(Qn), Rm = asArray(Rn);
+  const n = Am.rows;
+  const At = np.zeros(n, n);
+  for (let i = 0; i < n; ++i)
+    for (let j = 0; j < n; ++j) At.set(j, i, Am.at(i, j));
+  const Gt = np.zeros(Gm.cols, Gm.rows);
+  for (let i = 0; i < Gm.rows; ++i)
+    for (let j = 0; j < Gm.cols; ++j) Gt.set(j, i, Gm.at(i, j));
+  const Ct = np.zeros(Cm.cols, Cm.rows);
+  for (let i = 0; i < Cm.rows; ++i)
+    for (let j = 0; j < Cm.cols; ++j) Ct.set(j, i, Cm.at(i, j));
+  return care(At, Ct, np.matmul(np.matmul(Gm, Qm), Gt), Rm);
+}
+
+export function kalmd_P(Ad: any, G: any, C: any, Qn: any, Rn: any): NDArray {
+  const Am = asArray(Ad), Gm = asArray(G), Cm = asArray(C);
+  const Qm = asArray(Qn), Rm = asArray(Rn);
+  const n = Am.rows;
+  const At = np.zeros(n, n);
+  for (let i = 0; i < n; ++i)
+    for (let j = 0; j < n; ++j) At.set(j, i, Am.at(i, j));
+  const Gt = np.zeros(Gm.cols, Gm.rows);
+  for (let i = 0; i < Gm.rows; ++i)
+    for (let j = 0; j < Gm.cols; ++j) Gt.set(j, i, Gm.at(i, j));
+  const Ct = np.zeros(Cm.cols, Cm.rows);
+  for (let i = 0; i < Cm.rows; ++i)
+    for (let j = 0; j < Cm.cols; ++j) Ct.set(j, i, Cm.at(i, j));
+  return dare(At, Ct, np.matmul(np.matmul(Gm, Qm), Gt), Rm);
 }
 
 // Continuous Kalman gain via LQR duality. L = (lqr(A', C', G Qn G', Rn))'.

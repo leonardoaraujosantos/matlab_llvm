@@ -1,0 +1,22 @@
+1×1 Ad (closed form 0.904762): 0.904762
+1×1 Bd (closed form 0.095238): 0.095238
+isstable (continuous): 1
+isstable_d after Tustin: 1
+Tustin Ad (must be Schur):
+   0.989589   0.0462695
+   -0.416426   0.850781
+Tustin Bd:
+   0.00115674
+   0.0462695
+ZOH Ad:
+   0.989312   0.0462568
+   -0.416311   0.850541
+Tustin Ad:
+   0.989589   0.0462695
+   -0.416426   0.850781
+ZOH eig:
+   0.919927
+   0.919927
+Tustin eig:
+   0.920185
+   0.920185

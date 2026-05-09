@@ -1,0 +1,6 @@
+pole(A) â should be {-2, -1} (sorted ascending):
+[[-2.]
+ [-1.]]
+1st-order peak (closed form 1.0): 1.0000
+Resonant peak grid-approx (closed form ~10): 8.9507
+Damped peak (closed form 1.0 = DC gain): 1.0002

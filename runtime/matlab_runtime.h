@@ -151,6 +151,15 @@ matlab_mat *matlab_dare(matlab_mat *Ad, matlab_mat *Bd,
 matlab_mat *matlab_dlqr(matlab_mat *Ad, matlab_mat *Bd,
                         matlab_mat *Q, matlab_mat *R);
 
+/* Closed-loop poles for the 3-return [K, S, e] = lqr / dlqr shape.
+ *   matlab_lqr_e  = eig(A − B·K)   with K = lqr(A, B, Q, R)
+ *   matlab_dlqr_e = eig(Ad − Bd·K) with K = dlqr(Ad, Bd, Q, R)
+ * Polymorphic real/complex return (matches matlab_eig). */
+matlab_mat *matlab_lqr_e(matlab_mat *A, matlab_mat *B,
+                         matlab_mat *Q, matlab_mat *R);
+matlab_mat *matlab_dlqr_e(matlab_mat *Ad, matlab_mat *Bd,
+                          matlab_mat *Q, matlab_mat *R);
+
 /* Controllability matrix: ctrb(A, B) = [B, A B, A^2 B, ..., A^{n-1} B].
  * Returns n x (n*m). The pair is controllable iff rank(ctrb) = n.
  * Structural-rank companion to gram_c. */
@@ -189,6 +198,11 @@ matlab_mat *matlab_balreal_T(matlab_mat *A, matlab_mat *B, matlab_mat *C);
  * Returns +Inf if A is not Hurwitz. */
 double matlab_norm_h2(matlab_mat *A, matlab_mat *B, matlab_mat *C);
 
+/* Step-response metrics. Returns a 1 × 5 row
+ *   [RiseTime, SettlingTime, Overshoot (%), Peak, PeakTime]
+ * built from a sampled step response y(t). */
+matlab_mat *matlab_stepinfo(matlab_mat *y, matlab_mat *t);
+
 /* State-space DC gain (continuous): D − C · A⁻¹ · B. Returns a p × m
  * matrix. Returns 0×0 if A is singular (DC gain unbounded). */
 matlab_mat *matlab_dcgain_ss(matlab_mat *A, matlab_mat *B,
@@ -203,6 +217,14 @@ matlab_mat *matlab_kalman_L(matlab_mat *A, matlab_mat *G, matlab_mat *C,
 
 /* Discrete-time steady-state Kalman gain. Same duality with dlqr. */
 matlab_mat *matlab_kalmd_L(matlab_mat *Ad, matlab_mat *G, matlab_mat *C,
+                           matlab_mat *Qn, matlab_mat *Rn);
+
+/* Steady-state Kalman covariance — Riccati solution P. Routes the
+ *   [L, P] = kalman(A, G, C, Qn, Rn)
+ * 2-return splitter; same shape for `kalmd` (discrete). */
+matlab_mat *matlab_kalman_P(matlab_mat *A, matlab_mat *G, matlab_mat *C,
+                            matlab_mat *Qn, matlab_mat *Rn);
+matlab_mat *matlab_kalmd_P(matlab_mat *Ad, matlab_mat *G, matlab_mat *C,
                            matlab_mat *Qn, matlab_mat *Rn);
 
 /* Discrete stability test (Schur — |eig(A)| < 1). Returns 1.0 / 0.0. */
@@ -221,6 +243,13 @@ double matlab_norm_h2_d(matlab_mat *A, matlab_mat *B,
  * No expm needed. Same shape as matlab_c2d_Ad / matlab_c2d_Bd. */
 matlab_mat *matlab_c2d_tustin_Ad(matlab_mat *A, matlab_mat *B, double Ts);
 matlab_mat *matlab_c2d_tustin_Bd(matlab_mat *A, matlab_mat *B, double Ts);
+
+/* Inverse Tustin: [A, B] = d2c_tustin(Ad, Bd, Ts).
+ *   A = (2/Ts) · (Ad − I) · (I + Ad)⁻¹
+ *   B = (2/Ts) · (I + Ad)⁻¹ · Bd
+ * Returns 0×0 if (I + Ad) is singular (Ad has eigenvalue at z = -1). */
+matlab_mat *matlab_d2c_tustin_A(matlab_mat *Ad, matlab_mat *Bd, double Ts);
+matlab_mat *matlab_d2c_tustin_B(matlab_mat *Ad, matlab_mat *Bd, double Ts);
 
 /* k-state truncated balanced realization (model reduction).
  * balred_A returns the k x k upper-left block of the balanced A;
@@ -265,6 +294,54 @@ matlab_mat *matlab_bode_ss_phase(matlab_mat *A, matlab_mat *B,
 matlab_mat *matlab_lsim_ss(matlab_mat *A, matlab_mat *B,
                            matlab_mat *C, matlab_mat *D,
                            matlab_mat *u, double dt);
+
+/* SISO peak gain max |H(jw)| over a 1e-3..1e6 log-spaced grid (200
+ * points). First approximation of the H∞ norm. */
+double matlab_getPeakGain_ss(matlab_mat *A, matlab_mat *B,
+                             matlab_mat *C, matlab_mat *D);
+
+/* Closed-loop assembly for negative feedback. Strictly proper plants
+ * only (D1 = D2 = 0). Block-diagonal lift to the (n1+n2)-state plant.
+ *   Acl = [A1, -B1*C2; B2*C1, A2]
+ *   Bcl = [B1; 0]
+ *   Ccl = [C1, 0]
+ * Routes the [Acl, Bcl, Ccl] = feedback_ss(...) 3-return splitter. */
+matlab_mat *matlab_feedback_ss_A(matlab_mat *A1, matlab_mat *B1, matlab_mat *C1,
+                                 matlab_mat *A2, matlab_mat *B2, matlab_mat *C2);
+matlab_mat *matlab_feedback_ss_B(matlab_mat *A1, matlab_mat *B1, matlab_mat *C1,
+                                 matlab_mat *A2, matlab_mat *B2, matlab_mat *C2);
+matlab_mat *matlab_feedback_ss_C(matlab_mat *A1, matlab_mat *B1, matlab_mat *C1,
+                                 matlab_mat *A2, matlab_mat *B2, matlab_mat *C2);
+
+/* Series cascade: sys = sys2 * sys1 (sys2 fed by output of sys1). */
+matlab_mat *matlab_series_ss_A(matlab_mat *A1, matlab_mat *B1, matlab_mat *C1,
+                               matlab_mat *A2, matlab_mat *B2, matlab_mat *C2);
+matlab_mat *matlab_series_ss_B(matlab_mat *A1, matlab_mat *B1, matlab_mat *C1,
+                               matlab_mat *A2, matlab_mat *B2, matlab_mat *C2);
+matlab_mat *matlab_series_ss_C(matlab_mat *A1, matlab_mat *B1, matlab_mat *C1,
+                               matlab_mat *A2, matlab_mat *B2, matlab_mat *C2);
+
+/* Parallel sum: sys = sys1 + sys2 (same input, summed outputs). */
+matlab_mat *matlab_parallel_ss_A(matlab_mat *A1, matlab_mat *B1, matlab_mat *C1,
+                                 matlab_mat *A2, matlab_mat *B2, matlab_mat *C2);
+matlab_mat *matlab_parallel_ss_B(matlab_mat *A1, matlab_mat *B1, matlab_mat *C1,
+                                 matlab_mat *A2, matlab_mat *B2, matlab_mat *C2);
+matlab_mat *matlab_parallel_ss_C(matlab_mat *A1, matlab_mat *B1, matlab_mat *C1,
+                                 matlab_mat *A2, matlab_mat *B2, matlab_mat *C2);
+
+/* Block-diagonal append: sys = blkdiag(sys1, sys2). MIMO assembly. */
+matlab_mat *matlab_append_ss_A(matlab_mat *A1, matlab_mat *B1, matlab_mat *C1,
+                               matlab_mat *A2, matlab_mat *B2, matlab_mat *C2);
+matlab_mat *matlab_append_ss_B(matlab_mat *A1, matlab_mat *B1, matlab_mat *C1,
+                               matlab_mat *A2, matlab_mat *B2, matlab_mat *C2);
+matlab_mat *matlab_append_ss_C(matlab_mat *A1, matlab_mat *B1, matlab_mat *C1,
+                               matlab_mat *A2, matlab_mat *B2, matlab_mat *C2);
+
+/* SISO −3 dB bandwidth: lowest w where |H(jw)| < |H(j0)|/sqrt(2).
+ * Scans 1e-3 → 1e6 rad/s log-spaced, interpolates the crossover.
+ * Returns +Inf if no crossover (all-pass / unstable / zero DC gain). */
+double matlab_bandwidth_ss(matlab_mat *A, matlab_mat *B,
+                           matlab_mat *C, matlab_mat *D);
 
 /* SISO open-loop stability margins. Each scans `w`, interpolates the
  * crossover, returns +Inf if no crossover on the grid. */

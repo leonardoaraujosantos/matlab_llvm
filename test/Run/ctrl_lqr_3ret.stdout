@@ -1,0 +1,17 @@
+K = [1.000000, 1.732051]
+Riccati S (closed form [sqrt(3), 1; 1, sqrt(3)]):
+   1.73205         1
+         1   1.73205
+eig real parts (-sqrt(3)/2):
+   -0.866025
+   -0.866025
+eig imag parts (±0.5):
+      -0.5
+       0.5
+K2 = [1.000000, 1.732051]
+S2(1,1) = 1.732051
+dlqr K:
+   0.163905   0.216834
+dlqr eig magnitudes squared (must be < 1):
+   0.0287799
+   0.302077

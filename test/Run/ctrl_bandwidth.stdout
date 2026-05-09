@@ -1,0 +1,4 @@
+1st-order BW (closed form 1.0): 0.999420
+2nd-order BW (closed form ~10.09): 10.0870
+low-damping BW (zeta=0.1): 15.5191
+integrator BW (+Inf expected): inf

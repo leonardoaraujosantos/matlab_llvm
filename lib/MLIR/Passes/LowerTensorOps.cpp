@@ -3126,6 +3126,194 @@ bool TensorLowering::rewriteBuiltinCalls() {
       }
     }
 
+    /* [A, B] = d2c_tustin(Ad, Bd, Ts) — inverse Tustin. Same shape. */
+    if (NA && NA.getValue().getSExtValue() == 2 &&
+        Name == "d2c_tustin" && Call->getNumOperands() == 3 &&
+        Call->getNumResults() == 2 &&
+        Call->getOperand(2).getType() == F64) {
+      Value V0 = boxAsPtr(Call->getOperand(0));
+      Value V1 = boxAsPtr(Call->getOperand(1));
+      if (V0 && V1) {
+        B.setInsertionPoint(Call);
+        auto Fa = rt("matlab_d2c_tustin_A", PtrTy, {PtrTy, PtrTy, F64});
+        auto Fb = rt("matlab_d2c_tustin_B", PtrTy, {PtrTy, PtrTy, F64});
+        SmallVector<Value, 3> CA{V0, V1, Call->getOperand(2)};
+        auto Ca = LLVM::CallOp::create(B, Call->getLoc(), Fa, CA);
+        auto Cb = LLVM::CallOp::create(B, Call->getLoc(), Fb, CA);
+        Call->getResult(0).replaceAllUsesWith(Ca.getResult());
+        Call->getResult(1).replaceAllUsesWith(Cb.getResult());
+        Call->erase();
+        Changed = true;
+        continue;
+      }
+    }
+
+    /* [L, P] = kalman(A, G, C, Qn, Rn) — gain + Riccati covariance.
+     * Routes to matlab_kalman_L + matlab_kalman_P (or kalmd_* for the
+     * discrete variant). Both helpers take the same 5-arg signature. */
+    if (NA && NA.getValue().getSExtValue() == 2 &&
+        (Name == "kalman" || Name == "kalmd") &&
+        Call->getNumOperands() == 5 && Call->getNumResults() == 2) {
+      Value V0 = boxAsPtr(Call->getOperand(0));
+      Value V1 = boxAsPtr(Call->getOperand(1));
+      Value V2 = boxAsPtr(Call->getOperand(2));
+      Value V3 = boxAsPtr(Call->getOperand(3));
+      Value V4 = boxAsPtr(Call->getOperand(4));
+      if (V0 && V1 && V2 && V3 && V4) {
+        B.setInsertionPoint(Call);
+        const char *lFn = (Name == "kalman") ? "matlab_kalman_L" : "matlab_kalmd_L";
+        const char *pFn = (Name == "kalman") ? "matlab_kalman_P" : "matlab_kalmd_P";
+        auto Fl = rt(lFn, PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy, PtrTy});
+        auto Fp = rt(pFn, PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy, PtrTy});
+        SmallVector<Value, 5> CA{V0, V1, V2, V3, V4};
+        auto Cl = LLVM::CallOp::create(B, Call->getLoc(), Fl, CA);
+        auto Cp = LLVM::CallOp::create(B, Call->getLoc(), Fp, CA);
+        Call->getResult(0).replaceAllUsesWith(Cl.getResult());
+        Call->getResult(1).replaceAllUsesWith(Cp.getResult());
+        Call->erase();
+        Changed = true;
+        continue;
+      }
+    }
+
+    /* [Acl, Bcl, Ccl] = feedback_ss / series_ss / parallel_ss
+     * (A1, B1, C1, A2, B2, C2) — strictly-proper interconnection
+     * primitives. Each routes to its own matlab_<name>_{A,B,C}. */
+    if (NA && NA.getValue().getSExtValue() == 3 &&
+        (Name == "feedback_ss" || Name == "series_ss" ||
+         Name == "parallel_ss" || Name == "append_ss") &&
+        Call->getNumOperands() == 6 && Call->getNumResults() == 3) {
+      Value V0 = boxAsPtr(Call->getOperand(0));
+      Value V1 = boxAsPtr(Call->getOperand(1));
+      Value V2 = boxAsPtr(Call->getOperand(2));
+      Value V3 = boxAsPtr(Call->getOperand(3));
+      Value V4 = boxAsPtr(Call->getOperand(4));
+      Value V5 = boxAsPtr(Call->getOperand(5));
+      if (V0 && V1 && V2 && V3 && V4 && V5) {
+        B.setInsertionPoint(Call);
+        std::string aFn = "matlab_" + std::string(Name) + "_A";
+        std::string bFn = "matlab_" + std::string(Name) + "_B";
+        std::string cFn = "matlab_" + std::string(Name) + "_C";
+        auto Fa = rt(aFn, PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy});
+        auto Fb = rt(bFn, PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy});
+        auto Fc = rt(cFn, PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy});
+        SmallVector<Value, 6> CA{V0, V1, V2, V3, V4, V5};
+        auto Ca = LLVM::CallOp::create(B, Call->getLoc(), Fa, CA);
+        auto Cb = LLVM::CallOp::create(B, Call->getLoc(), Fb, CA);
+        auto Cc = LLVM::CallOp::create(B, Call->getLoc(), Fc, CA);
+        Call->getResult(0).replaceAllUsesWith(Ca.getResult());
+        Call->getResult(1).replaceAllUsesWith(Cb.getResult());
+        Call->getResult(2).replaceAllUsesWith(Cc.getResult());
+        Call->erase();
+        Changed = true;
+        continue;
+      }
+    }
+
+    /* [Ar, Br, Cr] = balred(A, B, C, k) — k-state truncated balanced
+     * realisation. Routes to matlab_balred_{A,B,C}, all of which take
+     * the same (A, B, C, k) args. */
+    if (NA && NA.getValue().getSExtValue() == 3 &&
+        Name == "balred" && Call->getNumOperands() == 4 &&
+        Call->getNumResults() == 3 &&
+        Call->getOperand(3).getType() == F64) {
+      Value V0 = boxAsPtr(Call->getOperand(0));
+      Value V1 = boxAsPtr(Call->getOperand(1));
+      Value V2 = boxAsPtr(Call->getOperand(2));
+      if (V0 && V1 && V2) {
+        B.setInsertionPoint(Call);
+        auto Fa = rt("matlab_balred_A", PtrTy, {PtrTy, PtrTy, PtrTy, F64});
+        auto Fb = rt("matlab_balred_B", PtrTy, {PtrTy, PtrTy, PtrTy, F64});
+        auto Fc = rt("matlab_balred_C", PtrTy, {PtrTy, PtrTy, PtrTy, F64});
+        SmallVector<Value, 4> CA{V0, V1, V2, Call->getOperand(3)};
+        auto Ca = LLVM::CallOp::create(B, Call->getLoc(), Fa, CA);
+        auto Cb = LLVM::CallOp::create(B, Call->getLoc(), Fb, CA);
+        auto Cc = LLVM::CallOp::create(B, Call->getLoc(), Fc, CA);
+        Call->getResult(0).replaceAllUsesWith(Ca.getResult());
+        Call->getResult(1).replaceAllUsesWith(Cb.getResult());
+        Call->getResult(2).replaceAllUsesWith(Cc.getResult());
+        Call->erase();
+        Changed = true;
+        continue;
+      }
+    }
+
+    /* [K, S, e] = lqr(A, B, Q, R) — full continuous LQR shape:
+     *   K = matlab_lqr(A, B, Q, R)
+     *   S = matlab_care(A, B, Q, R)   (the Riccati solution)
+     *   e = matlab_lqr_e(A, B, Q, R)  (closed-loop poles eig(A − B·K))
+     * The 2-return shape [K, S] = lqr(...) is also handled. */
+    if (NA && (NA.getValue().getSExtValue() == 2 ||
+               NA.getValue().getSExtValue() == 3) &&
+        (Name == "lqr" || Name == "dlqr") &&
+        Call->getNumOperands() == 4 &&
+        (Call->getNumResults() == 2 || Call->getNumResults() == 3)) {
+      Value V0 = boxAsPtr(Call->getOperand(0));
+      Value V1 = boxAsPtr(Call->getOperand(1));
+      Value V2 = boxAsPtr(Call->getOperand(2));
+      Value V3 = boxAsPtr(Call->getOperand(3));
+      if (V0 && V1 && V2 && V3) {
+        B.setInsertionPoint(Call);
+        const char *kFn  = (Name == "lqr") ? "matlab_lqr"  : "matlab_dlqr";
+        const char *sFn  = (Name == "lqr") ? "matlab_care" : "matlab_dare";
+        const char *eFn  = (Name == "lqr") ? "matlab_lqr_e" : "matlab_dlqr_e";
+        auto Fk = rt(kFn, PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy});
+        auto Fs = rt(sFn, PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy});
+        SmallVector<Value, 4> CA{V0, V1, V2, V3};
+        auto Ck = LLVM::CallOp::create(B, Call->getLoc(), Fk, CA);
+        auto Cs = LLVM::CallOp::create(B, Call->getLoc(), Fs, CA);
+        Call->getResult(0).replaceAllUsesWith(Ck.getResult());
+        Call->getResult(1).replaceAllUsesWith(Cs.getResult());
+        if (Call->getNumResults() == 3) {
+          auto Fe = rt(eFn, PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy});
+          auto Ce = LLVM::CallOp::create(B, Call->getLoc(), Fe, CA);
+          Call->getResult(2).replaceAllUsesWith(Ce.getResult());
+        }
+        Call->erase();
+        Changed = true;
+        continue;
+      }
+    }
+
+    /* [X, K, L] = care(A, B, Q, R) / dare(...) — full Riccati shape:
+     *   X = matlab_care/matlab_dare         (the stabilising solution)
+     *   K = matlab_lqr/matlab_dlqr          (R⁻¹B'X gain, R = Schur complement
+     *                                        for discrete)
+     *   L = matlab_lqr_e/matlab_dlqr_e      (closed-loop poles eig(A − B·K) /
+     *                                        eig(Ad − Bd·K))
+     * The 2-return [X, K] form is also handled. */
+    if (NA && (NA.getValue().getSExtValue() == 2 ||
+               NA.getValue().getSExtValue() == 3) &&
+        (Name == "care" || Name == "dare") &&
+        Call->getNumOperands() == 4 &&
+        (Call->getNumResults() == 2 || Call->getNumResults() == 3)) {
+      Value V0 = boxAsPtr(Call->getOperand(0));
+      Value V1 = boxAsPtr(Call->getOperand(1));
+      Value V2 = boxAsPtr(Call->getOperand(2));
+      Value V3 = boxAsPtr(Call->getOperand(3));
+      if (V0 && V1 && V2 && V3) {
+        B.setInsertionPoint(Call);
+        const char *xFn = (Name == "care") ? "matlab_care"  : "matlab_dare";
+        const char *kFn = (Name == "care") ? "matlab_lqr"   : "matlab_dlqr";
+        const char *lFn = (Name == "care") ? "matlab_lqr_e" : "matlab_dlqr_e";
+        auto Fx = rt(xFn, PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy});
+        auto Fk = rt(kFn, PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy});
+        SmallVector<Value, 4> CA{V0, V1, V2, V3};
+        auto Cx = LLVM::CallOp::create(B, Call->getLoc(), Fx, CA);
+        auto Ck = LLVM::CallOp::create(B, Call->getLoc(), Fk, CA);
+        Call->getResult(0).replaceAllUsesWith(Cx.getResult());
+        Call->getResult(1).replaceAllUsesWith(Ck.getResult());
+        if (Call->getNumResults() == 3) {
+          auto Fl = rt(lFn, PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy});
+          auto Cl = LLVM::CallOp::create(B, Call->getLoc(), Fl, CA);
+          Call->getResult(2).replaceAllUsesWith(Cl.getResult());
+        }
+        Call->erase();
+        Changed = true;
+        continue;
+      }
+    }
+
     /* [bd, ad] = bilinear(b, a, fs). Splits into matlab_bilinear_{b,a}. */
     if (NA && NA.getValue().getSExtValue() == 2 &&
         Name == "bilinear" && Call->getNumOperands() == 3 &&
@@ -3591,16 +3779,27 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"balred_A",   "matlab_balred_A",   1, "pppf"},
       {"balred_B",   "matlab_balred_B",   1, "pppf"},
       {"balred_C",   "matlab_balred_C",   1, "pppf"},
+      /* balred 1-return defaults to Ar (the more-useful default for
+       * stability/eig analysis). The 3-return shape goes through the
+       * dedicated splitter above. */
+      {"balred",     "matlab_balred_A",   1, "pppf"},
       {"norm_h2",    "matlab_norm_h2",    0, "ppp"},
       {"dcgain_ss",  "matlab_dcgain_ss",  1, "pppp"},
+      {"stepinfo",   "matlab_stepinfo",   1, "pp"},
       {"kalman_L",   "matlab_kalman_L",   1, "ppppp"},
       {"kalmd_L",    "matlab_kalmd_L",    1, "ppppp"},
+      /* 1-return forms default to L (the gain — most-used output). The
+       * 2-return [L, P] shape goes through the splitter above. */
+      {"kalman",     "matlab_kalman_L",   1, "ppppp"},
+      {"kalmd",      "matlab_kalmd_L",    1, "ppppp"},
       {"isstable_d", "matlab_isstable_d", 0, "p"},
       {"norm_h2_d",  "matlab_norm_h2_d",  0, "pppp"},
       /* c2d_tustin 1-return defaults to Ad (the more-useful default for
        * stability/eig analysis). The 2-return shape goes through the
        * dedicated splitter above. */
       {"c2d_tustin", "matlab_c2d_tustin_Ad", 1, "ppf"},
+      /* d2c_tustin 1-return defaults to A. */
+      {"d2c_tustin", "matlab_d2c_tustin_A",  1, "ppf"},
       {"gram_c",     "matlab_gram_c",     1, "pp"},
       {"gram_o",     "matlab_gram_o",     1, "pp"},
       {"step_ss",    "matlab_step_ss",    1, "ppppff"},
@@ -3611,6 +3810,16 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"lsim_ss",    "matlab_lsim_ss",    1, "pppppf"},
       {"gain_margin","matlab_gain_margin",0, "ppppp"},
       {"phase_margin","matlab_phase_margin",0,"ppppp"},
+      {"bandwidth_ss","matlab_bandwidth_ss",0,"pppp"},
+      {"getPeakGain_ss","matlab_getPeakGain_ss",0,"pppp"},
+      {"pole",       "matlab_eig",        1, "p"},
+      /* feedback_ss 1-return defaults to Acl (closed-loop A — most-
+       * useful for stability/eig analysis). 3-return goes through the
+       * dedicated splitter above. */
+      {"feedback_ss","matlab_feedback_ss_A",1,"pppppp"},
+      {"series_ss",  "matlab_series_ss_A", 1,"pppppp"},
+      {"parallel_ss","matlab_parallel_ss_A",1,"pppppp"},
+      {"append_ss",  "matlab_append_ss_A", 1,"pppppp"},
       /* bode_tf 1-return form returns magnitude (default for plotting).
        * The 2-return [mag, phase] = bode_tf(...) shape goes through the
        * dedicated splitter above. */
@@ -3854,22 +4063,24 @@ bool TensorLowering::rewriteBuiltinCalls() {
         /* CST Tier 3 — controllability/observability/place + characterization. */
         "ctrb", "obsv", "place", "damp", "hsvd",
         /* CST Tier 4 — balancing for model reduction. */
-        "balreal_T", "balred_A", "balred_B", "balred_C",
-        /* CST Tier 3 — H₂ system norm + DC gain. */
-        "norm_h2", "dcgain_ss",
+        "balreal_T", "balred", "balred_A", "balred_B", "balred_C",
+        /* CST Tier 3 — H₂ system norm + DC gain + stepinfo. */
+        "norm_h2", "dcgain_ss", "stepinfo",
         /* CST Tier 4.2 — Kalman / Kalmd steady-state gains. */
-        "kalman_L", "kalmd_L",
+        "kalman", "kalmd", "kalman_L", "kalmd_L",
         /* CST Tier 3 — discrete-time stability + H2. */
         "isstable_d", "norm_h2_d",
-        /* CST Tier 2.2 — Tustin discretisation. */
-        "c2d_tustin",
+        /* CST Tier 2.2 — Tustin discretisation + inverse. */
+        "c2d_tustin", "d2c_tustin",
         /* CST Tier 3.4 / 2.3 — gramians and SS step response. */
         "gram_c", "gram_o", "step_ss",
         /* CST Tier 2.4 — SISO bode_ss. */
         "bode_ss",
         /* CST Tier 2.3 follow-on + 2.4 — lsim, gain/phase margins,
          * TF-form bode. */
-        "lsim_ss", "gain_margin", "phase_margin", "bode_tf",
+        "lsim_ss", "gain_margin", "phase_margin",
+        "bandwidth_ss", "getPeakGain_ss",
+        "feedback_ss", "series_ss", "parallel_ss", "append_ss", "bode_tf",
         /* `inv` on a 1*1 matrix is `1/x` — auto-box so `inv(R2)` works
          * uniformly for both 1*1 R (often the case in SISO LQR) and
          * larger matrices. */

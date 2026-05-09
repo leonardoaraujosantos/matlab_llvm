@@ -55,6 +55,10 @@ void *matlab_care(void *A, void *B, void *Q, void *R);
 void *matlab_lqr (void *A, void *B, void *Q, void *R);
 void *matlab_dare(void *Ad, void *Bd, void *Q, void *R);
 void *matlab_dlqr(void *Ad, void *Bd, void *Q, void *R);
+void *matlab_lqr_e (void *A,  void *B,  void *Q, void *R);
+void *matlab_dlqr_e(void *Ad, void *Bd, void *Q, void *R);
+void *matlab_kalman_P(void *A,  void *G, void *C, void *Qn, void *Rn);
+void *matlab_kalmd_P (void *Ad, void *G, void *C, void *Qn, void *Rn);
 void *matlab_ctrb(void *A, void *B);
 void *matlab_obsv(void *A, void *C);
 void *matlab_place(void *A, void *B, void *P);
@@ -64,12 +68,15 @@ void *matlab_hsvd(void *A, void *B, void *C);
 void *matlab_balreal_T(void *A, void *B, void *C);
 double matlab_norm_h2(void *A, void *B, void *C);
 void *matlab_dcgain_ss(void *A, void *B, void *C, void *D);
+void *matlab_stepinfo(void *y, void *t);
 void *matlab_kalman_L(void *A, void *G, void *C, void *Qn, void *Rn);
 void *matlab_kalmd_L(void *Ad, void *G, void *C, void *Qn, void *Rn);
 double matlab_isstable_d(void *A);
 double matlab_norm_h2_d(void *A, void *B, void *C, void *D);
 void *matlab_c2d_tustin_Ad(void *A, void *B, double Ts);
 void *matlab_c2d_tustin_Bd(void *A, void *B, double Ts);
+void *matlab_d2c_tustin_A(void *Ad, void *Bd, double Ts);
+void *matlab_d2c_tustin_B(void *Ad, void *Bd, double Ts);
 void *matlab_balred_A(void *A, void *B, void *C, double k);
 void *matlab_balred_B(void *A, void *B, void *C, double k);
 void *matlab_balred_C(void *A, void *B, void *C, double k);
@@ -83,6 +90,32 @@ void *matlab_bode_ss_phase(void *A, void *B, void *C, void *D, void *w);
 void  *matlab_lsim_ss     (void *A, void *B, void *C, void *D, void *u, double dt);
 double matlab_gain_margin (void *A, void *B, void *C, void *D, void *w);
 double matlab_phase_margin(void *A, void *B, void *C, void *D, void *w);
+double matlab_bandwidth_ss(void *A, void *B, void *C, void *D);
+double matlab_getPeakGain_ss(void *A, void *B, void *C, void *D);
+void *matlab_feedback_ss_A(void *A1, void *B1, void *C1,
+                           void *A2, void *B2, void *C2);
+void *matlab_feedback_ss_B(void *A1, void *B1, void *C1,
+                           void *A2, void *B2, void *C2);
+void *matlab_feedback_ss_C(void *A1, void *B1, void *C1,
+                           void *A2, void *B2, void *C2);
+void *matlab_series_ss_A(void *A1, void *B1, void *C1,
+                         void *A2, void *B2, void *C2);
+void *matlab_series_ss_B(void *A1, void *B1, void *C1,
+                         void *A2, void *B2, void *C2);
+void *matlab_series_ss_C(void *A1, void *B1, void *C1,
+                         void *A2, void *B2, void *C2);
+void *matlab_parallel_ss_A(void *A1, void *B1, void *C1,
+                           void *A2, void *B2, void *C2);
+void *matlab_parallel_ss_B(void *A1, void *B1, void *C1,
+                           void *A2, void *B2, void *C2);
+void *matlab_parallel_ss_C(void *A1, void *B1, void *C1,
+                           void *A2, void *B2, void *C2);
+void *matlab_append_ss_A(void *A1, void *B1, void *C1,
+                         void *A2, void *B2, void *C2);
+void *matlab_append_ss_B(void *A1, void *B1, void *C1,
+                         void *A2, void *B2, void *C2);
+void *matlab_append_ss_C(void *A1, void *B1, void *C1,
+                         void *A2, void *B2, void *C2);
 void *matlab_bode_tf_mag  (void *b, void *a, void *w);
 void *matlab_bode_tf_phase(void *b, void *a, void *w);
 void *matlab_sum(void *A);

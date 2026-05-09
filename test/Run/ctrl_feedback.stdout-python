@@ -1,0 +1,25 @@
+Acl (3 x 3 = n1+n2):
+[[-1.  1.  0.]
+ [ 0. -2. -1.]
+ [ 1.  0.  0.]]
+Bcl (3 x 1):
+[[0.]
+ [1.]
+ [0.]]
+Ccl (1 x 3):
+[[1. 0. 0.]]
+isstable(Acl):
+1
+1-return Acl (must match):
+[[-1.  1.  0.]
+ [ 0. -2. -1.]
+ [ 1.  0.  0.]]
+1Ã1 each, closed-loop Acl (eig = -1 Â± j):
+[[-1. -1.]
+ [ 1. -1.]]
+eig real parts (must both be -1):
+[[-1.]
+ [-1.]]
+eig imag parts (must be Â±1):
+[[-1.]
+ [ 1.]]

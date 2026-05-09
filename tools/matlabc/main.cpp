@@ -524,6 +524,13 @@ int runReplInput(mlirgen::Context &MCtx, const std::string &Src, int Id,
     return 1;
   }
 
+  /* The JIT path (ExecutionEngine::create below) is stricter than the
+   * `-emit-llvm` translator about unknown llvm.func parameter attrs —
+   * the matlab.name / matlab.fi_* attrs we stamp for EmitC / SV need
+   * to be stripped before translation or it errors with "Unhandled
+   * parameter attribute". */
+  mlirgen::stripMatlabFuncAttrs(M);
+
   if (getenv("MATLABC_REPL_DUMP")) {
     mlirgen::printModule(std::cerr, M);
   }
@@ -1051,7 +1058,19 @@ private:
   }
 
   std::optional<std::string> readLineCooked(const char *prompt) {
-    std::cout << prompt << std::flush;
+    /* Non-TTY stdin = the caller is a pipe, a heredoc, an editor /
+     * IDE harness, or a CI script — none of which need our `>> `
+     * prompt characters. Writing them anyway forces every consumer
+     * to filter them back out (the matlab_llvm_ide Command Window
+     * was double-printing prompts because of exactly this), and it
+     * mismatches how Python / Node / irb / every well-behaved REPL
+     * handle pipe-driven input. We still flush the no-op so the
+     * stream stays in lock-step with std::cin reads.
+     *
+     * Interactive use is unaffected: the TTY branch in `readLine`
+     * dispatches to readLineRaw, which keeps writing the prompt
+     * (and re-drawing it on history scroll, line edits, etc.). */
+    (void)prompt;
     std::string Line;
     if (!std::getline(std::cin, Line)) {
       std::cout << '\n';
@@ -2494,6 +2513,11 @@ bool compileProgram() {
     if (!getenv("MATLABC_DAP_DUMP")) mlirgen::printModule(std::cerr, M);
     return false;
   }
+
+  /* The JIT path used by `-dap` (ExecutionEngine::create below) errors
+   * on unknown llvm.func parameter attrs — strip our matlab.* attrs
+   * before translation. Same fix as the `-repl` path. */
+  mlirgen::stripMatlabFuncAttrs(M);
 
   /* Forward decl so the pending-breakpoints replay below + monitorMain
    * (further down) can build `breakpoint` events / stopped events with
@@ -7774,21 +7798,48 @@ int main(int Argc, char **Argv) {
     return FlowDiag.hasErrors() ? 1 : 0;
   }
 
+  /* CST stdlib prelude: classdef definitions for `tf` / `ss` / `zpk`
+   * / `pid` / `frd` model objects and any other "intrinsic" classes
+   * the toolbox surface relies on. Located the same way as the
+   * cocotb runtime: walk up from argv[0] to find `runtime/`. Empty
+   * string when not found — silently skipped so non-CST tests keep
+   * working. */
+  auto findCstPrelude = [&]() -> std::string {
+    std::string SelfStr(Argv[0]);
+    auto last = SelfStr.find_last_of('/');
+    std::string Bin = (last == std::string::npos) ? "." : SelfStr.substr(0, last);
+    char Real[PATH_MAX];
+    if (realpath(Bin.c_str(), Real)) Bin = Real;
+    std::vector<std::string> Cands = {
+      Bin + "/../runtime/cst_classdefs.m",
+      Bin + "/runtime/cst_classdefs.m",
+      Bin + "/../share/matlabc/runtime/cst_classdefs.m",
+    };
+    for (auto &C : Cands) {
+      std::ifstream Fp(C);
+      if (Fp) return C;
+    }
+    return std::string();
+  };
+  std::string PreludePath = findCstPrelude();
+
   SourceManager SM;
   FileID F = 0;
-  if (Opts.ExtraInputs.empty()) {
+  /* Always go through the concat path when a prelude is found. The
+   * single-file fast path stays for .mflow / no-prelude builds. */
+  if (Opts.ExtraInputs.empty() && PreludePath.empty()) {
     F = SM.loadFile(Opts.InputPath);
     if (F == 0) {
       std::cerr << Opts.InputPath << ": cannot open file\n";
       return 1;
     }
   } else {
-    /* Multi-file input — concatenate `Opts.InputPath` + every
-     * `ExtraInputs` path in CLI order with `\n` separators, surface
-     * to the rest of the pipeline as one synthetic buffer. The
-     * combined name is the primary input's path (so diagnostics
-     * still mention a recognizable file) and per-file `% --- file
-     * <path> ---` markers separate the regions. */
+    /* Multi-file input — concatenate the optional CST prelude +
+     * `Opts.InputPath` + every `ExtraInputs` path in CLI order with
+     * `\n` separators, surface to the rest of the pipeline as one
+     * synthetic buffer. The combined name is the primary input's
+     * path (so diagnostics still mention a recognizable file) and
+     * per-file `% --- file <path> ---` markers separate the regions. */
     std::string Combined;
     auto Append = [&](const std::string &P) -> bool {
       std::ifstream In(P, std::ios::binary);
@@ -7805,9 +7856,17 @@ int main(int Argc, char **Argv) {
       Combined += Buf.str();
       return true;
     };
+    /* User input first, prelude classdefs last. MATLAB script files
+     * can mix top-level statements with classdef blocks; the existing
+     * test convention (class_inherit.m, class_operators.m, ...) puts
+     * the script before the classdef. Match that ordering so the CST
+     * stdlib slots into the same shape. */
     if (!Append(Opts.InputPath)) return 1;
     for (const auto &P : Opts.ExtraInputs)
       if (!Append(P)) return 1;
+    if (!PreludePath.empty()) {
+      if (!Append(PreludePath)) return 1;
+    }
     F = SM.addBuffer(Opts.InputPath, std::move(Combined));
   }
 

@@ -62,6 +62,17 @@ for m in "$TESTDIR"/*.m; do
   base="$(basename "${m%.m}")"
   exp="${m%.m}.stdout"
   [[ -e "$exp" ]] || { echo "SKIP $base (no .stdout)"; continue; }
+  # Per-mode skip files. Programs that compile / run cleanly under
+  # LLVM and one of the C/C++ lanes but trip a known bug in the other
+  # ship a `.skip-emit-c` or `.skip-emit-cpp` next to the .m to mark
+  # the lane carve-out (matches the existing .skip-emit-python /
+  # .skip-emit-typescript convention).
+  if [[ "$MODE" == cpp && -e "${m%.m}.skip-emit-cpp" ]]; then
+    echo "SKIP $base (marked .skip-emit-cpp)"; continue
+  fi
+  if [[ "$MODE" == c && -e "${m%.m}.skip-emit-c" ]]; then
+    echo "SKIP $base (marked .skip-emit-c)"; continue
+  fi
 
   tmpsrc="$(mktemp -t mlc.XXXXXX).${EXT}"
   tmpbin="$(mktemp -t mlc.XXXXXX).out"

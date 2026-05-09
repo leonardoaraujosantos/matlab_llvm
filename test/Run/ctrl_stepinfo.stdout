@@ -1,0 +1,9 @@
+1st-order RiseTime    = 1.1000 (closed form 1.0986)
+1st-order SettlingTime = 1.9500 (closed form 1.957)
+1st-order Overshoot   = 0.0000 (closed form 0)
+1st-order Peak        = 1.0000 (closed form 1.0)
+2nd-order RiseTime    = 0.2600
+2nd-order SettlingTime = 2.2400
+2nd-order Overshoot   = 37.2138% (expected ~37% for zeta=0.3)
+2nd-order Peak        = 1.3723
+2nd-order PeakTime    = 0.6600

@@ -1,0 +1,18 @@
+L:
+    2.4641
+   0.0717968
+P:
+    2.4641   0.0717968
+   0.0717968   0.248711
+P(:,1) (must equal L for this plant):
+2.4641
+0.0717968
+1-return L (must equal L from 2-return form):
+    2.4641
+   0.0717968
+discrete L:
+   0.495531
+   0.0122978
+discrete P (n × n SPD):
+    1.1864   0.0518474
+   0.0518474   1.19017

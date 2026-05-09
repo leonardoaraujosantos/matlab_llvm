@@ -185,14 +185,18 @@ proper large-plant follow-on (and `schur` is now shipped to gate it).
 **Why this matters**: gates `gram`, `ctrb`/`obsv`-derived gramian
 checks, balanced realizations, observer covariance propagation.
 
-### 2.5 Algebraic Riccati equations ✅ (1-return forms)
+### 2.5 Algebraic Riccati equations ✅ (1-return + 3-return [X, K, L] forms)
 
 **Scope**:
 - `X = care(A, B, Q, R)` continuous-time algebraic Riccati
   `A'·X + X·A − X·B·R⁻¹·B'·X + Q = 0`. Returns the stabilizing solution
-  `X` (1-return form shipped — see [`feature_status.md`](../feature_status.md);
-  3-return `[X, K, L] = care(...)` is a follow-on).
-- `X = dare(Ad, Bd, Q, R)` discrete analog ✅ (1-return form shipped).
+  `X` (1-return shipped). 3-return `[X, K, L] = care(A, B, Q, R)` ✅
+  shipped — splits to `matlab_care` + `matlab_lqr` + `matlab_lqr_e`,
+  giving the Riccati X, the LQ gain `K = R⁻¹B'X`, and the closed-loop
+  spectrum `L = eig(A − B·K)` in one call. The 2-return `[X, K]` form
+  drops L; useful when complex-poles handling isn't needed downstream.
+- `X = dare(Ad, Bd, Q, R)` discrete analog ✅ (1-return + 3-return
+  `[X, K, L]` shipped, K = `(R + B'XB)⁻¹B'XA`, L = `eig(Ad − Bd·K)`).
 - Generalized 5-arg `care(A, B, Q, R, S, E)` (descriptor systems).
 - `[X, K, L] = icare(...)`, `[X, K, L] = idare(...)` — newer
   numerically robust entries; defer to a follow-up if `care`/`dare`
@@ -218,7 +222,7 @@ is no state-space optimal control.
 | `schur` / `hess` / `qz` (2.2) | 0.5 wk | 🟡 schur ✅ + hess ✅ shipped; qz not |
 | `expm` / `logm` (2.3) | 1 wk | 🟡 expm ✅ shipped; logm not |
 | `lyap` / `dlyap` / `lyapchol` (2.4) | 1 wk | 🟡 lyap ✅ + dlyap ✅ shipped; lyapchol + Sylvester not |
-| `care` / `dare` (2.5) | 1 wk | ✅ care + dare shipped (1-return) |
+| `care` / `dare` (2.5) | 1 wk | ✅ care + dare shipped (1-return + 3-return `[X, K, L]`) |
 
 **Tier-1 status**: numerical core complete enough to build the rest
 of the toolbox. Logm, lyapchol, qz, the 2-return non-sym eig, and
@@ -882,7 +886,7 @@ unblocks the next; durations are focused-session estimates):
 | 2 | `expm` / `logm` (Tier 1.3) | 1 wk | 🟡 expm ✅, logm pending |
 | 3 | `schur` / `hess` / `qz` (Tier 1.2) | 0.5 wk | 🟡 schur ✅ + hess ✅, qz pending |
 | 4 | `lyap` / `dlyap` / `lyapchol` (Tier 1.4) | 1 wk | 🟡 lyap ✅ + dlyap ✅, lyapchol pending |
-| 5 | `care` / `dare` (Tier 1.5) | 1 wk | ✅ care + dare shipped (1-return) |
+| 5 | `care` / `dare` (Tier 1.5) | 1 wk | ✅ care + dare shipped (1-return + 3-return `[X, K, L]`) |
 | 6 | Model object constructors (Tier 2.1) — `tf` / `ss` / `zpk` / `pid` | 1 wk | 🔵 not started — single biggest UX gap |
 | 7 | Conversions + `c2d` / `d2c` (Tier 2.2) | 1 wk | 🟡 c2d ZOH (matrix-arg) shipped; d2c / Tustin / foh pending |
 | 8 | Time-domain simulation (Tier 2.3) — `step` / `impulse` / `lsim` / `initial` / `stepinfo` | 1 wk | 🟡 step_ss + lsim_ss (matrix-arg) shipped; impulse / initial / stepinfo pending |
@@ -959,21 +963,57 @@ overrides; they are easier to add than to retrofit.
 
 CST compatibility is a **two-stage** project:
 
-**Stage 1 (Tier 1, ~5 weeks)**: a numeric-prerequisite stack that is
-useful well beyond CST — non-symmetric `eig`, `schur`, `expm`,
-Lyapunov, Riccati. Without this, no CST workflow can return correct
-answers. With it, CST is a relatively conventional descriptor +
-numerical-method layer on top.
+**Stage 1 (Tier 1, ~5 weeks) — ✅ SHIPPED**: numeric-prerequisite stack —
+non-symmetric `eig` (1-return), `hess`, `schur`, `expm`, `lyap`/`dlyap`,
+`care`/`dare`. Useful well beyond CST. With this in place, CST became a
+relatively conventional descriptor + numerical-method layer on top.
 
-**Stage 2 (Tiers 2–4, ~13 weeks)**: model objects, time/frequency
-response, state-space design, model reduction, MIMO interconnect.
-Each tier is a coherent user-visible deliverable; ship them in order.
+**Stage 2 (Tiers 2–4) — ✅ matrix-arg form SHIPPED**: SISO design loop
+(`lqr`/`dlqr` with 3-return `[K, S, e]`, `place`, `kalman`/`kalmd` with
+2-return `[L, P]`); discretization (`c2d` ZOH, `c2d_tustin`,
+`d2c_tustin`); time-domain (`step_ss`, `lsim_ss`, `stepinfo`);
+frequency-domain (`bode_ss` SISO, `bode_tf`, gain/phase margins,
+`bandwidth_ss`, `getPeakGain_ss`); state-space utilities (`ctrb`,
+`obsv`, `gram_c`, `gram_o`, `isstable`/`isstable_d`, `damp`, `hsvd`,
+`pole`, `dcgain_ss`, `norm_h2`/`norm_h2_d`); model reduction
+(`balreal_T`, `balred` with 3-return `[Ar, Br, Cr]`); interconnection
+(`feedback_ss`, `series_ss`, `parallel_ss`, `append_ss` — all matrix-
+arg, strictly-proper, 3-return).
+
+**Stage 3 (model objects, ~1 week) — 🔵 OPEN**: `tf` / `ss` / `zpk` /
+`frd` / `pid` classdefs with operator overloads. Single biggest
+remaining UX gap. Without these, every workflow uses positional
+matrix args and `_ss`-suffixed primitives. With them, the existing
+matrix-arg primitives collapse to one-line wrappers (`step(sys)`,
+`bode(sys)`, `feedback(sys, K)`, `sys1 + sys2`, etc.) and most
+remaining open items (model-object `c2d(sys, Ts)`, `connect`,
+`sumblk`, `lft`, plotted `bode(sys)`) become simple follow-ons.
+
+**Stage 3 architectural blocker (recorded 2026-05-09)**: a first
+attempt at `tf` as a runtime-prelude classdef surfaced a deeper bug.
+The matlabc driver auto-prepends a stdlib `cst_classdefs.m` (see
+`tools/matlabc/main.cpp` `findCstPrelude`), and the field-store
+lowering now routes tensor-typed RHS to `matlab_obj_set_mat` /
+`matlab_struct_set_mat` (`Lowering.cpp:3539`). But class-method
+monomorphization (`LowerUserCalls.cpp` `runMonomorphiseUserCalls`)
+clones the constructor per call-site signature and propagates concrete
+tensor types from the cloned signature into the body's `obj.Field =
+param` sites. The eventually-emitted `matlab_obj_set_f64` calls then
+arrive at `LowerTensorOps.cpp:1708` with a tensor RHS where the
+runtime decl expects f64 — a verifier-rejected mismatch. Fix paths:
+(a) keep class methods polymorphic at the signature level AND
+have call-site lowering box tensor args through a runtime
+`matlab_mat_from_tensor` before the call, OR (b) post-monomorphization
+rewrite of `_set_f64`/`_get_f64` callees with non-f64 operands to
+their `_mat` counterparts. Both are 2+ day investigations. Until
+fixed, the prelude file ships empty and §3.1 stays 🔵.
 
 Heavy carve-outs (apps, Simulink, LPV/LTV, sparse-second-order,
 `systune`, Robust/MPC/SysID toolbox bridges) keep this scoped to
 **single-toolbox practical-numeric subset** — the same posture SPT
 takes. Re-open carve-outs only on user demand.
 
-The single most-impactful single primitive: **`expm`** (Tier 1.3).
-It alone unblocks `c2d` ZOH, `lsim` continuous, `initial`, gramian
-time-domain forms, and the LTV/LPV stretch path. Build it early.
+The single most-impactful primitive shipped: **`expm`** (Tier 1.3),
+the gating piece for everything continuous-time and model-reduction
+related. The single most-impactful primitive still **open**: model
+objects (Stage 3 above).

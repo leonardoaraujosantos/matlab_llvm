@@ -102,22 +102,32 @@ void Resolver::registerBuiltins() {
     "ctrb", "obsv", "place",
     /* Tier 3 — stability + characterization. */
     "isstable", "damp", "hsvd",
-    /* Tier 4 — balancing + balanced truncation for model reduction. */
-    "balreal_T", "balred_A", "balred_B", "balred_C",
-    /* Tier 3 — H₂ system norm (Lyapunov-based) + DC gain. */
-    "norm_h2", "dcgain_ss",
-    /* Tier 4.2 — Kalman / Kalmd steady-state gains. */
-    "kalman_L", "kalmd_L",
+    /* Tier 4 — balancing + balanced truncation for model reduction.
+     * `balred` (no suffix) is the user-facing 1-/3-return entry; the
+     * `_A` / `_B` / `_C` variants are the splitter targets. */
+    "balreal_T", "balred", "balred_A", "balred_B", "balred_C",
+    /* Tier 3 — H₂ system norm (Lyapunov-based) + DC gain + stepinfo. */
+    "norm_h2", "dcgain_ss", "stepinfo",
+    /* Tier 4.2 — Kalman / Kalmd steady-state gains. `kalman` /
+     * `kalmd` (no suffix) are the user-facing 1-/2-return entries; the
+     * `_L` / `_P` variants are the splitter targets. */
+    "kalman", "kalmd", "kalman_L", "kalmd_L",
     /* Tier 3 — discrete-time companions for stability + H₂ norm. */
     "isstable_d", "norm_h2_d",
     /* Tier 2.2 — continuous->discrete state-space ZOH + Tustin. */
     "c2d", "c2d_tustin",
+    /* Inverse Tustin: discrete-to-continuous. */
+    "d2c_tustin",
     /* Tier 3.4 / 2.3 — gramians and state-space step response. */
     "gram_c", "gram_o", "step_ss",
     /* Tier 2.4 — SISO state-space frequency response. */
     "bode_ss",
-    /* Tier 2.3 follow-on + 2.4 — generalised SS sim and stability margins. */
-    "lsim_ss", "gain_margin", "phase_margin",
+    /* Tier 2.3 follow-on + 2.4 — generalised SS sim, stability margins,
+     * −3 dB bandwidth, peak gain (rough H∞), pole alias. */
+    "lsim_ss", "gain_margin", "phase_margin", "bandwidth_ss",
+    "getPeakGain_ss", "pole",
+    /* Tier 2 — closed-loop assembly + interconnections (matrix-arg). */
+    "feedback_ss", "series_ss", "parallel_ss", "append_ss",
     /* Tier 2.4 follow-on — TF (b, a) frequency response. */
     "bode_tf",
     "arrayfun", "cellfun",

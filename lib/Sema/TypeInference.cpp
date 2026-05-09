@@ -326,12 +326,32 @@ TypeInference::Env TypeInference::visitStmt(Stmt &St, Env In) {
   case NodeKind::AssignStmt: {
     auto &A = static_cast<AssignStmt &>(St);
     const Type *RhsT = A.RHS ? visit(*A.RHS, In) : TC.any();
+    /* Multi-return refinement: when LHS arity > 1 and the RHS is a
+     * call to a known multi-return-matrix builtin, give each LHS the
+     * appropriate Array type instead of the single fallback RhsT.
+     * Without this, `[xx, yy] = meshgrid(...)` typed both `xx` and `yy`
+     * as the same fallback (often Any), and downstream `exp(xx)` then
+     * fell through to scalar Double — leading to an arith.mulf(f64,
+     * !llvm.ptr) op that crashed the LLVM lowering pipeline. */
+    const Type *PerLhsT = nullptr;
+    if (A.LHS.size() > 1 && A.RHS &&
+        A.RHS->Kind == NodeKind::CallOrIndex) {
+      auto *C = static_cast<const CallOrIndex *>(A.RHS);
+      if (auto *N = dynamic_cast<const NameExpr *>(C->Callee)) {
+        // [X, Y] = meshgrid(x, y), [X, Y] = ndgrid(x, y), and the 3-arg
+        // forms — all outputs are real-double matrices.
+        if (N->Name == "meshgrid" || N->Name == "ndgrid") {
+          PerLhsT = TC.arrayOf(Dtype::Double, Shape::matrix(-1, -1));
+        }
+      }
+    }
     for (Expr *L : A.LHS) {
       if (!L) continue;
       if (auto *N = dynamic_cast<NameExpr *>(L)) {
         if (N->Ref) {
-          In[N->Ref] = RhsT;
-          N->Ty = RhsT;
+          const Type *T = PerLhsT ? PerLhsT : RhsT;
+          In[N->Ref] = T;
+          N->Ty = T;
         }
       } else if (auto *C = dynamic_cast<CallOrIndex *>(L);
                  C && C->Args.size() == 1 && C->Args[0] &&

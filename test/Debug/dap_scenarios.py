@@ -3183,6 +3183,76 @@ def scn_var_range_for_bound(matlabc, program):
         c.wait_event("terminated", timeout=5.0)
 
 
+def scn_recursive_function_param_attrs(matlabc, program):
+    """Regression for the JIT path's "Unhandled parameter attribute
+    'matlab.name'" error.
+
+    The lowering stamps `matlab.name` arg attrs on every `func.func`
+    so EmitC / SystemVerilog can render named signatures. The
+    LLVM-conversion pipeline (ConvertFuncToLLVMPass) propagates
+    those attrs to `llvm.func`. The plain `-emit-llvm` translator
+    tolerates them, but the JIT (ExecutionEngine::create) used by
+    `-dap` and `-repl` errors out with `Unhandled parameter
+    attribute '<name>'`. The fix strips every `matlab.*` arg/result
+    attr from `llvm.func` ops between the conversion pipeline and
+    LLVM-IR translation (`stripMatlabFuncAttrs` in
+    `lib/MLIR/Passes/LowerToLLVMIR.cpp`).
+
+    Existing scenarios all use `dap_program.m` (no user functions
+    with parameters) or `dap_locals_program.m` (a single non-
+    recursive `compute(a,b)` that happens not to trip the per-
+    callsite cloning path that re-stamps the attrs). This fixture
+    is `dap_recursion_program.m` — a tiny `fact(n)` that calls
+    itself in the else branch, matching the shape that originally
+    surfaced the bug. The test only needs to reach
+    configurationDone; if launch fails (the bug returns), the
+    `initialize_and_launch` call raises with the JIT's compile
+    error visible in stderr.
+    """
+    import os
+    rec = os.path.join(
+        os.path.dirname(os.path.abspath(program)),
+        "dap_recursion_program.m",
+    )
+    with DapClient(matlabc, rec) as c:
+        # Stop on entry so we have a known synchronization point. The
+        # MLIR diagnostic for the bad attribute is non-fatal —
+        # translateModuleToLLVMIR emits the warning and still produces
+        # a working module, so launch + execution succeed either way.
+        # The only durable signal is the diagnostic text reaching the
+        # subprocess's stderr (captured by DapClient's _stderr_buf
+        # reader thread before the DAP server's pipe-redirect fully
+        # routes it as `output` events).
+        initialize_and_launch(c, stop_on_entry=True)
+        body = _stop_event(c)
+        assert body.get("reason") in ("entry", "step"), \
+            f"expected entry-stop, got {body!r}"
+        c.request("continue")
+        c.wait_event("terminated", timeout=5.0)
+        # Drain every category=stderr output event the server forwarded
+        # (the DAP path tees compile-time diagnostics through these so
+        # the IDE's debug console shows them).
+        stderr_chunks = list(c._stderr_buf)
+        try:
+            while True:
+                ev = c.wait_event("output", timeout=0.05)
+                body = ev.get("body") or {}
+                if body.get("category") == "stderr":
+                    stderr_chunks.append(body.get("output") or "")
+        except DapError:
+            pass
+
+    full = "".join(stderr_chunks)
+    bad_signals = ("matlab.name", "Unhandled parameter attribute")
+    for sig in bad_signals:
+        assert sig not in full, (
+            f"DAP stderr leaked compile-time MLIR diagnostic {sig!r} — "
+            f"the matlab.* arg/result attrs are reaching the JIT translator. "
+            f"See `mlirgen::stripMatlabFuncAttrs` in "
+            f"lib/MLIR/Passes/LowerToLLVMIR.cpp. Captured stderr:\n{full}"
+        )
+
+
 # --- entry point -------------------------------------------------------------
 
 def all_scenarios():
