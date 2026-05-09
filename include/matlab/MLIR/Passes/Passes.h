@@ -61,6 +61,18 @@ bool runLowerFixedPoint(mlir::ModuleOp M);
 /// module is directly linkable into an executable.
 bool runLowerIO(mlir::ModuleOp M);
 
+/// Lowers `matlab.call_builtin` ops whose callee is a matlab_plot
+/// runtime entry (figure / plot / title / xlabel / saveas / etc.) into
+/// `llvm.call` against the corresponding matlab_* symbol. String args
+/// are materialised via the same string-globals path as runLowerIO.
+/// Matrix args are passed straight through as ptr operands.
+///
+/// Must run AFTER runLowerTensorOps (so matlab.* tensor ops are gone
+/// and matlab_mat* descriptors are already PtrTy SSA values) and BEFORE
+/// runLowerIO (so unhandled builtins fall through to the existing
+/// fprintf / disp / assert dispatch).
+bool runLowerPlot(mlir::ModuleOp M);
+
 /// Convert every surviving `matlab.alloc` whose result type is a scalar
 /// primitive (f32/f64/integer) into an `llvm.alloca`, rewriting all loads
 /// and stores accordingly. Slot allocs with a `none` or non-scalar result

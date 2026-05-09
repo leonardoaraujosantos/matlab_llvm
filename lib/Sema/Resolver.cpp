@@ -185,6 +185,24 @@ void Resolver::registerBuiltins() {
      * recognizes the matlab.call_builtin sites and renders them as
      * SV bitwise operators. */
     "bitand", "bitor", "bitxor", "bitcmp", "bitshift",
+    /* Plotting (matlab_plot runtime; Cairo backend, headless cross-
+     * platform PNG/SVG/PDF). Recognised by name in Sema; the lowering
+     * pass LowerPlot.cpp rewrites matlab.call_builtin into LLVM calls
+     * to matlab_figure_new / matlab_plot2 / matlab_plot_fmt /
+     * matlab_title / etc. The runtime is built into matlabc when
+     * configured with -DMATLAB_LLVM_WITH_PLOT=ON. */
+    "figure", "gcf", "close",
+    "plot", "plot3", "bar", "scatter", "stem", "stairs", "area",
+    "errorbar", "histogram",
+    "imshow", "imagesc", "pcolor", "surf", "mesh", "contour",
+    "title", "xlabel", "ylabel", "zlabel", "legend", "text",
+    "colorbar", "colormap",
+    "grid", "hold", "axis", "box", "xlim", "ylim", "view",
+    "loglog", "semilogx", "semilogy",
+    "subplot", "saveas", "print",
+    "xline", "yline",
+    "xticks", "yticks", "xticklabels", "yticklabels",
+    "yyaxis", "contourf", "quiver",
   }) {
     registerBuiltin(N);
   }

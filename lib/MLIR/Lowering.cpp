@@ -6548,6 +6548,9 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
              * rank/cond return f64 (not ptr), so they live in F64Ret above. */
             "null", "orth", "imfilter", "padarray",
             "interp2", "upsample", "downsample",
+            /* Plotting — figure / gcf return an opaque matlab_figure*
+             * descriptor; everything else in the family returns void. */
+            "figure", "gcf",
           };
           if (F64Ret.contains(N->Name)) ResTy = F64;
           else if (PtrRet.contains(N->Name)) ResTy = PtrTy;
