@@ -79,7 +79,7 @@ CST-specific deadweight.
 This tier is roughly the size of the entire SPT Tier-1 + Tier-2 arc.
 Plan it as such.
 
-### 2.1 Full non-symmetric eigendecomposition 🔵
+### 2.1 Full non-symmetric eigendecomposition ✅ (1-return shipped)
 
 Today's `eig` symmetrizes `A` before diagonalizing — fast and
 numerically clean for symmetric matrices, but **wrong for plants**.
@@ -98,6 +98,12 @@ with double-shift (Wilkinson) → real Schur form → eigenvalue extraction
 from 1×1 / 2×2 diagonal blocks → eigenvector back-substitution. This
 is "LAPACK `dgeev`" in spirit, hand-coded.
 
+**Status**: 1-return `eig(A)` shipped — polymorphic real/complex
+return via Francis double-shift implicit QR with deflation.
+Symmetric inputs still take the Jacobi fast path. The 2-return
+`[V, D] = eig(A)` for non-symmetric A and the generalised `eig(A,B)`
+(QZ) are follow-ons.
+
 **Effort**: ~2 sessions for the QR loop, ~1 session for eigenvector
 back-substitution, ~1 session for QZ. ~1 week total.
 
@@ -106,7 +112,7 @@ back-substitution, ~1 session for QZ. ~1 week total.
 - companion matrix of a known polynomial: eigenvalues = roots
 - well-known rotation matrix `[0 -1; 1 0]` → eigenvalues `±i`
 
-### 2.2 Schur, Hessenberg, QZ 🔵
+### 2.2 Schur, Hessenberg, QZ 🟡 (schur + hess shipped, qz not)
 
 Many CST routines (Lyapunov / Riccati solvers, balanced truncation)
 use Schur or generalized Schur form directly, not as an internal step
@@ -118,10 +124,18 @@ of `eig`.
 - `[H, P] = hess(A)`, `H = hess(A)` upper Hessenberg.
 - `[AA, BB, Q, Z] = qz(A, B)` generalized Schur.
 
+**Status**: `schur(A)` (1-return T) and `[U, T] = schur(A)` shipped
+via the same Hessenberg + Francis-QR machinery as non-sym `eig`,
+threading an orthogonal accumulator through both passes. `hess(A)`
+(1-return) shipped (Householder reductions, in-place). `[H, P] =
+hess(A)` and the generalised `qz` pencil are follow-ons. Complex
+Schur is not separately needed since the real form already exposes
+1×1 / 2×2 blocks for complex pairs.
+
 **Effort**: 2-3 sessions on top of the Tier-2.1 QR machinery (most of
 the work is shared).
 
-### 2.3 Matrix exponential `expm` and inverse `logm` 🔵
+### 2.3 Matrix exponential `expm` and inverse `logm` 🟡 (expm shipped)
 
 `expm` is the **single most-called primitive in CST**. Used by:
 - `c2d` zero-order-hold discretization (the canonical formula).
@@ -137,13 +151,18 @@ on the existing LU.
 
 **Effort**: ~1 week. `expm` alone unblocks the largest tier-2 chunk.
 
+**Status**: `expm(A)` shipped via scaling-and-squaring with [13/13]
+Padé (Higham 2005), bit-identical across all 5 emit lanes. `logm`
+not shipped — would use inverse scaling-and-squaring on the same
+Padé table.
+
 **Gating tests**:
 - `expm(zeros(n))` = `eye(n)`.
 - `expm([0 1; -1 0]·t)` = rotation matrix.
 - `expm(A + A')` symmetric path against eigendecomp.
 - `logm(expm(A))` round-trip on stable `A`.
 
-### 2.4 Lyapunov and Sylvester equations 🔵
+### 2.4 Lyapunov and Sylvester equations 🟡 (lyap + dlyap shipped)
 
 **Scope**:
 - `X = lyap(A, Q)` solves `A·X + X·A' + Q = 0` (continuous).
@@ -154,6 +173,12 @@ on the existing LU.
 
 **Algorithm**: Bartels-Stewart on top of Schur form. For `dlyap`,
 the Smith iteration variant or Schur+back-substitution.
+
+**Status**: `lyap(A, Q)` and `dlyap(A, Q)` shipped via vectorise +
+dense LU on the n²·n² Kronecker matrix. `O(n^6)` cost; fine for
+typical CST plants (n = 2..10). Bartels-Stewart on Schur form is the
+proper large-plant follow-on (and `schur` is now shipped to gate it).
+`lyapchol` and the 3-arg Sylvester `lyap(A, B, C)` are follow-ons.
 
 **Effort**: ~1 week, sits cleanly on Tier-2.2.
 
@@ -187,13 +212,18 @@ is no state-space optimal control.
 
 ### 2.6 Tier-1 closure summary
 
-| Primitive | Effort | Unblocks |
+| Primitive | Effort | Status |
 |---|---|---|
-| Non-symmetric `eig` (2.1) | 1 wk | `pole` / `zero` / `damp` correctness |
-| `schur` / `hess` / `qz` (2.2) | 0.5 wk | Tier-1.4 / 1.5 internals, ordered eig |
-| `expm` / `logm` (2.3) | 1 wk | `c2d` ZOH, `lsim`, `initial`, gramians |
-| `lyap` / `dlyap` / `lyapchol` (2.4) | 1 wk | `gram`, balanced realization, H₂ norm |
-| `care` / `dare` (2.5) | 1 wk | `lqr` / `kalman` / `lqg`, H₂ norm exact |
+| Non-symmetric `eig` (2.1) | 1 wk | ✅ shipped (1-return); `[V, D]` for non-sym A and `qz` are follow-ons |
+| `schur` / `hess` / `qz` (2.2) | 0.5 wk | 🟡 schur ✅ + hess ✅ shipped; qz not |
+| `expm` / `logm` (2.3) | 1 wk | 🟡 expm ✅ shipped; logm not |
+| `lyap` / `dlyap` / `lyapchol` (2.4) | 1 wk | 🟡 lyap ✅ + dlyap ✅ shipped; lyapchol + Sylvester not |
+| `care` / `dare` (2.5) | 1 wk | ✅ care + dare shipped (1-return) |
+
+**Tier-1 status**: numerical core complete enough to build the rest
+of the toolbox. Logm, lyapchol, qz, the 2-return non-sym eig, and
+generalised eig remain — all are individual follow-on slices, none
+gating Tier-2/3/4 user-facing features that haven't already shipped.
 
 **Total Tier-1**: ~4-5 weeks of focused sessions. Land in the order
 above (each row depends on the rows above it).
@@ -269,7 +299,7 @@ For mixed-type pairs (`tf + ss`, etc.), the rule MATLAB uses is the
 constructors plus the conversion table; the operator overloads are a
 thin layer once conversions exist.
 
-### 3.2 Conversions between types 🔵
+### 3.2 Conversions between types 🟡 (c2d ZOH shipped)
 
 The CST UG dedicates an entire chapter (§5 Model Transformation) to
 this. The five-way table (`tf` ↔ `ss` ↔ `zpk` ↔ `frd` ↔ `pid`) plus
@@ -303,9 +333,17 @@ continuous ↔ discrete is the connective tissue.
 - `c2d` Tustin: bilinear `s = (2/Ts)·(z−1)/(z+1)` substitution into
   `A` / `B` / `C` / `D`. No `expm` needed.
 
+**Status**: matrix-arg `c2d(A, B, Ts)` ZOH form shipped (Van Loan
+augmented-matrix trick), 2-return splitter for `[Ad, Bd] = c2d(...)`.
+Tustin / foh / impulse / matched-pole-zero / least-squares methods
+are follow-ons. `d2c` (inverse direction) and `d2d` (resample) are
+follow-ons. The `c2d(sys, Ts)` model-object form awaits §3.1.
+`tf2ss` / `ss2tf` / `canon` / `ss2ss` follow §3.1 / §3.5 model
+objects. `balreal` matrix-arg form shipped (Tier-4, see §5.1).
+
 **Effort**: 1 week.
 
-### 3.3 Time-domain simulation 🔵
+### 3.3 Time-domain simulation 🟡 (step_ss / lsim_ss shipped)
 
 **Scope**:
 - `[y, t, x] = step(sys, t)`, `step(sys)` (auto-time).
@@ -330,6 +368,12 @@ continuous ↔ discrete is the connective tissue.
 - Auto-time: pick `T_final` from slowest pole; `Ts` from fastest pole
   (Nyquist-ish rule). Match MATLAB's heuristic loosely.
 
+**Status**: matrix-arg `step_ss(A, B, C, D, dt, N)` and
+`lsim_ss(A, B, C, D, u, dt)` shipped (ZOH discretisation +
+recurrence; SISO step, MIMO lsim). `impulse` / `initial` / model-
+object `step(sys)` / `stepinfo` / `lsiminfo` / `gensig` /
+`RespConfig` are follow-ons.
+
 **Effort**: 1 week. Bulk of the work is the auto-time heuristic and
 making `stepinfo` / `lsiminfo` match MATLAB's settling-time
 definitions.
@@ -337,7 +381,7 @@ definitions.
 **Gating tests**: SISO first-order (`tf(1, [τ 1])`), second-order
 underdamped, MIMO 2×2 plant — verify against analytic answers.
 
-### 3.4 Frequency-domain analysis 🔵
+### 3.4 Frequency-domain analysis 🟡 (bode_ss SISO + bode_tf + margins shipped)
 
 **Scope**:
 - `[mag, phase, w] = bode(sys, w)` / `bode(sys)`.
@@ -367,6 +411,17 @@ underdamped, MIMO 2×2 plant — verify against analytic answers.
   data; verify with high-density `freqresp` near crossovers for
   accuracy.
 
+**Status**: matrix-arg `bode_ss(A, B, C, D, w)` (SISO; MIMO is a
+follow-on) shipped via real 2n×2n decomposition of the complex
+linear solve. `bode_tf(b, a, w)` shipped via complex Horner. 2-return
+splitter for `[mag, phase] = bode_ss/bode_tf(...)` shipped.
+`gain_margin(A,B,C,D,w)` and `phase_margin(A,B,C,D,w)` shipped (scan
+the bode grid and interpolate the crossover; +Inf if no crossover).
+`dcgain_ss(A, B, C, D)` shipped. `nyquist`, `nichols`, `sigma`
+(needs MIMO bode + complex SVD), `bandwidth`, `getPeakGain`,
+`allmargin` are follow-ons. Model-object forms `bode(sys)` etc.
+follow §3.1.
+
 **Effort**: 1.5 weeks. `bode` / `freqresp` are quick; `margin` /
 `allmargin` need careful interpolation logic.
 
@@ -378,7 +433,7 @@ that today would just plot) prints a small ASCII summary
 w_max] rad/s"). Phase-2 work could ship a hook into
 `emit_python` to wrap matplotlib calls — out of scope here.
 
-### 3.5 Pole / zero analysis 🔵
+### 3.5 Pole / zero analysis 🟡 (isstable + damp shipped)
 
 **Scope**:
 - `p = pole(sys)` — closed-loop poles. Calls `eig(A)` for `ss`,
@@ -392,6 +447,14 @@ w_max] rad/s"). Phase-2 work could ship a hook into
 - `isstable(sys)` — boolean.
 - `stabsep(sys)` — stable / unstable additive decomposition. Gates
   some Tier-4 reduction; stretch.
+
+**Status**: matrix-arg `isstable(A)` shipped (continuous Hurwitz
+check; marginally-stable returns 0 per MATLAB convention). `damp(A)`
+shipped — 2-column `[wn, zeta]` form (MATLAB's full 4-column shape
+`[wn, zeta, pole, time-const]` is a follow-on once we have a
+4-return splitter). `pole(A) = eig(A)` is trivial via existing eig.
+`zero(sys)` requires `qz` (generalised eig on the Rosenbrock matrix
+`[A B; C D]` vs `[I 0; 0 0]`) and is gated on Tier-1.2 QZ.
 
 **Effort**: 0.5 week (light, mostly thin wrappers).
 
@@ -475,7 +538,7 @@ workflow.
 
 **Effort**: 0.5 week (each is a thin wrapper over `care`/`dare`).
 
-### 4.2 LQG and Kalman filter 🔵
+### 4.2 LQG and Kalman filter 🟡 (kalman_L + kalmd_L shipped)
 
 **Scope**:
 - `[kest, L, P] = kalman(sys, Q, R)` — continuous Kalman filter.
@@ -489,10 +552,18 @@ workflow.
   synthesis. Convenience wrapper.
 - `[reg, info] = lqgtrack(kest, K)` — tracking variant.
 
+**Status**: matrix-arg `kalman_L(A, G, C, Qn, Rn)` and
+`kalmd_L(Ad, G, C, Qn, Rn)` shipped — return just the steady-state
+Kalman gain `L`. Implementation exploits LQR/Kalman duality:
+`L = (lqr(A', C', G·Qn·G', Rn))'` (or `dlqr` for discrete). The
+4-return shape `[kest, L, P] = kalman(sys, Q, R)` (estimator state-
+space + gain + Riccati) and `lqgreg` / `lqg` / `lqgtrack` /
+`current` / `delayed` variants are follow-ons.
+
 **Effort**: 1 week (mainly bookkeeping; the heavy lifting is in
 `care` / `dare`).
 
-### 4.3 Pole placement 🔵
+### 4.3 Pole placement 🟡 (SISO Ackermann shipped)
 
 **Scope**:
 - `K = place(A, B, p)` — multi-input pole placement (Kautsky-Nichols-
@@ -501,11 +572,16 @@ workflow.
   but numerically poor for `n > 5`.
 - `est = estim(sys, L, sensors, known)` — observer construction.
 
+**Status**: matrix-arg `place(A, B, P)` shipped — SISO via
+Ackermann's formula `K = [0…01]·ctrb⁻¹·α(A)`. Multi-input
+Kautsky-Nichols-Van Dooren and the `estim` observer-construction
+helper are follow-ons.
+
 **Effort**: 1 week. Acker is half a session; `place` is the bulk
 (Kautsky-Nichols algorithm is non-trivial — eigenstructure
 assignment).
 
-### 4.4 Controllability / observability / gramians 🔵
+### 4.4 Controllability / observability / gramians ✅ (matrix-arg shipped)
 
 **Scope**:
 - `Cm = ctrb(sys)`, `ctrb(A, B)` — controllability matrix.
@@ -516,9 +592,15 @@ assignment).
   decomposition (gates `minreal`).
 - `[Abar, Bbar, Cbar, T, k] = obsvf(sys)` — observability staircase.
 
+**Status**: matrix-arg `ctrb(A, B)`, `obsv(A, C)`, `gram_c(A, B)`,
+`gram_o(A, C)` all shipped. The structural-rank pair (`ctrb` /
+`obsv`) and the energy-based pair (`gram_c` / `gram_o`) cover the
+practical surface. `ctrbf` / `obsvf` staircase decompositions and
+the model-object `gram(sys, 'c')` form are follow-ons.
+
 **Effort**: 0.5 week.
 
-### 4.5 System norms 🔵
+### 4.5 System norms 🟡 (norm_h2 shipped)
 
 **Scope**:
 - `n = norm(sys)` — H₂ norm by default.
@@ -529,9 +611,15 @@ assignment).
   Bruinsma-Steinbuch's two-step refinement.
 - `[n, fpeak] = hinfnorm(sys, tol)` — explicit H∞ entry.
 
+**Status**: matrix-arg `norm_h2(A, B, C)` shipped — `sqrt(trace(C ·
+Wc · C'))` with `Wc = lyap(A, B B')`. Returns +Inf if A is not
+Hurwitz. The H∞ norm (Boyd-Balakrishnan-Kabamba γ-bisection on
+Hamiltonian eigenvalues, or Bruinsma-Steinbuch refinement) is a
+follow-on.
+
 **Effort**: 1 week — H∞ is the bulk; H₂ is a Lyapunov solve.
 
-### 4.6 Stability / sensitivity analysis 🔵
+### 4.6 Stability / sensitivity analysis 🟡 (isstable shipped)
 
 **Scope**:
 - `[stabsys, unstabsys] = stabsep(sys)` — stable / unstable
@@ -542,11 +630,18 @@ assignment).
   sensitivity / loop-transfer / etc. (the "gang of six" or "gang of
   four").
 
+**Status**: `isstable(A)` shipped (continuous Hurwitz check).
+`stabsep` (ordered Schur stable/unstable split), `freqsep`, and
+`loopsens` / `gangoffour` are follow-ons.
+
 **Effort**: 1 week.
 
-**Tier-3 closure status**: full state-space optimal-control workflow
-is open. User can do `K = lqr(A, B, Q, R); est = kalman(sys, Q, R);
-reg = lqgreg(est, K)` and simulate the closed loop.
+**Tier-3 closure status**: matrix-arg state-space optimal-control
+workflow is now end-to-end usable. Users can do `K = lqr(A, B, Q, R);
+L = kalman_L(A, G, C, Qn, Rn);` and assemble the LQG controller via
+explicit state-space algebra. The model-object `lqgreg` / `lqg` and
+the 3-return forms `[K, S, e] = lqr(...)` await §3.1 / multi-return
+splitter follow-ons.
 
 ---
 
@@ -556,7 +651,7 @@ CST's Chapter 6 (Model Simplification) and the MIMO connection
 machinery. Useful once Tier-3 lights up because reduced-order
 controllers and MIMO designs are the natural next step.
 
-### 5.1 Model reduction 🔵
+### 5.1 Model reduction 🟡 (balreal_T + balred_* + hsvd shipped)
 
 **Scope**:
 - `rsys = balred(sys, order)` — balanced truncation. Stable plants
@@ -573,6 +668,16 @@ controllers and MIMO designs are the natural next step.
   cancellation; faster).
 - `R = reducespec(sys, method)` — task-based reduction object;
   defer (it is a wrapper over the above).
+
+**Status**: matrix-arg `balreal_T(A, B, C)` shipped (Laub 1980
+eigendecomposition variant — sym-eig + lyap stack; no Cholesky).
+`balred_A(A, B, C, k)` / `balred_B` / `balred_C` shipped for k-state
+balanced truncation; H∞ error bound `2·sum(HSV[k+1:n])`. `hsvd(A,
+B, C)` shipped (sqrt(eig(Wc · Wo)) sorted descending). The full
+4-return `[Ar, Br, Cr, hsv] = balreal/balred(...)` shapes need a
+multi-return splitter; `modred` (modal residualization), `minreal`,
+`sminreal`, and `reducespec` are follow-ons. Stable/unstable
+pre-split via `stabsep` is the gating piece for unstable plants.
 
 **Effort**: 2 weeks. `balred` is the bulk because the gramian path
 plus stable/unstable decomposition is a multi-piece pipeline.
@@ -771,28 +876,35 @@ across REPL turns and composes correctly under operator overloads.
 If user demand drives the order, expect this rough sequence (each row
 unblocks the next; durations are focused-session estimates):
 
-| Order | What | Effort | Unblocks |
+| Order | What | Effort | Status |
 |---|---|---|---|
-| 1 | Non-symmetric `eig` (Tier 1.1) | 1 wk | `pole` / `zero` / `damp` / `lqr` correctness — without this **nothing** works |
-| 2 | `expm` / `logm` (Tier 1.3) | 1 wk | `c2d` ZOH / `lsim` / `initial` |
-| 3 | `schur` / `hess` / `qz` (Tier 1.2) | 0.5 wk | Lyapunov / Riccati internals |
-| 4 | `lyap` / `dlyap` / `lyapchol` (Tier 1.4) | 1 wk | `gram`, balanced truncation, H₂ norm |
-| 5 | `care` / `dare` (Tier 1.5) | 1 wk | `lqr` / `kalman` / `lqg`, H∞ norm |
-| 6 | Model object constructors (Tier 2.1) — `tf` / `ss` / `zpk` / `pid` | 1 wk | Everything user-visible |
-| 7 | Conversions + `c2d` / `d2c` (Tier 2.2) | 1 wk | Mixed continuous/discrete workflow |
-| 8 | Time-domain simulation (Tier 2.3) — `step` / `impulse` / `lsim` / `initial` / `stepinfo` | 1 wk | First end-to-end demo |
-| 9 | Frequency-domain (Tier 2.4) — `bode` / `nyquist` / `sigma` / `freqresp` / `margin` | 1.5 wk | Classical loop-shaping |
-| 10 | Pole/zero + interconnections (Tier 2.5–2.6) | 1 wk | Closed-loop assembly |
-| 11 | `pidtune` (Tier 2.8) | 1 wk | First Tier-2 closure: design → simulate → analyze |
-| 12 | LQR + LQG + Kalman + place (Tier 3.1–3.3) | 1.5 wk | Modern control workflow |
-| 13 | Gramians + ctrb/obsv + norms (Tier 3.4–3.5) | 1 wk | Robustness analysis |
-| 14 | Model reduction (Tier 4.1) | 2 wk | Reduced-order controllers |
-| 15 | MIMO `connect` / `sumblk` (Tier 4.2) | 1 wk | Graph-style MIMO |
-| 16 | Padé / time delays (Tier 4.3) | 1 wk | Realistic plants |
-| 17 | Passivity / sectors (Tier 5.1) | 1 wk | Modern robust analysis |
+| 1 | Non-symmetric `eig` (Tier 1.1) | 1 wk | ✅ shipped (1-return) |
+| 2 | `expm` / `logm` (Tier 1.3) | 1 wk | 🟡 expm ✅, logm pending |
+| 3 | `schur` / `hess` / `qz` (Tier 1.2) | 0.5 wk | 🟡 schur ✅ + hess ✅, qz pending |
+| 4 | `lyap` / `dlyap` / `lyapchol` (Tier 1.4) | 1 wk | 🟡 lyap ✅ + dlyap ✅, lyapchol pending |
+| 5 | `care` / `dare` (Tier 1.5) | 1 wk | ✅ care + dare shipped (1-return) |
+| 6 | Model object constructors (Tier 2.1) — `tf` / `ss` / `zpk` / `pid` | 1 wk | 🔵 not started — single biggest UX gap |
+| 7 | Conversions + `c2d` / `d2c` (Tier 2.2) | 1 wk | 🟡 c2d ZOH (matrix-arg) shipped; d2c / Tustin / foh pending |
+| 8 | Time-domain simulation (Tier 2.3) — `step` / `impulse` / `lsim` / `initial` / `stepinfo` | 1 wk | 🟡 step_ss + lsim_ss (matrix-arg) shipped; impulse / initial / stepinfo pending |
+| 9 | Frequency-domain (Tier 2.4) — `bode` / `nyquist` / `sigma` / `freqresp` / `margin` | 1.5 wk | 🟡 bode_ss SISO + bode_tf + gain/phase margins shipped; MIMO bode + sigma + nyquist pending |
+| 10 | Pole/zero + interconnections (Tier 2.5–2.6) | 1 wk | 🟡 isstable + damp shipped; zero + feedback / series / parallel pending |
+| 11 | `pidtune` (Tier 2.8) | 1 wk | 🔵 pending (needs H∞ for MATLAB-faithful) |
+| 12 | LQR + LQG + Kalman + place (Tier 3.1–3.3) | 1.5 wk | 🟡 lqr ✅ + dlqr ✅ + place SISO ✅ + kalman_L ✅ + kalmd_L ✅; lqgreg / lqg / 4-return [kest, L, P] pending |
+| 13 | Gramians + ctrb/obsv + norms (Tier 3.4–3.5) | 1 wk | 🟡 ctrb + obsv + gram_c + gram_o + hsvd + norm_h2 + dcgain_ss shipped; norm_inf (H∞) pending |
+| 14 | Model reduction (Tier 4.1) | 2 wk | 🟡 balreal_T + balred_{A,B,C} shipped; minreal / sminreal / modred / stabsep pending |
+| 15 | MIMO `connect` / `sumblk` (Tier 4.2) | 1 wk | 🔵 pending (waits §3.1 model objects) |
+| 16 | Padé / time delays (Tier 4.3) | 1 wk | 🔵 pending |
+| 17 | Passivity / sectors (Tier 5.1) | 1 wk | 🔵 pending |
 
 **Total**: ~18-20 weeks of focused sessions for Tier 1 → Tier 4
 closure. Tier 5 is +1 week. Tier 6 (`systune`) is multi-month.
+
+**Current state (2026-05-09)**: rows 1-5, 7, 8, 9, 12, 13, 14 all
+🟡 partial-shipped via matrix-arg primitives. The big remaining
+unlock is **row 6 (model objects)** — once `tf` / `ss` / `zpk`
+classdefs land with operator overloads, the model-object forms of
+rows 7–14 become 5-line wrappers each, and rows 11 / 15 become
+reachable.
 
 **MVP slice (~11 weeks)**: Order 1-11. Lights up the "PID design and
 simulate" loop end-to-end. Most pedagogical control problems fit here.

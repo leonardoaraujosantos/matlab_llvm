@@ -780,6 +780,30 @@ def damp(A):
     return out
 
 
+def kalman_L(A, G, C, Qn, Rn):
+    """Continuous Kalman gain via duality with LQR.
+    Plant xdot = A x + G w, y = C x + v, cov(w)=Qn, cov(v)=Rn.
+    L = (lqr(A', C', G Qn G', Rn))'."""
+    Am = _m(A).astype(float); Gm = _m(G).astype(float)
+    Cm = _m(C).astype(float); Qm = _m(Qn).astype(float); Rm = _m(Rn).astype(float)
+    GQGt = Gm @ Qm @ Gm.T
+    Kdual = lqr(Am.T, Cm.T, GQGt, Rm)
+    if Kdual.size == 0:
+        return np.zeros((0, 0))
+    return Kdual.T
+
+
+def kalmd_L(Ad, G, C, Qn, Rn):
+    """Discrete Kalman gain. L' = dlqr(Ad', C', G Qn G', Rn)."""
+    Am = _m(Ad).astype(float); Gm = _m(G).astype(float)
+    Cm = _m(C).astype(float); Qm = _m(Qn).astype(float); Rm = _m(Rn).astype(float)
+    GQGt = Gm @ Qm @ Gm.T
+    Kdual = dlqr(Am.T, Cm.T, GQGt, Rm)
+    if Kdual.size == 0:
+        return np.zeros((0, 0))
+    return Kdual.T
+
+
 def dcgain_ss(A, B, C, D):
     """SS DC gain: D - C inv(A) B. Returns p×m matrix."""
     Am = _m(A).astype(float)

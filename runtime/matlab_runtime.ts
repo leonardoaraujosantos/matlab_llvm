@@ -801,14 +801,62 @@ export function damp(A: any): NDArray {
   return out;
 }
 
-// SS DC gain: D - C * inv(A) * B. Returns p×m matrix.
+// Continuous Kalman gain via LQR duality. L = (lqr(A', C', G Qn G', Rn))'.
+export function kalman_L(A: any, G: any, C: any, Qn: any, Rn: any): NDArray {
+  const Am = asArray(A), Gm = asArray(G), Cm = asArray(C);
+  const Qm = asArray(Qn), Rm = asArray(Rn);
+  const n = Am.rows;
+  const At = np.zeros(n, n);
+  for (let i = 0; i < n; ++i)
+    for (let j = 0; j < n; ++j) At.set(j, i, Am.at(i, j));
+  const Gt = np.zeros(Gm.cols, Gm.rows);
+  for (let i = 0; i < Gm.rows; ++i)
+    for (let j = 0; j < Gm.cols; ++j) Gt.set(j, i, Gm.at(i, j));
+  const Ct = np.zeros(Cm.cols, Cm.rows);
+  for (let i = 0; i < Cm.rows; ++i)
+    for (let j = 0; j < Cm.cols; ++j) Ct.set(j, i, Cm.at(i, j));
+  const GQGt = np.matmul(np.matmul(Gm, Qm), Gt);
+  const Kdual = lqr(At, Ct, GQGt, Rm);
+  if (Kdual.rows === 0) return np.zeros(0, 0);
+  const L = np.zeros(Kdual.cols, Kdual.rows);
+  for (let i = 0; i < Kdual.rows; ++i)
+    for (let j = 0; j < Kdual.cols; ++j) L.set(j, i, Kdual.at(i, j));
+  return L;
+}
+
+export function kalmd_L(Ad: any, G: any, C: any, Qn: any, Rn: any): NDArray {
+  const Am = asArray(Ad), Gm = asArray(G), Cm = asArray(C);
+  const Qm = asArray(Qn), Rm = asArray(Rn);
+  const n = Am.rows;
+  const At = np.zeros(n, n);
+  for (let i = 0; i < n; ++i)
+    for (let j = 0; j < n; ++j) At.set(j, i, Am.at(i, j));
+  const Gt = np.zeros(Gm.cols, Gm.rows);
+  for (let i = 0; i < Gm.rows; ++i)
+    for (let j = 0; j < Gm.cols; ++j) Gt.set(j, i, Gm.at(i, j));
+  const Ct = np.zeros(Cm.cols, Cm.rows);
+  for (let i = 0; i < Cm.rows; ++i)
+    for (let j = 0; j < Cm.cols; ++j) Ct.set(j, i, Cm.at(i, j));
+  const GQGt = np.matmul(np.matmul(Gm, Qm), Gt);
+  const Kdual = dlqr(At, Ct, GQGt, Rm);
+  if (Kdual.rows === 0) return np.zeros(0, 0);
+  const L = np.zeros(Kdual.cols, Kdual.rows);
+  for (let i = 0; i < Kdual.rows; ++i)
+    for (let j = 0; j < Kdual.cols; ++j) L.set(j, i, Kdual.at(i, j));
+  return L;
+}
+
+// SS DC gain: D - C * inv(A) * B. Returns p×m matrix; returns 0×0
+// when A is singular (TS np.linalg.inv throws on singular, so wrap).
 export function dcgain_ss(A: any, B: any, C: any, D: any): NDArray {
   const Am = asArray(A), Bm = asArray(B);
   const Cm = asArray(C), Dm = asArray(D);
   const n = Am.rows, m = Bm.cols, p = Cm.rows;
   if (n === 0 || Am.cols !== n || Bm.rows !== n || Cm.cols !== n)
     return np.zeros(0, 0);
-  const Ainv = np.linalg.inv(Am);
+  let Ainv: NDArray;
+  try { Ainv = np.linalg.inv(Am); }
+  catch { return np.zeros(0, 0); }
   if (Ainv.rows === 0) return np.zeros(0, 0);
   const CAinvB = np.matmul(Cm, np.matmul(Ainv, Bm));
   const out = np.zeros(p, m);

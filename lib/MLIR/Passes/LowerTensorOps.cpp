@@ -3570,6 +3570,8 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"balred_C",   "matlab_balred_C",   1, "pppf"},
       {"norm_h2",    "matlab_norm_h2",    0, "ppp"},
       {"dcgain_ss",  "matlab_dcgain_ss",  1, "pppp"},
+      {"kalman_L",   "matlab_kalman_L",   1, "ppppp"},
+      {"kalmd_L",    "matlab_kalmd_L",    1, "ppppp"},
       {"gram_c",     "matlab_gram_c",     1, "pp"},
       {"gram_o",     "matlab_gram_o",     1, "pp"},
       {"step_ss",    "matlab_step_ss",    1, "ppppff"},
@@ -3826,6 +3828,8 @@ bool TensorLowering::rewriteBuiltinCalls() {
         "balreal_T", "balred_A", "balred_B", "balred_C",
         /* CST Tier 3 — H₂ system norm + DC gain. */
         "norm_h2", "dcgain_ss",
+        /* CST Tier 4.2 — Kalman / Kalmd steady-state gains. */
+        "kalman_L", "kalmd_L",
         /* CST Tier 3.4 / 2.3 — gramians and SS step response. */
         "gram_c", "gram_o", "step_ss",
         /* CST Tier 2.4 — SISO bode_ss. */

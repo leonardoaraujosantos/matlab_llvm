@@ -64,6 +64,8 @@ void *matlab_hsvd(void *A, void *B, void *C);
 void *matlab_balreal_T(void *A, void *B, void *C);
 double matlab_norm_h2(void *A, void *B, void *C);
 void *matlab_dcgain_ss(void *A, void *B, void *C, void *D);
+void *matlab_kalman_L(void *A, void *G, void *C, void *Qn, void *Rn);
+void *matlab_kalmd_L(void *Ad, void *G, void *C, void *Qn, void *Rn);
 void *matlab_balred_A(void *A, void *B, void *C, double k);
 void *matlab_balred_B(void *A, void *B, void *C, double k);
 void *matlab_balred_C(void *A, void *B, void *C, double k);

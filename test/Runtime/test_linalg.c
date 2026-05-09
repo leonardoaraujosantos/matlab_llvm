@@ -1125,6 +1125,70 @@ static void test_dcgain_ss_similarity(void) {
     rt_free(Bsim); rt_free(Csim); rt_free(K2);
 }
 
+/* kalman_L: 1×1 closed form. Plant a = -1, G = 1, C = 1, Qn = 1, Rn = 1.
+ *   Dual ARE: A P + P A' - P C' Rn^-1 C P + G Qn G' = 0
+ *           → -2P - P^2 + 1 = 0 → P = -1 + sqrt(2) (take positive root).
+ *   L = P · C' / Rn = sqrt(2) - 1 ≈ 0.4142.
+ * Estimator pole: A - L*C = -1 - (sqrt(2)-1) = -sqrt(2) (Hurwitz). */
+static void test_kalman_L_first_order(void) {
+    double a[] = {-1.0}, g[] = {1.0}, c[] = {1.0};
+    double qn[] = {1.0}, rn[] = {1.0};
+    matlab_mat *A = mk(a, 1, 1), *G = mk(g, 1, 1), *C = mk(c, 1, 1);
+    matlab_mat *Qn = mk(qn, 1, 1), *Rn = mk(rn, 1, 1);
+    matlab_mat *L = matlab_kalman_L(A, G, C, Qn, Rn);
+    RT_NEAR(rt_at(L, 0, 0), sqrt(2.0) - 1.0, 1e-10, "kalman_L 1×1");
+    rt_free(A); rt_free(G); rt_free(C); rt_free(Qn); rt_free(Rn); rt_free(L);
+}
+
+/* kalman_L: estimator (A - L*C) must be Hurwitz on a 2-state plant. */
+static void test_kalman_L_estimator_stable(void) {
+    /* Open-loop unstable plant. */
+    double a[] = {1, 1, 0, -2};
+    double g[] = {1, 0, 0, 1};   /* 2x2: process noise on each state */
+    double c[] = {1, 0};         /* 1x2: measure first state only */
+    double qn[] = {1, 0, 0, 1};
+    double rn[] = {1.0};
+    matlab_mat *A = mk(a, 2, 2), *G = mk(g, 2, 2), *C = mk(c, 1, 2);
+    matlab_mat *Qn = mk(qn, 2, 2), *Rn = mk(rn, 1, 1);
+    matlab_mat *L = matlab_kalman_L(A, G, C, Qn, Rn);
+    /* Estimator A_est = A - L*C must be Hurwitz. */
+    matlab_mat *LC = matlab_matmul_mm(L, C);
+    matlab_mat *negLC = matlab_neg_m(LC);
+    matlab_mat *Aest = matlab_add_mm(A, negLC);
+    RT_NEAR(matlab_isstable(Aest), 1.0, 1e-15, "Kalman estimator Hurwitz");
+    rt_free(A); rt_free(G); rt_free(C); rt_free(Qn); rt_free(Rn);
+    rt_free(L); rt_free(LC); rt_free(negLC); rt_free(Aest);
+}
+
+/* kalmd_L: discrete estimator must be Schur-stable. */
+static void test_kalmd_L_estimator_schur(void) {
+    /* Schur-stable Ad. */
+    double ad[] = {0.7, 0.1, 0.0, 0.4};
+    double g[] = {1, 0, 0, 1};
+    double c[] = {1, 0};
+    double qn[] = {1, 0, 0, 1};
+    double rn[] = {0.5};
+    matlab_mat *Ad = mk(ad, 2, 2), *G = mk(g, 2, 2), *C = mk(c, 1, 2);
+    matlab_mat *Qn = mk(qn, 2, 2), *Rn = mk(rn, 1, 1);
+    matlab_mat *L = matlab_kalmd_L(Ad, G, C, Qn, Rn);
+    /* Estimator Ad_est = Ad - L*C; |eig| must be < 1. */
+    matlab_mat *LC = matlab_matmul_mm(L, C);
+    matlab_mat *negLC = matlab_neg_m(LC);
+    matlab_mat *Adest = matlab_add_mm(Ad, negLC);
+    matlab_mat *e  = matlab_eig(Adest);
+    matlab_mat *Re = matlab_real_c(e);
+    matlab_mat *Im = matlab_imag_c(e);
+    for (int i = 0; i < 2; ++i) {
+        double re = rt_at(Re, i, 0);
+        double im = rt_at(Im, i, 0);
+        double mag = sqrt(re*re + im*im);
+        RT_CHECK(mag < 1.0, "kalmd estimator Schur-stable");
+    }
+    rt_free(Ad); rt_free(G); rt_free(C); rt_free(Qn); rt_free(Rn);
+    rt_free(L); rt_free(LC); rt_free(negLC); rt_free(Adest);
+    rt_free(Re); rt_free(Im);
+}
+
 /* LQR closed-loop is Hurwitz: real(eig(A - B K)) < 0 elementwise. */
 static void test_lqr_closed_loop_stable(void) {
     /* Marginally unstable plant: A = [1 1; 0 -2] (one positive eigenvalue). */
@@ -1543,6 +1607,9 @@ int main(void) {
     RT_RUN(test_dcgain_ss_first_order);
     RT_RUN(test_dcgain_ss_msd);
     RT_RUN(test_dcgain_ss_similarity);
+    RT_RUN(test_kalman_L_first_order);
+    RT_RUN(test_kalman_L_estimator_stable);
+    RT_RUN(test_kalmd_L_estimator_schur);
     RT_RUN(test_c2d_diagonal);
     RT_RUN(test_c2d_zero_Ts);
     RT_RUN(test_gram_c_diagonal);

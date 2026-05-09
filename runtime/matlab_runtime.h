@@ -194,6 +194,17 @@ double matlab_norm_h2(matlab_mat *A, matlab_mat *B, matlab_mat *C);
 matlab_mat *matlab_dcgain_ss(matlab_mat *A, matlab_mat *B,
                              matlab_mat *C, matlab_mat *D);
 
+/* Steady-state Kalman gain (continuous): plant xdot = A x + G w,
+ * y = C x + v with cov(w) = Qn, cov(v) = Rn. Returns L (n × p) such
+ * that the estimator A − L·C is Hurwitz. Duality with LQR: solves the
+ * dual care via lqr(A', C', G Qn G', Rn) then transposes. */
+matlab_mat *matlab_kalman_L(matlab_mat *A, matlab_mat *G, matlab_mat *C,
+                            matlab_mat *Qn, matlab_mat *Rn);
+
+/* Discrete-time steady-state Kalman gain. Same duality with dlqr. */
+matlab_mat *matlab_kalmd_L(matlab_mat *Ad, matlab_mat *G, matlab_mat *C,
+                           matlab_mat *Qn, matlab_mat *Rn);
+
 /* k-state truncated balanced realization (model reduction).
  * balred_A returns the k x k upper-left block of the balanced A;
  * balred_B returns the first k rows of balanced B (k x m);

@@ -3183,6 +3183,83 @@ matlab_mat *matlab_balred_C(matlab_mat *A, matlab_mat *B, matlab_mat *C,
 double matlab_isstable(matlab_mat *A);
 
 /*-------------------------------------------------------------------------
+ * Continuous-time Kalman filter — steady-state gain.
+ *
+ *   L = kalman_L(A, G, C, Qn, Rn)  for the plant
+ *      xdot = A x + G w,  y = C x + v
+ *      cov(w) = Qn,       cov(v) = Rn
+ *   solves the dual ARE  A·P + P·A' − P·C'·Rn⁻¹·C·P + G·Qn·G' = 0
+ *   for the unique stabilising P, then returns L = P · C' · Rn⁻¹.
+ *
+ *   The estimator dynamics  xdot_hat = (A − L·C) x_hat + L y  are
+ *   Hurwitz; eig(A − L·C) are the estimator poles.
+ *
+ *   Implementation exploits the LQR/Kalman duality: the LQR gain on
+ *   the dual system (A', C', G·Qn·G', Rn) is K_dual = Rn⁻¹ C P, so
+ *   the Kalman gain is L = (K_dual)' = P C' Rn⁻¹. We just transpose
+ *   `lqr(A', C', GQG', Rn)`.
+ *
+ *   The MATLAB-faithful 4-return shape `[kest, L, P] = kalman(sys, Qn,
+ *   Rn)` (estimator state-space + gain + Riccati) is a follow-on once
+ *   we have model objects.  Tier 4.2 of the CST roadmap.
+ *-------------------------------------------------------------------------*/
+matlab_mat *matlab_kalman_L(matlab_mat *A, matlab_mat *G, matlab_mat *C,
+                            matlab_mat *Qn, matlab_mat *Rn) {
+    if (!A || !G || !C || !Qn || !Rn) return mat_alloc(0, 0);
+    int64_t n = A->rows;
+    if (n == 0 || A->cols != n) return mat_alloc(0, 0);
+    if (G->rows != n) return mat_alloc(0, 0);
+    int64_t q = G->cols;
+    int64_t p = C->rows;
+    if (C->cols != n) return mat_alloc(0, 0);
+    if (Qn->rows != q || Qn->cols != q) return mat_alloc(0, 0);
+    if (Rn->rows != p || Rn->cols != p) return mat_alloc(0, 0);
+    /* GQG' = effective process-noise covariance projected onto state space. */
+    matlab_mat *Gt = matlab_transpose(G);
+    matlab_mat *GQ = matlab_matmul_mm(G, Qn);
+    matlab_mat *GQGt = matlab_matmul_mm(GQ, Gt);
+    /* K_dual = lqr(A', C', GQG', Rn). */
+    matlab_mat *At = matlab_transpose(A);
+    matlab_mat *Ct = matlab_transpose(C);
+    matlab_mat *Kdual = matlab_lqr(At, Ct, GQGt, Rn);
+    if (!Kdual || Kdual->rows == 0) return mat_alloc(0, 0);
+    /* L = K_dual'. */
+    return matlab_transpose(Kdual);
+}
+
+/*-------------------------------------------------------------------------
+ * Discrete-time Kalman filter — steady-state gain.
+ *
+ *   L = kalmd_L(Ad, G, C, Qn, Rn)  for the discrete plant
+ *      x[k+1] = Ad x[k] + G w[k],  y[k] = C x[k] + v[k]
+ *   solves the discrete dual ARE for the steady-state covariance P
+ *   and returns L = P·C'·(C·P·C' + Rn)⁻¹ (the standard discrete
+ *   Kalman gain). Implementation: L' = dlqr(Ad', C', G·Qn·G', Rn).
+ *
+ *   Limitation inherited from `dare`: requires Ad Schur-stable so
+ *   the Newton-Kleinman seeding works.
+ *-------------------------------------------------------------------------*/
+matlab_mat *matlab_kalmd_L(matlab_mat *Ad, matlab_mat *G, matlab_mat *C,
+                           matlab_mat *Qn, matlab_mat *Rn) {
+    if (!Ad || !G || !C || !Qn || !Rn) return mat_alloc(0, 0);
+    int64_t n = Ad->rows;
+    if (n == 0 || Ad->cols != n) return mat_alloc(0, 0);
+    int64_t q = G->cols;
+    int64_t p = C->rows;
+    if (G->rows != n || C->cols != n) return mat_alloc(0, 0);
+    if (Qn->rows != q || Qn->cols != q) return mat_alloc(0, 0);
+    if (Rn->rows != p || Rn->cols != p) return mat_alloc(0, 0);
+    matlab_mat *Gt = matlab_transpose(G);
+    matlab_mat *GQ = matlab_matmul_mm(G, Qn);
+    matlab_mat *GQGt = matlab_matmul_mm(GQ, Gt);
+    matlab_mat *At = matlab_transpose(Ad);
+    matlab_mat *Ct = matlab_transpose(C);
+    matlab_mat *Kdual = matlab_dlqr(At, Ct, GQGt, Rn);
+    if (!Kdual || Kdual->rows == 0) return mat_alloc(0, 0);
+    return matlab_transpose(Kdual);
+}
+
+/*-------------------------------------------------------------------------
  * State-space DC gain (continuous LTI).
  *
  *   dcgain_ss(A, B, C, D) = lim_{s→0} G(s) = D − C · A⁻¹ · B

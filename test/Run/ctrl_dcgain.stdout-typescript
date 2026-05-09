@@ -1,0 +1,8 @@
+1st-order DC gain (closed form 2.0):
+2
+mass-spring-damper DC gain (1/k = 0.25):
+0.25
+closed-loop DC gain (LQR-feedback shifts the static response):
+0.242536
+numel of dcgain output for an integrator (0 â unbounded gain):
+0

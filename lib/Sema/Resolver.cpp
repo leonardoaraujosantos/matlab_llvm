@@ -106,6 +106,8 @@ void Resolver::registerBuiltins() {
     "balreal_T", "balred_A", "balred_B", "balred_C",
     /* Tier 3 — H₂ system norm (Lyapunov-based) + DC gain. */
     "norm_h2", "dcgain_ss",
+    /* Tier 4.2 — Kalman / Kalmd steady-state gains. */
+    "kalman_L", "kalmd_L",
     /* Tier 2.2 — continuous->discrete state-space ZOH. */
     "c2d",
     /* Tier 3.4 / 2.3 — gramians and state-space step response. */
