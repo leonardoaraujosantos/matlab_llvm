@@ -70,6 +70,44 @@ if [[ "$USES_SYM" == 1 && "$MATLABC" != *"build-sym/"* ]]; then
   echo "         (re-run with MATLABC=$ROOT/build-sym/matlabc, or build that target with MATLAB_LLVM_WITH_SYM=ON)" >&2
 fi
 
+# --- Auto-detect Cairo plotting usage ---------------------------------------
+# Programs that call any of the matlab_plot.h surface need the plot
+# runtime under runtime/plot/ + Cairo on the link line. False positives
+# (e.g. a struct field named `plot`) link a few extra .cpp files but
+# don't break the build.
+USES_PLOT=0
+if grep -qE '\b(figure|gcf|subplot|plot|plot3|scatter|bar|stem|stairs|area|errorbar|histogram|imshow|imagesc|pcolor|contour|contourf|quiver|mesh|surf|title|xlabel|ylabel|zlabel|legend|colorbar|colormap|grid|hold|axis|xlim|ylim|xticks|yticks|xticklabels|yticklabels|xline|yline|view|yyaxis|semilogx|semilogy|loglog|saveas|savefig|print|text)\b' "$INPUT"; then
+  USES_PLOT=1
+fi
+
+# --- Plot runtime sources + Cairo flags -------------------------------------
+PLOT_LINK_FLAGS=()
+if [[ "$USES_PLOT" == 1 ]]; then
+  if ! command -v pkg-config >/dev/null 2>&1; then
+    echo "error: input uses plotting builtins but pkg-config is not on PATH" >&2
+    echo "       brew install pkg-config (macOS) or apt-get install pkg-config" >&2
+    exit 2
+  fi
+  if ! pkg-config --exists cairo cairo-svg cairo-pdf; then
+    echo "error: cairo / cairo-svg / cairo-pdf not discoverable via pkg-config" >&2
+    echo "       brew install cairo (macOS) or apt-get install libcairo2-dev" >&2
+    exit 2
+  fi
+  RUNTIME_SRCS+=(
+    "$RUNTIME_DIR/plot/c_api.cpp"
+    "$RUNTIME_DIR/plot/figure.cpp"
+    "$RUNTIME_DIR/plot/cairo_render.cpp"
+    "$RUNTIME_DIR/plot/colormap.cpp"
+    "$RUNTIME_DIR/plot/contour.cpp"
+  )
+  # shellcheck disable=SC2207
+  PLOT_LINK_FLAGS=(
+    -DMATLAB_LLVM_WITH_PLOT=1
+    $(pkg-config --cflags cairo cairo-svg cairo-pdf)
+    $(pkg-config --libs   cairo cairo-svg cairo-pdf)
+  )
+fi
+
 # --- SymPP discovery + extra link line for sym programs --------------------
 SYM_LINK_FLAGS=()
 if [[ "$USES_SYM" == 1 ]]; then
@@ -111,6 +149,7 @@ trap 'rm -f "$TMP"' EXIT
 "${CLANG}++" -std=c++20 -Wno-override-module \
   "$TMP" "${RUNTIME_SRCS[@]}" \
   -I"$RUNTIME_DIR" \
+  ${PLOT_LINK_FLAGS[@]+"${PLOT_LINK_FLAGS[@]}"} \
   ${SYM_LINK_FLAGS[@]+"${SYM_LINK_FLAGS[@]}"} \
   -o "$OUT"
 echo "built $OUT"
