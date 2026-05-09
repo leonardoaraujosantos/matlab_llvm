@@ -1,0 +1,8 @@
+y_lsim(3) = 0.181269
+y_step(3) = 0.181269
+y_lsim(6) = 0.393469
+y_step(6) = 0.393469
+ramp y(0)   = 0.000000
+ramp y(0.5) = 0.086529
+phase margin = 51.8272 deg
+gain margin = Inf (correct for first-order)

@@ -2759,9 +2759,10 @@ bool TensorLowering::rewriteBuiltinCalls() {
         Call->getOperand(0).getType() == PtrTy) {
       struct TwoRet { StringRef MLName, F0, F1; };
       static const TwoRet TwoReturns[] = {
-        {"eig", "matlab_eig_V", "matlab_eig_D"},
-        {"qr",  "matlab_qr_Q",  "matlab_qr_R"},
-        {"lu",  "matlab_lu_L",  "matlab_lu_U"},
+        {"eig",   "matlab_eig_V",   "matlab_eig_D"},
+        {"qr",    "matlab_qr_Q",    "matlab_qr_R"},
+        {"lu",    "matlab_lu_L",    "matlab_lu_U"},
+        {"schur", "matlab_schur_U", "matlab_schur_T"},
       };
       const TwoRet *T = nullptr;
       for (auto &E : TwoReturns)
@@ -3028,6 +3029,79 @@ bool TensorLowering::rewriteBuiltinCalls() {
       }
       return Value{};
     };
+
+    /* [mag, phase] = bode_tf(b, a, w) — 3 ptr operands, 2 ptr returns.
+     * Splits into matlab_bode_tf_{mag,phase}. CST Tier 2.4 follow-on. */
+    if (NA && NA.getValue().getSExtValue() == 2 &&
+        Name == "bode_tf" && Call->getNumOperands() == 3 &&
+        Call->getNumResults() == 2) {
+      Value V0 = boxAsPtr(Call->getOperand(0));
+      Value V1 = boxAsPtr(Call->getOperand(1));
+      Value V2 = boxAsPtr(Call->getOperand(2));
+      if (V0 && V1 && V2) {
+        B.setInsertionPoint(Call);
+        auto Fm = rt("matlab_bode_tf_mag",   PtrTy, {PtrTy, PtrTy, PtrTy});
+        auto Fp = rt("matlab_bode_tf_phase", PtrTy, {PtrTy, PtrTy, PtrTy});
+        SmallVector<Value, 3> CA{V0, V1, V2};
+        auto Cm = LLVM::CallOp::create(B, Call->getLoc(), Fm, CA);
+        auto Cp = LLVM::CallOp::create(B, Call->getLoc(), Fp, CA);
+        Call->getResult(0).replaceAllUsesWith(Cm.getResult());
+        Call->getResult(1).replaceAllUsesWith(Cp.getResult());
+        Call->erase();
+        Changed = true;
+        continue;
+      }
+    }
+
+    /* [mag, phase] = bode_ss(A, B, C, D, w) — 5 ptr operands, 2 ptr
+     * returns. Splits into matlab_bode_ss_{mag,phase}. CST Tier 2.4. */
+    if (NA && NA.getValue().getSExtValue() == 2 &&
+        Name == "bode_ss" && Call->getNumOperands() == 5 &&
+        Call->getNumResults() == 2) {
+      Value V0 = boxAsPtr(Call->getOperand(0));
+      Value V1 = boxAsPtr(Call->getOperand(1));
+      Value V2 = boxAsPtr(Call->getOperand(2));
+      Value V3 = boxAsPtr(Call->getOperand(3));
+      Value V4 = boxAsPtr(Call->getOperand(4));
+      if (V0 && V1 && V2 && V3 && V4) {
+        B.setInsertionPoint(Call);
+        auto Fm = rt("matlab_bode_ss_mag",   PtrTy,
+                     {PtrTy, PtrTy, PtrTy, PtrTy, PtrTy});
+        auto Fp = rt("matlab_bode_ss_phase", PtrTy,
+                     {PtrTy, PtrTy, PtrTy, PtrTy, PtrTy});
+        SmallVector<Value, 5> CA{V0, V1, V2, V3, V4};
+        auto Cm = LLVM::CallOp::create(B, Call->getLoc(), Fm, CA);
+        auto Cp = LLVM::CallOp::create(B, Call->getLoc(), Fp, CA);
+        Call->getResult(0).replaceAllUsesWith(Cm.getResult());
+        Call->getResult(1).replaceAllUsesWith(Cp.getResult());
+        Call->erase();
+        Changed = true;
+        continue;
+      }
+    }
+
+    /* [Ad, Bd] = c2d(A, B, Ts) — same shape as bilinear (2 ptr + 1 f64,
+     * 2 ptr returns). CST Tier 2.2. */
+    if (NA && NA.getValue().getSExtValue() == 2 &&
+        Name == "c2d" && Call->getNumOperands() == 3 &&
+        Call->getNumResults() == 2 &&
+        Call->getOperand(2).getType() == F64) {
+      Value V0 = boxAsPtr(Call->getOperand(0));
+      Value V1 = boxAsPtr(Call->getOperand(1));
+      if (V0 && V1) {
+        B.setInsertionPoint(Call);
+        auto Fa = rt("matlab_c2d_Ad", PtrTy, {PtrTy, PtrTy, F64});
+        auto Fb = rt("matlab_c2d_Bd", PtrTy, {PtrTy, PtrTy, F64});
+        SmallVector<Value, 3> CA{V0, V1, Call->getOperand(2)};
+        auto Ca = LLVM::CallOp::create(B, Call->getLoc(), Fa, CA);
+        auto Cb = LLVM::CallOp::create(B, Call->getLoc(), Fb, CA);
+        Call->getResult(0).replaceAllUsesWith(Ca.getResult());
+        Call->getResult(1).replaceAllUsesWith(Cb.getResult());
+        Call->erase();
+        Changed = true;
+        continue;
+      }
+    }
 
     /* [bd, ad] = bilinear(b, a, fs). Splits into matlab_bilinear_{b,a}. */
     if (NA && NA.getValue().getSExtValue() == 2 &&
@@ -3475,6 +3549,41 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"det",        "matlab_det",        0, "p"},
       {"svd",        "matlab_svd",        1, "p"},
       {"eig",        "matlab_eig",        1, "p"},
+      {"expm",       "matlab_expm",       1, "p"},
+      {"hess",       "matlab_hess",       1, "p"},
+      {"schur",      "matlab_schur",      1, "p"},
+      {"lyap",       "matlab_lyap",       1, "pp"},
+      {"dlyap",      "matlab_dlyap",      1, "pp"},
+      {"care",       "matlab_care",       1, "pppp"},
+      {"dare",       "matlab_dare",       1, "pppp"},
+      {"lqr",        "matlab_lqr",        1, "pppp"},
+      {"dlqr",       "matlab_dlqr",       1, "pppp"},
+      {"ctrb",       "matlab_ctrb",       1, "pp"},
+      {"obsv",       "matlab_obsv",       1, "pp"},
+      {"place",      "matlab_place",      1, "ppp"},
+      {"isstable",   "matlab_isstable",   0, "p"},
+      {"damp",       "matlab_damp",       1, "p"},
+      {"hsvd",       "matlab_hsvd",       1, "ppp"},
+      {"balreal_T",  "matlab_balreal_T",  1, "ppp"},
+      {"balred_A",   "matlab_balred_A",   1, "pppf"},
+      {"balred_B",   "matlab_balred_B",   1, "pppf"},
+      {"balred_C",   "matlab_balred_C",   1, "pppf"},
+      {"norm_h2",    "matlab_norm_h2",    0, "ppp"},
+      {"dcgain_ss",  "matlab_dcgain_ss",  1, "pppp"},
+      {"gram_c",     "matlab_gram_c",     1, "pp"},
+      {"gram_o",     "matlab_gram_o",     1, "pp"},
+      {"step_ss",    "matlab_step_ss",    1, "ppppff"},
+      /* bode_ss 1-return form returns magnitude (the more-useful default
+       * for plotting). The 2-return [mag, phase] = bode_ss(...) shape
+       * goes through the dedicated splitter above. */
+      {"bode_ss",    "matlab_bode_ss_mag",1, "ppppp"},
+      {"lsim_ss",    "matlab_lsim_ss",    1, "pppppf"},
+      {"gain_margin","matlab_gain_margin",0, "ppppp"},
+      {"phase_margin","matlab_phase_margin",0,"ppppp"},
+      /* bode_tf 1-return form returns magnitude (default for plotting).
+       * The 2-return [mag, phase] = bode_tf(...) shape goes through the
+       * dedicated splitter above. */
+      {"bode_tf",    "matlab_bode_tf_mag",1, "ppp"},
       {"isequal",    "matlab_isequal",    0, "pp"},
       {"size",       "matlab_size_dim",   0, "pf"},   /* size(A, dim) */
       {"find",       "matlab_find",       1, "p"},
@@ -3704,6 +3813,30 @@ bool TensorLowering::rewriteBuiltinCalls() {
         "trapz", "cumtrapz", "imfilter", "padarray",
         /* §2.1 follow-on — analog↔digital + form conversions. */
         "bilinear", "freqs", "tf2zp", "zp2tf", "tf2sos", "sos2tf",
+        /* CST Tier 1.4 — Lyapunov / Stein. Scalar `lyap([-1], [1])`
+         * is a perfectly valid 1*1 invocation that we want to handle. */
+        "lyap", "dlyap",
+        /* CST Tier 1.5 — algebraic Riccati. Same scalar-invocation rule. */
+        "care", "dare",
+        /* CST Tier 2 — LQR convenience wrappers; same scalar shape. */
+        "lqr", "dlqr",
+        /* CST Tier 3 — controllability/observability/place + characterization. */
+        "ctrb", "obsv", "place", "damp", "hsvd",
+        /* CST Tier 4 — balancing for model reduction. */
+        "balreal_T", "balred_A", "balred_B", "balred_C",
+        /* CST Tier 3 — H₂ system norm + DC gain. */
+        "norm_h2", "dcgain_ss",
+        /* CST Tier 3.4 / 2.3 — gramians and SS step response. */
+        "gram_c", "gram_o", "step_ss",
+        /* CST Tier 2.4 — SISO bode_ss. */
+        "bode_ss",
+        /* CST Tier 2.3 follow-on + 2.4 — lsim, gain/phase margins,
+         * TF-form bode. */
+        "lsim_ss", "gain_margin", "phase_margin", "bode_tf",
+        /* `inv` on a 1*1 matrix is `1/x` — auto-box so `inv(R2)` works
+         * uniformly for both 1*1 R (often the case in SISO LQR) and
+         * larger matrices. */
+        "inv",
       };
       if (AutoBoxNames.contains(Name)) {
         for (auto &E : Table) {

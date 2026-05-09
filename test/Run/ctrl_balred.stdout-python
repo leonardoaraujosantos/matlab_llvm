@@ -1,0 +1,18 @@
+Hankel singular values (descending):
+[[5.84027392e-01]
+ [5.28471771e-01]
+ [6.65999671e-07]
+ [1.76150166e-08]]
+reduced A (2x2):
+[[-0.14251017 -2.9962563 ]
+ [ 2.9962563  -0.15749004]]
+reduced B (2x1):
+[[-0.40799472]
+ [ 0.40799274]]
+reduced C (1x2):
+[[-0.40799472 -0.40799274]]
+isstable(Ar) (must be 1):
+1
+hsvd(Ar, Br, Cr) â should match the top-2 HSVs of the original:
+[[0.58402739]
+ [0.52847177]]

@@ -1,0 +1,12 @@
+Hankel singular values:
+     0.731
+   0.0189998
+balanced Wc (should equal diag(HSV)):
+     0.731   -5.32403e-18
+   -5.31251e-18   0.0189998
+balanced Wo (should equal diag(HSV)):
+     0.731   1.22839e-16
+   1.22884e-16   0.0189998
+Wcb - Wob (should be ~0):
+   -9.99201e-16   -1.28163e-16
+   -1.28197e-16   1.27329e-15

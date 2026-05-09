@@ -1,0 +1,10 @@
+||G||_2 for G(s) = 1/(s+1) — closed form 1/sqrt(2):
+0.707107
+||G||_2 for lightly-damped MSD (zeta = 0.05):
+0.430331
+||G||_2 for the same plant with zeta = 0.5 (must be smaller):
+0.136083
+||G||_2 for the unstable plant a=1 (must be +Inf):
+inf
+||G||_2 invariant under similarity transform:
+0.430331

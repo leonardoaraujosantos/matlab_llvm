@@ -1731,7 +1731,18 @@ static llvm::StringRef MatrixReturningFns[] = {
     "matlab_matmul_mm", "matlab_inv", "matlab_mldivide_mm",
     "matlab_mrdivide_mm", "matlab_svd", "matlab_eig", "matlab_eig_V",
     "matlab_eig_D", "matlab_transpose", "matlab_diag", "matlab_reshape",
-    "matlab_matpow",
+    "matlab_matpow", "matlab_expm", "matlab_hess",
+    "matlab_schur", "matlab_schur_T", "matlab_schur_U",
+    "matlab_lyap", "matlab_dlyap", "matlab_care", "matlab_dare",
+    "matlab_lqr", "matlab_dlqr",
+    "matlab_ctrb", "matlab_obsv", "matlab_place",
+    "matlab_damp", "matlab_hsvd", "matlab_balreal_T",
+    "matlab_balred_A", "matlab_balred_B", "matlab_balred_C",
+    "matlab_dcgain_ss",
+    "matlab_c2d_Ad", "matlab_c2d_Bd",
+    "matlab_gram_c", "matlab_gram_o", "matlab_step_ss",
+    "matlab_bode_ss_mag", "matlab_bode_ss_phase", "matlab_lsim_ss",
+    "matlab_bode_tf_mag", "matlab_bode_tf_phase",
     "matlab_add_mm", "matlab_sub_mm", "matlab_emul_mm", "matlab_ediv_mm",
     "matlab_epow_mm", "matlab_add_ms", "matlab_sub_ms", "matlab_emul_ms",
     "matlab_ediv_ms", "matlab_epow_ms", "matlab_add_sm", "matlab_sub_sm",
@@ -2022,7 +2033,11 @@ bool Emitter::tryRewriteAsMatrixCall(llvm::StringRef Callee,
    * gate (they work on either Matrix or void* alike). */
   if (Operands.size() == 1 && firstIsMatrix()) {
     if (Callee == "matlab_transpose") { Out = m1("t"); return true; }
-    if (Callee == "matlab_inv")       { Out = m1("inv"); return true; }
+    /* Skip the m1("inv") shortcut — same emit-cpp bug as expm/hess/eig:
+     * `Matrix x(rhs).inv()` is parsed as a declaration with a chained
+     * method on the RHS, which doesn't compile. Fall through to the
+     * default `matlab_inv(...)` raw-call form (covered by the auto-
+     * Matrix-wrapping below). */
     if (Callee == "matlab_diag")      { Out = m1("diag"); return true; }
     if (Callee == "matlab_sum")       { Out = m1("sum"); return true; }
     if (Callee == "matlab_prod")      { Out = m1("prod"); return true; }
@@ -2037,10 +2052,24 @@ bool Emitter::tryRewriteAsMatrixCall(llvm::StringRef Callee,
     if (Callee == "matlab_cos_m")     { Out = m1("cos"); return true; }
     if (Callee == "matlab_tan_m")     { Out = m1("tan"); return true; }
     if (Callee == "matlab_neg_m")     { Out = "(-" + opnd(0) + ")"; return true; }
-    if (Callee == "matlab_eig")       { Out = m1("eig"); return true; }
-    if (Callee == "matlab_eig_V")     { Out = m1("eigV"); return true; }
-    if (Callee == "matlab_eig_D")     { Out = m1("eigD"); return true; }
+    /* matlab_eig / matlab_eig_V / matlab_eig_D — same emit-cpp pitfall
+     * as expm/hess: routing through the m1() method-chain shortcut
+     * produces invalid `Matrix x(rhs).eig()` declarations when the call
+     * is on the RHS of a named assignment whose result is reused. Fall
+     * through to the raw `matlab_eig(...)` call form, which the
+     * auto-Matrix wrapping handles correctly. The post-Tier-1.1 eig
+     * additionally returns a polymorphic real/complex descriptor —
+     * routing through Matrix.eig() would lose that polymorphism since
+     * the Matrix wrapper assumes real. */
     if (Callee == "matlab_svd")       { Out = m1("svd"); return true; }
+    /* expm: no `m1("expm")` shortcut — it would emit the method-chain
+     * `Matrix(rhs).expm()` form, which interacts badly with the named-
+     * assignment shape `B = expm(A); disp(B(1,1))` (parses as a
+     * declaration with a discarded chained method, not an assignment).
+     * Same latent issue affects inv/eig but no existing test exercises
+     * that pattern. Fall through to the default raw-call emission
+     * `matlab_expm(...)`, which the auto-Matrix-wrapping handles
+     * correctly on both lanes. */
   }
   // matlab_mat_from_buf((void*)slot, m, n) — caller side. The slot
   // expression is already an inlined "(void*)slotName" cast. Strip it
@@ -3395,6 +3424,18 @@ bool Emitter::run(mlir::ModuleOp M) {
           "matlab_mrdivide_mm", "matlab_eig", "matlab_eig_V",
           "matlab_eig_D", "matlab_svd", "matlab_neg_m",
           "matlab_reshape", "matlab_repmat", "matlab_matpow",
+          "matlab_expm", "matlab_hess",
+          "matlab_schur", "matlab_schur_T", "matlab_schur_U",
+    "matlab_lyap", "matlab_dlyap", "matlab_care", "matlab_dare",
+    "matlab_lqr", "matlab_dlqr",
+    "matlab_ctrb", "matlab_obsv", "matlab_place",
+    "matlab_damp", "matlab_hsvd", "matlab_balreal_T",
+    "matlab_balred_A", "matlab_balred_B", "matlab_balred_C",
+    "matlab_dcgain_ss",
+    "matlab_c2d_Ad", "matlab_c2d_Bd",
+    "matlab_gram_c", "matlab_gram_o", "matlab_step_ss",
+    "matlab_bode_ss_mag", "matlab_bode_ss_phase", "matlab_lsim_ss",
+    "matlab_bode_tf_mag", "matlab_bode_tf_phase",
       };
       for (auto &S : Covered)
         if (N == S) return true;
