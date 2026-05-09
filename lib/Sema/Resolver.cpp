@@ -86,6 +86,38 @@ void Resolver::registerBuiltins() {
     "strtrim", "strrep", "strcat",
     "svd", "eig", "inv", "pinv", "det", "rank", "cond",
     "qr", "lu", "chol", "norm", "trace", "kron",
+    /* Tier 1.3 — Control System Toolbox roadmap §2.3 (matrix exponential). */
+    "expm",
+    /* Tier 1.2 — Control System Toolbox roadmap §2.2 (Hessenberg reduction). */
+    "hess",
+    /* Tier 1.2 follow-on — real Schur decomposition. */
+    "schur",
+    /* Tier 1.4 — Lyapunov / Stein equation solvers. */
+    "lyap", "dlyap",
+    /* Tier 1.5 — algebraic Riccati. */
+    "care", "dare",
+    /* Tier 2 — first user-facing CST wrappers. lqi/lqry/lqg/kalman follow. */
+    "lqr", "dlqr",
+    /* Tier 3 — controllability/observability + pole placement. */
+    "ctrb", "obsv", "place",
+    /* Tier 3 — stability + characterization. */
+    "isstable", "damp", "hsvd",
+    /* Tier 4 — balancing + balanced truncation for model reduction. */
+    "balreal_T", "balred_A", "balred_B", "balred_C",
+    /* Tier 3 — H₂ system norm (Lyapunov-based) + DC gain. */
+    "norm_h2", "dcgain_ss",
+    /* Tier 4.2 — Kalman / Kalmd steady-state gains. */
+    "kalman_L", "kalmd_L",
+    /* Tier 2.2 — continuous->discrete state-space ZOH. */
+    "c2d",
+    /* Tier 3.4 / 2.3 — gramians and state-space step response. */
+    "gram_c", "gram_o", "step_ss",
+    /* Tier 2.4 — SISO state-space frequency response. */
+    "bode_ss",
+    /* Tier 2.3 follow-on + 2.4 — generalised SS sim and stability margins. */
+    "lsim_ss", "gain_margin", "phase_margin",
+    /* Tier 2.4 follow-on — TF (b, a) frequency response. */
+    "bode_tf",
     "arrayfun", "cellfun",
     /* Initial-value ODE solvers — see runtime/matlab_runtime.cpp.
      * ode23s is the Rosenbrock stiff solver. pdepe is the 1-D

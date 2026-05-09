@@ -1,0 +1,16 @@
+isstable(diag(-1, -2)):
+1
+isstable([1 0; 0 -1]):
+0
+isstable([0 1; -1 0]):
+0
+damp([-2]) — wn=2, zeta=1:
+         2         1
+damp(2nd order, wn=2, zeta=0.5) — both rows = [2, 0.5]:
+         2       0.5
+         2       0.5
+hsvd(-1, 1, 1) — closed form 1/2:
+0.5
+hsvd(diag(-1,-2), [1;1], [1 1]):
+     0.731
+   0.0189998

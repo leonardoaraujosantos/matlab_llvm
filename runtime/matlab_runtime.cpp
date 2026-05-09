@@ -569,23 +569,294 @@ matlab_mat *matlab_svd(matlab_mat *A_in) {
 }
 
 /*
- * Jacobi eigenvalue iteration for symmetric matrices.
- *
- * Returns a column vector of eigenvalues in ascending order. If the input
- * isn't symmetric, we work on H = (A + Aᵀ)/2, which returns correct
- * eigenvalues for any symmetric input and a reasonable approximation for
- * slightly-non-symmetric inputs. For genuinely non-symmetric matrices
- * (e.g. with complex eigenvalues), this is garbage — a future extension
- * would add QR iteration for the general case.
- *
- * Algorithm: repeatedly find the largest off-diagonal element (or sweep
- * over all pairs) and apply a Jacobi rotation R that zeros it in the
- * 2×2 principal submatrix indexed by (p, q). After convergence, the
- * diagonal of H holds the eigenvalues.
+ * Symmetry detection — returns 1 iff A[i,j] ≈ A[j,i] for all i, j with a
+ * relative tolerance suited to floating-point round-off. Used by
+ * matlab_eig to dispatch between the Jacobi (symmetric) and Francis QR
+ * (non-symmetric) paths.
  */
+static int matrix_is_symmetric_(const double *A, int64_t n) {
+    /* Frobenius norm of A and of (A - A^T)/2 — relative tolerance. */
+    double frobA = 0.0, frobAS = 0.0;
+    for (int64_t i = 0; i < n; ++i)
+        for (int64_t j = 0; j < n; ++j) {
+            double a = A[i * n + j];
+            frobA += a * a;
+            double d = a - A[j * n + i];
+            frobAS += d * d;
+        }
+    return frobAS <= 1e-24 * frobA + 1e-300;
+}
+
+/*
+ * In-place Hessenberg reduction via Householder reflections. Same
+ * algorithm as matlab_hess() above; factored here as a static helper
+ * so the Francis QR path can reduce its working copy without an
+ * intermediate allocation.
+ *
+ * If U != NULL, U is initialized to the identity and post-multiplied
+ * by each Householder. After the call A_orig = U H U' (Schur-form
+ * relation). Pass U == NULL when the orthogonal accumulator isn't
+ * needed (eig 1-return, matlab_hess).
+ */
+static void hessenberg_inplace_(double *H, int64_t n, double *U) {
+    if (U) {
+        for (int64_t i = 0; i < n * n; ++i) U[i] = 0.0;
+        for (int64_t i = 0; i < n; ++i) U[i * n + i] = 1.0;
+    }
+    if (n <= 2) return;
+    std::vector<double> v(n);
+    for (int64_t k = 0; k + 2 < n; ++k) {
+        double sigma = 0.0;
+        for (int64_t i = k + 1; i < n; ++i) {
+            double x = H[i * n + k];
+            sigma += x * x;
+        }
+        if (sigma == 0.0) continue;
+        double xk = H[(k + 1) * n + k];
+        double xnorm = sqrt(sigma);
+        double v0 = xk + (xk >= 0 ? xnorm : -xnorm);
+        v[k + 1] = v0;
+        for (int64_t i = k + 2; i < n; ++i) v[i] = H[i * n + k];
+        double vnorm2 = v0 * v0 + (sigma - xk * xk);
+        if (vnorm2 == 0.0) continue;
+        double beta = 2.0 / vnorm2;
+        for (int64_t j = k; j < n; ++j) {
+            double w = 0.0;
+            for (int64_t i = k + 1; i < n; ++i) w += v[i] * H[i * n + j];
+            w *= beta;
+            for (int64_t i = k + 1; i < n; ++i) H[i * n + j] -= v[i] * w;
+        }
+        for (int64_t i = 0; i < n; ++i) {
+            double w = 0.0;
+            for (int64_t j = k + 1; j < n; ++j) w += H[i * n + j] * v[j];
+            w *= beta;
+            for (int64_t j = k + 1; j < n; ++j) H[i * n + j] -= w * v[j];
+        }
+        /* Apply Householder from the right to U: U := U * P_k. P_k is
+         * symmetric (P = I - beta v v'), so we sweep the same v over
+         * U's columns k+1..n-1. */
+        if (U) {
+            for (int64_t i = 0; i < n; ++i) {
+                double w = 0.0;
+                for (int64_t j = k + 1; j < n; ++j) w += U[i * n + j] * v[j];
+                w *= beta;
+                for (int64_t j = k + 1; j < n; ++j) U[i * n + j] -= w * v[j];
+            }
+        }
+        for (int64_t i = k + 2; i < n; ++i) H[i * n + k] = 0.0;
+    }
+}
+
+/*
+ * Francis double-shift implicit QR iteration on an upper-Hessenberg
+ * matrix H. Drives H to real Schur form (block upper-triangular with
+ * 1*1 and 2*2 diagonal blocks) by applying implicit double shifts and
+ * chasing the resulting bulge down the diagonal. Deflation: subdiagonal
+ * elements that become "small" are zeroed, splitting the active region.
+ *
+ * Reference: Golub & Van Loan, "Matrix Computations" (4th ed),
+ * Algorithm 7.5.1 (Francis QR Step) + Algorithm 7.5.2 (driver).
+ *
+ * If U != NULL, post-multiply U by each Householder so that on exit
+ * U H_final U' = H_initial — the orthogonal accumulator that gates
+ * the schur 2-return form.
+ *
+ * Returns 0 on success; -1 if the iteration budget is exhausted.
+ */
+static int francis_qr_(double *H, int64_t n, double *U) {
+    if (n <= 1) return 0;
+    const int max_total_iter = 30 * (int)n;
+    int total_iter = 0;
+    /* Active block lives in [p, q]; we shrink it by deflation. */
+    int64_t q = n - 1;
+    while (q > 0 && total_iter < max_total_iter) {
+        /* Find the largest k ∈ [0, q] such that H[k, k-1] is "small" —
+         * that's the start of the active block. */
+        int64_t p = q;
+        while (p > 0) {
+            double off = fabs(H[p * n + (p - 1)]);
+            double diag = fabs(H[(p - 1) * n + (p - 1)]) + fabs(H[p * n + p]);
+            if (off <= 1e-14 * (diag == 0.0 ? 1.0 : diag)) {
+                H[p * n + (p - 1)] = 0.0;
+                break;
+            }
+            --p;
+        }
+        /* Trailing 1*1 block — deflate. */
+        if (p == q) { --q; continue; }
+        /* Trailing 2*2 block — deflate (eigenvalues extracted later). */
+        if (p == q - 1) { q -= 2; continue; }
+        ++total_iter;
+
+        /* Wilkinson double-shift from trailing 2*2:
+         *   s = trace,  t = det. */
+        double s = H[(q - 1) * n + (q - 1)] + H[q * n + q];
+        double t = H[(q - 1) * n + (q - 1)] * H[q * n + q] -
+                   H[(q - 1) * n + q] * H[q * n + (q - 1)];
+
+        /* Exceptional "ad-hoc" shift every 10 iterations to avoid cycling
+         * on stagnant matrices (Wilkinson's perturbation trick). */
+        if (total_iter % 10 == 0) {
+            double scale = fabs(H[q * n + (q - 1)]) +
+                           fabs(H[(q - 1) * n + (q - 2)]);
+            s = 1.5 * scale;
+            t = scale * scale;
+        }
+
+        /* First column of (H - lambda1 I)(H - lambda2 I) where the two
+         * shifts have sum s and product t, evaluated at row p. */
+        double Hpp  = H[p * n + p];
+        double Hpp1 = H[p * n + (p + 1)];
+        double Hp1p = H[(p + 1) * n + p];
+        double Hp1  = H[(p + 1) * n + (p + 1)];
+        double x = Hpp * Hpp + Hpp1 * Hp1p - s * Hpp + t;
+        double y = Hp1p * (Hpp + Hp1 - s);
+        double z = Hp1p * H[(p + 2) * n + (p + 1)];
+
+        /* Implicit Q step: Householder on (x, y, z) introduces a bulge,
+         * then we chase it down the diagonal back to Hessenberg form. */
+        for (int64_t k = p; k + 1 <= q; ++k) {
+            /* Build 3-element (or 2-element near the bottom) Householder.
+             * r == 3 when row k+2 is still inside [p..q]; r == 2 at the
+             * final chase step where only rows {k, k+1} fit. */
+            int64_t r = (k + 2 <= q) ? 3 : 2;
+            double v0, v1, v2 = 0.0;
+            if (k > p) {
+                v0 = H[k * n + (k - 1)];
+                v1 = H[(k + 1) * n + (k - 1)];
+                v2 = (r == 3) ? H[(k + 2) * n + (k - 1)] : 0.0;
+            } else {
+                v0 = x; v1 = y; v2 = z;
+            }
+            double sig = v0 * v0 + v1 * v1 + v2 * v2;
+            if (sig == 0.0) continue;
+            double xnorm = sqrt(sig);
+            double v0p = v0 + (v0 >= 0 ? xnorm : -xnorm);
+            double vnorm2 = v0p * v0p + v1 * v1 + v2 * v2;
+            if (vnorm2 == 0.0) continue;
+            double beta = 2.0 / vnorm2;
+            /* Apply reflection from the LEFT to rows {k, k+1, k+2}. */
+            int64_t row_lim_lo = (k > p) ? (k - 1) : p;
+            for (int64_t j = row_lim_lo; j < n; ++j) {
+                double w = v0p * H[k * n + j] + v1 * H[(k + 1) * n + j];
+                if (r == 3) w += v2 * H[(k + 2) * n + j];
+                w *= beta;
+                H[k * n + j]       -= v0p * w;
+                H[(k + 1) * n + j] -= v1  * w;
+                if (r == 3) H[(k + 2) * n + j] -= v2 * w;
+            }
+            /* Apply from the RIGHT to columns {k, k+1, k+2}. */
+            int64_t col_lim_hi = (k + r + 1 < n) ? (k + r + 1) : n;
+            for (int64_t i = 0; i < col_lim_hi; ++i) {
+                double w = v0p * H[i * n + k] + v1 * H[i * n + (k + 1)];
+                if (r == 3) w += v2 * H[i * n + (k + 2)];
+                w *= beta;
+                H[i * n + k]       -= v0p * w;
+                H[i * n + (k + 1)] -= v1  * w;
+                if (r == 3) H[i * n + (k + 2)] -= v2 * w;
+            }
+            /* Apply from the RIGHT to U over all n rows. */
+            if (U) {
+                for (int64_t i = 0; i < n; ++i) {
+                    double w = v0p * U[i * n + k] + v1 * U[i * n + (k + 1)];
+                    if (r == 3) w += v2 * U[i * n + (k + 2)];
+                    w *= beta;
+                    U[i * n + k]       -= v0p * w;
+                    U[i * n + (k + 1)] -= v1  * w;
+                    if (r == 3) U[i * n + (k + 2)] -= v2 * w;
+                }
+            }
+        }
+    }
+    return total_iter < max_total_iter ? 0 : -1;
+}
+
+/*
+ * Extract eigenvalues from a converged real Schur form. Walks the
+ * diagonal: a 1*1 block (zero subdiagonal below) is a real eigenvalue;
+ * a 2*2 block carries either two real eigenvalues or a complex conjugate
+ * pair, depending on the discriminant of the 2*2 characteristic polynomial.
+ *
+ * Fills eig_re[k], eig_im[k] for k in [0, n) and returns the number of
+ * complex pairs found (each contributes a non-zero imag part).
+ */
+static int extract_eigenvalues_(const double *H, int64_t n,
+                                double *eig_re, double *eig_im) {
+    int complex_pairs = 0;
+    int64_t i = 0;
+    while (i < n) {
+        int is_2x2 = (i + 1 < n) && (H[(i + 1) * n + i] != 0.0);
+        if (!is_2x2) {
+            eig_re[i] = H[i * n + i];
+            eig_im[i] = 0.0;
+            ++i;
+            continue;
+        }
+        double a = H[i * n + i];
+        double b = H[i * n + (i + 1)];
+        double c = H[(i + 1) * n + i];
+        double d = H[(i + 1) * n + (i + 1)];
+        double tr  = a + d;
+        double det = a * d - b * c;
+        double disc = tr * tr - 4.0 * det;
+        if (disc >= 0.0) {
+            double sq = sqrt(disc);
+            eig_re[i]     = (tr + sq) * 0.5;  eig_im[i]     = 0.0;
+            eig_re[i + 1] = (tr - sq) * 0.5;  eig_im[i + 1] = 0.0;
+        } else {
+            double sq = sqrt(-disc) * 0.5;
+            eig_re[i]     = tr * 0.5;  eig_im[i]     = sq;
+            eig_re[i + 1] = tr * 0.5;  eig_im[i + 1] = -sq;
+            ++complex_pairs;
+        }
+        i += 2;
+    }
+    return complex_pairs;
+}
+
 matlab_mat *matlab_eig(matlab_mat *A_in) {
     if (!A_in || A_in->rows != A_in->cols) return mat_alloc(0, 0);
     int64_t n = A_in->rows;
+
+    /* Non-symmetric path — Francis double-shift QR on Hessenberg form.
+     * Returns matlab_mat* (real) when all eigenvalues are real, or
+     * matlab_mat_c* (cast back to matlab_mat*) when any complex pair
+     * exists. The polymorphism rides on the magic-word convention used
+     * elsewhere in the runtime (mat_is_complex). */
+    if (n > 0 && !matrix_is_symmetric_(A_in->data, n)) {
+        std::vector<double> H(A_in->data, A_in->data + n * n);
+        hessenberg_inplace_(H.data(), n, /*U=*/nullptr);
+        francis_qr_(H.data(), n, /*U=*/nullptr);
+        std::vector<double> ere(n), eim(n);
+        int complex_pairs = extract_eigenvalues_(H.data(), n,
+                                                 ere.data(), eim.data());
+        /* Sort eigenvalues by ascending real part, tie-break by imag.
+         * Insertion sort — n is small for typical control plants. */
+        for (int64_t i = 0; i < n; ++i) {
+            for (int64_t j = i + 1; j < n; ++j) {
+                bool swap = (ere[j] < ere[i]) ||
+                            (ere[j] == ere[i] && eim[j] < eim[i]);
+                if (swap) {
+                    double t;
+                    t = ere[i]; ere[i] = ere[j]; ere[j] = t;
+                    t = eim[i]; eim[i] = eim[j]; eim[j] = t;
+                }
+            }
+        }
+        if (complex_pairs == 0) {
+            matlab::runtime::MatPtr E = matlab::runtime::make_mat(n, 1);
+            for (int64_t i = 0; i < n; ++i) E->data[i] = ere[i];
+            return E.release();
+        }
+        matlab_mat_c *Ec = mat_c_alloc(n, 1);
+        for (int64_t i = 0; i < n; ++i) {
+            Ec->re[i] = ere[i];
+            Ec->im[i] = eim[i];
+        }
+        return (matlab_mat *)Ec;
+    }
+
+    /* Symmetric path — Jacobi sweep (unchanged). */
     /* Phase-4 RAII: H scratch buffer holds the symmetric working matrix. */
     std::vector<double> H(n * n);
     for (int64_t i = 0; i < n; ++i) {
@@ -1673,6 +1944,1642 @@ matlab_mat *matlab_matpow(matlab_mat *A, double n) {
     }
     (void)freeable_base;
     return acc;
+}
+
+/*-------------------------------------------------------------------------
+ * Matrix exponential — expm(A).
+ *
+ * Scaling-and-squaring with a [13/13] Padé approximant (Higham 2005,
+ * "The Scaling and Squaring Method for the Matrix Exponential
+ * Revisited", SIAM J. Matrix Anal. Appl. 26(4), 1179-1193). This is
+ * the workhorse algorithm scipy.linalg.expm and MATLAB's expm both
+ * use as their double-precision path.
+ *
+ *   1. Pick s so that ||A / 2^s||_1 <= theta_13 ≈ 5.37192...
+ *   2. A_s = A / 2^s.
+ *   3. Compute U, V from A_s via Higham's Algorithm 10.20 (uses A_s^2,
+ *      A_s^4, A_s^6 only — the rest is linear combinations + one extra
+ *      mat-mat).
+ *   4. Solve (V - U) * R = (V + U) for R.
+ *   5. Square R s times to undo the scaling.
+ *
+ * Tier 1.3 of the Control System Toolbox roadmap. See
+ * docs/control_toolbox_roadmap.md §2.3.
+ *-------------------------------------------------------------------------*/
+matlab_mat *matlab_expm(matlab_mat *A) {
+    if (!A || A->rows != A->cols) return mat_alloc(0, 0);
+    int64_t n = A->rows;
+    if (n == 0) return mat_alloc(0, 0);
+
+    /* Padé [13/13] coefficients — denominators of the rational Padé
+     * are obtained by replacing A with -A and reusing the same b[k]
+     * (the [m/m]-Padé property). */
+    static const double b[14] = {
+        64764752532480000.0, 32382376266240000.0, 7771770303897600.0,
+        1187353796428800.0,  129060195264000.0,   10559470521600.0,
+        670442572800.0,      33522128640.0,       1323241920.0,
+        40840800.0,          960960.0,            16380.0,
+        182.0,               1.0
+    };
+    /* Higham 2005 Table 2.3: maximum 1-norm at which [13/13] Padé is
+     * accurate to ~unit roundoff in IEEE double. */
+    static const double theta13 = 5.371920351148152;
+
+    /* 1-norm of A (max column sum of |A_ij|). */
+    double anrm = 0.0;
+    for (int64_t j = 0; j < n; ++j) {
+        double col = 0.0;
+        for (int64_t i = 0; i < n; ++i) col += fabs(A->data[i * n + j]);
+        if (col > anrm) anrm = col;
+    }
+
+    int s = 0;
+    std::vector<double> As(A->data, A->data + n * n);
+    if (anrm > theta13) {
+        /* s = ceil(log2(anrm / theta13)).  Use ldexp(1, k) instead of
+         * `1 << k` so we don't trip the shift-overflow on very large
+         * anrm. */
+        double r = anrm / theta13;
+        s = 0;
+        while (ldexp(1.0, s + 1) < r) ++s;
+        if (ldexp(1.0, s) < r) ++s;
+        double scale = ldexp(1.0, -s);
+        for (int64_t i = 0; i < n * n; ++i) As[i] *= scale;
+    }
+
+    auto mm = [n](const double *X, const double *Y, double *Z) {
+        for (int64_t i = 0; i < n; ++i)
+            for (int64_t j = 0; j < n; ++j) {
+                double sum = 0.0;
+                for (int64_t k = 0; k < n; ++k)
+                    sum += X[i * n + k] * Y[k * n + j];
+                Z[i * n + j] = sum;
+            }
+    };
+
+    std::vector<double> A2(n * n), A4(n * n), A6(n * n);
+    mm(As.data(), As.data(), A2.data());
+    mm(A2.data(), A2.data(), A4.data());
+    mm(A4.data(), A2.data(), A6.data());
+
+    /* Algorithm 10.20 — split the polynomial in two halves so the
+     * inner-most product reuses A6:
+     *   U = A_s * (A6 * (b13*A6 + b11*A4 + b9*A2)
+     *              + b7*A6 + b5*A4 + b3*A2 + b1*I)
+     *   V =        A6 * (b12*A6 + b10*A4 + b8*A2)
+     *              + b6*A6 + b4*A4 + b2*A2 + b0*I
+     * Then exp(A_s) ≈ (V - U)^{-1} (V + U). */
+    std::vector<double> W1(n * n), W2(n * n), Z1(n * n), Z2(n * n);
+    for (int64_t i = 0; i < n * n; ++i) {
+        W1[i] = b[13] * A6[i] + b[11] * A4[i] + b[9] * A2[i];
+        Z1[i] = b[12] * A6[i] + b[10] * A4[i] + b[8] * A2[i];
+        W2[i] = b[7]  * A6[i] + b[5]  * A4[i] + b[3] * A2[i];
+        Z2[i] = b[6]  * A6[i] + b[4]  * A4[i] + b[2] * A2[i];
+    }
+    for (int64_t i = 0; i < n; ++i) {
+        W2[i * n + i] += b[1];
+        Z2[i * n + i] += b[0];
+    }
+
+    std::vector<double> tmp(n * n), W(n * n), V(n * n), U(n * n);
+    mm(A6.data(), W1.data(), tmp.data());
+    for (int64_t i = 0; i < n * n; ++i) W[i] = tmp[i] + W2[i];
+    mm(As.data(), W.data(), U.data());
+    mm(A6.data(), Z1.data(), tmp.data());
+    for (int64_t i = 0; i < n * n; ++i) V[i] = tmp[i] + Z2[i];
+
+    /* Solve (V - U) * R = (V + U) — column by column via the existing
+     * pivoted-LU scratch helpers. */
+    std::vector<double> LU(n * n);
+    std::vector<double> RHS(n * n);
+    for (int64_t i = 0; i < n * n; ++i) {
+        LU[i]  = V[i] - U[i];
+        RHS[i] = V[i] + U[i];
+    }
+    std::vector<int64_t> piv(n);
+    int sgn;
+    if (lu_decompose(LU.data(), n, piv.data(), &sgn) != 0)
+        return mat_alloc(0, 0);
+
+    std::vector<double> R(n * n);
+    std::vector<double> rhs_col(n), x_col(n);
+    for (int64_t c = 0; c < n; ++c) {
+        for (int64_t i = 0; i < n; ++i) rhs_col[i] = RHS[i * n + c];
+        lu_solve_column(LU.data(), n, piv.data(), rhs_col.data(),
+                        x_col.data());
+        for (int64_t i = 0; i < n; ++i) R[i * n + c] = x_col[i];
+    }
+
+    /* Square R back, s times, to recover exp(A) from exp(A_s). */
+    std::vector<double> Rsq(n * n);
+    for (int k = 0; k < s; ++k) {
+        mm(R.data(), R.data(), Rsq.data());
+        std::swap(R, Rsq);
+    }
+
+    matlab_mat *out = mat_alloc(n, n);
+    for (int64_t i = 0; i < n * n; ++i) out->data[i] = R[i];
+    return out;
+}
+
+/*-------------------------------------------------------------------------
+ * Hessenberg reduction — H = hess(A).
+ *
+ * Reduce a real n*n matrix A to upper Hessenberg form H via a sequence
+ * of Householder reflections, P_k. The composite orthogonal matrix
+ * P = P_0 P_1 ... P_{n-3} satisfies P' A P = H with H[i,j] = 0 for
+ * i > j+1.
+ *
+ * Hessenberg form preserves eigenvalues (similarity transform) and is
+ * the standard launch pad for the Francis double-shift QR algorithm
+ * that converges to real Schur form. Direct cost: O(n^3) per call.
+ *
+ * Tier 1.2 of the Control System Toolbox roadmap. See
+ * docs/control_toolbox_roadmap.md §2.2. The 2-return form
+ * [H, P] = hess(A) is a follow-on (will use the same scratch with one
+ * extra accumulator matrix; routed via separate matlab_hess_H /
+ * matlab_hess_P entries mirroring the eig_V / eig_D precedent).
+ *-------------------------------------------------------------------------*/
+matlab_mat *matlab_hess(matlab_mat *A) {
+    if (!A || A->rows != A->cols) return mat_alloc(0, 0);
+    int64_t n = A->rows;
+    matlab_mat *H = mat_alloc(n, n);
+    if (n == 0) return H;
+    for (int64_t i = 0; i < n * n; ++i) H->data[i] = A->data[i];
+    if (n <= 2) return H;  /* already upper Hessenberg */
+
+    std::vector<double> v(n);
+    for (int64_t k = 0; k + 2 < n; ++k) {
+        /* Build the Householder vector that zeroes H[k+2..n-1, k]. */
+        double sigma = 0.0;
+        for (int64_t i = k + 1; i < n; ++i) {
+            double x = H->data[i * n + k];
+            sigma += x * x;
+        }
+        if (sigma == 0.0) continue;
+        double xk = H->data[(k + 1) * n + k];
+        double xnorm = sqrt(sigma);
+        /* Choose the sign that *adds* magnitudes (avoids cancellation). */
+        double v0 = xk + (xk >= 0 ? xnorm : -xnorm);
+        v[k + 1] = v0;
+        for (int64_t i = k + 2; i < n; ++i) v[i] = H->data[i * n + k];
+        double vnorm2 = v0 * v0 + (sigma - xk * xk);
+        if (vnorm2 == 0.0) continue;
+        double beta = 2.0 / vnorm2;
+
+        /* Apply (I - beta v v^T) from the left: only rows k+1..n-1 are
+         * touched. Sweep across all n columns. */
+        for (int64_t j = k; j < n; ++j) {
+            double w = 0.0;
+            for (int64_t i = k + 1; i < n; ++i)
+                w += v[i] * H->data[i * n + j];
+            w *= beta;
+            for (int64_t i = k + 1; i < n; ++i)
+                H->data[i * n + j] -= v[i] * w;
+        }
+        /* Apply (I - beta v v^T) from the right: only columns k+1..n-1
+         * are touched. Sweep across all n rows. */
+        for (int64_t i = 0; i < n; ++i) {
+            double w = 0.0;
+            for (int64_t j = k + 1; j < n; ++j)
+                w += H->data[i * n + j] * v[j];
+            w *= beta;
+            for (int64_t j = k + 1; j < n; ++j)
+                H->data[i * n + j] -= w * v[j];
+        }
+        /* Numeric cleanup — round tiny subdiagonal residues to exact 0
+         * so disp(hess(A)) prints clean zeros. The reflection has
+         * already moved column k's tail into one element by
+         * construction; this is just IEEE-rounding hygiene. */
+        for (int64_t i = k + 2; i < n; ++i) H->data[i * n + k] = 0.0;
+    }
+    return H;
+}
+
+/*-------------------------------------------------------------------------
+ * Real Schur decomposition — [U, T] = schur(A).
+ *
+ * For real A, returns an orthogonal U and a real-Schur (upper quasi-
+ * triangular: 1*1 and 2*2 diagonal blocks) T such that A = U T U'.
+ * Real eigenvalues of A appear on T's diagonal as 1*1 blocks; complex
+ * conjugate pairs appear as 2*2 diagonal blocks (the [a b; c d] pencil
+ * has tr=a+d, det=ad-bc, with disc = tr^2 - 4 det < 0).
+ *
+ * Implementation: Hessenberg reduce + Francis double-shift QR (the
+ * same pipeline as non-symmetric matlab_eig), with the orthogonal
+ * accumulator U threaded through both passes.
+ *
+ * Three public entries — matlab_schur returns T (1-return form);
+ * matlab_schur_T / matlab_schur_U each compute both and return one for
+ * the [U, T] = schur(A) shape (eig_V / eig_D precedent). The two-pass
+ * computation is repeated per call rather than cached — keeps the
+ * runtime stateless. The cost is two extra Householder reductions
+ * worth of compute, which is negligible relative to the QR convergence.
+ *
+ * Tier 1.2 follow-on of the Control System Toolbox roadmap. See
+ * docs/control_toolbox_roadmap.md §2.2. Gates Tier 1.4 (Bartels-Stewart
+ * Lyapunov) and Tier 1.5 (ordered-Schur Riccati).
+ *-------------------------------------------------------------------------*/
+matlab_mat *matlab_schur(matlab_mat *A) {
+    if (!A || A->rows != A->cols) return mat_alloc(0, 0);
+    int64_t n = A->rows;
+    matlab_mat *T = mat_alloc(n, n);
+    if (n == 0) return T;
+    for (int64_t i = 0; i < n * n; ++i) T->data[i] = A->data[i];
+    hessenberg_inplace_(T->data, n, /*U=*/nullptr);
+    francis_qr_(T->data, n, /*U=*/nullptr);
+    return T;
+}
+
+matlab_mat *matlab_schur_T(matlab_mat *A) { return matlab_schur(A); }
+
+matlab_mat *matlab_schur_U(matlab_mat *A) {
+    if (!A || A->rows != A->cols) return mat_alloc(0, 0);
+    int64_t n = A->rows;
+    matlab_mat *U = mat_alloc(n, n);
+    if (n == 0) return U;
+    std::vector<double> H(A->data, A->data + n * n);
+    hessenberg_inplace_(H.data(), n, U->data);
+    francis_qr_(H.data(), n, U->data);
+    return U;
+}
+
+/*-------------------------------------------------------------------------
+ * Lyapunov / Stein equation solvers.
+ *
+ *   lyap(A, Q):    A X + X A' + Q = 0     (continuous Lyapunov)
+ *   dlyap(A, Q):   A X A' - X + Q = 0     (discrete / Stein equation)
+ *
+ * Implementation: vectorize and LU-solve. Vectorising the matrix
+ * equation in row-major form gives an n^2 * n^2 dense system that
+ * the existing `lu_decompose` + `lu_solve_column` helpers handle
+ * straight away. O(n^6) cost — fine for the small plants typical of
+ * the Control System Toolbox surface (n typically 2-10). For large
+ * plants the proper approach is Bartels-Stewart back-substitution
+ * on the Schur form (uses matlab_schur from Tier-1.2 follow-on);
+ * documented as a follow-on optimisation here.
+ *
+ * Vectorisation derivation (row-major vec):
+ *   vec(A X)  = (A o I) vec(X)    [Kronecker A o I_n]
+ *   vec(X A') = (I o A) vec(X)
+ *   vec(A X A') = (A o A) vec(X)
+ *
+ * Continuous: (A o I + I o A) vec(X) = -vec(Q).
+ * Discrete:   (A o A - I_{n^2}) vec(X) = -vec(Q).
+ *
+ * Tier 1.4 of the Control System Toolbox roadmap. See
+ * docs/control_toolbox_roadmap.md §2.4. Gates `gram` (controllability /
+ * observability gramians as Lyapunov solutions), the H2 system norm,
+ * and the balanced realisation that underlies model reduction.
+ *-------------------------------------------------------------------------*/
+matlab_mat *matlab_lyap(matlab_mat *A, matlab_mat *Q) {
+    if (!A || !Q || A->rows != A->cols ||
+        Q->rows != A->rows || Q->cols != A->cols) return mat_alloc(0, 0);
+    int64_t n = A->rows;
+    if (n == 0) return mat_alloc(0, 0);
+    int64_t n2 = n * n;
+
+    /* Build M = A o I + I o A (row-major Kronecker). */
+    std::vector<double> M(n2 * n2, 0.0);
+    for (int64_t i = 0; i < n; ++i)
+        for (int64_t k = 0; k < n; ++k) {
+            double a_ik = A->data[i * n + k];
+            for (int64_t j = 0; j < n; ++j)
+                M[(i * n + j) * n2 + (k * n + j)] += a_ik;
+        }
+    for (int64_t i = 0; i < n; ++i)
+        for (int64_t j = 0; j < n; ++j)
+            for (int64_t k = 0; k < n; ++k)
+                M[(i * n + j) * n2 + (i * n + k)] += A->data[j * n + k];
+
+    /* RHS = -vec(Q). */
+    std::vector<double> rhs(n2);
+    for (int64_t i = 0; i < n2; ++i) rhs[i] = -Q->data[i];
+
+    std::vector<int64_t> piv(n2);
+    int sgn;
+    if (lu_decompose(M.data(), n2, piv.data(), &sgn) != 0)
+        return mat_alloc(0, 0);
+
+    std::vector<double> x(n2);
+    lu_solve_column(M.data(), n2, piv.data(), rhs.data(), x.data());
+
+    matlab_mat *X = mat_alloc(n, n);
+    for (int64_t i = 0; i < n2; ++i) X->data[i] = x[i];
+    return X;
+}
+
+matlab_mat *matlab_dlyap(matlab_mat *A, matlab_mat *Q) {
+    if (!A || !Q || A->rows != A->cols ||
+        Q->rows != A->rows || Q->cols != A->cols) return mat_alloc(0, 0);
+    int64_t n = A->rows;
+    if (n == 0) return mat_alloc(0, 0);
+    int64_t n2 = n * n;
+
+    /* Build M = A o A - I_{n^2}. Row-major Kronecker A o A:
+     *   M[i n + j, k n + l] = A[i, k] * A[j, l]. */
+    std::vector<double> M(n2 * n2, 0.0);
+    for (int64_t i = 0; i < n; ++i)
+        for (int64_t j = 0; j < n; ++j)
+            for (int64_t k = 0; k < n; ++k)
+                for (int64_t l = 0; l < n; ++l)
+                    M[(i * n + j) * n2 + (k * n + l)] =
+                        A->data[i * n + k] * A->data[j * n + l];
+    for (int64_t i = 0; i < n2; ++i) M[i * n2 + i] -= 1.0;
+
+    std::vector<double> rhs(n2);
+    for (int64_t i = 0; i < n2; ++i) rhs[i] = -Q->data[i];
+
+    std::vector<int64_t> piv(n2);
+    int sgn;
+    if (lu_decompose(M.data(), n2, piv.data(), &sgn) != 0)
+        return mat_alloc(0, 0);
+
+    std::vector<double> x(n2);
+    lu_solve_column(M.data(), n2, piv.data(), rhs.data(), x.data());
+
+    matlab_mat *X = mat_alloc(n, n);
+    for (int64_t i = 0; i < n2; ++i) X->data[i] = x[i];
+    return X;
+}
+
+/*-------------------------------------------------------------------------
+ * Continuous algebraic Riccati equation - X = care(A, B, Q, R).
+ *
+ * Solves  A'X + X A - X B R^{-1} B' X + Q = 0  for the unique
+ * stabilising solution (X = X' >= 0; A - B R^{-1} B' X is Hurwitz).
+ *
+ * Algorithm: matrix sign function via Newton iteration on the
+ * Hamiltonian matrix H = [[A, -B R^{-1} B']; [-Q, -A']]. After
+ * convergence, sign(H) has eigenvalues +-1; P = (I - sign(H))/2
+ * projects onto the stable invariant subspace, and X = P_bot * inv(P_top)
+ * recovers the Riccati solution.
+ *
+ * Reference: Roberts (1980), "Linear model reduction and solution of
+ * the algebraic Riccati equation by use of the sign function",
+ * International J. of Control, 32(4):677-687. Newton iteration
+ * S_{k+1} = (S_k + S_k^{-1}) / 2 converges quadratically when H has
+ * no eigenvalue on the imaginary axis (i.e. for stabilisable +
+ * detectable LQR setups). Each iteration is one inv() + add.
+ *
+ * Tier 1.5 of the Control System Toolbox roadmap. See
+ * docs/control_toolbox_roadmap.md §2.5. Gates `lqr`, `kalman`, `lqg`,
+ * and the H_inf system norm. The discrete-time variant `dare` is a
+ * follow-on (needs the Cayley transform CARE<->DARE bridge or QZ).
+ *-------------------------------------------------------------------------*/
+matlab_mat *matlab_care(matlab_mat *A, matlab_mat *B,
+                        matlab_mat *Q, matlab_mat *R) {
+    if (!A || !B || !Q || !R) return mat_alloc(0, 0);
+    int64_t n = A->rows;
+    if (A->cols != n || B->rows != n || Q->rows != n || Q->cols != n)
+        return mat_alloc(0, 0);
+    int64_t m = B->cols;
+    if (R->rows != m || R->cols != m) return mat_alloc(0, 0);
+    if (n == 0) return mat_alloc(0, 0);
+
+    /* Compute B * R^{-1} * B'  (n x n). */
+    matlab_mat *Rinv  = matlab_inv(R);
+    if (!Rinv || Rinv->rows == 0) return mat_alloc(0, 0);
+    matlab_mat *Bt    = matlab_transpose(B);
+    matlab_mat *BR    = matlab_matmul_mm(B, Rinv);
+    matlab_mat *BRiBt = matlab_matmul_mm(BR, Bt);
+
+    /* Hamiltonian H = [[A, -BRiBt], [-Q, -A']] (2n x 2n). */
+    int64_t n2 = 2 * n;
+    std::vector<double> S(n2 * n2, 0.0);
+    for (int64_t i = 0; i < n; ++i)
+        for (int64_t j = 0; j < n; ++j) {
+            S[i * n2 + j]            =  A->data[i * n + j];
+            S[i * n2 + (n + j)]      = -BRiBt->data[i * n + j];
+            S[(n + i) * n2 + j]      = -Q->data[i * n + j];
+            S[(n + i) * n2 + (n + j)] = -A->data[j * n + i]; /* -A^T */
+        }
+
+    /* Newton iteration:  S_{k+1} = (S_k + S_k^{-1}) / 2. */
+    std::vector<double> LU(n2 * n2), Sinv(n2 * n2);
+    std::vector<int64_t> piv(n2);
+    std::vector<double> rhs_col(n2), x_col(n2);
+    int sgn;
+    const int max_iters = 60;
+    const double tol = 1e-12;
+    bool converged = false;
+    for (int iter = 0; iter < max_iters; ++iter) {
+        for (int64_t i = 0; i < n2 * n2; ++i) LU[i] = S[i];
+        if (lu_decompose(LU.data(), n2, piv.data(), &sgn) != 0) {
+            /* Singular S - bail with empty result. Intermediate
+             * matrices are arena-allocated (see Phase-4 RAII policy);
+             * no explicit free needed. */
+            return mat_alloc(0, 0);
+        }
+        for (int64_t c = 0; c < n2; ++c) {
+            for (int64_t r = 0; r < n2; ++r) rhs_col[r] = (r == c) ? 1.0 : 0.0;
+            lu_solve_column(LU.data(), n2, piv.data(),
+                            rhs_col.data(), x_col.data());
+            for (int64_t r = 0; r < n2; ++r) Sinv[r * n2 + c] = x_col[r];
+        }
+        double diff_fro = 0.0, S_fro = 0.0;
+        for (int64_t i = 0; i < n2 * n2; ++i) {
+            double Snew = 0.5 * (S[i] + Sinv[i]);
+            double d = Snew - S[i];
+            diff_fro += d * d;
+            S_fro    += Snew * Snew;
+            S[i] = Snew;
+        }
+        if (S_fro > 0.0 && diff_fro <= tol * tol * S_fro) {
+            converged = true;
+            break;
+        }
+    }
+    if (!converged) return mat_alloc(0, 0);
+    (void)Rinv; (void)Bt; (void)BR; (void)BRiBt; /* arena-managed */
+
+    /* P = (I - S) / 2 projects onto the stable invariant subspace.
+     * Take the first n columns: U_top = P[0..n-1, 0..n-1],
+     * U_bot = P[n..2n-1, 0..n-1]. For a generic Hamiltonian without
+     * imaginary-axis eigenvalues these are linearly independent and
+     * U_top is invertible. */
+    matlab_mat *Utop = mat_alloc(n, n);
+    matlab_mat *Ubot = mat_alloc(n, n);
+    for (int64_t i = 0; i < n; ++i)
+        for (int64_t j = 0; j < n; ++j) {
+            double Iij = (i == j) ? 1.0 : 0.0;
+            Utop->data[i * n + j] = 0.5 * (Iij - S[i * n2 + j]);
+            Ubot->data[i * n + j] = -0.5 * S[(n + i) * n2 + j];
+        }
+
+    matlab_mat *Utop_inv = matlab_inv(Utop);
+    if (!Utop_inv || Utop_inv->rows == 0) return mat_alloc(0, 0);
+    matlab_mat *X = matlab_matmul_mm(Ubot, Utop_inv);
+
+    /* Symmetrise: X should be exactly symmetric; round-trip rounding
+     * leaves a tiny asymmetric residue. */
+    for (int64_t i = 0; i < n; ++i)
+        for (int64_t j = i + 1; j < n; ++j) {
+            double s = 0.5 * (X->data[i * n + j] + X->data[j * n + i]);
+            X->data[i * n + j] = s;
+            X->data[j * n + i] = s;
+        }
+
+    return X;
+}
+
+/*-------------------------------------------------------------------------
+ * Continuous-to-discrete state-space conversion (zero-order hold).
+ *
+ *   [Ad, Bd] = c2d(A, B, Ts)
+ *
+ * For xdot = A x + B u with ZOH on u (held constant over each sample
+ * interval), the discrete-time recurrence is
+ *      x[k+1] = Ad x[k] + Bd u[k]
+ * where
+ *      Ad = expm(A * Ts)
+ *      Bd = integral_0^Ts expm(A * tau) B dtau
+ *
+ * Augmented-matrix trick (van Loan): build  M = [[A, B]; [0, 0]] of
+ * size (n+m) x (n+m) and compute  expm(M * Ts) = [[Ad, Bd]; [0, I]].
+ * The top-left n*n block is Ad; the top-right n*m block is Bd. One
+ * expm call gives both — much cleaner than computing the integral
+ * directly. See Tier-2.2 of the CST roadmap.
+ *
+ * Two public entries (eig_V/eig_D precedent for multi-return splitting):
+ *   matlab_c2d_Ad(A, B, Ts)  -> Ad
+ *   matlab_c2d_Bd(A, B, Ts)  -> Bd
+ * The MATLAB shape  [Ad, Bd] = c2d(A, B, Ts)  routes through the
+ * existing 2-return dispatcher in LowerTensorOps.cpp.
+ *-------------------------------------------------------------------------*/
+static matlab_mat *c2d_aug_expm_(matlab_mat *A, matlab_mat *B, double Ts) {
+    if (!A || !B || A->rows != A->cols ||
+        B->rows != A->rows) return mat_alloc(0, 0);
+    int64_t n = A->rows;
+    int64_t m = B->cols;
+    int64_t N = n + m;
+    /* Build M = [[A * Ts, B * Ts]; [0, 0]]. Note: scaling by Ts here
+     * means the resulting expm is exp(M * Ts) = exp([A B; 0 0] * Ts),
+     * which the Van Loan identity gives as [[Ad, Bd]; [0, I_m]]. */
+    matlab_mat *Maug = mat_alloc(N, N);
+    for (int64_t i = 0; i < n; ++i) {
+        for (int64_t j = 0; j < n; ++j)
+            Maug->data[i * N + j] = A->data[i * n + j] * Ts;
+        for (int64_t j = 0; j < m; ++j)
+            Maug->data[i * N + (n + j)] = B->data[i * m + j] * Ts;
+    }
+    /* Bottom rows already zero from mat_alloc's calloc. */
+    return matlab_expm(Maug);
+}
+
+matlab_mat *matlab_c2d_Ad(matlab_mat *A, matlab_mat *B, double Ts) {
+    matlab_mat *EM = c2d_aug_expm_(A, B, Ts);
+    if (!EM || EM->rows == 0) return mat_alloc(0, 0);
+    int64_t n = A->rows;
+    int64_t N = EM->rows;
+    matlab_mat *Ad = mat_alloc(n, n);
+    for (int64_t i = 0; i < n; ++i)
+        for (int64_t j = 0; j < n; ++j)
+            Ad->data[i * n + j] = EM->data[i * N + j];
+    return Ad;
+}
+
+matlab_mat *matlab_c2d_Bd(matlab_mat *A, matlab_mat *B, double Ts) {
+    matlab_mat *EM = c2d_aug_expm_(A, B, Ts);
+    if (!EM || EM->rows == 0) return mat_alloc(0, 0);
+    int64_t n = A->rows;
+    int64_t m = B->cols;
+    int64_t N = EM->rows;
+    matlab_mat *Bd = mat_alloc(n, m);
+    for (int64_t i = 0; i < n; ++i)
+        for (int64_t j = 0; j < m; ++j)
+            Bd->data[i * m + j] = EM->data[i * N + (n + j)];
+    return Bd;
+}
+
+/*-------------------------------------------------------------------------
+ * Controllability / observability gramians as Lyapunov solutions.
+ *
+ *   Wc = gram_c(A, B)  solves  A Wc + Wc A' + B B' = 0   ->  lyap(A, B B').
+ *   Wo = gram_o(A, C)  solves  A' Wo + Wo A + C' C = 0   ->  lyap(A', C' C).
+ *
+ * Used by the H2 system norm  ||G||_2 = sqrt(trace(B' Wo B)) = sqrt(trace(C Wc C'))
+ * and by balanced realisation. Tier 3.4 of the CST roadmap.
+ *
+ * The matlab_llvm matrix-arg API is functional (not model-object). Once
+ * `ss` constructors land (Tier 2.1), the model-object form `gram(sys,'c')`
+ * can be written in MATLAB-side as a one-liner over these helpers.
+ *-------------------------------------------------------------------------*/
+matlab_mat *matlab_gram_c(matlab_mat *A, matlab_mat *B) {
+    if (!A || !B) return mat_alloc(0, 0);
+    matlab_mat *Bt   = matlab_transpose(B);
+    matlab_mat *BBt  = matlab_matmul_mm(B, Bt);
+    return matlab_lyap(A, BBt);
+}
+
+matlab_mat *matlab_gram_o(matlab_mat *A, matlab_mat *C) {
+    if (!A || !C) return mat_alloc(0, 0);
+    matlab_mat *At  = matlab_transpose(A);
+    matlab_mat *Ct  = matlab_transpose(C);
+    matlab_mat *CtC = matlab_matmul_mm(Ct, C);
+    return matlab_lyap(At, CtC);
+}
+
+/*-------------------------------------------------------------------------
+ * State-space unit-step response.
+ *
+ *   y = step_ss(A, B, C, D, dt, N)  returns the N*p output trajectory
+ *   under unit-step input u = ones(m, 1) on all inputs simultaneously.
+ *   Each row is one time sample; each column is one output channel.
+ *
+ * Method: ZOH discretise via c2d_aug_expm at sample interval dt, then run
+ * the discrete recurrence  x[k+1] = Ad x[k] + Bd u,  y[k] = C x[k] + D u
+ * starting from relaxed initial state x[0] = 0.
+ *
+ * Tier 2.3 of the CST roadmap. The plot-the-output form `step(sys)` is
+ * deferred (no native plotting); programs render via fprintf / disp.
+ *-------------------------------------------------------------------------*/
+matlab_mat *matlab_step_ss(matlab_mat *A, matlab_mat *B,
+                           matlab_mat *C, matlab_mat *D,
+                           double dt, double N_in) {
+    if (!A || !B || !C || !D || dt <= 0.0)
+        return mat_alloc(0, 0);
+    int64_t n = A->rows;
+    int64_t m = B->cols;
+    int64_t p = C->rows;
+    int64_t N = (int64_t)N_in;
+    if (N <= 0) return mat_alloc(0, 0);
+    if (A->cols != n || B->rows != n || C->cols != n ||
+        D->rows != p || D->cols != m) return mat_alloc(0, 0);
+
+    matlab_mat *Ad = matlab_c2d_Ad(A, B, dt);
+    matlab_mat *Bd = matlab_c2d_Bd(A, B, dt);
+    matlab_mat *u  = matlab_ones((double)m, 1);  /* unit step on each input */
+
+    /* Output buffer y is N x p. Internal state x carried across iterations. */
+    matlab_mat *y = mat_alloc(N, p);
+    std::vector<double> x(n, 0.0);
+    std::vector<double> xnew(n, 0.0);
+
+    for (int64_t k = 0; k < N; ++k) {
+        /* y[k, :] = C x + D u (each row is one time sample). */
+        for (int64_t j = 0; j < p; ++j) {
+            double sum = 0.0;
+            for (int64_t i = 0; i < n; ++i) sum += C->data[j * n + i] * x[i];
+            for (int64_t i = 0; i < m; ++i) sum += D->data[j * m + i] * u->data[i];
+            y->data[k * p + j] = sum;
+        }
+        /* x[k+1] = Ad x + Bd u. */
+        for (int64_t i = 0; i < n; ++i) {
+            double s = 0.0;
+            for (int64_t j = 0; j < n; ++j) s += Ad->data[i * n + j] * x[j];
+            for (int64_t j = 0; j < m; ++j) s += Bd->data[i * m + j] * u->data[j];
+            xnew[i] = s;
+        }
+        for (int64_t i = 0; i < n; ++i) x[i] = xnew[i];
+    }
+    return y;
+}
+
+/*-------------------------------------------------------------------------
+ * Transfer-function frequency response: bode_tf(b, a, w).
+ *
+ *   H(s) = b(s) / a(s) = (b[0] s^N + b[1] s^(N-1) + ... + b[N])
+ *                       / (a[0] s^M + a[1] s^(M-1) + ... + a[M])
+ *
+ * Polynomial-coefficient form following the MATLAB convention
+ * (highest-power first). For each frequency w[k] evaluate b(jw) and
+ * a(jw) via complex Horner, then H = b(jw) / a(jw); return magnitude
+ * (linear) or phase (degrees).
+ *
+ * Tier-2.4 follow-on. Bridges to SPT users who work in (b, a) form
+ * for analog filters. Same eig_V/eig_D 2-return precedent as bode_ss.
+ *-------------------------------------------------------------------------*/
+static void bode_tf_at_freq_(matlab_mat *b, matlab_mat *a, double w,
+                             double *Hr, double *Hi) {
+    int64_t Nb = b->rows * b->cols;
+    int64_t Na = a->rows * a->cols;
+    /* Horner with s = jw: at each step, result = result * (jw) + p[k].
+     * (br + j bi) * (jw) = -bi w + j br w. */
+    double br = 0.0, bi = 0.0;
+    for (int64_t k = 0; k < Nb; ++k) {
+        double nbr = -bi * w + b->data[k];
+        double nbi =  br * w;
+        br = nbr; bi = nbi;
+    }
+    double ar = 0.0, ai = 0.0;
+    for (int64_t k = 0; k < Na; ++k) {
+        double nar = -ai * w + a->data[k];
+        double nai =  ar * w;
+        ar = nar; ai = nai;
+    }
+    /* H = (br + j bi) / (ar + j ai)
+     *   = ((br + j bi)(ar - j ai)) / (ar^2 + ai^2). */
+    double d = ar * ar + ai * ai;
+    if (d > 1e-300) {
+        *Hr = (br * ar + bi * ai) / d;
+        *Hi = (bi * ar - br * ai) / d;
+    } else { *Hr = 0.0; *Hi = 0.0; }
+}
+
+matlab_mat *matlab_bode_tf_mag(matlab_mat *b, matlab_mat *a, matlab_mat *w) {
+    if (!b || !a || !w) return mat_alloc(0, 0);
+    int64_t Nf = w->rows * w->cols;
+    matlab_mat *mag = mat_alloc(Nf, 1);
+    for (int64_t k = 0; k < Nf; ++k) {
+        double Hr, Hi;
+        bode_tf_at_freq_(b, a, w->data[k], &Hr, &Hi);
+        mag->data[k] = sqrt(Hr * Hr + Hi * Hi);
+    }
+    return mag;
+}
+
+matlab_mat *matlab_bode_tf_phase(matlab_mat *b, matlab_mat *a, matlab_mat *w) {
+    if (!b || !a || !w) return mat_alloc(0, 0);
+    int64_t Nf = w->rows * w->cols;
+    matlab_mat *phase = mat_alloc(Nf, 1);
+    for (int64_t k = 0; k < Nf; ++k) {
+        double Hr, Hi;
+        bode_tf_at_freq_(b, a, w->data[k], &Hr, &Hi);
+        phase->data[k] = atan2(Hi, Hr) * 180.0 / M_PI;
+    }
+    return phase;
+}
+
+/*-------------------------------------------------------------------------
+ * Generalised input simulation - y = lsim_ss(A, B, C, D, u, dt).
+ *
+ * Same shape as step_ss but the input `u` is an N*m matrix (each row
+ * is one sample of the m-input vector). ZOH between samples; relaxed
+ * initial state x[0] = 0.
+ *
+ * y is N*p (each row is the output at the corresponding sample).
+ *-------------------------------------------------------------------------*/
+matlab_mat *matlab_lsim_ss(matlab_mat *A, matlab_mat *B,
+                           matlab_mat *C, matlab_mat *D,
+                           matlab_mat *u, double dt) {
+    if (!A || !B || !C || !D || !u || dt <= 0.0)
+        return mat_alloc(0, 0);
+    int64_t n = A->rows;
+    int64_t m = B->cols;
+    int64_t p = C->rows;
+    int64_t N = u->rows;
+    if (A->cols != n || B->rows != n || C->cols != n ||
+        D->rows != p || D->cols != m || u->cols != m)
+        return mat_alloc(0, 0);
+    if (N <= 0) return mat_alloc(0, 0);
+
+    matlab_mat *Ad = matlab_c2d_Ad(A, B, dt);
+    matlab_mat *Bd = matlab_c2d_Bd(A, B, dt);
+    matlab_mat *y  = mat_alloc(N, p);
+    std::vector<double> x(n, 0.0), xnew(n, 0.0);
+    for (int64_t k = 0; k < N; ++k) {
+        for (int64_t j = 0; j < p; ++j) {
+            double s = 0.0;
+            for (int64_t i = 0; i < n; ++i) s += C->data[j * n + i] * x[i];
+            for (int64_t i = 0; i < m; ++i)
+                s += D->data[j * m + i] * u->data[k * m + i];
+            y->data[k * p + j] = s;
+        }
+        for (int64_t i = 0; i < n; ++i) {
+            double s = 0.0;
+            for (int64_t j = 0; j < n; ++j) s += Ad->data[i * n + j] * x[j];
+            for (int64_t j = 0; j < m; ++j)
+                s += Bd->data[i * m + j] * u->data[k * m + j];
+            xnew[i] = s;
+        }
+        for (int64_t i = 0; i < n; ++i) x[i] = xnew[i];
+    }
+    return y;
+}
+
+/* Forward declarations - matlab_bode_ss_mag/phase are defined below. */
+matlab_mat *matlab_bode_ss_mag  (matlab_mat *A, matlab_mat *B,
+                                 matlab_mat *C, matlab_mat *D, matlab_mat *w);
+matlab_mat *matlab_bode_ss_phase(matlab_mat *A, matlab_mat *B,
+                                 matlab_mat *C, matlab_mat *D, matlab_mat *w);
+
+/*-------------------------------------------------------------------------
+ * Stability margins for SISO open-loop L(s) = C (sI - A)^{-1} B + D.
+ *
+ *   Gm = gain_margin(A, B, C, D, w)
+ *   Pm = phase_margin(A, B, C, D, w)
+ *
+ * Both scan a user-provided frequency grid `w` (typically logspaced).
+ * Linear interpolation between adjacent samples locates the crossover.
+ *
+ * Gain margin:   the smallest 1/|L(jw)| where phase(L) crosses -180
+ *                degrees. Returns +Inf if phase never reaches -180 on
+ *                the grid (system has infinite gain margin -- the
+ *                first-order lowpass case).
+ *
+ * Phase margin:  180 + phase(L(jw)) at the gain crossover (|L| = 1).
+ *                Returns +Inf if |L| never crosses 1 on the grid (the
+ *                low-DC-gain case where L < 1 everywhere).
+ *
+ * Tier 2.4 follow-on. Sits cleanly on bode_ss.
+ *-------------------------------------------------------------------------*/
+double matlab_gain_margin(matlab_mat *A, matlab_mat *B,
+                          matlab_mat *C, matlab_mat *D,
+                          matlab_mat *w) {
+    if (!A || !B || !C || !D || !w) return INFINITY;
+    int64_t Nf = w->rows * w->cols;
+    if (Nf < 2) return INFINITY;
+    matlab_mat *phase = matlab_bode_ss_phase(A, B, C, D, w);
+    matlab_mat *mag   = matlab_bode_ss_mag  (A, B, C, D, w);
+    /* Find the first w[k] where phase crosses -180 from above. */
+    for (int64_t k = 1; k < Nf; ++k) {
+        double p1 = phase->data[k - 1];
+        double p2 = phase->data[k];
+        if (p1 > -180.0 && p2 <= -180.0) {
+            double frac = (p1 + 180.0) / (p1 - p2);
+            double m1 = mag->data[k - 1], m2 = mag->data[k];
+            double mc = m1 + frac * (m2 - m1);
+            if (mc > 1e-300) return 1.0 / mc;
+            return INFINITY;
+        }
+    }
+    return INFINITY;
+}
+
+double matlab_phase_margin(matlab_mat *A, matlab_mat *B,
+                           matlab_mat *C, matlab_mat *D,
+                           matlab_mat *w) {
+    if (!A || !B || !C || !D || !w) return INFINITY;
+    int64_t Nf = w->rows * w->cols;
+    if (Nf < 2) return INFINITY;
+    matlab_mat *phase = matlab_bode_ss_phase(A, B, C, D, w);
+    matlab_mat *mag   = matlab_bode_ss_mag  (A, B, C, D, w);
+    /* Find the first w[k] where |L| crosses 1 from above. */
+    for (int64_t k = 1; k < Nf; ++k) {
+        double m1 = mag->data[k - 1], m2 = mag->data[k];
+        if (m1 > 1.0 && m2 <= 1.0) {
+            double frac = (m1 - 1.0) / (m1 - m2);
+            double p1 = phase->data[k - 1], p2 = phase->data[k];
+            double pc = p1 + frac * (p2 - p1);
+            return 180.0 + pc;
+        }
+    }
+    return INFINITY;
+}
+
+/*-------------------------------------------------------------------------
+ * State-space frequency response (SISO).
+ *
+ *   [mag, phase] = bode_ss(A, B, C, D, w)
+ *
+ * For each frequency w[k], evaluates  H(jw) = C (jw I - A)^{-1} B + D
+ * and returns linear magnitude (not dB) and phase (in degrees).
+ *
+ * Complex linear solve via the real block decomposition:
+ *    M_complex = jw I - A = -A + j (w I)
+ *   [[-A, -w I];  [w I, -A]]  [Xr; Xi]  =  [B; 0]
+ * The result X_complex = Xr + j Xi has real and imaginary blocks.
+ *
+ * This avoids a complex LU - we reuse the existing real `lu_decompose`
+ * + `lu_solve_column` helpers on a 2n x 2n system. Cost is 4x the
+ * single-frequency case versus a true complex LU but for typical
+ * control plants (n = 2..10) it's fast enough and dependency-light.
+ *
+ * SISO only: B must be n*1 (single input), C must be 1*n (single
+ * output), D must be 1*1. MIMO is a follow-on (build the full complex
+ * H matrix per freq and stack).
+ *
+ * Tier 2.4 of the CST roadmap (gating margin, allmargin, getPeakGain,
+ * sigma 1-output, dcgain, bandwidth — all of which need freqresp).
+ *-------------------------------------------------------------------------*/
+static int bode_ss_at_freq_(matlab_mat *A, matlab_mat *B,
+                            matlab_mat *C, matlab_mat *D,
+                            double w, double *Hr_out, double *Hi_out) {
+    int64_t n = A->rows;
+    int64_t N = 2 * n;
+    std::vector<double> M(N * N, 0.0);
+    /* Top-left and bottom-right: -A. */
+    for (int64_t i = 0; i < n; ++i)
+        for (int64_t j = 0; j < n; ++j) {
+            double a = A->data[i * n + j];
+            M[i * N + j]               = -a;
+            M[(n + i) * N + (n + j)]   = -a;
+        }
+    /* Top-right -wI, bottom-left +wI. */
+    for (int64_t i = 0; i < n; ++i) {
+        M[i * N + (n + i)]   = -w;
+        M[(n + i) * N + i]   =  w;
+    }
+    std::vector<double> rhs(N, 0.0);
+    for (int64_t i = 0; i < n; ++i) rhs[i] = B->data[i];  /* B is n x 1 */
+
+    std::vector<int64_t> piv(N);
+    int sgn;
+    if (lu_decompose(M.data(), N, piv.data(), &sgn) != 0) {
+        *Hr_out = 0.0; *Hi_out = 0.0;
+        return -1;
+    }
+    std::vector<double> X(N);
+    lu_solve_column(M.data(), N, piv.data(), rhs.data(), X.data());
+
+    /* H = C * (Xr + j Xi) + D. C is 1 x n, D is 1 x 1. */
+    double Hr = 0.0, Hi = 0.0;
+    for (int64_t i = 0; i < n; ++i) {
+        Hr += C->data[i] * X[i];
+        Hi += C->data[i] * X[n + i];
+    }
+    Hr += D->data[0];
+    *Hr_out = Hr;
+    *Hi_out = Hi;
+    return 0;
+}
+
+matlab_mat *matlab_bode_ss_mag(matlab_mat *A, matlab_mat *B,
+                                matlab_mat *C, matlab_mat *D,
+                                matlab_mat *w) {
+    if (!A || !B || !C || !D || !w) return mat_alloc(0, 0);
+    if (A->rows != A->cols || B->cols != 1 ||
+        C->rows != 1 || D->rows != 1 || D->cols != 1)
+        return mat_alloc(0, 0);
+    int64_t Nf = w->rows * w->cols;
+    matlab_mat *mag = mat_alloc(Nf, 1);
+    for (int64_t k = 0; k < Nf; ++k) {
+        double Hr, Hi;
+        bode_ss_at_freq_(A, B, C, D, w->data[k], &Hr, &Hi);
+        mag->data[k] = sqrt(Hr * Hr + Hi * Hi);
+    }
+    return mag;
+}
+
+matlab_mat *matlab_bode_ss_phase(matlab_mat *A, matlab_mat *B,
+                                  matlab_mat *C, matlab_mat *D,
+                                  matlab_mat *w) {
+    if (!A || !B || !C || !D || !w) return mat_alloc(0, 0);
+    if (A->rows != A->cols || B->cols != 1 ||
+        C->rows != 1 || D->rows != 1 || D->cols != 1)
+        return mat_alloc(0, 0);
+    int64_t Nf = w->rows * w->cols;
+    matlab_mat *phase = mat_alloc(Nf, 1);
+    for (int64_t k = 0; k < Nf; ++k) {
+        double Hr, Hi;
+        bode_ss_at_freq_(A, B, C, D, w->data[k], &Hr, &Hi);
+        phase->data[k] = atan2(Hi, Hr) * 180.0 / M_PI;
+    }
+    return phase;
+}
+
+/*-------------------------------------------------------------------------
+ * Discrete algebraic Riccati equation.
+ *
+ *   X = dare(Ad, Bd, Q, R)  solves
+ *       Ad' X Ad - X - Ad' X Bd (R + Bd' X Bd)^{-1} Bd' X Ad + Q = 0
+ *   for the unique stabilising solution.
+ *
+ * Algorithm: Newton-Kleinman iteration from K_0 = 0 (so X_0 starts as the
+ * dlyap solution of (Ad', Q), the open-loop output covariance). At each
+ * step compute  K_k = (R + Bd' X_k Bd)^{-1} Bd' X_k Ad,
+ *               A_cl = Ad - Bd K_k,
+ *               X_{k+1} = dlyap(A_cl', Q + K_k' R K_k).
+ * Newton iterations preserve the closed-loop stability property
+ * (Hewer 1971), so once K_0 stabilises, the iteration converges
+ * quadratically to the unique stabilising solution.
+ *
+ * Limitation: K_0 = 0 stabilises only when Ad is already Schur-stable
+ * (eigenvalues inside the unit disk). For unstable Ad the user must
+ * pre-stabilise (e.g. via continuous-time lqr on the pre-discretised
+ * plant). Returns empty 0x0 if the iteration diverges.
+ *
+ * Tier 1.5 follow-on. See docs/control_toolbox_roadmap.md §2.5. The
+ * direct symplectic-pencil approach via QZ is the textbook large-scale
+ * algorithm; deferred until QZ is shipped.
+ *-------------------------------------------------------------------------*/
+/* Forward declarations: matlab_add_mm is defined via the BINARY_MM
+ * macro (void* signature for complex/real polymorphism); matlab_neg_m
+ * is defined via UNARY_M further down. */
+matlab_mat *matlab_add_mm(void *A, void *B);
+matlab_mat *matlab_neg_m(matlab_mat *A);
+
+matlab_mat *matlab_dare(matlab_mat *Ad, matlab_mat *Bd,
+                        matlab_mat *Q, matlab_mat *R) {
+    if (!Ad || !Bd || !Q || !R) return mat_alloc(0, 0);
+    int64_t n = Ad->rows;
+    int64_t m = Bd->cols;
+    if (Ad->cols != n || Bd->rows != n || Q->rows != n || Q->cols != n ||
+        R->rows != m || R->cols != m) return mat_alloc(0, 0);
+    if (n == 0) return mat_alloc(0, 0);
+
+    /* X_0 is the open-loop output covariance under Q: dlyap(Ad', Q). */
+    matlab_mat *Adt = matlab_transpose(Ad);
+    matlab_mat *X   = matlab_dlyap(Adt, Q);
+    if (!X || X->rows == 0) return mat_alloc(0, 0);
+    matlab_mat *Bdt = matlab_transpose(Bd);
+
+    const int max_iter = 60;
+    const double tol = 1e-12;
+    matlab_mat *Xprev = mat_alloc(n, n);
+    for (int iter = 0; iter < max_iter; ++iter) {
+        /* K = inv(R + Bd' X Bd) * (Bd' X Ad) */
+        matlab_mat *XB    = matlab_matmul_mm(X, Bd);
+        matlab_mat *BtXB  = matlab_matmul_mm(Bdt, XB);
+        matlab_mat *S     = matlab_add_mm(R, BtXB);
+        matlab_mat *Sinv  = matlab_inv(S);
+        if (!Sinv || Sinv->rows == 0) return mat_alloc(0, 0);
+        matlab_mat *XAd   = matlab_matmul_mm(X, Ad);
+        matlab_mat *BtXAd = matlab_matmul_mm(Bdt, XAd);
+        matlab_mat *K     = matlab_matmul_mm(Sinv, BtXAd);
+        /* Acl = Ad - Bd K */
+        matlab_mat *BdK   = matlab_matmul_mm(Bd, K);
+        matlab_mat *negBK = matlab_neg_m(BdK);
+        matlab_mat *Acl   = matlab_add_mm(Ad, negBK);
+        /* Q_aug = Q + K' R K */
+        matlab_mat *Kt    = matlab_transpose(K);
+        matlab_mat *RK    = matlab_matmul_mm(R, K);
+        matlab_mat *KtRK  = matlab_matmul_mm(Kt, RK);
+        matlab_mat *Qaug  = matlab_add_mm(Q, KtRK);
+        /* X_{k+1} = dlyap(Acl', Q_aug). */
+        matlab_mat *Aclt  = matlab_transpose(Acl);
+        matlab_mat *Xnew  = matlab_dlyap(Aclt, Qaug);
+        if (!Xnew || Xnew->rows == 0) return mat_alloc(0, 0);
+        /* Convergence: ||Xnew - X||_F / ||Xnew||_F. */
+        double diff = 0.0, xn = 0.0;
+        for (int64_t i = 0; i < n * n; ++i) {
+            double d = Xnew->data[i] - X->data[i];
+            diff += d * d;
+            xn   += Xnew->data[i] * Xnew->data[i];
+            Xprev->data[i] = X->data[i];
+        }
+        X = Xnew;
+        if (xn > 0.0 && diff <= tol * tol * xn) break;
+    }
+    /* Symmetrise. */
+    for (int64_t i = 0; i < n; ++i)
+        for (int64_t j = i + 1; j < n; ++j) {
+            double s = 0.5 * (X->data[i * n + j] + X->data[j * n + i]);
+            X->data[i * n + j] = s;
+            X->data[j * n + i] = s;
+        }
+    return X;
+}
+
+/* Discrete LQR — wrapper. K = (R + B' X B)^{-1} B' X A. */
+matlab_mat *matlab_dlqr(matlab_mat *Ad, matlab_mat *Bd,
+                        matlab_mat *Q, matlab_mat *R) {
+    matlab_mat *X = matlab_dare(Ad, Bd, Q, R);
+    if (!X || X->rows == 0) return mat_alloc(0, 0);
+    matlab_mat *Bdt   = matlab_transpose(Bd);
+    matlab_mat *XBd   = matlab_matmul_mm(X, Bd);
+    matlab_mat *BtXB  = matlab_matmul_mm(Bdt, XBd);
+    matlab_mat *S     = matlab_add_mm(R, BtXB);
+    matlab_mat *Sinv  = matlab_inv(S);
+    if (!Sinv || Sinv->rows == 0) return mat_alloc(0, 0);
+    matlab_mat *XAd   = matlab_matmul_mm(X, Ad);
+    matlab_mat *BtXAd = matlab_matmul_mm(Bdt, XAd);
+    matlab_mat *K     = matlab_matmul_mm(Sinv, BtXAd);
+    return K;
+}
+
+/*-------------------------------------------------------------------------
+ * Linear-quadratic regulator (continuous LTI).
+ *
+ *   K = lqr(A, B, Q, R)  computes the optimal state-feedback gain
+ *   minimising the cost  J = integral_0^infty (x' Q x + u' R u) dt
+ *   for  xdot = A x + B u. The gain is  K = R^{-1} B' X  where X is
+ *   the unique stabilising solution of the algebraic Riccati equation
+ *      A' X + X A - X B R^{-1} B' X + Q = 0
+ *   (provided by matlab_care; see Tier 1.5).
+ *
+ *   The closed-loop dynamics  Acl = A - B K  are Hurwitz; the closed-
+ *   loop poles are eig(Acl). Returned size: K is m x n where m = B->cols
+ *   (number of inputs).
+ *
+ * Tier 2.4 entry point in the Control System Toolbox roadmap. The
+ * 3-return MATLAB shape `[K, S, e] = lqr(A, B, Q, R)` is a follow-on;
+ * S = X (the Riccati solution) is exactly what care returns and e is
+ * eig(A - B*K), so users can recover them today by calling care + eig
+ * directly. Same applies to lqi/lqry which pre-augment A/Q/R.
+ *-------------------------------------------------------------------------*/
+matlab_mat *matlab_lqr(matlab_mat *A, matlab_mat *B,
+                       matlab_mat *Q, matlab_mat *R) {
+    if (!A || !B || !Q || !R) return mat_alloc(0, 0);
+    /* Solve the Riccati for X. */
+    matlab_mat *X = matlab_care(A, B, Q, R);
+    if (!X || X->rows == 0) return mat_alloc(0, 0);
+    /* K = R^{-1} B' X. */
+    matlab_mat *Bt    = matlab_transpose(B);
+    matlab_mat *BtX   = matlab_matmul_mm(Bt, X);   /* (m x n) */
+    matlab_mat *Rinv  = matlab_inv(R);
+    if (!Rinv || Rinv->rows == 0) return mat_alloc(0, 0);
+    matlab_mat *K     = matlab_matmul_mm(Rinv, BtX); /* (m x n) */
+    return K;
+}
+
+/*-------------------------------------------------------------------------
+ * Balancing similarity transformation (continuous LTI).
+ *
+ *   T = balreal_T(A, B, C)  returns an  n x n  similarity transform
+ *   such that the realization (A_b, B_b, C_b) = (T^{-1} A T, T^{-1} B,
+ *   C T) is internally balanced — i.e. its controllability and
+ *   observability gramians are equal and diagonal, with diagonal
+ *   entries equal to the Hankel singular values (sorted descending).
+ *
+ *   Algorithm (Laub 1980, eigendecomposition variant — no Cholesky):
+ *     Wc = gram_c(A, B), Wo = gram_o(A, C)
+ *     Wc symmetric PSD → eig_sym(Wc) gives  Wc = V_c D_c V_c'
+ *     Symmetric square root  X = V_c sqrt(D_c) V_c'  (X² = Wc)
+ *     M = X' Wo X = X Wo X (X symmetric); also sym PSD.
+ *     M = U S² U' (sym eig); then T = X U S^{-1/2}.
+ *   After this T, Wc_new = Wo_new = S = diag(HSVs) (descending).
+ *
+ *   Requires A Hurwitz so the gramians are bounded; returns 0x0 if
+ *   the gramian solves fail.
+ *
+ *   Tier-4 of CST roadmap (model reduction). The full
+ *   `[Ab, Bb, Cb, hsv] = balreal(A, B, C)` 4-return shape is a
+ *   follow-on; users assemble the balanced realization today via
+ *      T = balreal_T(A, B, C); Ti = inv(T);
+ *      Ab = Ti * A * T; Bb = Ti * B; Cb = C * T;
+ *-------------------------------------------------------------------------*/
+matlab_mat *matlab_balreal_T(matlab_mat *A, matlab_mat *B, matlab_mat *C) {
+    if (!A || !B || !C) return mat_alloc(0, 0);
+    int64_t n = A->rows;
+    if (n == 0 || A->cols != n) return mat_alloc(0, 0);
+
+    matlab_mat *Wc = matlab_gram_c(A, B);
+    if (!Wc || Wc->rows == 0) return mat_alloc(0, 0);
+    matlab_mat *Wo = matlab_gram_o(A, C);
+    if (!Wo || Wo->rows == 0) return mat_alloc(0, 0);
+
+    /* Symmetric square root  X = V_c sqrt(D_c) V_c'. */
+    matlab_mat *Vc = matlab_eig_V(Wc);
+    matlab_mat *Dc = matlab_eig_D(Wc);
+    matlab_mat *Vct = matlab_transpose(Vc);
+    /* sqrt(D_c) acting on each column of V_c — easiest via element-wise
+     * scaling: VD[i, j] = V_c[i, j] * sqrt(D_c[j, j]). */
+    matlab_mat *VD = mat_alloc(n, n);
+    for (int64_t i = 0; i < n; ++i) {
+        for (int64_t j = 0; j < n; ++j) {
+            double d = Dc->data[j * n + j];
+            double s = d > 0.0 ? sqrt(d) : 0.0;
+            VD->data[i * n + j] = Vc->data[i * n + j] * s;
+        }
+    }
+    matlab_mat *X = matlab_matmul_mm(VD, Vct);  /* X = V_c sqrt(D_c) V_c' */
+
+    /* M = X Wo X (X symmetric). */
+    matlab_mat *XWo = matlab_matmul_mm(X, Wo);
+    matlab_mat *M   = matlab_matmul_mm(XWo, X);
+
+    /* Symmetric eig: M = U S² U'. */
+    matlab_mat *U  = matlab_eig_V(M);
+    matlab_mat *S2 = matlab_eig_D(M);
+    /* Extract sigma_j = sqrt(S²_jj). Note eig_D returns ascending — we
+     * want descending (largest HSV first), so build a permutation that
+     * reverses the column order. */
+    std::vector<double> sigma(n);
+    for (int64_t j = 0; j < n; ++j) {
+        double s = S2->data[j * n + j];
+        sigma[j] = s > 0.0 ? sqrt(s) : 0.0;
+    }
+    /* Reorder U columns and sigma entries to descending sigma. */
+    std::vector<int64_t> perm(n);
+    for (int64_t j = 0; j < n; ++j) perm[j] = n - 1 - j;
+    matlab_mat *Uord = mat_alloc(n, n);
+    std::vector<double> sigma_ord(n);
+    for (int64_t j = 0; j < n; ++j) {
+        sigma_ord[j] = sigma[perm[j]];
+        for (int64_t i = 0; i < n; ++i)
+            Uord->data[i * n + j] = U->data[i * n + perm[j]];
+    }
+
+    /* T = X * U_ord * diag(sigma_ord^{-1/2}). Apply the column scale
+     * after the matmul. */
+    matlab_mat *XU = matlab_matmul_mm(X, Uord);
+    matlab_mat *T  = mat_alloc(n, n);
+    for (int64_t i = 0; i < n; ++i) {
+        for (int64_t j = 0; j < n; ++j) {
+            double s = sigma_ord[j];
+            double sc = s > 0.0 ? 1.0 / sqrt(s) : 0.0;
+            T->data[i * n + j] = XU->data[i * n + j] * sc;
+        }
+    }
+    return T;
+}
+
+/*-------------------------------------------------------------------------
+ * Balanced truncation — k-state model reduction.
+ *
+ *   balred_A(A, B, C, k)  returns the k×k upper-left block of the
+ *   balanced realization. balred_B / balred_C return the corresponding
+ *   first-k rows / columns of the balanced B / C.
+ *
+ *   Algorithm: build the full balanced (A_b, B_b, C_b) via balreal_T,
+ *   then keep only the first k rows / columns / both. The dropped
+ *   states correspond to the smallest Hankel singular values; the
+ *   H∞ error bound is  ||G − G_k||_∞ ≤ 2 · sum(HSV[k+1:n]).
+ *
+ *   Each entry rebuilds the full balanced realization internally —
+ *   for typical CST plants (n = 2..10) this is fine; if the redundancy
+ *   matters in practice we can stash the balanced realization in a
+ *   thread-local cache later. Tier-4 of the CST roadmap.
+ *
+ *   The MATLAB-faithful  [Ar, Br, Cr] = balred(A, B, C, k)  3-return
+ *   shape is a follow-on (3-return splitter mirroring the c2d / bode
+ *   precedent).
+ *-------------------------------------------------------------------------*/
+static matlab_mat *balred_full_(matlab_mat *A, matlab_mat *B, matlab_mat *C,
+                                matlab_mat **out_Bb, matlab_mat **out_Cb) {
+    matlab_mat *T = matlab_balreal_T(A, B, C);
+    if (!T || T->rows == 0) return NULL;
+    matlab_mat *Ti = matlab_inv(T);
+    if (!Ti || Ti->rows == 0) return NULL;
+    matlab_mat *TiA = matlab_matmul_mm(Ti, A);
+    matlab_mat *Ab  = matlab_matmul_mm(TiA, T);
+    if (out_Bb) *out_Bb = matlab_matmul_mm(Ti, B);
+    if (out_Cb) *out_Cb = matlab_matmul_mm(C, T);
+    return Ab;
+}
+
+matlab_mat *matlab_balred_A(matlab_mat *A, matlab_mat *B, matlab_mat *C,
+                            double kd) {
+    if (!A || !B || !C) return mat_alloc(0, 0);
+    int64_t n = A->rows;
+    int64_t k = (int64_t)kd;
+    if (k <= 0 || k > n) return mat_alloc(0, 0);
+    matlab_mat *Ab = balred_full_(A, B, C, NULL, NULL);
+    if (!Ab) return mat_alloc(0, 0);
+    matlab_mat *Ar = mat_alloc(k, k);
+    for (int64_t i = 0; i < k; ++i)
+        for (int64_t j = 0; j < k; ++j)
+            Ar->data[i * k + j] = Ab->data[i * n + j];
+    return Ar;
+}
+
+matlab_mat *matlab_balred_B(matlab_mat *A, matlab_mat *B, matlab_mat *C,
+                            double kd) {
+    if (!A || !B || !C) return mat_alloc(0, 0);
+    int64_t n = A->rows;
+    int64_t k = (int64_t)kd;
+    if (k <= 0 || k > n) return mat_alloc(0, 0);
+    matlab_mat *Bb = NULL;
+    (void)balred_full_(A, B, C, &Bb, NULL);
+    if (!Bb) return mat_alloc(0, 0);
+    int64_t m = Bb->cols;
+    matlab_mat *Br = mat_alloc(k, m);
+    for (int64_t i = 0; i < k; ++i)
+        for (int64_t j = 0; j < m; ++j)
+            Br->data[i * m + j] = Bb->data[i * m + j];
+    return Br;
+}
+
+matlab_mat *matlab_balred_C(matlab_mat *A, matlab_mat *B, matlab_mat *C,
+                            double kd) {
+    if (!A || !B || !C) return mat_alloc(0, 0);
+    int64_t n = A->rows;
+    int64_t k = (int64_t)kd;
+    if (k <= 0 || k > n) return mat_alloc(0, 0);
+    matlab_mat *Cb = NULL;
+    (void)balred_full_(A, B, C, NULL, &Cb);
+    if (!Cb) return mat_alloc(0, 0);
+    int64_t p = Cb->rows;
+    matlab_mat *Cr = mat_alloc(p, k);
+    for (int64_t i = 0; i < p; ++i)
+        for (int64_t j = 0; j < k; ++j)
+            Cr->data[i * k + j] = Cb->data[i * n + j];
+    return Cr;
+}
+
+/* Forward decl: matlab_isstable is defined just below. */
+double matlab_isstable(matlab_mat *A);
+
+/*-------------------------------------------------------------------------
+ * Continuous-time Kalman filter — steady-state gain.
+ *
+ *   L = kalman_L(A, G, C, Qn, Rn)  for the plant
+ *      xdot = A x + G w,  y = C x + v
+ *      cov(w) = Qn,       cov(v) = Rn
+ *   solves the dual ARE  A·P + P·A' − P·C'·Rn⁻¹·C·P + G·Qn·G' = 0
+ *   for the unique stabilising P, then returns L = P · C' · Rn⁻¹.
+ *
+ *   The estimator dynamics  xdot_hat = (A − L·C) x_hat + L y  are
+ *   Hurwitz; eig(A − L·C) are the estimator poles.
+ *
+ *   Implementation exploits the LQR/Kalman duality: the LQR gain on
+ *   the dual system (A', C', G·Qn·G', Rn) is K_dual = Rn⁻¹ C P, so
+ *   the Kalman gain is L = (K_dual)' = P C' Rn⁻¹. We just transpose
+ *   `lqr(A', C', GQG', Rn)`.
+ *
+ *   The MATLAB-faithful 4-return shape `[kest, L, P] = kalman(sys, Qn,
+ *   Rn)` (estimator state-space + gain + Riccati) is a follow-on once
+ *   we have model objects.  Tier 4.2 of the CST roadmap.
+ *-------------------------------------------------------------------------*/
+matlab_mat *matlab_kalman_L(matlab_mat *A, matlab_mat *G, matlab_mat *C,
+                            matlab_mat *Qn, matlab_mat *Rn) {
+    if (!A || !G || !C || !Qn || !Rn) return mat_alloc(0, 0);
+    int64_t n = A->rows;
+    if (n == 0 || A->cols != n) return mat_alloc(0, 0);
+    if (G->rows != n) return mat_alloc(0, 0);
+    int64_t q = G->cols;
+    int64_t p = C->rows;
+    if (C->cols != n) return mat_alloc(0, 0);
+    if (Qn->rows != q || Qn->cols != q) return mat_alloc(0, 0);
+    if (Rn->rows != p || Rn->cols != p) return mat_alloc(0, 0);
+    /* GQG' = effective process-noise covariance projected onto state space. */
+    matlab_mat *Gt = matlab_transpose(G);
+    matlab_mat *GQ = matlab_matmul_mm(G, Qn);
+    matlab_mat *GQGt = matlab_matmul_mm(GQ, Gt);
+    /* K_dual = lqr(A', C', GQG', Rn). */
+    matlab_mat *At = matlab_transpose(A);
+    matlab_mat *Ct = matlab_transpose(C);
+    matlab_mat *Kdual = matlab_lqr(At, Ct, GQGt, Rn);
+    if (!Kdual || Kdual->rows == 0) return mat_alloc(0, 0);
+    /* L = K_dual'. */
+    return matlab_transpose(Kdual);
+}
+
+/*-------------------------------------------------------------------------
+ * Discrete-time Kalman filter — steady-state gain.
+ *
+ *   L = kalmd_L(Ad, G, C, Qn, Rn)  for the discrete plant
+ *      x[k+1] = Ad x[k] + G w[k],  y[k] = C x[k] + v[k]
+ *   solves the discrete dual ARE for the steady-state covariance P
+ *   and returns L = P·C'·(C·P·C' + Rn)⁻¹ (the standard discrete
+ *   Kalman gain). Implementation: L' = dlqr(Ad', C', G·Qn·G', Rn).
+ *
+ *   Limitation inherited from `dare`: requires Ad Schur-stable so
+ *   the Newton-Kleinman seeding works.
+ *-------------------------------------------------------------------------*/
+matlab_mat *matlab_kalmd_L(matlab_mat *Ad, matlab_mat *G, matlab_mat *C,
+                           matlab_mat *Qn, matlab_mat *Rn) {
+    if (!Ad || !G || !C || !Qn || !Rn) return mat_alloc(0, 0);
+    int64_t n = Ad->rows;
+    if (n == 0 || Ad->cols != n) return mat_alloc(0, 0);
+    int64_t q = G->cols;
+    int64_t p = C->rows;
+    if (G->rows != n || C->cols != n) return mat_alloc(0, 0);
+    if (Qn->rows != q || Qn->cols != q) return mat_alloc(0, 0);
+    if (Rn->rows != p || Rn->cols != p) return mat_alloc(0, 0);
+    matlab_mat *Gt = matlab_transpose(G);
+    matlab_mat *GQ = matlab_matmul_mm(G, Qn);
+    matlab_mat *GQGt = matlab_matmul_mm(GQ, Gt);
+    matlab_mat *At = matlab_transpose(Ad);
+    matlab_mat *Ct = matlab_transpose(C);
+    matlab_mat *Kdual = matlab_dlqr(At, Ct, GQGt, Rn);
+    if (!Kdual || Kdual->rows == 0) return mat_alloc(0, 0);
+    return matlab_transpose(Kdual);
+}
+
+/*-------------------------------------------------------------------------
+ * State-space DC gain (continuous LTI).
+ *
+ *   dcgain_ss(A, B, C, D) = lim_{s→0} G(s) = D − C · A⁻¹ · B
+ *
+ * Returns a  p × m  matrix (one entry per output / input pair). For
+ * SISO plants the result is 1 × 1.
+ *
+ * If A is singular (e.g. an integrator pole at the origin), the DC
+ * gain is unbounded — matlab_inv signals this by returning a 0 × 0
+ * matrix, which we propagate. Users should check `numel(out) > 0`.
+ *
+ * Tier-3 of CST roadmap. The MATLAB-faithful `dcgain(sys)` and
+ * `dcgain(num, den)` forms are follow-ons (need model objects /
+ * polynomial form respectively); the matrix-arg form is the canonical
+ * positional API.
+ *-------------------------------------------------------------------------*/
+matlab_mat *matlab_dcgain_ss(matlab_mat *A, matlab_mat *B,
+                             matlab_mat *C, matlab_mat *D) {
+    if (!A || !B || !C || !D) return mat_alloc(0, 0);
+    int64_t n = A->rows;
+    if (n == 0 || A->cols != n || B->rows != n || C->cols != n)
+        return mat_alloc(0, 0);
+    int64_t m = B->cols;
+    int64_t p = C->rows;
+    if (D->rows != p || D->cols != m) return mat_alloc(0, 0);
+    matlab_mat *Ainv = matlab_inv(A);
+    if (!Ainv || Ainv->rows == 0) return mat_alloc(0, 0);  /* A singular */
+    matlab_mat *AinvB = matlab_matmul_mm(Ainv, B);    /* n × m */
+    matlab_mat *CAinvB = matlab_matmul_mm(C, AinvB);  /* p × m */
+    matlab_mat *out = mat_alloc(p, m);
+    for (int64_t i = 0; i < p; ++i)
+        for (int64_t j = 0; j < m; ++j)
+            out->data[i * m + j] = D->data[i * m + j] - CAinvB->data[i * m + j];
+    return out;
+}
+
+/*-------------------------------------------------------------------------
+ * H₂ system norm (continuous LTI, strictly proper).
+ *
+ *   norm_h2(A, B, C) = sqrt(trace(C · Wc · C'))
+ *                    = sqrt(trace(B' · Wo · B))
+ * where  Wc = gram_c(A, B) = lyap(A, B B'),
+ *        Wo = gram_o(A, C) = lyap(A', C' C).
+ *
+ * The two formulas are equal — they're the integral of the impulse
+ * response squared, which is the same quantity reached from either
+ * gramian. We use the C·Wc·C' form (one Lyapunov solve plus a small
+ * trace).
+ *
+ * Returns +Inf if A is not Hurwitz (gramian unbounded). Strictly-
+ * proper assumption: when D ≠ 0, the H₂ norm is +Inf for continuous
+ * systems (impulse response has a Dirac, integral is infinite). The
+ * shipped form ignores D since it's typically 0 in CST workflows; a
+ * `norm_h2_d` discrete variant is a follow-on.
+ *
+ * Tier-3 of CST roadmap. Sits cleanly on Tier-1.4 lyap.
+ *-------------------------------------------------------------------------*/
+double matlab_norm_h2(matlab_mat *A, matlab_mat *B, matlab_mat *C) {
+    if (!A || !B || !C) return INFINITY;
+    int64_t n = A->rows;
+    if (n == 0 || A->cols != n || B->rows != n || C->cols != n)
+        return INFINITY;
+    /* Stability check: A must be Hurwitz, otherwise the gramian
+     * doesn't exist (Lyapunov solve is ill-conditioned and the H₂
+     * norm is unbounded). */
+    if (matlab_isstable(A) == 0.0) return INFINITY;
+    matlab_mat *Wc = matlab_gram_c(A, B);
+    if (!Wc || Wc->rows == 0) return INFINITY;
+    matlab_mat *Ct = matlab_transpose(C);
+    matlab_mat *WCt = matlab_matmul_mm(Wc, Ct);     /* n x p */
+    matlab_mat *CWCt = matlab_matmul_mm(C, WCt);    /* p x p */
+    int64_t p = CWCt->rows;
+    double tr = 0.0;
+    for (int64_t i = 0; i < p; ++i) tr += CWCt->data[i * p + i];
+    return tr > 0.0 ? sqrt(tr) : 0.0;
+}
+
+/*-------------------------------------------------------------------------
+ * Stability test (continuous): isstable(A) returns 1.0 if every
+ * eigenvalue of A has strictly negative real part (Hurwitz), else 0.0.
+ * Polymorphic over real/complex eig output.
+ *-------------------------------------------------------------------------*/
+/* Forward declarations: real/imag part extractors live in
+ * runtime_complex.cpp; the matlab_runtime.cpp translation unit doesn't
+ * include matlab_runtime.h, so declare them locally. */
+matlab_mat *matlab_real_c(void *A);
+matlab_mat *matlab_imag_c(void *A);
+
+double matlab_isstable(matlab_mat *A) {
+    if (!A || A->rows == 0 || A->cols != A->rows) return 0.0;
+    matlab_mat *e = matlab_eig(A);
+    matlab_mat *Re = matlab_real_c(e);   /* zeros if e is real */
+    int64_t n = Re->rows * Re->cols;
+    for (int64_t i = 0; i < n; ++i) {
+        if (Re->data[i] >= 0.0) return 0.0;
+    }
+    return 1.0;
+}
+
+/*-------------------------------------------------------------------------
+ * Damping ratios + natural frequencies (continuous).
+ *
+ *   damp(A) returns an n x 2 matrix where row k is [wn_k, zeta_k] for
+ *   eigenvalue lambda_k of A:
+ *     wn   = |lambda|
+ *     zeta = -real(lambda) / |lambda|   (so zeta = 1 for purely real
+ *                                        Hurwitz poles, 0 for purely imaginary).
+ *
+ *   MATLAB's full `damp(sys)` returns four columns [pole, damping,
+ *   freq, time-const]; here we ship the canonical two-column form
+ *   that's what most workflows actually use. The full shape is a
+ *   follow-on once we have model objects + multi-return splitters
+ *   for the 4-tuple.
+ *-------------------------------------------------------------------------*/
+matlab_mat *matlab_damp(matlab_mat *A) {
+    if (!A || A->rows == 0 || A->cols != A->rows) return mat_alloc(0, 0);
+    matlab_mat *e = matlab_eig(A);
+    matlab_mat *Re = matlab_real_c(e);
+    matlab_mat *Im = matlab_imag_c(e);
+    int64_t n = Re->rows * Re->cols;
+    matlab_mat *out = mat_alloc(n, 2);
+    for (int64_t i = 0; i < n; ++i) {
+        double re = Re->data[i], im = Im->data[i];
+        double wn = sqrt(re * re + im * im);
+        double zeta = wn > 0.0 ? -re / wn : 0.0;
+        out->data[i * 2 + 0] = wn;
+        out->data[i * 2 + 1] = zeta;
+    }
+    return out;
+}
+
+/*-------------------------------------------------------------------------
+ * Hankel singular values.
+ *
+ *   hsvd(A, B, C) returns sqrt(eig(Wc * Wo)) sorted descending, where
+ *      Wc = gram_c(A, B) = lyap(A, B B')
+ *      Wo = gram_o(A, C) = lyap(A', C' C)
+ *
+ *   The Hankel singular values are similarity-invariant — they are
+ *   intrinsic input-output invariants of the system. Small HSVs
+ *   indicate states that contribute little to the I/O map and are the
+ *   diagnostic for balanced model reduction (`balred`/`balreal`).
+ *
+ *   Continuous LTI; discrete uses dlyap. Requires A Hurwitz so the
+ *   gramians are bounded. Returns 0x0 if the gramians fail.
+ *-------------------------------------------------------------------------*/
+matlab_mat *matlab_hsvd(matlab_mat *A, matlab_mat *B, matlab_mat *C) {
+    if (!A || !B || !C) return mat_alloc(0, 0);
+    matlab_mat *Wc = matlab_gram_c(A, B);
+    if (!Wc || Wc->rows == 0) return mat_alloc(0, 0);
+    matlab_mat *Wo = matlab_gram_o(A, C);
+    if (!Wo || Wo->rows == 0) return mat_alloc(0, 0);
+    matlab_mat *WW = matlab_matmul_mm(Wc, Wo);  /* n x n */
+    matlab_mat *e  = matlab_eig(WW);
+    matlab_mat *Re = matlab_real_c(e);
+    int64_t n = Re->rows * Re->cols;
+    matlab_mat *out = mat_alloc(n, 1);
+    for (int64_t i = 0; i < n; ++i) {
+        double v = Re->data[i];
+        out->data[i] = v > 0.0 ? sqrt(v) : 0.0;
+    }
+    /* Sort descending — MATLAB convention (largest HSV first). */
+    for (int64_t i = 0; i < n; ++i)
+        for (int64_t j = i + 1; j < n; ++j)
+            if (out->data[i] < out->data[j]) {
+                double t = out->data[i]; out->data[i] = out->data[j]; out->data[j] = t;
+            }
+    return out;
+}
+
+/*-------------------------------------------------------------------------
+ * Controllability matrix.  Co = ctrb(A, B) = [B, A B, A^2 B, ..., A^{n-1} B].
+ * The pair (A, B) is controllable iff rank(Co) = n. This is the
+ * structural-rank companion to the energy-based gramian gram_c.
+ * Returns an  n x (n*m)  matrix.
+ *-------------------------------------------------------------------------*/
+matlab_mat *matlab_ctrb(matlab_mat *A, matlab_mat *B) {
+    if (!A || !B) return mat_alloc(0, 0);
+    int64_t n = A->rows;
+    if (A->cols != n || B->rows != n) return mat_alloc(0, 0);
+    int64_t m = B->cols;
+    if (n == 0 || m == 0) return mat_alloc(0, 0);
+    matlab_mat *Co = mat_alloc(n, n * m);
+    /* Block 0 = B. */
+    for (int64_t i = 0; i < n; ++i)
+        for (int64_t j = 0; j < m; ++j)
+            Co->data[i * (n * m) + j] = B->data[i * m + j];
+    /* Block k = A^k B = A * (block k-1). */
+    matlab_mat *prev = B;
+    for (int64_t k = 1; k < n; ++k) {
+        matlab_mat *next = matlab_matmul_mm(A, prev);  /* n x m */
+        for (int64_t i = 0; i < n; ++i)
+            for (int64_t j = 0; j < m; ++j)
+                Co->data[i * (n * m) + (k * m + j)] = next->data[i * m + j];
+        prev = next;
+    }
+    return Co;
+}
+
+/*-------------------------------------------------------------------------
+ * Observability matrix.  Ob = obsv(A, C) = [C; C A; C A^2; ...; C A^{n-1}].
+ * The pair (A, C) is observable iff rank(Ob) = n. Structural-rank
+ * companion to the energy-based gramian gram_o.
+ * Returns a  (p*n) x n  matrix.
+ *-------------------------------------------------------------------------*/
+matlab_mat *matlab_obsv(matlab_mat *A, matlab_mat *C) {
+    if (!A || !C) return mat_alloc(0, 0);
+    int64_t n = A->rows;
+    if (A->cols != n || C->cols != n) return mat_alloc(0, 0);
+    int64_t p = C->rows;
+    if (n == 0 || p == 0) return mat_alloc(0, 0);
+    matlab_mat *Ob = mat_alloc(p * n, n);
+    /* Row-block 0 = C. */
+    for (int64_t i = 0; i < p; ++i)
+        for (int64_t j = 0; j < n; ++j)
+            Ob->data[i * n + j] = C->data[i * n + j];
+    /* Block k = C A^k = (block k-1) * A. */
+    matlab_mat *prev = C;
+    for (int64_t k = 1; k < n; ++k) {
+        matlab_mat *next = matlab_matmul_mm(prev, A);  /* p x n */
+        for (int64_t i = 0; i < p; ++i)
+            for (int64_t j = 0; j < n; ++j)
+                Ob->data[(k * p + i) * n + j] = next->data[i * n + j];
+        prev = next;
+    }
+    return Ob;
+}
+
+/*-------------------------------------------------------------------------
+ * Pole placement (SISO) — Ackermann's formula.
+ *
+ *   K = place(A, B, P)  for SISO single-input plant places the closed-
+ *   loop poles  eig(A - B K)  at the locations P (a length-n vector,
+ *   real or complex). The Ackermann formula for SISO is
+ *      K = [0 0 ... 0 1] * inv(ctrb(A, B)) * alpha(A)
+ *   where  alpha(s) = prod_i (s - p_i) = s^n + a_{n-1} s^{n-1} + ... + a_0
+ *   is the desired closed-loop characteristic polynomial.
+ *
+ *   alpha(A) is built by Horner on A: M = I; M = M*A + a_k I  (descending
+ *   in coefficient index), with the leading 1 starting M off as I.
+ *
+ *   For complex P with conjugate pairs the resulting alpha has real
+ *   coefficients, so K comes back real. We accept either real or
+ *   matlab_mat_c P input by reading real/imag halves.
+ *
+ *   Multi-input place uses the Kautsky-Nichols-Van Dooren algorithm
+ *   (extra degrees of freedom for orthogonal-eigenvector conditioning);
+ *   deferred. SISO Ackermann is widely-used pedagogically and matches
+ *   MATLAB's `acker(A, B, P)`.
+ *-------------------------------------------------------------------------*/
+matlab_mat *matlab_place(matlab_mat *A, matlab_mat *B, void *P_in) {
+    if (!A || !B || !P_in) return mat_alloc(0, 0);
+    int64_t n = A->rows;
+    if (A->cols != n || B->rows != n || B->cols != 1) return mat_alloc(0, 0);
+    /* Read P into real + imag arrays of length n. */
+    int64_t pn = 0;
+    std::vector<double> pr(n, 0.0), pi(n, 0.0);
+    if (mat_is_complex(P_in)) {
+        matlab_mat_c *Pc = (matlab_mat_c *)P_in;
+        pn = Pc->rows * Pc->cols;
+        if (pn != n) return mat_alloc(0, 0);
+        for (int64_t i = 0; i < n; ++i) { pr[i] = Pc->re[i]; pi[i] = Pc->im[i]; }
+    } else {
+        matlab_mat *Pr = (matlab_mat *)P_in;
+        pn = Pr->rows * Pr->cols;
+        if (pn != n) return mat_alloc(0, 0);
+        for (int64_t i = 0; i < n; ++i) { pr[i] = Pr->data[i]; pi[i] = 0.0; }
+    }
+    /* Build alpha(s) = prod (s - p_i) by complex multiplication. coef[k]
+     * is the s^k coefficient (real part — imag must collapse to zero for
+     * a valid set of conjugate-paired roots). Length n+1. */
+    std::vector<double> ar(n + 1, 0.0), ai(n + 1, 0.0);
+    ar[0] = 1.0;  /* polynomial = 1 (constant) initially */
+    int64_t deg = 0;
+    for (int64_t k = 0; k < n; ++k) {
+        /* Multiply current polynomial by (s - p_k). */
+        std::vector<double> nr(deg + 2, 0.0), ni(deg + 2, 0.0);
+        /* nr/ni[j+1] += ar/ai[j]  (the s * poly part) */
+        for (int64_t j = 0; j <= deg; ++j) {
+            nr[j + 1] += ar[j];
+            ni[j + 1] += ai[j];
+            /* Subtract p_k * coef: (re + i*im) * (pr + i*pi). */
+            double cr = ar[j], ci = ai[j];
+            double mr = cr * pr[k] - ci * pi[k];
+            double mi = cr * pi[k] + ci * pr[k];
+            nr[j] -= mr;
+            ni[j] -= mi;
+        }
+        for (int64_t j = 0; j <= deg + 1; ++j) { ar[j] = nr[j]; ai[j] = ni[j]; }
+        deg += 1;
+    }
+    /* alpha(A) via Horner on A.  M starts at coef of s^n times I (= 1*I);
+     * for k = n-1 down to 0:  M = M*A + ar[k] * I. */
+    matlab_mat *M = mat_alloc(n, n);
+    for (int64_t i = 0; i < n; ++i) M->data[i * n + i] = 1.0;
+    for (int64_t k = n - 1; k >= 0; --k) {
+        matlab_mat *MA = matlab_matmul_mm(M, A);
+        matlab_mat *N  = mat_alloc(n, n);
+        double a_k = ar[k];
+        for (int64_t i = 0; i < n; ++i) {
+            for (int64_t j = 0; j < n; ++j) {
+                double v = MA->data[i * n + j];
+                if (i == j) v += a_k;
+                N->data[i * n + j] = v;
+            }
+        }
+        M = N;
+    }
+    /* Build ctrb(A, B), invert it. */
+    matlab_mat *Co = matlab_ctrb(A, B);  /* n x n for SISO */
+    if (!Co || Co->rows != n || Co->cols != n) return mat_alloc(0, 0);
+    matlab_mat *Coinv = matlab_inv(Co);
+    if (!Coinv || Coinv->rows == 0) return mat_alloc(0, 0);
+    /* K = e_n^T * Coinv * M  where  e_n^T = [0 ... 0 1]. So K is the
+     * last row of  Coinv * M  (1 x n). */
+    matlab_mat *CinvM = matlab_matmul_mm(Coinv, M);  /* n x n */
+    matlab_mat *K = mat_alloc(1, n);
+    for (int64_t j = 0; j < n; ++j)
+        K->data[j] = CinvM->data[(n - 1) * n + j];
+    return K;
 }
 
 /*---------- Element-wise arithmetic --------------------------------------*/

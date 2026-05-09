@@ -44,6 +44,43 @@ void *matlab_neg_m(void *A);
 void *matlab_reshape(void *A, double m, double n);
 void *matlab_repmat(void *A, double m, double n);
 void *matlab_matpow(void *A, double n);
+void *matlab_expm(void *A);
+void *matlab_hess(void *A);
+void *matlab_schur(void *A);
+void *matlab_schur_T(void *A);
+void *matlab_schur_U(void *A);
+void *matlab_lyap(void *A, void *Q);
+void *matlab_dlyap(void *A, void *Q);
+void *matlab_care(void *A, void *B, void *Q, void *R);
+void *matlab_lqr (void *A, void *B, void *Q, void *R);
+void *matlab_dare(void *Ad, void *Bd, void *Q, void *R);
+void *matlab_dlqr(void *Ad, void *Bd, void *Q, void *R);
+void *matlab_ctrb(void *A, void *B);
+void *matlab_obsv(void *A, void *C);
+void *matlab_place(void *A, void *B, void *P);
+double matlab_isstable(void *A);
+void *matlab_damp(void *A);
+void *matlab_hsvd(void *A, void *B, void *C);
+void *matlab_balreal_T(void *A, void *B, void *C);
+double matlab_norm_h2(void *A, void *B, void *C);
+void *matlab_dcgain_ss(void *A, void *B, void *C, void *D);
+void *matlab_kalman_L(void *A, void *G, void *C, void *Qn, void *Rn);
+void *matlab_kalmd_L(void *Ad, void *G, void *C, void *Qn, void *Rn);
+void *matlab_balred_A(void *A, void *B, void *C, double k);
+void *matlab_balred_B(void *A, void *B, void *C, double k);
+void *matlab_balred_C(void *A, void *B, void *C, double k);
+void *matlab_c2d_Ad(void *A, void *B, double Ts);
+void *matlab_c2d_Bd(void *A, void *B, double Ts);
+void *matlab_gram_c(void *A, void *B);
+void *matlab_gram_o(void *A, void *C);
+void *matlab_step_ss(void *A, void *B, void *C, void *D, double dt, double N);
+void *matlab_bode_ss_mag  (void *A, void *B, void *C, void *D, void *w);
+void *matlab_bode_ss_phase(void *A, void *B, void *C, void *D, void *w);
+void  *matlab_lsim_ss     (void *A, void *B, void *C, void *D, void *u, double dt);
+double matlab_gain_margin (void *A, void *B, void *C, void *D, void *w);
+double matlab_phase_margin(void *A, void *B, void *C, void *D, void *w);
+void *matlab_bode_tf_mag  (void *b, void *a, void *w);
+void *matlab_bode_tf_phase(void *b, void *a, void *w);
 void *matlab_sum(void *A);
 void *matlab_prod(void *A);
 void *matlab_mean(void *A);
@@ -102,6 +139,11 @@ public:
   Matrix reshape(double m, double n) const { return matlab_reshape(p_, m, n); }
   Matrix repmat(double m, double n) const { return matlab_repmat(p_, m, n); }
   Matrix pow(double n) const { return matlab_matpow(p_, n); }
+  Matrix expm() const { return matlab_expm(p_); }
+  Matrix hess() const { return matlab_hess(p_); }
+  Matrix schur() const { return matlab_schur(p_); }
+  Matrix schurT() const { return matlab_schur_T(p_); }
+  Matrix schurU() const { return matlab_schur_U(p_); }
   Matrix operator-() const { return matlab_neg_m(p_); }
 
   Matrix sum() const { return matlab_sum(p_); }

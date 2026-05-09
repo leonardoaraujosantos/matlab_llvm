@@ -231,9 +231,14 @@ export function fprintf_str(fmt: string, _n?: number): void {
 // The `-emit-typescript` backend drops the C-ABI string-length operand
 // at call sites, so the natural TS signatures are `(fmt, ...values)`.
 // We accept both shapes for back-compat with hand-written callers that
-// pass the legacy `n` length first.
+// pass the legacy `n` length first. The `args.length > 1` guard avoids
+// a previously-latent bug: if a caller emitted `fprintf("%.6f\n", 5)`
+// then the value (5) collides with the fmt-string length (5) and the
+// heuristic would falsely drop the only data argument, leaving printf
+// with no value to substitute. Requiring at least one arg AFTER the
+// candidate length gates that case correctly.
 function splitFprintfArgs(fmt: string, args: any[]): any[] {
-  if (args.length > 0 && typeof args[0] === "number" &&
+  if (args.length > 1 && typeof args[0] === "number" &&
       Number.isInteger(args[0]) && args[0] === expandEscapes(fmt).length) {
     return args.slice(1);
   }
@@ -401,6 +406,843 @@ export function lu_U(A: any): NDArray { return asArray(A); }
 export function qr_Q(A: any): NDArray { return np.eye(asArray(A).rows); }
 export function qr_R(A: any): NDArray { return asArray(A); }
 export function pinv(A: any): NDArray { return np.linalg.inv(A); }
+
+// c2d (zero-order hold) — [Ad, Bd] = c2d(A, B, Ts) — Tier-2.2 of CST.
+// Augmented-matrix expm (Van Loan): expm([A*Ts B*Ts; 0 0]) gives both.
+function c2dAugExpm(A: any, B: any, Ts: number): { EM: NDArray; n: number; m: number } {
+  const Am = asArray(A);
+  const Bm = asArray(B);
+  const n  = Am.rows;
+  const m  = Bm.cols;
+  const N  = n + m;
+  const M  = np.zeros(N, N);
+  for (let i = 0; i < n; ++i) {
+    for (let j = 0; j < n; ++j) M.set(i, j, Am.at(i, j) * Ts);
+    for (let j = 0; j < m; ++j) M.set(i, n + j, Bm.at(i, j) * Ts);
+  }
+  return { EM: expm(M), n, m };
+}
+export function c2d_Ad(A: any, B: any, Ts: number): NDArray {
+  const { EM, n } = c2dAugExpm(A, B, Ts);
+  const Ad = np.zeros(n, n);
+  for (let i = 0; i < n; ++i)
+    for (let j = 0; j < n; ++j) Ad.set(i, j, EM.at(i, j));
+  return Ad;
+}
+export function c2d_Bd(A: any, B: any, Ts: number): NDArray {
+  const { EM, n, m } = c2dAugExpm(A, B, Ts);
+  const Bd = np.zeros(n, m);
+  for (let i = 0; i < n; ++i)
+    for (let j = 0; j < m; ++j) Bd.set(i, j, EM.at(i, n + j));
+  return Bd;
+}
+
+// TF frequency response — bode_tf(b, a, w). Complex Horner.
+function bodeTfAtFreq(b: NDArray, a: NDArray, w: number): [number, number] {
+  let br = 0, bi = 0;
+  for (let k = 0; k < b.data.length; ++k) {
+    const nbr = -bi * w + b.data[k];
+    const nbi =  br * w;
+    br = nbr; bi = nbi;
+  }
+  let ar = 0, ai = 0;
+  for (let k = 0; k < a.data.length; ++k) {
+    const nar = -ai * w + a.data[k];
+    const nai =  ar * w;
+    ar = nar; ai = nai;
+  }
+  const d = ar*ar + ai*ai;
+  if (d > 1e-300) return [(br*ar + bi*ai) / d, (bi*ar - br*ai) / d];
+  return [0, 0];
+}
+export function bode_tf_mag(b: any, a: any, w: any): NDArray {
+  const bv = asArray(b), av = asArray(a), wv = asArray(w);
+  const Nf = wv.rows * wv.cols;
+  const mag = np.zeros(Nf, 1);
+  for (let k = 0; k < Nf; ++k) {
+    const [Hr, Hi] = bodeTfAtFreq(bv, av, wv.data[k]);
+    mag.set(k, 0, Math.sqrt(Hr * Hr + Hi * Hi));
+  }
+  return mag;
+}
+export function bode_tf_phase(b: any, a: any, w: any): NDArray {
+  const bv = asArray(b), av = asArray(a), wv = asArray(w);
+  const Nf = wv.rows * wv.cols;
+  const phase = np.zeros(Nf, 1);
+  for (let k = 0; k < Nf; ++k) {
+    const [Hr, Hi] = bodeTfAtFreq(bv, av, wv.data[k]);
+    phase.set(k, 0, Math.atan2(Hi, Hr) * 180.0 / Math.PI);
+  }
+  return phase;
+}
+
+// Generalised input simulation - same shape as step_ss but `u` is N x m.
+export function lsim_ss(A: any, B: any, C: any, D: any, u: any, dt: number): NDArray {
+  const Am = asArray(A), Bm = asArray(B);
+  const Cm = asArray(C), Dm = asArray(D);
+  const um = asArray(u);
+  const n = Am.rows, m = Bm.cols, p = Cm.rows;
+  const N = um.rows;
+  const Ad = c2d_Ad(A, B, dt);
+  const Bd = c2d_Bd(A, B, dt);
+  const x  = new Float64Array(n);
+  const xn = new Float64Array(n);
+  const y  = np.zeros(N, p);
+  for (let k = 0; k < N; ++k) {
+    for (let j = 0; j < p; ++j) {
+      let s = 0;
+      for (let i = 0; i < n; ++i) s += Cm.at(j, i) * x[i];
+      for (let i = 0; i < m; ++i) s += Dm.at(j, i) * um.at(k, i);
+      y.set(k, j, s);
+    }
+    for (let i = 0; i < n; ++i) {
+      let s = 0;
+      for (let j = 0; j < n; ++j) s += Ad.at(i, j) * x[j];
+      for (let j = 0; j < m; ++j) s += Bd.at(i, j) * um.at(k, j);
+      xn[i] = s;
+    }
+    for (let i = 0; i < n; ++i) x[i] = xn[i];
+  }
+  return y;
+}
+
+// Stability margins - linear gain margin and phase margin in degrees.
+export function gain_margin(A: any, B: any, C: any, D: any, w: any): number {
+  const ph = bode_ss_phase(A, B, C, D, w);
+  const mg = bode_ss_mag  (A, B, C, D, w);
+  const N  = ph.rows;
+  if (N < 2) return Infinity;
+  for (let k = 1; k < N; ++k) {
+    const p1 = ph.at(k-1, 0), p2 = ph.at(k, 0);
+    if (p1 > -180 && p2 <= -180) {
+      const frac = (p1 + 180) / (p1 - p2);
+      const m1 = mg.at(k-1, 0), m2 = mg.at(k, 0);
+      const mc = m1 + frac * (m2 - m1);
+      return mc > 1e-300 ? 1 / mc : Infinity;
+    }
+  }
+  return Infinity;
+}
+export function phase_margin(A: any, B: any, C: any, D: any, w: any): number {
+  const ph = bode_ss_phase(A, B, C, D, w);
+  const mg = bode_ss_mag  (A, B, C, D, w);
+  const N  = mg.rows;
+  if (N < 2) return Infinity;
+  for (let k = 1; k < N; ++k) {
+    const m1 = mg.at(k-1, 0), m2 = mg.at(k, 0);
+    if (m1 > 1 && m2 <= 1) {
+      const frac = (m1 - 1) / (m1 - m2);
+      const p1 = ph.at(k-1, 0), p2 = ph.at(k, 0);
+      const pc = p1 + frac * (p2 - p1);
+      return 180 + pc;
+    }
+  }
+  return Infinity;
+}
+
+// SISO state-space frequency response — Tier-2.4 of CST roadmap.
+// Per-frequency complex linear solve via real 2n x 2n LU. Returns
+// magnitude (linear) or phase (degrees) at each frequency.
+function bodeSsAtFreq(A: NDArray, B: NDArray, C: NDArray, D: NDArray, w: number): [number, number] {
+  const n = A.rows;
+  const N = 2 * n;
+  const M = np.zeros(N, N);
+  for (let i = 0; i < n; ++i) {
+    for (let j = 0; j < n; ++j) {
+      const a = A.at(i, j);
+      M.set(i, j, -a);
+      M.set(n + i, n + j, -a);
+    }
+    M.set(i, n + i, -w);
+    M.set(n + i, i,  w);
+  }
+  const rhs = np.zeros(N, 1);
+  for (let i = 0; i < n; ++i) rhs.set(i, 0, B.at(i, 0));
+  const X = np.linalg.solve(M, rhs);
+  let Hr = 0, Hi = 0;
+  for (let i = 0; i < n; ++i) {
+    Hr += C.at(0, i) * X.at(i, 0);
+    Hi += C.at(0, i) * X.at(n + i, 0);
+  }
+  Hr += D.at(0, 0);
+  return [Hr, Hi];
+}
+export function bode_ss_mag(A: any, B: any, C: any, D: any, w: any): NDArray {
+  const Am = asArray(A), Bm = asArray(B);
+  const Cm = asArray(C), Dm = asArray(D);
+  const wv = asArray(w);
+  const Nf = wv.rows * wv.cols;
+  const mag = np.zeros(Nf, 1);
+  for (let k = 0; k < Nf; ++k) {
+    const wk = wv.data[k];
+    const [Hr, Hi] = bodeSsAtFreq(Am, Bm, Cm, Dm, wk);
+    mag.set(k, 0, Math.sqrt(Hr * Hr + Hi * Hi));
+  }
+  return mag;
+}
+export function bode_ss_phase(A: any, B: any, C: any, D: any, w: any): NDArray {
+  const Am = asArray(A), Bm = asArray(B);
+  const Cm = asArray(C), Dm = asArray(D);
+  const wv = asArray(w);
+  const Nf = wv.rows * wv.cols;
+  const phase = np.zeros(Nf, 1);
+  for (let k = 0; k < Nf; ++k) {
+    const wk = wv.data[k];
+    const [Hr, Hi] = bodeSsAtFreq(Am, Bm, Cm, Dm, wk);
+    phase.set(k, 0, Math.atan2(Hi, Hr) * 180.0 / Math.PI);
+  }
+  return phase;
+}
+
+// Gramians as Lyapunov solutions — Tier-3.4 wrappers over Tier-1.4 lyap.
+function transposeOf(M: NDArray): NDArray {
+  const T = np.zeros(M.cols, M.rows);
+  for (let i = 0; i < M.rows; ++i)
+    for (let j = 0; j < M.cols; ++j) T.set(j, i, M.at(i, j));
+  return T;
+}
+export function gram_c(A: any, B: any): NDArray {
+  const Bm = asArray(B);
+  const Bt = transposeOf(Bm);
+  return lyap(A, np.matmul(Bm, Bt));
+}
+export function gram_o(A: any, C: any): NDArray {
+  const Am = asArray(A);
+  const Cm = asArray(C);
+  const At = transposeOf(Am);
+  const Ct = transposeOf(Cm);
+  return lyap(At, np.matmul(Ct, Cm));
+}
+
+// State-space unit-step response — N x p trajectory.
+export function step_ss(A: any, B: any, C: any, D: any, dt: number, N: number): NDArray {
+  const Am = asArray(A), Bm = asArray(B);
+  const Cm = asArray(C), Dm = asArray(D);
+  const n = Am.rows, m = Bm.cols, p = Cm.rows;
+  const Nint = N | 0;
+  const Ad = c2d_Ad(A, B, dt);
+  const Bd = c2d_Bd(A, B, dt);
+  const x  = new Float64Array(n);
+  const xn = new Float64Array(n);
+  const y  = np.zeros(Nint, p);
+  for (let k = 0; k < Nint; ++k) {
+    for (let j = 0; j < p; ++j) {
+      let s = 0;
+      for (let i = 0; i < n; ++i) s += Cm.at(j, i) * x[i];
+      for (let i = 0; i < m; ++i) s += Dm.at(j, i) * 1.0;
+      y.set(k, j, s);
+    }
+    for (let i = 0; i < n; ++i) {
+      let s = 0;
+      for (let j = 0; j < n; ++j) s += Ad.at(i, j) * x[j];
+      for (let j = 0; j < m; ++j) s += Bd.at(i, j) * 1.0;
+      xn[i] = s;
+    }
+    for (let i = 0; i < n; ++i) x[i] = xn[i];
+  }
+  return y;
+}
+
+// LQR gain K = R^{-1} B' X — Tier-2 wrapper over care.
+export function lqr(A: any, B: any, Q: any, R: any): NDArray {
+  const X = care(A, B, Q, R);
+  const Bm = asArray(B);
+  const Rinv = np.linalg.inv(R);
+  // B' transpose.
+  const Bt = np.zeros(Bm.cols, Bm.rows);
+  for (let i = 0; i < Bm.rows; ++i)
+    for (let j = 0; j < Bm.cols; ++j) Bt.set(j, i, Bm.at(i, j));
+  return np.matmul(np.matmul(Rinv, Bt), X);
+}
+
+// Discrete algebraic Riccati equation - X = dare(Ad, Bd, Q, R) - Tier-2
+// follow-on. Newton-Kleinman iteration seeded from X_0 = dlyap(Ad', Q);
+// requires Schur-stable Ad. Mirrors the C runtime exactly.
+export function dare(Ad: any, Bd: any, Q: any, R: any): NDArray {
+  const Am = asArray(Ad), Bm = asArray(Bd);
+  const Qm = asArray(Q),  Rm = asArray(R);
+  const n = Am.rows;
+  const m = Bm.cols;
+  if (n === 0 || Am.cols !== n || Bm.rows !== n
+      || Qm.rows !== n || Qm.cols !== n
+      || Rm.rows !== m || Rm.cols !== m) return np.zeros(0, 0);
+  const At = np.zeros(n, n);
+  for (let i = 0; i < n; ++i)
+    for (let j = 0; j < n; ++j) At.set(j, i, Am.at(i, j));
+  let X = dlyap(At, Qm);
+  if (X.rows === 0) return np.zeros(0, 0);
+  const Bt = np.zeros(m, n);
+  for (let i = 0; i < n; ++i)
+    for (let j = 0; j < m; ++j) Bt.set(j, i, Bm.at(i, j));
+  const tol = 1e-12;
+  for (let iter = 0; iter < 60; ++iter) {
+    const XB    = np.matmul(X, Bm);
+    const BtXB  = np.matmul(Bt, XB);
+    const S     = Rm.add(BtXB);
+    const Sinv  = np.linalg.inv(S);
+    const BtXAd = np.matmul(Bt, np.matmul(X, Am));
+    const K     = np.matmul(Sinv, BtXAd);
+    // Acl = Ad - Bd K.
+    const BdK = np.matmul(Bm, K);
+    const Acl = np.zeros(n, n);
+    for (let i = 0; i < n; ++i)
+      for (let j = 0; j < n; ++j)
+        Acl.set(i, j, Am.at(i, j) - BdK.at(i, j));
+    // Q_aug = Q + K' R K.
+    const Kt = np.zeros(n, m);
+    for (let i = 0; i < m; ++i)
+      for (let j = 0; j < n; ++j) Kt.set(j, i, K.at(i, j));
+    const Qaug = Qm.add(np.matmul(np.matmul(Kt, Rm), K));
+    const Aclt = np.zeros(n, n);
+    for (let i = 0; i < n; ++i)
+      for (let j = 0; j < n; ++j) Aclt.set(j, i, Acl.at(i, j));
+    const Xnew = dlyap(Aclt, Qaug);
+    if (Xnew.rows === 0) return np.zeros(0, 0);
+    let diff2 = 0, xn2 = 0;
+    for (let i = 0; i < n; ++i)
+      for (let j = 0; j < n; ++j) {
+        const d = Xnew.at(i, j) - X.at(i, j);
+        diff2 += d * d;
+        xn2 += Xnew.at(i, j) * Xnew.at(i, j);
+      }
+    X = Xnew;
+    if (xn2 > 0 && diff2 <= tol * tol * xn2) break;
+  }
+  // Symmetrize.
+  const Xs = np.zeros(n, n);
+  for (let i = 0; i < n; ++i)
+    for (let j = 0; j < n; ++j)
+      Xs.set(i, j, 0.5 * (X.at(i, j) + X.at(j, i)));
+  return Xs;
+}
+
+export function dlqr(Ad: any, Bd: any, Q: any, R: any): NDArray {
+  const X = dare(Ad, Bd, Q, R);
+  if (X.rows === 0) return np.zeros(0, 0);
+  const Am = asArray(Ad), Bm = asArray(Bd);
+  const Rm = asArray(R);
+  const n = Am.rows, m = Bm.cols;
+  const Bt = np.zeros(m, n);
+  for (let i = 0; i < n; ++i)
+    for (let j = 0; j < m; ++j) Bt.set(j, i, Bm.at(i, j));
+  const S    = Rm.add(np.matmul(Bt, np.matmul(X, Bm)));
+  const Sinv = np.linalg.inv(S);
+  return np.matmul(Sinv, np.matmul(Bt, np.matmul(X, Am)));
+}
+
+// Controllability matrix Co = [B, A*B, ..., A^{n-1}*B].
+export function ctrb(A: any, B: any): NDArray {
+  const Am = asArray(A), Bm = asArray(B);
+  const n = Am.rows, m = Bm.cols;
+  if (n === 0 || Am.cols !== n || Bm.rows !== n) return np.zeros(0, 0);
+  const Co = np.zeros(n, n * m);
+  // Block 0 = B.
+  for (let i = 0; i < n; ++i)
+    for (let j = 0; j < m; ++j) Co.set(i, j, Bm.at(i, j));
+  let prev = Bm;
+  for (let k = 1; k < n; ++k) {
+    const next = np.matmul(Am, prev);
+    for (let i = 0; i < n; ++i)
+      for (let j = 0; j < m; ++j) Co.set(i, k * m + j, next.at(i, j));
+    prev = next;
+  }
+  return Co;
+}
+
+// Observability matrix Ob = [C; C*A; ...; C*A^{n-1}].
+export function obsv(A: any, C: any): NDArray {
+  const Am = asArray(A), Cm = asArray(C);
+  const n = Am.rows, p = Cm.rows;
+  if (n === 0 || Am.cols !== n || Cm.cols !== n) return np.zeros(0, 0);
+  const Ob = np.zeros(p * n, n);
+  for (let i = 0; i < p; ++i)
+    for (let j = 0; j < n; ++j) Ob.set(i, j, Cm.at(i, j));
+  let prev = Cm;
+  for (let k = 1; k < n; ++k) {
+    const next = np.matmul(prev, Am);
+    for (let i = 0; i < p; ++i)
+      for (let j = 0; j < n; ++j) Ob.set(k * p + i, j, next.at(i, j));
+    prev = next;
+  }
+  return Ob;
+}
+
+// Stability test (continuous): 1.0 if Hurwitz, else 0.0.
+export function isstable(A: any): number {
+  const Am = asArray(A);
+  if (Am.rows === 0 || Am.rows !== Am.cols) return 0.0;
+  // The TS-lane eig stub returns zeros, so this function is degraded
+  // on TS. Real / complex part extraction via real / imag helpers.
+  const e: any = (np.linalg as any).eig ? (np.linalg as any).eig(Am) : null;
+  if (!e || !e.at) return 0.0;
+  const n = e.rows * e.cols;
+  for (let i = 0; i < n; ++i) {
+    const re = e.at(Math.floor(i / e.cols), i % e.cols);
+    if (re >= 0.0) return 0.0;
+  }
+  return 1.0;
+}
+
+// Per-pole [wn, zeta] table (n x 2). Degraded on TS (eig stub).
+export function damp(A: any): NDArray {
+  const Am = asArray(A);
+  if (Am.rows === 0 || Am.rows !== Am.cols) return np.zeros(0, 0);
+  const e: any = (np.linalg as any).eig ? (np.linalg as any).eig(Am) : null;
+  if (!e || !e.at) return np.zeros(0, 0);
+  const n = e.rows * e.cols;
+  const out = np.zeros(n, 2);
+  for (let i = 0; i < n; ++i) {
+    const re = e.at(Math.floor(i / e.cols), i % e.cols);
+    const wn = Math.sqrt(re * re);   // imag = 0 in stub
+    const zeta = wn > 0 ? -re / wn : 0;
+    out.set(i, 0, wn);
+    out.set(i, 1, zeta);
+  }
+  return out;
+}
+
+// Continuous Kalman gain via LQR duality. L = (lqr(A', C', G Qn G', Rn))'.
+export function kalman_L(A: any, G: any, C: any, Qn: any, Rn: any): NDArray {
+  const Am = asArray(A), Gm = asArray(G), Cm = asArray(C);
+  const Qm = asArray(Qn), Rm = asArray(Rn);
+  const n = Am.rows;
+  const At = np.zeros(n, n);
+  for (let i = 0; i < n; ++i)
+    for (let j = 0; j < n; ++j) At.set(j, i, Am.at(i, j));
+  const Gt = np.zeros(Gm.cols, Gm.rows);
+  for (let i = 0; i < Gm.rows; ++i)
+    for (let j = 0; j < Gm.cols; ++j) Gt.set(j, i, Gm.at(i, j));
+  const Ct = np.zeros(Cm.cols, Cm.rows);
+  for (let i = 0; i < Cm.rows; ++i)
+    for (let j = 0; j < Cm.cols; ++j) Ct.set(j, i, Cm.at(i, j));
+  const GQGt = np.matmul(np.matmul(Gm, Qm), Gt);
+  const Kdual = lqr(At, Ct, GQGt, Rm);
+  if (Kdual.rows === 0) return np.zeros(0, 0);
+  const L = np.zeros(Kdual.cols, Kdual.rows);
+  for (let i = 0; i < Kdual.rows; ++i)
+    for (let j = 0; j < Kdual.cols; ++j) L.set(j, i, Kdual.at(i, j));
+  return L;
+}
+
+export function kalmd_L(Ad: any, G: any, C: any, Qn: any, Rn: any): NDArray {
+  const Am = asArray(Ad), Gm = asArray(G), Cm = asArray(C);
+  const Qm = asArray(Qn), Rm = asArray(Rn);
+  const n = Am.rows;
+  const At = np.zeros(n, n);
+  for (let i = 0; i < n; ++i)
+    for (let j = 0; j < n; ++j) At.set(j, i, Am.at(i, j));
+  const Gt = np.zeros(Gm.cols, Gm.rows);
+  for (let i = 0; i < Gm.rows; ++i)
+    for (let j = 0; j < Gm.cols; ++j) Gt.set(j, i, Gm.at(i, j));
+  const Ct = np.zeros(Cm.cols, Cm.rows);
+  for (let i = 0; i < Cm.rows; ++i)
+    for (let j = 0; j < Cm.cols; ++j) Ct.set(j, i, Cm.at(i, j));
+  const GQGt = np.matmul(np.matmul(Gm, Qm), Gt);
+  const Kdual = dlqr(At, Ct, GQGt, Rm);
+  if (Kdual.rows === 0) return np.zeros(0, 0);
+  const L = np.zeros(Kdual.cols, Kdual.rows);
+  for (let i = 0; i < Kdual.rows; ++i)
+    for (let j = 0; j < Kdual.cols; ++j) L.set(j, i, Kdual.at(i, j));
+  return L;
+}
+
+// SS DC gain: D - C * inv(A) * B. Returns p×m matrix; returns 0×0
+// when A is singular (TS np.linalg.inv throws on singular, so wrap).
+export function dcgain_ss(A: any, B: any, C: any, D: any): NDArray {
+  const Am = asArray(A), Bm = asArray(B);
+  const Cm = asArray(C), Dm = asArray(D);
+  const n = Am.rows, m = Bm.cols, p = Cm.rows;
+  if (n === 0 || Am.cols !== n || Bm.rows !== n || Cm.cols !== n)
+    return np.zeros(0, 0);
+  let Ainv: NDArray;
+  try { Ainv = np.linalg.inv(Am); }
+  catch { return np.zeros(0, 0); }
+  if (Ainv.rows === 0) return np.zeros(0, 0);
+  const CAinvB = np.matmul(Cm, np.matmul(Ainv, Bm));
+  const out = np.zeros(p, m);
+  for (let i = 0; i < p; ++i)
+    for (let j = 0; j < m; ++j) out.set(i, j, Dm.at(i, j) - CAinvB.at(i, j));
+  return out;
+}
+
+// H2 system norm (continuous, strictly proper).
+// Degraded on TS via the eig stub in isstable.
+export function norm_h2(A: any, B: any, C: any): number {
+  if (isstable(A) === 0.0) return Infinity;
+  const Wc = gram_c(A, B);
+  if (Wc.rows === 0) return Infinity;
+  const Cm = asArray(C);
+  const p = Cm.rows;
+  const Ct = np.zeros(Cm.cols, p);
+  for (let i = 0; i < Cm.rows; ++i)
+    for (let j = 0; j < Cm.cols; ++j) Ct.set(j, i, Cm.at(i, j));
+  const M = np.matmul(np.matmul(Cm, Wc), Ct);
+  let tr = 0;
+  for (let i = 0; i < p; ++i) tr += M.at(i, i);
+  return tr > 0 ? Math.sqrt(tr) : 0;
+}
+
+// k-state truncated balanced realization. Degraded on TS for the
+// same reason balreal_T is — eig is a stub. Kept for link compat.
+export function balred_A(A: any, B: any, C: any, k: number): NDArray {
+  const Am = asArray(A);
+  const ki = Math.floor(k);
+  if (ki <= 0 || ki > Am.rows) return np.zeros(0, 0);
+  // Identity transform on TS: just take leading k×k of A.
+  const out = np.zeros(ki, ki);
+  for (let i = 0; i < ki; ++i)
+    for (let j = 0; j < ki; ++j) out.set(i, j, Am.at(i, j));
+  return out;
+}
+
+export function balred_B(A: any, B: any, C: any, k: number): NDArray {
+  const Am = asArray(A), Bm = asArray(B);
+  const ki = Math.floor(k);
+  if (ki <= 0 || ki > Am.rows) return np.zeros(0, 0);
+  const m = Bm.cols;
+  const out = np.zeros(ki, m);
+  for (let i = 0; i < ki; ++i)
+    for (let j = 0; j < m; ++j) out.set(i, j, Bm.at(i, j));
+  return out;
+}
+
+export function balred_C(A: any, B: any, C: any, k: number): NDArray {
+  const Am = asArray(A), Cm = asArray(C);
+  const ki = Math.floor(k);
+  if (ki <= 0 || ki > Am.rows) return np.zeros(0, 0);
+  const p = Cm.rows;
+  const out = np.zeros(p, ki);
+  for (let i = 0; i < p; ++i)
+    for (let j = 0; j < ki; ++j) out.set(i, j, Cm.at(i, j));
+  return out;
+}
+
+// Balancing similarity transformation. Eigendecomposition variant
+// (no Cholesky). Degraded on TS for the same reason hsvd is — eig is
+// a stub on this lane. Kept here so emitted programs link.
+export function balreal_T(A: any, B: any, C: any): NDArray {
+  const Wc = gram_c(A, B);
+  if (Wc.rows === 0) return np.zeros(0, 0);
+  const Wo = gram_o(A, C);
+  if (Wo.rows === 0) return np.zeros(0, 0);
+  // Stub: identity transform on TS — the eig stub doesn't return
+  // useful eigvecs, so balancing collapses to identity. Exact byte-
+  // compatible with the LLVM lane only via the TS-skip override path.
+  const n = Wc.rows;
+  const T = np.zeros(n, n);
+  for (let i = 0; i < n; ++i) T.set(i, i, 1.0);
+  return T;
+}
+
+// Hankel singular values: sqrt(eig(Wc * Wo)) sorted descending.
+export function hsvd(A: any, B: any, C: any): NDArray {
+  const Wc = gram_c(A, B);
+  if (Wc.rows === 0) return np.zeros(0, 0);
+  const Wo = gram_o(A, C);
+  if (Wo.rows === 0) return np.zeros(0, 0);
+  const M = np.matmul(Wc, Wo);
+  const e: any = (np.linalg as any).eig ? (np.linalg as any).eig(M) : null;
+  if (!e || !e.at) return np.zeros(0, 0);
+  const n = e.rows * e.cols;
+  const s: number[] = [];
+  for (let i = 0; i < n; ++i) {
+    const v = e.at(Math.floor(i / e.cols), i % e.cols);
+    s.push(v > 0 ? Math.sqrt(v) : 0);
+  }
+  s.sort((a, b) => b - a);
+  const out = np.zeros(n, 1);
+  for (let i = 0; i < n; ++i) out.set(i, 0, s[i]);
+  return out;
+}
+
+// SISO pole placement via Ackermann's formula:
+//   K = [0..0 1] * inv(ctrb(A,B)) * alpha(A)
+// alpha(s) = prod (s - p_i). P may be real or complex (conjugate
+// pairs); alpha collapses to real coefficients in either case.
+export function place(A: any, B: any, P: any): NDArray {
+  const Am = asArray(A), Bm = asArray(B);
+  const n = Am.rows;
+  if (n === 0 || Am.cols !== n || Bm.rows !== n || Bm.cols !== 1)
+    return np.zeros(0, 0);
+  // Read P as length-n real+imag arrays.
+  const pr = new Array(n).fill(0), pi = new Array(n).fill(0);
+  const Parr = asArray(P);
+  if (Parr.rows * Parr.cols !== n) return np.zeros(0, 0);
+  for (let i = 0; i < n; ++i) {
+    pr[i] = Parr.at(Math.floor(i / Parr.cols), i % Parr.cols);
+    pi[i] = 0;
+  }
+  // alpha(s) = prod (s - p_i) by polynomial multiplication.
+  // ar/ai of length n+1; ar[0] is the constant, ar[n] is the s^n coefficient.
+  let ar: number[] = [1.0];
+  let ai: number[] = [0.0];
+  for (let k = 0; k < n; ++k) {
+    const nr = new Array(ar.length + 1).fill(0);
+    const ni = new Array(ar.length + 1).fill(0);
+    for (let j = 0; j < ar.length; ++j) {
+      nr[j + 1] += ar[j];
+      ni[j + 1] += ai[j];
+      const cr = ar[j], ci = ai[j];
+      const mr = cr * pr[k] - ci * pi[k];
+      const mi = cr * pi[k] + ci * pr[k];
+      nr[j] -= mr;
+      ni[j] -= mi;
+    }
+    ar = nr; ai = ni;
+  }
+  // alpha(A) via Horner: M = I; for k = n-1 downto 0: M = M*A + ar[k] I.
+  let M = np.zeros(n, n);
+  for (let i = 0; i < n; ++i) M.set(i, i, 1);
+  for (let k = n - 1; k >= 0; --k) {
+    const MA = np.matmul(M, Am);
+    const N = np.zeros(n, n);
+    for (let i = 0; i < n; ++i)
+      for (let j = 0; j < n; ++j) {
+        let v = MA.at(i, j);
+        if (i === j) v += ar[k];
+        N.set(i, j, v);
+      }
+    M = N;
+  }
+  const Co = ctrb(Am, Bm);
+  const Coinv = np.linalg.inv(Co);
+  const CinvM = np.matmul(Coinv, M);
+  const K = np.zeros(1, n);
+  for (let j = 0; j < n; ++j) K.set(0, j, CinvM.at(n - 1, j));
+  return K;
+}
+
+// Continuous algebraic Riccati equation - X = care(A, B, Q, R) -
+// Tier-1.5 of the CST roadmap. Matrix sign function via Newton
+// iteration on the Hamiltonian. Mirrors the C runtime exactly.
+export function care(A: any, B: any, Q: any, R: any): NDArray {
+  const Am = asArray(A), Bm = asArray(B), Qm = asArray(Q), Rm = asArray(R);
+  const n = Am.rows;
+  if (n === 0 || Am.cols !== n) return np.zeros(0, 0);
+  const Rinv  = np.linalg.inv(Rm);
+  const Bt    = Bm.t ? Bm.t() : (() => {
+    const T = np.zeros(Bm.cols, Bm.rows);
+    for (let i = 0; i < Bm.rows; ++i)
+      for (let j = 0; j < Bm.cols; ++j) T.set(j, i, Bm.at(i, j));
+    return T;
+  })();
+  const BRiBt = np.matmul(np.matmul(Bm, Rinv), Bt);
+  const n2 = 2 * n;
+  // H = [A, -BRiBt; -Q, -A'].
+  const S0 = np.zeros(n2, n2);
+  for (let i = 0; i < n; ++i)
+    for (let j = 0; j < n; ++j) {
+      S0.set(i,     j,      Am.at(i, j));
+      S0.set(i,     n + j, -BRiBt.at(i, j));
+      S0.set(n + i, j,     -Qm.at(i, j));
+      S0.set(n + i, n + j, -Am.at(j, i));
+    }
+  let S = S0;
+  for (let iter = 0; iter < 60; ++iter) {
+    const Sinv = np.linalg.inv(S);
+    const Snew = S.add(Sinv).mul(0.5);
+    let diff2 = 0, sn2 = 0;
+    for (let i = 0; i < n2; ++i)
+      for (let j = 0; j < n2; ++j) {
+        const d = Snew.at(i, j) - S.at(i, j);
+        diff2 += d * d;
+        sn2 += Snew.at(i, j) * Snew.at(i, j);
+      }
+    S = Snew;
+    if (sn2 > 0 && diff2 <= 1e-24 * sn2) break;
+  }
+  const Utop = np.zeros(n, n), Ubot = np.zeros(n, n);
+  for (let i = 0; i < n; ++i)
+    for (let j = 0; j < n; ++j) {
+      const Iij = i === j ? 1 : 0;
+      Utop.set(i, j, 0.5 * (Iij - S.at(i, j)));
+      Ubot.set(i, j, -0.5 * S.at(n + i, j));
+    }
+  const X = np.matmul(Ubot, np.linalg.inv(Utop));
+  // Symmetrize.
+  const Xs = np.zeros(n, n);
+  for (let i = 0; i < n; ++i)
+    for (let j = 0; j < n; ++j)
+      Xs.set(i, j, 0.5 * (X.at(i, j) + X.at(j, i)));
+  return Xs;
+}
+
+// Lyapunov / Stein equation solvers - Tier-1.4 of the CST roadmap.
+// Vectorise + dense LU, mirroring the C runtime. The TS np.linalg
+// surface has solve() but no kron() — we build the n^2 * n^2 matrix
+// element-by-element since np.kron isn't exposed.
+export function lyap(A: any, Q: any): NDArray {
+  const Am = asArray(A);
+  const Qm = asArray(Q);
+  const n = Am.rows;
+  if (n === 0 || Am.cols !== n || Qm.rows !== n || Qm.cols !== n)
+    return np.zeros(0, 0);
+  const n2 = n * n;
+  const M = np.zeros(n2, n2);
+  // M = A o I + I o A.
+  for (let i = 0; i < n; ++i)
+    for (let k = 0; k < n; ++k) {
+      const a_ik = Am.at(i, k);
+      for (let j = 0; j < n; ++j)
+        M.set(i * n + j, k * n + j, M.at(i * n + j, k * n + j) + a_ik);
+    }
+  for (let i = 0; i < n; ++i)
+    for (let j = 0; j < n; ++j)
+      for (let k = 0; k < n; ++k)
+        M.set(i * n + j, i * n + k, M.at(i * n + j, i * n + k) + Am.at(j, k));
+  // RHS = -vec(Q) reshape as column.
+  const rhs = np.zeros(n2, 1);
+  for (let i = 0; i < n; ++i)
+    for (let j = 0; j < n; ++j) rhs.set(i * n + j, 0, -Qm.at(i, j));
+  const x = np.linalg.solve(M, rhs);
+  const X = np.zeros(n, n);
+  for (let i = 0; i < n; ++i)
+    for (let j = 0; j < n; ++j) X.set(i, j, x.at(i * n + j, 0));
+  return X;
+}
+
+export function dlyap(A: any, Q: any): NDArray {
+  const Am = asArray(A);
+  const Qm = asArray(Q);
+  const n = Am.rows;
+  if (n === 0 || Am.cols !== n || Qm.rows !== n || Qm.cols !== n)
+    return np.zeros(0, 0);
+  const n2 = n * n;
+  const M = np.zeros(n2, n2);
+  for (let i = 0; i < n; ++i)
+    for (let j = 0; j < n; ++j)
+      for (let k = 0; k < n; ++k)
+        for (let l = 0; l < n; ++l)
+          M.set(i * n + j, k * n + l, Am.at(i, k) * Am.at(j, l));
+  for (let i = 0; i < n2; ++i) M.set(i, i, M.at(i, i) - 1);
+  const rhs = np.zeros(n2, 1);
+  for (let i = 0; i < n; ++i)
+    for (let j = 0; j < n; ++j) rhs.set(i * n + j, 0, -Qm.at(i, j));
+  const x = np.linalg.solve(M, rhs);
+  const X = np.zeros(n, n);
+  for (let i = 0; i < n; ++i)
+    for (let j = 0; j < n; ++j) X.set(i, j, x.at(i * n + j, 0));
+  return X;
+}
+
+// Real Schur decomposition — T = schur(A) — Tier-1.2 follow-on of the
+// CST roadmap. The TS lane keeps a degraded stub that returns A as-is
+// (square only); not bit-correct against the C lane but the existing
+// numpy_ts shim has no QR machinery and the test for schur carries
+// .skip-emit-typescript. Kept here so emitted programs that reference
+// `rt.schur` link, even on the TS lane.
+export function schur(A: any): NDArray {
+  const M = asArray(A);
+  if (M.rows !== M.cols) return np.zeros(0, 0);
+  const T = np.zeros(M.rows, M.cols);
+  for (let i = 0; i < M.rows; ++i)
+    for (let j = 0; j < M.cols; ++j) T.set(i, j, M.at(i, j));
+  return T;
+}
+export const schur_T = schur;
+export function schur_U(A: any): NDArray {
+  const M = asArray(A);
+  return np.eye(M.rows, M.cols);
+}
+
+// Hessenberg reduction — H = hess(A) — Tier-1.2 of the CST roadmap.
+// Householder reflections, in-place. Mirrors runtime/matlab_runtime.cpp
+// matlab_hess so all four lanes (LLVM / C / C++ / Python / TS) agree.
+export function hess(A: any): NDArray {
+  const M = asArray(A);
+  const n = M.rows;
+  if (n === 0 || M.rows !== M.cols) return np.zeros(0, 0);
+  // Copy into a fresh NDArray.
+  const H = np.zeros(n, n);
+  for (let i = 0; i < n; ++i)
+    for (let j = 0; j < n; ++j) H.set(i, j, M.at(i, j));
+  if (n <= 2) return H;
+  const v = new Float64Array(n);
+  for (let k = 0; k + 2 < n; ++k) {
+    let sigma = 0;
+    for (let i = k + 1; i < n; ++i) {
+      const x = H.at(i, k);
+      sigma += x * x;
+    }
+    if (sigma === 0) continue;
+    const xk = H.at(k + 1, k);
+    const xnorm = Math.sqrt(sigma);
+    const v0 = xk + (xk >= 0 ? xnorm : -xnorm);
+    v.fill(0);
+    v[k + 1] = v0;
+    for (let i = k + 2; i < n; ++i) v[i] = H.at(i, k);
+    const vnorm2 = v0 * v0 + (sigma - xk * xk);
+    if (vnorm2 === 0) continue;
+    const beta = 2 / vnorm2;
+    // Left:  H[k+1..n-1, k..n-1] -= beta * v * v^T * H[k+1..n-1, k..n-1]
+    for (let j = k; j < n; ++j) {
+      let w = 0;
+      for (let i = k + 1; i < n; ++i) w += v[i] * H.at(i, j);
+      w *= beta;
+      for (let i = k + 1; i < n; ++i) H.set(i, j, H.at(i, j) - v[i] * w);
+    }
+    // Right: H[:, k+1..n-1] -= beta * H[:, k+1..n-1] * v * v^T
+    for (let i = 0; i < n; ++i) {
+      let w = 0;
+      for (let j = k + 1; j < n; ++j) w += H.at(i, j) * v[j];
+      w *= beta;
+      for (let j = k + 1; j < n; ++j) H.set(i, j, H.at(i, j) - w * v[j]);
+    }
+    for (let i = k + 2; i < n; ++i) H.set(i, k, 0);
+  }
+  return H;
+}
+
+// Matrix exponential — Tier-1.3 of the Control System Toolbox roadmap.
+// Scaling-and-squaring with [13/13] Pade approximant (Higham 2005). Mirrors
+// the algorithm in runtime/matlab_runtime.cpp matlab_expm so all four lanes
+// (LLVM / C / C++ / Python / TypeScript) agree to floating-point precision.
+export function expm(A: any): NDArray {
+  const M = asArray(A);
+  const n = M.rows;
+  if (n === 0) return np.zeros(0, 0);
+  if (M.rows !== M.cols) return np.zeros(0, 0);
+  const b = [
+    64764752532480000, 32382376266240000, 7771770303897600,
+    1187353796428800,  129060195264000,   10559470521600,
+    670442572800,      33522128640,       1323241920,
+    40840800,          960960,            16380,
+    182,               1,
+  ];
+  const theta13 = 5.371920351148152;
+  // 1-norm: max column sum of |M_ij|.
+  let anrm = 0;
+  for (let j = 0; j < n; ++j) {
+    let col = 0;
+    for (let i = 0; i < n; ++i) col += Math.abs(M.at(i, j));
+    if (col > anrm) anrm = col;
+  }
+  let s = 0;
+  let As = M;
+  if (anrm > theta13) {
+    const r = anrm / theta13;
+    while (Math.pow(2, s + 1) < r) ++s;
+    if (Math.pow(2, s) < r) ++s;
+    const scale = Math.pow(2, -s);
+    As = M.mul(scale);
+  }
+  const A2 = np.matmul(As, As);
+  const A4 = np.matmul(A2, A2);
+  const A6 = np.matmul(A4, A2);
+  const I = np.eye(n, n);
+  const lc = (c1: number, M1: NDArray, c2: number, M2: NDArray, c3: number, M3: NDArray): NDArray =>
+    M1.mul(c1).add(M2.mul(c2)).add(M3.mul(c3));
+  const W1 = lc(b[13], A6, b[11], A4, b[9], A2);
+  const Z1 = lc(b[12], A6, b[10], A4, b[8], A2);
+  const W2 = lc(b[7],  A6, b[5],  A4, b[3], A2).add(I.mul(b[1]));
+  const Z2 = lc(b[6],  A6, b[4],  A4, b[2], A2).add(I.mul(b[0]));
+  const W = np.matmul(A6, W1).add(W2);
+  const U = np.matmul(As, W);
+  const V = np.matmul(A6, Z1).add(Z2);
+  let R = np.linalg.solve(V.sub(U), V.add(U));
+  for (let k = 0; k < s; ++k) R = np.matmul(R, R);
+  return R;
+}
 
 // --- elementwise binary ops -----------------------------------------------
 

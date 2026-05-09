@@ -86,6 +86,184 @@ matlab_mat *matlab_diag(matlab_mat *A);
 matlab_mat *matlab_reshape(matlab_mat *A, double m, double n);
 matlab_mat *matlab_matpow(matlab_mat *A, double n);
 
+/* Matrix exponential.  expm(A) for square real A by scaling-and-squaring
+ * with a [13/13] Padé approximant (Higham 2005). The single most-called
+ * primitive in the Control System Toolbox numeric stack — c2d ZOH,
+ * lsim continuous, initial-condition response, and the closed-form
+ * Lyapunov / Riccati transcriptions all flow through expm. */
+matlab_mat *matlab_expm(matlab_mat *A);
+
+/* Hessenberg reduction.  H = hess(A) returns the upper Hessenberg
+ * similarity-equivalent of A via Householder reflections. Building
+ * block for the Francis QR iteration that produces real Schur form
+ * (which non-symmetric eig, schur, lyap, and care all use). */
+matlab_mat *matlab_hess(matlab_mat *A);
+
+/* Real Schur decomposition.  T = schur(A) (or [U, T] = schur(A) via the
+ * matlab_schur_U / matlab_schur_T entries) returns an orthogonal U and
+ * a real-Schur (upper quasi-triangular) T such that A = U T U'.  Gates
+ * Bartels-Stewart Lyapunov (Tier 1.4) and ordered-Schur Riccati (Tier
+ * 1.5). Hessenberg reduction + Francis double-shift QR with the same
+ * Householder accumulator that powers matlab_eig's non-symmetric path. */
+matlab_mat *matlab_schur(matlab_mat *A);
+matlab_mat *matlab_schur_T(matlab_mat *A);
+matlab_mat *matlab_schur_U(matlab_mat *A);
+
+/* Lyapunov / Stein equation solvers.
+ *   lyap(A, Q):  A X + X A' + Q = 0     (continuous)
+ *   dlyap(A, Q): A X A' - X + Q = 0     (discrete / Stein)
+ * Vectorise + dense LU; O(n^6) cost; adequate for typical control
+ * plants (n = 2..10). Bartels-Stewart Schur back-substitution is a
+ * large-plant follow-on. Gates `gram` and the H2 system norm. */
+matlab_mat *matlab_lyap(matlab_mat *A, matlab_mat *Q);
+matlab_mat *matlab_dlyap(matlab_mat *A, matlab_mat *Q);
+
+/* Continuous algebraic Riccati equation.
+ *   X = care(A, B, Q, R) solves  A'X + XA - X B R^{-1} B' X + Q = 0
+ * for the unique stabilising (X = X' >= 0) solution. Matrix sign
+ * function via Newton iteration on the Hamiltonian. Gates lqr/lqi/
+ * kalman/lqg and the H_inf system norm. The discrete `dare` is a
+ * follow-on (needs the Cayley CARE<->DARE bridge or QZ pencil). */
+matlab_mat *matlab_care(matlab_mat *A, matlab_mat *B,
+                        matlab_mat *Q, matlab_mat *R);
+
+/* Linear-quadratic regulator (continuous): K = lqr(A, B, Q, R).
+ * K = R^{-1} B' X with X = care(A, B, Q, R). Closed-loop A - B K is
+ * Hurwitz. The 3-return MATLAB shape [K, S, e] = lqr(A, B, Q, R) is a
+ * follow-on (S = X from care, e = eig(A - B K)). */
+matlab_mat *matlab_lqr(matlab_mat *A, matlab_mat *B,
+                       matlab_mat *Q, matlab_mat *R);
+
+/* Discrete algebraic Riccati equation.
+ *   X = dare(Ad, Bd, Q, R) solves
+ *      A' X A - X - A' X B (R + B' X B)^{-1} B' X A + Q = 0
+ * for the unique stabilising X = X' >= 0. Newton-Kleinman iteration
+ * seeded from X_0 = dlyap(Ad', Q); requires Schur-stable Ad (typical
+ * after c2d of a stable continuous plant). Symplectic-pencil QZ is
+ * the textbook large-scale algorithm and is deferred until QZ ships.
+ * Gates dlqr / dlqi / kalmd. */
+matlab_mat *matlab_dare(matlab_mat *Ad, matlab_mat *Bd,
+                        matlab_mat *Q, matlab_mat *R);
+
+/* Linear-quadratic regulator (discrete): K = dlqr(Ad, Bd, Q, R).
+ *   K = (R + B' X B)^{-1} B' X A  with X = dare(Ad, Bd, Q, R).
+ * Closed-loop Ad - Bd K is Schur-stable. */
+matlab_mat *matlab_dlqr(matlab_mat *Ad, matlab_mat *Bd,
+                        matlab_mat *Q, matlab_mat *R);
+
+/* Controllability matrix: ctrb(A, B) = [B, A B, A^2 B, ..., A^{n-1} B].
+ * Returns n x (n*m). The pair is controllable iff rank(ctrb) = n.
+ * Structural-rank companion to gram_c. */
+matlab_mat *matlab_ctrb(matlab_mat *A, matlab_mat *B);
+
+/* Observability matrix: obsv(A, C) = [C; C A; ...; C A^{n-1}].
+ * Returns (p*n) x n. The pair is observable iff rank(obsv) = n.
+ * Structural-rank companion to gram_o. */
+matlab_mat *matlab_obsv(matlab_mat *A, matlab_mat *C);
+
+/* SISO pole placement via Ackermann's formula:
+ *   K = place(A, B, P)  s.t. eig(A - B K) = P (a length-n vector).
+ * SISO only (B is n x 1). The multi-input Kautsky-Nichols-Van Dooren
+ * variant is a follow-on. P may be real or complex (conjugate pairs);
+ * K is always real. */
+matlab_mat *matlab_place(matlab_mat *A, matlab_mat *B, void *P);
+
+/* Stability test (continuous): 1.0 if Hurwitz, else 0.0. */
+double matlab_isstable(matlab_mat *A);
+
+/* Per-pole [wn, zeta] table (continuous): n x 2 matrix where row k is
+ *   [|lambda_k|, -real(lambda_k)/|lambda_k|]. */
+matlab_mat *matlab_damp(matlab_mat *A);
+
+/* Hankel singular values: sqrt(eig(Wc Wo)) sorted descending; the
+ * intrinsic I/O invariants of the system, used by balred/balreal. */
+matlab_mat *matlab_hsvd(matlab_mat *A, matlab_mat *B, matlab_mat *C);
+
+/* Balancing similarity transform: T such that (T^{-1} A T, T^{-1} B,
+ * C T) has Wc = Wo = diag(HSVs descending). Eigen-decomposition variant
+ * (Laub 1980). Tier-4 building block for balred. */
+matlab_mat *matlab_balreal_T(matlab_mat *A, matlab_mat *B, matlab_mat *C);
+
+/* H₂ system norm (continuous, strictly proper):
+ *   ||G||_2 = sqrt(trace(C Wc C')) where Wc = lyap(A, B B').
+ * Returns +Inf if A is not Hurwitz. */
+double matlab_norm_h2(matlab_mat *A, matlab_mat *B, matlab_mat *C);
+
+/* State-space DC gain (continuous): D − C · A⁻¹ · B. Returns a p × m
+ * matrix. Returns 0×0 if A is singular (DC gain unbounded). */
+matlab_mat *matlab_dcgain_ss(matlab_mat *A, matlab_mat *B,
+                             matlab_mat *C, matlab_mat *D);
+
+/* Steady-state Kalman gain (continuous): plant xdot = A x + G w,
+ * y = C x + v with cov(w) = Qn, cov(v) = Rn. Returns L (n × p) such
+ * that the estimator A − L·C is Hurwitz. Duality with LQR: solves the
+ * dual care via lqr(A', C', G Qn G', Rn) then transposes. */
+matlab_mat *matlab_kalman_L(matlab_mat *A, matlab_mat *G, matlab_mat *C,
+                            matlab_mat *Qn, matlab_mat *Rn);
+
+/* Discrete-time steady-state Kalman gain. Same duality with dlqr. */
+matlab_mat *matlab_kalmd_L(matlab_mat *Ad, matlab_mat *G, matlab_mat *C,
+                           matlab_mat *Qn, matlab_mat *Rn);
+
+/* k-state truncated balanced realization (model reduction).
+ * balred_A returns the k x k upper-left block of the balanced A;
+ * balred_B returns the first k rows of balanced B (k x m);
+ * balred_C returns the first k columns of balanced C (p x k).
+ * H∞ error bound: ||G − G_k|| ≤ 2 · sum(HSV[k+1:n]). */
+matlab_mat *matlab_balred_A(matlab_mat *A, matlab_mat *B, matlab_mat *C, double k);
+matlab_mat *matlab_balred_B(matlab_mat *A, matlab_mat *B, matlab_mat *C, double k);
+matlab_mat *matlab_balred_C(matlab_mat *A, matlab_mat *B, matlab_mat *C, double k);
+
+/* Continuous-to-discrete ZOH: [Ad, Bd] = c2d(A, B, Ts).
+ * Ad = expm(A*Ts), Bd via the Van Loan augmented-matrix identity. */
+matlab_mat *matlab_c2d_Ad(matlab_mat *A, matlab_mat *B, double Ts);
+matlab_mat *matlab_c2d_Bd(matlab_mat *A, matlab_mat *B, double Ts);
+
+/* Controllability / observability gramians (continuous LTI):
+ *   Wc = gram_c(A, B) = lyap(A, B B').
+ *   Wo = gram_o(A, C) = lyap(A', C' C).  */
+matlab_mat *matlab_gram_c(matlab_mat *A, matlab_mat *B);
+matlab_mat *matlab_gram_o(matlab_mat *A, matlab_mat *C);
+
+/* State-space unit-step response.  y = step_ss(A, B, C, D, dt, N)
+ * returns N x p output trajectory under unit-step input. ZOH discretise
+ * + direct recurrence; relaxed initial state x[0] = 0. */
+matlab_mat *matlab_step_ss(matlab_mat *A, matlab_mat *B,
+                           matlab_mat *C, matlab_mat *D,
+                           double dt, double N);
+
+/* SISO state-space frequency response: [mag, phase] = bode_ss(A,B,C,D,w).
+ * Per-frequency complex linear solve via real 2n x 2n LU; returns
+ * linear magnitude + degrees. SISO only (B=n*1, C=1*n, D=1*1). */
+matlab_mat *matlab_bode_ss_mag(matlab_mat *A, matlab_mat *B,
+                                matlab_mat *C, matlab_mat *D,
+                                matlab_mat *w);
+matlab_mat *matlab_bode_ss_phase(matlab_mat *A, matlab_mat *B,
+                                  matlab_mat *C, matlab_mat *D,
+                                  matlab_mat *w);
+
+/* Generalised input simulation. y = lsim_ss(A, B, C, D, u, dt) with u
+ * an N*m matrix (one row per sample). ZOH between samples, relaxed
+ * initial state x[0] = 0. Output y is N*p. */
+matlab_mat *matlab_lsim_ss(matlab_mat *A, matlab_mat *B,
+                           matlab_mat *C, matlab_mat *D,
+                           matlab_mat *u, double dt);
+
+/* SISO open-loop stability margins. Each scans `w`, interpolates the
+ * crossover, returns +Inf if no crossover on the grid. */
+double matlab_gain_margin (matlab_mat *A, matlab_mat *B,
+                           matlab_mat *C, matlab_mat *D,
+                           matlab_mat *w);
+double matlab_phase_margin(matlab_mat *A, matlab_mat *B,
+                           matlab_mat *C, matlab_mat *D,
+                           matlab_mat *w);
+
+/* Transfer-function frequency response: [mag, phase] = bode_tf(b, a, w).
+ * Polynomial coefficients in MATLAB convention (highest power first).
+ * Complex Horner evaluation; returns linear magnitude + degrees. */
+matlab_mat *matlab_bode_tf_mag  (matlab_mat *b, matlab_mat *a, matlab_mat *w);
+matlab_mat *matlab_bode_tf_phase(matlab_mat *b, matlab_mat *a, matlab_mat *w);
+
 /* Convolution (full shape — MATLAB default). conv(u,v) treats u and v as
  * vectors and returns a vector of length numel(u)+numel(v)-1, oriented as
  * a row if both inputs are rows (or scalar), otherwise as a column.

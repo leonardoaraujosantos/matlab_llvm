@@ -399,7 +399,29 @@ def mldivide_mm(A, B): return np.linalg.solve(_m(A), _m(B))
 def mrdivide_mm(A, B): return _m(A) @ np.linalg.inv(_m(B))
 def det(A):            return float(np.linalg.det(_m(A)))
 def svd(A):            return np.linalg.svd(_m(A), compute_uv=False).reshape((-1, 1))
-def eig(A):            return np.linalg.eigvals(_m(A)).real.reshape((-1, 1))
+def eig(A):
+    """Eigenvalues — polymorphic real/complex return mirroring the C
+    runtime's matlab_eig (Tier-1.1 of the CST roadmap). Symmetric A
+    returns ascending real eigenvalues; non-symmetric A returns either
+    a real column (when eigenvalues are all real) or a complex column
+    (when any conjugate pair exists), sorted ascending by real part
+    then by imag.
+    """
+    M = _m(A)
+    n = M.shape[0]
+    if n == 0:
+        return np.zeros((0, 1))
+    is_sym = np.allclose(M, M.T, rtol=1e-12, atol=1e-300)
+    if is_sym:
+        w = np.linalg.eigvalsh(M)
+        return np.sort(w).reshape((-1, 1))
+    w = np.linalg.eigvals(M)
+    # Sort by real part, tie-break by imag.
+    order = np.lexsort((w.imag, w.real))
+    w = w[order]
+    if np.all(np.abs(w.imag) < 1e-12):
+        return w.real.reshape((-1, 1))
+    return w.reshape((-1, 1))
 def eig_V(A):
     _, V = np.linalg.eig(_m(A))
     return V.real
@@ -432,6 +454,806 @@ def qr_R(A): return np.linalg.qr(_m(A))[1]
 def pinv(A): return np.linalg.pinv(_m(A))
 def trace(A): return float(np.trace(_m(A)))
 def norm(A): return float(np.linalg.norm(_m(A)))
+
+def _c2d_aug_expm_(A, B, Ts):
+    """Internal helper for c2d - returns the (n+m)x(n+m) augmented expm."""
+    Am = _m(A).astype(float)
+    Bm = _m(B).astype(float)
+    n = Am.shape[0]
+    m = Bm.shape[1] if Bm.ndim == 2 else 1
+    N = n + m
+    M = np.zeros((N, N))
+    M[:n, :n] = Am * Ts
+    M[:n, n:] = Bm * Ts
+    return expm(M), n, m
+
+
+def c2d_Ad(A, B, Ts):
+    """Discrete-time A matrix via ZOH discretisation."""
+    EM, n, _m_ = _c2d_aug_expm_(A, B, Ts)
+    return EM[:n, :n]
+
+
+def c2d_Bd(A, B, Ts):
+    """Discrete-time B matrix via ZOH discretisation."""
+    EM, n, m = _c2d_aug_expm_(A, B, Ts)
+    return EM[:n, n:n+m]
+
+
+def gram_c(A, B):
+    """Continuous controllability gramian: Wc = lyap(A, B B')."""
+    Bm = _m(B).astype(float)
+    return lyap(A, Bm @ Bm.T)
+
+
+def gram_o(A, C):
+    """Continuous observability gramian: Wo = lyap(A', C' C)."""
+    Am = _m(A).astype(float)
+    Cm = _m(C).astype(float)
+    return lyap(Am.T, Cm.T @ Cm)
+
+
+def _bode_ss_at_freq_(A, B, C, D, w):
+    """Internal helper - returns (Hr, Hi) for a single frequency."""
+    n = A.shape[0]
+    # M = [[-A, -wI]; [wI, -A]] (2n x 2n)
+    M = np.zeros((2*n, 2*n))
+    M[:n, :n]   = -A
+    M[n:, n:]   = -A
+    for i in _pyrange(n):
+        M[i, n+i]   = -w
+        M[n+i, i]   =  w
+    rhs = np.zeros(2*n)
+    rhs[:n] = B[:, 0]
+    X = np.linalg.solve(M, rhs)
+    Hr = float(C[0, :] @ X[:n]) + float(D[0, 0])
+    Hi = float(C[0, :] @ X[n:])
+    return Hr, Hi
+
+
+def bode_ss_mag(A, B, C, D, w):
+    """SISO state-space frequency response - linear magnitude column."""
+    Am = _m(A).astype(float); Bm = _m(B).astype(float)
+    Cm = _m(C).astype(float); Dm = _m(D).astype(float)
+    if Cm.ndim == 1: Cm = Cm.reshape(1, -1)
+    wv = _m(w).astype(float).reshape(-1)
+    out = np.zeros((wv.size, 1))
+    for k in _pyrange(wv.size):
+        Hr, Hi = _bode_ss_at_freq_(Am, Bm, Cm, Dm, float(wv[k]))
+        out[k, 0] = math.sqrt(Hr*Hr + Hi*Hi)
+    return out
+
+
+def bode_ss_phase(A, B, C, D, w):
+    """SISO state-space phase response - degrees."""
+    Am = _m(A).astype(float); Bm = _m(B).astype(float)
+    Cm = _m(C).astype(float); Dm = _m(D).astype(float)
+    if Cm.ndim == 1: Cm = Cm.reshape(1, -1)
+    wv = _m(w).astype(float).reshape(-1)
+    out = np.zeros((wv.size, 1))
+    for k in _pyrange(wv.size):
+        Hr, Hi = _bode_ss_at_freq_(Am, Bm, Cm, Dm, float(wv[k]))
+        out[k, 0] = math.atan2(Hi, Hr) * 180.0 / math.pi
+    return out
+
+
+def _bode_tf_at_freq_(b, a, w):
+    """Internal helper - returns (Hr, Hi) at a single frequency."""
+    br, bi = 0.0, 0.0
+    for k in _pyrange(b.size):
+        nbr = -bi * w + float(b[k])
+        nbi =  br * w
+        br, bi = nbr, nbi
+    ar, ai = 0.0, 0.0
+    for k in _pyrange(a.size):
+        nar = -ai * w + float(a[k])
+        nai =  ar * w
+        ar, ai = nar, nai
+    d = ar*ar + ai*ai
+    if d > 1e-300:
+        return ((br*ar + bi*ai) / d, (bi*ar - br*ai) / d)
+    return (0.0, 0.0)
+
+
+def bode_tf_mag(b, a, w):
+    """TF frequency response - linear magnitude column."""
+    bv = _m(b).astype(float).reshape(-1)
+    av = _m(a).astype(float).reshape(-1)
+    wv = _m(w).astype(float).reshape(-1)
+    out = np.zeros((wv.size, 1))
+    for k in _pyrange(wv.size):
+        Hr, Hi = _bode_tf_at_freq_(bv, av, float(wv[k]))
+        out[k, 0] = math.sqrt(Hr*Hr + Hi*Hi)
+    return out
+
+
+def bode_tf_phase(b, a, w):
+    """TF phase response - degrees."""
+    bv = _m(b).astype(float).reshape(-1)
+    av = _m(a).astype(float).reshape(-1)
+    wv = _m(w).astype(float).reshape(-1)
+    out = np.zeros((wv.size, 1))
+    for k in _pyrange(wv.size):
+        Hr, Hi = _bode_tf_at_freq_(bv, av, float(wv[k]))
+        out[k, 0] = math.atan2(Hi, Hr) * 180.0 / math.pi
+    return out
+
+
+def lsim_ss(A, B, C, D, u, dt):
+    """Generalised input simulation - same shape as step_ss but `u` is
+    an N x m matrix (one row per sample)."""
+    Am = _m(A).astype(float); Bm = _m(B).astype(float)
+    Cm = _m(C).astype(float); Dm = _m(D).astype(float)
+    um = _m(u).astype(float)
+    n = Am.shape[0]
+    m = Bm.shape[1]
+    p = Cm.shape[0]
+    N = um.shape[0]
+    Ad = c2d_Ad(A, B, dt)
+    Bd = c2d_Bd(A, B, dt)
+    x = np.zeros(n)
+    y = np.zeros((N, p))
+    for k in _pyrange(N):
+        uk   = um[k]
+        y[k] = Cm @ x + Dm @ uk
+        x    = Ad @ x + Bd @ uk
+    return y
+
+
+def gain_margin(A, B, C, D, w):
+    """Gain margin in linear units (not dB). +Inf if phase never
+    crosses -180 on the grid `w`."""
+    phase = bode_ss_phase(A, B, C, D, w).reshape(-1)
+    mag   = bode_ss_mag  (A, B, C, D, w).reshape(-1)
+    Nf = phase.size
+    if Nf < 2:
+        return float('inf')
+    for k in _pyrange(1, Nf):
+        p1 = float(phase[k-1]); p2 = float(phase[k])
+        if p1 > -180.0 and p2 <= -180.0:
+            frac = (p1 + 180.0) / (p1 - p2)
+            m1 = float(mag[k-1]); m2 = float(mag[k])
+            mc = m1 + frac * (m2 - m1)
+            if mc > 1e-300:
+                return 1.0 / mc
+            return float('inf')
+    return float('inf')
+
+
+def phase_margin(A, B, C, D, w):
+    """Phase margin in degrees. +Inf if |L| never crosses 1 on `w`."""
+    phase = bode_ss_phase(A, B, C, D, w).reshape(-1)
+    mag   = bode_ss_mag  (A, B, C, D, w).reshape(-1)
+    Nf = mag.size
+    if Nf < 2:
+        return float('inf')
+    for k in _pyrange(1, Nf):
+        m1 = float(mag[k-1]); m2 = float(mag[k])
+        if m1 > 1.0 and m2 <= 1.0:
+            frac = (m1 - 1.0) / (m1 - m2)
+            p1 = float(phase[k-1]); p2 = float(phase[k])
+            pc = p1 + frac * (p2 - p1)
+            return 180.0 + pc
+    return float('inf')
+
+
+def step_ss(A, B, C, D, dt, N):
+    """State-space unit-step response — N x p output trajectory.
+    ZOH discretise + direct recurrence from relaxed x[0] = 0."""
+    Am = _m(A).astype(float); Bm = _m(B).astype(float)
+    Cm = _m(C).astype(float); Dm = _m(D).astype(float)
+    n = Am.shape[0]
+    m = Bm.shape[1]
+    p = Cm.shape[0]
+    N = int(N)
+    Ad = c2d_Ad(A, B, dt)
+    Bd = c2d_Bd(A, B, dt)
+    u  = np.ones(m)
+    x  = np.zeros(n)
+    y  = np.zeros((N, p))
+    for k in _pyrange(N):
+        y[k] = Cm @ x + Dm @ u
+        x    = Ad @ x + Bd @ u
+    return y
+
+
+def lqr(A, B, Q, R):
+    """Continuous linear-quadratic regulator gain K = R^{-1} B' X
+    with X solving the algebraic Riccati equation. Tier-2 user-facing
+    wrapper over Tier-1.5 care."""
+    X    = care(A, B, Q, R)
+    Bt   = _m(B).astype(float).T
+    Rinv = np.linalg.inv(_m(R).astype(float))
+    return Rinv @ Bt @ X
+
+
+def dare(Ad, Bd, Q, R):
+    """Discrete algebraic Riccati - X = dare(Ad, Bd, Q, R).
+    Newton-Kleinman iteration seeded from X_0 = dlyap(Ad', Q); requires
+    Schur-stable Ad. Mirrors the C runtime exactly."""
+    Adm = _m(Ad).astype(float); Bdm = _m(Bd).astype(float)
+    Qm  = _m(Q ).astype(float); Rm  = _m(R ).astype(float)
+    n = Adm.shape[0]
+    mcols = Bdm.shape[1]
+    if (n == 0 or Adm.shape[1] != n or Bdm.shape[0] != n
+        or Qm.shape != (n, n) or Rm.shape != (mcols, mcols)):
+        return np.zeros((0, 0))
+    X = dlyap(Adm.T, Qm)
+    if X.size == 0:
+        return np.zeros((0, 0))
+    tol = 1e-12
+    for _ in _pyrange(60):
+        XB    = X @ Bdm
+        BtXB  = Bdm.T @ XB
+        S     = Rm + BtXB
+        try:
+            Sinv = np.linalg.inv(S)
+        except np.linalg.LinAlgError:
+            return np.zeros((0, 0))
+        BtXAd = Bdm.T @ (X @ Adm)
+        K     = Sinv @ BtXAd
+        Acl   = Adm - Bdm @ K
+        Qaug  = Qm + K.T @ Rm @ K
+        Xnew  = dlyap(Acl.T, Qaug)
+        if Xnew.size == 0:
+            return np.zeros((0, 0))
+        diff = float(np.linalg.norm(Xnew - X, 'fro'))
+        xn   = float(np.linalg.norm(Xnew,    'fro'))
+        X    = Xnew
+        if xn > 0.0 and diff <= tol * xn:
+            break
+    return 0.5 * (X + X.T)
+
+
+def dlqr(Ad, Bd, Q, R):
+    """Discrete linear-quadratic regulator gain K = (R + B' X B)^{-1} B' X A
+    with X solving the discrete algebraic Riccati equation."""
+    X = dare(Ad, Bd, Q, R)
+    if X.size == 0:
+        return np.zeros((0, 0))
+    Adm = _m(Ad).astype(float); Bdm = _m(Bd).astype(float)
+    Rm  = _m(R ).astype(float)
+    S    = Rm + Bdm.T @ X @ Bdm
+    Sinv = np.linalg.inv(S)
+    return Sinv @ (Bdm.T @ X @ Adm)
+
+
+def ctrb(A, B):
+    """Controllability matrix Co = [B, A*B, A^2*B, ..., A^{n-1}*B]."""
+    Am = _m(A).astype(float)
+    Bm = _m(B).astype(float)
+    n = Am.shape[0]
+    if n == 0 or Am.shape[1] != n or Bm.shape[0] != n:
+        return np.zeros((0, 0))
+    m = Bm.shape[1]
+    Co = np.zeros((n, n * m))
+    block = Bm.copy()
+    Co[:, 0:m] = block
+    for k in _pyrange(1, n):
+        block = Am @ block
+        Co[:, k*m:(k+1)*m] = block
+    return Co
+
+
+def obsv(A, C):
+    """Observability matrix Ob = [C; C*A; ...; C*A^{n-1}]."""
+    Am = _m(A).astype(float)
+    Cm = _m(C).astype(float)
+    n = Am.shape[0]
+    if n == 0 or Am.shape[1] != n or Cm.shape[1] != n:
+        return np.zeros((0, 0))
+    p = Cm.shape[0]
+    Ob = np.zeros((p * n, n))
+    block = Cm.copy()
+    Ob[0:p, :] = block
+    for k in _pyrange(1, n):
+        block = block @ Am
+        Ob[k*p:(k+1)*p, :] = block
+    return Ob
+
+
+def isstable(A):
+    """Return 1.0 if every eigenvalue of A has strictly negative real
+    part (continuous Hurwitz), else 0.0."""
+    Am = _m(A).astype(float)
+    if Am.shape[0] == 0 or Am.shape[0] != Am.shape[1]:
+        return 0.0
+    e = np.linalg.eigvals(Am)
+    return 1.0 if np.all(e.real < 0.0) else 0.0
+
+
+def damp(A):
+    """Per-pole [wn, zeta] table (continuous): n x 2 where each row is
+    [|lambda|, -real(lambda)/|lambda|]."""
+    Am = _m(A).astype(float)
+    if Am.shape[0] == 0 or Am.shape[0] != Am.shape[1]:
+        return np.zeros((0, 0))
+    e = np.linalg.eigvals(Am)
+    n = e.size
+    out = np.zeros((n, 2))
+    for i in _pyrange(n):
+        re = float(e[i].real); im = float(e[i].imag)
+        wn = math.sqrt(re*re + im*im)
+        zeta = -re / wn if wn > 0 else 0.0
+        out[i, 0] = wn
+        out[i, 1] = zeta
+    return out
+
+
+def kalman_L(A, G, C, Qn, Rn):
+    """Continuous Kalman gain via duality with LQR.
+    Plant xdot = A x + G w, y = C x + v, cov(w)=Qn, cov(v)=Rn.
+    L = (lqr(A', C', G Qn G', Rn))'."""
+    Am = _m(A).astype(float); Gm = _m(G).astype(float)
+    Cm = _m(C).astype(float); Qm = _m(Qn).astype(float); Rm = _m(Rn).astype(float)
+    GQGt = Gm @ Qm @ Gm.T
+    Kdual = lqr(Am.T, Cm.T, GQGt, Rm)
+    if Kdual.size == 0:
+        return np.zeros((0, 0))
+    return Kdual.T
+
+
+def kalmd_L(Ad, G, C, Qn, Rn):
+    """Discrete Kalman gain. L' = dlqr(Ad', C', G Qn G', Rn)."""
+    Am = _m(Ad).astype(float); Gm = _m(G).astype(float)
+    Cm = _m(C).astype(float); Qm = _m(Qn).astype(float); Rm = _m(Rn).astype(float)
+    GQGt = Gm @ Qm @ Gm.T
+    Kdual = dlqr(Am.T, Cm.T, GQGt, Rm)
+    if Kdual.size == 0:
+        return np.zeros((0, 0))
+    return Kdual.T
+
+
+def dcgain_ss(A, B, C, D):
+    """SS DC gain: D - C inv(A) B. Returns p×m matrix."""
+    Am = _m(A).astype(float)
+    Bm = _m(B).astype(float)
+    Cm = _m(C).astype(float)
+    Dm = _m(D).astype(float)
+    n = Am.shape[0]
+    if n == 0 or Am.shape[1] != n or Bm.shape[0] != n or Cm.shape[1] != n:
+        return np.zeros((0, 0))
+    try:
+        Ainv = np.linalg.inv(Am)
+    except np.linalg.LinAlgError:
+        return np.zeros((0, 0))
+    return Dm - Cm @ Ainv @ Bm
+
+
+def norm_h2(A, B, C):
+    """H2 system norm (continuous, strictly proper).
+    sqrt(trace(C Wc C')) where Wc = lyap(A, B B'). +Inf if A not Hurwitz."""
+    if isstable(A) == 0.0:
+        return float('inf')
+    Wc = gram_c(A, B)
+    if Wc.size == 0:
+        return float('inf')
+    Cm = _m(C).astype(float)
+    M = Cm @ Wc @ Cm.T
+    tr = float(np.trace(M))
+    return math.sqrt(tr) if tr > 0 else 0.0
+
+
+def _balred_full(A, B, C):
+    """Build the full balanced realization (Ab, Bb, Cb)."""
+    Am = _m(A).astype(float)
+    Bm = _m(B).astype(float)
+    Cm = _m(C).astype(float)
+    T = balreal_T(Am, Bm, Cm)
+    Ti = np.linalg.inv(T)
+    Ab = Ti @ Am @ T
+    Bb = Ti @ Bm
+    Cb = Cm @ T
+    return Ab, Bb, Cb
+
+
+def balred_A(A, B, C, k):
+    """k x k upper-left block of the balanced A."""
+    k = int(k)
+    n = _m(A).shape[0]
+    if k <= 0 or k > n:
+        return np.zeros((0, 0))
+    Ab, _, _ = _balred_full(A, B, C)
+    return Ab[:k, :k].copy()
+
+
+def balred_B(A, B, C, k):
+    """First k rows of the balanced B."""
+    k = int(k)
+    n = _m(A).shape[0]
+    if k <= 0 or k > n:
+        return np.zeros((0, 0))
+    _, Bb, _ = _balred_full(A, B, C)
+    return Bb[:k, :].copy()
+
+
+def balred_C(A, B, C, k):
+    """First k columns of the balanced C."""
+    k = int(k)
+    n = _m(A).shape[0]
+    if k <= 0 or k > n:
+        return np.zeros((0, 0))
+    _, _, Cb = _balred_full(A, B, C)
+    return Cb[:, :k].copy()
+
+
+def balreal_T(A, B, C):
+    """Balancing similarity transformation. T such that (T^{-1} A T,
+    T^{-1} B, C T) has Wc = Wo = diag(HSVs descending). Mirrors the C
+    runtime — symmetric matrix square root via eig decomposition."""
+    Am = _m(A).astype(float)
+    Bm = _m(B).astype(float)
+    Cm = _m(C).astype(float)
+    n = Am.shape[0]
+    Wc = gram_c(Am, Bm)
+    if Wc.size == 0:
+        return np.zeros((0, 0))
+    Wo = gram_o(Am, Cm)
+    if Wo.size == 0:
+        return np.zeros((0, 0))
+    # Symmetric square root of Wc.
+    dc, Vc = np.linalg.eigh(Wc)         # ascending
+    sqrt_dc = np.sqrt(np.maximum(dc, 0))
+    X = Vc @ np.diag(sqrt_dc) @ Vc.T
+    # M = X Wo X (sym PSD).
+    M = X @ Wo @ X
+    s2, U = np.linalg.eigh(M)            # ascending
+    sigma = np.sqrt(np.maximum(s2, 0))
+    # Reorder to descending.
+    order = np.argsort(-sigma)
+    U_ord = U[:, order]
+    sigma_ord = sigma[order]
+    # T = X * U_ord * diag(sigma_ord^{-1/2}).
+    inv_sqrt = np.where(sigma_ord > 0, 1.0 / np.sqrt(sigma_ord), 0.0)
+    T = X @ U_ord @ np.diag(inv_sqrt)
+    return T
+
+
+def hsvd(A, B, C):
+    """Hankel singular values: sqrt(eig(Wc * Wo)) sorted descending."""
+    Wc = gram_c(A, B)
+    if Wc.size == 0:
+        return np.zeros((0, 0))
+    Wo = gram_o(A, C)
+    if Wo.size == 0:
+        return np.zeros((0, 0))
+    e = np.linalg.eigvals(Wc @ Wo).real
+    s = np.sqrt(np.maximum(e, 0.0))
+    s = np.sort(s)[::-1]   # descending
+    return s.reshape(-1, 1)
+
+
+def place(A, B, P):
+    """SISO pole placement via Ackermann's formula:
+       K = [0..0 1] * inv(ctrb(A,B)) * alpha(A)
+    where alpha(s) = prod (s - p_i) is the desired char polynomial."""
+    Am = _m(A).astype(float)
+    Bm = _m(B).astype(float)
+    n = Am.shape[0]
+    if n == 0 or Am.shape[1] != n or Bm.shape[0] != n or Bm.shape[1] != 1:
+        return np.zeros((0, 0))
+    # Coerce P to a flat complex array of length n.
+    Parr = _m(P)
+    if np.iscomplexobj(Parr):
+        Pc = Parr.astype(complex).reshape(-1)
+    else:
+        Pc = Parr.astype(float).reshape(-1).astype(complex)
+    if Pc.size != n:
+        return np.zeros((0, 0))
+    # alpha(s) = prod (s - p_i). Build by complex polynomial multiplication.
+    coef = np.array([1.0 + 0j])
+    for p in Pc:
+        coef = np.convolve(coef, np.array([1.0 + 0j, -p]))
+    coef = coef.real  # imag part collapses to ~0 for conjugate-paired roots
+    # alpha(A) via Horner. coef[0] = 1 (leading), coef[-1] = constant term.
+    M = np.eye(n)
+    for k in _pyrange(1, n + 1):
+        M = M @ Am + coef[k] * np.eye(n)
+    Co = ctrb(Am, Bm)
+    Coinv = np.linalg.inv(Co)
+    # K = e_n^T * Coinv * M = last row of (Coinv @ M).
+    CinvM = Coinv @ M
+    K = CinvM[n - 1:n, :]
+    return K
+
+
+def care(A, B, Q, R):
+    """Continuous algebraic Riccati - X = care(A, B, Q, R) - Tier-1.5
+    of the CST roadmap. Mirrors the C-runtime matrix-sign Newton
+    iteration; solves A'X + XA - X B R^{-1} B' X + Q = 0 for the
+    stabilising solution."""
+    Am = _m(A).astype(float); Bm = _m(B).astype(float)
+    Qm = _m(Q).astype(float); Rm = _m(R).astype(float)
+    n = Am.shape[0]
+    if n == 0 or Am.shape[1] != n:
+        return np.zeros((0, 0))
+    Rinv  = np.linalg.inv(Rm)
+    BRiBt = Bm @ Rinv @ Bm.T
+    H = np.block([[Am,        -BRiBt],
+                  [-Qm,       -Am.T]])
+    S = H.copy()
+    for _ in _pyrange(60):
+        try:
+            Sinv = np.linalg.inv(S)
+        except np.linalg.LinAlgError:
+            return np.zeros((0, 0))
+        Snew = 0.5 * (S + Sinv)
+        diff = float(np.linalg.norm(Snew - S, 'fro'))
+        snrm = float(np.linalg.norm(Snew, 'fro'))
+        S = Snew
+        if snrm > 0 and diff <= 1e-12 * snrm:
+            break
+    P = 0.5 * (np.eye(2*n) - S)
+    Utop = P[:n, :n]
+    Ubot = P[n:, :n]
+    try:
+        X = Ubot @ np.linalg.inv(Utop)
+    except np.linalg.LinAlgError:
+        return np.zeros((0, 0))
+    return 0.5 * (X + X.T)
+
+
+def lyap(A, Q):
+    """Continuous Lyapunov: A X + X A' + Q = 0 - Tier-1.4 of CST roadmap.
+    Vectorise + dense linear solve; mirrors the C runtime exactly."""
+    Am = _m(A).astype(float)
+    Qm = _m(Q).astype(float)
+    n = Am.shape[0]
+    if n == 0 or Am.shape[1] != n or Qm.shape != Am.shape:
+        return np.zeros((0, 0))
+    I = np.eye(n)
+    M = np.kron(Am, I) + np.kron(I, Am)
+    rhs = -Qm.reshape(-1)
+    x = np.linalg.solve(M, rhs)
+    return x.reshape(n, n)
+
+
+def dlyap(A, Q):
+    """Discrete Lyapunov: A X A' - X + Q = 0  - Tier-1.4 of CST roadmap."""
+    Am = _m(A).astype(float)
+    Qm = _m(Q).astype(float)
+    n = Am.shape[0]
+    if n == 0 or Am.shape[1] != n or Qm.shape != Am.shape:
+        return np.zeros((0, 0))
+    M = np.kron(Am, Am) - np.eye(n * n)
+    rhs = -Qm.reshape(-1)
+    x = np.linalg.solve(M, rhs)
+    return x.reshape(n, n)
+
+
+def _hessenberg_inplace_(H, U):
+    """Householder Hessenberg reduction. Mirrors the C runtime's
+    hessenberg_inplace_ — when U is not None it's pre-set to identity
+    by the caller and updated by the reflection accumulator."""
+    n = H.shape[0]
+    if n <= 2:
+        return
+    for k in _pyrange(n - 2):
+        col = H[k+1:, k]
+        sigma = float(np.dot(col, col))
+        if sigma == 0.0:
+            continue
+        xk = H[k+1, k]
+        xnorm = math.sqrt(sigma)
+        v0 = xk + (xnorm if xk >= 0 else -xnorm)
+        v = np.zeros(n)
+        v[k+1] = v0
+        v[k+2:] = H[k+2:, k]
+        vnorm2 = v0*v0 + (sigma - xk*xk)
+        if vnorm2 == 0.0:
+            continue
+        beta = 2.0 / vnorm2
+        # Apply from left.
+        w = beta * (v[k+1:] @ H[k+1:, k:])
+        H[k+1:, k:] -= np.outer(v[k+1:], w)
+        # Apply from right to H.
+        w = beta * (H[:, k+1:] @ v[k+1:])
+        H[:, k+1:] -= np.outer(w, v[k+1:])
+        # Apply from right to U if accumulating.
+        if U is not None:
+            wU = beta * (U[:, k+1:] @ v[k+1:])
+            U[:, k+1:] -= np.outer(wU, v[k+1:])
+        # Clean tiny residues.
+        H[k+2:, k] = 0.0
+
+
+def _francis_qr_(H, U):
+    """Francis double-shift implicit QR. Mirrors the C runtime's
+    francis_qr_; updates U on the right when not None."""
+    n = H.shape[0]
+    if n <= 1:
+        return
+    max_total_iter = 30 * n
+    total_iter = 0
+    q = n - 1
+    while q > 0 and total_iter < max_total_iter:
+        # Find start of the active block.
+        p = q
+        while p > 0:
+            off = abs(H[p, p-1])
+            diag = abs(H[p-1, p-1]) + abs(H[p, p])
+            if off <= 1e-14 * (diag if diag != 0 else 1.0):
+                H[p, p-1] = 0.0
+                break
+            p -= 1
+        if p == q:
+            q -= 1
+            continue
+        if p == q - 1:
+            q -= 2
+            continue
+        total_iter += 1
+        # Wilkinson double-shift from trailing 2x2.
+        s = H[q-1, q-1] + H[q, q]
+        t = H[q-1, q-1] * H[q, q] - H[q-1, q] * H[q, q-1]
+        if total_iter % 10 == 0:
+            scale = abs(H[q, q-1]) + abs(H[q-1, q-2])
+            s = 1.5 * scale
+            t = scale * scale
+        Hpp  = H[p, p]
+        Hpp1 = H[p, p+1]
+        Hp1p = H[p+1, p]
+        Hp1  = H[p+1, p+1]
+        x = Hpp*Hpp + Hpp1*Hp1p - s*Hpp + t
+        y = Hp1p * (Hpp + Hp1 - s)
+        z = Hp1p * H[p+2, p+1]
+        for k in _pyrange(p, q):
+            r = 3 if (k + 2) <= q else 2
+            if k > p:
+                v0 = H[k, k-1]
+                v1 = H[k+1, k-1]
+                v2 = H[k+2, k-1] if r == 3 else 0.0
+            else:
+                v0, v1, v2 = x, y, z
+            sig = v0*v0 + v1*v1 + v2*v2
+            if sig == 0.0:
+                continue
+            xnorm = math.sqrt(sig)
+            v0p = v0 + (xnorm if v0 >= 0 else -xnorm)
+            vnorm2 = v0p*v0p + v1*v1 + v2*v2
+            if vnorm2 == 0.0:
+                continue
+            beta = 2.0 / vnorm2
+            row_lim_lo = (k - 1) if k > p else p
+            for j in _pyrange(row_lim_lo, n):
+                w = v0p * H[k, j] + v1 * H[k+1, j]
+                if r == 3:
+                    w += v2 * H[k+2, j]
+                w *= beta
+                H[k,   j] -= v0p * w
+                H[k+1, j] -= v1  * w
+                if r == 3:
+                    H[k+2, j] -= v2 * w
+            col_lim_hi = _pymin(k + r + 1, n)
+            for i in _pyrange(col_lim_hi):
+                w = v0p * H[i, k] + v1 * H[i, k+1]
+                if r == 3:
+                    w += v2 * H[i, k+2]
+                w *= beta
+                H[i, k]   -= v0p * w
+                H[i, k+1] -= v1  * w
+                if r == 3:
+                    H[i, k+2] -= v2 * w
+            if U is not None:
+                for i in _pyrange(n):
+                    w = v0p * U[i, k] + v1 * U[i, k+1]
+                    if r == 3:
+                        w += v2 * U[i, k+2]
+                    w *= beta
+                    U[i, k]   -= v0p * w
+                    U[i, k+1] -= v1  * w
+                    if r == 3:
+                        U[i, k+2] -= v2 * w
+
+
+def schur(A):
+    """Real Schur decomposition T (1-return) — Tier-1.2 follow-on of
+    the CST roadmap. Mirrors the C-runtime Hessenberg + Francis-QR
+    pipeline so all four lanes (LLVM / C / C++ / Python / TS) agree
+    bit-for-bit on the resulting T."""
+    M = _m(A).astype(float)
+    n = M.shape[0]
+    if n == 0 or M.shape[1] != n:
+        return np.zeros((0, 0))
+    H = M.copy()
+    _hessenberg_inplace_(H, None)
+    _francis_qr_(H, None)
+    return H
+
+
+def schur_T(A): return schur(A)
+
+
+def schur_U(A):
+    """Orthogonal accumulator U for [U, T] = schur(A)."""
+    M = _m(A).astype(float)
+    n = M.shape[0]
+    if n == 0 or M.shape[1] != n:
+        return np.zeros((0, 0))
+    H = M.copy()
+    U = np.eye(n)
+    _hessenberg_inplace_(H, U)
+    _francis_qr_(H, U)
+    return U
+
+
+def hess(A):
+    """Hessenberg reduction — H = hess(A) — Tier-1.2 of the CST roadmap.
+    Householder reflections, in-place; mirrors the C lane bit-for-bit on
+    well-conditioned inputs (the same arithmetic order)."""
+    H = _m(A).astype(float).copy()
+    n = H.shape[0]
+    if n == 0 or H.shape[1] != n:
+        return np.zeros((0, 0))
+    if n <= 2:
+        return H
+    for k in _pyrange(n - 2):
+        sigma = float(np.sum(H[k+1:, k] ** 2))
+        if sigma == 0.0:
+            continue
+        xk = H[k+1, k]
+        xnorm = math.sqrt(sigma)
+        v = np.zeros(n)
+        v0 = xk + (xnorm if xk >= 0 else -xnorm)
+        v[k+1] = v0
+        v[k+2:] = H[k+2:, k]
+        vnorm2 = v0 * v0 + (sigma - xk * xk)
+        if vnorm2 == 0.0:
+            continue
+        beta = 2.0 / vnorm2
+        # Apply (I - beta v v^T) from the left — rows k+1..n-1.
+        w = beta * (v[k+1:] @ H[k+1:, k:])
+        H[k+1:, k:] -= np.outer(v[k+1:], w)
+        # Apply from the right — columns k+1..n-1.
+        w = beta * (H[:, k+1:] @ v[k+1:])
+        H[:, k+1:] -= np.outer(w, v[k+1:])
+        # Clean tiny subdiagonal residues.
+        H[k+2:, k] = 0.0
+    return H
+
+
+def expm(A):
+    """Matrix exponential — Tier-1.3 of the Control System Toolbox roadmap.
+    Hand-rolled scaling-and-squaring with [13/13] Pade approximant
+    (Higham 2005), mirroring runtime/matlab_runtime.cpp matlab_expm so
+    all four emit lanes (LLVM / C / C++ / Python / TS) agree to floating-
+    point precision. We don't defer to scipy.linalg.expm because (a) we
+    want lane-to-lane bit reproducibility, (b) the Anaconda environment
+    on macOS commonly has a numpy/scipy mismatch that breaks the import."""
+    M = _m(A).astype(float)
+    n = M.shape[0]
+    if n == 0 or M.shape[1] != n:
+        return np.zeros((0, 0))
+    b = (
+        64764752532480000.0, 32382376266240000.0, 7771770303897600.0,
+        1187353796428800.0,  129060195264000.0,   10559470521600.0,
+        670442572800.0,      33522128640.0,       1323241920.0,
+        40840800.0,          960960.0,            16380.0,
+        182.0,               1.0,
+    )
+    theta13 = 5.371920351148152
+    anrm = float(np.max(np.sum(np.abs(M), axis=0)))
+    s = 0
+    Ms = M
+    if anrm > theta13:
+        r = anrm / theta13
+        while (1 << (s + 1)) < r: s += 1
+        if (1 << s) < r: s += 1
+        Ms = M * (2.0 ** (-s))
+    A2 = Ms @ Ms
+    A4 = A2 @ A2
+    A6 = A4 @ A2
+    I  = np.eye(n)
+    W1 = b[13] * A6 + b[11] * A4 + b[9] * A2
+    Z1 = b[12] * A6 + b[10] * A4 + b[8] * A2
+    W2 = b[7]  * A6 + b[5]  * A4 + b[3] * A2 + b[1] * I
+    Z2 = b[6]  * A6 + b[4]  * A4 + b[2] * A2 + b[0] * I
+    U = Ms @ (A6 @ W1 + W2)
+    V = A6 @ Z1 + Z2
+    R = np.linalg.solve(V - U, V + U)
+    for _ in _pyrange(s):
+        R = R @ R
+    return R
 
 
 # --- elementwise binary ops -----------------------------------------------

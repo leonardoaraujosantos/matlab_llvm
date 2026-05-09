@@ -1,0 +1,27 @@
+1Ã1 Kalman gain L (closed form sqrt(2) - 1):
+[[0.41421356]]
+Kalman gain L (2Ã1 â observer column):
+[[2.46410162]
+ [0.07179677]]
+isstable(A - L*C) â must be 1:
+1
+estimator poles (must all have negative real part):
+[[-1.73205083]
+ [-1.73205079]]
+discrete Kalman gain L:
+[[0.49553149]
+ [0.01229778]]
+|eig(Ad - L Cd)|^2 (must all be < 1):
+[[0.04451019]
+ [0.15483762]]
+LQR feedback K:
+[[6.75084999 2.30136025]]
+Kalman gain L:
+[[2.07768354]
+ [0.0807009 ]]
+LQR closed-loop poles (real parts):
+[[-2.17532775]
+ [-1.1260325 ]]
+Kalman estimator poles (real parts):
+[[-1.90211303]
+ [-1.1755705 ]]
