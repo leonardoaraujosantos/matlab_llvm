@@ -3182,6 +3182,141 @@ matlab_mat *matlab_balred_C(matlab_mat *A, matlab_mat *B, matlab_mat *C,
 /* Forward decl: matlab_isstable is defined just below. */
 double matlab_isstable(matlab_mat *A);
 
+/* Forward decls (real_c / imag_c live in runtime_complex.cpp). */
+matlab_mat *matlab_real_c(void *A);
+matlab_mat *matlab_imag_c(void *A);
+
+/*-------------------------------------------------------------------------
+ * Continuous-to-discrete Tustin (bilinear) discretisation.
+ *
+ *   [Ad, Bd] = c2d_tustin(A, B, Ts)
+ *
+ * Substitutes s = (2/Ts)·(z − 1)/(z + 1) into the continuous-time
+ * state-space, no expm needed:
+ *      α  = Ts/2
+ *      M  = I − α A
+ *      Ad = M⁻¹ · (I + α A)
+ *      Bd = Ts · M⁻¹ · B
+ *
+ * Shipped as two single-return entries (matlab_c2d_tustin_Ad /
+ * matlab_c2d_tustin_Bd) mirroring the eig_V / eig_D and existing
+ * matlab_c2d_Ad / matlab_c2d_Bd precedent. The MATLAB-faithful
+ * `[Ad, Bd] = c2d(A, B, Ts, 'tustin')` form is a follow-on (string-arg
+ * dispatch). Tier-2.2 of the CST roadmap.
+ *
+ * Note: this v1 returns just (Ad, Bd) — same shape as the ZOH c2d
+ * we already ship. The exact transfer-function preservation
+ * `H_d(z) = H_c((2/Ts)(z−1)/(z+1))` holds without any C/D
+ * adjustment when the user keeps the same C/D matrices.
+ *-------------------------------------------------------------------------*/
+static matlab_mat *c2d_tustin_M_inv_(matlab_mat *A, double Ts) {
+    int64_t n = A->rows;
+    double alpha = Ts / 2.0;
+    matlab_mat *M = mat_alloc(n, n);
+    for (int64_t i = 0; i < n; ++i)
+        for (int64_t j = 0; j < n; ++j) {
+            double v = -alpha * A->data[i * n + j];
+            if (i == j) v += 1.0;
+            M->data[i * n + j] = v;
+        }
+    return matlab_inv(M);
+}
+
+matlab_mat *matlab_c2d_tustin_Ad(matlab_mat *A, matlab_mat *B, double Ts) {
+    if (!A) return mat_alloc(0, 0);
+    int64_t n = A->rows;
+    if (n == 0 || A->cols != n) return mat_alloc(0, 0);
+    (void)B;   /* Ad doesn't actually need B; arg kept for API symmetry. */
+    double alpha = Ts / 2.0;
+    matlab_mat *Minv = c2d_tustin_M_inv_(A, Ts);
+    if (!Minv || Minv->rows == 0) return mat_alloc(0, 0);
+    /* P = I + α A. */
+    matlab_mat *P = mat_alloc(n, n);
+    for (int64_t i = 0; i < n; ++i)
+        for (int64_t j = 0; j < n; ++j) {
+            double v = alpha * A->data[i * n + j];
+            if (i == j) v += 1.0;
+            P->data[i * n + j] = v;
+        }
+    return matlab_matmul_mm(Minv, P);
+}
+
+matlab_mat *matlab_c2d_tustin_Bd(matlab_mat *A, matlab_mat *B, double Ts) {
+    if (!A || !B) return mat_alloc(0, 0);
+    int64_t n = A->rows;
+    if (n == 0 || A->cols != n || B->rows != n) return mat_alloc(0, 0);
+    matlab_mat *Minv = c2d_tustin_M_inv_(A, Ts);
+    if (!Minv || Minv->rows == 0) return mat_alloc(0, 0);
+    /* Bd = Ts · M⁻¹ · B. */
+    matlab_mat *MinvB = matlab_matmul_mm(Minv, B);
+    int64_t m = B->cols;
+    matlab_mat *Bd = mat_alloc(n, m);
+    for (int64_t i = 0; i < n; ++i)
+        for (int64_t j = 0; j < m; ++j)
+            Bd->data[i * m + j] = Ts * MinvB->data[i * m + j];
+    return Bd;
+}
+
+/*-------------------------------------------------------------------------
+ * Discrete-time stability test: isstable_d(A) returns 1.0 if every
+ * eigenvalue of A is strictly inside the unit disk (|λ| < 1, Schur-
+ * stable), else 0.0. Marginal eigenvalues on |λ| = 1 fail (per MATLAB
+ * convention).
+ *-------------------------------------------------------------------------*/
+double matlab_isstable_d(matlab_mat *A) {
+    if (!A || A->rows == 0 || A->cols != A->rows) return 0.0;
+    matlab_mat *e  = matlab_eig(A);
+    matlab_mat *Re = matlab_real_c(e);
+    matlab_mat *Im = matlab_imag_c(e);
+    int64_t n = Re->rows * Re->cols;
+    for (int64_t i = 0; i < n; ++i) {
+        double re = Re->data[i], im = Im->data[i];
+        double mag2 = re * re + im * im;
+        if (mag2 >= 1.0) return 0.0;   /* on or outside unit circle → fail */
+    }
+    return 1.0;
+}
+
+/*-------------------------------------------------------------------------
+ * Discrete-time H₂ system norm.
+ *
+ *   norm_h2_d(A, B, C, D) = sqrt( trace(D · D') + trace(C · Wc · C') )
+ * where Wc = dlyap(A, B · B'). The trace(D·D') term is the impulse-
+ * response k=0 contribution; the gramian term is the rest.
+ *
+ * Returns +Inf if A is not Schur-stable (gramian unbounded). Unlike
+ * the continuous case, D ≠ 0 is fine for discrete H₂.
+ *-------------------------------------------------------------------------*/
+double matlab_norm_h2_d(matlab_mat *A, matlab_mat *B,
+                        matlab_mat *C, matlab_mat *D) {
+    if (!A || !B || !C || !D) return INFINITY;
+    int64_t n = A->rows;
+    if (n == 0 || A->cols != n || B->rows != n || C->cols != n)
+        return INFINITY;
+    int64_t m = B->cols;
+    int64_t p = C->rows;
+    if (D->rows != p || D->cols != m) return INFINITY;
+    if (matlab_isstable_d(A) == 0.0) return INFINITY;
+    /* Wc = dlyap(A, B B'). */
+    matlab_mat *Bt = matlab_transpose(B);
+    matlab_mat *BBt = matlab_matmul_mm(B, Bt);
+    matlab_mat *Wc = matlab_dlyap(A, BBt);
+    if (!Wc || Wc->rows == 0) return INFINITY;
+    /* C Wc C' trace. */
+    matlab_mat *Ct = matlab_transpose(C);
+    matlab_mat *WCt = matlab_matmul_mm(Wc, Ct);
+    matlab_mat *CWCt = matlab_matmul_mm(C, WCt);
+    double tr_gram = 0.0;
+    for (int64_t i = 0; i < p; ++i) tr_gram += CWCt->data[i * p + i];
+    /* D D' trace. */
+    matlab_mat *Dt = matlab_transpose(D);
+    matlab_mat *DDt = matlab_matmul_mm(D, Dt);
+    double tr_D = 0.0;
+    for (int64_t i = 0; i < p; ++i) tr_D += DDt->data[i * p + i];
+    double tr = tr_gram + tr_D;
+    return tr > 0.0 ? sqrt(tr) : 0.0;
+}
+
 /*-------------------------------------------------------------------------
  * Continuous-time Kalman filter — steady-state gain.
  *

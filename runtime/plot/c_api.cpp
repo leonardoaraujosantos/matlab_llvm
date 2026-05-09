@@ -762,3 +762,96 @@ int matlab_savefig(const char *path, int64_t plen) {
 }
 
 }  /* extern "C" */
+
+/* -------- IDE integration ------------------------------------------------ */
+
+namespace {
+
+/* RFC 4648 base64 alphabet. Stream-style encoder: writes directly to
+ * stdout in 76-char-wide lines so the IDE-side reader sees readable,
+ * easy-to-buffer chunks. Padding ('=') is appended on the final line. */
+constexpr const char kB64[] =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+void write_base64_chunked(const uint8_t *data, size_t n, FILE *out) {
+    constexpr int kLine = 76;          /* multiple of 4 — keeps groups intact */
+    char line[kLine + 1];
+    int  col = 0;
+    auto flush = [&]() {
+        if (col == 0) return;
+        std::fwrite(line, 1, col, out);
+        std::fputc('\n', out);
+        col = 0;
+    };
+    auto emit_byte = [&](char c) {
+        line[col++] = c;
+        if (col == kLine) flush();
+    };
+
+    size_t i = 0;
+    while (i + 3 <= n) {
+        uint32_t w = (uint32_t(data[i]) << 16) |
+                     (uint32_t(data[i+1]) << 8) |
+                      uint32_t(data[i+2]);
+        emit_byte(kB64[(w >> 18) & 0x3F]);
+        emit_byte(kB64[(w >> 12) & 0x3F]);
+        emit_byte(kB64[(w >>  6) & 0x3F]);
+        emit_byte(kB64[ w        & 0x3F]);
+        i += 3;
+    }
+    if (i < n) {
+        uint32_t w = uint32_t(data[i]) << 16;
+        if (i + 1 < n) w |= uint32_t(data[i+1]) << 8;
+        emit_byte(kB64[(w >> 18) & 0x3F]);
+        emit_byte(kB64[(w >> 12) & 0x3F]);
+        if (i + 1 < n) emit_byte(kB64[(w >> 6) & 0x3F]);
+        else           emit_byte('=');
+        emit_byte('=');
+    }
+    flush();
+}
+
+bool ide_figures_enabled() {
+    const char *v = std::getenv("MATLAB_LLVM_IDE_FIGURES");
+    return v && v[0] == '1';
+}
+
+/* End-of-process flush is handled by the destructor of figure.cpp's
+ * thread_local ThreadFigures registry — std::atexit isn't viable on
+ * macOS because thread_local destructors run before atexit handlers
+ * on the main thread, so by the time the handler fires the figure
+ * vector has already been cleared. The TLS destructor calls into
+ * matlab_ide_emit_all_figures while its member storage is still live,
+ * which is what we want for both Run mode (compiled exec) and the
+ * matlabc REPL (per-input emit happens explicitly from the REPL
+ * driver in tools/matlabc/main.cpp). */
+
+}  // namespace
+
+extern "C" {
+
+void matlab_ide_emit_all_figures(void) {
+    if (!ide_figures_enabled()) return;
+    auto figs = matlab_plot::figures_snapshot();
+    if (figs.empty()) return;
+
+    FILE *out = stdout;
+    for (matlab_plot::Figure *fig : figs) {
+        if (!fig) continue;
+        auto buf = matlab_plot::render(*fig, matlab_plot::Format::Png);
+        if (!buf.data || buf.size == 0) continue;
+        std::fprintf(out,
+                     "___MF_FIG_BEGIN___ id=%d w=%d h=%d\n",
+                     fig->id, fig->width_px, fig->height_px);
+        write_base64_chunked(buf.data, buf.size, out);
+        std::fputs("___MF_FIG_END___\n", out);
+        std::free(buf.data);
+    }
+    std::fflush(out);
+}
+
+void matlab_drawnow(void) {
+    matlab_ide_emit_all_figures();
+}
+
+}  /* extern "C" */

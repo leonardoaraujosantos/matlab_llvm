@@ -801,6 +801,83 @@ export function damp(A: any): NDArray {
   return out;
 }
 
+// Tustin discretisation Ad = (I − αA)⁻¹ (I + αA), α = Ts/2.
+export function c2d_tustin_Ad(A: any, B: any, Ts: number): NDArray {
+  const Am = asArray(A);
+  const n = Am.rows;
+  if (n === 0 || Am.cols !== n) return np.zeros(0, 0);
+  const alpha = Ts / 2.0;
+  const M = np.zeros(n, n), P = np.zeros(n, n);
+  for (let i = 0; i < n; ++i)
+    for (let j = 0; j < n; ++j) {
+      const aij = Am.at(i, j);
+      M.set(i, j, (i === j ? 1 : 0) - alpha * aij);
+      P.set(i, j, (i === j ? 1 : 0) + alpha * aij);
+    }
+  return np.matmul(np.linalg.inv(M), P);
+}
+
+// Tustin discretisation Bd = Ts · (I − αA)⁻¹ · B.
+export function c2d_tustin_Bd(A: any, B: any, Ts: number): NDArray {
+  const Am = asArray(A), Bm = asArray(B);
+  const n = Am.rows, m = Bm.cols;
+  if (n === 0 || Am.cols !== n || Bm.rows !== n) return np.zeros(0, 0);
+  const alpha = Ts / 2.0;
+  const M = np.zeros(n, n);
+  for (let i = 0; i < n; ++i)
+    for (let j = 0; j < n; ++j)
+      M.set(i, j, (i === j ? 1 : 0) - alpha * Am.at(i, j));
+  const MinvB = np.matmul(np.linalg.inv(M), Bm);
+  const out = np.zeros(n, m);
+  for (let i = 0; i < n; ++i)
+    for (let j = 0; j < m; ++j) out.set(i, j, Ts * MinvB.at(i, j));
+  return out;
+}
+
+// Discrete stability — 1.0 if |eig(A)| < 1 ∀, else 0.0.
+// Degraded on TS via the eig stub.
+export function isstable_d(A: any): number {
+  const Am = asArray(A);
+  if (Am.rows === 0 || Am.rows !== Am.cols) return 0.0;
+  const e: any = (np.linalg as any).eig ? (np.linalg as any).eig(Am) : null;
+  if (!e || !e.at) return 0.0;
+  const n = e.rows * e.cols;
+  for (let i = 0; i < n; ++i) {
+    const re = e.at(Math.floor(i / e.cols), i % e.cols);
+    if (re * re >= 1.0) return 0.0;   // imag = 0 in stub
+  }
+  return 1.0;
+}
+
+// Discrete H2 norm: sqrt(trace(D D') + trace(C Wc C')).
+export function norm_h2_d(A: any, B: any, C: any, D: any): number {
+  if (isstable_d(A) === 0.0) return Infinity;
+  const Am = asArray(A), Bm = asArray(B);
+  const Cm = asArray(C), Dm = asArray(D);
+  const n = Am.rows, m = Bm.cols, p = Cm.rows;
+  // BB' (n×n).
+  const Bt = np.zeros(m, n);
+  for (let i = 0; i < n; ++i)
+    for (let j = 0; j < m; ++j) Bt.set(j, i, Bm.at(i, j));
+  const BBt = np.matmul(Bm, Bt);
+  const Wc = dlyap(Am, BBt);
+  if (Wc.rows === 0) return Infinity;
+  // trace(C Wc C').
+  const Ct = np.zeros(Cm.cols, p);
+  for (let i = 0; i < Cm.rows; ++i)
+    for (let j = 0; j < Cm.cols; ++j) Ct.set(j, i, Cm.at(i, j));
+  const CWCt = np.matmul(Cm, np.matmul(Wc, Ct));
+  let tr = 0;
+  for (let i = 0; i < p; ++i) tr += CWCt.at(i, i);
+  // trace(D D').
+  const Dt = np.zeros(Dm.cols, p);
+  for (let i = 0; i < Dm.rows; ++i)
+    for (let j = 0; j < Dm.cols; ++j) Dt.set(j, i, Dm.at(i, j));
+  const DDt = np.matmul(Dm, Dt);
+  for (let i = 0; i < p; ++i) tr += DDt.at(i, i);
+  return tr > 0 ? Math.sqrt(tr) : 0;
+}
+
 // Continuous Kalman gain via LQR duality. L = (lqr(A', C', G Qn G', Rn))'.
 export function kalman_L(A: any, G: any, C: any, Qn: any, Rn: any): NDArray {
   const Am = asArray(A), Gm = asArray(G), Cm = asArray(C);

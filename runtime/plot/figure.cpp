@@ -2,6 +2,15 @@
 
 #include <memory>
 
+/* IDE-emit forward decl: defined in plot/c_api.cpp. We invoke it from
+ * the thread-local registry's destructor so the per-thread figure list
+ * is still alive when the program is exiting — std::atexit doesn't work
+ * here because on macOS thread_local destructors fire BEFORE atexit
+ * handlers for the main thread, so by the time atexit runs the vector
+ * has already been cleared. The function self-gates on the env var,
+ * so non-IDE runs pay only one no-op call per thread on shutdown. */
+extern "C" void matlab_ide_emit_all_figures(void);
+
 namespace matlab_plot {
 
 namespace {
@@ -13,6 +22,16 @@ struct ThreadFigures {
     std::vector<std::unique_ptr<Figure>> all;
     Figure *current = nullptr;
     int     next_id = 1;
+
+    ~ThreadFigures() {
+        /* Last-ditch IDE flush: any open figure on this thread that was
+         * never explicitly closed gets one final emit before its storage
+         * is torn down. The destructor body runs before member sub-objects
+         * (the `all` vector) are destroyed, so the snapshot is safe.
+         * Skipped if the user already called close_all() — `all` is empty
+         * and the emit is a no-op. */
+        matlab_ide_emit_all_figures();
+    }
 };
 
 thread_local ThreadFigures tls;
@@ -59,6 +78,13 @@ void close_all() {
     tls.all.clear();
     tls.current = nullptr;
     tls.next_id = 1;
+}
+
+std::vector<Figure *> figures_snapshot() {
+    std::vector<Figure *> out;
+    out.reserve(tls.all.size());
+    for (auto &f : tls.all) out.push_back(f.get());
+    return out;
 }
 
 Axes &current_axes() {

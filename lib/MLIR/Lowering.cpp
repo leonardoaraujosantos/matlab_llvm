@@ -6487,7 +6487,7 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             "schur", "lyap", "dlyap", "care", "dare", "lqr", "dlqr",
             "ctrb", "obsv", "place", "damp", "hsvd", "balreal_T",
             "balred_A", "balred_B", "balred_C", "dcgain_ss",
-            "kalman_L", "kalmd_L", "c2d",
+            "kalman_L", "kalmd_L", "c2d", "c2d_tustin",
             "gram_c", "gram_o", "step_ss", "bode_ss", "lsim_ss", "bode_tf",
             "find", "ind2sub", "linspace",
             /* Complex: all return a matrix descriptor (matlab_mat* or

@@ -3103,6 +3103,29 @@ bool TensorLowering::rewriteBuiltinCalls() {
       }
     }
 
+    /* [Ad, Bd] = c2d_tustin(A, B, Ts) — Tustin (bilinear) discretisation.
+     * Same shape as c2d above; routes to matlab_c2d_tustin_{Ad,Bd}. */
+    if (NA && NA.getValue().getSExtValue() == 2 &&
+        Name == "c2d_tustin" && Call->getNumOperands() == 3 &&
+        Call->getNumResults() == 2 &&
+        Call->getOperand(2).getType() == F64) {
+      Value V0 = boxAsPtr(Call->getOperand(0));
+      Value V1 = boxAsPtr(Call->getOperand(1));
+      if (V0 && V1) {
+        B.setInsertionPoint(Call);
+        auto Fa = rt("matlab_c2d_tustin_Ad", PtrTy, {PtrTy, PtrTy, F64});
+        auto Fb = rt("matlab_c2d_tustin_Bd", PtrTy, {PtrTy, PtrTy, F64});
+        SmallVector<Value, 3> CA{V0, V1, Call->getOperand(2)};
+        auto Ca = LLVM::CallOp::create(B, Call->getLoc(), Fa, CA);
+        auto Cb = LLVM::CallOp::create(B, Call->getLoc(), Fb, CA);
+        Call->getResult(0).replaceAllUsesWith(Ca.getResult());
+        Call->getResult(1).replaceAllUsesWith(Cb.getResult());
+        Call->erase();
+        Changed = true;
+        continue;
+      }
+    }
+
     /* [bd, ad] = bilinear(b, a, fs). Splits into matlab_bilinear_{b,a}. */
     if (NA && NA.getValue().getSExtValue() == 2 &&
         Name == "bilinear" && Call->getNumOperands() == 3 &&
@@ -3572,6 +3595,12 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"dcgain_ss",  "matlab_dcgain_ss",  1, "pppp"},
       {"kalman_L",   "matlab_kalman_L",   1, "ppppp"},
       {"kalmd_L",    "matlab_kalmd_L",    1, "ppppp"},
+      {"isstable_d", "matlab_isstable_d", 0, "p"},
+      {"norm_h2_d",  "matlab_norm_h2_d",  0, "pppp"},
+      /* c2d_tustin 1-return defaults to Ad (the more-useful default for
+       * stability/eig analysis). The 2-return shape goes through the
+       * dedicated splitter above. */
+      {"c2d_tustin", "matlab_c2d_tustin_Ad", 1, "ppf"},
       {"gram_c",     "matlab_gram_c",     1, "pp"},
       {"gram_o",     "matlab_gram_o",     1, "pp"},
       {"step_ss",    "matlab_step_ss",    1, "ppppff"},
@@ -3830,6 +3859,10 @@ bool TensorLowering::rewriteBuiltinCalls() {
         "norm_h2", "dcgain_ss",
         /* CST Tier 4.2 — Kalman / Kalmd steady-state gains. */
         "kalman_L", "kalmd_L",
+        /* CST Tier 3 — discrete-time stability + H2. */
+        "isstable_d", "norm_h2_d",
+        /* CST Tier 2.2 — Tustin discretisation. */
+        "c2d_tustin",
         /* CST Tier 3.4 / 2.3 — gramians and SS step response. */
         "gram_c", "gram_o", "step_ss",
         /* CST Tier 2.4 — SISO bode_ss. */

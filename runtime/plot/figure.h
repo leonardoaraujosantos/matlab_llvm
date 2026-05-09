@@ -152,6 +152,12 @@ Figure *figure_new();
 Figure *figure_by_id(int id);
 void    close_all();
 
+/* Snapshot of every figure on the calling thread, in creation order.
+ * Used by the IDE-emit path to walk the figure list without exposing
+ * the thread-local owning vector. Pointers are valid until the next
+ * call into the figure registry on this thread. */
+std::vector<Figure *> figures_snapshot();
+
 /* Active axes accessor — equivalent to current_figure()->axes(). */
 Axes   &current_axes();
 

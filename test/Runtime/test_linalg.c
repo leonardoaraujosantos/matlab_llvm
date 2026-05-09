@@ -1189,6 +1189,114 @@ static void test_kalmd_L_estimator_schur(void) {
     rt_free(Re); rt_free(Im);
 }
 
+/* isstable_d: Schur-stable diagonal plant. */
+static void test_isstable_d_schur(void) {
+    double a[] = {0.5, 0, 0, 0.7};
+    matlab_mat *A = mk(a, 2, 2);
+    RT_NEAR(matlab_isstable_d(A), 1.0, 1e-15, "isstable_d Schur returns 1");
+    rt_free(A);
+}
+
+/* isstable_d: unstable plant (eig outside unit disk). */
+static void test_isstable_d_unstable(void) {
+    double a[] = {1.5, 0, 0, 0.5};
+    matlab_mat *A = mk(a, 2, 2);
+    RT_NEAR(matlab_isstable_d(A), 0.0, 1e-15, "isstable_d unstable returns 0");
+    rt_free(A);
+}
+
+/* isstable_d: marginal (eig on unit circle) — fails per MATLAB conv. */
+static void test_isstable_d_marginal(void) {
+    double a[] = {0, 1, -1, 0};   /* eig = ±i, magnitude 1 */
+    matlab_mat *A = mk(a, 2, 2);
+    RT_NEAR(matlab_isstable_d(A), 0.0, 1e-15, "isstable_d marginal returns 0");
+    rt_free(A);
+}
+
+/* norm_h2_d closed form: SISO 1st-order. y[k+1] = a y[k] + u[k]. With
+ * a = 0.5, b = 1, c = 1, D = 0:
+ *   Wc = dlyap(0.5, 1) solves 0.25 Wc - Wc + 1 = 0 → Wc = 4/3.
+ *   ||G||_2² = trace(0) + trace(C Wc C') = 4/3.
+ *   ||G||_2 = 2/sqrt(3) ≈ 1.1547. */
+static void test_norm_h2_d_first_order(void) {
+    double a[] = {0.5}, b[] = {1.0}, c[] = {1.0}, d[] = {0.0};
+    matlab_mat *A = mk(a, 1, 1), *B = mk(b, 1, 1);
+    matlab_mat *C = mk(c, 1, 1), *D = mk(d, 1, 1);
+    double h2 = matlab_norm_h2_d(A, B, C, D);
+    RT_NEAR(h2, 2.0 / sqrt(3.0), 1e-12, "discrete H2 1st-order = 2/sqrt(3)");
+    rt_free(A); rt_free(B); rt_free(C); rt_free(D);
+}
+
+/* norm_h2_d: D contributes — for D = c with otherwise zero gain
+ * (a = 0, b = 0), only the trace(D D') term survives. */
+static void test_norm_h2_d_d_only(void) {
+    double a[] = {0.0}, b[] = {0.0}, c[] = {0.0}, d[] = {3.0};
+    matlab_mat *A = mk(a, 1, 1), *B = mk(b, 1, 1);
+    matlab_mat *C = mk(c, 1, 1), *D = mk(d, 1, 1);
+    double h2 = matlab_norm_h2_d(A, B, C, D);
+    /* ||G||_2² = D D' = 9; ||G||_2 = 3. */
+    RT_NEAR(h2, 3.0, 1e-12, "discrete H2 D-only term");
+    rt_free(A); rt_free(B); rt_free(C); rt_free(D);
+}
+
+/* norm_h2_d: unstable plant returns +Inf. */
+static void test_norm_h2_d_unstable_inf(void) {
+    double a[] = {1.5}, b[] = {1.0}, c[] = {1.0}, d[] = {0.0};
+    matlab_mat *A = mk(a, 1, 1), *B = mk(b, 1, 1);
+    matlab_mat *C = mk(c, 1, 1), *D = mk(d, 1, 1);
+    double h2 = matlab_norm_h2_d(A, B, C, D);
+    RT_CHECK(h2 > 1e10, "discrete H2 unstable returns +Inf");
+    rt_free(A); rt_free(B); rt_free(C); rt_free(D);
+}
+
+/* c2d_tustin 1×1 closed form: a = -1, b = 1, Ts = 0.1, α = 0.05.
+ *   Ad = (1 + α a)/(1 - α a) = 0.95/1.05 = 19/21.
+ *   Bd = Ts · b /(1 - α a) = 0.1/1.05 = 2/21. */
+static void test_c2d_tustin_first_order(void) {
+    double a[] = {-1.0}, b[] = {1.0};
+    matlab_mat *A = mk(a, 1, 1), *B = mk(b, 1, 1);
+    matlab_mat *Ad = matlab_c2d_tustin_Ad(A, B, 0.1);
+    matlab_mat *Bd = matlab_c2d_tustin_Bd(A, B, 0.1);
+    RT_NEAR(rt_at(Ad, 0, 0), 19.0/21.0, 1e-12, "tustin Ad 1×1");
+    RT_NEAR(rt_at(Bd, 0, 0), 2.0/21.0,  1e-12, "tustin Bd 1×1");
+    rt_free(A); rt_free(B); rt_free(Ad); rt_free(Bd);
+}
+
+/* c2d_tustin: stability is preserved — Hurwitz A → Schur Ad. */
+static void test_c2d_tustin_preserves_stability(void) {
+    double a[] = {-1, 0.5, 0, -2};   /* Hurwitz */
+    double b[] = {1, 0.5};
+    matlab_mat *A = mk(a, 2, 2), *B = mk(b, 2, 1);
+    matlab_mat *Ad = matlab_c2d_tustin_Ad(A, B, 0.1);
+    RT_NEAR(matlab_isstable_d(Ad), 1.0, 1e-15, "tustin preserves stability");
+    rt_free(A); rt_free(B); rt_free(Ad);
+}
+
+/* c2d_tustin: small Ts makes the discrete poles approach z = 1 + s·Ts
+ * (first-order Taylor of z = e^(s·Ts)). Use a real-pole plant and
+ * verify the Tustin Ad eigenvalues track the closed-form mapping
+ * z = (1 + α s)/(1 − α s). */
+static void test_c2d_tustin_pole_mapping(void) {
+    /* Plant with eigvals -1, -2. */
+    double a[] = {-1, 0, 0, -2};
+    double b[] = {1, 1};
+    double Ts = 0.1;
+    double alpha = Ts / 2.0;
+    matlab_mat *A = mk(a, 2, 2), *B = mk(b, 2, 1);
+    matlab_mat *Ad = matlab_c2d_tustin_Ad(A, B, Ts);
+    matlab_mat *e  = matlab_eig(Ad);
+    matlab_mat *Re = matlab_real_c(e);
+    /* Closed form: z_i = (1 + α s_i)/(1 − α s_i) for s_i ∈ {-1, -2}. */
+    double z1 = (1 + alpha * (-1)) / (1 - alpha * (-1));   /* 0.95/1.05 ≈ 0.9048 */
+    double z2 = (1 + alpha * (-2)) / (1 - alpha * (-2));   /* 0.90/1.10 ≈ 0.8182 */
+    /* Eigenvalues sorted ascending. */
+    double e_lo = z1 < z2 ? z1 : z2;
+    double e_hi = z1 < z2 ? z2 : z1;
+    RT_NEAR(rt_at(Re, 0, 0), e_lo, 1e-12, "tustin pole map [0]");
+    RT_NEAR(rt_at(Re, 1, 0), e_hi, 1e-12, "tustin pole map [1]");
+    rt_free(A); rt_free(B); rt_free(Ad); rt_free(Re);
+}
+
 /* LQR closed-loop is Hurwitz: real(eig(A - B K)) < 0 elementwise. */
 static void test_lqr_closed_loop_stable(void) {
     /* Marginally unstable plant: A = [1 1; 0 -2] (one positive eigenvalue). */
@@ -1610,6 +1718,15 @@ int main(void) {
     RT_RUN(test_kalman_L_first_order);
     RT_RUN(test_kalman_L_estimator_stable);
     RT_RUN(test_kalmd_L_estimator_schur);
+    RT_RUN(test_isstable_d_schur);
+    RT_RUN(test_isstable_d_unstable);
+    RT_RUN(test_isstable_d_marginal);
+    RT_RUN(test_norm_h2_d_first_order);
+    RT_RUN(test_norm_h2_d_d_only);
+    RT_RUN(test_norm_h2_d_unstable_inf);
+    RT_RUN(test_c2d_tustin_first_order);
+    RT_RUN(test_c2d_tustin_preserves_stability);
+    RT_RUN(test_c2d_tustin_pole_mapping);
     RT_RUN(test_c2d_diagonal);
     RT_RUN(test_c2d_zero_Ts);
     RT_RUN(test_gram_c_diagonal);

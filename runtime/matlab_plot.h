@@ -291,6 +291,41 @@ void               matlab_plot_buffer_free(matlab_plot_buffer buf);
  * unsupported extension, -2 on I/O error. */
 int matlab_savefig(const char *path, int64_t plen);
 
+/* --------------------------------------------------------------------------
+ * IDE integration (matlab_llvm_ide / Matlab_llvm_ide)
+ *
+ * When the env var MATLAB_LLVM_IDE_FIGURES=1 is set, the runtime streams
+ * every open figure as a base64-encoded PNG over stdout, sentinel-bracketed
+ * so the IDE's REPL / Run readers can intercept the block before it lands
+ * in the console. The format on stdout is:
+ *
+ *   ___MF_FIG_BEGIN___ id=<id> w=<px> h=<px>
+ *   <base64 PNG, chunked at 76 chars/line>
+ *   ___MF_FIG_END___
+ *
+ * Each emit walks the per-thread figure registry; figures are matched by
+ * `id` on the IDE side so re-emits replace the existing thumbnail in
+ * place rather than appending. Trigger points:
+ *   - process exit (atexit) — auto-registered on first figure when the
+ *     env var is set, so compiled programs flush figures even without
+ *     explicit drawnow / saveas;
+ *   - matlab_drawnow() — manual flush;
+ *   - in REPL mode, matlabc calls this after every input (see
+ *     tools/matlabc/main.cpp:runRepl).
+ * -------------------------------------------------------------------------- */
+
+/* Render and stream every figure on the calling thread. No-op when the
+ * env var isn't set. Safe to call from any of: program code (drawnow),
+ * the matlabc REPL driver (post-input), atexit. */
+void matlab_ide_emit_all_figures(void);
+
+/* drawnow — flush any pending figure state to the IDE. The MATLAB
+ * builtin's traditional role is "render now"; with the Cairo backend
+ * there is no event loop to pump, so this is a thin wrapper around
+ * matlab_ide_emit_all_figures. Always safe to call; no-op outside the
+ * IDE-integration path. */
+void matlab_drawnow(void);
+
 #ifdef __cplusplus
 }  /* extern "C" */
 #endif

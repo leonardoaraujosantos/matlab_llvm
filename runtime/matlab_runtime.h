@@ -205,6 +205,23 @@ matlab_mat *matlab_kalman_L(matlab_mat *A, matlab_mat *G, matlab_mat *C,
 matlab_mat *matlab_kalmd_L(matlab_mat *Ad, matlab_mat *G, matlab_mat *C,
                            matlab_mat *Qn, matlab_mat *Rn);
 
+/* Discrete stability test (Schur — |eig(A)| < 1). Returns 1.0 / 0.0. */
+double matlab_isstable_d(matlab_mat *A);
+
+/* Discrete H₂ system norm:
+ *   sqrt(trace(D D') + trace(C Wc C')) with Wc = dlyap(A, B B').
+ * Returns +Inf if A is not Schur-stable. */
+double matlab_norm_h2_d(matlab_mat *A, matlab_mat *B,
+                        matlab_mat *C, matlab_mat *D);
+
+/* Tustin (bilinear) continuous→discrete: [Ad, Bd] = c2d_tustin(A,B,Ts).
+ *   α  = Ts/2, M = I − α A
+ *   Ad = M⁻¹ · (I + α A)
+ *   Bd = Ts · M⁻¹ · B
+ * No expm needed. Same shape as matlab_c2d_Ad / matlab_c2d_Bd. */
+matlab_mat *matlab_c2d_tustin_Ad(matlab_mat *A, matlab_mat *B, double Ts);
+matlab_mat *matlab_c2d_tustin_Bd(matlab_mat *A, matlab_mat *B, double Ts);
+
 /* k-state truncated balanced realization (model reduction).
  * balred_A returns the k x k upper-left block of the balanced A;
  * balred_B returns the first k rows of balanced B (k x m);

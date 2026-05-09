@@ -780,6 +780,52 @@ def damp(A):
     return out
 
 
+def c2d_tustin_Ad(A, B, Ts):
+    """Tustin discretisation Ad = (I − αA)⁻¹ (I + αA), α = Ts/2."""
+    Am = _m(A).astype(float)
+    n = Am.shape[0]
+    if n == 0 or Am.shape[1] != n:
+        return np.zeros((0, 0))
+    alpha = Ts / 2.0
+    M = np.eye(n) - alpha * Am
+    P = np.eye(n) + alpha * Am
+    return np.linalg.inv(M) @ P
+
+
+def c2d_tustin_Bd(A, B, Ts):
+    """Tustin discretisation Bd = Ts · (I − αA)⁻¹ · B, α = Ts/2."""
+    Am = _m(A).astype(float)
+    Bm = _m(B).astype(float)
+    n = Am.shape[0]
+    if n == 0 or Am.shape[1] != n or Bm.shape[0] != n:
+        return np.zeros((0, 0))
+    alpha = Ts / 2.0
+    M = np.eye(n) - alpha * Am
+    return Ts * (np.linalg.inv(M) @ Bm)
+
+
+def isstable_d(A):
+    """Discrete stability: 1.0 if all |eig(A)| < 1, else 0.0."""
+    Am = _m(A).astype(float)
+    if Am.shape[0] == 0 or Am.shape[0] != Am.shape[1]:
+        return 0.0
+    e = np.linalg.eigvals(Am)
+    return 1.0 if np.all(np.abs(e) < 1.0) else 0.0
+
+
+def norm_h2_d(A, B, C, D):
+    """Discrete H2 norm: sqrt(trace(D D') + trace(C Wc C'))."""
+    if isstable_d(A) == 0.0:
+        return float('inf')
+    Am = _m(A).astype(float); Bm = _m(B).astype(float)
+    Cm = _m(C).astype(float); Dm = _m(D).astype(float)
+    Wc = dlyap(Am, Bm @ Bm.T)
+    if Wc.size == 0:
+        return float('inf')
+    tr = float(np.trace(Cm @ Wc @ Cm.T) + np.trace(Dm @ Dm.T))
+    return math.sqrt(tr) if tr > 0 else 0.0
+
+
 def kalman_L(A, G, C, Qn, Rn):
     """Continuous Kalman gain via duality with LQR.
     Plant xdot = A x + G w, y = C x + v, cov(w)=Qn, cov(v)=Rn.

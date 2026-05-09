@@ -108,8 +108,10 @@ void Resolver::registerBuiltins() {
     "norm_h2", "dcgain_ss",
     /* Tier 4.2 — Kalman / Kalmd steady-state gains. */
     "kalman_L", "kalmd_L",
-    /* Tier 2.2 — continuous->discrete state-space ZOH. */
-    "c2d",
+    /* Tier 3 — discrete-time companions for stability + H₂ norm. */
+    "isstable_d", "norm_h2_d",
+    /* Tier 2.2 — continuous->discrete state-space ZOH + Tustin. */
+    "c2d", "c2d_tustin",
     /* Tier 3.4 / 2.3 — gramians and state-space step response. */
     "gram_c", "gram_o", "step_ss",
     /* Tier 2.4 — SISO state-space frequency response. */

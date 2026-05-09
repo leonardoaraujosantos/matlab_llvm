@@ -407,6 +407,15 @@ std::string formatDiagnostics(const SourceManager &SM,
  * compile entries below can install it on their Resolver. */
 extern "C" int replWorkspaceKindHook(const char *name, int64_t len);
 
+#ifdef MATLAB_LLVM_WITH_PLOT
+/* IDE integration (Matlab_llvm_ide): defined in runtime/plot/c_api.cpp.
+ * Streams every open figure as a sentinel-bracketed base64 PNG to stdout
+ * when MATLAB_LLVM_IDE_FIGURES=1 is set; no-op otherwise. Forward decl
+ * here so we can call it from runRepl after each input without dragging
+ * the full matlab_plot.h surface into this TU. */
+extern "C" void matlab_ide_emit_all_figures(void);
+#endif
+
 int runReplInput(mlirgen::Context &MCtx, const std::string &Src, int Id,
                  std::string *DiagOut = nullptr) {
   SourceManager SM;
@@ -1221,6 +1230,16 @@ int runRepl() {
     if (blockDepth(Toks) > 0) continue;  /* need more input */
 
     (void)runReplInput(MCtx, Accum, Counter++);
+#ifdef MATLAB_LLVM_WITH_PLOT
+    /* IDE integration (Matlab_llvm_ide): when the harness sets
+     * MATLAB_LLVM_IDE_FIGURES=1, stream every open figure as a
+     * sentinel-bracketed base64 PNG over stdout after each REPL
+     * input so plot()/figure()/saveas() show up live in the Plots
+     * panel without the user needing to call drawnow. The runtime
+     * function self-gates on the env var, so this is a cheap no-op
+     * for non-IDE invocations. */
+    matlab_ide_emit_all_figures();
+#endif
     Accum.clear();
   }
   return 0;
