@@ -6,10 +6,16 @@
 % `tools/matlabc/main.cpp`.
 %
 % Surface today:
-%   tf  — full classdef: constructor + property reads + tf-vs-tf
-%         operator overloads (+, -, *, /, unary -) + scalar mixing
-%         (G + 2, 5 * G, …) + `s = tf([1 0], 1)` polynomial
-%         composition.
+%   tf  — full classdef: constructor + `tf('s')` / `tf('z')`
+%         char-literal sugar (intercepted at lowering time, see
+%         `lib/MLIR/Lowering.cpp`'s constructor-call site) + property
+%         reads + tf-vs-tf operator overloads (+, -, *, /, unary -)
+%         + scalar mixing (G + 2, 5 * G, …) + `s = tf([1 0], 1)`
+%         polynomial composition. `disp(tf)` formatted s-domain
+%         rendering is a runtime helper (see `matlab_tf_disp` in
+%         `runtime/matlab_runtime.cpp`); the disp-on-class dispatch
+%         in Lowering.cpp routes `disp(G)` for tf-pinned operands
+%         through that helper instead of the generic matrix path.
 %   ss / zpk / pid / frd — minimal classdefs: constructor + property
 %         storage + property reads. Operator overloads on these
 %         types require actual control-system math (e.g. ss + ss is

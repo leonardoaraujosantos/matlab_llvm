@@ -8119,6 +8119,77 @@ matlab_mat *matlab_obj_get_mat(matlab_obj *o, const char *name, int64_t len) {
 }
 
 /* ---------------------------------------------------------------------- */
+/* §3.1 — disp(tf) formatted s-domain rendering.
+ *
+ * The Lowering.cpp `disp(obj)` class-method dispatch routes a tf-pinned
+ * operand through this helper instead of the generic matrix disp path.
+ * Output mirrors MATLAB's centred-fraction layout:
+ *
+ *           s + 2
+ *     ----------------
+ *     s^2 + 3 s + 5
+ *
+ *     Continuous-time transfer function.
+ *
+ * Coefficients are taken from the matlab_obj's Numerator and
+ * Denominator properties (matlab_mat *), highest power first. The
+ * `var` arg is 's' for continuous-time (today's only path; `tf('z')`
+ * is sugared to the same coefficients with sample-time carry-through
+ * a follow-on). */
+static void matlab_tf_poly_to_str(matlab_mat *coeffs, char var,
+                                   std::string &out) {
+    if (!coeffs || !coeffs->data) { out = "0"; return; }
+    int64_t n = coeffs->rows * coeffs->cols;
+    bool first = true;
+    char buf[64];
+    for (int64_t i = 0; i < n; ++i) {
+        double c = coeffs->data[i];
+        int deg = (int)(n - 1 - i);
+        if (c == 0.0 && (deg != 0 || !first)) continue;
+        if (first) {
+            if (c < 0) out += '-';
+        } else {
+            out += (c < 0) ? " - " : " + ";
+        }
+        first = false;
+        double ac = std::fabs(c);
+        if (deg == 0) {
+            std::snprintf(buf, sizeof(buf), "%g", ac);
+            out += buf;
+        } else {
+            if (ac != 1.0) {
+                std::snprintf(buf, sizeof(buf), "%g ", ac);
+                out += buf;
+            }
+            if (deg == 1) {
+                out += var;
+            } else {
+                std::snprintf(buf, sizeof(buf), "%c^%d", var, deg);
+                out += buf;
+            }
+        }
+    }
+    if (out.empty()) out = "0";
+}
+
+extern "C" void matlab_tf_disp(matlab_obj *o) {
+    matlab_mat *num = matlab_obj_get_mat(o, "Numerator", 9);
+    matlab_mat *den = matlab_obj_get_mat(o, "Denominator", 11);
+    std::string num_str, den_str;
+    matlab_tf_poly_to_str(num, 's', num_str);
+    matlab_tf_poly_to_str(den, 's', den_str);
+    size_t width = std::max(num_str.size(), den_str.size());
+    std::string bar(width + 2, '-');
+    size_t pad_n = (bar.size() - num_str.size()) / 2;
+    size_t pad_d = (bar.size() - den_str.size()) / 2;
+    std::printf("\n");
+    std::printf("%*s%s\n", (int)pad_n, "", num_str.c_str());
+    std::printf("  %s\n", bar.c_str());
+    std::printf("%*s%s\n", (int)pad_d, "", den_str.c_str());
+    std::printf("\n  Continuous-time transfer function.\n\n");
+}
+
+/* ---------------------------------------------------------------------- */
 /* Real string type ("..." literals, distinct from '...' char arrays).
  *
  * matlab_string is a tiny {data, len} descriptor with a heap-copied

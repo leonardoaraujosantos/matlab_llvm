@@ -4869,6 +4869,42 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
         for (const Function *Mth : CD->Methods)
           if (Mth && Mth->Name == CD->Name) { HasCtor = true; break; }
         if (HasCtor) {
+          /* §3.1 sugar: `tf('s')` and `tf('z')` — MATLAB's idiom to
+           * mint the Laplace / z-transform variable. Rewrite as
+           * `tf([1, 0], 1)` here at the call site (char literals don't
+           * survive the constructor body's AST→MLIR lowering, but a
+           * 1×2 row matrix + scalar denominator does — this is the
+           * same shape as `s = tf([1 0], 1)` that operator overloads
+           * already exercise). The discrete-time `tf('z')` variant
+           * lands the same nominal coefficients; sample-time
+           * carry-through is a follow-on. */
+          if (CD->Name == "tf" && C.Args.size() == 1 && C.Args[0]) {
+            const CharLiteral *CL =
+                dynamic_cast<const CharLiteral *>(C.Args[0]);
+            const StringLiteral *SL =
+                CL ? nullptr
+                   : dynamic_cast<const StringLiteral *>(C.Args[0]);
+            llvm::StringRef Tok = CL ? CL->Value : (SL ? SL->Value : "");
+            if (Tok == "s" || Tok == "z") {
+              auto F64 = mlir::Float64Type::get(&MCtx);
+              mlir::Value One = mlir::arith::ConstantOp::create(
+                  B, L, F64, mlir::FloatAttr::get(F64, 1.0)).getResult();
+              mlir::Value Zero = mlir::arith::ConstantOp::create(
+                  B, L, F64, mlir::FloatAttr::get(F64, 0.0)).getResult();
+              auto NumTy = mlir::RankedTensorType::get({1, 2}, F64);
+              mlir::Value Num = emitUnreg(
+                  "matlab.concat_row", {One, Zero}, NumTy, L);
+              mlir::Value Den = mlir::arith::ConstantOp::create(
+                  B, L, F64, mlir::FloatAttr::get(F64, 1.0)).getResult();
+              std::string Callee = std::string(CD->Name) + "__" +
+                                    std::string(CD->Name);
+              mlir::NamedAttribute Cal(
+                  mlir::StringAttr::get(&MCtx, "callee"),
+                  mlir::StringAttr::get(&MCtx, Callee));
+              return emitUnreg("matlab.call", {Num, Den},
+                               PtrTyConst, L, {Cal});
+            }
+          }
           llvm::SmallVector<mlir::Value, 4> Args;
           for (const Expr *A : C.Args) if (A) Args.push_back(lowerExpr(*A));
           std::string Callee = std::string(CD->Name) + "__" +
@@ -5677,6 +5713,20 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
                   mlir::StringAttr::get(&MCtx, "callee"),
                   mlir::StringAttr::get(&MCtx, Callee));
               return emitUnreg("matlab.call", {Obj},
+                               mlir::NoneType::get(&MCtx), L, {Cal});
+            }
+            /* §3.1: disp(tf) — no MATLAB-side disp method on the tf
+             * classdef; route to the runtime helper that pulls the
+             * Numerator / Denominator properties and renders the
+             * canonical centred-fraction s-domain layout. */
+            if (AN->Ref->PinnedClass->Name == "tf") {
+              auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+              mlir::Value Obj = lowerExpr(*C.Args[0]);
+              if (Obj.getType() != PtrTy) Obj.setType(PtrTy);
+              mlir::NamedAttribute Cal(
+                  mlir::StringAttr::get(&MCtx, "callee"),
+                  mlir::StringAttr::get(&MCtx, "matlab_tf_disp"));
+              return emitUnreg("matlab.call_builtin", {Obj},
                                mlir::NoneType::get(&MCtx), L, {Cal});
             }
           }

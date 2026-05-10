@@ -856,6 +856,20 @@ bool TensorLowering::rewriteBuiltinCalls() {
       Changed = true;
       continue;
     }
+    /* §3.1: disp(tf) — Lowering.cpp routes a tf-pinned operand
+     * through matlab_tf_disp(matlab_obj *) instead of the generic
+     * matlab_disp_mat path. Same shape as matlab_string_disp: one
+     * ptr operand, void result. */
+    if (Name == "matlab_tf_disp" && Call->getNumOperands() == 1 &&
+        Call->getOperand(0).getType() == PtrTy) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt("matlab_tf_disp", VoidTy, {PtrTy});
+      LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                            ValueRange{Call->getOperand(0)});
+      Call->erase();
+      Changed = true;
+      continue;
+    }
     /* Phase 1.1.C — typed int matrix disp. Lowering.cpp swaps the
      * callee on disp(typed_matrix) sites so the runtime entry hits
      * matlab_mat_i32_disp / matlab_mat_u8_disp directly. Mirror the

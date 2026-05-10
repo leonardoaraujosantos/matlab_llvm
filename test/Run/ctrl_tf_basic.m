@@ -15,10 +15,13 @@
 % the binary-op dispatch wraps it in a 1-arg `tf(c)` constructor
 % before invoking the class method.
 %
-% `tf('s')` variable-builder syntax is a follow-on slice — char
-% literals don't survive the AST→MLIR lowering through the
-% constructor body today; users compose explicitly via
-% `s = tf([1 0], 1)`.
+% `tf('s')` variable-builder is sugar for `tf([1 0], 1)`. We
+% intercept the constructor call at the lowering site (char literals
+% wouldn't survive the constructor body's slot-typed assignment), so
+% `s = tf('s')` mints the same Laplace-variable transfer function as
+% the explicit `s = tf([1 0], 1)` form. `tf('z')` lands the same
+% nominal coefficients for discrete time; sample-time carry-through
+% is a follow-on.
 %
 % LLVM-lane only — emit-c / cpp / python / ts skipped because each
 % emits the obj as a struct value rather than a pointer, which
@@ -81,3 +84,11 @@ sv = tf([1 0], 1);
 J = (sv + 2) / (sv * sv + 3 * sv + 5);
 disp(J.Numerator);
 disp(J.Denominator);
+
+% --- `tf('s')` sugar — char-literal Laplace-variable form. Falls
+% through the same constructor-call intercept as `tf([1 0], 1)` and
+% should produce identical coefficients downstream.
+sx = tf('s');
+K = (sx + 2) / (sx * sx + 3 * sx + 5);
+disp(K.Numerator);
+disp(K.Denominator);

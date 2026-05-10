@@ -1026,17 +1026,28 @@ constructor + property reads + tf-vs-tf operator overloads
 (`+`, `-`, `*`, `/`, unary `-`) + **scalar mixing**
 (`G + 2`, `5 * G`, `G - 1`, `3 + G`, `G / 2`, …) + the **`s = tf
 ([1 0], 1)`** Laplace-variable composition idiom: write `J = (s +
-2) / (s * s + 3 * s + 5)` and get `[1, 2] / [1, 3, 5]`. The
-`tf('s')` char-literal sugar is a follow-on (char literals don't
-survive the AST→MLIR lowering through the constructor body
-today). `ss` / `zpk` / `pid` / `frd` ship as **minimal classdefs**
-— constructor + property storage + property reads — in
-`runtime/cst_class_<name>.m` files that matlabc auto-includes
-only when the user code mentions the corresponding name. Operator
-overloads on these types need actual control-system math (block-
-diagonal A assembly for `ss + ss`, root concatenation for `zpk *
-zpk`, Laplace expansion for `pid`, frequency-grid interpolation
-for `frd`) and are a follow-on slice.
+2) / (s * s + 3 * s + 5)` and get `[1, 2] / [1, 3, 5]` + the
+**`tf('s')` / `tf('z')` char-literal sugar** (rewritten at the
+constructor-call lowering to `tf([1 0], 1)`, since char literals
+don't survive the constructor body's AST→MLIR pipeline) +
+**`disp(tf)` formatted s-domain rendering** (centred-fraction
+layout backed by `matlab_tf_disp` in the runtime, dispatched from
+the existing `disp(obj)` class-method route in `Lowering.cpp`).
+`ss` / `zpk` / `pid` / `frd` now ship with **operator overloads**
+on top of the minimal classdef:
+  - `ss + ss` / `ss - ss` parallel (block-diagonal A, stacked B,
+    concatenated C, summed/differenced D), `ss * ss` series
+    cascade, `-ss` output negation;
+  - `zpk * zpk` series (root concatenation + gain product),
+    `zpk / zpk` (invert via Z↔P swap + 1/K), `-zpk` gain negation;
+  - `pid + pid` / `pid - pid` / `-pid` coefficient-wise (Tf
+    averaged); the Laplace `tf(pid)` conversion is a follow-on;
+  - `frd + frd` / `frd - frd` / `frd * frd` / `-frd` element-wise
+    on `ResponseData` (operands assumed to share the same
+    `Frequency` grid; mismatch interpolation is a follow-on).
+The classdefs live in `runtime/cst_class_<name>.m` and matlabc
+auto-includes only the ones referenced by the user input
+(`userMentionsCstClasses`).
 
 **Stage 3 — `tf` working with operator overloads (2026-05-09)**:
 `tf(num, den)` constructor with `obj.Numerator` / `obj.Denominator`
@@ -1147,14 +1158,57 @@ Operator-overload compiler fixes from the previous slice:
   a stranded matlab.call after the upstream helper converted to a
   func.call returning ptr.
 
-**Still 🔵**: `tf('s')` char-literal sugar (the `'s'` literal
-doesn't survive the AST→MLIR lowering through the constructor body —
-needs a special-case rewrite that recognises `tf('s')` at the
-CallOrIndex lowering and emits `tf([1 0], 1)` directly), `ss` /
-`zpk` / `frd` / `pid` classdefs (mechanical replicas of `tf`),
-model-object forms of the existing matrix-arg primitives
-(`step(sys)`, `bode(sys)`, etc.), and `disp(tf)` formatted s-domain
-rendering.
+`tf('s')` / `tf('z')` sugar + `disp(tf)` + sibling-class operator
+overloads (this slice):
+- `Lowering.cpp` constructor-call site: when the class is `tf`
+  and the single argument is a `'s'` or `'z'` char/string literal,
+  synthesise a 1×2 `[1, 0]` row matrix (via `matlab.concat_row`
+  with two f64 constants and a `tensor<1x2xf64>` result type) plus
+  a scalar `1.0` denominator and emit `tf__tf` directly. The
+  intercept runs *before* the literal arg is lowered, so the char
+  literal never reaches the constructor body's slot-typed
+  assignment.
+- `runtime/matlab_runtime.cpp` `matlab_tf_disp(matlab_obj *)`:
+  pulls `Numerator` / `Denominator` via `matlab_obj_get_mat`,
+  formats each as a polynomial string (no leading 1·, sign-of-
+  zero suppressed for non-leading zero coefficients), and prints
+  the centred fraction. `Lowering.cpp` `disp(obj)` dispatch falls
+  through to `matlab_tf_disp` when the class is `tf` and no
+  user-defined `disp` method exists; `LowerTensorOps.cpp` registers
+  a one-arg-ptr → void rewrite for the new builtin (mirrors
+  `matlab_string_disp`).
+- `runtime/cst_class_ss.m` `plus` / `minus` / `mtimes` / `uminus`
+  — block-diagonal A assembly via `horzcat` + `vertcat` builtins
+  (the bracket-concat `[A1 0; 0 A2]` path handles f64 scalars
+  only); for series cascade, `B_a * D_b` and `D_a * C_b` flow
+  through the existing scalar/matrix multiply lanes.
+- `runtime/cst_class_zpk.m` `mtimes` / `mrdivide` / `uminus` —
+  root-vector concatenation via `vertcat`, gain product / quotient
+  via plain `*` / `/`. `zpk + zpk` would require polynomial
+  expansion to a common-denominator tf and is a follow-on.
+- `runtime/cst_class_pid.m` `plus` / `minus` / `uminus` —
+  coefficient-wise (`Tf` averaged because two distinct Tfs would
+  split into two parallel D-paths and aren't representable in a
+  single pid struct).
+- `runtime/cst_class_frd.m` `plus` / `minus` / `mtimes` / `uminus`
+  — element-wise on `ResponseData`, sharing the operand's
+  `Frequency` vector. `mtimes` uses `.*` (pointwise product) since
+  H_ab(jω) = H_a(jω) · H_b(jω) — series cascade in the frequency
+  domain is a Hadamard product, not a matrix multiply.
+
+**Still 🔵**: model-object forms of the existing matrix-arg
+primitives (`step(sys)`, `bode(sys)`, `lsim(sys)`, `c2d(sys, Ts)`,
+`feedback(sys1, sys2)`, etc.) — these need dispatch from the
+classdef-argument case to the matching matrix-arg runtime entry
+(unpack `sys.A` / `sys.B` / `sys.C` / `sys.D`, call `step_ss`,
+re-box the result if needed). emit-c / emit-cpp / emit-python /
+emit-typescript lane parity for the §3.1 model-object tests is a
+separate piece (the emit lanes pass class structs by value while
+the runtime ABI is `void *`; the §3.1 tests are LLVM-lane only and
+carry `.skip-emit-*` markers). Laplace-form `tf(pid)` conversion
++ pid-as-tf composition. True frd grid-mismatch interpolation
+(today's overloads assume operands share the same Frequency
+vector).
 
 Heavy carve-outs (apps, Simulink, LPV/LTV, sparse-second-order,
 `systune`, Robust/MPC/SysID toolbox bridges) keep this scoped to
