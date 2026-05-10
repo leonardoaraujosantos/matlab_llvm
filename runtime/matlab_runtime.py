@@ -2908,13 +2908,30 @@ def table_size_dim(t, dim):
     return 1.0
 
 def _fmt_table_cell(v):
+    # datetime: render in MATLAB's default dd-Mon-yyyy form.
     try:
-        f = float(v)
-        if f == int(f) and abs(f) < 1e15:
-            return f"{int(f):>12d}"
-        return f"{f:>12.6g}"
+        import datetime as _dt
+        if isinstance(v, _dt.datetime):
+            return v.strftime("%d-%b-%Y").rjust(12)
+        if isinstance(v, _dt.date):
+            return v.strftime("%d-%b-%Y").rjust(12)
     except Exception:
-        return str(v).rjust(12)
+        pass
+    if v is None:
+        return "".rjust(12)
+    # numeric: matches MATLAB's mixed int-or-%g formatting.
+    if not isinstance(v, str):
+        try:
+            f = float(v)
+            if f == int(f) and abs(f) < 1e15:
+                return f"{int(f):>12d}"
+            return f"{f:>12.6g}"
+        except Exception:
+            pass
+    # string fallback — right-justify the text, truncating to W=12.
+    s = str(v)
+    if len(s) > 12: s = s[:12]
+    return s.rjust(12)
 
 def table_disp(t):
     if t is None: print("(empty table)"); return
@@ -2933,6 +2950,139 @@ def table_disp(t):
                 v = None
             row.append("    " + _fmt_table_cell(v))
         print("".join(row))
+
+
+# --- CSV / delimited-text readers ---------------------------------------
+#
+# Mirrors matlab_readtable / matlab_readmatrix in the C runtime. The
+# delimiter is auto-detected from the first non-empty line ("," "\t"
+# ";" "|"); the header is detected by trying to numerically parse
+# every cell of the first row (failure → header). Per-column type
+# inference: numeric → list of float; datetime → list of
+# datetime.datetime; otherwise list of str.
+#
+# Path may arrive as a Python str or a matlab_string descriptor — the
+# string-literal lowering produces native str on the Python lane, so
+# the .data field check is defensive only.
+
+import datetime as _csv_dt
+import re as _csv_re
+
+_csv_iso = _csv_re.compile(
+    r'^(\d{4})[-/](\d{2})[-/](\d{2})'
+    r'(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?$'
+)
+_csv_dmon = _csv_re.compile(
+    r'^(\d{2})-([A-Za-z]{3})-(\d{4})$'
+)
+_csv_months = {m: i + 1 for i, m in enumerate(
+    ["Jan","Feb","Mar","Apr","May","Jun",
+     "Jul","Aug","Sep","Oct","Nov","Dec"]
+)}
+
+def _csv_parse_double(tok):
+    if tok is None or tok == "": return None
+    try:
+        return float(tok)
+    except Exception:
+        return None
+
+def _csv_parse_dt(tok):
+    if not tok: return None
+    m = _csv_iso.match(tok)
+    if m:
+        y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        h = int(m.group(4) or 0); mi = int(m.group(5) or 0)
+        s = int(m.group(6) or 0)
+        try: return _csv_dt.datetime(y, mo, d, h, mi, s)
+        except Exception: return None
+    m = _csv_dmon.match(tok)
+    if m:
+        d = int(m.group(1)); mon = _csv_months.get(m.group(2))
+        y = int(m.group(3))
+        if mon is None: return None
+        try: return _csv_dt.datetime(y, mon, d)
+        except Exception: return None
+    return None
+
+def _csv_resolve_path(path):
+    if hasattr(path, 'data'):
+        return path.data if isinstance(path.data, str) \
+                          else path.data.decode('utf-8', 'replace')
+    return str(path)
+
+def _csv_load(path):
+    fname = _csv_resolve_path(path)
+    try:
+        with open(fname, 'r', encoding='utf-8-sig', newline='') as fp:
+            text = fp.read()
+    except Exception:
+        return None, None
+    # Detect delimiter from the first non-empty line.
+    line = ""
+    for cand in text.split('\n'):
+        cand = cand.strip('\r')
+        if cand.strip(): line = cand; break
+    counts = {d: line.count(d) for d in (',', '\t', ';', '|')}
+    # builtins.max — module-level `max` is the MATLAB shim.
+    delim = (builtins.max(counts, key=counts.get)
+             if any(counts.values()) else ',')
+    # Tokenize all non-empty lines.
+    rows = []
+    for raw in text.split('\n'):
+        raw = raw.strip('\r')
+        if not raw.strip(): continue
+        cells = [c.strip() for c in raw.split(delim)]
+        rows.append(cells)
+    return rows, delim
+
+def readtable(path, *_unused):
+    rows, _ = _csv_load(path)
+    t = table_new()
+    if not rows: return t
+    ncols = builtins.max(len(r) for r in rows)
+    for r in rows:
+        while len(r) < ncols: r.append("")
+    # Header detection. builtins.any — module-level `any` is the MATLAB shim.
+    has_header = builtins.any(_csv_parse_double(c) is None for c in rows[0])
+    if has_header:
+        names = [c if c else f"Var{i+1}" for i, c in enumerate(rows[0])]
+        body = rows[1:]
+    else:
+        names = [f"Var{i+1}" for i in _pyrange(ncols)]
+        body = rows
+    for c in _pyrange(ncols):
+        cells = [body[r][c] for r in _pyrange(len(body))]
+        nonempty = [x for x in cells if x != ""]
+        # builtins.{all,any} — module-level shims wrap the MATLAB ops
+        # which expect arrays; we want the Python boolean reducers.
+        all_num = bool(nonempty) and builtins.all(
+            _csv_parse_double(x) is not None for x in cells if x != "")
+        all_dt = bool(nonempty) and builtins.all(
+            _csv_parse_dt(x) is not None for x in cells if x != "")
+        if all_num:
+            col = [(_csv_parse_double(x) if x != "" else float('nan'))
+                    for x in cells]
+        elif all_dt:
+            col = [(_csv_parse_dt(x) if x != "" else None) for x in cells]
+        else:
+            col = list(cells)
+        table_add_column(t, names[c], col)
+    return t
+
+def readmatrix(path, *_unused):
+    import numpy as _np
+    rows, _ = _csv_load(path)
+    if not rows: return _np.zeros((0, 0))
+    ncols = builtins.max(len(r) for r in rows)
+    has_header = builtins.any(_csv_parse_double(c) is None for c in rows[0])
+    body = rows[1:] if has_header else rows
+    out = _np.full((len(body), ncols), float('nan'))
+    for r in _pyrange(len(body)):
+        for c in _pyrange(builtins.min(ncols, len(body[r]))):
+            v = _csv_parse_double(body[r][c])
+            if v is not None: out[r, c] = v
+    return out
 
 
 # Phase 5.2 — categorical. Mirrors the C runtime: each instance has a

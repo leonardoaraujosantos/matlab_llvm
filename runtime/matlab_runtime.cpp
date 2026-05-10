@@ -6765,12 +6765,38 @@ struct matlab_cell_s_fwd_ {
  *   disp(T)              MATLAB-style table display
  * ====================================================================== */
 
+/* matlab_table_disp renders datetime cells inline, so it needs the
+ * full matlab_datetime layout and the epoch-to-civil helper. The
+ * struct is small (one double) — defining it here once and forward-
+ * declaring the helper avoids reordering the rest of the TU. The
+ * canonical definition further down was promoted to this header
+ * to keep ODR happy. */
+struct matlab_datetime_s { double seconds; };
+typedef struct matlab_datetime_s matlab_datetime;
+struct matlab_duration_s { double seconds; };
+typedef struct matlab_duration_s matlab_duration;
+static void epoch_to_civil(double secs, int *y, int *m, int *d,
+                            int *hh, int *mm, double *ss);
+
+/* Column kinds. v1 stored only matlab_mat * columns; readtable
+ * landed string + datetime columns, so each slot now carries an
+ * explicit kind tag. The data pointer interpretation is:
+ *   MATLAB_TABLE_KIND_NUMERIC  → matlab_mat *           (column vector)
+ *   MATLAB_TABLE_KIND_STRING   → matlab_string ** array (nrows entries)
+ *   MATLAB_TABLE_KIND_DATETIME → matlab_datetime ** array (nrows entries) */
+enum {
+    MATLAB_TABLE_KIND_NUMERIC  = 0,
+    MATLAB_TABLE_KIND_STRING   = 1,
+    MATLAB_TABLE_KIND_DATETIME = 2,
+};
+
 struct matlab_table_s {
     int32_t  nvars;
     int32_t  cap;
     int32_t  nrows;
     char   **names;
-    void   **data;     /* per-column matlab_mat * */
+    void   **data;     /* matlab_mat * for numeric; pointer-array for string/datetime */
+    int8_t  *kinds;    /* one of MATLAB_TABLE_KIND_* per column */
 };
 typedef struct matlab_table_s matlab_table;
 
@@ -6780,9 +6806,11 @@ static void table_grow(matlab_table *t, int32_t need) {
     while (nc < need) nc *= 2;
     t->names = (char **)realloc(t->names, (size_t)nc * sizeof(char *));
     t->data  = (void **)realloc(t->data,  (size_t)nc * sizeof(void *));
+    t->kinds = (int8_t *)realloc(t->kinds, (size_t)nc * sizeof(int8_t));
     for (int32_t i = t->cap; i < nc; ++i) {
         t->names[i] = NULL;
         t->data[i]  = NULL;
+        t->kinds[i] = MATLAB_TABLE_KIND_NUMERIC;
     }
     t->cap = nc;
 }
@@ -6803,7 +6831,9 @@ static int32_t table_find(matlab_table *t, const char *name, int64_t len) {
 }
 
 /* Add or replace a column. The runtime takes ownership of the
- * matlab_mat *; the caller must not free it. */
+ * matlab_mat *; the caller must not free it. Slot is tagged as
+ * NUMERIC; string / datetime columns go through
+ * matlab_table_add_column_kind. */
 extern "C" void matlab_table_add_column(matlab_table *t,
                                          const char *name, int64_t namelen,
                                          matlab_mat *col) {
@@ -6820,15 +6850,60 @@ extern "C" void matlab_table_add_column(matlab_table *t,
             t->nrows = (int32_t)r;
         }
     }
-    t->data[i] = col;
+    t->data[i]  = col;
+    t->kinds[i] = MATLAB_TABLE_KIND_NUMERIC;
 }
 
+/* Add or replace a column with an explicit kind. For STRING /
+ * DATETIME, `col` is a pointer-array of length `nrows` whose
+ * element type matches the kind. The table assumes ownership of
+ * the array (and its element pointers) and frees nothing — the
+ * pointers come from the runtime registries that already track
+ * them. `nrows` is taken from the first column added; subsequent
+ * columns are silently truncated/extended only conceptually
+ * (disp walks min(nrows, col_len) when applicable). */
+extern "C" void matlab_table_add_column_kind(matlab_table *t,
+                                              const char *name,
+                                              int64_t namelen,
+                                              void *col, int32_t kind,
+                                              int64_t nrows_hint) {
+    if (!t) return;
+    int32_t i = table_find(t, name, namelen);
+    if (i < 0) {
+        if (t->nvars == t->cap) table_grow(t, t->nvars + 1);
+        i = t->nvars++;
+        t->names[i] = (char *)malloc((size_t)namelen + 1);
+        memcpy(t->names[i], name, (size_t)namelen);
+        t->names[i][namelen] = '\0';
+        if (t->nrows == 0 && nrows_hint > 0)
+            t->nrows = (int32_t)nrows_hint;
+    }
+    t->data[i]  = col;
+    t->kinds[i] = (int8_t)kind;
+}
+
+/* Numeric column read; returns an empty matrix on miss or if the
+ * column has a non-numeric kind. Callers reading non-numeric
+ * columns should consult matlab_table_get_kind first. */
 extern "C" matlab_mat *matlab_table_get_column(matlab_table *t,
                                                 const char *name,
                                                 int64_t namelen) {
     int32_t i = table_find(t, name, namelen);
     if (i < 0 || !t->data[i]) return mat_alloc(0, 0);
+    if (t->kinds && t->kinds[i] != MATLAB_TABLE_KIND_NUMERIC)
+        return mat_alloc(0, 0);
     return (matlab_mat *)t->data[i];
+}
+
+/* Returns the column kind (0=numeric, 1=string, 2=datetime) or
+ * -1 on miss. Used by future column-read paths that need to
+ * dispatch on element type. */
+extern "C" double matlab_table_get_kind(matlab_table *t,
+                                         const char *name,
+                                         int64_t namelen) {
+    int32_t i = table_find(t, name, namelen);
+    if (i < 0) return -1.0;
+    return t->kinds ? (double)t->kinds[i] : 0.0;
 }
 
 extern "C" double matlab_table_height(matlab_table *t) {
@@ -6864,24 +6939,542 @@ extern "C" void matlab_table_disp(matlab_table *t) {
         for (int j = 0; j < W; ++j) putchar('_');
     }
     putchar('\n');
-    /* Body — each row, one element per column. */
+    /* Body — each row, one element per column. Dispatch on the
+     * column kind so string/datetime columns render their text
+     * form instead of being misread as a matlab_mat. */
+    static const char *months[] = {"Jan","Feb","Mar","Apr","May","Jun",
+                                    "Jul","Aug","Sep","Oct","Nov","Dec"};
     for (int32_t r = 0; r < t->nrows; ++r) {
         for (int32_t c = 0; c < t->nvars; ++c) {
-            matlab_mat *col = (matlab_mat *)t->data[c];
-            if (col && r < col->rows * col->cols) {
-                double v = col->data[r];
-                /* Round-trip integer-valued doubles as %d for cleanliness. */
-                if (v == (double)(int64_t)v && fabs(v) < 1e15)
-                    printf("    %*lld", W, (long long)v);
-                else
-                    printf("    %*.*g", W, 6, v);
+            int kind = t->kinds ? (int)t->kinds[c] : 0;
+            if (kind == MATLAB_TABLE_KIND_STRING) {
+                matlab_string_s_fwd_ **arr =
+                    (matlab_string_s_fwd_ **)t->data[c];
+                matlab_string_s_fwd_ *s = arr ? arr[r] : NULL;
+                if (s && s->data) {
+                    /* Right-justify within width W, truncate if longer. */
+                    int len = (int)s->len;
+                    if (len > W) len = W;
+                    int pad = W - len;
+                    printf("    ");
+                    for (int p = 0; p < pad; ++p) putchar(' ');
+                    fwrite(s->data, 1, (size_t)len, stdout);
+                } else {
+                    printf("    %*s", W, "");
+                }
+            } else if (kind == MATLAB_TABLE_KIND_DATETIME) {
+                matlab_datetime **arr = (matlab_datetime **)t->data[c];
+                matlab_datetime *d = arr ? arr[r] : NULL;
+                if (d) {
+                    int y, m, dd, hh, mm; double ss;
+                    epoch_to_civil(d->seconds, &y, &m, &dd, &hh, &mm, &ss);
+                    int mi = (m - 1) % 12; if (mi < 0) mi += 12;
+                    char buf[32];
+                    int n = snprintf(buf, sizeof buf,
+                                      "%02d-%s-%04d", dd, months[mi], y);
+                    printf("    %*.*s", W, n, buf);
+                } else {
+                    printf("    %*s", W, "");
+                }
             } else {
-                printf("    %*s", W, "");
+                matlab_mat *col = (matlab_mat *)t->data[c];
+                if (col && r < col->rows * col->cols) {
+                    double v = col->data[r];
+                    if (v == (double)(int64_t)v && fabs(v) < 1e15)
+                        printf("    %*lld", W, (long long)v);
+                    else
+                        printf("    %*.*g", W, 6, v);
+                } else {
+                    printf("    %*s", W, "");
+                }
             }
         }
         putchar('\n');
     }
     pthread_mutex_unlock(&matlab_io_mutex);
+}
+
+/* ====================================================================== */
+/* readtable / readmatrix — CSV / delimited-text readers.
+ *
+ * Both functions accept a path (matlab_string *) and stream the
+ * file with the standard C I/O so they share semantics with
+ * matlab_fopen. The delimiter is auto-detected from the first
+ * non-empty line by tallying ',', '\t', ';', '|' (in that order
+ * of preference on ties) — covers .csv, .tsv, and the most
+ * common ; / | dialects without any user input.
+ *
+ * Header detection: if every cell in the first row parses as a
+ * finite number, no header is assumed (auto-named Var1..VarN);
+ * otherwise the first row supplies the column names. This
+ * matches MATLAB's default heuristic for files where the column
+ * labels are textual and the data is numeric.
+ *
+ * Per-column type inference (readtable only):
+ *   1. all cells parse as numeric           → NUMERIC column
+ *   2. all cells match a datetime pattern   → DATETIME column
+ *   3. otherwise                            → STRING column
+ *
+ * v1 limitations (intentional, follow-ups in the roadmap):
+ *   - no quote-aware tokenizer: a literal delimiter inside a
+ *     '"..."' field is split. CSV with embedded delimiters needs
+ *     a separate parser pass.
+ *   - no DateLocale / decimal-separator options: '.' decimal,
+ *     ASCII whitespace only.
+ *   - readmatrix returns NaN for cells that fail strtod (matches
+ *     MATLAB's default behaviour for mixed-text input).
+ * ====================================================================== */
+
+/* Forward decls for runtime helpers used below — they live further
+ * down in the TU. Linkage matches the original definitions:
+ * matlab_datetime_* are extern "C", matlab_string_from_literal is
+ * not (matches its public-header decl). */
+struct matlab_string_s *matlab_string_from_literal(const char *src, int64_t n);
+extern "C" matlab_datetime *matlab_datetime_ymd(double y, double m, double d);
+extern "C" matlab_datetime *matlab_datetime_ymdhms(double y, double m, double d,
+                                                    double h, double mn,
+                                                    double s);
+
+/* Trim leading/trailing ASCII whitespace in-place by adjusting
+ * the (start, len) view; the underlying buffer is untouched. */
+static void csv_trim(const char *s, int64_t len,
+                      const char **out, int64_t *outlen) {
+    int64_t a = 0, b = len;
+    while (a < b && (s[a] == ' ' || s[a] == '\t' || s[a] == '\r' ||
+                     s[a] == '\n')) ++a;
+    while (b > a && (s[b - 1] == ' ' || s[b - 1] == '\t' ||
+                     s[b - 1] == '\r' || s[b - 1] == '\n')) --b;
+    *out = s + a; *outlen = b - a;
+}
+
+/* Strict numeric parse: returns true and stores the value iff the
+ * entire trimmed token is consumed by strtod. Empty tokens count
+ * as "not numeric" so they bias header detection toward "yes,
+ * this is a header". */
+static bool csv_parse_double(const char *s, int64_t n, double *out) {
+    if (n <= 0) return false;
+    char buf[64];
+    if (n >= (int64_t)sizeof buf) return false;
+    memcpy(buf, s, (size_t)n);
+    buf[n] = '\0';
+    char *end = NULL;
+    double v = strtod(buf, &end);
+    if (!end || end == buf) return false;
+    while (*end == ' ' || *end == '\t') ++end;
+    if (*end != '\0') return false;
+    *out = v;
+    return true;
+}
+
+/* Datetime parser. Recognises (in order):
+ *   YYYY-MM-DD                   (10 chars)
+ *   YYYY/MM/DD                   (10 chars)
+ *   YYYY-MM-DD[ T]HH:MM[:SS]     (16 / 19 chars)
+ *   YYYY/MM/DD[ T]HH:MM[:SS]
+ *   DD-Mon-YYYY                  (e.g. 01-Jan-2024)
+ * Returns true on match and writes the y/m/d/hh/mm/ss components.
+ * Year 0 and seconds == 0 are unset components. */
+static const char *csv_month_lookup[] = {
+    "Jan","Feb","Mar","Apr","May","Jun",
+    "Jul","Aug","Sep","Oct","Nov","Dec"
+};
+
+static bool csv_parse_datetime(const char *s, int64_t n,
+                                int *y, int *m, int *d,
+                                int *hh, int *mm, double *ss) {
+    *y = *m = *d = *hh = *mm = 0; *ss = 0.0;
+    if (n < 8) return false;
+    /* DD-Mon-YYYY (length 11). */
+    if (n == 11 && s[2] == '-' && s[6] == '-') {
+        int dd = (s[0] - '0') * 10 + (s[1] - '0');
+        if (s[0] < '0' || s[0] > '9' || s[1] < '0' || s[1] > '9')
+            return false;
+        char mon[4] = {s[3], s[4], s[5], 0};
+        int mi = -1;
+        for (int i = 0; i < 12; ++i) {
+            if (mon[0] == csv_month_lookup[i][0] &&
+                mon[1] == csv_month_lookup[i][1] &&
+                mon[2] == csv_month_lookup[i][2]) { mi = i; break; }
+        }
+        if (mi < 0) return false;
+        int yy = 0;
+        for (int i = 7; i < 11; ++i) {
+            if (s[i] < '0' || s[i] > '9') return false;
+            yy = yy * 10 + (s[i] - '0');
+        }
+        *d = dd; *m = mi + 1; *y = yy;
+        return true;
+    }
+    /* YYYY[-/]MM[-/]DD ... — head 10 chars must be ISO-shaped. */
+    if (n < 10) return false;
+    char d1 = s[4], d2 = s[7];
+    if (!((d1 == '-' && d2 == '-') || (d1 == '/' && d2 == '/')))
+        return false;
+    int yy = 0;
+    for (int i = 0; i < 4; ++i) {
+        if (s[i] < '0' || s[i] > '9') return false;
+        yy = yy * 10 + (s[i] - '0');
+    }
+    int mo = (s[5] - '0') * 10 + (s[6] - '0');
+    int dd = (s[8] - '0') * 10 + (s[9] - '0');
+    if (s[5] < '0' || s[5] > '9' || s[6] < '0' || s[6] > '9' ||
+        s[8] < '0' || s[8] > '9' || s[9] < '0' || s[9] > '9')
+        return false;
+    if (mo < 1 || mo > 12 || dd < 1 || dd > 31) return false;
+    *y = yy; *m = mo; *d = dd;
+    if (n == 10) return true;
+    /* Optional time tail: [ T]HH:MM(:SS)?  */
+    if (s[10] != ' ' && s[10] != 'T') return false;
+    if (n < 16) return false;
+    int H = (s[11] - '0') * 10 + (s[12] - '0');
+    int M = (s[14] - '0') * 10 + (s[15] - '0');
+    if (s[13] != ':') return false;
+    if (s[11] < '0' || s[11] > '9' || s[12] < '0' || s[12] > '9' ||
+        s[14] < '0' || s[14] > '9' || s[15] < '0' || s[15] > '9')
+        return false;
+    *hh = H; *mm = M;
+    if (n == 16) return true;
+    if (n == 19 && s[16] == ':') {
+        int S = (s[17] - '0') * 10 + (s[18] - '0');
+        if (s[17] < '0' || s[17] > '9' || s[18] < '0' || s[18] > '9')
+            return false;
+        *ss = (double)S;
+        return true;
+    }
+    return false;
+}
+
+/* Pick the delimiter from the first non-empty line by counting
+ * candidates. Returns ',' on a hard tie / no candidates so a
+ * one-column CSV still degrades gracefully. */
+static char csv_detect_delim(const char *buf, int64_t len) {
+    int64_t i = 0;
+    while (i < len && (buf[i] == ' ' || buf[i] == '\r' || buf[i] == '\n'))
+        ++i;
+    int64_t e = i;
+    while (e < len && buf[e] != '\n') ++e;
+    int counts[4] = {0, 0, 0, 0}; /* , \t ; | */
+    for (int64_t k = i; k < e; ++k) {
+        switch (buf[k]) {
+            case ',':  counts[0]++; break;
+            case '\t': counts[1]++; break;
+            case ';':  counts[2]++; break;
+            case '|':  counts[3]++; break;
+        }
+    }
+    int best = 0;
+    for (int k = 1; k < 4; ++k) if (counts[k] > counts[best]) best = k;
+    if (counts[best] == 0) return ',';
+    static const char delims[4] = {',', '\t', ';', '|'};
+    return delims[best];
+}
+
+/* Split a buffer into a 2-D table of (row, col) → (start, len).
+ * Returns the malloc'd contiguous arrays of starts/lens — the
+ * caller frees both plus row_offs. row_offs[r] gives the index
+ * in starts/lens where row r begins; row_offs[nrows] is the
+ * total cell count. ncols_out is the column count of the longest
+ * row. Shorter rows are padded with empty cells. */
+static void csv_tokenize(const char *buf, int64_t len, char delim,
+                          int64_t **row_offs_out, int64_t *nrows_out,
+                          int64_t *ncols_out,
+                          const char ***starts_out, int64_t **lens_out) {
+    int64_t cap_cells = 64, ncells = 0;
+    const char **starts = (const char **)malloc((size_t)cap_cells * sizeof(*starts));
+    int64_t *lens = (int64_t *)malloc((size_t)cap_cells * sizeof(*lens));
+    int64_t cap_rows = 16, nrows = 0;
+    int64_t *row_offs = (int64_t *)malloc((size_t)(cap_rows + 1) *
+                                            sizeof(*row_offs));
+    row_offs[0] = 0;
+    int64_t i = 0;
+    while (i < len) {
+        /* Skip blank line. */
+        int64_t line_start = i;
+        while (i < len && buf[i] != '\n') ++i;
+        int64_t line_end = i;
+        if (i < len) ++i;
+        /* Trim CR. */
+        if (line_end > line_start && buf[line_end - 1] == '\r') --line_end;
+        if (line_end == line_start) continue;
+        /* Tokenize this line. */
+        int64_t k = line_start;
+        while (k <= line_end) {
+            int64_t cs = k;
+            while (k < line_end && buf[k] != delim) ++k;
+            const char *cell; int64_t clen;
+            csv_trim(buf + cs, k - cs, &cell, &clen);
+            if (ncells == cap_cells) {
+                cap_cells *= 2;
+                starts = (const char **)realloc(starts,
+                                                 (size_t)cap_cells * sizeof(*starts));
+                lens   = (int64_t *)realloc(lens,
+                                             (size_t)cap_cells * sizeof(*lens));
+            }
+            starts[ncells] = cell;
+            lens[ncells]   = clen;
+            ncells++;
+            if (k >= line_end) break;
+            ++k; /* step past delim */
+            if (k == line_end) {
+                /* Trailing delim → empty trailing cell. */
+                if (ncells == cap_cells) {
+                    cap_cells *= 2;
+                    starts = (const char **)realloc(starts,
+                                                     (size_t)cap_cells * sizeof(*starts));
+                    lens   = (int64_t *)realloc(lens,
+                                                 (size_t)cap_cells * sizeof(*lens));
+                }
+                starts[ncells] = buf + k;
+                lens[ncells]   = 0;
+                ncells++;
+                break;
+            }
+        }
+        if (nrows + 1 > cap_rows) {
+            cap_rows *= 2;
+            row_offs = (int64_t *)realloc(row_offs,
+                                           (size_t)(cap_rows + 1) *
+                                               sizeof(*row_offs));
+        }
+        nrows++;
+        row_offs[nrows] = ncells;
+    }
+    /* Compute longest row. */
+    int64_t ncols = 0;
+    for (int64_t r = 0; r < nrows; ++r) {
+        int64_t w = row_offs[r + 1] - row_offs[r];
+        if (w > ncols) ncols = w;
+    }
+    *row_offs_out = row_offs;
+    *nrows_out = nrows;
+    *ncols_out = ncols;
+    *starts_out = starts;
+    *lens_out = lens;
+}
+
+/* Read an entire file into a heap buffer. Returns NULL on miss
+ * and writes the size to *len_out. */
+static char *csv_slurp(const char *path, int64_t *len_out) {
+    FILE *fp = fopen(path, "rb");
+    if (!fp) return NULL;
+    fseek(fp, 0, SEEK_END);
+    long sz = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+    if (sz < 0) sz = 0;
+    char *buf = (char *)malloc((size_t)sz + 1);
+    size_t got = fread(buf, 1, (size_t)sz, fp);
+    fclose(fp);
+    buf[got] = '\0';
+    *len_out = (int64_t)got;
+    return buf;
+}
+
+/* Strip a UTF-8 BOM from the start of buf if present. Adjusts
+ * (buf, len) — the original allocation root is unchanged. */
+static void csv_strip_bom(const char **buf, int64_t *len) {
+    if (*len >= 3 && (unsigned char)(*buf)[0] == 0xEF &&
+        (unsigned char)(*buf)[1] == 0xBB && (unsigned char)(*buf)[2] == 0xBF) {
+        *buf += 3; *len -= 3;
+    }
+}
+
+/* Note: the public header types `path` as matlab_string *, but
+ * matlab_string_s isn't fully defined this early in the TU. The
+ * fwd-declared layout-equivalent matlab_string_s_fwd_ has the
+ * same {data, len} fields; the linker symbol name is what
+ * matters for cross-module calls. */
+extern "C" matlab_table *matlab_readtable(matlab_string_s_fwd_ *path) {
+    if (!path || !path->data) return matlab_table_new();
+    /* fopen needs a NUL-terminated path; matlab_string already
+     * stores one (we guarantee it elsewhere) but copy defensively. */
+    char *p = (char *)malloc((size_t)path->len + 1);
+    memcpy(p, path->data, (size_t)path->len);
+    p[path->len] = '\0';
+    int64_t len = 0;
+    char *raw = csv_slurp(p, &len);
+    free(p);
+    if (!raw) return matlab_table_new();
+    const char *buf = raw;
+    csv_strip_bom(&buf, &len);
+    char delim = csv_detect_delim(buf, len);
+    int64_t *row_offs = NULL; int64_t nrows = 0, ncols = 0;
+    const char **starts = NULL; int64_t *lens = NULL;
+    csv_tokenize(buf, len, delim, &row_offs, &nrows, &ncols,
+                  &starts, &lens);
+    matlab_table *t = matlab_table_new();
+    if (nrows == 0 || ncols == 0) {
+        free(raw); free(row_offs); free(starts); free(lens);
+        return t;
+    }
+    /* Header detection: if any cell in row 0 fails numeric
+     * parse, treat row 0 as a header. */
+    bool has_header = false;
+    int64_t r0_cells = row_offs[1] - row_offs[0];
+    for (int64_t c = 0; c < r0_cells; ++c) {
+        int64_t ix = row_offs[0] + c;
+        double v;
+        if (!csv_parse_double(starts[ix], lens[ix], &v)) {
+            has_header = true; break;
+        }
+    }
+    int64_t header_row = has_header ? 0 : -1;
+    int64_t data_start = has_header ? 1 : 0;
+    int64_t data_rows = nrows - data_start;
+
+    /* Build columns. For each column index c in [0, ncols):
+     *   - resolve a name (header cell or "VarN")
+     *   - probe every data cell to decide kind
+     *   - allocate the appropriate column storage and populate */
+    char namebuf[64];
+    for (int64_t c = 0; c < ncols; ++c) {
+        const char *name_s = NULL; int64_t name_n = 0;
+        if (header_row == 0 && c < (row_offs[1] - row_offs[0])) {
+            int64_t ix = row_offs[0] + c;
+            name_s = starts[ix]; name_n = lens[ix];
+        }
+        if (name_n == 0) {
+            int n = snprintf(namebuf, sizeof namebuf, "Var%lld",
+                             (long long)(c + 1));
+            name_s = namebuf; name_n = n;
+        }
+        /* Probe column type. all_num → numeric; else if all dates
+         * (and not all numeric) → datetime; else string. Empty
+         * cells block numeric/datetime so an empty column lands
+         * as STRING — least lossy. */
+        bool all_num = true, all_date = true;
+        int64_t nonempty = 0;
+        for (int64_t r = 0; r < data_rows; ++r) {
+            int64_t row = data_start + r;
+            int64_t row_w = row_offs[row + 1] - row_offs[row];
+            const char *cs = NULL; int64_t cl = 0;
+            if (c < row_w) {
+                int64_t ix = row_offs[row] + c;
+                cs = starts[ix]; cl = lens[ix];
+            }
+            if (cl == 0) { all_num = false; all_date = false; continue; }
+            ++nonempty;
+            double v;
+            if (!csv_parse_double(cs, cl, &v)) all_num = false;
+            int yy, mm, dd, hh, mi; double ss;
+            if (!csv_parse_datetime(cs, cl, &yy, &mm, &dd, &hh, &mi, &ss))
+                all_date = false;
+            if (!all_num && !all_date) break;
+        }
+        if (nonempty == 0) { all_num = false; all_date = false; }
+        int kind = all_num ? MATLAB_TABLE_KIND_NUMERIC :
+                    (all_date ? MATLAB_TABLE_KIND_DATETIME :
+                                MATLAB_TABLE_KIND_STRING);
+
+        if (kind == MATLAB_TABLE_KIND_NUMERIC) {
+            matlab_mat *col = mat_alloc(data_rows, 1);
+            for (int64_t r = 0; r < data_rows; ++r) {
+                int64_t row = data_start + r;
+                int64_t row_w = row_offs[row + 1] - row_offs[row];
+                double v = std::nan("");
+                if (c < row_w) {
+                    int64_t ix = row_offs[row] + c;
+                    csv_parse_double(starts[ix], lens[ix], &v);
+                }
+                col->data[r] = v;
+            }
+            matlab_table_add_column_kind(t, name_s, name_n, col,
+                                          MATLAB_TABLE_KIND_NUMERIC,
+                                          data_rows);
+        } else if (kind == MATLAB_TABLE_KIND_DATETIME) {
+            matlab_datetime **col =
+                (matlab_datetime **)calloc((size_t)data_rows,
+                                            sizeof(*col));
+            for (int64_t r = 0; r < data_rows; ++r) {
+                int64_t row = data_start + r;
+                int64_t row_w = row_offs[row + 1] - row_offs[row];
+                if (c < row_w) {
+                    int64_t ix = row_offs[row] + c;
+                    int yy, mm, dd, hh, mi; double ss;
+                    if (csv_parse_datetime(starts[ix], lens[ix],
+                                            &yy, &mm, &dd, &hh, &mi, &ss)) {
+                        col[r] = (hh || mi || ss != 0.0)
+                            ? matlab_datetime_ymdhms(yy, mm, dd,
+                                                       hh, mi, ss)
+                            : matlab_datetime_ymd(yy, mm, dd);
+                    }
+                }
+            }
+            matlab_table_add_column_kind(t, name_s, name_n, col,
+                                          MATLAB_TABLE_KIND_DATETIME,
+                                          data_rows);
+        } else {
+            matlab_string_s_fwd_ **col =
+                (matlab_string_s_fwd_ **)calloc((size_t)data_rows,
+                                                  sizeof(*col));
+            for (int64_t r = 0; r < data_rows; ++r) {
+                int64_t row = data_start + r;
+                int64_t row_w = row_offs[row + 1] - row_offs[row];
+                const char *cs = NULL; int64_t cl = 0;
+                if (c < row_w) {
+                    int64_t ix = row_offs[row] + c;
+                    cs = starts[ix]; cl = lens[ix];
+                }
+                col[r] = (matlab_string_s_fwd_ *)
+                    matlab_string_from_literal(cs ? cs : "", cl);
+            }
+            matlab_table_add_column_kind(t, name_s, name_n, col,
+                                          MATLAB_TABLE_KIND_STRING,
+                                          data_rows);
+        }
+    }
+    free(raw); free(row_offs); free(starts); free(lens);
+    return t;
+}
+
+extern "C" matlab_mat *matlab_readmatrix(matlab_string_s_fwd_ *path) {
+    if (!path || !path->data) return mat_alloc(0, 0);
+    char *p = (char *)malloc((size_t)path->len + 1);
+    memcpy(p, path->data, (size_t)path->len);
+    p[path->len] = '\0';
+    int64_t len = 0;
+    char *raw = csv_slurp(p, &len);
+    free(p);
+    if (!raw) return mat_alloc(0, 0);
+    const char *buf = raw;
+    csv_strip_bom(&buf, &len);
+    char delim = csv_detect_delim(buf, len);
+    int64_t *row_offs = NULL; int64_t nrows = 0, ncols = 0;
+    const char **starts = NULL; int64_t *lens = NULL;
+    csv_tokenize(buf, len, delim, &row_offs, &nrows, &ncols,
+                  &starts, &lens);
+    if (nrows == 0 || ncols == 0) {
+        free(raw); free(row_offs); free(starts); free(lens);
+        return mat_alloc(0, 0);
+    }
+    /* Header detection: same heuristic as readtable. */
+    bool has_header = false;
+    int64_t r0_cells = row_offs[1] - row_offs[0];
+    for (int64_t c = 0; c < r0_cells; ++c) {
+        int64_t ix = row_offs[0] + c;
+        double v;
+        if (!csv_parse_double(starts[ix], lens[ix], &v)) {
+            has_header = true; break;
+        }
+    }
+    int64_t data_start = has_header ? 1 : 0;
+    int64_t data_rows = nrows - data_start;
+    /* This runtime stores matrices row-major (matches the
+     * matlab_mat_from_buf / matlab_disp_mat_f64 convention). */
+    matlab_mat *M = mat_alloc(data_rows, ncols);
+    for (int64_t r = 0; r < data_rows; ++r) {
+        int64_t row = data_start + r;
+        int64_t row_w = row_offs[row + 1] - row_offs[row];
+        for (int64_t c = 0; c < ncols; ++c) {
+            double v = std::nan("");
+            if (c < row_w) {
+                int64_t ix = row_offs[row] + c;
+                csv_parse_double(starts[ix], lens[ix], &v);
+            }
+            M->data[r * ncols + c] = v;
+        }
+    }
+    free(raw); free(row_offs); free(starts); free(lens);
+    return M;
 }
 
 /* ====================================================================== */
@@ -7092,11 +7685,9 @@ extern "C" matlab_mat *matlab_categorical_eq(
 
 #include <time.h>
 
-struct matlab_datetime_s { double seconds; };
-typedef struct matlab_datetime_s matlab_datetime;
-
-struct matlab_duration_s { double seconds; };
-typedef struct matlab_duration_s matlab_duration;
+/* matlab_datetime_s / matlab_duration_s structs were promoted up
+ * to the table-disp section so the renderer can read ->seconds.
+ * Re-declaring them here would be ODR violation. */
 
 extern "C" matlab_datetime *matlab_datetime_now(void) {
     matlab_datetime *d = (matlab_datetime *)calloc(1, sizeof(*d));

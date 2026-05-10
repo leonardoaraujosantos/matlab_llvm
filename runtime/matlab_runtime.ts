@@ -3245,13 +3245,28 @@ export function table_size_dim(t: TableT, dim: number): number {
 }
 
 function fmtTableCell(v: any): string {
-  const f = Number(v);
-  if (Number.isFinite(f)) {
-    if (f === Math.floor(f) && Math.abs(f) < 1e15)
-      return String(Math.trunc(f)).padStart(12);
-    return formatG(f, 6).padStart(12);
+  if (v == null) return "".padStart(12);
+  // Date / datetime values render as MATLAB's default dd-Mon-yyyy.
+  if (v instanceof Date) {
+    const months = ["Jan","Feb","Mar","Apr","May","Jun",
+                     "Jul","Aug","Sep","Oct","Nov","Dec"];
+    const dd = String(v.getUTCDate()).padStart(2, '0');
+    const mo = months[v.getUTCMonth()];
+    const yy = String(v.getUTCFullYear()).padStart(4, '0');
+    return `${dd}-${mo}-${yy}`.padStart(12);
   }
-  return String(v).padStart(12);
+  if (typeof v !== 'string') {
+    const f = Number(v);
+    if (Number.isFinite(f)) {
+      if (f === Math.floor(f) && Math.abs(f) < 1e15)
+        return String(Math.trunc(f)).padStart(12);
+      return formatG(f, 6).padStart(12);
+    }
+  }
+  // String fallback — truncate to width 12.
+  let s = String(v);
+  if (s.length > 12) s = s.slice(0, 12);
+  return s.padStart(12);
 }
 
 export function table_disp(t: TableT): void {
@@ -3265,6 +3280,130 @@ export function table_disp(t: TableT): void {
     const row = t.cols.map(c => "    " + fmtTableCell(colCell(c, r))).join("");
     console.log(row);
   }
+}
+
+/* CSV / delimited-text readers. Mirrors matlab_readtable /
+ * matlab_readmatrix: auto-detect delimiter (',' '\\t' ';' '|'),
+ * detect a header row by trying numeric parse on row 0, infer
+ * column type per-column (numeric → number[]; datetime → Date[];
+ * else string[]). Path can be a string or a matlab_string-like
+ * { data } descriptor. */
+
+const _csvIso = /^(\d{4})[-/](\d{2})[-/](\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?$/;
+const _csvDmon = /^(\d{2})-([A-Za-z]{3})-(\d{4})$/;
+const _csvMonths: Record<string, number> = {
+  Jan: 1, Feb: 2, Mar: 3, Apr: 4, May: 5, Jun: 6,
+  Jul: 7, Aug: 8, Sep: 9, Oct: 10, Nov: 11, Dec: 12,
+};
+
+function csvParseDouble(tok: string): number | null {
+  if (tok === "") return null;
+  const t = tok.trim();
+  if (t === "") return null;
+  const n = Number(t);
+  return Number.isFinite(n) ? n : null;
+}
+
+function csvParseDt(tok: string): Date | null {
+  if (!tok) return null;
+  const t = tok.trim();
+  let m = _csvIso.exec(t);
+  if (m) {
+    const y = +m[1], mo = +m[2], d = +m[3];
+    const hh = +(m[4] || 0), mm = +(m[5] || 0), ss = +(m[6] || 0);
+    const out = new Date(Date.UTC(y, mo - 1, d, hh, mm, ss));
+    return Number.isFinite(out.getTime()) ? out : null;
+  }
+  m = _csvDmon.exec(t);
+  if (m) {
+    const d = +m[1], mo = _csvMonths[m[2]], y = +m[3];
+    if (!mo) return null;
+    const out = new Date(Date.UTC(y, mo - 1, d));
+    return Number.isFinite(out.getTime()) ? out : null;
+  }
+  return null;
+}
+
+function csvResolvePath(path: any): string {
+  if (path && typeof path === 'object' && 'data' in path)
+    return typeof path.data === 'string' ? path.data : String(path.data);
+  return String(path);
+}
+
+function csvLoad(path: any): string[][] {
+  const fs = require('fs');
+  let text = "";
+  try { text = fs.readFileSync(csvResolvePath(path), 'utf-8'); }
+  catch { return []; }
+  if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+  // Detect delim from the first non-empty line.
+  let line = "";
+  for (const cand of text.split('\n')) {
+    const c = cand.replace(/\r$/, '');
+    if (c.trim()) { line = c; break; }
+  }
+  const counts: Record<string, number> = {
+    ',': 0, '\t': 0, ';': 0, '|': 0,
+  };
+  for (const ch of line) if (ch in counts) counts[ch]++;
+  let delim = ',', best = 0;
+  for (const k of [',', '\t', ';', '|'] as const) {
+    if (counts[k] > best) { best = counts[k]; delim = k; }
+  }
+  const rows: string[][] = [];
+  for (const raw of text.split('\n')) {
+    const r = raw.replace(/\r$/, '');
+    if (!r.trim()) continue;
+    rows.push(r.split(delim).map(s => s.trim()));
+  }
+  return rows;
+}
+
+export function readtable(path: any, ..._unused: any[]): TableT {
+  const rows = csvLoad(path);
+  const t = table_new();
+  if (rows.length === 0) return t;
+  const ncols = rows.reduce((m, r) => Math.max(m, r.length), 0);
+  for (const r of rows) while (r.length < ncols) r.push("");
+  const hasHeader = rows[0].some(c => csvParseDouble(c) === null);
+  const names = hasHeader
+    ? rows[0].map((c, i) => c || `Var${i + 1}`)
+    : Array.from({ length: ncols }, (_, i) => `Var${i + 1}`);
+  const body = hasHeader ? rows.slice(1) : rows;
+  for (let c = 0; c < ncols; c++) {
+    const cells = body.map(r => r[c]);
+    const nonempty = cells.filter(x => x !== "");
+    let col: any;
+    if (nonempty.length > 0 && nonempty.every(x => csvParseDouble(x) !== null)) {
+      col = cells.map(x => x === "" ? Number.NaN : (csvParseDouble(x) as number));
+    } else if (nonempty.length > 0 && nonempty.every(x => csvParseDt(x) !== null)) {
+      col = cells.map(x => x === "" ? null : csvParseDt(x));
+    } else {
+      col = cells.slice();
+    }
+    table_add_column(t, names[c], col);
+  }
+  return t;
+}
+
+export function readmatrix(path: any, ..._unused: any[]): NDArray {
+  const rows = csvLoad(path);
+  if (rows.length === 0) return np.zeros(0, 0);
+  const ncols = rows.reduce((m, r) => Math.max(m, r.length), 0);
+  const hasHeader = rows[0].some(c => csvParseDouble(c) === null);
+  const body = hasHeader ? rows.slice(1) : rows;
+  const nrows = body.length;
+  const out = np.zeros(nrows, ncols);
+  // numpy_ts stores row-major (data[i * cols + j]); pre-fill NaN.
+  const buf = out.data as any;
+  for (let i = 0; i < nrows * ncols; i++) buf[i] = Number.NaN;
+  for (let r = 0; r < nrows; r++) {
+    for (let c = 0; c < Math.min(ncols, body[r].length); c++) {
+      const v = csvParseDouble(body[r][c]);
+      if (v !== null) buf[r * ncols + c] = v;
+    }
+  }
+  return out;
 }
 
 /* Phase 5.2 — categorical. Mirrors the C runtime: 1-D vector of

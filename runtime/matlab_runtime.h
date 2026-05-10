@@ -1245,13 +1245,33 @@ typedef struct matlab_table_s matlab_table;
 matlab_table *matlab_table_new(void);
 void          matlab_table_add_column(matlab_table *t, const char *name,
                                        int64_t namelen, matlab_mat *col);
+/* Add a column with an explicit kind (0=numeric/matlab_mat,
+ * 1=string array of matlab_string*, 2=datetime array of
+ * matlab_datetime*). nrows_hint sets the row count when this is
+ * the first column added. */
+void          matlab_table_add_column_kind(matlab_table *t, const char *name,
+                                            int64_t namelen, void *col,
+                                            int32_t kind, int64_t nrows_hint);
 matlab_mat   *matlab_table_get_column(matlab_table *t, const char *name,
                                        int64_t namelen);
+double        matlab_table_get_kind(matlab_table *t, const char *name,
+                                     int64_t namelen);
 double        matlab_table_height(matlab_table *t);
 double        matlab_table_width(matlab_table *t);
 double        matlab_table_numel(matlab_table *t);
 double        matlab_table_size_dim(matlab_table *t, double dim);
 void          matlab_table_disp(matlab_table *t);
+/* CSV / delimited-text readers. Both detect the delimiter from
+ * the file's first non-empty line ('", '\\t', ';', or '|'). The
+ * first row is treated as a header iff its cells are not numeric.
+ * readtable returns a heterogeneous table (numeric / string /
+ * datetime per column); readmatrix returns a numeric matrix
+ * (NaN for cells that do not parse). The matlab_string descriptor
+ * is forward-declared here — its full layout lives in the C++ TU. */
+struct matlab_string_s;
+typedef struct matlab_string_s matlab_string;
+matlab_table *matlab_readtable(matlab_string *path);
+matlab_mat   *matlab_readmatrix(matlab_string *path);
 
 /* Phase 5.2 — categorical. 1-D vector of category indices with a
  * deduplicated, alphabetically-sorted category-name table. */

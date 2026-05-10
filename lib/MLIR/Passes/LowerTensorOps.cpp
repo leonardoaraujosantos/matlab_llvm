@@ -2550,6 +2550,27 @@ bool TensorLowering::rewriteBuiltinCalls() {
       Changed = true;
       continue;
     }
+    /* readtable(path) -> matlab_table*; readmatrix(path) -> matlab_mat*.
+     * Path is a matlab_string* (PtrTy); the C runtime parses CSV /
+     * delimited text and returns the appropriate descriptor. Sema
+     * leaves these untyped — retype the result before RAUW. */
+    if ((Name == "readtable" || Name == "readmatrix") &&
+        Call->getNumOperands() == 1 && Call->getNumResults() == 1 &&
+        Call->getOperand(0).getType() == PtrTy) {
+      B.setInsertionPoint(Call);
+      llvm::StringRef Rn = (Name == "readtable") ? "matlab_readtable"
+                                                  : "matlab_readmatrix";
+      auto Fn = rt(Rn, PtrTy, {PtrTy});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                      Call->getOperands());
+      if (Call->getResult(0).getType() != PtrTy)
+        Call->getResult(0).setType(PtrTy);
+      carryName(Call, NC);
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
     /* save(path, A) / load(path) — custom binary format, one matrix
      * per file. save takes a matlab_string path and a ptr matrix;
      * load takes a matlab_string path and returns a ptr matrix.
