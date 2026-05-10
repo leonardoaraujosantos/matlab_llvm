@@ -205,7 +205,13 @@ std::string lowerToLLVMIR(mlir::ModuleOp M, bool EmitDebugInfo) {
   PM.addPass(mlir::createConvertFuncToLLVMPass());
   PM.addPass(mlir::createReconcileUnrealizedCastsPass());
 
+  if (getenv("MATLABC_DUMP_PRE_PIPELINE")) {
+    M.dump();
+  }
   if (mlir::failed(PM.run(M))) {
+    if (getenv("MATLABC_DUMP_ON_PIPELINE_FAIL")) {
+      M.dump();
+    }
     std::cerr << "error: MLIR-to-LLVM conversion pipeline failed\n";
     return {};
   }
@@ -223,6 +229,9 @@ std::string lowerToLLVMIR(mlir::ModuleOp M, bool EmitDebugInfo) {
    * post-pipeline state across all three lowering callers. */
   stripMatlabFuncAttrs(M);
 
+  if (getenv("MATLABC_DUMP_PRE_TRANSLATE")) {
+    M.dump();
+  }
   // Translate to LLVM IR.
   llvm::LLVMContext LLVMCtx;
   auto LLVMModule = mlir::translateModuleToLLVMIR(M, LLVMCtx);

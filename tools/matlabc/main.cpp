@@ -7803,7 +7803,14 @@ int main(int Argc, char **Argv) {
    * the toolbox surface relies on. Located the same way as the
    * cocotb runtime: walk up from argv[0] to find `runtime/`. Empty
    * string when not found — silently skipped so non-CST tests keep
-   * working. */
+   * working. The prelude is also skipped when the user input doesn't
+   * mention any of the class names it provides: an unused classdef
+   * compiles down to a func.func body whose `none`-typed slots no
+   * downstream pass can resolve, leaving stale `matlab.call_builtin`
+   * ops that fail LLVM-IR translation. The textual scan is a
+   * cheap whole-word check against the source — false positives
+   * (e.g. a user comment `% tf is short for transfer function`)
+   * just pay the parse cost, not a correctness bug. */
   auto findCstPrelude = [&]() -> std::string {
     std::string SelfStr(Argv[0]);
     auto last = SelfStr.find_last_of('/');
@@ -7821,7 +7828,59 @@ int main(int Argc, char **Argv) {
     }
     return std::string();
   };
-  std::string PreludePath = findCstPrelude();
+  auto userMentionsCstClass = [](const std::string &Path) -> bool {
+    std::ifstream In(Path);
+    if (!In) return false;
+    std::ostringstream Buf;
+    Buf << In.rdbuf();
+    std::string SrcRaw = Buf.str();
+    /* Strip line comments before the textual scan — a `% tf is short
+     * for transfer function` line shouldn't pull in the prelude. */
+    std::string Src;
+    Src.reserve(SrcRaw.size());
+    bool InComment = false;
+    for (char c : SrcRaw) {
+      if (c == '\n') {
+        InComment = false;
+        Src.push_back(c);
+        continue;
+      }
+      if (c == '%') InComment = true;
+      if (!InComment) Src.push_back(c);
+    }
+    /* Pattern-based match: look for `<name>(` (call/constructor) or
+     * `<name> =` (assignment of a returned model object). Whole-word
+     * pattern still applies on the left so `bode_tf(` doesn't match. */
+    static const char *Names[] = { "tf", "ss", "zpk", "pid", "frd" };
+    for (const char *N : Names) {
+      size_t NL = std::strlen(N);
+      size_t P = 0;
+      while ((P = Src.find(N, P)) != std::string::npos) {
+        bool LeftWord = (P > 0) && (std::isalnum((unsigned char)Src[P-1]) ||
+                                     Src[P-1] == '_');
+        if (!LeftWord && P + NL < Src.size()) {
+          char Right = Src[P + NL];
+          /* `tf(` — call or constructor. */
+          if (Right == '(') return true;
+          /* `tf =` or `tf=` — assignment from a return. Skip
+           * whitespace before the `=`. */
+          size_t Q = P + NL;
+          while (Q < Src.size() && (Src[Q] == ' ' || Src[Q] == '\t')) Q++;
+          if (Q < Src.size() && Src[Q] == '=') {
+            /* Distinguish `==` from single `=`: `==` is a comparison,
+             * not an assignment. */
+            if (Q + 1 >= Src.size() || Src[Q+1] != '=') return true;
+          }
+        }
+        P += NL;
+      }
+    }
+    return false;
+  };
+  std::string PreludePath;
+  if (userMentionsCstClass(Opts.InputPath)) {
+    PreludePath = findCstPrelude();
+  }
 
   SourceManager SM;
   FileID F = 0;

@@ -614,6 +614,23 @@ export function gram_o(A: any, C: any): NDArray {
   return lyap(At, np.matmul(Ct, Cm));
 }
 
+// lyapchol: Cholesky factor of the continuous controllability gramian.
+// R'·R = Wc with Wc the solution of A·Wc + Wc·A' + B·B' = 0. The TS
+// lane's lyap is a stub; logm-style tests should ship with
+// `.skip-emit-typescript`.
+export function lyapchol(A: any, B: any): NDArray {
+  const Wc = gram_c(A, B);
+  if (Wc.rows === 0) return np.zeros(0, 0);
+  return np.zeros(0, 0);
+}
+
+// sylvester: A·X + X·B + C = 0 (the 3-arg form of MATLAB's `lyap`).
+// TS lane stub returns zeros; tests should `.skip-emit-typescript`.
+export function sylvester(A: any, B: any, C: any): NDArray {
+  const Cm = asArray(C);
+  return np.zeros(Cm.rows, Cm.cols);
+}
+
 // State-space unit-step response — N x p trajectory.
 export function step_ss(A: any, B: any, C: any, D: any, dt: number, N: number): NDArray {
   const Am = asArray(A), Bm = asArray(B);
@@ -1690,6 +1707,75 @@ export function hess(A: any): NDArray {
   return H;
 }
 
+// 4-return [AA, BB, Q, Z] = qz(A, B). TS lane stub returning zeros —
+// the lane's schur is itself a stub, so any qz built on it would
+// degenerate to garbage. Tests should ship with `.skip-emit-typescript`.
+export function qz_AA(A: any, B: any): NDArray { return np.zeros(asArray(A).rows, asArray(A).cols); }
+export function qz_BB(A: any, B: any): NDArray { return np.zeros(asArray(A).rows, asArray(A).cols); }
+export function qz_Q(A: any, B: any): NDArray { return np.zeros(asArray(A).rows, asArray(A).cols); }
+export function qz_Z(A: any, B: any): NDArray { return np.zeros(asArray(A).rows, asArray(A).cols); }
+
+// 2-return [H, P] = hess(A). hess_H mirrors the 1-return entry; hess_P
+// rebuilds the orthogonal accumulator by re-running the reduction on
+// an identity matrix (small redundant compute keeps the runtime
+// stateless — same convention as schur_U).
+export function hess_H(A: any): NDArray { return hess(A); }
+export function hess_P(A: any): NDArray {
+  const M = asArray(A);
+  const n = M.rows;
+  if (n === 0 || M.rows !== M.cols) return np.zeros(0, 0);
+  const P = np.zeros(n, n);
+  for (let i = 0; i < n; ++i) P.set(i, i, 1);
+  if (n <= 2) return P;
+  const H = np.zeros(n, n);
+  for (let i = 0; i < n; ++i)
+    for (let j = 0; j < n; ++j) H.set(i, j, M.at(i, j));
+  const v = new Float64Array(n);
+  for (let k = 0; k + 2 < n; ++k) {
+    let sigma = 0;
+    for (let i = k + 1; i < n; ++i) {
+      const x = H.at(i, k);
+      sigma += x * x;
+    }
+    if (sigma === 0) continue;
+    const xk = H.at(k + 1, k);
+    const xnorm = Math.sqrt(sigma);
+    const v0 = xk + (xk >= 0 ? xnorm : -xnorm);
+    v.fill(0);
+    v[k + 1] = v0;
+    for (let i = k + 2; i < n; ++i) v[i] = H.at(i, k);
+    const vnorm2 = v0 * v0 + (sigma - xk * xk);
+    if (vnorm2 === 0) continue;
+    const beta = 2 / vnorm2;
+    // Apply to H from the left so subsequent iterations see the updated
+    // H column (same numerical order as the C lane).
+    for (let j = k; j < n; ++j) {
+      let w = 0;
+      for (let i = k + 1; i < n; ++i) w += v[i] * H.at(i, j);
+      w *= beta;
+      for (let i = k + 1; i < n; ++i)
+        H.set(i, j, H.at(i, j) - v[i] * w);
+    }
+    for (let i = 0; i < n; ++i) {
+      let w = 0;
+      for (let j = k + 1; j < n; ++j) w += H.at(i, j) * v[j];
+      w *= beta;
+      for (let j = k + 1; j < n; ++j)
+        H.set(i, j, H.at(i, j) - w * v[j]);
+    }
+    // Apply to P from the right: P · (I - beta v v^T).
+    for (let i = 0; i < n; ++i) {
+      let w = 0;
+      for (let j = k + 1; j < n; ++j) w += P.at(i, j) * v[j];
+      w *= beta;
+      for (let j = k + 1; j < n; ++j)
+        P.set(i, j, P.at(i, j) - w * v[j]);
+    }
+    for (let i = k + 2; i < n; ++i) H.set(i, k, 0);
+  }
+  return P;
+}
+
 // Matrix exponential — Tier-1.3 of the Control System Toolbox roadmap.
 // Scaling-and-squaring with [13/13] Pade approximant (Higham 2005). Mirrors
 // the algorithm in runtime/matlab_runtime.cpp matlab_expm so all four lanes
@@ -1739,6 +1825,19 @@ export function expm(A: any): NDArray {
   let R = np.linalg.solve(V.sub(U), V.add(U));
   for (let k = 0; k < s; ++k) R = np.matmul(R, R);
   return R;
+}
+
+export function logm(A: any): NDArray {
+  // TS lane stub. The C / C++ / Python lanes implement Schur-then-
+  // Parlett-recurrence; here we lean on np.eig for diagonalisation.
+  // The TS np.eig is itself a stub returning zeros, so any logm
+  // result on a non-diagonal input would be garbage. Tests that use
+  // logm should ship with `.skip-emit-typescript` until the TS eig
+  // story is filled in. Returns 0×0 so callers see the same "couldn't
+  // compute" sentinel as the C lane's failure path.
+  const M = asArray(A);
+  if (M.rows === 0 || M.cols !== M.rows) return np.zeros(0, 0);
+  return np.zeros(0, 0);
 }
 
 // --- elementwise binary ops -----------------------------------------------

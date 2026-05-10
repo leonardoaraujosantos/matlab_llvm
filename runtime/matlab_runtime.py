@@ -493,6 +493,45 @@ def gram_o(A, C):
     return lyap(Am.T, Cm.T @ Cm)
 
 
+def lyapchol(A, B):
+    """Cholesky factor of the controllability gramian.
+    R = lyapchol(A, B) returns upper-triangular R with R'·R = Wc,
+    where Wc solves A·Wc + Wc·A' + B·B' = 0. v1: round-trip via
+    lyap + chol. The square-root Hammarling solver is a follow-on."""
+    Wc = gram_c(A, B)
+    if Wc.size == 0:
+        return np.zeros((0, 0))
+    return np.linalg.cholesky(Wc).T
+
+
+def sylvester(A, B, C):
+    """3-arg Sylvester: A·X + X·B + C = 0. MATLAB surfaces this as the
+    3-arg form of `lyap(A, B, C)` — the dispatch lives in
+    LowerTensorOps. v1: dense LU on the (n·m)² Kronecker matrix."""
+    Am = _m(A).astype(float)
+    Bm = _m(B).astype(float)
+    Cm = _m(C).astype(float)
+    n = Am.shape[0]
+    m = Bm.shape[0]
+    if Am.shape[1] != n or Bm.shape[1] != m:
+        return np.zeros((0, 0))
+    if Cm.shape != (n, m):
+        return np.zeros((0, 0))
+    if n == 0 or m == 0:
+        return np.zeros((0, 0))
+    N = n * m
+    M = np.zeros((N, N))
+    for i in _pyrange(n):
+        for j in _pyrange(m):
+            for k in _pyrange(n):
+                M[i * m + j, k * m + j] += Am[i, k]
+            for l in _pyrange(m):
+                M[i * m + j, i * m + l] += Bm[l, j]
+    rhs = -Cm.reshape(N)
+    x = np.linalg.solve(M, rhs)
+    return x.reshape(n, m)
+
+
 def _bode_ss_at_freq_(A, B, C, D, w):
     """Internal helper - returns (Hr, Hi) for a single frequency."""
     n = A.shape[0]
@@ -1478,16 +1517,67 @@ def schur_U(A):
     return U
 
 
-def hess(A):
-    """Hessenberg reduction — H = hess(A) — Tier-1.2 of the CST roadmap.
-    Householder reflections, in-place; mirrors the C lane bit-for-bit on
-    well-conditioned inputs (the same arithmetic order)."""
+def _qz_compute(A, B):
+    """Internal helper — returns (AA, BB, Q, Z) for [AA, BB, Q, Z] =
+    qz(A, B). v1 path is layered on schur(B^{-1} A) + qr(B U); valid
+    only when B is invertible. Returns (None, None, None, None) when
+    the precondition fails."""
+    Am = _m(A).astype(float)
+    Bm = _m(B).astype(float)
+    n = Am.shape[0]
+    if n == 0 or Am.shape != (n, n) or Bm.shape != (n, n):
+        return None, None, None, None
+    # Reject singular B.
+    fro = float(np.sqrt(np.sum(Bm * Bm)))
+    tol = 1e-12 * (fro + 1.0)
+    try:
+        sign, logdet = np.linalg.slogdet(Bm)
+    except np.linalg.LinAlgError:
+        return None, None, None, None
+    if sign == 0 or math.exp(logdet) < tol:
+        return None, None, None, None
+    try:
+        C = np.linalg.solve(Bm, Am)
+    except np.linalg.LinAlgError:
+        return None, None, None, None
+    U = schur_U(C)
+    T = schur_T(C)
+    M = Bm @ U
+    O, R = np.linalg.qr(M)
+    Q = O.T
+    Z = U
+    BB = R
+    AA = R @ T
+    return AA, BB, Q, Z
+
+
+def qz_AA(A, B):
+    AA, _, _, _ = _qz_compute(A, B)
+    return np.zeros((0, 0)) if AA is None else AA
+
+def qz_BB(A, B):
+    _, BB, _, _ = _qz_compute(A, B)
+    return np.zeros((0, 0)) if BB is None else BB
+
+def qz_Q(A, B):
+    _, _, Q, _ = _qz_compute(A, B)
+    return np.zeros((0, 0)) if Q is None else Q
+
+def qz_Z(A, B):
+    _, _, _, Z = _qz_compute(A, B)
+    return np.zeros((0, 0)) if Z is None else Z
+
+
+def _hess_with_accumulator(A, want_P):
+    """Hessenberg reduction: returns (H, P) when want_P, else (H, None).
+    P is the orthogonal accumulator with P' A P = H."""
     H = _m(A).astype(float).copy()
     n = H.shape[0]
     if n == 0 or H.shape[1] != n:
-        return np.zeros((0, 0))
+        return np.zeros((0, 0)), (np.zeros((0, 0)) if want_P else None)
+    P = np.eye(n) if want_P else None
     if n <= 2:
-        return H
+        return H, P
     for k in _pyrange(n - 2):
         sigma = float(np.sum(H[k+1:, k] ** 2))
         if sigma == 0.0:
@@ -1508,9 +1598,31 @@ def hess(A):
         # Apply from the right — columns k+1..n-1.
         w = beta * (H[:, k+1:] @ v[k+1:])
         H[:, k+1:] -= np.outer(w, v[k+1:])
+        if want_P:
+            w = beta * (P[:, k+1:] @ v[k+1:])
+            P[:, k+1:] -= np.outer(w, v[k+1:])
         # Clean tiny subdiagonal residues.
         H[k+2:, k] = 0.0
+    return H, P
+
+
+def hess(A):
+    """Hessenberg reduction — H = hess(A) — Tier-1.2 of the CST roadmap.
+    Householder reflections, in-place; mirrors the C lane bit-for-bit on
+    well-conditioned inputs (the same arithmetic order)."""
+    H, _ = _hess_with_accumulator(A, want_P=False)
     return H
+
+
+def hess_H(A):
+    """First output of `[H, P] = hess(A)` — same as 1-return hess."""
+    return hess(A)
+
+
+def hess_P(A):
+    """Second output of `[H, P] = hess(A)` — orthogonal P with P' A P = H."""
+    _, P = _hess_with_accumulator(A, want_P=True)
+    return P
 
 
 def expm(A):
@@ -1555,6 +1667,42 @@ def expm(A):
     for _ in _pyrange(s):
         R = R @ R
     return R
+
+
+def logm(A):
+    """Matrix logarithm — Tier-1.3 follow-on. The C runtime uses
+    Schur-then-Parlett-recurrence on the real Schur form; the Python
+    lane mirrors the *preconditions* (positive distinct real
+    eigenvalues; no 2×2 blocks i.e. no complex pairs) and reaches the
+    same result via the equivalent diagonalisation log(A) = V·diag(log(d_i))·V⁻¹
+    when those preconditions hold. We avoid scipy.linalg.logm /
+    scipy.linalg.schur because the macOS Anaconda environment commonly
+    has a numpy/scipy ABI mismatch (same reason expm() reimplements
+    Padé scaling-and-squaring). Returns 0×0 for inputs that don't
+    meet the preconditions — same convention the C runtime uses."""
+    M = _m(A).astype(float)
+    n = M.shape[0]
+    if n == 0 or M.shape[1] != n:
+        return np.zeros((0, 0))
+    eigvals, eigvecs = np.linalg.eig(M)
+    eps = 1e-9
+    # All eigenvalues must be real and positive.
+    for v in eigvals:
+        if abs(v.imag) > eps * (abs(v.real) + 1.0):
+            return np.zeros((0, 0))
+        if v.real <= eps:
+            return np.zeros((0, 0))
+    # No two eigenvalues may coincide.
+    for i in _pyrange(n):
+        for j in _pyrange(i + 1, n):
+            if abs(eigvals[i].real - eigvals[j].real) < eps * \
+                    (abs(eigvals[i].real) + abs(eigvals[j].real) + 1.0):
+                return np.zeros((0, 0))
+    real_eigs = np.array([v.real for v in eigvals])
+    real_vecs = np.real(eigvecs)
+    Vinv = np.linalg.inv(real_vecs)
+    log_diag = np.diag(np.log(real_eigs))
+    return real_vecs @ log_diag @ Vinv
 
 
 # --- elementwise binary ops -----------------------------------------------

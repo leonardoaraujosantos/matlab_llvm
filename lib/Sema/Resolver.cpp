@@ -86,14 +86,16 @@ void Resolver::registerBuiltins() {
     "strtrim", "strrep", "strcat",
     "svd", "eig", "inv", "pinv", "det", "rank", "cond",
     "qr", "lu", "chol", "norm", "trace", "kron",
-    /* Tier 1.3 — Control System Toolbox roadmap §2.3 (matrix exponential). */
-    "expm",
-    /* Tier 1.2 — Control System Toolbox roadmap §2.2 (Hessenberg reduction). */
-    "hess",
+    /* Tier 1.3 — Control System Toolbox roadmap §2.3 (matrix exponential
+     * + matrix logarithm). */
+    "expm", "logm",
+    /* Tier 1.2 — Control System Toolbox roadmap §2.2 (Hessenberg reduction
+     * + generalised Schur via the QZ algorithm). */
+    "hess", "qz",
     /* Tier 1.2 follow-on — real Schur decomposition. */
     "schur",
     /* Tier 1.4 — Lyapunov / Stein equation solvers. */
-    "lyap", "dlyap",
+    "lyap", "dlyap", "lyapchol",
     /* Tier 1.5 — algebraic Riccati. */
     "care", "dare",
     /* Tier 2 — first user-facing CST wrappers. lqi/lqry/lqg/kalman follow. */

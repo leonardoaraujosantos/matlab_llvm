@@ -45,12 +45,21 @@ void *matlab_reshape(void *A, double m, double n);
 void *matlab_repmat(void *A, double m, double n);
 void *matlab_matpow(void *A, double n);
 void *matlab_expm(void *A);
+void *matlab_logm(void *A);
 void *matlab_hess(void *A);
+void *matlab_hess_H(void *A);
+void *matlab_hess_P(void *A);
+void *matlab_qz_AA(void *A, void *B);
+void *matlab_qz_BB(void *A, void *B);
+void *matlab_qz_Q(void *A, void *B);
+void *matlab_qz_Z(void *A, void *B);
 void *matlab_schur(void *A);
 void *matlab_schur_T(void *A);
 void *matlab_schur_U(void *A);
 void *matlab_lyap(void *A, void *Q);
 void *matlab_dlyap(void *A, void *Q);
+void *matlab_lyapchol(void *A, void *B);
+void *matlab_sylvester(void *A, void *B, void *C);
 void *matlab_care(void *A, void *B, void *Q, void *R);
 void *matlab_lqr (void *A, void *B, void *Q, void *R);
 void *matlab_dare(void *Ad, void *Bd, void *Q, void *R);
@@ -177,6 +186,7 @@ public:
   Matrix repmat(double m, double n) const { return matlab_repmat(p_, m, n); }
   Matrix pow(double n) const { return matlab_matpow(p_, n); }
   Matrix expm() const { return matlab_expm(p_); }
+  Matrix logm() const { return matlab_logm(p_); }
   Matrix hess() const { return matlab_hess(p_); }
   Matrix schur() const { return matlab_schur(p_); }
   Matrix schurT() const { return matlab_schur_T(p_); }

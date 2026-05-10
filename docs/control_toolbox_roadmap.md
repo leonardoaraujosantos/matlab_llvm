@@ -127,15 +127,23 @@ of `eig`.
 **Status**: `schur(A)` (1-return T) and `[U, T] = schur(A)` shipped
 via the same Hessenberg + Francis-QR machinery as non-sym `eig`,
 threading an orthogonal accumulator through both passes. `hess(A)`
-(1-return) shipped (Householder reductions, in-place). `[H, P] =
-hess(A)` and the generalised `qz` pencil are follow-ons. Complex
-Schur is not separately needed since the real form already exposes
-1×1 / 2×2 blocks for complex pairs.
+(1-return) and `[H, P] = hess(A)` (2-return) shipped via the same
+multi-return splitter pattern as `eig_V` / `eig_D`: `matlab_hess_H`
+returns the upper Hessenberg form and `matlab_hess_P` returns the
+orthogonal P with P' A P = H. `[AA, BB, Q, Z] = qz(A, B)`
+✅ shipped (4-return splitter routing to `matlab_qz_{AA,BB,Q,Z}`).
+v1 path: layered on `schur(B⁻¹·A)` + `qr(B·U)` — valid when B is
+invertible. The singular-B path needs proper Hessenberg-Triangular
+reduction + double-shift QZ iteration (Moler-Stewart 1973) and
+returns 0×0 today; that's the gating piece for `zero(sys)` on the
+Rosenbrock system matrix. Complex Schur is not separately needed
+since the real form already exposes 1×1 / 2×2 blocks for complex
+pairs.
 
 **Effort**: 2-3 sessions on top of the Tier-2.1 QR machinery (most of
 the work is shared).
 
-### 2.3 Matrix exponential `expm` and inverse `logm` 🟡 (expm shipped)
+### 2.3 Matrix exponential `expm` and inverse `logm` ✅ (both shipped)
 
 `expm` is the **single most-called primitive in CST**. Used by:
 - `c2d` zero-order-hold discretization (the canonical formula).
@@ -152,9 +160,17 @@ on the existing LU.
 **Effort**: ~1 week. `expm` alone unblocks the largest tier-2 chunk.
 
 **Status**: `expm(A)` shipped via scaling-and-squaring with [13/13]
-Padé (Higham 2005), bit-identical across all 5 emit lanes. `logm`
-not shipped — would use inverse scaling-and-squaring on the same
-Padé table.
+Padé (Higham 2005), bit-identical across all 5 emit lanes.
+`logm(A)` ✅ shipped via Schur-then-Parlett-recurrence (Higham 2008
+§11.4): real Schur T = U' A U, then F = log(T) computed with
+F[i,i] = log(T[i,i]) on the diagonal and Parlett's commutativity
+recurrence
+`F[i,j] = (T[i,j](F[j,j]−F[i,i]) + Σ(T[i,k]F[k,j]−F[i,k]T[k,j])) /
+(T[j,j]−T[i,i])` for the strict upper triangle, then log(A) =
+U F U'. Returns 0×0 if the Schur form has 2×2 blocks (complex
+eigenvalue pairs), non-positive diagonal, or repeated eigenvalues —
+those failure paths await complex-arithmetic block log + Parlett's
+block-form recurrence. Run-test `linalg_logm.m`.
 
 **Gating tests**:
 - `expm(zeros(n))` = `eye(n)`.
@@ -178,7 +194,16 @@ the Smith iteration variant or Schur+back-substitution.
 dense LU on the n²·n² Kronecker matrix. `O(n^6)` cost; fine for
 typical CST plants (n = 2..10). Bartels-Stewart on Schur form is the
 proper large-plant follow-on (and `schur` is now shipped to gate it).
-`lyapchol` and the 3-arg Sylvester `lyap(A, B, C)` are follow-ons.
+`lyapchol(A, B)` ✅ shipped — round-trip via `gram_c` then `chol`,
+returns upper-triangular R with R'·R = Wc. The square-root
+Hammarling solver (which avoids forming Wc explicitly) is the
+proper large-plant follow-on. 3-arg Sylvester `lyap(A, B, C)` ✅
+shipped via `matlab_sylvester(A, B, C)` solving A·X + X·B + C = 0
+with the same vectorise + dense LU shape (size (n·m)² for A: n×n,
+B: m×m); the dispatch table in `LowerTensorOps.cpp` maps `lyap`
+arity-3 calls to this entry. Bartels-Stewart on Schur(A) and
+Schur(B) is the large-plant follow-on. Run-tests
+`linalg_lyapchol.m`, `linalg_sylvester.m`.
 
 **Effort**: ~1 week, sits cleanly on Tier-2.2.
 
@@ -219,9 +244,9 @@ is no state-space optimal control.
 | Primitive | Effort | Status |
 |---|---|---|
 | Non-symmetric `eig` (2.1) | 1 wk | ✅ shipped (1-return); `[V, D]` for non-sym A and `qz` are follow-ons |
-| `schur` / `hess` / `qz` (2.2) | 0.5 wk | 🟡 schur ✅ + hess ✅ shipped; qz not |
-| `expm` / `logm` (2.3) | 1 wk | 🟡 expm ✅ shipped; logm not |
-| `lyap` / `dlyap` / `lyapchol` (2.4) | 1 wk | 🟡 lyap ✅ + dlyap ✅ shipped; lyapchol + Sylvester not |
+| `schur` / `hess` / `qz` (2.2) | 0.5 wk | ✅ schur (1+2-ret), hess (1+2-ret), qz (4-ret, B-invertible path) |
+| `expm` / `logm` (2.3) | 1 wk | ✅ both shipped (logm: real-Schur-then-Parlett, no 2×2 blocks) |
+| `lyap` / `dlyap` / `lyapchol` (2.4) | 1 wk | ✅ all four shipped (lyap 2-arg, lyap 3-arg Sylvester, dlyap, lyapchol) |
 | `care` / `dare` (2.5) | 1 wk | ✅ care + dare shipped (1-return + 3-return `[X, K, L]`) |
 
 **Tier-1 status**: numerical core complete enough to build the rest
@@ -989,24 +1014,79 @@ matrix-arg primitives collapse to one-line wrappers (`step(sys)`,
 remaining open items (model-object `c2d(sys, Ts)`, `connect`,
 `sumblk`, `lft`, plotted `bode(sys)`) become simple follow-ons.
 
-**Stage 3 architectural blocker (recorded 2026-05-09)**: a first
-attempt at `tf` as a runtime-prelude classdef surfaced a deeper bug.
-The matlabc driver auto-prepends a stdlib `cst_classdefs.m` (see
-`tools/matlabc/main.cpp` `findCstPrelude`), and the field-store
-lowering now routes tensor-typed RHS to `matlab_obj_set_mat` /
-`matlab_struct_set_mat` (`Lowering.cpp:3539`). But class-method
-monomorphization (`LowerUserCalls.cpp` `runMonomorphiseUserCalls`)
-clones the constructor per call-site signature and propagates concrete
-tensor types from the cloned signature into the body's `obj.Field =
-param` sites. The eventually-emitted `matlab_obj_set_f64` calls then
-arrive at `LowerTensorOps.cpp:1708` with a tensor RHS where the
-runtime decl expects f64 — a verifier-rejected mismatch. Fix paths:
-(a) keep class methods polymorphic at the signature level AND
-have call-site lowering box tensor args through a runtime
-`matlab_mat_from_tensor` before the call, OR (b) post-monomorphization
-rewrite of `_set_f64`/`_get_f64` callees with non-f64 operands to
-their `_mat` counterparts. Both are 2+ day investigations. Until
-fixed, the prelude file ships empty and §3.1 stays 🔵.
+**Stage 3 partial unblock (2026-05-09)**: a working `tf(num, den)`
+constructor with `obj.Numerator` / `obj.Denominator` read access now
+ships in `runtime/cst_classdefs.m`, auto-prepended by matlabc when
+the user input mentions any of `tf` / `ss` / `zpk` / `pid` / `frd`
+as a call target (see `tools/matlabc/main.cpp` `findCstPrelude` +
+`userMentionsCstClass`). Several compiler fixes landed to make this
+work:
+
+- `LowerUserCalls.cpp` `runMonomorphiseUserCalls` and
+  `runLowerUserCalls`: skip tensor-typed call-site args from
+  bucketing / signature refinement *for class methods only*
+  (gated by the `matlab.class_name` op attr). Tensor literals at
+  call sites get boxed to ptr by a later `LowerTensorOps` sweep;
+  refining the constructor sig to tensor early would lock in a
+  signature that no post-boxing call site matches and leave
+  stranded `matlab.call`s to a tensor-signature function.
+  Non-class user functions keep the existing per-shape clone
+  behaviour, so `sq([1 2 3])` and `sq(5)` still get separate clones
+  with correctly-typed arithmetic bodies.
+- `LowerTensorOps.cpp` field-set dispatch: when the AST-time choice
+  of `_set_f64` callee turns out to receive a ptr-typed value at
+  lowering time (because the function arg got refined to ptr by
+  the LowerUserCalls retype), auto-promote the callee to `_set_mat`
+  in place. The runtime `_set_mat` accepts ptr; `_set_f64` boxes a
+  scalar — they're interchangeable on the type axis.
+- `LowerTensorOps.cpp` `fieldNameAddr`: also accept
+  `LLVM::AddressOfOp` as a valid input (not just
+  `matlab.const_char`), so a second LowerTensorOps sweep can still
+  resolve the field-name pointer after the first sweep already
+  materialised the global.
+- `Lowering.cpp` field-read dispatch: for FieldAccess on an
+  instance of a CST prelude class (`tf`, `ss`, `zpk`, `pid`,
+  `frd`) where Sema couldn't infer a concrete type, route to
+  `matlab_obj_get_mat`. The runtime entry auto-boxes f64-stored
+  fields back to 1×1 matrices, so the dispatch is a strict
+  superset for these classes. Other user classdefs (Vec2,
+  BasicClass, Counter, …) keep the f64 default so their scalar
+  arithmetic stays in scalar lanes.
+- `tools/matlabc/main.cpp`: prelude inclusion is now conditional
+  — `userMentionsCstClass` does a comment-stripped, whole-word,
+  call-site-pattern scan over the user input and only prepends
+  the prelude when one of `tf(`, `ss(`, etc. appears (or one of
+  these names appears on the LHS of a single `=`). An unused
+  classdef would otherwise compile down to a `func.func` body
+  whose `none`-typed slots no downstream pass can resolve, leaving
+  stale `matlab.call_builtin` ops that fail LLVM-IR translation.
+
+**Still 🔵 (the next §3.1 slice)**: tf-vs-tf operator overloads
+(`G + H`, `G * H`), scalar mixing (`s + 2`), and the `tf('s')`
+builder. The lowering machinery handles these cases in isolation,
+but two issues come together at once when multiple `tf(...)` call
+sites coexist:
+
+1. Multi-call-site monomorphization on the constructor creates two
+   clones — one per (arg-type tuple) bucket — and the cloning
+   propagates entry-block arg types into the body. The clone that
+   gets refined slot allocs leaves the ORIGINAL `matlab.alloc`
+   ops in place alongside the new `llvm.alloca`, producing a
+   duplicate-slot body that the verifier rejects. Probable fix:
+   walk the cloned body's `matlab.alloc` ops after retyping and
+   either erase them or merge their uses with the SSA arg.
+2. Sema-level inference can't see through class properties — a
+   read of `obj.Numerator` returns `any`, which the lowering
+   then types as `f64`. The CST-class field-read default routes
+   the *call* to `_get_mat` (returning ptr at the SSA level) but
+   downstream type-flow (e.g. `-obj.Numerator`) still treats the
+   value as f64, lowering as scalar arithmetic that mismatches the
+   actual ptr operand. Closing the loop needs Sema to learn the
+   property's stored shape from the constructor body's field-store
+   sites, then propagate that shape forward to every read.
+
+Both items are tractable but separately scoped — they're the next
+§3.1 slice rather than a fold-into-this-one.
 
 Heavy carve-outs (apps, Simulink, LPV/LTV, sparse-second-order,
 `systune`, Robust/MPC/SysID toolbox bridges) keep this scoped to

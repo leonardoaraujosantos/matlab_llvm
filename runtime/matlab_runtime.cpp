@@ -2083,6 +2083,116 @@ matlab_mat *matlab_expm(matlab_mat *A) {
 }
 
 /*-------------------------------------------------------------------------
+ * Matrix logarithm — L = logm(A).
+ *
+ *   logm(A) is the inverse of expm: a matrix L such that expm(L) = A.
+ *   For a stable continuous-time plant whose discrete sample is Ad =
+ *   expm(A·Ts), logm(Ad)/Ts recovers A — that's the d2c ZOH workflow's
+ *   gating primitive.
+ *
+ * Algorithm: Schur-then-Parlett (Higham 2008 §11.4).
+ *   1. Real Schur T = U' A U (existing matlab_schur primitives).
+ *   2. log(T) for upper-triangular T computed via Parlett's recurrence:
+ *      diagonal entries are scalar logs; off-diagonals propagate from the
+ *      commutativity of T with any analytic function of T,
+ *        F[i,j] = (T[i,j] (F[j,j] − F[i,i]) +
+ *                  Σ_{k=i+1}^{j-1} (T[i,k] F[k,j] − F[i,k] T[k,j])) /
+ *                 (T[j,j] − T[i,i]).
+ *   3. logm(A) = U · log(T) · U'.
+ *
+ * Limitations of this v1 entry:
+ *   - Real Schur form must come back UPPER-TRIANGULAR (all eigenvalues
+ *     real). Complex conjugate pairs would land in 2×2 quasi-triangular
+ *     blocks; their proper handling needs a complex-arithmetic block log
+ *     plus Parlett's block-form recurrence — deferred.
+ *   - All eigenvalues must be POSITIVE. A negative or zero diagonal
+ *     entry would force log into the complex plane; we'd need a complex
+ *     return path.
+ *   - No two diagonal entries may coincide. Repeated eigenvalues make
+ *     the recurrence divide by zero; the cure (Parlett's "block"
+ *     algorithm with confluent Taylor expansion) is also deferred.
+ * Returns 0×0 in any of those cases — same convention the other
+ * decomposition primitives follow when their preconditions don't hold.
+ *
+ * Tier 1.3 follow-on of the Control System Toolbox roadmap; see
+ * docs/control_toolbox_roadmap.md §2.3.
+ *-------------------------------------------------------------------------*/
+matlab_mat *matlab_logm(matlab_mat *A) {
+    if (!A || A->rows != A->cols) return mat_alloc(0, 0);
+    int64_t n = A->rows;
+    if (n == 0) return mat_alloc(0, 0);
+
+    /* Schur decomposition. We need both U and T; the existing entries
+     * compute each independently, so re-do the full pipeline once here
+     * to get matched (U, T) without two redundant Hessenberg reductions. */
+    std::vector<double> T(A->data, A->data + n * n);
+    std::vector<double> U(n * n, 0.0);
+    for (int64_t i = 0; i < n; ++i) U[i * n + i] = 1.0;
+    hessenberg_inplace_(T.data(), n, U.data());
+    francis_qr_(T.data(), n, U.data());
+
+    /* Validate preconditions on the Schur form. */
+    const double eps = 1e-12;
+    for (int64_t i = 0; i < n; ++i) {
+        /* Subdiagonal must be (near) zero — no 2×2 quasi-triangular blocks. */
+        if (i + 1 < n) {
+            double sub = T[(i + 1) * n + i];
+            if (std::fabs(sub) > eps * (std::fabs(T[i * n + i]) +
+                                          std::fabs(T[(i+1) * n + (i+1)]) +
+                                          1.0))
+                return mat_alloc(0, 0);
+        }
+        /* Diagonal must be strictly positive. */
+        if (T[i * n + i] <= eps) return mat_alloc(0, 0);
+    }
+    /* Coincident diagonals would divide-by-zero in Parlett's recurrence. */
+    for (int64_t i = 0; i < n; ++i)
+        for (int64_t j = i + 1; j < n; ++j)
+            if (std::fabs(T[j * n + j] - T[i * n + i]) < eps *
+                (std::fabs(T[i * n + i]) + std::fabs(T[j * n + j]) + 1.0))
+                return mat_alloc(0, 0);
+
+    /* F = log(T) on the diagonal. */
+    std::vector<double> F(n * n, 0.0);
+    for (int64_t i = 0; i < n; ++i) F[i * n + i] = std::log(T[i * n + i]);
+
+    /* Parlett's recurrence for off-diagonals, sweeping super-diagonals
+     * from j-i = 1 upward so each F[i,j] depends only on already-filled
+     * entries. */
+    for (int64_t d = 1; d < n; ++d) {
+        for (int64_t i = 0; i + d < n; ++i) {
+            int64_t j = i + d;
+            double sum = 0.0;
+            for (int64_t k = i + 1; k < j; ++k)
+                sum += T[i * n + k] * F[k * n + j] -
+                       F[i * n + k] * T[k * n + j];
+            F[i * n + j] = (T[i * n + j] *
+                                (F[j * n + j] - F[i * n + i]) + sum) /
+                           (T[j * n + j] - T[i * n + i]);
+        }
+    }
+
+    /* logm(A) = U * F * U'. */
+    auto mm = [n](const double *X, const double *Y, double *Z) {
+        for (int64_t i = 0; i < n; ++i)
+            for (int64_t j = 0; j < n; ++j) {
+                double s = 0.0;
+                for (int64_t k = 0; k < n; ++k)
+                    s += X[i * n + k] * Y[k * n + j];
+                Z[i * n + j] = s;
+            }
+    };
+    std::vector<double> Ut(n * n);
+    for (int64_t i = 0; i < n; ++i)
+        for (int64_t j = 0; j < n; ++j) Ut[j * n + i] = U[i * n + j];
+    std::vector<double> tmp(n * n);
+    mm(U.data(), F.data(), tmp.data());
+    matlab_mat *out = mat_alloc(n, n);
+    mm(tmp.data(), Ut.data(), out->data);
+    return out;
+}
+
+/*-------------------------------------------------------------------------
  * Hessenberg reduction — H = hess(A).
  *
  * Reduce a real n*n matrix A to upper Hessenberg form H via a sequence
@@ -2156,6 +2266,29 @@ matlab_mat *matlab_hess(matlab_mat *A) {
     return H;
 }
 
+/* 2-return [H, P] = hess(A) shape — H is upper Hessenberg, P is the
+ * orthogonal similarity (P' A P = H). Two entries route through the
+ * same multi-return splitter pattern as eig_V/eig_D: the frontend
+ * dispatches each LHS to its own helper, and both helpers redo the
+ * Hessenberg reduction independently to keep the runtime stateless.
+ * Cost is one extra O(n³) Householder pass — negligible compared to
+ * the typical caller's downstream work. */
+matlab_mat *matlab_hess_H(matlab_mat *A) { return matlab_hess(A); }
+
+matlab_mat *matlab_hess_P(matlab_mat *A) {
+    if (!A || A->rows != A->cols) return mat_alloc(0, 0);
+    int64_t n = A->rows;
+    matlab_mat *P = mat_alloc(n, n);
+    if (n == 0) return P;
+    /* Initialise P to identity; the in-place pass accumulates the
+     * Householder reflections into it. */
+    for (int64_t i = 0; i < n; ++i) P->data[i * n + i] = 1.0;
+    if (n <= 2) return P;
+    std::vector<double> H(A->data, A->data + n * n);
+    hessenberg_inplace_(H.data(), n, P->data);
+    return P;
+}
+
 /*-------------------------------------------------------------------------
  * Real Schur decomposition — [U, T] = schur(A).
  *
@@ -2202,6 +2335,167 @@ matlab_mat *matlab_schur_U(matlab_mat *A) {
     hessenberg_inplace_(H.data(), n, U->data);
     francis_qr_(H.data(), n, U->data);
     return U;
+}
+
+/* Forward decls — qr_factor is defined later in this TU. */
+static void qr_factor(matlab_mat *A, matlab_mat *Q, matlab_mat *R);
+
+/*-------------------------------------------------------------------------
+ * Generalised Schur decomposition — [AA, BB, Q, Z] = qz(A, B).
+ *
+ *   qz reduces the matrix pencil A − λ·B to a generalised Schur form:
+ *     Q · A · Z = AA   (real upper quasi-triangular: 1×1 / 2×2 blocks)
+ *     Q · B · Z = BB   (real upper triangular)
+ *   with Q and Z orthogonal. The generalised eigenvalues are the
+ *   diagonal pairs (AA[i,i], BB[i,i]); λ_i = AA[i,i] / BB[i,i] when
+ *   BB[i,i] ≠ 0, otherwise λ_i = ∞ (an "infinite" pencil eigenvalue).
+ *
+ * v1 implementation: layered on the existing schur + qr primitives,
+ * valid when B is invertible (the common case for descriptor systems
+ * with regular dynamics):
+ *   1. C = B⁻¹ · A
+ *   2. Real Schur of C: U' · C · U = T (upper quasi-triangular)
+ *   3. M = B · U;  QR of M:  M = O · R  (O orthogonal, R upper
+ *      triangular).
+ *   4. Q = O',   Z = U.
+ *      AA = Q · A · Z = O' · A · U = O' · (B · U) · T = R · T
+ *      BB = Q · B · Z = O' · B · U = R
+ *   The product R·T is upper quasi-triangular when T is.
+ *   Returns 0×0 when B is singular — that path needs the proper
+ *   Hessenberg-Triangular reduction + double-shift QZ iteration
+ *   (Moler-Stewart 1973), which is the Tier-1.2 final follow-on for
+ *   `zero(sys)` on the Rosenbrock system matrix (where B is rank-
+ *   deficient by construction). Tracked in
+ *   docs/control_toolbox_roadmap.md §2.2.
+ *
+ * Four public entries follow the schur_U / schur_T precedent — each
+ * recomputes the full decomposition and returns one piece. Cost is
+ * negligible relative to the typical caller's downstream work
+ * (small-plant CST workflows, n = 2..10).
+ *-------------------------------------------------------------------------*/
+namespace {
+
+bool qz_is_b_invertible_(matlab_mat *B) {
+    if (!B || B->rows != B->cols) return false;
+    int64_t n = B->rows;
+    if (n == 0) return false;
+    std::vector<double> LU(B->data, B->data + n * n);
+    std::vector<int64_t> piv(n);
+    int sgn;
+    if (lu_decompose(LU.data(), n, piv.data(), &sgn) != 0) return false;
+    /* Reject if any diagonal entry of LU is too small (singular
+     * within roundoff). lu_decompose already errors on exact zero
+     * but a rank-deficient B can squeak through with a tiny pivot;
+     * compare against a Frobenius-scaled threshold. */
+    double fro = 0.0;
+    for (int64_t i = 0; i < n * n; ++i) fro += B->data[i] * B->data[i];
+    fro = std::sqrt(fro);
+    double tol = 1e-12 * (fro + 1.0);
+    for (int64_t i = 0; i < n; ++i)
+        if (std::fabs(LU[i * n + i]) < tol) return false;
+    return true;
+}
+
+bool qz_compute_(matlab_mat *A, matlab_mat *B,
+                  std::vector<double> &AA,
+                  std::vector<double> &BB,
+                  std::vector<double> &Q,
+                  std::vector<double> &Z,
+                  int64_t &n_out) {
+    if (!A || !B || A->rows != A->cols || B->rows != B->cols ||
+        A->rows != B->rows) return false;
+    int64_t n = A->rows;
+    if (n == 0) return false;
+    if (!qz_is_b_invertible_(B)) return false;
+
+    /* C = B⁻¹ · A — solve B · C = A column by column. */
+    std::vector<double> LU(B->data, B->data + n * n);
+    std::vector<int64_t> piv(n);
+    int sgn;
+    if (lu_decompose(LU.data(), n, piv.data(), &sgn) != 0) return false;
+    std::vector<double> C(n * n);
+    std::vector<double> rhs(n), x(n);
+    for (int64_t c = 0; c < n; ++c) {
+        for (int64_t r = 0; r < n; ++r) rhs[r] = A->data[r * n + c];
+        lu_solve_column(LU.data(), n, piv.data(), rhs.data(), x.data());
+        for (int64_t r = 0; r < n; ++r) C[r * n + c] = x[r];
+    }
+
+    /* Real Schur of C: T = U' · C · U via the same Hessenberg + QR
+     * machinery the schur entry uses. */
+    std::vector<double> T = C;
+    std::vector<double> U(n * n, 0.0);
+    for (int64_t i = 0; i < n; ++i) U[i * n + i] = 1.0;
+    hessenberg_inplace_(T.data(), n, U.data());
+    francis_qr_(T.data(), n, U.data());
+
+    /* M = B · U. */
+    std::vector<double> M(n * n, 0.0);
+    for (int64_t i = 0; i < n; ++i)
+        for (int64_t j = 0; j < n; ++j) {
+            double s = 0.0;
+            for (int64_t k = 0; k < n; ++k)
+                s += B->data[i * n + k] * U[k * n + j];
+            M[i * n + j] = s;
+        }
+
+    /* QR of M (modified Gram-Schmidt) — returns O orthogonal and R
+     * upper triangular with M = O · R. */
+    matlab::runtime::MatPtr Mmat = matlab::runtime::make_mat(n, n);
+    for (int64_t i = 0; i < n * n; ++i) Mmat->data[i] = M[i];
+    matlab::runtime::MatPtr O = matlab::runtime::make_mat(n, n);
+    matlab::runtime::MatPtr R = matlab::runtime::make_mat(n, n);
+    qr_factor(Mmat.get(), O.get(), R.get());
+
+    /* Q = O' (transposed orthogonal so MATLAB's `Q*A*Z = AA` shape holds). */
+    Q.assign(n * n, 0.0);
+    for (int64_t i = 0; i < n; ++i)
+        for (int64_t j = 0; j < n; ++j) Q[j * n + i] = O->data[i * n + j];
+
+    /* Z = U. */
+    Z.assign(U.begin(), U.end());
+
+    /* BB = R (upper triangular). */
+    BB.assign(R->data, R->data + n * n);
+
+    /* AA = R · T (upper quasi-triangular when T is). */
+    AA.assign(n * n, 0.0);
+    for (int64_t i = 0; i < n; ++i)
+        for (int64_t j = 0; j < n; ++j) {
+            double s = 0.0;
+            for (int64_t k = 0; k < n; ++k)
+                s += R->data[i * n + k] * T[k * n + j];
+            AA[i * n + j] = s;
+        }
+    n_out = n;
+    return true;
+}
+
+matlab_mat *qz_pick_(matlab_mat *A, matlab_mat *B, int which) {
+    std::vector<double> AA, BB, Q, Z;
+    int64_t n = 0;
+    if (!qz_compute_(A, B, AA, BB, Q, Z, n)) return mat_alloc(0, 0);
+    matlab_mat *out = mat_alloc(n, n);
+    const double *src = (which == 0) ? AA.data() :
+                         (which == 1) ? BB.data() :
+                         (which == 2) ? Q.data()  : Z.data();
+    for (int64_t i = 0; i < n * n; ++i) out->data[i] = src[i];
+    return out;
+}
+
+} // namespace
+
+matlab_mat *matlab_qz_AA(matlab_mat *A, matlab_mat *B) {
+    return qz_pick_(A, B, 0);
+}
+matlab_mat *matlab_qz_BB(matlab_mat *A, matlab_mat *B) {
+    return qz_pick_(A, B, 1);
+}
+matlab_mat *matlab_qz_Q(matlab_mat *A, matlab_mat *B) {
+    return qz_pick_(A, B, 2);
+}
+matlab_mat *matlab_qz_Z(matlab_mat *A, matlab_mat *B) {
+    return qz_pick_(A, B, 3);
 }
 
 /*-------------------------------------------------------------------------
@@ -2266,6 +2560,54 @@ matlab_mat *matlab_lyap(matlab_mat *A, matlab_mat *Q) {
 
     matlab_mat *X = mat_alloc(n, n);
     for (int64_t i = 0; i < n2; ++i) X->data[i] = x[i];
+    return X;
+}
+
+/* 3-argument Sylvester equation: A·X + X·B + C = 0  (note the convention:
+ * MATLAB's `lyap(A, B, C)` solves the equation with the +C sign — same
+ * as MATLAB Toolbox documentation). A is n×n, B is m×m, C and X are n×m.
+ *
+ * Vectorisation (row-major):
+ *   ((A o I_m) + (I_n o B^T)) · vec(X) = -vec(C)
+ *
+ * v1 implementation: dense LU on the (n·m)² Kronecker matrix. Same
+ * O(N³) cost shape as the 2-arg lyap; the proper Bartels-Stewart on
+ * the Schur forms of A and B is the large-plant follow-on.
+ *
+ * Tier 1.4 follow-on of CST roadmap §2.4. */
+matlab_mat *matlab_sylvester(matlab_mat *A, matlab_mat *B, matlab_mat *C) {
+    if (!A || !B || !C) return mat_alloc(0, 0);
+    int64_t n = A->rows;
+    int64_t m = B->rows;
+    if (A->cols != n || B->cols != m) return mat_alloc(0, 0);
+    if (C->rows != n || C->cols != m) return mat_alloc(0, 0);
+    if (n == 0 || m == 0) return mat_alloc(0, 0);
+    int64_t N = n * m;
+
+    /* Build M[(i*m+j), (k*m+l)] = A[i,k]·δ_{j,l} + δ_{i,k}·B[l,j]. */
+    std::vector<double> M(N * N, 0.0);
+    for (int64_t i = 0; i < n; ++i)
+        for (int64_t j = 0; j < m; ++j)
+            for (int64_t k = 0; k < n; ++k)
+                M[(i * m + j) * N + (k * m + j)] += A->data[i * n + k];
+    for (int64_t i = 0; i < n; ++i)
+        for (int64_t j = 0; j < m; ++j)
+            for (int64_t l = 0; l < m; ++l)
+                M[(i * m + j) * N + (i * m + l)] += B->data[l * m + j];
+
+    std::vector<double> rhs(N);
+    for (int64_t i = 0; i < N; ++i) rhs[i] = -C->data[i];
+
+    std::vector<int64_t> piv(N);
+    int sgn;
+    if (lu_decompose(M.data(), N, piv.data(), &sgn) != 0)
+        return mat_alloc(0, 0);
+
+    std::vector<double> x(N);
+    lu_solve_column(M.data(), N, piv.data(), rhs.data(), x.data());
+
+    matlab_mat *X = mat_alloc(n, m);
+    for (int64_t i = 0; i < N; ++i) X->data[i] = x[i];
     return X;
 }
 
@@ -2518,6 +2860,37 @@ matlab_mat *matlab_gram_o(matlab_mat *A, matlab_mat *C) {
     matlab_mat *Ct  = matlab_transpose(C);
     matlab_mat *CtC = matlab_matmul_mm(Ct, C);
     return matlab_lyap(At, CtC);
+}
+
+/*-------------------------------------------------------------------------
+ * Cholesky factor of the controllability gramian — R = lyapchol(A, B).
+ *
+ *   lyapchol returns an upper-triangular R such that R' R = Wc, where
+ *   Wc solves A·Wc + Wc·A' + B·B' = 0 (the controllability Lyapunov
+ *   equation). It's the numerically robust input to balanced-truncation
+ *   model reduction: SVD of R·R' = Wc gives the Hankel singular values
+ *   without ever forming Wc explicitly, dodging the squaring-of-condition-
+ *   number that hits a chol(Wc) round trip.
+ *
+ *   This v1 entry is the round-trip (compute Wc via lyap, then chol),
+ *   which is fine for the small plants typical of the practical CST
+ *   surface (n = 2..10) and the SPD inputs the gramian path produces.
+ *   The square-root Lyapunov solver of Hammarling 1982 (which avoids
+ *   forming Wc) is the proper large-plant path; deferred until Bartels-
+ *   Stewart on Schur form lands.
+ *
+ * Tier 1.4 follow-on of the Control System Toolbox roadmap; see
+ * docs/control_toolbox_roadmap.md §2.4. Gates the balanced-realisation
+ * tail of Tier 4 model reduction.
+ *-------------------------------------------------------------------------*/
+/* Forward decl — matlab_chol is defined later in this TU. */
+extern "C" matlab_mat *matlab_chol(matlab_mat *A);
+
+matlab_mat *matlab_lyapchol(matlab_mat *A, matlab_mat *B) {
+    if (!A || !B) return mat_alloc(0, 0);
+    matlab_mat *Wc = matlab_gram_c(A, B);
+    if (!Wc || Wc->rows == 0) return mat_alloc(0, 0);
+    return matlab_chol(Wc);
 }
 
 /*-------------------------------------------------------------------------

@@ -93,6 +93,42 @@ matlab_mat *matlab_matpow(matlab_mat *A, double n);
  * Lyapunov / Riccati transcriptions all flow through expm. */
 matlab_mat *matlab_expm(matlab_mat *A);
 
+/* Matrix logarithm.  L = logm(A) — inverse of expm.  v1 entry handles
+ * upper-triangular real-Schur forms with positive distinct eigenvalues
+ * (Schur-then-Parlett-recurrence; see matlab_runtime.cpp). Returns 0×0
+ * for inputs whose Schur form has 2×2 blocks, non-positive diagonals,
+ * or repeated eigenvalues. */
+matlab_mat *matlab_logm(matlab_mat *A);
+
+/* Cholesky factor of the controllability gramian — R = lyapchol(A, B).
+ * Returns upper-triangular R such that R'·R = Wc where Wc solves
+ * A·Wc + Wc·A' + B·B' = 0. v1 entry computes Wc via lyap then takes
+ * chol; the square-root Hammarling solver (which avoids forming Wc) is
+ * a follow-on. */
+matlab_mat *matlab_lyapchol(matlab_mat *A, matlab_mat *B);
+
+/* 3-arg Sylvester:  A·X + X·B + C = 0. A is n×n, B is m×m,
+ * C and X are n×m. Surfaces in MATLAB as `lyap(A, B, C)` (3-arg form).
+ * v1 entry: dense LU on the (n·m)² Kronecker matrix. Bartels-Stewart on
+ * Schur(A), Schur(B) is the large-plant follow-on. */
+matlab_mat *matlab_sylvester(matlab_mat *A, matlab_mat *B, matlab_mat *C);
+
+/* 2-return [H, P] = hess(A) — H upper Hessenberg, P orthogonal with
+ * P' A P = H. Same multi-return splitter pattern as eig_V / eig_D. */
+matlab_mat *matlab_hess_H(matlab_mat *A);
+matlab_mat *matlab_hess_P(matlab_mat *A);
+
+/* Generalised Schur — [AA, BB, Q, Z] = qz(A, B). v1 entry layered on
+ * schur(B⁻¹·A) + qr(B·U); valid when B is invertible. Returns 0×0
+ * when B is singular (the path needs proper Hessenberg-Triangular
+ * reduction + double-shift QZ; deferred). Four entries follow the
+ * schur_U / schur_T precedent; each recomputes the full
+ * decomposition and returns one piece. */
+matlab_mat *matlab_qz_AA(matlab_mat *A, matlab_mat *B);
+matlab_mat *matlab_qz_BB(matlab_mat *A, matlab_mat *B);
+matlab_mat *matlab_qz_Q(matlab_mat *A, matlab_mat *B);
+matlab_mat *matlab_qz_Z(matlab_mat *A, matlab_mat *B);
+
 /* Hessenberg reduction.  H = hess(A) returns the upper Hessenberg
  * similarity-equivalent of A via Householder reflections. Building
  * block for the Francis QR iteration that produces real Schur form

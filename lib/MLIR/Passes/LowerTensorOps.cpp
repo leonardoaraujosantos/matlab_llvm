@@ -468,6 +468,22 @@ bool TensorLowering::rewriteBuiltinCalls() {
     auto fieldNameAddr =
         [&](Value NameV, int64_t &LenOut) -> Value {
       Operation *Def = NameV.getDefiningOp();
+      /* On a second LowerTensorOps sweep the matlab.const_char that
+       * fed this call may already have been replaced by an
+       * llvm.mlir.addressof — that's the materialised global. If
+       * NameV is already a ptr-typed addressof of an existing
+       * `__matlab_str_*` constant, just reuse it and recover the
+       * length from the global's stored value. */
+      if (auto Addr = mlir::dyn_cast_or_null<LLVM::AddressOfOp>(Def)) {
+        if (auto G = mlir::SymbolTable::lookupNearestSymbolFrom<
+                LLVM::GlobalOp>(Addr, Addr.getGlobalNameAttr())) {
+          if (auto Val = mlir::dyn_cast_or_null<StringAttr>(
+                  G.getValueAttr())) {
+            LenOut = (int64_t)Val.getValue().size();
+            return Addr.getResult();
+          }
+        }
+      }
       if (!isMatlabOp(Def, "matlab.const_char")) return Value{};
       auto VA = Def->getAttrOfType<StringAttr>("value");
       if (!VA) return Value{};
@@ -1257,6 +1273,19 @@ bool TensorLowering::rewriteBuiltinCalls() {
       Value Ptr = fieldNameAddr(NameV, Len);
       if (!Ptr) continue;
       bool IsMat = Name == "matlab_struct_set_mat";
+      /* Auto-promote `_f64` callee to `_mat` when the value operand
+       * arrived as ptr — the AST-time dispatch in Lowering.cpp
+       * picks the callee from the RHS type at lowering time, but
+       * polymorphic flows (function args, class field stores
+       * sourced from another function's return) settle their type
+       * later in the pipeline. The runtime entries are
+       * interchangeable on the type axis: `_mat` reads/writes the
+       * matlab_mat * directly, `_f64` boxes a 1×1 — so promoting
+       * is safe whenever the actual value is ptr. */
+      if (!IsMat && Val.getType() == PtrTy) {
+        Name = "matlab_struct_set_mat";
+        IsMat = true;
+      }
       if (IsMat && Val.getType() != PtrTy) continue;
       if (!IsMat && Val.getType() != F64) continue;
       B.setInsertionPoint(Call);
@@ -1715,6 +1744,18 @@ bool TensorLowering::rewriteBuiltinCalls() {
       Value Ptr = fieldNameAddr(NameV, Len);
       if (!Ptr) continue;
       bool IsMat = Name == "matlab_obj_set_mat";
+      /* Auto-promote `_f64` callee to `_mat` when the value operand
+       * arrived as ptr — same reasoning as the matlab_struct_set
+       * dispatch above. The class-method case especially needs this:
+       * a `tf` constructor's `obj.Numerator = num` was lowered with
+       * the f64 callee at AST time (because Sema couldn't see
+       * through the param), but after LowerUserCalls retypes the
+       * function signature to ptr the field-store now carries a
+       * ptr-typed value. */
+      if (!IsMat && Val.getType() == PtrTy) {
+        Name = "matlab_obj_set_mat";
+        IsMat = true;
+      }
       if (IsMat && Val.getType() != PtrTy) continue;
       if (!IsMat && Val.getType() != F64) continue;
       B.setInsertionPoint(Call);
@@ -2763,6 +2804,9 @@ bool TensorLowering::rewriteBuiltinCalls() {
         {"qr",    "matlab_qr_Q",    "matlab_qr_R"},
         {"lu",    "matlab_lu_L",    "matlab_lu_U"},
         {"schur", "matlab_schur_U", "matlab_schur_T"},
+        /* [H, P] = hess(A) — H upper Hessenberg, P orthogonal with
+         * P' A P = H. Order matches MATLAB's first-output-is-H. */
+        {"hess",  "matlab_hess_H",  "matlab_hess_P"},
       };
       const TwoRet *T = nullptr;
       for (auto &E : TwoReturns)
@@ -3204,6 +3248,37 @@ bool TensorLowering::rewriteBuiltinCalls() {
         Call->getResult(0).replaceAllUsesWith(Ca.getResult());
         Call->getResult(1).replaceAllUsesWith(Cb.getResult());
         Call->getResult(2).replaceAllUsesWith(Cc.getResult());
+        Call->erase();
+        Changed = true;
+        continue;
+      }
+    }
+
+    /* [AA, BB, Q, Z] = qz(A, B) — generalised Schur form of the matrix
+     * pencil A − λ·B. Routes to four matlab_qz_{AA,BB,Q,Z} entries that
+     * each recompute the full decomposition (same stateless pattern as
+     * schur_U / schur_T). v1 path requires B invertible; the singular-
+     * pencil case returns 0×0 from each entry (deferred). */
+    if (NA && NA.getValue().getSExtValue() == 4 &&
+        Name == "qz" && Call->getNumOperands() == 2 &&
+        Call->getNumResults() == 4) {
+      Value V0 = boxAsPtr(Call->getOperand(0));
+      Value V1 = boxAsPtr(Call->getOperand(1));
+      if (V0 && V1) {
+        B.setInsertionPoint(Call);
+        auto Faa = rt("matlab_qz_AA", PtrTy, {PtrTy, PtrTy});
+        auto Fbb = rt("matlab_qz_BB", PtrTy, {PtrTy, PtrTy});
+        auto Fq  = rt("matlab_qz_Q",  PtrTy, {PtrTy, PtrTy});
+        auto Fz  = rt("matlab_qz_Z",  PtrTy, {PtrTy, PtrTy});
+        SmallVector<Value, 2> CA{V0, V1};
+        auto Caa = LLVM::CallOp::create(B, Call->getLoc(), Faa, CA);
+        auto Cbb = LLVM::CallOp::create(B, Call->getLoc(), Fbb, CA);
+        auto Cq  = LLVM::CallOp::create(B, Call->getLoc(), Fq,  CA);
+        auto Cz  = LLVM::CallOp::create(B, Call->getLoc(), Fz,  CA);
+        Call->getResult(0).replaceAllUsesWith(Caa.getResult());
+        Call->getResult(1).replaceAllUsesWith(Cbb.getResult());
+        Call->getResult(2).replaceAllUsesWith(Cq.getResult());
+        Call->getResult(3).replaceAllUsesWith(Cz.getResult());
         Call->erase();
         Changed = true;
         continue;
@@ -3761,10 +3836,15 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"svd",        "matlab_svd",        1, "p"},
       {"eig",        "matlab_eig",        1, "p"},
       {"expm",       "matlab_expm",       1, "p"},
+      {"logm",       "matlab_logm",       1, "p"},
       {"hess",       "matlab_hess",       1, "p"},
       {"schur",      "matlab_schur",      1, "p"},
       {"lyap",       "matlab_lyap",       1, "pp"},
+      /* 3-arg form A·X + X·B + C = 0 — surfaces as `lyap(A, B, C)` in
+       * MATLAB (same name, different arity, different equation). */
+      {"lyap",       "matlab_sylvester",  1, "ppp"},
       {"dlyap",      "matlab_dlyap",      1, "pp"},
+      {"lyapchol",   "matlab_lyapchol",   1, "pp"},
       {"care",       "matlab_care",       1, "pppp"},
       {"dare",       "matlab_dare",       1, "pppp"},
       {"lqr",        "matlab_lqr",        1, "pppp"},
@@ -4055,7 +4135,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
         "bilinear", "freqs", "tf2zp", "zp2tf", "tf2sos", "sos2tf",
         /* CST Tier 1.4 — Lyapunov / Stein. Scalar `lyap([-1], [1])`
          * is a perfectly valid 1*1 invocation that we want to handle. */
-        "lyap", "dlyap",
+        "lyap", "dlyap", "lyapchol",
         /* CST Tier 1.5 — algebraic Riccati. Same scalar-invocation rule. */
         "care", "dare",
         /* CST Tier 2 — LQR convenience wrappers; same scalar shape. */
@@ -4085,6 +4165,9 @@ bool TensorLowering::rewriteBuiltinCalls() {
          * uniformly for both 1*1 R (often the case in SISO LQR) and
          * larger matrices. */
         "inv",
+        /* CST Tier 1.3 follow-on — matrix logarithm. Scalar `logm(4)` is
+         * a valid 1*1 invocation that boxes to `[4]` for the runtime path. */
+        "logm",
       };
       if (AutoBoxNames.contains(Name)) {
         for (auto &E : Table) {

@@ -363,6 +363,16 @@ bool runMonomorphiseUserCalls(ModuleOp M) {
     };
     std::unordered_map<SigKey, llvm::SmallVector<Operation *>, SigHash>
         Buckets;
+    /* Class methods (constructors, instance methods) need the tensor
+     * skip below: a `tf([1 2], [1 3 5])` call cloning into a
+     * (tensor, tensor) signature locks in a sig that doesn't match
+     * post-boxing ptr operands and leaves the cloned constructor
+     * with `matlab.call_builtin matlab_obj_set_f64` ops carrying
+     * tensor-typed values that no LowerTensorOps dispatch handles.
+     * Non-class user functions keep the existing per-tensor-shape
+     * cloning so `sq([1 2 3])` and `sq(5)` get separate clones with
+     * correctly-typed arithmetic bodies. */
+    bool IsClassMethod = Fn->hasAttr("matlab.class_name");
     for (Operation *C : S) {
       unsigned N = C->getNumOperands();
       if (N > DeclArity) continue; /* too many args — user error, skip */
@@ -372,12 +382,16 @@ bool runMonomorphiseUserCalls(ModuleOp M) {
       else
         K.UserArity = N;
       bool AllConcrete = true;
+      bool HasTensor = false;
       for (unsigned i = 0; i < N; ++i) {
         Type T = C->getOperand(i).getType();
         if (mlir::isa<NoneType>(T)) AllConcrete = false;
+        if (mlir::isa<RankedTensorType, UnrankedTensorType>(T))
+          HasTensor = true;
         K.Tys.push_back(T);
       }
       if (!AllConcrete) continue;
+      if (IsClassMethod && HasTensor) continue;
       Buckets[K].push_back(C);
     }
     if (Buckets.empty()) continue;
@@ -473,11 +487,26 @@ bool runLowerUserCalls(ModuleOp M) {
     bool Compatible = true;
     llvm::SmallVector<Type, 4> NewInputs(OldType.getInputs().begin(),
                                           OldType.getInputs().end());
+    bool IsClassMethod = Fn->hasAttr("matlab.class_name");
     for (Operation *C : Sites) {
       if (C->getNumOperands() != NumIn) { Compatible = false; break; }
       for (unsigned i = 0; i < NumIn; ++i) {
         Type CallTy = C->getOperand(i).getType();
         Type ExistingNew = NewInputs[i];
+        /* For class methods only: tensor-typed operands at matlab.call
+         * sites come from literal `[1 2]` or similar concat ops that
+         * LowerTensorOps will rewrite to `matlab_mat_from_buf`
+         * (returning ptr) on a later sweep. If we refine the
+         * constructor sig to the tensor type now, the post-rewrite
+         * ptr-typed operands won't match the (now stale) tensor sig
+         * and the matlab.call → func.call conversion silently skips,
+         * leaving the constructor call unlowered with a stranded
+         * `matlab.call_builtin matlab_obj_set_f64` carrying tensor
+         * RHS. Non-class user functions still want the tensor sig
+         * because their bodies depend on per-tensor-shape arithmetic. */
+        if (IsClassMethod &&
+            mlir::isa<RankedTensorType, UnrankedTensorType>(CallTy))
+          continue;
         if (canRefineTo(ExistingNew, CallTy)) {
           NewInputs[i] = CallTy;
         } else if (ExistingNew != CallTy &&

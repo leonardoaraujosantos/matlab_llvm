@@ -2232,10 +2232,13 @@ void Lowerer::lowerStmt(const Stmt &St) {
           /* [r, c] = size(A) — both f64. */
           if (CN == "size" && A.LHS.size() == 2)
             Rtys.assign(A.LHS.size(), F64);
-          /* [V, D] = eig / [Q, R] = qr / [L, U] = lu / [U, S, V] = svd —
-           * all ptr (matrix) results. */
+          /* [V, D] = eig / [Q, R] = qr / [L, U] = lu / [U, S, V] = svd /
+           * [H, P] = hess — all ptr (matrix) results. */
           else if ((CN == "eig" || CN == "qr" || CN == "lu" ||
-                    CN == "svd") && A.LHS.size() >= 2)
+                    CN == "svd" || CN == "hess") && A.LHS.size() >= 2)
+            Rtys.assign(A.LHS.size(), PtrTy);
+          /* [AA, BB, Q, Z] = qz(A, B) — all four ptr (matrix). */
+          else if (CN == "qz" && A.LHS.size() == 4)
             Rtys.assign(A.LHS.size(), PtrTy);
           /* [t, y] = ode45(@f, tspan, y0) / ode23 / ode23s — all column
            * matrices. The 3-return form `[t, y, stats]` adds a struct
@@ -6527,8 +6530,8 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             "intersect", "union", "horzcat", "vertcat", "kron",
             "chol", "pinv", "permute", "squeeze", "flip", "fliplr",
             "flipud", "rot90", "size", "transpose", "ctranspose",
-            "diag", "reshape", "repmat", "inv", "svd", "eig", "expm", "hess",
-            "schur", "lyap", "dlyap", "care", "dare", "lqr", "dlqr",
+            "diag", "reshape", "repmat", "inv", "svd", "eig", "expm", "logm", "hess",
+            "schur", "qz", "lyap", "dlyap", "lyapchol", "care", "dare", "lqr", "dlqr",
             "ctrb", "obsv", "place", "damp", "hsvd", "balreal_T",
             "balred", "balred_A", "balred_B", "balred_C", "dcgain_ss",
             "stepinfo",
@@ -6925,6 +6928,26 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
       mlir::Value NameV = emitFieldNameChar(F.Field, L);
       bool WantMat = mlir::isa<mlir::RankedTensorType,
                                 mlir::UnrankedTensorType>(RT);
+      /* CST prelude classes (tf / ss / zpk / pid / frd) carry
+       * matrix-typed properties (Numerator / A / Z / etc.) almost
+       * exclusively. Sema can't see through the property to the
+       * stored type, so without this nudge a `G.Numerator` read
+       * defaults to `_get_f64` and silently returns 0 when the
+       * field actually holds an NxM vector. Force `_get_mat` for
+       * these classes — `matlab_struct_get_mat` auto-boxes f64
+       * fields back to 1×1 matrices, so scalar properties that
+       * happen to land on the same dispatch still print the same
+       * digits via `matlab_disp_mat`. Other user classdefs (Vec2,
+       * BasicClass, …) keep the f64 default so their scalar
+       * arithmetic stays in scalar lanes. */
+      bool IsCstClass = false;
+      if (PinnedCls) {
+        llvm::StringRef CN = PinnedCls->Name;
+        IsCstClass = (CN == "tf" || CN == "ss" || CN == "zpk" ||
+                      CN == "pid" || CN == "frd");
+      }
+      if (IsCstClass && !WantMat &&
+          !mlir::isa<mlir::Float64Type>(RT)) WantMat = true;
       llvm::StringRef Callee = WantMat ? "matlab_obj_get_mat"
                                         : "matlab_obj_get_f64";
       mlir::NamedAttribute Cal(
