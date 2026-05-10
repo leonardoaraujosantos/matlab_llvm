@@ -1789,6 +1789,7 @@ static llvm::StringRef MatrixReturningFns[] = {
     "matlab_intersect", "matlab_ismember", "matlab_setdiff",
     "matlab_union", "matlab_unique", "matlab_ind2sub",
     "matlab_load_mat", "matlab_fread",
+    "matlab_readmatrix",
     // Complex / FFT — runtime returns `matlab_mat_c *` or real
     // `matlab_mat *`, both representable as a Matrix wrapper since the
     // wrapper only holds a `void *`.

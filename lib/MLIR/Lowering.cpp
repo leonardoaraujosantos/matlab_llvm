@@ -2082,7 +2082,10 @@ void Lowerer::lowerStmt(const Stmt &St) {
       auto *Cx = static_cast<const CallOrIndex *>(A.RHS);
       if (auto *NE = dynamic_cast<const NameExpr *>(Cx->Callee)) {
         if (NE->Name == "categorical") RhsIsCategorical = true;
-        if (NE->Name == "table") RhsIsTable = true;
+        /* readtable returns a matlab_table*, so its result binding
+         * gets the same dispatch as `T = table(...)`. */
+        if (NE->Name == "table" || NE->Name == "readtable")
+          RhsIsTable = true;
       }
     } else if (A.RHS && A.RHS->Kind == NodeKind::NameExpr) {
       auto *NE = static_cast<const NameExpr *>(A.RHS);

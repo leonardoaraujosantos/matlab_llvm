@@ -141,6 +141,7 @@ void Resolver::registerBuiltins() {
     "nargin", "nargout", "varargin", "varargout",
     "fopen", "fclose", "fgetl", "feof",
     "fread", "fwrite",
+    "readtable", "readmatrix",
     "save", "load",
     "conj", "real", "imag", "angle", "complex",
     "fft", "ifft", "fft2", "ifft2",
