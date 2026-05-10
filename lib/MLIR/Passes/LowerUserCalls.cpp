@@ -763,6 +763,50 @@ bool runLowerUserCalls(ModuleOp M) {
     // helper converts to a func.call returning ptr. Inserting an
     // unrealized_conversion_cast at the boundary makes the new
     // func.call type-correct; later passes drop the cast.
+    /* When the strict signature match fails, scan for sibling clones
+     * (`<callee>__sN`) that the monomorphizer may have produced from
+     * a bucket whose operand types are the post-retyping types of
+     * THIS call site. Class-method bodies that read class fields end
+     * up holding ptr operands while the original constructor was
+     * retyped to a different signature based on its own bucket
+     * (e.g. tf__tf settled on `(ptr, f64)` for the `tf([1 0], 1)`
+     * site, but the call from inside `tf__plus` is `(ptr, ptr)`).
+     * The monomorphizer's bucketing skips operands typed `none` at
+     * its run point, so these calls don't get retargeted by the
+     * normal path. Try each sibling and pick the first whose
+     * signature matches the actual operand types. */
+    auto tryMatchSig = [&](func::FuncOp F) -> bool {
+      auto FT = F.getFunctionType();
+      if (FT.getNumInputs() < N) return false;
+      auto PtrTy_ = LLVM::LLVMPointerType::get(Ctx);
+      for (unsigned i = 0; i < N; ++i) {
+        Type CallTy = Call->getOperand(i).getType();
+        Type FnTyIn = FT.getInput(i);
+        if (FnTyIn == CallTy) continue;
+        if (mlir::isa<NoneType>(CallTy) && FnTyIn == PtrTy_) continue;
+        return false;
+      }
+      return true;
+    };
+    if (!tryMatchSig(Fn)) {
+      func::FuncOp Best;
+      for (auto Sib : M.getOps<func::FuncOp>()) {
+        StringRef SN = Sib.getSymName();
+        StringRef BaseName = CA.getValue();
+        if (!SN.starts_with(BaseName)) continue;
+        StringRef Suffix = SN.drop_front(BaseName.size());
+        if (!Suffix.starts_with("__s")) continue;
+        if (!tryMatchSig(Sib)) continue;
+        Best = Sib;
+        break;
+      }
+      if (Best) {
+        Fn = Best;
+        FnTy = Fn.getFunctionType();
+        M_ = FnTy.getNumInputs();
+        CA = StringAttr::get(Ctx, Fn.getSymName());
+      }
+    }
     bool OK = true;
     SmallVector<Value, 4> ConvArgs;
     ConvArgs.reserve(N);

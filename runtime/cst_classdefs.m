@@ -18,7 +18,17 @@ classdef tf
     end
     methods
         function obj = tf(num, den)
-            if nargin == 2
+            % Accept a single scalar / vector to box into a constant
+            % transfer function `c → c/1`. MATLAB's convention so
+            % `G + 2` boxes the right operand into `tf(2)` before
+            % dispatching to plus. The 1-arg `tf('s')` builder is a
+            % follow-on slice — char literals don't survive the
+            % AST→MLIR lowering through the constructor body today;
+            % users compose explicitly via `s = tf([1 0], 1)`.
+            if nargin == 1
+                obj.Numerator = num;
+                obj.Denominator = 1;
+            elseif nargin == 2
                 obj.Numerator = num;
                 obj.Denominator = den;
             end

@@ -3720,9 +3720,37 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
      * `le`, `gt`, `ge`), dispatch to that method. MATLAB picks the
      * dominant class when both operands are objects of different
      * classes; for v1 we just prefer the LHS's class. */
-    auto pinnedFromExpr = [](const Expr *X) -> const ClassDef * {
+    /* Walk an expression tree to find a class hint. NameExpr is the
+     * direct case (a class-pinned variable). For inline composite
+     * expressions like `s*s + 3*s` the LHS sub-expression is a
+     * BinaryOp whose operator dispatch returns a fresh class
+     * instance — recurse through BinaryOp/UnaryOp so the outer `+`
+     * still picks up the class. CallOrIndex on a class constructor
+     * also returns a class instance. */
+    std::function<const ClassDef *(const Expr *)> pinnedFromExpr =
+        [&pinnedFromExpr](const Expr *X) -> const ClassDef * {
+      if (!X) return nullptr;
       if (auto *NE = dynamic_cast<const NameExpr *>(X))
         if (NE->Ref && NE->Ref->PinnedClass) return NE->Ref->PinnedClass;
+      if (auto *Bi2 = dynamic_cast<const BinaryOpExpr *>(X)) {
+        bool IsCmp =
+            Bi2->Op == BinOp::Eq || Bi2->Op == BinOp::Ne ||
+            Bi2->Op == BinOp::Lt || Bi2->Op == BinOp::Le ||
+            Bi2->Op == BinOp::Gt || Bi2->Op == BinOp::Ge;
+        if (!IsCmp) {
+          if (auto *L = pinnedFromExpr(Bi2->LHS)) return L;
+          if (auto *R = pinnedFromExpr(Bi2->RHS)) return R;
+        }
+        return nullptr;
+      }
+      if (auto *U2 = dynamic_cast<const UnaryOpExpr *>(X))
+        return pinnedFromExpr(U2->Operand);
+      if (auto *CX = dynamic_cast<const CallOrIndex *>(X)) {
+        if (auto *NX = dynamic_cast<const NameExpr *>(CX->Callee))
+          if (NX->Ref && NX->Ref->Kind == BindingKind::Class &&
+              NX->Ref->ClassDef)
+            return NX->Ref->ClassDef;
+      }
       return nullptr;
     };
     const ClassDef *OpCls = pinnedFromExpr(Bi.LHS);
@@ -3759,6 +3787,44 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
         if (Owner) {
           mlir::Value LHS = Bi.LHS ? lowerExpr(*Bi.LHS) : mlir::Value{};
           mlir::Value RHS = Bi.RHS ? lowerExpr(*Bi.RHS) : mlir::Value{};
+          /* Scalar-mixing boxing: when one operand is a class
+           * instance (Owner) and the other is a non-class value
+           * (scalar f64, integer, raw matrix ptr), wrap the non-
+           * class operand in a one-arg `Owner(value)` constructor
+           * call so the class's operator method body sees two
+           * class-pinned operands. MATLAB's convention for `G + 2`
+           * is `G + Owner(2)`. Restricted to CST prelude classes
+           * (tf / ss / zpk / pid / frd) — other user classdefs
+           * (Vec2, BasicClass, …) typically don't have a 1-arg
+           * constructor handling the scalar-promotion case and
+           * would crash on a 1-arg invocation. The CST classes
+           * explicitly support `tf(c)` → constant-tf semantics. */
+          llvm::StringRef OCN = Owner->Name;
+          bool BoxScalars = (OCN == "tf" || OCN == "ss" ||
+                              OCN == "zpk" || OCN == "pid" ||
+                              OCN == "frd");
+          if (BoxScalars) {
+            auto PtrTyW = mlir::LLVM::LLVMPointerType::get(&MCtx);
+            auto wrapIfScalar = [&](mlir::Value V, const Expr *Op) -> mlir::Value {
+              if (!V) return V;
+              const ClassDef *Pinned = pinnedFromExpr(Op);
+              if (Pinned) return V;
+              mlir::Type T = V.getType();
+              if (T == PtrTyW) return V;
+              std::string Ctor = std::string(Owner->Name) + "__" +
+                                  std::string(Owner->Name);
+              mlir::NamedAttribute CC(
+                  mlir::StringAttr::get(&MCtx, "callee"),
+                  mlir::StringAttr::get(&MCtx, Ctor));
+              mlir::NamedAttribute UA(
+                  mlir::StringAttr::get(&MCtx, "user_arity"),
+                  mlir::IntegerAttr::get(
+                      mlir::IntegerType::get(&MCtx, 64), 1));
+              return emitUnreg("matlab.call", {V}, PtrTyW, L, {CC, UA});
+            };
+            LHS = wrapIfScalar(LHS, Bi.LHS);
+            RHS = wrapIfScalar(RHS, Bi.RHS);
+          }
           std::string Callee = std::string(Owner->Name) + "__" +
                                 std::string(OpMethod);
           mlir::NamedAttribute Cal(

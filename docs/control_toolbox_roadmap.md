@@ -1021,18 +1021,17 @@ frequency-domain (`bode_ss` SISO, `bode_tf`, gain/phase margins,
 (`feedback_ss`, `series_ss`, `parallel_ss`, `append_ss` — all matrix-
 arg, strictly-proper, 3-return).
 
-**Stage 3 (model objects) — 🟡 PARTIAL**: `tf` shipped with
+**Stage 3 (model objects) — 🟡 PARTIAL**: `tf` ships with
 constructor + property reads + tf-vs-tf operator overloads
-(`+`, `-`, `*`, `/`, unary `-`). `ss` / `zpk` / `frd` / `pid`
-classdefs are the remaining shape. Scalar mixing (`s + 2`,
-`tf('s')` builder) needs a Sema-level CST property type tracker
-(today `obj.Numerator` Sema-types as `any`/f64 and downstream
-arithmetic stays in scalar lanes — the lowering compensates by
-routing the call to `matlab_obj_get_mat` but doesn't update Sema's
-type, so `-obj.Numerator` outside a method body still lowers as
-scalar). Inside method bodies, the operand is a class-pinned param
-which the lowering correctly treats as ptr — that's why operator
-overloads work end-to-end today.
+(`+`, `-`, `*`, `/`, unary `-`) + **scalar mixing**
+(`G + 2`, `5 * G`, `G - 1`, `3 + G`, `G / 2`, …) + the **`s = tf
+([1 0], 1)`** Laplace-variable composition idiom: write `J = (s +
+2) / (s * s + 3 * s + 5)` and get `[1, 2] / [1, 3, 5]`. The
+`tf('s')` char-literal sugar is a follow-on (char literals don't
+survive the AST→MLIR lowering through the constructor body
+today). `ss` / `zpk` / `frd` / `pid` classdefs are the remaining
+shape — mechanical replicas of `tf` once the operator-overload +
+scalar-mixing pattern is settled.
 
 **Stage 3 — `tf` working with operator overloads (2026-05-09)**:
 `tf(num, den)` constructor with `obj.Numerator` / `obj.Denominator`
@@ -1083,7 +1082,38 @@ work:
   whose `none`-typed slots no downstream pass can resolve, leaving
   stale `matlab.call_builtin` ops that fail LLVM-IR translation.
 
-Operator-overload compiler fixes that landed alongside this slice:
+Scalar-mixing compiler fixes (this slice):
+- `Lowering.cpp` BinaryOp class-method dispatch wraps non-class
+  operands via a 1-arg `Owner(value)` constructor call before
+  emitting the matlab.call. MATLAB's convention: `G + 2` is
+  `G + tf(2)`. Restricted to CST prelude classes (tf / ss / zpk /
+  pid / frd) so other user classdefs (Vec2, BasicClass) keep their
+  scalar-mixing-friendly behaviour where the user-written method
+  body handles the scalar directly.
+- `Lowering.cpp` `pinnedFromExpr` recurses through BinaryOp /
+  UnaryOp / CallOrIndex so composite expressions like
+  `s*s + 3*s + 5` propagate the class pin through nested
+  operators. Without this, the outer `+` saw both LHS and RHS as
+  unpinned (their NameExprs are buried under operator nodes) and
+  fell back to the default arithmetic path, which segfaulted in
+  `matlab_add_mm` on the class-instance pointers.
+- `LowerUserCalls.cpp` matlab.call → func.call sibling-clone
+  search: when the strict signature match against the original
+  callee fails, scan the module for `<callee>__sN` clones produced
+  by the monomorphizer and pick the first whose signature matches
+  the actual operand types. Class-method bodies that read class
+  fields end up with ptr operands while the original constructor
+  was retyped to a different signature based on its own bucket
+  (e.g. `tf__tf` settled on `(ptr, f64)` for the `tf([1 0], 1)`
+  site, but the call from inside `tf__plus` is `(ptr, ptr)` after
+  slot retyping — that bucket landed on `tf__tf__s1`). The bucket-
+  setting monomorphizer skips operands typed `none` at its run
+  point, so these calls weren't retargeted by the normal path.
+- prelude `tf` constructor accepts a 1-arg form `tf(c)` →
+  `(c / 1)` constant transfer function, which is what the scalar-
+  boxing wrapper calls.
+
+Operator-overload compiler fixes from the previous slice:
 - `Resolver.cpp` extended-binary-operator pinning: the second param
   of `mtimes`/`mrdivide`/`mldivide`/`mpower` (and the elementwise
   variants) gets pinned to the class for CST prelude classes only
@@ -1112,14 +1142,14 @@ Operator-overload compiler fixes that landed alongside this slice:
   a stranded matlab.call after the upstream helper converted to a
   func.call returning ptr.
 
-**Still 🔵**: scalar mixing (`s + 2`, `tf('s')` builder), `ss` /
-`zpk` / `frd` / `pid` classdefs, model-object forms of the existing
-matrix-arg primitives. Scalar mixing is the bigger architectural
-piece — needs Sema-level CST property type tracking; without it,
-`G + 2` inside or outside a method body lowers as scalar arithmetic
-even though the operand is a class field reading as ptr. The other
-classdefs are mechanical replicas of `tf` once the operator-
-overload pattern is settled.
+**Still 🔵**: `tf('s')` char-literal sugar (the `'s'` literal
+doesn't survive the AST→MLIR lowering through the constructor body —
+needs a special-case rewrite that recognises `tf('s')` at the
+CallOrIndex lowering and emits `tf([1 0], 1)` directly), `ss` /
+`zpk` / `frd` / `pid` classdefs (mechanical replicas of `tf`),
+model-object forms of the existing matrix-arg primitives
+(`step(sys)`, `bode(sys)`, etc.), and `disp(tf)` formatted s-domain
+rendering.
 
 Heavy carve-outs (apps, Simulink, LPV/LTV, sparse-second-order,
 `systune`, Robust/MPC/SysID toolbox bridges) keep this scoped to
