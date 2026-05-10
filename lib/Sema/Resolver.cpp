@@ -132,6 +132,16 @@ void Resolver::registerBuiltins() {
     "feedback_ss", "series_ss", "parallel_ss", "append_ss",
     /* Tier 2.4 follow-on — TF (b, a) frequency response. */
     "bode_tf",
+    /* §3.1 — model-object short forms (value-returning). Recognised
+     * at the lowering site: a class-pinned first arg routes to the
+     * matching matrix-arg primitive (e.g. `step(sys)` for an
+     * ss-pinned `sys` → `step_ss(sys.A, sys.B, sys.C, sys.D, dt,
+     * N)`). Class-returning short forms (`c2d(sys, Ts)`,
+     * `feedback(sys1, sys2)`, …) are deferred — they need Sema to
+     * pin the result slot to the matching class, which is out of
+     * scope for the synthesised-builtin-call path today. Users
+     * compose those explicitly via `ss(Ad, Bd, …)`. */
+    "step", "bode", "dcgain", "lsim", "bandwidth",
     "arrayfun", "cellfun",
     /* Initial-value ODE solvers — see runtime/matlab_runtime.cpp.
      * ode23s is the Rosenbrock stiff solver. pdepe is the 1-D

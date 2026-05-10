@@ -1196,19 +1196,53 @@ overloads (this slice):
   H_ab(jω) = H_a(jω) · H_b(jω) — series cascade in the frequency
   domain is a Hadamard product, not a matrix multiply.
 
-**Still 🔵**: model-object forms of the existing matrix-arg
-primitives (`step(sys)`, `bode(sys)`, `lsim(sys)`, `c2d(sys, Ts)`,
-`feedback(sys1, sys2)`, etc.) — these need dispatch from the
-classdef-argument case to the matching matrix-arg runtime entry
-(unpack `sys.A` / `sys.B` / `sys.C` / `sys.D`, call `step_ss`,
-re-box the result if needed). emit-c / emit-cpp / emit-python /
-emit-typescript lane parity for the §3.1 model-object tests is a
-separate piece (the emit lanes pass class structs by value while
-the runtime ABI is `void *`; the §3.1 tests are LLVM-lane only and
-carry `.skip-emit-*` markers). Laplace-form `tf(pid)` conversion
-+ pid-as-tf composition. True frd grid-mismatch interpolation
-(today's overloads assume operands share the same Frequency
-vector).
+Model-object short forms (this slice, value-returning):
+- `Lowering.cpp` adds a class-pinned-first-arg dispatch right
+  after the disp(obj) class-method route. When the user writes
+  `pole(sys)`, `dcgain(sys)`, `bandwidth(sys)`, `step(sys [, dt,
+  N])`, `lsim(sys, u, dt)`, or `bode(sys, w)` and `sys` is pinned
+  to `ss` or (for `pole` / `bode`) `tf`, we extract the relevant
+  properties via `matlab_obj_get_mat` and emit the matching
+  matrix-arg primitive via `matlab.call_builtin` to the table
+  entry (`pole` → `eig`, `step` → `step_ss`, `bode` → `bode_ss` /
+  `bode_tf`, …). `step` defaults to `dt = 0.01`, `N = 500` (~5 s
+  simulation) when called without explicit time args. Matrix-arg
+  call sites (`pole(A)`, `step_ss(A, B, C, D, dt, N)`, …) keep
+  their existing behaviour — the short forms only fire when the
+  first arg is a NameExpr resolving to a class-pinned slot.
+- `Resolver.cpp` registers `step` / `bode` / `dcgain` / `lsim` /
+  `bandwidth` in the builtin-name allowlist so Sema accepts them.
+
+**Still 🔵**: class-returning short forms (`c2d(sys, Ts)`,
+`feedback(sys1, sys2)`, `series(sys1, sys2)`, `parallel(sys1,
+sys2)`) — these mint a fresh `ss` instance and the result needs
+class-pinning on the assignment LHS. Today the pin only flows
+from a NameExpr that directly resolves to a `ClassDef`; until
+Sema tracks "this builtin call returns a class instance," users
+compose those explicitly via `[Ad, Bd] = c2d(sys.A, sys.B, Ts);
+sys_d = ss(Ad, Bd, sys.C, sys.D)`.
+
+emit-c / emit-cpp / emit-python / emit-typescript lane parity
+for the §3.1 model-object tests is a separate piece. Today
+`EmitC.cpp` emits classdef property layouts as all-`double` — see
+`emitCStructTypedef`, where every property is rendered as `double
+<name>;` regardless of the runtime type. For the §3.1 classes
+(tf with `Numerator` / `Denominator` matrices, ss with `A` / `B`
+/ `C` / `D`, zpk with `Z` / `P` root vectors, frd with
+`ResponseData` / `Frequency`, pid mostly-scalar) we'd need to
+track per-property element types in `CppClassDef::Properties`,
+emit `void *` (or a matrix wrapper type) for matrix-typed
+properties, and rewrite property reads/writes to call the runtime
+helpers (`matlab_obj_get_mat` / `matlab_obj_set_mat`) instead of
+direct member access. The emit lanes also need the class instance
+to flow through the pipeline as a pointer (or by-reference
+struct) rather than a by-value struct, since runtime helpers
+operate on `void *`. Today the §3.1 tests carry `.skip-emit-*`
+markers and ship LLVM-lane only.
+
+Other follow-ons: Laplace-form `tf(pid)` conversion + pid-as-tf
+composition. True frd grid-mismatch interpolation (today's
+overloads assume operands share the same Frequency vector).
 
 Heavy carve-outs (apps, Simulink, LPV/LTV, sparse-second-order,
 `systune`, Robust/MPC/SysID toolbox bridges) keep this scoped to

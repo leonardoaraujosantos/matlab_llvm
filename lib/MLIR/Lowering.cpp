@@ -5732,6 +5732,147 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
           }
         }
       }
+      /* §3.1 — model-object short forms.
+       *
+       * `step(sys)` / `bode(sys, w)` / `pole(sys)` / `dcgain(sys)` /
+       * `lsim(sys, u, dt)` / `bandwidth(sys)` etc. take a class-
+       * pinned first argument and dispatch to the matching matrix-
+       * arg primitive (`step_ss`, `bode_ss`, …) by unpacking the
+       * relevant properties via `matlab_obj_get_mat`. The short
+       * forms only fire when the first arg is a NameExpr pinned to
+       * the matching class; matrix-arg call sites (e.g. `pole(A)`)
+       * fall through to the existing builtin path unchanged. */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          C.Args.size() >= 1 && C.Args[0]) {
+        auto *AN0 = dynamic_cast<const NameExpr *>(C.Args[0]);
+        const ClassDef *Cls0 = (AN0 && AN0->Ref) ? AN0->Ref->PinnedClass
+                                                  : nullptr;
+        const llvm::StringRef Cn0 = Cls0
+            ? llvm::StringRef(Cls0->Name.data(), Cls0->Name.size())
+            : llvm::StringRef();
+        const auto &Nm = N->Name;
+        auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+        auto F64 = mlir::Float64Type::get(&MCtx);
+        auto getProp = [&](mlir::Value Obj,
+                           llvm::StringRef Field) -> mlir::Value {
+          mlir::Value FieldName = emitFieldNameChar(Field, L);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_obj_get_mat"));
+          return emitUnreg("matlab.call_builtin", {Obj, FieldName},
+                            PtrTy, L, {Cal});
+        };
+        auto loadObj = [&](const Expr *X) -> mlir::Value {
+          mlir::Value V = lowerExpr(*X);
+          if (V.getType() != PtrTy) V.setType(PtrTy);
+          return V;
+        };
+
+        auto rebuildCall = [&](llvm::StringRef Callee,
+                               llvm::ArrayRef<mlir::Value> Args,
+                               mlir::Type ResTy) -> mlir::Value {
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, Callee));
+          return emitUnreg("matlab.call_builtin", Args, ResTy, L, {Cal});
+        };
+
+        /* pole(sys): for ss → eig(sys.A); for tf → roots(sys.Denominator).
+         * Result is a (possibly complex) matrix. */
+        if (Nm == "pole" && Cls0 && (Cn0 == "ss" || Cn0 == "tf")) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          if (Cn0 == "ss")
+            return rebuildCall("eig", {getProp(Obj, "A")}, PtrTy);
+          return rebuildCall("roots", {getProp(Obj, "Denominator")}, PtrTy);
+        }
+
+        /* dcgain(sys): for ss → dcgain_ss(A, B, C, D). */
+        if (Nm == "dcgain" && Cls0 && Cn0 == "ss") {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          return rebuildCall("dcgain_ss",
+                             {getProp(Obj, "A"), getProp(Obj, "B"),
+                              getProp(Obj, "C"), getProp(Obj, "D")},
+                             PtrTy);
+        }
+
+        /* bandwidth(sys): for ss → bandwidth_ss(A, B, C, D). Returns
+         * a scalar f64 (the −3 dB bandwidth in rad/s). */
+        if (Nm == "bandwidth" && Cls0 && Cn0 == "ss") {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          return rebuildCall("bandwidth_ss",
+                             {getProp(Obj, "A"), getProp(Obj, "B"),
+                              getProp(Obj, "C"), getProp(Obj, "D")},
+                             F64);
+        }
+
+        /* step(sys [, dt, N]): for ss → step_ss with defaults
+         * dt=0.01, N=500 if not provided. Returns y as a column
+         * matrix. */
+        if (Nm == "step" && Cls0 && Cn0 == "ss") {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value Dt, Nval;
+          if (C.Args.size() >= 3 && C.Args[1] && C.Args[2]) {
+            Dt = lowerExpr(*C.Args[1]);
+            Nval = lowerExpr(*C.Args[2]);
+          } else {
+            Dt = mlir::arith::ConstantOp::create(
+                B, L, F64, mlir::FloatAttr::get(F64, 0.01)).getResult();
+            Nval = mlir::arith::ConstantOp::create(
+                B, L, F64, mlir::FloatAttr::get(F64, 500.0)).getResult();
+          }
+          return rebuildCall("step_ss",
+                             {getProp(Obj, "A"), getProp(Obj, "B"),
+                              getProp(Obj, "C"), getProp(Obj, "D"),
+                              Dt, Nval},
+                             PtrTy);
+        }
+
+        /* lsim(sys, u, dt): for ss → lsim_ss(A, B, C, D, u, dt). */
+        if (Nm == "lsim" && Cls0 && Cn0 == "ss" && C.Args.size() == 3) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value U  = lowerExpr(*C.Args[1]);
+          mlir::Value Dt = lowerExpr(*C.Args[2]);
+          if (U.getType() != PtrTy) U.setType(PtrTy);
+          return rebuildCall("lsim_ss",
+                             {getProp(Obj, "A"), getProp(Obj, "B"),
+                              getProp(Obj, "C"), getProp(Obj, "D"),
+                              U, Dt},
+                             PtrTy);
+        }
+
+        /* bode(sys, w): ss → bode_ss(A, B, C, D, w); tf →
+         * bode_tf(num, den, w). Returns the magnitude vector
+         * (1-return form; 2-return [mag, phase] goes through the
+         * dedicated splitter in LowerTensorOps). */
+        if (Nm == "bode" && Cls0 && C.Args.size() == 2) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value W = lowerExpr(*C.Args[1]);
+          if (W.getType() != PtrTy) W.setType(PtrTy);
+          if (Cn0 == "ss") {
+            return rebuildCall("bode_ss",
+                               {getProp(Obj, "A"), getProp(Obj, "B"),
+                                getProp(Obj, "C"), getProp(Obj, "D"), W},
+                               PtrTy);
+          }
+          if (Cn0 == "tf") {
+            return rebuildCall("bode_tf",
+                               {getProp(Obj, "Numerator"),
+                                getProp(Obj, "Denominator"), W},
+                               PtrTy);
+          }
+        }
+
+        /* c2d(sys, Ts), feedback(sys1, sys2), series(sys1, sys2),
+         * parallel(sys1, sys2) — class-returning short forms.
+         * Deferred: the result needs a class-pinned slot type so
+         * downstream `obj.A` reads dispatch through the class path,
+         * which Sema won't infer for a synthesised constructor call
+         * site. Today the pin only flows from a NameExpr that
+         * directly resolves to a ClassDef. Until Sema tracks
+         * "this builtin call returns a class instance," users can
+         * compose explicitly: `[Ad, Bd] = c2d(sys.A, sys.B, Ts);
+         *  sys_d = ss(Ad, Bd, sys.C, sys.D)`. */
+      }
       /* disp(s) where s is a tracked string binding -> matlab_string_disp.
        * Also handles disp("literal") by routing a StringLiteral arg
        * and disp(expr) where expr is a call to a known string-
@@ -6700,6 +6841,8 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             "c2d", "c2d_tustin", "d2c_tustin", "pole",
             "feedback_ss", "series_ss", "parallel_ss", "append_ss",
             "gram_c", "gram_o", "step_ss", "bode_ss", "lsim_ss", "bode_tf",
+            /* §3.1 — model-object short forms (value-returning). */
+            "step", "bode", "dcgain", "lsim", "bandwidth",
             "find", "ind2sub", "linspace",
             /* Complex: all return a matrix descriptor (matlab_mat* or
              * matlab_mat_c*), uniformly ptr at MLIR level. */
