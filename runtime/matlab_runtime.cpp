@@ -7644,7 +7644,11 @@ static void csv_strip_bom(const char **buf, int64_t *len) {
  * same {data, len} fields; the linker symbol name is what
  * matters for cross-module calls. */
 extern "C" matlab_table *matlab_readtable(matlab_string_s_fwd_ *path) {
-    if (!path || !path->data) return matlab_table_new();
+    if (!path || !path->data) {
+        static const char msg[] = "readtable: empty path";
+        matlab_set_error_msg(msg, (int64_t)(sizeof msg - 1));
+        return matlab_table_new();
+    }
     /* fopen needs a NUL-terminated path; matlab_string already
      * stores one (we guarantee it elsewhere) but copy defensively. */
     char *p = (char *)malloc((size_t)path->len + 1);
@@ -7652,8 +7656,24 @@ extern "C" matlab_table *matlab_readtable(matlab_string_s_fwd_ *path) {
     p[path->len] = '\0';
     int64_t len = 0;
     char *raw = csv_slurp(p, &len);
+    if (!raw) {
+        /* Don't silently return an empty table on open failure — that
+         * masks relative-path mistakes (e.g. cwd not set under the DAP
+         * launch path). Surface a clear error including the bad path
+         * via both the error flag (caught by try/catch and by the DAP
+         * channel) and a direct stderr write (visible in the standalone
+         * binary path, where the traceback emitter is gated off). */
+        char msg[1024];
+        int n = snprintf(msg, sizeof msg,
+                         "readtable: cannot open file '%s'", p);
+        free(p);
+        if (n < 0) n = 0;
+        if (n > (int)sizeof msg - 1) n = (int)sizeof msg - 1;
+        fprintf(stderr, "error: %.*s\n", (int)n, msg);
+        matlab_set_error_msg(msg, (int64_t)n);
+        return matlab_table_new();
+    }
     free(p);
-    if (!raw) return matlab_table_new();
     const char *buf = raw;
     csv_strip_bom(&buf, &len);
     char delim = csv_detect_delim(buf, len);
@@ -7787,14 +7807,28 @@ extern "C" matlab_table *matlab_readtable(matlab_string_s_fwd_ *path) {
 }
 
 extern "C" matlab_mat *matlab_readmatrix(matlab_string_s_fwd_ *path) {
-    if (!path || !path->data) return mat_alloc(0, 0);
+    if (!path || !path->data) {
+        static const char msg[] = "readmatrix: empty path";
+        matlab_set_error_msg(msg, (int64_t)(sizeof msg - 1));
+        return mat_alloc(0, 0);
+    }
     char *p = (char *)malloc((size_t)path->len + 1);
     memcpy(p, path->data, (size_t)path->len);
     p[path->len] = '\0';
     int64_t len = 0;
     char *raw = csv_slurp(p, &len);
+    if (!raw) {
+        char msg[1024];
+        int n = snprintf(msg, sizeof msg,
+                         "readmatrix: cannot open file '%s'", p);
+        free(p);
+        if (n < 0) n = 0;
+        if (n > (int)sizeof msg - 1) n = (int)sizeof msg - 1;
+        fprintf(stderr, "error: %.*s\n", (int)n, msg);
+        matlab_set_error_msg(msg, (int64_t)n);
+        return mat_alloc(0, 0);
+    }
     free(p);
-    if (!raw) return mat_alloc(0, 0);
     const char *buf = raw;
     csv_strip_bom(&buf, &len);
     char delim = csv_detect_delim(buf, len);

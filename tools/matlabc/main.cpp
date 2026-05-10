@@ -3613,6 +3613,33 @@ bool handleRequest(const Object &Msg) {
                    Value("no program path supplied"));
       return true;
     }
+    /* Resolve the JIT'd program's working directory so relative
+     * file reads (readtable("foo.csv") etc.) behave the same way
+     * they do under `build_and_run.sh && ./out`, which exec's the
+     * binary from the script's folder. Order of precedence:
+     *   1. DAP `launch.cwd` if the IDE supplied one (matches the
+     *      vscode-debug spec — many IDEs send the workspace folder).
+     *   2. Otherwise, the directory containing the program file —
+     *      keeps relative paths in the script working without IDE
+     *      cooperation.
+     * A failed chdir is non-fatal (logged via the DAP `output` channel
+     * upstream of this function); the launch still proceeds because
+     * the user may be invoking the program with absolute paths. */
+    std::string TargetCwd;
+    auto CwdArg = Args->getString("cwd");
+    if (CwdArg && !CwdArg->empty()) {
+      TargetCwd = CwdArg->str();
+    } else {
+      auto Slash = G.ProgramPath.find_last_of("/\\");
+      if (Slash != std::string::npos && Slash > 0)
+        TargetCwd = G.ProgramPath.substr(0, Slash);
+    }
+    if (!TargetCwd.empty()) {
+      if (chdir(TargetCwd.c_str()) != 0) {
+        std::cerr << "matlabc -dap: chdir(" << TargetCwd
+                  << ") failed: " << std::strerror(errno) << "\n";
+      }
+    }
     if (!compileProgram()) {
       sendResponse(ReqSeq, *Cmd, false,
                    Value("failed to compile program"));
