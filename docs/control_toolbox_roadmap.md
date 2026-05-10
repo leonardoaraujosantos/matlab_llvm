@@ -259,16 +259,20 @@ is no state-space optimal control.
 
 | Primitive | Effort | Status |
 |---|---|---|
-| Non-symmetric `eig` (2.1) | 1 wk | ✅ 1+2-return for real eigenvalues; complex pairs return 0×0 (deferred) |
-| `schur` / `hess` / `qz` (2.2) | 0.5 wk | ✅ schur (1+2-ret), hess (1+2-ret), qz (4-ret, B-invertible path) |
-| `expm` / `logm` (2.3) | 1 wk | ✅ both shipped (logm: real-Schur-then-Parlett, no 2×2 blocks) |
-| `lyap` / `dlyap` / `lyapchol` (2.4) | 1 wk | ✅ all four shipped (lyap 2-arg, lyap 3-arg Sylvester, dlyap, lyapchol) |
-| `care` / `dare` (2.5) | 1 wk | ✅ 1+3-return + 5-arg cross-term + icare/idare aliases |
+| Non-symmetric `eig` (2.1) | 1 wk | ✅ 1+2-return for real eigenvalues; generalised `eig(A, B)` ✅ via QZ + 2×2-block quadratic. 2-return `[V, D] = eig(A)` complex-pair eigenvector back-substitution still 0×0 (needs complex arithmetic on quasi-blocks). |
+| `schur` / `hess` / `qz` (2.2) | 0.5 wk | ✅ schur (1+2-ret), hess (1+2-ret), qz (4-ret, B-invertible path). Moler-Stewart QZ for singular-B (gating `zero(sys)` on Rosenbrock pencils) is a follow-on. |
+| `expm` / `logm` (2.3) | 1 wk | ✅ both shipped. `logm` returns 0×0 on 2×2 Schur blocks (complex eigenvalue pairs), non-positive diagonal, or repeated eigenvalues — those failure paths await complex-arithmetic block log + Parlett's block recurrence. |
+| `lyap` / `dlyap` / `lyapchol` / `sylvester` (2.4) | 1 wk | ✅ all four shipped. v1 uses dense LU on the Kronecker matrix (O(n^6)); Bartels-Stewart back-substitution on Schur form (and Hammarling for lyapchol) is the proper large-plant follow-on, now unblocked by `schur` shipping. |
+| `care` / `dare` (2.5) | 1 wk | ✅ 1+3-return + 5-arg cross-term + icare/idare aliases. 6-arg descriptor form (`care(A, B, Q, R, S, E)`) needs generalised Riccati QZ on the symplectic pencil — same Moler-Stewart machinery as the QZ singular-B path. |
 
-**Tier-1 status**: numerical core complete enough to build the rest
-of the toolbox. Logm, lyapchol, qz, the 2-return non-sym eig, and
-generalised eig remain — all are individual follow-on slices, none
-gating Tier-2/3/4 user-facing features that haven't already shipped.
+**Tier-1 status — ✅ CLOSED (2026-05-10)**: every primitive that
+gates a Tier-2/3/4 user-facing surface has shipped. Remaining
+items (logm 2×2 blocks, complex eigenvectors, qz singular-B,
+Bartels-Stewart Schur-form solves, Hammarling lyapchol, 6-arg
+descriptor care) are large-plant or complex-arithmetic
+optimisations / coverage extensions — each is an isolated
+follow-on slice and none gates the Tier-2/3/4 surface that has
+already landed.
 
 **Total Tier-1**: ~4-5 weeks of focused sessions. Land in the order
 above (each row depends on the rows above it).
@@ -923,16 +927,16 @@ unblocks the next; durations are focused-session estimates):
 
 | Order | What | Effort | Status |
 |---|---|---|---|
-| 1 | Non-symmetric `eig` (Tier 1.1) | 1 wk | ✅ shipped (1-return) |
-| 2 | `expm` / `logm` (Tier 1.3) | 1 wk | 🟡 expm ✅, logm pending |
-| 3 | `schur` / `hess` / `qz` (Tier 1.2) | 0.5 wk | 🟡 schur ✅ + hess ✅, qz pending |
-| 4 | `lyap` / `dlyap` / `lyapchol` (Tier 1.4) | 1 wk | 🟡 lyap ✅ + dlyap ✅, lyapchol pending |
-| 5 | `care` / `dare` (Tier 1.5) | 1 wk | ✅ care + dare shipped (1-return + 3-return `[X, K, L]`) |
-| 6 | Model object constructors (Tier 2.1) — `tf` / `ss` / `zpk` / `pid` | 1 wk | 🔵 not started — single biggest UX gap |
-| 7 | Conversions + `c2d` / `d2c` (Tier 2.2) | 1 wk | 🟡 c2d ZOH (matrix-arg) shipped; d2c / Tustin / foh pending |
-| 8 | Time-domain simulation (Tier 2.3) — `step` / `impulse` / `lsim` / `initial` / `stepinfo` | 1 wk | 🟡 step_ss + lsim_ss (matrix-arg) shipped; impulse / initial / stepinfo pending |
-| 9 | Frequency-domain (Tier 2.4) — `bode` / `nyquist` / `sigma` / `freqresp` / `margin` | 1.5 wk | 🟡 bode_ss SISO + bode_tf + gain/phase margins shipped; MIMO bode + sigma + nyquist pending |
-| 10 | Pole/zero + interconnections (Tier 2.5–2.6) | 1 wk | 🟡 isstable + damp shipped; zero + feedback / series / parallel pending |
+| 1 | Non-symmetric `eig` (Tier 1.1) | 1 wk | ✅ 1+2-return shipped; generalised `eig(A, B)` ✅ via QZ + 2×2-block quadratic |
+| 2 | `expm` / `logm` (Tier 1.3) | 1 wk | ✅ both shipped (logm: Schur-Parlett; 2×2-block log a follow-on) |
+| 3 | `schur` / `hess` / `qz` (Tier 1.2) | 0.5 wk | ✅ shipped (qz on B-invertible path; Moler-Stewart for singular-B is a follow-on) |
+| 4 | `lyap` / `dlyap` / `lyapchol` / `sylvester` (Tier 1.4) | 1 wk | ✅ all four shipped (dense LU on the Kronecker matrix; Bartels-Stewart on Schur is a large-plant follow-on) |
+| 5 | `care` / `dare` (Tier 1.5) | 1 wk | ✅ 1+3-return + 5-arg cross-term + icare/idare aliases; 6-arg descriptor form is a follow-on |
+| 6 | Model object constructors (Tier 2.1) — `tf` / `ss` / `zpk` / `pid` / `frd` | 1 wk | ✅ shipped — full classdef + tf-vs-tf + scalar mixing + `tf('s')` / `tf('z')` + polynomial composition + ss/zpk/pid/frd operator overloads + `disp(tf)` + model-object short forms (pole/step/bode/dcgain/lsim/bandwidth) |
+| 7 | Conversions + `c2d` / `d2c` (Tier 2.2) | 1 wk | 🟡 c2d ZOH + c2d_tustin + d2c_tustin (matrix-arg) shipped; `c2d(sys, Ts)` returning ss is a follow-on (needs Sema-pin on synthesised-builtin results) |
+| 8 | Time-domain simulation (Tier 2.3) — `step` / `impulse` / `lsim` / `initial` / `stepinfo` | 1 wk | 🟡 step_ss + lsim_ss (matrix-arg) + `step(sys)` / `lsim(sys, u, dt)` (model-object) shipped; impulse / initial pending |
+| 9 | Frequency-domain (Tier 2.4) — `bode` / `nyquist` / `sigma` / `freqresp` / `margin` | 1.5 wk | 🟡 bode_ss SISO + bode_tf + gain/phase margins + `bode(sys, w)` (model-object) shipped; MIMO bode + sigma + nyquist pending |
+| 10 | Pole/zero + interconnections (Tier 2.5–2.6) | 1 wk | 🟡 isstable + damp + `pole(sys)` (model-object) shipped; zero + `feedback(sys1, sys2)` / `series` / `parallel` returning ss pending |
 | 11 | `pidtune` (Tier 2.8) | 1 wk | 🔵 pending (needs H∞ for MATLAB-faithful) |
 | 12 | LQR + LQG + Kalman + place (Tier 3.1–3.3) | 1.5 wk | 🟡 lqr ✅ + dlqr ✅ + place SISO ✅ + kalman_L ✅ + kalmd_L ✅; lqgreg / lqg / 4-return [kest, L, P] pending |
 | 13 | Gramians + ctrb/obsv + norms (Tier 3.4–3.5) | 1 wk | 🟡 ctrb + obsv + gram_c + gram_o + hsvd + norm_h2 + dcgain_ss shipped; norm_inf (H∞) pending |
@@ -944,12 +948,13 @@ unblocks the next; durations are focused-session estimates):
 **Total**: ~18-20 weeks of focused sessions for Tier 1 → Tier 4
 closure. Tier 5 is +1 week. Tier 6 (`systune`) is multi-month.
 
-**Current state (2026-05-09)**: rows 1-5, 7, 8, 9, 12, 13, 14 all
-🟡 partial-shipped via matrix-arg primitives. The big remaining
-unlock is **row 6 (model objects)** — once `tf` / `ss` / `zpk`
-classdefs land with operator overloads, the model-object forms of
-rows 7–14 become 5-line wrappers each, and rows 11 / 15 become
-reachable.
+**Current state (2026-05-10)**: rows 1-6 closed (numeric core +
+model objects); rows 7-10 partially shipped (matrix-arg primitives
++ value-returning model-object short forms). Class-returning
+short forms (`c2d(sys, Ts)`, `feedback(sys1, sys2)`, …) still
+pending — they need Sema to pin the result slot to the matching
+class, which is the next architectural piece for rows 7-10
+closure. Rows 11-17 mostly 🔵.
 
 **MVP slice (~11 weeks)**: Order 1-11. Lights up the "PID design and
 simulate" loop end-to-end. Most pedagogical control problems fit here.

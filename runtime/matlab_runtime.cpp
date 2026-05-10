@@ -2591,6 +2591,110 @@ matlab_mat *matlab_qz_Z(matlab_mat *A, matlab_mat *B) {
 }
 
 /*-------------------------------------------------------------------------
+ * Generalised eigenvalue problem — `eig(A, B)` returning the
+ * eigenvalues of the matrix pencil A − λB. Stages: QZ → diagonal
+ * walk → quadratic on 2×2 quasi-blocks. Polymorphic real/complex
+ * return (matches matlab_eig): pure-real spectrum returns a real
+ * column matrix; any complex pair flips the return to
+ * matlab_mat_c* (cast back to matlab_mat* for the dispatch ABI).
+ *
+ * 2×2 generalised eigenproblem: with AA_2 = AA[i:i+2, i:i+2] and
+ * BB_2 = BB[i:i+2, i:i+2] (BB upper-triangular so BB_2 has a zero
+ * sub-diagonal), det(AA_2 − λ·BB_2) = 0 expands to
+ *   (b11·b22) λ²
+ *     − (a11·b22 + a22·b11 − a21·b12) λ
+ *     + (a11·a22 − a12·a21) = 0
+ * which is a standard scalar quadratic. A zero leading coefficient
+ * means an infinite eigenvalue (BB rank-deficient on the block) —
+ * surfaced as NaN today.
+ *
+ * Tier 1 closure piece: matches the conversation in CST roadmap
+ * §2.1 that the generalised `eig(A, B)` "is a small wrapper over
+ * the already-shipped 4-return qz". B singular keeps the
+ * `qz_compute_` 0×0 fallback (Moler-Stewart QZ remains a follow-on).
+ *-------------------------------------------------------------------------*/
+matlab_mat *matlab_eig_gen(matlab_mat *A_in, matlab_mat *B_in) {
+    std::vector<double> AA, BB, Q, Z;
+    int64_t n = 0;
+    if (!qz_compute_(A_in, B_in, AA, BB, Q, Z, n)) return mat_alloc(0, 0);
+
+    std::vector<double> ere(n), eim(n);
+    int complex_pairs = 0;
+    int64_t i = 0;
+    while (i < n) {
+        bool is_2x2 = (i + 1 < n) &&
+                      (std::fabs(AA[(i + 1) * n + i]) > 1e-12);
+        if (is_2x2) {
+            double a11 = AA[i * n + i],     a12 = AA[i * n + (i + 1)];
+            double a21 = AA[(i + 1) * n + i], a22 = AA[(i + 1) * n + (i + 1)];
+            double b11 = BB[i * n + i],     b12 = BB[i * n + (i + 1)];
+            double b22 = BB[(i + 1) * n + (i + 1)];
+            double Aq = b11 * b22;
+            double Bq = -(a11 * b22 + a22 * b11 - a21 * b12);
+            double Cq = a11 * a22 - a12 * a21;
+            if (Aq == 0.0) {
+                ere[i] = std::numeric_limits<double>::quiet_NaN();
+                eim[i] = 0.0;
+                ere[i + 1] = std::numeric_limits<double>::quiet_NaN();
+                eim[i + 1] = 0.0;
+            } else {
+                double disc = Bq * Bq - 4.0 * Aq * Cq;
+                if (disc >= 0) {
+                    double sq = std::sqrt(disc);
+                    ere[i]     = (-Bq + sq) / (2.0 * Aq); eim[i]     = 0.0;
+                    ere[i + 1] = (-Bq - sq) / (2.0 * Aq); eim[i + 1] = 0.0;
+                } else {
+                    double sq = std::sqrt(-disc);
+                    double re = -Bq / (2.0 * Aq);
+                    double im =  sq / (2.0 * Aq);
+                    ere[i]     = re; eim[i]     = im;
+                    ere[i + 1] = re; eim[i + 1] = -im;
+                    complex_pairs++;
+                }
+            }
+            i += 2;
+        } else {
+            double b = BB[i * n + i];
+            if (std::fabs(b) < 1e-14) {
+                /* BB diagonal zero → infinite eigenvalue. Surface as
+                 * +Inf so downstream isstable / pole tests behave
+                 * predictably. */
+                ere[i] = std::numeric_limits<double>::infinity();
+            } else {
+                ere[i] = AA[i * n + i] / b;
+            }
+            eim[i] = 0.0;
+            i += 1;
+        }
+    }
+
+    /* Sort by ascending real part, tie-break on imaginary. Mirrors
+     * matlab_eig's order so test snapshots agree. */
+    for (int64_t a = 0; a < n; ++a) {
+        for (int64_t b = a + 1; b < n; ++b) {
+            bool swap = (ere[b] < ere[a]) ||
+                        (ere[b] == ere[a] && eim[b] < eim[a]);
+            if (swap) {
+                std::swap(ere[a], ere[b]);
+                std::swap(eim[a], eim[b]);
+            }
+        }
+    }
+
+    if (complex_pairs == 0) {
+        matlab_mat *E = mat_alloc(n, 1);
+        for (int64_t k = 0; k < n; ++k) E->data[k] = ere[k];
+        return E;
+    }
+    matlab_mat_c *Ec = mat_c_alloc(n, 1);
+    for (int64_t k = 0; k < n; ++k) {
+        Ec->re[k] = ere[k];
+        Ec->im[k] = eim[k];
+    }
+    return (matlab_mat *)Ec;
+}
+
+/*-------------------------------------------------------------------------
  * Lyapunov / Stein equation solvers.
  *
  *   lyap(A, Q):    A X + X A' + Q = 0     (continuous Lyapunov)

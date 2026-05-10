@@ -3935,6 +3935,10 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"bandwidth_ss","matlab_bandwidth_ss",0,"pppp"},
       {"getPeakGain_ss","matlab_getPeakGain_ss",0,"pppp"},
       {"pole",       "matlab_eig",        1, "p"},
+      /* Generalised eig(A, B): 2-arg form routes to matlab_eig_gen
+       * which returns the (possibly complex) spectrum of the pencil
+       * A − λB. The 1-arg `eig(A)` keeps the existing dispatch. */
+      {"eig",        "matlab_eig_gen",    1, "pp"},
       /* feedback_ss 1-return defaults to Acl (closed-loop A — most-
        * useful for stability/eig analysis). 3-return goes through the
        * dedicated splitter above. */

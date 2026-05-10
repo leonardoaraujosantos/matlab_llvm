@@ -80,6 +80,12 @@ matlab_mat *matlab_svd(matlab_mat *A_in);
 matlab_mat *matlab_eig(matlab_mat *A_in);
 matlab_mat *matlab_eig_V(matlab_mat *A_in);
 matlab_mat *matlab_eig_D(matlab_mat *A_in);
+/* Generalised eigenvalue problem — `eig(A, B)` over the pencil
+ * A − λB. Returns matlab_mat* (real) when the pencil has only real
+ * eigenvalues, or matlab_mat_c* (cast back) for complex pairs.
+ * B-singular cases return 0×0 (gated on the proper Moler-Stewart
+ * QZ; see CST roadmap §2.1 / §2.2). */
+matlab_mat *matlab_eig_gen(matlab_mat *A_in, matlab_mat *B_in);
 double      matlab_det(matlab_mat *A);
 matlab_mat *matlab_transpose(matlab_mat *A);
 matlab_mat *matlab_diag(matlab_mat *A);
