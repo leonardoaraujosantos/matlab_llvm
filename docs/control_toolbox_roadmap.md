@@ -1029,9 +1029,14 @@ constructor + property reads + tf-vs-tf operator overloads
 2) / (s * s + 3 * s + 5)` and get `[1, 2] / [1, 3, 5]`. The
 `tf('s')` char-literal sugar is a follow-on (char literals don't
 survive the AST→MLIR lowering through the constructor body
-today). `ss` / `zpk` / `frd` / `pid` classdefs are the remaining
-shape — mechanical replicas of `tf` once the operator-overload +
-scalar-mixing pattern is settled.
+today). `ss` / `zpk` / `pid` / `frd` ship as **minimal classdefs**
+— constructor + property storage + property reads — in
+`runtime/cst_class_<name>.m` files that matlabc auto-includes
+only when the user code mentions the corresponding name. Operator
+overloads on these types need actual control-system math (block-
+diagonal A assembly for `ss + ss`, root concatenation for `zpk *
+zpk`, Laplace expansion for `pid`, frequency-grid interpolation
+for `frd`) and are a follow-on slice.
 
 **Stage 3 — `tf` working with operator overloads (2026-05-09)**:
 `tf(num, den)` constructor with `obj.Numerator` / `obj.Denominator`

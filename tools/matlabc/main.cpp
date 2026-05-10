@@ -7828,14 +7828,18 @@ int main(int Argc, char **Argv) {
     }
     return std::string();
   };
-  auto userMentionsCstClass = [](const std::string &Path) -> bool {
+  /* Per-class detection: scan the user input for whole-word `<name>(`
+   * or `<name> =` (single-`=` assignment) patterns. Returns a vector
+   * of matched class names. Comments are stripped first so a `% tf
+   * is short for transfer function` line doesn't pull the prelude in. */
+  auto userMentionsCstClasses =
+      [](const std::string &Path) -> std::vector<std::string> {
+    std::vector<std::string> Found;
     std::ifstream In(Path);
-    if (!In) return false;
+    if (!In) return Found;
     std::ostringstream Buf;
     Buf << In.rdbuf();
     std::string SrcRaw = Buf.str();
-    /* Strip line comments before the textual scan — a `% tf is short
-     * for transfer function` line shouldn't pull in the prelude. */
     std::string Src;
     Src.reserve(SrcRaw.size());
     bool InComment = false;
@@ -7848,45 +7852,68 @@ int main(int Argc, char **Argv) {
       if (c == '%') InComment = true;
       if (!InComment) Src.push_back(c);
     }
-    /* Pattern-based match: look for `<name>(` (call/constructor) or
-     * `<name> =` (assignment of a returned model object). Whole-word
-     * pattern still applies on the left so `bode_tf(` doesn't match. */
     static const char *Names[] = { "tf", "ss", "zpk", "pid", "frd" };
     for (const char *N : Names) {
       size_t NL = std::strlen(N);
       size_t P = 0;
-      while ((P = Src.find(N, P)) != std::string::npos) {
+      bool Hit = false;
+      while ((P = Src.find(N, P)) != std::string::npos && !Hit) {
         bool LeftWord = (P > 0) && (std::isalnum((unsigned char)Src[P-1]) ||
                                      Src[P-1] == '_');
         if (!LeftWord && P + NL < Src.size()) {
           char Right = Src[P + NL];
-          /* `tf(` — call or constructor. */
-          if (Right == '(') return true;
-          /* `tf =` or `tf=` — assignment from a return. Skip
-           * whitespace before the `=`. */
+          if (Right == '(') { Hit = true; break; }
           size_t Q = P + NL;
           while (Q < Src.size() && (Src[Q] == ' ' || Src[Q] == '\t')) Q++;
           if (Q < Src.size() && Src[Q] == '=') {
-            /* Distinguish `==` from single `=`: `==` is a comparison,
-             * not an assignment. */
-            if (Q + 1 >= Src.size() || Src[Q+1] != '=') return true;
+            if (Q + 1 >= Src.size() || Src[Q+1] != '=') { Hit = true; break; }
           }
         }
         P += NL;
       }
+      if (Hit) Found.push_back(N);
     }
-    return false;
+    return Found;
   };
-  std::string PreludePath;
-  if (userMentionsCstClass(Opts.InputPath)) {
-    PreludePath = findCstPrelude();
+  /* The per-class prelude file lookup: tf lives in the umbrella
+   * `cst_classdefs.m` (it shares the `cst_polyadd` / `cst_polysub`
+   * helpers); the other classes have their own `cst_class_<name>.m`
+   * files so the unused-classdef bodies (with `none`-typed slots
+   * that no downstream pass refines) don't get pulled in for
+   * tf-only programs. */
+  auto findClassPrelude = [&](const std::string &ClsName) -> std::string {
+    std::string SelfStr(Argv[0]);
+    auto last = SelfStr.find_last_of('/');
+    std::string Bin = (last == std::string::npos) ? "." : SelfStr.substr(0, last);
+    char Real[PATH_MAX];
+    if (realpath(Bin.c_str(), Real)) Bin = Real;
+    std::string Leaf = (ClsName == "tf") ? "cst_classdefs.m"
+                                          : ("cst_class_" + ClsName + ".m");
+    std::vector<std::string> Cands = {
+      Bin + "/../runtime/" + Leaf,
+      Bin + "/runtime/" + Leaf,
+      Bin + "/../share/matlabc/runtime/" + Leaf,
+    };
+    for (auto &C : Cands) {
+      std::ifstream Fp(C);
+      if (Fp) return C;
+    }
+    return std::string();
+  };
+  std::vector<std::string> PreludePaths;
+  for (const std::string &Cls : userMentionsCstClasses(Opts.InputPath)) {
+    std::string P = findClassPrelude(Cls);
+    if (!P.empty()) PreludePaths.push_back(std::move(P));
   }
+  /* Back-compat single-path variable for the loader below; the
+   * concat path now iterates PreludePaths. */
+  std::string PreludePath = PreludePaths.empty() ? "" : PreludePaths.front();
 
   SourceManager SM;
   FileID F = 0;
   /* Always go through the concat path when a prelude is found. The
    * single-file fast path stays for .mflow / no-prelude builds. */
-  if (Opts.ExtraInputs.empty() && PreludePath.empty()) {
+  if (Opts.ExtraInputs.empty() && PreludePaths.empty()) {
     F = SM.loadFile(Opts.InputPath);
     if (F == 0) {
       std::cerr << Opts.InputPath << ": cannot open file\n";
@@ -7923,8 +7950,8 @@ int main(int Argc, char **Argv) {
     if (!Append(Opts.InputPath)) return 1;
     for (const auto &P : Opts.ExtraInputs)
       if (!Append(P)) return 1;
-    if (!PreludePath.empty()) {
-      if (!Append(PreludePath)) return 1;
+    for (const auto &P : PreludePaths) {
+      if (!Append(P)) return 1;
     }
     F = SM.addBuffer(Opts.InputPath, std::move(Combined));
   }

@@ -5,11 +5,17 @@
 % `findCstPrelude` and `userMentionsCstClass` in
 % `tools/matlabc/main.cpp`.
 %
-% Slice 2 surface: tf-vs-tf operator overloads (`G + H`, `G - H`,
-% `G * H`, `G / H`, `-G`). Scalar mixing (`s + 2`-style, `tf('s')`
-% builder) needs Sema-level CST property type tracking and is the
-% next slice; today scalar mixing falls through to the existing
-% generic operator dispatch which doesn't know about tf semantics.
+% Surface today:
+%   tf  — full classdef: constructor + property reads + tf-vs-tf
+%         operator overloads (+, -, *, /, unary -) + scalar mixing
+%         (G + 2, 5 * G, …) + `s = tf([1 0], 1)` polynomial
+%         composition.
+%   ss / zpk / pid / frd — minimal classdefs: constructor + property
+%         storage + property reads. Operator overloads on these
+%         types require actual control-system math (e.g. ss + ss is
+%         block-diagonal A assembly with stacked B / horizontally-
+%         concatenated C; zpk * zpk concatenates roots and multiplies
+%         gains) — those land in a follow-on slice.
 
 classdef tf
     properties
