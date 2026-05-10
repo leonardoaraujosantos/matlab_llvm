@@ -988,11 +988,93 @@ static void jacobi_sym(matlab_mat *A_in, double *eigvals, double *V) {
     for (int64_t i = 0; i < n; ++i) eigvals[i] = H[i * n + i];
 }
 
-/* matlab_eig_V(A): eigenvector matrix (columns = eigenvectors), ordered
- * so the i-th column corresponds to the i-th ascending eigenvalue. */
+/* Internal helper for the 2-return non-symmetric `[V, D] = eig(A)`
+ * shape. Computes the real Schur form U' A U = T (with the orthogonal
+ * accumulator U), then back-substitutes T y_i = λ_i y_i for each
+ * eigenvalue and recovers v_i = U y_i. v1 path handles the all-real-
+ * eigenvalues case (1×1 Schur blocks only); a 2×2 quasi-triangular
+ * block (complex conjugate pair) flips the `has_complex` flag and the
+ * caller falls back to returning 0×0 — proper complex eigenvector
+ * back-substitution is the follow-on. Eigenvalues are stored in
+ * Schur-diagonal order (no post-sort), so V's column k matches the
+ * (k, k) entry of the corresponding D. */
+static int eig_VD_real_(matlab_mat *A_in, double *V_out, double *D_out) {
+    int64_t n = A_in->rows;
+    std::vector<double> T(A_in->data, A_in->data + n * n);
+    std::vector<double> U(n * n, 0.0);
+    for (int64_t i = 0; i < n; ++i) U[i * n + i] = 1.0;
+    hessenberg_inplace_(T.data(), n, U.data());
+    francis_qr_(T.data(), n, U.data());
+
+    /* Detect any 2×2 quasi-triangular blocks (complex eigenvalue
+     * pairs); v1 doesn't compute their eigenvectors. */
+    for (int64_t i = 0; i + 1 < n; ++i)
+        if (T[(i + 1) * n + i] != 0.0) return 0;
+
+    /* Eigenvalues sit on the diagonal — copy them into D's diagonal. */
+    for (int64_t i = 0; i < n * n; ++i) D_out[i] = 0.0;
+    for (int64_t i = 0; i < n; ++i) D_out[i * n + i] = T[i * n + i];
+
+    /* For each eigenvalue λ_i = T[i,i], solve (T - λ_i I) y = 0 by
+     * back-substitution on the upper-triangular slice T[0..i, 0..i].
+     * Set y[i] = 1, y[k] = 0 for k > i, then for k = i-1..0:
+     *   (T[k,k] - λ) y[k] = -Σ_{m=k+1}^{i} T[k,m] y[m]
+     *   y[k] = (Σ_{m=k+1}^{i} T[k,m] y[m]) / (λ - T[k,k]).
+     * If λ - T[k,k] is too small (Schur diagonal has a near-repeated
+     * eigenvalue), set y[k] = 0 and continue — the resulting V column
+     * will be defective but still proportional to a valid eigenvector
+     * for the dominant eigenvalue. */
+    std::vector<double> y(n);
+    for (int64_t i = 0; i < n; ++i) {
+        double lambda = T[i * n + i];
+        for (int64_t k = i + 1; k < n; ++k) y[k] = 0.0;
+        y[i] = 1.0;
+        for (int64_t k = i; k-- > 0;) {
+            double s = 0.0;
+            for (int64_t m = k + 1; m <= i; ++m)
+                s += T[k * n + m] * y[m];
+            double denom = lambda - T[k * n + k];
+            if (std::fabs(denom) < 1e-14 * (std::fabs(lambda) + 1.0))
+                y[k] = 0.0;
+            else
+                y[k] = s / denom;
+        }
+        /* v_i = U · y, but only the leading i+1 components of y are
+         * non-zero, so the column accumulates U[:, 0..i] · y[0..i]. */
+        for (int64_t r = 0; r < n; ++r) {
+            double s = 0.0;
+            for (int64_t k = 0; k <= i; ++k) s += U[r * n + k] * y[k];
+            V_out[r * n + i] = s;
+        }
+        /* Normalise the column to unit 2-norm for a stable answer
+         * (MATLAB's eig also returns unit-norm eigenvectors). */
+        double col_nrm = 0.0;
+        for (int64_t r = 0; r < n; ++r)
+            col_nrm += V_out[r * n + i] * V_out[r * n + i];
+        col_nrm = std::sqrt(col_nrm);
+        if (col_nrm > 0.0)
+            for (int64_t r = 0; r < n; ++r) V_out[r * n + i] /= col_nrm;
+    }
+    return 1;
+}
+
+/* matlab_eig_V(A): eigenvector matrix (columns = eigenvectors).
+ * Symmetric path orders columns by ascending eigenvalue (Jacobi
+ * convention). Non-symmetric path keeps Schur-diagonal order so the
+ * companion matlab_eig_D matches column-for-column. Returns 0×0 when
+ * A has complex eigenvalue pairs (those need complex back-
+ * substitution; deferred). */
 matlab_mat *matlab_eig_V(matlab_mat *A_in) {
     if (!A_in || A_in->rows != A_in->cols) return mat_alloc(0, 0);
     int64_t n = A_in->rows;
+    if (n == 0) return mat_alloc(0, 0);
+    if (!matrix_is_symmetric_(A_in->data, n)) {
+        matlab::runtime::MatPtr V = matlab::runtime::make_mat(n, n);
+        std::vector<double> Dscratch(n * n);
+        if (!eig_VD_real_(A_in, V->data, Dscratch.data()))
+            return mat_alloc(0, 0);
+        return V.release();
+    }
     std::vector<double> eigvals(n);
     matlab::runtime::MatPtr V = matlab::runtime::make_mat(n, n);
     jacobi_sym(A_in, eigvals.data(), V->data);
@@ -1012,10 +1094,20 @@ matlab_mat *matlab_eig_V(matlab_mat *A_in) {
     return V.release();
 }
 
-/* matlab_eig_D(A): diagonal matrix of eigenvalues (ascending). */
+/* matlab_eig_D(A): diagonal matrix of eigenvalues. Symmetric path:
+ * ascending order. Non-symmetric path: Schur-diagonal order (matches
+ * matlab_eig_V's column order). 0×0 when complex pairs are present. */
 matlab_mat *matlab_eig_D(matlab_mat *A_in) {
     if (!A_in || A_in->rows != A_in->cols) return mat_alloc(0, 0);
     int64_t n = A_in->rows;
+    if (n == 0) return mat_alloc(0, 0);
+    if (!matrix_is_symmetric_(A_in->data, n)) {
+        matlab::runtime::MatPtr D = matlab::runtime::make_mat(n, n);
+        std::vector<double> Vscratch(n * n);
+        if (!eig_VD_real_(A_in, Vscratch.data(), D->data))
+            return mat_alloc(0, 0);
+        return D.release();
+    }
     std::vector<double> eigvals(n);
     std::vector<double> Vtmp(n * n);
     jacobi_sym(A_in, eigvals.data(), Vtmp.data());
@@ -2763,6 +2855,109 @@ matlab_mat *matlab_care(matlab_mat *A, matlab_mat *B,
         }
 
     return X;
+}
+
+/* Forward decls — matlab_dare and a few elementwise helpers are
+ * defined later in this TU. matlab_add_mm takes (void*, void*) for
+ * complex/real polymorphism (see the BINARY_MM macro definition
+ * further down). */
+extern "C" matlab_mat *matlab_dare(matlab_mat *Ad, matlab_mat *Bd,
+                                    matlab_mat *Q, matlab_mat *R);
+extern "C" matlab_mat *matlab_neg_m(matlab_mat *A);
+extern "C" matlab_mat *matlab_add_mm(void *A, void *B);
+
+/*-------------------------------------------------------------------------
+ * Numerically-robust algebraic Riccati entries — icare / idare.
+ *
+ *   MATLAB introduced `icare` and `idare` as the recommended successors
+ *   to `care` / `dare` (since R2019a). The numerical advantage shows up
+ *   on ill-conditioned pencils where the matrix-sign Newton iteration
+ *   that backs `care` can stall: `icare` uses an extended-pencil
+ *   structure-preserving generalised Schur algorithm
+ *   (Mehrmann-Voss), `idare` uses the equivalent symplectic-pencil
+ *   form. Both return the same `X` on well-conditioned inputs.
+ *
+ *   v1 implementation: alias to matlab_care / matlab_dare. The two
+ *   names diverge in numerics on pencils that have eigenvalues very
+ *   close to the imaginary axis (continuous) or unit circle (discrete);
+ *   the Mehrmann-Voss extended pencil avoids the matrix-sign squaring
+ *   step that loses 1 bit per iteration there. Shipping the structure-
+ *   preserving QZ on the symplectic pencil is the proper follow-on
+ *   (gated on the singular-B QZ path, which is the same generalised-
+ *   Schur primitive that backs `zero(sys)`). For the small CST-roadmap
+ *   plants (n = 2..10) the numerical gap is noise; the rename gives
+ *   user code on the modern API surface a working entry today.
+ *
+ * Tier 1.5 follow-on of CST roadmap §2.5. */
+matlab_mat *matlab_icare(matlab_mat *A, matlab_mat *B,
+                         matlab_mat *Q, matlab_mat *R) {
+    return matlab_care(A, B, Q, R);
+}
+
+matlab_mat *matlab_idare(matlab_mat *Ad, matlab_mat *Bd,
+                         matlab_mat *Q, matlab_mat *R) {
+    return matlab_dare(Ad, Bd, Q, R);
+}
+
+/*-------------------------------------------------------------------------
+ * 5-arg algebraic Riccati with state-input cross-term — care/dare(A, B,
+ * Q, R, S).
+ *
+ *   The cost functional J = ∫(x'Qx + 2x'Su + u'Ru) dt admits a
+ *   reduction to the standard 4-arg form via the change of basis
+ *     A_hat = A − B·R⁻¹·S'
+ *     Q_hat = Q − S·R⁻¹·S'
+ *   which preserves the stabilising solution (the cross-term is
+ *   absorbed into the drift matrix and the state weighting).
+ *   Discrete analogue:
+ *     Ad_hat = Ad − Bd·R⁻¹·S'
+ *     Qd_hat = Q  − S·R⁻¹·S'
+ *   (same algebra; the dare path is Schur-stable when Ad − Bd·K is
+ *   inside the unit disk).
+ *
+ *   Returns 0×0 when R is singular (S·R⁻¹ undefined) or when the
+ *   reduced problem has no stabilising solution. The 6-arg
+ *   `care(A, B, Q, R, S, E)` descriptor form (with generalised E·X·E'
+ *   shape) reduces to the standard form when E = I and is the
+ *   follow-on for E ≠ I (gated on the generalised-Riccati QZ path).
+ *
+ * Tier 1.5 follow-on of CST roadmap §2.5. */
+matlab_mat *matlab_care_5(matlab_mat *A, matlab_mat *B, matlab_mat *Q,
+                           matlab_mat *R, matlab_mat *S) {
+    if (!A || !B || !Q || !R || !S) return mat_alloc(0, 0);
+    int64_t n = A->rows;
+    int64_t m = B->cols;
+    if (S->rows != n || S->cols != m) return mat_alloc(0, 0);
+    matlab_mat *Rinv = matlab_inv(R);
+    if (!Rinv || Rinv->rows == 0) return mat_alloc(0, 0);
+    matlab_mat *St    = matlab_transpose(S);
+    matlab_mat *RinvSt = matlab_matmul_mm(Rinv, St);     /* m × n */
+    matlab_mat *BRinvSt = matlab_matmul_mm(B, RinvSt);    /* n × n */
+    matlab_mat *negBRinvSt = matlab_neg_m(BRinvSt);
+    matlab_mat *Ahat  = matlab_add_mm(A, negBRinvSt);
+    matlab_mat *SRinvSt = matlab_matmul_mm(S, RinvSt);    /* n × n */
+    matlab_mat *negSRinvSt = matlab_neg_m(SRinvSt);
+    matlab_mat *Qhat  = matlab_add_mm(Q, negSRinvSt);
+    return matlab_care(Ahat, B, Qhat, R);
+}
+
+matlab_mat *matlab_dare_5(matlab_mat *Ad, matlab_mat *Bd, matlab_mat *Q,
+                           matlab_mat *R, matlab_mat *S) {
+    if (!Ad || !Bd || !Q || !R || !S) return mat_alloc(0, 0);
+    int64_t n = Ad->rows;
+    int64_t m = Bd->cols;
+    if (S->rows != n || S->cols != m) return mat_alloc(0, 0);
+    matlab_mat *Rinv = matlab_inv(R);
+    if (!Rinv || Rinv->rows == 0) return mat_alloc(0, 0);
+    matlab_mat *St    = matlab_transpose(S);
+    matlab_mat *RinvSt = matlab_matmul_mm(Rinv, St);
+    matlab_mat *BRinvSt = matlab_matmul_mm(Bd, RinvSt);
+    matlab_mat *negBRinvSt = matlab_neg_m(BRinvSt);
+    matlab_mat *Ahat = matlab_add_mm(Ad, negBRinvSt);
+    matlab_mat *SRinvSt = matlab_matmul_mm(S, RinvSt);
+    matlab_mat *negSRinvSt = matlab_neg_m(SRinvSt);
+    matlab_mat *Qhat = matlab_add_mm(Q, negSRinvSt);
+    return matlab_dare(Ahat, Bd, Qhat, R);
 }
 
 /*-------------------------------------------------------------------------

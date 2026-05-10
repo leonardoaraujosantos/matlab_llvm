@@ -1581,6 +1581,43 @@ export function care(A: any, B: any, Q: any, R: any): NDArray {
   return Xs;
 }
 
+// icare / idare — numerically-robust Riccati aliases. v1 routes
+// through care / dare (same numerics for well-conditioned pencils).
+// The Mehrmann-Voss structure-preserving QZ path is the follow-on.
+export function icare(A: any, B: any, Q: any, R: any): NDArray {
+  return care(A, B, Q, R);
+}
+export function idare(Ad: any, Bd: any, Q: any, R: any): NDArray {
+  return dare(Ad, Bd, Q, R);
+}
+
+// 5-arg care / dare with state-input cross term S. Reduces to the
+// 4-arg form via A_hat = A − B·R⁻¹·S' and Q_hat = Q − S·R⁻¹·S'.
+export function care_5(A: any, B: any, Q: any, R: any, S: any): NDArray {
+  const Am = asArray(A);
+  const Bm = asArray(B);
+  const Qm = asArray(Q);
+  const Rm = asArray(R);
+  const Sm = asArray(S);
+  const Rinv = np.inv(Rm);
+  if (Rinv.rows === 0) return np.zeros(0, 0);
+  const Aht = np.sub(Am, np.matmul(np.matmul(Bm, Rinv), transposeOf(Sm)));
+  const Qht = np.sub(Qm, np.matmul(np.matmul(Sm, Rinv), transposeOf(Sm)));
+  return care(Aht, Bm, Qht, Rm);
+}
+export function dare_5(Ad: any, Bd: any, Q: any, R: any, S: any): NDArray {
+  const Am = asArray(Ad);
+  const Bm = asArray(Bd);
+  const Qm = asArray(Q);
+  const Rm = asArray(R);
+  const Sm = asArray(S);
+  const Rinv = np.inv(Rm);
+  if (Rinv.rows === 0) return np.zeros(0, 0);
+  const Aht = np.sub(Am, np.matmul(np.matmul(Bm, Rinv), transposeOf(Sm)));
+  const Qht = np.sub(Qm, np.matmul(np.matmul(Sm, Rinv), transposeOf(Sm)));
+  return dare(Aht, Bm, Qht, Rm);
+}
+
 // Lyapunov / Stein equation solvers - Tier-1.4 of the CST roadmap.
 // Vectorise + dense LU, mirroring the C runtime. The TS np.linalg
 // surface has solve() but no kron() — we build the n^2 * n^2 matrix

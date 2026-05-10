@@ -4036,6 +4036,47 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
         return emitUnreg("matlab.call_builtin", {A}, PtrTyU, L, {Cal});
       }
     }
+    /* Class-method operator overload for unary ops. Same dispatch
+     * shape as BinaryOp's class-pinned path: when the operand is
+     * pinned to a class that defines a method named after the
+     * operator (uminus / uplus / not / ctranspose / transpose),
+     * route the call through the class. Without this, `-tf_obj`
+     * calls matlab_neg_m on the class-instance pointer and reads
+     * garbage. */
+    if (U.Operand) {
+      auto pinnedFromExpr = [](const Expr *X) -> const ClassDef * {
+        if (auto *NE = dynamic_cast<const NameExpr *>(X))
+          if (NE->Ref && NE->Ref->PinnedClass) return NE->Ref->PinnedClass;
+        return nullptr;
+      };
+      const ClassDef *OpCls = pinnedFromExpr(U.Operand);
+      if (OpCls && A) {
+        llvm::StringRef OpMethod;
+        switch (U.Op) {
+          case UnOp::Minus: OpMethod = "uminus"; break;
+          case UnOp::Plus:  OpMethod = "uplus";  break;
+          case UnOp::Not:   OpMethod = "not";    break;
+        }
+        if (!OpMethod.empty()) {
+          const ClassDef *Owner = nullptr;
+          std::string_view OpSV(OpMethod.data(), OpMethod.size());
+          for (const ClassDef *CC = OpCls; CC; CC = CC->Super) {
+            for (const Function *Mm : CC->Methods)
+              if (Mm && Mm->Name == OpSV) { Owner = CC; break; }
+            if (Owner) break;
+          }
+          if (Owner) {
+            std::string Callee = std::string(Owner->Name) + "__" +
+                                  std::string(OpMethod);
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, Callee));
+            mlir::Type ResTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+            return emitUnreg("matlab.call", {A}, ResTy, L, {Cal});
+          }
+        }
+      }
+    }
     /* Same refinement as BinaryOp/PostfixOp: a unary op on a matrix
      * returns a matrix, on a scalar returns the same scalar type. */
     auto MLPtr = mlir::LLVM::LLVMPointerType::get(&MCtx);
@@ -6531,7 +6572,8 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             "chol", "pinv", "permute", "squeeze", "flip", "fliplr",
             "flipud", "rot90", "size", "transpose", "ctranspose",
             "diag", "reshape", "repmat", "inv", "svd", "eig", "expm", "logm", "hess",
-            "schur", "qz", "lyap", "dlyap", "lyapchol", "care", "dare", "lqr", "dlqr",
+            "schur", "qz", "lyap", "dlyap", "lyapchol",
+            "care", "dare", "icare", "idare", "lqr", "dlqr",
             "ctrb", "obsv", "place", "damp", "hsvd", "balreal_T",
             "balred", "balred_A", "balred_B", "balred_C", "dcgain_ss",
             "stepinfo",

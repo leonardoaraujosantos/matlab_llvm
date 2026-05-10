@@ -79,7 +79,7 @@ CST-specific deadweight.
 This tier is roughly the size of the entire SPT Tier-1 + Tier-2 arc.
 Plan it as such.
 
-### 2.1 Full non-symmetric eigendecomposition ✅ (1-return shipped)
+### 2.1 Full non-symmetric eigendecomposition ✅ (1+2-return shipped, real-eig path)
 
 Today's `eig` symmetrizes `A` before diagonalizing — fast and
 numerically clean for symmetric matrices, but **wrong for plants**.
@@ -100,9 +100,14 @@ is "LAPACK `dgeev`" in spirit, hand-coded.
 
 **Status**: 1-return `eig(A)` shipped — polymorphic real/complex
 return via Francis double-shift implicit QR with deflation.
-Symmetric inputs still take the Jacobi fast path. The 2-return
-`[V, D] = eig(A)` for non-symmetric A and the generalised `eig(A,B)`
-(QZ) are follow-ons.
+Symmetric inputs still take the Jacobi fast path. 2-return `[V, D] =
+eig(A)` for non-symmetric A ✅ shipped via Schur-back-substitution
+(real Schur form U' A U = T → solve T y_i = λ_i y_i for each
+eigenvalue → v_i = U y_i, normalised). v1 path handles all-real
+eigenvalues; complex conjugate pairs (2×2 quasi-blocks) need
+complex back-substitution and return 0×0 today. The generalised
+`eig(A, B)` would route through `qz` (already shipped 4-return for
+B-invertible inputs) and is a small wrapper away.
 
 **Effort**: ~2 sessions for the QR loop, ~1 session for eigenvector
 back-substitution, ~1 session for QZ. ~1 week total.
@@ -210,7 +215,7 @@ Schur(B) is the large-plant follow-on. Run-tests
 **Why this matters**: gates `gram`, `ctrb`/`obsv`-derived gramian
 checks, balanced realizations, observer covariance propagation.
 
-### 2.5 Algebraic Riccati equations ✅ (1-return + 3-return [X, K, L] forms)
+### 2.5 Algebraic Riccati equations ✅ (1+3+5-arg forms; icare / idare aliased)
 
 **Scope**:
 - `X = care(A, B, Q, R)` continuous-time algebraic Riccati
@@ -222,10 +227,21 @@ checks, balanced realizations, observer covariance propagation.
   drops L; useful when complex-poles handling isn't needed downstream.
 - `X = dare(Ad, Bd, Q, R)` discrete analog ✅ (1-return + 3-return
   `[X, K, L]` shipped, K = `(R + B'XB)⁻¹B'XA`, L = `eig(Ad − Bd·K)`).
-- Generalized 5-arg `care(A, B, Q, R, S, E)` (descriptor systems).
-- `[X, K, L] = icare(...)`, `[X, K, L] = idare(...)` — newer
-  numerically robust entries; defer to a follow-up if `care`/`dare`
-  cover the practical surface.
+- 5-arg `care(A, B, Q, R, S)` ✅ shipped — Riccati with state-input
+  cross term. Reduces to the 4-arg form by absorbing S into A_hat
+  = A − B·R⁻¹·S' and Q_hat = Q − S·R⁻¹·S'. Same dispatch-table-
+  multi-arity pattern as `lyap` (arity-2 vs arity-3 entries route
+  to different runtime helpers). Same shape for `dare`, `icare`,
+  `idare` 5-arg.
+- 6-arg `care(A, B, Q, R, S, E)` (descriptor systems with
+  generalised E·X·E' shape) — pending; needs the generalised
+  Riccati QZ machinery on the symplectic pencil.
+- `[X, K, L] = icare(...)` / `[X, K, L] = idare(...)` ✅ shipped as
+  aliases to `care` / `dare` (1+5 arg). The numerical advantage
+  shows up on ill-conditioned pencils; the proper Mehrmann-Voss
+  structure-preserving QZ is the same generalised-Schur primitive
+  that `zero(sys)` needs and ships together with the singular-B
+  QZ path.
 
 **Algorithm shipped**: `care` uses the matrix-sign Newton iteration
 (Roberts 1980) on the Hamiltonian `H = [[A, -B R⁻¹ B']; [-Q, -A']]` —
@@ -243,11 +259,11 @@ is no state-space optimal control.
 
 | Primitive | Effort | Status |
 |---|---|---|
-| Non-symmetric `eig` (2.1) | 1 wk | ✅ shipped (1-return); `[V, D]` for non-sym A and `qz` are follow-ons |
+| Non-symmetric `eig` (2.1) | 1 wk | ✅ 1+2-return for real eigenvalues; complex pairs return 0×0 (deferred) |
 | `schur` / `hess` / `qz` (2.2) | 0.5 wk | ✅ schur (1+2-ret), hess (1+2-ret), qz (4-ret, B-invertible path) |
 | `expm` / `logm` (2.3) | 1 wk | ✅ both shipped (logm: real-Schur-then-Parlett, no 2×2 blocks) |
 | `lyap` / `dlyap` / `lyapchol` (2.4) | 1 wk | ✅ all four shipped (lyap 2-arg, lyap 3-arg Sylvester, dlyap, lyapchol) |
-| `care` / `dare` (2.5) | 1 wk | ✅ care + dare shipped (1-return + 3-return `[X, K, L]`) |
+| `care` / `dare` (2.5) | 1 wk | ✅ 1+3-return + 5-arg cross-term + icare/idare aliases |
 
 **Tier-1 status**: numerical core complete enough to build the rest
 of the toolbox. Logm, lyapchol, qz, the 2-return non-sym eig, and
@@ -1005,18 +1021,24 @@ frequency-domain (`bode_ss` SISO, `bode_tf`, gain/phase margins,
 (`feedback_ss`, `series_ss`, `parallel_ss`, `append_ss` — all matrix-
 arg, strictly-proper, 3-return).
 
-**Stage 3 (model objects, ~1 week) — 🔵 OPEN**: `tf` / `ss` / `zpk` /
-`frd` / `pid` classdefs with operator overloads. Single biggest
-remaining UX gap. Without these, every workflow uses positional
-matrix args and `_ss`-suffixed primitives. With them, the existing
-matrix-arg primitives collapse to one-line wrappers (`step(sys)`,
-`bode(sys)`, `feedback(sys, K)`, `sys1 + sys2`, etc.) and most
-remaining open items (model-object `c2d(sys, Ts)`, `connect`,
-`sumblk`, `lft`, plotted `bode(sys)`) become simple follow-ons.
+**Stage 3 (model objects) — 🟡 PARTIAL**: `tf` shipped with
+constructor + property reads + tf-vs-tf operator overloads
+(`+`, `-`, `*`, `/`, unary `-`). `ss` / `zpk` / `frd` / `pid`
+classdefs are the remaining shape. Scalar mixing (`s + 2`,
+`tf('s')` builder) needs a Sema-level CST property type tracker
+(today `obj.Numerator` Sema-types as `any`/f64 and downstream
+arithmetic stays in scalar lanes — the lowering compensates by
+routing the call to `matlab_obj_get_mat` but doesn't update Sema's
+type, so `-obj.Numerator` outside a method body still lowers as
+scalar). Inside method bodies, the operand is a class-pinned param
+which the lowering correctly treats as ptr — that's why operator
+overloads work end-to-end today.
 
-**Stage 3 partial unblock (2026-05-09)**: a working `tf(num, den)`
-constructor with `obj.Numerator` / `obj.Denominator` read access now
-ships in `runtime/cst_classdefs.m`, auto-prepended by matlabc when
+**Stage 3 — `tf` working with operator overloads (2026-05-09)**:
+`tf(num, den)` constructor with `obj.Numerator` / `obj.Denominator`
+read access AND tf-vs-tf operator overloads `+ - * / -` (binary
+plus / minus / mtimes / mrdivide and unary minus) all ship in
+`runtime/cst_classdefs.m`, auto-prepended by matlabc when
 the user input mentions any of `tf` / `ss` / `zpk` / `pid` / `frd`
 as a call target (see `tools/matlabc/main.cpp` `findCstPrelude` +
 `userMentionsCstClass`). Several compiler fixes landed to make this
@@ -1061,32 +1083,43 @@ work:
   whose `none`-typed slots no downstream pass can resolve, leaving
   stale `matlab.call_builtin` ops that fail LLVM-IR translation.
 
-**Still 🔵 (the next §3.1 slice)**: tf-vs-tf operator overloads
-(`G + H`, `G * H`), scalar mixing (`s + 2`), and the `tf('s')`
-builder. The lowering machinery handles these cases in isolation,
-but two issues come together at once when multiple `tf(...)` call
-sites coexist:
+Operator-overload compiler fixes that landed alongside this slice:
+- `Resolver.cpp` extended-binary-operator pinning: the second param
+  of `mtimes`/`mrdivide`/`mldivide`/`mpower` (and the elementwise
+  variants) gets pinned to the class for CST prelude classes only
+  (`tf`/`ss`/`zpk`/`pid`/`frd`). Other user classdefs (Vec2, etc.)
+  keep the historical scalar-mixing-friendly behaviour where `b` is
+  unpinned. Without this, `b.Numerator` inside `tf__mtimes` reads
+  via `matlab_struct_get_f64` (boxing scalar 0 to a 1×1) and the
+  resulting `conv(...)` returns the right shape with all-zero data.
+- `Lowering.cpp` unary-op class-method dispatch: `-tf_obj`,
+  `+tf_obj`, `~tf_obj` route to the corresponding classdef method
+  (`uminus` / `uplus` / `not`) when the operand is class-pinned.
+  Without this, unary ops on a class instance lower as
+  `matlab_neg_m(obj_ptr)` etc., reading the obj as a raw matrix and
+  segfaulting.
+- `Resolver.cpp` `pinnedOfRhs` walker: also recurses into
+  `UnaryOpExpr`. Lets `M = -G;` propagate the pin from `G` to `M`
+  so subsequent `M.Numerator` reads route through the class path.
+- `LowerUserCalls.cpp` matlab.call → func.call conversion: relax
+  the strict operand-type match to also accept `none`-typed
+  operands (placeholder for "any") when the function expects ptr.
+  Insert an `unrealized_conversion_cast` at the boundary; later
+  passes drop it. Class-method bodies that flow a value through a
+  none-typed slot (e.g., `r = tf(new_num, new_den)` where
+  `new_num = cst_polyadd(...)` and the slot for `new_num` couldn't
+  be retyped because of mixed-typed stores) would otherwise leave
+  a stranded matlab.call after the upstream helper converted to a
+  func.call returning ptr.
 
-1. Multi-call-site monomorphization on the constructor creates two
-   clones — one per (arg-type tuple) bucket — and the cloning
-   propagates entry-block arg types into the body. The clone that
-   gets refined slot allocs leaves the ORIGINAL `matlab.alloc`
-   ops in place alongside the new `llvm.alloca`, producing a
-   duplicate-slot body that the verifier rejects. Probable fix:
-   walk the cloned body's `matlab.alloc` ops after retyping and
-   either erase them or merge their uses with the SSA arg.
-2. Sema-level inference can't see through class properties — a
-   read of `obj.Numerator` returns `any`, which the lowering
-   then types as `f64`. The CST-class field-read default routes
-   the *call* to `_get_mat` (returning ptr at the SSA level) but
-   downstream type-flow (e.g. `-obj.Numerator`) still treats the
-   value as f64, lowering as scalar arithmetic that mismatches the
-   actual ptr operand. Closing the loop needs Sema to learn the
-   property's stored shape from the constructor body's field-store
-   sites, then propagate that shape forward to every read.
-
-Both items are tractable but separately scoped — they're the next
-§3.1 slice rather than a fold-into-this-one.
+**Still 🔵**: scalar mixing (`s + 2`, `tf('s')` builder), `ss` /
+`zpk` / `frd` / `pid` classdefs, model-object forms of the existing
+matrix-arg primitives. Scalar mixing is the bigger architectural
+piece — needs Sema-level CST property type tracking; without it,
+`G + 2` inside or outside a method body lowers as scalar arithmetic
+even though the operand is a class field reading as ptr. The other
+classdefs are mechanical replicas of `tf` once the operator-
+overload pattern is settled.
 
 Heavy carve-outs (apps, Simulink, LPV/LTV, sparse-second-order,
 `systune`, Robust/MPC/SysID toolbox bridges) keep this scoped to

@@ -97,7 +97,7 @@ void Resolver::registerBuiltins() {
     /* Tier 1.4 — Lyapunov / Stein equation solvers. */
     "lyap", "dlyap", "lyapchol",
     /* Tier 1.5 — algebraic Riccati. */
-    "care", "dare",
+    "care", "dare", "icare", "idare",
     /* Tier 2 — first user-facing CST wrappers. lqi/lqry/lqg/kalman follow. */
     "lqr", "dlqr",
     /* Tier 3 — controllability/observability + pole placement. */
@@ -295,6 +295,25 @@ void Resolver::resolve(TranslationUnit &TU) {
            N == "gt" || N == "ge" ||
            N == "and" || N == "or";
   };
+  /* CST prelude classes (tf / ss / zpk / pid / frd) overload the
+   * scalar-mixing ops `mtimes` / `mrdivide` / etc. with both operands
+   * being class instances — a `tf * tf` series-cascade or `tf / tf`
+   * inversion never sees a scalar second argument, so we want the
+   * resolver to pin the second param to the class so its body reads
+   * (`b.Numerator`, `b.Denominator`) route through the class path.
+   * Other user classes (Vec2, BasicClass, …) keep the historical
+   * scalar-mixing behaviour for those operators. The list is the same
+   * one matlabc/main.cpp's `userMentionsCstClass` looks for. */
+  auto isCstClass = [](std::string_view N) {
+    return N == "tf" || N == "ss" || N == "zpk" || N == "pid" ||
+           N == "frd";
+  };
+  auto isExtendedBinaryObjectOperator = [](std::string_view N) {
+    return N == "mtimes" || N == "times" ||
+           N == "mrdivide" || N == "rdivide" ||
+           N == "mldivide" || N == "ldivide" ||
+           N == "mpower" || N == "power";
+  };
   for (ClassDef *C : TU.Classes) {
     for (Function *M : C->Methods) {
       resolveFunction(*M, Global);
@@ -313,12 +332,18 @@ void Resolver::resolve(TranslationUnit &TU) {
       /* For binary-object operators, also pin the second param — both
        * operands are expected to be the same class in those cases,
        * and pinning lets property reads route through the class path
-       * even when the method body uses `b.field`. Scalar-mixing ops
-       * like mtimes/times leave the second param alone: it might be a
-       * scalar (a * 3). */
-      if (!IsCtor && isBinaryObjectOperator(M->Name) &&
-          M->ParamRefs.size() >= 2 && M->ParamRefs[1])
-        M->ParamRefs[1]->PinnedClass = C;
+       * even when the method body uses `b.field`. The unconditional
+       * list (plus / minus / eq / ne / …) covers any user classdef.
+       * The extended list (mtimes / times / mrdivide / mpower / …)
+       * is gated on the CST prelude allowlist so user classes that
+       * scalar-mix in those operators (Vec2, …) keep working. */
+      if (!IsCtor && M->ParamRefs.size() >= 2 && M->ParamRefs[1]) {
+        bool BasePin = isBinaryObjectOperator(M->Name);
+        bool CstPin = isCstClass(C->Name) &&
+                      isExtendedBinaryObjectOperator(M->Name);
+        if (BasePin || CstPin)
+          M->ParamRefs[1]->PinnedClass = C;
+      }
     }
     for (Function *M : C->StaticMethods) {
       resolveFunction(*M, Global);
@@ -544,6 +569,12 @@ void Resolver::resolveStmt(Stmt &St, Scope *S) {
               Bi->Op == BinOp::Gt || Bi->Op == BinOp::Ge;
           if (!IsCmp) return R;
         }
+      }
+      /* Unary class-method overloads (`-tf_obj`, `+tf_obj`, etc.)
+       * return a fresh class instance — propagate the pin through
+       * the unary op so the LHS slot picks up the class. */
+      if (auto *U = dynamic_cast<UnaryOpExpr *>(RE)) {
+        if (auto *L = pinnedOfRhs(U->Operand)) return L;
       }
       return nullptr;
     };

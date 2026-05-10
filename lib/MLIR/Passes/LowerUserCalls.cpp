@@ -753,20 +753,41 @@ bool runLowerUserCalls(ModuleOp M) {
     }
 
     // Only convert if the first N operand types match the leading N
-    // inputs of the callee's signature exactly. Missing trailing args
-    // (fewer-arg calls) get padded with 0.0 or null-ptr depending on
-    // the declared type.
+    // inputs of the callee's signature exactly. `none`-typed operands
+    // are treated as ptr-compatible: they come from `matlab.load`s of
+    // slots whose Sema-inferred types are `any`, and the runtime
+    // representation of any-typed values is a matlab_mat * (ptr).
+    // Class-method bodies that flow a value through such a slot (e.g.
+    // `r = tf(new_num, new_den)` where `new_num = cst_polyadd(...)`)
+    // would otherwise leave a stranded matlab.call after the upstream
+    // helper converts to a func.call returning ptr. Inserting an
+    // unrealized_conversion_cast at the boundary makes the new
+    // func.call type-correct; later passes drop the cast.
     bool OK = true;
+    SmallVector<Value, 4> ConvArgs;
+    ConvArgs.reserve(N);
+    OpBuilder PreB(Call);
+    auto PtrTy = LLVM::LLVMPointerType::get(Ctx);
     for (unsigned i = 0; i < N; ++i) {
-      if (FnTy.getInput(i) != Call->getOperand(i).getType()) {
-        OK = false; break;
+      Type CallTy = Call->getOperand(i).getType();
+      Type FnTyIn = FnTy.getInput(i);
+      if (FnTyIn == CallTy) {
+        ConvArgs.push_back(Call->getOperand(i));
+        continue;
       }
+      if (mlir::isa<NoneType>(CallTy) && FnTyIn == PtrTy) {
+        Value Cast = UnrealizedConversionCastOp::create(
+            PreB, Call->getLoc(), TypeRange{PtrTy},
+            ValueRange{Call->getOperand(i)}).getResult(0);
+        ConvArgs.push_back(Cast);
+        continue;
+      }
+      OK = false; break;
     }
     if (!OK) continue;
 
     OpBuilder B(Call);
-    llvm::SmallVector<Value, 4> Args(Call->operand_begin(),
-                                     Call->operand_end());
+    llvm::SmallVector<Value, 4> Args(ConvArgs.begin(), ConvArgs.end());
     /* Pad missing trailing args. Scalar f64 -> 0.0; ptr-typed -> null
      * pointer constant. Any other declared type we leave unpadded and
      * skip the rewrite — later passes or a proper error will surface. */

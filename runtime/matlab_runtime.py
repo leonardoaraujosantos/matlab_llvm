@@ -423,10 +423,41 @@ def eig(A):
         return w.real.reshape((-1, 1))
     return w.reshape((-1, 1))
 def eig_V(A):
-    _, V = np.linalg.eig(_m(A))
+    """Right eigenvector matrix for `[V, D] = eig(A)`. Symmetric A:
+    columns sorted ascending by eigenvalue (Jacobi convention). Non-
+    symmetric A with all-real eigenvalues: Schur-diagonal column order
+    matching `eig_D`. Returns 0×0 when complex eigenvalue pairs are
+    present (deferred — needs complex back-substitution)."""
+    M = _m(A).astype(float)
+    n = M.shape[0]
+    if n == 0:
+        return np.zeros((0, 0))
+    is_sym = np.allclose(M, M.T, rtol=1e-12, atol=1e-300)
+    if is_sym:
+        w, V = np.linalg.eigh(M)
+        order = np.argsort(w)
+        return V[:, order]
+    w, V = np.linalg.eig(M)
+    if np.any(np.abs(w.imag) > 1e-12):
+        return np.zeros((0, 0))
     return V.real
+
 def eig_D(A):
-    w, _ = np.linalg.eig(_m(A))
+    """Diagonal eigenvalue matrix for `[V, D] = eig(A)`. Symmetric A:
+    ascending diagonal. Non-symmetric A with all-real eigenvalues:
+    Schur-diagonal order matching `eig_V`. Returns 0×0 when complex
+    eigenvalue pairs are present."""
+    M = _m(A).astype(float)
+    n = M.shape[0]
+    if n == 0:
+        return np.zeros((0, 0))
+    is_sym = np.allclose(M, M.T, rtol=1e-12, atol=1e-300)
+    if is_sym:
+        w = np.linalg.eigvalsh(M)
+        return np.diag(np.sort(w))
+    w = np.linalg.eigvals(M)
+    if np.any(np.abs(w.imag) > 1e-12):
+        return np.zeros((0, 0))
     return np.diag(w.real)
 def chol(A):          return np.linalg.cholesky(_m(A)).T
 def _lu_decompose(A):
@@ -1359,6 +1390,52 @@ def dlyap(A, Q):
     rhs = -Qm.reshape(-1)
     x = np.linalg.solve(M, rhs)
     return x.reshape(n, n)
+
+
+def icare(A, B, Q, R):
+    """Numerically-robust continuous Riccati — alias to care in v1.
+    The Mehrmann-Voss extended-pencil structure-preserving solver is
+    a follow-on (gated on the singular-B QZ path)."""
+    return care(A, B, Q, R)
+
+
+def idare(Ad, Bd, Q, R):
+    """Numerically-robust discrete Riccati — alias to dare in v1."""
+    return dare(Ad, Bd, Q, R)
+
+
+def care_5(A, B, Q, R, S):
+    """5-arg care with state-input cross term: cost J = ∫(x'Qx + 2 x'S u
+    + u'R u). Reduces to the 4-arg form via A_hat = A − B·R⁻¹·S' and
+    Q_hat = Q − S·R⁻¹·S' (the classical absorption of the cross term)."""
+    Am = _m(A).astype(float)
+    Bm = _m(B).astype(float)
+    Qm = _m(Q).astype(float)
+    Rm = _m(R).astype(float)
+    Sm = _m(S).astype(float)
+    try:
+        Rinv = np.linalg.inv(Rm)
+    except np.linalg.LinAlgError:
+        return np.zeros((0, 0))
+    A_hat = Am - Bm @ Rinv @ Sm.T
+    Q_hat = Qm - Sm @ Rinv @ Sm.T
+    return care(A_hat, Bm, Q_hat, Rm)
+
+
+def dare_5(Ad, Bd, Q, R, S):
+    """5-arg dare with state-input cross term."""
+    Am = _m(Ad).astype(float)
+    Bm = _m(Bd).astype(float)
+    Qm = _m(Q).astype(float)
+    Rm = _m(R).astype(float)
+    Sm = _m(S).astype(float)
+    try:
+        Rinv = np.linalg.inv(Rm)
+    except np.linalg.LinAlgError:
+        return np.zeros((0, 0))
+    A_hat = Am - Bm @ Rinv @ Sm.T
+    Q_hat = Qm - Sm @ Rinv @ Sm.T
+    return dare(A_hat, Bm, Q_hat, Rm)
 
 
 def _hessenberg_inplace_(H, U):

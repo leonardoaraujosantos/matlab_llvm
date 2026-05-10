@@ -129,6 +129,22 @@ matlab_mat *matlab_qz_BB(matlab_mat *A, matlab_mat *B);
 matlab_mat *matlab_qz_Q(matlab_mat *A, matlab_mat *B);
 matlab_mat *matlab_qz_Z(matlab_mat *A, matlab_mat *B);
 
+/* Numerically-robust Riccati entries — icare / idare. v1 aliases to
+ * matlab_care / matlab_dare; the proper structure-preserving Mehrmann-
+ * Voss QZ on the extended pencil is gated on the singular-B QZ path. */
+matlab_mat *matlab_icare(matlab_mat *A, matlab_mat *B, matlab_mat *Q,
+                          matlab_mat *R);
+matlab_mat *matlab_idare(matlab_mat *Ad, matlab_mat *Bd, matlab_mat *Q,
+                          matlab_mat *R);
+
+/* 5-arg care / dare with state-input cross term S. Reduce to the 4-arg
+ * form by absorbing the cross term into A_hat = A − B·R⁻¹·S' and
+ * Q_hat = Q − S·R⁻¹·S'. */
+matlab_mat *matlab_care_5(matlab_mat *A, matlab_mat *B, matlab_mat *Q,
+                          matlab_mat *R, matlab_mat *S);
+matlab_mat *matlab_dare_5(matlab_mat *Ad, matlab_mat *Bd, matlab_mat *Q,
+                          matlab_mat *R, matlab_mat *S);
+
 /* Hessenberg reduction.  H = hess(A) returns the upper Hessenberg
  * similarity-equivalent of A via Householder reflections. Building
  * block for the Francis QR iteration that produces real Schur form

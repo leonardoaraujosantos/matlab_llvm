@@ -3847,6 +3847,13 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"lyapchol",   "matlab_lyapchol",   1, "pp"},
       {"care",       "matlab_care",       1, "pppp"},
       {"dare",       "matlab_dare",       1, "pppp"},
+      {"icare",      "matlab_icare",      1, "pppp"},
+      {"idare",      "matlab_idare",      1, "pppp"},
+      /* 5-arg cross-term forms `care(A, B, Q, R, S)` / `dare(...)`. */
+      {"care",       "matlab_care_5",     1, "ppppp"},
+      {"dare",       "matlab_dare_5",     1, "ppppp"},
+      {"icare",      "matlab_care_5",     1, "ppppp"},
+      {"idare",      "matlab_dare_5",     1, "ppppp"},
       {"lqr",        "matlab_lqr",        1, "pppp"},
       {"dlqr",       "matlab_dlqr",       1, "pppp"},
       {"ctrb",       "matlab_ctrb",       1, "pp"},
@@ -4137,7 +4144,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
          * is a perfectly valid 1*1 invocation that we want to handle. */
         "lyap", "dlyap", "lyapchol",
         /* CST Tier 1.5 — algebraic Riccati. Same scalar-invocation rule. */
-        "care", "dare",
+        "care", "dare", "icare", "idare",
         /* CST Tier 2 — LQR convenience wrappers; same scalar shape. */
         "lqr", "dlqr",
         /* CST Tier 3 — controllability/observability/place + characterization. */
