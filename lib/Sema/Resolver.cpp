@@ -22,7 +22,7 @@ void Resolver::registerBuiltins() {
   for (const char *N : {
     "zeros", "ones", "eye", "rand", "randn", "magic", "diag",
     "size", "length", "numel", "ndims",
-    "reshape", "repmat", "linspace",
+    "reshape", "repmat", "linspace", "logspace",
     "abs", "sqrt", "exp", "log", "sin", "cos", "tan",
     "asin", "acos", "atan", "atan2", "sinh", "cosh", "tanh",
     "log2", "log10", "sign",
@@ -142,6 +142,14 @@ void Resolver::registerBuiltins() {
      * scope for the synthesised-builtin-call path today. Users
      * compose those explicitly via `ss(Ad, Bd, …)`. */
     "step", "bode", "dcgain", "lsim", "bandwidth",
+    /* §3.3 / §3.4 follow-ons — Tier-2 leftovers. impulse / initial
+     * for time-domain free response; freqresp / nyquist / allmargin
+     * for frequency-domain analysis. Matrix-arg companions
+     * (impulse_ss / initial_ss / freqresp_ss / freqresp_tf /
+     * nyquist_ss / nyquist_tf / allmargin_ss) ship alongside. */
+    "impulse", "initial", "freqresp", "nyquist", "allmargin",
+    "impulse_ss", "initial_ss", "freqresp_ss", "freqresp_tf",
+    "nyquist_ss", "nyquist_tf", "allmargin_ss",
     "arrayfun", "cellfun",
     /* Initial-value ODE solvers — see runtime/matlab_runtime.cpp.
      * ode23s is the Rosenbrock stiff solver. pdepe is the 1-D

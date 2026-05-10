@@ -417,11 +417,16 @@ objects. `balreal` matrix-arg form shipped (Tier-4, see §5.1).
 - Auto-time: pick `T_final` from slowest pole; `Ts` from fastest pole
   (Nyquist-ish rule). Match MATLAB's heuristic loosely.
 
-**Status**: matrix-arg `step_ss(A, B, C, D, dt, N)` and
-`lsim_ss(A, B, C, D, u, dt)` shipped (ZOH discretisation +
-recurrence; SISO step, MIMO lsim). `impulse` / `initial` / model-
-object `step(sys)` / `stepinfo` / `lsiminfo` / `gensig` /
-`RespConfig` are follow-ons.
+**Status**: matrix-arg `step_ss` / `lsim_ss` / `impulse_ss` /
+`initial_ss` shipped (ZOH discretisation + recurrence; SISO step,
+MIMO lsim). Model-object short forms `step(sys [, dt, N])`,
+`lsim(sys, u, dt)`, `impulse(sys [, dt, N])`, `initial(sys, x0
+[, dt, N])` route through Lowering.cpp's class-pinned-first-arg
+dispatch (defaults dt = 0.01, N = 500 ≈ 5 s simulation when the
+time grid is omitted). `stepinfo(y, t)` shipped (1×5 row
+[RiseTime, SettlingTime, Overshoot%, Peak, PeakTime]). `lsiminfo`
+/ `gensig` / `RespConfig` and auto-time selection from the
+slowest pole are follow-ons.
 
 **Effort**: 1 week. Bulk of the work is the auto-time heuristic and
 making `stepinfo` / `lsiminfo` match MATLAB's settling-time
@@ -466,10 +471,19 @@ linear solve. `bode_tf(b, a, w)` shipped via complex Horner. 2-return
 splitter for `[mag, phase] = bode_ss/bode_tf(...)` shipped.
 `gain_margin(A,B,C,D,w)` and `phase_margin(A,B,C,D,w)` shipped (scan
 the bode grid and interpolate the crossover; +Inf if no crossover).
-`dcgain_ss(A, B, C, D)` shipped. `nyquist`, `nichols`, `sigma`
-(needs MIMO bode + complex SVD), `bandwidth`, `getPeakGain`,
-`allmargin` are follow-ons. Model-object forms `bode(sys)` etc.
-follow §3.1.
+`dcgain_ss(A, B, C, D)` / `bandwidth_ss(A, B, C, D)` shipped.
+`freqresp_ss` / `freqresp_tf` (raw complex H(jω) returned as
+matlab_mat_c column) shipped. `nyquist_ss` / `nyquist_tf` shipped
+(N×2 real matrix [re, im]; complex form via `freqresp`).
+`allmargin_ss(A, B, C, D, w)` shipped (1×4 row [Gm, Pm, Wcg, Wcp];
+MATLAB's struct shape is a follow-on). Model-object short forms
+`bode(sys, w)`, `freqresp(sys, w)`, `nyquist(sys, w)`,
+`allmargin(sys, w)`, `dcgain(sys)`, `bandwidth(sys)`, `damp(sys)`,
+`isstable(sys)` route through Lowering.cpp. `nichols`, `sigma`
+(needs MIMO bode + complex SVD), `getPeakGain`, `bodemag`
+(would just alias bode 1-return), `getGainCrossover` /
+`getPhaseCrossover` are follow-ons. `logspace(a, b, n)` added as
+a runtime entry to back the standard frequency-grid idiom.
 
 **Effort**: 1.5 weeks. `bode` / `freqresp` are quick; `margin` /
 `allmargin` need careful interpolation logic.
@@ -934,9 +948,9 @@ unblocks the next; durations are focused-session estimates):
 | 5 | `care` / `dare` (Tier 1.5) | 1 wk | ✅ 1+3-return + 5-arg cross-term + icare/idare aliases; 6-arg descriptor form is a follow-on |
 | 6 | Model object constructors (Tier 2.1) — `tf` / `ss` / `zpk` / `pid` / `frd` | 1 wk | ✅ shipped — full classdef + tf-vs-tf + scalar mixing + `tf('s')` / `tf('z')` + polynomial composition + ss/zpk/pid/frd operator overloads + `disp(tf)` + model-object short forms (pole/step/bode/dcgain/lsim/bandwidth) |
 | 7 | Conversions + `c2d` / `d2c` (Tier 2.2) | 1 wk | 🟡 c2d ZOH + c2d_tustin + d2c_tustin (matrix-arg) shipped; `c2d(sys, Ts)` returning ss is a follow-on (needs Sema-pin on synthesised-builtin results) |
-| 8 | Time-domain simulation (Tier 2.3) — `step` / `impulse` / `lsim` / `initial` / `stepinfo` | 1 wk | 🟡 step_ss + lsim_ss (matrix-arg) + `step(sys)` / `lsim(sys, u, dt)` (model-object) shipped; impulse / initial pending |
-| 9 | Frequency-domain (Tier 2.4) — `bode` / `nyquist` / `sigma` / `freqresp` / `margin` | 1.5 wk | 🟡 bode_ss SISO + bode_tf + gain/phase margins + `bode(sys, w)` (model-object) shipped; MIMO bode + sigma + nyquist pending |
-| 10 | Pole/zero + interconnections (Tier 2.5–2.6) | 1 wk | 🟡 isstable + damp + `pole(sys)` (model-object) shipped; zero + `feedback(sys1, sys2)` / `series` / `parallel` returning ss pending |
+| 8 | Time-domain simulation (Tier 2.3) — `step` / `impulse` / `lsim` / `initial` / `stepinfo` | 1 wk | ✅ matrix-arg step_ss / lsim_ss / impulse_ss / initial_ss + stepinfo + model-object short forms `step(sys)` / `impulse(sys)` / `lsim(sys, u, dt)` / `initial(sys, x0)` shipped; lsiminfo / gensig / auto-time selection from slowest pole pending |
+| 9 | Frequency-domain (Tier 2.4) — `bode` / `nyquist` / `sigma` / `freqresp` / `margin` | 1.5 wk | 🟡 bode_ss SISO + bode_tf + freqresp_ss / _tf + nyquist_ss / _tf + gain/phase margins + allmargin_ss + dcgain_ss + bandwidth_ss + logspace + model-object short forms (`bode(sys, w)`, `freqresp`, `nyquist`, `allmargin`, `dcgain`, `bandwidth`, `damp`, `isstable`) shipped; MIMO bode + sigma + nichols + bodemag + getPeakGain + getGainCrossover pending |
+| 10 | Pole/zero + interconnections (Tier 2.5–2.6) | 1 wk | 🟡 isstable + damp + pole + model-object short forms shipped; zero + `feedback(sys1, sys2)` / `series` / `parallel` returning ss pending |
 | 11 | `pidtune` (Tier 2.8) | 1 wk | 🔵 pending (needs H∞ for MATLAB-faithful) |
 | 12 | LQR + LQG + Kalman + place (Tier 3.1–3.3) | 1.5 wk | 🟡 lqr ✅ + dlqr ✅ + place SISO ✅ + kalman_L ✅ + kalmd_L ✅; lqgreg / lqg / 4-return [kest, L, P] pending |
 | 13 | Gramians + ctrb/obsv + norms (Tier 3.4–3.5) | 1 wk | 🟡 ctrb + obsv + gram_c + gram_o + hsvd + norm_h2 + dcgain_ss shipped; norm_inf (H∞) pending |

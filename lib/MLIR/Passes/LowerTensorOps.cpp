@@ -3863,6 +3863,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"round",      "matlab_round_m",    1, "p"},
       {"fix",        "matlab_fix_m",      1, "p"},
       {"linspace",   "matlab_linspace",   1, "fff"},
+      {"logspace",   "matlab_logspace",   1, "fff"},
       {"mod",        "matlab_mod_s",      0, "ff"},
       {"rem",        "matlab_rem_s",      0, "ff"},
       {"atan2",      "matlab_atan2_m",    1, "pp"},
@@ -3925,11 +3926,24 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"gram_c",     "matlab_gram_c",     1, "pp"},
       {"gram_o",     "matlab_gram_o",     1, "pp"},
       {"step_ss",    "matlab_step_ss",    1, "ppppff"},
+      /* §3.3 follow-ons — impulse / initial response. Same arg-shape
+       * convention as step_ss; initial_ss carries x0 between (D, dt). */
+      {"impulse_ss", "matlab_impulse_ss", 1, "ppppff"},
+      {"initial_ss", "matlab_initial_ss", 1, "pppppff"},
       /* bode_ss 1-return form returns magnitude (the more-useful default
        * for plotting). The 2-return [mag, phase] = bode_ss(...) shape
        * goes through the dedicated splitter above. */
       {"bode_ss",    "matlab_bode_ss_mag",1, "ppppp"},
       {"lsim_ss",    "matlab_lsim_ss",    1, "pppppf"},
+      /* §3.4 follow-ons — raw complex freqresp + nyquist (re/im
+       * columns) + allmargin (1×4 row). freqresp / nyquist accept
+       * either matrix-arg (ss / tf) or model-object call sites; the
+       * model-object dispatch lives in Lowering.cpp. */
+      {"freqresp_ss","matlab_freqresp_ss",1, "ppppp"},
+      {"freqresp_tf","matlab_freqresp_tf",1, "ppp"},
+      {"nyquist_ss", "matlab_nyquist_ss", 1, "ppppp"},
+      {"nyquist_tf", "matlab_nyquist_tf", 1, "ppp"},
+      {"allmargin_ss","matlab_allmargin_ss",1, "ppppp"},
       {"gain_margin","matlab_gain_margin",0, "ppppp"},
       {"phase_margin","matlab_phase_margin",0,"ppppp"},
       {"bandwidth_ss","matlab_bandwidth_ss",0,"pppp"},

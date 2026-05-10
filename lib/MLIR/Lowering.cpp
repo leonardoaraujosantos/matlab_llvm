@@ -5862,6 +5862,117 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
           }
         }
 
+        /* impulse(sys [, dt, N]): for ss → impulse_ss with defaults
+         * dt=0.01, N=500 if not provided. Returns y as a column
+         * matrix. Same arg-shape as step(sys). */
+        if (Nm == "impulse" && Cls0 && Cn0 == "ss") {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value Dt, Nval;
+          if (C.Args.size() >= 3 && C.Args[1] && C.Args[2]) {
+            Dt = lowerExpr(*C.Args[1]);
+            Nval = lowerExpr(*C.Args[2]);
+          } else {
+            Dt = mlir::arith::ConstantOp::create(
+                B, L, F64, mlir::FloatAttr::get(F64, 0.01)).getResult();
+            Nval = mlir::arith::ConstantOp::create(
+                B, L, F64, mlir::FloatAttr::get(F64, 500.0)).getResult();
+          }
+          return rebuildCall("impulse_ss",
+                             {getProp(Obj, "A"), getProp(Obj, "B"),
+                              getProp(Obj, "C"), getProp(Obj, "D"),
+                              Dt, Nval},
+                             PtrTy);
+        }
+
+        /* initial(sys, x0 [, dt, N]): for ss → initial_ss(A, B, C,
+         * D, x0, dt, N). x0 is the initial state column vector. */
+        if (Nm == "initial" && Cls0 && Cn0 == "ss" && C.Args.size() >= 2) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value X0 = lowerExpr(*C.Args[1]);
+          if (X0.getType() != PtrTy) X0.setType(PtrTy);
+          mlir::Value Dt, Nval;
+          if (C.Args.size() >= 4 && C.Args[2] && C.Args[3]) {
+            Dt = lowerExpr(*C.Args[2]);
+            Nval = lowerExpr(*C.Args[3]);
+          } else {
+            Dt = mlir::arith::ConstantOp::create(
+                B, L, F64, mlir::FloatAttr::get(F64, 0.01)).getResult();
+            Nval = mlir::arith::ConstantOp::create(
+                B, L, F64, mlir::FloatAttr::get(F64, 500.0)).getResult();
+          }
+          return rebuildCall("initial_ss",
+                             {getProp(Obj, "A"), getProp(Obj, "B"),
+                              getProp(Obj, "C"), getProp(Obj, "D"),
+                              X0, Dt, Nval},
+                             PtrTy);
+        }
+
+        /* freqresp(sys, w): ss → freqresp_ss; tf → freqresp_tf.
+         * Returns matlab_mat_c (complex column). */
+        if (Nm == "freqresp" && Cls0 && C.Args.size() == 2) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value W = lowerExpr(*C.Args[1]);
+          if (W.getType() != PtrTy) W.setType(PtrTy);
+          if (Cn0 == "ss") {
+            return rebuildCall("freqresp_ss",
+                               {getProp(Obj, "A"), getProp(Obj, "B"),
+                                getProp(Obj, "C"), getProp(Obj, "D"), W},
+                               PtrTy);
+          }
+          if (Cn0 == "tf") {
+            return rebuildCall("freqresp_tf",
+                               {getProp(Obj, "Numerator"),
+                                getProp(Obj, "Denominator"), W},
+                               PtrTy);
+          }
+        }
+
+        /* nyquist(sys, w): ss → nyquist_ss; tf → nyquist_tf. Returns
+         * a real N×2 matrix with columns [re, im]. */
+        if (Nm == "nyquist" && Cls0 && C.Args.size() == 2) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value W = lowerExpr(*C.Args[1]);
+          if (W.getType() != PtrTy) W.setType(PtrTy);
+          if (Cn0 == "ss") {
+            return rebuildCall("nyquist_ss",
+                               {getProp(Obj, "A"), getProp(Obj, "B"),
+                                getProp(Obj, "C"), getProp(Obj, "D"), W},
+                               PtrTy);
+          }
+          if (Cn0 == "tf") {
+            return rebuildCall("nyquist_tf",
+                               {getProp(Obj, "Numerator"),
+                                getProp(Obj, "Denominator"), W},
+                               PtrTy);
+          }
+        }
+
+        /* allmargin(sys, w): ss → 1×4 row [Gm, Pm, Wcg, Wcp]. */
+        if (Nm == "allmargin" && Cls0 && Cn0 == "ss" &&
+            C.Args.size() == 2) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value W = lowerExpr(*C.Args[1]);
+          if (W.getType() != PtrTy) W.setType(PtrTy);
+          return rebuildCall("allmargin_ss",
+                             {getProp(Obj, "A"), getProp(Obj, "B"),
+                              getProp(Obj, "C"), getProp(Obj, "D"), W},
+                             PtrTy);
+        }
+
+        /* damp(sys): ss → damp(sys.A). Returns the 2-column
+         * [wn, zeta] matrix. tf form would need companion-matrix or
+         * roots-then-damp wiring; deferred. */
+        if (Nm == "damp" && Cls0 && Cn0 == "ss") {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          return rebuildCall("damp", {getProp(Obj, "A")}, PtrTy);
+        }
+
+        /* isstable(sys): ss → isstable(sys.A). Returns f64 (boolean). */
+        if (Nm == "isstable" && Cls0 && Cn0 == "ss") {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          return rebuildCall("isstable", {getProp(Obj, "A")}, F64);
+        }
+
         /* c2d(sys, Ts), feedback(sys1, sys2), series(sys1, sys2),
          * parallel(sys1, sys2) — class-returning short forms.
          * Deferred: the result needs a class-pinned slot type so
@@ -6843,7 +6954,13 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             "gram_c", "gram_o", "step_ss", "bode_ss", "lsim_ss", "bode_tf",
             /* §3.1 — model-object short forms (value-returning). */
             "step", "bode", "dcgain", "lsim", "bandwidth",
-            "find", "ind2sub", "linspace",
+            /* Tier-2 follow-on builtins (matrix-arg + model-object
+             * dispatch in CallOrIndex). */
+            "impulse", "initial", "freqresp", "nyquist", "allmargin",
+            "impulse_ss", "initial_ss",
+            "freqresp_ss", "freqresp_tf",
+            "nyquist_ss", "nyquist_tf", "allmargin_ss",
+            "find", "ind2sub", "linspace", "logspace",
             /* Complex: all return a matrix descriptor (matlab_mat* or
              * matlab_mat_c*), uniformly ptr at MLIR level. */
             "conj", "real", "imag", "angle", "complex",

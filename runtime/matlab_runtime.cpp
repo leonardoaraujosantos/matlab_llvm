@@ -3249,6 +3249,111 @@ matlab_mat *matlab_step_ss(matlab_mat *A, matlab_mat *B,
 }
 
 /*-------------------------------------------------------------------------
+ * State-space impulse response.
+ *
+ *   y = impulse_ss(A, B, C, D, dt, N) returns the N*p output
+ *   trajectory under a Dirac input at t = 0. Method: ZOH discretise
+ *   to get Ad = expm(A·dt), then iterate
+ *     x[0] = B    (the impulse pushes the state directly to B)
+ *     y[k] = C · x[k]    for k = 0, 1, …, N-1
+ *     x[k+1] = Ad · x[k]
+ *   For strictly proper plants (D = 0) this is the canonical MATLAB
+ *   shape. The Dirac-delta contribution D·δ(t) at t = 0 only shows up
+ *   in proper plants and is dropped here (discretised away) — the
+ *   sampled response captures the C·expm(A·t)·B continuous-time
+ *   piece, which is the practically useful part for plotting / time-
+ *   domain analysis.
+ *
+ * SISO and MIMO-1-input shapes both work; for MIMO with m inputs we
+ * concatenate per-input impulse responses column-wise (deferred —
+ * v1 takes the first input column of B only).
+ *
+ * Tier 2.3 of the CST roadmap.
+ *-------------------------------------------------------------------------*/
+matlab_mat *matlab_impulse_ss(matlab_mat *A, matlab_mat *B,
+                              matlab_mat *C, matlab_mat *D,
+                              double dt, double N_in) {
+    if (!A || !B || !C || !D || dt <= 0.0) return mat_alloc(0, 0);
+    int64_t n = A->rows;
+    int64_t p = C->rows;
+    int64_t N = (int64_t)N_in;
+    if (N <= 0 || A->cols != n || B->rows != n ||
+        C->cols != n || D->cols != B->cols ||
+        D->rows != p) return mat_alloc(0, 0);
+
+    matlab_mat *Ad = matlab_c2d_Ad(A, B, dt);
+    matlab_mat *y  = mat_alloc(N, p);
+    std::vector<double> x(n, 0.0);
+    /* SISO / first-input branch: x[0] = B[:, 0]. */
+    for (int64_t i = 0; i < n; ++i) x[i] = B->data[i * B->cols];
+    std::vector<double> xnew(n, 0.0);
+
+    for (int64_t k = 0; k < N; ++k) {
+        for (int64_t j = 0; j < p; ++j) {
+            double s = 0.0;
+            for (int64_t i = 0; i < n; ++i) s += C->data[j * n + i] * x[i];
+            y->data[k * p + j] = s;
+        }
+        for (int64_t i = 0; i < n; ++i) {
+            double s = 0.0;
+            for (int64_t j = 0; j < n; ++j) s += Ad->data[i * n + j] * x[j];
+            xnew[i] = s;
+        }
+        for (int64_t i = 0; i < n; ++i) x[i] = xnew[i];
+    }
+    return y;
+}
+
+/*-------------------------------------------------------------------------
+ * State-space initial-condition response.
+ *
+ *   y = initial_ss(A, B, C, D, x0, dt, N) returns the N*p output
+ *   trajectory under zero input from initial state x0. The free
+ *   response y(t) = C · expm(A·t) · x0. Discretised iteration:
+ *     x[0] = x0
+ *     y[k] = C · x[k]
+ *     x[k+1] = Ad · x[k]    Ad = expm(A·dt)
+ *   D does not contribute (u ≡ 0). B is kept in the signature so the
+ *   dispatch matches the same 6-argument `(A, B, C, D, x0, dt)` shape
+ *   the model-object short form `initial(sys, x0, t)` uses (B routes
+ *   through c2d to mint Ad consistently with step_ss / impulse_ss).
+ *
+ * Tier 2.3 of the CST roadmap.
+ *-------------------------------------------------------------------------*/
+matlab_mat *matlab_initial_ss(matlab_mat *A, matlab_mat *B,
+                              matlab_mat *C, matlab_mat *D,
+                              matlab_mat *x0, double dt, double N_in) {
+    (void)D;
+    if (!A || !B || !C || !x0 || dt <= 0.0) return mat_alloc(0, 0);
+    int64_t n = A->rows;
+    int64_t p = C->rows;
+    int64_t N = (int64_t)N_in;
+    if (N <= 0 || A->cols != n || C->cols != n ||
+        x0->rows * x0->cols != n) return mat_alloc(0, 0);
+
+    matlab_mat *Ad = matlab_c2d_Ad(A, B, dt);
+    matlab_mat *y  = mat_alloc(N, p);
+    std::vector<double> x(n, 0.0);
+    for (int64_t i = 0; i < n; ++i) x[i] = x0->data[i];
+    std::vector<double> xnew(n, 0.0);
+
+    for (int64_t k = 0; k < N; ++k) {
+        for (int64_t j = 0; j < p; ++j) {
+            double s = 0.0;
+            for (int64_t i = 0; i < n; ++i) s += C->data[j * n + i] * x[i];
+            y->data[k * p + j] = s;
+        }
+        for (int64_t i = 0; i < n; ++i) {
+            double s = 0.0;
+            for (int64_t j = 0; j < n; ++j) s += Ad->data[i * n + j] * x[j];
+            xnew[i] = s;
+        }
+        for (int64_t i = 0; i < n; ++i) x[i] = xnew[i];
+    }
+    return y;
+}
+
+/*-------------------------------------------------------------------------
  * Transfer-function frequency response: bode_tf(b, a, w).
  *
  *   H(s) = b(s) / a(s) = (b[0] s^N + b[1] s^(N-1) + ... + b[N])
@@ -3529,6 +3634,141 @@ matlab_mat *matlab_bode_ss_phase(matlab_mat *A, matlab_mat *B,
         phase->data[k] = atan2(Hi, Hr) * 180.0 / M_PI;
     }
     return phase;
+}
+
+/*-------------------------------------------------------------------------
+ * Raw complex frequency response — `H = freqresp(sys, w)`.
+ *
+ *   freqresp_ss(A, B, C, D, w) → matlab_mat_c with N rows × 1 col
+ *   freqresp_tf(b, a, w)       → matlab_mat_c with N rows × 1 col
+ *
+ * Returns the complex transfer-function evaluation at each frequency
+ * — the underlying quantity that bode / nyquist / nichols all
+ * sample. Backs the model-object short form `freqresp(sys, w)`.
+ *
+ * Tier 2.4 of the CST roadmap.
+ *-------------------------------------------------------------------------*/
+matlab_mat *matlab_freqresp_ss(matlab_mat *A, matlab_mat *B,
+                                matlab_mat *C, matlab_mat *D,
+                                matlab_mat *w) {
+    if (!A || !B || !C || !D || !w) return mat_alloc(0, 0);
+    if (A->rows != A->cols || B->cols != 1 ||
+        C->rows != 1 || D->rows != 1 || D->cols != 1)
+        return mat_alloc(0, 0);
+    int64_t Nf = w->rows * w->cols;
+    matlab_mat_c *H = mat_c_alloc(Nf, 1);
+    for (int64_t k = 0; k < Nf; ++k) {
+        double Hr, Hi;
+        bode_ss_at_freq_(A, B, C, D, w->data[k], &Hr, &Hi);
+        H->re[k] = Hr;
+        H->im[k] = Hi;
+    }
+    return (matlab_mat *)H;
+}
+
+matlab_mat *matlab_freqresp_tf(matlab_mat *b, matlab_mat *a, matlab_mat *w) {
+    if (!b || !a || !w) return mat_alloc(0, 0);
+    int64_t Nf = w->rows * w->cols;
+    matlab_mat_c *H = mat_c_alloc(Nf, 1);
+    for (int64_t k = 0; k < Nf; ++k) {
+        double Hr, Hi;
+        bode_tf_at_freq_(b, a, w->data[k], &Hr, &Hi);
+        H->re[k] = Hr;
+        H->im[k] = Hi;
+    }
+    return (matlab_mat *)H;
+}
+
+/*-------------------------------------------------------------------------
+ * Nyquist plot data — `[re, im] = nyquist(sys, w)`.
+ *
+ *   nyquist_ss(A, B, C, D, w) → matlab_mat N×2 with columns [re, im]
+ *   nyquist_tf(b, a, w)       → matlab_mat N×2 with columns [re, im]
+ *
+ * Two real columns rather than a complex vector — easier for the
+ * common "plot real vs imaginary" downstream use, and dodges the
+ * complex-emit-lane formatting drift. Users who want complex values
+ * call `freqresp(sys, w)` instead.
+ *
+ * Tier 2.4 of the CST roadmap.
+ *-------------------------------------------------------------------------*/
+matlab_mat *matlab_nyquist_ss(matlab_mat *A, matlab_mat *B,
+                               matlab_mat *C, matlab_mat *D,
+                               matlab_mat *w) {
+    if (!A || !B || !C || !D || !w) return mat_alloc(0, 0);
+    if (A->rows != A->cols || B->cols != 1 ||
+        C->rows != 1 || D->rows != 1 || D->cols != 1)
+        return mat_alloc(0, 0);
+    int64_t Nf = w->rows * w->cols;
+    matlab_mat *RI = mat_alloc(Nf, 2);
+    for (int64_t k = 0; k < Nf; ++k) {
+        double Hr, Hi;
+        bode_ss_at_freq_(A, B, C, D, w->data[k], &Hr, &Hi);
+        RI->data[k * 2 + 0] = Hr;
+        RI->data[k * 2 + 1] = Hi;
+    }
+    return RI;
+}
+
+matlab_mat *matlab_nyquist_tf(matlab_mat *b, matlab_mat *a, matlab_mat *w) {
+    if (!b || !a || !w) return mat_alloc(0, 0);
+    int64_t Nf = w->rows * w->cols;
+    matlab_mat *RI = mat_alloc(Nf, 2);
+    for (int64_t k = 0; k < Nf; ++k) {
+        double Hr, Hi;
+        bode_tf_at_freq_(b, a, w->data[k], &Hr, &Hi);
+        RI->data[k * 2 + 0] = Hr;
+        RI->data[k * 2 + 1] = Hi;
+    }
+    return RI;
+}
+
+/*-------------------------------------------------------------------------
+ * `allmargin(sys)` — gathers gain / phase margins + their crossover
+ * frequencies into a single 1×4 row [Gm, Pm, Wcg, Wcp]. MATLAB's
+ * struct return is a follow-on (needs the `Inf` / `NaN` field
+ * encoding); the row return is the bandwidth_ss / dcgain_ss shape.
+ *
+ * Gm    = gain_margin(A, B, C, D, w)
+ * Pm    = phase_margin(A, B, C, D, w)
+ * Wcg   = the ω where phase crosses −180° (gain crossover freq for
+ *         the gain margin); Inf if no crossing.
+ * Wcp   = the ω where |H| crosses 1 (phase crossover freq for the
+ *         phase margin); Inf if no crossing.
+ *
+ * Tier 2.4 of the CST roadmap.
+ *-------------------------------------------------------------------------*/
+matlab_mat *matlab_allmargin_ss(matlab_mat *A, matlab_mat *B,
+                                 matlab_mat *C, matlab_mat *D,
+                                 matlab_mat *w) {
+    if (!A || !B || !C || !D || !w) return mat_alloc(0, 0);
+    int64_t Nf = w->rows * w->cols;
+    matlab_mat *out = mat_alloc(1, 4);
+    out->data[0] = matlab_gain_margin(A, B, C, D, w);
+    out->data[1] = matlab_phase_margin(A, B, C, D, w);
+    /* Recompute the crossover frequencies inline. */
+    double wcg = INFINITY, wcp = INFINITY;
+    if (Nf >= 2) {
+        matlab_mat *phase = matlab_bode_ss_phase(A, B, C, D, w);
+        matlab_mat *mag   = matlab_bode_ss_mag  (A, B, C, D, w);
+        for (int64_t k = 1; k < Nf; ++k) {
+            double p1 = phase->data[k - 1], p2 = phase->data[k];
+            if (wcg == INFINITY && p1 > -180.0 && p2 <= -180.0) {
+                double frac = (p1 + 180.0) / (p1 - p2);
+                wcg = w->data[k - 1] +
+                      frac * (w->data[k] - w->data[k - 1]);
+            }
+            double m1 = mag->data[k - 1], m2 = mag->data[k];
+            if (wcp == INFINITY && m1 > 1.0 && m2 <= 1.0) {
+                double frac = (m1 - 1.0) / (m1 - m2);
+                wcp = w->data[k - 1] +
+                      frac * (w->data[k] - w->data[k - 1]);
+            }
+        }
+    }
+    out->data[2] = wcg;
+    out->data[3] = wcp;
+    return out;
 }
 
 /*-------------------------------------------------------------------------
@@ -5148,6 +5388,22 @@ matlab_mat *matlab_linspace(double a, double b, double nd) {
     double step = (b - a) / (double)(n - 1);
     for (int64_t i = 0; i < n; ++i) C->data[i] = a + step * (double)i;
     C->data[n - 1] = b;                /* exact endpoint */
+    return C;
+}
+
+/* logspace(a, b, n): n points logarithmically spaced from 10^a to
+ * 10^b. Equivalent to 10 .^ linspace(a, b, n). Returns a 1×n row.
+ * Used heavily for frequency-response grids in bode / nyquist /
+ * allmargin workflows. */
+matlab_mat *matlab_logspace(double a, double b, double nd) {
+    int64_t n = (int64_t)nd;
+    if (n < 1) n = 1;
+    matlab_mat *C = mat_alloc(1, n);
+    if (n == 1) { C->data[0] = std::pow(10.0, b); return C; }
+    double step = (b - a) / (double)(n - 1);
+    for (int64_t i = 0; i < n; ++i)
+        C->data[i] = std::pow(10.0, a + step * (double)i);
+    C->data[n - 1] = std::pow(10.0, b);
     return C;
 }
 

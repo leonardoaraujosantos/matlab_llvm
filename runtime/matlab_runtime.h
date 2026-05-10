@@ -332,6 +332,38 @@ matlab_mat *matlab_gram_o(matlab_mat *A, matlab_mat *C);
 /* State-space unit-step response.  y = step_ss(A, B, C, D, dt, N)
  * returns N x p output trajectory under unit-step input. ZOH discretise
  * + direct recurrence; relaxed initial state x[0] = 0. */
+/* Tier 2.3 follow-ons. impulse_ss runs the discretised free-response
+ * recurrence starting from x[0] = B (the impulse pushes the state
+ * directly to B); initial_ss runs the same recurrence from a user-
+ * provided x0 with no driving input. Same `(dt, N)` shape as
+ * step_ss. */
+matlab_mat *matlab_impulse_ss(matlab_mat *A, matlab_mat *B,
+                              matlab_mat *C, matlab_mat *D,
+                              double dt, double N);
+matlab_mat *matlab_initial_ss(matlab_mat *A, matlab_mat *B,
+                              matlab_mat *C, matlab_mat *D,
+                              matlab_mat *x0, double dt, double N);
+/* Tier 2.4 follow-ons. freqresp returns the raw complex H(jω); the
+ * ss form's signature mirrors bode_ss (SISO only today). nyquist
+ * returns the same data as two real columns [re, im] for downstream
+ * plotting / numerics that prefer real arithmetic. allmargin gathers
+ * [Gm, Pm, Wcg, Wcp] into a 1×4 row (MATLAB's struct form pending). */
+matlab_mat *matlab_freqresp_ss(matlab_mat *A, matlab_mat *B,
+                                matlab_mat *C, matlab_mat *D,
+                                matlab_mat *w);
+matlab_mat *matlab_freqresp_tf(matlab_mat *b, matlab_mat *a, matlab_mat *w);
+matlab_mat *matlab_nyquist_ss(matlab_mat *A, matlab_mat *B,
+                               matlab_mat *C, matlab_mat *D,
+                               matlab_mat *w);
+matlab_mat *matlab_nyquist_tf(matlab_mat *b, matlab_mat *a, matlab_mat *w);
+matlab_mat *matlab_allmargin_ss(matlab_mat *A, matlab_mat *B,
+                                 matlab_mat *C, matlab_mat *D,
+                                 matlab_mat *w);
+/* logspace(a, b, n) — n points logarithmically spaced from 10^a to
+ * 10^b. Tier-2 follow-on: standard frequency-grid builder for
+ * bode / nyquist / allmargin workflows. */
+matlab_mat *matlab_logspace(double a, double b, double n);
+
 matlab_mat *matlab_step_ss(matlab_mat *A, matlab_mat *B,
                            matlab_mat *C, matlab_mat *D,
                            double dt, double N);
