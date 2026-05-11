@@ -6081,16 +6081,127 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
                              PtrTy);
         }
 
-        /* c2d(sys, Ts), feedback(sys1, sys2), series(sys1, sys2),
-         * parallel(sys1, sys2) — class-returning short forms.
-         * Deferred: the result needs a class-pinned slot type so
-         * downstream `obj.A` reads dispatch through the class path,
-         * which Sema won't infer for a synthesised constructor call
-         * site. Today the pin only flows from a NameExpr that
-         * directly resolves to a ClassDef. Until Sema tracks
-         * "this builtin call returns a class instance," users can
-         * compose explicitly: `[Ad, Bd] = c2d(sys.A, sys.B, Ts);
-         *  sys_d = ss(Ad, Bd, sys.C, sys.D)`. */
+        /* §3.2 c2d(sys, Ts) — discretise an ss model. Result is a
+         * fresh ss instance with (Ad, Bd, sys.C, sys.D) where
+         *   Ad = matlab_c2d_Ad(A, B, Ts),
+         *   Bd = matlab_c2d_Bd(A, B, Ts).
+         * Default discretisation method is ZOH. Result slot is
+         * class-pinned by Resolver.cpp's pinnedOfRhs extension. */
+        if (Nm == "c2d" && Cls0 && Cn0 == "ss" && C.Args.size() == 2) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value Ts  = lowerExpr(*C.Args[1]);
+          mlir::Value AVal = getProp(Obj, "A");
+          mlir::Value BVal = getProp(Obj, "B");
+          mlir::NamedAttribute CalAd(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_c2d_Ad"));
+          mlir::NamedAttribute CalBd(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_c2d_Bd"));
+          mlir::Value Ad = emitUnreg("matlab.call_builtin",
+                                       {AVal, BVal, Ts}, PtrTy, L, {CalAd});
+          mlir::Value Bd = emitUnreg("matlab.call_builtin",
+                                       {AVal, BVal, Ts}, PtrTy, L, {CalBd});
+          mlir::Value CVal = getProp(Obj, "C");
+          mlir::Value DVal = getProp(Obj, "D");
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "ss__ss"));
+          return emitUnreg("matlab.call",
+                           {Ad, Bd, CVal, DVal},
+                           PtrTy, L, {CtorCal});
+        }
+
+        /* §3.6 feedback(sys1, sys2) / series(sys1, sys2) /
+         * parallel(sys1, sys2) — strictly-proper closed-loop
+         * assembly. Result is a fresh ss(Acl, Bcl, Ccl, sys1.D)
+         * where (Acl, Bcl, Ccl) come from the matching
+         * matlab_<name>_ss_{A,B,C} splitter. */
+        if ((Nm == "feedback" || Nm == "series" || Nm == "parallel") &&
+            Cls0 && Cn0 == "ss" && C.Args.size() == 2 && C.Args[1]) {
+          auto *AN1 = dynamic_cast<const NameExpr *>(C.Args[1]);
+          if (AN1 && AN1->Ref && AN1->Ref->PinnedClass &&
+              AN1->Ref->PinnedClass->Name == "ss") {
+            mlir::Value O1 = loadObj(C.Args[0]);
+            mlir::Value O2 = loadObj(C.Args[1]);
+            mlir::Value A1 = getProp(O1, "A");
+            mlir::Value B1 = getProp(O1, "B");
+            mlir::Value C1 = getProp(O1, "C");
+            mlir::Value A2 = getProp(O2, "A");
+            mlir::Value B2 = getProp(O2, "B");
+            mlir::Value C2 = getProp(O2, "C");
+            llvm::SmallVector<mlir::Value, 6> Ssa{A1, B1, C1, A2, B2, C2};
+            std::string PfA = "matlab_" + std::string(Nm) + "_ss_A";
+            std::string PfB = "matlab_" + std::string(Nm) + "_ss_B";
+            std::string PfC = "matlab_" + std::string(Nm) + "_ss_C";
+            mlir::NamedAttribute CalA(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, PfA));
+            mlir::NamedAttribute CalB(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, PfB));
+            mlir::NamedAttribute CalCC(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, PfC));
+            mlir::Value Acl = emitUnreg("matlab.call_builtin", Ssa,
+                                         PtrTy, L, {CalA});
+            mlir::Value Bcl = emitUnreg("matlab.call_builtin", Ssa,
+                                         PtrTy, L, {CalB});
+            mlir::Value Ccl = emitUnreg("matlab.call_builtin", Ssa,
+                                         PtrTy, L, {CalCC});
+            mlir::Value D1 = getProp(O1, "D");
+            mlir::NamedAttribute CtorCal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "ss__ss"));
+            return emitUnreg("matlab.call",
+                             {Acl, Bcl, Ccl, D1},
+                             PtrTy, L, {CtorCal});
+          }
+        }
+
+        /* §5.2 append(sys1, sys2) / blkdiag(sys1, sys2) — block-
+         * diagonal MIMO append. Same shape as feedback/series above
+         * but routes to matlab_append_ss_{A,B,C}. Result D is
+         * block-diagonal(D1, D2) — strictly-proper plants get
+         * D = sys1.D directly (zeros). */
+        if ((Nm == "append" || Nm == "blkdiag") &&
+            Cls0 && Cn0 == "ss" && C.Args.size() == 2 && C.Args[1]) {
+          auto *AN1 = dynamic_cast<const NameExpr *>(C.Args[1]);
+          if (AN1 && AN1->Ref && AN1->Ref->PinnedClass &&
+              AN1->Ref->PinnedClass->Name == "ss") {
+            mlir::Value O1 = loadObj(C.Args[0]);
+            mlir::Value O2 = loadObj(C.Args[1]);
+            mlir::Value A1 = getProp(O1, "A");
+            mlir::Value B1 = getProp(O1, "B");
+            mlir::Value C1 = getProp(O1, "C");
+            mlir::Value A2 = getProp(O2, "A");
+            mlir::Value B2 = getProp(O2, "B");
+            mlir::Value C2 = getProp(O2, "C");
+            llvm::SmallVector<mlir::Value, 6> Ssa{A1, B1, C1, A2, B2, C2};
+            mlir::NamedAttribute CalA(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_append_ss_A"));
+            mlir::NamedAttribute CalB(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_append_ss_B"));
+            mlir::NamedAttribute CalCC(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_append_ss_C"));
+            mlir::Value Aa = emitUnreg("matlab.call_builtin", Ssa,
+                                        PtrTy, L, {CalA});
+            mlir::Value Ba = emitUnreg("matlab.call_builtin", Ssa,
+                                        PtrTy, L, {CalB});
+            mlir::Value Ca = emitUnreg("matlab.call_builtin", Ssa,
+                                        PtrTy, L, {CalCC});
+            mlir::Value D1 = getProp(O1, "D");
+            mlir::NamedAttribute CtorCal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "ss__ss"));
+            return emitUnreg("matlab.call",
+                             {Aa, Ba, Ca, D1},
+                             PtrTy, L, {CtorCal});
+          }
+        }
       }
       /* disp(s) where s is a tracked string binding -> matlab_string_disp.
        * Also handles disp("literal") by routing a StringLiteral arg
@@ -7076,6 +7187,9 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
              * multi-return splitters; hsvd / balreal_T model-object
              * short forms route through CallOrIndex dispatch. */
             "pade", "minreal",
+            /* Class-returning model-object short forms (Sema's
+             * pinnedOfRhs handles the LHS slot pin). */
+            "feedback", "series", "parallel", "append", "blkdiag",
             "find", "ind2sub", "linspace", "logspace",
             /* Complex: all return a matrix descriptor (matlab_mat* or
              * matlab_mat_c*), uniformly ptr at MLIR level. */

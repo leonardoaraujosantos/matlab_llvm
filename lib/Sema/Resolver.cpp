@@ -161,6 +161,10 @@ void Resolver::registerBuiltins() {
      * den, tol). Model-object short forms hsvd(sys) / balreal_T(sys)
      * route through Lowering.cpp's class-pinned-first-arg dispatch. */
     "pade", "minreal",
+    /* §3.2 / §3.6 / §5.2 — class-returning model-object short forms.
+     * Result is a fresh ss(.) constructor call; Resolver's
+     * pinnedOfRhs propagates the class pin from the first arg. */
+    "feedback", "series", "parallel", "append", "blkdiag",
     "arrayfun", "cellfun",
     /* Initial-value ODE solvers — see runtime/matlab_runtime.cpp.
      * ode23s is the Rosenbrock stiff solver. pdepe is the 1-D
@@ -582,6 +586,23 @@ void Resolver::resolveStmt(Stmt &St, Scope *S) {
         if (auto *NX = dynamic_cast<NameExpr *>(CX->Callee)) {
           if (NX->Ref && NX->Ref->Kind == BindingKind::Class &&
               NX->Ref->ClassDef) return NX->Ref->ClassDef;
+          /* §3.1 / Tier-4 — class-returning model-object short forms.
+           * When the first arg is class-pinned and the callee is a
+           * known short-form name, the result is the same class.
+           * Mirrors the Lowering.cpp class-pinned-first-arg dispatch
+           * that emits the corresponding constructor call. */
+          if (NX->Ref && NX->Ref->Kind == BindingKind::Builtin &&
+              !CX->Args.empty()) {
+            ClassDef *Arg0Cls = pinnedOfRhs(CX->Args[0]);
+            if (Arg0Cls && Arg0Cls->Name == "ss") {
+              const auto &Nm = NX->Name;
+              if (Nm == "c2d" || Nm == "c2d_tustin" ||
+                  Nm == "d2c_tustin" || Nm == "feedback" ||
+                  Nm == "series" || Nm == "parallel" ||
+                  Nm == "append" || Nm == "blkdiag")
+                return Arg0Cls;
+            }
+          }
         }
       }
       if (auto *Bi = dynamic_cast<BinaryOpExpr *>(RE)) {

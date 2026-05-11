@@ -384,11 +384,17 @@ continuous ↔ discrete is the connective tissue.
 
 **Status**: matrix-arg `c2d(A, B, Ts)` ZOH form shipped (Van Loan
 augmented-matrix trick), 2-return splitter for `[Ad, Bd] = c2d(...)`.
-Tustin / foh / impulse / matched-pole-zero / least-squares methods
-are follow-ons. `d2c` (inverse direction) and `d2d` (resample) are
-follow-ons. The `c2d(sys, Ts)` model-object form awaits §3.1.
-`tf2ss` / `ss2tf` / `canon` / `ss2ss` follow §3.1 / §3.5 model
-objects. `balreal` matrix-arg form shipped (Tier-4, see §5.1).
+Tustin matrix-arg `[Ad, Bd] = c2d_tustin(A, B, Ts)` and the
+inverse `[A, B] = d2c_tustin(Ad, Bd, Ts)` shipped. The model-
+object form `sys_d = c2d(sys, Ts)` ✅ shipped — returns a fresh
+ss instance via Lowering.cpp's class-pinned-first-arg dispatch.
+Sema's `pinnedOfRhs` recognises `c2d / c2d_tustin / d2c_tustin /
+feedback / series / parallel / append / blkdiag` as class-
+returning when the first arg is class-pinned, so downstream
+property reads (`sys_d.A`, etc.) flow through the class path.
+foh / impulse / matched-pole-zero / least-squares methods,
+`d2d` (resample), and `tf2ss` / `ss2tf` / `canon` / `ss2ss`
+conversions are follow-ons.
 
 **Effort**: 1 week.
 
@@ -521,7 +527,7 @@ shipped — 2-column `[wn, zeta]` form (MATLAB's full 4-column shape
 
 **Effort**: 0.5 week (light, mostly thin wrappers).
 
-### 3.6 Interconnections (SISO scope) 🔵
+### 3.6 Interconnections (SISO scope) ✅
 
 **Scope**:
 - `series(sys1, sys2)` — same as `sys2 * sys1`.
@@ -529,8 +535,19 @@ shipped — 2-column `[wn, zeta]` form (MATLAB's full 4-column shape
 - `[T, Ts] = feedback(sys1, sys2, sign)` — closed-loop. Default
   negative feedback. Returns the closed-loop `tf` / `ss` derived from
   `sys1 / (1 + sys2*sys1)` algebra.
-- `append(sys1, sys2, ...)` — block-diagonal MIMO append (deferred to
-  Tier-4 if MIMO connect lands then).
+- `append(sys1, sys2, ...)` — block-diagonal MIMO append.
+
+**Status**: `feedback(sys1, sys2)` / `series(sys1, sys2)` /
+`parallel(sys1, sys2)` / `append(sys1, sys2)` / `blkdiag(sys1,
+sys2)` all ship via Lowering.cpp's class-pinned-first-arg
+dispatch — each routes to the matching matlab_<name>_ss_{A,B,C}
+runtime triple and wraps the result back into a fresh
+`ss(Acl, Bcl, Ccl, sys1.D)` constructor call. Sema's
+`pinnedOfRhs` propagates the class pin through these names so
+the LHS slot lands on `ss`. The 3-argument feedback shape
+`feedback(sys1, sys2, sign)` with `sign = +1` for positive
+feedback is a small follow-on (sign just flips one term in the
+Schur complement).
 
 **Effort**: 0.5 week. Bulk is the feedback formula in state-space
 (small Schur-complement-style algebra).
@@ -775,7 +792,7 @@ and `reducespec` are follow-ons. Stable/unstable pre-split via
 **Effort**: 2 weeks. `balred` is the bulk because the gramian path
 plus stable/unstable decomposition is a multi-piece pipeline.
 
-### 5.2 MIMO connection plumbing 🔵
+### 5.2 MIMO connection plumbing 🟡 (append / blkdiag shipped)
 
 **Scope**:
 - `sys = connect(blocks, inputs, outputs)` — graph-style MIMO
@@ -785,6 +802,16 @@ plus stable/unstable decomposition is a multi-piece pipeline.
 - `sys = append(sys1, sys2, ...)` — block-diagonal append.
 - `sys = lft(sys1, sys2, nu, ny)` — linear fractional transformation.
 - `sys = blkdiag(sys1, sys2)` — alias of `append`.
+
+**Status**: `append(sys1, sys2)` / `blkdiag(sys1, sys2)` ✅
+shipped — class-returning model-object short forms via
+Lowering.cpp's class-pinned dispatch, routing to the existing
+matlab_append_ss_{A,B,C} runtime triple. `connect` (graph-style
+multi-block assembly with summing junctions, string-parsing the
+connection topology), `sumblk` (the `'e = r - y'` equation
+parser), and `lft` (linear fractional transformation with the
+M = [[M11, M12]; [M21, M22]] partitioning) are bookkeeping-heavy
+follow-ons; each is a self-contained next-slice piece.
 
 **Algorithm**: `connect` is the only non-trivial one — parse the
 graph, identify summing junctions, build the closed-loop `ss` model
@@ -822,11 +849,17 @@ descriptor and delay-state machinery is the bulk.
 **Tier-4 closure status**: matrix-arg reduction surface ships
 (balreal_T / balred_{A,B,C} / hsvd / minreal for tf form + Padé
 time-delay approximation), plus model-object short forms
-`hsvd(sys)` and `balreal_T(sys)`. Multi-return on model-object
-call sites (`[Ar, Br, Cr, hsv] = balred(sys, k)`), `modred`,
-ss-form `minreal` (needs ctrbf/obsvf staircase), `sminreal`,
-internal-delay representation, `connect` / `sumblk` / `append` /
-`lft` / `blkdiag` MIMO assembly are isolated follow-ons.
+`hsvd(sys)` / `balreal_T(sys)` and the class-returning short
+forms `c2d(sys, Ts)` / `feedback(sys1, sys2)` / `series(sys1,
+sys2)` / `parallel(sys1, sys2)` / `append(sys1, sys2)` /
+`blkdiag(sys1, sys2)` (Sema's pinnedOfRhs propagates the class
+pin through the new short-form names so `sys_d.A` etc.
+downstream property reads dispatch through the class path).
+Isolated follow-ons: multi-return on model-object call sites
+(`[Ar, Br, Cr, hsv] = balred(sys, k)`), `modred`, ss-form
+`minreal` (needs ctrbf/obsvf staircase), `sminreal`,
+internal-delay representation, the graph-style `connect` /
+`sumblk` / `lft` MIMO assembly.
 
 ---
 
@@ -993,10 +1026,10 @@ unblocks the next; durations are focused-session estimates):
 | 4 | `lyap` / `dlyap` / `lyapchol` / `sylvester` (Tier 1.4) | 1 wk | ✅ all four shipped (dense LU on the Kronecker matrix; Bartels-Stewart on Schur is a large-plant follow-on) |
 | 5 | `care` / `dare` (Tier 1.5) | 1 wk | ✅ 1+3-return + 5-arg cross-term + icare/idare aliases; 6-arg descriptor form is a follow-on |
 | 6 | Model object constructors (Tier 2.1) — `tf` / `ss` / `zpk` / `pid` / `frd` | 1 wk | ✅ shipped — full classdef + tf-vs-tf + scalar mixing + `tf('s')` / `tf('z')` + polynomial composition + ss/zpk/pid/frd operator overloads + `disp(tf)` + model-object short forms (pole/step/bode/dcgain/lsim/bandwidth) |
-| 7 | Conversions + `c2d` / `d2c` (Tier 2.2) | 1 wk | 🟡 c2d ZOH + c2d_tustin + d2c_tustin (matrix-arg) shipped; `c2d(sys, Ts)` returning ss is a follow-on (needs Sema-pin on synthesised-builtin results) |
+| 7 | Conversions + `c2d` / `d2c` (Tier 2.2) | 1 wk | ✅ c2d ZOH + c2d_tustin + d2c_tustin (matrix-arg) + `c2d(sys, Ts)` model-object form (returns ss via Sema-pin) shipped; foh / impulse / matched / least-squares methods + `d2d` + canon / ss2ss conversions pending |
 | 8 | Time-domain simulation (Tier 2.3) — `step` / `impulse` / `lsim` / `initial` / `stepinfo` | 1 wk | ✅ matrix-arg step_ss / lsim_ss / impulse_ss / initial_ss + stepinfo + model-object short forms `step(sys)` / `impulse(sys)` / `lsim(sys, u, dt)` / `initial(sys, x0)` shipped; lsiminfo / gensig / auto-time selection from slowest pole pending |
 | 9 | Frequency-domain (Tier 2.4) — `bode` / `nyquist` / `sigma` / `freqresp` / `margin` | 1.5 wk | 🟡 bode_ss SISO + bode_tf + freqresp_ss / _tf + nyquist_ss / _tf + gain/phase margins + allmargin_ss + dcgain_ss + bandwidth_ss + logspace + model-object short forms (`bode(sys, w)`, `freqresp`, `nyquist`, `allmargin`, `dcgain`, `bandwidth`, `damp`, `isstable`) shipped; MIMO bode + sigma + nichols + bodemag + getPeakGain + getGainCrossover pending |
-| 10 | Pole/zero + interconnections (Tier 2.5–2.6) | 1 wk | 🟡 isstable + damp + pole + model-object short forms shipped; zero + `feedback(sys1, sys2)` / `series` / `parallel` returning ss pending |
+| 10 | Pole/zero + interconnections (Tier 2.5–2.6) | 1 wk | 🟡 isstable + damp + pole + model-object short forms + `feedback / series / parallel` returning ss all shipped; `zero(sys)` (Rosenbrock pencil) and `connect / sumblk / lft` pending |
 | 11 | `pidtune` (Tier 2.8) | 1 wk | 🔵 pending (needs H∞ for MATLAB-faithful) |
 | 12 | LQR + LQG + Kalman + place (Tier 3.1–3.3) | 1.5 wk | 🟡 lqr ✅ + dlqr ✅ + place SISO ✅ + kalman_L ✅ + kalmd_L ✅; lqgreg / lqg / 4-return [kest, L, P] pending |
 | 13 | Gramians + ctrb/obsv + norms (Tier 3.4–3.5) | 1 wk | 🟡 ctrb + obsv + gram_c + gram_o + hsvd + norm_h2 + dcgain_ss shipped; norm_inf (H∞) pending |
@@ -1008,13 +1041,15 @@ unblocks the next; durations are focused-session estimates):
 **Total**: ~18-20 weeks of focused sessions for Tier 1 → Tier 4
 closure. Tier 5 is +1 week. Tier 6 (`systune`) is multi-month.
 
-**Current state (2026-05-10)**: rows 1-6 closed (numeric core +
-model objects); rows 7-10 partially shipped (matrix-arg primitives
-+ value-returning model-object short forms). Class-returning
-short forms (`c2d(sys, Ts)`, `feedback(sys1, sys2)`, …) still
-pending — they need Sema to pin the result slot to the matching
-class, which is the next architectural piece for rows 7-10
-closure. Rows 11-17 mostly 🔵.
+**Current state (2026-05-10)**: rows 1-7 closed (numeric core +
+model objects + c2d round-trip), row 8 closed (impulse / step /
+lsim model-object), rows 9-10 partially shipped. Sema's
+`pinnedOfRhs` now propagates the class pin through known class-
+returning short forms (`c2d / c2d_tustin / d2c_tustin /
+feedback / series / parallel / append / blkdiag`), so the LHS
+slot for `sys_d = c2d(sys, Ts)` etc. lands on the right class
+and downstream property reads route through the class path.
+Rows 11-17 mostly 🔵.
 
 **MVP slice (~11 weeks)**: Order 1-11. Lights up the "PID design and
 simulate" loop end-to-end. Most pedagogical control problems fit here.

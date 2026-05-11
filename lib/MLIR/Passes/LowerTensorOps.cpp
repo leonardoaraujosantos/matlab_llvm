@@ -4028,6 +4028,26 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"series_ss",  "matlab_series_ss_A", 1,"pppppp"},
       {"parallel_ss","matlab_parallel_ss_A",1,"pppppp"},
       {"append_ss",  "matlab_append_ss_A", 1,"pppppp"},
+      /* §3.1 / §5.2 — direct-runtime-symbol passthroughs the class-
+       * returning model-object short forms in Lowering.cpp emit
+       * (c2d(sys, Ts), feedback / series / parallel / append /
+       * blkdiag on ss model objects). Each Lowering site picks the
+       * matching _A / _B / _C runtime entry directly so the result
+       * fits into the ss(_,_,_,_) constructor call. */
+      {"matlab_c2d_Ad",        "matlab_c2d_Ad",        1, "ppf"},
+      {"matlab_c2d_Bd",        "matlab_c2d_Bd",        1, "ppf"},
+      {"matlab_feedback_ss_A", "matlab_feedback_ss_A", 1, "pppppp"},
+      {"matlab_feedback_ss_B", "matlab_feedback_ss_B", 1, "pppppp"},
+      {"matlab_feedback_ss_C", "matlab_feedback_ss_C", 1, "pppppp"},
+      {"matlab_series_ss_A",   "matlab_series_ss_A",   1, "pppppp"},
+      {"matlab_series_ss_B",   "matlab_series_ss_B",   1, "pppppp"},
+      {"matlab_series_ss_C",   "matlab_series_ss_C",   1, "pppppp"},
+      {"matlab_parallel_ss_A", "matlab_parallel_ss_A", 1, "pppppp"},
+      {"matlab_parallel_ss_B", "matlab_parallel_ss_B", 1, "pppppp"},
+      {"matlab_parallel_ss_C", "matlab_parallel_ss_C", 1, "pppppp"},
+      {"matlab_append_ss_A",   "matlab_append_ss_A",   1, "pppppp"},
+      {"matlab_append_ss_B",   "matlab_append_ss_B",   1, "pppppp"},
+      {"matlab_append_ss_C",   "matlab_append_ss_C",   1, "pppppp"},
       /* bode_tf 1-return form returns magnitude (default for plotting).
        * The 2-return [mag, phase] = bode_tf(...) shape goes through the
        * dedicated splitter above. */
