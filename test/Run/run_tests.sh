@@ -22,6 +22,8 @@ RUNTIME_SRCS=(
   "$ROOT/runtime/matlab_runtime.cpp"
   "$ROOT/runtime/runtime_debug.cpp"
   "$ROOT/runtime/runtime_complex.cpp"
+  "$ROOT/runtime/runtime_comm.cpp"
+  "$ROOT/runtime/runtime_prop.cpp"
 )
 CXX="${CXX:-${CLANG}++}"
 TESTDIR="$(cd "$(dirname "$0")" && pwd)"

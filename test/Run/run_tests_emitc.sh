@@ -53,6 +53,8 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 RUNTIME_MAIN="$ROOT/runtime/matlab_runtime.cpp"
 RUNTIME_DEBUG="$ROOT/runtime/runtime_debug.cpp"
 RUNTIME_COMPLEX="$ROOT/runtime/runtime_complex.cpp"
+RUNTIME_COMM="$ROOT/runtime/runtime_comm.cpp"
+RUNTIME_PROP="$ROOT/runtime/runtime_prop.cpp"
 TESTDIR="$(cd "$(dirname "$0")" && pwd)"
 
 pass=0; fail=0
@@ -90,7 +92,7 @@ for m in "$TESTDIR"/*.m; do
   cc_err="$(mktemp -t mlc.XXXXXX).err"
   if [[ "$MODE" == cpp ]]; then
     if ! "$CXX" "${WFLAGS[@]}" "-I$ROOT/runtime" -x c++ "$tmpsrc" \
-           -x c++ "$RUNTIME_MAIN" "$RUNTIME_DEBUG" "$RUNTIME_COMPLEX" \
+           -x c++ "$RUNTIME_MAIN" "$RUNTIME_DEBUG" "$RUNTIME_COMPLEX" "$RUNTIME_COMM" "$RUNTIME_PROP" \
            -o "$tmpbin" -lm -lpthread 2>"$cc_err"; then
       echo "FAIL $base: $LABEL compile failed"
       [[ "$STRICT" == "1" ]] && sed 's/^/  /' "$cc_err" | head -5
@@ -99,7 +101,7 @@ for m in "$TESTDIR"/*.m; do
     fi
   else
     if ! "$CXX" "${WFLAGS[@]}" "-I$ROOT/runtime" -x c "$tmpsrc" \
-           -x c++ "$RUNTIME_MAIN" "$RUNTIME_DEBUG" "$RUNTIME_COMPLEX" \
+           -x c++ "$RUNTIME_MAIN" "$RUNTIME_DEBUG" "$RUNTIME_COMPLEX" "$RUNTIME_COMM" "$RUNTIME_PROP" \
            -o "$tmpbin" -lm -lpthread 2>"$cc_err"; then
       echo "FAIL $base: $LABEL compile failed"
       [[ "$STRICT" == "1" ]] && sed 's/^/  /' "$cc_err" | head -5

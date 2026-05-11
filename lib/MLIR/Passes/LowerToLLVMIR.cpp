@@ -14,10 +14,12 @@
 #include "mlir/Conversion/SCFToControlFlow/SCFToControlFlow.h"
 #include "mlir/Dialect/LLVMIR/LLVMAttrs.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Location.h"
 #include "mlir/IR/MLIRContext.h"
+#include "mlir/IR/SymbolTable.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Target/LLVMIR/Dialect/Builtin/BuiltinToLLVMIRTranslation.h"
 #include "mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h"
@@ -195,6 +197,36 @@ std::string lowerToLLVMIR(mlir::ModuleOp M, bool EmitDebugInfo) {
   // Ensure translation-to-LLVMIR hooks are registered on the context.
   mlir::registerBuiltinDialectTranslation(*Ctx);
   mlir::registerLLVMDialectTranslation(*Ctx);
+
+  /* Drop uncalled classdef method bodies before the LLVM conversion.
+   * Same posture as runReplInput (tools/matlabc/main.cpp): the
+   * prelude-loaded classdef pulls every method into the TU, but
+   * Sema only refines a method's param types when there's a call
+   * site driving them.  An uncalled method body with `none`-typed
+   * args survives the LowerScalars sweeps and trips the LLVM
+   * translation step with `func.func` / `tensor<*xf64>` operands
+   * that have no LLVM conversion.  Walking the SymbolTable to erase
+   * dead class methods is safe — internal sibling calls keep the
+   * transitive callee live, and non-classdef library functions
+   * don't carry `matlab.class_name`. */
+  {
+    auto SymTbl = mlir::SymbolTable(M);
+    bool Changed = true;
+    while (Changed) {
+      Changed = false;
+      llvm::SmallVector<mlir::Operation *> Drop;
+      M.walk([&](mlir::func::FuncOp F) {
+        if (!F->hasAttr("matlab.class_name")) return;
+        auto Sym = F.getSymNameAttr();
+        if (auto Uses = SymTbl.getSymbolUses(Sym, M))
+          if (Uses->empty()) Drop.push_back(F);
+      });
+      for (auto *Op : Drop) {
+        SymTbl.erase(Op);
+        Changed = true;
+      }
+    }
+  }
 
   // Conversion pipeline: scf -> cf, then convert to llvm dialect.
   mlir::PassManager PM(Ctx);

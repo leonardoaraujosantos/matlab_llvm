@@ -1576,23 +1576,49 @@ static std::string buildReplPrelude(const std::string &Src) {
       if (Fp) { Files.push_back(C); return; }
     }
   };
+  /* Per-class wants — each class's prelude file is pulled in only
+   * when the user input (or the workspace) actually mentions it.
+   * Same per-class file layout as the CST classes: keeps uncalled
+   * method bodies out of the TU, which would otherwise survive the
+   * lowering passes with `none`-typed args (Sema only refines types
+   * for methods that have call sites) and trip the LLVM translation
+   * step. */
+  struct Want { bool active = false; const char *Name; const char *File; };
+  Want Cls[] = {
+    /* CST — tf lives in the umbrella `cst_classdefs.m` (shares
+     * cst_polyadd / cst_polysub helpers); the others have their
+     * own per-class files. */
+    {false, "tf",                       "cst_classdefs.m"},
+    {false, "ss",                       "cst_class_ss.m"},
+    {false, "zpk",                      "cst_class_zpk.m"},
+    {false, "pid",                      "cst_class_pid.m"},
+    {false, "frd",                      "cst_class_frd.m"},
+    /* Comm SO surface — one file per class.  Convolutional / Viterbi /
+     * OFDM / channel SOs need matrix-typed property storage and
+     * matrix-arg method bodies (currently typed as `none` until the
+     * field-type-inference work lands); deferred to a follow-on slice. */
+    {false, "CommCRCGenerator",         "comm_class_crc_generator.m"},
+    {false, "CommCRCDetector",          "comm_class_crc_detector.m"},
+    /* Antenna Toolbox catalog (ANT-Tier-1, geometry-only).  v1 ships
+     * the catalog classes with scalar properties; pattern / impedance
+     * / sparameters methods require the wire-MoM solver (ANT-Tier-2)
+     * and land in a follow-on slice. */
+    {false, "AntDipole",   "ant_class_dipole.m"},
+    {false, "AntMonopole", "ant_class_monopole.m"},
+    /* RF Toolbox catalog (RF-Tier-1, skeleton).  v1 ships scalar
+     * properties (NumPorts / Impedance); the Parameters / Frequencies
+     * cube + Touchstone reader land in a follow-on slice once
+     * matrix-typed classdef property storage is in. */
+    {false, "RFSparameters", "rf_class_sparameters.m"},
+  };
   /* Source-mention scan: turn-0-style detection. */
-  bool WantTf = mentions("tf");
-  bool WantSs = mentions("ss");
-  bool WantZpk = mentions("zpk");
-  bool WantPid = mentions("pid");
-  bool WantFrd = mentions("frd");
-  bool WantComm = false;
-  static const char *CommNames[] = { "CommCRCGenerator" };
-  for (const char *N : CommNames) if (mentions(N)) { WantComm = true; break; }
+  for (auto &W : Cls) if (mentions(W.Name)) W.active = true;
 
   /* Workspace-mention scan: subsequent REPL turns may not re-mention
    * the class name (e.g. `crc = CommCRCGenerator(1)` in turn 0, then
    * just `crc(1)` in turn 1).  Walk every kind=2 workspace binding,
-   * resolve its class_id → class name, and union into the WantXxx
-   * set so the next TU still has the classdef in scope.  Without
-   * this, the second turn's Resolver doesn't see CommCRCGenerator
-   * as a ClassDef and the obj-call sugar can't fire. */
+   * resolve its class_id → class name, and union into the active set
+   * so the next TU still has the classdef in scope. */
   int n = matlab_dbg_ws_count();
   for (int i = 0; i < n; ++i) {
     if (matlab_dbg_ws_kind(i) != 2) continue;
@@ -1602,21 +1628,12 @@ static std::string buildReplPrelude(const std::string &Src) {
     int64_t cnLen = 0;
     const char *cn = matlab_dbg_class_name(cid, &cnLen);
     if (!cn || cnLen <= 0) continue;
-    std::string_view N(cn, (size_t)cnLen);
-    if      (N == "tf")  WantTf = true;
-    else if (N == "ss")  WantSs = true;
-    else if (N == "zpk") WantZpk = true;
-    else if (N == "pid") WantPid = true;
-    else if (N == "frd") WantFrd = true;
-    else if (N == "CommCRCGenerator") WantComm = true;
+    std::string_view CN(cn, (size_t)cnLen);
+    for (auto &W : Cls)
+      if (CN == W.Name) { W.active = true; break; }
   }
 
-  if (WantTf)  add("cst_classdefs.m");
-  if (WantSs)  add("cst_class_ss.m");
-  if (WantZpk) add("cst_class_zpk.m");
-  if (WantPid) add("cst_class_pid.m");
-  if (WantFrd) add("cst_class_frd.m");
-  if (WantComm) add("comm_classdefs.m");
+  for (auto &W : Cls) if (W.active) add(W.File);
   if (Files.empty()) return std::string();
   std::string Out;
   for (auto &P : Files) {
@@ -8430,33 +8447,20 @@ int main(int Argc, char **Argv) {
     std::string P = findClassPrelude(Cls);
     if (!P.empty()) PreludePaths.push_back(std::move(P));
   }
-  /* Communications Toolbox System Object prelude: every name in the
-   * umbrella file lives in `runtime/comm_classdefs.m`, so a single
-   * whole-word / call-site scan over the user input is enough.
-   * Mirrors the CST pattern, just collapsed into one file since the
-   * SO surface is smaller (no shared cst_polyadd-style helpers to
-   * keep per-class). */
-  auto findCommPrelude = [&]() -> std::string {
-    std::string SelfStr(Argv[0]);
-    auto last = SelfStr.find_last_of('/');
-    std::string Bin = (last == std::string::npos) ? "." : SelfStr.substr(0, last);
-    char Real[PATH_MAX];
-    if (realpath(Bin.c_str(), Real)) Bin = Real;
-    std::vector<std::string> Cands = {
-      Bin + "/../runtime/comm_classdefs.m",
-      Bin + "/runtime/comm_classdefs.m",
-      Bin + "/../share/matlabc/runtime/comm_classdefs.m",
-    };
-    for (auto &C : Cands) {
-      std::ifstream Fp(C);
-      if (Fp) return C;
-    }
-    return std::string();
-  };
-  auto userMentionsCommClasses =
-      [](const std::string &Path) -> bool {
+  /* Communications Toolbox System Object preludes — per-class files
+   * mirroring the CST pattern.  Each class lives in its own
+   * `comm_class_<name>.m` file so an uncalled class's method bodies
+   * (whose `none`-typed params Sema can't refine without a call
+   * site) don't get pulled into the TU. */
+  /* Comm + Antenna SO catalog scan.  Same shape as the CST scan
+   * above — whole-word / call-site match for each registered class
+   * name; per-class prelude file lookup via the explicit table
+   * below. */
+  auto userMentionsExtClasses =
+      [](const std::string &Path) -> std::vector<std::string> {
+    std::vector<std::string> Found;
     std::ifstream In(Path);
-    if (!In) return false;
+    if (!In) return Found;
     std::ostringstream Buf;
     Buf << In.rdbuf();
     std::string SrcRaw = Buf.str();
@@ -8473,32 +8477,67 @@ int main(int Argc, char **Argv) {
       if (!InComment) Src.push_back(c);
     }
     static const char *Names[] = {
-      /* Today's surface — extend as new SO classes land. */
-      "CommCRCGenerator",
+      /* Comm SO surface. */
+      "CommCRCGenerator", "CommCRCDetector",
+      /* Antenna catalog (ANT-Tier-1). */
+      "AntDipole", "AntMonopole",
+      /* RF catalog (RF-Tier-1). */
+      "RFSparameters",
     };
     for (const char *N : Names) {
       size_t NL = std::strlen(N);
       size_t P = 0;
-      while ((P = Src.find(N, P)) != std::string::npos) {
+      bool Hit = false;
+      while ((P = Src.find(N, P)) != std::string::npos && !Hit) {
         bool LeftWord = (P > 0) && (std::isalnum((unsigned char)Src[P-1]) ||
                                      Src[P-1] == '_');
         if (!LeftWord && P + NL < Src.size()) {
           char Right = Src[P + NL];
-          if (Right == '(') return true;
+          if (Right == '(') { Hit = true; break; }
           size_t Q = P + NL;
           while (Q < Src.size() && (Src[Q] == ' ' || Src[Q] == '\t')) Q++;
           if (Q < Src.size() && Src[Q] == '=') {
-            if (Q + 1 >= Src.size() || Src[Q+1] != '=') return true;
+            if (Q + 1 >= Src.size() || Src[Q+1] != '=') { Hit = true; break; }
           }
         }
         P += NL;
       }
+      if (Hit) Found.push_back(N);
     }
-    return false;
+    return Found;
   };
-  if (userMentionsCommClasses(Opts.InputPath)) {
-    std::string P = findCommPrelude();
-    if (!P.empty()) PreludePaths.push_back(std::move(P));
+  /* Per-class file name lookup — explicit table since the file names
+   * are intentionally friendly (`comm_class_crc_generator.m`, not
+   * the mechanical `comm_class_crcgenerator.m`). */
+  auto extClassLeaf = [](llvm::StringRef ClsName) -> std::string {
+    if (ClsName == "CommCRCGenerator")
+      return "comm_class_crc_generator.m";
+    if (ClsName == "CommCRCDetector")
+      return "comm_class_crc_detector.m";
+    if (ClsName == "AntDipole")
+      return "ant_class_dipole.m";
+    if (ClsName == "AntMonopole")
+      return "ant_class_monopole.m";
+    if (ClsName == "RFSparameters")
+      return "rf_class_sparameters.m";
+    return std::string();
+  };
+  for (const std::string &Cls : userMentionsExtClasses(Opts.InputPath)) {
+    std::string Leaf = extClassLeaf(Cls);
+    std::string SelfStr(Argv[0]);
+    auto last = SelfStr.find_last_of('/');
+    std::string Bin = (last == std::string::npos) ? "." : SelfStr.substr(0, last);
+    char Real[PATH_MAX];
+    if (realpath(Bin.c_str(), Real)) Bin = Real;
+    std::vector<std::string> Cands = {
+      Bin + "/../runtime/" + Leaf,
+      Bin + "/runtime/" + Leaf,
+      Bin + "/../share/matlabc/runtime/" + Leaf,
+    };
+    for (auto &C : Cands) {
+      std::ifstream Fp(C);
+      if (Fp) { PreludePaths.push_back(C); break; }
+    }
   }
   /* Back-compat single-path variable for the loader below; the
    * concat path now iterates PreludePaths. */

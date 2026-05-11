@@ -1,0 +1,1 @@
+TypeScript lane doesn't emit classdef bodies yet.  LLVM-only.

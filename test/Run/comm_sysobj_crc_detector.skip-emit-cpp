@@ -1,0 +1,2 @@
+Handle classdef + runtime helpers — same posture as CommCRCGenerator
+and the CST classdef tests.  LLVM lane is the source of truth.
