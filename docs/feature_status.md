@@ -380,6 +380,23 @@ MATLAB Coder integration, Python coexecution.
 | Wavelets / Wigner-Ville / synchrosqueezed (`cwt`, `dwt`, `wvd`, `fsst`) | 🔵 | Tier-4 §5.4. |
 | `digitalFilter` / `designfilt` system object | 🔵 | Tier-4 §5.1 — needs Tier-1 IIR/FIR shipped first. |
 
+### Communications Toolbox — Tier-2 digital modulation MVP (function-form)
+
+Per-toolbox roadmap in [`comm_toolbox_roadmap.md`](comm_toolbox_roadmap.md) §4. The first user-visible Comm slice: source → modulate → AWGN → demodulate → BER, with a closed-form theory overlay. Function-form, numeric-tag dispatch; runtime extends `runtime/runtime_comm.cpp`. End-to-end demos under `examples/comm/` (`tier2_smoke.m`, `pulse_shape_demo.m`, `ber_qam_montecarlo.m`).
+
+| Group | Function | Status | Notes |
+|---|---|:-:|---|
+| §4.1 PAM | `pammod(x, M, order)`, `pamdemod(y, M, order)` | ✅ shipped | order = 0 natural / 1 Gray. Constellation `2k − (M−1)` for k in [0, M−1]. Real-line output. |
+| §4.3 PSK | `pskmod(x, M, ini_phase, order)`, `pskdemod(y, M, ini_phase, order)` | ✅ shipped | Phase = ini_phase + 2π·k/M with Gray decoding. Complex output. Hard demod via atan2 + nearest-phase. |
+| §4.2 QAM | `qammod(x, M, order, unit_avg)` + `qamdemod` (hard / `qamdemodBit` / `qamdemodLlr`) | ✅ shipped | Square M ∈ {4, 16, 64, 256, 1024} via independent kx + ky bit splits per I/Q axis. Rectangular cross-QAM for M=8 (4×2) and M=32 (8×4). `unit_avg = 1` scales by `1/√(2(M−1)/3)` so mean symbol energy is 1. `qamdemodBit` emits `N·log2(M)` MSB-first bits; `qamdemodLlr` max-log LLR with a user-supplied noise variance. |
+| §4.6 Generic | `genqammod(x, alphabet)`, `genqamdemod(y, alphabet)` | ✅ shipped | Alphabet is a `matlab_mat_c` column; demod is nearest-Euclidean-distance. |
+| §4.7 Pulse shaping | `rcosdesign(beta, span, sps, shape)`, `gaussdesign(BT, span, sps)` | ✅ shipped | shape = 0 root-raised-cosine ('sqrt'), 1 = full raised-cosine ('normal'). Closed-form impulse response with L'Hôpital handling at `t=0` and `t = ±span/(4β)`. Unit-energy normalised. Gaussian uses GMSK `α = √(ln 2 / 2) / BT`, sum-normalised to 1. |
+| §4.8 berawgn | `berawgn(EbN0_dB, M, mod_code)` | ✅ shipped | mod_code 0 PAM / 1 PSK / 2 QAM / 3 DPSK / 4 FSK-coh / 5 FSK-nc. Closed-form per the user-guide table; uses libc `erfc`. Verified: BPSK BER @ 10 dB Eb/N0 = 3.87e-6, 16-QAM = 1.75e-3 — matches textbook to printed precision. |
+| §4.9 scatterplot | `scatterplot(x)` | ✅ shipped | Numeric form returning N×2 real matrix of (re, im) pairs. Cairo plotting on top is left to user code. |
+| §4.5 FSK | `fskmod` / `fskdemod` | 🔵 | Deferred — not needed for the closure test; the oversampling + non-coherent energy-detect path is a separate ~1 wk slice. |
+| Scalar runtime tail | `qfunc(x)`, `erfc(x)` | ✅ shipped | `qfunc(x) = 0.5·erfc(x/√2)`; thin wrappers over libc. |
+| Closure test (`examples/comm/ber_qam_montecarlo.m`) | `randi → qammod → awgn → qamdemod → biterrK` vs `berawgn` overlay | ✅ shipped | 16-QAM at 20 k symbols / Eb/N0 point: sim 0.0578 / 0.0283 / 0.0094 / 0.0019 / 1.25e-4 vs theory 0.0586 / 0.0279 / 0.0092 / 0.0018 / 1.39e-4 at 4 / 6 / 8 / 10 / 12 dB. The 14 dB point is statistically noisy (~1 expected error per run). |
+
 ### Communications Toolbox — Tier-1 base layer (function-form)
 
 Per-toolbox roadmap in [`comm_toolbox_roadmap.md`](comm_toolbox_roadmap.md) §2. The base-layer prerequisites that gate every higher Comm tier — bit sources, RNG seed control, AWGN channel, BER/SER measurement. Function-form, numeric-tag dispatch; all entries live in `runtime/runtime_comm.cpp`. End-to-end demos under `examples/comm/` (`comm_tier1_smoke.m`, `source_bits.m`, `ber_awgn_uncoded.m`).

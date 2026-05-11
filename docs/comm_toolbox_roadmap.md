@@ -985,14 +985,15 @@ shipped, so this is one line).
 
 | Primitive | Effort | Status |
 |---|---|---|
-| `pammod` / `pamdemod` (3.1) | 0.5 wk | 🔵 |
-| `qammod` / `qamdemod` (3.2) | 1 wk | 🔵 |
-| `pskmod` / `pskdemod` (3.3) | 0.5 wk | 🔵 |
-| `fskmod` / `fskdemod` (3.5) | 1 wk | 🔵 (deferrable) |
-| `genqammod` / `genqamdemod` (3.6) | 0.5 wk | 🔵 |
-| `rcosdesign` / `gaussdesign` (3.7) | 1 sess | 🔵 |
-| `berawgn` / `bercoding` (3.8) | 1 wk | 🔵 |
-| `scatterplot` (3.9) | 1 sess | 🔵 |
+| `pammod` / `pamdemod` (4.1) | 0.5 wk | ✅ shipped (natural + Gray; real-line output) |
+| `qammod` / `qamdemod` (4.2) | 1 wk | ✅ shipped (square M=4,16,64,256,1024 + rectangular cross-QAM M=8 [4×2] and M=32 [8×4]; hard / bit / LLR outputs; `UnitAveragePower` normalisation; max-log LLR with user-supplied noise variance) |
+| `pskmod` / `pskdemod` (4.3) | 0.5 wk | ✅ shipped (natural + Gray; configurable initial phase) |
+| `fskmod` / `fskdemod` (4.5) | 1 wk | 🔵 (deferred — not needed for the closure test) |
+| `genqammod` / `genqamdemod` (4.6) | 0.5 wk | ✅ shipped (nearest-Euclidean-distance demod on a user-supplied complex alphabet) |
+| `rcosdesign` / `gaussdesign` (4.7) | 1 sess | ✅ shipped (RRC + full RC via the `shape` tag; unit-energy normalised; Gaussian sum-normalised) |
+| `berawgn` / `bercoding` (4.8) | 1 wk | ✅ shipped (closed-form for PAM / PSK / QAM / DPSK / FSK-coherent / FSK-noncoherent; uses libc `erfc`. `bercoding` deferred to Tier-3 coded slice.) |
+| `scatterplot` (4.9) | 1 sess | ✅ shipped (numeric form returning N×2 real (re, im) pairs) |
+| Closure test (`examples/comm/ber_qam_montecarlo.m`) | — | ✅ shipped (16-QAM Monte-Carlo with `berawgn` overlay — sim BER tracks theory within ~10% relative from 4 dB Eb/N0 onward at 20 k symbols/point) |
 
 **Total**: ~3 weeks. End of Tier 2, this works:
 

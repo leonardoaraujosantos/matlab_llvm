@@ -1113,6 +1113,18 @@ const Type *TypeInference::visitBuiltinCall(std::string_view Name,
       Name == "awgn")
     return TC.arrayOf(Dtype::Double, Shape::unknown());
 
+  /* Tier-2 digital modulation (docs/comm_toolbox_roadmap.md §4). */
+  if (Name == "qfunc" || Name == "berawgn")
+    return TC.scalar(Dtype::Double);
+  if (Name == "pammod" || Name == "pamdemod" ||
+      Name == "pskmod" || Name == "pskdemod" ||
+      Name == "qammod" || Name == "qamdemod" ||
+      Name == "qamdemodBit" || Name == "qamdemodLlr" ||
+      Name == "genqammod" || Name == "genqamdemod" ||
+      Name == "rcosdesign" || Name == "gaussdesign" ||
+      Name == "scatterplot")
+    return TC.arrayOf(Dtype::Double, Shape::unknown());
+
   if (Name == "linspace") {
     int64_t N = -1;
     if (Args.size() >= 3) N = foldInt(Args[2]);

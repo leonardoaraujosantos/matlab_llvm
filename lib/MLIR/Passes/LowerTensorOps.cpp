@@ -4409,6 +4409,34 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"biterrCount", "matlab_comm_biterr_count",    0, "pp"},
       {"symerr",      "matlab_comm_symerr_ratio",    0, "pp"},
       {"symerrCount", "matlab_comm_symerr_count",    0, "pp"},
+      /* === Communications Toolbox Tier-2 — digital modulation MVP ===
+       * docs/comm_toolbox_roadmap.md §4. runtime/runtime_comm.cpp.
+       * Numeric-tag dispatch: order = 0 binary / 1 Gray;
+       * shape = 0 RRC ('sqrt') / 1 RC ('normal');
+       * mod_code = 0 PAM, 1 PSK, 2 QAM, 3 DPSK, 4 FSK-coh, 5 FSK-nc. */
+      {"qfunc", "matlab_comm_qfunc_s", 0, "f"},
+      {"erfc",  "matlab_comm_erfc_s",  0, "f"},
+      /* §4.1 PAM (real-line). */
+      {"pammod",   "matlab_comm_pammod",   1, "pff"},
+      {"pamdemod", "matlab_comm_pamdemod", 1, "pff"},
+      /* §4.3 PSK (complex). 4 args: x, M, ini_phase, order. */
+      {"pskmod",   "matlab_comm_pskmod",   1, "pfff"},
+      {"pskdemod", "matlab_comm_pskdemod", 1, "pfff"},
+      /* §4.2 QAM (complex). 4 args: x, M, order, unit_avg_power_flag. */
+      {"qammod",     "matlab_comm_qammod",     1, "pfff"},
+      {"qamdemod",   "matlab_comm_qamdemod",   1, "pfff"},
+      {"qamdemodBit","matlab_comm_qamdemod_bit",1,"pfff"},
+      {"qamdemodLlr","matlab_comm_qamdemod_llr",1,"pffff"},
+      /* §4.6 generic constellation. Alphabet is a complex column. */
+      {"genqammod",   "matlab_comm_genqammod",   1, "pp"},
+      {"genqamdemod", "matlab_comm_genqamdemod", 1, "pp"},
+      /* §4.7 pulse shaping. */
+      {"rcosdesign", "matlab_comm_rcosdesign", 1, "ffff"},
+      {"gaussdesign","matlab_comm_gaussdesign",1, "fff"},
+      /* §4.8 berawgn closed-form curve. Args: EbN0_dB, M, mod_code. */
+      {"berawgn",    "matlab_comm_berawgn_s",  0, "fff"},
+      /* §4.9 scatterplot numeric form. */
+      {"scatterplot","matlab_comm_scatterplot",1, "p"},
     };
 
     // Pick the first entry with name + arity + TYPE match so overloaded

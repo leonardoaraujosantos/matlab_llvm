@@ -282,6 +282,17 @@ void Resolver::registerBuiltins() {
     "int2bit", "bit2int", "de2bi", "bi2de",
     "awgn",
     "biterr", "biterrK", "biterrCount", "symerr", "symerrCount",
+    /* COMM Tier-2 — digital modulation MVP (docs/comm_toolbox_roadmap.md §4).
+     * Numeric tag dispatch: order code 0=binary, 1=Gray; output code
+     * 0=integer-hard, 1=bit, 2=LLR; modulation code 0=PAM, 1=PSK,
+     * 2=QAM, 3=DPSK, 4=FSK-coh, 5=FSK-nc; rcosdesign shape 0=sqrt
+     * (RRC), 1=normal (full RC). */
+    "pammod", "pamdemod", "pskmod", "pskdemod",
+    "qammod", "qamdemod", "qamdemodBit", "qamdemodLlr",
+    "genqammod", "genqamdemod",
+    "rcosdesign", "gaussdesign",
+    "berawgn", "scatterplot",
+    "qfunc", "erfc",
   }) {
     registerBuiltin(N);
   }
