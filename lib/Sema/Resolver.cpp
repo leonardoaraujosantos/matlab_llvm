@@ -155,6 +155,12 @@ void Resolver::registerBuiltins() {
      * gramian or H₂ / H∞ norm via a char/scalar second arg.
      * `lqry` is output-weighted LQR. */
     "acker", "gram", "norm", "lqry",
+    /* §5 follow-ons — Tier-4 leftovers. `pade` is the Padé time-
+     * delay approximation [num, den] = pade(τ, n); `minreal` is the
+     * tf-form pole-zero-cancellation [num_r, den_r] = minreal(num,
+     * den, tol). Model-object short forms hsvd(sys) / balreal_T(sys)
+     * route through Lowering.cpp's class-pinned-first-arg dispatch. */
+    "pade", "minreal",
     "arrayfun", "cellfun",
     /* Initial-value ODE solvers — see runtime/matlab_runtime.cpp.
      * ode23s is the Rosenbrock stiff solver. pdepe is the 1-D

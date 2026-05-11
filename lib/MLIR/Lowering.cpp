@@ -6059,6 +6059,28 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
                              PtrTy);
         }
 
+        /* §5.1 — model-reduction short forms. hsvd(sys) returns the
+         * Hankel singular values vector; balreal_T(sys) returns the
+         * balancing similarity transform T. Both route to existing
+         * matrix-arg runtime entries by unpacking sys.A/B/C. The
+         * full 4-return [Ar, Br, Cr, hsv] = balreal/balred forms
+         * remain matrix-arg-only (need multi-return splitter on
+         * model-object call sites; deferred). */
+        if (Nm == "hsvd" && Cls0 && Cn0 == "ss") {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          return rebuildCall("hsvd",
+                             {getProp(Obj, "A"), getProp(Obj, "B"),
+                              getProp(Obj, "C")},
+                             PtrTy);
+        }
+        if (Nm == "balreal_T" && Cls0 && Cn0 == "ss") {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          return rebuildCall("balreal_T",
+                             {getProp(Obj, "A"), getProp(Obj, "B"),
+                              getProp(Obj, "C")},
+                             PtrTy);
+        }
+
         /* c2d(sys, Ts), feedback(sys1, sys2), series(sys1, sys2),
          * parallel(sys1, sys2) — class-returning short forms.
          * Deferred: the result needs a class-pinned slot type so
@@ -7050,6 +7072,10 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
              * short forms with char/scalar second arg; lqry =
              * output-weighted LQR). */
             "acker", "gram", "norm", "lqry",
+            /* Tier-4 follow-on builtins. pade / minreal are
+             * multi-return splitters; hsvd / balreal_T model-object
+             * short forms route through CallOrIndex dispatch. */
+            "pade", "minreal",
             "find", "ind2sub", "linspace", "logspace",
             /* Complex: all return a matrix descriptor (matlab_mat* or
              * matlab_mat_c*), uniformly ptr at MLIR level. */

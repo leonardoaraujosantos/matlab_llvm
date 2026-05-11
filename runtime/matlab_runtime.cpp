@@ -4204,6 +4204,160 @@ matlab_mat *matlab_balred_C(matlab_mat *A, matlab_mat *B, matlab_mat *C,
     return Cr;
 }
 
+/*-------------------------------------------------------------------------
+ * Padé approximation of the time-delay element e^{-τs}.
+ *
+ *   [num, den] = pade(τ, n)
+ *
+ * Symmetric (diagonal) [n/n] Padé:
+ *   R_{n,n}(-τs) = P_n(-τs) / P_n(τs)
+ *   P_n(x) = sum_{j=0..n}  (2n−j)!·n!  /  ((2n)!·j!·(n−j)!)  · x^j
+ *
+ * Coefficient recurrence on the magnitude c_j = (2n−j)!·n! ·
+ * τ^j / ((2n)!·j!·(n−j)!):
+ *   c_0 = 1
+ *   c_j = c_{j-1} · τ · (n−j+1) / (j · (2n−j+1))
+ *
+ * The numerator is sum_{j=0..n} (−1)^j · c_j · s^j (alternating
+ * signs from the −τs substitution); the denominator is
+ * sum_{j=0..n} c_j · s^j. Both returned as 1×(n+1) row vectors in
+ * descending power, matching MATLAB's `[num, den] = pade(τ, n)`
+ * convention.
+ *
+ * Tier 4.3 of the CST roadmap.
+ *-------------------------------------------------------------------------*/
+static void pade_coeffs_(double tau, int n, std::vector<double> &c) {
+    c.assign(n + 1, 0.0);
+    c[0] = 1.0;
+    for (int j = 1; j <= n; ++j) {
+        c[j] = c[j - 1] * tau * (n - j + 1) /
+               ((double)j * (2 * n - j + 1));
+    }
+}
+
+matlab_mat *matlab_pade_num(double tau, double n_d) {
+    int n = (int)n_d;
+    if (n < 0) n = 0;
+    std::vector<double> c;
+    pade_coeffs_(tau, n, c);
+    matlab_mat *num = mat_alloc(1, n + 1);
+    /* Descending power: position i carries the s^{n-i} coefficient.
+     * Numerator picks up (-1)^j alternating signs from -τs. */
+    for (int i = 0; i <= n; ++i) {
+        int j = n - i;
+        double sign = (j % 2 == 0) ? 1.0 : -1.0;
+        num->data[i] = sign * c[j];
+    }
+    return num;
+}
+
+matlab_mat *matlab_pade_den(double tau, double n_d) {
+    int n = (int)n_d;
+    if (n < 0) n = 0;
+    std::vector<double> c;
+    pade_coeffs_(tau, n, c);
+    matlab_mat *den = mat_alloc(1, n + 1);
+    for (int i = 0; i <= n; ++i) {
+        int j = n - i;
+        den->data[i] = c[j];
+    }
+    return den;
+}
+
+/* Forward decls — matlab_roots / matlab_poly live in runtime_complex.cpp. */
+extern "C" matlab_mat_c *matlab_roots(matlab_mat *p);
+extern "C" matlab_mat   *matlab_poly(void *r);
+
+/*-------------------------------------------------------------------------
+ * Minimal realisation for the transfer-function form.
+ *
+ *   [num_r, den_r] = minreal(num, den, tol)
+ *
+ * Cancels matching pole-zero pairs within `tol` (Euclidean distance
+ * in the complex plane). Each (z_i, p_j) pair with |z_i − p_j| ≤
+ * tol drops both roots. The reduced polynomial is rebuilt via
+ * `matlab_poly` on the surviving roots and rescaled by the original
+ * leading coefficient (so the steady-state gain is preserved when
+ * no DC pole/zero gets cancelled).
+ *
+ * The ss-form `minreal(sys)` would go via the controllability /
+ * observability staircase decomposition (ctrbf / obsvf, both
+ * follow-ons); this tf-form covers the practical pole-zero
+ * cancellation surface for scalar transfer functions.
+ *
+ * Tier 4.1 of the CST roadmap §5.1.
+ *-------------------------------------------------------------------------*/
+static void minreal_cancel_roots_(matlab_mat_c *zeros, matlab_mat_c *poles,
+                                    double tol,
+                                    std::vector<double> &zre_out,
+                                    std::vector<double> &zim_out,
+                                    std::vector<double> &pre_out,
+                                    std::vector<double> &pim_out) {
+    int64_t nz = zeros ? zeros->rows * zeros->cols : 0;
+    int64_t np = poles ? poles->rows * poles->cols : 0;
+    std::vector<bool> z_alive(nz, true), p_alive(np, true);
+    for (int64_t i = 0; i < nz; ++i) {
+        if (!z_alive[i]) continue;
+        for (int64_t j = 0; j < np; ++j) {
+            if (!p_alive[j]) continue;
+            double dr = zeros->re[i] - poles->re[j];
+            double di = zeros->im[i] - poles->im[j];
+            if (dr * dr + di * di <= tol * tol) {
+                z_alive[i] = false;
+                p_alive[j] = false;
+                break;
+            }
+        }
+    }
+    zre_out.clear(); zim_out.clear();
+    pre_out.clear(); pim_out.clear();
+    for (int64_t i = 0; i < nz; ++i)
+        if (z_alive[i]) {
+            zre_out.push_back(zeros->re[i]);
+            zim_out.push_back(zeros->im[i]);
+        }
+    for (int64_t j = 0; j < np; ++j)
+        if (p_alive[j]) {
+            pre_out.push_back(poles->re[j]);
+            pim_out.push_back(poles->im[j]);
+        }
+}
+
+static matlab_mat *polynomial_from_roots_(const std::vector<double> &re,
+                                            const std::vector<double> &im,
+                                            double lead) {
+    int64_t n = (int64_t)re.size();
+    matlab_mat_c *R = mat_c_alloc(n, 1);
+    for (int64_t i = 0; i < n; ++i) { R->re[i] = re[i]; R->im[i] = im[i]; }
+    matlab_mat *p = matlab_poly((void *)R);
+    if (!p || p->rows * p->cols == 0) return p;
+    /* Scale by lead so the result is `lead · monic(s)`. */
+    for (int64_t i = 0; i < p->rows * p->cols; ++i) p->data[i] *= lead;
+    return p;
+}
+
+matlab_mat *matlab_minreal_tf_num(matlab_mat *num, matlab_mat *den,
+                                   double tol) {
+    if (!num || !den) return mat_alloc(0, 0);
+    matlab_mat_c *zeros = matlab_roots(num);
+    matlab_mat_c *poles = matlab_roots(den);
+    std::vector<double> zre, zim, pre, pim;
+    minreal_cancel_roots_(zeros, poles, tol, zre, zim, pre, pim);
+    double lead = num->data[0];
+    return polynomial_from_roots_(zre, zim, lead);
+}
+
+matlab_mat *matlab_minreal_tf_den(matlab_mat *num, matlab_mat *den,
+                                   double tol) {
+    if (!num || !den) return mat_alloc(0, 0);
+    matlab_mat_c *zeros = matlab_roots(num);
+    matlab_mat_c *poles = matlab_roots(den);
+    std::vector<double> zre, zim, pre, pim;
+    minreal_cancel_roots_(zeros, poles, tol, zre, zim, pre, pim);
+    double lead = den->data[0];
+    return polynomial_from_roots_(pre, pim, lead);
+}
+
 /* Forward decl: matlab_isstable is defined just below. */
 double matlab_isstable(matlab_mat *A);
 

@@ -444,6 +444,20 @@ matlab_mat *matlab_append_ss_B(matlab_mat *A1, matlab_mat *B1, matlab_mat *C1,
 matlab_mat *matlab_append_ss_C(matlab_mat *A1, matlab_mat *B1, matlab_mat *C1,
                                matlab_mat *A2, matlab_mat *B2, matlab_mat *C2);
 
+/* Tier 4.3 — Padé approximation of e^{-τs}. [num, den] = pade(τ, n)
+ * with the symmetric [n/n] form. Two public entries follow the
+ * splitter precedent used by c2d / bilinear / tf2zp. */
+matlab_mat *matlab_pade_num(double tau, double n);
+matlab_mat *matlab_pade_den(double tau, double n);
+
+/* Tier 4.1 — tf-form minimal realisation. Cancels matching pole-
+ * zero pairs within `tol` and rebuilds the polynomials. Splitter
+ * entries: [num_r, den_r] = minreal(num, den, tol). */
+matlab_mat *matlab_minreal_tf_num(matlab_mat *num, matlab_mat *den,
+                                   double tol);
+matlab_mat *matlab_minreal_tf_den(matlab_mat *num, matlab_mat *den,
+                                   double tol);
+
 /* SISO −3 dB bandwidth: lowest w where |H(jw)| < |H(j0)|/sqrt(2).
  * Scans 1e-3 → 1e6 rad/s log-spaced, interpolates the crossover.
  * Returns +Inf if no crossover (all-pass / unstable / zero DC gain). */

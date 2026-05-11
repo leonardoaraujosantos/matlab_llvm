@@ -3439,6 +3439,49 @@ bool TensorLowering::rewriteBuiltinCalls() {
       }
     }
 
+    /* [num, den] = pade(τ, n) — Padé approximation of e^{-τs}. Two
+     * f64 args, two ptr returns. */
+    if (NA && NA.getValue().getSExtValue() == 2 &&
+        Name == "pade" && Call->getNumOperands() == 2 &&
+        Call->getNumResults() == 2 &&
+        Call->getOperand(0).getType() == F64 &&
+        Call->getOperand(1).getType() == F64) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt("matlab_pade_num", PtrTy, {F64, F64});
+      auto Fd = rt("matlab_pade_den", PtrTy, {F64, F64});
+      SmallVector<Value, 2> CA{Call->getOperand(0), Call->getOperand(1)};
+      auto Cn = LLVM::CallOp::create(B, Call->getLoc(), Fn, CA);
+      auto Cd = LLVM::CallOp::create(B, Call->getLoc(), Fd, CA);
+      Call->getResult(0).replaceAllUsesWith(Cn.getResult());
+      Call->getResult(1).replaceAllUsesWith(Cd.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+
+    /* [num_r, den_r] = minreal(num, den, tol) — pole-zero
+     * cancellation on the transfer-function form. */
+    if (NA && NA.getValue().getSExtValue() == 2 &&
+        Name == "minreal" && Call->getNumOperands() == 3 &&
+        Call->getNumResults() == 2 &&
+        Call->getOperand(2).getType() == F64) {
+      Value V0 = boxAsPtr(Call->getOperand(0));
+      Value V1 = boxAsPtr(Call->getOperand(1));
+      if (V0 && V1) {
+        B.setInsertionPoint(Call);
+        auto Fn = rt("matlab_minreal_tf_num", PtrTy, {PtrTy, PtrTy, F64});
+        auto Fd = rt("matlab_minreal_tf_den", PtrTy, {PtrTy, PtrTy, F64});
+        SmallVector<Value, 3> CA{V0, V1, Call->getOperand(2)};
+        auto Cn = LLVM::CallOp::create(B, Call->getLoc(), Fn, CA);
+        auto Cd = LLVM::CallOp::create(B, Call->getLoc(), Fd, CA);
+        Call->getResult(0).replaceAllUsesWith(Cn.getResult());
+        Call->getResult(1).replaceAllUsesWith(Cd.getResult());
+        Call->erase();
+        Changed = true;
+        continue;
+      }
+    }
+
     /* [bd, ad] = bilinear(b, a, fs). Splits into matlab_bilinear_{b,a}. */
     if (NA && NA.getValue().getSExtValue() == 2 &&
         Name == "bilinear" && Call->getNumOperands() == 3 &&

@@ -758,11 +758,19 @@ controllers and MIMO designs are the natural next step.
 eigendecomposition variant — sym-eig + lyap stack; no Cholesky).
 `balred_A(A, B, C, k)` / `balred_B` / `balred_C` shipped for k-state
 balanced truncation; H∞ error bound `2·sum(HSV[k+1:n])`. `hsvd(A,
-B, C)` shipped (sqrt(eig(Wc · Wo)) sorted descending). The full
-4-return `[Ar, Br, Cr, hsv] = balreal/balred(...)` shapes need a
-multi-return splitter; `modred` (modal residualization), `minreal`,
-`sminreal`, and `reducespec` are follow-ons. Stable/unstable
-pre-split via `stabsep` is the gating piece for unstable plants.
+B, C)` shipped (sqrt(eig(Wc · Wo)) sorted descending). Model-object
+short forms `hsvd(sys)` and `balreal_T(sys)` route through
+Lowering.cpp's class-pinned-first-arg dispatch.
+`[num_r, den_r] = minreal(num, den, tol)` ✅ shipped for the tf
+form — cancels matching pole-zero pairs (Euclidean distance ≤ tol
+in the complex plane) and rebuilds the polynomials via
+`matlab_poly` on the surviving roots, preserving the original
+leading coefficient. The full 4-return `[Ar, Br, Cr, hsv] =
+balreal/balred(...)` shapes need a multi-return splitter on
+model-object call sites; `modred` (modal residualization),
+ss-form `minreal` (needs ctrbf/obsvf staircase), `sminreal`,
+and `reducespec` are follow-ons. Stable/unstable pre-split via
+`stabsep` is the gating piece for unstable plants.
 
 **Effort**: 2 weeks. `balred` is the bulk because the gramian path
 plus stable/unstable decomposition is a multi-piece pipeline.
@@ -785,7 +793,7 @@ matrix. Bookkeeping-heavy but no exotic primitives.
 
 **Effort**: 1 week.
 
-### 5.3 Time-delay handling 🔵
+### 5.3 Time-delay handling 🟡 (`pade(τ, n)` shipped)
 
 **Scope**:
 - Internal delay representation on `ss` / `tf` (the property exists at
@@ -797,12 +805,28 @@ matrix. Bookkeeping-heavy but no exotic primitives.
 - `thiran(τ, n)` — fractional-delay all-pass (signal-processing
   cousin).
 
+**Status**: matrix-arg `[num, den] = pade(τ, n)` shipped — closed-
+form [n/n] symmetric Padé via the coefficient recurrence
+`c_j = c_{j-1} · τ · (n − j + 1) / (j · (2n − j + 1))`. Numerator
+picks up alternating signs from the `-τs` substitution. The
+model-object `pade(sys, n)` shape (return a tf wrapping the
+approximation) is gated on class-returning short forms. Internal
+delay representation on the `ss` / `tf` classdefs (storing
+`InputDelay` / `OutputDelay` / `InternalDelay` properties and
+having `bode` / `step` / `freqresp` consume them), `absorbDelay`,
+`delayss`, and `thiran` are follow-ons.
+
 **Effort**: 1 week. `pade` is a closed-form Padé recurrence; the
 descriptor and delay-state machinery is the bulk.
 
-**Tier-4 closure status**: a user can build a MIMO plant from blocks,
-reduce it, design a controller, close the loop, and simulate — the
-full classical-and-modern control workflow.
+**Tier-4 closure status**: matrix-arg reduction surface ships
+(balreal_T / balred_{A,B,C} / hsvd / minreal for tf form + Padé
+time-delay approximation), plus model-object short forms
+`hsvd(sys)` and `balreal_T(sys)`. Multi-return on model-object
+call sites (`[Ar, Br, Cr, hsv] = balred(sys, k)`), `modred`,
+ss-form `minreal` (needs ctrbf/obsvf staircase), `sminreal`,
+internal-delay representation, `connect` / `sumblk` / `append` /
+`lft` / `blkdiag` MIMO assembly are isolated follow-ons.
 
 ---
 
