@@ -380,6 +380,23 @@ MATLAB Coder integration, Python coexecution.
 | Wavelets / Wigner-Ville / synchrosqueezed (`cwt`, `dwt`, `wvd`, `fsst`) | 🔵 | Tier-4 §5.4. |
 | `digitalFilter` / `designfilt` system object | 🔵 | Tier-4 §5.1 — needs Tier-1 IIR/FIR shipped first. |
 
+### Communications Toolbox — Tier-6 spreading + source coding (function-form)
+
+Per-toolbox roadmap in [`comm_toolbox_roadmap.md`](comm_toolbox_roadmap.md) §8. Spreading sequences (PN / Gold / Walsh-Hadamard) and source coding (uniform quantiser, μ-law / A-law companding, DPCM, Lloyd-Max codebook optimisation). System-Object variants (`comm.PNSequence`, `comm.GoldSequence`, `comm.KasamiSequence`) stay gated on the SO lowering fix. Hybrid ARQ (`comm.HybridARQ`) and ray-tracing-driven propagation (`propagationModel('raytracing')`) are explicit roadmap carve-outs. End-to-end demos under `examples/comm/` (`tier6_smoke.m`, `cdma_walsh_demo.m`).
+
+| Group | Function | Status | Notes |
+|---|---|:-:|---|
+| §8.1 PN | `pnSequence(poly_int, init_int, length, output_mode)` | ✅ shipped | LFSR (Fibonacci) generator. `poly_int` is the feedback polynomial as an integer mask with the implicit leading 1 (e.g. x⁴+x+1 → 0b10011 = 19); polynomial degree is the highest set bit. `output_mode` 0 = `{0, 1}` bits / 1 = `{−1, +1}` bipolar. Verified: poly = 19, length 30 produces an exact 15-period repetition. |
+| §8.1 Gold | `goldSequence(poly1, poly2, init1, init2, length, output_mode)` | ✅ shipped | XOR of two LFSR outputs. Caller supplies preferred-pair polynomials per the textbook (e.g. (19, 25) for degree-4). |
+| §8.1 Hadamard / Walsh | `hadamard(n)` (n × n Sylvester-form matrix; n snapped to next power of 2); `walshCode(n, k)` (1-based row index) | ✅ shipped | Standard recursive construction `H(2n) = [[H(n), H(n)]; [H(n), −H(n)]]`. Walsh codes (rows) are mutually orthogonal; verified in `cdma_walsh_demo.m` via `||A+B||² − ||A−B||² = 0`. Non-power-of-2 Hadamard orders (n = 12, 20, …) are not in scope. |
+| §8.1 Kasami | `comm.KasamiSequence` | 🔵 | Function-form follow-on; needs the m-sequence-decimation helper not yet shipped. |
+| §8.2 quantiz | `quantiz(sig, partition, codebook)` → integer index column; `quantizApply(idx, codebook)` → look-up | ✅ shipped | Caller supplies partition (M-1 sorted thresholds) and codebook (M entries). The split form matches the MATLAB `[indx, quant, dist] = quantiz(...)` triple via two calls (the distortion is `norm(sig - quantizApply(indx, codebook))^2`). |
+| §8.2 Lloyd-Max | `lloydsQuant(sig, init_codebook, max_iter, tol)` | ✅ shipped | Iterative codebook refinement: per iteration, midpoint-partition assignment + per-region mean update. Stops when `max(\|Δcodebook\|)` falls below `tol`. Verified: 4-level codebook on 2000 i.i.d. standard-normal samples shifts to the canonical optimal levels (≈ −1.51 / −0.45 / 0.45 / 1.51). |
+| §8.2 μ-law | `compandMu(x, mu, V, dir)` | ✅ shipped | G.711 μ-law: `dir = 0` compress / `dir = 1` expand. `V` is the peak amplitude. Round-trip is exact (norm of error 4e-16 at machine precision). |
+| §8.2 A-law | `compandA(x, A, V, dir)` | ✅ shipped | G.711 A-law with the canonical A = 87.6 default. |
+| §8.2 DPCM | `dpcmEncode(sig, partition, codebook)` / `dpcmDecode(idx, codebook)` | ✅ shipped | First-order predictor; residual is quantised through (partition, codebook) — caller designs both. The MATLAB-faithful `dpcmopt(sig, max_order, n_levels)` codebook-design helper is a 1-session follow-on. |
+| Closure tests | `examples/comm/cdma_walsh_demo.m` | ✅ shipped | Two-user Walsh-coded CDMA round-trip (length-8 chips, 15 dB AWGN). Walsh-code orthogonality verified via the norm identity; both users decode 0 symbol errors. |
+
 ### Communications Toolbox — Tier-5 OFDM / fading / MIMO (function-form)
 
 Per-toolbox roadmap in [`comm_toolbox_roadmap.md`](comm_toolbox_roadmap.md) §7. Function-form OFDM mod / demod, Rayleigh / Rician fading channels with Jakes-style Doppler, Alamouti 2-Tx space-time block coding, simple ML detector. System-Object variants (`comm.OFDMModulator`, `comm.OFDMDemodulator`, `comm.RayleighChannel`, `comm.RicianChannel`, `comm.OSTBCEncoder`, `comm.OSTBCCombiner`, `comm.SphereDecoder`) stay gated on the SO lowering fix. Runtime extends `runtime/runtime_comm.cpp`. End-to-end demos under `examples/comm/` (`tier5_smoke.m`, `ofdm_awgn.m`, `alamouti_diversity.m`).

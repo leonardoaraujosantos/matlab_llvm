@@ -311,6 +311,12 @@ void Resolver::registerBuiltins() {
     "ofdmmod", "ofdmdemod",
     "rayleighChannel", "ricianChannel",
     "ostbcEncode", "ostbcCombine", "mlDetect",
+    /* COMM Tier-6 — spreading + source coding
+     * (docs/comm_toolbox_roadmap.md §8). Function-form. */
+    "pnSequence", "goldSequence", "hadamard", "walshCode",
+    "quantiz", "quantizApply", "lloydsQuant",
+    "compandMu", "compandA",
+    "dpcmEncode", "dpcmDecode",
   }) {
     registerBuiltin(N);
   }

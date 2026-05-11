@@ -1251,24 +1251,36 @@ fading are follow-ons (need the complex-LU runtime).
 
 ## 8. Tier 6 — spreading, propagation, source coding (~3 weeks, stretch)
 
-### 8.1 Spreading sequences 🔵
+### 8.1 Spreading sequences ✅ shipped (function-form)
 
-- `comm.PNSequence` (LFSR-based PN).
-- `comm.GoldSequence` — Gold sequence generator.
-- `comm.KasamiSequence` — Kasami sequences.
-- `hadamard(n)` (already in core MATLAB; verify shipped) → Walsh
-  codes for orthogonal spreading.
+- `pnSequence(poly_int, init_int, length, output_mode)` — LFSR PN
+  generator. Polynomial passed as an integer mask (the implicit
+  leading 1 is the highest set bit). `output_mode` ∈ {0 = bits, 1 =
+  bipolar}.
+- `goldSequence(poly1, poly2, init1, init2, length, output_mode)` —
+  XOR of two preferred-pair PN streams.
+- `hadamard(n)` — Sylvester-form Hadamard matrix; `n` snaps up to
+  the next power of 2. `walshCode(n, k)` returns the k-th row (1-based).
+- `comm.KasamiSequence` — 🔵 deferred; needs the m-sequence-
+  decimation helper not yet shipped.
+- `comm.PNSequence` / `comm.GoldSequence` System Objects — gated on
+  SO fix.
 
-**Effort**: 1 week.
+### 8.2 Source coding ✅ shipped (function-form)
 
-### 8.2 Source coding 🔵
-
-- Quantization: `quantiz(sig, partition)` → codebook indices.
-- `lloyds(sig, codebook)` — Lloyd-Max optimization.
-- A-law / μ-law: `compand(x, mu, V, type)`, `lin2mu`, `mu2lin`.
-- `dpcmenco` / `dpcmdeco` / `dpcmopt` — DPCM.
-
-**Effort**: 1 week. All are short closed-form algorithms.
+- `quantiz(sig, partition, codebook)` returns the codebook indices
+  column; `quantizApply(idx, codebook)` looks up the codebook values.
+  Split form matches MATLAB's `[indx, quant] = quantiz(...)` triple.
+- `lloydsQuant(sig, init_codebook, max_iter, tol)` — iterative
+  midpoint-partition + per-region mean refinement; stops on
+  max-codebook-shift tolerance.
+- `compandMu(x, mu, V, dir)` / `compandA(x, A, V, dir)` — G.711
+  μ-law and A-law companders; `dir` 0 = compress, 1 = expand. Round-
+  trip is exact to machine precision.
+- `dpcmEncode(sig, partition, codebook)` / `dpcmDecode(idx, codebook)` —
+  DPCM with first-order predictor; caller designs the residual
+  partition/codebook. `dpcmopt` (codebook design) is a 1-session
+  follow-on.
 
 ### 8.3 Galois-field-based ARQ / hybrid ARQ — defer 🔴
 

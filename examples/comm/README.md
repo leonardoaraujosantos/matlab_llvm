@@ -23,6 +23,8 @@ bash runtime/build_and_run.sh examples/comm/<name>.m /tmp/<name>
 | `tier5_smoke.m` | 5 | One canonical call per Tier-5 entry: `ofdmmod` + `ofdmdemod` round-trip, `rayleighChannel` + `ricianChannel` multi-path channels (with two-tap delay / gain vectors), `ostbcEncode` Alamouti 2-Tx encoder, `mlDetect` per-symbol Euclidean ML decision against a 4-PSK alphabet. |
 | `ofdm_awgn.m` | 5 | Single-symbol OFDM loopback over AWGN at SNR = 15 dB: 64 QPSK subcarriers + CP = 16 → 0 errors after `ofdmdemod` + `mlDetect`. |
 | `alamouti_diversity.m` | 5 | **Tier-5 closure** — Alamouti 2-Tx encode → known scalar channel `(h1, h2)` + AWGN → maximum-ratio combine → `mlDetect`. At 10 dB SNR Alamouti reaches 0 errors vs the single-Tx baseline 0.0027 symerr (the combiner's coherent gain). |
+| `tier6_smoke.m` | 6 | One canonical call per Tier-6 entry: `pnSequence` (poly = 19, period 15), `goldSequence`, `hadamard(4)` Sylvester form, `walshCode(8, 3)`, uniform `quantiz` / `quantizApply`, `lloydsQuant` 4-level Gaussian codebook optimisation, μ-law and A-law round-trip, `dpcmEncode` / `dpcmDecode`. |
+| `cdma_walsh_demo.m` | 6 | **Tier-6 closure** — Two-user Walsh-coded CDMA round-trip at 15 dB SNR. Walsh-code orthogonality verified via `\|\|A+B\|\|² − \|\|A−B\|\|² = 0`; both users decode 0 symbol errors. |
 
 ## API conventions
 
@@ -88,3 +90,16 @@ To stay inside the single-return dispatch convention, `biterr(x, y)` returns jus
 | `rayleighChannel` length convention | Output length = `length(x) + max(delays_samples)` (per-path delays extend the output beyond the input). |
 | `ostbcCombine` channel gains | Pass real / imag components as four separate scalar args (no complex-scalar dispatch yet). Channel is assumed flat across the burst; for time-varying channels split the burst into coherence-time chunks. |
 | Complex outputs `size` / indexing | The `size`/`length` runtime entries read the real-matrix layout; on a `matlab_mat_c` result they return garbage. Take `abs(...)` first when you need shape introspection or scalar indexing on the magnitude. |
+
+### Tier-6 numeric tags
+
+| Tag | Values |
+|---|---|
+| `pnSequence` / `goldSequence` `poly_int` | Generator polynomial as an integer mask with the implicit leading 1 (highest set bit is the polynomial degree). e.g. x⁴+x+1 → 0b10011 = 19. |
+| `pnSequence` / `goldSequence` `output_mode` | 0 = `{0, 1}` bits, 1 = `{−1, +1}` bipolar |
+| `hadamard` `n` | Power of 2; non-power values snap up to the next power of 2. Non-power Hadamard orders (12, 20, …) are not in scope. |
+| `walshCode(n, k)` `k` | 1-based row index into the Hadamard matrix |
+| `compandMu` / `compandA` `dir` | 0 = compress, 1 = expand |
+| `compandMu` `mu` | Standard G.711 value is 255 |
+| `compandA` `A` | Standard G.711 value is 87.6 |
+| `compandMu` / `compandA` `V` | Peak amplitude (positive); the companders saturate at ±V |

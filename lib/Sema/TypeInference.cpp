@@ -1153,6 +1153,15 @@ const Type *TypeInference::visitBuiltinCall(std::string_view Name,
       Name == "mlDetect")
     return TC.arrayOf(Dtype::Double, Shape::unknown());
 
+  /* Tier-6 spreading + source coding. */
+  if (Name == "pnSequence" || Name == "goldSequence" ||
+      Name == "hadamard" || Name == "walshCode" ||
+      Name == "quantiz" || Name == "quantizApply" ||
+      Name == "lloydsQuant" ||
+      Name == "compandMu" || Name == "compandA" ||
+      Name == "dpcmEncode" || Name == "dpcmDecode")
+    return TC.arrayOf(Dtype::Double, Shape::unknown());
+
   if (Name == "linspace") {
     int64_t N = -1;
     if (Args.size() >= 3) N = foldInt(Args[2]);

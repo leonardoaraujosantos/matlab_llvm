@@ -2118,6 +2118,312 @@ matlab_mat_c *matlab_comm_ostbc_combine(matlab_mat_c *y,
     return out;
 }
 
+/* ===== Tier-6 — spreading sequences + source coding ====================== *
+ *
+ * docs/comm_toolbox_roadmap.md §8.  Function-form spreading
+ * (PN / Gold / Walsh-Hadamard) plus source-coding helpers (quantiz,
+ * Lloyd-Max, A-law / μ-law companding, DPCM).  System-Object forms
+ * (comm.PNSequence / GoldSequence / KasamiSequence) stay gated on
+ * the SO lowering fix.  Kasami + hybrid-ARQ stay deferred per the
+ * roadmap §8.3 carve-out. */
+
+/* ----- §8.1 Spreading sequences ---------------------------------------- *
+ *
+ * pnSequence(poly_int, init_int, length, output_mode)
+ *   poly_int    : LFSR feedback polynomial as an integer mask.  Each
+ *                 set bit selects a tap.  e.g. x^4 + x + 1 -> 0b10011
+ *                 = 19.  The polynomial degree is the highest set bit.
+ *   init_int    : initial state, lower (degree) bits.
+ *   length      : output sample count.
+ *   output_mode : 0 = {0, 1} bits, 1 = {-1, +1} bipolar.
+ *
+ * Returns a column of length samples.  Galois LFSR.
+ */
+matlab_mat *matlab_comm_pn_sequence(double poly_int_d, double init_int_d,
+                                     double length_d, double output_mode) {
+    int64_t N = (int64_t)length_d;
+    if (N < 1) N = 1;
+    uint64_t poly = (uint64_t)poly_int_d;
+    if (poly < 3) poly = 3;
+    int deg = 0;
+    {
+        uint64_t v = poly;
+        while (v) { v >>= 1; ++deg; }
+        --deg;
+        if (deg < 1) deg = 1;
+    }
+    uint64_t state = (uint64_t)init_int_d;
+    uint64_t state_mask = (deg >= 64) ? ~0ULL : ((1ULL << deg) - 1ULL);
+    state &= state_mask;
+    if (state == 0) state = 1;
+    /* Use the standard "Fibonacci" form: output the low bit, then
+     * shift right one and conditionally XOR the high taps (above the
+     * implicit leading 1). */
+    matlab_mat *out = mat_alloc(N, 1);
+    int mode = (int)output_mode;
+    for (int64_t i = 0; i < N; ++i) {
+        uint64_t bit = state & 1ULL;
+        out->data[i] = (mode == 1) ? (1.0 - 2.0 * (double)bit) : (double)bit;
+        state >>= 1;
+        if (bit) state ^= (poly >> 1);
+        state &= state_mask;
+    }
+    return out;
+}
+
+/* goldSequence(poly1, poly2, init1, init2, length, output_mode)
+ *   Two preferred-pair LFSRs whose outputs are XOR'd to give a Gold
+ *   sequence of length (2^n - 1) (or longer if the LFSRs are run
+ *   past one period).
+ */
+matlab_mat *matlab_comm_gold_sequence(double poly1_d, double poly2_d,
+                                       double init1_d, double init2_d,
+                                       double length_d, double output_mode) {
+    matlab_mat *a = matlab_comm_pn_sequence(poly1_d, init1_d, length_d, 0);
+    matlab_mat *b = matlab_comm_pn_sequence(poly2_d, init2_d, length_d, 0);
+    int64_t N = (int64_t)length_d;
+    if (N < 1) N = 1;
+    matlab_mat *out = mat_alloc(N, 1);
+    int mode = (int)output_mode;
+    for (int64_t i = 0; i < N; ++i) {
+        int bit = ((int)a->data[i] ^ (int)b->data[i]) & 1;
+        out->data[i] = (mode == 1) ? (1.0 - 2.0 * (double)bit) : (double)bit;
+    }
+    free(a->data); free(a);
+    free(b->data); free(b);
+    return out;
+}
+
+/* hadamard(n): n × n Sylvester-form Hadamard matrix (n a power of 2,
+ * with H(1) = [1] and H(2n) = [[H(n), H(n)]; [H(n), -H(n)]]).  Walsh
+ * codes are the rows of this matrix.  Other Hadamard orders (n = 12,
+ * 20, ...) are not in scope; pass n = 1, 2, 4, 8, ... */
+matlab_mat *matlab_comm_hadamard(double n_d) {
+    int n = (int)n_d;
+    if (n < 1) n = 1;
+    /* Snap to next power of 2. */
+    int p = 1;
+    while (p < n) p <<= 1;
+    n = p;
+    matlab_mat *H = mat_alloc(n, n);
+    H->data[0] = 1.0;
+    for (int sz = 1; sz < n; sz <<= 1) {
+        for (int i = 0; i < sz; ++i) {
+            for (int j = 0; j < sz; ++j) {
+                double v = H->data[i * n + j];
+                H->data[i * n + (sz + j)]      =  v;
+                H->data[(sz + i) * n + j]       =  v;
+                H->data[(sz + i) * n + (sz + j)] = -v;
+            }
+        }
+    }
+    return H;
+}
+
+/* walshCode(n, k): k-th row (1-based) of the n×n Hadamard matrix. */
+matlab_mat *matlab_comm_walsh_code(double n_d, double k_d) {
+    matlab_mat *H = matlab_comm_hadamard(n_d);
+    int n = (int)H->rows;
+    int k = (int)k_d - 1;
+    if (k < 0) k = 0;
+    if (k >= n) k = n - 1;
+    matlab_mat *out = mat_alloc(n, 1);
+    for (int j = 0; j < n; ++j) out->data[j] = H->data[k * n + j];
+    free(H->data); free(H);
+    return out;
+}
+
+/* ----- §8.2 Source coding ---------------------------------------------- *
+ *
+ * quantiz(sig, partition, codebook):
+ *   sig        : Nin × 1 real input
+ *   partition  : (M-1) thresholds (sorted ascending)
+ *   codebook   : M codebook entries (1 more than partitions)
+ *
+ * Returns an Nin x 1 column of *codebook indices* (0 .. M-1). For the
+ * quantised-signal companion, the caller looks up codebook[indices].
+ * (MATLAB returns [indx, quant, dist]; we ship the index lookup here
+ * and a `quantizApply(idx, codebook)` companion below.) */
+matlab_mat *matlab_comm_quantiz(matlab_mat *sig, matlab_mat *partition,
+                                 matlab_mat *codebook) {
+    if (!sig || !partition || !codebook) return mat_alloc(0, 0);
+    int64_t Nin = sig->rows * sig->cols;
+    int64_t Np = partition->rows * partition->cols;
+    matlab_mat *idx = mat_alloc(Nin, 1);
+    for (int64_t i = 0; i < Nin; ++i) {
+        double v = sig->data[i];
+        int64_t k = 0;
+        while (k < Np && v > partition->data[k]) ++k;
+        idx->data[i] = (double)k;
+    }
+    return idx;
+}
+
+/* quantizApply(idx, codebook): look up the codebook entries for the
+ * integer indices in idx. */
+matlab_mat *matlab_comm_quantiz_apply(matlab_mat *idx, matlab_mat *codebook) {
+    if (!idx || !codebook) return mat_alloc(0, 0);
+    int64_t N = idx->rows * idx->cols;
+    int64_t Mc = codebook->rows * codebook->cols;
+    matlab_mat *out = mat_alloc(N, 1);
+    for (int64_t i = 0; i < N; ++i) {
+        int64_t k = (int64_t)idx->data[i];
+        if (k < 0) k = 0;
+        if (k >= Mc) k = Mc - 1;
+        out->data[i] = codebook->data[k];
+    }
+    return out;
+}
+
+/* lloydsQuant(sig, initCodebook, max_iter, tol):
+ *   Iterative Lloyd-Max optimisation.  initCodebook is the M-element
+ *   starting codebook (sorted ascending).  Returns the optimised
+ *   codebook (M x 1) after at most max_iter sweeps. */
+matlab_mat *matlab_comm_lloyds_quant(matlab_mat *sig, matlab_mat *init_cb,
+                                      double max_iter, double tol_d) {
+    if (!sig || !init_cb) return mat_alloc(0, 0);
+    int M = (int)(init_cb->rows * init_cb->cols);
+    int64_t N = sig->rows * sig->cols;
+    if (M < 1 || N < 1) return mat_alloc(0, 0);
+    int iters = (int)max_iter;
+    if (iters < 1) iters = 30;
+    double tol = tol_d > 0.0 ? tol_d : 1e-6;
+    matlab_mat *cb = mat_alloc(M, 1);
+    for (int i = 0; i < M; ++i) cb->data[i] = init_cb->data[i];
+    std::vector<double> sum(M), cnt(M);
+    for (int it = 0; it < iters; ++it) {
+        /* Compute partitions = midpoints of adjacent codebook entries. */
+        for (int i = 0; i < M; ++i) { sum[i] = 0.0; cnt[i] = 0.0; }
+        for (int64_t k = 0; k < N; ++k) {
+            double v = sig->data[k];
+            int i = 0;
+            while (i < M - 1 && v > 0.5 * (cb->data[i] + cb->data[i + 1])) ++i;
+            sum[i] += v;
+            cnt[i] += 1.0;
+        }
+        double delta = 0.0;
+        for (int i = 0; i < M; ++i) {
+            double new_v = cnt[i] > 0.0 ? sum[i] / cnt[i] : cb->data[i];
+            double d = new_v - cb->data[i];
+            if (fabs(d) > delta) delta = fabs(d);
+            cb->data[i] = new_v;
+        }
+        if (delta < tol) break;
+    }
+    return cb;
+}
+
+/* μ-law companding (G.711).
+ *   compandMu(x, mu, V, dir):
+ *     dir = 0 -> compress (mu-law encode)
+ *     dir = 1 -> expand   (mu-law decode)
+ *   V = peak amplitude (positive).
+ *
+ * Compress: y = sign(x) · V · ln(1 + μ·|x|/V) / ln(1 + μ)
+ * Expand:   x = sign(y) · V · ((1 + μ)^(|y|/V) − 1) / μ
+ */
+matlab_mat *matlab_comm_compand_mu(matlab_mat *x, double mu_d, double V_d,
+                                    double dir_d) {
+    if (!x) return mat_alloc(0, 0);
+    int64_t N = x->rows * x->cols;
+    matlab_mat *y = mat_alloc(x->rows, x->cols);
+    double mu = mu_d > 0.0 ? mu_d : 255.0;
+    double V  = V_d  > 0.0 ? V_d  : 1.0;
+    int dir = (int)dir_d;
+    if (dir == 0) {
+        double denom = log(1.0 + mu);
+        for (int64_t i = 0; i < N; ++i) {
+            double v = x->data[i];
+            double s = v >= 0.0 ? 1.0 : -1.0;
+            y->data[i] = s * V * log(1.0 + mu * fabs(v) / V) / denom;
+        }
+    } else {
+        for (int64_t i = 0; i < N; ++i) {
+            double v = x->data[i];
+            double s = v >= 0.0 ? 1.0 : -1.0;
+            y->data[i] = s * V * (pow(1.0 + mu, fabs(v) / V) - 1.0) / mu;
+        }
+    }
+    return y;
+}
+
+/* A-law companding (G.711).
+ *   compandA(x, A, V, dir):  dir 0 compress / 1 expand.
+ */
+matlab_mat *matlab_comm_compand_a(matlab_mat *x, double A_d, double V_d,
+                                   double dir_d) {
+    if (!x) return mat_alloc(0, 0);
+    int64_t N = x->rows * x->cols;
+    matlab_mat *y = mat_alloc(x->rows, x->cols);
+    double A = A_d > 1.0 ? A_d : 87.6;
+    double V = V_d > 0.0 ? V_d : 1.0;
+    double thr = V / A;
+    double denom = 1.0 + log(A);
+    int dir = (int)dir_d;
+    for (int64_t i = 0; i < N; ++i) {
+        double v = x->data[i];
+        double s = v >= 0.0 ? 1.0 : -1.0;
+        double a = fabs(v);
+        if (dir == 0) {
+            double yv;
+            if (a < thr) yv = A * a / denom;
+            else         yv = V * (1.0 + log(A * a / V)) / denom;
+            y->data[i] = s * yv;
+        } else {
+            double xv;
+            double thr2 = V / denom;
+            if (a < thr2) xv = a * denom / A;
+            else          xv = V * exp(a * denom / V - 1.0) / A;
+            y->data[i] = s * xv;
+        }
+    }
+    return y;
+}
+
+/* dpcmEncode(sig, codebook, partition):
+ *   Differential PCM encoder. Predicts each sample as the previous
+ *   reconstructed sample (first-order predictor) and quantises the
+ *   prediction residual through (partition, codebook). Returns
+ *   the codebook-index column.
+ *
+ * dpcmDecode(idx, codebook): inverse — sums the reconstructed
+ * residuals to recover the (approximate) original signal.
+ */
+matlab_mat *matlab_comm_dpcm_encode(matlab_mat *sig, matlab_mat *partition,
+                                     matlab_mat *codebook) {
+    if (!sig || !partition || !codebook) return mat_alloc(0, 0);
+    int64_t N = sig->rows * sig->cols;
+    int64_t Np = partition->rows * partition->cols;
+    int64_t Mc = codebook->rows * codebook->cols;
+    if (Mc != Np + 1) return mat_alloc(0, 0);
+    matlab_mat *idx = mat_alloc(N, 1);
+    double recon = 0.0;
+    for (int64_t i = 0; i < N; ++i) {
+        double err = sig->data[i] - recon;
+        int64_t k = 0;
+        while (k < Np && err > partition->data[k]) ++k;
+        idx->data[i] = (double)k;
+        recon += codebook->data[k];
+    }
+    return idx;
+}
+
+matlab_mat *matlab_comm_dpcm_decode(matlab_mat *idx, matlab_mat *codebook) {
+    if (!idx || !codebook) return mat_alloc(0, 0);
+    int64_t N = idx->rows * idx->cols;
+    int64_t Mc = codebook->rows * codebook->cols;
+    matlab_mat *out = mat_alloc(N, 1);
+    double recon = 0.0;
+    for (int64_t i = 0; i < N; ++i) {
+        int64_t k = (int64_t)idx->data[i];
+        if (k < 0) k = 0;
+        if (k >= Mc) k = Mc - 1;
+        recon += codebook->data[k];
+        out->data[i] = recon;
+    }
+    return out;
+}
+
 /* mlDetect(y, alphabet): per-symbol ML decision against a complex
  * alphabet of M candidate constellation points. */
 matlab_mat *matlab_comm_ml_detect(matlab_mat_c *y, matlab_mat_c *alphabet) {

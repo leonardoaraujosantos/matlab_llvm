@@ -4490,6 +4490,21 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"ostbcEncode",  "matlab_comm_ostbc_encode",  1, "p"},
       {"ostbcCombine", "matlab_comm_ostbc_combine", 1, "pffff"},
       {"mlDetect",     "matlab_comm_ml_detect",     1, "pp"},
+      /* === Communications Toolbox Tier-6 — spreading + source coding ===
+       * docs/comm_toolbox_roadmap.md §8.  Function-form throughout. */
+      /* §8.1 spreading sequences. */
+      {"pnSequence",   "matlab_comm_pn_sequence",   1, "ffff"},
+      {"goldSequence", "matlab_comm_gold_sequence", 1, "ffffff"},
+      {"hadamard",     "matlab_comm_hadamard",      1, "f"},
+      {"walshCode",    "matlab_comm_walsh_code",    1, "ff"},
+      /* §8.2 source coding. */
+      {"quantiz",      "matlab_comm_quantiz",       1, "ppp"},
+      {"quantizApply", "matlab_comm_quantiz_apply", 1, "pp"},
+      {"lloydsQuant",  "matlab_comm_lloyds_quant",  1, "ppff"},
+      {"compandMu",    "matlab_comm_compand_mu",    1, "pfff"},
+      {"compandA",     "matlab_comm_compand_a",     1, "pfff"},
+      {"dpcmEncode",   "matlab_comm_dpcm_encode",   1, "ppp"},
+      {"dpcmDecode",   "matlab_comm_dpcm_decode",   1, "pp"},
     };
 
     // Pick the first entry with name + arity + TYPE match so overloaded
