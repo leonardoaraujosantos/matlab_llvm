@@ -1,10 +1,23 @@
 build/
+# Auxiliary CMake build trees produced by alternate configurations
+# (coverage, runtime-only, sym-enabled). Same artefacts as build/,
+# different layout; ignore the same way.
+build-*/
 *.o
 *.a
 .cache/
 compile_commands.json
 .DS_Store
 Testing/
+
+# Native binaries left in the repo root by ad-hoc compile commands.
+# The canonical artefacts live under build/; root-level copies are
+# transient (matlabc helper scripts, runtime-test-* runners, the
+# matlab-lsp executable, Clang's default.profraw coverage dump).
+/matlabc
+/matlab-lsp
+/runtime-test-*
+/default.profraw
 
 # Native binaries built from examples/*.m by the helper scripts.
 # Keep the .m sources and any markdown; drop the compiled artifacts.
