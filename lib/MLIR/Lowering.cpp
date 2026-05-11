@@ -5990,6 +5990,75 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
           return rebuildCall("isstable", {getProp(Obj, "A")}, F64);
         }
 
+        /* §4.4 — controllability / observability matrices on a
+         * model object. ctrb(sys) → ctrb(sys.A, sys.B);
+         * obsv(sys) → obsv(sys.A, sys.C). Returns a matlab_mat. */
+        if (Nm == "ctrb" && Cls0 && Cn0 == "ss") {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          return rebuildCall("ctrb",
+                             {getProp(Obj, "A"), getProp(Obj, "B")},
+                             PtrTy);
+        }
+        if (Nm == "obsv" && Cls0 && Cn0 == "ss") {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          return rebuildCall("obsv",
+                             {getProp(Obj, "A"), getProp(Obj, "C")},
+                             PtrTy);
+        }
+
+        /* gram(sys, 'c') / gram(sys, 'o') — controllability /
+         * observability gramian. Selects between gram_c and gram_o
+         * based on the second arg's char literal. */
+        if (Nm == "gram" && Cls0 && Cn0 == "ss" &&
+            C.Args.size() == 2 && C.Args[1]) {
+          const CharLiteral *CL =
+              dynamic_cast<const CharLiteral *>(C.Args[1]);
+          const StringLiteral *SL =
+              CL ? nullptr
+                 : dynamic_cast<const StringLiteral *>(C.Args[1]);
+          llvm::StringRef Tok = CL ? CL->Value : (SL ? SL->Value : "");
+          if (Tok == "c") {
+            mlir::Value Obj = loadObj(C.Args[0]);
+            return rebuildCall("gram_c",
+                               {getProp(Obj, "A"), getProp(Obj, "B")},
+                               PtrTy);
+          }
+          if (Tok == "o") {
+            mlir::Value Obj = loadObj(C.Args[0]);
+            return rebuildCall("gram_o",
+                               {getProp(Obj, "A"), getProp(Obj, "C")},
+                               PtrTy);
+          }
+        }
+
+        /* norm(sys) / norm(sys, 2) — H₂ system norm via the
+         * Lyapunov-derived formula sqrt(trace(C·Wc·C')). Returns
+         * a scalar f64. norm(sys, Inf) (H∞) is a follow-on. */
+        if (Nm == "norm" && Cls0 && Cn0 == "ss" &&
+            (C.Args.size() == 1 || C.Args.size() == 2)) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          return rebuildCall("norm_h2",
+                             {getProp(Obj, "A"), getProp(Obj, "B"),
+                              getProp(Obj, "C")},
+                             F64);
+        }
+
+        /* lqry(sys, Q, R) — output-weighted LQR. Routes to
+         * matlab_lqry_ss which does the C'QC / R+D'QD / C'QD algebra
+         * in C++ (cleaner than chaining matmul ops at the lowering
+         * site and gets scalar f64 args auto-boxed via the dispatch
+         * table's `lqry_ss` AutoBoxNames entry). */
+        if (Nm == "lqry" && Cls0 && Cn0 == "ss" && C.Args.size() == 3) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value Q = lowerExpr(*C.Args[1]);
+          mlir::Value R = lowerExpr(*C.Args[2]);
+          return rebuildCall("lqry_ss",
+                             {getProp(Obj, "A"), getProp(Obj, "B"),
+                              getProp(Obj, "C"), getProp(Obj, "D"),
+                              Q, R},
+                             PtrTy);
+        }
+
         /* c2d(sys, Ts), feedback(sys1, sys2), series(sys1, sys2),
          * parallel(sys1, sys2) — class-returning short forms.
          * Deferred: the result needs a class-pinned slot type so
@@ -6977,6 +7046,10 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             "impulse_ss", "initial_ss",
             "freqresp_ss", "freqresp_tf",
             "nyquist_ss", "nyquist_tf", "allmargin_ss",
+            /* Tier-3 follow-on builtins (acker = place; gram / norm
+             * short forms with char/scalar second arg; lqry =
+             * output-weighted LQR). */
+            "acker", "gram", "norm", "lqry",
             "find", "ind2sub", "linspace", "logspace",
             /* Complex: all return a matrix descriptor (matlab_mat* or
              * matlab_mat_c*), uniformly ptr at MLIR level. */

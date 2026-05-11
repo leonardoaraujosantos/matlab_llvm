@@ -150,6 +150,11 @@ void Resolver::registerBuiltins() {
     "impulse", "initial", "freqresp", "nyquist", "allmargin",
     "impulse_ss", "initial_ss", "freqresp_ss", "freqresp_tf",
     "nyquist_ss", "nyquist_tf", "allmargin_ss",
+    /* §4 follow-ons — Tier-3 leftovers. `acker` = SISO Ackermann
+     * (alias of place). `gram` / `norm` short forms select c/o
+     * gramian or H₂ / H∞ norm via a char/scalar second arg.
+     * `lqry` is output-weighted LQR. */
+    "acker", "gram", "norm", "lqry",
     "arrayfun", "cellfun",
     /* Initial-value ODE solvers — see runtime/matlab_runtime.cpp.
      * ode23s is the Rosenbrock stiff solver. pdepe is the 1-D

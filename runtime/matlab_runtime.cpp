@@ -3065,6 +3065,90 @@ matlab_mat *matlab_dare_5(matlab_mat *Ad, matlab_mat *Bd, matlab_mat *Q,
 }
 
 /*-------------------------------------------------------------------------
+ * 5-arg LQR with state-input cross term `lqr(A, B, Q, R, N)` solves
+ *   minimise  ∫ x'Q·x + 2·x'·N·u + u'·R·u  dt
+ * Optimal feedback K = R⁻¹·(N' + B'·X) where X is the stabilising
+ * solution of the 5-arg care. Same algebra for the discrete variant
+ * with K = (R + B'·X·B)⁻¹·(N' + B'·X·A) and the X from dare_5.
+ *
+ * Tier 3.1 of CST roadmap §4.1 — the cross-term form is the natural
+ * companion to the 5-arg care/dare already shipped, and lets users
+ * write `K = lqr(A, B, Q, R, N)` for non-orthogonal output weights.
+ *-------------------------------------------------------------------------*/
+matlab_mat *matlab_lqr_5(matlab_mat *A, matlab_mat *B, matlab_mat *Q,
+                         matlab_mat *R, matlab_mat *N) {
+    if (!A || !B || !Q || !R || !N) return mat_alloc(0, 0);
+    matlab_mat *X = matlab_care_5(A, B, Q, R, N);
+    if (!X || X->rows == 0) return mat_alloc(0, 0);
+    matlab_mat *Rinv = matlab_inv(R);
+    if (!Rinv || Rinv->rows == 0) return mat_alloc(0, 0);
+    matlab_mat *Nt = matlab_transpose(N);
+    matlab_mat *Bt = matlab_transpose(B);
+    matlab_mat *BtX = matlab_matmul_mm(Bt, X);
+    matlab_mat *NtPlusBtX = matlab_add_mm(Nt, BtX);
+    return matlab_matmul_mm(Rinv, NtPlusBtX);
+}
+
+/*-------------------------------------------------------------------------
+ * Output-weighted LQR — `K = lqry(sys, Q, R)`.
+ *
+ * Cost on outputs instead of states:
+ *   J = ∫ y'·Q·y + u'·R·u  dt
+ *     = ∫ (Cx + Du)'·Q·(Cx + Du) + u'·R·u  dt
+ *     = ∫ x'·C'QC·x  +  2·x'·C'QD·u  +  u'·(R + D'QD)·u  dt
+ * i.e. lqr_5(A, B, C'QC, R+D'QD, C'QD). For strictly-proper
+ * plants (D = 0) this collapses to lqr(A, B, C'·Q·C, R).
+ *
+ * Tier 3.1 of CST roadmap §4.1. The model-object form
+ * `K = lqry(sys, Q, R)` routes here via Lowering.cpp's
+ * class-pinned-first-arg dispatch.
+ *-------------------------------------------------------------------------*/
+/* Forward decls — matlab_lqr lives later in this TU. */
+extern "C" matlab_mat *matlab_lqr(matlab_mat *A, matlab_mat *B,
+                                   matlab_mat *Q, matlab_mat *R);
+
+matlab_mat *matlab_lqry_ss(matlab_mat *A, matlab_mat *B,
+                            matlab_mat *C, matlab_mat *D,
+                            matlab_mat *Q, matlab_mat *R) {
+    if (!A || !B || !C || !D || !Q || !R) return mat_alloc(0, 0);
+    matlab_mat *Ct  = matlab_transpose(C);
+    matlab_mat *CtQ = matlab_matmul_mm(Ct, Q);
+    matlab_mat *Qx  = matlab_matmul_mm(CtQ, C);
+    /* Detect non-zero D — if all zeros, take the strictly-proper
+     * branch (lqr 4-arg). Else fall back to lqr_5 with the cross
+     * term N = C'·Q·D and effective R + D'·Q·D. */
+    bool D_zero = true;
+    for (int64_t k = 0; k < D->rows * D->cols; ++k) {
+        if (D->data[k] != 0.0) { D_zero = false; break; }
+    }
+    if (D_zero) return matlab_lqr(A, B, Qx, R);
+    matlab_mat *Dt   = matlab_transpose(D);
+    matlab_mat *DtQ  = matlab_matmul_mm(Dt, Q);
+    matlab_mat *DtQD = matlab_matmul_mm(DtQ, D);
+    matlab_mat *Reff = matlab_add_mm(R, DtQD);
+    matlab_mat *N    = matlab_matmul_mm(CtQ, D);   /* C'·Q·D */
+    return matlab_lqr_5(A, B, Qx, Reff, N);
+}
+
+matlab_mat *matlab_dlqr_5(matlab_mat *Ad, matlab_mat *Bd, matlab_mat *Q,
+                          matlab_mat *R, matlab_mat *N) {
+    if (!Ad || !Bd || !Q || !R || !N) return mat_alloc(0, 0);
+    matlab_mat *X = matlab_dare_5(Ad, Bd, Q, R, N);
+    if (!X || X->rows == 0) return mat_alloc(0, 0);
+    /* K = (R + B'·X·B)⁻¹·(N' + B'·X·A). */
+    matlab_mat *Bt = matlab_transpose(Bd);
+    matlab_mat *BtX = matlab_matmul_mm(Bt, X);
+    matlab_mat *BtXB = matlab_matmul_mm(BtX, Bd);
+    matlab_mat *RplusBtXB = matlab_add_mm(R, BtXB);
+    matlab_mat *RplusBtXBinv = matlab_inv(RplusBtXB);
+    if (!RplusBtXBinv || RplusBtXBinv->rows == 0) return mat_alloc(0, 0);
+    matlab_mat *BtXA = matlab_matmul_mm(BtX, Ad);
+    matlab_mat *Nt = matlab_transpose(N);
+    matlab_mat *NtPlusBtXA = matlab_add_mm(Nt, BtXA);
+    return matlab_matmul_mm(RplusBtXBinv, NtPlusBtXA);
+}
+
+/*-------------------------------------------------------------------------
  * Continuous-to-discrete state-space conversion (zero-order hold).
  *
  *   [Ad, Bd] = c2d(A, B, Ts)

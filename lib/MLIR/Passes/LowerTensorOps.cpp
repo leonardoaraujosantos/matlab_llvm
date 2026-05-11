@@ -3907,9 +3907,19 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"idare",      "matlab_dare_5",     1, "ppppp"},
       {"lqr",        "matlab_lqr",        1, "pppp"},
       {"dlqr",       "matlab_dlqr",       1, "pppp"},
+      /* 5-arg cross-term LQR / DLQR. Wraps care_5 / dare_5 with the
+       * matching gain-extraction algebra. */
+      {"lqr",        "matlab_lqr_5",      1, "ppppp"},
+      {"dlqr",       "matlab_dlqr_5",     1, "ppppp"},
+      /* Output-weighted LQR. Model-object dispatch emits this. */
+      {"lqry_ss",    "matlab_lqry_ss",    1, "pppppp"},
       {"ctrb",       "matlab_ctrb",       1, "pp"},
       {"obsv",       "matlab_obsv",       1, "pp"},
       {"place",      "matlab_place",      1, "ppp"},
+      /* `acker(A, B, p)` — Ackermann's-formula pole placement. Same
+       * runtime entry as `place`; the difference is purely
+       * pedagogical (acker advertises SISO single-input). */
+      {"acker",      "matlab_place",      1, "ppp"},
       {"isstable",   "matlab_isstable",   0, "p"},
       {"damp",       "matlab_damp",       1, "p"},
       {"hsvd",       "matlab_hsvd",       1, "ppp"},
@@ -4214,7 +4224,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
         /* CST Tier 1.5 — algebraic Riccati. Same scalar-invocation rule. */
         "care", "dare", "icare", "idare",
         /* CST Tier 2 — LQR convenience wrappers; same scalar shape. */
-        "lqr", "dlqr",
+        "lqr", "dlqr", "lqry_ss",
         /* CST Tier 3 — controllability/observability/place + characterization. */
         "ctrb", "obsv", "place", "damp", "hsvd",
         /* CST Tier 4 — balancing for model reduction. */

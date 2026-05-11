@@ -586,18 +586,25 @@ State-space optimal control. Sits cleanly on Tier-1.4 / 1.5
 (Lyapunov / Riccati). Lights up the modern (post-1960s) control
 workflow.
 
-### 4.1 Linear-quadratic optimal control ✅ (1-return forms)
+### 4.1 Linear-quadratic optimal control ✅ (1-return, 3-return + 5-arg + lqry shipped)
 
 **Scope**:
 - `K = lqr(A, B, Q, R)` — continuous LQR. Calls `care` ✅ (1-return
-  shipped). `[K, S, P] = lqr(...)` 3-return form and 5-arg
-  `lqr(A, B, Q, R, N)` cross-term are follow-ons.
+  + 3-return `[K, S, P]` shipped).
+- `K = lqr(A, B, Q, R, N)` — 5-arg cross-term ✅ shipped via
+  `matlab_lqr_5` (wraps `care_5` + `K = R⁻¹·(N' + B'·X)` algebra).
 - `K = dlqr(Ad, Bd, Q, R)` — discrete. Calls `dare` ✅ (1-return
-  shipped).
-- `[K, S, e] = lqry(sys, Q, R)` — output-weighted (`Q_x = C'·Q·C`,
-  cross-term from `D`).
+  shipped). 5-arg `dlqr_5` ✅ shipped (`K = (R + B'XB)⁻¹·(N' + B'XA)`
+  algebra).
+- `[K, S, e] = lqry(sys, Q, R)` — output-weighted ✅ shipped via
+  `matlab_lqry_ss(A, B, C, D, Q, R)`. Strictly-proper branch
+  (D = 0) collapses to `lqr(A, B, C'·Q·C, R)`; the proper-plant
+  path uses `lqr_5` with cross term `N = C'·Q·D` and effective
+  `R_eff = R + D'·Q·D`. Model-object form `lqry(sys, Q, R)` routes
+  through Lowering.cpp.
 - `[K, S, e] = lqi(sys, Q, R)` — integral-action LQR (`A` augmented
-  with integrator state).
+  with integrator state). Follow-on (needs block matrix assembly
+  for `A_aug = [A, 0; -C, 0]`, `B_aug = [B; -D]`).
 
 **Effort**: 0.5 week (each is a thin wrapper over `care`/`dare`).
 
@@ -636,7 +643,9 @@ space + gain + Riccati) and `lqgreg` / `lqg` / `lqgtrack` /
 - `est = estim(sys, L, sensors, known)` — observer construction.
 
 **Status**: matrix-arg `place(A, B, P)` shipped — SISO via
-Ackermann's formula `K = [0…01]·ctrb⁻¹·α(A)`. Multi-input
+Ackermann's formula `K = [0…01]·ctrb⁻¹·α(A)`. `acker(A, B, P)`
+shipped as an alias of `place` (the call sites differ purely
+pedagogically — `acker` advertises SISO single-input). Multi-input
 Kautsky-Nichols-Van Dooren and the `estim` observer-construction
 helper are follow-ons.
 
@@ -658,8 +667,12 @@ assignment).
 **Status**: matrix-arg `ctrb(A, B)`, `obsv(A, C)`, `gram_c(A, B)`,
 `gram_o(A, C)` all shipped. The structural-rank pair (`ctrb` /
 `obsv`) and the energy-based pair (`gram_c` / `gram_o`) cover the
-practical surface. `ctrbf` / `obsvf` staircase decompositions and
-the model-object `gram(sys, 'c')` form are follow-ons.
+practical surface. Model-object short forms `ctrb(sys)`,
+`obsv(sys)`, `gram(sys, 'c'|'o')` ship via Lowering.cpp's
+class-pinned-first-arg dispatch (gram selects between gram_c and
+gram_o on the second arg's char/string literal). `ctrbf` / `obsvf`
+staircase decompositions are follow-ons (require QR-based
+controllability/observability reduction).
 
 **Effort**: 0.5 week.
 
@@ -676,9 +689,12 @@ the model-object `gram(sys, 'c')` form are follow-ons.
 
 **Status**: matrix-arg `norm_h2(A, B, C)` shipped — `sqrt(trace(C ·
 Wc · C'))` with `Wc = lyap(A, B B')`. Returns +Inf if A is not
-Hurwitz. The H∞ norm (Boyd-Balakrishnan-Kabamba γ-bisection on
+Hurwitz. Model-object short form `norm(sys)` / `norm(sys, 2)` for
+H₂ ships via Lowering.cpp's class-pinned-first-arg dispatch (the
+second arg is parsed but ignored for now — only the H₂ value is
+returned). The H∞ norm (Boyd-Balakrishnan-Kabamba γ-bisection on
 Hamiltonian eigenvalues, or Bruinsma-Steinbuch refinement) is a
-follow-on.
+follow-on, gating `norm(sys, Inf)` and `hinfnorm`.
 
 **Effort**: 1 week — H∞ is the bulk; H₂ is a Lyapunov solve.
 
@@ -702,9 +718,15 @@ follow-on.
 **Tier-3 closure status**: matrix-arg state-space optimal-control
 workflow is now end-to-end usable. Users can do `K = lqr(A, B, Q, R);
 L = kalman_L(A, G, C, Qn, Rn);` and assemble the LQG controller via
-explicit state-space algebra. The model-object `lqgreg` / `lqg` and
-the 3-return forms `[K, S, e] = lqr(...)` await §3.1 / multi-return
-splitter follow-ons.
+explicit state-space algebra. 3-return `[K, S, P] = lqr / dlqr`,
+5-arg cross-term `lqr / dlqr`, `lqry`, `acker` alias, plus
+model-object short forms `ctrb / obsv / gram / norm(_, 2) / lqry`
+all ship. The model-object `lqgreg` / `lqg` / `lqgtrack`, 4-return
+`[kest, L, P] = kalman(sys, Q, R)` (estimator-as-`ss`), `lqi`
+(integral-action LQR), multi-input `place` (Kautsky-Nichols),
+`estim`, `ctrbf` / `obsvf` staircase decompositions, H∞ norm,
+`stabsep` / `freqsep` / `loopsens` / `gangoffour` are isolated
+follow-ons.
 
 ---
 

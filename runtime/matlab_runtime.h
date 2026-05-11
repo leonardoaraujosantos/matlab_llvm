@@ -192,6 +192,23 @@ matlab_mat *matlab_care(matlab_mat *A, matlab_mat *B,
 matlab_mat *matlab_lqr(matlab_mat *A, matlab_mat *B,
                        matlab_mat *Q, matlab_mat *R);
 
+/* 5-arg LQR with state-input cross term. Solves
+ *   J = ∫ x'·Q·x + 2·x'·N·u + u'·R·u dt
+ * via care_5(A, B, Q, R, N) → X then K = R⁻¹·(N' + B'·X). The
+ * discrete dlqr_5 uses dare_5 and the corresponding gain formula. */
+matlab_mat *matlab_lqr_5 (matlab_mat *A,  matlab_mat *B,
+                          matlab_mat *Q,  matlab_mat *R, matlab_mat *N);
+matlab_mat *matlab_dlqr_5(matlab_mat *Ad, matlab_mat *Bd,
+                          matlab_mat *Q,  matlab_mat *R, matlab_mat *N);
+
+/* Output-weighted LQR (continuous): `K = lqry(sys, Q, R)`. Cost on
+ * outputs (y'·Q·y instead of x'·Q·x). Strictly-proper branch
+ * (D = 0) collapses to lqr(A, B, C'·Q·C, R); the D ≠ 0 path uses
+ * lqr_5 with the cross-term N = C'·Q·D and effective R + D'·Q·D. */
+matlab_mat *matlab_lqry_ss(matlab_mat *A, matlab_mat *B,
+                            matlab_mat *C, matlab_mat *D,
+                            matlab_mat *Q, matlab_mat *R);
+
 /* Discrete algebraic Riccati equation.
  *   X = dare(Ad, Bd, Q, R) solves
  *      A' X A - X - A' X B (R + B' X B)^{-1} B' X A + Q = 0
