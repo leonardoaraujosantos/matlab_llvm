@@ -2829,6 +2829,13 @@ void *monitorMain(void *) {
             Body["hitBreakpointIds"] = std::move(Ids);
           }
         }
+#ifdef MATLAB_LLVM_WITH_PLOT
+        /* Flush any figure the JIT created between the previous
+         * resume and this re-pause — a script that does plot(x,y)
+         * between two breakpoints should land the figure in the
+         * Plots panel at the second stop, not at thread exit. */
+        matlab_ide_emit_all_figures();
+#endif
         sendEvent("stopped", Value(std::move(Body)));
         pthread_mutex_lock(&G.Mu);
         /* Mark the stop as delivered so any step handler that's
@@ -4670,6 +4677,17 @@ bool handleRequest(const Object &Msg) {
                        : (std::string(EvalName) + " = (" + Expr + ");");
     std::string DiagText;
     int Rc = runReplInput(sharedDapContext(), Src, NextEvalId++, &DiagText);
+
+#ifdef MATLAB_LLVM_WITH_PLOT
+    /* Flush any figure the eval just created — without this the
+     * figure stays parked in the per-thread Figure registry until
+     * the JIT worker thread exits at session teardown, so the IDE's
+     * Plots panel stays empty for the duration of the debug session.
+     * Runs on both success and error paths (a partial eval that
+     * managed to plot before failing still flushes); the runtime
+     * self-gates on MATLAB_LLVM_IDE_FIGURES and fflushes stdout. */
+    matlab_ide_emit_all_figures();
+#endif
 
     /* Read the result before any restoration so we can format it. The
      * REPL path skips this entirely — its "result" is whatever the user's
