@@ -1125,6 +1125,16 @@ const Type *TypeInference::visitBuiltinCall(std::string_view Name,
       Name == "scatterplot")
     return TC.arrayOf(Dtype::Double, Shape::unknown());
 
+  /* Tier-3 channel coding (docs/comm_toolbox_roadmap.md §5). */
+  if (Name == "crcCheck" || Name == "oct2dec")
+    return TC.scalar(Dtype::Double);
+  if (Name == "crcGenerate" || Name == "crcStrip" ||
+      Name == "convenc" || Name == "vitdec" ||
+      Name == "hammgenParity" ||
+      Name == "hammingEncode" || Name == "hammingDecode" ||
+      Name == "intrlv" || Name == "deintrlv")
+    return TC.arrayOf(Dtype::Double, Shape::unknown());
+
   if (Name == "linspace") {
     int64_t N = -1;
     if (Args.size() >= 3) N = foldInt(Args[2]);

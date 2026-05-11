@@ -293,6 +293,13 @@ void Resolver::registerBuiltins() {
     "rcosdesign", "gaussdesign",
     "berawgn", "scatterplot",
     "qfunc", "erfc",
+    /* COMM Tier-3 — channel coding (docs/comm_toolbox_roadmap.md §5).
+     * Function-form CRC + convolutional + Hamming + interleavers.
+     * BCH / RS / gf + LDPC / Turbo / Polar are deferred. */
+    "crcGenerate", "crcCheck", "crcStrip",
+    "poly2trellis", "convenc", "vitdec", "oct2dec",
+    "hammgenParity", "hammingEncode", "hammingDecode",
+    "intrlv", "deintrlv",
   }) {
     registerBuiltin(N);
   }

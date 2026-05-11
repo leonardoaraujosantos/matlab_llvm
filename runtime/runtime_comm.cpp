@@ -1029,4 +1029,464 @@ matlab_mat *matlab_comm_scatterplot(matlab_mat_c *x) {
     return out;
 }
 
+/* ===== Tier-3 channel coding (function-form) ============================ *
+ *
+ * docs/comm_toolbox_roadmap.md §5.  The CRC System Object form
+ * (comm.CRCGenerator / comm.CRCDetector) is still gated on the
+ * SO lowering fix, but the bare-function CRC interface is shipped
+ * here.  poly2trellis / convenc / vitdec, Hamming, and the block
+ * interleavers are function-form by default; they land regardless.
+ *
+ * BCH / Reed-Solomon and the gf(2^m) descriptor are deliberately
+ * deferred — they need a new typed runtime descriptor, ~2 wk on its
+ * own.  LDPC / Turbo / Polar stay carved-out per the roadmap §5.4.
+ */
+
+/* CRC bit-shift-register over the bit stream.  `poly_bits` is the
+ * column vector representation of the generator polynomial of
+ * length `n+1` (so a degree-16 CRC has 17 bits, MSB first), with
+ * a leading 1.  We pass `poly_int` instead — the user passes the
+ * polynomial as a non-negative integer whose binary representation
+ * starts at the implicit leading 1; e.g. CRC-16-CCITT 0x1021 stays
+ * 0x1021 and `nbits` is 16.
+ *
+ * To avoid string args we expose two siblings:
+ *   crcGenerate(bits, poly_int, nbits) -> bits with CRC appended
+ *   crcCheck   (bits, poly_int, nbits) -> 0 if CRC matches, 1 otherwise
+ *   crcStrip   (bits, nbits)           -> bits[1:end-nbits] convenience
+ */
+
+static uint64_t crc_remainder(const matlab_mat *bits, int64_t N,
+                               uint64_t poly, int nbits) {
+    if (nbits < 1) nbits = 1;
+    if (nbits > 63) nbits = 63;
+    uint64_t mask = (nbits >= 64) ? ~0ULL : ((1ULL << nbits) - 1ULL);
+    uint64_t rem = 0;
+    for (int64_t k = 0; k < N; ++k) {
+        uint64_t b = ((uint64_t)bits->data[k]) & 1ULL;
+        uint64_t top = (rem >> (nbits - 1)) & 1ULL;
+        rem = ((rem << 1) | b) & mask;
+        if (top) rem ^= poly;
+    }
+    /* Pad with `nbits` trailing zeros to flush the register. */
+    for (int i = 0; i < nbits; ++i) {
+        uint64_t top = (rem >> (nbits - 1)) & 1ULL;
+        rem = (rem << 1) & mask;
+        if (top) rem ^= poly;
+    }
+    return rem;
+}
+
+matlab_mat *matlab_comm_crc_generate(matlab_mat *bits, double poly_int_d,
+                                      double nbits_d) {
+    if (!bits) return mat_alloc(0, 0);
+    int64_t N = bits->rows * bits->cols;
+    uint64_t poly = (uint64_t)poly_int_d;
+    int nbits = (int)nbits_d;
+    if (nbits < 1) nbits = 1; if (nbits > 63) nbits = 63;
+    uint64_t rem = crc_remainder(bits, N, poly, nbits);
+    matlab_mat *out = mat_alloc(N + nbits, 1);
+    for (int64_t k = 0; k < N; ++k) out->data[k] = bits->data[k];
+    for (int i = 0; i < nbits; ++i) {
+        uint64_t b = (rem >> (nbits - 1 - i)) & 1ULL;
+        out->data[N + i] = (double)b;
+    }
+    return out;
+}
+
+/* crcCheck — returns 0 if the trailing nbits CRC bits of `bits` match
+ * the recomputed CRC over the leading payload; 1 otherwise.  Operates
+ * over the full received stream including the appended CRC. */
+double matlab_comm_crc_check(matlab_mat *bits, double poly_int_d,
+                              double nbits_d) {
+    if (!bits) return 1.0;
+    int64_t N = bits->rows * bits->cols;
+    int nbits = (int)nbits_d;
+    if (nbits < 1) nbits = 1; if (nbits > 63) nbits = 63;
+    if (N <= nbits) return 1.0;
+    uint64_t poly = (uint64_t)poly_int_d;
+    /* Recompute the CRC over the payload portion. */
+    matlab_mat payload = *bits;
+    payload.rows = N - nbits;
+    payload.cols = 1;
+    uint64_t rem = crc_remainder(&payload, N - nbits, poly, nbits);
+    uint64_t received = 0;
+    for (int i = 0; i < nbits; ++i) {
+        uint64_t b = ((uint64_t)bits->data[N - nbits + i]) & 1ULL;
+        received = (received << 1) | b;
+    }
+    return rem == received ? 0.0 : 1.0;
+}
+
+/* crcStrip(bits, nbits) — payload-only view (a fresh allocation;
+ * we don't slice in place). */
+matlab_mat *matlab_comm_crc_strip(matlab_mat *bits, double nbits_d) {
+    if (!bits) return mat_alloc(0, 0);
+    int64_t N = bits->rows * bits->cols;
+    int nbits = (int)nbits_d;
+    if (nbits < 0) nbits = 0;
+    if (N <= nbits) return mat_alloc(0, 0);
+    matlab_mat *out = mat_alloc(N - nbits, 1);
+    for (int64_t k = 0; k < N - nbits; ++k) out->data[k] = bits->data[k];
+    return out;
+}
+
+/* ===== §5.2 convolutional codes — poly2trellis / convenc / vitdec ======== *
+ *
+ * poly2trellis(K, gens) builds the trellis struct for a rate 1/n
+ * non-recursive convolutional encoder with constraint length K and
+ * generator polynomials `gens` (a 1×n row vector of integers — user
+ * supplies them in decimal form; the canonical octal notation is up
+ * to them to convert with `oct2dec` for now).
+ *
+ * Returned struct fields:
+ *   numInputSymbols  = 2
+ *   numOutputSymbols = 2^n
+ *   numStates        = 2^(K-1)
+ *   nextStates       (numStates × 2 matrix, next state per input bit)
+ *   outputs          (numStates × 2 matrix, output integer per input bit)
+ */
+
+extern matlab_struct *matlab_struct_new(void);
+extern void matlab_struct_set_f64(matlab_struct *s, const char *name,
+                                   int64_t len, double v);
+extern void matlab_struct_set_mat(matlab_struct *s, const char *name,
+                                   int64_t len, matlab_mat *m);
+
+/* Compute the encoded output bit (parity over (state || input) bits
+ * gated by the generator polynomial mask).  `state_in` is the (K-1)
+ * lower bits; `input` is the new bit shifted in at the top. */
+static int conv_output_bit(uint64_t poly_mask, int K,
+                            uint64_t state_in, int input) {
+    uint64_t reg = (state_in << 1) | ((uint64_t)input & 1ULL);
+    (void)K;
+    uint64_t masked = reg & poly_mask;
+    int parity = 0;
+    while (masked) { parity ^= (int)(masked & 1ULL); masked >>= 1; }
+    return parity;
+}
+
+matlab_struct *matlab_comm_poly2trellis(double Kd, matlab_mat *gens) {
+    int K = (int)Kd;
+    if (K < 2) K = 2;
+    if (K > 30) K = 30;
+    int n = gens ? (int)(gens->rows * gens->cols) : 1;
+    if (n < 1) n = 1;
+    if (n > 8) n = 8;
+    int64_t S = 1LL << (K - 1);
+    matlab_mat *nextStates = mat_alloc(S, 2);
+    matlab_mat *outputs    = mat_alloc(S, 2);
+    /* For each (state, input), shift register on the LEFT (MSB):
+     *   reg = (input << (K-1)) | state, except convention varies; we
+     * follow MATLAB's: state bits are the (K-1) MOST-RECENT inputs
+     * with the newest at the MSB; the encoder receives a new bit and
+     * outputs n bits in the order gens[0], gens[1], ... .
+     * Specifically: reg_in = ((state << 1) | input) but the parity
+     * computation only uses the lowest K bits of the polynomial
+     * relative to the register's K bits — gens[i] is interpreted as
+     * a K-bit mask with the leading 1 at bit K-1. */
+    for (int64_t s = 0; s < S; ++s) {
+        for (int u = 0; u <= 1; ++u) {
+            /* Next-state is the new register with the oldest bit dropped. */
+            uint64_t reg = (((uint64_t)s) << 1) | (uint64_t)u;
+            int64_t ns = (int64_t)(reg & (uint64_t)(S - 1));
+            nextStates->data[s * 2 + u] = (double)ns;
+            /* Compute output integer: gens[i] -> bit i. */
+            int out_int = 0;
+            for (int i = 0; i < n; ++i) {
+                uint64_t poly = (uint64_t)gens->data[i];
+                int bit = conv_output_bit(poly, K, (uint64_t)s, u);
+                out_int |= (bit << (n - 1 - i));
+            }
+            outputs->data[s * 2 + u] = (double)out_int;
+        }
+    }
+    matlab_struct *t = matlab_struct_new();
+    matlab_struct_set_f64(t, "numInputSymbols",  15, 2.0);
+    matlab_struct_set_f64(t, "numOutputSymbols", 16, (double)(1 << n));
+    matlab_struct_set_f64(t, "numStates",         9, (double)S);
+    matlab_struct_set_f64(t, "K",                 1, (double)K);
+    matlab_struct_set_f64(t, "n",                 1, (double)n);
+    matlab_struct_set_mat(t, "nextStates",       10, nextStates);
+    matlab_struct_set_mat(t, "outputs",           7, outputs);
+    return t;
+}
+
+/* matlab_struct_get_* are exported from matlab_runtime.cpp. */
+extern double matlab_struct_get_f64(matlab_struct *s, const char *name, int64_t len);
+extern matlab_mat *matlab_struct_get_mat(matlab_struct *s, const char *name, int64_t len);
+
+/* convenc(msg, trellis) — straight state-machine encoder.  `msg` is a
+ * column of message bits; output is `n * length(msg)` bits. */
+matlab_mat *matlab_comm_convenc(matlab_mat *msg, matlab_struct *trellis) {
+    if (!msg || !trellis) return mat_alloc(0, 0);
+    int n = (int)matlab_struct_get_f64(trellis, "n", 1);
+    int64_t S = (int64_t)matlab_struct_get_f64(trellis, "numStates", 9);
+    matlab_mat *outputs    = matlab_struct_get_mat(trellis, "outputs",      7);
+    matlab_mat *nextStates = matlab_struct_get_mat(trellis, "nextStates", 10);
+    if (!outputs || !nextStates || n < 1) return mat_alloc(0, 0);
+    int64_t L = msg->rows * msg->cols;
+    matlab_mat *out = mat_alloc(L * n, 1);
+    int64_t state = 0;
+    for (int64_t k = 0; k < L; ++k) {
+        int u = ((int)msg->data[k]) & 1;
+        int out_int = (int)outputs->data[state * 2 + u];
+        for (int i = 0; i < n; ++i)
+            out->data[k * n + i] = (double)((out_int >> (n - 1 - i)) & 1);
+        state = (int64_t)nextStates->data[state * 2 + u];
+        if (state < 0 || state >= S) state = 0;
+    }
+    return out;
+}
+
+/* vitdec(code, trellis, tblen, opmode, dectype) — hard-decision Viterbi.
+ *   tblen   : traceback depth (typical 5K)
+ *   opmode  : 0 trunc, 1 term (assume known final-state 0), 2 cont (defer)
+ *   dectype : 0 unquant (== hard for {0,1} inputs), 1 hard
+ *
+ * Walks the trellis forward computing the cumulative Hamming distance
+ * to each state, stores predecessor + input-bit decisions, then
+ * tracebacks from the best terminal state.
+ */
+matlab_mat *matlab_comm_vitdec(matlab_mat *code, matlab_struct *trellis,
+                                double tblen_d, double opmode_d, double dectype_d) {
+    (void)dectype_d;     /* hard-decision only for the MVP slice */
+    if (!code || !trellis) return mat_alloc(0, 0);
+    int n = (int)matlab_struct_get_f64(trellis, "n", 1);
+    int64_t S = (int64_t)matlab_struct_get_f64(trellis, "numStates", 9);
+    matlab_mat *outputs    = matlab_struct_get_mat(trellis, "outputs",      7);
+    matlab_mat *nextStates = matlab_struct_get_mat(trellis, "nextStates", 10);
+    if (!outputs || !nextStates || n < 1 || S < 1) return mat_alloc(0, 0);
+    int64_t total = code->rows * code->cols;
+    int64_t T = total / n;
+    if (T < 1) return mat_alloc(0, 0);
+    int opmode = (int)opmode_d;
+    (void)tblen_d;
+
+    /* Build the reverse-edge table: incoming[s] gives the (prev_state,
+     * input_bit) pairs that reach state s.  For rate 1/n binary
+     * convolutional codes there are always exactly 2 incoming edges
+     * per state — we materialise that pair table once. */
+    std::vector<int64_t> in_prev(S * 2, -1);
+    std::vector<int>     in_bit (S * 2, 0);
+    std::vector<int>     in_out (S * 2, 0);
+    std::vector<int>     n_in   (S, 0);
+    for (int64_t ps = 0; ps < S; ++ps) {
+        for (int u = 0; u <= 1; ++u) {
+            int64_t ns = (int64_t)nextStates->data[ps * 2 + u];
+            if (ns < 0 || ns >= S) continue;
+            int slot = n_in[ns]++;
+            if (slot >= 2) continue;
+            in_prev[ns * 2 + slot] = ps;
+            in_bit [ns * 2 + slot] = u;
+            in_out [ns * 2 + slot] = (int)outputs->data[ps * 2 + u];
+        }
+    }
+
+    const double INF = 1e18;
+    std::vector<double> pm(S, INF);
+    std::vector<double> pm_next(S, INF);
+    std::vector<int8_t> bit_dec(T * S, 0);
+    std::vector<int32_t> prev_dec(T * S, 0);
+    pm[0] = 0.0;
+
+    for (int64_t t = 0; t < T; ++t) {
+        /* Decode the received n-tuple into an integer. */
+        int rx_int = 0;
+        for (int i = 0; i < n; ++i) {
+            int b = ((int)code->data[t * n + i]) & 1;
+            rx_int |= (b << (n - 1 - i));
+        }
+        for (int64_t s = 0; s < S; ++s) {
+            double best = INF;
+            int best_bit = 0;
+            int64_t best_prev = 0;
+            for (int slot = 0; slot < n_in[s] && slot < 2; ++slot) {
+                int64_t ps = in_prev[s * 2 + slot];
+                if (ps < 0) continue;
+                int u  = in_bit[s * 2 + slot];
+                int oi = in_out[s * 2 + slot];
+                int diff = rx_int ^ oi;
+                int hamming = 0;
+                while (diff) { hamming += diff & 1; diff >>= 1; }
+                double cand = pm[ps] + (double)hamming;
+                if (cand < best) {
+                    best = cand;
+                    best_bit = u;
+                    best_prev = ps;
+                }
+            }
+            pm_next[s] = best;
+            bit_dec [t * S + s] = (int8_t)best_bit;
+            prev_dec[t * S + s] = (int32_t)best_prev;
+        }
+        std::swap(pm, pm_next);
+        for (int64_t s = 0; s < S; ++s) pm_next[s] = INF;
+    }
+
+    /* Terminal state: opmode==1 (term) -> state 0; otherwise -> argmin pm. */
+    int64_t end = 0;
+    if (opmode != 1) {
+        double best = pm[0];
+        for (int64_t s = 1; s < S; ++s) {
+            if (pm[s] < best) { best = pm[s]; end = s; }
+        }
+    }
+    /* Traceback. */
+    matlab_mat *msg = mat_alloc(T, 1);
+    int64_t state = end;
+    for (int64_t t = T - 1; t >= 0; --t) {
+        msg->data[t] = (double)bit_dec[t * S + state];
+        state = (int64_t)prev_dec[t * S + state];
+    }
+    return msg;
+}
+
+/* oct2dec(octal_int) - convert a MATLAB-style octal-encoded decimal
+ * integer (e.g. 171 representing octal o171) to its decimal value
+ * (121).  Bridge for poly2trellis users who copy generator polys
+ * straight from textbook octal notation. */
+double matlab_comm_oct2dec_s(double v) {
+    int64_t x = (int64_t)v;
+    int64_t out = 0;
+    int64_t mult = 1;
+    while (x > 0) {
+        int64_t d = x % 10;
+        out += d * mult;
+        mult *= 8;
+        x /= 10;
+    }
+    return (double)out;
+}
+
+/* ===== §5.3 Hamming codes (binary, n = 2^m - 1) ========================== */
+
+/* hammgen(m): returns the [m × n] parity-check matrix H whose columns
+ * are the binary expansions of 1..n.  Caller-side, the companion
+ * generator matrix G is the systematic form derivable from H —
+ * `hammingGen(m)` returns G separately (so we can fit a single matrix
+ * per call into the dispatch). */
+matlab_mat *matlab_comm_hammgen_parity(double md) {
+    int m = (int)md;
+    if (m < 2) m = 2;
+    if (m > 12) m = 12;
+    int n = (1 << m) - 1;
+    matlab_mat *H = mat_alloc(m, n);
+    /* Columns are the binary expansions of 1..n, MSB at row 0. */
+    for (int c = 0; c < n; ++c) {
+        int v = c + 1;
+        for (int r = 0; r < m; ++r) {
+            H->data[r * n + c] = (double)((v >> (m - 1 - r)) & 1);
+        }
+    }
+    return H;
+}
+
+/* hammingEncode(msg, m): straightforward systematic Hamming.  msg is
+ * a column of k = (2^m - m - 1) bits per code word; we encode in
+ * blocks.  The systematic encoding places message bits at non-
+ * power-of-two column positions; parity bits at positions 1, 2, 4,
+ * 8, ..., 2^(m-1).
+ *
+ * For simplicity we exhibit a single-block (no length padding) form
+ * that requires `length(msg) == k`.  Callers can batch outside. */
+matlab_mat *matlab_comm_hamming_encode(matlab_mat *msg, double md) {
+    int m = (int)md;
+    if (m < 2) m = 2; if (m > 12) m = 12;
+    int n = (1 << m) - 1;
+    int k = n - m;
+    if (!msg || msg->rows * msg->cols != k) return mat_alloc(0, 0);
+    matlab_mat *code = mat_alloc(n, 1);
+    int msg_idx = 0;
+    /* Pre-place message bits. */
+    for (int pos = 1; pos <= n; ++pos) {
+        if ((pos & (pos - 1)) == 0) continue;     /* skip parity positions */
+        code->data[pos - 1] = msg->data[msg_idx++];
+    }
+    /* Compute parity bits at positions 1, 2, 4, ..., 2^(m-1). */
+    for (int p = 0; p < m; ++p) {
+        int pos = 1 << p;
+        int parity = 0;
+        for (int j = 1; j <= n; ++j) {
+            if (j == pos) continue;
+            if ((j & pos) == 0) continue;
+            parity ^= (int)code->data[j - 1] & 1;
+        }
+        code->data[pos - 1] = (double)parity;
+    }
+    return code;
+}
+
+/* hammingDecode(code, m): syndrome-based single-error correction.
+ * Returns the k = n - m message bits (extracted from non-power-of-two
+ * positions after correcting any single-bit error). */
+matlab_mat *matlab_comm_hamming_decode(matlab_mat *code, double md) {
+    int m = (int)md;
+    if (m < 2) m = 2; if (m > 12) m = 12;
+    int n = (1 << m) - 1;
+    int k = n - m;
+    if (!code || code->rows * code->cols != n) return mat_alloc(0, 0);
+    /* Compute syndrome. */
+    matlab_mat *work = mat_alloc(n, 1);
+    for (int i = 0; i < n; ++i) work->data[i] = code->data[i];
+    int syndrome = 0;
+    for (int p = 0; p < m; ++p) {
+        int pos = 1 << p;
+        int parity = 0;
+        for (int j = 1; j <= n; ++j) {
+            if ((j & pos) == 0) continue;
+            parity ^= (int)work->data[j - 1] & 1;
+        }
+        if (parity) syndrome |= pos;
+    }
+    /* Correct the bit at position `syndrome` if non-zero. */
+    if (syndrome >= 1 && syndrome <= n) {
+        work->data[syndrome - 1] = (double)(1 - (int)work->data[syndrome - 1]);
+    }
+    /* Extract message bits. */
+    matlab_mat *msg = mat_alloc(k, 1);
+    int msg_idx = 0;
+    for (int pos = 1; pos <= n; ++pos) {
+        if ((pos & (pos - 1)) == 0) continue;
+        msg->data[msg_idx++] = work->data[pos - 1];
+    }
+    free(work->data); free(work);
+    return msg;
+}
+
+/* ===== §5.5 Block interleavers ==========================================
+ *
+ * intrlv(data, perm) — reorder data per the permutation vector.  perm
+ * is a length-N column of 1-based indices that says "row i of the
+ * output is row perm(i) of the input".  deintrlv is the inverse.
+ * Both data and perm are matlab_mat (real); the data type stays f64
+ * so callers can use the same routine for bit / symbol streams. */
+matlab_mat *matlab_comm_intrlv(matlab_mat *data, matlab_mat *perm) {
+    if (!data || !perm) return mat_alloc(0, 0);
+    int64_t N = data->rows * data->cols;
+    int64_t Np = perm->rows * perm->cols;
+    if (N != Np) return mat_alloc(0, 0);
+    matlab_mat *out = mat_alloc(data->rows, data->cols);
+    for (int64_t i = 0; i < N; ++i) {
+        int64_t idx = (int64_t)perm->data[i] - 1;
+        if (idx < 0 || idx >= N) idx = 0;
+        out->data[i] = data->data[idx];
+    }
+    return out;
+}
+
+matlab_mat *matlab_comm_deintrlv(matlab_mat *data, matlab_mat *perm) {
+    if (!data || !perm) return mat_alloc(0, 0);
+    int64_t N = data->rows * data->cols;
+    int64_t Np = perm->rows * perm->cols;
+    if (N != Np) return mat_alloc(0, 0);
+    matlab_mat *out = mat_alloc(data->rows, data->cols);
+    for (int64_t i = 0; i < N; ++i) {
+        int64_t idx = (int64_t)perm->data[i] - 1;
+        if (idx < 0 || idx >= N) idx = 0;
+        out->data[idx] = data->data[i];
+    }
+    return out;
+}
+
 }  /* extern "C" */

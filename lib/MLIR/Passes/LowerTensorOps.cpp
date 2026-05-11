@@ -4437,6 +4437,27 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"berawgn",    "matlab_comm_berawgn_s",  0, "fff"},
       /* §4.9 scatterplot numeric form. */
       {"scatterplot","matlab_comm_scatterplot",1, "p"},
+      /* === Communications Toolbox Tier-3 — channel coding ===
+       * docs/comm_toolbox_roadmap.md §5. CRC function-form, the
+       * `poly2trellis` / `convenc` / `vitdec` convolutional surface,
+       * Hamming codes, and block interleavers. BCH / RS / gf and
+       * LDPC / Turbo / Polar are deferred. */
+      /* §5.1 CRC (function-form). */
+      {"crcGenerate", "matlab_comm_crc_generate", 1, "pff"},
+      {"crcCheck",    "matlab_comm_crc_check",    0, "pff"},
+      {"crcStrip",    "matlab_comm_crc_strip",    1, "pf"},
+      /* §5.2 convolutional codes. */
+      {"poly2trellis","matlab_comm_poly2trellis", 1, "fp"},
+      {"convenc",     "matlab_comm_convenc",      1, "pp"},
+      {"vitdec",      "matlab_comm_vitdec",       1, "ppfff"},
+      {"oct2dec",     "matlab_comm_oct2dec_s",    0, "f"},
+      /* §5.3 Hamming. */
+      {"hammgenParity",  "matlab_comm_hammgen_parity",  1, "f"},
+      {"hammingEncode",  "matlab_comm_hamming_encode",  1, "pf"},
+      {"hammingDecode",  "matlab_comm_hamming_decode",  1, "pf"},
+      /* §5.5 block interleavers. */
+      {"intrlv",   "matlab_comm_intrlv",   1, "pp"},
+      {"deintrlv", "matlab_comm_deintrlv", 1, "pp"},
     };
 
     // Pick the first entry with name + arity + TYPE match so overloaded

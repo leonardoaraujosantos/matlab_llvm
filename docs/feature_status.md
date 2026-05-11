@@ -380,6 +380,20 @@ MATLAB Coder integration, Python coexecution.
 | Wavelets / Wigner-Ville / synchrosqueezed (`cwt`, `dwt`, `wvd`, `fsst`) | 🔵 | Tier-4 §5.4. |
 | `digitalFilter` / `designfilt` system object | 🔵 | Tier-4 §5.1 — needs Tier-1 IIR/FIR shipped first. |
 
+### Communications Toolbox — Tier-3 channel coding (function-form)
+
+Per-toolbox roadmap in [`comm_toolbox_roadmap.md`](comm_toolbox_roadmap.md) §5. Function-form CRC + convolutional codes + Hamming + block interleavers — every entry that does *not* need the System-Object lowering fix. The classdef `comm.CRCGenerator` / `comm.CRCDetector` form stays gated on the SO fix (CST roadmap §12 / §11.1). Runtime extends `runtime/runtime_comm.cpp`. End-to-end demos under `examples/comm/` (`tier3_smoke.m`, `ber_coded_vs_uncoded.m`).
+
+| Group | Function | Status | Notes |
+|---|---|:-:|---|
+| §5.1 CRC (function-form) | `crcGenerate(bits, poly_int, nbits)` → bits with CRC appended; `crcCheck(bits, poly_int, nbits)` → 0 / 1 flag; `crcStrip(bits, nbits)` → payload only | ✅ shipped | The generator polynomial is passed as a decimal integer whose binary representation is the lower `nbits` bits with the leading-1 implicit. E.g. CRC-16-CCITT poly 0x11021 → `crcGenerate(bits, 4129, 16)`. Plain shift-register implementation; works to `nbits` ≤ 63. The classdef `comm.CRCGenerator` form is the SO-gated arc. |
+| §5.2 convolutional codes | `poly2trellis(K, gens)` (returns struct), `convenc(msg, trellis)`, `vitdec(code, trellis, tblen, opmode, dectype)`, `oct2dec(octal_decimal)` | ✅ shipped (hard-decision Viterbi) | Trellis struct has `numInputSymbols` / `numOutputSymbols` / `numStates` / `K` / `n` / `nextStates` / `outputs`. `oct2dec(171) = 121` bridge for textbook octal generators. `vitdec` runs forward path-metric accumulation + traceback; `opmode` 0 truncated / 1 terminated (assumes end-state 0); `dectype` is hard for the MVP slice. Verified: (171,133)₈ K=7 rate-1/2 corrects single bit errors clean and beats uncoded BPSK by ~2× at Eb/N0 = 7 dB in `ber_coded_vs_uncoded.m`. |
+| §5.3 Hamming codes | `hammgenParity(m)` → m×n parity-check matrix; `hammingEncode(msg, m)` / `hammingDecode(code, m)` for binary (n = 2^m − 1, k = n − m) | ✅ shipped (single-error correction) | Systematic Hamming: message bits at non-power-of-two positions, parity bits at positions 1, 2, 4, …, 2^(m-1). Syndrome-decode with 1-bit correction. Verified: Hamming(7, 4) corrects a flip at every position 1–7. Per-call shape is one codeword (`length(msg) == k`); batching is caller-side. |
+| §5.5 block interleavers | `intrlv(data, perm)` / `deintrlv(data, perm)` | ✅ shipped | Permutation vector is a 1-based row/column index map. Inverse round-trip is exact (verified). Convolutional / matrix interleavers stay deferred. |
+| §5.4 LDPC / Turbo / Polar | — | 🔴 | Carved out per the roadmap §5.4 — each is a multi-week iterative-decoder arc (Tier-7 stretch). |
+| BCH / Reed-Solomon + `gf(2^m)` | — | 🔵 | Deferred — needs a new typed runtime descriptor (small `m` + primitive-polynomial pair), ~2 wk on its own. |
+| Closure test (`examples/comm/ber_coded_vs_uncoded.m`) | uncoded BPSK vs Hamming(7, 4) vs (171, 133)₈ K=7 convolutional, all over AWGN | ✅ shipped | 30 k information bits per Eb/N0 point. At 2 dB: uncoded 0.10 / Hamming 0.16 / conv 0.44 (the rate-1/2 conv code pays its dB penalty without enough SNR margin to recover); at 7 dB: uncoded 0.0125 / Hamming 0.0174 / conv 0.0056 — conv crosses over and beats uncoded by ~2× as Eb/N0 climbs past ~5 dB, exactly the canonical hard-decision Viterbi curve. |
+
 ### Communications Toolbox — Tier-2 digital modulation MVP (function-form)
 
 Per-toolbox roadmap in [`comm_toolbox_roadmap.md`](comm_toolbox_roadmap.md) §4. The first user-visible Comm slice: source → modulate → AWGN → demodulate → BER, with a closed-form theory overlay. Function-form, numeric-tag dispatch; runtime extends `runtime/runtime_comm.cpp`. End-to-end demos under `examples/comm/` (`tier2_smoke.m`, `pulse_shape_demo.m`, `ber_qam_montecarlo.m`).

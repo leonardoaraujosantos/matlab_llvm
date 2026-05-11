@@ -1114,12 +1114,20 @@ convolutional variant has internal state across `step` calls.
 
 | Primitive | Effort | Status |
 |---|---|---|
-| CRC System Objects (4.1) | 1 wk | 🔵 — gates SO infrastructure |
-| `poly2trellis` / `convenc` / `vitdec` (4.2) | 2 wk | 🔵 |
-| Hamming / BCH / RS + `gf` helpers (4.3) | 2 wk | 🔵 |
-| Interleavers (4.5) | 1 wk | 🔵 |
+| CRC System Objects (5.1) | 1 wk | 🔵 — gates SO infrastructure |
+| CRC function-form (5.1 legacy) | 1 sess | ✅ shipped (`crcGenerate` / `crcCheck` / `crcStrip` — sidesteps the SO surface) |
+| `poly2trellis` / `convenc` / `vitdec` (5.2) | 2 wk | ✅ shipped (function-form trellis struct + state-machine encoder + hard-decision Viterbi with traceback; opmode 0 trunc / 1 term, dectype 0 unquant / 1 hard. Soft-decision Viterbi stays for the Tier-4 follow-on.) |
+| `oct2dec` bridge (5.2 helper) | 1 sess | ✅ shipped (decimal-from-octal-decimal converter so `oct2dec(171) = 121` lets users transcribe textbook generators verbatim) |
+| Hamming binary codes (5.3) | 0.5 wk | ✅ shipped (`hammgenParity` + `hammingEncode` / `hammingDecode` — single-error correction; verified at every bit position) |
+| BCH / RS + `gf` helpers (5.3) | 2 wk | 🔵 — needs a new `gf(2^m)` typed runtime descriptor |
+| Interleavers (5.5) | 1 wk | ✅ shipped (function-form `intrlv` / `deintrlv` block interleaver; convolutional / matrix variants stay deferred) |
+| Closure test (`ber_coded_vs_uncoded.m`) | — | ✅ shipped (uncoded vs Hamming(7,4) vs (171,133)₈ K=7 convolutional over BPSK + AWGN — conv beats uncoded ~2× at Eb/N0 = 7 dB) |
 
-**Total**: ~6 weeks. Lights up all coded BER curves up to RS / BCH.
+**Total**: ~6 weeks for the SO-free subset (shipped today) + ~2 wk for
+BCH/RS (deferred to a follow-on) + ~1 wk for the CRC System-Object
+surface once the SO lowering fix lands. Lights up all coded BER
+curves up to convolutional + Hamming; RS / BCH coverage waits on the
+`gf` descriptor.
 
 ---
 
