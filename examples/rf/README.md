@@ -19,6 +19,7 @@ The propagation runtime is `runtime/runtime_prop.cpp`; the function-name table l
 | `longley_rice_link.m` | Stand-alone Longley-Rice (ITM) sanity sweeps: reliability triple (50,50,50) → (95,99,99), climate codes 1–7, and a frequency sweep at fixed reliability. |
 | `coverage_three_sector.m` | Multi-site coverage with two sites × three 120-deg sectors each, best-server and SINR aggregation. |
 | `coverage_barbados.m` | **Headline scenario** — Mount Hillaby ↔ Bridgetown PtP link on a synthetic Barbados heightmap, two 22 dBi cosine-pattern directional dishes, Longley-Rice (ITM) path loss, plus a 48×48 coverage map from Mount Hillaby. |
+| `amini_barbados_ulap.m` | **Real-world site survey** — Amini ULAP three-site survey in Bridgetown: Police Command Center, Ilaro Court, Queen Elizabeth Hospital. Two directional 5.8 GHz Longley-Rice PtP links (Police↔Ilaro, Police↔Hospital) with full link budget + Fresnel-zone clearance check + minimum-mast-height suggestion under TSB-10F 80/99/99 reliability. Per-site 5G access bubble at 3.5 GHz (10 W, three 120° sectors per site) reporting coverage % above the −85 dBm 600 Mbit/s NR threshold. Heightmap is a synthetic Bridgetown-area DEM; swap in a real SRTM tile via `load('srtm.mat').heights` when available. |
 
 ## Numeric-tag conventions
 
