@@ -1532,6 +1532,27 @@ extern "C" int64_t matlab_dbg_mat3_depth(const struct matlab_mat3 *m);
 extern "C" double matlab_dbg_mat3_get(const struct matlab_mat3 *m,
                                        int64_t i, int64_t j, int64_t k);
 
+/* Phase 5 heterogeneous types — workspace rows for kind 6 (table) /
+ * 9 (categorical) / 10 (datetime) / 11 (duration) need their own
+ * shape/format paths. We don't include the runtime header here (the
+ * DAP server has its own LLVM/MLIR includes that don't play with
+ * matlab_runtime.h's C-style guards); forward-declare what we need. */
+struct matlab_table_s;        typedef struct matlab_table_s        matlab_table;
+struct matlab_categorical_s;  typedef struct matlab_categorical_s  matlab_categorical;
+struct matlab_datetime_s;     typedef struct matlab_datetime_s     matlab_datetime;
+struct matlab_duration_s;     typedef struct matlab_duration_s     matlab_duration;
+extern "C" double      matlab_table_height(matlab_table *t);
+extern "C" double      matlab_table_width (matlab_table *t);
+extern "C" const char *matlab_table_column_name(matlab_table *t,
+                                                 int32_t idx,
+                                                 int64_t *out_len);
+extern "C" void       *matlab_table_column_data(matlab_table *t, int32_t idx);
+extern "C" int32_t     matlab_table_column_kind_idx(matlab_table *t,
+                                                     int32_t idx);
+extern "C" double      matlab_categorical_length (matlab_categorical *c);
+extern "C" double      matlab_categorical_numcats(matlab_categorical *c);
+extern "C" double      matlab_duration_to_seconds(matlab_duration *d);
+
 namespace dap {
 
 using llvm::json::Array;
@@ -3041,6 +3062,42 @@ void *lookupMatRef(int64_t ref) {
   return MatRefs[idx];
 }
 
+/* Phase 5.3 — table variablesReference registry. Kept distinct from
+ * MatRefs because the drill-in handler must dispatch on table-vs-mat:
+ * walking a table's columns goes through matlab_table_column_* and
+ * the per-column formatter, walking a matrix's cells goes through
+ * matlab_dbg_mat_get. Mixing the two registries would let the existing
+ * `if (Ref >= MatRefBase)` branch grab a table pointer and crash
+ * (matlab_dbg_mat_get reads off the head of a matlab_table_s, which
+ * is the same crash the original bug surfaced).
+ *
+ * Window layout (existing constants in this TU):
+ *   1                       legacy "script Locals" alias
+ *   [1000, 50000)           frame ids (DAP frame_id + 1000)
+ *   [TableRefBase, ObjRefBase) = [50000, 100000)   table refs
+ *   [ObjRefBase, MatRefBase)   = [100000, 200000)  class-instance refs
+ *   [MatRefBase, ...)          = [200000, ...)     matrix refs
+ *
+ * 50000 slots is far more than any real session needs but keeps the
+ * encoding stable. The variables-handler dispatch inserts the table
+ * branch before the ObjRefBase check so a table ref can't fall through
+ * into the ObjRef path. */
+constexpr int64_t TableRefBase = 50000;
+std::vector<matlab_table *> TableRefs;
+
+int64_t registerTableRef(matlab_table *t) {
+  if (!t) return 0;
+  TableRefs.push_back(t);
+  return TableRefBase + (int64_t)(TableRefs.size() - 1);
+}
+
+matlab_table *lookupTableRef(int64_t ref) {
+  if (ref < TableRefBase || ref >= ObjRefBase) return nullptr;
+  size_t idx = (size_t)(ref - TableRefBase);
+  if (idx >= TableRefs.size()) return nullptr;
+  return TableRefs[idx];
+}
+
 /* Memory-region registry for the DAP `readMemory` / `writeMemory`
  * requests. Whenever we hand out a memoryReference on a matrix
  * variable row, we also record (data_ptr, byte_count) here so the
@@ -3418,8 +3475,15 @@ std::string typeForVar(int Kind, void *Ptr) {
   if (Kind == 3) return "string";
   if (Kind == 4) return "uint8";
   if (Kind == 5) return "int32";
+  /* Phase 5 heterogeneous types. The IDE's Workspace pane keys the
+   * TYPE column off these strings and the TABLE VIEWER tab routes
+   * on `table` specifically. */
+  if (Kind == 6) return "table";
   if (Kind == 7) return "sym";
   if (Kind == 8) return "sym matrix";
+  if (Kind == 9)  return "categorical";
+  if (Kind == 10) return "datetime";
+  if (Kind == 11) return "duration";
   return "any";
 }
 
@@ -3494,6 +3558,41 @@ std::string formatVar(int Kind, int WsIdx) {
     const char *SD = matlab_dbg_symmat_str(M, &SL);
     if (!SD || SL == 0) return "<unset sym matrix>";
     return std::string(SD, (size_t)SL);
+  }
+  if (Kind == 6) {
+    /* Phase 5.3 — table. Render the same `NxM table` summary MATLAB's
+     * Workspace pane shows; the IDE's TABLE VIEWER tab paints the full
+     * grid by reading inspectionRaw (captured disp(t) text). */
+    auto *T = (matlab_table *)matlab_dbg_ws_ptr(WsIdx);
+    char Buf[64];
+    snprintf(Buf, sizeof Buf, "%lldx%lld table",
+             (long long)matlab_table_height(T),
+             (long long)matlab_table_width(T));
+    return Buf;
+  }
+  if (Kind == 9) {
+    /* Phase 5.2 — categorical. 1-D vector; render `Nx1 categorical`. */
+    auto *C = (matlab_categorical *)matlab_dbg_ws_ptr(WsIdx);
+    char Buf[64];
+    snprintf(Buf, sizeof Buf, "%lldx1 categorical",
+             (long long)matlab_categorical_length(C));
+    return Buf;
+  }
+  if (Kind == 10) {
+    /* Phase 5.1 — datetime. Scalar wrapper around seconds-since-epoch;
+     * render as `1x1 datetime` (drilling further is a follow-up; for
+     * now the row is a leaf). */
+    return "1x1 datetime";
+  }
+  if (Kind == 11) {
+    /* Phase 5.1 — duration. Show the value too — `<n> sec duration` —
+     * because durations are tiny and inlining the numeric span is more
+     * useful than `1x1 duration`. */
+    auto *D = (matlab_duration *)matlab_dbg_ws_ptr(WsIdx);
+    char Buf[64];
+    snprintf(Buf, sizeof Buf, "%g sec duration",
+             matlab_duration_to_seconds(D));
+    return Buf;
   }
   return "<unknown>";
 }
@@ -3997,6 +4096,75 @@ bool handleRequest(const Object &Msg) {
                    Object{{"variables", std::move(Vs)}});
       return true;
     }
+    /* Phase 5.3 — table-column expansion. The variablesReference came
+     * from a kind=6 row (workspace pane); resolve to matlab_table*
+     * and emit one row per column using the per-kind formatter for
+     * the column's data pointer. CRITICAL: this branch must come
+     * before the ObjRefBase check below — TableRefBase < ObjRefBase
+     * by design, but the obj-branch's `Ref >= ObjRefBase` test would
+     * still miss table refs, so the actual safety here is that
+     * table refs never leak into MatRefs / ObjRefs (the lookup helpers
+     * gate by window). */
+    if (Ref >= TableRefBase && Ref < ObjRefBase) {
+      auto *T = lookupTableRef(Ref);
+      if (T) {
+        int32_t NCols = (int32_t)matlab_table_width(T);
+        int64_t NRows = (int64_t)matlab_table_height(T);
+        for (int32_t ci = 0; ci < NCols; ++ci) {
+          int64_t NameLen = 0;
+          const char *NameP = matlab_table_column_name(T, ci, &NameLen);
+          if (!NameP) continue;
+          std::string ColName(NameP, (size_t)NameLen);
+          int32_t CK = matlab_table_column_kind_idx(T, ci);
+          /* MATLAB_TABLE_KIND_NUMERIC=0  → matlab_mat *
+           * MATLAB_TABLE_KIND_STRING=1   → matlab_string ** array
+           * MATLAB_TABLE_KIND_DATETIME=2 → matlab_datetime ** array
+           * For v1 we render NUMERIC columns through formatMatShape +
+           * registerMatRef so the user can drill into the cells (the
+           * existing matrix viewer path). STRING / DATETIME columns
+           * render with a shape summary only — drilling into pointer
+           * arrays would need a new dispatch and isn't needed to clear
+           * the workspace-crash bug. */
+          std::string Val;
+          std::string Type;
+          int64_t ChildRef = 0;
+          int64_t IndexedHint = 0;
+          if (CK == 0) {
+            auto *M = (struct matlab_mat *)matlab_table_column_data(T, ci);
+            Val = formatMatShape(M);
+            Type = "double";
+            if (M && matIsMultiCell(M)) {
+              ChildRef = registerMatRef(M);
+              IndexedHint = matIndexedCount(M);
+            }
+          } else if (CK == 1) {
+            char Buf[64];
+            snprintf(Buf, sizeof Buf, "%lldx1 string", (long long)NRows);
+            Val = Buf;
+            Type = "string";
+          } else if (CK == 2) {
+            char Buf[64];
+            snprintf(Buf, sizeof Buf, "%lldx1 datetime", (long long)NRows);
+            Val = Buf;
+            Type = "datetime";
+          } else {
+            Val = "<unknown column kind>";
+            Type = "any";
+          }
+          Object Row{
+            {"name", std::move(ColName)},
+            {"value", std::move(Val)},
+            {"type", std::move(Type)},
+            {"variablesReference", ChildRef},
+          };
+          if (IndexedHint > 0) Row["indexedVariables"] = IndexedHint;
+          Vs.push_back(std::move(Row));
+        }
+      }
+      sendResponse(ReqSeq, *Cmd, true,
+                   Object{{"variables", std::move(Vs)}});
+      return true;
+    }
     /* Object-property expansion: when the IDE clicks the disclosure
      * arrow on a class-instance row, the request comes back with the
      * variablesReference we previously handed out. Resolve it back to
@@ -4173,6 +4341,16 @@ bool handleRequest(const Object &Msg) {
             ChildRef = registerMatRef(M);
             IndexedCount = matIndexedCount(M);
             MemRef = registerMatMemRef(M);
+          }
+        } else if (K == 6) {
+          /* Phase 5.3 — table row gets a variablesReference into the
+           * TableRefs registry so clicking the disclosure arrow drops
+           * into the column-walking branch in the `variables` handler,
+           * not the matlab_dbg_mat_get cell walker (which would crash
+           * on a misinterpreted matlab_table_s). */
+          if (auto *T = (matlab_table *)matlab_dbg_ws_ptr(i)) {
+            ChildRef = registerTableRef(T);
+            NamedCount = (int64_t)matlab_table_width(T);
           }
         }
         Object Row{

@@ -1299,6 +1299,15 @@ double        matlab_table_width(matlab_table *t);
 double        matlab_table_numel(matlab_table *t);
 double        matlab_table_size_dim(matlab_table *t, double dim);
 void          matlab_table_disp(matlab_table *t);
+/* Column iteration by integer index — used by the DAP `variables`
+ * drill-in to enumerate a table's columns without learning the
+ * matlab_table_s layout. Out-of-range idx returns NULL / -1. The
+ * data pointer's interpretation depends on the kind (see the
+ * MATLAB_TABLE_KIND_* enum in matlab_runtime.cpp). */
+const char   *matlab_table_column_name(matlab_table *t, int32_t idx,
+                                        int64_t *out_len);
+void         *matlab_table_column_data(matlab_table *t, int32_t idx);
+int32_t       matlab_table_column_kind_idx(matlab_table *t, int32_t idx);
 /* CSV / delimited-text readers. Both detect the delimiter from
  * the file's first non-empty line ('", '\\t', ';', or '|'). The
  * first row is treated as a header iff its cells are not numeric.

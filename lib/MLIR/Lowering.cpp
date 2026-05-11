@@ -3273,13 +3273,30 @@ void Lowerer::lowerLValueStore(const Expr &LHS, mlir::Value Rhs) {
         IsString = true;
       bool IsSym = SymBindings.count(N.Ref) != 0;
       bool IsSymmat = SymmatBindings.count(N.Ref) != 0;
+      /* Phase 5 heterogeneous types — route through their dedicated
+       * workspace setters so the DAP Workspace pane renders the row
+       * with the right type tag (`table` / `categorical` / `datetime`
+       * / `duration`) and the variable-children drill-in walks the
+       * native layout instead of casting the pointer to matlab_mat*
+       * and reading garbage. The binding sets are populated by the
+       * AssignStmt RhsIs* tagging block above (~:2579) — by the time
+       * we get here, a `T = readtable(...)` LHS is in TableBindings,
+       * `c = categorical(...)` in CategoricalBindings, etc. */
+      bool IsTable = TableBindings.count(N.Ref) != 0;
+      bool IsCategorical = CategoricalBindings.count(N.Ref) != 0;
+      bool IsDatetime = DatetimeBindings.count(N.Ref) != 0;
+      bool IsDuration = DurationBindings.count(N.Ref) != 0;
       llvm::StringRef Callee =
-          IsSymmat   ? "matlab_ws_set_symmat"
-                     : (IsSym ? "matlab_ws_set_sym"
+          IsSymmat       ? "matlab_ws_set_symmat"
+                         : (IsSym ? "matlab_ws_set_sym"
                               : (IsString ? "matlab_ws_set_string"
-                                          : (IsObj ? "matlab_ws_set_obj"
-                                                   : (IsMat ? "matlab_ws_set_mat"
-                                                            : "matlab_ws_set_f64"))));
+                              : (IsObj    ? "matlab_ws_set_obj"
+                              : (IsTable  ? "matlab_ws_set_table"
+                              : (IsCategorical ? "matlab_ws_set_categorical"
+                              : (IsDatetime    ? "matlab_ws_set_datetime"
+                              : (IsDuration    ? "matlab_ws_set_duration"
+                              : (IsMat ? "matlab_ws_set_mat"
+                                       : "matlab_ws_set_f64"))))))));
       mlir::NamedAttribute Cal(
           mlir::StringAttr::get(&MCtx, "callee"),
           mlir::StringAttr::get(&MCtx, Callee));

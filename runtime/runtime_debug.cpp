@@ -318,6 +318,88 @@ void *matlab_ws_get_symmat(const char *name, int64_t len) {
     return nullptr;
 }
 
+/* Forward-declare the heterogeneous types stored as opaque pointers
+ * in the workspace. The real layouts live in matlab_runtime.cpp /
+ * the runtime_sym module — runtime_debug.cpp only ever round-trips
+ * them through `ptr_vals[idx]` so the type-name is purely for
+ * function-signature documentation. */
+struct matlab_table_s;        typedef struct matlab_table_s        matlab_table;
+struct matlab_categorical_s;  typedef struct matlab_categorical_s  matlab_categorical;
+struct matlab_datetime_s;     typedef struct matlab_datetime_s     matlab_datetime;
+struct matlab_duration_s;     typedef struct matlab_duration_s     matlab_duration;
+
+/* Phase 5.3 — table workspace setter (kind=6). Stores a matlab_table*
+ * so the DAP formatter and Workspace pane render the variable as
+ * `NxM table` and the drill-in walks columns via matlab_table_column_*
+ * instead of casting the pointer to matlab_mat* (which made the row
+ * report "16x52357604992 double" — the table's internal pointer
+ * reinterpreted as a column count — and segfaulted on click as
+ * matlab_dbg_mat_get walked off the allocation). Picks the lowest
+ * free kind slot above the existing block (0–5). */
+void matlab_ws_set_table(const char *name, int64_t len, matlab_table *t) {
+    matlab_ws_init_if_needed();
+    matlab_ws_lock();
+    struct matlab_dbg_undo_rec *r =
+        matlab_ws_push_undo_locked(name, len, /*kind=*/2);
+    int32_t idx = struct_reserve(matlab_ws, name, (int32_t)len);
+    matlab_ws->kinds[idx] = 6;
+    matlab_ws->f64_vals[idx] = 0.0;
+    matlab_ws->ptr_vals[idx] = t;
+    matlab_dbg_undo_record_set_new_ptr(r, /*new_kind=*/6, t);
+    matlab_ws_unlock();
+    matlab_ws_check_watch(name, len);
+}
+
+/* Phase 5.2 — categorical workspace setter (kind=9). Mirrors the
+ * table setter shape. Kind 9 sits above the sym slots (7/8) so the
+ * decode tables stay contiguous. */
+void matlab_ws_set_categorical(const char *name, int64_t len,
+                                matlab_categorical *c) {
+    matlab_ws_init_if_needed();
+    matlab_ws_lock();
+    struct matlab_dbg_undo_rec *r =
+        matlab_ws_push_undo_locked(name, len, /*kind=*/2);
+    int32_t idx = struct_reserve(matlab_ws, name, (int32_t)len);
+    matlab_ws->kinds[idx] = 9;
+    matlab_ws->f64_vals[idx] = 0.0;
+    matlab_ws->ptr_vals[idx] = c;
+    matlab_dbg_undo_record_set_new_ptr(r, /*new_kind=*/9, c);
+    matlab_ws_unlock();
+    matlab_ws_check_watch(name, len);
+}
+
+/* Phase 5.1 — datetime workspace setter (kind=10). */
+void matlab_ws_set_datetime(const char *name, int64_t len,
+                             matlab_datetime *d) {
+    matlab_ws_init_if_needed();
+    matlab_ws_lock();
+    struct matlab_dbg_undo_rec *r =
+        matlab_ws_push_undo_locked(name, len, /*kind=*/2);
+    int32_t idx = struct_reserve(matlab_ws, name, (int32_t)len);
+    matlab_ws->kinds[idx] = 10;
+    matlab_ws->f64_vals[idx] = 0.0;
+    matlab_ws->ptr_vals[idx] = d;
+    matlab_dbg_undo_record_set_new_ptr(r, /*new_kind=*/10, d);
+    matlab_ws_unlock();
+    matlab_ws_check_watch(name, len);
+}
+
+/* Phase 5.1 — duration workspace setter (kind=11). */
+void matlab_ws_set_duration(const char *name, int64_t len,
+                             matlab_duration *d) {
+    matlab_ws_init_if_needed();
+    matlab_ws_lock();
+    struct matlab_dbg_undo_rec *r =
+        matlab_ws_push_undo_locked(name, len, /*kind=*/2);
+    int32_t idx = struct_reserve(matlab_ws, name, (int32_t)len);
+    matlab_ws->kinds[idx] = 11;
+    matlab_ws->f64_vals[idx] = 0.0;
+    matlab_ws->ptr_vals[idx] = d;
+    matlab_dbg_undo_record_set_new_ptr(r, /*new_kind=*/11, d);
+    matlab_ws_unlock();
+    matlab_ws_check_watch(name, len);
+}
+
 /* DAP variable formatter — pretty-prints a matlab_sym* into a stable
  * static buffer and returns it. The DAP server reads the result via
  * the value column of `variables` requests. Returns NULL on miss.

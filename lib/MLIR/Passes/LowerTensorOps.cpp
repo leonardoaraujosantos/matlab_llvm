@@ -1668,7 +1668,9 @@ bool TensorLowering::rewriteBuiltinCalls() {
     }
     if ((Name == "matlab_ws_set_f64" || Name == "matlab_ws_set_mat" ||
          Name == "matlab_ws_set_obj" || Name == "matlab_ws_set_string" ||
-         Name == "matlab_ws_set_sym" || Name == "matlab_ws_set_symmat") &&
+         Name == "matlab_ws_set_sym" || Name == "matlab_ws_set_symmat" ||
+         Name == "matlab_ws_set_table" || Name == "matlab_ws_set_categorical" ||
+         Name == "matlab_ws_set_datetime" || Name == "matlab_ws_set_duration") &&
         Call->getNumOperands() == 2) {
       Value NameV = Call->getOperand(0);
       Value Val = Call->getOperand(1);
@@ -1681,19 +1683,28 @@ bool TensorLowering::rewriteBuiltinCalls() {
        * runtime entry. The set_obj / set_string choices are sticky:
        * they carry Sema-pinned class / string-binding info, so we
        * trust the frontend and don't downgrade to set_mat even if
-       * the value is a generic ptr. */
+       * the value is a generic ptr. Same stickiness for set_table /
+       * set_categorical / set_datetime / set_duration — the frontend
+       * tagged the binding via the Phase-5 binding sets and the value
+       * is always a pointer at this point. */
       bool IsObj = (Name == "matlab_ws_set_obj");
       bool IsString = (Name == "matlab_ws_set_string");
       bool IsSym = (Name == "matlab_ws_set_sym");
       bool IsSymmat = (Name == "matlab_ws_set_symmat");
+      bool IsTable = (Name == "matlab_ws_set_table");
+      bool IsCategorical = (Name == "matlab_ws_set_categorical");
+      bool IsDatetime = (Name == "matlab_ws_set_datetime");
+      bool IsDuration = (Name == "matlab_ws_set_duration");
+      bool IsPtrSticky = IsObj || IsString || IsSym || IsSymmat ||
+                         IsTable || IsCategorical || IsDatetime || IsDuration;
       bool IsMat;
       bool IsInt = mlir::isa<mlir::IntegerType>(Val.getType());
-      if (IsObj || IsString || IsSym || IsSymmat) IsMat = true;
+      if (IsPtrSticky) IsMat = true;
       else if (Val.getType() == PtrTy)      IsMat = true;
       else if (Val.getType() == F64)         IsMat = false;
       else if (IsInt)                         IsMat = false;
       else continue;   /* neither ptr nor f64 nor int yet — wait for another iter */
-      if ((IsObj || IsString || IsSym || IsSymmat) && Val.getType() != PtrTy)
+      if (IsPtrSticky && Val.getType() != PtrTy)
         continue; /* retry once Val lowers */
       /* Cast int → f64 for the workspace mirror. Same logic as
        * matlab_dbg_frame_set above: i1 from `x = age > 18` at script
@@ -1726,12 +1737,16 @@ bool TensorLowering::rewriteBuiltinCalls() {
       Value Ptr = fieldNameAddr(NameV, Len);
       if (!Ptr) continue;
       StringRef RuntimeName =
-          IsSymmat   ? "matlab_ws_set_symmat"
-                     : (IsSym ? "matlab_ws_set_sym"
-                              : (IsString ? "matlab_ws_set_string"
-                                          : (IsObj ? "matlab_ws_set_obj"
-                                                   : (IsMat ? "matlab_ws_set_mat"
-                                                            : "matlab_ws_set_f64"))));
+          IsSymmat       ? "matlab_ws_set_symmat"
+                         : (IsSym ? "matlab_ws_set_sym"
+                              : (IsString      ? "matlab_ws_set_string"
+                              : (IsObj         ? "matlab_ws_set_obj"
+                              : (IsTable       ? "matlab_ws_set_table"
+                              : (IsCategorical ? "matlab_ws_set_categorical"
+                              : (IsDatetime    ? "matlab_ws_set_datetime"
+                              : (IsDuration    ? "matlab_ws_set_duration"
+                              : (IsMat         ? "matlab_ws_set_mat"
+                                               : "matlab_ws_set_f64"))))))));
       B.setInsertionPoint(Call);
       Value LenV = LLVM::ConstantOp::create(
           B, Call->getLoc(), I64, B.getI64IntegerAttr(Len));

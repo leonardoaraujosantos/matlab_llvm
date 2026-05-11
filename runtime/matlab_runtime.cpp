@@ -7283,6 +7283,32 @@ extern "C" double matlab_table_size_dim(matlab_table *t, double dim) {
     return 1.0;
 }
 
+/* Iterate columns by index — used by the DAP `variables` drill-in
+ * so it can walk a table's columns without learning the matlab_table_s
+ * layout. Out-of-range idx returns NULL / -1. The pointer returned by
+ * matlab_table_column_data is the raw `data[i]` slot whose
+ * interpretation depends on the kind:
+ *   NUMERIC  -> matlab_mat *
+ *   STRING   -> matlab_string ** (nrows entries)
+ *   DATETIME -> matlab_datetime ** (nrows entries) */
+extern "C" const char *matlab_table_column_name(matlab_table *t,
+                                                 int32_t idx,
+                                                 int64_t *out_len) {
+    if (out_len) *out_len = 0;
+    if (!t || idx < 0 || idx >= t->nvars) return NULL;
+    const char *n = t->names[idx];
+    if (out_len && n) *out_len = (int64_t)strlen(n);
+    return n;
+}
+extern "C" void *matlab_table_column_data(matlab_table *t, int32_t idx) {
+    if (!t || idx < 0 || idx >= t->nvars) return NULL;
+    return t->data[idx];
+}
+extern "C" int32_t matlab_table_column_kind_idx(matlab_table *t, int32_t idx) {
+    if (!t || idx < 0 || idx >= t->nvars) return -1;
+    return t->kinds ? (int32_t)t->kinds[idx] : 0;
+}
+
 extern "C" void matlab_table_disp(matlab_table *t) {
     if (!t) { matlab_disp_str("(empty table)", 13); return; }
     pthread_mutex_lock(&matlab_io_mutex);
