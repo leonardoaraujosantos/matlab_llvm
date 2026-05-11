@@ -272,6 +272,16 @@ void Resolver::registerBuiltins() {
     "sectorPattern", "cosinePattern", "gaussianPattern", "isotropicPattern",
     "applyMountOrientation", "applyMountAz", "applyMountEl",
     "coverageGridMulti",
+    /* COMM Tier-1 (docs/comm_toolbox_roadmap.md §2). Function-form
+     * base layer; runtime/runtime_comm.cpp. Numeric tag dispatch.
+     * `rng(seed)` uses the existing `rng` name (also already
+     * registered above by no other entry — only `rngDefault` /
+     * `rngShuffle` / `rngGet` / `rngSet` add new names). */
+    "randi", "rng", "rngDefault", "rngShuffle", "rngGet", "rngSet",
+    "randsrc", "randsrcWeighted", "randerr",
+    "int2bit", "bit2int", "de2bi", "bi2de",
+    "awgn",
+    "biterr", "biterrK", "biterrCount", "symerr", "symerrCount",
   }) {
     registerBuiltin(N);
   }

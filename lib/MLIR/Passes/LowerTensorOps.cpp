@@ -4371,6 +4371,44 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"applyMountEl",        "matlab_prop_mount_el_local",      0, "ffff"},
       {"coverageGridMulti",   "matlab_prop_coverage_grid_multi", 1,
                               "pppffffffffffffff"},
+      /* === Communications Toolbox Tier-1 base layer ===
+       * docs/comm_toolbox_roadmap.md §2. runtime/runtime_comm.cpp.
+       */
+      /* §2.2 rng — numeric-tag dispatch (string variants exposed
+       * as rngDefault / rngShuffle named functions). */
+      {"rng",          "matlab_comm_rng",          0, "f"},
+      {"rngDefault",   "matlab_comm_rng_default", 0, ""},
+      {"rngShuffle",   "matlab_comm_rng_shuffle", 0, ""},
+      {"rngGet",       "matlab_comm_rng_get",     0, ""},
+      {"rngSet",       "matlab_comm_rng_set",     0, "f"},
+      /* §2.1 randi — 1/2/3 arg forms. */
+      {"randi",        "matlab_comm_randi_s",     0, "f"},
+      {"randi",        "matlab_comm_randi_nn",    1, "ff"},
+      {"randi",        "matlab_comm_randi_mn",    1, "fff"},
+      /* §2.3 randsrc / randerr. */
+      {"randsrc",         "matlab_comm_randsrc",         1, "ffp"},
+      {"randsrcWeighted", "matlab_comm_randsrc_weighted",1, "ffpp"},
+      {"randerr",         "matlab_comm_randerr",         1, "fff"},
+      /* §2.4 bit conversion. */
+      {"int2bit", "matlab_comm_int2bit", 1, "pf"},
+      {"bit2int", "matlab_comm_bit2int", 1, "pf"},
+      {"de2bi",   "matlab_comm_de2bi",   1, "pf"},
+      {"bi2de",   "matlab_comm_bi2de",   1, "p"},
+      /* §2.5 awgn — polymorphic on real/complex via the magic-tag
+       * sniff inside the runtime. The dispatch accepts a ptr arg
+       * (matlab_mat OR matlab_mat_c). */
+      {"awgn",   "matlab_comm_awgn",   1, "pf"},
+      {"awgn",   "matlab_comm_awgn_p", 1, "pff"},
+      /* §2.6 biterr / symerr — single-return forms return the BER
+       * ratio (the second of MATLAB's [nerr, ratio] pair, since the
+       * ratio is what almost every script consumes). The count-only
+       * variants are named biterrCount / symerrCount for the rare
+       * raw-integer use. */
+      {"biterr",      "matlab_comm_biterr_ratio",    0, "pp"},
+      {"biterrK",     "matlab_comm_biterr_ratio_k",  0, "ppf"},
+      {"biterrCount", "matlab_comm_biterr_count",    0, "pp"},
+      {"symerr",      "matlab_comm_symerr_ratio",    0, "pp"},
+      {"symerrCount", "matlab_comm_symerr_count",    0, "pp"},
     };
 
     // Pick the first entry with name + arity + TYPE match so overloaded

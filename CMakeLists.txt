@@ -245,7 +245,8 @@ if(MATLAB_LLVM_WITH_MLIR)
     runtime/matlab_runtime.cpp
     runtime/runtime_debug.cpp
     runtime/runtime_complex.cpp
-    runtime/runtime_prop.cpp)
+    runtime/runtime_prop.cpp
+    runtime/runtime_comm.cpp)
   if(MATLAB_LLVM_WITH_SYM)
     target_sources(matlabc PRIVATE runtime/runtime_sym.cpp)
     target_link_libraries(matlabc PRIVATE SymPP::sympp)
@@ -289,7 +290,8 @@ foreach(_rt_test IN ITEMS linalg shape rng complex reduce signal stats image mor
     runtime/matlab_runtime.cpp
     runtime/runtime_debug.cpp
     runtime/runtime_complex.cpp
-    runtime/runtime_prop.cpp)
+    runtime/runtime_prop.cpp
+    runtime/runtime_comm.cpp)
   target_include_directories(${_rt_target} PRIVATE
     ${CMAKE_SOURCE_DIR}/runtime
     ${CMAKE_SOURCE_DIR}/test/Runtime)
@@ -311,6 +313,7 @@ if(MATLAB_LLVM_WITH_PLOT)
       runtime/runtime_debug.cpp
       runtime/runtime_complex.cpp
       runtime/runtime_prop.cpp
+      runtime/runtime_comm.cpp
       ${MATLAB_PLOT_SOURCES})
     target_include_directories(${_plot_target} PRIVATE
       ${CMAKE_SOURCE_DIR}/runtime)

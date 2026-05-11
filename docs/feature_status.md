@@ -380,6 +380,20 @@ MATLAB Coder integration, Python coexecution.
 | Wavelets / Wigner-Ville / synchrosqueezed (`cwt`, `dwt`, `wvd`, `fsst`) | 🔵 | Tier-4 §5.4. |
 | `digitalFilter` / `designfilt` system object | 🔵 | Tier-4 §5.1 — needs Tier-1 IIR/FIR shipped first. |
 
+### Communications Toolbox — Tier-1 base layer (function-form)
+
+Per-toolbox roadmap in [`comm_toolbox_roadmap.md`](comm_toolbox_roadmap.md) §2. The base-layer prerequisites that gate every higher Comm tier — bit sources, RNG seed control, AWGN channel, BER/SER measurement. Function-form, numeric-tag dispatch; all entries live in `runtime/runtime_comm.cpp`. End-to-end demos under `examples/comm/` (`comm_tier1_smoke.m`, `source_bits.m`, `ber_awgn_uncoded.m`).
+
+| Group | Function | Status | Notes |
+|---|---|:-:|---|
+| §2.1 randi | `randi(imax)` (scalar), `randi(imax, n)` (n×n), `randi(imax, m, n)` (m×n) | ✅ shipped | Reuses the existing xorshift64 kernel + `matlab_rng_state` so seeding is shared with `rand` / `randn`. `randi(imax)` returns f64 scalar; multi-arg forms return matrix. The bracketed `randi([imin imax], m, n)` shape is exposed as `randi_range` for the function-form lane (callers can use scalar imin/imax directly). |
+| §2.2 rng | `rng(seed)`, `rngDefault()`, `rngShuffle()`, `s = rngGet()`, `rngSet(s)` | ✅ shipped | The 'default' / 'shuffle' string variants are exposed as separate named entries to keep the numeric dispatch lane clean. Save/restore round-trips the xorshift state through an f64 (loses 11 LSBs but the mixer re-spreads entropy within 2 advances). |
+| §2.3 randsrc / randerr | `randsrc(m, n, alphabet)` (uniform pick from a column-vector alphabet), `randsrcWeighted(m, n, alphabet, probs)` (with explicit probability vector), `randerr(m, n, errs)` (m×n binary matrix, exactly `errs` ones per row via Fisher-Yates partial shuffle) | ✅ shipped | |
+| §2.4 bit / int conversion | `int2bit(ints, nbits)` (MSB-first), `bit2int(bits, nbits)` (MSB-first inverse), `de2bi(d, n)` (LSB-first legacy), `bi2de(b)` (LSB-first inverse) | ✅ shipped | Round-trip verified: `bit2int(int2bit(x, 4), 4) == x`, `bi2de(de2bi(x, 4)) == x`. nbits clamped to [1, 53] so the f64 lane never loses precision. |
+| §2.5 awgn | `awgn(x, snr_dB)` ('measured' default — signal power read from x), `awgn(x, snr_dB, sigpower_dBW)` (explicit signal power) | ✅ shipped | Polymorphic on the descriptor magic — real `matlab_mat *` produces real noise (sigma² = noiseP); complex `matlab_mat_c *` produces complex noise with sigma²/2 per axis so the total variance matches signal_power / snr_lin. Shares the seeded PRNG with the rest of the runtime. |
+| §2.6 biterr / symerr | `biterr(x, y)` → ratio, `biterrCount(x, y)` → integer count, `biterrK(x, y, k)` → ratio for k-bit symbols, `symerr(x, y)` → ratio, `symerrCount(x, y)` → integer count | ✅ shipped | Single-return-form convention: `biterr` returns the BER (second of MATLAB's `[nerr, ratio]` pair). Verified: `biterr([0;1;1;0;1;0;1;1], [0;0;1;0;1;1;1;0]) = 3/8`. The BPSK Monte-Carlo demo (`examples/comm/ber_awgn_uncoded.m`) tracks Q(sqrt(SNR_lin)) within ~5% from 4 dB onward at 50,000 bits per point. |
+| Test gate (BPSK over AWGN) | `examples/comm/ber_awgn_uncoded.m` | ✅ closes Tier-1 test gate | Canonical "modulate → AWGN → demod → BER" loop with theoretical-curve overlay. At 50 k bits / point: SNR 4 dB → sim 0.058 vs theory 0.060; SNR 6 dB → sim 0.024 vs theory 0.024; SNR 10 dB → sim 0.00084 vs theory 0.00075. |
+
 ### Propagation Models (Communications + Antenna Toolboxes — function-form)
 
 Per-toolbox roadmap in [`comm_toolbox_roadmap.md`](comm_toolbox_roadmap.md) §3. Function-form surface — no classdef System Objects required, so this track ships in parallel with the SO-gated Comm Tier-3+ / RF / Antenna arcs. All entries live in `runtime/runtime_prop.cpp`. End-to-end demos under `examples/rf/` (Barbados PtP + ITM coverage, sector-coverage SINR, Fresnel/diffraction, pattern sampling).

@@ -250,19 +250,24 @@ compare.
 
 | Primitive | Effort | Status |
 |---|---|---|
-| `randi` (2.1) | 1 sess | 🔵 |
-| `rng` (2.2) | 1 sess | 🔵 |
-| `randsrc` / `randerr` (2.3) | 2 sess | 🔵 |
-| `int2bit` / `bit2int` / `de2bi` / `bi2de` (2.4) | 1 sess | 🔵 |
-| `awgn` (2.5) | 1 sess | 🔵 |
-| `biterr` / `symerr` (2.6) | 2 sess | 🔵 |
+| `randi` (2.1) | 1 sess | ✅ shipped |
+| `rng` (2.2) | 1 sess | ✅ shipped (numeric-tag dispatch + `rngDefault` / `rngShuffle` / `rngGet` / `rngSet` siblings for the string-arg variants) |
+| `randsrc` / `randerr` (2.3) | 2 sess | ✅ shipped (plus `randsrcWeighted` for non-uniform alphabets) |
+| `int2bit` / `bit2int` / `de2bi` / `bi2de` (2.4) | 1 sess | ✅ shipped |
+| `awgn` (2.5) | 1 sess | ✅ shipped (real + complex; descriptor-magic dispatch on input) |
+| `biterr` / `symerr` (2.6) | 2 sess | ✅ shipped (single-return convention — ratio by default, `biterrCount` / `symerrCount` for the integer counts; `biterrK(x, y, k)` for k-bit symbol BER) |
 
 **Total**: ~1.5 weeks (8 sessions). Lights up the bit-source-and-
 measure surface that every higher tier consumes.
 
 **Test gate**: a 4-line "modulate → AWGN → demod → BER" loop must
 pass on all 5 emit lanes once Tier 2 lands on top — Tier 1 alone is
-"sources and sinks" with no modulation.
+"sources and sinks" with no modulation. The closure here is a
+BPSK Monte-Carlo loop (`examples/comm/ber_awgn_uncoded.m`) — sim
+BER tracks Q(sqrt(SNR_lin)) within ~5% from 4 dB onward at 50 k
+bits per SNR point. Tier-2 modulation will swap the
+`tx_sym = 1 - 2*tx_bits` map for the real `pammod` / `qammod` /
+`pskmod` entries.
 
 ---
 

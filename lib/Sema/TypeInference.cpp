@@ -1095,6 +1095,24 @@ const Type *TypeInference::visitBuiltinCall(std::string_view Name,
       Name == "coverageGridMulti" || Name == "applyMountOrientation")
     return TC.arrayOf(Dtype::Double, Shape::unknown());
 
+  /* COMM Tier-1 (docs/comm_toolbox_roadmap.md §2). Function-form
+   * base layer; runtime/runtime_comm.cpp. */
+  if (Name == "rngGet" ||
+      Name == "biterr" || Name == "biterrK" || Name == "biterrCount" ||
+      Name == "symerr" || Name == "symerrCount")
+    return TC.scalar(Dtype::Double);
+  if (Name == "randi") {
+    /* randi(imax) -> scalar; multi-arg forms -> matrix. */
+    if (Args.size() <= 1) return TC.scalar(Dtype::Double);
+    return TC.arrayOf(Dtype::Double, Shape::unknown());
+  }
+  if (Name == "randsrc" || Name == "randsrcWeighted" ||
+      Name == "randerr" ||
+      Name == "int2bit" || Name == "bit2int" ||
+      Name == "de2bi" || Name == "bi2de" ||
+      Name == "awgn")
+    return TC.arrayOf(Dtype::Double, Shape::unknown());
+
   if (Name == "linspace") {
     int64_t N = -1;
     if (Args.size() >= 3) N = foldInt(Args[2]);
