@@ -4436,7 +4436,6 @@ matlab_mat *matlab_sminreal_A(matlab_mat *A, matlab_mat *B, matlab_mat *C) {
 
 matlab_mat *matlab_sminreal_B(matlab_mat *A, matlab_mat *B, matlab_mat *C) {
     if (!A || !B || !C) return mat_alloc(0, 0);
-    int64_t n = A->rows;
     int64_t m = B->cols;
     std::vector<int64_t> keep;
     sminreal_keep_(A, B, C, keep);

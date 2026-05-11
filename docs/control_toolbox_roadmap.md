@@ -294,7 +294,7 @@ This is the first user-visible CST slice: design a SISO controller,
 simulate it, look at its frequency response. All Tier-2 items are
 layered on Tier-1 primitives.
 
-### 3.1 Model object constructors 🔵
+### 3.1 Model object constructors ✅ (full classdefs + operator overloads + short forms)
 
 MATLAB's `tf` / `ss` / `zpk` / `frd` / `pid` are value classes with
 overloaded operators. Map them to matlab_llvm's `classdef`
@@ -348,7 +348,7 @@ For mixed-type pairs (`tf + ss`, etc.), the rule MATLAB uses is the
 constructors plus the conversion table; the operator overloads are a
 thin layer once conversions exist.
 
-### 3.2 Conversions between types 🟡 (c2d ZOH shipped)
+### 3.2 Conversions between types 🟡 (c2d ZOH + Tustin / inverse Tustin + model-object `c2d(sys, Ts)` shipped)
 
 The CST UG dedicates an entire chapter (§5 Model Transformation) to
 this. The five-way table (`tf` ↔ `ss` ↔ `zpk` ↔ `frd` ↔ `pid`) plus
@@ -398,7 +398,7 @@ conversions are follow-ons.
 
 **Effort**: 1 week.
 
-### 3.3 Time-domain simulation 🟡 (step_ss / lsim_ss shipped)
+### 3.3 Time-domain simulation ✅ (step / impulse / initial / lsim + model-object short forms shipped)
 
 **Scope**:
 - `[y, t, x] = step(sys, t)`, `step(sys)` (auto-time).
@@ -441,7 +441,7 @@ definitions.
 **Gating tests**: SISO first-order (`tf(1, [τ 1])`), second-order
 underdamped, MIMO 2×2 plant — verify against analytic answers.
 
-### 3.4 Frequency-domain analysis 🟡 (bode_ss SISO + bode_tf + margins shipped)
+### 3.4 Frequency-domain analysis 🟡 (bode / freqresp / nyquist / margins / allmargin / dcgain / bandwidth + model-object short forms shipped; MIMO bode + sigma + nichols pending)
 
 **Scope**:
 - `[mag, phase, w] = bode(sys, w)` / `bode(sys)`.
@@ -502,7 +502,7 @@ that today would just plot) prints a small ASCII summary
 w_max] rad/s"). Phase-2 work could ship a hook into
 `emit_python` to wrap matplotlib calls — out of scope here.
 
-### 3.5 Pole / zero analysis 🟡 (isstable + damp shipped)
+### 3.5 Pole / zero analysis 🟡 (isstable + damp + pole + model-object short forms shipped; `zero(sys)` Rosenbrock pencil + stabsep pending)
 
 **Scope**:
 - `p = pole(sys)` — closed-loop poles. Calls `eig(A)` for `ss`,
@@ -650,7 +650,7 @@ space + gain + Riccati) and `lqgreg` / `lqg` / `lqgtrack` /
 **Effort**: 1 week (mainly bookkeeping; the heavy lifting is in
 `care` / `dare`).
 
-### 4.3 Pole placement 🟡 (SISO Ackermann shipped)
+### 4.3 Pole placement 🟡 (SISO Ackermann + `acker` alias shipped)
 
 **Scope**:
 - `K = place(A, B, p)` — multi-input pole placement (Kautsky-Nichols-
@@ -693,7 +693,7 @@ controllability/observability reduction).
 
 **Effort**: 0.5 week.
 
-### 4.5 System norms 🟡 (norm_h2 shipped)
+### 4.5 System norms 🟡 (norm_h2 + model-object `norm(sys)` / `norm(sys, 2)` shipped; H∞ pending)
 
 **Scope**:
 - `n = norm(sys)` — H₂ norm by default.
@@ -753,7 +753,7 @@ CST's Chapter 6 (Model Simplification) and the MIMO connection
 machinery. Useful once Tier-3 lights up because reduced-order
 controllers and MIMO designs are the natural next step.
 
-### 5.1 Model reduction 🟡 (balreal_T + balred_* + hsvd shipped)
+### 5.1 Model reduction 🟡 (balreal_T + balred_* + hsvd + sminreal + modred + tf-form `minreal` + model-object short forms shipped)
 
 **Scope**:
 - `rsys = balred(sys, order)` — balanced truncation. Stable plants

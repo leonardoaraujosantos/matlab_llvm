@@ -80,14 +80,16 @@ Cumulative test deltas vs. `e812c3f` (pre-SPT baseline): **+17 run-tests** on th
 
 ---
 
-## Recently shipped (Control System Toolbox arc, 2026-05-08 → 2026-05-09)
+## Recently shipped (Control System Toolbox arc, 2026-05-08 → 2026-05-11)
 
 A third focused arc closing the practical CST user surface across
 Tier-1 (numeric prerequisites), Tier-2 (SISO design loop), Tier-3
-(state-space design + analysis), Tier-4 (model reduction), and the
-matrix-arg form of Tier-2 interconnection. Drafted from the R2026a
-Control System Toolbox User's Guide (1982 pages, ~24 chapters).
-Per-toolbox plan in
+(state-space design + analysis), Tier-4 (model reduction + MIMO
+interconnect + time-delay tail), plus the §3.1 model-object
+classdefs (`tf` / `ss` / `zpk` / `pid` / `frd` with operator
+overloads and the full short-form surface). Drafted from the
+R2026a Control System Toolbox User's Guide (1982 pages, ~24
+chapters). Per-toolbox plan in
 [`control_toolbox_roadmap.md`](control_toolbox_roadmap.md);
 authoritative status in [`feature_status.md`](feature_status.md).
 
@@ -109,11 +111,28 @@ authoritative status in [`feature_status.md`](feature_status.md).
 | CST 5.1 | **Model reduction** — `balreal_T(A, B, C)` (similarity transform via Laub 1980 eigendecomposition variant — sym-eig + lyap, no Cholesky); `balred_A` / `balred_B` / `balred_C` plus 3-return splitter `[Ar, Br, Cr] = balred(A, B, C, k)` for k-state truncation. H∞ error bound `2·sum(HSV[k+1:n])`. | `test/Run/ctrl_balreal.m`, `ctrl_balred.m` |
 | CST 2.6 (interconnection, matrix-arg) | **`feedback_ss` + `series_ss` + `parallel_ss` + `append_ss`** — closed-loop assembly for two strictly-proper plants. All four are 3-return splitters `[Acl, Bcl, Ccl] = name(A1, B1, C1, A2, B2, C2)`. Generalised splitter (one block recognises all four function names). | `test/Run/ctrl_feedback.m`, `ctrl_interconnect.m` |
 | CST bug fix | **meshgrid / ndgrid multi-return type inference** — `[xx, yy] = meshgrid(...)` typed both outputs as Any so downstream `exp(xx)` fell through to scalar Double, triggering an `arith.mulf(f64, !llvm.ptr)` LLVM lowering crash. Fixed in `lib/Sema/TypeInference.cpp` (per-LHS Array(Double, matrix) type) and `lib/MLIR/Lowering.cpp` (multi-return MLIR result-type table). Plus added `.skip-emit-c` / `.skip-emit-cpp` support to `run_tests_emitc.sh` mirroring the existing python/ts skip convention. | `test/Run/lang_multiret_meshgrid.m` |
-| CST §3.1 prep | **CST stdlib prelude wiring** in `tools/matlabc/main.cpp` — auto-prepends `runtime/cst_classdefs.m` (when present, located via the same `<bin>/../runtime/...` walk as `findRuntimePy`) so model-object classdefs like `tf` / `ss` / can land as a stdlib without per-test boilerplate. Plus a real bugfix to `lib/MLIR/Lowering.cpp:3539` field-store dispatch — tensor-typed RHS now routes to `matlab_obj_set_mat` / `matlab_struct_set_mat` (was always `_f64`). The classdef file ships empty pending the §3.1 monomorphization fix (see `control_toolbox_roadmap.md` §12 blocker note). | (infra; no behavioural test) |
+| CST §3.1 prep | **CST stdlib prelude wiring** in `tools/matlabc/main.cpp` — auto-prepends `runtime/cst_classdefs.m` (when present, located via the same `<bin>/../runtime/...` walk as `findRuntimePy`) so model-object classdefs like `tf` / `ss` / can land as a stdlib without per-test boilerplate. Plus a real bugfix to `lib/MLIR/Lowering.cpp:3539` field-store dispatch — tensor-typed RHS now routes to `matlab_obj_set_mat` / `matlab_struct_set_mat` (was always `_f64`). | (infra; no behavioural test) |
+| CST 1 leftovers (closure) | **`logm`** (Schur-Parlett recurrence), **`lyapchol`**, 3-arg Sylvester `lyap(A, B, C)`, **`qz`** (4-return; B-invertible path), 2-return `[V, D] = eig` for non-sym A (real-only), 5-arg cross-term `care(A,B,Q,R,S)`/`dare`, `icare`/`idare` aliases, **`[H, P] = hess`**, **generalised `eig(A, B)`** via QZ + 2×2-block quadratic. | `test/Run/linalg_logm.m`, `linalg_lyapchol.m`, `linalg_sylvester.m`, `linalg_qz.m`, `linalg_icare_idare.m`, `linalg_eig_gen.m` |
+| CST §3.1 (model objects, full slice) | **`tf` classdef** with constructor + property reads + tf-vs-tf operator overloads (`+ − ∗ / −`) + scalar mixing (`G + 2`, `5 ∗ G`, …) + the `s = tf([1 0], 1)` Laplace-variable composition idiom + **`tf('s')` / `tf('z')` char-literal sugar** (intercepted at the constructor-call lowering and rewritten to `tf([1 0], 1)` — char literals don't survive the constructor body, so the rewrite happens at the call site) + **`disp(tf)` formatted s-domain rendering** (centred-fraction layout via the runtime helper `matlab_tf_disp`, dispatched through Lowering.cpp's existing `disp(obj)` class-method route). **`ss` / `zpk` / `pid` / `frd` classdefs** with constructors + property storage + operator overloads (ss block-diagonal A assembly for `+ − ∗ −`; zpk root concatenation + gain product for `∗ / −`; pid coefficient-wise; frd element-wise on `ResponseData`). Auto-prepended per-class preludes (`cst_class_<name>.m`) so a tf-only program doesn't pay the unused-classdef cost. Heavy compiler-side enablement: class-method monomorphisation fix (Sema didn't refine signatures on matrix-typed class properties), sibling-clone retargeting for `matlab.call` ↔ `func.call` conversion in `LowerUserCalls`, none-typed operand relaxation, `pinnedOfRhs` recursion through `BinaryOp` / `UnaryOp` / `CallOrIndex`, binary-op scalar-boxing wrapper restricted to CST classes, and Resolver-side `PinnedClass` propagation through extended-binary-operator method overloads. | `test/Run/ctrl_tf_basic.m`, `ctrl_tf_disp.m`, `ctrl_model_objects.m`, `ctrl_zpk_ops.m`, `ctrl_ss_ops.m`, `ctrl_pid_ops.m`, `ctrl_frd_ops.m` |
+| CST model-object short forms (value-returning) | **`pole(sys)`**, **`step(sys [, dt, N])`**, **`bode(sys, w)`**, **`dcgain(sys)`**, **`bandwidth(sys)`**, **`lsim(sys, u, dt)`** for ss / tf (where applicable). Class-pinned-first-arg dispatch in `Lowering.cpp::CallOrIndex` unpacks the relevant properties via `matlab_obj_get_mat` and routes to the matching matrix-arg primitive. | `test/Run/ctrl_sys_short.m` |
+| CST Tier-2 leftovers | **`impulse(sys [, dt, N])`** + **`initial(sys, x0 [, dt, N])`** (free-response builtins via ZOH discretisation + recurrence). **`freqresp(sys, w)`** (raw complex H(jω) as `matlab_mat_c`), **`nyquist(sys, w)`** (N×2 real `[re, im]` columns), **`allmargin(sys, w)`** (1×4 `[Gm, Pm, Wcg, Wcp]`), **`damp(sys)` / `isstable(sys)`** model-object short forms. **`logspace(a, b, n)`** runtime (the standard frequency-grid builder for bode / nyquist / allmargin). | `test/Run/ctrl_tier2_response.m` |
+| CST Tier-3 leftovers | **5-arg cross-term `lqr(A, B, Q, R, N)` / `dlqr`** via `care_5` / `dare_5` + the matching gain-extraction algebra. **`lqry(sys, Q, R)`** output-weighted LQR (strictly-proper branch collapses to `lqr(A, B, C'·Q·C, R)`; the D ≠ 0 path uses `lqr_5` with cross term `N = C'·Q·D` and effective `R_eff = R + D'·Q·D`). **`acker(A, B, p)`** alias of `place`. Model-object short forms `ctrb(sys)` / `obsv(sys)` / `gram(sys, 'c'\|'o')` / `norm(sys)` / `norm(sys, 2)`. | `test/Run/ctrl_tier3_design.m` |
+| CST Tier-4 leftovers (slice 1) | **Padé time-delay approximation `[num, den] = pade(τ, n)`** (closed-form [n/n] symmetric Padé recurrence). **`[num_r, den_r] = minreal(num, den, tol)`** tf-form pole-zero cancellation via roots-then-poly with leading-coefficient preservation. Model-object short forms `hsvd(sys)` / `balreal_T(sys)`. | `test/Run/ctrl_tier4_reduce.m` |
+| CST Tier-4 leftovers (slice 2 + Sema-pin) | **Sema-pin architectural piece** — `pinnedOfRhs` now propagates the class pin through a known set of class-returning builtin short forms; when the callee is a Builtin name in {`c2d`, `c2d_tustin`, `d2c_tustin`, `feedback`, `series`, `parallel`, `append`, `blkdiag`, `sminreal`, `modred`} AND the first argument is class-pinned to `ss`, the assignment LHS slot inherits the pin. Mirrors the existing constructor and unary-op-on-class pin paths. Unlocks: **`c2d(sys, Ts)`** (returns fresh `ss(Ad, Bd, sys.C, sys.D)`), **`feedback(sys1, sys2)`** / **`series(sys1, sys2)`** / **`parallel(sys1, sys2)`** (route to `matlab_<name>_ss_{A,B,C}` triple + ss-constructor wrap), **`append(sys1, sys2)`** / **`blkdiag(sys1, sys2)`** (block-diagonal MIMO assembly via `matlab_append_ss_{A,B,C}`). Plus **`sminreal(sys)`** (structural minimality via boolean-graph reach/observability analysis) and **`modred(sys, elim, 'Truncate'\|'MatchDC')`** (modal residualisation with optional Schur-complement DC matching). **Thiran fractional-delay all-pass FIR `[b, a] = thiran(D, n)`**. | `test/Run/ctrl_tier4_assemble.m`, `ctrl_tier4_close.m` |
 
-Cumulative test deltas vs. pre-CST baseline: **+36 run-tests** on the LLVM lane (189 → 225) with the same +36 on emit-c (and +34 on emit-cpp; 2 marked `.skip-emit-cpp`). Python lane: +36 with `.stdout-python` overrides for numpy bracket repr. TS lane: +31 with skips for tests that depend on the polymorphic eig (eig stub returns zeros on TS). Unit tests: +120 in `test/Runtime/test_linalg.c`. ~50 new CST runtime entries wired end-to-end. ~20 demonstration programs added under `examples/control/`, header-tagged with the tier they require.
+Cumulative test deltas vs. pre-CST baseline: **+59 run-tests** on the LLVM lane (189 → 248), with the same +59 on emit-c (where applicable). Class-method tests carry `.skip-emit-{c,cpp,python,typescript}` markers because the EmitC pass currently emits classdef property layouts as all-`double` (matrix-typed properties don't fit the struct layout, and class instances flow through the emit pipeline by-value while runtime helpers expect `void *`). Python lane: +35 with `.stdout-python` overrides for numpy bracket repr + ~25 model-object skips. TS lane: +28 with similar skips. ~80 new CST runtime entries wired end-to-end across the slice (15 in Tier-1 closure, ~30 in §3.1 model objects, ~15 in Tier-2/3 short forms, ~20 in Tier-4 close).
 
-**Recommendation for the next slice**: row 1 of the priority list is *model objects* (`tf`/`ss`/`zpk`/`frd`/`pid` classdefs with operator overloads), but it's currently blocked on a class-method monomorphization bug (matrix-typed properties — see `control_toolbox_roadmap.md` §12). Until that's fixed, the highest-leverage drop-ins are the matrix-arg leftovers: `logm` (closes Tier 1 §2.3), `qz` (gates `zero(sys)` and generalised `eig(A, B)`), 2-return `[V, D] = eig` for non-sym A, and the H∞ norm via Boyd-Balakrishnan-Kabamba bisection (closes Tier 3 §4.5).
+**Practical workflow now end-to-end usable through model objects**: design (`lqr` / `lqry` / `place` / `acker` / `kalman_L`) → discretise (`c2d(sys, Ts)`) → close the loop (`feedback / series / parallel / append / blkdiag`) → reduce (`sminreal / modred / balred / minreal`) → simulate (`step / impulse / initial / lsim`) → analyse (`bode / freqresp / nyquist / margin / allmargin / pole / damp / norm / hsvd / dcgain / bandwidth`) → time-delay approx (`pade / thiran`). Both matrix-arg primitives and model-object short forms ship.
+
+**Still 🔵 in the CST surface** (none gates the practical workflow; each is a separate slice):
+- ss-form `minreal(sys)` — needs `ctrbf` / `obsvf` controllability/observability staircase decompositions
+- Multi-return on model-object call sites: `[Ar, Br, Cr, hsv] = balred(sys, k)` (Lowering.cpp multi-return dispatch on class-pinned operands)
+- Graph-style MIMO assembly: `connect(blocks, inputs, outputs)`, `sumblk('e = r - y', size)`, `lft(sys1, sys2, nu, ny)`
+- H∞ norm: `norm(sys, Inf)`, `hinfnorm` (Boyd-Balakrishnan-Kabamba bisection on Hamiltonian eigenvalues)
+- §4.6 advanced stability/sensitivity: `stabsep` (needs ordered Schur), `freqsep`, `loopsens`, `gangoffour`
+- Internal-delay representation on `ss` / `tf` classdefs + `bode` / `step` / `freqresp` consuming the delay properties; `absorbDelay`, `delayss`
+- Long-tail Tier-1 numerical optimisations: Moler-Stewart QZ for singular-B, Bartels-Stewart Schur-form `lyap` / `dlyap` / `sylvester`, Hammarling `lyapchol`, 6-arg descriptor `care`, `logm` 2×2 Schur blocks, 2-return `[V, D] = eig` complex eigenvectors
+- emit-c / emit-cpp / emit-python / emit-typescript lane parity for the §3.1 model-object tests (EmitC currently models classdef properties as all-`double` and passes class instances by value rather than via `void *`; the §3.1 tests carry `.skip-emit-*` markers)
 
 ---
 
@@ -566,7 +585,7 @@ toolbox.
 These don't fit a single roadmap slot but get folded into other
 work as it lands:
 
-- **Test corpus growth.** Original ≥150 run-tests + 50 SV goldens target met during the data-container arc; current corpus is **189 run-tests** + **77 SV goldens**. Next milestone: ≥300 run-tests as Tier-2 SPT follow-ons + multirate / waveform exercise more of the surface, and growing the SV-cocotb cycle-by-cycle lane (item #1) to cover all 39 HDL examples rather than just 8.
+- **Test corpus growth.** Original ≥150 run-tests + 50 SV goldens target met during the data-container arc; current corpus is **248 run-tests** + **77 SV goldens**. Next milestone: ≥300 run-tests as the open SPT follow-ons (richer FIR, multitaper / STFT, strict Gustafsson `filtfilt`) and CST follow-ons (graph-style MIMO assembly via `connect`/`sumblk`/`lft`, H∞ norm, ss-form `minreal`) exercise more of the surface, and growing the SV-cocotb cycle-by-cycle lane (item #1) to cover all 39 HDL examples rather than just 8.
 - **Formatter idempotency** verified by a fixed-point CI lane
   (parse → format → parse → format → identical).
 - **Doc-up-to-dateness check** as a CI step (parse `feature_status.md`,
@@ -581,9 +600,11 @@ work as it lands:
 
 This file is updated at the end of each multi-week implementation
 arc — most recently after the **Control System Toolbox arc**
-(CST 1.1–5.1: numerical stack, SISO design loop, state-space design,
-analysis, model reduction, matrix-arg interconnection — see "Recently
-shipped" above), prior to that the **Signal Processing Toolbox arc**
+(CST 1.1–5.1 numerical stack + SISO design loop + state-space
+design + analysis + model reduction + interconnection plus §3.1
+model objects and the model-object short-form surface — see
+"Recently shipped" above), prior to that the **Signal Processing
+Toolbox arc**
 (SPT 1–13: windows, polynomial helpers, IIR/FIR design, close-the-loop,
 transforms, spectral, LP, time-frequency, pulse measurements, multirate,
 waveform generators, alignment), prior to that the data-container +

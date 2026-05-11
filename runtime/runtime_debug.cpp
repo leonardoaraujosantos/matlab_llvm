@@ -2895,32 +2895,6 @@ static int matlab_dbg_frame_local_find_or_alloc_in(
     return idx;
 }
 
-static int matlab_dbg_frame_local_find_or_alloc(int frame_idx,
-                                                 const char *name,
-                                                 int64_t name_len) {
-    /* Caller holds the dbg mutex. Returns an index in entries[] or
-     * -1 if the table is full / frame_idx is out of range. */
-    if (frame_idx < 0 || frame_idx >= MATLAB_DBG_MAX_FRAMES) return -1;
-    struct matlab_dbg_frame_locals *fl = &matlab_dbg.frame_locals[frame_idx];
-    for (int i = 0; i < fl->n; ++i) {
-        if (fl->entries[i].name_len == name_len &&
-            memcmp(fl->entries[i].name, name, (size_t)name_len) == 0)
-            return i;
-    }
-    if (fl->n >= MATLAB_DBG_MAX_LOCALS) return -1;
-    char *copy = (char *)malloc((size_t)name_len + 1);
-    if (!copy) return -1;
-    memcpy(copy, name, (size_t)name_len);
-    copy[name_len] = '\0';
-    int idx = fl->n++;
-    fl->entries[idx].name = copy;
-    fl->entries[idx].name_len = name_len;
-    fl->entries[idx].kind = 0;
-    fl->entries[idx].f64 = 0.0;
-    fl->entries[idx].ptr = NULL;
-    return idx;
-}
-
 /* Resolve the calling thread's innermost-frame frame_locals slot,
  * lazily seeding the chain if this is the thread's first touch.
  * Returns NULL if the chain is empty (n == 0) — caller drops the
