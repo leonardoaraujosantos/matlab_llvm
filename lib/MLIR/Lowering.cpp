@@ -465,6 +465,16 @@ private:
   /* Phase 5.3: bindings holding a matlab_table * — used to dispatch
    * column accessors (`T.x`), shape (height/width/size), and disp(T). */
   std::unordered_set<Binding *> TableBindings;
+  /* Bindings tagged as holding a plain matlab_struct* (vs class
+   * instance or matrix).  Populated by the AssignStmt RhsIsStruct
+   * tagging block when the RHS is a known struct-returning builtin
+   * (struct(...), linkBudget(...)) or a NameExpr referencing a
+   * previously-tagged struct binding (including cross-REPL via
+   * Binding->IsStruct).  Consumed only by the REPL-mode workspace-
+   * setter routing — the same-TU struct lowering keeps using
+   * StructInitialised + ensureStructSlot for the matlab_struct_new
+   * init dance. */
+  std::unordered_set<Binding *> StructBindings;
   /* Phase 6: bindings holding a matlab_sym * (Symbolic Math Toolbox
    * via SymPP). Triggers sym-typed arithmetic dispatch + disp routing,
    * mirrors how DatetimeBindings drive the datetime arithmetic family. */
@@ -913,11 +923,39 @@ mlir::Value Lowerer::ensureStructSlot(Binding *Bnd, std::string_view Name,
      * works because Slot was allocated there too. */
     auto *SlotOp = Slot.getDefiningOp();
     if (SlotOp) B.setInsertionPointAfter(SlotOp);
-    mlir::NamedAttribute Cal(
-        mlir::StringAttr::get(&MCtx, "callee"),
-        mlir::StringAttr::get(&MCtx, "matlab_struct_new"));
-    mlir::Value NewPtr = emitUnreg("matlab.call_builtin", {}, PtrTy, L, {Cal});
-    emitStore(NewPtr, Slot, L);
+    /* REPL mode + binding known to hold a struct: pull the existing
+     * pointer from the workspace instead of allocating a fresh empty
+     * struct.  Two paths land here:
+     *   - cross-input: Resolver stamps Bnd->IsStruct when the
+     *     workspace-kind hook reports kind=12 for a prior input's
+     *     binding.
+     *   - same-input: StructBindings.count(Bnd) is set by the
+     *     AssignStmt RhsIsStruct path the moment we lower the
+     *     `lb = linkBudget(...)` LHS.  Without this, the same-TU
+     *     pair `lb = linkBudget(...); disp(lb.Distance)` would see
+     *     ensureStructSlot allocate a fresh matlab_struct_new() and
+     *     shadow the just-stored workspace value (which is the only
+     *     place the assign wrote to in REPL mode — there's no local
+     *     slot store for `lb`). */
+    bool LoadFromWorkspace =
+        ReplMode && InScriptBody &&
+        (Bnd->IsStruct || StructBindings.count(Bnd)) &&
+        Bnd->Kind == BindingKind::Var;
+    if (LoadFromWorkspace) {
+      mlir::Value NameV = emitFieldNameChar(Name, L);
+      mlir::NamedAttribute Cal(
+          mlir::StringAttr::get(&MCtx, "callee"),
+          mlir::StringAttr::get(&MCtx, "matlab_ws_get_mat"));
+      mlir::Value Ptr = emitUnreg("matlab.call_builtin", {NameV},
+                                   PtrTy, L, {Cal});
+      emitStore(Ptr, Slot, L);
+    } else {
+      mlir::NamedAttribute Cal(
+          mlir::StringAttr::get(&MCtx, "callee"),
+          mlir::StringAttr::get(&MCtx, "matlab_struct_new"));
+      mlir::Value NewPtr = emitUnreg("matlab.call_builtin", {}, PtrTy, L, {Cal});
+      emitStore(NewPtr, Slot, L);
+    }
   }
   return Slot;
 }
@@ -993,6 +1031,22 @@ mlir::Value Lowerer::resolveStructBase(const Expr *E, mlir::Location L) {
   if (!E) return {};
   if (auto *N = dynamic_cast<const NameExpr *>(E)) {
     if (!N->Ref) return {};
+    /* REPL mode + struct binding: in REPL the assign side bypasses
+     * the local slot and routes through matlab_ws_set_struct.  An
+     * ensureStructSlot path here would emit a stale matlab_struct_new
+     * (or a workspace-load placed at function-entry, before the
+     * assign hit the workspace) and shadow the real value.  Read
+     * directly from the workspace at the read site so we always see
+     * the latest store. */
+    if (ReplMode && InScriptBody && N->Ref->Kind == BindingKind::Var &&
+        (N->Ref->IsStruct || StructBindings.count(N->Ref))) {
+      auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+      mlir::Value NameV = emitFieldNameChar(N->Name, L);
+      mlir::NamedAttribute Cal(
+          mlir::StringAttr::get(&MCtx, "callee"),
+          mlir::StringAttr::get(&MCtx, "matlab_ws_get_mat"));
+      return emitUnreg("matlab.call_builtin", {NameV}, PtrTy, L, {Cal});
+    }
     mlir::Value Slot = ensureStructSlot(N->Ref, N->Name, L);
     auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
     return emitLoad(Slot, PtrTy, L);
@@ -2071,6 +2125,13 @@ void Lowerer::lowerStmt(const Stmt &St) {
     bool RhsIsDuration = false;
     bool RhsIsCategorical = false;
     bool RhsIsTable = false;
+    /* Plain matlab_struct* RHS — needs a dedicated workspace setter
+     * (matlab_ws_set_struct, kind=9) so field-access dispatch sees
+     * `s` as struct rather than mat on subsequent REPL turns.  RHS
+     * is struct when it's a direct call to a known struct-returning
+     * builtin (struct(...) itself, plus the PROP linkBudget) or a
+     * NameExpr referencing a previously-tagged struct binding. */
+    bool RhsIsStruct = false;
     /* Phase 6 — Symbolic Math Toolbox. RHS is sym-typed when:
      *  - direct call to a sym-producing builtin
      *  - NameExpr already in SymBindings (re-assignment)
@@ -2086,6 +2147,11 @@ void Lowerer::lowerStmt(const Stmt &St) {
          * gets the same dispatch as `T = table(...)`. */
         if (NE->Name == "table" || NE->Name == "readtable")
           RhsIsTable = true;
+        /* Known struct-returning builtins. struct() is the textbook
+         * literal; linkBudget is the PROP-Tier-2b struct return.
+         * Adding more is a one-liner per future entry. */
+        if (NE->Name == "struct" || NE->Name == "linkBudget")
+          RhsIsStruct = true;
       }
     } else if (A.RHS && A.RHS->Kind == NodeKind::NameExpr) {
       auto *NE = static_cast<const NameExpr *>(A.RHS);
@@ -2093,6 +2159,9 @@ void Lowerer::lowerStmt(const Stmt &St) {
         RhsIsCategorical = true;
       if (NE->Ref && TableBindings.count(NE->Ref))
         RhsIsTable = true;
+      if (NE->Ref &&
+          (StructInitialised.count(NE->Ref) || NE->Ref->IsStruct))
+        RhsIsStruct = true;
     }
     if (A.RHS && A.RHS->Kind == NodeKind::CallOrIndex) {
       auto *Cx = static_cast<const CallOrIndex *>(A.RHS);
@@ -2580,6 +2649,17 @@ void Lowerer::lowerStmt(const Stmt &St) {
       for (const Expr *L : A.LHS)
         if (auto *N = dynamic_cast<const NameExpr *>(L))
           if (N->Ref) TableBindings.insert(N->Ref);
+    }
+    if (RhsIsStruct) {
+      /* Tag for workspace-setter routing.  We use a separate set
+       * from `StructInitialised` because the latter ALSO suppresses
+       * the matlab_struct_new auto-init inside ensureStructSlot —
+       * we want the same-TU struct lowering to keep doing its init,
+       * just have the cross-input workspace-store route via
+       * matlab_ws_set_struct rather than _set_mat. */
+      for (const Expr *L : A.LHS)
+        if (auto *N = dynamic_cast<const NameExpr *>(L))
+          if (N->Ref) StructBindings.insert(N->Ref);
     }
     if (RhsIsSym) {
       for (const Expr *L : A.LHS)
@@ -3286,17 +3366,20 @@ void Lowerer::lowerLValueStore(const Expr &LHS, mlir::Value Rhs) {
       bool IsCategorical = CategoricalBindings.count(N.Ref) != 0;
       bool IsDatetime = DatetimeBindings.count(N.Ref) != 0;
       bool IsDuration = DurationBindings.count(N.Ref) != 0;
+      bool IsStruct   = (N.Ref &&
+                         (StructBindings.count(N.Ref) || N.Ref->IsStruct));
       llvm::StringRef Callee =
           IsSymmat       ? "matlab_ws_set_symmat"
                          : (IsSym ? "matlab_ws_set_sym"
                               : (IsString ? "matlab_ws_set_string"
                               : (IsObj    ? "matlab_ws_set_obj"
+                              : (IsStruct ? "matlab_ws_set_struct"
                               : (IsTable  ? "matlab_ws_set_table"
                               : (IsCategorical ? "matlab_ws_set_categorical"
                               : (IsDatetime    ? "matlab_ws_set_datetime"
                               : (IsDuration    ? "matlab_ws_set_duration"
                               : (IsMat ? "matlab_ws_set_mat"
-                                       : "matlab_ws_set_f64"))))))));
+                                       : "matlab_ws_set_f64")))))))));
       mlir::NamedAttribute Cal(
           mlir::StringAttr::get(&MCtx, "callee"),
           mlir::StringAttr::get(&MCtx, Callee));

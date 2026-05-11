@@ -202,6 +202,31 @@ void matlab_ws_set_mat(const char *name, int64_t len, matlab_mat *m) {
     matlab_ws_check_watch(name, len);
 }
 
+/* Plain struct (matlab_struct*) assignment to the workspace.
+ * Stores the struct pointer with kind=12 so Resolver / Lowering can
+ * tell it apart from a class instance (kind=2) and a real matrix
+ * (kind=1) on the next REPL turn — field-access dispatch needs to
+ * see the binding as struct, not matrix.  Layout-compatible with
+ * matlab_obj* (same prefix), so the existing matlab_struct_get_*
+ * helpers walk it correctly.
+ *
+ * Note: kinds 6/9/10/11 are reserved for table / categorical /
+ * datetime / duration (see matlab_struct_get_mat); kind=12 is the
+ * next free slot. */
+void matlab_ws_set_struct(const char *name, int64_t len, matlab_struct *s) {
+    matlab_ws_init_if_needed();
+    matlab_ws_lock();
+    struct matlab_dbg_undo_rec *r =
+        matlab_ws_push_undo_locked(name, len, /*kind=*/12);
+    int32_t idx = struct_reserve(matlab_ws, name, (int32_t)len);
+    matlab_ws->kinds[idx] = 12;
+    matlab_ws->f64_vals[idx] = 0.0;
+    matlab_ws->ptr_vals[idx] = s;
+    matlab_dbg_undo_record_set_new_ptr(r, /*new_kind=*/12, s);
+    matlab_ws_unlock();
+    matlab_ws_check_watch(name, len);
+}
+
 /* Class-instance assignment to the script-level workspace. Stores
  * the obj pointer with kind=2 so matlab_dbg_ws_kind reports it as
  * an object — the DAP formatter then routes through the obj path

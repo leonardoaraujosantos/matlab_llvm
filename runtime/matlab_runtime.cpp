@@ -6160,7 +6160,11 @@ matlab_mat *matlab_struct_get_mat(matlab_struct *s, const char *name, int64_t le
     if ((s->kinds[idx] == 6  ||
          s->kinds[idx] == 9  ||
          s->kinds[idx] == 10 ||
-         s->kinds[idx] == 11) && s->ptr_vals[idx])
+         s->kinds[idx] == 11 ||
+         /* kind=12 is matlab_struct* — plain field-holder, layout-
+          * compatible with matlab_obj*.  Pass the pointer through so
+          * cross-REPL-turn field accesses see the descriptor. */
+         s->kinds[idx] == 12) && s->ptr_vals[idx])
         return (matlab_mat *)s->ptr_vals[idx];
     /* Box a scalar field into a 1x1 matrix. */
     if (s->kinds[idx] == 0) {

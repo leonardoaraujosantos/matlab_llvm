@@ -897,6 +897,23 @@ void Resolver::resolveExpr(Expr &E, Scope *S) {
   case NodeKind::NameExpr: {
     auto &N = static_cast<NameExpr &>(E);
     Binding *B = S->lookup(N.Name);
+    /* REPL workspace shadowing: when the same identifier exists as
+     * BOTH a registered builtin (e.g. `grid` — a plotting function)
+     * AND a workspace variable from a prior input, the user almost
+     * certainly meant the variable (they assigned to it earlier).
+     * In a single TU the resolver gets this right because the assign
+     * gets ahead of any read — `grid = ...; grid(:)` resolves `grid`
+     * locally on the read, shadowing the builtin.  In REPL the assign
+     * lives in a previous TU's scope and only the workspace knows
+     * about it, so the lookup falls back to the builtin and `grid(:)`
+     * gets lowered as a function call.  Force the auto-declare path
+     * when WorkspaceKindHook reports a real value for this name. */
+    if (B && ReplMode && WorkspaceKindHook &&
+        (B->Kind == BindingKind::Builtin ||
+         B->Kind == BindingKind::Function) &&
+        WorkspaceKindHook(N.Name.data(), (int64_t)N.Name.size()) >= 0) {
+      B = nullptr;
+    }
     if (!B) {
       /* REPL mode: names that don't resolve are auto-declared as Vars
        * in the current (script) scope. Lowering then routes the read
@@ -930,6 +947,14 @@ void Resolver::resolveExpr(Expr &E, Scope *S) {
            *   scalar Array(UInt8/Int32, unknown) so the BinaryOp emit
            *   site picks the typed runtime entry points. */
           if (K == 0) NB->InferredType = TC.scalar(Dtype::Double);
+          /* Kind 1 = generic matlab_mat* (real double matrix). Without
+           * this stamp, downstream MLIR lowerings fall back to a ptr-
+           * typed workspace load and elementwise operations (`.*`,
+           * matrix `+ -`, `norm`, etc.) misdispatch on the next REPL
+           * turn. Stamp the canonical "double array of unknown shape"
+           * so the BinaryOp / call_builtin path picks the matrix-mat
+           * runtime entries. */
+          else if (K == 1) NB->InferredType = TC.arrayOf(Dtype::Double, Shape::unknown());
           else if (K == 3) NB->InferredType = TC.stringScalar();
           else if (K == 4) NB->InferredType = TC.arrayOf(Dtype::UInt8, Shape::unknown());
           else if (K == 5) NB->InferredType = TC.arrayOf(Dtype::Int32, Shape::unknown());
@@ -940,6 +965,12 @@ void Resolver::resolveExpr(Expr &E, Scope *S) {
           else if (K == 7) NB->IsSym = true;
           /* Kind 8 = matlab_symmat* (Phase 6.1 — symbolic matrix). */
           else if (K == 8) NB->IsSymmat = true;
+          /* Kind 12 = matlab_struct* (plain field-holder, not a
+           * classdef instance).  Stamping IsStruct lets the MLIR
+           * lowering re-populate StructInitialised on the next
+           * compile so `lb.PathLoss` and friends route through the
+           * struct-get path. */
+          else if (K == 12) NB->IsStruct = true;
         }
       } else {
         Diag.error(N.Range.Begin,

@@ -53,6 +53,12 @@ struct Binding {
   /* Phase 6.1 — symbolic matrix (kind=8). Same cross-TU REPL story as
    * IsSym, but routes through matlab_ws_get_symmat / matlab_symmat_*. */
   bool IsSymmat = false;
+  /* Plain matlab_struct* (kind=9). Set when the REPL workspace-kind
+   * hook reports a struct binding from a prior input; consumed by the
+   * MLIR lowering to re-populate StructInitialised so field accesses
+   * (`s.x`) and re-assignments route through the struct-aware path
+   * instead of the matrix one. */
+  bool IsStruct = false;
 };
 
 class Scope {

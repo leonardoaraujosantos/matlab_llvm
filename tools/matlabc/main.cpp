@@ -361,6 +361,62 @@ int blockDepth(const std::vector<Token> &Toks) {
   return d < 0 ? 0 : d;
 }
 
+/* Bracket / paren / brace depth across the token stream.  Used by
+ * the REPL to keep buffering input while an expression is mid-flight
+ * (e.g. a `(...)` arg list or a `[...]` literal spanning multiple
+ * lines).  Returns 0 when all brackets are balanced. */
+int bracketDepth(const std::vector<Token> &Toks) {
+  int p = 0, sq = 0, br = 0;
+  for (const auto &T : Toks) {
+    switch (T.Kind) {
+    case TokenKind::l_paren:  ++p;  break;
+    case TokenKind::r_paren:  --p;  break;
+    case TokenKind::l_square: ++sq; break;
+    case TokenKind::r_square: --sq; break;
+    case TokenKind::l_brace:  ++br; break;
+    case TokenKind::r_brace:  --br; break;
+    default: break;
+    }
+  }
+  int total = (p < 0 ? 0 : p) + (sq < 0 ? 0 : sq) + (br < 0 ? 0 : br);
+  return total;
+}
+
+/* True if the raw input text ends with a MATLAB line continuation
+ * (`...` after stripping a trailing `%` line-comment and whitespace).
+ * The lexer consumes `...` silently — it does not emit an ellipsis
+ * token in the canonical case — so the REPL has to inspect the raw
+ * source to know that the user is mid-statement. */
+bool hasTrailingEllipsis(const std::string &Src) {
+  /* Walk back from the end, skipping CR / LF / spaces / tabs and any
+   * trailing line-comment (`% ...`).  If we land on a `...` triple,
+   * the statement is unfinished. */
+  int n = (int)Src.size();
+  int i = n - 1;
+  /* Strip trailing newline / whitespace. */
+  while (i >= 0 && (Src[i] == '\n' || Src[i] == '\r' ||
+                     Src[i] == ' ' || Src[i] == '\t'))
+    --i;
+  /* Strip a trailing line-comment if present.  Scan backwards from
+   * the current end position to the nearest preceding newline; if
+   * that segment starts with `%`, treat it as a comment and clip. */
+  if (i >= 0) {
+    int line_start = i;
+    while (line_start > 0 && Src[line_start - 1] != '\n') --line_start;
+    /* Look for the first `%` on this line that is NOT inside a quoted
+     * string.  We don't have a full lex state here; the simple
+     * heuristic of "first %" matches the textbook case and is the
+     * pattern shown in the REPL transcript. */
+    for (int j = line_start; j <= i; ++j) {
+      if (Src[j] == '%') { i = j - 1; break; }
+    }
+    /* Re-strip trailing whitespace before the comment we just dropped. */
+    while (i >= 0 && (Src[i] == ' ' || Src[i] == '\t'))
+      --i;
+  }
+  return i >= 2 && Src[i] == '.' && Src[i - 1] == '.' && Src[i - 2] == '.';
+}
+
 /* Format every diagnostic in `Diag` as a single multi-line string,
  * one diag per line in `<file>:<line>:<col>: <level>: <message>`
  * shape. Used by the DAP evaluate handler to carry compile errors
@@ -1240,13 +1296,20 @@ int runRepl() {
     Accum += Line;
     Accum += '\n';
 
-    /* Lex once to decide if we have a complete balanced input. */
+    /* Lex once to decide if we have a complete balanced input.
+     * Three things can keep the REPL collecting more lines:
+     *   - block-level keywords still open (if / for / function / ...),
+     *   - paren / bracket / brace depth > 0,
+     *   - the last meaningful chars on the trailing line are `...`
+     *     (MATLAB line-continuation; the lexer eats it silently). */
     SourceManager SM;
     FileID F = SM.addBuffer("<repl>", Accum);
     DiagnosticEngine Diag(SM);
     Lexer Lx(SM, F, Diag);
     auto Toks = Lx.tokenize();
-    if (blockDepth(Toks) > 0) continue;  /* need more input */
+    if (blockDepth(Toks)   > 0) continue;
+    if (bracketDepth(Toks) > 0) continue;
+    if (hasTrailingEllipsis(Accum)) continue;
 
     (void)runReplInput(MCtx, Accum, Counter++);
 #ifdef MATLAB_LLVM_WITH_PLOT
