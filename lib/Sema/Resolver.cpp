@@ -306,6 +306,11 @@ void Resolver::registerBuiltins() {
     "costasPll", "symbolSyncMM", "preambleDetect",
     "phaseFreqOffset", "iqimbal", "memorylessNl", "phaseNoise",
     "vitdecSoft",
+    /* COMM Tier-5 — OFDM / fading / MIMO
+     * (docs/comm_toolbox_roadmap.md §7).  Function-form. */
+    "ofdmmod", "ofdmdemod",
+    "rayleighChannel", "ricianChannel",
+    "ostbcEncode", "ostbcCombine", "mlDetect",
   }) {
     registerBuiltin(N);
   }

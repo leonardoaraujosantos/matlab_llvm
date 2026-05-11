@@ -20,6 +20,9 @@ bash runtime/build_and_run.sh examples/comm/<name>.m /tmp/<name>
 | `tier4_smoke.m` | 4 | One canonical call per Tier-4 entry: `lms` / `rls` / `cma` / `dfe` adaptive equalisers; `costasPll`, `symbolSyncMM`, `preambleDetect` sync; `phaseFreqOffset`, `iqimbal`, `memorylessNl`, `phaseNoise` impairments; `vitdecSoft` soft-decision Viterbi. |
 | `ber_soft_vs_hard.m` | 4 | **Tier-4 closure** — hard vs soft Viterbi BER curves on (171, 133)₈ K=7 convolutional + BPSK + AWGN at Eb/N0 ∈ {1, 2, 3, 4, 5} dB. Soft sits ~3 dB to the left of hard (at 50 k bits/point: hard 0.120 / soft 0.0051 at Eb/N0 = 5 dB). |
 | `impairment_demo.m` | 4 | Applies each of the four canonical RF impairments to a clean QPSK constellation in isolation (`phaseFreqOffset`, `iqimbal`, `memorylessNl` Rapp, `phaseNoise`) plus a combined chain, reporting the per-step distortion via `norm(abs(y) - abs(clean))`. |
+| `tier5_smoke.m` | 5 | One canonical call per Tier-5 entry: `ofdmmod` + `ofdmdemod` round-trip, `rayleighChannel` + `ricianChannel` multi-path channels (with two-tap delay / gain vectors), `ostbcEncode` Alamouti 2-Tx encoder, `mlDetect` per-symbol Euclidean ML decision against a 4-PSK alphabet. |
+| `ofdm_awgn.m` | 5 | Single-symbol OFDM loopback over AWGN at SNR = 15 dB: 64 QPSK subcarriers + CP = 16 → 0 errors after `ofdmdemod` + `mlDetect`. |
+| `alamouti_diversity.m` | 5 | **Tier-5 closure** — Alamouti 2-Tx encode → known scalar channel `(h1, h2)` + AWGN → maximum-ratio combine → `mlDetect`. At 10 dB SNR Alamouti reaches 0 errors vs the single-Tx baseline 0.0027 symerr (the combiner's coherent gain). |
 
 ## API conventions
 
@@ -74,3 +77,14 @@ To stay inside the single-return dispatch convention, `biterr(x, y)` returns jus
 | `memorylessNl` `model_code` | 0 = cubic clipper (`p1` = saturation amplitude); 1 = Saleh (`p1` = α_a, `p2` = β_a, `p3` = α_p, `p4` = β_p); 2 = Rapp (`p1` = smoothness `p`, `p2` = `Asat`); 3 = Ghorbani-style 4-parameter form |
 | `vitdecSoft` `opmode` | 0 = truncated, 1 = terminated (assume end-state 0) |
 | `vitdecSoft` input | Real values where positive ⇒ favours bit = 0 (matches the `qamdemodLlr` convention) |
+
+### Tier-5 conventions
+
+| Entry | Convention |
+|---|---|
+| `ofdmmod(data, Nfft, cp_len)` | `data` is an `Nfft × Nsym` complex matrix (rows = subcarriers, columns = OFDM symbols). Pilots / nulls / guards are caller-side compositions: zero out the relevant subcarrier rows of `data` before calling. Output is `(Nfft + cp_len) · Nsym × 1` complex. |
+| `ofdmdemod(samples, Nfft, cp_len)` | Inverse: strips the per-symbol cyclic prefix then FFTs each block. Returns `Nfft × Nsym` complex. |
+| `rayleighChannel` / `ricianChannel` `delays_samples`, `gains_dB` | Both must have ≥ 2 elements (single-element `[0]` literal gets typed as scalar f64 and fails the ptr-arg dispatch). For a degenerate single-tap channel use `[0; 0]` paired with `[0; -200]` (the second path is then ~80 dB below the first). |
+| `rayleighChannel` length convention | Output length = `length(x) + max(delays_samples)` (per-path delays extend the output beyond the input). |
+| `ostbcCombine` channel gains | Pass real / imag components as four separate scalar args (no complex-scalar dispatch yet). Channel is assumed flat across the burst; for time-varying channels split the burst into coherence-time chunks. |
+| Complex outputs `size` / indexing | The `size`/`length` runtime entries read the real-matrix layout; on a `matlab_mat_c` result they return garbage. Take `abs(...)` first when you need shape introspection or scalar indexing on the magnitude. |

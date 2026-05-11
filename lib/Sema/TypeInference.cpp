@@ -1146,6 +1146,13 @@ const Type *TypeInference::visitBuiltinCall(std::string_view Name,
       Name == "vitdecSoft")
     return TC.arrayOf(Dtype::Double, Shape::unknown());
 
+  /* Tier-5 OFDM / fading / MIMO. */
+  if (Name == "ofdmmod" || Name == "ofdmdemod" ||
+      Name == "rayleighChannel" || Name == "ricianChannel" ||
+      Name == "ostbcEncode" || Name == "ostbcCombine" ||
+      Name == "mlDetect")
+    return TC.arrayOf(Dtype::Double, Shape::unknown());
+
   if (Name == "linspace") {
     int64_t N = -1;
     if (Args.size() >= 3) N = foldInt(Args[2]);

@@ -4478,6 +4478,18 @@ bool TensorLowering::rewriteBuiltinCalls() {
       /* Soft-decision Viterbi extension (Tier-3 follow-on parked
        * with the Tier-4 RF-impairment + soft-demod slice). */
       {"vitdecSoft",     "matlab_comm_vitdec_soft",      1, "ppff"},
+      /* === Communications Toolbox Tier-5 — OFDM / fading / MIMO ===
+       * docs/comm_toolbox_roadmap.md §7.  Function-form. */
+      /* §7.1 OFDM. */
+      {"ofdmmod",   "matlab_comm_ofdmmod",   1, "pff"},
+      {"ofdmdemod", "matlab_comm_ofdmdemod", 1, "pff"},
+      /* §7.2 fading channels. */
+      {"rayleighChannel", "matlab_comm_rayleigh_channel", 1, "pppff"},
+      {"ricianChannel",   "matlab_comm_rician_channel",   1, "pfppff"},
+      /* §7.3 MIMO (Alamouti 2-Tx + ML detect). */
+      {"ostbcEncode",  "matlab_comm_ostbc_encode",  1, "p"},
+      {"ostbcCombine", "matlab_comm_ostbc_combine", 1, "pffff"},
+      {"mlDetect",     "matlab_comm_ml_detect",     1, "pp"},
     };
 
     // Pick the first entry with name + arity + TYPE match so overloaded

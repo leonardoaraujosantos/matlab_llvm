@@ -1869,6 +1869,276 @@ matlab_mat_c *matlab_comm_phase_noise(matlab_mat_c *x,
     return y;
 }
 
+/* ===== Tier-5 — OFDM / fading / MIMO ===================================== *
+ *
+ * docs/comm_toolbox_roadmap.md §7. Function-form: OFDM mod / demod,
+ * Rayleigh / Rician fading channels with Jakes-style Doppler,
+ * Alamouti 2x1 space-time block coding, simple ML detector + 2x2
+ * complex ZF MIMO detect.  The comm.OFDMModulator / RayleighChannel
+ * / RicianChannel / OSTBC* System Objects stay gated on the SO fix;
+ * sphere decoding defers to a follow-on (needs lattice reduction). */
+
+extern matlab_mat_c *matlab_fft_c(void *Aptr);
+extern matlab_mat_c *matlab_ifft_c(void *Aptr);
+
+/* ----- §7.1 OFDM mod / demod ---------------------------------------------
+ *
+ * ofdmmod(data, fft_len, cp_len): data is Nfft x Nsym complex.  For
+ * each column we IFFT to time domain then prepend cp_len samples
+ * (the last cp_len of the IFFT output).  Result is a
+ * (Nfft+cp_len)*Nsym x 1 complex column.
+ */
+matlab_mat_c *matlab_comm_ofdmmod(matlab_mat_c *data, double fft_len_d,
+                                   double cp_len_d) {
+    if (!data) return mat_c_alloc(0, 0);
+    int64_t Nfft = (int64_t)fft_len_d;
+    int64_t Lcp  = (int64_t)cp_len_d;
+    if (Nfft < 1) Nfft = 1;
+    if (Lcp  < 0) Lcp  = 0;
+    if (data->rows != Nfft) return mat_c_alloc(0, 0);
+    int64_t Nsym = data->cols;
+    int64_t Lout = (Nfft + Lcp) * Nsym;
+    matlab_mat_c *out = mat_c_alloc(Lout, 1);
+    /* Work column buffer for IFFT. */
+    matlab_mat_c col;
+    col.magic = 0xC0FFEE01u;
+    col.rows = Nfft;
+    col.cols = 1;
+    std::vector<double> re_buf(Nfft), im_buf(Nfft);
+    col.re = re_buf.data();
+    col.im = im_buf.data();
+    for (int64_t k = 0; k < Nsym; ++k) {
+        /* Extract column k from data (row-major (Nfft, Nsym) layout). */
+        for (int64_t i = 0; i < Nfft; ++i) {
+            re_buf[i] = data->re[i * data->cols + k];
+            im_buf[i] = data->im[i * data->cols + k];
+        }
+        matlab_mat_c *T = matlab_ifft_c((void *)&col);
+        int64_t base = k * (Nfft + Lcp);
+        for (int64_t i = 0; i < Lcp; ++i) {
+            int64_t src = Nfft - Lcp + i;
+            out->re[base + i] = T->re[src];
+            out->im[base + i] = T->im[src];
+        }
+        for (int64_t i = 0; i < Nfft; ++i) {
+            out->re[base + Lcp + i] = T->re[i];
+            out->im[base + Lcp + i] = T->im[i];
+        }
+        free(T->re); free(T->im); free(T);
+    }
+    return out;
+}
+
+matlab_mat_c *matlab_comm_ofdmdemod(matlab_mat_c *samples, double fft_len_d,
+                                     double cp_len_d) {
+    if (!samples) return mat_c_alloc(0, 0);
+    int64_t Nfft = (int64_t)fft_len_d;
+    int64_t Lcp  = (int64_t)cp_len_d;
+    if (Nfft < 1) Nfft = 1;
+    if (Lcp  < 0) Lcp  = 0;
+    int64_t Lin = samples->rows * samples->cols;
+    int64_t Nsym = Lin / (Nfft + Lcp);
+    if (Nsym < 1) return mat_c_alloc(0, 0);
+    matlab_mat_c *out = mat_c_alloc(Nfft, Nsym);
+    matlab_mat_c col;
+    col.magic = 0xC0FFEE01u;
+    col.rows = Nfft;
+    col.cols = 1;
+    std::vector<double> re_buf(Nfft), im_buf(Nfft);
+    col.re = re_buf.data();
+    col.im = im_buf.data();
+    for (int64_t k = 0; k < Nsym; ++k) {
+        int64_t base = k * (Nfft + Lcp) + Lcp;
+        for (int64_t i = 0; i < Nfft; ++i) {
+            re_buf[i] = samples->re[base + i];
+            im_buf[i] = samples->im[base + i];
+        }
+        matlab_mat_c *F = matlab_fft_c((void *)&col);
+        for (int64_t i = 0; i < Nfft; ++i) {
+            out->re[i * Nsym + k] = F->re[i];
+            out->im[i * Nsym + k] = F->im[i];
+        }
+        free(F->re); free(F->im); free(F);
+    }
+    return out;
+}
+
+/* ----- §7.2 fading channels ---------------------------------------------- *
+ *
+ * Sum-of-sinusoids Jakes generator for a single Rayleigh path.  Fills
+ * (re, im) with N samples of unit-power complex Gaussian-like fading
+ * (mean(|h|^2) ≈ 1).  Mosalavi 2002 modified Jakes; M = 16 oscillators.
+ */
+static void jakes_gen(double *re, double *im, int64_t N,
+                       double max_doppler_Hz, double fs_Hz) {
+    if (fs_Hz <= 0.0) fs_Hz = 1.0;
+    const int M = 16;
+    std::vector<double> phi(M), theta(M);
+    for (int m = 0; m < M; ++m) {
+        phi[m]   = 2.0 * M_PI * comm_uniform();
+        theta[m] = 2.0 * M_PI * comm_uniform();
+    }
+    double wd = 2.0 * M_PI * max_doppler_Hz / fs_Hz;
+    for (int64_t n = 0; n < N; ++n) {
+        double sr = 0.0, si = 0.0;
+        for (int m = 0; m < M; ++m) {
+            double alpha = (2.0 * M_PI * (double)(m + 1) - M_PI + theta[m]) / (4.0 * (double)M);
+            double c = wd * (double)n * cos(alpha) + phi[m];
+            sr += cos(c);
+            si += sin(c);
+        }
+        re[n] = sr / sqrt((double)M);
+        im[n] = si / sqrt((double)M);
+    }
+}
+
+/* rayleighChannel(x, delays_samples, gains_dB, max_doppler_Hz, fs_Hz).
+ * Each path gets its own independent Jakes process; the channel
+ * output is the sum of g_p · h_p[n] · x[n - d_p] over paths. */
+matlab_mat_c *matlab_comm_rayleigh_channel(matlab_mat_c *x, matlab_mat *delays,
+                                            matlab_mat *gains_dB,
+                                            double max_doppler_Hz, double fs_Hz) {
+    if (!x || !delays || !gains_dB) return mat_c_alloc(0, 0);
+    int P = (int)(delays->rows * delays->cols);
+    int Pg = (int)(gains_dB->rows * gains_dB->cols);
+    if (P < 1 || Pg < P) return mat_c_alloc(0, 0);
+    int64_t Nin = x->rows * x->cols;
+    int64_t max_delay = 0;
+    std::vector<int64_t> d_int(P);
+    for (int p = 0; p < P; ++p) {
+        d_int[p] = (int64_t)delays->data[p];
+        if (d_int[p] < 0) d_int[p] = 0;
+        if (d_int[p] > max_delay) max_delay = d_int[p];
+    }
+    std::vector<double> g_lin(P);
+    for (int p = 0; p < P; ++p)
+        g_lin[p] = pow(10.0, gains_dB->data[p] / 20.0);
+    int64_t Nout = Nin + max_delay;
+    matlab_mat_c *y = mat_c_alloc(Nout, 1);
+    std::vector<std::vector<double>> hre(P), him(P);
+    for (int p = 0; p < P; ++p) {
+        hre[p].resize(Nin);
+        him[p].resize(Nin);
+        jakes_gen(hre[p].data(), him[p].data(), Nin, max_doppler_Hz, fs_Hz);
+    }
+    for (int64_t n = 0; n < Nout; ++n) {
+        double yr = 0.0, yi = 0.0;
+        for (int p = 0; p < P; ++p) {
+            int64_t k = n - d_int[p];
+            if (k < 0 || k >= Nin) continue;
+            double xr = x->re[k];
+            double xi = x->im[k];
+            double hr = g_lin[p] * hre[p][k];
+            double hi = g_lin[p] * him[p][k];
+            yr += xr * hr - xi * hi;
+            yi += xr * hi + xi * hr;
+        }
+        y->re[n] = yr;
+        y->im[n] = yi;
+    }
+    return y;
+}
+
+/* ricianChannel(x, K_dB, delays, gains_dB, max_doppler, fs).
+ * LOS component is the input itself scaled by sqrt(K / (K+1));
+ * scatter component is Rayleigh scaled by sqrt(1 / (K+1)). */
+matlab_mat_c *matlab_comm_rician_channel(matlab_mat_c *x, double K_dB,
+                                          matlab_mat *delays, matlab_mat *gains_dB,
+                                          double max_doppler_Hz, double fs_Hz) {
+    matlab_mat_c *scatter = matlab_comm_rayleigh_channel(x, delays, gains_dB,
+                                                          max_doppler_Hz, fs_Hz);
+    if (!scatter) return mat_c_alloc(0, 0);
+    double K = pow(10.0, K_dB / 10.0);
+    double a_los     = sqrt(K / (K + 1.0));
+    double a_scatter = sqrt(1.0 / (K + 1.0));
+    int64_t N = scatter->rows * scatter->cols;
+    int64_t Nin = x->rows * x->cols;
+    for (int64_t n = 0; n < N; ++n) {
+        double sr = a_scatter * scatter->re[n];
+        double si = a_scatter * scatter->im[n];
+        if (n < Nin) {
+            sr += a_los * x->re[n];
+            si += a_los * x->im[n];
+        }
+        scatter->re[n] = sr;
+        scatter->im[n] = si;
+    }
+    return scatter;
+}
+
+/* ----- §7.3 Alamouti space-time block coding ----------------------------- *
+ *
+ * ostbcEncode(x): 2k x 1 complex input -> 2k x 2 complex output;
+ * column 1 is the Tx1 stream, column 2 is the Tx2 stream. */
+matlab_mat_c *matlab_comm_ostbc_encode(matlab_mat_c *x) {
+    if (!x) return mat_c_alloc(0, 0);
+    int64_t N = x->rows * x->cols;
+    if (N % 2 != 0) N -= 1;
+    matlab_mat_c *out = mat_c_alloc(N, 2);
+    for (int64_t k = 0; k < N / 2; ++k) {
+        double s0r = x->re[2 * k],     s0i = x->im[2 * k];
+        double s1r = x->re[2 * k + 1], s1i = x->im[2 * k + 1];
+        out->re[(2 * k) * 2 + 0] = s0r; out->im[(2 * k) * 2 + 0] = s0i;
+        out->re[(2 * k) * 2 + 1] = s1r; out->im[(2 * k) * 2 + 1] = s1i;
+        out->re[(2 * k + 1) * 2 + 0] = -s1r; out->im[(2 * k + 1) * 2 + 0] =  s1i;
+        out->re[(2 * k + 1) * 2 + 1] =  s0r; out->im[(2 * k + 1) * 2 + 1] = -s0i;
+    }
+    return out;
+}
+
+/* ostbcCombine(y, h1_re, h1_im, h2_re, h2_im): 2-Tx Alamouti
+ * maximum-ratio combiner at a single-RX terminal. Channel gains are
+ * scalar (flat-fading assumption — caller breaks the burst into
+ * coherence-time chunks if needed). */
+matlab_mat_c *matlab_comm_ostbc_combine(matlab_mat_c *y,
+                                         double h1_re, double h1_im,
+                                         double h2_re, double h2_im) {
+    if (!y) return mat_c_alloc(0, 0);
+    int64_t N = y->rows * y->cols;
+    if (N % 2 != 0) N -= 1;
+    double norm2 = h1_re * h1_re + h1_im * h1_im + h2_re * h2_re + h2_im * h2_im;
+    if (norm2 <= 0.0) norm2 = 1.0;
+    matlab_mat_c *out = mat_c_alloc(N, 1);
+    for (int64_t k = 0; k < N / 2; ++k) {
+        double y0r = y->re[2 * k],     y0i = y->im[2 * k];
+        double y1r = y->re[2 * k + 1], y1i = y->im[2 * k + 1];
+        double t1r = h1_re * y0r + h1_im * y0i;
+        double t1i = h1_re * y0i - h1_im * y0r;
+        double t2r = h2_re * y1r + h2_im * y1i;
+        double t2i = h2_re * (-y1i) + h2_im * y1r;
+        out->re[2 * k]     = (t1r + t2r) / norm2;
+        out->im[2 * k]     = (t1i + t2i) / norm2;
+        double u1r = h2_re * y0r + h2_im * y0i;
+        double u1i = h2_re * y0i - h2_im * y0r;
+        double u2r = h1_re * y1r + h1_im * y1i;
+        double u2i = h1_re * (-y1i) + h1_im * y1r;
+        out->re[2 * k + 1] = (u1r - u2r) / norm2;
+        out->im[2 * k + 1] = (u1i - u2i) / norm2;
+    }
+    return out;
+}
+
+/* mlDetect(y, alphabet): per-symbol ML decision against a complex
+ * alphabet of M candidate constellation points. */
+matlab_mat *matlab_comm_ml_detect(matlab_mat_c *y, matlab_mat_c *alphabet) {
+    if (!y || !alphabet) return mat_alloc(0, 0);
+    int64_t N = y->rows * y->cols;
+    int64_t M = alphabet->rows * alphabet->cols;
+    matlab_mat *out = mat_alloc(N, 1);
+    for (int64_t n = 0; n < N; ++n) {
+        double best = 1e300;
+        int64_t best_i = 0;
+        for (int64_t i = 0; i < M; ++i) {
+            double dr = y->re[n] - alphabet->re[i];
+            double di = y->im[n] - alphabet->im[i];
+            double d2 = dr * dr + di * di;
+            if (d2 < best) { best = d2; best_i = i; }
+        }
+        out->data[n] = (double)best_i;
+    }
+    return out;
+}
+
 /* ----- §6.x soft-decision Viterbi extension ----- *
  *
  * vitdecSoft(llr_or_quantised, trellis, tblen, opmode) — soft-input

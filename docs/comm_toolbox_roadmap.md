@@ -1236,11 +1236,16 @@ piece (lattice reduction-based search).
 
 | Primitive | Effort | Status |
 |---|---|---|
-| OFDM (6.1) | 1.5 wk | 🔵 |
-| Fading channels (6.2) | 2 wk | 🔵 |
-| MIMO (6.3) | 1.5 wk | 🔵 |
+| OFDM (7.1) | 1.5 wk | ✅ shipped (`ofdmmod` / `ofdmdemod` function-form over `Nfft × Nsym` complex; CP insert/strip; pilots / guards are caller-side compositions; `comm.OFDMModulator` / `OFDMDemodulator` System Objects gated on SO fix) |
+| Fading channels (7.2) | 2 wk | ✅ shipped (`rayleighChannel` multi-path Jakes sum-of-sinusoids; `ricianChannel` LOS + scatter decomposition with K_dB; `comm.RayleighChannel` / `RicianChannel` System Objects gated on SO fix; complex MIMO fading via `comm.MIMOChannel` deferred) |
+| MIMO (7.3) | 1.5 wk | ✅ shipped (Alamouti `ostbcEncode` 2-Tx + `ostbcCombine` MRC receiver; `mlDetect` per-symbol Euclidean nearest; `comm.OSTBCEncoder` / `OSTBCCombiner` System Objects + `comm.SphereDecoder` + complex ZF/MMSE detect gated on SO fix and the future complex-LU runtime) |
+| Closure tests (`ofdm_awgn.m`, `alamouti_diversity.m`) | — | ✅ shipped (OFDM AWGN loopback 0 symbol errors at 15 dB; Alamouti combine recovers the input symbols 0 errors at 10 dB SNR vs single-Tx 0.27% baseline) |
 
-**Total**: ~5 weeks. Lights up the modern wireless PHY surface.
+**Total**: ~5 weeks. Lights up the modern wireless PHY surface. The
+classdef System-Object variants of every entry in this tier stay
+gated on the SO lowering fix. Sphere decoding, MIMO ZF / MMSE
+detection on general H, and the `comm.MIMOChannel` spatial-correlation
+fading are follow-ons (need the complex-LU runtime).
 
 ---
 
