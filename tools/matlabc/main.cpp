@@ -1610,6 +1610,13 @@ static std::string buildReplPrelude(const std::string &Src) {
      * cube + Touchstone reader land in a follow-on slice once
      * matrix-typed classdef property storage is in. */
     {false, "RFSparameters", "rf_class_sparameters.m"},
+    /* RF Propagation site descriptors (MathWorks txsite / rxsite
+     * shape).  Constructed via the kwarg-sugar — every property is
+     * scalar or string (no matrices), so the catalog skeleton
+     * works today without additional infrastructure. */
+    {false, "TxSite", "rf_class_txsite.m"},
+    {false, "RxSite", "rf_class_rxsite.m"},
+    {false, "PropagationModel", "rf_class_propagationmodel.m"},
   };
   /* Source-mention scan: turn-0-style detection. */
   for (auto &W : Cls) if (mentions(W.Name)) W.active = true;
@@ -8483,6 +8490,8 @@ int main(int Argc, char **Argv) {
       "AntDipole", "AntMonopole",
       /* RF catalog (RF-Tier-1). */
       "RFSparameters",
+      /* RF Propagation site descriptors. */
+      "TxSite", "RxSite", "PropagationModel",
     };
     for (const char *N : Names) {
       size_t NL = std::strlen(N);
@@ -8520,6 +8529,12 @@ int main(int Argc, char **Argv) {
       return "ant_class_monopole.m";
     if (ClsName == "RFSparameters")
       return "rf_class_sparameters.m";
+    if (ClsName == "TxSite")
+      return "rf_class_txsite.m";
+    if (ClsName == "RxSite")
+      return "rf_class_rxsite.m";
+    if (ClsName == "PropagationModel")
+      return "rf_class_propagationmodel.m";
     return std::string();
   };
   for (const std::string &Cls : userMentionsExtClasses(Opts.InputPath)) {

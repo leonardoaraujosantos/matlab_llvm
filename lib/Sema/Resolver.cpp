@@ -149,6 +149,11 @@ void Resolver::registerBuiltins() {
      * ClassName__<name> method body when the first arg is class-
      * pinned. */
     "reset", "release", "clone", "isLocked",
+    /* MathWorks RF Propagation site methods — `pathloss(pm, rx, tx)`,
+     * `los(tx, rx)`, `link(tx, rx)`, `sigstrength(rx, tx, pm)`,
+     * `coverage(tx, pm, ...)`, `show(site)`.  Same function-style
+     * dispatch on a class-pinned first arg. */
+    "pathloss", "los", "link", "sigstrength", "coverage", "show",
     /* §3.3 / §3.4 follow-ons — Tier-2 leftovers. impulse / initial
      * for time-domain free response; freqresp / nyquist / allmargin
      * for frequency-domain analysis. Matrix-arg companions
@@ -279,6 +284,11 @@ void Resolver::registerBuiltins() {
     "sectorPattern", "cosinePattern", "gaussianPattern", "isotropicPattern",
     "applyMountOrientation", "applyMountAz", "applyMountEl",
     "coverageGridMulti",
+    /* PROP §3.5 — PropagationModel classdef dispatcher.  Called
+     * from the `pathloss(pm, rx, tx)` method body in
+     * `runtime/rf_class_propagationmodel.m`. */
+    "propPathlossDispatch",
+    "propLosSites",
     /* COMM Tier-1 (docs/comm_toolbox_roadmap.md §2). Function-form
      * base layer; runtime/runtime_comm.cpp. Numeric tag dispatch.
      * `rng(seed)` uses the existing `rng` name (also already

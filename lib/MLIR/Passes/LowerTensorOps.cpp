@@ -1767,7 +1767,8 @@ bool TensorLowering::rewriteBuiltinCalls() {
      * variants but the base is a matlab_obj* rather than matlab_struct*,
      * so the field name + length are materialised and passed identically;
      * the runtime delegates to the embedded struct table. */
-    if ((Name == "matlab_obj_set_f64" || Name == "matlab_obj_set_mat") &&
+    if ((Name == "matlab_obj_set_f64" || Name == "matlab_obj_set_mat" ||
+         Name == "matlab_obj_set_string") &&
         Call->getNumOperands() == 3) {
       Value Base = Call->getOperand(0);
       Value NameV = Call->getOperand(1);
@@ -1777,6 +1778,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
       Value Ptr = fieldNameAddr(NameV, Len);
       if (!Ptr) continue;
       bool IsMat = Name == "matlab_obj_set_mat";
+      bool IsString = Name == "matlab_obj_set_string";
       /* Auto-promote `_f64` callee to `_mat` when the value operand
        * arrived as ptr — same reasoning as the matlab_struct_set
        * dispatch above. The class-method case especially needs this:
@@ -1785,24 +1787,26 @@ bool TensorLowering::rewriteBuiltinCalls() {
        * through the param), but after LowerUserCalls retypes the
        * function signature to ptr the field-store now carries a
        * ptr-typed value. */
-      if (!IsMat && Val.getType() == PtrTy) {
+      if (!IsMat && !IsString && Val.getType() == PtrTy) {
         Name = "matlab_obj_set_mat";
         IsMat = true;
       }
+      if (IsString && Val.getType() != PtrTy) continue;
       if (IsMat && Val.getType() != PtrTy) continue;
-      if (!IsMat && Val.getType() != F64) continue;
+      if (!IsMat && !IsString && Val.getType() != F64) continue;
       B.setInsertionPoint(Call);
       Value LenV = LLVM::ConstantOp::create(
           B, Call->getLoc(), I64, B.getI64IntegerAttr(Len));
-      auto Fn = rt(Name, VoidTy, {PtrTy, PtrTy, I64,
-                                    IsMat ? (Type)PtrTy : (Type)F64});
+      Type ValTy = (IsMat || IsString) ? (Type)PtrTy : (Type)F64;
+      auto Fn = rt(Name, VoidTy, {PtrTy, PtrTy, I64, ValTy});
       LLVM::CallOp::create(B, Call->getLoc(), Fn,
                             ValueRange{Base, Ptr, LenV, Val});
       Call->erase();
       Changed = true;
       continue;
     }
-    if ((Name == "matlab_obj_get_f64" || Name == "matlab_obj_get_mat") &&
+    if ((Name == "matlab_obj_get_f64" || Name == "matlab_obj_get_mat" ||
+         Name == "matlab_obj_get_string") &&
         Call->getNumOperands() == 2 && Call->getNumResults() == 1) {
       Value Base = Call->getOperand(0);
       Value NameV = Call->getOperand(1);
@@ -1810,7 +1814,8 @@ bool TensorLowering::rewriteBuiltinCalls() {
       int64_t Len = 0;
       Value Ptr = fieldNameAddr(NameV, Len);
       if (!Ptr) continue;
-      bool IsPtr = Name == "matlab_obj_get_mat";
+      bool IsPtr = (Name == "matlab_obj_get_mat" ||
+                    Name == "matlab_obj_get_string");
       Type Ret = IsPtr ? (Type)PtrTy : (Type)F64;
       B.setInsertionPoint(Call);
       Value LenV = LLVM::ConstantOp::create(
@@ -1820,6 +1825,28 @@ bool TensorLowering::rewriteBuiltinCalls() {
                                       ValueRange{Base, Ptr, LenV});
       carryName(Call, NC);
       Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+    /* matlab_obj_disp_field(obj, "Name") — runtime-dispatched disp
+     * routing emitted by Lowering's `disp(obj.Field)` site.  Same
+     * shape as the obj_get/set helpers: ptr + name + len.  Void
+     * return. */
+    if (Name == "matlab_obj_disp_field" && Call->getNumOperands() == 2 &&
+        Call->getNumResults() == 1) {
+      Value Base = Call->getOperand(0);
+      Value NameV = Call->getOperand(1);
+      if (Base.getType() != PtrTy) continue;
+      int64_t Len = 0;
+      Value Ptr = fieldNameAddr(NameV, Len);
+      if (!Ptr) continue;
+      B.setInsertionPoint(Call);
+      Value LenV = LLVM::ConstantOp::create(
+          B, Call->getLoc(), I64, B.getI64IntegerAttr(Len));
+      auto Fn = rt("matlab_obj_disp_field", VoidTy, {PtrTy, PtrTy, I64});
+      LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                            ValueRange{Base, Ptr, LenV});
       Call->erase();
       Changed = true;
       continue;
@@ -4375,6 +4402,25 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"applyMountEl",        "matlab_prop_mount_el_local",      0, "ffff"},
       {"coverageGridMulti",   "matlab_prop_coverage_grid_multi", 1,
                               "pppffffffffffffff"},
+      /* §3.5 PropagationModel classdef dispatcher.  Takes the model
+       * kind as a `matlab_string *` (first arg, ptr) + the 6 site
+       * scalars (tx/rx lat/lon/height) + frequency, dispatches to the
+       * appropriate model in the runtime.  The classdef method
+       * `pathloss(pm, rx, tx)` calls this with `pm.Kind` and the
+       * site fields. */
+      {"propPathlossDispatch", "matlab_prop_dispatch_pathloss",
+                                0, "pfffffff"},
+      /* `los(tx, rx)` site-aware LOS check — uses Earth-bulge math
+       * over haversine distance (k=4/3 model).  Returns 1.0 / 0.0. */
+      {"propLosSites",         "matlab_prop_los_sites",
+                                0, "ffffff"},
+      /* `sigstrength(rx, tx, pm)` — received signal strength in dBm.
+       * Takes all three site / model obj pointers, reads each
+       * property through matlab_obj_get_f64 / _get_string at the
+       * runtime layer, computes the link budget in dB.  Bypasses
+       * the per-method-param class-pinning gap. */
+      {"sigstrength",          "matlab_prop_sigstrength",
+                                0, "ppp"},
       /* === Communications Toolbox Tier-1 base layer ===
        * docs/comm_toolbox_roadmap.md §2. runtime/runtime_comm.cpp.
        */

@@ -1157,4 +1157,208 @@ matlab_mat *matlab_prop_coverage_grid_multi(
     return out;
 }
 
+/* ======================================================================
+ * PropagationModel dispatcher — single entry point that selects the
+ * underlying model based on a string Kind read from the classdef
+ * property table.  Called by the `pathloss(pm, rx, tx)` method body in
+ * `runtime/rf_class_propagationmodel.m`.  Returns path loss in dB.
+ *
+ * Supported kinds (case-insensitive, hyphens optional):
+ *   freespace / free-space / fspl  → Friis free-space
+ *   longley-rice / longleyrice / itm → ITM with flat profile + defaults
+ *   rain / itu-rain                 → ITU-R P.838 rain attenuation
+ *   gas / atmospheric / itu-gas     → ITU-R P.676 oxygen + water vapour
+ *   fog / cloud                     → ITU-R P.840 fog/cloud attenuation
+ *   close-in / closein / ci         → Close-In propagation model
+ *   hata                            → Okumura-Hata urban path loss
+ *   cost231                         → COST-231 extension to Hata
+ *   egli / ecc33 / sui              → empirical macrocell models
+ *   ericsson9999                    → Ericsson 9999 urban macrocell
+ *
+ * Unknown kind names fall back to Friis FSPL with a console warning.
+ * ====================================================================== */
+struct matlab_string_s;
+extern "C" double matlab_string_len(struct matlab_string_s *s);
+struct kind_view_ { const char *data; int64_t len; };
+static struct kind_view_ ml_str_view(struct matlab_string_s *s) {
+    /* matlab_string_s layout: { char *data; int64_t len; }. */
+    struct kind_view_ V;
+    if (!s) { V.data = NULL; V.len = 0; return V; }
+    const char *const *pd = (const char *const *)s;
+    const int64_t *pl = (const int64_t *)((const char *)s + sizeof(void*));
+    V.data = *pd;
+    V.len = *pl;
+    return V;
+}
+static int ml_to_lower(int c) {
+    if (c >= 'A' && c <= 'Z') return c - 'A' + 'a';
+    return c;
+}
+static int ml_kind_eq(const char *a, int64_t al, const char *b) {
+    /* Case-insensitive, hyphen/underscore-insensitive comparison.
+     * Compares the entire `a` (length `al`) against the C-string `b`. */
+    int64_t bi = 0;
+    int64_t ai = 0;
+    while (ai < al || b[bi]) {
+        int ca = (ai < al) ? ml_to_lower((unsigned char)a[ai]) : -1;
+        int cb = b[bi] ? ml_to_lower((unsigned char)b[bi]) : -1;
+        if (ca == '-' || ca == '_' || ca == ' ') { ++ai; continue; }
+        if (cb == '-' || cb == '_' || cb == ' ') { ++bi; continue; }
+        if (ca != cb) return 0;
+        ++ai; ++bi;
+    }
+    return 1;
+}
+extern "C" double matlab_prop_dispatch_pathloss(
+    struct matlab_string_s *kind,
+    double tx_lat, double tx_lon, double tx_height_m,
+    double rx_lat, double rx_lon, double rx_height_m,
+    double freq_hz)
+{
+    struct kind_view_ V = ml_str_view(kind);
+    double d_m = matlab_prop_haversine(tx_lat, tx_lon, rx_lat, rx_lon);
+    if (d_m < 1.0) d_m = 1.0;   /* clamp degenerate near-zero distance */
+
+    /* Most-common kinds first. */
+    if (ml_kind_eq(V.data, V.len, "freespace") ||
+        ml_kind_eq(V.data, V.len, "fspl")) {
+        return matlab_prop_fspl(d_m, freq_hz);
+    }
+    if (ml_kind_eq(V.data, V.len, "longleyrice") ||
+        ml_kind_eq(V.data, V.len, "itm")) {
+        /* Flat-profile ITM with continental temperate climate +
+         * median quantiles.  Matches MathWorks `longley-rice`
+         * defaults for the no-terrain case. */
+        matlab_mat empty;
+        empty.rows = 0; empty.cols = 0; empty.data = NULL;
+        return matlab_prop_itm_pathloss(&empty, freq_hz,
+                                          tx_height_m, rx_height_m,
+                                          1.0,     /* vertical pol */
+                                          5.0,     /* continental temperate */
+                                          301.0, 0.005, 15.0, d_m,
+                                          50.0, 50.0, 50.0);
+    }
+    if (ml_kind_eq(V.data, V.len, "rain") ||
+        ml_kind_eq(V.data, V.len, "iturain")) {
+        /* Defaults: 10 mm/hr (moderate rain), vertical pol. */
+        return matlab_prop_pathloss_rain(d_m, freq_hz, 10.0, 1.0);
+    }
+    if (ml_kind_eq(V.data, V.len, "gas") ||
+        ml_kind_eq(V.data, V.len, "atmospheric") ||
+        ml_kind_eq(V.data, V.len, "itugas")) {
+        /* Defaults: 15 °C, 1013 hPa, 7.5 g/m³ water vapour density. */
+        return matlab_prop_pathloss_gas(d_m, freq_hz, 15.0, 1013.0, 7.5);
+    }
+    if (ml_kind_eq(V.data, V.len, "fog") ||
+        ml_kind_eq(V.data, V.len, "cloud")) {
+        /* Default: 0.5 g/m³ liquid water content (light fog). */
+        return matlab_prop_pathloss_fog(d_m, freq_hz, 0.5);
+    }
+    if (ml_kind_eq(V.data, V.len, "closein") ||
+        ml_kind_eq(V.data, V.len, "ci")) {
+        /* Defaults: PLE=2.0, 0 dB shadowing, 1 m reference distance. */
+        return matlab_prop_pathloss_closein(d_m, freq_hz, 2.0, 0.0, 1.0);
+    }
+    if (ml_kind_eq(V.data, V.len, "hata")) {
+        /* Defaults: urban environment (env=1). */
+        return matlab_prop_pathloss_hata(freq_hz / 1e6, tx_height_m,
+                                           rx_height_m, d_m / 1000.0, 1.0);
+    }
+    if (ml_kind_eq(V.data, V.len, "cost231")) {
+        return matlab_prop_pathloss_cost231(freq_hz / 1e6, tx_height_m,
+                                              rx_height_m, d_m / 1000.0, 1.0);
+    }
+    if (ml_kind_eq(V.data, V.len, "egli")) {
+        return matlab_prop_pathloss_egli(freq_hz / 1e6, tx_height_m,
+                                           rx_height_m, d_m / 1000.0);
+    }
+    if (ml_kind_eq(V.data, V.len, "ecc33")) {
+        return matlab_prop_pathloss_ecc33(freq_hz / 1e6, tx_height_m,
+                                            rx_height_m, d_m / 1000.0);
+    }
+    if (ml_kind_eq(V.data, V.len, "sui")) {
+        /* Default: terrain category A (worst-case urban / hilly). */
+        return matlab_prop_pathloss_sui(freq_hz / 1e6, tx_height_m,
+                                          rx_height_m, d_m / 1000.0, 1.0);
+    }
+    if (ml_kind_eq(V.data, V.len, "ericsson9999")) {
+        /* Default: urban environment (env=1.0). */
+        return matlab_prop_pathloss_ericsson9999(freq_hz / 1e6, tx_height_m,
+                                                   rx_height_m, d_m / 1000.0,
+                                                   1.0);
+    }
+    /* Unknown kind — fall back to free-space + warn. */
+    fprintf(stderr,
+            "warning: propagationModel: unknown kind '%.*s' — using "
+            "free-space fallback\n",
+            (int)V.len, V.data ? V.data : "");
+    return matlab_prop_fspl(d_m, freq_hz);
+}
+
+/* Companion: LOS clear-or-not between two geographic points.  Flat-
+ * earth + Earth-curvature bulge check (k=4/3 effective Earth model).
+ * Returns 1.0 (clear) when the line-of-sight ray clears the bulge,
+ * 0.0 otherwise.  Mirrors `los(tx, rx)` in MathWorks API. */
+extern "C" double matlab_prop_los_sites(
+    double tx_lat, double tx_lon, double tx_h_m,
+    double rx_lat, double rx_lon, double rx_h_m)
+{
+    double d_m = matlab_prop_haversine(tx_lat, tx_lon, rx_lat, rx_lon);
+    if (d_m < 1.0) return 1.0;
+    /* Earth bulge mid-path under 4/3 model: h = d1*d2 / (2 * k * R).
+     * For mid-path d1 = d2 = d/2. */
+    const double R = 6371000.0;
+    const double k = 4.0 / 3.0;
+    double bulge_m = (d_m * d_m) / (8.0 * k * R);
+    /* Required radio height = linear-interpolated antenna height
+     * minus bulge.  For LOS the chord between the two antennas must
+     * stay above zero. */
+    double avg_h = 0.5 * (tx_h_m + rx_h_m);
+    return (avg_h >= bulge_m) ? 1.0 : 0.0;
+}
+
+/* sigstrength(rx, tx, pm) — RX power in dBm.
+ *
+ * Bypasses the MATLAB-side method dispatch entirely because the
+ * compiler's per-method-param class pinning doesn't propagate from
+ * call sites (would need inter-procedural Sema work).  The runtime
+ * reads each site's properties directly via matlab_obj_get_f64 /
+ * matlab_obj_get_string and computes the link budget in dB:
+ *
+ *   ss_dBm = 10*log10(TX_W * 1000) + TX_gain
+ *            - pathloss(pm.Kind, ...)
+ *            + RX_gain - TX_SystemLoss - RX_SystemLoss
+ *
+ * Antenna gains default to 0 dBi (isotropic) — the Antenna property
+ * isn't wired into a directional gain lookup yet (lands with
+ * ANT-Tier-2 wire-MoM patterns).  Operates on matlab_obj* pointers
+ * directly so the compiler doesn't need to know the class structure.
+ */
+extern "C" double matlab_obj_get_f64(matlab_obj *o, const char *name, int64_t len);
+extern "C" void *matlab_obj_get_string(matlab_obj *o, const char *name, int64_t len);
+extern "C" double matlab_prop_sigstrength(matlab_obj *rx, matlab_obj *tx, matlab_obj *pm) {
+    if (!rx || !tx || !pm) return 0.0;
+    double tx_lat = matlab_obj_get_f64(tx, "Latitude", 8);
+    double tx_lon = matlab_obj_get_f64(tx, "Longitude", 9);
+    double tx_h   = matlab_obj_get_f64(tx, "AntennaHeight", 13);
+    double rx_lat = matlab_obj_get_f64(rx, "Latitude", 8);
+    double rx_lon = matlab_obj_get_f64(rx, "Longitude", 9);
+    double rx_h   = matlab_obj_get_f64(rx, "AntennaHeight", 13);
+    double freq   = matlab_obj_get_f64(tx, "TransmitterFrequency", 20);
+    double power_W = matlab_obj_get_f64(tx, "TransmitterPower", 16);
+    double tx_loss = matlab_obj_get_f64(tx, "SystemLoss", 10);
+    double rx_loss = matlab_obj_get_f64(rx, "SystemLoss", 10);
+
+    matlab_string_s *kind =
+        (matlab_string_s *)matlab_obj_get_string(pm, "Kind", 4);
+    double pl_dB = matlab_prop_dispatch_pathloss(
+        kind, tx_lat, tx_lon, tx_h, rx_lat, rx_lon, rx_h, freq);
+
+    double tx_dBm = 10.0 * log10(power_W * 1000.0);
+    /* Antenna gains default to 0 dBi (isotropic) for v1. */
+    double tx_gain_dBi = 0.0;
+    double rx_gain_dBi = 0.0;
+    return tx_dBm + tx_gain_dBi - pl_dB + rx_gain_dBi - tx_loss - rx_loss;
+}
+
 }  /* extern "C" */

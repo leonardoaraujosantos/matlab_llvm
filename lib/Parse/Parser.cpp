@@ -370,9 +370,16 @@ ClassDef *Parser::parseClassDef() {
             ++Idx;
           }
         }
-        /* Optional type annotation, e.g. `Next Node = Node.empty` — drop
-         * the `Node` part; we don't type-check it yet. */
-        if (at(TokenKind::identifier)) ++Idx;
+        /* Optional type annotation, e.g. `Name string` or `Next Node
+         * = Node.empty`.  Capture the type-name token into
+         * `TypeName` — the Lowering's field-access dispatch keys on
+         * it to route `obj.Name` through `_get_string` etc. when the
+         * annotation is `string`.  We don't type-check the annotation
+         * yet; arbitrary class names are passed through verbatim. */
+        if (at(TokenKind::identifier)) {
+          P.TypeName = cur().Text;
+          ++Idx;
+        }
         if (consume(TokenKind::equal)) {
           P.Default = parseExpr();
         }

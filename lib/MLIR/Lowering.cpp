@@ -3656,8 +3656,23 @@ void Lowerer::lowerLValueStore(const Expr &LHS, mlir::Value Rhs) {
       bool IsMatRhs = Rhs && (Rhs.getType() == PtrTy ||
                               mlir::isa<mlir::RankedTensorType,
                                         mlir::UnrankedTensorType>(Rhs.getType()));
-      llvm::StringRef Callee = IsMatRhs ? "matlab_obj_set_mat"
-                                         : "matlab_obj_set_f64";
+      /* Property type annotation: when the classdef declares the
+       * property as `Name string`, route stores through
+       * matlab_obj_set_string so the runtime stores the value with
+       * kind=3 and downstream reads (via the same TypeName-aware
+       * read path) come back as a matlab_string *. */
+      bool IsStringField = false;
+      for (const ClassDef *CC = PinnedCls; CC; CC = CC->Super) {
+        for (const auto &P : CC->Props)
+          if (P.Name == F.Field) {
+            if (P.TypeName == "string") IsStringField = true;
+            break;
+          }
+        if (IsStringField) break;
+      }
+      llvm::StringRef Callee = IsStringField ? "matlab_obj_set_string"
+                              : IsMatRhs    ? "matlab_obj_set_mat"
+                                            : "matlab_obj_set_f64";
       mlir::NamedAttribute Cal(
           mlir::StringAttr::get(&MCtx, "callee"),
           mlir::StringAttr::get(&MCtx, Callee));
@@ -4973,6 +4988,129 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
         bool HasCtor = false;
         for (const Function *Mth : CD->Methods)
           if (Mth && Mth->Name == CD->Name) { HasCtor = true; break; }
+        /* Name-value pair sugar (MathWorks `txsite('Name','X',...)` shape).
+         *
+         * Detect the kwarg-only pattern: every arg pair is
+         * `(string_literal, value)` where the string literal matches
+         * a property name of `CD` (or any superclass).  When the
+         * pattern holds, emit a zero-arg ctor call (or `matlab_obj_new`
+         * for ctor-less classes), then a `matlab_obj_set_<kind>` per
+         * pair to populate the named properties.  Skips when args
+         * don't fit the pattern so the normal positional-ctor path
+         * stays intact for `AntDipole(2.0, 0.05, 0.0)` etc.
+         *
+         * The class must have either no ctor or a ctor whose body
+         * tolerates `nargin == 0` (which our generated classdefs do
+         * via `if nargin >= 1 ... end` guards).  MathWorks-style
+         * classes that use this kwarg pattern conventionally do; if
+         * a class doesn't, the user can fall back to positional. */
+        auto allPropsByName = [&]() -> std::vector<llvm::StringRef> {
+          std::vector<llvm::StringRef> Out;
+          for (const ClassDef *CC = CD; CC; CC = CC->Super)
+            for (const auto &P : CC->Props) Out.push_back(P.Name);
+          return Out;
+        };
+        bool IsKwargPattern = false;
+        std::vector<std::string> KwargKeys;
+        std::vector<const Expr *> KwargVals;
+        if (C.Args.size() >= 2 && (C.Args.size() % 2) == 0) {
+          IsKwargPattern = true;
+          auto Props = allPropsByName();
+          for (size_t i = 0; i < C.Args.size(); i += 2) {
+            const Expr *KE = C.Args[i];
+            std::string Key;
+            if (auto *CL = dynamic_cast<const CharLiteral *>(KE))
+              Key = CL->Value;
+            else if (auto *SL = dynamic_cast<const StringLiteral *>(KE))
+              Key = SL->Value;
+            if (Key.empty()) { IsKwargPattern = false; break; }
+            bool Match = false;
+            for (auto &P : Props) if (P == Key) { Match = true; break; }
+            if (!Match) { IsKwargPattern = false; break; }
+            KwargKeys.push_back(std::move(Key));
+            KwargVals.push_back(C.Args[i + 1]);
+          }
+        }
+        if (IsKwargPattern) {
+          /* Step 1: create the instance.  If the class has an
+           * explicit ctor, call it with no args (the body's nargin
+           * guards keep it well-defined).  Otherwise allocate via
+           * `matlab_obj_new(class_id)`. */
+          mlir::Value Obj;
+          if (HasCtor) {
+            std::string Callee = std::string(CD->Name) + "__" +
+                                  std::string(CD->Name);
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, Callee));
+            Obj = emitUnreg("matlab.call", {}, PtrTyConst, L, {Cal});
+          } else {
+            auto I32 = mlir::IntegerType::get(&MCtx, 32);
+            mlir::Value ClsId = mlir::arith::ConstantOp::create(
+                B, L, I32, mlir::IntegerAttr::get(I32, (int64_t)CD->ClassId));
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_obj_new"));
+            Obj = emitUnreg("matlab.call_builtin", {ClsId},
+                            PtrTyConst, L, {Cal});
+          }
+          /* Step 2: set each named property.  Lower the value, then
+           * pick `matlab_obj_set_f64` / `_set_mat` / `_set_string`
+           * based on the value's MLIR type.  Char/string literals
+           * coerce through `matlab_string_from_literal` so the obj
+           * receives a `matlab_string *`. */
+          auto F64 = mlir::Float64Type::get(&MCtx);
+          for (size_t i = 0; i < KwargKeys.size(); ++i) {
+            mlir::Value NameV = emitFieldNameChar(KwargKeys[i], L);
+            const Expr *VE = KwargVals[i];
+            mlir::Value V;
+            bool IsString = false;
+            if (auto *CL = dynamic_cast<const CharLiteral *>(VE)) {
+              mlir::NamedAttribute VA(
+                  mlir::StringAttr::get(&MCtx, "value"),
+                  mlir::StringAttr::get(&MCtx, std::string(CL->Value)));
+              mlir::Value Ch = emitUnreg("matlab.const_char", {},
+                                          mlir::NoneType::get(&MCtx), L, {VA});
+              mlir::NamedAttribute Cal(
+                  mlir::StringAttr::get(&MCtx, "callee"),
+                  mlir::StringAttr::get(&MCtx, "matlab_string_from_literal"));
+              V = emitUnreg("matlab.call_builtin", {Ch}, PtrTyConst, L, {Cal});
+              IsString = true;
+            } else if (auto *SL = dynamic_cast<const StringLiteral *>(VE)) {
+              mlir::NamedAttribute VA(
+                  mlir::StringAttr::get(&MCtx, "value"),
+                  mlir::StringAttr::get(&MCtx, std::string(SL->Value)));
+              mlir::Value Ch = emitUnreg("matlab.const_char", {},
+                                          mlir::NoneType::get(&MCtx), L, {VA});
+              mlir::NamedAttribute Cal(
+                  mlir::StringAttr::get(&MCtx, "callee"),
+                  mlir::StringAttr::get(&MCtx, "matlab_string_from_literal"));
+              V = emitUnreg("matlab.call_builtin", {Ch}, PtrTyConst, L, {Cal});
+              IsString = true;
+            } else {
+              V = lowerExpr(*VE);
+            }
+            llvm::StringRef Setter;
+            if (IsString) {
+              Setter = "matlab_obj_set_string";
+            } else if (V.getType() == PtrTyConst ||
+                       mlir::isa<mlir::RankedTensorType,
+                                 mlir::UnrankedTensorType>(V.getType())) {
+              Setter = "matlab_obj_set_mat";
+            } else if (V.getType() == F64) {
+              Setter = "matlab_obj_set_f64";
+            } else {
+              /* Int / bool — coerce to f64. */
+              Setter = "matlab_obj_set_f64";
+            }
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, Setter));
+            emitUnregOp("matlab.call_builtin", {Obj, NameV, V},
+                        {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          }
+          return Obj;
+        }
         if (HasCtor) {
           /* §3.1 sugar: `tf('s')` and `tf('z')` — MATLAB's idiom to
            * mint the Laplace / z-transform variable. Rewrite as
@@ -5010,8 +5148,39 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
                                PtrTyConst, L, {Cal});
             }
           }
+          /* Wrap char/string literal args through
+           * `matlab_string_from_literal` so the ctor body sees a
+           * `matlab_string *` (ptr) rather than the raw char tensor.
+           * Without this, a positional `PropagationModel('freespace')`
+           * call passes `tensor<1x9xi8>` and the ctor body's
+           * `obj.Kind = kind` lowers as `matlab_obj_set_string(_, _,
+           * none)` which can't lower further.  The kwarg sugar path
+           * already does this wrap; mirror the behavior here for
+           * positional ctor calls. */
           llvm::SmallVector<mlir::Value, 4> Args;
-          for (const Expr *A : C.Args) if (A) Args.push_back(lowerExpr(*A));
+          for (const Expr *A : C.Args) {
+            if (!A) continue;
+            const CharLiteral *CL = dynamic_cast<const CharLiteral *>(A);
+            const StringLiteral *SL = CL ? nullptr
+                : dynamic_cast<const StringLiteral *>(A);
+            if (CL || SL) {
+              llvm::StringRef Tok = CL ? CL->Value : SL->Value;
+              mlir::NamedAttribute VA(
+                  mlir::StringAttr::get(&MCtx, "value"),
+                  mlir::StringAttr::get(&MCtx, std::string(Tok)));
+              mlir::Value Ch = emitUnreg("matlab.const_char", {},
+                                          mlir::NoneType::get(&MCtx),
+                                          L, {VA});
+              mlir::NamedAttribute SCal(
+                  mlir::StringAttr::get(&MCtx, "callee"),
+                  mlir::StringAttr::get(&MCtx, "matlab_string_from_literal"));
+              Args.push_back(
+                  emitUnreg("matlab.call_builtin", {Ch}, PtrTyConst,
+                            L, {SCal}));
+            } else {
+              Args.push_back(lowerExpr(*A));
+            }
+          }
           std::string Callee = std::string(CD->Name) + "__" +
                                 std::string(CD->Name);
           mlir::NamedAttribute Cal(
@@ -5840,6 +6009,51 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
                                      ? (mlir::Type)mlir::NoneType::get(&MCtx)
                                      : RT;
               return emitUnreg("matlab.call", Args, ResTy, L, {Cal});
+            }
+          }
+        }
+      }
+
+      /* disp(obj.Field) where `obj` is a class instance — route to
+       * the runtime-dispatched `matlab_obj_disp_field` so the
+       * property's stored kind (scalar / matrix / string / class
+       * instance) picks the correct disp variant at runtime.  Without
+       * this, a property holding a string (kind=3) read through the
+       * static-type-inferred `matlab_obj_get_f64` returns 0.0 and
+       * `disp` prints the wrong thing.  Restricted to the bare
+       * `disp(NameExpr.Field)` shape — composite expressions
+       * (`disp(obj.A + obj.B)`) still fall through to the standard
+       * matrix/scalar paths.
+       *
+       * Skipped when `Field` names a Dependent property: those have
+       * no backing storage and need to flow through `get.<Field>`
+       * dispatch (FieldAccess lowering site below).  The runtime
+       * helper would do `struct_find_field("Area") → -1` and print
+       * a blank line, masking the computed value. */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          N->Name == "disp" && C.Args.size() == 1 && C.Args[0]) {
+        if (auto *FA = dynamic_cast<const FieldAccess *>(C.Args[0])) {
+          if (auto *BN = dynamic_cast<const NameExpr *>(FA->Base)) {
+            if (BN->Ref && BN->Ref->PinnedClass) {
+              bool IsDependent = false;
+              for (const ClassDef *CC = BN->Ref->PinnedClass; CC; CC = CC->Super) {
+                for (const auto &P : CC->Props)
+                  if (P.Name == FA->Field && P.Dependent) {
+                    IsDependent = true; break;
+                  }
+                if (IsDependent) break;
+              }
+              if (!IsDependent) {
+                auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+                mlir::Value Obj = lowerExpr(*FA->Base);
+                if (Obj.getType() != PtrTy) Obj.setType(PtrTy);
+                mlir::Value NameV = emitFieldNameChar(FA->Field, L);
+                mlir::NamedAttribute Cal(
+                    mlir::StringAttr::get(&MCtx, "callee"),
+                    mlir::StringAttr::get(&MCtx, "matlab_obj_disp_field"));
+                return emitUnreg("matlab.call_builtin", {Obj, NameV},
+                                  mlir::NoneType::get(&MCtx), L, {Cal});
+              }
             }
           }
         }
@@ -7881,12 +8095,31 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
       }
       if (IsCstClass && !WantMat &&
           !mlir::isa<mlir::Float64Type>(RT)) WantMat = true;
-      llvm::StringRef Callee = WantMat ? "matlab_obj_get_mat"
-                                        : "matlab_obj_get_f64";
+      /* MATLAB property type annotation override: when the classdef
+       * declares the property as `Name string`, the parser stamps
+       * `TypeName = "string"` on the ClassProp.  Route reads to
+       * `matlab_obj_get_string` so the returned `matlab_string *`
+       * flows through string-aware downstream sites (disp, concat,
+       * etc.) rather than being mis-typed as f64. */
+      bool IsString = false;
+      if (PinnedCls) {
+        for (const ClassDef *CC = PinnedCls; CC; CC = CC->Super) {
+          for (const auto &P : CC->Props)
+            if (P.Name == F.Field) {
+              if (P.TypeName == "string") IsString = true;
+              break;
+            }
+          if (IsString) break;
+        }
+      }
+      llvm::StringRef Callee = IsString  ? "matlab_obj_get_string"
+                               : WantMat ? "matlab_obj_get_mat"
+                                         : "matlab_obj_get_f64";
       mlir::NamedAttribute Cal(
           mlir::StringAttr::get(&MCtx, "callee"),
           mlir::StringAttr::get(&MCtx, Callee));
-      mlir::Type ResTy = WantMat ? (mlir::Type)PtrTy : (mlir::Type)F64;
+      mlir::Type ResTy = (IsString || WantMat) ? (mlir::Type)PtrTy
+                                               : (mlir::Type)F64;
       return emitUnreg("matlab.call_builtin", {Obj, NameV}, ResTy, L, {Cal});
     }
     mlir::Value SPtr = resolveStructBase(F.Base, L);

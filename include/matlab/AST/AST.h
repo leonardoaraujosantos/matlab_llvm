@@ -448,6 +448,12 @@ struct ClassProp {
   std::string_view Access;         // "public" / "private" / "protected" / ""
   std::string_view SetAccess;
   std::string_view GetAccess;
+  // Optional MATLAB property type annotation, e.g. `Name string` or
+  // `Vals double`.  Captured at parse time but only acted on by the
+  // MLIR lowering's `_get_string` / `_get_mat` routing for property
+  // reads — the rest of the pipeline still treats properties as
+  // untyped.  Empty when the user didn't annotate.
+  std::string_view TypeName;
   // Populated by Sema after inference: the global slot id used to read/
   // write this property through matlab_obj_get_* / matlab_obj_set_*.
   int32_t PropId = -1;

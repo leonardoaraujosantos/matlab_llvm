@@ -6095,6 +6095,26 @@ void matlab_struct_set_mat(matlab_struct *s, const char *name, int64_t len, matl
     s->ptr_vals[idx] = m;
 }
 
+/* String-typed property storage.  Stored with kind=3 to match the
+ * workspace-side string encoding (see matlab_struct_get_mat's kind=3
+ * pass-through).  Used by classdef kwarg-ctor sugar when a property
+ * value is a string literal (e.g. `txsite('Name','X', ...)`). */
+void matlab_struct_set_string(matlab_struct *s, const char *name, int64_t len, void *str) {
+    if (!s) return;
+    int32_t idx = struct_reserve(s, name, (int32_t)len);
+    s->kinds[idx] = 3;
+    s->f64_vals[idx] = 0.0;
+    s->ptr_vals[idx] = str;
+}
+
+void *matlab_struct_get_string(matlab_struct *s, const char *name, int64_t len) {
+    if (!s) return NULL;
+    int32_t idx = struct_find_field(s, name, (int32_t)len);
+    if (idx < 0) return NULL;
+    if (s->kinds[idx] != 3) return NULL;
+    return s->ptr_vals[idx];
+}
+
 double matlab_struct_get_f64(matlab_struct *s, const char *name, int64_t len) {
     if (!s) return 0.0;
     int32_t idx = struct_find_field(s, name, (int32_t)len);
@@ -9048,6 +9068,62 @@ void matlab_obj_set_f64(matlab_obj *o, const char *name, int64_t len, double v) 
 
 void matlab_obj_set_mat(matlab_obj *o, const char *name, int64_t len, matlab_mat *m) {
     matlab_struct_set_mat((matlab_struct *)o, name, len, m);
+}
+
+/* String-typed property setter / getter — used by classdef kwarg
+ * sugar when a property value is a `matlab_string *` (string literal
+ * or sprintf result).  Layout-compatible with the workspace-side
+ * kind=3 storage so DAP property inspection renders it correctly. */
+void matlab_obj_set_string(matlab_obj *o, const char *name, int64_t len, void *str) {
+    matlab_struct_set_string((matlab_struct *)o, name, len, str);
+}
+
+void *matlab_obj_get_string(matlab_obj *o, const char *name, int64_t len) {
+    return matlab_struct_get_string((matlab_struct *)o, name, len);
+}
+
+/* Runtime-dispatched display for a class-instance property.  Lowering
+ * routes `disp(obj.Field)` to this entry when `obj` is class-pinned
+ * but the property's static type can't be inferred (e.g. a kwarg-
+ * stored value).  The helper looks at the stored `kinds[idx]` and
+ * picks the matching disp variant:
+ *   kind=0 → matlab_disp_f64 (scalar)
+ *   kind=1 → matlab_disp_mat (matrix)
+ *   kind=3 → matlab_string_disp (string)
+ *   kind=4/5 → typed-int matrix (also routes through matlab_disp_mat)
+ *   anything else / missing field → noop
+ *
+ * Falls back to a blank line on missing-field to mirror MATLAB's
+ * silent-on-undefined-field semantics in disp contexts. */
+struct matlab_string_s;
+extern "C" void matlab_string_disp(struct matlab_string_s *s);
+void matlab_disp_mat(void *m);  /* defined later in this TU */
+extern "C" const char *matlab_dbg_class_name(int32_t class_id, int64_t *len_out);
+void matlab_obj_disp_field(matlab_obj *o, const char *name, int64_t len) {
+    matlab_struct *s = (matlab_struct *)o;
+    if (!s) { printf("\n"); return; }
+    int32_t idx = struct_find_field(s, name, (int32_t)len);
+    if (idx < 0) { printf("\n"); return; }
+    uint8_t k = s->kinds[idx];
+    if (k == 0) {
+        matlab_disp_f64(s->f64_vals[idx]);
+    } else if (k == 3 && s->ptr_vals[idx]) {
+        matlab_string_disp((struct matlab_string_s *)s->ptr_vals[idx]);
+    } else if ((k == 1 || k == 4 || k == 5) && s->ptr_vals[idx]) {
+        matlab_disp_mat(s->ptr_vals[idx]);
+    } else if (k == 2 && s->ptr_vals[idx]) {
+        /* Class instance — print as `1x1 ClassName` summary. */
+        matlab_obj *child = (matlab_obj *)s->ptr_vals[idx];
+        int64_t cnLen = 0;
+        const char *cn = matlab_dbg_class_name(child->class_id, &cnLen);
+        if (cn) {
+            printf("  1x1 %.*s\n", (int)cnLen, cn);
+        } else {
+            printf("  1x1 <class %d>\n", (int)child->class_id);
+        }
+    } else {
+        printf("\n");
+    }
 }
 
 double matlab_obj_get_f64(matlab_obj *o, const char *name, int64_t len) {
