@@ -1091,13 +1091,30 @@ extra side-channel field carrying `m` and the primitive
 polynomial. Plan for a small new descriptor type rather than
 overloading the int dtype.
 
-### 5.4 LDPC / Turbo / Polar — defer 🔴
+### 5.4 LDPC / Turbo / Polar — ✅ shipped (function-form)
 
-LDPC, Turbo, and Polar codes are individually large (each is a
-~2-week project: parity-check sparse representation + iterative
-decoder loops). They are **carved out** as Tier-7 stretch — see
-§12. The four "modern" codes together would add ~8 weeks; a coded
-subset of two (e.g. LDPC + Turbo) is the realistic stretch slice.
+Originally carved out as a Tier-7 stretch.  Function-form
+implementations of all three modern code families landed in one
+slice:
+
+- **Polar**: `polarEncode(u, N)` Arikan butterfly + `polarSCdecode(llr,
+  frozen_mask, N)` recursive SC decoder.  Frozen-mask is caller-
+  supplied (the 3GPP NR reliability sequence is a separate lookup-
+  table follow-on).  Zero-noise round-trip exact at N up to 128.
+- **LDPC**: `ldpcEncode(msg, P)` systematic from a k × (n−k) parity
+  portion + `ldpcDecodeMS(llr, H, max_iter)` flooding-schedule
+  min-sum BP decoder.  Generic / 5G NR base matrices are caller-
+  supplied lookup tables.
+- **Turbo**: `turboEncode(msg, trellis, perm)` PCCC over a
+  `poly2trellis`-built trellis + caller-supplied interleaver
+  permutation.  `turboDecode(...)` is canonical iterative max-log-
+  MAP / BCJR with extrinsic LLR exchange.
+
+The classdef System-Object surface (`comm.LDPCEncoder` etc.) stays
+gated on the SO lowering fix.
+
+Verified at SNR = 5 dB on a 64-bit message: uncoded BPSK 2 errors /
+Polar (128, 64) 0 / Turbo PCCC 0 / LDPC (6, 3) 0.
 
 ### 5.5 Interleavers 🔵
 

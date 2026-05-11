@@ -317,6 +317,11 @@ void Resolver::registerBuiltins() {
     "quantiz", "quantizApply", "lloydsQuant",
     "compandMu", "compandA",
     "dpcmEncode", "dpcmDecode",
+    /* COMM Tier-7 — modern codes
+     * (docs/comm_toolbox_roadmap.md §5.4).  Function-form. */
+    "polarEncode", "polarSCdecode",
+    "ldpcEncode",  "ldpcDecodeMS",
+    "turboEncode", "turboDecode",
   }) {
     registerBuiltin(N);
   }

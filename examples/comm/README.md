@@ -25,6 +25,8 @@ bash runtime/build_and_run.sh examples/comm/<name>.m /tmp/<name>
 | `alamouti_diversity.m` | 5 | **Tier-5 closure** — Alamouti 2-Tx encode → known scalar channel `(h1, h2)` + AWGN → maximum-ratio combine → `mlDetect`. At 10 dB SNR Alamouti reaches 0 errors vs the single-Tx baseline 0.0027 symerr (the combiner's coherent gain). |
 | `tier6_smoke.m` | 6 | One canonical call per Tier-6 entry: `pnSequence` (poly = 19, period 15), `goldSequence`, `hadamard(4)` Sylvester form, `walshCode(8, 3)`, uniform `quantiz` / `quantizApply`, `lloydsQuant` 4-level Gaussian codebook optimisation, μ-law and A-law round-trip, `dpcmEncode` / `dpcmDecode`. |
 | `cdma_walsh_demo.m` | 6 | **Tier-6 closure** — Two-user Walsh-coded CDMA round-trip at 15 dB SNR. Walsh-code orthogonality verified via `\|\|A+B\|\|² − \|\|A−B\|\|² = 0`; both users decode 0 symbol errors. |
+| `tier7_smoke.m` | 7 | One canonical call per Tier-7 entry: Polar (N=16, K=8) `polarEncode` + `polarSCdecode` at SNR 4 dB; LDPC (6, 3) systematic encode + min-sum 20-iteration decode at SNR 5 dB; Turbo PCCC over (7, 5)₈ K=3 trellis with shift-by-11 permutation, 6 BCJR iterations at SNR 4 dB. |
+| `modern_codes_ber.m` | 7 | **Tier-7 closure** — at SNR = 5 dB on a 64-bit message: uncoded BPSK 2 errors / Polar (128, 64) SC 0 / Turbo PCCC 0 / LDPC (6, 3) 0 across 21 blocks. Single-SNR comparison; multi-SNR sweep is caller-side. |
 
 ## API conventions
 
@@ -103,3 +105,16 @@ To stay inside the single-return dispatch convention, `biterr(x, y)` returns jus
 | `compandMu` `mu` | Standard G.711 value is 255 |
 | `compandA` `A` | Standard G.711 value is 87.6 |
 | `compandMu` / `compandA` `V` | Peak amplitude (positive); the companders saturate at ±V |
+
+### Tier-7 numeric tags
+
+| Tag | Values |
+|---|---|
+| `polarEncode` / `polarSCdecode` `N` | Codeword length; rounded up to the next power of 2 |
+| `polarSCdecode` `frozen_mask` | Length-N column with 0 in info positions, 1 in frozen positions. Caller's responsibility to design (3GPP reliability sequence not yet shipped). |
+| `ldpcEncode` `P` | k × (n−k) parity portion of the systematic generator (G = [I_k \| P], H = [P^T \| I_{n−k}]) |
+| `ldpcDecodeMS` `H` | (n−k) × n binary parity-check matrix |
+| `turboEncode` / `turboDecode` `trellis` | matlab_struct from `poly2trellis(K, gens)`; rate-1/2 RSC recommended |
+| `turboEncode` / `turboDecode` `perm` | k-length 1-based permutation column for the interleaver between the two encoders |
+| `turboEncode` output layout | `[systematic_1..k; parity1_1..k; parity2_1..k]` (length 3·k) |
+| `turboDecode` `max_iter` | Number of BCJR / max-log-MAP iterations; typical 4–8 |

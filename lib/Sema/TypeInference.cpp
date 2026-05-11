@@ -1162,6 +1162,12 @@ const Type *TypeInference::visitBuiltinCall(std::string_view Name,
       Name == "dpcmEncode" || Name == "dpcmDecode")
     return TC.arrayOf(Dtype::Double, Shape::unknown());
 
+  /* Tier-7 LDPC / Turbo / Polar. */
+  if (Name == "polarEncode" || Name == "polarSCdecode" ||
+      Name == "ldpcEncode"  || Name == "ldpcDecodeMS"  ||
+      Name == "turboEncode" || Name == "turboDecode")
+    return TC.arrayOf(Dtype::Double, Shape::unknown());
+
   if (Name == "linspace") {
     int64_t N = -1;
     if (Args.size() >= 3) N = foldInt(Args[2]);

@@ -4505,6 +4505,14 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"compandA",     "matlab_comm_compand_a",     1, "pfff"},
       {"dpcmEncode",   "matlab_comm_dpcm_encode",   1, "ppp"},
       {"dpcmDecode",   "matlab_comm_dpcm_decode",   1, "pp"},
+      /* === Communications Toolbox Tier-7 — modern channel codes ===
+       * docs/comm_toolbox_roadmap.md §5.4.  Function-form. */
+      {"polarEncode",   "matlab_comm_polar_encode",     1, "pf"},
+      {"polarSCdecode", "matlab_comm_polar_sc_decode",  1, "ppf"},
+      {"ldpcEncode",    "matlab_comm_ldpc_encode",      1, "pp"},
+      {"ldpcDecodeMS",  "matlab_comm_ldpc_decode_ms",   1, "ppf"},
+      {"turboEncode",   "matlab_comm_turbo_encode",     1, "ppp"},
+      {"turboDecode",   "matlab_comm_turbo_decode",     1, "pppppf"},
     };
 
     // Pick the first entry with name + arity + TYPE match so overloaded

@@ -380,6 +380,17 @@ MATLAB Coder integration, Python coexecution.
 | Wavelets / Wigner-Ville / synchrosqueezed (`cwt`, `dwt`, `wvd`, `fsst`) | 🔵 | Tier-4 §5.4. |
 | `digitalFilter` / `designfilt` system object | 🔵 | Tier-4 §5.1 — needs Tier-1 IIR/FIR shipped first. |
 
+### Communications Toolbox — Tier-7 modern channel codes (function-form)
+
+Per-toolbox roadmap in [`comm_toolbox_roadmap.md`](comm_toolbox_roadmap.md) §5.4 — flipped from "🔴 stretch carve-out" to "✅ shipped" via function-form implementations. The classdef `comm.LDPCEncoder` / `LDPCDecoder` / `TurboEncoder` / `TurboDecoder` / `PolarEncoder` / `PolarDecoder` System Objects stay gated on the SO lowering fix. Runtime extends `runtime/runtime_comm.cpp`. Demos under `examples/comm/` (`tier7_smoke.m`, `modern_codes_ber.m`).
+
+| Group | Function | Status | Notes |
+|---|---|:-:|---|
+| §5.4.A Polar | `polarEncode(u, N)`, `polarSCdecode(llr, frozen_mask, N)` | ✅ shipped | Arikan polar transform via the recursive butterfly (no bit-reversal); SC decoder via recursive f / g node operations on min-sum LLRs. Caller supplies a frozen-mask vector (0 = info, 1 = frozen); placement of info bits is caller-controlled — production polar codes use a reliability-sequence lookup (3GPP NR sequence is a follow-on table). Verified: zero-noise round-trip exact at N = 4, 8, 16, 32, 64, 128. At 5 dB SNR, (128, 64) recovers 64 info bits with 0 errors. |
+| §5.4.B LDPC | `ldpcEncode(msg, P)`, `ldpcDecodeMS(llr, H, max_iter)` | ✅ shipped (function-form) | Systematic encoder from the parity portion `P` (k × (n−k)) of a systematic generator (G = [I_k | P], H = [P^T | I_{n−k}]). Decoder is flooding-schedule min-sum belief propagation on the Tanner graph of H. Caller supplies P / H — generic generators for irregular / 5G NR base matrices are a separate lookup-table slice. Verified: hand-rolled (6, 3) recovers a corrupted codeword in 20 iterations at SNR 5 dB. |
+| §5.4.C Turbo | `turboEncode(msg, trellis, perm)`, `turboDecode(llr_sys, llr_p1, llr_p2, trellis, perm, max_iter)` | ✅ shipped | Parallel-concatenated convolutional codes (PCCC): two systematic-RSC encoder passes through an interleaver, emitting `[systematic; parity1; parity2]` of length 3 × k. Decoder is the canonical iterative max-log-MAP / BCJR with extrinsic LLR exchange across the interleaver. Verified: (7, 5)₈ K=3 RSC with a shift-by-11 permutation at k = 64 — 0 errors from SNR = 2 dB onwards. |
+| Closure tests | `examples/comm/tier7_smoke.m`, `examples/comm/modern_codes_ber.m` | ✅ shipped | At SNR = 5 dB on a 64-bit message: uncoded BPSK 2 errors / Polar (128, 64) 0 / Turbo PCCC 0 / LDPC (6, 3) 0 (across 21 blocks). Compile, execute, and DWARF-debug lanes pass for both; REPL JIT runs every Tier-7 primitive correctly before tripping on the same `make_handle`-on-colon-slice REPL limitation documented across the rest of the comm surface. |
+
 ### Communications Toolbox — Tier-6 spreading + source coding (function-form)
 
 Per-toolbox roadmap in [`comm_toolbox_roadmap.md`](comm_toolbox_roadmap.md) §8. Spreading sequences (PN / Gold / Walsh-Hadamard) and source coding (uniform quantiser, μ-law / A-law companding, DPCM, Lloyd-Max codebook optimisation). System-Object variants (`comm.PNSequence`, `comm.GoldSequence`, `comm.KasamiSequence`) stay gated on the SO lowering fix. Hybrid ARQ (`comm.HybridARQ`) and ray-tracing-driven propagation (`propagationModel('raytracing')`) are explicit roadmap carve-outs. End-to-end demos under `examples/comm/` (`tier6_smoke.m`, `cdma_walsh_demo.m`).

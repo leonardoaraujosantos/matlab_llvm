@@ -2424,6 +2424,451 @@ matlab_mat *matlab_comm_dpcm_decode(matlab_mat *idx, matlab_mat *codebook) {
     return out;
 }
 
+/* ===== Tier-7 — LDPC / Turbo / Polar (modern channel codes) ============ *
+ *
+ * docs/comm_toolbox_roadmap.md §5.4 — the "Tier-7 stretch" carve-out.
+ * Function-form implementations of the three modern code families:
+ *   - Polar (Arikan transform + SC decoder)
+ *   - LDPC  (systematic encode from a parity portion + min-sum BP)
+ *   - Turbo (PCCC encode with interleaver + iterative max-log MAP)
+ *
+ * System-Object wrappers stay gated on the SO lowering fix.  These
+ * primitives are sufficient for end-to-end "encode → AWGN → decode"
+ * Monte-Carlo loops; they are NOT bit-identical to commercial
+ * implementations (Q.LDPC / 5G NR LDPC base matrices, 3GPP polar
+ * sequence indices, 3GPP turbo permutations are caller-supplied
+ * lookup tables when required).
+ */
+
+/* ----- §5.4.A Polar codes ----- *
+ *
+ * polarEncode(u, N) — Arikan polar transform y = u · G_N where
+ * G_N = F^(⊗log2(N)) and F = [[1,0],[1,1]].  Caller supplies the
+ * full N-bit input with frozen bits already set to 0; the encoder
+ * is purely the bit-reversal-free butterfly.
+ */
+matlab_mat *matlab_comm_polar_encode(matlab_mat *u, double Nd) {
+    int64_t N = (int64_t)Nd;
+    if (!u || N < 1) return mat_alloc(0, 0);
+    /* Round N up to next power of 2. */
+    int64_t P = 1;
+    while (P < N) P <<= 1;
+    N = P;
+    matlab_mat *y = mat_alloc(N, 1);
+    int64_t Nu = u->rows * u->cols;
+    for (int64_t i = 0; i < N; ++i)
+        y->data[i] = (i < Nu) ? ((int64_t)u->data[i] & 1) : 0.0;
+    /* Recursive butterfly in place: for each stage s of size 2^(s+1),
+     * pair (a, b) -> (a XOR b, b). */
+    for (int64_t step = 1; step < N; step <<= 1) {
+        for (int64_t base = 0; base < N; base += (step << 1)) {
+            for (int64_t i = 0; i < step; ++i) {
+                int a = (int)y->data[base + i] & 1;
+                int b = (int)y->data[base + step + i] & 1;
+                y->data[base + i] = (double)(a ^ b);
+            }
+        }
+    }
+    return y;
+}
+
+/* Recursive SC-decode helper.  Returns hard bit decisions (length N)
+ * for the input estimate `u_hat`.  `llr` is the N-element LLR vector
+ * at the current recursion level (positive favours 0). */
+static void polar_sc_rec(double *llr, double *u_hat, int *frozen,
+                          int64_t pos, int64_t N) {
+    if (N == 1) {
+        if (frozen[pos]) {
+            u_hat[pos] = 0.0;
+        } else {
+            u_hat[pos] = (llr[0] < 0.0) ? 1.0 : 0.0;
+        }
+        return;
+    }
+    int64_t H = N / 2;
+    std::vector<double> llr_top(H), llr_bot(H);
+    /* f-node: top half — soft XOR. */
+    for (int64_t i = 0; i < H; ++i) {
+        double a = llr[i], b = llr[i + H];
+        double sa = a >= 0 ? 1.0 : -1.0;
+        double sb = b >= 0 ? 1.0 : -1.0;
+        double mn = fabs(a) < fabs(b) ? fabs(a) : fabs(b);
+        llr_top[i] = sa * sb * mn;
+    }
+    polar_sc_rec(llr_top.data(), u_hat, frozen, pos, H);
+    /* g-node: bottom half — sign uses the *partial codeword* for the
+     * top half, i.e. u_top · G_{N/2}, not the raw decoded info bits.
+     * Apply the recursive polar butterfly to u_hat[pos..pos+H-1]
+     * locally before pulling the sign. */
+    std::vector<double> u_top_partial(H);
+    for (int64_t i = 0; i < H; ++i)
+        u_top_partial[i] = u_hat[pos + i];
+    for (int64_t step = 1; step < H; step <<= 1) {
+        for (int64_t base = 0; base < H; base += (step << 1)) {
+            for (int64_t i = 0; i < step; ++i) {
+                int aa = (int)u_top_partial[base + i] & 1;
+                int bb = (int)u_top_partial[base + step + i] & 1;
+                u_top_partial[base + i] = (double)(aa ^ bb);
+            }
+        }
+    }
+    for (int64_t i = 0; i < H; ++i) {
+        double a = llr[i], b = llr[i + H];
+        double u_part = u_top_partial[i];
+        double sign = (u_part > 0.5) ? -1.0 : 1.0;
+        llr_bot[i] = b + sign * a;
+    }
+    polar_sc_rec(llr_bot.data(), u_hat, frozen, pos + H, H);
+}
+
+/* polarSCdecode(llr, frozen_mask, N) — successive-cancellation
+ * decoder.  Returns N-bit u_hat.  frozen_mask is a 0/1 vector of
+ * length N indicating frozen positions. */
+matlab_mat *matlab_comm_polar_sc_decode(matlab_mat *llr,
+                                         matlab_mat *frozen, double Nd) {
+    int64_t N = (int64_t)Nd;
+    if (!llr || !frozen || N < 1) return mat_alloc(0, 0);
+    int64_t P = 1;
+    while (P < N) P <<= 1;
+    N = P;
+    std::vector<double> llr_buf(N);
+    std::vector<int> fz_buf(N);
+    int64_t Nl = llr->rows * llr->cols;
+    int64_t Nf = frozen->rows * frozen->cols;
+    for (int64_t i = 0; i < N; ++i) {
+        llr_buf[i] = (i < Nl) ? llr->data[i] : 0.0;
+        fz_buf [i] = (i < Nf) ? ((int)frozen->data[i] & 1) : 1;
+    }
+    matlab_mat *u_hat = mat_alloc(N, 1);
+    for (int64_t i = 0; i < N; ++i) u_hat->data[i] = 0.0;
+    polar_sc_rec(llr_buf.data(), u_hat->data, fz_buf.data(), 0, N);
+    return u_hat;
+}
+
+/* ----- §5.4.B LDPC (function-form) ----- *
+ *
+ * ldpcEncode(msg, P) — systematic encoder.
+ *   msg : k x 1 message bits
+ *   P   : k x (n-k) parity portion of G in systematic form
+ *         (so G = [I_k | P], H = [P^T | I_(n-k)])
+ * Returns n x 1 codeword = [msg ; mod(P^T · msg, 2)].
+ */
+matlab_mat *matlab_comm_ldpc_encode(matlab_mat *msg, matlab_mat *P) {
+    if (!msg || !P) return mat_alloc(0, 0);
+    int64_t k  = msg->rows * msg->cols;
+    int64_t Pk = P->rows;
+    int64_t Pm = P->cols;
+    if (Pk != k) return mat_alloc(0, 0);
+    int64_t m = Pm;
+    int64_t n = k + m;
+    matlab_mat *cw = mat_alloc(n, 1);
+    /* Systematic prefix. */
+    for (int64_t i = 0; i < k; ++i)
+        cw->data[i] = (int64_t)msg->data[i] & 1;
+    /* Parity = mod(P^T · msg, 2): each parity bit j is XOR over i of
+     * P[i, j] · msg[i]. */
+    for (int64_t j = 0; j < m; ++j) {
+        int p = 0;
+        for (int64_t i = 0; i < k; ++i) {
+            int b = (int)P->data[i * Pm + j] & 1;
+            int u = (int)msg->data[i] & 1;
+            p ^= (b & u);
+        }
+        cw->data[k + j] = (double)p;
+    }
+    return cw;
+}
+
+/* ldpcDecodeMS(llr, H, max_iter) — min-sum belief-propagation
+ * decoder.  Returns the hard-decision bit vector (length n).
+ *   llr      : n x 1 channel LLR (positive favours 0)
+ *   H        : (n-k) x n parity-check matrix (0/1)
+ *   max_iter : maximum BP iterations
+ */
+matlab_mat *matlab_comm_ldpc_decode_ms(matlab_mat *llr, matlab_mat *H,
+                                        double max_iter) {
+    if (!llr || !H) return mat_alloc(0, 0);
+    int64_t n = H->cols;
+    int64_t m = H->rows;
+    int64_t Nl = llr->rows * llr->cols;
+    if (Nl != n) return mat_alloc(0, 0);
+    int iters = (int)max_iter;
+    if (iters < 1) iters = 1;
+    /* Build edge list: list of (check, variable) pairs for each H[c, v] = 1. */
+    std::vector<std::vector<int64_t>> v_to_c(n);
+    std::vector<std::vector<int64_t>> c_to_v(m);
+    for (int64_t c = 0; c < m; ++c) {
+        for (int64_t v = 0; v < n; ++v) {
+            if (((int)H->data[c * n + v] & 1) == 1) {
+                v_to_c[v].push_back(c);
+                c_to_v[c].push_back(v);
+            }
+        }
+    }
+    /* Messages: var-to-check L_vc[v][c_index] and check-to-var L_cv[c][v_index]. */
+    std::vector<std::vector<double>> L_vc(n), L_cv(m);
+    for (int64_t v = 0; v < n; ++v) L_vc[v].resize(v_to_c[v].size(), 0.0);
+    for (int64_t c = 0; c < m; ++c) L_cv[c].resize(c_to_v[c].size(), 0.0);
+    /* Initialise var-to-check with the channel LLR. */
+    for (int64_t v = 0; v < n; ++v)
+        for (size_t i = 0; i < L_vc[v].size(); ++i)
+            L_vc[v][i] = llr->data[v];
+
+    matlab_mat *out = mat_alloc(n, 1);
+    for (int it = 0; it < iters; ++it) {
+        /* Check-node update: min-sum. */
+        for (int64_t c = 0; c < m; ++c) {
+            int deg = (int)c_to_v[c].size();
+            for (int j = 0; j < deg; ++j) {
+                double prod_sign = 1.0;
+                double min_abs   = 1e300;
+                for (int k = 0; k < deg; ++k) {
+                    if (k == j) continue;
+                    int64_t v = c_to_v[c][k];
+                    /* find the edge index from v's side that points back to c */
+                    int idx = -1;
+                    for (size_t e = 0; e < v_to_c[v].size(); ++e)
+                        if (v_to_c[v][e] == c) { idx = (int)e; break; }
+                    double L = L_vc[v][idx];
+                    if (L < 0.0) prod_sign = -prod_sign;
+                    double a = fabs(L);
+                    if (a < min_abs) min_abs = a;
+                }
+                L_cv[c][j] = prod_sign * min_abs;
+            }
+        }
+        /* Variable-node update: sum + channel. */
+        for (int64_t v = 0; v < n; ++v) {
+            int deg = (int)v_to_c[v].size();
+            double total = llr->data[v];
+            for (int i = 0; i < deg; ++i) {
+                int64_t c = v_to_c[v][i];
+                int idx = -1;
+                for (size_t e = 0; e < c_to_v[c].size(); ++e)
+                    if (c_to_v[c][e] == v) { idx = (int)e; break; }
+                total += L_cv[c][idx];
+            }
+            for (int i = 0; i < deg; ++i) {
+                int64_t c = v_to_c[v][i];
+                int idx = -1;
+                for (size_t e = 0; e < c_to_v[c].size(); ++e)
+                    if (c_to_v[c][e] == v) { idx = (int)e; break; }
+                L_vc[v][i] = total - L_cv[c][idx];
+            }
+            out->data[v] = (total < 0.0) ? 1.0 : 0.0;
+        }
+    }
+    return out;
+}
+
+/* ----- §5.4.C Turbo codes (PCCC) ----- *
+ *
+ * turboEncode(msg, trellis, perm) — parallel-concatenated convolutional
+ * codes with an interleaver.
+ *   msg     : k x 1 message bits
+ *   trellis : matlab_struct from poly2trellis (rate 1/n RSC; for the
+ *             canonical 3GPP turbo we use rate 1/2 so n = 2, but a
+ *             non-recursive code is acceptable for the demo)
+ *   perm    : k x 1 permutation (1-based indices) for the interleaver
+ *
+ * Output is a (3 · k) x 1 vector laid out as
+ *   [systematic_1; ...; systematic_k;
+ *    parity1_1;    ...; parity1_k;
+ *    parity2_1;    ...; parity2_k]
+ *
+ * (the trellis is rate 1/2 with two output bits per input; we emit
+ * the parity bit only, dropping the systematic copy that convenc
+ * would otherwise produce — caller's responsibility to ensure n = 2).
+ */
+matlab_mat *matlab_comm_turbo_encode(matlab_mat *msg, matlab_struct *trellis,
+                                      matlab_mat *perm) {
+    if (!msg || !trellis || !perm) return mat_alloc(0, 0);
+    int64_t k = msg->rows * msg->cols;
+    int n_out = (int)matlab_struct_get_f64(trellis, "n", 1);
+    if (n_out < 1) n_out = 2;
+    /* First encoder pass: convenc on msg. */
+    matlab_mat *c1 = matlab_comm_convenc(msg, trellis);
+    /* Permute msg via the interleaver. */
+    matlab_mat *msg_p = mat_alloc(k, 1);
+    for (int64_t i = 0; i < k; ++i) {
+        int64_t idx = (int64_t)perm->data[i] - 1;
+        if (idx < 0 || idx >= k) idx = 0;
+        msg_p->data[i] = msg->data[idx];
+    }
+    matlab_mat *c2 = matlab_comm_convenc(msg_p, trellis);
+    /* Assemble [sys; p1; p2]. p1 = the n_out-th bit of each c1 chunk
+     * (drop the systematic copy); same for p2. */
+    matlab_mat *out = mat_alloc(3 * k, 1);
+    for (int64_t i = 0; i < k; ++i) out->data[i] = msg->data[i];
+    for (int64_t i = 0; i < k; ++i)
+        out->data[k + i] = c1->data[i * n_out + (n_out - 1)];
+    for (int64_t i = 0; i < k; ++i)
+        out->data[2 * k + i] = c2->data[i * n_out + (n_out - 1)];
+    free(c1->data); free(c1);
+    free(c2->data); free(c2);
+    free(msg_p->data); free(msg_p);
+    return out;
+}
+
+/* Max-log-MAP (BCJR) SISO decoder for a rate-1/2 convolutional
+ * trellis.  Returns per-info-bit LLR (positive favours u=0,
+ * matching the qamdemodLlr / vitdecSoft convention).
+ *
+ *   llr_sys / llr_p : k-length channel LLRs for systematic + parity
+ *   La              : k-length a priori LLR on u (extrinsic from
+ *                     the previous decoder; pass zeros on iter 0)
+ *
+ * Operates over the same trellis struct `poly2trellis` builds.  For
+ * a non-recursive convolutional code the output's first bit is the
+ * systematic copy of u; we override the trellis's stored output bits
+ * to enforce "(u, parity)" interpretation regardless of the input
+ * generator polynomials.
+ */
+static void bcjr_max_log_siso(const double *llr_sys, const double *llr_p,
+                               const double *La, double *Lapp,
+                               matlab_struct *trellis, int64_t k) {
+    int64_t S = (int64_t)matlab_struct_get_f64(trellis, "numStates", 9);
+    matlab_mat *outputs    = matlab_struct_get_mat(trellis, "outputs",      7);
+    matlab_mat *nextStates = matlab_struct_get_mat(trellis, "nextStates", 10);
+    if (!outputs || !nextStates || S < 1) return;
+    int n_out = (int)matlab_struct_get_f64(trellis, "n", 1);
+    const double NEG = -1e18;
+
+    /* alpha[t][s], beta[t][s] — forward / backward path metrics. */
+    std::vector<std::vector<double>> alpha(k + 1, std::vector<double>(S, NEG));
+    std::vector<std::vector<double>> beta (k + 1, std::vector<double>(S, NEG));
+    alpha[0][0] = 0.0;
+    /* Open-end termination: beta_K = uniform 0. */
+    for (int64_t s = 0; s < S; ++s) beta[k][s] = 0.0;
+
+    /* Branch metric γ[t, s', u] = 0.5·u·(La[t] + Lsys[t]) + 0.5·p·Lp[t].
+     * The trellis stores the *encoded* output for transition (s', u);
+     * for a rate-1/2 code we interpret output bits as (b0, b1) where
+     * b0 is the parity in our turbo convention (we emit parity-only,
+     * dropping the systematic copy in `turboEncode`). */
+    auto gamma = [&](int64_t t, int64_t sp, int u) {
+        int oi = (int)outputs->data[sp * 2 + u];
+        int p_bit = (oi >> (n_out - 1)) & 1;   /* high bit ≡ parity_1 in (171,133)₈ */
+        /* For 3-bit and other rate forms we still take the first
+         * generator's bit as the parity stream — matches how
+         * turboEncode emits the n_out-th bit of each chunk. */
+        p_bit = oi & 1;
+        double u_d = (u == 0) ? 0.0 : 1.0;
+        double p_d = (p_bit == 0) ? 0.0 : 1.0;
+        /* sign convention: positive LLR favours bit=0, so b=0 yields
+         * +L/2 in the metric, b=1 yields -L/2. */
+        double sys_metric = (1.0 - 2.0 * u_d) * 0.5 * llr_sys[t];
+        double par_metric = (1.0 - 2.0 * p_d) * 0.5 * llr_p[t];
+        double ap_metric  = (1.0 - 2.0 * u_d) * 0.5 * La[t];
+        return sys_metric + par_metric + ap_metric;
+    };
+
+    /* Forward recursion. */
+    for (int64_t t = 0; t < k; ++t) {
+        for (int64_t s = 0; s < S; ++s) {
+            double best = NEG;
+            for (int64_t sp = 0; sp < S; ++sp) {
+                for (int u = 0; u <= 1; ++u) {
+                    int64_t ns = (int64_t)nextStates->data[sp * 2 + u];
+                    if (ns != s) continue;
+                    double cand = alpha[t][sp] + gamma(t, sp, u);
+                    if (cand > best) best = cand;
+                }
+            }
+            alpha[t + 1][s] = best;
+        }
+    }
+    /* Backward recursion. */
+    for (int64_t t = k - 1; t >= 0; --t) {
+        for (int64_t s = 0; s < S; ++s) {
+            double best = NEG;
+            for (int u = 0; u <= 1; ++u) {
+                int64_t ns = (int64_t)nextStates->data[s * 2 + u];
+                if (ns < 0 || ns >= S) continue;
+                double cand = beta[t + 1][ns] + gamma(t, s, u);
+                if (cand > best) best = cand;
+            }
+            beta[t][s] = best;
+        }
+    }
+    /* APP LLR per info bit. */
+    for (int64_t t = 0; t < k; ++t) {
+        double max0 = NEG, max1 = NEG;
+        for (int64_t sp = 0; sp < S; ++sp) {
+            for (int u = 0; u <= 1; ++u) {
+                int64_t ns = (int64_t)nextStates->data[sp * 2 + u];
+                if (ns < 0 || ns >= S) continue;
+                double m = alpha[t][sp] + gamma(t, sp, u) + beta[t + 1][ns];
+                if (u == 0) { if (m > max0) max0 = m; }
+                else        { if (m > max1) max1 = m; }
+            }
+        }
+        Lapp[t] = max0 - max1;
+    }
+}
+
+/* turboDecode(llr_sys, llr_p1, llr_p2, trellis, perm, max_iter)
+ *
+ * Iterative BCJR (max-log-MAP) turbo decoder.  Each iteration runs
+ * the SISO above twice — once on the natural-order half and once on
+ * the interleaved half — exchanging extrinsic LLR between them.
+ * Returns k hard-decision bits.
+ */
+matlab_mat *matlab_comm_turbo_decode(matlab_mat *llr_sys, matlab_mat *llr_p1,
+                                      matlab_mat *llr_p2,
+                                      matlab_struct *trellis, matlab_mat *perm,
+                                      double max_iter_d) {
+    if (!llr_sys || !llr_p1 || !llr_p2 || !trellis || !perm)
+        return mat_alloc(0, 0);
+    int64_t k = llr_sys->rows * llr_sys->cols;
+    int max_iter = (int)max_iter_d;
+    if (max_iter < 1) max_iter = 4;
+    /* Inverse permutation. */
+    std::vector<int64_t> inv_perm(k, 0);
+    for (int64_t i = 0; i < k; ++i) {
+        int64_t idx = (int64_t)perm->data[i] - 1;
+        if (idx >= 0 && idx < k) inv_perm[idx] = i;
+    }
+    /* Interleaved systematic LLR (used by decoder 2). */
+    std::vector<double> sys_perm(k);
+    for (int64_t i = 0; i < k; ++i) {
+        int64_t idx = (int64_t)perm->data[i] - 1;
+        sys_perm[i] = llr_sys->data[idx];
+    }
+    /* Extrinsic LLR feedback (a priori for the next half). */
+    std::vector<double> La1(k, 0.0);    /* a priori for decoder 1 (natural) */
+    std::vector<double> La2(k, 0.0);    /* a priori for decoder 2 (perm)    */
+    std::vector<double> Lapp1(k, 0.0), Lapp2(k, 0.0);
+    matlab_mat *dec = mat_alloc(k, 1);
+    for (int it = 0; it < max_iter; ++it) {
+        bcjr_max_log_siso(llr_sys->data, llr_p1->data, La1.data(),
+                          Lapp1.data(), trellis, k);
+        /* Extrinsic out of decoder 1 = Lapp - Lsys - La1, mapped into
+         * encoder-2's ordering: La2[inv_perm[i]] = Le[i] (so
+         * La2[j] = Le[perm[j]-1] is the a priori for decoder 2's bit j). */
+        for (int64_t i = 0; i < k; ++i) {
+            double Le = Lapp1[i] - llr_sys->data[i] - La1[i];
+            La2[inv_perm[i]] = Le;
+        }
+        bcjr_max_log_siso(sys_perm.data(), llr_p2->data, La2.data(),
+                          Lapp2.data(), trellis, k);
+        /* Extrinsic out of decoder 2, mapped back to natural order:
+         * La1[perm[i]-1] = Le_dec2[i]. */
+        for (int64_t i = 0; i < k; ++i) {
+            double Le = Lapp2[i] - sys_perm[i] - La2[i];
+            int64_t idx = (int64_t)perm->data[i] - 1;
+            La1[idx] = Le;
+        }
+    }
+    /* Final hard decision from the combined a posteriori at decoder 2,
+     * de-permuted back to natural order. */
+    for (int64_t i = 0; i < k; ++i) {
+        int64_t idx = (int64_t)perm->data[i] - 1;
+        dec->data[idx] = (Lapp2[i] < 0.0) ? 1.0 : 0.0;
+    }
+    return dec;
+}
+
 /* mlDetect(y, alphabet): per-symbol ML decision against a complex
  * alphabet of M candidate constellation points. */
 matlab_mat *matlab_comm_ml_detect(matlab_mat_c *y, matlab_mat_c *alphabet) {
