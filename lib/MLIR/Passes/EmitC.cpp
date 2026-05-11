@@ -1730,7 +1730,8 @@ static llvm::StringRef MatrixReturningFns[] = {
     "matlab_rand", "matlab_randn", "matlab_range", "matlab_repmat",
     "matlab_matmul_mm", "matlab_inv", "matlab_mldivide_mm",
     "matlab_mrdivide_mm", "matlab_svd", "matlab_eig", "matlab_eig_V",
-    "matlab_eig_D", "matlab_transpose", "matlab_diag", "matlab_reshape",
+    "matlab_eig_D", "matlab_eig_gen",
+    "matlab_transpose", "matlab_diag", "matlab_reshape",
     "matlab_matpow", "matlab_expm", "matlab_logm",
     "matlab_hess", "matlab_hess_H", "matlab_hess_P",
     "matlab_schur", "matlab_schur_T", "matlab_schur_U",
@@ -4283,10 +4284,31 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
             // Direct-init for `Matrix(...)` ctor expressions, mirroring
             // the class-call path so we get `Matrix A(slot, m, n)` not
             // `Matrix A = Matrix(slot, m, n)`.
+            //
+            // Critically, only apply this when the rewrite is exactly a
+            // constructor call — `Matrix(args)` with the matching `)`
+            // at the very end.  A method-chain rewrite like
+            // `Matrix(args).diag()` ALSO starts with `Matrix(` and ends
+            // with `)`, but turning it into `Matrix A(args).diag();`
+            // hits C++'s most-vexing-parse (declares `A` as a function
+            // returning Matrix instead of constructing a Matrix), so we
+            // fall back to the copy-init form.  Walk forward from the
+            // opening paren tracking depth and only accept when the
+            // matching close-paren is the final char.
             std::string CtorPrefix = ResultTy + "(";
+            bool ExactCtor = false;
             if (Rewrite.size() > CtorPrefix.size() &&
                 Rewrite.compare(0, CtorPrefix.size(), CtorPrefix) == 0 &&
                 Rewrite.back() == ')') {
+              int Depth = 1;
+              size_t i = CtorPrefix.size();
+              for (; i < Rewrite.size() && Depth > 0; ++i) {
+                if (Rewrite[i] == '(') ++Depth;
+                else if (Rewrite[i] == ')') --Depth;
+              }
+              ExactCtor = (Depth == 0 && i == Rewrite.size());
+            }
+            if (ExactCtor) {
               std::string Args = Rewrite.substr(
                   CtorPrefix.size(),
                   Rewrite.size() - CtorPrefix.size() - 1);
