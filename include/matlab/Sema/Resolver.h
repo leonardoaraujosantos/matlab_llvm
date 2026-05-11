@@ -43,6 +43,21 @@ public:
   using WorkspaceKindHookT = int (*)(const char *name, int64_t len);
   void setWorkspaceKindHook(WorkspaceKindHookT H) { WorkspaceKindHook = H; }
 
+  // REPL workspace class-name hook — for kind=2 (matlab_obj*) bindings,
+  // returns the class name stored with the instance (looked up from the
+  // runtime's class registry via the obj's class_id).  Used by the
+  // Resolver to re-pin `Binding::PinnedClass` cross-turn so the
+  // `obj(args)` System-Object sugar and dot-method dispatch still
+  // route to the class methods on a subsequent REPL input.  Returns
+  // null when the name isn't a kind=2 binding or the class hasn't
+  // been registered (e.g. a function ran with class registration
+  // disabled — pre-2026-05 behavior).
+  using WorkspaceClassNameHookT =
+      const char *(*)(const char *name, int64_t len, int64_t *name_len_out);
+  void setWorkspaceClassNameHook(WorkspaceClassNameHookT H) {
+    WorkspaceClassNameHook = H;
+  }
+
 private:
   SemaContext &Sema;
   TypeContext &TC;
@@ -50,6 +65,7 @@ private:
   Scope *Global = nullptr;
   bool ReplMode = false;
   WorkspaceKindHookT WorkspaceKindHook = nullptr;
+  WorkspaceClassNameHookT WorkspaceClassNameHook = nullptr;
 
   void registerBuiltins();
   void registerBuiltin(std::string_view Name);

@@ -1347,12 +1347,17 @@ void Lowerer::lowerScript(const Script &S, mlir::ModuleOp M) {
   Slots.clear();
   CurFnName = "script";
 
-  /* Register every classdef's name with the runtime so the DAP server
-   * can resolve a matlab_obj's class_id back to a printable class
-   * name. Emitted as the first thing in the script body so the table
-   * is populated before any constructor runs. No-op outside
-   * DebugMode — the registry is dead weight in production builds. */
-  if (DebugMode && CurTU) {
+  /* Register every classdef's name with the runtime so:
+   *   - the DAP server can resolve a matlab_obj's class_id back to a
+   *     printable class name (Debug/DAP path);
+   *   - the REPL prelude-loader can scan workspace kind=2 bindings on
+   *     a fresh turn and discover which classdefs to re-load, even
+   *     when the user's input doesn't textually mention the class
+   *     name (see `buildReplPrelude` in `tools/matlabc/main.cpp`).
+   * Emitted as the first thing in the script body so the table is
+   * populated before any constructor runs.  Cheap (one hash insert
+   * per class per script entry); always-on. */
+  if (CurTU) {
     auto I32 = mlir::IntegerType::get(&MCtx, 32);
     for (const ClassDef *C : CurTU->Classes) {
       if (!C || C->ClassId <= 0) continue;
@@ -5790,6 +5795,53 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
               mlir::StringAttr::get(&MCtx, Callee));
           return emitUnreg("matlab.call_builtin", {Wide, WL, FL},
                            mlir::NoneType::get(&MCtx), L, {Cal});
+        }
+      }
+
+      /* Generic `methodName(obj, args)` -> `obj.methodName(args)`
+       * dispatch: when the callee is a builtin name AND the first
+       * arg is class-pinned AND that class (or any ancestor) defines
+       * a method with the same name, route to the class method
+       * instead of the generic builtin.  Covers MATLAB's function-
+       * style method call idiom — `reset(crc)`, `release(filter)`,
+       * `clone(obj)`, etc. — without needing per-name carve-outs.
+       *
+       * Excludes `disp` because the disp-on-class path immediately
+       * below also handles the no-method case (falls back to the
+       * runtime-helper renderer for tf / etc.); the generic path
+       * would short-circuit before that fallback fires.  Excludes
+       * `step` because the bare `obj(args)` sugar (in the CallOrIndex
+       * Index branch) already routes there and we'd double-handle. */
+      if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
+          !C.Args.empty() && C.Args[0] &&
+          N->Name != "disp" && N->Name != "step") {
+        if (auto *AN = dynamic_cast<const NameExpr *>(C.Args[0])) {
+          if (AN->Ref && AN->Ref->PinnedClass) {
+            const ClassDef *Owner = nullptr;
+            for (const ClassDef *CC = AN->Ref->PinnedClass; CC; CC = CC->Super) {
+              for (const Function *Mm : CC->Methods)
+                if (Mm && Mm->Name == N->Name) { Owner = CC; break; }
+              if (Owner) break;
+            }
+            if (Owner) {
+              llvm::SmallVector<mlir::Value, 4> Args;
+              for (const Expr *A : C.Args) if (A) Args.push_back(lowerExpr(*A));
+              std::string Callee = std::string(Owner->Name) + "__" +
+                                    std::string(N->Name);
+              mlir::NamedAttribute Cal(
+                  mlir::StringAttr::get(&MCtx, "callee"),
+                  mlir::StringAttr::get(&MCtx, Callee));
+              /* Method bodies may return scalar f64, matrix ptr, or
+               * void — pass through the call-site's expected type RT
+               * when concrete and default to NoneType otherwise.  The
+               * runtime helpers + downstream passes handle the type
+               * widening if needed. */
+              mlir::Type ResTy = mlir::isa<mlir::NoneType>(RT)
+                                     ? (mlir::Type)mlir::NoneType::get(&MCtx)
+                                     : RT;
+              return emitUnreg("matlab.call", Args, ResTy, L, {Cal});
+            }
+          }
         }
       }
 

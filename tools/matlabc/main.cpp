@@ -43,6 +43,7 @@
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/SymbolTable.h"
 #include "mlir/IR/Verifier.h"
 #include "mlir/Conversion/ArithToLLVM/ArithToLLVM.h"
 #include "mlir/Conversion/ControlFlowToLLVM/ControlFlowToLLVM.h"
@@ -462,6 +463,32 @@ std::string formatDiagnostics(const SourceManager &SM,
  * runtime-introspection externs), forward-declared here so the REPL
  * compile entries below can install it on their Resolver. */
 extern "C" int replWorkspaceKindHook(const char *name, int64_t len);
+/* Companion hook for kind=2 bindings — returns the class name of the
+ * runtime obj stored under `name` (or null when the binding isn't a
+ * class instance / the class isn't registered).  Defined alongside
+ * replWorkspaceKindHook below. */
+extern "C" const char *replWorkspaceClassNameHook(const char *name,
+                                                   int64_t len,
+                                                   int64_t *len_out);
+
+/* matlabc binary directory — captured once in main() so the REPL
+ * prelude-search helpers can find runtime/*.m files relative to the
+ * binary location without threading argv[0] through every call site.
+ * Empty when matlabc was invoked without a discoverable on-disk path
+ * (rare; falls back to no preludes in that case). */
+static std::string g_MatlabcBinDir;
+
+/* Build the SO / CST classdef prelude content to prepend to a REPL
+ * input.  Same trigger logic as the static-input path (see
+ * `userMentionsCommClasses` / `userMentionsCstClasses` below): scan
+ * the source for whole-word class names with `(` or `=` follow-up,
+ * stripping line-comments; for each hit, locate the prelude file
+ * under `<bin>/../runtime/` and concatenate its contents.
+ *
+ * Returns the combined prelude text (possibly empty).  REPL caller
+ * prepends this to the user input before lexing — adds the
+ * `classdef` blocks to the same TU so Sema sees the class names. */
+static std::string buildReplPrelude(const std::string &Src);
 
 #ifdef MATLAB_LLVM_WITH_PLOT
 /* IDE integration (Matlab_llvm_ide): defined in runtime/plot/c_api.cpp.
@@ -474,8 +501,20 @@ extern "C" void matlab_ide_emit_all_figures(void);
 
 int runReplInput(mlirgen::Context &MCtx, const std::string &Src, int Id,
                  std::string *DiagOut = nullptr) {
+  /* If the input mentions any CST / Comm classdef name, prepend the
+   * matching prelude file(s) before parsing.  The classdef blocks
+   * land in the same TU as the user's script, so Sema can resolve
+   * the class name and the lowering can emit ctor / method bodies.
+   * Falls back to the user input verbatim when nothing matches —
+   * non-classdef REPL turns pay no overhead. */
+  /* Prelude goes AFTER the user input — MATLAB script files mix
+   * top-level statements with classdef blocks in that order, and the
+   * static-input path uses the same shape (see the loader around
+   * `Combined += "\n"; ... PreludePaths`). */
+  std::string Prelude = buildReplPrelude(Src);
+  std::string Combined = Prelude.empty() ? Src : Src + "\n" + Prelude;
   SourceManager SM;
-  FileID F = SM.addBuffer("<repl:" + std::to_string(Id) + ">", Src);
+  FileID F = SM.addBuffer("<repl:" + std::to_string(Id) + ">", Combined);
   DiagnosticEngine Diag(SM);
   auto onFail = [&] {
     if (DiagOut) *DiagOut = formatDiagnostics(SM, Diag);
@@ -497,6 +536,7 @@ int runReplInput(mlirgen::Context &MCtx, const std::string &Src, int Id,
   Resolver R(Sema, TC, Diag);
   R.setReplMode(true);
   R.setWorkspaceKindHook(&replWorkspaceKindHook);
+  R.setWorkspaceClassNameHook(&replWorkspaceClassNameHook);
   R.resolve(*TU);
   TypeInference Inf(Sema, TC, Diag);
   Inf.run(*TU);
@@ -558,6 +598,41 @@ int runReplInput(mlirgen::Context &MCtx, const std::string &Src, int Id,
   mlirgen::runLowerPlot(M);
 #endif
   mlirgen::runLowerIO(M);
+
+  /* Drop classdef method bodies that nothing in this TU calls.  The
+   * REPL prelude pulls every method of every referenced class into
+   * the module, but Sema's type-inference only refines a method's
+   * parameter types when there's a call site forcing them.  An
+   * uncalled method body keeps `none`-typed args and survives all
+   * the LowerScalars/Tensor sweeps unchanged — then trips the LLVM
+   * translation step because `func.func` with `none` args has no
+   * registered conversion.
+   *
+   * For a typical REPL session that creates an instance on turn 0
+   * and only calls `step` on turn 1, this drops `step` / `reset` /
+   * etc. from turn 0's TU (they'd be unused there) and pulls them
+   * back in on turn 1 when the call site fires.  Symbol uses are
+   * checked relative to the module — internal sibling calls between
+   * methods stay live transitively as long as some ancestor caller
+   * exists. */
+  {
+    auto SymTbl = mlir::SymbolTable(M);
+    bool Changed = true;
+    while (Changed) {
+      Changed = false;
+      llvm::SmallVector<mlir::Operation *> Drop;
+      M.walk([&](mlir::func::FuncOp F) {
+        if (!F->hasAttr("matlab.class_name")) return;
+        auto Sym = F.getSymNameAttr();
+        if (auto Uses = SymTbl.getSymbolUses(Sym, M))
+          if (Uses->empty()) Drop.push_back(F);
+      });
+      for (auto *Op : Drop) {
+        SymTbl.erase(Op);
+        Changed = true;
+      }
+    }
+  }
 
   if (mlir::failed(mlir::verify(M))) {
     std::cerr << "error: REPL MLIR verification failed after passes\n";
@@ -1374,6 +1449,13 @@ const char *matlab_dbg_ws_name(int i, int64_t *len_out);
 int  matlab_dbg_ws_kind(int i);
 double matlab_dbg_ws_f64(int i);
 void  *matlab_dbg_ws_ptr(int i);
+/* matlab_obj_class_id : matlab_obj* -> int32_t (returned as double).
+ * matlab_dbg_class_name(id, &len): class registry lookup, returns the
+ * UTF-8 name registered by the lowering (or NULL).  Both are used by
+ * buildReplPrelude to walk workspace kind=2 bindings and re-load the
+ * matching classdef prelude on subsequent REPL turns. */
+double matlab_obj_class_id(void *o);
+const char *matlab_dbg_class_name(int32_t class_id, int64_t *len_out);
 void  matlab_ws_set_f64(const char *name, int64_t len, double v);
 void  matlab_ws_set_mat(const char *name, int64_t len, struct matlab_mat *m);
 void  matlab_ws_set_string(const char *name, int64_t len, void *s);
@@ -1408,6 +1490,147 @@ extern "C" int replWorkspaceKindHook(const char *name, int64_t len) {
       return matlab_dbg_ws_kind(i);
   }
   return -1;
+}
+
+/* Resolver workspace class-name hook — when a name resolves to a
+ * kind=2 (matlab_obj*) binding, look up its class_id via the
+ * runtime's obj header and translate to a class name through the
+ * registry populated by the Lowering's `matlab_dbg_register_class`
+ * emission.  Returns nullptr (and leaves `*len_out` untouched) for
+ * non-obj bindings or unregistered class_ids. */
+extern "C" const char *replWorkspaceClassNameHook(const char *name,
+                                                   int64_t len,
+                                                   int64_t *len_out) {
+  int n = matlab_dbg_ws_count();
+  for (int i = 0; i < n; ++i) {
+    int64_t got = 0;
+    const char *gn = matlab_dbg_ws_name(i, &got);
+    if (got != len || !gn || memcmp(gn, name, (size_t)len) != 0) continue;
+    if (matlab_dbg_ws_kind(i) != 2) return nullptr;
+    void *o = matlab_dbg_ws_ptr(i);
+    if (!o) return nullptr;
+    int32_t cid = (int32_t)matlab_obj_class_id(o);
+    return matlab_dbg_class_name(cid, len_out);
+  }
+  return nullptr;
+}
+
+/* Definition of the forward declaration earlier in this file — kept
+ * here next to replWorkspaceKindHook because both consume
+ * `g_MatlabcBinDir` (set in main()) and share the per-class scanning
+ * idiom with the static-input prelude wiring. */
+static std::string buildReplPrelude(const std::string &Src) {
+  if (g_MatlabcBinDir.empty()) return std::string();
+  /* Comment-strip pass — drop everything from `%` to end-of-line so a
+   * comment line like `% tf is short for transfer function` doesn't
+   * pull the prelude in. */
+  std::string Stripped;
+  Stripped.reserve(Src.size());
+  bool InComment = false;
+  for (char c : Src) {
+    if (c == '\n') {
+      InComment = false;
+      Stripped.push_back(c);
+      continue;
+    }
+    if (c == '%') InComment = true;
+    if (!InComment) Stripped.push_back(c);
+  }
+  auto wordHit = [&](const char *Name, char Follow1, char Follow2) -> bool {
+    size_t NL = std::strlen(Name);
+    size_t P = 0;
+    while ((P = Stripped.find(Name, P)) != std::string::npos) {
+      bool LeftWord = (P > 0) && (std::isalnum((unsigned char)Stripped[P-1]) ||
+                                    Stripped[P-1] == '_');
+      if (!LeftWord && P + NL < Stripped.size()) {
+        char R = Stripped[P + NL];
+        if (R == Follow1) return true;
+        size_t Q = P + NL;
+        while (Q < Stripped.size() && (Stripped[Q] == ' ' || Stripped[Q] == '\t'))
+          Q++;
+        if (Q < Stripped.size() && Stripped[Q] == Follow2) {
+          /* Single `=` (not `==`) means assignment. */
+          if (Follow2 != '=' || Q + 1 >= Stripped.size() ||
+              Stripped[Q+1] != '=') return true;
+        }
+      }
+      P += NL;
+    }
+    return false;
+  };
+  auto mentions = [&](const char *Name) -> bool {
+    /* Call shape `Name(` or assignment shape `Name =`. */
+    return wordHit(Name, '(', '=');
+  };
+  /* CST prelude classes: tf lives in cst_classdefs.m (shares
+   * cst_polyadd helpers); ss / zpk / pid / frd have per-class files. */
+  std::vector<std::string> Files;
+  auto add = [&](const std::string &Leaf) {
+    std::vector<std::string> Cands = {
+      g_MatlabcBinDir + "/../runtime/" + Leaf,
+      g_MatlabcBinDir + "/runtime/" + Leaf,
+      g_MatlabcBinDir + "/../share/matlabc/runtime/" + Leaf,
+    };
+    for (auto &C : Cands) {
+      std::ifstream Fp(C);
+      if (Fp) { Files.push_back(C); return; }
+    }
+  };
+  /* Source-mention scan: turn-0-style detection. */
+  bool WantTf = mentions("tf");
+  bool WantSs = mentions("ss");
+  bool WantZpk = mentions("zpk");
+  bool WantPid = mentions("pid");
+  bool WantFrd = mentions("frd");
+  bool WantComm = false;
+  static const char *CommNames[] = { "CommCRCGenerator" };
+  for (const char *N : CommNames) if (mentions(N)) { WantComm = true; break; }
+
+  /* Workspace-mention scan: subsequent REPL turns may not re-mention
+   * the class name (e.g. `crc = CommCRCGenerator(1)` in turn 0, then
+   * just `crc(1)` in turn 1).  Walk every kind=2 workspace binding,
+   * resolve its class_id → class name, and union into the WantXxx
+   * set so the next TU still has the classdef in scope.  Without
+   * this, the second turn's Resolver doesn't see CommCRCGenerator
+   * as a ClassDef and the obj-call sugar can't fire. */
+  int n = matlab_dbg_ws_count();
+  for (int i = 0; i < n; ++i) {
+    if (matlab_dbg_ws_kind(i) != 2) continue;
+    void *o = matlab_dbg_ws_ptr(i);
+    if (!o) continue;
+    int32_t cid = (int32_t)matlab_obj_class_id(o);
+    int64_t cnLen = 0;
+    const char *cn = matlab_dbg_class_name(cid, &cnLen);
+    if (!cn || cnLen <= 0) continue;
+    std::string_view N(cn, (size_t)cnLen);
+    if      (N == "tf")  WantTf = true;
+    else if (N == "ss")  WantSs = true;
+    else if (N == "zpk") WantZpk = true;
+    else if (N == "pid") WantPid = true;
+    else if (N == "frd") WantFrd = true;
+    else if (N == "CommCRCGenerator") WantComm = true;
+  }
+
+  if (WantTf)  add("cst_classdefs.m");
+  if (WantSs)  add("cst_class_ss.m");
+  if (WantZpk) add("cst_class_zpk.m");
+  if (WantPid) add("cst_class_pid.m");
+  if (WantFrd) add("cst_class_frd.m");
+  if (WantComm) add("comm_classdefs.m");
+  if (Files.empty()) return std::string();
+  std::string Out;
+  for (auto &P : Files) {
+    std::ifstream In(P);
+    if (!In) continue;
+    std::ostringstream Buf;
+    Buf << In.rdbuf();
+    if (!Out.empty()) Out += '\n';
+    Out += "% --- prelude ";
+    Out += P;
+    Out += " ---\n";
+    Out += Buf.str();
+  }
+  return Out;
 }
 int  matlab_dbg_add_breakpoint_ex(int32_t file_id, int32_t line,
                                    const char *cond, int64_t cond_len,
@@ -2512,6 +2735,7 @@ bool compileProgram() {
   Resolver R(Sema, TC, Diag);
   R.setReplMode(true);
   R.setWorkspaceKindHook(&replWorkspaceKindHook);
+  R.setWorkspaceClassNameHook(&replWorkspaceClassNameHook);
   R.resolve(*TU);
   TypeInference Inf(Sema, TC, Diag);
   Inf.run(*TU);
@@ -8061,6 +8285,21 @@ int main(int Argc, char **Argv) {
   Options Opts;
   const char *Prog = Argv[0];
   if (!parseArgs(Argc, Argv, Opts, Prog)) return usage(Prog);
+
+  /* Capture the matlabc binary directory so `buildReplPrelude` (and any
+   * other path-relative helper) can locate `runtime/*.m` without
+   * threading argv[0] through their signatures.  realpath() resolves
+   * symlinks so a `/usr/local/bin/matlabc` symlink to the build tree
+   * still points back at the source's `runtime/` directory. */
+  {
+    std::string SelfStr(Argv[0]);
+    auto last = SelfStr.find_last_of('/');
+    std::string Bin = (last == std::string::npos)
+                          ? std::string(".") : SelfStr.substr(0, last);
+    char Real[PATH_MAX];
+    if (realpath(Bin.c_str(), Real)) Bin = Real;
+    g_MatlabcBinDir = Bin;
+  }
 
 #if MATLAB_LLVM_WITH_MLIR
   if (Opts.Mode == Options::Mode::Repl) return runRepl();

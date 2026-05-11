@@ -142,6 +142,13 @@ void Resolver::registerBuiltins() {
      * scope for the synthesised-builtin-call path today. Users
      * compose those explicitly via `ss(Ad, Bd, …)`. */
     "step", "bode", "dcgain", "lsim", "bandwidth",
+    /* System Object lifecycle methods.  Registered as builtin names
+     * so `reset(obj)` / `release(obj)` / `clone(obj)` / `isLocked(obj)`
+     * resolve at Sema time; the generic method-on-class-instance
+     * dispatch in Lowering.cpp routes the call to the matching
+     * ClassName__<name> method body when the first arg is class-
+     * pinned. */
+    "reset", "release", "clone", "isLocked",
     /* §3.3 / §3.4 follow-ons — Tier-2 leftovers. impulse / initial
      * for time-domain free response; freqresp / nyquist / allmargin
      * for frequency-domain analysis. Matrix-arg companions
@@ -971,6 +978,26 @@ void Resolver::resolveExpr(Expr &E, Scope *S) {
            * compile so `lb.PathLoss` and friends route through the
            * struct-get path. */
           else if (K == 12) NB->IsStruct = true;
+          /* Kind 2 = matlab_obj* (classdef instance).  Re-pin the
+           * binding to the runtime-tracked class so the obj-call
+           * sugar / dot-method dispatch / class operator overloads
+           * stay live across REPL turns.  Without this, a cross-
+           * input `crc(1)` (when `crc` was a SystemObject set in a
+           * prior turn) would fall through to the matrix-subscript
+           * path and read garbage.  The classdef itself must be in
+           * scope by this point — the REPL prelude loader pulls it
+           * in via the same workspace-scan path. */
+          else if (K == 2 && WorkspaceClassNameHook) {
+            int64_t CnLen = 0;
+            const char *Cn = WorkspaceClassNameHook(
+                N.Name.data(), (int64_t)N.Name.size(), &CnLen);
+            if (Cn && CnLen > 0) {
+              std::string_view CnView(Cn, (size_t)CnLen);
+              Binding *CB = S->lookup(CnView);
+              if (CB && CB->Kind == BindingKind::Class && CB->ClassDef)
+                NB->PinnedClass = CB->ClassDef;
+            }
+          }
         }
       } else {
         Diag.error(N.Range.Begin,
