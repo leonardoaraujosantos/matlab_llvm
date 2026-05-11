@@ -6159,6 +6159,102 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
           }
         }
 
+        /* §5.1 sminreal(sys) — structural minimal realisation.
+         * Returns a fresh ss with non-reachable + non-observable
+         * states dropped. Routes through matlab_sminreal_{A,B,C}. */
+        if (Nm == "sminreal" && Cls0 && Cn0 == "ss" &&
+            C.Args.size() == 1) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value AVal = getProp(Obj, "A");
+          mlir::Value BVal = getProp(Obj, "B");
+          mlir::Value CVal = getProp(Obj, "C");
+          mlir::Value DVal = getProp(Obj, "D");
+          llvm::SmallVector<mlir::Value, 3> Ssa{AVal, BVal, CVal};
+          mlir::NamedAttribute CalA(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_sminreal_A"));
+          mlir::NamedAttribute CalB(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_sminreal_B"));
+          mlir::NamedAttribute CalCC(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_sminreal_C"));
+          mlir::Value As = emitUnreg("matlab.call_builtin", Ssa,
+                                       PtrTy, L, {CalA});
+          mlir::Value Bs = emitUnreg("matlab.call_builtin", Ssa,
+                                       PtrTy, L, {CalB});
+          mlir::Value Cs = emitUnreg("matlab.call_builtin", Ssa,
+                                       PtrTy, L, {CalCC});
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "ss__ss"));
+          return emitUnreg("matlab.call",
+                           {As, Bs, Cs, DVal},
+                           PtrTy, L, {CtorCal});
+        }
+
+        /* §5.1 modred(sys, elim, method) — modal residualisation.
+         * `elim` is a vector of state indices to drop; `method` is
+         * the string 'Truncate' or 'MatchDC'. Result is a fresh ss
+         * via the matlab_modred_{A,B,C} runtime triple. */
+        if (Nm == "modred" && Cls0 && Cn0 == "ss" &&
+            (C.Args.size() == 2 || C.Args.size() == 3)) {
+          mlir::Value Obj  = loadObj(C.Args[0]);
+          mlir::Value Elim = lowerExpr(*C.Args[1]);
+          /* Box scalar f64 elim into a 1×1 matrix so the runtime
+           * sees a uniform ptr operand (covers `modred(sys, [2],
+           * 'Truncate')` where [2] collapses to scalar). */
+          if (Elim.getType() == F64) {
+            mlir::NamedAttribute BoxCal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_mat_from_scalar"));
+            Elim = emitUnreg("matlab.call_builtin", {Elim}, PtrTy, L,
+                              {BoxCal});
+          }
+          if (Elim.getType() != PtrTy) Elim.setType(PtrTy);
+          /* Pick method_id from the third arg's char/string literal.
+           * Default = 0 (Truncate) when no method is given. */
+          double mid = 0.0;
+          if (C.Args.size() == 3 && C.Args[2]) {
+            const CharLiteral *CL =
+                dynamic_cast<const CharLiteral *>(C.Args[2]);
+            const StringLiteral *SL =
+                CL ? nullptr
+                   : dynamic_cast<const StringLiteral *>(C.Args[2]);
+            llvm::StringRef Tok =
+                CL ? CL->Value : (SL ? SL->Value : "");
+            if (Tok == "MatchDC") mid = 1.0;
+          }
+          mlir::Value MidV = mlir::arith::ConstantOp::create(
+              B, L, F64, mlir::FloatAttr::get(F64, mid)).getResult();
+          mlir::Value AVal = getProp(Obj, "A");
+          mlir::Value BVal = getProp(Obj, "B");
+          mlir::Value CVal = getProp(Obj, "C");
+          mlir::Value DVal = getProp(Obj, "D");
+          llvm::SmallVector<mlir::Value, 5> Ssa{AVal, BVal, CVal, Elim, MidV};
+          mlir::NamedAttribute CalA(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_modred_A"));
+          mlir::NamedAttribute CalB(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_modred_B"));
+          mlir::NamedAttribute CalCC(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_modred_C"));
+          mlir::Value Ar = emitUnreg("matlab.call_builtin", Ssa,
+                                       PtrTy, L, {CalA});
+          mlir::Value Br = emitUnreg("matlab.call_builtin", Ssa,
+                                       PtrTy, L, {CalB});
+          mlir::Value Cr = emitUnreg("matlab.call_builtin", Ssa,
+                                       PtrTy, L, {CalCC});
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "ss__ss"));
+          return emitUnreg("matlab.call",
+                           {Ar, Br, Cr, DVal},
+                           PtrTy, L, {CtorCal});
+        }
+
         /* §5.2 append(sys1, sys2) / blkdiag(sys1, sys2) — block-
          * diagonal MIMO append. Same shape as feedback/series above
          * but routes to matlab_append_ss_{A,B,C}. Result D is
@@ -7190,6 +7286,8 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             /* Class-returning model-object short forms (Sema's
              * pinnedOfRhs handles the LHS slot pin). */
             "feedback", "series", "parallel", "append", "blkdiag",
+            /* Tier-4 reduction + delay tail. */
+            "sminreal", "modred", "thiran",
             "find", "ind2sub", "linspace", "logspace",
             /* Complex: all return a matrix descriptor (matlab_mat* or
              * matlab_mat_c*), uniformly ptr at MLIR level. */

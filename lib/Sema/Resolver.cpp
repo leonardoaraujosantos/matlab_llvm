@@ -165,6 +165,11 @@ void Resolver::registerBuiltins() {
      * Result is a fresh ss(.) constructor call; Resolver's
      * pinnedOfRhs propagates the class pin from the first arg. */
     "feedback", "series", "parallel", "append", "blkdiag",
+    /* §5.1 / §5.3 — Tier-4 model-reduction + delay tail.
+     * `sminreal` is the structural minimal realisation;
+     * `modred` is modal residualisation/truncation; `thiran`
+     * is the fractional-delay all-pass FIR builder. */
+    "sminreal", "modred", "thiran",
     "arrayfun", "cellfun",
     /* Initial-value ODE solvers — see runtime/matlab_runtime.cpp.
      * ode23s is the Rosenbrock stiff solver. pdepe is the 1-D
@@ -599,7 +604,8 @@ void Resolver::resolveStmt(Stmt &St, Scope *S) {
               if (Nm == "c2d" || Nm == "c2d_tustin" ||
                   Nm == "d2c_tustin" || Nm == "feedback" ||
                   Nm == "series" || Nm == "parallel" ||
-                  Nm == "append" || Nm == "blkdiag")
+                  Nm == "append" || Nm == "blkdiag" ||
+                  Nm == "sminreal" || Nm == "modred")
                 return Arg0Cls;
             }
           }

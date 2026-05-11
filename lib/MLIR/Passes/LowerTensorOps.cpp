@@ -3459,6 +3459,83 @@ bool TensorLowering::rewriteBuiltinCalls() {
       continue;
     }
 
+    /* [As, Bs, Cs] = sminreal(A, B, C) — structural minimal
+     * realisation. Pure boolean-graph analysis on the structure
+     * of A, B, C. */
+    if (NA && NA.getValue().getSExtValue() == 3 &&
+        Name == "sminreal" && Call->getNumOperands() == 3 &&
+        Call->getNumResults() == 3) {
+      Value V0 = boxAsPtr(Call->getOperand(0));
+      Value V1 = boxAsPtr(Call->getOperand(1));
+      Value V2 = boxAsPtr(Call->getOperand(2));
+      if (V0 && V1 && V2) {
+        B.setInsertionPoint(Call);
+        auto Fa = rt("matlab_sminreal_A", PtrTy, {PtrTy, PtrTy, PtrTy});
+        auto Fb = rt("matlab_sminreal_B", PtrTy, {PtrTy, PtrTy, PtrTy});
+        auto Fc = rt("matlab_sminreal_C", PtrTy, {PtrTy, PtrTy, PtrTy});
+        SmallVector<Value, 3> CA{V0, V1, V2};
+        auto Ca = LLVM::CallOp::create(B, Call->getLoc(), Fa, CA);
+        auto Cb = LLVM::CallOp::create(B, Call->getLoc(), Fb, CA);
+        auto Cc = LLVM::CallOp::create(B, Call->getLoc(), Fc, CA);
+        Call->getResult(0).replaceAllUsesWith(Ca.getResult());
+        Call->getResult(1).replaceAllUsesWith(Cb.getResult());
+        Call->getResult(2).replaceAllUsesWith(Cc.getResult());
+        Call->erase();
+        Changed = true;
+        continue;
+      }
+    }
+
+    /* [Ar, Br, Cr] = modred(A, B, C, elim, method_id) — modal
+     * residualisation. method_id is 0 = Truncate, 1 = MatchDC. */
+    if (NA && NA.getValue().getSExtValue() == 3 &&
+        Name == "modred" && Call->getNumOperands() == 5 &&
+        Call->getNumResults() == 3 &&
+        Call->getOperand(4).getType() == F64) {
+      Value V0 = boxAsPtr(Call->getOperand(0));
+      Value V1 = boxAsPtr(Call->getOperand(1));
+      Value V2 = boxAsPtr(Call->getOperand(2));
+      Value V3 = boxAsPtr(Call->getOperand(3));
+      if (V0 && V1 && V2 && V3) {
+        B.setInsertionPoint(Call);
+        auto Fa = rt("matlab_modred_A", PtrTy,
+                     {PtrTy, PtrTy, PtrTy, PtrTy, F64});
+        auto Fb = rt("matlab_modred_B", PtrTy,
+                     {PtrTy, PtrTy, PtrTy, PtrTy, F64});
+        auto Fc = rt("matlab_modred_C", PtrTy,
+                     {PtrTy, PtrTy, PtrTy, PtrTy, F64});
+        SmallVector<Value, 5> CA{V0, V1, V2, V3, Call->getOperand(4)};
+        auto Ca = LLVM::CallOp::create(B, Call->getLoc(), Fa, CA);
+        auto Cb = LLVM::CallOp::create(B, Call->getLoc(), Fb, CA);
+        auto Cc = LLVM::CallOp::create(B, Call->getLoc(), Fc, CA);
+        Call->getResult(0).replaceAllUsesWith(Ca.getResult());
+        Call->getResult(1).replaceAllUsesWith(Cb.getResult());
+        Call->getResult(2).replaceAllUsesWith(Cc.getResult());
+        Call->erase();
+        Changed = true;
+        continue;
+      }
+    }
+
+    /* [bb, aa] = thiran(D, n). Fractional-delay all-pass FIR. */
+    if (NA && NA.getValue().getSExtValue() == 2 &&
+        Name == "thiran" && Call->getNumOperands() == 2 &&
+        Call->getNumResults() == 2 &&
+        Call->getOperand(0).getType() == F64 &&
+        Call->getOperand(1).getType() == F64) {
+      B.setInsertionPoint(Call);
+      auto Fb = rt("matlab_thiran_b", PtrTy, {F64, F64});
+      auto Fa = rt("matlab_thiran_a", PtrTy, {F64, F64});
+      SmallVector<Value, 2> CA{Call->getOperand(0), Call->getOperand(1)};
+      auto Cb = LLVM::CallOp::create(B, Call->getLoc(), Fb, CA);
+      auto Ca = LLVM::CallOp::create(B, Call->getLoc(), Fa, CA);
+      Call->getResult(0).replaceAllUsesWith(Cb.getResult());
+      Call->getResult(1).replaceAllUsesWith(Ca.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+
     /* [num_r, den_r] = minreal(num, den, tol) — pole-zero
      * cancellation on the transfer-function form. */
     if (NA && NA.getValue().getSExtValue() == 2 &&
@@ -4048,6 +4125,15 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"matlab_append_ss_A",   "matlab_append_ss_A",   1, "pppppp"},
       {"matlab_append_ss_B",   "matlab_append_ss_B",   1, "pppppp"},
       {"matlab_append_ss_C",   "matlab_append_ss_C",   1, "pppppp"},
+      /* §5.1 — sminreal / modred direct runtime callees emitted by
+       * the model-object short-form dispatch in Lowering.cpp. */
+      {"matlab_sminreal_A", "matlab_sminreal_A", 1, "ppp"},
+      {"matlab_sminreal_B", "matlab_sminreal_B", 1, "ppp"},
+      {"matlab_sminreal_C", "matlab_sminreal_C", 1, "ppp"},
+      {"matlab_modred_A",   "matlab_modred_A",   1, "ppppf"},
+      {"matlab_modred_B",   "matlab_modred_B",   1, "ppppf"},
+      {"matlab_modred_C",   "matlab_modred_C",   1, "ppppf"},
+      {"matlab_mat_from_scalar", "matlab_mat_from_scalar", 1, "f"},
       /* bode_tf 1-return form returns magnitude (default for plotting).
        * The 2-return [mag, phase] = bode_tf(...) shape goes through the
        * dedicated splitter above. */

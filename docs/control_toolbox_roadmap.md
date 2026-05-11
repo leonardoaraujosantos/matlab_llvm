@@ -779,15 +779,20 @@ B, C)` shipped (sqrt(eig(Wc · Wo)) sorted descending). Model-object
 short forms `hsvd(sys)` and `balreal_T(sys)` route through
 Lowering.cpp's class-pinned-first-arg dispatch.
 `[num_r, den_r] = minreal(num, den, tol)` ✅ shipped for the tf
-form — cancels matching pole-zero pairs (Euclidean distance ≤ tol
-in the complex plane) and rebuilds the polynomials via
-`matlab_poly` on the surviving roots, preserving the original
-leading coefficient. The full 4-return `[Ar, Br, Cr, hsv] =
-balreal/balred(...)` shapes need a multi-return splitter on
-model-object call sites; `modred` (modal residualization),
-ss-form `minreal` (needs ctrbf/obsvf staircase), `sminreal`,
-and `reducespec` are follow-ons. Stable/unstable pre-split via
-`stabsep` is the gating piece for unstable plants.
+form. `[As, Bs, Cs] = sminreal(A, B, C)` ✅ shipped — pure
+boolean-graph analysis: walks A's structure to find states
+reachable from B and observable through C, drops states that
+fail either test. `[Ar, Br, Cr] = modred(A, B, C, elim, method)`
+✅ shipped — drops states listed in `elim` either by truncation
+(method_id = 0) or with the Schur-complement DC-match formula
+(method_id = 1). Both ss-form short forms `sminreal(sys)` and
+`modred(sys, elim, method)` route through Lowering.cpp and
+return a fresh ss instance. The full 4-return `[Ar, Br, Cr,
+hsv] = balreal/balred(...)` shapes need a multi-return splitter
+on model-object call sites; ss-form `minreal` (needs ctrbf /
+obsvf staircase) and `reducespec` are follow-ons. Stable /
+unstable pre-split via `stabsep` is the gating piece for
+unstable plants.
 
 **Effort**: 2 weeks. `balred` is the bulk because the gramian path
 plus stable/unstable decomposition is a multi-piece pipeline.
@@ -820,7 +825,7 @@ matrix. Bookkeeping-heavy but no exotic primitives.
 
 **Effort**: 1 week.
 
-### 5.3 Time-delay handling 🟡 (`pade(τ, n)` shipped)
+### 5.3 Time-delay handling 🟡 (`pade(τ, n)` + `thiran(D, n)` shipped)
 
 **Scope**:
 - Internal delay representation on `ss` / `tf` (the property exists at
@@ -835,31 +840,39 @@ matrix. Bookkeeping-heavy but no exotic primitives.
 **Status**: matrix-arg `[num, den] = pade(τ, n)` shipped — closed-
 form [n/n] symmetric Padé via the coefficient recurrence
 `c_j = c_{j-1} · τ · (n − j + 1) / (j · (2n − j + 1))`. Numerator
-picks up alternating signs from the `-τs` substitution. The
-model-object `pade(sys, n)` shape (return a tf wrapping the
-approximation) is gated on class-returning short forms. Internal
-delay representation on the `ss` / `tf` classdefs (storing
-`InputDelay` / `OutputDelay` / `InternalDelay` properties and
-having `bode` / `step` / `freqresp` consume them), `absorbDelay`,
-`delayss`, and `thiran` are follow-ons.
+picks up alternating signs from the `-τs` substitution.
+`[b, a] = thiran(D, n)` ✅ shipped — fractional-delay all-pass
+FIR via the standard `a_k = (−1)^k · C(n, k) · ∏ (D−n+i) /
+(D−n+k+i)` formula; numerator is the mirror-symmetric reversal.
+The model-object `pade(sys, n)` shape (return a tf wrapping the
+approximation) is gated on class-returning short forms.
+Internal delay representation on the `ss` / `tf` classdefs
+(storing `InputDelay` / `OutputDelay` / `InternalDelay`
+properties and having `bode` / `step` / `freqresp` consume
+them), `absorbDelay`, and `delayss` are follow-ons.
 
 **Effort**: 1 week. `pade` is a closed-form Padé recurrence; the
 descriptor and delay-state machinery is the bulk.
 
 **Tier-4 closure status**: matrix-arg reduction surface ships
-(balreal_T / balred_{A,B,C} / hsvd / minreal for tf form + Padé
-time-delay approximation), plus model-object short forms
-`hsvd(sys)` / `balreal_T(sys)` and the class-returning short
-forms `c2d(sys, Ts)` / `feedback(sys1, sys2)` / `series(sys1,
-sys2)` / `parallel(sys1, sys2)` / `append(sys1, sys2)` /
-`blkdiag(sys1, sys2)` (Sema's pinnedOfRhs propagates the class
-pin through the new short-form names so `sys_d.A` etc.
-downstream property reads dispatch through the class path).
+(balreal_T / balred_{A,B,C} / hsvd / minreal for tf form +
+sminreal + modred + Padé + Thiran time-delay approximations).
+Class-returning model-object short forms ship for `c2d(sys, Ts)` /
+`feedback(sys1, sys2)` / `series(sys1, sys2)` / `parallel(sys1,
+sys2)` / `append(sys1, sys2)` / `blkdiag(sys1, sys2)` /
+`sminreal(sys)` / `modred(sys, elim, method)`. Value-returning
+short forms ship for `hsvd(sys)` / `balreal_T(sys)`. Sema's
+`pinnedOfRhs` propagates the class pin through all of those so
+downstream property reads dispatch through the class path.
 Isolated follow-ons: multi-return on model-object call sites
-(`[Ar, Br, Cr, hsv] = balred(sys, k)`), `modred`, ss-form
-`minreal` (needs ctrbf/obsvf staircase), `sminreal`,
-internal-delay representation, the graph-style `connect` /
-`sumblk` / `lft` MIMO assembly.
+(`[Ar, Br, Cr, hsv] = balred(sys, k)`); ss-form `minreal`
+(needs `ctrbf` / `obsvf` controllability/observability
+staircase decompositions); internal-delay representation on the
+`ss` / `tf` classdefs; graph-style `connect` / `sumblk` /
+`lft` MIMO assembly; H∞ norm (`norm(sys, Inf)`, `hinfnorm`);
+`stabsep` / `freqsep` / `loopsens` / `gangoffour` (need ordered
+Schur). None of these gates the practical control workflow
+that's already end-to-end usable through the shipped surface.
 
 ---
 

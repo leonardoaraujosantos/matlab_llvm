@@ -458,6 +458,31 @@ matlab_mat *matlab_minreal_tf_num(matlab_mat *num, matlab_mat *den,
 matlab_mat *matlab_minreal_tf_den(matlab_mat *num, matlab_mat *den,
                                    double tol);
 
+/* Tier 4.1 — structural minimal realisation `sminreal(A, B, C)`.
+ * Drops states not both structurally reachable from inputs and
+ * observable through outputs. Pure boolean-graph analysis.
+ * 3-return splitter: [As, Bs, Cs] = sminreal(A, B, C). */
+matlab_mat *matlab_sminreal_A(matlab_mat *A, matlab_mat *B, matlab_mat *C);
+matlab_mat *matlab_sminreal_B(matlab_mat *A, matlab_mat *B, matlab_mat *C);
+matlab_mat *matlab_sminreal_C(matlab_mat *A, matlab_mat *B, matlab_mat *C);
+
+/* Tier 4.1 — modred(A, B, C, elim, method): modal residualisation
+ * / truncation. `elim` is a 1-indexed vector of state indices to
+ * drop. `method_id` is 0 = Truncate (drop rows/cols), 1 = MatchDC
+ * (Schur complement so DC gain is preserved). 3-return splitter. */
+matlab_mat *matlab_modred_A(matlab_mat *A, matlab_mat *B, matlab_mat *C,
+                             matlab_mat *elim, double method_id);
+matlab_mat *matlab_modred_B(matlab_mat *A, matlab_mat *B, matlab_mat *C,
+                             matlab_mat *elim, double method_id);
+matlab_mat *matlab_modred_C(matlab_mat *A, matlab_mat *B, matlab_mat *C,
+                             matlab_mat *elim, double method_id);
+
+/* Tier 4.3 — Thiran fractional-delay all-pass FIR `b = thiran(D, n)`.
+ * Returns (n+1)-element numerator / denominator coefficient
+ * vectors of the all-pass z-transform approximation of z^{-D}. */
+matlab_mat *matlab_thiran_a(double D, double n);
+matlab_mat *matlab_thiran_b(double D, double n);
+
 /* SISO −3 dB bandwidth: lowest w where |H(jw)| < |H(j0)|/sqrt(2).
  * Scans 1e-3 → 1e6 rad/s log-spaced, interpolates the crossover.
  * Returns +Inf if no crossover (all-pass / unstable / zero DC gain). */

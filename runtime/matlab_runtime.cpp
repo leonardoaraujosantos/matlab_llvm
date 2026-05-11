@@ -4358,6 +4358,268 @@ matlab_mat *matlab_minreal_tf_den(matlab_mat *num, matlab_mat *den,
     return polynomial_from_roots_(pre, pim, lead);
 }
 
+/*-------------------------------------------------------------------------
+ * Structural minimal realisation `sminreal(A, B, C)`.
+ *
+ * Drops states that are not both structurally reachable from at
+ * least one input (B column) and structurally observable from at
+ * least one output (C row). Pure boolean-graph analysis — no
+ * numerics, no cancellation tolerance — so it's faster and more
+ * predictable than the ctrbf/obsvf staircase minreal. Returns
+ * three matrices on the surviving state indices.
+ *
+ * Algorithm:
+ *   1. Reachable set R from B: start with {i : B[i, *] ≠ 0}, then
+ *      iterate: i ∈ R ∧ A[j, i] ≠ 0 ⇒ j ∈ R until no change.
+ *   2. Observable set O from C: start with {i : C[*, i] ≠ 0}, then
+ *      iterate: i ∈ O ∧ A[i, j] ≠ 0 ⇒ j ∈ O until no change.
+ *   3. Keep set K = R ∩ O. Build A_s / B_s / C_s on K.
+ *
+ * Tier 4.1 of CST roadmap §5.1.
+ *-------------------------------------------------------------------------*/
+static void sminreal_keep_(matlab_mat *A, matlab_mat *B, matlab_mat *C,
+                             std::vector<int64_t> &keep_out) {
+    int64_t n = A->rows;
+    int64_t m = B->cols;
+    int64_t p = C->rows;
+    std::vector<bool> reach(n, false), obs(n, false);
+    /* Reachable from B. */
+    for (int64_t i = 0; i < n; ++i)
+        for (int64_t k = 0; k < m; ++k)
+            if (B->data[i * m + k] != 0.0) { reach[i] = true; break; }
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (int64_t j = 0; j < n; ++j) {
+            if (reach[j]) continue;
+            for (int64_t i = 0; i < n; ++i) {
+                if (reach[i] && A->data[j * n + i] != 0.0) {
+                    reach[j] = true; changed = true; break;
+                }
+            }
+        }
+    }
+    /* Observable from C. */
+    for (int64_t i = 0; i < n; ++i)
+        for (int64_t k = 0; k < p; ++k)
+            if (C->data[k * n + i] != 0.0) { obs[i] = true; break; }
+    changed = true;
+    while (changed) {
+        changed = false;
+        for (int64_t i = 0; i < n; ++i) {
+            if (obs[i]) continue;
+            for (int64_t j = 0; j < n; ++j) {
+                if (obs[j] && A->data[i * n + j] != 0.0) {
+                    obs[i] = true; changed = true; break;
+                }
+            }
+        }
+    }
+    keep_out.clear();
+    for (int64_t i = 0; i < n; ++i)
+        if (reach[i] && obs[i]) keep_out.push_back(i);
+}
+
+matlab_mat *matlab_sminreal_A(matlab_mat *A, matlab_mat *B, matlab_mat *C) {
+    if (!A || !B || !C) return mat_alloc(0, 0);
+    int64_t n = A->rows;
+    if (A->cols != n) return mat_alloc(0, 0);
+    std::vector<int64_t> keep;
+    sminreal_keep_(A, B, C, keep);
+    int64_t nk = keep.size();
+    matlab_mat *As = mat_alloc(nk, nk);
+    for (int64_t i = 0; i < nk; ++i)
+        for (int64_t j = 0; j < nk; ++j)
+            As->data[i * nk + j] = A->data[keep[i] * n + keep[j]];
+    return As;
+}
+
+matlab_mat *matlab_sminreal_B(matlab_mat *A, matlab_mat *B, matlab_mat *C) {
+    if (!A || !B || !C) return mat_alloc(0, 0);
+    int64_t n = A->rows;
+    int64_t m = B->cols;
+    std::vector<int64_t> keep;
+    sminreal_keep_(A, B, C, keep);
+    int64_t nk = keep.size();
+    matlab_mat *Bs = mat_alloc(nk, m);
+    for (int64_t i = 0; i < nk; ++i)
+        for (int64_t j = 0; j < m; ++j)
+            Bs->data[i * m + j] = B->data[keep[i] * m + j];
+    return Bs;
+}
+
+matlab_mat *matlab_sminreal_C(matlab_mat *A, matlab_mat *B, matlab_mat *C) {
+    if (!A || !B || !C) return mat_alloc(0, 0);
+    int64_t n = A->rows;
+    int64_t p = C->rows;
+    std::vector<int64_t> keep;
+    sminreal_keep_(A, B, C, keep);
+    int64_t nk = keep.size();
+    matlab_mat *Cs = mat_alloc(p, nk);
+    for (int64_t i = 0; i < p; ++i)
+        for (int64_t j = 0; j < nk; ++j)
+            Cs->data[i * nk + j] = C->data[i * n + keep[j]];
+    return Cs;
+}
+
+/*-------------------------------------------------------------------------
+ * Modal residualisation / truncation `modred(A, B, C, elim, method)`.
+ *
+ * Drops a subset of states (specified by the `elim` vector of
+ * 1-indexed state indices). Two methods:
+ *   - Truncate: just drop those rows/columns of A, B, C.
+ *   - MatchDC: apply the Schur-complement formula so the reduced
+ *     system has the same DC gain as the full one.
+ *       Reorder x = [x_keep; x_elim].
+ *       A = [A11 A12; A21 A22],  B = [B1; B2],  C = [C1 C2].
+ *       A_r = A11 − A12 · A22⁻¹ · A21
+ *       B_r = B1  − A12 · A22⁻¹ · B2
+ *       C_r = C1  − C2  · A22⁻¹ · A21
+ *
+ * Method is encoded as f64: 0 = Truncate, 1 = MatchDC. The
+ * Lowering.cpp dispatch reads the user's `'Truncate'` /
+ * `'MatchDC'` string literal and picks the right method-id at
+ * call site.
+ *
+ * Tier 4.1 of CST roadmap §5.1.
+ *-------------------------------------------------------------------------*/
+static void modred_partition_(matlab_mat *elim, int64_t n,
+                                std::vector<int64_t> &keep_idx,
+                                std::vector<int64_t> &elim_idx) {
+    std::vector<bool> drop(n, false);
+    int64_t nel = elim ? elim->rows * elim->cols : 0;
+    for (int64_t i = 0; i < nel; ++i) {
+        int64_t idx = (int64_t)elim->data[i] - 1;  /* MATLAB 1-indexed */
+        if (idx >= 0 && idx < n) drop[idx] = true;
+    }
+    keep_idx.clear(); elim_idx.clear();
+    for (int64_t i = 0; i < n; ++i) {
+        if (drop[i]) elim_idx.push_back(i);
+        else         keep_idx.push_back(i);
+    }
+}
+
+static matlab_mat *submat_(matlab_mat *M, const std::vector<int64_t> &rows,
+                             const std::vector<int64_t> &cols) {
+    int64_t mr = rows.size(), mc = cols.size();
+    int64_t orig_cols = M->cols;
+    matlab_mat *S = mat_alloc(mr, mc);
+    for (int64_t i = 0; i < mr; ++i)
+        for (int64_t j = 0; j < mc; ++j)
+            S->data[i * mc + j] = M->data[rows[i] * orig_cols + cols[j]];
+    return S;
+}
+
+matlab_mat *matlab_modred_A(matlab_mat *A, matlab_mat *B, matlab_mat *C,
+                             matlab_mat *elim, double method_id) {
+    if (!A || !B || !C || !elim) return mat_alloc(0, 0);
+    int64_t n = A->rows;
+    std::vector<int64_t> keep, drop;
+    modred_partition_(elim, n, keep, drop);
+    int64_t nk = keep.size();
+    matlab_mat *A11 = submat_(A, keep, keep);
+    if (method_id == 0.0 || drop.empty()) return A11;
+    matlab_mat *A12 = submat_(A, keep, drop);
+    matlab_mat *A21 = submat_(A, drop, keep);
+    matlab_mat *A22 = submat_(A, drop, drop);
+    matlab_mat *A22inv = matlab_inv(A22);
+    if (!A22inv || A22inv->rows == 0) return A11;  /* fallback */
+    matlab_mat *Tmp1 = matlab_matmul_mm(A12, A22inv);
+    matlab_mat *Tmp2 = matlab_matmul_mm(Tmp1, A21);
+    matlab_mat *Neg  = matlab_neg_m(Tmp2);
+    (void)nk;
+    return matlab_add_mm(A11, Neg);
+}
+
+matlab_mat *matlab_modred_B(matlab_mat *A, matlab_mat *B, matlab_mat *C,
+                             matlab_mat *elim, double method_id) {
+    if (!A || !B || !C || !elim) return mat_alloc(0, 0);
+    int64_t n = A->rows;
+    int64_t m = B->cols;
+    std::vector<int64_t> keep, drop;
+    modred_partition_(elim, n, keep, drop);
+    std::vector<int64_t> all_cols(m);
+    for (int64_t j = 0; j < m; ++j) all_cols[j] = j;
+    matlab_mat *B1 = submat_(B, keep, all_cols);
+    if (method_id == 0.0 || drop.empty()) return B1;
+    matlab_mat *A12 = submat_(A, keep, drop);
+    matlab_mat *A22 = submat_(A, drop, drop);
+    matlab_mat *B2  = submat_(B, drop, all_cols);
+    matlab_mat *A22inv = matlab_inv(A22);
+    if (!A22inv || A22inv->rows == 0) return B1;
+    matlab_mat *Tmp1 = matlab_matmul_mm(A12, A22inv);
+    matlab_mat *Tmp2 = matlab_matmul_mm(Tmp1, B2);
+    matlab_mat *Neg  = matlab_neg_m(Tmp2);
+    return matlab_add_mm(B1, Neg);
+}
+
+matlab_mat *matlab_modred_C(matlab_mat *A, matlab_mat *B, matlab_mat *C,
+                             matlab_mat *elim, double method_id) {
+    if (!A || !B || !C || !elim) return mat_alloc(0, 0);
+    int64_t n = A->rows;
+    int64_t p = C->rows;
+    std::vector<int64_t> keep, drop;
+    modred_partition_(elim, n, keep, drop);
+    std::vector<int64_t> all_rows(p);
+    for (int64_t i = 0; i < p; ++i) all_rows[i] = i;
+    matlab_mat *C1 = submat_(C, all_rows, keep);
+    if (method_id == 0.0 || drop.empty()) return C1;
+    matlab_mat *A21 = submat_(A, drop, keep);
+    matlab_mat *A22 = submat_(A, drop, drop);
+    matlab_mat *C2  = submat_(C, all_rows, drop);
+    matlab_mat *A22inv = matlab_inv(A22);
+    if (!A22inv || A22inv->rows == 0) return C1;
+    matlab_mat *Tmp1 = matlab_matmul_mm(C2, A22inv);
+    matlab_mat *Tmp2 = matlab_matmul_mm(Tmp1, A21);
+    matlab_mat *Neg  = matlab_neg_m(Tmp2);
+    return matlab_add_mm(C1, Neg);
+}
+
+/*-------------------------------------------------------------------------
+ * Thiran fractional-delay all-pass FIR — `b = thiran(D, n)`.
+ *
+ * Standard Thiran formula for a length-(n+1) all-pass approximation
+ * of a fractional delay D (in samples):
+ *   a_k = (−1)^k · C(n, k) · ∏_{i=0..n}  (D − n + i) / (D − n + k + i)
+ * The denominator polynomial is sum a_k z^{−k}; the numerator is the
+ * reversed (mirror-symmetric) coefficient sequence — all-pass shape.
+ *
+ * Returns the (n+1)-element coefficient row vector. The numerator
+ * `b` reverses the denominator. Backs the matrix-arg
+ * `thiran(D, n)` builtin. Tier 4.3 of CST roadmap §5.3.
+ *-------------------------------------------------------------------------*/
+matlab_mat *matlab_thiran_a(double D, double n_d) {
+    int n = (int)n_d;
+    if (n < 0) n = 0;
+    matlab_mat *a = mat_alloc(1, n + 1);
+    /* Binomial coefficient via Pascal's recurrence (small n only). */
+    std::vector<double> binom(n + 1, 0.0);
+    binom[0] = 1.0;
+    for (int k = 1; k <= n; ++k)
+        binom[k] = binom[k - 1] * (n - k + 1) / (double)k;
+    for (int k = 0; k <= n; ++k) {
+        double prod = 1.0;
+        for (int i = 0; i <= n; ++i) {
+            double num = D - (double)n + (double)i;
+            double den = D - (double)n + (double)k + (double)i;
+            if (den != 0.0) prod *= num / den;
+        }
+        double sign = (k % 2 == 0) ? 1.0 : -1.0;
+        a->data[k] = sign * binom[k] * prod;
+    }
+    return a;
+}
+
+matlab_mat *matlab_thiran_b(double D, double n_d) {
+    int n = (int)n_d;
+    if (n < 0) n = 0;
+    matlab_mat *a = matlab_thiran_a(D, n_d);
+    /* All-pass: b is the mirror image of a. */
+    matlab_mat *b = mat_alloc(1, n + 1);
+    for (int k = 0; k <= n; ++k) b->data[k] = a->data[n - k];
+    return b;
+}
+
 /* Forward decl: matlab_isstable is defined just below. */
 double matlab_isstable(matlab_mat *A);
 
