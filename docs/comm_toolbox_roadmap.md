@@ -282,11 +282,11 @@ The arc decomposes into five sub-tiers ordered by independence:
 
 | Sub-tier | Effort | Dependencies | What lights up |
 |---|---|---|---|
-| §3.1 PROP-Tier-1a — Function-form closed-form models | ~1.5 wk | none (`log10`/`sqrt`/`erfc`) | All empirical path-loss formulas (FSPL/Hata/COST231/Egli/ECC33/SUI/Ericsson + ITU-R rain/gas/fog/close-in), Fresnel zones, knife-edge diffraction, Haversine/Vincenty |
-| §3.2 PROP-Tier-2a — ITM / Longley-Rice (function-form) | ~3 wk | PROP-Tier-1a + complex LU or 2N×2N real workaround (already feasible) | Terrain-aware path loss with reliability tuning |
-| §3.3 PROP-Tier-2b — Single-TX PtP + Coverage Map (function-form) | ~1 wk | PROP-Tier-2a | `los_check`, `link_budget`, `coverage_grid` numeric API. Single-TX, omnidirectional. |
-| §3.4 PROP-Tier-3 — Directional + multi-site coverage (function-form) | ~1.5 wk | PROP-Tier-2b | Sector / cosine / Gaussian / 3GPP analytical patterns, mount orientation, `coverage_grid_multi` with best-server / sum-power / SINR aggregation. **User's "two-poles + sectors + directionals" scenario lights up here.** |
-| §3.5 PROP-Tier-1b — `propagationModel` / `txsite` / `rxsite` classdef wrappers | ~3 sess | PROP-Tier-1a + System-Object fix (CST §12) | MathWorks-API-faithful `prop = propagationModel(...)` + `pathloss(prop, rx, tx)` syntax |
+| §3.1 PROP-Tier-1a — Function-form closed-form models | ~1.5 wk | none (`log10`/`sqrt`/`erfc`) | All empirical path-loss formulas (FSPL/Hata/COST231/Egli/ECC33/SUI/Ericsson + ITU-R rain/gas/fog/close-in), Fresnel zones, knife-edge diffraction, Haversine/Vincenty — ✅ **shipped** |
+| §3.2 PROP-Tier-2a — ITM / Longley-Rice (function-form) | ~3 wk | PROP-Tier-1a + complex LU or 2N×2N real workaround (already feasible) | Terrain-aware path loss with reliability tuning — ✅ **shipped** (engineering port; v7.0 NTIA byte-identical reference port still 🔵) |
+| §3.3 PROP-Tier-2b — Single-TX PtP + Coverage Map (function-form) | ~1 wk | PROP-Tier-2a | `los_check`, `link_budget`, `coverage_grid` numeric API. Single-TX, omnidirectional — ✅ **shipped** |
+| §3.4 PROP-Tier-3 — Directional + multi-site coverage (function-form) | ~1.5 wk | PROP-Tier-2b | Sector / cosine / Gaussian / 3GPP analytical patterns, mount orientation, `coverage_grid_multi` with best-server / sum-power / SINR aggregation — ✅ **shipped**. **User's "two-poles + sectors + directionals" scenario lights up here.** |
+| §3.5 PROP-Tier-1b — `propagationModel` / `txsite` / `rxsite` classdef wrappers | ~3 sess | PROP-Tier-1a + System-Object fix (CST §12) | MathWorks-API-faithful `prop = propagationModel(...)` + `pathloss(prop, rx, tx)` syntax — 🔵 gated on SO fix |
 
 **Total**: ~7 weeks for the function-form quartet (§3.1 + §3.2 +
 §3.3 + §3.4) — fully reachable today, no architectural blockers.

@@ -28,6 +28,7 @@ RUNTIME_SRCS=(
   "$RUNTIME_DIR/matlab_runtime.cpp"
   "$RUNTIME_DIR/runtime_debug.cpp"
   "$RUNTIME_DIR/runtime_complex.cpp"
+  "$RUNTIME_DIR/runtime_prop.cpp"
 )
 
 CLANG="${CLANG:-/opt/homebrew/opt/llvm/bin/clang}"

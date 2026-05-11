@@ -4318,6 +4318,59 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"interp2",    "matlab_interp2",    1, "ppppp"},
       {"upsample",   "matlab_upsample",   1, "pf"},
       {"downsample", "matlab_downsample", 1, "pf"},
+      /* === Propagation Models (PROP-Tier 1a/2a/2b/3) ===
+       *
+       * All entries are function-form, classdef-free; no string
+       * selectors (numeric tags are used for env / model / climate
+       * choices). See runtime/runtime_prop.cpp and docs/comm_toolbox_roadmap.md §3.
+       */
+      /* §3.1.5 geographic helpers */
+      {"haversine",          "matlab_prop_haversine",     0, "ffff"},
+      {"bearing",            "matlab_prop_bearing",       0, "ffff"},
+      {"vincenty",           "matlab_prop_vincenty",      0, "ffff"},
+      {"greatCircleDestLat", "matlab_prop_dest_lat",      0, "ffff"},
+      {"greatCircleDestLon", "matlab_prop_dest_lon",      0, "ffff"},
+      /* §3.1.1 ITU-R / NIST closed-form */
+      {"fspl",                "matlab_prop_fspl",                0, "ff"},
+      {"pathlossRain",        "matlab_prop_pathloss_rain",       0, "ffff"},
+      {"pathlossGas",         "matlab_prop_pathloss_gas",        0, "fffff"},
+      {"pathlossFog",         "matlab_prop_pathloss_fog",        0, "fff"},
+      {"pathlossCloseIn",     "matlab_prop_pathloss_closein",    0, "fffff"},
+      /* §3.1.2 cellular empirical */
+      {"pathlossHata",        "matlab_prop_pathloss_hata",       0, "fffff"},
+      {"pathlossCost231",     "matlab_prop_pathloss_cost231",    0, "fffff"},
+      {"pathlossEgli",        "matlab_prop_pathloss_egli",       0, "ffff"},
+      {"pathlossEcc33",       "matlab_prop_pathloss_ecc33",      0, "ffff"},
+      {"pathlossSui",         "matlab_prop_pathloss_sui",        0, "fffff"},
+      {"pathlossEricsson9999","matlab_prop_pathloss_ericsson9999",0,"fffff"},
+      /* §3.1.3 / 3.1.4 Fresnel + diffraction */
+      {"fresnelZoneRadius",   "matlab_prop_fresnel_zone_radius", 0, "ffff"},
+      {"fresnelClearance",    "matlab_prop_fresnel_clearance",   0, "pfffff"},
+      {"diffractionKnifeEdge","matlab_prop_diff_knife_edge",     0, "ffff"},
+      {"diffractionBullington","matlab_prop_diff_bullington",    0, "pffff"},
+      {"diffractionDeygout",  "matlab_prop_diff_deygout",        0, "pffff"},
+      /* §3.2 Longley-Rice (ITM) */
+      {"itmPathloss",         "matlab_prop_itm_pathloss",        0,
+                              "pffffffffffff"},
+      /* §3.3.1–3.3.4 terrain, LOS, link budget, single-TX coverage */
+      {"terrainProfile",      "matlab_prop_terrain_profile",     1,
+                              "pfffffffff"},
+      {"losObstruction",      "matlab_prop_los_obstruction",     0, "pfff"},
+      {"losClear",            "matlab_prop_los_clear",           0, "pfff"},
+      {"linkBudget",          "matlab_prop_link_budget",         1,
+                              "fffffffffffpffff"},
+      {"coverageGrid",        "matlab_prop_coverage_grid",       1,
+                              "fffffffpffffffffffff"},
+      /* §3.4 directional patterns + mount + multi-site coverage */
+      {"sectorPattern",       "matlab_prop_pat_sector",          0, "ffffff"},
+      {"cosinePattern",       "matlab_prop_pat_cosine",          0, "ffffff"},
+      {"gaussianPattern",     "matlab_prop_pat_gaussian",        0, "fffff"},
+      {"isotropicPattern",    "matlab_prop_pat_isotropic",       0, "fff"},
+      {"applyMountOrientation","matlab_prop_mount_to_local",     1, "ffff"},
+      {"applyMountAz",        "matlab_prop_mount_az_local",      0, "ffff"},
+      {"applyMountEl",        "matlab_prop_mount_el_local",      0, "ffff"},
+      {"coverageGridMulti",   "matlab_prop_coverage_grid_multi", 1,
+                              "pppffffffffffffff"},
     };
 
     // Pick the first entry with name + arity + TYPE match so overloaded

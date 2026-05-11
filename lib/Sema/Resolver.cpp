@@ -256,6 +256,22 @@ void Resolver::registerBuiltins() {
     "xline", "yline",
     "xticks", "yticks", "xticklabels", "yticklabels",
     "yyaxis", "contourf", "quiver",
+    /* PROP — Propagation Models (docs/comm_toolbox_roadmap.md §3).
+     * Function-form, numeric-tag dispatch; runtime/runtime_prop.cpp. */
+    "fspl",
+    "pathlossHata", "pathlossCost231", "pathlossEgli", "pathlossEcc33",
+    "pathlossSui", "pathlossEricsson9999",
+    "pathlossRain", "pathlossGas", "pathlossFog", "pathlossCloseIn",
+    "fresnelZoneRadius", "fresnelClearance",
+    "diffractionKnifeEdge", "diffractionBullington", "diffractionDeygout",
+    "haversine", "bearing", "vincenty",
+    "greatCircleDestLat", "greatCircleDestLon",
+    "itmPathloss",
+    "terrainProfile", "losObstruction", "losClear",
+    "linkBudget", "coverageGrid",
+    "sectorPattern", "cosinePattern", "gaussianPattern", "isotropicPattern",
+    "applyMountOrientation", "applyMountAz", "applyMountEl",
+    "coverageGridMulti",
   }) {
     registerBuiltin(N);
   }

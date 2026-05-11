@@ -1069,6 +1069,32 @@ const Type *TypeInference::visitBuiltinCall(std::string_view Name,
   if (Name == "length" || Name == "numel" || Name == "ndims")
     return TC.scalar(Dtype::Double);
 
+  /* Propagation Models (docs/comm_toolbox_roadmap.md §3). All scalar-
+   * returning closed-form path-loss / Fresnel / diffraction / geographic
+   * helpers report `scalar(Double)`. The matrix-returning entries
+   * (terrainProfile / coverageGrid / coverageGridMulti) return
+   * `arrayOf(Double, unknown)`. The struct-returning `linkBudget` falls
+   * through to `any()` — its uses are field accesses, which have their
+   * own typing path. */
+  if (Name == "fspl" || Name == "pathlossHata" || Name == "pathlossCost231" ||
+      Name == "pathlossEgli" || Name == "pathlossEcc33" ||
+      Name == "pathlossSui" || Name == "pathlossEricsson9999" ||
+      Name == "pathlossRain" || Name == "pathlossGas" ||
+      Name == "pathlossFog" || Name == "pathlossCloseIn" ||
+      Name == "fresnelZoneRadius" || Name == "fresnelClearance" ||
+      Name == "diffractionKnifeEdge" || Name == "diffractionBullington" ||
+      Name == "diffractionDeygout" ||
+      Name == "haversine" || Name == "bearing" || Name == "vincenty" ||
+      Name == "greatCircleDestLat" || Name == "greatCircleDestLon" ||
+      Name == "itmPathloss" || Name == "losObstruction" || Name == "losClear" ||
+      Name == "sectorPattern" || Name == "cosinePattern" ||
+      Name == "gaussianPattern" || Name == "isotropicPattern" ||
+      Name == "applyMountAz" || Name == "applyMountEl")
+    return TC.scalar(Dtype::Double);
+  if (Name == "terrainProfile" || Name == "coverageGrid" ||
+      Name == "coverageGridMulti" || Name == "applyMountOrientation")
+    return TC.arrayOf(Dtype::Double, Shape::unknown());
+
   if (Name == "linspace") {
     int64_t N = -1;
     if (Args.size() >= 3) N = foldInt(Args[2]);
