@@ -4414,13 +4414,16 @@ bool TensorLowering::rewriteBuiltinCalls() {
        * over haversine distance (k=4/3 model).  Returns 1.0 / 0.0. */
       {"propLosSites",         "matlab_prop_los_sites",
                                 0, "ffffff"},
-      /* `sigstrength(rx, tx, pm)` — received signal strength in dBm.
-       * Takes all three site / model obj pointers, reads each
-       * property through matlab_obj_get_f64 / _get_string at the
-       * runtime layer, computes the link budget in dB.  Bypasses
-       * the per-method-param class-pinning gap. */
-      {"sigstrength",          "matlab_prop_sigstrength",
-                                0, "ppp"},
+      /* `sigstrength(rx, tx, pm)` — now a real MATLAB-side method
+       * on RxSite (see rf_class_rxsite.m).  The inter-procedural
+       * class-pinning pass in Resolver carries the call-site `pm`
+       * pin into the method body's `pm` parameter, so the dispatch
+       * to `pathloss(pm, rx, tx)` inside the body routes through
+       * the PropagationModel method as expected.  The runtime
+       * helper `matlab_prop_sigstrength` stays available as a back-
+       * door for cases that don't go through Sema. */
+      {"matlab_prop_sigstrength", "matlab_prop_sigstrength",
+                                  0, "ppp"},
       /* === Communications Toolbox Tier-1 base layer ===
        * docs/comm_toolbox_roadmap.md §2. runtime/runtime_comm.cpp.
        */

@@ -228,6 +228,15 @@ std::string lowerToLLVMIR(mlir::ModuleOp M, bool EmitDebugInfo) {
     }
   }
 
+  /* Final LowerScalarsToArith sweep — catches `matlab.sub` / `matlab.add`
+   * / etc. ops whose operand types were refined to f64 only after the
+   * upstream LowerUserCalls pass settled func signatures.  The greedy
+   * rewriter inside LowerScalarsToArith doesn't always re-attempt
+   * patterns after an operand's defining op changes return type, so a
+   * single trailing sweep before LLVM conversion catches the stragglers.
+   * Idempotent — no-op when nothing matches. */
+  mlirgen::runLowerScalarsToArith(M);
+
   // Conversion pipeline: scf -> cf, then convert to llvm dialect.
   mlir::PassManager PM(Ctx);
   PM.addPass(mlir::createCanonicalizerPass());

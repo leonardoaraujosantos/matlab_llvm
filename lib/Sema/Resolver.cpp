@@ -471,6 +471,164 @@ void Resolver::resolve(TranslationUnit &TU) {
       resolveFunction(*M, Global);
     }
   }
+
+  /* Inter-procedural class pinning propagation.
+   *
+   * Sema's per-method param pinning (above) covers the SELF param
+   * (always class C for non-ctor methods on C) and the second
+   * operand of binary-operator overloads.  Other method params
+   * stay unpinned until a call site informs them.
+   *
+   * Without propagation, a method body like
+   *
+   *     function ss = sigstrength(rx, tx, pm)
+   *         pl = pathloss(pm, rx, tx);   % pm unpinned → fall-through
+   *         ...
+   *
+   * can't route `pathloss(pm, ...)` through the method-on-class
+   * dispatch (which keys on PinnedClass of the first arg).  When
+   * the user calls `sigstrength(rx, tx, pm)` with pm pinned to
+   * PropagationModel, the pin should propagate to the callee's
+   * `pm` parameter.
+   *
+   * Algorithm:
+   *   For each CallOrIndex in every script / function / method body,
+   *   look up the callee Function* (direct user function or class
+   *   method via builtin-name + first-arg class).  For each arg
+   *   that's a NameExpr with PinnedClass set, propagate to the
+   *   matching callee param Binding (when its PinnedClass is null).
+   *
+   *   Iterate to fixpoint: a newly-pinned param may enable more
+   *   pinning at calls inside its method body.
+   *
+   * The pin is read at lowering time (FieldAccess / CallOrIndex
+   * dispatch sites both consult Binding->PinnedClass), so setting
+   * it post-resolve still affects codegen. */
+  auto propagateOne = [&](const CallOrIndex *C) -> bool {
+    if (!C || !C->Callee || C->Args.empty()) return false;
+    auto *N = dynamic_cast<const NameExpr *>(C->Callee);
+    if (!N || !N->Ref) return false;
+    Function *Callee = nullptr;
+    /* Direct function call: callee binding points at the function. */
+    if (N->Ref->Kind == BindingKind::Function && N->Ref->FuncDef) {
+      Callee = N->Ref->FuncDef;
+    } else if (N->Ref->Kind == BindingKind::Builtin) {
+      /* Function-style class-method dispatch: when the first arg is
+       * class-pinned and the class (or any ancestor) has a method
+       * with the same name as the callee, the lowering routes there.
+       * Mirror the same lookup here so pinning propagates. */
+      if (auto *A0 = dynamic_cast<const NameExpr *>(C->Args[0])) {
+        if (A0->Ref && A0->Ref->PinnedClass) {
+          const ClassDef *Cls = A0->Ref->PinnedClass;
+          for (const ClassDef *CC = Cls; CC; CC = CC->Super) {
+            for (Function *M : CC->Methods)
+              if (M && M->Name == N->Name) { Callee = M; break; }
+            if (Callee) break;
+          }
+        }
+      }
+    }
+    if (!Callee) return false;
+    bool Changed = false;
+    size_t NArgs = C->Args.size();
+    for (size_t i = 0; i < NArgs && i < Callee->ParamRefs.size(); ++i) {
+      if (!C->Args[i]) continue;
+      auto *A = dynamic_cast<const NameExpr *>(C->Args[i]);
+      if (!A || !A->Ref || !A->Ref->PinnedClass) continue;
+      Binding *PB = Callee->ParamRefs[i];
+      if (!PB || PB->PinnedClass) continue;
+      PB->PinnedClass = A->Ref->PinnedClass;
+      Changed = true;
+    }
+    return Changed;
+  };
+  std::function<void(const Expr &, bool &)> walkExpr;
+  std::function<void(const Stmt &, bool &)> walkStmt;
+  std::function<void(const Block &, bool &)> walkBlock;
+  walkExpr = [&](const Expr &E, bool &Changed) {
+    if (auto *C = dynamic_cast<const CallOrIndex *>(&E)) {
+      if (propagateOne(C)) Changed = true;
+      if (C->Callee) walkExpr(*C->Callee, Changed);
+      for (Expr *A : C->Args) if (A) walkExpr(*A, Changed);
+      return;
+    }
+    if (auto *Bi = dynamic_cast<const BinaryOpExpr *>(&E)) {
+      if (Bi->LHS) walkExpr(*Bi->LHS, Changed);
+      if (Bi->RHS) walkExpr(*Bi->RHS, Changed);
+      return;
+    }
+    if (auto *U = dynamic_cast<const UnaryOpExpr *>(&E)) {
+      if (U->Operand) walkExpr(*U->Operand, Changed);
+      return;
+    }
+    if (auto *F = dynamic_cast<const FieldAccess *>(&E)) {
+      if (F->Base) walkExpr(*F->Base, Changed);
+      return;
+    }
+    if (auto *M = dynamic_cast<const MatrixLiteral *>(&E)) {
+      for (auto &Row : M->Rows)
+        for (Expr *X : Row) if (X) walkExpr(*X, Changed);
+      return;
+    }
+  };
+  walkStmt = [&](const Stmt &S, bool &Changed) {
+    if (auto *A = dynamic_cast<const AssignStmt *>(&S)) {
+      for (Expr *L : A->LHS) if (L) walkExpr(*L, Changed);
+      if (A->RHS) walkExpr(*A->RHS, Changed);
+      return;
+    }
+    if (auto *E = dynamic_cast<const ExprStmt *>(&S)) {
+      if (E->E) walkExpr(*E->E, Changed);
+      return;
+    }
+    if (auto *I = dynamic_cast<const IfStmt *>(&S)) {
+      if (I->Cond) walkExpr(*I->Cond, Changed);
+      if (I->Then) walkBlock(*I->Then, Changed);
+      for (auto &EI : I->Elseifs) {
+        if (EI.Cond) walkExpr(*EI.Cond, Changed);
+        if (EI.Body) walkBlock(*EI.Body, Changed);
+      }
+      if (I->Else) walkBlock(*I->Else, Changed);
+      return;
+    }
+    if (auto *F = dynamic_cast<const ForStmt *>(&S)) {
+      if (F->Iter) walkExpr(*F->Iter, Changed);
+      if (F->Body) walkBlock(*F->Body, Changed);
+      return;
+    }
+    if (auto *W = dynamic_cast<const WhileStmt *>(&S)) {
+      if (W->Cond) walkExpr(*W->Cond, Changed);
+      if (W->Body) walkBlock(*W->Body, Changed);
+      return;
+    }
+    if (auto *Sw = dynamic_cast<const SwitchStmt *>(&S)) {
+      if (Sw->Discriminant) walkExpr(*Sw->Discriminant, Changed);
+      for (auto &Cs : Sw->Cases) {
+        if (Cs.Value) walkExpr(*Cs.Value, Changed);
+        if (Cs.Body) walkBlock(*Cs.Body, Changed);
+      }
+      return;
+    }
+  };
+  walkBlock = [&](const Block &B, bool &Changed) {
+    for (Stmt *S : B.Stmts) if (S) walkStmt(*S, Changed);
+  };
+  /* Fixpoint — re-walk until no new pin is propagated.  Bounded
+   * iteration count just in case (the propagation is monotonic so
+   * fixpoint is finite, but the cap protects against accidental
+   * regressions). */
+  for (int Iter = 0; Iter < 16; ++Iter) {
+    bool Changed = false;
+    if (TU.ScriptNode && TU.ScriptNode->Body)
+      walkBlock(*TU.ScriptNode->Body, Changed);
+    for (Function *F : TU.Functions)
+      if (F->Body) walkBlock(*F->Body, Changed);
+    for (ClassDef *C : TU.Classes) {
+      for (Function *M : C->Methods) if (M->Body) walkBlock(*M->Body, Changed);
+      for (Function *M : C->StaticMethods) if (M->Body) walkBlock(*M->Body, Changed);
+    }
+    if (!Changed) break;
+  }
 }
 
 //===----------------------------------------------------------------------===//

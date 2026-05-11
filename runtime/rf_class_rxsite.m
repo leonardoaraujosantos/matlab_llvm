@@ -19,6 +19,7 @@ classdef RxSite < handle
         Longitude
         AntennaHeight
         AntennaAngle
+        AntennaGain
         ReceiverSensitivity
         SystemLoss
     end
@@ -26,17 +27,29 @@ classdef RxSite < handle
         function obj = RxSite()
             obj.AntennaHeight = 1.0;
             obj.AntennaAngle = 0.0;
+            obj.AntennaGain = 0.0;
             obj.ReceiverSensitivity = -100.0;
             obj.SystemLoss = 0.0;
         end
+
+        function ss = sigstrength(rx, tx, pm)
+            % Received signal strength in dBm.  Inter-procedural
+            % class pinning in the Resolver (see lib/Sema/Resolver.cpp
+            % propagation pass) carries the call-site `pm` argument's
+            % PropagationModel pin into this method body, so the
+            % `pathloss(pm, rx, tx)` dispatch routes correctly.
+            %
+            %   ss = 10*log10(P_W * 1000) + TX_gain - pathloss
+            %        + RX_gain - tx.SystemLoss - rx.SystemLoss
+            %
+            % Antenna gains default to 0 dBi (isotropic).  When
+            % tx.Antenna is wired to a catalog antenna with pattern
+            % data, the lookup routes through antennaGain (lands
+            % alongside ANT-Tier-2 wire-MoM).
+            pl = pathloss(pm, rx, tx);
+            ss = 10.0 .* log10(tx.TransmitterPower .* 1000.0) ...
+                  + tx.AntennaGain - pl + rx.AntennaGain ...
+                  - tx.SystemLoss - rx.SystemLoss;
+        end
     end
-    %
-    % `sigstrength(rx, tx, pm)` ships as a top-level builtin that
-    % dispatches to the C runtime `matlab_prop_sigstrength` rather
-    % than a MATLAB-side method.  Reason: the compiler doesn't yet
-    % propagate class pinning from call-site args into method-body
-    % parameters (an inter-procedural Sema piece), so `pm.Kind`
-    % inside a hypothetical `sigstrength` method body would read
-    % via the wrong dispatch path.  The C path reads the obj
-    % properties directly via matlab_obj_get_f64 / _get_string.
 end
