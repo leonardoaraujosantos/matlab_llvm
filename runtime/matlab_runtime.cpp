@@ -6146,6 +6146,23 @@ matlab_mat *matlab_struct_get_mat(matlab_struct *s, const char *name, int64_t le
      * of an int32/uint8 matrix in the REPL silently printed nothing. */
     if ((s->kinds[idx] == 4 || s->kinds[idx] == 5) && s->ptr_vals[idx])
         return (matlab_mat *)s->ptr_vals[idx];
+    /* Phase 5.x — table (6), categorical (9), datetime (10), duration (11)
+     * are pointer-shaped values whose workspace storage uses ptr_vals[]
+     * the same way kind=2/3 do. The script-scope read path lowers every
+     * non-string / non-sym name through matlab_ws_get_mat, but Sema
+     * knows the binding's actual type and lowers downstream calls
+     * (matlab_table_height, matlab_table_width, matlab_categorical_*, …)
+     * accordingly. Returning the raw pointer here keeps the layout
+     * faithful so those typed callees read the right fields; the old
+     * mat_alloc(0,0) fallback turned every table operation into garbage
+     * (height(T) came back as 0 from the all-zero shape, width(T) read
+     * past the end of the empty mat into allocator-leak bytes — the
+     * `-1.50101e+09` the user saw). */
+    if ((s->kinds[idx] == 6  ||
+         s->kinds[idx] == 9  ||
+         s->kinds[idx] == 10 ||
+         s->kinds[idx] == 11) && s->ptr_vals[idx])
+        return (matlab_mat *)s->ptr_vals[idx];
     /* Box a scalar field into a 1x1 matrix. */
     if (s->kinds[idx] == 0) {
         matlab_mat *m = mat_alloc(1, 1);
