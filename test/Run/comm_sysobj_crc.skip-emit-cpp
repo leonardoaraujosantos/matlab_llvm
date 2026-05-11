@@ -1,0 +1,3 @@
+Same handle-class limitation as the C lane — emit-cpp uses the same
+struct-member layout for class instances.  LLVM lane is the source of
+truth.

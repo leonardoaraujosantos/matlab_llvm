@@ -1,0 +1,6 @@
+C lane lowers classdef property reads to direct struct-member access
+(`self->State`), which works for value classes with explicit ctors but
+not for handle classes where the runtime allocates the instance via
+`matlab_obj_new` (the struct layout doesn't match the matlab_obj header).
+Same posture as the CST classdef tests — LLVM lane is the source of
+truth; emit-c parity for handle classes is a separate work item.

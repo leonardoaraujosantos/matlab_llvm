@@ -7462,6 +7462,55 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
         }
       }
 
+    /* System-Object callable-instance sugar: `obj(args)` where `obj` is
+     * class-pinned to a class with a `step` method dispatches to
+     * `step(obj, args)`.  MATLAB's `comm.*` / `dsp.*` / `phased.*`
+     * System Object surface is built on this idiom — the user writes
+     * `out = sys(in)` and the runtime routes to `step(sys, in)`.
+     *
+     * Detected only when:
+     *   - the callee is a bare NameExpr (rules out chained calls);
+     *   - its binding pins to a ClassDef that defines `step` directly
+     *     or through its Super chain;
+     *   - we're not already routing this as a handle-fn call (a
+     *     function-handle binding wins because the user is explicitly
+     *     invoking a stored handle).
+     *
+     * When detected, emit a direct `matlab.call @ClassName__step(obj,
+     * args)` and short-circuit the subscript path — mirrors how
+     * `obj.step(args)` already lowers, just without the dot syntax. */
+    if (!IsHandleCall) {
+      if (auto *NE = dynamic_cast<const NameExpr *>(C.Callee))
+        if (NE->Ref && NE->Ref->PinnedClass) {
+          const ClassDef *Owner = nullptr;
+          for (const ClassDef *CC = NE->Ref->PinnedClass; CC; CC = CC->Super) {
+            for (const Function *Mth : CC->Methods)
+              if (Mth && Mth->Name == "step") { Owner = CC; break; }
+            if (Owner) break;
+          }
+          if (Owner) {
+            auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+            mlir::Value Recv = lowerExpr(*C.Callee);
+            llvm::SmallVector<mlir::Value, 4> Args;
+            Args.push_back(Recv);
+            for (const Expr *A : C.Args) if (A) Args.push_back(lowerExpr(*A));
+            std::string Callee = std::string(Owner->Name) + "__step";
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, Callee));
+            /* `step` typically returns a value — Sema may or may not
+             * have typed the call.  Pass the RT through unchanged when
+             * it's already concrete; otherwise default to ptr (which
+             * the runtime auto-boxes for scalar f64 returns at the
+             * use site, matching how class-method dispatch above
+             * treats `obj.step(...)` returns). */
+            mlir::Type ResTy = mlir::isa<mlir::NoneType>(RT) ?
+                                 (mlir::Type)PtrTy : RT;
+            return emitUnreg("matlab.call", Args, ResTy, L, {Cal});
+          }
+        }
+    }
+
     mlir::Value Arr = C.Callee ? lowerExpr(*C.Callee) : mlir::Value{};
     /* Bit-slice extension: `x(hi:lo)` on a scalar integer with a
      * constant descending range. Sema annotated the result type as

@@ -8191,6 +8191,76 @@ int main(int Argc, char **Argv) {
     std::string P = findClassPrelude(Cls);
     if (!P.empty()) PreludePaths.push_back(std::move(P));
   }
+  /* Communications Toolbox System Object prelude: every name in the
+   * umbrella file lives in `runtime/comm_classdefs.m`, so a single
+   * whole-word / call-site scan over the user input is enough.
+   * Mirrors the CST pattern, just collapsed into one file since the
+   * SO surface is smaller (no shared cst_polyadd-style helpers to
+   * keep per-class). */
+  auto findCommPrelude = [&]() -> std::string {
+    std::string SelfStr(Argv[0]);
+    auto last = SelfStr.find_last_of('/');
+    std::string Bin = (last == std::string::npos) ? "." : SelfStr.substr(0, last);
+    char Real[PATH_MAX];
+    if (realpath(Bin.c_str(), Real)) Bin = Real;
+    std::vector<std::string> Cands = {
+      Bin + "/../runtime/comm_classdefs.m",
+      Bin + "/runtime/comm_classdefs.m",
+      Bin + "/../share/matlabc/runtime/comm_classdefs.m",
+    };
+    for (auto &C : Cands) {
+      std::ifstream Fp(C);
+      if (Fp) return C;
+    }
+    return std::string();
+  };
+  auto userMentionsCommClasses =
+      [](const std::string &Path) -> bool {
+    std::ifstream In(Path);
+    if (!In) return false;
+    std::ostringstream Buf;
+    Buf << In.rdbuf();
+    std::string SrcRaw = Buf.str();
+    std::string Src;
+    Src.reserve(SrcRaw.size());
+    bool InComment = false;
+    for (char c : SrcRaw) {
+      if (c == '\n') {
+        InComment = false;
+        Src.push_back(c);
+        continue;
+      }
+      if (c == '%') InComment = true;
+      if (!InComment) Src.push_back(c);
+    }
+    static const char *Names[] = {
+      /* Today's surface — extend as new SO classes land. */
+      "CommCRCGenerator",
+    };
+    for (const char *N : Names) {
+      size_t NL = std::strlen(N);
+      size_t P = 0;
+      while ((P = Src.find(N, P)) != std::string::npos) {
+        bool LeftWord = (P > 0) && (std::isalnum((unsigned char)Src[P-1]) ||
+                                     Src[P-1] == '_');
+        if (!LeftWord && P + NL < Src.size()) {
+          char Right = Src[P + NL];
+          if (Right == '(') return true;
+          size_t Q = P + NL;
+          while (Q < Src.size() && (Src[Q] == ' ' || Src[Q] == '\t')) Q++;
+          if (Q < Src.size() && Src[Q] == '=') {
+            if (Q + 1 >= Src.size() || Src[Q+1] != '=') return true;
+          }
+        }
+        P += NL;
+      }
+    }
+    return false;
+  };
+  if (userMentionsCommClasses(Opts.InputPath)) {
+    std::string P = findCommPrelude();
+    if (!P.empty()) PreludePaths.push_back(std::move(P));
+  }
   /* Back-compat single-path variable for the loader below; the
    * concat path now iterates PreludePaths. */
   std::string PreludePath = PreludePaths.empty() ? "" : PreludePaths.front();
