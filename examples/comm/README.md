@@ -17,6 +17,9 @@ bash runtime/build_and_run.sh examples/comm/<name>.m /tmp/<name>
 | `ber_qam_montecarlo.m` | 2 | **Tier-2 closure** — 16-QAM Monte-Carlo `source → qammod → awgn → qamdemod → biterrK` against the `berawgn` closed-form curve at Eb/N0 ∈ {4, 6, 8, 10, 12, 14} dB. Tracks theory within ~10% relative from 4 dB onward at 20 k symbols/point. |
 | `tier3_smoke.m` | 3 | One canonical call per Tier-3 entry: `crcGenerate` / `crcCheck` / `crcStrip`, `poly2trellis` / `convenc` / `vitdec` (with `oct2dec` bridge for textbook octal generators), `hammgenParity` / `hammingEncode` / `hammingDecode` (every-position 1-bit error correction), `intrlv` / `deintrlv`. |
 | `ber_coded_vs_uncoded.m` | 3 | **Tier-3 closure** — coded-vs-uncoded BER curve over BPSK + AWGN at Eb/N0 ∈ {2, 3, 4, 5, 6, 7} dB. Compares uncoded BPSK against Hamming(7, 4) and (171, 133)₈ K=7 hard-decision Viterbi. Conv crosses over and beats uncoded by ~2× at 7 dB Eb/N0. |
+| `tier4_smoke.m` | 4 | One canonical call per Tier-4 entry: `lms` / `rls` / `cma` / `dfe` adaptive equalisers; `costasPll`, `symbolSyncMM`, `preambleDetect` sync; `phaseFreqOffset`, `iqimbal`, `memorylessNl`, `phaseNoise` impairments; `vitdecSoft` soft-decision Viterbi. |
+| `ber_soft_vs_hard.m` | 4 | **Tier-4 closure** — hard vs soft Viterbi BER curves on (171, 133)₈ K=7 convolutional + BPSK + AWGN at Eb/N0 ∈ {1, 2, 3, 4, 5} dB. Soft sits ~3 dB to the left of hard (at 50 k bits/point: hard 0.120 / soft 0.0051 at Eb/N0 = 5 dB). |
+| `impairment_demo.m` | 4 | Applies each of the four canonical RF impairments to a clean QPSK constellation in isolation (`phaseFreqOffset`, `iqimbal`, `memorylessNl` Rapp, `phaseNoise`) plus a combined chain, reporting the per-step distortion via `norm(abs(y) - abs(clean))`. |
 
 ## API conventions
 
@@ -62,3 +65,12 @@ To stay inside the single-return dispatch convention, `biterr(x, y)` returns jus
 | `vitdec` `dectype` | 0 = unquantised, 1 = hard-decision (soft is a Tier-4 follow-on) |
 | Hamming `m` | The parity check length; gives `n = 2^m - 1`, `k = n - m`. m=3 → Hamming(7, 4); m=4 → (15, 11). |
 | Interleaver `perm` | 1-based permutation vector. `intrlv(data, perm)` writes `out(i) = data(perm(i))`; `deintrlv` is the exact inverse. |
+
+### Tier-4 numeric tags
+
+| Tag | Values |
+|---|---|
+| `costasPll` `M_psk` | 2 (BPSK squarer), 4 (QPSK 4-PSK error), other (atan2 generic) |
+| `memorylessNl` `model_code` | 0 = cubic clipper (`p1` = saturation amplitude); 1 = Saleh (`p1` = α_a, `p2` = β_a, `p3` = α_p, `p4` = β_p); 2 = Rapp (`p1` = smoothness `p`, `p2` = `Asat`); 3 = Ghorbani-style 4-parameter form |
+| `vitdecSoft` `opmode` | 0 = truncated, 1 = terminated (assume end-state 0) |
+| `vitdecSoft` input | Real values where positive ⇒ favours bit = 0 (matches the `qamdemodLlr` convention) |

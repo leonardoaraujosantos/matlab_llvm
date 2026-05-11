@@ -1175,12 +1175,17 @@ only one with non-trivial state (FIR shaping of white Gaussian).
 
 | Primitive | Effort | Status |
 |---|---|---|
-| Adaptive equalization (5.1) | 2 wk | 🔵 |
-| Carrier / symbol / frame sync (5.2) | 2 wk | 🔵 |
-| RF impairments (5.3) | 1 wk | 🔵 |
+| Adaptive equalization (6.1) | 2 wk | ✅ shipped (`lms` / `rls` / `cma` / `dfe` function-form; complex CMA carved out as a Tier-5 follow-on; `comm.LinearEqualizer` / `comm.DecisionFeedbackEqualizer` System Objects gated on the SO lowering fix) |
+| Carrier / symbol / frame sync (6.2) | 2 wk | ✅ shipped (`costasPll` for BPSK / QPSK / M-PSK, `symbolSyncMM` Mueller-Müller timing, `preambleDetect` cross-correlation peak; `comm.CarrierSynchronizer` / `comm.SymbolSynchronizer` / `comm.PreambleDetector` System Objects gated on the SO fix) |
+| RF impairments (6.3) | 1 wk | ✅ shipped (`phaseFreqOffset`, `iqimbal`, `memorylessNl` with cubic-clipper + Saleh + Rapp + Ghorbani models via numeric `model_code`, `phaseNoise`) |
+| Soft-decision Viterbi (Tier-3 follow-on parked here) | 0.5 wk | ✅ shipped (`vitdecSoft(llr, trellis, tblen, opmode)` — max-log-MAP path-metric Viterbi; ~3 dB gain over hard-decision at the Eb/N0 = 5 dB operating point) |
+| Closure test (`ber_soft_vs_hard.m`) | — | ✅ shipped (soft vs hard Viterbi BER curves: hard 0.120 / soft 0.0051 at Eb/N0 = 5 dB) |
 
 **Total**: ~5 weeks. Lights up the receiver-side post-channel
-processing chain.
+processing chain. The classdef System-Object variants of every entry
+in this tier stay gated on the SO lowering fix; the function-form
+surface shipped here is feature-complete against the canonical
+textbook workflows.
 
 ---
 

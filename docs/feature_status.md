@@ -380,6 +380,26 @@ MATLAB Coder integration, Python coexecution.
 | Wavelets / Wigner-Ville / synchrosqueezed (`cwt`, `dwt`, `wvd`, `fsst`) | 🔵 | Tier-4 §5.4. |
 | `digitalFilter` / `designfilt` system object | 🔵 | Tier-4 §5.1 — needs Tier-1 IIR/FIR shipped first. |
 
+### Communications Toolbox — Tier-4 equalisation / sync / RF impairments (function-form)
+
+Per-toolbox roadmap in [`comm_toolbox_roadmap.md`](comm_toolbox_roadmap.md) §6. Function-form adaptive equalisers + carrier / symbol / frame sync + the four canonical RF impairments + soft-decision Viterbi. The `comm.LinearEqualizer` / `DecisionFeedbackEqualizer` / `CarrierSynchronizer` / `SymbolSynchronizer` / `PreambleDetector` / `PhaseNoise` / `MemorylessNonlinearity` System Objects stay gated on the SO lowering fix. Runtime extends `runtime/runtime_comm.cpp`. End-to-end demos under `examples/comm/` (`tier4_smoke.m`, `ber_soft_vs_hard.m`, `impairment_demo.m`).
+
+| Group | Function | Status | Notes |
+|---|---|:-:|---|
+| §6.1 LMS | `lms(x, d, mu, ntaps)` | ✅ shipped | Widrow-Hoff LMS adaptive filter. `mu` is the step size (typical 1e-3 to 1e-1). Returns the equalised output stream. For channels with non-trivial delay the caller should supply `d` aligned to the centre-tap delay. Verified: 7-tap LMS converges to 0 BER on a 3-tap first-tap-dominant channel at SNR 30 dB. |
+| §6.1 RLS | `rls(x, d, lambda, delta, ntaps)` | ✅ shipped | Recursive least-squares with forgetting factor `lambda` (0.95–0.999 typical) and initial-P diagonal `delta` (1e2–1e4 typical). Converges faster than LMS at higher per-sample cost. Verified at 0 BER under the same scenario. |
+| §6.1 CMA | `cma(x, mu, ntaps, R2)` | ✅ shipped (real projection) | Constant-modulus (Godard) blind equaliser; `R2 = E[|s|^4] / E[|s|^2]` (= 1 for unit-circle PSK). Centre-tap initialised to 1.0. Complex-input CMA is a Tier-5 follow-on. |
+| §6.1 DFE | `dfe(x, d, mu, n_ff, n_fb)` | ✅ shipped | LMS-trained decision-feedback equaliser; `n_ff` feed-forward + `n_fb` feedback taps. First half of `d` runs in training mode, then switches to decision-directed (BPSK threshold at 0). |
+| §6.2 Costas PLL | `costasPll(x, M_psk, loop_bw, fs)` | ✅ shipped (BPSK / QPSK / Mₐ) | M=2 squarer discriminator, M=4 4-PSK error term, otherwise atan2. 2nd-order PLL with damping 1/√2; `loop_bw` normalised to `fs`. Returns the de-rotated complex stream. |
+| §6.2 Mueller-Müller | `symbolSyncMM(x, sps, loop_bw)` | ✅ shipped | NCO-driven sample selector with Mueller-Müller TED on real BPSK-style input; 1st-order loop. Output length = floor(N/sps). Verified: 20/20 last-symbol match on a clean 4-sps input. |
+| §6.2 Preamble | `preambleDetect(x, preamble)` | ✅ shipped | Argmax of the cross-correlation across all valid lags; returns the 1-based start index. |
+| §6.3 Phase / freq offset | `phaseFreqOffset(x, df_Hz, fs_Hz)` | ✅ shipped | y[n] = x[n] · exp(j·2π·df·n/fs). Inverse round-trip is machine-precision exact. |
+| §6.3 IQ imbalance | `iqimbal(x, amp_imb_dB, phase_imb_deg)` | ✅ shipped | Scales the Q axis by 10^(amp_dB/20) and rotates by `phase_imb_deg` before re-adding to I. Verified: 0.5 dB / 5° imbalance shifts the QPSK magnitude norm from 10.00 to 10.30. |
+| §6.3 Memoryless PA | `memorylessNl(x, model_code, p1, p2, p3, p4)` | ✅ shipped | model_code 0 cubic clipper (`p1` = saturation amplitude); 1 Saleh AM/AM + AM/PM with the classical 4-parameter form; 2 Rapp (`p1` = smoothness, `p2` = `Asat`); 3 Ghorbani-style 4-parameter form. Verified: Rapp at 1.5× drive into `Asat = 1` compresses 94.87 → 62.36 (≈ 1.0 · √N, the saturated limit). |
+| §6.3 Phase noise | `phaseNoise(x, level_dBcHz, fs_Hz)` | ✅ shipped | Random-walk phase noise with σ² = 10^(level/10) · fs / 2 per sample. Verified: `|x|` preserved to 4e-15 (unit-modulus rotation). |
+| §6.x Soft Viterbi | `vitdecSoft(llr, trellis, tblen, opmode)` | ✅ shipped | Max-log-MAP path-metric Viterbi; branch metric is the sum of LLR-with-sign over the n-tuple per state transition. Convention: positive LLR favours bit=0 (matches `qamdemodLlr`). Verified: at Eb/N0 = 5 dB on (171,133)₈ K=7, soft-decision BER ≈ 5.1e-3 vs hard 0.120 — textbook ≈24× gain. |
+| Closure test (`examples/comm/ber_soft_vs_hard.m`) | hard vs soft Viterbi BER curves under BPSK + AWGN | ✅ shipped | At 50 k bits per Eb/N0 point: hard 0.484 / soft 0.415 at 1 dB; hard 0.120 / soft 0.0051 at 5 dB. Soft curve sits ~3 dB to the left of the hard curve — canonical soft-decision coding gain. |
+
 ### Communications Toolbox — Tier-3 channel coding (function-form)
 
 Per-toolbox roadmap in [`comm_toolbox_roadmap.md`](comm_toolbox_roadmap.md) §5. Function-form CRC + convolutional codes + Hamming + block interleavers — every entry that does *not* need the System-Object lowering fix. The classdef `comm.CRCGenerator` / `comm.CRCDetector` form stays gated on the SO fix (CST roadmap §12 / §11.1). Runtime extends `runtime/runtime_comm.cpp`. End-to-end demos under `examples/comm/` (`tier3_smoke.m`, `ber_coded_vs_uncoded.m`).

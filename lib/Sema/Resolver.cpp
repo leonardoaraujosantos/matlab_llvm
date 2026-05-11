@@ -300,6 +300,12 @@ void Resolver::registerBuiltins() {
     "poly2trellis", "convenc", "vitdec", "oct2dec",
     "hammgenParity", "hammingEncode", "hammingDecode",
     "intrlv", "deintrlv",
+    /* COMM Tier-4 — equalisation, sync, RF impairments
+     * (docs/comm_toolbox_roadmap.md §6).  Function-form. */
+    "lms", "rls", "cma", "dfe",
+    "costasPll", "symbolSyncMM", "preambleDetect",
+    "phaseFreqOffset", "iqimbal", "memorylessNl", "phaseNoise",
+    "vitdecSoft",
   }) {
     registerBuiltin(N);
   }

@@ -1135,6 +1135,17 @@ const Type *TypeInference::visitBuiltinCall(std::string_view Name,
       Name == "intrlv" || Name == "deintrlv")
     return TC.arrayOf(Dtype::Double, Shape::unknown());
 
+  /* Tier-4 equalisation / sync / RF impairments + soft Viterbi
+   * (docs/comm_toolbox_roadmap.md §6). */
+  if (Name == "preambleDetect")
+    return TC.scalar(Dtype::Double);
+  if (Name == "lms" || Name == "rls" || Name == "cma" || Name == "dfe" ||
+      Name == "costasPll" || Name == "symbolSyncMM" ||
+      Name == "phaseFreqOffset" || Name == "iqimbal" ||
+      Name == "memorylessNl" || Name == "phaseNoise" ||
+      Name == "vitdecSoft")
+    return TC.arrayOf(Dtype::Double, Shape::unknown());
+
   if (Name == "linspace") {
     int64_t N = -1;
     if (Args.size() >= 3) N = foldInt(Args[2]);

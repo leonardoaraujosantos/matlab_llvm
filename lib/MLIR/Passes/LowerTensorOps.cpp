@@ -4458,6 +4458,26 @@ bool TensorLowering::rewriteBuiltinCalls() {
       /* §5.5 block interleavers. */
       {"intrlv",   "matlab_comm_intrlv",   1, "pp"},
       {"deintrlv", "matlab_comm_deintrlv", 1, "pp"},
+      /* === Communications Toolbox Tier-4 ===
+       * Equalisation / sync / RF impairments
+       * (docs/comm_toolbox_roadmap.md §6). */
+      /* §6.1 adaptive equalisers (function-form). */
+      {"lms", "matlab_comm_lms", 1, "ppff"},
+      {"rls", "matlab_comm_rls", 1, "ppfff"},
+      {"cma", "matlab_comm_cma", 1, "pfff"},
+      {"dfe", "matlab_comm_dfe", 1, "ppfff"},
+      /* §6.2 sync. */
+      {"costasPll",      "matlab_comm_costas_pll",       1, "pfff"},
+      {"symbolSyncMM",   "matlab_comm_symbol_sync_mm",   1, "pff"},
+      {"preambleDetect", "matlab_comm_preamble_detect",  0, "pp"},
+      /* §6.3 RF impairments. */
+      {"phaseFreqOffset","matlab_comm_phase_freq_offset",1, "pff"},
+      {"iqimbal",        "matlab_comm_iqimbal",          1, "pff"},
+      {"memorylessNl",   "matlab_comm_memoryless_nl",    1, "pfffff"},
+      {"phaseNoise",     "matlab_comm_phase_noise",      1, "pff"},
+      /* Soft-decision Viterbi extension (Tier-3 follow-on parked
+       * with the Tier-4 RF-impairment + soft-demod slice). */
+      {"vitdecSoft",     "matlab_comm_vitdec_soft",      1, "ppff"},
     };
 
     // Pick the first entry with name + arity + TYPE match so overloaded

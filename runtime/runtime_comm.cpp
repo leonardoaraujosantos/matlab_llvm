@@ -1489,4 +1489,471 @@ matlab_mat *matlab_comm_deintrlv(matlab_mat *data, matlab_mat *perm) {
     return out;
 }
 
+/* ===== Tier-4 — equalisation, sync, RF impairments ======================= *
+ *
+ * docs/comm_toolbox_roadmap.md §6. Function-form only — the
+ * comm.LinearEqualizer / DFE / CarrierSynchronizer / SymbolSynchronizer
+ * / PreambleDetector / PhaseNoise / MemorylessNonlinearity System
+ * Objects stay gated on the SO lowering fix recorded in CST §12. */
+
+/* ----- §6.1 Adaptive equalisers — LMS / RLS / CMA / DFE ----- *
+ *
+ * lms(x, d, mu, ntaps) — Wiener / Widrow-Hoff LMS adaptive filter.
+ *   x      : N x 1 received signal (real)
+ *   d      : N x 1 desired (training-mode reference)
+ *   mu     : step size (typical 1e-3 to 1e-1)
+ *   ntaps  : filter length
+ * Returns the equalised output y[n] of length N (the first ntaps-1
+ * samples are filter "warm-up" with zero history).  All real here;
+ * a complex sibling lms_c lives below. */
+matlab_mat *matlab_comm_lms(matlab_mat *x, matlab_mat *d,
+                             double mu, double ntaps) {
+    if (!x || !d) return mat_alloc(0, 0);
+    int64_t N = x->rows * x->cols;
+    int64_t Nd = d->rows * d->cols;
+    int K = (int)ntaps;
+    if (K < 1) K = 1;
+    if (K > N) K = (int)N;
+    int64_t Lo = std::min(N, Nd);
+    std::vector<double> w(K, 0.0);
+    std::vector<double> buf(K, 0.0);
+    matlab_mat *y = mat_alloc(Lo, 1);
+    for (int64_t n = 0; n < Lo; ++n) {
+        /* Shift buffer (right-to-left FIFO; index 0 is the newest). */
+        for (int k = K - 1; k > 0; --k) buf[k] = buf[k - 1];
+        buf[0] = x->data[n];
+        double yk = 0.0;
+        for (int k = 0; k < K; ++k) yk += w[k] * buf[k];
+        double e = d->data[n] - yk;
+        for (int k = 0; k < K; ++k) w[k] += mu * e * buf[k];
+        y->data[n] = yk;
+    }
+    return y;
+}
+
+/* rls(x, d, lambda, delta, ntaps) — recursive least squares.
+ *   lambda : forgetting factor (0.95..0.999 typical)
+ *   delta  : initial P diagonal (1e2..1e4 typical) */
+matlab_mat *matlab_comm_rls(matlab_mat *x, matlab_mat *d,
+                             double lambda, double delta, double ntaps) {
+    if (!x || !d) return mat_alloc(0, 0);
+    int64_t N = x->rows * x->cols;
+    int64_t Nd = d->rows * d->cols;
+    int K = (int)ntaps;
+    if (K < 1) K = 1;
+    if (K > N) K = (int)N;
+    int64_t Lo = std::min(N, Nd);
+    if (lambda <= 0.0 || lambda > 1.0) lambda = 0.99;
+    if (delta <= 0.0) delta = 1.0;
+    std::vector<double> w(K, 0.0);
+    std::vector<double> u(K, 0.0);
+    std::vector<double> P(K * K, 0.0);
+    for (int i = 0; i < K; ++i) P[i * K + i] = delta;
+    std::vector<double> Pu(K), gain(K);
+    matlab_mat *y = mat_alloc(Lo, 1);
+    for (int64_t n = 0; n < Lo; ++n) {
+        for (int k = K - 1; k > 0; --k) u[k] = u[k - 1];
+        u[0] = x->data[n];
+        /* Pu = P * u */
+        for (int i = 0; i < K; ++i) {
+            double s = 0.0;
+            for (int j = 0; j < K; ++j) s += P[i * K + j] * u[j];
+            Pu[i] = s;
+        }
+        /* den = lambda + u' * Pu */
+        double den = lambda;
+        for (int k = 0; k < K; ++k) den += u[k] * Pu[k];
+        if (den == 0.0) den = 1e-30;
+        for (int k = 0; k < K; ++k) gain[k] = Pu[k] / den;
+        double yk = 0.0;
+        for (int k = 0; k < K; ++k) yk += w[k] * u[k];
+        double e = d->data[n] - yk;
+        for (int k = 0; k < K; ++k) w[k] += gain[k] * e;
+        /* P = (1/lambda) * (P - gain * u' * P) = (P - gain * Pu') / lambda */
+        for (int i = 0; i < K; ++i) {
+            for (int j = 0; j < K; ++j)
+                P[i * K + j] = (P[i * K + j] - gain[i] * Pu[j]) / lambda;
+        }
+        y->data[n] = yk;
+    }
+    return y;
+}
+
+/* cma(x, mu, ntaps, R2) — constant-modulus (Godard / CMA) blind
+ * equaliser.  R2 = E[|s|^4] / E[|s|^2] for the source constellation
+ * (e.g. R2 = 1 for PSK on the unit circle).  Operates on the real
+ * envelope (since we don't have a typed complex argument descriptor
+ * in the dispatch lane yet — the complex variant ships once the
+ * matlab_mat_c arg lane is wired). */
+matlab_mat *matlab_comm_cma(matlab_mat *x, double mu, double ntaps, double R2) {
+    if (!x) return mat_alloc(0, 0);
+    int64_t N = x->rows * x->cols;
+    int K = (int)ntaps;
+    if (K < 1) K = 1;
+    if (K > N) K = (int)N;
+    std::vector<double> w(K, 0.0);
+    std::vector<double> buf(K, 0.0);
+    /* Centre tap initialised to 1 — standard CMA initialisation. */
+    w[K / 2] = 1.0;
+    matlab_mat *y = mat_alloc(N, 1);
+    for (int64_t n = 0; n < N; ++n) {
+        for (int k = K - 1; k > 0; --k) buf[k] = buf[k - 1];
+        buf[0] = x->data[n];
+        double yk = 0.0;
+        for (int k = 0; k < K; ++k) yk += w[k] * buf[k];
+        double err = yk * (R2 - yk * yk);   /* gradient of |y|^2 vs R2 */
+        for (int k = 0; k < K; ++k) w[k] += mu * err * buf[k];
+        y->data[n] = yk;
+    }
+    return y;
+}
+
+/* dfe(x, d, mu, n_ff, n_fb) — LMS-trained decision-feedback equaliser.
+ *   n_ff : feed-forward taps (across received samples)
+ *   n_fb : feedback taps (across decided symbols)
+ * Decision threshold at 0 (real BPSK-style symbol set {-1, +1}).
+ * Training uses the d[n] vector; switches to decision-directed mode
+ * once the trainer epoch (first half of d) completes. */
+matlab_mat *matlab_comm_dfe(matlab_mat *x, matlab_mat *d, double mu,
+                             double n_ff, double n_fb) {
+    if (!x || !d) return mat_alloc(0, 0);
+    int64_t N = x->rows * x->cols;
+    int64_t Nd = d->rows * d->cols;
+    int Kff = (int)n_ff; if (Kff < 1) Kff = 1;
+    int Kfb = (int)n_fb; if (Kfb < 0) Kfb = 0;
+    int64_t Lo = std::min(N, Nd);
+    int64_t train_n = Lo / 2;
+    std::vector<double> wff(Kff, 0.0);
+    std::vector<double> wfb(Kfb, 0.0);
+    std::vector<double> bff(Kff, 0.0);
+    std::vector<double> bfb(Kfb, 0.0);
+    matlab_mat *y = mat_alloc(Lo, 1);
+    for (int64_t n = 0; n < Lo; ++n) {
+        for (int k = Kff - 1; k > 0; --k) bff[k] = bff[k - 1];
+        bff[0] = x->data[n];
+        double yk = 0.0;
+        for (int k = 0; k < Kff; ++k) yk += wff[k] * bff[k];
+        for (int k = 0; k < Kfb; ++k) yk -= wfb[k] * bfb[k];
+        double sym = (yk >= 0.0) ? 1.0 : -1.0;
+        double ref = (n < train_n) ? d->data[n] : sym;
+        double err = ref - yk;
+        for (int k = 0; k < Kff; ++k) wff[k] += mu * err * bff[k];
+        for (int k = 0; k < Kfb; ++k) wfb[k] -= mu * err * bfb[k];
+        for (int k = Kfb - 1; k > 0; --k) bfb[k] = bfb[k - 1];
+        if (Kfb > 0) bfb[0] = ref;
+        y->data[n] = yk;
+    }
+    return y;
+}
+
+/* ----- §6.2 Carrier + symbol + frame sync ----- *
+ *
+ * costasPll(x, M_psk, loop_bw, fs) — M-PSK Costas-style PLL carrier
+ *   recovery. M_psk = 2 for BPSK (squarer) or 4 for QPSK (4th-power).
+ *   Returns the de-rotated output (a fresh complex matrix of the same
+ *   length as the input).  Implementation: 2nd-order phase-locked
+ *   loop with damping 1/sqrt(2). */
+matlab_mat_c *matlab_comm_costas_pll(matlab_mat_c *x, double M_psk,
+                                      double loop_bw, double fs) {
+    if (!x) return mat_c_alloc(0, 0);
+    int64_t N = x->rows * x->cols;
+    int M = (int)M_psk;
+    if (M < 2) M = 2;
+    if (fs <= 0.0) fs = 1.0;
+    if (loop_bw <= 0.0) loop_bw = fs * 1e-3;
+    double zeta = 1.0 / sqrt(2.0);
+    double wn = 2.0 * M_PI * loop_bw / fs;
+    double Kp = 2.0 * zeta * wn;
+    double Ki = wn * wn;
+    matlab_mat_c *y = mat_c_alloc(x->rows, x->cols);
+    double phi = 0.0, freq = 0.0;
+    for (int64_t n = 0; n < N; ++n) {
+        double cp = cos(-phi), sp = sin(-phi);
+        double re_r = x->re[n] * cp - x->im[n] * sp;
+        double im_r = x->re[n] * sp + x->im[n] * cp;
+        y->re[n] = re_r; y->im[n] = im_r;
+        /* Phase-error discriminator (M = 2 -> sign(Re)*Im; M = 4 -> imag of x^4). */
+        double err;
+        if (M == 2) {
+            err = (re_r >= 0.0 ? 1.0 : -1.0) * im_r;
+        } else if (M == 4) {
+            /* Hard slicing onto the 4-PSK constellation; phase error
+             * is the imag part of (y_rot * conj(sliced)). */
+            double sx = re_r >= 0.0 ? 1.0 : -1.0;
+            double sy = im_r >= 0.0 ? 1.0 : -1.0;
+            err = im_r * sx - re_r * sy;
+            err *= 0.5;
+        } else {
+            err = atan2(im_r, re_r);
+        }
+        freq += Ki * err;
+        phi  += Kp * err + freq;
+    }
+    return y;
+}
+
+/* symbolSyncMM(x, sps, loop_bw) — Mueller-Müller symbol-timing
+ * recovery for BPSK-style real signals.  Outputs a vector of
+ * symbol-rate samples (one per nominal symbol).  loop_bw normalised
+ * to sample rate.  Implementation: NCO-driven sample selector +
+ * Mueller-Müller TED, 1st-order loop with leakage. */
+matlab_mat *matlab_comm_symbol_sync_mm(matlab_mat *x, double sps,
+                                        double loop_bw) {
+    if (!x) return mat_alloc(0, 0);
+    int64_t N = x->rows * x->cols;
+    double sps_d = sps > 1.0 ? sps : 1.0;
+    if (loop_bw <= 0.0 || loop_bw >= 1.0) loop_bw = 0.05;
+    int64_t Nsym = (int64_t)((double)N / sps_d) + 1;
+    matlab_mat *y = mat_alloc(Nsym, 1);
+    int64_t idx = 0;
+    double tau = 0.0;            /* fractional time offset */
+    double prev = 0.0;
+    double pprev = 0.0;
+    for (int64_t k = 0; k < Nsym; ++k) {
+        double pos = sps_d * (double)k + tau;
+        int64_t i0 = (int64_t)floor(pos);
+        double frac = pos - (double)i0;
+        if (i0 < 0) i0 = 0;
+        if (i0 >= N - 1) break;
+        /* Linear-interpolated sample. */
+        double s = x->data[i0] * (1.0 - frac) + x->data[i0 + 1] * frac;
+        y->data[idx++] = s;
+        /* Mueller-Müller error: 0.5 * (sign(s) * prev - sign(prev) * pprev). */
+        double err;
+        if (k >= 2) {
+            double sgs    = s    >= 0.0 ? 1.0 : -1.0;
+            double sgprev = prev >= 0.0 ? 1.0 : -1.0;
+            err = 0.5 * (sgs * prev - sgprev * pprev);
+        } else err = 0.0;
+        tau -= loop_bw * err;
+        pprev = prev;
+        prev  = s;
+    }
+    /* Truncate to actually filled rows. */
+    y->rows = idx;
+    return y;
+}
+
+/* preambleDetect(x, preamble) — cross-correlate `preamble` against
+ * the leading samples of `x` and return the lag (1-based index)
+ * of the maximum-correlation point.  Caller can slice x from that
+ * index forward to align the frame. */
+double matlab_comm_preamble_detect(matlab_mat *x, matlab_mat *preamble) {
+    if (!x || !preamble) return 0.0;
+    int64_t N = x->rows * x->cols;
+    int64_t M = preamble->rows * preamble->cols;
+    if (M < 1 || N < M) return 0.0;
+    double best = -1e30;
+    int64_t best_idx = 0;
+    for (int64_t n = 0; n <= N - M; ++n) {
+        double acc = 0.0;
+        for (int64_t k = 0; k < M; ++k) acc += x->data[n + k] * preamble->data[k];
+        if (acc > best) { best = acc; best_idx = n; }
+    }
+    return (double)(best_idx + 1);
+}
+
+/* ----- §6.3 RF impairments ----- *
+ *
+ * phaseFreqOffset(x, df_Hz, fs_Hz) — complex frequency / phase offset
+ *   y[n] = x[n] * exp(j * 2*pi * df_Hz * n / fs_Hz). */
+matlab_mat_c *matlab_comm_phase_freq_offset(matlab_mat_c *x,
+                                             double df_Hz, double fs_Hz) {
+    if (!x) return mat_c_alloc(0, 0);
+    if (fs_Hz <= 0.0) fs_Hz = 1.0;
+    int64_t N = x->rows * x->cols;
+    matlab_mat_c *y = mat_c_alloc(x->rows, x->cols);
+    double w = 2.0 * M_PI * df_Hz / fs_Hz;
+    for (int64_t n = 0; n < N; ++n) {
+        double c = cos(w * (double)n), s = sin(w * (double)n);
+        y->re[n] = x->re[n] * c - x->im[n] * s;
+        y->im[n] = x->re[n] * s + x->im[n] * c;
+    }
+    return y;
+}
+
+/* iqimbal(x, amp_imb_dB, phase_imb_deg) — apply I/Q amplitude and
+ * phase imbalance.  Sets the Q axis scale to 10^(amp_dB/20) and
+ * rotates by phase_deg before adding back to I. */
+matlab_mat_c *matlab_comm_iqimbal(matlab_mat_c *x, double amp_imb_dB,
+                                   double phase_imb_deg) {
+    if (!x) return mat_c_alloc(0, 0);
+    int64_t N = x->rows * x->cols;
+    matlab_mat_c *y = mat_c_alloc(x->rows, x->cols);
+    double g = pow(10.0, amp_imb_dB / 20.0);
+    double p = phase_imb_deg * M_PI / 180.0;
+    double cp = cos(p), sp = sin(p);
+    for (int64_t n = 0; n < N; ++n) {
+        y->re[n] = x->re[n];
+        y->im[n] = g * (x->im[n] * cp + x->re[n] * sp);
+    }
+    return y;
+}
+
+/* memorylessNl(x, model_code, p1..p4) — memoryless PA nonlinearity.
+ *   model_code 0 = cubic clipper: y = x for |x| <= 1, sign(x) otherwise
+ *   model_code 1 = Saleh AM/AM + AM/PM (p1=alpha_a, p2=beta_a,
+ *                  p3=alpha_p, p4=beta_p)
+ *   model_code 2 = Rapp (p1 = smoothness p, p2 = saturation Asat)
+ *   model_code 3 = Ghorbani (4 params for AM/AM and AM/PM each;
+ *                  ship Saleh-equivalent simplification here) */
+matlab_mat_c *matlab_comm_memoryless_nl(matlab_mat_c *x, double model_code,
+                                         double p1, double p2,
+                                         double p3, double p4) {
+    if (!x) return mat_c_alloc(0, 0);
+    int64_t N = x->rows * x->cols;
+    matlab_mat_c *y = mat_c_alloc(x->rows, x->cols);
+    int mc = (int)model_code;
+    for (int64_t n = 0; n < N; ++n) {
+        double r = sqrt(x->re[n] * x->re[n] + x->im[n] * x->im[n]);
+        double phi = atan2(x->im[n], x->re[n]);
+        double amp_out, phi_out;
+        switch (mc) {
+        case 0: { /* clipper */
+            double sat = p1 > 0.0 ? p1 : 1.0;
+            amp_out = r > sat ? sat : r;
+            phi_out = phi;
+        } break;
+        case 1: { /* Saleh */
+            double a_a = p1 > 0.0 ? p1 : 2.1587;
+            double b_a = p2 > 0.0 ? p2 : 1.1517;
+            double a_p = p3;
+            double b_p = p4 > 0.0 ? p4 : 2.5293;
+            amp_out = a_a * r / (1.0 + b_a * r * r);
+            phi_out = phi + a_p * r * r / (1.0 + b_p * r * r);
+        } break;
+        case 2: { /* Rapp */
+            double p_s = p1 > 0.0 ? p1 : 3.0;
+            double Asat = p2 > 0.0 ? p2 : 1.0;
+            double pn = pow(r / Asat, 2.0 * p_s);
+            amp_out = r / pow(1.0 + pn, 1.0 / (2.0 * p_s));
+            phi_out = phi;
+        } break;
+        case 3: { /* Ghorbani (Saleh-style simplification) */
+            double aa = p1 > 0.0 ? p1 : 8.106;
+            double ba = p2 > 0.0 ? p2 : 1.5879;
+            double ap = p3;
+            double bp = p4 > 0.0 ? p4 : 4.0033;
+            amp_out = aa * pow(r, ba) / (1.0 + bp * pow(r, ba));
+            phi_out = phi + ap * pow(r, bp);
+        } break;
+        default:
+            amp_out = r; phi_out = phi;
+        }
+        y->re[n] = amp_out * cos(phi_out);
+        y->im[n] = amp_out * sin(phi_out);
+    }
+    return y;
+}
+
+/* phaseNoise(x, level_dBcHz, fs_Hz) — colour white Gaussian phase
+ * noise to the requested integrated single-sideband level, then
+ * apply as a complex rotation per sample.  Uses the shared PRNG. */
+matlab_mat_c *matlab_comm_phase_noise(matlab_mat_c *x,
+                                       double level_dBcHz, double fs_Hz) {
+    if (!x) return mat_c_alloc(0, 0);
+    if (fs_Hz <= 0.0) fs_Hz = 1.0;
+    int64_t N = x->rows * x->cols;
+    matlab_mat_c *y = mat_c_alloc(x->rows, x->cols);
+    /* phase noise variance per sample = 10^(level_dBcHz/10) * fs / 2
+     * (integrating single-sideband density over fs / 2 Hz). */
+    double sigma2 = pow(10.0, level_dBcHz / 10.0) * fs_Hz / 2.0;
+    double sigma = sqrt(sigma2);
+    double phi = 0.0;
+    for (int64_t n = 0; n < N; ++n) {
+        phi += sigma * comm_normal();
+        double c = cos(phi), s = sin(phi);
+        y->re[n] = x->re[n] * c - x->im[n] * s;
+        y->im[n] = x->re[n] * s + x->im[n] * c;
+    }
+    return y;
+}
+
+/* ----- §6.x soft-decision Viterbi extension ----- *
+ *
+ * vitdecSoft(llr_or_quantised, trellis, tblen, opmode) — soft-input
+ * Viterbi.  The branch metric is the dot product of the n-tuple LLR
+ * (or unquantised real) chunk with (1 - 2*expected_bits).  Returns
+ * the decoded bit vector (same length as message). */
+matlab_mat *matlab_comm_vitdec_soft(matlab_mat *llr, matlab_struct *trellis,
+                                     double tblen_d, double opmode_d) {
+    (void)tblen_d;
+    if (!llr || !trellis) return mat_alloc(0, 0);
+    int n = (int)matlab_struct_get_f64(trellis, "n", 1);
+    int64_t S = (int64_t)matlab_struct_get_f64(trellis, "numStates", 9);
+    matlab_mat *outputs    = matlab_struct_get_mat(trellis, "outputs",      7);
+    matlab_mat *nextStates = matlab_struct_get_mat(trellis, "nextStates", 10);
+    if (!outputs || !nextStates || n < 1 || S < 1) return mat_alloc(0, 0);
+    int64_t total = llr->rows * llr->cols;
+    int64_t T = total / n;
+    if (T < 1) return mat_alloc(0, 0);
+    int opmode = (int)opmode_d;
+
+    std::vector<int64_t> in_prev(S * 2, -1);
+    std::vector<int>     in_bit (S * 2, 0);
+    std::vector<int>     in_out (S * 2, 0);
+    std::vector<int>     n_in   (S, 0);
+    for (int64_t ps = 0; ps < S; ++ps) {
+        for (int u = 0; u <= 1; ++u) {
+            int64_t ns = (int64_t)nextStates->data[ps * 2 + u];
+            if (ns < 0 || ns >= S) continue;
+            int slot = n_in[ns]++;
+            if (slot >= 2) continue;
+            in_prev[ns * 2 + slot] = ps;
+            in_bit [ns * 2 + slot] = u;
+            in_out [ns * 2 + slot] = (int)outputs->data[ps * 2 + u];
+        }
+    }
+    const double NEG = -1e18;
+    std::vector<double> pm(S, NEG);
+    std::vector<double> pm_next(S, NEG);
+    std::vector<int8_t> bit_dec(T * S, 0);
+    std::vector<int32_t> prev_dec(T * S, 0);
+    pm[0] = 0.0;
+    for (int64_t t = 0; t < T; ++t) {
+        for (int64_t s = 0; s < S; ++s) {
+            double best = NEG;
+            int best_bit = 0;
+            int64_t best_prev = 0;
+            for (int slot = 0; slot < n_in[s] && slot < 2; ++slot) {
+                int64_t ps = in_prev[s * 2 + slot];
+                if (ps < 0) continue;
+                int u  = in_bit[s * 2 + slot];
+                int oi = in_out[s * 2 + slot];
+                double bm = 0.0;
+                for (int i = 0; i < n; ++i) {
+                    int bit = (oi >> (n - 1 - i)) & 1;
+                    /* +LLR/sample for bit=0, -LLR for bit=1 — matches
+                     * the qamdemodLlr "positive favours 0" convention. */
+                    double sign = (bit == 0) ? 1.0 : -1.0;
+                    bm += sign * llr->data[t * n + i];
+                }
+                double cand = pm[ps] + bm;
+                if (cand > best) {
+                    best = cand; best_bit = u; best_prev = ps;
+                }
+            }
+            pm_next[s] = best;
+            bit_dec [t * S + s] = (int8_t)best_bit;
+            prev_dec[t * S + s] = (int32_t)best_prev;
+        }
+        std::swap(pm, pm_next);
+        for (int64_t s = 0; s < S; ++s) pm_next[s] = NEG;
+    }
+    int64_t end = 0;
+    if (opmode != 1) {
+        double best = pm[0];
+        for (int64_t s = 1; s < S; ++s) {
+            if (pm[s] > best) { best = pm[s]; end = s; }
+        }
+    }
+    matlab_mat *msg = mat_alloc(T, 1);
+    int64_t state = end;
+    for (int64_t t = T - 1; t >= 0; --t) {
+        msg->data[t] = (double)bit_dec[t * S + state];
+        state = (int64_t)prev_dec[t * S + state];
+    }
+    return msg;
+}
+
 }  /* extern "C" */
