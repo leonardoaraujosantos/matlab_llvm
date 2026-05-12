@@ -1622,27 +1622,51 @@ matlab_mat *matlab_max_mm(matlab_mat *A, matlab_mat *B) {
 /*---------- Shape queries ------------------------------------------------*/
 
 /* size(A) -> 1×2 row vector [rows cols]. */
+/* size / numel / length / ndims — all take `matlab_mat *` in the
+ * MATLAB-facing API but must also handle `matlab_mat_c *` (complex)
+ * and `matlab_mat3 *` (3-D) descriptors, since the call sites are
+ * uniformly typed as ptr at the lowering layer.  Check the leading
+ * magic word and read rows/cols from the correct offset for each
+ * layout. */
+static inline void mat_any_shape(const void *A,
+                                 int64_t *out_r, int64_t *out_c) {
+    if (!A) { *out_r = 0; *out_c = 0; return; }
+    if (mat_is_complex(A)) {
+        const matlab_mat_c *c = (const matlab_mat_c *)A;
+        *out_r = c->rows; *out_c = c->cols; return;
+    }
+    /* Default: matlab_mat layout (data*, rows, cols, ...). */
+    const matlab_mat *m = (const matlab_mat *)A;
+    *out_r = m->rows; *out_c = m->cols;
+}
+
 matlab_mat *matlab_size(matlab_mat *A) {
+    int64_t r, c; mat_any_shape(A, &r, &c);
     matlab_mat *R = mat_alloc(1, 2);
-    R->data[0] = (double)A->rows;
-    R->data[1] = (double)A->cols;
+    R->data[0] = (double)r;
+    R->data[1] = (double)c;
     return R;
 }
 
 /* size(A, dim). dim is 1-based; 1=rows, 2=cols; any other dim returns 1. */
 double matlab_size_dim(matlab_mat *A, double dim) {
+    int64_t r, c; mat_any_shape(A, &r, &c);
     int64_t d = (int64_t)dim;
-    if (d == 1) return (double)A->rows;
-    if (d == 2) return (double)A->cols;
+    if (d == 1) return (double)r;
+    if (d == 2) return (double)c;
     return 1.0;
 }
 
 double matlab_length(matlab_mat *A) {
-    if (A->rows == 0 || A->cols == 0) return 0.0;
-    return (double)(A->rows > A->cols ? A->rows : A->cols);
+    int64_t r, c; mat_any_shape(A, &r, &c);
+    if (r == 0 || c == 0) return 0.0;
+    return (double)(r > c ? r : c);
 }
 
-double matlab_numel(matlab_mat *A)  { return (double)(A->rows * A->cols); }
+double matlab_numel(matlab_mat *A)  {
+    int64_t r, c; mat_any_shape(A, &r, &c);
+    return (double)(r * c);
+}
 double matlab_ndims(matlab_mat *A)  { (void)A; return 2.0; }
 
 /* end-of-dim for use inside subscript expressions: `end` in A(..., end, ...)
@@ -10930,14 +10954,50 @@ matlab_mat *matlab_sinc(matlab_mat *x) {
  * anti-aliased versions. Polyphase decomposition (`polyphase(b, m)`)
  * is a follow-on.
  */
-matlab_mat *matlab_upfirdn(matlab_mat *x, matlab_mat *h,
-                           double p_d, double q_d) {
-    if (!x || !h) return mat_alloc(0, 0);
+/* upfirdn — supports both real and complex `x`.  The pulse-shape
+ * filter `h` is always real (no complex-filter case in MATLAB's
+ * usage).  When `x` is complex, the I and Q channels filter
+ * independently against the same `h` taps, producing a complex
+ * output of matching dimensions.
+ *
+ * Detect input kind via the layout magic so the same MATLAB-level
+ * `upfirdn` entry routes either way without the caller having to
+ * pick a separate runtime symbol.  Mirrors how `awgn` / `scatterplot`
+ * etc. dispatch on `mat_is_complex(x)` internally. */
+void *matlab_upfirdn(void *x_any, matlab_mat *h,
+                     double p_d, double q_d) {
+    if (!x_any || !h) return mat_alloc(0, 0);
     int p = (int)p_d, q = (int)q_d;
     if (p < 1) p = 1;
     if (q < 1) q = 1;
-    int64_t Nx = x->rows * x->cols;
     int64_t Nh = h->rows * h->cols;
+    if (mat_is_complex(x_any)) {
+        const matlab_mat_c *xc = (const matlab_mat_c *)x_any;
+        int64_t Nx = xc->rows * xc->cols;
+        if (Nx == 0 || Nh == 0) return mat_c_alloc(1, 0);
+        int64_t N_filtered = Nx * p + Nh - 1;
+        int64_t Ny = (N_filtered + q - 1) / q;
+        matlab_mat_c *Y = (xc->cols == 1 && xc->rows > 1)
+                            ? mat_c_alloc(Ny, 1)
+                            : mat_c_alloc(1, Ny);
+        for (int64_t m = 0; m < Ny; ++m) {
+            double sre = 0.0, sim = 0.0;
+            int64_t k = m * q;
+            for (int64_t n = 0; n < Nx; ++n) {
+                int64_t hi = k - n * p;
+                if (hi >= 0 && hi < Nh) {
+                    double tap = h->data[hi];
+                    sre += xc->re[n] * tap;
+                    sim += xc->im[n] * tap;
+                }
+            }
+            Y->re[m] = sre;
+            Y->im[m] = sim;
+        }
+        return Y;
+    }
+    matlab_mat *x = (matlab_mat *)x_any;
+    int64_t Nx = x->rows * x->cols;
     if (Nx == 0 || Nh == 0) return mat_alloc(1, 0);
     /* Output length: full convolution Nx*p + Nh - 1, then ceil-div by q. */
     int64_t N_filtered = Nx * p + Nh - 1;

@@ -3,34 +3,30 @@
 % Ported from the MathWorks Getting Started example:
 %   https://www.mathworks.com/help/comm/gs/scatter-plot-and-eye-diagram-with-matlab-functions.html
 %
-% Demonstrates the canonical "modulate → channel → inspect"
-% digital-baseband flow on a QPSK constellation:
+% Demonstrates the canonical "modulate → pulse-shape → AWGN →
+% inspect" digital-baseband flow on a QPSK constellation:
 %
 %   1. Generate uniformly-distributed bits in [0, M-1].
 %   2. Map bits to QPSK symbols via `pskmod` (Gray-coded, π/4 offset).
-%   3. Pass through an AWGN channel at a chosen SNR.
-%   4. Read out the noisy constellation via `scatterplot` (which
+%   3. Upsample + pulse-shape with a root-raised-cosine filter
+%      (the standard square-root Nyquist pulse for matched-filter
+%      reception).
+%   4. Pass through an AWGN channel at a chosen Eb/N0.
+%   5. Read out the noisy constellation via `scatterplot` (which
 %      returns the I/Q point matrix in this build — no GUI).
 %
 % Differences from the MathWorks page:
 %
-%   - **No pulse shaping**: the MathWorks example chains
-%     `rcosdesign` + `upfirdn` between modulation and the channel.
-%     Our `upfirdn` runtime entry is real-only at the moment, and
-%     `modSig` is complex, so pulse shaping is skipped.  The
-%     scatter plot of the un-shaped symbols still shows the QPSK
-%     constellation under AWGN, which is what the page's first
-%     plot demonstrates.  Once `upfirdn` gains complex-input
-%     support the chain becomes the full MathWorks flow.
-%
-%   - **No `eyediagram`**: the eye-diagram renderer isn't wired
-%     in this build.  The MathWorks page's eye-diagram plot is
-%     specific to the post-pulse-shape waveform, so it doesn't
-%     have a meaningful analogue for un-shaped QPSK symbols.
+%   - **No `eyediagram`**: the eye-diagram renderer isn't wired in
+%     this build.  Once wired, it'd take the same `txSig`/`rxSig`
+%     vectors the scatterplot consumes.
 %
 %   - **`pskmod` 4-arg form**: `pskmod(data, M, ini_phase,
 %     symbolOrder)` — `symbolOrder = 0` selects Gray coding
 %     (matches MathWorks default).
+%
+%   - **`rcosdesign` 4-arg form**: `rcosdesign(beta, span, sps,
+%     shape)` — `shape = 1` selects 'sqrt' (root-raised-cosine).
 %
 %   - **`awgn` 2-arg form**: auto-measures input signal power
 %     (equivalent to the page's `'measured'` token, which the
@@ -39,31 +35,41 @@
 % --- Configuration ---
 M       = 4;          % QPSK
 nSym    = 1000;       % number of symbols
-snr_dB  = 15.0;       % AWGN channel SNR
+sps     = 4;          % samples per symbol
+beta    = 0.35;       % RRC rolloff factor
+span    = 10;         % filter span in symbols
+EbNo_dB = 10.0;       % per-bit SNR target (dB)
 
 % --- 1. Random bits ---
 data = randi(M, nSym, 1) - 1;          % uniform in [0, M-1]
 
 % --- 2. QPSK modulation (π/4 offset, Gray code) ---
 modSig = pskmod(data, M, 0.7853981633974483, 0);    % π/4 ≈ 0.7854
+disp(length(modSig));                  % 1000 (nSym)
 
-% --- 3. AWGN channel ---
-rxSig = awgn(modSig, snr_dB);
+% --- 3. Root-raised-cosine pulse shaping ---
+rrcFilter = rcosdesign(beta, span, sps, 1);    % 1 = 'sqrt'
+txSig = upfirdn(modSig, rrcFilter, sps, 1);
+disp(length(txSig));                   % nSym*sps + (filter_taps - 1)
 
-% --- 4. Inspect ---
-%   `scatterplot` returns an N×2 matrix of [I, Q] points.  Under
-%   QPSK with π/4 offset, the noise-free constellation sits at the
-%   four (±1/√2, ±1/√2) corners (≈ ±0.707 along each axis).  After
-%   AWGN the points form Gaussian clouds around those corners.
+% --- 4. AWGN channel ---
+%  snr = EbNo + 10*log10(log2(M)) - 10*log10(sps)
+snr_dB = EbNo_dB + 10.0 .* log2(M) .* (1.0 ./ log2(10)) ...
+         - 10.0 .* log10(sps);
+rxSig = awgn(txSig, snr_dB);
+
+% --- 5. Inspect the received constellation ---
+%   `scatterplot` returns an N×2 matrix of [I, Q] points.  After
+%   pulse shaping, points in between symbol centers carry partial
+%   ISI from the RRC pulse (this is what an eyediagram visualizes).
+%   Around a steady-state symbol center, the points sit near the
+%   QPSK corners (±1/√2, ±1/√2) plus AWGN noise.
 pts = scatterplot(rxSig);
-disp(size(pts, 1));         % 1000 rows
-disp(size(pts, 2));         % 2 columns
+disp(size(pts, 1));                    % 4040 = 1000*4 + 40
+disp(size(pts, 2));                    % 2
 
-% First few I/Q points — values vary with the random seed but stay
-% near the unit-circle quadrants.
-disp(pts(1, 1));
-disp(pts(1, 2));
-disp(pts(2, 1));
-disp(pts(2, 2));
-disp(pts(3, 1));
-disp(pts(3, 2));
+% Sample a steady-state point (one symbol period in, well past the
+% filter delay).  The exact value varies with the random seed.
+mid = floor(size(pts, 1) ./ 2);
+disp(pts(mid, 1));
+disp(pts(mid, 2));
