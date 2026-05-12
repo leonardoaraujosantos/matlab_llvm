@@ -140,6 +140,12 @@ that specific polish.
 ## Carved out
 - `writeVerilogA` / `rfmodel.rational/writeVA` Verilog-A export.
   Code generator for behavioral SPICE / SystemVerilog co-sim flows.
+  **Now planned** — see [`verilog_a_plan.md`](verilog_a_plan.md)
+  Tier-1 (4 sessions).  The Verilog-A backend generalizes well
+  past RF (Control System Toolbox `tf`/`zpk`/`ss`, SPT
+  `butter('s')`/`cheby1('s')`, behavioral ADC/DAC/PLL/comparators,
+  sensor models), so the work is being scoped as a full second
+  analog backend rather than a one-off RF utility.
 - Circuit envelope simulation (multi-tone time-stepping nonlinear
   circuit solver).
 - Harmonic Balance solver (Newton-Krylov on multi-tone steady-state
@@ -203,10 +209,12 @@ stability + matching + Smith overlays + group delay.
 
 ## Forward plan
 
-**Nothing in scope.**  Future work is carved-out infrastructure:
+**Nothing in scope inside the RF Toolbox itself.**  Adjacent
+work:
 
-- Verilog-A export (`writeVerilogA`) — behavioral SPICE/SystemVerilog
-  code generator.
+- Verilog-A export (`writeVerilogA`) — now planned as Tier-1 of
+  the general analog backend in
+  [`verilog_a_plan.md`](verilog_a_plan.md).
 - Circuit envelope simulation — multi-tone time-stepping nonlinear
   solver.
 - Harmonic Balance — Newton-Krylov on multi-tone steady-state.
