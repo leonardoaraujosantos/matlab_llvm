@@ -5432,6 +5432,134 @@ double matlab_rf_write_verilog_a_thermistor(double R0, double B, double T0,
     return 1.0;
 }
 
+/* Tier-8 — White + flicker noise sources.
+ *
+ *   writeVerilogANoise(kind, pwr, exponent, filename)
+ *     kind: 0 = white_noise(pwr, "thermal")
+ *           1 = flicker_noise(pwr, exponent, "1_over_f")
+ *
+ * Verilog-A's noise primitives plug into the simulator's small-signal
+ * noise analysis — they are not per-step `randn()` samples but PSD
+ * contributions evaluated during `.noise` analyses.
+ */
+
+double matlab_rf_write_verilog_a_noise(double kind_d, double pwr,
+                                         double exponent,
+                                         void *fname_str) {
+    char path[1024];
+    if (rf_va_read_path(fname_str, path, (int)sizeof(path)) == 0) return 0.0;
+    int K = (int)kind_d;
+    char modname[256];
+    rf_va_modname_from_path(path, modname, (int)sizeof(modname));
+    FILE *fp = fopen(path, "w");
+    if (!fp) return 0.0;
+    const char *kind_name = (K == 0) ? "white_noise"
+                          : (K == 1) ? "flicker_noise" : "unknown";
+    fprintf(fp, "// Verilog-A behavioral noise source emitted by matlab_llvm.\n");
+    fprintf(fp, "// Source kind: %s\n", kind_name);
+    fprintf(fp, "//\n");
+    fprintf(fp, "\n");
+    fprintf(fp, "`include \"disciplines.vams\"\n\n");
+    fprintf(fp, "module %s(out);\n", modname);
+    fprintf(fp, "    output out;\n");
+    fprintf(fp, "    electrical out;\n");
+    fprintf(fp, "    parameter real pwr = %.10g from [0:inf);\n", pwr);
+    if (K == 1) {
+        fprintf(fp, "    parameter real exponent = %.10g from (0:inf);\n",
+                exponent);
+    }
+    fprintf(fp, "    analog begin\n");
+    if (K == 0) {
+        fprintf(fp, "        V(out) <+ white_noise(pwr, \"thermal\");\n");
+    } else if (K == 1) {
+        fprintf(fp, "        V(out) <+ flicker_noise(pwr, exponent, "
+                    "\"1_over_f\");\n");
+    } else {
+        fprintf(fp, "        V(out) <+ 0.0;\n");
+    }
+    fprintf(fp, "    end\n");
+    fprintf(fp, "endmodule\n");
+    fclose(fp);
+    return 1.0;
+}
+
+/* Tier-9 — Lookup tables via $table_model.
+ *
+ *   writeVerilogATable(x_col, y_col, va_filename)
+ *
+ * Writes a sidecar .tbl file alongside the .va.  The .tbl format is
+ * one row per data point — two whitespace-separated columns (x, y).
+ * The .va module references the .tbl by relative path and uses
+ * $table_model(V(in), "name.tbl", "1L,L") for 1-D linear-interpolated
+ * lookup with linear extrapolation outside the data range.
+ *
+ * `$table_model` is part of the Verilog-A 2.4 LRM and is supported by
+ * Cadence Spectre, Synopsys CustomSim, Mentor Eldo, and (since v42)
+ * ngspice + OpenVAF.  Older simulators without $table_model can fall
+ * back to a piecewise-polynomial emission; not implemented yet.
+ */
+
+double matlab_rf_write_verilog_a_table(matlab_mat *xcol, matlab_mat *ycol,
+                                         void *fname_str) {
+    if (!xcol || !ycol) return 0.0;
+    char path[1024];
+    if (rf_va_read_path(fname_str, path, (int)sizeof(path)) == 0) return 0.0;
+    int Nx = (int)(xcol->rows * xcol->cols);
+    int Ny = (int)(ycol->rows * ycol->cols);
+    if (Nx < 2 || Ny != Nx) return 0.0;
+
+    /* Compose sidecar .tbl filename: replace trailing .va / .vams with
+     * .tbl, or append .tbl if no recognized extension. */
+    char tbl_path[1280];
+    int plen = (int)strlen(path);
+    int dot = -1;
+    for (int i = plen - 1; i >= 0; --i) {
+        if (path[i] == '.') { dot = i; break; }
+        if (path[i] == '/' || path[i] == '\\') break;
+    }
+    if (dot >= 0) {
+        memcpy(tbl_path, path, (size_t)dot);
+        memcpy(tbl_path + dot, ".tbl", 5);
+    } else {
+        snprintf(tbl_path, sizeof(tbl_path), "%s.tbl", path);
+    }
+
+    /* Write the .tbl side file. */
+    FILE *ft = fopen(tbl_path, "w");
+    if (!ft) return 0.0;
+    for (int i = 0; i < Nx; ++i)
+        fprintf(ft, "%.10g %.10g\n", xcol->data[i], ycol->data[i]);
+    fclose(ft);
+
+    /* Derive a short basename for the $table_model reference (relative
+     * path so the simulator picks it up from the same dir as the .va). */
+    const char *tbl_base = tbl_path;
+    for (const char *p = tbl_path; *p; ++p)
+        if (*p == '/' || *p == '\\') tbl_base = p + 1;
+
+    char modname[256];
+    rf_va_modname_from_path(path, modname, (int)sizeof(modname));
+
+    FILE *fp = fopen(path, "w");
+    if (!fp) return 0.0;
+    fprintf(fp, "// Verilog-A 1-D lookup table emitted by matlab_llvm.\n");
+    fprintf(fp, "// Side file: %s  (%d data points)\n", tbl_base, Nx);
+    fprintf(fp, "// Interpolation: linear; extrapolation: linear (\"1L,L\")\n");
+    fprintf(fp, "//\n");
+    fprintf(fp, "\n");
+    fprintf(fp, "`include \"disciplines.vams\"\n\n");
+    fprintf(fp, "module %s(in, out);\n", modname);
+    fprintf(fp, "    input in;\n    output out;\n");
+    fprintf(fp, "    electrical in, out;\n");
+    fprintf(fp, "    analog begin\n");
+    fprintf(fp, "        V(out) <+ $table_model(V(in), \"%s\", \"1L,L\");\n",
+            tbl_base);
+    fprintf(fp, "    end\n");
+    fprintf(fp, "endmodule\n");
+    fclose(fp);
+    return 1.0;
+}
+
 /* Tier-3 — Continuous state-space (SISO) Verilog-A export.
  *
  *   writeVerilogASS(A, B, C, D, filename)

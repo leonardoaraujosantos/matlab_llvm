@@ -796,9 +796,11 @@ RTD, thermistor, or photodiode.
 
 ## 12. Status
 
-**Tiers 1, 2, 3, 4, 5, 6, 7 shipped** (2026-05-12, runtime-form) —
+**Tiers 1 – 9 shipped + Tier-10 polish** (2026-05-12, runtime-form) —
 plus two infrastructure fixes that unblocked the classdef path and
 ergonomic complex-column construction.
+
+User-facing reference: [`emit_verilog_a.md`](emit_verilog_a.md).
 
 The pragmatic implementation route shipped runtime entries called
 from MATLAB rather than a separate `-emit-verilog-a` CLI walker.
@@ -827,21 +829,34 @@ tier on top of the runtime entries.
 | 7 | `writeVerilogAOpAmp(gain, vsat, filename)` | Open-loop gain + saturation rail. | `V(out) <+ vsat * tanh(gain * V(vp, vn) / vsat)` — smooth saturation, convergence-friendly. |
 | 7 | `writeVerilogARTD(R0, alpha, T0, filename)` | RTD parameters: nominal resistance, temperature coefficient, reference temperature. | `R(T) = R0 * (1 + alpha * ($temperature - T0))`; current contribution `I(p,n) <+ V(p,n) / R(T)`.  Uses first-class `$temperature`. |
 | 7 | `writeVerilogAThermistor(R0, B, T0, filename)` | NTC thermistor parameters (β-equation form). | `R(T) = R0 * exp(B*(1/$temperature - 1/T0))`; current contribution as for RTD. |
+| 8 | `writeVerilogANoise(kind, pwr, exponent, filename)` | kind ∈ {0=white, 1=flicker}; PSD power; flicker exponent (typically 1.0). | `V(out) <+ white_noise(pwr, "thermal")` or `flicker_noise(pwr, exponent, "1_over_f")`.  PSD contributions consumed by `.noise` analysis. |
+| 9 | `writeVerilogATable(x_col, y_col, va_filename)` | Real columns of equal length (N ≥ 2). | Writes a `.tbl` sidecar (`x y` per row) + a `.va` module using `$table_model(V(in), "name.tbl", "1L,L")`.  Linear interp + linear extrapolation outside data range. |
 
 ### Tests
 
-21 fixtures under `test/Run/`:
+24 fixtures under `test/Run/`:
 
-- Tier-1: `rf_writeva_basic.m`, `rf_writeva_complex.m`, `rf_writeva_delay.m`, `rf_writeva_classdef.m` (real-pole, complex-pair, delay, RFRational instance via the field-name fall-back).
+- Tier-1: `rf_writeva_basic.m`, `rf_writeva_complex.m`, `rf_writeva_delay.m`, `rf_writeva_classdef.m`.
 - Tier-2: `rf_writeva_tf_rc_lowpass.m`, `rf_writeva_tf_biquad.m`, `rf_writeva_zpk_realpoles.m`, `rf_writeva_zpk_complex.m`.
 - Tier-3: `rf_writeva_ss_lp1.m`, `rf_writeva_ss_lp2.m`, `rf_writeva_ss_observer.m`.
 - Tier-4: `rf_writeva_source_sine.m`, `rf_writeva_source_square.m`, `rf_writeva_comparator.m`, `rf_writeva_schmitt.m`.
 - Tier-5: `rf_writeva_vco.m`.
 - Tier-6: `rf_writeva_dac.m`.
 - Tier-7: `rf_writeva_diode.m`, `rf_writeva_opamp.m`, `rf_writeva_rtd.m`, `rf_writeva_thermistor.m`.
+- Tier-8: `rf_writeva_noise_white.m`, `rf_writeva_noise_flicker.m`.
+- Tier-9: `rf_writeva_table_iv.m`.
 
-16 example fixtures under `examples/verilog_a/` mirror the same surface
+19 example fixtures under `examples/verilog_a/` mirror the same surface
 (one example per Tier path) and emit `.va` files into the example directory.
+
+Tier-10 polish shipped:
+- `scripts/va_lint.sh` — OpenVAF / ADMS wrapper.  Skips cleanly when neither tool is installed.
+- `docs/emit_verilog_a.md` — user-facing reference.
+
+Open Tier-10 follow-ons: an opt-in CTest lane (`run-emit-va-admslint`)
+wired through `va_lint.sh`, and an opt-in ngspice / Xyce cosim lane
+cross-checking emitted `.va` files against in-tree `freqresp` /
+`timeresp` references.
 
 ### Infrastructure fixes shipped alongside Tiers 4–7
 
@@ -881,12 +896,25 @@ tier on top of the runtime entries.
 
 ### What's next (forward plan)
 
-Remaining tiers: **Tier-8** (noise — `white_noise` / `flicker_noise`),
-**Tier-9** (lookup tables via `$table_model`), **Tier-10** (polish:
-OpenVAF lint + optional ngspice / Xyce cosim against the in-tree
-`freqresp` / `timeresp`).  **Tier-11** (Verilog-AMS extensions —
-ADC bit-bus output + `connectmodule` / `connectrules`) stays deferred
-until there's clear demand for mixed-signal export.
+**Tiers 1 – 9 are shipped; Tier-10 polish (user doc + lint wrapper)
+landed alongside.**  Remaining items in scope:
+
+- Tier-10 CTest integration: opt-in `run-emit-va-admslint` lane that
+  runs `scripts/va_lint.sh` over every committed `.va` example
+  (gated behind `-DMATLAB_LLVM_WITH_VA_LINT=ON`).
+- Tier-10 cosim integration: opt-in `run-emit-va-cosim` lane that
+  pipes emitted `.va` modules through ngspice (or Xyce) and compares
+  the frequency / step response against the in-tree `freqresp` /
+  `timeresp` references.
+
+Out of scope until demand surfaces:
+
+- **Tier-11** (Verilog-AMS extensions — ADC bit-bus output +
+  `connectmodule` / `connectrules` discipline resolution).
+- A CLI-flag walker (`-emit-verilog-a`) that auto-derives module
+  signatures + port disciplines from MATLAB function signatures +
+  `%#verilog-a` annotations.  The runtime entries above cover the
+  same surface today.
 
 ## 13. Carved out (final)
 

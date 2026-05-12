@@ -4823,6 +4823,11 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"writeVerilogAOpAmp",      "matlab_rf_write_verilog_a_opamp",      0, "ffp"},
       {"writeVerilogARTD",        "matlab_rf_write_verilog_a_rtd",        0, "fffp"},
       {"writeVerilogAThermistor", "matlab_rf_write_verilog_a_thermistor", 0, "fffp"},
+      /* §9.5 Tier-8 — white + flicker noise sources. */
+      {"writeVerilogANoise",      "matlab_rf_write_verilog_a_noise",      0, "fffp"},
+      /* §9.5 Tier-9 — lookup tables via $table_model.  Writes a .tbl
+       * sidecar alongside the .va. */
+      {"writeVerilogATable",      "matlab_rf_write_verilog_a_table",      0, "ppp"},
     };
 
     // Pick the first entry with name + arity + TYPE match so overloaded

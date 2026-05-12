@@ -61,6 +61,19 @@ Mentor Eldo, Synopsys CustomSim, or Keysight ADS.
 | `rtd_pt100.m`         | Pt-100 RTD using Verilog-A's first-class `$temperature`.       |
 | `thermistor_ntc.m`    | NTC thermistor with β-equation temperature dependence.         |
 
+## Tier-8 — white + flicker noise
+
+| File                  | What it shows                                                  |
+|---|---|
+| `noise_thermal.m`     | Thermal-noise source for a 50 Ω resistor at 290 K.             |
+| `noise_flicker.m`     | MOSFET-style 1/f flicker noise.                                |
+
+## Tier-9 — lookup tables
+
+| File                  | What it shows                                                  |
+|---|---|
+| `iv_curve_table.m`    | Diode-like piecewise IV curve via `$table_model` + `.tbl` sidecar. |
+
 ## How to use
 
 ```bash

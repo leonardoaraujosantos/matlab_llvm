@@ -408,6 +408,10 @@ void Resolver::registerBuiltins() {
     /* Tier-7: compact components + sensor models. */
     "writeVerilogADiode", "writeVerilogAOpAmp",
     "writeVerilogARTD",   "writeVerilogAThermistor",
+    /* Tier-8: white + flicker noise sources. */
+    "writeVerilogANoise",
+    /* Tier-9: lookup tables via $table_model. */
+    "writeVerilogATable",
   }) {
     registerBuiltin(N);
   }
