@@ -4777,6 +4777,31 @@ bool TensorLowering::rewriteBuiltinCalls() {
       /* §9.1.2 N-port S→ABCD and S→H (block-partitioned, even N). */
       {"sparamS2abcdN",        "matlab_rf_s2abcd_n",         1, "p"},
       {"sparamS2hN",           "matlab_rf_s2h_n",            1, "p"},
+      /* §9.5 Verilog-A export — rfmodel.rational / RFRational.  Args:
+       * rationalfit-struct-or-RFRational, filename string.  Writes a
+       * parameterized .va module to disk. */
+      {"writeVerilogA",        "matlab_rf_write_verilog_a",  0, "pp"},
+      /* §9.5 Tier-2 — continuous rational filter export.
+       *   writeVerilogATF(num, den, filename) — coefficients in
+       *     descending power of s (MATLAB tf convention).
+       *   writeVerilogAZPK(zeros, poles, k, filename) — zeros/poles
+       *     as real or complex columns; complex-conjugate pairs fold
+       *     into real-coefficient quadratic factors. */
+      {"writeVerilogATF",      "matlab_rf_write_verilog_a_tf",     0, "ppp"},
+      /* Scalar-fold shims for cases where `num = [1.0]` collapses to
+       * an f64 instead of a 1×1 matrix at MIR. */
+      {"writeVerilogATF",      "matlab_rf_write_verilog_a_tf_sm",  0, "fpp"},
+      {"writeVerilogATF",      "matlab_rf_write_verilog_a_tf_ms",  0, "pfp"},
+      {"writeVerilogATF",      "matlab_rf_write_verilog_a_tf_ss",  0, "ffp"},
+      {"writeVerilogAZPK",     "matlab_rf_write_verilog_a_zpk",    0, "ppfp"},
+      /* §9.5 Tier-3 — continuous SISO state-space export.
+       *   writeVerilogASS(A, B, C, D, filename)
+       * Emits one ddt(x[i]) contribution per state variable + the
+       * output equation. */
+      {"writeVerilogASS",      "matlab_rf_write_verilog_a_ss",     0, "pppfp"},
+      /* Scalar-fold shim for 1-state systems where A / B / C collapse
+       * to f64 at MIR (e.g. `A = [-1e6]` folds to scalar). */
+      {"writeVerilogASS",      "matlab_rf_write_verilog_a_ss_fffd", 0, "ffffp"},
     };
 
     // Pick the first entry with name + arity + TYPE match so overloaded

@@ -396,6 +396,9 @@ void Resolver::registerBuiltins() {
     "rfDelayEstimate", "rfApplyDelay", "rfPassivityEnforce",
     "rationalfitWeighted", "newref", "cascadeSparamsNFullK",
     "sparamS2abcdN", "sparamS2hN",
+    /* RF-Tier-5 — Verilog-A export. */
+    "writeVerilogA", "writeVerilogATF", "writeVerilogAZPK",
+    "writeVerilogASS",
   }) {
     registerBuiltin(N);
   }

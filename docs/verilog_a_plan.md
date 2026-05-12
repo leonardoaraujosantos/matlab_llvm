@@ -796,10 +796,66 @@ RTD, thermistor, or photodiode.
 
 ## 12. Status
 
-**Plan only — nothing shipped yet.**
+**Tier-1, Tier-2, Tier-3 shipped** (2026-05-12, runtime-form).
 
-Tier-1 (RF Toolbox `writeVerilogA`) is the first concrete arc.
-~4 sessions to close the RF-Toolbox carve-out.
+The pragmatic implementation route shipped runtime entries called
+from MATLAB rather than a separate `-emit-verilog-a` CLI walker.
+This mirrors MathWorks' own `rfmodel.rational/writeVerilogA` API and
+the existing `touchstoneWrite` pattern in `runtime/runtime_rf.cpp`, so
+every .m source stays fully executable through the LLVM / REPL / DAP /
+plotting lanes and the Verilog-A emit is one runtime call.  A future
+`-emit-verilog-a` MIR walker (with port-discipline inference + the
+`%#verilog-a port ...` annotation parser) remains a possible polish
+tier on top of the runtime entries.
+
+### Shipped surface
+
+| Tier | Runtime entry | Inputs | Output |
+|---|---|---|---|
+| 1 | `writeVerilogA(mdl, filename)` | rationalfit struct (or RFRational instance, per the field-name fall-back) | Sum-of-poles module: real-pole 1st-order sections + complex-conjugate-pair biquads + `absdelay(sum, Delay)` wrap.  D + Delay parameterized. |
+| 2 | `writeVerilogATF(num, den, filename)` | num, den real columns in **descending** power of s (MATLAB tf convention).  Scalar-fold shims auto-promote `[1]` / scalars to 1×1 matrices. | Single `laplace_nd(V(in), {num...}, {den...})` contribution (coeffs reversed to ascending internally). |
+| 2 | `writeVerilogAZPK(zeros, poles, k, filename)` | zeros, poles as real or complex columns (complex pairs fold to real-coefficient quadratic factors); k scalar gain | Same `laplace_nd` shape; roots-to-polynomial multiplied out into real coefficients. |
+| 3 | `writeVerilogASS(A, B, C, D, filename)` | A: N×N, B: N×1, C: 1×N (SISO); D scalar.  Scalar-fold shim auto-promotes `[a]` / scalars to 1×1 for the N=1 case. | Per-state `ddt(x[i]) <+ ...` contribution + `V(out) <+ Σ Cⱼ x[j] + D V(in)` output equation.  Zero-coefficient terms are elided. |
+
+### Tests
+
+10 new fixtures under `test/Run/`:
+
+- `rf_writeva_basic.m`, `rf_writeva_complex.m`, `rf_writeva_delay.m` — Tier-1 (real-pole, complex-pair, delay path).
+- `rf_writeva_tf_rc_lowpass.m`, `rf_writeva_tf_biquad.m` — Tier-2 TF.
+- `rf_writeva_zpk_realpoles.m`, `rf_writeva_zpk_complex.m` — Tier-2 ZPK (real poles + complex pair via `rfPoles`).
+- `rf_writeva_ss_lp1.m`, `rf_writeva_ss_lp2.m`, `rf_writeva_ss_observer.m` — Tier-3 state-space.
+
+7 example fixtures under `examples/verilog_a/` mirror the same surface
+(one example per Tier-1/Tier-2/Tier-3 path) and emit `.va` files into
+the example directory.
+
+### Limitations (current)
+
+- Complex-scalar × real-matrix arithmetic (`poles = pre + 1i * pim`)
+  is **not** implemented in the matlab_llvm runtime today — the
+  scalar-times-matrix lowering drops the imaginary part.  Workaround
+  for ZPK: build complex columns via the runtime path
+  (`rfPoles(rationalfit(...))`) which produces a properly-flagged
+  `matlab_mat_c`.
+- RFRational classdef matrix-property read-back through
+  `matlab_struct_get_mat` returns NULL today (unrelated MIR-lowering
+  gap on `obj.A` for matrix-typed properties).  The runtime's
+  Poles→A / Residues→C field-name fall-back is in place for when that
+  gap is closed.  In the meantime the rationalfit-struct shape is the
+  primary supported input.
+- Tier-2 / Tier-3 register **scalar-fold shims** so single-element
+  numerator/denominator/state args (`[1.0]` collapses to f64 at MIR)
+  still dispatch correctly.
+
+### What's next (forward plan)
+
+Tiers 4 – 10 (analog sources, comparators with `cross()`-events,
+VCO/PLL via `idtmod`, behavioral DAC, compact RLC components, sensor
+models with `$temperature`, white + flicker noise, lookup tables via
+`$table_model`) are scoped in §6 but unshipped.  Tier-11 (Verilog-AMS
+extensions — ADC bit-bus output + `connectmodule`/`connectrules`) is
+deferred until there's clear demand for mixed-signal export.
 
 ## 13. Carved out (final)
 

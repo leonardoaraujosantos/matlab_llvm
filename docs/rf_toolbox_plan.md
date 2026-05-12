@@ -138,14 +138,16 @@ call those directly.  Adding the methods enables MathWorks-faithful
 that specific polish.
 
 ## Carved out
-- `writeVerilogA` / `rfmodel.rational/writeVA` Verilog-A export.
-  Code generator for behavioral SPICE / SystemVerilog co-sim flows.
-  **Now planned** — see [`verilog_a_plan.md`](verilog_a_plan.md)
-  Tier-1 (4 sessions).  The Verilog-A backend generalizes well
-  past RF (Control System Toolbox `tf`/`zpk`/`ss`, SPT
-  `butter('s')`/`cheby1('s')`, behavioral ADC/DAC/PLL/comparators,
-  sensor models), so the work is being scoped as a full second
-  analog backend rather than a one-off RF utility.
+- ~~`writeVerilogA` / `rfmodel.rational/writeVA` Verilog-A export.~~
+  **Shipped 2026-05-12** as Tier-1 of
+  [`verilog_a_plan.md`](verilog_a_plan.md).  Runtime entry
+  `writeVerilogA(mdl, filename)` emits a parameterized Verilog-A
+  module with real-pole 1st-order sections + complex-conjugate-pair
+  biquads + `absdelay` wrap.  Tier-2 (`writeVerilogATF` /
+  `writeVerilogAZPK` for continuous filters) and Tier-3
+  (`writeVerilogASS` for state-space) shipped together — closing
+  the export surface for Control System Toolbox `tf`/`zpk`/`ss`
+  and SPT `butter('s')`/`cheby1('s')` returns at no extra cost.
 - Circuit envelope simulation (multi-tone time-stepping nonlinear
   circuit solver).
 - Harmonic Balance solver (Newton-Krylov on multi-tone steady-state
@@ -210,11 +212,12 @@ stability + matching + Smith overlays + group delay.
 ## Forward plan
 
 **Nothing in scope inside the RF Toolbox itself.**  Adjacent
-work:
+work shipped or in flight:
 
-- Verilog-A export (`writeVerilogA`) — now planned as Tier-1 of
-  the general analog backend in
-  [`verilog_a_plan.md`](verilog_a_plan.md).
+- ✅ Verilog-A export (`writeVerilogA`) — shipped 2026-05-12 as
+  Tier-1 of [`verilog_a_plan.md`](verilog_a_plan.md).  Same arc
+  shipped Tier-2 (`writeVerilogATF` / `writeVerilogAZPK`) and
+  Tier-3 (`writeVerilogASS`).
 - Circuit envelope simulation — multi-tone time-stepping nonlinear
   solver.
 - Harmonic Balance — Newton-Krylov on multi-tone steady-state.
@@ -226,9 +229,16 @@ work:
 
 ## Carved out (final)
 
-Same as the original list — Verilog-A export, circuit envelope
-simulation, harmonic balance solver, RF apps (Budget Analyzer / Smith
-Chart Tool), Modelithics library, IEEE P370, AMP file format,
-Simulink RF Blockset.  These all need infrastructure outside the
-language layer (code generators, multi-tone time-stepping solvers,
-Qt apps, commercial licensing).
+Original list minus Verilog-A export (which shipped 2026-05-12 via
+[`verilog_a_plan.md`](verilog_a_plan.md) Tiers 1–3):
+
+- Circuit envelope simulation
+- Harmonic balance solver
+- RF apps (Budget Analyzer / Smith Chart Tool)
+- Modelithics commercial component library
+- IEEE P370 fixture characterization
+- AMP file format reader
+- Simulink RF Blockset
+
+These all need infrastructure outside the language layer (multi-tone
+time-stepping solvers, Qt apps, commercial licensing).

@@ -509,7 +509,7 @@ Per-toolbox roadmap in [`comm_toolbox_roadmap.md`](comm_toolbox_roadmap.md) §3.
 
 ### RF Toolbox (subset)
 
-Per-toolbox plan in [`rf_toolbox_plan.md`](rf_toolbox_plan.md).  Two-commit closure arc: `44198e5` (Tier-1 + Tier-1 polish) and `56e324c` (Tier-2 generalizations).  All entries live in `runtime/runtime_rf.cpp` (~4 200 lines).  290 / 290 Run/ tests pass.
+Per-toolbox plan in [`rf_toolbox_plan.md`](rf_toolbox_plan.md).  Two-commit closure arc: `44198e5` (Tier-1 + Tier-1 polish) and `56e324c` (Tier-2 generalizations).  All entries live in `runtime/runtime_rf.cpp` (~4 200 lines).  301 / 301 Run/ tests pass.
 
 | Group | Function | Status | Notes |
 |---|---|:-:|---|
@@ -533,7 +533,8 @@ Per-toolbox plan in [`rf_toolbox_plan.md`](rf_toolbox_plan.md).  Two-commit clos
 | `RFRational` value classdef (rfmodel.rational) | `RFRational()` with A / C / D / Delay / Order / Error properties | ✅ shipped | MathWorks-API value wrapper around the rationalfit struct.  Population via the typed getters: `mdl = RFRational(); mdl.A = rfPoles(s); mdl.C = rfResidues(s); ...`. |
 | MathWorks-faithful lowercase aliases | `s2y` / `s2z` / `s2h` / `s2g` / `s2abcd` / `s2t` + inverses + `rfbudget` / `rfwrite` / `sparameters` | ✅ shipped | Lowercase aliases registered in the dispatch table; tutorial-style MathWorks code copies verbatim. |
 | Internal numerics | Native complex N×N LU decomposition with partial pivoting (Doolittle); fallback to 2N×2N real-equivalent on singular pivot | ✅ shipped | Transparently powers every matrix-inverse call in the RF runtime (~4× faster than the real-equivalent path for non-singular matrices).  Caps at N ≤ 9 (matches the multi-port field-name decoration). |
-| Carved out (deliberately deferred) | Verilog-A export (`writeVerilogA`), circuit envelope simulation, harmonic balance solver, RF Budget Analyzer / Smith Chart Tool apps (Qt), Modelithics commercial component library, IEEE P370 fixture characterization, AMP file format reader, Simulink RF Blockset | 🔴 | All require infrastructure outside the language layer (code generators, multi-tone time-stepping solvers, GUI stack, commercial licensing).  Per `rf_toolbox_plan.md`. |
+| Verilog-A export (Tier-1 / Tier-2 / Tier-3) | `writeVerilogA(mdl, filename)` for `rfmodel.rational`; `writeVerilogATF(num, den, filename)` for tf-form filters; `writeVerilogAZPK(zeros, poles, k, filename)` for zpk-form; `writeVerilogASS(A, B, C, D, filename)` for continuous SISO state-space | ✅ shipped | Per [`verilog_a_plan.md`](verilog_a_plan.md) §6 Tiers 1–3.  Real-pole sections + complex-conjugate-pair biquads + `absdelay()` delay wrap (Tier-1).  Single `laplace_nd` contribution from MATLAB tf/zpk coefficients with complex-pair folding (Tier-2).  Per-state `ddt(x[i])` contributions + output equation (Tier-3).  Scalar-fold dispatch shims handle 1-element collapses (`num = [1.0]`).  10 new run-tests, 7 examples under `examples/verilog_a/`. |
+| Carved out (deliberately deferred) | Circuit envelope simulation, harmonic balance solver, RF Budget Analyzer / Smith Chart Tool apps (Qt), Modelithics commercial component library, IEEE P370 fixture characterization, AMP file format reader, Simulink RF Blockset | 🔴 | All require infrastructure outside the language layer (multi-tone time-stepping solvers, GUI stack, commercial licensing).  Per `rf_toolbox_plan.md`. |
 
 ### Strings
 
@@ -583,12 +584,12 @@ All implemented; see `docs/emit_c_cpp.md` for pipeline diagram.
 | Suite | Count | Status |
 |---|--:|:-:|
 | `frontend-tests` (Lexer, Parser, Sema, MIR, MLIR, Opt, Programs, Errors) | 77 | ✅ 77/77 |
-| `run-tests` (`-emit-llvm` + clang) | 290 | ✅ |
-| `run-tests-emit-c` (`-emit-c` + cc) | 290 | ✅ (RF Toolbox tests skip emit-C — they exercise runtime classdef wrappers + Touchstone I/O that only lower through MLIR / JIT) |
-| `run-tests-emit-cpp` (`-emit-cpp` + c++) | 290 | ✅ (RF Toolbox tests skip emit-C++ for the same reason) |
-| `run-tests-emit-c-strict` / `-cpp-strict` (-Wall -Wextra -Werror) | 290 | ✅ |
-| `run-tests-emit-python` (`-emit-python` + python3) | 290 | ✅ (RF Toolbox tests skip emit-Python; some `.stdout-python` overrides for numpy repr) |
-| `run-tests-emit-typescript` (`-emit-typescript` + bun) | 290 | ✅ (RF Toolbox tests skip emit-TypeScript; `string_concat_mixed` fixed in Phase 6.2; ~20 skipped for BigInt-vs-number coercion) |
+| `run-tests` (`-emit-llvm` + clang) | 301 | ✅ |
+| `run-tests-emit-c` (`-emit-c` + cc) | 301 | ✅ (RF Toolbox tests skip emit-C — they exercise runtime classdef wrappers + Touchstone I/O that only lower through MLIR / JIT) |
+| `run-tests-emit-cpp` (`-emit-cpp` + c++) | 301 | ✅ (RF Toolbox tests skip emit-C++ for the same reason) |
+| `run-tests-emit-c-strict` / `-cpp-strict` (-Wall -Wextra -Werror) | 301 | ✅ |
+| `run-tests-emit-python` (`-emit-python` + python3) | 301 | ✅ (RF Toolbox tests skip emit-Python; some `.stdout-python` overrides for numpy repr) |
+| `run-tests-emit-typescript` (`-emit-typescript` + bun) | 301 | ✅ (RF Toolbox tests skip emit-TypeScript; `string_concat_mixed` fixed in Phase 6.2; ~20 skipped for BigInt-vs-number coercion) |
 | `run-tests-sym` (`-emit-cpp` + SymPP, opt-in via `-DMATLAB_LLVM_WITH_SYM=ON`) | 4 | ✅ — Phase 6.2 sym_phase_a/b/b1/b2 fixtures; skip-if-missing-SymPP via rc=77 |
 | `emit-sv` golden tests + Verilator lint + Yosys synth | 76 | ✅ 76/76 |
 | `emit-sv-fail` synthesizability gate diagnostics | 10 | ✅ 10/10 |
