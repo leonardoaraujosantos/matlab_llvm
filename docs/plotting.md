@@ -262,7 +262,125 @@ here so it's clear they're not just "missing".
 | Animated GIF | 2 sessions | Render frame-by-frame, write via `libgif`. |
 | Multi-page PDF | 1 session | `cairo_show_page` between renders; expose via a multi-figure save API. |
 
-## 4. Internals reference
+## 4. Animation & interactivity roadmap
+
+Animation slots cleanly into the one-shot Cairo render path: each frame
+is a fresh paint, captured via the existing in-memory PNG path
+(`matlab_render_png`) and either streamed to the IDE through the
+sentinel channel (§6) or written to a video container.
+
+Interactivity is split into two tracks:
+- **Tier D — HTML export.** Headless-friendly. A self-contained SVG/HTML
+  bundle with vanilla-JS pan/zoom (and three.js for 3D). Works from
+  REPL, DAP, batch, and iOS.
+- **Tier E — Native window.** Opt-in CMake flag, desktop only. SDL2 +
+  cairo on a window surface. Implements true `pan` / `zoom` /
+  `rotate3d` / `datacursormode` / `ginput` / callbacks; the default
+  headless build is untouched.
+
+Animation tiers stay fully headless. The IDE / REPL already streams
+figures via the sentinel channel after every statement (post-input
+flush in `tools/matlabc/main.cpp`), so animation only needs to extend
+the existing pipe. This section expands on the Animated-GIF / Multi-page
+PDF teasers in §3 Tier 6.
+
+### Tier A — Animation core (output-only, fully headless)
+
+| Item | Effort | Notes |
+|---|---|---|
+| `drawnow` real semantics | 1 session | Today `matlab_drawnow` is a thin shim calling `matlab_ide_emit_all_figures`. Add `Figure::dirty` flag; flush only dirty figures; `drawnow('limitrate')` rate-limits to 20 Hz; `drawnow('expose')` becomes a no-op alias. |
+| `animatedline()` + `addpoints` / `clearpoints` | 2 sessions | New `SeriesKind::AnimatedLine` with growable x/y/z buffers. Returns a handle (numeric token, like figure ids). Name/Value pairs (`'MaximumNumPoints'`, `'LineStyle'`, …) route through the existing prop-setter path in `LowerPlot.cpp`. |
+| `comet(x, y)` / `comet3(x, y, z)` | 1 session | Sugar over animatedline: per-step `addpoints` + `drawnow` + sleep. MATLAB's head/body/tail = three series with different alphas. |
+| `getframe()` / `getframe(h)` | 1 session | Wraps the existing `matlab_render_png` in-memory path. Returns a frame handle whose payload is a malloc'd PNG + dims. Stored in a thread-local frame registry. |
+| `movie(F, n, fps)` | 1 session | In REPL/IDE: streams frames via the sentinel channel at `fps`. In batch: optional multi-page PDF, otherwise no-op. |
+| `pause(t)` integration | trivial | Already exists in `matlab_runtime`; animation loops just need to yield to it. |
+
+### Tier B — Animation containers (write video files)
+
+| Item | Effort | Notes |
+|---|---|---|
+| Multi-page PDF via `drawnow` | 1 session | `cairo_show_page()` between paints when output is `.pdf`. |
+| Animated GIF via `libgif` (giflib) | 2 sessions | Optional dep behind `MATLAB_LLVM_WITH_PLOT_GIF`. `saveas(gcf, 'anim.gif')` after a movie buffer is filled; or `VideoWriter` profile `'GIF'`. Per-frame 256-color quantization at encode time. |
+| `VideoWriter` — MP4/H.264 | 1 week | Optional dep `MATLAB_LLVM_WITH_PLOT_FFMPEG` (libav). API-compatible: `v = VideoWriter('out.mp4', 'MPEG-4'); open(v); writeVideo(v, frame); close(v);`. Opaque handle + four entry points + four `LowerPlot` rewrites. Profiles: `'Motion JPEG AVI'`, `'MPEG-4'`, `'Uncompressed AVI'`, `'Archival'`. |
+| `VideoReader` | 1 session | Symmetric — libav demux + PNG-decoded frames. Lower priority. |
+
+Both video deps stay optional and off by default. Without them,
+animation still produces multi-page PDF + IDE streaming, which covers
+most REPL workflows.
+
+### Tier C — REPL / Debug / IDE wiring (the "live plotting" channel)
+
+The REPL already calls `matlab_ide_emit_all_figures` after every
+statement (post-input flush in `tools/matlabc/main.cpp`) and the
+sentinel format `___MF_FIG_BEGIN___ id=… w=… h=…` is already plumbed
+through stdout. Animation only needs minor extensions.
+
+| Item | Effort | Notes |
+|---|---|---|
+| Sentinel `kind=frame\|figure` header | trivial | IDE distinguishes in-progress animation frames from final figures (replace-in-place vs. accumulate). |
+| `drawnow` rate-limit aware of IDE backpressure | 1 session | When IDE is consuming, throttle to `MATLAB_LLVM_IDE_FPS` (default 20). |
+| DAP custom event for frames | 2 sessions | DAP today only responds to client requests; add a custom `output` category `"figure"` carrying base64 PNG (or a non-standard `figure` event). Lets you see animations while paused at a breakpoint. |
+| REPL figure echoing during loops | 1 session | Inside a `for` loop, no per-iteration `runReplInput` boundary fires — `matlab_drawnow` itself must write to the same fd as REPL stdout. |
+
+### Tier D — Interactive plots via HTML export (still headless)
+
+Pragmatic answer to "interactive plots" without breaking the headless
+story: emit a self-contained HTML/SVG bundle.
+
+| Item | Effort | Notes |
+|---|---|---|
+| `saveas(gcf, 'fig.html')` for 2D | 1 week | Re-use the existing SVG painter, wrap in an HTML shell with ~200 lines of vanilla JS: pan (mousedrag), zoom (wheel), tooltip on nearest point. No external deps; one file you can email. |
+| HTML export for 3D | 1 week | Emit a three.js (or twgl) micro-bundle plus surface/mesh/line data as JSON. Rotate / pan / zoom via OrbitControls. |
+| Animated HTML (timeline scrubber) | 3 sessions | When a movie buffer is captured, embed frames as `<img>` slideshow + scrubber `<input>`. |
+
+This gives interactive plots that work from REPL / DAP / batch / iOS —
+the user just opens the file in any browser.
+
+### Tier E — Interactive plots via optional native window (opt-in, desktop only)
+
+For the closest-to-MATLAB experience (real `pan`, `zoom`, `rotate3d`,
+`datacursormode`, `ginput`, callbacks), add a separate window backend
+behind a CMake flag. **Opt-in**, **macOS + Linux only**, and the default
+headless build remains untouched.
+
+| Item | Effort | Notes |
+|---|---|---|
+| `MATLAB_LLVM_WITH_PLOT_WINDOW` (SDL2 + cairo image-on-texture) | 1 week | `figure()` opens an SDL window; cairo paints into a CPU surface uploaded as a GL/Metal texture each frame. |
+| `pan` / `zoom` / `rotate3d` as mode toggles | 1 week | Mouse-drag mutates `Axes::xlim/ylim` (pan), scales them (zoom), or rotates `Axes::view_az/el` (rotate3d). Each mutation marks the figure dirty → repaint loop. |
+| `ginput(n)` blocking | 2 sessions | Drains SDL mouse events on the JIT thread; returns `[x,y]` in axes data coords. Errors in headless build. |
+| `datacursormode on` + nearest-point lookup | 2 sessions | k-d-style nearest-neighbor on visible series; tooltip painter. |
+| Callbacks (`'ButtonDownFcn'`, `WindowKeyPressFcn`, …) | 1 week | Requires re-entering the JIT from the event thread to invoke a MATLAB anonymous function. The `matlab_dbg_hook` re-entry pattern in `tools/matlabc/main.cpp` is the precedent. |
+| `MATLAB_LLVM_WITH_PLOT_WEBSOCKET` (web alternative) | 1 week | Same surface as above but events come over WS from a browser viewing the HTML export. iOS-friendly variant of E. |
+
+### Tier F — Touch points
+
+Discrete files animation/interactivity must extend:
+
+- `runtime/matlab_plot.h` — new C ABI: `matlab_drawnow_flushed`, `matlab_animatedline_new`, `matlab_addpoints`, `matlab_clearpoints`, `matlab_getframe`, `matlab_movie`, `matlab_videowriter_*`.
+- `runtime/plot/figure.h` — `SeriesKind::AnimatedLine`, `Figure::dirty`, frame registry, `Axes::interaction_mode` enum.
+- `runtime/plot/cairo_render.cpp` — multi-page PDF support; frame-rate aware flush.
+- `lib/MLIR/Passes/LowerPlot.cpp` — extend `plotBuiltins()` (+~10 names) and `rewriteCallee()` arity branches.
+- `lib/Sema/Resolver.cpp` — register new builtins in `kBuiltins`.
+- `tools/matlabc/main.cpp` — sentinel `kind=` extension; optional DAP figure event; optional SDL window event loop.
+- `CMakeLists.txt` — new optional flags `MATLAB_LLVM_WITH_PLOT_GIF`, `…_FFMPEG`, `…_WINDOW`, `…_WEBSOCKET` (all off by default; `WITH_PLOT` remains the umbrella).
+- `test/Runtime/test_plot_animation.cpp` — frame-count, GIF magic-bytes, video duration assertions (no JIT, follow the existing direct-ABI test pattern).
+- `examples/plot/animatedline_*.m`, `examples/plot/comet_*.m` — end-to-end through matlabc.
+
+### Tier G — Explicitly out of scope
+
+- **No emit-c / emit-cpp / emit-python / emit-typescript / emit-systemverilog plumbing.** `LowerPlot` runs only on the JIT/runtime path; emit backends never see plot ops. SystemVerilog won't paint Cairo; Python/TS users have matplotlib/Plotly natively. C/C++ emit could in principle link against `libmatlab_plot`, but not pursued.
+- Plot tools / Live Editor / App Designer / `uifigure` — same rationale as the §3 Tier 5 carve-out.
+- WebGL-based realtime 3D inside the cairo runtime — too much surface area for the headless story.
+
+### Suggested execution order
+
+1. **A1–A4** (drawnow + animatedline + getframe) — covers >70 % of MATLAB animation scripts in the wild, all headless. ~1 week.
+2. **C1–C3** (REPL / DAP wiring) — makes animations *visible* in the IDE during interactive use. ~3 sessions.
+3. **B2** (libgif) — first persistent video output. ~2 sessions.
+4. **D1** (HTML export, 2D) — first form of "interactive plots". ~1 week.
+5. Then choose between **B3** (MP4) / **D2** (3D HTML) / **E** (native window) based on demand.
+
+## 5. Internals reference
 
 ### File layout
 
@@ -316,7 +434,7 @@ error or a translate-to-LLVM-IR error. Common reasons:
 To diagnose, run `matlabc -emit-mlir <file>.m` and inspect the
 `matlab.call_builtin` ops surviving past `LowerPlot`.
 
-## 5. Quick-reference: enabling and using
+## 6. Quick-reference: enabling and using
 
 ### From a `.m` file via matlabc
 
