@@ -77,7 +77,7 @@ Current corpus size in-tree:
 - `29` runnable programs in [`examples/`](examples/)
 - `39` synthesizable HDL example modules in [`examples/hdl/`](examples/hdl/) (plus driver scripts)
 - `10` flowchart programs in [`examples/mflow/`](examples/mflow/)
-- `315` execution tests in `test/Run/` plus `4` opt-in symbolic tests in `test/RunSym/`
+- `322` execution tests in `test/Run/` plus `4` opt-in symbolic tests in `test/RunSym/`
 - `77` SystemVerilog golden fixtures (Verilator lint-clean) in `test/EmitSV/`
 - `7` fi-spec port-declaration regression tests in `test/EmitSVPorts/`
 - `2` boolean-port lint-hint tests in `test/EmitSVHint/`

@@ -209,37 +209,121 @@ range.
 Cadence Spectre, Synopsys CustomSim, Mentor Eldo, and ngspice (v42+)
 via OpenVAF.
 
+### Tier-7 follow-on — Composite RF / signal-chain blocks
+
+Three additional runtime entries that emit higher-level building
+blocks frequently needed in RF / mixed-signal testbenches.  Each is
+a thin composite over the primitives shipped in Tiers 1–9.
+
+```matlab
+writeVerilogAAmplifier(gain, vsat, bw_3dB, filename)
+writeVerilogAAM(fc, mod_index, filename)
+writeVerilogAIQMod(fc, amp, filename)
+```
+
+`writeVerilogAAmplifier` — RF amplifier with **gain × 1st-order LPF
+× `tanh` saturation** in a single module:
+
+```verilog-a
+y_pre  = gain * V(in);
+y_filt = laplace_nd(y_pre, {1.0}, {1.0, 1.0 / (2*`M_PI * bw_3dB)});
+V(out) <+ vsat * tanh(y_filt / vsat);
+```
+
+`writeVerilogAAM` — amplitude modulator:
+
+```verilog-a
+V(out) <+ (1.0 + mod_index * V(msg)) * cos(2*`M_PI * fc * $abstime);
+```
+
+`writeVerilogAIQMod` — generic I/Q modulator (covers QAM, QPSK, OFDM
+front-end).  Drive `V(i_in)` and `V(q_in)` externally with the PAM-
+shaped symbol streams:
+
+```verilog-a
+V(out) <+ amp * (
+    V(i_in) * cos(2*`M_PI * fc * $abstime) -
+    V(q_in) * sin(2*`M_PI * fc * $abstime)
+);
+```
+
+FM is already covered by `writeVerilogAVCO` from Tier-5.
+
 ## Lint workflow (Tier-10)
+
+Direct invocation:
 
 ```bash
 scripts/va_lint.sh examples/verilog_a/*.va
 ```
 
-The script wraps OpenVAF (preferred) or ADMS (fallback).  Neither
-installed?  The script prints a hint and exits 0 (skip), so opt-in
-CI lanes can run it unconditionally.
+CTest lane (opt-in via `-DMATLAB_LLVM_WITH_VA_LINT=ON`):
+
+```bash
+cmake -S . -B build -DMATLAB_LLVM_WITH_VA_LINT=ON
+cmake --build build --target matlabc
+cd build && ctest -R run-emit-va-admslint -V
+```
+
+The lint lane compiles every `examples/verilog_a/*.m`, runs each
+binary to emit its `.va`, and pipes the lot through
+`scripts/va_lint.sh` (OpenVAF preferred, ADMS fallback).  Skips
+cleanly with exit 0 when neither linter is installed, so it's safe
+to enable unconditionally on CI machines that don't have OpenVAF.
 
 Install OpenVAF: <https://openvaf.semimod.de/>.
 
-## Cosim workflow (manual)
+## Cosim workflow (Tier-10)
 
-For round-trip validation against the in-tree `freqresp` / `timeresp`
-references, simulate the emitted `.va` in ngspice or Xyce and compare
-the frequency / step response:
+Direct invocation against a single `.va`:
+
+```bash
+scripts/va_cosim.sh path/to/module.va
+```
+
+CTest lane (opt-in via `-DMATLAB_LLVM_WITH_VA_COSIM=ON`):
+
+```bash
+cmake -S . -B build -DMATLAB_LLVM_WITH_VA_COSIM=ON
+cd build && ctest -R run-emit-va-cosim -V
+```
+
+The cosim lane detects whether **ngspice + OpenVAF** (preferred) or
+**Xyce + ADMS** is available, and for each suitable example (1-in /
+1-out port topology) compiles the `.va` and runs an AC sweep on a
+canonical netlist template:
+
+```spice
+* ngspice + OpenVAF
+pre_osdi module.osdi
+Vin in 0 AC 1
+X1 in out module
+Rload out 0 50
+.AC DEC 10 100 1G
+.PRINT AC v(out)
+.END
+```
+
+Composite blocks with more than 2 ports (AM, I/Q, comparator, DAC, …)
+need per-block testbenches that aren't auto-generated.  Skips
+cleanly when neither toolchain is installed.
+
+Reference simulator notes:
 
 ```bash
 # Spectre
 spectre netlist.scs -raw out.raw +log spectre.log
 
-# ngspice + OpenVAF (requires ngspice >= 42 built with OpenVAF support)
+# ngspice + OpenVAF (requires ngspice >= 42 + OpenVAF on PATH)
 ngspice -b netlist.cir -o ngspice.log
 
 # Xyce
 Xyce netlist.cir
 ```
 
-A CTest integration for cosim is on the Tier-10 plan but not shipped
-yet.
+A future tier may add a `freqresp` cross-check that compares ngspice's
+AC sweep result against the in-tree `freqresp(rationalfit(...))`
+reference column-by-column.
 
 ## Examples
 
@@ -266,6 +350,11 @@ See `examples/verilog_a/` for one runnable example per Tier:
 | `noise_thermal.m`                 | 8    | Thermal-noise source (`white_noise`)                    |
 | `noise_flicker.m`                 | 8    | 1/f flicker noise                                       |
 | `iv_curve_table.m`                | 9    | `$table_model` 1-D lookup + `.tbl` sidecar              |
+| `low_pass_filter.m`               | 2    | 3rd-order Butterworth LP at 100 kHz via `writeVerilogATF` |
+| `amplifier.m`                     | 7+   | RF amplifier (gain × LPF × `tanh` saturation) via `writeVerilogAAmplifier` |
+| `am_modulator.m`                  | 7+   | AM `(1 + m·V(msg)) · cos(2π fc t)` via `writeVerilogAAM` |
+| `fm_modulator.m`                  | 5    | FM modulator via `writeVerilogAVCO` (idtmod phase accumulator) |
+| `qam16_modulator.m`               | 7+   | I/Q modulator covering QAM-16 / QPSK / 8-PSK via `writeVerilogAIQMod` |
 
 Each example is fully executable through matlabc -emit-llvm and
 writes its `.va` (and a `.tbl` for Tier-9) into the working directory.

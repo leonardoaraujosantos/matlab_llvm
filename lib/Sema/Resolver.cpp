@@ -415,6 +415,8 @@ void Resolver::registerBuiltins() {
     "writeVerilogANoise",
     /* Tier-9: lookup tables via $table_model. */
     "writeVerilogATable",
+    /* Tier-7 follow-on: composite RF / signal-chain blocks. */
+    "writeVerilogAAmplifier", "writeVerilogAAM", "writeVerilogAIQMod",
   }) {
     registerBuiltin(N);
   }

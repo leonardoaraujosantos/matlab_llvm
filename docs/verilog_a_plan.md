@@ -796,11 +796,31 @@ RTD, thermistor, or photodiode.
 
 ## 12. Status
 
-**Tiers 1 – 9 shipped + Tier-10 polish** (2026-05-12, runtime-form) —
-plus two infrastructure fixes that unblocked the classdef path and
-ergonomic complex-column construction.
+**Tiers 1 – 10 shipped** (2026-05-12, runtime-form) — plus three
+composite RF / signal-chain blocks (Amplifier / AM / IQ-Mod), two
+infrastructure fixes that unblocked the classdef path and ergonomic
+complex-column construction, and two opt-in CTest lanes.
 
 User-facing reference: [`emit_verilog_a.md`](emit_verilog_a.md).
+
+**Tier-10 CTest lanes shipped**:
+- `run-emit-va-admslint` — compiles every `examples/verilog_a/*.m`,
+  runs each binary to emit its `.va`, pipes the lot through
+  `scripts/va_lint.sh` (OpenVAF / ADMS).  Opt-in via
+  `-DMATLAB_LLVM_WITH_VA_LINT=ON`.  Skips cleanly when neither
+  linter is installed.
+- `run-emit-va-cosim` — for the 1-in / 1-out subset of examples,
+  compiles `.va → .osdi` (OpenVAF) and runs an AC sweep through
+  ngspice on a canonical netlist template; Xyce + ADMS as
+  fallback.  Opt-in via `-DMATLAB_LLVM_WITH_VA_COSIM=ON`.  Skips
+  cleanly when no cosim toolchain is installed.
+
+**Tier-7 follow-on shipped** — composite RF / signal-chain blocks:
+- `writeVerilogAAmplifier(gain, vsat, bw_3dB, filename)` — linear
+  gain × 1st-order LPF × `tanh` saturation in one module.
+- `writeVerilogAAM(fc, mod_index, filename)` — amplitude modulator.
+- `writeVerilogAIQMod(fc, amp, filename)` — generic I/Q modulator
+  (covers QAM-16, QPSK, 8-PSK).
 
 The pragmatic implementation route shipped runtime entries called
 from MATLAB rather than a separate `-emit-verilog-a` CLI walker.
@@ -834,7 +854,7 @@ tier on top of the runtime entries.
 
 ### Tests
 
-24 fixtures under `test/Run/`:
+27 fixtures under `test/Run/`:
 
 - Tier-1: `rf_writeva_basic.m`, `rf_writeva_complex.m`, `rf_writeva_delay.m`, `rf_writeva_classdef.m`.
 - Tier-2: `rf_writeva_tf_rc_lowpass.m`, `rf_writeva_tf_biquad.m`, `rf_writeva_zpk_realpoles.m`, `rf_writeva_zpk_complex.m`.
@@ -843,20 +863,24 @@ tier on top of the runtime entries.
 - Tier-5: `rf_writeva_vco.m`.
 - Tier-6: `rf_writeva_dac.m`.
 - Tier-7: `rf_writeva_diode.m`, `rf_writeva_opamp.m`, `rf_writeva_rtd.m`, `rf_writeva_thermistor.m`.
+- Tier-7 follow-on: `rf_writeva_amplifier.m`, `rf_writeva_am.m`, `rf_writeva_iqmod.m`.
 - Tier-8: `rf_writeva_noise_white.m`, `rf_writeva_noise_flicker.m`.
 - Tier-9: `rf_writeva_table_iv.m`.
 
-19 example fixtures under `examples/verilog_a/` mirror the same surface
-(one example per Tier path) and emit `.va` files into the example directory.
+24 example fixtures under `examples/verilog_a/` mirror the same surface
+plus the **canonical RF-modulator suite**
+(`low_pass_filter.m`, `amplifier.m`, `am_modulator.m`,
+`fm_modulator.m`, `qam16_modulator.m`), and emit `.va` files into the
+example directory.
 
-Tier-10 polish shipped:
-- `scripts/va_lint.sh` — OpenVAF / ADMS wrapper.  Skips cleanly when neither tool is installed.
+Tier-10 shipped:
+- `scripts/va_lint.sh` — OpenVAF / ADMS wrapper, skips cleanly when
+  neither tool is installed.
+- `scripts/va_cosim.sh` — ngspice + OpenVAF (preferred) / Xyce + ADMS
+  AC-sweep cosim wrapper.
+- CTest lane `run-emit-va-admslint` (opt-in `-DMATLAB_LLVM_WITH_VA_LINT=ON`).
+- CTest lane `run-emit-va-cosim`     (opt-in `-DMATLAB_LLVM_WITH_VA_COSIM=ON`).
 - `docs/emit_verilog_a.md` — user-facing reference.
-
-Open Tier-10 follow-ons: an opt-in CTest lane (`run-emit-va-admslint`)
-wired through `va_lint.sh`, and an opt-in ngspice / Xyce cosim lane
-cross-checking emitted `.va` files against in-tree `freqresp` /
-`timeresp` references.
 
 ### Infrastructure fixes shipped alongside Tiers 4–7
 
@@ -896,16 +920,15 @@ cross-checking emitted `.va` files against in-tree `freqresp` /
 
 ### What's next (forward plan)
 
-**Tiers 1 – 9 are shipped; Tier-10 polish (user doc + lint wrapper)
-landed alongside.**  Remaining items in scope:
+**Tiers 1 – 10 are shipped.**  Only nice-to-have polish remains:
 
-- Tier-10 CTest integration: opt-in `run-emit-va-admslint` lane that
-  runs `scripts/va_lint.sh` over every committed `.va` example
-  (gated behind `-DMATLAB_LLVM_WITH_VA_LINT=ON`).
-- Tier-10 cosim integration: opt-in `run-emit-va-cosim` lane that
-  pipes emitted `.va` modules through ngspice (or Xyce) and compares
-  the frequency / step response against the in-tree `freqresp` /
-  `timeresp` references.
+- A `freqresp` cross-check pass in `scripts/va_cosim.sh` that parses
+  ngspice's AC-sweep output and compares against the in-tree
+  `freqresp(rationalfit(...))` reference column-by-column (today the
+  lane only verifies the AC sweep ran clean).
+- Per-block testbench templates for the >2-port composite modules
+  (AM modulator, I/Q modulator, comparator, DAC) — the canonical
+  1-in / 1-out template doesn't fit those.
 
 Out of scope until demand surfaces:
 

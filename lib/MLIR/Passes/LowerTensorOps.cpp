@@ -4839,6 +4839,10 @@ bool TensorLowering::rewriteBuiltinCalls() {
       /* §9.5 Tier-9 — lookup tables via $table_model.  Writes a .tbl
        * sidecar alongside the .va. */
       {"writeVerilogATable",      "matlab_rf_write_verilog_a_table",      0, "ppp"},
+      /* §9.5 Tier-7 follow-on — composite RF / signal-chain blocks. */
+      {"writeVerilogAAmplifier",  "matlab_rf_write_verilog_a_amplifier",  0, "fffp"},
+      {"writeVerilogAAM",         "matlab_rf_write_verilog_a_am",         0, "ffp"},
+      {"writeVerilogAIQMod",      "matlab_rf_write_verilog_a_iqmod",      0, "ffp"},
     };
 
     // Pick the first entry with name + arity + TYPE match so overloaded

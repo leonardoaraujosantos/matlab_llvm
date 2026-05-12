@@ -63,6 +63,24 @@ if(MATLAB_LLVM_WITH_PLOT)
     runtime/plot/contour.cpp)
 endif()
 
+# --- Verilog-A lint ---------------------------------------------------------
+# Off by default; turn on with -DMATLAB_LLVM_WITH_VA_LINT=ON to register a
+# CTest target that runs scripts/va_lint.sh (OpenVAF / ADMS) over every
+# example .va emitted from examples/verilog_a/.  The lint script exits 0
+# (skip) when neither tool is installed, so the CTest lane is safe to
+# enable unconditionally on CI machines.
+option(MATLAB_LLVM_WITH_VA_LINT
+       "Enable Verilog-A lint CTest lane (OpenVAF / ADMS wrapper)" OFF)
+# --- Verilog-A cosim --------------------------------------------------------
+# Off by default; turn on with -DMATLAB_LLVM_WITH_VA_COSIM=ON to register a
+# CTest target that pipes every example .va through ngspice + OpenVAF
+# (preferred) or Xyce + ADMS.  Skips cleanly when neither toolchain is
+# installed.  Limited to the 1-in/1-out subset of examples that fit the
+# canonical AC-sweep template; composite blocks (AM / I/Q / DAC) need
+# per-block testbenches that aren't in scope for this lane.
+option(MATLAB_LLVM_WITH_VA_COSIM
+       "Enable Verilog-A cosim CTest lane (ngspice+OpenVAF / Xyce+ADMS)" OFF)
+
 # --- Coverage ---------------------------------------------------------------
 # Off by default; turn on with -DMATLAB_LLVM_COVERAGE=ON to instrument the
 # matlabc binary (and therefore runtime/matlab_runtime.c) with Clang's
@@ -366,6 +384,27 @@ add_test(
           $<TARGET_FILE:matlabc>
   WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Flowchart/EmitMflow
 )
+# Opt-in Verilog-A lint lane (Tier-10 of docs/verilog_a_plan.md).
+# Compiles + runs every example under examples/verilog_a/ to emit
+# its .va, then pipes the result into scripts/va_lint.sh
+# (OpenVAF / ADMS wrapper).  Skips cleanly when neither linter is
+# on PATH; safe to enable on CI machines that don't have OpenVAF.
+if(MATLAB_LLVM_WITH_VA_LINT)
+  add_test(
+    NAME run-emit-va-admslint
+    COMMAND ${CMAKE_SOURCE_DIR}/test/EmitVA/run_lint.sh
+            $<TARGET_FILE:matlabc>
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/EmitVA
+  )
+endif()
+if(MATLAB_LLVM_WITH_VA_COSIM)
+  add_test(
+    NAME run-emit-va-cosim
+    COMMAND ${CMAKE_SOURCE_DIR}/test/EmitVA/run_cosim.sh
+            $<TARGET_FILE:matlabc>
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/EmitVA
+  )
+endif()
 if(MATLAB_LLVM_WITH_MLIR)
   add_test(
     NAME run-tests

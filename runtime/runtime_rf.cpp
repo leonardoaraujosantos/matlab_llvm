@@ -5560,6 +5560,119 @@ double matlab_rf_write_verilog_a_table(matlab_mat *xcol, matlab_mat *ycol,
     return 1.0;
 }
 
+/* Tier-7 follow-on / RF building blocks for the new examples.
+ *
+ *   writeVerilogAAmplifier(gain, vsat, bw_3dB_Hz, filename)
+ *     Composite RF amplifier: linear gain → 1st-order bandwidth limit
+ *     (single-pole laplace_nd) → tanh saturation.  V(out) = vsat *
+ *     tanh(LPF(gain * V(in)) / vsat).
+ *
+ *   writeVerilogAAM(fc, mod_index, filename)
+ *     Amplitude modulator.  V(out) = (1 + m * V(msg)) * cos(2π fc t)
+ *     where m is the modulation index.  Input port `msg`, output `out`.
+ *
+ *   writeVerilogAIQMod(fc, amp, filename)
+ *     Generic I/Q modulator (covers QAM, QPSK, OFDM front-end):
+ *       V(out) = amp · (V(i_in) cos(2π fc t) − V(q_in) sin(2π fc t)).
+ *     Drive V(i_in) and V(q_in) with PAM-shaped I/Q symbol streams to
+ *     build a QAM-16 / QPSK / 8-PSK transmitter.
+ */
+
+double matlab_rf_write_verilog_a_amplifier(double gain, double vsat,
+                                             double bw_3dB,
+                                             void *fname_str) {
+    char path[1024];
+    if (rf_va_read_path(fname_str, path, (int)sizeof(path)) == 0) return 0.0;
+    char modname[256];
+    rf_va_modname_from_path(path, modname, (int)sizeof(modname));
+    FILE *fp = fopen(path, "w");
+    if (!fp) return 0.0;
+    fprintf(fp, "// Verilog-A behavioral RF amplifier emitted by matlab_llvm.\n");
+    fprintf(fp, "// V(out) = vsat * tanh(LPF(gain * V(in)) / vsat)\n");
+    fprintf(fp, "// LPF: 1st-order at bw_3dB Hz via laplace_nd.\n");
+    fprintf(fp, "//\n");
+    fprintf(fp, "\n");
+    fprintf(fp, "`include \"disciplines.vams\"\n\n");
+    fprintf(fp, "module %s(in, out);\n", modname);
+    fprintf(fp, "    input in;\n    output out;\n");
+    fprintf(fp, "    electrical in, out;\n");
+    fprintf(fp, "    parameter real gain    = %.10g;\n", gain);
+    fprintf(fp, "    parameter real vsat    = %.10g from (0:inf);\n", vsat);
+    fprintf(fp, "    parameter real bw_3dB  = %.10g from (0:inf);\n", bw_3dB);
+    fprintf(fp, "    real y_pre, y_filt;\n");
+    fprintf(fp, "    analog begin\n");
+    fprintf(fp, "        y_pre  = gain * V(in);\n");
+    /* 1st-order LPF: H(s) = 1 / (1 + s / w0).  Ascending coeffs for
+     * laplace_nd: num = {1.0}, den = {1.0, 1/(2π·bw_3dB)}. */
+    fprintf(fp, "        y_filt = laplace_nd(y_pre, {1.0}, "
+                "{1.0, 1.0 / (2.0 * `M_PI * bw_3dB)});\n");
+    fprintf(fp, "        V(out) <+ vsat * tanh(y_filt / vsat);\n");
+    fprintf(fp, "    end\n");
+    fprintf(fp, "endmodule\n");
+    fclose(fp);
+    return 1.0;
+}
+
+double matlab_rf_write_verilog_a_am(double fc, double mod_index,
+                                      void *fname_str) {
+    char path[1024];
+    if (rf_va_read_path(fname_str, path, (int)sizeof(path)) == 0) return 0.0;
+    char modname[256];
+    rf_va_modname_from_path(path, modname, (int)sizeof(modname));
+    FILE *fp = fopen(path, "w");
+    if (!fp) return 0.0;
+    fprintf(fp, "// Verilog-A AM modulator emitted by matlab_llvm.\n");
+    fprintf(fp, "// V(out) = (1 + mod_index * V(msg)) * cos(2*pi*fc*$abstime)\n");
+    fprintf(fp, "//\n");
+    fprintf(fp, "\n");
+    fprintf(fp, "`include \"disciplines.vams\"\n\n");
+    fprintf(fp, "module %s(msg, out);\n", modname);
+    fprintf(fp, "    input msg;\n    output out;\n");
+    fprintf(fp, "    electrical msg, out;\n");
+    fprintf(fp, "    parameter real fc        = %.10g from (0:inf);\n", fc);
+    fprintf(fp, "    parameter real mod_index = %.10g;\n", mod_index);
+    fprintf(fp, "    analog begin\n");
+    fprintf(fp, "        V(out) <+ (1.0 + mod_index * V(msg)) * "
+                "cos(2.0 * `M_PI * fc * $abstime);\n");
+    fprintf(fp, "    end\n");
+    fprintf(fp, "endmodule\n");
+    fclose(fp);
+    return 1.0;
+}
+
+double matlab_rf_write_verilog_a_iqmod(double fc, double amp,
+                                         void *fname_str) {
+    char path[1024];
+    if (rf_va_read_path(fname_str, path, (int)sizeof(path)) == 0) return 0.0;
+    char modname[256];
+    rf_va_modname_from_path(path, modname, (int)sizeof(modname));
+    FILE *fp = fopen(path, "w");
+    if (!fp) return 0.0;
+    fprintf(fp, "// Verilog-A I/Q modulator emitted by matlab_llvm.\n");
+    fprintf(fp, "// V(out) = amp * (V(i_in) * cos(wt) - V(q_in) * sin(wt))\n");
+    fprintf(fp, "// Drives a QAM / QPSK / 8-PSK constellation; the\n");
+    fprintf(fp, "// caller drives V(i_in) and V(q_in) with the PAM-\n");
+    fprintf(fp, "// shaped symbol streams (e.g. via writeVerilogASource\n");
+    fprintf(fp, "// composed in the user's SPICE netlist).\n");
+    fprintf(fp, "//\n");
+    fprintf(fp, "\n");
+    fprintf(fp, "`include \"disciplines.vams\"\n\n");
+    fprintf(fp, "module %s(i_in, q_in, out);\n", modname);
+    fprintf(fp, "    input i_in, q_in;\n    output out;\n");
+    fprintf(fp, "    electrical i_in, q_in, out;\n");
+    fprintf(fp, "    parameter real fc  = %.10g from (0:inf);\n", fc);
+    fprintf(fp, "    parameter real amp = %.10g;\n", amp);
+    fprintf(fp, "    analog begin\n");
+    fprintf(fp, "        V(out) <+ amp * (\n");
+    fprintf(fp, "            V(i_in) * cos(2.0 * `M_PI * fc * $abstime) -\n");
+    fprintf(fp, "            V(q_in) * sin(2.0 * `M_PI * fc * $abstime)\n");
+    fprintf(fp, "        );\n");
+    fprintf(fp, "    end\n");
+    fprintf(fp, "endmodule\n");
+    fclose(fp);
+    return 1.0;
+}
+
 /* Tier-3 — Continuous state-space (SISO) Verilog-A export.
  *
  *   writeVerilogASS(A, B, C, D, filename)
