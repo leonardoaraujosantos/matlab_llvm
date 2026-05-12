@@ -5984,14 +5984,33 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
       if (N && N->Ref && N->Ref->Kind == BindingKind::Builtin &&
           !C.Args.empty() && C.Args[0] &&
           N->Name != "disp" && N->Name != "step") {
+        /* The first-arg class can come from either a NameExpr
+         * (most common: `design(d, freq)` where d is a class-pinned
+         * variable) OR a class ctor call (`design(AntDipole(), f)`
+         * — pin comes from the ctor's class).  Same shape as the
+         * Resolver's `argPin` helper. */
+        const ClassDef *FirstCls = nullptr;
         if (auto *AN = dynamic_cast<const NameExpr *>(C.Args[0])) {
-          if (AN->Ref && AN->Ref->PinnedClass) {
-            const ClassDef *Owner = nullptr;
-            for (const ClassDef *CC = AN->Ref->PinnedClass; CC; CC = CC->Super) {
-              for (const Function *Mm : CC->Methods)
-                if (Mm && Mm->Name == N->Name) { Owner = CC; break; }
-              if (Owner) break;
-            }
+          if (AN->Ref) FirstCls = AN->Ref->PinnedClass;
+        }
+        if (!FirstCls) {
+          if (auto *CI = dynamic_cast<const CallOrIndex *>(C.Args[0])) {
+            if (auto *NX = dynamic_cast<const NameExpr *>(CI->Callee))
+              if (NX->Ref && NX->Ref->Kind == BindingKind::Class &&
+                  NX->Ref->ClassDef)
+                FirstCls = NX->Ref->ClassDef;
+          }
+        }
+        if (FirstCls) {
+          const ClassDef *Owner = nullptr;
+          const Function *Method = nullptr;
+          for (const ClassDef *CC = FirstCls; CC; CC = CC->Super) {
+            for (const Function *Mm : CC->Methods)
+              if (Mm && Mm->Name == N->Name) {
+                Owner = CC; Method = Mm; break;
+              }
+            if (Owner) break;
+          }
             if (Owner) {
               llvm::SmallVector<mlir::Value, 4> Args;
               for (const Expr *A : C.Args) if (A) Args.push_back(lowerExpr(*A));
@@ -6004,15 +6023,32 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
                * void — pass through the call-site's expected type RT
                * when concrete and default to NoneType otherwise.  The
                * runtime helpers + downstream passes handle the type
-               * widening if needed. */
-              mlir::Type ResTy = mlir::isa<mlir::NoneType>(RT)
-                                     ? (mlir::Type)mlir::NoneType::get(&MCtx)
-                                     : RT;
+               * widening if needed.  EXCEPT: when the method's first
+               * output is class-pinned (e.g. `design(antenna, freq)`
+               * returning a fresh AntDipole), the result must flow
+               * as `!llvm.ptr` so the LHS slot retypes and the
+               * downstream method-dispatch on it sees a class
+               * instance.  Without this, `d = design(...)` stores a
+               * `none`-typed value into a class-pinned slot and the
+               * next `antennaGain(d, ...)` reads `d` as `none` and
+               * misdispatches. */
+              mlir::Type ResTy;
+              auto PtrTyCM = mlir::LLVM::LLVMPointerType::get(&MCtx);
+              bool ReturnsClass =
+                  Method && !Method->OutputRefs.empty() &&
+                  Method->OutputRefs.front() &&
+                  Method->OutputRefs.front()->PinnedClass != nullptr;
+              if (ReturnsClass) {
+                ResTy = (mlir::Type)PtrTyCM;
+              } else if (mlir::isa<mlir::NoneType>(RT)) {
+                ResTy = (mlir::Type)mlir::NoneType::get(&MCtx);
+              } else {
+                ResTy = RT;
+              }
               return emitUnreg("matlab.call", Args, ResTy, L, {Cal});
             }
           }
         }
-      }
 
       /* disp(obj.Field) where `obj` is a class instance — route to
        * the runtime-dispatched `matlab_obj_disp_field` so the

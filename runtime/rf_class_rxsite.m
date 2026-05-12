@@ -32,6 +32,15 @@ classdef RxSite < handle
             obj.SystemLoss = 0.0;
         end
 
+        function show(rx)
+            % Text-only site summary — stand-in for MathWorks `show(rx)`.
+            disp('--- RxSite ---');
+            disp(rx.Name);
+            disp(rx.Latitude);
+            disp(rx.Longitude);
+            disp(rx.AntennaHeight);
+        end
+
         function ss = sigstrength(rx, tx, pm)
             % Received signal strength in dBm.  Inter-procedural
             % class pinning in the Resolver (see lib/Sema/Resolver.cpp

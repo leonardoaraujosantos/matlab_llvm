@@ -4424,6 +4424,18 @@ bool TensorLowering::rewriteBuiltinCalls() {
        * door for cases that don't go through Sema. */
       {"matlab_prop_sigstrength", "matlab_prop_sigstrength",
                                   0, "ppp"},
+      /* `siteviewer(...)` — text-only stub.  Returns 0.  Lets
+       * MathWorks tutorial code with `viewer = siteviewer;` calls
+       * compile cleanly even though we have no GUI. */
+      {"siteviewer", "matlab_prop_siteviewer_stub", 0, ""},
+      /* Translate a PropagationModel.Kind string to the integer
+       * model code used by coverageGrid / coverageGridMulti.
+       * Called from the `coverage(tx, pm)` method body. */
+      {"propKindToModelCode", "matlab_prop_kind_to_model_code", 0, "p"},
+      /* antennaGain(ant, freq) — peak gain dBi.  Today returns the
+       * textbook broadside value; full angle-dependent pattern
+       * lookup lands with ANT-Tier-2 wire-MoM. */
+      {"antennaGain", "matlab_prop_antenna_gain", 0, "pf"},
       /* === Communications Toolbox Tier-1 base layer ===
        * docs/comm_toolbox_roadmap.md §2. runtime/runtime_comm.cpp.
        */

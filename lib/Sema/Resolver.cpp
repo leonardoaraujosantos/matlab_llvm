@@ -154,6 +154,17 @@ void Resolver::registerBuiltins() {
      * `coverage(tx, pm, ...)`, `show(site)`.  Same function-style
      * dispatch on a class-pinned first arg. */
     "pathloss", "los", "link", "sigstrength", "coverage", "show",
+    /* `siteviewer(...)` — MathWorks viewer launcher.  Text-only
+     * stub here (no map); does nothing and returns 0. */
+    "siteviewer",
+    /* `design(antenna, freq)` — auto-resize a catalog antenna for
+     * resonance at a given frequency.  Method-dispatch on the
+     * antenna class. */
+    "design",
+    /* `antennaGain(antenna, freq)` — broadside peak gain in dBi.
+     * Class-id dispatch in the runtime selects the textbook value
+     * (dipole / monopole / etc.). */
+    "antennaGain",
     /* §3.3 / §3.4 follow-ons — Tier-2 leftovers. impulse / initial
      * for time-domain free response; freqresp / nyquist / allmargin
      * for frequency-domain analysis. Matrix-arg companions
@@ -289,6 +300,7 @@ void Resolver::registerBuiltins() {
      * `runtime/rf_class_propagationmodel.m`. */
     "propPathlossDispatch",
     "propLosSites",
+    "propKindToModelCode",
     /* COMM Tier-1 (docs/comm_toolbox_roadmap.md §2). Function-form
      * base layer; runtime/runtime_comm.cpp. Numeric tag dispatch.
      * `rng(seed)` uses the existing `rng` name (also already
@@ -504,6 +516,45 @@ void Resolver::resolve(TranslationUnit &TU) {
    * The pin is read at lowering time (FieldAccess / CallOrIndex
    * dispatch sites both consult Binding->PinnedClass), so setting
    * it post-resolve still affects codegen. */
+  /* Recursive class-pin extractor — same shape as the existing
+   * `pinnedOfRhs` for LHS-pinning above, but exposed here as a
+   * local helper so the IP propagation can ask "is this arg
+   * class-pinned?" for ANY expression shape (NameExpr,
+   * ctor call, method-style call returning a class, etc.). */
+  std::function<const ClassDef *(const Expr *)> argPin =
+      [&argPin](const Expr *RE) -> const ClassDef * {
+    if (!RE) return nullptr;
+    if (auto *NE = dynamic_cast<const NameExpr *>(RE)) {
+      return NE->Ref ? NE->Ref->PinnedClass : nullptr;
+    }
+    if (auto *CX = dynamic_cast<const CallOrIndex *>(RE)) {
+      if (auto *NX = dynamic_cast<const NameExpr *>(CX->Callee)) {
+        /* Direct constructor call: ClassName(args) → that class. */
+        if (NX->Ref && NX->Ref->Kind == BindingKind::Class &&
+            NX->Ref->ClassDef) return NX->Ref->ClassDef;
+        /* Function-style class-method dispatch returning a class
+         * instance — `design(antenna, freq)` returns an AntDipole,
+         * `clone(obj)` returns the same class.  Resolve via the
+         * first-arg class + method-name lookup, then read the
+         * method's first output's PinnedClass. */
+        if (NX->Ref && NX->Ref->Kind == BindingKind::Builtin &&
+            !CX->Args.empty()) {
+          const ClassDef *FirstCls = argPin(CX->Args[0]);
+          if (FirstCls) {
+            for (const ClassDef *CC = FirstCls; CC; CC = CC->Super) {
+              for (Function *M : CC->Methods) {
+                if (!M || M->Name != NX->Name) continue;
+                if (!M->OutputRefs.empty() && M->OutputRefs.front() &&
+                    M->OutputRefs.front()->PinnedClass)
+                  return M->OutputRefs.front()->PinnedClass;
+              }
+            }
+          }
+        }
+      }
+    }
+    return nullptr;
+  };
   auto propagateOne = [&](const CallOrIndex *C) -> bool {
     if (!C || !C->Callee || C->Args.empty()) return false;
     auto *N = dynamic_cast<const NameExpr *>(C->Callee);
@@ -517,27 +568,34 @@ void Resolver::resolve(TranslationUnit &TU) {
        * class-pinned and the class (or any ancestor) has a method
        * with the same name as the callee, the lowering routes there.
        * Mirror the same lookup here so pinning propagates. */
-      if (auto *A0 = dynamic_cast<const NameExpr *>(C->Args[0])) {
-        if (A0->Ref && A0->Ref->PinnedClass) {
-          const ClassDef *Cls = A0->Ref->PinnedClass;
-          for (const ClassDef *CC = Cls; CC; CC = CC->Super) {
-            for (Function *M : CC->Methods)
-              if (M && M->Name == N->Name) { Callee = M; break; }
-            if (Callee) break;
-          }
+      const ClassDef *FirstCls = argPin(C->Args[0]);
+      if (FirstCls) {
+        for (const ClassDef *CC = FirstCls; CC; CC = CC->Super) {
+          for (Function *M : CC->Methods)
+            if (M && M->Name == N->Name) { Callee = M; break; }
+          if (Callee) break;
         }
       }
     }
     if (!Callee) return false;
     bool Changed = false;
     size_t NArgs = C->Args.size();
+    if (getenv("MATLABC_DBG_IP_PIN")) {
+      fprintf(stderr, "[ip-pin] %s(", std::string(N->Name).c_str());
+      for (size_t i = 0; i < NArgs; ++i) {
+        const ClassDef *Pin = argPin(C->Args[i]);
+        const char *p = Pin ? std::string(Pin->Name).c_str() : "-";
+        fprintf(stderr, "%s%s", i==0?"":",", p);
+      }
+      fprintf(stderr, ") → %s\n", std::string(Callee->Name).c_str());
+    }
     for (size_t i = 0; i < NArgs && i < Callee->ParamRefs.size(); ++i) {
       if (!C->Args[i]) continue;
-      auto *A = dynamic_cast<const NameExpr *>(C->Args[i]);
-      if (!A || !A->Ref || !A->Ref->PinnedClass) continue;
+      const ClassDef *Pin = argPin(C->Args[i]);
+      if (!Pin) continue;
       Binding *PB = Callee->ParamRefs[i];
       if (!PB || PB->PinnedClass) continue;
-      PB->PinnedClass = A->Ref->PinnedClass;
+      PB->PinnedClass = const_cast<ClassDef *>(Pin);
       Changed = true;
     }
     return Changed;
@@ -571,8 +629,31 @@ void Resolver::resolve(TranslationUnit &TU) {
       return;
     }
   };
+  /* Propagate method-return class pin back to caller LHS.  When
+   * `d = design(AntDipole(), f)` is processed, the script body
+   * resolves before the method bodies, so at script-resolve time
+   * `design`'s OutputRefs[0]->PinnedClass is null.  After all
+   * method bodies are resolved (and the inner `r = AntDipole(...)`
+   * pinned `r` to AntDipole), this pass re-runs pinnedOfRhs on
+   * AssignStmt RHS expressions and updates the LHS binding's
+   * PinnedClass accordingly. */
+  auto propagateLhsPin = [&](const AssignStmt *A, bool &Changed) {
+    if (!A || !A->RHS) return;
+    const ClassDef *Pin = argPin(A->RHS);
+    if (!Pin) return;
+    for (Expr *L : A->LHS) {
+      if (auto *LN = dynamic_cast<NameExpr *>(L)) {
+        if (LN->Ref && !LN->Ref->PinnedClass &&
+            LN->Ref->Kind != BindingKind::Class) {
+          LN->Ref->PinnedClass = const_cast<ClassDef *>(Pin);
+          Changed = true;
+        }
+      }
+    }
+  };
   walkStmt = [&](const Stmt &S, bool &Changed) {
     if (auto *A = dynamic_cast<const AssignStmt *>(&S)) {
+      propagateLhsPin(A, Changed);
       for (Expr *L : A->LHS) if (L) walkExpr(*L, Changed);
       if (A->RHS) walkExpr(*A->RHS, Changed);
       return;
@@ -832,6 +913,30 @@ void Resolver::resolveStmt(Stmt &St, Scope *S) {
         if (auto *NX = dynamic_cast<NameExpr *>(CX->Callee)) {
           if (NX->Ref && NX->Ref->Kind == BindingKind::Class &&
               NX->Ref->ClassDef) return NX->Ref->ClassDef;
+          /* Function-style class-method dispatch returning a fresh
+           * class instance — e.g. `design(antenna, freq)` returning
+           * an AntDipole.  When the callee is a builtin name AND
+           * the first arg is class-pinned AND that class has a
+           * method with the matching name AND the method's first
+           * output binding is class-pinned, propagate that pin.
+           * Covers `design(AntDipole, f)` / `clone(obj)` / etc. */
+          if (NX->Ref && NX->Ref->Kind == BindingKind::Builtin &&
+              !CX->Args.empty()) {
+            ClassDef *Arg0Cls = pinnedOfRhs(CX->Args[0]);
+            if (Arg0Cls) {
+              for (ClassDef *CC = Arg0Cls; CC; CC = CC->Super) {
+                for (Function *M : CC->Methods) {
+                  if (!M || M->Name != NX->Name) continue;
+                  if (!M->OutputRefs.empty() && M->OutputRefs.front() &&
+                      M->OutputRefs.front()->PinnedClass)
+                    return M->OutputRefs.front()->PinnedClass;
+                  /* Method exists but output isn't pinned — fall
+                   * through.  The CST-special-case block below
+                   * handles `c2d(sys, Ts)` etc. */
+                }
+              }
+            }
+          }
           /* §3.1 / Tier-4 — class-returning model-object short forms.
            * When the first arg is class-pinned and the callee is a
            * known short-form name, the result is the same class.

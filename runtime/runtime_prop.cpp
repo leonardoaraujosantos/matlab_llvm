@@ -1336,6 +1336,74 @@ extern "C" double matlab_prop_los_sites(
  */
 extern "C" double matlab_obj_get_f64(matlab_obj *o, const char *name, int64_t len);
 extern "C" void *matlab_obj_get_string(matlab_obj *o, const char *name, int64_t len);
+/* Translate a PropagationModel `Kind` string to the integer model
+ * code used by `coverageGrid` / `coverageGridMulti`.  Codes mirror
+ * the runtime-side `path_loss_dispatch` switch:
+ *   0 = FSPL                 (default)
+ *   1 = Hata urban           (matches 'hata')
+ *   2 = COST-231             (matches 'cost231')
+ *   3 = Egli                 (matches 'egli')
+ *   4 = ECC-33               (matches 'ecc33')
+ *   5 = SUI                  (matches 'sui')
+ *   6 = Ericsson 9999        (matches 'ericsson9999')
+ *   7 = Longley-Rice (ITM)   (matches 'longley-rice', 'itm')
+ *
+ * Unknown kinds fall through to FSPL (0) with no warning.  The
+ * companion function-form `propPathlossDispatch` warns; the
+ * coverage path is silent because it runs per-cell. */
+extern "C" double matlab_prop_kind_to_model_code(matlab_string_s *kind) {
+    kind_view_ V = ml_str_view(kind);
+    if (V.len <= 0) return 0.0;
+    if (ml_kind_eq(V.data, V.len, "freespace") ||
+        ml_kind_eq(V.data, V.len, "fspl")) return 0.0;
+    if (ml_kind_eq(V.data, V.len, "hata")) return 1.0;
+    if (ml_kind_eq(V.data, V.len, "cost231")) return 2.0;
+    if (ml_kind_eq(V.data, V.len, "egli")) return 3.0;
+    if (ml_kind_eq(V.data, V.len, "ecc33")) return 4.0;
+    if (ml_kind_eq(V.data, V.len, "sui")) return 5.0;
+    if (ml_kind_eq(V.data, V.len, "ericsson9999")) return 6.0;
+    if (ml_kind_eq(V.data, V.len, "longleyrice") ||
+        ml_kind_eq(V.data, V.len, "itm")) return 7.0;
+    return 0.0;
+}
+
+/* antennaGain(antenna, freq) — peak gain in dBi for a catalog
+ * antenna at the requested frequency.  Today returns the textbook
+ * broadside / boresight peak value; angle-dependent pattern lookup
+ * lands with ANT-Tier-2 wire-MoM solver.
+ *
+ * Closed-form peak gains:
+ *   AntDipole   → 2.15 dBi   (half-wave dipole, broadside)
+ *   AntMonopole → 5.15 dBi   (quarter-wave monopole over an
+ *                             infinite GP — half-wave dipole +3 dB
+ *                             via image theory)
+ *   anything else / null    → 0 dBi (isotropic fallback)
+ *
+ * The `freq` arg is accepted for forward-compat with the full
+ * pattern lookup (which depends on freq via λ-scaled element
+ * length).  v1 ignores it. */
+extern "C" const char *matlab_dbg_class_name(int32_t class_id, int64_t *len_out);
+extern "C" double matlab_prop_antenna_gain(matlab_obj *ant, double freq_hz) {
+    (void)freq_hz;
+    if (!ant) return 0.0;
+    int64_t cn_len = 0;
+    const char *cn = matlab_dbg_class_name(ant->class_id, &cn_len);
+    if (!cn || cn_len <= 0) return 0.0;
+    if (cn_len == 9 && memcmp(cn, "AntDipole", 9) == 0) return 2.15;
+    if (cn_len == 11 && memcmp(cn, "AntMonopole", 11) == 0) return 5.15;
+    return 0.0;
+}
+
+/* siteviewer() — MathWorks viewer launcher.  No GUI here; print a
+ * one-line stand-in and return 0.0 (the user's `viewer = siteviewer
+ * (...)` assignment captures a sentinel value the rest of the code
+ * usually only uses for `show(tx, 'Viewer', viewer)`-style calls
+ * which we currently ignore the kwarg on). */
+extern "C" double matlab_prop_siteviewer_stub() {
+    printf("[siteviewer stub: no GUI; site views skipped]\n");
+    return 0.0;
+}
+
 extern "C" double matlab_prop_sigstrength(matlab_obj *rx, matlab_obj *tx, matlab_obj *pm) {
     if (!rx || !tx || !pm) return 0.0;
     double tx_lat = matlab_obj_get_f64(tx, "Latitude", 8);

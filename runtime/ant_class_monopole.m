@@ -38,5 +38,16 @@ classdef AntMonopole < handle
                 obj.GroundPlaneLength = 2.0;
             end
         end
+
+        function r = design(ant, freq_hz)
+            % Quarter-wave resonance: Height = c / (4 * freq).  The
+            % ground plane size scales to ~1 wavelength (typical
+            % catalog ratio).  Same API as MathWorks `design`.
+            c = 299792458.0;
+            new_h = c ./ (4.0 .* freq_hz);
+            new_width = new_h .* 0.05;
+            new_gp = c ./ freq_hz;
+            r = AntMonopole(new_h, new_width, new_gp);
+        end
     end
 end

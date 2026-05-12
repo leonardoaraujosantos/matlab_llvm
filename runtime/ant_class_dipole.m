@@ -38,5 +38,16 @@ classdef AntDipole < handle
                 obj.FeedOffset = 0.0;
             end
         end
+
+        function r = design(ant, freq_hz)
+            % Half-wave resonance: Length = c / (2 * freq).  Width
+            % scales proportionally (the wire-radius-to-length ratio
+            % stays constant at the catalog default of 0.025).  Same
+            % API as MathWorks `design(antennaObj, freq)`.
+            c = 299792458.0;
+            new_len = c ./ (2.0 .* freq_hz);
+            new_width = new_len .* 0.025;
+            r = AntDipole(new_len, new_width, ant.FeedOffset);
+        end
     end
 end
