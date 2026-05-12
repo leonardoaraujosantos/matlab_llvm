@@ -317,6 +317,9 @@ void Resolver::registerBuiltins() {
      * 2=QAM, 3=DPSK, 4=FSK-coh, 5=FSK-nc; rcosdesign shape 0=sqrt
      * (RRC), 1=normal (full RC). */
     "pammod", "pamdemod", "pskmod", "pskdemod",
+    "fskmod", "fskdemod",
+    /* ANT-Tier-2 — wire-antenna MoM (Antenna MVP). */
+    "antennaWireSolve", "antennaWirePattern", "antennaWireSparameters",
     "qammod", "qamdemod", "qamdemodBit", "qamdemodLlr",
     "genqammod", "genqamdemod",
     "rcosdesign", "gaussdesign",

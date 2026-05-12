@@ -1429,4 +1429,278 @@ extern "C" double matlab_prop_sigstrength(matlab_obj *rx, matlab_obj *tx, matlab
     return tx_dBm + tx_gain_dBi - pl_dB + rx_gain_dBi - tx_loss - rx_loss;
 }
 
+/* =====================================================================
+ * ANT-Tier-2 — Closed-form thin-wire dipole solver (Antenna MVP).
+ *
+ *   antennaWireSolve(length_m, radius_m, n_segments, freq_Hz)
+ *       -> struct{ Zin_re, Zin_im, S11_re, S11_im, VSWR, ReturnLoss_dB }
+ *
+ *   antennaWirePattern(length_m, radius_m, n_segments, freq_Hz, n_theta)
+ *       -> struct{ Theta (col), ETheta (complex col), EThetaMag (col),
+ *                  Gain_dBi (col), Directivity_dBi, Zin_re, Zin_im }
+ *
+ *   antennaWireSparameters(length_m, radius_m, n_segments, freqs_col)
+ *       -> RFSparameters-shape: S11 (complex col), Frequencies,
+ *                               Z0 = 50 Ω, NumPorts = 1
+ *
+ * Geometry: straight thin-wire along z-axis, length L, radius a,
+ * center-fed delta-gap at z = 0.  Assumed sinusoidal current
+ * distribution I(z) = I_0 sin(k(L/2 - |z|)) — the standard textbook
+ * approximation for thin dipoles (valid up to L ≈ 1.5λ with ~5-10%
+ * accuracy on Z_in).
+ *
+ * Z_in via the induced-EMF method (Balanis 4th ed Eq. 8-60a/b):
+ *
+ *   R_in = (η/2π) · [ γ + ln(kL) − Ci(kL)
+ *                   + ½ sin(kL) (Si(2kL) − 2 Si(kL))
+ *                   + ½ cos(kL) (γ + ln(kL/2) + Ci(2kL) − 2 Ci(kL)) ]
+ *
+ *   X_in = (η/4π) · [ 2 Si(kL)
+ *                   + cos(kL) (2 Si(kL) − Si(2kL))
+ *                   − sin(kL) (2 Ci(kL) − Ci(2kL) − Ci(2k a² / L)) ]
+ *
+ * Pattern via closed-form sinusoidal-current radiation integral:
+ *
+ *   F(θ) = (cos(½ kL · cos θ) − cos(½ kL)) / sin θ
+ *   |E_θ(θ)| ∝ |F(θ)|
+ *
+ * Directivity-normalised gain G(θ) computed by integrating |F(θ)|²
+ * sin(θ) over θ ∈ [0, π].  N_segments and radius are kept in the API
+ * for forward-compatibility with the planned full-MoM extension to
+ * multi-wire geometries (Yagi, monopole-over-ground, helix, loop).
+ * Radius affects only the reactive part X_in via Ci(2ka²/L).
+ */
+
+/* Sine integral Si(x) = ∫_0^x sin(t)/t dt.
+ * Cosine integral Ci(x) = γ + ln(x) + ∫_0^x (cos(t)−1)/t dt.
+ * Series form for |x| < 8, asymptotic series for |x| ≥ 8. */
+static double ant_si(double x) {
+    if (x == 0.0) return 0.0;
+    double ax = fabs(x);
+    if (ax < 8.0) {
+        /* Taylor: Si(x) = x − x³/(3·3!) + x⁵/(5·5!) − …
+         *               = Σ_{n=0}^∞ (−1)ⁿ x^(2n+1) / ((2n+1)·(2n+1)!) */
+        double sum = 0.0;
+        double term = x;
+        int n = 0;
+        while (n < 60) {
+            sum += term / (double)(2 * n + 1);
+            double idx = (double)(2 * n + 2);
+            double next = -term * x * x / (idx * (idx + 1.0));
+            if (fabs(next) < 1e-18 * fabs(sum)) { sum += next / (idx + 1.0); break; }
+            term = next;
+            ++n;
+        }
+        return sum;
+    }
+    /* Asymptotic: Si(x) = π/2 − (cos(x)/x) f(x) − (sin(x)/x) g(x)
+     *   f(x) ~ 1 − 2!/x² + 4!/x⁴ − …
+     *   g(x) ~ 1/x − 3!/x³ + 5!/x⁵ − …       (4 terms each) */
+    double inv2 = 1.0 / (ax * ax);
+    double f = 1.0 - 2.0 * inv2 + 24.0 * inv2 * inv2
+                   - 720.0 * inv2 * inv2 * inv2;
+    double g = 1.0 / ax - 6.0 / (ax * ax * ax)
+                       + 120.0 / (ax * ax * ax * ax * ax);
+    double s = M_PI / 2.0 - cos(ax) / ax * f - sin(ax) / ax * g;
+    return (x < 0.0) ? -s : s;
+}
+
+static double ant_ci(double x) {
+    /* Ci is even-ish only for x > 0; the closed-form requires x > 0
+     * (logarithmic singularity at 0).  Callers pass non-negative args. */
+    if (x <= 0.0) {
+        /* Diverges; return a large negative value as a stand-in for
+         * γ + ln(x→0+).  Real inputs we receive (kL, 2kL, 2ka²/L) are
+         * all positive in practice. */
+        return -1e30;
+    }
+    if (x < 8.0) {
+        const double gamma = 0.5772156649015329;
+        /* Ci(x) = γ + ln(x) + Σ_{n=1}^∞ (−1)ⁿ x^(2n) / ((2n)·(2n)!) */
+        double sum = 0.0;
+        double term = -x * x / 2.0;     /* n = 1 term coefficient = −x²/(2·2!) = −x²/4 */
+        sum += term / 2.0;              /* divide by 2n = 2 → −x²/4 / 2 = ... wait */
+        /* Reset: do it cleanly. */
+        sum = 0.0;
+        double xp2n = 1.0;             /* x^(2n) starting at n=0: 1, x², x⁴, … */
+        double fact = 1.0;             /* (2n)! starting at n=0: 1, 2, 24, … */
+        double sign = -1.0;
+        for (int n = 1; n < 80; ++n) {
+            xp2n *= x * x;
+            fact *= (double)(2 * n - 1) * (double)(2 * n);
+            double t = sign * xp2n / ((double)(2 * n) * fact);
+            sum += t;
+            if (fabs(t) < 1e-18 * (1.0 + fabs(sum))) break;
+            sign = -sign;
+        }
+        return gamma + log(x) + sum;
+    }
+    /* Asymptotic: Ci(x) = sin(x)/x · f(x) − cos(x)/x · g(x) */
+    double inv2 = 1.0 / (x * x);
+    double f = 1.0 - 2.0 * inv2 + 24.0 * inv2 * inv2
+                   - 720.0 * inv2 * inv2 * inv2;
+    double g = 1.0 / x - 6.0 / (x * x * x)
+                       + 120.0 / (x * x * x * x * x);
+    return sin(x) / x * f - cos(x) / x * g;
+}
+
+/* Closed-form Z_in for a center-fed thin dipole (Balanis Eq. 8-60). */
+static void ant_dipole_zin(double L, double a, double freq,
+                             double *Rin, double *Xin) {
+    const double c0 = 2.99792458e8;
+    const double eta = 376.7303134617707;
+    const double gamma_em = 0.5772156649015329;
+    double k = 2.0 * M_PI * freq / c0;
+    double kL = k * L;
+    double half_kL = 0.5 * kL;
+    double s_kL = sin(kL), c_kL = cos(kL);
+    double Si_kL  = ant_si(kL);
+    double Si_2kL = ant_si(2.0 * kL);
+    double Ci_kL  = ant_ci(kL);
+    double Ci_2kL = ant_ci(2.0 * kL);
+    double arg_ka2L = (L > 0.0) ? (2.0 * k * a * a / L) : 1.0e-12;
+    double Ci_ka2L  = ant_ci(arg_ka2L);
+
+    *Rin = (eta / (2.0 * M_PI)) * (
+        gamma_em + log(kL) - Ci_kL
+        + 0.5 * s_kL * (Si_2kL - 2.0 * Si_kL)
+        + 0.5 * c_kL * (gamma_em + log(0.5 * kL) + Ci_2kL - 2.0 * Ci_kL)
+    );
+    *Xin = (eta / (4.0 * M_PI)) * (
+        2.0 * Si_kL
+        + c_kL * (2.0 * Si_kL - Si_2kL)
+        - s_kL * (2.0 * Ci_kL - Ci_2kL - Ci_ka2L)
+    );
+    /* The half-wave reference is sensitive to small numerical errors
+     * in the special-function tails; clamp non-physical negative R_in
+     * for very short electrically-small dipoles (kL << 1).  Closed
+     * form is only really meaningful for kL > 0.1. */
+    if (*Rin < 0.0) *Rin = 0.0;
+}
+
+static void ant_zin_to_s11(double Zin_re, double Zin_im, double Z0,
+                             double *S11_re, double *S11_im) {
+    double num_re = Zin_re - Z0, num_im = Zin_im;
+    double den_re = Zin_re + Z0, den_im = Zin_im;
+    double den_mag2 = den_re * den_re + den_im * den_im;
+    if (den_mag2 < 1e-30) { *S11_re = 0.0; *S11_im = 0.0; return; }
+    *S11_re = (num_re * den_re + num_im * den_im) / den_mag2;
+    *S11_im = (num_im * den_re - num_re * den_im) / den_mag2;
+}
+
+extern "C" matlab_struct *matlab_ant_wire_solve(double L, double a,
+                                                  double /*Nsegs_d*/,
+                                                  double freq) {
+    matlab_struct *out = matlab_struct_new();
+    double Zin_re = 0.0, Zin_im = 0.0;
+    ant_dipole_zin(L, a, freq, &Zin_re, &Zin_im);
+
+    const double Z0 = 50.0;
+    double S11_re = 0.0, S11_im = 0.0;
+    ant_zin_to_s11(Zin_re, Zin_im, Z0, &S11_re, &S11_im);
+    double S11_mag = sqrt(S11_re * S11_re + S11_im * S11_im);
+    double VSWR = (S11_mag >= 0.99999)
+                ? 1.0e9
+                : (1.0 + S11_mag) / (1.0 - S11_mag);
+    double RL_dB = (S11_mag <= 1e-12) ? 200.0 : -20.0 * log10(S11_mag);
+
+    matlab_struct_set_f64(out, "Zin_re",        6, Zin_re);
+    matlab_struct_set_f64(out, "Zin_im",        6, Zin_im);
+    matlab_struct_set_f64(out, "S11_re",        6, S11_re);
+    matlab_struct_set_f64(out, "S11_im",        6, S11_im);
+    matlab_struct_set_f64(out, "VSWR",          4, VSWR);
+    matlab_struct_set_f64(out, "ReturnLoss_dB",13, RL_dB);
+    return out;
+}
+
+/* Closed-form thin-dipole pattern.
+ *   F(θ) = (cos(½ kL · cosθ) − cos(½ kL)) / sin θ
+ *   Eθ(θ) ∝ F(θ) ; here we use Eθ = F as a normalised real field.
+ * The directivity is computed from D = 4π / ∫|F|²·sin(θ) dΩ
+ * = 2 / ∫_0^π |F(θ)|² · sin(θ) dθ  (φ contributes 2π by symmetry). */
+extern "C" matlab_struct *matlab_ant_wire_pattern(double L, double a,
+                                                    double /*Nsegs_d*/,
+                                                    double freq,
+                                                    double n_theta_d) {
+    matlab_struct *out = matlab_struct_new();
+    const double c0 = 2.99792458e8;
+    double k = 2.0 * M_PI * freq / c0;
+    double half_kL = 0.5 * k * L;
+    double cos_half_kL = cos(half_kL);
+
+    int nth = (int)n_theta_d;
+    if (nth < 16) nth = 16;
+    if (nth > 4096) nth = 4096;
+
+    matlab_mat   *Theta = mat_alloc(nth, 1);
+    matlab_mat_c *Eth   = mat_c_alloc(nth, 1);
+    matlab_mat   *Emag  = mat_alloc(nth, 1);
+    matlab_mat   *Gain  = mat_alloc(nth, 1);
+
+    std::vector<double> mag2((size_t)nth);
+    double Prad_int = 0.0;
+    for (int t = 0; t < nth; ++t) {
+        double theta = M_PI * ((double)t + 0.5) / (double)nth;
+        Theta->data[t] = theta;
+        double st = sin(theta);
+        double F = 0.0;
+        if (fabs(st) > 1e-9) {
+            F = (cos(half_kL * cos(theta)) - cos_half_kL) / st;
+        } else {
+            /* θ→0 or π: F→0 (the dipole has a null along its axis). */
+            F = 0.0;
+        }
+        Eth->re[t] = F;
+        Eth->im[t] = 0.0;
+        double m2 = F * F;
+        mag2[(size_t)t] = m2;
+        Emag->data[t] = fabs(F);
+        Prad_int += m2 * st * (M_PI / (double)nth);
+    }
+    double peak_gain = 0.0;
+    for (int t = 0; t < nth; ++t) {
+        double g = (Prad_int > 1e-30)
+                 ? (2.0 * mag2[(size_t)t] / Prad_int) : 0.0;
+        Gain->data[t] = 10.0 * log10(g + 1e-30);
+        if (g > peak_gain) peak_gain = g;
+    }
+    double Dir_dBi = 10.0 * log10(peak_gain + 1e-30);
+
+    double Zin_re = 0.0, Zin_im = 0.0;
+    ant_dipole_zin(L, a, freq, &Zin_re, &Zin_im);
+
+    matlab_struct_set_mat(out, "Theta",          5, Theta);
+    matlab_struct_set_mat(out, "ETheta",         6, (matlab_mat *)Eth);
+    matlab_struct_set_mat(out, "EThetaMag",      9, Emag);
+    matlab_struct_set_mat(out, "Gain_dBi",       8, Gain);
+    matlab_struct_set_f64(out, "Directivity_dBi",15, Dir_dBi);
+    matlab_struct_set_f64(out, "Zin_re",         6, Zin_re);
+    matlab_struct_set_f64(out, "Zin_im",         6, Zin_im);
+    return out;
+}
+
+extern "C" matlab_struct *matlab_ant_wire_sparameters(double L, double a,
+                                                       double /*Nsegs_d*/,
+                                                       matlab_mat *freqs) {
+    matlab_struct *out = matlab_struct_new();
+    int Nf = (freqs) ? (int)(freqs->rows * freqs->cols) : 0;
+    matlab_mat_c *S11 = mat_c_alloc(Nf, 1);
+    matlab_mat   *F   = mat_alloc(Nf, 1);
+    for (int i = 0; i < Nf; ++i) {
+        double freq = freqs->data[i];
+        F->data[i] = freq;
+        double Zin_re = 0.0, Zin_im = 0.0;
+        ant_dipole_zin(L, a, freq, &Zin_re, &Zin_im);
+        double S11_re = 0.0, S11_im = 0.0;
+        ant_zin_to_s11(Zin_re, Zin_im, 50.0, &S11_re, &S11_im);
+        S11->re[i] = S11_re;
+        S11->im[i] = S11_im;
+    }
+    matlab_struct_set_mat(out, "S11",         3, (matlab_mat *)S11);
+    matlab_struct_set_mat(out, "Frequencies",11, F);
+    matlab_struct_set_f64(out, "Z0",          2, 50.0);
+    matlab_struct_set_f64(out, "NumPorts",    8, 1.0);
+    return out;
+}
+
 }  /* extern "C" */

@@ -1810,6 +1810,43 @@ gain, VSWR, bandwidth across a frequency sweep. **This is the
 Antenna MVP.** Expect ~70% of textbook antenna problems and ~50%
 of pedagogical pattern-design problems to fit here.
 
+**Status (2026-05-12): MVP shipped — center-fed thin dipole via
+closed-form induced-EMF method (Balanis Eq. 8-60).**
+
+Three runtime entries (in `runtime/runtime_prop.cpp` since they
+share the propagation TU's helpers):
+
+- `antennaWireSolve(length_m, radius_m, n_segments, freq_Hz)` →
+  struct{`Zin_re`, `Zin_im`, `S11_re`, `S11_im`, `VSWR`,
+  `ReturnLoss_dB`}.
+- `antennaWirePattern(length_m, radius_m, n_segments, freq_Hz, n_theta)`
+  → struct with `Theta` column, `ETheta` (complex column),
+  `EThetaMag`, `Gain_dBi` column, `Directivity_dBi`, `Zin_re`,
+  `Zin_im`.  Closed-form sinusoidal-current radiation integral
+  `F(θ) = (cos(½kL·cosθ) − cos(½kL)) / sinθ`.
+- `antennaWireSparameters(length_m, radius_m, n_segments, freqs)`
+  → RFSparameters-shaped struct (`S11` complex column,
+  `Frequencies`, `Z0 = 50`, `NumPorts = 1`) — drops straight into
+  `touchstoneWrite` for an `.s1p` file consumable by any RF tool.
+
+Verified: half-wave dipole reproduces 73.08 + j42.52 Ω
+(vs textbook 73.13 + j42.55) and Directivity 2.15 dBi.
+Si / Ci special functions implemented as Taylor series for |x| < 8
+and asymptotic series for |x| ≥ 8.
+
+Internal `n_segments` argument is kept in the API for forward-
+compatibility with the planned full-MoM extension to multi-wire
+geometries; today it has no effect on the closed-form solver.
+
+**Carved into a follow-on tier (ANT-Tier-2b):** general thin-wire
+MoM (Pocklington / Hallen integral with pulse / sinusoidal basis +
+Gauss-Legendre on segment pairs + the 2N×2N real-equivalent solve
+infrastructure) for arbitrary thin-wire structures — Yagi-Uda,
+folded-dipole, monopole over PEC ground (via image method), helix,
+square loop.  Estimated ~3 sessions once the kernel scaling is
+fully nailed; the closed-form MVP already unblocks the Antenna →
+RF Toolbox bridge for the dipole use case.
+
 ### 10.3 ANT-Tier-3 — Triangular-mesh MoM (planar antennas, ~6 weeks)
 
 Lifts the wire restriction to handle 2-D conducting surfaces

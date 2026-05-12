@@ -641,6 +641,97 @@ matlab_mat *matlab_comm_pskdemod(matlab_mat_c *y, double Md,
     return out;
 }
 
+/* ===== §4.5 FSK — `fskmod` / `fskdemod` ================================== *
+ *
+ * Continuous-phase M-FSK modulation.  Symbol k with value m_k carries
+ * frequency offset
+ *     f_k = (m_k - (M-1)/2) * freqsep
+ * relative to baseband.  Output samples within symbol k are
+ *     y[k*nsamp + n] = exp(j * (phi_k + 2π f_k n / fs))
+ * with phi_k accumulated continuously across symbol boundaries so the
+ * waveform is phase-continuous.
+ *
+ * fskdemod uses per-symbol correlation against M candidate tones; the
+ * coherent variant scores by real part, the noncoherent variant by
+ * magnitude.  Standard 5-arg / 6-arg forms.
+ */
+
+matlab_mat_c *matlab_comm_fskmod(matlab_mat *x, double Md, double freqsep,
+                                  double nsamp_d, double fs) {
+    if (!x) return mat_c_alloc(0, 0);
+    int64_t M = (int64_t)Md;       if (M < 2) M = 2;
+    int64_t nsamp = (int64_t)nsamp_d; if (nsamp < 1) nsamp = 1;
+    if (fs <= 0.0) fs = 1.0;
+    int64_t Nsym = x->rows * x->cols;
+    int64_t Nout = Nsym * nsamp;
+    matlab_mat_c *out = mat_c_alloc(Nout, 1);
+    double phi = 0.0;
+    double half = ((double)M - 1.0) * 0.5;
+    for (int64_t k = 0; k < Nsym; ++k) {
+        double m = x->data[k];
+        if (m < 0) m = 0; else if (m > (double)(M - 1)) m = (double)(M - 1);
+        double f_off = (m - half) * freqsep;
+        double dphi = 2.0 * M_PI * f_off / fs;
+        for (int64_t n = 0; n < nsamp; ++n) {
+            double a = phi + dphi * (double)n;
+            out->re[k * nsamp + n] = cos(a);
+            out->im[k * nsamp + n] = sin(a);
+        }
+        phi += dphi * (double)nsamp;
+        /* Wrap phi to keep it bounded — accumulating over long sequences
+         * otherwise loses precision. */
+        if (phi > 2.0 * M_PI || phi < -2.0 * M_PI) {
+            phi = fmod(phi, 2.0 * M_PI);
+        }
+    }
+    return out;
+}
+
+matlab_mat *matlab_comm_fskdemod(matlab_mat_c *y, double Md, double freqsep,
+                                  double nsamp_d, double fs,
+                                  double mode_d) {
+    if (!y) return mat_alloc(0, 0);
+    int64_t M = (int64_t)Md;       if (M < 2) M = 2;
+    int64_t nsamp = (int64_t)nsamp_d; if (nsamp < 1) nsamp = 1;
+    if (fs <= 0.0) fs = 1.0;
+    int mode = (int)mode_d;  /* 0 = coherent, 1 = noncoherent */
+    int64_t Nout = (int64_t)(y->rows * y->cols);
+    int64_t Nsym = Nout / nsamp;
+    matlab_mat *out = mat_alloc(Nsym, 1);
+    double half = ((double)M - 1.0) * 0.5;
+    /* Precompute the M reference tones for one symbol period. */
+    std::vector<double> tone_re((size_t)(M * nsamp));
+    std::vector<double> tone_im((size_t)(M * nsamp));
+    for (int64_t m = 0; m < M; ++m) {
+        double f_off = ((double)m - half) * freqsep;
+        double dphi = 2.0 * M_PI * f_off / fs;
+        for (int64_t n = 0; n < nsamp; ++n) {
+            tone_re[(size_t)(m * nsamp + n)] = cos(dphi * (double)n);
+            tone_im[(size_t)(m * nsamp + n)] = sin(dphi * (double)n);
+        }
+    }
+    for (int64_t k = 0; k < Nsym; ++k) {
+        int64_t best_m = 0;
+        double best_score = -1e300;
+        for (int64_t m = 0; m < M; ++m) {
+            double cr = 0.0, ci = 0.0;
+            for (int64_t n = 0; n < nsamp; ++n) {
+                /* Correlate: y * conj(tone). */
+                double yr = y->re[k * nsamp + n];
+                double yi = y->im[k * nsamp + n];
+                double tr = tone_re[(size_t)(m * nsamp + n)];
+                double ti = tone_im[(size_t)(m * nsamp + n)];
+                cr += yr * tr + yi * ti;
+                ci += yi * tr - yr * ti;
+            }
+            double score = (mode == 0) ? cr : sqrt(cr * cr + ci * ci);
+            if (score > best_score) { best_score = score; best_m = m; }
+        }
+        out->data[k] = (double)best_m;
+    }
+    return out;
+}
+
 /* ===== §4.2 QAM — `qammod` / `qamdemod` ================================== *
  *
  * Square M-QAM (M = sqrt(M)^2): independent k=log2(sqrt(M)) PAM

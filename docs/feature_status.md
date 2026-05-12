@@ -509,7 +509,7 @@ Per-toolbox roadmap in [`comm_toolbox_roadmap.md`](comm_toolbox_roadmap.md) §3.
 
 ### RF Toolbox (subset)
 
-Per-toolbox plan in [`rf_toolbox_plan.md`](rf_toolbox_plan.md).  Two-commit closure arc: `44198e5` (Tier-1 + Tier-1 polish) and `56e324c` (Tier-2 generalizations).  All entries live in `runtime/runtime_rf.cpp` (~4 200 lines).  315 / 315 Run/ tests pass.
+Per-toolbox plan in [`rf_toolbox_plan.md`](rf_toolbox_plan.md).  Two-commit closure arc: `44198e5` (Tier-1 + Tier-1 polish) and `56e324c` (Tier-2 generalizations).  All entries live in `runtime/runtime_rf.cpp` (~4 200 lines).  319 / 319 Run/ tests pass.
 
 | Group | Function | Status | Notes |
 |---|---|:-:|---|
@@ -584,12 +584,12 @@ All implemented; see `docs/emit_c_cpp.md` for pipeline diagram.
 | Suite | Count | Status |
 |---|--:|:-:|
 | `frontend-tests` (Lexer, Parser, Sema, MIR, MLIR, Opt, Programs, Errors) | 77 | ✅ 77/77 |
-| `run-tests` (`-emit-llvm` + clang) | 315 | ✅ |
-| `run-tests-emit-c` (`-emit-c` + cc) | 315 | ✅ (RF Toolbox tests skip emit-C — they exercise runtime classdef wrappers + Touchstone I/O that only lower through MLIR / JIT) |
-| `run-tests-emit-cpp` (`-emit-cpp` + c++) | 315 | ✅ (RF Toolbox tests skip emit-C++ for the same reason) |
-| `run-tests-emit-c-strict` / `-cpp-strict` (-Wall -Wextra -Werror) | 315 | ✅ |
-| `run-tests-emit-python` (`-emit-python` + python3) | 315 | ✅ (RF Toolbox tests skip emit-Python; some `.stdout-python` overrides for numpy repr) |
-| `run-tests-emit-typescript` (`-emit-typescript` + bun) | 315 | ✅ (RF Toolbox tests skip emit-TypeScript; `string_concat_mixed` fixed in Phase 6.2; ~20 skipped for BigInt-vs-number coercion) |
+| `run-tests` (`-emit-llvm` + clang) | 319 | ✅ |
+| `run-tests-emit-c` (`-emit-c` + cc) | 319 | ✅ (RF Toolbox tests skip emit-C — they exercise runtime classdef wrappers + Touchstone I/O that only lower through MLIR / JIT) |
+| `run-tests-emit-cpp` (`-emit-cpp` + c++) | 319 | ✅ (RF Toolbox tests skip emit-C++ for the same reason) |
+| `run-tests-emit-c-strict` / `-cpp-strict` (-Wall -Wextra -Werror) | 319 | ✅ |
+| `run-tests-emit-python` (`-emit-python` + python3) | 319 | ✅ (RF Toolbox tests skip emit-Python; some `.stdout-python` overrides for numpy repr) |
+| `run-tests-emit-typescript` (`-emit-typescript` + bun) | 319 | ✅ (RF Toolbox tests skip emit-TypeScript; `string_concat_mixed` fixed in Phase 6.2; ~20 skipped for BigInt-vs-number coercion) |
 | `run-tests-sym` (`-emit-cpp` + SymPP, opt-in via `-DMATLAB_LLVM_WITH_SYM=ON`) | 4 | ✅ — Phase 6.2 sym_phase_a/b/b1/b2 fixtures; skip-if-missing-SymPP via rc=77 |
 | `emit-sv` golden tests + Verilator lint + Yosys synth | 76 | ✅ 76/76 |
 | `emit-sv-fail` synthesizability gate diagnostics | 10 | ✅ 10/10 |

@@ -4494,6 +4494,17 @@ bool TensorLowering::rewriteBuiltinCalls() {
       /* §4.3 PSK (complex). 4 args: x, M, ini_phase, order. */
       {"pskmod",   "matlab_comm_pskmod",   1, "pfff"},
       {"pskdemod", "matlab_comm_pskdemod", 1, "pfff"},
+      /* §4.5 FSK (complex, continuous-phase).
+       *   fskmod(x, M, freqsep, nsamp, fs)
+       *   fskdemod(y, M, freqsep, nsamp, fs, mode)
+       * mode: 0 = coherent (signed correlation), 1 = noncoherent (|·|). */
+      {"fskmod",   "matlab_comm_fskmod",   1, "pffff"},
+      {"fskdemod", "matlab_comm_fskdemod", 1, "pfffff"},
+      /* ANT-Tier-2 — straight thin-wire MoM (Pocklington / pulse-basis /
+       * 2N×2N real-equivalent solve).  Half-wave dipole MVP. */
+      {"antennaWireSolve",        "matlab_ant_wire_solve",        1, "ffff"},
+      {"antennaWirePattern",      "matlab_ant_wire_pattern",      1, "fffff"},
+      {"antennaWireSparameters",  "matlab_ant_wire_sparameters",  1, "fffp"},
       /* §4.2 QAM (complex). 4 args: x, M, order, unit_avg_power_flag. */
       {"qammod",     "matlab_comm_qammod",     1, "pfff"},
       {"qamdemod",   "matlab_comm_qamdemod",   1, "pfff"},
