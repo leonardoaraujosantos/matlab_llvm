@@ -3662,17 +3662,27 @@ void Lowerer::lowerLValueStore(const Expr &LHS, mlir::Value Rhs) {
        * kind=3 and downstream reads (via the same TypeName-aware
        * read path) come back as a matlab_string *. */
       bool IsStringField = false;
+      bool IsMatField = false;
       for (const ClassDef *CC = PinnedCls; CC; CC = CC->Super) {
         for (const auto &P : CC->Props)
           if (P.Name == F.Field) {
             if (P.TypeName == "string") IsStringField = true;
+            else if (P.TypeName == "complex" || P.TypeName == "matrix" ||
+                     P.TypeName == "double_col" || P.TypeName == "col")
+              IsMatField = true;
             break;
           }
-        if (IsStringField) break;
+        if (IsStringField || IsMatField) break;
       }
-      llvm::StringRef Callee = IsStringField ? "matlab_obj_set_string"
-                              : IsMatRhs    ? "matlab_obj_set_mat"
-                                            : "matlab_obj_set_f64";
+      /* If the property has a matrix-typed annotation, force the mat
+       * setter even when the Rhs source op carries an unresolved
+       * `none` type (common for fresh call_builtin results before
+       * type-propagation lands).  Without this, matrix RHS values get
+       * mis-routed to `matlab_obj_set_f64` which silently drops the
+       * payload. */
+      llvm::StringRef Callee = IsStringField        ? "matlab_obj_set_string"
+                              : (IsMatRhs || IsMatField) ? "matlab_obj_set_mat"
+                                                          : "matlab_obj_set_f64";
       mlir::NamedAttribute Cal(
           mlir::StringAttr::get(&MCtx, "callee"),
           mlir::StringAttr::get(&MCtx, Callee));
@@ -8138,24 +8148,28 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
        * flows through string-aware downstream sites (disp, concat,
        * etc.) rather than being mis-typed as f64. */
       bool IsString = false;
+      bool IsMatField = false;
       if (PinnedCls) {
         for (const ClassDef *CC = PinnedCls; CC; CC = CC->Super) {
           for (const auto &P : CC->Props)
             if (P.Name == F.Field) {
               if (P.TypeName == "string") IsString = true;
+              else if (P.TypeName == "complex" || P.TypeName == "matrix" ||
+                       P.TypeName == "double_col" || P.TypeName == "col")
+                IsMatField = true;
               break;
             }
-          if (IsString) break;
+          if (IsString || IsMatField) break;
         }
       }
-      llvm::StringRef Callee = IsString  ? "matlab_obj_get_string"
-                               : WantMat ? "matlab_obj_get_mat"
-                                         : "matlab_obj_get_f64";
+      llvm::StringRef Callee = IsString               ? "matlab_obj_get_string"
+                               : (WantMat || IsMatField) ? "matlab_obj_get_mat"
+                                                          : "matlab_obj_get_f64";
       mlir::NamedAttribute Cal(
           mlir::StringAttr::get(&MCtx, "callee"),
           mlir::StringAttr::get(&MCtx, Callee));
-      mlir::Type ResTy = (IsString || WantMat) ? (mlir::Type)PtrTy
-                                               : (mlir::Type)F64;
+      mlir::Type ResTy = (IsString || WantMat || IsMatField) ? (mlir::Type)PtrTy
+                                                              : (mlir::Type)F64;
       return emitUnreg("matlab.call_builtin", {Obj, NameV}, ResTy, L, {Cal});
     }
     mlir::Value SPtr = resolveStructBase(F.Base, L);

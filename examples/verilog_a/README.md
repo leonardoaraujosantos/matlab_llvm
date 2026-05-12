@@ -32,6 +32,35 @@ Mentor Eldo, Synopsys CustomSim, or Keysight ADS.
 | `biquad_ss_controllable.m` | Controllable canonical 2nd-order biquad with `ddt(x[i])`.    |
 | `butter3_observable.m`     | Observable-canonical 3rd-order Butterworth.                  |
 
+## Tier-4 — analog sources + comparators
+
+| File             | What it shows                                                       |
+|---|---|
+| `sine_source.m`  | 10 MHz sinusoidal source against `$abstime`.                        |
+| `comparator.m`   | Single-threshold comparator with `@(cross())` event transitions.    |
+| `schmitt.m`      | Schmitt trigger with hysteresis (dual `cross()` events).            |
+
+## Tier-5 — VCO / NCO
+
+| File             | What it shows                                                       |
+|---|---|
+| `vco.m`          | Voltage-controlled oscillator with `idtmod` phase accumulation.     |
+
+## Tier-6 — behavioral DAC
+
+| File             | What it shows                                                       |
+|---|---|
+| `dac_8bit.m`     | Pure-Verilog-A 8-bit DAC with parameterized `transition()` settling.|
+
+## Tier-7 — compact components + sensor models
+
+| File                  | What it shows                                                  |
+|---|---|
+| `diode.m`             | Ideal diode (Shockley equation), Is/Vt parameterized.          |
+| `opamp_saturated.m`   | Op-amp with smooth `tanh` saturation (good SPICE convergence). |
+| `rtd_pt100.m`         | Pt-100 RTD using Verilog-A's first-class `$temperature`.       |
+| `thermistor_ntc.m`    | NTC thermistor with β-equation temperature dependence.         |
+
 ## How to use
 
 ```bash

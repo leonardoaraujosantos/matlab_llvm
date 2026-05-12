@@ -100,6 +100,45 @@ matlab_mat_c *matlab_complex_scalar(double re, double im) {
     return A;
 }
 
+/* `complex(re_col, im_col)` for real-matrix args.  Combines element-
+ * wise into a single complex matlab_mat_c of the same shape.  Handles
+ * the three scalar/matrix broadcast variants too (scalar replicated to
+ * the matrix shape). */
+matlab_mat_c *matlab_complex_mm(matlab_mat *re, matlab_mat *im) {
+    if (!re && !im) return mat_c_alloc(0, 0);
+    int64_t r_re = re ? re->rows : 0, c_re = re ? re->cols : 0;
+    int64_t r_im = im ? im->rows : 0, c_im = im ? im->cols : 0;
+    int64_t R = (r_re >= r_im) ? r_re : r_im;
+    int64_t C = (c_re >= c_im) ? c_re : c_im;
+    matlab_mat_c *out = mat_c_alloc(R, C);
+    int64_t N = R * C;
+    for (int64_t k = 0; k < N; ++k) {
+        out->re[k] = (re && r_re * c_re > 0) ? re->data[k % (r_re * c_re)] : 0.0;
+        out->im[k] = (im && r_im * c_im > 0) ? im->data[k % (r_im * c_im)] : 0.0;
+    }
+    return out;
+}
+matlab_mat_c *matlab_complex_sm(double re_scalar, matlab_mat *im) {
+    if (!im) return matlab_complex_scalar(re_scalar, 0.0);
+    int64_t N = im->rows * im->cols;
+    matlab_mat_c *out = mat_c_alloc(im->rows, im->cols);
+    for (int64_t k = 0; k < N; ++k) {
+        out->re[k] = re_scalar;
+        out->im[k] = im->data[k];
+    }
+    return out;
+}
+matlab_mat_c *matlab_complex_ms(matlab_mat *re, double im_scalar) {
+    if (!re) return matlab_complex_scalar(0.0, im_scalar);
+    int64_t N = re->rows * re->cols;
+    matlab_mat_c *out = mat_c_alloc(re->rows, re->cols);
+    for (int64_t k = 0; k < N; ++k) {
+        out->re[k] = re->data[k];
+        out->im[k] = im_scalar;
+    }
+    return out;
+}
+
 /* Promote a real matrix to complex (zero imag). Used at binop sites where
  * one operand is complex and the other is real. Allocates a fresh
  * descriptor; the caller's real matrix is unchanged. */

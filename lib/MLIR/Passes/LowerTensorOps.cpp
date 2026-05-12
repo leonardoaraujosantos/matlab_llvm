@@ -4180,6 +4180,13 @@ bool TensorLowering::rewriteBuiltinCalls() {
       /* complex(re, im): build a 1x1 matlab_mat_c from two scalars,
        * mirroring the literal `re + im*i` lowering at line ~361. */
       {"complex",    "matlab_complex_scalar", 1, "ff"},
+      /* Matrix-arg variants for building a complex column from real
+       * re/im columns (or broadcasting a scalar against a column).
+       * Closes the `1i * real_col` ergonomics gap for ZPK / vector
+       * fitting / signal-processing workflows. */
+      {"complex",    "matlab_complex_mm",     1, "pp"},
+      {"complex",    "matlab_complex_sm",     1, "fp"},
+      {"complex",    "matlab_complex_ms",     1, "pf"},
       {"conj",       "matlab_conj_c",     1, "p"},
       {"real",       "matlab_real_c",     1, "p"},
       {"imag",       "matlab_imag_c",     1, "p"},
@@ -4802,6 +4809,20 @@ bool TensorLowering::rewriteBuiltinCalls() {
       /* Scalar-fold shim for 1-state systems where A / B / C collapse
        * to f64 at MIR (e.g. `A = [-1e6]` folds to scalar). */
       {"writeVerilogASS",      "matlab_rf_write_verilog_a_ss_fffd", 0, "ffffp"},
+      /* §9.5 Tier-4 — analog source / comparator / Schmitt-trigger
+       * Verilog-A export.  All take scalar parameters; no matrix args. */
+      {"writeVerilogASource",     "matlab_rf_write_verilog_a_source",     0, "fffp"},
+      {"writeVerilogAComparator", "matlab_rf_write_verilog_a_comparator", 0, "fffffp"},
+      {"writeVerilogASchmitt",    "matlab_rf_write_verilog_a_schmitt",    0, "ffffp"},
+      /* §9.5 Tier-5 — VCO via idtmod phase accumulation. */
+      {"writeVerilogAVCO",        "matlab_rf_write_verilog_a_vco",        0, "fffp"},
+      /* §9.5 Tier-6 — behavioral DAC (pure Verilog-A, analog-coded input). */
+      {"writeVerilogADAC",        "matlab_rf_write_verilog_a_dac",        0, "ffffp"},
+      /* §9.5 Tier-7 — compact analog components + sensor models. */
+      {"writeVerilogADiode",      "matlab_rf_write_verilog_a_diode",      0, "ffp"},
+      {"writeVerilogAOpAmp",      "matlab_rf_write_verilog_a_opamp",      0, "ffp"},
+      {"writeVerilogARTD",        "matlab_rf_write_verilog_a_rtd",        0, "fffp"},
+      {"writeVerilogAThermistor", "matlab_rf_write_verilog_a_thermistor", 0, "fffp"},
     };
 
     // Pick the first entry with name + arity + TYPE match so overloaded

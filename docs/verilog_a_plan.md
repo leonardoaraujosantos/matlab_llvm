@@ -796,7 +796,9 @@ RTD, thermistor, or photodiode.
 
 ## 12. Status
 
-**Tier-1, Tier-2, Tier-3 shipped** (2026-05-12, runtime-form).
+**Tiers 1, 2, 3, 4, 5, 6, 7 shipped** (2026-05-12, runtime-form) —
+plus two infrastructure fixes that unblocked the classdef path and
+ergonomic complex-column construction.
 
 The pragmatic implementation route shipped runtime entries called
 from MATLAB rather than a separate `-emit-verilog-a` CLI walker.
@@ -814,48 +816,77 @@ tier on top of the runtime entries.
 |---|---|---|---|
 | 1 | `writeVerilogA(mdl, filename)` | rationalfit struct (or RFRational instance, per the field-name fall-back) | Sum-of-poles module: real-pole 1st-order sections + complex-conjugate-pair biquads + `absdelay(sum, Delay)` wrap.  D + Delay parameterized. |
 | 2 | `writeVerilogATF(num, den, filename)` | num, den real columns in **descending** power of s (MATLAB tf convention).  Scalar-fold shims auto-promote `[1]` / scalars to 1×1 matrices. | Single `laplace_nd(V(in), {num...}, {den...})` contribution (coeffs reversed to ascending internally). |
-| 2 | `writeVerilogAZPK(zeros, poles, k, filename)` | zeros, poles as real or complex columns (complex pairs fold to real-coefficient quadratic factors); k scalar gain | Same `laplace_nd` shape; roots-to-polynomial multiplied out into real coefficients. |
+| 2 | `writeVerilogAZPK(zeros, poles, k, filename)` | zeros, poles as real or complex columns (complex pairs fold to real-coefficient quadratic factors); k scalar gain.  Build complex columns via `complex(re_col, im_col)` (added in the infra fix below). | Same `laplace_nd` shape; roots-to-polynomial multiplied out into real coefficients. |
 | 3 | `writeVerilogASS(A, B, C, D, filename)` | A: N×N, B: N×1, C: 1×N (SISO); D scalar.  Scalar-fold shim auto-promotes `[a]` / scalars to 1×1 for the N=1 case. | Per-state `ddt(x[i]) <+ ...` contribution + `V(out) <+ Σ Cⱼ x[j] + D V(in)` output equation.  Zero-coefficient terms are elided. |
+| 4 | `writeVerilogASource(kind, amp, freq_or_tau, filename)` | kind ∈ {0=sin, 1=cos, 2=square, 3=exp-decay}; amp / freq / τ scalars. | 1-output module driving V(out) from `$abstime`; square uses `sin(...) >= 0 ? amp : -amp`; exp-decay uses τ. |
+| 4 | `writeVerilogAComparator(vth, vh, vl, td, tr, filename)` | Threshold + rail voltages + settling-time scalars. | `@(cross(V(in)-vth, ±1))` event blocks toggling an integer state; `transition(state ? vh : vl, td, tr)` smoothing. |
+| 4 | `writeVerilogASchmitt(vhigh, vlow, vh, vl, filename)` | Hysteresis bounds + rail voltages. | Dual `@(cross())` events (rising at vhigh, falling at vlow). |
+| 5 | `writeVerilogAVCO(freq_center, gain, amp, filename)` | Center frequency, V→Hz tuning gain, output amplitude. | Phase accumulator via `idtmod(2*pi*(freq_center + gain*V(in)), 0, 2*pi)`; output `amp * sin(phase)`. |
+| 6 | `writeVerilogADAC(N, vref, td, tr, filename)` | Bit-resolution, reference voltage, settling timings. | `V(out) <+ transition(vref * V(code) / (2^N - 1), td, tr);` — pure Verilog-A; V(code) is analog-coded.  Bit-bus input deferred to Tier-11. |
+| 7 | `writeVerilogADiode(Is, Vt, filename)` | Saturation current + thermal voltage. | `I(p,n) <+ Is * (exp(V(p,n)/Vt) - 1)` — Shockley equation. |
+| 7 | `writeVerilogAOpAmp(gain, vsat, filename)` | Open-loop gain + saturation rail. | `V(out) <+ vsat * tanh(gain * V(vp, vn) / vsat)` — smooth saturation, convergence-friendly. |
+| 7 | `writeVerilogARTD(R0, alpha, T0, filename)` | RTD parameters: nominal resistance, temperature coefficient, reference temperature. | `R(T) = R0 * (1 + alpha * ($temperature - T0))`; current contribution `I(p,n) <+ V(p,n) / R(T)`.  Uses first-class `$temperature`. |
+| 7 | `writeVerilogAThermistor(R0, B, T0, filename)` | NTC thermistor parameters (β-equation form). | `R(T) = R0 * exp(B*(1/$temperature - 1/T0))`; current contribution as for RTD. |
 
 ### Tests
 
-10 new fixtures under `test/Run/`:
+21 fixtures under `test/Run/`:
 
-- `rf_writeva_basic.m`, `rf_writeva_complex.m`, `rf_writeva_delay.m` — Tier-1 (real-pole, complex-pair, delay path).
-- `rf_writeva_tf_rc_lowpass.m`, `rf_writeva_tf_biquad.m` — Tier-2 TF.
-- `rf_writeva_zpk_realpoles.m`, `rf_writeva_zpk_complex.m` — Tier-2 ZPK (real poles + complex pair via `rfPoles`).
-- `rf_writeva_ss_lp1.m`, `rf_writeva_ss_lp2.m`, `rf_writeva_ss_observer.m` — Tier-3 state-space.
+- Tier-1: `rf_writeva_basic.m`, `rf_writeva_complex.m`, `rf_writeva_delay.m`, `rf_writeva_classdef.m` (real-pole, complex-pair, delay, RFRational instance via the field-name fall-back).
+- Tier-2: `rf_writeva_tf_rc_lowpass.m`, `rf_writeva_tf_biquad.m`, `rf_writeva_zpk_realpoles.m`, `rf_writeva_zpk_complex.m`.
+- Tier-3: `rf_writeva_ss_lp1.m`, `rf_writeva_ss_lp2.m`, `rf_writeva_ss_observer.m`.
+- Tier-4: `rf_writeva_source_sine.m`, `rf_writeva_source_square.m`, `rf_writeva_comparator.m`, `rf_writeva_schmitt.m`.
+- Tier-5: `rf_writeva_vco.m`.
+- Tier-6: `rf_writeva_dac.m`.
+- Tier-7: `rf_writeva_diode.m`, `rf_writeva_opamp.m`, `rf_writeva_rtd.m`, `rf_writeva_thermistor.m`.
 
-7 example fixtures under `examples/verilog_a/` mirror the same surface
-(one example per Tier-1/Tier-2/Tier-3 path) and emit `.va` files into
-the example directory.
+16 example fixtures under `examples/verilog_a/` mirror the same surface
+(one example per Tier path) and emit `.va` files into the example directory.
 
-### Limitations (current)
+### Infrastructure fixes shipped alongside Tiers 4–7
 
-- Complex-scalar × real-matrix arithmetic (`poles = pre + 1i * pim`)
-  is **not** implemented in the matlab_llvm runtime today — the
-  scalar-times-matrix lowering drops the imaginary part.  Workaround
-  for ZPK: build complex columns via the runtime path
-  (`rfPoles(rationalfit(...))`) which produces a properly-flagged
-  `matlab_mat_c`.
-- RFRational classdef matrix-property read-back through
-  `matlab_struct_get_mat` returns NULL today (unrelated MIR-lowering
-  gap on `obj.A` for matrix-typed properties).  The runtime's
-  Poles→A / Residues→C field-name fall-back is in place for when that
-  gap is closed.  In the meantime the rationalfit-struct shape is the
-  primary supported input.
+- **`complex(re, im)` matrix-arg variants** — extends the existing
+  scalar `complex(re_scalar, im_scalar)` builtin with three new
+  dispatch entries (`pp`, `fp`, `pf`) so users can build complex
+  columns via `complex(p_re, p_im)` directly.  Sidesteps the
+  upstream `matlab_emul_sm` gap where `1i * real_col` drops the
+  imaginary part.  Runtime helpers in `runtime/runtime_complex.cpp`:
+  `matlab_complex_mm` / `_sm` / `_ms`.
+- **Classdef matrix-property storage** — the field-store lowering in
+  `lib/MLIR/Lowering.cpp` was routing `obj.A = rfPoles(...)` to
+  `matlab_obj_set_f64` because the Rhs source op had an unresolved
+  `none` type at lowering time.  Added a `TypeName == "complex" ||
+  "matrix" || "double_col" || "col"` property-type annotation path
+  that forces routing to `matlab_obj_set_mat` regardless of the Rhs
+  type-propagation state.  Symmetric fix on the load side.
+  `rf_class_rfrational.m` now annotates `A complex; C complex;` and
+  the writeVerilogA classdef-instance path works end-to-end.
+- **`matlab_struct_get_mat` zero-size fall-back** — the runtime
+  returns `mat_alloc(0,0)` (non-NULL, zero-size) on field miss; the
+  Tier-1 fall-back now checks `rows*cols > 0` before deciding the
+  primary field is absent, so the Poles→A fallback fires correctly.
+
+### Limitations (remaining)
+
+- The original `1i * real_col` lowering still drops the imag part
+  upstream.  Use `complex(re, im)` as the supported ergonomic form
+  for complex-column construction; the `1i *` path is a separate
+  matlab_emul fix.
+- Bit-bus ADC and `connectmodule` / `connectrules` are deferred to
+  Tier-11 (Verilog-AMS extensions).
 - Tier-2 / Tier-3 register **scalar-fold shims** so single-element
   numerator/denominator/state args (`[1.0]` collapses to f64 at MIR)
-  still dispatch correctly.
+  still dispatch correctly — same pattern is used for Tier-7's
+  scalar-only paths (no shims needed there).
 
 ### What's next (forward plan)
 
-Tiers 4 – 10 (analog sources, comparators with `cross()`-events,
-VCO/PLL via `idtmod`, behavioral DAC, compact RLC components, sensor
-models with `$temperature`, white + flicker noise, lookup tables via
-`$table_model`) are scoped in §6 but unshipped.  Tier-11 (Verilog-AMS
-extensions — ADC bit-bus output + `connectmodule`/`connectrules`) is
-deferred until there's clear demand for mixed-signal export.
+Remaining tiers: **Tier-8** (noise — `white_noise` / `flicker_noise`),
+**Tier-9** (lookup tables via `$table_model`), **Tier-10** (polish:
+OpenVAF lint + optional ngspice / Xyce cosim against the in-tree
+`freqresp` / `timeresp`).  **Tier-11** (Verilog-AMS extensions —
+ADC bit-bus output + `connectmodule` / `connectrules`) stays deferred
+until there's clear demand for mixed-signal export.
 
 ## 13. Carved out (final)
 

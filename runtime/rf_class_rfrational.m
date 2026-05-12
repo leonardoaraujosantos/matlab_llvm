@@ -20,8 +20,8 @@
 
 classdef RFRational < handle
     properties
-        A           % poles (complex column)
-        C           % residues (complex column)
+        A complex   % poles (complex column)
+        C complex   % residues (complex column)
         D           % direct term (real scalar)
         Delay       % bulk delay (real scalar, seconds)
         Order       % number of poles

@@ -4704,11 +4704,17 @@ double matlab_rf_write_verilog_a(matlab_struct *mdl, void *fname_str) {
     if (pn == 0) return 0.0;
 
     /* Field-name fall-back: rationalfit return struct uses
-     * Poles/Residues/D/Delay; RFRational classdef uses A/C/D/Delay. */
-    matlab_mat *Pmat = matlab_struct_get_mat(mdl, "Poles", 5);
-    if (!Pmat) Pmat = matlab_struct_get_mat(mdl, "A", 1);
-    matlab_mat *Rmat = matlab_struct_get_mat(mdl, "Residues", 8);
-    if (!Rmat) Rmat = matlab_struct_get_mat(mdl, "C", 1);
+     * Poles/Residues/D/Delay; RFRational classdef uses A/C/D/Delay.
+     * matlab_struct_get_mat returns a non-null zero-size matrix on
+     * miss, so we check rows*cols, not just the pointer. */
+    auto rf_va_field_or = [&](const char *primary, int64_t plen,
+                              const char *alt, int64_t alen) -> matlab_mat * {
+        matlab_mat *m = matlab_struct_get_mat(mdl, primary, plen);
+        if (m && (m->rows * m->cols) > 0) return m;
+        return matlab_struct_get_mat(mdl, alt, alen);
+    };
+    matlab_mat *Pmat = rf_va_field_or("Poles",    5, "A", 1);
+    matlab_mat *Rmat = rf_va_field_or("Residues", 8, "C", 1);
     double Dval = matlab_struct_get_f64(mdl, "D", 1);
     double Delay = matlab_struct_get_f64(mdl, "Delay", 5);
 
@@ -5059,6 +5065,369 @@ double matlab_rf_write_verilog_a_zpk(matlab_mat *zmat, matlab_mat *pmat,
                                      "zpk(zeros, poles, k) → writeVerilogAZPK");
     if (!fp) return 0.0;
     rf_va_emit_laplace_nd_line(fp, num_asc, den_asc);
+    fclose(fp);
+    return 1.0;
+}
+
+/* Tier-4 — Analog signal sources + comparators + Schmitt triggers.
+ *
+ *   writeVerilogASource(kind, amp, freq_or_tau, filename)
+ *     kind: 0=sin, 1=cos, 2=square, 3=exp-decay.  Emits a one-output
+ *     module driving V(out) from $abstime.  For exp-decay, the second
+ *     scalar is the time constant τ (V(out) = amp*exp(-$abstime/τ)).
+ *
+ *   writeVerilogAComparator(vth, vh, vl, td, tr, filename)
+ *     Single-threshold comparator with @(cross(V(in)-vth, ±1)) event
+ *     transitions and transition() output smoothing.
+ *
+ *   writeVerilogASchmitt(vhigh, vlow, vh, vl, filename)
+ *     Schmitt trigger with dual hysteresis thresholds.
+ */
+
+static int rf_va_read_path(void *fname_str, char *path, int cap) {
+    rf_string_view *sv = (rf_string_view *)fname_str;
+    int64_t pn = 0;
+    if (sv && sv->data && sv->len > 0) {
+        pn = sv->len < (cap - 1) ? sv->len : (cap - 1);
+        memcpy(path, sv->data, (size_t)pn);
+    }
+    path[pn] = 0;
+    return (int)pn;
+}
+
+double matlab_rf_write_verilog_a_source(double kind, double amp,
+                                          double freq_or_tau,
+                                          void *fname_str) {
+    char path[1024];
+    if (rf_va_read_path(fname_str, path, (int)sizeof(path)) == 0) return 0.0;
+    int K = (int)kind;
+    char modname[256];
+    rf_va_modname_from_path(path, modname, (int)sizeof(modname));
+    FILE *fp = fopen(path, "w");
+    if (!fp) return 0.0;
+    const char *kind_name = (K == 0) ? "sine"
+                          : (K == 1) ? "cosine"
+                          : (K == 2) ? "square"
+                          : (K == 3) ? "exp-decay" : "unknown";
+    fprintf(fp, "// Verilog-A behavioral source emitted by matlab_llvm.\n");
+    fprintf(fp, "// Source kind: %s\n", kind_name);
+    fprintf(fp, "//\n");
+    fprintf(fp, "\n");
+    fprintf(fp, "`include \"disciplines.vams\"\n\n");
+    fprintf(fp, "module %s(out);\n", modname);
+    fprintf(fp, "    output out;\n");
+    fprintf(fp, "    electrical out;\n");
+    fprintf(fp, "    parameter real amp = %.10g;\n", amp);
+    if (K == 3) {
+        fprintf(fp, "    parameter real tau = %.10g from (0:inf);\n",
+                freq_or_tau);
+    } else {
+        fprintf(fp, "    parameter real freq = %.10g from (0:inf);\n",
+                freq_or_tau);
+    }
+    fprintf(fp, "    analog begin\n");
+    if (K == 0) {
+        fprintf(fp, "        V(out) <+ amp * sin(2.0 * `M_PI * freq * "
+                    "$abstime);\n");
+    } else if (K == 1) {
+        fprintf(fp, "        V(out) <+ amp * cos(2.0 * `M_PI * freq * "
+                    "$abstime);\n");
+    } else if (K == 2) {
+        /* Square wave via sign(sin(...)): high when sin > 0, else low.
+         * Use the >0 ternary so output is +amp or -amp. */
+        fprintf(fp, "        V(out) <+ (sin(2.0 * `M_PI * freq * "
+                    "$abstime) >= 0.0) ? amp : -amp;\n");
+    } else if (K == 3) {
+        fprintf(fp, "        V(out) <+ amp * exp(-$abstime / tau);\n");
+    } else {
+        fprintf(fp, "        V(out) <+ 0.0;\n");
+    }
+    fprintf(fp, "    end\n");
+    fprintf(fp, "endmodule\n");
+    fclose(fp);
+    return 1.0;
+}
+
+double matlab_rf_write_verilog_a_comparator(double vth, double vh,
+                                              double vl, double td,
+                                              double tr, void *fname_str) {
+    char path[1024];
+    if (rf_va_read_path(fname_str, path, (int)sizeof(path)) == 0) return 0.0;
+    char modname[256];
+    rf_va_modname_from_path(path, modname, (int)sizeof(modname));
+    FILE *fp = fopen(path, "w");
+    if (!fp) return 0.0;
+    fprintf(fp, "// Verilog-A behavioral comparator emitted by matlab_llvm.\n");
+    fprintf(fp, "// V(out) = vh when V(in) > vth, else vl, via cross() events\n");
+    fprintf(fp, "//\n");
+    fprintf(fp, "\n");
+    fprintf(fp, "`include \"disciplines.vams\"\n\n");
+    fprintf(fp, "module %s(in, out);\n", modname);
+    fprintf(fp, "    input in;\n    output out;\n");
+    fprintf(fp, "    electrical in, out;\n");
+    fprintf(fp, "    parameter real vth = %.10g;\n", vth);
+    fprintf(fp, "    parameter real vh  = %.10g;\n", vh);
+    fprintf(fp, "    parameter real vl  = %.10g;\n", vl);
+    fprintf(fp, "    parameter real td  = %.10g from [0:inf);\n", td);
+    fprintf(fp, "    parameter real tr  = %.10g from (0:inf);\n", tr);
+    fprintf(fp, "    integer state;\n");
+    fprintf(fp, "    analog begin\n");
+    fprintf(fp, "        @(initial_step)            state = 0;\n");
+    fprintf(fp, "        @(cross(V(in) - vth, +1))  state = 1;\n");
+    fprintf(fp, "        @(cross(V(in) - vth, -1))  state = 0;\n");
+    fprintf(fp, "        V(out) <+ transition(state ? vh : vl, td, tr);\n");
+    fprintf(fp, "    end\n");
+    fprintf(fp, "endmodule\n");
+    fclose(fp);
+    return 1.0;
+}
+
+double matlab_rf_write_verilog_a_schmitt(double vhigh, double vlow,
+                                           double vh, double vl,
+                                           void *fname_str) {
+    char path[1024];
+    if (rf_va_read_path(fname_str, path, (int)sizeof(path)) == 0) return 0.0;
+    char modname[256];
+    rf_va_modname_from_path(path, modname, (int)sizeof(modname));
+    FILE *fp = fopen(path, "w");
+    if (!fp) return 0.0;
+    fprintf(fp, "// Verilog-A Schmitt trigger emitted by matlab_llvm.\n");
+    fprintf(fp, "// Hysteresis: latch high when V(in) crosses vhigh upward,\n");
+    fprintf(fp, "// latch low when V(in) crosses vlow downward.\n");
+    fprintf(fp, "//\n");
+    fprintf(fp, "\n");
+    fprintf(fp, "`include \"disciplines.vams\"\n\n");
+    fprintf(fp, "module %s(in, out);\n", modname);
+    fprintf(fp, "    input in;\n    output out;\n");
+    fprintf(fp, "    electrical in, out;\n");
+    fprintf(fp, "    parameter real vhigh = %.10g;\n", vhigh);
+    fprintf(fp, "    parameter real vlow  = %.10g;\n", vlow);
+    fprintf(fp, "    parameter real vh    = %.10g;\n", vh);
+    fprintf(fp, "    parameter real vl    = %.10g;\n", vl);
+    fprintf(fp, "    integer state;\n");
+    fprintf(fp, "    analog begin\n");
+    fprintf(fp, "        @(initial_step)              state = 0;\n");
+    fprintf(fp, "        @(cross(V(in) - vhigh, +1))  state = 1;\n");
+    fprintf(fp, "        @(cross(V(in) - vlow,  -1))  state = 0;\n");
+    fprintf(fp, "        V(out) <+ transition(state ? vh : vl, 0.0, 1.0e-12);\n");
+    fprintf(fp, "    end\n");
+    fprintf(fp, "endmodule\n");
+    fclose(fp);
+    return 1.0;
+}
+
+/* Tier-5 — VCO behavioral model.
+ *
+ *   writeVerilogAVCO(freq_center, gain, amp, filename)
+ *
+ * Frequency-modulated oscillator: instantaneous frequency
+ * f(t) = freq_center + gain * V(in).  Phase is accumulated via
+ * `idtmod` so it wraps cleanly between 0 and 2π — the Verilog-A
+ * idiom for behavioral VCOs / NCOs / PLLs.  Output is the sin of
+ * the phase, scaled by amp.
+ */
+
+double matlab_rf_write_verilog_a_vco(double freq_center, double gain,
+                                       double amp, void *fname_str) {
+    char path[1024];
+    if (rf_va_read_path(fname_str, path, (int)sizeof(path)) == 0) return 0.0;
+    char modname[256];
+    rf_va_modname_from_path(path, modname, (int)sizeof(modname));
+    FILE *fp = fopen(path, "w");
+    if (!fp) return 0.0;
+    fprintf(fp, "// Verilog-A behavioral VCO emitted by matlab_llvm.\n");
+    fprintf(fp, "// f(t) = freq_center + gain * V(in)\n");
+    fprintf(fp, "// phase = idtmod(2*pi * f(t), 0, 2*pi)\n");
+    fprintf(fp, "// V(out) = amp * sin(phase)\n");
+    fprintf(fp, "//\n");
+    fprintf(fp, "\n");
+    fprintf(fp, "`include \"disciplines.vams\"\n\n");
+    fprintf(fp, "module %s(in, out);\n", modname);
+    fprintf(fp, "    input in;\n    output out;\n");
+    fprintf(fp, "    electrical in, out;\n");
+    fprintf(fp, "    parameter real freq_center = %.10g;\n", freq_center);
+    fprintf(fp, "    parameter real gain        = %.10g;\n", gain);
+    fprintf(fp, "    parameter real amp         = %.10g;\n", amp);
+    fprintf(fp, "    real phase;\n");
+    fprintf(fp, "    analog begin\n");
+    fprintf(fp, "        phase = idtmod(2.0 * `M_PI * "
+                "(freq_center + gain * V(in)), 0.0, 2.0 * `M_PI);\n");
+    fprintf(fp, "        V(out) <+ amp * sin(phase);\n");
+    fprintf(fp, "    end\n");
+    fprintf(fp, "endmodule\n");
+    fclose(fp);
+    return 1.0;
+}
+
+/* Tier-6 — Behavioral DAC.
+ *
+ *   writeVerilogADAC(N, vref, td, tr, filename)
+ *
+ * V(out) = vref * code / (2^N - 1), wrapped in transition() for the
+ * settling-time profile.  `code` is read as the input voltage (analog
+ * domain — caller drives V(code) in volts, scaled to be interpreted
+ * as a digital code 0..(2^N-1)).  This is the pure-Verilog-A form;
+ * a true digital bit-bus input would need Verilog-AMS (deferred to
+ * Tier-11).
+ */
+
+double matlab_rf_write_verilog_a_dac(double N_d, double vref, double td,
+                                       double tr, void *fname_str) {
+    char path[1024];
+    if (rf_va_read_path(fname_str, path, (int)sizeof(path)) == 0) return 0.0;
+    char modname[256];
+    rf_va_modname_from_path(path, modname, (int)sizeof(modname));
+    int N = (int)N_d;
+    if (N < 1) N = 1;
+    if (N > 24) N = 24;   /* clamp — Verilog-A reals are doubles anyway */
+    double full_scale = (double)((1LL << N) - 1);
+    FILE *fp = fopen(path, "w");
+    if (!fp) return 0.0;
+    fprintf(fp, "// Verilog-A behavioral DAC emitted by matlab_llvm.\n");
+    fprintf(fp, "// V(out) = vref * code / (2^N - 1)\n");
+    fprintf(fp, "// `code` is read as V(code) interpreted as 0..(2^N-1).\n");
+    fprintf(fp, "//\n");
+    fprintf(fp, "\n");
+    fprintf(fp, "`include \"disciplines.vams\"\n\n");
+    fprintf(fp, "module %s(code, out);\n", modname);
+    fprintf(fp, "    input code;\n    output out;\n");
+    fprintf(fp, "    electrical code, out;\n");
+    fprintf(fp, "    parameter integer N        = %d;\n", N);
+    fprintf(fp, "    parameter real    vref     = %.10g;\n", vref);
+    fprintf(fp, "    parameter real    full_scale = %.10g;\n", full_scale);
+    fprintf(fp, "    parameter real    td       = %.10g from [0:inf);\n", td);
+    fprintf(fp, "    parameter real    tr       = %.10g from (0:inf);\n", tr);
+    fprintf(fp, "    analog begin\n");
+    fprintf(fp, "        V(out) <+ transition(vref * V(code) / full_scale, "
+                "td, tr);\n");
+    fprintf(fp, "    end\n");
+    fprintf(fp, "endmodule\n");
+    fclose(fp);
+    return 1.0;
+}
+
+/* Tier-7 — Compact analog components + sensor models.
+ *
+ *   writeVerilogADiode(Is, Vt, filename)
+ *     Ideal diode I(p,n) = Is * (exp(V(p,n)/Vt) - 1).
+ *
+ *   writeVerilogAOpAmp(gain, vsat, filename)
+ *     Saturated op-amp V(out) = vsat * tanh(gain * V(vp, vn) / vsat).
+ *
+ *   writeVerilogARTD(R0, alpha, T0, filename)
+ *     Pt-style RTD with linear-temperature response:
+ *     I(p,n) = V(p,n) / ( R0 * (1 + alpha*($temperature − T0)) ).
+ *
+ *   writeVerilogAThermistor(R0, B, T0, filename)
+ *     NTC thermistor with exponential-β response:
+ *     R(T) = R0 * exp( B * (1/T - 1/T0) )
+ *     I(p,n) = V(p,n) / R(T)
+ */
+
+double matlab_rf_write_verilog_a_diode(double Is, double Vt,
+                                         void *fname_str) {
+    char path[1024];
+    if (rf_va_read_path(fname_str, path, (int)sizeof(path)) == 0) return 0.0;
+    char modname[256];
+    rf_va_modname_from_path(path, modname, (int)sizeof(modname));
+    FILE *fp = fopen(path, "w");
+    if (!fp) return 0.0;
+    fprintf(fp, "// Verilog-A ideal diode emitted by matlab_llvm.\n");
+    fprintf(fp, "// I(p,n) = Is * (exp(V(p,n)/Vt) - 1)\n");
+    fprintf(fp, "//\n");
+    fprintf(fp, "\n");
+    fprintf(fp, "`include \"disciplines.vams\"\n\n");
+    fprintf(fp, "module %s(p, n);\n", modname);
+    fprintf(fp, "    inout p, n;\n");
+    fprintf(fp, "    electrical p, n;\n");
+    fprintf(fp, "    parameter real Is = %.10g from (0:inf);\n", Is);
+    fprintf(fp, "    parameter real Vt = %.10g from (0:inf);\n", Vt);
+    fprintf(fp, "    analog begin\n");
+    fprintf(fp, "        I(p, n) <+ Is * (exp(V(p, n) / Vt) - 1.0);\n");
+    fprintf(fp, "    end\n");
+    fprintf(fp, "endmodule\n");
+    fclose(fp);
+    return 1.0;
+}
+
+double matlab_rf_write_verilog_a_opamp(double gain, double vsat,
+                                         void *fname_str) {
+    char path[1024];
+    if (rf_va_read_path(fname_str, path, (int)sizeof(path)) == 0) return 0.0;
+    char modname[256];
+    rf_va_modname_from_path(path, modname, (int)sizeof(modname));
+    FILE *fp = fopen(path, "w");
+    if (!fp) return 0.0;
+    fprintf(fp, "// Verilog-A saturated op-amp emitted by matlab_llvm.\n");
+    fprintf(fp, "// V(out) = vsat * tanh(gain * V(vp, vn) / vsat)\n");
+    fprintf(fp, "//\n");
+    fprintf(fp, "\n");
+    fprintf(fp, "`include \"disciplines.vams\"\n\n");
+    fprintf(fp, "module %s(vp, vn, out);\n", modname);
+    fprintf(fp, "    input vp, vn;\n    output out;\n");
+    fprintf(fp, "    electrical vp, vn, out;\n");
+    fprintf(fp, "    parameter real gain = %.10g;\n", gain);
+    fprintf(fp, "    parameter real vsat = %.10g from (0:inf);\n", vsat);
+    fprintf(fp, "    analog begin\n");
+    fprintf(fp, "        V(out) <+ vsat * tanh(gain * V(vp, vn) / vsat);\n");
+    fprintf(fp, "    end\n");
+    fprintf(fp, "endmodule\n");
+    fclose(fp);
+    return 1.0;
+}
+
+double matlab_rf_write_verilog_a_rtd(double R0, double alpha, double T0,
+                                       void *fname_str) {
+    char path[1024];
+    if (rf_va_read_path(fname_str, path, (int)sizeof(path)) == 0) return 0.0;
+    char modname[256];
+    rf_va_modname_from_path(path, modname, (int)sizeof(modname));
+    FILE *fp = fopen(path, "w");
+    if (!fp) return 0.0;
+    fprintf(fp, "// Verilog-A RTD temperature sensor emitted by matlab_llvm.\n");
+    fprintf(fp, "// R(T) = R0 * (1 + alpha*($temperature - T0))\n");
+    fprintf(fp, "//\n");
+    fprintf(fp, "\n");
+    fprintf(fp, "`include \"disciplines.vams\"\n\n");
+    fprintf(fp, "module %s(p, n);\n", modname);
+    fprintf(fp, "    inout p, n;\n");
+    fprintf(fp, "    electrical p, n;\n");
+    fprintf(fp, "    parameter real R0    = %.10g from (0:inf);\n", R0);
+    fprintf(fp, "    parameter real alpha = %.10g;\n", alpha);
+    fprintf(fp, "    parameter real T0    = %.10g;\n", T0);
+    fprintf(fp, "    analog begin\n");
+    fprintf(fp, "        I(p, n) <+ V(p, n) / "
+                "(R0 * (1.0 + alpha * ($temperature - T0)));\n");
+    fprintf(fp, "    end\n");
+    fprintf(fp, "endmodule\n");
+    fclose(fp);
+    return 1.0;
+}
+
+double matlab_rf_write_verilog_a_thermistor(double R0, double B, double T0,
+                                              void *fname_str) {
+    char path[1024];
+    if (rf_va_read_path(fname_str, path, (int)sizeof(path)) == 0) return 0.0;
+    char modname[256];
+    rf_va_modname_from_path(path, modname, (int)sizeof(modname));
+    FILE *fp = fopen(path, "w");
+    if (!fp) return 0.0;
+    fprintf(fp, "// Verilog-A NTC thermistor emitted by matlab_llvm.\n");
+    fprintf(fp, "// R(T) = R0 * exp(B*(1/T - 1/T0))\n");
+    fprintf(fp, "//\n");
+    fprintf(fp, "\n");
+    fprintf(fp, "`include \"disciplines.vams\"\n\n");
+    fprintf(fp, "module %s(p, n);\n", modname);
+    fprintf(fp, "    inout p, n;\n");
+    fprintf(fp, "    electrical p, n;\n");
+    fprintf(fp, "    parameter real R0 = %.10g from (0:inf);\n", R0);
+    fprintf(fp, "    parameter real B  = %.10g;\n", B);
+    fprintf(fp, "    parameter real T0 = %.10g from (0:inf);\n", T0);
+    fprintf(fp, "    analog begin\n");
+    fprintf(fp, "        I(p, n) <+ V(p, n) / "
+                "(R0 * exp(B * (1.0/$temperature - 1.0/T0)));\n");
+    fprintf(fp, "    end\n");
+    fprintf(fp, "endmodule\n");
     fclose(fp);
     return 1.0;
 }

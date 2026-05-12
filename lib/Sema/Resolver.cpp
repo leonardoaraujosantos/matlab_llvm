@@ -399,6 +399,15 @@ void Resolver::registerBuiltins() {
     /* RF-Tier-5 — Verilog-A export. */
     "writeVerilogA", "writeVerilogATF", "writeVerilogAZPK",
     "writeVerilogASS",
+    /* Tier-4: analog sources + comparators + Schmitt triggers. */
+    "writeVerilogASource", "writeVerilogAComparator", "writeVerilogASchmitt",
+    /* Tier-5: VCO via idtmod. */
+    "writeVerilogAVCO",
+    /* Tier-6: behavioral DAC. */
+    "writeVerilogADAC",
+    /* Tier-7: compact components + sensor models. */
+    "writeVerilogADiode", "writeVerilogAOpAmp",
+    "writeVerilogARTD",   "writeVerilogAThermistor",
   }) {
     registerBuiltin(N);
   }
