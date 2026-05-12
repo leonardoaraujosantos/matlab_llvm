@@ -4502,6 +4502,10 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"berawgn",    "matlab_comm_berawgn_s",  0, "fff"},
       /* §4.9 scatterplot numeric form. */
       {"scatterplot","matlab_comm_scatterplot",1, "p"},
+      /* eyediagram(x, n) — n × num_traces matrix where each
+       * column is a consecutive n-sample slice of `x`.  Real and
+       * complex inputs both supported. */
+      {"eyediagram", "matlab_comm_eyediagram", 1, "pf"},
       /* === Communications Toolbox Tier-3 — channel coding ===
        * docs/comm_toolbox_roadmap.md §5. CRC function-form, the
        * `poly2trellis` / `convenc` / `vitdec` convolutional surface,

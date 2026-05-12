@@ -1029,6 +1029,53 @@ matlab_mat *matlab_comm_scatterplot(matlab_mat_c *x) {
     return out;
 }
 
+/* ===== eyediagram — numeric trace-matrix return ========================= *
+ *
+ * MATLAB's `eyediagram(x, n)` overlays consecutive n-sample slices of
+ * a pulse-shaped baseband signal onto a single figure — the "open
+ * eye" plot used to inspect ISI / timing-jitter / SNR by eye.
+ *
+ * The headless lane returns the trace MATRIX of shape (n × num_traces)
+ * where column k contains samples [k*n .. (k+1)*n - 1] of the input.
+ * Users can then `plot` the columns (overlaid) for the canonical eye
+ * diagram, or just inspect the matrix for ISI sanity-checks.
+ *
+ * Inputs:
+ *   - Real (matlab_mat *): traces of the signal itself.
+ *   - Complex (matlab_mat_c *): traces of the REAL part (the I
+ *     channel).  Users can also call `eyediagram(imag(x), n)` for
+ *     the Q channel.  MathWorks' interactive viewer renders I and Q
+ *     side by side; we leave that orchestration to the caller. */
+matlab_mat *matlab_comm_eyediagram(void *x_any, double n_samples_d) {
+    int n = (int)n_samples_d;
+    if (n < 2) n = 2;
+    int64_t N = 0;
+    const double *src = NULL;
+    if (mat_is_complex(x_any)) {
+        const matlab_mat_c *c = (const matlab_mat_c *)x_any;
+        if (!c) return mat_alloc(0, 0);
+        N = c->rows * c->cols;
+        src = c->re;
+    } else {
+        const matlab_mat *m = (const matlab_mat *)x_any;
+        if (!m) return mat_alloc(0, 0);
+        N = m->rows * m->cols;
+        src = m->data;
+    }
+    if (N <= 0 || !src) return mat_alloc(0, 0);
+    int num_traces = (int)(N / n);
+    if (num_traces <= 0) return mat_alloc(0, 0);
+    /* Output: n rows × num_traces cols, row-major. */
+    matlab_mat *Y = mat_alloc(n, num_traces);
+    for (int j = 0; j < num_traces; ++j) {
+        for (int i = 0; i < n; ++i) {
+            int64_t idx = (int64_t)j * n + i;
+            Y->data[(int64_t)i * num_traces + j] = src[idx];
+        }
+    }
+    return Y;
+}
+
 /* ===== Tier-3 channel coding (function-form) ============================ *
  *
  * docs/comm_toolbox_roadmap.md §5.  The CRC System Object form

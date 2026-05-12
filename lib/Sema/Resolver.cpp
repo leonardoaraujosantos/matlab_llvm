@@ -320,7 +320,7 @@ void Resolver::registerBuiltins() {
     "qammod", "qamdemod", "qamdemodBit", "qamdemodLlr",
     "genqammod", "genqamdemod",
     "rcosdesign", "gaussdesign",
-    "berawgn", "scatterplot",
+    "berawgn", "scatterplot", "eyediagram",
     "qfunc", "erfc",
     /* COMM Tier-3 — channel coding (docs/comm_toolbox_roadmap.md §5).
      * Function-form CRC + convolutional + Hamming + interleavers.

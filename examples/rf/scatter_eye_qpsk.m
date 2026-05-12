@@ -14,12 +14,15 @@
 %   4. Pass through an AWGN channel at a chosen Eb/N0.
 %   5. Read out the noisy constellation via `scatterplot` (which
 %      returns the I/Q point matrix in this build — no GUI).
+%   6. Read out the eye-diagram trace matrix via `eyediagram`.
 %
 % Differences from the MathWorks page:
 %
-%   - **No `eyediagram`**: the eye-diagram renderer isn't wired in
-%     this build.  Once wired, it'd take the same `txSig`/`rxSig`
-%     vectors the scatterplot consumes.
+%   - **Headless `scatterplot` / `eyediagram`**: both return numeric
+%     trace matrices in this build (no GUI).  The shapes match what
+%     a `plot` call would consume, so wiring them to the Cairo
+%     backend is just a follow-on `plot(pts(:,1), pts(:,2))` and
+%     `plot(eye)` call.
 %
 %   - **`pskmod` 4-arg form**: `pskmod(data, M, ini_phase,
 %     symbolOrder)` — `symbolOrder = 0` selects Gray coding
@@ -73,3 +76,17 @@ disp(size(pts, 2));                    % 2
 mid = floor(size(pts, 1) ./ 2);
 disp(pts(mid, 1));
 disp(pts(mid, 2));
+
+% --- 6. Eye diagram ---
+%   `eyediagram(x, n)` returns an `n × num_traces` matrix where each
+%   column is one n-sample slice of the signal — a 2-symbol slice
+%   here (2*sps = 8 samples).  An open eye means the symbol-decision
+%   instants (rows near the center) cluster cleanly above and below
+%   zero with little spread.
+eye = eyediagram(real(rxSig), 2 .* sps);
+disp(size(eye, 1));                    % 2*sps = 8 rows
+disp(size(eye, 2));                    % ~nSym/2 traces (post-filter-delay)
+
+% Mid-buffer sample at the symbol-decision instant (last row of the
+% trace).  In a clean eye, values cluster near ±0.707 (QPSK levels).
+disp(eye(8, floor(size(eye, 2) ./ 2)));
