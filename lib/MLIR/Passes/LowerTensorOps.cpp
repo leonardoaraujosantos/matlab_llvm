@@ -4770,6 +4770,13 @@ bool TensorLowering::rewriteBuiltinCalls() {
       /* Weighted Vector Fitting — per-frequency weight column scales
        * the LS rows so higher-weight frequencies dominate the fit. */
       {"rationalfitWeighted", "matlab_rf_rationalfit_w",     1, "ppppff"},
+      /* §9.1.2 follow-on — newref re-reference to a new scalar z0. */
+      {"newref",              "matlab_rf_newref",            1, "pf"},
+      /* Redheffer star with arbitrary inner-connection port count. */
+      {"cascadeSparamsNFullK", "matlab_rf_cascade_n_fullk",  1, "ppf"},
+      /* §9.1.2 N-port S→ABCD and S→H (block-partitioned, even N). */
+      {"sparamS2abcdN",        "matlab_rf_s2abcd_n",         1, "p"},
+      {"sparamS2hN",           "matlab_rf_s2h_n",            1, "p"},
     };
 
     // Pick the first entry with name + arity + TYPE match so overloaded

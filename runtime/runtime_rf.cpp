@@ -2533,9 +2533,157 @@ matlab_struct *matlab_rf_twowire(double radius, double separation, double er,
 
 extern matlab_mat *matlab_inv(matlab_mat *A);
 
+/* Native complex N×N LU decomposition with partial pivoting (Doolittle
+ * factorization).  Mutates A in place: lower triangle (strict) holds L,
+ * upper triangle (inclusive of diagonal) holds U.  piv[i] tracks the
+ * row that was pivoted to row i.  Returns 0 on success, -1 on singular
+ * pivot (caller should fall back to the 2N×2N real-equivalent path).
+ *
+ * Complex arithmetic uses paired re/im arrays.  Each elimination step:
+ *   factor = a_{r,i} / a_{i,i}   (complex divide)
+ *   row_r -= factor · row_i      (complex multiply-add)
+ *
+ * For N ≤ 9 (the multi-port cap) this is ~4× faster than the 2N×2N
+ * approach: complex N×N LU is ~N³ complex mults = 4·N³ real mults,
+ * vs (2N)³ = 8·N³ real mults for the real-equivalent path. */
+static int complex_lu(int N, double *A_re, double *A_im, int *piv) {
+    for (int i = 0; i < N; ++i) piv[i] = i;
+    for (int i = 0; i < N; ++i) {
+        /* Find largest-magnitude pivot in column i, rows i..N-1. */
+        int p = i;
+        double max_mag2 = A_re[(size_t)i*N + i] * A_re[(size_t)i*N + i]
+                        + A_im[(size_t)i*N + i] * A_im[(size_t)i*N + i];
+        for (int r = i + 1; r < N; ++r) {
+            double m2 = A_re[(size_t)r*N + i] * A_re[(size_t)r*N + i]
+                      + A_im[(size_t)r*N + i] * A_im[(size_t)r*N + i];
+            if (m2 > max_mag2) { max_mag2 = m2; p = r; }
+        }
+        if (max_mag2 == 0.0) return -1;
+        if (p != i) {
+            for (int c = 0; c < N; ++c) {
+                double tr = A_re[(size_t)i*N + c];
+                double ti = A_im[(size_t)i*N + c];
+                A_re[(size_t)i*N + c] = A_re[(size_t)p*N + c];
+                A_im[(size_t)i*N + c] = A_im[(size_t)p*N + c];
+                A_re[(size_t)p*N + c] = tr;
+                A_im[(size_t)p*N + c] = ti;
+            }
+            int tp = piv[i]; piv[i] = piv[p]; piv[p] = tp;
+        }
+        double pr = A_re[(size_t)i*N + i];
+        double pi = A_im[(size_t)i*N + i];
+        double pmag2 = pr*pr + pi*pi;
+        for (int r = i + 1; r < N; ++r) {
+            double ar = A_re[(size_t)r*N + i];
+            double ai = A_im[(size_t)r*N + i];
+            /* factor = a / pivot = a · conj(pivot) / |pivot|² */
+            double f_re = (ar * pr + ai * pi) / pmag2;
+            double f_im = (ai * pr - ar * pi) / pmag2;
+            A_re[(size_t)r*N + i] = f_re;
+            A_im[(size_t)r*N + i] = f_im;
+            for (int c = i + 1; c < N; ++c) {
+                double uc_re = A_re[(size_t)i*N + c];
+                double uc_im = A_im[(size_t)i*N + c];
+                A_re[(size_t)r*N + c] -= f_re * uc_re - f_im * uc_im;
+                A_im[(size_t)r*N + c] -= f_re * uc_im + f_im * uc_re;
+            }
+        }
+    }
+    return 0;
+}
+
+/* Forward + back substitute: solve A·X = B given LU + pivot.
+ * B is N × ncols (column-major in memory: B_re[c*N + i] is the i-th
+ * element of column c).  On exit, B holds X = A⁻¹·B. */
+static void complex_lu_solve(int N, int ncols,
+                              const double *LU_re, const double *LU_im,
+                              const int *piv,
+                              double *B_re, double *B_im) {
+    /* Apply pivot to each column (row reorder). */
+    std::vector<double> bp_re((size_t)N * ncols);
+    std::vector<double> bp_im((size_t)N * ncols);
+    for (int c = 0; c < ncols; ++c) {
+        for (int i = 0; i < N; ++i) {
+            int from = piv[i];
+            bp_re[(size_t)c*N + i] = B_re[(size_t)c*N + from];
+            bp_im[(size_t)c*N + i] = B_im[(size_t)c*N + from];
+        }
+    }
+    /* Forward substitution: L·Y = B.  L is unit lower. */
+    for (int c = 0; c < ncols; ++c) {
+        for (int i = 0; i < N; ++i) {
+            double sr = bp_re[(size_t)c*N + i];
+            double si = bp_im[(size_t)c*N + i];
+            for (int j = 0; j < i; ++j) {
+                double lr = LU_re[(size_t)i*N + j];
+                double li = LU_im[(size_t)i*N + j];
+                double yr = bp_re[(size_t)c*N + j];
+                double yi = bp_im[(size_t)c*N + j];
+                sr -= lr * yr - li * yi;
+                si -= lr * yi + li * yr;
+            }
+            bp_re[(size_t)c*N + i] = sr;
+            bp_im[(size_t)c*N + i] = si;
+        }
+    }
+    /* Back substitution: U·X = Y. */
+    for (int c = 0; c < ncols; ++c) {
+        for (int i = N - 1; i >= 0; --i) {
+            double sr = bp_re[(size_t)c*N + i];
+            double si = bp_im[(size_t)c*N + i];
+            for (int j = i + 1; j < N; ++j) {
+                double ur = LU_re[(size_t)i*N + j];
+                double ui = LU_im[(size_t)i*N + j];
+                double xr = bp_re[(size_t)c*N + j];
+                double xi = bp_im[(size_t)c*N + j];
+                sr -= ur * xr - ui * xi;
+                si -= ur * xi + ui * xr;
+            }
+            double dr = LU_re[(size_t)i*N + i];
+            double di = LU_im[(size_t)i*N + i];
+            double dmag2 = dr*dr + di*di;
+            bp_re[(size_t)c*N + i] = (sr * dr + si * di) / dmag2;
+            bp_im[(size_t)c*N + i] = (si * dr - sr * di) / dmag2;
+        }
+    }
+    /* Copy result back to B (still in column-major). */
+    for (int i = 0; i < N * ncols; ++i) {
+        B_re[(size_t)i] = bp_re[(size_t)i];
+        B_im[(size_t)i] = bp_im[(size_t)i];
+    }
+}
+
 static void complex_mat_inv_2neq(int N,
                                   const double *A_re, const double *A_im,
                                   double *out_re, double *out_im) {
+    /* Try native complex LU first (~4× faster than the 2N×2N real-
+     * equivalent path).  Falls back to the real-equivalent route on
+     * singular pivot so ill-conditioned matrices still get an answer. */
+    std::vector<double> LU_re((size_t)N * N), LU_im((size_t)N * N);
+    for (int i = 0; i < N * N; ++i) {
+        LU_re[(size_t)i] = A_re[(size_t)i];
+        LU_im[(size_t)i] = A_im[(size_t)i];
+    }
+    std::vector<int> piv((size_t)N);
+    if (complex_lu(N, LU_re.data(), LU_im.data(), piv.data()) == 0) {
+        /* Build B = I (column-major: column c has 1 at row c). */
+        std::vector<double> B_re((size_t)N * N, 0.0);
+        std::vector<double> B_im((size_t)N * N, 0.0);
+        for (int c = 0; c < N; ++c) B_re[(size_t)c*N + c] = 1.0;
+        complex_lu_solve(N, N, LU_re.data(), LU_im.data(), piv.data(),
+                          B_re.data(), B_im.data());
+        /* B is now A⁻¹ in column-major.  out is row-major, so
+         * transpose-write: out[i*N + j] = B_col_j_row_i = B_re[j*N + i]. */
+        for (int i = 0; i < N; ++i) {
+            for (int j = 0; j < N; ++j) {
+                out_re[(size_t)i*N + j] = B_re[(size_t)j*N + i];
+                out_im[(size_t)i*N + j] = B_im[(size_t)j*N + i];
+            }
+        }
+        return;
+    }
+    /* Fallback: 2N×2N real-equivalent inverse (slower but works on
+     * any non-singular complex matrix). */
     int N2 = 2 * N;
     matlab_mat *M = mat_alloc(N2, N2);
     for (int i = 0; i < N; ++i) {
@@ -2788,6 +2936,183 @@ static void cmat_mul_rect(int r, int k, int c,
  *
  * v1 specializes to k = N/2.  Result has N external ports. */
 matlab_struct *matlab_rf_cascade_n(matlab_struct *A, matlab_struct *B);
+
+/* Generalized Redheffer star: cascade N_A-port A with N_B-port B
+ * through k inner-connection ports.  Last k ports of A connect to
+ * first k ports of B.  Result has (N_A − k) + (N_B − k) external
+ * ports.  When N_A = N_B = N and k = N/2, this matches the symmetric
+ * case below. */
+matlab_struct *matlab_rf_cascade_n_fullk(matlab_struct *A, matlab_struct *B,
+                                          double k_inner_d) {
+    if (!A || !B) return matlab_struct_new();
+    int N_A = (int)matlab_struct_get_f64(A, "NumPorts", 8);
+    int N_B = (int)matlab_struct_get_f64(B, "NumPorts", 8);
+    int k = (int)k_inner_d;
+    if (k < 1 || N_A < k + 1 || N_B < k + 1 || N_A > 9 || N_B > 9) {
+        return matlab_struct_new();
+    }
+    int nkA = N_A - k;
+    int nkB = N_B - k;
+    int outDim = nkA + nkB;
+    double z0 = matlab_struct_get_f64(A, "Z0", 2);
+    matlab_mat *F = matlab_struct_get_mat(A, "Frequencies", 11);
+    int K = F ? (int)(F->rows * F->cols) : 0;
+    int n2_out = outDim * outDim;
+    std::vector<matlab_mat_c *> out_cols((size_t)n2_out);
+    for (int idx = 0; idx < n2_out; ++idx)
+        out_cols[(size_t)idx] = mat_c_alloc(K, 1);
+    auto gather = [](matlab_struct *S, int rows, int cols,
+                      int i0, int j0, int kfreq,
+                      std::vector<double> &buf_re,
+                      std::vector<double> &buf_im) {
+        char fname[8];
+        for (int i = 0; i < rows; ++i) {
+            for (int j = 0; j < cols; ++j) {
+                int sp_i = i0 + i, sp_j = j0 + j;
+                int fn = snprintf(fname, sizeof(fname), "S%d%d", sp_i, sp_j);
+                matlab_mat_c *Sij =
+                    (matlab_mat_c *)matlab_struct_get_mat(S, fname, fn);
+                int n_freq = Sij ? (int)(Sij->rows * Sij->cols) : 0;
+                buf_re[(size_t)(i*cols + j)] = (kfreq < n_freq) ? Sij->re[kfreq] : 0.0;
+                buf_im[(size_t)(i*cols + j)] = (kfreq < n_freq) ? Sij->im[kfreq] : 0.0;
+            }
+        }
+    };
+    for (int f = 0; f < K; ++f) {
+        std::vector<double> A11_re((size_t)(nkA*nkA)), A11_im((size_t)(nkA*nkA));
+        std::vector<double> A12_re((size_t)(nkA*k)),   A12_im((size_t)(nkA*k));
+        std::vector<double> A21_re((size_t)(k*nkA)),   A21_im((size_t)(k*nkA));
+        std::vector<double> A22_re((size_t)(k*k)),     A22_im((size_t)(k*k));
+        gather(A, nkA, nkA, 1,     1,     f, A11_re, A11_im);
+        gather(A, nkA, k,   1,     nkA+1, f, A12_re, A12_im);
+        gather(A, k,   nkA, nkA+1, 1,     f, A21_re, A21_im);
+        gather(A, k,   k,   nkA+1, nkA+1, f, A22_re, A22_im);
+        std::vector<double> B11_re((size_t)(k*k)),     B11_im((size_t)(k*k));
+        std::vector<double> B12_re((size_t)(k*nkB)),   B12_im((size_t)(k*nkB));
+        std::vector<double> B21_re((size_t)(nkB*k)),   B21_im((size_t)(nkB*k));
+        std::vector<double> B22_re((size_t)(nkB*nkB)), B22_im((size_t)(nkB*nkB));
+        gather(B, k,   k,   1,   1,   f, B11_re, B11_im);
+        gather(B, k,   nkB, 1,   k+1, f, B12_re, B12_im);
+        gather(B, nkB, k,   k+1, 1,   f, B21_re, B21_im);
+        gather(B, nkB, nkB, k+1, k+1, f, B22_re, B22_im);
+        std::vector<double> tmp_re((size_t)(k*k)), tmp_im((size_t)(k*k));
+        std::vector<double> X_re((size_t)(k*k)),   X_im((size_t)(k*k));
+        std::vector<double> M_re((size_t)(k*k)),   M_im((size_t)(k*k));
+        std::vector<double> Mp_re((size_t)(k*k)),  Mp_im((size_t)(k*k));
+        cmat_mul_rect(k, k, k, A22_re.data(), A22_im.data(),
+                                B11_re.data(), B11_im.data(),
+                                tmp_re.data(), tmp_im.data());
+        for (int i = 0; i < k; ++i) {
+            for (int j = 0; j < k; ++j) {
+                X_re[(size_t)(i*k + j)] = -tmp_re[(size_t)(i*k + j)];
+                X_im[(size_t)(i*k + j)] = -tmp_im[(size_t)(i*k + j)];
+            }
+            X_re[(size_t)(i*k + i)] += 1.0;
+        }
+        complex_mat_inv_2neq(k, X_re.data(), X_im.data(),
+                              M_re.data(), M_im.data());
+        cmat_mul_rect(k, k, k, B11_re.data(), B11_im.data(),
+                                A22_re.data(), A22_im.data(),
+                                tmp_re.data(), tmp_im.data());
+        for (int i = 0; i < k; ++i) {
+            for (int j = 0; j < k; ++j) {
+                X_re[(size_t)(i*k + j)] = -tmp_re[(size_t)(i*k + j)];
+                X_im[(size_t)(i*k + j)] = -tmp_im[(size_t)(i*k + j)];
+            }
+            X_re[(size_t)(i*k + i)] += 1.0;
+        }
+        complex_mat_inv_2neq(k, X_re.data(), X_im.data(),
+                              Mp_re.data(), Mp_im.data());
+        std::vector<double> t1_re((size_t)(nkA*k)), t1_im((size_t)(nkA*k));
+        cmat_mul_rect(nkA, k, k, A12_re.data(), A12_im.data(),
+                                  B11_re.data(), B11_im.data(),
+                                  t1_re.data(), t1_im.data());
+        std::vector<double> t2_re((size_t)(nkA*k)), t2_im((size_t)(nkA*k));
+        cmat_mul_rect(nkA, k, k, t1_re.data(), t1_im.data(),
+                                  M_re.data(), M_im.data(),
+                                  t2_re.data(), t2_im.data());
+        std::vector<double> SAB11_re((size_t)(nkA*nkA)), SAB11_im((size_t)(nkA*nkA));
+        cmat_mul_rect(nkA, k, nkA, t2_re.data(), t2_im.data(),
+                                    A21_re.data(), A21_im.data(),
+                                    SAB11_re.data(), SAB11_im.data());
+        for (int i = 0; i < nkA*nkA; ++i) {
+            SAB11_re[(size_t)i] += A11_re[(size_t)i];
+            SAB11_im[(size_t)i] += A11_im[(size_t)i];
+        }
+        std::vector<double> t3_re((size_t)(nkA*k)), t3_im((size_t)(nkA*k));
+        cmat_mul_rect(nkA, k, k, A12_re.data(), A12_im.data(),
+                                  M_re.data(), M_im.data(),
+                                  t3_re.data(), t3_im.data());
+        std::vector<double> SAB12_re((size_t)(nkA*nkB)), SAB12_im((size_t)(nkA*nkB));
+        cmat_mul_rect(nkA, k, nkB, t3_re.data(), t3_im.data(),
+                                    B12_re.data(), B12_im.data(),
+                                    SAB12_re.data(), SAB12_im.data());
+        std::vector<double> t4_re((size_t)(nkB*k)), t4_im((size_t)(nkB*k));
+        cmat_mul_rect(nkB, k, k, B21_re.data(), B21_im.data(),
+                                  Mp_re.data(), Mp_im.data(),
+                                  t4_re.data(), t4_im.data());
+        std::vector<double> SAB21_re((size_t)(nkB*nkA)), SAB21_im((size_t)(nkB*nkA));
+        cmat_mul_rect(nkB, k, nkA, t4_re.data(), t4_im.data(),
+                                    A21_re.data(), A21_im.data(),
+                                    SAB21_re.data(), SAB21_im.data());
+        std::vector<double> t5_re((size_t)(nkB*k)), t5_im((size_t)(nkB*k));
+        cmat_mul_rect(nkB, k, k, B21_re.data(), B21_im.data(),
+                                  A22_re.data(), A22_im.data(),
+                                  t5_re.data(), t5_im.data());
+        std::vector<double> t6_re((size_t)(nkB*k)), t6_im((size_t)(nkB*k));
+        cmat_mul_rect(nkB, k, k, t5_re.data(), t5_im.data(),
+                                  Mp_re.data(), Mp_im.data(),
+                                  t6_re.data(), t6_im.data());
+        std::vector<double> SAB22_re((size_t)(nkB*nkB)), SAB22_im((size_t)(nkB*nkB));
+        cmat_mul_rect(nkB, k, nkB, t6_re.data(), t6_im.data(),
+                                    B12_re.data(), B12_im.data(),
+                                    SAB22_re.data(), SAB22_im.data());
+        for (int i = 0; i < nkB*nkB; ++i) {
+            SAB22_re[(size_t)i] += B22_re[(size_t)i];
+            SAB22_im[(size_t)i] += B22_im[(size_t)i];
+        }
+        /* Pack output: ports 1..nkA → A's outer; ports nkA+1..outDim → B's outer. */
+        for (int i = 1; i <= outDim; ++i) {
+            for (int j = 1; j <= outDim; ++j) {
+                double re = 0.0, im = 0.0;
+                if (i <= nkA && j <= nkA) {
+                    int ii = i - 1, jj = j - 1;
+                    re = SAB11_re[(size_t)(ii*nkA + jj)];
+                    im = SAB11_im[(size_t)(ii*nkA + jj)];
+                } else if (i <= nkA && j > nkA) {
+                    int ii = i - 1, jj = j - 1 - nkA;
+                    re = SAB12_re[(size_t)(ii*nkB + jj)];
+                    im = SAB12_im[(size_t)(ii*nkB + jj)];
+                } else if (i > nkA && j <= nkA) {
+                    int ii = i - 1 - nkA, jj = j - 1;
+                    re = SAB21_re[(size_t)(ii*nkA + jj)];
+                    im = SAB21_im[(size_t)(ii*nkA + jj)];
+                } else {
+                    int ii = i - 1 - nkA, jj = j - 1 - nkA;
+                    re = SAB22_re[(size_t)(ii*nkB + jj)];
+                    im = SAB22_im[(size_t)(ii*nkB + jj)];
+                }
+                int idx = (i - 1) * outDim + (j - 1);
+                out_cols[(size_t)idx]->re[f] = re;
+                out_cols[(size_t)idx]->im[f] = im;
+            }
+        }
+    }
+    matlab_struct *out = matlab_struct_new();
+    char fname[8];
+    for (int i = 1; i <= outDim; ++i) {
+        for (int j = 1; j <= outDim; ++j) {
+            int fn = snprintf(fname, sizeof(fname), "S%d%d", i, j);
+            int idx = (i - 1) * outDim + (j - 1);
+            matlab_struct_set_mat(out, fname, fn,
+                                   (matlab_mat *)out_cols[(size_t)idx]);
+        }
+    }
+    matlab_struct_set_f64(out, "NumPorts", 8, (double)outDim);
+    matlab_struct_set_f64(out, "Z0",       2, z0);
+    matlab_struct_set_mat(out, "Frequencies", 11, F);
+    return out;
+}
 
 matlab_struct *matlab_rf_cascade_n_full(matlab_struct *A, matlab_struct *B) {
     if (!A || !B) return matlab_struct_new();
@@ -4304,6 +4629,327 @@ matlab_struct *matlab_rf_enforce_passivity(matlab_struct *mdl,
     matlab_struct_set_f64(out, "Order",    5, Order);
     matlab_struct_set_f64(out, "FitError", 8, FitErr);
     matlab_struct_set_f64(out, "Delay",    5, Delay);
+    return out;
+}
+
+/* ====================================================================== */
+/* §9.1.2 follow-on — N-port S↔ABCD and S↔H (even N, block-partitioned). */
+/* ====================================================================== */
+/*
+ * For an even-N port network partitioned into halves of N/2 ports
+ * ("a-side" = ports 1..N/2, "b-side" = ports N/2+1..N), generalized
+ * 2-block ABCD via the Y-partition:
+ *   A = −Y_bb·Y_ba⁻¹ ;  B = −Y_ba⁻¹ ;  C = −(Y_aa − Y_ab·Y_ba⁻¹·Y_bb) ;  D = −Y_ab·Y_ba⁻¹
+ *
+ * Generalized H-parameters:
+ *   H_aa = Y_aa⁻¹ ; H_ab = −Y_aa⁻¹·Y_ab ; H_ba = Y_ba·Y_aa⁻¹ ; H_bb = Y_bb − Y_ba·Y_aa⁻¹·Y_ab
+ *
+ * Storage: ABCD uses A_ij / B_ij / C_ij / D_ij with i,j ∈ 1..N/2.
+ * H uses H_ij with i,j ∈ 1..N (full N×N block-stitched matrix). */
+
+extern matlab_struct *matlab_rf_s2y_n(matlab_struct *data);
+
+static void rf_partition_y_blocks(matlab_struct *Y_data, int N,
+                                   int kfreq,
+                                   std::vector<double> &Yaa_re,
+                                   std::vector<double> &Yaa_im,
+                                   std::vector<double> &Yab_re,
+                                   std::vector<double> &Yab_im,
+                                   std::vector<double> &Yba_re,
+                                   std::vector<double> &Yba_im,
+                                   std::vector<double> &Ybb_re,
+                                   std::vector<double> &Ybb_im) {
+    int h = N / 2;
+    char fname[8];
+    auto load = [&](int i, int j) -> C {
+        int fn = snprintf(fname, sizeof(fname), "Y%d%d", i, j);
+        matlab_mat_c *Yij =
+            (matlab_mat_c *)matlab_struct_get_mat(Y_data, fname, fn);
+        int n_freq = Yij ? (int)(Yij->rows * Yij->cols) : 0;
+        if (kfreq < n_freq) return {Yij->re[kfreq], Yij->im[kfreq]};
+        return {0.0, 0.0};
+    };
+    for (int i = 0; i < h; ++i) {
+        for (int j = 0; j < h; ++j) {
+            C v = load(i + 1,     j + 1);
+            Yaa_re[(size_t)(i*h + j)] = v.re;  Yaa_im[(size_t)(i*h + j)] = v.im;
+            v = load(i + 1,     j + h + 1);
+            Yab_re[(size_t)(i*h + j)] = v.re;  Yab_im[(size_t)(i*h + j)] = v.im;
+            v = load(i + h + 1, j + 1);
+            Yba_re[(size_t)(i*h + j)] = v.re;  Yba_im[(size_t)(i*h + j)] = v.im;
+            v = load(i + h + 1, j + h + 1);
+            Ybb_re[(size_t)(i*h + j)] = v.re;  Ybb_im[(size_t)(i*h + j)] = v.im;
+        }
+    }
+}
+
+matlab_struct *matlab_rf_s2abcd_n(matlab_struct *data) {
+    if (!data) return matlab_struct_new();
+    int N = (int)matlab_struct_get_f64(data, "NumPorts", 8);
+    if (N < 2 || (N % 2) != 0 || N > 8) return matlab_struct_new();
+    int h = N / 2;
+    double z0 = matlab_struct_get_f64(data, "Z0", 2);
+    matlab_mat *F = matlab_struct_get_mat(data, "Frequencies", 11);
+    int K = F ? (int)(F->rows * F->cols) : 0;
+    matlab_struct *Y_data = matlab_rf_s2y_n(data);
+    int hh = h * h;
+    std::vector<matlab_mat_c *> A_cols((size_t)hh), B_cols((size_t)hh),
+                                  C_cols((size_t)hh), D_cols((size_t)hh);
+    for (int idx = 0; idx < hh; ++idx) {
+        A_cols[(size_t)idx] = mat_c_alloc(K, 1);
+        B_cols[(size_t)idx] = mat_c_alloc(K, 1);
+        C_cols[(size_t)idx] = mat_c_alloc(K, 1);
+        D_cols[(size_t)idx] = mat_c_alloc(K, 1);
+    }
+    std::vector<double> Yaa_re((size_t)hh), Yaa_im((size_t)hh);
+    std::vector<double> Yab_re((size_t)hh), Yab_im((size_t)hh);
+    std::vector<double> Yba_re((size_t)hh), Yba_im((size_t)hh);
+    std::vector<double> Ybb_re((size_t)hh), Ybb_im((size_t)hh);
+    std::vector<double> Y21inv_re((size_t)hh), Y21inv_im((size_t)hh);
+    std::vector<double> tmp_re((size_t)hh), tmp_im((size_t)hh);
+    std::vector<double> A_re((size_t)hh), A_im((size_t)hh);
+    std::vector<double> B_re((size_t)hh), B_im((size_t)hh);
+    std::vector<double> Cmat_re((size_t)hh), Cmat_im((size_t)hh);
+    std::vector<double> D_re((size_t)hh), D_im((size_t)hh);
+    for (int k = 0; k < K; ++k) {
+        rf_partition_y_blocks(Y_data, N, k,
+                                Yaa_re, Yaa_im, Yab_re, Yab_im,
+                                Yba_re, Yba_im, Ybb_re, Ybb_im);
+        complex_mat_inv_2neq(h, Yba_re.data(), Yba_im.data(),
+                              Y21inv_re.data(), Y21inv_im.data());
+        cmat_mul_rect(h, h, h, Ybb_re.data(), Ybb_im.data(),
+                                Y21inv_re.data(), Y21inv_im.data(),
+                                A_re.data(), A_im.data());
+        for (int i = 0; i < hh; ++i) {
+            A_re[(size_t)i] = -A_re[(size_t)i];
+            A_im[(size_t)i] = -A_im[(size_t)i];
+        }
+        for (int i = 0; i < hh; ++i) {
+            B_re[(size_t)i] = -Y21inv_re[(size_t)i];
+            B_im[(size_t)i] = -Y21inv_im[(size_t)i];
+        }
+        cmat_mul_rect(h, h, h, Yab_re.data(), Yab_im.data(),
+                                Y21inv_re.data(), Y21inv_im.data(),
+                                tmp_re.data(), tmp_im.data());
+        cmat_mul_rect(h, h, h, tmp_re.data(), tmp_im.data(),
+                                Ybb_re.data(), Ybb_im.data(),
+                                Cmat_re.data(), Cmat_im.data());
+        for (int i = 0; i < hh; ++i) {
+            Cmat_re[(size_t)i] = -(Yaa_re[(size_t)i] - Cmat_re[(size_t)i]);
+            Cmat_im[(size_t)i] = -(Yaa_im[(size_t)i] - Cmat_im[(size_t)i]);
+        }
+        for (int i = 0; i < hh; ++i) {
+            D_re[(size_t)i] = -tmp_re[(size_t)i];
+            D_im[(size_t)i] = -tmp_im[(size_t)i];
+        }
+        for (int idx = 0; idx < hh; ++idx) {
+            A_cols[(size_t)idx]->re[k] = A_re[(size_t)idx];
+            A_cols[(size_t)idx]->im[k] = A_im[(size_t)idx];
+            B_cols[(size_t)idx]->re[k] = B_re[(size_t)idx];
+            B_cols[(size_t)idx]->im[k] = B_im[(size_t)idx];
+            C_cols[(size_t)idx]->re[k] = Cmat_re[(size_t)idx];
+            C_cols[(size_t)idx]->im[k] = Cmat_im[(size_t)idx];
+            D_cols[(size_t)idx]->re[k] = D_re[(size_t)idx];
+            D_cols[(size_t)idx]->im[k] = D_im[(size_t)idx];
+        }
+    }
+    matlab_struct *out = matlab_struct_new();
+    char fname[8];
+    for (int i = 1; i <= h; ++i) {
+        for (int j = 1; j <= h; ++j) {
+            int idx = (i - 1) * h + (j - 1);
+            int fn;
+            fn = snprintf(fname, sizeof(fname), "A%d%d", i, j);
+            matlab_struct_set_mat(out, fname, fn,
+                                   (matlab_mat *)A_cols[(size_t)idx]);
+            fn = snprintf(fname, sizeof(fname), "B%d%d", i, j);
+            matlab_struct_set_mat(out, fname, fn,
+                                   (matlab_mat *)B_cols[(size_t)idx]);
+            fn = snprintf(fname, sizeof(fname), "C%d%d", i, j);
+            matlab_struct_set_mat(out, fname, fn,
+                                   (matlab_mat *)C_cols[(size_t)idx]);
+            fn = snprintf(fname, sizeof(fname), "D%d%d", i, j);
+            matlab_struct_set_mat(out, fname, fn,
+                                   (matlab_mat *)D_cols[(size_t)idx]);
+        }
+    }
+    matlab_struct_set_f64(out, "NumPorts", 8, (double)N);
+    matlab_struct_set_f64(out, "Z0",       2, z0);
+    matlab_struct_set_mat(out, "Frequencies", 11, F);
+    return out;
+}
+
+matlab_struct *matlab_rf_s2h_n(matlab_struct *data) {
+    if (!data) return matlab_struct_new();
+    int N = (int)matlab_struct_get_f64(data, "NumPorts", 8);
+    if (N < 2 || (N % 2) != 0 || N > 8) return matlab_struct_new();
+    int h = N / 2;
+    double z0 = matlab_struct_get_f64(data, "Z0", 2);
+    matlab_mat *F = matlab_struct_get_mat(data, "Frequencies", 11);
+    int K = F ? (int)(F->rows * F->cols) : 0;
+    matlab_struct *Y_data = matlab_rf_s2y_n(data);
+    int n2 = N * N;
+    std::vector<matlab_mat_c *> H_cols((size_t)n2);
+    for (int idx = 0; idx < n2; ++idx) H_cols[(size_t)idx] = mat_c_alloc(K, 1);
+    int hh = h * h;
+    std::vector<double> Yaa_re((size_t)hh), Yaa_im((size_t)hh);
+    std::vector<double> Yab_re((size_t)hh), Yab_im((size_t)hh);
+    std::vector<double> Yba_re((size_t)hh), Yba_im((size_t)hh);
+    std::vector<double> Ybb_re((size_t)hh), Ybb_im((size_t)hh);
+    std::vector<double> Yaa_inv_re((size_t)hh), Yaa_inv_im((size_t)hh);
+    std::vector<double> tmp_re((size_t)hh), tmp_im((size_t)hh);
+    std::vector<double> Hbb_re((size_t)hh), Hbb_im((size_t)hh);
+    std::vector<double> Hab_re((size_t)hh), Hab_im((size_t)hh);
+    std::vector<double> Hba_re((size_t)hh), Hba_im((size_t)hh);
+    for (int k = 0; k < K; ++k) {
+        rf_partition_y_blocks(Y_data, N, k,
+                                Yaa_re, Yaa_im, Yab_re, Yab_im,
+                                Yba_re, Yba_im, Ybb_re, Ybb_im);
+        complex_mat_inv_2neq(h, Yaa_re.data(), Yaa_im.data(),
+                              Yaa_inv_re.data(), Yaa_inv_im.data());
+        cmat_mul_rect(h, h, h, Yaa_inv_re.data(), Yaa_inv_im.data(),
+                                Yab_re.data(), Yab_im.data(),
+                                Hab_re.data(), Hab_im.data());
+        for (int i = 0; i < hh; ++i) {
+            Hab_re[(size_t)i] = -Hab_re[(size_t)i];
+            Hab_im[(size_t)i] = -Hab_im[(size_t)i];
+        }
+        cmat_mul_rect(h, h, h, Yba_re.data(), Yba_im.data(),
+                                Yaa_inv_re.data(), Yaa_inv_im.data(),
+                                Hba_re.data(), Hba_im.data());
+        cmat_mul_rect(h, h, h, Hba_re.data(), Hba_im.data(),
+                                Yab_re.data(), Yab_im.data(),
+                                tmp_re.data(), tmp_im.data());
+        for (int i = 0; i < hh; ++i) {
+            Hbb_re[(size_t)i] = Ybb_re[(size_t)i] - tmp_re[(size_t)i];
+            Hbb_im[(size_t)i] = Ybb_im[(size_t)i] - tmp_im[(size_t)i];
+        }
+        for (int i = 0; i < N; ++i) {
+            for (int j = 0; j < N; ++j) {
+                double re, im;
+                if (i < h && j < h) {
+                    re = Yaa_inv_re[(size_t)(i*h + j)];
+                    im = Yaa_inv_im[(size_t)(i*h + j)];
+                } else if (i < h && j >= h) {
+                    re = Hab_re[(size_t)(i*h + (j - h))];
+                    im = Hab_im[(size_t)(i*h + (j - h))];
+                } else if (i >= h && j < h) {
+                    re = Hba_re[(size_t)((i - h)*h + j)];
+                    im = Hba_im[(size_t)((i - h)*h + j)];
+                } else {
+                    re = Hbb_re[(size_t)((i - h)*h + (j - h))];
+                    im = Hbb_im[(size_t)((i - h)*h + (j - h))];
+                }
+                int idx = i * N + j;
+                H_cols[(size_t)idx]->re[k] = re;
+                H_cols[(size_t)idx]->im[k] = im;
+            }
+        }
+    }
+    matlab_struct *out = matlab_struct_new();
+    char fname[8];
+    for (int i = 1; i <= N; ++i) {
+        for (int j = 1; j <= N; ++j) {
+            int fn = snprintf(fname, sizeof(fname), "H%d%d", i, j);
+            int idx = (i - 1) * N + (j - 1);
+            matlab_struct_set_mat(out, fname, fn,
+                                   (matlab_mat *)H_cols[(size_t)idx]);
+        }
+    }
+    matlab_struct_set_f64(out, "NumPorts", 8, (double)N);
+    matlab_struct_set_f64(out, "Z0",       2, z0);
+    matlab_struct_set_mat(out, "Frequencies", 11, F);
+    return out;
+}
+
+/* ====================================================================== */
+/* §9.1.2 follow-on — newref renormalization.                              */
+/* ====================================================================== */
+/*
+ * Re-reference an N-port S-parameter struct from its current Z0 to a
+ * new scalar z0_new.  Per-frequency formula:
+ *
+ *   S_new = (S − Γ_a · I) · (I − Γ_a · S)⁻¹
+ *
+ * with Γ_a = (z_new − z_old) / (z_new + z_old).  When z_new = z_old
+ * the formula is the identity (Γ_a = 0); the shipped fast-path
+ * returns a copy of the input struct in that case. */
+matlab_struct *matlab_rf_newref(matlab_struct *data, double z0_new) {
+    if (!data) return matlab_struct_new();
+    int N = (int)matlab_struct_get_f64(data, "NumPorts", 8);
+    if (N < 1 || N > 9) return matlab_struct_new();
+    double z0_old = matlab_struct_get_f64(data, "Z0", 2);
+    matlab_mat *F = matlab_struct_get_mat(data, "Frequencies", 11);
+    int K = F ? (int)(F->rows * F->cols) : 0;
+    matlab_struct *out = matlab_struct_new();
+    if (z0_new == z0_old) {
+        /* Trivial case: copy unchanged. */
+        char fname[8];
+        for (int i = 1; i <= N; ++i) {
+            for (int j = 1; j <= N; ++j) {
+                int fn = snprintf(fname, sizeof(fname), "S%d%d", i, j);
+                matlab_mat_c *Sij =
+                    (matlab_mat_c *)matlab_struct_get_mat(data, fname, fn);
+                int n_freq = Sij ? (int)(Sij->rows * Sij->cols) : 0;
+                matlab_mat_c *copy = mat_c_alloc(n_freq, 1);
+                for (int k = 0; k < n_freq; ++k) {
+                    copy->re[k] = Sij->re[k];
+                    copy->im[k] = Sij->im[k];
+                }
+                matlab_struct_set_mat(out, fname, fn, (matlab_mat *)copy);
+            }
+        }
+        matlab_struct_set_f64(out, "NumPorts", 8, (double)N);
+        matlab_struct_set_f64(out, "Z0",       2, z0_new);
+        matlab_struct_set_mat(out, "Frequencies", 11, F);
+        return out;
+    }
+    double gamma_a = (z0_new - z0_old) / (z0_new + z0_old);
+    int n2 = N * N;
+    std::vector<matlab_mat_c *> out_cols((size_t)n2);
+    for (int idx = 0; idx < n2; ++idx) out_cols[(size_t)idx] = mat_c_alloc(K, 1);
+    std::vector<double> S_re((size_t)n2), S_im((size_t)n2);
+    std::vector<double> Snum_re((size_t)n2), Snum_im((size_t)n2);
+    std::vector<double> M_re((size_t)n2), M_im((size_t)n2);
+    std::vector<double> Inv_re((size_t)n2), Inv_im((size_t)n2);
+    std::vector<double> R_re((size_t)n2), R_im((size_t)n2);
+    for (int k = 0; k < K; ++k) {
+        gather_s_at_k(data, N, k, S_re, S_im);
+        /* M = I − Γ_a · S. */
+        for (int idx = 0; idx < n2; ++idx) {
+            M_re[(size_t)idx] = -gamma_a * S_re[(size_t)idx];
+            M_im[(size_t)idx] = -gamma_a * S_im[(size_t)idx];
+        }
+        for (int i = 0; i < N; ++i) M_re[(size_t)(i * N + i)] += 1.0;
+        complex_mat_inv_2neq(N, M_re.data(), M_im.data(),
+                              Inv_re.data(), Inv_im.data());
+        /* num = S − Γ_a · I. */
+        for (int idx = 0; idx < n2; ++idx) {
+            Snum_re[(size_t)idx] = S_re[(size_t)idx];
+            Snum_im[(size_t)idx] = S_im[(size_t)idx];
+        }
+        for (int i = 0; i < N; ++i) Snum_re[(size_t)(i * N + i)] -= gamma_a;
+        /* R = num · Inv. */
+        complex_mat_mul(N, Snum_re.data(), Snum_im.data(),
+                          Inv_re.data(), Inv_im.data(),
+                          R_re.data(), R_im.data());
+        for (int idx = 0; idx < n2; ++idx) {
+            out_cols[(size_t)idx]->re[k] = R_re[(size_t)idx];
+            out_cols[(size_t)idx]->im[k] = R_im[(size_t)idx];
+        }
+    }
+    char fname[8];
+    for (int i = 1; i <= N; ++i) {
+        for (int j = 1; j <= N; ++j) {
+            int fn = snprintf(fname, sizeof(fname), "S%d%d", i, j);
+            int idx = (i - 1) * N + (j - 1);
+            matlab_struct_set_mat(out, fname, fn,
+                                   (matlab_mat *)out_cols[(size_t)idx]);
+        }
+    }
+    matlab_struct_set_f64(out, "NumPorts", 8, (double)N);
+    matlab_struct_set_f64(out, "Z0",       2, z0_new);
+    matlab_struct_set_mat(out, "Frequencies", 11, F);
     return out;
 }
 

@@ -394,7 +394,8 @@ void Resolver::registerBuiltins() {
     "rfbudget", "rfwrite", "sparameters",
     /* RF-Tier-3.1 follow-on — rationalfit delay + passivity. */
     "rfDelayEstimate", "rfApplyDelay", "rfPassivityEnforce",
-    "rationalfitWeighted",
+    "rationalfitWeighted", "newref", "cascadeSparamsNFullK",
+    "sparamS2abcdN", "sparamS2hN",
   }) {
     registerBuiltin(N);
   }

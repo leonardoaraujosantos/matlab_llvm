@@ -176,6 +176,23 @@ polish all shipped:
 - `rationalfitWeighted(freqs, h_re, h_im, weight, nPoles, nIter)` —
   per-frequency weighted Vector Fitting.
 
+Tier 2 polish (generalizations of shipped code, all shipped):
+- `newref(spar, z0_new)` — renormalize an N-port S-parameter struct to
+  a new reference impedance via the Γ_a-renormalization formula.
+- `cascadeSparamsNFullK(A, B, k)` — Redheffer star product with
+  arbitrary inner-connection port count k (generalizes
+  `cascadeSparamsNFull`'s symmetric k = N/2 case to asymmetric outer
+  port counts N_A ≠ N_B).
+- `sparamS2abcdN(spar)` — N-port (even-N) ABCD via the Y-partition
+  formula.  Returns A_ij / B_ij / C_ij / D_ij blocks of size (N/2)².
+- `sparamS2hN(spar)` — N-port (even-N) H-parameters via the Y-
+  partition formula.  Stored as full N×N H_ij block-stitched matrix.
+- Native complex N×N LU decomposition with partial pivoting,
+  transparently replacing the 2N×2N real-equivalent path inside
+  `complex_mat_inv_2neq` (~4× speedup on every matrix inverse the RF
+  runtime performs).  The real-equivalent path stays as a fallback
+  when LU encounters a singular pivot.
+
 Algorithm coverage: **complete** — Vector Fitting with complex
 pairs, matrix algebra over arbitrary N (S↔Y/Z + Schur cascade +
 Schur port termination), all closed-form analyses, all cross-
