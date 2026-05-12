@@ -1610,6 +1610,29 @@ static std::string buildReplPrelude(const std::string &Src) {
      * cube + Touchstone reader land in a follow-on slice once
      * matrix-typed classdef property storage is in. */
     {false, "RFSparameters", "rf_class_sparameters.m"},
+    /* RF Toolbox sibling network-parameter classdefs (RF-Tier-1
+     * follow-on).  Each is a property-holder skeleton paralleling
+     * RFSparameters; population from sparamS2y / sparamS2z / sparamS2h
+     * / sparamS2abcd happens via direct assignment of the runtime
+     * helper's struct return. */
+    {false, "RFYparameters",     "rf_class_yparameters.m"},
+    {false, "RFZparameters",     "rf_class_zparameters.m"},
+    {false, "RFHparameters",     "rf_class_hparameters.m"},
+    {false, "RFGparameters",     "rf_class_gparameters.m"},
+    {false, "RFAbcdparameters",  "rf_class_abcdparameters.m"},
+    {false, "RFTparameters",     "rf_class_tparameters.m"},
+    /* RF circuit hierarchy (RF-Tier-4 partial).  Amplifier / mixer /
+     * passive blocks cascade through rfbudgetFriis via per-block
+     * NF / Gain / IP3 columns; the classdef is the user-facing
+     * property holder. */
+    {false, "RFCktAmplifier",    "rf_class_amplifier.m"},
+    {false, "RFCktMixer",        "rf_class_mixer.m"},
+    {false, "RFCktPassive",      "rf_class_passive.m"},
+    {false, "RFCktCascade",      "rf_class_cascade.m"},
+    {false, "RFCktParallel",     "rf_class_parallel.m"},
+    {false, "RFCktSeries",       "rf_class_series.m"},
+    {false, "RFCktShunt",        "rf_class_shunt.m"},
+    {false, "RFRational",        "rf_class_rfrational.m"},
     /* RF Propagation site descriptors (MathWorks txsite / rxsite
      * shape).  Constructed via the kwarg-sugar — every property is
      * scalar or string (no matrices), so the catalog skeleton
@@ -8490,6 +8513,13 @@ int main(int Argc, char **Argv) {
       "AntDipole", "AntMonopole",
       /* RF catalog (RF-Tier-1). */
       "RFSparameters",
+      /* RF sibling network-parameter classdefs. */
+      "RFYparameters", "RFZparameters", "RFHparameters",
+      "RFGparameters", "RFAbcdparameters", "RFTparameters",
+      /* RF circuit hierarchy. */
+      "RFCktAmplifier", "RFCktMixer", "RFCktPassive",
+      "RFCktCascade", "RFCktParallel", "RFCktSeries", "RFCktShunt",
+      "RFRational",
       /* RF Propagation site descriptors. */
       "TxSite", "RxSite", "PropagationModel",
     };
@@ -8529,6 +8559,34 @@ int main(int Argc, char **Argv) {
       return "ant_class_monopole.m";
     if (ClsName == "RFSparameters")
       return "rf_class_sparameters.m";
+    if (ClsName == "RFYparameters")
+      return "rf_class_yparameters.m";
+    if (ClsName == "RFZparameters")
+      return "rf_class_zparameters.m";
+    if (ClsName == "RFHparameters")
+      return "rf_class_hparameters.m";
+    if (ClsName == "RFGparameters")
+      return "rf_class_gparameters.m";
+    if (ClsName == "RFAbcdparameters")
+      return "rf_class_abcdparameters.m";
+    if (ClsName == "RFTparameters")
+      return "rf_class_tparameters.m";
+    if (ClsName == "RFCktAmplifier")
+      return "rf_class_amplifier.m";
+    if (ClsName == "RFCktMixer")
+      return "rf_class_mixer.m";
+    if (ClsName == "RFCktPassive")
+      return "rf_class_passive.m";
+    if (ClsName == "RFCktCascade")
+      return "rf_class_cascade.m";
+    if (ClsName == "RFCktParallel")
+      return "rf_class_parallel.m";
+    if (ClsName == "RFCktSeries")
+      return "rf_class_series.m";
+    if (ClsName == "RFCktShunt")
+      return "rf_class_shunt.m";
+    if (ClsName == "RFRational")
+      return "rf_class_rfrational.m";
     if (ClsName == "TxSite")
       return "rf_class_txsite.m";
     if (ClsName == "RxSite")

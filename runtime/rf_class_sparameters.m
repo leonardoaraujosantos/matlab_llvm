@@ -1,24 +1,43 @@
-% RFSparameters — RF Toolbox network parameter container.
+% RFSparameters — RF Toolbox network parameter container (2-port).
 %
-% MATLAB API: `sparameters(filename)` reads a Touchstone .sNp file
-% and exposes `Parameters` (P×P×F complex cube), `Frequencies`
-% (F×1 column), `NumPorts`, and `Impedance` (reference, default
-% 50 Ω).
+% MathWorks-faithful semantics on a CamelCase class name (the
+% lowercase `sparameters` constructor name is reserved for a future
+% slice that adds a name-resolution alias).
 %
-% v1 (this slice) ships only the catalog skeleton: NumPorts +
-% Impedance scalar properties, manual-construction form
-% `RFSparameters(num_ports, z0)`.  The actual Touchstone parser
-% + 3-D complex Parameters cube + Frequencies vector land in a
-% follow-on slice (matlab_rf_read_touchstone runtime entry +
-% matrix-property storage for classdef instances).
+% The 2-port subset of the surface defined in docs/comm_toolbox_roadmap.md
+% §9.1.  Holds:
+%   NumPorts      — number of ports (2 today)
+%   Impedance     — reference impedance, Ω (default 50)
+%   S11, S12,
+%   S21, S22      — complex column vectors (length NumFreqs)
+%   Frequencies   — real column vector, Hz
+%
+% v1 ships TWO constructor forms:
+%   p = RFSparameters()             % skeleton, 2 ports, 50 Ω
+%   p = RFSparameters(np, z0)       % skeleton, custom np / z0
+%
+% Touchstone loading goes through the function-form `touchstoneRead`:
+%   data = touchstoneRead('amp.s2p');
+%   p = RFSparameters(2, data.Z0);
+%   p.S11 = data.S11;  p.S12 = data.S12;
+%   p.S21 = data.S21;  p.S22 = data.S22;
+%   p.Frequencies = data.Frequencies;
+%
+% The function-form analyses (gammaIn, gammaOut, vswr, powerGain,
+% stabilityK, stabilityMu, s2tf, cascadeSparams2) accept the four S
+% column vectors directly, so dropping in the struct fields straight
+% out of touchstoneRead skips the classdef boilerplate when the user
+% just wants numbers out.
 
 classdef RFSparameters < handle
     properties
-        % Number of ports the network has (typically 2 for a
-        % standard two-port amplifier / filter / cable).
         NumPorts
-        % Reference impedance in ohms.  Default 50 Ω (RF standard).
         Impedance
+        S11
+        S12
+        S21
+        S22
+        Frequencies
     end
     methods
         function obj = RFSparameters(num_ports, z0)

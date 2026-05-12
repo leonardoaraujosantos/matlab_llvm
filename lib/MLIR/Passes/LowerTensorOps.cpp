@@ -4582,6 +4582,194 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"ldpcDecodeMS",  "matlab_comm_ldpc_decode_ms",   1, "ppf"},
       {"turboEncode",   "matlab_comm_turbo_encode",     1, "ppp"},
       {"turboDecode",   "matlab_comm_turbo_decode",     1, "pppppf"},
+      /* === RF Toolbox companion (RF-Tier-1 + RF-Tier-2) ===
+       * docs/comm_toolbox_roadmap.md §9.  Function-form, 2-port
+       * subset.  Touchstone v1 .s2p I/O + per-frequency closed-form
+       * S-parameter analyses + Friis cascade for rfbudget. */
+      /* §9.1.3 Touchstone I/O.  Reader returns a struct with S11/
+       * S12/S21/S22 (complex columns), Frequencies (real column),
+       * Z0 and NumPorts (scalars).  Writer emits .s2p in MA format. */
+      {"touchstoneRead",      "matlab_rf_touchstone_read",       1, "p"},
+      {"touchstoneWriteS2p",  "matlab_rf_touchstone_write_s2p",  0, "pppppppf"},
+      /* Typed-getter helpers for the touchstoneRead return struct.
+       * Needed because struct.S11 routes through matlab_struct_get_f64
+       * by default; users call tsS11(data) / tsS12(data) / ... to get
+       * the matrix-typed columns. */
+      {"tsS11",     "matlab_rf_ts_s11",        1, "p"},
+      {"tsS12",     "matlab_rf_ts_s12",        1, "p"},
+      {"tsS21",     "matlab_rf_ts_s21",        1, "p"},
+      {"tsS22",     "matlab_rf_ts_s22",        1, "p"},
+      {"tsFreqs",   "matlab_rf_ts_freqs",      1, "p"},
+      {"tsZ0",      "matlab_rf_ts_z0",         0, "p"},
+      {"tsNumPorts","matlab_rf_ts_num_ports",  0, "p"},
+      /* Generic multi-port S(i,j) getter — extracts S<i><j> field. */
+      {"tsSij",     "matlab_rf_ts_sij",        1, "pff"},
+      {"tsYij",     "matlab_rf_ts_yij",        1, "pff"},
+      {"tsZij",     "matlab_rf_ts_zij",        1, "pff"},
+      {"tsHij",     "matlab_rf_ts_hij",        1, "pff"},
+      {"tsGij",     "matlab_rf_ts_gij",        1, "pff"},
+      {"tsTij",     "matlab_rf_ts_tij",        1, "pff"},
+      {"tsAbcdA",   "matlab_rf_ts_abcd_a",     1, "p"},
+      {"tsAbcdB",   "matlab_rf_ts_abcd_b",     1, "p"},
+      {"tsAbcdC",   "matlab_rf_ts_abcd_c",     1, "p"},
+      {"tsAbcdD",   "matlab_rf_ts_abcd_d",     1, "p"},
+      /* N-port S↔Y / S↔Z conversions.  Take the touchstoneRead struct
+       * directly, return a parallel struct with Y_ij / Z_ij fields. */
+      {"sparamS2yN",          "matlab_rf_s2y_n",                 1, "p"},
+      {"sparamS2zN",          "matlab_rf_s2z_n",                 1, "p"},
+      /* snp2smp port-extraction.  Args: data struct, port-list column,
+       * target m-port count.  v1 assumes matched terminations at the
+       * dropped ports. */
+      {"snp2smp",             "matlab_rf_snp2smp",               1, "ppf"},
+      /* Non-matched termination variant: per-dropped-port termination
+       * impedance via the Schur-complement update. */
+      {"snp2smpZ",            "matlab_rf_snp2smp_z",             1, "pppf"},
+      /* Multi-port Touchstone writer.  Takes a data struct (any N) and
+       * writes a Touchstone v1 .sNp file in MA format.  Auto-detects
+       * port count from the struct's NumPorts field. */
+      {"touchstoneWrite",     "matlab_rf_touchstone_write",      0, "pp"},
+      /* N-port cascade (diagonal approximation for weakly-coupled
+       * networks). */
+      {"cascadeSparamsN",     "matlab_rf_cascade_n",             1, "pp"},
+      /* Full Redheffer star-product N-port cascade (k = N/2 case).
+       * Exact for arbitrarily-coupled networks of even port count. */
+      {"cascadeSparamsNFull", "matlab_rf_cascade_n_full",        1, "pp"},
+      /* 2-port cross-conversions: S↔H, S↔ABCD.  Per-frequency
+       * closed-form expressions. */
+      {"sparamS2h",           "matlab_rf_s2h",                   1, "ppppf"},
+      {"sparamS2abcd",        "matlab_rf_s2abcd",                1, "ppppf"},
+      /* Inverse cross-conversions: H→S, ABCD→S. */
+      {"sparamH2s",           "matlab_rf_h2s",                   1, "ppppf"},
+      {"sparamAbcd2s",        "matlab_rf_abcd2s",                1, "ppppf"},
+      /* Additional cross-conversions: S↔G, S↔T, plus the Smith-chart
+       * Γ ↔ Z helpers. */
+      {"sparamS2g",           "matlab_rf_s2g",                   1, "ppppf"},
+      {"sparamG2s",           "matlab_rf_g2s",                   1, "ppppf"},
+      {"sparamS2t",           "matlab_rf_s2t",                   1, "pppp"},
+      {"sparamT2s",           "matlab_rf_t2s",                   1, "pppp"},
+      {"gamma2z",             "matlab_rf_gamma2z",               1, "pf"},
+      {"z2gamma",             "matlab_rf_z2gamma",               1, "pf"},
+      /* T / Pi matchingnetwork topologies.  q_target argument
+       * controls the high-Q virtual-impedance level. */
+      {"matchingnetworkT",    "matlab_rf_matchingnetwork_t",     1, "ffffff"},
+      {"matchingnetworkPi",   "matlab_rf_matchingnetwork_pi",    1, "ffffff"},
+      /* §9.1.2 S↔Y / S↔Z conversions (2-port). */
+      {"sparamS2y",           "matlab_rf_s2y",                   1, "ppppf"},
+      {"sparamS2z",           "matlab_rf_s2z",                   1, "ppppf"},
+      /* §9.2.1 closed-form analyses (2-port). */
+      {"gammaIn",             "matlab_rf_gamma_in",              1, "ppppff"},
+      {"gammaOut",            "matlab_rf_gamma_out",             1, "ppppff"},
+      {"vswr",                "matlab_rf_vswr_from_gamma",       1, "p"},
+      /* type_code: 0=Gt, 1=Ga, 2=Gp.  Returns linear gain
+       * (caller applies 10*log10 for dB). */
+      {"powerGain",           "matlab_rf_power_gain",            1, "ppppffff"},
+      {"stabilityK",          "matlab_rf_stability_k",           1, "pppp"},
+      /* type: 0=mu1 (source-side), 1=mu2 (load-side). */
+      {"stabilityMu",         "matlab_rf_stability_mu",          1, "ppppf"},
+      {"s2tf",                "matlab_rf_s2tf",                  1, "ppppfff"},
+      /* §9.2.2 cascade — 2-port T-parameter chain.  Args:
+       * a.S11/12/21/22, b.S11/12/21/22.  Returns struct with
+       * S11/S12/S21/S22 fields. */
+      {"cascadeSparams2",     "matlab_rf_cascade2",              1, "pppppppp"},
+      /* §9.2.3 rfbudget Friis cascade.  Args: gains_dB (col),
+       * nfs_dB (col), ip3_dBm (col), p_in_dBm, bw_Hz.  Returns
+       * struct (Gain_dB / NF_dB / IP3_in_dBm / OutputPower_dBm /
+       * NoiseFloor_dBm / SNR_dB / ...). */
+      {"rfbudgetFriis",       "matlab_rf_budget_friis",          1, "pppff"},
+      /* §9.3.1 Vector Fitting (Gustavsen-Semlyen 1999).  Real-pole
+       * MVP — fits measured H(jω) with Σ rⱼ/(s − pⱼ) + d.  Returns
+       * a struct with Poles / Residues (real columns), D, Order,
+       * FitError.  Args: freq (col), h_re (col), h_im (col),
+       * nPoles, nIter. */
+      {"rationalfit",         "matlab_rf_rationalfit",           1, "pppff"},
+      /* §9.3.1 freqresp — evaluate the rational at frequencies.
+       * Args: mdl_struct, freq (col).  Returns complex column. */
+      {"freqresp",            "matlab_rf_freqresp",              1, "pp"},
+      /* Typed-getter helpers for the rationalfit return struct.
+       * Mirrors the touchstoneRead `tsS11` / `tsZ0` pattern. */
+      {"rfPoles",             "matlab_rf_rf_poles",              1, "p"},
+      {"rfResidues",          "matlab_rf_rf_residues",           1, "p"},
+      {"rfD",                 "matlab_rf_rf_d",                  0, "p"},
+      {"rfOrder",             "matlab_rf_rf_order",              0, "p"},
+      {"rfFitError",          "matlab_rf_rf_fit_error",          0, "p"},
+      /* §9.3.2 — time-domain RF.  timeresp(mdl, u, ts) drives the
+       * fitted rational with the input signal `u`; s2tdr / s2tdt
+       * fit then drive a unit step (TDR = reflection step, TDT =
+       * transmission step). */
+      {"timeresp",            "matlab_rf_timeresp",              1, "ppf"},
+      {"s2tdr",               "matlab_rf_s2tdr",                 1, "ppfff"},
+      {"s2tdt",               "matlab_rf_s2tdt",                 1, "ppfff"},
+      /* §9.1.2 mixed-mode 4-port.  block_code: 0=dd, 1=dc, 2=cd,
+       * 3=cc.  Args: 16 single-ended ptr columns + block code. */
+      {"sparamS2smm",         "matlab_rf_s2smm",                 1,
+                                                                  "ppppppppppppppppf"},
+      /* §9.4.3 Smith chart numeric grid.  r_norm = constant-r ring
+       * to draw (1.0 = matched), n_pts = points around the circle. */
+      {"smithGrid",           "matlab_rf_smith_grid",            1, "ff"},
+      {"smithRCircle",        "matlab_rf_smith_rcircle",         1, "p"},
+      {"smithUnitCircle",     "matlab_rf_smith_unit",            1, "p"},
+      /* §9.3.1 follow-on — passivity test.  Returns max |H(jω)|
+       * over a dense log-spaced frequency sweep. */
+      {"passivity",           "matlab_rf_passivity",             0, "pff"},
+      /* §9.4.1 matchingnetwork — L-section auto-synthesis.  Args:
+       * Re(Zs), Im(Zs), Re(Zl), Im(Zl), freq.  Returns a struct with
+       * Topology / Q / L / C component values + return loss. */
+      {"matchingnetwork",     "matlab_rf_matchingnetwork",       1, "fffff"},
+      /* §9.3.3 transmission-line geometries.  Each takes geometry
+       * parameters + a freq column + reference z0.  Returns the
+       * 2-port S-parameter struct (S11/S12/S21/S22 complex columns). */
+      {"rfckt_txline",        "matlab_rf_txline",                1, "fffpf"},
+      {"rfckt_coaxial",       "matlab_rf_coaxial",               1, "ffffpf"},
+      {"rfckt_microstrip",    "matlab_rf_microstrip",            1, "ffffpf"},
+      {"rfckt_cpw",           "matlab_rf_cpw",                   1, "ffffpf"},
+      {"rfckt_parallelplate", "matlab_rf_parallelplate",         1, "ffffpf"},
+      {"rfckt_twowire",       "matlab_rf_twowire",               1, "ffffpf"},
+      /* LC filter blocks.  topology: 0 = lowpass-tee, 1 = lowpass-pi,
+       * 2 = highpass-tee, 3 = highpass-pi.  Args: topology, comp1,
+       * comp2, freqs, z0. */
+      {"rfckt_lcfilter",      "matlab_rf_lc_filter",             1, "fffpf"},
+      /* 4-element LC bandpass / bandstop (codes 4..7).  Args:
+       * topology, L1, C1, L2, C2, freqs, z0. */
+      {"rfckt_lcfilter4",     "matlab_rf_lc_filter4",            1, "fffffpf"},
+      /* RFCkt block analyze helpers — synthesize S-parameter structs
+       * from scalar block properties (used by classdef analyze methods). */
+      {"rfAnalyzeAmplifier",  "matlab_rf_analyze_amplifier",     1, "fpf"},
+      {"rfAnalyzePassive",    "matlab_rf_analyze_passive",       1, "fpf"},
+      {"rfAnalyzeSeries",     "matlab_rf_analyze_series",        1, "ffpf"},
+      {"rfAnalyzeShunt",      "matlab_rf_analyze_shunt",         1, "ffpf"},
+      /* §9.2.1 follow-on — conjugate-match Γ + group delay +
+       * arbitrary-port s2tf + per-stage rfbudget + stability circles. */
+      {"gammams",             "matlab_rf_gammams",               1, "pppp"},
+      {"gammaml",             "matlab_rf_gammaml",               1, "pppp"},
+      {"groupdelay",          "matlab_rf_groupdelay",            1, "pp"},
+      {"s2tfPort",            "matlab_rf_s2tf_port",             1, "ppppfffff"},
+      {"rfbudgetTable",       "matlab_rf_budget_table",          1, "pppff"},
+      {"stabCircleLoad",      "matlab_rf_stab_circle_load",      1, "pppp"},
+      {"stabCircleSource",    "matlab_rf_stab_circle_source",    1, "pppp"},
+      /* MathWorks-faithful lowercase aliases.  Same runtime targets,
+       * just additional registered names so tutorial-style code from
+       * MathWorks docs runs verbatim. */
+      {"s2y",     "matlab_rf_s2y",              1, "ppppf"},
+      {"s2z",     "matlab_rf_s2z",              1, "ppppf"},
+      {"s2h",     "matlab_rf_s2h",              1, "ppppf"},
+      {"s2g",     "matlab_rf_s2g",              1, "ppppf"},
+      {"s2abcd",  "matlab_rf_s2abcd",           1, "ppppf"},
+      {"s2t",     "matlab_rf_s2t",              1, "pppp"},
+      {"h2s",     "matlab_rf_h2s",              1, "ppppf"},
+      {"g2s",     "matlab_rf_g2s",              1, "ppppf"},
+      {"abcd2s",  "matlab_rf_abcd2s",           1, "ppppf"},
+      {"t2s",     "matlab_rf_t2s",              1, "pppp"},
+      {"rfbudget",    "matlab_rf_budget_friis",     1, "pppff"},
+      {"rfwrite",     "matlab_rf_touchstone_write", 0, "pp"},
+      {"sparameters", "matlab_rf_touchstone_read",  1, "p"},
+      /* §9.3.1 follow-on — rationalfit pre-fit delay extraction +
+       * post-fit passivity enforcement. */
+      {"rfDelayEstimate",    "matlab_rf_delay_estimate",     0, "ppp"},
+      {"rfApplyDelay",       "matlab_rf_apply_delay",        1, "pppf"},
+      {"rfPassivityEnforce", "matlab_rf_enforce_passivity",  1, "pff"},
+      /* Weighted Vector Fitting — per-frequency weight column scales
+       * the LS rows so higher-weight frequencies dominate the fit. */
+      {"rationalfitWeighted", "matlab_rf_rationalfit_w",     1, "ppppff"},
     };
 
     // Pick the first entry with name + arity + TYPE match so overloaded

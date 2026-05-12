@@ -351,6 +351,50 @@ void Resolver::registerBuiltins() {
     "polarEncode", "polarSCdecode",
     "ldpcEncode",  "ldpcDecodeMS",
     "turboEncode", "turboDecode",
+    /* RF Toolbox companion (docs/comm_toolbox_roadmap.md §9).
+     * Function-form 2-port subset: Touchstone I/O + closed-form
+     * S-parameter analyses + Friis cascade. */
+    "touchstoneRead", "touchstoneWriteS2p",
+    "tsS11", "tsS12", "tsS21", "tsS22",
+    "tsFreqs", "tsZ0", "tsNumPorts",
+    "tsSij", "tsYij", "tsZij", "tsHij", "tsGij", "tsTij",
+    "tsAbcdA", "tsAbcdB", "tsAbcdC", "tsAbcdD",
+    "sparamS2yN", "sparamS2zN", "snp2smp", "snp2smpZ",
+    "touchstoneWrite", "cascadeSparamsN", "cascadeSparamsNFull",
+    "sparamS2h", "sparamS2abcd",
+    "sparamH2s", "sparamAbcd2s",
+    "sparamS2g", "sparamG2s", "sparamS2t", "sparamT2s",
+    "gamma2z", "z2gamma",
+    "matchingnetworkT", "matchingnetworkPi",
+    "sparamS2y", "sparamS2z",
+    "gammaIn", "gammaOut", "vswr",
+    "powerGain", "stabilityK", "stabilityMu", "s2tf",
+    "cascadeSparams2", "rfbudgetFriis",
+    /* RF-Tier-3.1 — Vector Fitting + freqresp on the fitted model. */
+    "rationalfit", "freqresp",
+    "rfPoles", "rfResidues", "rfD", "rfOrder", "rfFitError",
+    /* RF-Tier-3.2 — time-domain RF (timeresp + step-driven TDR/TDT). */
+    "timeresp", "s2tdr", "s2tdt",
+    /* RF-Tier-2 mixed-mode 4-port + Smith chart grid + passivity. */
+    "sparamS2smm", "smithGrid", "smithRCircle", "smithUnitCircle", "passivity",
+    /* RF-Tier-4.1 matchingnetwork L-section auto-synthesis. */
+    "matchingnetwork",
+    /* RF-Tier-3.3 transmission-line geometries. */
+    "rfckt_txline", "rfckt_coaxial", "rfckt_microstrip",
+    "rfckt_cpw", "rfckt_parallelplate", "rfckt_twowire",
+    "rfckt_lcfilter", "rfckt_lcfilter4",
+    "rfAnalyzeAmplifier", "rfAnalyzePassive",
+    "rfAnalyzeSeries", "rfAnalyzeShunt",
+    "gammams", "gammaml", "groupdelay",
+    "s2tfPort", "rfbudgetTable",
+    "stabCircleLoad", "stabCircleSource",
+    /* MathWorks-faithful lowercase aliases. */
+    "s2y", "s2z", "s2h", "s2g", "s2abcd", "s2t",
+    "h2s", "g2s", "abcd2s", "t2s",
+    "rfbudget", "rfwrite", "sparameters",
+    /* RF-Tier-3.1 follow-on — rationalfit delay + passivity. */
+    "rfDelayEstimate", "rfApplyDelay", "rfPassivityEnforce",
+    "rationalfitWeighted",
   }) {
     registerBuiltin(N);
   }

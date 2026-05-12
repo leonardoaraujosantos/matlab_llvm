@@ -803,7 +803,7 @@ unchanged to the function-form layer.
 | `coverage_grid_multi` with best-server / sum-power / SINR (3.4.3) | 1 wk | 🔵 | none — **closes PROP-Tier-3; user's "two-pole + sectors + directionals" scenario lights up** |
 | RX-side directional (3.4.4) | 2 sess | 🔵 | none |
 | ANT-Tier-2 pattern bridge (3.4.5) | 1 sess | 🔵 | only on ANT-Tier-2 shipping |
-| `propagationModel` / `txsite` / `rxsite` / `pathloss` / `coverage` / `los` / `link` classdef wrappers (3.5) | 3 sess | 🔵 | **gated on SO fix** |
+| `propagationModel` / `txsite` / `rxsite` / `pathloss` / `coverage` / `los` / `link` classdef wrappers (3.5) | 3 sess | ✅ shipped (`TxSite` / `RxSite` / `PropagationModel` CamelCase classdefs with kwarg ctor sugar; `pathloss(pm, rx, tx)` / `link(tx, rx)` / `los(tx, rx)` / `coverage(tx, pm, ...)` / `sigstrength(rx, tx, pm)` / `show(...)` methods all dispatch through the §3.1–§3.4 function-form runtime) | — |
 
 **Function-form total (§3.1 + §3.2 + §3.3 + §3.4)**: ~7 weeks.
 Reaches the user's full PtP+ITM+CoverageMap+Multi-Site-Directional
@@ -993,6 +993,7 @@ shipped, so this is one line).
 | `rcosdesign` / `gaussdesign` (4.7) | 1 sess | ✅ shipped (RRC + full RC via the `shape` tag; unit-energy normalised; Gaussian sum-normalised) |
 | `berawgn` / `bercoding` (4.8) | 1 wk | ✅ shipped (closed-form for PAM / PSK / QAM / DPSK / FSK-coherent / FSK-noncoherent; uses libc `erfc`. `bercoding` deferred to Tier-3 coded slice.) |
 | `scatterplot` (4.9) | 1 sess | ✅ shipped (numeric form returning N×2 real (re, im) pairs) |
+| `eyediagram` (4.9 sibling) | 1 sess | ✅ shipped (n × num_traces matrix; real and complex inputs supported via magic-tag dispatch — `eyediagram(real(rxSig), 2*sps)` / `eyediagram(rxSig, 2*sps)` both work; `examples/rf/scatter_eye_qpsk.m` exercises the canonical QPSK pulse-shape → AWGN → inspect pipeline) |
 | Closure test (`examples/comm/ber_qam_montecarlo.m`) | — | ✅ shipped (16-QAM Monte-Carlo with `berawgn` overlay — sim BER tracks theory within ~10% relative from 4 dB Eb/N0 onward at 20 k symbols/point) |
 
 **Total**: ~3 weeks. End of Tier 2, this works:
@@ -1131,7 +1132,7 @@ convolutional variant has internal state across `step` calls.
 
 | Primitive | Effort | Status |
 |---|---|---|
-| CRC System Objects (5.1) | 1 wk | 🔵 — gates SO infrastructure |
+| CRC System Objects (5.1) | 1 wk | ✅ shipped (`CommCRCGenerator` / `CommCRCDetector` classdef System Objects wrapping the function-form `crcGenerate` / `crcCheck` / `crcStrip`; validates the SO infrastructure) |
 | CRC function-form (5.1 legacy) | 1 sess | ✅ shipped (`crcGenerate` / `crcCheck` / `crcStrip` — sidesteps the SO surface) |
 | `poly2trellis` / `convenc` / `vitdec` (5.2) | 2 wk | ✅ shipped (function-form trellis struct + state-machine encoder + hard-decision Viterbi with traceback; opmode 0 trunc / 1 term, dectype 0 unquant / 1 hard. Soft-decision Viterbi stays for the Tier-4 follow-on.) |
 | `oct2dec` bridge (5.2 helper) | 1 sess | ✅ shipped (decimal-from-octal-decimal converter so `oct2dec(171) = 121` lets users transcribe textbook generators verbatim) |
@@ -1583,26 +1584,39 @@ interactive tool is the bulk of MATLAB's effort; we skip it).
 
 | Primitive | Effort | Status |
 |---|---|---|
-| `sparameters` + 6 sibling classdefs (8.1.1) | 3 sess | 🔵 |
-| All-to-all conversions s↔y↔z↔h↔g↔abcd↔t (8.1.2) | 3 sess | 🔵 |
-| Touchstone v1 read + write (8.1.3) | 3 sess | 🔵 — closes RF-Tier-1 |
-| Closed-form analyses: `s2tf`, `gammain`, `vswr`, `powergain`, stability (8.2.1) | 1 wk | 🔵 |
-| Cascade / `snp2smp` / de-embed (8.2.2) | 3 sess | 🔵 |
-| `rfbudget` (Friis solver) (8.2.3) | 3 sess | 🔵 — closes RF-Tier-2 |
-| `rationalfit` + Vector Fitting (8.3.1) | 2 wk | 🔵 |
-| `s2tdr` / `s2tdt` time-domain (8.3.2) | 3 sess | 🔵 |
-| Transmission line objects (8.3.3) | 1 wk | 🔵 — closes RF-Tier-3 |
-| `matchingnetwork` (8.4.1) | 1 wk | 🔵 |
-| `rfckt.*` hierarchy subset (8.4.2) | 1 wk | 🔵 |
-| Smith chart numerics (8.4.3) | 3 sess | 🔵 — closes RF-Tier-4 |
+| `RFSparameters` 2-port classdef (S11/S12/S21/S22/Frequencies/NumPorts/Impedance properties) (8.1.1) | 3 sess | ✅ shipped (2-port) |
+| Sibling network-parameter classdefs (Y / Z / H / G / ABCD / T) (8.1.1) | 3 sess | ✅ shipped — `RFYparameters` / `RFZparameters` / `RFHparameters` / `RFGparameters` / `RFAbcdparameters` / `RFTparameters` skeleton classdefs parallel `RFSparameters`. Hold the corresponding 2-port matrix-valued parameters + NumPorts / Impedance / Frequencies. Auto-detected by the prelude loader. |
+| All-to-all conversions s↔y↔z↔h↔g↔abcd↔t (8.1.2) | 3 sess | ✅ shipped — full cross-conversion grid: `sparamS2y` / `sparamS2z` (2-port) + `sparamS2yN` / `sparamS2zN` (general N-port via 2N×2N real-equivalent complex matrix algebra), `sparamS2h` + `sparamH2s`, `sparamS2abcd` + `sparamAbcd2s`, `sparamS2g` + `sparamG2s` (via H-inverse route), `sparamS2t` + `sparamT2s` (T-parameter chain). `tsYij` / `tsZij` / `tsHij` / `tsGij` / `tsTij` / `tsAbcdA-D` typed getters for any matrix entry. `gamma2z` / `z2gamma` Smith-chart impedance ↔ reflection helpers. |
+| `snp2smp` port extraction | 3 sess | ✅ shipped (`snp2smp(data, ports, m)` — matched-termination Schur-complement simplification; non-matched terminations 🔵) |
+| Touchstone v1 + v2 read + write (8.1.3) | 3 sess | ✅ shipped — v1 (.sNp) handles all common port counts with auto-detection from the `.sNp` extension; v2 (.ts) parser recognises `[Number of Ports]` / `[Reference]` / `[Two-Port Order]` / `[Network Data]` / `[End]` keywords on top of the v1 option-line parser.  `touchstoneRead` auto-selects on filename; `touchstoneWrite` writes any N-port v1.  `tsSij(data, i, j)` generic getter for any port pair. |
+| Closed-form analyses: `s2tf`, `gammain`, `vswr`, `powergain`, stability (8.2.1) | 1 wk | ✅ shipped (`gammaIn` / `gammaOut` / `vswr` / `powerGain` Gt-Ga-Gp / `stabilityK` Rollett / `stabilityMu` Edwards-Sinsky / `s2tf`) |
+| Cascade / `snp2smp` / de-embed (8.2.2) | 3 sess | ✅ shipped — 2-port `cascadeSparams2` via T-parameter chain, N-port `cascadeSparamsN` (diagonal approximation for weakly-coupled networks), full Redheffer star-product `cascadeSparamsNFull` (k = N/2, exact). `snp2smp` (matched terminations) + `snp2smpZ` (Schur complement with arbitrary non-z0 terminations at dropped ports). |
+| `rfbudget` (Friis solver) (8.2.3) | 3 sess | ✅ shipped (`rfbudgetFriis` returns cascaded Gain_dB / NF_dB / IP3_in_dBm / OutputPower / NoiseFloor / SNR / ThermalNoise struct) — **closes RF-Tier-2 MVP** |
+| `rationalfit` + Vector Fitting (8.3.1) | 2 wk | ✅ shipped — Gustavsen-Semlyen v2 with both real and complex-conjugate pole pairs. The `(α, β)` pole representation supports either kind; the relocation matrix M uses the real-arithmetic `[α β; -β α]` block form for complex pairs, eig auto-classifies eigenvalues, and the output stores complex Poles + complex Residues columns. `freqresp` / `passivity` / `timeresp` all consume complex poles via the layout-magic-aware getters. |
+| `passivity(mdl)` indicator (8.3.1 follow-on) | 3 sess | ✅ shipped (max \|H(jω)\| over a dense log-spaced sweep) |
+| `s2tdr` / `s2tdt` + `timeresp` time-domain (8.3.2) | 3 sess | ✅ shipped (per-pole ZOH discretization + step-driven step response) |
+| Transmission line objects (8.3.3) | 1 wk | ✅ shipped (function-form `rfckt_txline` / `rfckt_coaxial` / `rfckt_microstrip` (Hammerstad-Jensen) / `rfckt_cpw` / `rfckt_parallelplate` / `rfckt_twowire` — closed-form Z₀ + propagation, lossless; rfckt classdef wrappers deferred) |
+| `matchingnetwork` (8.4.1) | 1 wk | ✅ shipped (L-section `matchingnetwork`, T-section `matchingnetworkT(..., q_target)`, Pi-section `matchingnetworkPi(..., q_target)` — all closed-form via dual-L-section cascade for T/Pi at a virtual-impedance node R_V) |
+| `rfckt.*` classdef hierarchy subset (8.4.2) | 1 wk | ✅ shipped — `RFCktAmplifier` / `RFCktMixer` / `RFCktPassive` block skeletons + `RFCktCascade` / `RFCktParallel` / `RFCktSeries` / `RFCktShunt` combinator skeletons. Cascade composition via function-form `rfbudgetFriis` over per-block NF / Gain / IP3 columns. LC filter circuits: `rfckt_lcfilter(topology, comp1, comp2, freqs, z0)` for 3-element Lowpass/Highpass (Tee+Pi); `rfckt_lcfilter4(topology, L1, C1, L2, C2, freqs, z0)` for 4-element Bandpass/Bandstop (Tee+Pi). `rfmodel.rational` value classdef shipped as `RFRational` (A / C / D / Delay / Order / Error properties). Block analyze helpers: `rfAnalyzeAmplifier` / `rfAnalyzePassive` / `rfAnalyzeSeries` / `rfAnalyzeShunt` synthesize 2-port S-param structs from the block's scalar property surface. |
+| Mixed-mode 4-port `s2sdd` / `s2sdc` / `s2scc` / `s2scd` (8.1.2 follow-on) | 3 sess | ✅ shipped (`sparamS2smm(s11..s44, block_code)` — block_code 0=dd, 1=dc, 2=cd, 3=cc) |
+| Smith chart numerics (8.4.3) | 3 sess | ✅ shipped (`smithGrid(r_norm, n_pts)` returns RCircle + UnitCircle complex columns + `smithRCircle` / `smithUnitCircle` typed-getters) — closes RF-Tier-4 numerics |
 
 **Total**: ~6 weeks of focused sessions for full RF-Tier-1 → RF-
-Tier-4 closure. **MVP slice (~3 weeks)**: 8.1 + 8.2. Lights up "load
-.s2p, compute gain/stability/VSWR, cascade, run a Friis budget"
-— covers ~80% of the practical small-signal RF analysis workflow.
+Tier-4 closure. **MVP slice (~3 weeks): SHIPPED.**  Today users can:
+`data = touchstoneRead("amp.s2p"); s11 = tsS11(data); s12 = tsS12(data);
+... ; v = vswr(gammaIn(s11,s12,s21,s22,50,data.Z0)); K = stabilityK(...); 
+b = rfbudgetFriis(gains_dB, nfs_dB, ip3_dBm, p_in_dBm, bw_Hz);` — covers
+~80% of the practical small-signal RF analysis workflow.
 **+`rationalfit`** (8.3.1) at +2 weeks unlocks the
 frequency-domain-to-time-domain bridge that's RF Toolbox's most
 distinctive capability beyond closed-form S-parameter algebra.
+
+**Multi-port follow-on (defer ~2 wk)**: extend the Touchstone parser
+to s3p / s4p / sNp (the per-frequency block layout changes —
+`[s11 s21 s12 s22]` row order for s2p but `[s11 s12 ... s1N]` etc
+for N>2), add `snp2smp` port-extraction, `cascadesparams` general-N,
+mixed-mode `s2sdd` / `s2sdc` / `s2scc` / `s2scd`, and the sibling
+network-parameter classdefs (`Yparameters` / `Zparameters` / ...).
 
 ### 9.6 What RF Toolbox brings to Comm
 
@@ -1984,7 +1998,7 @@ carved):
 
 | Primitive | Effort | Status |
 |---|---|---|
-| Antenna catalog classdefs (12 types) (9.1) | 1 wk | 🔵 |
+| Antenna catalog classdefs (12 types) (9.1) | 1 wk | 🟡 partial — `AntDipole` + `AntMonopole` shipped with `design(ant, freq)` method + `antennaGain(ant, freq)` peak-gain dispatch (textbook 2.15 / 5.15 dBi). Remaining 10 stubs (`dipoleFolded` / `loopCircular` / `helix` / `bowtieRounded` / `spiralEquiangular` / `spiralArchimedean` / `patchMicrostrip` / `patchMicrostripCircular` / `pifa` / `yagiUda` / `vivaldi` / `hornConical` / `hornRectangular`) 🔵 |
 | Wire mesh + sinusoidal basis (9.2.1) | 3 sess | 🔵 |
 | Pocklington Z matrix + singularity extraction (9.2.2) | 1 wk | 🔵 |
 | Z·I=V solve + Z_in / S₁₁ (9.2.3) | 3 sess | 🔵 |
@@ -2535,23 +2549,34 @@ timing recovery, frame sync), OFDM, fading channels, MIMO.
 Conceptually conventional once the System-Object infrastructure
 lands; bulk is the per-block algorithm work.
 
-**Stage 5 (RF Toolbox, ~6 weeks bundled in §8) — 🔵 OPEN**:
-- **RF-Tier-1 (~1 wk)**: `sparameters` + 6 sibling network parameter
-  classdefs, all-to-all S/Y/Z/H/G/ABCD/T conversions, Touchstone v1
-  read/write. Foundation.
-- **RF-Tier-2 (~1.5 wk)**: closed-form S-parameter analyses (`s2tf`,
-  `gammain`, `vswr`, `powergain`, `stabilityk` / `stabilitymu`),
-  cascade, `rfbudget` Friis solver. **RF MVP** — closes the
-  small-signal RF analysis workflow.
-- **RF-Tier-3 (~3.5 wk)**: `rationalfit` Vector Fitting (uses
-  CST's already-shipped non-symmetric `eig`), TDR/TDT, transmission
-  line objects.
-- **RF-Tier-4 (~2 wk stretch)**: matching networks, `rfckt.*`
-  hierarchy, Smith chart numerics.
+**Stage 5 (RF Toolbox, ~6 weeks bundled in §9) — ✅ MOSTLY CLOSED**:
+- **RF-Tier-1 (~1 wk)**: ✅ shipped — `RFSparameters` + 6 sibling
+  network parameter classdefs (Y / Z / H / G / ABCD / T), 2-port S↔Y /
+  S↔Z / S↔H / S↔ABCD + inverses H→S / ABCD→S, N-port S↔Y / S↔Z via
+  2N×2N real-equivalent algebra, Touchstone v1 read/write for any
+  `.sNp` port count, `snp2smp` matched-termination port extraction,
+  mixed-mode 4-port `sparamS2smm`.
+- **RF-Tier-2 (~1.5 wk)**: ✅ shipped — closed-form analyses
+  (`gammaIn` / `gammaOut`, `vswr`, `powerGain`, `stabilityK` /
+  `stabilityMu`, `s2tf`), 2-port T-parameter cascade `cascadeSparams2`,
+  N-port `cascadeSparamsN` (diagonal approximation; full Schur-
+  complement form deferred), `rfbudgetFriis` Friis cascade with NF /
+  IP3 / SNR.
+- **RF-Tier-3 (~3.5 wk)**: ✅ shipped — `rationalfit` Vector Fitting
+  with real AND complex-conjugate pole pairs, `freqresp` / `passivity`
+  complex-pole-aware, `timeresp` complex-state ZOH, `s2tdr` / `s2tdt`
+  time-domain reflectometry/transmission, transmission-line geometries
+  (`rfckt_txline` / `coaxial` / `microstrip` / `cpw` / `parallelplate` /
+  `twowire`).
+- **RF-Tier-4 (~2 wk)**: ✅ shipped — `matchingnetwork` L / T / Pi
+  topologies, `RFCktAmplifier` / `RFCktMixer` / `RFCktPassive`
+  classdef skeletons, `smithGrid` numeric overlays.  `RFCktCascade` /
+  `RFCktParallel` / `RFCktSeries` / `RFCktShunt` combinators 🔵 partial.
 
-RF Toolbox shares the System-Object lowering fix with Comm Tier 3+
-(both use the same field-store-on-classdef path), so once the
-architectural blocker lifts, both toolboxes light up in parallel.
+**RF Toolbox status**: ~95% function-form complete, ~70% classdef
+complete.  Remaining work is small cross-conversions + classdef
+combinators + carved-out non-language items.  See
+`docs/rf_toolbox_plan.md` for the forward plan.
 
 **Stage 6 (Antenna Toolbox MVP — wire MoM, ~5 weeks bundled in §9)
 — 🔵 OPEN**:

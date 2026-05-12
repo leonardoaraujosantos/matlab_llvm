@@ -5948,12 +5948,30 @@ matlab_mat *matlab_atan2_m(matlab_mat *Y, matlab_mat *X) {
 
 double matlab_subscript2_s(matlab_mat *A, double i, double j) {
     int64_t ri = (int64_t)i - 1, cj = (int64_t)j - 1;
+    /* Complex-aware companion to matlab_subscript1_s — see comment
+     * there. Reads the real part of an indexed complex element. */
+    if (mat_is_complex(A)) {
+        matlab_mat_c *C = (matlab_mat_c *)A;
+        if (ri < 0 || ri >= C->rows || cj < 0 || cj >= C->cols) return 0.0;
+        return C->re[ri * C->cols + cj];
+    }
     if (ri < 0 || ri >= A->rows || cj < 0 || cj >= A->cols) return 0.0;
     return A->data[ri * A->cols + cj];
 }
 
 double matlab_subscript1_s(matlab_mat *A, double i) {
     int64_t idx = (int64_t)i - 1;
+    /* Complex-aware: matlab_mat_c shares the ptr lane.  Detect via
+     * the magic word at offset 0 and read from the real-part buffer
+     * (matches MATLAB's "real() then subscript" idiom and is the
+     * scalar lane's only sensible interpretation when the caller
+     * stored the result into an f64 slot). */
+    if (mat_is_complex(A)) {
+        matlab_mat_c *C = (matlab_mat_c *)A;
+        int64_t total = C->rows * C->cols;
+        if (idx < 0 || idx >= total) return 0.0;
+        return C->re[idx];
+    }
     int64_t total = A->rows * A->cols;
     if (idx < 0 || idx >= total) return 0.0;
     return A->data[idx];

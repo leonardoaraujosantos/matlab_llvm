@@ -1,0 +1,5 @@
+! Synthetic 2-port amplifier — single frequency
+! 1 GHz, 50 Ω reference, MA format
+# Hz S MA R 50
+1.0e9   0.200   0.0   2.000   0.0   0.100   0.0   0.050   0.0
+2.0e9   0.300   0.0   1.800   0.0   0.120   0.0   0.080   0.0
