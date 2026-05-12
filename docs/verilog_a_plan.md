@@ -33,9 +33,10 @@ The mental rule is:
 - Emit **vendor-neutral Verilog-A** (`.va`) consumable by
   ngspice (>=42 with the OpenVAF backend), Xyce (>=7.5), Cadence
   Spectre, Mentor Eldo, Synopsys CustomSim, Keysight ADS.
-- Where the construct is mixed-signal (ADC outputs, DAC inputs),
-  optionally emit **Verilog-AMS** (`.vams`) with explicit
-  `discipline` mappings.
+- **Pure Verilog-A only, initially.**  Mixed-signal Verilog-AMS
+  (digital bit-bus ports, `connectmodule` / `connectrules`
+  discipline resolution) is deferred to a separate later tier
+  (§6 Tier-11) — the initial roadmap stays in one language.
 - Keep the source MATLAB **fully executable** through every other
   backend.  An RC lowpass written for Verilog-A export should
   still produce numerical results via `matlabc -emit-llvm`, work
@@ -211,32 +212,22 @@ For a charge-pump PLL the full loop becomes:
 - Phase detector: a `cross()`-driven event comparing two phases
 - Loop filter: a `laplace_nd` (often a PI: `1 + k/s`)
 
-### 3.6 ADC / DAC behavioral models
+### 3.6 DAC behavioral models (pure Verilog-A)
 
 DAC (analog-out) is pure Verilog-A:
 ```verilog-a
 V(out) <+ transition(vref * code / ((1 << N) - 1), td, tr);
 ```
 
-ADC needs Verilog-AMS (digital output ports + analog input).
-The emitter detects the discipline-crossing and routes to a
-`.vams` file with:
-```verilog-ams
-`include "disciplines.vams"
-module behav_adc(in, code);
-    electrical in;
-    output [N-1:0] code;
-    reg [N-1:0] code;
-    analog begin
-        @(cross(V(clk) - vth, +1)) begin
-            code = $rtoi((V(in) / vref) * ((1<<N)-1));
-        end
-    end
-endmodule
-```
+Quantization, INL/DNL, offset, gain error all expressible as
+parameters of the same template.
 
-Quantization, INL/DNL, jitter, offset, gain error all expressible
-as parameters of the same template.
+ADC behavioral models (digital bit-bus outputs) need
+Verilog-AMS — deferred to Tier-11.  In the meantime, an
+"analog-level ADC" (one electrical port per bit driven by
+`transition()` to `vh` / `vl`) can be expressed in pure
+Verilog-A if a user really needs it; it's not bit-bus-clean but
+it simulates anywhere.
 
 ### 3.7 Sensor models (phenomenological)
 
@@ -347,14 +338,16 @@ Mirror the SV backend layout:
 | Emitter                                  | `lib/MLIR/Emit/EmitVerilogA.cpp`        |
 | Analog-subset gate (rejection diagnostics)| `lib/MLIR/Passes/CheckAnalog.cpp`       |
 | CLI flag                                 | `-emit-verilog-a` (alias: `-emit-va`)   |
-| Mixed-signal flag                        | `-emit-verilog-ams` (alias: `-emit-vams`) |
 | Annotation parser                        | `lib/Sema/AnalogAnnotations.cpp`        |
 | Lowering helpers (laplace, ddt patterns) | `lib/MLIR/Passes/LowerAnalog.cpp`       |
 | RF Toolbox `writeVerilogA` runtime       | extend `runtime/runtime_rf.cpp` to call into the emitter as a runtime function |
 | Golden tests                             | `test/EmitVA/<name>.{m,va.expected}`    |
-| Mixed-signal golden tests                | `test/EmitVAMS/<name>.{m,vams.expected}`|
 | Diagnostic gate tests                    | `test/EmitVAFail/<name>.{m,err.expected}`|
-| CTest lanes                              | `run-emit-va`, `run-emit-vams`, `run-emit-va-fail`, `run-emit-va-admslint` |
+| CTest lanes                              | `run-emit-va`, `run-emit-va-fail`, `run-emit-va-admslint` |
+
+A second `-emit-verilog-ams` / `.vams.expected` lane lands with
+Tier-11 (mixed-signal extensions); it's intentionally not in
+the initial backend wiring.
 
 ### 5.2 Routing
 
@@ -555,21 +548,21 @@ Steps:
 
 Test corpus delta: +3 fixtures.
 
-### Tier-6 — Behavioral DAC + Verilog-AMS ADC  ~3 sess
+### Tier-6 — Behavioral DAC (pure Verilog-A)  ~2 sess
 
-Target: parameterized DAC (pure Verilog-A) + ADC (Verilog-AMS
-with digital output bus).
+Target: parameterized DAC emitted as pure Verilog-A.
 
 Steps:
-1. DAC: `transition(vref * code / (2^N - 1), td, tr)`.
-2. ADC: emit `.vams` with mixed-signal port; `@(cross())` driven
-   sample loop; output `reg [N-1:0]`.
-3. CLI flag `-emit-verilog-ams` for mixed-signal targets;
-   default `-emit-verilog-a` emits only `.va`.
-4. Examples: `examples/verilog_a/dac_behav.m`,
-   `examples/verilog_a/adc_behav.m`.
+1. `transition(vref * code / (2^N - 1), td, tr)` contribution
+   with parameters for `N`, `vref`, `td`, `tr`, INL / DNL /
+   gain error / offset.
+2. Examples: `examples/verilog_a/dac_behav.m`,
+   `examples/verilog_a/dac_inl_dnl.m`.
 
-Test corpus delta: +4 fixtures (2 `.va` + 2 `.vams`).
+ADC (digital bit-bus output) is deferred to Tier-11
+(Verilog-AMS).
+
+Test corpus delta: +2 fixtures.
 
 ### Tier-7 — Compact components + sensor models  ~2 sess
 
@@ -629,9 +622,30 @@ Test corpus delta: +2 fixtures.
 
 Test corpus delta: optional cosim lane (~10 fixtures).
 
+### Tier-11 — Verilog-AMS extensions (deferred)  ~4 sess
+
+Target: lift the pure-VA constraint and emit Verilog-AMS where
+the construct genuinely needs it.
+
+Steps:
+1. CLI flag `-emit-verilog-ams` (alias `-emit-vams`).
+2. ADC with digital bit-bus output (`reg [N-1:0]` driven by
+   `@(cross(V(clk)-vth,+1))` sample event).
+3. `connectmodule` / `connectrules` discipline resolution for
+   user-authored mixed-signal interconnects.
+4. `test/EmitVAMS/<name>.{m,vams.expected}` golden lane and
+   `run-emit-vams` CTest target.
+5. Examples: `examples/verilog_a/adc_behav.m` (moves into
+   `.vams.expected` here),
+   `examples/verilog_a/comparator_digital_out.m`.
+
+Test corpus delta: +3 `.vams` fixtures.  Gated separately from
+Tiers 1–10 so the initial roadmap can land as pure VA.
+
 ### Total
 
-~27 sessions, ~10 PRs.  Tier-1 alone (4 sess) closes the
+~26 sessions of pure Verilog-A (Tiers 1–10) + ~4 sessions for
+Verilog-AMS (Tier-11).  Tier-1 alone (~4 sess) closes the
 RF-Toolbox `writeVerilogA` carve-out and unblocks shipping the
 RF Toolbox at *100 % + 1*.
 
@@ -669,7 +683,8 @@ Tier-9):
 | `vco.m`                                        | VCO via `idtmod`                 |
 | `pll_charge_pump.m`                            | Charge-pump PLL (VCO + PD + LF)  |
 | `dac_behav.m`                                  | Behavioral DAC                   |
-| `adc_behav.m`                                  | Behavioral ADC (.vams)           |
+| `dac_inl_dnl.m`                                | DAC with INL/DNL parameters      |
+| `adc_behav.m` (Tier-11, AMS)                   | Behavioral ADC (`.vams`, deferred)|
 | `resistor.m` / `capacitor.m` / `inductor.m`    | RLC primitives                   |
 | `diode.m`                                      | Ideal diode                      |
 | `opamp_ideal.m` / `opamp_sat.m`                | Op-amp + saturated op-amp        |
@@ -701,10 +716,10 @@ Three CTest lanes mirroring the SV pattern:
 | Lane                      | What it does                                              |
 |---|---|
 | `run-emit-va`             | `matlabc -emit-verilog-a` byte-compare against `.va.expected` |
-| `run-emit-vams`           | `matlabc -emit-verilog-ams` byte-compare against `.vams.expected` |
 | `run-emit-va-fail`        | Negative tests: source that violates the analog subset    |
-| `run-emit-va-admslint`    | Run `adms` / `openvaf` lint on each shipped `.va` / `.vams` (opt-in via `-DMATLAB_LLVM_WITH_VA_LINT=ON`) |
+| `run-emit-va-admslint`    | Run `adms` / `openvaf` lint on each shipped `.va` (opt-in via `-DMATLAB_LLVM_WITH_VA_LINT=ON`) |
 | `run-emit-va-cosim`       | Tier-10 optional: ngspice / Xyce cosim, compare against the in-tree `lsim` / `freqresp` / `timeresp` reference (opt-in via `-DMATLAB_LLVM_WITH_VA_COSIM=ON`) |
+| `run-emit-vams` (Tier-11) | `matlabc -emit-verilog-ams` byte-compare against `.vams.expected` — deferred with Tier-11 |
 
 The byte-compare lane is the load-bearing one — same model as
 `test/EmitSV`.  The lint lane is best-effort and opt-in (some
@@ -791,9 +806,11 @@ Tier-1 (RF Toolbox `writeVerilogA`) is the first concrete arc.
 - Verilog-A 2.4 features beyond what's listed in §5.5
   (`paramset`, `analog function` reuse libraries, complex
   branch contributions involving simultaneous `V` and `I`).
-- Verilog-AMS interconnects beyond simple ADC/DAC patterns
-  (full `connectmodule` / `connectrules` discipline-resolution
-  authoring).
+- Verilog-AMS in the initial scope — deferred to Tier-11.  The
+  initial backend emits pure `.va` only.  Tier-11 lifts that
+  constraint for ADC bit-bus outputs and user-authored mixed-
+  signal interconnects (`connectmodule` / `connectrules`
+  discipline resolution).
 - ADMS-only extensions (Synopsys / Cadence proprietary
   extensions).
 - HSPICE-only behavioral extensions.
