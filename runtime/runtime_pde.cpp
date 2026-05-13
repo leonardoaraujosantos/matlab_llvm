@@ -946,6 +946,15 @@ matlab_mat *matlab_pde_face_pressure_3d(matlab_struct *mesh,
 matlab_mat *matlab_pde_face_nodes(matlab_struct *mesh, double face_id_d);
 
 static bool field_holds_struct(matlab_struct *s, const char *name, int64_t len);
+matlab_struct *matlab_pde_assemble_poisson_3d_sparse(matlab_struct *mesh,
+                                                     double c, double a, double f);
+matlab_struct *matlab_pde_apply_dirichlet_3d_sparse(void *K_sparse,
+                                                     matlab_mat *F,
+                                                     matlab_mat *node_ids,
+                                                     double u_val);
+matlab_mat *matlab_pde_face_scalar_load_3d(matlab_struct *mesh,
+                                            double face_id_d, double q);
+matlab_mat *matlab_pde_sys_F(matlab_struct *sys);
 
 matlab_struct *matlab_pde_solve_femodel(matlab_struct *model) {
     /* Pull mesh — fall back to Geometry if Mesh is empty. */
@@ -1075,6 +1084,56 @@ matlab_struct *matlab_pde_set_face_pressure(matlab_struct *model,
     return model;
 }
 
+/* Tier-3 scalar setters: Temperature / Voltage Dirichlet on faces,
+ * Heat / ChargeDensity sources.  Each follows the same flat (Nx2)
+ * append pattern as PressureFaces.
+ */
+static matlab_struct *pde_append_face_pair(matlab_struct *model,
+                                           const char *field, int field_len,
+                                           double face_id, double value) {
+    matlab_mat *cur = matlab_struct_get_mat(model, field, field_len);
+    int64_t n = (cur && cur->rows > 0) ? cur->rows : 0;
+    matlab_mat *next = mat_alloc(n + 1, 2);
+    for (int64_t i = 0; i < n; ++i) {
+        next->data[i * 2 + 0] = cur->data[i * 2 + 0];
+        next->data[i * 2 + 1] = cur->data[i * 2 + 1];
+    }
+    next->data[n * 2 + 0] = face_id;
+    next->data[n * 2 + 1] = value;
+    matlab_struct_set_mat(model, field, field_len, next);
+    return model;
+}
+
+matlab_struct *matlab_pde_set_face_temperature(matlab_struct *model,
+                                                double face_id, double T) {
+    return pde_append_face_pair(model, "TemperatureFaces", 16, face_id, T);
+}
+
+matlab_struct *matlab_pde_set_face_heat(matlab_struct *model,
+                                         double face_id, double q) {
+    return pde_append_face_pair(model, "HeatFaces", 9, face_id, q);
+}
+
+matlab_struct *matlab_pde_set_face_voltage(matlab_struct *model,
+                                            double face_id, double V) {
+    return pde_append_face_pair(model, "VoltageFaces", 12, face_id, V);
+}
+
+matlab_struct *matlab_pde_set_face_charge(matlab_struct *model,
+                                           double face_id, double rho) {
+    return pde_append_face_pair(model, "ChargeFaces", 11, face_id, rho);
+}
+
+matlab_struct *matlab_pde_set_body_heat(matlab_struct *model, double q) {
+    matlab_struct_set_f64(model, "BodyHeat", 8, q);
+    return model;
+}
+
+matlab_struct *matlab_pde_set_body_charge(matlab_struct *model, double rho) {
+    matlab_struct_set_f64(model, "BodyCharge", 10, rho);
+    return model;
+}
+
 /* Test whether a struct field holds a populated value.  Returns 1
  * when the field exists AND its stored pointer is non-null AND, if
  * the stored value is a matlab_mat, it has positive rows.  A missing
@@ -1122,21 +1181,141 @@ matlab_struct *matlab_pde_generate_mesh(matlab_struct *model) {
     return model;
 }
 
+/* ------- Tier-3 scalar AnalysisType kernels --------------------- *
+ *
+ * Both thermal-steady and electrostatic discretise as
+ * `-∇·(c ∇u) + 0·u = f` on the volumetric tet mesh, with c chosen
+ * from MaterialProperties (k for thermal, ε for electrostatic), and
+ * Dirichlet BCs from FaceBC.Temperature / .Voltage entries (flat
+ * TemperatureFaces / VoltageFaces tables).  The same scalar Poisson
+ * sparse assembler + PCG path covers both.
+ *
+ * Returns struct { Mesh, u } — the user wraps it into a
+ * ThermalResults / ElectrostaticResults instance via the kwarg-ctor
+ * sugar at the call site.
+ */
+
+static matlab_struct *solve_scalar_poisson(matlab_struct *model,
+                                            double c, double body_f,
+                                            const char *bc_table,
+                                            int bc_table_len,
+                                            const char *flux_table,
+                                            int flux_table_len) {
+    matlab_struct *mesh = nullptr;
+    if (field_holds_struct(model, "Mesh", 4)) {
+        mesh = (matlab_struct *)matlab_struct_get_mat(model, "Mesh", 4);
+    } else if (field_holds_struct(model, "Geometry", 8)) {
+        mesh = (matlab_struct *)matlab_struct_get_mat(model, "Geometry", 8);
+    } else {
+        return matlab_struct_new();
+    }
+
+    matlab_struct *sys = matlab_pde_assemble_poisson_3d_sparse(mesh, c, 0.0, body_f);
+    void *K_sp = matlab_struct_get_mat(sys, "K", 1);
+    matlab_mat *F = matlab_pde_sys_F(sys);
+
+    /* Optional surface flux loads. */
+    matlab_mat *flux_t = matlab_struct_get_mat(model, flux_table, flux_table_len);
+    if (flux_t && flux_t->rows > 0 && flux_t->cols >= 2) {
+        for (int64_t i = 0; i < flux_t->rows; ++i) {
+            double fid = flux_t->data[i * flux_t->cols + 0];
+            double q   = flux_t->data[i * flux_t->cols + 1];
+            matlab_mat *Fk = matlab_pde_face_scalar_load_3d(mesh, fid, q);
+            for (int64_t k = 0; k < F->rows; ++k) F->data[k] += Fk->data[k];
+        }
+    }
+
+    /* Walk Dirichlet table; chain successive apply_dirichlet_3d
+     * calls so each BC value gets its correct row+col elimination. */
+    matlab_mat *bc_t = matlab_struct_get_mat(model, bc_table, bc_table_len);
+    void *K_cur = K_sp;
+    matlab_mat *F_cur = F;
+    if (bc_t && bc_t->rows > 0 && bc_t->cols >= 2) {
+        for (int64_t i = 0; i < bc_t->rows; ++i) {
+            double fid   = bc_t->data[i * bc_t->cols + 0];
+            double u_val = bc_t->data[i * bc_t->cols + 1];
+            matlab_mat *ids = matlab_pde_face_nodes(mesh, fid);
+            matlab_struct *sys2 = matlab_pde_apply_dirichlet_3d_sparse(
+                K_cur, F_cur, ids, u_val);
+            K_cur = matlab_struct_get_mat(sys2, "K", 1);
+            F_cur = matlab_pde_sys_F(sys2);
+        }
+    }
+
+    matlab_struct *pcg_res = matlab_sparse_pcg(K_cur, F_cur, 1e-6, 4000);
+    matlab_mat *u = matlab_sparse_pcg_x(pcg_res);
+
+    matlab_struct *out = matlab_struct_new();
+    matlab_struct_set_mat(out, "Mesh", 4, (matlab_mat *)mesh);
+    matlab_struct_set_mat(out, "u",    1, u);
+    return out;
+}
+
+matlab_struct *matlab_pde_solve_thermal_steady(matlab_struct *model) {
+    matlab_struct *props = (matlab_struct *)
+        matlab_struct_get_mat(model, "MaterialProperties", 18);
+    double k = matlab_struct_get_f64(props, "ThermalConductivity", 19);
+    double q_body = matlab_struct_get_f64(model, "BodyHeat", 8);
+    return solve_scalar_poisson(model, k, q_body,
+                                 "TemperatureFaces", 16,
+                                 "HeatFaces", 9);
+}
+
+matlab_struct *matlab_pde_solve_electrostatic(matlab_struct *model) {
+    matlab_struct *props = (matlab_struct *)
+        matlab_struct_get_mat(model, "MaterialProperties", 18);
+    /* For a pure Laplace problem with Dirichlet BCs and no body
+     * charge, the solution V depends only on the BC ratio, not on
+     * ε.  Using the raw ε = ε0·εr ≈ 1e-11 makes the assembled K
+     * matrix ~1e-11 in magnitude; PCG with default tol=1e-6
+     * converges at numerical noise and the free DOFs stay at zero.
+     *
+     * To preserve numerical conditioning we use the dimensionless εr
+     * (or 1.0 by default) as the K coefficient.  The Dirichlet
+     * voltage values pass through unchanged.  When body charge is
+     * present, scale ρ by 1/ε0 so the source term has the right
+     * units relative to the K-coefficient = εr we picked. */
+    double eps_r = matlab_struct_get_f64(props, "RelativePermittivity", 20);
+    if (eps_r <= 0) eps_r = 1.0;
+    double rho_body_raw = matlab_struct_get_f64(model, "BodyCharge", 10);
+    double eps0 = 8.8541878128e-12;
+    double rho_body = rho_body_raw / eps0;
+    return solve_scalar_poisson(model, eps_r, rho_body,
+                                 "VoltageFaces", 12,
+                                 "ChargeFaces", 11);
+}
+
 /* solve(model) — the unified entry point.  Reads AnalysisType +
- * dispatches.  v1 supports only structuralStatic.
+ * dispatches to the appropriate kernel.
  *
- * Returns a StaticStructuralResults instance — but since we can't
- * easily construct a classdef instance from inside the runtime, the
- * "classdef" property reads (R.Displacement, R.VonMisesStress, etc.)
- * on the user side go through the kwarg-ctor sugar at the call site.
- * That means solve() itself returns a matlab_struct with the same
- * field names, and the user wraps it via StaticStructuralResults().
+ * v1 dispatches:
+ *   'structuralStatic'    → 3-D linear elasticity (existing)
+ *   'thermalSteadyState'  → 3-D Poisson with thermal conductivity
+ *   'electrostatic'       → 3-D Poisson with permittivity
  *
- * For ergonomics we return the SAME matlab_struct shape (Mesh / u /
- * vm) as the kernel — the MATLAB-side wrapper inside the helper
- * `pde_solve_to_results` (a builtin) does the kwarg-ctor wrap.
+ * The result is a matlab_struct whose fields match the relevant
+ * Result class layout (.Mesh + .u + .vm for structural,
+ * .Mesh + .u for thermal/electrostatic).  The MATLAB-side wrapper
+ * then constructs the typed StaticStructuralResults / ThermalResults
+ * / ElectrostaticResults instance via the kwarg-ctor sugar.
  */
 matlab_struct *matlab_pde_solve(matlab_struct *model) {
+    /* AnalysisType is stored as a matlab_string under kind=3 — read
+     * its char data manually. */
+    struct local_str { char *data; int64_t len; };
+    matlab_mat *at_box = matlab_struct_get_mat(model, "AnalysisType", 12);
+    /* kind=3 storage returns the matlab_string ptr verbatim. */
+    if (at_box) {
+        local_str *s = (local_str *)at_box;
+        /* matlab_string layout: {char *data, int64_t len}.  We
+         * pattern-match on prefix bytes. */
+        if (s->data && s->len > 0) {
+            if (s->len == 18 && memcmp(s->data, "thermalSteadyState", 18) == 0)
+                return matlab_pde_solve_thermal_steady(model);
+            if (s->len == 13 && memcmp(s->data, "electrostatic", 13) == 0)
+                return matlab_pde_solve_electrostatic(model);
+        }
+    }
     return matlab_pde_solve_femodel(model);
 }
 
@@ -2096,7 +2275,293 @@ void *matlab_pde_assemble_elast_3d_sparse(matlab_struct *mesh,
     return matlab_sparse_from_triplets(I, J, V, (double)Ndof, (double)Ndof);
 }
 
-/* --- Voxelize-AABB volumetric tet mesher ---------------------------
+}  /* extern "C" close before the template */
+
+/* --- Geometry primitives (voxelize-AABB family) -------------------- *
+ *
+ * matlab_pde_multicylinder / matlab_pde_multisphere reuse the same
+ * AABB-voxelize-then-6-tet-decompose pipeline as the STL/GLB volumetric
+ * mesher (matlab_pde_voxelize_surface).  The only difference is the
+ * inside-test: each primitive provides its own predicate.
+ *
+ * The Kuhn 6-tet decomposition + boundary-face recovery + face_id
+ * assignment by dominant outward axis (1=-z, 2=+z, 3=-y, 4=+y, 5=-x,
+ * 6=+x) match matlab_pde_mesh_cuboid_tet exactly so downstream
+ * pde_face_nodes / pde_face_pressure_3d / pde_apply_fixed_3d_sparse
+ * code paths plug in unchanged.
+ */
+
+namespace {
+
+struct CylinderShape {
+    double R;       /* outer radius */
+    double R_in;    /* inner radius (0 = solid; > 0 = hollow) */
+    double H;       /* axial extent */
+    /* Axis-aligned along z.  Centroid at origin in XY; z spans [0, H]. */
+    bool inside(double x, double y, double z) const {
+        if (z < 0 || z > H) return false;
+        double r2 = x * x + y * y;
+        if (r2 > R * R) return false;
+        if (R_in > 0 && r2 < R_in * R_in) return false;
+        return true;
+    }
+};
+
+struct SphereShape {
+    double R;
+    /* Centred at origin. */
+    bool inside(double x, double y, double z) const {
+        return x * x + y * y + z * z <= R * R;
+    }
+};
+
+/* Common voxelize-decompose-collect routine, templated on the shape
+ * predicate.  Returns a struct with Nodes / Tets / Faces / Nx / Ny /
+ * Nz / W / D / H matching matlab_pde_mesh_cuboid_tet's output. */
+template <typename Shape>
+matlab_struct *voxelize_primitive(const Shape &shape,
+                                  double xmin, double xmax,
+                                  double ymin, double ymax,
+                                  double zmin, double zmax,
+                                  double voxel_size) {
+    if (voxel_size <= 0) return nullptr;
+    int64_t Nx = (int64_t)ceil((xmax - xmin) / voxel_size); if (Nx < 1) Nx = 1;
+    int64_t Ny = (int64_t)ceil((ymax - ymin) / voxel_size); if (Ny < 1) Ny = 1;
+    int64_t Nz = (int64_t)ceil((zmax - zmin) / voxel_size); if (Nz < 1) Nz = 1;
+    double dx = (xmax - xmin) / (double)Nx;
+    double dy = (ymax - ymin) / (double)Ny;
+    double dz = (zmax - zmin) / (double)Nz;
+
+    int64_t total_cells = Nx * Ny * Nz;
+    std::vector<int8_t> inside((size_t)total_cells, 0);
+    int64_t inside_count = 0;
+    for (int64_t k = 0; k < Nz; ++k) {
+        double cz = zmin + (k + 0.5) * dz;
+        for (int64_t j = 0; j < Ny; ++j) {
+            double cy = ymin + (j + 0.5) * dy;
+            for (int64_t i = 0; i < Nx; ++i) {
+                double cx = xmin + (i + 0.5) * dx;
+                if (shape.inside(cx, cy, cz)) {
+                    inside[(size_t)(k * Ny * Nx + j * Nx + i)] = 1;
+                    inside_count++;
+                }
+            }
+        }
+    }
+    if (inside_count == 0) return nullptr;
+
+    int64_t Px = Nx + 1, Py = Ny + 1, Pz = Nz + 1;
+    int64_t Pn = Px * Py * Pz;
+    std::vector<int64_t> node_id((size_t)Pn, -1);
+    std::vector<double> vol_nodes;
+    vol_nodes.reserve((size_t)inside_count * 24);
+
+    auto ensure_node = [&](int64_t i, int64_t j, int64_t k) -> int64_t {
+        int64_t key = (k * Py + j) * Px + i;
+        if (node_id[(size_t)key] >= 0) return node_id[(size_t)key];
+        int64_t nid = (int64_t)(vol_nodes.size() / 3);
+        vol_nodes.push_back(xmin + (double)i * dx);
+        vol_nodes.push_back(ymin + (double)j * dy);
+        vol_nodes.push_back(zmin + (double)k * dz);
+        node_id[(size_t)key] = nid;
+        return nid;
+    };
+
+    static const int Tdef[6][4] = {
+        {0, 1, 2, 6}, {0, 2, 3, 6}, {0, 3, 7, 6},
+        {0, 7, 4, 6}, {0, 4, 5, 6}, {0, 5, 1, 6},
+    };
+
+    std::vector<int64_t> tets_flat;
+    tets_flat.reserve((size_t)inside_count * 24);
+
+    auto inside_idx = [&](int64_t i, int64_t j, int64_t k) -> int8_t {
+        if (i < 0 || i >= Nx || j < 0 || j >= Ny || k < 0 || k >= Nz) return 0;
+        return inside[(size_t)(k * Ny * Nx + j * Nx + i)];
+    };
+
+    std::vector<int64_t> face_id, face_n1, face_n2, face_n3;
+    auto add_tri = [&](int64_t fid, int64_t a, int64_t b, int64_t c) {
+        face_id.push_back(fid);
+        face_n1.push_back(a + 1);
+        face_n2.push_back(b + 1);
+        face_n3.push_back(c + 1);
+    };
+
+    for (int64_t k = 0; k < Nz; ++k) {
+        for (int64_t j = 0; j < Ny; ++j) {
+            for (int64_t i = 0; i < Nx; ++i) {
+                if (!inside_idx(i, j, k)) continue;
+                int64_t corners[8] = {
+                    ensure_node(i,     j,     k    ),
+                    ensure_node(i + 1, j,     k    ),
+                    ensure_node(i + 1, j + 1, k    ),
+                    ensure_node(i,     j + 1, k    ),
+                    ensure_node(i,     j,     k + 1),
+                    ensure_node(i + 1, j,     k + 1),
+                    ensure_node(i + 1, j + 1, k + 1),
+                    ensure_node(i,     j + 1, k + 1),
+                };
+                for (int t = 0; t < 6; ++t) {
+                    tets_flat.push_back(corners[Tdef[t][0]] + 1);
+                    tets_flat.push_back(corners[Tdef[t][1]] + 1);
+                    tets_flat.push_back(corners[Tdef[t][2]] + 1);
+                    tets_flat.push_back(corners[Tdef[t][3]] + 1);
+                }
+                if (!inside_idx(i, j, k - 1)) {
+                    add_tri(1, corners[0], corners[2], corners[1]);
+                    add_tri(1, corners[0], corners[3], corners[2]);
+                }
+                if (!inside_idx(i, j, k + 1)) {
+                    add_tri(2, corners[4], corners[5], corners[6]);
+                    add_tri(2, corners[4], corners[6], corners[7]);
+                }
+                if (!inside_idx(i, j - 1, k)) {
+                    add_tri(3, corners[0], corners[1], corners[5]);
+                    add_tri(3, corners[0], corners[5], corners[4]);
+                }
+                if (!inside_idx(i, j + 1, k)) {
+                    add_tri(4, corners[3], corners[7], corners[6]);
+                    add_tri(4, corners[3], corners[6], corners[2]);
+                }
+                if (!inside_idx(i - 1, j, k)) {
+                    add_tri(5, corners[0], corners[4], corners[7]);
+                    add_tri(5, corners[0], corners[7], corners[3]);
+                }
+                if (!inside_idx(i + 1, j, k)) {
+                    add_tri(6, corners[1], corners[2], corners[6]);
+                    add_tri(6, corners[1], corners[6], corners[5]);
+                }
+            }
+        }
+    }
+
+    int64_t Nn = (int64_t)(vol_nodes.size() / 3);
+    int64_t Nt = (int64_t)(tets_flat.size()  / 4);
+    int64_t Nbnd = (int64_t)face_id.size();
+
+    matlab_mat *Nodes = mat_alloc(Nn, 3);
+    memcpy(Nodes->data, vol_nodes.data(), sizeof(double) * (size_t)(Nn * 3));
+    matlab_mat *Tets = mat_alloc(Nt, 4);
+    for (int64_t i = 0; i < Nt * 4; ++i) Tets->data[i] = (double)tets_flat[(size_t)i];
+    matlab_mat *Faces = mat_alloc(Nbnd, 4);
+    for (int64_t k = 0; k < Nbnd; ++k) {
+        Faces->data[k * 4 + 0] = (double)face_id[(size_t)k];
+        Faces->data[k * 4 + 1] = (double)face_n1[(size_t)k];
+        Faces->data[k * 4 + 2] = (double)face_n2[(size_t)k];
+        Faces->data[k * 4 + 3] = (double)face_n3[(size_t)k];
+    }
+    matlab_struct *out = matlab_struct_new();
+    matlab_struct_set_mat(out, "Nodes", 5, Nodes);
+    matlab_struct_set_mat(out, "Tets",  4, Tets);
+    matlab_struct_set_mat(out, "Faces", 5, Faces);
+    matlab_struct_set_f64(out, "Nx", 2, (double)Nx);
+    matlab_struct_set_f64(out, "Ny", 2, (double)Ny);
+    matlab_struct_set_f64(out, "Nz", 2, (double)Nz);
+    matlab_struct_set_f64(out, "W",  1, xmax - xmin);
+    matlab_struct_set_f64(out, "D",  1, ymax - ymin);
+    matlab_struct_set_f64(out, "H",  1, zmax - zmin);
+    matlab_struct_set_f64(out, "NumInsideCells", 14, (double)inside_count);
+    return out;
+}
+
+}  /* anonymous namespace */
+
+extern "C" {
+
+/* multicylinder(R, H, voxel_size) — solid cylinder centred at origin
+ * in XY with axis along z from 0 to H. */
+matlab_struct *matlab_pde_multicylinder(double R, double H, double voxel_size) {
+    CylinderShape S{R, 0.0, H};
+    return voxelize_primitive(S, -R, R, -R, R, 0, H, voxel_size);
+}
+
+/* multicylinder_hollow(R_out, R_in, H, voxel_size) — annular cylinder. */
+matlab_struct *matlab_pde_multicylinder_hollow(double R_out, double R_in,
+                                                double H, double voxel_size) {
+    CylinderShape S{R_out, R_in, H};
+    return voxelize_primitive(S, -R_out, R_out, -R_out, R_out, 0, H, voxel_size);
+}
+
+/* multisphere(R, voxel_size) — solid sphere centred at origin. */
+matlab_struct *matlab_pde_multisphere(double R, double voxel_size) {
+    SphereShape S{R};
+    return voxelize_primitive(S, -R, R, -R, R, -R, R, voxel_size);
+}
+
+/* --- Affine ops on fegeometry ---------------------------------- *
+ *
+ * Operate on the Nodes Nn×3 array.  Each op returns the SAME mesh
+ * struct (mutated in place) so user code can chain `mesh =
+ * pde_translate(mesh, ...)`.  The Tets / Faces tables don't change.
+ */
+
+matlab_struct *matlab_pde_translate(matlab_struct *mesh,
+                                    double dx, double dy, double dz) {
+    matlab_mat *nodes = matlab_struct_get_mat(mesh, "Nodes", 5);
+    if (!nodes) return mesh;
+    int64_t Nn = nodes->rows;
+    for (int64_t i = 0; i < Nn; ++i) {
+        nodes->data[i * 3 + 0] += dx;
+        nodes->data[i * 3 + 1] += dy;
+        nodes->data[i * 3 + 2] += dz;
+    }
+    return mesh;
+}
+
+matlab_struct *matlab_pde_scale(matlab_struct *mesh,
+                                double sx, double sy, double sz) {
+    matlab_mat *nodes = matlab_struct_get_mat(mesh, "Nodes", 5);
+    if (!nodes) return mesh;
+    int64_t Nn = nodes->rows;
+    for (int64_t i = 0; i < Nn; ++i) {
+        nodes->data[i * 3 + 0] *= sx;
+        nodes->data[i * 3 + 1] *= sy;
+        nodes->data[i * 3 + 2] *= sz;
+    }
+    return mesh;
+}
+
+/* matlab_pde_rotate(mesh, axis, angle_deg) — rotate every node by
+ * `angle_deg` degrees around an axis.  axis: 1=x, 2=y, 3=z.
+ *
+ * 3-D rotation matrices:
+ *   R_x = [1 0 0; 0 c -s; 0 s c]
+ *   R_y = [c 0 s; 0 1 0; -s 0 c]
+ *   R_z = [c -s 0; s c 0; 0 0 1]
+ */
+matlab_struct *matlab_pde_rotate(matlab_struct *mesh,
+                                  double axis_d, double angle_deg) {
+    matlab_mat *nodes = matlab_struct_get_mat(mesh, "Nodes", 5);
+    if (!nodes) return mesh;
+    int64_t Nn = nodes->rows;
+    int axis = (int)axis_d;
+    double th = angle_deg * M_PI / 180.0;
+    double c = cos(th);
+    double s = sin(th);
+    for (int64_t i = 0; i < Nn; ++i) {
+        double x = nodes->data[i * 3 + 0];
+        double y = nodes->data[i * 3 + 1];
+        double z = nodes->data[i * 3 + 2];
+        if (axis == 1) {  /* x-axis */
+            nodes->data[i * 3 + 1] = c * y - s * z;
+            nodes->data[i * 3 + 2] = s * y + c * z;
+        } else if (axis == 2) {  /* y-axis */
+            nodes->data[i * 3 + 0] = c * x + s * z;
+            nodes->data[i * 3 + 2] = -s * x + c * z;
+        } else {  /* z-axis (default) */
+            nodes->data[i * 3 + 0] = c * x - s * y;
+            nodes->data[i * 3 + 1] = s * x + c * y;
+        }
+    }
+    return mesh;
+}
+
+}  /* extern "C" */
+
+extern "C" {
+
+/* --- Voxelize-AABB volumetric tet mesher --------------------------- *
  *
  * matlab_pde_voxelize_surface(surface, voxel_size) — take a surface
  * fegeometry (Nodes, Faces from STL/GLB importers) and build a
@@ -2354,6 +2819,187 @@ matlab_struct *matlab_pde_voxelize_surface(matlab_struct *surface,
     matlab_struct_set_f64(out, "H",  1, zmax - zmin);
     matlab_struct_set_f64(out, "NumInsideCells", 14, (double)inside_count);
     return out;
+}
+
+/* --- 3-D scalar Poisson sparse assembly --------------------------- *
+ *
+ * Used by the Tier-3 thermal / electrostatic / dcConduction analysis
+ * paths (all of which discretise as -∇·(c∇u) + au = f on the
+ * volumetric tet mesh).  The same element-K formula as the 2-D
+ * sparse path, except in 3-D with linear tet shape functions.
+ *
+ * Output struct: { K (sparse Nn x Nn), F (dense Nn x 1) }.
+ */
+
+void *matlab_pde_assemble_elast_3d_sparse(matlab_struct *mesh,
+                                          double E, double nu);
+
+matlab_struct *matlab_pde_assemble_poisson_3d_sparse(matlab_struct *mesh,
+                                                     double c, double a,
+                                                     double f) {
+    matlab_mat *nodes = matlab_struct_get_mat(mesh, "Nodes", 5);
+    matlab_mat *tets  = matlab_struct_get_mat(mesh, "Tets",  4);
+    if (!nodes || !tets) return nullptr;
+    int64_t Nn = nodes->rows;
+    int64_t Nt = tets->rows;
+
+    /* 16 K entries per tet + 4 F entries. */
+    int64_t cap = Nt * 16;
+    matlab_mat *I = mat_alloc(cap, 1);
+    matlab_mat *J = mat_alloc(cap, 1);
+    matlab_mat *V = mat_alloc(cap, 1);
+    matlab_mat *F = mat_alloc(Nn, 1);
+    int64_t pos = 0;
+
+    for (int64_t e = 0; e < Nt; ++e) {
+        int64_t ids[4];
+        double X[4][3];
+        for (int i = 0; i < 4; ++i) {
+            ids[i] = (int64_t)tets->data[e * 4 + i] - 1;
+            X[i][0] = nodes->data[ids[i] * 3 + 0];
+            X[i][1] = nodes->data[ids[i] * 3 + 1];
+            X[i][2] = nodes->data[ids[i] * 3 + 2];
+        }
+        double dN[4][3];
+        double Vol;
+        extern void elast_compute_grad(const double X[4][3], double dN[4][3],
+                                        double *vol_out);
+        elast_compute_grad(X, dN, &Vol);
+        for (int p = 0; p < 4; ++p) {
+            for (int q = 0; q < 4; ++q) {
+                double Ke = c * Vol * (dN[p][0] * dN[q][0] +
+                                        dN[p][1] * dN[q][1] +
+                                        dN[p][2] * dN[q][2]);
+                if (p == q) Ke += a * Vol / 4.0;
+                I->data[pos] = (double)(ids[p] + 1);
+                J->data[pos] = (double)(ids[q] + 1);
+                V->data[pos] = Ke;
+                pos++;
+            }
+            F->data[ids[p]] += f * Vol / 4.0;
+        }
+    }
+    I->rows = pos; J->rows = pos; V->rows = pos;
+    void *K = matlab_sparse_from_triplets(I, J, V, (double)Nn, (double)Nn);
+    matlab_struct *out = matlab_struct_new();
+    matlab_struct_set_mat(out, "K", 1, (matlab_mat *)K);
+    matlab_struct_set_mat(out, "F", 1, F);
+    return out;
+}
+
+/* Scalar Dirichlet — clamp `u = u_val` on a set of node ids.
+ * Rebuilds the sparse triplets, dropping row r entries for fixed
+ * r and inserting diagonal-1, then dropping col c entries for fixed
+ * c (the column entries contribute F[r] -= K[r,c] * u_val).
+ *
+ * Returns { K (sparse), F (dense) } matching the structural pattern.
+ */
+matlab_struct *matlab_pde_apply_dirichlet_3d_sparse(void *K_sparse,
+                                                     matlab_mat *F,
+                                                     matlab_mat *node_ids,
+                                                     double u_val) {
+    struct sparse_view {
+        uint32_t magic, _pad;
+        int64_t *row_ptr;
+        int64_t *col_idx;
+        double  *vals;
+        int64_t rows, cols, nnz;
+    };
+    sparse_view *S = (sparse_view *)K_sparse;
+    if (!S || S->magic != 0xC0FFEE05u) return nullptr;
+    int64_t Nn = S->rows;
+    int64_t Nd = node_ids->rows * node_ids->cols;
+    std::vector<int8_t> fixed((size_t)Nn, 0);
+    for (int64_t k = 0; k < Nd; ++k) {
+        int64_t n = (int64_t)node_ids->data[k] - 1;
+        if (n >= 0 && n < Nn) fixed[(size_t)n] = 1;
+    }
+
+    matlab_mat *F2 = mat_alloc(Nn, 1);
+    memcpy(F2->data, F->data, sizeof(double) * (size_t)Nn);
+    if (u_val != 0.0) {
+        for (int64_t r = 0; r < Nn; ++r) {
+            int64_t lo = S->row_ptr[r];
+            int64_t hi = S->row_ptr[r + 1];
+            for (int64_t k = lo; k < hi; ++k) {
+                int64_t c = S->col_idx[k];
+                if (fixed[(size_t)c]) F2->data[r] -= S->vals[k] * u_val;
+            }
+        }
+    }
+
+    int64_t cap = S->nnz + Nn;
+    matlab_mat *I = mat_alloc(cap, 1);
+    matlab_mat *J = mat_alloc(cap, 1);
+    matlab_mat *V = mat_alloc(cap, 1);
+    int64_t pos = 0;
+    for (int64_t r = 0; r < Nn; ++r) {
+        int64_t lo = S->row_ptr[r];
+        int64_t hi = S->row_ptr[r + 1];
+        if (fixed[(size_t)r]) continue;
+        for (int64_t k = lo; k < hi; ++k) {
+            int64_t c = S->col_idx[k];
+            if (fixed[(size_t)c]) continue;
+            I->data[pos] = (double)(r + 1);
+            J->data[pos] = (double)(c + 1);
+            V->data[pos] = S->vals[k];
+            pos++;
+        }
+    }
+    for (int64_t r = 0; r < Nn; ++r) {
+        if (!fixed[(size_t)r]) continue;
+        I->data[pos] = (double)(r + 1);
+        J->data[pos] = (double)(r + 1);
+        V->data[pos] = 1.0;
+        pos++;
+        F2->data[r] = u_val;
+    }
+    I->rows = pos; J->rows = pos; V->rows = pos;
+    void *K2 = matlab_sparse_from_triplets(I, J, V, (double)Nn, (double)Nn);
+
+    matlab_struct *out = matlab_struct_new();
+    matlab_struct_set_mat(out, "K", 1, (matlab_mat *)K2);
+    matlab_struct_set_mat(out, "F", 1, F2);
+    return out;
+}
+
+/* Surface "scalar flux" load — adds heat/charge contributions to the
+ * RHS F by integrating a constant value over each boundary triangle
+ * of `face_id`.  Integral = q * area for piecewise-linear basis on a
+ * triangle, distributed equally to its 3 corner nodes.
+ */
+matlab_mat *matlab_pde_face_scalar_load_3d(matlab_struct *mesh,
+                                            double face_id_d, double q) {
+    int64_t fid = (int64_t)face_id_d;
+    matlab_mat *nodes = matlab_struct_get_mat(mesh, "Nodes", 5);
+    matlab_mat *faces = matlab_struct_get_mat(mesh, "Faces", 5);
+    if (!nodes || !faces) return mat_alloc(0, 0);
+    int64_t Nn = nodes->rows;
+    int64_t Nf = faces->rows;
+    matlab_mat *F = mat_alloc(Nn, 1);
+    for (int64_t k = 0; k < Nf; ++k) {
+        if ((int64_t)faces->data[k * 4 + 0] != fid) continue;
+        int64_t i0 = (int64_t)faces->data[k * 4 + 1] - 1;
+        int64_t i1 = (int64_t)faces->data[k * 4 + 2] - 1;
+        int64_t i2 = (int64_t)faces->data[k * 4 + 3] - 1;
+        double *p0 = nodes->data + i0 * 3;
+        double *p1 = nodes->data + i1 * 3;
+        double *p2 = nodes->data + i2 * 3;
+        double e1[3] = {p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]};
+        double e2[3] = {p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]};
+        double n[3] = {
+            e1[1] * e2[2] - e1[2] * e2[1],
+            e1[2] * e2[0] - e1[0] * e2[2],
+            e1[0] * e2[1] - e1[1] * e2[0]
+        };
+        double mag = sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+        double area = 0.5 * mag;
+        double s = q * area / 3.0;
+        F->data[i0] += s;
+        F->data[i1] += s;
+        F->data[i2] += s;
+    }
+    return F;
 }
 
 /* Fixed-DOF Dirichlet on a sparse 3-D elasticity K, F pair.  Same

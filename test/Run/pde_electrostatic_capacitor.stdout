@@ -1,0 +1,5 @@
+PDE Tier-3 electrostatic: parallel-plate capacitor
+  geom:                 0.1 x 0.1 x 0.01 m
+  V_top / V_bottom:     10 / 0 V
+  V(midpoint) = 5.0 V (rounded)
+  analytic    = 5.0 V

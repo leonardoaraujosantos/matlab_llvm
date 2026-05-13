@@ -385,6 +385,86 @@ spot-check across signal / control / ODE / comm / RF: clean.
   MathWorks idiom; the v1 `pde_set_face_*` helpers achieve the
   same semantic in straight function-call form.
 
+#### Geometry primitives + Tier-3 thermal / electrostatic (shipped 2026-05-13, fifth arc)
+
+Closes two work items in one tightly-coupled slice:
+
+**Geometry primitives** — `runtime/runtime_pde.cpp`:
+- `pde_multicylinder(R, H, voxel_size)` — solid cylinder along z.
+  Same voxelize-AABB pipeline as `voxelize_surface`, but with an
+  axis-aligned cylinder inside-test instead of ray-cast.
+- `pde_multicylinder_hollow(R_out, R_in, H, voxel_size)` — annular
+  cylinder (R_in > 0 means hollow shaft).
+- `pde_multisphere(R, voxel_size)` — solid sphere centred at origin.
+- `pde_translate(mesh, dx, dy, dz)` / `pde_rotate(mesh, axis, deg)`
+  / `pde_scale(mesh, sx, sy, sz)` — affine ops that mutate
+  `mesh.Nodes` in place.  axis selector: 1=x, 2=y, 3=z.
+- Shared helper `voxelize_primitive<Shape>` factors out the AABB +
+  uniform-grid + Kuhn-6-tet-split + boundary-face-recovery
+  pipeline so each primitive is just an inside predicate.
+
+Gating: `test/Run/pde_multicylinder.m` builds a voxelized cylinder
+(416 nodes, 540 faces), runs translate → rotate-y(90°) → scale-x(2),
+verifies a specific node lands at the expected post-transform
+coordinates.
+
+**Tier-3 scalar AnalysisType: thermalSteadyState + electrostatic**
+
+New 3-D scalar Poisson FEM stack (runtime/runtime_pde.cpp):
+- `pde_assemble_poisson_3d_sparse(mesh, c, a, f)` — P1 tet element
+  for `-∇·(c∇u) + au = f`.  Reuses the existing
+  `elast_compute_grad` helper for shape-function gradients.
+- `pde_apply_dirichlet_3d_sparse(K, F, node_ids, u_val)` — scalar
+  Dirichlet enforcement with row+col elimination and RHS
+  adjustment for non-zero `u_val`.
+- `pde_face_scalar_load_3d(mesh, face_id, q)` — surface heat /
+  charge contribution via piecewise-linear basis integral.
+
+`femodel.solve(model)` now dispatches on AnalysisType string:
+- `'structuralStatic'`   → existing kernel (3-D linear elasticity).
+- `'thermalSteadyState'` → new kernel — uses
+   MaterialProperties.ThermalConductivity as c, walks
+   TemperatureFaces table for Dirichlet T, HeatFaces table for
+   surface flux, BodyHeat scalar for volumetric source.
+- `'electrostatic'`      → new kernel — uses
+   MaterialProperties.RelativePermittivity as c (rescaled to keep
+   the K matrix well-conditioned; raw ε ≈ 1e-11 caused PCG to
+   converge at numerical noise), walks VoltageFaces / ChargeFaces /
+   BodyCharge similarly.
+
+New flat-array setters on the femodel struct:
+- `pde_set_face_temperature(model, face_id, T)` /
+  `pde_set_face_heat(model, face_id, q)` for thermal.
+- `pde_set_face_voltage(model, face_id, V)` /
+  `pde_set_face_charge(model, face_id, ρ)` for electrostatic.
+- `pde_set_body_heat(model, q)` / `pde_set_body_charge(model, ρ)`
+  for volumetric sources.
+
+New result classdefs in `runtime/pde_classdefs.m`:
+- `ThermalResults` — `.Temperature`, `.Mesh`.
+- `ElectrostaticResults` — `.Voltage`, `.Mesh`.
+
+The user-facing MATLAB code reads like the MathWorks docs:
+
+```matlab
+gm    = pde_mesh_cuboid_tet(1, 0.2, 0.2, 10, 2, 2);
+model = femodel('AnalysisType', 'thermalSteadyState', 'Geometry', gm);
+model = pde_set_material(model, materialProperties('ThermalConductivity', 50));
+model = pde_set_face_temperature(model, 5, 100);
+model = pde_set_face_temperature(model, 6,   0);
+raw   = pde_solve(model);
+T     = pde_kernel_u(raw);
+```
+
+Gating:
+- `test/Run/pde_thermal_block.m` — 1 m steel slab with
+  T=100/0 ends; midpoint = 50 °C (exact linear conduction).
+- `test/Run/pde_electrostatic_capacitor.m` — parallel-plate
+  capacitor with V=10/0 V; midpoint = 5 V (exact linear potential).
+
+All 12 PDE end-to-end tests pass.  Spot-check on
+signal/control/ODE/comm/RF: regression-clean.
+
 #### Architectural simplifications taken (deliberate)
 
 These are spelled out so future contributors don't re-pay the design cost:

@@ -1,0 +1,5 @@
+PDE Tier-3 thermal: 1m steel slab, T=100|0 ends
+  mesh:                 10 x 2 x 2 hex (33 surface faces)
+  k = 50 W/(m K)
+  T(midpoint) = 50.0 C (rounded)
+  analytic    = 50.0 C

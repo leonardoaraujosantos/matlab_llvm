@@ -1205,7 +1205,18 @@ const Type *TypeInference::visitBuiltinCall(std::string_view Name,
       Name == "pde_kernel_mesh" || Name == "pde_kernel_u" ||
       Name == "pde_kernel_vm" ||
       Name == "pde_set_material" || Name == "pde_set_face_fixed" ||
-      Name == "pde_set_face_pressure" || Name == "pde_generate_mesh")
+      Name == "pde_set_face_pressure" || Name == "pde_generate_mesh" ||
+      Name == "pde_multicylinder" || Name == "pde_multicylinder_hollow" ||
+      Name == "pde_multisphere" ||
+      Name == "pde_translate" || Name == "pde_rotate" || Name == "pde_scale" ||
+      Name == "pde_set_face_temperature" || Name == "pde_set_face_heat" ||
+      Name == "pde_set_face_voltage" || Name == "pde_set_face_charge" ||
+      Name == "pde_set_body_heat" || Name == "pde_set_body_charge" ||
+      Name == "pde_solve_thermal_steady" ||
+      Name == "pde_solve_electrostatic" ||
+      Name == "pde_assemble_poisson_3d_sparse" ||
+      Name == "pde_apply_dirichlet_3d_sparse" ||
+      Name == "pde_face_scalar_load_3d")
     return TC.arrayOf(Dtype::Double, Shape::unknown());
 
   if (Name == "linspace") {

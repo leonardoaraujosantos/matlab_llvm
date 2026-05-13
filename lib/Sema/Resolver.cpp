@@ -236,6 +236,16 @@ void Resolver::registerBuiltins() {
     "pde_kernel_mesh", "pde_kernel_u", "pde_kernel_vm",
     "pde_set_material", "pde_set_face_fixed", "pde_set_face_pressure",
     "pde_generate_mesh",
+    /* Geometry primitives — voxelize-AABB family. */
+    "pde_multicylinder", "pde_multicylinder_hollow", "pde_multisphere",
+    "pde_translate", "pde_rotate", "pde_scale",
+    /* Tier-3 scalar AnalysisType: thermal + electrostatic. */
+    "pde_set_face_temperature", "pde_set_face_heat",
+    "pde_set_face_voltage", "pde_set_face_charge",
+    "pde_set_body_heat", "pde_set_body_charge",
+    "pde_solve_thermal_steady", "pde_solve_electrostatic",
+    "pde_assemble_poisson_3d_sparse", "pde_apply_dirichlet_3d_sparse",
+    "pde_face_scalar_load_3d",
     /* pdeplot3D rendering — Cairo unstructured-mesh painter. */
     "pdeplot3d", "pdeplot3D",
     "pdeplot3d_deformation", "pdeplot3d_deform_scale",

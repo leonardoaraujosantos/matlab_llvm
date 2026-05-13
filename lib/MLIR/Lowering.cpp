@@ -8152,6 +8152,8 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
                       CN == "vertexLoad" || CN == "cellLoad" ||
                       CN == "StaticStructuralResults" ||
                       CN == "StationaryResults" ||
+                      CN == "ThermalResults" ||
+                      CN == "ElectrostaticResults" ||
                       CN == "pdeDisplacement");
       }
       if (IsCstClass && !WantMat &&

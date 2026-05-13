@@ -208,3 +208,25 @@ classdef StationaryResults
         end
     end
 end
+
+classdef ThermalResults
+    properties
+        Temperature
+        Mesh
+    end
+    methods
+        function obj = ThermalResults()
+        end
+    end
+end
+
+classdef ElectrostaticResults
+    properties
+        Voltage
+        Mesh
+    end
+    methods
+        function obj = ElectrostaticResults()
+        end
+    end
+end
