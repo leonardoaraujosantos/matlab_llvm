@@ -34,17 +34,30 @@ p_wind  = Cd * q_dyn;
 fprintf('Wind:   %.0f km/h, dynamic pressure %.0f Pa, p_wind %.0f Pa\n', ...
         v_kmh, q_dyn, p_wind);
 
-% --- Load + voxelize ----------------------------------------------
+% --- Load + flip + voxelize ---------------------------------------
 surface = pde_load_glb("/tmp/antenna_5g.glb");
+N_surf = pde_mesh_nodes(surface);
+n_surf = size(N_surf, 1);
 fprintf('GLB:  %.0f surface nodes, %.0f triangles\n', ...
-        size(pde_mesh_nodes(surface), 1), ...
-        size(pde_mesh_faces(surface), 1));
+        n_surf, size(pde_mesh_faces(surface), 1));
 
-% Voxel size — the antenna has thin members (~3 cm at the GLB
-% scale); voxel=0.05 lets them fall through the grid as
-% disconnected cells.  voxel=0.025 captures the connected
-% topology cleanly at ~5 k tets.
-voxel = 0.025;
+% The GLB has the antenna oriented with the radio housing at +z
+% and the mast extending to -z, which renders "upside down"
+% relative to the typical install orientation (housing at the
+% BOTTOM, mast extending UP to attach to the support bracket).
+% Flip the z-axis of the surface nodes so the natural install
+% pose is what we render.  We re-use the SAME node array
+% (pde_mesh_nodes returns the live storage), so the voxelizer
+% picks up the flipped coords.
+for i = 1:n_surf
+    N_surf(i, 3) = -N_surf(i, 3);
+end
+
+% Voxel size — the antenna has thin members; voxel=0.05 is too
+% coarse (mast falls through), 0.025 captures the topology but
+% the slender mast still looks blocky.  0.015 gives a clean
+% mast plus visible features on the housing.
+voxel = 0.015;
 mesh = pde_voxelize_surface(surface, voxel);
 nodes = pde_mesh_nodes(mesh);
 tets  = pde_mesh_tets(mesh);
@@ -71,9 +84,13 @@ sys2 = pde_apply_fixed_3d_sparse(K, F, fixed_nodes);
 Kc = pde_sys_K_sparse(sys2);
 Fc = pde_sys_F(sys2);
 
-% --- Sparse Krylov solve (ILU(0)+GMRES handles indefinite + larger
-% conditioning than PCG would; falls back to PCG behaviour for SPD).
-res    = sparse_gmres_ilu0(Kc, Fc, 1.0e-6, 4000.0);
+% --- Sparse PCG solve --------------------------------------------
+% Linear elasticity K is SPD → PCG is faster than ILU(0)+GMRES.
+% Loose tolerance (1e-4) because the slender mast pushes the
+% condition number high enough that converging to 1e-6 needs
+% ~50 k iterations.  1e-4 is fine for stress-visualisation
+% accuracy.
+res    = pcg(Kc, Fc, 1.0e-4, 20000.0);
 u      = pcg_x(res);
 flag   = pcg_flag(res);
 iters  = pcg_iter(res);
