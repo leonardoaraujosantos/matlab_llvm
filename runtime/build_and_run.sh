@@ -24,12 +24,20 @@ RUNTIME_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # Phase-2 + 2.5 split (docs/port_runtime_2_cpp.md): runtime is three
 # .cpp files sharing private layouts via runtime_internal.h.
+#
+# runtime_rf.cpp is unconditional: it has no external library
+# dependencies (unlike the Plot / Sym lanes below) and the CMake
+# static-library targets already include it unconditionally. Linking
+# it here is what lets `writeVerilogA*`, `rationalfit`,
+# `touchstoneWrite`, and the rest of the RF Toolbox surface resolve
+# when matlabc-emitted .ll references their `_matlab_rf_*` symbols.
 RUNTIME_SRCS=(
   "$RUNTIME_DIR/matlab_runtime.cpp"
   "$RUNTIME_DIR/runtime_debug.cpp"
   "$RUNTIME_DIR/runtime_complex.cpp"
   "$RUNTIME_DIR/runtime_prop.cpp"
   "$RUNTIME_DIR/runtime_comm.cpp"
+  "$RUNTIME_DIR/runtime_rf.cpp"
 )
 
 CLANG="${CLANG:-/opt/homebrew/opt/llvm/bin/clang}"

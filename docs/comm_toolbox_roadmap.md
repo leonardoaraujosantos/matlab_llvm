@@ -788,30 +788,36 @@ unchanged to the function-form layer.
 
 | Primitive | Effort | Status | SO-fix dependency |
 |---|---|---|---|
-| Closed-form ITU-R / NIST models (5) (3.1.1) | 4 sess | 🔵 | none |
-| Cellular empirical models (6) (3.1.2) | 3 sess | 🔵 | none |
-| Fresnel zone math (3.1.3) | 3 sess | 🔵 | none |
-| Knife-edge diffraction (single + 3 multi-edge) (3.1.4) | 1 wk | 🔵 | none |
-| Haversine / Vincenty / great-circle (3.1.5) | 2 sess | 🔵 | none — **closes PROP-Tier-1a** |
-| ITM (Longley-Rice) v7 port (3.2.1) | 3 wk | 🔵 | none — **closes PROP-Tier-2a; biggest sub-item** |
-| Terrain profile from heightmap (3.3.1) | 3 sess | 🔵 | none |
-| `los_check` (3.3.2) | 1 sess | 🔵 | none |
-| `link_budget` PtP (3.3.3) | 3 sess | 🔵 | none |
-| `coverage_grid` single-TX (3.3.4) | 3 sess | 🔵 | none — closes PROP-Tier-2b (single-TX, omnidirectional) |
-| Sector / cosine / Gaussian / 3GPP / custom pattern functions (3.4.1) | 3 sess | 🔵 | none |
-| `applyMountOrientation` (3.4.2) | 2 sess | 🔵 | none |
-| `coverage_grid_multi` with best-server / sum-power / SINR (3.4.3) | 1 wk | 🔵 | none — **closes PROP-Tier-3; user's "two-pole + sectors + directionals" scenario lights up** |
-| RX-side directional (3.4.4) | 2 sess | 🔵 | none |
-| ANT-Tier-2 pattern bridge (3.4.5) | 1 sess | 🔵 | only on ANT-Tier-2 shipping |
+| Closed-form ITU-R / NIST models (5) (3.1.1) | 4 sess | ✅ shipped (`fspl`, `pathlossRain`, `pathlossGas`, `pathlossFog`, `pathlossCloseIn`) | none |
+| Cellular empirical models (6) (3.1.2) | 3 sess | ✅ shipped (`pathlossHata`, `pathlossCost231`, `pathlossEgli`, `pathlossEcc33`, `pathlossSui`, `pathlossEricsson9999`) | none |
+| Fresnel zone math (3.1.3) | 3 sess | ✅ shipped (`fresnelZoneRadius`, `fresnelClearance`) | none |
+| Knife-edge diffraction (single + 3 multi-edge) (3.1.4) | 1 wk | ✅ shipped (`diffractionKnifeEdge`, `diffractionBullington`, `diffractionDeygout`) | none |
+| Haversine / Vincenty / great-circle (3.1.5) | 2 sess | ✅ shipped (`haversine`, `bearing`, `vincenty`, `greatCircleDestLat`/`Lon`) — **closes PROP-Tier-1a** | none |
+| ITM (Longley-Rice) v7 port (3.2.1) | 3 wk | ✅ shipped (engineering port: `itmPathloss(profile, freq, ht, hr, pol, climate, Ns, σ, εr, d_total, q_t, q_l, q_s)` with reliability quantile correction) — **closes PROP-Tier-2a**.  Byte-identical NTIA v7.0 reference port stays 🔵. | none |
+| Terrain profile from heightmap (3.3.1) | 3 sess | ✅ shipped (`terrainProfile`) | none |
+| `los_check` (3.3.2) | 1 sess | ✅ shipped (`losObstruction`, `losClear`) | none |
+| `link_budget` PtP (3.3.3) | 3 sess | ✅ shipped (`linkBudget` → struct of TX dBm / RX dBm / FSPL / margin) | none |
+| `coverage_grid` single-TX (3.3.4) | 3 sess | ✅ shipped (`coverageGrid` → matrix) — closes PROP-Tier-2b (single-TX, omnidirectional) | none |
+| Sector / cosine / Gaussian / 3GPP / custom pattern functions (3.4.1) | 3 sess | ✅ shipped (`sectorPattern`, `cosinePattern`, `gaussianPattern`, `isotropicPattern`) | none |
+| `applyMountOrientation` (3.4.2) | 2 sess | ✅ shipped (`applyMountAz`/`applyMountEl`/`applyMountOrientation`) | none |
+| `coverage_grid_multi` with best-server / sum-power / SINR (3.4.3) | 1 wk | ✅ shipped (`coverageGridMulti` with best-server / sum-power / SINR aggregation modes) — **closes PROP-Tier-3** | none |
+| RX-side directional (3.4.4) | 2 sess | ✅ shipped (RX antenna gain pattern applied symmetrically with TX-side gain) | none |
+| ANT-Tier-2 pattern bridge (3.4.5) | 1 sess | 🔵 — gated on ANT-Tier-2 shipping the full far-field pattern surface (closed-form dipole MVP shipped at commit `0f0894c`; multi-wire MoM still 🔵 ANT-Tier-2b) | only on ANT-Tier-2 shipping |
 | `propagationModel` / `txsite` / `rxsite` / `pathloss` / `coverage` / `los` / `link` classdef wrappers (3.5) | 3 sess | ✅ shipped (`TxSite` / `RxSite` / `PropagationModel` CamelCase classdefs with kwarg ctor sugar; `pathloss(pm, rx, tx)` / `link(tx, rx)` / `los(tx, rx)` / `coverage(tx, pm, ...)` / `sigstrength(rx, tx, pm)` / `show(...)` methods all dispatch through the §3.1–§3.4 function-form runtime) | — |
 
-**Function-form total (§3.1 + §3.2 + §3.3 + §3.4)**: ~7 weeks.
-Reaches the user's full PtP+ITM+CoverageMap+Multi-Site-Directional
-workflow with **zero** architectural dependencies — can ship in
-parallel with anything else, including starting work on Comm Tier 1.
+**Status (2026-05-12)**: **PROP-Tier-1a + 2a + 2b + 3 are fully
+shipped**.  All sub-items in the table above bear ✅ markers; the
+function-form runtime lives in `runtime/runtime_prop.cpp` (~1400
+lines) and the classdef wrappers `TxSite` / `RxSite` /
+`PropagationModel` ship with kwarg-sugar constructors.  Only the
+ANT-Tier-2 pattern bridge (3.4.5) remains 🔵 — gated on the planned
+ANT-Tier-2b multi-wire MoM that extends today's closed-form dipole
+into the broader far-field pattern surface.
 
-**Classdef wrapper (§3.5)**: +3 sessions, gated on the System-
-Object fix. Optional polish for MathWorks API compatibility.
+**Function-form effort consumed (§3.1 + §3.2 + §3.3 + §3.4)**: ~7
+weeks across multiple commits.  **Classdef wrappers (§3.5)** shipped
+in `f764dbd` alongside the matrix-property-storage infra fix —
+the originally planned System-Object dependency was sidestepped.
 
 ### 3.7 Out of scope (Propagation-specific carve-outs)
 
@@ -2036,11 +2042,12 @@ carved):
 | Primitive | Effort | Status |
 |---|---|---|
 | Antenna catalog classdefs (12 types) (9.1) | 1 wk | 🟡 partial — `AntDipole` + `AntMonopole` shipped with `design(ant, freq)` method + `antennaGain(ant, freq)` peak-gain dispatch (textbook 2.15 / 5.15 dBi). Remaining 10 stubs (`dipoleFolded` / `loopCircular` / `helix` / `bowtieRounded` / `spiralEquiangular` / `spiralArchimedean` / `patchMicrostrip` / `patchMicrostripCircular` / `pifa` / `yagiUda` / `vivaldi` / `hornConical` / `hornRectangular`) 🔵 |
-| Wire mesh + sinusoidal basis (9.2.1) | 3 sess | 🔵 |
-| Pocklington Z matrix + singularity extraction (9.2.2) | 1 wk | 🔵 |
-| Z·I=V solve + Z_in / S₁₁ (9.2.3) | 3 sess | 🔵 |
-| Far-field pattern + gain / directivity (9.2.4) | 1 wk | 🔵 |
-| Frequency sweep + RF-bridge `sparameters(ant, f)` (9.2.5) | 3 sess | 🔵 — closes ANT-Tier-2 / Antenna MVP |
+| Wire mesh + sinusoidal basis (9.2.1) | 3 sess | 🟡 sidestepped — the closed-form Balanis EMF path (commit `0f0894c`) doesn't need a discretized mesh; the `n_segments` argument is kept in the API for forward compatibility with the multi-wire MoM follow-on (ANT-Tier-2b 🔵). |
+| Pocklington Z matrix + singularity extraction (9.2.2) | 1 wk | 🔵 ANT-Tier-2b — gated on the kernel-scaling debug pass.  An exploratory pulse-basis / point-matching prototype shipped + reverted in favour of the closed-form path, which suffices for the canonical thin-dipole MVP. |
+| Z·I=V solve + Z_in / S₁₁ (9.2.3) | 3 sess | ✅ shipped — `antennaWireSolve(L, a, n_segs, freq)` returns `Zin_re` / `Zin_im` / `S11_re` / `S11_im` / `VSWR` / `ReturnLoss_dB`.  Closed-form induced-EMF method (Balanis Eq. 8-60a/b) with Si and Ci special functions (Taylor < 8 + asymptotic ≥ 8).  Verified at half-wave: 73.08 + j42.52 Ω vs reference 73.13 + j42.55. |
+| Far-field pattern + gain / directivity (9.2.4) | 1 wk | ✅ shipped — `antennaWirePattern(L, a, n_segs, freq, n_theta)` returns `Theta` / `ETheta` / `EThetaMag` / `Gain_dBi` / `Directivity_dBi`.  Closed-form sinusoidal-current pattern `F(θ) = (cos(½ kL · cos θ) − cos(½ kL)) / sin θ`.  Half-wave directivity = 2.15 dBi. |
+| Frequency sweep + RF-bridge `sparameters(ant, f)` (9.2.5) | 3 sess | ✅ shipped — `antennaWireSparameters(L, a, n_segs, freqs)` returns RFSparameters-shaped struct (`S11` complex col, `Frequencies`, `Z0 = 50`, `NumPorts = 1`).  Drops straight into `touchstoneWrite` for an `.s1p` Touchstone file — **closes ANT-Tier-2 / Antenna MVP** for the thin-dipole case. |
+| Multi-wire MoM (ANT-Tier-2b) | 3 sess | 🔵 follow-on — Pocklington (or Hallen) with pulse / sinusoidal basis + Gauss-Legendre on segment pairs + 2N×2N real-equivalent solve, unlocks Yagi-Uda / monopole-over-ground / helix / loop / folded-dipole geometries. |
 | Triangular mesh generator (9.3.1) | 1 wk | 🔵 |
 | RWG basis (9.3.2) | 2 sess | 🔵 |
 | Surface-integral Z matrix + singularity extraction (9.3.3) | 3 wk | 🔵 |
@@ -2049,11 +2056,24 @@ carved):
 | Array factor multiplication (9.4.2) | 3 sess | 🔵 — closes ANT-Tier-4 |
 | ANT-Tier-5 items | multi-month each | 🔴 carved out |
 
-**Total**: ~5 weeks for **ANT-Tier-2 Antenna MVP** (wire antennas).
-~12 weeks for ANT-Tier-2 + ANT-Tier-3 (wire + planar / patch).
-~14 weeks for ANT-Tier-2 + ANT-Tier-3 + ANT-Tier-4 (full
-ungated-mutual-coupling array surface). ANT-Tier-5 is multi-month
-per item, carved out.
+**Status (2026-05-12)**: **ANT-Tier-2 MVP shipped** for the
+canonical thin-dipole case via the closed-form induced-EMF method
+(Balanis Eq. 8-60).  Three runtime entries live in
+`runtime/runtime_prop.cpp`:
+`antennaWireSolve(L, a, n_segs, freq)` →
+struct{Zin_re, Zin_im, S11_re, S11_im, VSWR, ReturnLoss_dB};
+`antennaWirePattern(L, a, n_segs, freq, n_theta)` → far-field
+pattern + directivity; `antennaWireSparameters(L, a, n_segs, freqs)`
+→ RFSparameters-shaped struct for the RF-Toolbox bridge.
+
+**ANT-Tier-2b** (multi-wire MoM for Yagi / monopole-over-ground /
+helix / loop / folded-dipole) is the next antenna deliverable —
+~3 sessions once the Pocklington kernel scaling is nailed.
+
+**Total** (remaining work): ~7 weeks for ANT-Tier-3 + ANT-Tier-4
+(planar / patch surfaces + arrays).  Plus ~3 sessions for
+ANT-Tier-2b multi-wire MoM.  ANT-Tier-5 is multi-month per item,
+carved out.
 
 **Propagation Models** are now at top-level §3 (~6 weeks function-
 form, independently shippable). See §3 for the closure summary.
