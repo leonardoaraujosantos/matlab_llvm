@@ -1058,6 +1058,58 @@ matlab_struct *matlab_pde_set_material(matlab_struct *model,
     return model;
 }
 
+/* MATLAB-faithful entry: specifyCoefficients(model, c, a, f) stores
+ * the three scalar coefficients of the generic scalar PDE form
+ *   −∇·(c ∇u) + a u = f
+ * onto the model.  Used by the 2-D Poisson / scalar-Helmholtz path
+ * for users who want the classic createpde-style API. */
+matlab_struct *matlab_pde_specify_coefficients(matlab_struct *model,
+                                                double c, double a, double f) {
+    matlab_struct_set_f64(model, "Coeff_c", 7, c);
+    matlab_struct_set_f64(model, "Coeff_a", 7, a);
+    matlab_struct_set_f64(model, "Coeff_f", 7, f);
+    return model;
+}
+
+/* MATLAB-faithful entry: applyBoundaryCondition(model, face_id, val).
+ * Dirichlet-only at the v1 surface; Neumann/Robin variants are
+ * follow-ups.  Forwards to the existing voltage-face table since
+ * the underlying scalar Poisson kernel treats "voltage" as the
+ * generic Dirichlet field. */
+matlab_struct *matlab_pde_apply_boundary_condition(matlab_struct *model,
+                                                    double face_id,
+                                                    double u_val) {
+    /* Generic Dirichlet — dispatches to the right per-physics table
+     * based on the model's AnalysisType.  This lets users write
+     *   applyBoundaryCondition(model, face_id, val)
+     * regardless of whether they're solving thermal / electrostatic
+     * / DC-conduction / magnetostatic. */
+    extern matlab_struct *matlab_pde_set_face_voltage(matlab_struct *model,
+                                                       double face_id, double V);
+    extern matlab_struct *matlab_pde_set_face_temperature(matlab_struct *model,
+                                                          double face_id, double T);
+    struct local_str { char *data; int64_t len; };
+    matlab_mat *at_box = matlab_struct_get_mat(model, "AnalysisType", 12);
+    if (at_box) {
+        local_str *s = (local_str *)at_box;
+        if (s->data && s->len > 0) {
+            if ((s->len == 18 && memcmp(s->data, "thermalSteadyState", 18) == 0) ||
+                (s->len == 17 && memcmp(s->data, "thermalTransient",  16) == 0)) {
+                return matlab_pde_set_face_temperature(model, face_id, u_val);
+            }
+            /* electrostatic, dcConduction → VoltageFaces. */
+            if ((s->len == 13 && memcmp(s->data, "electrostatic", 13) == 0) ||
+                (s->len == 12 && memcmp(s->data, "dcConduction", 12) == 0) ||
+                (s->len == 23 && memcmp(s->data, "harmonicElectromagnetic", 23) == 0)) {
+                return matlab_pde_set_face_voltage(model, face_id, u_val);
+            }
+        }
+    }
+    /* Default: write to VoltageFaces (covers scalar Poisson with no
+     * AnalysisType set). */
+    return matlab_pde_set_face_voltage(model, face_id, u_val);
+}
+
 matlab_struct *matlab_pde_set_face_fixed(matlab_struct *model,
                                           double face_id) {
     matlab_mat *cur = matlab_struct_get_mat(model, "FixedFaces", 10);
@@ -1743,16 +1795,16 @@ matlab_struct *matlab_pde_solve_structural_frequency(matlab_struct *model) {
         void *Keff = matlab_sparse_from_triplets(I, J, V,
                                                   (double)Ndof, (double)Ndof);
 
-        /* Solve K_eff U = F.  v1 uses dense mldivide on the
-         * sparse-to-dense conversion (correct for any K_eff
-         * including indefinite; pre-iterative-Krylov fallback).
-         * Production scaling needs MINRES + ILU on the sparse path
-         * (a follow-up; the unpreconditioned MINRES converges far
-         * too slowly on the elasticity K's condition number). */
-        extern matlab_mat *matlab_sparse_full(void *Sv);
-        extern matlab_mat *matlab_mldivide_mm(matlab_mat *A, matlab_mat *B);
-        matlab_mat *Keff_dense = matlab_sparse_full(Keff);
-        matlab_mat *Ucol = matlab_mldivide_mm(Keff_dense, F);
+        /* Solve K_eff U = F via ILU(0)-preconditioned GMRES(30).
+         * Handles indefinite K_eff = K - ω²M correctly (negative
+         * eigenvalues near resonance just shift the spectrum;
+         * GMRES + ILU0 doesn't depend on positive definiteness). */
+        extern matlab_struct *matlab_sparse_gmres_ilu0(void *Sv,
+                                                        matlab_mat *b,
+                                                        double tol,
+                                                        double maxit);
+        matlab_struct *gr = matlab_sparse_gmres_ilu0(Keff, F, 1e-8, 2000);
+        matlab_mat *Ucol = matlab_struct_get_mat(gr, "Solution", 8);
         for (int64_t i = 0; i < Ndof; ++i)
             Uhist->data[i * Nfreq + fi] = Ucol->data[i];
     }
@@ -1850,14 +1902,15 @@ matlab_struct *matlab_pde_solve_harmonic_em(matlab_struct *model) {
         }
     }
 
-    /* K is real symmetric indefinite for k > 0.  v1 uses sparse →
-     * dense mldivide for correctness on small meshes; switch to an
-     * ILU-preconditioned MINRES on the sparse path for production
-     * scaling (same follow-up as structuralFrequency). */
-    extern matlab_mat *matlab_sparse_full(void *Sv);
-    extern matlab_mat *matlab_mldivide_mm(matlab_mat *A, matlab_mat *B);
-    matlab_mat *Kc_dense = matlab_sparse_full(Kc);
-    matlab_mat *u        = matlab_mldivide_mm(Kc_dense, Fc);
+    /* K is real symmetric indefinite for k > 0.  Sparse solve via
+     * ILU(0)-preconditioned GMRES(30) — lifts the DOF ceiling well
+     * above the ~3 k limit of the previous dense mldivide fallback. */
+    extern matlab_struct *matlab_sparse_gmres_ilu0(void *Sv,
+                                                    matlab_mat *b,
+                                                    double tol,
+                                                    double maxit);
+    matlab_struct *gr = matlab_sparse_gmres_ilu0(Kc, Fc, 1e-8, 2000);
+    matlab_mat *u     = matlab_struct_get_mat(gr, "Solution", 8);
 
     matlab_struct *out = matlab_struct_new();
     matlab_struct_set_mat(out, "Mesh", 4, (matlab_mat *)mesh);
@@ -1985,6 +2038,12 @@ static int64_t shifted_pcg(const ShiftedOp &A, const double *b, double *x,
  * m × m tridiagonal T = diag(alpha) + diag(beta, ±1).  Uses the
  * standard QL algorithm on Givens rotations (compact ~70 LOC).
  * Returns eigenvalues sorted ASCENDING in `mu`. */
+/* Kept for callers that don't need eigenvectors — currently unused
+ * since lanczos_si_core moved to tridiag_eig_with_vecs.  Retained
+ * because the QL kernel here is the cleanest reference impl and
+ * may be called by future eigsolvers (e.g. ARPACK-style multi-shift
+ * variants that don't accumulate Z). */
+[[maybe_unused]]
 static void tridiag_eig(std::vector<double> &alpha,
                         std::vector<double> &beta_off,
                         std::vector<double> &mu) {
@@ -2041,64 +2100,138 @@ static void tridiag_eig(std::vector<double> &alpha,
     std::sort(mu.begin(), mu.end());
 }
 
+/* Variant of tridiag_eig that also accumulates the eigenvector
+ * matrix Z (m × m, column j = eigenvector of T for eigenvalue
+ * mu[j]).  Z is row-major, indexed as Z[i*m + j]. */
+static void tridiag_eig_with_vecs(std::vector<double> &alpha,
+                                   std::vector<double> &beta_off,
+                                   std::vector<double> &mu,
+                                   std::vector<double> &Z) {
+    int m = (int)alpha.size();
+    mu.assign(alpha.begin(), alpha.end());
+    std::vector<double> e(beta_off.begin(), beta_off.end());
+    e.push_back(0.0);
+    Z.assign((size_t)m * (size_t)m, 0.0);
+    for (int i = 0; i < m; ++i) Z[(size_t)(i * m + i)] = 1.0;
+    int n = m;
+    for (int l = 0; l < n; ) {
+        int iter_count = 0;
+        int mm;
+        do {
+            for (mm = l; mm < n - 1; ++mm) {
+                double dd = fabs(mu[(size_t)mm]) + fabs(mu[(size_t)(mm + 1)]);
+                if (fabs(e[(size_t)mm]) + dd == dd) break;
+            }
+            if (mm != l) {
+                if (++iter_count == 60) return;
+                double g = (mu[(size_t)(l + 1)] - mu[(size_t)l]) /
+                            (2.0 * e[(size_t)l]);
+                double r2 = sqrt(g * g + 1.0);
+                double sign = (g >= 0) ? r2 : -r2;
+                g = mu[(size_t)mm] - mu[(size_t)l] +
+                    e[(size_t)l] / (g + sign);
+                double s = 1.0, c = 1.0, p = 0.0;
+                for (int i = mm - 1; i >= l; --i) {
+                    double f = s * e[(size_t)i];
+                    double b = c * e[(size_t)i];
+                    double r3 = sqrt(f * f + g * g);
+                    e[(size_t)(i + 1)] = r3;
+                    if (r3 == 0.0) {
+                        mu[(size_t)(i + 1)] -= p;
+                        e[(size_t)mm] = 0.0;
+                        break;
+                    }
+                    s = f / r3; c = g / r3;
+                    g = mu[(size_t)(i + 1)] - p;
+                    r3 = (mu[(size_t)i] - g) * s + 2.0 * c * b;
+                    p = s * r3;
+                    mu[(size_t)(i + 1)] = g + p;
+                    g = c * r3 - b;
+                    /* Apply Givens rotation to Z columns i, i+1. */
+                    for (int k = 0; k < m; ++k) {
+                        double zi  = Z[(size_t)(k * m + i)];
+                        double zi1 = Z[(size_t)(k * m + (i + 1))];
+                        Z[(size_t)(k * m + (i + 1))] = s * zi + c * zi1;
+                        Z[(size_t)(k * m + i)]       = c * zi - s * zi1;
+                    }
+                }
+                if (e[(size_t)mm] != 0.0 || mm == l + 1) {
+                    mu[(size_t)l] -= p;
+                    e[(size_t)l] = g;
+                    e[(size_t)mm] = 0.0;
+                }
+            }
+        } while (mm != l);
+        ++l;
+    }
+    /* Sort mu ascending; permute Z columns in the same order. */
+    std::vector<int> idx(m);
+    for (int i = 0; i < m; ++i) idx[i] = i;
+    std::sort(idx.begin(), idx.end(),
+              [&](int a, int b) { return mu[(size_t)a] < mu[(size_t)b]; });
+    std::vector<double> mu_sorted((size_t)m), Z_sorted((size_t)m * (size_t)m);
+    for (int j = 0; j < m; ++j) {
+        mu_sorted[(size_t)j] = mu[(size_t)idx[(size_t)j]];
+        for (int i = 0; i < m; ++i)
+            Z_sorted[(size_t)(i * m + j)] = Z[(size_t)(i * m + idx[(size_t)j])];
+    }
+    mu.swap(mu_sorted);
+    Z.swap(Z_sorted);
+}
+
 }  /* anonymous namespace */
 
 extern "C" {
 
 /* Public ABI for the new eigensolver.  Returns a column vector of
  * the n_modes smallest eigenvalues (sorted ascending). */
-matlab_mat *matlab_pde_eig_lanczos_si(void *K_sparse, matlab_mat *M_diag,
-                                       double nmodes_d, double sigma) {
-    if (!K_sparse || !M_diag) return mat_alloc(0, 1);
-    int64_t nmodes = (int64_t)nmodes_d;
-    if (nmodes <= 0) nmodes = 10;
-    int64_t m = 3 * nmodes + 10;  /* Krylov subspace size */
+/* Internal worker: returns both eigenvalues (lams) and Ritz
+ * eigenvector matrix V_ritz (n × n_ritz, row-major, indexed
+ * V_ritz[i * n_ritz + j]), with n_ritz being the actual subspace
+ * size that converged. */
+static void lanczos_si_core(void *K_sparse, matlab_mat *M_diag,
+                            int64_t nmodes, double sigma,
+                            std::vector<double> &lams_out,
+                            std::vector<double> &Vritz_out,
+                            int64_t &n_out,
+                            int64_t &nritz_out) {
     sparse_view_lanczos *K = (sparse_view_lanczos *)K_sparse;
-    if (!K || K->magic != 0xC0FFEE05u) return mat_alloc(0, 1);
     int64_t n = K->rows;
+    int64_t m = 3 * nmodes + 10;
     if (m > n) m = n;
     if (nmodes > n) nmodes = n;
+    n_out = n;
+    nritz_out = 0;
 
     ShiftedOp A{K, M_diag, sigma};
-
-    /* Lanczos basis Q: n × m. */
     std::vector<double> Q((size_t)n * (size_t)m, 0.0);
     std::vector<double> alpha((size_t)m, 0.0);
     std::vector<double> beta((size_t)(m - 1), 0.0);
 
-    /* Initial vector — deterministic seed for reproducibility. */
     std::vector<double> v((size_t)n);
     for (int64_t i = 0; i < n; ++i) v[(size_t)i] = sin((double)(i + 1) * 0.137);
-    /* M-normalize: ||v||_M = sqrt(v' M v). */
     double nrm2 = 0.0;
     for (int64_t i = 0; i < n; ++i) nrm2 += M_diag->data[i] * v[(size_t)i] * v[(size_t)i];
     double nrm = sqrt(nrm2);
-    if (nrm == 0.0) return mat_alloc(0, 1);
+    if (nrm == 0.0) return;
     for (int64_t i = 0; i < n; ++i) v[(size_t)i] /= nrm;
     for (int64_t i = 0; i < n; ++i) Q[(size_t)i] = v[(size_t)i];
 
     std::vector<double> Mv((size_t)n), z((size_t)n);
-
     int64_t j_last = 0;
     for (int64_t j = 0; j < m; ++j) {
-        /* M v_j */
         for (int64_t i = 0; i < n; ++i)
             Mv[(size_t)i] = M_diag->data[i] * Q[(size_t)(i * m + j)];
-        /* z = (K - σM)^-1 · Mv via shifted PCG. */
         shifted_pcg(A, Mv.data(), z.data(), 1e-8, 200);
-        /* α_j = v_j' · M · z = v_j' · (M z). */
         double aj = 0.0;
         for (int64_t i = 0; i < n; ++i)
             aj += Q[(size_t)(i * m + j)] * M_diag->data[i] * z[(size_t)i];
         alpha[(size_t)j] = aj;
-        /* z = z - α_j v_j - β_{j-1} v_{j-1}. */
         for (int64_t i = 0; i < n; ++i) {
             double sub = aj * Q[(size_t)(i * m + j)];
             if (j > 0) sub += beta[(size_t)(j - 1)] * Q[(size_t)(i * m + (j - 1))];
             z[(size_t)i] -= sub;
         }
-        /* Full re-orth (CGS-2 style) — single round for v1.  Critical
-         * for accuracy on tightly-clustered spectra. */
         for (int64_t k = 0; k <= j; ++k) {
             double dot = 0.0;
             for (int64_t i = 0; i < n; ++i)
@@ -2106,7 +2239,6 @@ matlab_mat *matlab_pde_eig_lanczos_si(void *K_sparse, matlab_mat *M_diag,
             for (int64_t i = 0; i < n; ++i)
                 z[(size_t)i] -= dot * Q[(size_t)(i * m + k)];
         }
-        /* β_j = sqrt(z' M z). */
         double bnorm2 = 0.0;
         for (int64_t i = 0; i < n; ++i)
             bnorm2 += M_diag->data[i] * z[(size_t)i] * z[(size_t)i];
@@ -2123,30 +2255,354 @@ matlab_mat *matlab_pde_eig_lanczos_si(void *K_sparse, matlab_mat *M_diag,
     alpha.resize((size_t)actual_m);
     beta.resize((size_t)(actual_m - 1));
 
-    /* Solve T · q = μ q on the tridiagonal projection.  μ_i are the
-     * eigenvalues of A = (K - σM)^-1 M; eigenvalues of (K, M) come
-     * from λ = σ + 1/μ. */
-    std::vector<double> mu;
-    tridiag_eig(alpha, beta, mu);
+    /* T eigvecs Z (m × m) + eigvals mu. */
+    std::vector<double> mu, Z;
+    tridiag_eig_with_vecs(alpha, beta, mu, Z);
+    int mm = (int)actual_m;
 
-    /* Map A's eigenvalues back to (K, M)'s: λ = σ + 1/μ.  The largest
-     * μ corresponds to the smallest |λ - σ| — i.e., the eigenvalues
-     * closest to σ.  Filter out zero / NaN μ defensively. */
-    std::vector<double> lams;
-    lams.reserve(mu.size());
-    for (double mui : mu) {
+    /* Map μ → λ = σ + 1/μ, sort by λ ascending, retain a
+     * permutation back into Z columns. */
+    std::vector<std::pair<double, int>> lam_idx;
+    lam_idx.reserve(mu.size());
+    for (int i = 0; i < (int)mu.size(); ++i) {
+        double mui = mu[(size_t)i];
         if (fabs(mui) < 1e-30 || !std::isfinite(mui)) continue;
         double l = sigma + 1.0 / mui;
-        if (std::isfinite(l)) lams.push_back(l);
+        if (l < 0 && l > -1e-3) l = 0.0;
+        if (std::isfinite(l)) lam_idx.emplace_back(l, i);
     }
-    std::sort(lams.begin(), lams.end());
-    /* Clamp tiny negative numerical noise from rigid-body modes. */
-    for (auto &x : lams) if (x < 0 && x > -1e-3) x = 0.0;
-
-    int64_t want = (int64_t)lams.size();
+    std::sort(lam_idx.begin(), lam_idx.end(),
+              [](const std::pair<double,int> &a,
+                 const std::pair<double,int> &b) { return a.first < b.first; });
+    int64_t want = (int64_t)lam_idx.size();
     if (want > nmodes) want = nmodes;
+    nritz_out = want;
+
+    lams_out.assign((size_t)nmodes, 0.0);
+    Vritz_out.assign((size_t)n * (size_t)want, 0.0);
+    for (int64_t k = 0; k < want; ++k) {
+        lams_out[(size_t)k] = lam_idx[(size_t)k].first;
+        int zcol = lam_idx[(size_t)k].second;
+        /* V_ritz[:, k] = Q · Z[:, zcol]; both row-major. */
+        for (int64_t i = 0; i < n; ++i) {
+            double acc = 0.0;
+            for (int j = 0; j < mm; ++j)
+                acc += Q[(size_t)(i * actual_m + j)] *
+                        Z[(size_t)(j * mm + zcol)];
+            Vritz_out[(size_t)(i * want + k)] = acc;
+        }
+        /* M-normalize the Ritz vector: ||φ||_M = 1. */
+        double nm2 = 0.0;
+        for (int64_t i = 0; i < n; ++i) {
+            double phi_i = Vritz_out[(size_t)(i * want + k)];
+            nm2 += M_diag->data[i] * phi_i * phi_i;
+        }
+        double s = (nm2 > 0) ? 1.0 / sqrt(nm2) : 0.0;
+        for (int64_t i = 0; i < n; ++i)
+            Vritz_out[(size_t)(i * want + k)] *= s;
+    }
+}
+
+matlab_mat *matlab_pde_eig_lanczos_si(void *K_sparse, matlab_mat *M_diag,
+                                       double nmodes_d, double sigma) {
+    if (!K_sparse || !M_diag) return mat_alloc(0, 1);
+    int64_t nmodes = (int64_t)nmodes_d;
+    if (nmodes <= 0) nmodes = 10;
+    sparse_view_lanczos *K = (sparse_view_lanczos *)K_sparse;
+    if (!K || K->magic != 0xC0FFEE05u) return mat_alloc(0, 1);
+
+    std::vector<double> lams, V;
+    int64_t n = 0, nritz = 0;
+    lanczos_si_core(K_sparse, M_diag, nmodes, sigma, lams, V, n, nritz);
+
     matlab_mat *out = mat_alloc(nmodes, 1);
-    for (int64_t i = 0; i < want; ++i) out->data[i] = lams[(size_t)i];
+    for (int64_t i = 0; i < (int64_t)lams.size() && i < nmodes; ++i)
+        out->data[i] = lams[(size_t)i];
+    return out;
+}
+
+/* Full eigensolver: returns {Lambda (nmodes × 1), Phi (n × nritz),
+ * NumConverged}.  Used by modal superposition. */
+matlab_struct *matlab_pde_eig_lanczos_si_full(void *K_sparse,
+                                               matlab_mat *M_diag,
+                                               double nmodes_d,
+                                               double sigma) {
+    matlab_struct *out = matlab_struct_new();
+    if (!K_sparse || !M_diag) return out;
+    int64_t nmodes = (int64_t)nmodes_d;
+    if (nmodes <= 0) nmodes = 10;
+    sparse_view_lanczos *K = (sparse_view_lanczos *)K_sparse;
+    if (!K || K->magic != 0xC0FFEE05u) return out;
+
+    std::vector<double> lams, V;
+    int64_t n = 0, nritz = 0;
+    lanczos_si_core(K_sparse, M_diag, nmodes, sigma, lams, V, n, nritz);
+
+    matlab_mat *Lam = mat_alloc(nmodes, 1);
+    for (int64_t i = 0; i < (int64_t)lams.size() && i < nmodes; ++i)
+        Lam->data[i] = lams[(size_t)i];
+
+    matlab_mat *Phi = mat_alloc(n, nritz);
+    for (int64_t i = 0; i < n; ++i)
+        for (int64_t k = 0; k < nritz; ++k)
+            Phi->data[i * nritz + k] = V[(size_t)(i * nritz + k)];
+
+    matlab_struct_set_mat(out, "Lambda", 6, Lam);
+    matlab_struct_set_mat(out, "Phi",    3, Phi);
+    matlab_struct_set_f64(out, "NumConverged", 12, (double)nritz);
+    return out;
+}
+
+matlab_mat *matlab_pde_eig_lambda(matlab_struct *r) {
+    return matlab_struct_get_mat(r, "Lambda", 6);
+}
+matlab_mat *matlab_pde_eig_phi(matlab_struct *r) {
+    return matlab_struct_get_mat(r, "Phi", 3);
+}
+
+/* --- Modal superposition transient + Rayleigh damping ------------- *
+ *
+ * Solves M Ü + C U̇ + K U = F(t) by projecting onto the linear
+ * modal subspace {φ_1, …, φ_n_m} from Lanczos:
+ *     U(t)  = Φ · q(t)
+ *     Φ' M Φ = I       (M-orthonormal by construction)
+ *     Φ' K Φ = diag(λ_i)
+ *     Φ' C Φ = diag(α + β λ_i)   for Rayleigh C = α M + β K
+ *
+ * Each modal DOF is a decoupled SDOF
+ *     q̈_i + (α + β λ_i) q̇_i + λ_i q_i = φ_iᵀ F(t)
+ *
+ * Integrated with central-difference Newmark (β=0, γ=½) for each
+ * mode — the same scheme the full-system structuralTransient uses,
+ * but on m_n × 1 modal vectors instead of 3N × 1 physical vectors.
+ *
+ * Inputs (on `model`):
+ *   ModalResults    — struct from pde_eig_lanczos_si_full holding
+ *                     Lambda (n_m × 1) and Phi (3N × n_m).
+ *   RayleighAlpha   — α  (default 0).
+ *   RayleighBeta    — β  (default 0).
+ *   TimeStep / NumSteps  — same as full-system transient.
+ *   MaterialProperties / FixedFaces / PressureFaces / Geometry —
+ *     the modal results were already built from these, so the
+ *     elasticity F vector is re-derived here for the load
+ *     projection.
+ */
+
+matlab_struct *matlab_pde_set_rayleigh(matlab_struct *model,
+                                        double alpha, double beta) {
+    matlab_struct_set_f64(model, "RayleighAlpha", 13, alpha);
+    matlab_struct_set_f64(model, "RayleighBeta",  12, beta);
+    return model;
+}
+
+matlab_struct *matlab_pde_set_modal_results(matlab_struct *model,
+                                             matlab_struct *modal) {
+    matlab_struct_set_mat(model, "ModalResults", 12, (matlab_mat *)modal);
+    return model;
+}
+
+/* Forward decls of helpers reused from structuralTransient. */
+extern matlab_mat *matlab_pde_face_pressure_3d(matlab_struct *mesh,
+                                                double face_id_d, double p);
+
+/* elast_build_K_F_M_diag is file-scope-static earlier in this TU
+ * and is visible here without a forward decl. */
+matlab_struct *matlab_pde_solve_structural_transient_modal(matlab_struct *model) {
+    matlab_struct *mesh = nullptr;
+    if (field_holds_struct(model, "Mesh", 4)) {
+        mesh = (matlab_struct *)matlab_struct_get_mat(model, "Mesh", 4);
+    } else if (field_holds_struct(model, "Geometry", 8)) {
+        mesh = (matlab_struct *)matlab_struct_get_mat(model, "Geometry", 8);
+    } else {
+        return matlab_struct_new();
+    }
+    matlab_struct *props = (matlab_struct *)
+        matlab_struct_get_mat(model, "MaterialProperties", 18);
+    double E   = matlab_struct_get_f64(props, "YoungsModulus", 13);
+    double nu  = matlab_struct_get_f64(props, "PoissonsRatio", 13);
+    double rho = matlab_struct_get_f64(props, "MassDensity",   11);
+    if (rho <= 0) rho = 1.0;
+
+    int64_t nmodes = (int64_t)matlab_struct_get_f64(model, "NumModes", 8);
+    if (nmodes <= 0) nmodes = 12;
+    double alpha = matlab_struct_get_f64(model, "RayleighAlpha", 13);
+    double beta  = matlab_struct_get_f64(model, "RayleighBeta",  12);
+
+    double dt = matlab_struct_get_f64(model, "TimeStep", 8);
+    if (dt <= 0) dt = 1e-5;
+    int64_t nsteps = (int64_t)matlab_struct_get_f64(model, "NumSteps", 8);
+    if (nsteps <= 0) nsteps = 200;
+
+    /* Assemble K (sparse), M_diag, F shape. */
+    void *K_sp = nullptr;
+    matlab_mat *Mdiag = nullptr;
+    int64_t Ndof = 0;
+    elast_build_K_F_M_diag(mesh, E, nu, rho, &K_sp, &Mdiag, &Ndof);
+
+    /* Build F from pressure faces. */
+    matlab_mat *F = mat_alloc(Ndof, 1);
+    matlab_mat *pf = matlab_struct_get_mat(model, "PressureFaces", 13);
+    if (pf && pf->rows > 0 && pf->cols >= 2) {
+        for (int64_t i = 0; i < pf->rows; ++i) {
+            double fid = pf->data[i * pf->cols + 0];
+            double p   = pf->data[i * pf->cols + 1];
+            matlab_mat *Fp = matlab_pde_face_pressure_3d(mesh, fid, p);
+            for (int64_t k = 0; k < Ndof; ++k) F->data[k] += Fp->data[k];
+        }
+    }
+
+    /* Fixed-DOF mask from FixedFaces. */
+    matlab_mat *ff = matlab_struct_get_mat(model, "FixedFaces", 10);
+    std::vector<int8_t> fixed_dof((size_t)Ndof, 0);
+    if (ff && ff->rows > 0) {
+        for (int64_t i = 0; i < ff->rows; ++i) {
+            double fid = ff->data[i];
+            matlab_mat *ids = matlab_pde_face_nodes(mesh, fid);
+            for (int64_t k = 0; k < ids->rows; ++k) {
+                int64_t n = (int64_t)ids->data[k] - 1;
+                if (n < 0 || n * 3 + 2 >= Ndof) continue;
+                fixed_dof[(size_t)(n * 3 + 0)] = 1;
+                fixed_dof[(size_t)(n * 3 + 1)] = 1;
+                fixed_dof[(size_t)(n * 3 + 2)] = 1;
+            }
+        }
+    }
+    /* Zero fixed rows of F (clamped DOFs carry no load). */
+    for (int64_t i = 0; i < Ndof; ++i)
+        if (fixed_dof[(size_t)i]) F->data[i] = 0.0;
+
+    /* Penalty-clamp K and M at fixed DOFs.  Builds K_pen as a new
+     * sparse matrix with the SAME pattern as K plus a large diagonal
+     * penalty at fixed rows.  M_pen is dense diagonal with 1.0 at
+     * fixed DOFs (so the eigenvalue at those DOFs is ~K_pen/1.0 =
+     * 1e20, far from any physical mode and excluded by Lanczos σ=0).
+     */
+    {
+        struct sparse_view {
+            uint32_t magic, _pad;
+            int64_t *row_ptr;
+            int64_t *col_idx;
+            double  *vals;
+            int64_t rows, cols, nnz;
+        };
+        sparse_view *S = (sparse_view *)K_sp;
+        for (int64_t r = 0; r < Ndof; ++r) {
+            if (!fixed_dof[(size_t)r]) continue;
+            int64_t lo = S->row_ptr[r];
+            int64_t hi = S->row_ptr[r + 1];
+            for (int64_t k = lo; k < hi; ++k) {
+                int64_t c = S->col_idx[k];
+                if (c == r)        S->vals[k] = 1.0e20;
+                else if (c < r)    S->vals[k] = 0.0;
+                else               S->vals[k] = 0.0;
+            }
+        }
+        /* Mirror: zero entries in OTHER rows that point to fixed cols. */
+        for (int64_t r = 0; r < Ndof; ++r) {
+            if (fixed_dof[(size_t)r]) continue;
+            int64_t lo = S->row_ptr[r];
+            int64_t hi = S->row_ptr[r + 1];
+            for (int64_t k = lo; k < hi; ++k) {
+                int64_t c = S->col_idx[k];
+                if (c != r && fixed_dof[(size_t)c]) S->vals[k] = 0.0;
+            }
+        }
+    }
+    matlab_mat *M_pen = mat_alloc(Ndof, 1);
+    for (int64_t i = 0; i < Ndof; ++i)
+        M_pen->data[i] = fixed_dof[(size_t)i] ? 1.0 : Mdiag->data[i];
+
+    /* Lanczos shift-invert eigensolve: K_pen φ = λ M_pen φ, σ = 0. */
+    std::vector<double> lams_v, Phi_v;
+    int64_t n_lanczos = 0, n_converged = 0;
+    lanczos_si_core(K_sp, M_pen, nmodes, 0.0,
+                    lams_v, Phi_v, n_lanczos, n_converged);
+
+    /* Discard modes with λ above a penalty threshold (these are the
+     * spurious modes from the fixed DOFs).  Keep nm_active genuine
+     * physical modes. */
+    int64_t nm_active = 0;
+    for (int64_t i = 0; i < n_converged; ++i) {
+        if (lams_v[(size_t)i] < 1e15) ++nm_active;
+        else break;
+    }
+    if (nm_active <= 0) nm_active = n_converged;
+
+    /* Repack Φ into a contiguous Ndof × nm_active matrix and zero
+     * the fixed-DOF rows so reconstructed U honours the BCs. */
+    matlab_mat *Phi = mat_alloc(Ndof, nm_active);
+    matlab_mat *Lam = mat_alloc(nm_active, 1);
+    for (int64_t i = 0; i < nm_active; ++i) Lam->data[i] = lams_v[(size_t)i];
+    for (int64_t i = 0; i < Ndof; ++i) {
+        for (int64_t k = 0; k < nm_active; ++k) {
+            double v = Phi_v[(size_t)(i * n_converged + k)];
+            if (fixed_dof[(size_t)i]) v = 0.0;
+            Phi->data[i * nm_active + k] = v;
+        }
+    }
+
+    /* Project F onto each mode: f_modal[i] = Φ[:,i]ᵀ F. */
+    std::vector<double> f_modal((size_t)nm_active, 0.0);
+    for (int64_t i = 0; i < nm_active; ++i) {
+        double s = 0.0;
+        for (int64_t k = 0; k < Ndof; ++k)
+            s += Phi->data[k * nm_active + i] * F->data[k];
+        f_modal[(size_t)i] = s;
+    }
+
+    /* SDOF Newmark β=¼, γ=½ (implicit, unconditionally stable):
+     *   q̈ + c q̇ + k q = f      (M=1 by mode-normalization)
+     *   q_{n+1} = q_n + dt q̇_n + dt²/4 (q̈_n + q̈_{n+1})
+     *   q̇_{n+1} = q̇_n + dt/2  (q̈_n + q̈_{n+1})
+     * → 2×2 linear system per mode per step, solved analytically.
+     */
+    std::vector<double> q((size_t)nm_active, 0.0);
+    std::vector<double> qd((size_t)nm_active, 0.0);
+    std::vector<double> qdd((size_t)nm_active);
+    for (int64_t i = 0; i < nm_active; ++i) qdd[(size_t)i] = f_modal[(size_t)i];
+
+    matlab_mat *Uhist = mat_alloc(Ndof, nsteps + 1);
+    matlab_mat *tlist = mat_alloc(nsteps + 1, 1);
+    for (int64_t s = 1; s <= nsteps; ++s) {
+        tlist->data[s] = (double)s * dt;
+        for (int64_t i = 0; i < nm_active; ++i) {
+            double k = Lam->data[i];
+            double c = alpha + beta * k;
+            double qn   = q[(size_t)i];
+            double qdn  = qd[(size_t)i];
+            double qddn = qdd[(size_t)i];
+            /* Predictor: q* = q + dt qd + dt²/4 qddn
+             *            qd* = qd + dt/2 qddn               */
+            double qstar  = qn + dt * qdn + 0.25 * dt * dt * qddn;
+            double qdstar = qdn + 0.5  * dt * qddn;
+            /* Solve a_{n+1} (1 + dt c/2 + dt² k/4)
+             *     = f - c qd* - k q*                         */
+            double denom = 1.0 + 0.5 * dt * c + 0.25 * dt * dt * k;
+            double qddnp1 = (f_modal[(size_t)i] - c * qdstar - k * qstar) / denom;
+            double qnp1  = qstar  + 0.25 * dt * dt * qddnp1;
+            double qdnp1 = qdstar + 0.5  * dt       * qddnp1;
+            q[(size_t)i]   = qnp1;
+            qd[(size_t)i]  = qdnp1;
+            qdd[(size_t)i] = qddnp1;
+        }
+        /* Reconstruct U(t) = Φ q. */
+        for (int64_t k = 0; k < Ndof; ++k) {
+            double u_k = 0.0;
+            for (int64_t i = 0; i < nm_active; ++i)
+                u_k += Phi->data[k * nm_active + i] * q[(size_t)i];
+            Uhist->data[k * (nsteps + 1) + s] = u_k;
+        }
+    }
+
+    matlab_mat *u_last = mat_alloc(Ndof, 1);
+    for (int64_t k = 0; k < Ndof; ++k)
+        u_last->data[k] = Uhist->data[k * (nsteps + 1) + nsteps];
+
+    matlab_struct *out = matlab_struct_new();
+    matlab_struct_set_mat(out, "Mesh",  4, (matlab_mat *)mesh);
+    matlab_struct_set_mat(out, "Uhist", 5, Uhist);
+    matlab_struct_set_mat(out, "tlist", 5, tlist);
+    matlab_struct_set_mat(out, "u",     1, u_last);
     return out;
 }
 
@@ -2211,6 +2667,12 @@ matlab_struct *matlab_pde_solve(matlab_struct *model) {
                 return matlab_pde_solve_magnetostatic(model);
             if (s->len == 12 && memcmp(s->data, "dcConduction", 12) == 0)
                 return matlab_pde_solve_dc_conduction(model);
+            /* Order matters: "structuralTransientModal" (24) must be
+             * tested BEFORE "structuralTransient" (19), since they
+             * share the same prefix.                                  */
+            if (s->len == 24 &&
+                memcmp(s->data, "structuralTransientModal", 24) == 0)
+                return matlab_pde_solve_structural_transient_modal(model);
             if (s->len == 19 &&
                 memcmp(s->data, "structuralTransient", 19) == 0)
                 return matlab_pde_solve_structural_transient(model);
@@ -4321,6 +4783,491 @@ matlab_struct *matlab_pde_load_glb(void *s) {
     if (!s) return nullptr;
     auto *ms = (struct matlab_string_local_s *)s;
     return matlab_pde_load_glb_path(ms->data, ms->len);
+}
+
+}  /* extern "C" */
+
+/* --- Quadratic tetrahedra (T10) ---------------------------------- *
+ *
+ * Upgrade a 4-node tet mesh in place to a 10-node mesh by adding
+ * mid-edge nodes.  Each shared edge gets a single mid-edge node
+ * across all incident tets (deduplicated via an edge hash).
+ *
+ * Element K assembly uses the standard T10 P2 shape functions in
+ * volume coords:
+ *   Corners (i=1..4): N_i = L_i (2 L_i − 1)
+ *   Mid-edges  ij  : N_ij = 4 L_i L_j  (edges 12,13,14,23,24,34)
+ *
+ * 4-point Keast quadrature (degree-of-precision 3):
+ *   point 1: (α, β, β, β)
+ *   point 2: (β, α, β, β)
+ *   point 3: (β, β, α, β)
+ *   point 4: (β, β, β, α)
+ *   with α = 0.58541019…, β = (1 − α) / 3 ≈ 0.13819660…
+ *   weights w_i = 1/4 each.
+ *
+ * Per-element stiffness K_e (30 × 30) = Σ_g w_g · B(g)ᵀ D B(g) ·
+ *   det(J(g)).  Assembled into a global sparse CSR via the same
+ *   triplet → CSR pipeline used for the P1 elasticity assembler.
+ */
+
+namespace {
+
+/* Layout: 4 corner indices (Tets), then 6 mid-edge indices (in fixed
+ * order: edges 0-1, 0-2, 0-3, 1-2, 1-3, 2-3).  Total 10 per element. */
+struct T10Mesh {
+    std::vector<double> nodes;   /* (Nn × 3), row-major */
+    std::vector<int64_t> tets10; /* (Nt × 10), 1-based */
+    std::vector<int64_t> faces;  /* (Nf × 4), face_id + 3 corner nodes (1-based) */
+    int64_t Nn = 0, Nt = 0, Nf = 0;
+};
+
+T10Mesh upgrade_to_t10(matlab_struct *mesh_t4) {
+    T10Mesh out;
+    matlab_mat *nodes_in = matlab_struct_get_mat(mesh_t4, "Nodes", 5);
+    matlab_mat *tets_in  = matlab_struct_get_mat(mesh_t4, "Tets",  4);
+    matlab_mat *faces_in = matlab_struct_get_mat(mesh_t4, "Faces", 5);
+    if (!nodes_in || !tets_in) return out;
+    int64_t Nn = nodes_in->rows;
+    int64_t Nt = tets_in->rows;
+
+    out.nodes.assign(nodes_in->data,
+                      nodes_in->data + (size_t)(Nn * 3));
+    out.tets10.assign((size_t)(Nt * 10), 0);
+
+    /* Edge dedupe: key = (low << 32) | high (0-based node ids). */
+    std::unordered_map<uint64_t, int64_t> edge2mid;
+    edge2mid.reserve((size_t)(Nt * 6));
+    auto edge_key = [](int64_t a, int64_t b) -> uint64_t {
+        if (a > b) std::swap(a, b);
+        return ((uint64_t)a << 32) | (uint64_t)b;
+    };
+    /* Edge order within each tet: (0,1) (0,2) (0,3) (1,2) (1,3) (2,3). */
+    static const int edge_def[6][2] = {
+        {0,1}, {0,2}, {0,3}, {1,2}, {1,3}, {2,3}
+    };
+
+    int64_t next_id = Nn;  /* 0-based id of next mid-edge node */
+    for (int64_t t = 0; t < Nt; ++t) {
+        int64_t c[4];
+        for (int j = 0; j < 4; ++j)
+            c[j] = (int64_t)tets_in->data[t * 4 + j] - 1;
+        for (int j = 0; j < 4; ++j) out.tets10[(size_t)(t * 10 + j)] = c[j] + 1;
+        for (int e = 0; e < 6; ++e) {
+            int64_t a = c[edge_def[e][0]];
+            int64_t b = c[edge_def[e][1]];
+            uint64_t key = edge_key(a, b);
+            auto it = edge2mid.find(key);
+            int64_t mid;
+            if (it == edge2mid.end()) {
+                mid = next_id++;
+                edge2mid.emplace(key, mid);
+                /* Append midpoint coords to nodes. */
+                double mx = 0.5 * (nodes_in->data[a * 3 + 0] + nodes_in->data[b * 3 + 0]);
+                double my = 0.5 * (nodes_in->data[a * 3 + 1] + nodes_in->data[b * 3 + 1]);
+                double mz = 0.5 * (nodes_in->data[a * 3 + 2] + nodes_in->data[b * 3 + 2]);
+                out.nodes.push_back(mx);
+                out.nodes.push_back(my);
+                out.nodes.push_back(mz);
+            } else {
+                mid = it->second;
+            }
+            out.tets10[(size_t)(t * 10 + 4 + e)] = mid + 1;
+        }
+    }
+    out.Nn = next_id;
+    out.Nt = Nt;
+    if (faces_in) {
+        out.Nf = faces_in->rows;
+        out.faces.assign(faces_in->data,
+                          faces_in->data + (size_t)(faces_in->rows * 4));
+    }
+    return out;
+}
+
+}  /* anonymous namespace */
+
+extern "C" {
+
+/* matlab_pde_mesh_quadratic(mesh) — returns a mesh struct with
+ * .Nodes (Nn_new × 3), .Tets (Nt × 4, corners), .Tets10 (Nt × 10),
+ * .Faces (Nf × 4), .OrderQuadratic = 1. */
+matlab_struct *matlab_pde_mesh_quadratic(matlab_struct *mesh_t4) {
+    T10Mesh M = upgrade_to_t10(mesh_t4);
+    matlab_struct *out = matlab_struct_new();
+    matlab_mat *nodes = mat_alloc(M.Nn, 3);
+    memcpy(nodes->data, M.nodes.data(),
+            sizeof(double) * (size_t)(M.Nn * 3));
+    matlab_mat *tets4  = matlab_struct_get_mat(mesh_t4, "Tets", 4);
+    matlab_mat *tets4c = mat_alloc(M.Nt, 4);
+    memcpy(tets4c->data, tets4->data,
+            sizeof(double) * (size_t)(M.Nt * 4));
+    matlab_mat *tets10 = mat_alloc(M.Nt, 10);
+    for (int64_t i = 0; i < M.Nt * 10; ++i)
+        tets10->data[i] = (double)M.tets10[(size_t)i];
+    matlab_struct_set_mat(out, "Nodes",  5, nodes);
+    matlab_struct_set_mat(out, "Tets",   4, tets4c);
+    matlab_struct_set_mat(out, "Tets10", 6, tets10);
+    if (M.Nf > 0) {
+        matlab_mat *faces = mat_alloc(M.Nf, 4);
+        for (size_t i = 0; i < M.faces.size(); ++i)
+            faces->data[i] = (double)M.faces[i];
+        matlab_struct_set_mat(out, "Faces", 5, faces);
+    }
+    matlab_struct_set_f64(out, "OrderQuadratic", 14, 1.0);
+    /* Copy through W/D/H/Nx/Ny/Nz if present. */
+    for (const char *fld : {"W","D","H","Nx","Ny","Nz"}) {
+        double v = matlab_struct_get_f64(mesh_t4, fld, (int)strlen(fld));
+        if (v != 0.0) matlab_struct_set_f64(out, fld, (int)strlen(fld), v);
+    }
+    return out;
+}
+
+}  /* extern "C" */
+
+/* T10 element assembly + face load.  Lives in anonymous namespace
+ * for the shape-function math; the public entry points re-enter
+ * extern "C" below. */
+namespace {
+
+/* T10 shape function gradients in vol-coord basis (L_1..L_4).
+ * For each node i (0..9), returns dN_i/dL_k for k=0..3 in dN[i][k].
+ * Node order: 0..3 corners, 4..9 mid-edges in edge_def order.        */
+static void t10_dN_dL(const double L[4], double dN[10][4]) {
+    for (int i = 0; i < 10; ++i)
+        for (int k = 0; k < 4; ++k) dN[i][k] = 0.0;
+    /* Corners: N_i = L_i (2 L_i - 1).  dN/dL_i = 4 L_i - 1; others 0. */
+    for (int i = 0; i < 4; ++i) dN[i][i] = 4.0 * L[i] - 1.0;
+    /* Mid-edges (in edge_def order): N_ij = 4 L_i L_j. */
+    static const int edge_def_[6][2] = {
+        {0,1}, {0,2}, {0,3}, {1,2}, {1,3}, {2,3}
+    };
+    for (int e = 0; e < 6; ++e) {
+        int i = edge_def_[e][0];
+        int j = edge_def_[e][1];
+        dN[4 + e][i] = 4.0 * L[j];
+        dN[4 + e][j] = 4.0 * L[i];
+    }
+}
+
+/* From dN/dL (10 × 4) and node coords X (10 × 3), build the 3 × 3
+ * Jacobian J = ΣN_i x_i (i.e. dx/dL_k for k=0..2 using L1,L2,L3 as
+ * independent coords with L4 = 1 - L1 - L2 - L3 ⇒ dL4/dL_k = −1).
+ *
+ * J[a][b] = ∂x_a/∂L_b for a,b = 0,1,2.  Then dN/dx = J^{-T} · dN/dξ
+ * where dN/dξ_b = dN/dL_b − dN/dL_3 (chain rule for L_4 elimination). */
+static void t10_jacobian_and_dNdx(const double dN_dL[10][4],
+                                   const double X[10][3],
+                                   double det_J_out[1],
+                                   double dN_dx[10][3]) {
+    double dN_dxi[10][3];
+    for (int i = 0; i < 10; ++i)
+        for (int b = 0; b < 3; ++b)
+            dN_dxi[i][b] = dN_dL[i][b] - dN_dL[i][3];
+    double J[3][3] = {{0,0,0},{0,0,0},{0,0,0}};
+    for (int a = 0; a < 3; ++a)
+        for (int b = 0; b < 3; ++b)
+            for (int i = 0; i < 10; ++i)
+                J[a][b] += X[i][a] * dN_dxi[i][b];
+    /* Inverse and det of J. */
+    double det = J[0][0] * (J[1][1] * J[2][2] - J[1][2] * J[2][1])
+                - J[0][1] * (J[1][0] * J[2][2] - J[1][2] * J[2][0])
+                + J[0][2] * (J[1][0] * J[2][1] - J[1][1] * J[2][0]);
+    det_J_out[0] = det;
+    double inv_det = (fabs(det) > 1e-30) ? 1.0 / det : 0.0;
+    double Jinv[3][3];
+    Jinv[0][0] = (J[1][1] * J[2][2] - J[1][2] * J[2][1]) * inv_det;
+    Jinv[0][1] = (J[0][2] * J[2][1] - J[0][1] * J[2][2]) * inv_det;
+    Jinv[0][2] = (J[0][1] * J[1][2] - J[0][2] * J[1][1]) * inv_det;
+    Jinv[1][0] = (J[1][2] * J[2][0] - J[1][0] * J[2][2]) * inv_det;
+    Jinv[1][1] = (J[0][0] * J[2][2] - J[0][2] * J[2][0]) * inv_det;
+    Jinv[1][2] = (J[0][2] * J[1][0] - J[0][0] * J[1][2]) * inv_det;
+    Jinv[2][0] = (J[1][0] * J[2][1] - J[1][1] * J[2][0]) * inv_det;
+    Jinv[2][1] = (J[0][1] * J[2][0] - J[0][0] * J[2][1]) * inv_det;
+    Jinv[2][2] = (J[0][0] * J[1][1] - J[0][1] * J[1][0]) * inv_det;
+    /* dN/dx = J^{-T} · dN/dξ  (chain rule: ∂φ/∂x_a =
+     * Σ_b (∂φ/∂ξ_b)(∂ξ_b/∂x_a) = Σ_b (∂φ/∂ξ_b)(J^{-1})_{b,a}). */
+    for (int i = 0; i < 10; ++i) {
+        for (int a = 0; a < 3; ++a) {
+            double s = 0.0;
+            for (int b = 0; b < 3; ++b)
+                s += Jinv[b][a] * dN_dxi[i][b];
+            dN_dx[i][a] = s;
+        }
+    }
+}
+
+}  /* anonymous namespace */
+
+extern "C" {
+
+/* matlab_pde_assemble_elast_3d_t10(mesh_q, E, nu) → CSR sparse K. */
+void *matlab_pde_assemble_elast_3d_t10(matlab_struct *mesh_q,
+                                        double E, double nu) {
+    matlab_mat *nodes  = matlab_struct_get_mat(mesh_q, "Nodes",  5);
+    matlab_mat *tets10 = matlab_struct_get_mat(mesh_q, "Tets10", 6);
+    if (!nodes || !tets10) return nullptr;
+    int64_t Nn = nodes->rows;
+    int64_t Nt = tets10->rows;
+
+    double lam = E * nu / ((1.0 + nu) * (1.0 - 2.0 * nu));
+    double mu  = E / (2.0 * (1.0 + nu));
+    /* 6 × 6 D matrix (Voigt). */
+    double D[6][6] = {{0}};
+    for (int i = 0; i < 3; ++i) for (int j = 0; j < 3; ++j)
+        D[i][j] = lam + ((i == j) ? 2.0 * mu : 0.0);
+    D[3][3] = mu; D[4][4] = mu; D[5][5] = mu;
+
+    /* Keast 4-point rule. */
+    const double a_q = 0.58541019662496845446;
+    const double b_q = 0.13819660112501051518;
+    const double Lpts[4][4] = {
+        {a_q, b_q, b_q, b_q},
+        {b_q, a_q, b_q, b_q},
+        {b_q, b_q, a_q, b_q},
+        {b_q, b_q, b_q, a_q}
+    };
+    const double wq = 1.0 / 24.0;  /* w_g/6 · det(J), and Σw_g = 1/4 */
+
+    /* Build a coarse-row triplet (I, J, V) by accumulating each
+     * element's 30 × 30 stiffness contribution. */
+    int64_t Ndof = 3 * Nn;
+    int64_t cap  = Nt * 30 * 30;
+    std::vector<int64_t> I_idx, J_idx;
+    std::vector<double>  vals;
+    I_idx.reserve((size_t)cap);
+    J_idx.reserve((size_t)cap);
+    vals.reserve((size_t)cap);
+
+    for (int64_t te = 0; te < Nt; ++te) {
+        int64_t enodes[10];
+        double X[10][3];
+        for (int i = 0; i < 10; ++i) {
+            int64_t nid = (int64_t)tets10->data[te * 10 + i] - 1;
+            enodes[i] = nid;
+            X[i][0] = nodes->data[nid * 3 + 0];
+            X[i][1] = nodes->data[nid * 3 + 1];
+            X[i][2] = nodes->data[nid * 3 + 2];
+        }
+        double Ke[30][30] = {{0}};
+        for (int gp = 0; gp < 4; ++gp) {
+            double dN_dL[10][4];
+            t10_dN_dL(Lpts[gp], dN_dL);
+            double dN_dx[10][3];
+            double detJ = 0.0;
+            t10_jacobian_and_dNdx(dN_dL, X, &detJ, dN_dx);
+            /* Some Kuhn-decomposed tets come in with the opposite
+             * orientation (det(J) < 0); use |det(J)| as the volume
+             * element since the integrand BᵀDB is orientation-
+             * invariant. */
+            double absDet = fabs(detJ);
+            if (absDet < 1e-30) continue;
+            /* B (6 × 30). */
+            double B[6][30] = {{0}};
+            for (int i = 0; i < 10; ++i) {
+                double dx = dN_dx[i][0];
+                double dy = dN_dx[i][1];
+                double dz = dN_dx[i][2];
+                int col = 3 * i;
+                B[0][col + 0] = dx;
+                B[1][col + 1] = dy;
+                B[2][col + 2] = dz;
+                B[3][col + 0] = dy; B[3][col + 1] = dx;
+                B[4][col + 1] = dz; B[4][col + 2] = dy;
+                B[5][col + 0] = dz; B[5][col + 2] = dx;
+            }
+            double weight = wq * absDet;
+            /* Ke += weight · Bᵀ D B  (30 × 30). */
+            double DB[6][30] = {{0}};
+            for (int i = 0; i < 6; ++i)
+                for (int j = 0; j < 30; ++j) {
+                    double s = 0.0;
+                    for (int k = 0; k < 6; ++k) s += D[i][k] * B[k][j];
+                    DB[i][j] = s;
+                }
+            for (int i = 0; i < 30; ++i)
+                for (int j = 0; j < 30; ++j) {
+                    double s = 0.0;
+                    for (int k = 0; k < 6; ++k) s += B[k][i] * DB[k][j];
+                    Ke[i][j] += weight * s;
+                }
+        }
+        /* Scatter Ke (30 × 30) into the global triplet. */
+        for (int i = 0; i < 30; ++i) {
+            int ni = i / 3;
+            int di = i % 3;
+            int64_t gi = enodes[ni] * 3 + di;
+            for (int j = 0; j < 30; ++j) {
+                int nj = j / 3;
+                int dj = j % 3;
+                int64_t gj = enodes[nj] * 3 + dj;
+                double v = Ke[i][j];
+                if (v == 0.0) continue;
+                I_idx.push_back(gi + 1);
+                J_idx.push_back(gj + 1);
+                vals.push_back(v);
+            }
+        }
+    }
+
+    /* triplet → CSR via the sparse_from_triplets builtin. */
+    int64_t nnz = (int64_t)vals.size();
+    matlab_mat *Im = mat_alloc(nnz, 1);
+    matlab_mat *Jm = mat_alloc(nnz, 1);
+    matlab_mat *Vm = mat_alloc(nnz, 1);
+    for (int64_t i = 0; i < nnz; ++i) {
+        Im->data[i] = (double)I_idx[(size_t)i];
+        Jm->data[i] = (double)J_idx[(size_t)i];
+        Vm->data[i] = vals[(size_t)i];
+    }
+    extern void *matlab_sparse_from_triplets(matlab_mat *I, matlab_mat *J,
+                                              matlab_mat *V,
+                                              double m_d, double n_d);
+    return matlab_sparse_from_triplets(Im, Jm, Vm,
+                                        (double)Ndof, (double)Ndof);
+}
+
+/* matlab_pde_face_pressure_3d_t10(mesh_q, face_id, p)
+ *
+ * Surface pressure on a T6 face (3 corner + 3 mid-edge nodes).  v1
+ * distributes the integrated pressure equally over the 6 face
+ * nodes (consistent for the inertial limit; exact T6 face
+ * quadrature is a small follow-up).
+ */
+matlab_mat *matlab_pde_face_pressure_3d_t10(matlab_struct *mesh_q,
+                                             double face_id_d, double p) {
+    int64_t fid = (int64_t)face_id_d;
+    matlab_mat *nodes  = matlab_struct_get_mat(mesh_q, "Nodes",  5);
+    matlab_mat *faces  = matlab_struct_get_mat(mesh_q, "Faces",  5);
+    matlab_mat *tets10 = matlab_struct_get_mat(mesh_q, "Tets10", 6);
+    if (!nodes || !faces || !tets10) return mat_alloc(0, 0);
+    int64_t Nn = nodes->rows;
+    int64_t Nf = faces->rows;
+    int64_t Nt = tets10->rows;
+    matlab_mat *F = mat_alloc(3 * Nn, 1);
+    /* Build a map from (sorted) corner triangle → 3 mid-edge nodes
+     * by walking tets10. */
+    auto pack = [](int64_t a, int64_t b) -> uint64_t {
+        if (a > b) std::swap(a, b);
+        return ((uint64_t)a << 32) | (uint64_t)b;
+    };
+    std::unordered_map<uint64_t, int64_t> edge2mid;
+    static const int edge_def_[6][2] = {
+        {0,1}, {0,2}, {0,3}, {1,2}, {1,3}, {2,3}
+    };
+    for (int64_t t = 0; t < Nt; ++t) {
+        int64_t c[4];
+        for (int j = 0; j < 4; ++j) c[j] = (int64_t)tets10->data[t * 10 + j] - 1;
+        for (int e = 0; e < 6; ++e) {
+            int64_t a = c[edge_def_[e][0]];
+            int64_t b = c[edge_def_[e][1]];
+            int64_t m = (int64_t)tets10->data[t * 10 + 4 + e] - 1;
+            edge2mid[pack(a, b)] = m;
+        }
+    }
+    for (int64_t fi = 0; fi < Nf; ++fi) {
+        if ((int64_t)faces->data[fi * 4 + 0] != fid) continue;
+        int64_t i0 = (int64_t)faces->data[fi * 4 + 1] - 1;
+        int64_t i1 = (int64_t)faces->data[fi * 4 + 2] - 1;
+        int64_t i2 = (int64_t)faces->data[fi * 4 + 3] - 1;
+        double *p0 = nodes->data + i0 * 3;
+        double *p1 = nodes->data + i1 * 3;
+        double *p2 = nodes->data + i2 * 3;
+        double v1x = p1[0]-p0[0], v1y = p1[1]-p0[1], v1z = p1[2]-p0[2];
+        double v2x = p2[0]-p0[0], v2y = p2[1]-p0[1], v2z = p2[2]-p0[2];
+        double nx = v1y * v2z - v1z * v2y;
+        double ny = v1z * v2x - v1x * v2z;
+        double nz = v1x * v2y - v1y * v2x;
+        double area2 = sqrt(nx*nx + ny*ny + nz*nz);
+        if (area2 < 1e-30) continue;
+        double inv_a2 = 1.0 / area2;
+        double Nx = nx * inv_a2, Ny = ny * inv_a2, Nz = nz * inv_a2;
+        double area = 0.5 * area2;
+        /* p > 0 → force into the body along −normal. */
+        double fx = -p * Nx * area;
+        double fy = -p * Ny * area;
+        double fz = -p * Nz * area;
+        /* 6-way split for T6: 3 corners + 3 mid-edges. */
+        auto it_01 = edge2mid.find(pack(i0, i1));
+        auto it_12 = edge2mid.find(pack(i1, i2));
+        auto it_02 = edge2mid.find(pack(i0, i2));
+        if (it_01 == edge2mid.end() || it_12 == edge2mid.end() ||
+            it_02 == edge2mid.end()) {
+            /* Fallback to 3-way corner split. */
+            for (int64_t nid : {i0, i1, i2}) {
+                F->data[nid * 3 + 0] += fx / 3.0;
+                F->data[nid * 3 + 1] += fy / 3.0;
+                F->data[nid * 3 + 2] += fz / 3.0;
+            }
+            continue;
+        }
+        int64_t mids[3] = { it_01->second, it_12->second, it_02->second };
+        /* Consistent T6 face-load distribution for constant traction:
+         *   corner nodes get 0 (because ∫ N_corner dA = 0 for the
+         *     quadratic corner shape function N = L(2L-1));
+         *   mid-edge nodes each get (total / 3) (because
+         *     ∫ 4 L_i L_j dA = A/3). */
+        for (int64_t nid : {mids[0], mids[1], mids[2]}) {
+            F->data[nid * 3 + 0] += fx / 3.0;
+            F->data[nid * 3 + 1] += fy / 3.0;
+            F->data[nid * 3 + 2] += fz / 3.0;
+        }
+    }
+    return F;
+}
+
+/* matlab_pde_face_nodes_t10(mesh_q, face_id) — returns ALL nodes
+ * (corners + mid-edges) of the face, for Dirichlet BC application. */
+matlab_mat *matlab_pde_face_nodes_t10(matlab_struct *mesh_q,
+                                       double face_id_d) {
+    int64_t fid = (int64_t)face_id_d;
+    matlab_mat *faces  = matlab_struct_get_mat(mesh_q, "Faces", 5);
+    matlab_mat *tets10 = matlab_struct_get_mat(mesh_q, "Tets10", 6);
+    if (!faces || !tets10) return mat_alloc(0, 0);
+    int64_t Nf = faces->rows;
+    int64_t Nt = tets10->rows;
+    auto pack = [](int64_t a, int64_t b) -> uint64_t {
+        if (a > b) std::swap(a, b);
+        return ((uint64_t)a << 32) | (uint64_t)b;
+    };
+    std::unordered_map<uint64_t, int64_t> edge2mid;
+    static const int edge_def_[6][2] = {
+        {0,1}, {0,2}, {0,3}, {1,2}, {1,3}, {2,3}
+    };
+    for (int64_t t = 0; t < Nt; ++t) {
+        int64_t c[4];
+        for (int j = 0; j < 4; ++j) c[j] = (int64_t)tets10->data[t * 10 + j] - 1;
+        for (int e = 0; e < 6; ++e) {
+            int64_t a = c[edge_def_[e][0]];
+            int64_t b = c[edge_def_[e][1]];
+            int64_t m = (int64_t)tets10->data[t * 10 + 4 + e] - 1;
+            edge2mid[pack(a, b)] = m;
+        }
+    }
+    std::vector<int64_t> all;
+    std::vector<int8_t> seen;
+    matlab_mat *nodes  = matlab_struct_get_mat(mesh_q, "Nodes",  5);
+    int64_t Nn = nodes->rows;
+    seen.assign((size_t)Nn, 0);
+    auto add = [&](int64_t n) {
+        if (n < 0 || n >= Nn) return;
+        if (seen[(size_t)n]) return;
+        seen[(size_t)n] = 1; all.push_back(n);
+    };
+    for (int64_t fi = 0; fi < Nf; ++fi) {
+        if ((int64_t)faces->data[fi * 4 + 0] != fid) continue;
+        int64_t i0 = (int64_t)faces->data[fi * 4 + 1] - 1;
+        int64_t i1 = (int64_t)faces->data[fi * 4 + 2] - 1;
+        int64_t i2 = (int64_t)faces->data[fi * 4 + 3] - 1;
+        add(i0); add(i1); add(i2);
+        auto it = edge2mid.find(pack(i0, i1)); if (it != edge2mid.end()) add(it->second);
+             it = edge2mid.find(pack(i1, i2)); if (it != edge2mid.end()) add(it->second);
+             it = edge2mid.find(pack(i0, i2)); if (it != edge2mid.end()) add(it->second);
+    }
+    matlab_mat *out = mat_alloc((int64_t)all.size(), 1);
+    for (size_t i = 0; i < all.size(); ++i)
+        out->data[i] = (double)(all[i] + 1);
+    return out;
 }
 
 }  /* extern "C" */

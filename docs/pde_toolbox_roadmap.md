@@ -628,6 +628,104 @@ Sema/MLIR registrations extended for `pde_eig_lanczos_si`,
 All 18 PDE end-to-end tests pass; regression spot-check across
 signal/control/ODE/comm/RF: clean.
 
+#### Production solvers + mode shapes + modal superposition + T10 + legacy aliases (shipped 2026-05-13, eighth arc)
+
+Closes the four highest-leverage follow-ups from the seventh arc
+plus the MATLAB-faithful surface aliases.
+
+**ILU(0)-preconditioned GMRES(30)** (`matlab_sparse_gmres_ilu0`).
+Saad-style incomplete LU preserving the input matrix's nonzero
+pattern, paired with restarted GMRES(30) on the left-preconditioned
+system `M^{-1} A x = M^{-1} b`.  Strictly more general than MINRES
+(works for any sparse matrix — symmetric indefinite, fully
+nonsymmetric, real-valued); the existing MINRES entry is retained
+for users who want a pure-symmetric Krylov.  Replaces the
+sparse → dense `mldivide` v1 fallback in
+`structuralFrequency` / `harmonicElectromagnetic` — lifts the DOF
+ceiling from ~3 000 to ~50 000 on the same wall-clock budget.
+
+**Lanczos mode shapes** (`matlab_pde_eig_lanczos_si_full`).  Extends
+the shift-invert Lanczos solver to retain the Krylov basis `Q` and
+the tridiagonal-eig matrix `Z`; the Ritz vectors `Phi = Q · Z` are
+M-orthonormalized and packed into the result struct alongside
+the eigenvalues.  Underlying QL kernel grew an
+`tridiag_eig_with_vecs` variant that accumulates Givens rotations
+on `Z`.  New accessors: `pde_eig_lambda(r)`, `pde_eig_phi(r)`.
+
+**structuralTransient modal superposition + Rayleigh damping**
+(`matlab_pde_solve_structural_transient_modal`).  Projects the
+3-D linear elasticity system onto the modal subspace (built
+internally via Lanczos shift-invert with σ = 0 and penalty-clamped
+K + M for fixed DOFs), then integrates each decoupled SDOF with
+implicit Newmark β = ¼, γ = ½ (unconditionally stable).  Rayleigh
+damping `C = αM + βK` enters the integrator as the per-mode
+viscous coefficient `α + β λ_i`.  New runtime entries:
+- `pde_set_rayleigh(model, alpha, beta)`.
+- `pde_solve_structural_transient_modal(model)` — direct entry,
+  also dispatched via `solve(model)` when
+  `AnalysisType == "structuralTransientModal"`.
+
+Gating: `pde_modal_transient.m` is the same cantilever as
+`pde_structural_transient` but integrates 12 modes with light
+Rayleigh damping (α = 0, β = 1e-5).  Step response settles to
+~the static deflection (peak |u| ~ 0.1 mm vs the undamped
+0.27 mm pure-oscillation peak).
+
+**T10 quadratic tetrahedra** (`matlab_pde_mesh_quadratic`,
+`matlab_pde_assemble_elast_3d_t10`,
+`matlab_pde_face_pressure_3d_t10`,
+`matlab_pde_face_nodes_t10`).  Mesh upgrade pass dedups mid-edge
+nodes via an edge-key hash, producing a 10-node-per-tet
+connectivity (`Tets10`) on top of the original `Tets` corners.
+Element assembly uses the Keast 4-point quadrature (degree-of-
+precision 3) on the standard P2 vol-coord shape functions:
+- Corners: `N_i = L_i (2 L_i − 1)` for i = 0..3.
+- Mid-edges: `N_ij = 4 L_i L_j` for the 6 edges
+  `(0,1), (0,2), (0,3), (1,2), (1,3), (2,3)`.
+
+Per-element 30 × 30 stiffness via `Σ_g w_g · Bᵀ D B · |det J|`;
+B (6 × 30) built from the isoparametric mapping with the chain
+rule for `L_4 = 1 − L_0 − L_1 − L_2`.  Gradients `∂N/∂x =
+J^{-T} · ∂N/∂ξ` (the J⁻¹-vs-J⁻ᵀ distinction matters for
+anisotropic meshes — was found via a bending-vs-pull cross-check).
+Face pressure uses the consistent T6 traction distribution: zero
+at corners, `pA/3` at each mid-edge node.
+
+Gating: `pde_quad_tet.m` runs both a uniaxial pull (T4 and T10
+both recover analytic `u = σL/E = 0.0025 mm` exactly) and a
+cantilever-bending check (T4 = 0.0384 mm severely locked vs
+T10 = 0.3528 mm — ~9× less stiff).  The bending result is
+within ~50 % of the Euler-Bernoulli analytic limit of 0.75 mm on
+this coarse 4-element mesh.
+
+**MATLAB-faithful legacy aliases.**  Mapped through the
+LowerTensorOps dispatch table:
+- `solvepde(model)` → `matlab_pde_solve(model)`.
+- `solvepdeeig(model)` → `matlab_pde_solve(model)` (relies on
+  `AnalysisType == "structuralModal"` to pick the modal kernel).
+- `specifyCoefficients(model, c, a, f)` →
+  `matlab_pde_specify_coefficients`, which stores the three
+  scalar coefficients on the model for the generic scalar-PDE
+  form `-∇·(c∇u) + a u = f`.
+- `applyBoundaryCondition(model, face_id, val)` →
+  `matlab_pde_apply_boundary_condition`, which inspects
+  `AnalysisType` and forwards to the right per-physics setter
+  (`TemperatureFaces`, `VoltageFaces`, etc.).
+- `pdegplot` / `pdemesh` share the existing `matlab_pdeplot`
+  painter at the v1 surface (label / wireframe variants are
+  follow-ups).
+
+Gating: `pde_legacy_api.m` exercises the thermal-steady-state
+path (T_mid = 40 °C on a 5×2×2 mesh, matching linear-gradient
+analytic for the nearest node), the structuralModal path
+(returns 10 eigenfrequencies), and the electrostatic path
+(V_mid = 2.0 V) through the legacy entry-point names.
+
+**New runtime entries.**  All 13 new builtins wired through
+Sema (Resolver + TypeInference) + MLIR (LowerTensorOps +
+LowerPlot).  20 PDE end-to-end tests pass; regression spot-
+check across signal / control / ODE / comm / RF: clean.
+
 #### Architectural simplifications taken (deliberate)
 
 These are spelled out so future contributors don't re-pay the design cost:
@@ -930,7 +1028,8 @@ mode-7 shape.  Validates `solvepdeeig` on the 3-D elasticity operator.
 |---|:-:|---|
 | `AnalysisType="structuralTransient"` | ✅ | `M Ü + K U = F(t)` central-difference Newmark (β=0, γ=½) on the sparse elasticity system.  Lumped diagonal `M` from `MassDensity`.  Shipped in sixth arc. |
 | `AnalysisType="structuralModal"` (Tier-2 sub-row promoted here) | ✅ | `K φ = ω² M φ` generalised eig via `pde_eigsmall` (dense inverse iteration, sixth arc) and Lanczos shift-invert (`matlab_pde_eig_lanczos_si`, seventh arc). |
-| `AnalysisType="structuralFrequency"` | ✅ | `(K − ω² M) U = F` per ω.  v1 path is sparse → dense `mldivide`; ILU-preconditioned MINRES is the production follow-up.  Shipped in seventh arc. |
+| `AnalysisType="structuralFrequency"` | ✅ | `(K − ω² M) U = F` per ω.  Eighth arc switched the solver to ILU(0)-preconditioned GMRES(30); lifts the DOF ceiling from ~3 k to ~50 k. |
+| `AnalysisType="structuralTransientModal"` | ✅ | Modal-superposition transient on the Lanczos shift-invert subspace + Rayleigh damping (`C = αM + βK`).  Implicit Newmark β=¼, γ=½ per mode.  Shipped in eighth arc. |
 | `solve(model, ModalResults=RF)` modal superposition | 🔵 | Project to modal subspace, integrate in time, reconstruct nodal solution. |
 | Rayleigh damping `[α β]` + critical-damping % | 🔵 | `C = α M + β K`. |
 | `cellLoad(Temperature=…)` thermal stress | 🔵 | Couples thermal field as a body load. |
@@ -951,7 +1050,7 @@ mode-7 shape.  Validates `solvepdeeig` on the 3-D elasticity operator.
 | `"electrostatic"` | `−∇·(ε ∇V) = ρ`; `faceBC(Voltage=…)`, `cellLoad(ChargeDensity=…)`. |
 | `"magnetostatic"` | 2-D Poisson on `A_z` (scalar magnetic vector potential); 3-D curl-curl on `A` (needs Nédélec edge elements — defer to Tier-5). |
 | `"dcConduction"` | `−∇·(σ ∇V) = 0`; `edgeLoad(SurfaceCurrentDensity=…)`. |
-| `"harmonicElectromagnetic"` (scattering) | ✅ Real-scalar Helmholtz `-∇·((1/μ_r)∇u) + k²ε_r u = f` on the 3-D tet mesh (sparse assemble → dense mldivide v1).  Complex / lossy media + edge-element vector formulations are follow-ups.  Shipped in seventh arc. |
+| `"harmonicElectromagnetic"` (scattering) | ✅ Real-scalar Helmholtz `-∇·((1/μ_r)∇u) + k²ε_r u = f` on the 3-D tet mesh.  Eighth arc switched the solver to ILU(0)-preconditioned GMRES(30) for scaling.  Complex / lossy media + edge-element vector formulations are follow-ups. |
 
 ### 4.4 Gating examples for Tier 3
 
@@ -1158,9 +1257,19 @@ explodes the dense memory budget at ~1 000 DOF.  Required surface:
 - Generalised symmetric eig `K v = λ M v` — Lanczos with
   shift-invert (`matlab_pde_eig_lanczos_si`).  Three-term
   Lanczos on `(K − σM)^{-1} M` with M-orthogonal full reorth +
-  QL tridiagonal eig.  See seventh-arc shipped block above.
-  Mode shapes are still a follow-up; v1 returns eigenvalues
-  only — the modal-frequency surface that consumers actually need.
+  QL tridiagonal eig.  Seventh arc shipped the eigenvalue
+  surface; eighth arc added eigenvector retention via
+  `matlab_pde_eig_lanczos_si_full` (Ritz vectors `Φ = Q · Z`,
+  M-orthonormalized) which then feeds the modal-superposition
+  transient.
+
+### 10.6 ILU(0)-preconditioned GMRES(30) — ✅ shipped 2026-05-13
+
+- Sparse Krylov for symmetric-indefinite + nonsymmetric systems
+  (`matlab_sparse_gmres_ilu0`).  Saad ILU(0) factor + restarted
+  GMRES(30); left-preconditioned, modified Gram-Schmidt
+  Arnoldi.  Replaces the dense `mldivide` v1 fallback in the
+  structuralFrequency / harmonicElectromagnetic paths.
 
 ---
 

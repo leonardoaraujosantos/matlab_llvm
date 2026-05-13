@@ -253,11 +253,24 @@ void Resolver::registerBuiltins() {
     "pde_set_num_modes",
     "pde_kernel_freqs",
     "pde_eig_lanczos_si",
+    "pde_eig_lanczos_si_full", "pde_eig_lambda", "pde_eig_phi",
     "pde_solve_structural_frequency", "pde_set_freq_list",
     "pde_kernel_freqlist",
     "pde_solve_harmonic_em", "pde_set_wave_number",
-    /* Sparse minres for symmetric indefinite systems. */
+    /* Modal superposition transient. */
+    "pde_solve_structural_transient_modal",
+    "pde_set_rayleigh", "pde_set_modal_results",
+    /* Sparse Krylov: MINRES (unpreconditioned indefinite),
+     * GMRES + ILU(0) (general indefinite, production solver). */
     "minres",
+    "sparse_gmres_ilu0",
+    /* T10 quadratic-tet path. */
+    "pde_mesh_quadratic", "pde_assemble_elast_3d_t10",
+    "pde_face_pressure_3d_t10", "pde_face_nodes_t10",
+    /* MATLAB-faithful legacy aliases. */
+    "solvepde", "solvepdeeig",
+    "pdegplot", "pdemesh",
+    "specifyCoefficients", "applyBoundaryCondition",
     "pde_assemble_poisson_3d_sparse", "pde_apply_dirichlet_3d_sparse",
     "pde_face_scalar_load_3d",
     /* pdeplot3D rendering — Cairo unstructured-mesh painter. */

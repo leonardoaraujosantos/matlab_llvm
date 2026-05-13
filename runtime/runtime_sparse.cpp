@@ -523,6 +523,296 @@ matlab_struct *matlab_sparse_minres(void *Sv, matlab_mat *b,
     return out;
 }
 
+/* --- ILU(0) factorization + preconditioned GMRES(m) --------------- *
+ *
+ * ILU(0): incomplete LU preserving A's nonzero pattern.  Stores L
+ * and U in a single CSR clone of A; diagonal entry = U[i,i], below =
+ * L (unit diag implicit), above = U.  Standard textbook recipe
+ * (Saad, Iterative Methods for Sparse Linear Systems, §10.3.1).
+ *
+ * Triangular solves: forward(L y = z), then back(U x = y), with L
+ * and U packed into the same CSR.  Diagonal lookup is precomputed
+ * for O(1) access.
+ *
+ * GMRES(m) with left preconditioner: solve M^{-1} A x = M^{-1} b.
+ * Arnoldi orthogonalization with modified Gram-Schmidt; Givens
+ * rotations turn the upper Hessenberg H into an upper triangular R
+ * incrementally.  Restart every m iterations.
+ *
+ * This is the production solver for indefinite symmetric and
+ * nonsymmetric sparse systems — replaces the sparse → dense
+ * mldivide fallback in PDE structuralFrequency and
+ * harmonicElectromagnetic.
+ */
+
+}  /* close extern "C" so we can use templates / anonymous namespace */
+
+namespace {
+
+/* ILU(0) factor — packed in the input matrix's sparsity pattern.
+ * Returns a heap-allocated copy of A with the factorization in
+ * place; caller frees via matlab_sparse_free. */
+struct ILU0 {
+    std::vector<int64_t> row_ptr;
+    std::vector<int64_t> col_idx;
+    std::vector<double>  vals;
+    std::vector<int64_t> diag_pos;  /* index of A[i,i] within vals */
+    int64_t n;
+};
+
+ILU0 ilu0_factor(matlab_sparse_mat *S) {
+    ILU0 F;
+    int64_t n = S->rows;
+    F.n = n;
+    F.row_ptr.assign(S->row_ptr, S->row_ptr + n + 1);
+    int64_t nnz = F.row_ptr[(size_t)n];
+    F.col_idx.assign(S->col_idx, S->col_idx + nnz);
+    F.vals.assign(S->vals, S->vals + nnz);
+    F.diag_pos.assign((size_t)n, -1);
+    for (int64_t i = 0; i < n; ++i) {
+        for (int64_t k = F.row_ptr[(size_t)i];
+                       k < F.row_ptr[(size_t)(i + 1)]; ++k) {
+            if (F.col_idx[(size_t)k] == i) {
+                F.diag_pos[(size_t)i] = k;
+                break;
+            }
+        }
+    }
+    /* Standard ILU(0): for each row i, for each k < i in pattern of
+     * row i, divide A[i,k] by A[k,k]; for each j > k in row i where
+     * (k,j) is also in pattern, A[i,j] -= A[i,k]·A[k,j]. */
+    for (int64_t i = 0; i < n; ++i) {
+        int64_t lo = F.row_ptr[(size_t)i];
+        int64_t hi = F.row_ptr[(size_t)(i + 1)];
+        for (int64_t pos_ik = lo; pos_ik < hi; ++pos_ik) {
+            int64_t k = F.col_idx[(size_t)pos_ik];
+            if (k >= i) break;  /* L only (col < diag) */
+            int64_t kdiag = F.diag_pos[(size_t)k];
+            if (kdiag < 0) continue;
+            double ukk = F.vals[(size_t)kdiag];
+            if (fabs(ukk) < 1e-30) continue;
+            double lik = F.vals[(size_t)pos_ik] / ukk;
+            F.vals[(size_t)pos_ik] = lik;
+            int64_t k_lo = kdiag + 1;
+            int64_t k_hi = F.row_ptr[(size_t)(k + 1)];
+            int64_t scan = pos_ik + 1;
+            for (int64_t kk = k_lo; kk < k_hi && scan < hi; ++kk) {
+                int64_t col = F.col_idx[(size_t)kk];
+                while (scan < hi && F.col_idx[(size_t)scan] < col) ++scan;
+                if (scan < hi && F.col_idx[(size_t)scan] == col) {
+                    F.vals[(size_t)scan] -= lik * F.vals[(size_t)kk];
+                }
+            }
+        }
+    }
+    return F;
+}
+
+/* Triangular solve: M y = z where M = L U, L unit lower, U upper,
+ * both packed in F.  In-place is fine since we write y[i] only
+ * after reading prior y[j<i]. */
+void ilu0_apply(const ILU0 &F, const double *z, double *y) {
+    int64_t n = F.n;
+    /* Forward: L w = z. */
+    std::vector<double> w((size_t)n);
+    for (int64_t i = 0; i < n; ++i) {
+        double s = z[i];
+        int64_t lo = F.row_ptr[(size_t)i];
+        int64_t hi = F.diag_pos[(size_t)i];
+        if (hi < 0) hi = lo;
+        for (int64_t k = lo; k < hi; ++k) {
+            s -= F.vals[(size_t)k] * w[(size_t)F.col_idx[(size_t)k]];
+        }
+        w[(size_t)i] = s;
+    }
+    /* Back: U y = w. */
+    for (int64_t i = n - 1; i >= 0; --i) {
+        double s = w[(size_t)i];
+        int64_t dpos = F.diag_pos[(size_t)i];
+        int64_t hi   = F.row_ptr[(size_t)(i + 1)];
+        if (dpos < 0) { y[i] = 0.0; continue; }
+        for (int64_t k = dpos + 1; k < hi; ++k) {
+            s -= F.vals[(size_t)k] * y[F.col_idx[(size_t)k]];
+        }
+        double uii = F.vals[(size_t)dpos];
+        y[i] = (fabs(uii) > 1e-30) ? s / uii : s;
+    }
+}
+
+}  /* anonymous namespace */
+
+extern "C" {
+
+/* matlab_sparse_gmres_ilu0(A, b, tol, maxit)
+ *
+ * Restarted GMRES(30) with left ILU(0) preconditioner.  Returns
+ * the same struct shape as PCG.  Handles symmetric indefinite and
+ * fully nonsymmetric A.
+ */
+matlab_struct *matlab_sparse_gmres_ilu0(void *Sv, matlab_mat *b,
+                                         double tol, double maxit_d) {
+    matlab_struct *out = matlab_struct_new();
+    if (!mat_is_sparse(Sv) || !b) {
+        matlab_struct_set_mat(out, "Solution", 8, mat_alloc(0, 0));
+        matlab_struct_set_f64(out, "Flag",     4, 2.0);
+        return out;
+    }
+    matlab_sparse_mat *S = (matlab_sparse_mat *)Sv;
+    int64_t n = S->rows;
+    if (S->cols != n) {
+        matlab_struct_set_mat(out, "Solution", 8, mat_alloc(0, 0));
+        matlab_struct_set_f64(out, "Flag",     4, 2.0);
+        return out;
+    }
+    if (tol <= 0) tol = 1e-8;
+    int64_t maxit = (int64_t)maxit_d;
+    if (maxit <= 0) maxit = (n < 1000) ? n : 1000;
+    const int m_restart = 30;
+
+    ILU0 F = ilu0_factor(S);
+
+    std::vector<double> x((size_t)n, 0.0);
+    std::vector<double> r((size_t)n);
+    std::vector<double> z((size_t)n);
+    std::vector<double> w((size_t)n);
+
+    /* z = M^{-1} b ; bnorm = ||z||. */
+    ilu0_apply(F, b->data, z.data());
+    double bnorm2 = 0.0;
+    for (int64_t i = 0; i < n; ++i) bnorm2 += z[(size_t)i] * z[(size_t)i];
+    double bnorm = sqrt(bnorm2);
+    if (bnorm == 0.0) {
+        matlab_mat *X = mat_alloc(n, 1);
+        matlab_struct_set_mat(out, "Solution", 8, X);
+        matlab_struct_set_f64(out, "Flag",     4, 0.0);
+        matlab_struct_set_f64(out, "RelRes",   6, 0.0);
+        matlab_struct_set_f64(out, "Iter",     4, 0.0);
+        return out;
+    }
+
+    int flag = 1;
+    int64_t total_iter = 0;
+    double rel = 1.0;
+
+    while (total_iter < maxit) {
+        /* r = M^{-1} (b - A x). */
+        for (int64_t i = 0; i < n; ++i) {
+            double s = b->data[i];
+            int64_t lo = S->row_ptr[i];
+            int64_t hi = S->row_ptr[i + 1];
+            for (int64_t k = lo; k < hi; ++k)
+                s -= S->vals[k] * x[(size_t)S->col_idx[k]];
+            r[(size_t)i] = s;
+        }
+        ilu0_apply(F, r.data(), z.data());
+        double beta = 0.0;
+        for (int64_t i = 0; i < n; ++i) beta += z[(size_t)i] * z[(size_t)i];
+        beta = sqrt(beta);
+        rel = beta / bnorm;
+        if (rel < tol) { flag = 0; break; }
+
+        /* Arnoldi basis V[(m_restart+1) * n] row-major over basis idx,
+         * inner over coordinates. */
+        std::vector<double> V((size_t)(m_restart + 1) * (size_t)n, 0.0);
+        std::vector<double> H((size_t)(m_restart + 1) * (size_t)m_restart, 0.0);
+        std::vector<double> cs((size_t)m_restart, 0.0);
+        std::vector<double> sn((size_t)m_restart, 0.0);
+        std::vector<double> g((size_t)(m_restart + 1), 0.0);
+        g[0] = beta;
+        for (int64_t i = 0; i < n; ++i)
+            V[(size_t)i] = z[(size_t)i] / beta;
+
+        int j_last = m_restart - 1;
+        for (int j = 0; j < m_restart && total_iter < maxit; ++j) {
+            ++total_iter;
+            /* w = A V[:, j] (A * v_j). */
+            for (int64_t i = 0; i < n; ++i) {
+                double s = 0.0;
+                int64_t lo = S->row_ptr[i];
+                int64_t hi = S->row_ptr[i + 1];
+                for (int64_t k = lo; k < hi; ++k)
+                    s += S->vals[k] *
+                          V[(size_t)((int64_t)j * n + S->col_idx[k])];
+                w[(size_t)i] = s;
+            }
+            /* z = M^{-1} w. */
+            ilu0_apply(F, w.data(), z.data());
+            /* Modified Gram-Schmidt against V[:, 0..j]. */
+            for (int i = 0; i <= j; ++i) {
+                double hij = 0.0;
+                for (int64_t k = 0; k < n; ++k)
+                    hij += V[(size_t)((int64_t)i * n + k)] * z[(size_t)k];
+                H[(size_t)((int64_t)i * m_restart + j)] = hij;
+                for (int64_t k = 0; k < n; ++k)
+                    z[(size_t)k] -= hij *
+                                     V[(size_t)((int64_t)i * n + k)];
+            }
+            double hjp1 = 0.0;
+            for (int64_t k = 0; k < n; ++k) hjp1 += z[(size_t)k] * z[(size_t)k];
+            hjp1 = sqrt(hjp1);
+            H[(size_t)((int64_t)(j + 1) * m_restart + j)] = hjp1;
+            if (hjp1 > 1e-30) {
+                for (int64_t k = 0; k < n; ++k)
+                    V[(size_t)((int64_t)(j + 1) * n + k)] = z[(size_t)k] / hjp1;
+            }
+
+            /* Apply previous Givens rotations to column j of H. */
+            for (int i = 0; i < j; ++i) {
+                double h_i  = H[(size_t)((int64_t)i * m_restart + j)];
+                double h_i1 = H[(size_t)((int64_t)(i + 1) * m_restart + j)];
+                H[(size_t)((int64_t)i * m_restart + j)]     = cs[(size_t)i] * h_i + sn[(size_t)i] * h_i1;
+                H[(size_t)((int64_t)(i + 1) * m_restart + j)] = -sn[(size_t)i] * h_i + cs[(size_t)i] * h_i1;
+            }
+            /* Compute new Givens. */
+            double h_jj   = H[(size_t)((int64_t)j * m_restart + j)];
+            double h_jp1j = H[(size_t)((int64_t)(j + 1) * m_restart + j)];
+            double rr = sqrt(h_jj * h_jj + h_jp1j * h_jp1j);
+            if (rr < 1e-30) { j_last = j; break; }
+            cs[(size_t)j] = h_jj  / rr;
+            sn[(size_t)j] = h_jp1j / rr;
+            H[(size_t)((int64_t)j       * m_restart + j)] = rr;
+            H[(size_t)((int64_t)(j + 1) * m_restart + j)] = 0.0;
+            /* Apply to g. */
+            double g_j  = g[(size_t)j];
+            double g_jp = g[(size_t)(j + 1)];
+            g[(size_t)j]       = cs[(size_t)j] * g_j + sn[(size_t)j] * g_jp;
+            g[(size_t)(j + 1)] = -sn[(size_t)j] * g_j + cs[(size_t)j] * g_jp;
+
+            rel = fabs(g[(size_t)(j + 1)]) / bnorm;
+            j_last = j;
+            if (rel < tol) break;
+        }
+
+        /* Back-solve R y = g (R is upper triangular block of H,
+         * j_last+1 rows). */
+        std::vector<double> y((size_t)(j_last + 1), 0.0);
+        for (int i = j_last; i >= 0; --i) {
+            double s = g[(size_t)i];
+            for (int k = i + 1; k <= j_last; ++k)
+                s -= H[(size_t)((int64_t)i * m_restart + k)] *
+                      y[(size_t)k];
+            double Rii = H[(size_t)((int64_t)i * m_restart + i)];
+            y[(size_t)i] = (fabs(Rii) > 1e-30) ? s / Rii : 0.0;
+        }
+        /* x += V[:, 0..j_last] · y. */
+        for (int i = 0; i <= j_last; ++i) {
+            double yi = y[(size_t)i];
+            for (int64_t k = 0; k < n; ++k)
+                x[(size_t)k] += yi *
+                                  V[(size_t)((int64_t)i * n + k)];
+        }
+        if (rel < tol) { flag = 0; break; }
+    }
+
+    matlab_mat *X = mat_alloc(n, 1);
+    memcpy(X->data, x.data(), sizeof(double) * (size_t)n);
+    matlab_struct_set_mat(out, "Solution", 8, X);
+    matlab_struct_set_f64(out, "Flag",     4, (double)flag);
+    matlab_struct_set_f64(out, "RelRes",   6, rel);
+    matlab_struct_set_f64(out, "Iter",     4, (double)total_iter);
+    return out;
+}
+
 /* Convenience accessors for the PCG result struct. */
 matlab_mat *matlab_sparse_pcg_x(matlab_struct *r) {
     return matlab_struct_get_mat(r, "Solution", 8);

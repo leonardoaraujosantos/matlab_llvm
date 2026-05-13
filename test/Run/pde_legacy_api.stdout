@@ -1,0 +1,4 @@
+PDE legacy API (solvepde / solvepdeeig / specifyCoefficients):
+  thermal T_mid (C):    40
+  modal n freqs:        10
+  electrostatic V_mid:  2.0

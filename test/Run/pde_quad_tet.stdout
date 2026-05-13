@@ -1,0 +1,8 @@
+PDE Quadratic-tet (T10), uniaxial pull:
+  T10 mesh nodes:           81
+  T10 max u_x (mm):         0.0025
+  T4  max u_x (mm):         0.0025
+  analytic u (mm):          0.0025
+  bending T4 peak |uz|(mm):  0.0384
+  bending T10 peak |uz|(mm): 0.3528
+  T10 > T4 (less stiff):    1

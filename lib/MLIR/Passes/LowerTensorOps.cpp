@@ -3900,6 +3900,19 @@ bool TensorLowering::rewriteBuiltinCalls() {
          PtrTy, {PtrTy}},
         {"pde_solve",                      "matlab_pde_solve",
          PtrTy, {PtrTy}},
+        /* MATLAB-faithful legacy entry-point names that forward
+         * to the same kernels: `solvepde(model)` and
+         * `solvepdeeig(model)`.  Both reuse the unified
+         * `matlab_pde_solve` dispatcher which looks at
+         * `model.AnalysisType` to pick the right kernel. */
+        {"solvepde",                       "matlab_pde_solve",
+         PtrTy, {PtrTy}},
+        {"solvepdeeig",                    "matlab_pde_solve",
+         PtrTy, {PtrTy}},
+        {"specifyCoefficients",            "matlab_pde_specify_coefficients",
+         PtrTy, {PtrTy, F64, F64, F64}},
+        {"applyBoundaryCondition",         "matlab_pde_apply_boundary_condition",
+         PtrTy, {PtrTy, F64, F64}},
         {"pde_kernel_mesh",                "matlab_pde_kernel_mesh",
          PtrTy, {PtrTy}},
         {"pde_kernel_u",                   "matlab_pde_kernel_u",
@@ -3972,8 +3985,21 @@ bool TensorLowering::rewriteBuiltinCalls() {
          PtrTy, {PtrTy}},
         {"pde_eig_lanczos_si",             "matlab_pde_eig_lanczos_si",
          PtrTy, {PtrTy, PtrTy, F64, F64}},
+        {"pde_eig_lanczos_si_full",        "matlab_pde_eig_lanczos_si_full",
+         PtrTy, {PtrTy, PtrTy, F64, F64}},
+        {"pde_eig_lambda",                 "matlab_pde_eig_lambda",
+         PtrTy, {PtrTy}},
+        {"pde_eig_phi",                    "matlab_pde_eig_phi",
+         PtrTy, {PtrTy}},
         {"pde_solve_structural_frequency", "matlab_pde_solve_structural_frequency",
          PtrTy, {PtrTy}},
+        {"pde_solve_structural_transient_modal",
+         "matlab_pde_solve_structural_transient_modal",
+         PtrTy, {PtrTy}},
+        {"pde_set_rayleigh",               "matlab_pde_set_rayleigh",
+         PtrTy, {PtrTy, F64, F64}},
+        {"pde_set_modal_results",          "matlab_pde_set_modal_results",
+         PtrTy, {PtrTy, PtrTy}},
         {"pde_set_freq_list",              "matlab_pde_set_freq_list",
          PtrTy, {PtrTy, PtrTy}},
         {"pde_kernel_freqlist",            "matlab_pde_kernel_freqlist",
@@ -3985,6 +4011,19 @@ bool TensorLowering::rewriteBuiltinCalls() {
         /* MINRES Krylov solver for symmetric indefinite sparse. */
         {"minres",                         "matlab_sparse_minres",
          PtrTy, {PtrTy, PtrTy, F64, F64}},
+        /* ILU(0)-preconditioned GMRES(30) — production solver for
+         * indefinite + nonsymmetric sparse systems. */
+        {"sparse_gmres_ilu0",              "matlab_sparse_gmres_ilu0",
+         PtrTy, {PtrTy, PtrTy, F64, F64}},
+        /* T10 quadratic-tet (10-node) — mesh upgrade + assembly. */
+        {"pde_mesh_quadratic",             "matlab_pde_mesh_quadratic",
+         PtrTy, {PtrTy}},
+        {"pde_assemble_elast_3d_t10",      "matlab_pde_assemble_elast_3d_t10",
+         PtrTy, {PtrTy, F64, F64}},
+        {"pde_face_pressure_3d_t10",       "matlab_pde_face_pressure_3d_t10",
+         PtrTy, {PtrTy, F64, F64}},
+        {"pde_face_nodes_t10",             "matlab_pde_face_nodes_t10",
+         PtrTy, {PtrTy, F64}},
         {"pde_assemble_poisson_3d_sparse", "matlab_pde_assemble_poisson_3d_sparse",
          PtrTy, {PtrTy, F64, F64, F64}},
         {"pde_apply_dirichlet_3d_sparse",  "matlab_pde_apply_dirichlet_3d_sparse",

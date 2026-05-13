@@ -138,6 +138,11 @@ const llvm::StringSet<> &plotBuiltins() {
     "pdeplot3d_deformation", "pdeplot3d_deform_scale",
     /* pdeplot — 2-D unstructured triangle painter. */
     "pdeplot",
+    /* MATLAB-faithful legacy aliases for pdeplot: pdegplot (geometry)
+     * and pdemesh (wireframe) share the same painter as pdeplot at
+     * the v1 surface; their distinguishing behaviour (edge labels,
+     * face labels, wireframe-only) is a follow-up. */
+    "pdegplot", "pdemesh",
   };
   return S;
 }
@@ -659,8 +664,10 @@ bool rewriteCallee(Operation *Op, StringRef Callee, Helper &H,
   }
 
   /* pdeplot — 2-D version, accepts (nodes, triangles) or
-   * (nodes, triangles, data). */
-  if (Callee == "pdeplot") {
+   * (nodes, triangles, data).  pdegplot / pdemesh forward here at
+   * the v1 surface (same painter; labels-only / wireframe-only
+   * variants are follow-ups). */
+  if (Callee == "pdeplot" || Callee == "pdegplot" || Callee == "pdemesh") {
     if (N == 2) {
       H.B.setInsertionPoint(Op);
       auto NullPtr = mlir::LLVM::ZeroOp::create(H.B, L, H.PtrTy);
