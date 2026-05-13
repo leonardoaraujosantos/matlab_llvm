@@ -535,6 +535,99 @@ class-pinned property-read list all extended.  All 16 PDE
 end-to-end tests pass; regression spot-check across
 signal/control/ODE/comm/RF: clean.
 
+#### §10.5 Lanczos + structuralFrequency + harmonicElectromagnetic (shipped 2026-05-13, seventh arc)
+
+Closes the §10.5 eigenvalue-solver upgrade and adds the two
+remaining harmonic-response AnalysisType variants on top.
+
+**§10.5 Lanczos with shift-invert** (`matlab_pde_eig_lanczos_si`).
+Three-term Lanczos on the shift-inverted generalised pencil
+`(K - σM)^{-1} M`; eigenvalues of A converge as `1/(λ - σ)`, so
+the largest eigenvalues of A pick out the (K, M) eigenvalues
+closest to σ.  Inner solve is a sparse PCG on `(K - σM)` (SPD
+whenever σ is below the smallest physical eigenvalue, or any
+negative value for the unconstrained case).  M-orthogonal
+Gram-Schmidt reorth at every step (full reorth — fine at the
+~300-DOF scale where we currently operate).  Tridiagonal Lanczos
+matrix collapsed via the QL algorithm with Wilkinson shift, output
+sorted ascending.  Mode shapes are deferred (returns eigenvalues
+only for v1 — the modal-frequency surface is what every higher
+solver consumes).
+
+Gating: `pde_modal_lanczos.m` runs Lanczos with σ = −1 on the same
+0.1m × 0.02m × 0.02m steel block as the dense `pde_eigsmall` test.
+Recovers 12 modes (7 near-zero rigid-body modes plus 5 flexible
+modes); the first physical flex mode lands at order 3 in the
+shift-invert convergence (different ordering than `pde_eigsmall`,
+because Lanczos with σ < 0 prefers eigenvalues closest to σ).
+
+**`structuralFrequency`** — `matlab_pde_solve_structural_frequency`.
+Sparse `(K - ω²M) U(ω) = F` per frequency.  K and M come from the
+existing sparse 3-D elasticity assembly + the lumped mass diagonal
+(`MassDensity` × tet volume / 4 per corner).  Fixed Dirichlet
+applied to both K and the new `K_eff = K - ω²M` operator per
+ω.  v1 path is sparse → dense `mldivide` for the solve: the
+elasticity K's condition number is high enough that
+unpreconditioned MINRES converges at numerical-noise level on
+test meshes.  Production scaling needs an ILU(0) (or LDLᵀ)
+preconditioner on the sparse path (follow-up).  New runtime
+entries:
+- `pde_set_freq_list(model, freqs)` — column-vector of angular
+  frequencies (rad/s) to sweep.
+- `pde_kernel_uhist(raw)` returns the 3N × Nfreq response matrix
+  (reused field from `structuralTransient`).
+- `pde_kernel_freqlist(raw)` returns the sampled ω column.
+
+Gating: `pde_freq_sweep.m` clamps the −x face of a 0.3 m steel
+beam, applies a 100 kPa pressure on the +z face, sweeps three
+well-separated low frequencies (1 / 10 / 100 rad/s — all well
+below the first resonance).  Reports `log10(peak)` per ω; gets
+`−5` on all three (peak ≈ 10 µm), matching the static-limit
+deflection scaling.
+
+**`harmonicElectromagnetic`** — `matlab_pde_solve_harmonic_em`.
+Scalar Helmholtz on the 3-D tet mesh: `-∇·((1/μ_r)∇u) + k²ε_r u = f`.
+Reuses `matlab_pde_assemble_poisson_3d_sparse` with `a = −k²ε_r`;
+the resulting K is real symmetric indefinite for `k > 0` and
+gets the same sparse → dense `mldivide` v1 path as
+`structuralFrequency` (same follow-up upgrade applies).  Dirichlet
+via `VoltageFaces` (interpreted as boundary field), volumetric
+source via `BodyCharge`, surface "current" via `ChargeFaces`.
+New runtime entries:
+- `pde_set_wave_number(model, k)` — angular wave number `k` in
+  rad / m for the Helmholtz coefficient.
+- `pde_solve_harmonic_em(model)` — direct entry; also dispatched
+  via `solve(model)` when `AnalysisType == "harmonicElectromagnetic"`.
+
+Gating: `pde_helmholtz.m` sets up a 100 × 20 × 20 mm cuboid with
+`k = 1 rad/m`, `ε_r = μ_r = 1`, Dirichlet boundary conditions
+`u(x = 0) = 1` / `u(x = L) = 0`.  Reports `u(midpoint) = 0.50`,
+matching the low-k analytic Helmholtz solution (`u = cos(kx)
+− cot(kL) sin(kx)`, which collapses to the linear electrostatic
+gradient as `kL → 0`).
+
+**Sparse MINRES** (`matlab_sparse_minres`).  Three-term Lanczos
+recurrence with Givens-rotation updates (Greenbaum textbook
+Algorithm 5.8.1) on the CSR sparse matrix; output is a
+`{Solution, Iterations, Residual}` struct mirroring
+`matlab_sparse_pcg`.  Wired through `LowerTensorOps.cpp` as the
+`minres` builtin.  Available in runtime but not yet on the
+default solver path (the structuralFrequency / harmonic EM
+arcs fall back to dense mldivide pending the ILU preconditioner
+follow-up).
+
+**New result classdefs** (`runtime/pde_classdefs.m`):
+- `FrequencyStructuralResults` — `.Uhist`, `.FrequencyList`, `.Mesh`.
+- `HarmonicEMResults` — `.u`, `.Mesh`.
+
+Sema/MLIR registrations extended for `pde_eig_lanczos_si`,
+`pde_solve_structural_frequency`, `pde_solve_harmonic_em`,
+`pde_set_freq_list`, `pde_set_wave_number`, `pde_kernel_uhist`,
+`pde_kernel_freqlist`, `minres`.  matlabc prelude scanner +
+`IsCstClass` list extended with the two new result classes.
+All 18 PDE end-to-end tests pass; regression spot-check across
+signal/control/ODE/comm/RF: clean.
+
 #### Architectural simplifications taken (deliberate)
 
 These are spelled out so future contributors don't re-pay the design cost:
@@ -835,9 +928,9 @@ mode-7 shape.  Validates `solvepdeeig` on the 3-D elasticity operator.
 
 | Feature | Status | Notes |
 |---|:-:|---|
-| `AnalysisType="structuralTransient"` | 🔵 | `M Ü + C U̇ + K U = F(t)`.  Newmark-β integrator (β=0.25, γ=0.5 default) on the sparse system.  Falls back to `ode23s_v` if `M` is singular. |
-| `AnalysisType="structuralModal"` (Tier-2 sub-row promoted here) | 🔵 | `K φ = ω² M φ` generalised eig via subspace iteration; ARPACK-style if large.  Already needed for the tuning-fork example. |
-| `AnalysisType="structuralFrequency"` | 🔵 | Harmonic response — `(K − ω² M + iωC) U = F`, complex sparse solve per ω. |
+| `AnalysisType="structuralTransient"` | ✅ | `M Ü + K U = F(t)` central-difference Newmark (β=0, γ=½) on the sparse elasticity system.  Lumped diagonal `M` from `MassDensity`.  Shipped in sixth arc. |
+| `AnalysisType="structuralModal"` (Tier-2 sub-row promoted here) | ✅ | `K φ = ω² M φ` generalised eig via `pde_eigsmall` (dense inverse iteration, sixth arc) and Lanczos shift-invert (`matlab_pde_eig_lanczos_si`, seventh arc). |
+| `AnalysisType="structuralFrequency"` | ✅ | `(K − ω² M) U = F` per ω.  v1 path is sparse → dense `mldivide`; ILU-preconditioned MINRES is the production follow-up.  Shipped in seventh arc. |
 | `solve(model, ModalResults=RF)` modal superposition | 🔵 | Project to modal subspace, integrate in time, reconstruct nodal solution. |
 | Rayleigh damping `[α β]` + critical-damping % | 🔵 | `C = α M + β K`. |
 | `cellLoad(Temperature=…)` thermal stress | 🔵 | Couples thermal field as a body load. |
@@ -858,7 +951,7 @@ mode-7 shape.  Validates `solvepdeeig` on the 3-D elasticity operator.
 | `"electrostatic"` | `−∇·(ε ∇V) = ρ`; `faceBC(Voltage=…)`, `cellLoad(ChargeDensity=…)`. |
 | `"magnetostatic"` | 2-D Poisson on `A_z` (scalar magnetic vector potential); 3-D curl-curl on `A` (needs Nédélec edge elements — defer to Tier-5). |
 | `"dcConduction"` | `−∇·(σ ∇V) = 0`; `edgeLoad(SurfaceCurrentDensity=…)`. |
-| `"harmonicElectromagnetic"` (scattering) | Helmholtz on `E_z` (TE) / `H_z` (TM). |
+| `"harmonicElectromagnetic"` (scattering) | ✅ Real-scalar Helmholtz `-∇·((1/μ_r)∇u) + k²ε_r u = f` on the 3-D tet mesh (sparse assemble → dense mldivide v1).  Complex / lossy media + edge-element vector formulations are follow-ups.  Shipped in seventh arc. |
 
 ### 4.4 Gating examples for Tier 3
 
@@ -1060,14 +1153,14 @@ explodes the dense memory budget at ~1 000 DOF.  Required surface:
 
 **Effort**: 2 sessions.  Lives in `runtime/runtime_pde_stl.cpp`.
 
-### 10.5 Eigenvalue solver upgrades
+### 10.5 Eigenvalue solver upgrades — ✅ shipped 2026-05-13
 
-- Generalised symmetric eig `K v = λ M v` — Krylov-Schur / Lanczos
-  with shift-invert.  Required for `solvepdeeig` and
-  `structuralModal`.  ARPACK-style (~600 LOC); reuses the existing
-  `lu_decompose` for the shift-invert step.
-
-**Effort**: 1 wk.
+- Generalised symmetric eig `K v = λ M v` — Lanczos with
+  shift-invert (`matlab_pde_eig_lanczos_si`).  Three-term
+  Lanczos on `(K − σM)^{-1} M` with M-orthogonal full reorth +
+  QL tridiagonal eig.  See seventh-arc shipped block above.
+  Mode shapes are still a follow-up; v1 returns eigenvalues
+  only — the modal-frequency surface that consumers actually need.
 
 ---
 

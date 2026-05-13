@@ -252,6 +252,12 @@ void Resolver::registerBuiltins() {
     "pde_solve_structural_modal",
     "pde_set_num_modes",
     "pde_kernel_freqs",
+    "pde_eig_lanczos_si",
+    "pde_solve_structural_frequency", "pde_set_freq_list",
+    "pde_kernel_freqlist",
+    "pde_solve_harmonic_em", "pde_set_wave_number",
+    /* Sparse minres for symmetric indefinite systems. */
+    "minres",
     "pde_assemble_poisson_3d_sparse", "pde_apply_dirichlet_3d_sparse",
     "pde_face_scalar_load_3d",
     /* pdeplot3D rendering — Cairo unstructured-mesh painter. */

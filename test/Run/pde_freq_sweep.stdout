@@ -1,0 +1,5 @@
+PDE structuralFrequency: 0.3m beam, sweep
+  num frequencies:      3
+  log10(peak @ omega1): -5
+  log10(peak @ omega2): -5
+  log10(peak @ omega3): -5

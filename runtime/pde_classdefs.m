@@ -277,3 +277,26 @@ classdef ModalStructuralResults
         end
     end
 end
+
+classdef FrequencyStructuralResults
+    properties
+        FrequencyList
+        Displacement
+        Mesh
+    end
+    methods
+        function obj = FrequencyStructuralResults()
+        end
+    end
+end
+
+classdef HarmonicEMResults
+    properties
+        WaveField
+        Mesh
+    end
+    methods
+        function obj = HarmonicEMResults()
+        end
+    end
+end

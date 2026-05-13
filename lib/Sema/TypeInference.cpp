@@ -1225,6 +1225,13 @@ const Type *TypeInference::visitBuiltinCall(std::string_view Name,
       Name == "pde_solve_structural_modal" ||
       Name == "pde_set_num_modes" ||
       Name == "pde_kernel_freqs" ||
+      Name == "pde_eig_lanczos_si" ||
+      Name == "pde_solve_structural_frequency" ||
+      Name == "pde_set_freq_list" ||
+      Name == "pde_kernel_freqlist" ||
+      Name == "pde_solve_harmonic_em" ||
+      Name == "pde_set_wave_number" ||
+      Name == "minres" ||
       Name == "pde_assemble_poisson_3d_sparse" ||
       Name == "pde_apply_dirichlet_3d_sparse" ||
       Name == "pde_face_scalar_load_3d")

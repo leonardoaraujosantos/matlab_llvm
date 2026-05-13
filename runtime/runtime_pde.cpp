@@ -1605,6 +1605,555 @@ matlab_mat *matlab_pde_kernel_freqs(matlab_struct *r) {
     return matlab_struct_get_mat(r, "NaturalFrequencies", 18);
 }
 
+/* --- structuralFrequency (harmonic response, no damping) --------- *
+ *
+ * Solves the undamped harmonic system K U(ω) = F + ω² M U(ω) at each
+ * frequency in `model.FrequencyList`.  The system K_eff = K - ω²M
+ * is real symmetric indefinite (negative eigenvalues near
+ * resonance); MINRES handles it.
+ *
+ * Returns struct {Mesh, FrequencyList, Uhist (3N × N_freq)}.
+ *
+ * v1 is undamped + real-valued.  Rayleigh damping (C = αM + βK,
+ * complex system) is a follow-up — needs a complex sparse Krylov
+ * solver (BiCGSTAB / GMRES).
+ */
+
+extern matlab_struct *matlab_sparse_minres(void *Sv, matlab_mat *b,
+                                            double tol, double maxit_d);
+extern void *matlab_sparse_from_triplets(matlab_mat *I, matlab_mat *J,
+                                          matlab_mat *V, double m_d, double n_d);
+
+matlab_struct *matlab_pde_set_freq_list(matlab_struct *model,
+                                         matlab_mat *freqs) {
+    matlab_struct_set_mat(model, "FrequencyList", 13, freqs);
+    return model;
+}
+
+matlab_struct *matlab_pde_solve_structural_frequency(matlab_struct *model) {
+    matlab_struct *mesh = nullptr;
+    if (field_holds_struct(model, "Mesh", 4)) {
+        mesh = (matlab_struct *)matlab_struct_get_mat(model, "Mesh", 4);
+    } else if (field_holds_struct(model, "Geometry", 8)) {
+        mesh = (matlab_struct *)matlab_struct_get_mat(model, "Geometry", 8);
+    } else {
+        return matlab_struct_new();
+    }
+
+    matlab_struct *props = (matlab_struct *)
+        matlab_struct_get_mat(model, "MaterialProperties", 18);
+    double E   = matlab_struct_get_f64(props, "YoungsModulus", 13);
+    double nu  = matlab_struct_get_f64(props, "PoissonsRatio", 13);
+    double rho = matlab_struct_get_f64(props, "MassDensity",   11);
+    if (rho <= 0) rho = 1.0;
+
+    /* Assemble sparse K and lumped M once. */
+    void *K_sp = nullptr;
+    matlab_mat *Mdiag = nullptr;
+    int64_t Ndof = 0;
+    elast_build_K_F_M_diag(mesh, E, nu, rho, &K_sp, &Mdiag, &Ndof);
+
+    /* Static F from pressure faces. */
+    matlab_mat *F = mat_alloc(Ndof, 1);
+    matlab_mat *pf = matlab_struct_get_mat(model, "PressureFaces", 13);
+    if (pf && pf->rows > 0 && pf->cols >= 2) {
+        for (int64_t i = 0; i < pf->rows; ++i) {
+            double fid = pf->data[i * pf->cols + 0];
+            double p   = pf->data[i * pf->cols + 1];
+            matlab_mat *Fk = matlab_pde_face_pressure_3d(mesh, fid, p);
+            for (int64_t k = 0; k < Ndof; ++k) F->data[k] += Fk->data[k];
+        }
+    }
+
+    /* Apply Dirichlet by zeroing fixed-DOF rows of F (the K - ω²M
+     * matrix retains its full structure; spurious modes get k=1
+     * eigenvalue, well away from physical resonances). */
+    matlab_mat *ff = matlab_struct_get_mat(model, "FixedFaces", 10);
+    std::vector<int8_t> fixed_dof((size_t)Ndof, 0);
+    if (ff && ff->rows > 0) {
+        for (int64_t i = 0; i < ff->rows; ++i) {
+            double fid = ff->data[i];
+            matlab_mat *ids = matlab_pde_face_nodes(mesh, fid);
+            for (int64_t k = 0; k < ids->rows; ++k) {
+                int64_t n = (int64_t)ids->data[k] - 1;
+                if (n < 0 || n * 3 + 2 >= Ndof) continue;
+                fixed_dof[(size_t)(n * 3 + 0)] = 1;
+                fixed_dof[(size_t)(n * 3 + 1)] = 1;
+                fixed_dof[(size_t)(n * 3 + 2)] = 1;
+            }
+        }
+    }
+    for (int64_t i = 0; i < Ndof; ++i)
+        if (fixed_dof[(size_t)i]) F->data[i] = 0.0;
+
+    /* Build the K - ω²M sparse triplet form once per frequency. */
+    matlab_mat *freqs = matlab_struct_get_mat(model, "FrequencyList", 13);
+    if (!freqs || freqs->rows < 1) {
+        return matlab_struct_new();
+    }
+    int64_t Nfreq = freqs->rows * freqs->cols;
+    matlab_mat *Uhist = mat_alloc(Ndof, Nfreq);
+
+    /* Pull sparse_view fields once; we'll rebuild K_eff per ω as
+     * fresh triplets and re-CSR through matlab_sparse_from_triplets. */
+    struct sparse_view {
+        uint32_t magic, _pad;
+        int64_t *row_ptr;
+        int64_t *col_idx;
+        double  *vals;
+        int64_t rows, cols, nnz;
+    };
+    sparse_view *S = (sparse_view *)K_sp;
+
+    for (int64_t fi = 0; fi < Nfreq; ++fi) {
+        double omega = freqs->data[fi];
+        double w2 = omega * omega;
+        /* Construct K_eff as new sparse_mat: K - ω² · diag(M).
+         * Only the diagonal entries change. */
+        int64_t cap = S->nnz + Ndof;  /* +Ndof for fresh diag entries */
+        matlab_mat *I = mat_alloc(cap, 1);
+        matlab_mat *J = mat_alloc(cap, 1);
+        matlab_mat *V = mat_alloc(cap, 1);
+        int64_t pos = 0;
+        for (int64_t r = 0; r < Ndof; ++r) {
+            int64_t lo = S->row_ptr[r];
+            int64_t hi = S->row_ptr[r + 1];
+            /* Zero entire row r if fixed_dof[r]; will be replaced
+             * by diag-1 below. */
+            if (fixed_dof[(size_t)r]) continue;
+            for (int64_t k = lo; k < hi; ++k) {
+                int64_t c = S->col_idx[k];
+                if (fixed_dof[(size_t)c]) continue;
+                double v = S->vals[k];
+                if (c == r) v -= w2 * Mdiag->data[r];
+                I->data[pos] = (double)(r + 1);
+                J->data[pos] = (double)(c + 1);
+                V->data[pos] = v;
+                pos++;
+            }
+        }
+        for (int64_t r = 0; r < Ndof; ++r) {
+            if (!fixed_dof[(size_t)r]) continue;
+            I->data[pos] = (double)(r + 1);
+            J->data[pos] = (double)(r + 1);
+            V->data[pos] = 1.0;
+            pos++;
+        }
+        I->rows = pos; J->rows = pos; V->rows = pos;
+        void *Keff = matlab_sparse_from_triplets(I, J, V,
+                                                  (double)Ndof, (double)Ndof);
+
+        /* Solve K_eff U = F.  v1 uses dense mldivide on the
+         * sparse-to-dense conversion (correct for any K_eff
+         * including indefinite; pre-iterative-Krylov fallback).
+         * Production scaling needs MINRES + ILU on the sparse path
+         * (a follow-up; the unpreconditioned MINRES converges far
+         * too slowly on the elasticity K's condition number). */
+        extern matlab_mat *matlab_sparse_full(void *Sv);
+        extern matlab_mat *matlab_mldivide_mm(matlab_mat *A, matlab_mat *B);
+        matlab_mat *Keff_dense = matlab_sparse_full(Keff);
+        matlab_mat *Ucol = matlab_mldivide_mm(Keff_dense, F);
+        for (int64_t i = 0; i < Ndof; ++i)
+            Uhist->data[i * Nfreq + fi] = Ucol->data[i];
+    }
+
+    matlab_struct *out = matlab_struct_new();
+    matlab_struct_set_mat(out, "Mesh", 4, (matlab_mat *)mesh);
+    matlab_struct_set_mat(out, "FrequencyList", 13, freqs);
+    matlab_struct_set_mat(out, "Uhist", 5, Uhist);
+    return out;
+}
+
+matlab_mat *matlab_pde_kernel_freqlist(matlab_struct *r) {
+    return matlab_struct_get_mat(r, "FrequencyList", 13);
+}
+
+/* --- harmonicElectromagnetic (real-valued scalar Helmholtz) ------ *
+ *
+ * Scalar Helmholtz on the 3-D tet mesh: -∇·(c∇u) - k²u = f.
+ * Reuses pde_assemble_poisson_3d_sparse with `a = -k²`.  The
+ * resulting K is real symmetric indefinite when k > 0; solve with
+ * MINRES on the sparse system.
+ *
+ * Reads:
+ *   model.MaterialProperties.RelativePermittivity (ε_r)
+ *   model.MaterialProperties.RelativePermeability (μ_r)
+ *   model.WaveNumber (k, supplied by user)
+ *
+ * For lossless plane-wave problems, k = ω·sqrt(μ_0 ε_0 · μ_r ε_r).
+ * Caller sets WaveNumber via pde_set_wave_number; for v1 the K-
+ * coefficient is just 1/(μ_r ε_r) — the dimensionless waves-in-a-box
+ * regime where the analytic eigenfrequencies and a free-space
+ * Helmholtz response check out.  Complex / lossy media is a
+ * follow-up via a complex sparse Krylov solver.
+ */
+
+matlab_struct *matlab_pde_set_wave_number(matlab_struct *model, double k) {
+    matlab_struct_set_f64(model, "WaveNumber", 10, k);
+    return model;
+}
+
+matlab_struct *matlab_pde_solve_harmonic_em(matlab_struct *model) {
+    matlab_struct *mesh = nullptr;
+    if (field_holds_struct(model, "Mesh", 4)) {
+        mesh = (matlab_struct *)matlab_struct_get_mat(model, "Mesh", 4);
+    } else if (field_holds_struct(model, "Geometry", 8)) {
+        mesh = (matlab_struct *)matlab_struct_get_mat(model, "Geometry", 8);
+    } else {
+        return matlab_struct_new();
+    }
+    matlab_struct *props = (matlab_struct *)
+        matlab_struct_get_mat(model, "MaterialProperties", 18);
+    double eps_r = matlab_struct_get_f64(props, "RelativePermittivity", 20);
+    double mu_r  = matlab_struct_get_f64(props, "RelativePermeability", 20);
+    if (eps_r <= 0) eps_r = 1.0;
+    if (mu_r  <= 0) mu_r  = 1.0;
+    /* For 1/μ_r ∇·∇ - k² formulation. */
+    double c  = 1.0 / mu_r;
+    double k  = matlab_struct_get_f64(model, "WaveNumber", 10);
+    /* For TE/TM scalar Helmholtz in a medium the eigenvalue
+     * relationship is k² = ω² μ_r ε_r (in normalized units with
+     * c0 = 1).  The K-side coefficient is `a = -k² ε_r` to keep
+     * the Helmholtz form ∇·(1/μ_r ∇u) + k² ε_r u = f. */
+    double a  = -k * k * eps_r;
+    /* Volumetric source via BodyCharge (interpreted as J / ε in EM). */
+    double f  = matlab_struct_get_f64(model, "BodyCharge", 10);
+
+    matlab_struct *sys = matlab_pde_assemble_poisson_3d_sparse(mesh, c, a, f);
+    void *K_sp = matlab_struct_get_mat(sys, "K", 1);
+    matlab_mat *F = matlab_pde_sys_F(sys);
+
+    /* Optional surface "current" loads via ChargeFaces. */
+    matlab_mat *cf = matlab_struct_get_mat(model, "ChargeFaces", 11);
+    if (cf && cf->rows > 0 && cf->cols >= 2) {
+        for (int64_t i = 0; i < cf->rows; ++i) {
+            double fid = cf->data[i * cf->cols + 0];
+            double q   = cf->data[i * cf->cols + 1];
+            matlab_mat *Fk = matlab_pde_face_scalar_load_3d(mesh, fid, q);
+            for (int64_t kk = 0; kk < F->rows; ++kk) F->data[kk] += Fk->data[kk];
+        }
+    }
+
+    /* Dirichlet via VoltageFaces (interpreted as boundary fields). */
+    matlab_mat *vf = matlab_struct_get_mat(model, "VoltageFaces", 12);
+    void *Kc = K_sp;
+    matlab_mat *Fc = F;
+    if (vf && vf->rows > 0 && vf->cols >= 2) {
+        for (int64_t i = 0; i < vf->rows; ++i) {
+            double fid   = vf->data[i * vf->cols + 0];
+            double u_val = vf->data[i * vf->cols + 1];
+            matlab_mat *ids = matlab_pde_face_nodes(mesh, fid);
+            matlab_struct *sys2 = matlab_pde_apply_dirichlet_3d_sparse(
+                Kc, Fc, ids, u_val);
+            Kc = matlab_struct_get_mat(sys2, "K", 1);
+            Fc = matlab_pde_sys_F(sys2);
+        }
+    }
+
+    /* K is real symmetric indefinite for k > 0.  v1 uses sparse →
+     * dense mldivide for correctness on small meshes; switch to an
+     * ILU-preconditioned MINRES on the sparse path for production
+     * scaling (same follow-up as structuralFrequency). */
+    extern matlab_mat *matlab_sparse_full(void *Sv);
+    extern matlab_mat *matlab_mldivide_mm(matlab_mat *A, matlab_mat *B);
+    matlab_mat *Kc_dense = matlab_sparse_full(Kc);
+    matlab_mat *u        = matlab_mldivide_mm(Kc_dense, Fc);
+
+    matlab_struct *out = matlab_struct_new();
+    matlab_struct_set_mat(out, "Mesh", 4, (matlab_mat *)mesh);
+    matlab_struct_set_mat(out, "u",    1, u);
+    return out;
+}
+
+/* --- §10.5 Lanczos with shift-invert (sparse generalised eig) ---- *
+ *
+ * Solves K φ = λ M φ via the Lanczos iteration on the shift-inverted
+ * operator A = (K - σM)^{-1} M.  Eigenvalues of A are 1/(λ - σ);
+ * the largest eigenvalues of A converge to eigenvalues of (K, M)
+ * closest to σ.  For lowest-frequency modes pick σ = 0 (constrained)
+ * or σ < 0 (unconstrained, where K is singular).
+ *
+ * Three-term Lanczos:
+ *   z_j = A · v_j = solve (K - σM) z = M v_j
+ *   α_j = v_j' M z_j
+ *   z   = z - α_j v_j - β_{j-1} v_{j-1}
+ *   β_j = sqrt(z' M z)
+ *   v_{j+1} = z / β_j
+ *
+ * The inner solve uses PCG on (K - σM) which is SPD when σ is
+ * smaller than the smallest physical eigenvalue (or any negative).
+ *
+ * Output: column vector of the n_modes smallest eigenvalues sorted
+ * ascending.  This is the v1 surface — mode shapes are a
+ * follow-up slice once we add reorthogonalization + restart for
+ * production-quality accuracy.
+ */
+
+/* Forward: sparse matvec from runtime_sparse.cpp. */
+extern "C" matlab_mat *matlab_sparse_matvec(void *Sv, matlab_mat *x);
+
+}  /* close extern "C" before the anonymous-namespace + templates */
+
+namespace {
+
+struct sparse_view_lanczos {
+    uint32_t magic, _pad;
+    int64_t *row_ptr;
+    int64_t *col_idx;
+    double  *vals;
+    int64_t rows, cols, nnz;
+};
+
+/* (K - σM) · v, where K is sparse, M is diagonal (vector). */
+struct ShiftedOp {
+    sparse_view_lanczos *K;
+    matlab_mat *Mdiag;
+    double sigma;
+    int64_t n() const { return K->rows; }
+    void apply(const double *v, double *out) const {
+        int64_t N = n();
+        for (int64_t r = 0; r < N; ++r) {
+            double s = 0.0;
+            int64_t lo = K->row_ptr[r];
+            int64_t hi = K->row_ptr[r + 1];
+            for (int64_t k = lo; k < hi; ++k)
+                s += K->vals[k] * v[K->col_idx[k]];
+            out[r] = s - sigma * Mdiag->data[r] * v[r];
+        }
+    }
+};
+
+/* Diagonal-preconditioned CG for (K - σM) x = b.  Stops at relres
+ * < tol or maxit iterations.  Returns the iteration count.  Used
+ * as the inner solver of the Lanczos shift-invert pass. */
+static int64_t shifted_pcg(const ShiftedOp &A, const double *b, double *x,
+                            double tol, int64_t maxit) {
+    int64_t n = A.n();
+    std::vector<double> r((size_t)n), z((size_t)n), p((size_t)n), Ap((size_t)n);
+    std::vector<double> Minv((size_t)n);
+    /* Jacobi: M^-1 = 1 / diag(K - σM). */
+    for (int64_t i = 0; i < n; ++i) {
+        double d = 0.0;
+        int64_t lo = A.K->row_ptr[i];
+        int64_t hi = A.K->row_ptr[i + 1];
+        for (int64_t k = lo; k < hi; ++k)
+            if (A.K->col_idx[k] == i) { d = A.K->vals[k]; break; }
+        d -= A.sigma * A.Mdiag->data[i];
+        Minv[(size_t)i] = (fabs(d) > 1e-30) ? 1.0 / d : 1.0;
+    }
+    /* x = 0; r = b. */
+    for (int64_t i = 0; i < n; ++i) { x[i] = 0.0; r[(size_t)i] = b[i]; }
+    double bnorm2 = 0.0;
+    for (int64_t i = 0; i < n; ++i) bnorm2 += b[i] * b[i];
+    double bnorm = sqrt(bnorm2);
+    if (bnorm == 0.0) return 0;
+    /* z = M^-1 r; p = z. */
+    double rzold = 0.0;
+    for (int64_t i = 0; i < n; ++i) {
+        z[(size_t)i] = Minv[(size_t)i] * r[(size_t)i];
+        p[(size_t)i] = z[(size_t)i];
+        rzold += r[(size_t)i] * z[(size_t)i];
+    }
+    int64_t iter = 0;
+    for (iter = 0; iter < maxit; ++iter) {
+        A.apply(p.data(), Ap.data());
+        double pAp = 0.0;
+        for (int64_t i = 0; i < n; ++i) pAp += p[(size_t)i] * Ap[(size_t)i];
+        if (fabs(pAp) < 1e-30) break;
+        double alpha = rzold / pAp;
+        double rnorm2 = 0.0;
+        for (int64_t i = 0; i < n; ++i) {
+            x[i] += alpha * p[(size_t)i];
+            r[(size_t)i] -= alpha * Ap[(size_t)i];
+            rnorm2 += r[(size_t)i] * r[(size_t)i];
+        }
+        if (sqrt(rnorm2) / bnorm < tol) { iter++; break; }
+        double rznew = 0.0;
+        for (int64_t i = 0; i < n; ++i) {
+            z[(size_t)i] = Minv[(size_t)i] * r[(size_t)i];
+            rznew += r[(size_t)i] * z[(size_t)i];
+        }
+        double beta = rznew / rzold;
+        for (int64_t i = 0; i < n; ++i)
+            p[(size_t)i] = z[(size_t)i] + beta * p[(size_t)i];
+        rzold = rznew;
+    }
+    return iter;
+}
+
+/* Solve the symmetric tridiagonal eigenproblem T · q = μ q for the
+ * m × m tridiagonal T = diag(alpha) + diag(beta, ±1).  Uses the
+ * standard QL algorithm on Givens rotations (compact ~70 LOC).
+ * Returns eigenvalues sorted ASCENDING in `mu`. */
+static void tridiag_eig(std::vector<double> &alpha,
+                        std::vector<double> &beta_off,
+                        std::vector<double> &mu) {
+    int m = (int)alpha.size();
+    mu.assign(alpha.begin(), alpha.end());
+    std::vector<double> e(beta_off.begin(), beta_off.end());
+    e.push_back(0.0);
+    /* Implicit QL with Wilkinson shift. */
+    int n = m;
+    for (int l = 0; l < n; ) {
+        int iter_count = 0;
+        int mm;
+        do {
+            for (mm = l; mm < n - 1; ++mm) {
+                double dd = fabs(mu[(size_t)mm]) + fabs(mu[(size_t)(mm + 1)]);
+                if (fabs(e[(size_t)mm]) + dd == dd) break;
+            }
+            if (mm != l) {
+                if (++iter_count == 60) return;  /* bail */
+                double g = (mu[(size_t)(l + 1)] - mu[(size_t)l]) /
+                            (2.0 * e[(size_t)l]);
+                double r2 = sqrt(g * g + 1.0);
+                double sign = (g >= 0) ? r2 : -r2;
+                g = mu[(size_t)mm] - mu[(size_t)l] +
+                    e[(size_t)l] / (g + sign);
+                double s = 1.0, c = 1.0, p = 0.0;
+                for (int i = mm - 1; i >= l; --i) {
+                    double f = s * e[(size_t)i];
+                    double b = c * e[(size_t)i];
+                    double r3 = sqrt(f * f + g * g);
+                    e[(size_t)(i + 1)] = r3;
+                    if (r3 == 0.0) {
+                        mu[(size_t)(i + 1)] -= p;
+                        e[(size_t)mm] = 0.0;
+                        break;
+                    }
+                    s = f / r3; c = g / r3;
+                    g = mu[(size_t)(i + 1)] - p;
+                    r3 = (mu[(size_t)i] - g) * s + 2.0 * c * b;
+                    p = s * r3;
+                    mu[(size_t)(i + 1)] = g + p;
+                    g = c * r3 - b;
+                }
+                if (e[(size_t)mm] != 0.0 || mm == l + 1) {
+                    mu[(size_t)l] -= p;
+                    e[(size_t)l] = g;
+                    e[(size_t)mm] = 0.0;
+                }
+            }
+        } while (mm != l);
+        ++l;
+    }
+    /* Sort ascending. */
+    std::sort(mu.begin(), mu.end());
+}
+
+}  /* anonymous namespace */
+
+extern "C" {
+
+/* Public ABI for the new eigensolver.  Returns a column vector of
+ * the n_modes smallest eigenvalues (sorted ascending). */
+matlab_mat *matlab_pde_eig_lanczos_si(void *K_sparse, matlab_mat *M_diag,
+                                       double nmodes_d, double sigma) {
+    if (!K_sparse || !M_diag) return mat_alloc(0, 1);
+    int64_t nmodes = (int64_t)nmodes_d;
+    if (nmodes <= 0) nmodes = 10;
+    int64_t m = 3 * nmodes + 10;  /* Krylov subspace size */
+    sparse_view_lanczos *K = (sparse_view_lanczos *)K_sparse;
+    if (!K || K->magic != 0xC0FFEE05u) return mat_alloc(0, 1);
+    int64_t n = K->rows;
+    if (m > n) m = n;
+    if (nmodes > n) nmodes = n;
+
+    ShiftedOp A{K, M_diag, sigma};
+
+    /* Lanczos basis Q: n × m. */
+    std::vector<double> Q((size_t)n * (size_t)m, 0.0);
+    std::vector<double> alpha((size_t)m, 0.0);
+    std::vector<double> beta((size_t)(m - 1), 0.0);
+
+    /* Initial vector — deterministic seed for reproducibility. */
+    std::vector<double> v((size_t)n);
+    for (int64_t i = 0; i < n; ++i) v[(size_t)i] = sin((double)(i + 1) * 0.137);
+    /* M-normalize: ||v||_M = sqrt(v' M v). */
+    double nrm2 = 0.0;
+    for (int64_t i = 0; i < n; ++i) nrm2 += M_diag->data[i] * v[(size_t)i] * v[(size_t)i];
+    double nrm = sqrt(nrm2);
+    if (nrm == 0.0) return mat_alloc(0, 1);
+    for (int64_t i = 0; i < n; ++i) v[(size_t)i] /= nrm;
+    for (int64_t i = 0; i < n; ++i) Q[(size_t)i] = v[(size_t)i];
+
+    std::vector<double> Mv((size_t)n), z((size_t)n);
+
+    int64_t j_last = 0;
+    for (int64_t j = 0; j < m; ++j) {
+        /* M v_j */
+        for (int64_t i = 0; i < n; ++i)
+            Mv[(size_t)i] = M_diag->data[i] * Q[(size_t)(i * m + j)];
+        /* z = (K - σM)^-1 · Mv via shifted PCG. */
+        shifted_pcg(A, Mv.data(), z.data(), 1e-8, 200);
+        /* α_j = v_j' · M · z = v_j' · (M z). */
+        double aj = 0.0;
+        for (int64_t i = 0; i < n; ++i)
+            aj += Q[(size_t)(i * m + j)] * M_diag->data[i] * z[(size_t)i];
+        alpha[(size_t)j] = aj;
+        /* z = z - α_j v_j - β_{j-1} v_{j-1}. */
+        for (int64_t i = 0; i < n; ++i) {
+            double sub = aj * Q[(size_t)(i * m + j)];
+            if (j > 0) sub += beta[(size_t)(j - 1)] * Q[(size_t)(i * m + (j - 1))];
+            z[(size_t)i] -= sub;
+        }
+        /* Full re-orth (CGS-2 style) — single round for v1.  Critical
+         * for accuracy on tightly-clustered spectra. */
+        for (int64_t k = 0; k <= j; ++k) {
+            double dot = 0.0;
+            for (int64_t i = 0; i < n; ++i)
+                dot += Q[(size_t)(i * m + k)] * M_diag->data[i] * z[(size_t)i];
+            for (int64_t i = 0; i < n; ++i)
+                z[(size_t)i] -= dot * Q[(size_t)(i * m + k)];
+        }
+        /* β_j = sqrt(z' M z). */
+        double bnorm2 = 0.0;
+        for (int64_t i = 0; i < n; ++i)
+            bnorm2 += M_diag->data[i] * z[(size_t)i] * z[(size_t)i];
+        double bj = sqrt(bnorm2);
+        j_last = j;
+        if (bj < 1e-12) break;
+        if (j + 1 < m) {
+            beta[(size_t)j] = bj;
+            for (int64_t i = 0; i < n; ++i)
+                Q[(size_t)(i * m + (j + 1))] = z[(size_t)i] / bj;
+        }
+    }
+    int64_t actual_m = j_last + 1;
+    alpha.resize((size_t)actual_m);
+    beta.resize((size_t)(actual_m - 1));
+
+    /* Solve T · q = μ q on the tridiagonal projection.  μ_i are the
+     * eigenvalues of A = (K - σM)^-1 M; eigenvalues of (K, M) come
+     * from λ = σ + 1/μ. */
+    std::vector<double> mu;
+    tridiag_eig(alpha, beta, mu);
+
+    /* Map A's eigenvalues back to (K, M)'s: λ = σ + 1/μ.  The largest
+     * μ corresponds to the smallest |λ - σ| — i.e., the eigenvalues
+     * closest to σ.  Filter out zero / NaN μ defensively. */
+    std::vector<double> lams;
+    lams.reserve(mu.size());
+    for (double mui : mu) {
+        if (fabs(mui) < 1e-30 || !std::isfinite(mui)) continue;
+        double l = sigma + 1.0 / mui;
+        if (std::isfinite(l)) lams.push_back(l);
+    }
+    std::sort(lams.begin(), lams.end());
+    /* Clamp tiny negative numerical noise from rigid-body modes. */
+    for (auto &x : lams) if (x < 0 && x > -1e-3) x = 0.0;
+
+    int64_t want = (int64_t)lams.size();
+    if (want > nmodes) want = nmodes;
+    matlab_mat *out = mat_alloc(nmodes, 1);
+    for (int64_t i = 0; i < want; ++i) out->data[i] = lams[(size_t)i];
+    return out;
+}
+
+}  /* extern "C" */
+
+extern "C" {
+
 matlab_struct *matlab_pde_solve_electrostatic(matlab_struct *model) {
     matlab_struct *props = (matlab_struct *)
         matlab_struct_get_mat(model, "MaterialProperties", 18);
@@ -1668,6 +2217,12 @@ matlab_struct *matlab_pde_solve(matlab_struct *model) {
             if (s->len == 15 &&
                 memcmp(s->data, "structuralModal", 15) == 0)
                 return matlab_pde_solve_structural_modal(model);
+            if (s->len == 19 &&
+                memcmp(s->data, "structuralFrequency", 19) == 0)
+                return matlab_pde_solve_structural_frequency(model);
+            if (s->len == 23 &&
+                memcmp(s->data, "harmonicElectromagnetic", 23) == 0)
+                return matlab_pde_solve_harmonic_em(model);
         }
     }
     return matlab_pde_solve_femodel(model);

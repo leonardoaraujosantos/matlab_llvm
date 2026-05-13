@@ -385,6 +385,144 @@ matlab_struct *matlab_sparse_pcg(void *Sv, matlab_mat *b,
     return out;
 }
 
+/* --- MINRES: Krylov solver for SYMMETRIC INDEFINITE sparse systems -- *
+ *
+ * Three-term Lanczos recurrence; minimizes ||Ax - b|| over the
+ * Krylov subspace K_m(A, b).  Same struct API as PCG.
+ *
+ * Used by the structuralFrequency path where K_eff = K - ω²M goes
+ * indefinite (negative eigenvalues) near resonances — PCG breaks
+ * down on indefinite SPD-only problems.
+ *
+ * No preconditioner in v1; users with stiff problems can wrap MINRES
+ * around an Incomplete-LU preconditioner in a follow-up slice.
+ */
+matlab_struct *matlab_sparse_minres(void *Sv, matlab_mat *b,
+                                    double tol, double maxit_d) {
+    matlab_struct *out = matlab_struct_new();
+    if (!mat_is_sparse(Sv) || !b) {
+        matlab_struct_set_mat(out, "Solution", 8, mat_alloc(0, 0));
+        matlab_struct_set_f64(out, "Flag",     4, 2.0);
+        return out;
+    }
+    matlab_sparse_mat *S = (matlab_sparse_mat *)Sv;
+    int64_t n = S->rows;
+    if (S->cols != n) {
+        matlab_struct_set_mat(out, "Solution", 8, mat_alloc(0, 0));
+        matlab_struct_set_f64(out, "Flag",     4, 2.0);
+        return out;
+    }
+    if (tol <= 0) tol = 1e-8;
+    int64_t maxit = (int64_t)maxit_d;
+    if (maxit <= 0) maxit = (n < 1000) ? n : 1000;
+
+    /* Standard MINRES iteration (no preconditioner).  Reference:
+     * Greenbaum, "Iterative Methods for Solving Linear Systems"
+     * (1997), Algorithm 5.8.1.  Variable names match the textbook. */
+    std::vector<double> x((size_t)n, 0.0);
+    std::vector<double> r((size_t)n);
+    std::vector<double> v_old((size_t)n, 0.0);
+    std::vector<double> v_cur((size_t)n);
+    std::vector<double> v_new((size_t)n);
+    std::vector<double> w0((size_t)n, 0.0);
+    std::vector<double> w1((size_t)n, 0.0);
+    std::vector<double> w2((size_t)n, 0.0);
+
+    /* r = b - A x; v_cur = r / ||r||. */
+    double bnorm2 = 0.0;
+    for (int64_t i = 0; i < n; ++i) {
+        r[(size_t)i] = b->data[i];
+        bnorm2 += r[(size_t)i] * r[(size_t)i];
+    }
+    double bnorm = sqrt(bnorm2);
+    if (bnorm == 0.0) {
+        matlab_mat *X = mat_alloc(n, 1);
+        matlab_struct_set_mat(out, "Solution", 8, X);
+        matlab_struct_set_f64(out, "Flag",     4, 0.0);
+        matlab_struct_set_f64(out, "RelRes",   6, 0.0);
+        matlab_struct_set_f64(out, "Iter",     4, 0.0);
+        return out;
+    }
+    double beta = bnorm;
+    for (int64_t i = 0; i < n; ++i) v_cur[(size_t)i] = r[(size_t)i] / beta;
+
+    double eta = beta;
+    double c_old = 1.0, c = 1.0;
+    double s_old = 0.0, s = 0.0;
+    double beta_prev = beta;
+
+    int flag = 1;
+    int64_t iter = 0;
+    double rel = 1.0;
+    for (iter = 1; iter <= maxit; ++iter) {
+        /* Av = A · v_cur. */
+        std::vector<double> Av((size_t)n);
+        for (int64_t row = 0; row < n; ++row) {
+            double sum = 0.0;
+            int64_t lo = S->row_ptr[row];
+            int64_t hi = S->row_ptr[row + 1];
+            for (int64_t k = lo; k < hi; ++k)
+                sum += S->vals[k] * v_cur[(size_t)S->col_idx[k]];
+            Av[(size_t)row] = sum;
+        }
+        double alpha = 0.0;
+        for (int64_t i = 0; i < n; ++i) alpha += v_cur[(size_t)i] * Av[(size_t)i];
+        for (int64_t i = 0; i < n; ++i) {
+            v_new[(size_t)i] = Av[(size_t)i] - alpha * v_cur[(size_t)i]
+                                              - beta_prev * v_old[(size_t)i];
+        }
+        double beta_new = 0.0;
+        for (int64_t i = 0; i < n; ++i)
+            beta_new += v_new[(size_t)i] * v_new[(size_t)i];
+        beta_new = sqrt(beta_new);
+
+        /* QR factorization with Givens (apply previous + new rotation). */
+        double delta = c * alpha - c_old * s * beta_prev;
+        double gamma_bar = s * alpha + c_old * c * beta_prev;
+        double eps_ = s_old * beta_prev;
+        double gamma = sqrt(gamma_bar * gamma_bar + beta_new * beta_new);
+        double c_new = gamma_bar / gamma;
+        double s_new = beta_new / gamma;
+
+        /* Update w2 = (v_cur - delta * w1 - eps_ * w0) / gamma. */
+        for (int64_t i = 0; i < n; ++i) {
+            w2[(size_t)i] = (v_cur[(size_t)i] - delta * w1[(size_t)i]
+                              - eps_ * w0[(size_t)i]) / gamma;
+        }
+        /* x += c_new * eta * w2. */
+        for (int64_t i = 0; i < n; ++i)
+            x[(size_t)i] += c_new * eta * w2[(size_t)i];
+        eta = -s_new * eta;
+
+        /* Residual estimate: |eta| ≈ ||r_k||.  Use relative
+         * residual ||r_k|| / ||b|| for the convergence check. */
+        rel = fabs(eta) / bnorm;
+        if (rel < tol) { flag = 0; break; }
+
+        /* Rotate buffers for the next iteration. */
+        for (int64_t i = 0; i < n; ++i) {
+            v_old[(size_t)i] = v_cur[(size_t)i];
+            if (beta_new > 0.0)
+                v_cur[(size_t)i] = v_new[(size_t)i] / beta_new;
+            w0[(size_t)i] = w1[(size_t)i];
+            w1[(size_t)i] = w2[(size_t)i];
+        }
+        c_old = c; c = c_new;
+        s_old = s; s = s_new;
+        beta_prev = beta_new;
+        if (beta_new < 1e-30) { flag = 0; break; }  /* exact convergence */
+    }
+    if (iter > maxit) iter = maxit;
+
+    matlab_mat *X = mat_alloc(n, 1);
+    memcpy(X->data, x.data(), sizeof(double) * (size_t)n);
+    matlab_struct_set_mat(out, "Solution", 8, X);
+    matlab_struct_set_f64(out, "Flag",     4, (double)flag);
+    matlab_struct_set_f64(out, "RelRes",   6, rel);
+    matlab_struct_set_f64(out, "Iter",     4, (double)iter);
+    return out;
+}
+
 /* Convenience accessors for the PCG result struct. */
 matlab_mat *matlab_sparse_pcg_x(matlab_struct *r) {
     return matlab_struct_get_mat(r, "Solution", 8);

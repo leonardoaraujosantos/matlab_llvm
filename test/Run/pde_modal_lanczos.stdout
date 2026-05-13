@@ -1,0 +1,6 @@
+PDE Lanczos §10.5: 0.1m steel block, unconstrained
+  modes requested:      12
+  modes returned:       12
+  rigid-body modes:     7 (expected ~6)
+  flex modes returned:  5
+  first flex order:     3

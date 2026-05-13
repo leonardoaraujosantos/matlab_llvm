@@ -563,7 +563,7 @@ toolbox.
 
 ---
 
-### 15. Partial Differential Equation Toolbox 🔵
+### 15. Partial Differential Equation Toolbox 🟡
 
 Per-toolbox roadmap at
 [`pde_toolbox_roadmap.md`](pde_toolbox_roadmap.md).  Closes the 2-D
@@ -593,6 +593,16 @@ closes PDE-Tier-2.
 **Effort.** ~8 wk to the wind-stress demo (6 wk infrastructure +
 2 wk PDE-specific assembly).  Tiers 3+ (transient / modal / thermal
 / EM / nonlinear / ROM) add ~6 wk on top.
+
+**Status (2026-05-13).** Seven shipped arcs cover Tier-1 → Tier-4
+function-form numerics + sparse infra + STL/GLB import + pdeplot3D +
+femodel classdef façade + geometry primitives + Tier-3 thermal /
+electrostatic / magnetostatic / dcConduction / structuralTransient /
+structuralModal + Lanczos shift-invert + structuralFrequency +
+harmonicElectromagnetic.  18 PDE end-to-end tests green on the
+LLVM lane.  Remaining: full-complex sparse solvers, mode-shape
+output for Lanczos, ILU-preconditioned MINRES for the
+frequency-response and Helmholtz paths, PDE Modeler 2-D app.
 
 ---
 

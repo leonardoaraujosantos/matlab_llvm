@@ -1,0 +1,6 @@
+PDE Helmholtz (harmonicElectromagnetic):
+  geom:                 0.1 x 0.02 x 0.02 m
+  k = 1 rad/m, eps_r = 1, mu_r = 1
+  u_top / u_bottom:     1 / 0
+  u(midpoint) = 0.50 (rounded)
+  ~analytic   = 0.5 (low-k limit)
