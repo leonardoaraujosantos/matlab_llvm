@@ -1,0 +1,4 @@
+PDE Tier-3 magnetostatic: 1m bar, A=10|0 ends
+  mu_r:                 1000
+  A(midpoint) = 5.0 (rounded)
+  analytic    = 5.0

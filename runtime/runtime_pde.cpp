@@ -1134,6 +1134,22 @@ matlab_struct *matlab_pde_set_body_charge(matlab_struct *model, double rho) {
     return model;
 }
 
+matlab_struct *matlab_pde_set_face_potential(matlab_struct *model,
+                                              double face_id, double A) {
+    return pde_append_face_pair(model, "MagneticPotentialFaces", 22,
+                                 face_id, A);
+}
+
+matlab_struct *matlab_pde_set_face_current(matlab_struct *model,
+                                            double face_id, double J) {
+    return pde_append_face_pair(model, "CurrentFaces", 12, face_id, J);
+}
+
+matlab_struct *matlab_pde_set_body_current(matlab_struct *model, double J) {
+    matlab_struct_set_f64(model, "BodyCurrent", 11, J);
+    return model;
+}
+
 /* Test whether a struct field holds a populated value.  Returns 1
  * when the field exists AND its stored pointer is non-null AND, if
  * the stored value is a matlab_mat, it has positive rows.  A missing
@@ -1261,6 +1277,334 @@ matlab_struct *matlab_pde_solve_thermal_steady(matlab_struct *model) {
                                  "HeatFaces", 9);
 }
 
+/* matlab_pde_solve_magnetostatic — scalar magnetic vector potential
+ * formulation in 2-D / 3-D.  The PDE is
+ *   -∇·((1/μ) ∇A_z) = J_z
+ * where μ = μ0·μr.  We use μr directly as the K-coefficient (μ0 =
+ * 4π·10⁻⁷ is constant and would scale every K entry by the same
+ * factor — adding nothing but conditioning grief).  The Dirichlet
+ * BC field is the magnetic-potential value at a face; the source
+ * is volumetric current density (BodyCurrent) or face current sheet
+ * (CurrentFaces table).
+ */
+matlab_struct *matlab_pde_solve_magnetostatic(matlab_struct *model) {
+    matlab_struct *props = (matlab_struct *)
+        matlab_struct_get_mat(model, "MaterialProperties", 18);
+    double mu_r = matlab_struct_get_f64(props, "RelativePermeability", 20);
+    if (mu_r <= 0) mu_r = 1.0;
+    /* K-coefficient is 1/μr (the "reluctance") so larger μr ↔ softer
+     * material ↔ smaller K diagonal. */
+    double c = 1.0 / mu_r;
+    double J_body = matlab_struct_get_f64(model, "BodyCurrent", 11);
+    return solve_scalar_poisson(model, c, J_body,
+                                 "MagneticPotentialFaces", 22,
+                                 "CurrentFaces", 12);
+}
+
+/* matlab_pde_solve_dc_conduction — Ohm's law on the volumetric
+ * conductor: -∇·(σ ∇V) = 0 (no internal sources in v1 — current
+ * injection through face traction is the standard load).
+ *
+ * Same shape as electrostatic; uses ElectricalConductivity from the
+ * MaterialProperties as the K-coefficient.
+ */
+matlab_struct *matlab_pde_solve_dc_conduction(matlab_struct *model) {
+    matlab_struct *props = (matlab_struct *)
+        matlab_struct_get_mat(model, "MaterialProperties", 18);
+    double sigma = matlab_struct_get_f64(props, "ElectricalConductivity", 22);
+    if (sigma <= 0) sigma = 1.0;
+    double J_body = matlab_struct_get_f64(model, "BodyCurrent", 11);
+    /* Same BC tables as electrostatic — VoltageFaces / ChargeFaces /
+     * BodyCharge map to V / J / I_body in the DC-conduction
+     * interpretation; the equations are mathematically identical. */
+    return solve_scalar_poisson(model, sigma, J_body,
+                                 "VoltageFaces", 12,
+                                 "ChargeFaces", 11);
+}
+
+/* --- structuralTransient via explicit central-difference Newmark - *
+ *
+ * Solves M·ü + K·u = F(t) on the 3-D linear elasticity tet mesh
+ * using a central-difference (Newmark-β with β=0, γ=½) integrator.
+ * Lumped mass — M is diagonal so M^-1 is a vector divide.  No
+ * damping in v1 (Rayleigh damping = α M + β K lands in a follow-up
+ * slice).
+ *
+ * Time step is set by model.TimeStep (defaults to 1e-5 s — small
+ * enough for the elasticity wave-speed CFL on the test meshes).
+ * Number of steps from model.NumSteps (default 200).
+ *
+ * Returns struct { Mesh, u_final, u_history (3N × Nt), tlist (Nt × 1) }.
+ */
+
+static void elast_build_K_F_M_diag(matlab_struct *mesh,
+                                   double E, double nu, double rho,
+                                   void **K_sparse_out,
+                                   matlab_mat **M_diag_out,
+                                   int64_t *Ndof_out) {
+    extern void *matlab_pde_assemble_elast_3d_sparse(matlab_struct *mesh,
+                                                     double E, double nu);
+    /* K via existing sparse assembler. */
+    *K_sparse_out = matlab_pde_assemble_elast_3d_sparse(mesh, E, nu);
+
+    /* Lumped mass: M_ii = ρ · V_inc / 4 summed over incident tets,
+     * replicated across the 3 DOFs of each node. */
+    matlab_mat *nodes = matlab_struct_get_mat(mesh, "Nodes", 5);
+    matlab_mat *tets  = matlab_struct_get_mat(mesh, "Tets",  4);
+    int64_t Nn = nodes->rows;
+    int64_t Nt = tets->rows;
+    int64_t Ndof = 3 * Nn;
+    matlab_mat *M = mat_alloc(Ndof, 1);
+
+    for (int64_t e = 0; e < Nt; ++e) {
+        int64_t ids[4];
+        double X[4][3];
+        for (int i = 0; i < 4; ++i) {
+            ids[i] = (int64_t)tets->data[e * 4 + i] - 1;
+            X[i][0] = nodes->data[ids[i] * 3 + 0];
+            X[i][1] = nodes->data[ids[i] * 3 + 1];
+            X[i][2] = nodes->data[ids[i] * 3 + 2];
+        }
+        double dN[4][3];
+        double Vol;
+        extern void elast_compute_grad(const double X[4][3], double dN[4][3],
+                                        double *vol_out);
+        elast_compute_grad(X, dN, &Vol);
+        double m_each = rho * Vol / 4.0;
+        for (int i = 0; i < 4; ++i) {
+            int64_t base = ids[i] * 3;
+            M->data[base + 0] += m_each;
+            M->data[base + 1] += m_each;
+            M->data[base + 2] += m_each;
+        }
+    }
+    *M_diag_out = M;
+    *Ndof_out = Ndof;
+}
+
+matlab_struct *matlab_pde_set_time_step(matlab_struct *model, double dt) {
+    matlab_struct_set_f64(model, "TimeStep", 8, dt);
+    return model;
+}
+
+matlab_struct *matlab_pde_set_num_steps(matlab_struct *model, double n) {
+    matlab_struct_set_f64(model, "NumSteps", 8, n);
+    return model;
+}
+
+matlab_struct *matlab_pde_solve_structural_transient(matlab_struct *model) {
+    matlab_struct *mesh = nullptr;
+    if (field_holds_struct(model, "Mesh", 4)) {
+        mesh = (matlab_struct *)matlab_struct_get_mat(model, "Mesh", 4);
+    } else if (field_holds_struct(model, "Geometry", 8)) {
+        mesh = (matlab_struct *)matlab_struct_get_mat(model, "Geometry", 8);
+    } else {
+        return matlab_struct_new();
+    }
+
+    matlab_struct *props = (matlab_struct *)
+        matlab_struct_get_mat(model, "MaterialProperties", 18);
+    double E   = matlab_struct_get_f64(props, "YoungsModulus", 13);
+    double nu  = matlab_struct_get_f64(props, "PoissonsRatio", 13);
+    double rho = matlab_struct_get_f64(props, "MassDensity",   11);
+    if (rho <= 0) rho = 1.0;
+
+    double dt = matlab_struct_get_f64(model, "TimeStep", 8);
+    if (dt <= 0) dt = 1e-5;
+    int64_t nsteps = (int64_t)matlab_struct_get_f64(model, "NumSteps", 8);
+    if (nsteps <= 0) nsteps = 200;
+
+    void *K_sp = nullptr;
+    matlab_mat *Mdiag = nullptr;
+    int64_t Ndof = 0;
+    elast_build_K_F_M_diag(mesh, E, nu, rho, &K_sp, &Mdiag, &Ndof);
+
+    /* Static F from pressure faces. */
+    matlab_mat *F = mat_alloc(Ndof, 1);
+    matlab_mat *pf = matlab_struct_get_mat(model, "PressureFaces", 13);
+    if (pf && pf->rows > 0 && pf->cols >= 2) {
+        for (int64_t i = 0; i < pf->rows; ++i) {
+            double fid = pf->data[i * pf->cols + 0];
+            double p   = pf->data[i * pf->cols + 1];
+            matlab_mat *Fk = matlab_pde_face_pressure_3d(mesh, fid, p);
+            for (int64_t k = 0; k < Ndof; ++k) F->data[k] += Fk->data[k];
+        }
+    }
+
+    /* Build the union of fixed DOFs (vector elasticity: 3 per node). */
+    matlab_mat *ff = matlab_struct_get_mat(model, "FixedFaces", 10);
+    std::vector<int8_t> fixed_dof((size_t)Ndof, 0);
+    if (ff && ff->rows > 0) {
+        for (int64_t i = 0; i < ff->rows; ++i) {
+            double fid = ff->data[i];
+            matlab_mat *ids = matlab_pde_face_nodes(mesh, fid);
+            for (int64_t k = 0; k < ids->rows; ++k) {
+                int64_t n = (int64_t)ids->data[k] - 1;
+                if (n < 0 || n * 3 + 2 >= Ndof) continue;
+                fixed_dof[(size_t)(n * 3 + 0)] = 1;
+                fixed_dof[(size_t)(n * 3 + 1)] = 1;
+                fixed_dof[(size_t)(n * 3 + 2)] = 1;
+            }
+        }
+    }
+
+    /* Central-difference time stepping.  Start from rest (u=v=0).
+     *   a_n  = M^{-1} (F - K u_n)
+     *   v_{n+1/2} = v_{n-1/2} + dt · a_n  (with v_{-1/2} = 0)
+     *   u_{n+1}   = u_n + dt · v_{n+1/2}
+     *   apply Dirichlet (u_{n+1}[fixed] = 0, v_{n+1/2}[fixed] = 0).
+     */
+    std::vector<double> u((size_t)Ndof, 0.0);
+    std::vector<double> v((size_t)Ndof, 0.0);
+    std::vector<double> Ku((size_t)Ndof, 0.0);
+
+    /* History buffer for the displacement.  3N × (nsteps + 1).  For
+     * large meshes / many timesteps this gets big; users can drop
+     * NumSteps to keep it tractable. */
+    matlab_mat *Uhist = mat_alloc(Ndof, nsteps + 1);
+    /* t = 0 column is all zeros (rest start). */
+
+    struct sparse_view {
+        uint32_t magic, _pad;
+        int64_t *row_ptr;
+        int64_t *col_idx;
+        double  *vals;
+        int64_t rows, cols, nnz;
+    };
+    sparse_view *S = (sparse_view *)K_sp;
+
+    for (int64_t step = 0; step < nsteps; ++step) {
+        /* Compute K · u. */
+        for (int64_t r = 0; r < Ndof; ++r) {
+            double s = 0.0;
+            int64_t lo = S->row_ptr[r];
+            int64_t hi = S->row_ptr[r + 1];
+            for (int64_t k = lo; k < hi; ++k)
+                s += S->vals[k] * u[(size_t)S->col_idx[k]];
+            Ku[(size_t)r] = s;
+        }
+        /* a_n = M^{-1} · (F - K u). */
+        for (int64_t i = 0; i < Ndof; ++i) {
+            double a = (F->data[i] - Ku[(size_t)i]) / Mdiag->data[i];
+            v[(size_t)i] += dt * a;
+        }
+        /* u_{n+1} = u_n + dt · v_{n+1/2}. */
+        for (int64_t i = 0; i < Ndof; ++i) {
+            u[(size_t)i] += dt * v[(size_t)i];
+            if (fixed_dof[(size_t)i]) {
+                u[(size_t)i] = 0.0;
+                v[(size_t)i] = 0.0;
+            }
+        }
+        /* Snapshot into Uhist column (step + 1). */
+        for (int64_t i = 0; i < Ndof; ++i)
+            Uhist->data[i * (nsteps + 1) + (step + 1)] = u[(size_t)i];
+    }
+
+    /* tlist column. */
+    matlab_mat *tlist = mat_alloc(nsteps + 1, 1);
+    for (int64_t i = 0; i <= nsteps; ++i) tlist->data[i] = (double)i * dt;
+
+    /* Final-step displacement for legacy single-call sites. */
+    matlab_mat *u_final = mat_alloc(Ndof, 1);
+    memcpy(u_final->data, u.data(), sizeof(double) * (size_t)Ndof);
+
+    matlab_struct *out = matlab_struct_new();
+    matlab_struct_set_mat(out, "Mesh", 4, (matlab_mat *)mesh);
+    matlab_struct_set_mat(out, "u",    1, u_final);
+    matlab_struct_set_mat(out, "Uhist", 5, Uhist);
+    matlab_struct_set_mat(out, "tlist", 5, tlist);
+    return out;
+}
+
+matlab_mat *matlab_pde_kernel_uhist(matlab_struct *r) {
+    return matlab_struct_get_mat(r, "Uhist", 5);
+}
+matlab_mat *matlab_pde_kernel_tlist(matlab_struct *r) {
+    return matlab_struct_get_mat(r, "tlist", 5);
+}
+
+/* --- structuralModal — generalised eigenvalue K φ = λ M φ -------- *
+ *
+ * For v1 we run UNCONSTRAINED modal analysis (no Dirichlet).  The
+ * first 6 eigenvalues are near-zero rigid-body modes; physical
+ * flexible modes start at index 7.  Matches the MathWorks doc
+ * convention for the tuning-fork / wing-spar examples.
+ *
+ * Uses the existing pde_eigsmall inverse-iteration solver, which
+ * expects DENSE K and M.  Practical ceiling is ~300 DOFs (the
+ * dense LU inside inverse iteration costs O(N³) per mode).
+ * Production-quality modal at scale needs Krylov-Schur with
+ * shift-invert (roadmap §10.5 follow-up).
+ *
+ * Returns struct { Mesh, NaturalFrequencies (Hz, n×1), ModeShapes (3N×n) }.
+ */
+
+extern matlab_mat *matlab_pde_assemble_elast_3d(matlab_struct *mesh,
+                                                 double E, double nu);
+extern matlab_mat *matlab_pde_eigsmall(matlab_mat *K, matlab_mat *M,
+                                        double nmodes_d);
+
+matlab_struct *matlab_pde_set_num_modes(matlab_struct *model, double n) {
+    matlab_struct_set_f64(model, "NumModes", 8, n);
+    return model;
+}
+
+matlab_struct *matlab_pde_solve_structural_modal(matlab_struct *model) {
+    matlab_struct *mesh = nullptr;
+    if (field_holds_struct(model, "Mesh", 4)) {
+        mesh = (matlab_struct *)matlab_struct_get_mat(model, "Mesh", 4);
+    } else if (field_holds_struct(model, "Geometry", 8)) {
+        mesh = (matlab_struct *)matlab_struct_get_mat(model, "Geometry", 8);
+    } else {
+        return matlab_struct_new();
+    }
+    matlab_struct *props = (matlab_struct *)
+        matlab_struct_get_mat(model, "MaterialProperties", 18);
+    double E   = matlab_struct_get_f64(props, "YoungsModulus", 13);
+    double nu  = matlab_struct_get_f64(props, "PoissonsRatio", 13);
+    double rho = matlab_struct_get_f64(props, "MassDensity",   11);
+    if (rho <= 0) rho = 1.0;
+    int64_t nmodes = (int64_t)matlab_struct_get_f64(model, "NumModes", 8);
+    if (nmodes <= 0) nmodes = 10;
+
+    /* Dense K from the existing assembler. */
+    matlab_mat *K = matlab_pde_assemble_elast_3d(mesh, E, nu);
+    int64_t Ndof = K->rows;
+
+    /* Build a DENSE lumped mass matrix from the per-DOF diagonal. */
+    matlab_mat *Mdiag = nullptr;
+    int64_t junk = 0;
+    void *Ksp_unused = nullptr;
+    elast_build_K_F_M_diag(mesh, E, nu, rho, &Ksp_unused, &Mdiag, &junk);
+    matlab_mat *M = mat_alloc(Ndof, Ndof);
+    for (int64_t i = 0; i < Ndof; ++i) M->data[i * Ndof + i] = Mdiag->data[i];
+
+    matlab_mat *lams = matlab_pde_eigsmall(K, M, (double)nmodes);
+
+    /* Convert λ = ω² (rad/s)² to natural frequencies in Hz. */
+    matlab_mat *freqs = mat_alloc(nmodes, 1);
+    for (int64_t i = 0; i < nmodes; ++i) {
+        double l = lams->data[i];
+        if (l < 0) l = 0;
+        freqs->data[i] = sqrt(l) / (2.0 * M_PI);
+    }
+
+    matlab_struct *out = matlab_struct_new();
+    matlab_struct_set_mat(out, "Mesh", 4, (matlab_mat *)mesh);
+    matlab_struct_set_mat(out, "NaturalFrequencies", 18, freqs);
+    /* Eigenvectors are produced by pde_eigsmall but only the lambdas
+     * are returned (the function discards the modes vector after the
+     * deflation pass).  Mode shapes ship as a Tier-3 follow-up; v1
+     * exposes frequencies only — adequate for the cantilever / tuning-
+     * fork validation. */
+    return out;
+}
+
+matlab_mat *matlab_pde_kernel_freqs(matlab_struct *r) {
+    return matlab_struct_get_mat(r, "NaturalFrequencies", 18);
+}
+
 matlab_struct *matlab_pde_solve_electrostatic(matlab_struct *model) {
     matlab_struct *props = (matlab_struct *)
         matlab_struct_get_mat(model, "MaterialProperties", 18);
@@ -1314,6 +1658,16 @@ matlab_struct *matlab_pde_solve(matlab_struct *model) {
                 return matlab_pde_solve_thermal_steady(model);
             if (s->len == 13 && memcmp(s->data, "electrostatic", 13) == 0)
                 return matlab_pde_solve_electrostatic(model);
+            if (s->len == 13 && memcmp(s->data, "magnetostatic", 13) == 0)
+                return matlab_pde_solve_magnetostatic(model);
+            if (s->len == 12 && memcmp(s->data, "dcConduction", 12) == 0)
+                return matlab_pde_solve_dc_conduction(model);
+            if (s->len == 19 &&
+                memcmp(s->data, "structuralTransient", 19) == 0)
+                return matlab_pde_solve_structural_transient(model);
+            if (s->len == 15 &&
+                memcmp(s->data, "structuralModal", 15) == 0)
+                return matlab_pde_solve_structural_modal(model);
         }
     }
     return matlab_pde_solve_femodel(model);

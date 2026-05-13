@@ -8154,6 +8154,10 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
                       CN == "StationaryResults" ||
                       CN == "ThermalResults" ||
                       CN == "ElectrostaticResults" ||
+                      CN == "MagneticResults" ||
+                      CN == "DCConductionResults" ||
+                      CN == "TransientStructuralResults" ||
+                      CN == "ModalStructuralResults" ||
                       CN == "pdeDisplacement");
       }
       if (IsCstClass && !WantMat &&

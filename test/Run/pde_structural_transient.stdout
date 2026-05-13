@@ -1,0 +1,4 @@
+PDE Tier-3 structuralTransient: cantilever step-pressure
+  dt = 2 us, steps = 1000, total t = 2 ms
+  num time samples:    1001
+  peak |u_i,k| (mm):   0.2688

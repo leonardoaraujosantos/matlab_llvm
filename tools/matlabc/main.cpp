@@ -8534,6 +8534,8 @@ int main(int Argc, char **Argv) {
       "faceLoad", "edgeLoad", "vertexLoad", "cellLoad",
       "StaticStructuralResults", "StationaryResults",
       "ThermalResults", "ElectrostaticResults",
+      "MagneticResults", "DCConductionResults",
+      "TransientStructuralResults", "ModalStructuralResults",
     };
     for (const char *N : Names) {
       size_t NL = std::strlen(N);
@@ -8622,7 +8624,11 @@ int main(int Argc, char **Argv) {
         ClsName == "StaticStructuralResults" ||
         ClsName == "StationaryResults" ||
         ClsName == "ThermalResults" ||
-        ClsName == "ElectrostaticResults")
+        ClsName == "ElectrostaticResults" ||
+        ClsName == "MagneticResults" ||
+        ClsName == "DCConductionResults" ||
+        ClsName == "TransientStructuralResults" ||
+        ClsName == "ModalStructuralResults")
       return "pde_classdefs.m";
     return std::string();
   };

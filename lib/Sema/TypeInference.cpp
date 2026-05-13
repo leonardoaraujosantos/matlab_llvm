@@ -1214,6 +1214,17 @@ const Type *TypeInference::visitBuiltinCall(std::string_view Name,
       Name == "pde_set_body_heat" || Name == "pde_set_body_charge" ||
       Name == "pde_solve_thermal_steady" ||
       Name == "pde_solve_electrostatic" ||
+      Name == "pde_solve_magnetostatic" ||
+      Name == "pde_solve_dc_conduction" ||
+      Name == "pde_set_face_potential" ||
+      Name == "pde_set_face_current" ||
+      Name == "pde_set_body_current" ||
+      Name == "pde_solve_structural_transient" ||
+      Name == "pde_set_time_step" || Name == "pde_set_num_steps" ||
+      Name == "pde_kernel_uhist" || Name == "pde_kernel_tlist" ||
+      Name == "pde_solve_structural_modal" ||
+      Name == "pde_set_num_modes" ||
+      Name == "pde_kernel_freqs" ||
       Name == "pde_assemble_poisson_3d_sparse" ||
       Name == "pde_apply_dirichlet_3d_sparse" ||
       Name == "pde_face_scalar_load_3d")

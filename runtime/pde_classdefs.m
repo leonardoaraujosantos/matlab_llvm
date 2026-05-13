@@ -230,3 +230,50 @@ classdef ElectrostaticResults
         end
     end
 end
+
+classdef MagneticResults
+    properties
+        MagneticPotential
+        Mesh
+    end
+    methods
+        function obj = MagneticResults()
+        end
+    end
+end
+
+classdef DCConductionResults
+    properties
+        Voltage
+        Mesh
+    end
+    methods
+        function obj = DCConductionResults()
+        end
+    end
+end
+
+classdef TransientStructuralResults
+    properties
+        Displacement
+        Uhist
+        SolutionTimes
+        Mesh
+    end
+    methods
+        function obj = TransientStructuralResults()
+        end
+    end
+end
+
+classdef ModalStructuralResults
+    properties
+        NaturalFrequencies
+        ModeShapes
+        Mesh
+    end
+    methods
+        function obj = ModalStructuralResults()
+        end
+    end
+end

@@ -465,6 +465,76 @@ Gating:
 All 12 PDE end-to-end tests pass.  Spot-check on
 signal/control/ODE/comm/RF: regression-clean.
 
+#### Tier-3 expansion: magnetostatic + dcConduction + structuralTransient + structuralModal (shipped 2026-05-13, sixth arc)
+
+Closes the remaining "easy" AnalysisType variants on the femodel
+dispatch.  All four reuse infrastructure that already shipped
+(`pde_assemble_poisson_3d_sparse`, `pde_assemble_elast_3d`,
+`pde_assemble_elast_3d_sparse`, `pde_eigsmall`); each new
+AnalysisType is one new kernel + a small extension to the
+solve(model) dispatcher.
+
+**`magnetostatic`** — `matlab_pde_solve_magnetostatic`.  Scalar
+magnetic vector potential A_z formulation: `-∇·((1/μ_r)∇A) = J`.
+The K-coefficient is the dimensionless 1/μ_r (μ_0 is constant and
+would only rescale K uniformly, harming PCG conditioning).  BCs
+from a new `MagneticPotentialFaces` flat table; sources from
+`CurrentFaces` (surface current sheet) and `BodyCurrent` (volumetric).
+
+**`dcConduction`** — `matlab_pde_solve_dc_conduction`.  Ohm's law
+`-∇·(σ∇V) = 0` using `ElectricalConductivity` from
+MaterialProperties.  Reuses the `VoltageFaces` / `ChargeFaces`
+tables (mathematically identical to electrostatic — the variable
+names just rename the same scalar Poisson system).
+
+**`structuralTransient`** — `matlab_pde_solve_structural_transient`.
+Explicit central-difference Newmark (β=0, γ=½) on the 3-D linear
+elasticity system `M ü + K u = F(t)`.  Lumped diagonal mass matrix
+built per-tet from `MaterialProperties.MassDensity`.  Starts from
+rest; applies face-pressure loads as a step input.  Dirichlet BCs
+re-enforced at every step.  New runtime entries:
+- `pde_set_time_step(model, dt)` / `pde_set_num_steps(model, n)`.
+- `pde_kernel_uhist(raw)` returns the 3N × (nsteps+1) displacement
+  history.
+- `pde_kernel_tlist(raw)` returns the time vector.
+
+Gating: `pde_structural_transient.m` clamps one face of a
+0.5m × 50mm cantilever, applies 0.1 MPa step pressure, runs 1000
+steps at dt=2µs (total 2ms ≈ one fundamental period), reports
+peak displacement magnitude across all nodes × all time samples
+(0.27mm — close to the analytical 2× static deflection for an
+undamped step response).
+
+**`structuralModal`** — `matlab_pde_solve_structural_modal`.
+Unconstrained generalised eigenvalue solve `K φ = λ M φ` via the
+existing `pde_eigsmall` inverse-iteration solver.  Returns the
+first `NumModes` eigenfrequencies sorted ascending.  Per the
+MathWorks doc convention, the first 6 modes are near-zero rigid-
+body modes; physical flexible modes start at index 7.  New runtime
+entries:
+- `pde_set_num_modes(model, n)`.
+- `pde_kernel_freqs(raw)` returns the frequencies (Hz, n × 1).
+
+Gating: `pde_structural_modal.m` requests 10 modes on a small
+0.1m × 0.02m × 0.02m steel block; recovers exactly 6 rigid-body
+modes (< 1 Hz) + 4 flexible modes (first ~13 kHz).  Caveat: the
+inverse-iteration solver costs O(N³) per mode and is fine to
+~300 DOFs.  Production-quality modal at scale needs Krylov-Schur
+with shift-invert (still a §10.5 follow-up).
+
+**New result classdefs** (`runtime/pde_classdefs.m`):
+- `MagneticResults` — `.MagneticPotential`, `.Mesh`.
+- `DCConductionResults` — `.Voltage`, `.Mesh`.
+- `TransientStructuralResults` — `.Displacement`, `.Uhist`,
+  `.SolutionTimes`, `.Mesh`.
+- `ModalStructuralResults` — `.NaturalFrequencies`, `.ModeShapes`,
+  `.Mesh`.
+
+Sema/MLIR wiring + matlabc prelude scanner + Lowering.cpp's
+class-pinned property-read list all extended.  All 16 PDE
+end-to-end tests pass; regression spot-check across
+signal/control/ODE/comm/RF: clean.
+
 #### Architectural simplifications taken (deliberate)
 
 These are spelled out so future contributors don't re-pay the design cost:

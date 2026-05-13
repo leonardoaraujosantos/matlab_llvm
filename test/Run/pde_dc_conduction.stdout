@@ -1,0 +1,4 @@
+PDE Tier-3 dcConduction: 0.1m copper bar, V=1|0 ends
+  sigma:                5.96e7 S/m (copper)
+  V(midpoint) = 0.50 V
+  analytic    = 0.5 V

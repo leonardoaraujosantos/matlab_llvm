@@ -1,0 +1,6 @@
+PDE Tier-3 structuralModal: 0.1m x 0.02m x 0.02m steel block
+  modes requested:      10
+  modes returned:       10
+  rigid-body modes:     6 (expected ~6)
+  flexible modes:       4
+  first flex frequency: 13000 Hz (order of magnitude)
