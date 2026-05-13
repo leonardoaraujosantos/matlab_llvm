@@ -8137,7 +8137,22 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
       if (PinnedCls) {
         llvm::StringRef CN = PinnedCls->Name;
         IsCstClass = (CN == "tf" || CN == "ss" || CN == "zpk" ||
-                      CN == "pid" || CN == "frd");
+                      CN == "pid" || CN == "frd" ||
+                      /* PDE Toolbox classdef façade: femodel carries
+                       * cell-array properties (FaceBC / FaceLoad /
+                       * EdgeBC / …) and matrix-valued results
+                       * (Geometry / Mesh).  materialProperties /
+                       * faceBC / faceLoad value-types hold matrix or
+                       * string fields with default `[]` so Sema can't
+                       * distinguish — same nudge as the CST family
+                       * forces `_get_mat` for downstream reads. */
+                      CN == "femodel" || CN == "materialProperties" ||
+                      CN == "faceBC"  || CN == "edgeBC" || CN == "vertexBC" ||
+                      CN == "faceLoad" || CN == "edgeLoad" ||
+                      CN == "vertexLoad" || CN == "cellLoad" ||
+                      CN == "StaticStructuralResults" ||
+                      CN == "StationaryResults" ||
+                      CN == "pdeDisplacement");
       }
       if (IsCstClass && !WantMat &&
           !mlir::isa<mlir::Float64Type>(RT)) WantMat = true;

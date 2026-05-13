@@ -272,6 +272,119 @@ Gating: `pde_poisson_plot.m` solves the 21×21 Poisson sparsely +
 renders the smooth yellow-centre / blue-boundary radial map at
 `/tmp/pde_poisson.png`.
 
+#### MATLAB-faithful `femodel` classdef façade (shipped 2026-05-13, fourth arc)
+
+Closes the §3.3 / docs-faithfulness work item.  The user-facing
+MATLAB program now reads identically to MathWorks documentation:
+
+```matlab
+gm    = pde_mesh_cuboid_tet(3, 0.05, 2, 12, 1, 8);
+model = femodel('AnalysisType', 'structuralStatic', 'Geometry', gm);
+model = pde_set_material(model, ...
+            materialProperties('YoungsModulus', 2e11, ...
+                               'PoissonsRatio', 0.3, ...
+                               'MassDensity',   7850));
+model = pde_set_face_fixed   (model, 5);
+model = pde_set_face_pressure(model, 3, 3543);
+model = pde_generate_mesh(model);
+raw   = pde_solve(model);
+R     = StaticStructuralResults( ...
+            'Mesh',           pde_kernel_mesh(raw), ...
+            'Displacement',   pdeDisplacement('ux', u, 'uy', u, 'uz', u, ...
+                                              'Magnitude', u), ...
+            'VonMisesStress', pde_kernel_vm(raw));
+peak_vm = max(R.VonMisesStress);
+```
+
+**Classdef bundle** — `runtime/pde_classdefs.m` (one file, 11
+classdefs):
+- `materialProperties` — kwarg-ctor value type with 8 scalar
+  properties (Young's modulus / Poisson's ratio / mass density /
+  thermal conductivity / specific heat / relative permittivity /
+  relative permeability / electrical conductivity).
+- `faceBC` / `edgeBC` / `vertexBC` — kwarg-ctor BC value types
+  (Constraint / Displacement / per-axis displacement / Temperature
+  / Voltage).
+- `faceLoad` / `edgeLoad` / `vertexLoad` / `cellLoad` — kwarg-ctor
+  load value types (Pressure / SurfaceTraction / Force / Heat /
+  Temperature / CurrentDensity / ChargeDensity).
+- `femodel` — top-level model container; properties include
+  AnalysisType / Geometry / Mesh / MaterialProperties / flat
+  FixedFaces / PressureFaces arrays / PlanarType.
+- `pdeDisplacement` — sub-struct exposing `.ux` / `.uy` / `.uz` /
+  `.Magnitude`.
+- `StaticStructuralResults` — result wrapper exposing
+  `.Displacement` / `.VonMisesStress` / `.Mesh`.
+- `StationaryResults` — placeholder for the legacy `createpde`
+  workflow (the §F5 deferred follow-up).
+
+Every constructor body is a no-op — the matlabc Lowering
+kwarg-ctor sugar in `lib/MLIR/Lowering.cpp` intercepts each
+`ClassName('Name', value, ...)` site and emits `matlab_obj_new` +
+one `matlab_obj_set_*` per kwarg pair at the call site.  The ctor
+body itself never runs.
+
+**C kernel + setters** — `runtime/runtime_pde.cpp`:
+- `matlab_pde_solve_femodel(model)` — reads MaterialProperties /
+  FixedFaces / PressureFaces / Mesh fields directly off the
+  matlab_obj, calls the sparse FEM stack
+  (`pde_assemble_elast_3d_sparse` + `pde_apply_fixed_3d_sparse` +
+  `pcg` + `pde_node_von_mises_3d`), returns a struct with
+  `.Mesh` / `.u` / `.vm` fields.
+- `matlab_pde_set_material` / `matlab_pde_set_face_fixed` /
+  `matlab_pde_set_face_pressure` — mutate the model in place.
+- `matlab_pde_generate_mesh` — defaults `model.Mesh = model.Geometry`
+  when Mesh isn't explicitly set (multicuboid / voxelize-style
+  geometries are already volumetric meshes).
+- `matlab_pde_kernel_mesh` / `_u` / `_vm` — pass-through accessors
+  on the kernel result.
+
+Sema/MLIR wiring registers the 8 new builtins (`pde_solve_femodel`,
+`pde_solve`, `pde_set_material`, `pde_set_face_fixed`,
+`pde_set_face_pressure`, `pde_generate_mesh`,
+`pde_kernel_{mesh,u,vm}`).  The dispatcher in
+`lib/MLIR/Passes/LowerTensorOps.cpp` was widened to also accept
+`none`-typed operands as ptr-equivalent via
+`UnrealizedConversionCastOp` (cross-call slots typed `none` no
+longer block matrix-vs-class-instance discrimination — that's the
+class-instance pointer ABI).
+
+Lowering.cpp's class-pinned property-read special case
+(`IsCstClass`) was extended to also pin PDE class names
+(`femodel`, `materialProperties`, `faceBC`, `edgeBC`, `vertexBC`,
+`faceLoad`, `edgeLoad`, `vertexLoad`, `cellLoad`,
+`StaticStructuralResults`, `StationaryResults`, `pdeDisplacement`)
+so matrix-valued properties (`Geometry`, `FixedFaces`,
+`PressureFaces`, `Mesh`, `Displacement`, `VonMisesStress`, …) route
+through `matlab_obj_get_mat` instead of the f64-default
+`matlab_obj_get_f64`.
+
+The matlabc prelude scanner in `tools/matlabc/main.cpp` adds
+detection for the 11 PDE class names and an umbrella-file mapping
+that dedupes when multiple class names hit the same file (so
+loading `pde_classdefs.m` once when several classes are detected
+doesn't duplicate-define the C-shim symbols).
+
+**Gating**: `test/Run/pde_femodel_wind.m` reproduces the headline
+250 km/h wind-stress result (`log10(peak vM Pa) = 6`) using only
+the MathWorks-faithful API.  All 9 PDE end-to-end tests pass;
+spot-check across signal / control / ODE / comm / RF: clean.
+
+**Carved out (Tier-2 polish follow-ups)**:
+- Legacy `createpde` / `specifyCoefficients` / `applyBoundaryCondition`
+  / `solvepde` workflow (§F5 deferred).  Same shape as femodel
+  (kwarg-ctor + C-runtime-setters); needs its own arc.
+- `interpolateDisplacement` / `interpolateStress` / `evaluateStrain`
+  query-point helpers — runtime kernels exist (nearest-node
+  lookup); MATLAB-side wiring is a half-session follow-up.
+- Modern `Name=value` kwarg syntax (vs the working `'Name', value`
+  string-literal form) — parser feature, not in scope for the
+  PDE arc.
+- `model.FaceBC(1) = faceBC(...)` indexed-property-assignment
+  syntax — Sema feature that would let the user write the exact
+  MathWorks idiom; the v1 `pde_set_face_*` helpers achieve the
+  same semantic in straight function-call form.
+
 #### Architectural simplifications taken (deliberate)
 
 These are spelled out so future contributors don't re-pay the design cost:

@@ -3895,6 +3895,25 @@ bool TensorLowering::rewriteBuiltinCalls() {
         /* Surface→tet voxelizer. */
         {"pde_voxelize_surface",           "matlab_pde_voxelize_surface",
          PtrTy, {PtrTy, F64}},
+        /* femodel classdef façade kernel + setters. */
+        {"pde_solve_femodel",              "matlab_pde_solve_femodel",
+         PtrTy, {PtrTy}},
+        {"pde_solve",                      "matlab_pde_solve",
+         PtrTy, {PtrTy}},
+        {"pde_kernel_mesh",                "matlab_pde_kernel_mesh",
+         PtrTy, {PtrTy}},
+        {"pde_kernel_u",                   "matlab_pde_kernel_u",
+         PtrTy, {PtrTy}},
+        {"pde_kernel_vm",                  "matlab_pde_kernel_vm",
+         PtrTy, {PtrTy}},
+        {"pde_set_material",               "matlab_pde_set_material",
+         PtrTy, {PtrTy, PtrTy}},
+        {"pde_set_face_fixed",             "matlab_pde_set_face_fixed",
+         PtrTy, {PtrTy, F64}},
+        {"pde_set_face_pressure",          "matlab_pde_set_face_pressure",
+         PtrTy, {PtrTy, F64, F64}},
+        {"pde_generate_mesh",              "matlab_pde_generate_mesh",
+         PtrTy, {PtrTy}},
       };
       bool matched = false;
       for (const auto &E : pde_table) {
@@ -3913,12 +3932,15 @@ bool TensorLowering::rewriteBuiltinCalls() {
           Type WantTy = E.args[k];
           if (V.getType() == WantTy) {
             coerced.push_back(V);
-          } else if (WantTy == PtrTy && isTensorLike(V.getType())) {
-            /* Tensor → ptr: the underlying value is already an
-             * llvm.ptr in the runtime ABI.  Emit an
-             * llvm.bitcast-style passthrough via builtin.unrealized
-             * conversion cast (a marker the LLVM lowering accepts as
-             * a noop when the runtime pointer types line up). */
+          } else if (WantTy == PtrTy && (isTensorLike(V.getType()) ||
+                                          mlir::isa<NoneType>(V.getType()))) {
+            /* Tensor / none → ptr: the underlying value is already an
+             * llvm.ptr in the runtime ABI (tensor slots holding
+             * matrix descriptors; none slots holding class-instance
+             * pointers from the kwarg-ctor sugar).  Bridge via
+             * builtin.unrealized_conversion_cast — the LLVM lowering
+             * treats it as a noop when the runtime pointer types
+             * line up. */
             B.setInsertionPoint(Call);
             auto Cast = mlir::UnrealizedConversionCastOp::create(
                 B, Call->getLoc(), PtrTy, V);

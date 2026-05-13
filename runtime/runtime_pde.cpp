@@ -913,6 +913,233 @@ matlab_mat *matlab_pde_mesh_faces(matlab_struct *mesh) {
     return matlab_struct_get_mat(mesh, "Faces", 5);
 }
 
+/* matlab_pde_solve_femodel — kernel for the femodel classdef's solve()
+ * method.  Reads the femodel's flattened field layout directly from
+ * the underlying struct (so the MATLAB-side solve() body stays a thin
+ * one-call wrapper instead of fighting the prelude-function
+ * func-to-llvm conversion).
+ *
+ * Expected fields on `model` (set by the classdef ctor / set*()
+ * helpers in runtime/pde_classdefs.m):
+ *   .Mesh                 — volumetric mesh struct (Nodes, Tets, Faces).
+ *   .Geometry             — fallback mesh when Mesh is empty.
+ *   .MaterialProperties   — sub-struct with YoungsModulus / PoissonsRatio.
+ *   .FixedFaces           — Nx1 column of face ids where Constraint='fixed'.
+ *   .PressureFaces        — Nx2 [face_id, pressure_value] table.
+ *
+ * Returns a struct with:
+ *   .Mesh     — the underlying mesh (passed back so the result class
+ *               can hand it to the user).
+ *   .u        — 3N x 1 displacement vector.
+ *   .vm       — N x 1 per-node von Mises.
+ */
+matlab_mat *matlab_sparse_full(void *Sv);
+matlab_mat *matlab_sparse_diag(void *Sv);
+matlab_struct *matlab_sparse_pcg(void *Sv, matlab_mat *b,
+                                 double tol, double maxit_d);
+matlab_mat *matlab_sparse_pcg_x(matlab_struct *r);
+void *matlab_pde_sys_K_sparse(matlab_struct *sys);
+matlab_mat *matlab_pde_node_von_mises_3d(matlab_struct *mesh, matlab_mat *u_flat,
+                                          double E, double nu);
+matlab_mat *matlab_pde_face_pressure_3d(matlab_struct *mesh,
+                                        double face_id_d, double pressure);
+matlab_mat *matlab_pde_face_nodes(matlab_struct *mesh, double face_id_d);
+
+static bool field_holds_struct(matlab_struct *s, const char *name, int64_t len);
+
+matlab_struct *matlab_pde_solve_femodel(matlab_struct *model) {
+    /* Pull mesh — fall back to Geometry if Mesh is empty. */
+    matlab_struct *mesh = nullptr;
+    if (field_holds_struct(model, "Mesh", 4)) {
+        mesh = (matlab_struct *)matlab_struct_get_mat(model, "Mesh", 4);
+    } else if (field_holds_struct(model, "Geometry", 8)) {
+        mesh = (matlab_struct *)matlab_struct_get_mat(model, "Geometry", 8);
+    } else {
+        return matlab_struct_new();  /* empty result */
+    }
+    /* Material properties. */
+    matlab_struct *props = (matlab_struct *)
+        matlab_struct_get_mat(model, "MaterialProperties", 18);
+    double E  = matlab_struct_get_f64(props, "YoungsModulus", 13);
+    double nu = matlab_struct_get_f64(props, "PoissonsRatio", 13);
+
+    /* Sparse 3-D elasticity assembly. */
+    extern void *matlab_pde_assemble_elast_3d_sparse(matlab_struct *mesh,
+                                                     double E, double nu);
+    void *K_sp = matlab_pde_assemble_elast_3d_sparse(mesh, E, nu);
+
+    /* Build F by walking PressureFaces rows. */
+    matlab_mat *nodes = matlab_struct_get_mat(mesh, "Nodes", 5);
+    int64_t Nn = nodes->rows;
+    matlab_mat *F = mat_alloc(3 * Nn, 1);
+    matlab_mat *pf = matlab_struct_get_mat(model, "PressureFaces", 13);
+    if (pf && pf->rows > 0 && pf->cols >= 2) {
+        for (int64_t i = 0; i < pf->rows; ++i) {
+            double fid = pf->data[i * pf->cols + 0];
+            double p   = pf->data[i * pf->cols + 1];
+            matlab_mat *Fk = matlab_pde_face_pressure_3d(mesh, fid, p);
+            for (int64_t k = 0; k < 3 * Nn; ++k) F->data[k] += Fk->data[k];
+        }
+    }
+
+    /* Union fixed nodes across all FixedFaces entries. */
+    matlab_mat *ff = matlab_struct_get_mat(model, "FixedFaces", 10);
+    std::vector<double> fixed_nodes_vec;
+    if (ff && ff->rows > 0) {
+        for (int64_t i = 0; i < ff->rows; ++i) {
+            double fid = ff->data[i];
+            matlab_mat *ids_here = matlab_pde_face_nodes(mesh, fid);
+            for (int64_t k = 0; k < ids_here->rows; ++k) {
+                fixed_nodes_vec.push_back(ids_here->data[k]);
+            }
+        }
+    }
+    matlab_mat *fixed_ids = mat_alloc((int64_t)fixed_nodes_vec.size(), 1);
+    for (size_t k = 0; k < fixed_nodes_vec.size(); ++k)
+        fixed_ids->data[k] = fixed_nodes_vec[k];
+
+    /* Apply Dirichlet + solve via PCG. */
+    extern matlab_struct *matlab_pde_apply_fixed_3d_sparse(void *K_sparse,
+                                                          matlab_mat *F,
+                                                          matlab_mat *node_ids);
+    matlab_struct *sys2 = matlab_pde_apply_fixed_3d_sparse(K_sp, F, fixed_ids);
+    void *Kc      = matlab_pde_sys_K_sparse(sys2);
+    matlab_mat *Fc = matlab_pde_sys_F(sys2);
+
+    matlab_struct *pcg_res = matlab_sparse_pcg(Kc, Fc, 1e-6, 4000);
+    matlab_mat *u = matlab_sparse_pcg_x(pcg_res);
+
+    /* Per-node von Mises. */
+    matlab_mat *vm = matlab_pde_node_von_mises_3d(mesh, u, E, nu);
+
+    matlab_struct *out = matlab_struct_new();
+    matlab_struct_set_mat(out, "Mesh", 4, (matlab_mat *)mesh);
+    matlab_struct_set_mat(out, "u",    1, u);
+    matlab_struct_set_mat(out, "vm",   2, vm);
+    return out;
+}
+
+/* Field accessors for the kernel result struct. */
+matlab_mat *matlab_pde_kernel_mesh(matlab_struct *r) {
+    return matlab_struct_get_mat(r, "Mesh", 4);
+}
+matlab_mat *matlab_pde_kernel_u(matlab_struct *r) {
+    return matlab_struct_get_mat(r, "u", 1);
+}
+matlab_mat *matlab_pde_kernel_vm(matlab_struct *r) {
+    return matlab_struct_get_mat(r, "vm", 2);
+}
+
+/* --- femodel setters (runtime builtins) ---------------------------
+ *
+ * MATLAB-side surface looks like
+ *   model = pde_set_material      (model, props);
+ *   model = pde_set_face_fixed    (model, face_id);
+ *   model = pde_set_face_pressure (model, face_id, p);
+ * with each call returning a (mutated) femodel instance.  The
+ * implementation MUTATES the underlying matlab_obj IN PLACE for
+ * efficiency — semantically MATLAB returns by value, but since the
+ * struct's backing storage is heap-allocated, returning the same
+ * pointer is observationally equivalent.
+ */
+matlab_struct *matlab_pde_set_material(matlab_struct *model,
+                                        matlab_struct *props) {
+    matlab_struct_set_mat(model, "MaterialProperties", 18,
+                           (matlab_mat *)props);
+    return model;
+}
+
+matlab_struct *matlab_pde_set_face_fixed(matlab_struct *model,
+                                          double face_id) {
+    matlab_mat *cur = matlab_struct_get_mat(model, "FixedFaces", 10);
+    int64_t n = (cur && cur->rows > 0) ? cur->rows : 0;
+    matlab_mat *next = mat_alloc(n + 1, 1);
+    for (int64_t i = 0; i < n; ++i) next->data[i] = cur->data[i];
+    next->data[n] = face_id;
+    matlab_struct_set_mat(model, "FixedFaces", 10, next);
+    return model;
+}
+
+matlab_struct *matlab_pde_set_face_pressure(matlab_struct *model,
+                                             double face_id, double p) {
+    matlab_mat *cur = matlab_struct_get_mat(model, "PressureFaces", 13);
+    int64_t n = (cur && cur->rows > 0) ? cur->rows : 0;
+    matlab_mat *next = mat_alloc(n + 1, 2);
+    for (int64_t i = 0; i < n; ++i) {
+        next->data[i * 2 + 0] = cur->data[i * 2 + 0];
+        next->data[i * 2 + 1] = cur->data[i * 2 + 1];
+    }
+    next->data[n * 2 + 0] = face_id;
+    next->data[n * 2 + 1] = p;
+    matlab_struct_set_mat(model, "PressureFaces", 13, next);
+    return model;
+}
+
+/* Test whether a struct field holds a populated value.  Returns 1
+ * when the field exists AND its stored pointer is non-null AND, if
+ * the stored value is a matlab_mat, it has positive rows.  A missing
+ * field comes back from struct_get_mat as `mat_alloc(0, 0)` (an
+ * empty matlab_mat with rows == cols == 0), which we detect to
+ * distinguish "field never set" from "field set to a real mesh
+ * struct that happens to start with a zero-valued first word". */
+static bool field_holds_struct(matlab_struct *s, const char *name, int64_t len) {
+    matlab_mat *box = matlab_struct_get_mat(s, name, len);
+    if (!box) return false;
+    /* matlab_mat layout: 8 bytes data ptr + 8 bytes rows + 8 bytes cols.
+     * A real struct pointer has the same first 4 bytes interpreted as
+     * its first field (or magic).  We disambiguate by checking
+     * whether the first 8 bytes look like a heap pointer vs a low
+     * integer; matlab_struct's first field is a nfields/capacity
+     * pair (int32_t + int32_t).  Simpler: check if box->rows is a
+     * plausibly-small int (< 1e9) — if it is, treat the box as a
+     * real matlab_mat; if rows is huge (likely a misinterpreted
+     * pointer), treat as a struct (so the caller knows it's the
+     * struct-shape underneath).
+     *
+     * In our case we just need to know if the field was set to
+     * SOMETHING.  Mesh / Geometry fields, when set, hold a
+     * matlab_struct* (kind=1 stored as a generic ptr).  When not
+     * set, struct_get_mat returns the freshly-allocated empty
+     * matlab_mat with rows=cols=0.  The distinguishing test: rows
+     * == 0 AND cols == 0 AND data is NULL means "missing".
+     */
+    /* mat_alloc(0, 0) returns rows=0 cols=0 (and a calloc'd dummy
+     * data pointer).  A struct cast as matlab_mat has rows/cols
+     * positions holding heap pointers — huge non-zero values.  Use
+     * rows==0 && cols==0 as the empty-field discriminator. */
+    if (box->rows == 0 && box->cols == 0) return false;
+    return true;
+}
+
+matlab_struct *matlab_pde_generate_mesh(matlab_struct *model) {
+    /* If Mesh is empty (the kwarg ctor never set it), default to
+     * Geometry — for multicuboid / voxelize-style inputs, the
+     * geometry struct IS the volumetric mesh. */
+    if (!field_holds_struct(model, "Mesh", 4)) {
+        matlab_mat *geom_box = matlab_struct_get_mat(model, "Geometry", 8);
+        matlab_struct_set_mat(model, "Mesh", 4, geom_box);
+    }
+    return model;
+}
+
+/* solve(model) — the unified entry point.  Reads AnalysisType +
+ * dispatches.  v1 supports only structuralStatic.
+ *
+ * Returns a StaticStructuralResults instance — but since we can't
+ * easily construct a classdef instance from inside the runtime, the
+ * "classdef" property reads (R.Displacement, R.VonMisesStress, etc.)
+ * on the user side go through the kwarg-ctor sugar at the call site.
+ * That means solve() itself returns a matlab_struct with the same
+ * field names, and the user wraps it via StaticStructuralResults().
+ *
+ * For ergonomics we return the SAME matlab_struct shape (Mesh / u /
+ * vm) as the kernel — the MATLAB-side wrapper inside the helper
+ * `pde_solve_to_results` (a builtin) does the kwarg-ctor wrap.
+ */
+matlab_struct *matlab_pde_solve(matlab_struct *model) {
+    return matlab_pde_solve_femodel(model);
+}
+
 /* Per-node von Mises stress.  Averages the per-tet vM over all tets
  * incident to each node — adequate for visualisation.  Returns
  * Nn × 1.  Bypass the Cauchy-stress reconstruction by reusing the

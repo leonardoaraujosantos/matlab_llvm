@@ -8522,6 +8522,17 @@ int main(int Argc, char **Argv) {
       "RFRational",
       /* RF Propagation site descriptors. */
       "TxSite", "RxSite", "PropagationModel",
+      /* PDE Toolbox classdef façade — see runtime/pde_classdefs.m.
+       * Any one detection pulls the umbrella file in, which contains
+       * all of femodel + materialProperties + faceBC/edgeBC/vertexBC
+       * + faceLoad/edgeLoad/vertexLoad/cellLoad + result classes
+       * (StaticStructuralResults / StationaryResults /
+       * pdeDisplacement) + the solve/generateMesh dispatch + setter
+       * helpers. */
+      "femodel", "materialProperties",
+      "faceBC", "edgeBC", "vertexBC",
+      "faceLoad", "edgeLoad", "vertexLoad", "cellLoad",
+      "StaticStructuralResults", "StationaryResults",
     };
     for (const char *N : Names) {
       size_t NL = std::strlen(N);
@@ -8593,6 +8604,23 @@ int main(int Argc, char **Argv) {
       return "rf_class_rxsite.m";
     if (ClsName == "PropagationModel")
       return "rf_class_propagationmodel.m";
+    /* PDE Toolbox classdef façade — all classes share one umbrella
+     * file `pde_classdefs.m` (mirrors the cst_classdefs.m pattern).
+     * The first match short-circuits the rest, so loading the
+     * umbrella once when ANY of these names is detected is
+     * idempotent. */
+    if (ClsName == "femodel" ||
+        ClsName == "materialProperties" ||
+        ClsName == "faceBC" ||
+        ClsName == "edgeBC" ||
+        ClsName == "vertexBC" ||
+        ClsName == "faceLoad" ||
+        ClsName == "edgeLoad" ||
+        ClsName == "vertexLoad" ||
+        ClsName == "cellLoad" ||
+        ClsName == "StaticStructuralResults" ||
+        ClsName == "StationaryResults")
+      return "pde_classdefs.m";
     return std::string();
   };
   for (const std::string &Cls : userMentionsExtClasses(Opts.InputPath)) {
@@ -8609,7 +8637,17 @@ int main(int Argc, char **Argv) {
     };
     for (auto &C : Cands) {
       std::ifstream Fp(C);
-      if (Fp) { PreludePaths.push_back(C); break; }
+      if (Fp) {
+        /* Dedupe: PDE umbrella `pde_classdefs.m` maps many class
+         * names to a single file.  Loading it twice would duplicate
+         * the function symbols (setMaterialProperties / setFaceBC /
+         * solve / ...). */
+        if (std::find(PreludePaths.begin(), PreludePaths.end(), C)
+            == PreludePaths.end()) {
+          PreludePaths.push_back(C);
+        }
+        break;
+      }
     }
   }
   /* Back-compat single-path variable for the loader below; the

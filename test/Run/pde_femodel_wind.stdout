@@ -1,0 +1,6 @@
+PDE femodel API: 250 km/h wind on sign-panel
+  AnalysisType:         structuralStatic
+  E / nu:               200 GPa / 0.3
+  load:                 Pressure 3545 Pa on face 3
+  BC:                   fixed on face 5
+  log10(peak vM Pa):    6

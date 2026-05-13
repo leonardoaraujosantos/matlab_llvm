@@ -231,6 +231,11 @@ void Resolver::registerBuiltins() {
     "pde_sys_K_sparse",
     /* Surface→tet voxelizer. */
     "pde_voxelize_surface",
+    /* femodel classdef façade kernel + setters. */
+    "pde_solve_femodel", "pde_solve",
+    "pde_kernel_mesh", "pde_kernel_u", "pde_kernel_vm",
+    "pde_set_material", "pde_set_face_fixed", "pde_set_face_pressure",
+    "pde_generate_mesh",
     /* pdeplot3D rendering — Cairo unstructured-mesh painter. */
     "pdeplot3d", "pdeplot3D",
     "pdeplot3d_deformation", "pdeplot3d_deform_scale",
