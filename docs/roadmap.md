@@ -563,7 +563,7 @@ toolbox.
 
 ---
 
-### 15. Partial Differential Equation Toolbox 🟡
+### 15. Partial Differential Equation Toolbox ✅
 
 Per-toolbox roadmap at
 [`pde_toolbox_roadmap.md`](pde_toolbox_roadmap.md).  Closes the 2-D
@@ -594,15 +594,46 @@ closes PDE-Tier-2.
 2 wk PDE-specific assembly).  Tiers 3+ (transient / modal / thermal
 / EM / nonlinear / ROM) add ~6 wk on top.
 
-**Status (2026-05-13).** Seven shipped arcs cover Tier-1 → Tier-4
-function-form numerics + sparse infra + STL/GLB import + pdeplot3D +
-femodel classdef façade + geometry primitives + Tier-3 thermal /
-electrostatic / magnetostatic / dcConduction / structuralTransient /
-structuralModal + Lanczos shift-invert + structuralFrequency +
-harmonicElectromagnetic.  18 PDE end-to-end tests green on the
-LLVM lane.  Remaining: full-complex sparse solvers, mode-shape
-output for Lanczos, ILU-preconditioned MINRES for the
-frequency-response and Helmholtz paths, PDE Modeler 2-D app.
+**Status (2026-05-13).** **Eleven shipped arcs** close the full
+Tier-1 → Tier-4 surface plus all the polish items.  Sparse CSR
+infra (`matlab_mat_sparse`) with PCG, MINRES, and ILU(0)-preconditioned
+GMRES.  Lanczos shift-invert with mode-shape retention.  Modal
+superposition + Rayleigh damping.  T10 quadratic tetrahedra with
+super-convergent Gauss-point stress recovery + per-node von Mises.
+STL + GLB importers (surface + voxelize-AABB volumetric).  Full
+`femodel` classdef façade + MATLAB-faithful legacy aliases
+(`solvepde`, `solvepdeeig`, `specifyCoefficients`,
+`applyBoundaryCondition`, `pdegplot`, `pdemesh`, `pdeplot`,
+`pdeplot3D`).  AnalysisType dispatch covering structuralStatic /
+Transient / Modal / Frequency (real and damped-complex via
+2N×2N real-bordered) / TransientModal / StaticNL / StaticTL /
+thermalSteadyState (+ Picard `k(T)`) / thermalTransient /
+electrostatic / magnetostatic / dcConduction /
+harmonicElectromagnetic.  Thermal-stress coupling
+(`cellLoad(Temperature=…)`).  Modal-truncation **and** full
+Craig-Bampton ROMs (`reduce`, `reconstructSolution`,
+`pde_reduce_craig_bampton`).  Geometry primitives
+(`multicuboid` / `multicylinder` / `multisphere`) +
+`refineMesh` / `refineMeshBey` (Bey 8-subdivision) / `adaptmesh`.
+N-component coupled scalar PDEs (`pde_solve_multi_n`).
+
+**33 PDE end-to-end tests green** on the LLVM lane.  Cross-
+toolbox regression spot-checks (signal / control / ODE / comm /
+RF): clean.
+
+**Remaining (mostly polish):**
+- Deep Total-Lagrangian element kernel (full Green-Lagrange B_NL
+  + geometric K_σ for true large-rotation problems).
+- Hanging-node red-green propagation for partial Bey refinement.
+- Real Delaunay / TetGen mesher (today's volumetric meshing
+  uses voxelize-AABB + Kuhn 6-tet — adequate but mesh-quality
+  ceiling shows up on T10 bending).
+- 3-D Gouraud shading on the unstructured mesh painter
+  (per-triangle flat today).
+
+**Explicit carve-outs** (per project memory): PINN / GNN / FNO,
+Battery P2D, STEP import, PDE Modeler 2-D app, full 3-D Nédélec
+edge-element vector EM.
 
 ---
 
