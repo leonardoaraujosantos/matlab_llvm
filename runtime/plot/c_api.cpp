@@ -268,6 +268,49 @@ void ingest_grid_xyz(matlab_mat *X, matlab_mat *Y, matlab_mat *Z, Series &s) {
 }
 }  // namespace
 
+/* --- pdeplot 2-D unstructured-mesh painter ------------------------ */
+
+void matlab_pdeplot(matlab_mat *nodes, matlab_mat *triangles,
+                    matlab_mat *nodal_data) {
+    if (!nodes || nodes->cols < 2 || nodes->rows < 3) return;
+    if (!triangles || triangles->rows < 1) return;
+    auto &ax = matlab_plot::current_axes();
+    Series &s = new_series(ax, SeriesKind::TriMesh2D);
+    s.color_set = true;
+    int64_t Nn = nodes->rows;
+    int64_t ncols = nodes->cols;  /* 2 or 3 (z ignored) */
+    s.x.resize((size_t)Nn);
+    s.y.resize((size_t)Nn);
+    for (int64_t i = 0; i < Nn; ++i) {
+        s.x[(size_t)i] = nodes->data[i * ncols + 0];
+        s.y[(size_t)i] = nodes->data[i * ncols + 1];
+    }
+    int64_t Nt = triangles->rows;
+    int idx_off = (triangles->cols == 4) ? 1 : 0;
+    s.mesh_tris.resize((size_t)(Nt * 3));
+    for (int64_t t = 0; t < Nt; ++t) {
+        for (int k = 0; k < 3; ++k) {
+            int64_t v = (int64_t)triangles->data[t * triangles->cols
+                                                  + idx_off + k] - 1;
+            if (v < 0) v = 0;
+            if (v >= Nn) v = Nn - 1;
+            s.mesh_tris[(size_t)(t * 3 + k)] = (int)v;
+        }
+    }
+    if (nodal_data) {
+        int64_t nd = nodal_data->rows * nodal_data->cols;
+        if (nd == Nn) {
+            s.image.resize((size_t)Nn);
+            for (int64_t i = 0; i < Nn; ++i) s.image[(size_t)i] = nodal_data->data[i];
+        } else if (nd == Nt) {
+            s.face_data.resize((size_t)Nt);
+            for (int64_t i = 0; i < Nt; ++i) s.face_data[(size_t)i] = nodal_data->data[i];
+        }
+    }
+    ax.colorbar = true;
+    ax.axis_equal = true;  /* Honest mesh aspect ratio */
+}
+
 /* --- pdeplot3D unstructured-mesh painter -------------------------- *
  *
  * Stashes the (nodes, triangles, nodal_data) triple in the current

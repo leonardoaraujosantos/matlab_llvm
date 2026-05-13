@@ -219,9 +219,22 @@ void Resolver::registerBuiltins() {
     "pde_result_num_iters", "pde_result_resid",
     /* PDE geometry importers (STL ASCII + binary, GLB / glTF 2.0). */
     "pde_load_stl", "pde_load_glb", "pde_save_stl",
+    /* Sparse matrix infrastructure — see runtime/runtime_sparse.cpp. */
+    "sparse", "spnnz", "sprows", "spcols", "speye", "spdiag",
+    "sparse_matvec", "spfull",
+    "pcg", "pcg_x", "pcg_flag", "pcg_relres", "pcg_iter",
+    /* Sparse FEM assembly. */
+    "pde_assemble_poisson_2d_sparse",
+    "pde_apply_dirichlet_sparse",
+    "pde_assemble_elast_3d_sparse",
+    "pde_apply_fixed_3d_sparse",
+    "pde_sys_K_sparse",
+    /* Surface→tet voxelizer. */
+    "pde_voxelize_surface",
     /* pdeplot3D rendering — Cairo unstructured-mesh painter. */
     "pdeplot3d", "pdeplot3D",
     "pdeplot3d_deformation", "pdeplot3d_deform_scale",
+    "pdeplot",
     "nargin", "nargout", "varargin", "varargout",
     "fopen", "fclose", "fgetl", "feof",
     "fread", "fwrite",

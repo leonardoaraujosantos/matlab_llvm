@@ -1593,6 +1593,608 @@ double matlab_pde_num_faces(matlab_struct *mesh) {
     return matlab_struct_get_f64(mesh, "NumFaces", 8);
 }
 
+/* --- Sparse FEM assembly path ---------------------------------------
+ *
+ * These mirror the dense pde_assemble_* family but emit (I, J, V)
+ * triplets instead of writing directly into a dense N×N array.  The
+ * triplets are handed to matlab_sparse_from_triplets which sums
+ * duplicates and compacts into CSR.
+ *
+ * Why this matters: dense K caps us at ~3 000 DOF.  Sparse K is
+ * essentially N + (per-row fan-out) entries, which scales to
+ * 100 000 DOF on commodity RAM.  Combined with PCG (matlab_sparse_pcg)
+ * the iterative solve runs in O(N * #iter * avg fan-out) which is
+ * typically 50–200× faster than dense LU at scale.
+ *
+ * The function-form API is structured as:
+ *   1. matlab_pde_assemble_poisson_2d_sparse(mesh, c, a, f) -> struct
+ *      with .K (sparse, m×m) and .F (dense, m×1).
+ *   2. matlab_pde_assemble_elast_3d_sparse(mesh, E, nu) -> sparse K.
+ *   3. matlab_pde_apply_dirichlet_sparse / matlab_pde_apply_fixed_3d_sparse
+ *      zero rows/cols by rewriting (I, J, V) in place and re-summing.
+ *
+ * The MATLAB-side call sequence:
+ *   sys  = pde_assemble_poisson_2d_sparse(mesh, 1, 0, 1);
+ *   sys2 = pde_apply_dirichlet_sparse(sys, bnd, 0);
+ *   res  = pcg(pde_sys_K_sparse(sys2), pde_sys_F(sys2), 1e-8, 1000);
+ *   u    = pcg_x(res);
+ */
+
+void *matlab_sparse_from_triplets(matlab_mat *I, matlab_mat *J, matlab_mat *V,
+                                  double m_d, double n_d);
+double matlab_sparse_nnz(void *S);
+
+/* 2-D Poisson sparse assembly. */
+matlab_struct *matlab_pde_assemble_poisson_2d_sparse(matlab_struct *mesh,
+                                                    double c, double a, double f) {
+    matlab_mat *nodes = matlab_struct_get_mat(mesh, "Nodes",     5);
+    matlab_mat *tris  = matlab_struct_get_mat(mesh, "Triangles", 9);
+    int64_t Nn = nodes->rows;
+    int64_t Nt = tris->rows;
+
+    /* Each triangle contributes 9 K entries + 3 F entries. */
+    int64_t cap = Nt * 9;
+    matlab_mat *I = mat_alloc(cap, 1);
+    matlab_mat *J = mat_alloc(cap, 1);
+    matlab_mat *V = mat_alloc(cap, 1);
+    matlab_mat *F = mat_alloc(Nn, 1);
+    int64_t pos = 0;
+
+    for (int64_t e = 0; e < Nt; ++e) {
+        int64_t i0 = (int64_t)tris->data[e * 3 + 0] - 1;
+        int64_t i1 = (int64_t)tris->data[e * 3 + 1] - 1;
+        int64_t i2 = (int64_t)tris->data[e * 3 + 2] - 1;
+        double x0 = nodes->data[i0 * 2 + 0], y0 = nodes->data[i0 * 2 + 1];
+        double x1 = nodes->data[i1 * 2 + 0], y1 = nodes->data[i1 * 2 + 1];
+        double x2 = nodes->data[i2 * 2 + 0], y2 = nodes->data[i2 * 2 + 1];
+        double twoA = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0);
+        double area = 0.5 * twoA;
+        if (area <= 0) area = -area;
+        double b[3] = { (y1 - y2), (y2 - y0), (y0 - y1) };
+        double cc[3] = { (x2 - x1), (x0 - x2), (x1 - x0) };
+        double inv2A = 1.0 / twoA;
+        for (int p = 0; p < 3; ++p) { b[p] *= inv2A; cc[p] *= inv2A; }
+        int64_t loc[3] = { i0, i1, i2 };
+        for (int p = 0; p < 3; ++p) {
+            for (int q = 0; q < 3; ++q) {
+                double Ke = c * area * (b[p] * b[q] + cc[p] * cc[q]);
+                if (p == q) Ke += a * area / 3.0;
+                I->data[pos] = (double)(loc[p] + 1);  /* 1-based */
+                J->data[pos] = (double)(loc[q] + 1);
+                V->data[pos] = Ke;
+                pos++;
+            }
+            F->data[loc[p]] += f * area / 3.0;
+        }
+    }
+    /* Trim. */
+    I->rows = pos; J->rows = pos; V->rows = pos;
+
+    void *K = matlab_sparse_from_triplets(I, J, V, (double)Nn, (double)Nn);
+    matlab_struct *out = matlab_struct_new();
+    /* Store the sparse matrix pointer via the standard struct-set-mat
+     * slot (the descriptor is sniffed via its 0xC0FFEE05 magic, so the
+     * polymorphic disp / matvec callsites still work). */
+    matlab_struct_set_mat(out, "K", 1, (matlab_mat *)K);
+    matlab_struct_set_mat(out, "F", 1, F);
+    return out;
+}
+
+/* matlab_pde_sys_K_sparse — accessor for the sparse-K field, returning
+ * a void* so the caller can pass it directly to PCG / sparse_matvec
+ * without going through the matlab_mat coercion. */
+void *matlab_pde_sys_K_sparse(matlab_struct *sys) {
+    return (void *)matlab_struct_get_mat(sys, "K", 1);
+}
+
+/* Dirichlet u = u_val on a set of node ids, sparse form.  Rebuilds
+ * the sparse matrix by walking its CSR storage: for each constrained
+ * row r, clear all entries; for each constrained column c, clear all
+ * entries.  Insert a diagonal-1 for each constrained row.  F is
+ * adjusted by subtracting K(:, fixed) * u_val (trivial for u_val=0).
+ *
+ * Uses a re-triplet pass to keep the code small.  At FEM scale this
+ * is O(nnz) which is small compared to the solve.
+ */
+matlab_struct *matlab_pde_apply_dirichlet_sparse(matlab_struct *sys,
+                                                  matlab_mat *node_ids,
+                                                  double u_val) {
+    /* Lift the sparse_mat back into triplets, filter, and rebuild. */
+    extern matlab_mat *matlab_sparse_full(void *Sv);
+    extern double matlab_sparse_rows(void *Sv);
+    extern double matlab_sparse_cols(void *Sv);
+    /* Pull the K + F. */
+    void *K_raw  = (void *)matlab_struct_get_mat(sys, "K", 1);
+    matlab_mat *F = matlab_struct_get_mat(sys, "F", 1);
+    /* Treat the sparse_mat as opaque and read out its triplets. */
+    struct sparse_view {
+        uint32_t magic, _pad;
+        int64_t *row_ptr;
+        int64_t *col_idx;
+        double  *vals;
+        int64_t rows, cols, nnz;
+    };
+    sparse_view *S = (sparse_view *)K_raw;
+    if (!S || S->magic != 0xC0FFEE05u) return nullptr;
+    int64_t Nn = S->rows;
+    int64_t Nd = node_ids->rows * node_ids->cols;
+    std::vector<int8_t> fixed((size_t)Nn, 0);
+    for (int64_t k = 0; k < Nd; ++k) {
+        int64_t n = (int64_t)node_ids->data[k] - 1;
+        if (n >= 0 && n < Nn) fixed[(size_t)n] = 1;
+    }
+    /* RHS adjustment for non-zero u_val. */
+    matlab_mat *F2 = mat_alloc(Nn, 1);
+    memcpy(F2->data, F->data, sizeof(double) * (size_t)Nn);
+    if (u_val != 0.0) {
+        for (int64_t r = 0; r < Nn; ++r) {
+            int64_t lo = S->row_ptr[r];
+            int64_t hi = S->row_ptr[r + 1];
+            for (int64_t k = lo; k < hi; ++k) {
+                int64_t c = S->col_idx[k];
+                if (fixed[(size_t)c]) F2->data[r] -= S->vals[k] * u_val;
+            }
+        }
+    }
+    /* Rebuild triplets, filtering. */
+    int64_t nnz_old = S->nnz;
+    matlab_mat *I = mat_alloc(nnz_old + Nd, 1);
+    matlab_mat *J = mat_alloc(nnz_old + Nd, 1);
+    matlab_mat *V = mat_alloc(nnz_old + Nd, 1);
+    int64_t pos = 0;
+    for (int64_t r = 0; r < Nn; ++r) {
+        int64_t lo = S->row_ptr[r];
+        int64_t hi = S->row_ptr[r + 1];
+        if (fixed[(size_t)r]) continue;  /* skip row */
+        for (int64_t k = lo; k < hi; ++k) {
+            int64_t c = S->col_idx[k];
+            if (fixed[(size_t)c]) continue;  /* skip col */
+            I->data[pos] = (double)(r + 1);
+            J->data[pos] = (double)(c + 1);
+            V->data[pos] = S->vals[k];
+            pos++;
+        }
+    }
+    /* Diagonal-1 + Dirichlet RHS for each fixed dof. */
+    for (int64_t r = 0; r < Nn; ++r) {
+        if (!fixed[(size_t)r]) continue;
+        I->data[pos] = (double)(r + 1);
+        J->data[pos] = (double)(r + 1);
+        V->data[pos] = 1.0;
+        pos++;
+        F2->data[r] = u_val;
+    }
+    I->rows = pos; J->rows = pos; V->rows = pos;
+    void *K2 = matlab_sparse_from_triplets(I, J, V, (double)Nn, (double)Nn);
+
+    matlab_struct *out = matlab_struct_new();
+    matlab_struct_set_mat(out, "K", 1, (matlab_mat *)K2);
+    matlab_struct_set_mat(out, "F", 1, F2);
+    return out;
+}
+
+/* --- Sparse 3-D linear elasticity assembly ----------------------- */
+
+/* Wire helpers — re-declarations of the static internals that the
+ * dense path uses.  They're declared at file scope above; this is
+ * just a local visibility marker. */
+static void elast_compute_grad_extern(const double X[4][3], double dN[4][3],
+                                      double *vol_out) {
+    extern void elast_compute_grad(const double X[4][3], double dN[4][3],
+                                   double *vol_out);
+    elast_compute_grad(X, dN, vol_out);
+}
+
+void *matlab_pde_assemble_elast_3d_sparse(matlab_struct *mesh,
+                                          double E, double nu) {
+    matlab_mat *nodes = matlab_struct_get_mat(mesh, "Nodes", 5);
+    matlab_mat *tets  = matlab_struct_get_mat(mesh, "Tets",  4);
+    int64_t Nn = nodes->rows;
+    int64_t Nt = tets->rows;
+    int64_t Ndof = 3 * Nn;
+
+    /* Each tet contributes 12*12 = 144 K entries.  At ~10k tets that's
+     * ~1.4M triplets — fits in RAM comfortably. */
+    int64_t cap = Nt * 144;
+    matlab_mat *I = mat_alloc(cap, 1);
+    matlab_mat *J = mat_alloc(cap, 1);
+    matlab_mat *V = mat_alloc(cap, 1);
+    int64_t pos = 0;
+
+    /* Constitutive matrix — same as dense path. */
+    double lam = E * nu / ((1.0 + nu) * (1.0 - 2.0 * nu));
+    double mu  = E / (2.0 * (1.0 + nu));
+    double D[6][6] = {0};
+    D[0][0] = lam + 2.0 * mu;  D[0][1] = lam;            D[0][2] = lam;
+    D[1][0] = lam;             D[1][1] = lam + 2.0 * mu; D[1][2] = lam;
+    D[2][0] = lam;             D[2][1] = lam;            D[2][2] = lam + 2.0 * mu;
+    D[3][3] = mu; D[4][4] = mu; D[5][5] = mu;
+
+    for (int64_t e = 0; e < Nt; ++e) {
+        int64_t ids[4];
+        double X[4][3];
+        for (int i = 0; i < 4; ++i) {
+            ids[i] = (int64_t)tets->data[e * 4 + i] - 1;
+            X[i][0] = nodes->data[ids[i] * 3 + 0];
+            X[i][1] = nodes->data[ids[i] * 3 + 1];
+            X[i][2] = nodes->data[ids[i] * 3 + 2];
+        }
+        double dN[4][3];
+        double Vol;
+        elast_compute_grad_extern(X, dN, &Vol);
+        /* B (6x12). */
+        double B[6][12] = {0};
+        for (int i = 0; i < 4; ++i) {
+            double bx = dN[i][0], by = dN[i][1], bz = dN[i][2];
+            int c = i * 3;
+            B[0][c + 0] = bx;
+            B[1][c + 1] = by;
+            B[2][c + 2] = bz;
+            B[3][c + 0] = by; B[3][c + 1] = bx;
+            B[4][c + 1] = bz; B[4][c + 2] = by;
+            B[5][c + 0] = bz; B[5][c + 2] = bx;
+        }
+        /* Ke = Vol * B^T * D * B. */
+        double DB[6][12];
+        for (int r = 0; r < 6; ++r)
+            for (int c = 0; c < 12; ++c) {
+                double s = 0.0;
+                for (int k = 0; k < 6; ++k) s += D[r][k] * B[k][c];
+                DB[r][c] = s;
+            }
+        double Ke[12][12];
+        for (int r = 0; r < 12; ++r)
+            for (int c = 0; c < 12; ++c) {
+                double s = 0.0;
+                for (int k = 0; k < 6; ++k) s += B[k][r] * DB[k][c];
+                Ke[r][c] = Vol * s;
+            }
+        /* Scatter into triplets (1-based global indices). */
+        for (int p = 0; p < 4; ++p) {
+            int64_t gp = ids[p] * 3;
+            for (int q = 0; q < 4; ++q) {
+                int64_t gq = ids[q] * 3;
+                for (int a = 0; a < 3; ++a) {
+                    for (int b = 0; b < 3; ++b) {
+                        I->data[pos] = (double)(gp + a + 1);
+                        J->data[pos] = (double)(gq + b + 1);
+                        V->data[pos] = Ke[p * 3 + a][q * 3 + b];
+                        pos++;
+                    }
+                }
+            }
+        }
+    }
+    I->rows = pos; J->rows = pos; V->rows = pos;
+    return matlab_sparse_from_triplets(I, J, V, (double)Ndof, (double)Ndof);
+}
+
+/* --- Voxelize-AABB volumetric tet mesher ---------------------------
+ *
+ * matlab_pde_voxelize_surface(surface, voxel_size) — take a surface
+ * fegeometry (Nodes, Faces from STL/GLB importers) and build a
+ * volumetric tet mesh by:
+ *   1. Computing the AABB of the surface.
+ *   2. Subdividing the AABB into a Nx × Ny × Nz grid of hex cells
+ *      with edge length ~voxel_size.
+ *   3. For each cell, ray-cast the centroid in +x and count
+ *      intersections with the surface triangles (Möller-Trumbore).
+ *      Odd count → inside.
+ *   4. Keep inside cells.  Add the corner vertices of each kept cell
+ *      to the volumetric node table (deduplicated via spatial hash).
+ *   5. Split each kept hex into 6 tets via the same Kuhn 0-6
+ *      diagonal decomposition used by multicuboid.
+ *   6. Recover boundary triangles where an inside cell has an
+ *      outside neighbour.  face_id assigned by dominant outward
+ *      normal direction: 1=-z, 2=+z, 3=-y, 4=+y, 5=-x, 6=+x.
+ *
+ * Returns the same struct shape as pde_mesh_cuboid_tet so the FEM
+ * assembler / pdeplot3D / etc. plug in unchanged.
+ *
+ * Trade-off: voxelization gives a step-stair boundary, not the
+ * original surface triangulation.  Mesh quality is uniform (all tets
+ * are identical shape) but the boundary fidelity scales with the
+ * voxel_size.  Adequate for visualisation + qualitative stress
+ * patterns; for high-fidelity boundary stress, a proper
+ * constrained-Delaunay tetrahedralization is roadmap §10.3 follow-up.
+ */
+
+static inline bool ray_triangle_intersect(
+    double ox, double oy, double oz,
+    double dx, double dy, double dz,
+    double v0x, double v0y, double v0z,
+    double v1x, double v1y, double v1z,
+    double v2x, double v2y, double v2z) {
+    /* Möller-Trumbore.  Returns true if the ray (o + t*d, t>0) hits
+     * the triangle.  Backface culling disabled (we want both sides). */
+    double e1x = v1x - v0x, e1y = v1y - v0y, e1z = v1z - v0z;
+    double e2x = v2x - v0x, e2y = v2y - v0y, e2z = v2z - v0z;
+    double hx = dy * e2z - dz * e2y;
+    double hy = dz * e2x - dx * e2z;
+    double hz = dx * e2y - dy * e2x;
+    double a = e1x * hx + e1y * hy + e1z * hz;
+    if (a > -1e-12 && a < 1e-12) return false;  /* parallel */
+    double f = 1.0 / a;
+    double sx = ox - v0x, sy = oy - v0y, sz = oz - v0z;
+    double u = f * (sx * hx + sy * hy + sz * hz);
+    if (u < 0.0 || u > 1.0) return false;
+    double qx = sy * e1z - sz * e1y;
+    double qy = sz * e1x - sx * e1z;
+    double qz = sx * e1y - sy * e1x;
+    double v = f * (dx * qx + dy * qy + dz * qz);
+    if (v < 0.0 || u + v > 1.0) return false;
+    double t = f * (e2x * qx + e2y * qy + e2z * qz);
+    return t > 1e-9;
+}
+
+matlab_struct *matlab_pde_voxelize_surface(matlab_struct *surface,
+                                           double voxel_size) {
+    matlab_mat *nodes = matlab_struct_get_mat(surface, "Nodes", 5);
+    matlab_mat *faces = matlab_struct_get_mat(surface, "Faces", 5);
+    if (!nodes || !faces) return nullptr;
+    int64_t Nn = nodes->rows;
+    int64_t Nf = faces->rows;
+    if (Nn < 3 || Nf < 1 || voxel_size <= 0) return nullptr;
+
+    /* AABB. */
+    double xmin =  1e300, ymin =  1e300, zmin =  1e300;
+    double xmax = -1e300, ymax = -1e300, zmax = -1e300;
+    for (int64_t i = 0; i < Nn; ++i) {
+        double x = nodes->data[i * 3 + 0];
+        double y = nodes->data[i * 3 + 1];
+        double z = nodes->data[i * 3 + 2];
+        if (x < xmin) xmin = x; if (x > xmax) xmax = x;
+        if (y < ymin) ymin = y; if (y > ymax) ymax = y;
+        if (z < zmin) zmin = z; if (z > zmax) zmax = z;
+    }
+    /* Inflate the AABB by a small padding so boundary cells stay
+     * fully inside the grid even with floating-point rounding. */
+    double pad = voxel_size * 0.05;
+    xmin -= pad; ymin -= pad; zmin -= pad;
+    xmax += pad; ymax += pad; zmax += pad;
+    int64_t Nx = (int64_t)ceil((xmax - xmin) / voxel_size); if (Nx < 1) Nx = 1;
+    int64_t Ny = (int64_t)ceil((ymax - ymin) / voxel_size); if (Ny < 1) Ny = 1;
+    int64_t Nz = (int64_t)ceil((zmax - zmin) / voxel_size); if (Nz < 1) Nz = 1;
+    double dx = (xmax - xmin) / (double)Nx;
+    double dy = (ymax - ymin) / (double)Ny;
+    double dz = (zmax - zmin) / (double)Nz;
+
+    /* For each cell, test centroid inside-ness via ray-cast in +x. */
+    int64_t total_cells = Nx * Ny * Nz;
+    std::vector<int8_t> inside((size_t)total_cells, 0);
+
+    /* Precompute triangle coords for fast access. */
+    std::vector<double> tv((size_t)Nf * 9);
+    for (int64_t k = 0; k < Nf; ++k) {
+        int64_t i0 = (int64_t)faces->data[k * 4 + 1] - 1;
+        int64_t i1 = (int64_t)faces->data[k * 4 + 2] - 1;
+        int64_t i2 = (int64_t)faces->data[k * 4 + 3] - 1;
+        for (int c = 0; c < 3; ++c) {
+            tv[(size_t)k * 9 + 0 + c] = nodes->data[i0 * 3 + c];
+            tv[(size_t)k * 9 + 3 + c] = nodes->data[i1 * 3 + c];
+            tv[(size_t)k * 9 + 6 + c] = nodes->data[i2 * 3 + c];
+        }
+    }
+
+    /* Direction = (1, 0, 0) — +x ray.  Use a slightly tilted ray so
+     * we don't graze edges/vertices of axis-aligned triangles. */
+    const double drx = 1.0, dry = 0.001, drz = 0.0007;
+
+    int64_t inside_count = 0;
+    for (int64_t k = 0; k < Nz; ++k) {
+        double cz = zmin + (k + 0.5) * dz;
+        for (int64_t j = 0; j < Ny; ++j) {
+            double cy = ymin + (j + 0.5) * dy;
+            for (int64_t i = 0; i < Nx; ++i) {
+                double cx = xmin + (i + 0.5) * dx;
+                int hits = 0;
+                for (int64_t t = 0; t < Nf; ++t) {
+                    const double *p = tv.data() + (size_t)t * 9;
+                    if (ray_triangle_intersect(cx, cy, cz, drx, dry, drz,
+                                                p[0], p[1], p[2],
+                                                p[3], p[4], p[5],
+                                                p[6], p[7], p[8])) {
+                        hits++;
+                    }
+                }
+                if (hits & 1) {
+                    inside[(size_t)(k * Ny * Nx + j * Nx + i)] = 1;
+                    inside_count++;
+                }
+            }
+        }
+    }
+
+    if (inside_count == 0) return nullptr;
+
+    /* Now build the tet mesh.  We allocate node ids for every corner
+     * of every kept cell, deduplicating by grid index. */
+    int64_t Px = Nx + 1, Py = Ny + 1, Pz = Nz + 1;
+    int64_t Pn = Px * Py * Pz;
+    std::vector<int64_t> node_id((size_t)Pn, -1);  /* -1 = not yet assigned */
+    std::vector<double> vol_nodes;
+    vol_nodes.reserve((size_t)inside_count * 24);
+
+    auto ensure_node = [&](int64_t i, int64_t j, int64_t k) -> int64_t {
+        int64_t key = (k * Py + j) * Px + i;
+        if (node_id[(size_t)key] >= 0) return node_id[(size_t)key];
+        int64_t nid = (int64_t)(vol_nodes.size() / 3);
+        vol_nodes.push_back(xmin + (double)i * dx);
+        vol_nodes.push_back(ymin + (double)j * dy);
+        vol_nodes.push_back(zmin + (double)k * dz);
+        node_id[(size_t)key] = nid;
+        return nid;
+    };
+
+    /* Kuhn 6-tet decomposition (same as multicuboid). */
+    static const int Tdef[6][4] = {
+        {0, 1, 2, 6}, {0, 2, 3, 6}, {0, 3, 7, 6},
+        {0, 7, 4, 6}, {0, 4, 5, 6}, {0, 5, 1, 6},
+    };
+
+    std::vector<int64_t> tets_flat;  /* (Nt, 4) row-major, 1-based */
+    tets_flat.reserve((size_t)inside_count * 24);
+
+    auto inside_idx = [&](int64_t i, int64_t j, int64_t k) -> int8_t {
+        if (i < 0 || i >= Nx || j < 0 || j >= Ny || k < 0 || k >= Nz) return 0;
+        return inside[(size_t)(k * Ny * Nx + j * Nx + i)];
+    };
+
+    /* Boundary face triangles. */
+    std::vector<int64_t> face_id, face_n1, face_n2, face_n3;
+
+    auto add_tri = [&](int64_t fid, int64_t a, int64_t b, int64_t c) {
+        face_id.push_back(fid);
+        face_n1.push_back(a + 1);
+        face_n2.push_back(b + 1);
+        face_n3.push_back(c + 1);
+    };
+
+    for (int64_t k = 0; k < Nz; ++k) {
+        for (int64_t j = 0; j < Ny; ++j) {
+            for (int64_t i = 0; i < Nx; ++i) {
+                if (!inside_idx(i, j, k)) continue;
+                int64_t corners[8] = {
+                    ensure_node(i,     j,     k    ),
+                    ensure_node(i + 1, j,     k    ),
+                    ensure_node(i + 1, j + 1, k    ),
+                    ensure_node(i,     j + 1, k    ),
+                    ensure_node(i,     j,     k + 1),
+                    ensure_node(i + 1, j,     k + 1),
+                    ensure_node(i + 1, j + 1, k + 1),
+                    ensure_node(i,     j + 1, k + 1),
+                };
+                for (int t = 0; t < 6; ++t) {
+                    tets_flat.push_back(corners[Tdef[t][0]] + 1);
+                    tets_flat.push_back(corners[Tdef[t][1]] + 1);
+                    tets_flat.push_back(corners[Tdef[t][2]] + 1);
+                    tets_flat.push_back(corners[Tdef[t][3]] + 1);
+                }
+                /* Boundary faces — emit when this cell's neighbour is
+                 * NOT inside.  Same orientation as multicuboid. */
+                if (!inside_idx(i, j, k - 1)) {  /* face 1: -z */
+                    add_tri(1, corners[0], corners[2], corners[1]);
+                    add_tri(1, corners[0], corners[3], corners[2]);
+                }
+                if (!inside_idx(i, j, k + 1)) {  /* face 2: +z */
+                    add_tri(2, corners[4], corners[5], corners[6]);
+                    add_tri(2, corners[4], corners[6], corners[7]);
+                }
+                if (!inside_idx(i, j - 1, k)) {  /* face 3: -y */
+                    add_tri(3, corners[0], corners[1], corners[5]);
+                    add_tri(3, corners[0], corners[5], corners[4]);
+                }
+                if (!inside_idx(i, j + 1, k)) {  /* face 4: +y */
+                    add_tri(4, corners[3], corners[7], corners[6]);
+                    add_tri(4, corners[3], corners[6], corners[2]);
+                }
+                if (!inside_idx(i - 1, j, k)) {  /* face 5: -x */
+                    add_tri(5, corners[0], corners[4], corners[7]);
+                    add_tri(5, corners[0], corners[7], corners[3]);
+                }
+                if (!inside_idx(i + 1, j, k)) {  /* face 6: +x */
+                    add_tri(6, corners[1], corners[2], corners[6]);
+                    add_tri(6, corners[1], corners[6], corners[5]);
+                }
+            }
+        }
+    }
+
+    int64_t Nn_vol = (int64_t)(vol_nodes.size() / 3);
+    int64_t Nt_vol = (int64_t)(tets_flat.size()  / 4);
+    int64_t Nbnd   = (int64_t)face_id.size();
+
+    matlab_mat *Nodes = mat_alloc(Nn_vol, 3);
+    memcpy(Nodes->data, vol_nodes.data(), sizeof(double) * (size_t)(Nn_vol * 3));
+    matlab_mat *Tets  = mat_alloc(Nt_vol, 4);
+    for (int64_t i = 0; i < Nt_vol * 4; ++i) Tets->data[i] = (double)tets_flat[(size_t)i];
+    matlab_mat *Faces = mat_alloc(Nbnd, 4);
+    for (int64_t k = 0; k < Nbnd; ++k) {
+        Faces->data[k * 4 + 0] = (double)face_id[(size_t)k];
+        Faces->data[k * 4 + 1] = (double)face_n1[(size_t)k];
+        Faces->data[k * 4 + 2] = (double)face_n2[(size_t)k];
+        Faces->data[k * 4 + 3] = (double)face_n3[(size_t)k];
+    }
+    matlab_struct *out = matlab_struct_new();
+    matlab_struct_set_mat(out, "Nodes", 5, Nodes);
+    matlab_struct_set_mat(out, "Tets",  4, Tets);
+    matlab_struct_set_mat(out, "Faces", 5, Faces);
+    matlab_struct_set_f64(out, "Nx", 2, (double)Nx);
+    matlab_struct_set_f64(out, "Ny", 2, (double)Ny);
+    matlab_struct_set_f64(out, "Nz", 2, (double)Nz);
+    matlab_struct_set_f64(out, "W",  1, xmax - xmin);
+    matlab_struct_set_f64(out, "D",  1, ymax - ymin);
+    matlab_struct_set_f64(out, "H",  1, zmax - zmin);
+    matlab_struct_set_f64(out, "NumInsideCells", 14, (double)inside_count);
+    return out;
+}
+
+/* Fixed-DOF Dirichlet on a sparse 3-D elasticity K, F pair.  Same
+ * shape as matlab_pde_apply_fixed_3d but operates on triplets. */
+matlab_struct *matlab_pde_apply_fixed_3d_sparse(void *K_sparse,
+                                                 matlab_mat *F,
+                                                 matlab_mat *node_ids) {
+    struct sparse_view {
+        uint32_t magic, _pad;
+        int64_t *row_ptr;
+        int64_t *col_idx;
+        double  *vals;
+        int64_t rows, cols, nnz;
+    };
+    sparse_view *S = (sparse_view *)K_sparse;
+    if (!S || S->magic != 0xC0FFEE05u) return nullptr;
+    int64_t Ndof = S->rows;
+    int64_t Nn = Ndof / 3;
+    int64_t Nd = node_ids->rows * node_ids->cols;
+
+    std::vector<int8_t> fixed((size_t)Ndof, 0);
+    for (int64_t k = 0; k < Nd; ++k) {
+        int64_t n = (int64_t)node_ids->data[k] - 1;
+        if (n < 0 || n >= Nn) continue;
+        fixed[(size_t)(n * 3 + 0)] = 1;
+        fixed[(size_t)(n * 3 + 1)] = 1;
+        fixed[(size_t)(n * 3 + 2)] = 1;
+    }
+
+    matlab_mat *F2 = mat_alloc(Ndof, 1);
+    memcpy(F2->data, F->data, sizeof(double) * (size_t)Ndof);
+
+    /* Rebuild triplets, filtering. */
+    int64_t cap = S->nnz + Ndof;
+    matlab_mat *I = mat_alloc(cap, 1);
+    matlab_mat *J = mat_alloc(cap, 1);
+    matlab_mat *V = mat_alloc(cap, 1);
+    int64_t pos = 0;
+    for (int64_t r = 0; r < Ndof; ++r) {
+        int64_t lo = S->row_ptr[r];
+        int64_t hi = S->row_ptr[r + 1];
+        if (fixed[(size_t)r]) continue;
+        for (int64_t k = lo; k < hi; ++k) {
+            int64_t c = S->col_idx[k];
+            if (fixed[(size_t)c]) continue;
+            I->data[pos] = (double)(r + 1);
+            J->data[pos] = (double)(c + 1);
+            V->data[pos] = S->vals[k];
+            pos++;
+        }
+    }
+    for (int64_t r = 0; r < Ndof; ++r) {
+        if (!fixed[(size_t)r]) continue;
+        I->data[pos] = (double)(r + 1);
+        J->data[pos] = (double)(r + 1);
+        V->data[pos] = 1.0;
+        pos++;
+        F2->data[r] = 0.0;
+    }
+    I->rows = pos; J->rows = pos; V->rows = pos;
+    void *K2 = matlab_sparse_from_triplets(I, J, V, (double)Ndof, (double)Ndof);
+
+    matlab_struct *out = matlab_struct_new();
+    matlab_struct_set_mat(out, "K", 1, (matlab_mat *)K2);
+    matlab_struct_set_mat(out, "F", 1, F2);
+    return out;
+}
+
 }  /* extern "C" */
 
 /* ===================================================================

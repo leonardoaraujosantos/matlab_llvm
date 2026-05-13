@@ -136,6 +136,8 @@ const llvm::StringSet<> &plotBuiltins() {
     /* pdeplot3D — unstructured 3-D triangle-mesh painter. */
     "pdeplot3d", "pdeplot3D",
     "pdeplot3d_deformation", "pdeplot3d_deform_scale",
+    /* pdeplot — 2-D unstructured triangle painter. */
+    "pdeplot",
   };
   return S;
 }
@@ -653,6 +655,20 @@ bool rewriteCallee(Operation *Op, StringRef Callee, Helper &H,
   if (Callee == "mesh") {
     if (N == 1) return rewriteMatArgs(Op, H, "matlab_mesh1", 1);
     if (N == 3) return rewriteMatArgs(Op, H, "matlab_mesh3", 3);
+    return false;
+  }
+
+  /* pdeplot — 2-D version, accepts (nodes, triangles) or
+   * (nodes, triangles, data). */
+  if (Callee == "pdeplot") {
+    if (N == 2) {
+      H.B.setInsertionPoint(Op);
+      auto NullPtr = mlir::LLVM::ZeroOp::create(H.B, L, H.PtrTy);
+      H.callVoid(L, "matlab_pdeplot", {H.PtrTy, H.PtrTy, H.PtrTy},
+                 {Op->getOperand(0), Op->getOperand(1), NullPtr.getRes()});
+      return true;
+    }
+    if (N == 3) return rewriteMatArgs(Op, H, "matlab_pdeplot", 3);
     return false;
   }
 

@@ -89,6 +89,19 @@ void matlab_zlabel(const char *s, int64_t n);
 void matlab_surf1(matlab_mat *Z);
 void matlab_surf3(matlab_mat *X, matlab_mat *Y, matlab_mat *Z);
 
+/* pdeplot(nodes, triangles, nodal_data) — Unstructured 2-D
+ * triangle-mesh painter for Tier-1 FEM solution visualisation.
+ *
+ *   nodes      : Nn × 2 — x, y per vertex.
+ *   triangles  : Nt × 3 (1-based vertex indices) or Nt × 4 (with a
+ *                 leading face-id column matching the STL/GLB
+ *                 convention).
+ *   nodal_data : Nn × 1 per-vertex scalar (Gouraud-mean per
+ *                 triangle) or NULL (depth-tint fallback).
+ */
+void matlab_pdeplot(matlab_mat *nodes, matlab_mat *triangles,
+                    matlab_mat *nodal_data);
+
 /* pdeplot3D(nodes, triangles, nodal_data) — Unstructured 3-D
  * triangle-mesh painter for FEM / STL / GLB visualisation.
  *

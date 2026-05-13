@@ -16,7 +16,12 @@ enum class SeriesKind {
      * per-vertex scalar in `image`; 0-based triangle indices (3 per
      * triangle) in `mesh_tris`; per-vertex deformation in u, v, plus
      * a third axis stored in `e_pos` (the existing 3rd scalar slot). */
-    TriMesh3D
+    TriMesh3D,
+    /* TriMesh2D — unstructured 2D triangle mesh, for pdeplot of
+     * Poisson-tier FEM solutions.  Node coordinates in x, y; per-
+     * vertex scalar in `image`; 0-based triangle indices in
+     * `mesh_tris`.  No depth sort, drawn in mesh order. */
+    TriMesh2D
 };
 
 enum class Scale { Linear, Log };

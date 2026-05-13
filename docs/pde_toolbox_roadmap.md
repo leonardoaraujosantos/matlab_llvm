@@ -217,6 +217,61 @@ import + unstructured-mesh 3-D rendering.
 `runtime/plot/*.cpp` + Cairo via pkg-config when present, SKIPping
 tests on machines without Cairo.
 
+#### Sparse linalg + volumetric meshing + 2-D plotting (shipped 2026-05-13, third arc)
+
+Closes the three §10 critical-path follow-ups from the prior arc.
+
+**Sparse matrices (§10.1)** — `runtime/runtime_sparse.cpp`:
+- `matlab_sparse_mat` CSR descriptor with `0xC0FFEE05` magic for
+  polymorphic dispatch (same idiom as `matlab_mat_c` / `matlab_mat3`).
+- `sparse(I, J, V, m, n)` triplet constructor with duplicate-summing
+  (FEM scatter idiom); per-row sort + dedupe; compacts to final
+  nnz.  `speye(n)`, `spdiag(S)`, `spfull(S)`, `spnnz` / `sprows` /
+  `spcols` accessors, `sparse_matvec(S, x)`.
+- `pcg(S, b, tol, maxit)` preconditioned conjugate gradient on
+  SPD systems with Jacobi (diagonal) preconditioner.  Returns a
+  result struct with `Solution`, `Flag` (0=converged, 1=maxit,
+  2=singular), `RelRes`, `Iter`.
+- Triplet-based sparse FEM assembly: `pde_assemble_poisson_2d_sparse`,
+  `pde_assemble_elast_3d_sparse`, plus `pde_apply_dirichlet_sparse`
+  and `pde_apply_fixed_3d_sparse` that rewrite triplets to enforce
+  fixed DOFs.
+
+Gating: `pde_poisson_sparse.m` recovers identical u(0.5,0.5) = 0.0735
+to the dense path on a 21×21 grid; K compresses from 441² dense
+entries to 2457 nnz (~79× memory saving); PCG converges in 39
+iterations at tol=1e-10.
+
+**Volumetric voxel-mesher (§10.4 follow-up)** —
+`matlab_pde_voxelize_surface(surface, voxel_size)`:
+- AABB computation + uniform Nx × Ny × Nz hex grid.
+- Per-cell ray-cast inside test in +x via Möller-Trumbore against
+  every surface triangle.  Odd intersection count → inside.
+- Kept cells split into 6 tets (Kuhn diagonal decomposition, same
+  as `multicuboid`).
+- Boundary triangles recovered from inside-vs-outside neighbour
+  testing; face_id assigned by dominant outward axis (1=-z … 6=+x).
+
+Gating: `examples/pde/antenna_glb_fem.m` loads
+`/Users/leonardoaraujo/Downloads/antenna_5g.glb` (14 594 vertices,
+10 123 triangles → 4 613 unique nodes after welding), voxelizes at
+voxel_size=0.05 → 494 nodes / 696 tets / 940 boundary faces.
+Sparse 3-D linear elasticity assembly (34 128 nnz), PCG converges
+in 195 iterations.  PNG render shows the voxelized antenna with
+stress concentration patterns.
+
+**2-D pdeplot painter (§10.2 follow-up)** — new `SeriesKind::TriMesh2D`
+in `runtime/plot/figure.h` + companion `draw_trimesh2d_series` in
+`runtime/plot/cairo_render.cpp`.  Reuses Cairo + colormap LUT;
+per-triangle flat fill with mean-of-vertex value, no Painter's
+depth sort needed in 2-D.  Wired as `matlab_pdeplot(nodes,
+triangles, nodal_data)` C-API + Sema builtin `pdeplot` + LowerPlot
+dispatch.
+
+Gating: `pde_poisson_plot.m` solves the 21×21 Poisson sparsely +
+renders the smooth yellow-centre / blue-boundary radial map at
+`/tmp/pde_poisson.png`.
+
 #### Architectural simplifications taken (deliberate)
 
 These are spelled out so future contributors don't re-pay the design cost:

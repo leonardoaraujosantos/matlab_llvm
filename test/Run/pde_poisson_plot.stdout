@@ -1,0 +1,6 @@
+PDE 2-D pdeplot: -Lap(u) = 1 on [0,1]^2
+  nodes:                441
+  triangles:            800
+  PCG iters:            39
+  u(0.5, 0.5):          0.0735
+  rendered:             /tmp/pde_poisson.png

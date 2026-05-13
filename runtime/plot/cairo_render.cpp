@@ -999,6 +999,55 @@ void draw_grid_series(cairo_t *cr, const Series &s, const Proj3 &P,
     }
 }
 
+/* TriMesh2D — 2-D unstructured triangle mesh painter for pdeplot.
+ *
+ * Reads per-vertex (x, y) from s.x, s.y; 0-based 3-per-tri indices
+ * from s.mesh_tris; per-vertex scalar from s.image or per-face from
+ * s.face_data.  No depth sort needed in 2-D; we just draw triangles
+ * in mesh order. */
+void draw_trimesh2d_series(cairo_t *cr, const Series &s,
+                            double (*mx)(double, void *),
+                            double (*my)(double, void *),
+                            void *ctx,
+                            Colormap cm,
+                            double cmap_lo, double cmap_hi) {
+    const size_t Nn = std::min(s.x.size(), s.y.size());
+    const size_t Nt = s.mesh_tris.size() / 3;
+    if (Nn < 3 || Nt < 1) return;
+
+    bool per_face   = s.face_data.size() == Nt;
+    bool per_vertex = s.image.size() == Nn;
+    double range = (cmap_hi > cmap_lo) ? (cmap_hi - cmap_lo) : 1.0;
+
+    cairo_set_line_width(cr, 0.3);
+    for (size_t t = 0; t < Nt; ++t) {
+        int a = s.mesh_tris[t * 3 + 0];
+        int b = s.mesh_tris[t * 3 + 1];
+        int c = s.mesh_tris[t * 3 + 2];
+        double cval;
+        if (per_face) {
+            cval = s.face_data[t];
+        } else if (per_vertex) {
+            cval = (s.image[(size_t)a] + s.image[(size_t)b] +
+                     s.image[(size_t)c]) / 3.0;
+        } else {
+            cval = (s.x[(size_t)a] + s.x[(size_t)b] + s.x[(size_t)c]) / 3.0;
+        }
+        double tnorm = (cval - cmap_lo) / range;
+        if (tnorm < 0) tnorm = 0; if (tnorm > 1) tnorm = 1;
+        float fr, fg, fb;
+        cmap_eval(cm, tnorm, fr, fg, fb);
+        cairo_set_source_rgb(cr, fr, fg, fb);
+        cairo_move_to(cr, mx(s.x[(size_t)a], ctx), my(s.y[(size_t)a], ctx));
+        cairo_line_to(cr, mx(s.x[(size_t)b], ctx), my(s.y[(size_t)b], ctx));
+        cairo_line_to(cr, mx(s.x[(size_t)c], ctx), my(s.y[(size_t)c], ctx));
+        cairo_close_path(cr);
+        cairo_fill_preserve(cr);
+        cairo_set_source_rgba(cr, 0, 0, 0, 0.15);
+        cairo_stroke(cr);
+    }
+}
+
 /* TriMesh3D rendering for pdeplot3D.
  *
  *   - Per-vertex world coordinates in s.x / s.y / s.z (length Nn).
@@ -1382,6 +1431,24 @@ void draw_axes(cairo_t *cr, const Axes &ax,
             case SeriesKind::Quiver:
                 draw_quiver_series(cr, s, map_x, map_y, active);
                 break;
+            case SeriesKind::TriMesh2D: {
+                /* Compute colormap range from per-vertex or per-face data. */
+                double lo, hi;
+                if (!s.face_data.empty()) {
+                    lo =  std::numeric_limits<double>::infinity();
+                    hi = -std::numeric_limits<double>::infinity();
+                    for (double v : s.face_data) { lo = std::min(lo, v); hi = std::max(hi, v); }
+                } else if (!s.image.empty()) {
+                    lo =  std::numeric_limits<double>::infinity();
+                    hi = -std::numeric_limits<double>::infinity();
+                    for (double v : s.image) { lo = std::min(lo, v); hi = std::max(hi, v); }
+                } else {
+                    lo = ctx.x_lo; hi = ctx.x_hi;
+                }
+                if (!std::isfinite(lo) || lo == hi) { lo = 0; hi = 1; }
+                draw_trimesh2d_series(cr, s, map_x, map_y, active, ax.cmap, lo, hi);
+                break;
+            }
             /* 3-D series belong on a 3-D axes; ignore in the 2-D path. */
             case SeriesKind::Line3D:
             case SeriesKind::Mesh:

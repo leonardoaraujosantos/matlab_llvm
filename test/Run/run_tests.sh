@@ -26,6 +26,7 @@ RUNTIME_SRCS=(
   "$ROOT/runtime/runtime_prop.cpp"
   "$ROOT/runtime/runtime_rf.cpp"
   "$ROOT/runtime/runtime_pde.cpp"
+  "$ROOT/runtime/runtime_sparse.cpp"
 )
 CXX="${CXX:-${CLANG}++}"
 TESTDIR="$(cd "$(dirname "$0")" && pwd)"

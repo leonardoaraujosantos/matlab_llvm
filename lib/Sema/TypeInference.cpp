@@ -1174,7 +1174,10 @@ const Type *TypeInference::visitBuiltinCall(std::string_view Name,
    * The one scalar return is pde_peak_disp_3d. */
   if (Name == "pde_peak_disp_3d" ||
       Name == "pde_result_num_iters" || Name == "pde_result_resid" ||
-      Name == "pde_save_stl")
+      Name == "pde_save_stl" ||
+      Name == "spnnz" || Name == "sprows" || Name == "spcols" ||
+      Name == "pcg_flag" ||
+      Name == "pcg_relres" || Name == "pcg_iter")
     return TC.scalar(Dtype::Double);
   if (Name == "pde_mesh_rect_tri" || Name == "pde_boundary_nodes_rect" ||
       Name == "pde_assemble_poisson_2d" || Name == "pde_apply_dirichlet" ||
@@ -1188,7 +1191,16 @@ const Type *TypeInference::visitBuiltinCall(std::string_view Name,
       Name == "pde_assemble_transient_2d" || Name == "pde_eigsmall" ||
       Name == "pde_step_forward_euler_2d" || Name == "pde_init_uniform_2d" ||
       Name == "pde_solve_nonlinear_2d" || Name == "pde_result_solution" ||
-      Name == "pde_load_stl" || Name == "pde_load_glb")
+      Name == "pde_load_stl" || Name == "pde_load_glb" ||
+      Name == "sparse" || Name == "speye" || Name == "spdiag" ||
+      Name == "sparse_matvec" || Name == "spfull" ||
+      Name == "pcg" || Name == "pcg_x" ||
+      Name == "pde_assemble_poisson_2d_sparse" ||
+      Name == "pde_apply_dirichlet_sparse" ||
+      Name == "pde_assemble_elast_3d_sparse" ||
+      Name == "pde_apply_fixed_3d_sparse" ||
+      Name == "pde_sys_K_sparse" ||
+      Name == "pde_voxelize_surface")
     return TC.arrayOf(Dtype::Double, Shape::unknown());
 
   if (Name == "linspace") {
