@@ -1,0 +1,5 @@
+PDE Tier-4: -div(c(u)*grad u) = 1, c(u) = 1 + 5*u^2
+  mesh:               21 x 21 (441 nodes, 800 tris)
+  Picard iters:       4
+  u(0.5, 0.5):        0.0729
+  linear u(0.5,0.5):  0.0737  (alpha = 0 baseline)

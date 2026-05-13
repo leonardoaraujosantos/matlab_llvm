@@ -10,7 +10,13 @@ namespace matlab_plot {
 
 enum class SeriesKind {
     Line, Scatter, Bar, Image, Contour, ErrorBar, Stem, Stairs, Area,
-    Line3D, Mesh, Surf, Quiver
+    Line3D, Mesh, Surf, Quiver,
+    /* TriMesh3D — unstructured 3D triangle mesh, for pdeplot3D /
+     * STL / GLB visualisation.  Node coordinates live in x, y, z;
+     * per-vertex scalar in `image`; 0-based triangle indices (3 per
+     * triangle) in `mesh_tris`; per-vertex deformation in u, v, plus
+     * a third axis stored in `e_pos` (the existing 3rd scalar slot). */
+    TriMesh3D
 };
 
 enum class Scale { Linear, Log };
@@ -54,6 +60,18 @@ struct Series {
     std::string display_name;  /* legend label override */
     /* yyaxis: which y-axis this series is bound to. */
     bool on_right_axis = false;
+    /* TriMesh3D series: 0-based triangle indices, 3 ints per triangle. */
+    std::vector<int> mesh_tris;
+    /* TriMesh3D deformation: per-vertex displacement vector (uz column
+     * stored in mesh_dz; ux/uy reuse u/v).  Scale factor applied
+     * pre-projection. */
+    std::vector<double> mesh_dz;
+    double deform_scale = 1.0;
+    /* TriMesh3D: a per-face value override.  If non-empty, used for
+     * colormap lookup per triangle (Gouraud shading not applied).
+     * Otherwise the painter uses the per-vertex `image` for Gouraud
+     * shading. */
+    std::vector<double> face_data;
 };
 
 struct TextAnnotation {

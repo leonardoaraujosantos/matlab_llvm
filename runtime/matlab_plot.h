@@ -89,6 +89,26 @@ void matlab_zlabel(const char *s, int64_t n);
 void matlab_surf1(matlab_mat *Z);
 void matlab_surf3(matlab_mat *X, matlab_mat *Y, matlab_mat *Z);
 
+/* pdeplot3D(nodes, triangles, nodal_data) — Unstructured 3-D
+ * triangle-mesh painter for FEM / STL / GLB visualisation.
+ *
+ *   nodes      : Nn × 3 — x, y, z per vertex.
+ *   triangles  : Nt × 3 (or Nt × 4 with a face_id column at column 0,
+ *                 matching the runtime_pde Faces convention) — 1-based
+ *                 vertex indices per triangle.
+ *   nodal_data : either Nn × 1 (per-vertex scalar, Gouraud-shaded) or
+ *                 Nt × 1 (per-face scalar) or NULL (depth tint only).
+ *
+ * Optional companions set the deformation field + scale factor before
+ * the next pdeplot3D call:
+ *   pdeplot3d_deformation(disp_Nx3)  — Nn × 3 displacement.
+ *   pdeplot3d_deform_scale(s)        — multiplier (default 1).
+ */
+void matlab_pdeplot3d(matlab_mat *nodes, matlab_mat *triangles,
+                      matlab_mat *nodal_data);
+void matlab_pdeplot3d_deformation(matlab_mat *disp);
+void matlab_pdeplot3d_deform_scale(double s);
+
 /* mesh(Z) / mesh(X, Y, Z) — wireframe surface (edges only, no fill). */
 void matlab_mesh1(matlab_mat *Z);
 void matlab_mesh3(matlab_mat *X, matlab_mat *Y, matlab_mat *Z);

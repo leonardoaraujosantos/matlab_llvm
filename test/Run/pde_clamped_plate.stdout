@@ -1,0 +1,8 @@
+PDE Tier-2: cantilever 0.5m x 50mm x 50mm steel beam
+  mesh:                 10 x 2 x 2 hex (99 nodes, 240 tets)
+  E = 200 GPa, nu = 0.3
+  load:                 100 kPa pressure on top face
+  fixed dofs:           9 nodes on root face
+  peak displacement:    135 microns
+  K rows:               297
+  vM count:             240

@@ -287,7 +287,7 @@ See [`docs/ode.md`](ode.md) for the full surface, ABI notes, and call shapes.
 | BVP (`bvp4c`, `bvp5c`), DDE (`dde23`) | ❌ | |
 | `pdepe` — 1-D parabolic-elliptic PDE via method-of-lines | ✅ | Cartesian / cylindrical / spherical (`m = 0, 1, 2`); Dirichlet, Neumann, Robin BCs; non-uniform mesh; scalar PDE. Wraps `ode23s_v` for stiff time integration. Output `sol` is N_t × N_x. See [`ode.md`](ode.md). |
 | `pdepe` extensions — multi-component systems (`npde > 1`); axis-of-symmetry `xmesh(1) = 0` for `m > 0`; `odeset` plumbed through | ❌ | Tracked in roadmap. |
-| 2-D / 3-D FEM (`createpde`, mesh generation, `solvepde`) | ❌ | Multi-month scope. |
+| 2-D / 3-D FEM (`createpde`, `femodel`, `multicuboid`, mesh generation, `solvepde`, `solve`, `pdeplot3D`, `VonMisesStress`, …) | ❌ | Tracked in [`pde_toolbox_roadmap.md`](pde_toolbox_roadmap.md). Gating example is [`examples/pde/wind_stress_3d.m`](../examples/pde/wind_stress_3d.m) — 3-D model under 250 km/h aerodynamic wind pressure with a von Mises stress map. Critical-path prerequisites: sparse matrices, 2-D + 3-D mesher, STL importer, unstructured-mesh plotting. ~8 wk to the headline demo. |
 | Symbolic `pdsolve` family (closed-form heat / wave / 1st-order linear) | ✅ | In symbolic toolbox — see [`sym.md`](sym.md). |
 
 ### Indexing / search

@@ -25,6 +25,7 @@ RUNTIME_SRCS=(
   "$ROOT/runtime/runtime_comm.cpp"
   "$ROOT/runtime/runtime_prop.cpp"
   "$ROOT/runtime/runtime_rf.cpp"
+  "$ROOT/runtime/runtime_pde.cpp"
 )
 CXX="${CXX:-${CLANG}++}"
 TESTDIR="$(cd "$(dirname "$0")" && pwd)"
@@ -45,7 +46,40 @@ for m in "$TESTDIR"/*.m; do
     fail=$((fail+1))
     rm -f "$tmpll" "$tmpbin"; continue
   fi
-  if ! "$CXX" -Wno-override-module "$tmpll" "${RUNTIME_SRCS[@]}" -I"$ROOT/runtime" -o "$tmpbin" 2>/dev/null; then
+  # Per-test opt-in for the Cairo plot runtime.  When a
+  # `<name>.requires-plot` marker exists, also link runtime/plot/*.cpp
+  # and the cairo pkg-config libs.  Without it the test gets a
+  # plot-free link line (smaller, no Cairo dep), matching the rest of
+  # the harness.  If the marker is present but pkg-config can't find
+  # cairo, SKIP the test rather than fail.
+  plot_srcs=()
+  plot_cflags=()
+  plot_libs=()
+  if [[ -e "${m%.m}.requires-plot" ]]; then
+    if ! command -v pkg-config >/dev/null 2>&1 || \
+       ! pkg-config --exists cairo cairo-svg cairo-pdf 2>/dev/null; then
+      echo "SKIP $base (requires-plot, no cairo)"
+      rm -f "$tmpll" "$tmpbin"; continue
+    fi
+    plot_srcs=(
+      "$ROOT/runtime/plot/c_api.cpp"
+      "$ROOT/runtime/plot/cairo_render.cpp"
+      "$ROOT/runtime/plot/colormap.cpp"
+      "$ROOT/runtime/plot/contour.cpp"
+      "$ROOT/runtime/plot/figure.cpp"
+    )
+    # shellcheck disable=SC2207
+    plot_cflags=( $(pkg-config --cflags cairo cairo-svg cairo-pdf) )
+    # shellcheck disable=SC2207
+    plot_libs=( $(pkg-config --libs cairo cairo-svg cairo-pdf) )
+  fi
+  if ! "$CXX" -DMATLAB_LLVM_WITH_PLOT=1 -Wno-override-module "$tmpll" \
+              "${RUNTIME_SRCS[@]}" \
+              ${plot_srcs[@]+"${plot_srcs[@]}"} \
+              -I"$ROOT/runtime" \
+              ${plot_cflags[@]+"${plot_cflags[@]}"} \
+              ${plot_libs[@]+"${plot_libs[@]}"} \
+              -o "$tmpbin" 2>/dev/null; then
     echo "FAIL $base: clang link failed"
     fail=$((fail+1))
     rm -f "$tmpll" "$tmpbin"; continue

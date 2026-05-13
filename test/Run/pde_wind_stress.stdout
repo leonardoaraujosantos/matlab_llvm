@@ -1,0 +1,8 @@
+PDE Tier-2 HEADLINE: 3m x 50mm x 2m sign-panel, 250 km/h wind
+  dynamic pressure:     2954 Pa
+  effective pressure:   3545 Pa
+  mesh:                 12 x 1 x 8 hex (234 nodes, 576 tets)
+  fixed dofs:           18 nodes on x=0 face
+  log10(peak displ):    -4
+  log10(peak vM Pa):    6
+  yield (S275):         275 MPa => log10 = 8

@@ -999,6 +999,128 @@ void draw_grid_series(cairo_t *cr, const Series &s, const Proj3 &P,
     }
 }
 
+/* TriMesh3D rendering for pdeplot3D.
+ *
+ *   - Per-vertex world coordinates in s.x / s.y / s.z (length Nn).
+ *   - 0-based triangle indices, 3 per triangle, in s.mesh_tris.
+ *   - Per-vertex scalar in s.image (length Nn → Gouraud) OR per-face
+ *     scalar in s.face_data (length Nt → flat fill).
+ *   - Optional deformation in s.u / s.v / s.mesh_dz, scaled by
+ *     s.deform_scale (applied before projection).
+ *
+ * Painter's algorithm: project every vertex once, sort triangles by
+ * centroid depth (back-to-front), then fill each.  Light-direction
+ * Lambertian shading multiplies the colormap RGB by max(0.4, n·l).
+ *
+ * For per-vertex data + Gouraud shading we approximate with the
+ * triangle-mean of the three vertex values — Cairo doesn't have a
+ * native gradient triangle paint without a mesh-gradient, so flat
+ * shading is good enough for visualising FEM fields at moderate mesh
+ * sizes.
+ */
+void draw_trimesh3d_series(cairo_t *cr, const Series &s, const Proj3 &P,
+                            Colormap cm, double cmap_lo, double cmap_hi) {
+    const size_t Nn = std::min({s.x.size(), s.y.size(), s.z.size()});
+    const size_t Nt = s.mesh_tris.size() / 3;
+    if (Nn < 3 || Nt < 1) return;
+
+    bool have_deformation = s.u.size() == Nn &&
+                            s.v.size() == Nn &&
+                            s.mesh_dz.size() == Nn;
+    double ds = have_deformation ? s.deform_scale : 0.0;
+
+    /* Project every vertex once.  Apply deformation (if any) first. */
+    std::vector<double> sx(Nn), sy(Nn), dep(Nn);
+    for (size_t i = 0; i < Nn; ++i) {
+        double x = s.x[i], y = s.y[i], z = s.z[i];
+        if (have_deformation) {
+            x += ds * s.u[i];
+            y += ds * s.v[i];
+            z += ds * s.mesh_dz[i];
+        }
+        project(P, x, y, z, sx[i], sy[i], dep[i]);
+    }
+
+    struct Tri {
+        int a, b, c;
+        double depth;
+        double cval;     /* colormap value */
+    };
+    std::vector<Tri> tris;
+    tris.reserve(Nt);
+    bool per_face   = s.face_data.size() == Nt;
+    bool per_vertex = s.image.size() == Nn;
+    for (size_t t = 0; t < Nt; ++t) {
+        Tri T;
+        T.a = s.mesh_tris[t * 3 + 0];
+        T.b = s.mesh_tris[t * 3 + 1];
+        T.c = s.mesh_tris[t * 3 + 2];
+        T.depth = (dep[(size_t)T.a] + dep[(size_t)T.b] + dep[(size_t)T.c]) / 3.0;
+        if (per_face) {
+            T.cval = s.face_data[t];
+        } else if (per_vertex) {
+            T.cval = (s.image[(size_t)T.a] + s.image[(size_t)T.b] +
+                       s.image[(size_t)T.c]) / 3.0;
+        } else {
+            /* Depth-tint fallback. */
+            T.cval = (s.z[(size_t)T.a] + s.z[(size_t)T.b] + s.z[(size_t)T.c]) / 3.0;
+        }
+        tris.push_back(T);
+    }
+    std::sort(tris.begin(), tris.end(),
+              [](const Tri &p, const Tri &q) { return p.depth > q.depth; });
+
+    /* Determine colormap range from cmap_lo / cmap_hi (typically the
+     * series' min / max, computed by the caller). */
+    double range = (cmap_hi > cmap_lo) ? (cmap_hi - cmap_lo) : 1.0;
+
+    /* Compute a triangle normal from its 3 deformed vertices for
+     * Lambertian shading.  Light direction picked to bring out depth
+     * from the default MATLAB view. */
+    const double Lx = 0.4, Ly = -0.6, Lz = 0.7;
+    const double Lmag = std::sqrt(Lx*Lx + Ly*Ly + Lz*Lz);
+
+    cairo_set_line_width(cr, 0.3);
+    for (const auto &T : tris) {
+        /* World-space normal — using non-projected coordinates that
+         * include deformation. */
+        double xa = s.x[(size_t)T.a], ya = s.y[(size_t)T.a], za = s.z[(size_t)T.a];
+        double xb = s.x[(size_t)T.b], yb = s.y[(size_t)T.b], zb = s.z[(size_t)T.b];
+        double xc = s.x[(size_t)T.c], yc = s.y[(size_t)T.c], zc = s.z[(size_t)T.c];
+        if (have_deformation) {
+            xa += ds * s.u[(size_t)T.a]; ya += ds * s.v[(size_t)T.a]; za += ds * s.mesh_dz[(size_t)T.a];
+            xb += ds * s.u[(size_t)T.b]; yb += ds * s.v[(size_t)T.b]; zb += ds * s.mesh_dz[(size_t)T.b];
+            xc += ds * s.u[(size_t)T.c]; yc += ds * s.v[(size_t)T.c]; zc += ds * s.mesh_dz[(size_t)T.c];
+        }
+        double ex = xb - xa, ey = yb - ya, ez = zb - za;
+        double fx = xc - xa, fy = yc - ya, fz = zc - za;
+        double nx = ey * fz - ez * fy;
+        double ny = ez * fx - ex * fz;
+        double nz = ex * fy - ey * fx;
+        double nmag = std::sqrt(nx*nx + ny*ny + nz*nz);
+        double diff = 1.0;
+        if (nmag > 0) {
+            double dot = (nx * Lx + ny * Ly + nz * Lz) / (nmag * Lmag);
+            if (dot < 0) dot = -dot;  /* light from both sides — show inside too */
+            diff = 0.4 + 0.6 * dot;   /* 40% ambient, 60% directional */
+        }
+
+        double t = (T.cval - cmap_lo) / range;
+        if (t < 0) t = 0; if (t > 1) t = 1;
+        float fr, fg, fb;
+        cmap_eval(cm, t, fr, fg, fb);
+        cairo_set_source_rgba(cr, fr * diff, fg * diff, fb * diff, 1.0);
+
+        cairo_move_to(cr, sx[(size_t)T.a], sy[(size_t)T.a]);
+        cairo_line_to(cr, sx[(size_t)T.b], sy[(size_t)T.b]);
+        cairo_line_to(cr, sx[(size_t)T.c], sy[(size_t)T.c]);
+        cairo_close_path(cr);
+        cairo_fill_preserve(cr);
+        cairo_set_source_rgba(cr, 0, 0, 0, 0.15);
+        cairo_stroke(cr);
+    }
+}
+
 void draw_line3d_series(cairo_t *cr, const Series &s, const Proj3 &P) {
     const size_t n = std::min({s.x.size(), s.y.size(), s.z.size()});
     if (n < 2) return;
@@ -1034,14 +1156,32 @@ void draw_axes_3d(cairo_t *cr, const Axes &ax,
     /* Bounding box first (drawn under the data). */
     if (!ax.axis_off) draw_box_3d(cr, P, x_lo, x_hi, y_lo, y_hi, z_lo, z_hi);
 
-    /* Series — Line3D, Mesh, Surf. Surf/Mesh get drawn first so Line3D
-     * overlays on top. */
+    /* Series — Line3D, Mesh, Surf, TriMesh3D. Surf/Mesh/TriMesh get
+     * drawn first so Line3D overlays on top. */
     cairo_save(cr);
     cairo_rectangle(cr, plot_x, plot_y, plot_w, plot_h);
     cairo_clip(cr);
     for (const auto &s : ax.series) {
         if (s.kind == SeriesKind::Surf || s.kind == SeriesKind::Mesh)
             draw_grid_series(cr, s, P, ax.cmap, z_lo, z_hi);
+        else if (s.kind == SeriesKind::TriMesh3D) {
+            /* TriMesh3D colormap range: per-face data if present, else
+             * per-vertex data, else fall back to z range. */
+            double lo, hi;
+            if (!s.face_data.empty()) {
+                lo =  std::numeric_limits<double>::infinity();
+                hi = -std::numeric_limits<double>::infinity();
+                for (double v : s.face_data) { lo = std::min(lo, v); hi = std::max(hi, v); }
+            } else if (!s.image.empty()) {
+                lo =  std::numeric_limits<double>::infinity();
+                hi = -std::numeric_limits<double>::infinity();
+                for (double v : s.image) { lo = std::min(lo, v); hi = std::max(hi, v); }
+            } else {
+                lo = z_lo; hi = z_hi;
+            }
+            if (!std::isfinite(lo) || lo == hi) { lo = 0; hi = 1; }
+            draw_trimesh3d_series(cr, s, P, ax.cmap, lo, hi);
+        }
     }
     for (const auto &s : ax.series) {
         if (s.kind == SeriesKind::Line3D) draw_line3d_series(cr, s, P);
@@ -1246,6 +1386,7 @@ void draw_axes(cairo_t *cr, const Axes &ax,
             case SeriesKind::Line3D:
             case SeriesKind::Mesh:
             case SeriesKind::Surf:
+            case SeriesKind::TriMesh3D:
                 break;
         }
     }

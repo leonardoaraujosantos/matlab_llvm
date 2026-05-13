@@ -1,0 +1,5 @@
+PDE pdeplot3D: 250 km/h wind on sign-panel
+  nodes / faces:        234 / 464
+  peak displacement:    0.638 mm
+  peak nodal vM:        6.12 MPa
+  rendered:             /tmp/pde_wind.png

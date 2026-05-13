@@ -3773,6 +3773,140 @@ bool TensorLowering::rewriteBuiltinCalls() {
       continue;
     }
 
+    /* === PDE Toolbox — Tier-1 + Tier-2 function-form core. ===
+     *
+     * All entries are single-result, signature-rigid (no overloads at
+     * the runtime ABI). Operand types match the runtime declarations
+     * in runtime/runtime_pde.cpp. See docs/pde_toolbox_roadmap.md. */
+    {
+      struct PDEEntry {
+        const char *name;
+        const char *rt_name;
+        Type result_ty;
+        SmallVector<Type, 6> args;
+      };
+      const SmallVector<PDEEntry, 12> pde_table = {
+        /* Tier-1 (2-D scalar). */
+        {"pde_mesh_rect_tri",      "matlab_pde_mesh_rect_tri",
+         PtrTy, {F64, F64, F64, F64, F64, F64}},
+        {"pde_boundary_nodes_rect","matlab_pde_boundary_nodes_rect",
+         PtrTy, {PtrTy}},
+        {"pde_assemble_poisson_2d","matlab_pde_assemble_poisson_2d",
+         PtrTy, {PtrTy, F64, F64, F64}},
+        {"pde_apply_dirichlet",    "matlab_pde_apply_dirichlet",
+         PtrTy, {PtrTy, PtrTy, F64}},
+        /* Tier-2 (3-D linear elasticity). */
+        {"pde_mesh_cuboid_tet",    "matlab_pde_mesh_cuboid_tet",
+         PtrTy, {F64, F64, F64, F64, F64, F64}},
+        {"pde_face_nodes",         "matlab_pde_face_nodes",
+         PtrTy, {PtrTy, F64}},
+        {"pde_assemble_elast_3d",  "matlab_pde_assemble_elast_3d",
+         PtrTy, {PtrTy, F64, F64}},
+        {"pde_face_pressure_3d",   "matlab_pde_face_pressure_3d",
+         PtrTy, {PtrTy, F64, F64}},
+        {"pde_apply_fixed_3d",     "matlab_pde_apply_fixed_3d",
+         PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"pde_reshape_disp_3d",    "matlab_pde_reshape_disp_3d",
+         PtrTy, {PtrTy}},
+        {"pde_von_mises_3d",       "matlab_pde_von_mises_3d",
+         PtrTy, {PtrTy, PtrTy, F64, F64}},
+        {"pde_node_von_mises_3d",  "matlab_pde_node_von_mises_3d",
+         PtrTy, {PtrTy, PtrTy, F64, F64}},
+        {"pde_peak_disp_3d",       "matlab_pde_peak_disp_3d",
+         F64,   {PtrTy}},
+        /* Struct field accessors (sidestep the f64-default field-access path). */
+        {"pde_sys_K",              "matlab_pde_sys_K",
+         PtrTy, {PtrTy}},
+        {"pde_sys_F",              "matlab_pde_sys_F",
+         PtrTy, {PtrTy}},
+        {"pde_sys_M",              "matlab_pde_sys_M",
+         PtrTy, {PtrTy}},
+        {"pde_mesh_nodes",         "matlab_pde_mesh_nodes",
+         PtrTy, {PtrTy}},
+        {"pde_mesh_triangles",     "matlab_pde_mesh_triangles",
+         PtrTy, {PtrTy}},
+        {"pde_mesh_tets",          "matlab_pde_mesh_tets",
+         PtrTy, {PtrTy}},
+        {"pde_mesh_faces",         "matlab_pde_mesh_faces",
+         PtrTy, {PtrTy}},
+        /* Tier-3 transient + modal. */
+        {"pde_assemble_transient_2d","matlab_pde_assemble_transient_2d",
+         PtrTy, {PtrTy, F64, F64, F64}},
+        {"pde_eigsmall",            "matlab_pde_eigsmall",
+         PtrTy, {PtrTy, PtrTy, F64}},
+        {"pde_step_forward_euler_2d","matlab_pde_step_forward_euler_2d",
+         PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, F64}},
+        {"pde_init_uniform_2d",     "matlab_pde_init_uniform_2d",
+         PtrTy, {PtrTy, F64, PtrTy}},
+        /* Tier-4 nonlinear. */
+        {"pde_solve_nonlinear_2d",  "matlab_pde_solve_nonlinear_2d",
+         PtrTy, {PtrTy, F64, F64, F64, F64}},
+        {"pde_result_solution",     "matlab_pde_result_solution",
+         PtrTy, {PtrTy}},
+        {"pde_result_num_iters",    "matlab_pde_result_num_iters",
+         F64,   {PtrTy}},
+        {"pde_result_resid",        "matlab_pde_result_resid",
+         F64,   {PtrTy}},
+        /* Geometry importers — single matlab_string* arg. */
+        {"pde_load_stl",            "matlab_pde_load_stl",
+         PtrTy, {PtrTy}},
+        {"pde_load_glb",            "matlab_pde_load_glb",
+         PtrTy, {PtrTy}},
+        {"pde_save_stl",            "matlab_pde_save_stl",
+         F64,   {PtrTy, PtrTy}},
+      };
+      bool matched = false;
+      for (const auto &E : pde_table) {
+        if (Name != E.name) continue;
+        if ((size_t)Call->getNumOperands() != E.args.size()) break;
+        if (Call->getNumResults() != 1) break;
+        /* Loose match: PtrTy expected operands also accept tensor types
+         * (the operand has come from a builtin whose type-inference
+         * stamp is Array — still a runtime ptr at LLVM level).  We
+         * insert an llvm.bitcast-style coercion via a no-op transfer
+         * since llvm.ptr and tensor share the underlying ptr ABI. */
+        bool ok = true;
+        SmallVector<Value, 6> coerced;
+        for (size_t k = 0; k < E.args.size(); ++k) {
+          Value V = Call->getOperand(k);
+          Type WantTy = E.args[k];
+          if (V.getType() == WantTy) {
+            coerced.push_back(V);
+          } else if (WantTy == PtrTy && isTensorLike(V.getType())) {
+            /* Tensor → ptr: the underlying value is already an
+             * llvm.ptr in the runtime ABI.  Emit an
+             * llvm.bitcast-style passthrough via builtin.unrealized
+             * conversion cast (a marker the LLVM lowering accepts as
+             * a noop when the runtime pointer types line up). */
+            B.setInsertionPoint(Call);
+            auto Cast = mlir::UnrealizedConversionCastOp::create(
+                B, Call->getLoc(), PtrTy, V);
+            coerced.push_back(Cast.getResult(0));
+          } else {
+            ok = false; break;
+          }
+        }
+        if (!ok) break;
+        B.setInsertionPoint(Call);
+        auto Fn = rt(E.rt_name, E.result_ty, E.args);
+        auto C0 = LLVM::CallOp::create(B, Call->getLoc(), Fn, coerced);
+        /* Replace the call's result with the new llvm.call result.
+         * The original result type may be tensor while the new is ptr;
+         * downstream uses (stores into tensor slots, loads with tensor
+         * result type) accept the type mismatch because matlab.alloc /
+         * load / store are unregistered ops with no operand-type
+         * verification.  On the next iteration of the fixpoint,
+         * retypeMatrixSlots sees ptr-typed stores and retypes the
+         * slots to llvm.alloca, fixing up the loads too. */
+        Call->getResult(0).replaceAllUsesWith(C0.getResult());
+        Call->erase();
+        Changed = true;
+        matched = true;
+        break;
+      }
+      if (matched) continue;
+    }
+
     /* Vector-y form: y0 is a ptr (matrix) instead of f64. Routes to the
      * matlab_ode{45,23}_v_* runtime entries which take a matrix RHS. */
     if (NA && (NA.getValue().getSExtValue() == 2 ||

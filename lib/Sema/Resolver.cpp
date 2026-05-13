@@ -199,6 +199,29 @@ void Resolver::registerBuiltins() {
      * parabolic-elliptic PDE solver via method-of-lines (uses
      * ode23s under the hood). */
     "ode45", "ode23", "ode23s", "ode_events", "pdepe",
+    /* Partial Differential Equation Toolbox — see docs/pde_toolbox_roadmap.md.
+     * Function-form numeric core; the MATLAB-side createpde/femodel
+     * wrappers (Tier-3 polish) layer kwarg sugar on top. */
+    "pde_mesh_rect_tri", "pde_boundary_nodes_rect",
+    "pde_assemble_poisson_2d", "pde_apply_dirichlet",
+    "pde_mesh_cuboid_tet", "pde_face_nodes",
+    "pde_assemble_elast_3d", "pde_face_pressure_3d",
+    "pde_apply_fixed_3d", "pde_reshape_disp_3d",
+    "pde_von_mises_3d", "pde_node_von_mises_3d", "pde_peak_disp_3d",
+    "pde_sys_K", "pde_sys_F", "pde_sys_M",
+    "pde_mesh_nodes", "pde_mesh_triangles",
+    "pde_mesh_tets", "pde_mesh_faces",
+    /* Tier-3 transient + modal. */
+    "pde_assemble_transient_2d", "pde_eigsmall",
+    "pde_step_forward_euler_2d", "pde_init_uniform_2d",
+    /* Tier-4 nonlinear. */
+    "pde_solve_nonlinear_2d", "pde_result_solution",
+    "pde_result_num_iters", "pde_result_resid",
+    /* PDE geometry importers (STL ASCII + binary, GLB / glTF 2.0). */
+    "pde_load_stl", "pde_load_glb", "pde_save_stl",
+    /* pdeplot3D rendering — Cairo unstructured-mesh painter. */
+    "pdeplot3d", "pdeplot3D",
+    "pdeplot3d_deformation", "pdeplot3d_deform_scale",
     "nargin", "nargout", "varargin", "varargout",
     "fopen", "fclose", "fgetl", "feof",
     "fread", "fwrite",

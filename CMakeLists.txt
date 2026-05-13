@@ -265,7 +265,8 @@ if(MATLAB_LLVM_WITH_MLIR)
     runtime/runtime_complex.cpp
     runtime/runtime_prop.cpp
     runtime/runtime_comm.cpp
-    runtime/runtime_rf.cpp)
+    runtime/runtime_rf.cpp
+    runtime/runtime_pde.cpp)
   if(MATLAB_LLVM_WITH_SYM)
     target_sources(matlabc PRIVATE runtime/runtime_sym.cpp)
     target_link_libraries(matlabc PRIVATE SymPP::sympp)
@@ -302,7 +303,7 @@ enable_testing()
 # Direct C tests for runtime/matlab_runtime.c — no JIT, no MATLAB
 # frontend. Each test_*.c links the runtime TU directly. See
 # docs/port_runtime_2_cpp.md (Phase 1).
-foreach(_rt_test IN ITEMS linalg shape rng complex reduce signal stats image more fft struct_cell fi elementwise unary fi_arrays int_arrays strings ode)
+foreach(_rt_test IN ITEMS linalg shape rng complex reduce signal stats image more fft struct_cell fi elementwise unary fi_arrays int_arrays strings ode pde pde_io)
   set(_rt_target "runtime-test-${_rt_test}")
   add_executable(${_rt_target}
     test/Runtime/test_${_rt_test}.c
@@ -311,7 +312,8 @@ foreach(_rt_test IN ITEMS linalg shape rng complex reduce signal stats image mor
     runtime/runtime_complex.cpp
     runtime/runtime_prop.cpp
     runtime/runtime_comm.cpp
-    runtime/runtime_rf.cpp)
+    runtime/runtime_rf.cpp
+    runtime/runtime_pde.cpp)
   target_include_directories(${_rt_target} PRIVATE
     ${CMAKE_SOURCE_DIR}/runtime
     ${CMAKE_SOURCE_DIR}/test/Runtime)
@@ -335,6 +337,7 @@ if(MATLAB_LLVM_WITH_PLOT)
       runtime/runtime_prop.cpp
       runtime/runtime_comm.cpp
       runtime/runtime_rf.cpp
+      runtime/runtime_pde.cpp
       ${MATLAB_PLOT_SOURCES})
     target_include_directories(${_plot_target} PRIVATE
       ${CMAKE_SOURCE_DIR}/runtime)

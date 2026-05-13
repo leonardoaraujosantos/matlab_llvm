@@ -133,6 +133,9 @@ const llvm::StringSet<> &plotBuiltins() {
     "grid", "hold", "axis", "box", "xlim", "ylim", "view",
     "loglog", "semilogx", "semilogy",
     "subplot", "saveas", "print",
+    /* pdeplot3D — unstructured 3-D triangle-mesh painter. */
+    "pdeplot3d", "pdeplot3D",
+    "pdeplot3d_deformation", "pdeplot3d_deform_scale",
   };
   return S;
 }
@@ -651,6 +654,30 @@ bool rewriteCallee(Operation *Op, StringRef Callee, Helper &H,
     if (N == 1) return rewriteMatArgs(Op, H, "matlab_mesh1", 1);
     if (N == 3) return rewriteMatArgs(Op, H, "matlab_mesh3", 3);
     return false;
+  }
+
+  /* pdeplot3D — accepts (nodes, triangles) or (nodes, triangles, data).
+   * Lower-case `pdeplot3d` alias kept for ergonomics. */
+  if (Callee == "pdeplot3d" || Callee == "pdeplot3D") {
+    if (N == 2) {
+      H.B.setInsertionPoint(Op);
+      /* Pass a NULL data pointer when no colour vector is supplied. */
+      auto NullPtr = mlir::LLVM::ZeroOp::create(H.B, L, H.PtrTy);
+      H.callVoid(L, "matlab_pdeplot3d", {H.PtrTy, H.PtrTy, H.PtrTy},
+                 {Op->getOperand(0), Op->getOperand(1), NullPtr.getRes()});
+      return true;
+    }
+    if (N == 3) return rewriteMatArgs(Op, H, "matlab_pdeplot3d", 3);
+    return false;
+  }
+  if (Callee == "pdeplot3d_deformation" && N == 1)
+    return rewriteMatArgs(Op, H, "matlab_pdeplot3d_deformation", 1);
+  if (Callee == "pdeplot3d_deform_scale" && N == 1) {
+    /* Scalar f64 arg → matlab_pdeplot3d_deform_scale(double). */
+    H.B.setInsertionPoint(Op);
+    H.callVoid(L, "matlab_pdeplot3d_deform_scale",
+               {H.F64}, {Op->getOperand(0)});
+    return true;
   }
 
   // plot3(x, y, z) / plot3(x, y, z, 'fmt')

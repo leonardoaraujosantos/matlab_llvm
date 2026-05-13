@@ -1,0 +1,5 @@
+PDE Tier-3: heat eq u_t = Lap(u), u=0 on bnd, u(x,y,0)=1
+  mesh:                 11 x 11 (121 nodes, 200 tris)
+  dt = 5e-4, steps = 400, total t = 0.2
+  u_center(t=0.0) = 1.0000
+  u_center(t=0.2) = 0.0312

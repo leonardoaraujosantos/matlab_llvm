@@ -1168,6 +1168,29 @@ const Type *TypeInference::visitBuiltinCall(std::string_view Name,
       Name == "turboEncode" || Name == "turboDecode")
     return TC.arrayOf(Dtype::Double, Shape::unknown());
 
+  /* Partial Differential Equation Toolbox — see
+   * docs/pde_toolbox_roadmap.md.  All return either a struct (typed as
+   * Array of Double so the struct ptr lowers to !llvm.ptr) or a matrix.
+   * The one scalar return is pde_peak_disp_3d. */
+  if (Name == "pde_peak_disp_3d" ||
+      Name == "pde_result_num_iters" || Name == "pde_result_resid" ||
+      Name == "pde_save_stl")
+    return TC.scalar(Dtype::Double);
+  if (Name == "pde_mesh_rect_tri" || Name == "pde_boundary_nodes_rect" ||
+      Name == "pde_assemble_poisson_2d" || Name == "pde_apply_dirichlet" ||
+      Name == "pde_mesh_cuboid_tet" || Name == "pde_face_nodes" ||
+      Name == "pde_assemble_elast_3d" || Name == "pde_face_pressure_3d" ||
+      Name == "pde_apply_fixed_3d" || Name == "pde_reshape_disp_3d" ||
+      Name == "pde_von_mises_3d" || Name == "pde_node_von_mises_3d" ||
+      Name == "pde_sys_K" || Name == "pde_sys_F" || Name == "pde_sys_M" ||
+      Name == "pde_mesh_nodes" || Name == "pde_mesh_triangles" ||
+      Name == "pde_mesh_tets" || Name == "pde_mesh_faces" ||
+      Name == "pde_assemble_transient_2d" || Name == "pde_eigsmall" ||
+      Name == "pde_step_forward_euler_2d" || Name == "pde_init_uniform_2d" ||
+      Name == "pde_solve_nonlinear_2d" || Name == "pde_result_solution" ||
+      Name == "pde_load_stl" || Name == "pde_load_glb")
+    return TC.arrayOf(Dtype::Double, Shape::unknown());
+
   if (Name == "linspace") {
     int64_t N = -1;
     if (Args.size() >= 3) N = foldInt(Args[2]);

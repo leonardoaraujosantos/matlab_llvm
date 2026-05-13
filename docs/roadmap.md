@@ -563,6 +563,39 @@ toolbox.
 
 ---
 
+### 15. Partial Differential Equation Toolbox 🔵
+
+Per-toolbox roadmap at
+[`pde_toolbox_roadmap.md`](pde_toolbox_roadmap.md).  Closes the 2-D
+and 3-D FEM workflow on top of the existing `pdepe` 1-D MOL surface:
+`createpde` / `femodel` → geometry (DG / `multicuboid` / STL) → tet
+mesher → linear-elasticity / thermal / EM assembly → sparse solve →
+post-processing (`VonMisesStress`, `interpolateStress`,
+`pdeplot3D`).
+
+The **headline gating example** is
+[`examples/pde/wind_stress_3d.m`](../examples/pde/wind_stress_3d.m) —
+a 3-D model under 250 km/h aerodynamic wind pressure with a von
+Mises stress map on the deformed shape.  Closing that example
+end-to-end (compile → JIT → execute → REPL inspect → PNG out)
+closes PDE-Tier-2.
+
+**Critical-path prerequisites** (each is its own sub-project; see
+§10 of the per-toolbox doc):
+- Sparse matrices (`matlab_mat_sparse`, sparse `\`, Krylov suite) —
+  unblocks every tier (1 wk).
+- 2-D + 3-D mesher (Delaunay-of-Bowyer-Watson in-tree; optional
+  `MATLAB_LLVM_WITH_TETGEN=ON` for production meshes) (2 wk).
+- STL importer (~2 sessions, lets users bring their own 3-D model).
+- Unstructured-mesh plotting (`trisurf2d` / `trisurf3d` painters in
+  `runtime/plot/`) (1 wk).
+
+**Effort.** ~8 wk to the wind-stress demo (6 wk infrastructure +
+2 wk PDE-specific assembly).  Tiers 3+ (transient / modal / thermal
+/ EM / nonlinear / ROM) add ~6 wk on top.
+
+---
+
 ## What's intentionally NOT on the roadmap
 
 - **Full MATLAB language compatibility.** Pursuing this leads to

@@ -268,6 +268,87 @@ void ingest_grid_xyz(matlab_mat *X, matlab_mat *Y, matlab_mat *Z, Series &s) {
 }
 }  // namespace
 
+/* --- pdeplot3D unstructured-mesh painter -------------------------- *
+ *
+ * Stashes the (nodes, triangles, nodal_data) triple in the current
+ * axes as a new TriMesh3D series.  Deformation + scale are picked up
+ * from per-thread sticky state.
+ */
+namespace {
+struct Pdeplot3dState {
+    matlab_mat *deformation = nullptr;  /* Nn × 3 displacement */
+    double scale            = 1.0;
+};
+static thread_local Pdeplot3dState g_pdeplot3d;
+}  /* anonymous namespace */
+
+void matlab_pdeplot3d_deformation(matlab_mat *disp) {
+    g_pdeplot3d.deformation = disp;
+}
+void matlab_pdeplot3d_deform_scale(double s) {
+    g_pdeplot3d.scale = s;
+}
+
+void matlab_pdeplot3d(matlab_mat *nodes, matlab_mat *triangles,
+                       matlab_mat *nodal_data) {
+    if (!nodes || nodes->cols != 3 || nodes->rows < 3) return;
+    if (!triangles || triangles->rows < 1) return;
+    auto &ax = matlab_plot::current_axes();
+    Series &s = new_series(ax, SeriesKind::TriMesh3D);
+    s.color_set = true;  /* TriMesh3D never auto-cycles a colour */
+    int64_t Nn = nodes->rows;
+    s.x.resize((size_t)Nn);
+    s.y.resize((size_t)Nn);
+    s.z.resize((size_t)Nn);
+    for (int64_t i = 0; i < Nn; ++i) {
+        s.x[(size_t)i] = nodes->data[i * 3 + 0];
+        s.y[(size_t)i] = nodes->data[i * 3 + 1];
+        s.z[(size_t)i] = nodes->data[i * 3 + 2];
+    }
+    /* Triangle indices: 1-based.  Source layout is either Nt × 3
+     * (n1, n2, n3) or Nt × 4 ([face_id, n1, n2, n3] from STL/GLB
+     * loaders + multicuboid faces). */
+    int64_t Nt = triangles->rows;
+    int idx_off = (triangles->cols == 4) ? 1 : 0;
+    s.mesh_tris.resize((size_t)(Nt * 3));
+    for (int64_t t = 0; t < Nt; ++t) {
+        for (int k = 0; k < 3; ++k) {
+            int64_t v = (int64_t)triangles->data[t * triangles->cols
+                                                  + idx_off + k] - 1;
+            if (v < 0) v = 0;
+            if (v >= Nn) v = Nn - 1;
+            s.mesh_tris[(size_t)(t * 3 + k)] = (int)v;
+        }
+    }
+    /* Nodal data: per-vertex if matches Nn, per-face if matches Nt. */
+    if (nodal_data) {
+        int64_t nd = nodal_data->rows * nodal_data->cols;
+        if (nd == Nn) {
+            s.image.resize((size_t)Nn);
+            for (int64_t i = 0; i < Nn; ++i) s.image[(size_t)i] = nodal_data->data[i];
+        } else if (nd == Nt) {
+            s.face_data.resize((size_t)Nt);
+            for (int64_t i = 0; i < Nt; ++i) s.face_data[(size_t)i] = nodal_data->data[i];
+        }
+    }
+    /* Deformation (sticky state). */
+    if (g_pdeplot3d.deformation &&
+        g_pdeplot3d.deformation->rows == Nn &&
+        g_pdeplot3d.deformation->cols == 3) {
+        s.u.resize((size_t)Nn);
+        s.v.resize((size_t)Nn);
+        s.mesh_dz.resize((size_t)Nn);
+        for (int64_t i = 0; i < Nn; ++i) {
+            s.u[(size_t)i]       = g_pdeplot3d.deformation->data[i * 3 + 0];
+            s.v[(size_t)i]       = g_pdeplot3d.deformation->data[i * 3 + 1];
+            s.mesh_dz[(size_t)i] = g_pdeplot3d.deformation->data[i * 3 + 2];
+        }
+        s.deform_scale = g_pdeplot3d.scale;
+    }
+    ax.is_3d = true;
+    ax.colorbar = true;
+}
+
 void matlab_surf1(matlab_mat *Z) {
     if (!Z || Z->rows < 2 || Z->cols < 2) return;
     auto &ax = matlab_plot::current_axes();
