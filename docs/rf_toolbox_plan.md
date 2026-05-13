@@ -121,9 +121,11 @@ already shipped, what's open, and which lanes are next.
 
 ## Tests on the LLVM lane
 
-The Run/ suite now has **18 RF-specific tests** (rf_*) under
-`test/Run/`.  All pass at the time of writing (274 / 274 total Run/
-tests).  Fixtures: `test/Run/fixtures/rf/test_amp.s2p`,
+The Run/ suite now has **67 RF-specific tests** (rf_*) under
+`test/Run/`, of which 27 are `rf_writeva_*` (the Verilog-A export
+surface from `verilog_a_plan.md` Tiers 1–10).  All pass at the time
+of writing (322 / 322 total Run/ tests).  Fixtures:
+`test/Run/fixtures/rf/test_amp.s2p`,
 `test/Run/fixtures/rf/diff_pair.s4p`.
 
 ## Open — function-form
@@ -139,15 +141,33 @@ that specific polish.
 
 ## Carved out
 - ~~`writeVerilogA` / `rfmodel.rational/writeVA` Verilog-A export.~~
-  **Shipped 2026-05-12** as Tier-1 of
-  [`verilog_a_plan.md`](verilog_a_plan.md).  Runtime entry
-  `writeVerilogA(mdl, filename)` emits a parameterized Verilog-A
-  module with real-pole 1st-order sections + complex-conjugate-pair
-  biquads + `absdelay` wrap.  Tier-2 (`writeVerilogATF` /
-  `writeVerilogAZPK` for continuous filters) and Tier-3
-  (`writeVerilogASS` for state-space) shipped together — closing
-  the export surface for Control System Toolbox `tf`/`zpk`/`ss`
-  and SPT `butter('s')`/`cheby1('s')` returns at no extra cost.
+  **Shipped 2026-05-12 across the full Tier-1 → Tier-10 arc** of
+  [`verilog_a_plan.md`](verilog_a_plan.md):
+  - Tier-1 `writeVerilogA(mdl, filename)` — rationalfit / RFRational
+    → parameterized .va with real-pole 1st-order sections + complex-
+    conjugate-pair biquads + `absdelay` wrap.
+  - Tier-2 `writeVerilogATF` / `writeVerilogAZPK` — continuous tf /
+    zpk filters; closes the Verilog-A export of Control System
+    Toolbox `tf`/`zpk` and SPT `butter('s')`/`cheby1('s')` returns.
+  - Tier-3 `writeVerilogASS` — continuous SISO state-space.
+  - Tier-4 `writeVerilogASource` / `Comparator` / `Schmitt`.
+  - Tier-5 `writeVerilogAVCO` (idtmod phase accumulator).
+  - Tier-6 `writeVerilogADAC`.
+  - Tier-7 `writeVerilogADiode` / `OpAmp` / `RTD` / `Thermistor`.
+  - Tier-7 follow-on: `writeVerilogAAmplifier` (gain × LPF × tanh),
+    `writeVerilogAAM` (amplitude modulator), `writeVerilogAIQMod`
+    (generic I/Q modulator — covers QAM-16 / QPSK / 8-PSK).
+  - Tier-8 `writeVerilogANoise` (white + flicker, PSD).
+  - Tier-9 `writeVerilogATable` (`$table_model` + .tbl sidecar).
+  - Tier-10 polish: `scripts/va_lint.sh` (OpenVAF/ADMS wrapper),
+    `scripts/va_cosim.sh` (ngspice+OpenVAF / Xyce+ADMS), opt-in
+    CTest lanes `run-emit-va-admslint` + `run-emit-va-cosim` gated
+    on `MATLAB_LLVM_WITH_VA_LINT` / `MATLAB_LLVM_WITH_VA_COSIM`,
+    and user-facing reference [`emit_verilog_a.md`](emit_verilog_a.md).
+  - One critical follow-on bug fix (commit `7b1f727`): the
+    `rf_va_field_or` Poles→A / Residues→C fallback now reads
+    `rows`/`cols` at the correct offsets for `matlab_mat_c`
+    descriptors (was UB through a `matlab_mat *` alias).
 - Circuit envelope simulation (multi-tone time-stepping nonlinear
   circuit solver).
 - Harmonic Balance solver (Newton-Krylov on multi-tone steady-state
@@ -214,10 +234,17 @@ stability + matching + Smith overlays + group delay.
 **Nothing in scope inside the RF Toolbox itself.**  Adjacent
 work shipped or in flight:
 
-- ✅ Verilog-A export (`writeVerilogA`) — shipped 2026-05-12 as
-  Tier-1 of [`verilog_a_plan.md`](verilog_a_plan.md).  Same arc
-  shipped Tier-2 (`writeVerilogATF` / `writeVerilogAZPK`) and
-  Tier-3 (`writeVerilogASS`).
+- ✅ Verilog-A export — full Tier-1 → Tier-10 arc shipped via
+  [`verilog_a_plan.md`](verilog_a_plan.md).  13 runtime entries
+  (`writeVerilogA`, `writeVerilogATF` / `AZPK` / `ASS`,
+  `writeVerilogASource` / `AComparator` / `ASchmitt`,
+  `writeVerilogAVCO`, `writeVerilogADAC`,
+  `writeVerilogADiode` / `AOpAmp` / `ARTD` / `AThermistor`,
+  `writeVerilogANoise`, `writeVerilogATable`, plus the Tier-7
+  follow-on composites `writeVerilogAAmplifier` / `AAM` / `AIQMod`),
+  24 examples in `examples/verilog_a/`, 27 `rf_writeva_*` Run/ tests,
+  two opt-in CTest lanes (lint + cosim).  See user reference
+  [`emit_verilog_a.md`](emit_verilog_a.md).
 - Circuit envelope simulation — multi-tone time-stepping nonlinear
   solver.
 - Harmonic Balance — Newton-Krylov on multi-tone steady-state.
@@ -229,8 +256,9 @@ work shipped or in flight:
 
 ## Carved out (final)
 
-Original list minus Verilog-A export (which shipped 2026-05-12 via
-[`verilog_a_plan.md`](verilog_a_plan.md) Tiers 1–3):
+Original list minus Verilog-A export (which shipped 2026-05-12
+across the full Tier-1 → Tier-10 arc of
+[`verilog_a_plan.md`](verilog_a_plan.md)):
 
 - Circuit envelope simulation
 - Harmonic balance solver
