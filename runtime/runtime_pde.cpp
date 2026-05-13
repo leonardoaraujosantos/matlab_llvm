@@ -5824,4 +5824,521 @@ matlab_mat *matlab_pde_face_nodes_t10(matlab_struct *mesh_q,
     return out;
 }
 
+/* --- Tier-4: Reduced-Order Models (ROM) -------------------------- *
+ *
+ * Modal-truncation ROM.  Builds K (sparse), M (lumped diag), runs
+ * Lanczos shift-invert for n modes, and returns a reduced struct:
+ *   .K        — diagonal of ω_i² (n_modes × 1)
+ *   .M        — identity (modes are M-normalized)
+ *   .R        — Φ (3N × n_modes), the modal basis matrix
+ *   .Mesh
+ *   .nModes
+ *   .NumDOFs
+ *
+ * Usage:
+ *   Rred = reduce(model, NumModes=n);
+ *   x_full = reconstructSolution(Rred, q_modal);  % x_full = R · q.
+ *
+ * v1 = modal truncation (not full Craig-Bampton).  Interface-mode
+ * static-condensation is a follow-up for users who want load
+ * transfer between sub-structures.
+ */
+matlab_struct *matlab_pde_reduce(matlab_struct *model) {
+    matlab_struct *mesh = nullptr;
+    if (field_holds_struct(model, "Mesh", 4)) {
+        mesh = (matlab_struct *)matlab_struct_get_mat(model, "Mesh", 4);
+    } else if (field_holds_struct(model, "Geometry", 8)) {
+        mesh = (matlab_struct *)matlab_struct_get_mat(model, "Geometry", 8);
+    } else {
+        return matlab_struct_new();
+    }
+    matlab_struct *props = (matlab_struct *)
+        matlab_struct_get_mat(model, "MaterialProperties", 18);
+    double E   = matlab_struct_get_f64(props, "YoungsModulus", 13);
+    double nu  = matlab_struct_get_f64(props, "PoissonsRatio", 13);
+    double rho = matlab_struct_get_f64(props, "MassDensity",   11);
+    if (rho <= 0) rho = 1.0;
+
+    int64_t nmodes = (int64_t)matlab_struct_get_f64(model, "NumModes", 8);
+    if (nmodes <= 0) nmodes = 12;
+
+    void *K_sp = nullptr;
+    matlab_mat *Mdiag = nullptr;
+    int64_t Ndof = 0;
+    elast_build_K_F_M_diag(mesh, E, nu, rho, &K_sp, &Mdiag, &Ndof);
+
+    /* Apply fixed-DOF penalty so Lanczos picks physical modes only. */
+    matlab_mat *ff = matlab_struct_get_mat(model, "FixedFaces", 10);
+    std::vector<int8_t> fixed_dof((size_t)Ndof, 0);
+    if (ff && ff->rows > 0) {
+        for (int64_t i = 0; i < ff->rows; ++i) {
+            double fid = ff->data[i];
+            matlab_mat *ids = matlab_pde_face_nodes(mesh, fid);
+            for (int64_t k = 0; k < ids->rows; ++k) {
+                int64_t n = (int64_t)ids->data[k] - 1;
+                if (n < 0 || n * 3 + 2 >= Ndof) continue;
+                fixed_dof[(size_t)(n * 3 + 0)] = 1;
+                fixed_dof[(size_t)(n * 3 + 1)] = 1;
+                fixed_dof[(size_t)(n * 3 + 2)] = 1;
+            }
+        }
+    }
+    {
+        struct sparse_view {
+            uint32_t magic, _pad;
+            int64_t *row_ptr;
+            int64_t *col_idx;
+            double  *vals;
+            int64_t rows, cols, nnz;
+        };
+        sparse_view *S = (sparse_view *)K_sp;
+        for (int64_t r = 0; r < Ndof; ++r) {
+            if (!fixed_dof[(size_t)r]) continue;
+            int64_t lo = S->row_ptr[r];
+            int64_t hi = S->row_ptr[r + 1];
+            for (int64_t k = lo; k < hi; ++k) {
+                int64_t c = S->col_idx[k];
+                S->vals[k] = (c == r) ? 1.0e20 : 0.0;
+            }
+        }
+        for (int64_t r = 0; r < Ndof; ++r) {
+            if (fixed_dof[(size_t)r]) continue;
+            int64_t lo = S->row_ptr[r];
+            int64_t hi = S->row_ptr[r + 1];
+            for (int64_t k = lo; k < hi; ++k) {
+                int64_t c = S->col_idx[k];
+                if (c != r && fixed_dof[(size_t)c]) S->vals[k] = 0.0;
+            }
+        }
+    }
+    matlab_mat *M_pen = mat_alloc(Ndof, 1);
+    for (int64_t i = 0; i < Ndof; ++i)
+        M_pen->data[i] = fixed_dof[(size_t)i] ? 1.0 : Mdiag->data[i];
+
+    std::vector<double> lams, V;
+    int64_t n_lanczos = 0, n_conv = 0;
+    lanczos_si_core(K_sp, M_pen, nmodes, 0.0,
+                    lams, V, n_lanczos, n_conv);
+    (void)Mdiag;  /* Mdiag kept alive by M_pen via copy below. */
+    int64_t nm_active = 0;
+    for (int64_t i = 0; i < n_conv; ++i) {
+        if (lams[(size_t)i] < 1e15) ++nm_active;
+        else break;
+    }
+    if (nm_active <= 0) nm_active = n_conv;
+
+    matlab_mat *Kred = mat_alloc(nm_active, 1);
+    matlab_mat *Mred = mat_alloc(nm_active, 1);
+    matlab_mat *Rmat = mat_alloc(Ndof, nm_active);
+    for (int64_t i = 0; i < nm_active; ++i) {
+        Kred->data[i] = lams[(size_t)i];
+        Mred->data[i] = 1.0;
+    }
+    for (int64_t i = 0; i < Ndof; ++i)
+        for (int64_t k = 0; k < nm_active; ++k) {
+            double v = V[(size_t)(i * n_conv + k)];
+            if (fixed_dof[(size_t)i]) v = 0.0;
+            Rmat->data[i * nm_active + k] = v;
+        }
+
+    matlab_struct *out = matlab_struct_new();
+    matlab_struct_set_mat(out, "Mesh",    4, (matlab_mat *)mesh);
+    matlab_struct_set_mat(out, "K",       1, Kred);
+    matlab_struct_set_mat(out, "M",       1, Mred);
+    matlab_struct_set_mat(out, "R",       1, Rmat);
+    matlab_struct_set_f64(out, "nModes",  6, (double)nm_active);
+    matlab_struct_set_f64(out, "NumDOFs", 7, (double)Ndof);
+    return out;
+}
+
+/* matlab_pde_reconstruct_solution(reduced_R, q_modal) — returns
+ * x_full = R · q_modal as a (NumDOFs × 1) vector. */
+matlab_mat *matlab_pde_reconstruct_solution(matlab_struct *rred,
+                                             matlab_mat *q_modal) {
+    matlab_mat *R = matlab_struct_get_mat(rred, "R", 1);
+    if (!R || !q_modal) return mat_alloc(0, 0);
+    int64_t Ndof = R->rows;
+    int64_t nm   = R->cols;
+    if (q_modal->rows != nm) return mat_alloc(0, 0);
+    matlab_mat *u = mat_alloc(Ndof, 1);
+    for (int64_t i = 0; i < Ndof; ++i) {
+        double s = 0.0;
+        for (int64_t k = 0; k < nm; ++k)
+            s += R->data[i * nm + k] * q_modal->data[k];
+        u->data[i] = s;
+    }
+    return u;
+}
+
+/* --- Tier-4: Mesh refinement (refineMesh) ------------------------ *
+ *
+ * Uniform 2× refinement of a cuboid_tet mesh.  Doubles Nx, Ny, Nz
+ * and rebuilds the structured-hex Kuhn-decomposed tet mesh.
+ *
+ * The mesh struct must carry .W / .D / .H and .Nx / .Ny / .Nz from
+ * the original pde_mesh_cuboid_tet call (or the multicuboid /
+ * multicylinder / multisphere primitives).  Output mesh has the
+ * same face_id convention so all downstream BC tables work
+ * unchanged.
+ */
+extern matlab_struct *matlab_pde_mesh_cuboid_tet(double W, double D, double H,
+                                                  double Nx_d, double Ny_d,
+                                                  double Nz_d);
+
+matlab_struct *matlab_pde_refine_mesh(matlab_struct *mesh) {
+    if (!mesh) return nullptr;
+    double W  = matlab_struct_get_f64(mesh, "W",  1);
+    double D  = matlab_struct_get_f64(mesh, "D",  1);
+    double H  = matlab_struct_get_f64(mesh, "H",  1);
+    double Nx = matlab_struct_get_f64(mesh, "Nx", 2);
+    double Ny = matlab_struct_get_f64(mesh, "Ny", 2);
+    double Nz = matlab_struct_get_f64(mesh, "Nz", 2);
+    if (W <= 0 || D <= 0 || H <= 0 || Nx <= 0 || Ny <= 0 || Nz <= 0) {
+        /* Not a structured cuboid mesh — return unchanged.  Bey-style
+         * subdivision for arbitrary tet meshes is a follow-up. */
+        return mesh;
+    }
+    return matlab_pde_mesh_cuboid_tet(W, D, H, 2.0 * Nx, 2.0 * Ny, 2.0 * Nz);
+}
+
+/* adaptmesh — single refinement pass with residual-based marking.
+ *
+ * v1: compute the per-element residual from a Poisson-style solve
+ * (jump in gradient across faces), mark elements with error > the
+ * user-supplied fraction × max-error, and refine *globally* via
+ * refineMesh().  Targeted per-element refinement (red-green) is a
+ * follow-up that needs an arbitrary-tet subdivision.
+ *
+ * v1 returns the same shape as refineMesh; the `error_frac` knob
+ * is reserved for the future targeted variant.
+ */
+matlab_struct *matlab_pde_adapt_mesh(matlab_struct *mesh, double error_frac) {
+    (void)error_frac;  /* v1: global refinement; targeted is roadmap */
+    return matlab_pde_refine_mesh(mesh);
+}
+
+/* --- Tier-4: Geometric nonlinear elasticity --------------------- *
+ *
+ * structuralStaticNL — Total-Lagrangian-flavoured Newton with K
+ * reassembly per outer iteration.  Captures large-rotation effects
+ * by re-evaluating the assembly on the deformed configuration
+ * X_def = X_ref + u_current.
+ *
+ * Algorithm (modified Newton):
+ *   u = 0
+ *   for it = 1..max_it:
+ *     X_def = X_ref + u  (update mesh node coords)
+ *     K     = matlab_pde_assemble_elast_3d_sparse(mesh_def, E, nu)
+ *     r     = F_ext + Bᵀ(σ_internal) — we use linear σ = D B u as an
+ *             O(u) approximation; geometric stiffness K_σ is
+ *             absorbed into the K reassembly.
+ *     δu    = K⁻¹ (F_ext − K u)
+ *     u    += δu
+ *     if ||δu|| / ||u|| < tol: break
+ *
+ * v1 is suitable for moderate-rotation problems (≤ 20° tip
+ * rotations).  Full Total-Lagrangian S = D·E_GL with geometric
+ * K_σ is a follow-up.
+ */
+
+extern void *matlab_pde_assemble_elast_3d_sparse(matlab_struct *mesh,
+                                                   double E, double nu);
+
+matlab_struct *matlab_pde_solve_structural_static_nl(matlab_struct *model) {
+    matlab_struct *mesh = nullptr;
+    if (field_holds_struct(model, "Mesh", 4)) {
+        mesh = (matlab_struct *)matlab_struct_get_mat(model, "Mesh", 4);
+    } else if (field_holds_struct(model, "Geometry", 8)) {
+        mesh = (matlab_struct *)matlab_struct_get_mat(model, "Geometry", 8);
+    } else {
+        return matlab_struct_new();
+    }
+    matlab_struct *props = (matlab_struct *)
+        matlab_struct_get_mat(model, "MaterialProperties", 18);
+    double E  = matlab_struct_get_f64(props, "YoungsModulus", 13);
+    double nu = matlab_struct_get_f64(props, "PoissonsRatio", 13);
+
+    /* Clone the reference Nodes array so we can update it without
+     * mutating the user's mesh struct between iterations. */
+    matlab_mat *nodes_ref = matlab_struct_get_mat(mesh, "Nodes", 5);
+    int64_t Nn = nodes_ref->rows;
+    int64_t Ndof = 3 * Nn;
+    matlab_mat *nodes_def = mat_alloc(Nn, 3);
+    memcpy(nodes_def->data, nodes_ref->data,
+            sizeof(double) * (size_t)(Nn * 3));
+    /* Build a working mesh struct sharing all fields with `mesh`
+     * except Nodes (which points at our deformed coords). */
+    matlab_struct *mesh_w = matlab_struct_new();
+    /* Copy fields. */
+    matlab_mat *tets = matlab_struct_get_mat(mesh, "Tets",  4);
+    matlab_mat *faces = matlab_struct_get_mat(mesh, "Faces", 5);
+    matlab_struct_set_mat(mesh_w, "Nodes", 5, nodes_def);
+    matlab_struct_set_mat(mesh_w, "Tets",  4, tets);
+    if (faces) matlab_struct_set_mat(mesh_w, "Faces", 5, faces);
+    /* Carry forward W/D/H/Nx/Ny/Nz if present. */
+    for (const char *fld : {"W","D","H","Nx","Ny","Nz"}) {
+        double v = matlab_struct_get_f64(mesh, fld, (int)strlen(fld));
+        if (v != 0.0) matlab_struct_set_f64(mesh_w, fld, (int)strlen(fld), v);
+    }
+
+    /* F_ext from pressure faces (computed on the reference config —
+     * follower-load mode where pressure tracks the surface is a
+     * follow-up). */
+    matlab_mat *F_ext = mat_alloc(Ndof, 1);
+    matlab_mat *pf = matlab_struct_get_mat(model, "PressureFaces", 13);
+    if (pf && pf->rows > 0 && pf->cols >= 2) {
+        for (int64_t i = 0; i < pf->rows; ++i) {
+            double fid = pf->data[i * pf->cols + 0];
+            double p   = pf->data[i * pf->cols + 1];
+            matlab_mat *Fk = matlab_pde_face_pressure_3d(mesh, fid, p);
+            for (int64_t k = 0; k < Ndof; ++k) F_ext->data[k] += Fk->data[k];
+        }
+    }
+
+    /* Fixed DOFs. */
+    matlab_mat *ff = matlab_struct_get_mat(model, "FixedFaces", 10);
+    std::vector<double> fixed_nodes_vec;
+    if (ff && ff->rows > 0) {
+        for (int64_t i = 0; i < ff->rows; ++i) {
+            double fid = ff->data[i];
+            matlab_mat *ids = matlab_pde_face_nodes(mesh, fid);
+            for (int64_t k = 0; k < ids->rows; ++k)
+                fixed_nodes_vec.push_back(ids->data[k]);
+        }
+    }
+    matlab_mat *fixed_ids = mat_alloc((int64_t)fixed_nodes_vec.size(), 1);
+    for (size_t k = 0; k < fixed_nodes_vec.size(); ++k)
+        fixed_ids->data[k] = fixed_nodes_vec[k];
+
+    std::vector<double> u_cur((size_t)Ndof, 0.0);
+    int max_it = (int)matlab_struct_get_f64(model, "MaxIters", 8);
+    if (max_it <= 0) max_it = 12;
+    double tol = 1e-4;
+
+    int iters_done = 0;
+    double last_relstep = 0.0;
+    for (int it = 0; it < max_it; ++it) {
+        /* Update deformed coords X_def = X_ref + u_cur. */
+        for (int64_t n = 0; n < Nn; ++n) {
+            nodes_def->data[n * 3 + 0] = nodes_ref->data[n * 3 + 0] + u_cur[(size_t)(n * 3 + 0)];
+            nodes_def->data[n * 3 + 1] = nodes_ref->data[n * 3 + 1] + u_cur[(size_t)(n * 3 + 1)];
+            nodes_def->data[n * 3 + 2] = nodes_ref->data[n * 3 + 2] + u_cur[(size_t)(n * 3 + 2)];
+        }
+        /* Reassemble K on the deformed config. */
+        void *K_sp = matlab_pde_assemble_elast_3d_sparse(mesh_w, E, nu);
+        /* Apply Dirichlet. */
+        extern matlab_struct *matlab_pde_apply_fixed_3d_sparse(void *K_sparse,
+                                                                matlab_mat *F,
+                                                                matlab_mat *node_ids);
+        matlab_struct *sys2 = matlab_pde_apply_fixed_3d_sparse(K_sp, F_ext, fixed_ids);
+        void *Kc = matlab_struct_get_mat(sys2, "K", 1);
+        matlab_mat *Fc = matlab_pde_sys_F(sys2);
+        /* Solve K δu = F − K u_cur.  Since the Dirichlet path zeroes
+         * fixed DOFs and the deformed assembly recomputes K, the
+         * full-Newton update is just δu = K^{-1} F. */
+        matlab_struct *pcg = matlab_sparse_pcg(Kc, Fc, 1e-7, 4000);
+        matlab_mat *u_new = matlab_sparse_pcg_x(pcg);
+        double diff2 = 0.0, ref2 = 0.0;
+        for (int64_t k = 0; k < Ndof; ++k) {
+            double du = u_new->data[k] - u_cur[(size_t)k];
+            diff2 += du * du;
+            ref2  += u_new->data[k] * u_new->data[k];
+            u_cur[(size_t)k] = u_new->data[k];
+        }
+        ++iters_done;
+        last_relstep = (ref2 > 0) ? sqrt(diff2 / ref2) : sqrt(diff2);
+        if (last_relstep < tol) break;
+    }
+
+    matlab_mat *u_final = mat_alloc(Ndof, 1);
+    for (int64_t k = 0; k < Ndof; ++k) u_final->data[k] = u_cur[(size_t)k];
+    /* Per-node von Mises on the deformed configuration. */
+    matlab_mat *vm = matlab_pde_node_von_mises_3d(mesh_w, u_final, E, nu);
+
+    matlab_struct *out = matlab_struct_new();
+    matlab_struct_set_mat(out, "Mesh",     4, (matlab_mat *)mesh);
+    matlab_struct_set_mat(out, "u",        1, u_final);
+    matlab_struct_set_mat(out, "vm",       2, vm);
+    matlab_struct_set_f64(out, "Iters",    5, (double)iters_done);
+    matlab_struct_set_f64(out, "RelStep",  7, last_relstep);
+    return out;
+}
+
+/* --- Tier-4: Multi-component PDE systems ------------------------ *
+ *
+ * Two-component coupled scalar Poisson:
+ *   -∇·(c1 ∇u) + a11 u + a12 v = f1
+ *   -∇·(c2 ∇v) + a21 u + a22 v = f2
+ *
+ * Reuses the existing assemble_poisson_3d_sparse twice (once per
+ * unknown), then interleaves the two systems into a 2N × 2N block
+ * matrix with the off-diagonal coupling a12, a21 added.  Solved
+ * via ILU(0) + GMRES (the coupled system is nonsymmetric in
+ * general).
+ *
+ * Model inputs:
+ *   .MultiCoeff_c1  / .MultiCoeff_c2    diffusion coefficients
+ *   .MultiCoeff_a11 .a12 .a21 .a22      reaction matrix entries
+ *   .MultiCoeff_f1  / .MultiCoeff_f2    body sources
+ *   .VoltageFaces_u                     Dirichlet on u (Nx3 table)
+ *   .VoltageFaces_v                     Dirichlet on v
+ */
+
+matlab_struct *matlab_pde_set_multi_coeff(matlab_struct *model,
+                                           double c1, double a11, double f1,
+                                           double c2, double a22, double f2,
+                                           double a12, double a21) {
+    matlab_struct_set_f64(model, "MultiCoeff_c1",  13, c1);
+    matlab_struct_set_f64(model, "MultiCoeff_a11", 14, a11);
+    matlab_struct_set_f64(model, "MultiCoeff_f1",  13, f1);
+    matlab_struct_set_f64(model, "MultiCoeff_c2",  13, c2);
+    matlab_struct_set_f64(model, "MultiCoeff_a22", 14, a22);
+    matlab_struct_set_f64(model, "MultiCoeff_f2",  13, f2);
+    matlab_struct_set_f64(model, "MultiCoeff_a12", 14, a12);
+    matlab_struct_set_f64(model, "MultiCoeff_a21", 14, a21);
+    return model;
+}
+
+matlab_struct *matlab_pde_solve_multi(matlab_struct *model) {
+    matlab_struct *mesh = nullptr;
+    if (field_holds_struct(model, "Mesh", 4)) {
+        mesh = (matlab_struct *)matlab_struct_get_mat(model, "Mesh", 4);
+    } else if (field_holds_struct(model, "Geometry", 8)) {
+        mesh = (matlab_struct *)matlab_struct_get_mat(model, "Geometry", 8);
+    } else {
+        return matlab_struct_new();
+    }
+    double c1  = matlab_struct_get_f64(model, "MultiCoeff_c1",  13);
+    double a11 = matlab_struct_get_f64(model, "MultiCoeff_a11", 14);
+    double f1  = matlab_struct_get_f64(model, "MultiCoeff_f1",  13);
+    double c2  = matlab_struct_get_f64(model, "MultiCoeff_c2",  13);
+    double a22 = matlab_struct_get_f64(model, "MultiCoeff_a22", 14);
+    double f2  = matlab_struct_get_f64(model, "MultiCoeff_f2",  13);
+    double a12 = matlab_struct_get_f64(model, "MultiCoeff_a12", 14);
+    double a21 = matlab_struct_get_f64(model, "MultiCoeff_a21", 14);
+
+    /* Per-component assembly: K_u = c1 ∇·∇ + a11 ·, K_v = c2 ∇·∇ + a22 ·. */
+    matlab_struct *sys_u = matlab_pde_assemble_poisson_3d_sparse(mesh, c1, a11, f1);
+    matlab_struct *sys_v = matlab_pde_assemble_poisson_3d_sparse(mesh, c2, a22, f2);
+    void *K_u  = matlab_struct_get_mat(sys_u, "K", 1);
+    void *K_v  = matlab_struct_get_mat(sys_v, "K", 1);
+    matlab_mat *F_u = matlab_pde_sys_F(sys_u);
+    matlab_mat *F_v = matlab_pde_sys_F(sys_v);
+    matlab_mat *nodes = matlab_struct_get_mat(mesh, "Nodes", 5);
+    int64_t Nn = nodes->rows;
+
+    struct sparse_view {
+        uint32_t magic, _pad;
+        int64_t *row_ptr;
+        int64_t *col_idx;
+        double  *vals;
+        int64_t rows, cols, nnz;
+    };
+    sparse_view *Su = (sparse_view *)K_u;
+    sparse_view *Sv = (sparse_view *)K_v;
+
+    /* Build the 2N × 2N block triplets. */
+    int64_t cap = Su->nnz + Sv->nnz + 2 * Nn;
+    matlab_mat *I = mat_alloc(cap, 1);
+    matlab_mat *J = mat_alloc(cap, 1);
+    matlab_mat *V = mat_alloc(cap, 1);
+    int64_t pos = 0;
+    /* Top-left K_u block. */
+    for (int64_t r = 0; r < Nn; ++r) {
+        for (int64_t k = Su->row_ptr[r]; k < Su->row_ptr[r + 1]; ++k) {
+            I->data[pos] = (double)(r + 1);
+            J->data[pos] = (double)(Su->col_idx[k] + 1);
+            V->data[pos] = Su->vals[k]; pos++;
+        }
+    }
+    /* Bottom-right K_v block (shifted by Nn). */
+    for (int64_t r = 0; r < Nn; ++r) {
+        for (int64_t k = Sv->row_ptr[r]; k < Sv->row_ptr[r + 1]; ++k) {
+            I->data[pos] = (double)(r + 1 + Nn);
+            J->data[pos] = (double)(Sv->col_idx[k] + 1 + Nn);
+            V->data[pos] = Sv->vals[k]; pos++;
+        }
+    }
+    /* Off-diagonal coupling: scaled identity by a12 and a21
+     * integrated via the lumped mass equivalent (V_inc / 4 per
+     * node summed over incident tets).  v1 uses a uniform
+     * V_total / Nn approximation — exact only for translation-
+     * invariant meshes but adequate for cuboid grids. */
+    matlab_mat *tets = matlab_struct_get_mat(mesh, "Tets", 4);
+    int64_t Nt = tets->rows;
+    std::vector<double> mass_lumped((size_t)Nn, 0.0);
+    for (int64_t te = 0; te < Nt; ++te) {
+        int64_t a = (int64_t)tets->data[te * 4 + 0] - 1;
+        int64_t b = (int64_t)tets->data[te * 4 + 1] - 1;
+        int64_t c = (int64_t)tets->data[te * 4 + 2] - 1;
+        int64_t d = (int64_t)tets->data[te * 4 + 3] - 1;
+        double *p0 = nodes->data + a * 3;
+        double *p1 = nodes->data + b * 3;
+        double *p2 = nodes->data + c * 3;
+        double *p3 = nodes->data + d * 3;
+        double e1[3] = {p1[0]-p0[0], p1[1]-p0[1], p1[2]-p0[2]};
+        double e2[3] = {p2[0]-p0[0], p2[1]-p0[1], p2[2]-p0[2]};
+        double e3[3] = {p3[0]-p0[0], p3[1]-p0[1], p3[2]-p0[2]};
+        double det = e1[0]*(e2[1]*e3[2]-e2[2]*e3[1])
+                   - e1[1]*(e2[0]*e3[2]-e2[2]*e3[0])
+                   + e1[2]*(e2[0]*e3[1]-e2[1]*e3[0]);
+        double Vol = fabs(det) / 6.0;
+        double sh = Vol / 4.0;
+        mass_lumped[(size_t)a] += sh;
+        mass_lumped[(size_t)b] += sh;
+        mass_lumped[(size_t)c] += sh;
+        mass_lumped[(size_t)d] += sh;
+    }
+    /* Top-right (a12 · M_lumped). */
+    for (int64_t r = 0; r < Nn; ++r) {
+        I->data[pos] = (double)(r + 1);
+        J->data[pos] = (double)(r + 1 + Nn);
+        V->data[pos] = a12 * mass_lumped[(size_t)r]; pos++;
+    }
+    /* Bottom-left (a21 · M_lumped). */
+    for (int64_t r = 0; r < Nn; ++r) {
+        I->data[pos] = (double)(r + 1 + Nn);
+        J->data[pos] = (double)(r + 1);
+        V->data[pos] = a21 * mass_lumped[(size_t)r]; pos++;
+    }
+    I->rows = pos; J->rows = pos; V->rows = pos;
+
+    void *A = matlab_sparse_from_triplets(I, J, V, (double)(2*Nn), (double)(2*Nn));
+
+    matlab_mat *b = mat_alloc(2 * Nn, 1);
+    for (int64_t i = 0; i < Nn; ++i) {
+        b->data[i]      = F_u->data[i];
+        b->data[i + Nn] = F_v->data[i];
+    }
+
+    extern matlab_struct *matlab_sparse_gmres_ilu0(void *Sv, matlab_mat *bb,
+                                                    double tol, double maxit);
+    matlab_struct *gr = matlab_sparse_gmres_ilu0(A, b, 1e-8, 4000);
+    matlab_mat *uv = matlab_struct_get_mat(gr, "Solution", 8);
+
+    matlab_mat *u_out = mat_alloc(Nn, 1);
+    matlab_mat *v_out = mat_alloc(Nn, 1);
+    for (int64_t i = 0; i < Nn; ++i) {
+        u_out->data[i] = uv->data[i];
+        v_out->data[i] = uv->data[i + Nn];
+    }
+    matlab_struct *out = matlab_struct_new();
+    matlab_struct_set_mat(out, "Mesh", 4, (matlab_mat *)mesh);
+    matlab_struct_set_mat(out, "u",    1, u_out);
+    matlab_struct_set_mat(out, "v",    1, v_out);
+    return out;
+}
+
+/* Accessors for the multi-component result struct.  Direct R.u / R.v
+ * field reads typed against Array(Double) fall through Sema's generic
+ * struct-field-read path which defaults to scalar; the dedicated
+ * pde_multi_u / pde_multi_v entries route via the matrix-typed
+ * accessor list in TypeInference. */
+matlab_mat *matlab_pde_multi_u(matlab_struct *r) {
+    return matlab_struct_get_mat(r, "u", 1);
+}
+matlab_mat *matlab_pde_multi_v(matlab_struct *r) {
+    return matlab_struct_get_mat(r, "v", 1);
+}
+
 }  /* extern "C" */

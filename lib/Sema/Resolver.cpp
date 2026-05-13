@@ -274,6 +274,14 @@ void Resolver::registerBuiltins() {
     "pde_set_initial_temperature",
     "pde_set_cell_temperature",
     "pde_set_reference_temperature",
+    /* Tier-4: ROM + adaptmesh + structuralStaticNL + multi-component. */
+    "pde_reduce", "reduce",
+    "pde_reconstruct_solution", "reconstructSolution",
+    "pde_refine_mesh", "refineMesh",
+    "pde_adapt_mesh",  "adaptmesh",
+    "pde_solve_structural_static_nl",
+    "pde_set_multi_coeff", "pde_solve_multi",
+    "pde_multi_u", "pde_multi_v",
     /* MATLAB-faithful legacy aliases. */
     "solvepde", "solvepdeeig",
     "pdegplot", "pdemesh",

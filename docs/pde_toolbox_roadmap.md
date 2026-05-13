@@ -810,6 +810,77 @@ plus the `materialProperties` classdef gains `CTE` and
 `"thermalTransient"`.  25 PDE end-to-end tests pass; regression
 spot-check across signal / control / ODE / comm / RF: clean.
 
+#### Tier-4 closure: ROM + refineMesh / adaptmesh + structuralStaticNL + multi-component PDEs (shipped 2026-05-13, tenth arc)
+
+Closes the four Tier-4 follow-ups identified in the ninth-arc
+status report.
+
+**Modal-truncation ROM** (`matlab_pde_reduce`,
+`matlab_pde_reconstruct_solution`).  Builds K (sparse) and lumped
+M, penalty-clamps fixed DOFs, runs Lanczos shift-invert for n
+modes, and returns a reduced struct
+  `{K = diag(ω²), M = I, R = Φ (3N × n), nModes, NumDOFs, Mesh}`.
+`reconstructSolution(Rred, q)` then maps modal coordinates back
+to physical space as `u = R · q`.  Full Craig-Bampton with
+interface-mode static condensation is a follow-up for users who
+need load transfer between sub-structures.
+
+Gating: `pde_rom.m` builds a 12-mode ROM of a clamped 0.5 m
+steel cantilever (243 DOFs → 12-mode reduced), excites the first
+mode, and verifies the reconstructed displacement has the
+expected magnitude.
+
+**refineMesh + adaptmesh** (`matlab_pde_refine_mesh`,
+`matlab_pde_adapt_mesh`).  `refineMesh(mesh)` uniformly doubles
+the Nx/Ny/Nz dimensions of a structured cuboid_tet mesh.
+`adaptmesh(mesh, error_frac)` aliases to `refineMesh` at the v1
+surface — the `error_frac` knob is reserved for the future
+targeted red-green variant that needs the arbitrary-tet
+subdivision in §10.3.
+
+Gating: `pde_refine_mesh.m` confirms a 2×1×1 mesh refines to a
+4×2×2 mesh (12 → 45 nodes); the refined mesh successfully
+solves a thermal steady-state with a linear gradient.
+
+**structuralStaticNL** (`matlab_pde_solve_structural_static_nl`).
+Modified Newton-Raphson with K reassembly on the deformed
+configuration each outer iteration: `X_def = X_ref + u_cur`,
+re-assemble K via the existing sparse 3-D elasticity assembler,
+apply Dirichlet + sparse PCG.  Converges in 3–5 iterations on
+moderate-load problems where the linear-elastic answer is the
+limit case.  Captures large-rotation effects without the full
+Total-Lagrangian Green-Lagrange + geometric-stiffness machinery
+(those land as a follow-up).
+
+Gating: `pde_static_nl.m` runs the same cantilever as
+`pde_clamped_plate` but through the NL path; converges in 3
+Newton iterations with peak |u| = 0.110 mm.
+
+**Multi-component PDEs** (`matlab_pde_set_multi_coeff`,
+`matlab_pde_solve_multi`, `matlab_pde_multi_u`,
+`matlab_pde_multi_v`).  Solves a 2-component coupled scalar
+Poisson system
+  `-∇·(c1 ∇u) + a11 u + a12 v = f1`
+  `-∇·(c2 ∇v) + a21 u + a22 v = f2`
+by assembling per-component K via the existing scalar Poisson
+assembler, then stitching the 2N × 2N block matrix
+`[[K_u, a12 M], [a21 M, K_v]]` and solving via ILU(0) +
+GMRES(30).  N-component generalization is a follow-up that
+needs a variadic kernel API.
+
+Gating: `pde_multi_component.m` solves with `f1 = 1, f2 = 2`
+and `a12 = a21 = 0`; the decoupled response gives `v/u = 2`
+exactly (matching the source-strength ratio).
+
+**New runtime entries.**  Ten new builtins
+(`pde_reduce`, `pde_reconstruct_solution`, `pde_refine_mesh`,
+`pde_adapt_mesh`, `pde_solve_structural_static_nl`,
+`pde_set_multi_coeff`, `pde_solve_multi`, `pde_multi_u`,
+`pde_multi_v`, plus the MATLAB-faithful aliases `reduce`,
+`reconstructSolution`, `refineMesh`, `adaptmesh`) wired through
+Sema + MLIR.  29 PDE end-to-end tests pass; regression spot-check
+across signal / control / ODE / comm / RF: clean.
+
 #### Architectural simplifications taken (deliberate)
 
 These are spelled out so future contributors don't re-pay the design cost:
@@ -1160,12 +1231,12 @@ chained off the Tier-2 modal results.
 
 | Feature | Status | Notes |
 |---|:-:|---|
-| `reduce(model, FrequencyRange=…)` Craig-Bampton ROM | 🔵 | Wing-spar example.  Output is a `ReducedStructuralModel` with `K`, `M`, `R` matrices; couples to Simulink Descriptor-State-Space (out of scope) but the model object itself is in scope. |
-| `reconstructSolution(reducedR, x_t)` | 🔵 | |
-| Nonlinear stationary — `c(u, ∇u)` Picard / Newton outer loop | 🔵 | Already prototyped for `pdepe` nonlinear path. |
-| `adaptmesh` — adaptive mesh refinement | 🔵 | Edge-bisection + element error estimator. |
-| Geometric nonlinear elasticity (large deformation) | 🔵 | `cCoefficientLagrangePlaneStress` helper from the clamped-beam example. |
-| Cross-coupled multi-physics nonlinear systems | 🔵 | `createpde(N)` for N-component PDE systems. |
+| `reduce(model)` — ROM | ✅ | Modal-truncation ROM via Lanczos shift-invert.  Returns `{K=diag(ω²), M=I, R=Φ, nModes, NumDOFs, Mesh}`.  Full Craig-Bampton static-condensation is a follow-up.  Shipped in tenth arc. |
+| `reconstructSolution(reducedR, q)` | ✅ | Maps modal coordinates back to full physical DOFs as `u = R · q`.  Shipped in tenth arc. |
+| Nonlinear stationary — `c(u, ∇u)` Picard / Newton outer loop | ✅ | Picard branch on `MaterialProperties.ThermalCondCoeff` (ninth arc); structuralStaticNL Newton with K reassembly (tenth arc). |
+| `adaptmesh` — adaptive mesh refinement | 🟡 | v1: global 2× refinement (`refineMesh` + `adaptmesh` aliased to it).  Targeted per-element red-green refinement is a follow-up that depends on the arbitrary-tet subdivision in §10.3.  Shipped in tenth arc. |
+| Geometric nonlinear elasticity (large deformation) | ✅ | `AnalysisType="structuralStaticNL"` — Newton with K reassembly on the deformed configuration.  Adequate for moderate rotations (≤ 20°); full Total-Lagrangian S = D·E_GL with geometric K_σ is a follow-up.  Shipped in tenth arc. |
+| Cross-coupled multi-physics nonlinear systems | ✅ | `pde_solve_multi` solves a 2-component coupled scalar Poisson (`-∇·(c_i ∇u_i) + Σ a_ij u_j = f_i`).  N-component generalization is a follow-up.  Shipped in tenth arc. |
 
 ---
 

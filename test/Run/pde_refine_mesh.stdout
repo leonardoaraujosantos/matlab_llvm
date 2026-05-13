@@ -1,0 +1,5 @@
+PDE Tier-4 refineMesh + adaptmesh:
+  input  nodes:         12
+  refined nodes:        45
+  adaptmesh nodes:      45
+  refined avg T (C):    50

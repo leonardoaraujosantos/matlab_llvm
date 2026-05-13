@@ -1246,6 +1246,13 @@ const Type *TypeInference::visitBuiltinCall(std::string_view Name,
       Name == "pde_set_initial_temperature" ||
       Name == "pde_set_cell_temperature" ||
       Name == "pde_set_reference_temperature" ||
+      Name == "pde_reduce" || Name == "reduce" ||
+      Name == "pde_reconstruct_solution" || Name == "reconstructSolution" ||
+      Name == "pde_refine_mesh" || Name == "refineMesh" ||
+      Name == "pde_adapt_mesh"  || Name == "adaptmesh"  ||
+      Name == "pde_solve_structural_static_nl" ||
+      Name == "pde_set_multi_coeff" || Name == "pde_solve_multi" ||
+      Name == "pde_multi_u" || Name == "pde_multi_v" ||
       Name == "solvepde" || Name == "solvepdeeig" ||
       Name == "specifyCoefficients" ||
       Name == "applyBoundaryCondition" ||
