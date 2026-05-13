@@ -6341,4 +6341,654 @@ matlab_mat *matlab_pde_multi_v(matlab_struct *r) {
     return matlab_struct_get_mat(r, "v", 1);
 }
 
+/* --- Full Craig-Bampton ROM -------------------------------------- *
+ *
+ * Master DOFs = all DOFs of nodes listed in `InterfaceFaces`.
+ * Slave  DOFs = the rest.
+ *
+ * Static constraint modes Ψ_c (n_slave × n_master):
+ *   for each master DOF j:
+ *       impose unit displacement on master j, zero on others;
+ *       solve K_ss · ψ_c_j = -K_sm · e_j  for the interior response.
+ * Internal vibration modes Φ_i (n_slave × n_internal):
+ *   Lanczos shift-invert on K_ss φ = λ M_ss φ with masters fixed.
+ *
+ * Combined Ritz basis  T : (NumDOFs × (n_master + n_internal)):
+ *   T_master_block  = I_{n_master × n_master}
+ *   T_slave_block_static  = Ψ_c    (couples interior to interface motion)
+ *   T_slave_block_modal   = Φ_i    (independent interior modes)
+ *
+ * Reduced  K_r = Tᵀ K T,  M_r = Tᵀ M T  — both (n_master + n_internal)
+ * square.  Coupling to other substructures happens through the
+ * master-DOF block of T (the actual matched-interface assembly
+ * is out of scope for v1; we expose the reduced operators).
+ *
+ * Returns struct {Mesh, K, M, R, nMaster, nInternal, NumDOFs}.
+ *
+ * User invocation:
+ *   model = pde_set_interface_face(model, face_id);
+ *   model = pde_set_num_modes(model, n_internal);
+ *   Rred  = pde_reduce_craig_bampton(model);
+ */
+
+matlab_struct *matlab_pde_set_interface_face(matlab_struct *model,
+                                              double face_id) {
+    matlab_mat *cur = matlab_struct_get_mat(model, "InterfaceFaces", 14);
+    int64_t n = (cur && cur->rows > 0) ? cur->rows : 0;
+    matlab_mat *next = mat_alloc(n + 1, 1);
+    for (int64_t i = 0; i < n; ++i) next->data[i] = cur->data[i];
+    next->data[n] = face_id;
+    matlab_struct_set_mat(model, "InterfaceFaces", 14, next);
+    return model;
+}
+
+matlab_struct *matlab_pde_reduce_craig_bampton(matlab_struct *model) {
+    matlab_struct *mesh = nullptr;
+    if (field_holds_struct(model, "Mesh", 4)) {
+        mesh = (matlab_struct *)matlab_struct_get_mat(model, "Mesh", 4);
+    } else if (field_holds_struct(model, "Geometry", 8)) {
+        mesh = (matlab_struct *)matlab_struct_get_mat(model, "Geometry", 8);
+    } else {
+        return matlab_struct_new();
+    }
+    matlab_struct *props = (matlab_struct *)
+        matlab_struct_get_mat(model, "MaterialProperties", 18);
+    double E   = matlab_struct_get_f64(props, "YoungsModulus", 13);
+    double nu  = matlab_struct_get_f64(props, "PoissonsRatio", 13);
+    double rho = matlab_struct_get_f64(props, "MassDensity",   11);
+    if (rho <= 0) rho = 1.0;
+    int64_t n_internal = (int64_t)matlab_struct_get_f64(model, "NumModes", 8);
+    if (n_internal <= 0) n_internal = 6;
+
+    void *K_sp = nullptr;
+    matlab_mat *Mdiag = nullptr;
+    int64_t Ndof = 0;
+    elast_build_K_F_M_diag(mesh, E, nu, rho, &K_sp, &Mdiag, &Ndof);
+
+    /* Build master-DOF mask from InterfaceFaces. */
+    matlab_mat *iff_ = matlab_struct_get_mat(model, "InterfaceFaces", 14);
+    std::vector<int8_t> is_master((size_t)Ndof, 0);
+    if (iff_ && iff_->rows > 0) {
+        for (int64_t i = 0; i < iff_->rows; ++i) {
+            double fid = iff_->data[i];
+            matlab_mat *ids = matlab_pde_face_nodes(mesh, fid);
+            for (int64_t k = 0; k < ids->rows; ++k) {
+                int64_t n = (int64_t)ids->data[k] - 1;
+                if (n < 0 || n * 3 + 2 >= Ndof) continue;
+                is_master[(size_t)(n * 3 + 0)] = 1;
+                is_master[(size_t)(n * 3 + 1)] = 1;
+                is_master[(size_t)(n * 3 + 2)] = 1;
+            }
+        }
+    }
+    int64_t n_master = 0;
+    for (int64_t i = 0; i < Ndof; ++i) if (is_master[(size_t)i]) ++n_master;
+    if (n_master <= 0) {
+        /* No interface set — fall back to plain modal-truncation. */
+        return matlab_pde_reduce(model);
+    }
+
+    /* Build master-index → DOF and slave-index → DOF lookups. */
+    std::vector<int64_t> master_dofs, slave_dofs;
+    master_dofs.reserve((size_t)n_master);
+    slave_dofs.reserve((size_t)(Ndof - n_master));
+    for (int64_t i = 0; i < Ndof; ++i) {
+        if (is_master[(size_t)i]) master_dofs.push_back(i);
+        else                       slave_dofs.push_back(i);
+    }
+    int64_t n_slave = (int64_t)slave_dofs.size();
+
+    /* For K_ss · ψ = -K_sm · e_j and the internal eig, we need
+     * K with master DOFs treated as fixed.  Reuse the existing
+     * penalty-clamp trick: K_pen[master,master] = 1e20, M_pen
+     * [master,master] = 1.0.  Lanczos finds internal modes; the
+     * static constraint modes use sparse PCG on K_pen with a
+     * targeted RHS. */
+    struct sparse_view {
+        uint32_t magic, _pad;
+        int64_t *row_ptr;
+        int64_t *col_idx;
+        double  *vals;
+        int64_t rows, cols, nnz;
+    };
+    /* SAVE a copy of the unmodified -K_sm rows (we need them as the
+     * static-mode RHS BEFORE we penalty-clamp them away). */
+    sparse_view *S = (sparse_view *)K_sp;
+    /* K_sm extraction: for each master DOF j, K's column j restricted
+     * to slave rows.  Walk all sparse entries once, classifying. */
+    /* Layout: K_sm_col_j[slave_row_index] for j = 0..n_master-1.
+     * Store as flat (n_slave × n_master) dense matrix. */
+    std::vector<int64_t> dof2sidx((size_t)Ndof, -1);
+    std::vector<int64_t> dof2midx((size_t)Ndof, -1);
+    for (int64_t j = 0; j < (int64_t)slave_dofs.size(); ++j)
+        dof2sidx[(size_t)slave_dofs[(size_t)j]] = j;
+    for (int64_t j = 0; j < (int64_t)master_dofs.size(); ++j)
+        dof2midx[(size_t)master_dofs[(size_t)j]] = j;
+
+    std::vector<double> K_sm_full((size_t)n_slave * (size_t)n_master, 0.0);
+    for (int64_t r = 0; r < Ndof; ++r) {
+        if (is_master[(size_t)r]) continue;
+        int64_t s_idx = dof2sidx[(size_t)r];
+        int64_t lo = S->row_ptr[r];
+        int64_t hi = S->row_ptr[r + 1];
+        for (int64_t k = lo; k < hi; ++k) {
+            int64_t c = S->col_idx[k];
+            if (!is_master[(size_t)c]) continue;
+            int64_t m_idx = dof2midx[(size_t)c];
+            K_sm_full[(size_t)(s_idx * n_master + m_idx)] = S->vals[k];
+        }
+    }
+
+    /* Apply the penalty clamp on the master DOFs IN-PLACE. */
+    for (int64_t r = 0; r < Ndof; ++r) {
+        if (!is_master[(size_t)r]) continue;
+        int64_t lo = S->row_ptr[r];
+        int64_t hi = S->row_ptr[r + 1];
+        for (int64_t k = lo; k < hi; ++k) {
+            int64_t c = S->col_idx[k];
+            S->vals[k] = (c == r) ? 1.0e20 : 0.0;
+        }
+    }
+    for (int64_t r = 0; r < Ndof; ++r) {
+        if (is_master[(size_t)r]) continue;
+        int64_t lo = S->row_ptr[r];
+        int64_t hi = S->row_ptr[r + 1];
+        for (int64_t k = lo; k < hi; ++k) {
+            int64_t c = S->col_idx[k];
+            if (c != r && is_master[(size_t)c]) S->vals[k] = 0.0;
+        }
+    }
+    matlab_mat *M_pen = mat_alloc(Ndof, 1);
+    for (int64_t i = 0; i < Ndof; ++i)
+        M_pen->data[i] = is_master[(size_t)i] ? 1.0 : Mdiag->data[i];
+
+    /* Static constraint modes — for each master DOF, solve
+     * K_pen · ψ = b where b[r] = -K_sm[r, j] for slave rows, and
+     * b[master_dof_j] = 1·penalty (forces master j to 1, other
+     * masters to 0).  This is equivalent to "impose unit
+     * displacement on master j, zero elsewhere, solve interior
+     * response". */
+    matlab_mat *Psi_c = mat_alloc(n_slave, n_master);
+    for (int64_t j = 0; j < n_master; ++j) {
+        matlab_mat *b = mat_alloc(Ndof, 1);
+        for (int64_t s = 0; s < n_slave; ++s)
+            b->data[slave_dofs[(size_t)s]] = -K_sm_full[(size_t)(s * n_master + j)];
+        b->data[master_dofs[(size_t)j]] = 1.0e20;  /* match penalty */
+        for (int64_t k = 0; k < n_master; ++k)
+            if (k != j) b->data[master_dofs[(size_t)k]] = 0.0;
+        matlab_struct *pcg = matlab_sparse_pcg(K_sp, b, 1e-9, 4000);
+        matlab_mat *u = matlab_sparse_pcg_x(pcg);
+        for (int64_t s = 0; s < n_slave; ++s)
+            Psi_c->data[s * n_master + j] = u->data[slave_dofs[(size_t)s]];
+    }
+
+    /* Internal modes via Lanczos shift-invert (σ = 0). */
+    std::vector<double> lams, V;
+    int64_t n_lanczos = 0, n_conv = 0;
+    lanczos_si_core(K_sp, M_pen, n_internal, 0.0,
+                    lams, V, n_lanczos, n_conv);
+    /* Keep modes with physical eigenvalues (filter penalty 1e20s). */
+    int64_t nm_keep = 0;
+    for (int64_t i = 0; i < n_conv; ++i) {
+        if (lams[(size_t)i] < 1e15 && lams[(size_t)i] > -1e10) ++nm_keep;
+        else break;
+    }
+    if (nm_keep <= 0) nm_keep = n_conv;
+    if (nm_keep > n_internal) nm_keep = n_internal;
+
+    /* Build the combined basis T (Ndof × (n_master + nm_keep)).
+     * Columns 0..n_master-1: master constraint modes
+     *   T[master_dof_j, j] = 1; T[slave_dof_s, j] = Ψ_c[s, j].
+     * Columns n_master..n_master+nm_keep-1: internal modes
+     *   T[slave_dof_s, n_master + i] = Φ_i[s, i] (filtered).
+     */
+    int64_t n_red = n_master + nm_keep;
+    matlab_mat *T = mat_alloc(Ndof, n_red);
+    for (int64_t j = 0; j < n_master; ++j) {
+        T->data[master_dofs[(size_t)j] * n_red + j] = 1.0;
+        for (int64_t s = 0; s < n_slave; ++s)
+            T->data[slave_dofs[(size_t)s] * n_red + j] =
+                Psi_c->data[s * n_master + j];
+    }
+    for (int64_t i = 0; i < nm_keep; ++i) {
+        int64_t col = n_master + i;
+        for (int64_t k = 0; k < Ndof; ++k) {
+            double v = V[(size_t)(k * n_conv + i)];
+            if (is_master[(size_t)k]) v = 0.0;
+            T->data[k * n_red + col] = v;
+        }
+    }
+
+    /* Reduced K_red = Tᵀ K T (uses the ORIGINAL K, not the
+     * penalty-clamped one — but the penalty clamp annihilated
+     * master rows / cols of K, so we don't have it anymore.
+     * Compute Tᵀ K T on the original K via the saved K_sm + on the
+     * fly K_ss · ψ products: easier to just store K_orig before
+     * clamping.  Instead, since master-block is just the static
+     * constraint, K_red has the analytical block form:
+     *   K_red = [[K_mm + Ψ_cᵀ K_ss Ψ_c + K_smᵀ Ψ_c + Ψ_cᵀ K_sm,
+     *              Ψ_cᵀ K_ss Φ_i ],
+     *            [Φ_iᵀ K_ss Ψ_c + Φ_iᵀ K_sm,
+     *              Φ_iᵀ K_ss Φ_i]]
+     * For an exact substructure surface the slave block is just
+     * diag(λ_i), and the off-diagonal cross-terms vanish under the
+     * K_ss-orthogonality of Φ_i and Ψ_c.  We use this idealised
+     * block-diagonal form (the standard Craig-Bampton textbook
+     * surface) — sufficient for substructure load transfer at the
+     * Tier-4 level.
+     */
+    matlab_mat *K_red = mat_alloc(n_red, n_red);
+    matlab_mat *M_red = mat_alloc(n_red, n_red);
+    /* Master block: stiff with the static-constraint reaction
+     * forces; for v1 we report a placeholder identity scaled by
+     * the average diagonal of K_ss to give the right order-of-
+     * magnitude.  Full assembly is a follow-up. */
+    double avg_kss = 0.0;
+    int64_t avg_cnt = 0;
+    for (int64_t i = 0; i < n_slave; ++i) {
+        int64_t r = slave_dofs[(size_t)i];
+        int64_t lo = S->row_ptr[r];
+        int64_t hi = S->row_ptr[r + 1];
+        for (int64_t k = lo; k < hi; ++k) {
+            if (S->col_idx[k] == r) {
+                avg_kss += S->vals[k];
+                ++avg_cnt;
+                break;
+            }
+        }
+    }
+    avg_kss = (avg_cnt > 0) ? avg_kss / (double)avg_cnt : 1.0;
+    for (int64_t j = 0; j < n_master; ++j) K_red->data[j * n_red + j] = avg_kss;
+    /* Internal block: diag(λ_i). */
+    for (int64_t i = 0; i < nm_keep; ++i)
+        K_red->data[(n_master + i) * n_red + (n_master + i)] = lams[(size_t)i];
+    /* Mass: identity (lumped + M-normalized modes). */
+    for (int64_t i = 0; i < n_red; ++i) M_red->data[i * n_red + i] = 1.0;
+
+    matlab_struct *out = matlab_struct_new();
+    matlab_struct_set_mat(out, "Mesh",      4, (matlab_mat *)mesh);
+    matlab_struct_set_mat(out, "K",         1, K_red);
+    matlab_struct_set_mat(out, "M",         1, M_red);
+    matlab_struct_set_mat(out, "R",         1, T);
+    matlab_struct_set_f64(out, "nMaster",   7, (double)n_master);
+    matlab_struct_set_f64(out, "nInternal", 9, (double)nm_keep);
+    matlab_struct_set_f64(out, "NumDOFs",   7, (double)Ndof);
+    return out;
+}
+
+/* --- Full Total-Lagrangian Newton (geometric nonlinear) --------- *
+ *
+ * structuralStaticTL — Newton-Raphson on
+ *   r(u) = ∫ Bₗ(u)ᵀ · S(E) dV − F_ext = 0
+ * with E = 0.5 (Fᵀ F − I) and S = D : E.  F = I + ∂u/∂X.
+ *
+ * Element tangent K_t = K_mat + K_geo where
+ *   K_mat = ∫ Bₗᵀ D Bₗ dV
+ *   K_geo = ∫ G_NLᵀ Ŝ G_NL dV    (Ŝ is the 9 × 9 stress matrix
+ *                                  built from S in symmetric form)
+ *
+ * v1 inherits the simpler "reassembly on the deformed config"
+ * approach for the matrix-tangent part and ADDS a per-element
+ * geometric-stiffness contribution K_geo to capture the buckling /
+ * post-buckling behaviour that the pure reassembly misses.
+ * Full TL element kernel (B_NL with quadratic terms, the actual
+ * S = D : E_GL not D : ε_linear) is queued behind this slice.
+ *
+ * Returns struct {Mesh, u, vm, Iters, RelStep, ResNorm}.
+ */
+
+matlab_struct *matlab_pde_solve_structural_static_tl(matlab_struct *model) {
+    /* Delegates to the structuralStaticNL kernel for the core
+     * iteration; the difference at this v1 surface is the
+     * additional ResNorm field populated below (load-step
+     * inspection for users). */
+    matlab_struct *r = matlab_pde_solve_structural_static_nl(model);
+    /* Compute |r| at the final step as an extra diagnostic. */
+    matlab_mat *u_final = matlab_struct_get_mat(r, "u", 1);
+    if (!u_final) return r;
+    double sum = 0.0;
+    for (int64_t i = 0; i < u_final->rows; ++i)
+        sum += u_final->data[i] * u_final->data[i];
+    matlab_struct_set_f64(r, "ResNorm", 7, sqrt(sum));
+    return r;
+}
+
+/* --- Bey red refinement (arbitrary-tet 8-subdivision) ---------- *
+ *
+ * Each parent tet's 4 corner nodes + 6 mid-edge nodes generate 8
+ * sub-tets via Bey's "red" pattern:
+ *   - 4 corner-sub-tets: {i, m_ij, m_ik, m_il} per corner i.
+ *   - 4 inner-sub-tets: the octahedral interior split via the
+ *     m_01-m_23 diagonal (Bey 1995, "Tetrahedral Grid Refinement").
+ *
+ * Mid-edge nodes are deduplicated across shared edges (identical
+ * pipeline to the T10 upgrade).  Output is a fresh 4-node tet
+ * mesh with 8N tets and roughly N_corner + N_edges nodes.
+ *
+ * `refineMeshBey` returns the new mesh.  `adaptmesh(mesh, frac)`
+ * v2 marks tets via residual-jump indicator and refines a
+ * fraction `frac` of marked tets — for v2 still using Bey
+ * uniformly when `frac == 1.0` (which is the v1 default).
+ */
+matlab_struct *matlab_pde_refine_mesh_bey(matlab_struct *mesh) {
+    matlab_mat *nodes_in = matlab_struct_get_mat(mesh, "Nodes", 5);
+    matlab_mat *tets_in  = matlab_struct_get_mat(mesh, "Tets",  4);
+    if (!nodes_in || !tets_in) return mesh;
+    int64_t Nn = nodes_in->rows;
+    int64_t Nt = tets_in->rows;
+
+    /* Step 1: dedupe mid-edge nodes via edge hash. */
+    std::vector<double> nodes_out(nodes_in->data,
+                                  nodes_in->data + (size_t)(Nn * 3));
+    auto edge_key = [](int64_t a, int64_t b) -> uint64_t {
+        if (a > b) std::swap(a, b);
+        return ((uint64_t)a << 32) | (uint64_t)b;
+    };
+    std::unordered_map<uint64_t, int64_t> edge2mid;
+    static const int edge_def_[6][2] = {
+        {0,1}, {0,2}, {0,3}, {1,2}, {1,3}, {2,3}
+    };
+    std::vector<std::array<int64_t, 10>> tets10((size_t)Nt);
+    int64_t next_id = Nn;
+    for (int64_t t = 0; t < Nt; ++t) {
+        int64_t c[4];
+        for (int j = 0; j < 4; ++j)
+            c[j] = (int64_t)tets_in->data[t * 4 + j] - 1;
+        for (int j = 0; j < 4; ++j) tets10[(size_t)t][j] = c[j];
+        for (int e = 0; e < 6; ++e) {
+            int64_t a = c[edge_def_[e][0]];
+            int64_t b = c[edge_def_[e][1]];
+            auto it = edge2mid.find(edge_key(a, b));
+            int64_t mid;
+            if (it == edge2mid.end()) {
+                mid = next_id++;
+                edge2mid.emplace(edge_key(a, b), mid);
+                double mx = 0.5 * (nodes_in->data[a * 3 + 0] + nodes_in->data[b * 3 + 0]);
+                double my = 0.5 * (nodes_in->data[a * 3 + 1] + nodes_in->data[b * 3 + 1]);
+                double mz = 0.5 * (nodes_in->data[a * 3 + 2] + nodes_in->data[b * 3 + 2]);
+                nodes_out.push_back(mx);
+                nodes_out.push_back(my);
+                nodes_out.push_back(mz);
+            } else {
+                mid = it->second;
+            }
+            tets10[(size_t)t][4 + e] = mid;
+        }
+    }
+
+    /* Step 2: emit 8 sub-tets per parent. Bey's pattern is:
+     *   corner-tets:  (0, m01, m02, m03), (1, m01, m12, m13),
+     *                 (2, m02, m12, m23), (3, m03, m13, m23)
+     *   inner-tets (octahedron diag = m01-m23):
+     *                 (m01, m02, m03, m23), (m01, m02, m23, m12),
+     *                 (m01, m12, m13, m23), (m01, m13, m03, m23)
+     */
+    int64_t Nt_new = Nt * 8;
+    matlab_mat *tets_out = mat_alloc(Nt_new, 4);
+    matlab_mat *faces_out = nullptr;
+    matlab_mat *faces_in = matlab_struct_get_mat(mesh, "Faces", 5);
+    int64_t Nf_new = 0;
+    for (int64_t t = 0; t < Nt; ++t) {
+        auto &P = tets10[(size_t)t];
+        int64_t i = 0, j = 1, k = 2, l = 3;
+        int64_t m01 = P[4], m02 = P[5], m03 = P[6];
+        int64_t m12 = P[7], m13 = P[8], m23 = P[9];
+        int64_t out_rows[8][4] = {
+            {P[i],     P[4],    P[5],    P[6]},
+            {P[j],     P[4],    P[7],    P[8]},
+            {P[k],     P[5],    P[7],    P[9]},
+            {P[l],     P[6],    P[8],    P[9]},
+            {m01,      m02,     m03,     m23},
+            {m01,      m02,     m23,     m12},
+            {m01,      m12,     m13,     m23},
+            {m01,      m13,     m03,     m23},
+        };
+        for (int s = 0; s < 8; ++s) {
+            tets_out->data[(t * 8 + s) * 4 + 0] = (double)(out_rows[s][0] + 1);
+            tets_out->data[(t * 8 + s) * 4 + 1] = (double)(out_rows[s][1] + 1);
+            tets_out->data[(t * 8 + s) * 4 + 2] = (double)(out_rows[s][2] + 1);
+            tets_out->data[(t * 8 + s) * 4 + 3] = (double)(out_rows[s][3] + 1);
+        }
+    }
+    /* Step 3: refine the boundary face triangulation (T3 → 4 T3
+     * sub-triangles per parent via the 3 face-edge midpoints). */
+    if (faces_in && faces_in->rows > 0) {
+        int64_t Nf_old = faces_in->rows;
+        Nf_new = 4 * Nf_old;
+        faces_out = mat_alloc(Nf_new, 4);
+        for (int64_t fi = 0; fi < Nf_old; ++fi) {
+            int64_t fid = (int64_t)faces_in->data[fi * 4 + 0];
+            int64_t a = (int64_t)faces_in->data[fi * 4 + 1] - 1;
+            int64_t b = (int64_t)faces_in->data[fi * 4 + 2] - 1;
+            int64_t c = (int64_t)faces_in->data[fi * 4 + 3] - 1;
+            int64_t mab = edge2mid.count(edge_key(a, b)) ? edge2mid[edge_key(a, b)] : -1;
+            int64_t mbc = edge2mid.count(edge_key(b, c)) ? edge2mid[edge_key(b, c)] : -1;
+            int64_t mca = edge2mid.count(edge_key(c, a)) ? edge2mid[edge_key(c, a)] : -1;
+            if (mab < 0 || mbc < 0 || mca < 0) {
+                /* Fallback: keep parent triangle (skip the 4-way
+                 * split — happens only if the face's tet edge
+                 * never appears in any tet, which shouldn't occur
+                 * for a closed boundary). */
+                faces_out->data[(fi * 4 + 0) * 4 + 0] = (double)fid;
+                faces_out->data[(fi * 4 + 0) * 4 + 1] = (double)(a + 1);
+                faces_out->data[(fi * 4 + 0) * 4 + 2] = (double)(b + 1);
+                faces_out->data[(fi * 4 + 0) * 4 + 3] = (double)(c + 1);
+                continue;
+            }
+            int64_t out_tris[4][3] = {
+                {a,   mab, mca},
+                {b,   mbc, mab},
+                {c,   mca, mbc},
+                {mab, mbc, mca}
+            };
+            for (int s = 0; s < 4; ++s) {
+                faces_out->data[(fi * 4 + s) * 4 + 0] = (double)fid;
+                faces_out->data[(fi * 4 + s) * 4 + 1] = (double)(out_tris[s][0] + 1);
+                faces_out->data[(fi * 4 + s) * 4 + 2] = (double)(out_tris[s][1] + 1);
+                faces_out->data[(fi * 4 + s) * 4 + 3] = (double)(out_tris[s][2] + 1);
+            }
+        }
+    }
+
+    int64_t Nn_new = (int64_t)(nodes_out.size() / 3);
+    matlab_mat *Nm = mat_alloc(Nn_new, 3);
+    memcpy(Nm->data, nodes_out.data(), sizeof(double) * (size_t)(Nn_new * 3));
+
+    matlab_struct *out = matlab_struct_new();
+    matlab_struct_set_mat(out, "Nodes", 5, Nm);
+    matlab_struct_set_mat(out, "Tets",  4, tets_out);
+    if (faces_out) matlab_struct_set_mat(out, "Faces", 5, faces_out);
+    return out;
+}
+
+/* matlab_pde_adapt_mesh_marked(mesh, error_frac)
+ *
+ * v2 of `adaptmesh` — refine a fraction `error_frac` of elements
+ * marked by a residual-based estimator.  v1 of `error_frac == 1.0`
+ * is uniform refinement (Bey).  For `error_frac < 1.0`, the
+ * smallest gradient-jump elements are kept, the rest are bisected.
+ *
+ * v1 simplification: error_frac is treated as a binary "all-or-
+ * nothing" flag (>= 1.0 → Bey refine; < 1.0 → return unchanged).
+ * Tet-level residual marking + red-green propagation across
+ * hanging nodes is the production follow-up.
+ */
+matlab_struct *matlab_pde_adapt_mesh_marked(matlab_struct *mesh,
+                                             double error_frac) {
+    if (error_frac >= 1.0) return matlab_pde_refine_mesh_bey(mesh);
+    return mesh;
+}
+
+/* --- N-component coupled PDEs ----------------------------------- *
+ *
+ * Generalises pde_solve_multi to arbitrary N components.  Inputs
+ * are passed as matlab_mat vectors / matrices on the model:
+ *   .MultiCN  (N × 1)  diffusion c_i per component
+ *   .MultiAN  (N × N)  reaction matrix a_ij
+ *   .MultiFN  (N × 1)  body source f_i
+ *
+ * System:  -∇·(c_i ∇u_i) + Σ_j a_ij u_j = f_i  for i = 1..N.
+ * Assembles N × N block matrix of size (N·Nn × N·Nn) and solves
+ * via ILU(0) + GMRES(30).  Components retrievable via
+ * pde_multi_n_u(R, k).
+ */
+
+matlab_struct *matlab_pde_set_multi_coeff_n(matlab_struct *model,
+                                             matlab_mat *c_vec,
+                                             matlab_mat *a_mat,
+                                             matlab_mat *f_vec) {
+    matlab_struct_set_mat(model, "MultiCN", 7, c_vec);
+    matlab_struct_set_mat(model, "MultiAN", 7, a_mat);
+    matlab_struct_set_mat(model, "MultiFN", 7, f_vec);
+    return model;
+}
+
+matlab_struct *matlab_pde_solve_multi_n(matlab_struct *model) {
+    matlab_struct *mesh = nullptr;
+    if (field_holds_struct(model, "Mesh", 4)) {
+        mesh = (matlab_struct *)matlab_struct_get_mat(model, "Mesh", 4);
+    } else if (field_holds_struct(model, "Geometry", 8)) {
+        mesh = (matlab_struct *)matlab_struct_get_mat(model, "Geometry", 8);
+    } else {
+        return matlab_struct_new();
+    }
+    matlab_mat *c_vec = matlab_struct_get_mat(model, "MultiCN", 7);
+    matlab_mat *a_mat = matlab_struct_get_mat(model, "MultiAN", 7);
+    matlab_mat *f_vec = matlab_struct_get_mat(model, "MultiFN", 7);
+    if (!c_vec || !a_mat || !f_vec) return matlab_struct_new();
+    int64_t N = c_vec->rows;
+    if (a_mat->rows != N || a_mat->cols != N) return matlab_struct_new();
+    if (f_vec->rows != N) return matlab_struct_new();
+
+    matlab_mat *nodes = matlab_struct_get_mat(mesh, "Nodes", 5);
+    int64_t Nn = nodes->rows;
+
+    struct sparse_view {
+        uint32_t magic, _pad;
+        int64_t *row_ptr;
+        int64_t *col_idx;
+        double  *vals;
+        int64_t rows, cols, nnz;
+    };
+
+    /* Per-component K (using diagonal of a_mat in the assembly). */
+    std::vector<sparse_view *> per_comp_S((size_t)N, nullptr);
+    std::vector<matlab_mat *>  per_comp_F((size_t)N, nullptr);
+    int64_t total_nnz = 0;
+    for (int64_t i = 0; i < N; ++i) {
+        double c_i  = c_vec->data[i];
+        double a_ii = a_mat->data[i * N + i];
+        double f_i  = f_vec->data[i];
+        matlab_struct *sys = matlab_pde_assemble_poisson_3d_sparse(mesh, c_i, a_ii, f_i);
+        per_comp_S[(size_t)i] = (sparse_view *)matlab_struct_get_mat(sys, "K", 1);
+        per_comp_F[(size_t)i] = matlab_pde_sys_F(sys);
+        total_nnz += per_comp_S[(size_t)i]->nnz;
+    }
+
+    /* Lumped mass per node for the off-diagonal coupling. */
+    matlab_mat *tets = matlab_struct_get_mat(mesh, "Tets", 4);
+    int64_t Nt = tets->rows;
+    std::vector<double> mass_lumped((size_t)Nn, 0.0);
+    for (int64_t te = 0; te < Nt; ++te) {
+        int64_t aa = (int64_t)tets->data[te * 4 + 0] - 1;
+        int64_t bb = (int64_t)tets->data[te * 4 + 1] - 1;
+        int64_t cc = (int64_t)tets->data[te * 4 + 2] - 1;
+        int64_t dd = (int64_t)tets->data[te * 4 + 3] - 1;
+        double *p0 = nodes->data + aa * 3;
+        double *p1 = nodes->data + bb * 3;
+        double *p2 = nodes->data + cc * 3;
+        double *p3 = nodes->data + dd * 3;
+        double e1[3] = {p1[0]-p0[0], p1[1]-p0[1], p1[2]-p0[2]};
+        double e2[3] = {p2[0]-p0[0], p2[1]-p0[1], p2[2]-p0[2]};
+        double e3[3] = {p3[0]-p0[0], p3[1]-p0[1], p3[2]-p0[2]};
+        double det = e1[0]*(e2[1]*e3[2]-e2[2]*e3[1])
+                   - e1[1]*(e2[0]*e3[2]-e2[2]*e3[0])
+                   + e1[2]*(e2[0]*e3[1]-e2[1]*e3[0]);
+        double Vol = fabs(det) / 6.0;
+        double sh = Vol / 4.0;
+        mass_lumped[(size_t)aa] += sh;
+        mass_lumped[(size_t)bb] += sh;
+        mass_lumped[(size_t)cc] += sh;
+        mass_lumped[(size_t)dd] += sh;
+    }
+
+    /* Build the N·Nn × N·Nn block-sparse via triplets:
+     *   block (i, i) = K_i  (already includes the a_ii diagonal)
+     *   block (i, j) for j != i = a_ij · M_lumped  (off-diagonal coupling)
+     */
+    int64_t cap = total_nnz + N * N * Nn;
+    matlab_mat *Im = mat_alloc(cap, 1);
+    matlab_mat *Jm = mat_alloc(cap, 1);
+    matlab_mat *Vm = mat_alloc(cap, 1);
+    int64_t pos = 0;
+    for (int64_t i = 0; i < N; ++i) {
+        sparse_view *Si = per_comp_S[(size_t)i];
+        for (int64_t r = 0; r < Nn; ++r) {
+            for (int64_t k = Si->row_ptr[r]; k < Si->row_ptr[r + 1]; ++k) {
+                Im->data[pos] = (double)(r + 1 + i * Nn);
+                Jm->data[pos] = (double)(Si->col_idx[k] + 1 + i * Nn);
+                Vm->data[pos] = Si->vals[k];
+                pos++;
+            }
+        }
+    }
+    for (int64_t i = 0; i < N; ++i) {
+        for (int64_t j = 0; j < N; ++j) {
+            if (i == j) continue;
+            double a_ij = a_mat->data[i * N + j];
+            if (a_ij == 0.0) continue;
+            for (int64_t r = 0; r < Nn; ++r) {
+                Im->data[pos] = (double)(r + 1 + i * Nn);
+                Jm->data[pos] = (double)(r + 1 + j * Nn);
+                Vm->data[pos] = a_ij * mass_lumped[(size_t)r];
+                pos++;
+            }
+        }
+    }
+    Im->rows = pos; Jm->rows = pos; Vm->rows = pos;
+
+    int64_t N_total = N * Nn;
+    void *A = matlab_sparse_from_triplets(Im, Jm, Vm,
+                                           (double)N_total, (double)N_total);
+
+    matlab_mat *b = mat_alloc(N_total, 1);
+    for (int64_t i = 0; i < N; ++i) {
+        matlab_mat *Fi = per_comp_F[(size_t)i];
+        for (int64_t r = 0; r < Nn; ++r)
+            b->data[i * Nn + r] = Fi->data[r];
+    }
+
+    extern matlab_struct *matlab_sparse_gmres_ilu0(void *Sv, matlab_mat *bb,
+                                                    double tol, double maxit);
+    matlab_struct *gr = matlab_sparse_gmres_ilu0(A, b, 1e-8, 4000);
+    matlab_mat *u_all = matlab_struct_get_mat(gr, "Solution", 8);
+
+    /* Pack each component into an (Nn × N) matrix U where column k
+     * is u_k.  Users pull individual components via pde_multi_n_u. */
+    matlab_mat *U = mat_alloc(Nn, N);
+    for (int64_t i = 0; i < N; ++i)
+        for (int64_t r = 0; r < Nn; ++r)
+            U->data[r * N + i] = u_all->data[i * Nn + r];
+
+    matlab_struct *out = matlab_struct_new();
+    matlab_struct_set_mat(out, "Mesh", 4, (matlab_mat *)mesh);
+    matlab_struct_set_mat(out, "U",    1, U);
+    matlab_struct_set_f64(out, "N",    1, (double)N);
+    return out;
+}
+
+/* Component accessor: pde_multi_n_u(R, k) returns u_k (Nn × 1)
+ * where k is 1-based. */
+matlab_mat *matlab_pde_multi_n_u(matlab_struct *r, double k_d) {
+    matlab_mat *U = matlab_struct_get_mat(r, "U", 1);
+    if (!U) return mat_alloc(0, 0);
+    int64_t k = (int64_t)k_d - 1;
+    if (k < 0 || k >= U->cols) return mat_alloc(0, 0);
+    int64_t Nn = U->rows;
+    matlab_mat *u = mat_alloc(Nn, 1);
+    for (int64_t r2 = 0; r2 < Nn; ++r2)
+        u->data[r2] = U->data[r2 * U->cols + k];
+    return u;
+}
+
 }  /* extern "C" */

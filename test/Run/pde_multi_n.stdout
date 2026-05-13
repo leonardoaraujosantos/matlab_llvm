@@ -1,0 +1,5 @@
+PDE Tier-4 multi-component (N=3 coupled Poisson):
+  N:                 3
+  num nodes:         36
+  u2/u1 ratio:       2
+  u3/u1 ratio:       3

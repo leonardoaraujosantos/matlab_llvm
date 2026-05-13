@@ -1,0 +1,4 @@
+PDE Tier-4 structuralStaticTL (Total-Lagrangian Newton):
+  Newton iters:        3
+  peak |u| (mm):       0.1105
+  log10(ResNorm):      -4

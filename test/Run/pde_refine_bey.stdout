@@ -1,0 +1,6 @@
+PDE Tier-4 Bey red refinement:
+  input  tets:           6
+  refined tets (Bey):    48
+  refined / input:       8
+  adaptmesh (frac=1):    48
+  refined avg T (C):     50

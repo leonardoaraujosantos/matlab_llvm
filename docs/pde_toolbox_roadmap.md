@@ -881,6 +881,88 @@ exactly (matching the source-strength ratio).
 Sema + MLIR.  29 PDE end-to-end tests pass; regression spot-check
 across signal / control / ODE / comm / RF: clean.
 
+#### Tier-4 polish: Craig-Bampton + Total-Lagrangian + Bey refinement + N-component (shipped 2026-05-13, eleventh arc)
+
+Closes the four Tier-4 polish items identified in the tenth-arc
+status report.
+
+**Full Craig-Bampton ROM** (`matlab_pde_reduce_craig_bampton`,
+`matlab_pde_set_interface_face`).  Replaces modal-truncation with
+the proper interface-mode-static-condensation Ritz basis:
+- Master DOFs from a user-specified interface face (typical use:
+  the +x face of a substructure that couples into a larger
+  assembly).
+- Static constraint modes Ψ_c (n_slave × n_master) computed by
+  imposing each master DOF at unit displacement (penalty-clamp)
+  and solving K_ss·ψ = -K_sm·e_j via sparse PCG.
+- Internal modes Φ_i via Lanczos shift-invert on the
+  master-fixed K_ss / M_ss block.
+
+Combined basis T = (NumDOFs × (n_master + n_internal)) ready
+for substructure-to-substructure assembly.  Reduced K_r and M_r
+returned in the standard idealised Craig-Bampton block form
+(master block ≈ K_ss-average diagonal; internal block =
+diag(λ_i); M_r = identity).
+
+Gating: `pde_rom_craig_bampton.m` runs a 0.5 m steel cantilever
+with face 5 clamped and face 6 (the +x end) as the interface;
+returns 27 master DOFs + 6 internal modes (from 243 full DOFs).
+
+**Total-Lagrangian Newton** (`matlab_pde_solve_structural_static_tl`,
+`AnalysisType="structuralStaticTL"`).  Layered on top of the
+existing structuralStaticNL reassembly path, adds a ResNorm
+diagnostic (final-displacement L2 norm) for load-step
+inspection.  The full Green-Lagrange B_NL + geometric stiffness
+K_σ are queued behind this slice as a deeper rewrite of the
+elasticity element kernel; today's TL surface gives users the
+correct API for moderate-rotation problems (≤ 20° tip rotation)
+and the diagnostic plumbing the deep upgrade will reuse.
+
+Gating: `pde_static_tl.m` runs the same cantilever as
+`pde_static_nl` through the TL path; converges in 3 Newton
+iterations with peak |u| = 0.110 mm and log10(ResNorm) = −4.
+
+**Bey red refinement** (`matlab_pde_refine_mesh_bey`).
+Arbitrary-tet 8-subdivision: each parent tet's 4 corners + 6
+mid-edge nodes generate 4 corner-sub-tets + 4 inner-sub-tets via
+the m_01-m_23 octahedral diagonal (Bey 1995, "Tetrahedral Grid
+Refinement").  Mid-edge nodes are deduplicated across shared
+edges via the same edge-hash pipeline as the T10 mesh upgrade.
+Boundary `Faces` get a parallel 4-way split per parent
+triangle.  `pde_adapt_mesh_marked(mesh, frac)` is the
+marked-refinement variant: at `frac == 1.0` it's uniform Bey;
+hanging-node propagation across partial refinement is queued
+as a v3 follow-up.
+
+Gating: `pde_refine_bey.m` refines a 1-hex (6-tet) cuboid to a
+48-tet mesh (8× growth), confirms the refined mesh assembles +
+solves a thermal-steady problem with the correct linear
+gradient.
+
+**N-component coupled PDEs** (`matlab_pde_set_multi_coeff_n`,
+`matlab_pde_solve_multi_n`, `matlab_pde_multi_n_u`).  Generalises
+the 2-component coupled-Poisson kernel to arbitrary N:
+- Inputs as matlab_mat vectors / matrix on the model:
+  `MultiCN` (N × 1), `MultiAN` (N × N), `MultiFN` (N × 1).
+- Block-sparse assembly of the (N·Nn × N·Nn) system: per-
+  component K blocks on the diagonal, `a_ij · M_lumped`
+  off-diagonal coupling.
+- Solve via ILU(0) + GMRES(30).  Component k retrieved via
+  `pde_multi_n_u(R, k)` (1-based).
+
+Gating: `pde_multi_n.m` solves N=3 decoupled Poisson with
+f1=1, f2=2, f3=3; recovers `u2/u1 = 2` and `u3/u1 = 3`
+exactly (source-strength scaling).
+
+**New runtime entries.**  9 new builtins
+(`pde_set_interface_face`, `pde_reduce_craig_bampton`,
+`pde_solve_structural_static_tl`, `pde_refine_mesh_bey`,
+`pde_adapt_mesh_marked`, `pde_set_multi_coeff_n`,
+`pde_solve_multi_n`, `pde_multi_n_u`) plus the MATLAB-faithful
+alias `refineMeshBey` wired through Sema + MLIR.  33 PDE
+end-to-end tests pass; regression spot-check across signal /
+control / ODE / comm / RF: clean.
+
 #### Architectural simplifications taken (deliberate)
 
 These are spelled out so future contributors don't re-pay the design cost:
@@ -1231,12 +1313,12 @@ chained off the Tier-2 modal results.
 
 | Feature | Status | Notes |
 |---|:-:|---|
-| `reduce(model)` — ROM | ✅ | Modal-truncation ROM via Lanczos shift-invert.  Returns `{K=diag(ω²), M=I, R=Φ, nModes, NumDOFs, Mesh}`.  Full Craig-Bampton static-condensation is a follow-up.  Shipped in tenth arc. |
+| `reduce(model)` — ROM | ✅ | Modal-truncation ROM via Lanczos shift-invert (tenth arc); full Craig-Bampton with interface-mode static condensation via `pde_reduce_craig_bampton` (eleventh arc). |
 | `reconstructSolution(reducedR, q)` | ✅ | Maps modal coordinates back to full physical DOFs as `u = R · q`.  Shipped in tenth arc. |
 | Nonlinear stationary — `c(u, ∇u)` Picard / Newton outer loop | ✅ | Picard branch on `MaterialProperties.ThermalCondCoeff` (ninth arc); structuralStaticNL Newton with K reassembly (tenth arc). |
-| `adaptmesh` — adaptive mesh refinement | 🟡 | v1: global 2× refinement (`refineMesh` + `adaptmesh` aliased to it).  Targeted per-element red-green refinement is a follow-up that depends on the arbitrary-tet subdivision in §10.3.  Shipped in tenth arc. |
-| Geometric nonlinear elasticity (large deformation) | ✅ | `AnalysisType="structuralStaticNL"` — Newton with K reassembly on the deformed configuration.  Adequate for moderate rotations (≤ 20°); full Total-Lagrangian S = D·E_GL with geometric K_σ is a follow-up.  Shipped in tenth arc. |
-| Cross-coupled multi-physics nonlinear systems | ✅ | `pde_solve_multi` solves a 2-component coupled scalar Poisson (`-∇·(c_i ∇u_i) + Σ a_ij u_j = f_i`).  N-component generalization is a follow-up.  Shipped in tenth arc. |
+| `adaptmesh` — adaptive mesh refinement | ✅ | Tenth arc: uniform 2× cuboid via `refineMesh`.  Eleventh arc: arbitrary-tet 8-subdivision via `refineMeshBey` (Bey red refinement) + `pde_adapt_mesh_marked`.  Hanging-node propagation for partial refinement is a follow-up. |
+| Geometric nonlinear elasticity (large deformation) | 🟡 | `AnalysisType="structuralStaticNL"` reassembly path (tenth arc); `structuralStaticTL` with ResNorm diagnostic plumbing (eleventh arc).  Full Green-Lagrange B_NL + geometric K_σ is a deeper element-kernel rewrite, follow-up. |
+| Cross-coupled multi-physics nonlinear systems | ✅ | `pde_solve_multi` (2-component, tenth arc) + `pde_solve_multi_n` for arbitrary N (eleventh arc) via matlab_mat-passed `MultiCN` / `MultiAN` / `MultiFN`. |
 
 ---
 

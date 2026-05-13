@@ -282,6 +282,14 @@ void Resolver::registerBuiltins() {
     "pde_solve_structural_static_nl",
     "pde_set_multi_coeff", "pde_solve_multi",
     "pde_multi_u", "pde_multi_v",
+    /* Tier-4 closure: Craig-Bampton + Total-Lagrangian Newton +
+     * Bey refinement + N-component PDEs. */
+    "pde_set_interface_face",
+    "pde_reduce_craig_bampton",
+    "pde_solve_structural_static_tl",
+    "pde_refine_mesh_bey", "refineMeshBey",
+    "pde_adapt_mesh_marked",
+    "pde_set_multi_coeff_n", "pde_solve_multi_n", "pde_multi_n_u",
     /* MATLAB-faithful legacy aliases. */
     "solvepde", "solvepdeeig",
     "pdegplot", "pdemesh",

@@ -1253,6 +1253,14 @@ const Type *TypeInference::visitBuiltinCall(std::string_view Name,
       Name == "pde_solve_structural_static_nl" ||
       Name == "pde_set_multi_coeff" || Name == "pde_solve_multi" ||
       Name == "pde_multi_u" || Name == "pde_multi_v" ||
+      Name == "pde_set_interface_face" ||
+      Name == "pde_reduce_craig_bampton" ||
+      Name == "pde_solve_structural_static_tl" ||
+      Name == "pde_refine_mesh_bey" || Name == "refineMeshBey" ||
+      Name == "pde_adapt_mesh_marked" ||
+      Name == "pde_set_multi_coeff_n" ||
+      Name == "pde_solve_multi_n" ||
+      Name == "pde_multi_n_u" ||
       Name == "solvepde" || Name == "solvepdeeig" ||
       Name == "specifyCoefficients" ||
       Name == "applyBoundaryCondition" ||
