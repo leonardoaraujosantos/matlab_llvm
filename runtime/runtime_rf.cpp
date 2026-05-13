@@ -4710,7 +4710,21 @@ double matlab_rf_write_verilog_a(matlab_struct *mdl, void *fname_str) {
     auto rf_va_field_or = [&](const char *primary, int64_t plen,
                               const char *alt, int64_t alen) -> matlab_mat * {
         matlab_mat *m = matlab_struct_get_mat(mdl, primary, plen);
-        if (m && (m->rows * m->cols) > 0) return m;
+        if (m) {
+            /* matlab_mat and matlab_mat_c have different prefix layouts
+             * (matlab_mat starts with data ptr; matlab_mat_c starts with
+             * magic + pad + re ptr + im ptr).  Reading m->rows blindly
+             * is undefined when the descriptor is actually complex —
+             * dispatch on mat_is_complex first. */
+            int64_t r, c;
+            if (mat_is_complex(m)) {
+                matlab_mat_c *mc = (matlab_mat_c *)m;
+                r = mc->rows; c = mc->cols;
+            } else {
+                r = m->rows; c = m->cols;
+            }
+            if (r * c > 0) return m;
+        }
         return matlab_struct_get_mat(mdl, alt, alen);
     };
     matlab_mat *Pmat = rf_va_field_or("Poles",    5, "A", 1);
