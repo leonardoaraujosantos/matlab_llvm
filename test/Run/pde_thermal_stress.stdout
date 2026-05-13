@@ -1,0 +1,3 @@
+PDE thermal-stress coupling (cellLoad Temperature=R_t):
+  peak free-end u_x (mm):   0.079
+  ~analytic alpha dT L (mm): 0.060

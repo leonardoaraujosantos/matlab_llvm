@@ -36,7 +36,9 @@ classdef materialProperties
         PoissonsRatio
         MassDensity
         ThermalConductivity
+        ThermalCondCoeff
         SpecificHeat
+        CTE
         RelativePermittivity
         RelativePermeability
         ElectricalConductivity

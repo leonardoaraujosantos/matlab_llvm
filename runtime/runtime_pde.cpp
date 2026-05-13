@@ -991,6 +991,85 @@ matlab_struct *matlab_pde_solve_femodel(matlab_struct *model) {
         }
     }
 
+    /* Thermal-stress coupling: when a `CellTemperatureField` is set
+     * via pde_set_cell_temperature(model, thermal_R), add the
+     * thermal-load vector F_e = α(T_avg - T_ref)(3λ + 2μ) V_e ·
+     * [∂N_i/∂x, ∂N_i/∂y, ∂N_i/∂z]ᵀ scattered to each node's 3 DOFs.
+     * Uses the constant-strain P1 tet basis — exact for piecewise-
+     * constant thermal strain. */
+    if (field_holds_struct(model, "CellTemperatureField", 20)) {
+        matlab_struct *thermal_r = (matlab_struct *)
+            matlab_struct_get_mat(model, "CellTemperatureField", 20);
+        matlab_mat *Tnod = matlab_struct_get_mat(thermal_r, "u", 1);
+        double alpha = matlab_struct_get_f64(props, "CTE", 3);
+        double T_ref = matlab_struct_get_f64(model, "ReferenceTemperature", 20);
+        double lam = E * nu / ((1.0 + nu) * (1.0 - 2.0 * nu));
+        double mu_e = E / (2.0 * (1.0 + nu));
+        double bulk_factor = (3.0 * lam + 2.0 * mu_e);
+        matlab_mat *tets_in = matlab_struct_get_mat(mesh, "Tets", 4);
+        int64_t Nt_e = tets_in->rows;
+        for (int64_t te = 0; te < Nt_e; ++te) {
+            int64_t a = (int64_t)tets_in->data[te * 4 + 0] - 1;
+            int64_t b = (int64_t)tets_in->data[te * 4 + 1] - 1;
+            int64_t c = (int64_t)tets_in->data[te * 4 + 2] - 1;
+            int64_t d = (int64_t)tets_in->data[te * 4 + 3] - 1;
+            int64_t ids[4] = {a, b, c, d};
+            double X[4][3];
+            for (int j = 0; j < 4; ++j) {
+                X[j][0] = nodes->data[ids[j] * 3 + 0];
+                X[j][1] = nodes->data[ids[j] * 3 + 1];
+                X[j][2] = nodes->data[ids[j] * 3 + 2];
+            }
+            double T_avg = 0.25 * (Tnod->data[a] + Tnod->data[b]
+                                    + Tnod->data[c] + Tnod->data[d]);
+            double eps_th = alpha * (T_avg - T_ref);
+            if (eps_th == 0.0) continue;
+            /* dN_i/dx via standard P1 tet gradient — reuse the
+             * existing helper if visible, else inline.  Compute
+             * via [v1, v2, v3] = node_i - node_0 inverse. */
+            double e1[3] = {X[1][0]-X[0][0], X[1][1]-X[0][1], X[1][2]-X[0][2]};
+            double e2[3] = {X[2][0]-X[0][0], X[2][1]-X[0][1], X[2][2]-X[0][2]};
+            double e3[3] = {X[3][0]-X[0][0], X[3][1]-X[0][1], X[3][2]-X[0][2]};
+            double det = e1[0]*(e2[1]*e3[2] - e2[2]*e3[1])
+                       - e1[1]*(e2[0]*e3[2] - e2[2]*e3[0])
+                       + e1[2]*(e2[0]*e3[1] - e2[1]*e3[0]);
+            if (fabs(det) < 1e-30) continue;
+            double V = fabs(det) / 6.0;
+            double inv = 1.0 / det;
+            /* J^{-1} of the 3 × 3 [e1 e2 e3] matrix (columns). */
+            double Ji[3][3];
+            Ji[0][0] =  (e2[1]*e3[2] - e2[2]*e3[1]) * inv;
+            Ji[0][1] = -(e1[1]*e3[2] - e1[2]*e3[1]) * inv;
+            Ji[0][2] =  (e1[1]*e2[2] - e1[2]*e2[1]) * inv;
+            Ji[1][0] = -(e2[0]*e3[2] - e2[2]*e3[0]) * inv;
+            Ji[1][1] =  (e1[0]*e3[2] - e1[2]*e3[0]) * inv;
+            Ji[1][2] = -(e1[0]*e2[2] - e1[2]*e2[0]) * inv;
+            Ji[2][0] =  (e2[0]*e3[1] - e2[1]*e3[0]) * inv;
+            Ji[2][1] = -(e1[0]*e3[1] - e1[1]*e3[0]) * inv;
+            Ji[2][2] =  (e1[0]*e2[1] - e1[1]*e2[0]) * inv;
+            /* dN/dx for the 4 nodes.  My adjugate formula above
+             * computes the inverse of M with e_i as ROWS (i.e.
+             * (J^{-1})^T when J has e_i as COLUMNS).  ∂N_i/∂x_a
+             * needs (J^{-1})[i-1][a], which lives at Ji[a][i-1]
+             * after the implicit transpose.  Hence
+             * dN[i][a] = Ji[a][i-1]. */
+            double dN[4][3];
+            for (int a2 = 0; a2 < 3; ++a2) {
+                dN[1][a2] = Ji[a2][0];
+                dN[2][a2] = Ji[a2][1];
+                dN[3][a2] = Ji[a2][2];
+                dN[0][a2] = -(dN[1][a2] + dN[2][a2] + dN[3][a2]);
+            }
+            double scale = eps_th * bulk_factor * V;
+            for (int i = 0; i < 4; ++i) {
+                int64_t nid = ids[i];
+                F->data[nid * 3 + 0] += scale * dN[i][0];
+                F->data[nid * 3 + 1] += scale * dN[i][1];
+                F->data[nid * 3 + 2] += scale * dN[i][2];
+            }
+        }
+    }
+
     /* Union fixed nodes across all FixedFaces entries. */
     matlab_mat *ff = matlab_struct_get_mat(model, "FixedFaces", 10);
     std::vector<double> fixed_nodes_vec;
@@ -1324,9 +1403,238 @@ matlab_struct *matlab_pde_solve_thermal_steady(matlab_struct *model) {
         matlab_struct_get_mat(model, "MaterialProperties", 18);
     double k = matlab_struct_get_f64(props, "ThermalConductivity", 19);
     double q_body = matlab_struct_get_f64(model, "BodyHeat", 8);
-    return solve_scalar_poisson(model, k, q_body,
-                                 "TemperatureFaces", 16,
-                                 "HeatFaces", 9);
+    /* Picard outer loop on k(T) = k0 (1 + alpha_k T).  Triggered
+     * when MaterialProperties.ThermalCondCoeff is set (the
+     * `alpha_k` slope).  Each Picard step solves the linear
+     * Poisson with the *current* effective k evaluated from the
+     * previous temperature solution. */
+    double alpha_k = matlab_struct_get_f64(props, "ThermalCondCoeff", 16);
+    if (alpha_k == 0.0) {
+        return solve_scalar_poisson(model, k, q_body,
+                                     "TemperatureFaces", 16,
+                                     "HeatFaces", 9);
+    }
+
+    /* Nonconstant-k Picard loop.  Use the average temperature on
+     * each step to update the effective k.  Converges quadratically
+     * for the linearization k(T_avg). */
+    int64_t maxit = 30;
+    double tol   = 1e-5;
+    matlab_struct *r_prev = solve_scalar_poisson(model, k, q_body,
+                                                  "TemperatureFaces", 16,
+                                                  "HeatFaces", 9);
+    matlab_mat *T_prev = matlab_struct_get_mat(r_prev, "u", 1);
+    int64_t Nn = T_prev->rows;
+    double t_avg_prev = 0.0;
+    for (int64_t i = 0; i < Nn; ++i) t_avg_prev += T_prev->data[i];
+    t_avg_prev /= (double)Nn;
+    for (int64_t iter = 0; iter < maxit; ++iter) {
+        double k_eff = k * (1.0 + alpha_k * t_avg_prev);
+        if (k_eff < 1e-9) k_eff = 1e-9;
+        matlab_struct *r = solve_scalar_poisson(model, k_eff, q_body,
+                                                 "TemperatureFaces", 16,
+                                                 "HeatFaces", 9);
+        matlab_mat *T = matlab_struct_get_mat(r, "u", 1);
+        double t_avg = 0.0;
+        for (int64_t i = 0; i < Nn; ++i) t_avg += T->data[i];
+        t_avg /= (double)Nn;
+        if (fabs(t_avg - t_avg_prev) < tol * fabs(t_avg + 1e-30)) {
+            matlab_struct_set_f64(r, "PicardIters", 11, (double)(iter + 1));
+            return r;
+        }
+        r_prev = r;
+        T_prev = T;
+        t_avg_prev = t_avg;
+    }
+    matlab_struct_set_f64(r_prev, "PicardIters", 11, (double)maxit);
+    return r_prev;
+}
+
+/* --- thermalTransient (parabolic) -------------------------------- *
+ *
+ * Solves ρ c_p ∂T/∂t − ∇·(k ∇T) = Q with implicit Euler:
+ *   (M + Δt K) T_{n+1} = M T_n + Δt F
+ * where M is the lumped diagonal heat-capacity matrix (per-node
+ * ρ c_p V_inc / 4).  Each step is a sparse GMRES + ILU(0) solve.
+ *
+ * Model inputs:
+ *   .MaterialProperties.ThermalConductivity (W / m·K)
+ *   .MaterialProperties.MassDensity         (kg / m³)
+ *   .MaterialProperties.SpecificHeat        (J / kg·K)
+ *   .InitialTemperature                     (uniform °C at t=0)
+ *   .TimeStep                               (s)
+ *   .NumSteps                               (count)
+ *   .TemperatureFaces                       Dirichlet table
+ *   .HeatFaces                              Neumann (surface heat flux)
+ *   .BodyHeat                               volumetric heat source
+ *
+ * Returns struct {Mesh, Uhist (Nn × Nt+1), tlist (Nt+1 × 1), u}.
+ */
+
+extern matlab_struct *matlab_sparse_gmres_ilu0(void *Sv, matlab_mat *b,
+                                                double tol, double maxit_d);
+extern void *matlab_sparse_from_triplets(matlab_mat *I, matlab_mat *J,
+                                          matlab_mat *V,
+                                          double m_d, double n_d);
+
+matlab_struct *matlab_pde_solve_thermal_transient(matlab_struct *model) {
+    matlab_struct *mesh = nullptr;
+    if (field_holds_struct(model, "Mesh", 4)) {
+        mesh = (matlab_struct *)matlab_struct_get_mat(model, "Mesh", 4);
+    } else if (field_holds_struct(model, "Geometry", 8)) {
+        mesh = (matlab_struct *)matlab_struct_get_mat(model, "Geometry", 8);
+    } else {
+        return matlab_struct_new();
+    }
+    matlab_struct *props = (matlab_struct *)
+        matlab_struct_get_mat(model, "MaterialProperties", 18);
+    double k     = matlab_struct_get_f64(props, "ThermalConductivity", 19);
+    double rho   = matlab_struct_get_f64(props, "MassDensity",         11);
+    double cp    = matlab_struct_get_f64(props, "SpecificHeat",        12);
+    if (rho <= 0) rho = 1.0;
+    if (cp  <= 0) cp  = 1.0;
+    double q_body = matlab_struct_get_f64(model, "BodyHeat", 8);
+    double T_init = matlab_struct_get_f64(model, "InitialTemperature", 18);
+
+    double dt = matlab_struct_get_f64(model, "TimeStep", 8);
+    if (dt <= 0) dt = 1.0e-2;
+    int64_t nsteps = (int64_t)matlab_struct_get_f64(model, "NumSteps", 8);
+    if (nsteps <= 0) nsteps = 100;
+
+    /* Assemble K and the lumped mass-diagonal M. */
+    matlab_struct *sys = matlab_pde_assemble_poisson_3d_sparse(mesh, k, 0.0, q_body);
+    void *K_sp = matlab_struct_get_mat(sys, "K", 1);
+    matlab_mat *F = matlab_pde_sys_F(sys);
+    matlab_mat *nodes = matlab_struct_get_mat(mesh, "Nodes", 5);
+    matlab_mat *tets  = matlab_struct_get_mat(mesh, "Tets",  4);
+    int64_t Nn = nodes->rows;
+    int64_t Nt = tets->rows;
+    /* Lumped diagonal: M_ii = ρ c_p V_inc / 4 summed over incident tets. */
+    matlab_mat *Mdiag = mat_alloc(Nn, 1);
+    for (int64_t te = 0; te < Nt; ++te) {
+        int64_t a = (int64_t)tets->data[te * 4 + 0] - 1;
+        int64_t b = (int64_t)tets->data[te * 4 + 1] - 1;
+        int64_t c = (int64_t)tets->data[te * 4 + 2] - 1;
+        int64_t d = (int64_t)tets->data[te * 4 + 3] - 1;
+        double x0[3] = {nodes->data[a*3+0], nodes->data[a*3+1], nodes->data[a*3+2]};
+        double x1[3] = {nodes->data[b*3+0], nodes->data[b*3+1], nodes->data[b*3+2]};
+        double x2[3] = {nodes->data[c*3+0], nodes->data[c*3+1], nodes->data[c*3+2]};
+        double x3[3] = {nodes->data[d*3+0], nodes->data[d*3+1], nodes->data[d*3+2]};
+        double e1[3] = {x1[0]-x0[0], x1[1]-x0[1], x1[2]-x0[2]};
+        double e2[3] = {x2[0]-x0[0], x2[1]-x0[1], x2[2]-x0[2]};
+        double e3[3] = {x3[0]-x0[0], x3[1]-x0[1], x3[2]-x0[2]};
+        double det = e1[0]*(e2[1]*e3[2] - e2[2]*e3[1])
+                   - e1[1]*(e2[0]*e3[2] - e2[2]*e3[0])
+                   + e1[2]*(e2[0]*e3[1] - e2[1]*e3[0]);
+        double V = fabs(det) / 6.0;
+        double m_share = rho * cp * V * 0.25;
+        Mdiag->data[a] += m_share;
+        Mdiag->data[b] += m_share;
+        Mdiag->data[c] += m_share;
+        Mdiag->data[d] += m_share;
+    }
+
+    /* Walk Dirichlet table; apply to base K once. */
+    matlab_mat *bc_t = matlab_struct_get_mat(model, "TemperatureFaces", 16);
+    void *K_cur = K_sp;
+    matlab_mat *F_cur = F;
+    /* Vector of (node_id, value) for Dirichlet enforcement at every step. */
+    std::vector<std::pair<int64_t, double>> dir_list;
+    if (bc_t && bc_t->rows > 0 && bc_t->cols >= 2) {
+        for (int64_t i = 0; i < bc_t->rows; ++i) {
+            double fid   = bc_t->data[i * bc_t->cols + 0];
+            double u_val = bc_t->data[i * bc_t->cols + 1];
+            matlab_mat *ids = matlab_pde_face_nodes(mesh, fid);
+            for (int64_t kk = 0; kk < ids->rows; ++kk) {
+                int64_t n = (int64_t)ids->data[kk] - 1;
+                if (n >= 0 && n < Nn) dir_list.emplace_back(n, u_val);
+            }
+            matlab_struct *sys2 = matlab_pde_apply_dirichlet_3d_sparse(
+                K_cur, F_cur, ids, u_val);
+            K_cur = matlab_struct_get_mat(sys2, "K", 1);
+            F_cur = matlab_pde_sys_F(sys2);
+        }
+    }
+
+    /* Build the implicit-Euler operator (M + Δt K) — same nonzero
+     * pattern as K plus diagonal M.  Re-sparse via triplets so we
+     * can reuse sparse_gmres_ilu0 cleanly. */
+    struct sparse_view {
+        uint32_t magic, _pad;
+        int64_t *row_ptr;
+        int64_t *col_idx;
+        double  *vals;
+        int64_t rows, cols, nnz;
+    };
+    sparse_view *S = (sparse_view *)K_cur;
+    int64_t nnz0 = S->nnz;
+    matlab_mat *Im = mat_alloc(nnz0 + Nn, 1);
+    matlab_mat *Jm = mat_alloc(nnz0 + Nn, 1);
+    matlab_mat *Vm = mat_alloc(nnz0 + Nn, 1);
+    int64_t wp = 0;
+    for (int64_t r = 0; r < Nn; ++r) {
+        int64_t lo = S->row_ptr[r];
+        int64_t hi = S->row_ptr[r + 1];
+        for (int64_t kk = lo; kk < hi; ++kk) {
+            Im->data[wp] = (double)(r + 1);
+            Jm->data[wp] = (double)(S->col_idx[kk] + 1);
+            Vm->data[wp] = dt * S->vals[kk];
+            ++wp;
+        }
+        Im->data[wp] = (double)(r + 1);
+        Jm->data[wp] = (double)(r + 1);
+        Vm->data[wp] = Mdiag->data[r];
+        ++wp;
+    }
+    Im->rows = wp; Jm->rows = wp; Vm->rows = wp;
+    void *A = matlab_sparse_from_triplets(Im, Jm, Vm, (double)Nn, (double)Nn);
+    /* Re-enforce Dirichlet rows on A: set fixed rows to identity. */
+    sparse_view *SA = (sparse_view *)A;
+    std::vector<int8_t> fixed((size_t)Nn, 0);
+    for (auto &p : dir_list) fixed[(size_t)p.first] = 1;
+    for (int64_t r = 0; r < Nn; ++r) {
+        if (!fixed[(size_t)r]) continue;
+        int64_t lo = SA->row_ptr[r];
+        int64_t hi = SA->row_ptr[r + 1];
+        for (int64_t kk = lo; kk < hi; ++kk) {
+            SA->vals[kk] = (SA->col_idx[kk] == r) ? 1.0 : 0.0;
+        }
+    }
+
+    /* History buffer. */
+    matlab_mat *Uhist = mat_alloc(Nn, nsteps + 1);
+    matlab_mat *tlist = mat_alloc(nsteps + 1, 1);
+    std::vector<double> T_cur((size_t)Nn, T_init);
+    /* Initial column at t = 0: enforce BCs on T_init. */
+    for (auto &p : dir_list) T_cur[(size_t)p.first] = p.second;
+    for (int64_t i = 0; i < Nn; ++i) Uhist->data[i * (nsteps + 1)] = T_cur[(size_t)i];
+
+    /* Time-stepping loop. */
+    matlab_mat *rhs = mat_alloc(Nn, 1);
+    for (int64_t s = 1; s <= nsteps; ++s) {
+        tlist->data[s] = (double)s * dt;
+        for (int64_t i = 0; i < Nn; ++i)
+            rhs->data[i] = Mdiag->data[i] * T_cur[(size_t)i] + dt * F_cur->data[i];
+        /* Enforce Dirichlet on RHS. */
+        for (auto &p : dir_list) rhs->data[p.first] = p.second;
+        matlab_struct *gr = matlab_sparse_gmres_ilu0(A, rhs, 1e-8, 4000);
+        matlab_mat *Tnew  = matlab_struct_get_mat(gr, "Solution", 8);
+        for (int64_t i = 0; i < Nn; ++i) {
+            T_cur[(size_t)i] = Tnew->data[i];
+            Uhist->data[i * (nsteps + 1) + s] = Tnew->data[i];
+        }
+    }
+
+    matlab_mat *u_last = mat_alloc(Nn, 1);
+    for (int64_t i = 0; i < Nn; ++i)
+        u_last->data[i] = Uhist->data[i * (nsteps + 1) + nsteps];
+
+    matlab_struct *out = matlab_struct_new();
+    matlab_struct_set_mat(out, "Mesh",  4, (matlab_mat *)mesh);
+    matlab_struct_set_mat(out, "Uhist", 5, Uhist);
+    matlab_struct_set_mat(out, "tlist", 5, tlist);
+    matlab_struct_set_mat(out, "u",     1, u_last);
+    return out;
 }
 
 /* matlab_pde_solve_magnetostatic — scalar magnetic vector potential
@@ -1441,6 +1749,29 @@ matlab_struct *matlab_pde_set_time_step(matlab_struct *model, double dt) {
 
 matlab_struct *matlab_pde_set_num_steps(matlab_struct *model, double n) {
     matlab_struct_set_f64(model, "NumSteps", 8, n);
+    return model;
+}
+
+matlab_struct *matlab_pde_set_initial_temperature(matlab_struct *model,
+                                                   double T0) {
+    matlab_struct_set_f64(model, "InitialTemperature", 18, T0);
+    return model;
+}
+
+/* For thermalTransient — thermal-stress coupling stores the
+ * cellLoad(Temperature=…) result on the model under
+ * `CellTemperatureField`, so the structuralStatic kernel can pick
+ * it up and add ε_th = α (T - T_ref) to the load vector. */
+matlab_struct *matlab_pde_set_cell_temperature(matlab_struct *model,
+                                                matlab_struct *thermal_r) {
+    matlab_struct_set_mat(model, "CellTemperatureField", 20,
+                           (matlab_mat *)thermal_r);
+    return model;
+}
+
+matlab_struct *matlab_pde_set_reference_temperature(matlab_struct *model,
+                                                    double T_ref) {
+    matlab_struct_set_f64(model, "ReferenceTemperature", 20, T_ref);
     return model;
 }
 
@@ -1738,7 +2069,14 @@ matlab_struct *matlab_pde_solve_structural_frequency(matlab_struct *model) {
     for (int64_t i = 0; i < Ndof; ++i)
         if (fixed_dof[(size_t)i]) F->data[i] = 0.0;
 
-    /* Build the K - ω²M sparse triplet form once per frequency. */
+    /* Build the K - ω²M (+ iωC) sparse triplet form once per
+     * frequency.  When Rayleigh damping (α, β) is set, build the
+     * 2N × 2N real bordered system
+     *   [ K - ω²M,    -ω C    ] [ U_re ]   [ F_re ]
+     *   [   ω C,    K - ω²M   ] [ U_im ] = [ F_im ]
+     * with C = αM + βK, and solve once per ω.  Without damping
+     * the system collapses to the real-valued (K - ω²M) U = F
+     * with no second block. */
     matlab_mat *freqs = matlab_struct_get_mat(model, "FrequencyList", 13);
     if (!freqs || freqs->rows < 1) {
         return matlab_struct_new();
@@ -1746,8 +2084,10 @@ matlab_struct *matlab_pde_solve_structural_frequency(matlab_struct *model) {
     int64_t Nfreq = freqs->rows * freqs->cols;
     matlab_mat *Uhist = mat_alloc(Ndof, Nfreq);
 
-    /* Pull sparse_view fields once; we'll rebuild K_eff per ω as
-     * fresh triplets and re-CSR through matlab_sparse_from_triplets. */
+    double alpha_d = matlab_struct_get_f64(model, "RayleighAlpha", 13);
+    double beta_d  = matlab_struct_get_f64(model, "RayleighBeta",  12);
+    bool   damped  = (alpha_d != 0.0 || beta_d != 0.0);
+
     struct sparse_view {
         uint32_t magic, _pad;
         int64_t *row_ptr;
@@ -1760,9 +2100,60 @@ matlab_struct *matlab_pde_solve_structural_frequency(matlab_struct *model) {
     for (int64_t fi = 0; fi < Nfreq; ++fi) {
         double omega = freqs->data[fi];
         double w2 = omega * omega;
-        /* Construct K_eff as new sparse_mat: K - ω² · diag(M).
-         * Only the diagonal entries change. */
-        int64_t cap = S->nnz + Ndof;  /* +Ndof for fresh diag entries */
+        if (!damped) {
+            /* Real-only path: K - ω²M, free DOFs handled by 1
+             * on diagonal of fixed rows. */
+            int64_t cap = S->nnz + Ndof;
+            matlab_mat *I = mat_alloc(cap, 1);
+            matlab_mat *J = mat_alloc(cap, 1);
+            matlab_mat *V = mat_alloc(cap, 1);
+            int64_t pos = 0;
+            for (int64_t r = 0; r < Ndof; ++r) {
+                int64_t lo = S->row_ptr[r];
+                int64_t hi = S->row_ptr[r + 1];
+                if (fixed_dof[(size_t)r]) continue;
+                for (int64_t k = lo; k < hi; ++k) {
+                    int64_t c = S->col_idx[k];
+                    if (fixed_dof[(size_t)c]) continue;
+                    double v = S->vals[k];
+                    if (c == r) v -= w2 * Mdiag->data[r];
+                    I->data[pos] = (double)(r + 1);
+                    J->data[pos] = (double)(c + 1);
+                    V->data[pos] = v;
+                    pos++;
+                }
+            }
+            for (int64_t r = 0; r < Ndof; ++r) {
+                if (!fixed_dof[(size_t)r]) continue;
+                I->data[pos] = (double)(r + 1);
+                J->data[pos] = (double)(r + 1);
+                V->data[pos] = 1.0;
+                pos++;
+            }
+            I->rows = pos; J->rows = pos; V->rows = pos;
+            void *Keff = matlab_sparse_from_triplets(I, J, V,
+                                                      (double)Ndof, (double)Ndof);
+            extern matlab_struct *matlab_sparse_gmres_ilu0(void *Sv,
+                                                            matlab_mat *b,
+                                                            double tol,
+                                                            double maxit);
+            matlab_struct *gr = matlab_sparse_gmres_ilu0(Keff, F, 1e-8, 2000);
+            matlab_mat *Ucol = matlab_struct_get_mat(gr, "Solution", 8);
+            for (int64_t i = 0; i < Ndof; ++i)
+                Uhist->data[i * Nfreq + fi] = Ucol->data[i];
+            continue;
+        }
+
+        /* Damped 2N × 2N bordered real system.  Each entry of
+         * the original K appears in up to 4 places:
+         *   (r, c)         → K[r,c] - ω²M[r,r]δ(r=c)   (top-left)
+         *   (r, c + N)     → -ω · C[r,c]               (top-right)
+         *   (r + N, c)     → +ω · C[r,c]               (bot-left)
+         *   (r + N, c + N) → K[r,c] - ω²M[r,r]δ(r=c)   (bot-right)
+         * C = αM + βK, where M is lumped diagonal.  Fixed DOFs
+         * get the same identity treatment in both blocks. */
+        int64_t N2 = 2 * Ndof;
+        int64_t cap = 4 * S->nnz + 2 * Ndof;
         matlab_mat *I = mat_alloc(cap, 1);
         matlab_mat *J = mat_alloc(cap, 1);
         matlab_mat *V = mat_alloc(cap, 1);
@@ -1770,43 +2161,65 @@ matlab_struct *matlab_pde_solve_structural_frequency(matlab_struct *model) {
         for (int64_t r = 0; r < Ndof; ++r) {
             int64_t lo = S->row_ptr[r];
             int64_t hi = S->row_ptr[r + 1];
-            /* Zero entire row r if fixed_dof[r]; will be replaced
-             * by diag-1 below. */
             if (fixed_dof[(size_t)r]) continue;
             for (int64_t k = lo; k < hi; ++k) {
                 int64_t c = S->col_idx[k];
                 if (fixed_dof[(size_t)c]) continue;
-                double v = S->vals[k];
-                if (c == r) v -= w2 * Mdiag->data[r];
+                double v_re = S->vals[k];
+                if (c == r) v_re -= w2 * Mdiag->data[r];
+                /* C = αM + βK; with M diagonal only the diagonal
+                 * has the αM term, off-diagonals carry βK only. */
+                double c_e  = beta_d * S->vals[k];
+                if (c == r) c_e += alpha_d * Mdiag->data[r];
+                double v_im = omega * c_e;
+                /* Top-left (r, c) */
                 I->data[pos] = (double)(r + 1);
                 J->data[pos] = (double)(c + 1);
-                V->data[pos] = v;
-                pos++;
+                V->data[pos] = v_re; pos++;
+                /* Top-right (r, c + N) */
+                I->data[pos] = (double)(r + 1);
+                J->data[pos] = (double)(c + 1 + Ndof);
+                V->data[pos] = -v_im; pos++;
+                /* Bot-left (r + N, c) */
+                I->data[pos] = (double)(r + 1 + Ndof);
+                J->data[pos] = (double)(c + 1);
+                V->data[pos] = +v_im; pos++;
+                /* Bot-right (r + N, c + N) */
+                I->data[pos] = (double)(r + 1 + Ndof);
+                J->data[pos] = (double)(c + 1 + Ndof);
+                V->data[pos] = v_re; pos++;
             }
         }
+        /* Identity rows for fixed DOFs (in both real and imaginary
+         * blocks). */
         for (int64_t r = 0; r < Ndof; ++r) {
             if (!fixed_dof[(size_t)r]) continue;
             I->data[pos] = (double)(r + 1);
             J->data[pos] = (double)(r + 1);
-            V->data[pos] = 1.0;
-            pos++;
+            V->data[pos] = 1.0; pos++;
+            I->data[pos] = (double)(r + 1 + Ndof);
+            J->data[pos] = (double)(r + 1 + Ndof);
+            V->data[pos] = 1.0; pos++;
         }
         I->rows = pos; J->rows = pos; V->rows = pos;
         void *Keff = matlab_sparse_from_triplets(I, J, V,
-                                                  (double)Ndof, (double)Ndof);
-
-        /* Solve K_eff U = F via ILU(0)-preconditioned GMRES(30).
-         * Handles indefinite K_eff = K - ω²M correctly (negative
-         * eigenvalues near resonance just shift the spectrum;
-         * GMRES + ILU0 doesn't depend on positive definiteness). */
+                                                  (double)N2, (double)N2);
+        /* Bordered RHS = [F_re ; 0]. */
+        matlab_mat *F2 = mat_alloc(N2, 1);
+        for (int64_t i = 0; i < Ndof; ++i) F2->data[i] = F->data[i];
+        for (int64_t i = 0; i < Ndof; ++i) F2->data[i + Ndof] = 0.0;
         extern matlab_struct *matlab_sparse_gmres_ilu0(void *Sv,
                                                         matlab_mat *b,
                                                         double tol,
                                                         double maxit);
-        matlab_struct *gr = matlab_sparse_gmres_ilu0(Keff, F, 1e-8, 2000);
+        matlab_struct *gr = matlab_sparse_gmres_ilu0(Keff, F2, 1e-8, 4000);
         matlab_mat *Ucol = matlab_struct_get_mat(gr, "Solution", 8);
-        for (int64_t i = 0; i < Ndof; ++i)
-            Uhist->data[i * Nfreq + fi] = Ucol->data[i];
+        /* Store |U| = sqrt(U_re² + U_im²) in the history. */
+        for (int64_t i = 0; i < Ndof; ++i) {
+            double ur = Ucol->data[i];
+            double ui = Ucol->data[i + Ndof];
+            Uhist->data[i * Nfreq + fi] = sqrt(ur * ur + ui * ui);
+        }
     }
 
     matlab_struct *out = matlab_struct_new();
@@ -2661,6 +3074,8 @@ matlab_struct *matlab_pde_solve(matlab_struct *model) {
         if (s->data && s->len > 0) {
             if (s->len == 18 && memcmp(s->data, "thermalSteadyState", 18) == 0)
                 return matlab_pde_solve_thermal_steady(model);
+            if (s->len == 16 && memcmp(s->data, "thermalTransient", 16) == 0)
+                return matlab_pde_solve_thermal_transient(model);
             if (s->len == 13 && memcmp(s->data, "electrostatic", 13) == 0)
                 return matlab_pde_solve_electrostatic(model);
             if (s->len == 13 && memcmp(s->data, "magnetostatic", 13) == 0)
@@ -5214,6 +5629,145 @@ matlab_mat *matlab_pde_face_pressure_3d_t10(matlab_struct *mesh_q,
         }
     }
     return F;
+}
+
+/* matlab_pde_node_von_mises_3d_t10(mesh_q, u, E, nu)
+ *
+ * Per-node von Mises stress recovery for the T10 element.  Each
+ * tet contributes 4 sample points (Keast Gauss points) where the
+ * P2 stress is O(h²) accurate (super-convergent).  Stresses at
+ * those points are scattered to each tet's 10 nodes via the shape
+ * functions (corner & mid-edge alike), then averaged per node by
+ * an incidence count.  Returns an Nn × 1 vector indexed by node.
+ *
+ * Notes:
+ *   - Strain ε = B u_e in Voigt form, σ = D ε, σ_VM derived from σ.
+ *   - For pure displacement-based P2 elements, the Gauss-point
+ *     stress is the highest-accuracy estimator we have without
+ *     SPR / Z2 patch recovery — adequate for visualisation at the
+ *     mesh densities the current dense + sparse linalg handles.
+ *   - This is the headline benefit of T10 over T4: locking-free
+ *     stress on coarse meshes where T4 reports near-zero stress.
+ */
+matlab_mat *matlab_pde_node_von_mises_3d_t10(matlab_struct *mesh_q,
+                                              matlab_mat *u_flat,
+                                              double E, double nu) {
+    matlab_mat *nodes  = matlab_struct_get_mat(mesh_q, "Nodes",  5);
+    matlab_mat *tets10 = matlab_struct_get_mat(mesh_q, "Tets10", 6);
+    if (!nodes || !tets10) return mat_alloc(0, 0);
+    int64_t Nn = nodes->rows;
+    int64_t Nt = tets10->rows;
+
+    double lam = E * nu / ((1.0 + nu) * (1.0 - 2.0 * nu));
+    double mu  = E / (2.0 * (1.0 + nu));
+    double D[6][6] = {{0}};
+    for (int i = 0; i < 3; ++i) for (int j = 0; j < 3; ++j)
+        D[i][j] = lam + ((i == j) ? 2.0 * mu : 0.0);
+    D[3][3] = mu; D[4][4] = mu; D[5][5] = mu;
+
+    /* Keast 4-point rule (same as T10 assembly). */
+    const double a_q = 0.58541019662496845446;
+    const double b_q = 0.13819660112501051518;
+    const double Lpts[4][4] = {
+        {a_q, b_q, b_q, b_q},
+        {b_q, a_q, b_q, b_q},
+        {b_q, b_q, a_q, b_q},
+        {b_q, b_q, b_q, a_q}
+    };
+
+    matlab_mat *vm   = mat_alloc(Nn, 1);
+    matlab_mat *incn = mat_alloc(Nn, 1);  /* incidence count */
+
+    for (int64_t te = 0; te < Nt; ++te) {
+        int64_t enodes[10];
+        double X[10][3];
+        double ue[30];
+        for (int i = 0; i < 10; ++i) {
+            int64_t nid = (int64_t)tets10->data[te * 10 + i] - 1;
+            enodes[i] = nid;
+            X[i][0] = nodes->data[nid * 3 + 0];
+            X[i][1] = nodes->data[nid * 3 + 1];
+            X[i][2] = nodes->data[nid * 3 + 2];
+            ue[i * 3 + 0] = u_flat->data[nid * 3 + 0];
+            ue[i * 3 + 1] = u_flat->data[nid * 3 + 1];
+            ue[i * 3 + 2] = u_flat->data[nid * 3 + 2];
+        }
+        /* Element-averaged σ over the 4 Gauss points. */
+        double sig_avg[6] = {0, 0, 0, 0, 0, 0};
+        int valid_gp = 0;
+        for (int gp = 0; gp < 4; ++gp) {
+            double dN_dL[10][4];
+            t10_dN_dL(Lpts[gp], dN_dL);
+            double dN_dx[10][3];
+            double detJ = 0.0;
+            t10_jacobian_and_dNdx(dN_dL, X, &detJ, dN_dx);
+            if (fabs(detJ) < 1e-30) continue;
+            double B[6][30] = {{0}};
+            for (int i = 0; i < 10; ++i) {
+                double dx = dN_dx[i][0];
+                double dy = dN_dx[i][1];
+                double dz = dN_dx[i][2];
+                int col = 3 * i;
+                B[0][col + 0] = dx;
+                B[1][col + 1] = dy;
+                B[2][col + 2] = dz;
+                B[3][col + 0] = dy; B[3][col + 1] = dx;
+                B[4][col + 1] = dz; B[4][col + 2] = dy;
+                B[5][col + 0] = dz; B[5][col + 2] = dx;
+            }
+            double eps_v[6] = {0, 0, 0, 0, 0, 0};
+            for (int r = 0; r < 6; ++r) {
+                double s = 0.0;
+                for (int c = 0; c < 30; ++c) s += B[r][c] * ue[c];
+                eps_v[r] = s;
+            }
+            double sig_v[6] = {0, 0, 0, 0, 0, 0};
+            for (int r = 0; r < 6; ++r) {
+                double s = 0.0;
+                for (int c = 0; c < 6; ++c) s += D[r][c] * eps_v[c];
+                sig_v[r] = s;
+            }
+            for (int r = 0; r < 6; ++r) sig_avg[r] += sig_v[r];
+            valid_gp++;
+        }
+        if (valid_gp == 0) continue;
+        for (int r = 0; r < 6; ++r) sig_avg[r] /= (double)valid_gp;
+        /* von Mises from element-averaged σ. */
+        double sx = sig_avg[0], sy = sig_avg[1], sz = sig_avg[2];
+        double txy = sig_avg[3], tyz = sig_avg[4], txz = sig_avg[5];
+        double vm_e = sqrt(0.5 * ((sx - sy) * (sx - sy)
+                                   + (sy - sz) * (sy - sz)
+                                   + (sz - sx) * (sz - sx))
+                            + 3.0 * (txy * txy + tyz * tyz + txz * txz));
+        /* Scatter to all 10 nodes of the element. */
+        for (int i = 0; i < 10; ++i) {
+            int64_t nid = enodes[i];
+            vm->data[nid]   += vm_e;
+            incn->data[nid] += 1.0;
+        }
+    }
+    /* Average. */
+    for (int64_t n = 0; n < Nn; ++n) {
+        if (incn->data[n] > 0) vm->data[n] /= incn->data[n];
+    }
+    return vm;
+}
+
+/* matlab_pde_apply_fixed_3d_t10(K_sparse, F, node_ids)
+ *
+ * T10-aware Dirichlet that clamps all 3 DOFs of each node id.
+ * For whole-face clamps this is bit-identical to the T4 helper
+ * (same 3-DOF-per-node convention); the dedicated entry exists
+ * so partial-edge constraints can grow a T10-specific path
+ * later without breaking the T4 caller chain.
+ */
+matlab_struct *matlab_pde_apply_fixed_3d_t10(void *K_sparse,
+                                              matlab_mat *F,
+                                              matlab_mat *node_ids) {
+    extern matlab_struct *matlab_pde_apply_fixed_3d_sparse(void *K_sparse,
+                                                            matlab_mat *F,
+                                                            matlab_mat *node_ids);
+    return matlab_pde_apply_fixed_3d_sparse(K_sparse, F, node_ids);
 }
 
 /* matlab_pde_face_nodes_t10(mesh_q, face_id) — returns ALL nodes

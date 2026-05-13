@@ -1,0 +1,4 @@
+PDE T10 stress recovery (uniaxial pull):
+  T10 mesh nodes:        81
+  avg von Mises (MPa):   0.978
+  analytic sigma_VM:     1.000 MPa

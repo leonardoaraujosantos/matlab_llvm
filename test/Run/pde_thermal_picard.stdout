@@ -1,0 +1,3 @@
+PDE thermalSteady Picard k(T):
+  alpha_k:              0.01
+  T_mid (C, rounded):   40

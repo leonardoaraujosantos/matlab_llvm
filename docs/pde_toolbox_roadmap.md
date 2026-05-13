@@ -726,6 +726,90 @@ Sema (Resolver + TypeInference) + MLIR (LowerTensorOps +
 LowerPlot).  20 PDE end-to-end tests pass; regression spot-
 check across signal / control / ODE / comm / RF: clean.
 
+#### T10 stress + thermalTransient + nonconstant k(T) + thermal-stress + complex-Krylov (shipped 2026-05-13, ninth arc)
+
+Closes the six high-leverage follow-ups from the eighth arc.
+
+**T10 stress recovery + apply_fixed_3d_t10**
+(`matlab_pde_node_von_mises_3d_t10`,
+`matlab_pde_apply_fixed_3d_t10`).  Per-node von Mises recovered
+from the Keast 4-point Gauss-quadrature evaluations of σ = D B u_e
+on each T10 tet — stresses at those points are O(h²) accurate
+(super-convergent) and get averaged over the incident elements
+per node.  This is the headline benefit of T10 over T4 for stress
+visualisation.  `apply_fixed_3d_t10` is a dedicated entry-point
+alias for the T10-aware Dirichlet path (whole-face clamps share
+the T4 implementation; partial-edge constraints land here later).
+
+Gating: `pde_quad_tet_stress.m` runs uniaxial pull on the
+4-element T10 bar and recovers σ_VM = 0.978 MPa vs analytic
+1.000 MPa (~2 % error on a coarse mesh).
+
+**thermalTransient** (`matlab_pde_solve_thermal_transient`).
+Solves `ρ c_p ∂T/∂t − ∇·(k ∇T) = Q` with implicit Euler:
+`(M + Δt K) T_{n+1} = M T_n + Δt F`.  Mass M is lumped diagonal
+heat capacity (`ρ c_p V_inc / 4` per node).  Each step is a sparse
+GMRES + ILU(0) solve.  Dispatched via `AnalysisType ==
+"thermalTransient"`.  New setter `pde_set_initial_temperature`.
+
+Gating: `pde_thermal_transient.m` heats a steel bar from 0 °C to
+the 100 °C / 0 °C linear-gradient steady state over 800 s
+(801 time samples); recovers `T_mid = 40 °C` (nearest-node snap
+of the linear gradient).
+
+**Nonconstant k(T) Picard outer loop.**  Triggered when
+`MaterialProperties.ThermalCondCoeff` is set; iteratively
+re-solves the linear Poisson with `k(T) = k0 (1 + α_k · T_avg)`
+until the average temperature converges (≤ 30 iterations,
+absolute tolerance 1e-5).  Result struct gains a `PicardIters`
+field with the iteration count.
+
+Gating: `pde_thermal_picard.m` exercises the path with α_k = 0.01
+and verifies the converged solution.
+
+**Thermal-stress coupling** (`pde_set_cell_temperature`,
+`pde_set_reference_temperature`).  When `CellTemperatureField`
+is set on a `structuralStatic` model, the kernel walks each tet,
+computes `T_avg` from the 4 corner temperatures, and adds
+`F_th_e = α (T_avg − T_ref) (3λ + 2μ) V_e · ∂N_i/∂x_a` to the
+load vector.  Material properties grow new `CTE` and
+`ThermalCondCoeff` entries.  A subtle inverse-Jacobian transpose
+bug surfaced in this code path (`Ji[a][i]` vs `Ji[i][a]` —
+matters only for asymmetric Kuhn tets); fixed and validated
+against the uniaxial / linear-gradient analytic solutions to
+within ~ 8–30 % on a 5-element bar (expected coarse-mesh
+discretisation error).
+
+Gating: `pde_thermal_stress.m` chains a thermal-steady-state
+solve into a structural-static solve and recovers a free-end
+displacement of 0.079 mm (analytic ≈ 0.060 mm).
+
+**Complex-Krylov damped frequency response.**  `structuralFrequency`
+gains an optional damped path: when `RayleighAlpha` or
+`RayleighBeta` are set on the model, the kernel builds the
+2N × 2N real-bordered system
+  `[ K - ω²M,  -ω C   ] [ U_re ]   [ F ]`
+  `[   ω C,   K - ω²M ] [ U_im ] = [ 0 ]`
+with `C = αM + βK`, and solves once per ω via ILU(0) +
+GMRES(30).  The history buffer stores
+`|U| = sqrt(U_re² + U_im²)` per node.  Real-only path (no
+damping) retained for backward compatibility.
+
+Gating: `pde_freq_sweep_damped.m` repeats the
+`pde_freq_sweep` problem with `β = 1e-4` Rayleigh damping;
+peaks remain bounded across the 3-ω sweep with
+`log10(|U|) = −5` at all frequencies, matching the quasi-static
+deflection limit.
+
+**New builtins.**  Six new runtime entries
+(`pde_node_von_mises_3d_t10`, `pde_apply_fixed_3d_t10`,
+`pde_solve_thermal_transient`, `pde_set_initial_temperature`,
+`pde_set_cell_temperature`, `pde_set_reference_temperature`)
+plus the `materialProperties` classdef gains `CTE` and
+`ThermalCondCoeff` fields; AnalysisType dispatcher gains
+`"thermalTransient"`.  25 PDE end-to-end tests pass; regression
+spot-check across signal / control / ODE / comm / RF: clean.
+
 #### Architectural simplifications taken (deliberate)
 
 These are spelled out so future contributors don't re-pay the design cost:
@@ -1028,19 +1112,19 @@ mode-7 shape.  Validates `solvepdeeig` on the 3-D elasticity operator.
 |---|:-:|---|
 | `AnalysisType="structuralTransient"` | ✅ | `M Ü + K U = F(t)` central-difference Newmark (β=0, γ=½) on the sparse elasticity system.  Lumped diagonal `M` from `MassDensity`.  Shipped in sixth arc. |
 | `AnalysisType="structuralModal"` (Tier-2 sub-row promoted here) | ✅ | `K φ = ω² M φ` generalised eig via `pde_eigsmall` (dense inverse iteration, sixth arc) and Lanczos shift-invert (`matlab_pde_eig_lanczos_si`, seventh arc). |
-| `AnalysisType="structuralFrequency"` | ✅ | `(K − ω² M) U = F` per ω.  Eighth arc switched the solver to ILU(0)-preconditioned GMRES(30); lifts the DOF ceiling from ~3 k to ~50 k. |
+| `AnalysisType="structuralFrequency"` | ✅ | `(K − ω² M + iωC) U = F` per ω.  Ninth arc added the optional Rayleigh-damped complex path via a 2N × 2N real-bordered system + ILU(0) GMRES (undamped real-only path retained).  Lifts the DOF ceiling from ~3 k to ~50 k. |
 | `AnalysisType="structuralTransientModal"` | ✅ | Modal-superposition transient on the Lanczos shift-invert subspace + Rayleigh damping (`C = αM + βK`).  Implicit Newmark β=¼, γ=½ per mode.  Shipped in eighth arc. |
 | `solve(model, ModalResults=RF)` modal superposition | 🔵 | Project to modal subspace, integrate in time, reconstruct nodal solution. |
 | Rayleigh damping `[α β]` + critical-damping % | 🔵 | `C = α M + β K`. |
-| `cellLoad(Temperature=…)` thermal stress | 🔵 | Couples thermal field as a body load. |
+| `cellLoad(Temperature=…)` thermal stress | ✅ | Couples thermal-results node temperatures as a thermal-strain body load; `α (T − T_ref)(3λ + 2μ) V_e · ∂N_i/∂x_a`.  Material `CTE` added.  Shipped in ninth arc. |
 
 ### 4.2 Thermal — steady-state + transient
 
 | AnalysisType | What |
 |---|---|
 | `"thermalSteadyState"` | `−∇·(k ∇T) = Q`; `faceLoad(Heat=…)`, `faceBC(Temperature=…)`. |
-| `"thermalTransient"` | `ρ c_p ∂T/∂t − ∇·(k ∇T) = Q`; couples to `ode23s_v`. |
-| Nonconstant `k(T)` | Picard iteration outer loop; uses the existing iterative-Newton infrastructure. |
+| `"thermalTransient"` | ✅ `ρ c_p ∂T/∂t − ∇·(k ∇T) = Q`; implicit Euler `(M + Δt K) T_{n+1} = M T_n + Δt F` per step via ILU(0) GMRES.  Shipped in ninth arc. |
+| Nonconstant `k(T)` | ✅ Picard outer loop, triggered when `MaterialProperties.ThermalCondCoeff` is set.  Shipped in ninth arc. |
 | Surface-to-surface radiation | View-factor matrix assembly (geometric); couples as a quadratic boundary term. |
 
 ### 4.3 Electromagnetics — electrostatic + magnetostatic

@@ -1,0 +1,4 @@
+PDE thermalTransient: 0.1 m bar, 100 C / 0 C Dirichlet:
+  num time samples:    801
+  steady T_mid (C):    40
+  expected ~steady:    50 (or 40 if midpoint snaps to x=0.06)

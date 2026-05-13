@@ -1240,6 +1240,12 @@ const Type *TypeInference::visitBuiltinCall(std::string_view Name,
       Name == "pde_assemble_elast_3d_t10" ||
       Name == "pde_face_pressure_3d_t10" ||
       Name == "pde_face_nodes_t10" ||
+      Name == "pde_node_von_mises_3d_t10" ||
+      Name == "pde_apply_fixed_3d_t10" ||
+      Name == "pde_solve_thermal_transient" ||
+      Name == "pde_set_initial_temperature" ||
+      Name == "pde_set_cell_temperature" ||
+      Name == "pde_set_reference_temperature" ||
       Name == "solvepde" || Name == "solvepdeeig" ||
       Name == "specifyCoefficients" ||
       Name == "applyBoundaryCondition" ||

@@ -267,6 +267,13 @@ void Resolver::registerBuiltins() {
     /* T10 quadratic-tet path. */
     "pde_mesh_quadratic", "pde_assemble_elast_3d_t10",
     "pde_face_pressure_3d_t10", "pde_face_nodes_t10",
+    "pde_node_von_mises_3d_t10",
+    "pde_apply_fixed_3d_t10",
+    /* thermalTransient + thermal-stress coupling + Picard nonconstant-k. */
+    "pde_solve_thermal_transient",
+    "pde_set_initial_temperature",
+    "pde_set_cell_temperature",
+    "pde_set_reference_temperature",
     /* MATLAB-faithful legacy aliases. */
     "solvepde", "solvepdeeig",
     "pdegplot", "pdemesh",
