@@ -1,0 +1,69 @@
+{
+  "schema": "matforge.flowchart",
+  "version": "0.1.0",
+  "entry": "goto_from",
+  "settings": {
+    "kind": "signal_flow",
+    "solver": {
+      "type": "variable_step",
+      "algorithm": "ode45",
+      "startTime": 0.0,
+      "stopTime": 4.0,
+      "maxStep": "0.01",
+      "zeroCrossing": true,
+      "algebraicLoopMethod": "trust_region"
+    },
+    "snapshot": { "enabled": true, "depth": 256, "fields": "states" }
+  },
+  "flows": [
+    {
+      "id": "flow_goto_from",
+      "kind": "program",
+      "name": "goto_from",
+      "signature": { "inputs": [], "outputs": [] },
+      "nodes": [
+        { "id": "src", "kind": "signal_sine",
+          "data": { "log_signal": true,
+                    "params": { "amplitude": 1.0, "bias": 0.0,
+                                "frequency": 3.1415927, "phase": 0.0 } },
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+        { "id": "send", "kind": "signal_goto",
+          "data": { "tag": "drive" },
+          "ports": { "in": [{"id": "in"}], "out": [] } },
+        { "id": "recv_a", "kind": "signal_from",
+          "data": { "tag": "drive" },
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+        { "id": "recv_b", "kind": "signal_from",
+          "data": { "tag": "drive" },
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+        { "id": "amp_a", "kind": "signal_gain",
+          "data": { "log_signal": true, "params": { "gain": 2.0 } },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "amp_b", "kind": "signal_gain",
+          "data": { "log_signal": true, "params": { "gain": -3.0 } },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "sum", "kind": "signal_sum",
+          "data": { "params": { "signs": "++" } },
+          "ports": { "in": [{"id": "in1"}, {"id": "in2"}],
+                     "out": [{"id": "out"}] } },
+        { "id": "scope", "kind": "signal_scope",
+          "data": { "params": { "title": "goto_from" } },
+          "ports": { "in": [{"id": "in"}], "out": [] } }
+      ],
+      "edges": [
+        { "id": "e_drv",  "kind": "data",
+          "from": {"node": "src",    "port": "out"}, "to": {"node": "send",   "port": "in"} },
+        { "id": "e_va",   "kind": "data",
+          "from": {"node": "recv_a", "port": "out"}, "to": {"node": "amp_a",  "port": "in"} },
+        { "id": "e_vb",   "kind": "data",
+          "from": {"node": "recv_b", "port": "out"}, "to": {"node": "amp_b",  "port": "in"} },
+        { "id": "e_a",    "kind": "data",
+          "from": {"node": "amp_a",  "port": "out"}, "to": {"node": "sum",    "port": "in1"} },
+        { "id": "e_b",    "kind": "data",
+          "from": {"node": "amp_b",  "port": "out"}, "to": {"node": "sum",    "port": "in2"} },
+        { "id": "e_sc",   "kind": "data",
+          "from": {"node": "sum",    "port": "out"}, "to": {"node": "scope",  "port": "in"} }
+      ]
+    }
+  ]
+}

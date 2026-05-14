@@ -1,4 +1,5 @@
 #include "matlab/Flowchart/MflowLinkModel.h"
+#include "matlab/Flowchart/MflowLinkSim.h"
 
 #include "matlab/Basic/Diagnostic.h"
 
@@ -111,6 +112,14 @@ const KindInfo *lookupKind(const std::string &K) {
                              {true, true, false, false, false, FIM});
     add("signal_compare_to_constant",
                              {true, true, false, false, false, FIM});
+    // Tier-H carve-out — Custom Block (MATLAB Function). The
+    // `params.expression` string is parsed once at construction
+    // (`MflowLinkSim::buildMatlabFcn`); the evaluator walks the
+    // resulting tiny expression tree on every step. Supports the
+    // arithmetic / math / trig functions documented in
+    // `docs/mflowlink_blocks.md`. Variable names: `u` / `u1` …
+    // `uN` for the N input ports, plus `t` for simulation time.
+    add("signal_matlab_fcn", {true, true, false, false, false, FIM});
     // Signal routing.
     add("signal_mux",    {true, true, false, false, false, FIM});
     add("signal_demux",  {true, true, false, false, false, FIM});
@@ -118,6 +127,13 @@ const KindInfo *lookupKind(const std::string &K) {
     add("signal_multiport_switch",
                          {true, true, false, false, false, FIM});
     add("signal_merge",  {true, true, false, false, false, FIM});
+    // Tier-H carve-out — virtual wires. Marked Composite so the
+    // Flattener's existing "contracted away during lowering" path
+    // applies; a dedicated `contractGotoFrom` pass actually rewires
+    // edges across them. By the time block construction runs,
+    // every goto and from has been removed from the graph.
+    add("signal_goto", {true, true, true, false, false, FIM});
+    add("signal_from", {true, true, true, false, false, FIM});
     // Tier E carve-out — hysteretic relay (the third zero-crossing
     // kind alongside Switch / Saturation in roadmap §7.3). One
     // discrete state slot for the latched on/off bit; ZC predicate
@@ -150,10 +166,11 @@ const KindInfo *lookupKind(const std::string &K) {
     for (const char *Name : {
              "signal_from_workspace",
              "signal_bus_creator", "signal_bus_selector",
-             "signal_goto", "signal_from",
              "signal_if_action", "signal_switch_case_action",
              "signal_lookup_nd",
-             "signal_matlab_fcn", "signal_custom"}) {
+             "signal_custom"}) { // NOTE: signal_custom remains
+                                  // reserved — it needs a plugin
+                                  // hook the runtime doesn't have
       KindInfo I;
       I.Known = true;
       I.Supported = false;
@@ -259,6 +276,7 @@ public:
                     /*EdgeTriggered=*/false);
     if (!G) return std::nullopt;
     if (!contractBoundaries(*G)) return std::nullopt;
+    if (!contractGotoFrom(*G)) return std::nullopt;
     return G;
   }
 
@@ -463,6 +481,123 @@ private:
     }
     return true;
   }
+
+  //===-----------------------------------------------------------===//
+  // Tier-H carve-out — virtual wires (`signal_goto` / `signal_from`).
+  //
+  // Each `signal_goto` is a sink: it has a single incoming edge
+  // carrying the value to broadcast, and a `data.tag` naming the
+  // broadcast channel. Each `signal_from` is a source: no incoming
+  // edge, a `data.tag` naming the channel it subscribes to. After
+  // this pass, every outgoing edge of every `signal_from` is
+  // rewired so its source is the block driving the matching
+  // `signal_goto`, and both kinds are removed from the graph. Net
+  // effect: the goto/from pair act like a long-distance wire that
+  // never appears in the runtime IR.
+  //===-----------------------------------------------------------===//
+  bool contractGotoFrom(FlatGraph &G) {
+    auto dataTag = [](const Node &N) -> std::string {
+      if (auto *T = N.getData("tag")) return *T;
+      return std::string{};
+    };
+    // tag → (source flat block id, source port). Filled from each
+    // signal_goto's single incoming edge.
+    std::unordered_map<std::string, std::pair<std::string, std::string>>
+        TagSrc;
+    std::unordered_set<std::string> Drop;
+    for (auto &N : G.Nodes) {
+      if (N.Src->Kind == "signal_goto") {
+        std::string Tag = dataTag(*N.Src);
+        if (Tag.empty()) {
+          Diag_.error(N.Src->Loc,
+                      "signal_goto \"" + N.Id + "\" missing data.tag");
+          return false;
+        }
+        const FEdge *Inc = nullptr;
+        int InCount = 0;
+        for (auto &E : G.Edges) {
+          if (E.ToNode == N.Id) { Inc = &E; ++InCount; }
+        }
+        if (InCount == 0) {
+          Diag_.error(N.Src->Loc, "signal_goto \"" + N.Id +
+                                      "\" (tag \"" + Tag +
+                                      "\") has no incoming signal");
+          return false;
+        }
+        if (InCount > 1) {
+          Diag_.error(N.Src->Loc, "signal_goto \"" + N.Id +
+                                      "\" has " + std::to_string(InCount) +
+                                      " incoming edges; expected exactly 1");
+          return false;
+        }
+        if (TagSrc.count(Tag)) {
+          Diag_.error(N.Src->Loc, "duplicate signal_goto for tag \"" +
+                                      Tag + "\"");
+          return false;
+        }
+        TagSrc[Tag] = {Inc->FromNode, Inc->FromPort};
+        Drop.insert(N.Id);
+      } else if (N.Src->Kind == "signal_from") {
+        Drop.insert(N.Id);
+      }
+    }
+    if (Drop.empty()) return true;
+
+    // Rewire edges. An edge from a signal_from gets its source
+    // replaced by the tag's stored producer. Edges into a goto or
+    // edges incident to a from on the input side are dropped —
+    // gotos consume their input, froms have no input.
+    auto lookupKindFor = [&](const std::string &Id) -> const std::string * {
+      for (auto &N : G.Nodes)
+        if (N.Id == Id) return &N.Src->Kind;
+      return nullptr;
+    };
+    auto lookupNodeFor = [&](const std::string &Id) -> const Node * {
+      for (auto &N : G.Nodes)
+        if (N.Id == Id) return N.Src;
+      return nullptr;
+    };
+    std::vector<FEdge> Kept;
+    Kept.reserve(G.Edges.size());
+    for (auto &E : G.Edges) {
+      if (Drop.count(E.ToNode)) {
+        // Edge into goto = consumed. Edge into from = malformed
+        // (from has no input port); the loader's port validation
+        // would have caught it. Either way, drop.
+        continue;
+      }
+      if (Drop.count(E.FromNode)) {
+        const std::string *K = lookupKindFor(E.FromNode);
+        if (K && *K == "signal_from") {
+          const Node *FromN = lookupNodeFor(E.FromNode);
+          std::string Tag = FromN ? dataTag(*FromN) : std::string{};
+          auto It = TagSrc.find(Tag);
+          if (It == TagSrc.end()) {
+            Diag_.error(FromN ? FromN->Loc : SourceLocation{},
+                        "signal_from \"" + E.FromNode +
+                            "\" references tag \"" + Tag +
+                            "\" which no signal_goto provides");
+            return false;
+          }
+          FEdge Rewired = E;
+          Rewired.FromNode = It->second.first;
+          Rewired.FromPort = It->second.second;
+          Kept.push_back(std::move(Rewired));
+          continue;
+        }
+        // Edge from goto: gotos are sinks, so an outgoing edge is
+        // malformed. Drop defensively.
+        continue;
+      }
+      Kept.push_back(E);
+    }
+    G.Edges = std::move(Kept);
+    G.Nodes.erase(
+        std::remove_if(G.Nodes.begin(), G.Nodes.end(),
+                       [&](const FNode &N) { return Drop.count(N.Id) > 0; }),
+        G.Nodes.end());
+    return true;
+  }
 };
 
 } // namespace
@@ -642,6 +777,26 @@ std::optional<MflowLinkModel> lowerSignalFlow(const FlowDoc &Doc,
       Diag.error(B.Loc, "block \"" + B.Id +
                             "\" references unknown enable block \"" +
                             B.EnableSource + "\"");
+      return std::nullopt;
+    }
+  }
+
+  // Tier-H carve-out — validate every `signal_matlab_fcn`'s
+  // `params.expression` parses cleanly. The user gets a sourced
+  // diagnostic at lower time; the runtime cache then trusts the
+  // parse will succeed.
+  for (auto &B : M.Blocks) {
+    if (B.Kind != "signal_matlab_fcn") continue;
+    auto It = B.Params.find("expression");
+    if (It == B.Params.end() || It->second.empty()) {
+      Diag.error(B.Loc, "signal_matlab_fcn \"" + B.Id +
+                            "\" missing data.params.expression");
+      return std::nullopt;
+    }
+    std::string Err = validateMatlabFcnExpression(It->second);
+    if (!Err.empty()) {
+      Diag.error(B.Loc, "signal_matlab_fcn \"" + B.Id +
+                            "\": " + Err);
       return std::nullopt;
     }
   }

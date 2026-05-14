@@ -1,12 +1,15 @@
 #include "matlab/Flowchart/MflowLinkSim.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <ostream>
 #include <sstream>
+#include <string_view>
 #include <string>
 #include <unordered_map>
 
@@ -53,6 +56,288 @@ std::vector<double> parsePoly(const std::string &S) {
 const std::string *paramS(const MflBlock &B, const char *Key) {
   auto It = B.Params.find(Key);
   return It == B.Params.end() ? nullptr : &It->second;
+}
+
+} // namespace
+
+//===----------------------------------------------------------------------===//
+// Tier-H carve-out — `signal_matlab_fcn` expression tree + evaluator.
+//
+// A tiny recursive-descent parser handles enough of the MATLAB
+// expression grammar to express ~80% of "MATLAB Function Block"
+// formulas:
+//
+//   expr  := term (('+'|'-') term)*
+//   term  := unary (('*'|'/'|'.*'|'./') unary)*
+//   unary := '-' unary | power
+//   power := atom ('^' unary)?     ;; right-associative
+//   atom  := number | identifier | identifier '(' args ')' | '(' expr ')'
+//
+// Variables: `u` (alias for `u1`), `u1`..`uN`, `t`, `pi`, `e`.
+// Functions: sin/cos/tan/asin/acos/atan/atan2, sinh/cosh/tanh,
+//            exp/log/log10/log2/sqrt, abs/sign/floor/ceil/round,
+//            min/max/mod/rem/pow/hypot.
+//
+// The node is a tagged union allocated through `std::unique_ptr` so
+// the cache can be heterogeneous without a std::variant. Evaluation
+// walks the tree with a small switch.
+//===----------------------------------------------------------------------===//
+
+namespace {
+
+using Node = MatlabFcnTree;
+using NodeKind = Node::K;
+
+class ExprParser {
+public:
+  ExprParser(std::string_view S) : S_(S) {}
+
+  std::unique_ptr<Node> parse(std::string &Err) {
+    auto E = parseExpr();
+    skipWs();
+    if (!E || Failed_) {
+      Err = ErrMsg_.empty() ? std::string("invalid expression") : ErrMsg_;
+      return nullptr;
+    }
+    if (Pos_ != S_.size()) {
+      Err = "trailing content at \"" + std::string(S_.substr(Pos_)) + "\"";
+      return nullptr;
+    }
+    return E;
+  }
+
+private:
+  std::string_view S_;
+  size_t Pos_ = 0;
+  bool Failed_ = false;
+  std::string ErrMsg_;
+
+  void fail(std::string Msg) {
+    if (Failed_) return;
+    Failed_ = true;
+    ErrMsg_ = std::move(Msg);
+  }
+  void skipWs() {
+    while (Pos_ < S_.size() &&
+           (S_[Pos_] == ' ' || S_[Pos_] == '\t' ||
+            S_[Pos_] == '\n' || S_[Pos_] == '\r'))
+      ++Pos_;
+  }
+  bool peek(char C) {
+    skipWs();
+    return Pos_ < S_.size() && S_[Pos_] == C;
+  }
+  bool consume(char C) {
+    skipWs();
+    if (Pos_ < S_.size() && S_[Pos_] == C) { ++Pos_; return true; }
+    return false;
+  }
+  bool consume2(char A, char B) {
+    skipWs();
+    if (Pos_ + 1 < S_.size() && S_[Pos_] == A && S_[Pos_ + 1] == B) {
+      Pos_ += 2;
+      return true;
+    }
+    return false;
+  }
+  std::unique_ptr<Node> num(double V) {
+    auto N = std::make_unique<Node>();
+    N->Kind = NodeKind::Num;
+    N->Num = V;
+    return N;
+  }
+  std::unique_ptr<Node> bin(char Op, std::unique_ptr<Node> L,
+                            std::unique_ptr<Node> R) {
+    auto N = std::make_unique<Node>();
+    N->Kind = NodeKind::Bin;
+    N->Op = Op;
+    N->Children.push_back(std::move(L));
+    N->Children.push_back(std::move(R));
+    return N;
+  }
+
+  std::unique_ptr<Node> parseExpr() {
+    auto L = parseTerm();
+    while (L && !Failed_) {
+      skipWs();
+      if (peek('+'))      { ++Pos_; auto R = parseTerm(); if (!R) return nullptr; L = bin('+', std::move(L), std::move(R)); }
+      else if (peek('-')) { ++Pos_; auto R = parseTerm(); if (!R) return nullptr; L = bin('-', std::move(L), std::move(R)); }
+      else break;
+    }
+    return L;
+  }
+  std::unique_ptr<Node> parseTerm() {
+    auto L = parseUnary();
+    while (L && !Failed_) {
+      skipWs();
+      if (consume2('.', '*'))      { auto R = parseUnary(); if (!R) return nullptr; L = bin('*', std::move(L), std::move(R)); }
+      else if (consume2('.', '/')) { auto R = parseUnary(); if (!R) return nullptr; L = bin('/', std::move(L), std::move(R)); }
+      else if (peek('*'))          { ++Pos_; auto R = parseUnary(); if (!R) return nullptr; L = bin('*', std::move(L), std::move(R)); }
+      else if (peek('/'))          { ++Pos_; auto R = parseUnary(); if (!R) return nullptr; L = bin('/', std::move(L), std::move(R)); }
+      else break;
+    }
+    return L;
+  }
+  std::unique_ptr<Node> parseUnary() {
+    skipWs();
+    if (peek('-')) {
+      ++Pos_;
+      auto C = parseUnary();
+      if (!C) return nullptr;
+      auto N = std::make_unique<Node>();
+      N->Kind = NodeKind::Neg;
+      N->Children.push_back(std::move(C));
+      return N;
+    }
+    if (peek('+')) { ++Pos_; return parseUnary(); }
+    return parsePower();
+  }
+  std::unique_ptr<Node> parsePower() {
+    auto L = parseAtom();
+    if (!L) return nullptr;
+    skipWs();
+    if (consume2('.', '^') || peek('^')) {
+      if (Pos_ < S_.size() && S_[Pos_] == '^') ++Pos_;
+      auto R = parseUnary();
+      if (!R) return nullptr;
+      L = bin('^', std::move(L), std::move(R));
+    }
+    return L;
+  }
+  std::unique_ptr<Node> parseAtom() {
+    skipWs();
+    if (Pos_ >= S_.size()) { fail("unexpected end of expression"); return nullptr; }
+    char C = S_[Pos_];
+    if (C == '(') {
+      ++Pos_;
+      auto E = parseExpr();
+      if (!E) return nullptr;
+      if (!consume(')')) { fail("expected ')'"); return nullptr; }
+      return E;
+    }
+    if (std::isdigit(static_cast<unsigned char>(C)) || C == '.') {
+      size_t Start = Pos_;
+      while (Pos_ < S_.size() &&
+             (std::isdigit(static_cast<unsigned char>(S_[Pos_])) ||
+              S_[Pos_] == '.')) ++Pos_;
+      if (Pos_ < S_.size() && (S_[Pos_] == 'e' || S_[Pos_] == 'E')) {
+        ++Pos_;
+        if (Pos_ < S_.size() && (S_[Pos_] == '+' || S_[Pos_] == '-')) ++Pos_;
+        while (Pos_ < S_.size() &&
+               std::isdigit(static_cast<unsigned char>(S_[Pos_]))) ++Pos_;
+      }
+      try { return num(std::stod(std::string(S_.substr(Start, Pos_ - Start)))); }
+      catch (...) { fail("invalid number literal"); return nullptr; }
+    }
+    if (std::isalpha(static_cast<unsigned char>(C)) || C == '_') {
+      size_t Start = Pos_;
+      while (Pos_ < S_.size() &&
+             (std::isalnum(static_cast<unsigned char>(S_[Pos_])) ||
+              S_[Pos_] == '_')) ++Pos_;
+      std::string Name(S_.substr(Start, Pos_ - Start));
+      skipWs();
+      if (peek('(')) {
+        ++Pos_;
+        auto N = std::make_unique<Node>();
+        N->Kind = NodeKind::Call;
+        N->Name = Name;
+        if (!peek(')')) {
+          while (true) {
+            auto Arg = parseExpr();
+            if (!Arg) return nullptr;
+            N->Children.push_back(std::move(Arg));
+            if (consume(',')) continue;
+            break;
+          }
+        }
+        if (!consume(')')) { fail("expected ')' in call to " + Name); return nullptr; }
+        return N;
+      }
+      auto N = std::make_unique<Node>();
+      N->Kind = NodeKind::Var;
+      N->Name = std::move(Name);
+      return N;
+    }
+    fail(std::string("unexpected character '") + C + "'");
+    return nullptr;
+  }
+};
+
+double evalMatlabFcn(const Node *N,
+                     const std::vector<double> &U,
+                     double T) {
+  if (!N) return 0.0;
+  switch (N->Kind) {
+  case NodeKind::Num: return N->Num;
+  case NodeKind::Var: {
+    const std::string &Name = N->Name;
+    if (Name == "t")   return T;
+    if (Name == "u")   return U.empty() ? 0.0 : U[0];
+    if (Name == "pi")  return M_PI;
+    if (Name == "e")   return M_E;
+    if (Name.size() > 1 && Name[0] == 'u' &&
+        std::all_of(Name.begin() + 1, Name.end(),
+                    [](char C) {
+                      return std::isdigit(static_cast<unsigned char>(C));
+                    })) {
+      int Idx = std::stoi(Name.substr(1));
+      if (Idx >= 1 && static_cast<size_t>(Idx) <= U.size())
+        return U[Idx - 1];
+    }
+    return 0.0;
+  }
+  case NodeKind::Neg:
+    return -evalMatlabFcn(N->Children[0].get(), U, T);
+  case NodeKind::Bin: {
+    double L = evalMatlabFcn(N->Children[0].get(), U, T);
+    double R = evalMatlabFcn(N->Children[1].get(), U, T);
+    switch (N->Op) {
+    case '+': return L + R;
+    case '-': return L - R;
+    case '*': return L * R;
+    case '/': return L / R;
+    case '^': return std::pow(L, R);
+    }
+    return 0.0;
+  }
+  case NodeKind::Call: {
+    const std::string &F = N->Name;
+    auto arg = [&](size_t I) {
+      return I < N->Children.size()
+                 ? evalMatlabFcn(N->Children[I].get(), U, T)
+                 : 0.0;
+    };
+    if (F == "sin")    return std::sin(arg(0));
+    if (F == "cos")    return std::cos(arg(0));
+    if (F == "tan")    return std::tan(arg(0));
+    if (F == "asin")   return std::asin(arg(0));
+    if (F == "acos")   return std::acos(arg(0));
+    if (F == "atan")   return std::atan(arg(0));
+    if (F == "atan2")  return std::atan2(arg(0), arg(1));
+    if (F == "sinh")   return std::sinh(arg(0));
+    if (F == "cosh")   return std::cosh(arg(0));
+    if (F == "tanh")   return std::tanh(arg(0));
+    if (F == "exp")    return std::exp(arg(0));
+    if (F == "log")    return std::log(arg(0));
+    if (F == "log10")  return std::log10(arg(0));
+    if (F == "log2")   return std::log2(arg(0));
+    if (F == "sqrt")   return std::sqrt(arg(0));
+    if (F == "abs")    return std::fabs(arg(0));
+    if (F == "sign") { double V = arg(0); return (V > 0) - (V < 0); }
+    if (F == "floor")  return std::floor(arg(0));
+    if (F == "ceil")   return std::ceil(arg(0));
+    if (F == "round")  return std::round(arg(0));
+    if (F == "min")    return std::fmin(arg(0), arg(1));
+    if (F == "max")    return std::fmax(arg(0), arg(1));
+    if (F == "mod")    return std::fmod(arg(0), arg(1));
+    if (F == "rem")    return arg(0) - arg(1) * std::trunc(arg(0) / arg(1));
+    if (F == "pow")    return std::pow(arg(0), arg(1));
+    if (F == "hypot")  return std::hypot(arg(0), arg(1));
+    if (F == "square") { double V = arg(0); return V * V; }
+    return 0.0;
+  }
+  }
+  return 0.0;
 }
 
 } // namespace
@@ -131,6 +416,7 @@ MflowLinkSim::MflowLinkSim(const MflowLinkModel &M) : M_(M) {
   Lookup1DCache_.assign(N, {});
   Lookup2DCache_.assign(N, {});
   NoiseSeed_.assign(N, 0);
+  MatlabFcnCache_.resize(N);
   auto expandPoly = [](const std::vector<double> &Roots) {
     // Product over `(s - r_k)` expanded to coefficient form, highest
     // power first. Empty roots ⇒ {1} (the "constant 1" polynomial).
@@ -209,6 +495,18 @@ MflowLinkSim::MflowLinkSim(const MflowLinkModel &M) : M_(M) {
           MflowLinkSim::paramD(B, "delay", 0.0);
       TransportBuf_[I].InitialOutput =
           MflowLinkSim::paramD(B, "initialOutput", 0.0);
+    } else if (B.Kind == "signal_matlab_fcn") {
+      // Parse `params.expression` once. A failed parse leaves the
+      // cache slot empty; the evaluator emits 0.0 and the user has
+      // already seen the diagnostic from the validation pass in
+      // lowerSignalFlow (driver-side — see SignalFlowLowering.cpp).
+      auto *ES = paramS(B, "expression");
+      if (ES && !ES->empty()) {
+        std::string Err;
+        ExprParser P(*ES);
+        MatlabFcnCache_[I] = P.parse(Err);
+        (void)Err; // already reported at lowering
+      }
     }
   }
 
@@ -913,6 +1211,27 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
       // ZOH. The fireDiscreteTicks scheduler is what advances the
       // state on each sample tick.
       Out_[I] = Z_[DiscStateOffset_[I]];
+    } else if (K == "signal_matlab_fcn") {
+      // Tier-H carve-out — pack every connected input port (`u1`,
+      // `u2`, …) into a flat vector ordered by port id, then walk
+      // the cached expression tree. Empty cache (parse failure)
+      // falls through to 0.
+      std::vector<std::pair<int, double>> Sorted;
+      for (auto &P : Inputs_[I]) {
+        if (P.DstPort.size() > 1 && P.DstPort[0] == 'u') {
+          try {
+            int Idx = std::stoi(P.DstPort.substr(1));
+            Sorted.emplace_back(Idx, Out_[P.SrcBlock]);
+          } catch (...) {}
+        } else if (P.DstPort == "in" || P.DstPort == "in1") {
+          Sorted.emplace_back(1, Out_[P.SrcBlock]);
+        }
+      }
+      std::sort(Sorted.begin(), Sorted.end());
+      std::vector<double> U;
+      U.reserve(Sorted.size());
+      for (auto &PR : Sorted) U.push_back(PR.second);
+      Out_[I] = evalMatlabFcn(MatlabFcnCache_[I].get(), U, T);
     } else {
       // Loader-level reserved kinds are rejected at lowering, so
       // anything reaching here is an evaluator gap — treat as
@@ -1408,6 +1727,14 @@ MflowLinkSim::currentLoggedOutputs() const {
   for (size_t Ci = 0; Ci < LogBlocks_.size(); ++Ci)
     Out.emplace_back(LogNames_[Ci], Out_[LogBlocks_[Ci]]);
   return Out;
+}
+
+std::string validateMatlabFcnExpression(const std::string &Expr) {
+  ExprParser P(Expr);
+  std::string Err;
+  auto Tree = P.parse(Err);
+  if (Tree) return std::string{};
+  return Err.empty() ? std::string("invalid expression") : Err;
 }
 
 } // namespace matlab::flowchart

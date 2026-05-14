@@ -84,6 +84,7 @@ diagnostic) until its evaluator lands.
 | `signal_logical`    | ✓ | `op: "AND"`                                              | Tier-H — `AND`/`OR`/`NAND`/`NOR`/`XOR` over every connected input, or `NOT` on `in1`. Truthiness keyed off `value ≠ 0` |
 | `signal_compare_to_zero`     | ✓ | `op: ">"`                                       | Tier-H — predicate on input vs. zero |
 | `signal_compare_to_constant` | ✓ | `op: ">"`, `constant: 0.0`                      | Tier-H — predicate on input vs. constant |
+| `signal_matlab_fcn`          | ✓ | `expression` (string, required)                 | Tier-H carve-out — inline MATLAB expression evaluator. Variables `u1`..`uN` are the input ports (also `u` ≡ `u1`), `t` is simulation time, plus `pi` and `e`. Operators `+ - * / ^ .* ./ .^` and unary `-`. Functions: sin/cos/tan/asin/acos/atan/atan2, sinh/cosh/tanh, exp/log/log10/log2, sqrt/abs/sign/floor/ceil/round, min/max/mod/rem/pow/hypot/square. Expressions are parsed once at construction and rejected at lowering with a sourced diagnostic on syntax failure |
 | `signal_relay`      | ✓ | `onPoint: 0.5`, `offPoint: -0.5`, `onValue: 1.0`, `offValue: 0.0`, `initialState: 0.0` | Tier-E carve-out — hysteretic on/off switch. State flips at major-step boundaries only; the dead-band between `offPoint` and `onPoint` gives the latched output its persistence. Registers two zero-crossing predicates so the bisector lands transitions sub-step accurately. |
 
 ## Signal routing
@@ -95,6 +96,8 @@ diagnostic) until its evaluator lands.
 | `signal_switch` | stub | `threshold: 0.0`             | Tier-E: zero-crossing on `in2 − threshold`; current evaluator passes through `in1` |
 | `signal_multiport_switch` | ✓ | `defaultOutput: 0.0`     | Tier-H — `in1` is the 1-based selector; `in2`, `in3`, … are the data lines. Out-of-range selectors fall through to `defaultOutput` |
 | `signal_merge`            | ✓ | `initialOutput: 0.0`     | Tier-H — first non-zero input in port order wins. Falls through to `initialOutput` when every input is zero |
+| `signal_goto`             | ✓ | `tag` (in `data`, not `params`) — broadcast channel name      | Tier-H carve-out — virtual wire. Sink with one incoming edge; the Flattener's `contractGotoFrom` pass rewires every matching `signal_from`'s outgoing edges to the goto's source and drops both kinds from the IR |
+| `signal_from`             | ✓ | `tag` (in `data`, not `params`)                               | Tier-H carve-out — paired with `signal_goto`. Reading from an unknown tag is a sourced lowering error |
 
 ## Lookup tables
 
@@ -138,9 +141,8 @@ Tier-H "ship more evaluators" axis:
 |---|---|
 | `signal_bus_creator`, `signal_bus_selector` | First-class vector / struct signal type in the IR. Today every wire is scalar `double` — a bus needs a composite signal carrier plus per-port type checking. Roadmap §16 punts this until the scalar path is solid. |
 | `signal_from_workspace` | Mechanism to bind a runtime `simout`-style variable into the simulation as a time-indexed source. The matlabc workspace model and the mflowLink runtime currently share no such handle. |
-| `signal_matlab_fcn`, `signal_custom` | An inline MATLAB expression evaluator (`signal_matlab_fcn`'s `expression: "u1 * u2 + 3"` shape) or a plugin layer for user-defined evaluators. Both want to reuse the existing MATLAB parser via a Sema-free expression path that doesn't currently exist. |
+| `signal_custom` | Plugin layer for user-defined evaluators. The shipped `signal_matlab_fcn` covers the inline-expression case; `signal_custom` would let the IDE register evaluators implemented elsewhere (a `.cpp` the user compiles into the runtime, a remote service, …). Needs a registry + ABI design. |
 | `signal_if_action`, `signal_switch_case_action` | A parent `signal_if_subsystem` / `signal_switch_case_subsystem` container that scopes which case fires. The IDE's `SignalFlowParamSpec` doesn't ship these containers yet — IDE-side prerequisite. |
-| `signal_goto`, `signal_from` | A virtual-wire lowering pass that rewires every `signal_from(tag = T)` to the source of the matching `signal_goto(tag = T)` and drops both blocks. Self-contained but ~150 LOC; deferred to its own PR. |
 | `signal_lookup_nd` | Settle the `lookup_1d` / `lookup_2d` pair (breakpoint shape + extrapolation policy + cached table format) before generalising to N dimensions. |
 
 ## Cross-repo invariants

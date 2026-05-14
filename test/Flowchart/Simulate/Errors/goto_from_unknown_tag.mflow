@@ -1,0 +1,33 @@
+{
+  "schema": "matforge.flowchart",
+  "version": "0.1.0",
+  "entry": "bad_tag",
+  "settings": { "kind": "signal_flow" },
+  "flows": [
+    {
+      "id": "flow_bad_tag",
+      "kind": "program",
+      "name": "bad_tag",
+      "signature": { "inputs": [], "outputs": [] },
+      "nodes": [
+        { "id": "src", "kind": "signal_constant",
+          "data": { "params": { "value": 1.0 } },
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+        { "id": "send", "kind": "signal_goto",
+          "data": { "tag": "a" },
+          "ports": { "in": [{"id": "in"}], "out": [] } },
+        { "id": "recv", "kind": "signal_from",
+          "data": { "tag": "b" },
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+        { "id": "term", "kind": "signal_terminator",
+          "ports": { "in": [{"id": "in"}], "out": [] } }
+      ],
+      "edges": [
+        { "id": "e1", "kind": "data",
+          "from": {"node": "src",  "port": "out"}, "to": {"node": "send", "port": "in"} },
+        { "id": "e2", "kind": "data",
+          "from": {"node": "recv", "port": "out"}, "to": {"node": "term", "port": "in"} }
+      ]
+    }
+  ]
+}

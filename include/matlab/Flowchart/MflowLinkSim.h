@@ -3,6 +3,7 @@
 #include "matlab/Flowchart/MflowLinkModel.h"
 
 #include <iosfwd>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -29,6 +30,28 @@ namespace flowchart {
 // Mux/Demux/Switch (algebra only — zero-crossing root-finding is
 // Tier E). Discrete blocks (Unit Delay / ZOH) are Tier E.
 //===----------------------------------------------------------------------===//
+
+// Tier-H carve-out — parse-only validation of a `signal_matlab_fcn`
+// expression. Returns an empty string on success, or a human-readable
+// error message on syntax failure. The result of a successful call is
+// equivalent to what `MflowLinkSim`'s constructor would parse, so a
+// caller can do the parse + error-report at lowering time and trust
+// the runtime cache will succeed too.
+std::string validateMatlabFcnExpression(const std::string &Expr);
+
+// Parsed expression tree for a `signal_matlab_fcn` block. Public so
+// the runtime cache (`MflowLinkSim::MatlabFcnCache_`) can hold
+// `unique_ptr<MatlabFcnTree>` without dragging in an opaque-type
+// dance. Only `MflowLinkSim.cpp` builds and walks these — callers
+// shouldn't construct them directly.
+struct MatlabFcnTree {
+  enum class K { Num, Var, Neg, Bin, Call };
+  K Kind = K::Num;
+  double Num = 0.0;
+  std::string Name;
+  char Op = '+';
+  std::vector<std::unique_ptr<MatlabFcnTree>> Children;
+};
 
 class MflowLinkSim {
 public:
@@ -193,6 +216,11 @@ private:
   // - `NoiseSeed_` is the per-block RNG state (xorshift64). Reseeded
   //   on `reset()` from `params.seed`.
   std::vector<uint64_t> NoiseSeed_;
+  // - `MatlabFcnCache_[I]` holds the parsed expression tree for a
+  //   `signal_matlab_fcn` block. Empty `unique_ptr` means "not a
+  //   matlab_fcn block" or "parse failed and the block was rejected
+  //   at lowering".
+  std::vector<std::unique_ptr<MatlabFcnTree>> MatlabFcnCache_;
 
   double T_ = 0.0;
   size_t MajorSteps_ = 0;

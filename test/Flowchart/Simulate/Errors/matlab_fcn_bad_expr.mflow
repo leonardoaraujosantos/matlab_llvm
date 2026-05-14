@@ -1,0 +1,30 @@
+{
+  "schema": "matforge.flowchart",
+  "version": "0.1.0",
+  "entry": "bad_expr",
+  "settings": { "kind": "signal_flow" },
+  "flows": [
+    {
+      "id": "flow_bad_expr",
+      "kind": "program",
+      "name": "bad_expr",
+      "signature": { "inputs": [], "outputs": [] },
+      "nodes": [
+        { "id": "src", "kind": "signal_constant",
+          "data": { "params": { "value": 1.0 } },
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+        { "id": "fcn", "kind": "signal_matlab_fcn",
+          "data": { "params": { "expression": "u1 + sin(" } },
+          "ports": { "in": [{"id": "u1"}], "out": [{"id": "out"}] } },
+        { "id": "term", "kind": "signal_terminator",
+          "ports": { "in": [{"id": "in"}], "out": [] } }
+      ],
+      "edges": [
+        { "id": "e1", "kind": "data",
+          "from": {"node": "src", "port": "out"}, "to": {"node": "fcn",  "port": "u1"} },
+        { "id": "e2", "kind": "data",
+          "from": {"node": "fcn", "port": "out"}, "to": {"node": "term", "port": "in"} }
+      ]
+    }
+  ]
+}

@@ -191,6 +191,36 @@ DI_T2=$(printf '%s\n' "$DI" | awk -F, '$1+0==2 {print $2; exit}')
 check "discrete_integrator hits 2.0 at t=2" \
   "awk 'BEGIN{exit !(($DI_T2 - 2)^2 < 1e-9)}'" ""
 
+#--- goto_from: virtual-wire elision -------------------------------------
+GF="$("$MATLABC" -simulate "$EX/goto_from.mflow")"
+GF_HEAD=$(printf '%s\n' "$GF" | head -1)
+check "goto/from header"  "[[ '$GF_HEAD' == 't,src,amp_a,amp_b,scope' ]]" ""
+# At t = 0.5: src = sin(π·0.5) = 1, so amp_a = 2 and amp_b = -3,
+# scope = 2 + (-3) = -1. Confirms the from-blocks were rewired to
+# the goto's source and the goto+from pair is gone from the IR.
+GF_T05=$(printf '%s\n' "$GF" | awk -F, '$1+0==0.5 { print $5; exit }')
+check "goto/from scope at t=0.5 == -1" \
+  "awk 'BEGIN{exit !(($GF_T05 + 1)^2 < 1e-9)}'" ""
+
+#--- matlab_fcn: expression evaluator ------------------------------------
+MF="$("$MATLABC" -simulate "$EX/matlab_fcn.mflow")"
+MF_HEAD=$(printf '%s\n' "$MF" | head -1)
+check "matlab_fcn header"  "[[ '$MF_HEAD' == 't,src1,src2,fcn,scope' ]]" ""
+# At t = 0: u1=0, u2=0 → 0·sin(0) + sqrt(0) - 1 = -1.0
+MF_T0=$(printf '%s\n' "$MF" | awk -F, 'NR>1 && $1+0==0 { print $4; exit }')
+check "matlab_fcn(0,0) == -1"   "awk 'BEGIN{exit !(($MF_T0 + 1)^2 < 1e-9)}'" ""
+# At t = 0.5: u1=1, u2=0.25 → 1·sin(π) + sqrt(0.25) - 1 = -0.5
+MF_T05=$(printf '%s\n' "$MF" | awk -F, '$1+0==0.5 { print $4; exit }')
+check "matlab_fcn at t=0.5 == -0.5" \
+  "awk 'BEGIN{exit !(($MF_T05 + 0.5)^2 < 1e-6)}'" ""
+# At t = 2: u1≈0, u2=1.0 → 0·sin(4π) + sqrt(1) - 1 = 0
+MF_T2=$(printf '%s\n' "$MF" | awk -F, '$1+0==2 { print $4; exit }')
+check "matlab_fcn at t=2 == 0"      "awk 'BEGIN{exit !($MF_T2^2 < 1e-9)}'" ""
+# At t = 3: u1≈0, u2=1.5 → sqrt(1.5) - 1 ≈ 0.2247
+MF_T3=$(printf '%s\n' "$MF" | awk -F, '$1+0==3 { print $4; exit }')
+check "matlab_fcn at t=3 ≈ 0.2247" \
+  "awk 'BEGIN{exit !(($MF_T3 - 0.2247448)^2 < 1e-6)}'" ""
+
 echo "----"
 echo "passed: $pass    failed: $fail"
 exit $(( fail > 0 ? 1 : 0 ))

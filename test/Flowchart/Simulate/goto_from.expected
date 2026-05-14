@@ -1,0 +1,16 @@
+MflowLinkModel entry=goto_from blocks=5 edges=5
+  solver type=variable_step algorithm=ode45 startTime=0 stopTime=4
+  states continuous=0 discrete=0
+  exec-order:
+    0 src kind=signal_sine sample=fixed_in_minor log
+    1 amp_a kind=signal_gain sample=fixed_in_minor log
+    2 amp_b kind=signal_gain sample=fixed_in_minor log
+    3 sum kind=signal_sum sample=fixed_in_minor
+    4 scope kind=signal_scope sample=fixed_in_minor
+  zero-crossings: none
+  edges:
+    e_va src:out -> amp_a:in
+    e_vb src:out -> amp_b:in
+    e_a amp_a:out -> sum:in1
+    e_b amp_b:out -> sum:in2
+    e_sc sum:out -> scope:in
