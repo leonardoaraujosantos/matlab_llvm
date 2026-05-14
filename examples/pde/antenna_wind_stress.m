@@ -179,19 +179,27 @@ ext_faces(nf_orig + 4, 2) = n_orig + 5;
 ext_faces(nf_orig + 4, 3) = n_orig + 4;
 ext_faces(nf_orig + 4, 4) = n_orig + 7;
 
-% Extended vm field: arrow nodes get the global peak vM as marker
-% so they render in the bright end of the colour ramp.
+% Extended vm field with percentile clamp.  Cantilever bending
+% gives a strongly non-uniform stress field: peak at the clamped
+% base, near-zero at the free top.  A linear colour map over
+% [0, peak] collapses ~99% of the antenna into dark-blue.  Clamp
+% every nodal value above (peak * 0.05) to that ceiling: the
+% bulk of the antenna body now spans the full colour ramp while
+% hotspots saturate to the bright end.
 peak_marker = 0.0;
 for i = 1:n_orig
     v = vm_node(i);
     if v > peak_marker; peak_marker = v; end
 end
+clamp_max = peak_marker * 0.005;   % 0.5 % of peak — aggressive clip
 ext_vm = zeros(ntot, 1);
 for i = 1:n_orig
-    ext_vm(i) = vm_node(i);
+    v = vm_node(i);
+    if v > clamp_max; v = clamp_max; end
+    ext_vm(i) = v;
 end
 for i = 1:7
-    ext_vm(n_orig + i) = peak_marker;
+    ext_vm(n_orig + i) = clamp_max;
 end
 
 % Exaggerate displacement 500× on the antenna nodes (arrow stays
@@ -207,7 +215,7 @@ pdeplot3d_deform_scale(500.0);
 pdeplot3d_deformation(ext_disp);
 pdeplot3d(ext_nodes, ext_faces, ext_vm);
 
-title('Antenna 5G: 200 km/h wind on -y face (arrow), von Mises (Pa)');
+title('Antenna 5G: 200 km/h wind (arrow), vM clamped at 0.5% of peak');
 saveas(gcf, '/tmp/antenna_wind.png');
 
 % --- Summary -----------------------------------------------------
