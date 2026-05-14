@@ -55,9 +55,10 @@ end
 
 % Voxel size — the antenna has thin members; voxel=0.05 is too
 % coarse (mast falls through), 0.025 captures the topology but
-% the slender mast still looks blocky.  0.015 gives a clean
-% mast plus visible features on the housing.
-voxel = 0.015;
+% looks blocky.  0.012 is the sweet spot: ~25 k nodes / ~75 k
+% tets / ~75 k DOFs; PCG converges in a few minutes.  Drop to
+% 0.008 for finer detail at the cost of ~10× compute.
+voxel = 0.012;
 mesh = pde_voxelize_surface(surface, voxel);
 nodes = pde_mesh_nodes(mesh);
 tets  = pde_mesh_tets(mesh);
@@ -90,7 +91,7 @@ Fc = pde_sys_F(sys2);
 % condition number high enough that converging to 1e-6 needs
 % ~50 k iterations.  1e-4 is fine for stress-visualisation
 % accuracy.
-res    = pcg(Kc, Fc, 1.0e-4, 20000.0);
+res    = pcg(Kc, Fc, 1.0e-4, 30000.0);
 u      = pcg_x(res);
 flag   = pcg_flag(res);
 iters  = pcg_iter(res);
@@ -100,12 +101,113 @@ relres = pcg_relres(res);
 vm_node = pde_node_von_mises_3d(mesh, u, E, nu);
 disp    = pde_reshape_disp_3d(u);
 
-% Exaggerate displacement 50× so the deformed-shape effect is
-% visible at this load magnitude (typical for cantilever bending).
-pdeplot3d_deform_scale(50.0);
-pdeplot3d_deformation(disp);
-pdeplot3d(nodes, faces, vm_node);
-title('Antenna 5G: 200 km/h wind, von Mises stress (Pa)');
+% --- Wind direction arrow baked into the mesh --------------------
+% Append a short arrow-shaped triangular ribbon on the windward
+% side (-y direction at mid-height z=0).  The arrow is built from
+% 5 extra nodes and 3 extra triangles; we give those node rows a
+% high vM marker value so they render in the warm/red end of the
+% colour map, visibly contrasted against the antenna body.
+%
+% Arrow geometry (in the FLIPPED frame, after the z-flip above):
+%   tail   = ( 0,    -0.70, 0)
+%   shaft  = ( 0,    -0.40, 0)   (where the head starts)
+%   tip    = ( 0,    -0.32, 0)
+%   leftV  = (-0.06, -0.42, 0)
+%   rightV = ( 0.06, -0.42, 0)
+%
+% Triangles (1-based node refs into the extended Nodes array):
+%   shaft strip (2 thin rectangles -> 4 triangles):
+%     a thin rectangle around the shaft line, in the z=0 plane
+%   tip:  shaft -> leftV -> rightV  (an arrowhead triangle)
+%
+% The antenna's existing surface nodes / faces are kept; we
+% append the arrow vertices and faces.
+
+n_orig = size(nodes, 1);
+arr_pts = [
+   0.00, -0.70, -0.02;
+   0.00, -0.70,  0.02;
+   0.00, -0.40, -0.02;
+   0.00, -0.40,  0.02;
+   0.00, -0.32,  0.00;
+  -0.06, -0.42,  0.00;
+   0.06, -0.42,  0.00
+];
+
+% Build extended Nodes ((Nn + 7) x 3)
+ntot = n_orig + 7;
+ext_nodes = zeros(ntot, 3);
+for i = 1:n_orig
+    ext_nodes(i, 1) = nodes(i, 1);
+    ext_nodes(i, 2) = nodes(i, 2);
+    ext_nodes(i, 3) = nodes(i, 3);
+end
+for i = 1:7
+    ext_nodes(n_orig + i, 1) = arr_pts(i, 1);
+    ext_nodes(n_orig + i, 2) = arr_pts(i, 2);
+    ext_nodes(n_orig + i, 3) = arr_pts(i, 3);
+end
+
+% Build extended Faces.  Each face row is [face_id, n1, n2, n3].
+% We use face_id = 99 for the arrow triangles so it doesn't
+% collide with the mesh's 1..6 ids.
+nf_orig = size(faces, 1);
+ftot = nf_orig + 4;
+ext_faces = zeros(ftot, 4);
+for i = 1:nf_orig
+    ext_faces(i, 1) = faces(i, 1);
+    ext_faces(i, 2) = faces(i, 2);
+    ext_faces(i, 3) = faces(i, 3);
+    ext_faces(i, 4) = faces(i, 4);
+end
+% Shaft ribbon -- 2 triangles forming a thin rectangle
+ext_faces(nf_orig + 1, 1) = 99;
+ext_faces(nf_orig + 1, 2) = n_orig + 1;
+ext_faces(nf_orig + 1, 3) = n_orig + 2;
+ext_faces(nf_orig + 1, 4) = n_orig + 4;
+ext_faces(nf_orig + 2, 1) = 99;
+ext_faces(nf_orig + 2, 2) = n_orig + 1;
+ext_faces(nf_orig + 2, 3) = n_orig + 4;
+ext_faces(nf_orig + 2, 4) = n_orig + 3;
+% Arrowhead -- 2 triangles forming the V
+ext_faces(nf_orig + 3, 1) = 99;
+ext_faces(nf_orig + 3, 2) = n_orig + 5;
+ext_faces(nf_orig + 3, 3) = n_orig + 6;
+ext_faces(nf_orig + 3, 4) = n_orig + 3;
+ext_faces(nf_orig + 4, 1) = 99;
+ext_faces(nf_orig + 4, 2) = n_orig + 5;
+ext_faces(nf_orig + 4, 3) = n_orig + 4;
+ext_faces(nf_orig + 4, 4) = n_orig + 7;
+
+% Extended vm field: arrow nodes get the global peak vM as marker
+% so they render in the bright end of the colour ramp.
+peak_marker = 0.0;
+for i = 1:n_orig
+    v = vm_node(i);
+    if v > peak_marker; peak_marker = v; end
+end
+ext_vm = zeros(ntot, 1);
+for i = 1:n_orig
+    ext_vm(i) = vm_node(i);
+end
+for i = 1:7
+    ext_vm(n_orig + i) = peak_marker;
+end
+
+% Exaggerate displacement 500× on the antenna nodes (arrow stays
+% put at its reference position).
+ext_disp = zeros(ntot, 3);
+for i = 1:n_orig
+    ext_disp(i, 1) = disp(i, 1);
+    ext_disp(i, 2) = disp(i, 2);
+    ext_disp(i, 3) = disp(i, 3);
+end
+
+pdeplot3d_deform_scale(500.0);
+pdeplot3d_deformation(ext_disp);
+pdeplot3d(ext_nodes, ext_faces, ext_vm);
+
+title('Antenna 5G: 200 km/h wind on -y face (arrow), von Mises (Pa)');
 saveas(gcf, '/tmp/antenna_wind.png');
 
 % --- Summary -----------------------------------------------------
