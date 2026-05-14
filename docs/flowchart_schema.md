@@ -789,3 +789,81 @@ cc /tmp/hello.c runtime/matlab_runtime.c -o /tmp/hello -lm && /tmp/hello
 For more example shapes covering every block kind, see
 [`examples/mflow/`](../examples/mflow/) and the test corpus under
 [`test/Flowchart/EmitMatlab/`](../test/Flowchart/EmitMatlab/).
+
+---
+
+## Signal-flow extensions (mflowLink)
+
+`.mflow` is one file format with two dialects, selected by
+`settings.kind`:
+
+- `"control_flow"` (default; absent ⇒ this) — the structured
+  *program* described above: `start` / `if` / `for` / … nodes that
+  lower to MATLAB statements.
+- `"signal_flow"` — an **mflowLink** *block diagram*: `signal_*`
+  blocks wired by `"kind": "data"` edges, integrated over time by
+  the simulation runtime. See [`mflow_link_roadmap.md`](mflow_link_roadmap.md).
+
+All signal-flow fields are **additive** — the schema version stays
+`0.1.0`, and a control-flow `.mflow` is byte-for-byte unaffected. An
+older loader simply ignores the fields it doesn't recognise.
+
+### `settings.kind` / `settings.solver` / `settings.snapshot`
+
+```jsonc
+"settings": {
+  "kind": "signal_flow",              // "control_flow" (default) | "signal_flow"
+  "solver": {                         // optional; defaults shown
+    "type":                "variable_step",  // "fixed_step" | "variable_step"
+    "algorithm":           "ode45",           // ode45|ode23|ode23s|ode15s|euler|heun
+    "startTime":           0.0,
+    "stopTime":            10.0,
+    "maxStep":             "auto",            // "auto" | "<seconds>"
+    "minStep":             "auto",
+    "relTol":              1e-3,
+    "absTol":              1e-6,
+    "zeroCrossing":        true,
+    "algebraicLoopMethod": "trust_region"     // trust_region | newton | off
+  },
+  "snapshot": {                       // optional; defaults shown
+    "enabled": true,
+    "depth":   256,
+    "fields":  "states"               // "states" | "states+inputs" | "all"
+  }
+}
+```
+
+Sub-field keys are camelCase on disk, matching the IDE's `JSONEncoder`
+output. An unknown `kind` is a hard load error; absent `solver` /
+`snapshot` blocks fall back to the defaults above.
+
+### Signal-flow nodes
+
+A signal-flow flow has **no `start` / `end` nodes** — the
+program-shape validation is skipped for `signal_flow` documents.
+Nodes use the `signal_*` kinds (`signal_sine`, `signal_gain`,
+`signal_transfer_fcn`, `signal_integrator`, `signal_scope`, …); the
+full reserved set is in [`mflow_link_roadmap.md`](mflow_link_roadmap.md) §5.2.
+The loader accepts and round-trips **any** `signal_*` kind — a kind
+whose evaluator hasn't shipped is rejected later, at lowering time,
+not at load time.
+
+Signal-flow nodes carry extra optional `data` fields:
+
+```jsonc
+{ "id": "k", "kind": "signal_gain",
+  "data": {
+    "sample_time": "continuous",     // "continuous" | "inherited" | "<seconds>"
+    "units":       "Nm",
+    "data_type":   "double",
+    "log_signal":  true,             // stream this block's output
+    "params": { "gain": 2.0 }        // per-kind block parameters
+  },
+  "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } }
+```
+
+`data.params` is a nested object of scalar block parameters (number /
+bool / string). Its keys are pinned per block kind by the IDE's
+`SignalFlowParamSpec` catalogue — mirrored in
+[`mflowlink_blocks.md`](mflowlink_blocks.md). Edges between signal
+blocks use `"kind": "data"`.

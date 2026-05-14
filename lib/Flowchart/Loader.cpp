@@ -303,6 +303,26 @@ std::optional<bool> asBool(const JValue *V) {
   return std::nullopt;
 }
 
+// Numeric JSON value → double. Numbers are kept as raw text by the
+// reader, so this is the one place that actually evaluates them.
+std::optional<double> asNumber(const JValue *V) {
+  if (!V || V->Kind != JKind::Number) return std::nullopt;
+  try {
+    return std::stod(V->StrVal);
+  } catch (...) {
+    return std::nullopt;
+  }
+}
+
+// A "step size" field (`settings.solver.maxStep` / `minStep`): the IDE
+// always writes it as a string ("auto" or a numeric literal), but a
+// bare JSON number is accepted defensively and kept as its raw text.
+std::optional<std::string> asNumberOrString(const JValue *V) {
+  if (!V) return std::nullopt;
+  if (V->Kind == JKind::String || V->Kind == JKind::Number) return V->StrVal;
+  return std::nullopt;
+}
+
 SourceLocation locOf(const JValue &V, FileID File) {
   SourceLocation L;
   L.File = File;
@@ -349,9 +369,65 @@ public:
           if (auto *S = asString(&P.second)) Doc.Settings.DefaultNumericType = *S;
         } else if (P.first == "sourceLanguage") {
           if (auto *S = asString(&P.second)) Doc.Settings.SourceLanguage = *S;
+        } else if (P.first == "kind") {
+          // mflowLink dialect selector. An absent `kind` keeps the
+          // historical "control_flow" default.
+          if (auto *S = asString(&P.second)) Doc.Settings.Kind = *S;
+        } else if (P.first == "solver") {
+          if (auto *Obj = asObject(&P.second)) {
+            SolverConfig SC;
+            for (auto &Q : *Obj) {
+              if (Q.first == "type") {
+                if (auto *S = asString(&Q.second)) SC.Type = *S;
+              } else if (Q.first == "algorithm") {
+                if (auto *S = asString(&Q.second)) SC.Algorithm = *S;
+              } else if (Q.first == "startTime") {
+                if (auto N = asNumber(&Q.second)) SC.StartTime = *N;
+              } else if (Q.first == "stopTime") {
+                if (auto N = asNumber(&Q.second)) SC.StopTime = *N;
+              } else if (Q.first == "maxStep") {
+                if (auto S = asNumberOrString(&Q.second)) SC.MaxStep = *S;
+              } else if (Q.first == "minStep") {
+                if (auto S = asNumberOrString(&Q.second)) SC.MinStep = *S;
+              } else if (Q.first == "relTol") {
+                if (auto N = asNumber(&Q.second)) SC.RelTol = *N;
+              } else if (Q.first == "absTol") {
+                if (auto N = asNumber(&Q.second)) SC.AbsTol = *N;
+              } else if (Q.first == "zeroCrossing") {
+                if (auto B = asBool(&Q.second)) SC.ZeroCrossing = *B;
+              } else if (Q.first == "algebraicLoopMethod") {
+                if (auto *S = asString(&Q.second)) SC.AlgebraicLoopMethod = *S;
+              }
+            }
+            Doc.Settings.Solver = std::move(SC);
+          }
+        } else if (P.first == "snapshot") {
+          if (auto *Obj = asObject(&P.second)) {
+            SnapshotConfig SN;
+            for (auto &Q : *Obj) {
+              if (Q.first == "enabled") {
+                if (auto B = asBool(&Q.second)) SN.Enabled = *B;
+              } else if (Q.first == "depth") {
+                if (auto N = asNumber(&Q.second))
+                  SN.Depth = static_cast<int>(*N);
+              } else if (Q.first == "fields") {
+                if (auto *S = asString(&Q.second)) SN.Fields = *S;
+              }
+            }
+            Doc.Settings.Snapshot = std::move(SN);
+          }
         }
       }
     }
+
+    if (Doc.Settings.Kind != "control_flow" &&
+        Doc.Settings.Kind != "signal_flow") {
+      Diag_.error(locOf(Root, File_),
+                  "unknown settings.kind \"" + Doc.Settings.Kind +
+                      "\"; expected \"control_flow\" or \"signal_flow\"");
+      return std::nullopt;
+    }
+    SignalFlow_ = Doc.isSignalFlow();
 
     if (Doc.Schema != "matforge.flowchart") {
       Diag_.error(locOf(Root, File_),
@@ -409,6 +485,10 @@ public:
 private:
   FileID File_;
   DiagnosticEngine &Diag_;
+  // Set once `settings.kind` is parsed: a signal-flow document is a
+  // block diagram, so it has no `start` / `end` control nodes — the
+  // program-shape validation in `validateFlow` is skipped for it.
+  bool SignalFlow_ = false;
 
   std::optional<Flow> buildFlow(const JValue &FJ) {
     if (FJ.Kind != JKind::Object) {
@@ -495,6 +575,27 @@ private:
 
     if (auto *Data = asObject(NJ.find("data"))) {
       for (auto &P : *Data) {
+        // mflowLink: `data.params` is a nested object of scalar block
+        // parameters (per the IDE's SignalFlowParamSpec). The generic
+        // scalar/array handling below skips nested objects, so pull
+        // params out into Node::Params first. Scalars kept as raw
+        // text — the lowering pass (§6) reparses per the catalogue.
+        if (P.first == "params") {
+          if (auto *PObj = asObject(&P.second)) {
+            for (auto &PP : *PObj) {
+              if (auto *S = asString(&PP.second))
+                N.Params[PP.first] = *S;
+              else if (PP.second.Kind == JKind::Number)
+                N.Params[PP.first] = PP.second.StrVal;
+              else if (PP.second.Kind == JKind::Bool)
+                N.Params[PP.first] = PP.second.BoolVal ? "true" : "false";
+              else
+                continue; // arrays / nested objects not used by params
+              N.ParamLocs[PP.first] = locOf(PP.second, File_);
+            }
+          }
+          continue;
+        }
         if (auto *S = asString(&P.second)) {
           N.Data[P.first] = *S;
           N.DataLocs[P.first] = locOf(P.second, File_);
@@ -671,7 +772,11 @@ private:
       }
     }
 
-    if (F.Kind == "program") {
+    // A signal-flow flow is a block diagram, not a statement program:
+    // it has no `start` / `end` control nodes. Skip the program-shape
+    // check entirely — execution-order validation happens later in
+    // SignalFlowLowering (§6), not here.
+    if (F.Kind == "program" && !SignalFlow_) {
       int StartCount = 0, EndCount = 0;
       for (auto &N : F.Nodes) {
         if (N.Kind == "start") ++StartCount;
@@ -770,6 +875,24 @@ void dumpFlowDoc(std::ostream &OS, const FlowDoc &Doc) {
   OS << "  settings.columnMajor=" << (Doc.Settings.ColumnMajor ? "true" : "false")
      << " defaultNumericType=" << Doc.Settings.DefaultNumericType
      << " sourceLanguage=" << Doc.Settings.SourceLanguage << "\n";
+  // mflowLink lines are emitted only when present, so control-flow
+  // `.mflow` dumps stay byte-for-byte identical to before.
+  if (Doc.Settings.Kind != "control_flow")
+    OS << "  settings.kind=" << Doc.Settings.Kind << "\n";
+  if (Doc.Settings.Solver) {
+    const auto &S = *Doc.Settings.Solver;
+    OS << "  settings.solver type=" << S.Type << " algorithm=" << S.Algorithm
+       << " startTime=" << S.StartTime << " stopTime=" << S.StopTime
+       << " maxStep=" << S.MaxStep << " minStep=" << S.MinStep
+       << " relTol=" << S.RelTol << " absTol=" << S.AbsTol
+       << " zeroCrossing=" << (S.ZeroCrossing ? "true" : "false")
+       << " algebraicLoopMethod=" << S.AlgebraicLoopMethod << "\n";
+  }
+  if (Doc.Settings.Snapshot) {
+    const auto &S = *Doc.Settings.Snapshot;
+    OS << "  settings.snapshot enabled=" << (S.Enabled ? "true" : "false")
+       << " depth=" << S.Depth << " fields=" << S.Fields << "\n";
+  }
   for (auto &F : Doc.Flows) {
     OS << "Flow id=" << F.Id << " kind=" << F.Kind << " name=" << F.Name;
     if (!F.Sig.Inputs.empty() || !F.Sig.Outputs.empty()) {
@@ -810,6 +933,14 @@ void dumpFlowDoc(std::ostream &OS, const FlowDoc &Doc) {
         }
         OS << "]\n";
       }
+      // mflowLink block parameters (`data.params`), sorted for stable
+      // goldens. Only present on signal-flow nodes.
+      std::vector<std::string> ParamKeys;
+      ParamKeys.reserve(N.Params.size());
+      for (auto &P : N.Params) ParamKeys.push_back(P.first);
+      std::sort(ParamKeys.begin(), ParamKeys.end());
+      for (auto &K : ParamKeys)
+        OS << "    param." << K << "=" << N.Params.at(K) << "\n";
       for (auto &P : N.InPorts)  OS << "    in:"  << P.Id << "\n";
       for (auto &P : N.OutPorts) OS << "    out:" << P.Id << "\n";
     }

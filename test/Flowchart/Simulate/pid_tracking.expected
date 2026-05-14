@@ -1,0 +1,23 @@
+MflowLinkModel entry=pid_tracking blocks=8 edges=9
+  solver type=variable_step algorithm=ode45 startTime=0 stopTime=8
+  states continuous=2 discrete=0
+  exec-order:
+    0 ref kind=signal_step sample=fixed_in_minor log
+    1 err kind=signal_sum sample=fixed_in_minor
+    2 kp kind=signal_gain sample=fixed_in_minor
+    3 ki kind=signal_gain sample=fixed_in_minor
+    4 integ kind=signal_integrator sample=continuous cont-states=1 loop-breaker
+    5 usum kind=signal_sum sample=fixed_in_minor
+    6 plant kind=signal_transfer_fcn sample=continuous cont-states=1 loop-breaker
+    7 out_scope kind=signal_scope sample=fixed_in_minor log
+  zero-crossings: none
+  edges:
+    e_ref ref:out -> err:in1
+    e_fb plant:out -> err:in2
+    e_err_p err:out -> kp:in
+    e_err_i err:out -> ki:in
+    e_ki ki:out -> integ:in
+    e_p kp:out -> usum:in1
+    e_i integ:out -> usum:in2
+    e_u usum:out -> plant:in
+    e_out plant:out -> out_scope:in

@@ -1,0 +1,32 @@
+FlowDoc schema=matforge.flowchart version=0.1.0 entry=lowpass
+  settings.columnMajor=true defaultNumericType=double sourceLanguage=
+  settings.kind=signal_flow
+  settings.solver type=variable_step algorithm=ode45 startTime=0 stopTime=10 maxStep=auto minStep=auto relTol=0.001 absTol=1e-06 zeroCrossing=true algebraicLoopMethod=trust_region
+  settings.snapshot enabled=true depth=256 fields=states
+Flow id=flow_lowpass kind=program name=lowpass
+  Node id=src kind=signal_sine
+    data.log_signal=true
+    param.amplitude=1.0
+    param.bias=0.0
+    param.frequency=6.2831853
+    param.phase=0.0
+    out:out
+  Node id=k kind=signal_gain
+    param.gain=2.0
+    in:in
+    out:out
+  Node id=lp kind=signal_transfer_fcn
+    param.den=1, 1
+    param.num=1
+    in:in
+    out:out
+  Node id=scope kind=signal_scope
+    data.log_signal=true
+    param.decimation=1
+    param.title=lowpass out
+    param.yMax=2.0
+    param.yMin=-2.0
+    in:in
+  Edge id=e1 kind=data src:out -> k:in
+  Edge id=e2 kind=data k:out -> lp:in
+  Edge id=e3 kind=data lp:out -> scope:in

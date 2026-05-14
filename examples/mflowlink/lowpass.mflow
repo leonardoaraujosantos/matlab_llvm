@@ -1,0 +1,65 @@
+{
+  "schema": "matforge.flowchart",
+  "version": "0.1.0",
+  "entry": "lowpass",
+  "settings": {
+    "kind": "signal_flow",
+    "columnMajor": true,
+    "defaultNumericType": "double",
+    "solver": {
+      "type": "variable_step",
+      "algorithm": "ode45",
+      "startTime": 0.0,
+      "stopTime": 10.0,
+      "maxStep": "auto",
+      "minStep": "auto",
+      "relTol": 1e-3,
+      "absTol": 1e-6,
+      "zeroCrossing": true,
+      "algebraicLoopMethod": "trust_region"
+    },
+    "snapshot": {
+      "enabled": true,
+      "depth": 256,
+      "fields": "states"
+    }
+  },
+  "flows": [
+    {
+      "id": "flow_lowpass",
+      "kind": "program",
+      "name": "lowpass",
+      "signature": { "inputs": [], "outputs": [] },
+      "nodes": [
+        { "id": "src", "kind": "signal_sine",
+          "data": {
+            "log_signal": true,
+            "params": { "amplitude": 1.0, "bias": 0.0,
+                        "frequency": 6.2831853, "phase": 0.0 }
+          },
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+        { "id": "k", "kind": "signal_gain",
+          "data": { "params": { "gain": 2.0 } },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "lp", "kind": "signal_transfer_fcn",
+          "data": { "params": { "num": "1", "den": "1, 1" } },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "scope", "kind": "signal_scope",
+          "data": {
+            "log_signal": true,
+            "params": { "yMin": -2.0, "yMax": 2.0,
+                        "title": "lowpass out", "decimation": 1 }
+          },
+          "ports": { "in": [{"id": "in"}], "out": [] } }
+      ],
+      "edges": [
+        { "id": "e1", "kind": "data",
+          "from": {"node": "src", "port": "out"}, "to": {"node": "k", "port": "in"} },
+        { "id": "e2", "kind": "data",
+          "from": {"node": "k", "port": "out"}, "to": {"node": "lp", "port": "in"} },
+        { "id": "e3", "kind": "data",
+          "from": {"node": "lp", "port": "out"}, "to": {"node": "scope", "port": "in"} }
+      ]
+    }
+  ]
+}

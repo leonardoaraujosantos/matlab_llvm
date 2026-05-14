@@ -1,0 +1,78 @@
+{
+  "schema": "matforge.flowchart",
+  "version": "0.1.0",
+  "entry": "pid_tracking",
+  "settings": {
+    "kind": "signal_flow",
+    "solver": {
+      "type": "variable_step",
+      "algorithm": "ode45",
+      "startTime": 0.0,
+      "stopTime": 8.0,
+      "relTol": 1e-4,
+      "absTol": 1e-7,
+      "zeroCrossing": true,
+      "algebraicLoopMethod": "trust_region"
+    },
+    "snapshot": { "enabled": true, "depth": 256, "fields": "states" }
+  },
+  "flows": [
+    {
+      "id": "flow_pid",
+      "kind": "program",
+      "name": "pid_tracking",
+      "signature": { "inputs": [], "outputs": [] },
+      "nodes": [
+        { "id": "ref", "kind": "signal_step",
+          "data": { "log_signal": true,
+                    "params": { "stepTime": 1.0, "initialValue": 0.0,
+                                "finalValue": 1.0 } },
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+        { "id": "err", "kind": "signal_sum",
+          "data": { "params": { "signs": "+-" } },
+          "ports": { "in": [{"id": "in1"}, {"id": "in2"}],
+                     "out": [{"id": "out"}] } },
+        { "id": "kp", "kind": "signal_gain",
+          "data": { "params": { "gain": 2.5 } },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "ki", "kind": "signal_gain",
+          "data": { "params": { "gain": 1.5 } },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "integ", "kind": "signal_integrator",
+          "data": { "params": { "initialCondition": 0.0 } },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "usum", "kind": "signal_sum",
+          "data": { "params": { "signs": "++" } },
+          "ports": { "in": [{"id": "in1"}, {"id": "in2"}],
+                     "out": [{"id": "out"}] } },
+        { "id": "plant", "kind": "signal_transfer_fcn",
+          "data": { "params": { "num": "1", "den": "1, 1" } },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "out_scope", "kind": "signal_scope",
+          "data": { "log_signal": true,
+                    "params": { "title": "tracked output" } },
+          "ports": { "in": [{"id": "in"}], "out": [] } }
+      ],
+      "edges": [
+        { "id": "e_ref",   "kind": "data",
+          "from": {"node": "ref",   "port": "out"}, "to": {"node": "err",   "port": "in1"} },
+        { "id": "e_fb",    "kind": "data",
+          "from": {"node": "plant", "port": "out"}, "to": {"node": "err",   "port": "in2"} },
+        { "id": "e_err_p", "kind": "data",
+          "from": {"node": "err",   "port": "out"}, "to": {"node": "kp",    "port": "in"} },
+        { "id": "e_err_i", "kind": "data",
+          "from": {"node": "err",   "port": "out"}, "to": {"node": "ki",    "port": "in"} },
+        { "id": "e_ki",    "kind": "data",
+          "from": {"node": "ki",    "port": "out"}, "to": {"node": "integ", "port": "in"} },
+        { "id": "e_p",     "kind": "data",
+          "from": {"node": "kp",    "port": "out"}, "to": {"node": "usum",  "port": "in1"} },
+        { "id": "e_i",     "kind": "data",
+          "from": {"node": "integ", "port": "out"}, "to": {"node": "usum",  "port": "in2"} },
+        { "id": "e_u",     "kind": "data",
+          "from": {"node": "usum",  "port": "out"}, "to": {"node": "plant", "port": "in"} },
+        { "id": "e_out",   "kind": "data",
+          "from": {"node": "plant", "port": "out"}, "to": {"node": "out_scope", "port": "in"} }
+      ]
+    }
+  ]
+}

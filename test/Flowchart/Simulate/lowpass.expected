@@ -1,0 +1,13 @@
+MflowLinkModel entry=lowpass blocks=4 edges=3
+  solver type=variable_step algorithm=ode45 startTime=0 stopTime=10
+  states continuous=1 discrete=0
+  exec-order:
+    0 src kind=signal_sine sample=fixed_in_minor log
+    1 k kind=signal_gain sample=fixed_in_minor
+    2 lp kind=signal_transfer_fcn sample=continuous cont-states=1 loop-breaker
+    3 scope kind=signal_scope sample=fixed_in_minor log
+  zero-crossings: none
+  edges:
+    e1 src:out -> k:in
+    e2 k:out -> lp:in
+    e3 lp:out -> scope:in

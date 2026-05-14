@@ -6,6 +6,8 @@
 #include "matlab/Flowchart/ASTToGraph.h"
 #include "matlab/Flowchart/GraphToAST.h"
 #include "matlab/Flowchart/Loader.h"
+#include "matlab/Flowchart/MflowLinkModel.h"
+#include "matlab/Flowchart/MflowLinkSim.h"
 #include "matlab/Lex/Lexer.h"
 #include "matlab/Parse/Parser.h"
 #include "matlab/MIR/Lowering.h"
@@ -96,9 +98,19 @@ struct Options {
                     EmitFiReport, EmitSystemVerilog, CheckSynthesizable,
                     EmitHardwareReport, EmitCocotb,
                     DumpFlow, EmitMatlab, EmitMflow,
-                    Check, Repl, Format, Dap };
+                    Check, Repl, Format, Dap, Simulate };
   Mode Mode = Mode::Check;
   bool Opt = false;
+  /* mflowLink: `-simulate --dry-run` lowers a signal-flow .mflow to
+   * the MflowLinkModel IR and prints the sorted execution order
+   * without booting the simulation runtime — the Tier-B smoke lane
+   * (docs/mflow_link_roadmap.md §14). */
+  bool DryRun = false;
+  /* mflowLink: `-simulate --dap` boots a DAP server on stdio (Tier-D).
+   * Pauses at entry, then accepts the §10 verb set: stepMajor /
+   * stepBackMajor / continue / pause / disconnect, plus the snapshot
+   * ring (settings.snapshot.depth). */
+  bool SimulateDap = false;
   /* `-emit-c` / `-emit-cpp` default to NOT emitting `#line` directives
    * — the cleaner output is what most users want for hand-reading the
    * generated C / C++. Pass `-line` to opt back in when you need
@@ -256,6 +268,9 @@ bool parseArgs(int Argc, char **Argv, Options &Opts, const char *&Prog) {
     else if (A == "-repl") Opts.Mode = Options::Mode::Repl;
     else if (A == "-format") Opts.Mode = Options::Mode::Format;
     else if (A == "-dap") Opts.Mode = Options::Mode::Dap;
+    else if (A == "-simulate") Opts.Mode = Options::Mode::Simulate;
+    else if (A == "--dry-run" || A == "-dry-run") Opts.DryRun = true;
+    else if (A == "--sim-dap" || A == "-sim-dap") Opts.SimulateDap = true;
     else if (A == "-opt" || A == "-O") Opts.Opt = true;
     else if (A == "-no-line" || A == "--no-line") Opts.NoLine = true;
     else if (A == "-line" || A == "--line") Opts.EmitLine = true;
@@ -6582,6 +6597,314 @@ int runDap(const std::string &CLIPath) {
   return 0;
 }
 
+//===----------------------------------------------------------------------===//
+// mflowLink — `matlabc -simulate --dap model.mflow`
+//
+// Tier-D DAP server for the signal-flow simulation lane
+// (docs/mflow_link_roadmap.md §8 + §10). Reuses the JSON-RPC framing
+// (`readFrame` / `writeFrame` / `sendResponse` / `sendEvent`) but
+// dispatches a completely separate request set on top of an in-process
+// `MflowLinkSim`. The matlab-program DAP path (runDap above) is left
+// untouched.
+//
+// Three things that make this loop simpler than runDap:
+//   1. No JIT'd child process → no pipe + dup2 dance. We still grab
+//      OriginalStdoutFd so writeFrame's `write(OriginalStdoutFd, ...)`
+//      reaches the DAP client.
+//   2. The simulator is synchronous; pausing means "the request loop
+//      is waiting for the next request". No worker thread, no
+//      matlab_dbg_resume — `continue` just runs the loop in this
+//      thread.
+//   3. Source mapping is single-frame: every stopped event reports a
+//      single virtual frame named "mflowLink" with the current
+//      simulation time as `line`. The IDE renders the active block
+//      via `simulationActiveBlock` events instead.
+//===----------------------------------------------------------------------===//
+
+namespace {
+// `stopped` reason → DAP body. Convenience over building the Object
+// inline at every call site.
+llvm::json::Value mflStoppedBody(const char *Reason,
+                                 const char *Description = nullptr) {
+  llvm::json::Object O{
+    {"reason", Reason},
+    {"threadId", 1},
+    {"allThreadsStopped", true},
+  };
+  if (Description) O["description"] = Description;
+  return llvm::json::Value(std::move(O));
+}
+
+void mflEmitTimeEvent(double T, size_t MajorStep) {
+  sendEvent("simulationTime",
+            llvm::json::Object{{"t", T},
+                               {"majorStep", static_cast<int64_t>(MajorStep)}});
+}
+
+void mflEmitSampleEvents(const matlab::flowchart::MflowLinkSim &Sim) {
+  double T = Sim.currentTime();
+  for (auto &P : Sim.currentLoggedOutputs()) {
+    sendEvent("signalSample",
+              llvm::json::Object{{"blockId", P.first},
+                                 {"t", T},
+                                 {"value", P.second}});
+  }
+}
+} // namespace
+
+int runMflowLinkDap(const std::string &Path) {
+  // The simulation runs entirely in-process — no child stdout to
+  // shield — but writeFrame still routes everything through
+  // OriginalStdoutFd, so capture stdout here. (Pipe redirection of
+  // stdin/stdout/stderr is not needed: the simulator never writes
+  // to stdout, and the runtime has no printf-style output.)
+  OriginalStdoutFd = dup(STDOUT_FILENO);
+  if (OriginalStdoutFd < 0) {
+    std::cerr << "matlabc -simulate --dap: dup(stdout) failed\n";
+    return 1;
+  }
+
+  matlab::SourceManager FlowSM;
+  matlab::DiagnosticEngine FlowDiag(FlowSM);
+  auto Doc = matlab::flowchart::loadMflowFromPath(FlowSM, Path, FlowDiag);
+  if (!Doc) {
+    FlowDiag.printAll();
+    return 1;
+  }
+  if (!Doc->isSignalFlow()) {
+    std::cerr << Path
+              << ": -simulate --dap requires a signal-flow .mflow\n";
+    return 1;
+  }
+  auto Model = matlab::flowchart::lowerSignalFlow(*Doc, FlowDiag);
+  FlowDiag.printAll();
+  if (!Model) return 1;
+
+  matlab::flowchart::MflowLinkSim Sim(*Model);
+  Sim.reset();
+
+  bool ConfDone = false;
+  bool Debug = getenv("MATLABC_DAP_TRACE") != nullptr;
+
+  std::ios::sync_with_stdio(false);
+
+  while (true) {
+    auto Msg = readFrame();
+    if (!Msg) break;
+    if (Msg->empty()) continue;
+    if (Debug)
+      std::fprintf(stderr, "[sim-dap] recv: %s\n",
+                   Msg->substr(0, 160).c_str());
+    auto Parsed = llvm::json::parse(*Msg);
+    if (!Parsed) {
+      llvm::consumeError(Parsed.takeError());
+      continue;
+    }
+    const Object *Root = Parsed->getAsObject();
+    if (!Root) continue;
+    auto Ty = Root->getString("type");
+    if (!Ty || *Ty != "request") continue;
+    auto Cmd = Root->getString("command");
+    if (!Cmd) continue;
+    int64_t Seq = Root->getInteger("seq").value_or(0);
+
+    if (*Cmd == "initialize") {
+      Object Caps{
+        {"supportsConfigurationDoneRequest", true},
+        {"supportsStepBack", true},
+        {"supportsRestartRequest", true},
+        {"supportsTerminateRequest", true},
+      };
+      sendResponse(Seq, *Cmd, true, Value(std::move(Caps)));
+      sendEvent("initialized");
+      continue;
+    }
+    if (*Cmd == "launch" || *Cmd == "attach") {
+      sendResponse(Seq, *Cmd, true, Object{});
+      continue;
+    }
+    if (*Cmd == "configurationDone") {
+      sendResponse(Seq, *Cmd, true, Object{});
+      // Boot stopped at startTime per roadmap §8.
+      mflEmitTimeEvent(Sim.currentTime(), Sim.majorStepsTaken());
+      mflEmitSampleEvents(Sim);
+      sendEvent("stopped", mflStoppedBody("entry"));
+      ConfDone = true;
+      continue;
+    }
+    if (*Cmd == "setBreakpoints" || *Cmd == "setExceptionBreakpoints" ||
+        *Cmd == "setSignalBreakpoints" || *Cmd == "setTimeBreakpoints") {
+      // Tier-F: real handling. For now ack as no-op so the IDE's
+      // post-launch sync doesn't hang.
+      sendResponse(Seq, *Cmd, true, Object{{"breakpoints", Array{}}});
+      continue;
+    }
+    if (*Cmd == "threads") {
+      Array Ts{Object{{"id", 1}, {"name", "mflowLink"}}};
+      sendResponse(Seq, *Cmd, true,
+                   Object{{"threads", Value(std::move(Ts))}});
+      continue;
+    }
+    if (*Cmd == "stackTrace") {
+      Array Frames{Object{
+        {"id", 1},
+        {"name", "mflowLink"},
+        {"line", 1},
+        {"column", 1},
+      }};
+      sendResponse(Seq, *Cmd, true,
+                   Object{{"stackFrames", Value(std::move(Frames))},
+                          {"totalFrames", 1}});
+      continue;
+    }
+    if (*Cmd == "scopes") {
+      Array Sc{Object{{"name", "Signals"},
+                      {"variablesReference", 1},
+                      {"expensive", false}}};
+      sendResponse(Seq, *Cmd, true,
+                   Object{{"scopes", Value(std::move(Sc))}});
+      continue;
+    }
+    if (*Cmd == "variables") {
+      Array Vars;
+      Vars.push_back(Object{{"name", "t"},
+                            {"value", std::to_string(Sim.currentTime())},
+                            {"variablesReference", 0}});
+      Vars.push_back(Object{
+        {"name", "majorStep"},
+        {"value", std::to_string(Sim.majorStepsTaken())},
+        {"variablesReference", 0}});
+      for (auto &P : Sim.currentLoggedOutputs()) {
+        Vars.push_back(Object{{"name", P.first},
+                              {"value", std::to_string(P.second)},
+                              {"variablesReference", 0}});
+      }
+      sendResponse(Seq, *Cmd, true,
+                   Object{{"variables", Value(std::move(Vars))}});
+      continue;
+    }
+    if (*Cmd == "evaluate") {
+      // Tier-F: real expression evaluator. Echo a short status so the
+      // IDE's hover / watch panes don't sit on `<no value>`.
+      auto Args = Root->getObject("arguments");
+      std::string Expr;
+      if (Args)
+        if (auto S = Args->getString("expression")) Expr = std::string(*S);
+      std::string Body = "t=" + std::to_string(Sim.currentTime()) +
+                         " majorStep=" + std::to_string(Sim.majorStepsTaken());
+      (void)Expr;
+      sendResponse(Seq, *Cmd, true,
+                   Object{{"result", Body}, {"variablesReference", 0}});
+      continue;
+    }
+
+    auto stepN = [&](int N) {
+      for (int K = 0; K < N; ++K) {
+        double H = Sim.stepMajor();
+        if (H <= 0.0) break;
+      }
+      mflEmitTimeEvent(Sim.currentTime(), Sim.majorStepsTaken());
+      mflEmitSampleEvents(Sim);
+      sendEvent("snapshotTaken",
+                Object{{"majorStep",
+                        static_cast<int64_t>(Sim.majorStepsTaken())},
+                       {"depth",
+                        static_cast<int64_t>(Sim.snapshotDepth())}});
+    };
+
+    if (*Cmd == "continue") {
+      // Run to stopTime in this thread (synchronous — the matlabc
+      // process is the simulator). Stream the per-step events as we
+      // go so the IDE's signal scopes stay live.
+      sendResponse(Seq, *Cmd, true,
+                   Object{{"allThreadsContinued", true}});
+      while (Sim.currentTime() < Model->Solver.StopTime - 1e-12) {
+        double H = Sim.stepMajor();
+        if (H <= 0.0) break;
+        // Throttle: emit a sample event every 16th step to avoid
+        // flooding (§10 — IDE-side throttle target).
+        if ((Sim.majorStepsTaken() % 16) == 0) {
+          mflEmitTimeEvent(Sim.currentTime(), Sim.majorStepsTaken());
+          mflEmitSampleEvents(Sim);
+        }
+      }
+      mflEmitTimeEvent(Sim.currentTime(), Sim.majorStepsTaken());
+      mflEmitSampleEvents(Sim);
+      sendEvent("stopped", mflStoppedBody("step", "stopTime reached"));
+      continue;
+    }
+    if (*Cmd == "pause") {
+      // The loop is already paused between requests; ack and re-stop.
+      sendResponse(Seq, *Cmd, true, Object{});
+      sendEvent("stopped", mflStoppedBody("pause"));
+      continue;
+    }
+    if (*Cmd == "next" || *Cmd == "stepIn" || *Cmd == "stepMajor") {
+      sendResponse(Seq, *Cmd, true, Object{});
+      stepN(1);
+      sendEvent("stopped", mflStoppedBody("step"));
+      continue;
+    }
+    if (*Cmd == "stepOut") {
+      // No call stack to step out of — fall through to a single step.
+      sendResponse(Seq, *Cmd, true, Object{});
+      stepN(1);
+      sendEvent("stopped", mflStoppedBody("step"));
+      continue;
+    }
+    if (*Cmd == "reverseContinue" || *Cmd == "stepBack" ||
+        *Cmd == "stepBackMajor") {
+      sendResponse(Seq, *Cmd, true, Object{});
+      bool Ok = Sim.stepBackMajor();
+      mflEmitTimeEvent(Sim.currentTime(), Sim.majorStepsTaken());
+      mflEmitSampleEvents(Sim);
+      const char *Desc = Ok ? "step-back" : "snapshot ring empty";
+      sendEvent("stopped", mflStoppedBody("step", Desc));
+      continue;
+    }
+    if (*Cmd == "stepBlock" || *Cmd == "stepBackBlock") {
+      // Block-level stepping is Tier-E (one block per request, within
+      // a major step). For now alias to major-step granularity so the
+      // IDE button doesn't appear broken.
+      sendResponse(Seq, *Cmd, true, Object{});
+      if (*Cmd == "stepBlock") stepN(1);
+      else (void)Sim.stepBackMajor();
+      mflEmitTimeEvent(Sim.currentTime(), Sim.majorStepsTaken());
+      sendEvent("stopped", mflStoppedBody("step"));
+      continue;
+    }
+    if (*Cmd == "resetSimulation" || *Cmd == "restart") {
+      Sim.reset();
+      sendResponse(Seq, *Cmd, true, Object{});
+      mflEmitTimeEvent(Sim.currentTime(), Sim.majorStepsTaken());
+      mflEmitSampleEvents(Sim);
+      sendEvent("stopped", mflStoppedBody("entry", "reset"));
+      continue;
+    }
+    if (*Cmd == "configureSolver") {
+      // Tier-F: live tuning of relTol / maxStep. Ack so the IDE pane
+      // doesn't error; the live-tuning hook into MflowLinkSim is a
+      // small follow-up.
+      sendResponse(Seq, *Cmd, true, Object{});
+      continue;
+    }
+    if (*Cmd == "terminate" || *Cmd == "terminateThreads") {
+      sendResponse(Seq, *Cmd, true, Object{});
+      sendEvent("terminated");
+      continue;
+    }
+    if (*Cmd == "disconnect") {
+      sendResponse(Seq, *Cmd, true, Object{});
+      break;
+    }
+
+    // Unknown request — ack empty so the client doesn't stall.
+    (void)ConfDone;
+    sendResponse(Seq, *Cmd, true, Object{});
+  }
+  return 0;
+}
+
 } // namespace dap
 #endif
 
@@ -8500,6 +8823,61 @@ int main(int Argc, char **Argv) {
     if (Doc) matlab::flowchart::dumpFlowDoc(std::cout, *Doc);
     FlowDiag.printAll();
     return FlowDiag.hasErrors() ? 1 : 0;
+  }
+
+  /* mflowLink — `matlabc -simulate model.mflow`. Lowers a signal-flow
+   * `.mflow` to the MflowLinkModel IR (lib/Flowchart/SignalFlowLowering.cpp).
+   * With `--dry-run` it prints the sorted execution order and exits —
+   * the Tier-B smoke lane. The interactive runtime (DAP-server mode,
+   * step / step-back) is Tier C/D of docs/mflow_link_roadmap.md. */
+  if (Opts.Mode == Options::Mode::Simulate) {
+    SourceManager FlowSM;
+    DiagnosticEngine FlowDiag(FlowSM);
+    auto Doc = matlab::flowchart::loadMflowFromPath(FlowSM, Opts.InputPath,
+                                                    FlowDiag);
+    if (!Doc) {
+      FlowDiag.printAll();
+      return 1;
+    }
+    if (!Doc->isSignalFlow()) {
+      std::cerr << Opts.InputPath
+                << ": -simulate requires a signal-flow .mflow "
+                   "(settings.kind == \"signal_flow\")\n";
+      return 1;
+    }
+    auto Model = matlab::flowchart::lowerSignalFlow(*Doc, FlowDiag);
+    FlowDiag.printAll();
+    if (!Model) return 1;
+    if (Opts.DryRun) {
+      matlab::flowchart::dumpMflowLinkModel(std::cout, *Model);
+      return 0;
+    }
+#if MATLAB_LLVM_WITH_MLIR
+    // Tier-D DAP-server lane — pauses at entry, accepts the §10 verb
+    // set, drives the same MflowLinkSim instance with snapshot-ring
+    // step-back. Reuses the JSON-RPC framing the matlab-program DAP
+    // server already established (`OriginalStdoutFd`, `readFrame`,
+    // `sendResponse`, `sendEvent`).
+    if (Opts.SimulateDap) {
+      // The DAP code lives behind MATLAB_LLVM_WITH_MLIR like the rest
+      // of the dap:: namespace; we don't need MLIR for the simulator
+      // itself, but the framing helpers are gated this way today.
+      return dap::runMflowLinkDap(Opts.InputPath);
+    }
+#else
+    if (Opts.SimulateDap) {
+      std::cerr << "matlabc was built without MLIR support; "
+                   "-simulate --sim-dap is unavailable\n";
+      return 1;
+    }
+#endif
+    // Tier-C interpreter (lib/Flowchart/MflowLinkSim.cpp). Runs from
+    // solver.startTime to solver.stopTime and streams the logged
+    // signals as CSV on stdout.
+    matlab::flowchart::MflowLinkSim Sim(*Model);
+    Sim.runToCompletion();
+    Sim.writeCsv(std::cout);
+    return 0;
   }
 
   /* CST stdlib prelude: classdef definitions for `tf` / `ss` / `zpk`

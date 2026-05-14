@@ -52,7 +52,14 @@ struct Node {
   // that only care about strings (the Phase 2/3/4 block kinds) don't
   // need to inspect a variant.
   std::map<std::string, std::vector<std::string>> DataArrays;
+  // mflowLink: the `data.params` nested object the IDE writes for
+  // every `signal_*` block (Matlab_llvm_ide `SignalFlowParamSpec`).
+  // Kept separate from `Data` because the generic `data` parser only
+  // flattens scalar fields and skips nested objects. Scalars stored
+  // as raw text, exactly like `Data`. Empty on a control-flow node.
+  std::map<std::string, std::string> Params;
   std::map<std::string, SourceLocation> DataLocs; // per-field byte location
+  std::map<std::string, SourceLocation> ParamLocs; // per-param byte location
   std::vector<Port> InPorts;
   std::vector<Port> OutPorts;
   SourceLocation Loc;       // points at the opening `{` of the node object
@@ -82,6 +89,13 @@ struct Node {
     auto It = DataArrays.find(std::string(Key));
     return It == DataArrays.end() ? nullptr : &It->second;
   }
+  bool hasParam(std::string_view Key) const {
+    return Params.find(std::string(Key)) != Params.end();
+  }
+  const std::string *getParam(std::string_view Key) const {
+    auto It = Params.find(std::string(Key));
+    return It == Params.end() ? nullptr : &It->second;
+  }
 };
 
 struct Signature {
@@ -99,10 +113,44 @@ struct Flow {
   SourceLocation Loc;       // points at the flow object
 };
 
+//===----------------------------------------------------------------------===//
+// mflowLink (signal-flow) settings — `settings.solver` / `settings.snapshot`.
+//
+// Only meaningful when `Settings::Kind == "signal_flow"`; absent on a
+// control-flow document. Field names mirror the IDE's `SolverConfig` /
+// `SnapshotConfig` (Matlab_llvm_ide `FlowchartModels.swift`). See
+// `docs/mflow_link_roadmap.md` §5.1. The on-disk JSON keys are
+// camelCase (`startTime`, `relTol`, …) — the loader matches the IDE's
+// `JSONEncoder` output verbatim.
+//===----------------------------------------------------------------------===//
+
+struct SolverConfig {                       // settings.solver
+  std::string Type      = "variable_step";  // "fixed_step" | "variable_step"
+  std::string Algorithm = "ode45";          // ode45|ode23|ode23s|ode15s|euler|heun
+  double StartTime = 0.0, StopTime = 10.0;
+  std::string MaxStep = "auto", MinStep = "auto";   // "auto" | <seconds>
+  double RelTol = 1e-3, AbsTol = 1e-6;
+  bool   ZeroCrossing = true;
+  std::string AlgebraicLoopMethod = "trust_region"; // trust_region|newton|off
+};
+
+struct SnapshotConfig {                     // settings.snapshot
+  bool Enabled = true;
+  int  Depth   = 256;
+  std::string Fields = "states";            // "states"|"states+inputs"|"all"
+};
+
 struct Settings {
   bool ColumnMajor = true;
   std::string DefaultNumericType = "double";
   std::string SourceLanguage;
+  // mflowLink: which `.mflow` dialect this document is. Absent on
+  // disk ⇒ "control_flow" (the historical default — control-flow
+  // files are byte-for-byte unaffected). "signal_flow" selects the
+  // block-diagram simulation lane.
+  std::string Kind = "control_flow";
+  std::optional<SolverConfig>   Solver;
+  std::optional<SnapshotConfig> Snapshot;
 };
 
 struct FlowDoc {
@@ -116,6 +164,10 @@ struct FlowDoc {
   // Returns the flow whose `name` matches Entry, or nullptr if missing.
   const Flow *entryFlow() const;
   const Flow *findFlow(std::string_view Name) const;
+
+  // True for an mflowLink (signal-flow) document. Control-flow docs —
+  // every `.mflow` shipped before mflowLink — return false.
+  bool isSignalFlow() const { return Settings.Kind == "signal_flow"; }
 };
 
 //===----------------------------------------------------------------------===//

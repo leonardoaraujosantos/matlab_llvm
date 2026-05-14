@@ -152,6 +152,8 @@ add_library(MatlabFlowchart STATIC
   lib/Flowchart/Loader.cpp
   lib/Flowchart/GraphToAST.cpp
   lib/Flowchart/ASTToGraph.cpp
+  lib/Flowchart/SignalFlowLowering.cpp
+  lib/Flowchart/MflowLinkSim.cpp
 )
 target_link_libraries(MatlabFlowchart PUBLIC MatlabParse MatlabBasic)
 
@@ -391,6 +393,34 @@ add_test(
   COMMAND ${CMAKE_SOURCE_DIR}/test/Flowchart/EmitMflow/run_tests.sh
           $<TARGET_FILE:matlabc>
   WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Flowchart/EmitMflow
+)
+# mflowLink Tier-B smoke lane — `matlabc -simulate --dry-run` lowers a
+# signal-flow .mflow to the MflowLinkModel IR and prints the sorted
+# execution order; the Errors/ corpus checks rejected algebraic loops.
+add_test(
+  NAME flowchart-simulate-tests
+  COMMAND ${CMAKE_SOURCE_DIR}/test/Flowchart/Simulate/run_tests.sh
+          $<TARGET_FILE:matlabc>
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Flowchart/Simulate
+)
+# mflowLink Tier-C smoke lane — actually run the in-process simulation
+# interpreter (lib/Flowchart/MflowLinkSim.cpp) on the headline demos
+# and check analytic invariants on the CSV output.
+add_test(
+  NAME flowchart-simulate-run-tests
+  COMMAND ${CMAKE_SOURCE_DIR}/test/Flowchart/SimulateRun/run_tests.sh
+          $<TARGET_FILE:matlabc>
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Flowchart/SimulateRun
+)
+# mflowLink Tier-D smoke lane — drive `matlabc -simulate --sim-dap`
+# over stdio with a scripted DAP conversation and check that the
+# simulator pauses at entry, steps forward / backward, and resumes
+# to stopTime. Covers the snapshot ring (settings.snapshot.depth).
+add_test(
+  NAME flowchart-simulate-dap-tests
+  COMMAND python3 ${CMAKE_SOURCE_DIR}/test/Flowchart/SimulateDap/run_tests.py
+          $<TARGET_FILE:matlabc>
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Flowchart/SimulateDap
 )
 # Opt-in Verilog-A lint lane (Tier-10 of docs/verilog_a_plan.md).
 # Compiles + runs every example under examples/verilog_a/ to emit

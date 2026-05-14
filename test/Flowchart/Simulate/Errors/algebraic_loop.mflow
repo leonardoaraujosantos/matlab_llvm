@@ -1,0 +1,38 @@
+{
+  "schema": "matforge.flowchart",
+  "version": "0.1.0",
+  "entry": "algloop",
+  "settings": { "kind": "signal_flow" },
+  "flows": [
+    {
+      "id": "flow_algloop",
+      "kind": "program",
+      "name": "algloop",
+      "signature": { "inputs": [], "outputs": [] },
+      "nodes": [
+        { "id": "c", "kind": "signal_constant",
+          "data": { "params": { "value": 1.0 } },
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+        { "id": "s", "kind": "signal_sum",
+          "data": { "params": { "signs": "+-" } },
+          "ports": { "in": [{"id": "in1"}, {"id": "in2"}],
+                     "out": [{"id": "out"}] } },
+        { "id": "g", "kind": "signal_gain",
+          "data": { "params": { "gain": 0.5 } },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "term", "kind": "signal_terminator",
+          "ports": { "in": [{"id": "in"}], "out": [] } }
+      ],
+      "edges": [
+        { "id": "e_c", "kind": "data",
+          "from": {"node": "c", "port": "out"}, "to": {"node": "s", "port": "in1"} },
+        { "id": "e_s", "kind": "data",
+          "from": {"node": "s", "port": "out"}, "to": {"node": "g", "port": "in"} },
+        { "id": "e_fb", "kind": "data",
+          "from": {"node": "g", "port": "out"}, "to": {"node": "s", "port": "in2"} },
+        { "id": "e_t", "kind": "data",
+          "from": {"node": "g", "port": "out"}, "to": {"node": "term", "port": "in"} }
+      ]
+    }
+  ]
+}
