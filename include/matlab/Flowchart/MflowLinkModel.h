@@ -61,6 +61,12 @@ struct MflBlock {
   // `MflowLinkSim::evalAll` skips this block's evaluator (and zeros
   // its derivative slice) whenever the source's output is ≤ 0.
   std::string EnableSource;
+  // Tier F carve-out — when true, the gate is an *edge* condition:
+  // the block fires for exactly one major step on the rising edge
+  // (0 → 1 transition) of `EnableSource`. Stamped onto every leaf
+  // inlined from a `signal_triggered_subsystem`. Mutually exclusive
+  // with the level-gated `signal_enabled_subsystem` semantics.
+  bool EnableEdgeTriggered = false;
   SourceLocation Loc;          // the originating `.mflow` node
 };
 

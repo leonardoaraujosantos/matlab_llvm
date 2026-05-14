@@ -1,0 +1,22 @@
+MflowLinkModel entry=thermostat blocks=7 edges=8
+  solver type=variable_step algorithm=ode45 startTime=0 stopTime=12
+  states continuous=1 discrete=1
+  exec-order:
+    0 setpoint kind=signal_constant sample=constant
+    1 err kind=signal_sum sample=fixed_in_minor
+    2 ctrl kind=signal_relay sample=fixed_in_minor disc-states=1 log
+    3 loss kind=signal_gain sample=fixed_in_minor
+    4 net kind=signal_sum sample=fixed_in_minor
+    5 plant kind=signal_integrator sample=continuous cont-states=1 loop-breaker log
+    6 scope kind=signal_scope sample=fixed_in_minor
+  zero-crossings:
+    ctrl (signal_relay)
+  edges:
+    e_set setpoint:out -> err:in1
+    e_fb plant:out -> err:in2
+    e_err err:out -> ctrl:in
+    e_ctrl ctrl:out -> net:in1
+    e_temp plant:out -> loss:in
+    e_loss loss:out -> net:in2
+    e_net net:out -> plant:in
+    e_scope plant:out -> scope:in

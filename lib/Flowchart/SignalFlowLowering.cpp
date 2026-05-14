@@ -61,6 +61,13 @@ const KindInfo *lookupKind(const std::string &K) {
     add("signal_sine",     {true, true, false, false, false, FIM});
     add("signal_pulse",    {true, true, false, false, false, FIM});
     add("signal_ramp",     {true, true, false, false, false, FIM});
+    // Tier F carve-out — clock-like pulse generator for driving
+    // `signal_triggered_subsystem`. Emits a one-step `1` at every
+    // `period` boundary, `0` between. Sample class is fixed-in-
+    // minor because the pulse width is exactly one major step;
+    // a `Discrete` class would need a sub-step finer than h.
+    add("signal_function_call_generator",
+                           {true, true, false, false, false, FIM});
     // Sinks.
     add("signal_scope",        {true, true, false, false, false, FIM});
     add("signal_display",      {true, true, false, false, false, FIM});
@@ -84,6 +91,11 @@ const KindInfo *lookupKind(const std::string &K) {
     add("signal_mux",    {true, true, false, false, false, FIM});
     add("signal_demux",  {true, true, false, false, false, FIM});
     add("signal_switch", {true, true, false, false, true,  FIM});
+    // Tier E carve-out — hysteretic relay (the third zero-crossing
+    // kind alongside Switch / Saturation in roadmap §7.3). One
+    // discrete state slot for the latched on/off bit; ZC predicate
+    // flips when the input crosses either threshold rail.
+    add("signal_relay",  {true, true, false, false, true,  FIM});
     // Composite — handled by flattening, never reaches block construction.
     add("signal_subsystem", {true, true, true, false, false, FIM});
     add("signal_inport",    {true, true, true, false, false, FIM});
@@ -109,10 +121,10 @@ const KindInfo *lookupKind(const std::string &K) {
              "signal_dead_zone", "signal_relop", "signal_logical",
              "signal_bus_creator", "signal_bus_selector",
              "signal_multiport_switch", "signal_goto", "signal_from",
-             "signal_merge", "signal_function_call_generator",
+             "signal_merge",
              "signal_if_action", "signal_switch_case_action",
              "signal_lookup_1d", "signal_lookup_2d", "signal_lookup_nd",
-             "signal_relay", "signal_compare_to_zero",
+             "signal_compare_to_zero",
              "signal_compare_to_constant", "signal_matlab_fcn",
              "signal_custom"}) {
       KindInfo I;
@@ -192,6 +204,10 @@ struct FNode {
   // `signal_enabled_subsystem` / `signal_triggered_subsystem`, holds
   // the flat id of the source signal driving the subsystem's enable.
   std::string EnableStamp;
+  // Tier-F carve-out — true when the stamp came from a
+  // `signal_triggered_subsystem`, so the runtime treats the gate as
+  // a rising-edge condition rather than a level condition.
+  bool EdgeTriggered = false;
 };
 
 struct FEdge {
@@ -212,7 +228,8 @@ public:
 
   std::optional<FlatGraph> run(const Flow &Entry) {
     std::vector<std::string> Stack{Entry.Id};
-    auto G = expand(Entry, "", Stack, /*EnableStamp=*/"");
+    auto G = expand(Entry, "", Stack, /*EnableStamp=*/"",
+                    /*EdgeTriggered=*/false);
     if (!G) return std::nullopt;
     if (!contractBoundaries(*G)) return std::nullopt;
     return G;
@@ -256,10 +273,13 @@ private:
   // id reappearing is a subsystem cycle. `EnableStamp` (Tier F) is
   // the inherited conditional-subsystem gate: every leaf inlined
   // here picks it up unless we descend into a nested enabled-
-  // subsystem (handled by `composeEnable`).
+  // subsystem (handled by `composeEnable`). `EdgeTriggered` flags
+  // the stamp as a rising-edge condition (from a
+  // `signal_triggered_subsystem`) rather than a level condition.
   std::optional<FlatGraph> expand(const Flow &F, const std::string &Prefix,
                                   std::vector<std::string> &Stack,
-                                  const std::string &EnableStamp) {
+                                  const std::string &EnableStamp,
+                                  bool EdgeTriggered) {
     FlatGraph G;
     // subsystem node id → { bindingPort → flat boundary node id }
     std::unordered_map<std::string, std::map<std::string, std::string>> InMap;
@@ -295,15 +315,27 @@ private:
           return std::nullopt;
         }
         // Inherit the parent's gate (if any) plus the subsystem's
-        // own `data.enable_block` override.
+        // own `data.enable_block` override. The edge-triggered flag
+        // is set only when descending into a triggered subsystem
+        // that introduces its own gate — nested enabled subsystems
+        // under a triggered one inherit the level-gated semantic
+        // of their immediate parent (Tier H may revisit this).
         std::string ChildEnable = EnableStamp;
+        bool ChildEdge = EdgeTriggered;
         if (N.Kind == "signal_enabled_subsystem" ||
             N.Kind == "signal_triggered_subsystem") {
-          if (auto *EB = N.getData("enable_block"))
-            ChildEnable = composeEnable(EnableStamp, *EB, Prefix);
+          if (auto *EB = N.getData("enable_block")) {
+            std::string Composed =
+                composeEnable(EnableStamp, *EB, Prefix);
+            if (Composed != EnableStamp) {
+              ChildEnable = Composed;
+              ChildEdge = (N.Kind == "signal_triggered_subsystem");
+            }
+          }
         }
         Stack.push_back(*FlowId);
-        auto ChildG = expand(*Child, Prefix + N.Id + "/", Stack, ChildEnable);
+        auto ChildG = expand(*Child, Prefix + N.Id + "/", Stack,
+                             ChildEnable, ChildEdge);
         Stack.pop_back();
         if (!ChildG) return std::nullopt;
         for (auto &CN : ChildG->Nodes) {
@@ -321,10 +353,15 @@ private:
       // `data.enable_block` is honoured directly when no outer
       // gate is in force; `composeEnable` resolves the conflict.
       std::string LeafEnable = EnableStamp;
+      bool LeafEdge = EdgeTriggered;
       if (LeafEnable.empty())
-        if (auto *EB = N.getData("enable_block"))
+        if (auto *EB = N.getData("enable_block")) {
           LeafEnable = composeEnable("", *EB, Prefix);
-      G.Nodes.push_back({Prefix + N.Id, &N, LeafEnable});
+          // A leaf-level `enable_block` is always level-gated; the
+          // edge form only comes from a triggered subsystem.
+          LeafEdge = false;
+        }
+      G.Nodes.push_back({Prefix + N.Id, &N, LeafEnable, LeafEdge});
     }
 
     // Rewire this flow's edges, redirecting through subsystem boundaries.
@@ -488,6 +525,7 @@ std::optional<MflowLinkModel> lowerSignalFlow(const FlowDoc &Doc,
     B.Loc = N.Loc;
     B.SampleClass = KI->Sample;
     B.EnableSource = FN.EnableStamp;
+    B.EnableEdgeTriggered = FN.EdgeTriggered;
     if (auto *L = N.getData("log_signal"))
       B.LogSignal = (*L == "true");
 
@@ -506,6 +544,12 @@ std::optional<MflowLinkModel> lowerSignalFlow(const FlowDoc &Doc,
       B.ContStateCount = matrixRows(N.getParam("A") ? *N.getParam("A") : "");
       const std::string *D = N.getParam("D");
       if (!D || *D == "0" || D->empty()) B.IsLoopBreaker = true;
+    } else if (N.Kind == "signal_relay") {
+      // One discrete bit (on / off). The relay is a fixed-in-minor
+      // block — its output is read every step, but state transitions
+      // only at major-step boundaries (the evaluator skips updates
+      // when `Deriv != nullptr`, i.e. inside RK4 substeps).
+      B.DiscStateCount = 1;
     } else if (N.Kind == "signal_unit_delay" || N.Kind == "signal_zoh") {
       B.DiscStateCount = 1;
       // Discrete period: `params.sampleTime`, else numeric
@@ -647,7 +691,10 @@ void dumpMflowLinkModel(std::ostream &OS, const MflowLinkModel &M) {
     if (B.DiscStateCount) OS << " disc-states=" << B.DiscStateCount;
     if (B.IsLoopBreaker) OS << " loop-breaker";
     if (B.LogSignal) OS << " log";
-    if (!B.EnableSource.empty()) OS << " enable=" << B.EnableSource;
+    if (!B.EnableSource.empty()) {
+      OS << " enable=" << B.EnableSource;
+      if (B.EnableEdgeTriggered) OS << " (rising-edge)";
+    }
     OS << "\n";
   }
   OS << "  zero-crossings:";

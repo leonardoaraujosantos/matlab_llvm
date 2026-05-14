@@ -86,6 +86,46 @@ EN_DRIVE=$(printf '%s\n' "$EN" | awk -F, '$1+0 >= 2.10 && $1+0 < 2.12 { print $2
 check "scope = 2*drive post-gate" \
   "awk 'BEGIN{d=$EN_DRIVE; s=$EN_POST; exit !((s - 2*d)^2 < 1e-6)}'" ""
 
+#--- triggered_counter (Tier F carve-out): rising-edge samples a ramp ------
+TR="$("$MATLABC" -simulate "$EX/triggered_counter.mflow")"
+TR_HEAD=$(printf '%s\n' "$TR" | head -1)
+check "triggered header" "[[ '$TR_HEAD' == 't,clk,src,trig/pass,scope' ]]" ""
+# The scope should latch the ramp value at integer t (= 1, 2, 3, 4, 5).
+# Outside those instants, the gate is closed and the scope reads 0.
+TR_T1=$(printf '%s\n' "$TR" | awk -F, '$1+0==1 { print $5; exit }')
+TR_T3=$(printf '%s\n' "$TR" | awk -F, '$1+0==3 { print $5; exit }')
+TR_T5=$(printf '%s\n' "$TR" | awk -F, '$1+0==5 { print $5; exit }')
+check "trigger@1 latches ramp(1)" \
+  "awk 'BEGIN{exit !(($TR_T1 - 1)^2 < 1e-6)}'" ""
+check "trigger@3 latches ramp(3)" \
+  "awk 'BEGIN{exit !(($TR_T3 - 3)^2 < 1e-6)}'" ""
+check "trigger@5 latches ramp(5)" \
+  "awk 'BEGIN{exit !(($TR_T5 - 5)^2 < 1e-6)}'" ""
+# And between triggers (say t = 1.5), the scope is held at 0 (the
+# edge-triggered subsystem resets its output outside the firing
+# step — Simulink's "Output when disabled: reset" mode).
+TR_BTW=$(printf '%s\n' "$TR" | awk -F, '$1+0 >= 1.49 && $1+0 < 1.51 { print $5; exit }')
+check "trigger off between" \
+  "awk 'BEGIN{exit !($TR_BTW*$TR_BTW < 1e-12)}'" ""
+
+#--- thermostat (Tier E carve-out): hysteretic relay bang-bang -------------
+TH="$("$MATLABC" -simulate "$EX/thermostat.mflow")"
+TH_HEAD=$(printf '%s\n' "$TH" | head -1)
+check "thermostat header" "[[ '$TH_HEAD' == 't,ctrl,plant,scope' ]]" ""
+# The plant must oscillate between [19.5, 20.5] in steady state.
+TH_MAX=$(printf '%s\n' "$TH" | awk -F, 'NR>1 && $1+0>=3 {if($3>m)m=$3} END{print m+0}')
+TH_MIN=$(printf '%s\n' "$TH" | awk -F, 'NR>1 && $1+0>=3 {if(m==""||$3<m)m=$3} END{print m+0}')
+check "thermostat upper bound" \
+  "awk 'BEGIN{exit !($TH_MAX >= 20.49 && $TH_MAX <= 20.52)}'" ""
+check "thermostat lower bound" \
+  "awk 'BEGIN{exit !($TH_MIN >= 19.48 && $TH_MIN <= 19.51)}'" ""
+# The relay control output must visit BOTH 0 and 20 in steady state
+# (i.e. it actually bangs back and forth, not stuck on one rail).
+TH_ON=$(printf '%s\n' "$TH" | awk -F, 'NR>1 && $1+0>=3 && $2+0>=19' | head -1)
+TH_OFF=$(printf '%s\n' "$TH" | awk -F, 'NR>1 && $1+0>=3 && $2+0<=1' | head -1)
+check "relay reaches on rail"  "[[ -n '$TH_ON' ]]"  ""
+check "relay reaches off rail" "[[ -n '$TH_OFF' ]]" ""
+
 #--- saturation_zc (Tier E): ramp -1.5..2.5 through ±1 saturation ----------
 SZ="$("$MATLABC" -simulate "$EX/saturation_zc.mflow")"
 # At t = 1.5 the ramp = 0 (well within the rails), sat output = 0.

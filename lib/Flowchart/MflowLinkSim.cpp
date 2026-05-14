@@ -80,6 +80,8 @@ MflowLinkSim::MflowLinkSim(const MflowLinkModel &M) : M_(M) {
   NextFire_.assign(N, std::numeric_limits<double>::infinity());
   TFCache_.assign(N, {});
   Gate_.assign(N, -1);
+  GateEdge_.assign(N, false);
+  PrevOut_.assign(N, 0.0);
 
   std::unordered_map<std::string, size_t> IdxOf;
   for (size_t I = 0; I < N; ++I) IdxOf[M_.Blocks[I].Id] = I;
@@ -91,6 +93,7 @@ MflowLinkSim::MflowLinkSim(const MflowLinkModel &M) : M_(M) {
     if (B.EnableSource.empty()) continue;
     auto It = IdxOf.find(B.EnableSource);
     if (It != IdxOf.end()) Gate_[I] = static_cast<int>(It->second);
+    GateEdge_[I] = B.EnableEdgeTriggered;
   }
 
   // Per-block continuous-state offset.
@@ -176,6 +179,7 @@ void MflowLinkSim::reset() {
   std::fill(Z_.begin(), Z_.end(), 0.0);
   std::fill(Znext_.begin(), Znext_.end(), 0.0);
   std::fill(Out_.begin(), Out_.end(), 0.0);
+  std::fill(PrevOut_.begin(), PrevOut_.end(), 0.0);
   for (auto &C : LogColumns_) C.clear();
   Snapshots_.clear();
   LogsTruncated_ = false;
@@ -192,6 +196,12 @@ void MflowLinkSim::reset() {
       double X0 = paramD(B, "x0", 0.0);
       for (int J = 0; J < B.ContStateCount; ++J)
         Y_[StateOffset_[I] + J] = X0;
+    } else if (B.Kind == "signal_relay") {
+      // Initial relay state: `initialState` (bool/0|1) wins, else
+      // start in the "off" branch. The on/off VALUES (not the
+      // boolean state) reach Out_[I] at first evalAll.
+      double IS = paramD(B, "initialState", 0.0);
+      Z_[DiscStateOffset_[I]] = IS > 0.5 ? 1.0 : 0.0;
     } else if (B.Kind == "signal_unit_delay" || B.Kind == "signal_zoh") {
       // Latched output starts at the initial-value param (Unit Delay)
       // or 0 (ZOH — held by definition once the first tick fires).
@@ -209,6 +219,17 @@ void MflowLinkSim::reset() {
   // Run one evaluation at t=startTime so the very first logged sample
   // reflects t=0 outputs, not the post-construction zeros.
   evalAll(T_, Y_.data(), nullptr);
+  // Relay's initial output depends on its input at t=0 — if the
+  // input is already past either threshold, the latched bit needs
+  // to reflect that before the first logSample.
+  commitRelayState();
+  evalAll(T_, Y_.data(), nullptr);
+  // Snapshot the initial outputs as the "previous" baseline so the
+  // first major step's edge-trigger detection compares against the
+  // post-init values, not the all-zero default. Without this, an
+  // already-high gate signal at t=0 would falsely "rise" during
+  // the first step.
+  PrevOut_ = Out_;
 
   // Seed zero-crossing signs from the initial outputs so the first
   // major step can detect a flip cleanly.
@@ -256,12 +277,41 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
     // the evaluator entirely (output and discrete state hold) and
     // zeros the continuous-state derivative slice so any RK4 sub-
     // step sees `dx/dt = 0` for the gated block.
-    if (Gate_[I] >= 0 && Out_[Gate_[I]] <= 0.0) {
-      if (Deriv && B.ContStateCount > 0) {
-        size_t Off = StateOffset_[I];
-        for (int J = 0; J < B.ContStateCount; ++J) Deriv[Off + J] = 0.0;
+    //
+    // Edge-triggered gate (Tier F carve-out — from a
+    // `signal_triggered_subsystem`): the block fires only when the
+    // gate signal has just *risen* through zero between the previous
+    // and current major step. `PrevOut_` captures the last logged
+    // value of every block; on a rising edge it's ≤ 0 and the
+    // current `Out_` is > 0, so the gate opens for exactly one
+    // step.
+    if (Gate_[I] >= 0) {
+      bool Open;
+      if (GateEdge_[I]) {
+        double Now = Out_[Gate_[I]];
+        double Before = PrevOut_[Gate_[I]];
+        Open = (Before <= 0.0 && Now > 0.0);
+      } else {
+        Open = Out_[Gate_[I]] > 0.0;
       }
-      continue;
+      if (!Open) {
+        // Level-gated (`signal_enabled_subsystem`): hold the prior
+        // output and freeze any continuous state — Simulink's
+        // "Output when disabled: held".
+        // Edge-triggered (`signal_triggered_subsystem`): drive the
+        // output to zero outside the trigger window so a downstream
+        // accumulator/integrator only sees the value during the
+        // single firing step — Simulink's "Output when disabled:
+        // reset". This is what makes a function-call-generator +
+        // triggered-pass + integrator add up to one count per
+        // pulse instead of running away.
+        if (GateEdge_[I]) Out_[I] = 0.0;
+        if (Deriv && B.ContStateCount > 0) {
+          size_t Off = StateOffset_[I];
+          for (int J = 0; J < B.ContStateCount; ++J) Deriv[Off + J] = 0.0;
+        }
+        continue;
+      }
     }
 
     if (K == "signal_constant") {
@@ -290,6 +340,27 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
       double Tt = std::fmod(T - D, Pp);
       if (Tt < 0.0) Tt += Pp;
       Out_[I] = (Tt < Pp * W * 0.01) ? A : 0.0;
+    } else if (K == "signal_function_call_generator") {
+      // Tier F carve-out — emit `1` for one major step at the
+      // start of every `period`; `0` otherwise. With a configured
+      // period P and current time T, the pulse fires when
+      // `t mod P` is within one step of zero. This is what drives
+      // a `signal_triggered_subsystem` to fire — the rising edge
+      // of this output is the trigger event.
+      double Pp = paramD(B, "period", 1.0);
+      if (Pp <= 0.0) Pp = 1.0;
+      double Phase = paramD(B, "phaseDelay", 0.0);
+      double Tt = std::fmod(T - Phase, Pp);
+      if (Tt < 0.0) Tt += Pp;
+      // Width is 1.5 × the integration step. Half a step at the
+      // *trailing* edge would miss the period boundary on rounding-
+      // up drift; 1.5 × means even a noticeable accumulation of
+      // float error (T_ a few ULP past N·P) lands inside the
+      // window. The rising-edge detector keys on PrevOut_[clk] vs
+      // Out_[clk], so a 2-step-wide pulse still fires the trigger
+      // exactly once per period.
+      double Width = StepSize_ * 1.5;
+      Out_[I] = (Tt < Width || Tt > Pp - 1e-12) ? 1.0 : 0.0;
     } else if (K == "signal_gain") {
       Out_[I] = paramD(B, "gain", 1.0) * inputOf(I, "in");
     } else if (K == "signal_abs") {
@@ -439,6 +510,17 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
       // loop-breaker during lowering, so the topo order never
       // tries to read this block's output before reaching it.
       Out_[I] = Z_[DiscStateOffset_[I]];
+    } else if (K == "signal_relay") {
+      // Tier E carve-out — hysteretic on/off switch. Z_[Off] holds
+      // the latched bit (0.0 = off, 1.0 = on). The evaluator only
+      // *reads* Z_; the state update lives in `commitRelayState`,
+      // which runs once per major step (after RK4 + fireDiscreteTicks
+      // + zero-crossing settle) — otherwise the relay could flip
+      // several times per step because stepMajor calls evalAll
+      // multiple times for end-of-step refresh.
+      double OnV   = paramD(B, "onValue",  1.0);
+      double OffV  = paramD(B, "offValue", 0.0);
+      Out_[I] = (Z_[DiscStateOffset_[I]] > 0.5) ? OnV : OffV;
     } else {
       // Loader-level reserved kinds are rejected at lowering, so
       // anything reaching here is an evaluator gap — treat as
@@ -572,8 +654,38 @@ double MflowLinkSim::stepMajor() {
   // Outputs again, so a Unit Delay / ZOH that latched a new value at
   // this tick is visible to downstream blocks in the logged sample.
   evalAll(T_, Y_.data(), nullptr);
+  // Tier E carve-out — once-per-step relay sweep. Runs after every
+  // other update so its input read sees the post-discrete-tick
+  // outputs, but before logging so the latched output appears in
+  // the recorded sample at the same `t` it actually flipped on.
+  commitRelayState();
+  evalAll(T_, Y_.data(), nullptr);
+  // Tier F carve-out — snapshot the just-finished outputs as the
+  // *previous* values for the next step's edge-trigger detection.
+  // Doing this after the final evalAll means PrevOut_ holds the
+  // logged value, so a rising edge between consecutive logged
+  // samples is what the next step's evalAll keys on.
+  PrevOut_ = Out_;
   logSample();
   return H;
+}
+
+void MflowLinkSim::commitRelayState() {
+  // Idempotent per call: only flips when the input has crossed
+  // *outside* the dead-band — repeated calls with the same input
+  // converge to the same latched state on the first pass.
+  for (size_t I = 0; I < M_.Blocks.size(); ++I) {
+    const auto &B = M_.Blocks[I];
+    if (B.Kind != "signal_relay") continue;
+    double U = 0.0;
+    for (auto &P : Inputs_[I])
+      if (P.DstPort == "in") U += Out_[P.SrcBlock];
+    double OnPt  = paramD(B, "onPoint",  0.5);
+    double OffPt = paramD(B, "offPoint", -0.5);
+    size_t Off = DiscStateOffset_[I];
+    if (Z_[Off] <= 0.5 && U > OnPt)       Z_[Off] = 1.0;
+    else if (Z_[Off] >  0.5 && U < OffPt) Z_[Off] = 0.0;
+  }
 }
 
 void MflowLinkSim::fireDiscreteTicks() {
@@ -642,6 +754,21 @@ int MflowLinkSim::predicateSign(size_t K) const {
     double Th = paramD(*B, "threshold", 0.0);
     double D = Ctrl - Th;
     return D > 0 ? +1 : (D < 0 ? -1 : 0);
+  }
+  if (B->Kind == "signal_relay") {
+    // Predicate flips sign at each rail crossing. Inside the dead-
+    // band the relay's state is sticky so the predicate sign just
+    // tracks the input's *current* zone (above onPoint, below
+    // offPoint, or in-between). Either flip → a registered ZC the
+    // bisector will land on.
+    double U = 0.0;
+    for (auto &P : Inputs_[I])
+      if (P.DstPort == "in") U += Out_[P.SrcBlock];
+    double OnPt  = paramD(*B, "onPoint",  0.5);
+    double OffPt = paramD(*B, "offPoint", -0.5);
+    if (U > OnPt)  return +1;
+    if (U < OffPt) return -1;
+    return 0;
   }
   return 0;
 }
@@ -783,6 +910,7 @@ void MflowLinkSim::pushSnapshot() {
   S.Y = Y_;
   S.Out = Out_;
   S.Z = Z_;
+  S.PrevOut = PrevOut_;
   S.NextFire = NextFire_;
   S.ZCSign = ZCSign_;
   S.LogRows = LogColumns_.empty() ? 0 : LogColumns_.front().size();
@@ -801,6 +929,7 @@ bool MflowLinkSim::stepBackMajor() {
   Out_ = std::move(S.Out);
   Z_ = std::move(S.Z);
   Znext_ = Z_; // shadow buffer matches the latched value on restore
+  PrevOut_ = std::move(S.PrevOut);
   NextFire_ = std::move(S.NextFire);
   ZCSign_ = std::move(S.ZCSign);
   // Truncate any log rows newer than this snapshot — they belong to

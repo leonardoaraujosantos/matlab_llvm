@@ -36,6 +36,7 @@ diagnostic) until its evaluator lands.
 | `signal_noise`        |   | reserved                                                                  | |
 | `signal_from_workspace` | | reserved                                                                | |
 | `signal_clock`        |   | reserved                                                                  | |
+| `signal_function_call_generator` | ✓ | `period: 1.0`, `phaseDelay: 0.0`                               | Tier-F carve-out — emits `1` over a 1.5×step window at every `period` boundary, `0` otherwise. Designed to drive `signal_triggered_subsystem` via a rising edge. |
 
 ## Sinks
 
@@ -81,6 +82,7 @@ diagnostic) until its evaluator lands.
 | `signal_dead_zone`  |   | reserved                                                 | |
 | `signal_relop`      |   | reserved                                                 | |
 | `signal_logical`    |   | reserved                                                 | |
+| `signal_relay`      | ✓ | `onPoint: 0.5`, `offPoint: -0.5`, `onValue: 1.0`, `offValue: 0.0`, `initialState: 0.0` | Tier-E carve-out — hysteretic on/off switch. State flips at major-step boundaries only; the dead-band between `offPoint` and `onPoint` gives the latched output its persistence. Registers two zero-crossing predicates so the bisector lands transitions sub-step accurately. |
 
 ## Signal routing
 
@@ -98,7 +100,7 @@ diagnostic) until its evaluator lands.
 | `signal_inport`    | ✓ | `port` (in `data`) — optional external-port binding         | Contracted into the parent during flattening |
 | `signal_outport`   | ✓ | `port` (in `data`) — optional external-port binding         | Contracted into the parent during flattening |
 | `signal_enabled_subsystem`   | ✓ | `flow_id` + `enable_block` (in `data`) — id of a sibling block whose output drives the gate | Tier-F: flattens like `signal_subsystem`; every inlined leaf inherits the gate. Runtime holds outputs / zeros derivatives while gate ≤ 0 |
-| `signal_triggered_subsystem` | ✓ | `flow_id` + `enable_block` (in `data`)                                                       | Tier-F: same level-gated semantics as `signal_enabled_subsystem` today. Proper edge-triggered semantics (fire on `0 → 1` transition only) is Tier-H |
+| `signal_triggered_subsystem` | ✓ | `flow_id` + `enable_block` (in `data`)                                                       | Tier-F carve-out — proper rising-edge semantics: the gated subtree fires for exactly one major step on each `0 → 1` transition of the `enable_block`'s output, then resets its outputs to zero (Simulink's "Output when disabled: reset"). Typically paired with `signal_function_call_generator`. |
 
 ## Node-level data fields (not `params`)
 

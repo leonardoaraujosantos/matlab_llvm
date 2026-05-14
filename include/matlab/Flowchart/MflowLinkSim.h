@@ -141,6 +141,16 @@ private:
   // from `MflBlock::EnableSource` (a flat block id). `evalAll` skips
   // block I when Gate_[I] ≥ 0 and Out_[Gate_[I]] ≤ 0.
   std::vector<int> Gate_;
+  // Tier F carve-out — true when the gate is edge-triggered (the
+  // block fires for exactly one major step on a rising edge of the
+  // gate). The level-vs-edge distinction is read from
+  // `MflBlock::EnableEdgeTriggered` at construction time.
+  std::vector<bool> GateEdge_;
+  // Previous-step value of every block's output, used to detect
+  // rising edges on gate signals. Updated at the end of each major
+  // step (after the final evalAll) so the *next* step's evalAll
+  // sees the just-completed step's outputs as "previous".
+  std::vector<double> PrevOut_;
 
   // Cached per-block plant data the evaluator would otherwise reparse
   // on every step (transfer-fcn numerator/denominator coefficients,
@@ -199,6 +209,7 @@ private:
     std::vector<double> Y;
     std::vector<double> Out;
     std::vector<double> Z;          // discrete state
+    std::vector<double> PrevOut;    // for Tier-F edge-trigger detection
     std::vector<double> NextFire;   // scheduler queue
     std::vector<int> ZCSign;        // zero-crossing signs
     size_t LogRows;     // truncate logs back to this size on restore
@@ -228,6 +239,13 @@ private:
   // latching new outputs into Z_ / Znext_ and advancing the per-
   // block next-fire time by the configured sample period.
   void fireDiscreteTicks();
+
+  // Run the once-per-major-step relay state-update sweep. Looks at
+  // each `signal_relay`'s current input and, with hysteresis-aware
+  // logic, may flip its latched bit. Idempotent if called more than
+  // once at the same time — the predicate uses the *latched* state,
+  // not transient evalAll values.
+  void commitRelayState();
 
   // Predicate sign for `M_.ZeroCrossings[k]` at the current outputs:
   // returns +1, 0, or -1. The predicate depends on the block's kind

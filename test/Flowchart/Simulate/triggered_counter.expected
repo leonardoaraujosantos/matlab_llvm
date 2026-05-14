@@ -1,0 +1,12 @@
+MflowLinkModel entry=triggered_counter blocks=4 edges=2
+  solver type=variable_step algorithm=ode45 startTime=0 stopTime=5
+  states continuous=0 discrete=0
+  exec-order:
+    0 clk kind=signal_function_call_generator sample=fixed_in_minor log
+    1 src kind=signal_ramp sample=fixed_in_minor log
+    2 trig/pass kind=signal_gain sample=fixed_in_minor log enable=clk (rising-edge)
+    3 scope kind=signal_scope sample=fixed_in_minor
+  zero-crossings: none
+  edges:
+    _splice0 src:out -> trig/pass:in
+    _splice1 trig/pass:out -> scope:in
