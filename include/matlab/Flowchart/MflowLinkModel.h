@@ -54,6 +54,13 @@ struct MflBlock {
   // are dropped from the execution-order sort graph (§6.3).
   bool IsLoopBreaker = false;
   bool LogSignal = false;      // `data.log_signal` — stream this output
+  // Tier F — conditional subsystem gate. Empty for an always-enabled
+  // block; a flat block id (the source signal driving the enable)
+  // for a block inlined from a `signal_enabled_subsystem` or for a
+  // block that carries an explicit `data.enable_block`. At runtime,
+  // `MflowLinkSim::evalAll` skips this block's evaluator (and zeros
+  // its derivative slice) whenever the source's output is ≤ 0.
+  std::string EnableSource;
   SourceLocation Loc;          // the originating `.mflow` node
 };
 

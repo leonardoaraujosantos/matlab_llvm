@@ -1,0 +1,12 @@
+MflowLinkModel entry=sat_zc blocks=3 edges=2
+  solver type=variable_step algorithm=ode45 startTime=0 stopTime=4
+  states continuous=0 discrete=0
+  exec-order:
+    0 ramp kind=signal_ramp sample=fixed_in_minor log
+    1 sat kind=signal_saturation sample=fixed_in_minor log
+    2 scope kind=signal_scope sample=fixed_in_minor
+  zero-crossings:
+    sat (signal_saturation)
+  edges:
+    e1 ramp:out -> sat:in
+    e2 sat:out -> scope:in

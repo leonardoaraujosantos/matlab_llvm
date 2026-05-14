@@ -1,0 +1,55 @@
+{
+  "schema": "matforge.flowchart",
+  "version": "0.1.0",
+  "entry": "freefall",
+  "settings": {
+    "kind": "signal_flow",
+    "solver": {
+      "type": "variable_step",
+      "algorithm": "ode45",
+      "startTime": 0.0,
+      "stopTime": 2.5,
+      "maxStep": "0.005",
+      "zeroCrossing": true,
+      "algebraicLoopMethod": "trust_region"
+    },
+    "snapshot": { "enabled": true, "depth": 256, "fields": "states" }
+  },
+  "flows": [
+    {
+      "id": "flow_freefall",
+      "kind": "program",
+      "name": "freefall",
+      "signature": { "inputs": [], "outputs": [] },
+      "nodes": [
+        { "id": "g", "kind": "signal_constant",
+          "data": { "params": { "value": -9.81 } },
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+        { "id": "vel", "kind": "signal_integrator",
+          "data": { "params": { "initialCondition": 0.0 } },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "pos", "kind": "signal_integrator",
+          "data": { "log_signal": true,
+                    "params": { "initialCondition": 10.0 } },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "floor", "kind": "signal_saturation",
+          "data": { "log_signal": true,
+                    "params": { "upperLimit": 100.0, "lowerLimit": 0.0 } },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "scope", "kind": "signal_scope",
+          "data": { "params": { "title": "freefall" } },
+          "ports": { "in": [{"id": "in"}], "out": [] } }
+      ],
+      "edges": [
+        { "id": "e1", "kind": "data",
+          "from": {"node": "g",     "port": "out"}, "to": {"node": "vel",   "port": "in"} },
+        { "id": "e2", "kind": "data",
+          "from": {"node": "vel",   "port": "out"}, "to": {"node": "pos",   "port": "in"} },
+        { "id": "e3", "kind": "data",
+          "from": {"node": "pos",   "port": "out"}, "to": {"node": "floor", "port": "in"} },
+        { "id": "e4", "kind": "data",
+          "from": {"node": "floor", "port": "out"}, "to": {"node": "scope", "port": "in"} }
+      ]
+    }
+  ]
+}

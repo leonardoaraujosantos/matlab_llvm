@@ -45,9 +45,9 @@ def read_one_frame(stream):
 
 def main(matlabc: str) -> int:
     here = os.path.dirname(os.path.abspath(__file__))
-    mflow = os.path.abspath(
-        os.path.join(here, "..", "..", "..", "examples",
-                     "mflowlink", "lowpass.mflow"))
+    examples = os.path.abspath(
+        os.path.join(here, "..", "..", "..", "examples", "mflowlink"))
+    mflow = os.path.join(examples, "lowpass.mflow")
 
     proc = subprocess.Popen(
         [matlabc, "-simulate", "--sim-dap", mflow],
@@ -160,6 +160,95 @@ def main(matlabc: str) -> int:
         fail(f"matlabc exited with {rc}")
     else:
         print(f"PASS  disconnect:  exit {rc}")
+
+    # ----------------------------------------------------------------
+    # Tier-E scenario: stepBlock + zeroCrossing on a different model.
+    # Driven by freefall_floor.mflow — a free-falling integrator that
+    # hits a saturation rail (the "floor") around t ≈ 1.43 s. The
+    # `continue` request stops on the first zero-crossing (our DAP
+    # policy in main.cpp) and emits a `zeroCrossing` event with the
+    # offending block id.
+    # ----------------------------------------------------------------
+    ff_mflow = os.path.join(examples, "freefall_floor.mflow")
+    proc2 = subprocess.Popen(
+        [matlabc, "-simulate", "--sim-dap", ff_mflow],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    assert proc2.stdin and proc2.stdout
+
+    def send2(obj):
+        proc2.stdin.write(frame(obj))
+        proc2.stdin.flush()
+
+    seq2 = [10]
+
+    def req2(cmd, args=None):
+        seq2[0] += 1
+        send2({"seq": seq2[0], "type": "request", "command": cmd,
+               "arguments": args or {}})
+
+    def wait_for2(pred, label, max_frames=4000):
+        for _ in range(max_frames):
+            f = read_one_frame(proc2.stdout)
+            if f is None:
+                fail(f"stream closed while waiting for {label}")
+                return None
+            if pred(f):
+                return f
+        fail(f"timed out waiting for {label}")
+        return None
+
+    req2("initialize")
+    wait_for2(lambda f: is_resp(f, "initialize"), "ff initialize")
+    wait_for2(lambda f: f.get("event") == "initialized", "ff initialized")
+    req2("launch")
+    wait_for2(lambda f: is_resp(f, "launch"), "ff launch")
+    req2("configurationDone")
+    wait_for2(lambda f: is_resp(f, "configurationDone"), "ff confDone")
+    wait_for2(lambda f: is_stopped(f, "entry"), "ff stopped(entry)")
+
+    # stepBlock should yield a `simulationActiveBlock` event with a
+    # non-empty nodeId pointing at the topo-first block (the gravity
+    # constant `g`).
+    req2("stepBlock")
+    wait_for2(lambda f: is_resp(f, "stepBlock"), "stepBlock resp")
+    act = wait_for2(
+        lambda f: f.get("event") == "simulationActiveBlock",
+        "simulationActiveBlock event")
+    wait_for2(lambda f: is_stopped(f, "step"), "stopped after stepBlock")
+    if act:
+        nid = act.get("body", {}).get("nodeId", "")
+        if nid != "g":
+            fail(f"expected stepBlock to highlight `g`, got `{nid}`")
+        else:
+            print(f"PASS  stepBlock:   nodeId={nid!r}")
+
+    # continue runs until it hits the saturation zero-crossing. The
+    # `zeroCrossing` event names `floor`; the `stopped` event carries
+    # reason="crossing".
+    req2("continue")
+    wait_for2(lambda f: is_resp(f, "continue"), "ff continue resp")
+    zc = wait_for2(
+        lambda f: f.get("event") == "zeroCrossing",
+        "zeroCrossing event")
+    if zc:
+        bid = zc.get("body", {}).get("blockId", "")
+        t   = zc.get("body", {}).get("t", -1)
+        if bid != "floor":
+            fail(f"expected zeroCrossing on `floor`, got `{bid}`")
+        elif not (1.30 <= float(t) <= 1.55):
+            fail(f"expected crossing at t≈1.43 s, got {t}")
+        else:
+            print(f"PASS  zeroCrossing: blockId={bid!r} t={t:.3f}")
+    wait_for2(lambda f: is_stopped(f, "crossing"), "stopped(crossing)")
+
+    req2("disconnect")
+    proc2.stdin.close()
+    rc2 = proc2.wait(timeout=10)
+    if rc2 != 0:
+        fail(f"freefall matlabc exited with {rc2}")
+    else:
+        print(f"PASS  ff disconnect: exit {rc2}")
 
     print("----")
     if failures:

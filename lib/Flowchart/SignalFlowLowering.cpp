@@ -88,6 +88,17 @@ const KindInfo *lookupKind(const std::string &K) {
     add("signal_subsystem", {true, true, true, false, false, FIM});
     add("signal_inport",    {true, true, true, false, false, FIM});
     add("signal_outport",   {true, true, true, false, false, FIM});
+    // Tier F — gated composites. Flattening is identical to
+    // `signal_subsystem`; the extra step is stamping every inlined
+    // child block with the enable source named by
+    // `data.enable_block` (a sibling block in the parent flow). The
+    // runtime evaluator (`MflowLinkSim::evalAll`) holds outputs and
+    // zeros derivatives while the gate is ≤ 0. Triggered / function-
+    // call variants accept the same `data.enable_block` field today
+    // and share the same gate semantics — proper edge-trigger /
+    // call-event handling is Tier H.
+    add("signal_enabled_subsystem",   {true, true, true, false, false, FIM});
+    add("signal_triggered_subsystem", {true, true, true, false, false, FIM});
 
     // --- Reserved (Known, not yet Supported) --------------------------------
     for (const char *Name : {
@@ -98,8 +109,7 @@ const KindInfo *lookupKind(const std::string &K) {
              "signal_dead_zone", "signal_relop", "signal_logical",
              "signal_bus_creator", "signal_bus_selector",
              "signal_multiport_switch", "signal_goto", "signal_from",
-             "signal_merge", "signal_enabled_subsystem",
-             "signal_triggered_subsystem", "signal_function_call_generator",
+             "signal_merge", "signal_function_call_generator",
              "signal_if_action", "signal_switch_case_action",
              "signal_lookup_1d", "signal_lookup_2d", "signal_lookup_nd",
              "signal_relay", "signal_compare_to_zero",
@@ -177,6 +187,11 @@ double parseDoubleOr(const std::string *S, double Fallback) {
 struct FNode {
   std::string Id;          // flat (prefixed) id
   const Node *Src;         // originating loader node
+  // Tier-F enable-gate inheritance. Empty for a top-level block
+  // (always enabled). For a block inlined from a
+  // `signal_enabled_subsystem` / `signal_triggered_subsystem`, holds
+  // the flat id of the source signal driving the subsystem's enable.
+  std::string EnableStamp;
 };
 
 struct FEdge {
@@ -197,7 +212,7 @@ public:
 
   std::optional<FlatGraph> run(const Flow &Entry) {
     std::vector<std::string> Stack{Entry.Id};
-    auto G = expand(Entry, "", Stack);
+    auto G = expand(Entry, "", Stack, /*EnableStamp=*/"");
     if (!G) return std::nullopt;
     if (!contractBoundaries(*G)) return std::nullopt;
     return G;
@@ -207,6 +222,21 @@ private:
   const FlowDoc &Doc_;
   DiagnosticEngine &Diag_;
   int SynthEdge_ = 0;
+
+  // Compute the effective enable stamp for an inherited gate +
+  // optional override. Empty if neither is set. When BOTH are set
+  // (a per-block `data.enable_block` inside an already-gated
+  // subsystem), we keep the inherited gate — the subsystem-level
+  // enable is the outer guard, and an inner override should be
+  // wired through the diagram, not stacked here. A real
+  // multi-gate composite is a Tier-H follow-up.
+  static std::string composeEnable(const std::string &Inherited,
+                                   const std::string &Local,
+                                   const std::string &Prefix) {
+    if (!Inherited.empty()) return Inherited;
+    if (Local.empty()) return std::string{};
+    return Prefix + Local;
+  }
 
   const Flow *findFlowById(const std::string &Id) const {
     for (auto &F : Doc_.Flows)
@@ -223,9 +253,13 @@ private:
 
   // Recursively expand `F`. `Prefix` namespaces every emitted id.
   // `Stack` carries the flow ids currently being expanded — a flow
-  // id reappearing is a subsystem cycle.
+  // id reappearing is a subsystem cycle. `EnableStamp` (Tier F) is
+  // the inherited conditional-subsystem gate: every leaf inlined
+  // here picks it up unless we descend into a nested enabled-
+  // subsystem (handled by `composeEnable`).
   std::optional<FlatGraph> expand(const Flow &F, const std::string &Prefix,
-                                  std::vector<std::string> &Stack) {
+                                  std::vector<std::string> &Stack,
+                                  const std::string &EnableStamp) {
     FlatGraph G;
     // subsystem node id → { bindingPort → flat boundary node id }
     std::unordered_map<std::string, std::map<std::string, std::string>> InMap;
@@ -234,17 +268,22 @@ private:
 
     for (auto &N : F.Nodes) {
       const KindInfo *KI = lookupKind(N.Kind);
-      if (KI && KI->Composite && N.Kind == "signal_subsystem") {
+      const bool IsSubsystem =
+          KI && KI->Composite &&
+          (N.Kind == "signal_subsystem" ||
+           N.Kind == "signal_enabled_subsystem" ||
+           N.Kind == "signal_triggered_subsystem");
+      if (IsSubsystem) {
         SubsysIds.insert(N.Id);
         const std::string *FlowId = N.getData("flow_id");
         if (!FlowId || FlowId->empty()) {
-          Diag_.error(N.Loc, "signal_subsystem \"" + N.Id +
+          Diag_.error(N.Loc, N.Kind + " \"" + N.Id +
                                  "\" is missing data.flow_id");
           return std::nullopt;
         }
         const Flow *Child = findFlowById(*FlowId);
         if (!Child) {
-          Diag_.error(N.Loc, "signal_subsystem \"" + N.Id +
+          Diag_.error(N.Loc, N.Kind + " \"" + N.Id +
                                  "\" references unknown flow id \"" + *FlowId +
                                  "\"");
           return std::nullopt;
@@ -255,8 +294,16 @@ private:
                                  "may not reference an ancestor flow)");
           return std::nullopt;
         }
+        // Inherit the parent's gate (if any) plus the subsystem's
+        // own `data.enable_block` override.
+        std::string ChildEnable = EnableStamp;
+        if (N.Kind == "signal_enabled_subsystem" ||
+            N.Kind == "signal_triggered_subsystem") {
+          if (auto *EB = N.getData("enable_block"))
+            ChildEnable = composeEnable(EnableStamp, *EB, Prefix);
+        }
         Stack.push_back(*FlowId);
-        auto ChildG = expand(*Child, Prefix + N.Id + "/", Stack);
+        auto ChildG = expand(*Child, Prefix + N.Id + "/", Stack, ChildEnable);
         Stack.pop_back();
         if (!ChildG) return std::nullopt;
         for (auto &CN : ChildG->Nodes) {
@@ -269,8 +316,15 @@ private:
         for (auto &CE : ChildG->Edges) G.Edges.push_back(CE);
         continue;
       }
-      // Leaf block, or an inport/outport passthrough — keep it.
-      G.Nodes.push_back({Prefix + N.Id, &N});
+      // Leaf block, or an inport/outport passthrough — keep it and
+      // stamp the active enable inheritance. A leaf's own
+      // `data.enable_block` is honoured directly when no outer
+      // gate is in force; `composeEnable` resolves the conflict.
+      std::string LeafEnable = EnableStamp;
+      if (LeafEnable.empty())
+        if (auto *EB = N.getData("enable_block"))
+          LeafEnable = composeEnable("", *EB, Prefix);
+      G.Nodes.push_back({Prefix + N.Id, &N, LeafEnable});
     }
 
     // Rewire this flow's edges, redirecting through subsystem boundaries.
@@ -433,6 +487,7 @@ std::optional<MflowLinkModel> lowerSignalFlow(const FlowDoc &Doc,
     B.Params = N.Params;
     B.Loc = N.Loc;
     B.SampleClass = KI->Sample;
+    B.EnableSource = FN.EnableStamp;
     if (auto *L = N.getData("log_signal"))
       B.LogSignal = (*L == "true");
 
@@ -475,6 +530,22 @@ std::optional<MflowLinkModel> lowerSignalFlow(const FlowDoc &Doc,
   // Build the edge list.
   for (auto &FE : Flat->Edges)
     M.Edges.push_back({FE.Id, FE.FromNode, FE.FromPort, FE.ToNode, FE.ToPort});
+
+  // Validate every `EnableSource` resolves to a block we know about.
+  // A typo here would silently disable a subtree at runtime — far
+  // better to fail cleanly at lower time with the block id quoted.
+  for (auto &B : M.Blocks) {
+    if (B.EnableSource.empty()) continue;
+    bool Found = false;
+    for (auto &Other : M.Blocks)
+      if (Other.Id == B.EnableSource) { Found = true; break; }
+    if (!Found) {
+      Diag.error(B.Loc, "block \"" + B.Id +
+                            "\" references unknown enable block \"" +
+                            B.EnableSource + "\"");
+      return std::nullopt;
+    }
+  }
 
   //===--------------------------------------------------------------------===//
   // Execution-order sort (§6.3).
@@ -576,6 +647,7 @@ void dumpMflowLinkModel(std::ostream &OS, const MflowLinkModel &M) {
     if (B.DiscStateCount) OS << " disc-states=" << B.DiscStateCount;
     if (B.IsLoopBreaker) OS << " loop-breaker";
     if (B.LogSignal) OS << " log";
+    if (!B.EnableSource.empty()) OS << " enable=" << B.EnableSource;
     OS << "\n";
   }
   OS << "  zero-crossings:";

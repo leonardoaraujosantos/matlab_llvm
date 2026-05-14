@@ -61,8 +61,8 @@ diagnostic) until its evaluator lands.
 
 | Kind | Tier-C | Params | Notes |
 |---|---|---|---|
-| `signal_unit_delay`   | stub | `initialValue: 0.0`, `sampleTime: 1.0`                | Tier-E: proper discrete scheduler; current evaluator outputs `initialValue` |
-| `signal_zoh`          | stub | `sampleTime: 1.0`                                     | Tier-E: see above |
+| `signal_unit_delay`   | ✓ | `initialValue: 0.0`, `sampleTime: 1.0`                   | Multi-rate scheduler latches `u[n-1]` at each tick (Tier E) |
+| `signal_zoh`          | ✓ | `sampleTime: 1.0`                                        | Sample-and-hold; output latched at each tick boundary |
 | `signal_discrete_integrator` | | reserved                                          | |
 | `signal_discrete_filter`     | | reserved                                          | |
 | `signal_rate_transition`     | | reserved                                          | |
@@ -97,6 +97,8 @@ diagnostic) until its evaluator lands.
 | `signal_subsystem` | ✓ | `flow_id` (in `data`, *not* `params`) — id of the sub-flow | Flattened during lowering (§6.2); runtime never sees a subsystem |
 | `signal_inport`    | ✓ | `port` (in `data`) — optional external-port binding         | Contracted into the parent during flattening |
 | `signal_outport`   | ✓ | `port` (in `data`) — optional external-port binding         | Contracted into the parent during flattening |
+| `signal_enabled_subsystem`   | ✓ | `flow_id` + `enable_block` (in `data`) — id of a sibling block whose output drives the gate | Tier-F: flattens like `signal_subsystem`; every inlined leaf inherits the gate. Runtime holds outputs / zeros derivatives while gate ≤ 0 |
+| `signal_triggered_subsystem` | ✓ | `flow_id` + `enable_block` (in `data`)                                                       | Tier-F: same level-gated semantics as `signal_enabled_subsystem` today. Proper edge-triggered semantics (fire on `0 → 1` transition only) is Tier-H |
 
 ## Node-level data fields (not `params`)
 
@@ -105,11 +107,12 @@ These live directly under `data` (not nested in `params`) and use
 
 | Key | Type | Default | Notes |
 |---|---|---|---|
-| `sample_time` | string  | `"inherited"` | `"continuous"` \| `"inherited"` \| `"<seconds>"` |
-| `units`       | string  | `""`          | Engineering-unit string, advisory |
-| `data_type`   | string  | `"double"`    | `"double"` \| `"single"` \| `"int8"` … |
-| `log_signal`  | bool    | `false`       | Stream this block's output (§7.6) |
-| `params`      | object  | `{}`          | Block parameters per the table above |
+| `sample_time`  | string  | `"inherited"` | `"continuous"` \| `"inherited"` \| `"<seconds>"` |
+| `units`        | string  | `""`          | Engineering-unit string, advisory |
+| `data_type`    | string  | `"double"`    | `"double"` \| `"single"` \| `"int8"` … |
+| `log_signal`   | bool    | `false`       | Stream this block's output (§7.6) |
+| `enable_block` | string  | `""`          | Tier-F gate. On a `signal_enabled_subsystem` / `signal_triggered_subsystem`, names a sibling block whose output drives the gate (every inlined sub-block picks it up). On any other block, gates that block individually. Empty ⇒ always enabled. |
+| `params`       | object  | `{}`          | Block parameters per the table above |
 
 ## Cross-repo invariants
 

@@ -1,0 +1,12 @@
+MflowLinkModel entry=enabled_demo blocks=4 edges=2
+  solver type=variable_step algorithm=ode45 startTime=0 stopTime=4
+  states continuous=0 discrete=0
+  exec-order:
+    0 drive kind=signal_sine sample=fixed_in_minor log
+    1 gate kind=signal_step sample=fixed_in_minor log
+    2 sub/amp kind=signal_gain sample=fixed_in_minor log enable=gate
+    3 scope kind=signal_scope sample=fixed_in_minor
+  zero-crossings: none
+  edges:
+    _splice0 drive:out -> sub/amp:in
+    _splice1 sub/amp:out -> scope:in

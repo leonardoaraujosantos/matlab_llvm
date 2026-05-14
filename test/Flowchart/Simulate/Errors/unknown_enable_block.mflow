@@ -1,0 +1,31 @@
+{
+  "schema": "matforge.flowchart",
+  "version": "0.1.0",
+  "entry": "bad_enable",
+  "settings": { "kind": "signal_flow" },
+  "flows": [
+    {
+      "id": "flow_bad_enable",
+      "kind": "program",
+      "name": "bad_enable",
+      "signature": { "inputs": [], "outputs": [] },
+      "nodes": [
+        { "id": "drive", "kind": "signal_constant",
+          "data": { "params": { "value": 1.0 } },
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+        { "id": "g", "kind": "signal_gain",
+          "data": { "enable_block": "no_such_block",
+                    "params": { "gain": 2.0 } },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "term", "kind": "signal_terminator",
+          "ports": { "in": [{"id": "in"}], "out": [] } }
+      ],
+      "edges": [
+        { "id": "e1", "kind": "data",
+          "from": {"node": "drive", "port": "out"}, "to": {"node": "g",    "port": "in"} },
+        { "id": "e2", "kind": "data",
+          "from": {"node": "g",     "port": "out"}, "to": {"node": "term", "port": "in"} }
+      ]
+    }
+  ]
+}

@@ -422,6 +422,23 @@ add_test(
           $<TARGET_FILE:matlabc>
   WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Flowchart/SimulateDap
 )
+# mflowLink Tier-E smoke lane — block-level stepping. Walks the topo
+# order one block at a time, then commits a major step on cursor wrap.
+add_test(
+  NAME flowchart-simulate-dap-block-tests
+  COMMAND python3 ${CMAKE_SOURCE_DIR}/test/Flowchart/SimulateDap/run_block_step.py
+          $<TARGET_FILE:matlabc>
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Flowchart/SimulateDap
+)
+# mflowLink Tier-F smoke lane — time + signal breakpoints. Arms each
+# kind, verifies `stopped { reason: "breakpoint" }`, and checks that
+# breakpoints are sticky until `restart` re-arms them.
+add_test(
+  NAME flowchart-simulate-dap-breakpoint-tests
+  COMMAND python3 ${CMAKE_SOURCE_DIR}/test/Flowchart/SimulateDap/run_breakpoints.py
+          $<TARGET_FILE:matlabc>
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Flowchart/SimulateDap
+)
 # Opt-in Verilog-A lint lane (Tier-10 of docs/verilog_a_plan.md).
 # Compiles + runs every example under examples/verilog_a/ to emit
 # its .va, then pipes the result into scripts/va_lint.sh

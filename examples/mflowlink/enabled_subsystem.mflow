@@ -1,0 +1,77 @@
+{
+  "schema": "matforge.flowchart",
+  "version": "0.1.0",
+  "entry": "enabled_demo",
+  "settings": {
+    "kind": "signal_flow",
+    "solver": {
+      "type": "variable_step",
+      "algorithm": "ode45",
+      "startTime": 0.0,
+      "stopTime": 4.0,
+      "maxStep": "0.01",
+      "zeroCrossing": true,
+      "algebraicLoopMethod": "trust_region"
+    },
+    "snapshot": { "enabled": true, "depth": 256, "fields": "states" }
+  },
+  "flows": [
+    {
+      "id": "flow_enabled_demo",
+      "kind": "program",
+      "name": "enabled_demo",
+      "signature": { "inputs": [], "outputs": [] },
+      "nodes": [
+        { "id": "drive", "kind": "signal_sine",
+          "data": { "log_signal": true,
+                    "params": { "amplitude": 1.0, "bias": 0.0,
+                                "frequency": 3.1415927, "phase": 0.0 } },
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+        { "id": "gate", "kind": "signal_step",
+          "data": { "log_signal": true,
+                    "params": { "stepTime": 2.0,
+                                "initialValue": 0.0,
+                                "finalValue": 1.0 } },
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+        { "id": "sub", "kind": "signal_enabled_subsystem",
+          "data": { "flow_id": "flow_enabled_inner",
+                    "enable_block": "gate" },
+          "ports": { "in":  [{"id": "in"}],
+                     "out": [{"id": "out"}] } },
+        { "id": "scope", "kind": "signal_scope",
+          "data": { "params": { "title": "enabled_demo" } },
+          "ports": { "in": [{"id": "in"}], "out": [] } }
+      ],
+      "edges": [
+        { "id": "e1", "kind": "data",
+          "from": {"node": "drive", "port": "out"}, "to": {"node": "sub",   "port": "in"} },
+        { "id": "e2", "kind": "data",
+          "from": {"node": "sub",   "port": "out"}, "to": {"node": "scope", "port": "in"} }
+      ]
+    },
+    {
+      "id": "flow_enabled_inner",
+      "kind": "function",
+      "name": "enabled_inner",
+      "signature": { "inputs": ["in"], "outputs": ["out"] },
+      "nodes": [
+        { "id": "in_p", "kind": "signal_inport",
+          "data": { "port": "in" },
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+        { "id": "amp", "kind": "signal_gain",
+          "data": { "log_signal": true,
+                    "params": { "gain": 2.0 } },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "out_p", "kind": "signal_outport",
+          "data": { "port": "out" },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } }
+      ],
+      "edges": [
+        { "id": "ei1", "kind": "data",
+          "from": {"node": "in_p", "port": "out"}, "to": {"node": "amp",   "port": "in"} },
+        { "id": "ei2", "kind": "data",
+          "from": {"node": "amp",  "port": "out"}, "to": {"node": "out_p", "port": "in"} }
+      ]
+    }
+  ]
+}

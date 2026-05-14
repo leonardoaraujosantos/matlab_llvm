@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <ostream>
 #include <sstream>
 #include <string>
@@ -75,10 +76,22 @@ MflowLinkSim::MflowLinkSim(const MflowLinkModel &M) : M_(M) {
   Out_.assign(N, 0.0);
   Inputs_.assign(N, {});
   StateOffset_.assign(N, 0);
+  DiscStateOffset_.assign(N, 0);
+  NextFire_.assign(N, std::numeric_limits<double>::infinity());
   TFCache_.assign(N, {});
+  Gate_.assign(N, -1);
 
   std::unordered_map<std::string, size_t> IdxOf;
   for (size_t I = 0; I < N; ++I) IdxOf[M_.Blocks[I].Id] = I;
+
+  // Resolve EnableSource → block index. Lowering has already
+  // validated the reference, so any failure here is a logic error.
+  for (size_t I = 0; I < N; ++I) {
+    const auto &B = M_.Blocks[I];
+    if (B.EnableSource.empty()) continue;
+    auto It = IdxOf.find(B.EnableSource);
+    if (It != IdxOf.end()) Gate_[I] = static_cast<int>(It->second);
+  }
 
   // Per-block continuous-state offset.
   size_t Off = 0;
@@ -87,6 +100,15 @@ MflowLinkSim::MflowLinkSim(const MflowLinkModel &M) : M_(M) {
     Off += static_cast<size_t>(M_.Blocks[I].ContStateCount);
   }
   Y_.assign(M_.ContStateCount, 0.0);
+
+  // Per-block discrete-state offset (one slot for Unit Delay / ZOH).
+  size_t DOff = 0;
+  for (size_t I = 0; I < N; ++I) {
+    DiscStateOffset_[I] = DOff;
+    DOff += static_cast<size_t>(M_.Blocks[I].DiscStateCount);
+  }
+  Z_.assign(M_.DiscStateCount, 0.0);
+  Znext_.assign(M_.DiscStateCount, 0.0);
 
   // Input wiring. Sum / Product blocks read in1, in2, …; every other
   // single-input block reads "in".
@@ -151,10 +173,14 @@ void MflowLinkSim::reset() {
   T_ = M_.Solver.StartTime;
   MajorSteps_ = 0;
   std::fill(Y_.begin(), Y_.end(), 0.0);
+  std::fill(Z_.begin(), Z_.end(), 0.0);
+  std::fill(Znext_.begin(), Znext_.end(), 0.0);
   std::fill(Out_.begin(), Out_.end(), 0.0);
   for (auto &C : LogColumns_) C.clear();
   Snapshots_.clear();
   LogsTruncated_ = false;
+  BlockCursor_ = 0;
+  ZCQueue_.clear();
 
   for (size_t I = 0; I < M_.Blocks.size(); ++I) {
     const auto &B = M_.Blocks[I];
@@ -166,12 +192,30 @@ void MflowLinkSim::reset() {
       double X0 = paramD(B, "x0", 0.0);
       for (int J = 0; J < B.ContStateCount; ++J)
         Y_[StateOffset_[I] + J] = X0;
+    } else if (B.Kind == "signal_unit_delay" || B.Kind == "signal_zoh") {
+      // Latched output starts at the initial-value param (Unit Delay)
+      // or 0 (ZOH — held by definition once the first tick fires).
+      double IV = paramD(B, "initialValue", 0.0);
+      Z_[DiscStateOffset_[I]] = IV;
+      Znext_[DiscStateOffset_[I]] = IV;
+      // First fire-tick is at startTime + 0 (Simulink convention) —
+      // the value latched at t=startTime is what the block outputs
+      // through the first sample interval. A future `sampleOffset`
+      // param can override this.
+      NextFire_[I] = M_.Solver.StartTime;
     }
   }
 
   // Run one evaluation at t=startTime so the very first logged sample
   // reflects t=0 outputs, not the post-construction zeros.
   evalAll(T_, Y_.data(), nullptr);
+
+  // Seed zero-crossing signs from the initial outputs so the first
+  // major step can detect a flip cleanly.
+  ZCSign_.assign(M_.ZeroCrossings.size(), 0);
+  for (size_t K = 0; K < M_.ZeroCrossings.size(); ++K)
+    ZCSign_[K] = predicateSign(K);
+
   logSample();
 }
 
@@ -202,6 +246,23 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
     size_t I = M_.ExecOrder[Pos];
     const auto &B = M_.Blocks[I];
     const std::string &K = B.Kind;
+
+    // Tier F — conditional-subsystem gate. The gate signal is read
+    // from `Out_` which has already been written for every earlier
+    // block in topo order; the gate source therefore appears
+    // before any gated block (an enable signal can't be downstream
+    // of the gate, which the lowering ensures by edge-rewiring
+    // through the subsystem boundary). A non-positive gate skips
+    // the evaluator entirely (output and discrete state hold) and
+    // zeros the continuous-state derivative slice so any RK4 sub-
+    // step sees `dx/dt = 0` for the gated block.
+    if (Gate_[I] >= 0 && Out_[Gate_[I]] <= 0.0) {
+      if (Deriv && B.ContStateCount > 0) {
+        size_t Off = StateOffset_[I];
+        for (int J = 0; J < B.ContStateCount; ++J) Deriv[Off + J] = 0.0;
+      }
+      continue;
+    }
 
     if (K == "signal_constant") {
       Out_[I] = paramD(B, "value", 0.0);
@@ -372,15 +433,12 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
       // the proper switch / demux semantics + zero-crossing.
       Out_[I] = Inputs_[I].empty() ? 0.0 : Out_[Inputs_[I].front().SrcBlock];
     } else if (K == "signal_unit_delay" || K == "signal_zoh") {
-      // Discrete blocks ride along as a fixed value (their current
-      // output) until Tier E adds the sample-time scheduler. The
-      // lowering already marked them as loop-breakers so the topo
-      // order doesn't try to read them mid-step.
-      size_t Off = StateOffset_[I];
-      (void)Off;
-      // Default to their initialValue param — picked up at reset()
-      // once we wire discrete state through Y_; until then, 0.
-      Out_[I] = paramD(B, "initialValue", 0.0);
+      // Tier E — read the latched discrete state. The scheduler
+      // (`fireDiscreteTicks`) is what updates Z_; the evaluator
+      // here just reports the current latched value. Marked as a
+      // loop-breaker during lowering, so the topo order never
+      // tries to read this block's output before reaching it.
+      Out_[I] = Z_[DiscStateOffset_[I]];
     } else {
       // Loader-level reserved kinds are rejected at lowering, so
       // anything reaching here is an evaluator gap — treat as
@@ -405,53 +463,292 @@ void MflowLinkSim::derivative(double T, const double *State, double *Deriv) {
 // the IR untouched so the choice surfaces in `--dry-run` output.
 //===----------------------------------------------------------------------===//
 
+// Take a single RK4 substep of size `H` from time `TBegin` with the
+// state in `YIn`. Writes the integrated state to `YOut`. No logging,
+// no scheduler — just the pure integrator.
+static void rk4Substep(MflowLinkSim &Sim,
+                       void (MflowLinkSim::*Deriv)(double, const double *,
+                                                   double *),
+                       double TBegin, double H,
+                       const std::vector<double> &YIn,
+                       std::vector<double> &YOut,
+                       std::vector<double> &K1,
+                       std::vector<double> &K2,
+                       std::vector<double> &K3,
+                       std::vector<double> &K4,
+                       std::vector<double> &Yt) {
+  const size_t Nx = YIn.size();
+  (Sim.*Deriv)(TBegin, YIn.data(), K1.data());
+  for (size_t I = 0; I < Nx; ++I) Yt[I] = YIn[I] + 0.5 * H * K1[I];
+  (Sim.*Deriv)(TBegin + 0.5 * H, Yt.data(), K2.data());
+  for (size_t I = 0; I < Nx; ++I) Yt[I] = YIn[I] + 0.5 * H * K2[I];
+  (Sim.*Deriv)(TBegin + 0.5 * H, Yt.data(), K3.data());
+  for (size_t I = 0; I < Nx; ++I) Yt[I] = YIn[I] + H * K3[I];
+  (Sim.*Deriv)(TBegin + H, Yt.data(), K4.data());
+  for (size_t I = 0; I < Nx; ++I)
+    YOut[I] = YIn[I] + (H / 6.0) * (K1[I] + 2.0 * K2[I]
+                                      + 2.0 * K3[I] + K4[I]);
+}
+
 double MflowLinkSim::stepMajor() {
+  // Pick `h` as the smaller of the configured fixed step and the
+  // distance to the next discrete event / stopTime — the multirate
+  // scheduler's job (§7.1). The simulation never integrates past a
+  // discrete tick, so each discrete partition fires at exact period
+  // boundaries and the continuous partitions only see their own
+  // smooth segment of the trajectory.
   const size_t Nx = Y_.size();
   double H = StepSize_;
-  // Clamp the final step so we land exactly on stopTime; if we're
-  // already there (within an absolute tick), refuse to step. This
-  // keeps `runToCompletion`'s loop from logging a duplicate sample
-  // at t = stopTime when float drift leaves T_ a few ULP below it.
-  if (T_ + H > M_.Solver.StopTime) H = M_.Solver.StopTime - T_;
-  if (H <= 1e-12) return 0.0;
+  double TNextDisc = std::numeric_limits<double>::infinity();
+  for (size_t I = 0; I < NextFire_.size(); ++I)
+    if (NextFire_[I] < TNextDisc) TNextDisc = NextFire_[I];
+  double TTarget = T_ + H;
+  if (TNextDisc < TTarget) TTarget = TNextDisc;
+  if (TTarget > M_.Solver.StopTime) TTarget = M_.Solver.StopTime;
+  H = TTarget - T_;
+  if (H <= 1e-12) {
+    // No continuous integration to do, but a discrete tick might
+    // still be exactly due at T_ — fire it and call this a step.
+    if (TNextDisc <= T_ + 1e-12) {
+      pushSnapshot();
+      fireDiscreteTicks();
+      evalAll(T_, Y_.data(), nullptr);
+      ++MajorSteps_;
+      logSample();
+      return 0.0;
+    }
+    return 0.0;
+  }
 
   // Snapshot BEFORE we step so step-back can restore exactly here.
   // After a step-back the user is rewriting an alternate future:
-  // truncate the log columns down to the snapshot's row count so
-  // they don't grow back interleaved.
-  if (LogsTruncated_) {
-    size_t Rows = LogColumns_.empty() ? 0 : LogColumns_.front().size();
-    (void)Rows;
-    LogsTruncated_ = false;
-  }
+  // the log columns were already truncated by `stepBackMajor`.
+  LogsTruncated_ = false;
   pushSnapshot();
 
-  std::vector<double> K1(Nx), K2(Nx), K3(Nx), K4(Nx), Yt(Nx);
+  // Remember start-of-step state for zero-crossing bisection.
+  std::vector<double> Y0 = Y_;
+
+  std::vector<double> K1(Nx), K2(Nx), K3(Nx), K4(Nx), Yt(Nx), Y1(Nx);
   if (Nx > 0) {
-    derivative(T_, Y_.data(), K1.data());
-    for (size_t I = 0; I < Nx; ++I) Yt[I] = Y_[I] + 0.5 * H * K1[I];
-    derivative(T_ + 0.5 * H, Yt.data(), K2.data());
-    for (size_t I = 0; I < Nx; ++I) Yt[I] = Y_[I] + 0.5 * H * K2[I];
-    derivative(T_ + 0.5 * H, Yt.data(), K3.data());
-    for (size_t I = 0; I < Nx; ++I) Yt[I] = Y_[I] + H * K3[I];
-    derivative(T_ + H, Yt.data(), K4.data());
-    for (size_t I = 0; I < Nx; ++I)
-      Y_[I] += (H / 6.0) * (K1[I] + 2.0 * K2[I] + 2.0 * K3[I] + K4[I]);
+    rk4Substep(*this, &MflowLinkSim::derivative, T_, H, Y_, Y1,
+               K1, K2, K3, K4, Yt);
+    Y_ = std::move(Y1);
   }
   T_ += H;
   ++MajorSteps_;
 
-  // End-of-step output refresh + logging at the new time.
+  // Refresh outputs at the new time so zero-crossing predicates and
+  // discrete-input reads see a coherent post-step picture.
+  evalAll(T_, Y_.data(), nullptr);
+
+  // Zero-crossing detection + bisection. We only bisect the *first*
+  // observed sign flip per major step; multiple coincident crossings
+  // surface as separate events on subsequent steps once the bisected
+  // state has been resumed.
+  for (size_t K = 0; K < M_.ZeroCrossings.size(); ++K) {
+    int Now = predicateSign(K);
+    int Was = ZCSign_[K];
+    // Any sign change is a crossing — including the band-entry /
+    // band-exit transitions (0 → ±1, ±1 → 0). Saturation sits at
+    // sign 0 while inside its rails, and the moment we care about is
+    // when it engages or releases a rail.
+    if (Was != Now && Nx > 0) {
+      double TStar = bisectZeroCrossing(K, T_ - H, Y0, T_);
+      ZCQueue_.push_back({M_.ZeroCrossings[K].BlockId, TStar});
+      // The bisector left Y_ at the crossing time and T_ at TStar —
+      // refresh outputs once more so logging records the crossing
+      // instant, not the post-overshoot value.
+      T_ = TStar;
+      evalAll(T_, Y_.data(), nullptr);
+      ZCSign_[K] = predicateSign(K);
+      break;
+    }
+    ZCSign_[K] = Now;
+  }
+
+  // Fire any discrete blocks whose period boundary we just landed on.
+  fireDiscreteTicks();
+  // Outputs again, so a Unit Delay / ZOH that latched a new value at
+  // this tick is visible to downstream blocks in the logged sample.
   evalAll(T_, Y_.data(), nullptr);
   logSample();
   return H;
 }
 
+void MflowLinkSim::fireDiscreteTicks() {
+  const double Eps = 1e-12;
+  bool AnyFired = false;
+  for (size_t I = 0; I < M_.Blocks.size(); ++I) {
+    const auto &B = M_.Blocks[I];
+    if (B.SampleClass != SampleTimeClass::Discrete) continue;
+    if (NextFire_[I] > T_ + Eps) continue;
+    // Read the block's current input — same wiring as evalAll.
+    double U = 0.0;
+    for (auto &P : Inputs_[I])
+      if (P.DstPort == "in") U = Out_[P.SrcBlock];
+    size_t Off = DiscStateOffset_[I];
+    if (B.Kind == "signal_zoh") {
+      // Held value updates at this tick and remains until the next.
+      Z_[Off] = U;
+      Znext_[Off] = U;
+    } else if (B.Kind == "signal_unit_delay") {
+      // One-tick lag: stage the new value; commit at end-of-tick.
+      Znext_[Off] = U;
+    }
+    NextFire_[I] += B.SamplePeriod > 0.0 ? B.SamplePeriod : 1.0;
+    AnyFired = true;
+  }
+  if (AnyFired) {
+    // Commit the unit-delay shadow buffer. We do this once after
+    // every discrete tick at this time, so a chain of unit delays
+    // all advance by exactly one tick per period boundary.
+    for (size_t I = 0; I < M_.Blocks.size(); ++I) {
+      const auto &B = M_.Blocks[I];
+      if (B.Kind != "signal_unit_delay") continue;
+      size_t Off = DiscStateOffset_[I];
+      Z_[Off] = Znext_[Off];
+    }
+  }
+}
+
+int MflowLinkSim::predicateSign(size_t K) const {
+  if (K >= M_.ZeroCrossings.size()) return 0;
+  const auto &ZC = M_.ZeroCrossings[K];
+  const MflBlock *B = M_.findBlock(ZC.BlockId);
+  if (!B) return 0;
+  size_t I = 0;
+  for (; I < M_.Blocks.size(); ++I)
+    if (&M_.Blocks[I] == B) break;
+  if (I == M_.Blocks.size()) return 0;
+  if (B->Kind == "signal_saturation") {
+    // Two rails worth caring about, combined into one predicate that
+    // flips when the *clamping* engages or releases. This collapses
+    // to a clean sign change exactly when the input crosses either
+    // limit — enough granularity for the demo + scope highlight.
+    double U = 0.0;
+    for (auto &P : Inputs_[I])
+      if (P.DstPort == "in") U += Out_[P.SrcBlock];
+    double Up = paramD(*B, "upperLimit",  1.0);
+    double Lo = paramD(*B, "lowerLimit", -1.0);
+    if (U > Up) return +1;
+    if (U < Lo) return -1;
+    return 0;
+  }
+  if (B->Kind == "signal_switch") {
+    double Ctrl = 0.0;
+    for (auto &P : Inputs_[I])
+      if (P.DstPort == "in2") Ctrl += Out_[P.SrcBlock];
+    double Th = paramD(*B, "threshold", 0.0);
+    double D = Ctrl - Th;
+    return D > 0 ? +1 : (D < 0 ? -1 : 0);
+  }
+  return 0;
+}
+
+double MflowLinkSim::bisectZeroCrossing(size_t K, double TStart,
+                                        const std::vector<double> &YStart,
+                                        double TEnd) {
+  // Illinois-flavoured bisection. We have a sign flip on `[TStart,
+  // TEnd]`; integrate forward from `YStart` to a midpoint, check the
+  // sign, and tighten the bracket. The simulator already trusts the
+  // RK4 integrator inside this step so re-integration is exact at
+  // the step size we picked.
+  std::vector<double> K1(YStart.size()), K2(YStart.size()),
+      K3(YStart.size()), K4(YStart.size()), Yt(YStart.size()),
+      YMid(YStart.size());
+  double Lo = TStart, Hi = TEnd;
+  std::vector<double> YHi = Y_; // post-step state already in Y_
+  int SignLo = ZCSign_[K];
+  for (int Iter = 0; Iter < 32; ++Iter) {
+    double Mid = 0.5 * (Lo + Hi);
+    if (Hi - Lo < 1e-9) {
+      Y_ = YHi;
+      return Mid;
+    }
+    rk4Substep(*this, &MflowLinkSim::derivative, Lo, Mid - Lo, YStart,
+               YMid, K1, K2, K3, K4, Yt);
+    // Pin Y_ to the midpoint state so predicateSign + evalAll read
+    // the correct inputs at `Mid`.
+    Y_ = YMid;
+    evalAll(Mid, Y_.data(), nullptr);
+    int SignMid = predicateSign(K);
+    if (SignMid == 0) return Mid;
+    if (SignMid == SignLo) {
+      Lo = Mid;
+      // YStart stays the start point of the next sub-integration —
+      // but to integrate from a closer-to-the-root state, capture
+      // `YMid` as the new start; the function-arg is `const &` so
+      // we'd need a mutable copy. Cheaper: keep integrating from
+      // YStart over the full `Mid - Lo` interval. Numerically still
+      // converges quadratically because each iteration halves the
+      // bracket; integration over a smaller `h` is more accurate,
+      // not less.
+    } else {
+      Hi = Mid;
+      YHi = YMid;
+    }
+  }
+  Y_ = YHi;
+  return Hi;
+}
+
+std::vector<MflowLinkSim::CrossingEvent>
+MflowLinkSim::consumeZeroCrossings() {
+  std::vector<CrossingEvent> Out;
+  Out.swap(ZCQueue_);
+  return Out;
+}
+
+std::string MflowLinkSim::stepBlock() {
+  // The block-stepping cursor is purely informational — it does not
+  // hold state-update aside from the index, because the simulator
+  // computes block outputs as a single topo-ordered pass. The cursor
+  // controls *which* block the IDE highlights; advancing past the
+  // last block commits the major step and resets the cursor.
+  const size_t N = M_.ExecOrder.size();
+  if (BlockCursor_ < N) {
+    size_t I = M_.ExecOrder[BlockCursor_];
+    ++BlockCursor_;
+    return M_.Blocks[I].Id;
+  }
+  // Cursor wrapped — commit one major step.
+  stepMajor();
+  BlockCursor_ = 0;
+  return std::string{};
+}
+
+std::string MflowLinkSim::stepBackBlock() {
+  if (BlockCursor_ > 0) {
+    --BlockCursor_;
+    size_t I = M_.ExecOrder[BlockCursor_];
+    return M_.Blocks[I].Id;
+  }
+  // Cursor at zero — pop a major step instead.
+  if (!stepBackMajor()) return std::string{};
+  BlockCursor_ = M_.ExecOrder.size();
+  return std::string{};
+}
+
+std::string MflowLinkSim::activeBlockId() const {
+  const size_t N = M_.ExecOrder.size();
+  if (BlockCursor_ == 0 || BlockCursor_ > N) return std::string{};
+  size_t I = M_.ExecOrder[BlockCursor_ - 1];
+  return M_.Blocks[I].Id;
+}
+
 void MflowLinkSim::runToCompletion() {
   reset();
+  // A returned `h = 0` is ambiguous in a multi-rate world: it can
+  // mean "stuck" (StopTime reached, no work left), or "a discrete
+  // tick fired exactly at the current time and the next continuous
+  // segment hasn't started yet". Disambiguate by tracking
+  // MajorSteps_ — a tick fire still bumps it, so a `(h, ΔSteps) =
+  // (0, 0)` pair is the only true stall.
   while (T_ < M_.Solver.StopTime - 1e-15) {
+    size_t Before = MajorSteps_;
     double H = stepMajor();
-    if (H <= 0.0) break;
+    if (H <= 0.0 && MajorSteps_ == Before) break;
   }
 }
 
@@ -485,6 +782,9 @@ void MflowLinkSim::pushSnapshot() {
   S.MajorSteps = MajorSteps_;
   S.Y = Y_;
   S.Out = Out_;
+  S.Z = Z_;
+  S.NextFire = NextFire_;
+  S.ZCSign = ZCSign_;
   S.LogRows = LogColumns_.empty() ? 0 : LogColumns_.front().size();
   if (Snapshots_.size() >= SnapshotCap_)
     Snapshots_.erase(Snapshots_.begin());
@@ -499,6 +799,10 @@ bool MflowLinkSim::stepBackMajor() {
   MajorSteps_ = S.MajorSteps;
   Y_ = std::move(S.Y);
   Out_ = std::move(S.Out);
+  Z_ = std::move(S.Z);
+  Znext_ = Z_; // shadow buffer matches the latched value on restore
+  NextFire_ = std::move(S.NextFire);
+  ZCSign_ = std::move(S.ZCSign);
   // Truncate any log rows newer than this snapshot — they belong to
   // the now-rewound timeline.
   for (auto &C : LogColumns_)

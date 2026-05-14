@@ -1,0 +1,46 @@
+{
+  "schema": "matforge.flowchart",
+  "version": "0.1.0",
+  "entry": "sat_zc",
+  "settings": {
+    "kind": "signal_flow",
+    "solver": {
+      "type": "variable_step",
+      "algorithm": "ode45",
+      "startTime": 0.0,
+      "stopTime": 4.0,
+      "maxStep": "0.01",
+      "zeroCrossing": true,
+      "algebraicLoopMethod": "trust_region"
+    },
+    "snapshot": { "enabled": true, "depth": 256, "fields": "states" }
+  },
+  "flows": [
+    {
+      "id": "flow_sat",
+      "kind": "program",
+      "name": "sat_zc",
+      "signature": { "inputs": [], "outputs": [] },
+      "nodes": [
+        { "id": "ramp", "kind": "signal_ramp",
+          "data": { "log_signal": true,
+                    "params": { "slope": 1.0, "startTime": 0.0,
+                                "initialOutput": -1.5 } },
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+        { "id": "sat", "kind": "signal_saturation",
+          "data": { "log_signal": true,
+                    "params": { "upperLimit": 1.0, "lowerLimit": -1.0 } },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "scope", "kind": "signal_scope",
+          "data": { "params": { "title": "sat_zc" } },
+          "ports": { "in": [{"id": "in"}], "out": [] } }
+      ],
+      "edges": [
+        { "id": "e1", "kind": "data",
+          "from": {"node": "ramp", "port": "out"}, "to": {"node": "sat",   "port": "in"} },
+        { "id": "e2", "kind": "data",
+          "from": {"node": "sat",  "port": "out"}, "to": {"node": "scope", "port": "in"} }
+      ]
+    }
+  ]
+}

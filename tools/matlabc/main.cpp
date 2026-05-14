@@ -6650,6 +6650,24 @@ void mflEmitSampleEvents(const matlab::flowchart::MflowLinkSim &Sim) {
                                  {"value", P.second}});
   }
 }
+
+// Drain the simulator's zero-crossing queue (§10 zeroCrossing event).
+// Called after every forward-progress operation (continue, stepMajor,
+// stepBlock) so the IDE's active-block halo / log can react.
+void mflEmitZeroCrossings(matlab::flowchart::MflowLinkSim &Sim) {
+  for (auto &E : Sim.consumeZeroCrossings()) {
+    sendEvent("zeroCrossing",
+              llvm::json::Object{{"blockId", E.BlockId}, {"t", E.T}});
+  }
+}
+
+// Tag the IDE's canvas with the cursor's currently-active block.
+// Empty id ⇒ no block is highlighted (the cursor is at end-of-step,
+// pre-stepBlock or post-major-commit).
+void mflEmitActiveBlock(const std::string &BlockId) {
+  sendEvent("simulationActiveBlock",
+            llvm::json::Object{{"nodeId", BlockId}});
+}
 } // namespace
 
 int runMflowLinkDap(const std::string &Path) {
@@ -6685,6 +6703,116 @@ int runMflowLinkDap(const std::string &Path) {
 
   bool ConfDone = false;
   bool Debug = getenv("MATLABC_DAP_TRACE") != nullptr;
+
+  //===-------------------------------------------------------------===//
+  // Tier-F — DAP-server-local breakpoint state.
+  //
+  // Per-session: replaced wholesale by each `setTimeBreakpoints` /
+  // `setSignalBreakpoints` request (DAP convention is "this list is
+  // now the entire set"). `Hit` is sticky-per-pass — a fired
+  // breakpoint won't fire again until the simulator is reset or the
+  // user disarms it by sending a new list.
+  //===-------------------------------------------------------------===//
+  struct TimeBP { double T; bool Hit; };
+  std::vector<TimeBP> TimeBreakpoints_;
+  struct SignalBP {
+    std::string BlockId;
+    std::string Condition; // raw expression; parsed by `signalCondMet`
+    bool Hit;
+  };
+  std::vector<SignalBP> SignalBreakpoints_;
+
+  //===-------------------------------------------------------------===//
+  // Tier-F — tiny condition evaluator.
+  //
+  // Accepts the shapes the IDE roadmap §10 calls out:
+  //   value <op> N
+  //   abs(value) <op> N
+  // where <op> ∈ { >, <, >=, <=, ==, != }. Returns false on any
+  // parse failure — the user's `setSignalBreakpoints` list is
+  // already ack'd (so the IDE knows we accepted the request), and a
+  // mis-parsed expression silently never fires rather than spamming
+  // diagnostics.
+  //===-------------------------------------------------------------===//
+  auto signalCondMet = [](const std::string &Expr, double V) -> bool {
+    std::string S = Expr;
+    // Strip whitespace.
+    S.erase(std::remove_if(S.begin(), S.end(),
+                           [](char C) { return C == ' ' || C == '\t'; }),
+            S.end());
+    // Identify `value` vs `abs(value)`.
+    double Lhs;
+    size_t Pos;
+    if (S.rfind("abs(value)", 0) == 0) {
+      Lhs = std::fabs(V);
+      Pos = 10;
+    } else if (S.rfind("value", 0) == 0) {
+      Lhs = V;
+      Pos = 5;
+    } else {
+      return false;
+    }
+    // Operator.
+    std::string Op;
+    if (S.compare(Pos, 2, ">=") == 0 || S.compare(Pos, 2, "<=") == 0 ||
+        S.compare(Pos, 2, "==") == 0 || S.compare(Pos, 2, "!=") == 0) {
+      Op = S.substr(Pos, 2);
+      Pos += 2;
+    } else if (Pos < S.size() && (S[Pos] == '>' || S[Pos] == '<')) {
+      Op = S.substr(Pos, 1);
+      Pos += 1;
+    } else {
+      return false;
+    }
+    double Rhs;
+    try {
+      Rhs = std::stod(S.substr(Pos));
+    } catch (...) {
+      return false;
+    }
+    if (Op == ">")  return Lhs >  Rhs;
+    if (Op == "<")  return Lhs <  Rhs;
+    if (Op == ">=") return Lhs >= Rhs;
+    if (Op == "<=") return Lhs <= Rhs;
+    if (Op == "==") return Lhs == Rhs;
+    if (Op == "!=") return Lhs != Rhs;
+    return false;
+  };
+
+  // Returns the first breakpoint that just fired, formatted as
+  // `(reason-description, description)` for the `stopped` event;
+  // empty description when nothing fired. Side-effect: marks the
+  // matching breakpoint as `Hit` so it doesn't refire on the next
+  // step.
+  auto checkBreakpoints = [&]() -> std::string {
+    // Time breakpoints first — they're cheaper to test and the
+    // expected "stop at t = 5s" UX wants priority over signal
+    // breakpoints that happen to coincide.
+    for (auto &BP : TimeBreakpoints_) {
+      if (!BP.Hit && Sim.currentTime() >= BP.T - 1e-9) {
+        BP.Hit = true;
+        std::ostringstream OS;
+        OS << "t=" << BP.T;
+        return OS.str();
+      }
+    }
+    auto Outputs = Sim.currentLoggedOutputs();
+    for (auto &BP : SignalBreakpoints_) {
+      if (BP.Hit) continue;
+      double V = 0.0;
+      bool Found = false;
+      for (auto &P : Outputs)
+        if (P.first == BP.BlockId) { V = P.second; Found = true; break; }
+      if (!Found) continue;
+      if (signalCondMet(BP.Condition, V)) {
+        BP.Hit = true;
+        std::ostringstream OS;
+        OS << BP.BlockId << " " << BP.Condition << " (=" << V << ")";
+        return OS.str();
+      }
+    }
+    return std::string{};
+  };
 
   std::ios::sync_with_stdio(false);
 
@@ -6732,11 +6860,67 @@ int runMflowLinkDap(const std::string &Path) {
       ConfDone = true;
       continue;
     }
-    if (*Cmd == "setBreakpoints" || *Cmd == "setExceptionBreakpoints" ||
-        *Cmd == "setSignalBreakpoints" || *Cmd == "setTimeBreakpoints") {
-      // Tier-F: real handling. For now ack as no-op so the IDE's
-      // post-launch sync doesn't hang.
+    if (*Cmd == "setBreakpoints" || *Cmd == "setExceptionBreakpoints") {
+      // Source-file breakpoints don't apply to a block-diagram —
+      // ack with an empty `breakpoints` array.
       sendResponse(Seq, *Cmd, true, Object{{"breakpoints", Array{}}});
+      continue;
+    }
+    if (*Cmd == "setTimeBreakpoints") {
+      // Tier-F (§10): pause when simulation time crosses any of a
+      // user-specified list. Replaces (not appends) — DAP convention.
+      Array Out;
+      TimeBreakpoints_.clear();
+      auto Args = Root->getObject("arguments");
+      if (Args) {
+        if (auto *Arr = Args->getArray("times")) {
+          for (auto &V : *Arr) {
+            const Object *BP = V.getAsObject();
+            if (!BP) continue;
+            std::optional<double> T;
+            if (auto N = BP->getNumber("t")) T = *N;
+            else if (auto N = BP->getInteger("t")) T = static_cast<double>(*N);
+            if (!T) continue;
+            TimeBreakpoints_.push_back({*T, /*Hit=*/false});
+            Out.push_back(Object{{"verified", true}, {"t", *T}});
+          }
+        }
+      }
+      sendResponse(Seq, *Cmd, true,
+                   Object{{"breakpoints", Value(std::move(Out))}});
+      continue;
+    }
+    if (*Cmd == "setSignalBreakpoints") {
+      // Tier-F (§10): watch a signal output, pause when a condition
+      // becomes true. The IDE roadmap's per-edge `breakpoint` schema
+      // is still unbuilt, so we accept either the edge form
+      // (`{ "edgeId": "e7", "condition": "..." }`) — resolved when
+      // edge metadata lands — or a direct `{ "blockId": "b", ... }`
+      // form that names the source block of the watched signal.
+      Array Out;
+      SignalBreakpoints_.clear();
+      auto Args = Root->getObject("arguments");
+      if (Args) {
+        if (auto *Arr = Args->getArray("breakpoints")) {
+          for (auto &V : *Arr) {
+            const Object *BP = V.getAsObject();
+            if (!BP) continue;
+            std::string Block, Cond;
+            if (auto S = BP->getString("blockId")) Block = std::string(*S);
+            else if (auto S = BP->getString("edgeId"))
+              Block = std::string(*S); // best-effort until edge meta ships
+            if (auto S = BP->getString("condition"))
+              Cond = std::string(*S);
+            if (Block.empty() || Cond.empty()) continue;
+            SignalBreakpoints_.push_back({Block, Cond, /*Hit=*/false});
+            Out.push_back(Object{{"verified", true},
+                                 {"blockId", Block},
+                                 {"condition", Cond}});
+          }
+        }
+      }
+      sendResponse(Seq, *Cmd, true,
+                   Object{{"breakpoints", Value(std::move(Out))}});
       continue;
     }
     if (*Cmd == "threads") {
@@ -6805,6 +6989,7 @@ int runMflowLinkDap(const std::string &Path) {
       }
       mflEmitTimeEvent(Sim.currentTime(), Sim.majorStepsTaken());
       mflEmitSampleEvents(Sim);
+      mflEmitZeroCrossings(Sim);
       sendEvent("snapshotTaken",
                 Object{{"majorStep",
                         static_cast<int64_t>(Sim.majorStepsTaken())},
@@ -6818,19 +7003,46 @@ int runMflowLinkDap(const std::string &Path) {
       // go so the IDE's signal scopes stay live.
       sendResponse(Seq, *Cmd, true,
                    Object{{"allThreadsContinued", true}});
+      bool ZCStopped = false;
+      std::string BPDesc;     // Tier-F: non-empty when a breakpoint fired
+      size_t Before = Sim.majorStepsTaken();
       while (Sim.currentTime() < Model->Solver.StopTime - 1e-12) {
+        size_t MStart = Sim.majorStepsTaken();
         double H = Sim.stepMajor();
-        if (H <= 0.0) break;
+        if (H <= 0.0 && Sim.majorStepsTaken() == MStart) break;
+        // Zero-crossings always surface (no throttle — they're rare
+        // by definition and the user wants to see them).
+        auto Crossings = Sim.consumeZeroCrossings();
+        for (auto &E : Crossings)
+          sendEvent("zeroCrossing",
+                    Object{{"blockId", E.BlockId}, {"t", E.T}});
         // Throttle: emit a sample event every 16th step to avoid
         // flooding (§10 — IDE-side throttle target).
         if ((Sim.majorStepsTaken() % 16) == 0) {
           mflEmitTimeEvent(Sim.currentTime(), Sim.majorStepsTaken());
           mflEmitSampleEvents(Sim);
         }
+        // Tier-F: pause on the first hit time / signal breakpoint.
+        BPDesc = checkBreakpoints();
+        if (!BPDesc.empty()) break;
+        if (!Crossings.empty()) {
+          // Stop on the first crossing inside `continue` so the IDE
+          // can land the user there — matches Simulink's "pause on
+          // zero-crossing" behaviour. Forward-stepping resumes the
+          // run; the IDE controls the policy.
+          ZCStopped = true;
+          break;
+        }
       }
+      (void)Before;
       mflEmitTimeEvent(Sim.currentTime(), Sim.majorStepsTaken());
       mflEmitSampleEvents(Sim);
-      sendEvent("stopped", mflStoppedBody("step", "stopTime reached"));
+      const char *Reason = !BPDesc.empty() ? "breakpoint"
+                            : (ZCStopped   ? "crossing" : "step");
+      const char *Default = ZCStopped ? "zero crossing" : "stopTime reached";
+      sendEvent("stopped",
+                mflStoppedBody(Reason, !BPDesc.empty() ? BPDesc.c_str()
+                                                      : Default));
       continue;
     }
     if (*Cmd == "pause") {
@@ -6858,23 +7070,52 @@ int runMflowLinkDap(const std::string &Path) {
       bool Ok = Sim.stepBackMajor();
       mflEmitTimeEvent(Sim.currentTime(), Sim.majorStepsTaken());
       mflEmitSampleEvents(Sim);
+      // The cursor is reset at end-of-step after a step-back — clear
+      // any IDE-side active-block highlight.
+      mflEmitActiveBlock(Sim.activeBlockId());
       const char *Desc = Ok ? "step-back" : "snapshot ring empty";
       sendEvent("stopped", mflStoppedBody("step", Desc));
       continue;
     }
-    if (*Cmd == "stepBlock" || *Cmd == "stepBackBlock") {
-      // Block-level stepping is Tier-E (one block per request, within
-      // a major step). For now alias to major-step granularity so the
-      // IDE button doesn't appear broken.
+    if (*Cmd == "stepBlock") {
+      // Tier-E: advance the cursor one block within the current major
+      // step. When the cursor wraps, `Sim.stepBlock()` commits the
+      // major step and returns "" — emit the post-commit time/sample
+      // events in that case.
       sendResponse(Seq, *Cmd, true, Object{});
-      if (*Cmd == "stepBlock") stepN(1);
-      else (void)Sim.stepBackMajor();
-      mflEmitTimeEvent(Sim.currentTime(), Sim.majorStepsTaken());
+      size_t MajorBefore = Sim.majorStepsTaken();
+      std::string Active = Sim.stepBlock();
+      if (Sim.majorStepsTaken() != MajorBefore) {
+        // A major step was committed by this stepBlock call.
+        mflEmitTimeEvent(Sim.currentTime(), Sim.majorStepsTaken());
+        mflEmitSampleEvents(Sim);
+        mflEmitZeroCrossings(Sim);
+      }
+      mflEmitActiveBlock(Active);
+      sendEvent("stopped", mflStoppedBody("step"));
+      continue;
+    }
+    if (*Cmd == "stepBackBlock") {
+      // Tier-E: pull the cursor back one block. At cursor 0, this
+      // pops a major step from the snapshot ring and lands the
+      // cursor at end-of-step.
+      sendResponse(Seq, *Cmd, true, Object{});
+      size_t MajorBefore = Sim.majorStepsTaken();
+      std::string Active = Sim.stepBackBlock();
+      if (Sim.majorStepsTaken() != MajorBefore) {
+        mflEmitTimeEvent(Sim.currentTime(), Sim.majorStepsTaken());
+        mflEmitSampleEvents(Sim);
+      }
+      mflEmitActiveBlock(Active);
       sendEvent("stopped", mflStoppedBody("step"));
       continue;
     }
     if (*Cmd == "resetSimulation" || *Cmd == "restart") {
       Sim.reset();
+      // Re-arm every breakpoint so a resumed run after `restart`
+      // can pause at the same instants as before.
+      for (auto &BP : TimeBreakpoints_)   BP.Hit = false;
+      for (auto &BP : SignalBreakpoints_) BP.Hit = false;
       sendResponse(Seq, *Cmd, true, Object{});
       mflEmitTimeEvent(Sim.currentTime(), Sim.majorStepsTaken());
       mflEmitSampleEvents(Sim);
