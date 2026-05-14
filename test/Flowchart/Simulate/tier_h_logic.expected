@@ -1,0 +1,25 @@
+MflowLinkModel entry=tier_h_logic blocks=8 edges=11
+  solver type=variable_step algorithm=ode45 startTime=0 stopTime=4
+  states continuous=0 discrete=0
+  exec-order:
+    0 src_a kind=signal_step sample=fixed_in_minor
+    1 src_b kind=signal_step sample=fixed_in_minor
+    2 and_ab kind=signal_logical sample=fixed_in_minor log
+    3 or_ab kind=signal_logical sample=fixed_in_minor log
+    4 xor_ab kind=signal_logical sample=fixed_in_minor log
+    5 diff kind=signal_sum sample=fixed_in_minor
+    6 rel_lt kind=signal_relop sample=fixed_in_minor log
+    7 term kind=signal_terminator sample=fixed_in_minor
+  zero-crossings: none
+  edges:
+    e_aa src_a:out -> and_ab:in1
+    e_ab src_b:out -> and_ab:in2
+    e_oa src_a:out -> or_ab:in1
+    e_ob src_b:out -> or_ab:in2
+    e_xa src_a:out -> xor_ab:in1
+    e_xb src_b:out -> xor_ab:in2
+    e_da src_a:out -> diff:in1
+    e_db src_b:out -> diff:in2
+    e_la diff:out -> rel_lt:in1
+    e_lb src_a:out -> rel_lt:in2
+    e_t and_ab:out -> term:in

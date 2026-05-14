@@ -1,0 +1,69 @@
+{
+  "schema": "matforge.flowchart",
+  "version": "0.1.0",
+  "entry": "tier_h_showcase",
+  "settings": {
+    "kind": "signal_flow",
+    "solver": {
+      "type": "variable_step",
+      "algorithm": "ode45",
+      "startTime": 0.0,
+      "stopTime": 5.0,
+      "maxStep": "0.01",
+      "zeroCrossing": true,
+      "algebraicLoopMethod": "trust_region"
+    },
+    "snapshot": { "enabled": true, "depth": 256, "fields": "states" }
+  },
+  "flows": [
+    {
+      "id": "flow_tier_h_showcase",
+      "kind": "program",
+      "name": "tier_h_showcase",
+      "signature": { "inputs": [], "outputs": [] },
+      "nodes": [
+        { "id": "clk", "kind": "signal_clock",
+          "data": { "log_signal": true },
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+        { "id": "sin_t", "kind": "signal_trig_fcn",
+          "data": { "log_signal": true,
+                    "params": { "function": "sin" } },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "abs_sin", "kind": "signal_math_fcn",
+          "data": { "log_signal": true,
+                    "params": { "function": "abs" } },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "gt_half", "kind": "signal_compare_to_constant",
+          "data": { "log_signal": true,
+                    "params": { "op": ">", "constant": 0.5 } },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "lut_table", "kind": "signal_lookup_1d",
+          "data": { "log_signal": true,
+                    "params": { "breakpointsX": "0, 1, 2, 3, 4, 5",
+                                "tableData":    "0, 1, 4, 9, 16, 25" } },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "delay", "kind": "signal_transport_delay",
+          "data": { "log_signal": true,
+                    "params": { "delay": 0.25, "initialOutput": 0.0 } },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "scope", "kind": "signal_scope",
+          "data": { "params": { "title": "tier_h_showcase" } },
+          "ports": { "in": [{"id": "in"}], "out": [] } }
+      ],
+      "edges": [
+        { "id": "e1", "kind": "data",
+          "from": {"node": "clk",     "port": "out"}, "to": {"node": "sin_t",   "port": "in"} },
+        { "id": "e2", "kind": "data",
+          "from": {"node": "sin_t",   "port": "out"}, "to": {"node": "abs_sin", "port": "in"} },
+        { "id": "e3", "kind": "data",
+          "from": {"node": "abs_sin", "port": "out"}, "to": {"node": "gt_half", "port": "in"} },
+        { "id": "e4", "kind": "data",
+          "from": {"node": "clk",     "port": "out"}, "to": {"node": "lut_table","port": "in"} },
+        { "id": "e5", "kind": "data",
+          "from": {"node": "lut_table","port": "out"}, "to": {"node": "delay",  "port": "in"} },
+        { "id": "e6", "kind": "data",
+          "from": {"node": "delay",   "port": "out"}, "to": {"node": "scope",   "port": "in"} }
+      ]
+    }
+  ]
+}

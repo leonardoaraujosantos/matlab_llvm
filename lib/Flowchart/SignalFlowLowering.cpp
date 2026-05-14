@@ -61,6 +61,9 @@ const KindInfo *lookupKind(const std::string &K) {
     add("signal_sine",     {true, true, false, false, false, FIM});
     add("signal_pulse",    {true, true, false, false, false, FIM});
     add("signal_ramp",     {true, true, false, false, false, FIM});
+    add("signal_clock",    {true, true, false, false, false, FIM});
+    add("signal_chirp",    {true, true, false, false, false, FIM});
+    add("signal_noise",    {true, true, false, false, false, FIM});
     // Tier F carve-out — clock-like pulse generator for driving
     // `signal_triggered_subsystem`. Emits a one-step `1` at every
     // `period` boundary, `0` between. Sample class is fixed-in-
@@ -78,19 +81,43 @@ const KindInfo *lookupKind(const std::string &K) {
     add("signal_derivative",   {true, true, false, false, false, CONT});
     add("signal_transfer_fcn", {true, true, false, false, false, CONT});
     add("signal_state_space",  {true, true, false, false, false, CONT});
+    add("signal_zero_pole",    {true, true, false, false, false, CONT});
+    add("signal_transport_delay",
+                               {true, true, false, true,  false, CONT});
     // Discrete.
     add("signal_unit_delay", {true, true, false, true, false, DISC});
     add("signal_zoh",        {true, true, false, true, false, DISC});
+    add("signal_discrete_integrator",
+                             {true, true, false, true, false, DISC});
+    add("signal_discrete_filter",
+                             {true, true, false, true, false, DISC});
+    add("signal_rate_transition",
+                             {true, true, false, true, false, DISC});
+    // Lookup tables (Tier H — table-driven scalar evaluation).
+    add("signal_lookup_1d",  {true, true, false, false, false, FIM});
+    add("signal_lookup_2d",  {true, true, false, false, false, FIM});
     // Math.
     add("signal_gain",       {true, true, false, false, false, FIM});
     add("signal_sum",        {true, true, false, false, false, FIM});
     add("signal_product",    {true, true, false, false, false, FIM});
     add("signal_abs",        {true, true, false, false, false, FIM});
     add("signal_saturation", {true, true, false, false, true,  FIM});
+    add("signal_math_fcn",   {true, true, false, false, false, FIM});
+    add("signal_trig_fcn",   {true, true, false, false, false, FIM});
+    add("signal_dead_zone",  {true, true, false, false, false, FIM});
+    add("signal_relop",      {true, true, false, false, false, FIM});
+    add("signal_logical",    {true, true, false, false, false, FIM});
+    add("signal_compare_to_zero",
+                             {true, true, false, false, false, FIM});
+    add("signal_compare_to_constant",
+                             {true, true, false, false, false, FIM});
     // Signal routing.
     add("signal_mux",    {true, true, false, false, false, FIM});
     add("signal_demux",  {true, true, false, false, false, FIM});
     add("signal_switch", {true, true, false, false, true,  FIM});
+    add("signal_multiport_switch",
+                         {true, true, false, false, false, FIM});
+    add("signal_merge",  {true, true, false, false, false, FIM});
     // Tier E carve-out — hysteretic relay (the third zero-crossing
     // kind alongside Switch / Saturation in roadmap §7.3). One
     // discrete state slot for the latched on/off bit; ZC predicate
@@ -113,20 +140,20 @@ const KindInfo *lookupKind(const std::string &K) {
     add("signal_triggered_subsystem", {true, true, true, false, false, FIM});
 
     // --- Reserved (Known, not yet Supported) --------------------------------
+    // The remaining reserved kinds need prerequisites the runtime
+    // doesn't have yet (vector signal type for bus creator/selector,
+    // workspace var binding for from_workspace, an inline MATLAB
+    // expression evaluator for matlab_fcn / custom, parent If /
+    // SwitchCase subsystem containers for *_action, the goto / from
+    // virtual-wire lowering pass, and the N-d generalisation after
+    // lookup_1d / 2d are solid). See `docs/mflowlink_blocks.md`.
     for (const char *Name : {
-             "signal_chirp", "signal_noise", "signal_from_workspace",
-             "signal_clock", "signal_zero_pole", "signal_transport_delay",
-             "signal_discrete_integrator", "signal_discrete_filter",
-             "signal_rate_transition", "signal_math_fcn", "signal_trig_fcn",
-             "signal_dead_zone", "signal_relop", "signal_logical",
+             "signal_from_workspace",
              "signal_bus_creator", "signal_bus_selector",
-             "signal_multiport_switch", "signal_goto", "signal_from",
-             "signal_merge",
+             "signal_goto", "signal_from",
              "signal_if_action", "signal_switch_case_action",
-             "signal_lookup_1d", "signal_lookup_2d", "signal_lookup_nd",
-             "signal_compare_to_zero",
-             "signal_compare_to_constant", "signal_matlab_fcn",
-             "signal_custom"}) {
+             "signal_lookup_nd",
+             "signal_matlab_fcn", "signal_custom"}) {
       KindInfo I;
       I.Known = true;
       I.Supported = false;
@@ -550,10 +577,22 @@ std::optional<MflowLinkModel> lowerSignalFlow(const FlowDoc &Doc,
       // only at major-step boundaries (the evaluator skips updates
       // when `Deriv != nullptr`, i.e. inside RK4 substeps).
       B.DiscStateCount = 1;
-    } else if (N.Kind == "signal_unit_delay" || N.Kind == "signal_zoh") {
-      B.DiscStateCount = 1;
+    } else if (N.Kind == "signal_unit_delay" || N.Kind == "signal_zoh" ||
+               N.Kind == "signal_discrete_integrator" ||
+               N.Kind == "signal_discrete_filter" ||
+               N.Kind == "signal_rate_transition") {
       // Discrete period: `params.sampleTime`, else numeric
-      // `data.sample_time`, else 1 s.
+      // `data.sample_time`, else 1 s. Every discrete block keys
+      // its NextFire_ on this period; the evaluator-specific state
+      // shape (single-bit latch for ZOH / unit_delay, accumulator
+      // for discrete_integrator, IIR taps for discrete_filter, etc.)
+      // is decided in MflowLinkSim. For Tier-H pass 3 we keep one
+      // scalar slot — vector filters land alongside bus signals.
+      B.DiscStateCount = 1;
+      if (N.Kind == "signal_discrete_filter") {
+        int DenDeg = polyDegree(N.getParam("den") ? *N.getParam("den") : "1");
+        B.DiscStateCount = std::max(1, DenDeg);
+      }
       double Period = parseDoubleOr(N.getParam("sampleTime"), -1.0);
       if (Period < 0.0) {
         if (auto *ST = N.getData("sample_time"))
@@ -562,6 +601,22 @@ std::optional<MflowLinkModel> lowerSignalFlow(const FlowDoc &Doc,
           Period = 1.0;
       }
       B.SamplePeriod = Period;
+    } else if (N.Kind == "signal_zero_pole") {
+      // Convert zeros/poles to num/den polynomial degrees so the
+      // existing transfer-fcn machinery (state count + loop breaker
+      // classification) applies as-is. The evaluator does the actual
+      // ZPK → coefficient expansion at construction time.
+      int Z = 0, P = 0;
+      if (auto *S = N.getParam("zeros")) Z = polyDegree(*S) + 1;
+      if (auto *S = N.getParam("poles")) P = polyDegree(*S) + 1;
+      B.ContStateCount = P > 0 ? P : 0;
+      if (Z < P) B.IsLoopBreaker = true;
+    } else if (N.Kind == "signal_transport_delay") {
+      // Pure time delay needs a history buffer. Sample class is
+      // Continuous because the runtime reads the delayed value at
+      // every step (interpolating the buffer); the buffer itself
+      // lives in a per-block stash inside MflowLinkSim, not in Y_.
+      B.IsLoopBreaker = true; // delayed-by-anything-positive ⇒ no feedthrough
     }
 
     M.ContStateCount += B.ContStateCount;

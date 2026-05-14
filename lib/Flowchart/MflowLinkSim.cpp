@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstring>
 #include <limits>
 #include <ostream>
@@ -122,15 +123,93 @@ MflowLinkSim::MflowLinkSim(const MflowLinkModel &M) : M_(M) {
     Inputs_[TI->second].push_back({FI->second, E.ToPort});
   }
 
-  // Cache transfer-function coefficients.
+  // Cache transfer-function coefficients. For `signal_zero_pole`,
+  // we run the same path after expanding zeros/poles into num/den
+  // polynomials — the evaluator reuses the transfer_fcn machinery
+  // verbatim from then on.
+  TransportBuf_.assign(N, {});
+  Lookup1DCache_.assign(N, {});
+  Lookup2DCache_.assign(N, {});
+  NoiseSeed_.assign(N, 0);
+  auto expandPoly = [](const std::vector<double> &Roots) {
+    // Product over `(s - r_k)` expanded to coefficient form, highest
+    // power first. Empty roots ⇒ {1} (the "constant 1" polynomial).
+    std::vector<double> P{1.0};
+    for (double R : Roots) {
+      std::vector<double> Q(P.size() + 1, 0.0);
+      for (size_t I = 0; I < P.size(); ++I) {
+        Q[I]     += P[I];
+        Q[I + 1] += -R * P[I];
+      }
+      P = std::move(Q);
+    }
+    return P;
+  };
   for (size_t I = 0; I < N; ++I) {
     const auto &B = M_.Blocks[I];
-    if (B.Kind != "signal_transfer_fcn") continue;
-    auto *NumS = paramS(B, "num");
-    auto *DenS = paramS(B, "den");
-    TFCache_[I].Num = parsePoly(NumS ? *NumS : "1");
-    TFCache_[I].Den = parsePoly(DenS ? *DenS : "1");
-    TFCache_[I].Valid = !TFCache_[I].Den.empty();
+    if (B.Kind == "signal_transfer_fcn" ||
+        B.Kind == "signal_discrete_filter") {
+      auto *NumS = paramS(B, "num");
+      auto *DenS = paramS(B, "den");
+      TFCache_[I].Num = parsePoly(NumS ? *NumS : "1");
+      TFCache_[I].Den = parsePoly(DenS ? *DenS : "1");
+      TFCache_[I].Valid = !TFCache_[I].Den.empty();
+    } else if (B.Kind == "signal_zero_pole") {
+      // Param shape: `zeros` and `poles` are comma-separated real
+      // roots; `gain` is a scalar leading coefficient. Complex root
+      // pairs aren't accepted in the Tier-H pass — would need a
+      // complex-poly parser. Pure-real zero-pole models cover the
+      // common pole-placement / PID-with-zeros cases.
+      auto *ZS = paramS(B, "zeros");
+      auto *PS = paramS(B, "poles");
+      double Gain = MflowLinkSim::paramD(B, "gain", 1.0);
+      auto Zeros = parsePoly(ZS ? *ZS : "");
+      auto Poles = parsePoly(PS ? *PS : "");
+      auto Num = expandPoly(Zeros);
+      auto Den = expandPoly(Poles);
+      for (auto &C : Num) C *= Gain;
+      TFCache_[I].Num = std::move(Num);
+      TFCache_[I].Den = std::move(Den);
+      TFCache_[I].Valid = !TFCache_[I].Den.empty();
+    } else if (B.Kind == "signal_lookup_1d") {
+      auto *X = paramS(B, "breakpointsX");
+      auto *Y = paramS(B, "tableData");
+      Lookup1DCache_[I].X = parsePoly(X ? *X : "");
+      Lookup1DCache_[I].Y = parsePoly(Y ? *Y : "");
+      // Sort by X (breakpoints must be monotonically increasing —
+      // we re-sort defensively in case the user supplied them
+      // already-sorted-but-with-noise, paired with their Y values).
+      if (Lookup1DCache_[I].X.size() == Lookup1DCache_[I].Y.size() &&
+          !Lookup1DCache_[I].X.empty()) {
+        std::vector<std::pair<double, double>> Pairs;
+        Pairs.reserve(Lookup1DCache_[I].X.size());
+        for (size_t K = 0; K < Lookup1DCache_[I].X.size(); ++K)
+          Pairs.emplace_back(Lookup1DCache_[I].X[K], Lookup1DCache_[I].Y[K]);
+        std::sort(Pairs.begin(), Pairs.end());
+        for (size_t K = 0; K < Pairs.size(); ++K) {
+          Lookup1DCache_[I].X[K] = Pairs[K].first;
+          Lookup1DCache_[I].Y[K] = Pairs[K].second;
+        }
+        Lookup1DCache_[I].Valid = true;
+      }
+    } else if (B.Kind == "signal_lookup_2d") {
+      auto *X = paramS(B, "breakpointsX");
+      auto *Y = paramS(B, "breakpointsY");
+      auto *T = paramS(B, "tableData");
+      Lookup2DCache_[I].X = parsePoly(X ? *X : "");
+      Lookup2DCache_[I].Y = parsePoly(Y ? *Y : "");
+      Lookup2DCache_[I].Z = parsePoly(T ? *T : "");
+      Lookup2DCache_[I].Valid = !Lookup2DCache_[I].X.empty() &&
+                                !Lookup2DCache_[I].Y.empty() &&
+                                Lookup2DCache_[I].Z.size() ==
+                                  Lookup2DCache_[I].X.size() *
+                                  Lookup2DCache_[I].Y.size();
+    } else if (B.Kind == "signal_transport_delay") {
+      TransportBuf_[I].Delay =
+          MflowLinkSim::paramD(B, "delay", 0.0);
+      TransportBuf_[I].InitialOutput =
+          MflowLinkSim::paramD(B, "initialOutput", 0.0);
+    }
   }
 
   StepSize_ = 0.01;
@@ -213,6 +292,39 @@ void MflowLinkSim::reset() {
       // through the first sample interval. A future `sampleOffset`
       // param can override this.
       NextFire_[I] = M_.Solver.StartTime;
+    } else if (B.Kind == "signal_discrete_integrator" ||
+               B.Kind == "signal_rate_transition" ||
+               B.Kind == "signal_discrete_filter") {
+      // Initial discrete state: `initialCondition` (or 0). For
+      // signal_discrete_filter the IIR taps all start at 0; the
+      // first sample at NextFire_ then writes the new state.
+      double IC = paramD(B, "initialCondition", 0.0);
+      for (int J = 0; J < B.DiscStateCount; ++J)
+        Z_[DiscStateOffset_[I] + J] = J == 0 ? IC : 0.0;
+      // First fire-tick = startTime + period. The state already
+      // carries the initial condition, so the integration step
+      // y[1] = y[0] + h·u happens at t = startTime + period —
+      // matches Simulink's "Integrator: update after step" model.
+      // Unit Delay / ZOH differ: they need to latch a sample *at*
+      // startTime to have any output during the first interval.
+      double Period =
+          B.SamplePeriod > 0.0 ? B.SamplePeriod : 1.0;
+      NextFire_[I] = M_.Solver.StartTime + Period;
+    } else if (B.Kind == "signal_transport_delay") {
+      TransportBuf_[I].Samples.clear();
+      // Prime the history with a single sample at startTime so
+      // the first major step's interpolation has something to
+      // read.
+      TransportBuf_[I].Samples.push_back(
+          {M_.Solver.StartTime, TransportBuf_[I].InitialOutput});
+    } else if (B.Kind == "signal_noise") {
+      // Per-block xorshift seed. The default seed makes the same
+      // model reproducible across runs; users can override via
+      // `params.seed`.
+      uint64_t Seed =
+          static_cast<uint64_t>(paramD(B, "seed", 1.0));
+      if (Seed == 0) Seed = 0xC0FFEE12345678ABULL;
+      NoiseSeed_[I] = Seed;
     }
   }
 
@@ -521,6 +633,286 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
       double OnV   = paramD(B, "onValue",  1.0);
       double OffV  = paramD(B, "offValue", 0.0);
       Out_[I] = (Z_[DiscStateOffset_[I]] > 0.5) ? OnV : OffV;
+    }
+    //===-----------------------------------------------------------===//
+    // Tier-H — sources, scalar math, lookup tables, routing.
+    //===-----------------------------------------------------------===//
+    else if (K == "signal_clock") {
+      Out_[I] = T;
+    } else if (K == "signal_chirp") {
+      // Linear frequency sweep f0 → f1 over [0, t1].
+      double A  = paramD(B, "amplitude", 1.0);
+      double F0 = paramD(B, "f0",        0.1);
+      double F1 = paramD(B, "f1",        1.0);
+      double T1 = paramD(B, "t1",       10.0);
+      double Phase;
+      if (T1 > 0.0) {
+        double K = (F1 - F0) / T1;
+        // Instantaneous phase = 2π·(f0·t + K·t²/2)
+        Phase = 2.0 * M_PI * (F0 * T + 0.5 * K * T * T);
+      } else {
+        Phase = 2.0 * M_PI * F0 * T;
+      }
+      Out_[I] = A * std::sin(Phase);
+    } else if (K == "signal_noise") {
+      // xorshift64 + uniform-to-gaussian projection (only when
+      // `params.kind == "gaussian"`). Uniform output spans
+      // [-amplitude, +amplitude]; gaussian has σ = amplitude.
+      double A = paramD(B, "amplitude", 1.0);
+      const std::string *Kind = paramS(B, "kind");
+      uint64_t &S = NoiseSeed_[I];
+      // Advance state — xorshift64.
+      S ^= S << 13;
+      S ^= S >> 7;
+      S ^= S << 17;
+      double U1 = (S >> 11) / 9007199254740992.0; // [0, 1)
+      if (Kind && *Kind == "gaussian") {
+        // Box-Muller: draw a second uniform.
+        uint64_t S2 = S ^ 0xDEADBEEFCAFEBABEULL;
+        S2 ^= S2 << 13; S2 ^= S2 >> 7; S2 ^= S2 << 17;
+        double U2 = (S2 >> 11) / 9007199254740992.0;
+        if (U1 < 1e-12) U1 = 1e-12;
+        double R = std::sqrt(-2.0 * std::log(U1));
+        Out_[I] = A * R * std::cos(2.0 * M_PI * U2);
+      } else {
+        Out_[I] = A * (2.0 * U1 - 1.0);
+      }
+    } else if (K == "signal_math_fcn") {
+      const std::string *F = paramS(B, "function");
+      double U  = inputOf(I, "in");
+      double U2 = inputOf(I, "in2");
+      double R = U;
+      if (F) {
+        const std::string &Fn = *F;
+        if      (Fn == "sqrt")        R = std::sqrt(U);
+        else if (Fn == "exp")         R = std::exp(U);
+        else if (Fn == "log")         R = std::log(U);
+        else if (Fn == "log10")       R = std::log10(U);
+        else if (Fn == "abs")         R = std::fabs(U);
+        else if (Fn == "sign")        R = (U > 0) - (U < 0);
+        else if (Fn == "square")      R = U * U;
+        else if (Fn == "reciprocal")  R = 1.0 / U;
+        else if (Fn == "pow")         R = std::pow(U, U2);
+        else if (Fn == "hypot")       R = std::hypot(U, U2);
+        else if (Fn == "mod")         R = std::fmod(U, U2);
+        else if (Fn == "rem")         R = U - U2 * std::trunc(U / U2);
+      }
+      Out_[I] = R;
+    } else if (K == "signal_trig_fcn") {
+      const std::string *F = paramS(B, "function");
+      double U  = inputOf(I, "in");
+      double U2 = inputOf(I, "in2");
+      double R = U;
+      if (F) {
+        const std::string &Fn = *F;
+        if      (Fn == "sin")   R = std::sin(U);
+        else if (Fn == "cos")   R = std::cos(U);
+        else if (Fn == "tan")   R = std::tan(U);
+        else if (Fn == "asin")  R = std::asin(U);
+        else if (Fn == "acos")  R = std::acos(U);
+        else if (Fn == "atan")  R = std::atan(U);
+        else if (Fn == "atan2") R = std::atan2(U, U2);
+        else if (Fn == "sinh")  R = std::sinh(U);
+        else if (Fn == "cosh")  R = std::cosh(U);
+        else if (Fn == "tanh")  R = std::tanh(U);
+      }
+      Out_[I] = R;
+    } else if (K == "signal_dead_zone") {
+      double U  = inputOf(I, "in");
+      double Lo = paramD(B, "lowerLimit", -0.5);
+      double Hi = paramD(B, "upperLimit",  0.5);
+      if      (U > Hi) Out_[I] = U - Hi;
+      else if (U < Lo) Out_[I] = U - Lo;
+      else             Out_[I] = 0.0;
+    } else if (K == "signal_relop") {
+      double U1 = sumInput(I, "in1");
+      double U2 = sumInput(I, "in2");
+      const std::string *Op = paramS(B, "op");
+      bool R = false;
+      if (Op) {
+        const std::string &O = *Op;
+        if      (O == "==" || O == "eq") R = U1 == U2;
+        else if (O == "~=" || O == "!=" || O == "ne") R = U1 != U2;
+        else if (O == "<"  || O == "lt") R = U1 <  U2;
+        else if (O == "<=" || O == "le") R = U1 <= U2;
+        else if (O == ">"  || O == "gt") R = U1 >  U2;
+        else if (O == ">=" || O == "ge") R = U1 >= U2;
+      }
+      Out_[I] = R ? 1.0 : 0.0;
+    } else if (K == "signal_logical") {
+      // Boolean: input ≠ 0 ⇒ true. NOT is unary on `in1`; everything
+      // else folds across every connected input port.
+      const std::string *Op = paramS(B, "op");
+      auto truthy = [](double V) { return V != 0.0; };
+      bool R = false;
+      if (Op && *Op == "NOT") {
+        R = !truthy(sumInput(I, "in1"));
+      } else if (Op) {
+        std::vector<bool> Vs;
+        for (auto &P : Inputs_[I]) Vs.push_back(truthy(Out_[P.SrcBlock]));
+        if (Vs.empty()) { R = false; }
+        else {
+          const std::string &O = *Op;
+          if (O == "AND" || O == "and") {
+            R = true; for (bool V : Vs) R = R && V;
+          } else if (O == "OR" || O == "or") {
+            R = false; for (bool V : Vs) R = R || V;
+          } else if (O == "NAND" || O == "nand") {
+            bool T = true; for (bool V : Vs) T = T && V; R = !T;
+          } else if (O == "NOR" || O == "nor") {
+            bool T = false; for (bool V : Vs) T = T || V; R = !T;
+          } else if (O == "XOR" || O == "xor") {
+            int Ones = 0; for (bool V : Vs) Ones += V ? 1 : 0;
+            R = (Ones & 1) != 0;
+          }
+        }
+      }
+      Out_[I] = R ? 1.0 : 0.0;
+    } else if (K == "signal_compare_to_zero" ||
+               K == "signal_compare_to_constant") {
+      double U  = inputOf(I, "in");
+      double C  = (K == "signal_compare_to_constant")
+                    ? paramD(B, "constant", 0.0) : 0.0;
+      const std::string *Op = paramS(B, "op");
+      bool R = false;
+      if (Op) {
+        const std::string &O = *Op;
+        if      (O == "==" || O == "eq") R = U == C;
+        else if (O == "~=" || O == "!=" || O == "ne") R = U != C;
+        else if (O == "<"  || O == "lt") R = U <  C;
+        else if (O == "<=" || O == "le") R = U <= C;
+        else if (O == ">"  || O == "gt") R = U >  C;
+        else if (O == ">=" || O == "ge") R = U >= C;
+      }
+      Out_[I] = R ? 1.0 : 0.0;
+    } else if (K == "signal_multiport_switch") {
+      // First input is the control selector (1-based); the remaining
+      // inputs are data lines. Out-of-range selectors fall through to
+      // the `defaultOutput` param.
+      double Ctrl = inputOf(I, "in1");
+      int Idx = static_cast<int>(std::round(Ctrl));
+      std::string Port = "in" + std::to_string(Idx + 1);
+      bool Found = false;
+      double Val = paramD(B, "defaultOutput", 0.0);
+      for (auto &P : Inputs_[I])
+        if (P.DstPort == Port) { Val = Out_[P.SrcBlock]; Found = true; break; }
+      (void)Found;
+      Out_[I] = Val;
+    } else if (K == "signal_merge") {
+      // Output the first non-zero input in port-id order. Matches
+      // Simulink's "first-driven-wins" merge semantic for control
+      // flows where exactly one source is active at a time.
+      double V = paramD(B, "initialOutput", 0.0);
+      for (auto &P : Inputs_[I]) {
+        double Cand = Out_[P.SrcBlock];
+        if (Cand != 0.0) { V = Cand; break; }
+      }
+      Out_[I] = V;
+    } else if (K == "signal_lookup_1d") {
+      // Linear interpolation over the cached breakpoint table.
+      // Out-of-range inputs clamp to the endpoints (Simulink's
+      // "clip" extrapolation; "linear" / "hold" are follow-ups).
+      double U = inputOf(I, "in");
+      const auto &Tbl = Lookup1DCache_[I];
+      if (!Tbl.Valid || Tbl.X.empty()) { Out_[I] = 0.0; }
+      else if (U <= Tbl.X.front()) { Out_[I] = Tbl.Y.front(); }
+      else if (U >= Tbl.X.back())  { Out_[I] = Tbl.Y.back(); }
+      else {
+        auto It = std::upper_bound(Tbl.X.begin(), Tbl.X.end(), U);
+        size_t K1 = static_cast<size_t>(It - Tbl.X.begin());
+        size_t K0 = K1 - 1;
+        double Frac = (U - Tbl.X[K0]) / (Tbl.X[K1] - Tbl.X[K0]);
+        Out_[I] = Tbl.Y[K0] + Frac * (Tbl.Y[K1] - Tbl.Y[K0]);
+      }
+    } else if (K == "signal_lookup_2d") {
+      // Bilinear interpolation. tableData is row-major, indexed by
+      // (i, j) where i runs over breakpointsX and j over breakpointsY.
+      double U = inputOf(I, "in1");
+      double V = inputOf(I, "in2");
+      const auto &Tbl = Lookup2DCache_[I];
+      if (!Tbl.Valid) { Out_[I] = 0.0; }
+      else {
+        auto clamp = [](double X, const std::vector<double> &Bp,
+                        size_t &Lo, double &Frac) {
+          if (X <= Bp.front()) { Lo = 0; Frac = 0.0; return; }
+          if (X >= Bp.back())  { Lo = Bp.size() - 2; Frac = 1.0; return; }
+          auto It = std::upper_bound(Bp.begin(), Bp.end(), X);
+          Lo = static_cast<size_t>(It - Bp.begin()) - 1;
+          Frac = (X - Bp[Lo]) / (Bp[Lo + 1] - Bp[Lo]);
+        };
+        size_t IX = 0, IY = 0;
+        double FX = 0.0, FY = 0.0;
+        clamp(U, Tbl.X, IX, FX);
+        clamp(V, Tbl.Y, IY, FY);
+        size_t W = Tbl.Y.size();
+        double Z00 = Tbl.Z[IX       * W + IY];
+        double Z10 = Tbl.Z[(IX + 1) * W + IY];
+        double Z01 = Tbl.Z[IX       * W + (IY + 1)];
+        double Z11 = Tbl.Z[(IX + 1) * W + (IY + 1)];
+        double Z0 = Z00 + FX * (Z10 - Z00);
+        double Z1 = Z01 + FX * (Z11 - Z01);
+        Out_[I] = Z0 + FY * (Z1 - Z0);
+      }
+    } else if (K == "signal_zero_pole") {
+      // Same evaluator as signal_transfer_fcn — the constructor
+      // already pre-expanded ZPK into num/den polynomials into the
+      // same TFCache_ slot.
+      const auto &TF = TFCache_[I];
+      int N = static_cast<int>(TF.Den.size()) - 1;
+      double U = inputOf(I, "in");
+      if (N <= 0 || !TF.Valid) {
+        double NumLead = TF.Num.empty() ? 0.0 : TF.Num.front();
+        double DenLead = TF.Den.empty() ? 1.0 : TF.Den.front();
+        Out_[I] = (NumLead / DenLead) * U;
+      } else {
+        size_t Off = StateOffset_[I];
+        double Lead = TF.Den.front();
+        if (Deriv) {
+          for (int Ki = 0; Ki < N - 1; ++Ki)
+            Deriv[Off + Ki] = State[Off + Ki + 1];
+          double Last = U / Lead;
+          for (int Ki = 0; Ki < N; ++Ki)
+            Last -= (TF.Den[N - Ki] / Lead) * State[Off + Ki];
+          Deriv[Off + N - 1] = Last;
+        }
+        std::vector<double> NPad(N + 1, 0.0);
+        int Mdeg = static_cast<int>(TF.Num.size()) - 1;
+        for (int Ki = 0; Ki <= Mdeg; ++Ki)
+          NPad[N - Mdeg + Ki] = TF.Num[Ki];
+        double Y = 0.0;
+        for (int Ki = 0; Ki < N; ++Ki)
+          Y += (NPad[N - Ki] / Lead) * State[Off + Ki];
+        Out_[I] = Y;
+      }
+    } else if (K == "signal_transport_delay") {
+      // Linear-interpolate the buffered history at `T - delay`.
+      // Buffer is monotonic in time; binary-search the window.
+      const auto &Buf = TransportBuf_[I].Samples;
+      double TD = TransportBuf_[I].Delay;
+      double TTarget = T - TD;
+      if (Buf.empty() || TTarget <= Buf.front().first) {
+        Out_[I] = TransportBuf_[I].InitialOutput;
+      } else if (TTarget >= Buf.back().first) {
+        Out_[I] = Buf.back().second;
+      } else {
+        size_t Lo = 0, Hi = Buf.size() - 1;
+        while (Hi - Lo > 1) {
+          size_t M = (Lo + Hi) / 2;
+          if (Buf[M].first <= TTarget) Lo = M;
+          else Hi = M;
+        }
+        double T0 = Buf[Lo].first,  T1 = Buf[Hi].first;
+        double V0 = Buf[Lo].second, V1 = Buf[Hi].second;
+        double F = (TTarget - T0) / (T1 - T0);
+        Out_[I] = V0 + F * (V1 - V0);
+      }
+    } else if (K == "signal_discrete_integrator" ||
+               K == "signal_discrete_filter" ||
+               K == "signal_rate_transition") {
+      // All three read the same single-scalar latch as Unit Delay /
+      // ZOH. The fireDiscreteTicks scheduler is what advances the
+      // state on each sample tick.
+      Out_[I] = Z_[DiscStateOffset_[I]];
     } else {
       // Loader-level reserved kinds are rejected at lowering, so
       // anything reaching here is an evaluator gap — treat as
@@ -666,6 +1058,23 @@ double MflowLinkSim::stepMajor() {
   // logged value, so a rising edge between consecutive logged
   // samples is what the next step's evalAll keys on.
   PrevOut_ = Out_;
+  // Tier-H — append every transport-delay block's current input to
+  // its history buffer. We do this at end-of-step so the recorded
+  // sample's `t` is the just-advanced T_, matching how Out_ /
+  // Y_ are sampled. Trim ancient samples older than `delay + 2·h`
+  // so the buffer doesn't grow unboundedly on long runs.
+  for (size_t I = 0; I < M_.Blocks.size(); ++I) {
+    if (M_.Blocks[I].Kind != "signal_transport_delay") continue;
+    double Uin = 0.0;
+    for (auto &P : Inputs_[I])
+      if (P.DstPort == "in") Uin = Out_[P.SrcBlock];
+    auto &Buf = TransportBuf_[I].Samples;
+    Buf.push_back({T_, Uin});
+    double Keep = T_ - TransportBuf_[I].Delay - 2.0 * StepSize_;
+    size_t Drop = 0;
+    while (Drop + 1 < Buf.size() && Buf[Drop + 1].first < Keep) ++Drop;
+    if (Drop > 0) Buf.erase(Buf.begin(), Buf.begin() + Drop);
+  }
   logSample();
   return H;
 }
@@ -700,13 +1109,65 @@ void MflowLinkSim::fireDiscreteTicks() {
     for (auto &P : Inputs_[I])
       if (P.DstPort == "in") U = Out_[P.SrcBlock];
     size_t Off = DiscStateOffset_[I];
-    if (B.Kind == "signal_zoh") {
+    if (B.Kind == "signal_zoh" || B.Kind == "signal_rate_transition") {
       // Held value updates at this tick and remains until the next.
       Z_[Off] = U;
       Znext_[Off] = U;
     } else if (B.Kind == "signal_unit_delay") {
       // One-tick lag: stage the new value; commit at end-of-tick.
       Znext_[Off] = U;
+    } else if (B.Kind == "signal_discrete_integrator") {
+      // y[n+1] = y[n] + h · g(u). Method = Forward/Backward Euler /
+      // Trapezoidal. ForwardEuler is the default — uses the input
+      // sampled *at* the tick; BackwardEuler / Trapezoidal use the
+      // input "after" the tick, which for our scheduler model is
+      // approximated by the same `U` (the runtime would need a
+      // second sub-sample for true backward / trapezoidal accuracy).
+      double H = B.SamplePeriod > 0.0 ? B.SamplePeriod : 1.0;
+      const std::string *MS = nullptr;
+      auto It = B.Params.find("method");
+      if (It != B.Params.end()) MS = &It->second;
+      double Y = Z_[Off];
+      if (!MS || *MS == "ForwardEuler" || *MS == "forward_euler") {
+        Y = Y + H * U;
+      } else if (*MS == "BackwardEuler" || *MS == "backward_euler") {
+        Y = Y + H * U;     // see comment above — single-sample approx
+      } else if (*MS == "Trapezoidal" || *MS == "trapezoidal") {
+        Y = Y + 0.5 * H * U + 0.5 * H * U;
+      } else {
+        Y = Y + H * U;
+      }
+      Z_[Off]     = Y;
+      Znext_[Off] = Y;
+    } else if (B.Kind == "signal_discrete_filter") {
+      // Direct-form-II IIR step: y[n] = (num · u_history − den[1..] · y_history) / den[0]
+      // For our single-output Tier-H pass, Z_ stores `den.size()-1`
+      // taps of y. We re-derive the state every tick from the
+      // already-cached coefficients.
+      const auto &TF = TFCache_[I];
+      int N = static_cast<int>(TF.Den.size()) - 1;
+      double Y = 0.0;
+      if (TF.Valid && N >= 0) {
+        double Lead = TF.Den.front();
+        double NumLead = TF.Num.empty() ? 0.0 : TF.Num.front();
+        // Use the leading-coefficient feedforward of u + the running
+        // sum of previous-y feedback taps. A full direct-form-II
+        // needs both u-history and y-history; the IIR Tier-H pass
+        // implements the y-feedback half (poles) so simple low/
+        // high-pass IIR filters work. Zero-only FIR designs are a
+        // follow-up that needs a u-history buffer too.
+        Y = (NumLead / Lead) * U;
+        for (int K = 0; K < N; ++K)
+          Y -= (TF.Den[K + 1] / Lead) * Z_[Off + K];
+      } else {
+        Y = U;
+      }
+      // Shift taps: y[n-1] ← y[n], y[n-2] ← y[n-1], …
+      for (int K = N - 1; K >= 1; --K) Z_[Off + K] = Z_[Off + K - 1];
+      if (N >= 1) Z_[Off + 0] = Y;
+      // Even if N == 0 (static gain), Out_ still needs to surface Y
+      // — store it in slot 0 for the evaluator to read.
+      if (N == 0) Z_[Off] = Y;
     }
     NextFire_[I] += B.SamplePeriod > 0.0 ? B.SamplePeriod : 1.0;
     AnyFired = true;

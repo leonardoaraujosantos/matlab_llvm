@@ -135,6 +135,62 @@ check "sat passthrough mid"  "awk 'BEGIN{exit !($SZ_MID*$SZ_MID < 1e-3)}'" ""
 SZ_HI=$(printf '%s\n' "$SZ" | awk -F, '$1+0 >= 3.495 && $1+0 < 3.505 { print $3; exit }')
 check "sat clamps to upper"  "awk 'BEGIN{exit !($SZ_HI >= 0.999 && $SZ_HI <= 1.001)}'" ""
 
+#--- tier_h_showcase: clock / trig / math / compare / lookup / delay --------
+HS="$("$MATLABC" -simulate "$EX/tier_h_showcase.mflow")"
+HS_HEAD=$(printf '%s\n' "$HS" | head -1)
+check "tier-H showcase header" \
+  "[[ '$HS_HEAD' == 't,clk,sin_t,abs_sin,gt_half,lut_table,delay,scope' ]]" ""
+# At t=1: clk=1, sin(1)=0.841, |sin|=0.841 > 0.5 ⇒ 1, lookup(1)=1.
+HS_AT1=$(printf '%s\n' "$HS" | awk -F, '$1+0==1 {print; exit}')
+HS_SIN=$(printf '%s\n' "$HS_AT1" | awk -F, '{print $3}')
+HS_ABS=$(printf '%s\n' "$HS_AT1" | awk -F, '{print $4}')
+HS_GT=$(printf '%s\n'  "$HS_AT1" | awk -F, '{print $5}')
+HS_LUT=$(printf '%s\n' "$HS_AT1" | awk -F, '{print $6}')
+check "trig sin(1) == 0.8414" \
+  "awk 'BEGIN{exit !(($HS_SIN - 0.8414709)^2 < 1e-6)}'" ""
+check "math abs of sin >= 0" \
+  "awk 'BEGIN{exit !($HS_ABS >= 0)}'" ""
+check "compare >0.5 fires at sin(1)" "[[ '$HS_GT' == '1.000000000e+00' ]]" ""
+check "lookup_1d(1) interpolates 1" \
+  "awk 'BEGIN{exit !(($HS_LUT - 1)^2 < 1e-9)}'" ""
+# transport_delay(0.25 s): at t = 1.0 the scope reads lookup at t = 0.75
+# = linear interp between (0,0) and (1,1) = 0.75.
+HS_DEL=$(printf '%s\n' "$HS" | awk -F, '$1+0==1 {print $7; exit}')
+check "transport_delay shifts 0.25s" \
+  "awk 'BEGIN{exit !(($HS_DEL - 0.75)^2 < 1e-6)}'" ""
+# lookup_1d at x=3 should hit the table entry exactly = 9.
+HS_LUT3=$(printf '%s\n' "$HS" | awk -F, '$1+0==3 {print $6; exit}')
+check "lookup_1d(3) == 9" \
+  "awk 'BEGIN{exit !(($HS_LUT3 - 9)^2 < 1e-9)}'" ""
+
+#--- tier_h_logic: AND/OR/XOR/<  truth table ---------------------------------
+LG="$("$MATLABC" -simulate "$EX/tier_h_logic.mflow")"
+LG_HEAD=$(printf '%s\n' "$LG" | head -1)
+check "tier-H logic header" \
+  "[[ '$LG_HEAD' == 't,and_ab,or_ab,xor_ab,rel_lt' ]]" ""
+# t=0.5: A=0, B=0 → AND=0, OR=0, XOR=0, rel_lt(0<0)=0
+LG_R05=$(printf '%s\n' "$LG" | awk -F, '$1+0==0.5 {print $2","$3","$4","$5; exit}')
+check "logic A=0,B=0 row" "[[ '$LG_R05' == '0.000000000e+00,0.000000000e+00,0.000000000e+00,0.000000000e+00' ]]" ""
+# t=1.5: A=1, B=0 → AND=0, OR=1, XOR=1, rel_lt(1<1)=0
+LG_R15=$(printf '%s\n' "$LG" | awk -F, '$1+0==1.5 {print $2","$3","$4","$5; exit}')
+check "logic A=1,B=0 row" "[[ '$LG_R15' == '0.000000000e+00,1.000000000e+00,1.000000000e+00,0.000000000e+00' ]]" ""
+# t=2.5: A=1, B=1 → AND=1, OR=1, XOR=0, rel_lt(0<1)=1
+LG_R25=$(printf '%s\n' "$LG" | awk -F, '$1+0==2.5 {print $2","$3","$4","$5; exit}')
+check "logic A=1,B=1 row" "[[ '$LG_R25' == '1.000000000e+00,1.000000000e+00,0.000000000e+00,1.000000000e+00' ]]" ""
+
+#--- tier_h_discrete: ForwardEuler accumulator ------------------------------
+DI="$("$MATLABC" -simulate "$EX/tier_h_discrete.mflow")"
+DI_HEAD=$(printf '%s\n' "$DI" | head -1)
+check "tier-H discrete header" "[[ '$DI_HEAD' == 't,di,scope' ]]" ""
+# After 10 ticks of period 0.1 with input=1, di = 1.0.
+DI_T1=$(printf '%s\n' "$DI" | awk -F, '$1+0==1 {print $2; exit}')
+check "discrete_integrator hits 1.0 at t=1" \
+  "awk 'BEGIN{exit !(($DI_T1 - 1)^2 < 1e-9)}'" ""
+# After 20 ticks, di = 2.0.
+DI_T2=$(printf '%s\n' "$DI" | awk -F, '$1+0==2 {print $2; exit}')
+check "discrete_integrator hits 2.0 at t=2" \
+  "awk 'BEGIN{exit !(($DI_T2 - 2)^2 < 1e-9)}'" ""
+
 echo "----"
 echo "passed: $pass    failed: $fail"
 exit $(( fail > 0 ? 1 : 0 ))

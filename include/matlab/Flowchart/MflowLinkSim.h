@@ -162,6 +162,38 @@ private:
   };
   std::vector<TFCoeffs> TFCache_;
 
+  // Tier-H per-block side state. Indexed by block index; only the
+  // entries for blocks of the matching kind are meaningful.
+  // - `TransportBuf_[I]` is the circular history for a
+  //   `signal_transport_delay`. Element `.first` is `t`, `.second`
+  //   is the input value at that `t`. The runtime appends one
+  //   sample per major step and linear-interpolates the output at
+  //   `T_ - delay`.
+  struct DelayHistory {
+    double Delay = 0.0;
+    std::vector<std::pair<double, double>> Samples;
+    double InitialOutput = 0.0;
+  };
+  std::vector<DelayHistory> TransportBuf_;
+  // - `Lookup1D_[I]` and `Lookup2D_[I]` are the resolved breakpoint
+  //   tables. Filled once at construction so the evaluator doesn't
+  //   reparse the comma-separated `params.tableData` / `breakpoints*`
+  //   strings every step.
+  struct Lookup1D {
+    bool Valid = false;
+    std::vector<double> X, Y;
+  };
+  struct Lookup2D {
+    bool Valid = false;
+    std::vector<double> X, Y;       // breakpoints
+    std::vector<double> Z;          // row-major, size = X.size()·Y.size()
+  };
+  std::vector<Lookup1D> Lookup1DCache_;
+  std::vector<Lookup2D> Lookup2DCache_;
+  // - `NoiseSeed_` is the per-block RNG state (xorshift64). Reseeded
+  //   on `reset()` from `params.seed`.
+  std::vector<uint64_t> NoiseSeed_;
+
   double T_ = 0.0;
   size_t MajorSteps_ = 0;
   double StepSize_ = 0.01;

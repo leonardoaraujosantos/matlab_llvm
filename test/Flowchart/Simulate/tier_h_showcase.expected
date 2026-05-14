@@ -1,0 +1,19 @@
+MflowLinkModel entry=tier_h_showcase blocks=7 edges=6
+  solver type=variable_step algorithm=ode45 startTime=0 stopTime=5
+  states continuous=0 discrete=0
+  exec-order:
+    0 clk kind=signal_clock sample=fixed_in_minor log
+    1 sin_t kind=signal_trig_fcn sample=fixed_in_minor log
+    2 abs_sin kind=signal_math_fcn sample=fixed_in_minor log
+    3 gt_half kind=signal_compare_to_constant sample=fixed_in_minor log
+    4 lut_table kind=signal_lookup_1d sample=fixed_in_minor log
+    5 delay kind=signal_transport_delay sample=continuous loop-breaker log
+    6 scope kind=signal_scope sample=fixed_in_minor
+  zero-crossings: none
+  edges:
+    e1 clk:out -> sin_t:in
+    e2 sin_t:out -> abs_sin:in
+    e3 abs_sin:out -> gt_half:in
+    e4 clk:out -> lut_table:in
+    e5 lut_table:out -> delay:in
+    e6 delay:out -> scope:in
