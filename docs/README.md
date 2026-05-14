@@ -14,6 +14,7 @@ Use this page as the entry point to the repo docs.
 - [`sema.md`](sema.md): tour of `lib/Sema/` — bindings, scopes, name resolution, and type inference
 - [`flowchart_frontend.md`](flowchart_frontend.md): `.mflow` graphical block-language frontend — design, architecture, and shipped phases (graph → AST → every existing backend; round-trips to MATLAB source for free)
 - [`flowchart_schema.md`](flowchart_schema.md): `.mflow` JSON schema reference — field-by-field contract, every block kind's required data fields and port conventions, validation rules. **Read this when implementing the IDE save/load.**
+- [`mflow_link_roadmap.md`](mflow_link_roadmap.md): **mflowLink** — the compiler-side plan for a Simulink-like *signal-flow* dialect of `.mflow` (time-domain block-diagram simulation). **Greenfield / not started.** Covers schema acceptance, the `MflowLinkModel` lowering (`lib/Flowchart/SignalFlowLowering.cpp`), `runtime_mflowlink.cpp` (sample-time scheduler + ODE-solver wrapping + zero-crossing + snapshot ring), the `-simulate` DAP-server flag, `-emit-mflowlink-cpp`, and the DAP protocol extensions. Companion to the IDE-side roadmap in `Matlab_llvm_ide/docs/mflowLink_roadmap.md`; the IDE authoring surface is largely shipped, this is the half that isn't
 - [`save_load_compat.md`](save_load_compat.md): plan to bring `save` / `load` to the real MATLAB API and `.mat` v5 file format
 
 ## Backends And Runtime

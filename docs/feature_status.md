@@ -54,7 +54,7 @@ Now in scope (covered by dedicated docs):
 | Line continuation (`...`) | ✅ | |
 | Line and block comments (`%`, `%{ ... %}`) | ✅ | |
 | Arithmetic ops (`+ - * / \ ^`) + element-wise (`.* ./ .\ .^`) | ✅ | |
-| Comparison, logical, short-circuit (`== ~= < <= > >= & | && || ~`) | ✅ | |
+| Comparison, logical, short-circuit (`== ~= < <= > >= & | && || ~`) | ✅ | Scalar `& \| && \|\| ~` lower to `arith.{andi,ori,xori}` in `LowerScalarsToArith` (operands truth-coerced to i1). `&&` / `\|\|` are eager — the frontend emits both operands, so there is no runtime short-circuit (an RHS guarded against an error by the LHS is not skipped). |
 | Transpose and conjugate-transpose (`'`, `.'`) | ✅ | |
 | Function handle operator (`@`) | ✅ | |
 | OOP keywords (`classdef properties methods events enumeration`) | ✅ | `classdef`, `properties`, `methods`, `enumeration` all parse and lower end-to-end (see §3 / §8 OOP rows). `events` parses but is ignored at runtime. |
@@ -192,6 +192,7 @@ at emit time with a clear error.
 | `abs`, `sqrt`, `exp`, `log`, `sin`, `cos`, `tan` | ✅ |
 | `floor`, `ceil`, `round`, `fix`, `mod`, `rem` | ✅ |
 | `asin`, `acos`, `atan`, `atan2`, `sinh`, `cosh`, `tanh`, `log2`, `log10`, `sign` | ✅ |
+| `sind`, `cosd`, `tand`, `asind`, `acosd`, `atand`, `atan2d` | ✅ | Degree-argument trigonometry; scalar + matrix runtime entries (`matlab_sind_s` / `matlab_sind_m` / …). |
 | `conj`, `real`, `imag`, `angle` | ✅ | Polymorphic — accept either real or complex input |
 | `fft`, `ifft`, `fft2`, `ifft2` | ✅ | Pure-C Cooley-Tukey radix-2 + Bluestein for general N. See [`docs/complex.md`](complex.md). |
 

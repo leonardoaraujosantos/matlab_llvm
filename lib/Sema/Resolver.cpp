@@ -25,6 +25,8 @@ void Resolver::registerBuiltins() {
     "reshape", "repmat", "linspace", "logspace",
     "abs", "sqrt", "exp", "log", "sin", "cos", "tan",
     "asin", "acos", "atan", "atan2", "sinh", "cosh", "tanh",
+    /* Degree-argument trigonometry. */
+    "sind", "cosd", "tand", "asind", "acosd", "atand", "atan2d",
     "log2", "log10", "sign",
     "min", "max", "sum", "prod", "mean",
     "cumsum", "cumprod",
@@ -199,6 +201,38 @@ void Resolver::registerBuiltins() {
      * parabolic-elliptic PDE solver via method-of-lines (uses
      * ode23s under the hood). */
     "ode45", "ode23", "ode23s", "ode_events", "pdepe",
+    /* Optimization Toolbox — see docs/optim_toolbox_roadmap.md.
+     * Tier-1.1: scalar root finder via Brent's method.  Two operand
+     * shapes share the name `fzero` and are split by the lowering
+     * pass — `fzero(@fn, x0)` (scalar guess) vs `fzero(@fn, [a b])`
+     * (bracket).  Tier-1.2–1.9: 1-D minimiser (`fminbnd`), N-D
+     * minimisers (`fminsearch` Nelder–Mead, `fminunc` BFGS), linear
+     * programming (`linprog`, 3- or 7-arg), non-negative least
+     * squares (`lsqnonneg`), and the scalar-equation solver
+     * (`fsolve`).  All single-return in Tier-1. */
+    "fzero", "fminbnd", "fminsearch", "fminunc",
+    "linprog", "lsqnonneg", "fsolve",
+    /* Tier-2: constrained nonlinear (`fmincon`), convex QP
+     * (`quadprog`), constrained linear least squares (`lsqlin`),
+     * nonlinear least squares (`lsqnonlin`), and curve fitting
+     * (`lsqcurvefit`).  `fsolve` (registered above) also gains an
+     * N-D vector form in Tier-2.  All single-return. */
+    "fmincon", "quadprog", "lsqlin", "lsqnonlin", "lsqcurvefit",
+    /* Tier-3: mixed-integer LP (`intlinprog`), second-order cone
+     * programming (`coneprog`), minimax (`fminimax`), goal attainment
+     * (`fgoalattain`), and semi-infinite programming (`fseminf`). */
+    "intlinprog", "coneprog", "fminimax", "fgoalattain", "fseminf",
+    /* Tier-4: problem-based API expression-DAG builders.  The
+     * MATLAB-facing `optimvar` / `optimproblem` are user functions in
+     * runtime/optim_classdefs.m; the `matlab_optim_pb_*` family below
+     * is the runtime the classdef methods forward to. */
+    "matlab_optim_pb_var", "matlab_optim_pb_const",
+    "matlab_optim_pb_add", "matlab_optim_pb_sub", "matlab_optim_pb_neg",
+    "matlab_optim_pb_mul", "matlab_optim_pb_div", "matlab_optim_pb_pow",
+    "matlab_optim_pb_le", "matlab_optim_pb_ge", "matlab_optim_pb_eq",
+    "matlab_optim_pb_solve",
+    /* Tier-5: problem-based equation solving (`eqnproblem`). */
+    "matlab_optim_pb_solve_eqn",
     /* Partial Differential Equation Toolbox — see docs/pde_toolbox_roadmap.md.
      * Function-form numeric core; the MATLAB-side createpde/femodel
      * wrappers (Tier-3 polish) layer kwarg sugar on top. */
@@ -903,6 +937,72 @@ void Resolver::collectAssignments(Function &F, Scope *FnScope) {
   if (F.Body) collectAssignmentsInBlock(*F.Body, FnScope);
 }
 
+void Resolver::applyWorkspaceKind(Binding *NB, std::string_view Name,
+                                  Scope *S) {
+  /* REPL cross-input persistence: when the resolver auto-declares a
+   * name that wasn't assigned in this TU, query the live workspace for
+   * the kind under which a prior input bound it.  Stamping
+   * InferredType lets every downstream dispatch site (string disp,
+   * strlen, isstring, the workspace load path itself) see the correct
+   * shape — without this, a fresh `disp(t)` after an earlier
+   * `t = "..."` couldn't tell matrix from string and either silently
+   * dropped the read or matrix-cast the descriptor's bytes. */
+  if (!ReplMode || !WorkspaceKindHook) return;
+  int K = WorkspaceKindHook(Name.data(), (int64_t)Name.size());
+  /* Kind encoding (matches matlab_dbg_ws_kind):
+   *   0 = f64 scalar, 1 = matlab_mat*, 2 = matlab_obj*,
+   *   3 = matlab_string*, 4 = matlab_mat_u8*, 5 = matlab_mat_i32*.
+   *   Stamp InferredType for the kinds the lowering can specialise on
+   *   — without a scalar-double stamp, the workspace load path falls
+   *   back to matlab_ws_get_mat (returns ptr) and downstream consumers
+   *   that need an f64 (num2str / arithmetic / range bounds) silently
+   *   misbehave.  Kinds 4/5 (typed-int matrices) are stamped with a
+   *   non-scalar Array(UInt8/Int32, unknown) so the BinaryOp emit site
+   *   picks the typed runtime entry points. */
+  if (K == 0) NB->InferredType = TC.scalar(Dtype::Double);
+  /* Kind 1 = generic matlab_mat* (real double matrix). Without this
+   * stamp, downstream MLIR lowerings fall back to a ptr-typed
+   * workspace load and elementwise operations (`.*`, matrix `+ -`,
+   * `norm`, etc.) misdispatch on the next REPL turn. Stamp the
+   * canonical "double array of unknown shape" so the BinaryOp /
+   * call_builtin path picks the matrix-mat runtime entries. */
+  else if (K == 1) NB->InferredType = TC.arrayOf(Dtype::Double, Shape::unknown());
+  else if (K == 3) NB->InferredType = TC.stringScalar();
+  else if (K == 4) NB->InferredType = TC.arrayOf(Dtype::UInt8, Shape::unknown());
+  else if (K == 5) NB->InferredType = TC.arrayOf(Dtype::Int32, Shape::unknown());
+  /* Kind 7 = matlab_sym* (Phase 6 — Symbolic Math Toolbox).  No
+   * InferredType is set (Sema has no SymType yet), but the binding is
+   * tagged so the MLIR lowering's BinaryOp / disp / workspace-store
+   * dispatch sees it as sym across TUs. */
+  else if (K == 7) NB->IsSym = true;
+  /* Kind 8 = matlab_symmat* (Phase 6.1 — symbolic matrix). */
+  else if (K == 8) NB->IsSymmat = true;
+  /* Kind 12 = matlab_struct* (plain field-holder, not a classdef
+   * instance).  Stamping IsStruct lets the MLIR lowering re-populate
+   * StructInitialised on the next compile so `lb.PathLoss` and friends
+   * route through the struct-get path. */
+  else if (K == 12) NB->IsStruct = true;
+  /* Kind 2 = matlab_obj* (classdef instance).  Re-pin the binding to
+   * the runtime-tracked class so the obj-call sugar / dot-method
+   * dispatch / class operator overloads stay live across REPL turns.
+   * Without this, a cross-input `crc(1)` (when `crc` was a
+   * SystemObject set in a prior turn) would fall through to the
+   * matrix-subscript path and read garbage.  The classdef itself must
+   * be in scope by this point — the REPL prelude loader pulls it in
+   * via the same workspace-scan path. */
+  else if (K == 2 && WorkspaceClassNameHook) {
+    int64_t CnLen = 0;
+    const char *Cn = WorkspaceClassNameHook(Name.data(),
+                                            (int64_t)Name.size(), &CnLen);
+    if (Cn && CnLen > 0) {
+      std::string_view CnView(Cn, (size_t)CnLen);
+      Binding *CB = S ? S->lookup(CnView) : nullptr;
+      if (CB && CB->Kind == BindingKind::Class && CB->ClassDef)
+        NB->PinnedClass = CB->ClassDef;
+    }
+  }
+}
+
 void Resolver::collectAssignmentsInBlock(Block &B, Scope *FnScope) {
   for (Stmt *S : B.Stmts)
     if (S) collectAssignmentsInStmt(*S, FnScope);
@@ -919,8 +1019,17 @@ void Resolver::collectAssignmentsInStmt(Stmt &S, Scope *FnScope) {
         switch (Root->Kind) {
         case NodeKind::NameExpr: {
           auto *N = static_cast<NameExpr *>(Root);
-          Binding *B = Sema.newBinding();
-          FnScope->getOrDeclareVar(N->Name, B);
+          Binding *NB = Sema.newBinding();
+          Binding *B = FnScope->getOrDeclareVar(N->Name, NB);
+          /* Compound LHS (`prob.X = ...`, `prob(i) = ...`): the root
+           * name is read-modified, not freshly rebound. In REPL mode a
+           * freshly auto-declared root must be rehydrated from the
+           * workspace so e.g. `prob` re-pins to its classdef and the
+           * field store routes through matlab_obj_set_* instead of
+           * spawning a throwaway struct. Bare `x = ...` (Root == L) is
+           * a clean rebind — pinnedOfRhs handles its class pin. */
+          if (B == NB && Root != L)
+            applyWorkspaceKind(NB, N->Name, FnScope);
           Root = nullptr;
           break;
         }
@@ -1070,7 +1179,7 @@ void Resolver::resolveStmt(Stmt &St, Scope *S) {
      * don't know, so skip. Returning a new instance is the common
      * pattern for v1 and matches the BasicClass / Vec2 examples. */
     std::function<ClassDef *(Expr *)> pinnedOfRhs =
-        [&pinnedOfRhs](Expr *RE) -> ClassDef * {
+        [&pinnedOfRhs, S](Expr *RE) -> ClassDef * {
       if (!RE) return nullptr;
       if (auto *NE = dynamic_cast<NameExpr *>(RE)) {
         if (NE->Ref && NE->Ref->PinnedClass) return NE->Ref->PinnedClass;
@@ -1080,6 +1189,40 @@ void Resolver::resolveStmt(Stmt &St, Scope *S) {
         if (auto *NX = dynamic_cast<NameExpr *>(CX->Callee)) {
           if (NX->Ref && NX->Ref->Kind == BindingKind::Class &&
               NX->Ref->ClassDef) return NX->Ref->ClassDef;
+          /* Optimization Toolbox problem-based factory functions —
+           * `optimvar` / `optimintvar` produce an OptimizationExpression
+           * and `optimproblem` an OptimizationProblem.  These are
+           * resolved by name (the classdef prelude is *appended* after
+           * the user script, so the generic "user function returning a
+           * pinned output" rule below can't see the pin yet when the
+           * caller is resolved). */
+          auto classByName = [S](const char *Nm) -> ClassDef * {
+            if (Binding *B = S ? S->lookup(Nm) : nullptr)
+              if (B->Kind == BindingKind::Class && B->ClassDef)
+                return B->ClassDef;
+            return nullptr;
+          };
+          if (NX->Name == "optimvar" || NX->Name == "optimintvar") {
+            if (ClassDef *C = classByName("OptimizationExpression"))
+              return C;
+          }
+          if (NX->Name == "optimproblem") {
+            if (ClassDef *C = classByName("OptimizationProblem"))
+              return C;
+          }
+          if (NX->Name == "eqnproblem") {
+            if (ClassDef *C = classByName("EquationProblem"))
+              return C;
+          }
+          /* User function whose body returns a class-pinned value —
+           * propagate that pin to the caller's LHS. */
+          if (NX->Ref && NX->Ref->Kind == BindingKind::Function &&
+              NX->Ref->FuncDef) {
+            Function *F = NX->Ref->FuncDef;
+            if (!F->OutputRefs.empty() && F->OutputRefs.front() &&
+                F->OutputRefs.front()->PinnedClass)
+              return F->OutputRefs.front()->PinnedClass;
+          }
           /* Function-style class-method dispatch returning a fresh
            * class instance — e.g. `design(antenna, freq)` returning
            * an AntDipole.  When the callee is a builtin name AND
@@ -1371,74 +1514,7 @@ void Resolver::resolveExpr(Expr &E, Scope *S) {
       if (ReplMode) {
         Binding *NB = Sema.newBinding();
         B = S->getOrDeclareVar(N.Name, NB);
-        /* REPL cross-input persistence: when the resolver auto-declares
-         * a name that wasn't assigned in this TU, query the live
-         * workspace for the kind under which a prior input bound it.
-         * Stamping InferredType lets every downstream dispatch site
-         * (string disp, strlen, isstring, the workspace load path
-         * itself) see the correct shape — without this, a fresh
-         * `disp(t)` after an earlier `t = "..."` couldn't tell
-         * matrix from string and either silently dropped the read or
-         * matrix-cast the descriptor's bytes. */
-        if (WorkspaceKindHook) {
-          int K = WorkspaceKindHook(N.Name.data(), (int64_t)N.Name.size());
-          /* Kind encoding (matches matlab_dbg_ws_kind):
-           *   0 = f64 scalar, 1 = matlab_mat*, 2 = matlab_obj*,
-           *   3 = matlab_string*, 4 = matlab_mat_u8*, 5 = matlab_mat_i32*.
-           *   Stamp InferredType for the kinds the lowering can
-           *   specialise on — without a scalar-double stamp, the
-           *   workspace load path falls back to matlab_ws_get_mat
-           *   (returns ptr) and downstream consumers that need an f64
-           *   (num2str / arithmetic / range bounds) silently misbehave.
-           *   Kinds 4/5 (typed-int matrices) are stamped with a non-
-           *   scalar Array(UInt8/Int32, unknown) so the BinaryOp emit
-           *   site picks the typed runtime entry points. */
-          if (K == 0) NB->InferredType = TC.scalar(Dtype::Double);
-          /* Kind 1 = generic matlab_mat* (real double matrix). Without
-           * this stamp, downstream MLIR lowerings fall back to a ptr-
-           * typed workspace load and elementwise operations (`.*`,
-           * matrix `+ -`, `norm`, etc.) misdispatch on the next REPL
-           * turn. Stamp the canonical "double array of unknown shape"
-           * so the BinaryOp / call_builtin path picks the matrix-mat
-           * runtime entries. */
-          else if (K == 1) NB->InferredType = TC.arrayOf(Dtype::Double, Shape::unknown());
-          else if (K == 3) NB->InferredType = TC.stringScalar();
-          else if (K == 4) NB->InferredType = TC.arrayOf(Dtype::UInt8, Shape::unknown());
-          else if (K == 5) NB->InferredType = TC.arrayOf(Dtype::Int32, Shape::unknown());
-          /* Kind 7 = matlab_sym* (Phase 6 — Symbolic Math Toolbox).
-           * No InferredType is set (Sema has no SymType yet), but the
-           * binding is tagged so the MLIR lowering's BinaryOp / disp /
-           * workspace-store dispatch sees it as sym across TUs. */
-          else if (K == 7) NB->IsSym = true;
-          /* Kind 8 = matlab_symmat* (Phase 6.1 — symbolic matrix). */
-          else if (K == 8) NB->IsSymmat = true;
-          /* Kind 12 = matlab_struct* (plain field-holder, not a
-           * classdef instance).  Stamping IsStruct lets the MLIR
-           * lowering re-populate StructInitialised on the next
-           * compile so `lb.PathLoss` and friends route through the
-           * struct-get path. */
-          else if (K == 12) NB->IsStruct = true;
-          /* Kind 2 = matlab_obj* (classdef instance).  Re-pin the
-           * binding to the runtime-tracked class so the obj-call
-           * sugar / dot-method dispatch / class operator overloads
-           * stay live across REPL turns.  Without this, a cross-
-           * input `crc(1)` (when `crc` was a SystemObject set in a
-           * prior turn) would fall through to the matrix-subscript
-           * path and read garbage.  The classdef itself must be in
-           * scope by this point — the REPL prelude loader pulls it
-           * in via the same workspace-scan path. */
-          else if (K == 2 && WorkspaceClassNameHook) {
-            int64_t CnLen = 0;
-            const char *Cn = WorkspaceClassNameHook(
-                N.Name.data(), (int64_t)N.Name.size(), &CnLen);
-            if (Cn && CnLen > 0) {
-              std::string_view CnView(Cn, (size_t)CnLen);
-              Binding *CB = S->lookup(CnView);
-              if (CB && CB->Kind == BindingKind::Class && CB->ClassDef)
-                NB->PinnedClass = CB->ClassDef;
-            }
-          }
-        }
+        applyWorkspaceKind(NB, N.Name, S);
       } else {
         Diag.error(N.Range.Begin,
                    std::string("undefined name '") + std::string(N.Name) + "'");

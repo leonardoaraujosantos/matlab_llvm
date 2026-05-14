@@ -264,6 +264,74 @@ struct NegToArith : public NameMatch {
 };
 
 //===----------------------------------------------------------------------===//
+// Logical operators (& | && || ~)
+//===----------------------------------------------------------------------===//
+
+/// Coerce a scalar value to an i1 truth value, MATLAB-style (nonzero =
+/// true).  i1 passes through; a float compares ONE against 0.0; a wider
+/// integer compares ne against 0.  Returns a null Value when the type
+/// is not a concrete scalar yet (the pattern then defers, like the rest
+/// of this type-refinement-driven pass).
+static mlir::Value coerceToI1(mlir::Value V, mlir::Location Loc,
+                              mlir::PatternRewriter &R) {
+  mlir::Type T = V.getType();
+  if (auto IT = mlir::dyn_cast<mlir::IntegerType>(T)) {
+    if (IT.getWidth() == 1) return V;
+    auto Zero = mlir::arith::ConstantOp::create(
+        R, Loc, T, mlir::IntegerAttr::get(T, 0));
+    return mlir::arith::CmpIOp::create(
+        R, Loc, mlir::arith::CmpIPredicate::ne, V, Zero);
+  }
+  if (isScalarFloat(T)) {
+    auto Zero = mlir::arith::ConstantOp::create(
+        R, Loc, T, mlir::FloatAttr::get(T, 0.0));
+    return mlir::arith::CmpFOp::create(
+        R, Loc, mlir::arith::CmpFPredicate::ONE, V, Zero);
+  }
+  return mlir::Value{};
+}
+
+/// `matlab.and` / `matlab.or` and their short-circuit twins
+/// `matlab.short_and` / `matlab.short_or` on scalar operands.  The
+/// frontend already emits both operands eagerly (short-circuit is not
+/// represented in the IR), so the lowering is a straight `arith.andi`
+/// / `arith.ori` of the two truth-coerced operands; the result is i1.
+template <typename IOp>
+struct LogicalBinToArith : public NameMatch {
+  using NameMatch::NameMatch;
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *Op,
+                  mlir::PatternRewriter &R) const override {
+    if (Op->getNumOperands() != 2 || Op->getNumResults() != 1)
+      return mlir::failure();
+    mlir::Value A = coerceToI1(Op->getOperand(0), Op->getLoc(), R);
+    mlir::Value B = coerceToI1(Op->getOperand(1), Op->getLoc(), R);
+    if (!A || !B) return mlir::failure();
+    R.replaceOpWithNewOp<IOp>(Op, A, B);
+    return mlir::success();
+  }
+};
+
+/// `matlab.not` (the `~` operator) on a scalar operand: truth-coerce,
+/// then XOR with the i1 constant `true`.
+struct NotToArith : public NameMatch {
+  using NameMatch::NameMatch;
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *Op,
+                  mlir::PatternRewriter &R) const override {
+    if (Op->getNumOperands() != 1 || Op->getNumResults() != 1)
+      return mlir::failure();
+    mlir::Value A = coerceToI1(Op->getOperand(0), Op->getLoc(), R);
+    if (!A) return mlir::failure();
+    auto I1 = R.getI1Type();
+    auto True = mlir::arith::ConstantOp::create(
+        R, Op->getLoc(), I1, mlir::IntegerAttr::get(I1, 1));
+    R.replaceOpWithNewOp<mlir::arith::XOrIOp>(Op, A, True);
+    return mlir::success();
+  }
+};
+
+//===----------------------------------------------------------------------===//
 // Binary arithmetic
 //===----------------------------------------------------------------------===//
 
@@ -692,6 +760,15 @@ bool runLowerScalarsToArith(mlir::ModuleOp M) {
       "matlab.ediv", Ctx);
   Patterns.add<ScalarMatMulToMulf>("matlab.matmul", Ctx);
   Patterns.add<ScalarMatDivToDivf>("matlab.matdiv", Ctx);
+
+  // Logical operators on scalars: & | && || ~.  The frontend emits the
+  // operands eagerly, so the short-circuit twins lower identically to
+  // the eager forms.
+  Patterns.add<LogicalBinToArith<mlir::arith::AndIOp>>("matlab.and", Ctx);
+  Patterns.add<LogicalBinToArith<mlir::arith::AndIOp>>("matlab.short_and", Ctx);
+  Patterns.add<LogicalBinToArith<mlir::arith::OrIOp>>("matlab.or", Ctx);
+  Patterns.add<LogicalBinToArith<mlir::arith::OrIOp>>("matlab.short_or", Ctx);
+  Patterns.add<NotToArith>("matlab.not", Ctx);
 
   // Bitwise builtins. Only fire when operand types are concrete
   // matching scalar integers — type-refinement-driven, like the rest

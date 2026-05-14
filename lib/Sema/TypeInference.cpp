@@ -1177,8 +1177,36 @@ const Type *TypeInference::visitBuiltinCall(std::string_view Name,
       Name == "pde_save_stl" ||
       Name == "spnnz" || Name == "sprows" || Name == "spcols" ||
       Name == "pcg_flag" ||
-      Name == "pcg_relres" || Name == "pcg_iter")
+      Name == "pcg_relres" || Name == "pcg_iter" ||
+      /* Optimization Toolbox — see docs/optim_toolbox_roadmap.md.
+       * Scalar-returning solvers: root finder (`fzero`), 1-D
+       * minimiser (`fminbnd`).  Tier-4 problem-based DAG builders all
+       * return a scalar node id. */
+      Name == "fzero" || Name == "fminbnd" ||
+      Name == "matlab_optim_pb_var" || Name == "matlab_optim_pb_const" ||
+      Name == "matlab_optim_pb_add" || Name == "matlab_optim_pb_sub" ||
+      Name == "matlab_optim_pb_neg" || Name == "matlab_optim_pb_mul" ||
+      Name == "matlab_optim_pb_div" || Name == "matlab_optim_pb_pow" ||
+      Name == "matlab_optim_pb_le" || Name == "matlab_optim_pb_ge" ||
+      Name == "matlab_optim_pb_eq")
     return TC.scalar(Dtype::Double);
+
+  /* `matlab_optim_pb_solve` and the problem-based `solve(prob)` return
+   * the solution column vector — but we deliberately leave them
+   * `any`-typed so the receiving slot stays `none` and the matrix-slot
+   * retyping pass lifts it to `!llvm.ptr` on the ptr-typed store (a
+   * `tensor`-typed slot would not retype the same way).  The SymPP
+   * `solve` is gated on a sym first argument and is unaffected. */
+
+  /* `fsolve` — scalar x0 gives a scalar root; a vector x0 gives a
+   * vector solution.  Decide from the second argument's shape. */
+  if (Name == "fsolve") {
+    if (Args.size() >= 2 && ArgTys[1] &&
+        ArgTys[1]->K == Type::Kind::Array &&
+        static_cast<const ArrayType *>(ArgTys[1])->S.K == Shape::Rank::Scalar)
+      return TC.scalar(Dtype::Double);
+    return TC.arrayOf(Dtype::Double, Shape::unknown());
+  }
   if (Name == "pde_mesh_rect_tri" || Name == "pde_boundary_nodes_rect" ||
       Name == "pde_assemble_poisson_2d" || Name == "pde_apply_dirichlet" ||
       Name == "pde_mesh_cuboid_tet" || Name == "pde_face_nodes" ||
@@ -1266,7 +1294,22 @@ const Type *TypeInference::visitBuiltinCall(std::string_view Name,
       Name == "applyBoundaryCondition" ||
       Name == "pde_assemble_poisson_3d_sparse" ||
       Name == "pde_apply_dirichlet_3d_sparse" ||
-      Name == "pde_face_scalar_load_3d")
+      Name == "pde_face_scalar_load_3d" ||
+      /* Optimization Toolbox — vector-returning solvers: N-D
+       * minimisers (`fminsearch`, `fminunc`), linear programming
+       * (`linprog`), non-negative least squares (`lsqnonneg`), and
+       * the Tier-2 constrained / least-squares solvers (`fmincon`,
+       * `quadprog`, `lsqlin`, `lsqnonlin`, `lsqcurvefit`).  `fsolve`
+       * is handled separately — scalar form returns a scalar, N-D
+       * form returns a vector. */
+      Name == "fminsearch" || Name == "fminunc" ||
+      Name == "linprog" || Name == "lsqnonneg" ||
+      Name == "fmincon" || Name == "quadprog" || Name == "lsqlin" ||
+      Name == "lsqnonlin" || Name == "lsqcurvefit" ||
+      /* Tier-3 — MILP, cone, minimax, goal-attainment, semi-infinite
+       * all return a solution vector. */
+      Name == "intlinprog" || Name == "coneprog" || Name == "fminimax" ||
+      Name == "fgoalattain" || Name == "fseminf")
     return TC.arrayOf(Dtype::Double, Shape::unknown());
 
   if (Name == "linspace") {
@@ -1277,7 +1320,10 @@ const Type *TypeInference::visitBuiltinCall(std::string_view Name,
   }
 
   if (Name == "abs" || Name == "sqrt" || Name == "exp" ||
-      Name == "log" || Name == "sin"  || Name == "cos" || Name == "tan") {
+      Name == "log" || Name == "sin"  || Name == "cos" || Name == "tan" ||
+      /* Degree-argument trigonometry — element-wise like sin/cos. */
+      Name == "sind"  || Name == "cosd"  || Name == "tand" ||
+      Name == "asind" || Name == "acosd" || Name == "atand") {
     // Element-wise: preserves shape, promotes to floating.
     if (!ArgTys.empty() && ArgTys[0] && ArgTys[0]->K == Type::Kind::Array) {
       auto &A = static_cast<const ArrayType &>(*ArgTys[0]);

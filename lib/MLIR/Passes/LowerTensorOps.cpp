@@ -3773,6 +3773,210 @@ bool TensorLowering::rewriteBuiltinCalls() {
       continue;
     }
 
+    /* fzero — Optimization Toolbox Tier-1.1.  See
+     * docs/optim_toolbox_roadmap.md.  Two operand shapes:
+     *   x = fzero(@fn, x0)     — scalar guess        → matlab_optim_fzero
+     *   x = fzero(@fn, [a b])  — sign-change bracket → matlab_optim_fzero_iv
+     * Result is a scalar f64 root.  The handle is a ptr produced by
+     * make_handle / anon-call lowering; the second arg's type
+     * disambiguates the call shape. */
+    if (Name == "fzero" &&
+        Call->getNumOperands() == 2 && Call->getNumResults() == 1 &&
+        Call->getOperand(0).getType() == PtrTy) {
+      mlir::Value Arg1 = Call->getOperand(1);
+      mlir::Type Arg1Ty = Arg1.getType();
+      B.setInsertionPoint(Call);
+      if (Arg1Ty == F64) {
+        auto Fn = rt("matlab_optim_fzero", F64, {PtrTy, F64});
+        auto C0 = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                        Call->getOperands());
+        Call->getResult(0).replaceAllUsesWith(C0.getResult());
+        Call->erase();
+        Changed = true;
+        continue;
+      }
+      if (Arg1Ty == PtrTy || isTensorLike(Arg1Ty)) {
+        mlir::Value Coerced = Arg1;
+        if (Arg1Ty != PtrTy) {
+          auto Cast = mlir::UnrealizedConversionCastOp::create(
+              B, Call->getLoc(), PtrTy, Arg1);
+          Coerced = Cast.getResult(0);
+        }
+        auto Fn = rt("matlab_optim_fzero_iv", F64, {PtrTy, PtrTy});
+        auto C0 = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                        mlir::ValueRange{
+                                          Call->getOperand(0), Coerced});
+        Call->getResult(0).replaceAllUsesWith(C0.getResult());
+        Call->erase();
+        Changed = true;
+        continue;
+      }
+    }
+
+    /* linprog — Optimization Toolbox Tier-1.5.  See
+     * docs/optim_toolbox_roadmap.md.  Two operand shapes:
+     *   x = linprog(f, A, b)                    → matlab_optim_linprog3
+     *   x = linprog(f, A, b, Aeq, beq, lb, ub)  → matlab_optim_linprog
+     * Every argument is a matrix (a 0×0 `[]` stands for "absent").
+     * Operands arrive as ptr or tensor; tensor operands are bridged to
+     * ptr with builtin.unrealized_conversion_cast, exactly as the PDE
+     * dispatch table does. */
+    if (Name == "linprog" && Call->getNumResults() == 1 &&
+        (Call->getNumOperands() == 3 || Call->getNumOperands() == 7)) {
+      unsigned NArgs = Call->getNumOperands();
+      bool ok = true;
+      SmallVector<Value, 7> coerced;
+      B.setInsertionPoint(Call);
+      for (unsigned k = 0; k < NArgs; ++k) {
+        Value V = Call->getOperand(k);
+        Type T = V.getType();
+        if (T == PtrTy) {
+          coerced.push_back(V);
+        } else if (isTensorLike(T) || mlir::isa<NoneType>(T)) {
+          auto Cast = mlir::UnrealizedConversionCastOp::create(
+              B, Call->getLoc(), PtrTy, V);
+          coerced.push_back(Cast.getResult(0));
+        } else if (T == F64) {
+          /* A scalar argument (e.g. `beq = 3`) — box it into a 1×1
+           * matrix descriptor so the runtime sees a uniform ptr ABI. */
+          auto FromScalar = rt("matlab_mat_from_scalar", PtrTy, {F64});
+          auto Boxed = LLVM::CallOp::create(B, Call->getLoc(), FromScalar,
+                                            ValueRange{V});
+          coerced.push_back(Boxed.getResult());
+        } else {
+          ok = false;
+          break;
+        }
+      }
+      if (ok) {
+        const char *RtName =
+            (NArgs == 3) ? "matlab_optim_linprog3" : "matlab_optim_linprog";
+        SmallVector<Type, 7> ArgTys(NArgs, PtrTy);
+        auto Fn = rt(RtName, PtrTy, ArgTys);
+        auto C0 = LLVM::CallOp::create(B, Call->getLoc(), Fn, coerced);
+        Call->getResult(0).replaceAllUsesWith(C0.getResult());
+        Call->erase();
+        Changed = true;
+        continue;
+      }
+    }
+
+    /* fmincon / quadprog / lsqlin / lsqnonlin — Optimization Toolbox
+     * Tier-2.  See docs/optim_toolbox_roadmap.md §3.  Each carries
+     * several call arities; the runtime ABI is a fixed-width ptr
+     * vector, so the lowering maps the first N call operands to the
+     * first N ABI slots and null-pads the rest.  Function handles
+     * arrive already as ptr; matrix arguments arrive as ptr or tensor
+     * (bridged to ptr); a scalar argument is boxed via
+     * matlab_mat_from_scalar.  All single-result. */
+    {
+      struct OptimMultiArity {
+        const char *name;
+        const char *rt_name;
+        unsigned abi_arity;
+        SmallVector<unsigned, 4> valid_arities;
+      };
+      const SmallVector<OptimMultiArity, 9> optim_table = {
+        {"fmincon",   "matlab_optim_fmincon",   9, {2, 4, 6, 8, 9}},
+        {"quadprog",  "matlab_optim_quadprog",  8, {4, 6, 8}},
+        {"lsqlin",    "matlab_optim_lsqlin",    8, {4, 6, 8}},
+        {"lsqnonlin", "matlab_optim_lsqnonlin", 4, {2, 4}},
+        /* Tier-3 — same multi-arity dispatch: first N call operands
+         * map to the first N fixed-ABI slots, the rest are null-padded.
+         * Function handles arrive as ptr; scalar args (e.g. coneprog's
+         * `gamma`) are boxed via matlab_mat_from_scalar. */
+        {"intlinprog",  "matlab_optim_intlinprog",  8, {4, 6, 8}},
+        {"fminimax",    "matlab_optim_fminimax",    8, {2, 4, 6, 8}},
+        {"fgoalattain", "matlab_optim_fgoalattain", 10, {4, 6, 8, 10}},
+        {"coneprog",    "matlab_optim_coneprog",    11, {5, 7, 9, 11}},
+        {"fseminf",     "matlab_optim_fseminf",     5, {3, 5}},
+      };
+      bool matched = false;
+      for (const auto &E : optim_table) {
+        if (Name != E.name) continue;
+        unsigned nargs = Call->getNumOperands();
+        bool arity_ok = false;
+        for (unsigned a : E.valid_arities) if (a == nargs) arity_ok = true;
+        if (!arity_ok || Call->getNumResults() != 1) break;
+
+        B.setInsertionPoint(Call);
+        SmallVector<Value, 9> args;
+        bool ok = true;
+        for (unsigned k = 0; k < E.abi_arity; ++k) {
+          if (k < nargs) {
+            Value V = Call->getOperand(k);
+            Type T = V.getType();
+            if (T == PtrTy) {
+              args.push_back(V);
+            } else if (isTensorLike(T) || mlir::isa<NoneType>(T)) {
+              auto Cast = mlir::UnrealizedConversionCastOp::create(
+                  B, Call->getLoc(), PtrTy, V);
+              args.push_back(Cast.getResult(0));
+            } else if (T == F64) {
+              auto FromScalar = rt("matlab_mat_from_scalar", PtrTy, {F64});
+              auto Boxed = LLVM::CallOp::create(B, Call->getLoc(), FromScalar,
+                                                ValueRange{V});
+              args.push_back(Boxed.getResult());
+            } else {
+              ok = false;
+              break;
+            }
+          } else {
+            /* Absent argument — pass a null ptr; the runtime's
+             * mat_absent() treats it as "argument omitted". */
+            args.push_back(LLVM::ZeroOp::create(B, Call->getLoc(), PtrTy));
+          }
+        }
+        if (!ok) break;
+        SmallVector<Type, 9> ArgTys(E.abi_arity, PtrTy);
+        auto Fn = rt(E.rt_name, PtrTy, ArgTys);
+        auto C0 = LLVM::CallOp::create(B, Call->getLoc(), Fn, args);
+        Call->getResult(0).replaceAllUsesWith(C0.getResult());
+        Call->erase();
+        Changed = true;
+        matched = true;
+        break;
+      }
+      if (matched) continue;
+    }
+
+    /* fsolve — Optimization Toolbox.  Two operand shapes:
+     *   x = fsolve(@fn, x0)  with x0 scalar  → matlab_optim_fsolve_scalar
+     *   x = fsolve(@fn, x0)  with x0 vector  → matlab_optim_fsolve
+     * The handle is operand 0 (ptr); the x0 operand's type selects the
+     * call shape. */
+    if (Name == "fsolve" && Call->getNumOperands() == 2 &&
+        Call->getNumResults() == 1 &&
+        Call->getOperand(0).getType() == PtrTy) {
+      Value X0 = Call->getOperand(1);
+      Type X0Ty = X0.getType();
+      B.setInsertionPoint(Call);
+      if (X0Ty == F64) {
+        auto Fn = rt("matlab_optim_fsolve_scalar", F64, {PtrTy, F64});
+        auto C0 = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                       Call->getOperands());
+        Call->getResult(0).replaceAllUsesWith(C0.getResult());
+        Call->erase();
+        Changed = true;
+        continue;
+      }
+      if (X0Ty == PtrTy || isTensorLike(X0Ty)) {
+        Value Coerced = X0;
+        if (X0Ty != PtrTy) {
+          auto Cast = mlir::UnrealizedConversionCastOp::create(
+              B, Call->getLoc(), PtrTy, X0);
+          Coerced = Cast.getResult(0);
+        }
+        auto Fn = rt("matlab_optim_fsolve", PtrTy, {PtrTy, PtrTy});
+        auto C0 = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                       ValueRange{Call->getOperand(0), Coerced});
+        Call->getResult(0).replaceAllUsesWith(C0.getResult());
+        Call->erase();
+        Changed = true;
+        continue;
+      }
+    }
+
     /* === PDE Toolbox — Tier-1 + Tier-2 function-form core. ===
      *
      * All entries are single-result, signature-rigid (no overloads at
@@ -4091,6 +4295,43 @@ bool TensorLowering::rewriteBuiltinCalls() {
          PtrTy, {PtrTy, PtrTy, PtrTy, F64}},
         {"pde_face_scalar_load_3d",        "matlab_pde_face_scalar_load_3d",
          PtrTy, {PtrTy, F64, F64}},
+        /* Optimization Toolbox — Tier-1 single-signature solvers.
+         * See docs/optim_toolbox_roadmap.md.  `fzero` and `linprog`
+         * carry two operand shapes each and are dispatched by the
+         * hand-rolled blocks above instead.  Objective handles arrive
+         * as ptr (function-pointer materialised by anon-call lowering);
+         * matrix args arrive as ptr or tensor and are bridged by the
+         * loose-match coercion. */
+        {"fminbnd",    "matlab_optim_fminbnd",    F64,   {PtrTy, F64, F64}},
+        {"fminsearch", "matlab_optim_fminsearch", PtrTy, {PtrTy, PtrTy}},
+        {"fminunc",    "matlab_optim_fminunc",    PtrTy, {PtrTy, PtrTy}},
+        {"lsqnonneg",  "matlab_optim_lsqnonneg",  PtrTy, {PtrTy, PtrTy}},
+        /* Tier-2 — `lsqcurvefit` has a single 4-arg shape; the model
+         * handle and the three matrices all arrive as ptr (or are
+         * coerced).  `fmincon` / `quadprog` / `lsqlin` / `lsqnonlin`
+         * carry several arities and use the hand-rolled multi-arity
+         * block below; `fsolve` has a scalar and an N-D form. */
+        {"lsqcurvefit", "matlab_optim_lsqcurvefit", PtrTy,
+         {PtrTy, PtrTy, PtrTy, PtrTy}},
+        /* Tier-4 — problem-based expression-DAG builders.  Every
+         * builder takes / returns a scalar node id (f64); `pb_var`
+         * takes the variable-name string; `pb_solve` takes the
+         * OptimizationProblem classdef object and returns the
+         * named-variable solution struct. */
+        {"matlab_optim_pb_var",   "matlab_optim_pb_var",   F64, {F64}},
+        {"matlab_optim_pb_const", "matlab_optim_pb_const", F64, {F64}},
+        {"matlab_optim_pb_add",   "matlab_optim_pb_add",   F64, {F64, F64}},
+        {"matlab_optim_pb_sub",   "matlab_optim_pb_sub",   F64, {F64, F64}},
+        {"matlab_optim_pb_neg",   "matlab_optim_pb_neg",   F64, {F64}},
+        {"matlab_optim_pb_mul",   "matlab_optim_pb_mul",   F64, {F64, F64}},
+        {"matlab_optim_pb_div",   "matlab_optim_pb_div",   F64, {F64, F64}},
+        {"matlab_optim_pb_pow",   "matlab_optim_pb_pow",   F64, {F64, F64}},
+        {"matlab_optim_pb_le",    "matlab_optim_pb_le",    F64, {F64, F64}},
+        {"matlab_optim_pb_ge",    "matlab_optim_pb_ge",    F64, {F64, F64}},
+        {"matlab_optim_pb_eq",    "matlab_optim_pb_eq",    F64, {F64, F64}},
+        {"matlab_optim_pb_solve", "matlab_optim_pb_solve", PtrTy, {PtrTy}},
+        {"matlab_optim_pb_solve_eqn", "matlab_optim_pb_solve_eqn",
+         PtrTy, {PtrTy}},
       };
       bool matched = false;
       for (const auto &E : pde_table) {
@@ -4386,6 +4627,12 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"asin",       "matlab_asin_m",     1, "p"},
       {"acos",       "matlab_acos_m",     1, "p"},
       {"atan",       "matlab_atan_m",     1, "p"},
+      {"sind",       "matlab_sind_m",     1, "p"},
+      {"cosd",       "matlab_cosd_m",     1, "p"},
+      {"tand",       "matlab_tand_m",     1, "p"},
+      {"asind",      "matlab_asind_m",    1, "p"},
+      {"acosd",      "matlab_acosd_m",    1, "p"},
+      {"atand",      "matlab_atand_m",    1, "p"},
       {"sinh",       "matlab_sinh_m",     1, "p"},
       {"cosh",       "matlab_cosh_m",     1, "p"},
       {"tanh",       "matlab_tanh_m",     1, "p"},
@@ -5344,6 +5591,10 @@ bool TensorLowering::rewriteBuiltinCalls() {
          * in the table above. */
         {"asin", "matlab_asin_s"}, {"acos", "matlab_acos_s"},
         {"atan", "matlab_atan_s"},
+        /* Degree-argument trigonometry, scalar forms. */
+        {"sind", "matlab_sind_s"}, {"cosd", "matlab_cosd_s"},
+        {"tand", "matlab_tand_s"}, {"asind", "matlab_asind_s"},
+        {"acosd", "matlab_acosd_s"}, {"atand", "matlab_atand_s"},
         {"sinh", "matlab_sinh_s"}, {"cosh", "matlab_cosh_s"},
         {"tanh", "matlab_tanh_s"},
         {"log2", "matlab_log2_s"}, {"log10", "matlab_log10_s"},
@@ -5360,12 +5611,15 @@ bool TensorLowering::rewriteBuiltinCalls() {
         {"double", "matlab_double_s"}, {"single", "matlab_single_s"},
         {"logical", "matlab_logical_s"},
       };
-      /* Two-argument scalar: atan2(y, x). */
-      if (Name == "atan2" && Call->getNumOperands() == 2 &&
+      /* Two-argument scalar: atan2(y, x) / atan2d(y, x). */
+      if ((Name == "atan2" || Name == "atan2d") &&
+          Call->getNumOperands() == 2 &&
           Call->getOperand(0).getType() == F64 &&
           Call->getOperand(1).getType() == F64) {
         B.setInsertionPoint(Call);
-        auto Fn = rt("matlab_atan2_s", F64, {F64, F64});
+        const char *RtName =
+            (Name == "atan2d") ? "matlab_atan2d_s" : "matlab_atan2_s";
+        auto Fn = rt(RtName, F64, {F64, F64});
         auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
                                         Call->getOperands());
         if (Call->getResult(0).getType() != F64)

@@ -100,6 +100,38 @@ struct StringGlobals {
 std::optional<std::pair<Value, int64_t>>
 materializeStringArg(Value V, OpBuilder &B, StringGlobals &Strings) {
   Operation *Def = V.getDefiningOp();
+  /* REPL mode lowers a string literal eagerly into a
+   * `matlab_string_from_literal(addressof @global, len)` runtime call
+   * rather than leaving a `matlab.const_char` for LowerIO to consume
+   * (the file pipeline keeps the const_char around long enough).
+   * Recognise that shape and recover the raw char-array global +
+   * length straight from the call's operands — the global already
+   * holds exactly the literal text, so it doubles as the C-string
+   * `disp` / `fprintf` need. Without this every REPL `fprintf("...",
+   * ...)` survives as an untranslatable matlab.call_builtin. */
+  if (auto Call = mlir::dyn_cast_or_null<LLVM::CallOp>(Def)) {
+    if (auto Callee = Call.getCallee())
+      if (*Callee == "matlab_string_from_literal" &&
+          Call.getNumOperands() == 2) {
+        Value GAddr = Call.getOperand(0);
+        Value LenV = Call.getOperand(1);
+        auto AddrOp =
+            mlir::dyn_cast_or_null<LLVM::AddressOfOp>(GAddr.getDefiningOp());
+        auto LenCst =
+            mlir::dyn_cast_or_null<LLVM::ConstantOp>(LenV.getDefiningOp());
+        if (AddrOp && LenCst) {
+          if (auto LenAttr =
+                  mlir::dyn_cast<IntegerAttr>(LenCst.getValue())) {
+            OpBuilder::InsertionGuard Guard(B);
+            B.setInsertionPoint(Def);
+            auto PtrTy = LLVM::LLVMPointerType::get(B.getContext());
+            Value Addr = LLVM::AddressOfOp::create(
+                B, Def->getLoc(), PtrTy, AddrOp.getGlobalName());
+            return std::make_pair(Addr, LenAttr.getInt());
+          }
+        }
+      }
+  }
   if (!isMatlabOp(Def, "matlab.const_char")) return std::nullopt;
   auto ValAttr = Def->getAttrOfType<StringAttr>("value");
   if (!ValAttr) return std::nullopt;
@@ -287,17 +319,40 @@ LogicalResult rewriteFprintfCall(Operation *Call, OpBuilder &B,
   if (!FmtPair) return failure();
   auto [FmtPtr, FmtLen] = *FmtPair;
 
-  /* All extra args must be f64 for now — matching matlab_fprintf_f64_* . */
-  for (unsigned i = 1; i < NOps; ++i)
-    if (Call->getOperand(i).getType() != F64) return failure();
-
+  /* Extra args go to the matlab_fprintf_f64_* runtime entries as f64.
+   * An f64 operand passes straight through; a ptr operand is a matrix
+   * descriptor — for the common case of a scalar-valued result that
+   * Sema couldn't pin to f64 (e.g. `max(v)` / `sum(v)`, typed `any` →
+   * a 1×1 matrix at runtime) we extract element 1 with
+   * matlab_subscript1_s.  Anything else (an unconverted tensor, a
+   * genuine multi-element matrix) still bails — printf-style format
+   * cycling over a matrix is a separate feature. */
   B.setInsertionPoint(Call);
   ModuleOp M = Call->getParentOfType<ModuleOp>();
+  SmallVector<Value, 6> DataArgs;
+  for (unsigned i = 1; i < NOps; ++i) {
+    Value V = Call->getOperand(i);
+    Type T = V.getType();
+    if (T == F64) {
+      DataArgs.push_back(V);
+    } else if (T == PtrTy) {
+      auto Sub = getOrInsertRuntimeFunc(
+          B, M, "matlab_subscript1_s", F64, {PtrTy, F64});
+      Value One = LLVM::ConstantOp::create(
+          B, Call->getLoc(), F64, B.getF64FloatAttr(1.0));
+      auto Ext = LLVM::CallOp::create(B, Call->getLoc(), Sub,
+                                      ValueRange{V, One});
+      DataArgs.push_back(Ext.getResult());
+    } else {
+      return failure();
+    }
+  }
+
   Value FmtLenV = LLVM::ConstantOp::create(
       B, Call->getLoc(), I64, B.getI64IntegerAttr(FmtLen));
 
   SmallVector<Value, 6> Args{FmtPtr, FmtLenV};
-  for (unsigned i = 1; i < NOps; ++i) Args.push_back(Call->getOperand(i));
+  for (Value V : DataArgs) Args.push_back(V);
 
   /* Pick the matching runtime symbol by arity. */
   StringRef Name;

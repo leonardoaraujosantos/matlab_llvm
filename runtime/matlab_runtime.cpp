@@ -5843,6 +5843,14 @@ UNARY_M(log,  log(x))
 UNARY_M(sin,  sin(x))
 UNARY_M(cos,  cos(x))
 UNARY_M(tan,  tan(x))
+/* Degree-argument trigonometry (sind/cosd/tand and the inverse forms).
+ * deg->rad = pi/180; rad->deg = 180/pi. */
+UNARY_M(sind,  sin(x * 0.017453292519943295))
+UNARY_M(cosd,  cos(x * 0.017453292519943295))
+UNARY_M(tand,  tan(x * 0.017453292519943295))
+UNARY_M(asind, asin(x) * 57.29577951308232)
+UNARY_M(acosd, acos(x) * 57.29577951308232)
+UNARY_M(atand, atan(x) * 57.29577951308232)
 UNARY_M(asin, asin(x))
 UNARY_M(acos, acos(x))
 UNARY_M(atan, atan(x))
@@ -5887,6 +5895,18 @@ double matlab_floor_s(double x) { return floor(x); }
 double matlab_ceil_s(double x)  { return ceil(x); }
 double matlab_round_s(double x) { return round(x); }
 double matlab_fix_s(double x)   { return trunc(x); }
+
+/* Degree-argument trigonometry, scalar forms.  deg->rad = pi/180;
+ * rad->deg = 180/pi. */
+double matlab_sind_s(double x)  { return sin(x * 0.017453292519943295); }
+double matlab_cosd_s(double x)  { return cos(x * 0.017453292519943295); }
+double matlab_tand_s(double x)  { return tan(x * 0.017453292519943295); }
+double matlab_asind_s(double x) { return asin(x) * 57.29577951308232; }
+double matlab_acosd_s(double x) { return acos(x) * 57.29577951308232; }
+double matlab_atand_s(double x) { return atan(x) * 57.29577951308232; }
+double matlab_atan2d_s(double y, double x) {
+    return atan2(y, x) * 57.29577951308232;
+}
 
 /* MATLAB `mod(a,b)`: result has same sign as b (or 0). `rem(a,b)`: sign
  * of a. C's fmod uses sign-of-a, so fmod == rem; derive mod from that. */

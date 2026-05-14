@@ -475,6 +475,10 @@ bool rewriteUserCallIndirect(ModuleOp M) {
 bool runLowerAnonCallsPost(ModuleOp M) {
   MLIRContext *Ctx = M.getContext();
   OpBuilder B(Ctx);
+  auto PtrTy = LLVM::LLVMPointerType::get(Ctx);
+  auto isTensorLike = [](Type T) {
+    return mlir::isa<RankedTensorType>(T) || mlir::isa<UnrankedTensorType>(T);
+  };
   SmallVector<Operation *> Calls;
   M.walk([&](Operation *Op) {
     if (isMatlabOp(Op, "matlab.call_indirect")) Calls.push_back(Op);
@@ -482,26 +486,37 @@ bool runLowerAnonCallsPost(ModuleOp M) {
   bool Changed = false;
   for (Operation *Call : Calls) {
     if (Call->getNumOperands() < 1) continue;
-    /* Trace the callee operand back to an llvm.mlir.addressof (possibly
-     * through a load from a slot whose sole store is the addressof). */
+    /* Trace the callee operand back to an llvm.mlir.addressof.  The
+     * handle may be the direct defining op, or it may flow through a
+     * slot — and at this point in the pipeline that slot's load/store
+     * pair can still be either `matlab.load`/`matlab.store` (the anon
+     * outliner replaced the make_anon with an addressof but left the
+     * surrounding slot ops untouched) or already-lowered `llvm.load`/
+     * `llvm.store`.  Handle both. */
     Value Callee = Call->getOperand(0);
     Operation *Def = Callee.getDefiningOp();
     StringRef FnName;
+    auto srcAddrName = [](Value Src) -> StringRef {
+      if (auto Addr = dyn_cast_or_null<LLVM::AddressOfOp>(Src.getDefiningOp()))
+        return Addr.getGlobalName();
+      return {};
+    };
     if (auto Addr = dyn_cast_or_null<LLVM::AddressOfOp>(Def)) {
       FnName = Addr.getGlobalName();
-    } else if (Def && Def->getName().getStringRef() == "llvm.load") {
+    } else if (Def && (Def->getName().getStringRef() == "llvm.load" ||
+                       isMatlabOp(Def, "matlab.load")) &&
+               Def->getNumOperands() == 1) {
       Value Slot = Def->getOperand(0);
       for (OpOperand &Use : Slot.getUses()) {
         Operation *U = Use.getOwner();
-        if (U->getName().getStringRef() != "llvm.store") continue;
+        bool IsStore = U->getName().getStringRef() == "llvm.store" ||
+                       isMatlabOp(U, "matlab.store");
+        if (!IsStore) continue;
         if (U->getNumOperands() != 2 || U->getOperand(1) != Slot) continue;
-        if (auto Addr = dyn_cast_or_null<LLVM::AddressOfOp>(
-                U->getOperand(0).getDefiningOp())) {
-          if (FnName.empty()) FnName = Addr.getGlobalName();
-          else if (FnName != Addr.getGlobalName()) { FnName = {}; break; }
-        } else {
-          FnName = {}; break;
-        }
+        StringRef N = srcAddrName(U->getOperand(0));
+        if (N.empty()) { FnName = {}; break; }
+        if (FnName.empty()) FnName = N;
+        else if (FnName != N) { FnName = {}; break; }
       }
     }
     if (FnName.empty()) continue;
@@ -511,10 +526,25 @@ bool runLowerAnonCallsPost(ModuleOp M) {
     if (Call->getNumOperands() - 1 != FnType.getNumParams()) continue;
     bool OK = true;
     SmallVector<Value> Args;
+    B.setInsertionPoint(Call);
     for (unsigned i = 0; i < FnType.getNumParams(); ++i) {
       Value V = Call->getOperand(i + 1);
-      if (V.getType() != FnType.getParamType(i)) { OK = false; break; }
-      Args.push_back(V);
+      Type Want = FnType.getParamType(i);
+      if (V.getType() == Want) {
+        Args.push_back(V);
+      } else if (Want == PtrTy && isTensorLike(V.getType())) {
+        /* The outlined function takes a ptr but the call site still
+         * has a tensor-typed value (e.g. the result of a builtin call
+         * that hasn't been converted yet) — bridge with an
+         * unrealized_conversion_cast, the same ptr/tensor ABI bridge
+         * the PDE / Optim dispatch tables use. */
+        auto Cast = mlir::UnrealizedConversionCastOp::create(
+            B, Call->getLoc(), PtrTy, V);
+        Args.push_back(Cast.getResult(0));
+      } else {
+        OK = false;
+        break;
+      }
     }
     if (!OK) continue;
 
@@ -620,7 +650,161 @@ static bool retypeAnonsForVectorODE(ModuleOp M) {
   return Changed;
 }
 
-bool runLowerAnonCalls(ModuleOp M) {
+/* Retype one block arg of the anonymous function reachable from
+ * `handle` to ptr, cascading the change through the prologue slot the
+ * argument is stored into and that slot's loads.  Returns true if a
+ * change was made.  Shared by the Optimization-Toolbox pre-passes that
+ * give an objective / constraint handle a vector (matrix) argument.   */
+static bool retypeMakeAnonArg(Operation *Anon, unsigned argIdx) {
+  if (!Anon || Anon->getNumRegions() != 1) return false;
+  MLIRContext *Ctx = Anon->getContext();
+  auto F64 = Float64Type::get(Ctx);
+  auto PtrTy = LLVM::LLVMPointerType::get(Ctx);
+  Region &Body = Anon->getRegion(0);
+  if (!Body.hasOneBlock()) return false;
+  Block &Entry = Body.front();
+  if (Entry.getNumArguments() <= argIdx) return false;
+  BlockArgument Arg = Entry.getArgument(argIdx);
+  if (Arg.getType() != F64) return false;     /* already retyped / wrong shape */
+
+  Arg.setType(PtrTy);
+  for (Operation *U : Arg.getUsers()) {
+    if (!isMatlabOp(U, "matlab.store") || U->getNumOperands() != 2) continue;
+    if (U->getOperand(0) != Arg) continue;
+    Value Slot = U->getOperand(1);
+    Operation *SlotDef = Slot.getDefiningOp();
+    if (isMatlabOp(SlotDef, "matlab.alloc"))
+      SlotDef->getResult(0).setType(PtrTy);
+    for (Operation *SU : Slot.getUsers()) {
+      if (isMatlabOp(SU, "matlab.load") && SU->getNumResults() == 1)
+        SU->getResult(0).setType(PtrTy);
+    }
+  }
+  return true;
+}
+
+static bool retypeAnonArg(Value handle, unsigned argIdx) {
+  return retypeMakeAnonArg(traceToMakeAnon(handle), argIdx);
+}
+
+/* REPL-only pre-pass.  In the static -emit-* pipeline an anon used as a
+ * vector objective is reached from its solver call site
+ * (`retypeAnonsForVectorObjective` traces `fminunc(ros, …)` back to the
+ * `make_anon`).  In the REPL each line is its own module, so the turn
+ * that types `ros = @(x) … x(1) … x(2) …` has no solver call to key
+ * off — the anon would be outlined with an f64 `x` and its
+ * `matlab.subscript` reads would survive untranslatable.
+ *
+ * Heuristic: if a `make_anon` block argument is itself used as the base
+ * of a `matlab.subscript` (directly, or through the prologue
+ * store→slot→load it is spilled into), the parameter is being indexed
+ * — it is array-shaped — so retype it to ptr.  This fixes the ABI at
+ * the *definition* site, independent of any call site, so the handle
+ * stored in the workspace already has the `double(*)(matlab_mat*)`
+ * shape the solver expects on a later turn. */
+static bool retypeAnonsBySubscriptedParam(ModuleOp M) {
+  bool Changed = false;
+  SmallVector<Operation *> Anons;
+  M.walk([&](Operation *Op) {
+    if (isMatlabOp(Op, "matlab.make_anon")) Anons.push_back(Op);
+  });
+  auto F64 = Float64Type::get(M.getContext());
+  for (Operation *Anon : Anons) {
+    if (Anon->getNumRegions() != 1) continue;
+    Region &Body = Anon->getRegion(0);
+    if (!Body.hasOneBlock()) continue;
+    Block &Entry = Body.front();
+    for (unsigned ai = 0; ai < Entry.getNumArguments(); ++ai) {
+      BlockArgument Arg = Entry.getArgument(ai);
+      if (Arg.getType() != F64) continue;
+      /* Does this arg feed a matlab.subscript as its base value?  Check
+       * both the direct use and the spilled-slot load chain. */
+      bool Subscripted = false;
+      auto feedsSubscript = [&](Value V) {
+        for (Operation *U : V.getUsers())
+          if (isMatlabOp(U, "matlab.subscript") && U->getNumOperands() >= 1 &&
+              U->getOperand(0) == V)
+            return true;
+        return false;
+      };
+      if (feedsSubscript(Arg)) {
+        Subscripted = true;
+      } else {
+        for (Operation *U : Arg.getUsers()) {
+          if (!isMatlabOp(U, "matlab.store") || U->getNumOperands() != 2)
+            continue;
+          if (U->getOperand(0) != Arg) continue;
+          for (Operation *SU : U->getOperand(1).getUsers())
+            if (isMatlabOp(SU, "matlab.load") && SU->getNumResults() == 1 &&
+                feedsSubscript(SU->getResult(0)))
+              Subscripted = true;
+        }
+      }
+      if (Subscripted)
+        Changed |= retypeMakeAnonArg(Anon, ai);
+    }
+  }
+  return Changed;
+}
+
+/* Pre-pass for the Optimization-Toolbox solvers whose objective /
+ * constraint / model handles take a vector argument.  Sema types
+ * anonymous-function block args as f64 by default; retype the relevant
+ * ones to ptr so the outlined function takes a matrix and the body's
+ * `x(i)` subscripts lower against a ptr base.  Mirrors
+ * retypeAnonsForVectorODE.  Per solver:
+ *   fminsearch / fminunc / lsqnonlin — handle is operand 0, retype arg 0
+ *   fmincon  — objective operand 0 (arg 0); 9-arg form also has the
+ *              nonlcon handle at operand 8 (arg 0)
+ *   lsqcurvefit — model handle fun(params, xdata): operand 0, args 0 & 1
+ *   fsolve   — operand 0; only the N-D form (vector x0 at operand 1)
+ *              has a vector argument, the scalar form keeps f64        */
+static bool retypeAnonsForVectorObjective(ModuleOp M) {
+  auto PtrTy = LLVM::LLVMPointerType::get(M.getContext());
+  bool Changed = false;
+  SmallVector<Operation *> Calls;
+  M.walk([&](Operation *Op) {
+    if (isMatlabOp(Op, "matlab.call_builtin")) Calls.push_back(Op);
+  });
+  for (Operation *Call : Calls) {
+    auto Cn = Call->getAttrOfType<StringAttr>("callee");
+    if (!Cn) continue;
+    StringRef Name = Cn.getValue();
+    unsigned nops = Call->getNumOperands();
+    if ((Name == "fminsearch" || Name == "fminunc" || Name == "lsqnonlin" ||
+         Name == "fminimax" || Name == "fgoalattain") &&
+        nops >= 1) {
+      /* Single vector-argument objective / vector-residual handle. */
+      Changed |= retypeAnonArg(Call->getOperand(0), 0);
+    } else if (Name == "fseminf" && nops >= 3) {
+      /* fseminf(@fun, x0, @seminfcon, ...): `fun` is a vector
+       * objective (operand 0, arg 0); `seminfcon` is the per-point
+       * handle fcon(x, w) at operand 2 — only its first arg `x` is a
+       * vector, `w` stays a scalar, exactly like lsqcurvefit's model. */
+      Changed |= retypeAnonArg(Call->getOperand(0), 0);
+      Changed |= retypeAnonArg(Call->getOperand(2), 0);
+    } else if (Name == "lsqcurvefit" && nops >= 1) {
+      /* Model handle fun(params, t): only `params` is a vector — it is
+       * indexed in the body, so retyping is safe.  `t` is passed as a
+       * scalar (the model is evaluated per data point), so it stays
+       * f64 and element-wise model expressions lower cleanly. */
+      Changed |= retypeAnonArg(Call->getOperand(0), 0);
+    } else if (Name == "fmincon" && nops >= 1) {
+      Changed |= retypeAnonArg(Call->getOperand(0), 0);
+      if (nops == 9)
+        Changed |= retypeAnonArg(Call->getOperand(8), 0);
+    } else if (Name == "fsolve" && nops == 2) {
+      Type X0Ty = Call->getOperand(1).getType();
+      bool x0Vector = mlir::isa<RankedTensorType>(X0Ty) ||
+                      mlir::isa<UnrankedTensorType>(X0Ty) ||
+                      X0Ty == PtrTy;
+      if (x0Vector) Changed |= retypeAnonArg(Call->getOperand(0), 0);
+    }
+  }
+  return Changed;
+}
+
+bool runLowerAnonCalls(ModuleOp M, bool ReplMode) {
   /* User-function handles (`f = @sq; f(3)`) — rewrite to direct
    * matlab.call so the LowerUserCalls fixpoint refines sq's signature
    * the same way it handles a syntactic sq(3). Must run before the
@@ -629,6 +813,15 @@ bool runLowerAnonCalls(ModuleOp M) {
 
   /* Vector-y ode45/ode23: retype anon `y` block args before outlining. */
   Changed |= retypeAnonsForVectorODE(M);
+
+  /* Vector-objective fminsearch/fminunc: retype anon `x` block arg. */
+  Changed |= retypeAnonsForVectorObjective(M);
+
+  /* REPL only: an anon defined on one line and used as a solver
+   * objective on a later line has no in-module call site to trace, so
+   * retype any subscripted parameter to ptr at the definition site. */
+  if (ReplMode)
+    Changed |= retypeAnonsBySubscriptedParam(M);
 
   /* make_handle first so @sin-style handles resolve to addressof before the
    * anon outliner inspects call_indirect sites. */

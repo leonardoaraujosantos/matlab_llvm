@@ -787,7 +787,7 @@ bool Lowerer::exprIsSym(const Expr *X) const {
       llvm::StringRef Nm = CN->Name;
       static const llvm::StringSet<> Producers = {
           "sym", "syms", "str2sym", "simplify", "expand", "factor",
-          "subs", "solve", "vpa", "taylor", "limit",
+          "subs", "vpa", "taylor", "limit",
           "dsolve", "pdsolve", "pdsolve_heat", "pdsolve_wave",
           "laplace", "ilaplace", "fourier", "ifourier",
           "ztrans", "iztrans",
@@ -797,6 +797,23 @@ bool Lowerer::exprIsSym(const Expr *X) const {
           /* Phase 6.1 — symmat reductions returning sym scalars. */
           "sym_det", "sym_trace"};
       if (Producers.contains(Nm)) return true;
+      /* `solve` is overloaded: SymPP's symbolic `solve` *and* the
+       * Optimization Toolbox problem-based `solve(prob)`. The latter
+       * returns a plain numeric solution vector (matlab_mat*), not a
+       * sym — so only treat `solve` as a sym producer when its first
+       * argument is NOT pinned to a problem-based classdef. Without
+       * this the REPL tags `sol = solve(prob)` as sym, stores it via
+       * matlab_ws_set_sym, and the next turn's `sol(1)` reads garbage. */
+      if (Nm == "solve") {
+        if (!CX->Args.empty()) {
+          if (auto *AN = dynamic_cast<const NameExpr *>(CX->Args[0]))
+            if (AN->Ref && AN->Ref->PinnedClass &&
+                (AN->Ref->PinnedClass->Name == "OptimizationProblem" ||
+                 AN->Ref->PinnedClass->Name == "EquationProblem"))
+              return false;
+        }
+        return true;
+      }
       /* Type-overloaded sym builtins — sym only when first arg is sym.
        * Covers diff/int/sin/cos/exp/log/sqrt/abs and the rest of the
        * elementary functions; when the first arg is sym, the result is
@@ -1037,9 +1054,19 @@ mlir::Value Lowerer::resolveStructBase(const Expr *E, mlir::Location L) {
      * (or a workspace-load placed at function-entry, before the
      * assign hit the workspace) and shadow the real value.  Read
      * directly from the workspace at the read site so we always see
-     * the latest store. */
+     * the latest store.
+     *
+     * The same applies to a class-pinned binding (PinnedClass set):
+     * a classdef instance restored across REPL turns lives in the
+     * workspace as a kind=2 matlab_obj*, and matlab_obj shares the
+     * leading struct layout — so `prob.Constraints.c1 = ...` must walk
+     * the child struct of the *workspace* object, not a throwaway
+     * matlab_struct_new local slot.  Without this branch the nested
+     * field write lands on a local struct that's discarded at end of
+     * turn and `solve(prob)` sees an objective-only / empty problem. */
     if (ReplMode && InScriptBody && N->Ref->Kind == BindingKind::Var &&
-        (N->Ref->IsStruct || StructBindings.count(N->Ref))) {
+        (N->Ref->IsStruct || StructBindings.count(N->Ref) ||
+         N->Ref->PinnedClass != nullptr)) {
       auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
       mlir::Value NameV = emitFieldNameChar(N->Name, L);
       mlir::NamedAttribute Cal(
@@ -3337,8 +3364,16 @@ void Lowerer::lowerLValueStore(const Expr &LHS, mlir::Value Rhs) {
        * pointer is a matlab_obj* (class instance) rather than a
        * matlab_mat*. Route to matlab_ws_set_obj so the workspace
        * tracks kind=2; the DAP server uses that to render the
-       * variable as `1x1 ClassName` and to expose its properties. */
-      bool IsObj = N.Ref->PinnedClass != nullptr && IsMat;
+       * variable as `1x1 ClassName` and to expose its properties.
+       *
+       * The IsMat guard is intentionally NOT required: when the RHS
+       * is a call to a user-defined factory (e.g. the problem-based
+       * `optimvar()` / `optimproblem()` prelude functions) the call
+       * result is still `none`-typed at this point — the user-call
+       * lowering pass refines it to `!llvm.ptr` later. PinnedClass
+       * being set is itself the authoritative signal that the value
+       * is a class instance, so route on that alone. */
+      bool IsObj = N.Ref->PinnedClass != nullptr;
       /* Strings are LLVM pointer-typed too (matlab_string*), so an
        * unguarded IsMat check would route them to matlab_ws_set_mat
        * — which then aliases matlab_string::data into matlab_mat::data
@@ -3935,7 +3970,12 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
           llvm::StringRef OCN = Owner->Name;
           bool BoxScalars = (OCN == "tf" || OCN == "ss" ||
                               OCN == "zpk" || OCN == "pid" ||
-                              OCN == "frd");
+                              OCN == "frd" ||
+                              /* Optimization Toolbox problem-based
+                               * expressions: `2*x` / `x + 3` box the
+                               * scalar into a constant-node
+                               * OptimizationExpression(c). */
+                              OCN == "OptimizationExpression");
           if (BoxScalars) {
             auto PtrTyW = mlir::LLVM::LLVMPointerType::get(&MCtx);
             auto wrapIfScalar = [&](mlir::Value V, const Expr *Op) -> mlir::Value {
@@ -5708,7 +5748,15 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             mlir::NamedAttribute Cal(
                 mlir::StringAttr::get(&MCtx, "callee"),
                 mlir::StringAttr::get(&MCtx, Callee));
-            return emitUnreg("matlab.call", Args, RT, L, {Cal});
+            return emitUnreg("matlab.call", Args,
+                /* A matrix / array return flows as !llvm.ptr in the
+                 * runtime ABI — coerce so the receiving slot retypes
+                 * and downstream indexing lowers. */
+                (mlir::isa<mlir::RankedTensorType,
+                           mlir::UnrankedTensorType>(RT)
+                     ? (mlir::Type)mlir::LLVM::LLVMPointerType::get(&MCtx)
+                     : RT),
+                L, {Cal});
           }
         }
         /* Static method dispatch: `ClassName.method(args)` — the Base
@@ -5727,7 +5775,15 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
               mlir::NamedAttribute Cal(
                   mlir::StringAttr::get(&MCtx, "callee"),
                   mlir::StringAttr::get(&MCtx, Callee));
-              return emitUnreg("matlab.call", Args, RT, L, {Cal});
+              return emitUnreg("matlab.call", Args,
+                /* A matrix / array return flows as !llvm.ptr in the
+                 * runtime ABI — coerce so the receiving slot retypes
+                 * and downstream indexing lowers. */
+                (mlir::isa<mlir::RankedTensorType,
+                           mlir::UnrankedTensorType>(RT)
+                     ? (mlir::Type)mlir::LLVM::LLVMPointerType::get(&MCtx)
+                     : RT),
+                L, {Cal});
             }
           }
         }
@@ -5748,7 +5804,15 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
               mlir::NamedAttribute Cal(
                   mlir::StringAttr::get(&MCtx, "callee"),
                   mlir::StringAttr::get(&MCtx, Callee));
-              return emitUnreg("matlab.call", Args, RT, L, {Cal});
+              return emitUnreg("matlab.call", Args,
+                /* A matrix / array return flows as !llvm.ptr in the
+                 * runtime ABI — coerce so the receiving slot retypes
+                 * and downstream indexing lowers. */
+                (mlir::isa<mlir::RankedTensorType,
+                           mlir::UnrankedTensorType>(RT)
+                     ? (mlir::Type)mlir::LLVM::LLVMPointerType::get(&MCtx)
+                     : RT),
+                L, {Cal});
             }
           }
         }
@@ -6049,6 +6113,13 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
                   Method->OutputRefs.front() &&
                   Method->OutputRefs.front()->PinnedClass != nullptr;
               if (ReturnsClass) {
+                ResTy = (mlir::Type)PtrTyCM;
+              } else if (mlir::isa<mlir::RankedTensorType,
+                                   mlir::UnrankedTensorType>(RT)) {
+                /* A matrix / array return — the runtime ABI carries
+                 * matrices as !llvm.ptr (matlab_mat* descriptors), so
+                 * the call result must flow as ptr for the receiving
+                 * slot to retype and downstream indexing to lower. */
                 ResTy = (mlir::Type)PtrTyCM;
               } else if (mlir::isa<mlir::NoneType>(RT)) {
                 ResTy = (mlir::Type)mlir::NoneType::get(&MCtx);

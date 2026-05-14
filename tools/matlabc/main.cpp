@@ -569,7 +569,7 @@ int runReplInput(mlirgen::Context &MCtx, const std::string &Src, int Id,
   mlirgen::runRefineFuncSigs(M);
   mlirgen::runOutlineParfor(M);
   mlirgen::runLowerSeqLoops(M);
-  mlirgen::runLowerAnonCalls(M);
+  mlirgen::runLowerAnonCalls(M, /*ReplMode=*/true);
   for (int Iter = 0; Iter < 8; ++Iter) {
     bool A = mlirgen::runLowerScalarsToArith(M);
     bool B = mlirgen::runLowerUserCalls(M);
@@ -582,6 +582,87 @@ int runReplInput(mlirgen::Context &MCtx, const std::string &Src, int Id,
     if (!A && !B) break;
   }
   mlirgen::runLowerTensorOps(M);
+  // Second-chance anon call rewrite — same step the static -emit-*
+  // pipeline runs. A matlab.call_indirect that survived the first
+  // LowerAnonCalls because its matrix operands were still tensor-typed
+  // can now match the outlined function's (ptr, ...) signature after
+  // LowerTensorOps retyped the slots. This is what lowers a vector
+  // objective anon like `@(x) x(1)*x(1) + x(2)*x(2)` passed to
+  // fminunc / fminsearch / lsqnonlin: retypeAnonsForVectorObjective
+  // flips the anon's `x` arg f64 -> ptr, and the post-pass then lowers
+  // the `matlab.subscript` reads of `x(1)` / `x(2)` against the ptr.
+  // Without it those subscripts survive untranslatable into the JIT.
+  if (mlirgen::runLowerAnonCallsPost(M)) {
+    mlirgen::runLowerTensorOps(M);
+    for (int Iter = 0; Iter < 4; ++Iter) {
+      bool A = mlirgen::runLowerScalarsToArith(M);
+      bool B = mlirgen::runLowerUserCalls(M);
+      if (!A && !B) break;
+    }
+    mlirgen::runLowerTensorOps(M);
+  }
+  // Multi-callsite monomorphisation — same step the static -emit-*
+  // pipeline runs (see the `runMonomorphiseUserCalls` block there).
+  // A user function called at more than one arity (or with mixed
+  // scalar / matrix args) is cloned per concrete signature so each
+  // specialisation retypes independently. The problem-based prelude
+  // hits this hard: `OptimizationExpression(a, b)` is an nargin-
+  // dispatched constructor invoked both 1-arg (scalar boxing of a
+  // numeric literal — `2*y`) and 2-arg (wrapping a runtime node id).
+  // Without the monomorphiser the 1-arg call site keeps a
+  // `(f64) -> !llvm.ptr` shape that never matches the 2-arg
+  // `func.func` and survives as an untranslatable `matlab.call`.
+  if (mlirgen::runMonomorphiseUserCalls(M)) {
+    for (int Iter = 0; Iter < 4; ++Iter) {
+      bool A = mlirgen::runLowerScalarsToArith(M);
+      bool B = mlirgen::runLowerUserCalls(M);
+      if (!A && !B) break;
+    }
+    mlirgen::runLowerTensorOps(M);
+    // Refresh each func.func's signature from the types that now flow
+    // through its func.return — LowerTensorOps rewrote clone bodies
+    // but not their enclosing signatures.
+    M.walk([&](mlir::func::FuncOp Fn) {
+      if (Fn.empty()) return;
+      llvm::SmallVector<mlir::Type, 4> NewResults(
+          Fn.getFunctionType().getResults().begin(),
+          Fn.getFunctionType().getResults().end());
+      bool Changed = false;
+      Fn.walk([&](mlir::func::ReturnOp Ret) {
+        if (Ret.getNumOperands() != NewResults.size()) return;
+        for (unsigned i = 0; i < Ret.getNumOperands(); ++i) {
+          auto Old = NewResults[i];
+          auto New = Ret.getOperand(i).getType();
+          if (mlir::isa<mlir::NoneType>(Old) && Old != New) {
+            NewResults[i] = New;
+            Changed = true;
+          }
+        }
+      });
+      if (Changed)
+        Fn.setFunctionType(mlir::FunctionType::get(
+            Fn.getContext(), Fn.getFunctionType().getInputs(), NewResults));
+    });
+    // Stale func.call result types need patching to match.
+    M.walk([&](mlir::func::CallOp Call) {
+      auto Tgt = M.lookupSymbol<mlir::func::FuncOp>(Call.getCallee());
+      if (!Tgt) return;
+      auto SigR = Tgt.getFunctionType().getResults();
+      if (Call.getNumResults() != SigR.size()) return;
+      bool Mismatch = false;
+      for (unsigned i = 0; i < SigR.size(); ++i)
+        if (Call.getResult(i).getType() != SigR[i]) { Mismatch = true; break; }
+      if (!Mismatch) return;
+      mlir::OpBuilder CB(Call);
+      auto Nc = mlir::func::CallOp::create(CB, Call.getLoc(), SigR,
+                                            Call.getCallee(),
+                                            Call.getOperands());
+      for (unsigned i = 0; i < SigR.size(); ++i)
+        Call.getResult(i).replaceAllUsesWith(Nc.getResult(i));
+      Call.erase();
+    });
+    mlirgen::runLowerTensorOps(M);
+  }
   // Second LowerFixedPoint sweep — picks up matlab.call_builtin
   // @matlab_mat_*_slice1 / _concat_row sites that needed their tensor
   // operand retyped to ptr by LowerTensorOps first.
@@ -594,6 +675,18 @@ int runReplInput(mlirgen::Context &MCtx, const std::string &Src, int Id,
   // the func-to-llvm conversion sees consistent types. Same as the
   // static -emit-* pipeline.
   mlirgen::runRefineFuncSigs(M);
+  // One more LowerTensorOps sweep: RefineFuncSigs just restamped
+  // call-site result types — in particular a `x = optimvar()` /
+  // `prob = optimproblem()` whose user-defined prelude factory only
+  // had its `-> !llvm.ptr` return type settled here. The REPL's
+  // `matlab.call_builtin @matlab_ws_set_obj` workspace store is
+  // "ptr-sticky": LowerTensorOps deliberately waits until the stored
+  // value is concretely ptr-typed before lowering it. Without this
+  // final sweep that store (and its `matlab.const_char` variable
+  // name) survives into the func-to-llvm conversion and the JIT
+  // rejects the module. The static -emit-* pipeline never hits this
+  // because file-mode top-level vars use local slots, not ws_set_*.
+  mlirgen::runLowerTensorOps(M);
 #ifdef MATLAB_LLVM_WITH_PLOT
   mlirgen::runLowerPlot(M);
 #endif
@@ -693,6 +786,17 @@ int runReplInput(mlirgen::Context &MCtx, const std::string &Src, int Id,
   using Thunk = int (*)(void);
   auto Fn = reinterpret_cast<Thunk>(*FnOrErr);
   (void)Fn();
+  /* Keep this turn's ExecutionEngine alive for the rest of the REPL
+   * session.  A turn that does `f = @(x) ...` stores a function
+   * pointer into *this* turn's JIT'd code in the workspace; a later
+   * turn (`fminunc(f, ...)`) calls back through it.  If the engine
+   * were destroyed at end of turn that code memory would be freed and
+   * the cross-turn call would jump into reclaimed memory.  The MLIR
+   * context outlives all turns (runRepl owns it), so parking the
+   * engines in a session-lifetime vector is sufficient.  Memory grows
+   * per turn, which is acceptable for an interactive session. */
+  static std::vector<std::unique_ptr<mlir::ExecutionEngine>> g_ReplEngines;
+  g_ReplEngines.push_back(std::move(Engine));
   return 0;
 }
 
@@ -1536,6 +1640,18 @@ static std::string buildReplPrelude(const std::string &Src) {
     if (c == '%') InComment = true;
     if (!InComment) Stripped.push_back(c);
   }
+  /* A comment-only / blank turn references nothing, so it never needs
+   * a classdef prelude.  Bail early: appending the prelude to such a
+   * turn would make `classdef` the first non-comment token, which
+   * flips the parser into single-classdef-file mode and trips
+   * "stray tokens after classdef" on the second classdef in a
+   * multi-class umbrella file (optim_classdefs.m has three). */
+  {
+    bool AnyCode = false;
+    for (char c : Stripped)
+      if (!std::isspace((unsigned char)c)) { AnyCode = true; break; }
+    if (!AnyCode) return std::string();
+  }
   auto wordHit = [&](const char *Name, char Follow1, char Follow2) -> bool {
     size_t NL = std::strlen(Name);
     size_t P = 0;
@@ -1573,7 +1689,14 @@ static std::string buildReplPrelude(const std::string &Src) {
     };
     for (auto &C : Cands) {
       std::ifstream Fp(C);
-      if (Fp) { Files.push_back(C); return; }
+      if (Fp) {
+        /* Dedup — several Want entries can map to the same umbrella
+         * prelude file (e.g. optimvar / optimproblem / Optimization*
+         * all live in optim_classdefs.m). */
+        for (auto &F : Files) if (F == C) return;
+        Files.push_back(C);
+        return;
+      }
     }
   };
   /* Per-class wants — each class's prelude file is pulled in only
@@ -1640,6 +1763,15 @@ static std::string buildReplPrelude(const std::string &Src) {
     {false, "TxSite", "rf_class_txsite.m"},
     {false, "RxSite", "rf_class_rxsite.m"},
     {false, "PropagationModel", "rf_class_propagationmodel.m"},
+    /* Optimization Toolbox problem-based API (Tier-4).  The umbrella
+     * `optim_classdefs.m` holds the OptimizationExpression /
+     * OptimizationProblem classdefs plus the `optimvar` /
+     * `optimproblem` factory functions; any mention pulls it in (the
+     * `add` helper dedups the repeated file). */
+    {false, "optimvar",               "optim_classdefs.m"},
+    {false, "optimproblem",           "optim_classdefs.m"},
+    {false, "OptimizationExpression", "optim_classdefs.m"},
+    {false, "OptimizationProblem",    "optim_classdefs.m"},
   };
   /* Source-mention scan: turn-0-style detection. */
   for (auto &W : Cls) if (mentions(W.Name)) W.active = true;
@@ -2819,7 +2951,7 @@ bool compileProgram() {
   mlirgen::runRefineFuncSigs(M);
   mlirgen::runOutlineParfor(M);
   mlirgen::runLowerSeqLoops(M);
-  mlirgen::runLowerAnonCalls(M);
+  mlirgen::runLowerAnonCalls(M, /*ReplMode=*/true);
   for (int Iter = 0; Iter < 8; ++Iter) {
     bool A = mlirgen::runLowerScalarsToArith(M);
     bool B = mlirgen::runLowerUserCalls(M);
@@ -8537,6 +8669,12 @@ int main(int Argc, char **Argv) {
       "MagneticResults", "DCConductionResults",
       "TransientStructuralResults", "ModalStructuralResults",
       "FrequencyStructuralResults", "HarmonicEMResults",
+      /* Optimization Toolbox problem-based API — umbrella file
+       * `optim_classdefs.m` (OptimizationExpression / Optimization
+       * Problem / EquationProblem classdefs + the optimvar /
+       * optimproblem / eqnproblem factories). */
+      "optimvar", "optimintvar", "optimproblem", "eqnproblem",
+      "OptimizationExpression", "OptimizationProblem", "EquationProblem",
     };
     for (const char *N : Names) {
       size_t NL = std::strlen(N);
@@ -8633,6 +8771,14 @@ int main(int Argc, char **Argv) {
         ClsName == "FrequencyStructuralResults" ||
         ClsName == "HarmonicEMResults")
       return "pde_classdefs.m";
+    /* Optimization Toolbox problem-based API — umbrella file shared
+     * by all detection names (deduped by PreludePaths below). */
+    if (ClsName == "optimvar" || ClsName == "optimintvar" ||
+        ClsName == "optimproblem" || ClsName == "eqnproblem" ||
+        ClsName == "OptimizationExpression" ||
+        ClsName == "OptimizationProblem" ||
+        ClsName == "EquationProblem")
+      return "optim_classdefs.m";
     return std::string();
   };
   for (const std::string &Cls : userMentionsExtClasses(Opts.InputPath)) {

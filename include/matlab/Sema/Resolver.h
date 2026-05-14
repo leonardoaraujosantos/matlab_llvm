@@ -79,6 +79,16 @@ private:
   void collectAssignmentsInStmt(Stmt &S, Scope *FnScope);
   void collectAssignmentsInExpr(Expr &E, Scope *FnScope); // for anon fn vars? no-op
 
+  // REPL cross-turn rehydration: when a binding is auto-declared for a
+  // name that a prior REPL input already stored in the live workspace,
+  // query WorkspaceKindHook / WorkspaceClassNameHook and stamp the
+  // binding's InferredType / IsSym / IsStruct / PinnedClass so this
+  // turn's dispatch sites see the value's real shape. Shared by the
+  // NameExpr read path and the compound-LHS-base path (`prob.X = ...`
+  // must re-pin `prob` to its classdef just like a bare `prob` read
+  // would). No-op when not in ReplMode or no hook is installed.
+  void applyWorkspaceKind(Binding *NB, std::string_view Name, Scope *S);
+
   // Resolution pass.
   void resolveFunction(Function &F, Scope *Parent);
   void resolveBlock(Block &B, Scope *S);

@@ -96,7 +96,10 @@ bool runLowerTensorOps(mlir::ModuleOp M);
 /// matlab.call_indirect through that handle into an llvm.call through a
 /// function pointer. v1 scope: scalar f64 params, no captures of outer
 /// values (anything more complex causes the pass to bail cleanly).
-bool runLowerAnonCalls(mlir::ModuleOp M);
+/// When ReplMode is set, also retypes any subscripted anon parameter to
+/// ptr at its definition site (the REPL has no in-module solver call
+/// site to trace a vector-objective handle back from).
+bool runLowerAnonCalls(mlir::ModuleOp M, bool ReplMode = false);
 
 /// Second-chance rewrite of matlab.call_indirect ops whose callee is an
 /// llvm.mlir.addressof of a previously-outlined llvm.func. Intended to run
