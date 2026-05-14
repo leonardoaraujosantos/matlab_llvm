@@ -439,6 +439,17 @@ add_test(
           $<TARGET_FILE:matlabc>
   WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Flowchart/SimulateDap
 )
+# mflowLink Tier-G smoke lane — emit + compile + run + diff. Each
+# example .mflow gets emitted to a standalone C++ file via
+# `-emit-mflowlink-cpp`, built with `runtime/build_mflowlink.sh`,
+# and its CSV output is diffed byte-for-byte against the in-process
+# `matlabc -simulate` interpreter on the same input.
+add_test(
+  NAME flowchart-emit-mflowlink-cpp-tests
+  COMMAND ${CMAKE_SOURCE_DIR}/test/Flowchart/EmitMflowLinkCpp/run_tests.sh
+          $<TARGET_FILE:matlabc>
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Flowchart/EmitMflowLinkCpp
+)
 # Opt-in Verilog-A lint lane (Tier-10 of docs/verilog_a_plan.md).
 # Compiles + runs every example under examples/verilog_a/ to emit
 # its .va, then pipes the result into scripts/va_lint.sh

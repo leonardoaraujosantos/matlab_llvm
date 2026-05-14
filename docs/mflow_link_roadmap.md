@@ -513,12 +513,31 @@ IDE can step block-by-block through one major step.
 IDE's edge `breakpoint` schema field landed first). Conditional
 subsystems (Enabled / Triggered / Function-Call).
 
-### Tier G — Code-gen lane  *(§9)*
+### Tier G — Code-gen lane  *(§9)*  ✓ shipped
 
-`-emit-mflowlink-cpp` produces a standalone simulator binary. The
-`-emit-cpp` lane learns to embed `runtime_mflowlink` for a
-control-flow `.m` that calls into a `signal_flow` sub-`Flow`
-(cross-dialect composition).
+`matlabc -emit-mflowlink-cpp model.mflow` produces a self-contained
+C++ source file that embeds the .mflow JSON as a raw string literal,
+includes the matlab_llvm Flowchart headers, and has a `main()` which
+loads the embedded model through the existing `loadMflow` /
+`lowerSignalFlow` machinery, runs `MflowLinkSim::runToCompletion`,
+and dumps the logged-signal CSV to stdout. The user compiles it
+against the matlab_llvm Flowchart static libs via
+`runtime/build_mflowlink.sh` (or any equivalent C++17 command line)
+to produce a deployable simulator that does **not** need the
+original .mflow at runtime.
+
+The CTest lane `flowchart-emit-mflowlink-cpp-tests` round-trips every
+shipped example .mflow through emit → compile → run and diffs the
+output CSV byte-for-byte against `matlabc -simulate` on the same
+input — proof that the standalone codegen lane reproduces the
+in-process interpreter exactly.
+
+**Cross-dialect composition** — the `-emit-cpp` lane learning to
+embed `runtime_mflowlink` for a control-flow `.m` that calls into a
+`signal_flow` sub-`Flow` — is left to a follow-up PR. It needs a
+linker step that pulls `MflowLinkSim` into the regular MATLAB-program
+compile path, plus a call-site convention for the host MATLAB code
+to invoke a baked simulation.
 
 ### Tier H — Reserved-kind expansion
 
