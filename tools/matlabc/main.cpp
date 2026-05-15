@@ -5,6 +5,7 @@
 #include "matlab/Basic/SourceManager.h"
 #include "matlab/Flowchart/ASTToGraph.h"
 #include "matlab/Flowchart/GraphToAST.h"
+#include "matlab/Flowchart/SubsystemToMatlab.h"
 #include "matlab/Flowchart/Loader.h"
 #include "matlab/Flowchart/MflowLinkModel.h"
 #include "matlab/Flowchart/MflowLinkSim.h"
@@ -166,6 +167,14 @@ struct Options {
    * referenced from the script. Lets a `test_<mod>.m` driver compile
    * together with its `<mod>.m` definition without manual splicing. */
   std::vector<std::string> ExtraInputs;
+  /* Embedded Coder, Tier 1 — `--subsystem <name>` flag. When set with
+   * a `-emit-{c,cpp,python,typescript,...}` mode and a `.mflow` input,
+   * the driver runs `lowerSubsystemToMatlab` to synthesise a MATLAB
+   * `function` AST from the named flow and feeds it into the regular
+   * emit-* pipeline. See `docs/embedded_coder_roadmap.md` §7. Empty =
+   * no subsystem-emit; the input is processed as a normal MATLAB or
+   * `.mflow` source. */
+  std::string Subsystem;
   /* Block-library search path for `.mflow` custom blocks (Phase 4b).
    * Resolution order: command-line `--block-path DIR` entries (in CLI
    * order) followed by colon-separated entries from the
@@ -282,6 +291,15 @@ bool parseArgs(int Argc, char **Argv, Options &Opts, const char *&Prog) {
     else if (A == "-simulate") Opts.Mode = Options::Mode::Simulate;
     else if (A == "--dry-run" || A == "-dry-run") Opts.DryRun = true;
     else if (A == "--sim-dap" || A == "-sim-dap") Opts.SimulateDap = true;
+    else if (A.size() > 12 && A.substr(0, 12) == "--subsystem=")
+      Opts.Subsystem = std::string(A.substr(12));
+    else if (A == "--subsystem" || A == "-subsystem") {
+      if (++I >= Argc) {
+        std::cerr << "--subsystem requires an argument\n";
+        return false;
+      }
+      Opts.Subsystem = Argv[I];
+    }
     else if (A == "-opt" || A == "-O") Opts.Opt = true;
     else if (A == "-no-line" || A == "--no-line") Opts.NoLine = true;
     else if (A == "-line" || A == "--line") Opts.EmitLine = true;
@@ -9664,8 +9682,20 @@ int main(int Argc, char **Argv) {
         BO.MflowDirectory = Opts.InputPath.substr(0, LastSlash);
     }
     auto Doc = matlab::flowchart::loadMflow(SM, F, Diag);
-    if (Doc)
-      TU = matlab::flowchart::buildAST(*Doc, Ctx, SM, Diag, BO);
+    if (Doc) {
+      // Embedded Coder, Tier 1 — when the user supplies `--subsystem
+      // <name>` against a signal-flow .mflow, run the dedicated
+      // SubsystemToMatlab lowering instead of the control-flow
+      // buildAST. Produces a single-function TU + driver call for
+      // the downstream emit-* lanes (docs/embedded_coder_roadmap.md
+      // §3, §6).
+      if (!Opts.Subsystem.empty() && Doc->isSignalFlow()) {
+        TU = matlab::flowchart::buildSubsystemTU(*Doc, Opts.Subsystem,
+                                                  Ctx, Diag);
+      } else {
+        TU = matlab::flowchart::buildAST(*Doc, Ctx, SM, Diag, BO);
+      }
+    }
     if (Opts.Mode == Options::Mode::DumpTokens) {
       Diag.printAll();
       std::cerr << "warning: -dump-tokens does not apply to .mflow input\n";

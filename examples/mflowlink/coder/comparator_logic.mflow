@@ -1,0 +1,57 @@
+{
+  "schema": "matforge.flowchart",
+  "version": "0.1.0",
+  "entry": "comparator_logic",
+  "settings": {
+    "kind": "signal_flow"
+  },
+  "flows": [
+    {
+      "id": "flow_comparator_logic",
+      "kind": "function",
+      "name": "comparator_logic",
+      "signature": { "inputs": ["u1", "u2"], "outputs": ["y"] },
+      "nodes": [
+        { "id": "u1", "kind": "signal_inport",
+          "data": { "params": {} },
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+        { "id": "u2", "kind": "signal_inport",
+          "data": { "params": {} },
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+
+        { "id": "u1_gt_0", "kind": "signal_compare_to_zero",
+          "data": { "params": { "op": ">" } },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "u2_lt_5", "kind": "signal_compare_to_constant",
+          "data": { "params": { "op": "<", "constant": 5.0 } },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+
+        { "id": "both",   "kind": "signal_logical",
+          "data": { "params": { "op": "and" } },
+          "ports": { "in": [{"id": "in1"}, {"id": "in2"}],
+                     "out": [{"id": "out"}] } },
+
+        { "id": "y1",  "kind": "signal_outport",
+          "data": { "params": {} },
+          "ports": { "in": [{"id": "in"}], "out": [] } }
+      ],
+      "edges": [
+        { "id": "e1", "kind": "data",
+          "from": {"node": "u1",      "port": "out"},
+          "to":   {"node": "u1_gt_0", "port": "in"} },
+        { "id": "e2", "kind": "data",
+          "from": {"node": "u2",      "port": "out"},
+          "to":   {"node": "u2_lt_5", "port": "in"} },
+        { "id": "e3", "kind": "data",
+          "from": {"node": "u1_gt_0", "port": "out"},
+          "to":   {"node": "both",    "port": "in1"} },
+        { "id": "e4", "kind": "data",
+          "from": {"node": "u2_lt_5", "port": "out"},
+          "to":   {"node": "both",    "port": "in2"} },
+        { "id": "e5", "kind": "data",
+          "from": {"node": "both",    "port": "out"},
+          "to":   {"node": "y1",      "port": "in"} }
+      ]
+    }
+  ]
+}

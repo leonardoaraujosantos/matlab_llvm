@@ -153,6 +153,7 @@ add_library(MatlabFlowchart STATIC
   lib/Flowchart/GraphToAST.cpp
   lib/Flowchart/ASTToGraph.cpp
   lib/Flowchart/SignalFlowLowering.cpp
+  lib/Flowchart/SubsystemToMatlab.cpp
   lib/Flowchart/MflowLinkSim.cpp
 )
 target_link_libraries(MatlabFlowchart PUBLIC MatlabParse MatlabBasic)
@@ -460,6 +461,18 @@ add_test(
   COMMAND ${CMAKE_SOURCE_DIR}/test/Flowchart/EmitMflowLinkCpp/run_tests.sh
           $<TARGET_FILE:matlabc>
   WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Flowchart/EmitMflowLinkCpp
+)
+# Embedded Coder Tier-1 smoke lane — `matlabc -emit-python` /
+# `-emit-cpp` --subsystem <name>` against every fixture under
+# `examples/mflowlink/coder/`. The Python side imports the emitted
+# module and tests the subsystem entry against analytically-known
+# values; the C++ side compiles via clang++ + runs + diffs the
+# printf'd output. See `docs/embedded_coder_roadmap.md` Tier 1–2.
+add_test(
+  NAME flowchart-emit-subsystem-tests
+  COMMAND ${CMAKE_SOURCE_DIR}/test/Flowchart/EmitSubsystem/run_tests.sh
+          $<TARGET_FILE:matlabc>
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Flowchart/EmitSubsystem
 )
 # Opt-in Verilog-A lint lane (Tier-10 of docs/verilog_a_plan.md).
 # Compiles + runs every example under examples/verilog_a/ to emit

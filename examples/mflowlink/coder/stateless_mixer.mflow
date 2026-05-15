@@ -1,0 +1,65 @@
+{
+  "schema": "matforge.flowchart",
+  "version": "0.1.0",
+  "entry": "stateless_mixer",
+  "settings": {
+    "kind": "signal_flow"
+  },
+  "flows": [
+    {
+      "id": "flow_stateless_mixer",
+      "kind": "function",
+      "name": "stateless_mixer",
+      "signature": { "inputs": ["u1", "u2", "u3"], "outputs": ["y"] },
+      "nodes": [
+        { "id": "u1", "kind": "signal_inport",
+          "data": { "params": {} },
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+        { "id": "u2", "kind": "signal_inport",
+          "data": { "params": {} },
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+        { "id": "u3", "kind": "signal_inport",
+          "data": { "params": {} },
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+
+        { "id": "scale", "kind": "signal_gain",
+          "data": { "params": { "gain": 2.0 } },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+
+        { "id": "mix",   "kind": "signal_sum",
+          "data": { "params": { "signs": "++-" } },
+          "ports": { "in": [{"id": "in1"}, {"id": "in2"}, {"id": "in3"}],
+                     "out": [{"id": "out"}] } },
+
+        { "id": "clamp", "kind": "signal_saturation",
+          "data": { "params": { "lowerLimit": -1.0,
+                                "upperLimit":  1.0 } },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+
+        { "id": "y1",  "kind": "signal_outport",
+          "data": { "params": {} },
+          "ports": { "in": [{"id": "in"}], "out": [] } }
+      ],
+      "edges": [
+        { "id": "e1", "kind": "data",
+          "from": {"node": "u1",    "port": "out"},
+          "to":   {"node": "scale", "port": "in"} },
+        { "id": "e2", "kind": "data",
+          "from": {"node": "scale", "port": "out"},
+          "to":   {"node": "mix",   "port": "in1"} },
+        { "id": "e3", "kind": "data",
+          "from": {"node": "u2",    "port": "out"},
+          "to":   {"node": "mix",   "port": "in2"} },
+        { "id": "e4", "kind": "data",
+          "from": {"node": "u3",    "port": "out"},
+          "to":   {"node": "mix",   "port": "in3"} },
+        { "id": "e5", "kind": "data",
+          "from": {"node": "mix",   "port": "out"},
+          "to":   {"node": "clamp", "port": "in"} },
+        { "id": "e6", "kind": "data",
+          "from": {"node": "clamp", "port": "out"},
+          "to":   {"node": "y1",    "port": "in"} }
+      ]
+    }
+  ]
+}

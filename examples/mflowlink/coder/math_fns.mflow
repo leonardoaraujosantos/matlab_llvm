@@ -1,0 +1,49 @@
+{
+  "schema": "matforge.flowchart",
+  "version": "0.1.0",
+  "entry": "math_fns",
+  "settings": {
+    "kind": "signal_flow"
+  },
+  "flows": [
+    {
+      "id": "flow_math_fns",
+      "kind": "function",
+      "name": "math_fns",
+      "signature": { "inputs": ["u1"], "outputs": ["y_abs", "y_sin"] },
+      "nodes": [
+        { "id": "u1", "kind": "signal_inport",
+          "data": { "params": {} },
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+
+        { "id": "absu",  "kind": "signal_abs",
+          "data": { "params": {} },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "sinu",  "kind": "signal_trig_fcn",
+          "data": { "params": { "function": "sin" } },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+
+        { "id": "y_abs", "kind": "signal_outport",
+          "data": { "params": {} },
+          "ports": { "in": [{"id": "in"}], "out": [] } },
+        { "id": "y_sin", "kind": "signal_outport",
+          "data": { "params": {} },
+          "ports": { "in": [{"id": "in"}], "out": [] } }
+      ],
+      "edges": [
+        { "id": "e1", "kind": "data",
+          "from": {"node": "u1",   "port": "out"},
+          "to":   {"node": "absu", "port": "in"} },
+        { "id": "e2", "kind": "data",
+          "from": {"node": "u1",   "port": "out"},
+          "to":   {"node": "sinu", "port": "in"} },
+        { "id": "e3", "kind": "data",
+          "from": {"node": "absu", "port": "out"},
+          "to":   {"node": "y_abs","port": "in"} },
+        { "id": "e4", "kind": "data",
+          "from": {"node": "sinu", "port": "out"},
+          "to":   {"node": "y_sin","port": "in"} }
+      ]
+    }
+  ]
+}
