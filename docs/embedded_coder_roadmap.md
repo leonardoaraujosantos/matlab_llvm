@@ -257,14 +257,34 @@ Each tier ends with a working demo + a CTest lane.
   defers to Tier 6 — its per-tap history is a vector slot, not a
   single scalar.
 
-### Tier 4 — Continuous-block discretization  *(~3 days)*
+### Tier 4 — Continuous-block discretization  *(✓ partial 2026-05-15)*
 
-- Auto-discretize Integrator / Transfer Fcn / State-Space /
-  Zero-Pole at `--target-rate` for software targets.
-- Reuses the §17.5 #4 discretization machinery.
-- Demo: `continuous_lowpass.mflow` — 1/(s+1) plant subsystem →
-  C++ class; analytic step-response check against the continuous
-  reference.
+- `signal_integrator` (continuous `dx/dt = u`) auto-discretised to
+  Forward Euler at the chosen sample rate — same Lowering surface
+  as the Tier-3 stateful blocks, just gated on the resolved `Ts`.
+  Ts resolution order:
+    1. `--target-rate <Ts>` CLI flag
+    2. block's `data.sample_time` / `params.Ts`
+    3. `settings.solver.maxStep`
+    4. sourced error (no implicit default).
+- Loop-breaker rule: every stateful block (Tier 3 + 4) drops its
+  outgoing edges from the topo sort, and state reads get hoisted
+  to the top of the function body — matches the simulator's
+  "load Z_ first, then evalAll" tick shape and lets feedback paths
+  through integrators / delays resolve cleanly.
+- Per-block initial conditions (`params.initialCondition`) flow
+  into the class wrapper's default-init so a fresh object matches
+  the simulator's t=0 snapshot.
+- Demo: `examples/mflowlink/coder/continuous_lowpass.mflow` —
+  1/(s+1) plant realised as Integrator + Sum feedback. Class-form
+  smoke test drives a unit step for 5 s at Ts=0.05 and checks the
+  response stays within 1.5% of the analytic `1 - e^{-t}`.
+- Carve-outs (separable follow-up slice):
+  - `signal_transfer_fcn` / `signal_state_space` / `signal_zero_pole`
+    need bilinear (Tustin) or matrix-exponential discretization
+    — substantial linalg, separate slice.
+  - `signal_transport_delay` needs a circular-buffer state slot
+    (not a single scalar).
 
 ### Tier 5 — SystemVerilog emit  *(~1.5 weeks)*
 

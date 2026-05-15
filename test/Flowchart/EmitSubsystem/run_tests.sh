@@ -61,6 +61,12 @@ declare -a CASES=(
   # Step 2 (prev=1, iacc=0.10): err = 1, P = 1.2, I = 0.04, D = 0
   #   u = 1.24; iacc_next = 0.15; prev_next = 1.0
   'discrete_pid|1.0,0.0,0.0,0.0->5.0,0.05,1.0|1.0,0.0,0.05,1.0->1.22,0.10,1.0|1.0,0.0,0.10,1.0->1.24,0.15,1.0'
+  # Tier 4 — continuous integrator auto-discretised at Ts=0.05.
+  # continuous_lowpass(u, s_x) -> (y, s_x_next):
+  #   y = s_x;  s_x_next = s_x + Ts*(u - s_x) = s_x + 0.05*(u - s_x)
+  # At (u=1, s_x=0): y=0, next=0.05.  At (u=1, s_x=0.5): y=0.5,
+  # next=0.5 + 0.05*0.5 = 0.525.  At (u=0, s_x=1): y=1, next=0.95.
+  'continuous_lowpass|1.0,0.0->0.0,0.05|1.0,0.5->0.5,0.525|0.0,1.0->1.0,0.95'
 )
 
 check() {
@@ -219,6 +225,46 @@ PY
   fi
 }
 class_smoke discrete_pid DiscretePid
+
+# Tier 4 — continuous-block discretization smoke test. Drive the
+# auto-discretised 1/(s+1) lowpass with a step input for 5 seconds
+# at Ts=0.05 and check the response stays within Forward-Euler
+# error bounds of the analytic `1 - e^{-t}` ground truth.
+lp_smoke() {
+  local py="$SCRATCH/continuous_lowpass_cls.py"
+  "$MATLABC" -emit-python "$EX/continuous_lowpass.mflow" \
+      --subsystem continuous_lowpass --target-rate 0.05 \
+      > "$py" 2> "$SCRATCH/emit.err"
+  python3 - "$py" <<'PY'
+import importlib.util, math, sys
+py = sys.argv[1]
+spec = importlib.util.spec_from_file_location("cl", py)
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+plant = m.ContinuousLowpass()
+Ts = 0.05
+worst = 0.0
+# The integrator returns the CURRENT (pre-update) state, so call k
+# yields y[k] which corresponds to the analytic response at t = k·Ts
+# (the first call returns the initial-condition zero).
+for k in range(101):  # 0..5 s
+    y = plant.step(1.0)
+    t = k * Ts
+    ref = 1.0 - math.exp(-t)
+    err = abs(y - ref)
+    if err > worst: worst = err
+# Forward Euler error bound at Ts=0.05 stays below 1.5% over [0, 5].
+if worst > 0.015:
+    print(f"  continuous_lowpass: worst-case error {worst:.6f} > 0.015",
+          file=sys.stderr)
+    sys.exit(1)
+PY
+  if [[ $? -ne 0 ]]; then
+    fail=$((fail+1)); fails+=("continuous_lowpass (class smoke)")
+  else
+    pass=$((pass+1))
+  fi
+}
+lp_smoke
 
 echo "----"
 echo "passed: $pass    failed: $fail"

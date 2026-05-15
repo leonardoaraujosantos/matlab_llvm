@@ -183,6 +183,13 @@ struct Options {
    * `[y, s_next] = step(u, s)` form alone.  SystemVerilog ignores
    * this flag (state lives in registers natively). */
   std::string StateForm = "class";
+  /* Embedded Coder, Tier 4 — `--target-rate <Ts>` flag.  Sample
+   * period (seconds) at which any continuous block in the chosen
+   * subsystem gets auto-discretised (Forward Euler today; see
+   * docs/embedded_coder_roadmap.md Tier 4).  When 0.0, the lowering
+   * falls back to the block's `data.sample_time` / `params.Ts` /
+   * `settings.solver.maxStep`, in that order. */
+  double TargetRate = 0.0;
   /* Block-library search path for `.mflow` custom blocks (Phase 4b).
    * Resolution order: command-line `--block-path DIR` entries (in CLI
    * order) followed by colon-separated entries from the
@@ -310,6 +317,24 @@ bool parseArgs(int Argc, char **Argv, Options &Opts, const char *&Prog) {
     }
     else if (A.size() > 13 && A.substr(0, 13) == "--state-form=")
       Opts.StateForm = std::string(A.substr(13));
+    else if (A.size() > 14 && A.substr(0, 14) == "--target-rate=") {
+      try { Opts.TargetRate = std::stod(std::string(A.substr(14))); }
+      catch (...) {
+        std::cerr << "--target-rate must be a positive number\n";
+        return false;
+      }
+    }
+    else if (A == "--target-rate" || A == "-target-rate") {
+      if (++I >= Argc) {
+        std::cerr << "--target-rate requires an argument\n";
+        return false;
+      }
+      try { Opts.TargetRate = std::stod(Argv[I]); }
+      catch (...) {
+        std::cerr << "--target-rate must be a positive number\n";
+        return false;
+      }
+    }
     else if (A == "-opt" || A == "-O") Opts.Opt = true;
     else if (A == "-no-line" || A == "--no-line") Opts.NoLine = true;
     else if (A == "-line" || A == "--line") Opts.EmitLine = true;
@@ -9700,8 +9725,10 @@ int main(int Argc, char **Argv) {
       // the downstream emit-* lanes (docs/embedded_coder_roadmap.md
       // §3, §6).
       if (!Opts.Subsystem.empty() && Doc->isSignalFlow()) {
+        matlab::flowchart::SubsystemEmitOptions SO;
+        SO.TargetRate = Opts.TargetRate;
         TU = matlab::flowchart::buildSubsystemTU(*Doc, Opts.Subsystem,
-                                                  Ctx, Diag);
+                                                  Ctx, Diag, SO);
       } else {
         TU = matlab::flowchart::buildAST(*Doc, Ctx, SM, Diag, BO);
       }

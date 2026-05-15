@@ -1,0 +1,55 @@
+{
+  "schema": "matforge.flowchart",
+  "version": "0.1.0",
+  "entry": "continuous_lowpass",
+  "settings": {
+    "kind": "signal_flow",
+    "solver": {
+      "type": "fixed_step",
+      "algorithm": "ode4",
+      "startTime": 0.0,
+      "stopTime": 5.0,
+      "maxStep": "0.05"
+    }
+  },
+  "flows": [
+    {
+      "id": "flow_continuous_lowpass",
+      "kind": "function",
+      "name": "continuous_lowpass",
+      "signature": { "inputs": ["u"], "outputs": ["y"] },
+      "nodes": [
+        { "id": "u1", "kind": "signal_inport",
+          "data": { "params": {} },
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+
+        { "id": "err", "kind": "signal_sum",
+          "data": { "params": { "signs": "+-" } },
+          "ports": { "in": [{"id": "in1"}, {"id": "in2"}],
+                     "out": [{"id": "out"}] } },
+
+        { "id": "x", "kind": "signal_integrator",
+          "data": { "params": { "initialCondition": 0.0 } },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+
+        { "id": "y1", "kind": "signal_outport",
+          "data": { "params": {} },
+          "ports": { "in": [{"id": "in"}], "out": [] } }
+      ],
+      "edges": [
+        { "id": "e1", "kind": "data",
+          "from": {"node": "u1",  "port": "out"},
+          "to":   {"node": "err", "port": "in1"} },
+        { "id": "e2", "kind": "data",
+          "from": {"node": "x",   "port": "out"},
+          "to":   {"node": "err", "port": "in2"} },
+        { "id": "e3", "kind": "data",
+          "from": {"node": "err", "port": "out"},
+          "to":   {"node": "x",   "port": "in"} },
+        { "id": "e4", "kind": "data",
+          "from": {"node": "x",   "port": "out"},
+          "to":   {"node": "y1",  "port": "in"} }
+      ]
+    }
+  ]
+}

@@ -73,6 +73,10 @@ const std::set<std::string> &tier1Kinds() {
       // naming convention.
       "signal_unit_delay", "signal_zoh",
       "signal_discrete_integrator",
+      // Tier 4 — continuous-time integrator, auto-discretised at
+      // the subsystem's `Ts` (CLI --target-rate / block sample_time
+      // / settings.solver.maxStep).
+      "signal_integrator",
       // Routing-only — emit nothing, but pass through the variable
       // name from the source.
       "signal_inport",   "signal_outport",
@@ -95,10 +99,34 @@ bool isSinkKind(const std::string &K) {
 // `s_<id>_next` (state for the next tick). The state read happens
 // at the start of the block's evaluation; the state-update lands
 // in the next-state output.
+//
+// Tier 4 promotes `signal_integrator` (continuous-time `dx/dt = u`)
+// into the stateful set: it gets auto-discretised to Forward Euler
+// (or Backward Euler / Trapezoidal — see SubsystemEmitOptions) at
+// the subsystem's chosen `Ts`. The lowering reports a sourced error
+// if no rate can be resolved.
 bool isStatefulKind(const std::string &K) {
   return K == "signal_unit_delay" ||
          K == "signal_zoh" ||
-         K == "signal_discrete_integrator";
+         K == "signal_discrete_integrator" ||
+         K == "signal_integrator";
+}
+
+// Tier 4 — initial-condition param lookup per stateful kind.
+// signal_integrator / signal_discrete_integrator carry an
+// `initialCondition` (alt-spelling `initial_condition`). Unit Delay
+// uses `initialCondition` too; ZOH uses `initialOutput`. Default 0.0.
+double initialStateOf(const Node &N) {
+  auto get = [&](const char *Key) -> const std::string * {
+    auto It = N.Params.find(Key);
+    return It == N.Params.end() ? nullptr : &It->second;
+  };
+  const std::string *S = get("initialCondition");
+  if (!S) S = get("initial_condition");
+  if (!S) S = get("initialOutput");
+  if (!S) S = get("initial_value");
+  if (!S) return 0.0;
+  try { return std::stod(*S); } catch (...) { return 0.0; }
 }
 
 //===-----------------------------------------------------------------===//
@@ -146,9 +174,24 @@ toposortInternals(const Flow &F, DiagnosticEngine &Diag,
   std::unordered_set<std::string> InternalSet;
   for (auto *N : Internal) InternalSet.insert(N->Id);
 
+  // Loop-breaker rule: stateful blocks (Tier 3 + Tier 4 stateful set)
+  // emit their CURRENT state as the output — that doesn't depend on
+  // the in-this-tick input. Drop their outgoing edges from the topo
+  // graph so feedback paths through `signal_integrator` /
+  // `signal_unit_delay` / `signal_zoh` / `signal_discrete_integrator`
+  // resolve cleanly. (The next-state update is computed *after* every
+  // dependent block has consumed the current-state read, so the
+  // back-edge is legitimately broken.)
+  auto isLoopBreaker = [&](const std::string &NodeId) {
+    auto It = std::find_if(F.Nodes.begin(), F.Nodes.end(),
+                            [&](const Node &N) { return N.Id == NodeId; });
+    if (It == F.Nodes.end()) return false;
+    return isStatefulKind(It->Kind);
+  };
   for (const auto &E : F.Edges) {
     if (!InternalSet.count(E.To.Node)) continue;
     if (!InternalSet.count(E.From.Node)) continue; // inport / sink-edge
+    if (isLoopBreaker(E.From.Node)) continue;       // §6.3 loop-breaker
     InEdges[E.To.Node].push_back(E.From.Node);
     InDegree[E.To.Node]++;
   }
@@ -532,7 +575,8 @@ matlab::Function *lowerSubsystemToMatlab(
     const FlowDoc &Doc,
     const std::string &SubsystemName,
     matlab::ASTContext &AST,
-    matlab::DiagnosticEngine &Diag) {
+    matlab::DiagnosticEngine &Diag,
+    const SubsystemEmitOptions &Opts) {
   const Flow *Sub = Doc.findFlow(SubsystemName);
   if (!Sub) {
     Diag.error(SourceLocation{}, "subsystem \"" + SubsystemName +
@@ -643,6 +687,30 @@ matlab::Function *lowerSubsystemToMatlab(
   // the `<next> = ...` update expression cleanly.
   std::unordered_map<std::string, Expr *> NextStateExpr;
 
+  // Tier 3+4 — hoist every stateful block's STATE READ to the top
+  // of the body, BEFORE any consumer evaluates. Without this hoist
+  // the topo sort (which drops loop-breakers' outgoing edges) is
+  // free to place the consumer ahead of the state-read assignment,
+  // and the consumer would read the variable's pre-init zero value
+  // — silently producing wrong outputs.  Matches the simulator's
+  // "load Z_ first, then evalAll" tick shape (lib/Flowchart/
+  // MflowLinkSim.cpp).
+  for (auto *N : Internal) {
+    if (!isStatefulKind(N->Kind)) continue;
+    const std::string &OutV = VarOfNode[N->Id];
+    const std::string CurS  = "s_" + sanitizeIdent(N->Id);
+    // `<OutV> = <CurS> + 0.0;`  (output the latched state)
+    // The `+ 0.0` anchors the assignment to `f64` so the static
+    // -emit-* pipeline's slot-type inference picks `double`
+    // throughout — without it a pure-passthrough subsystem (e.g.
+    // one Unit Delay with no internal arithmetic) gets collapsed
+    // away as dead-code and the emitted function body is empty.
+    // The anchor is a no-op at runtime.
+    Body->Stmts.push_back(B.assign(OutV,
+                                    B.bin(BinOp::Add, B.name(CurS),
+                                          B.number(0.0))));
+  }
+
   // Emit one statement per internal block.
   for (auto *N : Internal) {
     auto Ports = inputPortsOf(*N);
@@ -650,37 +718,56 @@ matlab::Function *lowerSubsystemToMatlab(
     for (auto &P : Ports) Ins.push_back(resolveInputExpr(N->Id, P));
 
     if (isStatefulKind(N->Kind)) {
-      // §17.5 #4 / Tier 3 — stateful block. Output is the current
-      // state; next state is computed from the upstream input.
-      const std::string &OutV = VarOfNode[N->Id];
+      // State read was hoisted above; we still need to compute the
+      // next-state expression here (which DOES depend on the
+      // consumer order because the integrator's input is `u[n]`,
+      // i.e. the current-tick value upstream — which only exists
+      // after every block feeding it has run).
       const std::string CurS  = "s_" + sanitizeIdent(N->Id);
-      // 1) `<OutV> = <CurS> + 0.0;`   (output the latched state)
-      // The `+ 0.0` anchors the assignment to `f64` so the static
-      // -emit-* pipeline's slot-type inference picks `double`
-      // throughout — without it a pure-passthrough subsystem
-      // (e.g. one Unit Delay with no internal arithmetic) gets
-      // collapsed away as dead-code and the emitted function body
-      // is empty. The anchor is a no-op at runtime.
-      Body->Stmts.push_back(B.assign(OutV,
-                                      B.bin(BinOp::Add, B.name(CurS),
-                                            B.number(0.0))));
-      // 2) Compute next state. Stash in `NextStateExpr` for the
-      //    final state-update block at end of body.
+      // Compute next state. Stash in `NextStateExpr` for the
+      // final state-update block at end of body.
       Expr *NextExpr = nullptr;
       if (N->Kind == "signal_unit_delay" || N->Kind == "signal_zoh") {
         // Next state = current input.  Anchor with `+ 0.0` for
         // the same reason as above.
         Expr *U = Ins.empty() ? B.number(0.0) : Ins.front();
         NextExpr = B.bin(BinOp::Add, U, B.number(0.0));
-      } else if (N->Kind == "signal_discrete_integrator") {
-        // Forward Euler default (matches simulator §17.5 #4 default):
-        //   s_next = s + Ts * u
-        // Backward Euler / Trapezoidal need `u[n+1]` AND `u[n]` —
-        // for the emit lane we discretise to Forward Euler so the
-        // caller can drive `step(u)` without tracking past inputs.
-        double Ts = paramD(*N, "sample_time", 0.0);
-        if (Ts == 0.0) Ts = paramD(*N, "sampleTime", 0.0);
-        if (Ts == 0.0) Ts = paramD(*N, "Ts", 0.01);
+      } else if (N->Kind == "signal_discrete_integrator" ||
+                 N->Kind == "signal_integrator") {
+        // signal_integrator (continuous) gets auto-discretised here
+        // — the math is identical to `signal_discrete_integrator`
+        // once a sample rate is picked.  Forward-Euler-with-current-
+        // u: s_next = s + Ts * u (matches the Tier-3 lowering).
+        //
+        // Ts resolution order:
+        //   1. SubsystemEmitOptions.TargetRate (CLI --target-rate)
+        //   2. block's `sample_time` / `sampleTime` / `Ts` param
+        //   3. settings.solver.maxStep from the flow doc
+        //   4. hard error
+        double Ts = Opts.TargetRate;
+        if (Ts <= 0.0) Ts = paramD(*N, "sample_time", 0.0);
+        if (Ts <= 0.0) Ts = paramD(*N, "sampleTime", 0.0);
+        if (Ts <= 0.0) Ts = paramD(*N, "Ts", 0.0);
+        if (Ts <= 0.0) {
+          // settings.solver.maxStep — only meaningful when it's a
+          // numeric literal ("auto" means continuous).
+          if (Doc.Settings.Solver.has_value()) {
+            const auto &SC = *Doc.Settings.Solver;
+            if (SC.MaxStep != "auto") {
+              try { Ts = std::stod(SC.MaxStep); } catch (...) {}
+            }
+          }
+        }
+        if (Ts <= 0.0) {
+          Diag.error(N->Loc,
+                     "embedded coder: continuous `" + N->Kind +
+                         "` block \"" + N->Id +
+                         "\" needs a sample period — pass `--target-rate "
+                         "<Ts>`, or set `data.sample_time` on the block, "
+                         "or declare `settings.solver.maxStep` on the "
+                         "flow");
+          return nullptr;
+        }
         Expr *U = Ins.empty() ? B.number(0.0) : Ins.front();
         Expr *TsU = B.bin(BinOp::ElemMul, B.number(Ts), U);
         NextExpr = B.bin(BinOp::Add, B.name(CurS), TsU);
@@ -735,8 +822,9 @@ matlab::TranslationUnit *buildSubsystemTU(
     const FlowDoc &Doc,
     const std::string &SubsystemName,
     matlab::ASTContext &AST,
-    matlab::DiagnosticEngine &Diag) {
-  auto *Fn = lowerSubsystemToMatlab(Doc, SubsystemName, AST, Diag);
+    matlab::DiagnosticEngine &Diag,
+    const SubsystemEmitOptions &Opts) {
+  auto *Fn = lowerSubsystemToMatlab(Doc, SubsystemName, AST, Diag, Opts);
   if (!Fn) return nullptr;
 
   auto *TU = AST.make<TranslationUnit>();
@@ -812,11 +900,15 @@ std::optional<SubsystemMeta> describeSubsystem(
   auto Outports = collectPorts(*Sub, "signal_outport");
   for (auto &P : Outports) M.OutputNames.push_back(P.Var);
 
-  // Stateful blocks → one state slot each.
+  // Stateful blocks → one state slot each. Capture the per-block
+  // initial condition so the class wrapper can default-init each
+  // member field to the right value (matches the simulator's
+  // t = 0 snapshot).
   for (const auto &N : Sub->Nodes) {
     if (!isStatefulKind(N.Kind)) continue;
     M.StateArgNames.push_back("s_" + sanitizeIdent(N.Id));
     M.StateReturnNames.push_back("s_" + sanitizeIdent(N.Id) + "_next");
+    M.StateInitVals.push_back(initialStateOf(N));
   }
   return M;
 }
@@ -855,6 +947,18 @@ std::string emitSubsystemClassWrapper(const SubsystemMeta &M,
   size_t N = M.InputNames.size();   // public arg count
   size_t Outs = M.OutputNames.size(); // public return count
 
+  // Tier 4 — render a state slot's default-init expression. Falls
+  // back to 0.0 when the .mflow didn't capture an initial value
+  // (early lowering paths may produce a SubsystemMeta without IC
+  // info — older code paths).
+  auto initFor = [&](size_t I) -> std::string {
+    if (I >= M.StateInitVals.size()) return "0.0";
+    std::ostringstream Tmp;
+    Tmp.precision(17);
+    Tmp << M.StateInitVals[I];
+    return Tmp.str();
+  };
+
   if (Target == "python") {
     OS << "\n\n";
     OS << "# Tier-2 class wrapper: object-style step() that carries\n";
@@ -866,8 +970,9 @@ std::string emitSubsystemClassWrapper(const SubsystemMeta &M,
     if (!Stateful) {
       OS << "        pass\n";
     } else {
-      for (auto &S : M.StateArgNames)
-        OS << "        self." << S << " = 0.0\n";
+      for (size_t I = 0; I < M.StateArgNames.size(); ++I)
+        OS << "        self." << M.StateArgNames[I] << " = "
+           << initFor(I) << "\n";
     }
     OS << "    def step(self";
     for (auto &In : M.InputNames) OS << ", " << In;
@@ -899,8 +1004,9 @@ std::string emitSubsystemClassWrapper(const SubsystemMeta &M,
     OS << "// Tier-2 class wrapper: object-style step() that carries\n";
     OS << "// the per-block state across calls.\n";
     OS << "struct " << ClassName << " {\n";
-    for (auto &S : M.StateArgNames)
-      OS << "  double " << S << " = 0.0;\n";
+    for (size_t I = 0; I < M.StateArgNames.size(); ++I)
+      OS << "  double " << M.StateArgNames[I] << " = "
+         << initFor(I) << ";\n";
     if (Outs == 1) OS << "  double step(";
     else           OS << "  std::tuple<";
     if (Outs > 1) {
@@ -958,6 +1064,17 @@ std::string emitSubsystemClassWrapper(const SubsystemMeta &M,
       for (auto &S : M.StateArgNames) OS << "  double " << S << ";\n";
     }
     OS << "} " << ClassName << ";\n";
+    // Tier 4 — init helper that lays down the initial conditions
+    // captured from the .mflow. Callers do `<Class> obj; <Class>_init(&obj);`
+    // before the first step.
+    if (Stateful) {
+      OS << "static void " << ClassName << "_init(" << ClassName
+         << " *self) {\n";
+      for (size_t I = 0; I < M.StateArgNames.size(); ++I)
+        OS << "  self->" << M.StateArgNames[I] << " = " << initFor(I)
+           << ";\n";
+      OS << "}\n";
+    }
     if (Outs == 1) OS << "static double ";
     else           OS << "static void ";
     OS << ClassName << "_step(" << ClassName << " *self";
@@ -996,8 +1113,9 @@ std::string emitSubsystemClassWrapper(const SubsystemMeta &M,
     OS << "// Tier-2 class wrapper: object-style step() that carries\n";
     OS << "// the per-block state across calls.\n";
     OS << "class " << ClassName << " {\n";
-    for (auto &S : M.StateArgNames)
-      OS << "  " << S << ": number = 0;\n";
+    for (size_t I = 0; I < M.StateArgNames.size(); ++I)
+      OS << "  " << M.StateArgNames[I] << ": number = "
+         << initFor(I) << ";\n";
     OS << "  step(";
     for (size_t I = 0; I < N; ++I) {
       if (I) OS << ", ";

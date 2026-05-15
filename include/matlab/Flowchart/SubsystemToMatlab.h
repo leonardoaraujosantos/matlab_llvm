@@ -40,13 +40,26 @@ namespace flowchart {
 // diagnostic; the pass returns nullptr.
 //===----------------------------------------------------------------------===//
 
+// Tier-4 emit options. `TargetRate` is the global sample period
+// (seconds) the codegen lane discretises every continuous block to;
+// 0.0 = unset, fall back to per-block `sample_time` / `Ts` or
+// `settings.solver.maxStep`. `DiscretizeMethod` is currently
+// "backward_euler" (the simulator's signal_discrete_integrator
+// default — uses the current input). Future: "trapezoidal" /
+// "forward_euler".
+struct SubsystemEmitOptions {
+  double TargetRate = 0.0;
+  std::string DiscretizeMethod = "backward_euler";
+};
+
 // Lower a named subsystem to a `matlab::Function`. The returned node
 // is owned by `AST`. Returns nullptr on failure (with diagnostic).
 matlab::Function *lowerSubsystemToMatlab(
     const FlowDoc &Doc,
     const std::string &SubsystemName,
     matlab::ASTContext &AST,
-    matlab::DiagnosticEngine &Diag);
+    matlab::DiagnosticEngine &Diag,
+    const SubsystemEmitOptions &Opts = {});
 
 // Wrap the lowered subsystem in a synthesised `TranslationUnit` plus
 // a concrete-typed driver call so the downstream `-emit-*` lanes
@@ -66,7 +79,8 @@ matlab::TranslationUnit *buildSubsystemTU(
     const FlowDoc &Doc,
     const std::string &SubsystemName,
     matlab::ASTContext &AST,
-    matlab::DiagnosticEngine &Diag);
+    matlab::DiagnosticEngine &Diag,
+    const SubsystemEmitOptions &Opts = {});
 
 //===----------------------------------------------------------------------===//
 // Tier-2 class wrapper — per-target shim that bundles the functional
@@ -82,6 +96,13 @@ struct SubsystemMeta {
   std::vector<std::string> OutputNames;        // y1, y2, ... (public)
   std::vector<std::string> StateArgNames;      // s_<id>
   std::vector<std::string> StateReturnNames;   // s_<id>_next
+  // Tier-4 — per-state-slot initial value (matches index of
+  // StateArgNames). 0.0 for blocks without an `initialCondition` /
+  // `initialOutput` param; otherwise the user-supplied IC. The class
+  // wrapper emits these as the default-init values for the member
+  // fields so a freshly-constructed object has the same starting
+  // state as the simulator's t=0 snapshot.
+  std::vector<double>      StateInitVals;
 };
 
 // Compute the public metadata from the named subsystem. Returns an

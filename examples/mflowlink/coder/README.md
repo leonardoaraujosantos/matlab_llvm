@@ -39,6 +39,34 @@ subsystem.
 | `discrete_integrator.mflow` | Forward-Euler accumulator with `Ts = 0.1` and a 0.5× input gain |
 | `discrete_pid.mflow` | Full PID controller — discrete integrator + unit delay + sum / gain / saturation; class-wrapped per target |
 
+### Continuous → auto-discretised (Tier 4)
+
+| File | Block coverage |
+|---|---|
+| `continuous_lowpass.mflow` | 1/(s+1) realised as Integrator + Sum feedback; auto-discretised to Forward Euler at the user-picked sample rate |
+
+`signal_integrator` blocks get auto-discretised at codegen time —
+no separate "discretizer" block needed. Sample period resolution:
+
+1. `--target-rate <Ts>` CLI flag (explicit, wins)
+2. block's `data.sample_time` / `params.Ts`
+3. `settings.solver.maxStep` from the flow
+4. **sourced error** if none of the above resolves
+
+```bash
+matlabc -emit-cpp continuous_lowpass.mflow \
+    --subsystem continuous_lowpass --target-rate 0.05
+```
+
+The initial state value (`params.initialCondition`) is baked into
+the class wrapper's default-init, so a freshly-constructed object
+matches the simulator's t=0 snapshot.
+
+Carve-outs (defer to a follow-up slice): `signal_transfer_fcn` /
+`signal_state_space` / `signal_zero_pole` need bilinear /
+matrix-exponential discretization; `signal_transport_delay` needs
+a circular-buffer state.
+
 Stateful subsystems emit a multi-return functional form
 `[y, s_next] = step(u, s)` *and* a Tier-2 class wrapper that
 holds the state slots as member fields and exposes a mutating
