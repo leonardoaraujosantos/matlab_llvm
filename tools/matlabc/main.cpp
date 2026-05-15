@@ -43,6 +43,7 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/LLVMIR/LLVMTypes.h"
+#include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinTypes.h"
@@ -99,6 +100,65 @@ using namespace matlab;
 // can register it before any -simulate path runs.
 namespace matlab { namespace flowchart {
 void installMflowLinkJit();
+
+#if MATLAB_LLVM_WITH_MLIR
+// Tier 5 — stamp `hdl.ports` ArrayAttr on a subsystem's
+// synthesised function so `runApplyPortTypePragmas` types the
+// args/return at the user-requested fi format. Bypasses the
+// source-text scan (`runScanHWPragmas`) — our AST is hand-built
+// and the SourceManager doesn't carry `% hdl:` comments.
+//
+// Builds one DictionaryAttr per public input + output, plus a
+// `bool` entry for the implicit `reset` arg when the subsystem
+// is stateful. Default spec is signed Q16.16; overrides come from
+// the `--fi-spec port=Q<W>.<F>` CLI flag.
+static void stampSubsystemPortPragmas(
+    mlir::ModuleOp M,
+    const std::string &FnName,
+    const std::vector<std::string> &Inputs,
+    const std::vector<std::string> &Outputs,
+    const FixedPointSpec &DefaultFi,
+    const std::map<std::string, FixedPointSpec> &Overrides,
+    bool HasReset) {
+  auto &Ctx = *M.getContext();
+  auto I64 = mlir::IntegerType::get(&Ctx, 64);
+  auto buildEntry = [&](const std::string &Name,
+                         const FixedPointSpec &Spec,
+                         bool BoolKind = false) -> mlir::DictionaryAttr {
+    llvm::SmallVector<mlir::NamedAttribute> Fields;
+    Fields.push_back({mlir::StringAttr::get(&Ctx, "name"),
+                      mlir::StringAttr::get(&Ctx, Name)});
+    Fields.push_back({mlir::StringAttr::get(&Ctx, "kind"),
+                      mlir::StringAttr::get(
+                          &Ctx, BoolKind ? "bool" : "fi")});
+    Fields.push_back({mlir::StringAttr::get(&Ctx, "signed"),
+                      mlir::BoolAttr::get(&Ctx,
+                                           BoolKind ? false : Spec.Signed)});
+    Fields.push_back({mlir::StringAttr::get(&Ctx, "width"),
+                      mlir::IntegerAttr::get(I64,
+                                              BoolKind ? 1 : Spec.Width)});
+    Fields.push_back({mlir::StringAttr::get(&Ctx, "frac"),
+                      mlir::IntegerAttr::get(I64,
+                                              BoolKind ? 0 : Spec.Frac)});
+    return mlir::DictionaryAttr::get(&Ctx, Fields);
+  };
+  llvm::SmallVector<mlir::Attribute> Ports;
+  auto specOf = [&](const std::string &N) -> FixedPointSpec {
+    auto It = Overrides.find(N);
+    return It == Overrides.end() ? DefaultFi : It->second;
+  };
+  for (auto &N : Inputs)  Ports.push_back(buildEntry(N, specOf(N)));
+  if (HasReset) Ports.push_back(buildEntry("reset", DefaultFi, /*BoolKind=*/true));
+  for (auto &N : Outputs) Ports.push_back(buildEntry(N, specOf(N)));
+  auto PortsAttr = mlir::ArrayAttr::get(&Ctx, Ports);
+  // Find the function by name and stamp.
+  M.walk([&](mlir::func::FuncOp F) {
+    if (F.getSymName() == FnName)
+      F->setAttr("hdl.ports", PortsAttr);
+  });
+}
+#endif
+
 } }
 
 namespace {
@@ -190,6 +250,16 @@ struct Options {
    * falls back to the block's `data.sample_time` / `params.Ts` /
    * `settings.solver.maxStep`, in that order. */
   double TargetRate = 0.0;
+  /* Embedded Coder, Tier 5 — `--fi-spec <port>=Q<W>.<F>` flag,
+   * repeatable. Per-port fixed-point width / fraction overrides
+   * for the SV emit lane. Without an override, every port emits
+   * as the default fi spec (signed Q16.16 — 32 bits, 16 fractional).
+   * Format examples:
+   *   --fi-spec u=Q16.16         (signed)
+   *   --fi-spec idx=UQ8.0        (unsigned, 8-bit integer)
+   *   --fi-spec sig=Q32.24       (high-precision)
+   */
+  std::vector<std::string> FiSpecs;
   /* Block-library search path for `.mflow` custom blocks (Phase 4b).
    * Resolution order: command-line `--block-path DIR` entries (in CLI
    * order) followed by colon-separated entries from the
@@ -334,6 +404,15 @@ bool parseArgs(int Argc, char **Argv, Options &Opts, const char *&Prog) {
         std::cerr << "--target-rate must be a positive number\n";
         return false;
       }
+    }
+    else if (A.size() > 10 && A.substr(0, 10) == "--fi-spec=")
+      Opts.FiSpecs.push_back(std::string(A.substr(10)));
+    else if (A == "--fi-spec" || A == "-fi-spec") {
+      if (++I >= Argc) {
+        std::cerr << "--fi-spec requires an argument (port=Q<W>.<F>)\n";
+        return false;
+      }
+      Opts.FiSpecs.push_back(Argv[I]);
     }
     else if (A == "-opt" || A == "-O") Opts.Opt = true;
     else if (A == "-no-line" || A == "--no-line") Opts.NoLine = true;
@@ -9727,6 +9806,55 @@ int main(int Argc, char **Argv) {
       if (!Opts.Subsystem.empty() && Doc->isSignalFlow()) {
         matlab::flowchart::SubsystemEmitOptions SO;
         SO.TargetRate = Opts.TargetRate;
+        // Tier 5 — when the user is emitting SystemVerilog, switch
+        // the lowering into HDL mode: continuous blocks become a
+        // sourced error (no implicit auto-discretisation), state
+        // emits as MATLAB `persistent` variables (which the SV
+        // pipeline lowers to clocked registers), and the function
+        // gains a `reset` arg for power-up clear.
+        bool IsSV =
+            Opts.Mode == Options::Mode::EmitSystemVerilog ||
+            Opts.Mode == Options::Mode::CheckSynthesizable ||
+            Opts.Mode == Options::Mode::EmitHardwareReport ||
+            Opts.Mode == Options::Mode::EmitCocotb;
+        // --state-form=persistent forces HDL-style state regardless
+        // of target mode — useful for `-dump-ast` / `-emit-matlab`
+        // inspection of the SV-shaped function.
+        if (Opts.StateForm == "persistent") IsSV = true;
+        if (IsSV) {
+          SO.RejectContinuous = true;
+          SO.StateAsPersistent = true;
+        }
+        // Parse `--fi-spec port=Q<W>.<F>` entries.
+        // Form: name=[U]Q<W>.<F>. Default sign = signed (`Q...`);
+        // unsigned prefix is `UQ...`.
+        for (const auto &S : Opts.FiSpecs) {
+          auto Eq = S.find('=');
+          if (Eq == std::string::npos) continue;
+          std::string Name = S.substr(0, Eq);
+          std::string Spec = S.substr(Eq + 1);
+          matlab::flowchart::FixedPointSpec FS;
+          size_t Cur = 0;
+          if (Spec.size() > 1 && (Spec[0] == 'U' || Spec[0] == 'u') &&
+              (Spec[1] == 'Q' || Spec[1] == 'q')) {
+            FS.Signed = false; Cur = 2;
+          } else if (!Spec.empty() &&
+                     (Spec[0] == 'Q' || Spec[0] == 'q')) {
+            FS.Signed = true; Cur = 1;
+          }
+          auto Dot = Spec.find('.', Cur);
+          if (Dot != std::string::npos) {
+            try {
+              FS.Width = std::stoi(Spec.substr(Cur, Dot - Cur));
+              FS.Frac  = std::stoi(Spec.substr(Dot + 1));
+            } catch (...) {
+              std::cerr << "ignoring malformed --fi-spec \"" << S
+                        << "\" (expected name=[U]Q<W>.<F>)\n";
+              continue;
+            }
+          }
+          SO.FiSpecs[Name] = FS;
+        }
         TU = matlab::flowchart::buildSubsystemTU(*Doc, Opts.Subsystem,
                                                   Ctx, Diag, SO);
       } else {
@@ -9934,6 +10062,66 @@ int main(int Argc, char **Argv) {
       // ...) is re-scanned further down in the SV branch.
       if (WantFullPipeline) {
         mlirgen::runScanHWPragmas(M, &SM);
+        // Tier 5 — for a subsystem emit, ScanHWPragmas runs over the
+        // .mflow JSON buffer and finds nothing (the synthesised AST
+        // has no `% hdl:` comments). Stamp the port-type attributes
+        // programmatically from the public inputs/outputs + the
+        // `--fi-spec` overrides so `runApplyPortTypePragmas` (next
+        // line) types the function args/return at the requested
+        // fi format. Software targets (Python/C/C++/TS) don't go
+        // through this branch — they're handled by emit-* via Tier 1.
+        bool IsSV =
+            Opts.Mode == Options::Mode::EmitSystemVerilog ||
+            Opts.Mode == Options::Mode::CheckSynthesizable ||
+            Opts.Mode == Options::Mode::EmitHardwareReport ||
+            Opts.Mode == Options::Mode::EmitCocotb;
+        if (!Opts.Subsystem.empty() && IsSV) {
+          // Re-load the .mflow doc to get the public-port list. (Doc
+          // pointer above is out of scope here — recompute.)
+          SourceManager FlowSM3;
+          DiagnosticEngine FlowDiag3(FlowSM3);
+          auto Doc3 = matlab::flowchart::loadMflowFromPath(
+              FlowSM3, Opts.InputPath, FlowDiag3);
+          if (Doc3) {
+            auto Meta = matlab::flowchart::describeSubsystem(
+                *Doc3, Opts.Subsystem, FlowDiag3);
+            if (Meta) {
+              matlab::flowchart::FixedPointSpec Default{};
+              std::map<std::string,
+                       matlab::flowchart::FixedPointSpec> Overrides;
+              // Replicate the CLI parse from §9740 — kept inline to
+              // avoid a third copy of the same logic.
+              for (const auto &S : Opts.FiSpecs) {
+                auto Eq = S.find('=');
+                if (Eq == std::string::npos) continue;
+                std::string Name = S.substr(0, Eq);
+                std::string Spec = S.substr(Eq + 1);
+                matlab::flowchart::FixedPointSpec FS;
+                size_t Cur = 0;
+                if (Spec.size() > 1 &&
+                    (Spec[0] == 'U' || Spec[0] == 'u') &&
+                    (Spec[1] == 'Q' || Spec[1] == 'q')) {
+                  FS.Signed = false; Cur = 2;
+                } else if (!Spec.empty() &&
+                           (Spec[0] == 'Q' || Spec[0] == 'q')) {
+                  FS.Signed = true; Cur = 1;
+                }
+                auto Dot = Spec.find('.', Cur);
+                if (Dot != std::string::npos) {
+                  try {
+                    FS.Width = std::stoi(Spec.substr(Cur, Dot - Cur));
+                    FS.Frac  = std::stoi(Spec.substr(Dot + 1));
+                  } catch (...) { continue; }
+                }
+                Overrides[Name] = FS;
+              }
+              bool HasReset = !Meta->StateArgNames.empty();
+              matlab::flowchart::stampSubsystemPortPragmas(
+                  M, Meta->Name, Meta->InputNames, Meta->OutputNames,
+                  Default, Overrides, HasReset);
+            }
+          }
+        }
         if (!mlirgen::runApplyPortTypePragmas(M)) {
           Diag.printAll();
           return 1;

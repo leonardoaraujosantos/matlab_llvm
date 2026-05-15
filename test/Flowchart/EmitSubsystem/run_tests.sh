@@ -266,6 +266,53 @@ PY
 }
 lp_smoke
 
+# Tier 5 — SystemVerilog emit smoke test. Verifies that a stateless
+# subsystem with Gain + Sum lowers to synthesisable SV (default
+# Q16.16 signed). The check is purely structural: the emitted source
+# contains the `module <name>` declaration, the three fi-typed input
+# ports, and the single fi-typed output. Synth-clean validation
+# (Verilator lint, yosys synth) is gated on
+# `MATLAB_LLVM_EMIT_SUBSYSTEM_SV_COSIM` (deferred).
+sv_smoke() {
+  local sv="$SCRATCH/scaled_sum.sv"
+  "$MATLABC" -emit-sv "$EX/scaled_sum_sv.mflow" --subsystem scaled_sum \
+       > "$sv" 2> "$SCRATCH/emit.err"
+  if ! grep -q "module scaled_sum" "$sv"; then
+    fail=$((fail+1)); fails+=("scaled_sum_sv (missing module)")
+    sed 's/^/  /' "$SCRATCH/emit.err" >&2
+    return
+  fi
+  if ! grep -q "input  logic signed \[31:0\] u1" "$sv"; then
+    fail=$((fail+1)); fails+=("scaled_sum_sv (wrong port type)")
+    head -20 "$sv" >&2
+    return
+  fi
+  if ! grep -q "output logic signed \[31:0\] y1" "$sv"; then
+    fail=$((fail+1)); fails+=("scaled_sum_sv (missing output)")
+    return
+  fi
+  pass=$((pass+1))
+}
+sv_smoke
+
+# Tier 5 — continuous block must be rejected with a sourced error
+# in HDL emit (no implicit auto-discretisation).
+sv_reject() {
+  if "$MATLABC" -emit-sv "$EX/continuous_lowpass.mflow" \
+       --subsystem continuous_lowpass > "$SCRATCH/out.sv" \
+       2> "$SCRATCH/reject.err"; then
+    fail=$((fail+1)); fails+=("continuous_lowpass SV (no rejection)")
+    return
+  fi
+  if ! grep -q "continuous block" "$SCRATCH/reject.err"; then
+    fail=$((fail+1)); fails+=("continuous_lowpass SV (wrong error)")
+    sed 's/^/  /' "$SCRATCH/reject.err" >&2
+    return
+  fi
+  pass=$((pass+1))
+}
+sv_reject
+
 echo "----"
 echo "passed: $pass    failed: $fail"
 if (( fail > 0 )); then

@@ -286,10 +286,57 @@ Each tier ends with a working demo + a CTest lane.
   - `signal_transport_delay` needs a circular-buffer state slot
     (not a single scalar).
 
-### Tier 5 — SystemVerilog emit  *(~1.5 weeks)*
+### Tier 5 — SystemVerilog emit  *(✓ partial 2026-05-15)*
 
-- Reuse `-emit-systemverilog` pipeline through `SubsystemToMatlab`.
-- Hard-reject continuous blocks with sourced diagnostic.
+Shipped:
+- `--subsystem` against a `-emit-sv` mode routes through the
+  HDL-aware `SubsystemToMatlab` path.
+- **Hard-reject continuous blocks** with a sourced diagnostic
+  (the user must replace with `signal_discrete_*` in the `.mflow`
+  source). Tier-4 auto-discretisation stays software-target-only.
+- **Programmatic `hdl.ports` stamping** in `tools/matlabc/main.cpp`
+  — builds the `ArrayAttr` of `DictionaryAttr`s that
+  `runApplyPortTypePragmas` consumes, no source-text comments
+  needed. Default fi format is `Q16.16 signed` (32-bit, 16
+  fractional); per-port overrides via repeatable
+  `--fi-spec port=Q<W>.<F>` (signed) /
+  `--fi-spec port=UQ<W>.<F>` (unsigned).
+- **`persistent` state mode**: when `SubsystemEmitOptions.StateAsPersistent`,
+  stateful blocks emit MATLAB `persistent <slot>; if isempty(<slot>)
+  || reset; <slot> = fi(IC, sgn, W, F); end` — same pattern the
+  static SV pipeline already lowers to clocked regs.
+- **Numeric-literal fi wrapping**: ASTBuilder's `lit(V)` switches
+  to `fi(V, sgn, W, F)` calls in HDL mode so SV-pipeline constant
+  folding sees integer types instead of f64.
+- **No driver script for SV**: the priming
+  `__mflowlink_priming = subsystem(0, 0, ...)` call confused
+  `arith.shli` (passes f64 zeros that don't match the fi'd args);
+  SV mode skips it (port types come from `hdl.ports`, not from
+  call-site inference).
+- **`signal_matlab_fcn` support**: inline user MATLAB becomes a
+  sibling local function. SV synth-check applies; user must use
+  explicit `fi(...)` for constants inside the body.
+
+Demos:
+- `scaled_sum_sv.mflow` — stateless mixer (Gain · Sum) →
+  synthesisable SV with Q16.16 fi ports.
+- `matlab_fcn_sv.mflow` — `signal_matlab_fcn` block containing
+  user-written synthesisable MATLAB.
+- `fir_4tap.mflow` — 4-tap FIR (Unit Delays + Gains + Sum) —
+  Python/C/C++/TS emit + class wrappers work end-to-end; SV
+  blocked on Tier-5b (stateful → SV).
+
+Tier-5b open carve-outs (not yet shipped):
+- Stateful subsystems → SV: `isempty(...) || reset` short-or →
+  `if isempty + if reset` split needs the reset arg coerced to
+  f64 in the HWStateInfer step. Functional / class wrappers in
+  software targets work; only HDL is blocked.
+- `signal_saturation` → SV: bool-by-fi multiplication doesn't
+  synthesise; workaround for HDL targets is to replace with a
+  `signal_matlab_fcn` containing the if/elseif/else.
+- Continuous `signal_transfer_fcn` / `signal_state_space` /
+  `signal_zero_pole` discretization (bilinear / matrix-exp).
+- Verilator + yosys CTest gated lane.
 - `--fi-spec` flag stamps `hdl.ports` attrs.
 - Synth-check + Verilator lint in the CTest lane (gated like
   `MATLAB_LLVM_WITH_VA_COSIM` — opt-in CMake flag).

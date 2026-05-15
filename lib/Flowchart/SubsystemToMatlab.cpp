@@ -11,10 +11,14 @@
 #include "matlab/Flowchart/SubsystemToMatlab.h"
 
 #include "matlab/Basic/Diagnostic.h"
+#include "matlab/Basic/SourceManager.h"
+#include "matlab/Lex/Lexer.h"
+#include "matlab/Parse/Parser.h"
 
 #include <algorithm>
 #include <cctype>
 #include <map>
+#include <memory>
 #include <set>
 #include <sstream>
 #include <unordered_map>
@@ -75,8 +79,15 @@ const std::set<std::string> &tier1Kinds() {
       "signal_discrete_integrator",
       // Tier 4 — continuous-time integrator, auto-discretised at
       // the subsystem's `Ts` (CLI --target-rate / block sample_time
-      // / settings.solver.maxStep).
+      // / settings.solver.maxStep). Rejected with a sourced error
+      // when SubsystemEmitOptions.RejectContinuous = true (HDL lane).
       "signal_integrator",
+      // Tier 5 — inline user MATLAB. The block's `params.function_body`
+      // becomes a sibling local function in the same TU; the call
+      // site emits as `<out> = <fn_name>(<inputs...>)`. SV emit
+      // delegates synthesisability to the existing -check-synthesizable
+      // pass over the user body.
+      "signal_matlab_fcn",
       // Routing-only — emit nothing, but pass through the variable
       // name from the source.
       "signal_inport",   "signal_outport",
@@ -238,6 +249,14 @@ toposortInternals(const Flow &F, DiagnosticEngine &Diag,
 //===-----------------------------------------------------------------===//
 struct ASTBuilder {
   ASTContext &Ctx;
+  // Tier 5 — when WrapFi is true, `lit(V)` wraps numeric literals in
+  // `fi(V, signed, W, F)` so the SV pipeline sees concrete fixed-
+  // point constants instead of f64.  Software-target emit leaves
+  // the literal as a bare FPLiteral.
+  bool WrapFi = false;
+  bool FiSigned = true;
+  int FiWidth = 32;
+  int FiFrac = 16;
 
   NameExpr *name(const std::string &S) {
     auto *N = Ctx.make<NameExpr>();
@@ -256,6 +275,20 @@ struct ASTBuilder {
     auto *I = Ctx.make<IntegerLiteral>();
     I->Text = Ctx.intern(std::to_string(V));
     return I;
+  }
+  // Numeric literal honouring WrapFi — use this for ALL constant
+  // operands inside lowerBlock's per-kind dispatch so a single flip
+  // of WrapFi switches the entire emitter between software (raw
+  // f64) and HDL (fi-wrapped) modes.
+  Expr *lit(double V) {
+    if (!WrapFi) return number(V);
+    auto *Call = Ctx.make<CallOrIndex>();
+    Call->Callee = name("fi");
+    Call->Args.push_back(number(V));
+    Call->Args.push_back(integer(FiSigned ? 1 : 0));
+    Call->Args.push_back(integer(FiWidth));
+    Call->Args.push_back(integer(FiFrac));
+    return Call;
   }
   BinaryOpExpr *bin(BinOp Op, Expr *L, Expr *R) {
     auto *B = Ctx.make<BinaryOpExpr>();
@@ -311,7 +344,7 @@ AssignStmt *lowerBlock(const Node &N, const std::string &OutVar,
   const auto &K = N.Kind;
 
   auto get = [&](size_t I) -> Expr * {
-    return I < Ins.size() ? Ins[I] : static_cast<Expr *>(B.number(0.0));
+    return I < Ins.size() ? Ins[I] : static_cast<Expr *>(B.lit(0.0));
   };
 
   if (K == "signal_constant") {
@@ -323,7 +356,7 @@ AssignStmt *lowerBlock(const Node &N, const std::string &OutVar,
     if (V.find('[') == std::string::npos) {
       double D = 0.0;
       try { D = std::stod(V); } catch (...) {}
-      return B.assign(OutVar, B.number(D));
+      return B.assign(OutVar, B.lit(D));
     }
     // Strip the brackets, parse row-major numbers, build a MatrixLiteral.
     auto L = V.find('['), R = V.rfind(']');
@@ -333,8 +366,8 @@ AssignStmt *lowerBlock(const Node &N, const std::string &OutVar,
     std::vector<Expr *> Row;
     auto endTok = [&]() {
       if (Tok.empty()) return;
-      try { Row.push_back(B.number(std::stod(Tok))); }
-      catch (...) { Row.push_back(B.number(0.0)); }
+      try { Row.push_back(B.lit(std::stod(Tok))); }
+      catch (...) { Row.push_back(B.lit(0.0)); }
       Tok.clear();
     };
     auto endRow = [&]() {
@@ -352,7 +385,7 @@ AssignStmt *lowerBlock(const Node &N, const std::string &OutVar,
   if (K == "signal_gain") {
     double Gain = paramD(N, "gain", 1.0);
     // y = K .* u
-    auto *G = B.number(Gain);
+    auto *G = B.lit(Gain);
     auto *U = get(0);
     auto *Mul = B.bin(BinOp::ElemMul, G, U);
     return B.assign(OutVar, Mul);
@@ -372,7 +405,7 @@ AssignStmt *lowerBlock(const Node &N, const std::string &OutVar,
         Acc = B.bin(Neg ? BinOp::Sub : BinOp::Add, Acc, T);
       }
     }
-    if (!Acc) Acc = B.number(0.0);
+    if (!Acc) Acc = B.lit(0.0);
     return B.assign(OutVar, Acc);
   }
   if (K == "signal_product") {
@@ -380,7 +413,7 @@ AssignStmt *lowerBlock(const Node &N, const std::string &OutVar,
     for (Expr *T : Ins) {
       Acc = Acc ? B.bin(BinOp::ElemMul, Acc, T) : T;
     }
-    if (!Acc) Acc = B.number(1.0);
+    if (!Acc) Acc = B.lit(1.0);
     return B.assign(OutVar, Acc);
   }
   if (K == "signal_abs") {
@@ -389,27 +422,22 @@ AssignStmt *lowerBlock(const Node &N, const std::string &OutVar,
   if (K == "signal_saturation") {
     double Lo = paramD(N, "lowerLimit", -1.0);
     double Hi = paramD(N, "upperLimit",  1.0);
-    // The natural form `max(Lo, min(Hi, u))` routes through the
-    // polymorphic matlab_min / matlab_max runtime entries — those
-    // pick the *matrix* dispatch when any operand is none-typed
-    // (function-arg-typed slots are `none` until refined), and the
-    // emit-python pass can't lower the resulting !llvm.ptr return.
-    // Emit the equivalent pure-arith form instead:
-    //
-    //   y = u + (Hi - u) * (u > Hi) + (Lo - u) * (u < Lo)
-    //
-    // Both correction terms are zero in the middle, exactly one is
-    // active outside the rails — stays scalar f64 throughout.
+    // Pure-arith form: y = u + (Hi - u) * (u > Hi) + (Lo - u) * (u < Lo)
+    // Two correction terms; exactly one fires outside the rails.
+    // Works cleanly for software targets. SV synthesis rejects
+    // bool-by-fi multiplication — a saturation block in an HDL
+    // subsystem currently surfaces as `unsynthesizable type` at
+    // synth-check time. The carve-out: users replace
+    // `signal_saturation` with a `signal_matlab_fcn` containing the
+    // explicit `if rail; ... end` form for HDL emit (Tier 5
+    // follow-up: emit the if/elseif/else form natively).
     auto *U = get(0);
-    // (Hi - u) * (u > Hi)
-    auto *DHi  = B.bin(BinOp::Sub, B.number(Hi), U);
-    auto *GtHi = B.bin(BinOp::Gt,  U, B.number(Hi));
+    auto *DHi  = B.bin(BinOp::Sub, B.lit(Hi), U);
+    auto *GtHi = B.bin(BinOp::Gt,  U, B.lit(Hi));
     auto *CHi  = B.bin(BinOp::ElemMul, DHi, GtHi);
-    // (Lo - u) * (u < Lo)
-    auto *DLo  = B.bin(BinOp::Sub, B.number(Lo), U);
-    auto *LtLo = B.bin(BinOp::Lt,  U, B.number(Lo));
+    auto *DLo  = B.bin(BinOp::Sub, B.lit(Lo), U);
+    auto *LtLo = B.bin(BinOp::Lt,  U, B.lit(Lo));
     auto *CLo  = B.bin(BinOp::ElemMul, DLo, LtLo);
-    // u + CHi + CLo
     auto *S1   = B.bin(BinOp::Add, U, CHi);
     auto *Sat  = B.bin(BinOp::Add, S1, CLo);
     return B.assign(OutVar, Sat);
@@ -420,7 +448,7 @@ AssignStmt *lowerBlock(const Node &N, const std::string &OutVar,
     auto Fn = paramSTR(N, "function", K == "signal_trig_fcn" ? "sin" : "exp");
     std::vector<Expr *> Args;
     for (Expr *T : Ins) Args.push_back(T);
-    if (Args.empty()) Args.push_back(B.number(0.0));
+    if (Args.empty()) Args.push_back(B.lit(0.0));
     return B.assign(OutVar, B.call(Fn, std::move(Args)));
   }
   if (K == "signal_relop") {
@@ -441,7 +469,7 @@ AssignStmt *lowerBlock(const Node &N, const std::string &OutVar,
                                               ? BinOp::Or
                                               : BinOp::And, Acc, T)
                                   : T;
-    if (!Acc) Acc = B.number(0.0);
+    if (!Acc) Acc = B.lit(0.0);
     return B.assign(OutVar, Acc);
   }
   if (K == "signal_compare_to_zero") {
@@ -453,7 +481,7 @@ AssignStmt *lowerBlock(const Node &N, const std::string &OutVar,
     else if (Op == "<=") BO = BinOp::Le;
     else if (Op == ">")  BO = BinOp::Gt;
     else if (Op == ">=") BO = BinOp::Ge;
-    return B.assign(OutVar, B.bin(BO, get(0), B.number(0.0)));
+    return B.assign(OutVar, B.bin(BO, get(0), B.lit(0.0)));
   }
   if (K == "signal_compare_to_constant") {
     auto Op = paramSTR(N, "op", ">");
@@ -465,7 +493,7 @@ AssignStmt *lowerBlock(const Node &N, const std::string &OutVar,
     else if (Op == "<=") BO = BinOp::Le;
     else if (Op == ">")  BO = BinOp::Gt;
     else if (Op == ">=") BO = BinOp::Ge;
-    return B.assign(OutVar, B.bin(BO, get(0), B.number(C)));
+    return B.assign(OutVar, B.bin(BO, get(0), B.lit(C)));
   }
   if (K == "signal_mux") {
     // y = [in1, in2, ...]
@@ -500,12 +528,12 @@ AssignStmt *lowerBlock(const Node &N, const std::string &OutVar,
     //
     //   y = 0.0 + (ctrl > threshold)*in1 + (ctrl <= threshold)*in3
     double Th = paramD(N, "threshold", 0.0);
-    auto *Gt = B.bin(BinOp::Gt, get(1), B.number(Th));
-    auto *Le = B.bin(BinOp::Le, get(1), B.number(Th));
+    auto *Gt = B.bin(BinOp::Gt, get(1), B.lit(Th));
+    auto *Le = B.bin(BinOp::Le, get(1), B.lit(Th));
     auto *T  = B.bin(BinOp::ElemMul, Gt, get(0));
     auto *F  = B.bin(BinOp::ElemMul, Le, get(2));
     auto *Sum = B.bin(BinOp::Add, T, F);
-    auto *Anchored = B.bin(BinOp::Add, B.number(0.0), Sum);
+    auto *Anchored = B.bin(BinOp::Add, B.lit(0.0), Sum);
     return B.assign(OutVar, Anchored);
   }
   if (K == "signal_multiport_switch") {
@@ -522,8 +550,51 @@ AssignStmt *lowerBlock(const Node &N, const std::string &OutVar,
     // of all inputs (works when only one is active at a time).
     Expr *Acc = nullptr;
     for (Expr *T : Ins) Acc = Acc ? B.bin(BinOp::Add, Acc, T) : T;
-    if (!Acc) Acc = B.number(0.0);
+    if (!Acc) Acc = B.lit(0.0);
     return B.assign(OutVar, Acc);
+  }
+  if (K == "signal_matlab_fcn") {
+    // Tier 5 — call into the user's inline MATLAB. The
+    // `params.function_body` is parsed at the end of the main
+    // lowering (so all matlab_fcn helpers are sibling functions in
+    // the same TU); here we just emit the call site. Helper name:
+    // `<userFnName>_<sanitizedBlockId>` — guarantees uniqueness if
+    // two blocks happen to have user functions with the same name.
+    auto *FB = N.getParam("function_body");
+    if (!FB) {
+      Diag.error(N.Loc, "signal_matlab_fcn \"" + N.Id +
+                            "\": missing `params.function_body`");
+      return nullptr;
+    }
+    // Extract function name (first identifier before `(`).
+    std::string SourceTxt = *FB;
+    size_t Pos = SourceTxt.find("function");
+    size_t Eq  = SourceTxt.find('=', Pos);
+    size_t Lp  = SourceTxt.find('(', Pos);
+    std::string FnName;
+    if (Pos != std::string::npos && Lp != std::string::npos) {
+      size_t Start = (Eq != std::string::npos && Eq < Lp)
+                         ? Eq + 1 : Pos + sizeof("function") - 1;
+      while (Start < Lp &&
+             (SourceTxt[Start] == ' ' || SourceTxt[Start] == '\t'))
+        ++Start;
+      size_t End = Lp;
+      while (End > Start &&
+             (SourceTxt[End - 1] == ' ' || SourceTxt[End - 1] == '\t'))
+        --End;
+      FnName = SourceTxt.substr(Start, End - Start);
+    }
+    if (FnName.empty()) {
+      Diag.error(N.Loc, "signal_matlab_fcn \"" + N.Id +
+                            "\": could not extract function name from "
+                            "`params.function_body`");
+      return nullptr;
+    }
+    // Renamed helper: <user_name>_<block_id>.
+    std::string Helper = FnName + "_" + sanitizeIdent(N.Id);
+    std::vector<Expr *> Args;
+    for (Expr *T : Ins) Args.push_back(T);
+    return B.assign(OutVar, B.call(Helper, std::move(Args)));
   }
   // Tier-1 doesn't cover this kind.
   Diag.error(N.Loc, "embedded coder Tier-1 doesn't yet support "
@@ -594,6 +665,16 @@ matlab::Function *lowerSubsystemToMatlab(
   }
 
   ASTBuilder B{AST};
+  // Tier 5 — flip the ASTBuilder into HDL mode so per-block numeric
+  // literals emit as `fi(V, ...)` calls. SV synth-check rejects f64
+  // operands; the static SV pipeline's `runLowerFixedPoint` resolves
+  // fi-wrapped constants into the right integer width.
+  if (Opts.StateAsPersistent) {
+    B.WrapFi   = true;
+    B.FiSigned = Opts.FiDefault.Signed;
+    B.FiWidth  = Opts.FiDefault.Width;
+    B.FiFrac   = Opts.FiDefault.Frac;
+  }
   EdgeIndex EI = buildEdgeIndex(*Sub);
 
   // For each non-port block, decide a unique output variable name.
@@ -687,6 +768,77 @@ matlab::Function *lowerSubsystemToMatlab(
   // the `<next> = ...` update expression cleanly.
   std::unordered_map<std::string, Expr *> NextStateExpr;
 
+  // Tier 5 — hard-reject continuous blocks for HDL emit. Software
+  // targets (Tier 4) auto-discretise via `--target-rate`; SV must
+  // be explicit (the user replaces `signal_integrator` with
+  // `signal_discrete_integrator` and Unit Delays in the .mflow).
+  if (Opts.RejectContinuous) {
+    for (auto *N : Internal) {
+      if (N->Kind == "signal_integrator" ||
+          N->Kind == "signal_transfer_fcn" ||
+          N->Kind == "signal_state_space" ||
+          N->Kind == "signal_zero_pole" ||
+          N->Kind == "signal_transport_delay") {
+        Diag.error(N->Loc,
+                   "HDL emit: continuous block `" + N->Kind + "` \"" +
+                       N->Id + "\" can't be synthesised — replace with "
+                       "the equivalent `signal_discrete_*` in the "
+                       ".mflow source (the simulator's continuous "
+                       "behaviour is software-only).");
+        return nullptr;
+      }
+    }
+  }
+
+  // Tier 5 — `persistent <slot>; if isempty(<slot>) || reset; ... end`
+  // initialisation block per stateful block, when SubsystemEmitOptions
+  // wants HDL-style internal state (registers).  Routes through the
+  // existing matlab_llvm SV pipeline's persistent → reg lowering
+  // (`lib/MLIR/Passes/LowerPersistentFiArrays.cpp`).
+  if (Opts.StateAsPersistent) {
+    for (auto &S : States) {
+      auto *Decl = AST.make<PersistentDecl>();
+      Decl->Names.push_back(AST.intern(S.CurArg));
+      Body->Stmts.push_back(Decl);
+    }
+    // Wrap each init under `if isempty(<slot>) || reset`.
+    for (auto &S : States) {
+      // Build: `isempty(<slot>) || reset` — short-circuit OR
+      // (BinOp::ShortOr), the form the SV pipeline recognises in
+      // its `if isempty(...)` init template.  Bitwise `|` would
+      // route through arith.ori which requires integer operands.
+      auto *IsEmpty = B.call("isempty", {B.name(S.CurArg)});
+      auto *Or = B.bin(BinOp::ShortOr, IsEmpty, B.name("reset"));
+      // Build the init expression. For HDL, route through `fi(...)`
+      // so the persistent register gets the user's chosen format.
+      // Lookup per-port spec; default to the global FiDefault.
+      FixedPointSpec Spec = Opts.FiDefault;
+      auto It = Opts.FiSpecs.find(S.CurArg);
+      if (It != Opts.FiSpecs.end()) Spec = It->second;
+      double InitVal = 0.0;
+      // Pull the actual IC from the block — the StateSlot vector is
+      // already populated above in topo order.
+      for (const auto &N : Sub->Nodes) {
+        if (N.Id == S.N->Id) {
+          InitVal = initialStateOf(N);
+          break;
+        }
+      }
+      // fi(<value>, <signed>, <width>, <frac>)
+      auto *FiCall = B.call("fi",
+                            {B.number(InitVal),
+                             B.integer(Spec.Signed ? 1 : 0),
+                             B.integer(Spec.Width),
+                             B.integer(Spec.Frac)});
+      auto *Then = AST.make<Block>();
+      Then->Stmts.push_back(B.assign(S.CurArg, FiCall));
+      auto *If = AST.make<IfStmt>();
+      If->Cond = Or;
+      If->Then = Then;
+      Body->Stmts.push_back(If);
+    }
+  }
+
   // Tier 3+4 — hoist every stateful block's STATE READ to the top
   // of the body, BEFORE any consumer evaluates. Without this hoist
   // the topo sort (which drops loop-breakers' outgoing edges) is
@@ -705,10 +857,16 @@ matlab::Function *lowerSubsystemToMatlab(
     // throughout — without it a pure-passthrough subsystem (e.g.
     // one Unit Delay with no internal arithmetic) gets collapsed
     // away as dead-code and the emitted function body is empty.
-    // The anchor is a no-op at runtime.
-    Body->Stmts.push_back(B.assign(OutV,
-                                    B.bin(BinOp::Add, B.name(CurS),
-                                          B.number(0.0))));
+    // The anchor is a no-op at runtime.  Persistent-mode reads
+    // skip the anchor since the slot already carries a concrete
+    // `fi(...)` type from the isempty-init block.
+    if (Opts.StateAsPersistent) {
+      Body->Stmts.push_back(B.assign(OutV, B.name(CurS)));
+    } else {
+      Body->Stmts.push_back(B.assign(OutV,
+                                      B.bin(BinOp::Add, B.name(CurS),
+                                            B.number(0.0))));
+    }
   }
 
   // Emit one statement per internal block.
@@ -796,24 +954,41 @@ matlab::Function *lowerSubsystemToMatlab(
   }
 
   // Tier 3 — emit `<NextOut> = <NextExpr>;` for every stateful block
-  // so the multi-return picks up the next-state values.
+  // so the multi-return picks up the next-state values. In Tier-5
+  // persistent mode the next state lands directly in the persistent
+  // slot (no separate `_next` return — the persistent itself is the
+  // mutable storage), which the SV pipeline lowers to a register.
   for (auto &S : States) {
     Expr *E = NextStateExpr[S.N->Id];
     if (!E) E = B.number(0.0);
-    Body->Stmts.push_back(B.assign(S.NextOut, E));
+    if (Opts.StateAsPersistent) {
+      Body->Stmts.push_back(B.assign(S.CurArg, E));
+    } else {
+      Body->Stmts.push_back(B.assign(S.NextOut, E));
+    }
   }
 
   // Build the function node.
   auto *Fn = AST.make<Function>();
   Fn->Name = AST.intern(sanitizeIdent(SubsystemName));
   for (auto &P : Inports)  Fn->Inputs.push_back(AST.intern(P.Var));
-  // Tier 3 — append state args after the inports so the public
-  // signature reads `step(u1, ..., uN, s_<a>, s_<b>, ...)`.
-  for (auto &S : States) Fn->Inputs.push_back(AST.intern(S.CurArg));
+  if (Opts.StateAsPersistent && !States.empty()) {
+    // Tier 5 — HDL needs an explicit `reset` boundary to clear the
+    // persistent regs on power-up. Add it as the final arg so the
+    // synthesised SV module exposes `reset` alongside the data
+    // inputs. Stateless subsystems have no regs and skip the reset.
+    Fn->Inputs.push_back(AST.intern("reset"));
+  } else if (!Opts.StateAsPersistent) {
+    // Tier 3 — append state args after the inports so the public
+    // signature reads `step(u1, ..., uN, s_<a>, s_<b>, ...)`.
+    for (auto &S : States) Fn->Inputs.push_back(AST.intern(S.CurArg));
+  }
   for (auto &P : Outports) Fn->Outputs.push_back(AST.intern(P.Var));
-  // And next-state returns after the regular outports:
-  //   `[y1, ..., yM, s_<a>_next, s_<b>_next, ...]`.
-  for (auto &S : States) Fn->Outputs.push_back(AST.intern(S.NextOut));
+  if (!Opts.StateAsPersistent) {
+    // And next-state returns after the regular outports:
+    //   `[y1, ..., yM, s_<a>_next, s_<b>_next, ...]`.
+    for (auto &S : States) Fn->Outputs.push_back(AST.intern(S.NextOut));
+  }
   Fn->Body = Body;
   return Fn;
 }
@@ -830,6 +1005,73 @@ matlab::TranslationUnit *buildSubsystemTU(
   auto *TU = AST.make<TranslationUnit>();
   TU->Functions.push_back(Fn);
 
+  // Tier 5 — collect every `signal_matlab_fcn` block in the subsystem
+  // and add its `params.function_body` as a sibling local function in
+  // the same TU. The block-level dispatch already emits a call site
+  // named `<userFnName>_<sanitizedBlockId>` (renamed for uniqueness);
+  // here we parse the user-supplied body, rename the entry, and
+  // append to the TU's Functions list so Sema + lowering pick it up
+  // alongside the main subsystem function.
+  const Flow *Sub = Doc.findFlow(SubsystemName);
+  if (Sub) {
+    for (const auto &N : Sub->Nodes) {
+      if (N.Kind != "signal_matlab_fcn") continue;
+      auto It = N.Params.find("function_body");
+      if (It == N.Params.end()) continue;
+      // Parse the user body in its own SourceManager so its
+      // SourceLocations don't collide with the main TU's. The
+      // outer Diag still sees any errors.
+      auto LocalSM = std::make_unique<matlab::SourceManager>();
+      auto LocalDiag = std::make_unique<matlab::DiagnosticEngine>(*LocalSM);
+      matlab::FileID F = LocalSM->addBuffer(
+          "<signal_matlab_fcn:" + N.Id + ">", It->second);
+      matlab::Lexer L(*LocalSM, F, *LocalDiag);
+      auto Toks = L.tokenize();
+      if (LocalDiag->hasErrors()) {
+        Diag.error(N.Loc,
+                   "signal_matlab_fcn \"" + N.Id +
+                       "\": lex error in `params.function_body`");
+        return nullptr;
+      }
+      matlab::Parser P(std::move(Toks), AST, *LocalDiag);
+      auto *FnTU = P.parseFile();
+      if (!FnTU || LocalDiag->hasErrors() || FnTU->Functions.empty()) {
+        Diag.error(N.Loc,
+                   "signal_matlab_fcn \"" + N.Id +
+                       "\": parse error in `params.function_body`");
+        return nullptr;
+      }
+      // Rename the entry function to `<orig>_<blockId>` so callers
+      // who reference the unique helper name resolve cleanly.
+      auto *UserFn = FnTU->Functions.front();
+      std::string Helper =
+          std::string(UserFn->Name) + "_" + sanitizeIdent(N.Id);
+      UserFn->Name = AST.intern(Helper);
+      TU->Functions.push_back(UserFn);
+      // The LocalSM/LocalDiag go out of scope here; the AST nodes
+      // they back stay alive in `AST` (the bump allocator on the
+      // outer ASTContext). The string_views into the SM's buffer
+      // would dangle — re-intern them.
+      // (Best-effort: most string_view fields are short-lived
+      // identifiers that the resolver re-interns; for fields like
+      // FPLiteral.Text we walk the body and re-intern below.)
+      // Simpler approach: intern the whole source text into `AST`
+      // so the LocalSM's buffer isn't the backing store.  Since
+      // we already have the text in `It->second`, we can ensure
+      // it's interned in the outer AST too — but the parser
+      // already created string_views pointing at the LocalSM
+      // buffer. Drop both LocalSM and LocalDiag at TU end-of-life
+      // by appending to a TU-scoped reservoir.  For now we leak
+      // them deliberately by stashing in a static — they're tiny
+      // per matlab_fcn block and the matlabc process exits at end
+      // of compile anyway.
+      static std::vector<std::unique_ptr<matlab::SourceManager>> KeepSM;
+      static std::vector<std::unique_ptr<matlab::DiagnosticEngine>> KeepDiag;
+      KeepSM.push_back(std::move(LocalSM));
+      KeepDiag.push_back(std::move(LocalDiag));
+    }
+  }
+
   // Synthesise a driver script that calls the function with concrete
   // f64 args. That call site forces the static `-emit-*` pipeline to
   // refine the function's slots to `double` instead of `none` / `void*`
@@ -838,7 +1080,15 @@ matlab::TranslationUnit *buildSubsystemTU(
   // Script node — matlab_llvm allows a script body before function
   // definitions in the same file.
   ASTBuilder B{AST};
-  if (!Fn->Inputs.empty()) {
+  // Tier 5 — skip the priming driver for HDL emit. HDL gets its
+  // arg/result types from the `hdl.ports` MLIR attribute the
+  // caller stamps post-lowering (no need to type-refine via a
+  // call site), and the call's f64 args confuse the SV pipeline
+  // (e.g. `arith.shli` on an f64 operand of the constant-mul
+  // optimisation).  Software targets keep the driver — they
+  // need the concrete-typed call site to refine the function's
+  // slots to `double`.
+  if (!Fn->Inputs.empty() && !Opts.StateAsPersistent) {
     std::vector<Expr *> Args;
     for (size_t I = 0; I < Fn->Inputs.size(); ++I)
       Args.push_back(B.number(0.0));

@@ -1,0 +1,50 @@
+{
+  "schema": "matforge.flowchart",
+  "version": "0.1.0",
+  "entry": "matlab_fcn_sv",
+  "settings": {
+    "kind": "signal_flow"
+  },
+  "flows": [
+    {
+      "id": "flow_matlab_fcn_sv",
+      "kind": "function",
+      "name": "matlab_fcn_sv",
+      "signature": { "inputs": ["a", "b"], "outputs": ["y"] },
+      "nodes": [
+        { "id": "u1", "kind": "signal_inport",
+          "data": { "params": {} },
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+        { "id": "u2", "kind": "signal_inport",
+          "data": { "params": {} },
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+
+        { "id": "mac", "kind": "signal_matlab_fcn",
+          "data": {
+            "log_signal": false,
+            "params": {
+              "function_body":
+                "function out = poly_mac(u1, u2)\n  % Polynomial multiply-accumulate: 3*a + 5*b.\n  % Stays synthesisable — only arithmetic on the inputs.\n  out = u1 * 3 + u2 * 5;\nend\n"
+            }
+          },
+          "ports": { "in": [{"id": "u1"}, {"id": "u2"}],
+                     "out": [{"id": "out"}] } },
+
+        { "id": "y1", "kind": "signal_outport",
+          "data": { "params": {} },
+          "ports": { "in": [{"id": "in"}], "out": [] } }
+      ],
+      "edges": [
+        { "id": "e1", "kind": "data",
+          "from": {"node": "u1",  "port": "out"},
+          "to":   {"node": "mac", "port": "u1"} },
+        { "id": "e2", "kind": "data",
+          "from": {"node": "u2",  "port": "out"},
+          "to":   {"node": "mac", "port": "u2"} },
+        { "id": "e3", "kind": "data",
+          "from": {"node": "mac", "port": "out"},
+          "to":   {"node": "y1",  "port": "in"} }
+      ]
+    }
+  ]
+}

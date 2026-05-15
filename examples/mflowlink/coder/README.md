@@ -45,6 +45,52 @@ subsystem.
 |---|---|
 | `continuous_lowpass.mflow` | 1/(s+1) realised as Integrator + Sum feedback; auto-discretised to Forward Euler at the user-picked sample rate |
 
+### SystemVerilog emit (Tier 5)
+
+| File | Block coverage |
+|---|---|
+| `scaled_sum_sv.mflow` | Stateless mixer (Gain · Sum) → synthesisable SV with Q16.16 fi ports |
+| `matlab_fcn_sv.mflow` | `signal_matlab_fcn` block containing user-written synthesisable MATLAB (3·u1 + 5·u2) |
+| `fir_4tap.mflow` | 4-tap FIR with Unit Delays + Gains + Sum — Python/C/C++/TS class wrappers work; SV emit is gated on the persistent + reset support (Tier-5b) |
+
+Usage:
+
+```bash
+matlabc -emit-sv scaled_sum_sv.mflow --subsystem scaled_sum
+```
+
+HDL-mode behaviour:
+
+- **Continuous blocks are rejected** with a sourced error (no
+  implicit auto-discretisation): the user replaces
+  `signal_integrator` with `signal_discrete_integrator` /
+  `signal_unit_delay` etc. in the source `.mflow` explicitly.
+- **State emits as `persistent` variables** with `if isempty(...)
+  || reset` initialisation that the SV pipeline lowers to
+  clocked registers (Tier-5b — currently blocked on an
+  isempty-vs-reset type mismatch; stateful subsystems still
+  work for software targets).
+- **Port types**: default `Q16.16 signed` (32-bit, 16 fractional);
+  override per port with `--fi-spec u1=Q24.16` /
+  `--fi-spec ctrl=UQ8.0` / `--fi-spec sig=Q32.24`.
+- **`signal_matlab_fcn` bodies must be synthesisable** — the
+  existing `-check-synthesizable` pass validates. Constants
+  inside the body must use explicit `fi(...)` wrappers (the
+  user writes `fi(3, 1, 32, 16) * u1`, not `3 * u1`).
+
+Tier-5 carve-outs (separable follow-ups):
+
+- Stateful subsystems → SV (the `isempty(...) || reset` pattern
+  triggers an `arith.ori` operand-type mismatch in the SV
+  pipeline's HWStateInfer step; needs a pre-pass to coerce
+  `reset` from `i1` into the f64 the cmpf expects).
+- `signal_saturation` → SV (bool-by-fi multiplication in the
+  pure-arith form doesn't synthesise; workaround: replace with
+  a `signal_matlab_fcn` block containing `if`/`elseif`/`else`).
+- `signal_transfer_fcn` / `signal_state_space` /
+  `signal_zero_pole` (continuous → discrete) — need bilinear or
+  matrix-exponential discretization.
+
 `signal_integrator` blocks get auto-discretised at codegen time —
 no separate "discretizer" block needed. Sample period resolution:
 

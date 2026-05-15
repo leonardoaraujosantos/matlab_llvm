@@ -1,0 +1,95 @@
+{
+  "schema": "matforge.flowchart",
+  "version": "0.1.0",
+  "entry": "fir_4tap",
+  "settings": {
+    "kind": "signal_flow"
+  },
+  "flows": [
+    {
+      "id": "flow_fir_4tap",
+      "kind": "function",
+      "name": "fir_4tap",
+      "signature": { "inputs": ["u"], "outputs": ["y"] },
+      "nodes": [
+        { "id": "u1", "kind": "signal_inport",
+          "data": { "params": {} },
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+
+        { "id": "d1", "kind": "signal_unit_delay",
+          "data": { "params": { "initialCondition": 0.0 } },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "d2", "kind": "signal_unit_delay",
+          "data": { "params": { "initialCondition": 0.0 } },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "d3", "kind": "signal_unit_delay",
+          "data": { "params": { "initialCondition": 0.0 } },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+
+        { "id": "k0", "kind": "signal_gain",
+          "data": { "params": { "gain": 0.25 } },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "k1", "kind": "signal_gain",
+          "data": { "params": { "gain": 0.25 } },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "k2", "kind": "signal_gain",
+          "data": { "params": { "gain": 0.25 } },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "k3", "kind": "signal_gain",
+          "data": { "params": { "gain": 0.25 } },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+
+        { "id": "sum", "kind": "signal_sum",
+          "data": { "params": { "signs": "++++" } },
+          "ports": { "in": [{"id": "in1"}, {"id": "in2"},
+                            {"id": "in3"}, {"id": "in4"}],
+                     "out": [{"id": "out"}] } },
+
+        { "id": "y1", "kind": "signal_outport",
+          "data": { "params": {} },
+          "ports": { "in": [{"id": "in"}], "out": [] } }
+      ],
+      "edges": [
+        { "id": "e_u_d1", "kind": "data",
+          "from": {"node": "u1", "port": "out"},
+          "to":   {"node": "d1", "port": "in"} },
+        { "id": "e_d1_d2", "kind": "data",
+          "from": {"node": "d1", "port": "out"},
+          "to":   {"node": "d2", "port": "in"} },
+        { "id": "e_d2_d3", "kind": "data",
+          "from": {"node": "d2", "port": "out"},
+          "to":   {"node": "d3", "port": "in"} },
+
+        { "id": "e_u_k0", "kind": "data",
+          "from": {"node": "u1", "port": "out"},
+          "to":   {"node": "k0", "port": "in"} },
+        { "id": "e_d1_k1", "kind": "data",
+          "from": {"node": "d1", "port": "out"},
+          "to":   {"node": "k1", "port": "in"} },
+        { "id": "e_d2_k2", "kind": "data",
+          "from": {"node": "d2", "port": "out"},
+          "to":   {"node": "k2", "port": "in"} },
+        { "id": "e_d3_k3", "kind": "data",
+          "from": {"node": "d3", "port": "out"},
+          "to":   {"node": "k3", "port": "in"} },
+
+        { "id": "e_k0_sum", "kind": "data",
+          "from": {"node": "k0", "port": "out"},
+          "to":   {"node": "sum", "port": "in1"} },
+        { "id": "e_k1_sum", "kind": "data",
+          "from": {"node": "k1", "port": "out"},
+          "to":   {"node": "sum", "port": "in2"} },
+        { "id": "e_k2_sum", "kind": "data",
+          "from": {"node": "k2", "port": "out"},
+          "to":   {"node": "sum", "port": "in3"} },
+        { "id": "e_k3_sum", "kind": "data",
+          "from": {"node": "k3", "port": "out"},
+          "to":   {"node": "sum", "port": "in4"} },
+
+        { "id": "e_sum_y", "kind": "data",
+          "from": {"node": "sum", "port": "out"},
+          "to":   {"node": "y1", "port": "in"} }
+      ]
+    }
+  ]
+}

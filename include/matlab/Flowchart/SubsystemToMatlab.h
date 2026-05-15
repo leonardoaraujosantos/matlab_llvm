@@ -3,6 +3,7 @@
 #include "matlab/AST/AST.h"
 #include "matlab/Flowchart/Loader.h"
 
+#include <map>
 #include <optional>
 #include <string>
 #include <vector>
@@ -40,16 +41,45 @@ namespace flowchart {
 // diagnostic; the pass returns nullptr.
 //===----------------------------------------------------------------------===//
 
-// Tier-4 emit options. `TargetRate` is the global sample period
-// (seconds) the codegen lane discretises every continuous block to;
-// 0.0 = unset, fall back to per-block `sample_time` / `Ts` or
-// `settings.solver.maxStep`. `DiscretizeMethod` is currently
-// "backward_euler" (the simulator's signal_discrete_integrator
-// default — uses the current input). Future: "trapezoidal" /
-// "forward_euler".
+// Per-port fixed-point spec for HDL emit. Default `Q16.16` signed
+// covers most embedded-controller datapaths; user overrides per port
+// via `--fi-spec <name>=Q<W>.<F>` on the CLI.
+struct FixedPointSpec {
+  int Width = 32;
+  int Frac  = 16;
+  bool Signed = true;
+};
+
+// Tier-4 + Tier-5 emit options.
+//
+// `TargetRate` (Tier 4): global sample period (seconds) the codegen
+// lane discretises every continuous block to; 0.0 = unset, fall back
+// to per-block `sample_time` / `Ts` or `settings.solver.maxStep`.
+//
+// `RejectContinuous` (Tier 5): when true, continuous-time blocks
+// (`signal_integrator` / `signal_transfer_fcn` / etc.) emit a
+// sourced error instead of auto-discretising. SV emit sets this
+// because hardware has no implicit floating-point integrator —
+// the user must replace continuous blocks with their discrete
+// counterparts in the source `.mflow` explicitly.
+//
+// `StateAsPersistent` (Tier 5): when true, stateful blocks emit
+// state as MATLAB `persistent` variables (with `if isempty(...)`
+// initialisation guarded by a `reset` arg) instead of as function
+// args + returns. This routes through the existing matlab_llvm
+// SV pipeline's persistent → register lowering and keeps subsystem
+// state internal to the synthesised module.
+//
+// `FiDefault` / `FiSpecs`: default fixed-point format + per-port
+// overrides for the synthesised function's args / returns. Only
+// honoured by the HDL emit lane.
 struct SubsystemEmitOptions {
   double TargetRate = 0.0;
   std::string DiscretizeMethod = "backward_euler";
+  bool RejectContinuous = false;
+  bool StateAsPersistent = false;
+  FixedPointSpec FiDefault{};
+  std::map<std::string, FixedPointSpec> FiSpecs;
 };
 
 // Lower a named subsystem to a `matlab::Function`. The returned node
