@@ -886,10 +886,17 @@ matlab::Function *lowerSubsystemToMatlab(
       // final state-update block at end of body.
       Expr *NextExpr = nullptr;
       if (N->Kind == "signal_unit_delay" || N->Kind == "signal_zoh") {
-        // Next state = current input.  Anchor with `+ 0.0` for
-        // the same reason as above.
+        // Next state = current input. Software targets anchor with
+        // `+ 0.0` so the static -emit-* pipeline's slot inference
+        // picks `double` (otherwise pure-passthrough subsystems
+        // get DCE'd to `pass`). HDL mode passes the input through
+        // directly — adding an f64 literal would taint the
+        // persistent slot's fi typing and trip the HWLegalize
+        // synthcheck.
         Expr *U = Ins.empty() ? B.number(0.0) : Ins.front();
-        NextExpr = B.bin(BinOp::Add, U, B.number(0.0));
+        NextExpr = Opts.StateAsPersistent
+                       ? U
+                       : B.bin(BinOp::Add, U, B.number(0.0));
       } else if (N->Kind == "signal_discrete_integrator" ||
                  N->Kind == "signal_integrator") {
         // signal_integrator (continuous) gets auto-discretised here

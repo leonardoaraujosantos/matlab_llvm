@@ -322,15 +322,38 @@ Demos:
   synthesisable SV with Q16.16 fi ports.
 - `matlab_fcn_sv.mflow` — `signal_matlab_fcn` block containing
   user-written synthesisable MATLAB.
-- `fir_4tap.mflow` — 4-tap FIR (Unit Delays + Gains + Sum) —
-  Python/C/C++/TS emit + class wrappers work end-to-end; SV
-  blocked on Tier-5b (stateful → SV).
+- `tapped_delay.mflow` (Tier-5b) — 3-tap shift register with
+  multi-output. Stateful subsystem → SV with `clk` / `rst_n` /
+  `reset` + three `logic signed [31:0]` registers + the
+  required `always_ff @(posedge clk or negedge rst_n)` block.
+- `fir_4tap.mflow` — 4-tap FIR — Python/C/C++/TS emit + class
+  wrappers work end-to-end; SV blocked on the fi-math width
+  tracker bug (Tier-5c, see carve-outs).
 
-Tier-5b open carve-outs (not yet shipped):
-- Stateful subsystems → SV: `isempty(...) || reset` short-or →
-  `if isempty + if reset` split needs the reset arg coerced to
-  f64 in the HWStateInfer step. Functional / class wrappers in
-  software targets work; only HDL is blocked.
+Tier-5b (✓ shipped 2026-05-15):
+- `lib/MLIR/Passes/SplitIsEmptyOr.cpp` extended to recognise the
+  **post-`LowerScalarsToArith` shape**: `arith.cmpf one, %ie, 0.0`
+  feeding `arith.ori` with the reset operand. Pre-existing
+  implementation only matched the pre-lowering `matlab.short_or`
+  shape, which the SV pipeline had already lowered by the time
+  the split-pass ran. Side benefit: the same fix unblocked **20
+  pre-existing matlab_llvm SV tests** (`emit-sv-tests` 47/77 →
+  67/77; FSM-encoding sweep 6/10 → 10/10 — `axi_handshake.m`,
+  `mealy_fsm.m`, `moore_fsm.m`, `cordic_pipe.m`, ...).
+- HDL-mode dropped the `+ 0.0` software-target type anchor on
+  Unit Delay / ZOH state updates — adding an f64 literal taints
+  the persistent slot's fi typing and trips HWLegalize. HDL
+  mode passes the input through directly.
+
+Tier-5c open carve-outs (not yet shipped):
+- **fi-math width tracker (pre-existing matlab_llvm bug)**:
+  expressions mixing a persistent fetch and a function-arg
+  through fi-multiply + add (e.g. the 4-tap FIR's
+  `0.25*u + 0.25*s_d1 + ...`) hit a `matlab.add(i32, i64) ->
+  none` mismatch at HWLegalize. The persistent value goes
+  through a saturate path that produces i64, while the function
+  arg stays i32. `runHWBitWidthInfer` should equalise widths
+  before legality check; needs deeper SV pipeline work.
 - `signal_saturation` → SV: bool-by-fi multiplication doesn't
   synthesise; workaround for HDL targets is to replace with a
   `signal_matlab_fcn` containing the if/elseif/else.

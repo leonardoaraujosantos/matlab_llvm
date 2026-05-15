@@ -295,6 +295,39 @@ sv_smoke() {
 }
 sv_smoke
 
+# Tier-5b — stateful subsystem → SV. Three Unit Delays form a
+# tapped delay line; each emits a clocked register, no fi-math on
+# the persistent reads. Checks (i) the module has clk+rst+reset
+# wired, (ii) three logic signed [31:0] regs are declared, (iii)
+# the always_ff block is present.
+sv_stateful_smoke() {
+  local sv="$SCRATCH/tapped_delay.sv"
+  "$MATLABC" -emit-sv "$EX/tapped_delay.mflow" --subsystem tapped_delay \
+       > "$sv" 2> "$SCRATCH/emit.err"
+  if ! grep -q "module tapped_delay" "$sv"; then
+    fail=$((fail+1)); fails+=("tapped_delay (missing module)")
+    sed 's/^/  /' "$SCRATCH/emit.err" >&2
+    return
+  fi
+  if ! grep -q "input  logic clk" "$sv" \
+       || ! grep -q "input  logic rst_n" "$sv" \
+       || ! grep -q "input  logic reset" "$sv"; then
+    fail=$((fail+1)); fails+=("tapped_delay (missing clk/rst)")
+    return
+  fi
+  if [[ $(grep -c "logic signed \[31:0\] s_" "$sv") -lt 3 ]]; then
+    fail=$((fail+1)); fails+=("tapped_delay (missing state regs)")
+    head -25 "$sv" >&2
+    return
+  fi
+  if ! grep -q "always_ff @(posedge clk" "$sv"; then
+    fail=$((fail+1)); fails+=("tapped_delay (no always_ff block)")
+    return
+  fi
+  pass=$((pass+1))
+}
+sv_stateful_smoke
+
 # Tier 5 — continuous block must be rejected with a sourced error
 # in HDL emit (no implicit auto-discretisation).
 sv_reject() {
