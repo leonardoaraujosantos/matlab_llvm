@@ -305,6 +305,11 @@ private:
   // scheduler fires at end-of-step so the `Out_` read at tick time
   // is `u[n+1]`. This vector stashes `u[n]` between ticks.
   std::vector<double> DiscPrevU_;
+  // §17.5 #5 — u-history buffer for signal_discrete_filter. One
+  // vector per block; size matches the filter order so any
+  // numerator coefficient (b₀..b_M) can multiply its corresponding
+  // delayed input u[n-k]. Empty for non-filter blocks.
+  std::vector<std::vector<double>> FirHistory_;
   // Per-block next-fire time. `+∞` for blocks that don't have a
   // discrete sample-time; a finite value (multiple of `SamplePeriod`)
   // for Unit Delay / ZOH / future Discrete blocks.
@@ -344,6 +349,7 @@ private:
     std::vector<double> Out;
     std::vector<double> Z;          // discrete state
     std::vector<double> DiscPrevU;  // §17.5 #4 — prev-tick input
+    std::vector<std::vector<double>> FirHistory; // §17.5 #5
     std::vector<double> PrevOut;    // for Tier-F edge-trigger detection
     std::vector<double> NextFire;   // scheduler queue
     std::vector<int> ZCSign;        // zero-crossing signs

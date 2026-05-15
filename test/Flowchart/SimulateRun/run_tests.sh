@@ -265,6 +265,23 @@ SB_T2=$(printf '%s\n' "$SB" | awk -F, 'NR>1 && $1+0==2.0 {print $3-$2; exit}')
 check "stiff plant tracks drive at t=2.0" \
   "awk 'BEGIN{exit !(($SB_T2)^2 < 1e-2)}'" ""
 
+#--- fir_filter (§17.5 #5): 3-tap moving-average FIR ----------------------
+FF="$("$MATLABC" -simulate "$EX/fir_filter.mflow")"
+FF_HEAD=$(printf '%s\n' "$FF" | head -1)
+check "fir_filter header" "[[ '$FF_HEAD' == 't,step,ma3,scope' ]]" ""
+# Step at t=0.1; FIR ticks at 0.05s with b=[1/3, 1/3, 1/3].
+# First tick after step (t=0.15) sees one '1' in the 3-tap window
+# → output = 1/3. Second tick (t=0.20) → 2/3. Third (t=0.25) → 1.0.
+FF_T015=$(printf '%s\n' "$FF" | awk -F, 'NR>1 && $1+0 >= 0.149 && $1+0 < 0.151 {print $3; exit}')
+check "FIR tap 1 = 1/3" \
+  "awk 'BEGIN{exit !(($FF_T015 - 0.333333)^2 < 1e-6)}'" ""
+FF_T020=$(printf '%s\n' "$FF" | awk -F, 'NR>1 && $1+0 >= 0.199 && $1+0 < 0.201 {print $3; exit}')
+check "FIR tap 2 = 2/3" \
+  "awk 'BEGIN{exit !(($FF_T020 - 0.666666)^2 < 1e-6)}'" ""
+FF_T025=$(printf '%s\n' "$FF" | awk -F, 'NR>1 && $1+0 >= 0.249 && $1+0 < 0.251 {print $3; exit}')
+check "FIR steady-state = 1.0" \
+  "awk 'BEGIN{exit !(($FF_T025 - 1.0)^2 < 1e-6)}'" ""
+
 #--- bouncing_ball (§17.5 #2): integrator-reset port ----------------------
 BB="$("$MATLABC" -simulate "$EX/bouncing_ball.mflow")"
 BB_HEAD=$(printf '%s\n' "$BB" | head -1)

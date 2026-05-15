@@ -424,6 +424,16 @@ MflowLinkSim::MflowLinkSim(const MflowLinkModel &M) : M_(M) {
   Z_.assign(M_.DiscStateCount, 0.0);
   Znext_.assign(M_.DiscStateCount, 0.0);
   DiscPrevU_.assign(N, 0.0);
+  FirHistory_.assign(N, {});
+  // Pre-size FIR history per discrete_filter block to max(NumLen,
+  // DenLen) so every reference index is in-range.
+  for (size_t I = 0; I < N; ++I) {
+    if (M_.Blocks[I].Kind != "signal_discrete_filter") continue;
+    const auto &TF = TFCache_[I];
+    size_t Sz = std::max(TF.Num.size(), TF.Den.size());
+    if (Sz == 0) Sz = 1;
+    FirHistory_[I].assign(Sz, 0.0);
+  }
 
   // Input wiring. Sum / Product blocks read in1, in2, …; every other
   // single-input block reads "in".
@@ -615,6 +625,7 @@ void MflowLinkSim::reset() {
   std::fill(Z_.begin(), Z_.end(), 0.0);
   std::fill(Znext_.begin(), Znext_.end(), 0.0);
   std::fill(DiscPrevU_.begin(), DiscPrevU_.end(), 0.0);
+  for (auto &H : FirHistory_) std::fill(H.begin(), H.end(), 0.0);
   std::fill(Out_.begin(), Out_.end(), 0.0);
   std::fill(PrevOut_.begin(), PrevOut_.end(), 0.0);
   for (auto &C : LogColumns_) C.clear();
@@ -2053,34 +2064,56 @@ void MflowLinkSim::fireDiscreteTicks() {
       Znext_[Off] = Y;
       DiscPrevU_[I] = U;
     } else if (B.Kind == "signal_discrete_filter") {
-      // Direct-form-II IIR step: y[n] = (num · u_history − den[1..] · y_history) / den[0]
-      // For our single-output Tier-H pass, Z_ stores `den.size()-1`
-      // taps of y. We re-derive the state every tick from the
-      // already-cached coefficients.
+      // §17.5 #5 — full direct-form-II IIR with u-history (FIR
+      // numerator path). User provides num and den as polynomials
+      // in z, highest order first. We rewrite as z^-1:
+      //   H(z) = (Σ NumPad[k]·z^-k) / (Σ Den[k]·z^-k), k = 0..N
+      //   where N = DenLen - 1 and NumPad pads Num with leading
+      //   zeros to align with Den.
+      // Time domain (after dividing by Den[0]):
+      //   y[n] = (1/Den[0]) · ( Σ NumPad[k]·u[n-k] − Σ Den[k]·y[n-k] )
+      // Z_ holds y[n-1]..y[n-(DenLen-1)]; FirHistory_ holds
+      // u[n]..u[n-(NumLen-1+pad)].
       const auto &TF = TFCache_[I];
-      int N = static_cast<int>(TF.Den.size()) - 1;
+      int DenLen = static_cast<int>(TF.Den.size());
+      int NumLen = static_cast<int>(TF.Num.size());
+      auto &UHist = FirHistory_[I];
+      if ((int)UHist.size() < std::max(DenLen, NumLen))
+        UHist.resize(std::max(DenLen, NumLen), 0.0);
+      // Shift u-history: UHist[K] = u[n-K]. Newest at index 0.
+      for (int K = (int)UHist.size() - 1; K >= 1; --K)
+        UHist[K] = UHist[K - 1];
+      UHist[0] = U;
+
       double Y = 0.0;
-      if (TF.Valid && N >= 0) {
+      if (TF.Valid && DenLen >= 1) {
         double Lead = TF.Den.front();
-        double NumLead = TF.Num.empty() ? 0.0 : TF.Num.front();
-        // Use the leading-coefficient feedforward of u + the running
-        // sum of previous-y feedback taps. A full direct-form-II
-        // needs both u-history and y-history; the IIR Tier-H pass
-        // implements the y-feedback half (poles) so simple low/
-        // high-pass IIR filters work. Zero-only FIR designs are a
-        // follow-up that needs a u-history buffer too.
-        Y = (NumLead / Lead) * U;
-        for (int K = 0; K < N; ++K)
-          Y -= (TF.Den[K + 1] / Lead) * Z_[Off + K];
+        if (Lead == 0.0) Lead = 1.0;
+        int N = DenLen - 1;
+        // Padding offset: NumPad coefficient for z^-k corresponds
+        // to TF.Num[k - UShift] when k ≥ UShift, else 0.
+        int UShift = DenLen - NumLen;
+        if (UShift < 0) UShift = 0;
+        // Numerator sum: Σ TF.Num[j] · u[n - (UShift + j)].
+        for (int J = 0; J < NumLen; ++J) {
+          int HistIdx = UShift + J;
+          double UVal = (HistIdx < (int)UHist.size())
+                          ? UHist[HistIdx] : 0.0;
+          Y += TF.Num[J] * UVal;
+        }
+        // Denominator feedback: − Σ TF.Den[k] · y[n-k], k = 1..N.
+        for (int K = 1; K <= N; ++K) {
+          Y -= TF.Den[K] * Z_[Off + K - 1];
+        }
+        Y /= Lead;
       } else {
         Y = U;
       }
-      // Shift taps: y[n-1] ← y[n], y[n-2] ← y[n-1], …
+      // Shift y-history.
+      int N = DenLen - 1;
       for (int K = N - 1; K >= 1; --K) Z_[Off + K] = Z_[Off + K - 1];
       if (N >= 1) Z_[Off + 0] = Y;
-      // Even if N == 0 (static gain), Out_ still needs to surface Y
-      // — store it in slot 0 for the evaluator to read.
-      if (N == 0) Z_[Off] = Y;
+      if (N == 0) Z_[Off] = Y;  // pure FIR (no feedback)
     }
     NextFire_[I] += B.SamplePeriod > 0.0 ? B.SamplePeriod : 1.0;
     AnyFired = true;
@@ -2301,6 +2334,7 @@ void MflowLinkSim::pushSnapshot() {
   S.Out = Out_;
   S.Z = Z_;
   S.DiscPrevU = DiscPrevU_;
+  S.FirHistory = FirHistory_;
   S.PrevOut = PrevOut_;
   S.NextFire = NextFire_;
   S.ZCSign = ZCSign_;
@@ -2321,6 +2355,7 @@ bool MflowLinkSim::stepBackMajor() {
   Z_ = std::move(S.Z);
   Znext_ = Z_; // shadow buffer matches the latched value on restore
   DiscPrevU_ = std::move(S.DiscPrevU);
+  FirHistory_ = std::move(S.FirHistory);
   PrevOut_ = std::move(S.PrevOut);
   NextFire_ = std::move(S.NextFire);
   ZCSign_ = std::move(S.ZCSign);
