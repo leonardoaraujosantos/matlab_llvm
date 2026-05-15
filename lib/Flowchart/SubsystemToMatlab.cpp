@@ -159,6 +159,54 @@ bool isStatefulKind(const std::string &K) {
          K == "signal_state_space";
 }
 
+// Tier-5i — does this block's output equation overwrite the
+// state-read local? For these kinds the state-read hoist must
+// write to a SEPARATE local (e.g. `x1_<id>`) so the next-state
+// update — emitted at end-of-body, AFTER the output assignment —
+// still sees the un-overwritten state value.
+//
+// Gated on `Method == "tustin"` because:
+//
+//   - Forward Euler `signal_transfer_fcn` / `signal_zero_pole` /
+//     `signal_state_space` output equations have NO direct
+//     feedthrough (y = b_0*x or C*x, depends on state only).
+//     Their state-update uses `state[k]` not `y[k]`, so even
+//     when the output overwrites OutVar, the state-update reads
+//     `localFor` which under FE Order=1 == OutVar — yielding
+//     `b_0*state` instead of `state`. **This is latent: FE TF
+//     with b_0=1 (the existing tf_lowpass) is unaffected; b_0!=1
+//     would be wrong.** Fixing that requires emitting the output
+//     equation EARLY (right after state-read hoist) so consumers
+//     reading the OutVar in a feedback loop see the correct
+//     value. Deferred — no Tier ≤ 5h demo exercises b_0!=1
+//     Order=1.
+//
+//   - Tustin always has direct feedthrough through the output:
+//     y[k] = NumZ[0]*u[k] + v_1[k] (TF/ZP/SS) or
+//     y[k] = (Ts/2)*u[k] + state[k] (integrator). The output
+//     overwrites OutVar with a value that depends on u[k]. The
+//     state-update needs the ORIGINAL state value, which is only
+//     preserved by a separate LocalVar.
+//
+//     Tustin blocks placed in algebraic feedback loops (output
+//     fed back to input without an intervening unit-delay) form a
+//     combinational loop that this lowering can't break. Users
+//     wanting a Tustin-discretised filter inside a feedback loop
+//     should replace the manual Integrator+Sum subgraph with a
+//     standalone `signal_transfer_fcn` and let Tustin
+//     discretisation handle the math globally. Detection of such
+//     loops is a follow-up — current code emits an uninitialised
+//     OutVar read at runtime.
+bool needsSeparateLocal(const std::string &Kind,
+                        const std::string &Method) {
+  if (Method != "tustin") return false;
+  return Kind == "signal_transfer_fcn" ||
+         Kind == "signal_zero_pole"    ||
+         Kind == "signal_state_space"  ||
+         Kind == "signal_integrator"   ||
+         Kind == "signal_discrete_integrator";
+}
+
 // Tier-5g — parse a comma-separated coefficient list, highest order
 // first.  Mirrors `parsePoly` in lib/Flowchart/MflowLinkSim.cpp.
 std::vector<double> parsePoly(const std::string &S) {
@@ -222,6 +270,135 @@ void parseMatrixStr(const std::string &S, std::vector<double> &Vals,
     if (C > 0) {
       ++Rows;
       Cols = C;
+    }
+  }
+}
+
+// Tier-5i — generic polynomial helpers used by the Tustin (bilinear)
+// substitution path. Coefficient convention matches `parsePoly` /
+// `expandPoly`: highest power first, length = degree + 1.
+std::vector<double> polyMul(const std::vector<double> &A,
+                            const std::vector<double> &B) {
+  if (A.empty() || B.empty()) return {};
+  std::vector<double> C(A.size() + B.size() - 1, 0.0);
+  for (size_t I = 0; I < A.size(); ++I)
+    for (size_t J = 0; J < B.size(); ++J)
+      C[I + J] += A[I] * B[J];
+  return C;
+}
+
+std::vector<double> polyPow(const std::vector<double> &P, int K) {
+  std::vector<double> R{1.0};
+  for (int I = 0; I < K; ++I) R = polyMul(R, P);
+  return R;
+}
+
+void polyAddInto(std::vector<double> &Acc,
+                 const std::vector<double> &P) {
+  if (Acc.size() < P.size())
+    Acc.insert(Acc.begin(), P.size() - Acc.size(), 0.0);
+  size_t Off = Acc.size() - P.size();
+  for (size_t I = 0; I < P.size(); ++I) Acc[Off + I] += P[I];
+}
+
+// Tier-5i — Apply Tustin (bilinear) substitution s = (2/Ts)·(z-1)/(z+1)
+// to a polynomial in s of degree m ≤ DegN, multiplying every term by
+// (z+1)^(DegN - PowS) so the result is a single polynomial in z of
+// degree DegN (highest power first, length DegN+1). Used for both
+// numerator and denominator: pass the SAME DegN for both so the two
+// share a common denominator clearing factor (z+1)^DegN.
+std::vector<double> tustinSubst(const std::vector<double> &Ps, int DegN,
+                                double Ts) {
+  std::vector<double> R(DegN + 1, 0.0);
+  std::vector<double> Z1{1.0, -1.0};  // z - 1
+  std::vector<double> Z0{1.0, 1.0};   // z + 1
+  int M = (int)Ps.size() - 1;
+  double TwoOverTs = 2.0 / Ts;
+  for (int K = 0; K <= M; ++K) {
+    double Coef = Ps[K];
+    if (Coef == 0.0) continue;
+    int PowS = M - K;  // power of s for this term
+    double Scale = Coef;
+    for (int J = 0; J < PowS; ++J) Scale *= TwoOverTs;
+    auto Term = polyMul(polyPow(Z1, PowS), polyPow(Z0, DegN - PowS));
+    for (auto &X : Term) X *= Scale;
+    polyAddInto(R, Term);
+  }
+  return R;
+}
+
+// Tier-5i — Tustin discretisation of a continuous SISO TF Num/Den.
+// Returns the discrete numerator and denominator in z, both length
+// (deg(Den) + 1), normalised so the leading denominator coefficient
+// is 1. The discrete numerator is proper (degree = deg(Den)) so the
+// realisation has a direct-feedthrough term — that's the defining
+// feature of Tustin vs. Forward Euler. Caller must drive the result
+// through a realisation that handles direct feedthrough (e.g. Direct
+// Form II Transposed).
+void tustinTF(const std::vector<double> &Num,
+              const std::vector<double> &Den, double Ts,
+              std::vector<double> &NumZ, std::vector<double> &DenZ) {
+  int N = (int)Den.size() - 1;  // continuous denominator degree
+  NumZ = tustinSubst(Num, N, Ts);
+  DenZ = tustinSubst(Den, N, Ts);
+  double Lead = DenZ.front();
+  if (Lead == 0.0) Lead = 1.0;
+  for (auto &X : NumZ) X /= Lead;
+  for (auto &X : DenZ) X /= Lead;
+}
+
+// Tier-5i — Faddeev-LeVerrier conversion of a SISO continuous state-
+// space (A, B, C) into a transfer function (Num, Den). A is N×N
+// row-major, B is N×1, C is 1×N. Returns Num of length N (degree
+// N-1, lowest leading coef is the s^{N-1} term) and Den of length
+// N+1 (monic in s^N). Both highest-power first.
+//
+// Algorithm (with monic numerator/denominator convention):
+//   M_0 = I,  p_0 = 1
+//   M_1 = A * M_0 + p_1 * I,  p_1 = -tr(A * M_0) / 1
+//   M_k = A * M_{k-1} + p_k * I,  p_k = -tr(A * M_{k-1}) / k
+//   det(sI - A) = s^N + p_1 s^{N-1} + ... + p_N
+//   adj(sI - A) = s^{N-1} M_0 + s^{N-2} M_1 + ... + M_{N-1}
+// SISO numerator coefficient of s^{N-1-k} is (C * M_k * B).
+void ssToTFSiso(const std::vector<double> &A,
+                const std::vector<double> &B,
+                const std::vector<double> &C, int N,
+                std::vector<double> &Num,
+                std::vector<double> &Den) {
+  auto matMul = [&](const std::vector<double> &X,
+                     const std::vector<double> &Y, int Xr, int Xc,
+                     int Yc) {
+    std::vector<double> R(Xr * Yc, 0.0);
+    for (int I = 0; I < Xr; ++I)
+      for (int J = 0; J < Yc; ++J) {
+        double S = 0.0;
+        for (int K = 0; K < Xc; ++K) S += X[I * Xc + K] * Y[K * Yc + J];
+        R[I * Yc + J] = S;
+      }
+    return R;
+  };
+  std::vector<double> Mk(N * N, 0.0);
+  for (int I = 0; I < N; ++I) Mk[I * N + I] = 1.0;  // M_0 = I
+  Den.assign(N + 1, 0.0);
+  Den[0] = 1.0;  // s^N coefficient (monic)
+  Num.assign(N, 0.0);
+  // s^{N-1} coefficient of Num = C * M_0 * B.
+  {
+    auto CB = matMul(C, matMul(Mk, B, N, N, 1), 1, N, 1);
+    Num[0] = CB[0];
+  }
+  for (int K = 1; K <= N; ++K) {
+    auto AMk = matMul(A, Mk, N, N, N);
+    double Trace = 0.0;
+    for (int I = 0; I < N; ++I) Trace += AMk[I * N + I];
+    double Pk = -Trace / (double)K;
+    Den[K] = Pk;
+    // M_k = A * M_{k-1} + p_k * I
+    Mk = AMk;
+    for (int I = 0; I < N; ++I) Mk[I * N + I] += Pk;
+    if (K < N) {
+      auto CMB = matMul(C, matMul(Mk, B, N, N, 1), 1, N, 1);
+      Num[K] = CMB[0];
     }
   }
 }
@@ -843,6 +1020,14 @@ matlab::Function *lowerSubsystemToMatlab(
 
   // For each non-port block, decide a unique output variable name.
   std::unordered_map<std::string, std::string> VarOfNode;
+  // Tier-5i — port-specific output variable map. For single-output
+  // blocks this echoes VarOfNode; for MIMO state-space the block
+  // exposes one variable per `out<q>` port. `resolveInputExpr`
+  // looks up here first (using the edge's source port) and falls
+  // back to `VarOfNode` so non-MIMO blocks still work via the
+  // legacy single-var path.
+  std::map<std::pair<std::string, std::string>, std::string>
+      VarOfNodePort;
   for (auto &P : Inports)  VarOfNode[P.N->Id] = P.Var;
   for (auto &P : Outports) VarOfNode[P.N->Id] = P.Var;
   // Avoid name collisions across blocks.
@@ -928,13 +1113,18 @@ matlab::Function *lowerSubsystemToMatlab(
     if (!isStatefulKind(N->Kind)) continue;
     int Order = stateOrderForBlock(N);
     if (Order == 1) {
-      // Single-slot stateful block — LocalVar coincides with the
-      // block's output variable (state read IS the output).
+      // Single-slot stateful block. LocalVar normally coincides
+      // with the block's output variable (state read IS the output);
+      // direct-feedthrough-style blocks (Tier-5i) override that.
       StateSlot S;
       S.N        = N;
       S.CurArg   = "s_" + sanitizeIdent(N->Id);
       S.NextOut  = "s_" + sanitizeIdent(N->Id) + "_next";
-      S.LocalVar = "";  // resolved to VarOfNode[N->Id] below
+      if (needsSeparateLocal(N->Kind, Opts.DiscretizeMethod)) {
+        S.LocalVar = "x1_" + sanitizeIdent(N->Id);
+      } else {
+        S.LocalVar = "";  // resolved to VarOfNode[N->Id] below
+      }
       States.push_back(S);
     } else {
       // Multi-slot (higher-order TF) — N slots named s_<id>_x1, …,
@@ -965,16 +1155,50 @@ matlab::Function *lowerSubsystemToMatlab(
   for (auto &S : States) {
     if (S.LocalVar.empty()) S.LocalVar = VarOfNode[S.N->Id];
   }
+  // Tier-5i — MIMO state-space exposes one variable per `out<q>`
+  // port. Allocate the per-port names now so downstream blocks can
+  // wire to specific outputs via the edge index. SISO blocks skip
+  // this and fall through to the legacy VarOfNode path.
+  for (auto *N : Internal) {
+    if (N->Kind != "signal_state_space") continue;
+    auto It = N->Params.find("C");
+    if (It == N->Params.end()) continue;
+    std::vector<double> CM;
+    int Cr = 0, Cc = 0;
+    parseMatrixStr(It->second, CM, Cr, Cc);
+    if (Cr <= 1) continue;  // SISO output — legacy path
+    std::string Base = sanitizeIdent(N->Id);
+    for (int Q = 1; Q <= Cr; ++Q) {
+      std::string PortId = "out" + std::to_string(Q);
+      std::string Var = Base + "_y" + std::to_string(Q);
+      // Bump on collision the same way `uniqueVarFor` does.
+      int Suffix = 1;
+      while (Used.count(Var))
+        Var = Base + "_y" + std::to_string(Q) + "_" +
+              std::to_string(++Suffix);
+      Used.insert(Var);
+      VarOfNodePort[{N->Id, PortId}] = Var;
+    }
+    // First output also stamped at the default block id so any
+    // legacy lookup (`VarOfNode[N->Id]`) lands on `out1`.
+    VarOfNode[N->Id] = VarOfNodePort[{N->Id, "out1"}];
+  }
 
   // Build the function body.
   auto *Body = AST.make<Block>();
 
   // Resolve a Name expression to the variable feeding the named port.
+  // Tier-5i — port-aware lookup: if the source block exposes a
+  // per-port variable (e.g. MIMO state-space's `out1`/`out2`/...),
+  // use that. Otherwise fall back to the block's single OutVar.
   auto resolveInputExpr = [&](const std::string &ToNode,
                               const std::string &ToPort) -> Expr * {
     auto It = EI.Map.find({ToNode, ToPort});
     if (It == EI.Map.end()) return B.number(0.0);
-    auto VarIt = VarOfNode.find(It->second.first);
+    const auto &From = It->second;
+    auto VP = VarOfNodePort.find(From);
+    if (VP != VarOfNodePort.end()) return B.name(VP->second);
+    auto VarIt = VarOfNode.find(From.first);
     if (VarIt == VarOfNode.end()) return B.number(0.0);
     return B.name(VarIt->second);
   };
@@ -1177,8 +1401,7 @@ matlab::Function *lowerSubsystemToMatlab(
         // targets emit the bare double (the IEEE arithmetic is what
         // matches the simulator's continuous integrator).
         Expr *TsConst = B.WrapFi ? B.lit(Ts) : B.number(Ts);
-        Expr *TsU = B.bin(BinOp::ElemMul, TsConst, U);
-        // Tier-5e — in HDL mode, reference the LOCAL state-read
+        // Tier-5e / 5i — in HDL mode, reference the LOCAL state-read
         // variable (set by the hoisted state-read at top of body)
         // instead of the persistent slot. The local was already
         // converted from f64 → fi/i32 by fptosi; re-fetching the
@@ -1186,24 +1409,50 @@ matlab::Function *lowerSubsystemToMatlab(
         // `matlab.add(f64, i32) → none` downstream. Software
         // targets keep referencing the persistent slot directly
         // (the slot is a plain f64 var, no conversion needed).
-        const std::string &LocalRead =
-            B.WrapFi ? VarOfNode[N->Id] : CurS;
-        NextExpr = B.bin(BinOp::Add, B.name(LocalRead), TsU);
+        // For Tustin (direct-feedthrough) the state-read local is
+        // forced separate from OutVar — see needsSeparateLocal —
+        // so the next-state update still sees state[k], not y[k].
+        bool SepLocal =
+            needsSeparateLocal(N->Kind, Opts.DiscretizeMethod);
+        std::string LocalRead =
+            SepLocal           ? ("x1_" + sanitizeIdent(N->Id))
+            : B.WrapFi         ? VarOfNode[N->Id]
+                               : CurS;
+        // Tier-5i — Tustin (trapezoidal) integrator: in DF2T form
+        //   y[k] = (Ts/2)*u[k] + v[k]         (direct feedthrough)
+        //   v_next = v[k] + Ts*u[k]           (same accumulator)
+        // The single state slot stores `y[k-1] + (Ts/2)*u[k-1]`, so
+        // initial-condition semantics (state init = y at t=0 before
+        // the first sample) line up with the Forward-Euler form.
+        if (Opts.DiscretizeMethod == "tustin") {
+          Expr *HalfTs = B.WrapFi ? B.lit(Ts / 2.0)
+                                  : B.number(Ts / 2.0);
+          Expr *HalfTsU = B.bin(BinOp::ElemMul, HalfTs, U);
+          // Output overwrite with direct feedthrough.
+          Body->Stmts.push_back(B.assign(
+              VarOfNode[N->Id],
+              B.bin(BinOp::Add, B.name(LocalRead), HalfTsU)));
+          // State update mirrors Forward Euler — pre-feedthrough.
+          Expr *TsU = B.bin(BinOp::ElemMul, TsConst, U);
+          NextExpr = B.bin(BinOp::Add, B.name(LocalRead), TsU);
+        } else {
+          Expr *TsU = B.bin(BinOp::ElemMul, TsConst, U);
+          NextExpr = B.bin(BinOp::Add, B.name(LocalRead), TsU);
+        }
       } else if (N->Kind == "signal_transfer_fcn" ||
                  N->Kind == "signal_zero_pole") {
-        // Tier-5h — continuous N-th order strictly-proper Transfer
-        // Function (or Zero-Pole expanded to one) via Forward Euler
-        // on the controllable canonical state-space realisation.
+        // Tier-5h/5i — continuous N-th order strictly-proper Transfer
+        // Function (or Zero-Pole expanded to one).
         //
         //   H(s) = (b_{n-1}*s^{n-1} + ... + b_0) / (s^n + a_{n-1}*s^{n-1} + ... + a_0)
         //
-        // Controllable canonical form:
-        //   x_1' = x_2;  x_2' = x_3;  ...;  x_{n-1}' = x_n
-        //   x_n' = -a_0*x_1 - a_1*x_2 - ... - a_{n-1}*x_n + u
-        //   y    =  b_0*x_1 +  b_1*x_2 + ... +  b_{n-1}*x_n
-        //
-        // Forward Euler at Ts: x_i[k+1] = x_i[k] + Ts * x_i'[k].
-        // Strict-proper invariant ⇒ no direct feedthrough.
+        // Two discretisation paths gated on Opts.DiscretizeMethod:
+        // - "forward_euler" (default): controllable canonical state-
+        //   space + Forward Euler. Strict-proper continuous TF stays
+        //   strict-proper in discrete form.
+        // - "tustin" (Tier-5i): polynomial substitution s = (2/Ts)·
+        //   (z-1)/(z+1), then Direct Form II Transposed. Discrete TF
+        //   gains direct feedthrough n_n*u[k]; same N state slots.
         std::vector<double> NumIn, DenIn;
         if (!resolveTFCoeffs(*N, NumIn, DenIn)) {
           Diag.error(N->Loc,
@@ -1226,24 +1475,7 @@ matlab::Function *lowerSubsystemToMatlab(
                          "denominator degree).");
           return nullptr;
         }
-        // Normalise: divide every coefficient by den's leading
-        // coefficient so the canonical-form denominator is
-        // s^n + a_{n-1}*s^{n-1} + ... + a_0.
-        double Lead = DenIn.front();
         int Order = (int)DenIn.size() - 1;
-        // A[i] = coefficient of s^i in the normalised denominator
-        // (lowest power first), with A[Order] = 1 dropped (implicit).
-        std::vector<double> A(Order, 0.0);
-        for (int i = 0; i < Order; ++i)
-          A[i] = DenIn[DenIn.size() - 1 - i] / Lead;
-        // BV[i] = coefficient of s^i in the numerator (lowest power
-        // first), 0.0 for missing powers. Length Order (strictly
-        // proper ⇒ no s^Order term).
-        std::vector<double> BV(Order, 0.0);
-        for (size_t i = 0; i < NumIn.size(); ++i) {
-          size_t Power = NumIn.size() - 1 - i;
-          if ((int)Power < Order) BV[Power] = NumIn[i] / Lead;
-        }
         // Same Ts-resolution ladder as the integrator.
         double Ts = Opts.TargetRate;
         if (Ts <= 0.0) Ts = paramD(*N, "sample_time", 0.0);
@@ -1266,20 +1498,18 @@ matlab::Function *lowerSubsystemToMatlab(
           return nullptr;
         }
         Expr *U = Ins.empty() ? B.number(0.0) : Ins.front();
-        // For each of the Order slots, find the matching StateSlot
-        // (looked up by CurArg = "s_<id>_x<k>") and emit:
-        //   slot k (1..Order-1): x_k_next = x_k + Ts*x_{k+1}
-        //   slot Order:          x_Order_next = x_Order +
-        //                          Ts*(-A[0]*x_1 - ... - A[Order-1]*x_Order + u)
-        // Plus the OutVar = b_0*x_1 + ... + b_{n-1}*x_n linear combo
-        // (emitted below, after we collect the LocalVar names).
         std::string SlotPrefix = "s_" + sanitizeIdent(N->Id) + "_x";
         std::string LocalPrefix = "x";
         std::string LocalSuffix = "_" + sanitizeIdent(N->Id);
-        // For Order=1, single-slot path uses LocalVar = VarOfNode.
-        // Translate to the same name we used in the State collection.
+        // Tier-5i — Tustin direct-feedthrough Order=1 TF/ZP uses a
+        // separate state-read local (`x1_<id>`); FE Order=1 keeps
+        // the legacy LocalVar = OutVar convention so subsequent
+        // consumers can read the block's OutVar without waiting
+        // for the per-block dispatch to emit the output equation.
+        bool SepLocal =
+            needsSeparateLocal(N->Kind, Opts.DiscretizeMethod);
         auto localFor = [&](int K) -> std::string {
-          if (Order == 1) return VarOfNode[N->Id];
+          if (Order == 1 && !SepLocal) return VarOfNode[N->Id];
           return LocalPrefix + std::to_string(K) + LocalSuffix;
         };
         auto slotFor = [&](int K) -> std::string {
@@ -1289,6 +1519,58 @@ matlab::Function *lowerSubsystemToMatlab(
         auto fiC = [&](double V) -> Expr * {
           return B.WrapFi ? B.lit(V) : B.number(V);
         };
+        const std::string &OutV = VarOfNode[N->Id];
+        if (Opts.DiscretizeMethod == "tustin") {
+          // Tier-5i — Tustin bilinear: H(z) = NumZ/DenZ, both length
+          // Order+1. After normalisation DenZ[0]=1; NumZ[0] is the
+          // direct-feedthrough term n_n. Direct Form II Transposed
+          // (DF2T) realises the discrete IIR with Order state slots:
+          //   y    = n_n * u + v_1
+          //   v_i_next = n_{n-i} * u - d_{n-i} * y + v_{i+1}   (1..n-1)
+          //   v_n_next = n_0 * u - d_0 * y
+          std::vector<double> NumZ, DenZ;
+          tustinTF(NumIn, DenIn, Ts, NumZ, DenZ);
+          // Emit the output expression first (the next-state updates
+          // reference the local OutVar that carries y[k]).
+          Expr *YExpr = B.bin(BinOp::ElemMul, fiC(NumZ[0]), U);
+          YExpr = B.bin(BinOp::Add, YExpr, B.name(localFor(1)));
+          Body->Stmts.push_back(B.assign(OutV, YExpr));
+          // Now build the next-state expressions per slot.
+          for (int K = 1; K <= Order; ++K) {
+            // n_{n-K} = NumZ[K], d_{n-K} = DenZ[K]
+            Expr *Term = B.bin(BinOp::ElemMul, fiC(NumZ[K]), U);
+            Expr *Neg  = B.bin(BinOp::ElemMul, fiC(-DenZ[K]),
+                                B.name(OutV));
+            Expr *Acc  = B.bin(BinOp::Add, Term, Neg);
+            if (K < Order) {
+              Acc = B.bin(BinOp::Add, Acc, B.name(localFor(K + 1)));
+            }
+            NextStateExpr[slotFor(K)] = Acc;
+          }
+          NextExpr = nullptr;
+          continue;
+        }
+        // Forward Euler — controllable canonical state-space.
+        //   x_1' = x_2;  x_2' = x_3;  ...;  x_{n-1}' = x_n
+        //   x_n' = -a_0*x_1 - a_1*x_2 - ... - a_{n-1}*x_n + u
+        //   y    =  b_0*x_1 +  b_1*x_2 + ... +  b_{n-1}*x_n
+        // Normalise: divide every coefficient by den's leading
+        // coefficient so the canonical-form denominator is
+        // s^n + a_{n-1}*s^{n-1} + ... + a_0.
+        double Lead = DenIn.front();
+        // A[i] = coefficient of s^i in the normalised denominator
+        // (lowest power first), with A[Order] = 1 dropped (implicit).
+        std::vector<double> A(Order, 0.0);
+        for (int i = 0; i < Order; ++i)
+          A[i] = DenIn[DenIn.size() - 1 - i] / Lead;
+        // BV[i] = coefficient of s^i in the numerator (lowest power
+        // first), 0.0 for missing powers. Length Order (strictly
+        // proper ⇒ no s^Order term).
+        std::vector<double> BV(Order, 0.0);
+        for (size_t i = 0; i < NumIn.size(); ++i) {
+          size_t Power = NumIn.size() - 1 - i;
+          if ((int)Power < Order) BV[Power] = NumIn[i] / Lead;
+        }
         // Build the next-state expressions per slot. The first
         // Order-1 slots are simple advances; the last slot rolls
         // up all the -A[i]*x_{i+1} terms plus the input.
@@ -1311,15 +1593,10 @@ matlab::Function *lowerSubsystemToMatlab(
         Expr *TsAcc  = B.bin(BinOp::ElemMul, fiC(Ts), Acc);
         Expr *XNNext = B.bin(BinOp::Add, XN, TsAcc);
         NextStateExpr[slotFor(Order)] = XNNext;
-        // Emit the block's output `OutVar = Σ b_i * x_i`. This is
-        // the linear combination of states. For Order=1 the
-        // existing state-read hoist already set OutVar = state;
-        // we overwrite it with the b_0-weighted form here so the
-        // output matches the controllable-canonical y equation.
-        // (For Order=1, b_0 might != 1, so the overwrite is the
-        // correct semantic — replaces a stale state-read hoist
-        // that wrote OutVar = state.)
-        const std::string &OutV = VarOfNode[N->Id];
+        // Emit the block's output `OutVar = Σ b_i * x_i`. For Order=1
+        // the existing state-read hoist already set OutVar = state;
+        // overwrite with the b_0-weighted form so the output matches
+        // the controllable-canonical y equation.
         Expr *YAcc = nullptr;
         for (int K = 1; K <= Order; ++K) {
           Expr *Term = B.bin(BinOp::ElemMul, fiC(BV[K - 1]),
@@ -1331,12 +1608,18 @@ matlab::Function *lowerSubsystemToMatlab(
         NextExpr = nullptr;  // already filled per slot above
         continue;            // skip the single-key store below
       } else if (N->Kind == "signal_state_space") {
-        // Tier-5h — continuous state-space (A, B, C; D = 0 strict-
-        // proper). Forward Euler at Ts:
-        //   x[k+1] = (I + Ts*A)*x[k] + Ts*B*u[k]
-        //   y[k]   = C*x[k]
-        // SISO only — B is N×1, C is 1×N. Multi-input/output is a
-        // Tier-5i follow-up (vector-valued ports).
+        // Tier-5h/5i — continuous state-space (A, B, C; D = 0
+        // strict-proper). Supports SISO (B is N×1, C is 1×N) and
+        // MIMO (B is N×P, C is Q×N — Tier-5i). Two discretisation
+        // paths gated on Opts.DiscretizeMethod:
+        // - "forward_euler" (default):
+        //     x[k+1] = (I + Ts*A)*x[k] + Ts*B*u[k];   y[k] = C*x[k]
+        //   N state slots in the original (A, B, C) basis. MIMO
+        //   reads P inputs (`in1`..`inP`) and emits Q output
+        //   assignments (one per `out1`..`outQ` port variable).
+        // - "tustin": SISO only (Faddeev-LeVerrier → DF2T). MIMO
+        //   Tustin is a future follow-up (requires matrix Tustin
+        //   transformation with non-trivial state basis change).
         auto getStr = [&](const char *Key) -> std::string {
           auto It = N->Params.find(Key);
           return It == N->Params.end() ? std::string{} : It->second;
@@ -1353,21 +1636,32 @@ matlab::Function *lowerSubsystemToMatlab(
           return nullptr;
         }
         int Order = Ar;
-        if (Br != Order || Bc != 1) {
+        if (Br != Order || Bc < 1) {
           Diag.error(N->Loc,
                      "signal_state_space \"" + N->Id +
                          "\": B must be " + std::to_string(Order) +
-                         "×1 (SISO only in Tier-5h)");
+                         "×P (P ≥ 1 input columns)");
           return nullptr;
         }
-        if (Cr != 1 || Cc != Order) {
+        if (Cc != Order || Cr < 1) {
           Diag.error(N->Loc,
                      "signal_state_space \"" + N->Id +
-                         "\": C must be 1×" + std::to_string(Order) +
-                         " (SISO only in Tier-5h)");
+                         "\": C must be Q×" + std::to_string(Order) +
+                         " (Q ≥ 1 output rows)");
           return nullptr;
         }
-        // D, if present, must be the zero scalar.
+        int P = Bc;  // number of inputs
+        int Q = Cr;  // number of outputs
+        bool MIMO = (P > 1 || Q > 1);
+        if (MIMO && Opts.DiscretizeMethod == "tustin") {
+          Diag.error(N->Loc,
+                     "signal_state_space \"" + N->Id +
+                         "\": Tustin discretisation is SISO-only "
+                         "(MIMO Tustin needs a matrix bilinear "
+                         "transform — use --discretize=forward_euler)");
+          return nullptr;
+        }
+        // D, if present, must be the zero matrix.
         auto DStr = getStr("D");
         if (!DStr.empty()) {
           std::vector<double> DM; int Dr=0, Dc=0;
@@ -1376,7 +1670,7 @@ matlab::Function *lowerSubsystemToMatlab(
             if (D != 0.0) {
               Diag.error(N->Loc,
                          "signal_state_space \"" + N->Id +
-                             "\": D must be 0 (strict-proper only)");
+                             "\": D must be zero (strict-proper only)");
               return nullptr;
             }
           }
@@ -1400,8 +1694,16 @@ matlab::Function *lowerSubsystemToMatlab(
         std::string LocalPrefix = "x";
         std::string LocalSuffix = "_" + sanitizeIdent(N->Id);
         std::string SlotPrefix = "s_" + sanitizeIdent(N->Id) + "_x";
+        // Tier-5i — Tustin direct-feedthrough Order=1 SS uses a
+        // separate state-read local (`x1_<id>`); FE Order=1 keeps
+        // legacy LocalVar = OutVar.
+        bool SepLocal =
+            needsSeparateLocal(N->Kind, Opts.DiscretizeMethod);
+        // MIMO output is per-port, so SISO-style OutVar reuse
+        // doesn't apply — each output port gets its own variable.
         auto localFor = [&](int K) -> std::string {
-          if (Order == 1) return VarOfNode[N->Id];
+          if (Order == 1 && !SepLocal && !MIMO)
+            return VarOfNode[N->Id];
           return LocalPrefix + std::to_string(K) + LocalSuffix;
         };
         auto slotFor = [&](int K) -> std::string {
@@ -1411,30 +1713,86 @@ matlab::Function *lowerSubsystemToMatlab(
         auto fiC = [&](double V) -> Expr * {
           return B.WrapFi ? B.lit(V) : B.number(V);
         };
-        Expr *U = Ins.empty() ? B.number(0.0) : Ins.front();
-        // Row i: x_i_next = x_i + Ts*(Σ_j A[i,j]*x_j + B[i]*u)
+        // Resolve the K-th input expression. Ins is already sorted
+        // by canonical port name (`in`, `in1`, `in2`, ...). For SISO
+        // we just take Ins.front(); for MIMO we index into Ins with
+        // bounds-check fallback to zero.
+        auto inputExpr = [&](int K /*1-based*/) -> Expr * {
+          if (K < 1 || K > (int)Ins.size()) return B.number(0.0);
+          return Ins[K - 1];
+        };
+        const std::string &OutV = VarOfNode[N->Id];
+        if (Opts.DiscretizeMethod == "tustin") {
+          // SISO Tustin — already gated above. Convert (A, B, C) to
+          // a SISO transfer function, then apply Tustin + DF2T.
+          Expr *U = inputExpr(1);
+          std::vector<double> NumIn, DenIn;
+          ssToTFSiso(AM, BM, CM, Order, NumIn, DenIn);
+          std::vector<double> NumZ, DenZ;
+          tustinTF(NumIn, DenIn, Ts, NumZ, DenZ);
+          Expr *YExpr = B.bin(BinOp::ElemMul, fiC(NumZ[0]), U);
+          YExpr = B.bin(BinOp::Add, YExpr, B.name(localFor(1)));
+          Body->Stmts.push_back(B.assign(OutV, YExpr));
+          for (int K = 1; K <= Order; ++K) {
+            Expr *Term = B.bin(BinOp::ElemMul, fiC(NumZ[K]), U);
+            Expr *Neg  = B.bin(BinOp::ElemMul, fiC(-DenZ[K]),
+                                B.name(OutV));
+            Expr *Acc  = B.bin(BinOp::Add, Term, Neg);
+            if (K < Order) {
+              Acc = B.bin(BinOp::Add, Acc, B.name(localFor(K + 1)));
+            }
+            NextStateExpr[slotFor(K)] = Acc;
+          }
+          NextExpr = nullptr;
+          continue;
+        }
+        // Forward Euler — row i:
+        //   x_i_next = x_i + Ts*(Σ_j A[i,j]*x_j + Σ_k B[i,k]*u_k)
         for (int I = 1; I <= Order; ++I) {
-          Expr *Acc = B.bin(BinOp::ElemMul, fiC(BM[I - 1]), U);
+          // Σ_k B[i,k]*u_k
+          Expr *Acc = nullptr;
+          for (int K = 1; K <= P; ++K) {
+            double Bik = BM[(I - 1) * P + (K - 1)];
+            if (Bik == 0.0) continue;
+            Expr *T = B.bin(BinOp::ElemMul, fiC(Bik), inputExpr(K));
+            Acc = Acc ? B.bin(BinOp::Add, Acc, T) : T;
+          }
+          // Σ_j A[i,j]*x_j
           for (int J = 1; J <= Order; ++J) {
             double Aij = AM[(I - 1) * Order + (J - 1)];
             if (Aij == 0.0) continue;
             Expr *T = B.bin(BinOp::ElemMul, fiC(Aij),
                              B.name(localFor(J)));
-            Acc = B.bin(BinOp::Add, Acc, T);
+            Acc = Acc ? B.bin(BinOp::Add, Acc, T) : T;
           }
+          if (!Acc) Acc = B.number(0.0);
           Expr *TsAcc = B.bin(BinOp::ElemMul, fiC(Ts), Acc);
           Expr *XI = B.name(localFor(I));
           NextStateExpr[slotFor(I)] = B.bin(BinOp::Add, XI, TsAcc);
         }
-        // Output: y = Σ C[k] * x_k
-        Expr *YAcc = nullptr;
-        for (int K = 1; K <= Order; ++K) {
-          Expr *Term = B.bin(BinOp::ElemMul, fiC(CM[K - 1]),
-                              B.name(localFor(K)));
-          YAcc = YAcc ? B.bin(BinOp::Add, YAcc, Term) : Term;
+        // Outputs: y_q = Σ_n C[q,n]*x_n. For MIMO emit one stmt per
+        // output port (the `out<q>` var was pre-allocated above).
+        // For SISO emit a single OutVar assignment as before.
+        for (int Qi = 1; Qi <= Q; ++Qi) {
+          Expr *YAcc = nullptr;
+          for (int K = 1; K <= Order; ++K) {
+            double Cqk = CM[(Qi - 1) * Order + (K - 1)];
+            if (Cqk == 0.0) continue;
+            Expr *Term = B.bin(BinOp::ElemMul, fiC(Cqk),
+                                B.name(localFor(K)));
+            YAcc = YAcc ? B.bin(BinOp::Add, YAcc, Term) : Term;
+          }
+          if (!YAcc) YAcc = B.number(0.0);
+          std::string Dst;
+          if (MIMO) {
+            std::string PortId = "out" + std::to_string(Qi);
+            auto It = VarOfNodePort.find({N->Id, PortId});
+            Dst = (It != VarOfNodePort.end()) ? It->second : OutV;
+          } else {
+            Dst = OutV;
+          }
+          Body->Stmts.push_back(B.assign(Dst, YAcc));
         }
-        if (!YAcc) YAcc = B.number(0.0);
-        Body->Stmts.push_back(B.assign(VarOfNode[N->Id], YAcc));
         NextExpr = nullptr;
         continue;
       } else if (N->Kind == "signal_transport_delay") {

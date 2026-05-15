@@ -456,27 +456,58 @@ Tier-5h (✓ shipped 2026-05-15):
   demos pass Verilator lint** with the documented cosmetic
   warnings suppressed.
 
+Tier-5i (✓ shipped 2026-05-15):
+- **Bilinear (Tustin) discretisation** as an alternative to
+  Forward Euler for `signal_integrator`, `signal_transfer_fcn`,
+  `signal_zero_pole`, `signal_state_space` (SISO). New CLI flag
+  `--discretize=forward_euler|tustin` (default `forward_euler`
+  preserves Tier-5h behaviour). Tustin uses polynomial
+  substitution `s = (2/Ts)·(z-1)/(z+1)` and Direct Form II
+  Transposed; the SISO state-space case routes through a
+  Faddeev-LeVerrier `(A,B,C) → (Num,Den)` conversion. Same N
+  state slots as Forward Euler. Adds a direct-feedthrough term
+  `n_n*u[k]` in the output equation, so any block kind under
+  Tustin needs a SEPARATE state-read local (`x1_<id>`) instead
+  of the legacy `LocalVar = OutVar` shape — see
+  `needsSeparateLocal` in
+  `lib/Flowchart/SubsystemToMatlab.cpp`. SV emit + Verilator
+  lint all 11 SV-capable demos remain clean under Tustin.
+  Demo: `tf_lowpass.mflow` driven with `--discretize=tustin`
+  yields DF2T realisation (`y[k] = NumZ[0]·u[k] + v[k]`,
+  `v_next = NumZ[1]·u[k] + 0.9512·y[k]` for `1/(s+1)` at
+  Ts=0.05); 2nd-order peak 1.527 matches analytic ζ=0.2 ωₙ=1
+  better than Forward Euler's 1.535.
+- **MIMO state-space (vector-valued ports)** —
+  `signal_state_space` now accepts B with P ≥ 1 columns and C
+  with Q ≥ 1 rows. Per-port output variables (`<id>_y1` /
+  `<id>_y2` / ...) tracked through a new `VarOfNodePort` map;
+  `resolveInputExpr` consults it before falling back to the
+  legacy `VarOfNode`. State update sums over all P inputs
+  via `B[i,k]*u_k`; output equations emit one statement per
+  output port. Tustin remains SISO-only — `--discretize=tustin`
+  with a MIMO shape emits a sourced error (matrix bilinear
+  needs a state-basis transform that this lowering doesn't
+  do yet). Demo: `mimo_state_space.mflow` (2-in/2-out
+  decoupled plant, A=diag(-1,-2), B=I, C=I).
+
 Tier-5i open carve-outs (not yet shipped):
-- Multi-input / multi-output state-space (MIMO) — needs
-  vector-valued port shapes; B becomes N×P, C becomes Q×N.
-- Bilinear (Tustin) discretization as an alternative to
-  Forward Euler — preserves stability for stiff systems but
-  introduces direct feedthrough which conflicts with the
-  loop-breaker topo sort. Path: special-case the proper-but-
-  not-strictly-proper TFs and use a different realisation
-  (Direct Form II Transposed) that handles D ≠ 0.
-- `signal_saturation` → SV: bool-by-fi multiplication doesn't
-  synthesise; workaround for HDL targets is to replace with a
-  `signal_matlab_fcn` containing the if/elseif/else.
-- Continuous `signal_transfer_fcn` / `signal_state_space` /
-  `signal_zero_pole` discretization (bilinear / matrix-exp).
-- Verilator + yosys CTest gated lane.
-- `--fi-spec` flag stamps `hdl.ports` attrs.
-- Synth-check + Verilator lint in the CTest lane (gated like
-  `MATLAB_LLVM_WITH_VA_COSIM` — opt-in CMake flag).
-- Demo: `fir_4tap.mflow` — 4-tap FIR filter subsystem → synth-
-  clean SV that yosys-synth's without warnings; Verilator
-  simulation matches `matlabc -simulate` waveform.
+- **MIMO Tustin** — currently SISO-only. Matrix bilinear
+  `Ad = M(I + αA), Bd = M·Ts·B, Cd = C, Dd = α·C·M·B`
+  (α = Ts/2, M = (I − αA)⁻¹) would let MIMO state-space share
+  Tustin's improved frequency fidelity. Needs a small linalg
+  helper (square matrix inversion) and a state-basis transform
+  to recover the standard `x[k+1] = Ad·x[k] + Bd·u[k]; y =
+  Cd·x[k] + Dd·u[k]` shape without a `u[k+1]` dependency.
+  Sourced error fires today when `--discretize=tustin` is
+  combined with a MIMO shape.
+- **Algebraic-loop detection for Tustin** — Tustin direct-
+  feedthrough blocks placed in a feedback loop (e.g.
+  Integrator → Sum → Integrator) produce an algebraic loop the
+  loop-breaker can't break. Emitter currently produces an
+  uninitialised OutVar read; should detect the cycle and
+  surface a sourced error suggesting the user replace the
+  manual Integrator+Sum subgraph with a single
+  `signal_transfer_fcn`.
 
 ### Tier 6 — Nested + multirate + advanced  *(~1 week)*
 

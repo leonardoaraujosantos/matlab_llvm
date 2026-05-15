@@ -1,0 +1,65 @@
+{
+  "schema": "matforge.flowchart",
+  "version": "0.1.0",
+  "entry": "mimo_state_space",
+  "settings": {
+    "kind": "signal_flow",
+    "solver": {
+      "type": "fixed_step",
+      "algorithm": "ode4",
+      "startTime": 0.0,
+      "stopTime": 5.0,
+      "maxStep": "0.05"
+    }
+  },
+  "flows": [
+    {
+      "id": "flow_mimo_ss",
+      "kind": "function",
+      "name": "mimo_state_space",
+      "signature": { "inputs": ["u1", "u2"], "outputs": ["y1", "y2"] },
+      "nodes": [
+        { "id": "u1", "kind": "signal_inport",
+          "data": { "params": {} },
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+        { "id": "u2", "kind": "signal_inport",
+          "data": { "params": {} },
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+
+        { "id": "plant", "kind": "signal_state_space",
+          "data": {
+            "params": {
+              "A": "-1, 0; 0, -2",
+              "B": "1, 0; 0, 1",
+              "C": "1, 0; 0, 1"
+            }
+          },
+          "ports": {
+            "in":  [{"id": "in1"}, {"id": "in2"}],
+            "out": [{"id": "out1"}, {"id": "out2"}]
+          } },
+
+        { "id": "y1", "kind": "signal_outport",
+          "data": { "params": {} },
+          "ports": { "in": [{"id": "in"}], "out": [] } },
+        { "id": "y2", "kind": "signal_outport",
+          "data": { "params": {} },
+          "ports": { "in": [{"id": "in"}], "out": [] } }
+      ],
+      "edges": [
+        { "id": "e1", "kind": "data",
+          "from": {"node": "u1", "port": "out"},
+          "to":   {"node": "plant", "port": "in1"} },
+        { "id": "e2", "kind": "data",
+          "from": {"node": "u2", "port": "out"},
+          "to":   {"node": "plant", "port": "in2"} },
+        { "id": "e3", "kind": "data",
+          "from": {"node": "plant", "port": "out1"},
+          "to":   {"node": "y1", "port": "in"} },
+        { "id": "e4", "kind": "data",
+          "from": {"node": "plant", "port": "out2"},
+          "to":   {"node": "y2", "port": "in"} }
+      ]
+    }
+  ]
+}

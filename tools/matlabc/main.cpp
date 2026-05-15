@@ -260,6 +260,15 @@ struct Options {
    *   --fi-spec sig=Q32.24       (high-precision)
    */
   std::vector<std::string> FiSpecs;
+  /* Embedded Coder, Tier-5i — `--discretize=forward_euler|tustin`
+   * flag. Controls how continuous-time blocks (signal_integrator,
+   * signal_transfer_fcn, signal_zero_pole, signal_state_space) are
+   * mapped to discrete form. Default `forward_euler` preserves the
+   * pre-Tier-5i behaviour (strict-proper continuous TF stays
+   * strict-proper). `tustin` (bilinear) gives better frequency
+   * fidelity at the cost of direct feedthrough in the output
+   * equation — same state count, DF2T realisation. */
+  std::string Discretize = "forward_euler";
   /* Block-library search path for `.mflow` custom blocks (Phase 4b).
    * Resolution order: command-line `--block-path DIR` entries (in CLI
    * order) followed by colon-separated entries from the
@@ -413,6 +422,27 @@ bool parseArgs(int Argc, char **Argv, Options &Opts, const char *&Prog) {
         return false;
       }
       Opts.FiSpecs.push_back(Argv[I]);
+    }
+    else if (A.size() > 13 && A.substr(0, 13) == "--discretize=") {
+      Opts.Discretize = std::string(A.substr(13));
+      if (Opts.Discretize != "forward_euler" &&
+          Opts.Discretize != "tustin") {
+        std::cerr << "--discretize must be `forward_euler` or `tustin`\n";
+        return false;
+      }
+    }
+    else if (A == "--discretize" || A == "-discretize") {
+      if (++I >= Argc) {
+        std::cerr << "--discretize requires an argument "
+                  << "(forward_euler|tustin)\n";
+        return false;
+      }
+      Opts.Discretize = Argv[I];
+      if (Opts.Discretize != "forward_euler" &&
+          Opts.Discretize != "tustin") {
+        std::cerr << "--discretize must be `forward_euler` or `tustin`\n";
+        return false;
+      }
     }
     else if (A == "-opt" || A == "-O") Opts.Opt = true;
     else if (A == "-no-line" || A == "--no-line") Opts.NoLine = true;
@@ -9806,6 +9836,7 @@ int main(int Argc, char **Argv) {
       if (!Opts.Subsystem.empty() && Doc->isSignalFlow()) {
         matlab::flowchart::SubsystemEmitOptions SO;
         SO.TargetRate = Opts.TargetRate;
+        SO.DiscretizeMethod = Opts.Discretize;
         // Tier 5 — when the user is emitting SystemVerilog, switch
         // the lowering into HDL mode: continuous blocks become a
         // sourced error (no implicit auto-discretisation), state

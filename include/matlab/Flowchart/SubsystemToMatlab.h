@@ -73,9 +73,22 @@ struct FixedPointSpec {
 // `FiDefault` / `FiSpecs`: default fixed-point format + per-port
 // overrides for the synthesised function's args / returns. Only
 // honoured by the HDL emit lane.
+// `DiscretizeMethod` (Tier-5i): how `signal_integrator` /
+// `signal_transfer_fcn` / `signal_zero_pole` / `signal_state_space`
+// blocks are discretised when a sample rate is picked.
+//   - "forward_euler" (default): s -> (z-1)/Ts. Strictly proper
+//     continuous TFs stay strictly proper in discrete form (no direct
+//     feedthrough) — preserves the loop-breaker topo-sort invariant.
+//   - "tustin": s -> (2/Ts)·(z-1)/(z+1) (a.k.a. bilinear). Discrete TF
+//     gains a direct-feedthrough term n_n*u[k] in the output equation.
+//     Realisation switches to Direct Form II Transposed; same state
+//     count (= continuous denominator degree). Better frequency
+//     fidelity over the Nyquist band; users running the result inside
+//     a feedback loop must ensure another delay element (Unit Delay /
+//     discrete integrator) breaks the cycle.
 struct SubsystemEmitOptions {
   double TargetRate = 0.0;
-  std::string DiscretizeMethod = "backward_euler";
+  std::string DiscretizeMethod = "forward_euler";
   bool RejectContinuous = false;
   bool StateAsPersistent = false;
   FixedPointSpec FiDefault{};

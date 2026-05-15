@@ -628,6 +628,189 @@ PY
 }
 ss_step_smoke
 
+# Tier-5i — Tustin (bilinear) discretisation of signal_transfer_fcn.
+# `H(s) = 1/(s+1)` substituted s = (2/Ts)·(z-1)/(z+1) at Ts=0.05 gives
+# `H(z) = (z+1)/(41z - 39)` (NumZ = [1/41, 1/41], DenZ = [1, -39/41]).
+# Realised as Direct Form II Transposed: y[k] = NumZ[0]·u[k] + v[k].
+# At t=0 with u=1, y[0] = 1/41 ≈ 0.024390 (direct feedthrough). DC
+# gain = H(1) = 1, so step response settles to 1.0.
+tustin_tf_smoke() {
+  local py="$SCRATCH/tustin_tf.py"
+  "$MATLABC" -emit-python "$EX/tf_lowpass.mflow" --subsystem tf_lowpass \
+      --discretize=tustin > "$py" 2> "$SCRATCH/tustin.err"
+  python3 - "$py" <<'PY'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("tf", sys.argv[1])
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+plant = m.TfLowpass()
+ys = [plant.step(1.0) for _ in range(201)]  # 10 s at Ts=0.05
+# Tustin direct feedthrough: y[0] = NumZ[0] = 1/41 ≈ 0.02439.
+if abs(ys[0] - 1.0/41.0) > 1e-6:
+    print(f"  tustin_tf: y[0]={ys[0]} != 1/41", file=sys.stderr); sys.exit(1)
+# DC gain = 1: steady-state approaches 1.0.
+if abs(ys[-1] - 1.0) > 0.01:
+    print(f"  tustin_tf: final={ys[-1]} not near 1.0", file=sys.stderr); sys.exit(1)
+# Pole at z = 39/41 ≈ 0.9512 → 5%-settling at log(0.05)/log(0.9512) ≈ 60
+# steps. y[60] should be > 0.95 (well-settled).
+if ys[60] < 0.95:
+    print(f"  tustin_tf: y[60]={ys[60]} < 0.95", file=sys.stderr); sys.exit(1)
+PY
+  if [[ $? -ne 0 ]]; then
+    fail=$((fail+1)); fails+=("tustin tf_lowpass (mismatched response)")
+  else
+    pass=$((pass+1))
+  fi
+}
+tustin_tf_smoke
+
+# Tier-5i — Tustin 2nd-order TF (underdamped ζ=0.2). Tustin gives a
+# better peak match to the analytic 1.527 than Forward Euler (which
+# overshoots to ~1.535 at Ts=0.01); checks peak stays in band.
+tustin_tf2_smoke() {
+  local py="$SCRATCH/tustin_tf2.py"
+  "$MATLABC" -emit-python "$EX/tf_2nd_order.mflow" --subsystem tf_2nd_order \
+      --discretize=tustin > "$py" 2> "$SCRATCH/tustin.err"
+  python3 - "$py" <<'PY'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("tf2", sys.argv[1])
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+plant = m.Tf2ndOrder()
+peak = 0.0; final = 0.0
+for k in range(2000):
+    y = plant.step(1.0); peak = max(peak, y); final = y
+# Analytic peak (ζ=0.2, ωn=1): 1.527. Tustin at Ts=0.01 should be
+# within ±0.02 of analytic — tighter than Forward Euler's overshoot.
+if not (1.50 <= peak <= 1.55):
+    print(f"  tustin_tf_2nd_order: peak {peak} out of band", file=sys.stderr)
+    sys.exit(1)
+if not (0.95 <= final <= 1.05):
+    print(f"  tustin_tf_2nd_order: final {final} off", file=sys.stderr)
+    sys.exit(1)
+PY
+  if [[ $? -ne 0 ]]; then
+    fail=$((fail+1)); fails+=("tustin tf_2nd_order (mismatched response)")
+  else
+    pass=$((pass+1))
+  fi
+}
+tustin_tf2_smoke
+
+# Tier-5i — Tustin SISO state-space. The Faddeev-LeVerrier conversion
+# `(A, B, C) -> (Num, Den)` should yield the same discrete TF (and
+# therefore the same step response) as the Tustin TF path. ss_plant
+# is the (A, B, C) realisation of tf_2nd_order; their Tustin responses
+# must agree to numerical precision.
+tustin_ss_smoke() {
+  local py="$SCRATCH/tustin_ss.py"
+  "$MATLABC" -emit-python "$EX/ss_plant.mflow" --subsystem ss_plant \
+      --discretize=tustin > "$py" 2> "$SCRATCH/tustin.err"
+  python3 - "$py" <<'PY'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("ss", sys.argv[1])
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+plant = m.SsPlant()
+peak = 0.0; final = 0.0
+for k in range(2000):
+    y = plant.step(1.0); peak = max(peak, y); final = y
+if not (1.50 <= peak <= 1.55):
+    print(f"  tustin_ss_plant: peak {peak} out of band", file=sys.stderr)
+    sys.exit(1)
+if not (0.95 <= final <= 1.05):
+    print(f"  tustin_ss_plant: final {final} off", file=sys.stderr)
+    sys.exit(1)
+PY
+  if [[ $? -ne 0 ]]; then
+    fail=$((fail+1)); fails+=("tustin ss_plant (mismatched response)")
+  else
+    pass=$((pass+1))
+  fi
+}
+tustin_ss_smoke
+
+# Tier-5i — MIMO state-space (2-input, 2-output). Decoupled plant:
+# A = diag(-1, -2), B = I, C = I → two independent first-order modes
+# (gain 1, τ=1) and (gain 0.5, τ=0.5). Step responses on each input
+# must affect only the corresponding output.
+mimo_ss_smoke() {
+  local py="$SCRATCH/mimo_ss.py"
+  "$MATLABC" -emit-python "$EX/mimo_state_space.mflow" \
+       --subsystem mimo_state_space > "$py" 2> "$SCRATCH/mimo.err"
+  python3 - "$py" <<'PY'
+import importlib.util, math, sys
+spec = importlib.util.spec_from_file_location("mimo", sys.argv[1])
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+# Drive u1 only — y2 must stay zero, y1 settles near 1.
+plant = m.MimoStateSpace()
+for _ in range(200): y1, y2 = plant.step(1.0, 0.0)
+if y2 != 0.0:
+    print(f"  mimo: y2 leakage with u1 step ({y2})", file=sys.stderr); sys.exit(1)
+if not (0.95 <= y1 <= 1.05):
+    print(f"  mimo: y1 final {y1} off 1.0", file=sys.stderr); sys.exit(1)
+# Drive u2 only — y1 must stay zero, y2 settles near 0.5.
+plant = m.MimoStateSpace()
+for _ in range(200): y1, y2 = plant.step(0.0, 1.0)
+if y1 != 0.0:
+    print(f"  mimo: y1 leakage with u2 step ({y1})", file=sys.stderr); sys.exit(1)
+if not (0.45 <= y2 <= 0.55):
+    print(f"  mimo: y2 final {y2} off 0.5", file=sys.stderr); sys.exit(1)
+PY
+  if [[ $? -ne 0 ]]; then
+    fail=$((fail+1)); fails+=("mimo_state_space (response mismatch)")
+  else
+    pass=$((pass+1))
+  fi
+}
+mimo_ss_smoke
+
+# Tier-5i — MIMO state-space SV emit. Verifies the per-port output
+# signals make it through the SV pipeline (`y1`/`y2`, both fi-typed),
+# both state registers exist, and the always_ff block is present.
+mimo_ss_sv_smoke() {
+  local sv="$SCRATCH/mimo_ss.sv"
+  "$MATLABC" -emit-sv "$EX/mimo_state_space.mflow" \
+       --subsystem mimo_state_space > "$sv" 2> "$SCRATCH/mimo.err"
+  if ! grep -q "module mimo_state_space" "$sv"; then
+    fail=$((fail+1)); fails+=("mimo SV (missing module)")
+    sed 's/^/  /' "$SCRATCH/mimo.err" >&2
+    return
+  fi
+  if ! grep -q "output logic signed \[31:0\] y1" "$sv" \
+       || ! grep -q "output logic signed \[31:0\] y2" "$sv"; then
+    fail=$((fail+1)); fails+=("mimo SV (missing y1/y2 outputs)")
+    return
+  fi
+  if [[ $(grep -c "logic signed \[31:0\] s_plant_x" "$sv") -lt 2 ]]; then
+    fail=$((fail+1)); fails+=("mimo SV (missing state regs)")
+    return
+  fi
+  pass=$((pass+1))
+}
+mimo_ss_sv_smoke
+
+# Tier-5i — Tustin SV emit (synth sanity). Verifies the SV emit lane
+# produces a valid module with the direct-feedthrough output equation
+# (y = NumZ[0]*u + state) and the DF2T state update visible.
+tustin_sv_smoke() {
+  local sv="$SCRATCH/tustin_tf.sv"
+  "$MATLABC" -emit-sv "$EX/tf_lowpass.mflow" --subsystem tf_lowpass \
+      --discretize=tustin > "$sv" 2> "$SCRATCH/tustin_sv.err"
+  if ! grep -q "module tf_lowpass" "$sv"; then
+    fail=$((fail+1)); fails+=("tustin tf_lowpass SV (missing module)")
+    sed 's/^/  /' "$SCRATCH/tustin_sv.err" >&2
+    return
+  fi
+  if ! grep -q "logic signed \[31:0\] s_tf;" "$sv"; then
+    fail=$((fail+1)); fails+=("tustin tf_lowpass SV (missing state reg)")
+    return
+  fi
+  if ! grep -q "always_ff @(posedge clk" "$sv"; then
+    fail=$((fail+1)); fails+=("tustin tf_lowpass SV (no always_ff)")
+    return
+  fi
+  pass=$((pass+1))
+}
+tustin_sv_smoke
+
 echo "----"
 echo "passed: $pass    failed: $fail"
 if (( fail > 0 )); then

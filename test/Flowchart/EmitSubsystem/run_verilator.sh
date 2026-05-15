@@ -49,6 +49,7 @@ declare -a SV_FIXTURES=(
   "zp_plant:zp_plant"
   "transport_delay:transport_delay"
   "ss_plant:ss_plant"
+  "mimo_state_space:mimo_state_space"
 )
 
 for spec in "${SV_FIXTURES[@]}"; do

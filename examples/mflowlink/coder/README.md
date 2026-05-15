@@ -39,16 +39,17 @@ subsystem.
 | `discrete_integrator.mflow` | Forward-Euler accumulator with `Ts = 0.1` and a 0.5× input gain |
 | `discrete_pid.mflow` | Full PID controller — discrete integrator + unit delay + sum / gain / saturation; class-wrapped per target |
 
-### Continuous → auto-discretised (Tier 4 + 5g + 5h)
+### Continuous → auto-discretised (Tier 4 + 5g + 5h + 5i)
 
 | File | Block coverage |
 |---|---|
 | `continuous_lowpass.mflow` | 1/(s+1) realised as Integrator + Sum feedback; auto-discretised to Forward Euler at the user-picked sample rate. Software *and* HDL targets |
-| `tf_lowpass.mflow` | 1/(s+1) realised as `signal_transfer_fcn` — 1st-order strictly-proper (Tier-5g) |
-| `tf_2nd_order.mflow` | 1/(s² + 0.4s + 1) — Tier-5h N-th-order strictly-proper TF via Forward Euler on controllable canonical state-space. Underdamped (ζ=0.2): peak overshoot 1.535 at t=3.21 — matches analytic |
-| `zp_plant.mflow` | Zero-pole-gain form: poles [-1, -2], gain 2 → 2/((s+1)(s+2)). Expanded to TF by `expandPoly`, then reuses the Tier-5h TF path |
+| `tf_lowpass.mflow` | 1/(s+1) realised as `signal_transfer_fcn` — 1st-order strictly-proper. Works with `--discretize=forward_euler` (default) or `--discretize=tustin` (Tier-5i) |
+| `tf_2nd_order.mflow` | 1/(s² + 0.4s + 1) — N-th-order strictly-proper TF. Forward Euler picks up controllable-canonical realisation (peak 1.535 at Ts=0.01); Tustin uses Direct Form II Transposed (peak 1.527 — closer to analytic 1.527) |
+| `zp_plant.mflow` | Zero-pole-gain form: poles [-1, -2], gain 2 → 2/((s+1)(s+2)). Expanded to TF by `expandPoly`, then reuses the TF path under either discretisation |
 | `transport_delay.mflow` | `delay = 0.2 s` at `Ts = 0.05 s` → 4-tap shift register. Each tap is one state slot in the emitted module |
-| `ss_plant.mflow` | State-space (A, B, C; D=0) realisation of the same 2nd-order plant — verified to match `tf_2nd_order.mflow` numerically |
+| `ss_plant.mflow` | State-space (A, B, C; D=0) realisation of the same 2nd-order plant. Forward Euler integrates the state directly; Tustin routes through Faddeev-LeVerrier `(A,B,C) → (Num,Den)` and reuses the Tustin TF path |
+| `mimo_state_space.mflow` | 2-in / 2-out decoupled plant: A = diag(-1, -2), B = I, C = I. Tier-5i MIMO — block exposes `in1`/`in2` and `out1`/`out2`, with per-port output vars in the emitted code |
 
 ### SystemVerilog emit (Tier 5 + 5b)
 
@@ -126,9 +127,28 @@ Tier-5 carve-outs (separable follow-ups):
   PID controller now emits clean SV with both state regs
   (s_iacc, s_prev_err), the saturation 3-way mux, and the
   always_ff tick block.
-- `signal_transfer_fcn` / `signal_state_space` /
+- ~~`signal_transfer_fcn` / `signal_state_space` /
   `signal_zero_pole` (continuous → discrete) — need bilinear or
-  matrix-exponential discretization.
+  matrix-exponential discretization.~~ ✓ shipped 2026-05-15.
+  Forward Euler (Tier-5h) and Tustin/bilinear (Tier-5i) are both
+  available via `--discretize=forward_euler|tustin`. Tustin uses
+  polynomial substitution `s = (2/Ts)·(z-1)/(z+1)` and Direct
+  Form II Transposed; the SISO state-space case routes through
+  Faddeev-LeVerrier `(A,B,C) → (Num,Den)`. **Tustin caveat**:
+  the discrete output has a direct-feedthrough term `n_n*u[k]`,
+  so a Tustin block placed in a pure algebraic feedback loop
+  (`y → some-stateless-chain → u`) forms a combinational loop
+  this lowering can't break — use `signal_transfer_fcn` /
+  `signal_zero_pole` directly rather than a manual
+  Integrator+Sum subgraph in that case.
+- ~~MIMO state-space (vector-valued ports)~~ ✓ shipped
+  2026-05-15. `signal_state_space` now accepts B with P ≥ 1
+  columns and C with Q ≥ 1 rows; the block exposes `in1`..`inP`
+  / `out1`..`outQ` ports and the emitter allocates a per-port
+  output variable each downstream block can wire to. Tustin is
+  SISO-only (sourced error if `--discretize=tustin` with MIMO
+  shapes — needs a matrix bilinear transform). Demo:
+  `mimo_state_space.mflow`.
 
 `signal_integrator` blocks get auto-discretised at codegen time —
 no separate "discretizer" block needed. Sample period resolution:
@@ -143,14 +163,34 @@ matlabc -emit-cpp continuous_lowpass.mflow \
     --subsystem continuous_lowpass --target-rate 0.05
 ```
 
+Pick the discretisation per emit invocation:
+
+```bash
+# Default (Forward Euler).
+matlabc -emit-python tf_lowpass.mflow --subsystem tf_lowpass
+
+# Tustin (bilinear) — better frequency fidelity, direct
+# feedthrough in the output equation.
+matlabc -emit-python tf_lowpass.mflow --subsystem tf_lowpass \
+    --discretize=tustin
+```
+
 The initial state value (`params.initialCondition`) is baked into
 the class wrapper's default-init, so a freshly-constructed object
 matches the simulator's t=0 snapshot.
 
-Carve-outs (defer to a follow-up slice): `signal_transfer_fcn` /
-`signal_state_space` / `signal_zero_pole` need bilinear /
-matrix-exponential discretization; `signal_transport_delay` needs
-a circular-buffer state.
+Tier-5i carve-outs (separable follow-ups):
+
+- **MIMO Tustin** — currently SISO-only; matrix bilinear
+  transform `Ad = M(I+αA), Bd = ..., Cd = ..., Dd = ...` would
+  let MIMO state-space share Tustin's improved frequency
+  fidelity. Sourced error today.
+- **Algebraic-loop detection** — Tustin discretised blocks in a
+  pure-feedthrough feedback loop emit uninitialised reads of
+  the block's OutVar; users should restructure to a single
+  `signal_transfer_fcn` instead of a manual Integrator+Sum.
+  Tracking which Tustin blocks are inside a cycle and
+  surfacing a sourced error would catch this early.
 
 Stateful subsystems emit a multi-return functional form
 `[y, s_next] = step(u, s)` *and* a Tier-2 class wrapper that
