@@ -1039,8 +1039,9 @@ std::optional<MflowLinkModel> lowerSignalFlow(const FlowDoc &Doc,
     // in the set until only the genuine cycles remain — so the
     // diagnostic names the blocks the user actually has to break.
     std::unordered_set<size_t> U;
+    std::unordered_set<size_t> AllStuck;
     for (size_t I = 0; I < N; ++I)
-      if (InDegree[I] > 0) U.insert(I);
+      if (InDegree[I] > 0) { U.insert(I); AllStuck.insert(I); }
     bool Peeled = true;
     while (Peeled) {
       Peeled = false;
@@ -1056,16 +1057,36 @@ std::optional<MflowLinkModel> lowerSignalFlow(const FlowDoc &Doc,
     }
     std::vector<size_t> OnLoop(U.begin(), U.end());
     std::sort(OnLoop.begin(), OnLoop.end());
-    std::string List;
-    for (size_t K = 0; K < OnLoop.size(); ++K) {
-      if (K) List += ", ";
-      List += "\"" + M.Blocks[OnLoop[K]].Id + "\"";
+
+    // Item-2 — `settings.solver.algebraicLoopMethod`:
+    //   - "off"            ⇒ hard error (the legacy behaviour);
+    //   - "newton" / "trust_region" ⇒ accept the cycle and let the
+    //     runtime fixed-point-iterate each step.
+    if (M.Solver.AlgebraicLoopMethod == "off") {
+      std::string List;
+      for (size_t K = 0; K < OnLoop.size(); ++K) {
+        if (K) List += ", ";
+        List += "\"" + M.Blocks[OnLoop[K]].Id + "\"";
+      }
+      Diag.error(M.Blocks[OnLoop.front()].Loc,
+                 "algebraic loop in signal-flow model: blocks " + List +
+                     " form a direct-feedthrough cycle with no loop-breaker "
+                     "(set settings.solver.algebraicLoopMethod to "
+                     "\"trust_region\" or \"newton\" to solve at runtime)");
+      return std::nullopt;
     }
-    Diag.error(M.Blocks[OnLoop.front()].Loc,
-               "algebraic loop in signal-flow model: blocks " + List +
-                   " form a direct-feedthrough cycle with no loop-breaker "
-                   "(insert an Integrator, Unit Delay, or ZOH to break it)");
-    return std::nullopt;
+
+    // Record the loop in the IR. Members are the blocks on the
+    // cycle in their topological-stable order. Append every
+    // still-stuck block (loop members + their downstream
+    // dependants) to ExecOrder so the runtime visits them.
+    MflAlgebraicLoop AL;
+    AL.Members = OnLoop;
+    M.AlgebraicLoops.push_back(std::move(AL));
+
+    std::vector<size_t> StuckOrdered(AllStuck.begin(), AllStuck.end());
+    std::sort(StuckOrdered.begin(), StuckOrdered.end());
+    for (size_t I : StuckOrdered) M.ExecOrder.push_back(I);
   }
 
   return M;
@@ -1108,6 +1129,18 @@ void dumpMflowLinkModel(std::ostream &OS, const MflowLinkModel &M) {
     OS << "\n";
     for (auto &Z : M.ZeroCrossings)
       OS << "    " << Z.BlockId << " (" << Z.Kind << ")\n";
+  }
+  // Item-2 — algebraic loops accepted by the lowering.
+  if (!M.AlgebraicLoops.empty()) {
+    OS << "  algebraic-loops:\n";
+    for (auto &L : M.AlgebraicLoops) {
+      OS << "    {";
+      for (size_t K = 0; K < L.Members.size(); ++K) {
+        if (K) OS << ", ";
+        OS << M.Blocks[L.Members[K]].Id;
+      }
+      OS << "}\n";
+    }
   }
   OS << "  edges:\n";
   for (auto &E : M.Edges)

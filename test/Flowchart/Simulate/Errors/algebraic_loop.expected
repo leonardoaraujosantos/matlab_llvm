@@ -1,3 +1,3 @@
-Errors/algebraic_loop.mflow:16:9: error: algebraic loop in signal-flow model: blocks "s", "g" form a direct-feedthrough cycle with no loop-breaker (insert an Integrator, Unit Delay, or ZOH to break it)
+Errors/algebraic_loop.mflow:19:9: error: algebraic loop in signal-flow model: blocks "s", "g" form a direct-feedthrough cycle with no loop-breaker (set settings.solver.algebraicLoopMethod to "trust_region" or "newton" to solve at runtime)
           { "id": "s", "kind": "signal_sum",
           ^

@@ -96,6 +96,17 @@ struct MflZeroCrossing {
   std::string Kind;
 };
 
+// Item-2 (§7.4) — algebraic-loop record. One per direct-feedthrough
+// cycle the lowering kept (and didn't break with an
+// Integrator/UnitDelay/ZOH). At runtime, `MflowLinkSim` re-iterates
+// every block index in `Members` each major step until the outputs
+// reach a fixed point under the configured tolerance. The members
+// are stored in their execution-order index (into `Blocks`) so the
+// solver can walk them in a deterministic order.
+struct MflAlgebraicLoop {
+  std::vector<size_t> Members;
+};
+
 struct MflowLinkModel {
   std::string EntryName;                  // entry flow name
   std::vector<MflBlock> Blocks;
@@ -105,6 +116,11 @@ struct MflowLinkModel {
   // exactly once.
   std::vector<size_t> ExecOrder;
   std::vector<MflZeroCrossing> ZeroCrossings;
+  // Item-2 — algebraic loops that the lowering accepted (because
+  // `settings.solver.algebraicLoopMethod != "off"`). The runtime
+  // solves them via fixed-point iteration each major step. Empty
+  // when the model has no direct-feedthrough cycles.
+  std::vector<MflAlgebraicLoop> AlgebraicLoops;
   int ContStateCount = 0;                 // sum over blocks
   int DiscStateCount = 0;
   SolverConfig Solver;                    // resolved from settings.solver

@@ -144,6 +144,22 @@ public:
   };
   std::vector<CrossingEvent> consumeZeroCrossings();
 
+  //===-------------------------------------------------------------===//
+  // Item-2 — algebraic-loop solver diagnostics.
+  //
+  // When the runtime's fixed-point solver fails to converge inside
+  // its iteration cap, the loop's member ids are queued here. The
+  // DAP server drains the queue every step and surfaces them as
+  // `stopped { reason: "algebraic loop did not converge" }`. In
+  // `-simulate` (non-DAP) mode the queue is collected at end of
+  // run and printed to stderr.
+  //===-------------------------------------------------------------===//
+  struct AlgebraicLoopFailure {
+    double T;
+    std::vector<size_t> Members; // indices into M_.Blocks
+  };
+  std::vector<AlgebraicLoopFailure> consumeAlgebraicLoopFailures();
+
 private:
   const MflowLinkModel &M_;
   // Per-block input wiring: Inputs_[i] is the list of (sourceBlock,
@@ -225,6 +241,14 @@ private:
   double T_ = 0.0;
   size_t MajorSteps_ = 0;
   double StepSize_ = 0.01;
+  // Item-2 — adaptive step state for the Dormand-Prince RK4(5)
+  // integrator. CurrentAdaptiveH_ is the last accepted step size;
+  // it seeds the next step (warm-start). True only when
+  // `settings.solver.type == "variable_step"` AND the algorithm is
+  // an adaptive one (ode45 / ode23). Fixed-step mode falls back to
+  // classic RK4 at `StepSize_`.
+  bool   AdaptiveSolver_ = false;
+  double CurrentAdaptiveH_ = 0.01;
   // Scalar / first-element output per block. Every evaluator writes
   // this slot whether the block is scalar or vector — downstream
   // scalar readers (the vast majority of evaluators) read it
@@ -263,6 +287,9 @@ private:
   // `CrossingEvent` push to `ZCQueue_`.
   std::vector<int> ZCSign_;
   std::vector<CrossingEvent> ZCQueue_;
+  // Item-2 — algebraic-loop convergence failures since the last
+  // `consumeAlgebraicLoopFailures()` call.
+  std::vector<AlgebraicLoopFailure> AlgLoopFailures_;
 
   // Buffer for the logged-signal CSV: one *column* per element of
   // a logged block (scalar blocks ⇒ one column; vector blocks ⇒

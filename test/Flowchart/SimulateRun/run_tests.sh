@@ -250,6 +250,18 @@ ST_LINE=$("$MATLABC" -simulate --dry-run "$EX/sample_time_inherit.mflow" 2>&1 | 
 check "gain block inherits discrete 0.1s" \
   "[[ '$ST_LINE' == *'sample=discrete period=0.1'* ]]" ""
 
+#--- algebraic_loop_solved (Item-2): direct-feedthrough cycle, runtime fixed-point ---
+AL="$("$MATLABC" -simulate "$EX/algebraic_loop_solved.mflow")"
+AL_HEAD=$(printf '%s\n' "$AL" | head -1)
+check "alg-loop header"        "[[ '$AL_HEAD' == 't,g,scope' ]]" ""
+# g = 0.5·(1 - g) ⇒ g_∞ = 1/3.
+AL_END=$(printf '%s\n' "$AL" | awk -F, 'NR>1 && $1+0>=0.9 {print $2; exit}')
+check "alg-loop converges to 1/3" \
+  "awk 'BEGIN{exit !(($AL_END - 0.3333333)^2 < 1e-6)}'" ""
+# IR dump should still flag the loop.
+AL_IR=$("$MATLABC" -simulate --dry-run "$EX/algebraic_loop_solved.mflow" 2>&1 | grep -c 'algebraic-loops')
+check "alg-loop surfaced in IR" "[[ '$AL_IR' == '1' ]]" ""
+
 echo "----"
 echo "passed: $pass    failed: $fail"
 exit $(( fail > 0 ? 1 : 0 ))

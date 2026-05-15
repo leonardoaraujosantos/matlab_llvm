@@ -1,0 +1,16 @@
+MflowLinkModel entry=algloop_solved blocks=4 edges=4
+  solver type=variable_step algorithm=ode45 startTime=0 stopTime=1
+  states continuous=0 discrete=0
+  exec-order:
+    0 c kind=signal_constant sample=constant
+    1 s kind=signal_sum sample=fixed_in_minor
+    2 g kind=signal_gain sample=fixed_in_minor log
+    3 scope kind=signal_scope sample=fixed_in_minor
+  zero-crossings: none
+  algebraic-loops:
+    {s, g}
+  edges:
+    e_c c:out -> s:in1
+    e_s s:out -> g:in
+    e_fb g:out -> s:in2
+    e_sc g:out -> scope:in

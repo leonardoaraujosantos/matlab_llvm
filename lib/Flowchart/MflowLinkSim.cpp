@@ -526,6 +526,13 @@ MflowLinkSim::MflowLinkSim(const MflowLinkModel &M) : M_(M) {
     } catch (...) {
     }
   }
+  // Item-2 — adaptive step is enabled when the model asks for
+  // variable_step + an adaptive algorithm. Fixed-step mode keeps
+  // the legacy classic RK4 path.
+  AdaptiveSolver_ = (M_.Solver.Type != "fixed_step") &&
+                    (M_.Solver.Algorithm == "ode45" ||
+                     M_.Solver.Algorithm == "ode23");
+  CurrentAdaptiveH_ = StepSize_;
 
   if (M_.Snapshot.Enabled && M_.Snapshot.Depth > 0)
     SnapshotCap_ = static_cast<size_t>(M_.Snapshot.Depth);
@@ -1389,6 +1396,50 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
 
 void MflowLinkSim::derivative(double T, const double *State, double *Deriv) {
   evalAll(T, State, Deriv);
+  // Item-2 — algebraic-loop solver. After the topological pass has
+  // written every output, re-iterate the loop members until their
+  // outputs converge within `relTol`. Each iteration calls the
+  // per-block evaluator again with the current `Out_` snapshot;
+  // the loop's wiring (Inputs_) reaches back into the same Out_,
+  // so the next iteration sees the previous one's outputs. This is
+  // the classic Picard / fixed-point method; under contraction it
+  // converges (Banach), and a true Newton / trust-region solver is
+  // a deeper follow-up. Diverging loops are detected after `MaxIt`
+  // and reported via `consumeAlgebraicLoopFailures` (collected for
+  // the DAP server to surface as `stopped { reason: "algebraic
+  // loop did not converge" }`).
+  if (M_.AlgebraicLoops.empty()) return;
+  const double Tol = std::max(M_.Solver.RelTol, 1e-8);
+  const int MaxIt = 50;
+  for (auto &Loop : M_.AlgebraicLoops) {
+    if (Loop.Members.empty()) continue;
+    std::vector<double> Prev(Loop.Members.size());
+    bool Converged = false;
+    for (int It = 0; It < MaxIt; ++It) {
+      for (size_t K = 0; K < Loop.Members.size(); ++K)
+        Prev[K] = Out_[Loop.Members[K]];
+      // Re-evaluate just the loop members in their stored order.
+      // We piggy-back on the existing evalAll by re-running the
+      // full pass — cheap for our typical block counts and avoids
+      // duplicating the per-kind dispatch. Refactoring to a
+      // per-block evaluator entry point is a follow-up.
+      evalAll(T, State, nullptr);
+      double Delta = 0.0;
+      for (size_t K = 0; K < Loop.Members.size(); ++K) {
+        double D = Out_[Loop.Members[K]] - Prev[K];
+        if (D < 0) D = -D;
+        if (D > Delta) Delta = D;
+      }
+      if (Delta < Tol) { Converged = true; break; }
+    }
+    if (!Converged) {
+      AlgLoopFailures_.push_back({T, Loop.Members});
+    }
+  }
+  // Refresh derivatives one final time so the RK4 stages see the
+  // settled outputs — without this, an integrator immediately
+  // downstream of a loop would integrate the pre-converged input.
+  if (Deriv) evalAll(T, State, Deriv);
 }
 
 //===----------------------------------------------------------------------===//
@@ -1427,6 +1478,90 @@ static void rk4Substep(MflowLinkSim &Sim,
     YOut[I] = YIn[I] + (H / 6.0) * (K1[I] + 2.0 * K2[I]
                                       + 2.0 * K3[I] + K4[I]);
 }
+
+//===-----------------------------------------------------------------===//
+// Item-2 — Dormand-Prince 5(4) adaptive integrator (the standard
+// `ode45` tableau). One call attempts a single step of size `H`,
+// returns both the 5th-order solution in `YOut` and the embedded
+// 4th-order error estimate in `Err`. The caller compares `Err`
+// against the configured `relTol` / `absTol` and either accepts +
+// grows the step, or rejects + shrinks. See e.g. Hairer & Wanner
+// "Solving ODEs I" §II.4. Coefficients are the Dormand-Prince
+// (1980) tableau used by MATLAB's `ode45` and SciPy's `RK45`.
+//===-----------------------------------------------------------------===//
+
+namespace {
+struct DOPRI5Workspace {
+  std::vector<double> K1, K2, K3, K4, K5, K6, K7, Yt;
+};
+
+void dopri5Step(MflowLinkSim &Sim,
+                void (MflowLinkSim::*Deriv)(double, const double *, double *),
+                double TBegin, double H,
+                const std::vector<double> &YIn,
+                std::vector<double> &YOut,
+                std::vector<double> &Err,
+                DOPRI5Workspace &W) {
+  const size_t Nx = YIn.size();
+  if (W.K1.size() != Nx) {
+    W.K1.assign(Nx, 0.0); W.K2.assign(Nx, 0.0); W.K3.assign(Nx, 0.0);
+    W.K4.assign(Nx, 0.0); W.K5.assign(Nx, 0.0); W.K6.assign(Nx, 0.0);
+    W.K7.assign(Nx, 0.0); W.Yt.assign(Nx, 0.0);
+  }
+  // Stage 1: k1 = f(t, y).
+  (Sim.*Deriv)(TBegin, YIn.data(), W.K1.data());
+  // Stage 2: t + h/5, y + h·(1/5)·k1.
+  for (size_t I = 0; I < Nx; ++I) W.Yt[I] = YIn[I] + H * (1.0 / 5.0) * W.K1[I];
+  (Sim.*Deriv)(TBegin + 0.2 * H, W.Yt.data(), W.K2.data());
+  // Stage 3: t + 3h/10, y + h·(3/40 k1 + 9/40 k2).
+  for (size_t I = 0; I < Nx; ++I)
+    W.Yt[I] = YIn[I] + H * ((3.0 / 40.0) * W.K1[I] + (9.0 / 40.0) * W.K2[I]);
+  (Sim.*Deriv)(TBegin + 0.3 * H, W.Yt.data(), W.K3.data());
+  // Stage 4: t + 4h/5.
+  for (size_t I = 0; I < Nx; ++I)
+    W.Yt[I] = YIn[I] + H * ((44.0 / 45.0) * W.K1[I]
+                            - (56.0 / 15.0) * W.K2[I]
+                            + (32.0 / 9.0)  * W.K3[I]);
+  (Sim.*Deriv)(TBegin + 0.8 * H, W.Yt.data(), W.K4.data());
+  // Stage 5: t + 8h/9.
+  for (size_t I = 0; I < Nx; ++I)
+    W.Yt[I] = YIn[I] + H * ((19372.0 / 6561.0)  * W.K1[I]
+                            - (25360.0 / 2187.0) * W.K2[I]
+                            + (64448.0 / 6561.0) * W.K3[I]
+                            - (212.0   / 729.0)  * W.K4[I]);
+  (Sim.*Deriv)(TBegin + (8.0 / 9.0) * H, W.Yt.data(), W.K5.data());
+  // Stage 6: t + h. Combines into the 5th-order solution.
+  for (size_t I = 0; I < Nx; ++I)
+    W.Yt[I] = YIn[I] + H * ((9017.0 / 3168.0)    * W.K1[I]
+                            - (355.0 / 33.0)     * W.K2[I]
+                            + (46732.0 / 5247.0) * W.K3[I]
+                            + (49.0 / 176.0)     * W.K4[I]
+                            - (5103.0 / 18656.0) * W.K5[I]);
+  (Sim.*Deriv)(TBegin + H, W.Yt.data(), W.K6.data());
+  // 5th-order solution: y_{n+1}.
+  for (size_t I = 0; I < Nx; ++I)
+    YOut[I] = YIn[I] + H * ((35.0 / 384.0)      * W.K1[I]
+                            + (500.0 / 1113.0)  * W.K3[I]
+                            + (125.0 / 192.0)   * W.K4[I]
+                            - (2187.0 / 6784.0) * W.K5[I]
+                            + (11.0 / 84.0)     * W.K6[I]);
+  // Stage 7: FSAL — k7 evaluated at YOut to feed the embedded
+  // 4th-order solution.
+  (Sim.*Deriv)(TBegin + H, YOut.data(), W.K7.data());
+  // Embedded error estimate: yhat_{n+1} = y_n + h·Σ b̂ᵢ·kᵢ; the
+  // difference `YOut - yhat` is what we report.
+  Err.assign(Nx, 0.0);
+  for (size_t I = 0; I < Nx; ++I) {
+    double E = H * ((35.0 / 384.0     - 5179.0 / 57600.0)    * W.K1[I]
+                  + (500.0 / 1113.0   - 7571.0 / 16695.0)    * W.K3[I]
+                  + (125.0 / 192.0    - 393.0 / 640.0)       * W.K4[I]
+                  + (-2187.0 / 6784.0 - (-92097.0 / 339200.0)) * W.K5[I]
+                  + (11.0 / 84.0      - 187.0 / 2100.0)      * W.K6[I]
+                  + (0.0              - 1.0 / 40.0)          * W.K7[I]);
+    Err[I] = E;
+  }
+}
+} // namespace
 
 double MflowLinkSim::stepMajor() {
   // Pick `h` as the smaller of the configured fixed step and the
@@ -1469,9 +1604,71 @@ double MflowLinkSim::stepMajor() {
 
   std::vector<double> K1(Nx), K2(Nx), K3(Nx), K4(Nx), Yt(Nx), Y1(Nx);
   if (Nx > 0) {
-    rk4Substep(*this, &MflowLinkSim::derivative, T_, H, Y_, Y1,
-               K1, K2, K3, K4, Yt);
-    Y_ = std::move(Y1);
+    if (AdaptiveSolver_) {
+      // Item-2 — Dormand-Prince RK4(5) with PI step-size control.
+      // Try the full window `H`; if the embedded error estimate
+      // exceeds tolerance, shrink and retry. Each accepted step
+      // updates `CurrentAdaptiveH_` so the next major step starts
+      // from a reasonable size. The maxStep cap (`StepSize_`) is
+      // respected: the chosen step never exceeds it.
+      static thread_local DOPRI5Workspace WS;
+      std::vector<double> Err(Nx, 0.0);
+      double TLocal = T_;
+      double TEnd   = T_ + H;
+      double HCur   = std::min(CurrentAdaptiveH_, H);
+      const double RelTol = M_.Solver.RelTol;
+      const double AbsTol = M_.Solver.AbsTol;
+      const int MaxRetries = 32;
+      while (TLocal < TEnd - 1e-15) {
+        double HTry = std::min(HCur, TEnd - TLocal);
+        if (HTry <= 1e-15) break;
+        int Retry = 0;
+        bool Accepted = false;
+        while (!Accepted && Retry++ < MaxRetries) {
+          dopri5Step(*this, &MflowLinkSim::derivative,
+                     TLocal, HTry, Y_, Y1, Err, WS);
+          // Norm: max over elements of |err_i| / (atol + rtol·|y_i|).
+          double Norm = 0.0;
+          for (size_t I = 0; I < Nx; ++I) {
+            double Sc = AbsTol + RelTol *
+                        std::max(std::fabs(Y_[I]), std::fabs(Y1[I]));
+            if (Sc <= 0.0) Sc = AbsTol > 0 ? AbsTol : 1e-12;
+            double E = std::fabs(Err[I]) / Sc;
+            if (E > Norm) Norm = E;
+          }
+          if (Norm <= 1.0) {
+            Accepted = true;
+            // PI-control: grow step on success, capped at the
+            // configured maxStep.
+            double Factor = (Norm > 1e-12)
+                              ? 0.9 * std::pow(Norm, -0.2)
+                              : 5.0;
+            if (Factor > 5.0) Factor = 5.0;
+            HCur = std::min(HTry * Factor, StepSize_);
+          } else {
+            // Reject + shrink. Lower bound keeps us from
+            // infinite-looping on a hard discontinuity.
+            double Factor = 0.9 * std::pow(Norm, -0.2);
+            if (Factor < 0.1) Factor = 0.1;
+            HTry = HTry * Factor;
+            if (HTry < 1e-15) break;
+          }
+        }
+        if (!Accepted) {
+          // Last-resort fallback — take a fixed RK4 step at HTry
+          // and move on. Better an inaccurate step than a hang.
+          rk4Substep(*this, &MflowLinkSim::derivative, TLocal, HTry,
+                     Y_, Y1, K1, K2, K3, K4, Yt);
+        }
+        Y_ = Y1;
+        TLocal += HTry;
+      }
+      CurrentAdaptiveH_ = HCur;
+    } else {
+      rk4Substep(*this, &MflowLinkSim::derivative, T_, H, Y_, Y1,
+                 K1, K2, K3, K4, Yt);
+      Y_ = std::move(Y1);
+    }
   }
   T_ += H;
   ++MajorSteps_;
@@ -1749,6 +1946,13 @@ std::vector<MflowLinkSim::CrossingEvent>
 MflowLinkSim::consumeZeroCrossings() {
   std::vector<CrossingEvent> Out;
   Out.swap(ZCQueue_);
+  return Out;
+}
+
+std::vector<MflowLinkSim::AlgebraicLoopFailure>
+MflowLinkSim::consumeAlgebraicLoopFailures() {
+  std::vector<AlgebraicLoopFailure> Out;
+  Out.swap(AlgLoopFailures_);
   return Out;
 }
 

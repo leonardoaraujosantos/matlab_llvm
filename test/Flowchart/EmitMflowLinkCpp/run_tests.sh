@@ -60,7 +60,8 @@ run_one() {
 
 for name in lowpass pid_tracking multirate saturation_zc enabled_subsystem \
             thermostat tier_h_showcase tier_h_logic \
-            goto_from matlab_fcn vector_signals sample_time_inherit; do
+            goto_from matlab_fcn vector_signals sample_time_inherit \
+            algebraic_loop_solved; do
   run_one "$name"
 done
 

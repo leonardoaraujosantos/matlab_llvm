@@ -2,7 +2,10 @@
   "schema": "matforge.flowchart",
   "version": "0.1.0",
   "entry": "algloop",
-  "settings": { "kind": "signal_flow" },
+  "settings": {
+    "kind": "signal_flow",
+    "solver": { "algebraicLoopMethod": "off" }
+  },
   "flows": [
     {
       "id": "flow_algloop",
