@@ -175,6 +175,14 @@ struct Options {
    * no subsystem-emit; the input is processed as a normal MATLAB or
    * `.mflow` source. */
   std::string Subsystem;
+  /* Embedded Coder, Tier 2 — `--state-form={class,function}` flag.
+   * Default = `class` for software targets: the emit-* output gets
+   * a target-specific class/struct wrapper appended that carries
+   * the subsystem's state slots as member fields and exposes a
+   * mutating `step(u)` method. `function` leaves the raw functional
+   * `[y, s_next] = step(u, s)` form alone.  SystemVerilog ignores
+   * this flag (state lives in registers natively). */
+  std::string StateForm = "class";
   /* Block-library search path for `.mflow` custom blocks (Phase 4b).
    * Resolution order: command-line `--block-path DIR` entries (in CLI
    * order) followed by colon-separated entries from the
@@ -300,6 +308,8 @@ bool parseArgs(int Argc, char **Argv, Options &Opts, const char *&Prog) {
       }
       Opts.Subsystem = Argv[I];
     }
+    else if (A.size() > 13 && A.substr(0, 13) == "--state-form=")
+      Opts.StateForm = std::string(A.substr(13));
     else if (A == "-opt" || A == "-O") Opts.Opt = true;
     else if (A == "-no-line" || A == "--no-line") Opts.NoLine = true;
     else if (A == "-line" || A == "--line") Opts.EmitLine = true;
@@ -10243,6 +10253,35 @@ int main(int Argc, char **Argv) {
                 Opts.Doxygen, Opts.CppAuto, &SM);
           }
           if (Src.empty()) return 1;
+          // Embedded Coder, Tier 2 — append a per-target class
+          // wrapper around the functional `step(...)` when the
+          // user is emitting a `.mflow` subsystem AND opted into
+          // the (default) `class` state form. Skipped for
+          // `--state-form=function` and for non-subsystem emits.
+          if (!Opts.Subsystem.empty() && Opts.StateForm == "class") {
+            std::string TargetKey;
+            switch (Opts.Mode) {
+              case Options::Mode::EmitPython:     TargetKey = "python"; break;
+              case Options::Mode::EmitCpp:        TargetKey = "cpp"; break;
+              case Options::Mode::EmitC:          TargetKey = "c"; break;
+              case Options::Mode::EmitTypeScript: TargetKey = "typescript"; break;
+              default: break;
+            }
+            if (!TargetKey.empty()) {
+              SourceManager FlowSM2;
+              DiagnosticEngine FlowDiag2(FlowSM2);
+              auto Doc2 = matlab::flowchart::loadMflowFromPath(
+                  FlowSM2, Opts.InputPath, FlowDiag2);
+              if (Doc2) {
+                auto Meta = matlab::flowchart::describeSubsystem(
+                    *Doc2, Opts.Subsystem, FlowDiag2);
+                if (Meta) {
+                  Src += matlab::flowchart::emitSubsystemClassWrapper(
+                      *Meta, TargetKey);
+                }
+              }
+            }
+          }
           std::cout << Src;
         } else if (Opts.Mode == Options::Mode::EmitSystemVerilog ||
                    Opts.Mode == Options::Mode::CheckSynthesizable ||

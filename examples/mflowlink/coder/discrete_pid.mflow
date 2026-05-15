@@ -1,0 +1,113 @@
+{
+  "schema": "matforge.flowchart",
+  "version": "0.1.0",
+  "entry": "discrete_pid",
+  "settings": {
+    "kind": "signal_flow"
+  },
+  "flows": [
+    {
+      "id": "flow_discrete_pid",
+      "kind": "function",
+      "name": "discrete_pid",
+      "signature": { "inputs": ["ref", "meas"], "outputs": ["u"] },
+      "nodes": [
+        { "id": "u1", "kind": "signal_inport",
+          "data": { "params": {} },
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+        { "id": "u2", "kind": "signal_inport",
+          "data": { "params": {} },
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+
+        { "id": "err", "kind": "signal_sum",
+          "data": { "params": { "signs": "+-" } },
+          "ports": { "in": [{"id": "in1"}, {"id": "in2"}],
+                     "out": [{"id": "out"}] } },
+
+        { "id": "P",   "kind": "signal_gain",
+          "data": { "params": { "gain": 1.2 } },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+
+        { "id": "iacc", "kind": "signal_discrete_integrator",
+          "data": { "params": { "Ts": 0.05, "method": "ForwardEuler" } },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+
+        { "id": "I",   "kind": "signal_gain",
+          "data": { "params": { "gain": 0.4 } },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+
+        { "id": "prev_err", "kind": "signal_unit_delay",
+          "data": { "params": { "initialCondition": 0.0 } },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+
+        { "id": "diff", "kind": "signal_sum",
+          "data": { "params": { "signs": "+-" } },
+          "ports": { "in": [{"id": "in1"}, {"id": "in2"}],
+                     "out": [{"id": "out"}] } },
+
+        { "id": "D",   "kind": "signal_gain",
+          "data": { "params": { "gain": 4.0 } },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+
+        { "id": "ctrl", "kind": "signal_sum",
+          "data": { "params": { "signs": "+++" } },
+          "ports": { "in": [{"id": "in1"}, {"id": "in2"}, {"id": "in3"}],
+                     "out": [{"id": "out"}] } },
+
+        { "id": "clamp", "kind": "signal_saturation",
+          "data": { "params": { "lowerLimit": -5.0, "upperLimit": 5.0 } },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+
+        { "id": "y1",  "kind": "signal_outport",
+          "data": { "params": {} },
+          "ports": { "in": [{"id": "in"}], "out": [] } }
+      ],
+      "edges": [
+        { "id": "e1",  "kind": "data",
+          "from": {"node": "u1",   "port": "out"},
+          "to":   {"node": "err",  "port": "in1"} },
+        { "id": "e2",  "kind": "data",
+          "from": {"node": "u2",   "port": "out"},
+          "to":   {"node": "err",  "port": "in2"} },
+
+        { "id": "e3",  "kind": "data",
+          "from": {"node": "err",  "port": "out"},
+          "to":   {"node": "P",    "port": "in"} },
+        { "id": "e4",  "kind": "data",
+          "from": {"node": "err",  "port": "out"},
+          "to":   {"node": "iacc", "port": "in"} },
+        { "id": "e5",  "kind": "data",
+          "from": {"node": "iacc", "port": "out"},
+          "to":   {"node": "I",    "port": "in"} },
+        { "id": "e6",  "kind": "data",
+          "from": {"node": "err",  "port": "out"},
+          "to":   {"node": "prev_err", "port": "in"} },
+        { "id": "e7",  "kind": "data",
+          "from": {"node": "err",  "port": "out"},
+          "to":   {"node": "diff", "port": "in1"} },
+        { "id": "e8",  "kind": "data",
+          "from": {"node": "prev_err", "port": "out"},
+          "to":   {"node": "diff", "port": "in2"} },
+        { "id": "e9",  "kind": "data",
+          "from": {"node": "diff", "port": "out"},
+          "to":   {"node": "D",    "port": "in"} },
+
+        { "id": "e10", "kind": "data",
+          "from": {"node": "P",    "port": "out"},
+          "to":   {"node": "ctrl", "port": "in1"} },
+        { "id": "e11", "kind": "data",
+          "from": {"node": "I",    "port": "out"},
+          "to":   {"node": "ctrl", "port": "in2"} },
+        { "id": "e12", "kind": "data",
+          "from": {"node": "D",    "port": "out"},
+          "to":   {"node": "ctrl", "port": "in3"} },
+        { "id": "e13", "kind": "data",
+          "from": {"node": "ctrl", "port": "out"},
+          "to":   {"node": "clamp","port": "in"} },
+        { "id": "e14", "kind": "data",
+          "from": {"node": "clamp","port": "out"},
+          "to":   {"node": "y1",   "port": "in"} }
+      ]
+    }
+  ]
+}

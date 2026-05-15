@@ -1,0 +1,37 @@
+{
+  "schema": "matforge.flowchart",
+  "version": "0.1.0",
+  "entry": "unit_delay",
+  "settings": {
+    "kind": "signal_flow"
+  },
+  "flows": [
+    {
+      "id": "flow_unit_delay",
+      "kind": "function",
+      "name": "unit_delay",
+      "signature": { "inputs": ["u"], "outputs": ["y"] },
+      "nodes": [
+        { "id": "u1", "kind": "signal_inport",
+          "data": { "params": {} },
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+
+        { "id": "z1", "kind": "signal_unit_delay",
+          "data": { "params": { "initialCondition": 0.0 } },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+
+        { "id": "y1", "kind": "signal_outport",
+          "data": { "params": {} },
+          "ports": { "in": [{"id": "in"}], "out": [] } }
+      ],
+      "edges": [
+        { "id": "e1", "kind": "data",
+          "from": {"node": "u1", "port": "out"},
+          "to":   {"node": "z1", "port": "in"} },
+        { "id": "e2", "kind": "data",
+          "from": {"node": "z1", "port": "out"},
+          "to":   {"node": "y1", "port": "in"} }
+      ]
+    }
+  ]
+}

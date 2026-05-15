@@ -66,6 +66,13 @@ const std::set<std::string> &tier1Kinds() {
       "signal_mux",      "signal_demux",        "signal_reshape",
       "signal_switch",   "signal_multiport_switch",
       "signal_merge",
+      // Tier 3 — stateful discrete blocks.  Each contributes one
+      // scalar state slot to the emitted function's signature
+      // (one extra arg + one extra return).  See the `isStatefulKind`
+      // helper below for the actual list and `stateSlotName` for the
+      // naming convention.
+      "signal_unit_delay", "signal_zoh",
+      "signal_discrete_integrator",
       // Routing-only — emit nothing, but pass through the variable
       // name from the source.
       "signal_inport",   "signal_outport",
@@ -80,6 +87,18 @@ const std::set<std::string> &tier1Kinds() {
 bool isSinkKind(const std::string &K) {
   return K == "signal_scope" || K == "signal_display" ||
          K == "signal_to_workspace" || K == "signal_terminator";
+}
+
+// Tier 3 — stateful (loop-breaker) blocks. Each carries one state
+// slot in the emitted function's signature: an extra scalar arg
+// `s_<id>` (current state) and an extra scalar return
+// `s_<id>_next` (state for the next tick). The state read happens
+// at the start of the block's evaluation; the state-update lands
+// in the next-state output.
+bool isStatefulKind(const std::string &K) {
+  return K == "signal_unit_delay" ||
+         K == "signal_zoh" ||
+         K == "signal_discrete_integrator";
 }
 
 //===-----------------------------------------------------------------===//
@@ -556,9 +575,40 @@ matlab::Function *lowerSubsystemToMatlab(
   }
   if (Diag.hasErrors()) return nullptr;
 
+  // Tier 3 — collect stateful blocks in topo order; each contributes
+  // one scalar state slot to the function signature: an extra arg
+  // `s_<id>` (current state) and an extra return `s_<id>_next` (state
+  // for the next tick). The state read is what the block's "output"
+  // becomes; the next-state update lands in `s_<id>_next` at the end
+  // of the body so the caller can latch it back for the next call.
+  struct StateSlot {
+    const Node *N;
+    std::string CurArg;    // function arg name carrying current state
+    std::string NextOut;   // function return name carrying next state
+    std::string OutVar;    // local var = current state (block's output)
+  };
+  std::vector<StateSlot> States;
+  for (auto *N : Internal) {
+    if (!isStatefulKind(N->Kind)) continue;
+    StateSlot S;
+    S.N       = N;
+    S.CurArg  = "s_" + sanitizeIdent(N->Id);
+    S.NextOut = "s_" + sanitizeIdent(N->Id) + "_next";
+    S.OutVar  = VarOfNode[N->Id];   // already populated below
+    States.push_back(S);
+  }
+  // Pre-reserve all the state-related identifiers in `Used` so the
+  // generic `uniqueVarFor` doesn't accidentally collide with them.
+  for (auto &S : States) {
+    Used.insert(S.CurArg);
+    Used.insert(S.NextOut);
+  }
+
   for (auto *N : Internal) {
     VarOfNode[N->Id] = uniqueVarFor(N->Id);
   }
+  // Refresh OutVar now that VarOfNode is populated.
+  for (auto &S : States) S.OutVar = VarOfNode[S.N->Id];
 
   // Build the function body.
   auto *Body = AST.make<Block>();
@@ -588,11 +638,59 @@ matlab::Function *lowerSubsystemToMatlab(
     return Out;
   };
 
+  // §17.5-#4-style discretization spec for each stateful block —
+  // computed up front so the per-block dispatch below can render
+  // the `<next> = ...` update expression cleanly.
+  std::unordered_map<std::string, Expr *> NextStateExpr;
+
   // Emit one statement per internal block.
   for (auto *N : Internal) {
     auto Ports = inputPortsOf(*N);
     std::vector<Expr *> Ins;
     for (auto &P : Ports) Ins.push_back(resolveInputExpr(N->Id, P));
+
+    if (isStatefulKind(N->Kind)) {
+      // §17.5 #4 / Tier 3 — stateful block. Output is the current
+      // state; next state is computed from the upstream input.
+      const std::string &OutV = VarOfNode[N->Id];
+      const std::string CurS  = "s_" + sanitizeIdent(N->Id);
+      // 1) `<OutV> = <CurS> + 0.0;`   (output the latched state)
+      // The `+ 0.0` anchors the assignment to `f64` so the static
+      // -emit-* pipeline's slot-type inference picks `double`
+      // throughout — without it a pure-passthrough subsystem
+      // (e.g. one Unit Delay with no internal arithmetic) gets
+      // collapsed away as dead-code and the emitted function body
+      // is empty. The anchor is a no-op at runtime.
+      Body->Stmts.push_back(B.assign(OutV,
+                                      B.bin(BinOp::Add, B.name(CurS),
+                                            B.number(0.0))));
+      // 2) Compute next state. Stash in `NextStateExpr` for the
+      //    final state-update block at end of body.
+      Expr *NextExpr = nullptr;
+      if (N->Kind == "signal_unit_delay" || N->Kind == "signal_zoh") {
+        // Next state = current input.  Anchor with `+ 0.0` for
+        // the same reason as above.
+        Expr *U = Ins.empty() ? B.number(0.0) : Ins.front();
+        NextExpr = B.bin(BinOp::Add, U, B.number(0.0));
+      } else if (N->Kind == "signal_discrete_integrator") {
+        // Forward Euler default (matches simulator §17.5 #4 default):
+        //   s_next = s + Ts * u
+        // Backward Euler / Trapezoidal need `u[n+1]` AND `u[n]` —
+        // for the emit lane we discretise to Forward Euler so the
+        // caller can drive `step(u)` without tracking past inputs.
+        double Ts = paramD(*N, "sample_time", 0.0);
+        if (Ts == 0.0) Ts = paramD(*N, "sampleTime", 0.0);
+        if (Ts == 0.0) Ts = paramD(*N, "Ts", 0.01);
+        Expr *U = Ins.empty() ? B.number(0.0) : Ins.front();
+        Expr *TsU = B.bin(BinOp::ElemMul, B.number(Ts), U);
+        NextExpr = B.bin(BinOp::Add, B.name(CurS), TsU);
+      } else {
+        NextExpr = B.number(0.0);
+      }
+      NextStateExpr[N->Id] = NextExpr;
+      continue;
+    }
+
     auto *Stmt = lowerBlock(*N, VarOfNode[N->Id], Ins, Ports, B, Diag);
     if (!Stmt) return nullptr;
     Body->Stmts.push_back(Stmt);
@@ -610,11 +708,25 @@ matlab::Function *lowerSubsystemToMatlab(
     Body->Stmts.push_back(B.assign(P.Var, Rhs));
   }
 
+  // Tier 3 — emit `<NextOut> = <NextExpr>;` for every stateful block
+  // so the multi-return picks up the next-state values.
+  for (auto &S : States) {
+    Expr *E = NextStateExpr[S.N->Id];
+    if (!E) E = B.number(0.0);
+    Body->Stmts.push_back(B.assign(S.NextOut, E));
+  }
+
   // Build the function node.
   auto *Fn = AST.make<Function>();
   Fn->Name = AST.intern(sanitizeIdent(SubsystemName));
   for (auto &P : Inports)  Fn->Inputs.push_back(AST.intern(P.Var));
+  // Tier 3 — append state args after the inports so the public
+  // signature reads `step(u1, ..., uN, s_<a>, s_<b>, ...)`.
+  for (auto &S : States) Fn->Inputs.push_back(AST.intern(S.CurArg));
   for (auto &P : Outports) Fn->Outputs.push_back(AST.intern(P.Var));
+  // And next-state returns after the regular outports:
+  //   `[y1, ..., yM, s_<a>_next, s_<b>_next, ...]`.
+  for (auto &S : States) Fn->Outputs.push_back(AST.intern(S.NextOut));
   Fn->Body = Body;
   return Fn;
 }
@@ -644,8 +756,20 @@ matlab::TranslationUnit *buildSubsystemTU(
       Args.push_back(B.number(0.0));
     auto *Call = B.call(std::string(Fn->Name), std::move(Args));
     auto *Driver = AST.make<AssignStmt>();
-    auto *Lhs = B.name("__mflowlink_priming");
-    Driver->LHS.push_back(Lhs);
+    // Tier 3 — multi-return functions need one LHS per output for
+    // the static -emit-* pipeline to refine ALL output types to
+    // f64 (a single-LHS call keeps the trailing returns at `none`).
+    // Use `[_p1, _p2, ..., _pK]` for stateful subsystems with K
+    // returns; a single `__mflowlink_priming` keeps the stateless
+    // case readable.
+    if (Fn->Outputs.size() > 1) {
+      for (size_t I = 0; I < Fn->Outputs.size(); ++I) {
+        Driver->LHS.push_back(B.name("__mflowlink_priming" +
+                                       std::to_string(I + 1)));
+      }
+    } else {
+      Driver->LHS.push_back(B.name("__mflowlink_priming"));
+    }
     Driver->RHS = Call;
     Driver->Suppressed = true;
     auto *S = AST.make<Script>();
@@ -654,6 +778,272 @@ matlab::TranslationUnit *buildSubsystemTU(
     TU->ScriptNode = S;
   }
   return TU;
+}
+
+//===----------------------------------------------------------------------===//
+// Tier 2 — subsystem metadata + per-target class-wrapper rendering.
+//
+// `describeSubsystem` recomputes the public surface (inputs, outputs,
+// state slots) without touching the AST.  `emitSubsystemClassWrapper`
+// renders a small target-specific class/struct that bundles the
+// functional `step(...)` into the more ergonomic "class with mutating
+// step(u) → y" idiom — matches the user's pick during planning (see
+// docs/embedded_coder_roadmap.md §5).
+//===----------------------------------------------------------------------===//
+
+std::optional<SubsystemMeta> describeSubsystem(
+    const FlowDoc &Doc,
+    const std::string &SubsystemName,
+    matlab::DiagnosticEngine &Diag) {
+  const Flow *Sub = Doc.findFlow(SubsystemName);
+  if (!Sub) {
+    Diag.error(SourceLocation{}, "subsystem \"" + SubsystemName +
+                                     "\" not found in `.mflow` file");
+    return std::nullopt;
+  }
+  SubsystemMeta M;
+  M.Name = sanitizeIdent(SubsystemName);
+
+  // Inputs.
+  auto Inports = collectPorts(*Sub, "signal_inport");
+  for (auto &P : Inports) M.InputNames.push_back(P.Var);
+
+  // Outputs.
+  auto Outports = collectPorts(*Sub, "signal_outport");
+  for (auto &P : Outports) M.OutputNames.push_back(P.Var);
+
+  // Stateful blocks → one state slot each.
+  for (const auto &N : Sub->Nodes) {
+    if (!isStatefulKind(N.Kind)) continue;
+    M.StateArgNames.push_back("s_" + sanitizeIdent(N.Id));
+    M.StateReturnNames.push_back("s_" + sanitizeIdent(N.Id) + "_next");
+  }
+  return M;
+}
+
+namespace {
+
+// Convert "snake_case" → "SnakeCase" so we get an idiomatic class
+// name (Python: `DiscretePid`, C++: `DiscretePid`, …).
+std::string toCamelCase(const std::string &S) {
+  std::string Out;
+  bool Up = true;
+  for (char C : S) {
+    if (C == '_' || C == '-') { Up = true; continue; }
+    Out.push_back(Up ? std::toupper((unsigned char)C) : C);
+    Up = false;
+  }
+  return Out;
+}
+
+std::string joinComma(const std::vector<std::string> &V) {
+  std::string Out;
+  for (size_t I = 0; I < V.size(); ++I) {
+    if (I) Out += ", ";
+    Out += V[I];
+  }
+  return Out;
+}
+
+} // namespace
+
+std::string emitSubsystemClassWrapper(const SubsystemMeta &M,
+                                       const std::string &Target) {
+  std::string ClassName = toCamelCase(M.Name);
+  std::ostringstream OS;
+  bool Stateful = !M.StateArgNames.empty();
+  size_t N = M.InputNames.size();   // public arg count
+  size_t Outs = M.OutputNames.size(); // public return count
+
+  if (Target == "python") {
+    OS << "\n\n";
+    OS << "# Tier-2 class wrapper: object-style step() that carries\n";
+    OS << "# the per-block state across calls.  Mirrors the functional\n";
+    OS << "# `" << M.Name << "(...)` above; idiomatic for service / ML\n";
+    OS << "# code that owns one controller instance per signal.\n";
+    OS << "class " << ClassName << ":\n";
+    OS << "    def __init__(self):\n";
+    if (!Stateful) {
+      OS << "        pass\n";
+    } else {
+      for (auto &S : M.StateArgNames)
+        OS << "        self." << S << " = 0.0\n";
+    }
+    OS << "    def step(self";
+    for (auto &In : M.InputNames) OS << ", " << In;
+    OS << "):\n";
+    OS << "        ";
+    // LHS — y outputs + state-next.
+    std::vector<std::string> Lhs;
+    for (auto &Y : M.OutputNames) Lhs.push_back(Y);
+    for (auto &S : M.StateReturnNames) Lhs.push_back(S);
+    if (Lhs.size() == 1) OS << Lhs[0];
+    else OS << joinComma(Lhs);
+    OS << " = " << M.Name << "(";
+    OS << joinComma(M.InputNames);
+    for (auto &S : M.StateArgNames) OS << ", self." << S;
+    OS << ")\n";
+    // Latch state.
+    for (size_t I = 0; I < M.StateArgNames.size(); ++I) {
+      OS << "        self." << M.StateArgNames[I] << " = "
+         << M.StateReturnNames[I] << "\n";
+    }
+    if (Outs == 1) OS << "        return " << M.OutputNames[0] << "\n";
+    else           OS << "        return " << joinComma(M.OutputNames)
+                      << "\n";
+    return OS.str();
+  }
+
+  if (Target == "cpp") {
+    OS << "\n\n";
+    OS << "// Tier-2 class wrapper: object-style step() that carries\n";
+    OS << "// the per-block state across calls.\n";
+    OS << "struct " << ClassName << " {\n";
+    for (auto &S : M.StateArgNames)
+      OS << "  double " << S << " = 0.0;\n";
+    if (Outs == 1) OS << "  double step(";
+    else           OS << "  std::tuple<";
+    if (Outs > 1) {
+      for (size_t I = 0; I < Outs; ++I) {
+        if (I) OS << ", ";
+        OS << "double";
+      }
+      OS << "> step(";
+    }
+    for (size_t I = 0; I < N; ++I) {
+      if (I) OS << ", ";
+      OS << "double " << M.InputNames[I];
+    }
+    OS << ") {\n";
+    if (Stateful || Outs > 1) {
+      OS << "    ";
+      OS << "auto _r = " << M.Name << "(";
+      OS << joinComma(M.InputNames);
+      for (auto &S : M.StateArgNames) OS << ", " << S;
+      OS << ");\n";
+      // Latch state: tuple elements after the y outputs.
+      for (size_t I = 0; I < M.StateArgNames.size(); ++I) {
+        OS << "    " << M.StateArgNames[I] << " = std::get<"
+           << (Outs + I) << ">(_r);\n";
+      }
+      if (Outs == 1) {
+        OS << "    return std::get<0>(_r);\n";
+      } else {
+        // Pack the y outputs into a tuple to return.
+        OS << "    return std::make_tuple(";
+        for (size_t I = 0; I < Outs; ++I) {
+          if (I) OS << ", ";
+          OS << "std::get<" << I << ">(_r)";
+        }
+        OS << ");\n";
+      }
+    } else {
+      // Stateless single-output — direct return.
+      OS << "    return " << M.Name << "(" << joinComma(M.InputNames)
+         << ");\n";
+    }
+    OS << "  }\n";
+    OS << "};\n";
+    return OS.str();
+  }
+
+  if (Target == "c") {
+    // C: struct + free `<ClassName>_step` taking pointer-to-self.
+    OS << "\n\n";
+    OS << "// Tier-2 class wrapper (C): struct + free step function.\n";
+    OS << "typedef struct {\n";
+    if (M.StateArgNames.empty()) {
+      OS << "  char _unused;  /* zero-state placeholder */\n";
+    } else {
+      for (auto &S : M.StateArgNames) OS << "  double " << S << ";\n";
+    }
+    OS << "} " << ClassName << ";\n";
+    if (Outs == 1) OS << "static double ";
+    else           OS << "static void ";
+    OS << ClassName << "_step(" << ClassName << " *self";
+    for (auto &In : M.InputNames) OS << ", double " << In;
+    if (Outs > 1) {
+      for (auto &Y : M.OutputNames) OS << ", double *" << Y << "_out";
+    }
+    OS << ") {\n";
+    // Allocate locals for the function's full set of returns.
+    std::vector<std::string> AllOuts;
+    for (auto &Y : M.OutputNames) AllOuts.push_back("y_" + Y);
+    for (auto &S : M.StateReturnNames) AllOuts.push_back(S);
+    for (auto &L : AllOuts) OS << "  double " << L << ";\n";
+    OS << "  " << M.Name << "(";
+    OS << joinComma(M.InputNames);
+    for (auto &S : M.StateArgNames) OS << ", self->" << S;
+    for (auto &L : AllOuts) OS << ", &" << L;
+    OS << ");\n";
+    for (size_t I = 0; I < M.StateArgNames.size(); ++I) {
+      OS << "  self->" << M.StateArgNames[I] << " = "
+         << M.StateReturnNames[I] << ";\n";
+    }
+    if (Outs == 1) {
+      OS << "  return y_" << M.OutputNames[0] << ";\n";
+    } else {
+      for (auto &Y : M.OutputNames) {
+        OS << "  *" << Y << "_out = y_" << Y << ";\n";
+      }
+    }
+    OS << "}\n";
+    return OS.str();
+  }
+
+  if (Target == "typescript") {
+    OS << "\n\n";
+    OS << "// Tier-2 class wrapper: object-style step() that carries\n";
+    OS << "// the per-block state across calls.\n";
+    OS << "class " << ClassName << " {\n";
+    for (auto &S : M.StateArgNames)
+      OS << "  " << S << ": number = 0;\n";
+    OS << "  step(";
+    for (size_t I = 0; I < N; ++I) {
+      if (I) OS << ", ";
+      OS << M.InputNames[I] << ": number";
+    }
+    OS << "): ";
+    if (Outs == 1) OS << "number";
+    else {
+      OS << "[";
+      for (size_t I = 0; I < Outs; ++I) {
+        if (I) OS << ", ";
+        OS << "number";
+      }
+      OS << "]";
+    }
+    OS << " {\n";
+    // Destructure the call result.
+    OS << "    const [";
+    std::vector<std::string> AllReturns;
+    for (auto &Y : M.OutputNames) AllReturns.push_back(Y);
+    for (auto &S : M.StateReturnNames) AllReturns.push_back(S);
+    OS << joinComma(AllReturns);
+    OS << "] = " << M.Name << "(";
+    OS << joinComma(M.InputNames);
+    for (auto &S : M.StateArgNames) OS << ", this." << S;
+    OS << ");\n";
+    for (size_t I = 0; I < M.StateArgNames.size(); ++I) {
+      OS << "    this." << M.StateArgNames[I] << " = "
+         << M.StateReturnNames[I] << ";\n";
+    }
+    if (Outs == 1) {
+      OS << "    return " << M.OutputNames[0] << ";\n";
+    } else {
+      OS << "    return [";
+      OS << joinComma(M.OutputNames);
+      OS << "];\n";
+    }
+    OS << "  }\n";
+    OS << "}\n";
+    return OS.str();
+  }
+
+  // Unsupported target — return empty so the caller skips the
+  // wrapper. SystemVerilog handles state via registers natively
+  // (Tier 5) and doesn't go through this wrapper.
+  return {};
 }
 
 } // namespace matlab::flowchart

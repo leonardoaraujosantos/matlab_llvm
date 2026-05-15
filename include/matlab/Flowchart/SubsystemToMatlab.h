@@ -3,7 +3,9 @@
 #include "matlab/AST/AST.h"
 #include "matlab/Flowchart/Loader.h"
 
+#include <optional>
 #include <string>
+#include <vector>
 
 namespace matlab {
 
@@ -65,6 +67,43 @@ matlab::TranslationUnit *buildSubsystemTU(
     const std::string &SubsystemName,
     matlab::ASTContext &AST,
     matlab::DiagnosticEngine &Diag);
+
+//===----------------------------------------------------------------------===//
+// Tier-2 class wrapper — per-target shim that bundles the functional
+// `step(...)` into a class/struct holding the persistent state slots.
+//
+// Computed independently of `lowerSubsystemToMatlab` so the matlabc
+// driver can append it to whichever emit-* lane's output. Returns the
+// metadata + ready-to-emit class source for the given target.
+//===----------------------------------------------------------------------===//
+struct SubsystemMeta {
+  std::string Name;                            // canonical entry name
+  std::vector<std::string> InputNames;         // u1, u2, ... (public)
+  std::vector<std::string> OutputNames;        // y1, y2, ... (public)
+  std::vector<std::string> StateArgNames;      // s_<id>
+  std::vector<std::string> StateReturnNames;   // s_<id>_next
+};
+
+// Compute the public metadata from the named subsystem. Returns an
+// empty optional if the subsystem can't be lowered (the diagnostic
+// is the same one `lowerSubsystemToMatlab` would emit). The class
+// wrapper sample uses InputNames + OutputNames + State*Names to
+// place each member field / step-method arg.
+std::optional<SubsystemMeta> describeSubsystem(
+    const FlowDoc &Doc,
+    const std::string &SubsystemName,
+    matlab::DiagnosticEngine &Diag);
+
+// Render a class/struct wrapper around the functional `step(...)` for
+// the target language. Targets: "python" / "cpp" / "c" / "typescript".
+// Returns the source text to append after the emit-* lane's output.
+// The wrapper exposes:
+//   - a default constructor that zero-initialises every state slot;
+//   - a `step(u1, ..., uN)` method that calls the functional form,
+//     latches the next-state into member fields, and returns the
+//     y-tuple (or single y when M == 1).
+std::string emitSubsystemClassWrapper(const SubsystemMeta &Meta,
+                                       const std::string &Target);
 
 } // namespace flowchart
 } // namespace matlab

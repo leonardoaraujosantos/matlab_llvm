@@ -221,23 +221,41 @@ Each tier ends with a working demo + a CTest lane.
 - CTest: `flowchart-emit-subsystem-python` diffs Python output
   against `matlabc -simulate`.
 
-### Tier 2 — C / C++ / TypeScript emit  *(~3 days)*
+### Tier 2 — C / C++ / TypeScript emit  *(✓ shipped 2026-05-15)*
 
 - Same `SubsystemToMatlab` pass, switch the downstream emitter.
-- C++ + TS pick up the class-with-step shape.
-- CTest: three new lanes
-  (`flowchart-emit-subsystem-{c,cpp,ts}`) each compiling +
-  running the emitted code and checking numerical equivalence.
+- All four software targets covered: Python, C, C++, TypeScript.
+- Class-with-step shape: post-emit per-target wrapper appended by
+  matlabc (`emitSubsystemClassWrapper`), placing the subsystem's
+  state slots as member fields and the functional `step(...)` as
+  the class's update method. Opt-out via `--state-form=function`.
+- CTest: lane covers Python (import + tests) and C++ (clang++
+  compile + run) for every fixture.
 
-### Tier 3 — Stateful subsystems  *(~1 week)*
+### Tier 3 — Stateful subsystems  *(✓ shipped 2026-05-15)*
 
-- Unit Delay, ZOH, discrete integrator, discrete filter.
-- State struct generation in the synthesised MATLAB
-  (`state.<id>_*` fields).
-- Class-with-step packaging picks up the state automatically (it
-  lives as a member; `step` mutates it).
-- Demo: `discrete_pid.mflow` — a 50 ms-sampled PID controller
-  subsystem → Python class. Numerical equivalence vs `-simulate`.
+- Unit Delay, ZOH, discrete integrator (Forward Euler) now lower
+  to a multi-return functional form: signature gains one extra
+  arg `s_<id>` per stateful block (current state) and one extra
+  return `s_<id>_next` (next state). The emitted body reads the
+  current state into the block's output variable, then computes
+  the next state from the upstream input (Forward Euler for the
+  integrator: `s + Ts · u`; latch for Unit Delay / ZOH).
+- Type-anchor: each stateful read emits `<var> = <s_arg> + 0.0;`
+  so pure-passthrough subsystems (one Unit Delay, no internal
+  arithmetic) don't get collapsed to an empty body by the
+  MLIR pipeline's dead-code pass.
+- Class wrapper picks up state automatically (it lives as a
+  member field; `step(u)` calls the functional form, latches
+  the returned next-state into members, returns `y`).
+- Demo: `examples/mflowlink/coder/discrete_pid.mflow` — full
+  P + I + D + saturation controller with 50 ms-sampled
+  Forward-Euler integrator + unit-delay derivative. 10-tick
+  smoke test verifies numerical equivalence between the
+  functional form and the auto-generated `DiscretePid` Python
+  class. Carve-out: discrete filter (general N-order direct-form-II)
+  defers to Tier 6 — its per-tap history is a vector slot, not a
+  single scalar.
 
 ### Tier 4 — Continuous-block discretization  *(~3 days)*
 

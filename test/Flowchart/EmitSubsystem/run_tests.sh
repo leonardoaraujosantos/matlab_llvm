@@ -30,8 +30,14 @@ pass=0; fail=0
 fails=()
 
 # Expected outputs per fixture — single-row tabular form
-# `<u1>,<u2>,... -> <y1>[,<y2>...]`. The Python harness eval's the
-# subsystem call and asserts approximate equality (1e-9).
+# `<args> -> <returns>`. For stateful subsystems the args include
+# the per-block state slots in their final positions, and the
+# returns include the next-state slots in theirs (matching the
+# function's full signature). The Python harness eval's the
+# subsystem call once per case and asserts approximate equality
+# (1e-6). Multi-tick state evolution is tested by chaining cases
+# (the test runner doesn't thread state automatically — each case
+# stands on its own with explicit state inputs).
 declare -a CASES=(
   # stateless_mixer: y = sat(2*u1 + u2 - u3), sat clamps to [-1, 1]
   'stateless_mixer|0.3,0.2,0.1->0.7|1.0,1.0,0.0->1.0|-1.0,-2.0,0.0->-1.0|0.0,0.0,0.0->0.0'
@@ -41,6 +47,20 @@ declare -a CASES=(
   'threshold_switch|10.0,0.6,-10.0->10.0|10.0,0.4,-10.0->-10.0|10.0,0.5,-10.0->-10.0'
   # math_fns: returns (abs(u1), sin(u1))
   'math_fns|0.0->0.0,0.0|1.5->1.5,0.9974949866|-2.0->2.0,-0.9092974268'
+  # Tier 3 — stateful subsystems.
+  # unit_delay(u, s) -> (y, s_next): y = s, s_next = u.
+  'unit_delay|0.0,0.0->0.0,0.0|5.0,2.0->2.0,5.0|-1.0,7.0->7.0,-1.0'
+  # discrete_integrator(u, s_acc) -> (y, s_acc_next):
+  #   y = s_acc, s_acc_next = s_acc + 0.5 * u * Ts (Ts=0.1)
+  'discrete_integrator|0.0,0.0->0.0,0.0|1.0,0.0->0.0,0.05|1.0,0.1->0.1,0.15|2.0,0.5->0.5,0.6'
+  # discrete_pid(ref, meas, s_iacc, s_prev_err) -> (u, iacc_next, prev_next):
+  # Step 0 (cold start): err = 1, P = 1.2, I = 0, D = 1*4 = 4.0
+  #   u_pre_sat = 5.2; sat[-5,5] -> 5.0; iacc_next = 0.05; prev_next = 1.0
+  # Step 1 (prev=1, iacc=0.05): err = 1, P = 1.2, I = 0.05*0.4 = 0.02, D = 0
+  #   u = 1.22; iacc_next = 0.10; prev_next = 1.0
+  # Step 2 (prev=1, iacc=0.10): err = 1, P = 1.2, I = 0.04, D = 0
+  #   u = 1.24; iacc_next = 0.15; prev_next = 1.0
+  'discrete_pid|1.0,0.0,0.0,0.0->5.0,0.05,1.0|1.0,0.0,0.05,1.0->1.22,0.10,1.0|1.0,0.0,0.10,1.0->1.24,0.15,1.0'
 )
 
 check() {
@@ -167,6 +187,38 @@ for entry in "${CASES[@]}"; do
   IFS='|' read -ra cases <<< "$rest"
   check "$name" "${cases[@]}"
 done
+
+# Tier 2 — class wrapper smoke test for the stateful PID demo.
+# Confirms the auto-emitted `DiscretePid` Python class produces
+# the same per-tick `u` sequence as the functional form (and as
+# the analytic reference baked into CASES above). Catches
+# wrapper-template regressions (wrong state-slot order, missed
+# latch, wrong return shape) without re-implementing every case.
+class_smoke() {
+  local fixture="$1" ; local cls="$2"
+  local py="$SCRATCH/${fixture}_cls.py"
+  "$MATLABC" -emit-python "$EX/${fixture}.mflow" --subsystem "$fixture" \
+       > "$py" 2> "$SCRATCH/emit.err"
+  python3 - "$py" "$fixture" "$cls" <<'PY'
+import importlib.util, sys
+py, fixture, cls = sys.argv[1], sys.argv[2], sys.argv[3]
+spec = importlib.util.spec_from_file_location(fixture, py)
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+ctrl = getattr(m, cls)()
+expected = [5.0, 1.22, 1.24, 1.26, 1.28, 1.30, 1.32, 1.34, 1.36, 1.38]
+for tick, want in enumerate(expected):
+    got = ctrl.step(1.0, 0.0)
+    if abs(got - want) > 1e-6:
+        print(f"  {cls}.step tick {tick}: got {got}, want {want}", file=sys.stderr)
+        sys.exit(1)
+PY
+  if [[ $? -ne 0 ]]; then
+    fail=$((fail+1)); fails+=("$fixture (class wrapper smoke)")
+  else
+    pass=$((pass+1))
+  fi
+}
+class_smoke discrete_pid DiscretePid
 
 echo "----"
 echo "passed: $pass    failed: $fail"
