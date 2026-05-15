@@ -419,23 +419,82 @@ sv_pid_smoke() {
 }
 sv_pid_smoke
 
-# Tier 5 — continuous block must be rejected with a sourced error
-# in HDL emit (no implicit auto-discretisation).
-sv_reject() {
-  if "$MATLABC" -emit-sv "$EX/continuous_lowpass.mflow" \
-       --subsystem continuous_lowpass > "$SCRATCH/out.sv" \
-       2> "$SCRATCH/reject.err"; then
-    fail=$((fail+1)); fails+=("continuous_lowpass SV (no rejection)")
+# Tier-5g — continuous Integrator + Transfer Function auto-
+# discretise for HDL too (Forward Euler at the user-picked Ts).
+# Validate continuous_lowpass.mflow (Integrator + Sum feedback)
+# emits clean SV with the integrator state register.
+sv_integrator_smoke() {
+  local sv="$SCRATCH/continuous_lowpass.sv"
+  "$MATLABC" -emit-sv "$EX/continuous_lowpass.mflow" \
+       --subsystem continuous_lowpass > "$sv" \
+       2> "$SCRATCH/cl.err"
+  if ! grep -q "module continuous_lowpass" "$sv"; then
+    fail=$((fail+1)); fails+=("continuous_lowpass SV (missing module)")
+    sed 's/^/  /' "$SCRATCH/cl.err" >&2
     return
   fi
-  if ! grep -q "continuous block" "$SCRATCH/reject.err"; then
-    fail=$((fail+1)); fails+=("continuous_lowpass SV (wrong error)")
-    sed 's/^/  /' "$SCRATCH/reject.err" >&2
+  if ! grep -q "logic signed \[31:0\] s_x;" "$sv"; then
+    fail=$((fail+1)); fails+=("continuous_lowpass SV (missing integrator reg)")
     return
   fi
   pass=$((pass+1))
 }
-sv_reject
+sv_integrator_smoke
+
+# Tier-5g — continuous Transfer Function (1st-order
+# strictly-proper) → SV. tf_lowpass.mflow emits a single-state
+# Forward-Euler discretisation of 1/(s+1) at the user-picked Ts.
+sv_tf_smoke() {
+  local sv="$SCRATCH/tf_lowpass.sv"
+  "$MATLABC" -emit-sv "$EX/tf_lowpass.mflow" \
+       --subsystem tf_lowpass > "$sv" 2> "$SCRATCH/tf.err"
+  if ! grep -q "module tf_lowpass" "$sv"; then
+    fail=$((fail+1)); fails+=("tf_lowpass SV (missing module)")
+    sed 's/^/  /' "$SCRATCH/tf.err" >&2
+    return
+  fi
+  if ! grep -q "logic signed \[31:0\] s_tf;" "$sv"; then
+    fail=$((fail+1)); fails+=("tf_lowpass SV (missing TF reg)")
+    return
+  fi
+  if ! grep -q "always_ff @(posedge clk" "$sv"; then
+    fail=$((fail+1)); fails+=("tf_lowpass SV (no always_ff)")
+    return
+  fi
+  pass=$((pass+1))
+}
+sv_tf_smoke
+
+# Tier-5g — TF step response (Python class form). Drives
+# 1/(s+1) at Ts=0.05 for 5 s and checks the Forward-Euler error
+# vs the analytic 1 - e^{-t} stays within bounds.
+tf_step_smoke() {
+  local py="$SCRATCH/tf_step.py"
+  "$MATLABC" -emit-python "$EX/tf_lowpass.mflow" \
+       --subsystem tf_lowpass > "$py" 2> "$SCRATCH/tf.err"
+  python3 - "$py" <<'PY'
+import importlib.util, math, sys
+spec = importlib.util.spec_from_file_location("tf", sys.argv[1])
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+plant = m.TfLowpass()
+worst = 0.0
+Ts = 0.05
+for k in range(101):
+    y = plant.step(1.0)
+    t = k * Ts
+    err = abs(y - (1.0 - math.exp(-t)))
+    if err > worst: worst = err
+if worst > 0.015:
+    print(f"  tf_lowpass step: max err {worst}", file=sys.stderr)
+    sys.exit(1)
+PY
+  if [[ $? -ne 0 ]]; then
+    fail=$((fail+1)); fails+=("tf_lowpass step (out of tolerance)")
+  else
+    pass=$((pass+1))
+  fi
+}
+tf_step_smoke
 
 echo "----"
 echo "passed: $pass    failed: $fail"

@@ -1,0 +1,49 @@
+{
+  "schema": "matforge.flowchart",
+  "version": "0.1.0",
+  "entry": "tf_lowpass",
+  "settings": {
+    "kind": "signal_flow",
+    "solver": {
+      "type": "fixed_step",
+      "algorithm": "ode4",
+      "startTime": 0.0,
+      "stopTime": 5.0,
+      "maxStep": "0.05"
+    }
+  },
+  "flows": [
+    {
+      "id": "flow_tf_lowpass",
+      "kind": "function",
+      "name": "tf_lowpass",
+      "signature": { "inputs": ["u"], "outputs": ["y"] },
+      "nodes": [
+        { "id": "u1", "kind": "signal_inport",
+          "data": { "params": {} },
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+
+        { "id": "tf", "kind": "signal_transfer_fcn",
+          "data": {
+            "params": {
+              "num": "1",
+              "den": "1, 1"
+            }
+          },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+
+        { "id": "y1", "kind": "signal_outport",
+          "data": { "params": {} },
+          "ports": { "in": [{"id": "in"}], "out": [] } }
+      ],
+      "edges": [
+        { "id": "e1", "kind": "data",
+          "from": {"node": "u1", "port": "out"},
+          "to":   {"node": "tf", "port": "in"} },
+        { "id": "e2", "kind": "data",
+          "from": {"node": "tf", "port": "out"},
+          "to":   {"node": "y1", "port": "in"} }
+      ]
+    }
+  ]
+}

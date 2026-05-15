@@ -82,6 +82,12 @@ const std::set<std::string> &tier1Kinds() {
       // / settings.solver.maxStep). Rejected with a sourced error
       // when SubsystemEmitOptions.RejectContinuous = true (HDL lane).
       "signal_integrator",
+      // Tier-5g — continuous Transfer Function (1st-order
+      // strictly-proper MVP only).  num at most order 0, den
+      // order 1.  Auto-discretised via Forward Euler at the
+      // subsystem's chosen Ts.  Higher-order TFs and Zero-Pole /
+      // State-Space follow in Tier-5h.
+      "signal_transfer_fcn",
       // Tier 5 — inline user MATLAB. The block's `params.function_body`
       // becomes a sibling local function in the same TU; the call
       // site emits as `<out> = <fn_name>(<inputs...>)`. SV emit
@@ -120,7 +126,28 @@ bool isStatefulKind(const std::string &K) {
   return K == "signal_unit_delay" ||
          K == "signal_zoh" ||
          K == "signal_discrete_integrator" ||
-         K == "signal_integrator";
+         K == "signal_integrator" ||
+         // Tier-5g: 1st-order strictly-proper TFs only — discretised
+         // to a single state slot via Forward Euler.  Other shapes
+         // (higher-order TF, state-space, zero-pole) emit a sourced
+         // error in lowerSubsystemToMatlab.
+         K == "signal_transfer_fcn";
+}
+
+// Tier-5g — parse a comma-separated coefficient list, highest order
+// first.  Mirrors `parsePoly` in lib/Flowchart/MflowLinkSim.cpp.
+std::vector<double> parsePoly(const std::string &S) {
+  std::vector<double> Out;
+  std::stringstream SS(S);
+  std::string Tok;
+  while (std::getline(SS, Tok, ',')) {
+    size_t A = Tok.find_first_not_of(" \t");
+    if (A == std::string::npos) continue;
+    size_t Bp = Tok.find_last_not_of(" \t");
+    try { Out.push_back(std::stod(Tok.substr(A, Bp - A + 1))); }
+    catch (...) {}
+  }
+  return Out;
 }
 
 // Tier 4 — initial-condition param lookup per stateful kind.
@@ -800,9 +827,12 @@ matlab::Function *lowerSubsystemToMatlab(
   // `signal_discrete_integrator` and Unit Delays in the .mflow).
   if (Opts.RejectContinuous) {
     for (auto *N : Internal) {
-      if (N->Kind == "signal_integrator" ||
-          N->Kind == "signal_transfer_fcn" ||
-          N->Kind == "signal_state_space" ||
+      // Tier-5g: signal_integrator + signal_transfer_fcn (1st-order
+      // strictly-proper) now auto-discretise in HDL mode too —
+      // Forward Euler at the user-picked Ts, same path as software
+      // targets. Higher-order TFs, state-space, and zero-pole
+      // stay rejected pending Tier-5h.
+      if (N->Kind == "signal_state_space" ||
           N->Kind == "signal_zero_pole" ||
           N->Kind == "signal_transport_delay") {
         Diag.error(N->Loc,
@@ -977,6 +1007,73 @@ matlab::Function *lowerSubsystemToMatlab(
         const std::string &LocalRead =
             B.WrapFi ? VarOfNode[N->Id] : CurS;
         NextExpr = B.bin(BinOp::Add, B.name(LocalRead), TsU);
+      } else if (N->Kind == "signal_transfer_fcn") {
+        // Tier-5g — continuous 1st-order strictly-proper TF.
+        //   H(s) = b0 / (a1*s + a0)
+        //   Continuous state: dx/dt = -(a0/a1)*x + (b0/a1)*u, y = x
+        //   Forward Euler discretisation at Ts:
+        //     x[n+1] = (1 - Ts*a0/a1) * x[n] + (Ts*b0/a1) * u[n]
+        //     y[n]   = x[n]      ← strictly proper, no direct feedthrough
+        auto *NumS = N->getParam("num");
+        auto *DenS = N->getParam("den");
+        auto Num = parsePoly(NumS ? *NumS : "1");
+        auto Den = parsePoly(DenS ? *DenS : "1");
+        // Tier-5g restrictions: den exactly 2 coefficients (linear in
+        // s), num at most 1 coefficient (constant). Higher-order /
+        // proper-but-not-strictly-proper shapes defer to Tier-5h.
+        if (Den.size() != 2 || Num.size() > 1 || Num.empty()) {
+          Diag.error(N->Loc,
+                     "embedded coder Tier-5g: signal_transfer_fcn \"" +
+                         N->Id +
+                         "\" needs num order ≤ 0 (constant) and den "
+                         "order = 1 (linear in s). Higher-order TFs "
+                         "and proper-but-not-strictly-proper shapes "
+                         "are a Tier-5h follow-up.");
+          return nullptr;
+        }
+        double b0 = Num[0];
+        double a1 = Den[0], a0 = Den[1];
+        if (a1 == 0.0) {
+          Diag.error(N->Loc,
+                     "signal_transfer_fcn \"" + N->Id +
+                         "\" has zero leading denominator coefficient");
+          return nullptr;
+        }
+        // Same Ts-resolution ladder as the discrete integrator.
+        double Ts = Opts.TargetRate;
+        if (Ts <= 0.0) Ts = paramD(*N, "sample_time", 0.0);
+        if (Ts <= 0.0) Ts = paramD(*N, "sampleTime", 0.0);
+        if (Ts <= 0.0) Ts = paramD(*N, "Ts", 0.0);
+        if (Ts <= 0.0) {
+          if (Doc.Settings.Solver.has_value()) {
+            const auto &SC = *Doc.Settings.Solver;
+            if (SC.MaxStep != "auto") {
+              try { Ts = std::stod(SC.MaxStep); } catch (...) {}
+            }
+          }
+        }
+        if (Ts <= 0.0) {
+          Diag.error(N->Loc,
+                     "embedded coder: signal_transfer_fcn \"" + N->Id +
+                         "\" needs a sample period — pass "
+                         "`--target-rate <Ts>` or set "
+                         "`data.sample_time` / `settings.solver.maxStep`");
+          return nullptr;
+        }
+        // Forward Euler coefficients:
+        //   Adis = 1 - Ts * (a0/a1)
+        //   Bdis = Ts * (b0/a1)
+        double Adis = 1.0 - Ts * (a0 / a1);
+        double Bdis = Ts * (b0 / a1);
+        Expr *AdisC = B.WrapFi ? B.lit(Adis) : B.number(Adis);
+        Expr *BdisC = B.WrapFi ? B.lit(Bdis) : B.number(Bdis);
+        Expr *U = Ins.empty() ? B.number(0.0) : Ins.front();
+        const std::string &LocalRead =
+            B.WrapFi ? VarOfNode[N->Id] : CurS;
+        // s_next = Adis * <local state> + Bdis * u
+        auto *AdTerm = B.bin(BinOp::ElemMul, AdisC, B.name(LocalRead));
+        auto *BdTerm = B.bin(BinOp::ElemMul, BdisC, U);
+        NextExpr = B.bin(BinOp::Add, AdTerm, BdTerm);
       } else {
         NextExpr = B.number(0.0);
       }

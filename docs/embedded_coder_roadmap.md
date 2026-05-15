@@ -397,7 +397,38 @@ Tier-5f (✓ shipped 2026-05-15):
 - 16/16 emit-subsystem cases green; emit-sv-tests stays at
   67/77 (no regressions).
 
-Tier-5g open carve-outs (not yet shipped):
+Tier-5g (✓ partial, shipped 2026-05-15):
+- `signal_transfer_fcn` (1st-order strictly-proper only) now
+  emits across all targets — software + HDL. Auto-discretised
+  via Forward Euler at the subsystem's chosen `Ts` (CLI
+  `--target-rate` / block `sample_time` / flow
+  `settings.solver.maxStep`). Single state slot per TF
+  (`s_<id>`), Forward-Euler difference equation
+  `s_next = (1 - Ts*a0/a1) * s + (Ts*b0/a1) * u`.
+- `signal_integrator` also drops out of the HDL hard-reject
+  list now — same auto-discretization path (Tier 4) carries it
+  through. Continuous integrator + sum-feedback subsystems
+  emit clean SV with the integrator state register.
+- Demo: `examples/mflowlink/coder/tf_lowpass.mflow` — 1/(s+1)
+  directly via `signal_transfer_fcn`. Python step response
+  matches `1 - e^{-t}` within 1% Forward-Euler accuracy;
+  SV emits a single `logic signed [31:0] s_tf` register +
+  `always_ff` tick block.
+- 18/18 emit-subsystem cases green; 37/37 flowchart/runtime/
+  frontend lanes green.
+
+Tier-5h open carve-outs (not yet shipped):
+- Higher-order Transfer Function (2nd-order+) discretization
+  via the bilinear transform with full polynomial algebra.
+  Math sketched in the Tier-5g implementation comments
+  (`lib/Flowchart/SubsystemToMatlab.cpp`).
+- `signal_state_space` discretization via matrix exponential
+  (or bilinear with matrix inversion). Needs a small linalg
+  helper.
+- `signal_zero_pole` — expand zeros/poles polynomial form
+  into a TF then reuse the TF path.
+- `signal_transport_delay` discretization via a circular
+  buffer state.
 - `signal_saturation` → SV: bool-by-fi multiplication doesn't
   synthesise; workaround for HDL targets is to replace with a
   `signal_matlab_fcn` containing the if/elseif/else.

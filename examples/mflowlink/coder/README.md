@@ -39,11 +39,12 @@ subsystem.
 | `discrete_integrator.mflow` | Forward-Euler accumulator with `Ts = 0.1` and a 0.5× input gain |
 | `discrete_pid.mflow` | Full PID controller — discrete integrator + unit delay + sum / gain / saturation; class-wrapped per target |
 
-### Continuous → auto-discretised (Tier 4)
+### Continuous → auto-discretised (Tier 4 + 5g)
 
 | File | Block coverage |
 |---|---|
-| `continuous_lowpass.mflow` | 1/(s+1) realised as Integrator + Sum feedback; auto-discretised to Forward Euler at the user-picked sample rate |
+| `continuous_lowpass.mflow` | 1/(s+1) realised as Integrator + Sum feedback; auto-discretised to Forward Euler at the user-picked sample rate. Software *and* HDL targets |
+| `tf_lowpass.mflow` | 1/(s+1) realised as `signal_transfer_fcn`; auto-discretised via Forward Euler (Tier-5g). 1st-order strictly-proper MVP |
 
 ### SystemVerilog emit (Tier 5 + 5b)
 
