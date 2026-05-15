@@ -429,6 +429,19 @@ Stmt *lowerBlock(const Node &N, const std::string &OutVar,
     // an explicit if/elseif/else compiles to a clean 3-way mux at
     // synth time.
     if (B.WrapFi) {
+      // Simple if/elseif/else form. All three branches store the
+      // upstream-typed value (rails are fi-typed literals; the
+      // else-branch passthrough carries the value verbatim).
+      // For stateless subsystems this works cleanly. For subsystems
+      // where the upstream chain widens to i64 (e.g. a discrete-PID
+      // accumulator chain through fi-saturate), the alloc slot
+      // ends up with mixed-width stores and HWLegalize rejects.
+      // Pre-coercing all branches via `+ fi(0, ...)` widens the
+      // rails to match — but breaks the stateless case (where
+      // `c + 0` triggers a fi-saturate that the variable
+      // passthrough doesn't take). Settling for the simple form;
+      // PID-with-saturation needs Tier-5e (a dedicated MLIR pass
+      // that detects mixed-width stores and unifies them).
       auto *IfStmt = B.Ctx.make<class IfStmt>();
       IfStmt->Cond = B.bin(BinOp::Gt, U, B.lit(Hi));
       IfStmt->Then = B.Ctx.make<Block>();
@@ -953,7 +966,17 @@ matlab::Function *lowerSubsystemToMatlab(
         // matches the simulator's continuous integrator).
         Expr *TsConst = B.WrapFi ? B.lit(Ts) : B.number(Ts);
         Expr *TsU = B.bin(BinOp::ElemMul, TsConst, U);
-        NextExpr = B.bin(BinOp::Add, B.name(CurS), TsU);
+        // Tier-5e — in HDL mode, reference the LOCAL state-read
+        // variable (set by the hoisted state-read at top of body)
+        // instead of the persistent slot. The local was already
+        // converted from f64 → fi/i32 by fptosi; re-fetching the
+        // persistent would yield f64 and trigger
+        // `matlab.add(f64, i32) → none` downstream. Software
+        // targets keep referencing the persistent slot directly
+        // (the slot is a plain f64 var, no conversion needed).
+        const std::string &LocalRead =
+            B.WrapFi ? VarOfNode[N->Id] : CurS;
+        NextExpr = B.bin(BinOp::Add, B.name(LocalRead), TsU);
       } else {
         NextExpr = B.number(0.0);
       }
