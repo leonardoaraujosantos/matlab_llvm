@@ -513,6 +513,19 @@ if(MATLAB_LLVM_WITH_EMIT_SUBSYSTEM_SV_COSIM)
             $<TARGET_FILE:matlabc>
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Flowchart/EmitSubsystem
   )
+  # Tier-5j — behavioural cosim: compile each SV-capable fixture
+  # with Verilator (--cc --exe --build), drive the same stimulus
+  # through both the SV binary AND the Python emit's class wrapper,
+  # then compare per-tick outputs with tolerance. Catches numerical
+  # divergence the lint lane can't.  Curated to the subset of
+  # fixtures whose SV emit is currently bit-exact-equivalent to
+  # the Python emit (Tier-5j carve-outs in docs/ track the rest).
+  add_test(
+    NAME flowchart-emit-subsystem-sv-cosim
+    COMMAND ${CMAKE_SOURCE_DIR}/test/Flowchart/EmitSubsystem/run_verilator_cosim.sh
+            $<TARGET_FILE:matlabc>
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Flowchart/EmitSubsystem
+  )
 endif()
 if(MATLAB_LLVM_WITH_MLIR)
   add_test(

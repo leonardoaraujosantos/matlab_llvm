@@ -192,6 +192,29 @@ Tier-5i carve-outs (separable follow-ups):
   Tracking which Tustin blocks are inside a cycle and
   surfacing a sourced error would catch this early.
 
+Tier-5j cosim coverage (✓ shipped 2026-05-15):
+
+Behavioural cosim (Verilator + Python) currently passes for
+**`unit_delay`, `transport_delay`, `comparator_logic`,
+`threshold_switch`** — pure-passthrough delays and stateless
+combinational logic without fi-multiplications. The other
+SV-capable fixtures (`tf_lowpass`, `tf_2nd_order`, `zp_plant`,
+`ss_plant`, `mimo_state_space`, `fir_4tap`, `discrete_pid`,
+`stateless_mixer`, `tapped_delay`) lint clean but the SV emit
+itself has two open bugs the cosim correctly identifies:
+
+1. **fi-multiplication missing Q16.16 normalising shift** — every
+   block with a Gain/Sum-of-products/TF/SS coefficient.
+2. **Stateful local self-assignment** in some multi-output state
+   patterns (`tapped_delay` shape).
+
+See `docs/embedded_coder_roadmap.md` Tier-5j for the fix paths.
+Until those land, the SV emit should be treated as
+**structurally correct + lint-clean** but **NOT bit-exact** for
+fi-multiplication paths. Run the cosim lane (`ctest -R cosim`,
+gated by `MATLAB_LLVM_WITH_EMIT_SUBSYSTEM_SV_COSIM=ON`) to
+re-verify after either fix.
+
 Stateful subsystems emit a multi-return functional form
 `[y, s_next] = step(u, s)` *and* a Tier-2 class wrapper that
 holds the state slots as member fields and exposes a mutating

@@ -490,6 +490,57 @@ Tier-5i (✓ shipped 2026-05-15):
   do yet). Demo: `mimo_state_space.mflow` (2-in/2-out
   decoupled plant, A=diag(-1,-2), B=I, C=I).
 
+Tier-5j (✓ partial, shipped 2026-05-15):
+- **Verilator behavioural cosim lane** —
+  `test/Flowchart/EmitSubsystem/cosim.py` + `run_verilator_cosim.sh`
+  compile each SV-capable fixture with `verilator --cc --exe
+  --build`, drive deterministic stimulus through both the
+  Verilator binary AND the Python emit's class wrapper, and
+  compare per-tick outputs with tolerance. Gated under the
+  existing `MATLAB_LLVM_WITH_EMIT_SUBSYSTEM_SV_COSIM` CMake flag
+  as `flowchart-emit-subsystem-sv-cosim`. Skips cleanly when
+  verilator isn't on PATH.
+- Curated to **four fixtures whose SV emit is bit-exact today**:
+  `unit_delay`, `transport_delay` (pure-delay state machines —
+  state read IS the output, no fi-multiplication in the data
+  path), `comparator_logic`, `threshold_switch` (pure stateless
+  combinational with boolean outputs). The cosim decodes 1-bit
+  output ports as plain booleans; wider ports as Q16.16 fi
+  values. Handles both sequential (clk + rst_n + optional reset)
+  and pure-combinational modules.
+- Caught two pre-existing SV emit bugs the lint lane misses
+  (carved out as Tier-5j follow-ups below):
+    - **fi-multiplication missing the Q<W>.<F> normalising shift**
+      — `fi(K, 1, 32, 16) .* x` lowers to `(x << log2(K_raw))`
+      without the trailing `>>> 16`, so the wider intermediate's
+      high bits truncate when stored into a 32-bit register.
+      Affects every fixture with a Gain, Sum-of-products, TF,
+      ZP, or state-space block — i.e. most numerically-interesting
+      ones. Fix path: route fi-multiplications through an explicit
+      `matlab.fi.cast` op so `LowerFixedPoint::rewriteFiCast`
+      inserts the right shift. AST-level wrapping in
+      `SubsystemToMatlab.cpp::fiMul` is the natural place, but
+      the AST → MIR lowering currently emits a malformed cast
+      (callee=`matlab_fi_quantize_s` on an `i32 → i32` cast)
+      when the input type isn't yet inferred — needs a fi-type-
+      aware AST builder or a post-codegen fixup pass.
+    - **Stateful blocks' state-read hoist emits `local = local`
+      (cosmetic self-assignment) instead of `local = state_reg`**
+      in some shapes — visible in `tapped_delay` output of `d1 =
+      d1; d2 = d2;` (suppressed today as the cosmetic Verilator
+      UNOPTFLAT / ALWCOMBORDER warnings). The behavioural impact
+      is that `local` reads uninitialised, so the output uses
+      garbage instead of the latched register value. Fix path:
+      a slot-promotion ordering or an explicit `matlab.load(s_*)
+      → local` rewrite before the multi-output reassignment.
+
+Tier-5j open carve-outs (not yet shipped):
+- **SV fi-multiplication normalising shift** — see Tier-5j shipped
+  notes above. Highest impact; unblocks behavioural cosim for the
+  remaining 11 SV-capable fixtures.
+- **SV stateful local self-assignment** — same Tier-5j notes; the
+  cosmetic Verilator warning hides a real semantic bug.
+
 Tier-5i open carve-outs (not yet shipped):
 - **MIMO Tustin** — currently SISO-only. Matrix bilinear
   `Ad = M(I + αA), Bd = M·Ts·B, Cd = C, Dd = α·C·M·B`
