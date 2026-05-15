@@ -1,0 +1,15 @@
+MflowLinkModel entry=fn_loops blocks=5 edges=4
+  solver type=variable_step algorithm=ode45 startTime=0 stopTime=2
+  states continuous=0 discrete=0
+  exec-order:
+    0 drive kind=signal_sine sample=fixed_in_minor log
+    1 harmonic_sum kind=signal_matlab_fcn sample=fixed_in_minor log
+    2 convergence kind=signal_matlab_fcn sample=fixed_in_minor log
+    3 scope_h kind=signal_scope sample=fixed_in_minor
+    4 scope_n kind=signal_scope sample=fixed_in_minor
+  zero-crossings: none
+  edges:
+    e1 drive:out -> harmonic_sum:u1
+    e2 drive:out -> convergence:u1
+    e3 harmonic_sum:out -> scope_h:in
+    e4 convergence:out -> scope_n:in

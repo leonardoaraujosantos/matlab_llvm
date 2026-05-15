@@ -63,7 +63,8 @@ for name in lowpass pid_tracking multirate saturation_zc enabled_subsystem \
             goto_from matlab_fcn vector_signals sample_time_inherit \
             algebraic_loop_solved masked_library matlab_function_block \
             discrete_pid discrete_integrator_methods bus_signals \
-            bouncing_ball stiff_bdf fir_filter per_flow_solver; do
+            bouncing_ball stiff_bdf fir_filter per_flow_solver \
+            matlab_fcn_loops; do
   run_one "$name"
 done
 

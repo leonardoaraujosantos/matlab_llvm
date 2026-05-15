@@ -2497,6 +2497,9 @@ struct InterpEnv {
   std::map<std::string, double> Vars;
 };
 struct ReturnSignal {};
+// §17.5 #8 — break / continue inside for / while bodies.
+struct BreakSignal {};
+struct ContinueSignal {};
 
 double interpExpr(const matlab::Expr *E, InterpEnv &Env);
 
@@ -2650,6 +2653,57 @@ void interpStmt(const matlab::Stmt *S, InterpEnv &Env) {
     return;
   case MNK::ReturnStmt:
     throw ReturnSignal{};
+  case MNK::ForStmt: {
+    // §17.5 #8 — `for var = expr; body; end`. Supports the
+    // numeric-range form (`for i = 1:n` or `for i = start:step:end`).
+    // The induction variable is bound to each successive value in
+    // Env.Vars[Var]. break / continue handled via sentinel
+    // exceptions; return propagates as ReturnSignal.
+    auto *FS = static_cast<const matlab::ForStmt *>(S);
+    std::string Var(FS->Var);
+    if (!FS->Iter) return;
+    if (FS->Iter->Kind == MNK::RangeExpr) {
+      auto *R = static_cast<const matlab::RangeExpr *>(FS->Iter);
+      double Start = interpExpr(R->Start, Env);
+      double End   = interpExpr(R->End, Env);
+      double Step  = R->Step ? interpExpr(R->Step, Env) : 1.0;
+      if (Step == 0.0) return;
+      for (double V = Start; (Step > 0 ? V <= End + 1e-12
+                                       : V >= End - 1e-12); V += Step) {
+        Env.Vars[Var] = V;
+        try {
+          interpBlock(FS->Body, Env);
+        } catch (const BreakSignal &) { break; }
+          catch (const ContinueSignal &) { continue; }
+      }
+    } else {
+      // Single-value form `for x = scalar`: one iteration with x = value.
+      double V = interpExpr(FS->Iter, Env);
+      Env.Vars[Var] = V;
+      try { interpBlock(FS->Body, Env); }
+      catch (const BreakSignal &) {}
+      catch (const ContinueSignal &) {}
+    }
+    return;
+  }
+  case MNK::WhileStmt: {
+    // §17.5 #8 — `while cond; body; end`. Cond is re-evaluated each
+    // iteration. Same break / continue / return semantics as
+    // ForStmt. Bounded at 1e6 iterations to keep infinite loops in
+    // user code from hanging the simulator silently.
+    auto *WS = static_cast<const matlab::WhileStmt *>(S);
+    long Guard = 0;
+    while (interpExpr(WS->Cond, Env) != 0.0) {
+      if (++Guard > 1000000) break;
+      try {
+        interpBlock(WS->Body, Env);
+      } catch (const BreakSignal &) { break; }
+        catch (const ContinueSignal &) { continue; }
+    }
+    return;
+  }
+  case MNK::BreakStmt:    throw BreakSignal{};
+  case MNK::ContinueStmt: throw ContinueSignal{};
   default:
     return;
   }

@@ -280,6 +280,20 @@ PFS_IR=$("$MATLABC" -simulate --dry-run "$EX/per_flow_solver.mflow" 2>&1 | grep 
 check "tight_sub/tf carries maxStep=0.005 in IR" \
   "[[ '$PFS_IR' == *'maxStep=0.005'* ]]" ""
 
+#--- matlab_fcn_loops (§17.5 #8): for / while loops + break ---------------
+MFL="$("$MATLABC" -simulate "$EX/matlab_fcn_loops.mflow")"
+MFL_HEAD=$(printf '%s\n' "$MFL" | head -1)
+check "matlab_fcn_loops header" \
+  "[[ '$MFL_HEAD' == 't,drive,harmonic_sum,convergence,scope_h,scope_n' ]]" ""
+# At drive = 1 (t = 0.25): harmonic_sum = Σ sin(k)/k for k=1..5 =
+# 0.9621742, newton_inverse_sqrt(1) = √2 = 1.4142136.
+MFL_H=$(printf '%s\n' "$MFL" | awk -F, 'NR>1 && $1+0==0.25 {print $3; exit}')
+MFL_N=$(printf '%s\n' "$MFL" | awk -F, 'NR>1 && $1+0==0.25 {print $4; exit}')
+check "for-loop harmonic sum ≈ 0.962" \
+  "awk 'BEGIN{exit !(($MFL_H - 0.962174)^2 < 1e-6)}'" ""
+check "Newton with break ≈ √2" \
+  "awk 'BEGIN{exit !(($MFL_N - 1.414214)^2 < 1e-6)}'" ""
+
 #--- fir_filter (§17.5 #5): 3-tap moving-average FIR ----------------------
 FF="$("$MATLABC" -simulate "$EX/fir_filter.mflow")"
 FF_HEAD=$(printf '%s\n' "$FF" | head -1)

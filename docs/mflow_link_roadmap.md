@@ -827,12 +827,20 @@ foundation:
    solver per block. Mostly Loader changes plus a per-block
    `SolverIndex` in `MflBlock`.
 
-8. **MATLAB Function block — JIT path** *(~1–2 weeks)*. Replace
-   the Item-4 scalar AST interpreter with the actual matlab_llvm
-   MIR/MLIR/LLVM/JIT pipeline so users can write loops,
-   multi-return, indexing, function calls. Reuses everything
-   matlabc already does for `.m` files — the heavy lift is the
-   ABI between the JIT'd function and `MflowLinkSim`.
+8. **MATLAB Function block — JIT path**
+   *(extended-interpreter MVP shipped 2026-05-15 / true MLIR JIT
+   still pending, ~1–2 weeks)*. The Item-4 scalar AST interpreter
+   has been extended with for / while / break / continue so users
+   can write real MATLAB control-flow inside a `signal_matlab_fcn`
+   body — `matlab_fcn_loops.mflow` shows a 5-term harmonic sum
+   and a Newton-iteration `√(u+1)` solver both producing exact
+   analytic answers. True JIT integration (REPL-style MLIR
+   pipeline → ORC → function pointer) is the next horizon: lets
+   users write multi-return, indexing, vector ops, user-function
+   calls. It needs ~30 new MLIR / LLVM headers in
+   MatlabFlowchart's build line and a new
+   `lib/Flowchart/MflowLinkJit.cpp` translation unit gated on
+   `MATLAB_LLVM_WITH_MLIR`.
 
 9. **Matrix-shaped signals** *(~2 weeks)*. Extend Item 1's
    per-port width to per-port shape (rows × cols). Unlocks
