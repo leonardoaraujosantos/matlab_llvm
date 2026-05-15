@@ -92,6 +92,14 @@
 
 using namespace matlab;
 
+// §17.5 #8 — installer for the MLIR-JIT factory consumed by
+// `MflowLinkSim` to evaluate signal_matlab_fcn bodies. Defined in
+// tools/matlabc/MflowLinkJit.cpp; forward-declared here so main()
+// can register it before any -simulate path runs.
+namespace matlab { namespace flowchart {
+void installMflowLinkJit();
+} }
+
 namespace {
 struct Options {
   enum class Mode { DumpTokens, DumpAST, EmitSema, EmitMIR, EmitMLIR,
@@ -9079,6 +9087,11 @@ int main(int Argc, char **Argv) {
   }
 
 #if MATLAB_LLVM_WITH_MLIR
+  // §17.5 #8 — register the MLIR-JIT factory for signal_matlab_fcn
+  // blocks. This is what makes `-simulate` route a block's
+  // `params.function_body` through the full lex/parse/lower/JIT
+  // pipeline instead of the scalar AST interpreter. Idempotent.
+  matlab::flowchart::installMflowLinkJit();
   if (Opts.Mode == Options::Mode::Repl) return runRepl();
   if (Opts.Mode == Options::Mode::Dap) return dap::runDap(Opts.InputPath);
 #else

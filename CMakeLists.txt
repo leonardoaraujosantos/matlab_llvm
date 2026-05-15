@@ -241,7 +241,9 @@ if(MATLAB_LLVM_WITH_MLIR)
   target_link_libraries(matlab-lsp PRIVATE LLVMSupport)
 endif()
 
-add_executable(matlabc tools/matlabc/main.cpp)
+add_executable(matlabc
+  tools/matlabc/main.cpp
+  tools/matlabc/MflowLinkJit.cpp)
 # MatlabMIR and MatlabParse PUBLIC-link the rest transitively;
 # listing them explicitly here would duplicate them on the link line
 # (ld64 warns "ignoring duplicate libraries").

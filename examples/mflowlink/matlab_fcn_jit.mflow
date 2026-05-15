@@ -1,0 +1,82 @@
+{
+  "schema": "matforge.flowchart",
+  "version": "0.1.0",
+  "entry": "fn_jit",
+  "settings": {
+    "kind": "signal_flow",
+    "solver": {
+      "type": "variable_step",
+      "algorithm": "ode45",
+      "startTime": 0.0,
+      "stopTime": 2.0,
+      "maxStep": "0.05",
+      "zeroCrossing": true,
+      "algebraicLoopMethod": "trust_region"
+    },
+    "snapshot": { "enabled": true, "depth": 256, "fields": "states" }
+  },
+  "flows": [
+    {
+      "id": "flow_fn_jit",
+      "kind": "program",
+      "name": "fn_jit",
+      "signature": { "inputs": [], "outputs": [] },
+      "nodes": [
+        { "id": "drive", "kind": "signal_sine",
+          "data": { "log_signal": true,
+                    "params": { "amplitude": 1.0, "bias": 0.0,
+                                "frequency": 6.2831853, "phase": 0.0 } },
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+
+        { "id": "phase", "kind": "signal_constant",
+          "data": { "log_signal": false, "params": { "value": 0.5 } },
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+
+        { "id": "polar", "kind": "signal_matlab_fcn",
+          "data": {
+            "log_signal": true,
+            "params": {
+              "function_body":
+                "function out = polar_score(u1, u2)\n  % Tests multi-return via a helper function + scalar fan-in.\n  % The JIT compiles `to_polar` to a {double,double} aggregate\n  % return (see `polar_decompose` in tools/matlabc/MflowLinkJit\n  % .cpp).  Falls back to the AST interpreter if compilation\n  % fails — interpreter would always return 0.0 here.\n  [r, theta] = to_polar(u1, u2);\n  out = r * cos(theta);\nend\n\nfunction [r, theta] = to_polar(x, y)\n  r = sqrt(x*x + y*y);\n  theta = atan2(y, x);\nend\n"
+            }
+          },
+          "ports": { "in": [{"id": "u1"}, {"id": "u2"}],
+                     "out": [{"id": "out"}] } },
+
+        { "id": "vec_norm", "kind": "signal_matlab_fcn",
+          "data": {
+            "log_signal": true,
+            "params": {
+              "function_body":
+                "function out = vec_l2(u1)\n  % Tests vector literal + element indexing inside the body.\n  % The JIT lowers `v = [...]` to `matlab_mat_from_buf` and\n  % `v(k)` to `matlab_subscript1_s`; the AST interpreter does\n  % NOT recognise either form and would return 0.0.\n  v = [u1, u1 * u1, sin(u1), cos(u1)];\n  s = 0.0;\n  for k = 1:4\n    s = s + v(k) * v(k);\n  end\n  out = sqrt(s);\nend\n"
+            }
+          },
+          "ports": { "in": [{"id": "u1"}], "out": [{"id": "out"}] } },
+
+        { "id": "scope_polar", "kind": "signal_scope",
+          "data": { "params": { "title": "polar score" } },
+          "ports": { "in": [{"id": "in"}], "out": [] } },
+        { "id": "scope_vec", "kind": "signal_scope",
+          "data": { "params": { "title": "vector L2 norm" } },
+          "ports": { "in": [{"id": "in"}], "out": [] } }
+      ],
+      "edges": [
+        { "id": "e1", "kind": "data",
+          "from": {"node": "drive", "port": "out"},
+          "to":   {"node": "polar", "port": "u1"} },
+        { "id": "e2", "kind": "data",
+          "from": {"node": "phase", "port": "out"},
+          "to":   {"node": "polar", "port": "u2"} },
+        { "id": "e3", "kind": "data",
+          "from": {"node": "drive", "port": "out"},
+          "to":   {"node": "vec_norm", "port": "u1"} },
+        { "id": "e4", "kind": "data",
+          "from": {"node": "polar", "port": "out"},
+          "to":   {"node": "scope_polar", "port": "in"} },
+        { "id": "e5", "kind": "data",
+          "from": {"node": "vec_norm", "port": "out"},
+          "to":   {"node": "scope_vec", "port": "in"} }
+      ]
+    }
+  ]
+}

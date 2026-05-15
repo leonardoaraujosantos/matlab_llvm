@@ -41,6 +41,23 @@ namespace matlab::flowchart {
 
 namespace {
 
+// §17.5 #8 — process-wide JIT factory snapshot. Updated by
+// `setMatlabFcnJit`; captured at sim construction so a later install
+// can't change semantics mid-run. Initialised to all-null = no JIT,
+// AST interpreter always wins.
+MatlabFcnJit &globalJitSlot() {
+  static MatlabFcnJit S{};
+  return S;
+}
+
+} // namespace
+
+void setMatlabFcnJit(MatlabFcnJit Jit) { globalJitSlot() = Jit; }
+
+const MatlabFcnJit &currentMatlabFcnJit() { return globalJitSlot(); }
+
+namespace {
+
 // "1, 2, 1" → {1, 2, 1}. Trims whitespace; silently drops malformed
 // tokens (the loader has already validated structural shape).
 std::vector<double> parsePoly(const std::string &S) {
@@ -357,6 +374,13 @@ std::pair<std::unique_ptr<MflowLinkSim::MatlabFunctionState>, std::string>
 parseMatlabFunctionBody(const std::string &Source);
 double runMatlabFunction(const MflowLinkSim::MatlabFunctionState &S,
                          const std::vector<double> &Inputs, double T);
+// §17.5 #8 — accessor for the parsed-function input count. The
+// constructor needs this to decide how many `u1..uN` slots the JIT
+// wrapper should declare, but `MatlabFunctionState` is defined
+// further down (after AST/Lexer/Parser have established their full
+// types). Defined alongside the struct definition itself.
+unsigned matlabFunctionInputCount(
+    const MflowLinkSim::MatlabFunctionState &S);
 } // namespace
 
 double MflowLinkSim::paramD(const MflBlock &B, const char *Key, double Def) {
@@ -454,6 +478,11 @@ MflowLinkSim::MflowLinkSim(const MflowLinkModel &M) : M_(M) {
   NoiseSeed_.assign(N, 0);
   MatlabFcnCache_.resize(N);
   MatlabFnCache_.resize(N);
+  // §17.5 #8 — snapshot the currently installed JIT factory once.
+  // Subsequent installs only affect later simulators.
+  MatlabFcnJitOps_ = currentMatlabFcnJit();
+  MatlabFnJit_.assign(N, nullptr);
+  MatlabFnJitArity_.assign(N, 0);
   auto expandPoly = [](const std::vector<double> &Roots) {
     // Product over `(s - r_k)` expanded to coefficient form, highest
     // power first. Empty roots ⇒ {1} (the "constant 1" polynomial).
@@ -551,7 +580,36 @@ MflowLinkSim::MflowLinkSim(const MflowLinkModel &M) : M_(M) {
       auto *FB = paramS(B, "function_body");
       if (FB && !FB->empty()) {
         auto Pair = parseMatlabFunctionBody(*FB);
-        if (Pair.first) MatlabFnCache_[I] = std::move(Pair.first);
+        if (Pair.first) {
+          // §17.5 #8 — try the JIT factory first when installed.
+          // The AST interpreter parse above is what we fall back to
+          // (and what `MatlabFnCache_[I]` keeps for the fallback
+          // path); we use its signature to know NumInputs / OutName.
+          if (MatlabFcnJitOps_.Compile && MatlabFcnJitOps_.Call &&
+              MatlabFcnJitOps_.Release) {
+            unsigned NumInputs = matlabFunctionInputCount(*Pair.first);
+            // Cap at 8 to match the wrapper's pre-generated signature
+            // pad — bodies with more inputs fall back to the AST
+            // interpreter rather than failing the sim.
+            if (NumInputs <= 8) {
+              std::string JitErr;
+              if (auto *H = MatlabFcnJitOps_.Compile(*FB, NumInputs,
+                                                     JitErr)) {
+                MatlabFnJit_[I]      = H;
+                MatlabFnJitArity_[I] = NumInputs;
+              }
+              // On JIT failure we silently keep the AST fallback —
+              // the user's signal-flow keeps running; advanced
+              // language constructs that the interpreter doesn't
+              // implement will just return 0 until they're added.
+              // The `JitErr` text is intentionally not surfaced
+              // here to avoid swamping the user with diagnostics
+              // when the JIT factory is opt-in.
+              (void)JitErr;
+            }
+          }
+          MatlabFnCache_[I] = std::move(Pair.first);
+        }
         // Parse failure was already reported at lowering — leaving
         // the cache empty makes the evaluator fall through to 0.
       }
@@ -1527,7 +1585,16 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
       std::vector<double> U;
       U.reserve(Sorted.size());
       for (auto &PR : Sorted) U.push_back(PR.second);
-      if (MatlabFnCache_[I]) {
+      if (MatlabFnJit_[I]) {
+        // §17.5 #8 — JIT'd entrypoint. Pad inputs out to the arity
+        // the wrapper expects (the unused trailing slots are zero,
+        // matching the AST interpreter's behaviour for missing
+        // inputs).
+        double Pad[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+        unsigned Arity = MatlabFnJitArity_[I];
+        for (unsigned K = 0; K < Arity && K < U.size(); ++K) Pad[K] = U[K];
+        Out_[I] = MatlabFcnJitOps_.Call(MatlabFnJit_[I], Pad, Arity);
+      } else if (MatlabFnCache_[I]) {
         Out_[I] = runMatlabFunction(*MatlabFnCache_[I], U, T);
       } else {
         Out_[I] = evalMatlabFcn(MatlabFcnCache_[I].get(), U, T);
@@ -2454,7 +2521,23 @@ struct MflowLinkSim::MatlabFunctionState {
   std::string OutName;
 };
 
-MflowLinkSim::~MflowLinkSim() = default;
+namespace {
+unsigned matlabFunctionInputCount(
+    const MflowLinkSim::MatlabFunctionState &S) {
+  return static_cast<unsigned>(S.InNames.size());
+}
+} // namespace
+
+MflowLinkSim::~MflowLinkSim() {
+  // §17.5 #8 — release every JIT'd block handle. `Release` is the
+  // factory's tear-down hook; it owns the ExecutionEngine + JIT'd
+  // memory and is responsible for freeing both.
+  if (MatlabFcnJitOps_.Release) {
+    for (auto *H : MatlabFnJit_) {
+      if (H) MatlabFcnJitOps_.Release(H);
+    }
+  }
+}
 
 namespace {
 
@@ -2477,12 +2560,20 @@ parseMatlabFunctionBody(const std::string &Source) {
   TranslationUnit *TU = P.parseFile();
   if (!TU || S->Diag->hasErrors())
     return {nullptr, "parse error in function_body"};
-  if (TU->Functions.size() != 1)
-    return {nullptr, "function_body must contain exactly one function"};
+  if (TU->Functions.empty())
+    return {nullptr, "function_body must declare at least one function"};
+  // §17.5 #8 — the first function is the entry; trailing functions
+  // are treated as locals. Bodies with helpers work under the JIT
+  // (where lowering wires through user calls properly) and also
+  // under the AST interpreter so long as the entry doesn't actually
+  // call the helpers at runtime (the interpreter only knows
+  // builtins). Loader keeps the same first-function-is-entry rule
+  // either way.
   S->Fn = TU->Functions.front();
   if (S->Fn->Outputs.size() != 1)
     return {nullptr,
-            "function_body must declare exactly one output variable"};
+            "function_body's entry function must declare exactly one "
+            "output variable"};
   S->OutName = std::string(S->Fn->Outputs[0]);
   S->InNames.reserve(S->Fn->Inputs.size());
   for (auto &In : S->Fn->Inputs) S->InNames.emplace_back(In);

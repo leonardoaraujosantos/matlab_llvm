@@ -412,6 +412,26 @@ DP_END=$(printf '%s\n' "$DP" | awk -F, 'END{print $6}')
 check "discrete PID converges past 0.9" \
   "awk 'BEGIN{exit !($DP_END > 0.9 && $DP_END <= 1.05)}'" ""
 
+#--- matlab_fcn_jit (§17.5 #8 carve-out): MLIR JIT — vector + indexing ---
+# The interpreter would return 0 for both of these blocks (it
+# doesn't model vector literals or multi-return helpers); a non-
+# zero, analytically-correct value at t=0.25 proves the simulator
+# is using its installed JIT factory.
+MFJ="$("$MATLABC" -simulate "$EX/matlab_fcn_jit.mflow")"
+MFJ_HEAD=$(printf '%s\n' "$MFJ" | head -1)
+check "matlab_fcn_jit header" \
+  "[[ '$MFJ_HEAD' == 't,drive,polar,vec_norm,scope_polar,scope_vec' ]]" ""
+# At drive=1.0 (t=0.25), phase=0.5:
+#   polar:    r·cos(θ) = √(1+0.25)·cos(atan2(0.5,1)) = 1.0
+#             (because √(x²+y²)·cos(atan2(y,x)) ≡ x)
+#   vec_norm: v=[1, 1, sin(1), cos(1)] → ‖v‖₂ = √3 ≈ 1.732
+MFJ_P=$(printf '%s\n' "$MFJ" | awk -F, 'NR>1 && $1+0==0.25 {print $3; exit}')
+MFJ_V=$(printf '%s\n' "$MFJ" | awk -F, 'NR>1 && $1+0==0.25 {print $4; exit}')
+check "JIT multi-return polar ≈ 1.0" \
+  "awk 'BEGIN{exit !(($MFJ_P - 1.0)^2 < 1e-6)}'" ""
+check "JIT vector L2 ≈ √3" \
+  "awk 'BEGIN{exit !(($MFJ_V - 1.7320508)^2 < 1e-6)}'" ""
+
 #--- algebraic_loop_solved (Item-2): direct-feedthrough cycle, runtime fixed-point ---
 AL="$("$MATLABC" -simulate "$EX/algebraic_loop_solved.mflow")"
 AL_HEAD=$(printf '%s\n' "$AL" | head -1)

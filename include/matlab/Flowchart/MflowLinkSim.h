@@ -46,6 +46,63 @@ std::string validateMatlabFcnExpression(const std::string &Expr);
 // syntax errors surface with a sourced diagnostic and the block id.
 std::string validateMatlabFunctionBody(const std::string &Source);
 
+//===----------------------------------------------------------------------===//
+// §17.5 #8 carve-out — true MLIR JIT for `signal_matlab_fcn` bodies.
+//
+// MflowLinkSim ships with a scalar-only AST interpreter as the always-
+// available fallback. When a richer evaluator is wanted (multi-return,
+// matrix indexing, vector ops, nested user-function calls), a host
+// binary (today: matlabc) can install a JIT factory here; the
+// simulator's constructor consults it for every `signal_matlab_fcn`
+// block and — on a successful compile — uses the JIT'd entrypoint at
+// runtime instead of walking the AST.
+//
+// Layering: this struct keeps MatlabFlowchart's static-library
+// dependency closure unchanged. The factory's implementation can pull
+// in MatlabSema / MatlabMLIR / LLVM ORC freely; only the three
+// function-pointer slots below are crossed at link time.
+//
+// Failure is silent and per-block — `Compile` returning null leaves
+// `Err` populated for the lowering diagnostics layer to surface, and
+// the affected block falls back to the AST interpreter.
+//===----------------------------------------------------------------------===//
+struct MatlabFcnJit {
+  // Opaque per-block compiled-state handle. The host binary defines
+  // the concrete layout (an `mlir::ExecutionEngine` plus the resolved
+  // entry-point function pointer is the natural choice).
+  struct Handle;
+
+  // Compile a `function y = foo(u1, u2, ...)` body string for an
+  // entry that takes `NumInputs` scalar inputs and returns a single
+  // scalar. Returns the new handle (caller owns it via `Release`),
+  // or null on failure with `Err` set. `NumInputs` is bounded by the
+  // simulator at the wire-arity ceiling — 8 today.
+  using CompileFn = Handle *(*)(const std::string &Body,
+                                unsigned NumInputs,
+                                std::string &Err);
+  // Invoke a previously-compiled handle. `Inputs` has length
+  // `NumInputs` (the same value passed to `Compile`); returns the
+  // entry-point's scalar output.
+  using CallFn    = double (*)(Handle *H, const double *Inputs,
+                               unsigned NumInputs);
+  // Tear down a handle (frees JIT'd code memory + the engine).
+  using ReleaseFn = void   (*)(Handle *H);
+
+  CompileFn Compile = nullptr;
+  CallFn    Call    = nullptr;
+  ReleaseFn Release = nullptr;
+};
+
+// Install / clear the process-wide JIT factory. Calls after this
+// affect subsequent `MflowLinkSim` constructions; already-built
+// simulators keep whatever they captured at construction time.
+void setMatlabFcnJit(MatlabFcnJit Jit);
+
+// Retrieve the currently installed factory. Returns a default-
+// constructed (all-null) struct when no JIT is registered. Used by
+// `MflowLinkSim`'s constructor to capture the factory snapshot.
+const MatlabFcnJit &currentMatlabFcnJit();
+
 // Parsed expression tree for a `signal_matlab_fcn` block. Public so
 // the runtime cache (`MflowLinkSim::MatlabFcnCache_`) can hold
 // `unique_ptr<MatlabFcnTree>` without dragging in an opaque-type
@@ -258,6 +315,19 @@ private:
   //   is a follow-up. `MatlabFunctionState` is forward-declared
   //   publicly above; defined in the .cpp.
   std::vector<std::unique_ptr<MatlabFunctionState>> MatlabFnCache_;
+  // §17.5 #8 — per-block JIT handle. Non-null iff the installed
+  // `MatlabFcnJit` factory successfully compiled this block's
+  // `params.function_body`. When set, the runtime evaluator dispatches
+  // through the JIT'd entrypoint instead of `runMatlabFunction`. The
+  // matching `NumInputs` arity is captured in `MatlabFnJitArity_[I]`
+  // (resolved once at construction from the connected `u1..uN`
+  // ports plus the function-body signature).
+  std::vector<MatlabFcnJit::Handle *> MatlabFnJit_;
+  std::vector<unsigned>               MatlabFnJitArity_;
+  // Snapshot of the JIT factory captured at construction time. Held
+  // by-value (three function pointers) so a later `setMatlabFcnJit`
+  // call doesn't change semantics mid-run.
+  MatlabFcnJit MatlabFcnJitOps_{};
 
   double T_ = 0.0;
   size_t MajorSteps_ = 0;

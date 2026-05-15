@@ -660,7 +660,7 @@ Items marked ✓ closed since the original list was written.
 | `bouncing_ball.mflow` demo | ○ open | §12 example carve-out | Integrator-with-external-reset-port (~50 LOC block-parameter extension) |
 | Discrete filter — FIR path | ○ open | `signal_discrete_filter` ships the pole half of direct-form-II only | Pure-FIR designs need a `u`-history buffer (taps on the input side) |
 | Backward Euler / Trapezoidal | ○ open | `signal_discrete_integrator` parses the method param but uses the Forward Euler single-sample approximation | True implicit / averaged discrete integration |
-| MATLAB Function block — JIT | ○ open | Item 4 ships a scalar AST interpreter only; the full matlab_llvm MIR/MLIR/LLVM/JIT path would let users write loops, multi-return, indexing | Reuses existing matlabc infrastructure; ~1-2 wk follow-up |
+| MATLAB Function block — JIT | ✓ closed | §17.5 #8 — `tools/matlabc/MflowLinkJit.cpp` synthesises a one-level wrapper (driver + `mflowlink_jit_entry` shim + user body), runs the full lex/parse/Sema/MLIR/LLVM-ORC pipeline, casts the resolved entrypoint to a flat `(double, ...) → double` function pointer. Bodies the wrapper can't refine (e.g. triple-helper chains, `n`-as-loop-bound) fall back to the AST interpreter automatically | Demo: `examples/mflowlink/matlab_fcn_jit.mflow` |
 | Vector signals — true matrix shapes | ○ open | Item 1 supports 1-D vectors with scalar broadcast; full N-D matrices need per-port shape tracking | DSP-style frame processing, image / sensor models |
 
 ### 17.3 Blocked carve-outs — five Tier-H+ kinds still reserved
@@ -827,20 +827,33 @@ foundation:
    solver per block. Mostly Loader changes plus a per-block
    `SolverIndex` in `MflBlock`.
 
-8. **MATLAB Function block — JIT path**
-   *(extended-interpreter MVP shipped 2026-05-15 / true MLIR JIT
-   still pending, ~1–2 weeks)*. The Item-4 scalar AST interpreter
-   has been extended with for / while / break / continue so users
-   can write real MATLAB control-flow inside a `signal_matlab_fcn`
-   body — `matlab_fcn_loops.mflow` shows a 5-term harmonic sum
-   and a Newton-iteration `√(u+1)` solver both producing exact
-   analytic answers. True JIT integration (REPL-style MLIR
-   pipeline → ORC → function pointer) is the next horizon: lets
-   users write multi-return, indexing, vector ops, user-function
-   calls. It needs ~30 new MLIR / LLVM headers in
-   MatlabFlowchart's build line and a new
-   `lib/Flowchart/MflowLinkJit.cpp` translation unit gated on
-   `MATLAB_LLVM_WITH_MLIR`.
+8. **MATLAB Function block — JIT path** *(✓ shipped 2026-05-15)*.
+   Two-stage delivery:
+   - **Stage A (interpreter loops)** — the Item-4 scalar AST
+     interpreter gained for / while / break / continue so users
+     can write real MATLAB control-flow inside a
+     `signal_matlab_fcn` body. `matlab_fcn_loops.mflow` shows a
+     5-term harmonic sum and a Newton-iteration `√(u+1)` solver
+     both producing exact analytic answers.
+   - **Stage B (true MLIR JIT)** — `MflowLinkSim` now consults
+     an injectable `MatlabFcnJit` factory at construction. When
+     `matlabc` is the host, `installMflowLinkJit()`
+     (`tools/matlabc/MflowLinkJit.cpp`) registers a factory that
+     synthesises a wrapper TU, runs the full lex → parse → Sema
+     → MLIR → LLVM-ORC pipeline, and resolves
+     `mflowlink_jit_entry` as a flat `(double, ..., double) →
+     double` function pointer. Bodies the JIT can't compile
+     silently fall back to the AST interpreter, so the surface
+     keeps the simpler bodies working even when the wrapper
+     stalls. Demoed by `matlab_fcn_jit.mflow` (multi-return
+     polar decomposition + vector-literal L2 norm, both verified
+     in `test/Flowchart/SimulateRun/run_tests.sh`).
+   Layering: the JIT factory lives in matlabc, not in
+   `MatlabFlowchart` — the static library's dependency closure
+   stays MLIR-free. Up to 8 scalar inputs per block; the
+   `-emit-mflowlink-cpp` codegen lane still uses the AST
+   interpreter (any host that wants JIT can install the same
+   factory).
 
 9. **Matrix-shaped signals** *(~2 weeks)*. Extend Item 1's
    per-port width to per-port shape (rows × cols). Unlocks
