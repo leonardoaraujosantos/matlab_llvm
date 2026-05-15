@@ -402,11 +402,23 @@ MflowLinkSim::MflowLinkSim(const MflowLinkModel &M) : M_(M) {
   const size_t N = M_.Blocks.size();
   Out_.assign(N, 0.0);
   OutWidth_.resize(N, 1);
+  OutRows_.resize(N, 1);
+  OutCols_.resize(N, 1);
   VecOut_.assign(N, {});
   for (size_t I = 0; I < N; ++I) {
     int W = M_.Blocks[I].OutWidth;
     if (W < 1) W = 1;
     OutWidth_[I] = W;
+    // §17.5 #9 — mirror the lowering's shape. Fall back to
+    // (1 × W) for blocks the lowering didn't stamp (older models
+    // round-trip cleanly without an explicit shape annotation).
+    int R = M_.Blocks[I].OutRows;
+    int C = M_.Blocks[I].OutCols;
+    if (R <= 0 || C <= 0 || R * C != W) {
+      R = 1; C = W;
+    }
+    OutRows_[I] = R;
+    OutCols_[I] = C;
     if (W > 1) VecOut_[I].assign(W, 0.0);
   }
   Inputs_.assign(N, {});
@@ -692,10 +704,24 @@ MflowLinkSim::MflowLinkSim(const MflowLinkModel &M) : M_(M) {
       // Item-1 — one CSV column per element. Naming follows MATLAB
       // indexing (1-based on disk) to match what users see in the
       // IDE's scope.
+      // §17.5 #9 — when the block has a 2-D shape, emit
+      // `<id>[r,c]` for each (row, col) in row-major order; 1-D
+      // vectors keep the legacy `<id>[k]` form so existing IDE
+      // consumers and tests stay byte-identical.
+      int R = OutRows_[I];
+      int C = OutCols_[I];
+      bool TwoD = (R > 1 && C > 1 && R * C == W);
       for (int E = 0; E < W; ++E) {
         LogBlocks_.push_back(I);
         LogElements_.push_back(E);
-        LogNames_.push_back(Name + "[" + std::to_string(E + 1) + "]");
+        if (TwoD) {
+          int Ri = (E / C) + 1;
+          int Ci = (E % C) + 1;
+          LogNames_.push_back(Name + "[" + std::to_string(Ri) + "," +
+                              std::to_string(Ci) + "]");
+        } else {
+          LogNames_.push_back(Name + "[" + std::to_string(E + 1) + "]");
+        }
       }
     }
   }
@@ -1204,6 +1230,33 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
       // Algebra-only Tier-C stub: passthrough first input. Tier-E adds
       // the proper switch / demux semantics + zero-crossing.
       Out_[I] = Inputs_[I].empty() ? 0.0 : Out_[Inputs_[I].front().SrcBlock];
+    } else if (K == "signal_reshape") {
+      // §17.5 #9 — copy the upstream flat buffer through; shape
+      // change is purely a metadata switch (OutRows / OutCols
+      // already stamped by lowering). The element count contract
+      // is enforced at lowering time.
+      if (Inputs_[I].empty()) {
+        if (OutWidth_[I] > 1)
+          std::fill(VecOut_[I].begin(), VecOut_[I].end(), 0.0);
+        Out_[I] = 0.0;
+      } else {
+        size_t Src = Inputs_[I].front().SrcBlock;
+        if (OutWidth_[I] > 1) {
+          VecOut_[I].assign(OutWidth_[I], 0.0);
+          int SW = OutWidth_[Src];
+          if (SW == 1) {
+            // Scalar input broadcast — replicate across the new shape.
+            std::fill(VecOut_[I].begin(), VecOut_[I].end(), Out_[Src]);
+          } else {
+            const auto &SV = VecOut_[Src];
+            for (int E = 0; E < OutWidth_[I] && E < (int)SV.size(); ++E)
+              VecOut_[I][E] = SV[E];
+          }
+          Out_[I] = VecOut_[I].front();
+        } else {
+          Out_[I] = Out_[Src];
+        }
+      }
     } else if (K == "signal_unit_delay" || K == "signal_zoh") {
       // Tier E — read the latched discrete state. The scheduler
       // (`fireDiscreteTicks`) is what updates Z_; the evaluator

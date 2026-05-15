@@ -1,0 +1,67 @@
+{
+  "schema": "matforge.flowchart",
+  "version": "0.1.0",
+  "entry": "matrix_sig",
+  "settings": {
+    "kind": "signal_flow",
+    "solver": {
+      "type": "fixed_step",
+      "algorithm": "ode4",
+      "startTime": 0.0,
+      "stopTime": 1.0,
+      "maxStep": "0.05"
+    }
+  },
+  "flows": [
+    {
+      "id": "flow_matrix_sig",
+      "kind": "program",
+      "name": "matrix_sig",
+      "signature": { "inputs": [], "outputs": [] },
+      "nodes": [
+        { "id": "M2x2", "kind": "signal_constant",
+          "data": { "log_signal": true,
+                    "params": { "value": "[1 2; 3 4]" } },
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+
+        { "id": "scale", "kind": "signal_gain",
+          "data": { "log_signal": true, "params": { "gain": 0.5 } },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+
+        { "id": "shift", "kind": "signal_constant",
+          "data": { "log_signal": false,
+                    "params": { "value": "[10 20; 30 40]" } },
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+
+        { "id": "add", "kind": "signal_sum",
+          "data": { "log_signal": true, "params": { "signs": "++" } },
+          "ports": { "in": [{"id": "in1"}, {"id": "in2"}],
+                     "out": [{"id": "out"}] } },
+
+        { "id": "vec", "kind": "signal_constant",
+          "data": { "log_signal": false,
+                    "params": { "value": "[1 2 3 4]" } },
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+
+        { "id": "r2x2", "kind": "signal_reshape",
+          "data": { "log_signal": true,
+                    "params": { "rows": "2", "cols": "2" } },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } }
+      ],
+      "edges": [
+        { "id": "e1", "kind": "data",
+          "from": {"node": "M2x2",  "port": "out"},
+          "to":   {"node": "scale", "port": "in"} },
+        { "id": "e2", "kind": "data",
+          "from": {"node": "scale", "port": "out"},
+          "to":   {"node": "add",   "port": "in1"} },
+        { "id": "e3", "kind": "data",
+          "from": {"node": "shift", "port": "out"},
+          "to":   {"node": "add",   "port": "in2"} },
+        { "id": "e4", "kind": "data",
+          "from": {"node": "vec",   "port": "out"},
+          "to":   {"node": "r2x2",  "port": "in"} }
+      ]
+    }
+  ]
+}

@@ -412,6 +412,30 @@ DP_END=$(printf '%s\n' "$DP" | awk -F, 'END{print $6}')
 check "discrete PID converges past 0.9" \
   "awk 'BEGIN{exit !($DP_END > 0.9 && $DP_END <= 1.05)}'" ""
 
+#--- matrix_signals (§17.5 #9): 2-D shape signals + reshape ----------------
+MS="$("$MATLABC" -simulate "$EX/matrix_signals.mflow")"
+MS_HEAD=$(printf '%s\n' "$MS" | head -1)
+# Column names must use the [r,c] form (not [k]) for 2-D blocks.
+check "matrix_signals 2-D header columns" \
+  "[[ '$MS_HEAD' == *'M2x2[1,1]'* && '$MS_HEAD' == *'M2x2[2,2]'* ]]" ""
+check "matrix_signals 2-D reshape columns" \
+  "[[ '$MS_HEAD' == *'r2x2[1,1]'* && '$MS_HEAD' == *'r2x2[2,2]'* ]]" ""
+# Constant [1 2; 3 4] scaled by 0.5 then shifted by [10 20; 30 40] →
+# [10.5 21; 31.5 42] at every time step.
+MS_T0=$(printf '%s\n' "$MS" | awk -F, 'NR==2 {print $10","$11","$12","$13}')
+check "scale + shift broadcasts elementwise on 2x2" \
+  "[[ '$MS_T0' == '1.050000000e+01,2.100000000e+01,3.150000000e+01,4.200000000e+01' ]]" ""
+# Reshape [1 2 3 4] → [[1 2];[3 4]] preserves row-major order.
+MS_RS=$(printf '%s\n' "$MS" | awk -F, 'NR==2 {print $14","$15","$16","$17}')
+check "reshape 1x4 → 2x2 row-major" \
+  "[[ '$MS_RS' == '1.000000000e+00,2.000000000e+00,3.000000000e+00,4.000000000e+00' ]]" ""
+# Dry-run dumps the inferred 2-D shape on every 2-D block, plus the
+# legacy width=N tag on the 1-D vec input — confirms lowering keeps
+# the per-block shape distinct from the flat element count.
+MS_DRY=$("$MATLABC" -simulate --dry-run "$EX/matrix_signals.mflow" 2>&1)
+check "lowering tags 2-D constant"     "[[ '$MS_DRY' == *'shape=2x2'* ]]" ""
+check "lowering keeps 1-D vec as width" "[[ '$MS_DRY' == *'vec'*'width=4'* ]]" ""
+
 #--- matlab_fcn_jit (§17.5 #8 carve-out): MLIR JIT — vector + indexing ---
 # The interpreter would return 0 for both of these blocks (it
 # doesn't model vector literals or multi-return helpers); a non-

@@ -63,6 +63,18 @@ struct MflBlock {
   // width once its inputs are known — e.g. Gain inherits from its
   // input, Mux sums its inputs).
   int OutWidth = 1;
+  // §17.5 #9 — 2-D shape annotation. When `OutCols > 1`, this
+  // block emits a `OutRows × OutCols` matrix (row-major flat
+  // storage in `MflowLinkSim::VecOut_`); `OutWidth` stays the
+  // product (total element count) so scalar-fanout broadcast
+  // logic keeps working without modification.  `OutRows == 0`
+  // means "infer the row count from the upstream port"; the
+  // common 1-D vector case is `OutRows = 1, OutCols = OutWidth`.
+  // Blocks that don't carry a 2-D shape annotation default to
+  // (1 × OutWidth) so existing Mux/Demux/Sum/... evaluators
+  // observe their pre-#9 single-row layout.
+  int OutRows = 1;
+  int OutCols = 1;
   // For multi-input blocks the widths line up with `Inputs_` in
   // `MflowLinkSim` once edges are resolved. The lowering doesn't
   // try to populate this — the runtime fills it on first use.

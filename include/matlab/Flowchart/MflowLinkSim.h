@@ -362,6 +362,13 @@ private:
   // signal_constant, scope/log when width > 1) reach in here;
   // every other reader still hits the scalar Out_[I].
   std::vector<int>                 OutWidth_;
+  // §17.5 #9 — per-block 2-D shape (rows, cols). Mirrors
+  // MflBlock::OutRows / OutCols stamped by the lowering's shape
+  // inference. For 1-D vectors / scalars, OutRows=1 and OutCols
+  // equals OutWidth so element-wise broadcast loops over OutWidth
+  // unchanged.
+  std::vector<int>                 OutRows_;
+  std::vector<int>                 OutCols_;
   std::vector<std::vector<double>> VecOut_;
   std::vector<double> Y_;             // continuous state, length M_.ContStateCount
   // Discrete state — one scalar slot per `Unit Delay` / `ZOH`, indexed

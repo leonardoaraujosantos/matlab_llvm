@@ -661,7 +661,7 @@ Items marked ✓ closed since the original list was written.
 | Discrete filter — FIR path | ○ open | `signal_discrete_filter` ships the pole half of direct-form-II only | Pure-FIR designs need a `u`-history buffer (taps on the input side) |
 | Backward Euler / Trapezoidal | ○ open | `signal_discrete_integrator` parses the method param but uses the Forward Euler single-sample approximation | True implicit / averaged discrete integration |
 | MATLAB Function block — JIT | ✓ closed | §17.5 #8 — `tools/matlabc/MflowLinkJit.cpp` synthesises a one-level wrapper (driver + `mflowlink_jit_entry` shim + user body), runs the full lex/parse/Sema/MLIR/LLVM-ORC pipeline, casts the resolved entrypoint to a flat `(double, ...) → double` function pointer. Bodies the wrapper can't refine (e.g. triple-helper chains, `n`-as-loop-bound) fall back to the AST interpreter automatically | Demo: `examples/mflowlink/matlab_fcn_jit.mflow` |
-| Vector signals — true matrix shapes | ○ open | Item 1 supports 1-D vectors with scalar broadcast; full N-D matrices need per-port shape tracking | DSP-style frame processing, image / sensor models |
+| Vector signals — true matrix shapes | ✓ closed | §17.5 #9 — `OutRows × OutCols` carried on every `MflBlock`; lowering's shape-inference pass propagates the dominant non-scalar shape, broadcast operators stay flat-storage element-wise. New `signal_reshape` block + matrix-literal parsing on `signal_constant` (`"[1 2; 3 4]"`). Scope / to-workspace columns switch to `<id>[r,c]` for 2-D outputs | Demo: `examples/mflowlink/matrix_signals.mflow` |
 
 ### 17.3 Blocked carve-outs — five Tier-H+ kinds still reserved
 
@@ -855,11 +855,25 @@ foundation:
    interpreter (any host that wants JIT can install the same
    factory).
 
-9. **Matrix-shaped signals** *(~2 weeks)*. Extend Item 1's
-   per-port width to per-port shape (rows × cols). Unlocks
-   image / sensor / DSP frame-based processing. Mostly
-   evaluator changes; the wiring machinery is already shape-aware
-   through `OutWidth`.
+9. **Matrix-shaped signals** *(✓ MVP shipped 2026-05-15)*.
+   `MflBlock` now carries `OutRows × OutCols` next to `OutWidth`;
+   the lowering's shape-inference pass propagates the dominant
+   non-scalar shape through every block (scalar inputs broadcast
+   freely; mismatched non-scalar shapes are a sourced
+   diagnostic). `signal_constant` accepts the MATLAB matrix
+   literal form `"[1 2; 3 4]"`; new `signal_reshape` block
+   re-stamps a flat-storage signal as `rows × cols` (element
+   count must match — pure metadata pass at runtime). Scope /
+   to-workspace columns switch to the `<id>[r,c]` form for 2-D
+   blocks; 1-D vectors keep the legacy `<id>[k]` columns so
+   existing IDE consumers stay byte-identical. Demo:
+   `examples/mflowlink/matrix_signals.mflow` (2×2 constant +
+   elementwise broadcast + 1×4 → 2×2 reshape, both byte-
+   identical against the `-emit-mflowlink-cpp` standalone).
+   Carve-outs: shape-aware Mux/Demux with an `axis` parameter
+   (mux/demux still 1-D-row today); matrix multiplication
+   block (`signal_matmul`) needs different broadcast semantics
+   and will land as a separate slice.
 
 10. **Stateflow** *(separate roadmap, multi-month)*. Hierarchical
     FSMs are 50% of why engineering teams pick Simulink. Out of

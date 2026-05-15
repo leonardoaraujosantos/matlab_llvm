@@ -93,6 +93,7 @@ diagnostic) until its evaluator lands.
 |---|---|---|---|
 | `signal_mux`    | stub | `numInputs: 2.0`             | Vector signal type pending (Tier H+); current evaluator passes through `in1` |
 | `signal_demux`  | stub | `numOutputs: 2.0`            | Same caveat |
+| `signal_reshape` | ✓ | `rows: "<N>"`, `cols: "<M>"` *(or `shape: "rows,cols"`)* | §17.5 #9 — re-stamps a flat-storage signal as an `N × M` matrix. Total element count must match the upstream port (sourced lowering error otherwise). Pure metadata pass at runtime — flat buffer is copied verbatim |
 | `signal_switch` | stub | `threshold: 0.0`             | Tier-E: zero-crossing on `in2 − threshold`; current evaluator passes through `in1` |
 | `signal_multiport_switch` | ✓ | `defaultOutput: 0.0`     | Tier-H — `in1` is the 1-based selector; `in2`, `in3`, … are the data lines. Out-of-range selectors fall through to `defaultOutput` |
 | `signal_merge`            | ✓ | `initialOutput: 0.0`     | Tier-H — first non-zero input in port order wins. Falls through to `initialOutput` when every input is zero |
