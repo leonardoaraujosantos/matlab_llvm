@@ -250,6 +250,21 @@ ST_LINE=$("$MATLABC" -simulate --dry-run "$EX/sample_time_inherit.mflow" 2>&1 | 
 check "gain block inherits discrete 0.1s" \
   "[[ '$ST_LINE' == *'sample=discrete period=0.1'* ]]" ""
 
+#--- bus_signals (§17.5 #1): named-field struct wires ---------------------
+BS="$("$MATLABC" -simulate "$EX/bus_signals.mflow")"
+BS_HEAD=$(printf '%s\n' "$BS" | head -1)
+check "bus_signals header (15 cols)" \
+  "[[ '$BS_HEAD' == 't,height_src,velocity_src,temp_src,telemetry[1],telemetry[2],telemetry[3],pick_temp,pick_height' ]]" ""
+# Field "temperature" lives at element 3 of the bus.
+BS_TEMP=$(printf '%s\n' "$BS" | awk -F, 'NR>1 && $1+0==0.5 {print $8; exit}')
+BS_TEMP_BUS=$(printf '%s\n' "$BS" | awk -F, 'NR>1 && $1+0==0.5 {print $7; exit}')
+check "selector projects 'temperature'" \
+  "awk 'BEGIN{exit !(($BS_TEMP - $BS_TEMP_BUS)^2 < 1e-9)}'" ""
+# Field "height" at element 1, value = ramp·0.5 = 0.25 at t=0.5.
+BS_H=$(printf '%s\n' "$BS" | awk -F, 'NR>1 && $1+0==0.5 {print $9; exit}')
+check "selector projects 'height'" \
+  "awk 'BEGIN{exit !(($BS_H - 0.25)^2 < 1e-9)}'" ""
+
 #--- discrete_integrator_methods (§17.5 #4): three methods on a ramp ------
 DM="$("$MATLABC" -simulate "$EX/discrete_integrator_methods.mflow")"
 DM_HEAD=$(printf '%s\n' "$DM" | head -1)

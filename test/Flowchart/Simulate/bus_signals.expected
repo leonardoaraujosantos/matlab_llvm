@@ -1,0 +1,21 @@
+MflowLinkModel entry=bus_demo blocks=8 edges=7
+  solver type=variable_step algorithm=ode45 startTime=0 stopTime=2
+  states continuous=0 discrete=0
+  exec-order:
+    0 height_src kind=signal_ramp sample=fixed_in_minor log
+    1 velocity_src kind=signal_constant sample=constant log
+    2 temp_src kind=signal_sine sample=fixed_in_minor log
+    3 telemetry kind=signal_bus_creator sample=fixed_in_minor log width=3 fields={height,velocity,temperature}
+    4 pick_temp kind=signal_bus_selector sample=fixed_in_minor log
+    5 pick_height kind=signal_bus_selector sample=fixed_in_minor log
+    6 term_temp kind=signal_terminator sample=fixed_in_minor
+    7 term_h kind=signal_terminator sample=fixed_in_minor
+  zero-crossings: none
+  edges:
+    e_h height_src:out -> telemetry:in1
+    e_v velocity_src:out -> telemetry:in2
+    e_t temp_src:out -> telemetry:in3
+    e_pt telemetry:out -> pick_temp:in
+    e_ph telemetry:out -> pick_height:in
+    e_sk_temp pick_temp:out -> term_temp:in
+    e_sk_h pick_height:out -> term_h:in

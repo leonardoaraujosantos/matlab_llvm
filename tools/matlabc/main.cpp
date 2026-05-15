@@ -6664,6 +6664,30 @@ void mflEmitZeroCrossings(matlab::flowchart::MflowLinkSim &Sim) {
   }
 }
 
+// Drain the simulator's algebraic-loop failure queue. Tier-I Item-2
+// runs Newton / trust-region iterations on direct-feedthrough cycles;
+// when a cycle fails to converge within the 50-iteration cap, the
+// runtime records the offending member set + simulation time. The
+// IDE captures these into MflowLinkSimulation.recentAlgebraicLoopFailures
+// and shows a chrome-strip badge. Block indices are translated to the
+// IR-side string ids so the IDE doesn't need to know about the
+// runtime's internal layout.
+void mflEmitAlgebraicLoopFailures(
+    matlab::flowchart::MflowLinkSim &Sim,
+    const matlab::flowchart::MflowLinkModel &Model) {
+  for (auto &F : Sim.consumeAlgebraicLoopFailures()) {
+    llvm::json::Array Members;
+    for (size_t Idx : F.Members) {
+      if (Idx < Model.Blocks.size())
+        Members.push_back(Model.Blocks[Idx].Id);
+    }
+    sendEvent("algebraicLoopFailure",
+              llvm::json::Object{
+                {"t", F.T},
+                {"members", llvm::json::Value(std::move(Members))}});
+  }
+}
+
 // Tag the IDE's canvas with the cursor's currently-active block.
 // Empty id ⇒ no block is highlighted (the cursor is at end-of-step,
 // pre-stepBlock or post-major-commit).

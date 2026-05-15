@@ -127,6 +127,11 @@ const KindInfo *lookupKind(const std::string &K) {
     add("signal_multiport_switch",
                          {true, true, false, false, false, FIM});
     add("signal_merge",  {true, true, false, false, false, FIM});
+    // §17.5 #1 — bus signals. The creator packs scalar inputs into
+    // a named-field vector; the selector projects out one named
+    // field. Both reuse the OutWidth + VecOut_ runtime path.
+    add("signal_bus_creator",  {true, true, false, false, false, FIM});
+    add("signal_bus_selector", {true, true, false, false, false, FIM});
     // Tier-H carve-out — virtual wires. Marked Composite so the
     // Flattener's existing "contracted away during lowering" path
     // applies; a dedicated `contractGotoFrom` pass actually rewires
@@ -165,7 +170,6 @@ const KindInfo *lookupKind(const std::string &K) {
     // lookup_1d / 2d are solid). See `docs/mflowlink_blocks.md`.
     for (const char *Name : {
              "signal_from_workspace",
-             "signal_bus_creator", "signal_bus_selector",
              "signal_if_action", "signal_switch_case_action",
              "signal_lookup_nd",
              "signal_custom"}) { // NOTE: signal_custom remains
@@ -790,6 +794,29 @@ std::optional<MflowLinkModel> lowerSignalFlow(const FlowDoc &Doc,
       // `numInputs` × upstream widths — finalised by width inference
       // once we know what's wired to each input.
       B.OutWidth = 0; // sentinel: "compute from inputs"
+    } else if (N.Kind == "signal_bus_creator") {
+      // §17.5 #1 — pack N scalar inputs into a named-field vector.
+      // `params.field_names` is a comma-separated list; the number
+      // of names IS the output width.
+      if (auto *FN = N.getParam("field_names")) {
+        std::string S = *FN;
+        std::string Tok;
+        for (size_t I = 0; I <= S.size(); ++I) {
+          char C = I < S.size() ? S[I] : ',';
+          if (C == ',' || C == ' ' || C == '\t') {
+            if (!Tok.empty()) {
+              B.FieldNames.push_back(std::move(Tok));
+              Tok.clear();
+            }
+          } else {
+            Tok.push_back(C);
+          }
+        }
+      }
+      B.OutWidth = B.FieldNames.empty() ? 1 : (int)B.FieldNames.size();
+    } else if (N.Kind == "signal_bus_selector") {
+      // Always emits one scalar — the element matching its `field`.
+      B.OutWidth = 1;
     } else if (N.Kind == "signal_demux") {
       // Width is decided per-output-port. For the Tier-I MVP we
       // restrict signal_demux to a single output (the first
@@ -1206,6 +1233,14 @@ void dumpMflowLinkModel(std::ostream &OS, const MflowLinkModel &M) {
       if (B.EnableEdgeTriggered) OS << " (rising-edge)";
     }
     if (B.OutWidth != 1) OS << " width=" << B.OutWidth;
+    if (!B.FieldNames.empty()) {
+      OS << " fields={";
+      for (size_t K = 0; K < B.FieldNames.size(); ++K) {
+        if (K) OS << ",";
+        OS << B.FieldNames[K];
+      }
+      OS << "}";
+    }
     OS << "\n";
   }
   OS << "  zero-crossings:";

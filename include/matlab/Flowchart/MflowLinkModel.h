@@ -66,6 +66,12 @@ struct MflBlock {
   // `MflowLinkSim` once edges are resolved. The lowering doesn't
   // try to populate this — the runtime fills it on first use.
   std::vector<int> InWidths;
+  // §17.5 #1 — bus signal field names. Empty for plain vector
+  // signals; populated by signal_bus_creator from its
+  // `params.field_names` (comma-separated). signal_bus_selector
+  // walks edges upstream to find a block with matching FieldNames
+  // and resolves its `params.field` to an element offset.
+  std::vector<std::string> FieldNames;
   // Tier F — conditional subsystem gate. Empty for an always-enabled
   // block; a flat block id (the source signal driving the enable)
   // for a block inlined from a `signal_enabled_subsystem` or for a

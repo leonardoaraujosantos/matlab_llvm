@@ -1284,6 +1284,63 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
         if (P.DstPort == Port) { Val = Out_[P.SrcBlock]; Found = true; break; }
       (void)Found;
       Out_[I] = Val;
+    } else if (K == "signal_bus_creator") {
+      // §17.5 #1 — pack N scalar inputs into a named-field vector
+      // ordered by port id. Same wire shape as signal_mux but the
+      // output carries an associated FieldNames map (set at
+      // lowering time on B.FieldNames) so a downstream
+      // signal_bus_selector can project by name.
+      VecOut_[I].assign(OutWidth_[I], 0.0);
+      std::vector<std::pair<int, size_t>> Order;
+      for (size_t Idx = 0; Idx < Inputs_[I].size(); ++Idx) {
+        const auto &P = Inputs_[I][Idx];
+        int N = 1;
+        if (P.DstPort.size() > 1 && P.DstPort[0] == 'i' &&
+            P.DstPort[1] == 'n') {
+          try { N = std::stoi(P.DstPort.substr(2)); }
+          catch (...) { N = 1; }
+        }
+        Order.emplace_back(N, Idx);
+      }
+      std::sort(Order.begin(), Order.end());
+      size_t Pos = 0;
+      for (auto &OEnt : Order) {
+        const auto &P = Inputs_[I][OEnt.second];
+        int SW = OutWidth_[P.SrcBlock];
+        if (SW == 1) {
+          if (Pos < VecOut_[I].size())
+            VecOut_[I][Pos++] = Out_[P.SrcBlock];
+        } else {
+          for (int E = 0; E < SW && Pos < VecOut_[I].size(); ++E)
+            VecOut_[I][Pos++] = VecOut_[P.SrcBlock][E];
+        }
+      }
+      Out_[I] = VecOut_[I].empty() ? 0.0 : VecOut_[I].front();
+    } else if (K == "signal_bus_selector") {
+      // §17.5 #1 — look up `params.field` against the upstream
+      // bus_creator's FieldNames map and project that element out.
+      // Falls through to passthrough of the first element when no
+      // matching field is found (matches Simulink's "default to
+      // signal 1" fallback).
+      const std::string *F = paramS(B, "field");
+      size_t Src = static_cast<size_t>(-1);
+      for (auto &P : Inputs_[I])
+        if (P.DstPort == "in") { Src = P.SrcBlock; break; }
+      double V = 0.0;
+      if (Src != static_cast<size_t>(-1)) {
+        const auto &SrcFields = M_.Blocks[Src].FieldNames;
+        int Idx = 0;
+        if (F && !F->empty()) {
+          for (size_t K2 = 0; K2 < SrcFields.size(); ++K2) {
+            if (SrcFields[K2] == *F) { Idx = (int)K2; break; }
+          }
+        }
+        if (OutWidth_[Src] > 1 && Idx < (int)VecOut_[Src].size())
+          V = VecOut_[Src][Idx];
+        else
+          V = Out_[Src];
+      }
+      Out_[I] = V;
     } else if (K == "signal_merge") {
       // Output the first non-zero input in port-id order. Matches
       // Simulink's "first-driven-wins" merge semantic for control
