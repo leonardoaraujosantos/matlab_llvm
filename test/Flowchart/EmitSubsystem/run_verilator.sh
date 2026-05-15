@@ -51,6 +51,8 @@ declare -a SV_FIXTURES=(
   "ss_plant:ss_plant"
   "mimo_state_space:mimo_state_space"
   "nested_pid_filter:outer_loop"
+  "matlab_fcn_sv:matlab_fcn_sv"
+  "multirate_filters:multirate_filters"
 )
 
 for spec in "${SV_FIXTURES[@]}"; do

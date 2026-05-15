@@ -674,14 +674,28 @@ Tier-6a — multi-instantiation (✓ already works):
   fields. Verified with a twin-LP demo: 64 DFFs (= 32 × 2
   separate state spaces) after `yosys synth`.
 
-Tier-6b (not yet shipped):
-- `signal_matlab_fcn` body re-runs through the JIT-class
-  refinement (§17.5 #8) so multi-return + indexing inside the
-  body propagate to the emitted code. Also closes the
-  matlab_fcn_sv synth gap — the body's bare-int constants
-  (`u1 * 3 + u2 * 5`) need to either lift to `fi(3,...)` /
-  `fi(5,...)` automatically or for Sema's body walker to
-  infer the result as fi-typed without explicit wrapping.
+Tier-6b (✓ shipped 2026-05-15):
+- **`signal_matlab_fcn` user-body fi-typing.** When the user-
+  function is parsed and added to the TU, its formal args get a
+  prepended `<arg> = fi(<arg>, S, W, F)` re-cast in HDL mode.
+  Sema's Phase 5.6 Stage A.1 mechanism then pins the args' fi
+  spec from the call sites; bare-int arithmetic inside the body
+  (e.g. `u1 * 3 + u2 * 5`) inherits the fi type via the
+  cross-function return-type propagation shipped in Tier-6a.
+- The TU layout now pushes user functions BEFORE the outer Fn
+  (alongside nested helpers) so TypeInference visits the user
+  body first and the outer's call site can pull a typed return.
+- `cosim.py` learned the multi-module shape: `parse_sv_ports`
+  takes a `want_module` arg pointing at the outer's subsystem
+  name; `verilator --top-module` is passed through so the
+  testbench instantiates the right top. `matlab_fcn_sv` cosim
+  passes bit-exact.
+- Demo: `matlab_fcn_sv.mflow` — outer subsystem wraps a
+  `signal_matlab_fcn` block whose body is
+  `out = u1 * 3 + u2 * 5`. SV emit: outer module instantiates
+  `poly_mac_mac_mac u_...` as a sub-module; the inner emits
+  proper Q16.16 multiplications with the `>>> 16` normalising
+  shift. yosys synth 686 cells.
 
 Tier-6c (✓ partial, shipped 2026-05-15 — software targets):
 - **Multirate subsystems for software targets.** Each stateful
@@ -709,14 +723,19 @@ Tier-6c (✓ partial, shipped 2026-05-15 — software targets):
   verifies the fast block latches immediately while the slow
   block holds the previous value until the next firing tick.
 
-Tier-6c open carve-outs (not yet shipped):
-- **HDL multirate** — the modulo / tick-counter / conditional
-  emit needs to lower to a synthesisable clock-enable signal.
-  Plan: add an `en` port to each multirate register's
-  `always_ff` block, drive it from a counter+compare at the
-  top-level always_ff. The emit gate today surfaces a sourced
-  error directing the user to flatten the multirate to the
-  base rate or split the subsystem per rate domain.
+Tier-6c — HDL update (✓ shipped 2026-05-15):
+- **HDL multirate.** Software emit uses a global `_tick` counter
+  and `mod(_tick, epoch) == 0` to gate each slow block's state
+  update. `mod` doesn't synthesise, so HDL emit uses a different
+  shape: each slow block (epoch > 1) gets its OWN persistent
+  `phase_<block>` counter that wraps at `epoch-1`. The state
+  update gates on `phase == 0`; the counter advances via
+  `if phase == epoch - 1; phase = 0; else phase = phase + 1`.
+  Both branches synth to a clean 2-way mux + adder, and the
+  per-block counters compose freely (multiple rate domains
+  don't interfere). Demo: `multirate_filters.mflow` SV emit
+  passes verilator lint, behavioural cosim (bit-exact vs Python),
+  and yosys synth (60+ cells).
 
 **Total to "every demo target works": ~4–5 weeks.**
 

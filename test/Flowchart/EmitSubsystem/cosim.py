@@ -38,20 +38,43 @@ import sys
 import tempfile
 from pathlib import Path
 
+# Tier-6c — multirate emit imports `matlab_runtime` for `mod`. Make
+# sure the shipped runtime is reachable when cosim imports the
+# emitted Python module.
+_RUNTIME = (Path(__file__).resolve().parents[3] / "runtime")
+if _RUNTIME.is_dir():
+    sys.path.insert(0, str(_RUNTIME))
 
-def parse_sv_ports(sv_text: str):
+
+def parse_sv_ports(sv_text: str, want_module: str = ""):
     """Walk the module declaration and pull out (name, width) lists
     for the user-visible data inputs and outputs.  Tracks whether
     the module is sequential (clk + rst_n present) or pure
     combinational (no clock ports — common for stateless mixers /
     comparators / threshold switches). The control ports (clk,
     rst_n, reset) are wiggled by the testbench directly when present
-    and skipped otherwise."""
-    m = re.search(r"module\s+(\w+)\s*\((.*?)\);", sv_text, re.DOTALL)
-    if not m:
-        raise ValueError("no module declaration found")
-    mod_name = m.group(1)
-    body = m.group(2)
+    and skipped otherwise. When `want_module` is non-empty, look for
+    that module specifically — needed for SV files with multiple
+    modules (nested subsystems / signal_matlab_fcn helpers) where
+    we want the OUTER subsystem, not the first-declared helper."""
+    if want_module:
+        pat = (r"module\s+" + re.escape(want_module) + r"\s*\((.*?)\);")
+        m = re.search(pat, sv_text, re.DOTALL)
+        if m:
+            mod_name = want_module
+            body = m.group(1)
+        else:
+            m = re.search(r"module\s+(\w+)\s*\((.*?)\);", sv_text, re.DOTALL)
+            if not m:
+                raise ValueError("no module declaration found")
+            mod_name = m.group(1)
+            body = m.group(2)
+    else:
+        m = re.search(r"module\s+(\w+)\s*\((.*?)\);", sv_text, re.DOTALL)
+        if not m:
+            raise ValueError("no module declaration found")
+        mod_name = m.group(1)
+        body = m.group(2)
     ins = []
     outs = []
     has_clk = False
@@ -208,7 +231,8 @@ def main():
          "--subsystem", args.subsystem]).decode()
 
     (mod_name, ins, outs,
-     has_clk, has_rst_n, has_reset) = parse_sv_ports(sv_text)
+     has_clk, has_rst_n, has_reset) = parse_sv_ports(sv_text,
+                                                      args.subsystem)
     if not ins or not outs:
         print(f"skip {args.subsystem}: empty port list", file=sys.stderr)
         return 0
@@ -226,6 +250,7 @@ def main():
 
         verilator_cmd = [
             "verilator", "--cc", str(sv_file),
+            "--top-module", mod_name,
             "--exe", str(tb_file), "--build",
             # Suppress the cosmetic warnings the lint lane already
             # explicitly accepts as benign.

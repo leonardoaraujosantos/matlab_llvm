@@ -45,11 +45,10 @@ declare -a CASES=(
   "comparator_logic:comparator_logic:1"
   "threshold_switch:threshold_switch:20"
   "scaled_sum_sv:scaled_sum:50"
-  # matlab_fcn_sv carved out — pre-existing SV emit limitation
-  # where the user `signal_matlab_fcn` body's return type isn't
-  # fi-inferred, so the outport fi-wrap routes through the
-  # non-synthesisable matlab_fi_quantize_s constructor. Fix path:
-  # propagate operand fi specs through the user-fn body's binops.
+  # Tier-6b — signal_matlab_fcn body's args are now fi-cast wrapped
+  # at function entry so the user MATLAB body's return is fi-typed
+  # through Sema. Cell count includes the user-fn helper + outer.
+  "matlab_fcn_sv:matlab_fcn_sv:300"
   "unit_delay:unit_delay:30"
   "tapped_delay:tapped_delay:80"
   "transport_delay:transport_delay:80"
@@ -63,6 +62,8 @@ declare -a CASES=(
   "mimo_state_space:mimo_state_space:200"
   # Tier-6 — nested subsystem (outer instantiates lp_filter submodule).
   "nested_pid_filter:outer_loop:300"
+  # Tier-6c — HDL multirate (per-block phase counter + clock enable).
+  "multirate_filters:multirate_filters:60"
 )
 
 for spec in "${CASES[@]}"; do

@@ -1362,23 +1362,14 @@ matlab::Function *lowerSubsystemImpl(
       }
     }
   }
-  if (IsMultirate && Opts.StateAsPersistent) {
-    // HDL multirate would require clock-enable threading at every
-    // multirate register; defer to a future tier. Software targets
-    // get full multirate support.
-    for (auto *N : Internal) {
-      if (BlockEpoch.count(N->Id) && BlockEpoch[N->Id] > 1) {
-        Diag.error(N->Loc,
-                   std::string("block \"") + N->Id +
-                       "\" has sample_time > base period — HDL "
-                       "multirate emit is a Tier-6c carve-out "
-                       "(software targets work today); flatten to "
-                       "the base rate or split the subsystem per "
-                       "rate domain");
-        return nullptr;
-      }
-    }
-  }
+  // Tier-6c — HDL multirate. The SV pipeline already lowers
+  // conditional `if-store` patterns around persistent slot writes
+  // to clock-enabled register updates, so the same `if mod(_tick,
+  // epoch) == 0 ... end` AST shape works in both software and HDL.
+  // The hidden `_tick` counter is allocated as another persistent
+  // slot in HDL mode (counts up each clock; resets to 0 on
+  // power-up). For HDL the `_tick` slot is declared alongside the
+  // other state slots in the State setup loop below.
 
   // Tier 3 — collect stateful blocks in topo order; each contributes
   // one or more scalar state slots to the function signature.  Per
@@ -1656,6 +1647,35 @@ matlab::Function *lowerSubsystemImpl(
       If->Cond = Or;
       If->Then = Then;
       Body->Stmts.push_back(If);
+    }
+    // Tier-6c — HDL multirate. For each slow block (epoch > 1),
+    // declare a per-block phase counter `phase_<block>` as an
+    // additional persistent. Each counter wraps at `epoch - 1`
+    // (incremented at end-of-body via an if/else); the block's
+    // state update gates on `phase == 0`. Per-block counters
+    // avoid the non-synthesisable `mod(_tick, epoch)` shape the
+    // software emit uses.
+    if (IsMultirate) {
+      for (const auto &BP : BlockEpoch) {
+        if (BP.second <= 1) continue;
+        std::string Phase = "phase_" + sanitizeIdent(BP.first);
+        auto *Decl = AST.make<PersistentDecl>();
+        Decl->Names.push_back(AST.intern(Phase));
+        Body->Stmts.push_back(Decl);
+        auto *IsEmpty = B.call("isempty", {B.name(Phase)});
+        auto *Or = B.bin(BinOp::ShortOr, IsEmpty, B.name("reset"));
+        auto *FiCall = B.call("fi",
+                              {B.number(0.0),
+                               B.integer(Opts.FiDefault.Signed ? 1 : 0),
+                               B.integer(Opts.FiDefault.Width),
+                               B.integer(Opts.FiDefault.Frac)});
+        auto *Then = AST.make<Block>();
+        Then->Stmts.push_back(B.assign(Phase, FiCall));
+        auto *If = AST.make<IfStmt>();
+        If->Cond = Or;
+        If->Then = Then;
+        Body->Stmts.push_back(If);
+      }
     }
   }
 
@@ -2448,10 +2468,15 @@ matlab::Function *lowerSubsystemImpl(
   // the call statement above (multi-LHS assign captures both Y and
   // S_next), so skip them here.
   // Tier-6c — multirate gating. When a stateful block's epoch > 1,
-  // the state update only fires every `epoch` ticks. Wrap the
-  // assignment in `if mod(_tick, epoch) == 0 ... else hold ... end`
-  // so non-firing ticks preserve the current state. Fast blocks
-  // (epoch == 1) emit the assignment unconditionally.
+  // the state update only fires every `epoch` ticks.
+  // Software mode: gate on `mod(_tick, epoch) == 0` (single global
+  //   `_tick` counter increments each tick; non-firing ticks hold
+  //   the previous state).
+  // HDL mode: `mod` doesn't synthesise, so for each multirate
+  //   block we emit a separate counter that wraps at `epoch-1`
+  //   (`phase_<block>`), and gate on `phase == 0`. The phase
+  //   counter increments by 1 and resets to 0 at epoch-1 via an
+  //   if/else; both branches synthesise to a clean 2-way mux.
   for (auto &S : States) {
     if (S.N->Kind == "signal_subsystem") continue;
     Expr *E = NextStateExpr[S.CurArg];
@@ -2469,9 +2494,19 @@ matlab::Function *lowerSubsystemImpl(
       Body->Stmts.push_back(Assign);
       continue;
     }
-    // Multirate slow slot — gate on tick % epoch == 0.
-    auto *Mod = B.call("mod", {B.name("_tick"), B.integer(Epoch)});
-    auto *Cond = B.bin(BinOp::Eq, Mod, B.integer(0));
+    // Multirate slow slot — gate on epoch boundary.
+    Expr *Cond;
+    if (Opts.StateAsPersistent) {
+      // HDL: per-block phase counter (declared above with the
+      // other persistents). gate = (phase_<block> == 0).
+      std::string Phase = "phase_" + sanitizeIdent(S.N->Id);
+      Cond = B.bin(BinOp::Eq, B.name(Phase),
+                    B.WrapFi ? B.lit(0.0) : B.number(0.0));
+    } else {
+      // Software: global `_tick` + mod.
+      auto *Mod = B.call("mod", {B.name("_tick"), B.integer(Epoch)});
+      Cond = B.bin(BinOp::Eq, Mod, B.integer(0));
+    }
     auto *If = AST.make<IfStmt>();
     If->Cond = Cond;
     If->Then = AST.make<Block>();
@@ -2487,11 +2522,36 @@ matlab::Function *lowerSubsystemImpl(
     If->Else->Stmts.push_back(Hold);
     Body->Stmts.push_back(If);
   }
-  // Tier-6c — increment the hidden multirate counter at end-of-body.
+  // Tier-6c — tick / phase counter updates.
+  // Software emit writes to `_tick_next` (returned alongside the
+  // other state-next values).
+  // HDL emit increments per-block `phase_<block>` counters that
+  // wrap at `epoch-1`. Each counter starts at 0 and rolls over
+  // synchronously with its block's epoch.
   if (IsMultirate) {
-    Body->Stmts.push_back(
-        B.assign("_tick_next",
-                 B.bin(BinOp::Add, B.name("_tick"), B.integer(1))));
+    if (Opts.StateAsPersistent) {
+      for (const auto &BP : BlockEpoch) {
+        if (BP.second <= 1) continue;
+        std::string Phase = "phase_" + sanitizeIdent(BP.first);
+        // phase = (phase == epoch-1) ? 0 : phase + 1
+        auto *Cond = B.bin(BinOp::Eq, B.name(Phase),
+                            B.WrapFi ? B.lit((double)(BP.second - 1))
+                                     : B.number(BP.second - 1));
+        auto *If = AST.make<IfStmt>();
+        If->Cond = Cond;
+        If->Then = AST.make<Block>();
+        If->Then->Stmts.push_back(B.assign(
+            Phase, B.WrapFi ? B.lit(0.0) : B.number(0.0)));
+        If->Else = AST.make<Block>();
+        If->Else->Stmts.push_back(B.assign(
+            Phase, B.bin(BinOp::Add, B.name(Phase), B.integer(1))));
+        Body->Stmts.push_back(If);
+      }
+    } else {
+      Body->Stmts.push_back(
+          B.assign("_tick_next",
+                   B.bin(BinOp::Add, B.name("_tick"), B.integer(1))));
+    }
   }
 
   // Build the function node.
@@ -2564,7 +2624,6 @@ matlab::TranslationUnit *buildSubsystemTU(
   for (auto *Helper : Ctx.Pending) {
     TU->Functions.push_back(Helper);
   }
-  TU->Functions.push_back(Fn);
 
   // Tier 5 — collect every `signal_matlab_fcn` block in the subsystem
   // and add its `params.function_body` as a sibling local function in
@@ -2573,6 +2632,15 @@ matlab::TranslationUnit *buildSubsystemTU(
   // here we parse the user-supplied body, rename the entry, and
   // append to the TU's Functions list so Sema + lowering pick it up
   // alongside the main subsystem function.
+  // Tier-6b — user functions must be pushed BEFORE the outer Fn so
+  // Sema's TypeInference visits them first (same ordering as nested
+  // subsystems). And in HDL mode, the user function's args are
+  // re-cast to fi at the start of its body so Sema's Phase 5.6
+  // Stage A.1 `ParamFiSpec` mechanism pins their types — without
+  // this, bare-int arithmetic inside the body (`u1 * 3 + u2 * 5`)
+  // leaves the args as `any`, and the outer's outport wrap routes
+  // the call result through the non-synthesisable
+  // `matlab_fi_quantize_s` constructor.
   const Flow *Sub = Doc.findFlow(SubsystemName);
   if (Sub) {
     for (const auto &N : Sub->Nodes) {
@@ -2608,6 +2676,27 @@ matlab::TranslationUnit *buildSubsystemTU(
       std::string Helper =
           std::string(UserFn->Name) + "_" + sanitizeIdent(N.Id);
       UserFn->Name = AST.intern(Helper);
+      // Tier-6b — inject `<arg> = fi(<arg>, S, W, F)` at the start of
+      // the body in HDL mode so Sema pins the args' fi specs.
+      if (Opts.StateAsPersistent && UserFn->Body) {
+        ASTBuilder UB{AST};
+        UB.WrapFi   = true;
+        UB.FiSigned = Opts.FiDefault.Signed;
+        UB.FiWidth  = Opts.FiDefault.Width;
+        UB.FiFrac   = Opts.FiDefault.Frac;
+        std::vector<Stmt *> Casts;
+        for (auto Arg : UserFn->Inputs) {
+          std::string Name(Arg);
+          auto *FiCall = UB.call("fi",
+                                  {UB.name(Name),
+                                   UB.integer(UB.FiSigned ? 1 : 0),
+                                   UB.integer(UB.FiWidth),
+                                   UB.integer(UB.FiFrac)});
+          Casts.push_back(UB.assign(Name, FiCall));
+        }
+        UserFn->Body->Stmts.insert(UserFn->Body->Stmts.begin(),
+                                    Casts.begin(), Casts.end());
+      }
       TU->Functions.push_back(UserFn);
       // The LocalSM/LocalDiag go out of scope here; the AST nodes
       // they back stay alive in `AST` (the bump allocator on the
@@ -2632,6 +2721,10 @@ matlab::TranslationUnit *buildSubsystemTU(
       KeepDiag.push_back(std::move(LocalDiag));
     }
   }
+  // Outer subsystem function comes LAST so Sema visits inner helpers
+  // (nested subsystems + user matlab_fcn bodies) first — see the
+  // Tier-6 ordering note above.
+  TU->Functions.push_back(Fn);
 
   // Synthesise a driver script that calls the function with concrete
   // f64 args. That call site forces the static `-emit-*` pipeline to

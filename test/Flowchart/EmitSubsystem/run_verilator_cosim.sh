@@ -85,6 +85,13 @@ declare -a CASES=(
   "continuous_lowpass:continuous_lowpass:step_first:30:0.005"
   # Tier-6 — nested subsystem (outer + inner helper modules).
   "nested_pid_filter:outer_loop:step_first:30:0.005"
+  # Tier-6b — signal_matlab_fcn user-MATLAB body wrapped at args.
+  "matlab_fcn_sv:matlab_fcn_sv:step_first:20:0.005"
+  # Tier-6c — multirate (fast + slow Unit Delay, per-block phase
+  # counters). Same level-change stimulus as the software smoke
+  # test; cosim verifies the SV emit's HDL multirate gating matches
+  # the Python emit's software multirate gating bit-for-bit.
+  "multirate_filters:multirate_filters:step_first:30:0.001"
 )
 
 for spec in "${CASES[@]}"; do
