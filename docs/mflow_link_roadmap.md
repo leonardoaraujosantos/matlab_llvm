@@ -8,16 +8,31 @@ AST (`docs/flowchart_frontend.md`), mflowLink adds a second
 **signal-flow** dialect that lowers to a simulation IR and runs
 through a new ODE-driven runtime.
 
-**Status: Tiers A–H shipped (2026-05-14).** The `.mflow` loader
+**Status: Tiers A–H shipped + Items 1, 2, 4, 5 of the §17.5
+next-horizon priority list (2026-05-14).** The `.mflow` loader
 parses `settings.kind` and signal-flow attributes, `MflowLinkSim`
 runs continuous + multirate + zero-crossing simulations with
 step / step-back / block-stepping via the snapshot ring,
 `matlabc -simulate --sim-dap` boots a DAP server with time + signal
-breakpoints, and `matlabc -emit-mflowlink-cpp` produces a deployable
+breakpoints, `matlabc -emit-mflowlink-cpp` produces a deployable
 standalone simulator that matches `-simulate` byte-for-byte across
-every shipped demo. 12/12 flowchart-* CTest lanes pass. The shipped
-surface is summarised in §17.1; the gap to "real Simulink" — what
-this roadmap intentionally doesn't cover — is documented in §17.4.
+every shipped demo, vectors propagate through Mux / Demux /
+element-wise math with sample-time inheritance, an adaptive
+Dormand-Prince 5(4) integrator drives the continuous step under
+PI step-size control, the algebraic-loop solver iterates
+direct-feedthrough cycles to convergence, masked subsystems
+clone library flows with `${name}` parameter substitution, and
+the MATLAB Function block accepts a full
+`function y = f(u1, u2); ... end` body parsed via the existing
+matlab_llvm lexer + parser and walked by a scalar AST
+interpreter. 12/12 flowchart-* CTest lanes pass, 62 SimulateRun
+analytic checks green, 15 demos round-trip byte-identical through
+the standalone codegen lane.
+
+The shipped surface is summarised in §17.1, what we cut along the
+way in §17.2, the still-blocked carve-outs in §17.3, the bigger
+gap to "real Simulink" in §17.4, and the **updated** priority for
+the next chunk of work in §17.5.
 
 This doc is the concrete compiler-side plan; the **IDE-side**
 authoring surface is documented in `Matlab_llvm_ide/docs/
@@ -594,7 +609,9 @@ rediscovering each gap.
 ### 17.1 Where we are — the scorecard
 
 Every named tier in the roadmap landed, plus two of the six Tier-H+
-carve-outs:
+carve-outs and four of the five §17.5 next-horizon items:
+
+**Tiers A–H:**
 
 | Tier | Item | Status | CTest lane |
 |---|---|---|---|
@@ -607,27 +624,44 @@ carve-outs:
 | G | `-emit-mflowlink-cpp` standalone codegen | ✓ | `flowchart-emit-mflowlink-cpp-tests` |
 | H | 21 of 23 reserved-kind evaluators + `signal_goto`/`from` + `signal_matlab_fcn` | ✓ | (folded into the lanes above) |
 
-**12/12 flowchart-* CTest lanes, 46/46 SimulateRun analytic checks,
-every shipped demo round-trips byte-identical through the standalone
-codegen lane.**
+**§17.5 next-horizon items shipped:**
+
+| # | Item | Status | Commit |
+|---|---|---|---|
+| §17.5 #1 | Vector signals + sample-time inheritance | ✓ | `8cbdf7a` |
+| §17.5 #2 | Algebraic-loop solver + adaptive ODE (DOPRI5) | ✓ | `0091a2d` |
+| §17.5 #4 | Block masks + library blocks | ✓ | `a2a0d49` |
+| §17.5 #5 | Real MATLAB Function block (interpreter MVP) | ✓ | `7a69f96` |
+
+**12/12 flowchart-* CTest lanes, 62/62 SimulateRun analytic checks,
+15 demos round-trip byte-identical through the standalone codegen
+lane.**
+
+Demos that exercise the next-horizon work: `vector_signals.mflow`,
+`sample_time_inherit.mflow`, `algebraic_loop_solved.mflow`,
+`masked_library.mflow`, `matlab_function_block.mflow`.
 
 ### 17.2 Deferred deviations — places we cut a shortcut
 
 These are decisions inside shipped tiers where the implementation
 took a deliberately smaller path than the roadmap text. Each is
 internally documented in the source; collected here for visibility.
+Items marked ✓ closed since the original list was written.
 
-| Gap | Where I cut | What it would unlock |
-|---|---|---|
-| Adaptive ODE wrapping | §7.2 — used fixed-step RK4 inside `MflowLinkSim` instead of wrapping the `ode45` / `ode23` / `ode23s` builtins | Better accuracy on stiff / transient-heavy models; dense-output interpolation between major steps |
-| Algebraic-loop *solver* | §7.4 — currently rejects every loop at lowering with a sourced diagnostic | Direct-feedthrough cycles the user chose not to break (Newton / trust_region per `settings.solver.algebraicLoopMethod`, which is parsed but ignored) |
-| BDF stiff solver | §16 open — only `ode23s` Rosenbrock is wired elsewhere | `ode15s`-style implicit integration for stiff chemistry / electronics / thermal models |
-| Per-flow solver overrides | §16 open | Model-reference flows with different solver settings than the parent |
-| Cross-dialect composition | §9 follow-up | `-emit-cpp` linking `runtime_mflowlink` so a `.m` script can call into a baked signal-flow simulation |
-| `bouncing_ball.mflow` demo | §12 example carve-out | Integrator-with-external-reset-port (~50 LOC block-parameter extension) |
-| Discrete filter — FIR path | `signal_discrete_filter` ships the pole half of direct-form-II only | Pure-FIR designs need a `u`-history buffer (taps on the input side) |
-| Backward Euler / Trapezoidal | `signal_discrete_integrator` parses the method param but uses the Forward Euler single-sample approximation | True implicit / averaged discrete integration |
-| Vector signal type | Tier H carve-out justification | Most of the items in §17.4 below |
+| Gap | Status | Where I cut | What it unlocked / would unlock |
+|---|---|---|---|
+| Adaptive ODE wrapping | ✓ closed | §7.2 — was fixed-step RK4 | Dormand-Prince 5(4) with PI step-size control now runs when `settings.solver.type == "variable_step"` (Item 2 / `0091a2d`). Fixed-step RK4 kept as the `fixed_step` fallback |
+| Algebraic-loop *solver* | ✓ closed | §7.4 — was hard-error at lowering | Fixed-point Picard iteration each step, tolerance keyed off `settings.solver.relTol`; non-convergence queued via `consumeAlgebraicLoopFailures` (Item 2 / `0091a2d`). The `"off"` method preserves the hard-error path |
+| Vector signal type | ✓ closed | Tier H carve-out justification | Per-block `OutWidth` + `VecOut_`; element-wise broadcast for Gain / Sum / Product / Abs / Saturation; Mux concatenates, scope logs per-element columns; sample-time inheritance walks topo order (Item 1 / `8cbdf7a`) |
+| `signal_transfer_fcn` output scaling | ✓ closed | Pre-existing bug — output divided by `Lead` (leading denominator coefficient) when it shouldn't have. Masked by every demo with `den = "1, ..."` (Lead = 1) | Surfaced by the masked-library demo (τ = 0.1 → 10× output overshoot); fixed in the Item 3 chain. Same path covers `signal_zero_pole` |
+| BDF stiff solver | ○ open | §16 open — only `ode23s` Rosenbrock is wired elsewhere | `ode15s`-style implicit integration for stiff chemistry / electronics / thermal models |
+| Per-flow solver overrides | ○ open | §16 open | Model-reference flows with different solver settings than the parent |
+| Cross-dialect composition | ○ open | §9 follow-up | `-emit-cpp` linking `runtime_mflowlink` so a `.m` script can call into a baked signal-flow simulation |
+| `bouncing_ball.mflow` demo | ○ open | §12 example carve-out | Integrator-with-external-reset-port (~50 LOC block-parameter extension) |
+| Discrete filter — FIR path | ○ open | `signal_discrete_filter` ships the pole half of direct-form-II only | Pure-FIR designs need a `u`-history buffer (taps on the input side) |
+| Backward Euler / Trapezoidal | ○ open | `signal_discrete_integrator` parses the method param but uses the Forward Euler single-sample approximation | True implicit / averaged discrete integration |
+| MATLAB Function block — JIT | ○ open | Item 4 ships a scalar AST interpreter only; the full matlab_llvm MIR/MLIR/LLVM/JIT path would let users write loops, multi-return, indexing | Reuses existing matlabc infrastructure; ~1-2 wk follow-up |
+| Vector signals — true matrix shapes | ○ open | Item 1 supports 1-D vectors with scalar broadcast; full N-D matrices need per-port shape tracking | DSP-style frame processing, image / sensor models |
 
 ### 17.3 Blocked carve-outs — five Tier-H+ kinds still reserved
 
@@ -651,50 +685,52 @@ expect that aren't on the current roadmap at all.
 
 #### 17.4.1 Core simulation semantics
 
-| Missing | What Simulink does | Today in mflowLink |
+| Item | What Simulink does | Today in mflowLink |
 |---|---|---|
-| **Vector / matrix signals** | First-class N-D signals on every wire | Scalar `double` everywhere; `signal_mux/demux` are passthrough stubs |
-| **Bus signals (structs)** | Nested named-field signals; in-place type inference | Tier-H+ carve-out |
-| **Complex numbers** | Native complex-valued signals | Real `double` only |
-| **Fixed-point arithmetic** | Q-format with overflow handling, FxP-aware codegen | Floating-point only |
-| **Variable-size signals** | Array sizes change at runtime; max-size declared at design time | Fixed at construction |
-| **Sample-time inheritance** | `-1` inherits from upstream, `auto` picks, colour-coded on the canvas | Each block declares its own sample time |
-| **Algebraic-loop solver** | Newton / trust-region per `algebraicLoopMethod` | Currently rejects; solver promised in §7.4 |
-| **Stiff / implicit solvers** | `ode15s`, `ode23t`, `ode23tb`, fixed-step `ode4` / `ode5` / Heun | Fixed-step RK4 only |
-| **Frame-based processing** | Process N samples per tick (DSP convention) | One sample per tick |
-| **Variable-step solver** | True adaptive integration with error control | `solver.algorithm` is parsed but ignored — always fixed-step RK4 |
+| **Vector signals** *(partial)* | First-class N-D signals on every wire | ✓ 1-D vectors with scalar-broadcast through element-wise math + Mux concat; matrix shapes still TODO |
+| **Sample-time inheritance** | `-1` inherits from upstream, `auto` picks, colour-coded on the canvas | ✓ Fixpoint inheritance pass; downstream block adopts the fastest upstream period |
+| **Algebraic-loop solver** | Newton / trust-region per `algebraicLoopMethod` | ✓ Fixed-point Picard iteration each step under `relTol`; non-convergence surfaces as a paused DAP state |
+| **Variable-step solver** | True adaptive integration with error control | ✓ Dormand-Prince 5(4) with PI step-size control when `type == "variable_step"`; fixed-step RK4 fallback |
+| **Bus signals (structs)** | Nested named-field signals; in-place type inference | ○ Tier-H+ carve-out — needs composite signal type |
+| **Matrix-shaped signals** | First-class 2-D + N-D wires with per-dimension width | ○ Tier-I+ — extends the 1-D vector path |
+| **Complex numbers** | Native complex-valued signals | ○ Real `double` only |
+| **Fixed-point arithmetic** | Q-format with overflow handling, FxP-aware codegen | ○ Floating-point only |
+| **Variable-size signals** | Array sizes change at runtime; max-size declared at design time | ○ Fixed at construction |
+| **Stiff / implicit solvers** | `ode15s`, `ode23t`, `ode23tb`, fixed-step `ode4` / `ode5` / Heun | ○ Only DOPRI5 + RK4; BDF / Rosenbrock still TODO |
+| **Frame-based processing** | Process N samples per tick (DSP convention) | ○ One sample per tick |
 
 #### 17.4.2 Authoring features Simulink users expect
 
-| Missing | What Simulink does |
-|---|---|
-| **Block masks** | A user-visible block with hidden internals plus a custom icon and parameter dialog |
-| **Library blocks + linking** | A referenced library that updates across every model when its definition changes |
-| **Model reference** | `simulink.ModelReference` — one model called by another, with its own solver |
-| **Mask parameters** | Same library block reused with different per-instance params |
-| **Signal labels + propagation** | Hover, label propagation, multi-line scope plots |
-| **Annotation blocks** | Free-form text / images on the canvas |
-| **Goto tag visibility** | Local / scoped / global tag namespaces |
-| **Signal tracing** | Click a signal → trace it through the model |
-| **Model navigation** | Breadcrumbs, hyperlinks between subsystems |
-| **Subsystem masking** | Hide a subsystem's internals behind a mask UI |
+| Item | Status | What Simulink does |
+|---|---|---|
+| **Block masks** | ✓ | A user-visible block with hidden internals plus a custom icon and parameter dialog — schema side shipped (Item 3 / `a2a0d49`); IDE-side mask UI still upstream |
+| **Library blocks + linking** | ✓ | A referenced library that updates across every model — `kind: "library"` flow accepted; one library cloned into N masked instances each with their own `mask_params` |
+| **Mask parameters** | ✓ | Same library block reused with different per-instance params — `${name}` placeholder substitution per Item 3 |
+| **Goto tag visibility** | partial | `signal_goto` / `signal_from` shipped with global tag scope; local / scoped tag namespaces still TODO |
+| **Model reference** | ○ | `simulink.ModelReference` — one model called by another, with its own solver. Closest we have is library flows; per-model solver still TODO |
+| **Signal labels + propagation** | ○ | Hover, label propagation, multi-line scope plots |
+| **Annotation blocks** | ○ | Free-form text / images on the canvas |
+| **Signal tracing** | ○ | Click a signal → trace it through the model |
+| **Model navigation** | ○ | Breadcrumbs, hyperlinks between subsystems |
+| **Subsystem masking UI** | ○ | Custom icon / dialog hiding the subsystem internals (IDE-side prerequisite) |
 
-#### 17.4.3 Block kinds Simulink has that mflowLink doesn't reserve
+#### 17.4.3 Block kinds Simulink has that mflowLink doesn't fully cover
 
-| Category | Examples |
-|---|---|
-| **Stateflow** | Hierarchical state machines (entire separate tier, called out as non-goal in §2) |
-| **For-Each / Iterator subsystems** | Vector iteration with local state |
-| **Full MATLAB Function block** | Full MATLAB code, not just expressions like our `signal_matlab_fcn` |
-| **S-Function** | Compiled C / Fortran / MATLAB user blocks with full lifecycle hooks |
-| **Discrete filters (real DSP)** | Biquad, FIR Decimation / Interpolation, CIC, polyphase |
-| **Continuous filters** | Variable transport delay, integrator with limits + reset port |
-| **Logic & bit operations** | Bitwise AND / OR / XOR / shift, bit-packed counters |
-| **Lookup tables (advanced)** | N-D, prelookup + `Interpolation-Using-Prelookup` pattern |
-| **Sources** | Band-limited noise, repeating sequence, signal builder, from-file |
-| **Sinks** | XY graph, Display, To-File, Floating Scope |
-| **Variant subsystems / model variants** | Conditional model assembly at compile time |
-| **Discrete events** | Function-call subsystems with priority, event-driven scheduling |
+| Category | Status | What Simulink does |
+|---|---|---|
+| **MATLAB Function block** | ✓ MVP | Item 4 / `7a69f96` — `function y = f(u1, u2); ... end` parsed by the matlab_llvm lexer + parser, walked by a scalar AST interpreter. Supports assignment, if/else, math/trig builtins, scalar locals. Loops / multi-return / vectors / user-function calls still TODO (would route through the matlab_llvm MIR/MLIR/JIT pipeline) |
+| **Function-Call subsystems** | partial | Event-driven via `signal_triggered_subsystem` + `signal_function_call_generator` (Tier F). Discrete-event priority + multi-call-source orchestration still TODO |
+| **Stateflow** | ○ | Hierarchical state machines (separate roadmap, called out as non-goal in §2) |
+| **For-Each / Iterator subsystems** | ○ | Vector iteration with local state |
+| **S-Function** | ○ | Compiled C / Fortran / MATLAB user blocks with full lifecycle hooks (closest carve-out: `signal_custom`, blocked on plugin ABI) |
+| **Discrete filters (real DSP)** | ○ | Biquad, FIR Decimation / Interpolation, CIC, polyphase |
+| **Continuous filters with reset / limits** | ○ | Variable transport delay, integrator with limits + external reset port (also surfaces in the `bouncing_ball.mflow` carve-out) |
+| **Logic & bit operations** | ○ | Bitwise AND / OR / XOR / shift, bit-packed counters |
+| **Lookup tables (advanced)** | partial | `signal_lookup_1d` / `_2d` shipped; N-D + prelookup + `Interpolation-Using-Prelookup` pattern still TODO |
+| **Sources** | partial | Constant / Step / Sine / Pulse / Ramp / Chirp / Clock / Noise shipped. Repeating sequence, signal builder, from-file still TODO |
+| **Sinks** | partial | Scope / Display / To-Workspace / Terminator shipped. XY graph, To-File, Floating Scope still TODO |
+| **Variant subsystems / model variants** | ○ | Conditional model assembly at compile time |
+| **Discrete events** | ○ | Function-call subsystems with priority, event-driven scheduling |
 
 #### 17.4.4 Tooling Simulink has
 
@@ -726,47 +762,96 @@ expect that aren't on the current roadmap at all.
 
 ### 17.5 Suggested priority for the next horizon
 
-Ranked roughly by impact-per-effort. Each is its own multi-tier
-plan; numbers are rough estimates from the existing surface.
+The original list at this slot ranked 10 items; **four are
+shipped** (#1, #2, #4, #5 — see §17.1 for the commits). The
+remaining work, re-ranked by impact-per-effort given the new
+foundation:
 
-1. **Vector signals + sample-time inheritance** *(~2–3 weeks of IR
-   work)*. Unlocks `signal_mux` / `signal_demux` properly,
-   frame-based processing, and a huge swath of the missing
-   block library. The foundation for #2 below.
+#### Shipped already (kept for trace)
 
-2. **Algebraic-loop solver + adaptive ODE wrapping** *(~1 week)*.
-   Closes the §7.2 and §7.4 deviations. No new abstractions
-   needed; improves correctness on graphs we already accept.
+| Original # | Item | Commit |
+|---|---|---|
+| 1 | Vector signals + sample-time inheritance | `8cbdf7a` |
+| 2 | Algebraic-loop solver + adaptive ODE | `0091a2d` |
+| 4 | Block masks + library blocks | `a2a0d49` |
+| 5 | Real MATLAB Function block (interpreter MVP) | `7a69f96` |
 
-3. **Bus signals (struct-typed wires)** *(~1–2 weeks, depends on #1)*.
-   Closes `signal_bus_creator` / `signal_bus_selector`. Needs a
-   composite signal carrier in the IR plus per-port type checking.
+#### Remaining work — ranked
 
-4. **Block masks + library blocks** *(IDE-driven; matlabc side
-   ~1 week)*. The matlabc side gets new schema fields for mask
-   parameters; the heavier lift is in the IDE.
+1. **Bus signals (struct-typed wires)** *(~1–2 weeks)*. Closes the
+   `signal_bus_creator` / `signal_bus_selector` Tier-H+ carve-out
+   and the most-cited §17.4.1 sim-semantics gap. The per-block
+   `OutWidth` + `VecOut_` machinery from Item 1 gives us a
+   foundation; bus needs a *composite* signal carrier plus per-
+   port type checking. Cleanest design: a new `MflBusType` IR
+   record with named fields, edges carry the type reference,
+   creator/selector evaluators pack / project at runtime.
 
-5. **Full MATLAB Function block** *(~1–2 weeks)*. Replace the
-   expression evaluator with the actual matlab_llvm parser / JIT
-   pipeline so users can write `function y = f(u1, u2); ... end`.
-   Reuses existing matlabc infrastructure.
+2. **`bouncing_ball.mflow` + integrator-reset port** *(~50 LOC)*.
+   Cleanup that closes a roadmap §12 demo carve-out and
+   demonstrates the zero-crossing → state-reset pattern central
+   to physical / discrete-event simulation. New `reset` input
+   port on `signal_integrator`; on a rising edge of the reset
+   signal, replace the integrator's continuous state with its
+   `initialCondition` parameter at the start of the next major
+   step.
 
-6. **`bouncing_ball.mflow` + integrator-reset port** *(~50 LOC)*.
-   Cleanup that closes a roadmap §12 demo carve-out.
+3. **Implicit / BDF solver (ode15s-style)** *(~1 week)*. Now that
+   adaptive DOPRI5 is wired, adding an implicit BDF integrator is
+   self-contained. Unlocks stiff models (electronics with widely-
+   separated time constants, chemistry kinetics, thermal). Same
+   step-size-control infrastructure as DOPRI5; the inner Newton
+   step reuses the algebraic-loop solver's iteration shape.
 
-7. **Implicit / BDF solver (ode15s-style)** *(~1 week once #2
-   lands)*. Stiff models with widely-separated eigenvalues.
+4. **Backward Euler / Trapezoidal for `signal_discrete_integrator`**
+   *(~1 day)*. Small correctness fix: we parse the `method` param
+   but always use Forward Euler. Needs a sub-sample of the input
+   for Backward Euler / Trapezoidal — the scheduler already
+   exposes the previous tick's value via the existing
+   `Znext_` shadow buffer.
 
-8. **Stateflow** *(its own Tier I–N, multi-month)*. Hierarchical
-   FSMs are 50% of why engineering teams pick Simulink over
-   alternatives. Out of scope for the current `mflow_link_roadmap`;
-   would be a separate `stateflow_roadmap.md`.
+5. **Discrete filter FIR path** *(~1 day)*. `signal_discrete_filter`
+   ships the pole half of direct-form-II only. Add a `u`-history
+   buffer so pure-FIR designs work; the IIR path already uses a
+   `Z_`-style tap shift that generalises cleanly.
 
-9. **Simscape-style physical networks** *(order of magnitude more
-   work than the simulation engine itself)*. Non-goal per §2, but
-   the single biggest reason engineering teams pick Simulink.
+6. **Cross-dialect composition** *(~3–5 days)*. The last Tier-G
+   follow-up: teach `-emit-cpp` to embed `runtime_mflowlink` so a
+   control-flow `.m` script can invoke a baked signal-flow
+   simulation. Needs a call-site convention (a magic identifier
+   like `mflowlink_run("model.mflow")`) plus the link-time
+   inclusion of `MflowLinkSim`.
 
-10. **Real-Time / PIL / Embedded Coder** *(production-grade
+7. **Per-flow solver overrides** *(~3 days)*. Schema-side
+   `Flow.solver` field; lowering picks the nearest enclosing
+   solver per block. Mostly Loader changes plus a per-block
+   `SolverIndex` in `MflBlock`.
+
+8. **MATLAB Function block — JIT path** *(~1–2 weeks)*. Replace
+   the Item-4 scalar AST interpreter with the actual matlab_llvm
+   MIR/MLIR/LLVM/JIT pipeline so users can write loops,
+   multi-return, indexing, function calls. Reuses everything
+   matlabc already does for `.m` files — the heavy lift is the
+   ABI between the JIT'd function and `MflowLinkSim`.
+
+9. **Matrix-shaped signals** *(~2 weeks)*. Extend Item 1's
+   per-port width to per-port shape (rows × cols). Unlocks
+   image / sensor / DSP frame-based processing. Mostly
+   evaluator changes; the wiring machinery is already shape-aware
+   through `OutWidth`.
+
+10. **Stateflow** *(separate roadmap, multi-month)*. Hierarchical
+    FSMs are 50% of why engineering teams pick Simulink. Out of
+    scope for `mflow_link_roadmap.md`; would be a sibling
+    `stateflow_roadmap.md`.
+
+11. **Simscape-style physical networks** *(order of magnitude
+    more work than the simulation engine itself)*. Non-goal per
+    §2 but the single biggest reason engineering teams pick
+    Simulink. Modified nodal analysis, across-and-through
+    variables, multi-domain network solvers.
+
+12. **Real-Time / PIL / Embedded Coder** *(production-grade
     codegen)*. Builds on Tier G but adds timing constraints,
     target-specific optimisations, AUTOSAR, fixed-step real-time
     hooks. Adjacent to but separate from the simulation surface.
