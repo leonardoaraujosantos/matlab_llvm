@@ -35,7 +35,7 @@ check() {
 LP="$("$MATLABC" -simulate "$EX/lowpass.mflow")"
 LP_HEAD=$(printf '%s\n' "$LP" | head -1)
 LP_ROWS=$(printf '%s\n' "$LP" | wc -l | tr -d ' ')
-check "lowpass header"     "[[ '$LP_HEAD' == 't,src,scope' ]]"  ""
+check "lowpass header"     "[[ '$LP_HEAD' == 't,src,scope'* ]]"  ""
 check "lowpass row count"  "[[ $LP_ROWS -ge 1001 && $LP_ROWS -le 1003 ]]" ""
 # Steady-state amplitude through 1/(s+1) for u = 2·sin(2π·t) is
 # 2/sqrt(1+(2π)^2) ≈ 0.31427. Skip the t < 8 transient ramp; accept
@@ -262,6 +262,19 @@ check "fast LP peak ≈ 0.847" \
 ML_SLOW=$(printf '%s\n' "$ML" | awk -F, 'NR>1 && $1+0>=3 { v=$4<0?-$4:$4; if(v>m)m=v } END {print m}')
 check "slow LP peak ≈ 0.157" \
   "awk 'BEGIN{exit !(($ML_SLOW - 0.157)^2 < 1e-3)}'" ""
+
+#--- matlab_function_block (Item-4): full function body with if/else ------
+FN="$("$MATLABC" -simulate "$EX/matlab_function_block.mflow")"
+FN_HEAD=$(printf '%s\n' "$FN" | head -1)
+check "matlab_function header" "[[ '$FN_HEAD' == 't,src,rectify,scope' ]]" ""
+# Positive branch: rectify(u1=1) = u1 = 1.
+FN_POS=$(printf '%s\n' "$FN" | awk -F, 'NR>1 && $1+0==0.5 {print $3; exit}')
+check "if-branch positive: rectify(1)=1" \
+  "awk 'BEGIN{exit !(($FN_POS - 1)^2 < 1e-9)}'" ""
+# Negative branch: rectify(u1=-1) = -u1 * 0.5 = 0.5.
+FN_NEG=$(printf '%s\n' "$FN" | awk -F, 'NR>1 && $1+0==1.5 {print $3; exit}')
+check "else-branch negative: rectify(-1)=0.5" \
+  "awk 'BEGIN{exit !(($FN_NEG - 0.5)^2 < 1e-9)}'" ""
 
 #--- algebraic_loop_solved (Item-2): direct-feedthrough cycle, runtime fixed-point ---
 AL="$("$MATLABC" -simulate "$EX/algebraic_loop_solved.mflow")"

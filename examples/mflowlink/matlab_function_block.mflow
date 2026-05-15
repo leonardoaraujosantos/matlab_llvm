@@ -1,0 +1,49 @@
+{
+  "schema": "matforge.flowchart",
+  "version": "0.1.0",
+  "entry": "fn_demo",
+  "settings": {
+    "kind": "signal_flow",
+    "solver": {
+      "type": "variable_step",
+      "algorithm": "ode45",
+      "startTime": 0.0,
+      "stopTime": 4.0,
+      "maxStep": "0.01",
+      "zeroCrossing": true,
+      "algebraicLoopMethod": "trust_region"
+    },
+    "snapshot": { "enabled": true, "depth": 256, "fields": "states" }
+  },
+  "flows": [
+    {
+      "id": "flow_fn_demo",
+      "kind": "program",
+      "name": "fn_demo",
+      "signature": { "inputs": [], "outputs": [] },
+      "nodes": [
+        { "id": "src", "kind": "signal_sine",
+          "data": { "log_signal": true,
+                    "params": { "amplitude": 1.0, "bias": 0.0,
+                                "frequency": 3.1415927, "phase": 0.0 } },
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+        { "id": "rectify", "kind": "signal_matlab_fcn",
+          "data": { "log_signal": true,
+                    "params": {
+                      "function_body":
+                        "function y = rectify(u1)\n  if u1 >= 0\n    y = u1;\n  else\n    y = -u1 * 0.5;\n  end\nend\n"
+                    } },
+          "ports": { "in":  [{"id": "u1"}], "out": [{"id": "out"}] } },
+        { "id": "scope", "kind": "signal_scope",
+          "data": { "params": { "title": "matlab_function_block" } },
+          "ports": { "in": [{"id": "in"}], "out": [] } }
+      ],
+      "edges": [
+        { "id": "e1", "kind": "data",
+          "from": {"node": "src",     "port": "out"}, "to": {"node": "rectify", "port": "u1"} },
+        { "id": "e2", "kind": "data",
+          "from": {"node": "rectify", "port": "out"}, "to": {"node": "scope",   "port": "in"} }
+      ]
+    }
+  ]
+}

@@ -1044,16 +1044,32 @@ std::optional<MflowLinkModel> lowerSignalFlow(const FlowDoc &Doc,
     }
   }
 
-  // Tier-H carve-out — validate every `signal_matlab_fcn`'s
-  // `params.expression` parses cleanly. The user gets a sourced
-  // diagnostic at lower time; the runtime cache then trusts the
-  // parse will succeed.
+  // Tier-H / Item-4 — validate every `signal_matlab_fcn`'s body.
+  // Two acceptable shapes:
+  //   - `params.function_body` (Item 4): full `function y = f(...)`
+  //     — parsed by the matlab_llvm lexer / parser, walked by a
+  //     small AST interpreter at runtime.
+  //   - `params.expression`    (Tier H): a single expression in
+  //     u1..uN, t, pi, e, with math / trig builtins.
+  // `function_body` wins when both are present (the IDE may emit
+  // both to let users mix-and-match).
   for (auto &B : M.Blocks) {
     if (B.Kind != "signal_matlab_fcn") continue;
+    auto FB = B.Params.find("function_body");
+    if (FB != B.Params.end() && !FB->second.empty()) {
+      std::string Err = validateMatlabFunctionBody(FB->second);
+      if (!Err.empty()) {
+        Diag.error(B.Loc, "signal_matlab_fcn \"" + B.Id +
+                              "\": " + Err);
+        return std::nullopt;
+      }
+      continue;
+    }
     auto It = B.Params.find("expression");
     if (It == B.Params.end() || It->second.empty()) {
       Diag.error(B.Loc, "signal_matlab_fcn \"" + B.Id +
-                            "\" missing data.params.expression");
+                            "\" missing data.params.expression "
+                            "or data.params.function_body");
       return std::nullopt;
     }
     std::string Err = validateMatlabFcnExpression(It->second);

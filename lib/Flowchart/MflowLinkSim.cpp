@@ -1,5 +1,11 @@
 #include "matlab/Flowchart/MflowLinkSim.h"
 
+#include "matlab/AST/AST.h"
+#include "matlab/Basic/Diagnostic.h"
+#include "matlab/Basic/SourceManager.h"
+#include "matlab/Lex/Lexer.h"
+#include "matlab/Parse/Parser.h"
+
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -342,6 +348,17 @@ double evalMatlabFcn(const Node *N,
 
 } // namespace
 
+// Item-4 — forward declarations for the function-body parser +
+// interpreter. Bodies live further down in this file (after the
+// expression evaluator) but the constructor and evaluator branch
+// above use them.
+namespace {
+std::pair<std::unique_ptr<MflowLinkSim::MatlabFunctionState>, std::string>
+parseMatlabFunctionBody(const std::string &Source);
+double runMatlabFunction(const MflowLinkSim::MatlabFunctionState &S,
+                         const std::vector<double> &Inputs, double T);
+} // namespace
+
 double MflowLinkSim::paramD(const MflBlock &B, const char *Key, double Def) {
   auto It = B.Params.find(Key);
   if (It == B.Params.end()) return Def;
@@ -425,6 +442,7 @@ MflowLinkSim::MflowLinkSim(const MflowLinkModel &M) : M_(M) {
   Lookup2DCache_.assign(N, {});
   NoiseSeed_.assign(N, 0);
   MatlabFcnCache_.resize(N);
+  MatlabFnCache_.resize(N);
   auto expandPoly = [](const std::vector<double> &Roots) {
     // Product over `(s - r_k)` expanded to coefficient form, highest
     // power first. Empty roots ⇒ {1} (the "constant 1" polynomial).
@@ -514,6 +532,17 @@ MflowLinkSim::MflowLinkSim(const MflowLinkModel &M) : M_(M) {
         ExprParser P(*ES);
         MatlabFcnCache_[I] = P.parse(Err);
         (void)Err; // already reported at lowering
+      }
+      // Item-4 — alternative path: full MATLAB function body.
+      // Parsed via the matlab_llvm lexer + parser and walked by
+      // the AST interpreter in `runMatlabFunction`. Same lowering-
+      // time validation contract as the expression path.
+      auto *FB = paramS(B, "function_body");
+      if (FB && !FB->empty()) {
+        auto Pair = parseMatlabFunctionBody(*FB);
+        if (Pair.first) MatlabFnCache_[I] = std::move(Pair.first);
+        // Parse failure was already reported at lowering — leaving
+        // the cache empty makes the evaluator fall through to 0.
       }
     }
   }
@@ -1374,10 +1403,11 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
       // state on each sample tick.
       Out_[I] = Z_[DiscStateOffset_[I]];
     } else if (K == "signal_matlab_fcn") {
-      // Tier-H carve-out — pack every connected input port (`u1`,
-      // `u2`, …) into a flat vector ordered by port id, then walk
-      // the cached expression tree. Empty cache (parse failure)
-      // falls through to 0.
+      // Pack every connected input port (`u1`, `u2`, …) into a
+      // flat vector ordered by port id. Two evaluator paths:
+      //   - `params.function_body` (Item 4) → walk parsed AST.
+      //   - `params.expression`     (Tier-H) → walk expression tree.
+      // The function_body path wins when both are present.
       std::vector<std::pair<int, double>> Sorted;
       for (auto &P : Inputs_[I]) {
         if (P.DstPort.size() > 1 && P.DstPort[0] == 'u') {
@@ -1393,7 +1423,11 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
       std::vector<double> U;
       U.reserve(Sorted.size());
       for (auto &PR : Sorted) U.push_back(PR.second);
-      Out_[I] = evalMatlabFcn(MatlabFcnCache_[I].get(), U, T);
+      if (MatlabFnCache_[I]) {
+        Out_[I] = runMatlabFunction(*MatlabFnCache_[I], U, T);
+      } else {
+        Out_[I] = evalMatlabFcn(MatlabFcnCache_[I].get(), U, T);
+      }
     } else {
       // Loader-level reserved kinds are rejected at lowering, so
       // anything reaching here is an evaluator gap — treat as
@@ -2108,6 +2142,270 @@ std::string validateMatlabFcnExpression(const std::string &Expr) {
   auto Tree = P.parse(Err);
   if (Tree) return std::string{};
   return Err.empty() ? std::string("invalid expression") : Err;
+}
+
+//===----------------------------------------------------------------------===//
+// Item-4 — Real MATLAB Function block.
+//
+// `params.function_body` carries a full `function y = f(u1, u2, ...);
+// ... end` definition that we parse via the existing matlab_llvm
+// lexer + parser, then walk with a small scalar AST interpreter at
+// runtime. Compared to the (already-shipped) `params.expression`
+// path, this supports multi-statement bodies with assignments and
+// `if`/`else` control flow.
+//
+// Supported AST node subset (anything else → sourced diagnostic
+// at lowering time):
+//   - IntegerLiteral, FPLiteral, NameExpr
+//   - BinaryOpExpr: + - * / ^ .* ./ .^ == ~= < <= > >= && || & |
+//   - UnaryOpExpr: + - ~
+//   - CallOrIndex (treated as a builtin math call — no user calls)
+//   - AssignStmt (single LHS NameExpr only — no multi-return,
+//     no indexing)
+//   - ExprStmt
+//   - IfStmt with elseifs / else
+//   - Block, ReturnStmt
+//
+// Vectors, matrices, cells, strings, structs, while, for, switch,
+// try, recursion, multi-return — all out of scope for this MVP.
+//===----------------------------------------------------------------------===//
+
+struct MflowLinkSim::MatlabFunctionState {
+  std::unique_ptr<matlab::SourceManager> SM;
+  std::unique_ptr<matlab::DiagnosticEngine> Diag;
+  std::unique_ptr<matlab::ASTContext> AST;
+  matlab::Function *Fn = nullptr;
+  std::vector<std::string> InNames;
+  std::string OutName;
+};
+
+MflowLinkSim::~MflowLinkSim() = default;
+
+namespace {
+
+// Parse a `params.function_body` blob into a fresh state. Returns
+// `(state, error_message)`. On any error the state is left empty
+// and the message is non-empty.
+std::pair<std::unique_ptr<MflowLinkSim::MatlabFunctionState>, std::string>
+parseMatlabFunctionBody(const std::string &Source) {
+  using namespace matlab;
+  auto S = std::make_unique<MflowLinkSim::MatlabFunctionState>();
+  S->SM = std::make_unique<SourceManager>();
+  S->Diag = std::make_unique<DiagnosticEngine>(*S->SM);
+  S->AST = std::make_unique<ASTContext>();
+  FileID F = S->SM->addBuffer("<signal_matlab_fcn>", Source);
+  Lexer L(*S->SM, F, *S->Diag);
+  auto Tokens = L.tokenize();
+  if (S->Diag->hasErrors())
+    return {nullptr, "lexer error in function_body"};
+  Parser P(std::move(Tokens), *S->AST, *S->Diag);
+  TranslationUnit *TU = P.parseFile();
+  if (!TU || S->Diag->hasErrors())
+    return {nullptr, "parse error in function_body"};
+  if (TU->Functions.size() != 1)
+    return {nullptr, "function_body must contain exactly one function"};
+  S->Fn = TU->Functions.front();
+  if (S->Fn->Outputs.size() != 1)
+    return {nullptr,
+            "function_body must declare exactly one output variable"};
+  S->OutName = std::string(S->Fn->Outputs[0]);
+  S->InNames.reserve(S->Fn->Inputs.size());
+  for (auto &In : S->Fn->Inputs) S->InNames.emplace_back(In);
+  return {std::move(S), std::string{}};
+}
+
+//===-----------------------------------------------------------------===//
+// Scalar AST interpreter for `signal_matlab_fcn` / function_body.
+//===-----------------------------------------------------------------===//
+
+struct InterpEnv {
+  std::map<std::string, double> Vars;
+};
+struct ReturnSignal {};
+
+double interpExpr(const matlab::Expr *E, InterpEnv &Env);
+
+double callBuiltinScalar(const std::string &Name,
+                         const std::vector<double> &Args) {
+  auto arg = [&](size_t I) { return I < Args.size() ? Args[I] : 0.0; };
+  if (Name == "sin")    return std::sin(arg(0));
+  if (Name == "cos")    return std::cos(arg(0));
+  if (Name == "tan")    return std::tan(arg(0));
+  if (Name == "asin")   return std::asin(arg(0));
+  if (Name == "acos")   return std::acos(arg(0));
+  if (Name == "atan")   return std::atan(arg(0));
+  if (Name == "atan2")  return std::atan2(arg(0), arg(1));
+  if (Name == "sinh")   return std::sinh(arg(0));
+  if (Name == "cosh")   return std::cosh(arg(0));
+  if (Name == "tanh")   return std::tanh(arg(0));
+  if (Name == "exp")    return std::exp(arg(0));
+  if (Name == "log")    return std::log(arg(0));
+  if (Name == "log10")  return std::log10(arg(0));
+  if (Name == "log2")   return std::log2(arg(0));
+  if (Name == "sqrt")   return std::sqrt(arg(0));
+  if (Name == "abs")    return std::fabs(arg(0));
+  if (Name == "sign") { double V = arg(0); return (V > 0) - (V < 0); }
+  if (Name == "floor")  return std::floor(arg(0));
+  if (Name == "ceil")   return std::ceil(arg(0));
+  if (Name == "round")  return std::round(arg(0));
+  if (Name == "min")    return std::fmin(arg(0), arg(1));
+  if (Name == "max")    return std::fmax(arg(0), arg(1));
+  if (Name == "mod")    return std::fmod(arg(0), arg(1));
+  if (Name == "rem")    return arg(0) - arg(1) * std::trunc(arg(0) / arg(1));
+  if (Name == "pow")    return std::pow(arg(0), arg(1));
+  if (Name == "hypot")  return std::hypot(arg(0), arg(1));
+  if (Name == "square") { double V = arg(0); return V * V; }
+  return 0.0;
+}
+
+double interpExpr(const matlab::Expr *E, InterpEnv &Env) {
+  if (!E) return 0.0;
+  // Local alias to dodge the `NodeKind` already in scope from the
+  // expression-evaluator namespace block (typedef'd to
+  // `MatlabFcnTree::K`). Fully qualifying disambiguates.
+  using MNK = matlab::NodeKind;
+  switch (E->Kind) {
+  case MNK::IntegerLiteral: {
+    auto *IL = static_cast<const matlab::IntegerLiteral *>(E);
+    try { return std::stod(std::string(IL->Text)); } catch (...) { return 0.0; }
+  }
+  case MNK::FPLiteral: {
+    auto *FL = static_cast<const matlab::FPLiteral *>(E);
+    try { return std::stod(std::string(FL->Text)); } catch (...) { return 0.0; }
+  }
+  case MNK::NameExpr: {
+    auto *NE = static_cast<const matlab::NameExpr *>(E);
+    std::string Name(NE->Name);
+    if (Name == "pi") return M_PI;
+    if (Name == "e")  return M_E;
+    auto It = Env.Vars.find(Name);
+    return It == Env.Vars.end() ? 0.0 : It->second;
+  }
+  case MNK::UnaryOp: {
+    auto *U = static_cast<const matlab::UnaryOpExpr *>(E);
+    double V = interpExpr(U->Operand, Env);
+    switch (U->Op) {
+    case matlab::UnOp::Plus:  return V;
+    case matlab::UnOp::Minus: return -V;
+    case matlab::UnOp::Not:   return V == 0.0 ? 1.0 : 0.0;
+    }
+    return V;
+  }
+  case MNK::BinaryOp: {
+    auto *B = static_cast<const matlab::BinaryOpExpr *>(E);
+    double L = interpExpr(B->LHS, Env);
+    double R = interpExpr(B->RHS, Env);
+    using MO = matlab::BinOp;
+    switch (B->Op) {
+    case MO::Add: return L + R;
+    case MO::Sub: return L - R;
+    case MO::Mul: case MO::ElemMul: return L * R;
+    case MO::Div: case MO::ElemDiv: return L / R;
+    case MO::LeftDiv: case MO::ElemLeftDiv: return R / L;
+    case MO::Pow: case MO::ElemPow: return std::pow(L, R);
+    case MO::Eq: return L == R ? 1.0 : 0.0;
+    case MO::Ne: return L != R ? 1.0 : 0.0;
+    case MO::Lt: return L <  R ? 1.0 : 0.0;
+    case MO::Le: return L <= R ? 1.0 : 0.0;
+    case MO::Gt: return L >  R ? 1.0 : 0.0;
+    case MO::Ge: return L >= R ? 1.0 : 0.0;
+    case MO::And: case MO::ShortAnd:
+      return (L != 0.0 && R != 0.0) ? 1.0 : 0.0;
+    case MO::Or: case MO::ShortOr:
+      return (L != 0.0 || R != 0.0) ? 1.0 : 0.0;
+    }
+    return 0.0;
+  }
+  case MNK::CallOrIndex: {
+    auto *CI = static_cast<const matlab::CallOrIndex *>(E);
+    if (!CI->Callee || CI->Callee->Kind != MNK::NameExpr) return 0.0;
+    auto *Callee = static_cast<const matlab::NameExpr *>(CI->Callee);
+    std::vector<double> Args;
+    Args.reserve(CI->Args.size());
+    for (auto *A : CI->Args) Args.push_back(interpExpr(A, Env));
+    return callBuiltinScalar(std::string(Callee->Name), Args);
+  }
+  default:
+    return 0.0;
+  }
+}
+
+void interpStmt(const matlab::Stmt *S, InterpEnv &Env);
+
+void interpBlock(const matlab::Block *B, InterpEnv &Env) {
+  if (!B) return;
+  for (auto *S : B->Stmts) interpStmt(S, Env);
+}
+
+void interpStmt(const matlab::Stmt *S, InterpEnv &Env) {
+  using MNK = matlab::NodeKind;
+  if (!S) return;
+  switch (S->Kind) {
+  case MNK::ExprStmt: {
+    auto *ES = static_cast<const matlab::ExprStmt *>(S);
+    interpExpr(ES->E, Env);
+    return;
+  }
+  case MNK::AssignStmt: {
+    auto *AS = static_cast<const matlab::AssignStmt *>(S);
+    if (AS->LHS.size() != 1) return;
+    auto *Lhs = AS->LHS.front();
+    if (!Lhs || Lhs->Kind != MNK::NameExpr) return;
+    auto *NE = static_cast<const matlab::NameExpr *>(Lhs);
+    Env.Vars[std::string(NE->Name)] = interpExpr(AS->RHS, Env);
+    return;
+  }
+  case MNK::IfStmt: {
+    auto *I = static_cast<const matlab::IfStmt *>(S);
+    if (interpExpr(I->Cond, Env) != 0.0) {
+      interpBlock(I->Then, Env);
+      return;
+    }
+    for (auto &EI : I->Elseifs) {
+      if (interpExpr(EI.Cond, Env) != 0.0) {
+        interpBlock(EI.Body, Env);
+        return;
+      }
+    }
+    if (I->Else) interpBlock(I->Else, Env);
+    return;
+  }
+  case MNK::Block:
+    interpBlock(static_cast<const matlab::Block *>(S), Env);
+    return;
+  case MNK::ReturnStmt:
+    throw ReturnSignal{};
+  default:
+    return;
+  }
+}
+
+double runMatlabFunction(const MflowLinkSim::MatlabFunctionState &S,
+                         const std::vector<double> &Inputs,
+                         double T) {
+  InterpEnv Env;
+  Env.Vars["t"] = T;
+  for (size_t I = 0; I < S.InNames.size(); ++I)
+    Env.Vars[S.InNames[I]] = I < Inputs.size() ? Inputs[I] : 0.0;
+  // The shorthand `u` alias (matches our expression-evaluator
+  // semantics — first input is `u`).
+  if (!Inputs.empty()) Env.Vars["u"] = Inputs.front();
+  try {
+    interpBlock(S.Fn->Body, Env);
+  } catch (const ReturnSignal &) {
+    // Normal `return` exit.
+  }
+  auto It = Env.Vars.find(S.OutName);
+  return It == Env.Vars.end() ? 0.0 : It->second;
+}
+
+} // namespace
+
+std::string validateMatlabFunctionBody(const std::string &Source) {
+  auto Pair = parseMatlabFunctionBody(Source);
+  if (Pair.first) return std::string{};
+  return Pair.second.empty() ? std::string("invalid function_body")
+                              : Pair.second;
 }
 
 } // namespace matlab::flowchart

@@ -39,6 +39,13 @@ namespace flowchart {
 // the runtime cache will succeed too.
 std::string validateMatlabFcnExpression(const std::string &Expr);
 
+// Item-4 — parse-only validation of a `signal_matlab_fcn` block's
+// `params.function_body`. Returns empty on success, or a human-
+// readable error otherwise. Same contract as
+// `validateMatlabFcnExpression`: the lowering pass invokes this so
+// syntax errors surface with a sourced diagnostic and the block id.
+std::string validateMatlabFunctionBody(const std::string &Source);
+
 // Parsed expression tree for a `signal_matlab_fcn` block. Public so
 // the runtime cache (`MflowLinkSim::MatlabFcnCache_`) can hold
 // `unique_ptr<MatlabFcnTree>` without dragging in an opaque-type
@@ -55,6 +62,12 @@ struct MatlabFcnTree {
 
 class MflowLinkSim {
 public:
+  // Forward declaration of the parsed-function state struct. Defined
+  // in MflowLinkSim.cpp — held opaquely here so callers outside the
+  // .cpp don't need to drag in the matlab AST / Lexer / Parser
+  // headers.
+  struct MatlabFunctionState;
+
   // One per-step recorded sample of a logged signal (`data.log_signal:
   // true`, or a Scope / To Workspace block). Streamed to CSV by the
   // `-simulate` driver, and — once Tier D lands — over the DAP
@@ -65,6 +78,7 @@ public:
   };
 
   explicit MflowLinkSim(const MflowLinkModel &M);
+  ~MflowLinkSim();
 
   // (Re)initialise the state vector from per-block initial conditions,
   // clear the log buffers, set t = startTime.
@@ -233,10 +247,17 @@ private:
   //   on `reset()` from `params.seed`.
   std::vector<uint64_t> NoiseSeed_;
   // - `MatlabFcnCache_[I]` holds the parsed expression tree for a
-  //   `signal_matlab_fcn` block. Empty `unique_ptr` means "not a
-  //   matlab_fcn block" or "parse failed and the block was rejected
-  //   at lowering".
+  //   `signal_matlab_fcn` block with `params.expression`. Empty
+  //   `unique_ptr` means "not a matlab_fcn block" or "the block
+  //   uses the function_body path instead" or "parse failed".
   std::vector<std::unique_ptr<MatlabFcnTree>> MatlabFcnCache_;
+  // - `MatlabFnCache_[I]` holds the parsed-function state for a
+  //   `signal_matlab_fcn` block that uses `params.function_body`
+  //   instead of `params.expression`. Item-4 MVP walks the parsed
+  //   AST with a small scalar interpreter — full JIT integration
+  //   is a follow-up. `MatlabFunctionState` is forward-declared
+  //   publicly above; defined in the .cpp.
+  std::vector<std::unique_ptr<MatlabFunctionState>> MatlabFnCache_;
 
   double T_ = 0.0;
   size_t MajorSteps_ = 0;

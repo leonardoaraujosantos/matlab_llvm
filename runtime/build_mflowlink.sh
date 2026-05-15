@@ -26,11 +26,15 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 INC="$ROOT/include"
 LIB="$ROOT/build"
 
-if [[ ! -f "$LIB/libMatlabFlowchart.a" || ! -f "$LIB/libMatlabBasic.a" ]]; then
-  echo "error: matlab_llvm build artefacts not found under $LIB" >&2
-  echo "       run \`ninja -C $LIB\` first (or pass MATLAB_LLVM_BUILD=...)" >&2
-  exit 1
-fi
+REQUIRED=(libMatlabFlowchart.a libMatlabParse.a libMatlabLex.a
+          libMatlabAST.a libMatlabBasic.a)
+for L in "${REQUIRED[@]}"; do
+  if [[ ! -f "$LIB/$L" ]]; then
+    echo "error: matlab_llvm build artefact $LIB/$L not found" >&2
+    echo "       run \`ninja -C $LIB\` first" >&2
+    exit 1
+  fi
+done
 
 CXX="${CXX:-$(command -v clang++ || command -v c++)}"
 if [[ -z "$CXX" ]]; then
@@ -38,8 +42,15 @@ if [[ -z "$CXX" ]]; then
   exit 1
 fi
 
+# Order matters for static linking: Flowchart depends on Parse/Lex/AST/
+# Basic; symbol resolution walks left-to-right. The repeat of
+# Flowchart + Parse at the end picks up the small cycle the
+# signal_matlab_fcn function-body path introduces (the parser
+# instantiates a node whose dtor lives in Flowchart's AST glue).
 "$CXX" -std=c++17 -O2 -I "$INC" "$SRC" \
-       "$LIB/libMatlabFlowchart.a" "$LIB/libMatlabBasic.a" \
+       "$LIB/libMatlabFlowchart.a" "$LIB/libMatlabParse.a" \
+       "$LIB/libMatlabLex.a" "$LIB/libMatlabAST.a" \
+       "$LIB/libMatlabBasic.a" \
        -o "$OUT"
 
 echo "built: $OUT"
