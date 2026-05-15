@@ -646,20 +646,32 @@ targets (Python / C / C++ / TypeScript):
   (1/(s+1)) followed by gain 2. Step response within Forward-
   Euler tolerance of analytic `2·(1−e⁻ᵗ)`.
 
+Tier-6a — HDL update (✓ shipped 2026-05-15):
+- **Cross-function fi-type propagation in Sema** —
+  `TypeInference::visitCallOrIndex` for `BindingKind::Function`
+  used to return `Any` (with a TODO).  It now returns the
+  callee's `OutputRefs[0]->InferredType` when the callee has
+  been visited earlier in the TU walk. The Embedded Coder lane
+  orders TU entries inner-first (helpers before the outer
+  subsystem) so this fires naturally for nested subsystems;
+  ordinary user `.m` files with forward references still fall
+  back to `Any`.
+- **HDL nested subsystems work.** The previous HDL-mode
+  sourced error gate is removed. `outer_loop` SV emit
+  instantiates `lp_filter u_lp_filter_0 (.clk(clk), .rst_n(rst_n),
+  .u1(u1), .reset(reset), .y1(u_lp_filter_0_y1));` and uses
+  the captured output downstream. Verilator lint + behavioural
+  cosim + yosys generic synth all pass on the nested fixture.
+
 Tier-6a open carve-outs (not yet shipped):
-- **Nested subsystems for HDL emit** — Sema's cross-function
-  fi-type inference doesn't propagate the inner's return-type
-  spec into the outer's expression tree, so the outport / fiMul
-  wraps route the call result through `matlab_fi_quantize_s`
-  (the non-synthesisable constructor cast). Today's
-  workaround: surfaces a sourced error directing the user to
-  flatten the nested subsystem manually until cross-function
-  fi-type propagation lands.
 - **Multi-instantiation of stateful inner** — HDL mode persists
   state inside the inner's function via `persistent` slots,
   shared across all call sites. Each instantiation should have
-  its own state space. Software mode already works (state args
-  are per-instantiation).
+  its own state space (Verilog `module foo u_foo_0(...);
+  module foo u_foo_1(...);` already gives separate registers per
+  instantiation; the matlab.persistent → SV reg lowering needs
+  the matching per-instance namespacing). Software mode already
+  works (state args are per-instantiation).
 
 Tier-6b (not yet shipped):
 - `signal_matlab_fcn` body re-runs through the JIT-class

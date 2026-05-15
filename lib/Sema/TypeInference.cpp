@@ -1566,7 +1566,20 @@ const Type *TypeInference::visitCallOrIndex(CallOrIndex &C, Env &Env) {
       if (N->Ref && N->Ref->Kind == BindingKind::Function && N->Ref->FuncDef) {
         // Visit arguments for side-effect annotation.
         for (Expr *A : C.Args) if (A) visit(*A, Env);
-        // Without cross-function inference, return Any. TODO: infer per-call.
+        // Tier-6 — cross-function return-type propagation. When the
+        // callee has been visited earlier in the TU walk (e.g. an
+        // inner subsystem helper that was emitted before its
+        // outer-subsystem caller), its `OutputRefs[0]->Ty` carries
+        // the type Sema inferred for the first output. Use it as
+        // the call result. The Embedded Coder lane orders TU
+        // entries inner-first so this fires naturally for nested
+        // subsystems; ordinary user `.m` files where outers
+        // reference inners declared later in the same file still
+        // fall back to `Any` (matches the prior behaviour).
+        Function *F = N->Ref->FuncDef;
+        if (!F->OutputRefs.empty() && F->OutputRefs[0]) {
+          if (auto *FTy = F->OutputRefs[0]->InferredType) return FTy;
+        }
         return TC.any();
       }
     }

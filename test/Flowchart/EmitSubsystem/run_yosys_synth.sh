@@ -61,6 +61,8 @@ declare -a CASES=(
   "zp_plant:zp_plant:500"
   "ss_plant:ss_plant:500"
   "mimo_state_space:mimo_state_space:200"
+  # Tier-6 — nested subsystem (outer instantiates lp_filter submodule).
+  "nested_pid_filter:outer_loop:300"
 )
 
 for spec in "${CASES[@]}"; do

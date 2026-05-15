@@ -50,6 +50,7 @@ declare -a SV_FIXTURES=(
   "transport_delay:transport_delay"
   "ss_plant:ss_plant"
   "mimo_state_space:mimo_state_space"
+  "nested_pid_filter:outer_loop"
 )
 
 for spec in "${SV_FIXTURES[@]}"; do

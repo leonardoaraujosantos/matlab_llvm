@@ -1286,25 +1286,9 @@ matlab::Function *lowerSubsystemImpl(
   // call sites. Recursively emits each unique flow_id exactly once
   // into Ctx.Pending; subsequent references reuse the cached
   // function. NestedMeta indexes by the outer block's id.
-  //
-  // HDL mode carve-out: cross-function fi-type inference doesn't
-  // propagate the inner's return type into the outer's expression
-  // tree, so outport / fiMul wraps end up routing the call result
-  // through `matlab_fi_quantize_s` (the non-synthesisable
-  // constructor cast). Reject nested subsystems for HDL targets
-  // until that propagation lands.
   std::map<std::string, SubsystemMeta> NestedMeta;
   for (auto *N : Internal) {
     if (N->Kind != "signal_subsystem") continue;
-    if (Opts.StateAsPersistent) {
-      Diag.error(N->Loc,
-                 "signal_subsystem \"" + N->Id +
-                     "\": nested subsystems aren't supported in HDL "
-                     "emit yet (Tier-6 carve-out — software targets "
-                     "work today, HDL needs cross-function fi-type "
-                     "propagation in Sema)");
-      return nullptr;
-    }
     const std::string *FlowId = N->getData("flow_id");
     if (!FlowId || FlowId->empty()) {
       Diag.error(N->Loc,
@@ -2465,13 +2449,16 @@ matlab::TranslationUnit *buildSubsystemTU(
   if (!Fn) return nullptr;
 
   auto *TU = AST.make<TranslationUnit>();
-  TU->Functions.push_back(Fn);
-  // Inner helpers — appended after the outer entry. Sema resolves
-  // calls by name regardless of order; downstream emit lanes that
-  // care about declaration order get the order from `Ctx.Pending`.
+  // Tier-6 — inner helpers are pushed FIRST so Sema's
+  // TypeInference visits them before the outer subsystem.  That
+  // lets the outer's `visitCallOrIndex` pull a typed return value
+  // from the inner function's already-typed `OutputRefs` instead
+  // of returning `Any` (which would route the call result through
+  // the non-synthesisable f64 quantize cast in HDL mode).
   for (auto *Helper : Ctx.Pending) {
     TU->Functions.push_back(Helper);
   }
+  TU->Functions.push_back(Fn);
 
   // Tier 5 — collect every `signal_matlab_fcn` block in the subsystem
   // and add its `params.function_body` as a sibling local function in

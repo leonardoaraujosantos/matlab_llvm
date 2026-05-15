@@ -83,6 +83,8 @@ declare -a CASES=(
   "zp_plant:zp_plant:step_first:30:0.005"
   "ss_plant:ss_plant:step_first:30:0.005"
   "continuous_lowpass:continuous_lowpass:step_first:30:0.005"
+  # Tier-6 — nested subsystem (outer + inner helper modules).
+  "nested_pid_filter:outer_loop:step_first:30:0.005"
 )
 
 for spec in "${CASES[@]}"; do
