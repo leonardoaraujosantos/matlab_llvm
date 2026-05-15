@@ -1,11 +1,13 @@
-MflowLinkModel entry=fn_demo blocks=3 edges=2
+MflowLinkModel entry=fn_demo blocks=4 edges=3
   solver type=variable_step algorithm=ode45 startTime=0 stopTime=4
   states continuous=0 discrete=0
   exec-order:
-    0 src kind=signal_sine sample=fixed_in_minor log
-    1 rectify kind=signal_matlab_fcn sample=fixed_in_minor log
-    2 scope kind=signal_scope sample=fixed_in_minor
+    0 src_a kind=signal_sine sample=fixed_in_minor log
+    1 src_b kind=signal_sine sample=fixed_in_minor log
+    2 mixer kind=signal_matlab_fcn sample=fixed_in_minor log
+    3 scope kind=signal_scope sample=fixed_in_minor
   zero-crossings: none
   edges:
-    e1 src:out -> rectify:u1
-    e2 rectify:out -> scope:in
+    e1 src_a:out -> mixer:u1
+    e2 src_b:out -> mixer:u2
+    e3 mixer:out -> scope:in

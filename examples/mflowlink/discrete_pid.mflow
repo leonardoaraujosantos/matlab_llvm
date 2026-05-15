@@ -1,5 +1,5 @@
 {
-  "entry" : "pid_tracking",
+  "entry" : "discrete_pid",
   "flows" : [
     {
       "edges" : [
@@ -32,7 +32,19 @@
             "node" : "err",
             "port" : "out"
           },
-          "id" : "e_err_p",
+          "id" : "e_sample",
+          "kind" : "data",
+          "to" : {
+            "node" : "sampler",
+            "port" : "in"
+          }
+        },
+        {
+          "from" : {
+            "node" : "sampler",
+            "port" : "out"
+          },
+          "id" : "e_to_kp",
           "kind" : "data",
           "to" : {
             "node" : "kp",
@@ -41,10 +53,10 @@
         },
         {
           "from" : {
-            "node" : "err",
+            "node" : "sampler",
             "port" : "out"
           },
-          "id" : "e_err_i",
+          "id" : "e_to_ki",
           "kind" : "data",
           "to" : {
             "node" : "ki",
@@ -56,10 +68,10 @@
             "node" : "ki",
             "port" : "out"
           },
-          "id" : "e_ki",
+          "id" : "e_i_in",
           "kind" : "data",
           "to" : {
-            "node" : "integ",
+            "node" : "i_acc",
             "port" : "in"
           }
         },
@@ -68,31 +80,43 @@
             "node" : "kp",
             "port" : "out"
           },
-          "id" : "e_p",
+          "id" : "e_p_term",
           "kind" : "data",
           "to" : {
-            "node" : "usum",
+            "node" : "u_sampled",
             "port" : "in1"
           }
         },
         {
           "from" : {
-            "node" : "integ",
+            "node" : "i_acc",
             "port" : "out"
           },
-          "id" : "e_i",
+          "id" : "e_i_term",
           "kind" : "data",
           "to" : {
-            "node" : "usum",
+            "node" : "u_sampled",
             "port" : "in2"
           }
         },
         {
           "from" : {
-            "node" : "usum",
+            "node" : "u_sampled",
             "port" : "out"
           },
-          "id" : "e_u",
+          "id" : "e_u_hold",
+          "kind" : "data",
+          "to" : {
+            "node" : "u_hold",
+            "port" : "in"
+          }
+        },
+        {
+          "from" : {
+            "node" : "u_hold",
+            "port" : "out"
+          },
+          "id" : "e_to_plant",
           "kind" : "data",
           "to" : {
             "node" : "plant",
@@ -104,17 +128,17 @@
             "node" : "plant",
             "port" : "out"
           },
-          "id" : "e_out",
+          "id" : "e_scope",
           "kind" : "data",
           "to" : {
-            "node" : "out_scope",
+            "node" : "scope",
             "port" : "in"
           }
         }
       ],
-      "id" : "flow_pid",
+      "id" : "flow_dpid",
       "kind" : "program",
-      "name" : "pid_tracking",
+      "name" : "discrete_pid",
       "nodes" : [
         {
           "data" : {
@@ -178,12 +202,13 @@
         },
         {
           "data" : {
+            "log_signal" : true,
             "params" : {
-              "gain" : 2.5
+              "sampleTime" : 0.05
             }
           },
-          "id" : "kp",
-          "kind" : "signal_gain",
+          "id" : "sampler",
+          "kind" : "signal_zoh",
           "label" : "",
           "ports" : {
             "in" : [
@@ -207,10 +232,11 @@
         {
           "data" : {
             "params" : {
-              "gain" : 1.5
-            }
+              "gain" : 1.6
+            },
+            "sample_time" : "inherited"
           },
-          "id" : "ki",
+          "id" : "kp",
           "kind" : "signal_gain",
           "label" : "",
           "ports" : {
@@ -227,19 +253,20 @@
           },
           "ui" : {
             "position" : {
-              "x" : 480,
-              "y" : 392
+              "x" : 680,
+              "y" : 172
             }
           }
         },
         {
           "data" : {
             "params" : {
-              "initialCondition" : 0
-            }
+              "gain" : 0.8
+            },
+            "sample_time" : "inherited"
           },
-          "id" : "integ",
-          "kind" : "signal_integrator",
+          "id" : "ki",
+          "kind" : "signal_gain",
           "label" : "",
           "ports" : {
             "in" : [
@@ -262,11 +289,44 @@
         },
         {
           "data" : {
+            "log_signal" : true,
             "params" : {
-              "signs" : "++"
+              "initialCondition" : 0,
+              "method" : "ForwardEuler",
+              "sampleTime" : 0.05
             }
           },
-          "id" : "usum",
+          "id" : "i_acc",
+          "kind" : "signal_discrete_integrator",
+          "label" : "",
+          "ports" : {
+            "in" : [
+              {
+                "id" : "in"
+              }
+            ],
+            "out" : [
+              {
+                "id" : "out"
+              }
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 880,
+              "y" : 392
+            }
+          }
+        },
+        {
+          "data" : {
+            "log_signal" : true,
+            "params" : {
+              "signs" : "++"
+            },
+            "sample_time" : "inherited"
+          },
+          "id" : "u_sampled",
           "kind" : "signal_sum",
           "label" : "",
           "ports" : {
@@ -286,13 +346,42 @@
           },
           "ui" : {
             "position" : {
-              "x" : 680,
+              "x" : 880,
               "y" : 172
             }
           }
         },
         {
           "data" : {
+            "params" : {
+              "sampleTime" : 0.05
+            }
+          },
+          "id" : "u_hold",
+          "kind" : "signal_zoh",
+          "label" : "",
+          "ports" : {
+            "in" : [
+              {
+                "id" : "in"
+              }
+            ],
+            "out" : [
+              {
+                "id" : "out"
+              }
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 1080,
+              "y" : 172
+            }
+          }
+        },
+        {
+          "data" : {
+            "log_signal" : true,
             "params" : {
               "den" : "1, 1",
               "num" : "1"
@@ -315,19 +404,18 @@
           },
           "ui" : {
             "position" : {
-              "x" : 880,
+              "x" : 1280,
               "y" : 172
             }
           }
         },
         {
           "data" : {
-            "log_signal" : true,
             "params" : {
-              "title" : "tracked output"
+              "title" : "discrete PID + cont plant"
             }
           },
-          "id" : "out_scope",
+          "id" : "scope",
           "kind" : "signal_scope",
           "label" : "",
           "ports" : {
@@ -342,7 +430,7 @@
           },
           "ui" : {
             "position" : {
-              "x" : 1080,
+              "x" : 1480,
               "y" : 282
             }
           }
@@ -370,6 +458,7 @@
       "absTol" : 1e-07,
       "algebraicLoopMethod" : "trust_region",
       "algorithm" : "ode45",
+      "maxStep" : "0.005",
       "relTol" : 0.0001,
       "startTime" : 0,
       "stopTime" : 8,

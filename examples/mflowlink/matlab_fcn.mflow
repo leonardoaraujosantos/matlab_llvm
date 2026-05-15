@@ -1,55 +1,194 @@
 {
-  "schema": "matforge.flowchart",
-  "version": "0.1.0",
-  "entry": "matlab_fcn_demo",
-  "settings": {
-    "kind": "signal_flow",
-    "solver": {
-      "type": "variable_step",
-      "algorithm": "ode45",
-      "startTime": 0.0,
-      "stopTime": 4.0,
-      "maxStep": "0.01",
-      "zeroCrossing": true,
-      "algebraicLoopMethod": "trust_region"
-    },
-    "snapshot": { "enabled": true, "depth": 256, "fields": "states" }
-  },
-  "flows": [
+  "entry" : "matlab_fcn_demo",
+  "flows" : [
     {
-      "id": "flow_matlab_fcn",
-      "kind": "program",
-      "name": "matlab_fcn_demo",
-      "signature": { "inputs": [], "outputs": [] },
-      "nodes": [
-        { "id": "src1", "kind": "signal_sine",
-          "data": { "log_signal": true,
-                    "params": { "amplitude": 1.0, "bias": 0.0,
-                                "frequency": 3.1415927, "phase": 0.0 } },
-          "ports": { "in": [], "out": [{"id": "out"}] } },
-        { "id": "src2", "kind": "signal_ramp",
-          "data": { "log_signal": true,
-                    "params": { "slope": 0.5, "startTime": 0.0,
-                                "initialOutput": 0.0 } },
-          "ports": { "in": [], "out": [{"id": "out"}] } },
-        { "id": "fcn", "kind": "signal_matlab_fcn",
-          "data": { "log_signal": true,
-                    "params": { "expression":
-                      "u1 * sin(2*pi*t) + sqrt(abs(u2)) - 1.0" } },
-          "ports": { "in":  [{"id": "u1"}, {"id": "u2"}],
-                     "out": [{"id": "out"}] } },
-        { "id": "scope", "kind": "signal_scope",
-          "data": { "params": { "title": "matlab_fcn" } },
-          "ports": { "in": [{"id": "in"}], "out": [] } }
+      "edges" : [
+        {
+          "from" : {
+            "node" : "src1",
+            "port" : "out"
+          },
+          "id" : "e1",
+          "kind" : "data",
+          "to" : {
+            "node" : "fcn",
+            "port" : "u1"
+          }
+        },
+        {
+          "from" : {
+            "node" : "src2",
+            "port" : "out"
+          },
+          "id" : "e2",
+          "kind" : "data",
+          "to" : {
+            "node" : "fcn",
+            "port" : "u2"
+          }
+        },
+        {
+          "from" : {
+            "node" : "fcn",
+            "port" : "out"
+          },
+          "id" : "e3",
+          "kind" : "data",
+          "to" : {
+            "node" : "scope",
+            "port" : "in"
+          }
+        }
       ],
-      "edges": [
-        { "id": "e1", "kind": "data",
-          "from": {"node": "src1", "port": "out"}, "to": {"node": "fcn",   "port": "u1"} },
-        { "id": "e2", "kind": "data",
-          "from": {"node": "src2", "port": "out"}, "to": {"node": "fcn",   "port": "u2"} },
-        { "id": "e3", "kind": "data",
-          "from": {"node": "fcn",  "port": "out"}, "to": {"node": "scope", "port": "in"} }
-      ]
+      "id" : "flow_matlab_fcn",
+      "kind" : "program",
+      "name" : "matlab_fcn_demo",
+      "nodes" : [
+        {
+          "data" : {
+            "log_signal" : true,
+            "params" : {
+              "amplitude" : 1,
+              "bias" : 0,
+              "frequency" : 3.1415927,
+              "phase" : 0
+            }
+          },
+          "id" : "src1",
+          "kind" : "signal_sine",
+          "label" : "",
+          "ports" : {
+            "in" : [
+
+            ],
+            "out" : [
+              {
+                "id" : "out"
+              }
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 80,
+              "y" : 172
+            }
+          }
+        },
+        {
+          "data" : {
+            "log_signal" : true,
+            "params" : {
+              "initialOutput" : 0,
+              "slope" : 0.5,
+              "startTime" : 0
+            }
+          },
+          "id" : "src2",
+          "kind" : "signal_ramp",
+          "label" : "",
+          "ports" : {
+            "in" : [
+
+            ],
+            "out" : [
+              {
+                "id" : "out"
+              }
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 80,
+              "y" : 172
+            }
+          }
+        },
+        {
+          "data" : {
+            "log_signal" : true,
+            "params" : {
+              "expression" : "u1 * sin(2*pi*t) + sqrt(abs(u2)) - 1.0"
+            }
+          },
+          "id" : "fcn",
+          "kind" : "signal_matlab_fcn",
+          "label" : "",
+          "ports" : {
+            "in" : [
+              {
+                "id" : "u1"
+              },
+              {
+                "id" : "u2"
+              }
+            ],
+            "out" : [
+              {
+                "id" : "out"
+              }
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 283,
+              "y" : 316
+            }
+          }
+        },
+        {
+          "data" : {
+            "params" : {
+              "title" : "matlab_fcn"
+            }
+          },
+          "id" : "scope",
+          "kind" : "signal_scope",
+          "label" : "",
+          "ports" : {
+            "in" : [
+              {
+                "id" : "in"
+              }
+            ],
+            "out" : [
+
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 480,
+              "y" : 172
+            }
+          }
+        }
+      ],
+      "signature" : {
+        "inputs" : [
+
+        ],
+        "outputs" : [
+
+        ]
+      }
     }
-  ]
+  ],
+  "schema" : "matforge.flowchart",
+  "settings" : {
+    "kind" : "signal_flow",
+    "snapshot" : {
+      "depth" : 256,
+      "enabled" : true,
+      "fields" : "states"
+    },
+    "solver" : {
+      "algebraicLoopMethod" : "trust_region",
+      "algorithm" : "ode45",
+      "maxStep" : "0.01",
+      "startTime" : 0,
+      "stopTime" : 4,
+      "type" : "variable_step",
+      "zeroCrossing" : true
+    }
+  },
+  "version" : "0.1.0"
 }

@@ -263,18 +263,41 @@ ML_SLOW=$(printf '%s\n' "$ML" | awk -F, 'NR>1 && $1+0>=3 { v=$4<0?-$4:$4; if(v>m
 check "slow LP peak ≈ 0.157" \
   "awk 'BEGIN{exit !(($ML_SLOW - 0.157)^2 < 1e-3)}'" ""
 
-#--- matlab_function_block (Item-4): full function body with if/else ------
+#--- matlab_function_block (Item-4): soft-saturated mixer with deadband ---
 FN="$("$MATLABC" -simulate "$EX/matlab_function_block.mflow")"
 FN_HEAD=$(printf '%s\n' "$FN" | head -1)
-check "matlab_function header" "[[ '$FN_HEAD' == 't,src,rectify,scope' ]]" ""
-# Positive branch: rectify(u1=1) = u1 = 1.
-FN_POS=$(printf '%s\n' "$FN" | awk -F, 'NR>1 && $1+0==0.5 {print $3; exit}')
-check "if-branch positive: rectify(1)=1" \
-  "awk 'BEGIN{exit !(($FN_POS - 1)^2 < 1e-9)}'" ""
-# Negative branch: rectify(u1=-1) = -u1 * 0.5 = 0.5.
-FN_NEG=$(printf '%s\n' "$FN" | awk -F, 'NR>1 && $1+0==1.5 {print $3; exit}')
-check "else-branch negative: rectify(-1)=0.5" \
-  "awk 'BEGIN{exit !(($FN_NEG - 0.5)^2 < 1e-9)}'" ""
+check "matlab_function header" \
+  "[[ '$FN_HEAD' == 't,src_a,src_b,mixer,scope' ]]" ""
+# At t=0: a=0, b=0, s=0 → |s|<0.2 → deadband branch → y=0.
+FN_DB=$(printf '%s\n' "$FN" | awk -F, 'NR>1 && $1+0==0 {print $4; exit}')
+check "deadband branch: y=0 at s=0" \
+  "awk 'BEGIN{exit !($FN_DB^2 < 1e-9)}'" ""
+# At t=0.5: a=sin(π·0.5)·1.2=1.2, b≈0, s=1.2 → elseif s>1 → y = 1 + 0.1·(1.2-1) = 1.02.
+FN_POS=$(printf '%s\n' "$FN" | awk -F, 'NR>1 && $1+0==0.5 {print $4; exit}')
+check "soft-sat positive: y=1+0.1·(s-1)" \
+  "awk 'BEGIN{exit !(($FN_POS - 1.02)^2 < 1e-5)}'" ""
+# At t=1.5: a≈-1.2 → s≈-1.2 → elseif s<-1 → y = -1 + 0.1·(-1.2+1) = -1.02.
+FN_NEG=$(printf '%s\n' "$FN" | awk -F, 'NR>1 && $1+0==1.5 {print $4; exit}')
+check "soft-sat negative: y=-1+0.1·(s+1)" \
+  "awk 'BEGIN{exit !(($FN_NEG + 1.02)^2 < 1e-5)}'" ""
+
+#--- discrete_pid (Item-1 follow-on): 50ms-sampled PID + cont plant -------
+DP="$("$MATLABC" -simulate "$EX/discrete_pid.mflow")"
+DP_HEAD=$(printf '%s\n' "$DP" | head -1)
+check "discrete_pid header" \
+  "[[ '$DP_HEAD' == 't,ref,sampler,i_acc,u_sampled,plant,scope' ]]" ""
+# Sample-time inheritance: kp / ki / u_sampled / plant all picked up
+# `discrete period=0.05` from the upstream ZOH.
+DP_KP=$("$MATLABC" -simulate --dry-run "$EX/discrete_pid.mflow" 2>&1 | grep 'kp kind=signal_gain')
+check "kp inherits discrete 0.05s" \
+  "[[ '$DP_KP' == *'sample=discrete period=0.05'* ]]" ""
+DP_USUM=$("$MATLABC" -simulate --dry-run "$EX/discrete_pid.mflow" 2>&1 | grep 'u_sampled kind=signal_sum')
+check "u_sampled inherits discrete 0.05s" \
+  "[[ '$DP_USUM' == *'sample=discrete period=0.05'* ]]" ""
+# Steady-state: plant approaches reference (1.0) within tolerance.
+DP_END=$(printf '%s\n' "$DP" | awk -F, 'END{print $6}')
+check "discrete PID converges past 0.9" \
+  "awk 'BEGIN{exit !($DP_END > 0.9 && $DP_END <= 1.05)}'" ""
 
 #--- algebraic_loop_solved (Item-2): direct-feedthrough cycle, runtime fixed-point ---
 AL="$("$MATLABC" -simulate "$EX/algebraic_loop_solved.mflow")"

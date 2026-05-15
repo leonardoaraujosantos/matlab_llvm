@@ -1,0 +1,27 @@
+MflowLinkModel entry=discrete_pid blocks=10 edges=11
+  solver type=variable_step algorithm=ode45 startTime=0 stopTime=8
+  states continuous=1 discrete=3
+  exec-order:
+    0 ref kind=signal_step sample=fixed_in_minor log
+    1 err kind=signal_sum sample=fixed_in_minor
+    2 sampler kind=signal_zoh sample=discrete period=0.05 disc-states=1 loop-breaker log
+    3 kp kind=signal_gain sample=discrete period=0.05
+    4 ki kind=signal_gain sample=discrete period=0.05
+    5 i_acc kind=signal_discrete_integrator sample=discrete period=0.05 disc-states=1 loop-breaker log
+    6 u_sampled kind=signal_sum sample=discrete period=0.05 log
+    7 u_hold kind=signal_zoh sample=discrete period=0.05 disc-states=1 loop-breaker
+    8 plant kind=signal_transfer_fcn sample=continuous cont-states=1 loop-breaker log
+    9 scope kind=signal_scope sample=fixed_in_minor
+  zero-crossings: none
+  edges:
+    e_ref ref:out -> err:in1
+    e_fb plant:out -> err:in2
+    e_sample err:out -> sampler:in
+    e_to_kp sampler:out -> kp:in
+    e_to_ki sampler:out -> ki:in
+    e_i_in ki:out -> i_acc:in
+    e_p_term kp:out -> u_sampled:in1
+    e_i_term i_acc:out -> u_sampled:in2
+    e_u_hold u_sampled:out -> u_hold:in
+    e_to_plant u_hold:out -> plant:in
+    e_scope plant:out -> scope:in
