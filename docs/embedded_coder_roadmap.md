@@ -663,24 +663,60 @@ Tier-6a — HDL update (✓ shipped 2026-05-15):
   the captured output downstream. Verilator lint + behavioural
   cosim + yosys generic synth all pass on the nested fixture.
 
-Tier-6a open carve-outs (not yet shipped):
-- **Multi-instantiation of stateful inner** — HDL mode persists
-  state inside the inner's function via `persistent` slots,
-  shared across all call sites. Each instantiation should have
-  its own state space (Verilog `module foo u_foo_0(...);
-  module foo u_foo_1(...);` already gives separate registers per
-  instantiation; the matlab.persistent → SV reg lowering needs
-  the matching per-instance namespacing). Software mode already
-  works (state args are per-instantiation).
+Tier-6a — multi-instantiation (✓ already works):
+- The matlab_llvm SV emitter renders each function call as a
+  separate module instantiation (`lp_filter u_lp_filter_0(...);
+  lp_filter u_lp_filter_1(...);`), each carrying its own
+  register state automatically. Software mode also works — each
+  `signal_subsystem` block gets its own state slots in the
+  outer's signature (named `s_<outer_id>_<inner_arg>`), with
+  the class wrapper holding all instances as separate member
+  fields. Verified with a twin-LP demo: 64 DFFs (= 32 × 2
+  separate state spaces) after `yosys synth`.
 
 Tier-6b (not yet shipped):
 - `signal_matlab_fcn` body re-runs through the JIT-class
   refinement (§17.5 #8) so multi-return + indexing inside the
-  body propagate to the emitted code.
+  body propagate to the emitted code. Also closes the
+  matlab_fcn_sv synth gap — the body's bare-int constants
+  (`u1 * 3 + u2 * 5`) need to either lift to `fi(3,...)` /
+  `fi(5,...)` automatically or for Sema's body walker to
+  infer the result as fi-typed without explicit wrapping.
 
-Tier-6c (not yet shipped):
-- Multirate subsystems: emit per-rate `step` functions plus a
-  scheduling preamble.
+Tier-6c (✓ partial, shipped 2026-05-15 — software targets):
+- **Multirate subsystems for software targets.** Each stateful
+  block can declare a per-block `sample_time` / `sampleTime` /
+  `Ts` param. The emitter walks every block, finds the
+  smallest positive period as the base rate (falls back to
+  `settings.solver.maxStep`), computes per-block epoch =
+  `round(period / base)`. Any epoch > 1 makes the subsystem
+  multirate.
+- Multirate subsystems get a hidden `_tick` state slot
+  (initial 0) threaded through the function's args/returns
+  alongside the regular `s_<id>` slots. The body increments
+  `_tick_next = _tick + 1` at end-of-body so the counter
+  advances each call.
+- Each slow block's state-update is wrapped in
+  `if mod(_tick, epoch) == 0 ... else <hold previous> ...
+  end` so non-firing ticks preserve the current state.
+  Fast blocks (epoch = 1) emit their state-update
+  unconditionally and run every tick.
+- Class wrapper picks up `_tick` automatically (it appears
+  as a member field in `describeSubsystem`'s `StateArgNames`
+  with initial value 0).
+- Demo: `multirate_filters.mflow` — two `signal_unit_delay`
+  blocks at base 0.01 and 5x-slower 0.05. Step-up test
+  verifies the fast block latches immediately while the slow
+  block holds the previous value until the next firing tick.
+
+Tier-6c open carve-outs (not yet shipped):
+- **HDL multirate** — the modulo / tick-counter / conditional
+  emit needs to lower to a synthesisable clock-enable signal.
+  Plan: add an `en` port to each multirate register's
+  `always_ff` block, drive it from a counter+compare at the
+  top-level always_ff. The emit gate today surfaces a sourced
+  error directing the user to flatten the multirate to the
+  base rate or split the subsystem per rate domain.
 
 **Total to "every demo target works": ~4–5 weeks.**
 

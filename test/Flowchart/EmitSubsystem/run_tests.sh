@@ -878,6 +878,54 @@ PY
 }
 nested_subsystem_smoke
 
+# Tier-6c — multirate subsystem. Two `signal_unit_delay` blocks
+# at sampleTime 0.01 (base) and 0.05 (5x slower). The fast block
+# latches every tick; the slow block latches every 5 ticks. The
+# outer step() takes a hidden `_tick` member that counts up each
+# call; the slow block's state-update is wrapped in
+# `if mod(_tick, 5) == 0 ... end` with an else-branch holding
+# the previous state.
+multirate_smoke() {
+  local py="$SCRATCH/multirate.py"
+  "$MATLABC" -emit-python "$EX/multirate_filters.mflow" \
+      --subsystem multirate_filters > "$py" 2> "$SCRATCH/mr.err"
+  python3 - "$py" <<'PY'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("mr", sys.argv[1])
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+plant = m.MultirateFilters()
+# Drive a level change at t=3. Fast block should latch u=5
+# immediately (next tick); slow block should hold u=1 until the
+# next firing tick (t=5), then latch u=5.
+expected = [
+    # (u,         expected_y, expected_s_fast, expected_s_slow)
+    (1.0,         0.0,         1.0,             1.0),  # t=0 (firing)
+    (1.0,         2.0,         1.0,             1.0),  # t=1
+    (1.0,         2.0,         1.0,             1.0),  # t=2
+    (5.0,         2.0,         5.0,             1.0),  # t=3 (slow holds)
+    (5.0,         6.0,         5.0,             1.0),  # t=4 (slow holds)
+    (5.0,         6.0,         5.0,             5.0),  # t=5 (slow fires)
+    (5.0,        10.0,         5.0,             5.0),  # t=6
+]
+for t, (u, exp_y, exp_fast, exp_slow) in enumerate(expected):
+    y = plant.step(u)
+    if abs(y - exp_y) > 1e-9 or \
+       abs(plant.s_fast - exp_fast) > 1e-9 or \
+       abs(plant.s_slow - exp_slow) > 1e-9:
+        print(f"  multirate t={t}: u={u} got y={y} "
+              f"s_fast={plant.s_fast} s_slow={plant.s_slow}, "
+              f"want y={exp_y} s_fast={exp_fast} s_slow={exp_slow}",
+              file=sys.stderr)
+        sys.exit(1)
+PY
+  if [[ $? -ne 0 ]]; then
+    fail=$((fail+1)); fails+=("multirate_filters (mismatch)")
+  else
+    pass=$((pass+1))
+  fi
+}
+multirate_smoke
+
 # Tier-5i — Tustin SV emit (synth sanity). Verifies the SV emit lane
 # produces a valid module with the direct-feedthrough output equation
 # (y = NumZ[0]*u + state) and the DF2T state update visible.

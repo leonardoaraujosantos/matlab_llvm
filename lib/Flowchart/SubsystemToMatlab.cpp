@@ -1319,6 +1319,67 @@ matlab::Function *lowerSubsystemImpl(
     NestedMeta[N->Id] = Ctx.ByFlowId[*FlowId].second;
   }
 
+  // Tier-6c — multirate scheduling. Walk every stateful block,
+  // pull its declared sample period (`sample_time` / `sampleTime`
+  // / `Ts` / inherited from `settings.solver.maxStep`), find the
+  // minimum positive value as the base period, and compute each
+  // block's epoch = round(period / base). Blocks with epoch > 1
+  // fire only every `epoch` outer-step ticks; the state update is
+  // wrapped in `if mod(_tick, epoch) == 0 ... end` at end-of-body.
+  // When ANY block has epoch > 1 the outer gets a hidden `_tick`
+  // state slot that counts up each call. Software mode only; HDL
+  // multirate needs clock-enable wiring that's a Tier-6c carve-out.
+  std::map<std::string, int> BlockEpoch;  // block id → epoch (>=1)
+  bool IsMultirate = false;
+  auto computeBlockPeriod = [&](const Node *N) -> double {
+    double Ts = paramD(*N, "sample_time", 0.0);
+    if (Ts <= 0.0) Ts = paramD(*N, "sampleTime", 0.0);
+    if (Ts <= 0.0) Ts = paramD(*N, "Ts", 0.0);
+    return Ts;
+  };
+  {
+    double Base = 0.0;
+    for (auto *N : Internal) {
+      if (!isStatefulKind(N->Kind)) continue;
+      double P = computeBlockPeriod(N);
+      if (P > 0.0 && (Base <= 0.0 || P < Base)) Base = P;
+    }
+    if (Base <= 0.0 && Doc.Settings.Solver.has_value()) {
+      const auto &SC = *Doc.Settings.Solver;
+      if (SC.MaxStep != "auto") {
+        try { Base = std::stod(SC.MaxStep); } catch (...) {}
+      }
+    }
+    if (Base > 0.0) {
+      for (auto *N : Internal) {
+        if (!isStatefulKind(N->Kind)) continue;
+        double P = computeBlockPeriod(N);
+        if (P <= 0.0) { BlockEpoch[N->Id] = 1; continue; }
+        int E = (int)std::round(P / Base);
+        if (E < 1) E = 1;
+        BlockEpoch[N->Id] = E;
+        if (E > 1) IsMultirate = true;
+      }
+    }
+  }
+  if (IsMultirate && Opts.StateAsPersistent) {
+    // HDL multirate would require clock-enable threading at every
+    // multirate register; defer to a future tier. Software targets
+    // get full multirate support.
+    for (auto *N : Internal) {
+      if (BlockEpoch.count(N->Id) && BlockEpoch[N->Id] > 1) {
+        Diag.error(N->Loc,
+                   std::string("block \"") + N->Id +
+                       "\" has sample_time > base period — HDL "
+                       "multirate emit is a Tier-6c carve-out "
+                       "(software targets work today); flatten to "
+                       "the base rate or split the subsystem per "
+                       "rate domain");
+        return nullptr;
+      }
+    }
+  }
+
   // Tier 3 — collect stateful blocks in topo order; each contributes
   // one or more scalar state slots to the function signature.  Per
   // slot: an extra arg `s_<id>` (current state) and an extra return
@@ -2386,15 +2447,51 @@ matlab::Function *lowerSubsystemImpl(
   // Tier-6 — nested subsystem state slots are written directly by
   // the call statement above (multi-LHS assign captures both Y and
   // S_next), so skip them here.
+  // Tier-6c — multirate gating. When a stateful block's epoch > 1,
+  // the state update only fires every `epoch` ticks. Wrap the
+  // assignment in `if mod(_tick, epoch) == 0 ... else hold ... end`
+  // so non-firing ticks preserve the current state. Fast blocks
+  // (epoch == 1) emit the assignment unconditionally.
   for (auto &S : States) {
     if (S.N->Kind == "signal_subsystem") continue;
     Expr *E = NextStateExpr[S.CurArg];
     if (!E) E = B.number(0.0);
+    int Epoch = 1;
+    auto EIt = BlockEpoch.find(S.N->Id);
+    if (EIt != BlockEpoch.end()) Epoch = EIt->second;
+    Stmt *Assign;
     if (Opts.StateAsPersistent) {
-      Body->Stmts.push_back(B.assign(S.CurArg, E));
+      Assign = B.assign(S.CurArg, E);
     } else {
-      Body->Stmts.push_back(B.assign(S.NextOut, E));
+      Assign = B.assign(S.NextOut, E);
     }
+    if (Epoch <= 1) {
+      Body->Stmts.push_back(Assign);
+      continue;
+    }
+    // Multirate slow slot — gate on tick % epoch == 0.
+    auto *Mod = B.call("mod", {B.name("_tick"), B.integer(Epoch)});
+    auto *Cond = B.bin(BinOp::Eq, Mod, B.integer(0));
+    auto *If = AST.make<IfStmt>();
+    If->Cond = Cond;
+    If->Then = AST.make<Block>();
+    If->Then->Stmts.push_back(Assign);
+    // Hold path — assign next = current state.
+    Stmt *Hold;
+    if (Opts.StateAsPersistent) {
+      Hold = B.assign(S.CurArg, B.name(S.CurArg));
+    } else {
+      Hold = B.assign(S.NextOut, B.name(S.CurArg));
+    }
+    If->Else = AST.make<Block>();
+    If->Else->Stmts.push_back(Hold);
+    Body->Stmts.push_back(If);
+  }
+  // Tier-6c — increment the hidden multirate counter at end-of-body.
+  if (IsMultirate) {
+    Body->Stmts.push_back(
+        B.assign("_tick_next",
+                 B.bin(BinOp::Add, B.name("_tick"), B.integer(1))));
   }
 
   // Build the function node.
@@ -2422,11 +2519,20 @@ matlab::Function *lowerSubsystemImpl(
     // signature reads `step(u1, ..., uN, s_<a>, s_<b>, ...)`.
     for (auto &S : States) Fn->Inputs.push_back(AST.intern(S.CurArg));
   }
+  // Tier-6c — multirate counter as the last input arg (after all
+  // state args). Software mode only; HDL multirate is gated above.
+  if (IsMultirate && !Opts.StateAsPersistent) {
+    Fn->Inputs.push_back(AST.intern("_tick"));
+  }
   for (auto &P : Outports) Fn->Outputs.push_back(AST.intern(P.Var));
   if (!Opts.StateAsPersistent) {
     // And next-state returns after the regular outports:
     //   `[y1, ..., yM, s_<a>_next, s_<b>_next, ...]`.
     for (auto &S : States) Fn->Outputs.push_back(AST.intern(S.NextOut));
+  }
+  // Tier-6c — multirate counter as the last return.
+  if (IsMultirate && !Opts.StateAsPersistent) {
+    Fn->Outputs.push_back(AST.intern("_tick_next"));
   }
   Fn->Body = Body;
   return Fn;
@@ -2698,6 +2804,48 @@ std::optional<SubsystemMeta> describeSubsystem(
         // controllable-canonical realisation at t=0).
         M.StateInitVals.push_back(0.0);
       }
+    }
+  }
+  // Tier-6c — multirate counter. Mirror the lowerSubsystemImpl
+  // detection: if any stateful block has a sample_time > base
+  // period, the class wrapper carries a hidden `_tick` member
+  // that initialises to 0 and threads through the multi-return.
+  {
+    auto getD = [&](const Node &N, const char *Key) -> double {
+      auto It = N.Params.find(Key);
+      if (It == N.Params.end()) return 0.0;
+      try { return std::stod(It->second); } catch (...) { return 0.0; }
+    };
+    double Base = 0.0;
+    for (const auto &N : Sub->Nodes) {
+      if (!isStatefulKind(N.Kind)) continue;
+      double Ts = getD(N, "sample_time");
+      if (Ts <= 0.0) Ts = getD(N, "sampleTime");
+      if (Ts <= 0.0) Ts = getD(N, "Ts");
+      if (Ts > 0.0 && (Base <= 0.0 || Ts < Base)) Base = Ts;
+    }
+    if (Base <= 0.0 && Doc.Settings.Solver.has_value()) {
+      const auto &SC = *Doc.Settings.Solver;
+      if (SC.MaxStep != "auto") {
+        try { Base = std::stod(SC.MaxStep); } catch (...) {}
+      }
+    }
+    bool IsMultirate = false;
+    if (Base > 0.0) {
+      for (const auto &N : Sub->Nodes) {
+        if (!isStatefulKind(N.Kind)) continue;
+        double Ts = getD(N, "sample_time");
+        if (Ts <= 0.0) Ts = getD(N, "sampleTime");
+        if (Ts <= 0.0) Ts = getD(N, "Ts");
+        if (Ts <= 0.0) continue;
+        int E = (int)std::round(Ts / Base);
+        if (E > 1) { IsMultirate = true; break; }
+      }
+    }
+    if (IsMultirate) {
+      M.StateArgNames.push_back("_tick");
+      M.StateReturnNames.push_back("_tick_next");
+      M.StateInitVals.push_back(0.0);
     }
   }
   return M;
