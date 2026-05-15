@@ -252,6 +252,13 @@ struct FNode {
   // `signal_triggered_subsystem`, so the runtime treats the gate as
   // a rising-edge condition rather than a level condition.
   bool EdgeTriggered = false;
+  // Item-3 — mask param bindings inherited from the enclosing
+  // `signal_subsystem` (if any). Empty for top-level blocks. The
+  // MflBlock-construction step substitutes `${name}` placeholders
+  // in this leaf's params with the bound values, so a library
+  // block parameterised as `den: "1, ${tau}"` resolves to e.g.
+  // `den: "1, 0.5"` once cloned under a host with `tau: 0.5`.
+  std::map<std::string, std::string> MaskBindings;
 };
 
 struct FEdge {
@@ -273,7 +280,8 @@ public:
   std::optional<FlatGraph> run(const Flow &Entry) {
     std::vector<std::string> Stack{Entry.Id};
     auto G = expand(Entry, "", Stack, /*EnableStamp=*/"",
-                    /*EdgeTriggered=*/false);
+                    /*EdgeTriggered=*/false,
+                    /*MaskBindings=*/{});
     if (!G) return std::nullopt;
     if (!contractBoundaries(*G)) return std::nullopt;
     if (!contractGotoFrom(*G)) return std::nullopt;
@@ -324,7 +332,9 @@ private:
   std::optional<FlatGraph> expand(const Flow &F, const std::string &Prefix,
                                   std::vector<std::string> &Stack,
                                   const std::string &EnableStamp,
-                                  bool EdgeTriggered) {
+                                  bool EdgeTriggered,
+                                  std::map<std::string, std::string>
+                                      MaskBindings) {
     FlatGraph G;
     // subsystem node id → { bindingPort → flat boundary node id }
     std::unordered_map<std::string, std::map<std::string, std::string>> InMap;
@@ -378,9 +388,41 @@ private:
             }
           }
         }
+        // Item-3 — merge any subsystem-level `data.mask` bindings
+        // into the child scope. The host's `data.mask.<param>`
+        // shadows any inherited binding of the same name (inner
+        // mask wins), so a library template can be nested under
+        // another mask and still re-bind its own params.
+        std::map<std::string, std::string> ChildMask = MaskBindings;
+        if (auto *MaskParams = N.getData("mask_params")) {
+          // The IDE serialises mask bindings as `data.mask_params`
+          // — a flat string of `key=value, …` pairs. Parsing is
+          // lenient: whitespace tolerated, malformed entries
+          // skipped.
+          std::string S = *MaskParams;
+          size_t I = 0;
+          while (I < S.size()) {
+            size_t Eq = S.find('=', I);
+            if (Eq == std::string::npos) break;
+            size_t Comma = S.find(',', Eq + 1);
+            if (Comma == std::string::npos) Comma = S.size();
+            std::string K = S.substr(I, Eq - I);
+            std::string V = S.substr(Eq + 1, Comma - Eq - 1);
+            auto trim = [](std::string &T) {
+              size_t A = T.find_first_not_of(" \t");
+              size_t B = T.find_last_not_of(" \t");
+              if (A == std::string::npos) { T.clear(); return; }
+              T = T.substr(A, B - A + 1);
+            };
+            trim(K);
+            trim(V);
+            if (!K.empty()) ChildMask[K] = V;
+            I = Comma + 1;
+          }
+        }
         Stack.push_back(*FlowId);
         auto ChildG = expand(*Child, Prefix + N.Id + "/", Stack,
-                             ChildEnable, ChildEdge);
+                             ChildEnable, ChildEdge, ChildMask);
         Stack.pop_back();
         if (!ChildG) return std::nullopt;
         for (auto &CN : ChildG->Nodes) {
@@ -406,7 +448,8 @@ private:
           // edge form only comes from a triggered subsystem.
           LeafEdge = false;
         }
-      G.Nodes.push_back({Prefix + N.Id, &N, LeafEnable, LeafEdge});
+      G.Nodes.push_back(
+          {Prefix + N.Id, &N, LeafEnable, LeafEdge, MaskBindings});
     }
 
     // Rewire this flow's edges, redirecting through subsystem boundaries.
@@ -684,6 +727,33 @@ std::optional<MflowLinkModel> lowerSignalFlow(const FlowDoc &Doc,
     B.Id = FN.Id;
     B.Kind = N.Kind;
     B.Params = N.Params;
+    // Item-3 — substitute `${name}` placeholders in this block's
+    // params with the active mask bindings inherited from the
+    // enclosing subsystem. Unbound placeholders are left untouched
+    // (matches Simulink: a missing mask param surfaces as a
+    // visible string in the param, which downstream parsers like
+    // polyDegree will then misread — that's the user's signal that
+    // a mask binding is missing).
+    if (!FN.MaskBindings.empty()) {
+      for (auto &P : B.Params) {
+        std::string &V = P.second;
+        size_t I = 0;
+        while (I < V.size()) {
+          size_t Open = V.find("${", I);
+          if (Open == std::string::npos) break;
+          size_t Close = V.find('}', Open + 2);
+          if (Close == std::string::npos) break;
+          std::string Key = V.substr(Open + 2, Close - Open - 2);
+          auto It = FN.MaskBindings.find(Key);
+          if (It != FN.MaskBindings.end()) {
+            V.replace(Open, Close - Open + 1, It->second);
+            I = Open + It->second.size();
+          } else {
+            I = Close + 1;
+          }
+        }
+      }
+    }
     B.Loc = N.Loc;
     B.SampleClass = KI->Sample;
     B.EnableSource = FN.EnableStamp;

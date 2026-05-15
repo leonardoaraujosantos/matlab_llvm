@@ -940,7 +940,12 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
           NPad[N - Mdeg + Ki] = TF.Num[Ki];
         double Y = 0.0;
         for (int Ki = 0; Ki < N; ++Ki)
-          Y += (NPad[N - Ki] / Lead) * State[Off + Ki];
+          // Item-3 — correct controllable-canonical-form output:
+          // C = num coefficients (NO division by Lead). The state
+          // x is already scaled because B = 1/Lead, so y = C·x
+          // gives the right gain. The previous `/Lead` was a bug
+          // masked by every demo using `den = "1, ..."` (Lead = 1).
+          Y += NPad[N - Ki] * State[Off + Ki];
         Out_[I] = Y;
       }
     } else if (K == "signal_state_space") {
@@ -1331,7 +1336,12 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
           NPad[N - Mdeg + Ki] = TF.Num[Ki];
         double Y = 0.0;
         for (int Ki = 0; Ki < N; ++Ki)
-          Y += (NPad[N - Ki] / Lead) * State[Off + Ki];
+          // Item-3 — correct controllable-canonical-form output:
+          // C = num coefficients (NO division by Lead). The state
+          // x is already scaled because B = 1/Lead, so y = C·x
+          // gives the right gain. The previous `/Lead` was a bug
+          // masked by every demo using `den = "1, ..."` (Lead = 1).
+          Y += NPad[N - Ki] * State[Off + Ki];
         Out_[I] = Y;
       }
     } else if (K == "signal_transport_delay") {

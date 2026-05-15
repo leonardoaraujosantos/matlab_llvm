@@ -510,7 +510,13 @@ private:
       return std::nullopt;
     }
     if (F.Kind.empty()) F.Kind = "program";
-    if (F.Kind != "program" && F.Kind != "function") {
+    // Item-3 — `library` flows are templates: they're never the
+    // entry, never run on their own, and only participate in a
+    // simulation when a `signal_subsystem` with a `data.mask`
+    // resolves their id. The loader accepts them as a recognised
+    // flow kind; SignalFlowLowering skips them unless mask-cloned.
+    if (F.Kind != "program" && F.Kind != "function" &&
+        F.Kind != "library") {
       Diag_.error(F.Loc,
                   "flow \"" + F.Id + "\" has unknown kind \"" + F.Kind + "\"");
       return std::nullopt;

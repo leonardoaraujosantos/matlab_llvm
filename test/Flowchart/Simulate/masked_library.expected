@@ -1,0 +1,15 @@
+MflowLinkModel entry=masked_demo blocks=5 edges=4
+  solver type=variable_step algorithm=ode45 startTime=0 stopTime=4
+  states continuous=2 discrete=0
+  exec-order:
+    0 src kind=signal_sine sample=fixed_in_minor log
+    1 fast_lp/tf kind=signal_transfer_fcn sample=continuous cont-states=1 loop-breaker
+    2 slow_lp/tf kind=signal_transfer_fcn sample=continuous cont-states=1 loop-breaker
+    3 fast_scope kind=signal_scope sample=fixed_in_minor log
+    4 slow_scope kind=signal_scope sample=fixed_in_minor log
+  zero-crossings: none
+  edges:
+    _splice0 src:out -> fast_lp/tf:in
+    _splice1 fast_lp/tf:out -> fast_scope:in
+    _splice2 src:out -> slow_lp/tf:in
+    _splice3 slow_lp/tf:out -> slow_scope:in

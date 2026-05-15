@@ -1,0 +1,84 @@
+{
+  "schema": "matforge.flowchart",
+  "version": "0.1.0",
+  "entry": "masked_demo",
+  "settings": {
+    "kind": "signal_flow",
+    "solver": {
+      "type": "variable_step",
+      "algorithm": "ode45",
+      "startTime": 0.0,
+      "stopTime": 4.0,
+      "maxStep": "0.01",
+      "zeroCrossing": true,
+      "algebraicLoopMethod": "trust_region"
+    },
+    "snapshot": { "enabled": true, "depth": 256, "fields": "states" }
+  },
+  "flows": [
+    {
+      "id": "flow_masked",
+      "kind": "program",
+      "name": "masked_demo",
+      "signature": { "inputs": [], "outputs": [] },
+      "nodes": [
+        { "id": "src", "kind": "signal_sine",
+          "data": { "log_signal": true,
+                    "params": { "amplitude": 1.0, "bias": 0.0,
+                                "frequency": 6.2831853, "phase": 0.0 } },
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+        { "id": "fast_lp", "kind": "signal_subsystem",
+          "data": { "flow_id": "lib_first_order_lp",
+                    "mask_params": "tau=0.1" },
+          "ports": { "in":  [{"id": "in"}],
+                     "out": [{"id": "out"}] } },
+        { "id": "slow_lp", "kind": "signal_subsystem",
+          "data": { "flow_id": "lib_first_order_lp",
+                    "mask_params": "tau=1.0" },
+          "ports": { "in":  [{"id": "in"}],
+                     "out": [{"id": "out"}] } },
+        { "id": "fast_scope", "kind": "signal_scope",
+          "data": { "log_signal": true,
+                    "params": { "title": "fast" } },
+          "ports": { "in": [{"id": "in"}], "out": [] } },
+        { "id": "slow_scope", "kind": "signal_scope",
+          "data": { "log_signal": true,
+                    "params": { "title": "slow" } },
+          "ports": { "in": [{"id": "in"}], "out": [] } }
+      ],
+      "edges": [
+        { "id": "e1", "kind": "data",
+          "from": {"node": "src", "port": "out"}, "to": {"node": "fast_lp", "port": "in"} },
+        { "id": "e2", "kind": "data",
+          "from": {"node": "src", "port": "out"}, "to": {"node": "slow_lp", "port": "in"} },
+        { "id": "e3", "kind": "data",
+          "from": {"node": "fast_lp", "port": "out"}, "to": {"node": "fast_scope", "port": "in"} },
+        { "id": "e4", "kind": "data",
+          "from": {"node": "slow_lp", "port": "out"}, "to": {"node": "slow_scope", "port": "in"} }
+      ]
+    },
+    {
+      "id": "lib_first_order_lp",
+      "kind": "library",
+      "name": "first_order_lp",
+      "signature": { "inputs": ["in"], "outputs": ["out"] },
+      "nodes": [
+        { "id": "in_p",  "kind": "signal_inport",
+          "data": { "port": "in" },
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+        { "id": "tf",    "kind": "signal_transfer_fcn",
+          "data": { "params": { "num": "1", "den": "${tau}, 1" } },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "out_p", "kind": "signal_outport",
+          "data": { "port": "out" },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } }
+      ],
+      "edges": [
+        { "id": "li1", "kind": "data",
+          "from": {"node": "in_p", "port": "out"}, "to": {"node": "tf",    "port": "in"} },
+        { "id": "li2", "kind": "data",
+          "from": {"node": "tf",   "port": "out"}, "to": {"node": "out_p", "port": "in"} }
+      ]
+    }
+  ]
+}

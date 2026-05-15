@@ -250,6 +250,19 @@ ST_LINE=$("$MATLABC" -simulate --dry-run "$EX/sample_time_inherit.mflow" 2>&1 | 
 check "gain block inherits discrete 0.1s" \
   "[[ '$ST_LINE' == *'sample=discrete period=0.1'* ]]" ""
 
+#--- masked_library (Item-3): two subsystem instances of one library ------
+ML="$("$MATLABC" -simulate "$EX/masked_library.mflow")"
+ML_HEAD=$(printf '%s\n' "$ML" | head -1)
+check "masked header"        "[[ '$ML_HEAD' == 't,src,fast_scope,slow_scope' ]]" ""
+# fast LP: τ=0.1, ωc=10, amplitude 1/√(1+(2π/10)²) ≈ 0.847.
+ML_FAST=$(printf '%s\n' "$ML" | awk -F, 'NR>1 && $1+0>=3 { v=$3<0?-$3:$3; if(v>m)m=v } END {print m}')
+check "fast LP peak ≈ 0.847" \
+  "awk 'BEGIN{exit !(($ML_FAST - 0.847)^2 < 1e-3)}'" ""
+# slow LP: τ=1.0, ωc=1, amplitude 1/√(1+(2π)²) ≈ 0.157.
+ML_SLOW=$(printf '%s\n' "$ML" | awk -F, 'NR>1 && $1+0>=3 { v=$4<0?-$4:$4; if(v>m)m=v } END {print m}')
+check "slow LP peak ≈ 0.157" \
+  "awk 'BEGIN{exit !(($ML_SLOW - 0.157)^2 < 1e-3)}'" ""
+
 #--- algebraic_loop_solved (Item-2): direct-feedthrough cycle, runtime fixed-point ---
 AL="$("$MATLABC" -simulate "$EX/algebraic_loop_solved.mflow")"
 AL_HEAD=$(printf '%s\n' "$AL" | head -1)
