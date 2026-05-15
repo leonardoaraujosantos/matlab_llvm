@@ -619,11 +619,54 @@ Tier-5l open carve-outs (not yet shipped):
 
 ### Tier 6 — Nested + multirate + advanced  *(~1 week)*
 
-- Nested `signal_subsystem` → local MATLAB helper function in
-  same TU.
+Tier-6a (✓ shipped 2026-05-15) — nested subsystems for software
+targets (Python / C / C++ / TypeScript):
+
+- `signal_subsystem` blocks now resolve their `data.flow_id` to
+  the inner flow and emit it as a sibling helper function in the
+  same TU. Recursive lowering with a `NestedCtx` that caches each
+  inner by `flow_id` so multiple references to the same subsystem
+  share one function. Cycle detection in the recursion stack.
+- State plumbing: each `signal_subsystem` block's slot count
+  inherits from the inner's metadata (one outer slot per inner
+  state arg, named `s_<outer_id>_<inner_arg>` to keep multiple
+  instantiations unique). The outer's signature grows by the sum
+  of inner state slots; the class wrapper's `step(u)` threads
+  them through the multi-LHS call.
+- Multi-output inner subsystems get per-port output variables
+  via `VarOfNodePort` so downstream blocks can wire to `out1` /
+  `out2` / ... independently.
+- `buildSubsystemTU` flushes `Ctx.Pending` into the TU's
+  `Functions` list in emission order (innermost first); Sema
+  resolves the cross-function calls by name.
+- `describeSubsystem` mirrors the recursion so the class
+  wrapper's member fields align with the function signature.
+- Demo: `nested_pid_filter.mflow` — outer subsystem wraps a
+  `signal_subsystem` referencing an inner `lp_filter` flow
+  (1/(s+1)) followed by gain 2. Step response within Forward-
+  Euler tolerance of analytic `2·(1−e⁻ᵗ)`.
+
+Tier-6a open carve-outs (not yet shipped):
+- **Nested subsystems for HDL emit** — Sema's cross-function
+  fi-type inference doesn't propagate the inner's return-type
+  spec into the outer's expression tree, so the outport / fiMul
+  wraps route the call result through `matlab_fi_quantize_s`
+  (the non-synthesisable constructor cast). Today's
+  workaround: surfaces a sourced error directing the user to
+  flatten the nested subsystem manually until cross-function
+  fi-type propagation lands.
+- **Multi-instantiation of stateful inner** — HDL mode persists
+  state inside the inner's function via `persistent` slots,
+  shared across all call sites. Each instantiation should have
+  its own state space. Software mode already works (state args
+  are per-instantiation).
+
+Tier-6b (not yet shipped):
 - `signal_matlab_fcn` body re-runs through the JIT-class
   refinement (§17.5 #8) so multi-return + indexing inside the
   body propagate to the emitted code.
+
+Tier-6c (not yet shipped):
 - Multirate subsystems: emit per-rate `step` functions plus a
   scheduling preamble.
 

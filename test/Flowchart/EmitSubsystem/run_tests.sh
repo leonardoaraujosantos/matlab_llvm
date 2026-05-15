@@ -840,6 +840,44 @@ PY
 }
 mimo_tustin_smoke
 
+# Tier-6 — nested signal_subsystem support. Outer subsystem
+# `outer_loop` contains a `signal_subsystem` block pointing at the
+# inner `lp_filter` flow (1/(s+1) lowpass), followed by a gain of
+# 2.  The Embedded Coder lane emits both as sibling functions in
+# the same TU, threads the inner's state through the outer's
+# signature, and the class wrapper instantiates the outer + holds
+# the threaded state.  Expected step response: `y(t) = 2·(1 − e⁻ᵗ)`,
+# settles to 2.0.
+nested_subsystem_smoke() {
+  local py="$SCRATCH/nested.py"
+  "$MATLABC" -emit-python "$EX/nested_pid_filter.mflow" \
+      --subsystem outer_loop > "$py" 2> "$SCRATCH/nested.err"
+  python3 - "$py" <<'PY'
+import importlib.util, math, sys
+spec = importlib.util.spec_from_file_location("nested", sys.argv[1])
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+plant = m.OuterLoop()
+worst = 0.0; Ts = 0.05
+for k in range(201):
+    y = plant.step(1.0)
+    t = k * Ts
+    # Forward Euler 1/(s+1) step response, scaled by gain 2.
+    # Reference matches the analytic continuous response within
+    # the Forward-Euler discretisation error band.
+    ref = 2.0 * (1.0 - math.exp(-t))
+    err = abs(y - ref)
+    if err > worst: worst = err
+if worst > 0.03:
+    print(f"  nested: max err {worst} > 0.03", file=sys.stderr); sys.exit(1)
+PY
+  if [[ $? -ne 0 ]]; then
+    fail=$((fail+1)); fails+=("nested_subsystem (response mismatch)")
+  else
+    pass=$((pass+1))
+  fi
+}
+nested_subsystem_smoke
+
 # Tier-5i — Tustin SV emit (synth sanity). Verifies the SV emit lane
 # produces a valid module with the direct-feedthrough output equation
 # (y = NumZ[0]*u + state) and the DF2T state update visible.

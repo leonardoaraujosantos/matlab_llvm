@@ -1138,6 +1138,47 @@ std::vector<PortInfo> collectPorts(const Flow &F, const std::string &Kind) {
 } // namespace
 
 //===----------------------------------------------------------------------===//
+// Tier-6 — nested subsystem context.
+//
+// Carried across recursive `lowerSubsystemImpl` calls so each
+// `signal_subsystem` block resolves its `data.flow_id` to the inner
+// subsystem's emitted function, with caching so the same flow
+// referenced by multiple outer blocks emits ONE function. The
+// `Pending` list is flushed into the TU by `buildSubsystemTU` in
+// emission order.
+//===----------------------------------------------------------------------===//
+
+struct NestedCtx {
+  // flow_id → (function, metadata).  The metadata exposes the inner
+  // subsystem's input / output ports and state slot count to the
+  // outer site for state-plumbing and call-site emission.
+  std::map<std::string, std::pair<matlab::Function *, SubsystemMeta>>
+      ByFlowId;
+  // Functions to add to the final TU, in the order they were first
+  // emitted (innermost subsystems precede their enclosers).
+  std::vector<matlab::Function *> Pending;
+  // Active flow stack used to detect mutually-recursive subsystem
+  // graphs (would otherwise cause unbounded recursion).
+  std::vector<std::string> Stack;
+};
+
+const Flow *findFlowById(const FlowDoc &Doc, const std::string &FlowId) {
+  for (auto &F : Doc.Flows)
+    if (F.Id == FlowId) return &F;
+  return nullptr;
+}
+
+// Forward declaration — the actual subsystem lowering, parameterised
+// over the nested-emit context. The public `lowerSubsystemToMatlab`
+// is a thin wrapper that constructs a context, calls this impl, and
+// discards the pending list (for the single-subsystem case where
+// the caller doesn't want nested children in their TU).
+matlab::Function *lowerSubsystemImpl(
+    const FlowDoc &Doc, const std::string &SubsystemName,
+    matlab::ASTContext &AST, matlab::DiagnosticEngine &Diag,
+    const SubsystemEmitOptions &Opts, NestedCtx &Ctx);
+
+//===----------------------------------------------------------------------===//
 // Public entry points.
 //===----------------------------------------------------------------------===//
 
@@ -1147,12 +1188,44 @@ matlab::Function *lowerSubsystemToMatlab(
     matlab::ASTContext &AST,
     matlab::DiagnosticEngine &Diag,
     const SubsystemEmitOptions &Opts) {
+  NestedCtx Ctx;
+  return lowerSubsystemImpl(Doc, SubsystemName, AST, Diag, Opts, Ctx);
+}
+
+matlab::Function *lowerSubsystemImpl(
+    const FlowDoc &Doc,
+    const std::string &SubsystemName,
+    matlab::ASTContext &AST,
+    matlab::DiagnosticEngine &Diag,
+    const SubsystemEmitOptions &Opts,
+    NestedCtx &Ctx) {
   const Flow *Sub = Doc.findFlow(SubsystemName);
   if (!Sub) {
     Diag.error(SourceLocation{}, "subsystem \"" + SubsystemName +
                                      "\" not found in `.mflow` file");
     return nullptr;
   }
+  // Tier-6 — recursion guard for mutually-referential nested
+  // subsystems. The signal-flow `signal_subsystem` model normally
+  // requires DAG shape so this fires only when the user wires a
+  // cycle by hand.
+  for (const auto &S : Ctx.Stack) {
+    if (S == Sub->Id) {
+      Diag.error(Sub->Loc,
+                 "subsystem \"" + SubsystemName +
+                     "\" references itself recursively via "
+                     "`signal_subsystem` — embedded coder needs a "
+                     "DAG of subsystems");
+      return nullptr;
+    }
+  }
+  Ctx.Stack.push_back(Sub->Id);
+  // Pop on every return.
+  struct StackPopper {
+    NestedCtx *C;
+    ~StackPopper() { if (C) C->Stack.pop_back(); }
+  } Popper{&Ctx};
+  (void)Popper;
   auto Inports = collectPorts(*Sub, "signal_inport");
   auto Outports = collectPorts(*Sub, "signal_outport");
   if (Inports.empty() && Outports.empty()) {
@@ -1206,6 +1279,61 @@ matlab::Function *lowerSubsystemToMatlab(
     // Allow pure passthrough — an outport wired straight to an inport.
   }
   if (Diag.hasErrors()) return nullptr;
+
+  // Tier-6 — pre-resolve every nested `signal_subsystem` block so
+  // we know the inner's metadata (state-slot count, input/output
+  // port shape) before allocating outer state slots or emitting
+  // call sites. Recursively emits each unique flow_id exactly once
+  // into Ctx.Pending; subsequent references reuse the cached
+  // function. NestedMeta indexes by the outer block's id.
+  //
+  // HDL mode carve-out: cross-function fi-type inference doesn't
+  // propagate the inner's return type into the outer's expression
+  // tree, so outport / fiMul wraps end up routing the call result
+  // through `matlab_fi_quantize_s` (the non-synthesisable
+  // constructor cast). Reject nested subsystems for HDL targets
+  // until that propagation lands.
+  std::map<std::string, SubsystemMeta> NestedMeta;
+  for (auto *N : Internal) {
+    if (N->Kind != "signal_subsystem") continue;
+    if (Opts.StateAsPersistent) {
+      Diag.error(N->Loc,
+                 "signal_subsystem \"" + N->Id +
+                     "\": nested subsystems aren't supported in HDL "
+                     "emit yet (Tier-6 carve-out — software targets "
+                     "work today, HDL needs cross-function fi-type "
+                     "propagation in Sema)");
+      return nullptr;
+    }
+    const std::string *FlowId = N->getData("flow_id");
+    if (!FlowId || FlowId->empty()) {
+      Diag.error(N->Loc,
+                 "signal_subsystem \"" + N->Id +
+                     "\": missing data.flow_id (embedded coder needs "
+                     "an explicit subflow reference)");
+      return nullptr;
+    }
+    const Flow *Inner = findFlowById(Doc, *FlowId);
+    if (!Inner) {
+      Diag.error(N->Loc,
+                 "signal_subsystem \"" + N->Id +
+                     "\": data.flow_id \"" + *FlowId +
+                     "\" not found in `.mflow` document");
+      return nullptr;
+    }
+    auto Hit = Ctx.ByFlowId.find(*FlowId);
+    if (Hit == Ctx.ByFlowId.end()) {
+      auto *InnerFn =
+          lowerSubsystemImpl(Doc, Inner->Name, AST, Diag, Opts, Ctx);
+      if (!InnerFn) return nullptr;
+      auto InnerMetaOpt = describeSubsystem(Doc, Inner->Name, Diag);
+      if (!InnerMetaOpt) return nullptr;
+      InnerMetaOpt->Name = Inner->Name;
+      Ctx.ByFlowId[*FlowId] = {InnerFn, *InnerMetaOpt};
+      Ctx.Pending.push_back(InnerFn);
+    }
+    NestedMeta[N->Id] = Ctx.ByFlowId[*FlowId].second;
+  }
 
   // Tier 3 — collect stateful blocks in topo order; each contributes
   // one or more scalar state slots to the function signature.  Per
@@ -1268,6 +1396,32 @@ matlab::Function *lowerSubsystemToMatlab(
     return 1;
   };
   for (auto *N : Internal) {
+    // Tier-6 — nested subsystem state: one outer slot per inner
+    // state arg. Software mode threads them through outer's
+    // signature; HDL mode skips (the inner function manages its
+    // own persistents).
+    if (N->Kind == "signal_subsystem") {
+      if (Opts.StateAsPersistent) continue;
+      auto MIt = NestedMeta.find(N->Id);
+      if (MIt == NestedMeta.end()) continue;
+      const SubsystemMeta &Meta = MIt->second;
+      for (size_t I = 0; I < Meta.StateArgNames.size(); ++I) {
+        StateSlot S;
+        S.N = N;
+        // `<outer_block_id>_<inner_arg_basename>` keeps the slot
+        // names unique across multiple nested subsystem instances.
+        std::string Inner = Meta.StateArgNames[I];
+        std::string Suffix = (Inner.rfind("s_", 0) == 0)
+                                 ? Inner.substr(2) : Inner;
+        S.CurArg = "s_" + sanitizeIdent(N->Id) + "_" + Suffix;
+        S.NextOut = S.CurArg + "_next";
+        // Empty LocalVar — nested subsystem's call statement reads
+        // state args directly (no hoisted local).
+        S.LocalVar = "";
+        States.push_back(S);
+      }
+      continue;
+    }
     if (!isStatefulKind(N->Kind)) continue;
     int Order = stateOrderForBlock(N);
     if (Order == 1) {
@@ -1310,8 +1464,12 @@ matlab::Function *lowerSubsystemToMatlab(
   }
   // Refresh LocalVar for single-slot blocks (now that VarOfNode is
   // populated). Multi-slot LocalVars stay at their per-slot names.
+  // Nested-subsystem state slots have no associated local — the
+  // call statement reads state args directly, so leave LocalVar
+  // empty for them and skip the state-read hoist below.
   for (auto &S : States) {
-    if (S.LocalVar.empty()) S.LocalVar = VarOfNode[S.N->Id];
+    if (S.LocalVar.empty() && S.N->Kind != "signal_subsystem")
+      S.LocalVar = VarOfNode[S.N->Id];
   }
   // Tier-5i — MIMO state-space exposes one variable per `out<q>`
   // port. Allocate the per-port names now so downstream blocks can
@@ -1495,6 +1653,9 @@ matlab::Function *lowerSubsystemToMatlab(
   // <CurArg>`; the block's OutVar gets computed separately below
   // (for higher-order TF, it's the Σ b_i*x_i linear combination).
   for (auto &S : States) {
+    // Tier-6 — nested subsystem state slots have no LocalVar (the
+    // call statement reads/writes the state args directly).
+    if (S.LocalVar.empty()) continue;
     if (Opts.StateAsPersistent) {
       Body->Stmts.push_back(B.assign(S.LocalVar, B.name(S.CurArg)));
     } else {
@@ -1510,11 +1671,102 @@ matlab::Function *lowerSubsystemToMatlab(
     }
   }
 
+  // Tier-6 — pre-allocate per-output-port variables for multi-output
+  // nested subsystems so downstream blocks can resolve `out1` /
+  // `out2` / ... via VarOfNodePort. Single-output inner subsystems
+  // route through the legacy VarOfNode path.
+  for (auto *N : Internal) {
+    if (N->Kind != "signal_subsystem") continue;
+    auto MIt = NestedMeta.find(N->Id);
+    if (MIt == NestedMeta.end()) continue;
+    const SubsystemMeta &Meta = MIt->second;
+    if (Meta.OutputNames.size() <= 1) continue;
+    std::string Base = sanitizeIdent(N->Id);
+    for (size_t I = 0; I < Meta.OutputNames.size(); ++I) {
+      // Match the simulator's port convention: `out1`/`out2`/...
+      std::string PortId = "out" + std::to_string(I + 1);
+      std::string Var = Base + "_y" + std::to_string(I + 1);
+      int Suffix = 1;
+      while (Used.count(Var))
+        Var = Base + "_y" + std::to_string(I + 1) + "_" +
+              std::to_string(++Suffix);
+      Used.insert(Var);
+      VarOfNodePort[{N->Id, PortId}] = Var;
+    }
+    VarOfNode[N->Id] = VarOfNodePort[{N->Id, "out1"}];
+  }
+
   // Emit one statement per internal block.
   for (auto *N : Internal) {
     auto Ports = inputPortsOf(*N);
     std::vector<Expr *> Ins;
     for (auto &P : Ports) Ins.push_back(resolveInputExpr(N->Id, P));
+
+    // Tier-6 — nested subsystem block. Emit a call to the inner
+    // function, threading state args (software mode) or `reset`
+    // (HDL mode). Multi-output captures route to per-port vars.
+    if (N->Kind == "signal_subsystem") {
+      auto MIt = NestedMeta.find(N->Id);
+      if (MIt == NestedMeta.end()) {
+        Diag.error(N->Loc,
+                   "internal: nested subsystem \"" + N->Id +
+                       "\" wasn't pre-resolved");
+        return nullptr;
+      }
+      const SubsystemMeta &Meta = MIt->second;
+      // Build argument list: P data inputs, then state args (software
+      // mode) or `reset` (HDL mode).
+      std::vector<Expr *> Args;
+      for (size_t I = 0; I < Meta.InputNames.size(); ++I) {
+        Expr *A = (I < Ins.size()) ? Ins[I] : B.number(0.0);
+        Args.push_back(A);
+      }
+      if (Opts.StateAsPersistent) {
+        if (!Meta.StateArgNames.empty())
+          Args.push_back(B.name("reset"));
+      } else {
+        // Find the outer state slots we allocated for this block
+        // and pass their CurArg names through.
+        for (auto &S : States) {
+          if (S.N != N) continue;
+          Args.push_back(B.name(S.CurArg));
+        }
+      }
+      auto *Call = B.call(Meta.Name, std::move(Args));
+      // Capture outputs + (software-only) next-state values. In HDL
+      // mode we trust the inner's hdl.ports-stamped return type to
+      // propagate through Sema's function-call return-type
+      // inference; no outer wrap needed.
+      size_t NumYs = Meta.OutputNames.size();
+      bool HDLMode = Opts.StateAsPersistent;
+      size_t NumSnext = HDLMode ? 0 : Meta.StateReturnNames.size();
+      if (NumYs == 1 && NumSnext == 0) {
+        // Single output, no state — plain assignment.
+        const std::string &Dst = VarOfNode[N->Id];
+        Body->Stmts.push_back(B.assign(Dst, Call));
+      } else {
+        // Multi-LHS assign: [y1, y2, ..., s1_next, ...] = inner(...)
+        auto *Assign = AST.make<AssignStmt>();
+        for (size_t I = 0; I < NumYs; ++I) {
+          std::string PortId = "out" + std::to_string(I + 1);
+          auto VP = VarOfNodePort.find({N->Id, PortId});
+          std::string DstVar = (VP != VarOfNodePort.end())
+                                   ? VP->second
+                                   : VarOfNode[N->Id];
+          Assign->LHS.push_back(B.name(DstVar));
+        }
+        if (!HDLMode) {
+          for (auto &S : States) {
+            if (S.N != N) continue;
+            Assign->LHS.push_back(B.name(S.NextOut));
+          }
+        }
+        Assign->RHS = Call;
+        Assign->Suppressed = true;
+        Body->Stmts.push_back(Assign);
+      }
+      continue;
+    }
 
     if (isStatefulKind(N->Kind)) {
       // State read was hoisted above; we still need to compute the
@@ -2099,6 +2351,14 @@ matlab::Function *lowerSubsystemToMatlab(
            Kind == "signal_compare_to_zero" ||
            Kind == "signal_compare_to_constant";
   };
+  // Tier-6 — a nested signal_subsystem's return value is already
+  // narrowed by the inner's own outport wrap. Re-wrapping at the
+  // outer would route the call result through `matlab_fi_quantize_s`
+  // (Sema can't propagate the call's fi return type cross-function),
+  // which doesn't synthesise.
+  auto isNarrowedProducer = [&](const std::string &Kind) {
+    return Kind == "signal_subsystem";
+  };
   // For each outport, append `<port_var> = <feeding_var>;`.
   for (auto &P : Outports) {
     // An outport has exactly one input (`in`). Resolve to its source.
@@ -2120,7 +2380,8 @@ matlab::Function *lowerSubsystemToMatlab(
       break;
     }
     if (!Rhs) Rhs = B.number(0.0);
-    if (Opts.StateAsPersistent && !isBooleanProducer(UpstreamKind)) {
+    if (Opts.StateAsPersistent && !isBooleanProducer(UpstreamKind) &&
+        !isNarrowedProducer(UpstreamKind)) {
       FixedPointSpec Spec = Opts.FiDefault;
       auto It = Opts.FiSpecs.find(P.Var);
       if (It != Opts.FiSpecs.end()) Spec = It->second;
@@ -2138,7 +2399,11 @@ matlab::Function *lowerSubsystemToMatlab(
   // persistent mode the next state lands directly in the persistent
   // slot (no separate `_next` return — the persistent itself is the
   // mutable storage), which the SV pipeline lowers to a register.
+  // Tier-6 — nested subsystem state slots are written directly by
+  // the call statement above (multi-LHS assign captures both Y and
+  // S_next), so skip them here.
   for (auto &S : States) {
+    if (S.N->Kind == "signal_subsystem") continue;
     Expr *E = NextStateExpr[S.CurArg];
     if (!E) E = B.number(0.0);
     if (Opts.StateAsPersistent) {
@@ -2152,7 +2417,17 @@ matlab::Function *lowerSubsystemToMatlab(
   auto *Fn = AST.make<Function>();
   Fn->Name = AST.intern(sanitizeIdent(SubsystemName));
   for (auto &P : Inports)  Fn->Inputs.push_back(AST.intern(P.Var));
-  if (Opts.StateAsPersistent && !States.empty()) {
+  // Tier-6 — a stateful nested subsystem also requires the outer
+  // to forward `reset` even when the outer itself has no own state
+  // slots. Detect by looking at the nested metadata.
+  bool NestedNeedsReset = false;
+  for (const auto &MP : NestedMeta) {
+    if (!MP.second.StateArgNames.empty()) {
+      NestedNeedsReset = true;
+      break;
+    }
+  }
+  if (Opts.StateAsPersistent && (!States.empty() || NestedNeedsReset)) {
     // Tier 5 — HDL needs an explicit `reset` boundary to clear the
     // persistent regs on power-up. Add it as the final arg so the
     // synthesised SV module exposes `reset` alongside the data
@@ -2179,11 +2454,24 @@ matlab::TranslationUnit *buildSubsystemTU(
     matlab::ASTContext &AST,
     matlab::DiagnosticEngine &Diag,
     const SubsystemEmitOptions &Opts) {
-  auto *Fn = lowerSubsystemToMatlab(Doc, SubsystemName, AST, Diag, Opts);
+  // Tier-6 — pass a NestedCtx through the lowering so any
+  // `signal_subsystem` block's referenced flow gets emitted as a
+  // sibling helper in the same TU. The outer subsystem ends up
+  // last in TU.Functions; inner helpers precede it in emission
+  // order (innermost first).
+  NestedCtx Ctx;
+  auto *Fn =
+      lowerSubsystemImpl(Doc, SubsystemName, AST, Diag, Opts, Ctx);
   if (!Fn) return nullptr;
 
   auto *TU = AST.make<TranslationUnit>();
   TU->Functions.push_back(Fn);
+  // Inner helpers — appended after the outer entry. Sema resolves
+  // calls by name regardless of order; downstream emit lanes that
+  // care about declaration order get the order from `Ctx.Pending`.
+  for (auto *Helper : Ctx.Pending) {
+    TU->Functions.push_back(Helper);
+  }
 
   // Tier 5 — collect every `signal_matlab_fcn` block in the subsystem
   // and add its `params.function_body` as a sibling local function in
@@ -2335,6 +2623,31 @@ std::optional<SubsystemMeta> describeSubsystem(
   // member field to the right value (matches the simulator's
   // t = 0 snapshot).
   for (const auto &N : Sub->Nodes) {
+    // Tier-6 — nested subsystem state: enumerate the inner flow's
+    // state slots and bubble them up under an `s_<outer_id>_<inner>`
+    // prefix. Matches the lowerSubsystemImpl allocation so the
+    // class wrapper instantiates member fields aligned with the
+    // function signature.
+    if (N.Kind == "signal_subsystem") {
+      const std::string *FlowId = N.getData("flow_id");
+      if (!FlowId || FlowId->empty()) continue;
+      const Flow *Inner = findFlowById(Doc, *FlowId);
+      if (!Inner) continue;
+      auto InnerMeta = describeSubsystem(Doc, Inner->Name, Diag);
+      if (!InnerMeta) continue;
+      for (size_t I = 0; I < InnerMeta->StateArgNames.size(); ++I) {
+        std::string Inner0 = InnerMeta->StateArgNames[I];
+        std::string Suf = (Inner0.rfind("s_", 0) == 0)
+                              ? Inner0.substr(2) : Inner0;
+        std::string Base = "s_" + sanitizeIdent(N.Id) + "_" + Suf;
+        M.StateArgNames.push_back(Base);
+        M.StateReturnNames.push_back(Base + "_next");
+        double Init = (I < InnerMeta->StateInitVals.size())
+                          ? InnerMeta->StateInitVals[I] : 0.0;
+        M.StateInitVals.push_back(Init);
+      }
+      continue;
+    }
     if (!isStatefulKind(N.Kind)) continue;
     // Tier-5h — higher-order TF / ZP blocks contribute N slots,
     // named `s_<id>_x1` … `s_<id>_xN`. Single-slot blocks keep the

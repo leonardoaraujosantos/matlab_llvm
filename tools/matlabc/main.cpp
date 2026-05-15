@@ -10150,6 +10150,33 @@ int main(int Argc, char **Argv) {
               matlab::flowchart::stampSubsystemPortPragmas(
                   M, Meta->Name, Meta->InputNames, Meta->OutputNames,
                   Default, Overrides, HasReset);
+              // Tier-6 — nested subsystem helpers also need their
+              // ports stamped so the SV pipeline can lower each
+              // function's args / returns at the right fi width
+              // (otherwise the call's return type stays `none` and
+              // downstream fi-casts fall back to the constructor
+              // path that doesn't synthesise). Walk every flow that
+              // has signal_inport / signal_outport boundary ports
+              // and stamp its hdl.ports too.
+              for (const auto &OtherFlow : Doc3->Flows) {
+                if (OtherFlow.Name == Opts.Subsystem) continue;
+                bool HasBoundary = false;
+                for (const auto &N : OtherFlow.Nodes) {
+                  if (N.Kind == "signal_inport" ||
+                      N.Kind == "signal_outport") {
+                    HasBoundary = true;
+                    break;
+                  }
+                }
+                if (!HasBoundary) continue;
+                auto OMeta = matlab::flowchart::describeSubsystem(
+                    *Doc3, OtherFlow.Name, FlowDiag3);
+                if (!OMeta) continue;
+                bool ORst = !OMeta->StateArgNames.empty();
+                matlab::flowchart::stampSubsystemPortPragmas(
+                    M, OMeta->Name, OMeta->InputNames,
+                    OMeta->OutputNames, Default, Overrides, ORst);
+              }
             }
           }
         }
