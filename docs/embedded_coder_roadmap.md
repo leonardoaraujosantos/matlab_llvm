@@ -377,7 +377,27 @@ Tier-5d (✓ saturation shipped 2026-05-15):
   fetch at f64, requires routing through fptosi — separable
   follow-up).
 
-Tier-5e open carve-outs (not yet shipped):
+Tier-5f (✓ shipped 2026-05-15):
+- New pass `lib/MLIR/Passes/UnifyMixedWidthStores.cpp` runs
+  between `runLowerScalarSlots` and `runHWLegalize` in the SV
+  pipeline. Walks every `matlab.alloc` and, when its stores have
+  mixed integer widths (e.g. i32 saturation rails + i64
+  passthrough from a fi-saturate chain), sign-extends narrower
+  stores to the widest store width via `arith.extsi`. Retypes
+  the slot + every load + refreshes the enclosing function's
+  return signature. The pass runs in tandem with a re-run of
+  `runLowerScalarSlots` + `runMem2RegLite` so the now-typed
+  alloc gets lowered to `llvm.alloca` and the single-writer
+  scalar gets promoted.
+- Closes the headline **full discrete PID + saturation → SV**
+  case: `examples/mflowlink/coder/discrete_pid.mflow` emits a
+  clean module with both state registers (s_iacc, s_prev_err),
+  the saturation 3-way mux, the i64 accumulator chain, and the
+  always_ff tick block.
+- 16/16 emit-subsystem cases green; emit-sv-tests stays at
+  67/77 (no regressions).
+
+Tier-5g open carve-outs (not yet shipped):
 - `signal_saturation` → SV: bool-by-fi multiplication doesn't
   synthesise; workaround for HDL targets is to replace with a
   `signal_matlab_fcn` containing the if/elseif/else.

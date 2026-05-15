@@ -611,6 +611,30 @@ bool gatherHWPersistentState(mlir::Operation *FuncOp,
 /// — "Synthesizability gate" for the per-phase coverage table.
 bool runHWLegalize(mlir::ModuleOp M, const matlab::SourceManager *SM = nullptr);
 
+/// Tier-5f — unify mixed-width integer stores to the same
+/// `matlab.alloc` slot via `arith.extsi`. The SV pipeline's
+/// fi-saturate path produces i64 intermediates from fi-multiplies
+/// on persistent fetches, while pragma-typed function args + fi
+/// literals stay at the declared width (typically i32). A
+/// saturation block emitted as `if upper / elseif lower / else
+/// passthrough` ends up with i32 rail stores + i64 passthrough
+/// stores into the same `clamp` slot; HWLegalize then rejects the
+/// function with "result has unsynthesizable type" because the
+/// slot's load returns `none`.
+///
+/// This pass walks every `matlab.alloc` and, when its stores have
+/// mixed integer widths, sign-extends narrower stores to the
+/// widest store width via `arith.extsi`. Every `matlab.load` on
+/// the slot gets its result type retyped to the unified width;
+/// the enclosing function signature is refreshed if any load
+/// feeds a `func.return`.  Slots whose stores aren't all integers
+/// are left alone — real type bugs that should surface at
+/// HWLegalize anyway.
+///
+/// Runs between `runLowerScalarSlots` and `runHWLegalize` in the
+/// SV emit lane. Returns true if the module changed.
+bool runUnifyMixedWidthStores(mlir::ModuleOp M);
+
 /// Bit-width inference for the SystemVerilog backend. Walks the module
 /// and verifies every SSA value carries a type that the SV emitter
 /// can render: `i1` (→ `logic`), `i8/i16/i32/i64` (signed or unsigned

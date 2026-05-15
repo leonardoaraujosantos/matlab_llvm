@@ -110,6 +110,17 @@ Tier-5 carve-outs (separable follow-ups):
   mux. Software targets keep the pure-arith form (compact and
   branch-free). Demos: `stateless_mixer.mflow` emits clean SV
   with the saturation rails visible in the always_comb block.
+- ~~Mixed-width-store unifier (the full discrete PID case)~~
+  ✓ shipped 2026-05-15. New
+  `lib/MLIR/Passes/UnifyMixedWidthStores.cpp` runs between
+  `runLowerScalarSlots` and `runHWLegalize`. Walks every
+  `matlab.alloc` with mixed-width integer stores and
+  sign-extends narrower stores to the widest store width. Then
+  retypes the slot + loads + enclosing function's return type.
+  Closes the **full PID + saturation → SV** path: 50ms-sampled
+  PID controller now emits clean SV with both state regs
+  (s_iacc, s_prev_err), the saturation 3-way mux, and the
+  always_ff tick block.
 - `signal_transfer_fcn` / `signal_state_space` /
   `signal_zero_pole` (continuous → discrete) — need bilinear or
   matrix-exponential discretization.

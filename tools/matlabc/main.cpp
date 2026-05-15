@@ -10561,6 +10561,20 @@ int main(int Argc, char **Argv) {
           mlirgen::runRefineFuncSigs(M);
           mlirgen::runLowerScalarSlots(M);
           mlirgen::runMem2RegLite(M);
+          // Tier-5f — unify mixed-width integer stores into the
+          // same matlab.alloc slot (the saturation+persistent
+          // pattern: i32 rails + i64 passthrough). Sign-extends
+          // narrower stores and retypes the slot's loads so
+          // HWLegalize sees a consistent width.  Idempotent on
+          // already-uniform slots.
+          if (mlirgen::runUnifyMixedWidthStores(M)) {
+            // The unified slot now has a concrete integer type;
+            // LowerScalarSlots can lower it to llvm.alloca on a
+            // re-run.  Then Mem2RegLite picks up the alloca that
+            // becomes a single-writer scalar.
+            mlirgen::runLowerScalarSlots(M);
+            mlirgen::runMem2RegLite(M);
+          }
           if (getenv("DUMP_AFTER_F")) mlirgen::printModule(std::cerr, M);
 
           // Phase 5.1: replace runtime-call `matlab_fi_sat_s64` /

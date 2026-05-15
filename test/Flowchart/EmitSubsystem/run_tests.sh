@@ -386,6 +386,39 @@ sv_sat_smoke() {
 }
 sv_sat_smoke
 
+# Tier-5f — full discrete PID with saturation → SV. Combines
+# stateful (discrete integrator, unit delay), fi-math width
+# equalising (Tier-5c), saturation if/elseif/else (Tier-5d), and
+# the mixed-width-store unifier (Tier-5f). Checks the module has
+# both state registers (s_iacc, s_prev_err) AND the saturation
+# rails in the always_comb block.
+sv_pid_smoke() {
+  local sv="$SCRATCH/discrete_pid_sv.sv"
+  "$MATLABC" -emit-sv "$EX/discrete_pid.mflow" --subsystem discrete_pid \
+       > "$sv" 2> "$SCRATCH/emit.err"
+  if ! grep -q "module discrete_pid" "$sv"; then
+    fail=$((fail+1)); fails+=("discrete_pid SV (missing module)")
+    sed 's/^/  /' "$SCRATCH/emit.err" >&2
+    return
+  fi
+  if ! grep -q "logic signed \[31:0\] s_iacc;" "$sv" \
+       || ! grep -q "logic signed \[31:0\] s_prev_err;" "$sv"; then
+    fail=$((fail+1)); fails+=("discrete_pid SV (missing state regs)")
+    return
+  fi
+  if ! grep -q "if (ctrl > " "$sv" \
+       || ! grep -q "< -" "$sv"; then
+    fail=$((fail+1)); fails+=("discrete_pid SV (missing saturation rails)")
+    return
+  fi
+  if ! grep -q "always_ff @(posedge clk" "$sv"; then
+    fail=$((fail+1)); fails+=("discrete_pid SV (no always_ff)")
+    return
+  fi
+  pass=$((pass+1))
+}
+sv_pid_smoke
+
 # Tier 5 — continuous block must be rejected with a sourced error
 # in HDL emit (no implicit auto-discretisation).
 sv_reject() {
