@@ -250,6 +250,21 @@ ST_LINE=$("$MATLABC" -simulate --dry-run "$EX/sample_time_inherit.mflow" 2>&1 | 
 check "gain block inherits discrete 0.1s" \
   "[[ '$ST_LINE' == *'sample=discrete period=0.1'* ]]" ""
 
+#--- stiff_bdf (§17.5 #3): ode15s implicit BDF1 with Newton ---------------
+SB="$("$MATLABC" -simulate "$EX/stiff_bdf.mflow")"
+SB_HEAD=$(printf '%s\n' "$SB" | head -1)
+check "stiff_bdf header" "[[ '$SB_HEAD' == 't,drive,plant,scope' ]]" ""
+# Stiff plant 1/(0.0001·s+1) driven by 100·cos(t). Step h=0.1
+# would explode DOPRI5 (h·|λ|=1000 >> 2.78 stability bound).
+# BDF1 + Newton iteration is L-stable: plant ≈ drive (phase lag
+# atan(1·0.0001) ≈ 1e-4 rad, negligible).
+SB_T05=$(printf '%s\n' "$SB" | awk -F, 'NR>1 && $1+0==0.5 {print $3-$2; exit}')
+check "stiff plant tracks drive at t=0.5" \
+  "awk 'BEGIN{exit !(($SB_T05)^2 < 1e-2)}'" ""
+SB_T2=$(printf '%s\n' "$SB" | awk -F, 'NR>1 && $1+0==2.0 {print $3-$2; exit}')
+check "stiff plant tracks drive at t=2.0" \
+  "awk 'BEGIN{exit !(($SB_T2)^2 < 1e-2)}'" ""
+
 #--- bouncing_ball (§17.5 #2): integrator-reset port ----------------------
 BB="$("$MATLABC" -simulate "$EX/bouncing_ball.mflow")"
 BB_HEAD=$(printf '%s\n' "$BB" | head -1)

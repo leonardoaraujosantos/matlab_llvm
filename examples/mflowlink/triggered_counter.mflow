@@ -1,75 +1,296 @@
 {
-  "schema": "matforge.flowchart",
-  "version": "0.1.0",
-  "entry": "triggered_counter",
-  "settings": {
-    "kind": "signal_flow",
-    "solver": {
-      "type": "variable_step",
-      "algorithm": "ode45",
-      "startTime": 0.0,
-      "stopTime": 5.0,
-      "maxStep": "0.01",
-      "zeroCrossing": true,
-      "algebraicLoopMethod": "trust_region"
-    },
-    "snapshot": { "enabled": true, "depth": 256, "fields": "states" }
-  },
-  "flows": [
+  "entry" : "triggered_counter",
+  "flows" : [
     {
-      "id": "flow_triggered_counter",
-      "kind": "program",
-      "name": "triggered_counter",
-      "signature": { "inputs": [], "outputs": [] },
-      "nodes": [
-        { "id": "clk", "kind": "signal_function_call_generator",
-          "data": { "log_signal": true,
-                    "params": { "period": 1.0, "phaseDelay": 0.0 } },
-          "ports": { "in": [], "out": [{"id": "out"}] } },
-        { "id": "src", "kind": "signal_ramp",
-          "data": { "log_signal": true,
-                    "params": { "slope": 1.0, "startTime": 0.0,
-                                "initialOutput": 0.0 } },
-          "ports": { "in": [], "out": [{"id": "out"}] } },
-        { "id": "trig", "kind": "signal_triggered_subsystem",
-          "data": { "flow_id": "flow_triggered_inner",
-                    "enable_block": "clk" },
-          "ports": { "in":  [{"id": "in"}],
-                     "out": [{"id": "out"}] } },
-        { "id": "scope", "kind": "signal_scope",
-          "data": { "params": { "title": "triggered_counter" } },
-          "ports": { "in": [{"id": "in"}], "out": [] } }
+      "edges" : [
+        {
+          "from" : {
+            "node" : "src",
+            "port" : "out"
+          },
+          "id" : "e1",
+          "kind" : "data",
+          "to" : {
+            "node" : "trig",
+            "port" : "in"
+          }
+        },
+        {
+          "from" : {
+            "node" : "trig",
+            "port" : "out"
+          },
+          "id" : "e2",
+          "kind" : "data",
+          "to" : {
+            "node" : "scope",
+            "port" : "in"
+          }
+        }
       ],
-      "edges": [
-        { "id": "e1", "kind": "data",
-          "from": {"node": "src",  "port": "out"}, "to": {"node": "trig",  "port": "in"} },
-        { "id": "e2", "kind": "data",
-          "from": {"node": "trig", "port": "out"}, "to": {"node": "scope", "port": "in"} }
-      ]
+      "id" : "flow_triggered_counter",
+      "kind" : "program",
+      "name" : "triggered_counter",
+      "nodes" : [
+        {
+          "data" : {
+            "log_signal" : true,
+            "params" : {
+              "period" : 1,
+              "phaseDelay" : 0
+            }
+          },
+          "id" : "clk",
+          "kind" : "signal_function_call_generator",
+          "label" : "",
+          "ports" : {
+            "in" : [
+
+            ],
+            "out" : [
+              {
+                "id" : "out"
+              }
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 80,
+              "y" : 172
+            }
+          }
+        },
+        {
+          "data" : {
+            "log_signal" : true,
+            "params" : {
+              "initialOutput" : 0,
+              "slope" : 1,
+              "startTime" : 0
+            }
+          },
+          "id" : "src",
+          "kind" : "signal_ramp",
+          "label" : "",
+          "ports" : {
+            "in" : [
+
+            ],
+            "out" : [
+              {
+                "id" : "out"
+              }
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 80,
+              "y" : 172
+            }
+          }
+        },
+        {
+          "data" : {
+            "enable_block" : "clk",
+            "flow_id" : "flow_triggered_inner"
+          },
+          "id" : "trig",
+          "kind" : "signal_triggered_subsystem",
+          "label" : "",
+          "ports" : {
+            "in" : [
+              {
+                "id" : "in"
+              }
+            ],
+            "out" : [
+              {
+                "id" : "out"
+              }
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 280,
+              "y" : 160
+            }
+          }
+        },
+        {
+          "data" : {
+            "log_signal" : true,
+            "params" : {
+              "title" : "triggered_counter"
+            }
+          },
+          "id" : "scope",
+          "kind" : "signal_scope",
+          "label" : "",
+          "ports" : {
+            "in" : [
+              {
+                "id" : "in"
+              }
+            ],
+            "out" : [
+
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 480,
+              "y" : 172
+            }
+          }
+        }
+      ],
+      "signature" : {
+        "inputs" : [
+
+        ],
+        "outputs" : [
+
+        ]
+      }
     },
     {
-      "id": "flow_triggered_inner",
-      "kind": "function",
-      "name": "triggered_inner",
-      "signature": { "inputs": ["in"], "outputs": ["out"] },
-      "nodes": [
-        { "id": "in_p", "kind": "signal_inport",
-          "data": { "port": "in" },
-          "ports": { "in": [], "out": [{"id": "out"}] } },
-        { "id": "pass", "kind": "signal_gain",
-          "data": { "log_signal": true,
-                    "params": { "gain": 1.0 } },
-          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
-        { "id": "out_p", "kind": "signal_outport",
-          "data": { "port": "out" },
-          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } }
+      "edges" : [
+        {
+          "from" : {
+            "node" : "in",
+            "port" : "out"
+          },
+          "id" : "ei1",
+          "kind" : "data",
+          "to" : {
+            "node" : "pass",
+            "port" : "in"
+          }
+        },
+        {
+          "from" : {
+            "node" : "pass",
+            "port" : "out"
+          },
+          "id" : "ei2",
+          "kind" : "data",
+          "to" : {
+            "node" : "out",
+            "port" : "in"
+          }
+        }
       ],
-      "edges": [
-        { "id": "ei1", "kind": "data",
-          "from": {"node": "in_p", "port": "out"}, "to": {"node": "pass",  "port": "in"} },
-        { "id": "ei2", "kind": "data",
-          "from": {"node": "pass", "port": "out"}, "to": {"node": "out_p", "port": "in"} }
-      ]
+      "id" : "flow_triggered_inner",
+      "kind" : "function",
+      "name" : "triggered_inner",
+      "nodes" : [
+        {
+          "data" : {
+
+          },
+          "id" : "in",
+          "kind" : "signal_inport",
+          "label" : "",
+          "ports" : {
+            "in" : [
+
+            ],
+            "out" : [
+              {
+                "id" : "out"
+              }
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 0,
+              "y" : 0
+            }
+          }
+        },
+        {
+          "data" : {
+            "log_signal" : true,
+            "params" : {
+              "gain" : 1
+            }
+          },
+          "id" : "pass",
+          "kind" : "signal_gain",
+          "label" : "",
+          "ports" : {
+            "in" : [
+              {
+                "id" : "in"
+              }
+            ],
+            "out" : [
+              {
+                "id" : "out"
+              }
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 0,
+              "y" : 0
+            }
+          }
+        },
+        {
+          "data" : {
+
+          },
+          "id" : "out",
+          "kind" : "signal_outport",
+          "label" : "",
+          "ports" : {
+            "in" : [
+              {
+                "id" : "in"
+              }
+            ],
+            "out" : [
+              {
+                "id" : "out"
+              }
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 0,
+              "y" : 0
+            }
+          }
+        }
+      ],
+      "signature" : {
+        "inputs" : [
+          "in"
+        ],
+        "outputs" : [
+          "out"
+        ]
+      }
     }
-  ]
+  ],
+  "schema" : "matforge.flowchart",
+  "settings" : {
+    "kind" : "signal_flow",
+    "snapshot" : {
+      "depth" : 256,
+      "enabled" : true,
+      "fields" : "states"
+    },
+    "solver" : {
+      "algebraicLoopMethod" : "trust_region",
+      "algorithm" : "ode45",
+      "maxStep" : "0.01",
+      "startTime" : 0,
+      "stopTime" : 5,
+      "type" : "variable_step",
+      "zeroCrossing" : true
+    }
+  },
+  "version" : "0.1.0"
 }

@@ -558,10 +558,14 @@ MflowLinkSim::MflowLinkSim(const MflowLinkModel &M) : M_(M) {
   }
   // Item-2 — adaptive step is enabled when the model asks for
   // variable_step + an adaptive algorithm. Fixed-step mode keeps
-  // the legacy classic RK4 path.
+  // the legacy classic RK4 path. The ode15s lane (§17.5 #3) ships
+  // as fixed-step implicit BDF1 — the user picks the step via
+  // `settings.solver.maxStep`; BDF1 is L-stable so stiff systems
+  // run at step sizes DOPRI5 wouldn't survive.
   AdaptiveSolver_ = (M_.Solver.Type != "fixed_step") &&
                     (M_.Solver.Algorithm == "ode45" ||
                      M_.Solver.Algorithm == "ode23");
+  Implicit_ = (M_.Solver.Algorithm == "ode15s");
   CurrentAdaptiveH_ = StepSize_;
 
   if (M_.Snapshot.Enabled && M_.Snapshot.Depth > 0)
@@ -1664,6 +1668,114 @@ void dopri5Step(MflowLinkSim &Sim,
     Err[I] = E;
   }
 }
+
+//===-----------------------------------------------------------------===//
+// §17.5 #3 — Implicit Backward Euler (BDF1) substep for stiff
+// systems. Solves `y_new = y_old + h · f(t_old + h, y_new)` via
+// fixed-point iteration, starting from an explicit-Euler predictor.
+//
+// L-stable: the test equation `y' = λ·y` with `Re(λ) → -∞` gives
+// `y_new = y_old / (1 - h·λ)` → 0 — the right behaviour for stiff
+// dissipation. DOPRI5 needs `|h·λ| < 2.78` to stay stable; BDF1
+// has no stability bound, so the user can pick a step size matched
+// to accuracy rather than stability.
+//
+// MVP caveat: fixed-point iteration converges only when
+// `h · |∂f/∂y| < 1`. True stiff stability needs Newton with a
+// Jacobian (or quasi-Newton). Documented in §17.5.
+//===-----------------------------------------------------------===//
+
+// Tiny dense LU + back-substitute for the Newton update. Returns
+// false on singular/zero pivots — caller falls back to a smaller
+// step.
+bool solveDense(std::vector<double> &J, int N, std::vector<double> &B) {
+  // J stored row-major: J[i*N+j]. Solve J·x = B in place; B receives x.
+  for (int K = 0; K < N; ++K) {
+    // Partial pivoting.
+    int Pivot = K;
+    double Best = std::fabs(J[K * N + K]);
+    for (int I = K + 1; I < N; ++I) {
+      double V = std::fabs(J[I * N + K]);
+      if (V > Best) { Best = V; Pivot = I; }
+    }
+    if (Best < 1e-15) return false;
+    if (Pivot != K) {
+      for (int J2 = 0; J2 < N; ++J2)
+        std::swap(J[K * N + J2], J[Pivot * N + J2]);
+      std::swap(B[K], B[Pivot]);
+    }
+    for (int I = K + 1; I < N; ++I) {
+      double F = J[I * N + K] / J[K * N + K];
+      for (int J2 = K; J2 < N; ++J2)
+        J[I * N + J2] -= F * J[K * N + J2];
+      B[I] -= F * B[K];
+    }
+  }
+  // Back-substitute.
+  for (int I = N - 1; I >= 0; --I) {
+    double S = B[I];
+    for (int J2 = I + 1; J2 < N; ++J2) S -= J[I * N + J2] * B[J2];
+    B[I] = S / J[I * N + I];
+  }
+  return true;
+}
+
+void bdf1Step(MflowLinkSim &Sim,
+              void (MflowLinkSim::*Deriv)(double, const double *, double *),
+              double TBegin, double H,
+              const std::vector<double> &YIn,
+              std::vector<double> &YOut,
+              double RelTol, double AbsTol) {
+  // Newton iteration on G(y) = y - y_old - h·f(t+h, y). The
+  // Jacobian J = ∂G/∂y = I - h · ∂f/∂y is approximated by
+  // forward-difference perturbation. For stiff y' = λ·y with
+  // Re(λ) → -∞, J = 1 - h·λ → ∞ and the Newton update y_new =
+  // y_old/(1 - h·λ) → 0 — exact L-stability.
+  const int Nx = static_cast<int>(YIn.size());
+  YOut.assign(Nx, 0.0);
+  if (Nx == 0) return;
+  std::vector<double> F(Nx), FP(Nx), G(Nx), Delta(Nx);
+  // Predictor: explicit Euler.
+  (Sim.*Deriv)(TBegin, YIn.data(), F.data());
+  for (int I = 0; I < Nx; ++I) YOut[I] = YIn[I] + H * F[I];
+
+  for (int It = 0; It < 20; ++It) {
+    // Residual G(YOut).
+    (Sim.*Deriv)(TBegin + H, YOut.data(), F.data());
+    for (int I = 0; I < Nx; ++I) G[I] = YOut[I] - YIn[I] - H * F[I];
+
+    // Convergence on G.
+    double GNorm = 0.0;
+    for (int I = 0; I < Nx; ++I) {
+      double Sc = AbsTol + RelTol * std::fabs(YOut[I]);
+      if (Sc < 1e-15) Sc = 1e-15;
+      double E = std::fabs(G[I]) / Sc;
+      if (E > GNorm) GNorm = E;
+    }
+    if (GNorm < 1.0) break;
+
+    // Finite-difference Jacobian. Column j: J[:,j] = (G(y+eps·e_j)
+    // − G(y)) / eps = e_j − h·(f(y+eps·e_j) − f(y))/eps. Reuses F
+    // for the unperturbed f and FP for the perturbed.
+    std::vector<double> J(Nx * Nx, 0.0);
+    std::vector<double> YPert = YOut;
+    for (int Jc = 0; Jc < Nx; ++Jc) {
+      double Eps = 1e-7 * std::max(1.0, std::fabs(YOut[Jc]));
+      YPert[Jc] += Eps;
+      (Sim.*Deriv)(TBegin + H, YPert.data(), FP.data());
+      YPert[Jc] = YOut[Jc];
+      for (int I = 0; I < Nx; ++I) {
+        double Dfdy = (FP[I] - F[I]) / Eps;
+        J[I * Nx + Jc] = (I == Jc ? 1.0 : 0.0) - H * Dfdy;
+      }
+    }
+
+    // Newton update: solve J·Δ = G, then YOut −= Δ.
+    Delta = G;
+    if (!solveDense(J, Nx, Delta)) break; // singular — bail
+    for (int I = 0; I < Nx; ++I) YOut[I] -= Delta[I];
+  }
+}
 } // namespace
 
 double MflowLinkSim::stepMajor() {
@@ -1707,7 +1819,14 @@ double MflowLinkSim::stepMajor() {
 
   std::vector<double> K1(Nx), K2(Nx), K3(Nx), K4(Nx), Yt(Nx), Y1(Nx);
   if (Nx > 0) {
-    if (AdaptiveSolver_) {
+    if (Implicit_) {
+      // §17.5 #3 — BDF1 fixed-step implicit Backward Euler for
+      // stiff systems. No step-size adaptation in this MVP; the
+      // user picks `settings.solver.maxStep`.
+      bdf1Step(*this, &MflowLinkSim::derivative, T_, H, Y_, Y1,
+               M_.Solver.RelTol, M_.Solver.AbsTol);
+      Y_ = std::move(Y1);
+    } else if (AdaptiveSolver_) {
       // Item-2 — Dormand-Prince RK4(5) with PI step-size control.
       // Try the full window `H`; if the embedded error estimate
       // exceeds tolerance, shrink and retry. Each accepted step

@@ -50,6 +50,18 @@
             "node" : "n_signal_scope_1",
             "port" : "in"
           }
+        },
+        {
+          "from" : {
+            "node" : "src",
+            "port" : "out"
+          },
+          "id" : "e_2",
+          "kind" : "data",
+          "to" : {
+            "node" : "n_signal_scope_2",
+            "port" : "in"
+          }
         }
       ],
       "id" : "flow_lowpass",
@@ -179,6 +191,30 @@
           },
           "id" : "n_signal_scope_1",
           "kind" : "signal_scope",
+          "label" : "Scope2",
+          "ports" : {
+            "in" : [
+              {
+                "id" : "in"
+              }
+            ],
+            "out" : [
+
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 506.98046875,
+              "y" : 276.98046875
+            }
+          }
+        },
+        {
+          "data" : {
+            "log_signal" : true
+          },
+          "id" : "n_signal_scope_2",
+          "kind" : "signal_scope",
           "label" : "Scope",
           "ports" : {
             "in" : [
@@ -192,8 +228,8 @@
           },
           "ui" : {
             "position" : {
-              "x" : 500.98046875,
-              "y" : 270.98046875
+              "x" : 288.98046875,
+              "y" : 268.98046875
             }
           }
         }

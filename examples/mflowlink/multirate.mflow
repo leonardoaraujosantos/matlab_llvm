@@ -1,54 +1,194 @@
 {
-  "schema": "matforge.flowchart",
-  "version": "0.1.0",
-  "entry": "multirate",
-  "settings": {
-    "kind": "signal_flow",
-    "solver": {
-      "type": "variable_step",
-      "algorithm": "ode45",
-      "startTime": 0.0,
-      "stopTime": 2.0,
-      "maxStep": "0.005",
-      "relTol": 1e-3,
-      "absTol": 1e-6,
-      "zeroCrossing": true,
-      "algebraicLoopMethod": "trust_region"
-    },
-    "snapshot": { "enabled": true, "depth": 256, "fields": "states" }
-  },
-  "flows": [
+  "entry" : "multirate",
+  "flows" : [
     {
-      "id": "flow_mr",
-      "kind": "program",
-      "name": "multirate",
-      "signature": { "inputs": [], "outputs": [] },
-      "nodes": [
-        { "id": "src", "kind": "signal_sine",
-          "data": { "log_signal": true,
-                    "params": { "amplitude": 1.0, "bias": 0.0,
-                                "frequency": 6.2831853, "phase": 0.0 } },
-          "ports": { "in": [], "out": [{"id": "out"}] } },
-        { "id": "zoh", "kind": "signal_zoh",
-          "data": { "log_signal": true,
-                    "params": { "sampleTime": 0.1 } },
-          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
-        { "id": "plant", "kind": "signal_transfer_fcn",
-          "data": { "log_signal": true,
-                    "params": { "num": "1", "den": "1, 1" } },
-          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
-        { "id": "scope", "kind": "signal_scope",
-          "data": { "params": { "title": "multirate" } },
-          "ports": { "in": [{"id": "in"}], "out": [] } }
+      "edges" : [
+        {
+          "from" : {
+            "node" : "src",
+            "port" : "out"
+          },
+          "id" : "e1",
+          "kind" : "data",
+          "to" : {
+            "node" : "zoh",
+            "port" : "in"
+          }
+        },
+        {
+          "from" : {
+            "node" : "zoh",
+            "port" : "out"
+          },
+          "id" : "e2",
+          "kind" : "data",
+          "to" : {
+            "node" : "plant",
+            "port" : "in"
+          }
+        },
+        {
+          "from" : {
+            "node" : "plant",
+            "port" : "out"
+          },
+          "id" : "e3",
+          "kind" : "data",
+          "to" : {
+            "node" : "scope",
+            "port" : "in"
+          }
+        }
       ],
-      "edges": [
-        { "id": "e1", "kind": "data",
-          "from": {"node": "src",   "port": "out"}, "to": {"node": "zoh",   "port": "in"} },
-        { "id": "e2", "kind": "data",
-          "from": {"node": "zoh",   "port": "out"}, "to": {"node": "plant", "port": "in"} },
-        { "id": "e3", "kind": "data",
-          "from": {"node": "plant", "port": "out"}, "to": {"node": "scope", "port": "in"} }
-      ]
+      "id" : "flow_mr",
+      "kind" : "program",
+      "name" : "multirate",
+      "nodes" : [
+        {
+          "data" : {
+            "log_signal" : true,
+            "params" : {
+              "amplitude" : 1,
+              "bias" : 0,
+              "frequency" : 6.2831853,
+              "phase" : 0
+            }
+          },
+          "id" : "src",
+          "kind" : "signal_sine",
+          "label" : "",
+          "ports" : {
+            "in" : [
+
+            ],
+            "out" : [
+              {
+                "id" : "out"
+              }
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 80,
+              "y" : 172
+            }
+          }
+        },
+        {
+          "data" : {
+            "log_signal" : true,
+            "params" : {
+              "sampleTime" : 0.1
+            }
+          },
+          "id" : "zoh",
+          "kind" : "signal_zoh",
+          "label" : "",
+          "ports" : {
+            "in" : [
+              {
+                "id" : "in"
+              }
+            ],
+            "out" : [
+              {
+                "id" : "out"
+              }
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 280,
+              "y" : 172
+            }
+          }
+        },
+        {
+          "data" : {
+            "log_signal" : true,
+            "params" : {
+              "den" : "1, 1",
+              "num" : "1"
+            }
+          },
+          "id" : "plant",
+          "kind" : "signal_transfer_fcn",
+          "label" : "",
+          "ports" : {
+            "in" : [
+              {
+                "id" : "in"
+              }
+            ],
+            "out" : [
+              {
+                "id" : "out"
+              }
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 480,
+              "y" : 172
+            }
+          }
+        },
+        {
+          "data" : {
+            "params" : {
+              "title" : "multirate"
+            }
+          },
+          "id" : "scope",
+          "kind" : "signal_scope",
+          "label" : "",
+          "ports" : {
+            "in" : [
+              {
+                "id" : "in"
+              }
+            ],
+            "out" : [
+
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 680,
+              "y" : 172
+            }
+          }
+        }
+      ],
+      "signature" : {
+        "inputs" : [
+
+        ],
+        "outputs" : [
+
+        ]
+      }
     }
-  ]
+  ],
+  "schema" : "matforge.flowchart",
+  "settings" : {
+    "kind" : "signal_flow",
+    "snapshot" : {
+      "depth" : 256,
+      "enabled" : true,
+      "fields" : "states"
+    },
+    "solver" : {
+      "absTol" : 1e-06,
+      "algebraicLoopMethod" : "trust_region",
+      "algorithm" : "ode45",
+      "maxStep" : "0.005",
+      "relTol" : 0.001,
+      "startTime" : 0,
+      "stopTime" : 2,
+      "type" : "variable_step",
+      "zeroCrossing" : true
+    }
+  },
+  "version" : "0.1.0"
 }

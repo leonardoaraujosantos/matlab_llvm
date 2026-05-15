@@ -1,0 +1,11 @@
+MflowLinkModel entry=stiff_bdf blocks=3 edges=2
+  solver type=fixed_step algorithm=ode15s startTime=0 stopTime=5
+  states continuous=1 discrete=0
+  exec-order:
+    0 drive kind=signal_sine sample=fixed_in_minor log
+    1 plant kind=signal_transfer_fcn sample=continuous cont-states=1 loop-breaker log
+    2 scope kind=signal_scope sample=fixed_in_minor
+  zero-crossings: none
+  edges:
+    e1 drive:out -> plant:in
+    e2 plant:out -> scope:in

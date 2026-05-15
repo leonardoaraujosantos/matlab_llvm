@@ -1,71 +1,310 @@
 {
-  "schema": "matforge.flowchart",
-  "version": "0.1.0",
-  "entry": "di_methods",
-  "settings": {
-    "kind": "signal_flow",
-    "solver": {
-      "type": "variable_step",
-      "algorithm": "ode45",
-      "startTime": 0.0,
-      "stopTime": 2.0,
-      "maxStep": "0.005",
-      "zeroCrossing": true,
-      "algebraicLoopMethod": "trust_region"
-    },
-    "snapshot": { "enabled": true, "depth": 256, "fields": "states" }
-  },
-  "flows": [
+  "entry" : "di_methods",
+  "flows" : [
     {
-      "id": "flow_di_methods",
-      "kind": "program",
-      "name": "di_methods",
-      "signature": { "inputs": [], "outputs": [] },
-      "nodes": [
-        { "id": "u_ramp", "kind": "signal_ramp",
-          "data": { "log_signal": true,
-                    "params": { "slope": 1.0, "startTime": 0.0,
-                                "initialOutput": 0.0 } },
-          "ports": { "in": [], "out": [{"id": "out"}] } },
-        { "id": "di_fe", "kind": "signal_discrete_integrator",
-          "data": { "log_signal": true,
-                    "params": { "method": "ForwardEuler",
-                                "initialCondition": 0.0,
-                                "sampleTime": 0.1 } },
-          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
-        { "id": "di_be", "kind": "signal_discrete_integrator",
-          "data": { "log_signal": true,
-                    "params": { "method": "BackwardEuler",
-                                "initialCondition": 0.0,
-                                "sampleTime": 0.1 } },
-          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
-        { "id": "di_tr", "kind": "signal_discrete_integrator",
-          "data": { "log_signal": true,
-                    "params": { "method": "Trapezoidal",
-                                "initialCondition": 0.0,
-                                "sampleTime": 0.1 } },
-          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
-        { "id": "term1", "kind": "signal_terminator",
-          "ports": { "in": [{"id": "in"}], "out": [] } },
-        { "id": "term2", "kind": "signal_terminator",
-          "ports": { "in": [{"id": "in"}], "out": [] } },
-        { "id": "term3", "kind": "signal_terminator",
-          "ports": { "in": [{"id": "in"}], "out": [] } }
+      "edges" : [
+        {
+          "from" : {
+            "node" : "u_ramp",
+            "port" : "out"
+          },
+          "id" : "e_fe_in",
+          "kind" : "data",
+          "to" : {
+            "node" : "di_fe",
+            "port" : "in"
+          }
+        },
+        {
+          "from" : {
+            "node" : "u_ramp",
+            "port" : "out"
+          },
+          "id" : "e_be_in",
+          "kind" : "data",
+          "to" : {
+            "node" : "di_be",
+            "port" : "in"
+          }
+        },
+        {
+          "from" : {
+            "node" : "u_ramp",
+            "port" : "out"
+          },
+          "id" : "e_tr_in",
+          "kind" : "data",
+          "to" : {
+            "node" : "di_tr",
+            "port" : "in"
+          }
+        },
+        {
+          "from" : {
+            "node" : "di_fe",
+            "port" : "out"
+          },
+          "id" : "e_fe_sink",
+          "kind" : "data",
+          "to" : {
+            "node" : "term1",
+            "port" : "in"
+          }
+        },
+        {
+          "from" : {
+            "node" : "di_be",
+            "port" : "out"
+          },
+          "id" : "e_be_sink",
+          "kind" : "data",
+          "to" : {
+            "node" : "term2",
+            "port" : "in"
+          }
+        },
+        {
+          "from" : {
+            "node" : "di_tr",
+            "port" : "out"
+          },
+          "id" : "e_tr_sink",
+          "kind" : "data",
+          "to" : {
+            "node" : "term3",
+            "port" : "in"
+          }
+        }
       ],
-      "edges": [
-        { "id": "e_fe_in", "kind": "data",
-          "from": {"node": "u_ramp", "port": "out"}, "to": {"node": "di_fe", "port": "in"} },
-        { "id": "e_be_in", "kind": "data",
-          "from": {"node": "u_ramp", "port": "out"}, "to": {"node": "di_be", "port": "in"} },
-        { "id": "e_tr_in", "kind": "data",
-          "from": {"node": "u_ramp", "port": "out"}, "to": {"node": "di_tr", "port": "in"} },
-        { "id": "e_fe_sink", "kind": "data",
-          "from": {"node": "di_fe", "port": "out"}, "to": {"node": "term1", "port": "in"} },
-        { "id": "e_be_sink", "kind": "data",
-          "from": {"node": "di_be", "port": "out"}, "to": {"node": "term2", "port": "in"} },
-        { "id": "e_tr_sink", "kind": "data",
-          "from": {"node": "di_tr", "port": "out"}, "to": {"node": "term3", "port": "in"} }
-      ]
+      "id" : "flow_di_methods",
+      "kind" : "program",
+      "name" : "di_methods",
+      "nodes" : [
+        {
+          "data" : {
+            "log_signal" : true,
+            "params" : {
+              "initialOutput" : 0,
+              "slope" : 1,
+              "startTime" : 0
+            }
+          },
+          "id" : "u_ramp",
+          "kind" : "signal_ramp",
+          "label" : "",
+          "ports" : {
+            "in" : [
+
+            ],
+            "out" : [
+              {
+                "id" : "out"
+              }
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 80,
+              "y" : 172
+            }
+          }
+        },
+        {
+          "data" : {
+            "log_signal" : true,
+            "params" : {
+              "initialCondition" : 0,
+              "method" : "ForwardEuler",
+              "sampleTime" : 0.1
+            }
+          },
+          "id" : "di_fe",
+          "kind" : "signal_discrete_integrator",
+          "label" : "",
+          "ports" : {
+            "in" : [
+              {
+                "id" : "in"
+              }
+            ],
+            "out" : [
+              {
+                "id" : "out"
+              }
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 280,
+              "y" : 172
+            }
+          }
+        },
+        {
+          "data" : {
+            "log_signal" : true,
+            "params" : {
+              "initialCondition" : 0,
+              "method" : "BackwardEuler",
+              "sampleTime" : 0.1
+            }
+          },
+          "id" : "di_be",
+          "kind" : "signal_discrete_integrator",
+          "label" : "",
+          "ports" : {
+            "in" : [
+              {
+                "id" : "in"
+              }
+            ],
+            "out" : [
+              {
+                "id" : "out"
+              }
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 280,
+              "y" : 282
+            }
+          }
+        },
+        {
+          "data" : {
+            "log_signal" : true,
+            "params" : {
+              "initialCondition" : 0,
+              "method" : "Trapezoidal",
+              "sampleTime" : 0.1
+            }
+          },
+          "id" : "di_tr",
+          "kind" : "signal_discrete_integrator",
+          "label" : "",
+          "ports" : {
+            "in" : [
+              {
+                "id" : "in"
+              }
+            ],
+            "out" : [
+              {
+                "id" : "out"
+              }
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 280,
+              "y" : 392
+            }
+          }
+        },
+        {
+          "data" : {
+
+          },
+          "id" : "term1",
+          "kind" : "signal_terminator",
+          "label" : "",
+          "ports" : {
+            "in" : [
+              {
+                "id" : "in"
+              }
+            ],
+            "out" : [
+
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 480,
+              "y" : 172
+            }
+          }
+        },
+        {
+          "data" : {
+
+          },
+          "id" : "term2",
+          "kind" : "signal_terminator",
+          "label" : "",
+          "ports" : {
+            "in" : [
+              {
+                "id" : "in"
+              }
+            ],
+            "out" : [
+
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 480,
+              "y" : 282
+            }
+          }
+        },
+        {
+          "data" : {
+
+          },
+          "id" : "term3",
+          "kind" : "signal_terminator",
+          "label" : "",
+          "ports" : {
+            "in" : [
+              {
+                "id" : "in"
+              }
+            ],
+            "out" : [
+
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 480,
+              "y" : 392
+            }
+          }
+        }
+      ],
+      "signature" : {
+        "inputs" : [
+
+        ],
+        "outputs" : [
+
+        ]
+      }
     }
-  ]
+  ],
+  "schema" : "matforge.flowchart",
+  "settings" : {
+    "kind" : "signal_flow",
+    "snapshot" : {
+      "depth" : 256,
+      "enabled" : true,
+      "fields" : "states"
+    },
+    "solver" : {
+      "absTol" : 1e-06,
+      "algebraicLoopMethod" : "trust_region",
+      "algorithm" : "ode45",
+      "maxStep" : "0.005",
+      "minStep" : "auto",
+      "relTol" : 0.001,
+      "startTime" : 0,
+      "stopTime" : 2,
+      "type" : "fixed_step",
+      "zeroCrossing" : true
+    }
+  },
+  "version" : "0.1.0"
 }

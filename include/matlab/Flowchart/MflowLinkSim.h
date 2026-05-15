@@ -269,6 +269,11 @@ private:
   // an adaptive one (ode45 / ode23). Fixed-step mode falls back to
   // classic RK4 at `StepSize_`.
   bool   AdaptiveSolver_ = false;
+  // §17.5 #3 — implicit BDF1 lane for stiff systems. Gated on
+  // `settings.solver.algorithm == "ode15s"`. Fixed-step, uses
+  // `StepSize_`. L-stable, so steps can be much larger than
+  // DOPRI5's stability bound on stiff problems.
+  bool   Implicit_ = false;
   double CurrentAdaptiveH_ = 0.01;
   // Scalar / first-element output per block. Every evaluator writes
   // this slot whether the block is scalar or vector — downstream
