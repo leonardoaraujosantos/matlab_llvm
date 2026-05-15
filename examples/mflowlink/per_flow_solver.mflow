@@ -1,0 +1,83 @@
+{
+  "schema": "matforge.flowchart",
+  "version": "0.1.0",
+  "entry": "per_flow_solver",
+  "settings": {
+    "kind": "signal_flow",
+    "solver": {
+      "type": "variable_step",
+      "algorithm": "ode45",
+      "startTime": 0.0,
+      "stopTime": 2.0,
+      "maxStep": "0.05",
+      "relTol": 1e-3,
+      "absTol": 1e-6,
+      "zeroCrossing": true,
+      "algebraicLoopMethod": "trust_region"
+    },
+    "snapshot": { "enabled": true, "depth": 256, "fields": "states" }
+  },
+  "flows": [
+    {
+      "id": "flow_main",
+      "kind": "program",
+      "name": "per_flow_solver",
+      "signature": { "inputs": [], "outputs": [] },
+      "nodes": [
+        { "id": "drive", "kind": "signal_sine",
+          "data": { "log_signal": true,
+                    "params": { "amplitude": 1.0, "bias": 0.0,
+                                "frequency": 6.2831853, "phase": 0.0 } },
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+        { "id": "loose_plant", "kind": "signal_transfer_fcn",
+          "data": { "log_signal": true,
+                    "params": { "num": "1", "den": "1, 1" } },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "tight_sub", "kind": "signal_subsystem",
+          "data": { "flow_id": "lib_tight_dynamics" },
+          "ports": { "in":  [{"id": "in"}],
+                     "out": [{"id": "out"}] } },
+        { "id": "tight_scope", "kind": "signal_scope",
+          "data": { "params": { "title": "tight (forced 0.005s)" } },
+          "ports": { "in": [{"id": "in"}], "out": [] } }
+      ],
+      "edges": [
+        { "id": "e1", "kind": "data",
+          "from": {"node": "drive",       "port": "out"}, "to": {"node": "loose_plant", "port": "in"} },
+        { "id": "e2", "kind": "data",
+          "from": {"node": "loose_plant", "port": "out"}, "to": {"node": "tight_sub",   "port": "in"} },
+        { "id": "e3", "kind": "data",
+          "from": {"node": "tight_sub",   "port": "out"}, "to": {"node": "tight_scope", "port": "in"} }
+      ]
+    },
+    {
+      "id": "lib_tight_dynamics",
+      "kind": "library",
+      "name": "tight_dynamics",
+      "signature": { "inputs": ["in"], "outputs": ["out"] },
+      "solver": {
+        "maxStep": "0.005",
+        "relTol": 1e-5,
+        "absTol": 1e-8
+      },
+      "nodes": [
+        { "id": "in",  "kind": "signal_inport",
+          "data": {},
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+        { "id": "tf",  "kind": "signal_transfer_fcn",
+          "data": { "log_signal": true,
+                    "params": { "num": "1", "den": "0.05, 1" } },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "out", "kind": "signal_outport",
+          "data": {},
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } }
+      ],
+      "edges": [
+        { "id": "li1", "kind": "data",
+          "from": {"node": "in",  "port": "out"}, "to": {"node": "tf",  "port": "in"} },
+        { "id": "li2", "kind": "data",
+          "from": {"node": "tf",  "port": "out"}, "to": {"node": "out", "port": "in"} }
+      ]
+    }
+  ]
+}

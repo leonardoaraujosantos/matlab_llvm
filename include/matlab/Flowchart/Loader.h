@@ -103,25 +103,10 @@ struct Signature {
   std::vector<std::string> Outputs;
 };
 
-struct Flow {
-  std::string Id;
-  std::string Kind;         // "program" | "function"
-  std::string Name;
-  Signature Sig;
-  std::vector<Node> Nodes;
-  std::vector<Edge> Edges;
-  SourceLocation Loc;       // points at the flow object
-};
-
 //===----------------------------------------------------------------------===//
-// mflowLink (signal-flow) settings — `settings.solver` / `settings.snapshot`.
-//
-// Only meaningful when `Settings::Kind == "signal_flow"`; absent on a
-// control-flow document. Field names mirror the IDE's `SolverConfig` /
-// `SnapshotConfig` (Matlab_llvm_ide `FlowchartModels.swift`). See
-// `docs/mflow_link_roadmap.md` §5.1. The on-disk JSON keys are
-// camelCase (`startTime`, `relTol`, …) — the loader matches the IDE's
-// `JSONEncoder` output verbatim.
+// mflowLink (signal-flow) solver / snapshot settings — must be
+// defined before `Flow` because per-flow solver overrides hold an
+// optional<SolverConfig> by value.
 //===----------------------------------------------------------------------===//
 
 struct SolverConfig {                       // settings.solver
@@ -139,6 +124,36 @@ struct SnapshotConfig {                     // settings.snapshot
   int  Depth   = 256;
   std::string Fields = "states";            // "states"|"states+inputs"|"all"
 };
+
+struct Flow {
+  std::string Id;
+  std::string Kind;         // "program" | "function"
+  std::string Name;
+  Signature Sig;
+  std::vector<Node> Nodes;
+  std::vector<Edge> Edges;
+  SourceLocation Loc;       // points at the flow object
+  // §17.5 #7 — per-flow solver override. When present, blocks
+  // inlined from this flow inherit `maxStep` / `relTol` / `absTol`
+  // from this config (the rest of the SolverConfig — algorithm,
+  // type, zeroCrossing, algebraicLoopMethod — stays global).
+  // Threaded through the Flattener so nested subsystem boundaries
+  // are honoured.
+  std::optional<SolverConfig> Solver;
+};
+
+//===----------------------------------------------------------------------===//
+// mflowLink (signal-flow) settings — `settings.solver` / `settings.snapshot`.
+//
+// Only meaningful when `Settings::Kind == "signal_flow"`; absent on a
+// control-flow document. Field names mirror the IDE's `SolverConfig` /
+// `SnapshotConfig` (Matlab_llvm_ide `FlowchartModels.swift`). See
+// `docs/mflow_link_roadmap.md` §5.1. The on-disk JSON keys are
+// camelCase (`startTime`, `relTol`, …) — the loader matches the IDE's
+// `JSONEncoder` output verbatim.
+// (SolverConfig + SnapshotConfig are defined above to satisfy
+// Flow.Solver's `std::optional` requirement.)
+//===----------------------------------------------------------------------===//
 
 struct Settings {
   bool ColumnMajor = true;

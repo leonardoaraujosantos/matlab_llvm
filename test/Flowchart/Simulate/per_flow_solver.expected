@@ -1,0 +1,13 @@
+MflowLinkModel entry=per_flow_solver blocks=4 edges=3
+  solver type=variable_step algorithm=ode45 startTime=0 stopTime=2
+  states continuous=2 discrete=0
+  exec-order:
+    0 drive kind=signal_sine sample=fixed_in_minor log
+    1 loose_plant kind=signal_transfer_fcn sample=continuous cont-states=1 loop-breaker log
+    2 tight_sub/tf kind=signal_transfer_fcn sample=continuous cont-states=1 loop-breaker log maxStep=0.005
+    3 tight_scope kind=signal_scope sample=fixed_in_minor
+  zero-crossings: none
+  edges:
+    e1 drive:out -> loose_plant:in
+    _splice0 loose_plant:out -> tight_sub/tf:in
+    _splice1 tight_sub/tf:out -> tight_scope:in

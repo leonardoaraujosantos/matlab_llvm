@@ -4,6 +4,7 @@
 #include "matlab/Flowchart/Loader.h"
 
 #include <iosfwd>
+#include <limits>
 #include <map>
 #include <optional>
 #include <string>
@@ -85,6 +86,14 @@ struct MflBlock {
   // inlined from a `signal_triggered_subsystem`. Mutually exclusive
   // with the level-gated `signal_enabled_subsystem` semantics.
   bool EnableEdgeTriggered = false;
+  // §17.5 #7 — per-flow solver overrides effective for this
+  // block. Inherits from the enclosing Flow's `solver` (or the
+  // top-level `settings.solver`). Empty `MaxStepOverride` (NaN)
+  // means "no override, use the global step". Per-block algorithm
+  // and type stay global — only step + tolerances vary.
+  double MaxStepOverride = std::numeric_limits<double>::quiet_NaN();
+  double RelTolOverride  = std::numeric_limits<double>::quiet_NaN();
+  double AbsTolOverride  = std::numeric_limits<double>::quiet_NaN();
   SourceLocation Loc;          // the originating `.mflow` node
 };
 

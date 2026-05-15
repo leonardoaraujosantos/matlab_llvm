@@ -275,6 +275,11 @@ private:
   // DOPRI5's stability bound on stiff problems.
   bool   Implicit_ = false;
   double CurrentAdaptiveH_ = 0.01;
+  // §17.5 #7 — effective tolerances after applying per-flow
+  // solver overrides. Equal to `M_.Solver.{Rel,Abs}Tol` when no
+  // block tightens them.
+  double EffectiveRelTol_ = 1e-3;
+  double EffectiveAbsTol_ = 1e-6;
   // Scalar / first-element output per block. Every evaluator writes
   // this slot whether the block is scalar or vector — downstream
   // scalar readers (the vast majority of evaluators) read it

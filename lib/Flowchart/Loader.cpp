@@ -323,6 +323,40 @@ std::optional<std::string> asNumberOrString(const JValue *V) {
   return std::nullopt;
 }
 
+// Parse a `solver` JSON object into a SolverConfig. §17.5 #7
+// extracts this from the top-level settings.solver and per-flow
+// solver paths so the two share one keyset. The returned config
+// has every field at its SolverConfig default unless explicitly
+// overridden by the JSON.
+SolverConfig parseSolverConfig(const std::vector<std::pair<std::string, JValue>>
+                                   &Obj) {
+  SolverConfig SC;
+  for (auto &Q : Obj) {
+    if (Q.first == "type") {
+      if (auto *S = asString(&Q.second)) SC.Type = *S;
+    } else if (Q.first == "algorithm") {
+      if (auto *S = asString(&Q.second)) SC.Algorithm = *S;
+    } else if (Q.first == "startTime") {
+      if (auto N = asNumber(&Q.second)) SC.StartTime = *N;
+    } else if (Q.first == "stopTime") {
+      if (auto N = asNumber(&Q.second)) SC.StopTime = *N;
+    } else if (Q.first == "maxStep") {
+      if (auto S = asNumberOrString(&Q.second)) SC.MaxStep = *S;
+    } else if (Q.first == "minStep") {
+      if (auto S = asNumberOrString(&Q.second)) SC.MinStep = *S;
+    } else if (Q.first == "relTol") {
+      if (auto N = asNumber(&Q.second)) SC.RelTol = *N;
+    } else if (Q.first == "absTol") {
+      if (auto N = asNumber(&Q.second)) SC.AbsTol = *N;
+    } else if (Q.first == "zeroCrossing") {
+      if (auto B = asBool(&Q.second)) SC.ZeroCrossing = *B;
+    } else if (Q.first == "algebraicLoopMethod") {
+      if (auto *S = asString(&Q.second)) SC.AlgebraicLoopMethod = *S;
+    }
+  }
+  return SC;
+}
+
 SourceLocation locOf(const JValue &V, FileID File) {
   SourceLocation L;
   L.File = File;
@@ -374,33 +408,8 @@ public:
           // historical "control_flow" default.
           if (auto *S = asString(&P.second)) Doc.Settings.Kind = *S;
         } else if (P.first == "solver") {
-          if (auto *Obj = asObject(&P.second)) {
-            SolverConfig SC;
-            for (auto &Q : *Obj) {
-              if (Q.first == "type") {
-                if (auto *S = asString(&Q.second)) SC.Type = *S;
-              } else if (Q.first == "algorithm") {
-                if (auto *S = asString(&Q.second)) SC.Algorithm = *S;
-              } else if (Q.first == "startTime") {
-                if (auto N = asNumber(&Q.second)) SC.StartTime = *N;
-              } else if (Q.first == "stopTime") {
-                if (auto N = asNumber(&Q.second)) SC.StopTime = *N;
-              } else if (Q.first == "maxStep") {
-                if (auto S = asNumberOrString(&Q.second)) SC.MaxStep = *S;
-              } else if (Q.first == "minStep") {
-                if (auto S = asNumberOrString(&Q.second)) SC.MinStep = *S;
-              } else if (Q.first == "relTol") {
-                if (auto N = asNumber(&Q.second)) SC.RelTol = *N;
-              } else if (Q.first == "absTol") {
-                if (auto N = asNumber(&Q.second)) SC.AbsTol = *N;
-              } else if (Q.first == "zeroCrossing") {
-                if (auto B = asBool(&Q.second)) SC.ZeroCrossing = *B;
-              } else if (Q.first == "algebraicLoopMethod") {
-                if (auto *S = asString(&Q.second)) SC.AlgebraicLoopMethod = *S;
-              }
-            }
-            Doc.Settings.Solver = std::move(SC);
-          }
+          if (auto *Obj = asObject(&P.second))
+            Doc.Settings.Solver = parseSolverConfig(*Obj);
         } else if (P.first == "snapshot") {
           if (auto *Obj = asObject(&P.second)) {
             SnapshotConfig SN;
@@ -536,6 +545,11 @@ private:
       loadList("inputs", F.Sig.Inputs);
       loadList("outputs", F.Sig.Outputs);
     }
+
+    // §17.5 #7 — optional per-flow solver. Same JSON shape as the
+    // top-level settings.solver.
+    if (auto *Obj = asObject(FJ.find("solver")))
+      F.Solver = parseSolverConfig(*Obj);
 
     auto *Nodes = asArray(FJ.find("nodes"));
     if (!Nodes) {

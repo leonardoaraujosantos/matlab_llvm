@@ -566,6 +566,36 @@ MflowLinkSim::MflowLinkSim(const MflowLinkModel &M) : M_(M) {
     } catch (...) {
     }
   }
+  // §17.5 #7 — per-block solver overrides. Each MflBlock may carry
+  // a non-NaN MaxStepOverride from its enclosing flow's solver.
+  // The global step is the tightest cap: `min` over all overrides
+  // + the global MaxStep. Tolerances similarly tighten globally.
+  for (size_t I = 0; I < N; ++I) {
+    const auto &B = M_.Blocks[I];
+    if (!std::isnan(B.MaxStepOverride) && B.MaxStepOverride > 0.0 &&
+        B.MaxStepOverride < StepSize_) {
+      StepSize_ = B.MaxStepOverride;
+    }
+    if (!std::isnan(B.RelTolOverride) && B.RelTolOverride > 0.0 &&
+        B.RelTolOverride < M_.Solver.RelTol) {
+      // Mutate a local copy of the solver config doesn't apply here
+      // since M_.Solver is const; instead the runtime picks the
+      // tightest tolerance through this read at substep time.
+      // Stash the global tightening once.
+    }
+  }
+  // Recompute effective relTol / absTol as the tightest demanded.
+  EffectiveRelTol_ = M_.Solver.RelTol;
+  EffectiveAbsTol_ = M_.Solver.AbsTol;
+  for (size_t I = 0; I < N; ++I) {
+    const auto &B = M_.Blocks[I];
+    if (!std::isnan(B.RelTolOverride) && B.RelTolOverride > 0.0 &&
+        B.RelTolOverride < EffectiveRelTol_)
+      EffectiveRelTol_ = B.RelTolOverride;
+    if (!std::isnan(B.AbsTolOverride) && B.AbsTolOverride > 0.0 &&
+        B.AbsTolOverride < EffectiveAbsTol_)
+      EffectiveAbsTol_ = B.AbsTolOverride;
+  }
   // Item-2 — adaptive step is enabled when the model asks for
   // variable_step + an adaptive algorithm. Fixed-step mode keeps
   // the legacy classic RK4 path. The ode15s lane (§17.5 #3) ships
@@ -1527,7 +1557,7 @@ void MflowLinkSim::derivative(double T, const double *State, double *Deriv) {
   // the DAP server to surface as `stopped { reason: "algebraic
   // loop did not converge" }`).
   if (M_.AlgebraicLoops.empty()) return;
-  const double Tol = std::max(M_.Solver.RelTol, 1e-8);
+  const double Tol = std::max(EffectiveRelTol_, 1e-8);
   const int MaxIt = 50;
   for (auto &Loop : M_.AlgebraicLoops) {
     if (Loop.Members.empty()) continue;
@@ -1835,7 +1865,7 @@ double MflowLinkSim::stepMajor() {
       // stiff systems. No step-size adaptation in this MVP; the
       // user picks `settings.solver.maxStep`.
       bdf1Step(*this, &MflowLinkSim::derivative, T_, H, Y_, Y1,
-               M_.Solver.RelTol, M_.Solver.AbsTol);
+               EffectiveRelTol_, EffectiveAbsTol_);
       Y_ = std::move(Y1);
     } else if (AdaptiveSolver_) {
       // Item-2 — Dormand-Prince RK4(5) with PI step-size control.
@@ -1849,8 +1879,8 @@ double MflowLinkSim::stepMajor() {
       double TLocal = T_;
       double TEnd   = T_ + H;
       double HCur   = std::min(CurrentAdaptiveH_, H);
-      const double RelTol = M_.Solver.RelTol;
-      const double AbsTol = M_.Solver.AbsTol;
+      const double RelTol = EffectiveRelTol_;
+      const double AbsTol = EffectiveAbsTol_;
       const int MaxRetries = 32;
       while (TLocal < TEnd - 1e-15) {
         double HTry = std::min(HCur, TEnd - TLocal);

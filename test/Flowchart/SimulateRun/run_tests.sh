@@ -265,6 +265,21 @@ SB_T2=$(printf '%s\n' "$SB" | awk -F, 'NR>1 && $1+0==2.0 {print $3-$2; exit}')
 check "stiff plant tracks drive at t=2.0" \
   "awk 'BEGIN{exit !(($SB_T2)^2 < 1e-2)}'" ""
 
+#--- per_flow_solver (§17.5 #7): per-flow maxStep override ----------------
+PFS="$("$MATLABC" -simulate "$EX/per_flow_solver.mflow")"
+PFS_HEAD=$(printf '%s\n' "$PFS" | head -1)
+check "per_flow_solver header" \
+  "[[ '$PFS_HEAD' == 't,drive,loose_plant,tight_sub/tf,tight_scope' ]]" ""
+# Parent flow has maxStep=0.05; library flow has 0.005. Effective
+# global step = min(0.05, 0.005) = 0.005. Over 2s, that's ~401 rows.
+PFS_ROWS=$(printf '%s\n' "$PFS" | wc -l | tr -d ' ')
+check "step tightened to 0.005 (≈401 rows)" \
+  "[[ \$PFS_ROWS -ge 380 && \$PFS_ROWS -le 410 ]]" ""
+# Per-block override surfaces in the IR dump.
+PFS_IR=$("$MATLABC" -simulate --dry-run "$EX/per_flow_solver.mflow" 2>&1 | grep 'tf kind=signal_transfer_fcn')
+check "tight_sub/tf carries maxStep=0.005 in IR" \
+  "[[ '$PFS_IR' == *'maxStep=0.005'* ]]" ""
+
 #--- fir_filter (§17.5 #5): 3-tap moving-average FIR ----------------------
 FF="$("$MATLABC" -simulate "$EX/fir_filter.mflow")"
 FF_HEAD=$(printf '%s\n' "$FF" | head -1)

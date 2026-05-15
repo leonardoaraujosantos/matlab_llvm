@@ -263,6 +263,11 @@ struct FNode {
   // block parameterised as `den: "1, ${tau}"` resolves to e.g.
   // `den: "1, 0.5"` once cloned under a host with `tau: 0.5`.
   std::map<std::string, std::string> MaskBindings;
+  // §17.5 #7 — per-flow solver overrides effective for this leaf.
+  // NaN when the enclosing flow inherits the global solver.
+  double MaxStepOverride = std::numeric_limits<double>::quiet_NaN();
+  double RelTolOverride  = std::numeric_limits<double>::quiet_NaN();
+  double AbsTolOverride  = std::numeric_limits<double>::quiet_NaN();
 };
 
 struct FEdge {
@@ -283,9 +288,20 @@ public:
 
   std::optional<FlatGraph> run(const Flow &Entry) {
     std::vector<std::string> Stack{Entry.Id};
+    // §17.5 #7 — start with the global solver effective for the
+    // entry flow (overridden by Entry.Solver if it carries one).
+    SolverConfig InitSolver = Doc_.Settings.Solver.value_or(SolverConfig{});
+    if (Entry.Solver) {
+      // Apply per-flow overrides to the relevant fields.
+      InitSolver.MaxStep = Entry.Solver->MaxStep;
+      InitSolver.MinStep = Entry.Solver->MinStep;
+      InitSolver.RelTol  = Entry.Solver->RelTol;
+      InitSolver.AbsTol  = Entry.Solver->AbsTol;
+    }
     auto G = expand(Entry, "", Stack, /*EnableStamp=*/"",
                     /*EdgeTriggered=*/false,
-                    /*MaskBindings=*/{});
+                    /*MaskBindings=*/{},
+                    InitSolver);
     if (!G) return std::nullopt;
     if (!contractBoundaries(*G)) return std::nullopt;
     if (!contractGotoFrom(*G)) return std::nullopt;
@@ -338,7 +354,8 @@ private:
                                   const std::string &EnableStamp,
                                   bool EdgeTriggered,
                                   std::map<std::string, std::string>
-                                      MaskBindings) {
+                                      MaskBindings,
+                                  const SolverConfig &Solver) {
     FlatGraph G;
     // subsystem node id → { bindingPort → flat boundary node id }
     std::unordered_map<std::string, std::map<std::string, std::string>> InMap;
@@ -424,9 +441,22 @@ private:
             I = Comma + 1;
           }
         }
+        // §17.5 #7 — fold any per-flow solver override the child
+        // declares into the inherited config. Step / tolerance
+        // fields override; algorithm / type stay global.
+        SolverConfig ChildSolver = Solver;
+        if (Child->Solver) {
+          if (Child->Solver->MaxStep != "auto")
+            ChildSolver.MaxStep = Child->Solver->MaxStep;
+          if (Child->Solver->MinStep != "auto")
+            ChildSolver.MinStep = Child->Solver->MinStep;
+          ChildSolver.RelTol = Child->Solver->RelTol;
+          ChildSolver.AbsTol = Child->Solver->AbsTol;
+        }
         Stack.push_back(*FlowId);
         auto ChildG = expand(*Child, Prefix + N.Id + "/", Stack,
-                             ChildEnable, ChildEdge, ChildMask);
+                             ChildEnable, ChildEdge, ChildMask,
+                             ChildSolver);
         Stack.pop_back();
         if (!ChildG) return std::nullopt;
         for (auto &CN : ChildG->Nodes) {
@@ -452,8 +482,18 @@ private:
           // edge form only comes from a triggered subsystem.
           LeafEdge = false;
         }
-      G.Nodes.push_back(
-          {Prefix + N.Id, &N, LeafEnable, LeafEdge, MaskBindings});
+      // §17.5 #7 — capture the active per-flow solver's step +
+      // tolerance overrides on the leaf so the runtime can pick
+      // min over all blocks at construction.
+      double MaxStepOv = std::numeric_limits<double>::quiet_NaN();
+      if (Solver.MaxStep != "auto") {
+        try { MaxStepOv = std::stod(Solver.MaxStep); }
+        catch (...) {}
+      }
+      double RelTolOv = Solver.RelTol;
+      double AbsTolOv = Solver.AbsTol;
+      G.Nodes.push_back({Prefix + N.Id, &N, LeafEnable, LeafEdge,
+                         MaskBindings, MaxStepOv, RelTolOv, AbsTolOv});
     }
 
     // Rewire this flow's edges, redirecting through subsystem boundaries.
@@ -762,6 +802,9 @@ std::optional<MflowLinkModel> lowerSignalFlow(const FlowDoc &Doc,
     B.SampleClass = KI->Sample;
     B.EnableSource = FN.EnableStamp;
     B.EnableEdgeTriggered = FN.EdgeTriggered;
+    B.MaxStepOverride = FN.MaxStepOverride;
+    B.RelTolOverride  = FN.RelTolOverride;
+    B.AbsTolOverride  = FN.AbsTolOverride;
     if (auto *L = N.getData("log_signal"))
       B.LogSignal = (*L == "true");
 
@@ -1240,6 +1283,21 @@ void dumpMflowLinkModel(std::ostream &OS, const MflowLinkModel &M) {
         OS << B.FieldNames[K];
       }
       OS << "}";
+    }
+    // §17.5 #7 — surface per-flow solver overrides on the IR
+    // dump so `-simulate --dry-run` confirms the tightening.
+    if (!std::isnan(B.MaxStepOverride)) {
+      double GlobalH = -1.0;
+      try {
+        if (M.Solver.MaxStep != "auto")
+          GlobalH = std::stod(M.Solver.MaxStep);
+      } catch (...) {}
+      if (GlobalH < 0 ||
+          std::fabs(B.MaxStepOverride - GlobalH) > 1e-15) {
+        char Buf[64];
+        std::snprintf(Buf, sizeof Buf, " maxStep=%g", B.MaxStepOverride);
+        OS << Buf;
+      }
     }
     OS << "\n";
   }
