@@ -678,6 +678,24 @@ struct CmpToArith : public NameMatch {
       return mlir::failure();
     mlir::Value A = Op->getOperand(0);
     mlir::Value B = Op->getOperand(1);
+    // Tier-5c — same width-equaliser as `BinArithToArith`. When the
+    // HDL pipeline's persistent-fetch-via-saturate yields an i64
+    // value but the rhs (constant fi rail) stays i32, the comparison
+    // operand types disagree and the pattern used to bail.
+    // Sign-extend the narrower side to the wider; comparison
+    // signedness picks the user-set fi_signed conventionally.
+    if (isScalarInt(A.getType()) && isScalarInt(B.getType()) &&
+        A.getType() != B.getType()) {
+      auto AI = mlir::cast<mlir::IntegerType>(A.getType());
+      auto BI = mlir::cast<mlir::IntegerType>(B.getType());
+      auto Wider = (AI.getWidth() >= BI.getWidth()) ? AI : BI;
+      if (AI != Wider) {
+        A = mlir::arith::ExtSIOp::create(R, Op->getLoc(), Wider, A);
+      }
+      if (BI != Wider) {
+        B = mlir::arith::ExtSIOp::create(R, Op->getLoc(), Wider, B);
+      }
+    }
     mlir::Type OperandTy = A.getType();
     if (OperandTy != B.getType()) return mlir::failure();
     // Result must be i1.

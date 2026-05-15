@@ -359,7 +359,25 @@ Tier-5c (✓ shipped 2026-05-15):
   4 unit-delay registers + combinational tap sum + `always_ff`
   block; Python step response matches the 4-tap MA analytically.
 
-Tier-5d open carve-outs (not yet shipped):
+Tier-5d (✓ saturation shipped 2026-05-15):
+- `signal_saturation` → SV: HDL mode emits the if/elseif/else form
+  (AST IfStmt node) instead of the pure-arith bool-by-fi form
+  (which the SV synthcheck rejects). Software targets keep the
+  compact arith form. `lowerBlock`'s return type widened from
+  `AssignStmt*` to `Stmt*` so a single block can emit either
+  an assign or a multi-statement if-block.
+- Bonus side fix: `CmpToArith` now sign-extends the narrower
+  operand for mismatched-width integer comparisons — mirrors
+  the Tier-5c `BinArithToArith` equaliser. Helps stateful
+  subsystems where a persistent fetch (i64-routed via fi-saturate)
+  is compared against a rail constant (i32).
+- Demo: `stateless_mixer.mflow` emits clean SV with saturation
+  rails in the `always_comb` block. Discrete-PID-with-saturation
+  still needs Tier-5e (state-update path keeps the persistent
+  fetch at f64, requires routing through fptosi — separable
+  follow-up).
+
+Tier-5e open carve-outs (not yet shipped):
 - `signal_saturation` → SV: bool-by-fi multiplication doesn't
   synthesise; workaround for HDL targets is to replace with a
   `signal_matlab_fcn` containing the if/elseif/else.

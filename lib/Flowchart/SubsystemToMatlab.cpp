@@ -337,10 +337,10 @@ std::string paramSTR(const Node &N, const std::string &K,
   return S ? *S : Def;
 }
 
-AssignStmt *lowerBlock(const Node &N, const std::string &OutVar,
-                       const std::vector<Expr *> &Ins,
-                       const std::vector<std::string> &InPortIds,
-                       ASTBuilder &B, DiagnosticEngine &Diag) {
+Stmt *lowerBlock(const Node &N, const std::string &OutVar,
+                 const std::vector<Expr *> &Ins,
+                 const std::vector<std::string> &InPortIds,
+                 ASTBuilder &B, DiagnosticEngine &Diag) {
   const auto &K = N.Kind;
 
   auto get = [&](size_t I) -> Expr * {
@@ -422,16 +422,29 @@ AssignStmt *lowerBlock(const Node &N, const std::string &OutVar,
   if (K == "signal_saturation") {
     double Lo = paramD(N, "lowerLimit", -1.0);
     double Hi = paramD(N, "upperLimit",  1.0);
-    // Pure-arith form: y = u + (Hi - u) * (u > Hi) + (Lo - u) * (u < Lo)
-    // Two correction terms; exactly one fires outside the rails.
-    // Works cleanly for software targets. SV synthesis rejects
-    // bool-by-fi multiplication — a saturation block in an HDL
-    // subsystem currently surfaces as `unsynthesizable type` at
-    // synth-check time. The carve-out: users replace
-    // `signal_saturation` with a `signal_matlab_fcn` containing the
-    // explicit `if rail; ... end` form for HDL emit (Tier 5
-    // follow-up: emit the if/elseif/else form natively).
     auto *U = get(0);
+    // Tier-5d — HDL mode emits the if/elseif/else form. The pure-
+    // arith form below (used for software targets) routes through
+    // `bool * fi` multiplications that the SV synthcheck rejects;
+    // an explicit if/elseif/else compiles to a clean 3-way mux at
+    // synth time.
+    if (B.WrapFi) {
+      auto *IfStmt = B.Ctx.make<class IfStmt>();
+      IfStmt->Cond = B.bin(BinOp::Gt, U, B.lit(Hi));
+      IfStmt->Then = B.Ctx.make<Block>();
+      IfStmt->Then->Stmts.push_back(B.assign(OutVar, B.lit(Hi)));
+      ElseIf EI;
+      EI.Cond = B.bin(BinOp::Lt, U, B.lit(Lo));
+      EI.Body = B.Ctx.make<Block>();
+      EI.Body->Stmts.push_back(B.assign(OutVar, B.lit(Lo)));
+      IfStmt->Elseifs.push_back(EI);
+      IfStmt->Else = B.Ctx.make<Block>();
+      IfStmt->Else->Stmts.push_back(B.assign(OutVar, U));
+      return IfStmt;
+    }
+    // Pure-arith form for software targets:
+    //   y = u + (Hi - u) * (u > Hi) + (Lo - u) * (u < Lo)
+    // Two correction terms; exactly one fires outside the rails.
     auto *DHi  = B.bin(BinOp::Sub, B.lit(Hi), U);
     auto *GtHi = B.bin(BinOp::Gt,  U, B.lit(Hi));
     auto *CHi  = B.bin(BinOp::ElemMul, DHi, GtHi);
@@ -934,7 +947,12 @@ matlab::Function *lowerSubsystemToMatlab(
           return nullptr;
         }
         Expr *U = Ins.empty() ? B.number(0.0) : Ins.front();
-        Expr *TsU = B.bin(BinOp::ElemMul, B.number(Ts), U);
+        // Wrap the Ts coefficient in `fi(...)` when in HDL mode so
+        // the multiplication stays in integer arithmetic. Software
+        // targets emit the bare double (the IEEE arithmetic is what
+        // matches the simulator's continuous integrator).
+        Expr *TsConst = B.WrapFi ? B.lit(Ts) : B.number(Ts);
+        Expr *TsU = B.bin(BinOp::ElemMul, TsConst, U);
         NextExpr = B.bin(BinOp::Add, B.name(CurS), TsU);
       } else {
         NextExpr = B.number(0.0);

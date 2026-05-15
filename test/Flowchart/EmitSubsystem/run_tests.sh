@@ -356,6 +356,36 @@ sv_fir_smoke() {
 }
 sv_fir_smoke
 
+# Tier-5d — saturation → SV. The pure-arith form (used for
+# software targets) routes through bool-by-fi multiplication
+# that the SV synthcheck rejects. HDL mode now emits an explicit
+# if/elseif/else form via the AST IfStmt node, which the SV
+# pipeline lowers to a 3-way mux cleanly.  Verify that
+# stateless_mixer.mflow (Gain · Sum · Saturation) emits clean
+# SV — the if/else block plus the < / > comparison rails are
+# present.
+sv_sat_smoke() {
+  local sv="$SCRATCH/stateless_mixer_sv.sv"
+  "$MATLABC" -emit-sv "$EX/stateless_mixer.mflow" \
+       --subsystem stateless_mixer \
+       > "$sv" 2> "$SCRATCH/emit.err"
+  if ! grep -q "module stateless_mixer" "$sv"; then
+    fail=$((fail+1)); fails+=("stateless_mixer sat (missing module)")
+    sed 's/^/  /' "$SCRATCH/emit.err" >&2
+    return
+  fi
+  if ! grep -q "if (mix > " "$sv"; then
+    fail=$((fail+1)); fails+=("stateless_mixer sat (missing upper rail)")
+    return
+  fi
+  if ! grep -q "< -" "$sv"; then
+    fail=$((fail+1)); fails+=("stateless_mixer sat (missing lower rail)")
+    return
+  fi
+  pass=$((pass+1))
+}
+sv_sat_smoke
+
 # Tier 5 — continuous block must be rejected with a sourced error
 # in HDL emit (no implicit auto-discretisation).
 sv_reject() {

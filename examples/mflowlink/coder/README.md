@@ -103,9 +103,13 @@ Tier-5 carve-outs (separable follow-ups):
   `fir_4tap.mflow` emits clean SV (4 unit-delay registers +
   combinational tap sum + `always_ff` block) and the Python
   step response matches the analytic 4-tap MA.
-- `signal_saturation` → SV (bool-by-fi multiplication in the
-  pure-arith form doesn't synthesise; workaround: replace with
-  a `signal_matlab_fcn` block containing `if`/`elseif`/`else`).
+- ~~`signal_saturation` → SV~~ ✓ shipped 2026-05-15.
+  HDL mode (`SubsystemEmitOptions.StateAsPersistent` is on) now
+  emits saturation as an explicit `if/elseif/else` (an AST
+  `IfStmt` node), which the SV pipeline lowers to a clean 3-way
+  mux. Software targets keep the pure-arith form (compact and
+  branch-free). Demos: `stateless_mixer.mflow` emits clean SV
+  with the saturation rails visible in the always_comb block.
 - `signal_transfer_fcn` / `signal_state_space` /
   `signal_zero_pole` (continuous → discrete) — need bilinear or
   matrix-exponential discretization.
