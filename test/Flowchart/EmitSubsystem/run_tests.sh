@@ -496,6 +496,138 @@ PY
 }
 tf_step_smoke
 
+# Tier-5h — higher-order TF (2nd-order step response).
+tf2_step_smoke() {
+  local py="$SCRATCH/tf2.py"
+  "$MATLABC" -emit-python "$EX/tf_2nd_order.mflow" \
+       --subsystem tf_2nd_order > "$py" 2> "$SCRATCH/tf2.err"
+  python3 - "$py" <<'PY'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("tf2", sys.argv[1])
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+plant = m.Tf2ndOrder()
+peak = 0.0; final = 0.0
+for k in range(500):
+    y = plant.step(1.0)
+    if y > peak: peak = y
+    final = y
+if not (1.45 <= peak <= 1.60):
+    print(f"  tf_2nd_order peak {peak} out of band", file=sys.stderr)
+    sys.exit(1)
+if not (0.95 <= final <= 1.05):
+    print(f"  tf_2nd_order final {final} not near 1", file=sys.stderr)
+    sys.exit(1)
+PY
+  if [[ $? -ne 0 ]]; then
+    fail=$((fail+1)); fails+=("tf_2nd_order (step response)")
+  else
+    pass=$((pass+1))
+  fi
+}
+tf2_step_smoke
+
+# Tier-5h — Zero-Pole via expansion to TF.
+zp_step_smoke() {
+  local py="$SCRATCH/zp.py"
+  "$MATLABC" -emit-python "$EX/zp_plant.mflow" \
+       --subsystem zp_plant > "$py" 2> "$SCRATCH/zp.err"
+  python3 - "$py" <<'PY'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("zp", sys.argv[1])
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+plant = m.ZpPlant()
+prev = 0.0; monotonic = True
+for k in range(100):
+    y = plant.step(1.0)
+    if y < prev - 1e-9: monotonic = False
+    prev = y
+if not monotonic:
+    print(f"  zp_plant not monotonic", file=sys.stderr); sys.exit(1)
+if not (0.95 <= y <= 1.05):
+    print(f"  zp_plant final {y}", file=sys.stderr); sys.exit(1)
+PY
+  if [[ $? -ne 0 ]]; then
+    fail=$((fail+1)); fails+=("zp_plant (step response)")
+  else
+    pass=$((pass+1))
+  fi
+}
+zp_step_smoke
+
+# Tier-5h — transport delay (4-tap shift register).
+td_smoke() {
+  local py="$SCRATCH/td.py"
+  "$MATLABC" -emit-python "$EX/transport_delay.mflow" \
+       --subsystem transport_delay > "$py" 2> "$SCRATCH/td.err"
+  python3 - "$py" <<'PY'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("td", sys.argv[1])
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+plant = m.TransportDelay()
+seq = [plant.step(1.0) for _ in range(8)]
+# 4-tap shift register: y[0..3] = 0, y[4..] = 1.
+expected = [0, 0, 0, 0, 1, 1, 1, 1]
+for k, (g, e) in enumerate(zip(seq, expected)):
+    if abs(g - e) > 1e-9:
+        print(f"  transport_delay tick {k}: got {g}, want {e}",
+              file=sys.stderr); sys.exit(1)
+PY
+  if [[ $? -ne 0 ]]; then
+    fail=$((fail+1)); fails+=("transport_delay (step response)")
+  else
+    pass=$((pass+1))
+  fi
+}
+td_smoke
+
+# Tier-5h — transport delay SV emit (multi-tap shift register).
+sv_td_smoke() {
+  local sv="$SCRATCH/td.sv"
+  "$MATLABC" -emit-sv "$EX/transport_delay.mflow" \
+       --subsystem transport_delay > "$sv" 2> "$SCRATCH/td.err"
+  if [[ $(grep -c "logic signed \[31:0\] s_delay_x" "$sv") -lt 4 ]]; then
+    fail=$((fail+1)); fails+=("transport_delay SV (missing taps)")
+    return
+  fi
+  if ! grep -q "always_ff @(posedge clk" "$sv"; then
+    fail=$((fail+1)); fails+=("transport_delay SV (no always_ff)")
+    return
+  fi
+  pass=$((pass+1))
+}
+sv_td_smoke
+
+# Tier-5h — state-space (A, B, C; D=0). Same plant as
+# tf_2nd_order.mflow but in (A, B, C) form: A = [0 1; -1 -0.4],
+# B = [0; 1], C = [1 0]. Step response must match the TF form
+# within tolerance.
+ss_step_smoke() {
+  local py="$SCRATCH/ss.py"
+  "$MATLABC" -emit-python "$EX/ss_plant.mflow" \
+       --subsystem ss_plant > "$py" 2> "$SCRATCH/ss.err"
+  python3 - "$py" <<'PY'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("ss", sys.argv[1])
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+plant = m.SsPlant()
+peak = 0.0
+for k in range(500):
+    y = plant.step(1.0)
+    if y > peak: peak = y
+final = y
+if not (1.45 <= peak <= 1.60):
+    print(f"  ss_plant peak {peak} out of band", file=sys.stderr); sys.exit(1)
+if not (0.95 <= final <= 1.05):
+    print(f"  ss_plant final {final} off", file=sys.stderr); sys.exit(1)
+PY
+  if [[ $? -ne 0 ]]; then
+    fail=$((fail+1)); fails+=("ss_plant (step response)")
+  else
+    pass=$((pass+1))
+  fi
+}
+ss_step_smoke
+
 echo "----"
 echo "passed: $pass    failed: $fail"
 if (( fail > 0 )); then

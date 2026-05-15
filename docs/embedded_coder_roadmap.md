@@ -417,18 +417,54 @@ Tier-5g (✓ partial, shipped 2026-05-15):
 - 18/18 emit-subsystem cases green; 37/37 flowchart/runtime/
   frontend lanes green.
 
-Tier-5h open carve-outs (not yet shipped):
-- Higher-order Transfer Function (2nd-order+) discretization
-  via the bilinear transform with full polynomial algebra.
-  Math sketched in the Tier-5g implementation comments
-  (`lib/Flowchart/SubsystemToMatlab.cpp`).
-- `signal_state_space` discretization via matrix exponential
-  (or bilinear with matrix inversion). Needs a small linalg
-  helper.
-- `signal_zero_pole` — expand zeros/poles polynomial form
-  into a TF then reuse the TF path.
-- `signal_transport_delay` discretization via a circular
-  buffer state.
+Tier-5h (✓ shipped 2026-05-15):
+- **Higher-order TF** (any N-th order, strictly proper) via
+  Forward Euler on the controllable canonical state-space
+  realisation. Allocates N state slots per block; emits
+  state-update difference equations + a y = Σ b_i*x_i output
+  combination. Demo: `tf_2nd_order.mflow` — 2nd-order
+  underdamped lowpass with peak overshoot 1.535 at t=3.21.
+- **`signal_zero_pole`** — `resolveTFCoeffs` expands real-root
+  zeros/poles + scalar gain into (num, den) polynomial form
+  via `expandPoly`, then routes through the same TF path. Demo:
+  `zp_plant.mflow` — 2/((s+1)(s+2)) monotonic step response,
+  DC gain 1.0.
+- **`signal_transport_delay`** — discretised as a length-N
+  shift register (N = round(delay/Ts)). Each tap is one state
+  slot; oldest tap feeds the output, newest tap takes the
+  input. Demo: `transport_delay.mflow` — 4-tap shift register
+  with verified delay-by-4-ticks step response.
+- **`signal_state_space`** (SISO, D=0) — parses (A, B, C)
+  matrices and discretises via Forward Euler:
+  `x[k+1] = (I + Ts*A)*x[k] + Ts*B*u[k]; y = C*x[k]`.
+  Demo: `ss_plant.mflow` — same 2nd-order plant as
+  `tf_2nd_order.mflow` realised in canonical (A, B, C) form,
+  with identical numerical response.
+- **Multi-slot state infrastructure**: `StateSlot` extended
+  with `LocalVar` (separate from `OutVar`) so a single block
+  can carry multiple state registers. The state-read hoist,
+  next-state expression collection, class-wrapper metadata,
+  and the function-signature builder all generalise to
+  "N slots per block".
+- **Verilator lint gated CTest lane**: new
+  `MATLAB_LLVM_WITH_EMIT_SUBSYSTEM_SV_COSIM` CMake flag
+  (off by default) registers
+  `flowchart-emit-subsystem-sv-verilator`. Runs
+  `verilator --lint-only` over every SV-capable coder fixture;
+  catches regressions the structural smoke tests can't. Skips
+  cleanly when verilator isn't on PATH. **All 11 SV-capable
+  demos pass Verilator lint** with the documented cosmetic
+  warnings suppressed.
+
+Tier-5i open carve-outs (not yet shipped):
+- Multi-input / multi-output state-space (MIMO) — needs
+  vector-valued port shapes; B becomes N×P, C becomes Q×N.
+- Bilinear (Tustin) discretization as an alternative to
+  Forward Euler — preserves stability for stiff systems but
+  introduces direct feedthrough which conflicts with the
+  loop-breaker topo sort. Path: special-case the proper-but-
+  not-strictly-proper TFs and use a different realisation
+  (Direct Form II Transposed) that handles D ≠ 0.
 - `signal_saturation` → SV: bool-by-fi multiplication doesn't
   synthesise; workaround for HDL targets is to replace with a
   `signal_matlab_fcn` containing the if/elseif/else.

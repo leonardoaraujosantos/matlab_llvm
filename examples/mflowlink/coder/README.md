@@ -39,12 +39,16 @@ subsystem.
 | `discrete_integrator.mflow` | Forward-Euler accumulator with `Ts = 0.1` and a 0.5× input gain |
 | `discrete_pid.mflow` | Full PID controller — discrete integrator + unit delay + sum / gain / saturation; class-wrapped per target |
 
-### Continuous → auto-discretised (Tier 4 + 5g)
+### Continuous → auto-discretised (Tier 4 + 5g + 5h)
 
 | File | Block coverage |
 |---|---|
 | `continuous_lowpass.mflow` | 1/(s+1) realised as Integrator + Sum feedback; auto-discretised to Forward Euler at the user-picked sample rate. Software *and* HDL targets |
-| `tf_lowpass.mflow` | 1/(s+1) realised as `signal_transfer_fcn`; auto-discretised via Forward Euler (Tier-5g). 1st-order strictly-proper MVP |
+| `tf_lowpass.mflow` | 1/(s+1) realised as `signal_transfer_fcn` — 1st-order strictly-proper (Tier-5g) |
+| `tf_2nd_order.mflow` | 1/(s² + 0.4s + 1) — Tier-5h N-th-order strictly-proper TF via Forward Euler on controllable canonical state-space. Underdamped (ζ=0.2): peak overshoot 1.535 at t=3.21 — matches analytic |
+| `zp_plant.mflow` | Zero-pole-gain form: poles [-1, -2], gain 2 → 2/((s+1)(s+2)). Expanded to TF by `expandPoly`, then reuses the Tier-5h TF path |
+| `transport_delay.mflow` | `delay = 0.2 s` at `Ts = 0.05 s` → 4-tap shift register. Each tap is one state slot in the emitted module |
+| `ss_plant.mflow` | State-space (A, B, C; D=0) realisation of the same 2nd-order plant — verified to match `tf_2nd_order.mflow` numerically |
 
 ### SystemVerilog emit (Tier 5 + 5b)
 

@@ -496,6 +496,24 @@ if(MATLAB_LLVM_WITH_VA_COSIM)
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/EmitVA
   )
 endif()
+# Tier-5h — Embedded Coder Verilator lint lane.  Opt-in CMake flag
+# (off by default).  When on, emits each examples/mflowlink/coder/
+# SV-capable subsystem through `-emit-sv` and runs the result
+# through `verilator --lint-only`. Skips cleanly if verilator
+# isn't on PATH (the lint script exits 0 with a warning).  Catches
+# regressions the structural smoke tests can't — e.g. timing
+# loops, undriven nets, lint-class errors that the SV emitter
+# produces but yosys synth tolerates.
+option(MATLAB_LLVM_WITH_EMIT_SUBSYSTEM_SV_COSIM
+       "Enable Verilator lint CTest lane for Embedded Coder subsystems" OFF)
+if(MATLAB_LLVM_WITH_EMIT_SUBSYSTEM_SV_COSIM)
+  add_test(
+    NAME flowchart-emit-subsystem-sv-verilator
+    COMMAND ${CMAKE_SOURCE_DIR}/test/Flowchart/EmitSubsystem/run_verilator.sh
+            $<TARGET_FILE:matlabc>
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Flowchart/EmitSubsystem
+  )
+endif()
 if(MATLAB_LLVM_WITH_MLIR)
   add_test(
     NAME run-tests

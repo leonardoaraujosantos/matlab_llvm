@@ -1,0 +1,50 @@
+{
+  "schema": "matforge.flowchart",
+  "version": "0.1.0",
+  "entry": "zp_plant",
+  "settings": {
+    "kind": "signal_flow",
+    "solver": {
+      "type": "fixed_step",
+      "algorithm": "ode4",
+      "startTime": 0.0,
+      "stopTime": 5.0,
+      "maxStep": "0.05"
+    }
+  },
+  "flows": [
+    {
+      "id": "flow_zp_plant",
+      "kind": "function",
+      "name": "zp_plant",
+      "signature": { "inputs": ["u"], "outputs": ["y"] },
+      "nodes": [
+        { "id": "u1", "kind": "signal_inport",
+          "data": { "params": {} },
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+
+        { "id": "plant", "kind": "signal_zero_pole",
+          "data": {
+            "params": {
+              "zeros": "",
+              "poles": "-1, -2",
+              "gain":  "2"
+            }
+          },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+
+        { "id": "y1", "kind": "signal_outport",
+          "data": { "params": {} },
+          "ports": { "in": [{"id": "in"}], "out": [] } }
+      ],
+      "edges": [
+        { "id": "e1", "kind": "data",
+          "from": {"node": "u1", "port": "out"},
+          "to":   {"node": "plant", "port": "in"} },
+        { "id": "e2", "kind": "data",
+          "from": {"node": "plant", "port": "out"},
+          "to":   {"node": "y1", "port": "in"} }
+      ]
+    }
+  ]
+}

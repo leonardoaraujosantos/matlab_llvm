@@ -88,6 +88,23 @@ const std::set<std::string> &tier1Kinds() {
       // subsystem's chosen Ts.  Higher-order TFs and Zero-Pole /
       // State-Space follow in Tier-5h.
       "signal_transfer_fcn",
+      // Tier-5h — continuous Zero-Pole-Gain form. Real roots only
+      // (zeros / poles as comma-separated reals + scalar gain).
+      // Expanded to (num, den) polynomials via `resolveTFCoeffs`
+      // and then routed through the same Forward Euler controllable
+      // canonical state-space discretisation as signal_transfer_fcn.
+      "signal_zero_pole",
+      // Tier-5h — continuous transport delay (`delay` seconds).
+      // Discretised as a length-N shift register where
+      // N = round(delay / Ts). Each tap is one state slot;
+      // output = oldest tap, new tap = current input.
+      "signal_transport_delay",
+      // Tier-5h — continuous state-space realisation. (A, B, C) as
+      // matlab-matrix-literal strings, D = 0 (strictly proper).
+      // Discretised via Forward Euler: x[k+1] = (I + Ts*A)*x[k] +
+      // Ts*B*u[k]; y = C*x. Contributes N state slots (N = A's row
+      // count).
+      "signal_state_space",
       // Tier 5 — inline user MATLAB. The block's `params.function_body`
       // becomes a sibling local function in the same TU; the call
       // site emits as `<out> = <fn_name>(<inputs...>)`. SV emit
@@ -127,11 +144,19 @@ bool isStatefulKind(const std::string &K) {
          K == "signal_zoh" ||
          K == "signal_discrete_integrator" ||
          K == "signal_integrator" ||
-         // Tier-5g: 1st-order strictly-proper TFs only — discretised
-         // to a single state slot via Forward Euler.  Other shapes
-         // (higher-order TF, state-space, zero-pole) emit a sourced
-         // error in lowerSubsystemToMatlab.
-         K == "signal_transfer_fcn";
+         // Tier-5g/h: continuous Transfer Function / Zero-Pole-Gain,
+         // any order strictly proper. Discretised via Forward Euler
+         // on the controllable canonical state-space realisation —
+         // contributes `den_degree` state slots to the function
+         // signature.
+         K == "signal_transfer_fcn" ||
+         K == "signal_zero_pole" ||
+         // Tier-5h: transport delay — discretised as a length-N
+         // shift register with N = round(delay/Ts).
+         K == "signal_transport_delay" ||
+         // Tier-5h: continuous state-space (A, B, C) with D=0.
+         // Contributes N state slots (N = A's row count).
+         K == "signal_state_space";
 }
 
 // Tier-5g — parse a comma-separated coefficient list, highest order
@@ -148,6 +173,92 @@ std::vector<double> parsePoly(const std::string &S) {
     catch (...) {}
   }
   return Out;
+}
+
+// Tier-5h — expand a list of real roots `r_k` into the coefficients
+// of `Π (s - r_k)`, highest power first. Empty roots ⇒ {1} (the
+// constant 1 polynomial). Mirrors `expandPoly` in MflowLinkSim.cpp;
+// shared here so `signal_zero_pole` can reuse the TF discretisation
+// path by first lifting (zeros, poles, gain) into (num, den).
+std::vector<double> expandPoly(const std::vector<double> &Roots) {
+  std::vector<double> P{1.0};
+  for (double R : Roots) {
+    std::vector<double> Q(P.size() + 1, 0.0);
+    for (size_t I = 0; I < P.size(); ++I) {
+      Q[I]     += P[I];
+      Q[I + 1] += -R * P[I];
+    }
+    P = std::move(Q);
+  }
+  return P;
+}
+
+// Tier-5h — parse a comma/space/semicolon-separated matrix string
+// like `"1 2; 3 4"` or `"[1, 2; 3, 4]"` into a row-major flat
+// vector + dimensions. Mirrors the simulator's `parseMatrix`
+// helper in `lib/Flowchart/MflowLinkSim.cpp`.
+void parseMatrixStr(const std::string &S, std::vector<double> &Vals,
+                    int &Rows, int &Cols) {
+  Vals.clear();
+  Rows = 0;
+  Cols = 0;
+  std::string T = S;
+  auto F = T.find('[');
+  if (F != std::string::npos) T.erase(0, F + 1);
+  auto L = T.rfind(']');
+  if (L != std::string::npos) T.erase(L);
+  std::stringstream RS(T);
+  std::string Row;
+  while (std::getline(RS, Row, ';')) {
+    int C = 0;
+    // Treat commas as whitespace.
+    for (auto &ch : Row) if (ch == ',') ch = ' ';
+    std::stringstream CS(Row);
+    std::string Tok;
+    while (CS >> Tok) {
+      try { Vals.push_back(std::stod(Tok)); ++C; }
+      catch (...) {}
+    }
+    if (C > 0) {
+      ++Rows;
+      Cols = C;
+    }
+  }
+}
+
+// Tier-5h — resolve a signal_transfer_fcn or signal_zero_pole block
+// to a (num, den) polynomial pair. For zero-pole, expands the
+// real-root lists via `expandPoly` and scales num by `gain`. For
+// transfer functions, returns the raw num/den parsed straight from
+// params. Returns false on any malformed input.
+bool resolveTFCoeffs(const Node &N,
+                     std::vector<double> &Num,
+                     std::vector<double> &Den) {
+  if (N.Kind == "signal_transfer_fcn") {
+    auto It = N.Params.find("num");
+    Num = parsePoly(It == N.Params.end() ? "1" : It->second);
+    It  = N.Params.find("den");
+    Den = parsePoly(It == N.Params.end() ? "1" : It->second);
+    return !Den.empty();
+  }
+  if (N.Kind == "signal_zero_pole") {
+    auto getStr = [&](const char *Key) -> std::string {
+      auto It = N.Params.find(Key);
+      return It == N.Params.end() ? std::string{} : It->second;
+    };
+    auto Zeros = parsePoly(getStr("zeros"));
+    auto Poles = parsePoly(getStr("poles"));
+    double Gain = 1.0;
+    auto It = N.Params.find("gain");
+    if (It != N.Params.end()) {
+      try { Gain = std::stod(It->second); } catch (...) {}
+    }
+    Num = expandPoly(Zeros);
+    for (auto &C : Num) C *= Gain;
+    Den = expandPoly(Poles);
+    return !Den.empty();
+  }
+  return false;
 }
 
 // Tier 4 — initial-condition param lookup per stateful kind.
@@ -754,39 +865,106 @@ matlab::Function *lowerSubsystemToMatlab(
   if (Diag.hasErrors()) return nullptr;
 
   // Tier 3 — collect stateful blocks in topo order; each contributes
-  // one scalar state slot to the function signature: an extra arg
-  // `s_<id>` (current state) and an extra return `s_<id>_next` (state
-  // for the next tick). The state read is what the block's "output"
-  // becomes; the next-state update lands in `s_<id>_next` at the end
-  // of the body so the caller can latch it back for the next call.
+  // one or more scalar state slots to the function signature.  Per
+  // slot: an extra arg `s_<id>` (current state) and an extra return
+  // `s_<id>_next` (state for the next tick).  The state read is what
+  // the block's "output" becomes (for single-slot stateful blocks
+  // like Unit Delay / discrete integrator); the next-state update
+  // lands in `s_<id>_next` at the end of the body.
+  //
+  // Tier-5h — higher-order Transfer Function blocks contribute N
+  // slots (where N = denominator order). The block's output isn't
+  // a single state read but a linear combination `Σ b_i * x_i` of
+  // the per-slot state-reads; that's emitted separately in the
+  // dispatch loop below.  Slot LocalVars are per-slot (e.g. `x1`,
+  // `x2`, …) rather than the block-id-shared `VarOfNode[id]` that
+  // single-slot blocks use.
   struct StateSlot {
     const Node *N;
     std::string CurArg;    // function arg name carrying current state
     std::string NextOut;   // function return name carrying next state
-    std::string OutVar;    // local var = current state (block's output)
+    std::string LocalVar;  // local var for the state-read hoist
   };
   std::vector<StateSlot> States;
+  auto stateOrderForBlock = [&](const Node *N) -> int {
+    // Tier-5h — for higher-order TF (or Zero-Pole expanded into a
+    // TF), the order is the denominator polynomial's degree.
+    // For transport_delay, the order is round(delay / Ts).
+    // Other stateful blocks contribute one slot each.
+    if (N->Kind == "signal_transfer_fcn" ||
+        N->Kind == "signal_zero_pole") {
+      std::vector<double> Num, Den;
+      if (!resolveTFCoeffs(*N, Num, Den)) return 1;
+      if (Den.size() < 2) return 1;
+      return (int)Den.size() - 1;
+    }
+    if (N->Kind == "signal_transport_delay") {
+      double Delay = paramD(*N, "delay", 0.0);
+      double Ts = Opts.TargetRate;
+      if (Ts <= 0.0) Ts = paramD(*N, "sample_time", 0.0);
+      if (Ts <= 0.0) Ts = paramD(*N, "sampleTime", 0.0);
+      if (Ts <= 0.0) Ts = paramD(*N, "Ts", 0.0);
+      if (Ts <= 0.0 && Doc.Settings.Solver.has_value()) {
+        const auto &SC = *Doc.Settings.Solver;
+        if (SC.MaxStep != "auto") {
+          try { Ts = std::stod(SC.MaxStep); } catch (...) {}
+        }
+      }
+      if (Ts <= 0.0 || Delay <= 0.0) return 1;
+      int Taps = (int)std::round(Delay / Ts);
+      return Taps < 1 ? 1 : Taps;
+    }
+    if (N->Kind == "signal_state_space") {
+      auto It = N->Params.find("A");
+      if (It == N->Params.end()) return 1;
+      std::vector<double> A;
+      int Ar = 0, Ac = 0;
+      parseMatrixStr(It->second, A, Ar, Ac);
+      return (Ar > 0 && Ar == Ac) ? Ar : 1;
+    }
+    return 1;
+  };
   for (auto *N : Internal) {
     if (!isStatefulKind(N->Kind)) continue;
-    StateSlot S;
-    S.N       = N;
-    S.CurArg  = "s_" + sanitizeIdent(N->Id);
-    S.NextOut = "s_" + sanitizeIdent(N->Id) + "_next";
-    S.OutVar  = VarOfNode[N->Id];   // already populated below
-    States.push_back(S);
+    int Order = stateOrderForBlock(N);
+    if (Order == 1) {
+      // Single-slot stateful block — LocalVar coincides with the
+      // block's output variable (state read IS the output).
+      StateSlot S;
+      S.N        = N;
+      S.CurArg   = "s_" + sanitizeIdent(N->Id);
+      S.NextOut  = "s_" + sanitizeIdent(N->Id) + "_next";
+      S.LocalVar = "";  // resolved to VarOfNode[N->Id] below
+      States.push_back(S);
+    } else {
+      // Multi-slot (higher-order TF) — N slots named s_<id>_x1, …,
+      // s_<id>_xN with per-slot LocalVars x1_<id>, ..., xN_<id>.
+      for (int K = 1; K <= Order; ++K) {
+        StateSlot S;
+        S.N        = N;
+        S.CurArg   = "s_" + sanitizeIdent(N->Id) + "_x" + std::to_string(K);
+        S.NextOut  = S.CurArg + "_next";
+        S.LocalVar = "x" + std::to_string(K) + "_" + sanitizeIdent(N->Id);
+        States.push_back(S);
+      }
+    }
   }
   // Pre-reserve all the state-related identifiers in `Used` so the
   // generic `uniqueVarFor` doesn't accidentally collide with them.
   for (auto &S : States) {
     Used.insert(S.CurArg);
     Used.insert(S.NextOut);
+    if (!S.LocalVar.empty()) Used.insert(S.LocalVar);
   }
 
   for (auto *N : Internal) {
     VarOfNode[N->Id] = uniqueVarFor(N->Id);
   }
-  // Refresh OutVar now that VarOfNode is populated.
-  for (auto &S : States) S.OutVar = VarOfNode[S.N->Id];
+  // Refresh LocalVar for single-slot blocks (now that VarOfNode is
+  // populated). Multi-slot LocalVars stay at their per-slot names.
+  for (auto &S : States) {
+    if (S.LocalVar.empty()) S.LocalVar = VarOfNode[S.N->Id];
+  }
 
   // Build the function body.
   auto *Body = AST.make<Block>();
@@ -818,7 +996,10 @@ matlab::Function *lowerSubsystemToMatlab(
 
   // §17.5-#4-style discretization spec for each stateful block —
   // computed up front so the per-block dispatch below can render
-  // the `<next> = ...` update expression cleanly.
+  // the `<next> = ...` update expression cleanly. Keyed by slot's
+  // CurArg so higher-order TF blocks (multiple slots) can each
+  // carry their own update expression. Single-slot blocks use the
+  // sole entry per CurArg as before.
   std::unordered_map<std::string, Expr *> NextStateExpr;
 
   // Tier 5 — hard-reject continuous blocks for HDL emit. Software
@@ -827,14 +1008,12 @@ matlab::Function *lowerSubsystemToMatlab(
   // `signal_discrete_integrator` and Unit Delays in the .mflow).
   if (Opts.RejectContinuous) {
     for (auto *N : Internal) {
-      // Tier-5g: signal_integrator + signal_transfer_fcn (1st-order
-      // strictly-proper) now auto-discretise in HDL mode too —
-      // Forward Euler at the user-picked Ts, same path as software
-      // targets. Higher-order TFs, state-space, and zero-pole
-      // stay rejected pending Tier-5h.
-      if (N->Kind == "signal_state_space" ||
-          N->Kind == "signal_zero_pole" ||
-          N->Kind == "signal_transport_delay") {
+      // Tier-5g/h: every continuous block kind currently in the
+      // supported set auto-discretises in HDL mode via Forward
+      // Euler at the user-picked Ts. Nothing in the reject list
+      // for now; future continuous shapes (frequency-domain
+      // filters, hybrid networks) would land here.
+      if (false) {
         Diag.error(N->Loc,
                    "HDL emit: continuous block `" + N->Kind + "` \"" +
                        N->Id + "\" can't be synthesised — replace with "
@@ -903,24 +1082,24 @@ matlab::Function *lowerSubsystemToMatlab(
   // — silently producing wrong outputs.  Matches the simulator's
   // "load Z_ first, then evalAll" tick shape (lib/Flowchart/
   // MflowLinkSim.cpp).
-  for (auto *N : Internal) {
-    if (!isStatefulKind(N->Kind)) continue;
-    const std::string &OutV = VarOfNode[N->Id];
-    const std::string CurS  = "s_" + sanitizeIdent(N->Id);
-    // `<OutV> = <CurS> + 0.0;`  (output the latched state)
-    // The `+ 0.0` anchors the assignment to `f64` so the static
-    // -emit-* pipeline's slot-type inference picks `double`
-    // throughout — without it a pure-passthrough subsystem (e.g.
-    // one Unit Delay with no internal arithmetic) gets collapsed
-    // away as dead-code and the emitted function body is empty.
-    // The anchor is a no-op at runtime.  Persistent-mode reads
-    // skip the anchor since the slot already carries a concrete
-    // `fi(...)` type from the isempty-init block.
+  // Iterate per StateSlot — single-slot blocks contribute one entry
+  // (LocalVar = block's OutVar); higher-order TF blocks contribute
+  // N entries (one local per state, distinct from the block's
+  // OutVar). The state-read for each slot becomes `<LocalVar> =
+  // <CurArg>`; the block's OutVar gets computed separately below
+  // (for higher-order TF, it's the Σ b_i*x_i linear combination).
+  for (auto &S : States) {
     if (Opts.StateAsPersistent) {
-      Body->Stmts.push_back(B.assign(OutV, B.name(CurS)));
+      Body->Stmts.push_back(B.assign(S.LocalVar, B.name(S.CurArg)));
     } else {
-      Body->Stmts.push_back(B.assign(OutV,
-                                      B.bin(BinOp::Add, B.name(CurS),
+      // The `+ 0.0` anchors the assignment to `f64` so the static
+      // -emit-* pipeline's slot-type inference picks `double`
+      // throughout — without it a pure-passthrough subsystem
+      // (e.g. one Unit Delay with no internal arithmetic) gets
+      // collapsed away as dead-code and the body is empty. The
+      // anchor is a no-op at runtime.
+      Body->Stmts.push_back(B.assign(S.LocalVar,
+                                      B.bin(BinOp::Add, B.name(S.CurArg),
                                             B.number(0.0))));
     }
   }
@@ -939,7 +1118,10 @@ matlab::Function *lowerSubsystemToMatlab(
       // after every block feeding it has run).
       const std::string CurS  = "s_" + sanitizeIdent(N->Id);
       // Compute next state. Stash in `NextStateExpr` for the
-      // final state-update block at end of body.
+      // final state-update block at end of body. For single-slot
+      // blocks the key is the slot's CurArg (== "s_<id>"). For
+      // higher-order TF the per-slot entries get filled in the
+      // TF dispatch.
       Expr *NextExpr = nullptr;
       if (N->Kind == "signal_unit_delay" || N->Kind == "signal_zoh") {
         // Next state = current input. Software targets anchor with
@@ -1007,39 +1189,62 @@ matlab::Function *lowerSubsystemToMatlab(
         const std::string &LocalRead =
             B.WrapFi ? VarOfNode[N->Id] : CurS;
         NextExpr = B.bin(BinOp::Add, B.name(LocalRead), TsU);
-      } else if (N->Kind == "signal_transfer_fcn") {
-        // Tier-5g — continuous 1st-order strictly-proper TF.
-        //   H(s) = b0 / (a1*s + a0)
-        //   Continuous state: dx/dt = -(a0/a1)*x + (b0/a1)*u, y = x
-        //   Forward Euler discretisation at Ts:
-        //     x[n+1] = (1 - Ts*a0/a1) * x[n] + (Ts*b0/a1) * u[n]
-        //     y[n]   = x[n]      ← strictly proper, no direct feedthrough
-        auto *NumS = N->getParam("num");
-        auto *DenS = N->getParam("den");
-        auto Num = parsePoly(NumS ? *NumS : "1");
-        auto Den = parsePoly(DenS ? *DenS : "1");
-        // Tier-5g restrictions: den exactly 2 coefficients (linear in
-        // s), num at most 1 coefficient (constant). Higher-order /
-        // proper-but-not-strictly-proper shapes defer to Tier-5h.
-        if (Den.size() != 2 || Num.size() > 1 || Num.empty()) {
+      } else if (N->Kind == "signal_transfer_fcn" ||
+                 N->Kind == "signal_zero_pole") {
+        // Tier-5h — continuous N-th order strictly-proper Transfer
+        // Function (or Zero-Pole expanded to one) via Forward Euler
+        // on the controllable canonical state-space realisation.
+        //
+        //   H(s) = (b_{n-1}*s^{n-1} + ... + b_0) / (s^n + a_{n-1}*s^{n-1} + ... + a_0)
+        //
+        // Controllable canonical form:
+        //   x_1' = x_2;  x_2' = x_3;  ...;  x_{n-1}' = x_n
+        //   x_n' = -a_0*x_1 - a_1*x_2 - ... - a_{n-1}*x_n + u
+        //   y    =  b_0*x_1 +  b_1*x_2 + ... +  b_{n-1}*x_n
+        //
+        // Forward Euler at Ts: x_i[k+1] = x_i[k] + Ts * x_i'[k].
+        // Strict-proper invariant ⇒ no direct feedthrough.
+        std::vector<double> NumIn, DenIn;
+        if (!resolveTFCoeffs(*N, NumIn, DenIn)) {
           Diag.error(N->Loc,
-                     "embedded coder Tier-5g: signal_transfer_fcn \"" +
-                         N->Id +
-                         "\" needs num order ≤ 0 (constant) and den "
-                         "order = 1 (linear in s). Higher-order TFs "
-                         "and proper-but-not-strictly-proper shapes "
-                         "are a Tier-5h follow-up.");
+                     "could not extract (num, den) for `" + N->Kind +
+                         "` block \"" + N->Id + "\"");
           return nullptr;
         }
-        double b0 = Num[0];
-        double a1 = Den[0], a0 = Den[1];
-        if (a1 == 0.0) {
+        if (DenIn.size() < 2 || DenIn.front() == 0.0) {
           Diag.error(N->Loc,
                      "signal_transfer_fcn \"" + N->Id +
-                         "\" has zero leading denominator coefficient");
+                         "\": denominator must be degree ≥ 1 with "
+                         "non-zero leading coefficient");
           return nullptr;
         }
-        // Same Ts-resolution ladder as the discrete integrator.
+        if (NumIn.size() >= DenIn.size()) {
+          Diag.error(N->Loc,
+                     "signal_transfer_fcn \"" + N->Id +
+                         "\": only strictly-proper TFs are supported "
+                         "(numerator degree must be strictly less than "
+                         "denominator degree).");
+          return nullptr;
+        }
+        // Normalise: divide every coefficient by den's leading
+        // coefficient so the canonical-form denominator is
+        // s^n + a_{n-1}*s^{n-1} + ... + a_0.
+        double Lead = DenIn.front();
+        int Order = (int)DenIn.size() - 1;
+        // A[i] = coefficient of s^i in the normalised denominator
+        // (lowest power first), with A[Order] = 1 dropped (implicit).
+        std::vector<double> A(Order, 0.0);
+        for (int i = 0; i < Order; ++i)
+          A[i] = DenIn[DenIn.size() - 1 - i] / Lead;
+        // BV[i] = coefficient of s^i in the numerator (lowest power
+        // first), 0.0 for missing powers. Length Order (strictly
+        // proper ⇒ no s^Order term).
+        std::vector<double> BV(Order, 0.0);
+        for (size_t i = 0; i < NumIn.size(); ++i) {
+          size_t Power = NumIn.size() - 1 - i;
+          if ((int)Power < Order) BV[Power] = NumIn[i] / Lead;
+        }
+        // Same Ts-resolution ladder as the integrator.
         double Ts = Opts.TargetRate;
         if (Ts <= 0.0) Ts = paramD(*N, "sample_time", 0.0);
         if (Ts <= 0.0) Ts = paramD(*N, "sampleTime", 0.0);
@@ -1060,24 +1265,248 @@ matlab::Function *lowerSubsystemToMatlab(
                          "`data.sample_time` / `settings.solver.maxStep`");
           return nullptr;
         }
-        // Forward Euler coefficients:
-        //   Adis = 1 - Ts * (a0/a1)
-        //   Bdis = Ts * (b0/a1)
-        double Adis = 1.0 - Ts * (a0 / a1);
-        double Bdis = Ts * (b0 / a1);
-        Expr *AdisC = B.WrapFi ? B.lit(Adis) : B.number(Adis);
-        Expr *BdisC = B.WrapFi ? B.lit(Bdis) : B.number(Bdis);
         Expr *U = Ins.empty() ? B.number(0.0) : Ins.front();
-        const std::string &LocalRead =
-            B.WrapFi ? VarOfNode[N->Id] : CurS;
-        // s_next = Adis * <local state> + Bdis * u
-        auto *AdTerm = B.bin(BinOp::ElemMul, AdisC, B.name(LocalRead));
-        auto *BdTerm = B.bin(BinOp::ElemMul, BdisC, U);
-        NextExpr = B.bin(BinOp::Add, AdTerm, BdTerm);
+        // For each of the Order slots, find the matching StateSlot
+        // (looked up by CurArg = "s_<id>_x<k>") and emit:
+        //   slot k (1..Order-1): x_k_next = x_k + Ts*x_{k+1}
+        //   slot Order:          x_Order_next = x_Order +
+        //                          Ts*(-A[0]*x_1 - ... - A[Order-1]*x_Order + u)
+        // Plus the OutVar = b_0*x_1 + ... + b_{n-1}*x_n linear combo
+        // (emitted below, after we collect the LocalVar names).
+        std::string SlotPrefix = "s_" + sanitizeIdent(N->Id) + "_x";
+        std::string LocalPrefix = "x";
+        std::string LocalSuffix = "_" + sanitizeIdent(N->Id);
+        // For Order=1, single-slot path uses LocalVar = VarOfNode.
+        // Translate to the same name we used in the State collection.
+        auto localFor = [&](int K) -> std::string {
+          if (Order == 1) return VarOfNode[N->Id];
+          return LocalPrefix + std::to_string(K) + LocalSuffix;
+        };
+        auto slotFor = [&](int K) -> std::string {
+          if (Order == 1) return "s_" + sanitizeIdent(N->Id);
+          return SlotPrefix + std::to_string(K);
+        };
+        auto fiC = [&](double V) -> Expr * {
+          return B.WrapFi ? B.lit(V) : B.number(V);
+        };
+        // Build the next-state expressions per slot. The first
+        // Order-1 slots are simple advances; the last slot rolls
+        // up all the -A[i]*x_{i+1} terms plus the input.
+        for (int K = 1; K <= Order - 1; ++K) {
+          // x_K_next = x_K + Ts * x_{K+1}
+          Expr *XK   = B.name(localFor(K));
+          Expr *XK1  = B.name(localFor(K + 1));
+          Expr *Term = B.bin(BinOp::ElemMul, fiC(Ts), XK1);
+          NextStateExpr[slotFor(K)] = B.bin(BinOp::Add, XK, Term);
+        }
+        // Last slot: x_n_next = x_n + Ts*(-A[0]*x_1 - ... - A[n-1]*x_n + u)
+        Expr *Acc = U;
+        for (int K = 1; K <= Order; ++K) {
+          Expr *NegA = fiC(-A[K - 1]);
+          Expr *Term = B.bin(BinOp::ElemMul, NegA, B.name(localFor(K)));
+          Acc = B.bin(BinOp::Add, Acc, Term);
+        }
+        // x_n + Ts * (Acc)
+        Expr *XN     = B.name(localFor(Order));
+        Expr *TsAcc  = B.bin(BinOp::ElemMul, fiC(Ts), Acc);
+        Expr *XNNext = B.bin(BinOp::Add, XN, TsAcc);
+        NextStateExpr[slotFor(Order)] = XNNext;
+        // Emit the block's output `OutVar = Σ b_i * x_i`. This is
+        // the linear combination of states. For Order=1 the
+        // existing state-read hoist already set OutVar = state;
+        // we overwrite it with the b_0-weighted form here so the
+        // output matches the controllable-canonical y equation.
+        // (For Order=1, b_0 might != 1, so the overwrite is the
+        // correct semantic — replaces a stale state-read hoist
+        // that wrote OutVar = state.)
+        const std::string &OutV = VarOfNode[N->Id];
+        Expr *YAcc = nullptr;
+        for (int K = 1; K <= Order; ++K) {
+          Expr *Term = B.bin(BinOp::ElemMul, fiC(BV[K - 1]),
+                              B.name(localFor(K)));
+          YAcc = YAcc ? B.bin(BinOp::Add, YAcc, Term) : Term;
+        }
+        if (!YAcc) YAcc = B.number(0.0);
+        Body->Stmts.push_back(B.assign(OutV, YAcc));
+        NextExpr = nullptr;  // already filled per slot above
+        continue;            // skip the single-key store below
+      } else if (N->Kind == "signal_state_space") {
+        // Tier-5h — continuous state-space (A, B, C; D = 0 strict-
+        // proper). Forward Euler at Ts:
+        //   x[k+1] = (I + Ts*A)*x[k] + Ts*B*u[k]
+        //   y[k]   = C*x[k]
+        // SISO only — B is N×1, C is 1×N. Multi-input/output is a
+        // Tier-5i follow-up (vector-valued ports).
+        auto getStr = [&](const char *Key) -> std::string {
+          auto It = N->Params.find(Key);
+          return It == N->Params.end() ? std::string{} : It->second;
+        };
+        std::vector<double> AM, BM, CM;
+        int Ar = 0, Ac = 0, Br = 0, Bc = 0, Cr = 0, Cc = 0;
+        parseMatrixStr(getStr("A"), AM, Ar, Ac);
+        parseMatrixStr(getStr("B"), BM, Br, Bc);
+        parseMatrixStr(getStr("C"), CM, Cr, Cc);
+        if (Ar == 0 || Ar != Ac) {
+          Diag.error(N->Loc,
+                     "signal_state_space \"" + N->Id +
+                         "\": A matrix must be square and non-empty");
+          return nullptr;
+        }
+        int Order = Ar;
+        if (Br != Order || Bc != 1) {
+          Diag.error(N->Loc,
+                     "signal_state_space \"" + N->Id +
+                         "\": B must be " + std::to_string(Order) +
+                         "×1 (SISO only in Tier-5h)");
+          return nullptr;
+        }
+        if (Cr != 1 || Cc != Order) {
+          Diag.error(N->Loc,
+                     "signal_state_space \"" + N->Id +
+                         "\": C must be 1×" + std::to_string(Order) +
+                         " (SISO only in Tier-5h)");
+          return nullptr;
+        }
+        // D, if present, must be the zero scalar.
+        auto DStr = getStr("D");
+        if (!DStr.empty()) {
+          std::vector<double> DM; int Dr=0, Dc=0;
+          parseMatrixStr(DStr, DM, Dr, Dc);
+          for (double D : DM) {
+            if (D != 0.0) {
+              Diag.error(N->Loc,
+                         "signal_state_space \"" + N->Id +
+                             "\": D must be 0 (strict-proper only)");
+              return nullptr;
+            }
+          }
+        }
+        double Ts = Opts.TargetRate;
+        if (Ts <= 0.0) Ts = paramD(*N, "sample_time", 0.0);
+        if (Ts <= 0.0) Ts = paramD(*N, "sampleTime", 0.0);
+        if (Ts <= 0.0) Ts = paramD(*N, "Ts", 0.0);
+        if (Ts <= 0.0 && Doc.Settings.Solver.has_value()) {
+          const auto &SC = *Doc.Settings.Solver;
+          if (SC.MaxStep != "auto") {
+            try { Ts = std::stod(SC.MaxStep); } catch (...) {}
+          }
+        }
+        if (Ts <= 0.0) {
+          Diag.error(N->Loc,
+                     "embedded coder: signal_state_space \"" + N->Id +
+                         "\" needs a sample period");
+          return nullptr;
+        }
+        std::string LocalPrefix = "x";
+        std::string LocalSuffix = "_" + sanitizeIdent(N->Id);
+        std::string SlotPrefix = "s_" + sanitizeIdent(N->Id) + "_x";
+        auto localFor = [&](int K) -> std::string {
+          if (Order == 1) return VarOfNode[N->Id];
+          return LocalPrefix + std::to_string(K) + LocalSuffix;
+        };
+        auto slotFor = [&](int K) -> std::string {
+          if (Order == 1) return "s_" + sanitizeIdent(N->Id);
+          return SlotPrefix + std::to_string(K);
+        };
+        auto fiC = [&](double V) -> Expr * {
+          return B.WrapFi ? B.lit(V) : B.number(V);
+        };
+        Expr *U = Ins.empty() ? B.number(0.0) : Ins.front();
+        // Row i: x_i_next = x_i + Ts*(Σ_j A[i,j]*x_j + B[i]*u)
+        for (int I = 1; I <= Order; ++I) {
+          Expr *Acc = B.bin(BinOp::ElemMul, fiC(BM[I - 1]), U);
+          for (int J = 1; J <= Order; ++J) {
+            double Aij = AM[(I - 1) * Order + (J - 1)];
+            if (Aij == 0.0) continue;
+            Expr *T = B.bin(BinOp::ElemMul, fiC(Aij),
+                             B.name(localFor(J)));
+            Acc = B.bin(BinOp::Add, Acc, T);
+          }
+          Expr *TsAcc = B.bin(BinOp::ElemMul, fiC(Ts), Acc);
+          Expr *XI = B.name(localFor(I));
+          NextStateExpr[slotFor(I)] = B.bin(BinOp::Add, XI, TsAcc);
+        }
+        // Output: y = Σ C[k] * x_k
+        Expr *YAcc = nullptr;
+        for (int K = 1; K <= Order; ++K) {
+          Expr *Term = B.bin(BinOp::ElemMul, fiC(CM[K - 1]),
+                              B.name(localFor(K)));
+          YAcc = YAcc ? B.bin(BinOp::Add, YAcc, Term) : Term;
+        }
+        if (!YAcc) YAcc = B.number(0.0);
+        Body->Stmts.push_back(B.assign(VarOfNode[N->Id], YAcc));
+        NextExpr = nullptr;
+        continue;
+      } else if (N->Kind == "signal_transport_delay") {
+        // Tier-5h — chain of N unit delays. State slots
+        // `s_<id>_x1` … `s_<id>_xN` form a shift register; output
+        // is the oldest tap (x_1), new value enters at x_N.
+        //   x_1_next = x_2; x_2_next = x_3; ...; x_{N-1}_next = x_N;
+        //   x_N_next = u
+        //   y = x_1
+        int Order = (int)0;
+        // Recompute order locally so the dispatch matches the
+        // state-slot allocation (avoid re-running the lambda since
+        // it captures by reference).
+        {
+          double Delay = paramD(*N, "delay", 0.0);
+          double Ts = Opts.TargetRate;
+          if (Ts <= 0.0) Ts = paramD(*N, "sample_time", 0.0);
+          if (Ts <= 0.0) Ts = paramD(*N, "sampleTime", 0.0);
+          if (Ts <= 0.0) Ts = paramD(*N, "Ts", 0.0);
+          if (Ts <= 0.0 && Doc.Settings.Solver.has_value()) {
+            const auto &SC = *Doc.Settings.Solver;
+            if (SC.MaxStep != "auto") {
+              try { Ts = std::stod(SC.MaxStep); } catch (...) {}
+            }
+          }
+          if (Ts <= 0.0 || Delay <= 0.0) {
+            Diag.error(N->Loc,
+                       "signal_transport_delay \"" + N->Id +
+                           "\" needs both `delay` and a sample period "
+                           "(`--target-rate <Ts>` or block "
+                           "`data.sample_time`)");
+            return nullptr;
+          }
+          Order = (int)std::round(Delay / Ts);
+          if (Order < 1) Order = 1;
+        }
+        std::string SlotPrefix = "s_" + sanitizeIdent(N->Id) + "_x";
+        std::string LocalPrefix = "x";
+        std::string LocalSuffix = "_" + sanitizeIdent(N->Id);
+        auto localFor = [&](int K) -> std::string {
+          if (Order == 1) return VarOfNode[N->Id];
+          return LocalPrefix + std::to_string(K) + LocalSuffix;
+        };
+        auto slotFor = [&](int K) -> std::string {
+          if (Order == 1) return "s_" + sanitizeIdent(N->Id);
+          return SlotPrefix + std::to_string(K);
+        };
+        Expr *U = Ins.empty() ? B.number(0.0) : Ins.front();
+        // Shift register state-update chain.
+        for (int K = 1; K <= Order - 1; ++K) {
+          NextStateExpr[slotFor(K)] = B.name(localFor(K + 1));
+        }
+        // Newest tap takes the input.
+        NextStateExpr[slotFor(Order)] =
+            Opts.StateAsPersistent
+                ? U
+                : B.bin(BinOp::Add, U, B.number(0.0));
+        // Block output = oldest tap (x_1) — re-assert it here so the
+        // state-read hoist's `LocalVar = current state` writes to
+        // the block's output variable for multi-slot delays.
+        if (Order > 1) {
+          Body->Stmts.push_back(
+              B.assign(VarOfNode[N->Id], B.name(localFor(1))));
+        }
+        NextExpr = nullptr;
+        continue;
       } else {
         NextExpr = B.number(0.0);
       }
-      NextStateExpr[N->Id] = NextExpr;
+      // Single-slot block — key by CurArg ("s_<id>") to match the
+      // higher-order-TF per-slot keying.
+      NextStateExpr["s_" + sanitizeIdent(N->Id)] = NextExpr;
       continue;
     }
 
@@ -1104,7 +1533,7 @@ matlab::Function *lowerSubsystemToMatlab(
   // slot (no separate `_next` return — the persistent itself is the
   // mutable storage), which the SV pipeline lowers to a register.
   for (auto &S : States) {
-    Expr *E = NextStateExpr[S.N->Id];
+    Expr *E = NextStateExpr[S.CurArg];
     if (!E) E = B.number(0.0);
     if (Opts.StateAsPersistent) {
       Body->Stmts.push_back(B.assign(S.CurArg, E));
@@ -1301,9 +1730,69 @@ std::optional<SubsystemMeta> describeSubsystem(
   // t = 0 snapshot).
   for (const auto &N : Sub->Nodes) {
     if (!isStatefulKind(N.Kind)) continue;
-    M.StateArgNames.push_back("s_" + sanitizeIdent(N.Id));
-    M.StateReturnNames.push_back("s_" + sanitizeIdent(N.Id) + "_next");
-    M.StateInitVals.push_back(initialStateOf(N));
+    // Tier-5h — higher-order TF / ZP blocks contribute N slots,
+    // named `s_<id>_x1` … `s_<id>_xN`. Single-slot blocks keep the
+    // legacy `s_<id>` name.
+    int Order = 1;
+    if (N.Kind == "signal_transfer_fcn" || N.Kind == "signal_zero_pole") {
+      std::vector<double> Num, Den;
+      if (resolveTFCoeffs(N, Num, Den) && Den.size() >= 2)
+        Order = (int)Den.size() - 1;
+    } else if (N.Kind == "signal_transport_delay") {
+      // Match the stateOrderForBlock logic in lowerSubsystemToMatlab.
+      // describeSubsystem doesn't have access to SubsystemEmitOptions,
+      // so use the per-block params + the flow's solver maxStep as
+      // the fallback ladder. The CLI --target-rate override isn't
+      // captured here, but the class wrapper still emits a state
+      // field per slot — the count just may differ from the
+      // actual emitted function signature when --target-rate
+      // overrides the per-block sample period.  Acceptable for
+      // the metadata view; the source-of-truth is the function
+      // itself.
+      auto getD = [&](const char *K) -> double {
+        auto It = N.Params.find(K);
+        if (It == N.Params.end()) return 0.0;
+        try { return std::stod(It->second); } catch (...) { return 0.0; }
+      };
+      double Delay = getD("delay");
+      double Ts = getD("sample_time");
+      if (Ts <= 0.0) Ts = getD("sampleTime");
+      if (Ts <= 0.0) Ts = getD("Ts");
+      if (Ts <= 0.0 && Doc.Settings.Solver.has_value()) {
+        const auto &SC = *Doc.Settings.Solver;
+        if (SC.MaxStep != "auto") {
+          try { Ts = std::stod(SC.MaxStep); } catch (...) {}
+        }
+      }
+      if (Delay > 0.0 && Ts > 0.0) {
+        int Taps = (int)std::round(Delay / Ts);
+        if (Taps >= 1) Order = Taps;
+      }
+    } else if (N.Kind == "signal_state_space") {
+      auto It = N.Params.find("A");
+      if (It != N.Params.end()) {
+        std::vector<double> A;
+        int Ar = 0, Ac = 0;
+        parseMatrixStr(It->second, A, Ar, Ac);
+        if (Ar > 0 && Ar == Ac) Order = Ar;
+      }
+    }
+    if (Order == 1) {
+      M.StateArgNames.push_back("s_" + sanitizeIdent(N.Id));
+      M.StateReturnNames.push_back("s_" + sanitizeIdent(N.Id) + "_next");
+      M.StateInitVals.push_back(initialStateOf(N));
+    } else {
+      for (int K = 1; K <= Order; ++K) {
+        std::string Base = "s_" + sanitizeIdent(N.Id) + "_x" +
+                           std::to_string(K);
+        M.StateArgNames.push_back(Base);
+        M.StateReturnNames.push_back(Base + "_next");
+        // No per-slot initial condition for higher-order TF — all
+        // states zero by convention (matches the simulator's
+        // controllable-canonical realisation at t=0).
+        M.StateInitVals.push_back(0.0);
+      }
+    }
   }
   return M;
 }
