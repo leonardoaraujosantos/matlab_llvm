@@ -2631,6 +2631,25 @@ bool TensorLowering::rewriteBuiltinCalls() {
       Changed = true;
       continue;
     }
+    /* §17.5 #6 — cross-dialect composition. `y = mflowlink_run(path)`
+     * lowers to the C runtime in runtime/runtime_mflowlink_call.cpp.
+     * Same signature pattern as readmatrix: matlab_string* path in,
+     * matlab_mat* row vector of final logged-signal values out. */
+    if (Name == "mflowlink_run" &&
+        Call->getNumOperands() == 1 && Call->getNumResults() == 1 &&
+        Call->getOperand(0).getType() == PtrTy) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt("matlab_mflowlink_run", PtrTy, {PtrTy});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn,
+                                      Call->getOperands());
+      if (Call->getResult(0).getType() != PtrTy)
+        Call->getResult(0).setType(PtrTy);
+      carryName(Call, NC);
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
     /* save(path, A) / load(path) — custom binary format, one matrix
      * per file. save takes a matlab_string path and a ptr matrix;
      * load takes a matlab_string path and returns a ptr matrix.

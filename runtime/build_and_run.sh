@@ -90,6 +90,15 @@ if grep -qE '\b(figure|gcf|subplot|plot|plot3|scatter|bar|stem|stairs|area|error
   USES_PLOT=1
 fi
 
+# §17.5 #6 — auto-detect cross-dialect composition. Any .m using
+# `mflowlink_run(...)` pulls in runtime/runtime_mflowlink_call.cpp
+# plus the matlab_llvm Flowchart static libs that own the loader,
+# SignalFlowLowering, and MflowLinkSim.
+USES_MFLOWLINK=0
+if grep -qE '\bmflowlink_run\s*\(' "$INPUT"; then
+  USES_MFLOWLINK=1
+fi
+
 # --- Plot runtime sources + Cairo flags -------------------------------------
 PLOT_LINK_FLAGS=()
 if [[ "$USES_PLOT" == 1 ]]; then
@@ -168,6 +177,28 @@ if [[ "$USES_SYM" == 1 ]]; then
   )
 fi
 
+# §17.5 #6 — mflowlink_run requires the Flowchart static libs that
+# own loader / SignalFlowLowering / MflowLinkSim. The matlab_llvm
+# build directory must be discoverable (we walk up from $MATLABC).
+MFLOWLINK_LINK_FLAGS=()
+if [[ "$USES_MFLOWLINK" == 1 ]]; then
+  MATLABC_BUILD_DIR="$(cd "$(dirname "$MATLABC")" && pwd)"
+  if [[ ! -f "$MATLABC_BUILD_DIR/libMatlabFlowchart.a" ]]; then
+    echo "error: cannot find Flowchart static libs alongside $MATLABC" >&2
+    echo "       (looked in $MATLABC_BUILD_DIR)" >&2
+    exit 2
+  fi
+  RUNTIME_SRCS+=("$RUNTIME_DIR/runtime_mflowlink_call.cpp")
+  MFLOWLINK_LINK_FLAGS=(
+    -I"$ROOT/include"
+    "$MATLABC_BUILD_DIR/libMatlabFlowchart.a"
+    "$MATLABC_BUILD_DIR/libMatlabParse.a"
+    "$MATLABC_BUILD_DIR/libMatlabLex.a"
+    "$MATLABC_BUILD_DIR/libMatlabAST.a"
+    "$MATLABC_BUILD_DIR/libMatlabBasic.a"
+  )
+fi
+
 # --- Compile + link --------------------------------------------------------
 TMP="$(mktemp -t matlabc.XXXXXX).ll"
 trap 'rm -f "$TMP"' EXIT
@@ -184,5 +215,6 @@ trap 'rm -f "$TMP"' EXIT
   -I"$RUNTIME_DIR" \
   ${PLOT_LINK_FLAGS[@]+"${PLOT_LINK_FLAGS[@]}"} \
   ${SYM_LINK_FLAGS[@]+"${SYM_LINK_FLAGS[@]}"} \
+  ${MFLOWLINK_LINK_FLAGS[@]+"${MFLOWLINK_LINK_FLAGS[@]}"} \
   -o "$OUT"
 echo "built $OUT"

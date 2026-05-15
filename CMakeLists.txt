@@ -439,6 +439,15 @@ add_test(
           $<TARGET_FILE:matlabc>
   WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Flowchart/SimulateDap
 )
+# mflowLink §17.5 #6 — cross-dialect composition. Compile a .m
+# that calls `mflowlink_run("model.mflow")` via runtime/
+# runtime_mflowlink_call.cpp and confirm the round-trip works.
+add_test(
+  NAME flowchart-cross-dialect-tests
+  COMMAND ${CMAKE_SOURCE_DIR}/test/Flowchart/CrossDialect/run_tests.sh
+          $<TARGET_FILE:matlabc>
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Flowchart/CrossDialect
+)
 # mflowLink Tier-G smoke lane — emit + compile + run + diff. Each
 # example .mflow gets emitted to a standalone C++ file via
 # `-emit-mflowlink-cpp`, built with `runtime/build_mflowlink.sh`,

@@ -339,6 +339,10 @@ void Resolver::registerBuiltins() {
     "fread", "fwrite",
     "readtable", "readmatrix",
     "save", "load",
+    // §17.5 #6 — cross-dialect composition: call a signal-flow
+    // .mflow from a .m program. Lowers to `matlab_mflowlink_run`
+    // (see runtime/runtime_mflowlink_call.cpp).
+    "mflowlink_run",
     "conj", "real", "imag", "angle", "complex",
     "fft", "ifft", "fft2", "ifft2",
     "conv", "conv2",
