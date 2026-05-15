@@ -1,0 +1,19 @@
+MflowLinkModel entry=di_methods blocks=7 edges=6
+  solver type=variable_step algorithm=ode45 startTime=0 stopTime=2
+  states continuous=0 discrete=3
+  exec-order:
+    0 u_ramp kind=signal_ramp sample=fixed_in_minor log
+    1 di_fe kind=signal_discrete_integrator sample=discrete period=0.1 disc-states=1 loop-breaker log
+    2 di_be kind=signal_discrete_integrator sample=discrete period=0.1 disc-states=1 loop-breaker log
+    3 di_tr kind=signal_discrete_integrator sample=discrete period=0.1 disc-states=1 loop-breaker log
+    4 term1 kind=signal_terminator sample=fixed_in_minor
+    5 term2 kind=signal_terminator sample=fixed_in_minor
+    6 term3 kind=signal_terminator sample=fixed_in_minor
+  zero-crossings: none
+  edges:
+    e_fe_in u_ramp:out -> di_fe:in
+    e_be_in u_ramp:out -> di_be:in
+    e_tr_in u_ramp:out -> di_tr:in
+    e_fe_sink di_fe:out -> term1:in
+    e_be_sink di_be:out -> term2:in
+    e_tr_sink di_tr:out -> term3:in

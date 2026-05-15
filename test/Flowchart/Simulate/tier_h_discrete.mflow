@@ -27,7 +27,7 @@
           "ports": { "in": [], "out": [{"id": "out"}] } },
         { "id": "di", "kind": "signal_discrete_integrator",
           "data": { "log_signal": true,
-                    "params": { "method": "ForwardEuler",
+                    "params": { "method": "BackwardEuler",
                                 "initialCondition": 0.0,
                                 "sampleTime": 0.1 } },
           "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },

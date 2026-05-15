@@ -423,6 +423,7 @@ MflowLinkSim::MflowLinkSim(const MflowLinkModel &M) : M_(M) {
   }
   Z_.assign(M_.DiscStateCount, 0.0);
   Znext_.assign(M_.DiscStateCount, 0.0);
+  DiscPrevU_.assign(N, 0.0);
 
   // Input wiring. Sum / Product blocks read in1, in2, …; every other
   // single-input block reads "in".
@@ -609,6 +610,7 @@ void MflowLinkSim::reset() {
   std::fill(Y_.begin(), Y_.end(), 0.0);
   std::fill(Z_.begin(), Z_.end(), 0.0);
   std::fill(Znext_.begin(), Znext_.end(), 0.0);
+  std::fill(DiscPrevU_.begin(), DiscPrevU_.end(), 0.0);
   std::fill(Out_.begin(), Out_.end(), 0.0);
   std::fill(PrevOut_.begin(), PrevOut_.end(), 0.0);
   for (auto &C : LogColumns_) C.clear();
@@ -1822,28 +1824,30 @@ void MflowLinkSim::fireDiscreteTicks() {
       // One-tick lag: stage the new value; commit at end-of-tick.
       Znext_[Off] = U;
     } else if (B.Kind == "signal_discrete_integrator") {
-      // y[n+1] = y[n] + h · g(u). Method = Forward/Backward Euler /
-      // Trapezoidal. ForwardEuler is the default — uses the input
-      // sampled *at* the tick; BackwardEuler / Trapezoidal use the
-      // input "after" the tick, which for our scheduler model is
-      // approximated by the same `U` (the runtime would need a
-      // second sub-sample for true backward / trapezoidal accuracy).
+      // §17.5 #4 — proper Forward / Backward Euler / Trapezoidal.
+      // `U` here is the input value AT tick time t = (n+1)·h (the
+      // fire is at end-of-step). DiscPrevU_[I] retains u[n] from
+      // the previous tick.
+      //   Forward Euler:  y[n+1] = y[n] + h · u[n]      (uses PrevU)
+      //   Backward Euler: y[n+1] = y[n] + h · u[n+1]    (uses U)
+      //   Trapezoidal:    y[n+1] = y[n] + h/2·(u[n]+u[n+1])
       double H = B.SamplePeriod > 0.0 ? B.SamplePeriod : 1.0;
       const std::string *MS = nullptr;
       auto It = B.Params.find("method");
       if (It != B.Params.end()) MS = &It->second;
+      double UPrev = DiscPrevU_[I];
       double Y = Z_[Off];
-      if (!MS || *MS == "ForwardEuler" || *MS == "forward_euler") {
+      if (MS && (*MS == "BackwardEuler" || *MS == "backward_euler")) {
         Y = Y + H * U;
-      } else if (*MS == "BackwardEuler" || *MS == "backward_euler") {
-        Y = Y + H * U;     // see comment above — single-sample approx
-      } else if (*MS == "Trapezoidal" || *MS == "trapezoidal") {
-        Y = Y + 0.5 * H * U + 0.5 * H * U;
+      } else if (MS && (*MS == "Trapezoidal" || *MS == "trapezoidal")) {
+        Y = Y + 0.5 * H * (UPrev + U);
       } else {
-        Y = Y + H * U;
+        // Default = Forward Euler (the unflagged case).
+        Y = Y + H * UPrev;
       }
       Z_[Off]     = Y;
       Znext_[Off] = Y;
+      DiscPrevU_[I] = U;
     } else if (B.Kind == "signal_discrete_filter") {
       // Direct-form-II IIR step: y[n] = (num · u_history − den[1..] · y_history) / den[0]
       // For our single-output Tier-H pass, Z_ stores `den.size()-1`
@@ -2092,6 +2096,7 @@ void MflowLinkSim::pushSnapshot() {
   S.Y = Y_;
   S.Out = Out_;
   S.Z = Z_;
+  S.DiscPrevU = DiscPrevU_;
   S.PrevOut = PrevOut_;
   S.NextFire = NextFire_;
   S.ZCSign = ZCSign_;
@@ -2111,6 +2116,7 @@ bool MflowLinkSim::stepBackMajor() {
   Out_ = std::move(S.Out);
   Z_ = std::move(S.Z);
   Znext_ = Z_; // shadow buffer matches the latched value on restore
+  DiscPrevU_ = std::move(S.DiscPrevU);
   PrevOut_ = std::move(S.PrevOut);
   NextFire_ = std::move(S.NextFire);
   ZCSign_ = std::move(S.ZCSign);

@@ -250,6 +250,23 @@ ST_LINE=$("$MATLABC" -simulate --dry-run "$EX/sample_time_inherit.mflow" 2>&1 | 
 check "gain block inherits discrete 0.1s" \
   "[[ '$ST_LINE' == *'sample=discrete period=0.1'* ]]" ""
 
+#--- discrete_integrator_methods (§17.5 #4): three methods on a ramp ------
+DM="$("$MATLABC" -simulate "$EX/discrete_integrator_methods.mflow")"
+DM_HEAD=$(printf '%s\n' "$DM" | head -1)
+check "di-methods header"   "[[ '$DM_HEAD' == 't,u_ramp,di_fe,di_be,di_tr' ]]" ""
+# Integrate u(t)=t from 0 to 2 with h=0.1: Forward Euler = Σh·u[n]
+# for n=0..19 = 1.9. Backward Euler = Σh·u[n+1] = 2.1. Trapezoidal
+# is exact = 2.0.
+DM_FE=$(printf '%s\n' "$DM" | awk -F, 'NR>1 && $1+0==2.0 {print $3; exit}')
+DM_BE=$(printf '%s\n' "$DM" | awk -F, 'NR>1 && $1+0==2.0 {print $4; exit}')
+DM_TR=$(printf '%s\n' "$DM" | awk -F, 'NR>1 && $1+0==2.0 {print $5; exit}')
+check "Forward Euler (lagging)  = 1.9" \
+  "awk 'BEGIN{exit !(($DM_FE - 1.9)^2 < 1e-6)}'" ""
+check "Backward Euler (leading) = 2.1" \
+  "awk 'BEGIN{exit !(($DM_BE - 2.1)^2 < 1e-6)}'" ""
+check "Trapezoidal (exact)      = 2.0" \
+  "awk 'BEGIN{exit !(($DM_TR - 2.0)^2 < 1e-9)}'" ""
+
 #--- masked_library (Item-3): two subsystem instances of one library ------
 ML="$("$MATLABC" -simulate "$EX/masked_library.mflow")"
 ML_HEAD=$(printf '%s\n' "$ML" | head -1)
