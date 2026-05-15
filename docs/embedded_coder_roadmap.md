@@ -570,16 +570,44 @@ Tier-5j open carve-outs (not yet shipped):
 - ~~SV fi-multiplication normalising shift~~ ✓ fixed in Tier-5k.
 - ~~SV stateful local self-assignment~~ ✓ fixed in Tier-5k.
 
-Tier-5i open carve-outs (not yet shipped):
-- **MIMO Tustin** — currently SISO-only. Matrix bilinear
-  `Ad = M(I + αA), Bd = M·Ts·B, Cd = C, Dd = α·C·M·B`
-  (α = Ts/2, M = (I − αA)⁻¹) would let MIMO state-space share
-  Tustin's improved frequency fidelity. Needs a small linalg
-  helper (square matrix inversion) and a state-basis transform
-  to recover the standard `x[k+1] = Ad·x[k] + Bd·u[k]; y =
-  Cd·x[k] + Dd·u[k]` shape without a `u[k+1]` dependency.
-  Sourced error fires today when `--discretize=tustin` is
-  combined with a MIMO shape.
+Tier-5l (✓ shipped 2026-05-15):
+- **MIMO Tustin (matrix bilinear)** — `signal_state_space` under
+  `--discretize=tustin` now supports MIMO too (was SISO-only).
+  Implementation in `lib/Flowchart/SubsystemToMatlab.cpp`:
+  new dense-matrix helpers (`matEye`, `matAdd`, `matSub`,
+  `matMulOuter`, `matInverse` with partial pivoting) plus a
+  `tustinSS` driver that computes `Ad = M(I+αA), Bd = α(I+Ad)MB,
+  Cd = C, Dd = α·C·M·B` (α = Ts/2, M = (I−αA)⁻¹). The state
+  transformation `z[k] = x[k] − α·M·B·u[k]` is folded into the
+  emitted state update so the discrete equations are the
+  standard `z[k+1] = Ad·z[k] + Bd·u[k], y[k] = Cd·z[k] + Dd·u[k]`
+  shape. Direct-feedthrough `Dd·u` appears in the output
+  equation as expected for Tustin. SISO state-space also routes
+  through the same path (matrix Tustin reduces to scalar
+  Tustin at N=P=Q=1). Demo: `mimo_tustin.mflow` — same 2-in/2-out
+  decoupled plant as `mimo_state_space.mflow`, drive
+  `--discretize=tustin` and verify per-port direct feedthrough
+  (y1[0] = 0.0244 for u1=1, exactly matches α·M[0,0]·B[0,0])
+  + decoupled DC gain (y1→1.0, y2→0.5) + no cross-leakage.
+- **yosys generic synthesis lane** —
+  `test/Flowchart/EmitSubsystem/run_yosys_synth.sh` runs
+  `yosys -p "read_verilog -sv <sv>; synth -top <name>; stat"`
+  over every SV-capable fixture, verifies it synthesises
+  cleanly, parses the cell count from the stat dump, and
+  enforces a per-fixture gate-count floor as a regression
+  sentinel. Registered as `flowchart-emit-subsystem-sv-yosys`
+  under the same `MATLAB_LLVM_WITH_EMIT_SUBSYSTEM_SV_COSIM`
+  CMake flag. Skips cleanly when yosys isn't on PATH. 15/15
+  fixtures synthesise (matlab_fcn_sv carved out — pre-existing
+  emit issue where the user-fn's return type isn't fi-inferred).
+  Per-fixture cell counts: unit_delay 32, threshold_switch 181,
+  comparator_logic 47, stateless_mixer 478, scaled_sum 523,
+  tapped_delay 96, transport_delay 128, fir_4tap 572,
+  continuous_lowpass 1243, tf_lowpass 1355, mimo_state_space
+  2722, zp_plant 3057, tf_2nd_order 4096, ss_plant 4109,
+  discrete_pid 4727.
+
+Tier-5l open carve-outs (not yet shipped):
 - **Algebraic-loop detection for Tustin** — Tustin direct-
   feedthrough blocks placed in a feedback loop (e.g.
   Integrator → Sum → Integrator) produce an algebraic loop the

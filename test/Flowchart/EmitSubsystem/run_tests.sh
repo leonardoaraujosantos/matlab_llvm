@@ -794,6 +794,52 @@ mimo_ss_sv_smoke() {
 }
 mimo_ss_sv_smoke
 
+# Tier-5l — MIMO Tustin (matrix bilinear). Same 2-in/2-out
+# decoupled plant as mimo_state_space.mflow but discretised via
+# `--discretize=tustin`. Tustin's direct-feedthrough term
+# `Dd·u` puts a non-zero first-sample response on each output
+# (y1[0] = α·u1[0] / (1 - α·A[0,0]) ≈ 0.0244 for u1 = 1).
+# DC gain still settles to 1.0 / 0.5 on respective outputs.
+mimo_tustin_smoke() {
+  local py="$SCRATCH/mimo_tustin.py"
+  "$MATLABC" -emit-python "$EX/mimo_tustin.mflow" \
+      --subsystem mimo_tustin --discretize=tustin \
+      > "$py" 2> "$SCRATCH/mt.err"
+  python3 - "$py" <<'PY'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("mt", sys.argv[1])
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+plant = m.MimoTustin()
+for _ in range(400): y1, y2 = plant.step(1.0, 0.0)
+if abs(y2) > 1e-12:
+    print(f"  mimo_tustin: y2 leakage with u1 step ({y2})", file=sys.stderr)
+    sys.exit(1)
+if not (0.95 <= y1 <= 1.05):
+    print(f"  mimo_tustin: y1 final {y1} off 1.0", file=sys.stderr)
+    sys.exit(1)
+plant = m.MimoTustin()
+for _ in range(400): y1, y2 = plant.step(0.0, 1.0)
+if abs(y1) > 1e-12:
+    print(f"  mimo_tustin: y1 leakage with u2 step ({y1})", file=sys.stderr)
+    sys.exit(1)
+if not (0.45 <= y2 <= 0.55):
+    print(f"  mimo_tustin: y2 final {y2} off 0.5", file=sys.stderr)
+    sys.exit(1)
+# Direct feedthrough at tick 0 — the defining Tustin feature.
+plant = m.MimoTustin()
+y1, y2 = plant.step(1.0, 0.0)
+if abs(y1 - 0.024390243902439025) > 1e-9:
+    print(f"  mimo_tustin: y1 tick-0 feedthrough {y1} off 0.02439",
+          file=sys.stderr); sys.exit(1)
+PY
+  if [[ $? -ne 0 ]]; then
+    fail=$((fail+1)); fails+=("mimo_tustin (response mismatch)")
+  else
+    pass=$((pass+1))
+  fi
+}
+mimo_tustin_smoke
+
 # Tier-5i — Tustin SV emit (synth sanity). Verifies the SV emit lane
 # produces a valid module with the direct-feedthrough output equation
 # (y = NumZ[0]*u + state) and the DF2T state update visible.

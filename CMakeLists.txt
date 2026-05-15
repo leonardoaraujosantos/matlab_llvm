@@ -526,6 +526,17 @@ if(MATLAB_LLVM_WITH_EMIT_SUBSYSTEM_SV_COSIM)
             $<TARGET_FILE:matlabc>
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Flowchart/EmitSubsystem
   )
+  # Tier-5l — yosys generic synthesis gate. Catches what the lint
+  # and cosim lanes can't: latch inference, unsynthesisable
+  # constructs, ungrouped state, plus a per-fixture gate-count
+  # floor as a regression sentinel. Skips cleanly when yosys
+  # isn't on PATH.
+  add_test(
+    NAME flowchart-emit-subsystem-sv-yosys
+    COMMAND ${CMAKE_SOURCE_DIR}/test/Flowchart/EmitSubsystem/run_yosys_synth.sh
+            $<TARGET_FILE:matlabc>
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Flowchart/EmitSubsystem
+  )
 endif()
 if(MATLAB_LLVM_WITH_MLIR)
   add_test(

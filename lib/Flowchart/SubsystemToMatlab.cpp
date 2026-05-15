@@ -347,6 +347,137 @@ void tustinTF(const std::vector<double> &Num,
   for (auto &X : DenZ) X /= Lead;
 }
 
+// Tier-5l — Small dense matrix helpers shared by MIMO Tustin.
+// Vectors are row-major flat std::vector<double>; dimensions are
+// passed explicitly. Sized for the small N typical in control
+// systems (≤ ~8); cubic Gauss-Jordan is fine at that scale.
+void matEye(int N, std::vector<double> &Out) {
+  Out.assign((size_t)N * N, 0.0);
+  for (int I = 0; I < N; ++I) Out[(size_t)I * N + I] = 1.0;
+}
+
+void matAdd(const std::vector<double> &A, const std::vector<double> &B,
+            int Rows, int Cols, std::vector<double> &Out) {
+  Out.assign((size_t)Rows * Cols, 0.0);
+  for (size_t I = 0; I < (size_t)Rows * Cols; ++I) Out[I] = A[I] + B[I];
+}
+
+void matSub(const std::vector<double> &A, const std::vector<double> &B,
+            int Rows, int Cols, std::vector<double> &Out) {
+  Out.assign((size_t)Rows * Cols, 0.0);
+  for (size_t I = 0; I < (size_t)Rows * Cols; ++I) Out[I] = A[I] - B[I];
+}
+
+void matScaleInPlace(std::vector<double> &M, double S) {
+  for (auto &X : M) X *= S;
+}
+
+// Row-major (Ar × Ac) · (Ac × Bc) → (Ar × Bc).
+void matMulOuter(const std::vector<double> &A, int Ar, int Ac,
+                 const std::vector<double> &B, int Bc,
+                 std::vector<double> &Out) {
+  Out.assign((size_t)Ar * Bc, 0.0);
+  for (int I = 0; I < Ar; ++I)
+    for (int J = 0; J < Bc; ++J) {
+      double S = 0.0;
+      for (int K = 0; K < Ac; ++K)
+        S += A[(size_t)I * Ac + K] * B[(size_t)K * Bc + J];
+      Out[(size_t)I * Bc + J] = S;
+    }
+}
+
+// Gauss-Jordan inverse for small square matrices. Partial pivoting
+// only. Returns false on singular input (any pivot below 1e-12 in
+// absolute value).
+bool matInverse(const std::vector<double> &In, int N,
+                std::vector<double> &Out) {
+  std::vector<double> A = In;
+  matEye(N, Out);
+  for (int K = 0; K < N; ++K) {
+    int P = K;
+    double Best = std::abs(A[(size_t)K * N + K]);
+    for (int R = K + 1; R < N; ++R) {
+      double V = std::abs(A[(size_t)R * N + K]);
+      if (V > Best) { Best = V; P = R; }
+    }
+    if (Best < 1e-12) return false;
+    if (P != K) {
+      for (int J = 0; J < N; ++J) {
+        std::swap(A[(size_t)K * N + J], A[(size_t)P * N + J]);
+        std::swap(Out[(size_t)K * N + J], Out[(size_t)P * N + J]);
+      }
+    }
+    double Pv = A[(size_t)K * N + K];
+    for (int J = 0; J < N; ++J) {
+      A[(size_t)K * N + J]   /= Pv;
+      Out[(size_t)K * N + J] /= Pv;
+    }
+    for (int R = 0; R < N; ++R) {
+      if (R == K) continue;
+      double F = A[(size_t)R * N + K];
+      if (F == 0.0) continue;
+      for (int J = 0; J < N; ++J) {
+        A[(size_t)R * N + J]   -= F * A[(size_t)K * N + J];
+        Out[(size_t)R * N + J] -= F * Out[(size_t)K * N + J];
+      }
+    }
+  }
+  return true;
+}
+
+// Tier-5l — Tustin (bilinear) discretisation of continuous MIMO
+// state-space `dx/dt = A x + B u, y = C x + D u` (input D omitted —
+// caller knows D=0 at the source level).  Derivation:
+//
+//   (I - αA) x[k+1] = (I + αA) x[k] + α B (u[k+1] + u[k])
+//
+// with α = Ts/2.  Eliminating the u[k+1] dependence via the state
+// transform z[k] = x[k] - α M B u[k] (where M = (I - αA)^-1) gives
+// the canonical Tustin form:
+//
+//   Ad = M · (I + αA)
+//   Bd = α · (I + Ad) · M · B          ← direct-feedthrough comes
+//   Cd = C                              ← from the state transform
+//   Dd = α · C · M · B                  ← y = Cd·z + Dd·u
+//
+// Returns false when (I - αA) is singular (numerically, |det| <
+// 1e-12 after partial pivoting). Output matrix shapes: Ad N×N,
+// Bd N×P, Cd Q×N, Dd Q×P.
+bool tustinSS(const std::vector<double> &A, int N,
+              const std::vector<double> &B, int P,
+              const std::vector<double> &C, int Q, double Ts,
+              std::vector<double> &Ad, std::vector<double> &Bd,
+              std::vector<double> &Cd, std::vector<double> &Dd) {
+  double Alpha = Ts / 2.0;
+  std::vector<double> EyeN;
+  matEye(N, EyeN);
+  std::vector<double> AlphaA = A;
+  matScaleInPlace(AlphaA, Alpha);
+  std::vector<double> IminusAA;
+  matSub(EyeN, AlphaA, N, N, IminusAA);
+  std::vector<double> M;
+  if (!matInverse(IminusAA, N, M)) return false;
+  std::vector<double> IplusAA;
+  matAdd(EyeN, AlphaA, N, N, IplusAA);
+  // Ad = M (I+αA).
+  matMulOuter(M, N, N, IplusAA, N, Ad);
+  // Bd = α (I + Ad) M B.
+  std::vector<double> IplusAd;
+  matAdd(EyeN, Ad, N, N, IplusAd);
+  std::vector<double> Tmp;
+  matMulOuter(IplusAd, N, N, M, N, Tmp);          // (I+Ad)·M
+  matMulOuter(Tmp, N, N, B, P, Bd);               // ·B
+  matScaleInPlace(Bd, Alpha);
+  // Cd = C  (unchanged in the transformed basis).
+  Cd = C;
+  // Dd = α C M B.
+  std::vector<double> CM;
+  matMulOuter(C, Q, N, M, N, CM);
+  matMulOuter(CM, Q, N, B, P, Dd);
+  matScaleInPlace(Dd, Alpha);
+  return true;
+}
+
 // Tier-5i — Faddeev-LeVerrier conversion of a SISO continuous state-
 // space (A, B, C) into a transfer function (Num, Den). A is N×N
 // row-major, B is N×1, C is 1×N. Returns Num of length N (degree
@@ -1702,14 +1833,6 @@ matlab::Function *lowerSubsystemToMatlab(
         int P = Bc;  // number of inputs
         int Q = Cr;  // number of outputs
         bool MIMO = (P > 1 || Q > 1);
-        if (MIMO && Opts.DiscretizeMethod == "tustin") {
-          Diag.error(N->Loc,
-                     "signal_state_space \"" + N->Id +
-                         "\": Tustin discretisation is SISO-only "
-                         "(MIMO Tustin needs a matrix bilinear "
-                         "transform — use --discretize=forward_euler)");
-          return nullptr;
-        }
         // D, if present, must be the zero matrix.
         auto DStr = getStr("D");
         if (!DStr.empty()) {
@@ -1772,24 +1895,68 @@ matlab::Function *lowerSubsystemToMatlab(
         };
         const std::string &OutV = VarOfNode[N->Id];
         if (Opts.DiscretizeMethod == "tustin") {
-          // SISO Tustin — already gated above. Convert (A, B, C) to
-          // a SISO transfer function, then apply Tustin + DF2T.
-          Expr *U = inputExpr(1);
-          std::vector<double> NumIn, DenIn;
-          ssToTFSiso(AM, BM, CM, Order, NumIn, DenIn);
-          std::vector<double> NumZ, DenZ;
-          tustinTF(NumIn, DenIn, Ts, NumZ, DenZ);
-          Expr *YExpr = B.fiMul(fiC(NumZ[0]), U);
-          YExpr = B.bin(BinOp::Add, YExpr, B.name(localFor(1)));
-          Body->Stmts.push_back(B.assign(OutV, YExpr));
-          for (int K = 1; K <= Order; ++K) {
-            Expr *Term = B.fiMul(fiC(NumZ[K]), U);
-            Expr *Neg  = B.fiMul(fiC(-DenZ[K]), B.name(OutV));
-            Expr *Acc  = B.bin(BinOp::Add, Term, Neg);
-            if (K < Order) {
-              Acc = B.bin(BinOp::Add, Acc, B.name(localFor(K + 1)));
+          // Tier-5l — matrix bilinear Tustin (supports MIMO + SISO).
+          //
+          //   Ad = M(I + αA),  Bd = α(I + Ad)MB
+          //   Cd = C,           Dd = α·C·M·B
+          //
+          // (α = Ts/2, M = (I - αA)^-1.) The direct-feedthrough term
+          // `Dd·u` lives in the output equation; state-update reads
+          // x[k] (NOT y[k]) so the SeparateLocal hoist (Tier-5i) is
+          // already correct.
+          std::vector<double> Ad, Bd, Cd, Dd;
+          if (!tustinSS(AM, Order, BM, P, CM, Q, Ts, Ad, Bd, Cd, Dd)) {
+            Diag.error(N->Loc,
+                       "signal_state_space \"" + N->Id +
+                           "\": Tustin requires (I - (Ts/2)·A) to be "
+                           "invertible at the chosen sample period");
+            return nullptr;
+          }
+          // Output equations first (each y_q depends on current x
+          // AND current u via Dd). State update happens at end-of-
+          // body and reads localFor() = the un-overwritten state.
+          for (int Qi = 1; Qi <= Q; ++Qi) {
+            Expr *YAcc = nullptr;
+            for (int K = 1; K <= Order; ++K) {
+              double Cqk = Cd[(size_t)(Qi - 1) * Order + (K - 1)];
+              if (Cqk == 0.0) continue;
+              Expr *T = B.fiMul(fiC(Cqk), B.name(localFor(K)));
+              YAcc = YAcc ? B.bin(BinOp::Add, YAcc, T) : T;
             }
-            NextStateExpr[slotFor(K)] = Acc;
+            for (int K = 1; K <= P; ++K) {
+              double Dqk = Dd[(size_t)(Qi - 1) * P + (K - 1)];
+              if (Dqk == 0.0) continue;
+              Expr *T = B.fiMul(fiC(Dqk), inputExpr(K));
+              YAcc = YAcc ? B.bin(BinOp::Add, YAcc, T) : T;
+            }
+            if (!YAcc) YAcc = B.number(0.0);
+            std::string Dst;
+            if (MIMO) {
+              std::string PortId = "out" + std::to_string(Qi);
+              auto It = VarOfNodePort.find({N->Id, PortId});
+              Dst = (It != VarOfNodePort.end()) ? It->second : OutV;
+            } else {
+              Dst = OutV;
+            }
+            Body->Stmts.push_back(B.assign(Dst, YAcc));
+          }
+          // State update: z_i[k+1] = Σ_j Ad[i,j]·z_j + Σ_k Bd[i,k]·u_k.
+          for (int I = 1; I <= Order; ++I) {
+            Expr *Acc = nullptr;
+            for (int J = 1; J <= Order; ++J) {
+              double Aij = Ad[(size_t)(I - 1) * Order + (J - 1)];
+              if (Aij == 0.0) continue;
+              Expr *T = B.fiMul(fiC(Aij), B.name(localFor(J)));
+              Acc = Acc ? B.bin(BinOp::Add, Acc, T) : T;
+            }
+            for (int K = 1; K <= P; ++K) {
+              double Bik = Bd[(size_t)(I - 1) * P + (K - 1)];
+              if (Bik == 0.0) continue;
+              Expr *T = B.fiMul(fiC(Bik), inputExpr(K));
+              Acc = Acc ? B.bin(BinOp::Add, Acc, T) : T;
+            }
+            if (!Acc) Acc = B.number(0.0);
+            NextStateExpr[slotFor(I)] = Acc;
           }
           NextExpr = nullptr;
           continue;
