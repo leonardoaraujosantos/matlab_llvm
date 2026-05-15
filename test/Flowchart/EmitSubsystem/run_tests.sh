@@ -328,6 +328,34 @@ sv_stateful_smoke() {
 }
 sv_stateful_smoke
 
+# Tier-5c — FIR with fi-multiply on persistent reads. The pipeline
+# used to barf with `matlab.add(i32, i64) -> none` because the
+# function-arg path and the persistent-fetch path arrived at the
+# `+` with mismatched widths (i32 vs i64 after fi-saturate).
+# `BinArithToArith` now sign-extends the narrower operand. Verify
+# the 4-tap FIR emits clean SV with 4 unit-delay registers + a
+# combinational sum.
+sv_fir_smoke() {
+  local sv="$SCRATCH/fir_4tap.sv"
+  "$MATLABC" -emit-sv "$EX/fir_4tap.mflow" --subsystem fir_4tap \
+       > "$sv" 2> "$SCRATCH/emit.err"
+  if ! grep -q "module fir_4tap" "$sv"; then
+    fail=$((fail+1)); fails+=("fir_4tap (missing module)")
+    sed 's/^/  /' "$SCRATCH/emit.err" >&2
+    return
+  fi
+  if [[ $(grep -c "logic signed \[31:0\] s_d" "$sv") -lt 3 ]]; then
+    fail=$((fail+1)); fails+=("fir_4tap (missing delay regs)")
+    return
+  fi
+  if ! grep -q "always_ff @(posedge clk" "$sv"; then
+    fail=$((fail+1)); fails+=("fir_4tap (no always_ff)")
+    return
+  fi
+  pass=$((pass+1))
+}
+sv_fir_smoke
+
 # Tier 5 — continuous block must be rejected with a sourced error
 # in HDL emit (no implicit auto-discretisation).
 sv_reject() {

@@ -345,15 +345,21 @@ Tier-5b (✓ shipped 2026-05-15):
   the persistent slot's fi typing and trips HWLegalize. HDL
   mode passes the input through directly.
 
-Tier-5c open carve-outs (not yet shipped):
-- **fi-math width tracker (pre-existing matlab_llvm bug)**:
-  expressions mixing a persistent fetch and a function-arg
-  through fi-multiply + add (e.g. the 4-tap FIR's
-  `0.25*u + 0.25*s_d1 + ...`) hit a `matlab.add(i32, i64) ->
-  none` mismatch at HWLegalize. The persistent value goes
-  through a saturate path that produces i64, while the function
-  arg stays i32. `runHWBitWidthInfer` should equalise widths
-  before legality check; needs deeper SV pipeline work.
+Tier-5c (✓ shipped 2026-05-15):
+- `lib/MLIR/Passes/LowerScalarsToArith.cpp::BinArithToArith` now
+  sign-extends the narrower integer operand when a `matlab.add` /
+  `matlab.sub` / `matlab.emul` sees mismatched widths.  Picks
+  the wider integer as the result type. The common offender is
+  `i32 function arg + i64 persistent-fetch` (the persistent goes
+  through fi-multiply → fi-saturate which produces i64); the
+  arith op used to bail with `result type none` and HWLegalize
+  rejected it. Unblocks FIR / IIR / accumulators / any
+  subsystem mixing pragma-typed args with persistent-fetch
+  fi-multiplies. Demo `fir_4tap.mflow` emits clean SV with
+  4 unit-delay registers + combinational tap sum + `always_ff`
+  block; Python step response matches the 4-tap MA analytically.
+
+Tier-5d open carve-outs (not yet shipped):
 - `signal_saturation` → SV: bool-by-fi multiplication doesn't
   synthesise; workaround for HDL targets is to replace with a
   `signal_matlab_fcn` containing the if/elseif/else.

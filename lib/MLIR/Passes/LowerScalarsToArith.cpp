@@ -352,6 +352,33 @@ struct BinArithToArith : public NameMatch {
     // bitop rewrite).
     mlir::Type Ty = Op->getResult(0).getType();
     if (mlir::isa<mlir::NoneType>(Ty)) Ty = A.getType();
+    // Tier-5c — fi-math width equaliser. The HDL emit path
+    // routes function args through pragma-driven i32 typing and
+    // persistent fetches through f64→fptosi→i32→extsi→i64 (the
+    // fi-saturate path on multiplies). When an FIR-style
+    // `arg*k0 + persistent*k1` lands in `matlab.add`, the two
+    // operands disagree in width — i32 + i64 — and this pass
+    // used to bail. The result `matlab.add` survived all the way
+    // to HWLegalize where it tripped `result has unsynthesizable
+    // type`. Sign-extend the narrower operand to the wider when
+    // both are scalar ints; the wider integer becomes the result
+    // type. (Floats already match by f32/f64 invariant in
+    // matlab_llvm — no float-width-mixing happens in practice.)
+    if constexpr (!std::is_same_v<IOp, void>) {
+      if (isScalarInt(A.getType()) && isScalarInt(B.getType()) &&
+          A.getType() != B.getType()) {
+        auto AI = mlir::cast<mlir::IntegerType>(A.getType());
+        auto BI = mlir::cast<mlir::IntegerType>(B.getType());
+        auto Wider = (AI.getWidth() >= BI.getWidth()) ? AI : BI;
+        if (AI != Wider) {
+          A = mlir::arith::ExtSIOp::create(R, Op->getLoc(), Wider, A);
+        }
+        if (BI != Wider) {
+          B = mlir::arith::ExtSIOp::create(R, Op->getLoc(), Wider, B);
+        }
+        Ty = Wider;
+      }
+    }
     if (A.getType() != Ty || B.getType() != Ty) return mlir::failure();
     if (isScalarFloat(Ty)) {
       R.replaceOpWithNewOp<FOp>(Op, A, B);

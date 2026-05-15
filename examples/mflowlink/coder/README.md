@@ -52,7 +52,7 @@ subsystem.
 | `scaled_sum_sv.mflow` | Stateless mixer (Gain · Sum) → synthesisable SV with Q16.16 fi ports |
 | `matlab_fcn_sv.mflow` | `signal_matlab_fcn` block containing user-written synthesisable MATLAB (3·u1 + 5·u2) |
 | `tapped_delay.mflow` | 3-tap shift register with multi-output — stateful subsystem → SV with `clk` / `rst_n` / `reset` + three `logic signed [31:0]` registers |
-| `fir_4tap.mflow` | 4-tap FIR — Python/C/C++/TS class wrappers work; SV emit hits a pre-existing matlab_llvm fi-math width tracker bug (i32-vs-i64 mismatch between args and persistent reads when the same expression mixes both) — pass-through delay subsystems work, fi-multiply-on-persistent + add does not |
+| `fir_4tap.mflow` | 4-tap FIR with Unit Delays + Gains + Sum — Python/C/C++/TS class wrappers + SV emit all work end-to-end. Validated step response: y[0..3] = 0.25/0.5/0.75/1.0, then steady-state 1.0 (textbook 4-tap MA) |
 
 Usage:
 
@@ -91,13 +91,18 @@ Tier-5 carve-outs (separable follow-ups):
   declarations. **Side benefit**: the same fix unblocked **20
   pre-existing matlab_llvm SV tests** (`emit-sv-tests` went from
   47/77 → 67/77 passing; FSM-encoding sweep 6/10 → 10/10).
-- **fi-math width tracker (Tier-5c, pre-existing matlab_llvm
-  pipeline bug)**: expressions like `y = u + k*s` where `u` is a
-  function arg (i32) and `s` is a persistent (lowered through a
-  saturate path that produces i64) hit a `matlab.add(i32, i64) ->
-  none` type mismatch at HWLegalize. Needs deeper SV pipeline
-  work — the `runHWBitWidthInfer` pass should equalise widths
-  before the legality check.
+- ~~fi-math width tracker~~ ✓ shipped 2026-05-15.
+  `lib/MLIR/Passes/LowerScalarsToArith.cpp::BinArithToArith` now
+  sign-extends the narrower operand when a `matlab.add` /
+  `matlab.sub` / `matlab.emul` sees mismatched integer widths
+  (the common case being i32 function arg + i64 persistent
+  fetch after fi-saturate). Result type becomes the wider
+  integer; downstream HWLegalize sees consistent widths and
+  accepts. Unblocks FIR / IIR / any subsystem mixing
+  pragma-typed args with persistent-fetch fi-multiplies. Demo
+  `fir_4tap.mflow` emits clean SV (4 unit-delay registers +
+  combinational tap sum + `always_ff` block) and the Python
+  step response matches the analytic 4-tap MA.
 - `signal_saturation` → SV (bool-by-fi multiplication in the
   pure-arith form doesn't synthesise; workaround: replace with
   a `signal_matlab_fcn` block containing `if`/`elseif`/`else`).
