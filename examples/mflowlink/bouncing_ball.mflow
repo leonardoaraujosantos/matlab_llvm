@@ -1,0 +1,68 @@
+{
+  "schema": "matforge.flowchart",
+  "version": "0.1.0",
+  "entry": "bouncing_ball",
+  "settings": {
+    "kind": "signal_flow",
+    "solver": {
+      "type": "variable_step",
+      "algorithm": "ode45",
+      "startTime": 0.0,
+      "stopTime": 6.0,
+      "maxStep": "0.005",
+      "relTol": 1e-5,
+      "absTol": 1e-8,
+      "zeroCrossing": true,
+      "algebraicLoopMethod": "trust_region"
+    },
+    "snapshot": { "enabled": true, "depth": 256, "fields": "states" }
+  },
+  "flows": [
+    {
+      "id": "flow_bb",
+      "kind": "program",
+      "name": "bouncing_ball",
+      "signature": { "inputs": [], "outputs": [] },
+      "nodes": [
+        { "id": "g", "kind": "signal_constant",
+          "data": { "params": { "value": -9.81 } },
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+        { "id": "vel", "kind": "signal_integrator",
+          "data": { "log_signal": true,
+                    "params": { "initialCondition": 0.0 } },
+          "ports": { "in":  [{"id": "in"}, {"id": "reset"}, {"id": "init"}],
+                     "out": [{"id": "out"}] } },
+        { "id": "pos", "kind": "signal_integrator",
+          "data": { "log_signal": true,
+                    "params": { "initialCondition": 10.0 } },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "below_floor", "kind": "signal_compare_to_zero",
+          "data": { "log_signal": true,
+                    "params": { "op": "<" } },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "bounce_vel", "kind": "signal_gain",
+          "data": { "params": { "gain": -0.8 } },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "scope", "kind": "signal_scope",
+          "data": { "params": { "title": "bouncing ball position" } },
+          "ports": { "in": [{"id": "in"}], "out": [] } }
+      ],
+      "edges": [
+        { "id": "e_g",      "kind": "data",
+          "from": {"node": "g",          "port": "out"}, "to": {"node": "vel",         "port": "in"} },
+        { "id": "e_v2p",    "kind": "data",
+          "from": {"node": "vel",        "port": "out"}, "to": {"node": "pos",         "port": "in"} },
+        { "id": "e_p2cmp",  "kind": "data",
+          "from": {"node": "pos",        "port": "out"}, "to": {"node": "below_floor", "port": "in"} },
+        { "id": "e_cmp2rst","kind": "data",
+          "from": {"node": "below_floor","port": "out"}, "to": {"node": "vel",         "port": "reset"} },
+        { "id": "e_v2gain", "kind": "data",
+          "from": {"node": "vel",        "port": "out"}, "to": {"node": "bounce_vel",  "port": "in"} },
+        { "id": "e_gain2init","kind": "data",
+          "from": {"node": "bounce_vel", "port": "out"}, "to": {"node": "vel",         "port": "init"} },
+        { "id": "e_scope",  "kind": "data",
+          "from": {"node": "pos",        "port": "out"}, "to": {"node": "scope",       "port": "in"} }
+      ]
+    }
+  ]
+}

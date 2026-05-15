@@ -250,6 +250,26 @@ ST_LINE=$("$MATLABC" -simulate --dry-run "$EX/sample_time_inherit.mflow" 2>&1 | 
 check "gain block inherits discrete 0.1s" \
   "[[ '$ST_LINE' == *'sample=discrete period=0.1'* ]]" ""
 
+#--- bouncing_ball (§17.5 #2): integrator-reset port ----------------------
+BB="$("$MATLABC" -simulate "$EX/bouncing_ball.mflow")"
+BB_HEAD=$(printf '%s\n' "$BB" | head -1)
+check "bouncing_ball header" \
+  "[[ '$BB_HEAD' == 't,vel,pos,below_floor,scope' ]]" ""
+# First floor strike near t = √(2·10/9.81) ≈ 1.428. The compare's
+# rising edge fires within the next step; we accept anything in
+# [1.42, 1.45].
+BB_HIT=$(printf '%s\n' "$BB" | awk -F, 'NR>1 && $4+0 > 0.5 {print $1; exit}')
+check "ball hits floor at t≈1.43" \
+  "awk 'BEGIN{exit !($BB_HIT >= 1.42 && $BB_HIT <= 1.45)}'" ""
+# Post-bounce peak: (0.8·v_impact)²/(2g) ≈ 0.64·14² / 19.62 ≈ 6.4m.
+BB_PEAK=$(printf '%s\n' "$BB" | awk -F, 'NR>1 && $1+0 >= 1.5 && $1+0 <= 3.0 { if($3>m)m=$3 } END {print m+0}')
+check "first bounce peak ≈ 6.4m" \
+  "awk 'BEGIN{exit !($BB_PEAK >= 6.2 && $BB_PEAK <= 6.6)}'" ""
+# Energy diminishes — after several bounces the peak is < initial.
+BB_LATE_PEAK=$(printf '%s\n' "$BB" | awk -F, 'NR>1 && $1+0 >= 4.0 && $1+0 <= 6.0 { if($3>m)m=$3 } END {print m+0}')
+check "energy dissipates (later peak < 6m)" \
+  "awk 'BEGIN{exit !($BB_LATE_PEAK < 6.0)}'" ""
+
 #--- bus_signals (§17.5 #1): named-field struct wires ---------------------
 BS="$("$MATLABC" -simulate "$EX/bus_signals.mflow")"
 BS_HEAD=$(printf '%s\n' "$BS" | head -1)

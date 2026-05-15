@@ -7017,6 +7017,7 @@ int runMflowLinkDap(const std::string &Path) {
       mflEmitTimeEvent(Sim.currentTime(), Sim.majorStepsTaken());
       mflEmitSampleEvents(Sim);
       mflEmitZeroCrossings(Sim);
+      mflEmitAlgebraicLoopFailures(Sim, *Model);
       sendEvent("snapshotTaken",
                 Object{{"majorStep",
                         static_cast<int64_t>(Sim.majorStepsTaken())},
@@ -7043,6 +7044,12 @@ int runMflowLinkDap(const std::string &Path) {
         for (auto &E : Crossings)
           sendEvent("zeroCrossing",
                     Object{{"blockId", E.BlockId}, {"t", E.T}});
+        // Drain the Tier-I Item-2 algebraic-loop failure queue.
+        // Surface as a custom event AND, on the first failure, flip
+        // the continue loop into a stopped(reason="algebraic loop")
+        // state so the user has a chance to inspect before time
+        // marches on. Same policy as the zero-crossing pause.
+        mflEmitAlgebraicLoopFailures(Sim, *Model);
         // Throttle: emit a sample event every 16th step to avoid
         // flooding (§10 — IDE-side throttle target).
         if ((Sim.majorStepsTaken() % 16) == 0) {

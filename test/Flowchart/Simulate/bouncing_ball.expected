@@ -1,0 +1,19 @@
+MflowLinkModel entry=bouncing_ball blocks=6 edges=7
+  solver type=variable_step algorithm=ode45 startTime=0 stopTime=6
+  states continuous=2 discrete=0
+  exec-order:
+    0 g kind=signal_constant sample=constant
+    1 pos kind=signal_integrator sample=continuous cont-states=1 loop-breaker log
+    2 below_floor kind=signal_compare_to_zero sample=fixed_in_minor log
+    3 bounce_vel kind=signal_gain sample=fixed_in_minor
+    4 vel kind=signal_integrator sample=continuous cont-states=1 loop-breaker log
+    5 scope kind=signal_scope sample=fixed_in_minor
+  zero-crossings: none
+  edges:
+    e_g g:out -> vel:in
+    e_v2p vel:out -> pos:in
+    e_p2cmp pos:out -> below_floor:in
+    e_cmp2rst below_floor:out -> vel:reset
+    e_v2gain vel:out -> bounce_vel:in
+    e_gain2init bounce_vel:out -> vel:init
+    e_scope pos:out -> scope:in

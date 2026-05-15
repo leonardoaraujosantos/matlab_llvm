@@ -1,73 +1,341 @@
 {
-  "schema": "matforge.flowchart",
-  "version": "0.1.0",
-  "entry": "thermostat",
-  "settings": {
-    "kind": "signal_flow",
-    "solver": {
-      "type": "variable_step",
-      "algorithm": "ode45",
-      "startTime": 0.0,
-      "stopTime": 12.0,
-      "maxStep": "0.05",
-      "zeroCrossing": true,
-      "algebraicLoopMethod": "trust_region"
-    },
-    "snapshot": { "enabled": true, "depth": 256, "fields": "states" }
-  },
-  "flows": [
+  "entry" : "thermostat",
+  "flows" : [
     {
-      "id": "flow_thermostat",
-      "kind": "program",
-      "name": "thermostat",
-      "signature": { "inputs": [], "outputs": [] },
-      "nodes": [
-        { "id": "setpoint", "kind": "signal_constant",
-          "data": { "params": { "value": 20.0 } },
-          "ports": { "in": [], "out": [{"id": "out"}] } },
-        { "id": "err", "kind": "signal_sum",
-          "data": { "params": { "signs": "+-" } },
-          "ports": { "in": [{"id": "in1"}, {"id": "in2"}],
-                     "out": [{"id": "out"}] } },
-        { "id": "ctrl", "kind": "signal_relay",
-          "data": { "log_signal": true,
-                    "params": { "onPoint": 0.5, "offPoint": -0.5,
-                                "onValue": 20.0, "offValue": 0.0,
-                                "initialState": 0.0 } },
-          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
-        { "id": "loss", "kind": "signal_gain",
-          "data": { "params": { "gain": 0.5 } },
-          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
-        { "id": "net", "kind": "signal_sum",
-          "data": { "params": { "signs": "+-" } },
-          "ports": { "in": [{"id": "in1"}, {"id": "in2"}],
-                     "out": [{"id": "out"}] } },
-        { "id": "plant", "kind": "signal_integrator",
-          "data": { "log_signal": true,
-                    "params": { "initialCondition": 16.0 } },
-          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
-        { "id": "scope", "kind": "signal_scope",
-          "data": { "params": { "title": "thermostat temperature" } },
-          "ports": { "in": [{"id": "in"}], "out": [] } }
+      "edges" : [
+        {
+          "from" : {
+            "node" : "setpoint",
+            "port" : "out"
+          },
+          "id" : "e_set",
+          "kind" : "data",
+          "to" : {
+            "node" : "err",
+            "port" : "in1"
+          }
+        },
+        {
+          "from" : {
+            "node" : "plant",
+            "port" : "out"
+          },
+          "id" : "e_fb",
+          "kind" : "data",
+          "to" : {
+            "node" : "err",
+            "port" : "in2"
+          }
+        },
+        {
+          "from" : {
+            "node" : "err",
+            "port" : "out"
+          },
+          "id" : "e_err",
+          "kind" : "data",
+          "to" : {
+            "node" : "ctrl",
+            "port" : "in"
+          }
+        },
+        {
+          "from" : {
+            "node" : "ctrl",
+            "port" : "out"
+          },
+          "id" : "e_ctrl",
+          "kind" : "data",
+          "to" : {
+            "node" : "net",
+            "port" : "in1"
+          }
+        },
+        {
+          "from" : {
+            "node" : "plant",
+            "port" : "out"
+          },
+          "id" : "e_temp",
+          "kind" : "data",
+          "to" : {
+            "node" : "loss",
+            "port" : "in"
+          }
+        },
+        {
+          "from" : {
+            "node" : "loss",
+            "port" : "out"
+          },
+          "id" : "e_loss",
+          "kind" : "data",
+          "to" : {
+            "node" : "net",
+            "port" : "in2"
+          }
+        },
+        {
+          "from" : {
+            "node" : "net",
+            "port" : "out"
+          },
+          "id" : "e_net",
+          "kind" : "data",
+          "to" : {
+            "node" : "plant",
+            "port" : "in"
+          }
+        },
+        {
+          "from" : {
+            "node" : "plant",
+            "port" : "out"
+          },
+          "id" : "e_scope",
+          "kind" : "data",
+          "to" : {
+            "node" : "scope",
+            "port" : "in"
+          }
+        }
       ],
-      "edges": [
-        { "id": "e_set",   "kind": "data",
-          "from": {"node": "setpoint", "port": "out"}, "to": {"node": "err",   "port": "in1"} },
-        { "id": "e_fb",    "kind": "data",
-          "from": {"node": "plant",    "port": "out"}, "to": {"node": "err",   "port": "in2"} },
-        { "id": "e_err",   "kind": "data",
-          "from": {"node": "err",      "port": "out"}, "to": {"node": "ctrl",  "port": "in"} },
-        { "id": "e_ctrl",  "kind": "data",
-          "from": {"node": "ctrl",     "port": "out"}, "to": {"node": "net",   "port": "in1"} },
-        { "id": "e_temp",  "kind": "data",
-          "from": {"node": "plant",    "port": "out"}, "to": {"node": "loss",  "port": "in"} },
-        { "id": "e_loss",  "kind": "data",
-          "from": {"node": "loss",     "port": "out"}, "to": {"node": "net",   "port": "in2"} },
-        { "id": "e_net",   "kind": "data",
-          "from": {"node": "net",      "port": "out"}, "to": {"node": "plant", "port": "in"} },
-        { "id": "e_scope", "kind": "data",
-          "from": {"node": "plant",    "port": "out"}, "to": {"node": "scope", "port": "in"} }
-      ]
+      "id" : "flow_thermostat",
+      "kind" : "program",
+      "name" : "thermostat",
+      "nodes" : [
+        {
+          "data" : {
+            "params" : {
+              "value" : 20
+            }
+          },
+          "id" : "setpoint",
+          "kind" : "signal_constant",
+          "label" : "",
+          "ports" : {
+            "in" : [
+
+            ],
+            "out" : [
+              {
+                "id" : "out"
+              }
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 80,
+              "y" : 172
+            }
+          }
+        },
+        {
+          "data" : {
+            "params" : {
+              "signs" : "+-"
+            }
+          },
+          "id" : "err",
+          "kind" : "signal_sum",
+          "label" : "",
+          "ports" : {
+            "in" : [
+              {
+                "id" : "in1"
+              },
+              {
+                "id" : "in2"
+              }
+            ],
+            "out" : [
+              {
+                "id" : "out"
+              }
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 280,
+              "y" : 172
+            }
+          }
+        },
+        {
+          "data" : {
+            "log_signal" : true,
+            "params" : {
+              "initialState" : 0,
+              "offPoint" : -0.5,
+              "offValue" : 0,
+              "onPoint" : 0.5,
+              "onValue" : 20
+            }
+          },
+          "id" : "ctrl",
+          "kind" : "signal_relay",
+          "label" : "",
+          "ports" : {
+            "in" : [
+              {
+                "id" : "in"
+              }
+            ],
+            "out" : [
+              {
+                "id" : "out"
+              }
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 480,
+              "y" : 172
+            }
+          }
+        },
+        {
+          "data" : {
+            "params" : {
+              "gain" : 0.5
+            }
+          },
+          "id" : "loss",
+          "kind" : "signal_gain",
+          "label" : "",
+          "ports" : {
+            "in" : [
+              {
+                "id" : "in"
+              }
+            ],
+            "out" : [
+              {
+                "id" : "out"
+              }
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 1080,
+              "y" : 282
+            }
+          }
+        },
+        {
+          "data" : {
+            "params" : {
+              "signs" : "+-"
+            }
+          },
+          "id" : "net",
+          "kind" : "signal_sum",
+          "label" : "",
+          "ports" : {
+            "in" : [
+              {
+                "id" : "in1"
+              },
+              {
+                "id" : "in2"
+              }
+            ],
+            "out" : [
+              {
+                "id" : "out"
+              }
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 680,
+              "y" : 172
+            }
+          }
+        },
+        {
+          "data" : {
+            "log_signal" : true,
+            "params" : {
+              "initialCondition" : 16
+            }
+          },
+          "id" : "plant",
+          "kind" : "signal_integrator",
+          "label" : "",
+          "ports" : {
+            "in" : [
+              {
+                "id" : "in"
+              }
+            ],
+            "out" : [
+              {
+                "id" : "out"
+              }
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 880,
+              "y" : 172
+            }
+          }
+        },
+        {
+          "data" : {
+            "params" : {
+              "title" : "thermostat temperature"
+            }
+          },
+          "id" : "scope",
+          "kind" : "signal_scope",
+          "label" : "",
+          "ports" : {
+            "in" : [
+              {
+                "id" : "in"
+              }
+            ],
+            "out" : [
+
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 1080,
+              "y" : 392
+            }
+          }
+        }
+      ],
+      "signature" : {
+        "inputs" : [
+
+        ],
+        "outputs" : [
+
+        ]
+      }
     }
-  ]
+  ],
+  "schema" : "matforge.flowchart",
+  "settings" : {
+    "kind" : "signal_flow",
+    "snapshot" : {
+      "depth" : 256,
+      "enabled" : true,
+      "fields" : "states"
+    },
+    "solver" : {
+      "algebraicLoopMethod" : "trust_region",
+      "algorithm" : "ode45",
+      "maxStep" : "0.05",
+      "startTime" : 0,
+      "stopTime" : 12,
+      "type" : "variable_step",
+      "zeroCrossing" : true
+    }
+  },
+  "version" : "0.1.0"
 }

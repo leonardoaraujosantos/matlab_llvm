@@ -1816,6 +1816,34 @@ double MflowLinkSim::stepMajor() {
   // the recorded sample at the same `t` it actually flipped on.
   commitRelayState();
   evalAll(T_, Y_.data(), nullptr);
+  // §17.5 #2 — signal_integrator reset port. Scan for any
+  // integrator with a connected `reset` port; if the reset source
+  // just rose through zero (PrevOut ≤ 0 && Out > 0), reload the
+  // continuous state from the `init` port (if connected) or
+  // `params.initialCondition`. The reload happens BEFORE the
+  // snapshot of PrevOut_ below, so the next step's edge detector
+  // sees the just-completed step's outputs as "previous".
+  for (size_t I = 0; I < M_.Blocks.size(); ++I) {
+    if (M_.Blocks[I].Kind != "signal_integrator") continue;
+    size_t ResetSrc = static_cast<size_t>(-1);
+    size_t InitSrc  = static_cast<size_t>(-1);
+    for (auto &P : Inputs_[I]) {
+      if (P.DstPort == "reset")     ResetSrc = P.SrcBlock;
+      else if (P.DstPort == "init") InitSrc  = P.SrcBlock;
+    }
+    if (ResetSrc == static_cast<size_t>(-1)) continue;
+    bool Rising = PrevOut_[ResetSrc] <= 0.0 && Out_[ResetSrc] > 0.0;
+    if (!Rising) continue;
+    double NewIC =
+        (InitSrc != static_cast<size_t>(-1))
+            ? Out_[InitSrc]
+            : paramD(M_.Blocks[I], "initialCondition", 0.0);
+    Y_[StateOffset_[I]] = NewIC;
+  }
+  // Refresh outputs once more so the reset-into-state propagates
+  // visibly into the post-step Out_ slot (the integrator's output
+  // equals its state).
+  evalAll(T_, Y_.data(), nullptr);
   // Tier F carve-out — snapshot the just-finished outputs as the
   // *previous* values for the next step's edge-trigger detection.
   // Doing this after the final evalAll means PrevOut_ holds the
