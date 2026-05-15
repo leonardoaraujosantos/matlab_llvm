@@ -691,6 +691,56 @@ std::optional<MflowLinkModel> lowerSignalFlow(const FlowDoc &Doc,
     if (auto *L = N.getData("log_signal"))
       B.LogSignal = (*L == "true");
 
+    // Item-1 — initial output width per kind. Defaults to 1
+    // (scalar) and gets refined later by the width-inference pass
+    // for blocks whose output width is a function of their input.
+    B.OutWidth = 1;
+    if (N.Kind == "signal_constant") {
+      // `value` may be a vector literal like "[1 2 3]" or a scalar.
+      // Count commas / spaces inside the brackets to size the
+      // output. Empty or unparseable falls through to width 1.
+      if (auto *V = N.getParam("value")) {
+        std::string S = *V;
+        auto A = S.find('[');
+        auto B0 = S.rfind(']');
+        if (A != std::string::npos && B0 != std::string::npos && A < B0) {
+          std::string Inner = S.substr(A + 1, B0 - A - 1);
+          int N0 = 0;
+          bool InTok = false;
+          for (char C : Inner) {
+            bool Sep = (C == ',' || C == ' ' || C == '\t' ||
+                        C == ';');
+            if (!Sep && !InTok) { ++N0; InTok = true; }
+            else if (Sep) InTok = false;
+          }
+          if (N0 > 0) B.OutWidth = N0;
+        }
+      }
+    } else if (N.Kind == "signal_mux") {
+      // `numInputs` × upstream widths — finalised by width inference
+      // once we know what's wired to each input.
+      B.OutWidth = 0; // sentinel: "compute from inputs"
+    } else if (N.Kind == "signal_demux") {
+      // Width is decided per-output-port. For the Tier-I MVP we
+      // restrict signal_demux to a single output (the first
+      // element of the input vector) so the dispatch can stay
+      // scalar; full N-output demux needs per-port output offsets
+      // which is a follow-up.
+      B.OutWidth = 1;
+    } else {
+      // For most blocks, the output width inherits from the input
+      // width when this block has a data input. The width-inference
+      // pass below propagates from upstream once all blocks are
+      // constructed. A sentinel of 0 means "decide later".
+      bool ScalarSource =
+          N.Kind == "signal_sine" || N.Kind == "signal_step" ||
+          N.Kind == "signal_pulse" || N.Kind == "signal_ramp" ||
+          N.Kind == "signal_clock" || N.Kind == "signal_chirp" ||
+          N.Kind == "signal_noise" ||
+          N.Kind == "signal_function_call_generator";
+      if (!ScalarSource) B.OutWidth = 0; // inherit
+    }
+
     // State counts + loop-breaker classification.
     B.IsLoopBreaker = KI->LoopBreakerAlways;
     if (N.Kind == "signal_integrator") {
@@ -764,6 +814,149 @@ std::optional<MflowLinkModel> lowerSignalFlow(const FlowDoc &Doc,
   // Build the edge list.
   for (auto &FE : Flat->Edges)
     M.Edges.push_back({FE.Id, FE.FromNode, FE.FromPort, FE.ToNode, FE.ToPort});
+
+  //===--------------------------------------------------------------------===//
+  // Item-1 — width inference (per-port).
+  //
+  // Source blocks already declared their output width above. Every
+  // other block has `OutWidth = 0` (inherit). Walk in a fixpoint
+  // loop: for each unknown-width block, if at least one of its
+  // *known* input widths is consistent, adopt that width. Mux
+  // sums its inputs. Width mismatches between inputs at the same
+  // block (other than scalar-broadcast) are a sourced diagnostic.
+  //===--------------------------------------------------------------------===//
+  {
+    std::unordered_map<std::string, size_t> IdxOf;
+    for (size_t I = 0; I < M.Blocks.size(); ++I)
+      IdxOf[M.Blocks[I].Id] = I;
+    auto inputWidths = [&](size_t I) {
+      std::vector<int> Ws;
+      for (auto &E : M.Edges) {
+        if (E.ToBlock != M.Blocks[I].Id) continue;
+        auto It = IdxOf.find(E.FromBlock);
+        if (It == IdxOf.end()) continue;
+        Ws.push_back(M.Blocks[It->second].OutWidth);
+      }
+      return Ws;
+    };
+    bool Changed = true;
+    int Guard = 0;
+    while (Changed && Guard++ < 64) {
+      Changed = false;
+      for (size_t I = 0; I < M.Blocks.size(); ++I) {
+        auto &B = M.Blocks[I];
+        if (B.OutWidth != 0) continue;
+        auto Ws = inputWidths(I);
+        if (Ws.empty()) {
+          // Sinkless block with no input — fall back to scalar.
+          B.OutWidth = 1;
+          Changed = true;
+          continue;
+        }
+        // Skip if any input is still unknown — re-try next pass.
+        bool AllKnown = true;
+        for (int W : Ws) if (W <= 0) { AllKnown = false; break; }
+        if (!AllKnown) continue;
+        if (B.Kind == "signal_mux") {
+          int Sum = 0;
+          for (int W : Ws) Sum += W;
+          B.OutWidth = Sum > 0 ? Sum : 1;
+        } else {
+          // Element-wise broadcast: max(1, max(Ws)). Mixed sizes
+          // beyond scalar-vs-vector are an error.
+          int W = 1;
+          for (int Wi : Ws) if (Wi > W) W = Wi;
+          for (int Wi : Ws) {
+            if (Wi != 1 && Wi != W) {
+              Diag.error(B.Loc, "block \"" + B.Id +
+                                    "\": width mismatch on inputs "
+                                    "(scalar broadcasting allowed, "
+                                    "but found widths " +
+                                    std::to_string(Wi) + " and " +
+                                    std::to_string(W) + ")");
+              return std::nullopt;
+            }
+          }
+          B.OutWidth = W;
+        }
+        Changed = true;
+      }
+    }
+    // Anything still unknown at this point is in a strongly-
+    // connected component with no scalar anchor — default to
+    // scalar.
+    for (auto &B : M.Blocks)
+      if (B.OutWidth == 0) B.OutWidth = 1;
+  }
+
+  //===--------------------------------------------------------------------===//
+  // Item-1 — sample-time inheritance.
+  //
+  // A block with no explicit `data.sample_time` (or with
+  // `sample_time: "inherited"`) picks up its sample class from its
+  // upstream inputs. Rules:
+  //   - any continuous upstream → continuous;
+  //   - else any discrete upstream → discrete (period = fastest);
+  //   - else fixed-in-minor.
+  // Walk in topo-ish order via repeated passes until stable.
+  //===--------------------------------------------------------------------===//
+  {
+    auto isInherit = [](const Node &N) -> bool {
+      auto *ST = N.getData("sample_time");
+      return ST && *ST == "inherited";
+    };
+    std::unordered_map<std::string, size_t> IdxOf;
+    for (size_t I = 0; I < M.Blocks.size(); ++I)
+      IdxOf[M.Blocks[I].Id] = I;
+    // Cache which flat-node sources requested inheritance — keyed
+    // on the block id, since the lowering has already discarded
+    // the flat-node wrapper at this point.
+    std::unordered_set<std::string> Inherits;
+    for (auto &FN : Flat->Nodes) {
+      if (isInherit(*FN.Src)) Inherits.insert(FN.Id);
+    }
+    if (!Inherits.empty()) {
+      bool Changed = true;
+      int Guard = 0;
+      while (Changed && Guard++ < 64) {
+        Changed = false;
+        for (size_t I = 0; I < M.Blocks.size(); ++I) {
+          auto &B = M.Blocks[I];
+          if (!Inherits.count(B.Id)) continue;
+          // Already settled this round? Only re-touch if a fresh
+          // upstream changed sample class.
+          SampleTimeClass Best = SampleTimeClass::FixedInMinor;
+          double FastestPeriod = 0.0;
+          bool AnyDisc = false;
+          for (auto &E : M.Edges) {
+            if (E.ToBlock != B.Id) continue;
+            auto It = IdxOf.find(E.FromBlock);
+            if (It == IdxOf.end()) continue;
+            const auto &Up = M.Blocks[It->second];
+            if (Up.SampleClass == SampleTimeClass::Continuous) {
+              Best = SampleTimeClass::Continuous;
+            } else if (Up.SampleClass == SampleTimeClass::Discrete) {
+              if (!AnyDisc || Up.SamplePeriod < FastestPeriod) {
+                FastestPeriod = Up.SamplePeriod;
+                AnyDisc = true;
+              }
+            }
+          }
+          if (Best == SampleTimeClass::FixedInMinor && AnyDisc) {
+            Best = SampleTimeClass::Discrete;
+            if (B.SamplePeriod != FastestPeriod) {
+              B.SamplePeriod = FastestPeriod;
+              Changed = true;
+            }
+          }
+          if (B.SampleClass != Best) {
+            B.SampleClass = Best;
+            Changed = true;
+          }
+        }
+      }
+    }
+  }
 
   // Validate every `EnableSource` resolves to a block we know about.
   // A typo here would silently disable a subtree at runtime — far
@@ -905,6 +1098,7 @@ void dumpMflowLinkModel(std::ostream &OS, const MflowLinkModel &M) {
       OS << " enable=" << B.EnableSource;
       if (B.EnableEdgeTriggered) OS << " (rising-edge)";
     }
+    if (B.OutWidth != 1) OS << " width=" << B.OutWidth;
     OS << "\n";
   }
   OS << "  zero-crossings:";

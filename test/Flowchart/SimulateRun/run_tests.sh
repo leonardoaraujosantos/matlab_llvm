@@ -221,6 +221,35 @@ MF_T3=$(printf '%s\n' "$MF" | awk -F, '$1+0==3 { print $4; exit }')
 check "matlab_fcn at t=3 ≈ 0.2247" \
   "awk 'BEGIN{exit !(($MF_T3 - 0.2247448)^2 < 1e-6)}'" ""
 
+#--- vector_signals (Item-1): width inference + Mux concat ----------------
+VS="$("$MATLABC" -simulate "$EX/vector_signals.mflow")"
+VS_HEAD=$(printf '%s\n' "$VS" | head -1)
+# 1 (t) + 3 (src_const) + 3 (amp) + 4 (mux) + 4 (scope) = 15 columns.
+VS_COLS=$(printf '%s' "$VS_HEAD" | awk -F, '{print NF}')
+check "vector header has 15 columns" "[[ '$VS_COLS' == '15' ]]" ""
+# At t=0: gain·[1,2,3] = [2,4,6]; mux = [2,4,6,sin(0)=0]; scope mirrors.
+VS_AMP1=$(printf '%s\n' "$VS" | awk -F, 'NR==2 { print $5 }')
+VS_AMP3=$(printf '%s\n' "$VS" | awk -F, 'NR==2 { print $7 }')
+VS_MUX4_T0=$(printf '%s\n' "$VS" | awk -F, 'NR==2 { print $11 }')
+check "amp[1]=2 at t=0" \
+  "awk 'BEGIN{exit !(($VS_AMP1 - 2)^2 < 1e-9)}'" ""
+check "amp[3]=6 at t=0" \
+  "awk 'BEGIN{exit !(($VS_AMP3 - 6)^2 < 1e-9)}'" ""
+check "mux[4]=0 at t=0 (sin(0))" \
+  "awk 'BEGIN{exit !($VS_MUX4_T0^2 < 1e-9)}'" ""
+# At t=0.5: mux[4] = sin(π·0.5) = 1.
+VS_MUX4=$(printf '%s\n' "$VS" | awk -F, 'NR>1 && $1+0==0.5 { print $11; exit }')
+check "mux[4] at t=0.5 ≈ 1" \
+  "awk 'BEGIN{exit !(($VS_MUX4 - 1)^2 < 1e-9)}'" ""
+VS_SC4=$(printf '%s\n' "$VS" | awk -F, 'NR>1 && $1+0==0.5 { print $15; exit }')
+check "scope[4] mirrors mux[4]" \
+  "awk 'BEGIN{exit !(($VS_SC4 - 1)^2 < 1e-9)}'" ""
+
+#--- sample_time_inherit (Item-1): downstream gain inherits 0.1 from ZOH ---
+ST_LINE=$("$MATLABC" -simulate --dry-run "$EX/sample_time_inherit.mflow" 2>&1 | grep 'gain kind=signal_gain')
+check "gain block inherits discrete 0.1s" \
+  "[[ '$ST_LINE' == *'sample=discrete period=0.1'* ]]" ""
+
 echo "----"
 echo "passed: $pass    failed: $fail"
 exit $(( fail > 0 ? 1 : 0 ))

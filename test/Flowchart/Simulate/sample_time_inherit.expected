@@ -1,0 +1,13 @@
+MflowLinkModel entry=inherit_demo blocks=4 edges=3
+  solver type=variable_step algorithm=ode45 startTime=0 stopTime=1
+  states continuous=0 discrete=1
+  exec-order:
+    0 src kind=signal_sine sample=fixed_in_minor log
+    1 zoh kind=signal_zoh sample=discrete period=0.1 disc-states=1 loop-breaker log
+    2 gain kind=signal_gain sample=discrete period=0.1 log
+    3 scope kind=signal_scope sample=fixed_in_minor
+  zero-crossings: none
+  edges:
+    e1 src:out -> zoh:in
+    e2 zoh:out -> gain:in
+    e3 gain:out -> scope:in

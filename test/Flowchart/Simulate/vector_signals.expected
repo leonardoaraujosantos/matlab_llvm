@@ -1,0 +1,15 @@
+MflowLinkModel entry=vec_demo blocks=5 edges=4
+  solver type=variable_step algorithm=ode45 startTime=0 stopTime=2
+  states continuous=0 discrete=0
+  exec-order:
+    0 src_const kind=signal_constant sample=constant log width=3
+    1 src_sin kind=signal_sine sample=fixed_in_minor
+    2 amp kind=signal_gain sample=fixed_in_minor log width=3
+    3 mux kind=signal_mux sample=fixed_in_minor log width=4
+    4 scope kind=signal_scope sample=fixed_in_minor width=4
+  zero-crossings: none
+  edges:
+    e1 src_const:out -> amp:in
+    e2 amp:out -> mux:in1
+    e3 src_sin:out -> mux:in2
+    e4 mux:out -> scope:in

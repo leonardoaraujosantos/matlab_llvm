@@ -360,6 +360,14 @@ double MflowLinkSim::paramD(const MflBlock &B, const char *Key, double Def) {
 MflowLinkSim::MflowLinkSim(const MflowLinkModel &M) : M_(M) {
   const size_t N = M_.Blocks.size();
   Out_.assign(N, 0.0);
+  OutWidth_.resize(N, 1);
+  VecOut_.assign(N, {});
+  for (size_t I = 0; I < N; ++I) {
+    int W = M_.Blocks[I].OutWidth;
+    if (W < 1) W = 1;
+    OutWidth_[I] = W;
+    if (W > 1) VecOut_[I].assign(W, 0.0);
+  }
   Inputs_.assign(N, {});
   StateOffset_.assign(N, 0);
   DiscStateOffset_.assign(N, 0);
@@ -532,15 +540,25 @@ MflowLinkSim::MflowLinkSim(const MflowLinkModel &M) : M_(M) {
                     B.Kind == "signal_display" ||
                     B.Kind == "signal_to_workspace";
     if (!B.LogSignal && !Implicit) continue;
-    LogBlocks_.push_back(I);
-    // `signal_to_workspace` records under `params.variableName` so the
-    // CSV column matches the IDE's intent; everything else uses the
-    // block id.
     std::string Name = B.Id;
     if (B.Kind == "signal_to_workspace") {
       if (auto *V = paramS(B, "variableName")) Name = *V;
     }
-    LogNames_.push_back(std::move(Name));
+    int W = OutWidth_[I];
+    if (W <= 1) {
+      LogBlocks_.push_back(I);
+      LogElements_.push_back(0);
+      LogNames_.push_back(Name);
+    } else {
+      // Item-1 — one CSV column per element. Naming follows MATLAB
+      // indexing (1-based on disk) to match what users see in the
+      // IDE's scope.
+      for (int E = 0; E < W; ++E) {
+        LogBlocks_.push_back(I);
+        LogElements_.push_back(E);
+        LogNames_.push_back(Name + "[" + std::to_string(E + 1) + "]");
+      }
+    }
   }
   LogColumns_.assign(LogNames_.size(), {});
 }
@@ -725,7 +743,35 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
     }
 
     if (K == "signal_constant") {
-      Out_[I] = paramD(B, "value", 0.0);
+      // Item-1 — vector-literal value (`"[1 2 3]"`). Scalar still
+      // hits Out_[I]; vectors fill VecOut_[I] and mirror the first
+      // element into Out_[I] for scalar consumers.
+      if (OutWidth_[I] > 1) {
+        const std::string *V = paramS(B, "value");
+        std::string S = V ? *V : "0";
+        auto A = S.find('[');
+        auto C0 = S.rfind(']');
+        if (A != std::string::npos && C0 != std::string::npos && A < C0)
+          S = S.substr(A + 1, C0 - A - 1);
+        std::vector<double> Vals;
+        std::string Tok;
+        for (size_t Ki = 0; Ki <= S.size(); ++Ki) {
+          char Cc = Ki < S.size() ? S[Ki] : ',';
+          if (Cc == ',' || Cc == ' ' || Cc == '\t' || Cc == ';') {
+            if (!Tok.empty()) {
+              try { Vals.push_back(std::stod(Tok)); } catch (...) {}
+              Tok.clear();
+            }
+          } else {
+            Tok.push_back(Cc);
+          }
+        }
+        Vals.resize(OutWidth_[I], 0.0);
+        VecOut_[I] = Vals;
+        Out_[I] = Vals.front();
+      } else {
+        Out_[I] = paramD(B, "value", 0.0);
+      }
     } else if (K == "signal_step") {
       double ST = paramD(B, "stepTime", 1.0);
       double IV = paramD(B, "initialValue", 0.0);
@@ -772,7 +818,28 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
       double Width = StepSize_ * 1.5;
       Out_[I] = (Tt < Width || Tt > Pp - 1e-12) ? 1.0 : 0.0;
     } else if (K == "signal_gain") {
-      Out_[I] = paramD(B, "gain", 1.0) * inputOf(I, "in");
+      double G = paramD(B, "gain", 1.0);
+      if (OutWidth_[I] > 1) {
+        // Find the upstream block driving "in" and pull its vector
+        // slice; broadcast scalars by repetition.
+        size_t Src = static_cast<size_t>(-1);
+        for (auto &P : Inputs_[I])
+          if (P.DstPort == "in") { Src = P.SrcBlock; break; }
+        VecOut_[I].assign(OutWidth_[I], 0.0);
+        if (Src != static_cast<size_t>(-1)) {
+          if (OutWidth_[Src] == 1) {
+            double V = G * Out_[Src];
+            std::fill(VecOut_[I].begin(), VecOut_[I].end(), V);
+          } else {
+            const auto &SV = VecOut_[Src];
+            for (int E = 0; E < OutWidth_[I]; ++E)
+              VecOut_[I][E] = G * (E < (int)SV.size() ? SV[E] : 0.0);
+          }
+        }
+        Out_[I] = VecOut_[I].front();
+      } else {
+        Out_[I] = G * inputOf(I, "in");
+      }
     } else if (K == "signal_abs") {
       Out_[I] = std::fabs(inputOf(I, "in"));
     } else if (K == "signal_saturation") {
@@ -781,19 +848,42 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
       double U  = inputOf(I, "in");
       Out_[I] = U < Lo ? Lo : (U > Hi ? Hi : U);
     } else if (K == "signal_sum") {
-      double Sum = 0.0;
-      auto *Signs = paramS(B, "signs");
-      if (Signs && !Signs->empty()) {
-        for (size_t Ki = 0; Ki < Signs->size(); ++Ki) {
-          char Sg = (*Signs)[Ki];
-          double V = sumInput(I, "in" + std::to_string(Ki + 1));
-          Sum += (Sg == '-') ? -V : V;
+      if (OutWidth_[I] > 1) {
+        // Element-wise vector sum. Each input port contributes one
+        // slice; scalar sources broadcast.
+        auto *Signs = paramS(B, "signs");
+        VecOut_[I].assign(OutWidth_[I], 0.0);
+        size_t N = Signs ? Signs->size() : Inputs_[I].size();
+        for (size_t Ki = 0; Ki < N; ++Ki) {
+          char Sg = (Signs && Ki < Signs->size()) ? (*Signs)[Ki] : '+';
+          std::string Port = "in" + std::to_string(Ki + 1);
+          for (auto &P : Inputs_[I]) {
+            if (P.DstPort != Port && !(Ki == 0 && P.DstPort == "in")) continue;
+            int SW = OutWidth_[P.SrcBlock];
+            for (int E = 0; E < OutWidth_[I]; ++E) {
+              double V = SW == 1 ? Out_[P.SrcBlock]
+                                 : (E < (int)VecOut_[P.SrcBlock].size()
+                                        ? VecOut_[P.SrcBlock][E] : 0.0);
+              VecOut_[I][E] += (Sg == '-') ? -V : V;
+            }
+          }
         }
+        Out_[I] = VecOut_[I].front();
       } else {
-        // No `signs` declared — sum every connected input port.
-        for (auto &P : Inputs_[I]) Sum += Out_[P.SrcBlock];
+        double Sum = 0.0;
+        auto *Signs = paramS(B, "signs");
+        if (Signs && !Signs->empty()) {
+          for (size_t Ki = 0; Ki < Signs->size(); ++Ki) {
+            char Sg = (*Signs)[Ki];
+            double V = sumInput(I, "in" + std::to_string(Ki + 1));
+            Sum += (Sg == '-') ? -V : V;
+          }
+        } else {
+          // No `signs` declared — sum every connected input port.
+          for (auto &P : Inputs_[I]) Sum += Out_[P.SrcBlock];
+        }
+        Out_[I] = Sum;
       }
-      Out_[I] = Sum;
     } else if (K == "signal_product") {
       int NIn = static_cast<int>(paramD(B, "numInputs", 2.0));
       if (NIn < 1) NIn = 1;
@@ -905,10 +995,65 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
       Out_[I] = Y;
     } else if (K == "signal_scope" || K == "signal_display" ||
                K == "signal_to_workspace" || K == "signal_terminator") {
-      Out_[I] = inputOf(I, "in");
+      if (OutWidth_[I] > 1) {
+        // Item-1 — mirror the vector input verbatim so the scope's
+        // per-element log columns capture every element of the
+        // upstream signal, not just the first.
+        size_t Src = static_cast<size_t>(-1);
+        for (auto &P : Inputs_[I])
+          if (P.DstPort == "in") { Src = P.SrcBlock; break; }
+        VecOut_[I].assign(OutWidth_[I], 0.0);
+        if (Src != static_cast<size_t>(-1)) {
+          int SW = OutWidth_[Src];
+          if (SW == 1) {
+            std::fill(VecOut_[I].begin(), VecOut_[I].end(), Out_[Src]);
+          } else {
+            for (int E = 0; E < OutWidth_[I]; ++E)
+              VecOut_[I][E] = E < (int)VecOut_[Src].size()
+                                 ? VecOut_[Src][E] : 0.0;
+          }
+        }
+        Out_[I] = VecOut_[I].front();
+      } else {
+        Out_[I] = inputOf(I, "in");
+      }
     } else if (K == "signal_mux") {
-      // Tier-C: scalar signals, so a mux is just the first input.
-      Out_[I] = Inputs_[I].empty() ? 0.0 : Out_[Inputs_[I].front().SrcBlock];
+      // Item-1 — concatenate input slices into a single vector
+      // output. Scalar inputs contribute one element each; vector
+      // inputs contribute their full width. The width-inference
+      // pass already sized OutWidth_[I] = sum of input widths.
+      if (OutWidth_[I] > 1) {
+        VecOut_[I].assign(OutWidth_[I], 0.0);
+        size_t Pos = 0;
+        // Visit input ports in port-id order so the concatenation
+        // is deterministic. Sum-style "in1", "in2", … and unnamed
+        // single-input wires are both handled.
+        std::vector<std::pair<int, size_t>> Order;
+        for (size_t Idx = 0; Idx < Inputs_[I].size(); ++Idx) {
+          const auto &P = Inputs_[I][Idx];
+          int N = 1;
+          if (P.DstPort.size() > 1 && P.DstPort[0] == 'i' &&
+              P.DstPort[1] == 'n') {
+            try { N = std::stoi(P.DstPort.substr(2)); } catch (...) { N = 1; }
+          }
+          Order.emplace_back(N, Idx);
+        }
+        std::sort(Order.begin(), Order.end());
+        for (auto &OEnt : Order) {
+          const auto &P = Inputs_[I][OEnt.second];
+          int SW = OutWidth_[P.SrcBlock];
+          if (SW == 1) {
+            if (Pos < VecOut_[I].size())
+              VecOut_[I][Pos++] = Out_[P.SrcBlock];
+          } else {
+            for (int E = 0; E < SW && Pos < VecOut_[I].size(); ++E)
+              VecOut_[I][Pos++] = VecOut_[P.SrcBlock][E];
+          }
+        }
+        Out_[I] = VecOut_[I].front();
+      } else {
+        Out_[I] = Inputs_[I].empty() ? 0.0 : Out_[Inputs_[I].front().SrcBlock];
+      }
     } else if (K == "signal_demux" || K == "signal_switch") {
       // Algebra-only Tier-C stub: passthrough first input. Tier-E adds
       // the proper switch / demux semantics + zero-crossing.
@@ -1664,8 +1809,17 @@ void MflowLinkSim::runToCompletion() {
 //===----------------------------------------------------------------------===//
 
 void MflowLinkSim::logSample() {
-  for (size_t Ci = 0; Ci < LogBlocks_.size(); ++Ci)
-    LogColumns_[Ci].push_back({T_, Out_[LogBlocks_[Ci]]});
+  for (size_t Ci = 0; Ci < LogBlocks_.size(); ++Ci) {
+    size_t I = LogBlocks_[Ci];
+    int E = LogElements_[Ci];
+    double V;
+    if (OutWidth_[I] > 1 && E < (int)VecOut_[I].size()) {
+      V = VecOut_[I][E];
+    } else {
+      V = Out_[I];
+    }
+    LogColumns_[Ci].push_back({T_, V});
+  }
 }
 
 void MflowLinkSim::writeCsv(std::ostream &OS) const {
@@ -1724,8 +1878,13 @@ std::vector<std::pair<std::string, double>>
 MflowLinkSim::currentLoggedOutputs() const {
   std::vector<std::pair<std::string, double>> Out;
   Out.reserve(LogBlocks_.size());
-  for (size_t Ci = 0; Ci < LogBlocks_.size(); ++Ci)
-    Out.emplace_back(LogNames_[Ci], Out_[LogBlocks_[Ci]]);
+  for (size_t Ci = 0; Ci < LogBlocks_.size(); ++Ci) {
+    size_t I = LogBlocks_[Ci];
+    int E = LogElements_[Ci];
+    double V = (OutWidth_[I] > 1 && E < (int)VecOut_[I].size())
+                 ? VecOut_[I][E] : Out_[I];
+    Out.emplace_back(LogNames_[Ci], V);
+  }
   return Out;
 }
 

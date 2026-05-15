@@ -225,9 +225,19 @@ private:
   double T_ = 0.0;
   size_t MajorSteps_ = 0;
   double StepSize_ = 0.01;
-  // Current outputs, one scalar per block — written by `evalOutputs`,
-  // read by downstream blocks via the Inputs_ wiring.
+  // Scalar / first-element output per block. Every evaluator writes
+  // this slot whether the block is scalar or vector — downstream
+  // scalar readers (the vast majority of evaluators) read it
+  // unchanged, so the Tier-I introduction of vectors doesn't
+  // ripple through every Out_[X] reference.
   std::vector<double> Out_;
+  // Item-1 — per-block output *vector*. Populated for blocks whose
+  // OutWidth_[I] > 1; held but empty for scalar blocks. Vector-
+  // aware evaluators (Mux concat, Demux split, vector
+  // signal_constant, scope/log when width > 1) reach in here;
+  // every other reader still hits the scalar Out_[I].
+  std::vector<int>                 OutWidth_;
+  std::vector<std::vector<double>> VecOut_;
   std::vector<double> Y_;             // continuous state, length M_.ContStateCount
   // Discrete state — one scalar slot per `Unit Delay` / `ZOH`, indexed
   // by `DiscStateOffset_[i]`. Treated by the evaluator as the current
@@ -254,10 +264,15 @@ private:
   std::vector<int> ZCSign_;
   std::vector<CrossingEvent> ZCQueue_;
 
-  // Buffer for the logged-signal CSV: log column names in stable order
-  // (block-id), parallel sample arrays.
+  // Buffer for the logged-signal CSV: one *column* per element of
+  // a logged block (scalar blocks ⇒ one column; vector blocks ⇒
+  // OutWidth columns named `<id>[0]`, `<id>[1]`, …). LogBlocks_[k]
+  // is the originating block index for column k, and
+  // LogElements_[k] is the element offset inside that block's
+  // vector output.
   std::vector<std::string> LogNames_;
-  std::vector<size_t> LogBlocks_;     // index into M_.Blocks for each column
+  std::vector<size_t> LogBlocks_;
+  std::vector<int>    LogElements_;
   std::vector<std::vector<LogSample>> LogColumns_;
 
   // Snapshot ring (§7.5). One entry per past major step, capped at

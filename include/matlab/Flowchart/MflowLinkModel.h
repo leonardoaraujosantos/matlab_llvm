@@ -54,6 +54,18 @@ struct MflBlock {
   // are dropped from the execution-order sort graph (§6.3).
   bool IsLoopBreaker = false;
   bool LogSignal = false;      // `data.log_signal` — stream this output
+  // Item-1 (Tier-I) — signal width per port. Default = 1 (scalar).
+  // A block's *output width* is what downstream blocks read; its
+  // *input widths* are filled in by width inference at lowering
+  // time from the upstream edges. `OutWidth == 0` means
+  // "scalar-or-inherit" (the block contributes its own output
+  // width once its inputs are known — e.g. Gain inherits from its
+  // input, Mux sums its inputs).
+  int OutWidth = 1;
+  // For multi-input blocks the widths line up with `Inputs_` in
+  // `MflowLinkSim` once edges are resolved. The lowering doesn't
+  // try to populate this — the runtime fills it on first use.
+  std::vector<int> InWidths;
   // Tier F — conditional subsystem gate. Empty for an always-enabled
   // block; a flat block id (the source signal driving the enable)
   // for a block inlined from a `signal_enabled_subsystem` or for a
