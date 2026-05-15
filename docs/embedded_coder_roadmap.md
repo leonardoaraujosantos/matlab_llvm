@@ -490,6 +490,38 @@ Tier-5i (✓ shipped 2026-05-15):
   do yet). Demo: `mimo_state_space.mflow` (2-in/2-out
   decoupled plant, A=diag(-1,-2), B=I, C=I).
 
+Tier-5k (✓ shipped 2026-05-15):
+- **SV fi-multiplication normalising shift fixed.** Every fi
+  multiplication in `SubsystemToMatlab.cpp` now routes through a
+  `fiMul` helper that wraps the result in `fi(prod, S, W, F)`.
+  Sema infers the outer expression as Q<W>.<F>; the AST → MIR
+  lowering emits a clamp-style `matlab.fi.cast` that
+  LowerFixedPoint translates into `>>> Frac`. Combined with an
+  outport wrap and an else-branch wrap inside `signal_saturation`,
+  Sema now narrows every chain back to the declared port spec
+  instead of accumulating widened FL through the expression tree.
+  Input args also gain a `<arg> = fi(<arg>, S, W, F)` re-cast at
+  the start of the body so Sema's Phase 5.6 Stage A.1
+  `ParamFiSpec` mechanism pins their type — without it the SV
+  pipeline would emit a malformed `fi(none, ...)` constructor
+  cast at the outport that the SV emitter can't lower.
+- **SV stateful local self-assignment fixed.** `exprFor` in
+  `lib/MLIR/Passes/EmitSystemVerilog.cpp` now unwraps multi-use
+  `arith.fptosi` / `arith.fptoui` of a persistent-get result to
+  the register signal (previously only the single-use inline
+  path did this). The canonical `d1 = d1` self-assignment shape
+  in tapped-delay / FIR-style stateful subsystems now correctly
+  reads as `d1 = s_d1`.
+- **Behavioural cosim coverage**: all 14 SV-capable fixtures
+  (was 4 before) pass `flowchart-emit-subsystem-sv-cosim` —
+  bit-exact for pure-delay and stateless boolean shapes;
+  within Q16.16 quantisation noise (~6e-4) for fi-arith chains.
+  Worst-case errors: fir_4tap / unit_delay / transport_delay /
+  comparator_logic / threshold_switch / stateless_mixer /
+  tapped_delay = 0.000e+0; tf_lowpass / mimo_state_space /
+  continuous_lowpass = 2.0e-4; tf_2nd_order / ss_plant = 2.5e-4;
+  zp_plant = 6.0e-4; discrete_pid = 1.6e-4.
+
 Tier-5j (✓ partial, shipped 2026-05-15):
 - **Verilator behavioural cosim lane** —
   `test/Flowchart/EmitSubsystem/cosim.py` + `run_verilator_cosim.sh`
@@ -535,11 +567,8 @@ Tier-5j (✓ partial, shipped 2026-05-15):
       → local` rewrite before the multi-output reassignment.
 
 Tier-5j open carve-outs (not yet shipped):
-- **SV fi-multiplication normalising shift** — see Tier-5j shipped
-  notes above. Highest impact; unblocks behavioural cosim for the
-  remaining 11 SV-capable fixtures.
-- **SV stateful local self-assignment** — same Tier-5j notes; the
-  cosmetic Verilator warning hides a real semantic bug.
+- ~~SV fi-multiplication normalising shift~~ ✓ fixed in Tier-5k.
+- ~~SV stateful local self-assignment~~ ✓ fixed in Tier-5k.
 
 Tier-5i open carve-outs (not yet shipped):
 - **MIMO Tustin** — currently SISO-only. Matrix bilinear

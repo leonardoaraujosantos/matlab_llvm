@@ -192,28 +192,48 @@ Tier-5i carve-outs (separable follow-ups):
   Tracking which Tustin blocks are inside a cycle and
   surfacing a sourced error would catch this early.
 
-Tier-5j cosim coverage (✓ shipped 2026-05-15):
+Tier-5k cosim coverage (✓ shipped 2026-05-15):
 
-Behavioural cosim (Verilator + Python) currently passes for
-**`unit_delay`, `transport_delay`, `comparator_logic`,
-`threshold_switch`** — pure-passthrough delays and stateless
-combinational logic without fi-multiplications. The other
-SV-capable fixtures (`tf_lowpass`, `tf_2nd_order`, `zp_plant`,
-`ss_plant`, `mimo_state_space`, `fir_4tap`, `discrete_pid`,
-`stateless_mixer`, `tapped_delay`) lint clean but the SV emit
-itself has two open bugs the cosim correctly identifies:
+All 14 SV-capable fixtures now pass behavioural cosim
+(`flowchart-emit-subsystem-sv-cosim`, gated by
+`MATLAB_LLVM_WITH_EMIT_SUBSYSTEM_SV_COSIM=ON`):
 
-1. **fi-multiplication missing Q16.16 normalising shift** — every
-   block with a Gain/Sum-of-products/TF/SS coefficient.
-2. **Stateful local self-assignment** in some multi-output state
-   patterns (`tapped_delay` shape).
+| Fixture | Worst-case error vs Python emit |
+|---|---|
+| `unit_delay`, `transport_delay`, `comparator_logic`, `threshold_switch`, `stateless_mixer`, `tapped_delay`, `fir_4tap` | 0 (bit-exact) |
+| `discrete_pid` | 1.6e-4 |
+| `tf_lowpass`, `mimo_state_space`, `continuous_lowpass` | 2.0e-4 |
+| `tf_2nd_order`, `ss_plant` | 2.5e-4 |
+| `zp_plant` | 6.0e-4 |
 
-See `docs/embedded_coder_roadmap.md` Tier-5j for the fix paths.
-Until those land, the SV emit should be treated as
-**structurally correct + lint-clean** but **NOT bit-exact** for
-fi-multiplication paths. Run the cosim lane (`ctest -R cosim`,
-gated by `MATLAB_LLVM_WITH_EMIT_SUBSYSTEM_SV_COSIM=ON`) to
-re-verify after either fix.
+The non-zero errors are Q16.16 quantisation noise from `fi(K, ...)`
+constants getting rounded to the nearest int32 (e.g. `fi(0.05, 1,
+32, 16)` → 3276 → 0.04999...). Tolerance < 1e-3 across the board.
+
+Tier-5k bug fixes that unblocked this:
+
+1. **fi-multiplication normalising shift.** `fi(K) .* x` now wraps
+   the product in an explicit `fi(prod, S, W, F)` cast so the SV
+   pipeline inserts the trailing `>>> F` shift instead of leaking
+   the wider Q*.{2F} intermediate through the assignment chain.
+2. **Stateful local self-assignment.** `exprFor` for multi-use
+   `arith.fptosi` of a persistent-get result now unwraps to the
+   register signal (was only single-use before), so the `d1 = d1`
+   self-assignment shape now correctly reads as `d1 = s_d1`.
+3. **Input arg fi-tagging.** Each public input gets a `<u> = fi(<u>,
+   S, W, F)` re-cast at the start of the body so Sema's
+   `ParamFiSpec` mechanism pins its type — without it the
+   outport wrap would emit a malformed `fi(none, ...)`
+   constructor cast.
+4. **Outport fi-narrowing.** Each output assignment is wrapped
+   in `fi(<rhs>, S, W, F)` so Sema narrows back to the user's
+   declared port spec (otherwise sum-chains widen the inferred FL
+   to (sum of operand FLs)).
+5. **Saturation else-branch wrap.** The pass-through else of
+   `signal_saturation` now also wraps in `fi(U, S, W, F)` so all
+   three stores agree at a single Q<W>.<F> spec (previously the
+   join was `any`, leading to the malformed cast at downstream
+   consumers).
 
 Stateful subsystems emit a multi-return functional form
 `[y, s_next] = step(u, s)` *and* a Tier-2 class wrapper that

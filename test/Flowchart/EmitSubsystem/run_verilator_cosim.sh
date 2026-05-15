@@ -63,13 +63,26 @@ fails=()
 declare -a CASES=(
   # Pure-delay state machines — state read IS the output, no fi
   # multiplication in the data path. Bit-exact agreement expected.
-  "unit_delay:unit_delay:step_first:20:0.001"
-  "transport_delay:transport_delay:step:20:0.001"
+  "unit_delay:unit_delay:step_first:30:0.001"
+  "transport_delay:transport_delay:step:30:0.001"
 
   # Stateless combinational with boolean outputs. The cosim
   # decodes 1-bit output ports as boolean rather than Q16.16.
-  "comparator_logic:comparator_logic:step_first:20:0.001"
-  "threshold_switch:threshold_switch:step_first:20:0.001"
+  "comparator_logic:comparator_logic:step_first:30:0.001"
+  "threshold_switch:threshold_switch:step_first:30:0.001"
+
+  # Tier-5k bug fixes: every fixture with fi-multiplication or
+  # multi-output stateful blocks now passes within Q16.16 noise.
+  "stateless_mixer:stateless_mixer:step_first:30:0.001"
+  "tapped_delay:tapped_delay:step:30:0.001"
+  "tf_lowpass:tf_lowpass:step_first:30:0.005"
+  "fir_4tap:fir_4tap:step_first:30:0.001"
+  "discrete_pid:discrete_pid:step_first:30:0.005"
+  "mimo_state_space:mimo_state_space:step_first:30:0.005"
+  "tf_2nd_order:tf_2nd_order:step_first:30:0.005"
+  "zp_plant:zp_plant:step_first:30:0.005"
+  "ss_plant:ss_plant:step_first:30:0.005"
+  "continuous_lowpass:continuous_lowpass:step_first:30:0.005"
 )
 
 for spec in "${CASES[@]}"; do

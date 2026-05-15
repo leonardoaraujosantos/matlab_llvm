@@ -610,6 +610,29 @@ struct ASTBuilder {
     B->Op = Op; B->LHS = L; B->RHS = R;
     return B;
   }
+  // Tier-5k — Fi-aware multiplication. The fi-multiplication of
+  // two Q<W>.<F> values yields a Q*.{2F} natural product. Without
+  // an explicit cast, Sema widens the inferred FL through the
+  // expression tree and downstream slots inherit the wider spec,
+  // so the SV pipeline lowers `fi(K) .* x` to `(x << log2(K_raw))`
+  // without the `>>> F` normalising shift. Wrapping the result in
+  // `fi(prod, S, W, F)` lets Sema infer the outer expression as
+  // Q<W>.<F>; the AST → MIR lowering then emits a clamp-style
+  // `matlab.fi.cast` that LowerFixedPoint translates into the
+  // right shift. Software targets emit plain `.*` on f64 (the
+  // Sema-side fi type doesn't change the IEEE arithmetic the
+  // emit-* lanes produce).
+  Expr *fiMul(Expr *L, Expr *R) {
+    Expr *Prod = bin(BinOp::ElemMul, L, R);
+    if (!WrapFi) return Prod;
+    auto *Call = Ctx.make<CallOrIndex>();
+    Call->Callee = name("fi");
+    Call->Args.push_back(Prod);
+    Call->Args.push_back(integer(FiSigned ? 1 : 0));
+    Call->Args.push_back(integer(FiWidth));
+    Call->Args.push_back(integer(FiFrac));
+    return Call;
+  }
   UnaryOpExpr *unary(UnOp Op, Expr *V) {
     auto *U = Ctx.make<UnaryOpExpr>();
     U->Op = Op; U->Operand = V;
@@ -699,11 +722,11 @@ Stmt *lowerBlock(const Node &N, const std::string &OutVar,
   }
   if (K == "signal_gain") {
     double Gain = paramD(N, "gain", 1.0);
-    // y = K .* u
+    // y = K .* u — fiMul wraps the result in an explicit fi cast
+    // so the SV pipeline applies the Q<W>.<F> normalising shift.
     auto *G = B.lit(Gain);
     auto *U = get(0);
-    auto *Mul = B.bin(BinOp::ElemMul, G, U);
-    return B.assign(OutVar, Mul);
+    return B.assign(OutVar, B.fiMul(G, U));
   }
   if (K == "signal_sum") {
     // signs string like "+-+"; default = all '+' to match the input
@@ -726,7 +749,7 @@ Stmt *lowerBlock(const Node &N, const std::string &OutVar,
   if (K == "signal_product") {
     Expr *Acc = nullptr;
     for (Expr *T : Ins) {
-      Acc = Acc ? B.bin(BinOp::ElemMul, Acc, T) : T;
+      Acc = Acc ? B.fiMul(Acc, T) : T;
     }
     if (!Acc) Acc = B.lit(1.0);
     return B.assign(OutVar, Acc);
@@ -744,19 +767,16 @@ Stmt *lowerBlock(const Node &N, const std::string &OutVar,
     // an explicit if/elseif/else compiles to a clean 3-way mux at
     // synth time.
     if (B.WrapFi) {
-      // Simple if/elseif/else form. All three branches store the
-      // upstream-typed value (rails are fi-typed literals; the
-      // else-branch passthrough carries the value verbatim).
-      // For stateless subsystems this works cleanly. For subsystems
-      // where the upstream chain widens to i64 (e.g. a discrete-PID
-      // accumulator chain through fi-saturate), the alloc slot
-      // ends up with mixed-width stores and HWLegalize rejects.
-      // Pre-coercing all branches via `+ fi(0, ...)` widens the
-      // rails to match — but breaks the stateless case (where
-      // `c + 0` triggers a fi-saturate that the variable
-      // passthrough doesn't take). Settling for the simple form;
-      // PID-with-saturation needs Tier-5e (a dedicated MLIR pass
-      // that detects mixed-width stores and unifies them).
+      // Simple if/elseif/else form. The rails come pre-wrapped as
+      // `fi(Hi, S, W, F)` / `fi(Lo, S, W, F)` via B.lit; wrap the
+      // else-branch passthrough in a matching `fi(U, S, W, F)`
+      // cast so Sema joins all three stores at a single Q<W>.<F>
+      // spec instead of `any` (which trips the AST → MIR codegen
+      // into a malformed `fi(none, ...)` constructor cast at the
+      // outport binding). Tier-5f's `UnifyMixedWidthStores` MLIR
+      // pass takes care of the integer-width mismatch at LowerFi
+      // time; this AST-level wrap takes care of the Sema-level
+      // type-join mismatch.
       auto *IfStmt = B.Ctx.make<class IfStmt>();
       IfStmt->Cond = B.bin(BinOp::Gt, U, B.lit(Hi));
       IfStmt->Then = B.Ctx.make<Block>();
@@ -767,7 +787,14 @@ Stmt *lowerBlock(const Node &N, const std::string &OutVar,
       EI.Body->Stmts.push_back(B.assign(OutVar, B.lit(Lo)));
       IfStmt->Elseifs.push_back(EI);
       IfStmt->Else = B.Ctx.make<Block>();
-      IfStmt->Else->Stmts.push_back(B.assign(OutVar, U));
+      // Wrap U so the passthrough has the same Q<W>.<F> spec as
+      // the rails (Sema joins all three stores cleanly).
+      auto *FiU = B.call("fi",
+                          {U,
+                           B.integer(B.FiSigned ? 1 : 0),
+                           B.integer(B.FiWidth),
+                           B.integer(B.FiFrac)});
+      IfStmt->Else->Stmts.push_back(B.assign(OutVar, FiU));
       return IfStmt;
     }
     // Pure-arith form for software targets:
@@ -1298,6 +1325,30 @@ matlab::Function *lowerSubsystemToMatlab(
     }
   }
 
+  // Tier-5k — In HDL mode the public input args don't carry an AST
+  // type annotation (the `hdl.ports` MLIR attribute is stamped after
+  // codegen). Sema's "Phase 5.6 Stage A.1" mechanism in
+  // `lib/Sema/TypeInference.cpp` recognises `fi(param, signed, WL,
+  // FL)` re-cast and pins the param's binding to that fi spec. Emit
+  // one re-cast per public input at the start of the body so Sema
+  // propagates Q<W>.<F> through every downstream use; without it
+  // the per-port `u_k` stays `any`, breaks fi-multiplication's
+  // outer cast, and the SV emitter ends up with a malformed
+  // `fi(none, ...)` constructor cast.
+  if (Opts.StateAsPersistent) {
+    for (auto &P : Inports) {
+      FixedPointSpec Spec = Opts.FiDefault;
+      auto It = Opts.FiSpecs.find(P.Var);
+      if (It != Opts.FiSpecs.end()) Spec = It->second;
+      auto *FiCall = B.call("fi",
+                            {B.name(P.Var),
+                             B.integer(Spec.Signed ? 1 : 0),
+                             B.integer(Spec.Width),
+                             B.integer(Spec.Frac)});
+      Body->Stmts.push_back(B.assign(P.Var, FiCall));
+    }
+  }
+
   // Tier 3+4 — hoist every stateful block's STATE READ to the top
   // of the body, BEFORE any consumer evaluates. Without this hoist
   // the topo sort (which drops loop-breakers' outgoing edges) is
@@ -1427,16 +1478,16 @@ matlab::Function *lowerSubsystemToMatlab(
         if (Opts.DiscretizeMethod == "tustin") {
           Expr *HalfTs = B.WrapFi ? B.lit(Ts / 2.0)
                                   : B.number(Ts / 2.0);
-          Expr *HalfTsU = B.bin(BinOp::ElemMul, HalfTs, U);
+          Expr *HalfTsU = B.fiMul(HalfTs, U);
           // Output overwrite with direct feedthrough.
           Body->Stmts.push_back(B.assign(
               VarOfNode[N->Id],
               B.bin(BinOp::Add, B.name(LocalRead), HalfTsU)));
           // State update mirrors Forward Euler — pre-feedthrough.
-          Expr *TsU = B.bin(BinOp::ElemMul, TsConst, U);
+          Expr *TsU = B.fiMul(TsConst, U);
           NextExpr = B.bin(BinOp::Add, B.name(LocalRead), TsU);
         } else {
-          Expr *TsU = B.bin(BinOp::ElemMul, TsConst, U);
+          Expr *TsU = B.fiMul(TsConst, U);
           NextExpr = B.bin(BinOp::Add, B.name(LocalRead), TsU);
         }
       } else if (N->Kind == "signal_transfer_fcn" ||
@@ -1532,15 +1583,14 @@ matlab::Function *lowerSubsystemToMatlab(
           tustinTF(NumIn, DenIn, Ts, NumZ, DenZ);
           // Emit the output expression first (the next-state updates
           // reference the local OutVar that carries y[k]).
-          Expr *YExpr = B.bin(BinOp::ElemMul, fiC(NumZ[0]), U);
+          Expr *YExpr = B.fiMul(fiC(NumZ[0]), U);
           YExpr = B.bin(BinOp::Add, YExpr, B.name(localFor(1)));
           Body->Stmts.push_back(B.assign(OutV, YExpr));
           // Now build the next-state expressions per slot.
           for (int K = 1; K <= Order; ++K) {
             // n_{n-K} = NumZ[K], d_{n-K} = DenZ[K]
-            Expr *Term = B.bin(BinOp::ElemMul, fiC(NumZ[K]), U);
-            Expr *Neg  = B.bin(BinOp::ElemMul, fiC(-DenZ[K]),
-                                B.name(OutV));
+            Expr *Term = B.fiMul(fiC(NumZ[K]), U);
+            Expr *Neg  = B.fiMul(fiC(-DenZ[K]), B.name(OutV));
             Expr *Acc  = B.bin(BinOp::Add, Term, Neg);
             if (K < Order) {
               Acc = B.bin(BinOp::Add, Acc, B.name(localFor(K + 1)));
@@ -1578,19 +1628,19 @@ matlab::Function *lowerSubsystemToMatlab(
           // x_K_next = x_K + Ts * x_{K+1}
           Expr *XK   = B.name(localFor(K));
           Expr *XK1  = B.name(localFor(K + 1));
-          Expr *Term = B.bin(BinOp::ElemMul, fiC(Ts), XK1);
+          Expr *Term = B.fiMul(fiC(Ts), XK1);
           NextStateExpr[slotFor(K)] = B.bin(BinOp::Add, XK, Term);
         }
         // Last slot: x_n_next = x_n + Ts*(-A[0]*x_1 - ... - A[n-1]*x_n + u)
         Expr *Acc = U;
         for (int K = 1; K <= Order; ++K) {
           Expr *NegA = fiC(-A[K - 1]);
-          Expr *Term = B.bin(BinOp::ElemMul, NegA, B.name(localFor(K)));
+          Expr *Term = B.fiMul(NegA, B.name(localFor(K)));
           Acc = B.bin(BinOp::Add, Acc, Term);
         }
         // x_n + Ts * (Acc)
         Expr *XN     = B.name(localFor(Order));
-        Expr *TsAcc  = B.bin(BinOp::ElemMul, fiC(Ts), Acc);
+        Expr *TsAcc  = B.fiMul(fiC(Ts), Acc);
         Expr *XNNext = B.bin(BinOp::Add, XN, TsAcc);
         NextStateExpr[slotFor(Order)] = XNNext;
         // Emit the block's output `OutVar = Σ b_i * x_i`. For Order=1
@@ -1599,8 +1649,7 @@ matlab::Function *lowerSubsystemToMatlab(
         // the controllable-canonical y equation.
         Expr *YAcc = nullptr;
         for (int K = 1; K <= Order; ++K) {
-          Expr *Term = B.bin(BinOp::ElemMul, fiC(BV[K - 1]),
-                              B.name(localFor(K)));
+          Expr *Term = B.fiMul(fiC(BV[K - 1]), B.name(localFor(K)));
           YAcc = YAcc ? B.bin(BinOp::Add, YAcc, Term) : Term;
         }
         if (!YAcc) YAcc = B.number(0.0);
@@ -1730,13 +1779,12 @@ matlab::Function *lowerSubsystemToMatlab(
           ssToTFSiso(AM, BM, CM, Order, NumIn, DenIn);
           std::vector<double> NumZ, DenZ;
           tustinTF(NumIn, DenIn, Ts, NumZ, DenZ);
-          Expr *YExpr = B.bin(BinOp::ElemMul, fiC(NumZ[0]), U);
+          Expr *YExpr = B.fiMul(fiC(NumZ[0]), U);
           YExpr = B.bin(BinOp::Add, YExpr, B.name(localFor(1)));
           Body->Stmts.push_back(B.assign(OutV, YExpr));
           for (int K = 1; K <= Order; ++K) {
-            Expr *Term = B.bin(BinOp::ElemMul, fiC(NumZ[K]), U);
-            Expr *Neg  = B.bin(BinOp::ElemMul, fiC(-DenZ[K]),
-                                B.name(OutV));
+            Expr *Term = B.fiMul(fiC(NumZ[K]), U);
+            Expr *Neg  = B.fiMul(fiC(-DenZ[K]), B.name(OutV));
             Expr *Acc  = B.bin(BinOp::Add, Term, Neg);
             if (K < Order) {
               Acc = B.bin(BinOp::Add, Acc, B.name(localFor(K + 1)));
@@ -1754,19 +1802,18 @@ matlab::Function *lowerSubsystemToMatlab(
           for (int K = 1; K <= P; ++K) {
             double Bik = BM[(I - 1) * P + (K - 1)];
             if (Bik == 0.0) continue;
-            Expr *T = B.bin(BinOp::ElemMul, fiC(Bik), inputExpr(K));
+            Expr *T = B.fiMul(fiC(Bik), inputExpr(K));
             Acc = Acc ? B.bin(BinOp::Add, Acc, T) : T;
           }
           // Σ_j A[i,j]*x_j
           for (int J = 1; J <= Order; ++J) {
             double Aij = AM[(I - 1) * Order + (J - 1)];
             if (Aij == 0.0) continue;
-            Expr *T = B.bin(BinOp::ElemMul, fiC(Aij),
-                             B.name(localFor(J)));
+            Expr *T = B.fiMul(fiC(Aij), B.name(localFor(J)));
             Acc = Acc ? B.bin(BinOp::Add, Acc, T) : T;
           }
           if (!Acc) Acc = B.number(0.0);
-          Expr *TsAcc = B.bin(BinOp::ElemMul, fiC(Ts), Acc);
+          Expr *TsAcc = B.fiMul(fiC(Ts), Acc);
           Expr *XI = B.name(localFor(I));
           NextStateExpr[slotFor(I)] = B.bin(BinOp::Add, XI, TsAcc);
         }
@@ -1778,8 +1825,7 @@ matlab::Function *lowerSubsystemToMatlab(
           for (int K = 1; K <= Order; ++K) {
             double Cqk = CM[(Qi - 1) * Order + (K - 1)];
             if (Cqk == 0.0) continue;
-            Expr *Term = B.bin(BinOp::ElemMul, fiC(Cqk),
-                                B.name(localFor(K)));
+            Expr *Term = B.fiMul(fiC(Cqk), B.name(localFor(K)));
             YAcc = YAcc ? B.bin(BinOp::Add, YAcc, Term) : Term;
           }
           if (!YAcc) YAcc = B.number(0.0);
@@ -1873,15 +1919,50 @@ matlab::Function *lowerSubsystemToMatlab(
     Body->Stmts.push_back(Stmt);
   }
 
+  // Tier-5k — In HDL mode, wrap each outport assignment in
+  // `fi(<rhs>, S, W, F)` so Sema narrows the output type back to
+  // the user-declared Q<W>.<F>. Without it, sum-chains widen the
+  // inferred FL to (sum of operand FLs) and the SV port emits
+  // with a wider-than-spec width. Skip the wrap when the upstream
+  // block is a boolean producer (comparators / logical ops) since
+  // wrapping a 1-bit value in a Q<W>.<F> cast routes through the
+  // f64-quantize runtime, which is not synthesisable.
+  auto isBooleanProducer = [&](const std::string &Kind) {
+    return Kind == "signal_relop" || Kind == "signal_logical" ||
+           Kind == "signal_compare_to_zero" ||
+           Kind == "signal_compare_to_constant";
+  };
   // For each outport, append `<port_var> = <feeding_var>;`.
   for (auto &P : Outports) {
     // An outport has exactly one input (`in`). Resolve to its source.
     Expr *Rhs = nullptr;
+    std::string UpstreamKind;
     for (const auto &Port : P.N->InPorts) {
       Rhs = resolveInputExpr(P.N->Id, Port.Id);
+      // Look up the upstream block's kind via the edge index so the
+      // outport wrap can skip booleans.
+      auto It = EI.Map.find({P.N->Id, Port.Id});
+      if (It != EI.Map.end()) {
+        for (const auto &NN : Sub->Nodes) {
+          if (NN.Id == It->second.first) {
+            UpstreamKind = NN.Kind;
+            break;
+          }
+        }
+      }
       break;
     }
     if (!Rhs) Rhs = B.number(0.0);
+    if (Opts.StateAsPersistent && !isBooleanProducer(UpstreamKind)) {
+      FixedPointSpec Spec = Opts.FiDefault;
+      auto It = Opts.FiSpecs.find(P.Var);
+      if (It != Opts.FiSpecs.end()) Spec = It->second;
+      Rhs = B.call("fi",
+                    {Rhs,
+                     B.integer(Spec.Signed ? 1 : 0),
+                     B.integer(Spec.Width),
+                     B.integer(Spec.Frac)});
+    }
     Body->Stmts.push_back(B.assign(P.Var, Rhs));
   }
 

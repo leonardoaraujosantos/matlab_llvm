@@ -374,7 +374,11 @@ sv_sat_smoke() {
     sed 's/^/  /' "$SCRATCH/emit.err" >&2
     return
   fi
-  if ! grep -q "if (mix > " "$sv"; then
+  # Tier-5k changed the saturation intermediate var from `mix` to
+  # `clamp_sat` (the explicit fi-cast of the sum) so the upper-rail
+  # comparison now reads `if (clamp_sat > 64'sd65536) ...`. Lower
+  # rail keeps the `< -` shape.
+  if ! grep -q "if (clamp_sat > " "$sv"; then
     fail=$((fail+1)); fails+=("stateless_mixer sat (missing upper rail)")
     return
   fi
@@ -406,7 +410,10 @@ sv_pid_smoke() {
     fail=$((fail+1)); fails+=("discrete_pid SV (missing state regs)")
     return
   fi
-  if ! grep -q "if (ctrl > " "$sv" \
+  # Tier-5k changed the saturation intermediate var name: the
+  # explicit fi-cast lands in `clamp_sat` rather than the original
+  # `ctrl`/`mix` user name. Both rails must still appear.
+  if ! grep -q "if (clamp_sat > " "$sv" \
        || ! grep -q "< -" "$sv"; then
     fail=$((fail+1)); fails+=("discrete_pid SV (missing saturation rails)")
     return

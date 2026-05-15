@@ -694,6 +694,32 @@ std::string Emitter::exprFor(mlir::Value V) {
     // inlineable ops collapse into one readable line.
     if (isInlineable(V))
       return renderInlineExpr(Op);
+    // Tier-5k: a MULTI-USE `arith.fptosi` / `arith.fptoui` of a
+    // persistent-get result still renders as the register signal —
+    // the typed re-cast is inert at the SV level. Without this,
+    // multi-use state-reads (the canonical `d1 = d1` self-
+    // assignment pattern that surfaces in tapped-delay/FIR-style
+    // stateful subsystems) lose the register signal name on the
+    // RHS and read uninitialised. Single-use is already handled
+    // via `renderInlineExpr`; this branch covers ≥2 uses.
+    llvm::StringRef Nm = Op->getName().getStringRef();
+    if (Nm == "arith.fptosi" || Nm == "arith.fptoui") {
+      if (auto *In = Op->getOperand(0).getDefiningOp()) {
+        auto GIt = GetSiteToReg.find(In);
+        if (GIt != GetSiteToReg.end()) {
+          auto &P = Persists[GIt->second];
+          unsigned ResultW = widthOf(Op->getResult(0).getType());
+          // Same width-wrap logic as the inline-render path.
+          if (P.Width > 0 && P.Width == ResultW) return P.Name;
+          if (ResultW > 0) {
+            std::ostringstream S;
+            S << ResultW << "'($signed(" << P.Name << "))";
+            return S.str();
+          }
+          return P.Name;
+        }
+      }
+    }
   }
   return name(V);
 }
