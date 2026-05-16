@@ -1,7 +1,7 @@
 # mflowLink Embedded Coder — Plan
 
-A new code-gen lane that emits a single mflowLink **subsystem** as
-standalone, AOT-compiled code in **Python / C / C++ / TypeScript /
+A code-gen lane that emits mflowLink models as standalone,
+AOT-compiled code in **Python / C / C++ / TypeScript /
 SystemVerilog**. Separate from the existing
 `-emit-mflowlink-cpp` lane, which bakes a *whole model* into a
 standalone simulator built around the in-process `MflowLinkSim`
@@ -9,11 +9,23 @@ runtime; this lane emits per-block expressions **inline** — a
 `signal_gain(2)` becomes `y = 2 * u;` literally, with no dispatch
 table at runtime.
 
-The mental rule:
+Two unit shapes:
 
-> `-emit-mflowlink-cpp <model.mflow>` = ship the simulator.
-> `-emit-{c,cpp,python,ts,sv} <model.mflow> --subsystem <name>` =
-> ship the *kernel* of one subsystem.
+> **Per-subsystem (Tier 1–6, ✓ shipped):**
+> `-emit-{c,cpp,python,ts,sv} <model.mflow> --subsystem <name>` —
+> emit ONE named subsystem as a kernel function / SV module.
+>
+> **Whole-diagram (Tier 7, in planning):**
+> `-emit-{c,cpp,python,ts} <model.mflow>` (no `--subsystem`) —
+> emit the WHOLE diagram (sources + subsystems + sinks + time
+> loop) as a standalone driver that runs to completion, plus an
+> optional `-emit-cocotb` mode that wraps the diagram around a
+> SystemVerilog DUT for Software-in-the-Loop (SIL) bring-up.
+>
+> Distinct from `-emit-mflowlink-cpp` (runtime-dispatch
+> simulator) because Tier 7's output has all block kernels
+> inlined — no dispatch tables, no runtime `MflowLinkSim`
+> dependency.
 
 Companion to:
 - [`mflow_link_roadmap.md`](mflow_link_roadmap.md) — §17.5 #12
@@ -30,37 +42,70 @@ Companion to:
 ## 1. Goals
 
 - Emit a single `signal_subsystem` as production code in
-  **Python / C / C++ / TypeScript / SystemVerilog**.
+  **Python / C / C++ / TypeScript / SystemVerilog** (Tier 1–6).
+- Emit the **whole diagram** as a standalone driver in
+  **Python / C / C++ / TypeScript** plus a **cocotb SIL harness**
+  that wraps the diagram around an SV DUT (Tier 7). No
+  whole-diagram SV — the SV emit lane stays per-subsystem because
+  a whole-diagram-as-one-SV-module isn't how hardware designs
+  partition.
 - Output is **self-contained**: no link against `MflowLinkSim`, no
   embedded `.mflow` JSON, no dispatch table at runtime.
 - Numerical equivalence against `matlabc -simulate` (at the
-  same sample rate) verified per target by CTest.
+  same sample rate) verified per target by CTest. For SIL: the
+  cocotb harness's host-side reference IS the per-subsystem
+  emit, so SIL pass ⇔ the SV DUT matches the host reference
+  within fi quantisation noise.
 
 ## 2. Non-goals
 
-- **Whole-model emit** — that's the existing `-emit-mflowlink-cpp`.
-  This lane operates strictly *per-subsystem*.
-- **AUTOSAR / fixed-step real-time wrappers** — Tier 6+ follow-up;
-  the kernel is what this lane emits.
+- **`-emit-mflowlink-cpp` replacement** — that lane stays the
+  way it is (runtime-dispatch interpreter, includes the full
+  block library). Tier 7 emits inline code per the chosen
+  diagram only; the two coexist.
+- **AUTOSAR / fixed-step real-time wrappers** — separate roadmap
+  follow-up; this lane emits the kernel(s) and the driver loop.
 - **Variable-size signals** — fixed at codegen time.
 - **`signal_from_workspace`** — workspace binding is host-side,
   can't AOT-compile.
 - **Stateflow / Simscape inside a subsystem** — separate roadmaps.
+- **HIL beyond cocotb** — Vivado / Quartus board bring-up,
+  real-time hardware harnesses are out of scope. cocotb is the
+  software-in-the-loop boundary.
 
 ## 3. Architecture — Path A: via MATLAB AST
 
 ```
+Per-subsystem (Tier 1–6, shipped):
 .mflow signal_flow
   └─ signal_subsystem "MyCtrl" with inports/outports
      └─ SignalFlowLowering             (existing)
         ↓
         MflowLinkModel (subsystem subgraph)
         ↓
-        SubsystemToMatlab              (NEW, lib/Flowchart/SubsystemToMatlab.cpp)
+        SubsystemToMatlab              (lib/Flowchart/SubsystemToMatlab.cpp)
         ↓
         matlab::Function AST (synthesised)
         ↓
         existing -emit-{c,cpp,python,typescript,systemverilog}
+
+Whole-diagram (Tier 7, in planning):
+.mflow signal_flow
+  └─ entry flow (no boundary ports required)
+     └─ DiagramToMatlab                (NEW, lib/Flowchart/DiagramToMatlab.cpp)
+        ├─ for each `signal_subsystem`:        reuse SubsystemToMatlab
+        ├─ for each source (sine/ramp/step):  inline `<out> = src(t)`
+        ├─ for each sink (scope/to_ws/disp):  inline `<log> = u`
+        └─ synthesise `main()`:
+             - time loop: for k in 0..N-1: t = k * Ts
+             - call sources, subsystems, sinks in topo order
+             - latch state across iterations
+             - dump CSV at end / write to stdout
+        ↓
+        matlab::TranslationUnit (Driver + helpers)
+        ↓
+        existing -emit-{c,cpp,python,typescript}
+        OR `-emit-cocotb` (NEW Python emit shape with cocotb scaffold)
 ```
 
 **Why Path A and not direct per-target templates:**
@@ -737,31 +782,267 @@ Tier-6c — HDL update (✓ shipped 2026-05-15):
   passes verilator lint, behavioural cosim (bit-exact vs Python),
   and yosys synth (60+ cells).
 
-**Total to "every demo target works": ~4–5 weeks.**
+### Tier 7 — Whole-diagram emit + Cocotb SIL  *(planning, ~2 weeks)*
+
+Lifts the Embedded Coder lane from per-subsystem to whole-
+`.mflow`-model. The output isn't another `signal_subsystem`
+kernel — it's the **driver**: sources + sinks + time loop +
+state plumbing wrapped around the per-subsystem kernels from
+Tier 1–6. Two flavours sharing the same DiagramToMatlab core:
+
+1. **Standalone simulator** (`-emit-{c,cpp,python,ts} <model.mflow>`,
+   no `--subsystem`) — runs the whole diagram on the host for
+   `settings.solver.stopTime` seconds, captures every
+   `signal_scope` / `signal_to_workspace` / `signal_display`
+   into per-sink CSV columns, writes the table to stdout or
+   `--output <path>`. Inline per-block emit (no runtime
+   dispatch); distinguishes from `-emit-mflowlink-cpp`'s
+   interpretive standalone in that there's no `MflowLinkSim`
+   link dependency and no embedded JSON.
+2. **Cocotb SIL harness** (`-emit-cocotb <model.mflow>
+   --dut <subsystem-name>`) — Python testbench that drives the
+   SV emit of `<subsystem-name>` from cocotb while running the
+   REST of the diagram host-side. Sources feed both the DUT
+   (Q16.16-encoded over `dut.<port>.value`) and the host-side
+   reference subsystem; per-tick cocotb checks DUT outputs
+   against the host reference within fi quantisation noise.
+   Sinks log to CSV for post-run plotting. The DUT subsystem's
+   SV is assumed pre-emitted via `-emit-sv --subsystem <name>`;
+   `-emit-cocotb` generates the wrapper around it.
+
+#### Tier 7a — DiagramToMatlab scaffold
+
+- New pass `lib/Flowchart/DiagramToMatlab.cpp`. Takes a
+  `FlowDoc` whose entry flow is a `program` (no boundary
+  inports/outports — sources and sinks are part of the
+  graph), produces a `TranslationUnit` carrying:
+  - One helper `Function` per nested `signal_subsystem` (via
+    `lowerSubsystemImpl` from Tier 6a)
+  - A top-level `simulate()` function (or `main()` for C/C++):
+    - Reads `Doc.Settings.Solver` for `stopTime`, `maxStep`
+    - Allocates per-block state slots (matches each subsystem's
+      `SubsystemMeta::StateArgNames`)
+    - Allocates per-sink log buffers (vector / list per scope
+      output)
+    - Time loop: `for k = 1 : N_TICKS`
+      - Compute `t = (k - 1) * Ts`
+      - Drive sources: `<out> = sine_at(t, freq, amp, phase)` etc.
+      - Call each subsystem's `step(...)` in topo order, threading
+        state args/returns
+      - Capture each sink's input into its log column
+    - Returns the log table (Python: dict-of-lists; C++: struct
+      of std::vector; C: float* arrays + length)
+
+#### Tier 7b — Source blocks
+
+Per-tick generators that compute `<out> = f(t)`:
+
+| Block kind | Generator |
+|---|---|
+| `signal_constant` | `c = <value>` (hoisted out of loop) |
+| `signal_sine` | `out = amp * sin(2*pi*freq*t + phase) + bias` |
+| `signal_ramp` | `out = slope * (t - start_time) + bias` |
+| `signal_step` | `out = (t >= start_time) ? final_value : initial_value` |
+| `signal_pulse_generator` | `out = (mod(t - phase, period) < duty * period) ? amp : 0` |
+| `signal_chirp` | `out = amp * sin(2*pi*(f0 + (f1-f0)*t/T)*t)` |
+| `signal_clock` | `out = t` |
+| `signal_repeating_sequence` | LUT-driven, `mod(t, period)` index |
+| `signal_random_number` | seeded `randn` / `rand` (deterministic per seed) |
+| `signal_from_workspace` | **rejected** (workspace = host runtime, not AOT-compilable) |
+
+Source emit lives next to the existing per-block lowering in
+`lib/Flowchart/SubsystemToMatlab.cpp` so the same dispatch table
+serves both per-subsystem and whole-diagram paths.
+
+#### Tier 7c — Sink blocks
+
+Per-tick recorders / passthroughs:
+
+| Block kind | Lowering |
+|---|---|
+| `signal_scope` | append `<input>` to a per-block log column; column name = `params.title \|\| block_id` |
+| `signal_to_workspace` | same, with `params.variableName` as column name; column gets stamped into a "workspace dict" returned alongside the scope log |
+| `signal_display` | print to stdout every tick (or every Nth tick per `params.decimation`) |
+| `signal_terminator` | drop (no-op, but still consumes the upstream so DCE doesn't strip producers) |
+
+#### Tier 7d — Cocotb emit
+
+`matlabc -emit-cocotb <model.mflow> --dut <subsystem>` emits a
+Python testbench against a pre-emitted SV DUT:
+
+```python
+# Generated by matlabc -emit-cocotb.  Do not edit.
+import cocotb, math, csv
+from cocotb.clock import Clock
+from cocotb.triggers import RisingEdge
+
+# Host-side reference subsystems (every block EXCEPT the DUT)
+class PlantRef:
+    def __init__(self): ...
+    def step(self, u): ...       # generated from Tier 1–6 emit
+
+def sine_src(t):                  # generated from Tier 7b
+    return AMP * math.sin(2*math.pi*FREQ*t + PHASE)
+
+# Q16.16 helpers
+_FRAC = 16
+def fi_enc(v): return int(round(v * (1 << _FRAC)))
+def fi_dec(x): return x / (1 << _FRAC)
+
+TOLERANCE = 1e-3
+TS = 0.05
+N_TICKS = 200
+
+@cocotb.test()
+async def sil(dut):
+    cocotb.start_soon(Clock(dut.clk, 10, units="ns").start())
+    dut.rst_n.value = 0; dut.reset.value = 1
+    await RisingEdge(dut.clk); await RisingEdge(dut.clk)
+    dut.rst_n.value = 1; dut.reset.value = 0
+
+    ref = PlantRef()
+    log = []
+    for k in range(N_TICKS):
+        t = k * TS
+        u = sine_src(t)
+        dut.u1.value = fi_enc(u)
+        await RisingEdge(dut.clk)
+        dut_y = fi_dec(int(dut.y1.value.signed_integer))
+        ref_y = ref.step(u)
+        log.append((t, u, dut_y, ref_y, dut_y - ref_y))
+        assert abs(dut_y - ref_y) <= TOLERANCE, \
+            f"tick {k}: dut={dut_y} ref={ref_y}"
+
+    with open("sil_log.csv", "w") as f:
+        csv.writer(f).writerows(
+            [("t", "u", "dut_y", "ref_y", "err")] + log)
+```
+
+Design notes:
+
+- The DUT is wired by **port name**; cocotb's `dut.<name>.value`
+  matches the SV port list emitted by `-emit-sv --subsystem`.
+- Sources / other subsystems / sinks live on the host side. The
+  cocotb harness imports the same module the standalone Python
+  emit would produce (Tier 7a / 7b / 7c).
+- The DUT's input feed routes through `fi_enc` (host f64 →
+  Q16.16 raw int) and output routes through `fi_dec` (Q16.16
+  raw int → host f64).
+- Per-tick assertion enforces SIL pass/fail; tolerance comes
+  from the user via `--tolerance` (default 1e-3, matching the
+  per-subsystem cosim lane's Q16.16 quantisation noise band).
+- Sinks (scope / to_workspace) get a final CSV dump at
+  end-of-test for post-run plotting.
+
+#### Tier 7e — CLI surface
+
+```
+# Whole-diagram, standalone (new — no --subsystem)
+matlabc -emit-python  model.mflow > sim.py
+matlabc -emit-c       model.mflow > sim.c
+matlabc -emit-cpp     model.mflow > sim.cpp
+matlabc -emit-ts      model.mflow > sim.ts
+
+# Whole-diagram, cocotb harness
+matlabc -emit-cocotb  model.mflow --dut MyCtrl --output cocotb_tb.py
+
+Optional:
+  --target-rate <Ts>       # base sample rate (overrides settings.solver.maxStep)
+  --ticks <N>              # explicit tick count (overrides stopTime / Ts)
+  --tolerance <t>          # cocotb assertion tolerance (default 1e-3)
+  --csv <path>             # write sink log to <path> instead of stdout
+  --decimation <N>         # log every N-th tick (default 1)
+```
+
+#### Tier 7 — Demos
+
+| Fixture | Targets |
+|---|---|
+| `whole_pid_loop.mflow` | sine source → PID controller → 1st-order plant → scope. Stand-alone Python / C / C++ / TS emits run for `stopTime`, dump CSV. Plot-friendly. |
+| `cocotb_pid_sil.mflow` | same model, with the `PID` block tagged as DUT. Cocotb harness drives the SV-emitted `PID` against the host-side reference and asserts SIL match within Q16.16 noise. |
+| `multirate_scope.mflow` | fast 1 kHz sensor → slow 200 Hz controller → scope. Verifies Tier 6c multirate hooks through the time loop correctly. |
+
+#### Tier 7 — CTest lanes
+
+- `flowchart-emit-diagram-python` / `-c` / `-cpp` / `-ts` —
+  whole-diagram emit + run + diff against `matlabc -simulate`'s
+  CSV log (same-rate, fixed-step comparison).
+- `flowchart-emit-diagram-cocotb` — gated under the existing
+  `MATLAB_LLVM_WITH_EMIT_SUBSYSTEM_SV_COSIM` flag (already opts
+  into Verilator). Generates the cocotb harness, compiles the
+  DUT via Verilator, runs `python3 cocotb_tb.py`, asserts the
+  SIL log's per-tick error stays under tolerance.
+
+#### Tier 7 — Carve-outs
+
+- **No whole-diagram SV emit.** A whole `.mflow` model is bigger
+  than what one SV module wants to be. The SV side stays
+  per-subsystem; whole-diagram simulation lives on the host.
+- **No multi-DUT cocotb.** Initial version accepts ONE `--dut`
+  subsystem at a time. Multi-DUT (e.g. host drives two SV
+  modules in lockstep) is a follow-up.
+- **No clock-domain mismatch.** The cocotb harness assumes the
+  DUT runs at the same `Ts` as the host loop. Multi-clock SIL
+  (DUT at 100 MHz, host loop at 1 kHz) is out of scope —
+  matches Tier 5's "single clk + rst" constraint.
+
+**Total Tier 1–7 to "whole-diagram SIL works": ~5–6 weeks
+(Tier 1–6 shipped; Tier 7 adds ~2 weeks).**
 
 ## 11. Demo coverage
 
-Under `examples/embedded_coder/`:
+Under `examples/mflowlink/coder/`:
 
 | Fixture | Exercises |
 |---|---|
 | `stateless_mixer.mflow` | Tier 1–2 — pure scalar fan-in/fan-out, no state |
+| `comparator_logic.mflow` / `threshold_switch.mflow` / `math_fns.mflow` | Tier 1 — booleans, switches, math fn library |
 | `discrete_pid.mflow` | Tier 3 — Unit Delay + discrete integrator state |
-| `continuous_lowpass.mflow` | Tier 4 — Backward Euler discretization |
+| `unit_delay.mflow` / `tapped_delay.mflow` / `transport_delay.mflow` | Tier 3 — single + multi-tap delays |
+| `continuous_lowpass.mflow` / `tf_lowpass.mflow` | Tier 4 / 5g — continuous TF + Forward Euler discretisation |
+| `tf_2nd_order.mflow` / `zp_plant.mflow` / `ss_plant.mflow` | Tier 5h — N-th order TF / ZP / SS realisations |
+| `mimo_state_space.mflow` / `mimo_tustin.mflow` | Tier 5i / 5l — MIMO + bilinear discretisation |
 | `fir_4tap.mflow` | Tier 5 — synth-clean SV with Verilator cross-check |
-| `nested_controller.mflow` | Tier 6 — outer subsystem calls inner subsystem |
+| `scaled_sum_sv.mflow` / `matlab_fcn_sv.mflow` | Tier 5 / 6b — SV emit + user MATLAB body |
+| `nested_pid_filter.mflow` | Tier 6a — outer subsystem calls inner subsystem |
+| `multirate_filters.mflow` | Tier 6c — fast + slow rate domains under one outer |
 
 Each fixture doubles as a CTest fixture under
 `test/Flowchart/EmitSubsystem/`.
 
+Tier 7 (planned) adds whole-diagram fixtures under the same
+directory tree:
+
+| Fixture | Exercises |
+|---|---|
+| `whole_pid_loop.mflow` | Tier 7a — sine → PID → plant → scope; whole-diagram standalone emit |
+| `cocotb_pid_sil.mflow` | Tier 7d — PID subsystem as cocotb DUT, plant on host side |
+| `multirate_scope.mflow` | Tier 7 + 6c — multi-rate diagram with logged scopes |
+
 ## 12. CTest lanes
 
-- `flowchart-emit-subsystem-python` — Python execution diff vs `-simulate`
-- `flowchart-emit-subsystem-c` — clang-compile + run + diff
-- `flowchart-emit-subsystem-cpp` — clang++-compile + run + diff
-- `flowchart-emit-subsystem-ts` — `tsc` + node run + diff
-- `flowchart-emit-subsystem-sv` — Verilator lint + simulation diff
-  (gated on `MATLAB_LLVM_EMIT_SUBSYSTEM_SV_COSIM=ON`)
+Per-subsystem (Tier 1–6, ✓ shipped):
+
+- `flowchart-emit-subsystem-tests` — structural + Python /
+  C++ class smoke
+- `flowchart-emit-subsystem-sv-verilator` — `verilator
+  --lint-only` over every SV-capable fixture
+- `flowchart-emit-subsystem-sv-cosim` — Verilator + Python
+  behavioural diff per tick
+- `flowchart-emit-subsystem-sv-yosys` — yosys generic synth
+  + per-fixture gate-count floor sentinel
+
+Whole-diagram (Tier 7, planned):
+
+- `flowchart-emit-diagram-python` — whole-diagram Python emit
+  + run + diff against `matlabc -simulate`'s CSV log
+- `flowchart-emit-diagram-c` / `-cpp` / `-ts` — same per
+  language (clang / clang++ / tsc + node)
+- `flowchart-emit-diagram-cocotb` — gated under the existing
+  `MATLAB_LLVM_WITH_EMIT_SUBSYSTEM_SV_COSIM` flag. Generates
+  the cocotb harness, compiles the DUT via Verilator, runs
+  `cocotb-test` or `make sim`, asserts the per-tick SIL log
+  stays under tolerance.
 
 Each lane re-uses the `compare CSV row-by-row` helper from
 `test/Flowchart/SimulateRun/run_tests.sh`.
@@ -780,17 +1061,25 @@ Each lane re-uses the `compare CSV row-by-row` helper from
 
 ## 14. Carve-outs (deliberately not in scope)
 
-- **Whole-model emit** — already covered by
-  `-emit-mflowlink-cpp` (interpretive standalone)
+- **`-emit-mflowlink-cpp` replacement** — that lane stays (runtime-
+  dispatch interpreter); Tier 7 emits inline + per-model
 - **Variable-size signals** — fixed at codegen time
 - **`signal_from_workspace`** — workspace binding is host-side,
   can't AOT-compile
 - **AUTOSAR / fixed-step real-time wrappers** — §17.5 #12
-  follow-up; this lane just emits the kernel
+  follow-up; this lane emits kernels + driver loops, not the
+  RT shell
 - **Stateflow / Simscape inside a subsystem** — separate
   roadmaps (§17.5 #10 / #11)
 - **Multi-clock HDL** — single `clk` + `rst` only for MVP
 - **HDL ROM / RAM block inference** — Tier 6+ extension
+- **Whole-diagram SV emit** — Tier 7 only emits whole-diagram
+  for software targets. The SV lane stays per-subsystem.
+- **HIL beyond cocotb** — Vivado / Quartus board bring-up, real
+  hardware harnesses, real-time hardware-in-the-loop are out of
+  scope. cocotb is the SIL boundary.
+- **Multi-DUT cocotb** — initial Tier 7 accepts one `--dut`
+  subsystem per harness.
 
 ## 15. Open questions
 
@@ -808,6 +1097,32 @@ Each lane re-uses the `compare CSV row-by-row` helper from
   a single `--fi-default Q15.16` + per-port overrides? Default:
   per-port flag, repeatable.
 
+Tier 7 open questions:
+
+- **Cocotb framework choice**: vanilla cocotb (`cocotb-test` /
+  `make sim`) vs cocotb-coverage vs verilator-cocotb shim? The
+  emitted harness should run under all three; we'll target
+  cocotb-test as the default CTest runner because it integrates
+  cleanly with pytest / CMake.
+- **Scope / to_workspace output format**: CSV (default — easy
+  to plot with pandas / matplotlib) vs HDF5 (compact, typed) vs
+  MATLAB `.mat` (round-trippable). Default: CSV with a single
+  header row; HDF5 / .mat as opt-in later.
+- **SIL tolerance per port**: a single `--tolerance` flag vs
+  per-port overrides. Default: single tolerance; per-port can
+  reuse the `--fi-spec` repeatable form.
+- **Source block determinism**: `signal_random_number` needs a
+  seed for repeatable SIL. Default: stamp `params.seed`
+  (defaults to 42 when missing). Cocotb harness threads the
+  seed into both the DUT testbench input and the host-side
+  reference so they stay in lockstep.
+- **Multi-rate cocotb**: when the diagram has multiple rate
+  domains and the DUT subsystem itself is multi-rate, the
+  cocotb harness needs to drive the DUT at the BASE rate
+  (every clk edge) and let the DUT's internal counters gate.
+  Matches the Tier 6c HDL multirate emit. Open: which rate
+  does the host loop run at — base or per-block? Default: base.
+
 ---
 
 ## 16. Reference — relationship to the bigger §17.5 #12
@@ -819,10 +1134,17 @@ Each lane re-uses the `compare CSV row-by-row` helper from
 > target-specific optimisations, AUTOSAR, fixed-step real-time
 > hooks. Adjacent to but separate from the simulation surface.
 
-This roadmap covers the **kernel** half of #12 — the per-
-subsystem AOT-compiled code. The **wrapper** half (AUTOSAR task
-binding, fixed-step task scheduling, PIL bring-up scaffolding,
-target-specific cycle-accurate optimisation) is a follow-up that
-*consumes* this lane's emitted kernels.
+This roadmap covers the **kernel** (Tier 1–6) and **whole-
+diagram driver + cocotb SIL** (Tier 7) halves of #12 — the
+per-subsystem AOT-compiled code, the surrounding host-side
+driver loop, and the SIL harness wrapping the host loop around
+an SV DUT.
 
-Together the two halves close §17.5 #12.
+The remaining **production-RT** half (AUTOSAR task binding,
+fixed-step task scheduling on RT-Linux / FreeRTOS, PIL board
+bring-up scaffolding, target-specific cycle-accurate
+optimisation, real hardware-in-the-loop) is a follow-up that
+*consumes* this lane's emitted kernels and SIL infrastructure.
+
+Together the three pieces (kernel ✓, driver + cocotb SIL
+planned, RT follow-up) close §17.5 #12.
