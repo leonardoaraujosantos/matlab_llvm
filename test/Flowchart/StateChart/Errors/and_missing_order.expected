@@ -1,0 +1,3 @@
+StateChart/Errors/and_missing_order.mflow:16:9: error: AND-region child state "k2" missing data.params.executionOrder
+          { "id": "k2", "parent": "p", "kind": "state",
+          ^

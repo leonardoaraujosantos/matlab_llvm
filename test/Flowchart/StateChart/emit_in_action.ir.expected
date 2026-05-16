@@ -1,0 +1,15 @@
+ChartModel entry=watchdog charts=1
+Chart watchdog sig=()->(overheat) maxIter=1000
+  symbol.data name=overheat scope=output type=double initial=0
+  symbol.data name=warnings scope=local type=double initial=0
+  symbol.event name=tick trigger=rising
+  symbol.event name=fault trigger=rising
+  symbol.event name=shutdown trigger=rising
+  State normal decomp=leaf initial
+    .entry=overheat = 0; warnings = 0
+  State warned decomp=leaf
+    .entry=warnings = warnings + 1; emit('shutdown')
+  State halted decomp=leaf
+    .entry=overheat = 1
+  Transition t_norm_warn normal -> warned kind=outer priority=1 event=fault
+  Transition t_warn_halt warned -> halted kind=outer priority=1 event=shutdown

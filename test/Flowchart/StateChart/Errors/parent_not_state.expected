@@ -1,0 +1,3 @@
+StateChart/Errors/parent_not_state.mflow:12:34: error: node "kid" parent "j" must be a state node (got kind "junction_connective")
+          { "id": "kid", "parent": "j", "kind": "state",
+                                   ^

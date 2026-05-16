@@ -1,0 +1,11 @@
+% mStateflow -simulate trace for chart "air_temp_controller"
+[superStepBegin iter=0]
++enter controller
++enter temp_loop
++enter idle_temp
++enter blower_loop
++enter blower_off
+[superStepEnd iter=0 quiescent=true]
+[superStepBegin iter=0]
+[superStepEnd iter=1 quiescent=true]
+active@end: controller temp_loop idle_temp blower_loop blower_off

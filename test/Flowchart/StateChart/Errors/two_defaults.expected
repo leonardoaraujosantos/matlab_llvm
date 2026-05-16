@@ -1,0 +1,3 @@
+StateChart/Errors/two_defaults.mflow:10:9: error: OR region under "<root>" has 2 default transitions; expected at most one
+          { "id": "d1", "kind": "junction_default",
+          ^

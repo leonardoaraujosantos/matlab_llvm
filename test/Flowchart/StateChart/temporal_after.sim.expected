@@ -1,0 +1,7 @@
+% mStateflow -simulate trace for chart "blink"
+[superStepBegin iter=0]
++enter off
+[superStepEnd iter=0 quiescent=true]
+[superStepBegin iter=0]
+[superStepEnd iter=1 quiescent=true]
+active@end: off

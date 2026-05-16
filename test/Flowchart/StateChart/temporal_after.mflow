@@ -1,0 +1,48 @@
+{
+  "schema": "matforge.flowchart",
+  "version": "0.2.0",
+  "entry": "blink",
+  "settings": { "kind": "state_chart" },
+  "flows": [
+    {
+      "id": "flow_blink",
+      "kind": "program",
+      "name": "blink",
+      "signature": { "inputs": [], "outputs": ["led"] },
+      "symbols": {
+        "data": [
+          { "name": "led", "scope": "output", "type": "double", "initial": "0" }
+        ],
+        "events": [
+          { "name": "tick", "trigger": "rising" }
+        ]
+      },
+      "nodes": [
+        { "id": "off", "kind": "state",
+          "data": {
+            "entryAction": "led = 0",
+            "params": { "decomposition": "leaf", "isInitial": "true" }
+          },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "on", "kind": "state",
+          "data": {
+            "entryAction": "led = 1",
+            "params": { "decomposition": "leaf" }
+          },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } }
+      ],
+      "edges": [
+        { "id": "t_off_on", "kind": "transition",
+          "label": "[after(3, tick)]",
+          "from": {"node": "off", "port": "out"},
+          "to":   {"node": "on", "port": "in"},
+          "data": { "params": { "priority": "1" } } },
+        { "id": "t_on_off", "kind": "transition",
+          "label": "[after(2, tick)]",
+          "from": {"node": "on", "port": "out"},
+          "to":   {"node": "off", "port": "in"},
+          "data": { "params": { "priority": "1" } } }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,85 @@
+{
+  "schema": "matforge.flowchart",
+  "version": "0.2.0",
+  "entry": "transmission",
+  "settings": { "kind": "state_chart" },
+  "flows": [
+    {
+      "id": "flow_transmission",
+      "kind": "program",
+      "name": "transmission",
+      "signature": {
+        "inputs":  ["speed", "throttle"],
+        "outputs": ["gear"]
+      },
+      "symbols": {
+        "data": [
+          { "name": "speed",    "scope": "input",  "type": "double", "units": "mph" },
+          { "name": "throttle", "scope": "input",  "type": "double" },
+          { "name": "gear",     "scope": "output", "type": "double", "initial": "1" }
+        ],
+        "events": [
+          { "name": "step", "trigger": "rising" }
+        ]
+      },
+      "nodes": [
+        { "id": "first", "kind": "state",
+          "data": {
+            "entryAction": "gear = 1",
+            "params": { "decomposition": "leaf", "isInitial": "true" }
+          },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "second", "kind": "state",
+          "data": {
+            "entryAction": "gear = 2",
+            "params": { "decomposition": "leaf" }
+          },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "third", "kind": "state",
+          "data": {
+            "entryAction": "gear = 3",
+            "params": { "decomposition": "leaf" }
+          },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "fourth", "kind": "state",
+          "data": {
+            "entryAction": "gear = 4",
+            "params": { "decomposition": "leaf" }
+          },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } }
+      ],
+      "edges": [
+        { "id": "t_up12", "kind": "transition",
+          "label": "step[speed > 25 && throttle > 0.3]",
+          "from": {"node": "first", "port": "out"},
+          "to":   {"node": "second", "port": "in"},
+          "data": { "params": { "priority": "1" } } },
+        { "id": "t_dn21", "kind": "transition",
+          "label": "step[speed < 15]",
+          "from": {"node": "second", "port": "out"},
+          "to":   {"node": "first", "port": "in"},
+          "data": { "params": { "priority": "2" } } },
+        { "id": "t_up23", "kind": "transition",
+          "label": "step[speed > 45 && throttle > 0.4]",
+          "from": {"node": "second", "port": "out"},
+          "to":   {"node": "third", "port": "in"},
+          "data": { "params": { "priority": "1" } } },
+        { "id": "t_dn32", "kind": "transition",
+          "label": "step[speed < 35]",
+          "from": {"node": "third", "port": "out"},
+          "to":   {"node": "second", "port": "in"},
+          "data": { "params": { "priority": "2" } } },
+        { "id": "t_up34", "kind": "transition",
+          "label": "step[speed > 65 && throttle > 0.5]",
+          "from": {"node": "third", "port": "out"},
+          "to":   {"node": "fourth", "port": "in"},
+          "data": { "params": { "priority": "1" } } },
+        { "id": "t_dn43", "kind": "transition",
+          "label": "step[speed < 55]",
+          "from": {"node": "fourth", "port": "out"},
+          "to":   {"node": "third", "port": "in"},
+          "data": { "params": { "priority": "1" } } }
+      ]
+    }
+  ]
+}

@@ -22,21 +22,109 @@ mflowLink §2); this is that tier.
 
 ## Status (2026-05-16)
 
-**Nothing is shipped.** This document is a green-field plan. The
-existing matlab_llvm has *zero* state-chart awareness:
+**Compiler / Debugger / DAP / REPL side: shipped end-to-end. UI/UX
+side: not started.** The chart authoring + live-debug surface is
+ready for the IDE team to consume — chart `.mflow` files load,
+compile to readable MATLAB, simulate with deterministic event
+traces, and stream chart-namespaced DAP events with full breakpoint
++ introspection support.
 
-- the `.mflow` loader (`lib/Flowchart/Loader.cpp`) only switches between
-  `control_flow` and `signal_flow` kinds,
-- there is no chart IR, no chart runtime, no chart DAP adapter,
-- the IDE's flowchart canvas has no hierarchy primitives (every
-  `FlowNode` sits at chart root today),
-- `FlowNode` has no `parent` field,
-- `EdgeKind` only knows `.control` and `.data`.
+### What's shipped (matlab_llvm side)
+
+- **Tier 0 — Schema + Loader** *(complete)*:
+  `lib/Flowchart/Loader.cpp` accepts `settings.kind == "state_chart"`,
+  parses every new field (`FlowNode.parent`, `ui.size`,
+  `data.params.*`, `data.onEventActions`, `Flow.symbols`, transition
+  `data.params` + label), validates parent resolution / parent-cycle /
+  AND-execution-order / default-transition multiplicity. Schema bumped
+  to 0.2.0; existing control-flow + signal-flow fixtures stay
+  byte-stable.
+- **Tier 4a — Chart IR**: `include/matlab/StateChart/StateChartIR.h`
+  + `lib/StateChart/StateChartIR.cpp`. `Chart` / `ChartState` /
+  `ChartJunction` / `Transition` / `ChartFunction` with four-field
+  `TransitionLabel` parser. Edit-time lint: undefined-symbol warnings
+  on every action / guard / cond / trans body.
+- **Tier 4b — Lowering**: `lib/StateChart/Lowering.cpp`. Emits
+  `<chart>_init` + `<chart>_tick(state, inputs, events) → (outputs,
+  state)` with super-step fixed-point loop, `kMaxIterations`
+  saturation warning, on-event handlers, history-junction-aware
+  entry, inner transitions, super-transitions across hierarchy
+  (LCA-relative exit + entry chains), junction chains (connective /
+  history / entry / exit / default), temporal operators (`after` /
+  `before` / `at` / `every` — tick / sec aliased), `emit('X')`
+  rewriting, `in(stateId)` via auto-emitted `<chart>_in_active_`
+  helper, identifier-aware action-source rewriter that prefixes chart
+  symbols with `state.locals.*` / `state.events.*`.
+- **Tier 4c — Runtime**: `runtime/runtime_mstateflow.cpp` (snapshot
+  ring, DAP event sinks, bounded FIFO event queue with
+  configurable depth, instrumentation hooks) +
+  `runtime/mstateflow_helpers.m` (emit, save_op / restore_op,
+  active, push_history / pop_history, auto_snap).
+- **Tier 4d — CLI**: `-simulate` drives a deterministic trace through
+  the chart interpreter; `-emit-matlab` emits the compilable .m;
+  `-dump-chart` dumps the resolved IR; `-simulate --sim-dap` boots
+  the chart DAP server.
+- **Tier 4e — DAP namespace `stateChart/*`**: full request set
+  (`emit`, `setLocal`, `getActive`, `getLocals`, `stepSuperStep`,
+  `stepTransition`, `setStateBreakpoints`, `setTransitionBreakpoints`,
+  `setSymbolBreakpoints`, `saveOperatingPoint`,
+  `restoreOperatingPoint`, `listStates`, `listTransitions`,
+  `listJunctions`, `listEvents`, `listSymbols`, `listSnapshots`) +
+  events (`superStepBegin` / `superStepEnd` / `stateEnter` /
+  `stateExit` / `transitionFired` / `eventBroadcast` /
+  `maxIterations`) + `stopped` on breakpoint hits.
+- **Tier 4f — Canonical fixtures**: all six §6.8 examples ship
+  (`air_temp_controller`, `hotel_check_in`, `traffic_light_moore`,
+  `vending_machine_mealy` as `flat_vending`, `bang_bang_temp`,
+  `automatic_transmission`) + four extras (`nested_heater`,
+  `on_event_handlers`, `emit_in_action`, `temporal_after`). Each
+  fixture has four goldens locked in (flow / chart-IR / lowered-MATLAB
+  / interpreter-trace). 55/55 tests passing.
+- **Tier 6 — Snapshots + step-back** *(compiler side)*: named
+  operating points via `saveOperatingPoint` / `restoreOperatingPoint`;
+  auto-snapshot per super-step into a capped MATLAB-side ring (gated
+  by `state.auto_snapshot`); C-side snapshot ring with name / size /
+  copy introspection.
+- **Tier 8 — Chart functions** *(partial)*: `chart_fn_matlab` nodes
+  emit as sibling MATLAB functions callable from action bodies;
+  graphical / truth-table call-sites still warn-and-pass.
+- **Tier 9 — Codegen lanes** *(partial)*: `-emit-matlab` and
+  `-emit-mir` work. `-emit-c` / `-emit-cpp` / `-emit-llvm` blocked
+  on the matlabc emit-c gap around `matlab.alloc` of dynamic struct
+  slots — not chart-specific.
+- **Bonus — Chart interpreter**: `lib/StateChart/Interpreter.{h,cpp}`.
+  In-process C++ super-step simulator with full backtracking junction
+  resolver, history junctions, super-transitions, temporal counters,
+  symbol-change watchpoints, and operating-point snapshot/restore.
+  Hosts the live DAP simulation.
+- **REPL**: `runtime/stateflow_classdefs.m` ships the `stateChart`
+  classdef wrapper (`tick` / `step` / `emit` / `active` / `save_op` /
+  `restore_op` / `reset`) for handle-style use after a user runs
+  `matlabc -emit-matlab <chart>.mflow`.
+
+### What's NOT shipped
+
+- Everything in §5 / Tiers 1–3 / 5 / 7 / 10 (the UI/UX track).
+- Within Tier 8: graphical-function (control-flow sub-Flow) inlining
+  + truth-table semantics (over/underspec diagnostic).
+- Within Tier 9: `-emit-c` / `-emit-cpp` / `-emit-llvm` — gated by
+  the matlabc emit-c lane growing `matlab.alloc` support for
+  `any`-typed slots that the chart's `struct()` calls produce.
+- `temporalCount(event)` and `duration(cond)` — the four scalar
+  temporal operators are shipped; these counter-style variants are
+  Tier-N+.
+- Connective-junction backtracking in the **lowering** path —
+  interpreter does it; the lowered MATLAB commits greedily on the
+  first matching guard.
+- REPL auto-load of `.mflow` (`loadStateChart('foo.mflow')`) — the
+  workflow today is `matlabc -emit-matlab foo.mflow > foo.m` then
+  source it.
 
 The plan below is organised so Tier 0 (additive schema + palette stubs)
 lands first as a tiny PR; everything downstream forks into two parallel
 tracks — **UI/UX** (§5) and **Compiler / runtime** (§6) — that converge
-at Tier 4 for live debug.
+at Tier 4 for live debug. The Compiler / runtime track is complete;
+the UI/UX track is the next slice.
 
 ## 1. North-star UX
 
@@ -427,22 +515,23 @@ Each tier is a shippable slice. Tracks: **[UI/UX]** = IDE-side,
 **[Compiler]** = matlab_llvm-side, **[Both]** = needs coordinated PR.
 Effort tags: **S** (≤ 1 wk), **M** (1–3 wk), **L** (3–6 wk).
 
-### Tier 0 — Foundations *(Both, S)*
+### Tier 0 — Foundations *(Both, S)* — **Compiler ✅ · UI/UX ⬜**
 
 **Goal**: minimum schema + routing so chart `.mflow` files load and
 save without breaking existing dialects.
 
-- **[Compiler]** `SchemaKind.state_chart` accepted by loader; new
+- ✅ **[Compiler]** `SchemaKind.state_chart` accepted by loader; new
   optional fields parse (`FlowNode.parent`, `ui.size`, `data.params.*`,
-  `Flow.symbols`); validation rejects malformed hierarchies.
-- **[UI/UX]** `SchemaKind` mirror in the IDE codable layer; new node-
-  kind stubs (palette icons drawn, no canvas behaviour yet).
-- **[UI/UX]** "New → State Chart…" file template; Project Explorer
+  `data.onEventActions`, `Flow.symbols`, transition `data.params` +
+  label); validation rejects malformed hierarchies.
+- ⬜ **[UI/UX]** `SchemaKind` mirror in the IDE codable layer; new
+  node-kind stubs (palette icons drawn, no canvas behaviour yet).
+- ⬜ **[UI/UX]** "New → State Chart…" file template; Project Explorer
   badge; routing to a stub `StateChartWindow` (empty canvas).
-- **[Both]** Schema bump 0.1.0 → 0.2.0; back-compat tests for existing
+- ✅ **[Both]** Schema bump 0.1.0 → 0.2.0; back-compat tests for existing
   control-flow and signal-flow fixtures.
 
-### Tier 1 — Flat authoring canvas *(UI/UX, M)*
+### Tier 1 — Flat authoring canvas *(UI/UX, M)* — **⬜ not started**
 
 **Goal**: visual Stateflow-equivalent for a flat (non-hierarchical)
 chart. No simulation yet.
@@ -461,7 +550,7 @@ chart. No simulation yet.
 **Verifies**: the flat "Vending Machine Mealy" example (§5-7) is fully
 authorable.
 
-### Tier 2 — Hierarchy + decomposition *(UI/UX, M)*
+### Tier 2 — Hierarchy + decomposition *(UI/UX, M)* — **⬜ not started**
 
 **Goal**: full Stateflow visual parity for nested charts.
 
@@ -479,7 +568,7 @@ authorable.
 **Verifies**: "Air Temperature Controller" (§1-31) and "Hotel Check-In"
 (§1-9) fully authorable.
 
-### Tier 3 — Symbols + action-language editor *(UI/UX, M)*
+### Tier 3 — Symbols + action-language editor *(UI/UX, M)* — **⬜ not started**
 
 **Goal**: production-grade action authoring with autocomplete.
 
@@ -492,28 +581,44 @@ authorable.
 **Verifies**: the bang-bang controller's actions (§14-62) author with
 the same editing quality the existing `.m` editor provides.
 
-### Tier 4 — Chart compiler + runtime *(Compiler, L)*
+### Tier 4 — Chart compiler + runtime *(Compiler, L)* — **✅ complete**
 
 **The single largest chunk; gates everything below.**
 
-- `lib/StateChart/StateChartIR.{h,cpp}` — chart, region, state,
-  transition, junction, symbol tables.
-- `lib/StateChart/Lowering.cpp` — chart IR → matlabc IR; super-step
-  fixed-point loop with `kMaxIterations`; temporal/`in()` operators
-  implemented.
-- `lib/Runtime/runtime_mstateflow.cpp` — event queue, broadcast
-  helper, active-state bitset, snapshot ring shared with mflowLink.
-- CLI: `-simulate` detects `state_chart`; `-emit-matlab` emits a
-  readable equivalent.
-- DAP adapter: chart-namespaced events and requests (§6.7).
-- Golden-file fixtures for the canonical examples in §6.8.
+- ✅ `lib/StateChart/StateChartIR.{h,cpp}` — chart, region, state,
+  transition, junction, symbol tables, chart functions.
+- ✅ `lib/StateChart/Lowering.cpp` — chart IR → matlabc IR; super-step
+  fixed-point loop with `kMaxIterations` + saturation warning;
+  temporal operators (`after` / `before` / `at` / `every`) + `in()`
+  via auto-emitted helper; history junctions; inner + super
+  transitions; junction chains; `emit('X')` rewriting.
+- ✅ `runtime/runtime_mstateflow.cpp` — bounded FIFO event queue,
+  broadcast helpers, snapshot ring with name introspection, DAP
+  event sinks, C ABI bookends.
+- ✅ `lib/StateChart/Interpreter.{h,cpp}` — bonus C++ super-step
+  simulator with full junction backtracking, history, temporal
+  counters, symbol watchpoints, snapshot/restore.
+- ✅ CLI: `-simulate` runs the interpreter trace; `-emit-matlab`
+  emits compilable MATLAB; `-dump-chart` dumps the IR.
+- ✅ DAP adapter: chart-namespaced events + requests + introspection
+  + breakpoints (state / transition / symbol-change) (§6.7).
+- ✅ Golden-file fixtures for all six canonical examples in §6.8 plus
+  four extras; 55/55 tests green.
 
 **Verifies**: command-line simulation of all six reference examples
-produces deterministic, reference-matching traces.
+produces deterministic, golden-locked traces. ✅
 
-### Tier 5 — Live debug surface *(UI/UX, M)*
+### Tier 5 — Live debug surface *(UI/UX, M)* — **⬜ not started (DAP surface ready)**
 
-Builds directly on Tier 4's DAP events.
+Builds directly on Tier 4's DAP events. Backend stream is fully
+wired — `stateEnter` / `stateExit` / `transitionFired` /
+`eventBroadcast` / `superStepBegin` / `superStepEnd` /
+`maxIterations` / `stopped` all fire from the live interpreter; the
+introspection requests (`listStates` / `listTransitions` /
+`listJunctions` / `listEvents` / `listSymbols` / `listSnapshots` /
+`getActive` / `getLocals`) populate every pane without re-parsing
+the FlowDoc; breakpoints (state-enter / state-exit / transition /
+symbol-change) pause mid-action.
 
 - Active-state animation: blue pulse on enter, amber flash on firing
   transition. Speed controlled by transport-row slider.
@@ -529,19 +634,22 @@ Builds directly on Tier 4's DAP events.
 **Verifies**: pausing on a breakpoint surfaces the same active-state
 set the runtime believes is active; the canvas pulses correctly.
 
-### Tier 6 — Snapshots + step-back *(Both, S)*
+### Tier 6 — Snapshots + step-back *(Both, S)* — **Compiler ✅ · UI/UX ⬜**
 
 Reuses mflowLink's snapshot ring buffer.
 
-- **[Compiler]** Chart-runtime emits a snapshot every super-step
-  boundary; DAP request `stateChart/saveOperatingPoint` named-tags one.
-- **[UI/UX]** Transport row gains "Save snapshot" / "Restore snapshot";
+- ✅ **[Compiler]** Chart-runtime auto-snapshots every super-step
+  boundary (gated by `state.auto_snapshot`); DAP requests
+  `stateChart/saveOperatingPoint` / `restoreOperatingPoint` named-tag
+  + restore via the runtime ring; `listSnapshots` enumerates names +
+  sizes.
+- ⬜ **[UI/UX]** Transport row gains "Save snapshot" / "Restore snapshot";
   named snapshots in a side panel; "Start sim from this point" sets the
   next-run's initial active-state vector.
 
 **Verifies**: parity with §18 of the guide (Operating Points).
 
-### Tier 7 — Tabular alternatives *(UI/UX, M)*
+### Tier 7 — Tabular alternatives *(UI/UX, M)* — **⬜ not started**
 
 - State Transition Table editor: docked grid; two-way sync with canvas.
 - Truth Table editor: condition × decision grid + action row;
@@ -551,31 +659,38 @@ Reuses mflowLink's snapshot ring buffer.
 **Verifies**: the bang-bang controller authored as an STT (§16-16)
 produces an identical simulation trace to its canvas equivalent.
 
-### Tier 8 — Functions + reuse *(UI/UX + Compiler, M)*
+### Tier 8 — Functions + reuse *(UI/UX + Compiler, M)* — **Compiler 🟧 partial · UI/UX ⬜**
 
-- **[UI/UX]** Graphical / MATLAB / Truth Table function call-site
+- ⬜ **[UI/UX]** Graphical / MATLAB / Truth Table function call-site
   nodes; navigate-into-sub-`Flow` machinery (reused from
   `signal_subsystem`).
-- **[Compiler]** Function inlining at chart-lowering time; recursion
-  detection.
+- 🟧 **[Compiler]** `chart_fn_matlab` lowers to sibling MATLAB
+  functions callable from action bodies. `chart_fn_graphical`
+  (sub-Flow inlining) + `chart_fn_truth_table` (over/underspec
+  diagnostic) still warn-and-pass; recursion detection deferred.
 
-### Tier 9 — Codegen lanes *(Compiler, S)*
+### Tier 9 — Codegen lanes *(Compiler, S)* — **🟧 partial**
 
 Mostly free once the chart IR lowers to the existing matlabc IR. One
 fixture test per lane per canonical example.
 
-- `-emit-c`, `-emit-cpp`, `-emit-llvm`, `-emit-mlir`.
+- ✅ `-emit-matlab`, `-emit-mir` work for charts unchanged.
+- ⬜ `-emit-c` / `-emit-cpp` / `-emit-llvm` blocked on the matlabc
+  emit-c lane growing `matlab.alloc` support for `any`-typed slots
+  (the lowered chart's `struct()` calls create them). Not chart-
+  specific; lands when matlabc emit-c does.
 
-### Tier 10 — Polish *(UI/UX, S, scattered)*
+### Tier 10 — Polish *(UI/UX, S, scattered)* — **Compiler ✅ partial · UI/UX ⬜**
 
-- Pattern Wizard (debouncer / edge-detector / fault-handler templates).
-- TeX in annotations (parity with §6-24).
-- Chart-from-selection: refactor flat `if` / `function_definition`
+- ⬜ Pattern Wizard (debouncer / edge-detector / fault-handler templates).
+- ⬜ TeX in annotations (parity with §6-24).
+- ⬜ Chart-from-selection: refactor flat `if` / `function_definition`
   control-flow nodes into a chart.
-- Active-state output port — the chart publishes its current active
-  state as an enum output, mirroring §11-38. Useful for cross-chart
-  wiring inside an mflowLink signal-flow document.
-- Examples library shipped under `Examples/StateCharts/*.mflow`.
+- ✅ Active-state output port — `outputs.active_state_` mirrors the
+  live `state.regions` struct so an mflowLink signal-flow document
+  can wire a chart's active configuration into downstream blocks.
+- ✅ Examples library shipped under `test/Flowchart/StateChart/*.mflow`
+  (6 canonical + 4 extras).
 
 ### Tier N+ — Deferred
 
@@ -660,7 +775,14 @@ fixture test per lane per canonical example.
 
 ---
 
-**Suggested first PR**: Tier 0 alone — schema additions, file template,
-empty `StateChartWindow`. It unlocks parallel work on Tier 1 (canvas)
-IDE-side and on the matlab_llvm chart loader, both of which can
-progress independently until Tier 4 brings them together.
+**Backend status (matlab_llvm side, 2026-05-16)**: Tiers 0 / 4 / 6
+shipped end-to-end; Tier 8 + Tier 9 partial; Tier 10 active-state
+output port shipped. 55/55 chart fixtures green. DAP + introspection
++ breakpoints + interpreter all production-ready for the IDE team to
+consume.
+
+**Next slice (UI/UX side)**: Tier 0 IDE bits → Tier 1 (flat canvas)
+→ Tier 2 (hierarchy) → Tier 5 (live debug, which now has a real
+backend behind it). Tiers 1–5 can ship without any further compiler
+work; richer charts later may want the remaining backend follow-ons
+listed under "What's NOT shipped" in §Status.

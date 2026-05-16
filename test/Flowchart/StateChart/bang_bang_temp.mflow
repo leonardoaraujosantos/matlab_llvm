@@ -1,0 +1,54 @@
+{
+  "schema": "matforge.flowchart",
+  "version": "0.2.0",
+  "entry": "bang_bang",
+  "settings": { "kind": "state_chart" },
+  "flows": [
+    {
+      "id": "flow_bang_bang",
+      "kind": "program",
+      "name": "bang_bang",
+      "signature": {
+        "inputs":  ["temp", "setpoint"],
+        "outputs": ["heater"]
+      },
+      "symbols": {
+        "data": [
+          { "name": "temp",     "scope": "input",  "type": "double", "units": "C" },
+          { "name": "setpoint", "scope": "input",  "type": "double", "units": "C" },
+          { "name": "heater",   "scope": "output", "type": "double", "initial": "0" },
+          { "name": "delta",    "scope": "local",  "type": "double", "initial": "1.0" }
+        ],
+        "events": [
+          { "name": "tick", "trigger": "rising" }
+        ]
+      },
+      "nodes": [
+        { "id": "off", "kind": "state",
+          "data": {
+            "entryAction": "heater = 0",
+            "params": { "decomposition": "leaf", "isInitial": "true" }
+          },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "on", "kind": "state",
+          "data": {
+            "entryAction": "heater = 1",
+            "params": { "decomposition": "leaf" }
+          },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } }
+      ],
+      "edges": [
+        { "id": "t_off_on", "kind": "transition",
+          "label": "tick[temp <= setpoint - delta]",
+          "from": {"node": "off", "port": "out"},
+          "to":   {"node": "on", "port": "in"},
+          "data": { "params": { "priority": "1" } } },
+        { "id": "t_on_off", "kind": "transition",
+          "label": "tick[temp >= setpoint + delta]",
+          "from": {"node": "on", "port": "out"},
+          "to":   {"node": "off", "port": "in"},
+          "data": { "params": { "priority": "1" } } }
+      ]
+    }
+  ]
+}

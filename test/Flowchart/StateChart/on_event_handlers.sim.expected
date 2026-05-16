@@ -1,0 +1,7 @@
+% mStateflow -simulate trace for chart "alarm"
+[superStepBegin iter=0]
++enter armed
+[superStepEnd iter=0 quiescent=true]
+[superStepBegin iter=0]
+[superStepEnd iter=1 quiescent=true]
+active@end: armed

@@ -1,0 +1,56 @@
+{
+  "schema": "matforge.flowchart",
+  "version": "0.2.0",
+  "entry": "alarm",
+  "settings": { "kind": "state_chart" },
+  "flows": [
+    {
+      "id": "flow_alarm",
+      "kind": "program",
+      "name": "alarm",
+      "signature": { "inputs": [], "outputs": ["bell", "lamp"] },
+      "symbols": {
+        "data": [
+          { "name": "bell", "scope": "output", "type": "double", "initial": "0" },
+          { "name": "lamp", "scope": "output", "type": "double", "initial": "0" }
+        ],
+        "events": [
+          { "name": "intruder", "trigger": "rising" },
+          { "name": "all_clear", "trigger": "rising" },
+          { "name": "test",      "trigger": "rising" }
+        ]
+      },
+      "nodes": [
+        { "id": "armed", "kind": "state",
+          "data": {
+            "entryAction": "bell = 0; lamp = 0",
+            "onEventActions": {
+              "test":     "bell = 1; lamp = 1",
+              "intruder": "lamp = 1"
+            },
+            "params": { "decomposition": "leaf", "isInitial": "true" }
+          },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "alarming", "kind": "state",
+          "data": {
+            "entryAction": "bell = 1; lamp = 1",
+            "exitAction":  "bell = 0",
+            "params": { "decomposition": "leaf" }
+          },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } }
+      ],
+      "edges": [
+        { "id": "t_arm_alarm", "kind": "transition",
+          "label": "intruder[lamp==1]",
+          "from": {"node": "armed", "port": "out"},
+          "to":   {"node": "alarming", "port": "in"},
+          "data": { "params": { "priority": "1" } } },
+        { "id": "t_alarm_arm", "kind": "transition",
+          "label": "all_clear",
+          "from": {"node": "alarming", "port": "out"},
+          "to":   {"node": "armed", "port": "in"},
+          "data": { "params": { "priority": "1" } } }
+      ]
+    }
+  ]
+}

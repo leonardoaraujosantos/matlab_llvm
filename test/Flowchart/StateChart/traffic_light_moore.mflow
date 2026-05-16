@@ -1,0 +1,65 @@
+{
+  "schema": "matforge.flowchart",
+  "version": "0.2.0",
+  "entry": "traffic_light",
+  "settings": { "kind": "state_chart" },
+  "flows": [
+    {
+      "id": "flow_traffic_light",
+      "kind": "program",
+      "name": "traffic_light",
+      "signature": { "inputs": [], "outputs": ["red", "yellow", "green"] },
+      "symbols": {
+        "data": [
+          { "name": "red",    "scope": "output", "type": "double", "initial": "0" },
+          { "name": "yellow", "scope": "output", "type": "double", "initial": "0" },
+          { "name": "green",  "scope": "output", "type": "double", "initial": "0" },
+          { "name": "timer",  "scope": "local",  "type": "double", "initial": "0" }
+        ],
+        "events": [
+          { "name": "step", "trigger": "rising" }
+        ]
+      },
+      "nodes": [
+        { "id": "S_red", "kind": "state",
+          "data": {
+            "entryAction": "red = 1; yellow = 0; green = 0; timer = 0",
+            "duringAction": "timer = timer + 1",
+            "params": { "decomposition": "leaf", "isInitial": "true" }
+          },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "S_green", "kind": "state",
+          "data": {
+            "entryAction": "red = 0; yellow = 0; green = 1; timer = 0",
+            "duringAction": "timer = timer + 1",
+            "params": { "decomposition": "leaf" }
+          },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "S_yellow", "kind": "state",
+          "data": {
+            "entryAction": "red = 0; yellow = 1; green = 0; timer = 0",
+            "duringAction": "timer = timer + 1",
+            "params": { "decomposition": "leaf" }
+          },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } }
+      ],
+      "edges": [
+        { "id": "t_rg", "kind": "transition",
+          "label": "step[timer >= 30]",
+          "from": {"node": "S_red", "port": "out"},
+          "to":   {"node": "S_green", "port": "in"},
+          "data": { "params": { "priority": "1" } } },
+        { "id": "t_gy", "kind": "transition",
+          "label": "step[timer >= 25]",
+          "from": {"node": "S_green", "port": "out"},
+          "to":   {"node": "S_yellow", "port": "in"},
+          "data": { "params": { "priority": "1" } } },
+        { "id": "t_yr", "kind": "transition",
+          "label": "step[timer >= 5]",
+          "from": {"node": "S_yellow", "port": "out"},
+          "to":   {"node": "S_red", "port": "in"},
+          "data": { "params": { "priority": "1" } } }
+      ]
+    }
+  ]
+}

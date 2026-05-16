@@ -158,6 +158,13 @@ add_library(MatlabFlowchart STATIC
 )
 target_link_libraries(MatlabFlowchart PUBLIC MatlabParse MatlabBasic)
 
+add_library(MatlabStateChart STATIC
+  lib/StateChart/StateChartIR.cpp
+  lib/StateChart/Lowering.cpp
+  lib/StateChart/Interpreter.cpp
+)
+target_link_libraries(MatlabStateChart PUBLIC MatlabFlowchart MatlabBasic)
+
 add_library(MatlabSema STATIC
   lib/Sema/Scope.cpp
   lib/Sema/Type.cpp
@@ -235,7 +242,7 @@ add_executable(matlab-lsp tools/matlab-lsp/main.cpp)
 # MatlabFlowchart and MatlabSema PUBLIC-link the rest transitively;
 # don't list those again to avoid `ld: ignoring duplicate libraries`.
 target_link_libraries(matlab-lsp
-  PRIVATE MatlabFlowchart MatlabSema)
+  PRIVATE MatlabStateChart MatlabSema)
 if(MATLAB_LLVM_WITH_MLIR)
   # The LSP binary only needs llvm::json from LLVMSupport — but since
   # MATLAB_LLVM_WITH_MLIR implies a usable llvm install, link against
@@ -250,7 +257,7 @@ add_executable(matlabc
 # listing them explicitly here would duplicate them on the link line
 # (ld64 warns "ignoring duplicate libraries").
 target_link_libraries(matlabc
-  PRIVATE MatlabMIR MatlabFlowchart)
+  PRIVATE MatlabMIR MatlabStateChart)
 if(MATLAB_LLVM_WITH_MLIR)
   target_link_libraries(matlabc PRIVATE MatlabMLIR)
   target_compile_definitions(matlabc PRIVATE MATLAB_LLVM_WITH_MLIR=1)
@@ -274,7 +281,8 @@ if(MATLAB_LLVM_WITH_MLIR)
     runtime/runtime_rf.cpp
     runtime/runtime_pde.cpp
     runtime/runtime_sparse.cpp
-    runtime/runtime_optim.cpp)
+    runtime/runtime_optim.cpp
+    runtime/runtime_mstateflow.cpp)
   if(MATLAB_LLVM_WITH_SYM)
     target_sources(matlabc PRIVATE runtime/runtime_sym.cpp)
     target_link_libraries(matlabc PRIVATE SymPP::sympp)

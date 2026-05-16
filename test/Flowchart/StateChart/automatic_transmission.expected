@@ -1,0 +1,41 @@
+FlowDoc schema=matforge.flowchart version=0.2.0 entry=transmission
+  settings.columnMajor=true defaultNumericType=double sourceLanguage=
+  settings.kind=state_chart
+Flow id=flow_transmission kind=program name=transmission sig=(speed,throttle)->(gear)
+  symbol.data name=speed scope=input type=double units=mph
+  symbol.data name=throttle scope=input type=double
+  symbol.data name=gear scope=output type=double initial=1
+  symbol.event name=step trigger=rising
+  Node id=first kind=state
+    data.entryAction=gear = 1
+    param.decomposition=leaf
+    param.isInitial=true
+    in:in
+    out:out
+  Node id=second kind=state
+    data.entryAction=gear = 2
+    param.decomposition=leaf
+    in:in
+    out:out
+  Node id=third kind=state
+    data.entryAction=gear = 3
+    param.decomposition=leaf
+    in:in
+    out:out
+  Node id=fourth kind=state
+    data.entryAction=gear = 4
+    param.decomposition=leaf
+    in:in
+    out:out
+  Edge id=t_up12 kind=transition first:out -> second:in label=step[speed > 25 && throttle > 0.3]
+    param.priority=1
+  Edge id=t_dn21 kind=transition second:out -> first:in label=step[speed < 15]
+    param.priority=2
+  Edge id=t_up23 kind=transition second:out -> third:in label=step[speed > 45 && throttle > 0.4]
+    param.priority=1
+  Edge id=t_dn32 kind=transition third:out -> second:in label=step[speed < 35]
+    param.priority=2
+  Edge id=t_up34 kind=transition third:out -> fourth:in label=step[speed > 65 && throttle > 0.5]
+    param.priority=1
+  Edge id=t_dn43 kind=transition fourth:out -> third:in label=step[speed < 55]
+    param.priority=1

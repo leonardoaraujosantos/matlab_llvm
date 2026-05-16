@@ -1,0 +1,3 @@
+StateChart/Errors/dangling_parent.mflow:10:34: error: node "kid" references unknown parent "no_such_parent" in flow "flow_c"
+          { "id": "kid", "parent": "no_such_parent", "kind": "state",
+                                   ^

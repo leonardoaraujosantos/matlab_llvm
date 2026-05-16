@@ -1,0 +1,20 @@
+ChartModel entry=transmission charts=1
+Chart transmission sig=(speed,throttle)->(gear) maxIter=1000
+  symbol.data name=speed scope=input type=double units=mph
+  symbol.data name=throttle scope=input type=double
+  symbol.data name=gear scope=output type=double initial=1
+  symbol.event name=step trigger=rising
+  State first decomp=leaf initial
+    .entry=gear = 1
+  State second decomp=leaf
+    .entry=gear = 2
+  State third decomp=leaf
+    .entry=gear = 3
+  State fourth decomp=leaf
+    .entry=gear = 4
+  Transition t_up12 first -> second kind=outer priority=1 event=step guard=speed > 25 && throttle > 0.3
+  Transition t_dn21 second -> first kind=outer priority=2 event=step guard=speed < 15
+  Transition t_up23 second -> third kind=outer priority=1 event=step guard=speed > 45 && throttle > 0.4
+  Transition t_dn32 third -> second kind=outer priority=2 event=step guard=speed < 35
+  Transition t_up34 third -> fourth kind=outer priority=1 event=step guard=speed > 65 && throttle > 0.5
+  Transition t_dn43 fourth -> third kind=outer priority=1 event=step guard=speed < 55

@@ -1,0 +1,29 @@
+FlowDoc schema=matforge.flowchart version=0.2.0 entry=watchdog
+  settings.columnMajor=true defaultNumericType=double sourceLanguage=
+  settings.kind=state_chart
+Flow id=flow_watchdog kind=program name=watchdog sig=()->(overheat)
+  symbol.data name=overheat scope=output type=double initial=0
+  symbol.data name=warnings scope=local type=double initial=0
+  symbol.event name=tick trigger=rising
+  symbol.event name=fault trigger=rising
+  symbol.event name=shutdown trigger=rising
+  Node id=normal kind=state
+    data.entryAction=overheat = 0; warnings = 0
+    param.decomposition=leaf
+    param.isInitial=true
+    in:in
+    out:out
+  Node id=warned kind=state
+    data.entryAction=warnings = warnings + 1; emit('shutdown')
+    param.decomposition=leaf
+    in:in
+    out:out
+  Node id=halted kind=state
+    data.entryAction=overheat = 1
+    param.decomposition=leaf
+    in:in
+    out:out
+  Edge id=t_norm_warn kind=transition normal:out -> warned:in label=fault
+    param.priority=1
+  Edge id=t_warn_halt kind=transition warned:out -> halted:in label=shutdown
+    param.priority=1

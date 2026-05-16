@@ -1,0 +1,106 @@
+{
+  "schema": "matforge.flowchart",
+  "version": "0.2.0",
+  "entry": "air_temp_controller",
+  "settings": { "kind": "state_chart" },
+  "flows": [
+    {
+      "id": "flow_air_temp_controller",
+      "kind": "program",
+      "name": "air_temp_controller",
+      "signature": {
+        "inputs":  ["temp", "setpoint"],
+        "outputs": ["heater", "cooler", "blower"]
+      },
+      "symbols": {
+        "data": [
+          { "name": "temp",     "scope": "input",  "type": "double", "units": "C" },
+          { "name": "setpoint", "scope": "input",  "type": "double", "units": "C" },
+          { "name": "heater",   "scope": "output", "type": "double", "initial": "0" },
+          { "name": "cooler",   "scope": "output", "type": "double", "initial": "0" },
+          { "name": "blower",   "scope": "output", "type": "double", "initial": "0" }
+        ],
+        "events": [
+          { "name": "tick", "trigger": "rising" }
+        ]
+      },
+      "nodes": [
+        { "id": "controller", "kind": "state", "label": "Air Temp Controller",
+          "data": { "params": { "decomposition": "and" } },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+
+        { "id": "temp_loop", "parent": "controller", "kind": "state",
+          "label": "Temperature",
+          "data": { "params": { "decomposition": "or", "executionOrder": "1" } },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "idle_temp", "parent": "temp_loop", "kind": "state",
+          "data": {
+            "entryAction": "heater = 0; cooler = 0",
+            "params": { "decomposition": "leaf", "isInitial": "true" }
+          },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "heating", "parent": "temp_loop", "kind": "state",
+          "data": {
+            "entryAction": "heater = 1; cooler = 0",
+            "params": { "decomposition": "leaf" }
+          },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "cooling", "parent": "temp_loop", "kind": "state",
+          "data": {
+            "entryAction": "heater = 0; cooler = 1",
+            "params": { "decomposition": "leaf" }
+          },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+
+        { "id": "blower_loop", "parent": "controller", "kind": "state",
+          "label": "Blower",
+          "data": { "params": { "decomposition": "or", "executionOrder": "2" } },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "blower_off", "parent": "blower_loop", "kind": "state",
+          "data": {
+            "entryAction": "blower = 0",
+            "params": { "decomposition": "leaf", "isInitial": "true" }
+          },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "blower_on",  "parent": "blower_loop", "kind": "state",
+          "data": {
+            "entryAction": "blower = 1",
+            "params": { "decomposition": "leaf" }
+          },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } }
+      ],
+      "edges": [
+        { "id": "t_idle_heat", "kind": "transition",
+          "label": "tick[temp <= setpoint - 1]",
+          "from": {"node": "idle_temp", "port": "out"},
+          "to":   {"node": "heating", "port": "in"},
+          "data": { "params": { "priority": "1" } } },
+        { "id": "t_idle_cool", "kind": "transition",
+          "label": "tick[temp >= setpoint + 1]",
+          "from": {"node": "idle_temp", "port": "out"},
+          "to":   {"node": "cooling", "port": "in"},
+          "data": { "params": { "priority": "2" } } },
+        { "id": "t_heat_idle", "kind": "transition",
+          "label": "tick[temp >= setpoint]",
+          "from": {"node": "heating", "port": "out"},
+          "to":   {"node": "idle_temp", "port": "in"},
+          "data": { "params": { "priority": "1" } } },
+        { "id": "t_cool_idle", "kind": "transition",
+          "label": "tick[temp <= setpoint]",
+          "from": {"node": "cooling", "port": "out"},
+          "to":   {"node": "idle_temp", "port": "in"},
+          "data": { "params": { "priority": "1" } } },
+        { "id": "t_bloweron", "kind": "transition",
+          "label": "tick[heater == 1 || cooler == 1]",
+          "from": {"node": "blower_off", "port": "out"},
+          "to":   {"node": "blower_on", "port": "in"},
+          "data": { "params": { "priority": "1" } } },
+        { "id": "t_bloweroff", "kind": "transition",
+          "label": "tick[heater == 0 && cooler == 0]",
+          "from": {"node": "blower_on", "port": "out"},
+          "to":   {"node": "blower_off", "port": "in"},
+          "data": { "params": { "priority": "1" } } }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,90 @@
+{
+  "schema": "matforge.flowchart",
+  "version": "0.2.0",
+  "entry": "heater",
+  "settings": { "kind": "state_chart" },
+  "flows": [
+    {
+      "id": "flow_heater",
+      "kind": "program",
+      "name": "heater",
+      "signature": { "inputs": ["temp", "setpoint"], "outputs": ["heat", "fan_cmd"] },
+      "symbols": {
+        "data": [
+          { "name": "temp",     "scope": "input",  "type": "double", "units": "C" },
+          { "name": "setpoint", "scope": "input",  "type": "double", "units": "C" },
+          { "name": "heat",     "scope": "output", "type": "double", "initial": "0" },
+          { "name": "fan_cmd",  "scope": "output", "type": "double", "initial": "0" }
+        ],
+        "events": [
+          { "name": "tick", "trigger": "rising" }
+        ]
+      },
+      "nodes": [
+        { "id": "ctrl", "kind": "state", "label": "controller",
+          "ui": { "position": { "x": 80, "y": 60 }, "size": { "w": 480, "h": 320 } },
+          "data": { "params": { "decomposition": "and", "containerStyle": "state" } },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+
+        { "id": "thermo", "parent": "ctrl", "kind": "state", "label": "thermostat",
+          "ui": { "position": { "x": 100, "y": 100 }, "size": { "w": 200, "h": 200 } },
+          "data": { "params": { "decomposition": "or", "executionOrder": "1" } },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "on", "parent": "thermo", "kind": "state",
+          "data": {
+            "entryAction": "heat = 1",
+            "params": { "decomposition": "leaf", "isInitial": "true" }
+          },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "off", "parent": "thermo", "kind": "state",
+          "data": {
+            "entryAction": "heat = 0",
+            "params": { "decomposition": "leaf" }
+          },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+
+        { "id": "fan", "parent": "ctrl", "kind": "state", "label": "fan",
+          "ui": { "position": { "x": 320, "y": 100 }, "size": { "w": 200, "h": 200 } },
+          "data": { "params": { "decomposition": "or", "executionOrder": "2" } },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "idle", "parent": "fan", "kind": "state",
+          "data": {
+            "entryAction": "fan_cmd = 0",
+            "params": { "decomposition": "leaf", "isInitial": "true" }
+          },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "run", "parent": "fan", "kind": "state",
+          "data": {
+            "entryAction": "fan_cmd = 1",
+            "params": { "decomposition": "leaf" }
+          },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+
+        { "id": "h_thermo", "parent": "thermo", "kind": "junction_history",
+          "ports": { "in": [{"id": "in"}], "out": [] } }
+      ],
+      "edges": [
+        { "id": "t_on_off", "kind": "transition",
+          "label": "tick[temp >= setpoint + 2]",
+          "from": {"node": "on", "port": "out"},
+          "to":   {"node": "off", "port": "in"},
+          "data": { "params": { "priority": "1" } } },
+        { "id": "t_off_on", "kind": "transition",
+          "label": "tick[temp <= setpoint - 2]",
+          "from": {"node": "off", "port": "out"},
+          "to":   {"node": "on", "port": "in"},
+          "data": { "params": { "priority": "1" } } },
+        { "id": "t_idle_run", "kind": "transition",
+          "label": "tick[heat==1]",
+          "from": {"node": "idle", "port": "out"},
+          "to":   {"node": "run", "port": "in"},
+          "data": { "params": { "priority": "1" } } },
+        { "id": "t_run_idle", "kind": "transition",
+          "label": "tick[heat==0]",
+          "from": {"node": "run", "port": "out"},
+          "to":   {"node": "idle", "port": "in"},
+          "data": { "params": { "priority": "1" } } }
+      ]
+    }
+  ]
+}

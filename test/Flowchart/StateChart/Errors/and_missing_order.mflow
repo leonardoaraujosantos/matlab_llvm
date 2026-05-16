@@ -1,0 +1,23 @@
+{
+  "schema": "matforge.flowchart",
+  "version": "0.2.0",
+  "entry": "c",
+  "settings": { "kind": "state_chart" },
+  "flows": [
+    {
+      "id": "flow_c", "kind": "program", "name": "c",
+      "nodes": [
+        { "id": "p", "kind": "state",
+          "data": { "params": { "decomposition": "and" } },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "k1", "parent": "p", "kind": "state",
+          "data": { "params": { "decomposition": "leaf", "executionOrder": "1" } },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "k2", "parent": "p", "kind": "state",
+          "data": { "params": { "decomposition": "leaf" } },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } }
+      ],
+      "edges": []
+    }
+  ]
+}

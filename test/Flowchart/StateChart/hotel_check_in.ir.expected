@@ -1,0 +1,18 @@
+ChartModel entry=hotel_check_in charts=1
+Chart hotel_check_in sig=()->(room_key,wake_up) maxIter=1000
+  symbol.data name=room_key scope=output type=double initial=0
+  symbol.data name=wake_up scope=output type=double initial=0
+  symbol.event name=arrived trigger=rising
+  symbol.event name=paid trigger=rising
+  symbol.event name=departed trigger=rising
+  symbol.event name=alarm_time trigger=rising
+  State lobby decomp=leaf initial
+    .entry=room_key = 0; wake_up = 0
+  State registering decomp=leaf
+  State in_room decomp=leaf
+    .entry=room_key = 1
+    .exit=room_key = 0; wake_up = 0
+  Transition t_lobby_reg lobby -> registering kind=outer priority=1 event=arrived
+  Transition t_reg_room registering -> in_room kind=outer priority=1 event=paid
+  Transition t_alarm in_room -> in_room kind=inner priority=1 event=alarm_time transA=wake_up = 1
+  Transition t_room_lobby in_room -> lobby kind=outer priority=2 event=departed

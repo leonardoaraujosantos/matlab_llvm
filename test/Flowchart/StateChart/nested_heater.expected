@@ -1,0 +1,59 @@
+FlowDoc schema=matforge.flowchart version=0.2.0 entry=heater
+  settings.columnMajor=true defaultNumericType=double sourceLanguage=
+  settings.kind=state_chart
+Flow id=flow_heater kind=program name=heater sig=(temp,setpoint)->(heat,fan_cmd)
+  symbol.data name=temp scope=input type=double units=C
+  symbol.data name=setpoint scope=input type=double units=C
+  symbol.data name=heat scope=output type=double initial=0
+  symbol.data name=fan_cmd scope=output type=double initial=0
+  symbol.event name=tick trigger=rising
+  Node id=ctrl kind=state label=controller
+    ui.size=480x320
+    param.containerStyle=state
+    param.decomposition=and
+    in:in
+    out:out
+  Node id=thermo kind=state label=thermostat parent=ctrl
+    ui.size=200x200
+    param.decomposition=or
+    param.executionOrder=1
+    in:in
+    out:out
+  Node id=on kind=state parent=thermo
+    data.entryAction=heat = 1
+    param.decomposition=leaf
+    param.isInitial=true
+    in:in
+    out:out
+  Node id=off kind=state parent=thermo
+    data.entryAction=heat = 0
+    param.decomposition=leaf
+    in:in
+    out:out
+  Node id=fan kind=state label=fan parent=ctrl
+    ui.size=200x200
+    param.decomposition=or
+    param.executionOrder=2
+    in:in
+    out:out
+  Node id=idle kind=state parent=fan
+    data.entryAction=fan_cmd = 0
+    param.decomposition=leaf
+    param.isInitial=true
+    in:in
+    out:out
+  Node id=run kind=state parent=fan
+    data.entryAction=fan_cmd = 1
+    param.decomposition=leaf
+    in:in
+    out:out
+  Node id=h_thermo kind=junction_history parent=thermo
+    in:in
+  Edge id=t_on_off kind=transition on:out -> off:in label=tick[temp >= setpoint + 2]
+    param.priority=1
+  Edge id=t_off_on kind=transition off:out -> on:in label=tick[temp <= setpoint - 2]
+    param.priority=1
+  Edge id=t_idle_run kind=transition idle:out -> run:in label=tick[heat==1]
+    param.priority=1
+  Edge id=t_run_idle kind=transition run:out -> idle:in label=tick[heat==0]
+    param.priority=1

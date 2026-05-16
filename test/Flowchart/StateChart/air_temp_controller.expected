@@ -1,0 +1,63 @@
+FlowDoc schema=matforge.flowchart version=0.2.0 entry=air_temp_controller
+  settings.columnMajor=true defaultNumericType=double sourceLanguage=
+  settings.kind=state_chart
+Flow id=flow_air_temp_controller kind=program name=air_temp_controller sig=(temp,setpoint)->(heater,cooler,blower)
+  symbol.data name=temp scope=input type=double units=C
+  symbol.data name=setpoint scope=input type=double units=C
+  symbol.data name=heater scope=output type=double initial=0
+  symbol.data name=cooler scope=output type=double initial=0
+  symbol.data name=blower scope=output type=double initial=0
+  symbol.event name=tick trigger=rising
+  Node id=controller kind=state label=Air Temp Controller
+    param.decomposition=and
+    in:in
+    out:out
+  Node id=temp_loop kind=state label=Temperature parent=controller
+    param.decomposition=or
+    param.executionOrder=1
+    in:in
+    out:out
+  Node id=idle_temp kind=state parent=temp_loop
+    data.entryAction=heater = 0; cooler = 0
+    param.decomposition=leaf
+    param.isInitial=true
+    in:in
+    out:out
+  Node id=heating kind=state parent=temp_loop
+    data.entryAction=heater = 1; cooler = 0
+    param.decomposition=leaf
+    in:in
+    out:out
+  Node id=cooling kind=state parent=temp_loop
+    data.entryAction=heater = 0; cooler = 1
+    param.decomposition=leaf
+    in:in
+    out:out
+  Node id=blower_loop kind=state label=Blower parent=controller
+    param.decomposition=or
+    param.executionOrder=2
+    in:in
+    out:out
+  Node id=blower_off kind=state parent=blower_loop
+    data.entryAction=blower = 0
+    param.decomposition=leaf
+    param.isInitial=true
+    in:in
+    out:out
+  Node id=blower_on kind=state parent=blower_loop
+    data.entryAction=blower = 1
+    param.decomposition=leaf
+    in:in
+    out:out
+  Edge id=t_idle_heat kind=transition idle_temp:out -> heating:in label=tick[temp <= setpoint - 1]
+    param.priority=1
+  Edge id=t_idle_cool kind=transition idle_temp:out -> cooling:in label=tick[temp >= setpoint + 1]
+    param.priority=2
+  Edge id=t_heat_idle kind=transition heating:out -> idle_temp:in label=tick[temp >= setpoint]
+    param.priority=1
+  Edge id=t_cool_idle kind=transition cooling:out -> idle_temp:in label=tick[temp <= setpoint]
+    param.priority=1
+  Edge id=t_bloweron kind=transition blower_off:out -> blower_on:in label=tick[heater == 1 || cooler == 1]
+    param.priority=1
+  Edge id=t_bloweroff kind=transition blower_on:out -> blower_off:in label=tick[heater == 0 && cooler == 0]
+    param.priority=1

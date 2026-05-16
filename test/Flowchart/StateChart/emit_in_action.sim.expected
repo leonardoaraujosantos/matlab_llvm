@@ -1,0 +1,7 @@
+% mStateflow -simulate trace for chart "watchdog"
+[superStepBegin iter=0]
++enter normal
+[superStepEnd iter=0 quiescent=true]
+[superStepBegin iter=0]
+[superStepEnd iter=1 quiescent=true]
+active@end: normal

@@ -1,0 +1,27 @@
+FlowDoc schema=matforge.flowchart version=0.2.0 entry=alarm
+  settings.columnMajor=true defaultNumericType=double sourceLanguage=
+  settings.kind=state_chart
+Flow id=flow_alarm kind=program name=alarm sig=()->(bell,lamp)
+  symbol.data name=bell scope=output type=double initial=0
+  symbol.data name=lamp scope=output type=double initial=0
+  symbol.event name=intruder trigger=rising
+  symbol.event name=all_clear trigger=rising
+  symbol.event name=test trigger=rising
+  Node id=armed kind=state
+    data.entryAction=bell = 0; lamp = 0
+    param.decomposition=leaf
+    param.isInitial=true
+    onEvent.test=bell = 1; lamp = 1
+    onEvent.intruder=lamp = 1
+    in:in
+    out:out
+  Node id=alarming kind=state
+    data.entryAction=bell = 1; lamp = 1
+    data.exitAction=bell = 0
+    param.decomposition=leaf
+    in:in
+    out:out
+  Edge id=t_arm_alarm kind=transition armed:out -> alarming:in label=intruder[lamp==1]
+    param.priority=1
+  Edge id=t_alarm_arm kind=transition alarming:out -> armed:in label=all_clear
+    param.priority=1

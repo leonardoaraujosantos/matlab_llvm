@@ -1,0 +1,21 @@
+FlowDoc schema=matforge.flowchart version=0.2.0 entry=blink
+  settings.columnMajor=true defaultNumericType=double sourceLanguage=
+  settings.kind=state_chart
+Flow id=flow_blink kind=program name=blink sig=()->(led)
+  symbol.data name=led scope=output type=double initial=0
+  symbol.event name=tick trigger=rising
+  Node id=off kind=state
+    data.entryAction=led = 0
+    param.decomposition=leaf
+    param.isInitial=true
+    in:in
+    out:out
+  Node id=on kind=state
+    data.entryAction=led = 1
+    param.decomposition=leaf
+    in:in
+    out:out
+  Edge id=t_off_on kind=transition off:out -> on:in label=[after(3, tick)]
+    param.priority=1
+  Edge id=t_on_off kind=transition on:out -> off:in label=[after(2, tick)]
+    param.priority=1

@@ -1,0 +1,24 @@
+FlowDoc schema=matforge.flowchart version=0.2.0 entry=bang_bang
+  settings.columnMajor=true defaultNumericType=double sourceLanguage=
+  settings.kind=state_chart
+Flow id=flow_bang_bang kind=program name=bang_bang sig=(temp,setpoint)->(heater)
+  symbol.data name=temp scope=input type=double units=C
+  symbol.data name=setpoint scope=input type=double units=C
+  symbol.data name=heater scope=output type=double initial=0
+  symbol.data name=delta scope=local type=double initial=1.0
+  symbol.event name=tick trigger=rising
+  Node id=off kind=state
+    data.entryAction=heater = 0
+    param.decomposition=leaf
+    param.isInitial=true
+    in:in
+    out:out
+  Node id=on kind=state
+    data.entryAction=heater = 1
+    param.decomposition=leaf
+    in:in
+    out:out
+  Edge id=t_off_on kind=transition off:out -> on:in label=tick[temp <= setpoint - delta]
+    param.priority=1
+  Edge id=t_on_off kind=transition on:out -> off:in label=tick[temp >= setpoint + delta]
+    param.priority=1

@@ -1,0 +1,10 @@
+ChartModel entry=blink charts=1
+Chart blink sig=()->(led) maxIter=1000
+  symbol.data name=led scope=output type=double initial=0
+  symbol.event name=tick trigger=rising
+  State off decomp=leaf initial
+    .entry=led = 0
+  State on decomp=leaf
+    .entry=led = 1
+  Transition t_off_on off -> on kind=outer priority=1 guard=after(3, tick)
+  Transition t_on_off on -> off kind=outer priority=1 guard=after(2, tick)

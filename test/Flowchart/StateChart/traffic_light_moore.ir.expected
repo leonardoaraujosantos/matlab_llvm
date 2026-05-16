@@ -1,0 +1,19 @@
+ChartModel entry=traffic_light charts=1
+Chart traffic_light sig=()->(red,yellow,green) maxIter=1000
+  symbol.data name=red scope=output type=double initial=0
+  symbol.data name=yellow scope=output type=double initial=0
+  symbol.data name=green scope=output type=double initial=0
+  symbol.data name=timer scope=local type=double initial=0
+  symbol.event name=step trigger=rising
+  State S_red decomp=leaf initial
+    .entry=red = 1; yellow = 0; green = 0; timer = 0
+    .during=timer = timer + 1
+  State S_green decomp=leaf
+    .entry=red = 0; yellow = 0; green = 1; timer = 0
+    .during=timer = timer + 1
+  State S_yellow decomp=leaf
+    .entry=red = 0; yellow = 1; green = 0; timer = 0
+    .during=timer = timer + 1
+  Transition t_rg S_red -> S_green kind=outer priority=1 event=step guard=timer >= 30
+  Transition t_gy S_green -> S_yellow kind=outer priority=1 event=step guard=timer >= 25
+  Transition t_yr S_yellow -> S_red kind=outer priority=1 event=step guard=timer >= 5

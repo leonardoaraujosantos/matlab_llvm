@@ -25,30 +25,47 @@ fail=0
 failed_names=()
 
 run_one() {
-  local f="$1"
-  local exp="${f%.mflow}.expected"
+  local f="$1" mode="$2" suffix="$3" flag="$4"
+  local exp="${f%.mflow}${suffix}"
   # Replace the absolute path in diagnostics with a stable placeholder
   # so the goldens are portable across checkouts.
   local got
-  got="$("$MATLABC" -dump-flow "$f" 2>&1 | sed "s|$TESTDIR/||g")" || true
+  got="$("$MATLABC" "$flag" "$f" 2>&1 | sed "s|$TESTDIR/||g")" || true
   if [[ -n "${UPDATE:-}" || ! -e "$exp" ]]; then
     printf '%s\n' "$got" > "$exp"
-    echo "UPDATED $f"
+    echo "UPDATED ($mode) $f"
     return
   fi
   if diff -u "$exp" <(printf '%s\n' "$got") >/dev/null; then
     pass=$((pass+1))
   else
     fail=$((fail+1))
-    failed_names+=("$f")
-    echo "FAIL $f"
+    failed_names+=("$f ($mode)")
+    echo "FAIL ($mode) $f"
     diff -u "$exp" <(printf '%s\n' "$got") | sed 's/^/  /'
   fi
 }
 
 shopt -s nullglob
-for f in *.mflow Errors/*.mflow; do
-  run_one "$f"
+# FlowDoc-level dump: covers every .mflow regardless of dialect.
+for f in *.mflow Errors/*.mflow StateChart/*.mflow StateChart/Errors/*.mflow; do
+  run_one "$f" flow .expected -dump-flow
+done
+# Chart-IR dump: only state-chart fixtures, only the ones that load
+# cleanly (Errors/ fail at the loader stage so a chart-IR run would
+# repeat the same diagnostic).
+for f in StateChart/*.mflow; do
+  run_one "$f" chart .ir.expected -dump-chart
+done
+# Lowered-MATLAB dump: every clean state-chart fixture, captured so
+# the lowering itself stays byte-stable across refactors.
+for f in StateChart/*.mflow; do
+  run_one "$f" matlab .matlab.expected -emit-matlab
+done
+# Interpreter trace: drive -simulate on every clean state-chart
+# fixture and lock the deterministic trace as a regression signal.
+for f in StateChart/*.mflow; do
+  run_one "$f" simulate .sim.expected -simulate
 done
 
 echo "----"

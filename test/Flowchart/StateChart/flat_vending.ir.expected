@@ -1,0 +1,14 @@
+ChartModel entry=vending charts=1
+Chart vending sig=(coin)->(dispense) maxIter=1000
+  symbol.data name=credit scope=local type=double initial=0
+  symbol.data name=dispense scope=output type=double initial=0
+  symbol.event name=insertCoin trigger=rising
+  symbol.event name=select trigger=either
+  State idle decomp=leaf
+    .entry=credit = 0; dispense = 0
+  State have decomp=leaf
+    .during=% wait for selection
+  Junction d0 kind=default
+  Transition td d0 -> idle kind=default priority=1
+  Transition t1 idle -> have kind=outer priority=1 event=insertCoin transA=credit = credit + 1
+  Transition t2 have -> idle kind=outer priority=1 event=select guard=credit>0 transA=dispense = 1

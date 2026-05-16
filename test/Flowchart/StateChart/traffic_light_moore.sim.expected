@@ -1,0 +1,7 @@
+% mStateflow -simulate trace for chart "traffic_light"
+[superStepBegin iter=0]
++enter S_red
+[superStepEnd iter=0 quiescent=true]
+[superStepBegin iter=0]
+[superStepEnd iter=1 quiescent=true]
+active@end: S_red

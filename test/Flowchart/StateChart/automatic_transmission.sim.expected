@@ -1,0 +1,7 @@
+% mStateflow -simulate trace for chart "transmission"
+[superStepBegin iter=0]
++enter first
+[superStepEnd iter=0 quiescent=true]
+[superStepBegin iter=0]
+[superStepEnd iter=1 quiescent=true]
+active@end: first

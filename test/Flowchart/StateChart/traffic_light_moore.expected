@@ -1,0 +1,34 @@
+FlowDoc schema=matforge.flowchart version=0.2.0 entry=traffic_light
+  settings.columnMajor=true defaultNumericType=double sourceLanguage=
+  settings.kind=state_chart
+Flow id=flow_traffic_light kind=program name=traffic_light sig=()->(red,yellow,green)
+  symbol.data name=red scope=output type=double initial=0
+  symbol.data name=yellow scope=output type=double initial=0
+  symbol.data name=green scope=output type=double initial=0
+  symbol.data name=timer scope=local type=double initial=0
+  symbol.event name=step trigger=rising
+  Node id=S_red kind=state
+    data.duringAction=timer = timer + 1
+    data.entryAction=red = 1; yellow = 0; green = 0; timer = 0
+    param.decomposition=leaf
+    param.isInitial=true
+    in:in
+    out:out
+  Node id=S_green kind=state
+    data.duringAction=timer = timer + 1
+    data.entryAction=red = 0; yellow = 0; green = 1; timer = 0
+    param.decomposition=leaf
+    in:in
+    out:out
+  Node id=S_yellow kind=state
+    data.duringAction=timer = timer + 1
+    data.entryAction=red = 0; yellow = 1; green = 0; timer = 0
+    param.decomposition=leaf
+    in:in
+    out:out
+  Edge id=t_rg kind=transition S_red:out -> S_green:in label=step[timer >= 30]
+    param.priority=1
+  Edge id=t_gy kind=transition S_green:out -> S_yellow:in label=step[timer >= 25]
+    param.priority=1
+  Edge id=t_yr kind=transition S_yellow:out -> S_red:in label=step[timer >= 5]
+    param.priority=1

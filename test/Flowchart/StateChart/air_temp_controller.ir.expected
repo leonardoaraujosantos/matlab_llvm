@@ -1,0 +1,27 @@
+ChartModel entry=air_temp_controller charts=1
+Chart air_temp_controller sig=(temp,setpoint)->(heater,cooler,blower) maxIter=1000
+  symbol.data name=temp scope=input type=double units=C
+  symbol.data name=setpoint scope=input type=double units=C
+  symbol.data name=heater scope=output type=double initial=0
+  symbol.data name=cooler scope=output type=double initial=0
+  symbol.data name=blower scope=output type=double initial=0
+  symbol.event name=tick trigger=rising
+  State controller label=Air Temp Controller decomp=and
+    State temp_loop label=Temperature decomp=or exec=1
+      State idle_temp decomp=leaf initial
+        .entry=heater = 0; cooler = 0
+      State heating decomp=leaf
+        .entry=heater = 1; cooler = 0
+      State cooling decomp=leaf
+        .entry=heater = 0; cooler = 1
+    State blower_loop label=Blower decomp=or exec=2
+      State blower_off decomp=leaf initial
+        .entry=blower = 0
+      State blower_on decomp=leaf
+        .entry=blower = 1
+  Transition t_idle_heat idle_temp -> heating kind=outer priority=1 event=tick guard=temp <= setpoint - 1
+  Transition t_idle_cool idle_temp -> cooling kind=outer priority=2 event=tick guard=temp >= setpoint + 1
+  Transition t_heat_idle heating -> idle_temp kind=outer priority=1 event=tick guard=temp >= setpoint
+  Transition t_cool_idle cooling -> idle_temp kind=outer priority=1 event=tick guard=temp <= setpoint
+  Transition t_bloweron blower_off -> blower_on kind=outer priority=1 event=tick guard=heater == 1 || cooler == 1
+  Transition t_bloweroff blower_on -> blower_off kind=outer priority=1 event=tick guard=heater == 0 && cooler == 0

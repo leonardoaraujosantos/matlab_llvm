@@ -1,0 +1,28 @@
+FlowDoc schema=matforge.flowchart version=0.2.0 entry=vending
+  settings.columnMajor=true defaultNumericType=double sourceLanguage=
+  settings.kind=state_chart
+Flow id=flow_vending kind=program name=vending sig=(coin)->(dispense)
+  symbol.data name=credit scope=local type=double initial=0
+  symbol.data name=dispense scope=output type=double initial=0
+  symbol.event name=insertCoin trigger=rising
+  symbol.event name=select trigger=either
+  Node id=d0 kind=junction_default
+    out:out
+  Node id=idle kind=state
+    data.entryAction=credit = 0; dispense = 0
+    param.decomposition=leaf
+    in:in
+    out:out
+  Node id=have kind=state
+    data.duringAction=% wait for selection
+    param.decomposition=leaf
+    in:in
+    out:out
+  Edge id=td kind=transition d0:out -> idle:in
+    param.kind=default
+  Edge id=t1 kind=transition idle:out -> have:in label=insertCoin/credit = credit + 1
+    param.kind=outer
+    param.priority=1
+  Edge id=t2 kind=transition have:out -> idle:in label=select[credit>0]/dispense = 1
+    param.kind=outer
+    param.priority=1

@@ -1,0 +1,56 @@
+{
+  "schema": "matforge.flowchart",
+  "version": "0.2.0",
+  "entry": "vending",
+  "settings": { "kind": "state_chart" },
+  "flows": [
+    {
+      "id": "flow_vending",
+      "kind": "program",
+      "name": "vending",
+      "signature": { "inputs": ["coin"], "outputs": ["dispense"] },
+      "symbols": {
+        "data":   [
+          { "name": "credit",   "scope": "local",  "type": "double", "initial": "0" },
+          { "name": "dispense", "scope": "output", "type": "double", "initial": "0" }
+        ],
+        "events": [
+          { "name": "insertCoin", "trigger": "rising" },
+          { "name": "select",     "trigger": "either" }
+        ]
+      },
+      "nodes": [
+        { "id": "d0", "kind": "junction_default",
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+        { "id": "idle", "kind": "state",
+          "data": {
+            "entryAction": "credit = 0; dispense = 0",
+            "params": { "decomposition": "leaf" }
+          },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "have", "kind": "state",
+          "data": {
+            "duringAction": "% wait for selection",
+            "params": { "decomposition": "leaf" }
+          },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } }
+      ],
+      "edges": [
+        { "id": "td", "kind": "transition",
+          "from": {"node": "d0", "port": "out"},
+          "to":   {"node": "idle", "port": "in"},
+          "data": { "params": { "kind": "default" } } },
+        { "id": "t1", "kind": "transition",
+          "label": "insertCoin/credit = credit + 1",
+          "from": {"node": "idle", "port": "out"},
+          "to":   {"node": "have", "port": "in"},
+          "data": { "params": { "priority": "1", "kind": "outer" } } },
+        { "id": "t2", "kind": "transition",
+          "label": "select[credit>0]/dispense = 1",
+          "from": {"node": "have", "port": "out"},
+          "to":   {"node": "idle", "port": "in"},
+          "data": { "params": { "priority": "1", "kind": "outer" } } }
+      ]
+    }
+  ]
+}

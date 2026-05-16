@@ -1,0 +1,25 @@
+{
+  "schema": "matforge.flowchart",
+  "version": "0.2.0",
+  "entry": "c",
+  "settings": { "kind": "state_chart" },
+  "flows": [
+    {
+      "id": "flow_c", "kind": "program", "name": "c",
+      "nodes": [
+        { "id": "d1", "kind": "junction_default",
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+        { "id": "d2", "kind": "junction_default",
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+        { "id": "a", "kind": "state",
+          "data": { "params": { "decomposition": "leaf" } },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } }
+      ],
+      "edges": [
+        { "id": "ea", "kind": "transition",
+          "from": {"node": "d1", "port": "out"},
+          "to":   {"node": "a", "port": "in"} }
+      ]
+    }
+  ]
+}

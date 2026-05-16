@@ -1,0 +1,57 @@
+{
+  "schema": "matforge.flowchart",
+  "version": "0.2.0",
+  "entry": "watchdog",
+  "settings": { "kind": "state_chart" },
+  "flows": [
+    {
+      "id": "flow_watchdog",
+      "kind": "program",
+      "name": "watchdog",
+      "signature": { "inputs": [], "outputs": ["overheat"] },
+      "symbols": {
+        "data": [
+          { "name": "overheat", "scope": "output", "type": "double", "initial": "0" },
+          { "name": "warnings", "scope": "local",  "type": "double", "initial": "0" }
+        ],
+        "events": [
+          { "name": "tick",      "trigger": "rising" },
+          { "name": "fault",     "trigger": "rising" },
+          { "name": "shutdown",  "trigger": "rising" }
+        ]
+      },
+      "nodes": [
+        { "id": "normal", "kind": "state",
+          "data": {
+            "entryAction": "overheat = 0; warnings = 0",
+            "params": { "decomposition": "leaf", "isInitial": "true" }
+          },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "warned", "kind": "state",
+          "data": {
+            "entryAction": "warnings = warnings + 1; emit('shutdown')",
+            "params": { "decomposition": "leaf" }
+          },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "halted", "kind": "state",
+          "data": {
+            "entryAction": "overheat = 1",
+            "params": { "decomposition": "leaf" }
+          },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } }
+      ],
+      "edges": [
+        { "id": "t_norm_warn", "kind": "transition",
+          "label": "fault",
+          "from": {"node": "normal", "port": "out"},
+          "to":   {"node": "warned", "port": "in"},
+          "data": { "params": { "priority": "1" } } },
+        { "id": "t_warn_halt", "kind": "transition",
+          "label": "shutdown",
+          "from": {"node": "warned", "port": "out"},
+          "to":   {"node": "halted", "port": "in"},
+          "data": { "params": { "priority": "1" } } }
+      ]
+    }
+  ]
+}

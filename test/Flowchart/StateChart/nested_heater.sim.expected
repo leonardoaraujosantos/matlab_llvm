@@ -1,0 +1,11 @@
+% mStateflow -simulate trace for chart "heater"
+[superStepBegin iter=0]
++enter ctrl
++enter thermo
++enter on
++enter fan
++enter idle
+[superStepEnd iter=0 quiescent=true]
+[superStepBegin iter=0]
+[superStepEnd iter=1 quiescent=true]
+active@end: ctrl thermo on fan idle

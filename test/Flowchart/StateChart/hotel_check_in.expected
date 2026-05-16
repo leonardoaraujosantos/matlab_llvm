@@ -1,0 +1,35 @@
+FlowDoc schema=matforge.flowchart version=0.2.0 entry=hotel_check_in
+  settings.columnMajor=true defaultNumericType=double sourceLanguage=
+  settings.kind=state_chart
+Flow id=flow_hotel kind=program name=hotel_check_in sig=()->(room_key,wake_up)
+  symbol.data name=room_key scope=output type=double initial=0
+  symbol.data name=wake_up scope=output type=double initial=0
+  symbol.event name=arrived trigger=rising
+  symbol.event name=paid trigger=rising
+  symbol.event name=departed trigger=rising
+  symbol.event name=alarm_time trigger=rising
+  Node id=lobby kind=state
+    data.entryAction=room_key = 0; wake_up = 0
+    param.decomposition=leaf
+    param.isInitial=true
+    in:in
+    out:out
+  Node id=registering kind=state
+    param.decomposition=leaf
+    in:in
+    out:out
+  Node id=in_room kind=state
+    data.entryAction=room_key = 1
+    data.exitAction=room_key = 0; wake_up = 0
+    param.decomposition=leaf
+    in:in
+    out:out
+  Edge id=t_lobby_reg kind=transition lobby:out -> registering:in label=arrived
+    param.priority=1
+  Edge id=t_reg_room kind=transition registering:out -> in_room:in label=paid
+    param.priority=1
+  Edge id=t_alarm kind=transition in_room:out -> in_room:in label=alarm_time/wake_up = 1
+    param.kind=inner
+    param.priority=1
+  Edge id=t_room_lobby kind=transition in_room:out -> lobby:in label=departed
+    param.priority=2

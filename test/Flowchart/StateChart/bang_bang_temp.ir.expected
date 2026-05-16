@@ -1,0 +1,13 @@
+ChartModel entry=bang_bang charts=1
+Chart bang_bang sig=(temp,setpoint)->(heater) maxIter=1000
+  symbol.data name=temp scope=input type=double units=C
+  symbol.data name=setpoint scope=input type=double units=C
+  symbol.data name=heater scope=output type=double initial=0
+  symbol.data name=delta scope=local type=double initial=1.0
+  symbol.event name=tick trigger=rising
+  State off decomp=leaf initial
+    .entry=heater = 0
+  State on decomp=leaf
+    .entry=heater = 1
+  Transition t_off_on off -> on kind=outer priority=1 event=tick guard=temp <= setpoint - delta
+  Transition t_on_off on -> off kind=outer priority=1 event=tick guard=temp >= setpoint + delta

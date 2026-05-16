@@ -1,0 +1,18 @@
+{
+  "schema": "matforge.flowchart",
+  "version": "0.2.0",
+  "entry": "c",
+  "settings": { "kind": "state_chart" },
+  "flows": [
+    {
+      "id": "flow_c", "kind": "program", "name": "c",
+      "nodes": [
+        { "id": "j", "kind": "junction_connective",
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "kid", "parent": "j", "kind": "state",
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } }
+      ],
+      "edges": []
+    }
+  ]
+}

@@ -36,10 +36,21 @@ struct Endpoint {
 
 struct Edge {
   std::string Id;
-  std::string Kind;         // "control" | "data"
+  std::string Kind;         // "control" | "data" | "transition"
   Endpoint From;
   Endpoint To;
   SourceLocation Loc;       // points at the edge object
+  // mStateflow: human-readable transition label as written in the
+  // canvas. The four-field decomposition
+  // `event[guard]{condAction}/transAction` is parsed lazily by the
+  // chart IR builder (lib/StateChart/StateChartIR.cpp). Empty on
+  // control-flow / signal-flow edges.
+  std::string Label;
+  SourceLocation LabelLoc;
+  // mStateflow: `data.params` on an edge mirrors the `Node::Params`
+  // bag (priority / kind / etc.). Empty on legacy edges.
+  std::map<std::string, std::string> Params;
+  std::map<std::string, SourceLocation> ParamLocs;
 };
 
 struct Node {
@@ -60,6 +71,12 @@ struct Node {
   std::map<std::string, std::string> Params;
   std::map<std::string, SourceLocation> DataLocs; // per-field byte location
   std::map<std::string, SourceLocation> ParamLocs; // per-param byte location
+  // mStateflow: `data.onEventActions` is a nested object of event-
+  // name → action-body strings. Empty on non-chart nodes; populated
+  // for `state` nodes that declare per-event handlers. Declaration
+  // order is preserved so codegen + dump come out deterministically.
+  std::vector<std::pair<std::string, std::string>> OnEventActions;
+  std::map<std::string, SourceLocation> OnEventActionLocs;
   std::vector<Port> InPorts;
   std::vector<Port> OutPorts;
   SourceLocation Loc;       // points at the opening `{` of the node object
@@ -77,6 +94,19 @@ struct Node {
   bool HasUiPosition = false;
   int UiX = 0;
   int UiY = 0;
+  // mStateflow: `ui.size.{w,h}`. Compound states carry visible bounds
+  // because their children render inside the parent. Absent on any
+  // node that autosizes (signal-flow blocks today). Same "absent vs.
+  // (0,0)" rationale as HasUiPosition.
+  bool HasUiSize = false;
+  int UiW = 0;
+  int UiH = 0;
+  // mStateflow: id of the containing state (a sibling `Node` whose
+  // kind is "state"). Empty for chart-root children and for every
+  // node in a control-flow / signal-flow document. The schema keeps
+  // `Flow.Nodes` flat — this is the only hierarchy carrier.
+  std::string Parent;
+  SourceLocation ParentLoc;
 
   bool hasData(std::string_view Key) const {
     return Data.find(std::string(Key)) != Data.end();
@@ -101,6 +131,38 @@ struct Node {
 struct Signature {
   std::vector<std::string> Inputs;
   std::vector<std::string> Outputs;
+};
+
+//===----------------------------------------------------------------------===//
+// mStateflow — symbol table (`Flow.symbols`). One row per data /
+// event / message. Every field is optional except `Name`; the loader
+// keeps the raw text and defers MATLAB-type resolution to the chart
+// IR builder so error messages can point back at the JSON source.
+//===----------------------------------------------------------------------===//
+
+struct Symbol {
+  std::string Name;
+  // Scope keywords match Stateflow's data property: "input" | "output"
+  // | "local" | "constant" | "parameter" | "chartLocal" |
+  // "dataStoreMemory". For events the same field encodes direction
+  // ("input" | "output" | "local"). Unknown values are kept verbatim
+  // so a forward-compat schema doesn't fail to load.
+  std::string Scope;
+  std::string Type;           // MATLAB type string (data/messages)
+  std::string Units;
+  std::string Initial;        // optional initial value (data only)
+  std::string Trigger;        // events: rising | falling | either | function
+  SourceLocation Loc;
+};
+
+struct SymbolTable {
+  std::vector<Symbol> Data;
+  std::vector<Symbol> Events;
+  std::vector<Symbol> Messages;
+
+  bool empty() const {
+    return Data.empty() && Events.empty() && Messages.empty();
+  }
 };
 
 //===----------------------------------------------------------------------===//
@@ -140,6 +202,10 @@ struct Flow {
   // Threaded through the Flattener so nested subsystem boundaries
   // are honoured.
   std::optional<SolverConfig> Solver;
+  // mStateflow: per-flow data / event / message tables. Empty on
+  // control-flow / signal-flow flows. Drives the chart inspector's
+  // Symbols tab; resolved by lib/StateChart/StateChartIR.
+  SymbolTable Symbols;
 };
 
 //===----------------------------------------------------------------------===//
@@ -159,10 +225,11 @@ struct Settings {
   bool ColumnMajor = true;
   std::string DefaultNumericType = "double";
   std::string SourceLanguage;
-  // mflowLink: which `.mflow` dialect this document is. Absent on
-  // disk ⇒ "control_flow" (the historical default — control-flow
-  // files are byte-for-byte unaffected). "signal_flow" selects the
-  // block-diagram simulation lane.
+  // mflowLink / mStateflow: which `.mflow` dialect this document is.
+  // Absent on disk ⇒ "control_flow" (the historical default — control-
+  // flow files are byte-for-byte unaffected). "signal_flow" selects
+  // the block-diagram simulation lane; "state_chart" selects the
+  // hierarchical state-machine lane (see docs/mStateflow_roadmap.md).
   std::string Kind = "control_flow";
   std::optional<SolverConfig>   Solver;
   std::optional<SnapshotConfig> Snapshot;
@@ -183,6 +250,13 @@ struct FlowDoc {
   // True for an mflowLink (signal-flow) document. Control-flow docs —
   // every `.mflow` shipped before mflowLink — return false.
   bool isSignalFlow() const { return Settings.Kind == "signal_flow"; }
+  // True for an mStateflow (state-chart) document.
+  bool isStateChart() const { return Settings.Kind == "state_chart"; }
+  // True when the document is a diagram (signal-flow OR state-chart),
+  // i.e. NOT the historical control-flow program shape. Used to
+  // suppress the `start`/`end` validation that only makes sense for
+  // control-flow programs.
+  bool isDiagram() const { return isSignalFlow() || isStateChart(); }
 };
 
 //===----------------------------------------------------------------------===//

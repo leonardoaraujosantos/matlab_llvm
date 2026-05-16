@@ -1,0 +1,23 @@
+ChartModel entry=heater charts=1
+Chart heater sig=(temp,setpoint)->(heat,fan_cmd) maxIter=1000
+  symbol.data name=temp scope=input type=double units=C
+  symbol.data name=setpoint scope=input type=double units=C
+  symbol.data name=heat scope=output type=double initial=0
+  symbol.data name=fan_cmd scope=output type=double initial=0
+  symbol.event name=tick trigger=rising
+  State ctrl label=controller decomp=and
+    State thermo label=thermostat decomp=or exec=1
+      State on decomp=leaf initial
+        .entry=heat = 1
+      State off decomp=leaf
+        .entry=heat = 0
+      Junction h_thermo kind=history
+    State fan label=fan decomp=or exec=2
+      State idle decomp=leaf initial
+        .entry=fan_cmd = 0
+      State run decomp=leaf
+        .entry=fan_cmd = 1
+  Transition t_on_off on -> off kind=outer priority=1 event=tick guard=temp >= setpoint + 2
+  Transition t_off_on off -> on kind=outer priority=1 event=tick guard=temp <= setpoint - 2
+  Transition t_idle_run idle -> run kind=outer priority=1 event=tick guard=heat==1
+  Transition t_run_idle run -> idle kind=outer priority=1 event=tick guard=heat==0

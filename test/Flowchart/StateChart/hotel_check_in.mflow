@@ -1,0 +1,68 @@
+{
+  "schema": "matforge.flowchart",
+  "version": "0.2.0",
+  "entry": "hotel_check_in",
+  "settings": { "kind": "state_chart" },
+  "flows": [
+    {
+      "id": "flow_hotel",
+      "kind": "program",
+      "name": "hotel_check_in",
+      "signature": { "inputs": [], "outputs": ["room_key", "wake_up"] },
+      "symbols": {
+        "data": [
+          { "name": "room_key", "scope": "output", "type": "double", "initial": "0" },
+          { "name": "wake_up",  "scope": "output", "type": "double", "initial": "0" }
+        ],
+        "events": [
+          { "name": "arrived",    "trigger": "rising" },
+          { "name": "paid",       "trigger": "rising" },
+          { "name": "departed",   "trigger": "rising" },
+          { "name": "alarm_time", "trigger": "rising" }
+        ]
+      },
+      "nodes": [
+        { "id": "lobby", "kind": "state",
+          "data": {
+            "entryAction": "room_key = 0; wake_up = 0",
+            "params": { "decomposition": "leaf", "isInitial": "true" }
+          },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "registering", "kind": "state",
+          "data": {
+            "params": { "decomposition": "leaf" }
+          },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "in_room", "kind": "state",
+          "data": {
+            "entryAction": "room_key = 1",
+            "exitAction":  "room_key = 0; wake_up = 0",
+            "params": { "decomposition": "leaf" }
+          },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } }
+      ],
+      "edges": [
+        { "id": "t_lobby_reg", "kind": "transition",
+          "label": "arrived",
+          "from": {"node": "lobby", "port": "out"},
+          "to":   {"node": "registering", "port": "in"},
+          "data": { "params": { "priority": "1" } } },
+        { "id": "t_reg_room", "kind": "transition",
+          "label": "paid",
+          "from": {"node": "registering", "port": "out"},
+          "to":   {"node": "in_room", "port": "in"},
+          "data": { "params": { "priority": "1" } } },
+        { "id": "t_alarm", "kind": "transition",
+          "label": "alarm_time/wake_up = 1",
+          "from": {"node": "in_room", "port": "out"},
+          "to":   {"node": "in_room", "port": "in"},
+          "data": { "params": { "priority": "1", "kind": "inner" } } },
+        { "id": "t_room_lobby", "kind": "transition",
+          "label": "departed",
+          "from": {"node": "in_room", "port": "out"},
+          "to":   {"node": "lobby", "port": "in"},
+          "data": { "params": { "priority": "2" } } }
+      ]
+    }
+  ]
+}

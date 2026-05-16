@@ -9,6 +9,9 @@
 #include "matlab/Flowchart/Loader.h"
 #include "matlab/Flowchart/MflowLinkModel.h"
 #include "matlab/Flowchart/MflowLinkSim.h"
+#include "matlab/StateChart/Interpreter.h"
+#include "matlab/StateChart/Lowering.h"
+#include "matlab/StateChart/StateChartIR.h"
 #include "matlab/Lex/Lexer.h"
 #include "matlab/Parse/Parser.h"
 #include "matlab/MIR/Lowering.h"
@@ -167,7 +170,8 @@ struct Options {
                     EmitLLVM, EmitC, EmitCpp, EmitPython, EmitTypeScript,
                     EmitFiReport, EmitSystemVerilog, CheckSynthesizable,
                     EmitHardwareReport, EmitCocotb,
-                    DumpFlow, EmitMatlab, EmitMflow, EmitMflowLinkCpp,
+                    DumpFlow, DumpChart, EmitMatlab, EmitMflow,
+                    EmitMflowLinkCpp,
                     Check, Repl, Format, Dap, Simulate };
   Mode Mode = Mode::Check;
   bool Opt = false;
@@ -369,6 +373,7 @@ bool parseArgs(int Argc, char **Argv, Options &Opts, const char *&Prog) {
     else if (A == "-emit-hardware-report" || A == "-emit-hw-report")
       Opts.Mode = Options::Mode::EmitHardwareReport;
     else if (A == "-dump-flow") Opts.Mode = Options::Mode::DumpFlow;
+    else if (A == "-dump-chart") Opts.Mode = Options::Mode::DumpChart;
     else if (A == "-emit-matlab" || A == "-emit-m")
       Opts.Mode = Options::Mode::EmitMatlab;
     else if (A == "-emit-mflow" || A == "-emit-flow")
@@ -2014,6 +2019,22 @@ static std::string buildReplPrelude(const std::string &Src) {
     {false, "optimproblem",           "optim_classdefs.m"},
     {false, "OptimizationExpression", "optim_classdefs.m"},
     {false, "OptimizationProblem",    "optim_classdefs.m"},
+    /* mStateflow Tier 4c — `mstateflow_helpers.m` exposes the small
+     * MATLAB-level surface (emit / save-op / restore-op / active /
+     * reset) that lets a REPL session drive a chart_tick function
+     * without ceremony. Pulled in on any `mstateflow_*` mention. */
+    {false, "mstateflow_emit",         "mstateflow_helpers.m"},
+    {false, "mstateflow_save_op",      "mstateflow_helpers.m"},
+    {false, "mstateflow_restore_op",   "mstateflow_helpers.m"},
+    {false, "mstateflow_active",       "mstateflow_helpers.m"},
+    {false, "mstateflow_reset",        "mstateflow_helpers.m"},
+    {false, "mstateflow_push_history", "mstateflow_helpers.m"},
+    {false, "mstateflow_pop_history",  "mstateflow_helpers.m"},
+    /* mStateflow Tier 4f — `stateChart` classdef wraps the
+     * <chart>_init / <chart>_tick functions emitted by the chart
+     * lowering and gives the REPL the same handle-style surface
+     * (`c = c.tick(in, ev)`) the CST / Optim classes use. */
+    {false, "stateChart",             "stateflow_classdefs.m"},
   };
   /* Source-mention scan: turn-0-style detection. */
   for (auto &W : Cls) if (mentions(W.Name)) W.active = true;
@@ -2259,6 +2280,20 @@ extern "C" int32_t     matlab_table_column_kind_idx(matlab_table *t,
 extern "C" double      matlab_categorical_length (matlab_categorical *c);
 extern "C" double      matlab_categorical_numcats(matlab_categorical *c);
 extern "C" double      matlab_duration_to_seconds(matlab_duration *d);
+
+/* mStateflow Tier 4c — forward decls for the chart-runtime snapshot
+ * helpers in runtime/runtime_mstateflow.cpp. File-scope so name
+ * lookup from inside namespace dap resolves to the global C symbol. */
+extern "C" {
+int    mstateflow_snapshot_save_blob(const char *Name, const void *Data,
+                                     size_t Len);
+size_t mstateflow_snapshot_size(const char *Name);
+int    mstateflow_snapshot_copy(const char *Name, void *Out, size_t Cap);
+void   mstateflow_snapshot_reset(void);
+int    mstateflow_snapshot_count(void);
+const char *mstateflow_snapshot_name(int Idx);
+size_t mstateflow_snapshot_name_size(int Idx);
+}
 
 namespace dap {
 
@@ -7404,6 +7439,474 @@ int runMflowLinkDap(const std::string &Path) {
   return 0;
 }
 
+/* ===========================================================================
+ * mStateflow — `matlabc -simulate --dap model.mflow` for a state-chart
+ *
+ * Tier 4e of docs/mStateflow_roadmap.md. Reuses the same JSON-RPC
+ * framing as `runMflowLinkDap`, namespaces every chart-specific verb
+ * under `stateChart/`. The session owns a `ChartInterpreter` — every
+ * `stepSuperStep` / `stepTransition` / `emit` mutates real chart
+ * state, and the resulting trace is streamed back as
+ * `stateChart/{stateEnter, stateExit, transitionFired, ...}` events.
+ * Breakpoints set via `stateChart/setStateBreakpoints` /
+ * `setTransitionBreakpoints` fire from inside the step and cause a
+ * `stopped` event matching DAP convention.
+ * ========================================================================= */
+int runStateChartDap(const std::string &Path) {
+  OriginalStdoutFd = dup(STDOUT_FILENO);
+  if (OriginalStdoutFd < 0) {
+    std::cerr << "matlabc -simulate --dap: dup(stdout) failed\n";
+    return 1;
+  }
+
+  matlab::SourceManager FlowSM;
+  matlab::DiagnosticEngine FlowDiag(FlowSM);
+  auto Doc = matlab::flowchart::loadMflowFromPath(FlowSM, Path, FlowDiag);
+  if (!Doc) { FlowDiag.printAll(); return 1; }
+  if (!Doc->isStateChart()) {
+    std::cerr << Path
+              << ": runStateChartDap requires a state-chart .mflow\n";
+    return 1;
+  }
+  auto Model = matlab::statechart::buildChartModel(*Doc, FlowDiag);
+  FlowDiag.printAll();
+  if (!Model) return 1;
+  const matlab::statechart::Chart *Entry = Model->entryChart();
+  if (!Entry && !Model->Charts.empty()) Entry = &Model->Charts.front();
+  if (!Entry) {
+    std::cerr << Path << ": state-chart document has no charts\n";
+    return 1;
+  }
+
+  matlab::statechart::ChartInterpreter Interp(*Entry);
+
+  // Stream the result of a step (initialise / super-step / step-
+  // transition) as DAP events in fire order. A `stopped` event is
+  // emitted on the first Breakpoint trace event so the IDE can
+  // freeze the canvas.
+  auto streamTrace =
+      [&](const std::vector<matlab::statechart::ChartTraceEvent> &Trace) {
+        using K = matlab::statechart::ChartTraceEvent::Kind;
+        bool StoppedSent = false;
+        for (auto &E : Trace) {
+          switch (E.K) {
+          case K::SuperStepBegin:
+            sendEvent("stateChart/superStepBegin",
+                      Object{{"iteration", (int64_t)E.Iteration}, {"t", 0.0}});
+            break;
+          case K::SuperStepEnd:
+            sendEvent("stateChart/superStepEnd",
+                      Object{{"iteration", (int64_t)E.Iteration},
+                             {"quiescent", E.Quiescent},
+                             {"t", 0.0}});
+            break;
+          case K::StateEnter:
+            sendEvent("stateChart/stateEnter",
+                      Object{{"id", E.Id}, {"t", 0.0}});
+            break;
+          case K::StateExit:
+            sendEvent("stateChart/stateExit",
+                      Object{{"id", E.Id}, {"t", 0.0}});
+            break;
+          case K::TransitionFired: {
+            Object Body{
+              {"id", E.Id}, {"src", E.Src}, {"dst", E.Dst}, {"t", 0.0}};
+            if (!E.EventName.empty()) Body["eventName"] = E.EventName;
+            sendEvent("stateChart/transitionFired", std::move(Body));
+            break;
+          }
+          case K::EventBroadcast:
+            sendEvent("stateChart/eventBroadcast",
+                      Object{{"name", E.Id}, {"t", 0.0}});
+            break;
+          case K::Breakpoint:
+            if (!StoppedSent) {
+              sendEvent("stopped",
+                        Object{{"reason", "breakpoint"},
+                               {"description", E.BreakpointReason + " " +
+                                                   E.Id},
+                               {"threadId", (int64_t)1}});
+              StoppedSent = true;
+            }
+            break;
+          case K::MaxIterations:
+            sendEvent("stateChart/maxIterations",
+                      Object{{"iteration", (int64_t)E.Iteration}, {"t", 0.0}});
+            break;
+          }
+        }
+      };
+
+  // Serialised snapshot blob format: simple text "key=value\n" lines —
+  // enough to round-trip Regions + Locals + History between save and
+  // restore. The C-side ring stores it as bytes; the chart-DAP side
+  // re-parses on restore.
+  auto serializeSnapshot =
+      [&](const matlab::statechart::ChartInterpreter::Snapshot &S) {
+        std::string Out;
+        Out += "R\n";
+        for (auto &P : S.Regions)
+          Out += "r " + P.first + " " + P.second + "\n";
+        Out += "L\n";
+        for (auto &P : S.Locals)
+          Out += "l " + P.first + " " + std::to_string(P.second) + "\n";
+        Out += "H\n";
+        for (auto &P : S.History)
+          Out += "h " + P.first + " " + P.second + "\n";
+        return Out;
+      };
+  auto deserializeSnapshot =
+      [](const std::string &Blob)
+      -> matlab::statechart::ChartInterpreter::Snapshot {
+        matlab::statechart::ChartInterpreter::Snapshot S;
+        size_t i = 0;
+        while (i < Blob.size()) {
+          size_t nl = Blob.find('\n', i);
+          if (nl == std::string::npos) nl = Blob.size();
+          std::string Line = Blob.substr(i, nl - i);
+          i = nl + 1;
+          if (Line.size() < 2) continue;
+          char Tag = Line[0];
+          if (Tag != 'r' && Tag != 'l' && Tag != 'h') continue;
+          size_t sp = Line.find(' ', 2);
+          if (sp == std::string::npos) continue;
+          std::string K = Line.substr(2, sp - 2);
+          std::string V = Line.substr(sp + 1);
+          if (Tag == 'r') S.Regions[K] = V;
+          else if (Tag == 'l') {
+            try { S.Locals[K] = std::stod(V); } catch (...) {}
+          } else if (Tag == 'h') S.History[K] = V;
+        }
+        return S;
+      };
+
+  bool ConfDone = false;
+  std::ios::sync_with_stdio(false);
+  while (true) {
+    auto Msg = readFrame();
+    if (!Msg) break;
+    if (getenv("MATLABC_DAP_TRACE")) {
+      std::fprintf(stderr, "[chart-dap] frame: len=%zu \"%s\"\n",
+                   Msg->size(),
+                   Msg->substr(0, 80).c_str());
+    }
+    if (Msg->empty()) continue;
+    auto Parsed = llvm::json::parse(*Msg);
+    if (!Parsed) { llvm::consumeError(Parsed.takeError()); continue; }
+    const Object *O = Parsed->getAsObject();
+    if (!O) continue;
+    auto Ty = O->getString("type");
+    if (!Ty || *Ty != "request") continue;
+    auto Cmd = O->getString("command");
+    int64_t Seq = O->getInteger("seq").value_or(0);
+    if (!Cmd) continue;
+    if (getenv("MATLABC_DAP_TRACE")) {
+      std::fprintf(stderr, "[chart-dap] recv: command=%s seq=%lld\n",
+                   Cmd->str().c_str(), (long long)Seq);
+    }
+
+    if (*Cmd == "initialize") {
+      Object Caps{
+        {"supportsConfigurationDoneRequest", true},
+        {"supportsStateChartProtocol", true},
+      };
+      sendResponse(Seq, *Cmd, true, std::move(Caps));
+      sendEvent("initialized");
+      continue;
+    }
+    if (*Cmd == "launch" || *Cmd == "attach") {
+      sendResponse(Seq, *Cmd, true, Object{});
+      continue;
+    }
+    if (*Cmd == "configurationDone") {
+      sendResponse(Seq, *Cmd, true, Object{});
+      ConfDone = true;
+      streamTrace(Interp.initialize());
+      continue;
+    }
+    if (*Cmd == "disconnect" || *Cmd == "terminate") {
+      sendResponse(Seq, *Cmd, true, Object{});
+      break;
+    }
+
+    // --- stateChart-namespaced verbs ---------------------------------
+    if (*Cmd == "stateChart/setStateBreakpoints") {
+      std::vector<std::string> Enter, Exit;
+      const Object *Args = O->getObject("arguments");
+      if (Args) {
+        bool OnEnter = Args->getBoolean("onEnter").value_or(true);
+        bool OnExit  = Args->getBoolean("onExit").value_or(false);
+        const Array *Ids = Args->getArray("ids");
+        if (Ids) {
+          for (auto &V : *Ids) {
+            auto S = V.getAsString();
+            if (!S) continue;
+            if (OnEnter) Enter.push_back(S->str());
+            if (OnExit)  Exit.push_back(S->str());
+          }
+        }
+      }
+      Interp.setStateEnterBreakpoints(Enter);
+      Interp.setStateExitBreakpoints(Exit);
+      sendResponse(Seq, *Cmd, true,
+                   Object{{"verified", true},
+                          {"count", (int64_t)Enter.size() +
+                                    (int64_t)Exit.size()}});
+      continue;
+    }
+    if (*Cmd == "stateChart/setTransitionBreakpoints") {
+      std::vector<std::string> Ids;
+      const Object *Args = O->getObject("arguments");
+      if (Args) {
+        const Array *Arr = Args->getArray("ids");
+        if (Arr) {
+          for (auto &V : *Arr) {
+            auto S = V.getAsString();
+            if (!S) continue;
+            Ids.push_back(S->str());
+          }
+        }
+      }
+      Interp.setTransitionBreakpoints(Ids);
+      sendResponse(Seq, *Cmd, true,
+                   Object{{"verified", true}, {"count", (int64_t)Ids.size()}});
+      continue;
+    }
+    if (*Cmd == "stateChart/setSymbolBreakpoints") {
+      // Tier 5 — right-click a symbol in the Symbols pane → "Break
+      // on change". Pause when any of these locals' value is updated
+      // by an entry / during / exit / cond / trans / on-event action.
+      std::vector<std::string> Names;
+      const Object *Args = O->getObject("arguments");
+      if (Args) {
+        const Array *Arr = Args->getArray("names");
+        if (Arr) {
+          for (auto &V : *Arr) {
+            auto S = V.getAsString();
+            if (!S) continue;
+            Names.push_back(S->str());
+          }
+        }
+      }
+      Interp.setSymbolBreakpoints(Names);
+      sendResponse(Seq, *Cmd, true,
+                   Object{{"verified", true}, {"count", (int64_t)Names.size()}});
+      continue;
+    }
+    if (*Cmd == "stateChart/emit") {
+      const Object *Args = O->getObject("arguments");
+      auto Name = Args ? Args->getString("name") : std::nullopt;
+      if (Name) Interp.emit(Name->str());
+      sendResponse(Seq, *Cmd, true,
+                   Object{{"name", Name ? Name->str() : std::string()}});
+      continue;
+    }
+    if (*Cmd == "stateChart/setLocal") {
+      const Object *Args = O->getObject("arguments");
+      auto Name = Args ? Args->getString("name") : std::nullopt;
+      auto Val  = Args ? Args->getNumber("value") : std::nullopt;
+      if (Name && Val) Interp.setLocal(Name->str(), *Val);
+      sendResponse(Seq, *Cmd, true, Object{});
+      continue;
+    }
+    if (*Cmd == "stateChart/getActive") {
+      Array Ids;
+      for (auto &Id : Interp.activeStates()) Ids.push_back(Id);
+      sendResponse(Seq, *Cmd, true, Object{{"ids", std::move(Ids)}});
+      continue;
+    }
+    if (*Cmd == "stateChart/getLocals") {
+      // Snapshot every local + its current value. Pairs with the
+      // Active-State pane's live-inspector row during pause.
+      Object Locals;
+      for (auto &P : Interp.allLocals()) Locals[P.first] = P.second;
+      sendResponse(Seq, *Cmd, true,
+                   Object{{"locals", std::move(Locals)}});
+      continue;
+    }
+    if (*Cmd == "stateChart/listStates") {
+      // Flat list of every state in the chart. Parent / decomposition
+      // / initial-flag fields let the IDE recreate the hierarchy tree
+      // without re-parsing the .mflow source.
+      Array Out;
+      for (auto &P : Entry->States) {
+        const matlab::statechart::ChartState &S = P.second;
+        Object O{
+          {"id", S.Id},
+          {"label", S.Label},
+          {"parent", S.ParentId},
+          {"decomposition",
+              std::string(matlab::statechart::decompositionName(S.Decomp))},
+          {"isInitial", S.IsInitial},
+          {"hasHistory", S.HasHistory},
+          {"atomic", S.Atomic},
+        };
+        if (S.ExecutionOrder)
+          O["executionOrder"] = (int64_t)*S.ExecutionOrder;
+        Out.push_back(std::move(O));
+      }
+      sendResponse(Seq, *Cmd, true, Object{{"states", std::move(Out)}});
+      continue;
+    }
+    if (*Cmd == "stateChart/listJunctions") {
+      // Every connective / history / entry / exit / default junction
+      // in the chart. The IDE renders glyphs from this without
+      // re-parsing the FlowDoc.
+      Array Out;
+      for (auto &P : Entry->Junctions) {
+        const matlab::statechart::ChartJunction &J = P.second;
+        Out.push_back(Object{
+          {"id", J.Id},
+          {"kind",
+              std::string(matlab::statechart::junctionKindName(J.Kind))},
+          {"parent", J.ParentId},
+        });
+      }
+      sendResponse(Seq, *Cmd, true, Object{{"junctions", std::move(Out)}});
+      continue;
+    }
+    if (*Cmd == "stateChart/listTransitions") {
+      // One entry per transition with its parsed label fields. The IDE
+      // breakpoint UI uses this to populate "fire on" pickers.
+      Array Out;
+      for (auto &T : Entry->Transitions) {
+        Object O{
+          {"id", T.Id},
+          {"src", T.SourceId},
+          {"dst", T.DestId},
+          {"kind",
+              std::string(matlab::statechart::transitionKindName(T.Kind))},
+          {"priority", (int64_t)T.Priority},
+        };
+        if (!T.Label.Raw.empty())         O["label"]      = T.Label.Raw;
+        if (!T.Label.Event.empty())       O["event"]      = T.Label.Event;
+        if (!T.Label.Guard.empty())       O["guard"]      = T.Label.Guard;
+        if (!T.Label.CondAction.empty())  O["condAction"] = T.Label.CondAction;
+        if (!T.Label.TransAction.empty()) O["transAction"]= T.Label.TransAction;
+        Out.push_back(std::move(O));
+      }
+      sendResponse(Seq, *Cmd, true, Object{{"transitions", std::move(Out)}});
+      continue;
+    }
+    if (*Cmd == "stateChart/listEvents") {
+      // Symbol table → events bucket. Lets the IDE populate the
+      // "broadcast" combobox in the Command Window.
+      Array Out;
+      for (auto &E : Entry->Symbols.Events) {
+        Object O{{"name", E.Name}};
+        if (!E.Scope.empty())   O["scope"]   = E.Scope;
+        if (!E.Trigger.empty()) O["trigger"] = E.Trigger;
+        Out.push_back(std::move(O));
+      }
+      sendResponse(Seq, *Cmd, true, Object{{"events", std::move(Out)}});
+      continue;
+    }
+    if (*Cmd == "stateChart/listSymbols") {
+      // Every data + message slot the chart declares. The Symbols
+      // inspector tab reads this; the IDE doesn't need to re-parse
+      // the .mflow JSON itself.
+      auto emitSym = [&](const matlab::flowchart::Symbol &S,
+                         const char *Bucket) {
+        Object O{{"name", S.Name}, {"bucket", std::string(Bucket)}};
+        if (!S.Scope.empty())   O["scope"]   = S.Scope;
+        if (!S.Type.empty())    O["type"]    = S.Type;
+        if (!S.Units.empty())   O["units"]   = S.Units;
+        if (!S.Initial.empty()) O["initial"] = S.Initial;
+        return O;
+      };
+      Array Out;
+      for (auto &S : Entry->Symbols.Data)     Out.push_back(emitSym(S, "data"));
+      for (auto &S : Entry->Symbols.Messages) Out.push_back(emitSym(S, "message"));
+      sendResponse(Seq, *Cmd, true, Object{{"symbols", std::move(Out)}});
+      continue;
+    }
+    if (*Cmd == "stateChart/listSnapshots") {
+      // Names currently in the runtime snapshot ring. Sizes included
+      // so the IDE can show a footprint column in the snapshots panel.
+      Array Out;
+      int N = ::mstateflow_snapshot_count();
+      for (int I = 0; I < N; ++I) {
+        const char *Nm = ::mstateflow_snapshot_name(I);
+        size_t Sz = ::mstateflow_snapshot_name_size(I);
+        if (!Nm) continue;
+        Out.push_back(Object{{"name", std::string(Nm)},
+                             {"bytes", (int64_t)Sz}});
+      }
+      sendResponse(Seq, *Cmd, true, Object{{"snapshots", std::move(Out)}});
+      continue;
+    }
+    if (*Cmd == "stateChart/stepSuperStep") {
+      auto Trace = Interp.superStep();
+      streamTrace(Trace);
+      // Cheap count for the IDE: how many transitions fired.
+      int64_t Fired = 0;
+      bool Quiescent = false;
+      using TK = matlab::statechart::ChartTraceEvent::Kind;
+      for (auto &E : Trace) {
+        if (E.K == TK::TransitionFired) ++Fired;
+        if (E.K == TK::SuperStepEnd)    Quiescent = E.Quiescent;
+      }
+      sendResponse(Seq, *Cmd, true,
+                   Object{{"quiescent", Quiescent}, {"firedCount", Fired}});
+      continue;
+    }
+    if (*Cmd == "stateChart/stepTransition") {
+      auto Trace = Interp.stepTransition();
+      streamTrace(Trace);
+      int64_t Fired = 0;
+      using TK = matlab::statechart::ChartTraceEvent::Kind;
+      for (auto &E : Trace) if (E.K == TK::TransitionFired) ++Fired;
+      sendResponse(Seq, *Cmd, true,
+                   Object{{"fired", Fired > 0}, {"firedCount", Fired}});
+      continue;
+    }
+    if (*Cmd == "stateChart/saveOperatingPoint") {
+      const Object *Args = O->getObject("arguments");
+      auto Name = Args ? Args->getString("name") : std::nullopt;
+      std::string N = Name ? Name->str() : std::string("default");
+      std::string Blob = serializeSnapshot(Interp.snapshot());
+      ::mstateflow_snapshot_save_blob(N.c_str(), Blob.data(), Blob.size());
+      sendResponse(Seq, *Cmd, true,
+                   Object{{"name", N}, {"bytes", (int64_t)Blob.size()}});
+      continue;
+    }
+    if (*Cmd == "stateChart/restoreOperatingPoint") {
+      const Object *Args = O->getObject("arguments");
+      auto Name = Args ? Args->getString("name") : std::nullopt;
+      std::string N = Name ? Name->str() : std::string("default");
+      size_t Sz = ::mstateflow_snapshot_size(N.c_str());
+      if (Sz == 0) {
+        sendResponse(Seq, *Cmd, false,
+                     Object{{"name", N},
+                            {"reason", "unknown snapshot"}});
+        continue;
+      }
+      std::string Blob(Sz, '\0');
+      ::mstateflow_snapshot_copy(N.c_str(), Blob.data(), Sz);
+      Interp.restore(deserializeSnapshot(Blob));
+      sendResponse(Seq, *Cmd, true, Object{{"name", N}, {"restored", true}});
+      // Refresh the IDE's view of active state via a synthetic
+      // super-step boundary (no events fired, just announce the new
+      // active configuration).
+      sendEvent("stateChart/superStepBegin",
+                Object{{"iteration", (int64_t)0}, {"t", 0.0}});
+      for (auto &Id : Interp.activeStates())
+        sendEvent("stateChart/stateEnter",
+                  Object{{"id", Id}, {"t", 0.0}});
+      sendEvent("stateChart/superStepEnd",
+                Object{{"iteration", (int64_t)0},
+                       {"quiescent", true},
+                       {"t", 0.0}});
+      continue;
+    }
+
+    // Unknown command — ack with success to keep the IDE happy.
+    (void)ConfDone;
+    sendResponse(Seq, *Cmd, true, Object{});
+  }
+  return 0;
+}
+
 } // namespace dap
 #endif
 
@@ -9678,6 +10181,30 @@ int main(int Argc, char **Argv) {
     return FlowDiag.hasErrors() ? 1 : 0;
   }
 
+  /* mStateflow Tier 0/4a — `matlabc -dump-chart chart.mflow` loads a
+   * state-chart `.mflow`, lowers it to the resolved chart IR, and
+   * prints a stable text dump for golden-file tests. Errors out when
+   * the input is not a state-chart document. */
+  if (Opts.Mode == Options::Mode::DumpChart) {
+    SourceManager FlowSM;
+    DiagnosticEngine FlowDiag(FlowSM);
+    auto Doc = matlab::flowchart::loadMflowFromPath(FlowSM, Opts.InputPath,
+                                                    FlowDiag);
+    if (Doc) {
+      if (!Doc->isStateChart()) {
+        std::cerr << Opts.InputPath
+                  << ": -dump-chart requires a state-chart .mflow "
+                     "(got settings.kind=\""
+                  << Doc->Settings.Kind << "\")\n";
+        return 1;
+      }
+      auto Model = matlab::statechart::buildChartModel(*Doc, FlowDiag);
+      if (Model) matlab::statechart::dumpChartModel(std::cout, *Model);
+    }
+    FlowDiag.printAll();
+    return FlowDiag.hasErrors() ? 1 : 0;
+  }
+
   /* mflowLink Tier G — `matlabc -emit-mflowlink-cpp model.mflow` emits
    * a self-contained C++ file to stdout: the original .mflow JSON
    * embedded as a raw string literal plus a small `main()` that
@@ -9787,6 +10314,106 @@ int main(int Argc, char **Argv) {
     if (!Doc) {
       FlowDiag.printAll();
       return 1;
+    }
+    if (Doc->isStateChart()) {
+      /* mStateflow Tier 4d — `-simulate` on a state-chart .mflow
+       * lowers to MATLAB and prints a smoke trace: N super-step
+       * iterations starting from the initial active configuration,
+       * one line per tick showing the active region-vector. Real
+       * driver scripts (REPL / IDE) get their interactivity through
+       * the `<chart>_tick` function the lowering emits — this lane
+       * just confirms the chart simulates end-to-end.  --dry-run
+       * short-circuits to the chart IR dump (same as `-dump-chart`)
+       * so the existing CTest goldens cover this path too. */
+#if MATLAB_LLVM_WITH_MLIR
+      // Tier 4e — `-simulate --sim-dap` on a chart .mflow boots the
+      // chart-namespaced DAP server.
+      if (Opts.SimulateDap) {
+        return dap::runStateChartDap(Opts.InputPath);
+      }
+#else
+      if (Opts.SimulateDap) {
+        std::cerr << "matlabc was built without MLIR support; "
+                     "-simulate --sim-dap is unavailable\n";
+        return 1;
+      }
+#endif
+      auto Model = matlab::statechart::buildChartModel(*Doc, FlowDiag);
+      FlowDiag.printAll();
+      if (!Model) return 1;
+      if (Opts.DryRun) {
+        matlab::statechart::dumpChartModel(std::cout, *Model);
+        return 0;
+      }
+      const matlab::statechart::Chart *Entry = Model->entryChart();
+      if (!Entry && !Model->Charts.empty()) Entry = &Model->Charts.front();
+      if (!Entry) {
+        std::cerr << Opts.InputPath
+                  << ": state-chart document has no charts\n";
+        return 1;
+      }
+      auto Lowered = matlab::statechart::lowerChartToMatlab(*Entry, FlowDiag);
+      FlowDiag.printAll();
+      if (!Lowered) return 1;
+      // Drive the C++ chart interpreter and print a deterministic
+      // trace. By default we run the initial entry chain plus N
+      // super-steps with no external events; the chart settles into
+      // its quiescent post-entry configuration and we dump the
+      // active-state vector. Real driver scripts get richer control
+      // through the chart_tick MATLAB lowering or the chart DAP
+      // server (`-simulate --sim-dap`).
+      matlab::statechart::ChartInterpreter Interp(*Entry);
+      std::cout << "% mStateflow -simulate trace for chart \""
+                << Entry->Name << "\"\n";
+      auto printEvent =
+          [&](const matlab::statechart::ChartTraceEvent &E) {
+            using K = matlab::statechart::ChartTraceEvent::Kind;
+            switch (E.K) {
+            case K::SuperStepBegin:
+              std::cout << "[superStepBegin iter=" << E.Iteration << "]\n";
+              break;
+            case K::SuperStepEnd:
+              std::cout << "[superStepEnd iter=" << E.Iteration
+                        << " quiescent=" << (E.Quiescent ? "true" : "false")
+                        << "]\n";
+              break;
+            case K::StateEnter:
+              std::cout << "+enter " << E.Id << "\n";
+              break;
+            case K::StateExit:
+              std::cout << "-exit  " << E.Id << "\n";
+              break;
+            case K::TransitionFired:
+              std::cout << ">fire  " << E.Id << " (" << E.Src << " -> "
+                        << E.Dst;
+              if (!E.EventName.empty()) std::cout << " on " << E.EventName;
+              std::cout << ")\n";
+              break;
+            case K::EventBroadcast:
+              std::cout << "*event " << E.Id << "\n";
+              break;
+            case K::Breakpoint:
+              std::cout << "!break " << E.BreakpointReason << " " << E.Id
+                        << "\n";
+              break;
+            case K::MaxIterations:
+              std::cout << "!warn  super-step did not converge within "
+                        << E.Iteration << " iterations\n";
+              break;
+            }
+          };
+      auto Init = Interp.initialize();
+      for (auto &E : Init) printEvent(E);
+      // Run one no-event super-step to exercise during actions /
+      // self-firing transitions. Charts that need external events
+      // sit quiescent here, which is the right CLI behaviour.
+      auto Step = Interp.superStep();
+      for (auto &E : Step) printEvent(E);
+      // Final active-state vector for at-a-glance verification.
+      std::cout << "active@end:";
+      for (auto &Id : Interp.activeStates()) std::cout << " " << Id;
+      std::cout << "\n";
+      return 0;
     }
     if (!Doc->isSignalFlow()) {
       std::cerr << Opts.InputPath
@@ -10230,6 +10857,47 @@ int main(int Argc, char **Argv) {
     }
     auto Doc = matlab::flowchart::loadMflow(SM, F, Diag);
     if (Doc) {
+      /* mStateflow Tier 4 — a state-chart .mflow lowers to MATLAB
+       * source (Lowering.cpp), which is then fed through the existing
+       * lex/parse/sema/codegen pipeline so every -emit-* lane works
+       * without further special-casing. -emit-matlab prints the
+       * lowered source verbatim and exits; other modes drop the
+       * lowered MATLAB into the SourceManager and continue. */
+      if (Doc->isStateChart()) {
+        auto Model = matlab::statechart::buildChartModel(*Doc, Diag);
+        if (!Model) { Diag.printAll(); return 1; }
+        const matlab::statechart::Chart *Entry = Model->entryChart();
+        if (!Entry && !Model->Charts.empty()) Entry = &Model->Charts.front();
+        if (!Entry) {
+          std::cerr << Opts.InputPath
+                    << ": state-chart document has no charts\n";
+          return 1;
+        }
+        auto Lowered =
+            matlab::statechart::lowerChartToMatlab(*Entry, Diag);
+        if (!Lowered) { Diag.printAll(); return 1; }
+        if (Opts.Mode == Options::Mode::EmitMatlab ||
+            Opts.Mode == Options::Mode::Format) {
+          std::cout << Lowered->MatlabSource;
+          Diag.printAll();
+          return Diag.hasErrors() ? 1 : 0;
+        }
+        // For every other mode (-emit-c / -emit-cpp / -emit-mir / ...)
+        // re-enter the standard .m pipeline on the lowered source.
+        FileID Synth = SM.addBuffer(Opts.InputPath + ".lowered.m",
+                                    Lowered->MatlabSource);
+        Lexer Lx(SM, Synth, Diag);
+        Toks = Lx.tokenize();
+        Parser P(std::move(Toks), Ctx, Diag);
+        TU = P.parseFile();
+        if (Opts.Mode == Options::Mode::DumpTokens) {
+          Diag.printAll();
+          return Diag.hasErrors() ? 1 : 0;
+        }
+        // Fall through into the post-load `if (Opts.Mode ==
+        // DumpAST)` / sema / MLIR / emit-* dispatch below.
+        goto state_chart_lowered;
+      }
       // Embedded Coder, Tier 7d — whole-diagram cocotb SIL emit.
       // `matlabc -emit-cocotb <model.mflow> --dut <block>` short-
       // circuits the regular AST + Sema + MLIR pipeline: the entry
@@ -10349,6 +11017,11 @@ int main(int Argc, char **Argv) {
     Parser P(std::move(Toks), Ctx, Diag);
     TU = P.parseFile();
   }
+  // mStateflow Tier 4 — landing pad for the state-chart lowering
+  // path. After it injects the lowered .m into SM and produces a TU,
+  // control jumps here so the downstream sema / MLIR / emit-* dispatch
+  // applies uniformly with control-flow / signal-flow inputs.
+  state_chart_lowered: ;
 
   if (Opts.Mode == Options::Mode::DumpAST) {
     if (TU) dumpAST(std::cout, *TU);
