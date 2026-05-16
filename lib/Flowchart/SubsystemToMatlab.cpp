@@ -3195,4 +3195,487 @@ std::string emitSubsystemClassWrapper(const SubsystemMeta &M,
   return {};
 }
 
+//===----------------------------------------------------------------------===//
+// Tier-7 — whole-diagram emit.
+//
+// Walks the entry flow (kind=program or function), categorises
+// each block as source / sink / stateful internal / stateless
+// internal, and synthesises a `simulate()` Function with:
+//
+//     function [<log_1>, <log_2>, ..., <log_M>, t_log] = simulate()
+//         <state-var init>
+//         <log array preallocation>
+//         for k = 1 : N
+//             t = (k - 1) * Ts;
+//             <source generators consume t>
+//             <internal-block dispatch — state read / compute / state update>
+//             <sink logging — log_q(k) = upstream>
+//         end
+//     end
+//
+// Wraps the result in a TU + driver call so the downstream -emit-*
+// lanes type-refine through. SystemVerilog whole-diagram is
+// deliberately rejected here — the SV emit lane stays per-
+// subsystem; whole-diagram simulation lives on the host.
+//===----------------------------------------------------------------------===//
+
+namespace {
+
+bool isSourceKind(const std::string &K) {
+  return K == "signal_sine" || K == "signal_step" ||
+         K == "signal_ramp" || K == "signal_constant" ||
+         K == "signal_pulse" || K == "signal_clock" ||
+         K == "signal_function_call_generator";
+}
+
+bool isDiagramSink(const std::string &K) {
+  return K == "signal_scope" || K == "signal_to_workspace" ||
+         K == "signal_display" || K == "signal_terminator";
+}
+
+// Emit the source block's `<out> = expr(t)` at the per-tick site.
+// `T` is the current-time variable name (always "t" in the
+// emitted body). Returns an expression that reads as the source's
+// instantaneous value at time `t`.
+Expr *lowerSourceExpr(const Node &N, const std::string &TVar,
+                       ASTBuilder &B) {
+  const std::string &K = N.Kind;
+  if (K == "signal_constant") {
+    return B.number(paramD(N, "value", 0.0));
+  }
+  if (K == "signal_clock") {
+    return B.name(TVar);
+  }
+  if (K == "signal_step") {
+    // out = (t >= stepTime) ? finalValue : initialValue
+    double ST = paramD(N, "stepTime", 1.0);
+    double IV = paramD(N, "initialValue", 0.0);
+    double FV = paramD(N, "finalValue", 1.0);
+    auto *Cond = B.bin(BinOp::Ge, B.name(TVar), B.number(ST));
+    auto *Diff = B.bin(BinOp::Sub, B.number(FV), B.number(IV));
+    auto *Mul  = B.bin(BinOp::ElemMul, Cond, Diff);
+    return B.bin(BinOp::Add, B.number(IV), Mul);
+  }
+  if (K == "signal_sine") {
+    // out = amp * sin(freq * t + phase) + bias.  The simulator
+    // treats `frequency` as angular ω (rad/s) — match that
+    // convention exactly so the cosim diff stays tight.
+    double A  = paramD(N, "amplitude", 1.0);
+    double F  = paramD(N, "frequency", 1.0);
+    double P  = paramD(N, "phase", 0.0);
+    double Bs = paramD(N, "bias", 0.0);
+    auto *Arg = B.bin(BinOp::ElemMul, B.number(F), B.name(TVar));
+    Arg = B.bin(BinOp::Add, Arg, B.number(P));
+    auto *Sin = B.call("sin", {Arg});
+    auto *Scaled = B.bin(BinOp::ElemMul, B.number(A), Sin);
+    return B.bin(BinOp::Add, Scaled, B.number(Bs));
+  }
+  if (K == "signal_ramp") {
+    // out = (t >= start) ? init + slope * (t - start) : init
+    double Slope = paramD(N, "slope", 1.0);
+    double Start = paramD(N, "startTime", 0.0);
+    double Init  = paramD(N, "initialOutput", 0.0);
+    auto *Cond = B.bin(BinOp::Ge, B.name(TVar), B.number(Start));
+    auto *Dt = B.bin(BinOp::Sub, B.name(TVar), B.number(Start));
+    auto *Slope_Dt = B.bin(BinOp::ElemMul, B.number(Slope), Dt);
+    auto *Mul = B.bin(BinOp::ElemMul, Cond, Slope_Dt);
+    return B.bin(BinOp::Add, B.number(Init), Mul);
+  }
+  if (K == "signal_pulse") {
+    // out = (mod(t - phase, period) < period * width / 100) ? amp : 0
+    double A   = paramD(N, "amplitude", 1.0);
+    double Pp  = paramD(N, "period", 1.0);
+    double W   = paramD(N, "pulseWidth", 50.0);
+    double Phd = paramD(N, "phaseDelay", 0.0);
+    auto *Shifted = B.bin(BinOp::Sub, B.name(TVar), B.number(Phd));
+    auto *Mod = B.call("mod", {Shifted, B.number(Pp)});
+    auto *Cond = B.bin(BinOp::Lt, Mod, B.number(Pp * W * 0.01));
+    return B.bin(BinOp::ElemMul, Cond, B.number(A));
+  }
+  // Default — emit 0.0.  Unknown source kinds (function_call_generator,
+  // band-limited noise, etc.) lower as constant zero; the diagnostic
+  // path catches this at the dispatch layer below.
+  return B.number(0.0);
+}
+
+} // namespace
+
+matlab::TranslationUnit *buildDiagramTU(
+    const FlowDoc &Doc,
+    const std::string &EntryFlowName,
+    matlab::ASTContext &AST,
+    matlab::DiagnosticEngine &Diag,
+    const SubsystemEmitOptions &Opts) {
+  // HDL whole-diagram is out of scope — sources/sinks are host-
+  // side; SV stays per-subsystem.
+  if (Opts.StateAsPersistent) {
+    Diag.error(SourceLocation{},
+               "whole-diagram emit doesn't support SystemVerilog "
+               "(Tier-7 carve-out): use `--subsystem <name>` to "
+               "emit a single subsystem instead");
+    return nullptr;
+  }
+
+  const Flow *Entry = Doc.findFlow(EntryFlowName);
+  if (!Entry) {
+    Diag.error(SourceLocation{},
+               "flow \"" + EntryFlowName +
+                   "\" not found in `.mflow` document");
+    return nullptr;
+  }
+  // Tick-count + period resolution.  Priority order:
+  //   1. SubsystemEmitOptions.TargetRate / explicit --ticks (carved
+  //      out of CLI surface — falls back to settings.solver).
+  //   2. settings.solver.maxStep + stopTime - startTime.
+  //   3. Default Ts = 0.01, N = 100 (so cold-start emits still run).
+  double Ts = Opts.TargetRate;
+  double Tstart = 0.0, Tstop = 0.0;
+  if (Doc.Settings.Solver.has_value()) {
+    const auto &SC = *Doc.Settings.Solver;
+    if (Ts <= 0.0 && SC.MaxStep != "auto") {
+      try { Ts = std::stod(SC.MaxStep); } catch (...) {}
+    }
+    Tstart = SC.StartTime;
+    Tstop  = SC.StopTime;
+  }
+  if (Ts <= 0.0) Ts = 0.01;
+  double Span = Tstop - Tstart;
+  int NTicks = Span > 0.0 ? (int)std::round(Span / Ts) : 100;
+  if (NTicks < 1) NTicks = 1;
+
+  ASTBuilder B{AST};
+  // Sema-friendly: leave WrapFi off for whole-diagram emit; the
+  // function operates in f64 throughout (no HDL).
+  EdgeIndex EI = buildEdgeIndex(*Entry);
+
+  // Categorise blocks.
+  std::vector<const Node *> Sources, Sinks, Internal;
+  for (const auto &N : Entry->Nodes) {
+    if (N.Kind == "signal_inport" || N.Kind == "signal_outport")
+      continue;  // boundary tags ignored at whole-diagram level
+    if (isSourceKind(N.Kind)) { Sources.push_back(&N); continue; }
+    if (isDiagramSink(N.Kind)) { Sinks.push_back(&N); continue; }
+    Internal.push_back(&N);
+  }
+
+  // Variable allocation: one local per block output; one log
+  // array per scope/to_workspace sink (display/terminator drop
+  // their input). State slots for stateful internal blocks
+  // declared as local vars updated in place (no return-thread).
+  std::set<std::string> Used{"t", "k", "Ts", "N", "simulate"};
+  auto uniqueName = [&](const std::string &Base) {
+    std::string Cand = sanitizeIdent(Base);
+    if (Cand.empty()) Cand = "v";
+    std::string Name = Cand;
+    int Suffix = 1;
+    while (Used.count(Name))
+      Name = Cand + "_" + std::to_string(++Suffix);
+    Used.insert(Name);
+    return Name;
+  };
+  std::unordered_map<std::string, std::string> VarOfNode;
+  for (const auto *N : Sources)  VarOfNode[N->Id] = uniqueName(N->Id);
+  for (const auto *N : Internal) VarOfNode[N->Id] = uniqueName(N->Id);
+
+  // Sinks logged per-block: log_<id> is the array name.  The
+  // function's return list is the sink columns in source order
+  // followed by the `t_log` column (always last).
+  struct SinkLog {
+    const Node *N;
+    std::string Var;       // log_<id>
+    std::string Source;    // upstream block id
+    std::string SourcePort;
+  };
+  std::vector<SinkLog> Logs;
+  for (const auto *N : Sinks) {
+    if (N->Kind == "signal_terminator") continue;  // drop
+    SinkLog L;
+    L.N = N;
+    L.Var = uniqueName("log_" + N->Id);
+    // Find the upstream feeding the sink's first input port.
+    for (const auto &P : N->InPorts) {
+      auto It = EI.Map.find({N->Id, P.Id});
+      if (It != EI.Map.end()) {
+        L.Source = It->second.first;
+        L.SourcePort = It->second.second;
+        break;
+      }
+    }
+    Logs.push_back(L);
+  }
+  std::string TLog = uniqueName("t_log");
+
+  // State for stateful internal blocks. Use a similar StateSlot
+  // structure as lowerSubsystemImpl, BUT with state as plain
+  // local vars (no function-arg threading).
+  struct LocalStateSlot {
+    const Node *N;
+    std::string Var;      // current state local
+    double Init;          // initial value (from block's IC or 0)
+    int Epoch = 1;        // multirate epoch
+    std::string PhaseVar; // optional per-block phase counter
+  };
+  std::vector<LocalStateSlot> States;
+  auto stateOrderForBlock = [&](const Node *N) -> int {
+    if (N->Kind == "signal_transfer_fcn" ||
+        N->Kind == "signal_zero_pole") {
+      std::vector<double> Num, Den;
+      if (!resolveTFCoeffs(*N, Num, Den)) return 1;
+      if (Den.size() < 2) return 1;
+      return (int)Den.size() - 1;
+    }
+    if (N->Kind == "signal_state_space") {
+      auto It = N->Params.find("A");
+      if (It == N->Params.end()) return 1;
+      std::vector<double> A; int Ar = 0, Ac = 0;
+      parseMatrixStr(It->second, A, Ar, Ac);
+      return (Ar > 0 && Ar == Ac) ? Ar : 1;
+    }
+    return 1;
+  };
+
+  auto Body = AST.make<Block>();
+
+  // Declare Ts and N as constants at function start.
+  Body->Stmts.push_back(B.assign("Ts", B.number(Ts)));
+  Body->Stmts.push_back(B.assign("N", B.integer(NTicks)));
+
+  // Pre-allocate log arrays as zeros(1, N).
+  auto preallocZeros = [&](const std::string &Var) {
+    auto *Call = B.call("zeros", {B.integer(1), B.name("N")});
+    Body->Stmts.push_back(B.assign(Var, Call));
+  };
+  for (const auto &L : Logs) preallocZeros(L.Var);
+  preallocZeros(TLog);
+
+  // Initialise state vars (only the simple, single-slot stateful
+  // blocks for the MVP).  Multi-slot blocks (TF order >= 2, SS)
+  // and signal_subsystem nested calls are routed back through
+  // lowerSubsystemImpl in follow-up tiers — for now, error
+  // gracefully if seen.
+  for (const auto *N : Internal) {
+    if (N->Kind == "signal_subsystem") {
+      Diag.error(N->Loc,
+                 "whole-diagram emit MVP doesn't support nested "
+                 "`signal_subsystem` blocks yet — Tier 7 follow-up. "
+                 "Flatten the nested subsystem into the entry flow "
+                 "or use `--subsystem <name>` to emit one "
+                 "subsystem instead");
+      return nullptr;
+    }
+    if (!isStatefulKind(N->Kind)) continue;
+    int Order = stateOrderForBlock(N);
+    if (Order > 1) {
+      Diag.error(N->Loc,
+                 "whole-diagram emit MVP supports single-slot "
+                 "stateful blocks only (Unit Delay, ZOH, discrete "
+                 "integrator, 1st-order TF). Block \"" + N->Id +
+                 "\" needs " + std::to_string(Order) + " state "
+                 "slots — Tier 7 follow-up");
+      return nullptr;
+    }
+    LocalStateSlot S;
+    S.N = N;
+    S.Var = uniqueName("s_" + N->Id);
+    S.Init = initialStateOf(*N);
+    // Multirate per-block epoch (reused logic from the per-
+    // subsystem lane). Base rate = the loop's Ts.
+    double BlockTs = paramD(*N, "sample_time", 0.0);
+    if (BlockTs <= 0.0) BlockTs = paramD(*N, "sampleTime", 0.0);
+    if (BlockTs <= 0.0) BlockTs = paramD(*N, "Ts", 0.0);
+    if (BlockTs > 0.0) {
+      int E = (int)std::round(BlockTs / Ts);
+      if (E > 1) {
+        S.Epoch = E;
+        S.PhaseVar = uniqueName("phase_" + N->Id);
+      }
+    }
+    States.push_back(S);
+    Body->Stmts.push_back(B.assign(S.Var, B.number(S.Init)));
+    if (!S.PhaseVar.empty())
+      Body->Stmts.push_back(B.assign(S.PhaseVar, B.integer(0)));
+  }
+
+  // Build the for-loop body (per-tick computations).
+  auto *Loop = AST.make<Block>();
+  // t = (k - 1) * Ts
+  Loop->Stmts.push_back(B.assign(
+      "t", B.bin(BinOp::ElemMul,
+                  B.bin(BinOp::Sub, B.name("k"), B.integer(1)),
+                  B.name("Ts"))));
+
+  // Source generators.
+  for (const auto *N : Sources) {
+    Expr *Val = lowerSourceExpr(*N, "t", B);
+    Loop->Stmts.push_back(B.assign(VarOfNode[N->Id], Val));
+  }
+
+  // Internal blocks — toposort first so consumers come after
+  // producers within the loop body.
+  auto Topo = toposortInternals(*Entry, Diag, EntryFlowName);
+  if (Diag.hasErrors()) return nullptr;
+  std::vector<const Node *> TopoInternal;
+  for (auto *N : Topo) {
+    if (isSourceKind(N->Kind) || isDiagramSink(N->Kind)) continue;
+    TopoInternal.push_back(N);
+  }
+
+  // Helper: resolve an input port's upstream value as an Expr.
+  auto resolveIn = [&](const std::string &ToNode,
+                        const std::string &ToPort) -> Expr * {
+    auto It = EI.Map.find({ToNode, ToPort});
+    if (It == EI.Map.end()) return B.number(0.0);
+    auto VarIt = VarOfNode.find(It->second.first);
+    if (VarIt == VarOfNode.end()) return B.number(0.0);
+    return B.name(VarIt->second);
+  };
+  auto inputPortsOf = [&](const Node &N) -> std::vector<std::string> {
+    std::vector<std::pair<int, std::string>> Pairs;
+    for (const auto &P : N.InPorts) {
+      int Idx = parsePortIndex(P.Id);
+      if (Idx < 0) Idx = (int)Pairs.size() + 1;
+      Pairs.push_back({Idx, P.Id});
+    }
+    std::sort(Pairs.begin(), Pairs.end());
+    std::vector<std::string> Out;
+    for (auto &PR : Pairs) Out.push_back(PR.second);
+    return Out;
+  };
+
+  // Loop-breaker hoist: every stateful block's OutVar must be
+  // assigned from the state slot BEFORE any consumer evaluates.
+  // Mirrors `lowerSubsystemImpl`'s state-read hoist — keeps the
+  // topo's drop-outgoing-edges-of-stateful-blocks semantics
+  // consistent at the per-tick emit site.
+  for (auto &S : States) {
+    Loop->Stmts.push_back(
+        B.assign(VarOfNode[S.N->Id], B.name(S.Var)));
+  }
+
+  for (const auto *N : TopoInternal) {
+    const std::string &OutVar = VarOfNode[N->Id];
+    auto Ports = inputPortsOf(*N);
+    std::vector<Expr *> Ins;
+    for (auto &P : Ports) Ins.push_back(resolveIn(N->Id, P));
+
+    // Find the state slot (if any) for this block.
+    LocalStateSlot *Slot = nullptr;
+    for (auto &S : States) if (S.N == N) { Slot = &S; break; }
+
+    if (Slot) {
+      // Stateful single-slot block — state-read already hoisted
+      // above; here we only compute the next state and gate on
+      // the epoch counter for multirate.
+      Expr *NextExpr = nullptr;
+      if (N->Kind == "signal_unit_delay" || N->Kind == "signal_zoh") {
+        NextExpr = Ins.empty() ? B.number(0.0) : Ins.front();
+      } else if (N->Kind == "signal_discrete_integrator" ||
+                 N->Kind == "signal_integrator") {
+        Expr *U = Ins.empty() ? B.number(0.0) : Ins.front();
+        // Forward-Euler integrator: s_next = s + Ts * u.  Honour
+        // the per-block sample period when set, else use the
+        // outer base rate.
+        double LocalTs = paramD(*N, "sample_time", 0.0);
+        if (LocalTs <= 0.0) LocalTs = paramD(*N, "sampleTime", Ts);
+        Expr *Step = B.bin(BinOp::ElemMul, B.number(LocalTs), U);
+        NextExpr = B.bin(BinOp::Add, B.name(Slot->Var), Step);
+      } else if (N->Kind == "signal_transfer_fcn" ||
+                 N->Kind == "signal_zero_pole") {
+        // 1st-order strictly-proper: H(s) = b0 / (a1 s + a0).
+        // Forward Euler: x_next = x + Ts*(b0/a1*u - a0/a1*x).
+        std::vector<double> Num, Den;
+        resolveTFCoeffs(*N, Num, Den);
+        double Lead = Den.empty() ? 1.0 : Den.front();
+        double A0 = Den.size() >= 2 ? Den[1] / Lead : 0.0;
+        double B0 = !Num.empty() ? Num.front() / Lead : 1.0;
+        Expr *U = Ins.empty() ? B.number(0.0) : Ins.front();
+        Expr *MinusA0 = B.bin(BinOp::ElemMul,
+                               B.number(-A0), B.name(Slot->Var));
+        Expr *B0u = B.bin(BinOp::ElemMul, B.number(B0), U);
+        Expr *Acc = B.bin(BinOp::Add, B0u, MinusA0);
+        Expr *Step = B.bin(BinOp::ElemMul, B.number(Ts), Acc);
+        NextExpr = B.bin(BinOp::Add, B.name(Slot->Var), Step);
+      } else {
+        NextExpr = B.name(Slot->Var);  // no-op
+      }
+      // Multirate gating: only update state when phase == 0.
+      if (Slot->Epoch > 1) {
+        auto *If = AST.make<IfStmt>();
+        If->Cond = B.bin(BinOp::Eq, B.name(Slot->PhaseVar),
+                          B.integer(0));
+        If->Then = AST.make<Block>();
+        If->Then->Stmts.push_back(B.assign(Slot->Var, NextExpr));
+        Loop->Stmts.push_back(If);
+        // Phase advance: phase = (phase == epoch - 1) ? 0 : phase + 1
+        auto *PhaseIf = AST.make<IfStmt>();
+        PhaseIf->Cond = B.bin(BinOp::Eq, B.name(Slot->PhaseVar),
+                               B.integer(Slot->Epoch - 1));
+        PhaseIf->Then = AST.make<Block>();
+        PhaseIf->Then->Stmts.push_back(
+            B.assign(Slot->PhaseVar, B.integer(0)));
+        PhaseIf->Else = AST.make<Block>();
+        PhaseIf->Else->Stmts.push_back(B.assign(
+            Slot->PhaseVar,
+            B.bin(BinOp::Add, B.name(Slot->PhaseVar), B.integer(1))));
+        Loop->Stmts.push_back(PhaseIf);
+      } else {
+        Loop->Stmts.push_back(B.assign(Slot->Var, NextExpr));
+      }
+      continue;
+    }
+
+    // Stateless block — fall back to the per-block lowering
+    // shared with the per-subsystem emit.
+    auto *Stmt = lowerBlock(*N, OutVar, Ins, Ports, B, Diag);
+    if (!Stmt) return nullptr;
+    Loop->Stmts.push_back(Stmt);
+  }
+
+  // Sink logging — append the upstream's current value to the
+  // log column at index k.
+  for (const auto &L : Logs) {
+    Expr *Src = L.Source.empty()
+                    ? B.number(0.0)
+                    : (VarOfNode.count(L.Source)
+                           ? (Expr *)B.name(VarOfNode[L.Source])
+                           : B.number(0.0));
+    auto *Idx = B.call(L.Var, {B.name("k")});
+    auto *Assign = AST.make<AssignStmt>();
+    Assign->LHS.push_back(Idx);
+    Assign->RHS = Src;
+    Assign->Suppressed = true;
+    Loop->Stmts.push_back(Assign);
+  }
+  // t_log(k) = t
+  {
+    auto *Idx = B.call(TLog, {B.name("k")});
+    auto *Assign = AST.make<AssignStmt>();
+    Assign->LHS.push_back(Idx);
+    Assign->RHS = B.name("t");
+    Assign->Suppressed = true;
+    Loop->Stmts.push_back(Assign);
+  }
+
+  // Wrap the loop body in `for k = 1 : N`.
+  auto *For = AST.make<ForStmt>();
+  For->Var = AST.intern("k");
+  auto *Range = AST.make<RangeExpr>();
+  Range->Start = B.integer(1);
+  Range->End   = B.name("N");
+  For->Iter = Range;
+  For->Body = Loop;
+  Body->Stmts.push_back(For);
+
+  // Build the function: returns [log1, log2, ..., t_log].
+  auto *Fn = AST.make<Function>();
+  Fn->Name = AST.intern("simulate");
+  for (const auto &L : Logs) Fn->Outputs.push_back(AST.intern(L.Var));
+  Fn->Outputs.push_back(AST.intern(TLog));
+  Fn->Body = Body;
+
+  auto *TU = AST.make<TranslationUnit>();
+  TU->Functions.push_back(Fn);
+  return TU;
+}
+
 } // namespace matlab::flowchart

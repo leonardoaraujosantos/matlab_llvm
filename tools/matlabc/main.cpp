@@ -9888,6 +9888,24 @@ int main(int Argc, char **Argv) {
         }
         TU = matlab::flowchart::buildSubsystemTU(*Doc, Opts.Subsystem,
                                                   Ctx, Diag, SO);
+      } else if (Doc->isSignalFlow() && Doc->isSignalFlow() &&
+                 (Opts.Mode == Options::Mode::EmitPython ||
+                  Opts.Mode == Options::Mode::EmitC ||
+                  Opts.Mode == Options::Mode::EmitCpp ||
+                  Opts.Mode == Options::Mode::EmitTypeScript ||
+                  Opts.Mode == Options::Mode::EmitMatlab)) {
+        // Tier-7 — whole-diagram emit. When the user emits a
+        // signal-flow .mflow WITHOUT `--subsystem` and targets a
+        // software language, route through DiagramToMatlab. The
+        // entry flow's sources / sinks / subsystems get bundled
+        // into a `simulate()` function that runs the time loop
+        // and returns per-sink log arrays. SV is excluded — the
+        // SV lane stays per-subsystem.
+        matlab::flowchart::SubsystemEmitOptions SO;
+        SO.TargetRate = Opts.TargetRate;
+        SO.DiscretizeMethod = Opts.Discretize;
+        TU = matlab::flowchart::buildDiagramTU(*Doc, Doc->Entry, Ctx,
+                                                Diag, SO);
       } else {
         TU = matlab::flowchart::buildAST(*Doc, Ctx, SM, Diag, BO);
       }

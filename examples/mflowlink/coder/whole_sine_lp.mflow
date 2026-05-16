@@ -1,0 +1,52 @@
+{
+  "schema": "matforge.flowchart",
+  "version": "0.1.0",
+  "entry": "whole_sine_lp",
+  "settings": {
+    "kind": "signal_flow",
+    "solver": {
+      "type": "fixed_step",
+      "algorithm": "ode4",
+      "startTime": 0.0,
+      "stopTime": 2.0,
+      "maxStep": "0.01"
+    }
+  },
+  "flows": [
+    {
+      "id": "flow_whole_sine",
+      "kind": "program",
+      "name": "whole_sine_lp",
+      "nodes": [
+        { "id": "src", "kind": "signal_sine",
+          "data": { "params": { "amplitude": "1",
+                                "frequency": "6.2832",
+                                "phase": "0",
+                                "bias": "0" } },
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+
+        { "id": "lp", "kind": "signal_transfer_fcn",
+          "data": { "params": { "num": "1", "den": "1, 1" } },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+
+        { "id": "scope_in",  "kind": "signal_scope",
+          "data": { "params": { "title": "in" } },
+          "ports": { "in": [{"id": "in"}], "out": [] } },
+        { "id": "scope_out", "kind": "signal_scope",
+          "data": { "params": { "title": "out" } },
+          "ports": { "in": [{"id": "in"}], "out": [] } }
+      ],
+      "edges": [
+        { "id": "e1", "kind": "data",
+          "from": {"node": "src", "port": "out"},
+          "to":   {"node": "lp",  "port": "in"} },
+        { "id": "e2", "kind": "data",
+          "from": {"node": "src", "port": "out"},
+          "to":   {"node": "scope_in", "port": "in"} },
+        { "id": "e3", "kind": "data",
+          "from": {"node": "lp",  "port": "out"},
+          "to":   {"node": "scope_out", "port": "in"} }
+      ]
+    }
+  ]
+}

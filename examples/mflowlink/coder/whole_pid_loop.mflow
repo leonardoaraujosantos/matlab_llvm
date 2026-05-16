@@ -1,0 +1,68 @@
+{
+  "schema": "matforge.flowchart",
+  "version": "0.1.0",
+  "entry": "whole_pid_loop",
+  "settings": {
+    "kind": "signal_flow",
+    "solver": {
+      "type": "fixed_step",
+      "algorithm": "ode4",
+      "startTime": 0.0,
+      "stopTime": 4.0,
+      "maxStep": "0.05"
+    }
+  },
+  "flows": [
+    {
+      "id": "flow_whole",
+      "kind": "program",
+      "name": "whole_pid_loop",
+      "nodes": [
+        { "id": "src", "kind": "signal_step",
+          "data": { "params": { "stepTime": "0.5",
+                                "initialValue": "0",
+                                "finalValue": "1" } },
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+
+        { "id": "plant", "kind": "signal_transfer_fcn",
+          "data": { "params": { "num": "1", "den": "1, 1" } },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+
+        { "id": "err", "kind": "signal_sum",
+          "data": { "params": { "signs": "+-" } },
+          "ports": { "in": [{"id": "in1"}, {"id": "in2"}],
+                     "out": [{"id": "out"}] } },
+
+        { "id": "scope_ref",   "kind": "signal_scope",
+          "data": { "params": { "title": "ref" } },
+          "ports": { "in": [{"id": "in"}], "out": [] } },
+        { "id": "scope_plant", "kind": "signal_scope",
+          "data": { "params": { "title": "plant" } },
+          "ports": { "in": [{"id": "in"}], "out": [] } },
+        { "id": "scope_err",   "kind": "signal_scope",
+          "data": { "params": { "title": "err" } },
+          "ports": { "in": [{"id": "in"}], "out": [] } }
+      ],
+      "edges": [
+        { "id": "e1", "kind": "data",
+          "from": {"node": "src", "port": "out"},
+          "to":   {"node": "err", "port": "in1"} },
+        { "id": "e2", "kind": "data",
+          "from": {"node": "plant", "port": "out"},
+          "to":   {"node": "err", "port": "in2"} },
+        { "id": "e3", "kind": "data",
+          "from": {"node": "err", "port": "out"},
+          "to":   {"node": "plant", "port": "in"} },
+        { "id": "e4", "kind": "data",
+          "from": {"node": "src", "port": "out"},
+          "to":   {"node": "scope_ref", "port": "in"} },
+        { "id": "e5", "kind": "data",
+          "from": {"node": "plant", "port": "out"},
+          "to":   {"node": "scope_plant", "port": "in"} },
+        { "id": "e6", "kind": "data",
+          "from": {"node": "err", "port": "out"},
+          "to":   {"node": "scope_err", "port": "in"} }
+      ]
+    }
+  ]
+}

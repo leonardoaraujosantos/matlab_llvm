@@ -475,6 +475,17 @@ add_test(
           $<TARGET_FILE:matlabc>
   WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Flowchart/EmitSubsystem
 )
+# Tier-7 whole-diagram emit lane — `matlabc -emit-python <model.mflow>`
+# (no `--subsystem`) routes through `DiagramToMatlab` to produce a
+# top-level `simulate()` running the diagram's time loop. The tests
+# import the emitted module, call `simulate()`, and check the
+# per-sink log columns against analytic references.
+add_test(
+  NAME flowchart-emit-diagram-tests
+  COMMAND ${CMAKE_SOURCE_DIR}/test/Flowchart/EmitSubsystem/run_diagram_tests.sh
+          $<TARGET_FILE:matlabc>
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Flowchart/EmitSubsystem
+)
 # Opt-in Verilog-A lint lane (Tier-10 of docs/verilog_a_plan.md).
 # Compiles + runs every example under examples/verilog_a/ to emit
 # its .va, then pipes the result into scripts/va_lint.sh

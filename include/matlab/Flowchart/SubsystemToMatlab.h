@@ -126,6 +126,30 @@ matlab::TranslationUnit *buildSubsystemTU(
     const SubsystemEmitOptions &Opts = {});
 
 //===----------------------------------------------------------------------===//
+// Tier-7 — whole-diagram emit. Takes a `.mflow` model whose entry
+// flow is a "program" (no boundary inports/outports — sources and
+// sinks ARE the graph) and synthesises a top-level `simulate()`
+// function that runs the diagram for the model's configured
+// number of ticks. Sources (signal_sine / signal_step / etc.)
+// become per-tick generators computed from the current time; sinks
+// (signal_scope / signal_to_workspace) accumulate per-tick values
+// into per-block log arrays returned alongside `simulate()`'s
+// other outputs.
+//
+// The downstream `-emit-{c,cpp,python,typescript}` lanes consume
+// the TU exactly the same way as per-subsystem emit: only the
+// shape of the synthesised function differs. SystemVerilog
+// whole-diagram is deliberately NOT supported (the SV emit lane
+// stays per-subsystem; whole-diagram simulation lives on the
+// host).
+matlab::TranslationUnit *buildDiagramTU(
+    const FlowDoc &Doc,
+    const std::string &EntryFlowName,
+    matlab::ASTContext &AST,
+    matlab::DiagnosticEngine &Diag,
+    const SubsystemEmitOptions &Opts = {});
+
+//===----------------------------------------------------------------------===//
 // Tier-2 class wrapper — per-target shim that bundles the functional
 // `step(...)` into a class/struct holding the persistent state slots.
 //
