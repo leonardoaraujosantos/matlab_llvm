@@ -1,0 +1,51 @@
+{
+  "schema": "matforge.flowchart",
+  "version": "0.1.0",
+  "entry": "whole_tf2_step",
+  "settings": {
+    "kind": "signal_flow",
+    "solver": {
+      "type": "fixed_step",
+      "algorithm": "ode4",
+      "startTime": 0.0,
+      "stopTime": 6.0,
+      "maxStep": "0.02"
+    }
+  },
+  "flows": [
+    {
+      "id": "flow_top",
+      "kind": "program",
+      "name": "whole_tf2_step",
+      "nodes": [
+        { "id": "src", "kind": "signal_step",
+          "data": { "params": { "stepTime": "0.5",
+                                "initialValue": "0",
+                                "finalValue": "1" } },
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+
+        { "id": "tf2", "kind": "signal_transfer_fcn",
+          "data": { "params": { "num": "1", "den": "1, 2, 2" } },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+
+        { "id": "scope_in",  "kind": "signal_scope",
+          "data": { "params": { "title": "u" } },
+          "ports": { "in": [{"id": "in"}], "out": [] } },
+        { "id": "scope_out", "kind": "signal_scope",
+          "data": { "params": { "title": "y" } },
+          "ports": { "in": [{"id": "in"}], "out": [] } }
+      ],
+      "edges": [
+        { "id": "e1", "kind": "data",
+          "from": {"node": "src", "port": "out"},
+          "to":   {"node": "tf2", "port": "in"} },
+        { "id": "e2", "kind": "data",
+          "from": {"node": "src", "port": "out"},
+          "to":   {"node": "scope_in", "port": "in"} },
+        { "id": "e3", "kind": "data",
+          "from": {"node": "tf2", "port": "out"},
+          "to":   {"node": "scope_out", "port": "in"} }
+      ]
+    }
+  ]
+}

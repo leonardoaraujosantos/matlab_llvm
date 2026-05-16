@@ -93,6 +93,17 @@ struct SubsystemEmitOptions {
   bool StateAsPersistent = false;
   FixedPointSpec FiDefault{};
   std::map<std::string, FixedPointSpec> FiSpecs;
+  // Tier-7e — whole-diagram tick count override. 0 = inherit from
+  // `settings.solver.stopTime / TargetRate`. Honoured only by
+  // `buildDiagramTU` (the standalone whole-diagram emit); the per-
+  // subsystem lane has no time loop.
+  int TickCount = 0;
+  // Tier-7e — sink-log decimation. The diagram's time loop still
+  // runs every tick, but `signal_scope` / `signal_to_workspace`
+  // assignments fire only every Nth tick. Useful when stopTime is
+  // long and the log would otherwise be enormous. 1 = no
+  // decimation (log every tick); 0 falls back to 1.
+  int LogDecimation = 1;
 };
 
 // Lower a named subsystem to a `matlab::Function`. The returned node

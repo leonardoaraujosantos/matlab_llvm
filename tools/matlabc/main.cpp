@@ -250,6 +250,13 @@ struct Options {
    * falls back to the block's `data.sample_time` / `params.Ts` /
    * `settings.solver.maxStep`, in that order. */
   double TargetRate = 0.0;
+  /* Tier-7e — `--ticks <N>` / `--decimation <N>` flags for the
+   * standalone whole-diagram emit. `Ticks` overrides the time-loop
+   * count (otherwise `stopTime / Ts`); `Decimation` gates sink-log
+   * writes so a long simulation can produce a manageable log array.
+   * Both default to 0 / 1 respectively — the historical behaviour. */
+  int Ticks = 0;
+  int Decimation = 1;
   /* Embedded Coder, Tier 5 — `--fi-spec <port>=Q<W>.<F>` flag,
    * repeatable. Per-port fixed-point width / fraction overrides
    * for the SV emit lane. Without an override, every port emits
@@ -442,6 +449,24 @@ bool parseArgs(int Argc, char **Argv, Options &Opts, const char *&Prog) {
         std::cerr << "--target-rate must be a positive number\n";
         return false;
       }
+    }
+    else if (A.size() > 8 && A.substr(0, 8) == "--ticks=")
+      Opts.Ticks = std::atoi(std::string(A.substr(8)).c_str());
+    else if (A == "--ticks" || A == "-ticks") {
+      if (++I >= Argc) {
+        std::cerr << "--ticks requires a positive integer\n";
+        return false;
+      }
+      Opts.Ticks = std::atoi(Argv[I]);
+    }
+    else if (A.size() > 13 && A.substr(0, 13) == "--decimation=")
+      Opts.Decimation = std::atoi(std::string(A.substr(13)).c_str());
+    else if (A == "--decimation" || A == "-decimation") {
+      if (++I >= Argc) {
+        std::cerr << "--decimation requires a positive integer\n";
+        return false;
+      }
+      Opts.Decimation = std::atoi(Argv[I]);
     }
     else if (A.size() > 10 && A.substr(0, 10) == "--fi-spec=")
       Opts.FiSpecs.push_back(std::string(A.substr(10)));
@@ -10145,6 +10170,8 @@ int main(int Argc, char **Argv) {
         matlab::flowchart::SubsystemEmitOptions SO;
         SO.TargetRate = Opts.TargetRate;
         SO.DiscretizeMethod = Opts.Discretize;
+        SO.TickCount     = Opts.Ticks;
+        SO.LogDecimation = Opts.Decimation;
         TU = matlab::flowchart::buildDiagramTU(*Doc, Doc->Entry, Ctx,
                                                 Diag, SO);
       } else {

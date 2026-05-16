@@ -1,0 +1,74 @@
+{
+  "schema": "matforge.flowchart",
+  "version": "0.1.0",
+  "entry": "cocotb_delay_sil",
+  "settings": {
+    "kind": "signal_flow",
+    "solver": {
+      "type": "fixed_step",
+      "algorithm": "ode4",
+      "startTime": 0.0,
+      "stopTime": 0.3,
+      "maxStep": "0.01"
+    }
+  },
+  "flows": [
+    {
+      "id": "flow_top",
+      "kind": "program",
+      "name": "cocotb_delay_sil",
+      "nodes": [
+        { "id": "src", "kind": "signal_sine",
+          "data": { "params": { "amplitude": "0.5",
+                                "frequency": "6.2832",
+                                "phase": "0",
+                                "bias": "0" } },
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+
+        { "id": "delay_dut", "kind": "signal_subsystem",
+          "data": { "flow_id": "flow_delay" },
+          "ports": { "in": [{"id": "u1"}], "out": [{"id": "y1"}] } },
+
+        { "id": "scope_in",  "kind": "signal_scope",
+          "data": { "params": { "title": "u" } },
+          "ports": { "in": [{"id": "in"}], "out": [] } },
+        { "id": "scope_out", "kind": "signal_scope",
+          "data": { "params": { "title": "y" } },
+          "ports": { "in": [{"id": "in"}], "out": [] } }
+      ],
+      "edges": [
+        { "id": "e1", "kind": "data",
+          "from": {"node": "src", "port": "out"},
+          "to":   {"node": "delay_dut", "port": "u1"} },
+        { "id": "e2", "kind": "data",
+          "from": {"node": "src", "port": "out"},
+          "to":   {"node": "scope_in", "port": "in"} },
+        { "id": "e3", "kind": "data",
+          "from": {"node": "delay_dut", "port": "y1"},
+          "to":   {"node": "scope_out", "port": "in"} }
+      ]
+    },
+    {
+      "id": "flow_delay",
+      "kind": "function",
+      "name": "delay_block",
+      "nodes": [
+        { "id": "u1", "kind": "signal_inport",
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+        { "id": "z",  "kind": "signal_unit_delay",
+          "data": { "params": { "initialCondition": "0" } },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "y1", "kind": "signal_outport",
+          "ports": { "in": [{"id": "in"}], "out": [] } }
+      ],
+      "edges": [
+        { "id": "p1", "kind": "data",
+          "from": {"node": "u1", "port": "out"},
+          "to":   {"node": "z",  "port": "in"} },
+        { "id": "p2", "kind": "data",
+          "from": {"node": "z",  "port": "out"},
+          "to":   {"node": "y1", "port": "in"} }
+      ]
+    }
+  ]
+}

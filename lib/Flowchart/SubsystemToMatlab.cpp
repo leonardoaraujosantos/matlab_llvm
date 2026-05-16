@@ -3225,6 +3225,8 @@ bool isSourceKind(const std::string &K) {
   return K == "signal_sine" || K == "signal_step" ||
          K == "signal_ramp" || K == "signal_constant" ||
          K == "signal_pulse" || K == "signal_clock" ||
+         K == "signal_chirp" ||
+         K == "signal_repeating_sequence" ||
          K == "signal_function_call_generator";
 }
 
@@ -3292,6 +3294,63 @@ Expr *lowerSourceExpr(const Node &N, const std::string &TVar,
     auto *Cond = B.bin(BinOp::Lt, Mod, B.number(Pp * W * 0.01));
     return B.bin(BinOp::ElemMul, Cond, B.number(A));
   }
+  if (K == "signal_chirp") {
+    // Linear frequency sweep from f0 to f1 over the sweep period T:
+    //   out = amp * sin(2π * (f0 + (f1 - f0) * t / (2*T)) * t + phase)
+    // The factor (f1 - f0)/(2T) is the instantaneous-frequency slope
+    // / 2; integrating ω(t) = 2π*(f0 + (f1-f0)*t/T) gives the
+    // argument above. `targetFrequency` + `targetTime` match the
+    // Simulink Chirp block's parameter names.
+    double A  = paramD(N, "amplitude", 1.0);
+    double F0 = paramD(N, "initialFrequency", 0.1);
+    double F1 = paramD(N, "targetFrequency", 1.0);
+    double Tt = paramD(N, "targetTime", 1.0);
+    double P  = paramD(N, "phase", 0.0);
+    double Pi2 = 2.0 * 3.141592653589793238;
+    if (Tt <= 0.0) Tt = 1.0;
+    // Inner = (f0 + (f1-f0)*t/(2*Tt)) * t
+    auto *Slope = B.bin(BinOp::ElemMul, B.number((F1 - F0) / (2.0 * Tt)),
+                         B.name(TVar));
+    auto *Freq  = B.bin(BinOp::Add, B.number(F0), Slope);
+    auto *Inner = B.bin(BinOp::ElemMul, Freq, B.name(TVar));
+    auto *Arg   = B.bin(BinOp::ElemMul, B.number(Pi2), Inner);
+    Arg = B.bin(BinOp::Add, Arg, B.number(P));
+    auto *Sin = B.call("sin", {Arg});
+    return B.bin(BinOp::ElemMul, B.number(A), Sin);
+  }
+  if (K == "signal_repeating_sequence") {
+    // LUT-driven periodic sequence: piecewise-linear interpolation
+    // through (timeValues, outputValues), looping with period
+    // (timeValues[end] - timeValues[0]). For the MVP we emit the
+    // simplest shape — a sawtooth from outputValues[0] to
+    // outputValues[end] over [0, period]:
+    //   out = out0 + (out1 - out0) * mod(t, period) / period
+    // Multi-segment interpolation is a follow-up (needs piecewise
+    // emission). The user can encode arbitrary periodic signals
+    // with two points covering the linear segment.
+    auto It = N.Params.find("outputValues");
+    auto Tt = N.Params.find("timeValues");
+    double Out0 = 0.0, Out1 = 1.0, T0 = 0.0, T1 = 1.0;
+    if (It != N.Params.end()) {
+      std::vector<double> O; int Or = 0, Oc = 0;
+      parseMatrixStr(It->second, O, Or, Oc);
+      if (!O.empty()) Out0 = O.front();
+      if (O.size() >= 2) Out1 = O.back();
+    }
+    if (Tt != N.Params.end()) {
+      std::vector<double> T; int Tr = 0, Tc = 0;
+      parseMatrixStr(Tt->second, T, Tr, Tc);
+      if (!T.empty()) T0 = T.front();
+      if (T.size() >= 2) T1 = T.back();
+    }
+    double Period = T1 - T0;
+    if (Period <= 0.0) Period = 1.0;
+    auto *Shifted = B.bin(BinOp::Sub, B.name(TVar), B.number(T0));
+    auto *Mod = B.call("mod", {Shifted, B.number(Period)});
+    auto *Slope = B.number((Out1 - Out0) / Period);
+    auto *Lin = B.bin(BinOp::ElemMul, Slope, Mod);
+    return B.bin(BinOp::Add, B.number(Out0), Lin);
+  }
   // Default — emit 0.0.  Unknown source kinds (function_call_generator,
   // band-limited noise, etc.) lower as constant zero; the diagnostic
   // path catches this at the dispatch layer below.
@@ -3342,6 +3401,15 @@ matlab::TranslationUnit *buildDiagramTU(
   double Span = Tstop - Tstart;
   int NTicks = Span > 0.0 ? (int)std::round(Span / Ts) : 100;
   if (NTicks < 1) NTicks = 1;
+  // Tier-7e: `--ticks <N>` CLI override beats the solver-derived
+  // count. Useful for short smoke runs of a long-stopTime model
+  // without editing the .mflow.
+  if (Opts.TickCount > 0) NTicks = Opts.TickCount;
+  // Log decimation — emit one log entry every `Decim` ticks (default
+  // 1 = no decimation). The log array's length matches the count
+  // of emitted entries (ceil(NTicks / Decim)).
+  int Decim = Opts.LogDecimation > 0 ? Opts.LogDecimation : 1;
+  int LogLen = (NTicks + Decim - 1) / Decim;
 
   ASTBuilder B{AST};
   // Sema-friendly: leave WrapFi off for whole-diagram emit; the
@@ -3363,6 +3431,18 @@ matlab::TranslationUnit *buildDiagramTU(
   // their input). State slots for stateful internal blocks
   // declared as local vars updated in place (no return-thread).
   std::set<std::string> Used{"t", "k", "Ts", "N", "simulate"};
+  // Pre-reserve every helper function name (nested subsystem flows
+  // referenced from the entry flow). Without this, a block id whose
+  // sanitised name matches the helper's function name would shadow
+  // the call site — emitting `pi_ctrl = pi_ctrl(...)` looks like
+  // self-indexing to Sema, not a function call.
+  for (const auto &N : Entry->Nodes) {
+    if (N.Kind != "signal_subsystem") continue;
+    const std::string *FlowId = N.getData("flow_id");
+    if (!FlowId || FlowId->empty()) continue;
+    const Flow *Inner = findFlowById(Doc, *FlowId);
+    if (Inner) Used.insert(sanitizeIdent(Inner->Name));
+  }
   auto uniqueName = [&](const std::string &Base) {
     std::string Cand = sanitizeIdent(Base);
     if (Cand.empty()) Cand = "v";
@@ -3405,9 +3485,24 @@ matlab::TranslationUnit *buildDiagramTU(
   }
   std::string TLog = uniqueName("t_log");
 
-  // State for stateful internal blocks. Use a similar StateSlot
-  // structure as lowerSubsystemImpl, BUT with state as plain
-  // local vars (no function-arg threading).
+  // State for stateful internal blocks. Two paths:
+  //
+  //   * **Inline (single-slot)** — Unit Delay / ZOH / discrete
+  //     integrator / 1st-order TF stay inline as a single local var
+  //     `s_<id>` updated each tick with the per-kind next-state
+  //     expression. Keeps the emitted body compact for the common
+  //     case.
+  //   * **Helper-bound (Tier-7 multi-slot + nested)** — every
+  //     `signal_subsystem` and every higher-order stateful primitive
+  //     (TF/ZP order ≥ 2 / state-space / transport-delay) is lowered
+  //     via `lowerSubsystemImpl` into a helper Function (the
+  //     primitive case wraps the block in a synthesised single-
+  //     block subsystem flow first). The diagram body emits a call
+  //     site `[<outs>, <sn_next>] = helper(<ins>, <sn>)` and
+  //     latches each state slot from its next-state local. This
+  //     pulls the per-subsystem emit's full state-space / Tustin /
+  //     transport-delay machinery into the whole-diagram lane
+  //     without duplicating ~200 lines of state-update emission.
   struct LocalStateSlot {
     const Node *N;
     std::string Var;      // current state local
@@ -3416,6 +3511,19 @@ matlab::TranslationUnit *buildDiagramTU(
     std::string PhaseVar; // optional per-block phase counter
   };
   std::vector<LocalStateSlot> States;
+  struct HelperBinding {
+    const Node *N;
+    Function *Fn = nullptr;
+    SubsystemMeta Meta;
+    // Per-slot allocated current-state local (size = Meta.StateArgNames.size()).
+    std::vector<std::string> StateVars;
+    // Per-slot next-state local captured from the call return.
+    std::vector<std::string> StateNextVars;
+    // Per-port output local (size = Meta.OutputNames.size()).
+    std::vector<std::string> OutVars;
+  };
+  std::map<std::string, HelperBinding> Helpers;
+
   auto stateOrderForBlock = [&](const Node *N) -> int {
     if (N->Kind == "signal_transfer_fcn" ||
         N->Kind == "signal_zero_pole") {
@@ -3431,49 +3539,198 @@ matlab::TranslationUnit *buildDiagramTU(
       parseMatrixStr(It->second, A, Ar, Ac);
       return (Ar > 0 && Ar == Ac) ? Ar : 1;
     }
+    if (N->Kind == "signal_transport_delay") {
+      // Same heuristic the per-subsystem lane uses.
+      double Delay = paramD(*N, "delay", 0.0);
+      double LocalTs = paramD(*N, "sample_time", 0.0);
+      if (LocalTs <= 0.0) LocalTs = paramD(*N, "sampleTime", 0.0);
+      if (LocalTs <= 0.0) LocalTs = paramD(*N, "Ts", 0.0);
+      if (LocalTs <= 0.0) LocalTs = Ts;
+      if (Delay > 0.0 && LocalTs > 0.0) {
+        int Taps = (int)std::round(Delay / LocalTs);
+        if (Taps >= 1) return Taps;
+      }
+    }
     return 1;
   };
+
+  // Local FlowDoc copy so we can append synthesised wrapper flows
+  // without mutating the caller's Doc. FlowDoc is trivially copyable
+  // (just vectors / maps / strings under the hood).
+  FlowDoc DocLocal = Doc;
+  NestedCtx Ctx;
+
+  // Synthesise a single-block wrapper flow around the given primitive
+  // block. The resulting flow has boundary `signal_inport`s named
+  // `u1`..`uP`, the original block (params + ports preserved), and
+  // boundary `signal_outport`s named `y1`..`yQ`. Edges hook them up
+  // by the block's declared port ids.
+  auto buildWrapperFlow = [&](const Node *N) -> std::string {
+    Flow F;
+    F.Name = EntryFlowName + "__" + sanitizeIdent(N->Id) + "_helper";
+    F.Id   = "synth_" + F.Name;
+    F.Kind = "function";
+    auto mkInport = [&](int Idx) {
+      Node In;
+      In.Id = "u" + std::to_string(Idx);
+      In.Kind = "signal_inport";
+      Port OutP; OutP.Id = "out";
+      In.OutPorts.push_back(OutP);
+      return In;
+    };
+    auto mkOutport = [&](int Idx) {
+      Node Out;
+      Out.Id = "y" + std::to_string(Idx);
+      Out.Kind = "signal_outport";
+      Port InP; InP.Id = "in";
+      Out.InPorts.push_back(InP);
+      return Out;
+    };
+    for (size_t I = 0; I < N->InPorts.size(); ++I)
+      F.Nodes.push_back(mkInport((int)I + 1));
+    F.Nodes.push_back(*N);
+    for (size_t I = 0; I < N->OutPorts.size(); ++I)
+      F.Nodes.push_back(mkOutport((int)I + 1));
+    for (size_t I = 0; I < N->InPorts.size(); ++I) {
+      Edge E;
+      E.Id   = "synth_in_" + std::to_string(I + 1);
+      E.Kind = "data";
+      E.From.Node = "u" + std::to_string(I + 1);
+      E.From.Port = "out";
+      E.To.Node = N->Id;
+      E.To.Port = N->InPorts[I].Id;
+      F.Edges.push_back(E);
+    }
+    for (size_t I = 0; I < N->OutPorts.size(); ++I) {
+      Edge E;
+      E.Id   = "synth_out_" + std::to_string(I + 1);
+      E.Kind = "data";
+      E.From.Node = N->Id;
+      E.From.Port = N->OutPorts[I].Id;
+      E.To.Node = "y" + std::to_string(I + 1);
+      E.To.Port = "in";
+      F.Edges.push_back(E);
+    }
+    DocLocal.Flows.push_back(F);
+    return F.Name;
+  };
+
+  // Pre-pass: bind helpers for every nested subsystem and every
+  // multi-slot stateful primitive.
+  for (auto *N : Internal) {
+    std::string HelperFlowName;
+    if (N->Kind == "signal_subsystem") {
+      const std::string *FlowId = N->getData("flow_id");
+      if (!FlowId || FlowId->empty()) {
+        Diag.error(N->Loc,
+                   "signal_subsystem \"" + N->Id +
+                       "\": missing data.flow_id (embedded coder "
+                       "needs an explicit subflow reference)");
+        return nullptr;
+      }
+      const Flow *Inner = findFlowById(DocLocal, *FlowId);
+      if (!Inner) {
+        Diag.error(N->Loc,
+                   "signal_subsystem \"" + N->Id +
+                       "\": data.flow_id \"" + *FlowId +
+                       "\" not found in `.mflow` document");
+        return nullptr;
+      }
+      HelperFlowName = Inner->Name;
+    } else if (isStatefulKind(N->Kind) && stateOrderForBlock(N) > 1) {
+      HelperFlowName = buildWrapperFlow(N);
+    } else {
+      continue; // single-slot stateful + stateless handled inline
+    }
+    auto Hit = Ctx.ByFlowId.find(HelperFlowName);
+    Function *Fn = nullptr;
+    SubsystemMeta Meta;
+    if (Hit != Ctx.ByFlowId.end()) {
+      // Same flow already lowered (multiple instances of the same
+      // nested subsystem). Reuse the cached function + meta.
+      Fn = Hit->second.first;
+      Meta = Hit->second.second;
+    } else {
+      Fn = lowerSubsystemImpl(DocLocal, HelperFlowName, AST, Diag,
+                               Opts, Ctx);
+      if (!Fn) return nullptr;
+      auto MetaOpt = describeSubsystem(DocLocal, HelperFlowName, Diag);
+      if (!MetaOpt) return nullptr;
+      MetaOpt->Name = HelperFlowName;
+      Meta = *MetaOpt;
+      Ctx.ByFlowId[HelperFlowName] = {Fn, Meta};
+      Ctx.Pending.push_back(Fn);
+    }
+
+    HelperBinding HB;
+    HB.N = N;
+    HB.Fn = Fn;
+    HB.Meta = Meta;
+    for (size_t I = 0; I < HB.Meta.StateArgNames.size(); ++I) {
+      HB.StateVars.push_back(
+          uniqueName(N->Id + "_" + HB.Meta.StateArgNames[I]));
+      HB.StateNextVars.push_back(
+          uniqueName(N->Id + "_" + HB.Meta.StateReturnNames[I]));
+    }
+    if (HB.Meta.OutputNames.size() <= 1) {
+      HB.OutVars.push_back(VarOfNode[N->Id]);
+    } else {
+      for (size_t I = 0; I < HB.Meta.OutputNames.size(); ++I)
+        HB.OutVars.push_back(
+            uniqueName(N->Id + "_" + HB.Meta.OutputNames[I]));
+    }
+    Helpers[N->Id] = std::move(HB);
+  }
+
+  // Per-port output map for multi-output helpers — downstream
+  // consumers resolve their input through this when the upstream
+  // is a multi-output helper. Keyed by (blockId, portId).
+  struct PairHash {
+    size_t operator()(const std::pair<std::string, std::string> &P) const {
+      return std::hash<std::string>()(P.first) ^
+             (std::hash<std::string>()(P.second) << 1);
+    }
+  };
+  std::unordered_map<std::pair<std::string, std::string>, std::string,
+                     PairHash> VarOfNodePort;
+  for (auto &[Id, HB] : Helpers) {
+    if (HB.OutVars.size() <= 1) continue;
+    for (size_t I = 0;
+         I < HB.N->OutPorts.size() && I < HB.OutVars.size(); ++I) {
+      VarOfNodePort[{HB.N->Id, HB.N->OutPorts[I].Id}] = HB.OutVars[I];
+    }
+  }
 
   auto Body = AST.make<Block>();
 
   // Declare Ts and N as constants at function start.
   Body->Stmts.push_back(B.assign("Ts", B.number(Ts)));
   Body->Stmts.push_back(B.assign("N", B.integer(NTicks)));
-
-  // Pre-allocate log arrays as zeros(1, N).
+  // Tier-7e: when --decimation > 1, sink logs hold one entry per
+  // `Decim` ticks. `LogN` is the log-array length; `kd` (declared
+  // below) is the decimated write index that advances by 1 every
+  // `Decim` simulation ticks. Plain Decim == 1 falls through to
+  // the historical "log every tick" shape (kd == k).
+  bool Decimate = Decim > 1;
+  if (Decimate) {
+    Body->Stmts.push_back(B.assign("Decim", B.integer(Decim)));
+    Body->Stmts.push_back(B.assign("LogN", B.integer(LogLen)));
+    Body->Stmts.push_back(B.assign("kd", B.integer(0)));
+  }
+  // Pre-allocate log arrays as zeros(1, LogN) (or 1, N when no
+  // decimation).
   auto preallocZeros = [&](const std::string &Var) {
-    auto *Call = B.call("zeros", {B.integer(1), B.name("N")});
+    auto *Call = B.call(
+        "zeros", {B.integer(1), B.name(Decimate ? "LogN" : "N")});
     Body->Stmts.push_back(B.assign(Var, Call));
   };
   for (const auto &L : Logs) preallocZeros(L.Var);
   preallocZeros(TLog);
 
-  // Initialise state vars (only the simple, single-slot stateful
-  // blocks for the MVP).  Multi-slot blocks (TF order >= 2, SS)
-  // and signal_subsystem nested calls are routed back through
-  // lowerSubsystemImpl in follow-up tiers — for now, error
-  // gracefully if seen.
+  // Initialise inline single-slot state vars.
   for (const auto *N : Internal) {
-    if (N->Kind == "signal_subsystem") {
-      Diag.error(N->Loc,
-                 "whole-diagram emit MVP doesn't support nested "
-                 "`signal_subsystem` blocks yet — Tier 7 follow-up. "
-                 "Flatten the nested subsystem into the entry flow "
-                 "or use `--subsystem <name>` to emit one "
-                 "subsystem instead");
-      return nullptr;
-    }
+    if (Helpers.count(N->Id)) continue;     // handled via helper
     if (!isStatefulKind(N->Kind)) continue;
-    int Order = stateOrderForBlock(N);
-    if (Order > 1) {
-      Diag.error(N->Loc,
-                 "whole-diagram emit MVP supports single-slot "
-                 "stateful blocks only (Unit Delay, ZOH, discrete "
-                 "integrator, 1st-order TF). Block \"" + N->Id +
-                 "\" needs " + std::to_string(Order) + " state "
-                 "slots — Tier 7 follow-up");
-      return nullptr;
-    }
     LocalStateSlot S;
     S.N = N;
     S.Var = uniqueName("s_" + N->Id);
@@ -3494,6 +3751,14 @@ matlab::TranslationUnit *buildDiagramTU(
     Body->Stmts.push_back(B.assign(S.Var, B.number(S.Init)));
     if (!S.PhaseVar.empty())
       Body->Stmts.push_back(B.assign(S.PhaseVar, B.integer(0)));
+  }
+  // Initialise helper-bound state vars.
+  for (auto &[Id, HB] : Helpers) {
+    for (size_t I = 0; I < HB.StateVars.size(); ++I) {
+      double Init = (I < HB.Meta.StateInitVals.size())
+                        ? HB.Meta.StateInitVals[I] : 0.0;
+      Body->Stmts.push_back(B.assign(HB.StateVars[I], B.number(Init)));
+    }
   }
 
   // Build the for-loop body (per-tick computations).
@@ -3521,11 +3786,18 @@ matlab::TranslationUnit *buildDiagramTU(
   }
 
   // Helper: resolve an input port's upstream value as an Expr.
+  // Consults VarOfNodePort first so multi-output helpers' per-port
+  // outputs are routed correctly; falls back to the legacy single
+  // VarOfNode[id] for blocks with a single output local.
   auto resolveIn = [&](const std::string &ToNode,
                         const std::string &ToPort) -> Expr * {
     auto It = EI.Map.find({ToNode, ToPort});
     if (It == EI.Map.end()) return B.number(0.0);
-    auto VarIt = VarOfNode.find(It->second.first);
+    const std::string &Up = It->second.first;
+    const std::string &UpPort = It->second.second;
+    auto VPIt = VarOfNodePort.find({Up, UpPort});
+    if (VPIt != VarOfNodePort.end()) return B.name(VPIt->second);
+    auto VarIt = VarOfNode.find(Up);
     if (VarIt == VarOfNode.end()) return B.number(0.0);
     return B.name(VarIt->second);
   };
@@ -3542,11 +3814,14 @@ matlab::TranslationUnit *buildDiagramTU(
     return Out;
   };
 
-  // Loop-breaker hoist: every stateful block's OutVar must be
-  // assigned from the state slot BEFORE any consumer evaluates.
-  // Mirrors `lowerSubsystemImpl`'s state-read hoist — keeps the
-  // topo's drop-outgoing-edges-of-stateful-blocks semantics
-  // consistent at the per-tick emit site.
+  // Loop-breaker hoist: every inline single-slot stateful block's
+  // OutVar must be assigned from the state slot BEFORE any consumer
+  // evaluates. Mirrors `lowerSubsystemImpl`'s state-read hoist —
+  // keeps the topo's drop-outgoing-edges-of-stateful-blocks
+  // semantics consistent at the per-tick emit site. Helper-bound
+  // blocks don't need this — their output materialises from the
+  // function call return (which is emitted at the block's topo
+  // position).
   for (auto &S : States) {
     Loop->Stmts.push_back(
         B.assign(VarOfNode[S.N->Id], B.name(S.Var)));
@@ -3557,6 +3832,45 @@ matlab::TranslationUnit *buildDiagramTU(
     auto Ports = inputPortsOf(*N);
     std::vector<Expr *> Ins;
     for (auto &P : Ports) Ins.push_back(resolveIn(N->Id, P));
+
+    // Helper-bound block: emit a function call to the helper plus
+    // a state-latch tail (`s = s_next`).
+    auto HIt = Helpers.find(N->Id);
+    if (HIt != Helpers.end()) {
+      auto &HB = HIt->second;
+      // Build call args: public inputs in port order, then state
+      // args. Public inputs come from upstream wiring (via Ins);
+      // state args are the per-slot StateVars allocated above.
+      std::vector<Expr *> Args;
+      size_t NumPubIn = HB.Meta.InputNames.size();
+      for (size_t I = 0; I < NumPubIn; ++I) {
+        Expr *A = (I < Ins.size()) ? Ins[I] : B.number(0.0);
+        Args.push_back(A);
+      }
+      for (auto &SV : HB.StateVars) Args.push_back(B.name(SV));
+      auto *Call = B.call(HB.Meta.Name, std::move(Args));
+      size_t NumYs = HB.Meta.OutputNames.size();
+      size_t NumSnext = HB.Meta.StateReturnNames.size();
+      if (NumYs <= 1 && NumSnext == 0) {
+        // Plain single-output stateless subsystem helper.
+        std::string Dst = HB.OutVars.empty() ? OutVar : HB.OutVars[0];
+        Loop->Stmts.push_back(B.assign(Dst, Call));
+      } else {
+        auto *Assign = AST.make<AssignStmt>();
+        for (size_t I = 0; I < HB.OutVars.size(); ++I)
+          Assign->LHS.push_back(B.name(HB.OutVars[I]));
+        for (size_t I = 0; I < HB.StateNextVars.size(); ++I)
+          Assign->LHS.push_back(B.name(HB.StateNextVars[I]));
+        Assign->RHS = Call;
+        Assign->Suppressed = true;
+        Loop->Stmts.push_back(Assign);
+      }
+      // State latch.
+      for (size_t I = 0; I < HB.StateVars.size(); ++I)
+        Loop->Stmts.push_back(
+            B.assign(HB.StateVars[I], B.name(HB.StateNextVars[I])));
+      continue;
+    }
 
     // Find the state slot (if any) for this block.
     LocalStateSlot *Slot = nullptr;
@@ -3632,29 +3946,63 @@ matlab::TranslationUnit *buildDiagramTU(
   }
 
   // Sink logging — append the upstream's current value to the
-  // log column at index k.
+  // log column. When decimation is on, gate writes on
+  // `mod(k - 1, Decim) == 0` and use a separate decimated write
+  // index `kd` that advances by 1 each fire. Consult
+  // VarOfNodePort first so multi-output helpers route through
+  // their per-port locals; fall back to VarOfNode for the single-
+  // output case.
+  Block *LogBlock = Loop;
+  IfStmt *DecimIf = nullptr;
+  if (Decimate) {
+    DecimIf = AST.make<IfStmt>();
+    // The loop unroller folds k to a constant per iteration but
+    // doesn't re-flow that constant into kd, so compute kd as a
+    // stateful counter incremented INSIDE the gate. kd is
+    // initialised to 0 in the body prologue (see emit just below
+    // the LogN setup) and bumped by 1 each fire.
+    auto *KMinus1 = B.bin(BinOp::Sub, B.name("k"), B.integer(1));
+    DecimIf->Cond = B.bin(BinOp::Eq,
+                           B.call("mod", {KMinus1, B.name("Decim")}),
+                           B.integer(0));
+    DecimIf->Then = AST.make<Block>();
+    LogBlock = DecimIf->Then;
+    LogBlock->Stmts.push_back(B.assign(
+        "kd", B.bin(BinOp::Add, B.name("kd"), B.integer(1))));
+  }
+  std::string LogIdx = Decimate ? std::string("kd") : std::string("k");
   for (const auto &L : Logs) {
-    Expr *Src = L.Source.empty()
-                    ? B.number(0.0)
-                    : (VarOfNode.count(L.Source)
-                           ? (Expr *)B.name(VarOfNode[L.Source])
-                           : B.number(0.0));
-    auto *Idx = B.call(L.Var, {B.name("k")});
+    Expr *Src;
+    if (L.Source.empty()) {
+      Src = B.number(0.0);
+    } else {
+      auto VPIt = VarOfNodePort.find({L.Source, L.SourcePort});
+      if (VPIt != VarOfNodePort.end()) {
+        Src = B.name(VPIt->second);
+      } else if (VarOfNode.count(L.Source)) {
+        Src = B.name(VarOfNode[L.Source]);
+      } else {
+        Src = B.number(0.0);
+      }
+    }
+    auto *Idx = B.call(L.Var, {B.name(LogIdx)});
     auto *Assign = AST.make<AssignStmt>();
     Assign->LHS.push_back(Idx);
     Assign->RHS = Src;
     Assign->Suppressed = true;
-    Loop->Stmts.push_back(Assign);
+    LogBlock->Stmts.push_back(Assign);
   }
-  // t_log(k) = t
+  // t_log column. Decimated and undecimated emits both use the same
+  // index variable so all log columns stay aligned.
   {
-    auto *Idx = B.call(TLog, {B.name("k")});
+    auto *Idx = B.call(TLog, {B.name(LogIdx)});
     auto *Assign = AST.make<AssignStmt>();
     Assign->LHS.push_back(Idx);
     Assign->RHS = B.name("t");
     Assign->Suppressed = true;
-    Loop->Stmts.push_back(Assign);
+    LogBlock->Stmts.push_back(Assign);
   }
+  if (Decimate) Loop->Stmts.push_back(DecimIf);
 
   // Wrap the loop body in `for k = 1 : N`.
   auto *For = AST.make<ForStmt>();
@@ -3674,6 +4022,11 @@ matlab::TranslationUnit *buildDiagramTU(
   Fn->Body = Body;
 
   auto *TU = AST.make<TranslationUnit>();
+  // Drain helper functions (lowered via lowerSubsystemImpl during
+  // the helper-binding pre-pass) before the top-level simulate().
+  // Sema's TypeInference visits in order; placing helpers first
+  // means simulate()'s call sites see typed return values.
+  for (auto *Helper : Ctx.Pending) TU->Functions.push_back(Helper);
   TU->Functions.push_back(Fn);
   return TU;
 }
@@ -3756,6 +4109,43 @@ std::string pySourceExpr(const Node &N) {
     Os << "(" << pyDouble(A) << " if ((t - " << pyDouble(Phd)
        << ") % " << pyDouble(Pp) << ") < "
        << pyDouble(Pp * W * 0.01) << " else 0.0)";
+    return Os.str();
+  }
+  if (K == "signal_chirp") {
+    double A  = paramD(N, "amplitude", 1.0);
+    double F0 = paramD(N, "initialFrequency", 0.1);
+    double F1 = paramD(N, "targetFrequency", 1.0);
+    double Tt = paramD(N, "targetTime", 1.0);
+    double P  = paramD(N, "phase", 0.0);
+    if (Tt <= 0.0) Tt = 1.0;
+    std::ostringstream Os;
+    Os << pyDouble(A) << " * math.sin(2 * math.pi * ("
+       << pyDouble(F0) << " + " << pyDouble((F1 - F0) / (2.0 * Tt))
+       << " * t) * t + " << pyDouble(P) << ")";
+    return Os.str();
+  }
+  if (K == "signal_repeating_sequence") {
+    auto It = N.Params.find("outputValues");
+    auto Tt = N.Params.find("timeValues");
+    double Out0 = 0.0, Out1 = 1.0, T0 = 0.0, T1 = 1.0;
+    if (It != N.Params.end()) {
+      std::vector<double> O; int Or = 0, Oc = 0;
+      parseMatrixStr(It->second, O, Or, Oc);
+      if (!O.empty()) Out0 = O.front();
+      if (O.size() >= 2) Out1 = O.back();
+    }
+    if (Tt != N.Params.end()) {
+      std::vector<double> T; int Tr = 0, Tc = 0;
+      parseMatrixStr(Tt->second, T, Tr, Tc);
+      if (!T.empty()) T0 = T.front();
+      if (T.size() >= 2) T1 = T.back();
+    }
+    double Period = T1 - T0;
+    if (Period <= 0.0) Period = 1.0;
+    std::ostringstream Os;
+    Os << pyDouble(Out0) << " + " << pyDouble((Out1 - Out0) / Period)
+       << " * ((t - " << pyDouble(T0) << ") % " << pyDouble(Period)
+       << ")";
     return Os.str();
   }
   return "0.0";
@@ -4215,16 +4605,22 @@ std::optional<std::string> emitDiagramCocotbHarness(
     Os << "        dut." << Opts.DutInputPorts[I]
        << ".value = pack_fi(u_dut[" << I
        << "], fi_signed, fi_w, fi_f)\n";
+  // Sample DUT outputs. The sampling-vs-clock-edge ordering matters:
+  //
+  //   - Combinational DUT: drive → settle → sample → no edge.
+  //   - Sequential DUT: drive → SAMPLE (gets pre-edge state which
+  //     matches MATLAB unit-delay semantics y[k] = u[k-1]) → wait
+  //     for posedge to advance state. Sampling AFTER the posedge
+  //     would give the new state (= current u), which doesn't
+  //     match the Python reference (`step(u)` returns the OLD
+  //     state then sets state = u).
   if (Opts.Sequential) {
-    Os << "        await RisingEdge(dut.clk)\n";
+    // Tiny settle so combinational paths from u_k to y (e.g. a
+    // Tustin direct-feedthrough term) propagate before we read.
+    Os << "        await Timer(1, units=\"ns\")\n";
   } else {
-    // Combinational DUT: 1 ns settle so the SV gets a chance to
-    // re-evaluate before we sample its outputs.
     Os << "        await Timer(1, units=\"ns\")\n";
   }
-  Os << "        if k < L:\n";
-  Os << "            continue  # pipeline still filling\n";
-  // Read DUT outputs.
   for (size_t I = 0; I < Opts.DutOutputPorts.size(); ++I)
     Os << "        y" << (I + 1) << "_bits = int(dut."
        << Opts.DutOutputPorts[I] << ".value)\n";
@@ -4232,6 +4628,13 @@ std::optional<std::string> emitDiagramCocotbHarness(
     Os << "        y" << (I + 1)
        << " = unpack_fi(y" << (I + 1)
        << "_bits, fi_signed, fi_w, fi_f)\n";
+  // Advance the clock after sampling so the FF latches u_k for the
+  // next iteration's pre-edge sample.
+  if (Opts.Sequential) {
+    Os << "        await RisingEdge(dut.clk)\n";
+  }
+  Os << "        if k < L:\n";
+  Os << "            continue  # pipeline still filling\n";
   Os << "        if not pending_ref:\n";
   Os << "            continue\n";
   Os << "        t_cmp, u_cmp, ref_tuple = pending_ref.pop(0)\n";

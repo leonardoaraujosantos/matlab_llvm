@@ -1,0 +1,96 @@
+{
+  "schema": "matforge.flowchart",
+  "version": "0.1.0",
+  "entry": "whole_nested_pid",
+  "settings": {
+    "kind": "signal_flow",
+    "solver": {
+      "type": "fixed_step",
+      "algorithm": "ode4",
+      "startTime": 0.0,
+      "stopTime": 5.0,
+      "maxStep": "0.05"
+    }
+  },
+  "flows": [
+    {
+      "id": "flow_top",
+      "kind": "program",
+      "name": "whole_nested_pid",
+      "nodes": [
+        { "id": "src",  "kind": "signal_step",
+          "data": { "params": { "stepTime": "0.5",
+                                "initialValue": "0",
+                                "finalValue": "1" } },
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+
+        { "id": "pi_ctrl", "kind": "signal_subsystem",
+          "data": { "flow_id": "flow_pi" },
+          "ports": { "in": [{"id": "u1"}], "out": [{"id": "y1"}] } },
+
+        { "id": "scope_u", "kind": "signal_scope",
+          "data": { "params": { "title": "u" } },
+          "ports": { "in": [{"id": "in"}], "out": [] } },
+        { "id": "scope_y", "kind": "signal_scope",
+          "data": { "params": { "title": "y" } },
+          "ports": { "in": [{"id": "in"}], "out": [] } }
+      ],
+      "edges": [
+        { "id": "e1", "kind": "data",
+          "from": {"node": "src", "port": "out"},
+          "to":   {"node": "pi_ctrl", "port": "u1"} },
+        { "id": "e2", "kind": "data",
+          "from": {"node": "src", "port": "out"},
+          "to":   {"node": "scope_u", "port": "in"} },
+        { "id": "e3", "kind": "data",
+          "from": {"node": "pi_ctrl", "port": "y1"},
+          "to":   {"node": "scope_y", "port": "in"} }
+      ]
+    },
+    {
+      "id": "flow_pi",
+      "kind": "function",
+      "name": "pi_ctrl",
+      "nodes": [
+        { "id": "u1", "kind": "signal_inport",
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+        { "id": "kp", "kind": "signal_gain",
+          "data": { "params": { "gain": "2.0" } },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "ki", "kind": "signal_gain",
+          "data": { "params": { "gain": "0.5" } },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "intg", "kind": "signal_discrete_integrator",
+          "data": { "params": { "sample_time": "0.05",
+                                "initialCondition": "0" } },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "sum", "kind": "signal_sum",
+          "data": { "params": { "signs": "++" } },
+          "ports": { "in": [{"id": "in1"}, {"id": "in2"}],
+                     "out": [{"id": "out"}] } },
+        { "id": "y1", "kind": "signal_outport",
+          "ports": { "in": [{"id": "in"}], "out": [] } }
+      ],
+      "edges": [
+        { "id": "p1", "kind": "data",
+          "from": {"node": "u1", "port": "out"},
+          "to":   {"node": "kp", "port": "in"} },
+        { "id": "p2", "kind": "data",
+          "from": {"node": "u1", "port": "out"},
+          "to":   {"node": "ki", "port": "in"} },
+        { "id": "p3", "kind": "data",
+          "from": {"node": "ki", "port": "out"},
+          "to":   {"node": "intg", "port": "in"} },
+        { "id": "p4", "kind": "data",
+          "from": {"node": "kp", "port": "out"},
+          "to":   {"node": "sum", "port": "in1"} },
+        { "id": "p5", "kind": "data",
+          "from": {"node": "intg", "port": "out"},
+          "to":   {"node": "sum", "port": "in2"} },
+        { "id": "p6", "kind": "data",
+          "from": {"node": "sum", "port": "out"},
+          "to":   {"node": "y1", "port": "in"} }
+      ]
+    }
+  ]
+}

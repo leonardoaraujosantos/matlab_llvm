@@ -101,6 +101,37 @@ PY
 }
 sine_lp_smoke
 
+# Tier-7e — per-language emit smoke. Each fixture is also emitted
+# through -emit-c / -emit-cpp / -emit-typescript; we only check
+# that emit succeeds (rc=0) and stdout is non-empty. Full
+# compile+run lives in the per-subsystem cosim lane; this gate is
+# a shorter "did the lowering pipeline stay green" sentinel.
+per_language_smoke() {
+  local fixture="$1"
+  local mflow="$EX/${fixture}.mflow"
+  for lang in c cpp ts; do
+    case "$lang" in
+      c)   flag="-emit-c"; out="$SCRATCH/${fixture}.c";;
+      cpp) flag="-emit-cpp"; out="$SCRATCH/${fixture}.cpp";;
+      ts)  flag="-emit-typescript"; out="$SCRATCH/${fixture}.ts";;
+    esac
+    "$MATLABC" "$flag" "$mflow" > "$out" \
+        2> "$SCRATCH/${fixture}.${lang}.err"
+    if [[ $? -ne 0 ]]; then
+      fail=$((fail+1)); fails+=("$fixture ${flag} (emit failed)")
+      sed 's/^/  /' "$SCRATCH/${fixture}.${lang}.err" >&2
+      continue
+    fi
+    if [[ ! -s "$out" ]]; then
+      fail=$((fail+1)); fails+=("$fixture ${flag} (empty output)")
+      continue
+    fi
+    pass=$((pass+1))
+  done
+}
+per_language_smoke whole_pid_loop
+per_language_smoke whole_sine_lp
+
 echo "----"
 echo "passed: $pass    failed: $fail"
 if (( fail > 0 )); then

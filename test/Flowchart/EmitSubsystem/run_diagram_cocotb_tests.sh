@@ -114,6 +114,60 @@ PY
 }
 pid_sil_smoke
 
+# Stateful DUT smoke: sine source → unit-delay subsystem → scope.
+# Verifies the sequential-DUT pre-edge sampling path against the
+# Python reference (which returns the pre-update state). Same end-
+# to-end gate as the combinational case.
+delay_sil_smoke() {
+  local out="$SCRATCH/delay"
+  "$MATLABC" -emit-cocotb "$EX/cocotb_delay_sil.mflow" \
+      --dut delay_dut -cocotb-out="$out" >/dev/null 2>"$SCRATCH/delay.err"
+  if [[ $? -ne 0 ]]; then
+    fail=$((fail+1)); fails+=("cocotb_delay_sil (emit failed: $(cat "$SCRATCH/delay.err"))")
+    return
+  fi
+  for needed in delay_block.sv delay_block_ref.py \
+                test_cocotb_delay_sil.py cocotb_fi.py Makefile; do
+    if [[ ! -f "$out/$needed" ]]; then
+      fail=$((fail+1)); fails+=("cocotb_delay_sil ($needed missing)")
+      return
+    fi
+  done
+  python3 - "$out" <<'PY'
+import ast, os, sys
+out = sys.argv[1]
+tb = open(os.path.join(out, "test_cocotb_delay_sil.py")).read()
+ast.parse(tb)
+ref = open(os.path.join(out, "delay_block_ref.py")).read()
+ast.parse(ref)
+ns = {}
+exec(ref, ns)
+assert "DelayBlock" in ns, "delay_block_ref.py missing DelayBlock class"
+PY
+  if [[ $? -ne 0 ]]; then
+    fail=$((fail+1)); fails+=("cocotb_delay_sil (python smoke failed)")
+    return
+  fi
+  pass=$((pass+1))
+  if command -v cocotb-config >/dev/null 2>&1 && \
+     command -v verilator >/dev/null 2>&1; then
+    pushd "$out" >/dev/null
+    if make sim >"$SCRATCH/delay.cocotb.log" 2>&1; then
+      if grep -qi "FAIL=0" "$SCRATCH/delay.cocotb.log"; then
+        pass=$((pass+1))
+      else
+        fail=$((fail+1))
+        fails+=("cocotb_delay_sil (cocotb run reported failures)")
+      fi
+    else
+      fail=$((fail+1))
+      fails+=("cocotb_delay_sil (make sim non-zero exit)")
+    fi
+    popd >/dev/null
+  fi
+}
+delay_sil_smoke
+
 echo "----"
 echo "passed: $pass    failed: $fail"
 if (( fail > 0 )); then

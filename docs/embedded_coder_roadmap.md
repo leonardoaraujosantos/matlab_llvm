@@ -782,7 +782,7 @@ Tier-6c — HDL update (✓ shipped 2026-05-15):
   passes verilator lint, behavioural cosim (bit-exact vs Python),
   and yosys synth (60+ cells).
 
-### Tier 7 — Whole-diagram emit + Cocotb SIL  *(planning, ~2 weeks)*
+### Tier 7 — Whole-diagram emit + Cocotb SIL  *(✓ shipped 2026-05-16)*
 
 Lifts the Embedded Coder lane from per-subsystem to whole-
 `.mflow`-model. The output isn't another `signal_subsystem`
@@ -810,7 +810,7 @@ Tier 1–6. Two flavours sharing the same DiagramToMatlab core:
    SV is assumed pre-emitted via `-emit-sv --subsystem <name>`;
    `-emit-cocotb` generates the wrapper around it.
 
-#### Tier 7a — DiagramToMatlab scaffold
+#### Tier 7a — DiagramToMatlab scaffold  *(✓ shipped 2026-05-16)*
 
 - New pass `lib/Flowchart/DiagramToMatlab.cpp`. Takes a
   `FlowDoc` whose entry flow is a `program` (no boundary
@@ -833,7 +833,7 @@ Tier 1–6. Two flavours sharing the same DiagramToMatlab core:
     - Returns the log table (Python: dict-of-lists; C++: struct
       of std::vector; C: float* arrays + length)
 
-#### Tier 7b — Source blocks
+#### Tier 7b — Source blocks  *(✓ shipped 2026-05-16)*
 
 Per-tick generators that compute `<out> = f(t)`:
 
@@ -854,7 +854,7 @@ Source emit lives next to the existing per-block lowering in
 `lib/Flowchart/SubsystemToMatlab.cpp` so the same dispatch table
 serves both per-subsystem and whole-diagram paths.
 
-#### Tier 7c — Sink blocks
+#### Tier 7c — Sink blocks  *(✓ shipped 2026-05-16)*
 
 Per-tick recorders / passthroughs:
 
@@ -974,7 +974,7 @@ Tier-7d MVP carve-outs (follow-up tiers):
   sources produce; the `% cocotb: stimulus(...)` pragma surface
   from the per-`.m` lane isn't wired (sources fill that role).
 
-#### Tier 7e — CLI surface
+#### Tier 7e — CLI surface  *(✓ shipped 2026-05-16)*
 
 ```
 # Whole-diagram, standalone (new — no --subsystem)
@@ -1032,8 +1032,27 @@ Stand-alone whole-diagram emit knobs (planning):
   (DUT at 100 MHz, host loop at 1 kHz) is out of scope —
   matches Tier 5's "single clk + rst" constraint.
 
-**Total Tier 1–7 to "whole-diagram SIL works": ~5–6 weeks
-(Tier 1–6 shipped; Tier 7 adds ~2 weeks).**
+**Total Tier 1–7 to "whole-diagram SIL works": shipped 2026-05-16.**
+
+Outstanding Tier-7 follow-ups (not blocking the headline workflow):
+
+- **Multi-DUT cocotb** — `--dut a,b,c` synthesises a wrapper SV that
+  instantiates all DUTs side-by-side, harness drives each in
+  lockstep. Currently the user can run matlabc once per DUT to
+  generate independent SIL directories.
+- **Cocotb host multi-slot / nested support** — the standalone
+  whole-diagram emit handles multi-slot stateful blocks and nested
+  subsystems via the helper-binding pre-pass; the cocotb harness's
+  HostModel renderer still errors on those (Tier-7d MVP carve-outs).
+  Lifting them requires embedding self-emitted helper Python
+  modules alongside the test file and instantiating them as
+  HostModel members.
+- **Stateful DUT semantic alignment with MATLAB unit-delay
+  z⁻¹** — cocotb-SIL now samples DUT outputs BEFORE the rising
+  edge so the FF output reflects the pre-edge state matching
+  MATLAB unit-delay semantics y[k]=u[k-1]. Tustin / direct-
+  feedthrough blocks still rely on combinational re-evaluation
+  (handled by a 1 ns Timer before the read).
 
 ## 11. Demo coverage
 
@@ -1056,14 +1075,17 @@ Under `examples/mflowlink/coder/`:
 Each fixture doubles as a CTest fixture under
 `test/Flowchart/EmitSubsystem/`.
 
-Tier 7 (planned) adds whole-diagram fixtures under the same
-directory tree:
+Tier 7 (shipped 2026-05-16) adds whole-diagram fixtures under the
+same directory tree:
 
 | Fixture | Exercises |
 |---|---|
-| `whole_pid_loop.mflow` | Tier 7a — sine → PID → plant → scope; whole-diagram standalone emit |
-| `cocotb_pid_sil.mflow` | Tier 7d — PID subsystem as cocotb DUT, plant on host side |
-| `multirate_scope.mflow` | Tier 7 + 6c — multi-rate diagram with logged scopes |
+| `whole_pid_loop.mflow` | Tier 7a — step → err → 1st-order plant → feedback → scopes; whole-diagram standalone emit |
+| `whole_sine_lp.mflow` | Tier 7a/7b — sine source → 1st-order LP → scopes; standalone emit |
+| `whole_tf2_step.mflow` | Tier 7 multi-slot — 2nd-order TF (1/(s²+2s+2)) step response, controllable-canonical state-space via helper-binding |
+| `whole_nested_pid.mflow` | Tier 7 nested — step → `pi_ctrl` subsystem (Kp + Ki·integrator) → scope; verifies whole-diagram nested subsystem call site |
+| `cocotb_pid_sil.mflow` | Tier 7d — gain plant subsystem as cocotb DUT, end-to-end Verilator+cocotb pass |
+| `cocotb_delay_sil.mflow` | Tier 7d stateful DUT — unit-delay subsystem, pre-edge sampling alignment with Python reference |
 
 ## 12. CTest lanes
 
@@ -1078,12 +1100,12 @@ Per-subsystem (Tier 1–6, ✓ shipped):
 - `flowchart-emit-subsystem-sv-yosys` — yosys generic synth
   + per-fixture gate-count floor sentinel
 
-Whole-diagram (Tier 7, planned):
+Whole-diagram (Tier 7, ✓ shipped 2026-05-16):
 
-- `flowchart-emit-diagram-python` — whole-diagram Python emit
-  + run + diff against `matlabc -simulate`'s CSV log
-- `flowchart-emit-diagram-c` / `-cpp` / `-ts` — same per
-  language (clang / clang++ / tsc + node)
+- `flowchart-emit-diagram-tests` — Python emit + run + analytic
+  reference check (closed-loop step settles to DC gain 0.5;
+  sine LP attenuates by frequency response). Includes per-
+  language smoke for `-emit-c` / `-emit-cpp` / `-emit-ts`.
 - `flowchart-emit-diagram-cocotb` — gated under the existing
   `MATLAB_LLVM_WITH_EMIT_SUBSYSTEM_SV_COSIM` flag. Generates
   the cocotb harness, compiles the DUT via Verilator, runs
