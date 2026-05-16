@@ -168,6 +168,119 @@ PY
 }
 delay_sil_smoke
 
+# Host-helper SIL smoke: sine → ctrl subsystem (host-side) → plant
+# subsystem (DUT) → scope. Verifies the Tier-7d host-helper path
+# end-to-end: the orchestrator self-invokes `-emit-python` for the
+# host-side `ctrl` subsystem, writes it next to the cocotb test,
+# and the testbench's HostModel imports + calls it on every tick.
+host_helper_sil_smoke() {
+  local out="$SCRATCH/host_helper"
+  "$MATLABC" -emit-cocotb "$EX/cocotb_host_helper_sil.mflow" \
+      --dut plant_dut -cocotb-out="$out" >/dev/null \
+      2>"$SCRATCH/host_helper.err"
+  if [[ $? -ne 0 ]]; then
+    fail=$((fail+1)); fails+=("cocotb_host_helper_sil (emit failed: $(cat "$SCRATCH/host_helper.err"))")
+    return
+  fi
+  for needed in plant_block.sv plant_block_ref.py ctrl_block_ref.py \
+                test_cocotb_host_helper_sil.py cocotb_fi.py Makefile; do
+    if [[ ! -f "$out/$needed" ]]; then
+      fail=$((fail+1)); fails+=("cocotb_host_helper_sil ($needed missing)")
+      return
+    fi
+  done
+  python3 - "$out" <<'PY'
+import ast, os, sys
+out = sys.argv[1]
+ast.parse(open(os.path.join(out, "test_cocotb_host_helper_sil.py")).read())
+ns_ctrl = {}
+exec(open(os.path.join(out, "ctrl_block_ref.py")).read(), ns_ctrl)
+assert "CtrlBlock" in ns_ctrl, "ctrl_block_ref.py missing CtrlBlock class"
+ctrl = ns_ctrl["CtrlBlock"]()
+y = ctrl.step(2.0)
+assert abs(y - 3.0) < 1e-9, f"CtrlBlock.step(2.0) = {y}, expected 3.0"
+PY
+  if [[ $? -ne 0 ]]; then
+    fail=$((fail+1)); fails+=("cocotb_host_helper_sil (python smoke failed)")
+    return
+  fi
+  pass=$((pass+1))
+  if command -v cocotb-config >/dev/null 2>&1 && \
+     command -v verilator >/dev/null 2>&1; then
+    pushd "$out" >/dev/null
+    if make sim >"$SCRATCH/host_helper.cocotb.log" 2>&1; then
+      if grep -qi "FAIL=0" "$SCRATCH/host_helper.cocotb.log"; then
+        pass=$((pass+1))
+      else
+        fail=$((fail+1))
+        fails+=("cocotb_host_helper_sil (cocotb run reported failures)")
+      fi
+    else
+      fail=$((fail+1))
+      fails+=("cocotb_host_helper_sil (make sim non-zero exit)")
+    fi
+    popd >/dev/null
+  fi
+}
+host_helper_sil_smoke
+
+# Multi-DUT SIL smoke: `--dut gain_a,gain_b` synthesises a wrapper
+# SV that instantiates both DUT subsystems side-by-side; harness
+# drives each in lockstep and compares against per-DUT references.
+multi_dut_sil_smoke() {
+  local out="$SCRATCH/multi_dut"
+  "$MATLABC" -emit-cocotb "$EX/cocotb_multi_dut_sil.mflow" \
+      --dut gain_a,gain_b -cocotb-out="$out" >/dev/null \
+      2>"$SCRATCH/multi_dut.err"
+  if [[ $? -ne 0 ]]; then
+    fail=$((fail+1)); fails+=("cocotb_multi_dut_sil (emit failed: $(cat "$SCRATCH/multi_dut.err"))")
+    return
+  fi
+  for needed in gain_a_block.sv gain_b_block.sv \
+                cocotb_multi_dut_sil_wrapper.sv \
+                gain_a_block_ref.py gain_b_block_ref.py \
+                test_cocotb_multi_dut_sil.py cocotb_fi.py Makefile; do
+    if [[ ! -f "$out/$needed" ]]; then
+      fail=$((fail+1)); fails+=("cocotb_multi_dut_sil ($needed missing)")
+      return
+    fi
+  done
+  python3 - "$out" <<'PY'
+import ast, os, sys
+out = sys.argv[1]
+tb = open(os.path.join(out, "test_cocotb_multi_dut_sil.py")).read()
+ast.parse(tb)
+# Multi-DUT harness exposes ports prefixed by block id and tracks
+# per-DUT pending queues.
+assert "dut.gain_a__u1" in tb, "missing gain_a prefixed drive"
+assert "dut.gain_b__u1" in tb, "missing gain_b prefixed drive"
+assert "pending_0" in tb and "pending_1" in tb, \
+    "missing per-DUT pending queues"
+PY
+  if [[ $? -ne 0 ]]; then
+    fail=$((fail+1)); fails+=("cocotb_multi_dut_sil (python smoke failed)")
+    return
+  fi
+  pass=$((pass+1))
+  if command -v cocotb-config >/dev/null 2>&1 && \
+     command -v verilator >/dev/null 2>&1; then
+    pushd "$out" >/dev/null
+    if make sim >"$SCRATCH/multi_dut.cocotb.log" 2>&1; then
+      if grep -qi "FAIL=0" "$SCRATCH/multi_dut.cocotb.log"; then
+        pass=$((pass+1))
+      else
+        fail=$((fail+1))
+        fails+=("cocotb_multi_dut_sil (cocotb run reported failures)")
+      fi
+    else
+      fail=$((fail+1))
+      fails+=("cocotb_multi_dut_sil (make sim non-zero exit)")
+    fi
+    popd >/dev/null
+  fi
+}
+multi_dut_sil_smoke
+
 echo "----"
 echo "passed: $pass    failed: $fail"
 if (( fail > 0 )); then

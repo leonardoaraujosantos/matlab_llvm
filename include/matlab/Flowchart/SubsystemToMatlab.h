@@ -175,31 +175,53 @@ matlab::TranslationUnit *buildDiagramTU(
 // `matlabc -emit-systemverilog --subsystem` and `-emit-python
 // --subsystem`); this function only renders the testbench text.
 struct DiagramCocotbOptions {
-  // Block id (entry flow) that maps to the SV DUT.
-  std::string DutBlockId;
-  // SV top-level module name (matches the emitted .sv).
-  std::string DutModuleName;
-  // Python module to import for the reference (e.g. `<name>_ref`).
-  std::string DutRefModule;
-  // Python class name inside that module (CamelCase of the subsystem).
-  std::string DutRefClass;
+  // One DUT pinned to one entry-flow signal_subsystem block. The
+  // single-DUT case (Tier-7d MVP) is the common form; multi-DUT
+  // (`--dut a,b,c`) is the same plumbing with a wrapper SV that
+  // instantiates each DUT side-by-side with its ports prefixed by
+  // the block id. Each DUT compares independently against its own
+  // Python reference.
+  struct DutSpec {
+    std::string BlockId;           // entry-flow block id
+    std::string ModuleName;        // SV module name (per-DUT)
+    std::string RefModule;         // Python module name for the ref
+    std::string RefClass;          // Python class name in that module
+    std::vector<std::string> InputPorts;   // ordered (per-DUT)
+    std::vector<std::string> OutputPorts;  // ordered (per-DUT)
+    bool Sequential = false;       // DUT has clk + rst_n / reset?
+  };
+  // The list of DUTs. Single-DUT models populate this with one
+  // entry; the harness emit loops over it for drive + sample +
+  // compare. Empty is a programming error caught at emit time.
+  std::vector<DutSpec> Duts;
   // SIL comparison tolerance (decoded units).
   double Tolerance = 1.0 / 65536.0;
   // Q<W>.<F> packing for every DUT port.
   int FiWidth = 32;
   int FiFrac  = 16;
   bool FiSigned = true;
-  // Ordered DUT public input port names (match SV `module <name>(...)`).
-  std::vector<std::string> DutInputPorts;
-  // Ordered DUT public output port names.
-  std::vector<std::string> DutOutputPorts;
   // Cycles between drive and compare: matches the SV pipeline depth.
   int Latency = 0;
-  // True when the SV DUT exposes `clk` (and typically `rst_n`) ports
-  // — i.e. the subsystem is stateful. False = combinational DUT;
-  // the harness uses a small `Timer` delay between drive and read
-  // instead of `RisingEdge(clk)`.
-  bool Sequential = false;
+  // Multi-DUT wrapper SV module name. Empty when there's only one
+  // DUT (the harness uses the DUT's own module directly).
+  std::string WrapperModule;
+  // Tier-7d follow-up — non-DUT nested `signal_subsystem` blocks on
+  // the host side. Each entry pins one entry-flow block id to its
+  // Python helper class (the per-subsystem `-emit-python` output
+  // alongside the test file). The harness's HostModel instantiates
+  // one helper-class instance per entry and calls `step(...)` at
+  // the block's site in the topo walk; that step carries the
+  // helper's persistent state across ticks. Without these, host-
+  // side stateful subsystems would emit a "Tier-7d follow-up"
+  // diagnostic.
+  struct HostHelper {
+    std::string BlockId;        // entry-flow block id
+    std::string ModuleName;     // sibling Python module to import
+    std::string ClassName;      // helper class name inside it
+    std::vector<std::string> InputPorts;   // ordered public inputs
+    std::vector<std::string> OutputPorts;  // ordered public outputs
+  };
+  std::vector<HostHelper> HostHelpers;
 };
 
 // Returns the test_<entry>.py contents on success, or std::nullopt on

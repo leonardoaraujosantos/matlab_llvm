@@ -1034,25 +1034,34 @@ Stand-alone whole-diagram emit knobs (planning):
 
 **Total Tier 1–7 to "whole-diagram SIL works": shipped 2026-05-16.**
 
-Outstanding Tier-7 follow-ups (not blocking the headline workflow):
+Outstanding Tier-7 follow-ups status:
 
-- **Multi-DUT cocotb** — `--dut a,b,c` synthesises a wrapper SV that
-  instantiates all DUTs side-by-side, harness drives each in
-  lockstep. Currently the user can run matlabc once per DUT to
-  generate independent SIL directories.
-- **Cocotb host multi-slot / nested support** — the standalone
-  whole-diagram emit handles multi-slot stateful blocks and nested
-  subsystems via the helper-binding pre-pass; the cocotb harness's
-  HostModel renderer still errors on those (Tier-7d MVP carve-outs).
-  Lifting them requires embedding self-emitted helper Python
-  modules alongside the test file and instantiating them as
-  HostModel members.
+- **Multi-DUT cocotb** *(✓ shipped)* — `matlabc -emit-cocotb FILE
+  --dut a,b,c` synthesises a wrapper SV (`<entry>_wrapper.sv`)
+  that instantiates every DUT side-by-side and re-exposes their
+  I/O at the wrapper boundary prefixed with `<block_id>__`. The
+  harness drives each DUT in lockstep, maintains per-DUT pending-
+  ref FIFOs for latency-aligned compare, and writes one CSV column
+  per DUT × output port. Demo: `cocotb_multi_dut_sil.mflow`.
+- **Cocotb host multi-slot / nested support** *(✓ shipped — nested
+  subsystems)* — the orchestrator now self-invokes
+  `-emit-python --subsystem <flow>` for every non-DUT
+  `signal_subsystem` in the entry flow, writes its reference
+  alongside the test file, and the harness's HostModel
+  instantiates the helper class once and calls `step(...)` at the
+  block's site each tick (persistent state carries across ticks
+  inside the helper instance). Demo:
+  `cocotb_host_helper_sil.mflow`. **Multi-slot stateful PRIMITIVES**
+  (TF order ≥ 2 / state-space / transport-delay) on the host side
+  remain a Tier-7d follow-up — they need a synthetic-wrapper-flow
+  pass mirroring `buildDiagramTU`'s helper-binding logic into the
+  cocotb orchestrator.
 - **Stateful DUT semantic alignment with MATLAB unit-delay
-  z⁻¹** — cocotb-SIL now samples DUT outputs BEFORE the rising
-  edge so the FF output reflects the pre-edge state matching
-  MATLAB unit-delay semantics y[k]=u[k-1]. Tustin / direct-
-  feedthrough blocks still rely on combinational re-evaluation
-  (handled by a 1 ns Timer before the read).
+  z⁻¹** *(✓ shipped)* — cocotb-SIL samples DUT outputs BEFORE
+  the rising edge so the FF output reflects the pre-edge state
+  matching MATLAB unit-delay semantics y[k]=u[k-1]. Tustin /
+  direct-feedthrough blocks still rely on combinational re-
+  evaluation (handled by a 1 ns Timer before the read).
 
 ## 11. Demo coverage
 

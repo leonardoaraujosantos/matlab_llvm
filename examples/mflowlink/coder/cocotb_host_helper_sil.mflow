@@ -1,0 +1,103 @@
+{
+  "schema": "matforge.flowchart",
+  "version": "0.1.0",
+  "entry": "cocotb_host_helper_sil",
+  "settings": {
+    "kind": "signal_flow",
+    "solver": {
+      "type": "fixed_step",
+      "algorithm": "ode4",
+      "startTime": 0.0,
+      "stopTime": 0.3,
+      "maxStep": "0.01"
+    }
+  },
+  "flows": [
+    {
+      "id": "flow_top",
+      "kind": "program",
+      "name": "cocotb_host_helper_sil",
+      "nodes": [
+        { "id": "src", "kind": "signal_sine",
+          "data": { "params": { "amplitude": "0.25",
+                                "frequency": "6.2832",
+                                "phase": "0",
+                                "bias": "0" } },
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+
+        { "id": "ctrl", "kind": "signal_subsystem",
+          "data": { "flow_id": "flow_ctrl" },
+          "ports": { "in": [{"id": "u1"}], "out": [{"id": "y1"}] } },
+
+        { "id": "plant_dut", "kind": "signal_subsystem",
+          "data": { "flow_id": "flow_plant" },
+          "ports": { "in": [{"id": "u1"}], "out": [{"id": "y1"}] } },
+
+        { "id": "scope_in",  "kind": "signal_scope",
+          "data": { "params": { "title": "u" } },
+          "ports": { "in": [{"id": "in"}], "out": [] } },
+        { "id": "scope_out", "kind": "signal_scope",
+          "data": { "params": { "title": "y" } },
+          "ports": { "in": [{"id": "in"}], "out": [] } }
+      ],
+      "edges": [
+        { "id": "e1", "kind": "data",
+          "from": {"node": "src",  "port": "out"},
+          "to":   {"node": "ctrl", "port": "u1"} },
+        { "id": "e2", "kind": "data",
+          "from": {"node": "ctrl", "port": "y1"},
+          "to":   {"node": "plant_dut", "port": "u1"} },
+        { "id": "e3", "kind": "data",
+          "from": {"node": "src", "port": "out"},
+          "to":   {"node": "scope_in", "port": "in"} },
+        { "id": "e4", "kind": "data",
+          "from": {"node": "plant_dut", "port": "y1"},
+          "to":   {"node": "scope_out", "port": "in"} }
+      ]
+    },
+    {
+      "id": "flow_ctrl",
+      "kind": "function",
+      "name": "ctrl_block",
+      "nodes": [
+        { "id": "u1", "kind": "signal_inport",
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+        { "id": "g",  "kind": "signal_gain",
+          "data": { "params": { "gain": "1.5" } },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "y1", "kind": "signal_outport",
+          "ports": { "in": [{"id": "in"}], "out": [] } }
+      ],
+      "edges": [
+        { "id": "c1", "kind": "data",
+          "from": {"node": "u1", "port": "out"},
+          "to":   {"node": "g",  "port": "in"} },
+        { "id": "c2", "kind": "data",
+          "from": {"node": "g",  "port": "out"},
+          "to":   {"node": "y1", "port": "in"} }
+      ]
+    },
+    {
+      "id": "flow_plant",
+      "kind": "function",
+      "name": "plant_block",
+      "nodes": [
+        { "id": "u1", "kind": "signal_inport",
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+        { "id": "g",  "kind": "signal_gain",
+          "data": { "params": { "gain": "2.0" } },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "y1", "kind": "signal_outport",
+          "ports": { "in": [{"id": "in"}], "out": [] } }
+      ],
+      "edges": [
+        { "id": "p1", "kind": "data",
+          "from": {"node": "u1", "port": "out"},
+          "to":   {"node": "g",  "port": "in"} },
+        { "id": "p2", "kind": "data",
+          "from": {"node": "g",  "port": "out"},
+          "to":   {"node": "y1", "port": "in"} }
+      ]
+    }
+  ]
+}

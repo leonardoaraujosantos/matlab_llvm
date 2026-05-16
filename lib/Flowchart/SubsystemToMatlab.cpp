@@ -4166,37 +4166,74 @@ std::optional<std::string> emitDiagramCocotbHarness(
     return std::nullopt;
   }
 
-  // Locate the DUT block.
-  const Node *DutNode = nullptr;
-  for (const auto &N : Entry->Nodes) {
-    if (N.Id == Opts.DutBlockId) { DutNode = &N; break; }
-  }
-  if (!DutNode) {
+  if (Opts.Duts.empty()) {
     Diag.error(SourceLocation{},
-               "--dut block \"" + Opts.DutBlockId +
-                   "\" not found in entry flow \"" + EntryFlowName + "\"");
+               "cocotb-SIL: DiagramCocotbOptions::Duts is empty — "
+               "caller must populate at least one DutSpec.");
     return std::nullopt;
   }
-  if (DutNode->Kind != "signal_subsystem") {
-    Diag.error(DutNode->Loc,
-               "--dut block \"" + Opts.DutBlockId +
-                   "\" must be a signal_subsystem (kind is \"" +
-                   DutNode->Kind + "\")");
-    return std::nullopt;
+  // Locate every DUT block in the entry flow and snapshot its node
+  // pointer. Multi-DUT (`--dut a,b,c`) populates `Opts.Duts` with
+  // one entry per DUT; single-DUT runs with a one-element list.
+  std::vector<const Node *> DutNodes(Opts.Duts.size(), nullptr);
+  for (size_t I = 0; I < Opts.Duts.size(); ++I) {
+    const std::string &BId = Opts.Duts[I].BlockId;
+    for (const auto &N : Entry->Nodes) {
+      if (N.Id == BId) { DutNodes[I] = &N; break; }
+    }
+    if (!DutNodes[I]) {
+      Diag.error(SourceLocation{},
+                 "--dut block \"" + BId +
+                     "\" not found in entry flow \"" + EntryFlowName + "\"");
+      return std::nullopt;
+    }
+    if (DutNodes[I]->Kind != "signal_subsystem") {
+      Diag.error(DutNodes[I]->Loc,
+                 "--dut block \"" + BId +
+                     "\" must be a signal_subsystem (kind is \"" +
+                     DutNodes[I]->Kind + "\")");
+      return std::nullopt;
+    }
   }
+  auto isDutNode = [&](const Node *N) -> int {
+    for (size_t I = 0; I < DutNodes.size(); ++I)
+      if (DutNodes[I] == N) return (int)I;
+    return -1;
+  };
+  auto dutByBlockId = [&](const std::string &BId) -> int {
+    for (size_t I = 0; I < Opts.Duts.size(); ++I)
+      if (Opts.Duts[I].BlockId == BId) return (int)I;
+    return -1;
+  };
+  bool MultiDut = Opts.Duts.size() > 1;
+  bool AnySequential = false;
+  for (const auto &D : Opts.Duts) if (D.Sequential) AnySequential = true;
 
   // Categorise blocks: sources / sinks / internal-non-DUT / DUT.
+  // Nested non-DUT signal_subsystem blocks are accepted when the
+  // caller supplies the matching HostHelpers entry (the orchestrator
+  // self-invokes `-emit-python --subsystem <flow>` for each one).
+  // Without a matching HostHelpers entry the legacy "Tier-7d follow-
+  // up" diagnostic still fires.
+  auto hostHelperFor = [&](const std::string &BlockId)
+      -> const DiagramCocotbOptions::HostHelper * {
+    for (const auto &H : Opts.HostHelpers)
+      if (H.BlockId == BlockId) return &H;
+    return nullptr;
+  };
   std::vector<const Node *> Sources, Sinks, Internal;
   for (const auto &N : Entry->Nodes) {
-    if (&N == DutNode) continue;
+    if (isDutNode(&N) >= 0) continue;
     if (N.Kind == "signal_inport" || N.Kind == "signal_outport") continue;
     if (isSourceKind(N.Kind)) { Sources.push_back(&N); continue; }
     if (isDiagramSink(N.Kind)) { Sinks.push_back(&N); continue; }
-    if (N.Kind == "signal_subsystem") {
+    if (N.Kind == "signal_subsystem" && !hostHelperFor(N.Id)) {
       Diag.error(N.Loc,
-                 "cocotb-SIL MVP allows exactly one `signal_subsystem` "
-                 "in the entry flow (the --dut). Found additional "
-                 "subsystem \"" + N.Id + "\" — Tier-7d follow-up");
+                 "cocotb-SIL: non-DUT `signal_subsystem` \"" + N.Id +
+                 "\" needs a per-subsystem Python reference; the "
+                 "orchestrator should populate "
+                 "DiagramCocotbOptions::HostHelpers for it before "
+                 "calling emitDiagramCocotbHarness.");
       return std::nullopt;
     }
     Internal.push_back(&N);
@@ -4219,13 +4256,18 @@ std::optional<std::string> emitDiagramCocotbHarness(
   std::unordered_map<std::string, std::string> VarOfNode;
   for (auto *N : Sources)  VarOfNode[N->Id] = uniqueName(N->Id);
   for (auto *N : Internal) VarOfNode[N->Id] = uniqueName(N->Id);
-  // DUT block contributes one var per OUTPUT port — those carry the
-  // value driven into the rest of the diagram. Inputs are computed
-  // from upstream values just like any other block.
-  std::vector<std::string> DutOutVars;
-  for (size_t I = 0; I < Opts.DutOutputPorts.size(); ++I)
-    DutOutVars.push_back(uniqueName(Opts.DutBlockId + "_" +
-                                    Opts.DutOutputPorts[I]));
+  // Each DUT block contributes one var per output port — those
+  // carry the sampled-from-DUT value into the rest of the diagram.
+  // Inputs are computed from upstream values like any other block.
+  // For multi-DUT, DutOutVars[d][i] is the local for DUT d's i-th
+  // output port.
+  std::vector<std::vector<std::string>> DutOutVars(Opts.Duts.size());
+  for (size_t D = 0; D < Opts.Duts.size(); ++D) {
+    const auto &Spec = Opts.Duts[D];
+    for (size_t I = 0; I < Spec.OutputPorts.size(); ++I)
+      DutOutVars[D].push_back(uniqueName(Spec.BlockId + "_" +
+                                         Spec.OutputPorts[I]));
+  }
 
   // Per-sink log array.
   struct SinkLog { const Node *N; std::string Name; std::string Src; };
@@ -4262,6 +4304,9 @@ std::optional<std::string> emitDiagramCocotbHarness(
     return 1;
   };
   for (auto *N : Internal) {
+    // Helper-bound subsystems carry their own state inside the
+    // imported Python class — no host-local state slot needed.
+    if (N->Kind == "signal_subsystem" && hostHelperFor(N->Id)) continue;
     if (!isStatefulKind(N->Kind)) continue;
     int Order = stateOrderForBlock(N);
     if (Order > 1) {
@@ -4276,6 +4321,12 @@ std::optional<std::string> emitDiagramCocotbHarness(
     S.Var = uniqueName("s_" + N->Id);
     S.Init = initialStateOf(*N);
     States.push_back(S);
+  }
+  // Helper var name (CamelCase class lives in HostHelper, but the
+  // HostModel field uses snake_case `helper_<block_id>`).
+  std::unordered_map<std::string, std::string> HelperFieldOf;
+  for (const auto &H : Opts.HostHelpers) {
+    HelperFieldOf[H.BlockId] = uniqueName("helper_" + H.BlockId);
   }
 
   // Resolve Ts / N from the model's solver settings.
@@ -4301,12 +4352,14 @@ std::optional<std::string> emitDiagramCocotbHarness(
     if (It == EI.Map.end()) return "0.0";
     const std::string &Up = It->second.first;
     const std::string &UpPort = It->second.second;
-    if (Up == Opts.DutBlockId) {
-      // Reading the DUT's output. Map UpPort to its index in
-      // DutOutputPorts; fall back to first port on mismatch.
-      for (size_t I = 0; I < Opts.DutOutputPorts.size(); ++I)
-        if (Opts.DutOutputPorts[I] == UpPort) return DutOutVars[I];
-      if (!DutOutVars.empty()) return DutOutVars.front();
+    if (int D = dutByBlockId(Up); D >= 0) {
+      // Reading a DUT's output. Map UpPort to its index in that
+      // DUT's OutputPorts; fall back to its first output on
+      // mismatch.
+      const auto &Spec = Opts.Duts[D];
+      for (size_t I = 0; I < Spec.OutputPorts.size(); ++I)
+        if (Spec.OutputPorts[I] == UpPort) return DutOutVars[D][I];
+      if (!DutOutVars[D].empty()) return DutOutVars[D].front();
       return "0.0";
     }
     auto VIt = VarOfNode.find(Up);
@@ -4337,6 +4390,22 @@ std::optional<std::string> emitDiagramCocotbHarness(
     auto Ports = inputPortsOf(*N);
     std::vector<std::string> Ins;
     for (auto &P : Ports) Ins.push_back(upstreamVar(N->Id, P));
+
+    // Host-side nested subsystem: call its helper class's step()
+    // and capture the return into OutVar. The helper instance is
+    // pinned on the HostModel (so its state carries across ticks).
+    if (auto *Helper = hostHelperFor(N->Id)) {
+      std::ostringstream Os;
+      Os << "        " << OutVar << " = self." << HelperFieldOf[N->Id]
+         << ".step(";
+      for (size_t I = 0; I < Ins.size(); ++I) {
+        if (I) Os << ", ";
+        Os << Ins[I];
+      }
+      Os << ")\n";
+      Body += Os.str();
+      return true;
+    }
 
     LocalState *Slot = nullptr;
     for (auto &S : States) if (S.N == N) { Slot = &S; break; }
@@ -4427,24 +4496,38 @@ std::optional<std::string> emitDiagramCocotbHarness(
   Os << "#\n";
   Os << "# Whole-diagram SIL harness. Entry flow: " << EntryFlowName
      << "\n";
-  Os << "# DUT block       : " << Opts.DutBlockId
-     << " (SV module: " << Opts.DutModuleName << ")\n";
-  Os << "# DUT reference   : " << Opts.DutRefModule << "."
-     << Opts.DutRefClass << "\n";
+  for (size_t D = 0; D < Opts.Duts.size(); ++D) {
+    const auto &Spec = Opts.Duts[D];
+    Os << "# DUT[" << D << "] block       : " << Spec.BlockId
+       << " (SV module: " << Spec.ModuleName << ")\n";
+    Os << "# DUT[" << D << "] reference   : " << Spec.RefModule << "."
+       << Spec.RefClass << "\n";
+  }
+  if (!Opts.WrapperModule.empty())
+    Os << "# Wrapper module  : " << Opts.WrapperModule << "\n";
   Os << "# Q-format        : " << (Opts.FiSigned ? "Q" : "UQ")
      << Opts.FiWidth - Opts.FiFrac << "." << Opts.FiFrac << "\n";
   Os << "# Tolerance       : " << pyDouble(Opts.Tolerance) << "\n";
   Os << "import math, os, csv\n";
   Os << "import cocotb\n";
-  if (Opts.Sequential) {
+  if (AnySequential) {
     Os << "from cocotb.clock import Clock\n";
     Os << "from cocotb.triggers import RisingEdge, Timer\n";
   } else {
     Os << "from cocotb.triggers import Timer\n";
   }
   Os << "from cocotb_fi import pack_fi, unpack_fi\n";
-  Os << "from " << Opts.DutRefModule << " import " << Opts.DutRefClass
-     << "\n\n";
+  for (const auto &Spec : Opts.Duts) {
+    Os << "from " << Spec.RefModule << " import " << Spec.RefClass
+       << "\n";
+  }
+  // Host-side helper subsystems. Each one was emitted as a
+  // standalone Python module by the orchestrator's self-invocation;
+  // we import the class here and instantiate it in HostModel below.
+  for (const auto &H : Opts.HostHelpers) {
+    Os << "from " << H.ModuleName << " import " << H.ClassName << "\n";
+  }
+  Os << "\n";
 
   // Host model — keeps per-tick state for non-DUT stateful blocks.
   Os << "class HostModel:\n";
@@ -4457,10 +4540,15 @@ std::optional<std::string> emitDiagramCocotbHarness(
   Os << "    output tuple and updates downstream values + state.\n";
   Os << "    \"\"\"\n";
   Os << "    def __init__(self):\n";
-  if (States.empty())
+  if (States.empty() && Opts.HostHelpers.empty())
     Os << "        pass\n";
   for (auto &S : States)
     Os << "        self." << S.Var << " = " << pyDouble(S.Init) << "\n";
+  // Helper-class instances — one per non-DUT signal_subsystem.
+  for (const auto &H : Opts.HostHelpers) {
+    Os << "        self." << HelperFieldOf[H.BlockId] << " = "
+       << H.ClassName << "()\n";
+  }
 
   // Pre-DUT: every node strictly upstream of the DUT. The MVP runs
   // every source unconditionally and every non-DUT internal in
@@ -4472,7 +4560,7 @@ std::optional<std::string> emitDiagramCocotbHarness(
   if (Diag.hasErrors()) return std::nullopt;
   std::vector<const Node *> TopoNonDut;
   for (auto *N : Topo) {
-    if (N == DutNode) continue;
+    if (isDutNode(N) >= 0) continue;
     if (isSourceKind(N->Kind) || isDiagramSink(N->Kind)) continue;
     TopoNonDut.push_back(N);
   }
@@ -4503,13 +4591,22 @@ std::optional<std::string> emitDiagramCocotbHarness(
   for (auto *N : Internal)
     Os << "        self._" << VarOfNode[N->Id] << " = "
        << VarOfNode[N->Id] << "\n";
-  // Resolve DUT input tuple from the entry flow's wiring.
+  // Resolve every DUT's input tuple from the entry flow's wiring,
+  // concatenated in `Opts.Duts` order. The harness drives them in
+  // the same order — see the `dut.<prefix>_<port> = pack_fi(...)`
+  // chain below.
+  size_t TotalIns = 0;
+  for (const auto &Spec : Opts.Duts) TotalIns += Spec.InputPorts.size();
   Os << "        return (";
-  for (size_t I = 0; I < Opts.DutInputPorts.size(); ++I) {
-    if (I) Os << ", ";
-    Os << upstreamVar(Opts.DutBlockId, Opts.DutInputPorts[I]);
+  size_t IdxI = 0;
+  for (const auto &Spec : Opts.Duts) {
+    for (size_t I = 0; I < Spec.InputPorts.size(); ++I) {
+      if (IdxI) Os << ", ";
+      Os << upstreamVar(Spec.BlockId, Spec.InputPorts[I]);
+      ++IdxI;
+    }
   }
-  if (Opts.DutInputPorts.size() == 1) Os << ",";
+  if (TotalIns == 1) Os << ",";
   Os << ")\n\n";
 
   // Post-DUT: replay non-DUT pre-evaluated values onto locals, accept
@@ -4525,16 +4622,37 @@ std::optional<std::string> emitDiagramCocotbHarness(
   for (auto *N : Internal)
     Os << "        " << VarOfNode[N->Id] << " = self._"
        << VarOfNode[N->Id] << "\n";
-  // Unpack DUT outputs into the named OutVars.
-  for (size_t I = 0; I < DutOutVars.size(); ++I)
-    Os << "        " << DutOutVars[I] << " = dut_outs[" << I << "]\n";
+  // Unpack DUT outputs into the named OutVars. dut_outs is a flat
+  // tuple concatenating every DUT's outputs in `Opts.Duts` order.
+  {
+    size_t IdxO = 0;
+    for (size_t D = 0; D < Opts.Duts.size(); ++D) {
+      for (size_t I = 0; I < DutOutVars[D].size(); ++I) {
+        Os << "        " << DutOutVars[D][I] << " = dut_outs["
+           << IdxO << "]\n";
+        ++IdxO;
+      }
+    }
+  }
   // Sink logging: log[k] = upstream value.
   for (auto &L : Logs) {
     std::string Src = "0.0";
     if (!L.Src.empty()) {
-      if (L.Src == Opts.DutBlockId && !DutOutVars.empty())
-        Src = DutOutVars.front();
-      else if (VarOfNode.count(L.Src)) Src = VarOfNode[L.Src];
+      int DUp = dutByBlockId(L.Src);
+      if (DUp >= 0 && !DutOutVars[DUp].empty()) {
+        // Look up the sink's source port → DUT output index.
+        const auto &Spec = Opts.Duts[DUp];
+        Src = DutOutVars[DUp].front();
+        for (size_t I = 0; I < Spec.OutputPorts.size(); ++I) {
+          // SinkLog doesn't keep the source-port name today — we
+          // route through VarOfNodePort-style first-output fallback.
+          // (Multi-output sink wiring is a future enhancement; the
+          // first port is the common case.)
+          (void)I;
+        }
+      } else if (VarOfNode.count(L.Src)) {
+        Src = VarOfNode[L.Src];
+      }
     }
     Os << "        self." << L.Name << ".append(" << Src << ")\n";
   }
@@ -4544,14 +4662,25 @@ std::optional<std::string> emitDiagramCocotbHarness(
   if (!PostBody.empty()) Os << PostBody;
   Os << "\n";
 
-  // Per-test driver.
+  // Per-test driver. Multi-DUT routes through the same shape as
+  // single-DUT, but with each DUT's signals prefixed by its block
+  // id (e.g. `dut.<block_id>__u1`, `dut.<block_id>__y1`) when the
+  // wrapper SV instantiates multiple DUTs.
+  //
+  // The harness keeps one pending-ref FIFO per DUT so each DUT's
+  // pipeline-latency-aligned compare is independent. The CSV
+  // header gets columns per DUT × output.
+  auto portName = [&](size_t D, const std::string &Port) -> std::string {
+    if (!MultiDut) return Port;
+    return Opts.Duts[D].BlockId + "__" + Port;
+  };
   Os << "@cocotb.test()\n";
   Os << "async def sil(dut):\n";
-  Os << "    \"\"\"matlabc-generated SIL test. Drives the DUT each "
-        "tick, samples its\n";
-  Os << "    output on the clock edge, compares against the host "
-        "reference, and\n";
-  Os << "    writes a CSV of (t, dut_y*, ref_y*, err*) rows.\n";
+  Os << "    \"\"\"matlabc-generated SIL test. Drives the DUT(s) "
+        "each tick, samples\n";
+  Os << "    their outputs, compares against the host reference, "
+        "and writes a CSV\n";
+  Os << "    of (t, dut_y*, ref_y*, err*) rows.\n";
   Os << "    \"\"\"\n";
   Os << "    Ts = " << pyDouble(Ts) << "\n";
   Os << "    N  = " << NTicks << "\n";
@@ -4561,13 +4690,12 @@ std::optional<std::string> emitDiagramCocotbHarness(
   Os << "    fi_signed, fi_w, fi_f = "
      << (Opts.FiSigned ? "True" : "False") << ", " << Opts.FiWidth
      << ", " << Opts.FiFrac << "\n";
-  if (Opts.Sequential) {
-    // Stateful DUT: drive a 100 MHz clock + async-low reset.
+  if (AnySequential) {
+    // Any sequential DUT triggers the shared clock + reset prologue.
+    // The wrapper SV (multi-DUT) fans clk / rst_n / reset out to
+    // each DUT instance; single-DUT runs hit the DUT module directly.
     Os << "    cocotb.start_soon(Clock(dut.clk, 10, units=\"ns\")"
           ".start())\n";
-    // Reset shape: async-low + sync-high mirror so the SV either
-    // reset convention works without recompiling. The harness
-    // writes both; any DUT that lacks one is silently ignored.
     Os << "    if hasattr(dut, \"rst_n\"): dut.rst_n.value = 0\n";
     Os << "    if hasattr(dut, \"reset\"): dut.reset.value = 1\n";
     Os << "    await RisingEdge(dut.clk); await RisingEdge(dut.clk)\n";
@@ -4575,106 +4703,159 @@ std::optional<std::string> emitDiagramCocotbHarness(
     Os << "    if hasattr(dut, \"reset\"): dut.reset.value = 0\n";
   }
   Os << "    host = HostModel()\n";
-  // Pre-allocate per-sink + per-DUT-output logs on the host instance.
   for (auto &L : Logs)
     Os << "    host." << L.Name << " = []\n";
-  Os << "    ref = " << Opts.DutRefClass << "()\n";
-  Os << "    log_t = []\n";
-  for (size_t I = 0; I < Opts.DutOutputPorts.size(); ++I) {
-    Os << "    log_dut_y" << (I + 1) << " = []\n";
-    Os << "    log_ref_y" << (I + 1) << " = []\n";
-    Os << "    log_err_y" << (I + 1) << " = []\n";
+  for (size_t D = 0; D < Opts.Duts.size(); ++D) {
+    Os << "    ref_" << D << " = " << Opts.Duts[D].RefClass << "()\n";
   }
-  Os << "    pending_ref = []  # FIFO of (t, ref_outs) for latency-aligned compare\n";
+  Os << "    log_t = []\n";
+  for (size_t D = 0; D < Opts.Duts.size(); ++D) {
+    for (size_t I = 0; I < Opts.Duts[D].OutputPorts.size(); ++I) {
+      Os << "    log_d" << D << "_y" << (I + 1) << " = []\n";
+      Os << "    log_d" << D << "_ref" << (I + 1) << " = []\n";
+      Os << "    log_d" << D << "_err" << (I + 1) << " = []\n";
+    }
+  }
+  // One pending-ref FIFO per DUT — independent latency-aligned
+  // compare windows.
+  for (size_t D = 0; D < Opts.Duts.size(); ++D)
+    Os << "    pending_" << D << " = []\n";
   Os << "    fail_count = 0\n";
   Os << "    for k in range(N + L):\n";
-  // Drive phase: ticks 0..N-1 drive from sources, ticks N..N+L-1
-  // drive zeros to flush the pipeline.
   Os << "        if k < N:\n";
   Os << "            t = k * Ts\n";
-  Os << "            u_dut = host.pre_dut(t)\n";
-  Os << "            _ref_out = ref.step(*u_dut)\n";
-  Os << "            ref_tuple = _ref_out if isinstance(_ref_out, tuple) else (_ref_out,)\n";
-  Os << "            pending_ref.append((t, u_dut, ref_tuple))\n";
+  Os << "            u_all = host.pre_dut(t)\n";
+  // Slice u_all per-DUT and compute per-DUT ref outputs.
+  {
+    size_t Cur = 0;
+    for (size_t D = 0; D < Opts.Duts.size(); ++D) {
+      size_t NI = Opts.Duts[D].InputPorts.size();
+      Os << "            u_" << D << " = u_all[" << Cur << ":"
+         << (Cur + NI) << "]\n";
+      Os << "            _ref_out_" << D << " = ref_" << D
+         << ".step(*u_" << D << ")\n";
+      Os << "            ref_tuple_" << D
+         << " = _ref_out_" << D << " if isinstance(_ref_out_" << D
+         << ", tuple) else (_ref_out_" << D << ",)\n";
+      Os << "            pending_" << D << ".append((t, u_" << D
+         << ", ref_tuple_" << D << "))\n";
+      Cur += NI;
+    }
+  }
   Os << "        else:\n";
   Os << "            t = float(\"nan\")\n";
-  Os << "            u_dut = tuple(0.0 for _ in range("
-     << Opts.DutInputPorts.size() << "))\n";
-  // Drive DUT inputs.
-  for (size_t I = 0; I < Opts.DutInputPorts.size(); ++I)
-    Os << "        dut." << Opts.DutInputPorts[I]
-       << ".value = pack_fi(u_dut[" << I
-       << "], fi_signed, fi_w, fi_f)\n";
-  // Sample DUT outputs. The sampling-vs-clock-edge ordering matters:
-  //
-  //   - Combinational DUT: drive → settle → sample → no edge.
-  //   - Sequential DUT: drive → SAMPLE (gets pre-edge state which
-  //     matches MATLAB unit-delay semantics y[k] = u[k-1]) → wait
-  //     for posedge to advance state. Sampling AFTER the posedge
-  //     would give the new state (= current u), which doesn't
-  //     match the Python reference (`step(u)` returns the OLD
-  //     state then sets state = u).
-  if (Opts.Sequential) {
-    // Tiny settle so combinational paths from u_k to y (e.g. a
-    // Tustin direct-feedthrough term) propagate before we read.
-    Os << "        await Timer(1, units=\"ns\")\n";
-  } else {
-    Os << "        await Timer(1, units=\"ns\")\n";
+  Os << "            u_all = tuple(0.0 for _ in range("
+     << TotalIns << "))\n";
+  {
+    size_t Cur = 0;
+    for (size_t D = 0; D < Opts.Duts.size(); ++D) {
+      size_t NI = Opts.Duts[D].InputPorts.size();
+      Os << "            u_" << D << " = u_all[" << Cur << ":"
+         << (Cur + NI) << "]\n";
+      Cur += NI;
+    }
   }
-  for (size_t I = 0; I < Opts.DutOutputPorts.size(); ++I)
-    Os << "        y" << (I + 1) << "_bits = int(dut."
-       << Opts.DutOutputPorts[I] << ".value)\n";
-  for (size_t I = 0; I < Opts.DutOutputPorts.size(); ++I)
-    Os << "        y" << (I + 1)
-       << " = unpack_fi(y" << (I + 1)
-       << "_bits, fi_signed, fi_w, fi_f)\n";
-  // Advance the clock after sampling so the FF latches u_k for the
-  // next iteration's pre-edge sample.
-  if (Opts.Sequential) {
+  // Drive every DUT's inputs in port order.
+  {
+    size_t Cur = 0;
+    for (size_t D = 0; D < Opts.Duts.size(); ++D) {
+      for (size_t I = 0; I < Opts.Duts[D].InputPorts.size(); ++I) {
+        Os << "        dut." << portName(D, Opts.Duts[D].InputPorts[I])
+           << ".value = pack_fi(u_all[" << Cur
+           << "], fi_signed, fi_w, fi_f)\n";
+        ++Cur;
+      }
+    }
+  }
+  // Sample DUT outputs. Sequential DUTs sample BEFORE the rising
+  // edge so the FF output reflects the pre-edge state (matching
+  // MATLAB unit-delay y[k]=u[k-1]); combinational DUTs settle for
+  // 1 ns and read directly. Multi-DUT with mixed sequential /
+  // combinational: a small Timer covers both cases — the
+  // RisingEdge below advances the FF for sequential DUTs.
+  Os << "        await Timer(1, units=\"ns\")\n";
+  for (size_t D = 0; D < Opts.Duts.size(); ++D) {
+    for (size_t I = 0; I < Opts.Duts[D].OutputPorts.size(); ++I) {
+      Os << "        y" << D << "_" << (I + 1)
+         << " = unpack_fi(int(dut."
+         << portName(D, Opts.Duts[D].OutputPorts[I])
+         << ".value), fi_signed, fi_w, fi_f)\n";
+    }
+  }
+  if (AnySequential) {
+    // Advance the clock once per tick — the wrapper SV fans clk to
+    // all DUT instances, so combinational DUTs in the same harness
+    // simply ignore the edge.
     Os << "        await RisingEdge(dut.clk)\n";
   }
   Os << "        if k < L:\n";
   Os << "            continue  # pipeline still filling\n";
-  Os << "        if not pending_ref:\n";
-  Os << "            continue\n";
-  Os << "        t_cmp, u_cmp, ref_tuple = pending_ref.pop(0)\n";
-  for (size_t I = 0; I < Opts.DutOutputPorts.size(); ++I) {
-    Os << "        err" << (I + 1) << " = y" << (I + 1)
-       << " - ref_tuple[" << I << "]\n";
-    Os << "        if abs(err" << (I + 1) << ") > TOL:\n";
-    Os << "            fail_count += 1\n";
-    Os << "            cocotb.log.error(\n";
-    Os << "                f\"sil[t={t_cmp:.6g}] y" << (I + 1)
-       << ": dut={y" << (I + 1) << "} ref={ref_tuple[" << I << "]}\"\n";
-    Os << "                f\" err={err" << (I + 1)
-       << "} (tol={TOL})\")\n";
-    Os << "        log_dut_y" << (I + 1) << ".append(y" << (I + 1) << ")\n";
-    Os << "        log_ref_y" << (I + 1) << ".append(ref_tuple[" << I << "])\n";
-    Os << "        log_err_y" << (I + 1) << ".append(err" << (I + 1) << ")\n";
+  // Per-DUT compare.
+  for (size_t D = 0; D < Opts.Duts.size(); ++D) {
+    Os << "        if pending_" << D << ":\n";
+    Os << "            t_cmp_" << D << ", u_cmp_" << D
+       << ", ref_tuple_" << D << " = pending_" << D << ".pop(0)\n";
+    for (size_t I = 0; I < Opts.Duts[D].OutputPorts.size(); ++I) {
+      Os << "            err_" << D << "_" << (I + 1)
+         << " = y" << D << "_" << (I + 1)
+         << " - ref_tuple_" << D << "[" << I << "]\n";
+      Os << "            if abs(err_" << D << "_" << (I + 1)
+         << ") > TOL:\n";
+      Os << "                fail_count += 1\n";
+      Os << "                cocotb.log.error(\n";
+      Os << "                    f\"sil[d" << D << " t={t_cmp_" << D
+         << ":.6g}] y" << (I + 1) << ": dut={y" << D << "_" << (I + 1)
+         << "} ref={ref_tuple_" << D << "[" << I << "]}"
+         << " err={err_" << D << "_" << (I + 1)
+         << "} (tol={TOL})\")\n";
+      Os << "            log_d" << D << "_y" << (I + 1)
+         << ".append(y" << D << "_" << (I + 1) << ")\n";
+      Os << "            log_d" << D << "_ref" << (I + 1)
+         << ".append(ref_tuple_" << D << "[" << I << "])\n";
+      Os << "            log_d" << D << "_err" << (I + 1)
+         << ".append(err_" << D << "_" << (I + 1) << ")\n";
+    }
   }
-  Os << "        log_t.append(t_cmp)\n";
-  // Update host downstream + state on the compare cycle.
-  Os << "        host.post_dut(t_cmp, (";
-  for (size_t I = 0; I < Opts.DutOutputPorts.size(); ++I) {
-    if (I) Os << ", ";
-    Os << "y" << (I + 1);
+  // Log time from DUT 0 (all DUTs see the same tick — they're
+  // driven in lockstep by `for k in range(N + L)`).
+  Os << "        if pending_0 is None or True:\n";
+  Os << "            log_t.append(t if k < N else float(\"nan\"))\n";
+  // Update host downstream + state on the compare cycle. The flat
+  // tuple concatenates every DUT's outputs in `Opts.Duts` order.
+  Os << "        host.post_dut(t, (";
+  {
+    size_t IdxO = 0;
+    for (size_t D = 0; D < Opts.Duts.size(); ++D) {
+      for (size_t I = 0; I < Opts.Duts[D].OutputPorts.size(); ++I) {
+        if (IdxO) Os << ", ";
+        Os << "y" << D << "_" << (I + 1);
+        ++IdxO;
+      }
+    }
+    if (IdxO == 1) Os << ",";
   }
-  if (Opts.DutOutputPorts.size() == 1) Os << ",";
   Os << "))\n";
   Os << "    csv_path = os.environ.get(\"SIL_CSV\", \"sil_log.csv\")\n";
   Os << "    with open(csv_path, \"w\", newline=\"\") as f:\n";
   Os << "        w = csv.writer(f)\n";
   Os << "        header = [\"t\"]\n";
-  for (size_t I = 0; I < Opts.DutOutputPorts.size(); ++I)
-    Os << "        header += [\"dut_y" << (I + 1) << "\", \"ref_y"
-       << (I + 1) << "\", \"err_y" << (I + 1) << "\"]\n";
+  for (size_t D = 0; D < Opts.Duts.size(); ++D) {
+    for (size_t I = 0; I < Opts.Duts[D].OutputPorts.size(); ++I) {
+      Os << "        header += [\"d" << D << "_dut" << (I + 1)
+         << "\", \"d" << D << "_ref" << (I + 1)
+         << "\", \"d" << D << "_err" << (I + 1) << "\"]\n";
+    }
+  }
   Os << "        w.writerow(header)\n";
   Os << "        for i, t_i in enumerate(log_t):\n";
   Os << "            row = [t_i]\n";
-  for (size_t I = 0; I < Opts.DutOutputPorts.size(); ++I)
-    Os << "            row += [log_dut_y" << (I + 1)
-       << "[i], log_ref_y" << (I + 1) << "[i], log_err_y" << (I + 1)
-       << "[i]]\n";
+  for (size_t D = 0; D < Opts.Duts.size(); ++D) {
+    for (size_t I = 0; I < Opts.Duts[D].OutputPorts.size(); ++I) {
+      Os << "            row += [log_d" << D << "_y" << (I + 1)
+         << "[i], log_d" << D << "_ref" << (I + 1)
+         << "[i], log_d" << D << "_err" << (I + 1) << "[i]]\n";
+    }
+  }
   Os << "            w.writerow(row)\n";
   Os << "    cocotb.log.info(\n";
   Os << "        f\"matlabc cocotb-SIL: {len(log_t)} compares, "
