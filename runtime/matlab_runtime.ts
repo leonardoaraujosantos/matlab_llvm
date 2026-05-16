@@ -3681,6 +3681,32 @@ export function obj_get_f64(obj: any, name: string, _len?: number): number {
   return Number.isNaN(f) ? 0 : f;
 }
 
+// `disp(obj.Field)` lowered through the runtime. The C lane emits
+// `matlab_obj_disp_field(obj, "Field", _)` so the property's stored
+// kind (scalar / matrix / string) picks the right disp variant at
+// runtime; the TS emit funnels through this stub for the same
+// reason. We dispatch on the value's JS type so numbers, strings,
+// and matrices all format the way disp(.) would for a bare value
+// of that kind.
+export function obj_disp_field(obj: any, name: string, _len?: number): void {
+  const val = obj?.[name];
+  if (val === undefined || val === null) { disp_f64(0); return; }
+  if (typeof val === "string") { console.log(val); return; }
+  if (typeof val === "boolean") { disp_f64(val ? 1 : 0); return; }
+  if (Array.isArray(val) || (val && typeof val === "object" &&
+                              "shape" in val)) {
+    disp_mat(val);
+    return;
+  }
+  disp_f64(Number(val));
+}
+
+// Debugger hook from `matlab_dbg_register_class`. The DAP server
+// consumes these registrations when present; in a plain bun/node
+// run they're a no-op. Kept as a stub so emitted modules import
+// cleanly without depending on the debugger plumbing.
+export function dbg_register_class(..._args: any[]): void { /* no-op */ }
+
 // --- strings --------------------------------------------------------------
 
 export function string_from_literal(s: string, _n?: number): string { return s; }

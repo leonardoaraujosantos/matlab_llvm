@@ -3366,9 +3366,24 @@ def obj_clone(o):
     return new
 
 def _resolve_obj(oid_or_obj):
-    """Accept either a `_MatObj` instance or the legacy integer oid."""
+    """Accept either a `_MatObj` instance, a user classdef instance
+    (the `-emit-python` lane lowers classdef to a real Python class
+    so callers pass the instance directly), or the legacy integer
+    oid that the `obj_new()` shim hands out. Returns the resolved
+    object, or None if the input is an integer oid pointing at a
+    legacy dict-style bucket (callers fall back to `_obj_store`)."""
     if isinstance(oid_or_obj, _MatObj): return oid_or_obj
-    obj = _obj_store.get(int(oid_or_obj))
+    # User classdef instance — accept anything with at least one
+    # public attribute. Booleans / numbers / strings / numpy arrays
+    # would all answer True for hasattr if we didn't exclude them,
+    # so block the primitive-types list explicitly.
+    if not isinstance(oid_or_obj, (int, float, bool, str, bytes,
+                                    np.ndarray, np.generic, type(None))):
+        return oid_or_obj
+    try:
+        obj = _obj_store.get(int(oid_or_obj))
+    except (TypeError, ValueError):
+        return None
     if isinstance(obj, _MatObj): return obj
     # Pre-existing int-oid stores (back-compat path): wrap a thin facade
     # that proxies attribute access into the original dict.
@@ -3402,6 +3417,41 @@ def obj_get_f64(oid_or_obj, name, *unused):
     if isinstance(bucket, dict):
         return float(bucket.get(name, 0.0))
     return 0.0
+
+
+def obj_disp_field(oid_or_obj, name, *unused):
+    """`disp(obj.Field)` lowered through the runtime. The C path emits
+    `matlab_obj_disp_field(obj, "Field", _)` so the property's
+    dynamically-stored kind (scalar / matrix / string) picks the right
+    disp variant at runtime; the Python emit funnels through this stub
+    for the same reason. We dispatch by the resolved value's type so
+    integers, strings, and numpy matrices all format the way disp(.)
+    would for a bare value of that kind."""
+    obj = _resolve_obj(oid_or_obj)
+    if obj is None:
+        # Legacy oid → bucket dict route (matches obj_get_f64).
+        bucket = _obj_store.get(int(oid_or_obj), {})
+        val = bucket.get(name, 0.0) if isinstance(bucket, dict) else 0.0
+    else:
+        val = getattr(obj, name, 0.0)
+    if isinstance(val, str):
+        print(val)
+        return
+    if isinstance(val, np.ndarray):
+        disp_mat(val)
+        return
+    try:
+        disp_f64(float(val))
+    except (TypeError, ValueError):
+        print(val)
+
+
+def dbg_register_class(*_ignored):
+    """Debugger hook from `matlab_dbg_register_class`. The DAP server
+    consumes these registrations when present; in a plain Python run
+    they're a no-op. Kept as a stub so emitted modules import cleanly
+    without depending on the debugger plumbing."""
+    return None
 
 
 # --- strings --------------------------------------------------------------

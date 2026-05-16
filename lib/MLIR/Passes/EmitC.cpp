@@ -3093,6 +3093,20 @@ void Emitter::precomputeModuleProperties(mlir::ModuleOp M) {
         Substituted = true;
         AnyDispScalar = true;
       }
+      // Mirror tryEmitIOSubstitution: when the receiver is a tracked
+      // class instance and the property is named by a literal, the
+      // runtime call disappears and the prolog should drop the
+      // `extern matlab_obj_disp_field` decl. Without this, strict
+      // mode flags it as an unused declaration in the emit output.
+      if (Name == "matlab_obj_disp_field" && C.getNumOperands() >= 2 &&
+          !classTypeOf(C.getOperand(0)).empty()) {
+        auto ParentMod = C->getParentOfType<mlir::ModuleOp>();
+        auto Lit = getStringGlobalLit(C.getOperand(1), ParentMod);
+        if (Lit && isValidCppIdentifier(*Lit)) {
+          Substituted = true;
+          AnyDispScalar = true;
+        }
+      }
       /* Persistent-variable accesses get rewritten to a function-static
        * `<name>` reference by emitPersistentStaticsFor — the verbatim
        * runtime call is suppressed. Mark them as substituted here so the
@@ -3368,6 +3382,38 @@ bool Emitter::tryEmitIOSubstitution(mlir::LLVM::CallOp Call, int Indent) {
       OS << "std::cout << " << exprFor(Call.getOperand(0)) << " << '\\n';\n";
     } else {
       OS << "printf(\"%lld\\n\", (long long)" << stmtExpr(Call.getOperand(0))
+         << ");\n";
+    }
+    return true;
+  }
+
+  // `matlab_obj_disp_field(recv, "FieldName", _)` — classdef property
+  // disp lowered as a runtime call by `lib/MLIR/Lowering.cpp` so the
+  // dynamic property-kind dispatch works in interpreted contexts. For
+  // the C/C++ emit lane we have full static knowledge: the receiver
+  // is a real struct, the field is a real member. Rewrite to the
+  // same `printf("%g\n", recv.field)` / `std::cout << recv.field`
+  // shape `matlab_disp_f64` uses. Without this, the runtime call's
+  // first parameter is declared `void *` but we'd be passing a
+  // struct value — compile fails. The rewrite only fires when the
+  // receiver is a tracked class instance and the field is a valid
+  // C++ identifier; otherwise we fall through (the runtime call is
+  // kept but the receiver-passing convention is still wrong and
+  // surfaces as a compile error — that hits non-classdef receivers
+  // routed here by a future expansion of the dispatch site).
+  if (Name == "matlab_obj_disp_field" && Call.getNumOperands() >= 2) {
+    mlir::Value Recv = Call.getOperand(0);
+    auto Cls = classTypeOf(Recv);
+    if (Cls.empty()) return false;
+    auto ParentMod = Call->getParentOfType<mlir::ModuleOp>();
+    auto Lit = getStringGlobalLit(Call.getOperand(1), ParentMod);
+    if (!Lit || !isValidCppIdentifier(*Lit)) return false;
+    indent(Indent);
+    if (Cpp) {
+      OS << "std::cout << " << exprFor(Recv) << "." << *Lit
+         << " << '\\n';\n";
+    } else {
+      OS << "printf(\"%g\\n\", " << stmtExpr(Recv) << "." << *Lit
          << ");\n";
     }
     return true;
