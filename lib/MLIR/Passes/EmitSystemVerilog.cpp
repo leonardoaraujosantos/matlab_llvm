@@ -803,6 +803,33 @@ std::string Emitter::renderInlineExpr(mlir::Operation *Op) {
     case mlir::arith::CmpFPredicate::UGE: SvOp = ">="; break;
     default: return name(Op->getResult(0));  // unsupported pred
     }
+    // 1-bit bool peephole: `cmpf one|une, x, 0.0` where x traces
+    // back to a 1-bit persistent register reads as `x` directly
+    // (the `!= 0.0` is a no-op on a bool). Similarly
+    // `cmpf oeq|ueq, x, 0.0` reads as `!x`. Without this, the
+    // runtime ABI's f64 promotion of bool registers leaves an
+    // unnecessary `(reg != 0)` in the SV that the goldens never
+    // had.
+    auto isZeroF = [](mlir::Value V) -> bool {
+      auto Cn = V.getDefiningOp<mlir::arith::ConstantOp>();
+      if (!Cn) return false;
+      auto FA = mlir::dyn_cast<mlir::FloatAttr>(Cn.getValue());
+      return FA && FA.getValueAsDouble() == 0.0;
+    };
+    bool IsEq = (C.getPredicate() == mlir::arith::CmpFPredicate::OEQ ||
+                 C.getPredicate() == mlir::arith::CmpFPredicate::UEQ);
+    bool IsNe = (C.getPredicate() == mlir::arith::CmpFPredicate::ONE ||
+                 C.getPredicate() == mlir::arith::CmpFPredicate::UNE);
+    if ((IsEq || IsNe) && isZeroF(C.getRhs()) &&
+        renderedWidthOf(C.getLhs()) == 1) {
+      return (IsNe ? std::string() : std::string("!")) +
+             exprFor(C.getLhs());
+    }
+    if ((IsEq || IsNe) && isZeroF(C.getLhs()) &&
+        renderedWidthOf(C.getRhs()) == 1) {
+      return (IsNe ? std::string() : std::string("!")) +
+             exprFor(C.getRhs());
+    }
     std::string L = exprFor(C.getLhs());
     std::string R = exprFor(C.getRhs());
     if (!fsmEnum(C.getLhs(), C.getRhs(), R))
@@ -963,10 +990,18 @@ std::string Emitter::renderInlineExpr(mlir::Operation *Op) {
     return Val.isAllOnes();
   };
   if (N == "arith.xori" && Op->getNumOperands() == 2) {
+    // `xori(x, all-ones)` is the MLIR canonical form of `~x`. For i1
+    // operands that's the same as `!x` — match the goldens (and the
+    // matlab.not lane below) by picking the unary `!` for i1 results
+    // and bitwise `~` for everything wider.
+    auto unaryFor = [&](mlir::Value V) -> std::string {
+      const char *Op = V.getType().isInteger(1) ? "!" : "~";
+      return std::string(Op) + exprFor(V);
+    };
     if (isAllOnesIntConst(Op->getOperand(1)))
-      return "~" + exprFor(Op->getOperand(0));
+      return unaryFor(Op->getOperand(0));
     if (isAllOnesIntConst(Op->getOperand(0)))
-      return "~" + exprFor(Op->getOperand(1));
+      return unaryFor(Op->getOperand(1));
   }
   // `matlab.not` is the unregistered op the frontend emits for
   // logical/bitwise NOT (`~x` in MATLAB). Render as `!x` for i1
@@ -1083,8 +1118,24 @@ std::string Emitter::renderInlineExpr(mlir::Operation *Op) {
   else if (N == "arith.subi" || N == "matlab.sub") SvOp = "-";
   else if (N == "arith.muli" || N == "matlab.matmul" ||
            N == "matlab.emul") SvOp = "*";
-  else if (N == "arith.andi") SvOp = "&";
-  else if (N == "arith.ori")  SvOp = "|";
+  else if (N == "arith.andi") {
+    // Pre-`LowerScalarsToArith`, MATLAB `a && b` came in as
+    // `matlab.short_and` and emitted as `&&`. The scalars-to-arith
+    // pass folds short_and/or into `arith.andi`/`arith.ori` because
+    // they're semantically equivalent on 1-bit operands — fine for
+    // software emit but loses the idiomatic logical form in SV.
+    // Emit `&&` when the result is i1 (logical AND on bools);
+    // otherwise stay with bitwise `&`. Type-erased Sema returns
+    // (`none`-typed operand from a runtime call) still produce an
+    // i1 result through the comparison chain, so this catches them
+    // even when individual operand types don't show as i1.
+    bool ResI1 = Op->getResult(0).getType().isInteger(1);
+    SvOp = ResI1 ? "&&" : "&";
+  }
+  else if (N == "arith.ori") {
+    bool ResI1 = Op->getResult(0).getType().isInteger(1);
+    SvOp = ResI1 ? "||" : "|";
+  }
   else if (N == "arith.xori") SvOp = "^";
   else if (N == "arith.shli") SvOp = "<<";
   else if (N == "arith.shrsi") SvOp = ">>>";
@@ -2639,8 +2690,19 @@ void Emitter::emitOp(mlir::Operation &Op, int Indent) {
   if (isa<arith::DivUIOp>(Op)) { emitBinop(Op, "/", Indent); return; }
   if (isa<arith::RemSIOp>(Op)) { emitBinop(Op, "%", Indent); return; }
   if (isa<arith::RemUIOp>(Op)) { emitBinop(Op, "%", Indent); return; }
-  if (isa<arith::AndIOp>(Op)) { emitBinop(Op, "&", Indent); return; }
-  if (isa<arith::OrIOp>(Op))  { emitBinop(Op, "|", Indent); return; }
+  // i1-result andi/ori came in as `matlab.short_and` / `matlab.short_or`
+  // before LowerScalarsToArith folded them to bitwise. Emit `&&` / `||`
+  // so the SV reads as logical-AND/OR, matching the goldens captured
+  // before the lowering pass landed. Same logic mirrored in the
+  // exprFor path for inlined binops.
+  if (isa<arith::AndIOp>(Op)) {
+    const char *Sv = Op.getResult(0).getType().isInteger(1) ? "&&" : "&";
+    emitBinop(Op, Sv, Indent); return;
+  }
+  if (isa<arith::OrIOp>(Op)) {
+    const char *Sv = Op.getResult(0).getType().isInteger(1) ? "||" : "|";
+    emitBinop(Op, Sv, Indent); return;
+  }
   if (isa<arith::XOrIOp>(Op)) { emitBinop(Op, "^", Indent); return; }
   if (isa<arith::ShLIOp>(Op))  { emitBinop(Op, "<<",  Indent); return; }
   if (isa<arith::ShRSIOp>(Op)) { emitBinop(Op, ">>>", Indent); return; }

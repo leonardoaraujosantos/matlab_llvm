@@ -266,13 +266,20 @@ def main():
     print(f"\nCompile-error visibility:")
     sys.stdout.write(f"  diag_visible_on_failed_launch    ... ")
     sys.stdout.flush()
-    broken_dir = os.path.join(work, "broken_short_and")
+    broken_dir = os.path.join(work, "broken_undef_field")
     os.makedirs(broken_dir, exist_ok=True)
     broken = os.path.join(broken_dir, "prog.m")
+    # Field-access on a numeric literal lowers to `matlab.undef`,
+    # which the LLVM translation lane rejects with a clean
+    # diagnostic carrying the "matlab.undef" op name.
+    #
+    # The historical fixture used `(a > 0) && (b > 0)` to exercise
+    # the same path via an unsupported short-circuit boolean, but
+    # LowerScalarsToArith now lowers short_and / short_or cleanly
+    # — that program compiles and launches fine. Field-access on a
+    # number stays a launch-time error.
     with open(broken, "w") as f:
-        f.write("disp(both(1, 2));\n"
-                "function r = both(a, b)\n"
-                "  r = (a > 0) && (b > 0);\nend\n")
+        f.write("x = 1.bad_field;\ndisp(x);\n")
     try:
         with DapClient(matlabc, broken) as c:
             c.request("initialize", {"linesStartAt1": True,

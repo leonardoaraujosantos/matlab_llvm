@@ -29,8 +29,6 @@ module axi_handshake (
         if (reset) begin
             buf_valid_next = 1'b0;
         end
-        // Slave-side ready: we can accept new data when the buffer is
-        // empty or about to drain.
         sready_1 = !buf_valid || m_ready;
         // Buffer update: shift in if we're accepting; clear if the
         // master accepted and no new sample is coming in.

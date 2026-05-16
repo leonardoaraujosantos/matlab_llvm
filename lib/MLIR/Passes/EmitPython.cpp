@@ -2434,9 +2434,37 @@ void Emitter::emitFuncFunc(mlir::func::FuncOp F) {
     auto Cmp = mlir::dyn_cast<mlir::arith::CmpFOp>(CmpUser);
     bool IsOrShape = false;
     mlir::Operation *Or = nullptr;
-    if (!Cmp) {
-      if (CmpUser->getName().getStringRef() == "matlab.short_or" &&
-          CmpUser->getNumResults() == 1) {
+    // Recognised CmpUser shapes:
+    //
+    //   Shape 1 — `isempty(p) → cmpf one, _, 0.0 → scf.if` (the
+    //   canonical `if isempty(p)` first-call init).
+    //
+    //   Shape 2 — `isempty(p) → matlab.short_or → scf.if` (the
+    //   `if isempty(p) || reset` form, pre-LowerScalarsToArith).
+    //
+    //   Shape 3 — `isempty(p) → cmpf → arith.ori → scf.if` (the
+    //   same shape-2 source, but LowerScalarsToArith has folded the
+    //   short_or into `cmpf + arith.ori`; the cmpf result is the
+    //   ori's first operand). This is what the production pipeline
+    //   actually produces, so without recognising it the snapshot
+    //   stays at function entry and reads the PRE-reset state on
+    //   reset cycles.
+    if (Cmp) {
+      // Walk one hop past cmpf to see if it feeds an `arith.ori`
+      // (shape 3). When it does, the ori becomes the Or.
+      if (Cmp.getResult().hasOneUse()) {
+        auto *Next = Cmp.getResult().use_begin()->getOwner();
+        if (mlir::isa<mlir::arith::OrIOp>(Next) &&
+            Next->getNumResults() == 1) {
+          Or = Next;
+          IsOrShape = true;
+        }
+      }
+    } else {
+      bool IsShortOr =
+          CmpUser->getName().getStringRef() == "matlab.short_or";
+      bool IsArithOr = mlir::isa<mlir::arith::OrIOp>(CmpUser);
+      if ((IsShortOr || IsArithOr) && CmpUser->getNumResults() == 1) {
         Or = CmpUser;
         IsOrShape = true;
       } else {

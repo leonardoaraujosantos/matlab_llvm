@@ -307,7 +307,16 @@ struct LogicalBinToArith : public NameMatch {
     mlir::Value A = coerceToI1(Op->getOperand(0), Op->getLoc(), R);
     mlir::Value B = coerceToI1(Op->getOperand(1), Op->getLoc(), R);
     if (!A || !B) return mlir::failure();
-    R.replaceOpWithNewOp<IOp>(Op, A, B);
+    // Preserve the source-variable name so SV emit picks the
+    // user's `full_1` / `sready_1` etc. instead of a synthetic
+    // `vN_1`. The frontend stamps `matlab.name` on the lowered
+    // `matlab.short_and/or` op when the result is bound to a
+    // named variable; `replaceOpWithNewOp` drops that attr by
+    // default, so we round-trip it onto the new arith op.
+    auto NameAttr =
+        Op->getAttrOfType<mlir::StringAttr>("matlab.name");
+    auto New = R.replaceOpWithNewOp<IOp>(Op, A, B);
+    if (NameAttr) New->setAttr("matlab.name", NameAttr);
     return mlir::success();
   }
 };

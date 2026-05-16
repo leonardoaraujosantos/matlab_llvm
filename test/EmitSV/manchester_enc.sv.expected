@@ -23,7 +23,7 @@ module manchester_enc (
         // Manchester output: first half = data_in XOR'd with 1 (so 0→1
         // and 1→0), second half = data_in directly. Equivalently:
         // first half = NOT data_in; second half = data_in.
-        if (phase != 0) begin
+        if (phase) begin
             manch_out = data_in;
         end else begin
             manch_out = !data_in;
