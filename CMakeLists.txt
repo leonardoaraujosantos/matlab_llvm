@@ -548,6 +548,20 @@ if(MATLAB_LLVM_WITH_EMIT_SUBSYSTEM_SV_COSIM)
             $<TARGET_FILE:matlabc>
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Flowchart/EmitSubsystem
   )
+  # Tier-7d — whole-diagram cocotb SIL emit. Verifies
+  # `matlabc -emit-cocotb FILE.mflow --dut <block>` writes a full
+  # cocotb harness directory (SV + Python reference + testbench)
+  # and that the harness imports cleanly. When cocotb + verilator
+  # are both on PATH, also runs the testbench end-to-end and asserts
+  # zero SIL mismatches. Gated under the same flag as the rest of
+  # the SV-cosim lanes — opting in already implies a Verilator-
+  # capable host.
+  add_test(
+    NAME flowchart-emit-diagram-cocotb
+    COMMAND ${CMAKE_SOURCE_DIR}/test/Flowchart/EmitSubsystem/run_diagram_cocotb_tests.sh
+            $<TARGET_FILE:matlabc>
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Flowchart/EmitSubsystem
+  )
 endif()
 if(MATLAB_LLVM_WITH_MLIR)
   add_test(

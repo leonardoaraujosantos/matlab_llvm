@@ -3678,4 +3678,607 @@ matlab::TranslationUnit *buildDiagramTU(
   return TU;
 }
 
+//===----------------------------------------------------------------------===//
+// Tier-7d — whole-diagram cocotb SIL emit.
+//
+// Walk the entry flow and synthesise a Python cocotb testbench that:
+//   * runs every source / non-DUT internal / sink host-side (mirrors
+//     `buildDiagramTU`'s per-tick body, just rendered as Python text);
+//   * drives the DUT's input ports with Q<W>.<F>-packed values;
+//   * waits a clock edge (+ user-supplied pipeline latency) and reads
+//     back the DUT outputs;
+//   * compares the decoded outputs against the same subsystem's
+//     reference Python emit (from `-emit-python --subsystem <flow>`);
+//   * accumulates per-tick CSV rows and writes them at sign-off.
+//
+// MVP carve-outs (logged + diagnosed):
+//   - one DUT block per diagram;
+//   - single-slot stateful internals only (TF order ≥ 2 deferred);
+//   - no nested subsystems on the host side;
+//   - DUT public ports are scalars in the Q<W>.<F> default format.
+//===----------------------------------------------------------------------===//
+namespace {
+
+// Render a numeric literal at Python precision. Plain `std::to_string`
+// truncates to 6 digits which loses precision for Ts / IC values; the
+// `precision(17)` recipe matches the per-subsystem class wrapper.
+std::string pyDouble(double V) {
+  std::ostringstream Os;
+  Os.precision(17);
+  Os << V;
+  return Os.str();
+}
+
+// Render the Python expression for a source block's instantaneous
+// value at scalar `t`. Mirrors `lowerSourceExpr` but emits text.
+std::string pySourceExpr(const Node &N) {
+  const std::string &K = N.Kind;
+  if (K == "signal_constant")
+    return pyDouble(paramD(N, "value", 0.0));
+  if (K == "signal_clock")
+    return "t";
+  if (K == "signal_step") {
+    double ST = paramD(N, "stepTime", 1.0);
+    double IV = paramD(N, "initialValue", 0.0);
+    double FV = paramD(N, "finalValue", 1.0);
+    std::ostringstream Os;
+    Os << "(" << pyDouble(FV) << " if t >= " << pyDouble(ST)
+       << " else " << pyDouble(IV) << ")";
+    return Os.str();
+  }
+  if (K == "signal_sine") {
+    double A  = paramD(N, "amplitude", 1.0);
+    double F  = paramD(N, "frequency", 1.0);
+    double P  = paramD(N, "phase", 0.0);
+    double Bs = paramD(N, "bias", 0.0);
+    std::ostringstream Os;
+    Os << pyDouble(A) << " * math.sin(" << pyDouble(F) << " * t + "
+       << pyDouble(P) << ") + " << pyDouble(Bs);
+    return Os.str();
+  }
+  if (K == "signal_ramp") {
+    double Slope = paramD(N, "slope", 1.0);
+    double Start = paramD(N, "startTime", 0.0);
+    double Init  = paramD(N, "initialOutput", 0.0);
+    std::ostringstream Os;
+    Os << "(" << pyDouble(Init) << " + " << pyDouble(Slope)
+       << " * (t - " << pyDouble(Start) << ")"
+       << " if t >= " << pyDouble(Start)
+       << " else " << pyDouble(Init) << ")";
+    return Os.str();
+  }
+  if (K == "signal_pulse") {
+    double A   = paramD(N, "amplitude", 1.0);
+    double Pp  = paramD(N, "period", 1.0);
+    double W   = paramD(N, "pulseWidth", 50.0);
+    double Phd = paramD(N, "phaseDelay", 0.0);
+    std::ostringstream Os;
+    Os << "(" << pyDouble(A) << " if ((t - " << pyDouble(Phd)
+       << ") % " << pyDouble(Pp) << ") < "
+       << pyDouble(Pp * W * 0.01) << " else 0.0)";
+    return Os.str();
+  }
+  return "0.0";
+}
+
+} // namespace
+
+std::optional<std::string> emitDiagramCocotbHarness(
+    const FlowDoc &Doc,
+    const std::string &EntryFlowName,
+    const DiagramCocotbOptions &Opts,
+    matlab::DiagnosticEngine &Diag) {
+  const Flow *Entry = Doc.findFlow(EntryFlowName);
+  if (!Entry) {
+    Diag.error(SourceLocation{},
+               "flow \"" + EntryFlowName +
+                   "\" not found in `.mflow` document");
+    return std::nullopt;
+  }
+
+  // Locate the DUT block.
+  const Node *DutNode = nullptr;
+  for (const auto &N : Entry->Nodes) {
+    if (N.Id == Opts.DutBlockId) { DutNode = &N; break; }
+  }
+  if (!DutNode) {
+    Diag.error(SourceLocation{},
+               "--dut block \"" + Opts.DutBlockId +
+                   "\" not found in entry flow \"" + EntryFlowName + "\"");
+    return std::nullopt;
+  }
+  if (DutNode->Kind != "signal_subsystem") {
+    Diag.error(DutNode->Loc,
+               "--dut block \"" + Opts.DutBlockId +
+                   "\" must be a signal_subsystem (kind is \"" +
+                   DutNode->Kind + "\")");
+    return std::nullopt;
+  }
+
+  // Categorise blocks: sources / sinks / internal-non-DUT / DUT.
+  std::vector<const Node *> Sources, Sinks, Internal;
+  for (const auto &N : Entry->Nodes) {
+    if (&N == DutNode) continue;
+    if (N.Kind == "signal_inport" || N.Kind == "signal_outport") continue;
+    if (isSourceKind(N.Kind)) { Sources.push_back(&N); continue; }
+    if (isDiagramSink(N.Kind)) { Sinks.push_back(&N); continue; }
+    if (N.Kind == "signal_subsystem") {
+      Diag.error(N.Loc,
+                 "cocotb-SIL MVP allows exactly one `signal_subsystem` "
+                 "in the entry flow (the --dut). Found additional "
+                 "subsystem \"" + N.Id + "\" — Tier-7d follow-up");
+      return std::nullopt;
+    }
+    Internal.push_back(&N);
+  }
+
+  // Allocate variable names per block.
+  std::set<std::string> Used{
+      "t", "k", "Ts", "N", "host", "ref", "dut", "TOL", "math",
+      "cocotb", "log_t", "fi_signed", "fi_w", "fi_f", "csv", "row",
+      "log_dut", "log_ref", "log_err", "pack_fi", "unpack_fi"};
+  auto uniqueName = [&](const std::string &Base) {
+    std::string Cand = sanitizeIdent(Base);
+    if (Cand.empty()) Cand = "v";
+    std::string Name = Cand;
+    int Suf = 1;
+    while (Used.count(Name)) Name = Cand + "_" + std::to_string(++Suf);
+    Used.insert(Name);
+    return Name;
+  };
+  std::unordered_map<std::string, std::string> VarOfNode;
+  for (auto *N : Sources)  VarOfNode[N->Id] = uniqueName(N->Id);
+  for (auto *N : Internal) VarOfNode[N->Id] = uniqueName(N->Id);
+  // DUT block contributes one var per OUTPUT port — those carry the
+  // value driven into the rest of the diagram. Inputs are computed
+  // from upstream values just like any other block.
+  std::vector<std::string> DutOutVars;
+  for (size_t I = 0; I < Opts.DutOutputPorts.size(); ++I)
+    DutOutVars.push_back(uniqueName(Opts.DutBlockId + "_" +
+                                    Opts.DutOutputPorts[I]));
+
+  // Per-sink log array.
+  struct SinkLog { const Node *N; std::string Name; std::string Src; };
+  std::vector<SinkLog> Logs;
+  EdgeIndex EI = buildEdgeIndex(*Entry);
+  for (auto *N : Sinks) {
+    if (N->Kind == "signal_terminator") continue;
+    SinkLog L; L.N = N;
+    L.Name = uniqueName("log_" + N->Id);
+    for (const auto &P : N->InPorts) {
+      auto It = EI.Map.find({N->Id, P.Id});
+      if (It != EI.Map.end()) { L.Src = It->second.first; break; }
+    }
+    Logs.push_back(L);
+  }
+
+  // State slots for non-DUT stateful internals.
+  struct LocalState { const Node *N; std::string Var; double Init; };
+  std::vector<LocalState> States;
+  auto stateOrderForBlock = [&](const Node *N) -> int {
+    if (N->Kind == "signal_transfer_fcn" || N->Kind == "signal_zero_pole") {
+      std::vector<double> Num, Den;
+      if (!resolveTFCoeffs(*N, Num, Den)) return 1;
+      if (Den.size() < 2) return 1;
+      return (int)Den.size() - 1;
+    }
+    if (N->Kind == "signal_state_space") {
+      auto It = N->Params.find("A");
+      if (It == N->Params.end()) return 1;
+      std::vector<double> A; int Ar = 0, Ac = 0;
+      parseMatrixStr(It->second, A, Ar, Ac);
+      return (Ar > 0 && Ar == Ac) ? Ar : 1;
+    }
+    return 1;
+  };
+  for (auto *N : Internal) {
+    if (!isStatefulKind(N->Kind)) continue;
+    int Order = stateOrderForBlock(N);
+    if (Order > 1) {
+      Diag.error(N->Loc,
+                 "cocotb-SIL MVP supports single-slot stateful blocks "
+                 "only (block \"" + N->Id + "\" needs " +
+                 std::to_string(Order) + " state slots) — Tier-7d "
+                 "follow-up");
+      return std::nullopt;
+    }
+    LocalState S; S.N = N;
+    S.Var = uniqueName("s_" + N->Id);
+    S.Init = initialStateOf(*N);
+    States.push_back(S);
+  }
+
+  // Resolve Ts / N from the model's solver settings.
+  double Ts = 0.0;
+  double Tstart = 0.0, Tstop = 0.0;
+  if (Doc.Settings.Solver.has_value()) {
+    const auto &SC = *Doc.Settings.Solver;
+    if (SC.MaxStep != "auto") {
+      try { Ts = std::stod(SC.MaxStep); } catch (...) {}
+    }
+    Tstart = SC.StartTime;
+    Tstop  = SC.StopTime;
+  }
+  if (Ts <= 0.0) Ts = 0.01;
+  double Span = Tstop - Tstart;
+  int NTicks = Span > 0.0 ? (int)std::round(Span / Ts) : 100;
+  if (NTicks < 1) NTicks = 1;
+
+  // Helpers for input resolution.
+  auto upstreamVar = [&](const std::string &ToNode,
+                         const std::string &ToPort) -> std::string {
+    auto It = EI.Map.find({ToNode, ToPort});
+    if (It == EI.Map.end()) return "0.0";
+    const std::string &Up = It->second.first;
+    const std::string &UpPort = It->second.second;
+    if (Up == Opts.DutBlockId) {
+      // Reading the DUT's output. Map UpPort to its index in
+      // DutOutputPorts; fall back to first port on mismatch.
+      for (size_t I = 0; I < Opts.DutOutputPorts.size(); ++I)
+        if (Opts.DutOutputPorts[I] == UpPort) return DutOutVars[I];
+      if (!DutOutVars.empty()) return DutOutVars.front();
+      return "0.0";
+    }
+    auto VIt = VarOfNode.find(Up);
+    if (VIt == VarOfNode.end()) return "0.0";
+    return VIt->second;
+  };
+  auto inputPortsOf = [&](const Node &N) -> std::vector<std::string> {
+    std::vector<std::pair<int, std::string>> Pairs;
+    for (const auto &P : N.InPorts) {
+      int Idx = parsePortIndex(P.Id);
+      if (Idx < 0) Idx = (int)Pairs.size() + 1;
+      Pairs.push_back({Idx, P.Id});
+    }
+    std::sort(Pairs.begin(), Pairs.end());
+    std::vector<std::string> Out;
+    for (auto &PR : Pairs) Out.push_back(PR.second);
+    return Out;
+  };
+
+  // Render a non-DUT internal block's body line. Supports stateless
+  // blocks via direct Python expressions and the same single-slot
+  // stateful blocks as `buildDiagramTU`. For coverage outside this
+  // set, error out (Tier-7d follow-up to share `lowerBlock`).
+  auto renderInternal = [&](const Node *N,
+                            std::string &Body,
+                            std::string &PostBody) -> bool {
+    const std::string &OutVar = VarOfNode[N->Id];
+    auto Ports = inputPortsOf(*N);
+    std::vector<std::string> Ins;
+    for (auto &P : Ports) Ins.push_back(upstreamVar(N->Id, P));
+
+    LocalState *Slot = nullptr;
+    for (auto &S : States) if (S.N == N) { Slot = &S; break; }
+    if (Slot) {
+      // State-read hoisted earlier (we just emit OutVar = self.<slot>
+      // at the head of the tick body in the generator). Compute the
+      // next-state expression here and assign in PostBody so that any
+      // consumers downstream of stateful blocks see the *current*
+      // state on this tick.
+      std::string U = Ins.empty() ? std::string("0.0") : Ins.front();
+      std::string Next;
+      if (N->Kind == "signal_unit_delay" || N->Kind == "signal_zoh") {
+        Next = U;
+      } else if (N->Kind == "signal_discrete_integrator" ||
+                 N->Kind == "signal_integrator") {
+        double LocalTs = paramD(*N, "sample_time", 0.0);
+        if (LocalTs <= 0.0) LocalTs = paramD(*N, "sampleTime", Ts);
+        std::ostringstream Os;
+        Os << "self." << Slot->Var << " + " << pyDouble(LocalTs)
+           << " * (" << U << ")";
+        Next = Os.str();
+      } else if (N->Kind == "signal_transfer_fcn" ||
+                 N->Kind == "signal_zero_pole") {
+        std::vector<double> Num, Den;
+        resolveTFCoeffs(*N, Num, Den);
+        double Lead = Den.empty() ? 1.0 : Den.front();
+        double A0 = Den.size() >= 2 ? Den[1] / Lead : 0.0;
+        double B0 = !Num.empty() ? Num.front() / Lead : 1.0;
+        std::ostringstream Os;
+        Os << "self." << Slot->Var << " + " << pyDouble(Ts) << " * ("
+           << pyDouble(B0) << " * (" << U << ") - " << pyDouble(A0)
+           << " * self." << Slot->Var << ")";
+        Next = Os.str();
+      } else {
+        Next = "self." + Slot->Var;
+      }
+      PostBody += "        self." + Slot->Var + " = " + Next + "\n";
+      // Current-state read happens once at the top of each tick via
+      // `OutVar = host.<slot>` — generated up in the prologue below.
+      return true;
+    }
+
+    // Stateless internals — limited set for the MVP. Extending this
+    // to full `lowerBlock` parity is the natural next iteration.
+    if (N->Kind == "signal_sum") {
+      auto It = N->Params.find("signs");
+      std::string Signs = It != N->Params.end() ? It->second : "++";
+      std::ostringstream Os;
+      Os << "        " << OutVar << " = ";
+      for (size_t I = 0; I < Ins.size(); ++I) {
+        char S = (I < Signs.size()) ? Signs[I] : '+';
+        if (I == 0)
+          Os << (S == '-' ? "-(" + Ins[I] + ")" : Ins[I]);
+        else
+          Os << " " << S << " (" << Ins[I] << ")";
+      }
+      Os << "\n";
+      Body += Os.str();
+      return true;
+    }
+    if (N->Kind == "signal_gain") {
+      double G = paramD(*N, "gain", 1.0);
+      std::ostringstream Os;
+      Os << "        " << OutVar << " = " << pyDouble(G) << " * ("
+         << (Ins.empty() ? "0.0" : Ins.front()) << ")\n";
+      Body += Os.str();
+      return true;
+    }
+    if (N->Kind == "signal_constant") {
+      Body += "        " + OutVar + " = " +
+              pyDouble(paramD(*N, "value", 0.0)) + "\n";
+      return true;
+    }
+    Diag.error(N->Loc,
+               "cocotb-SIL MVP: block kind \"" + N->Kind +
+               "\" (block \"" + N->Id + "\") not in the host-side "
+               "rendering set yet — Tier-7d follow-up");
+    return false;
+  };
+
+  // Build the per-tick Python body in two halves:
+  //   * Pre-DUT: state-reads, sources, host internals strictly
+  //     upstream of the DUT, DUT input resolution.
+  //   * Post-DUT: host internals strictly downstream of the DUT,
+  //     sink logging, state-next updates.
+  std::ostringstream Os;
+  Os << "# Generated by matlabc -emit-cocotb. Do not edit.\n";
+  Os << "#\n";
+  Os << "# Whole-diagram SIL harness. Entry flow: " << EntryFlowName
+     << "\n";
+  Os << "# DUT block       : " << Opts.DutBlockId
+     << " (SV module: " << Opts.DutModuleName << ")\n";
+  Os << "# DUT reference   : " << Opts.DutRefModule << "."
+     << Opts.DutRefClass << "\n";
+  Os << "# Q-format        : " << (Opts.FiSigned ? "Q" : "UQ")
+     << Opts.FiWidth - Opts.FiFrac << "." << Opts.FiFrac << "\n";
+  Os << "# Tolerance       : " << pyDouble(Opts.Tolerance) << "\n";
+  Os << "import math, os, csv\n";
+  Os << "import cocotb\n";
+  if (Opts.Sequential) {
+    Os << "from cocotb.clock import Clock\n";
+    Os << "from cocotb.triggers import RisingEdge, Timer\n";
+  } else {
+    Os << "from cocotb.triggers import Timer\n";
+  }
+  Os << "from cocotb_fi import pack_fi, unpack_fi\n";
+  Os << "from " << Opts.DutRefModule << " import " << Opts.DutRefClass
+     << "\n\n";
+
+  // Host model — keeps per-tick state for non-DUT stateful blocks.
+  Os << "class HostModel:\n";
+  Os << "    \"\"\"Host-side reference for everything in the entry "
+        "flow except\n";
+  Os << "    the DUT. Per-tick state for stateful blocks lives on "
+        "the instance;\n";
+  Os << "    pre_dut() returns the DUT input tuple, post_dut() "
+        "consumes the DUT\n";
+  Os << "    output tuple and updates downstream values + state.\n";
+  Os << "    \"\"\"\n";
+  Os << "    def __init__(self):\n";
+  if (States.empty())
+    Os << "        pass\n";
+  for (auto &S : States)
+    Os << "        self." << S.Var << " = " << pyDouble(S.Init) << "\n";
+
+  // Pre-DUT: every node strictly upstream of the DUT. The MVP runs
+  // every source unconditionally and every non-DUT internal in
+  // toposort order — this is sound because the DUT's inputs may
+  // depend on any subset of sources / stateful blocks, and post-DUT
+  // sees the same updated values. Splitting at the DUT site is a
+  // pure-performance refinement (post can skip pre-evaluated nodes).
+  auto Topo = toposortInternals(*Entry, Diag, EntryFlowName);
+  if (Diag.hasErrors()) return std::nullopt;
+  std::vector<const Node *> TopoNonDut;
+  for (auto *N : Topo) {
+    if (N == DutNode) continue;
+    if (isSourceKind(N->Kind) || isDiagramSink(N->Kind)) continue;
+    TopoNonDut.push_back(N);
+  }
+
+  Os << "    def pre_dut(self, t):\n";
+  // State-reads — load current state into the block's OutVar so any
+  // downstream block sees this-tick's value. The return statement at
+  // the end of the method always emits a body line so no `pass`
+  // sentinel is needed.
+  for (auto &S : States)
+    Os << "        " << VarOfNode[S.N->Id] << " = self." << S.Var << "\n";
+  // Sources.
+  for (auto *N : Sources)
+    Os << "        " << VarOfNode[N->Id] << " = " << pySourceExpr(*N) << "\n";
+  // Non-DUT internals (toposorted).
+  std::string PreBody;
+  std::string PostBody;  // collected next-state updates; rendered after DUT
+  for (auto *N : TopoNonDut) {
+    if (!renderInternal(N, PreBody, PostBody)) return std::nullopt;
+  }
+  Os << PreBody;
+  // Stash variables on `self` so post_dut can use them (Python
+  // closures over locals don't survive method boundaries). Cheap +
+  // explicit.
+  for (auto *N : Sources)
+    Os << "        self._" << VarOfNode[N->Id] << " = "
+       << VarOfNode[N->Id] << "\n";
+  for (auto *N : Internal)
+    Os << "        self._" << VarOfNode[N->Id] << " = "
+       << VarOfNode[N->Id] << "\n";
+  // Resolve DUT input tuple from the entry flow's wiring.
+  Os << "        return (";
+  for (size_t I = 0; I < Opts.DutInputPorts.size(); ++I) {
+    if (I) Os << ", ";
+    Os << upstreamVar(Opts.DutBlockId, Opts.DutInputPorts[I]);
+  }
+  if (Opts.DutInputPorts.size() == 1) Os << ",";
+  Os << ")\n\n";
+
+  // Post-DUT: replay non-DUT pre-evaluated values onto locals, accept
+  // the DUT output tuple, drive sinks, advance state.
+  Os << "    def post_dut(self, t, dut_outs):\n";
+  // Replay state-reads (the same values pre_dut used — they're still
+  // valid for state-next computation).
+  for (auto &S : States)
+    Os << "        " << VarOfNode[S.N->Id] << " = self." << S.Var << "\n";
+  for (auto *N : Sources)
+    Os << "        " << VarOfNode[N->Id] << " = self._"
+       << VarOfNode[N->Id] << "\n";
+  for (auto *N : Internal)
+    Os << "        " << VarOfNode[N->Id] << " = self._"
+       << VarOfNode[N->Id] << "\n";
+  // Unpack DUT outputs into the named OutVars.
+  for (size_t I = 0; I < DutOutVars.size(); ++I)
+    Os << "        " << DutOutVars[I] << " = dut_outs[" << I << "]\n";
+  // Sink logging: log[k] = upstream value.
+  for (auto &L : Logs) {
+    std::string Src = "0.0";
+    if (!L.Src.empty()) {
+      if (L.Src == Opts.DutBlockId && !DutOutVars.empty())
+        Src = DutOutVars.front();
+      else if (VarOfNode.count(L.Src)) Src = VarOfNode[L.Src];
+    }
+    Os << "        self." << L.Name << ".append(" << Src << ")\n";
+  }
+  // State-next updates. The DUT-output unpack always emits a body
+  // line so `pass` isn't needed even when there are no logs / state
+  // updates.
+  if (!PostBody.empty()) Os << PostBody;
+  Os << "\n";
+
+  // Per-test driver.
+  Os << "@cocotb.test()\n";
+  Os << "async def sil(dut):\n";
+  Os << "    \"\"\"matlabc-generated SIL test. Drives the DUT each "
+        "tick, samples its\n";
+  Os << "    output on the clock edge, compares against the host "
+        "reference, and\n";
+  Os << "    writes a CSV of (t, dut_y*, ref_y*, err*) rows.\n";
+  Os << "    \"\"\"\n";
+  Os << "    Ts = " << pyDouble(Ts) << "\n";
+  Os << "    N  = " << NTicks << "\n";
+  Os << "    L  = " << Opts.Latency
+     << "  # pipeline latency: compare cycle k against drive cycle k-L\n";
+  Os << "    TOL = " << pyDouble(Opts.Tolerance) << "\n";
+  Os << "    fi_signed, fi_w, fi_f = "
+     << (Opts.FiSigned ? "True" : "False") << ", " << Opts.FiWidth
+     << ", " << Opts.FiFrac << "\n";
+  if (Opts.Sequential) {
+    // Stateful DUT: drive a 100 MHz clock + async-low reset.
+    Os << "    cocotb.start_soon(Clock(dut.clk, 10, units=\"ns\")"
+          ".start())\n";
+    // Reset shape: async-low + sync-high mirror so the SV either
+    // reset convention works without recompiling. The harness
+    // writes both; any DUT that lacks one is silently ignored.
+    Os << "    if hasattr(dut, \"rst_n\"): dut.rst_n.value = 0\n";
+    Os << "    if hasattr(dut, \"reset\"): dut.reset.value = 1\n";
+    Os << "    await RisingEdge(dut.clk); await RisingEdge(dut.clk)\n";
+    Os << "    if hasattr(dut, \"rst_n\"): dut.rst_n.value = 1\n";
+    Os << "    if hasattr(dut, \"reset\"): dut.reset.value = 0\n";
+  }
+  Os << "    host = HostModel()\n";
+  // Pre-allocate per-sink + per-DUT-output logs on the host instance.
+  for (auto &L : Logs)
+    Os << "    host." << L.Name << " = []\n";
+  Os << "    ref = " << Opts.DutRefClass << "()\n";
+  Os << "    log_t = []\n";
+  for (size_t I = 0; I < Opts.DutOutputPorts.size(); ++I) {
+    Os << "    log_dut_y" << (I + 1) << " = []\n";
+    Os << "    log_ref_y" << (I + 1) << " = []\n";
+    Os << "    log_err_y" << (I + 1) << " = []\n";
+  }
+  Os << "    pending_ref = []  # FIFO of (t, ref_outs) for latency-aligned compare\n";
+  Os << "    fail_count = 0\n";
+  Os << "    for k in range(N + L):\n";
+  // Drive phase: ticks 0..N-1 drive from sources, ticks N..N+L-1
+  // drive zeros to flush the pipeline.
+  Os << "        if k < N:\n";
+  Os << "            t = k * Ts\n";
+  Os << "            u_dut = host.pre_dut(t)\n";
+  Os << "            _ref_out = ref.step(*u_dut)\n";
+  Os << "            ref_tuple = _ref_out if isinstance(_ref_out, tuple) else (_ref_out,)\n";
+  Os << "            pending_ref.append((t, u_dut, ref_tuple))\n";
+  Os << "        else:\n";
+  Os << "            t = float(\"nan\")\n";
+  Os << "            u_dut = tuple(0.0 for _ in range("
+     << Opts.DutInputPorts.size() << "))\n";
+  // Drive DUT inputs.
+  for (size_t I = 0; I < Opts.DutInputPorts.size(); ++I)
+    Os << "        dut." << Opts.DutInputPorts[I]
+       << ".value = pack_fi(u_dut[" << I
+       << "], fi_signed, fi_w, fi_f)\n";
+  if (Opts.Sequential) {
+    Os << "        await RisingEdge(dut.clk)\n";
+  } else {
+    // Combinational DUT: 1 ns settle so the SV gets a chance to
+    // re-evaluate before we sample its outputs.
+    Os << "        await Timer(1, units=\"ns\")\n";
+  }
+  Os << "        if k < L:\n";
+  Os << "            continue  # pipeline still filling\n";
+  // Read DUT outputs.
+  for (size_t I = 0; I < Opts.DutOutputPorts.size(); ++I)
+    Os << "        y" << (I + 1) << "_bits = int(dut."
+       << Opts.DutOutputPorts[I] << ".value)\n";
+  for (size_t I = 0; I < Opts.DutOutputPorts.size(); ++I)
+    Os << "        y" << (I + 1)
+       << " = unpack_fi(y" << (I + 1)
+       << "_bits, fi_signed, fi_w, fi_f)\n";
+  Os << "        if not pending_ref:\n";
+  Os << "            continue\n";
+  Os << "        t_cmp, u_cmp, ref_tuple = pending_ref.pop(0)\n";
+  for (size_t I = 0; I < Opts.DutOutputPorts.size(); ++I) {
+    Os << "        err" << (I + 1) << " = y" << (I + 1)
+       << " - ref_tuple[" << I << "]\n";
+    Os << "        if abs(err" << (I + 1) << ") > TOL:\n";
+    Os << "            fail_count += 1\n";
+    Os << "            cocotb.log.error(\n";
+    Os << "                f\"sil[t={t_cmp:.6g}] y" << (I + 1)
+       << ": dut={y" << (I + 1) << "} ref={ref_tuple[" << I << "]}\"\n";
+    Os << "                f\" err={err" << (I + 1)
+       << "} (tol={TOL})\")\n";
+    Os << "        log_dut_y" << (I + 1) << ".append(y" << (I + 1) << ")\n";
+    Os << "        log_ref_y" << (I + 1) << ".append(ref_tuple[" << I << "])\n";
+    Os << "        log_err_y" << (I + 1) << ".append(err" << (I + 1) << ")\n";
+  }
+  Os << "        log_t.append(t_cmp)\n";
+  // Update host downstream + state on the compare cycle.
+  Os << "        host.post_dut(t_cmp, (";
+  for (size_t I = 0; I < Opts.DutOutputPorts.size(); ++I) {
+    if (I) Os << ", ";
+    Os << "y" << (I + 1);
+  }
+  if (Opts.DutOutputPorts.size() == 1) Os << ",";
+  Os << "))\n";
+  Os << "    csv_path = os.environ.get(\"SIL_CSV\", \"sil_log.csv\")\n";
+  Os << "    with open(csv_path, \"w\", newline=\"\") as f:\n";
+  Os << "        w = csv.writer(f)\n";
+  Os << "        header = [\"t\"]\n";
+  for (size_t I = 0; I < Opts.DutOutputPorts.size(); ++I)
+    Os << "        header += [\"dut_y" << (I + 1) << "\", \"ref_y"
+       << (I + 1) << "\", \"err_y" << (I + 1) << "\"]\n";
+  Os << "        w.writerow(header)\n";
+  Os << "        for i, t_i in enumerate(log_t):\n";
+  Os << "            row = [t_i]\n";
+  for (size_t I = 0; I < Opts.DutOutputPorts.size(); ++I)
+    Os << "            row += [log_dut_y" << (I + 1)
+       << "[i], log_ref_y" << (I + 1) << "[i], log_err_y" << (I + 1)
+       << "[i]]\n";
+  Os << "            w.writerow(row)\n";
+  Os << "    cocotb.log.info(\n";
+  Os << "        f\"matlabc cocotb-SIL: {len(log_t)} compares, "
+        "{fail_count} mismatches, csv={csv_path}\")\n";
+  Os << "    assert fail_count == 0, "
+        "f\"SIL mismatch on {fail_count} ticks (TOL={TOL})\"\n";
+  return Os.str();
+}
+
 } // namespace matlab::flowchart

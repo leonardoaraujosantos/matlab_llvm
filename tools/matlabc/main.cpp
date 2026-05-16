@@ -312,6 +312,17 @@ struct Options {
    * different randomization schedules without editing the
    * generated harness. */
   int CocotbSeed = 42;
+  /* Tier-7d — `-emit-cocotb FILE.mflow --dut <block>` mode.  The
+   * named entry-flow block (must be a `signal_subsystem`) maps to
+   * the SV DUT; the rest of the diagram (sources, sinks, non-DUT
+   * internals) is rendered as a host-side Python class that the
+   * cocotb testbench drives + samples each tick. Empty = stick
+   * with the existing per-subsystem cocotb harness. */
+  std::string CocotbDut;
+  /* Tier-7d — comparison tolerance, decoded units (per output
+   * port). Default 1 LSB at Q16.16 = 1/65536. */
+  double CocotbTolerance = 1.0 / 65536.0;
+  bool CocotbToleranceExplicit = false;
 };
 
 int usage(const char *Prog) {
@@ -378,6 +389,24 @@ bool parseArgs(int Argc, char **Argv, Options &Opts, const char *&Prog) {
     }
     else if (A.size() > 13 && A.substr(0, 13) == "-cocotb-seed=") {
       Opts.CocotbSeed = std::atoi(std::string(A.substr(13)).c_str());
+    }
+    else if (A == "--dut" || A == "-dut") {
+      if (++I >= Argc) {
+        std::cerr << "--dut requires an argument\n";
+        return false;
+      }
+      Opts.CocotbDut = Argv[I];
+    }
+    else if (A.size() > 6 && A.substr(0, 6) == "--dut=")
+      Opts.CocotbDut = std::string(A.substr(6));
+    else if (A.size() > 18 && A.substr(0, 18) == "-cocotb-tolerance=") {
+      try {
+        Opts.CocotbTolerance = std::stod(std::string(A.substr(18)));
+        Opts.CocotbToleranceExplicit = true;
+      } catch (...) {
+        std::cerr << "-cocotb-tolerance must be a non-negative number\n";
+        return false;
+      }
     }
     else if (A == "-repl") Opts.Mode = Options::Mode::Repl;
     else if (A == "-format") Opts.Mode = Options::Mode::Format;
@@ -8947,6 +8976,202 @@ static int writeStringToFile(const std::string &Path, const std::string &S) {
   return 0;
 }
 
+// Tier-7d — whole-diagram cocotb SIL emit. Driven from
+// `matlabc -emit-cocotb <model.mflow> --dut <block>`. We self-invoke
+// `-emit-systemverilog --subsystem <dut-flow>` to get the SV, then
+// `-emit-python --subsystem <dut-flow>` for the host reference,
+// parse the SV's port list as the source of truth for DUT signals,
+// and finally call `emitDiagramCocotbHarness` to render the
+// testbench Python file.
+//
+// Returns 0 on success, non-zero on any failure (with diagnostics
+// already printed). Mirrors `emitCocotbHarness`'s I/O contract so the
+// EmitCocotb dispatch can call either depending on the input shape.
+static int emitCocotbHarnessForDiagram(const char *Self,
+                                        const Options &Opts,
+                                        matlab::flowchart::FlowDoc &Doc,
+                                        DiagnosticEngine &Diag) {
+  // Resolve the DUT block and its referenced flow.
+  const matlab::flowchart::Flow *Entry = Doc.findFlow(Doc.Entry);
+  if (!Entry) {
+    std::cerr << "error: -emit-cocotb: entry flow \"" << Doc.Entry
+              << "\" not found\n";
+    return 1;
+  }
+  const matlab::flowchart::Node *DutNode = nullptr;
+  for (const auto &N : Entry->Nodes) {
+    if (N.Id == Opts.CocotbDut) { DutNode = &N; break; }
+  }
+  if (!DutNode) {
+    std::cerr << "error: -emit-cocotb: --dut block \"" << Opts.CocotbDut
+              << "\" not found in entry flow \"" << Doc.Entry << "\"\n";
+    return 1;
+  }
+  if (DutNode->Kind != "signal_subsystem") {
+    std::cerr << "error: -emit-cocotb: --dut block \"" << Opts.CocotbDut
+              << "\" must be a signal_subsystem (kind is \""
+              << DutNode->Kind << "\")\n";
+    return 1;
+  }
+  const std::string *FlowId = DutNode->getData("flow_id");
+  if (!FlowId || FlowId->empty()) {
+    std::cerr << "error: -emit-cocotb: --dut block \"" << Opts.CocotbDut
+              << "\" missing data.flow_id\n";
+    return 1;
+  }
+  const matlab::flowchart::Flow *DutFlow = nullptr;
+  for (const auto &F : Doc.Flows) {
+    if (F.Id == *FlowId) { DutFlow = &F; break; }
+  }
+  if (!DutFlow) {
+    std::cerr << "error: -emit-cocotb: flow with id \"" << *FlowId
+              << "\" (referenced by --dut block \"" << Opts.CocotbDut
+              << "\") not found\n";
+    return 1;
+  }
+
+  // Output dir: <model_stem>_cocotb (or user override).
+  std::string Input = Opts.InputPath;
+  std::string Stem = Input;
+  size_t Slash = Stem.find_last_of('/');
+  if (Slash != std::string::npos) Stem = Stem.substr(Slash + 1);
+  size_t Dot = Stem.find_last_of('.');
+  if (Dot != std::string::npos) Stem = Stem.substr(0, Dot);
+  std::string OutDir = Opts.CocotbOutDir;
+  if (OutDir.empty()) {
+    std::string Parent = ".";
+    if (Slash != std::string::npos) Parent = Input.substr(0, Slash);
+    OutDir = Parent + "/" + Stem + "_cocotb";
+  }
+  if (mkdirIfNeeded(OutDir) != 0) return 1;
+
+  // SV + Python reference emits via self-invocation. Both target the
+  // DUT flow, NOT the whole-diagram model. The result lands in
+  // OutDir as <dut-flow>.sv + <dut-flow>_ref.py.
+  std::string DutStem = DutFlow->Name;
+  std::string SVPath = OutDir + "/" + DutStem + ".sv";
+  std::string RefPyPath = OutDir + "/" + DutStem + "_ref.py";
+  std::string DutFlag = "--subsystem " + shellQuote(DutFlow->Name);
+  if (runMatlabcEmit(Self, "-emit-systemverilog " + DutFlag, Input,
+                     SVPath) != 0)
+    return 1;
+  if (runMatlabcEmit(Self, "-emit-python " + DutFlag, Input,
+                     RefPyPath) != 0)
+    return 1;
+
+  // Parse the SV's port list for the canonical DUT input / output
+  // names + widths. Same parser the per-subsystem cocotb lane uses.
+  auto Spec = parseCocotbSpecFromSv(SVPath, DutStem);
+  if (!Spec) {
+    std::cerr << "error: -emit-cocotb: failed to parse port list from "
+              << SVPath << "\n";
+    return 1;
+  }
+
+  // Build DiagramCocotbOptions from the SV spec.
+  matlab::flowchart::DiagramCocotbOptions DCO;
+  DCO.DutBlockId    = Opts.CocotbDut;
+  DCO.DutModuleName = Spec->Name;
+  DCO.DutRefModule  = DutStem + "_ref";
+  // Class name comes from the per-subsystem class wrapper convention
+  // (CamelCase of the sanitised subsystem name) — mirror it here so
+  // the import matches.
+  auto camel = [](const std::string &S) {
+    std::string Out; bool Up = true;
+    for (char C : S) {
+      if (C == '_' || C == '-') { Up = true; continue; }
+      Out.push_back(Up ? std::toupper((unsigned char)C) : C);
+      Up = false;
+    }
+    return Out;
+  };
+  DCO.DutRefClass = camel(DutFlow->Name);
+  DCO.Tolerance = Opts.CocotbTolerance;
+  // Pick the widest input port's WL as the default FiWidth. SV uses
+  // signed Q.0 for the harness lane, but the underlying Python ref
+  // honours the full Q<W>.<F> spec from the subsystem emit — so we
+  // hand 16 fractional bits + signed by default (matches the Q16.16
+  // SubsystemEmitOptions default).
+  if (!Spec->Inputs.empty()) DCO.FiWidth = (int)Spec->Inputs.front().WL;
+  DCO.FiFrac = 16;
+  DCO.FiSigned = Spec->Inputs.empty() ? true : Spec->Inputs.front().Signed;
+  // Filter synthetic ports (`reset` is the SV emit's power-up clear
+  // signal — driven by the harness prologue, not by the diagram).
+  // clk / rst_n are already filtered upstream by parseCocotbSpecFromSv.
+  for (auto &P : Spec->Inputs) {
+    if (P.Name == "reset") continue;
+    DCO.DutInputPorts.push_back(P.Name);
+  }
+  for (auto &P : Spec->Outputs) DCO.DutOutputPorts.push_back(P.Name);
+  DCO.Latency = Opts.CocotbLatency;
+  DCO.Sequential = Spec->Sequential;
+
+  auto TestPy =
+      matlab::flowchart::emitDiagramCocotbHarness(Doc, Doc.Entry, DCO,
+                                                   Diag);
+  if (!TestPy) return 1;
+
+  std::string TestPath = OutDir + "/test_" + Stem + ".py";
+  if (writeStringToFile(TestPath, *TestPy) != 0) return 1;
+  if (writeStringToFile(OutDir + "/cocotb_fi.py",
+                         std::string(kCocotbFiHelperPy)) != 0)
+    return 1;
+  // Makefile points at the DUT's SV + the diagram-level test module.
+  std::string MF;
+  MF += "# Generated by matlabc -emit-cocotb. Do not edit.\n";
+  MF += "TOPLEVEL_LANG ?= verilog\n";
+  MF += "SIM           ?= verilator\n";
+  MF += "EXTRA_ARGS    += --trace --trace-structs\n";
+  MF += "VERILOG_SOURCES = $(PWD)/" + DutStem + ".sv\n";
+  MF += "TOPLEVEL = " + Spec->Name + "\n";
+  MF += "MODULE   = test_" + Stem + "\n";
+  MF += "\n";
+  MF += "include $(shell cocotb-config --makefiles)/Makefile.sim\n";
+  if (writeStringToFile(OutDir + "/Makefile", MF) != 0) return 1;
+
+  // Copy matlab_runtime.py over for the reference module.
+  auto findRuntimePy = [&]() -> std::string {
+    std::string SelfStr(Self);
+    auto last = SelfStr.find_last_of('/');
+    std::string Bin = (last == std::string::npos) ? "."
+                                                    : SelfStr.substr(0, last);
+    char Real[PATH_MAX];
+    if (realpath(Bin.c_str(), Real)) Bin = Real;
+    std::vector<std::string> Cands = {
+      Bin + "/../runtime/matlab_runtime.py",
+      Bin + "/runtime/matlab_runtime.py",
+      Bin + "/../share/matlabc/runtime/matlab_runtime.py",
+    };
+    for (auto &C : Cands) {
+      std::ifstream F(C);
+      if (F) return C;
+    }
+    return std::string();
+  };
+  std::string RuntimePy = findRuntimePy();
+  if (RuntimePy.empty()) {
+    std::cerr << "warning: -emit-cocotb: couldn't locate matlab_runtime.py "
+                 "next to matlabc; the reference model won't import. "
+                 "Copy it manually into "
+              << OutDir << "/ or set PYTHONPATH to its directory.\n";
+  } else {
+    std::ifstream Src(RuntimePy);
+    std::string Body((std::istreambuf_iterator<char>(Src)),
+                     std::istreambuf_iterator<char>());
+    if (writeStringToFile(OutDir + "/matlab_runtime.py", Body) != 0)
+      return 1;
+  }
+
+  std::cerr << "matlabc: wrote whole-diagram cocotb SIL harness to "
+            << OutDir << " (DUT: " << Opts.CocotbDut << " → "
+            << DutFlow->Name << ", " << Spec->Inputs.size()
+            << " inputs, " << Spec->Outputs.size() << " outputs";
+  if (Opts.CocotbLatency > 0)
+    std::cerr << ", latency=" << Opts.CocotbLatency;
+  std::cerr << ", tol=" << DCO.Tolerance << ")\n";
+  return 0;
+}
+
 int emitCocotbHarness(const char *Self, const Options &Opts,
                       const TranslationUnit &TU, TypeContext &TC,
                       DiagnosticEngine &Diag, SourceManager &SM) {
@@ -9827,6 +10052,22 @@ int main(int Argc, char **Argv) {
     }
     auto Doc = matlab::flowchart::loadMflow(SM, F, Diag);
     if (Doc) {
+      // Embedded Coder, Tier 7d — whole-diagram cocotb SIL emit.
+      // `matlabc -emit-cocotb <model.mflow> --dut <block>` short-
+      // circuits the regular AST + Sema + MLIR pipeline: the entry
+      // flow is walked directly, the named DUT block's referenced
+      // flow gets its own SV + Python emits via self-invocation,
+      // and a top-level cocotb testbench is rendered from the
+      // diagram's wiring. No host TU is needed because the test
+      // harness drives the DUT and computes the host model in
+      // Python directly.
+      if (Opts.Mode == Options::Mode::EmitCocotb &&
+          !Opts.CocotbDut.empty() && Doc->isSignalFlow()) {
+        if (emitCocotbHarnessForDiagram(Argv[0], Opts, *Doc, Diag) != 0)
+          return 1;
+        Diag.printAll();
+        return Diag.hasErrors() ? 1 : 0;
+      }
       // Embedded Coder, Tier 1 — when the user supplies `--subsystem
       // <name>` against a signal-flow .mflow, run the dedicated
       // SubsystemToMatlab lowering instead of the control-flow

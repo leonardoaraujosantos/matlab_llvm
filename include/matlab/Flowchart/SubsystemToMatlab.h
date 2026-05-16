@@ -150,6 +150,57 @@ matlab::TranslationUnit *buildDiagramTU(
     const SubsystemEmitOptions &Opts = {});
 
 //===----------------------------------------------------------------------===//
+// Tier-7d — whole-diagram cocotb SIL emit. Render a Python testbench
+// that exercises a pre-emitted SystemVerilog DUT (from one of the
+// entry flow's `signal_subsystem` blocks) while running the rest of
+// the diagram host-side as the SIL reference. Each tick: the host
+// drives the DUT's inputs with Q<W>.<F> packed values, samples the
+// DUT outputs on the clock edge, decodes them, and compares against
+// the reference subsystem's Python emit. Sample mismatches abort
+// the test; the harness writes a CSV of `(t, dut_y*, ref_y*, err)`
+// rows on success.
+//
+// The caller orchestrates the SV + Python reference emits (via
+// `matlabc -emit-systemverilog --subsystem` and `-emit-python
+// --subsystem`); this function only renders the testbench text.
+struct DiagramCocotbOptions {
+  // Block id (entry flow) that maps to the SV DUT.
+  std::string DutBlockId;
+  // SV top-level module name (matches the emitted .sv).
+  std::string DutModuleName;
+  // Python module to import for the reference (e.g. `<name>_ref`).
+  std::string DutRefModule;
+  // Python class name inside that module (CamelCase of the subsystem).
+  std::string DutRefClass;
+  // SIL comparison tolerance (decoded units).
+  double Tolerance = 1.0 / 65536.0;
+  // Q<W>.<F> packing for every DUT port.
+  int FiWidth = 32;
+  int FiFrac  = 16;
+  bool FiSigned = true;
+  // Ordered DUT public input port names (match SV `module <name>(...)`).
+  std::vector<std::string> DutInputPorts;
+  // Ordered DUT public output port names.
+  std::vector<std::string> DutOutputPorts;
+  // Cycles between drive and compare: matches the SV pipeline depth.
+  int Latency = 0;
+  // True when the SV DUT exposes `clk` (and typically `rst_n`) ports
+  // — i.e. the subsystem is stateful. False = combinational DUT;
+  // the harness uses a small `Timer` delay between drive and read
+  // instead of `RisingEdge(clk)`.
+  bool Sequential = false;
+};
+
+// Returns the test_<entry>.py contents on success, or std::nullopt on
+// error (diagnostic emitted via Diag).  The caller writes the string
+// to disk alongside the SV + reference Python + Makefile.
+std::optional<std::string> emitDiagramCocotbHarness(
+    const FlowDoc &Doc,
+    const std::string &EntryFlowName,
+    const DiagramCocotbOptions &Opts,
+    matlab::DiagnosticEngine &Diag);
+
+//===----------------------------------------------------------------------===//
 // Tier-2 class wrapper — per-target shim that bundles the functional
 // `step(...)` into a class/struct holding the persistent state slots.
 //
