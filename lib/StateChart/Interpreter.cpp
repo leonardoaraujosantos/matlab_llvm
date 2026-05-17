@@ -84,6 +84,19 @@ public:
     return false;
   }
 
+  // Source-window accessors used by the duration() raw-text capture.
+  // `pos()` is the current cursor (one past the last consumed char);
+  // `slice(from, to)` returns the substring exactly as it appeared in
+  // source so duration's per-(state, expr) map can key on the
+  // user-authored expression text.
+  size_t pos() const { return Pos_; }
+  const std::string &source() const { return Src_; }
+  std::string slice(size_t From, size_t To) const {
+    if (To <= From || From >= Src_.size()) return {};
+    if (To > Src_.size()) To = Src_.size();
+    return Src_.substr(From, To - From);
+  }
+
 private:
   const std::string &Src_;
   size_t Pos_ = 0;
@@ -317,7 +330,35 @@ private:
       advance();
       if (Cur_.K == Tok::LParen) {
         // function call — collect args, dispatch builtins.
+        // Snapshot the lexer cursor right after `(` (before any inner
+        // tokens are consumed) so duration() can later carve out the
+        // raw expression source text by slicing [start, end).
+        size_t LParenPast = Lex_.pos();
         advance();
+        // `duration(EXPR)` — capture the raw inner-expression text
+        // by slicing the lexer's source between the open paren and
+        // the matching close paren, then look up the (state, expr)
+        // slot. The bool value of EXPR drives the slot transitions;
+        // the duration in ticks is returned to the caller.
+        if (Name == "duration") {
+          double Cond = parseOr(Ok);
+          if (!Ok) return 0.0;
+          if (Cur_.K != Tok::RParen) { Ok = false; return 0.0; }
+          // Lex_.pos() at this point is one past the `)` that the
+          // last advance() consumed when Cur_ became RParen.
+          size_t InnerEnd = Lex_.pos();
+          if (InnerEnd > 0) --InnerEnd;  // step back over `)`
+          std::string Expr = Lex_.slice(LParenPast, InnerEnd);
+          while (!Expr.empty() &&
+                 std::isspace((unsigned char)Expr.front()))
+            Expr.erase(Expr.begin());
+          while (!Expr.empty() &&
+                 std::isspace((unsigned char)Expr.back()))
+            Expr.pop_back();
+          advance();  // consume `)`
+          return (double)Interp_.durationOf(
+              Interp_.actionOwner(), Expr, Cond != 0.0);
+        }
         // emit('X') / emit("X") / emit(X) — broadcast the named event
         // into the interpreter's pending-events set. Returns 0 as a
         // scalar so it composes with assignment statements (rare but
@@ -472,6 +513,22 @@ ChartInterpreter::ChartInterpreter(const Chart &C)
 
 void ChartInterpreter::emit(const std::string &EventName) {
   Events_.insert(EventName);
+}
+
+int ChartInterpreter::durationOf(const std::string &State,
+                                 const std::string &Expr, bool CondHolds) {
+  auto &Slot = Durations_[{State, Expr}];
+  if (CondHolds) {
+    if (Slot.first == 0) {
+      Slot.first  = 1;
+      Slot.second = TickCount_;
+      return 0;
+    }
+    return TickCount_ - Slot.second;
+  }
+  Slot.first  = 0;
+  Slot.second = 0;
+  return 0;
 }
 
 void ChartInterpreter::setLocal(const std::string &Name, double V) {
@@ -670,10 +727,14 @@ void ChartInterpreter::enterState(const std::string &Id,
   // Stamp entry time for temporal operators.
   EntryTimes_[Id] = TickCount_;
   // Clear counter-style temporal slots so a fresh entry observes
-  // temporalCount==0. Iterate and erase any (state, *) pair whose
-  // first element is `Id`.
+  // temporalCount==0 + duration==0. Iterate and erase any (state, *)
+  // pair whose first element is `Id`.
   for (auto It = TempCounts_.begin(); It != TempCounts_.end(); ) {
     if (It->first.first == Id) It = TempCounts_.erase(It);
+    else ++It;
+  }
+  for (auto It = Durations_.begin(); It != Durations_.end(); ) {
+    if (It->first.first == Id) It = Durations_.erase(It);
     else ++It;
   }
   // Entry action — owner is this state so temporal operators inside

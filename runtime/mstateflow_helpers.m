@@ -1,10 +1,20 @@
 % mStateflow runtime helpers (Tier 4c).
 %
-% Auto-pulled into the REPL / -simulate prelude whenever the user
-% references one of the names below. Pure MATLAB — every chart-tick
-% the matlabc lowering emits operates on the same state struct
-% shape ({locals, regions, events}), so these helpers compose
-% naturally with hand-written driver scripts.
+% **Legacy struct-based shape.** These helpers assume each chart-tick
+% takes a `state` struct of {locals, regions, events, snapshots, ...}
+% and returns it. The persistent-scalar lowering shipped 2026-05
+% does NOT use this shape — `<chart>_tick(in1, ..., ev_e1, ...)`
+% holds state in function-local `persistent` slots, with no struct
+% threaded through.
+%
+% These helpers stay around for users with hand-written drivers that
+% predate the refactor + for the DAP server's introspection-side
+% snapshot manipulation, but they do NOT compose with the
+% persistent-scalar tick. For the modern path:
+%   - drive the chart by calling `<name>_tick(...)` directly,
+%   - use the `stateChart/setLocal` / `stateChart/emit` /
+%     `stateChart/saveOperatingPoint` DAP requests for live
+%     introspection (see docs/mStateflow_roadmap.md §6.7).
 
 function state = mstateflow_emit(state, name)
   % Broadcast a chart event in the current super-step. Equivalent to

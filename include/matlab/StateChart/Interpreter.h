@@ -156,6 +156,17 @@ private:
   // active and the event was broadcast. Cleared on state entry. The
   // parser looks up entries by (Interp_.actionOwner(), event-name).
   std::map<std::pair<std::string, std::string>, int> TempCounts_;
+  // `duration(expr)` per (state, raw-expr-text) pair. `first` is the
+  // active flag (1 while the inner expression holds continuously);
+  // `second` is the tick_count snapshot when the current run began.
+  // Cleared on state entry. The parser captures the raw expression
+  // text between balanced parens via the lexer's slice() helper, and
+  // routes evaluation through `durationOf` below — which both reads
+  // and maintains the slot, since the interpreter resolves duration
+  // calls lazily on every guard / cond evaluation rather than via a
+  // pre-super-step maintenance pass.
+  std::map<std::pair<std::string, std::string>,
+           std::pair<int, int>> Durations_;
   // Owning state id for the action currently being evaluated. Set
   // by execAction / evalGuard before invoking the Parser so the
   // temporal-operator builtins can compute (TickCount_ -
@@ -218,6 +229,17 @@ public:
     auto It = TempCounts_.find({State, Event});
     return It == TempCounts_.end() ? 0 : It->second;
   }
+  // Lazy evaluator for `duration(expr)`. Called every time the parser
+  // reaches a duration call site with the inner expression's current
+  // bool value and its raw source text. The slot transitions are:
+  //   - cond true,  !active → active=1, start=tickCount, return 0
+  //   - cond true,   active → return tickCount - start
+  //   - cond false,         → active=0, return 0
+  // Multiple reads in the same super-step yield the same value as
+  // long as `cond` evaluates the same way (Stateflow's "actions are
+  // side-effect-free in cond expressions" assumption).
+  int durationOf(const std::string &State,
+                 const std::string &Expr, bool CondHolds);
 private:
 };
 

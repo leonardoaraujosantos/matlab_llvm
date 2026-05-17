@@ -1766,10 +1766,18 @@ static int tryHandleLoadStateChart(const std::string &rawLine,
   /* Feed the captured MATLAB source through the REPL pipeline so
    * its `<chart>_tick` (and any sibling chart functions) register
    * in the live session. The chart-tick fn carries persistent
-   * state, so subsequent calls advance the chart in-place. */
+   * state, so subsequent calls advance the chart in-place — when
+   * called from inside the same REPL input. The included demo
+   * driver at the top of the emitted .m runs 5 ticks and prints
+   * the chart's outputs, which is usually enough to verify the
+   * lowering. Driving the chart programmatically across REPL
+   * turns hits matlabc's current cross-unit function-call gap;
+   * use `matlabc -emit-c` / AOT for production drivers. */
   (void)runReplInput(MCtx, Captured, Counter++);
   std::cout << "loadStateChart: emitted " << Arg
-            << " — call the chart's `<name>_tick(...)` to drive it."
+            << " — demo driver ran above. For programmatic drives, "
+               "emit-c the chart + a driver .m together (REPL "
+               "cross-unit calls hit matlabc's JIT gap)."
             << std::endl;
   return 1;
 }
@@ -2122,10 +2130,13 @@ static std::string buildReplPrelude(const std::string &Src) {
     {false, "mstateflow_reset",        "mstateflow_helpers.m"},
     {false, "mstateflow_push_history", "mstateflow_helpers.m"},
     {false, "mstateflow_pop_history",  "mstateflow_helpers.m"},
-    /* mStateflow Tier 4f — `stateChart` classdef wraps the
-     * <chart>_init / <chart>_tick functions emitted by the chart
-     * lowering and gives the REPL the same handle-style surface
-     * (`c = c.tick(in, ev)`) the CST / Optim classes use. */
+    /* mStateflow Tier 4f — `stateChart` classdef is a thin wrapper
+     * around the persistent-scalar `<chart>_tick(in1, ..., ev_e1,
+     * ...)` function the lowering emits. The previous classdef
+     * design (state-struct + init_fn) is gone with the
+     * persistent-scalar refactor (2026-05); the wrapper now just
+     * captures a function handle + a `reset` that nukes
+     * persistents. */
     {false, "stateChart",             "stateflow_classdefs.m"},
   };
   /* Source-mention scan: turn-0-style detection. */

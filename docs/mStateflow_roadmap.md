@@ -110,9 +110,14 @@ produce verilator-lint-clean SystemVerilog modules.
   auto-snapshot per super-step into a capped MATLAB-side ring (gated
   by `state.auto_snapshot`); C-side snapshot ring with name / size /
   copy introspection.
-- **Tier 8 — Chart functions** *(partial)*: `chart_fn_matlab` nodes
-  emit as sibling MATLAB functions callable from action bodies;
-  graphical / truth-table call-sites still warn-and-pass.
+- **Tier 8 — Chart functions** *(complete)*: All three kinds
+  (`chart_fn_matlab`, `chart_fn_graphical`, `chart_fn_truth_table`)
+  emit as sibling MATLAB functions callable from action bodies.
+  Truth-table call-sites lower to a priority-ordered if/elseif
+  dispatch over (condition × T/F/X pattern) columns plus an
+  over/underspecification diagnostic (parity with §8-27).
+  Chart-function recursion + cycle detection warns at chart-IR
+  build time.
 - **Tier 9 — Codegen lanes** *(complete)*: `-emit-matlab`,
   `-emit-mir`, `-emit-llvm`, `-emit-c`, `-emit-cpp`, and
   `-emit-systemverilog` all work on chart `.mflow` inputs. The
@@ -123,13 +128,21 @@ produce verilator-lint-clean SystemVerilog modules.
   modules; float-typed charts hard-error at SV emission.
 - **Bonus — Chart interpreter**: `lib/StateChart/Interpreter.{h,cpp}`.
   In-process C++ super-step simulator with full backtracking junction
-  resolver, history junctions, super-transitions, temporal counters,
+  resolver, history junctions, super-transitions, scalar **and
+  counter-style** temporal operators (`after` / `before` / `at` /
+  `every` / `temporalCount(event)` / `duration(cond)` — the last
+  via raw-text capture of the inner expression at parse time),
   symbol-change watchpoints, and operating-point snapshot/restore.
   Hosts the live DAP simulation.
 - **REPL**: `runtime/stateflow_classdefs.m` ships the `stateChart`
-  classdef wrapper (`tick` / `step` / `emit` / `active` / `save_op` /
-  `restore_op` / `reset`) for handle-style use after a user runs
-  `matlabc -emit-matlab <chart>.mflow`.
+  metadata classdef. The persistent-scalar lowering (no state-
+  struct argument) doesn't permit the old `tick/emit/save_op`
+  state-threading API, so the wrapper is now thin: it stores the
+  chart name as discovery metadata, and the user drives the chart
+  via direct `<name>_tick(...)` calls (set up by
+  `loadStateChart('foo.mflow')`). Programmatic drives across REPL
+  turns hit matlabc's cross-unit JIT gap — use `-emit-c` + an AOT
+  driver for production workflows.
 
 ### What's shipped (IDE side — Matlab_llvm_ide)
 
@@ -220,7 +233,7 @@ Every UI/UX tier from §7 is in. Specifics by tier:
   (state-per-node mapping with bracketed-guard transitions +
   `_comment` attribution) and opens it in a chart window.
 
-**Test coverage (IDE side):** 80+ chart-specific cases across 11
+**Test coverage (IDE side):** 79 chart-specific cases across 16
 suites (`StateChartSchemaTests`, `StateChartBackCompatTests`,
 `StateChartMatlabcFixturesTests`, `StateChartHierarchyTests`,
 `StateChartSymbolsLintTests`, `TransitionLabelParserTests`,
@@ -234,7 +247,8 @@ green; 860 tests total.
 ### What's NOT shipped
 
 All five backend follow-ons listed in the prior revision **shipped
-2026-05-17**:
+2026-05-17**, plus the `duration(cond)` interpreter parity + the
+classdef rewrite that were the final 3-day cleanup slice:
 
 - ✅ **Tier 8 close-out** — `chart_fn_graphical` lowers as a sibling
   MATLAB function (Body is plain MATLAB; the IDE renders it as a
@@ -252,8 +266,10 @@ All five backend follow-ons listed in the prior revision **shipped
   reset on state entry, and maintained once per super-step before
   the transition dispatch. Interpreter: `temporalCount` resolved
   through a per-(state, event) counter incremented on broadcast
-  while the owner is active; `duration` left as lowering-only for
-  this slice (no raw-text capture in the inline parser yet).
+  while the owner is active; `duration` resolved lazily via raw-
+  text capture of the inner expression (`Lex_.slice(...)` between
+  balanced parens) keyed into a per-(state, expr) `(active, start)`
+  map maintained by `durationOf`. Both clear on state entry.
   Backed by `test/Flowchart/StateChart/temporal_counter.mflow`.
 - ✅ **Connective-junction backtracking** in the **lowering** path —
   `emitJunctionChain` rewritten as a path-enumeration approach in
@@ -280,12 +296,6 @@ All five backend follow-ons listed in the prior revision **shipped
 
 Remaining deferrals (Tier-N+):
 
-- `duration(cond)` in the **interpreter** — the lowering supports it
-  fully; the inline parser inside `lib/StateChart/Interpreter.cpp`
-  doesn't yet capture the raw expression text between balanced
-  parens, so guards using `duration(...)` evaluate to 0 in the
-  interpreter trace. The lowered MATLAB / C / LLVM / SV paths all
-  honour the operator.
 - C as action language; conversion sweep.
 - Stateflow Messages with queue semantics.
 - Mealy/Moore conversion sweeps.
@@ -640,13 +650,21 @@ Common semantics across both targets:
   down to dst.
 - Junction chains follow `connective` / `entry` / `exit` outgoing
   transitions in priority order; `history` redirects to the parent's
-  `state.history.<parent>` slot. Lowering commits greedily on the
-  first matching guard; the C++ interpreter backtracks properly.
+  `state.history.<parent>` slot. **Both** the C++ interpreter and
+  the lowered MATLAB backtrack properly: the lowering enumerates
+  every root-to-state path through a junction chain at compile time
+  and emits one if/elseif arm per path, so the elseif fall-through
+  recovers when a sub-chain dead-ends with all guards false.
 - Temporal operators `after` / `before` / `at` / `every` lower to
   `(tick_count − t_<owner>) <cmp> N`. `tick_count` advances once per
   super-step; `t_<state>` is stamped on each entry. The `sec` and
   `tick` unit suffixes are aliased (1 super-step = 1 sec).
-  `temporalCount(event)` and `duration(cond)` are Tier-N+.
+  `temporalCount(event)` and `duration(cond)` are also shipped:
+  the lowering allocates per-(state, event) and per-(state, expr)
+  persistent slots and maintains them once per super-step before
+  transition dispatch; the interpreter resolves them lazily on
+  every guard evaluation via the `tempCountOf` / `durationOf`
+  accessors.
 - `in(stateId)` lowers to an integer comparison against the named
   state's parent-region slot — through a chart-scoped helper on
   software target, inlined on SV target.
@@ -667,13 +685,26 @@ The runtime exposes `mstateflow_tick(chart_ctx, event_vec, inputs,
 outputs)`; everything else is pure data so it round-trips through the
 existing C++ runtime that already underpins `.m` programs.
 
-### 6.5 CLI — `tools/matlabc/CLI.cpp`
+### 6.5 CLI — `tools/matlabc/main.cpp`
 
 - `-simulate` already understands `.mflow`; detect `state_chart` and
   dispatch into the chart runtime. **No new flag required.**
-- `-emit-matlab` for chart → emits a runnable MATLAB script
-  `function [outputs, state] = chart_tick(inputs, state, events)` so
-  generated code is readable.
+- `-emit-matlab` for chart → emits a runnable MATLAB script of shape
+  `function [out_y1, out_y2, ...] = <chart>_tick(in_x1, ..., ev_e1, ...)`
+  with persistent-scalar state inside the function (no state struct
+  threaded through). A 5-tick demo driver is prepended for readable
+  test runs.
+- `-dump-chart` dumps the resolved chart IR (states / junctions /
+  transitions / chart functions) for inspection.
+- `-simulate --sim-dap` boots a chart-namespaced DAP server (see
+  §6.7) for live debug + introspection.
+- **REPL shortcut**: `loadStateChart('foo.mflow')` is intercepted at
+  the REPL line dispatcher (next to `tryHandleHelp`); it shells out
+  to the same matlabc binary with `-emit-matlab` and feeds the
+  output through `runReplInput` so the chart's `<name>_tick`
+  registers in the live session. The demo driver runs once; further
+  drive scripts that span REPL turns currently hit matlabc's
+  cross-unit JIT gap (use `-emit-c` + an AOT driver instead).
 
 ### 6.6 Codegen lanes (closed)
 
@@ -708,26 +739,54 @@ Each gains one fixture test per canonical chart example.
   existing Verilog-A path; not currently exercised by any chart
   fixture. Tier-N+.
 
-### 6.7 DAP adapter — `tools/matlabc/DAP/StateChartAdapter.cpp`
+### 6.7 DAP adapter — `tools/matlabc/main.cpp` (`runStateChartDap`)
 
 Extends the mflowLink DAP server (same socket; protocol additions are
 namespaced under `stateChart/*`).
 
-New events:
+New events (8 total):
 - `stateChart/stateEnter { id, t }`
 - `stateChart/stateExit  { id, t }`
 - `stateChart/transitionFired { id, src, dst, t, eventName? }`
 - `stateChart/superStepBegin { t, iteration }`
 - `stateChart/superStepEnd   { t, iteration, quiescent: bool }`
 - `stateChart/eventBroadcast { name, t, payload? }`
+- `stateChart/maxIterations  { iteration }` — fired when the
+  super-step saturates `kMaxIterations` without quiescing.
+- `stopped { reason: 'breakpoint' | ... }` — standard DAP stop on
+  any chart breakpoint hit (state-enter / state-exit / transition /
+  symbol-change).
 
-New requests:
-- `stateChart/setStateBreakpoints { ids: [], onEnter, onExit }`
-- `stateChart/setTransitionBreakpoints { ids: [] }`
+New requests (17 total):
+
+**Drive / introspect:**
+- `stateChart/emit { name }` — broadcast an event into the queue.
+- `stateChart/setLocal { name, value }` — write a chart-local data
+  slot (inputs, outputs, locals).
+- `stateChart/getActive` — return the active substate per region.
+- `stateChart/getLocals` — return the current locals table.
 - `stateChart/stepTransition` — fire exactly one transition then halt.
 - `stateChart/stepSuperStep` — fire transitions until quiescent then halt.
+
+**Breakpoints:**
+- `stateChart/setStateBreakpoints { ids: [], onEnter, onExit }`
+- `stateChart/setTransitionBreakpoints { ids: [] }`
+- `stateChart/setSymbolBreakpoints { names: [] }` — pause when a
+  chart-local data slot's value changes.
+
+**Snapshots / operating points:**
 - `stateChart/saveOperatingPoint { name }`
 - `stateChart/restoreOperatingPoint { name }`
+- `stateChart/listSnapshots` — enumerate named + auto-snapshot
+  entries with footprint sizes.
+
+**Discovery (drives the IDE's Active State / Symbols panes without
+re-parsing the FlowDoc):**
+- `stateChart/listStates`
+- `stateChart/listTransitions`
+- `stateChart/listJunctions`
+- `stateChart/listEvents`
+- `stateChart/listSymbols`
 
 ### 6.8 Reference examples — `matlab_llvm/Examples/StateCharts/`
 
@@ -823,9 +882,12 @@ the same editing quality the existing `.m` editor provides.
   transition, junction, symbol tables, chart functions.
 - ✅ `lib/StateChart/Lowering.cpp` — chart IR → matlabc IR; super-step
   fixed-point loop with `kMaxIterations` + saturation warning;
-  temporal operators (`after` / `before` / `at` / `every`) + `in()`
-  via auto-emitted helper; history junctions; inner + super
-  transitions; junction chains; `emit('X')` rewriting.
+  scalar temporal operators (`after` / `before` / `at` / `every`)
+  + counter-style (`temporalCount(event)` / `duration(cond)`) +
+  `in()` via auto-emitted helper; history junctions; inner + super
+  transitions; junction chains with connective-backtracking via
+  path enumeration; `emit('X')` rewriting; SV-target hard-error
+  on float-typed literals.
 - ✅ `runtime/runtime_mstateflow.cpp` — bounded FIFO event queue,
   broadcast helpers, snapshot ring with name introspection, DAP
   event sinks, C ABI bookends.
@@ -955,9 +1017,12 @@ sibling.
 - Stateflow Messages with queue semantics.
 - Mealy/Moore conversion sweeps.
 - Atomic Subcharts (separate codegen).
-- HDL emission for digital state machines.
 - Simulink-based states.
 - Multi-chart Sequence Viewer.
+
+(HDL emission for digital state machines is **shipped** for the
+integer-typed Moore / Mealy / AND-parallel cases — see §6.6 and
+Tier 9. The previous Tier-N+ entry has been removed.)
 
 ## 8. Risk register
 
@@ -1059,8 +1124,9 @@ round-trip, lint, simulation wiring, codegen dispatch, Pattern
 Wizard, TeX renderer, and chart-from-selection refactor (16
 chart-specific suites, 79 chart-specific cases).
 
-**Remaining backend follow-ons**: see "What's NOT shipped" in
-§Status — `duration(cond)` interpreter parity (lowering has it
-already), plus the Tier-N+ deferrals (C action language, Messages,
-Mealy/Moore conversion sweeps, Atomic Subcharts, Simulink-based
-states, multi-chart Sequence Viewer).
+**Remaining backend follow-ons**: only the Tier-N+ deferrals (C
+action language, Messages with queue semantics, Mealy/Moore
+*conversion* sweeps, Atomic Subcharts for separate codegen,
+Simulink-based states, multi-chart Sequence Viewer). All five
+operator / lowering / REPL gaps identified during the prior
+review are closed.

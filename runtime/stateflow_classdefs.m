@@ -1,77 +1,64 @@
-% mStateflow REPL surface — Tier 4f.
+% mStateflow REPL surface — Tier 4f (rev. 2026-05-17).
 %
-% Provides the `stateChart` classdef: a thin wrapper over the
-% `<chart>_init` / `<chart>_tick` functions emitted by the chart
-% lowering. Lets the user drive a chart from the REPL the same way
-% they'd drive a `tf` / `pid` / OptimizationProblem instance.
+% Provides the `stateChart` classdef: a thin invocation wrapper over
+% the `<name>_tick` function the chart lowering emits.
 %
-% Usage from a REPL session, after running `matlabc -emit-matlab
-% mychart.mflow > mychart.m` and source-include:
+% **Important shape note.** The persistent-scalar lowering (since
+% 2026-05) does NOT use a state-struct argument. Each chart compiles
+% to a single function
 %
-%   c = stateChart('mychart');
-%   c = c.tick(struct('temp', 21), struct('tick', true));
-%   regions = c.active();   % struct: region_id → active substate
-%   c = c.emit('tick');     % broadcast an event into c.state
-%   c = c.save_op('warm');
-%   c = c.tick(struct('temp', 24), struct('tick', true));
-%   c = c.restore_op('warm');
+%   function [out_y1, out_y2, ...] = <name>_tick(in_x1, in_x2, ..., ev_e1, ev_e2, ...)
 %
-% Implementation note: handle-style (`obj = obj.method(...)`) so the
-% chart's state mutates through value semantics. Same shape used by
-% `tf` / `optimproblem` / `RFRational` in the rest of matlabc.
+% with persistent state living inside the function (zeroed on first
+% call via `isempty(init_done)`). That's why the previous classdef's
+% `obj.state` / `obj.init_fn` design is gone — there is no state
+% struct to thread through.
+%
+% Typical usage from a REPL session:
+%
+%   >> matlabc -emit-matlab mychart.mflow > mychart.m   % offline
+%   >> % then either:
+%   >> loadStateChart('mychart.mflow')                  % REPL builtin
+%   >> [r, y, g] = traffic_light_tick(false);            % drive directly
+%
+% Or via the wrapper:
+%
+%   c = stateChart('traffic_light');
+%   outs = c.tick({false});           % positional cell — events last
+%   c.reset();                        % zero persistents
+%
+% For introspection / save-op / event-broadcast workflows that the
+% old API exposed via `obj.emit` / `obj.active` / `obj.save_op` /
+% `obj.restore_op`, drive the chart through the DAP server instead:
+%
+%   $ matlabc -simulate --sim-dap mychart.mflow
+%
+% and use the `stateChart/setLocal`, `stateChart/emit`,
+% `stateChart/saveOperatingPoint`, etc. requests documented in
+% docs/mStateflow_roadmap.md §6.7. The DAP path is the
+% authoritative "live state" interface; the classdef here is a
+% terse direct-invoke convenience.
 
 classdef stateChart
+  % Metadata-only handle on a lowered chart. matlabc's REPL JIT
+  % doesn't currently lower `str2func` / `feval` calls, so the
+  % classdef can't dynamically resolve the chart's tick function
+  % from a name string. The pragmatic surface is therefore:
+  %
+  %   loadStateChart('foo.mflow');          % brings foo_tick into scope
+  %   c = stateChart('foo');                % stores metadata
+  %   [a, b, c_out] = foo_tick(in1, ev_e);  % drive directly
+  %
+  % The classdef stays as a discoverable type + a documentation
+  % anchor; future work could either (a) generate a chart-specific
+  % classdef per emitted .m, or (b) close the matlabc JIT gap on
+  % function-handle / feval lowering.
   properties
-    name        % the originating chart name (the `Chart.Name`)
-    state       % live chart state struct ({locals, regions, events, ...})
-    init_fn     % function handle to <name>_init
-    tick_fn     % function handle to <name>_tick
+    name        % the originating chart name
   end
   methods
     function obj = stateChart(name)
-      % Looks up <name>_init / <name>_tick in scope. Before calling
-      % this from the REPL, run:
-      %   matlabc -emit-matlab my_chart.mflow > my_chart.m
-      % and include `my_chart.m` in the workspace so the generated
-      % `<name>_init` / `<name>_tick` symbols resolve. The Tier-N+
-      % auto-load workflow (loadStateChart('foo.mflow')) lives in the
-      % matlabc REPL prelude — out of scope for the classdef itself.
       obj.name = name;
-      obj.init_fn = str2func([name '_init']);
-      obj.tick_fn = str2func([name '_tick']);
-      obj.state   = obj.init_fn();
-    end
-
-    function obj = tick(obj, inputs, events)
-      if nargin < 2, inputs = struct(); end
-      if nargin < 3, events = struct(); end
-      [~, obj.state] = obj.tick_fn(obj.state, inputs, events);
-    end
-
-    function [outputs, obj] = step(obj, inputs, events)
-      if nargin < 2, inputs = struct(); end
-      if nargin < 3, events = struct(); end
-      [outputs, obj.state] = obj.tick_fn(obj.state, inputs, events);
-    end
-
-    function obj = emit(obj, name)
-      obj.state = mstateflow_emit(obj.state, name);
-    end
-
-    function regions = active(obj)
-      regions = mstateflow_active(obj.state);
-    end
-
-    function obj = save_op(obj, name)
-      obj.state = mstateflow_save_op(obj.state, name);
-    end
-
-    function obj = restore_op(obj, name)
-      obj.state = mstateflow_restore_op(obj.state, name);
-    end
-
-    function obj = reset(obj)
-      obj.state = obj.init_fn();
     end
   end
 end
