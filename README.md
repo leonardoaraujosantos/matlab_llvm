@@ -70,6 +70,7 @@ control flow, functions, basic OOP, and editor tooling.
 | Parallelism | `parfor` with reduction support |
 | OOP | `classdef`, inheritance, static methods, operator overloading, `Dependent` properties, enumerations, **value-class copy-on-assign** for non-handle classes |
 | Multi-return | full `[a, b] = f(x)` plus `varargout` (pure and mixed `function [first, varargout] = f(...)`) |
+| Stateflow Toolbox (mStateflow) — chart compiler + interpreter + DAP | **`settings.kind = "state_chart"` `.mflow` dialect shipped end-to-end on the compiler / debugger / DAP / REPL side.** Full hierarchical state-chart authoring + live-debug surface as a third `.mflow` dialect alongside `control_flow` and `signal_flow`. **Tiers 0 / 4 / 6 complete + Tier 8 / 9 / 10 partial; UI/UX (Tiers 1–3 / 5 / 7) is the next slice.** Compiler: `lib/StateChart/StateChartIR.{h,cpp}` (Chart / ChartState / ChartJunction / Transition / ChartFunction; build-time lint warns on undefined symbol refs), `lib/StateChart/Lowering.cpp` (chart IR → JIT-friendly persistent-scalar MATLAB OR synthesizable SV form; super-step fixed-point loop with kMaxIterations + saturation warning; identifier-aware action rewriter swaps `state.locals.X` / `state.events.X` for flat persistent vars; `in(stateId)` / `emit('X')` / `after`/`before`/`at`/`every` rewriting; history junctions, inner + super-transitions via LCA-relative exit/enter chains, junction chains; auto-snapshot per super-step gated by `state.auto_snapshot`; active-state output port). C++ chart interpreter (`lib/StateChart/Interpreter.{h,cpp}`) — in-process super-step simulator with backtracking junction resolver, history, super-transitions, temporal counters, symbol-change watchpoints, snapshot/restore. Runtime: `runtime/runtime_mstateflow.cpp` (bounded FIFO event queue, snapshot ring with name introspection, DAP event sinks) + `runtime/mstateflow_helpers.m` (emit / save_op / restore_op / active / push_history / pop_history / auto_snap) + `runtime/stateflow_classdefs.m` (`stateChart` REPL classdef wrapper). CLI: `matlabc -dump-chart` (chart IR dump), `matlabc -emit-matlab` (compilable MATLAB), `matlabc -simulate` (deterministic interpreter trace), `matlabc -simulate --sim-dap` (live DAP server). DAP namespace `stateChart/*`: events (stateEnter/stateExit/transitionFired/eventBroadcast/superStepBegin/End/maxIterations + `stopped` on BP hits), requests (emit/setLocal/getActive/getLocals/stepSuperStep/stepTransition/set{State,Transition,Symbol}Breakpoints/save+restoreOperatingPoint), introspection (list{States,Transitions,Junctions,Events,Symbols,Snapshots}). All six MathWorks §6.8 canonical fixtures (air_temp_controller / hotel_check_in / traffic_light_moore / vending_machine_mealy / bang_bang_temp / automatic_transmission) shipped plus five tutorial-aligned examples under `examples/stateflow/`. **Charts also lower to verilator-clean synthesizable SystemVerilog**: traffic_light (Moore) emits a 122-line FSM module, vending_machine (Mealy) emits a 106-line module with cond-action outputs, air_temp_controller (AND-parallel regions) emits 208 lines — `(clk, rst_n, inputs..., outputs...)` surface with `always_comb` next-state + `always_ff @(posedge clk or negedge rst_n)` state registers. See [`docs/mStateflow_roadmap.md`](docs/mStateflow_roadmap.md). |
 | Tooling | formatter, REPL, DAP server, LSP server, `.mflow` flowchart frontend (graph → AST → every backend) |
 | Outputs | LLVM IR, C, C++, experimental Python, native executables via helper scripts. Symbolic programs route through `-emit-cpp` / `-emit-llvm`; `-emit-python`, `-emit-typescript`, and `-emit-systemverilog` diagnose unsupported sym usage at emit time. |
 
@@ -84,6 +85,8 @@ Current corpus size in-tree:
 - `2` boolean-port lint-hint tests in `test/EmitSVHint/`
 - `10` synthesizability-gate diagnostic tests in `test/EmitSVFail/`
 - `40` flowchart fixtures across 6 lanes in `test/Flowchart/` (loader / emit-matlab / cross-backend / lsp / dap / emit-mflow)
+- `5` Stateflow examples in [`examples/stateflow/`](examples/stateflow/) (battery basic / hierarchy, air-temp AND-parallel, Moore traffic light, Mealy vending machine — all five compile through every matlabc lane; three produce verilator-clean SV)
+- `10` state-chart fixtures × 4 modes (flow / chart-IR / lowered-MATLAB / interpreter-trace) in `test/Flowchart/StateChart/` + 4 schema-error fixtures (55/55 tests green across all `.mflow` dialects)
 
 For the authoritative compatibility inventory, see
 [`docs/feature_status.md`](docs/feature_status.md).
@@ -442,11 +445,19 @@ Maturity by output path (most → least mature):
    pragmas, bit-slicing `x(hi:lo)` syntax (any width 1..64), runtime-
    indexed persistent fi-arrays (auto-decoded regfile pattern), and
    hierarchical multi-module emission (`func.call` → SV instance with
-   auto-wired clk/rst_n). 77 fixtures lint clean under Verilator, and
-   all 39 standalone HDL examples verify bit-exact under cocotb. See
+   auto-wired clk/rst_n). Now also covers **mStateflow `.mflow`
+   state-chart inputs**: chart lowering picks the HDL form when the
+   target is `-emit-systemverilog` / `-check-synthesizable` /
+   `-emit-hardware-report` / `-emit-cocotb`, producing Moore + Mealy
+   FSM modules + AND-parallel charts that verilator-lint clean (see
+   `examples/stateflow/` for traffic-light / vending-machine / air-
+   temp). 77 fixtures lint clean under Verilator, all 39 standalone
+   HDL examples verify bit-exact under cocotb, and three of five
+   chart examples produce verilator-clean modules end-to-end. See
    `docs/sv_supported_subset.md` for the supported-subset reference,
-   `docs/emit_systemverilog.md` for backend architecture, and
-   `examples/hdl/` for the canonical ASIC examples.
+   `docs/emit_systemverilog.md` for backend architecture,
+   `examples/hdl/` for the canonical ASIC examples, and
+   `docs/mStateflow_roadmap.md` for the state-chart lane.
 5. **TypeScript** — same scope as Python; least exercised in CI.
 
 The frontend itself has a second source surface alongside `.m` text:
@@ -462,3 +473,11 @@ The frontend itself has a second source surface alongside `.m` text:
   asserts `.mflow` ≡ round-tripped `.m` across C / C++ / Python /
   TS. See [`docs/flowchart_frontend.md`](docs/flowchart_frontend.md)
   and [`docs/flowchart_schema.md`](docs/flowchart_schema.md).
+- **State-chart (`settings.kind = "state_chart"`) dialect** of the
+  same `.mflow` container — hierarchical Stateflow-style charts as a
+  third dialect alongside `control_flow` and `signal_flow`. Chart
+  IR + lowering + interpreter + DAP namespace + Moore / Mealy /
+  AND-parallel synthesizable SystemVerilog emission all shipped on
+  the compiler side; the IDE-side UI is the next slice. See
+  [`docs/mStateflow_roadmap.md`](docs/mStateflow_roadmap.md) and
+  the [`examples/stateflow/`](examples/stateflow/) examples.

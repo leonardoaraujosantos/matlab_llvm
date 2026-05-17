@@ -1,0 +1,135 @@
+{
+  "schema": "matforge.flowchart",
+  "version": "0.2.0",
+  "entry": "air_controller",
+  "settings": { "kind": "state_chart" },
+  "_comment": [
+    "Mirror of MathWorks Stateflow example:",
+    "  https://www.mathworks.com/help/stateflow/ug/model-air-temperature-controler.html",
+    "",
+    "Air Controller chart: OR-decomposed root with PowerOff / PowerOn.",
+    "PowerOn AND-decomposes into three parallel regions:",
+    "  - FAN1 (exec 1): On above 120 degF, Off otherwise.",
+    "  - FAN2 (exec 2): On above 150 degF, Off otherwise.",
+    "  - SpeedValue (exec 3): tracks airflow as count of active fans",
+    "    via the in(state) predicate.",
+    "",
+    "Drive from MATLAB / DAP:",
+    "  set state.locals.temp before each tick; emit('tick') to step.",
+    "  Read state.locals.airflow to see {0,1,2}."
+  ],
+  "flows": [
+    {
+      "id": "flow_air_controller",
+      "kind": "program",
+      "name": "air_controller",
+      "signature": {
+        "inputs":  ["temp", "power"],
+        "outputs": ["airflow"]
+      },
+      "symbols": {
+        "data": [
+          { "name": "temp",     "scope": "input",  "type": "int32", "units": "degF" },
+          { "name": "power",    "scope": "input",  "type": "int32" },
+          { "name": "airflow",  "scope": "output", "type": "int32", "initial": "0" },
+          { "name": "fan1_on",  "scope": "local",  "type": "int32", "initial": "0" },
+          { "name": "fan2_on",  "scope": "local",  "type": "int32", "initial": "0" }
+        ],
+        "events": [
+          { "name": "tick", "trigger": "rising" }
+        ]
+      },
+      "nodes": [
+        { "id": "PowerOff", "kind": "state",
+          "data": {
+            "entryAction": "airflow = 0",
+            "params": { "decomposition": "leaf", "isInitial": "true" }
+          },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+
+        { "id": "PowerOn", "kind": "state",
+          "data": {
+            "params": { "decomposition": "and" }
+          },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+
+        { "id": "FAN1", "parent": "PowerOn", "kind": "state",
+          "data": {
+            "params": { "decomposition": "or", "executionOrder": "1" }
+          },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "FAN1_Off", "parent": "FAN1", "kind": "state",
+          "data": {
+            "entryAction": "fan1_on = 0",
+            "params": { "decomposition": "leaf", "isInitial": "true" }
+          },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "FAN1_On", "parent": "FAN1", "kind": "state",
+          "data": {
+            "entryAction": "fan1_on = 1",
+            "params": { "decomposition": "leaf" }
+          },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+
+        { "id": "FAN2", "parent": "PowerOn", "kind": "state",
+          "data": {
+            "params": { "decomposition": "or", "executionOrder": "2" }
+          },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "FAN2_Off", "parent": "FAN2", "kind": "state",
+          "data": {
+            "entryAction": "fan2_on = 0",
+            "params": { "decomposition": "leaf", "isInitial": "true" }
+          },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "FAN2_On", "parent": "FAN2", "kind": "state",
+          "data": {
+            "entryAction": "fan2_on = 1",
+            "params": { "decomposition": "leaf" }
+          },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+
+        { "id": "SpeedValue", "parent": "PowerOn", "kind": "state",
+          "data": {
+            "duringAction": "airflow = fan1_on + fan2_on",
+            "params": { "decomposition": "leaf", "executionOrder": "3" }
+          },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } }
+      ],
+      "edges": [
+        { "id": "t_off_to_on", "kind": "transition",
+          "label": "[power]",
+          "from": {"node": "PowerOff", "port": "out"},
+          "to":   {"node": "PowerOn", "port": "in"},
+          "data": { "params": { "priority": "1" } } },
+        { "id": "t_on_to_off", "kind": "transition",
+          "label": "[~power]",
+          "from": {"node": "PowerOn", "port": "out"},
+          "to":   {"node": "PowerOff", "port": "in"},
+          "data": { "params": { "priority": "1" } } },
+
+        { "id": "t_fan1_on",  "kind": "transition",
+          "label": "tick[temp > 120]",
+          "from": {"node": "FAN1_Off", "port": "out"},
+          "to":   {"node": "FAN1_On",  "port": "in"},
+          "data": { "params": { "priority": "1" } } },
+        { "id": "t_fan1_off", "kind": "transition",
+          "label": "tick[temp <= 120]",
+          "from": {"node": "FAN1_On",  "port": "out"},
+          "to":   {"node": "FAN1_Off", "port": "in"},
+          "data": { "params": { "priority": "1" } } },
+
+        { "id": "t_fan2_on",  "kind": "transition",
+          "label": "tick[temp > 150]",
+          "from": {"node": "FAN2_Off", "port": "out"},
+          "to":   {"node": "FAN2_On",  "port": "in"},
+          "data": { "params": { "priority": "1" } } },
+        { "id": "t_fan2_off", "kind": "transition",
+          "label": "tick[temp <= 150]",
+          "from": {"node": "FAN2_On",  "port": "out"},
+          "to":   {"node": "FAN2_Off", "port": "in"},
+          "data": { "params": { "priority": "1" } } }
+      ]
+    }
+  ]
+}

@@ -1,67 +1,229 @@
 {
-  "schema": "matforge.flowchart",
-  "version": "0.1.0",
-  "entry": "fn_loops",
-  "settings": {
-    "kind": "signal_flow",
-    "solver": {
-      "type": "variable_step",
-      "algorithm": "ode45",
-      "startTime": 0.0,
-      "stopTime": 2.0,
-      "maxStep": "0.05",
-      "zeroCrossing": true,
-      "algebraicLoopMethod": "trust_region"
-    },
-    "snapshot": { "enabled": true, "depth": 256, "fields": "states" }
-  },
-  "flows": [
+  "entry" : "fn_loops",
+  "flows" : [
     {
-      "id": "flow_fn_loops",
-      "kind": "program",
-      "name": "fn_loops",
-      "signature": { "inputs": [], "outputs": [] },
-      "nodes": [
-        { "id": "drive", "kind": "signal_sine",
-          "data": { "log_signal": true,
-                    "params": { "amplitude": 1.0, "bias": 0.0,
-                                "frequency": 6.2831853, "phase": 0.0 } },
-          "ports": { "in": [], "out": [{"id": "out"}] } },
-        { "id": "harmonic_sum", "kind": "signal_matlab_fcn",
-          "data": {
-            "log_signal": true,
-            "params": {
-              "function_body":
-                "function y = harmonic_sum(u1)\n  % Sum the first 5 harmonics of u1 with diminishing amplitude.\n  % Exercises the for loop + accumulator pattern.\n  y = 0;\n  for k = 1:5\n    y = y + sin(k * u1) / k;\n  end\nend\n"
-            }
+      "edges" : [
+        {
+          "from" : {
+            "node" : "drive",
+            "port" : "out"
           },
-          "ports": { "in": [{"id": "u1"}], "out": [{"id": "out"}] } },
-        { "id": "convergence", "kind": "signal_matlab_fcn",
-          "data": {
-            "log_signal": true,
-            "params": {
-              "function_body":
-                "function y = newton_inverse_sqrt(u1)\n  % Newton iteration: solve x^2 = u1 + 1 for x.\n  % Exercises the while loop + early break pattern.\n  y = 1.0;\n  for it = 1:50\n    if abs(y*y - (u1 + 1)) < 1e-9\n      break\n    end\n    y = 0.5 * (y + (u1 + 1) / y);\n  end\nend\n"
-            }
+          "id" : "e1",
+          "kind" : "data",
+          "to" : {
+            "node" : "harmonic_sum",
+            "port" : "u1"
+          }
+        },
+        {
+          "from" : {
+            "node" : "drive",
+            "port" : "out"
           },
-          "ports": { "in": [{"id": "u1"}], "out": [{"id": "out"}] } },
-        { "id": "scope_h", "kind": "signal_scope",
-          "data": { "params": { "title": "harmonic sum" } },
-          "ports": { "in": [{"id": "in"}], "out": [] } },
-        { "id": "scope_n", "kind": "signal_scope",
-          "data": { "params": { "title": "Newton sqrt" } },
-          "ports": { "in": [{"id": "in"}], "out": [] } }
+          "id" : "e2",
+          "kind" : "data",
+          "to" : {
+            "node" : "convergence",
+            "port" : "u1"
+          }
+        },
+        {
+          "from" : {
+            "node" : "harmonic_sum",
+            "port" : "out"
+          },
+          "id" : "e3",
+          "kind" : "data",
+          "to" : {
+            "node" : "scope_h",
+            "port" : "in"
+          }
+        },
+        {
+          "from" : {
+            "node" : "convergence",
+            "port" : "out"
+          },
+          "id" : "e4",
+          "kind" : "data",
+          "to" : {
+            "node" : "scope_n",
+            "port" : "in"
+          }
+        }
       ],
-      "edges": [
-        { "id": "e1", "kind": "data",
-          "from": {"node": "drive",        "port": "out"}, "to": {"node": "harmonic_sum", "port": "u1"} },
-        { "id": "e2", "kind": "data",
-          "from": {"node": "drive",        "port": "out"}, "to": {"node": "convergence",  "port": "u1"} },
-        { "id": "e3", "kind": "data",
-          "from": {"node": "harmonic_sum", "port": "out"}, "to": {"node": "scope_h",      "port": "in"} },
-        { "id": "e4", "kind": "data",
-          "from": {"node": "convergence",  "port": "out"}, "to": {"node": "scope_n",      "port": "in"} }
-      ]
+      "id" : "flow_fn_loops",
+      "kind" : "program",
+      "name" : "fn_loops",
+      "nodes" : [
+        {
+          "data" : {
+            "log_signal" : true,
+            "params" : {
+              "amplitude" : 1,
+              "bias" : 0,
+              "frequency" : 6.2831853,
+              "phase" : 0
+            }
+          },
+          "id" : "drive",
+          "kind" : "signal_sine",
+          "label" : "",
+          "ports" : {
+            "in" : [
+
+            ],
+            "out" : [
+              {
+                "id" : "out"
+              }
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 80,
+              "y" : 172
+            }
+          }
+        },
+        {
+          "data" : {
+            "log_signal" : true,
+            "params" : {
+              "function_body" : "function y = harmonic_sum(u1)\n  % Sum the first 5 harmonics of u1 with diminishing amplitude.\n  % Exercises the for loop + accumulator pattern.\n  y = 0;\n  for k = 1:5\n    y = y + sin(k * u1) / k;\n  end\nend\n"
+            }
+          },
+          "id" : "harmonic_sum",
+          "kind" : "signal_matlab_fcn",
+          "label" : "",
+          "ports" : {
+            "in" : [
+              {
+                "id" : "u1"
+              }
+            ],
+            "out" : [
+              {
+                "id" : "out"
+              }
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 280,
+              "y" : 172
+            }
+          }
+        },
+        {
+          "data" : {
+            "log_signal" : true,
+            "params" : {
+              "function_body" : "function y = newton_inverse_sqrt(u1)\n  % Newton iteration: solve x^2 = u1 + 1 for x.\n  % Exercises the while loop + early break pattern.\n  y = 1.0;\n  for it = 1:50\n    if abs(y*y - (u1 + 1)) < 1e-9\n      break\n    end\n    y = 0.5 * (y + (u1 + 1) / y);\n  end\nend\n"
+            }
+          },
+          "id" : "convergence",
+          "kind" : "signal_matlab_fcn",
+          "label" : "",
+          "ports" : {
+            "in" : [
+              {
+                "id" : "u1"
+              }
+            ],
+            "out" : [
+              {
+                "id" : "out"
+              }
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 280,
+              "y" : 282
+            }
+          }
+        },
+        {
+          "data" : {
+            "params" : {
+              "title" : "harmonic sum"
+            }
+          },
+          "id" : "scope_h",
+          "kind" : "signal_scope",
+          "label" : "",
+          "ports" : {
+            "in" : [
+              {
+                "id" : "in"
+              }
+            ],
+            "out" : [
+
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 480,
+              "y" : 172
+            }
+          }
+        },
+        {
+          "data" : {
+            "params" : {
+              "title" : "Newton sqrt"
+            }
+          },
+          "id" : "scope_n",
+          "kind" : "signal_scope",
+          "label" : "",
+          "ports" : {
+            "in" : [
+              {
+                "id" : "in"
+              }
+            ],
+            "out" : [
+
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 480,
+              "y" : 282
+            }
+          }
+        }
+      ],
+      "signature" : {
+        "inputs" : [
+
+        ],
+        "outputs" : [
+
+        ]
+      }
     }
-  ]
+  ],
+  "schema" : "matforge.flowchart",
+  "settings" : {
+    "kind" : "signal_flow",
+    "snapshot" : {
+      "depth" : 256,
+      "enabled" : true,
+      "fields" : "states"
+    },
+    "solver" : {
+      "algebraicLoopMethod" : "trust_region",
+      "algorithm" : "ode45",
+      "maxStep" : "0.05",
+      "startTime" : 0,
+      "stopTime" : 2,
+      "type" : "variable_step",
+      "zeroCrossing" : true
+    }
+  },
+  "version" : "0.1.0"
 }

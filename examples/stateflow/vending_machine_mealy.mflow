@@ -1,0 +1,85 @@
+{
+  "schema": "matforge.flowchart",
+  "version": "0.2.0",
+  "entry": "vending",
+  "settings": { "kind": "state_chart" },
+  "_comment": [
+    "Mealy-style vending machine. Output `dispense` is driven by the",
+    "TRANSITION's condition action (depends on state + input event),",
+    "matching Stateflow §5-7 Mealy convention. Contrast with the Moore",
+    "traffic-light example whose outputs are state-resident.",
+    "",
+    "Three states (idle / coin1 / coin2) accumulate coin counts. The",
+    "`select` event fires `dispense=1` only when in `coin2` (Mealy:",
+    "output depends on the current state AND the incoming event); any",
+    "other state ignores select. The `reset` event returns to idle.",
+    "",
+    "Synthesizable through `matlabc -emit-systemverilog`; verilator",
+    "--lint-only passes."
+  ],
+  "flows": [
+    {
+      "id": "flow_vending",
+      "kind": "program",
+      "name": "vending",
+      "signature": { "inputs": [], "outputs": ["dispense"] },
+      "symbols": {
+        "data": [
+          { "name": "dispense", "scope": "output", "type": "int32", "initial": "0" }
+        ],
+        "events": [
+          { "name": "coin",   "trigger": "rising" },
+          { "name": "select", "trigger": "rising" },
+          { "name": "reset",  "trigger": "rising" }
+        ]
+      },
+      "nodes": [
+        { "id": "Idle", "kind": "state",
+          "data": {
+            "entryAction": "dispense = 0",
+            "params": { "decomposition": "leaf", "isInitial": "true" }
+          },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "Coin1", "kind": "state",
+          "data": {
+            "entryAction": "dispense = 0",
+            "params": { "decomposition": "leaf" }
+          },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "Coin2", "kind": "state",
+          "data": {
+            "entryAction": "dispense = 0",
+            "params": { "decomposition": "leaf" }
+          },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } }
+      ],
+      "edges": [
+        { "id": "t_idle_c1", "kind": "transition",
+          "label": "coin",
+          "from": {"node": "Idle",  "port": "out"},
+          "to":   {"node": "Coin1", "port": "in"},
+          "data": { "params": { "priority": "1" } } },
+        { "id": "t_c1_c2", "kind": "transition",
+          "label": "coin",
+          "from": {"node": "Coin1", "port": "out"},
+          "to":   {"node": "Coin2", "port": "in"},
+          "data": { "params": { "priority": "1" } } },
+        { "id": "t_c2_idle", "kind": "transition",
+          "label": "select/dispense = 1",
+          "from": {"node": "Coin2", "port": "out"},
+          "to":   {"node": "Idle",  "port": "in"},
+          "data": { "params": { "priority": "1" } } },
+        { "id": "t_c1_idle", "kind": "transition",
+          "label": "reset",
+          "from": {"node": "Coin1", "port": "out"},
+          "to":   {"node": "Idle",  "port": "in"},
+          "data": { "params": { "priority": "2" } } },
+        { "id": "t_c2_idle_r", "kind": "transition",
+          "label": "reset",
+          "from": {"node": "Coin2", "port": "out"},
+          "to":   {"node": "Idle",  "port": "in"},
+          "data": { "params": { "priority": "2" } } }
+      ]
+    }
+  ]
+}

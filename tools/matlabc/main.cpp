@@ -10873,8 +10873,31 @@ int main(int Argc, char **Argv) {
                     << ": state-chart document has no charts\n";
           return 1;
         }
+        // SV / hardware-report / synthesizable-check lanes need the
+        // HDL-friendly chart form (one-pass tick, integer types, per-
+        // var isempty initialisers). Software lanes get the default.
+        matlab::statechart::LoweringOptions LowOpts;
+        switch (Opts.Mode) {
+        case Options::Mode::EmitSystemVerilog:
+        case Options::Mode::CheckSynthesizable:
+        case Options::Mode::EmitHardwareReport:
+        case Options::Mode::EmitCocotb:
+          LowOpts.Target = matlab::statechart::LoweringTarget::SystemVerilog;
+          break;
+        default: break;
+        }
+        // Debug hook — `MATLABC_DUMP_SV_LOWER=1` prints the SV-target
+        // MATLAB source to stderr so we can see what the SV pipeline
+        // sees. Useful while iterating on the lowering.
+        if (LowOpts.Target ==
+                matlab::statechart::LoweringTarget::SystemVerilog &&
+            getenv("MATLABC_DUMP_SV_LOWER")) {
+          auto Dump = matlab::statechart::lowerChartToMatlab(*Entry, Diag,
+                                                              LowOpts);
+          if (Dump) std::cerr << Dump->MatlabSource;
+        }
         auto Lowered =
-            matlab::statechart::lowerChartToMatlab(*Entry, Diag);
+            matlab::statechart::lowerChartToMatlab(*Entry, Diag, LowOpts);
         if (!Lowered) { Diag.printAll(); return 1; }
         if (Opts.Mode == Options::Mode::EmitMatlab ||
             Opts.Mode == Options::Mode::Format) {

@@ -1,0 +1,76 @@
+{
+  "schema": "matforge.flowchart",
+  "version": "0.2.0",
+  "entry": "traffic_light",
+  "settings": { "kind": "state_chart" },
+  "_comment": [
+    "Moore-style traffic-light controller. Outputs (red / yellow /",
+    "green) depend ONLY on the active state — classic Stateflow §5-12",
+    "Moore example. Drives cleanly through every matlabc lane:",
+    "",
+    "  matlabc -emit-matlab           examples/stateflow/traffic_light_moore.mflow",
+    "  matlabc -emit-c                examples/stateflow/traffic_light_moore.mflow > tl.c",
+    "  matlabc -emit-systemverilog    examples/stateflow/traffic_light_moore.mflow > tl.sv",
+    "  matlabc -simulate              examples/stateflow/traffic_light_moore.mflow",
+    "  matlabc -simulate --sim-dap    examples/stateflow/traffic_light_moore.mflow",
+    "",
+    "Integer-only data so the SV lane produces a synthesizable",
+    "module (verilator --lint-only passes)."
+  ],
+  "flows": [
+    {
+      "id": "flow_traffic_light",
+      "kind": "program",
+      "name": "traffic_light",
+      "signature": { "inputs": [], "outputs": ["red", "yellow", "green"] },
+      "symbols": {
+        "data": [
+          { "name": "red",    "scope": "output", "type": "int32", "initial": "0" },
+          { "name": "yellow", "scope": "output", "type": "int32", "initial": "0" },
+          { "name": "green",  "scope": "output", "type": "int32", "initial": "0" },
+          { "name": "timer",  "scope": "local",  "type": "int32", "initial": "0" }
+        ],
+        "events": [
+          { "name": "step", "trigger": "rising" }
+        ]
+      },
+      "nodes": [
+        { "id": "Red", "kind": "state",
+          "data": {
+            "entryAction": "red = 1; yellow = 0; green = 0; timer = 0",
+            "params": { "decomposition": "leaf", "isInitial": "true" }
+          },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "Green", "kind": "state",
+          "data": {
+            "entryAction": "red = 0; yellow = 0; green = 1; timer = 0",
+            "params": { "decomposition": "leaf" }
+          },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "Yellow", "kind": "state",
+          "data": {
+            "entryAction": "red = 0; yellow = 1; green = 0; timer = 0",
+            "params": { "decomposition": "leaf" }
+          },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } }
+      ],
+      "edges": [
+        { "id": "t_red_green",   "kind": "transition",
+          "label": "step[timer >= 30]",
+          "from": {"node": "Red",    "port": "out"},
+          "to":   {"node": "Green",  "port": "in"},
+          "data": { "params": { "priority": "1" } } },
+        { "id": "t_green_yellow","kind": "transition",
+          "label": "step[timer >= 25]",
+          "from": {"node": "Green",  "port": "out"},
+          "to":   {"node": "Yellow", "port": "in"},
+          "data": { "params": { "priority": "1" } } },
+        { "id": "t_yellow_red",  "kind": "transition",
+          "label": "step[timer >= 5]",
+          "from": {"node": "Yellow", "port": "out"},
+          "to":   {"node": "Red",    "port": "in"},
+          "data": { "params": { "priority": "1" } } }
+      ]
+    }
+  ]
+}

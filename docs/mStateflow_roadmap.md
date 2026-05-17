@@ -25,9 +25,13 @@ mflowLink §2); this is that tier.
 **Compiler / Debugger / DAP / REPL side: shipped end-to-end. UI/UX
 side: not started.** The chart authoring + live-debug surface is
 ready for the IDE team to consume — chart `.mflow` files load,
-compile to readable MATLAB, simulate with deterministic event
-traces, and stream chart-namespaced DAP events with full breakpoint
-+ introspection support.
+**compile through every matlabc emit lane** (`-emit-matlab` /
+`-emit-mir` / `-emit-llvm` / `-emit-c` / `-emit-cpp` for software,
+`-emit-systemverilog` for synthesizable RTL), simulate with
+deterministic event traces, and stream chart-namespaced DAP events
+with full breakpoint + introspection support. The integer-typed
+Moore / Mealy / AND-parallel examples in `examples/stateflow/`
+produce verilator-lint-clean SystemVerilog modules.
 
 ### What's shipped (matlab_llvm side)
 
@@ -44,17 +48,33 @@ traces, and stream chart-namespaced DAP events with full breakpoint
   `ChartJunction` / `Transition` / `ChartFunction` with four-field
   `TransitionLabel` parser. Edit-time lint: undefined-symbol warnings
   on every action / guard / cond / trans body.
-- **Tier 4b — Lowering**: `lib/StateChart/Lowering.cpp`. Emits
-  `<chart>_init` + `<chart>_tick(state, inputs, events) → (outputs,
-  state)` with super-step fixed-point loop, `kMaxIterations`
-  saturation warning, on-event handlers, history-junction-aware
-  entry, inner transitions, super-transitions across hierarchy
-  (LCA-relative exit + entry chains), junction chains (connective /
-  history / entry / exit / default), temporal operators (`after` /
-  `before` / `at` / `every` — tick / sec aliased), `emit('X')`
-  rewriting, `in(stateId)` via auto-emitted `<chart>_in_active_`
-  helper, identifier-aware action-source rewriter that prefixes chart
-  symbols with `state.locals.*` / `state.events.*`.
+- **Tier 4b — Lowering**: `lib/StateChart/Lowering.cpp`. Two target
+  forms behind a `LoweringTarget` enum:
+  - **Software** (default; drives `-emit-matlab`/`-emit-mir`/
+    `-emit-llvm`/`-emit-c`/`-emit-cpp`): single `<chart>_tick(in_X1,
+    …, ev_E1, …) → out_Y1, …` function with **persistent-scalar**
+    state (no `struct()`, no string literals — every chart slot is a
+    flat `persistent l_<local>` / `persistent r_<region>` / etc.
+    that matlabc's MATLAB → LLVM lane lowers cleanly).
+  - **SystemVerilog** (drives `-emit-systemverilog` /
+    `-check-synthesizable` / `-emit-hardware-report` / `-emit-cocotb`):
+    per-variable `if isempty(X), X = intW(0); end` reset
+    initialisers, integer-typed locals + region codes (`int16(...)`
+    casts on every literal), one-pass tick (each call = one clock
+    edge / one transition attempt per region), inlined `in()`
+    predicate (no helper — bypasses matlabc's call-site type-
+    inference loop), reset arg + clk auto-injected by matlabc's SV
+    pass.
+  Common to both targets: super-step fixed-point loop with
+  `kMaxIterations` saturation; on-event handlers; history-junction-
+  aware entry; inner transitions; super-transitions across hierarchy
+  (LCA-relative exit + entry chains); junction chains (connective /
+  history / entry / exit / default); temporal operators (`after` /
+  `before` / `at` / `every` — tick / sec aliased); `emit('X')`
+  rewriting; identifier-aware action-source rewriter that prefixes
+  chart symbols with `l_*` (locals) / `ev_*` (events). Three of five
+  `examples/stateflow/` fixtures produce verilator-lint-clean
+  modules end-to-end.
 - **Tier 4c — Runtime**: `runtime/runtime_mstateflow.cpp` (snapshot
   ring, DAP event sinks, bounded FIFO event queue with
   configurable depth, instrumentation hooks) +
@@ -88,10 +108,13 @@ traces, and stream chart-namespaced DAP events with full breakpoint
 - **Tier 8 — Chart functions** *(partial)*: `chart_fn_matlab` nodes
   emit as sibling MATLAB functions callable from action bodies;
   graphical / truth-table call-sites still warn-and-pass.
-- **Tier 9 — Codegen lanes** *(partial)*: `-emit-matlab` and
-  `-emit-mir` work. `-emit-c` / `-emit-cpp` / `-emit-llvm` blocked
-  on the matlabc emit-c gap around `matlab.alloc` of dynamic struct
-  slots — not chart-specific.
+- **Tier 9 — Codegen lanes** *(complete)*: `-emit-matlab`,
+  `-emit-mir`, `-emit-llvm`, `-emit-c`, `-emit-cpp`, and
+  `-emit-systemverilog` all work on chart `.mflow` inputs. The
+  persistent-scalar lowering form (no struct, no string literals)
+  unblocked the LLVM / C / C++ lanes; the parallel SV-target
+  lowering produces synthesizable RTL. Three of five
+  `examples/stateflow/` examples produce verilator-clean modules.
 - **Bonus — Chart interpreter**: `lib/StateChart/Interpreter.{h,cpp}`.
   In-process C++ super-step simulator with full backtracking junction
   resolver, history junctions, super-transitions, temporal counters,
@@ -107,9 +130,6 @@ traces, and stream chart-namespaced DAP events with full breakpoint
 - Everything in §5 / Tiers 1–3 / 5 / 7 / 10 (the UI/UX track).
 - Within Tier 8: graphical-function (control-flow sub-Flow) inlining
   + truth-table semantics (over/underspec diagnostic).
-- Within Tier 9: `-emit-c` / `-emit-cpp` / `-emit-llvm` — gated by
-  the matlabc emit-c lane growing `matlab.alloc` support for
-  `any`-typed slots that the chart's `struct()` calls produce.
 - `temporalCount(event)` and `duration(cond)` — the four scalar
   temporal operators are shipped; these counter-style variants are
   Tier-N+.
@@ -119,6 +139,11 @@ traces, and stream chart-namespaced DAP events with full breakpoint
 - REPL auto-load of `.mflow` (`loadStateChart('foo.mflow')`) — the
   workflow today is `matlabc -emit-matlab foo.mflow > foo.m` then
   source it.
+- SV emission for charts using **float-typed locals** — two of five
+  shipped examples (`get_started_create_chart`, `get_started_hierarchy_chart`)
+  use `sentPower = 3.5` and produce SV with verilator warnings on
+  the float→int cast. The integer-typed Moore / Mealy / AND-parallel
+  examples are fully lint-clean.
 
 The plan below is organised so Tier 0 (additive schema + palette stubs)
 lands first as a tiny PR; everything downstream forks into two parallel
@@ -176,8 +201,11 @@ with mflowLink §1.1).
   interesting but niche.
 - **Custom C code via `coder.extrinsic`** (§14-22). Stays inside
   `matlabc`-compileable expressions only.
-- **HDL coder for charts.** Digital-only state machines may eventually
-  lower through `-emit-sv`, but not in scope here.
+- ~~**HDL coder for charts.** Digital-only state machines may eventually
+  lower through `-emit-sv`, but not in scope here.~~ *(Shipped:
+  `-emit-systemverilog` on chart `.mflow` files emits verilator-clean
+  Moore / Mealy / AND-parallel modules. The synthesizable lowering
+  is a sibling target of the software lowering — see §6.3.)*
 - **Atomic Subchart for separate codegen** (§17). Will reuse the
   existing `signal_subsystem` / sub-flow mechanism if needed; no
   chart-only equivalent.
@@ -423,23 +451,59 @@ In-memory IR matching the schema:
 
 ### 6.3 Lowering — `lib/StateChart/Lowering.cpp`
 
-Chart IR → existing matlabc IR. Strategy:
+Chart IR → MATLAB (which matlabc then routes through its existing
+backends). The lowering exposes a `LoweringTarget` enum so the same
+chart IR drives two output shapes:
 
-- Active state encoded as a packed `uint8`/`uint16` vector indexed by
-  region id (one slot per OR region; AND regions encode their children
-  as a bitset).
-- Each chart compiles to a single tick function
-  `chart_tick(state, events, inputs) → (state, outputs)` that mutates
-  the active-state vector + chart-local data block.
-- Transitions become a priority-sorted dispatch table per region.
-- Entry / during / exit / on-event actions are inlined MATLAB ASTs.
-- Super-step runs as a fixed-point loop with `kMaxIterations` (default
-  1000) and a runtime warning on saturation (parity with §2-41).
-- Temporal operators (`after`, `before`, `every`, `at`, `duration`,
-  `temporalCount`) lower to counter increments on event broadcasts
-  (parity with §14-45).
-- The `in(state)` operator lowers to a bitmask check against the
-  active-state vector.
+- **`Software`** (default; targets `-emit-matlab` / `-emit-mir` /
+  `-emit-llvm` / `-emit-c` / `-emit-cpp`):
+  `<chart>_tick(in_X1, …, ev_E1, …) → out_Y1, …` as a single MATLAB
+  function with **persistent scalars** for every chart slot
+  (`persistent l_<local>` / `r_<region>` / `t_<state>` / `h_<state>`
+  / `tick_count`). No `struct()`, no string literals — region codes
+  are 1-based integers, every persistent has an `if isempty(X), X = 0;
+  end` init line. Super-step is a `while fired … end` loop bounded by
+  `kMaxIterations`.
+- **`SystemVerilog`** (targets `-emit-systemverilog` /
+  `-check-synthesizable` / `-emit-hardware-report` / `-emit-cocotb`):
+  same body shape but **per-variable** `if isempty(X), X = intW(0);
+  end` initialisers (mapped to power-on reset values by matlabc's SV
+  pass), integer-typed literals (`int16(N)` wraps on every numeric
+  emit), one-pass tick (no inner fixed-point loop — each call =
+  one clock edge / one transition attempt per region), inlined
+  `in()` predicate bypassing the helper function (matlabc's SV
+  pipeline can't infer `in_helper` param types from in-body call
+  sites, so the helper is dead code on SV and stays unemitted).
+  matlabc's SV pass auto-injects `clk` / `rst_n` and translates
+  each persistent into a flip-flop + `<X>_next` combinational
+  assignment.
+
+Common semantics across both targets:
+
+- Active state encoded as a per-OR-region integer slot (`r_<region>`).
+  AND regions don't get a slot — their children are always co-active
+  and visited per super-step iteration in `executionOrder`.
+- Entry / during / exit / on-event actions are inlined into the
+  per-substate dispatch.
+- Transitions become a priority-sorted dispatch per source state.
+- Inner transitions skip the exit/entry chain.
+- Super-transitions across hierarchy walk src up to the LCA, exit each
+  level (saving history for OR parents with `hasHistory`), then walk
+  down to dst.
+- Junction chains follow `connective` / `entry` / `exit` outgoing
+  transitions in priority order; `history` redirects to the parent's
+  `state.history.<parent>` slot. Lowering commits greedily on the
+  first matching guard; the C++ interpreter backtracks properly.
+- Temporal operators `after` / `before` / `at` / `every` lower to
+  `(tick_count − t_<owner>) <cmp> N`. `tick_count` advances once per
+  super-step; `t_<state>` is stamped on each entry. The `sec` and
+  `tick` unit suffixes are aliased (1 super-step = 1 sec).
+  `temporalCount(event)` and `duration(cond)` are Tier-N+.
+- `in(stateId)` lowers to an integer comparison against the named
+  state's parent-region slot — through a chart-scoped helper on
+  software target, inlined on SV target.
+- `emit('X')` rewrites to `ev_X = true` so action bodies can broadcast
+  events without leaking lowering internals.
 
 ### 6.4 Runtime — `lib/Runtime/runtime_mstateflow.cpp`
 
@@ -463,16 +527,36 @@ existing C++ runtime that already underpins `.m` programs.
   `function [outputs, state] = chart_tick(inputs, state, events)` so
   generated code is readable.
 
-### 6.6 Codegen lanes (free, mostly)
+### 6.6 Codegen lanes (closed)
 
 Each gains one fixture test per canonical chart example.
 
-- `-emit-matlab` — readable MATLAB equivalent of the chart.
-- `-emit-c` / `-emit-cpp` — chart compiles to nested `switch`-cases +
-  state vector + event dispatch.
-- `-emit-llvm` / `-emit-mlir` — flow through existing pipelines once
-  the IR is hooked up.
-- **HDL / Verilog-A** — explicit non-goal.
+- ✅ `-emit-matlab` — readable MATLAB equivalent of the chart
+  (persistent-scalar form; ~70-150 lines per fixture).
+- ✅ `-emit-c` / `-emit-cpp` — chart compiles to `static double` /
+  `static int16_t` persistent locals + if-chain transition dispatch.
+  Verified end-to-end: emitted C compiles with `cc`, links against a
+  small `matlab_persistent_isempty` stub, and prints the expected
+  tick trace.
+- ✅ `-emit-llvm` — chart lowers to clean LLVM IR (~170 lines per
+  fixture) that `llc` assembles without warnings.
+- ✅ `-emit-mlir` / `-emit-mir` — chart lowers to clean `matlab.func`
+  IR, all locals as scalar `matlab.alloc`, transitions as nested
+  `scf.if`.
+- ✅ `-emit-systemverilog` — synthesizable RTL via the SV-target
+  lowering. Three of five `examples/stateflow/` examples are
+  **verilator-lint-clean**:
+  - `traffic_light_moore` → Moore FSM, 122 lines.
+  - `vending_machine_mealy` → Mealy FSM with cond-action outputs,
+    106 lines.
+  - `model_air_temperature_controller` → AND-parallel chart with
+    three regions, 208 lines.
+  The two float-typed examples (`get_started_create_chart` /
+  `get_started_hierarchy_chart`) produce SV with cosmetic warnings
+  on the float→int cast.
+- 🟧 **Verilog-A** — analog action bodies could lower through the
+  existing Verilog-A path; not currently exercised by any chart
+  fixture. Tier-N+.
 
 ### 6.7 DAP adapter — `tools/matlabc/DAP/StateChartAdapter.cpp`
 
@@ -669,16 +753,20 @@ produces an identical simulation trace to its canvas equivalent.
   (sub-Flow inlining) + `chart_fn_truth_table` (over/underspec
   diagnostic) still warn-and-pass; recursion detection deferred.
 
-### Tier 9 — Codegen lanes *(Compiler, S)* — **🟧 partial**
+### Tier 9 — Codegen lanes *(Compiler, S)* — **✅ complete**
 
-Mostly free once the chart IR lowers to the existing matlabc IR. One
-fixture test per lane per canonical example.
+Closed by the persistent-scalar lowering rewrite + the SV-target
+sibling.
 
-- ✅ `-emit-matlab`, `-emit-mir` work for charts unchanged.
-- ⬜ `-emit-c` / `-emit-cpp` / `-emit-llvm` blocked on the matlabc
-  emit-c lane growing `matlab.alloc` support for `any`-typed slots
-  (the lowered chart's `struct()` calls create them). Not chart-
-  specific; lands when matlabc emit-c does.
+- ✅ `-emit-matlab` / `-emit-mir` / `-emit-llvm` / `-emit-c` /
+  `-emit-cpp` all work on chart `.mflow` inputs unchanged. The
+  software-target lowering produces compilable MATLAB with no
+  `struct()` / no string literals, so matlabc's MATLAB → LLVM lane
+  handles every chart fixture.
+- ✅ `-emit-systemverilog` — synthesizable RTL via the SV-target
+  lowering (per-variable `if isempty` resets, integer-typed locals,
+  single-pass tick). Moore / Mealy / AND-parallel charts produce
+  verilator-lint-clean modules end-to-end.
 
 ### Tier 10 — Polish *(UI/UX, S, scattered)* — **Compiler ✅ partial · UI/UX ⬜**
 
@@ -689,8 +777,20 @@ fixture test per lane per canonical example.
 - ✅ Active-state output port — `outputs.active_state_` mirrors the
   live `state.regions` struct so an mflowLink signal-flow document
   can wire a chart's active configuration into downstream blocks.
-- ✅ Examples library shipped under `test/Flowchart/StateChart/*.mflow`
-  (6 canonical + 4 extras).
+- ✅ Examples library shipped under two paths:
+  - `test/Flowchart/StateChart/*.mflow` — 6 canonical §6.8 fixtures
+    (`air_temp_controller`, `hotel_check_in`, `traffic_light_moore`,
+    `flat_vending` ≡ Stateflow's vending_machine_mealy,
+    `bang_bang_temp`, `automatic_transmission`) plus 4 extras
+    (`nested_heater`, `on_event_handlers`, `emit_in_action`,
+    `temporal_after`); 10 happy + 4 schema-error.
+  - `examples/stateflow/*.mflow` — 5 tutorial-aligned examples
+    designed for end-to-end Compile / Run / Debug / REPL / DAP / SV
+    walkthroughs (`get_started_create_chart`,
+    `get_started_hierarchy_chart`,
+    `model_air_temperature_controller`, `traffic_light_moore`,
+    `vending_machine_mealy`). The Moore / Mealy / AND-parallel
+    three produce verilator-lint-clean SystemVerilog.
 
 ### Tier N+ — Deferred
 
@@ -775,11 +875,16 @@ fixture test per lane per canonical example.
 
 ---
 
-**Backend status (matlab_llvm side, 2026-05-16)**: Tiers 0 / 4 / 6
-shipped end-to-end; Tier 8 + Tier 9 partial; Tier 10 active-state
-output port shipped. 55/55 chart fixtures green. DAP + introspection
-+ breakpoints + interpreter all production-ready for the IDE team to
-consume.
+**Backend status (matlab_llvm side, 2026-05-16)**: Tiers 0 / 4 / 6 / 9
+shipped end-to-end; Tier 8 partial (chart_fn_matlab inlined; graphical
++ truth-table deferred); Tier 10 active-state output port + examples
+library shipped. 55/55 chart fixtures green. DAP + introspection +
+breakpoints + interpreter all production-ready for the IDE team to
+consume. Chart `.mflow` files now lower through **every** matlabc
+emit lane — `-emit-matlab` / `-emit-mir` / `-emit-llvm` / `-emit-c` /
+`-emit-cpp` for software, `-emit-systemverilog` for synthesizable
+RTL (Moore / Mealy / AND-parallel charts produce verilator-lint-
+clean modules).
 
 **Next slice (UI/UX side)**: Tier 0 IDE bits → Tier 1 (flat canvas)
 → Tier 2 (hierarchy) → Tier 5 (live debug, which now has a real

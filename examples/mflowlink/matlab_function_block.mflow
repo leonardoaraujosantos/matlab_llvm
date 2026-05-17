@@ -1,59 +1,195 @@
 {
-  "schema": "matforge.flowchart",
-  "version": "0.1.0",
-  "entry": "fn_demo",
-  "settings": {
-    "kind": "signal_flow",
-    "solver": {
-      "type": "variable_step",
-      "algorithm": "ode45",
-      "startTime": 0.0,
-      "stopTime": 4.0,
-      "maxStep": "0.01",
-      "zeroCrossing": true,
-      "algebraicLoopMethod": "trust_region"
-    },
-    "snapshot": { "enabled": true, "depth": 256, "fields": "states" }
-  },
-  "flows": [
+  "entry" : "fn_demo",
+  "flows" : [
     {
-      "id": "flow_fn_demo",
-      "kind": "program",
-      "name": "fn_demo",
-      "signature": { "inputs": [], "outputs": [] },
-      "nodes": [
-        { "id": "src_a", "kind": "signal_sine",
-          "data": { "log_signal": true,
-                    "params": { "amplitude": 1.2, "bias": 0.0,
-                                "frequency": 3.1415927, "phase": 0.0 } },
-          "ports": { "in": [], "out": [{"id": "out"}] } },
-        { "id": "src_b", "kind": "signal_sine",
-          "data": { "log_signal": true,
-                    "params": { "amplitude": 0.3, "bias": 0.0,
-                                "frequency": 12.566371, "phase": 0.0 } },
-          "ports": { "in": [], "out": [{"id": "out"}] } },
-        { "id": "mixer", "kind": "signal_matlab_fcn",
-          "data": {
-            "log_signal": true,
-            "params": {
-              "function_body":
-                "function y = soft_mix(u1, u2)\n  % Soft-saturated mixer with deadband.\n  % Combines two inputs, applies a ±0.2 deadband around zero,\n  % and softly clips above ±1 with a 10x compression ratio.\n  s = u1 + u2;\n  abs_s = abs(s);\n  if abs_s < 0.2\n    y = 0;\n  elseif s > 1.0\n    y = 1 + 0.1 * (s - 1);\n  elseif s < -1.0\n    y = -1 + 0.1 * (s + 1);\n  else\n    y = s;\n  end\nend\n"
+      "edges" : [
+        {
+          "from" : {
+            "node" : "src_a",
+            "port" : "out"
+          },
+          "id" : "e1",
+          "kind" : "data",
+          "to" : {
+            "node" : "mixer",
+            "port" : "u1"
+          }
+        },
+        {
+          "from" : {
+            "node" : "src_b",
+            "port" : "out"
+          },
+          "id" : "e2",
+          "kind" : "data",
+          "to" : {
+            "node" : "mixer",
+            "port" : "u2"
+          }
+        },
+        {
+          "from" : {
+            "node" : "mixer",
+            "port" : "out"
+          },
+          "id" : "e3",
+          "kind" : "data",
+          "to" : {
+            "node" : "scope",
+            "port" : "in"
+          }
+        }
+      ],
+      "id" : "flow_fn_demo",
+      "kind" : "program",
+      "name" : "fn_demo",
+      "nodes" : [
+        {
+          "data" : {
+            "log_signal" : true,
+            "params" : {
+              "amplitude" : 1.2,
+              "bias" : 0,
+              "frequency" : 3.1415927,
+              "phase" : 0
             }
           },
-          "ports": { "in":  [{"id": "u1"}, {"id": "u2"}],
-                     "out": [{"id": "out"}] } },
-        { "id": "scope", "kind": "signal_scope",
-          "data": { "params": { "title": "soft_mix output" } },
-          "ports": { "in": [{"id": "in"}], "out": [] } }
+          "id" : "src_a",
+          "kind" : "signal_sine",
+          "label" : "",
+          "ports" : {
+            "in" : [
+
+            ],
+            "out" : [
+              {
+                "id" : "out"
+              }
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 80,
+              "y" : 172
+            }
+          }
+        },
+        {
+          "data" : {
+            "log_signal" : true,
+            "params" : {
+              "amplitude" : 0.3,
+              "bias" : 0,
+              "frequency" : 12.566371,
+              "phase" : 0
+            }
+          },
+          "id" : "src_b",
+          "kind" : "signal_sine",
+          "label" : "",
+          "ports" : {
+            "in" : [
+
+            ],
+            "out" : [
+              {
+                "id" : "out"
+              }
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 89,
+              "y" : 85
+            }
+          }
+        },
+        {
+          "data" : {
+            "log_signal" : true,
+            "params" : {
+              "function_body" : "function y = soft_mix(u1, u2)\n  % Soft-saturated mixer with deadband.\n  % Combines two inputs, applies a ±0.2 deadband around zero,\n  % and softly clips above ±1 with a 10x compression ratio.\n  s = u1 + u2;\n  abs_s = abs(s);\n  if abs_s < 0.2\n    y = 0;\n  elseif s > 1.0\n    y = 1 + 0.1 * (s - 1);\n  elseif s < -1.0\n    y = -1 + 0.1 * (s + 1);\n  else\n    y = s;\n  end\nend\n"
+            }
+          },
+          "id" : "mixer",
+          "kind" : "signal_matlab_fcn",
+          "label" : "",
+          "ports" : {
+            "in" : [
+              {
+                "id" : "u1"
+              },
+              {
+                "id" : "u2"
+              }
+            ],
+            "out" : [
+              {
+                "id" : "out"
+              }
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 268,
+              "y" : 286
+            }
+          }
+        },
+        {
+          "data" : {
+            "params" : {
+              "title" : "soft_mix output"
+            }
+          },
+          "id" : "scope",
+          "kind" : "signal_scope",
+          "label" : "",
+          "ports" : {
+            "in" : [
+              {
+                "id" : "in"
+              }
+            ],
+            "out" : [
+
+            ]
+          },
+          "ui" : {
+            "position" : {
+              "x" : 480,
+              "y" : 172
+            }
+          }
+        }
       ],
-      "edges": [
-        { "id": "e1", "kind": "data",
-          "from": {"node": "src_a", "port": "out"}, "to": {"node": "mixer", "port": "u1"} },
-        { "id": "e2", "kind": "data",
-          "from": {"node": "src_b", "port": "out"}, "to": {"node": "mixer", "port": "u2"} },
-        { "id": "e3", "kind": "data",
-          "from": {"node": "mixer", "port": "out"}, "to": {"node": "scope", "port": "in"} }
-      ]
+      "signature" : {
+        "inputs" : [
+
+        ],
+        "outputs" : [
+
+        ]
+      }
     }
-  ]
+  ],
+  "schema" : "matforge.flowchart",
+  "settings" : {
+    "kind" : "signal_flow",
+    "snapshot" : {
+      "depth" : 256,
+      "enabled" : true,
+      "fields" : "states"
+    },
+    "solver" : {
+      "algebraicLoopMethod" : "trust_region",
+      "algorithm" : "ode45",
+      "maxStep" : "0.01",
+      "startTime" : 0,
+      "stopTime" : 4,
+      "type" : "variable_step",
+      "zeroCrossing" : true
+    }
+  },
+  "version" : "0.1.0"
 }

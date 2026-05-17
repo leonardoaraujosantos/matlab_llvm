@@ -42,6 +42,28 @@ namespace statechart {
 // happens when matlabc compiles the emitted .m.
 //===----------------------------------------------------------------------===//
 
+enum class LoweringTarget {
+  // Default: software execution. Persistent-scalar form with a
+  // top-level driver, while-loop super-step, and float-typed locals.
+  // Targets matlabc's `-emit-matlab` / `-emit-llvm` / `-emit-c`
+  // lanes.
+  Software,
+  // Synthesizable HDL. No top-level driver, one-pass tick (no
+  // super-step inner loop — every clock advances one transition
+  // attempt per region), per-variable `if isempty(X)` initialisers,
+  // explicit integer / fixed-point types so the SV emit pipeline
+  // can pick widths.
+  SystemVerilog,
+};
+
+struct LoweringOptions {
+  LoweringTarget Target = LoweringTarget::Software;
+  // SV-only: bit width for state codes + integer-typed locals.
+  // 16-bit covers up to 65k states; chart symbol locals reuse the
+  // same width unless the caller overrides via fi-spec.
+  int IntegerWidth = 16;
+};
+
 struct LoweringResult {
   std::string MatlabSource;          // full generated .m text
   std::string TickFunction;          // name of the chart-tick entry function
@@ -49,12 +71,12 @@ struct LoweringResult {
 };
 
 // Emit a runnable MATLAB program for the chart's entry flow. Returns
-// nullopt on any unsupported feature (Tier 4b carves out: super-
-// transitions across hierarchy levels, temporal operators, in(),
-// history junctions outside the most-common pattern, and chart-fn
-// nodes — those are deferred to later tiers).
+// nullopt on any unsupported feature.
 std::optional<LoweringResult> lowerChartToMatlab(const Chart &C,
                                                  DiagnosticEngine &Diag);
+std::optional<LoweringResult> lowerChartToMatlab(const Chart &C,
+                                                 DiagnosticEngine &Diag,
+                                                 const LoweringOptions &Opts);
 
 } // namespace statechart
 } // namespace matlab

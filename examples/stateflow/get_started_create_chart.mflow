@@ -1,0 +1,62 @@
+{
+  "schema": "matforge.flowchart",
+  "version": "0.2.0",
+  "entry": "battery_basic",
+  "settings": { "kind": "state_chart" },
+  "_comment": [
+    "Mirror of MathWorks Stateflow tutorial:",
+    "  https://www.mathworks.com/help/stateflow/gs/get-started-create-chart.html",
+    "",
+    "Battery system with two states: Charge (default) and Discharge.",
+    "Transitions are guarded on the `isCharging` input — no event triggers.",
+    "Charge runs `sentPower = 0` on entry and increases `charge` by 4 per",
+    "super-step in the during action. Discharge sets `sentPower = 3.5` on",
+    "entry and decreases `charge` by 3 per super-step."
+  ],
+  "flows": [
+    {
+      "id": "flow_battery_basic",
+      "kind": "program",
+      "name": "battery_basic",
+      "signature": {
+        "inputs":  ["isCharging"],
+        "outputs": ["sentPower"]
+      },
+      "symbols": {
+        "data": [
+          { "name": "isCharging", "scope": "input",  "type": "boolean" },
+          { "name": "sentPower",  "scope": "output", "type": "double", "initial": "0" },
+          { "name": "charge",     "scope": "local",  "type": "double", "initial": "50" }
+        ]
+      },
+      "nodes": [
+        { "id": "Charge", "kind": "state",
+          "data": {
+            "entryAction":  "sentPower = 0",
+            "duringAction": "charge = charge + 4",
+            "params": { "decomposition": "leaf", "isInitial": "true" }
+          },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "Discharge", "kind": "state",
+          "data": {
+            "entryAction":  "sentPower = 3.5",
+            "duringAction": "charge = charge - 3",
+            "params": { "decomposition": "leaf" }
+          },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } }
+      ],
+      "edges": [
+        { "id": "t_charge_to_discharge", "kind": "transition",
+          "label": "[~isCharging]",
+          "from": {"node": "Charge", "port": "out"},
+          "to":   {"node": "Discharge", "port": "in"},
+          "data": { "params": { "priority": "1" } } },
+        { "id": "t_discharge_to_charge", "kind": "transition",
+          "label": "[isCharging]",
+          "from": {"node": "Discharge", "port": "out"},
+          "to":   {"node": "Charge", "port": "in"},
+          "data": { "params": { "priority": "1" } } }
+      ]
+    }
+  ]
+}

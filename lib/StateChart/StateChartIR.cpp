@@ -435,6 +435,11 @@ private:
         "case", "otherwise", "return", "break", "continue",
         "function", "global", "persistent",
       };
+      // Collect every state + junction id so the scanner can treat
+      // them as known identifiers when they appear inside `in(...)`
+      // arguments (state-membership predicate).
+      std::unordered_set<std::string> NodeIds;
+      for (auto &N : F.Nodes) NodeIds.insert(N.Id);
       auto scan = [&](const std::string &Src, SourceLocation Loc,
                       const std::string &Where) {
         size_t I = 0;
@@ -457,7 +462,22 @@ private:
                    (std::isalnum(static_cast<unsigned char>(Src[I])) ||
                     Src[I] == '_')) ++I;
             std::string Id = Src.substr(Start, I - Start);
+            // Skip the argument identifier of `in(...)`: it names a
+            // state, not a chart-symbol-table entry. We peek past any
+            // whitespace after `in` and consume the inner identifier
+            // ourselves so the outer scanner doesn't flag it.
+            if (Id == "in" && !PrevDot) {
+              size_t P = I;
+              while (P < Src.size() &&
+                     std::isspace(static_cast<unsigned char>(Src[P]))) ++P;
+              if (P < Src.size() && Src[P] == '(') {
+                I = P + 1;
+                PrevDot = false;
+                continue;
+              }
+            }
             if (!PrevDot && !Known.count(Id) && !Builtins.count(Id) &&
+                !NodeIds.count(Id) &&
                 !std::isdigit(static_cast<unsigned char>(Id[0]))) {
               Diag_.warning(Loc, "undefined identifier \"" + Id +
                                      "\" in " + Where);
