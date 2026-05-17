@@ -451,6 +451,29 @@ add_test(
           $<TARGET_FILE:matlabc>
   WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Flowchart/SimulateDap
 )
+# mStateflow DAP smoke lane — drive a chart `.mflow` over DAP, inject
+# locals + events, and verify the chart transitions through the
+# expected state trajectory. Exercises the temporalCount / duration
+# interpreter paths end-to-end (no other test fires these operators
+# because the default -simulate driver doesn't inject inputs).
+add_test(
+  NAME flowchart-simulate-dap-chart-tests
+  COMMAND python3 ${CMAKE_SOURCE_DIR}/test/Flowchart/SimulateDap/StateChart/run_tests.py
+          $<TARGET_FILE:matlabc>
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Flowchart/SimulateDap/StateChart
+)
+# mStateflow cocotb SIL lane — feed the three integer-typed charts
+# through `matlabc -emit-cocotb`, check the harness directory is
+# structurally complete (SV + ref.py + testbench + Makefile +
+# helpers), parse the generated Python, and confirm the chart's
+# tick function is exposed. Runs `make sim` end-to-end when
+# verilator + cocotb are both on PATH.
+add_test(
+  NAME flowchart-emit-chart-cocotb
+  COMMAND ${CMAKE_SOURCE_DIR}/test/Flowchart/EmitSubsystem/run_chart_cocotb_tests.sh
+          $<TARGET_FILE:matlabc>
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Flowchart/EmitSubsystem
+)
 # mflowLink §17.5 #6 — cross-dialect composition. Compile a .m
 # that calls `mflowlink_run("model.mflow")` via runtime/
 # runtime_mflowlink_call.cpp and confirm the round-trip works.

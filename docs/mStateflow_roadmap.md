@@ -696,6 +696,14 @@ existing C++ runtime that already underpins `.m` programs.
   test runs.
 - `-dump-chart` dumps the resolved chart IR (states / junctions /
   transitions / chart functions) for inspection.
+- `-emit-trace` drives the chart through one initialise + 5
+  super-steps via the C++ interpreter and prints each trace event
+  (super-step begin/end, state enter/exit, transition fired, event
+  broadcast, max-iterations) as a one-line JSON record to stdout.
+  Useful for offline trace analysis pipelines + golden-file
+  regression of the chart's deterministic step sequence (DAP path
+  is the live-interactive surface; `-emit-trace` is its one-shot
+  dump sibling).
 - `-simulate --sim-dap` boots a chart-namespaced DAP server (see
   §6.7) for live debug + introspection.
 - **REPL shortcut**: `loadStateChart('foo.mflow')` is intercepted at
@@ -704,7 +712,10 @@ existing C++ runtime that already underpins `.m` programs.
   output through `runReplInput` so the chart's `<name>_tick`
   registers in the live session. The demo driver runs once; further
   drive scripts that span REPL turns currently hit matlabc's
-  cross-unit JIT gap (use `-emit-c` + an AOT driver instead).
+  cross-unit JIT gap (see
+  [`repl_jit_cross_unit_gap.md`](repl_jit_cross_unit_gap.md) for the
+  layer-by-layer investigation + fix sketch). For programmatic
+  drives today, use `-emit-c` + an AOT driver instead.
 
 ### 6.6 Codegen lanes (closed)
 
@@ -978,10 +989,13 @@ Closed by the persistent-scalar lowering rewrite + the SV-target
 sibling.
 
 - ✅ `-emit-matlab` / `-emit-mir` / `-emit-llvm` / `-emit-c` /
-  `-emit-cpp` all work on chart `.mflow` inputs unchanged. The
-  software-target lowering produces compilable MATLAB with no
-  `struct()` / no string literals, so matlabc's MATLAB → LLVM lane
-  handles every chart fixture.
+  `-emit-cpp` / `-emit-python` / `-emit-typescript` all work on
+  chart `.mflow` inputs unchanged. The software-target lowering
+  produces compilable MATLAB with no `struct()` / no string
+  literals, so matlabc's MATLAB → LLVM lane (and the source-emit
+  lanes downstream) handle every chart fixture including
+  AND-parallel decomposition + chart functions + truth-table
+  dispatch.
 - ✅ `-emit-systemverilog` — synthesizable RTL via the SV-target
   lowering (per-variable `if isempty` resets, integer-typed locals,
   single-pass tick). Moore / Mealy / AND-parallel charts produce
@@ -1127,6 +1141,9 @@ chart-specific suites, 79 chart-specific cases).
 **Remaining backend follow-ons**: only the Tier-N+ deferrals (C
 action language, Messages with queue semantics, Mealy/Moore
 *conversion* sweeps, Atomic Subcharts for separate codegen,
-Simulink-based states, multi-chart Sequence Viewer). All five
-operator / lowering / REPL gaps identified during the prior
-review are closed.
+Simulink-based states, multi-chart Sequence Viewer) — plus the
+**matlabc REPL cross-unit JIT gap** documented in
+[`repl_jit_cross_unit_gap.md`](repl_jit_cross_unit_gap.md), which
+is matlabc-wide (not chart-specific) and estimated at ~1 wk for a
+proper coordinated fix across resolver / runtime workspace / JIT
+plumbing.

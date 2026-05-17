@@ -172,7 +172,7 @@ struct Options {
                     EmitFiReport, EmitSystemVerilog, CheckSynthesizable,
                     EmitHardwareReport, EmitCocotb,
                     DumpFlow, DumpChart, EmitMatlab, EmitMflow,
-                    EmitMflowLinkCpp,
+                    EmitMflowLinkCpp, EmitTrace,
                     Check, Repl, Format, Dap, Simulate };
   Mode Mode = Mode::Check;
   bool Opt = false;
@@ -344,6 +344,7 @@ int usage(const char *Prog) {
                "             -emit-python | -emit-typescript |\n"
                "             -emit-systemverilog | -check-synthesizable |\n"
                "             -emit-hardware-report | -dump-flow |\n"
+               "             -dump-chart | -emit-trace |\n"
                "             -emit-matlab |\n"
                "             -format | -repl | -dap]\n"
                "            [-no-line | -line] [-doxygen] [-cpp-auto] [-g]  FILE.m\n";
@@ -375,6 +376,7 @@ bool parseArgs(int Argc, char **Argv, Options &Opts, const char *&Prog) {
       Opts.Mode = Options::Mode::EmitHardwareReport;
     else if (A == "-dump-flow") Opts.Mode = Options::Mode::DumpFlow;
     else if (A == "-dump-chart") Opts.Mode = Options::Mode::DumpChart;
+    else if (A == "-emit-trace") Opts.Mode = Options::Mode::EmitTrace;
     else if (A == "-emit-matlab" || A == "-emit-m")
       Opts.Mode = Options::Mode::EmitMatlab;
     else if (A == "-emit-mflow" || A == "-emit-flow")
@@ -10306,6 +10308,105 @@ int main(int Argc, char **Argv) {
     }
     FlowDiag.printAll();
     return FlowDiag.hasErrors() ? 1 : 0;
+  }
+
+  /* mStateflow Tier-N polish — `matlabc -emit-trace chart.mflow`
+   * drives the chart through one initialise + N super-steps via the
+   * C++ interpreter and prints each ChartTraceEvent as a one-line
+   * JSON record to stdout. Useful for offline trace analysis
+   * pipelines + golden-file regression of the chart's deterministic
+   * step sequence (DAP path is the live-interactive surface; this
+   * is its "one-shot dump" sibling). The number of post-init steps
+   * defaults to 5 to match the -emit-matlab demo driver; users can
+   * pipe stdout into jq for filtering. */
+  if (Opts.Mode == Options::Mode::EmitTrace) {
+    SourceManager FlowSM;
+    DiagnosticEngine FlowDiag(FlowSM);
+    auto Doc = matlab::flowchart::loadMflowFromPath(FlowSM, Opts.InputPath,
+                                                    FlowDiag);
+    if (!Doc) { FlowDiag.printAll(); return 1; }
+    if (!Doc->isStateChart()) {
+      std::cerr << Opts.InputPath
+                << ": -emit-trace requires a state-chart .mflow "
+                   "(got settings.kind=\""
+                << Doc->Settings.Kind << "\")\n";
+      return 1;
+    }
+    auto Model = matlab::statechart::buildChartModel(*Doc, FlowDiag);
+    FlowDiag.printAll();
+    if (!Model || FlowDiag.hasErrors()) return 1;
+    if (Model->Charts.empty()) {
+      std::cerr << Opts.InputPath
+                << ": -emit-trace: chart model has no charts\n";
+      return 1;
+    }
+    matlab::statechart::ChartInterpreter Interp(Model->Charts.front());
+    auto jsonEscape = [](const std::string &S) {
+      std::string Out;
+      Out.reserve(S.size() + 2);
+      for (char C : S) {
+        switch (C) {
+          case '"':  Out += "\\\""; break;
+          case '\\': Out += "\\\\"; break;
+          case '\n': Out += "\\n";  break;
+          case '\r': Out += "\\r";  break;
+          case '\t': Out += "\\t";  break;
+          default:
+            if ((unsigned char)C < 0x20)
+              Out += "?";  // strip control chars
+            else
+              Out += C;
+        }
+      }
+      return Out;
+    };
+    auto kindName = [](matlab::statechart::ChartTraceEvent::Kind K) {
+      using K_ = matlab::statechart::ChartTraceEvent::Kind;
+      switch (K) {
+        case K_::SuperStepBegin:    return "superStepBegin";
+        case K_::SuperStepEnd:      return "superStepEnd";
+        case K_::StateEnter:        return "stateEnter";
+        case K_::StateExit:         return "stateExit";
+        case K_::TransitionFired:   return "transitionFired";
+        case K_::EventBroadcast:    return "eventBroadcast";
+        case K_::Breakpoint:        return "breakpoint";
+        case K_::MaxIterations:     return "maxIterations";
+      }
+      return "unknown";
+    };
+    auto emitEvents = [&](const std::vector<
+                              matlab::statechart::ChartTraceEvent> &Evs) {
+      for (auto &E : Evs) {
+        std::cout << "{\"kind\":\"" << kindName(E.K) << "\"";
+        if (!E.Id.empty())
+          std::cout << ",\"id\":\"" << jsonEscape(E.Id) << "\"";
+        if (!E.Src.empty())
+          std::cout << ",\"src\":\"" << jsonEscape(E.Src) << "\"";
+        if (!E.Dst.empty())
+          std::cout << ",\"dst\":\"" << jsonEscape(E.Dst) << "\"";
+        if (!E.EventName.empty())
+          std::cout << ",\"eventName\":\""
+                    << jsonEscape(E.EventName) << "\"";
+        if (E.K == matlab::statechart::ChartTraceEvent::Kind::SuperStepBegin
+            || E.K == matlab::statechart::ChartTraceEvent::Kind::SuperStepEnd
+            || E.K == matlab::statechart::ChartTraceEvent::Kind::MaxIterations)
+          std::cout << ",\"iteration\":" << E.Iteration;
+        if (E.K == matlab::statechart::ChartTraceEvent::Kind::SuperStepEnd)
+          std::cout << ",\"quiescent\":"
+                    << (E.Quiescent ? "true" : "false");
+        if (!E.BreakpointReason.empty())
+          std::cout << ",\"reason\":\""
+                    << jsonEscape(E.BreakpointReason) << "\"";
+        std::cout << "}\n";
+      }
+    };
+    // Initialise + 5 super-steps. Subsequent super-steps run with
+    // the default driver (no events, no local injections), so the
+    // trace is deterministic across machines. Drivers that want to
+    // inject inputs should use the DAP path.
+    emitEvents(Interp.superStep());
+    for (int I = 0; I < 4; ++I) emitEvents(Interp.superStep());
+    return 0;
   }
 
   /* mflowLink Tier G — `matlabc -emit-mflowlink-cpp model.mflow` emits
