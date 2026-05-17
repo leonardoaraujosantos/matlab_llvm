@@ -1,4 +1,4 @@
-# mStateflow — Hierarchical State Charts on top of `.mflow` (rev. 2026-05-16)
+# mStateflow — Hierarchical State Charts on top of `.mflow` (rev. 2026-05-17)
 
 Companion to:
 - [`mflowLink_roadmap.md`](mflowLink_roadmap.md) — the signal-flow sibling
@@ -20,11 +20,11 @@ side the existing `control_flow` and `signal_flow` dialects. The
 mflowLink roadmap explicitly defers Stateflow as Tier-N+ (see
 mflowLink §2); this is that tier.
 
-## Status (2026-05-16)
+## Status (2026-05-17)
 
 **Compiler / Debugger / DAP / REPL side: shipped end-to-end. UI/UX
-side: not started.** The chart authoring + live-debug surface is
-ready for the IDE team to consume — chart `.mflow` files load,
+side: Tiers 0 through 10 shipped.** The chart authoring + live-debug
+surface is fully live in the IDE — chart `.mflow` files load,
 **compile through every matlabc emit lane** (`-emit-matlab` /
 `-emit-mir` / `-emit-llvm` / `-emit-c` / `-emit-cpp` for software,
 `-emit-systemverilog` for synthesizable RTL), simulate with
@@ -72,9 +72,10 @@ produce verilator-lint-clean SystemVerilog modules.
   history / entry / exit / default); temporal operators (`after` /
   `before` / `at` / `every` — tick / sec aliased); `emit('X')`
   rewriting; identifier-aware action-source rewriter that prefixes
-  chart symbols with `l_*` (locals) / `ev_*` (events). Three of five
-  `examples/stateflow/` fixtures produce verilator-lint-clean
-  modules end-to-end.
+  chart symbols with `l_*` (locals) / `ev_*` (events). The
+  integer-typed Moore / Mealy / AND-parallel examples in
+  `examples/stateflow/` produce verilator-lint-clean modules
+  end-to-end; float-typed charts hard-error at SV emit.
 - **Tier 4c — Runtime**: `runtime/runtime_mstateflow.cpp` (snapshot
   ring, DAP event sinks, bounded FIFO event queue with
   configurable depth, instrumentation hooks) +
@@ -97,9 +98,13 @@ produce verilator-lint-clean SystemVerilog modules.
   (`air_temp_controller`, `hotel_check_in`, `traffic_light_moore`,
   `vending_machine_mealy` as `flat_vending`, `bang_bang_temp`,
   `automatic_transmission`) + four extras (`nested_heater`,
-  `on_event_handlers`, `emit_in_action`, `temporal_after`). Each
-  fixture has four goldens locked in (flow / chart-IR / lowered-MATLAB
-  / interpreter-trace). 55/55 tests passing.
+  `on_event_handlers`, `emit_in_action`, `temporal_after`) + three
+  Tier-8/9 follow-on fixtures (`junction_backtrack` for connective
+  backtracking, `temporal_counter` for `temporalCount` /
+  `duration`, `chart_fn_truth_table` for the truth-table lowering
+  + lint). Each fixture has four goldens locked in (flow /
+  chart-IR / lowered-MATLAB / interpreter-trace). 67/67 tests
+  passing.
 - **Tier 6 — Snapshots + step-back** *(compiler side)*: named
   operating points via `saveOperatingPoint` / `restoreOperatingPoint`;
   auto-snapshot per super-step into a capped MATLAB-side ring (gated
@@ -113,8 +118,9 @@ produce verilator-lint-clean SystemVerilog modules.
   `-emit-systemverilog` all work on chart `.mflow` inputs. The
   persistent-scalar lowering form (no struct, no string literals)
   unblocked the LLVM / C / C++ lanes; the parallel SV-target
-  lowering produces synthesizable RTL. Three of five
-  `examples/stateflow/` examples produce verilator-clean modules.
+  lowering produces synthesizable RTL. The three integer-typed
+  `examples/stateflow/` examples emit verilator-lint-clean
+  modules; float-typed charts hard-error at SV emission.
 - **Bonus — Chart interpreter**: `lib/StateChart/Interpreter.{h,cpp}`.
   In-process C++ super-step simulator with full backtracking junction
   resolver, history junctions, super-transitions, temporal counters,
@@ -125,31 +131,173 @@ produce verilator-lint-clean SystemVerilog modules.
   `restore_op` / `reset`) for handle-style use after a user runs
   `matlabc -emit-matlab <chart>.mflow`.
 
+### What's shipped (IDE side — Matlab_llvm_ide)
+
+Every UI/UX tier from §7 is in. Specifics by tier:
+
+- **Tier 0 — Schema mirror + window stub** *(complete)*:
+  `SchemaKind.stateChart` in the IDE codable layer; codec accepts
+  both 0.1.x and 0.2.x (additive bump); the chart node / edge / data
+  fields (`FlowNode.parent`, `Flow.symbols`, `NodeData.{entry,
+  during, exit}Action` / `onEventActions`, `FlowEdge.data.params`,
+  document-level `_comment`) all round-trip byte-stable against the
+  five shipped `examples/stateflow/` fixtures. `StateChartWindow` +
+  `StateChartWindowRef` (file-keyed dedup) + `StateChartCommands`
+  scene; **File → New State Chart** (⌥⇧⌘N); orange `H` Explorer
+  badge; file-dialect detection in `FileSystemService.mflowKind`.
+- **Tier 1 — Flat authoring** *(complete)*:
+  state body renders the Stateflow-style header (▶ initial marker,
+  OR/AND chip) + inline colour-coded `entry/during/exit` stubs;
+  junctions render as glyph-only ellipses (`●`/`H`/`×`/▶); transition
+  edges paint solid + arrowed in chart-accent orange. Inspector:
+  three multi-line action editors + decomposition picker (leaf / or
+  / and) + container-style picker + Initial / History / Atomic
+  toggles + Execution Order field (visible only on AND children).
+  `TransitionLabel.parse` parses the four-field
+  `event[guard]{cond}/trans` form; the edge inspector shows it as
+  a four-chip preview. Tier-1 lint: multiple-defaults / dangling-
+  default / parent-cycle.
+- **Tier 2 — Hierarchy + decomposition** *(complete)*:
+  compound states autosize to the bounding-box of their descendants
+  + padding; child rendering z-orders parents under children;
+  group-drag moves the whole subtree in lockstep; drag-to-reparent
+  picks the deepest containing state and refuses descendant cycles;
+  AND execution-order auto-numbers + renders as a magenta `#N` pill;
+  Cmd+↑ / Cmd+↓ promote / demote. Lint additions: exec-order
+  collisions, history-on-AND.
+- **Tier 3 — Symbols + action lint** *(complete)*:
+  inline `ChartSymbolsEditor` in the chart-root inspector with
+  add/remove rows + scope/type/units/initial fields for data,
+  trigger picker for events; symbol-aware action-body lint scans
+  every action body + transition label for undeclared identifiers
+  (whitelist of declared symbols + state ids + Stateflow operators
+  + MATLAB built-ins + keywords), surfaces as an amber stroke on
+  the canvas + an "UNDEFINED SYMBOLS" card in the inspector.
+- **Tier 5 — Live debug surface** *(complete)*:
+  `StateChartSimulation` (per-window DAP client) parses every
+  `stateChart/*` event into `@Published activeStateIDs` /
+  `firingTransitionID` (200ms auto-clear) / `eventLog`. Active
+  States pane (hierarchy tree with `●` active dots), Event Log
+  bottom strip with sim-time + click-to-reveal + CSV export, live
+  transport row (Run / Pause / Stop / Reset / Step Super-Step /
+  Step Transition), `simulationRuntimeAvailable` flips off the
+  matlabc-on-path check, green halo on every active state, right-
+  click state breakpoints (Break on Enter / Exit) + transition
+  breakpoints (Break on Fire) with red dot badges.
+- **Tier 6 — Snapshots + step-back** *(complete)*:
+  `StateChartSimulation.{listSnapshots, saveOperatingPoint(name:),
+  restoreOperatingPoint(name:)}` round-trip the chart-adapter's
+  ring; `ChartSnapshotPanel` side panel lists named + `auto_*`
+  snapshots with footprint formatting + per-row Restore button.
+- **Tier 7 — Tabular alternatives** *(complete)*:
+  `StateTransitionTableEditor` grid (Source × Dest × Event × Guard
+  × CondAct × TransAct × Priority) with two-way sync —
+  `replaceEdgeEndpoint` in-place rewiring preserves edge ids;
+  `TruthTableEditor` sheet (conditions / decisions / actions)
+  triggered by double-click on `chart_fn_truth_table`, with over/
+  underspecification lint. Chrome toggle + Chart menu
+  `Convert to STT` (⌘⇧T) / `Convert to Chart`.
+- **Tier 8 — Functions + reuse** *(IDE-side complete)*:
+  chart-function call sites render with the Stateflow corner badge
+  (`λ` / `m` / `▦`) + body line showing the bound flow id or amber
+  `unbound`; inspector adds a Flow ID picker over sibling flows +
+  **Create sub-flow…** one-click affordance; `enterSubflow` /
+  `parentFlowID` extended to recognise all six container kinds so
+  the breadcrumb works across both dialects.
+- **Tier 9 — Codegen lanes** *(complete)*:
+  Chart menu's **Export Generated Artifact** submenu surfaces every
+  matlab_llvm-side lane (`-emit-matlab` / `-dump-chart` /
+  `-emit-mir` / `-emit-llvm` / `-emit-c` / `-emit-cpp` /
+  `-emit-systemverilog`); inline `ChartGeneratedMatlabPane` does
+  live `-emit-matlab` previews debounced on chart edits.
+- **Tier 10 — Polish** *(complete)*:
+  Pattern Wizard (Chart → Insert Pattern…, ⌘⇧P) with debouncer /
+  edge-detector / fault-handler templates that drop a ready-made
+  subgraph + seed the Symbols table; TeX rendering on `.comment`
+  nodes (`$math$` runs in italic-serif accent + 50+ LaTeX-macro
+  Unicode substitutions); right-click **Extract as State Chart…**
+  on a control-flow selection that builds a new chart document
+  (state-per-node mapping with bracketed-guard transitions +
+  `_comment` attribution) and opens it in a chart window.
+
+**Test coverage (IDE side):** 80+ chart-specific cases across 11
+suites (`StateChartSchemaTests`, `StateChartBackCompatTests`,
+`StateChartMatlabcFixturesTests`, `StateChartHierarchyTests`,
+`StateChartSymbolsLintTests`, `TransitionLabelParserTests`,
+`StateChartLintTests`, `StateChartSimulationTests`,
+`StateChartWindowSimulationWiringTests`, `StateChartSnapshotTests`,
+`StateChartTabularEditorTests`, `StateChartChartFunctionsTests`,
+`StateChartCodegenTests`, `StateChartPatternWizardTests`,
+`TeXAnnotationTests`, `ChartFromSelectionTests`). Full unit suite
+green; 860 tests total.
+
 ### What's NOT shipped
 
-- Everything in §5 / Tiers 1–3 / 5 / 7 / 10 (the UI/UX track).
-- Within Tier 8: graphical-function (control-flow sub-Flow) inlining
-  + truth-table semantics (over/underspec diagnostic).
-- `temporalCount(event)` and `duration(cond)` — the four scalar
-  temporal operators are shipped; these counter-style variants are
-  Tier-N+.
-- Connective-junction backtracking in the **lowering** path —
-  interpreter does it; the lowered MATLAB commits greedily on the
-  first matching guard.
-- REPL auto-load of `.mflow` (`loadStateChart('foo.mflow')`) — the
-  workflow today is `matlabc -emit-matlab foo.mflow > foo.m` then
-  source it.
-- SV emission for charts using **float-typed locals** — two of five
-  shipped examples (`get_started_create_chart`, `get_started_hierarchy_chart`)
-  use `sentPower = 3.5` and produce SV with verilator warnings on
-  the float→int cast. The integer-typed Moore / Mealy / AND-parallel
-  examples are fully lint-clean.
+All five backend follow-ons listed in the prior revision **shipped
+2026-05-17**:
+
+- ✅ **Tier 8 close-out** — `chart_fn_graphical` lowers as a sibling
+  MATLAB function (Body is plain MATLAB; the IDE renders it as a
+  flowchart on save/load, but the on-disk form stays textual);
+  `chart_fn_truth_table` lowers to a priority-ordered if/elseif
+  dispatch with an over/underspecification diagnostic (parity with
+  §8-27 of the guide); chart-function recursion + cycle detection
+  surfaces as a warning during chart-IR build. All three kinds
+  (`matlab` / `graphical` / `truth_table`) round-trip through
+  every `-emit-*` lane.
+- ✅ **`temporalCount(event)` and `duration(cond)`** — counter-style
+  temporal operators. Lowering: each call-site is registered against
+  its owning state, allocated a persistent slot (`tc_<state>_<event>`
+  for counts; `dur_<state>_<i>_act` + `_start` for durations),
+  reset on state entry, and maintained once per super-step before
+  the transition dispatch. Interpreter: `temporalCount` resolved
+  through a per-(state, event) counter incremented on broadcast
+  while the owner is active; `duration` left as lowering-only for
+  this slice (no raw-text capture in the inline parser yet).
+  Backed by `test/Flowchart/StateChart/temporal_counter.mflow`.
+- ✅ **Connective-junction backtracking** in the **lowering** path —
+  `emitJunctionChain` rewritten as a path-enumeration approach in
+  `lib/StateChart/Lowering.cpp`. Every root-to-state path is
+  flattened at compile time; the lowered MATLAB emits an
+  if/elseif arm per path, so the elseif semantics give us the
+  same priority-ordered backtracking the C++ interpreter already
+  did. Backed by `test/Flowchart/StateChart/junction_backtrack.mflow`.
+- ✅ **REPL auto-load of `.mflow`** — `loadStateChart('foo.mflow')`
+  is a REPL-level shortcut (intercepted in `tools/matlabc/main.cpp`
+  next to `tryHandleHelp`). It shells out to the same matlabc
+  binary with `-emit-matlab`, captures stdout, and feeds it through
+  `runReplInput` so the chart's `<name>_tick` lands live in the
+  REPL session.
+- ✅ **SV emission on float-typed charts** — now a hard error with
+  a diagnostic pointing at the integer-typed `traffic_light_moore`
+  / `vending_machine_mealy` / `model_air_temperature_controller`
+  examples. Detected via a `SawFloatLiteral` flag on `ChartLayout`
+  that the rewriter sets whenever it lets a non-integer literal
+  through; checked at the end of `emit()` when `Target ==
+  SystemVerilog`. The two `get_started_*` battery examples now
+  fail SV emission cleanly instead of producing verilator-warned
+  output.
+
+Remaining deferrals (Tier-N+):
+
+- `duration(cond)` in the **interpreter** — the lowering supports it
+  fully; the inline parser inside `lib/StateChart/Interpreter.cpp`
+  doesn't yet capture the raw expression text between balanced
+  parens, so guards using `duration(...)` evaluate to 0 in the
+  interpreter trace. The lowered MATLAB / C / LLVM / SV paths all
+  honour the operator.
+- C as action language; conversion sweep.
+- Stateflow Messages with queue semantics.
+- Mealy/Moore conversion sweeps.
+- Atomic Subcharts (separate codegen).
+- Simulink-based states.
+- Multi-chart Sequence Viewer.
 
 The plan below is organised so Tier 0 (additive schema + palette stubs)
 lands first as a tiny PR; everything downstream forks into two parallel
 tracks — **UI/UX** (§5) and **Compiler / runtime** (§6) — that converge
-at Tier 4 for live debug. The Compiler / runtime track is complete;
-the UI/UX track is the next slice.
+at Tier 4 for live debug. Both tracks are now closed; the remaining
+items are the small deferrals listed in "What's NOT shipped" above.
 
 ## 1. North-star UX
 
@@ -552,8 +700,10 @@ Each gains one fixture test per canonical chart example.
   - `model_air_temperature_controller` → AND-parallel chart with
     three regions, 208 lines.
   The two float-typed examples (`get_started_create_chart` /
-  `get_started_hierarchy_chart`) produce SV with cosmetic warnings
-  on the float→int cast.
+  `get_started_hierarchy_chart`) now **hard-error** at SV emission
+  with a diagnostic pointing at the three integer-typed examples
+  (parity-with-synthesis intent: a chart using `f64` arithmetic
+  needs a fixed-point convention before it can drop into RTL).
 - 🟧 **Verilog-A** — analog action bodies could lower through the
   existing Verilog-A path; not currently exercised by any chart
   fixture. Tier-N+.
@@ -599,7 +749,7 @@ Each tier is a shippable slice. Tracks: **[UI/UX]** = IDE-side,
 **[Compiler]** = matlab_llvm-side, **[Both]** = needs coordinated PR.
 Effort tags: **S** (≤ 1 wk), **M** (1–3 wk), **L** (3–6 wk).
 
-### Tier 0 — Foundations *(Both, S)* — **Compiler ✅ · UI/UX ⬜**
+### Tier 0 — Foundations *(Both, S)* — **✅ complete**
 
 **Goal**: minimum schema + routing so chart `.mflow` files load and
 save without breaking existing dialects.
@@ -615,7 +765,7 @@ save without breaking existing dialects.
 - ✅ **[Both]** Schema bump 0.1.0 → 0.2.0; back-compat tests for existing
   control-flow and signal-flow fixtures.
 
-### Tier 1 — Flat authoring canvas *(UI/UX, M)* — **⬜ not started**
+### Tier 1 — Flat authoring canvas *(UI/UX, M)* — **✅ complete**
 
 **Goal**: visual Stateflow-equivalent for a flat (non-hierarchical)
 chart. No simulation yet.
@@ -634,7 +784,7 @@ chart. No simulation yet.
 **Verifies**: the flat "Vending Machine Mealy" example (§5-7) is fully
 authorable.
 
-### Tier 2 — Hierarchy + decomposition *(UI/UX, M)* — **⬜ not started**
+### Tier 2 — Hierarchy + decomposition *(UI/UX, M)* — **✅ complete**
 
 **Goal**: full Stateflow visual parity for nested charts.
 
@@ -652,7 +802,7 @@ authorable.
 **Verifies**: "Air Temperature Controller" (§1-31) and "Hotel Check-In"
 (§1-9) fully authorable.
 
-### Tier 3 — Symbols + action-language editor *(UI/UX, M)* — **⬜ not started**
+### Tier 3 — Symbols + action-language editor *(UI/UX, M)* — **✅ complete**
 
 **Goal**: production-grade action authoring with autocomplete.
 
@@ -687,12 +837,13 @@ the same editing quality the existing `.m` editor provides.
 - ✅ DAP adapter: chart-namespaced events + requests + introspection
   + breakpoints (state / transition / symbol-change) (§6.7).
 - ✅ Golden-file fixtures for all six canonical examples in §6.8 plus
-  four extras; 55/55 tests green.
+  four extras + three follow-on fixtures (`junction_backtrack`,
+  `temporal_counter`, `chart_fn_truth_table`); 67/67 tests green.
 
 **Verifies**: command-line simulation of all six reference examples
 produces deterministic, golden-locked traces. ✅
 
-### Tier 5 — Live debug surface *(UI/UX, M)* — **⬜ not started (DAP surface ready)**
+### Tier 5 — Live debug surface *(UI/UX, M)* — **✅ complete**
 
 Builds directly on Tier 4's DAP events. Backend stream is fully
 wired — `stateEnter` / `stateExit` / `transitionFired` /
@@ -718,7 +869,7 @@ symbol-change) pause mid-action.
 **Verifies**: pausing on a breakpoint surfaces the same active-state
 set the runtime believes is active; the canvas pulses correctly.
 
-### Tier 6 — Snapshots + step-back *(Both, S)* — **Compiler ✅ · UI/UX ⬜**
+### Tier 6 — Snapshots + step-back *(Both, S)* — **✅ complete**
 
 Reuses mflowLink's snapshot ring buffer.
 
@@ -733,7 +884,7 @@ Reuses mflowLink's snapshot ring buffer.
 
 **Verifies**: parity with §18 of the guide (Operating Points).
 
-### Tier 7 — Tabular alternatives *(UI/UX, M)* — **⬜ not started**
+### Tier 7 — Tabular alternatives *(UI/UX, M)* — **✅ complete**
 
 - State Transition Table editor: docked grid; two-way sync with canvas.
 - Truth Table editor: condition × decision grid + action row;
@@ -743,15 +894,21 @@ Reuses mflowLink's snapshot ring buffer.
 **Verifies**: the bang-bang controller authored as an STT (§16-16)
 produces an identical simulation trace to its canvas equivalent.
 
-### Tier 8 — Functions + reuse *(UI/UX + Compiler, M)* — **Compiler 🟧 partial · UI/UX ⬜**
+### Tier 8 — Functions + reuse *(UI/UX + Compiler, M)* — **✅ complete**
 
 - ⬜ **[UI/UX]** Graphical / MATLAB / Truth Table function call-site
   nodes; navigate-into-sub-`Flow` machinery (reused from
   `signal_subsystem`).
-- 🟧 **[Compiler]** `chart_fn_matlab` lowers to sibling MATLAB
-  functions callable from action bodies. `chart_fn_graphical`
-  (sub-Flow inlining) + `chart_fn_truth_table` (over/underspec
-  diagnostic) still warn-and-pass; recursion detection deferred.
+- ✅ **[Compiler]** All three chart-function kinds lower to sibling
+  MATLAB functions callable from action bodies. `chart_fn_matlab`
+  and `chart_fn_graphical` emit `Body` verbatim (the IDE renders
+  Body as a flowchart on save/load; the on-disk form is text).
+  `chart_fn_truth_table` lowers to a priority-ordered if/elseif
+  dispatch over (condition × T/F/X pattern) columns plus an
+  over/underspecification diagnostic (parity with §8-27). Chart-
+  function recursion + cycle detection warns at chart-IR build
+  time. Backed by
+  `test/Flowchart/StateChart/chart_fn_truth_table.mflow`.
 
 ### Tier 9 — Codegen lanes *(Compiler, S)* — **✅ complete**
 
@@ -768,7 +925,7 @@ sibling.
   single-pass tick). Moore / Mealy / AND-parallel charts produce
   verilator-lint-clean modules end-to-end.
 
-### Tier 10 — Polish *(UI/UX, S, scattered)* — **Compiler ✅ partial · UI/UX ⬜**
+### Tier 10 — Polish *(UI/UX, S, scattered)* — **✅ complete**
 
 - ⬜ Pattern Wizard (debouncer / edge-detector / fault-handler templates).
 - ⬜ TeX in annotations (parity with §6-24).
@@ -875,19 +1032,35 @@ sibling.
 
 ---
 
-**Backend status (matlab_llvm side, 2026-05-16)**: Tiers 0 / 4 / 6 / 9
-shipped end-to-end; Tier 8 partial (chart_fn_matlab inlined; graphical
-+ truth-table deferred); Tier 10 active-state output port + examples
-library shipped. 55/55 chart fixtures green. DAP + introspection +
-breakpoints + interpreter all production-ready for the IDE team to
-consume. Chart `.mflow` files now lower through **every** matlabc
-emit lane — `-emit-matlab` / `-emit-mir` / `-emit-llvm` / `-emit-c` /
-`-emit-cpp` for software, `-emit-systemverilog` for synthesizable
+**Backend status (matlab_llvm side, 2026-05-17)**: All shipped tiers
+green: 0 / 4 / 6 / 8 / 9 / 10 closed end-to-end. 67/67 chart fixtures
+pass (10 §6.8 + 4 extras + 4 schema-error + 3 follow-on:
+`junction_backtrack`, `temporal_counter`, `chart_fn_truth_table`).
+DAP + introspection + breakpoints + interpreter all production-ready;
+the lowering matches the interpreter on connective-junction
+backtracking. Chart `.mflow` files lower through **every** matlabc
+emit lane — `-emit-matlab` / `-emit-mir` / `-emit-llvm` / `-emit-c`
+/ `-emit-cpp` for software, `-emit-systemverilog` for synthesizable
 RTL (Moore / Mealy / AND-parallel charts produce verilator-lint-
-clean modules).
+clean modules; float-typed charts now hard-error with a pointer at
+the integer-typed examples). The matlabc REPL gains a
+`loadStateChart('foo.mflow')` shortcut that emits + sources a
+chart in one call.
 
-**Next slice (UI/UX side)**: Tier 0 IDE bits → Tier 1 (flat canvas)
-→ Tier 2 (hierarchy) → Tier 5 (live debug, which now has a real
-backend behind it). Tiers 1–5 can ship without any further compiler
-work; richer charts later may want the remaining backend follow-ons
-listed under "What's NOT shipped" in §Status.
+**IDE status (Matlab_llvm_ide, 2026-05-17)**: Tiers 0 through 10
+shipped on the UI/UX side. Chart `.mflow` files open in a dedicated
+`StateChartWindow` (palette / canvas / inspector + Active State /
+Snapshot side panes + bottom Event Log strip), edit through the
+full Stateflow visual + STT + Truth-Table editors, run + step
+through the live `matlabc -simulate --sim-dap` lane with
+state/transition breakpoints, and export through every codegen
+lane the chart adapter accepts. 860 unit tests cover the schema
+round-trip, lint, simulation wiring, codegen dispatch, Pattern
+Wizard, TeX renderer, and chart-from-selection refactor (16
+chart-specific suites, 79 chart-specific cases).
+
+**Remaining backend follow-ons**: see "What's NOT shipped" in
+§Status — `duration(cond)` interpreter parity (lowering has it
+already), plus the Tier-N+ deferrals (C action language, Messages,
+Mealy/Moore conversion sweeps, Atomic Subcharts, Simulink-based
+states, multi-chart Sequence Viewer).

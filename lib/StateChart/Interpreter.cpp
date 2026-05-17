@@ -345,6 +345,21 @@ private:
               advance();
               return Interp_.isActive(StateId) ? 1.0 : 0.0;
             }
+            // `temporalCount(eventName)`: counter-style temporal —
+            // returns the count of broadcasts of `eventName` since
+            // the owner state was last entered. The chart's
+            // super-step processor increments these counters per
+            // active state when an event fires (see
+            // ChartInterpreter::superStep).
+            if (Name == "temporalCount" &&
+                (Cur_.K == Tok::Ident || Cur_.K == Tok::Str)) {
+              std::string Ev = Cur_.Id;
+              advance();
+              if (Cur_.K != Tok::RParen) { Ok = false; return 0.0; }
+              advance();
+              return (double)Interp_.tempCountOf(
+                  Interp_.actionOwner(), Ev);
+            }
             double v = parseOr(Ok);
             if (!Ok) return 0.0;
             Args.push_back(v);
@@ -654,6 +669,13 @@ void ChartInterpreter::enterState(const std::string &Id,
   }
   // Stamp entry time for temporal operators.
   EntryTimes_[Id] = TickCount_;
+  // Clear counter-style temporal slots so a fresh entry observes
+  // temporalCount==0. Iterate and erase any (state, *) pair whose
+  // first element is `Id`.
+  for (auto It = TempCounts_.begin(); It != TempCounts_.end(); ) {
+    if (It->first.first == Id) It = TempCounts_.erase(It);
+    else ++It;
+  }
   // Entry action — owner is this state so temporal operators inside
   // resolve against EntryTimes_[Id].
   ActionOwner_ = Id;
@@ -1031,6 +1053,15 @@ std::vector<ChartTraceEvent> ChartInterpreter::superStep() {
     EB.K = ChartTraceEvent::Kind::EventBroadcast;
     EB.Id = E; Out.push_back(std::move(EB));
   }
+  // Counter-style temporal maintenance: for every event in this
+  // super-step's broadcast set, increment temporalCount(event) for
+  // every currently-active state. Active states are tracked through
+  // Regions_; we walk them via isActive() to catch nested OR/AND
+  // parents.
+  for (auto &Ev : Events_)
+    for (auto &P : C_.States)
+      if (isActive(P.first))
+        ++TempCounts_[{P.first, Ev}];
   ChartTraceEvent Begin; Begin.K = ChartTraceEvent::Kind::SuperStepBegin;
   Begin.Iteration = 0; Out.push_back(std::move(Begin));
   int Iter = 0;

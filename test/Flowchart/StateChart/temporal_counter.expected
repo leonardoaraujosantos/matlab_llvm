@@ -1,0 +1,29 @@
+FlowDoc schema=matforge.flowchart version=0.2.0 entry=sampler
+  settings.columnMajor=true defaultNumericType=double sourceLanguage=
+  settings.kind=state_chart
+Flow id=flow_sampler kind=program name=sampler sig=(pressure)->(alarm)
+  symbol.data name=pressure scope=input type=double initial=0
+  symbol.data name=alarm scope=output type=double initial=0
+  symbol.event name=sample trigger=rising
+  Node id=watch kind=state
+    data.entryAction=alarm = 0
+    param.decomposition=leaf
+    param.isInitial=true
+    in:in
+    out:out
+  Node id=warn kind=state
+    data.entryAction=alarm = 1
+    param.decomposition=leaf
+    in:in
+    out:out
+  Node id=fault kind=state
+    data.entryAction=alarm = 2
+    param.decomposition=leaf
+    in:in
+    out:out
+  Edge id=t_watch_warn kind=transition watch:out -> warn:in label=[temporalCount(sample) >= 5]
+    param.priority=1
+  Edge id=t_warn_fault kind=transition warn:out -> fault:in label=[duration(pressure > 100) >= 3]
+    param.priority=1
+  Edge id=t_fault_watch kind=transition fault:out -> watch:in label=[pressure < 50]
+    param.priority=1

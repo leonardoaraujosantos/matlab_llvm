@@ -153,12 +153,32 @@ struct Transition {
 // Chart — one per state-chart `Flow`.
 //===----------------------------------------------------------------------===//
 
+// One column of a truth table. `Pattern` carries T/F/X for each row
+// of conditions (X = don't-care). `Action` is the action body that
+// fires when the column matches. Decision columns are tried in
+// order — the first one whose pattern matches the runtime condition
+// values commits its action.
+struct TruthTableColumn {
+  std::vector<char> Pattern;   // size == ChartFunction.TruthConditions.size()
+  std::string Action;          // MATLAB source for the action body
+};
+
+enum class ChartFunctionKind {
+  Matlab,     // inline MATLAB body
+  Graphical,  // sub-flow MATLAB body (treated identically to Matlab today)
+  TruthTable, // priority-ordered decision-column dispatch
+};
+
 struct ChartFunction {
   std::string Id;              // the node id that hosts the call-site
   std::string Name;            // identifier referenced from action bodies
+  ChartFunctionKind Kind = ChartFunctionKind::Matlab;
   std::vector<std::string> Inputs;
   std::vector<std::string> Outputs;
-  std::string Body;            // raw MATLAB source (matlab variant)
+  std::string Body;            // raw MATLAB source (matlab / graphical)
+  // Truth-table-only data — empty for non-truth-table kinds.
+  std::vector<std::string> TruthConditions;
+  std::vector<TruthTableColumn> TruthColumns;
   SourceLocation Loc;
 };
 

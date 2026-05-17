@@ -1,0 +1,45 @@
+FlowDoc schema=matforge.flowchart version=0.2.0 entry=router
+  settings.columnMajor=true defaultNumericType=double sourceLanguage=
+  settings.kind=state_chart
+Flow id=flow_router kind=program name=router sig=(mode,val)->(dest)
+  symbol.data name=mode scope=input type=double initial=0
+  symbol.data name=val scope=input type=double initial=0
+  symbol.data name=dest scope=output type=double initial=0
+  symbol.event name=tick trigger=rising
+  Node id=idle kind=state
+    data.entryAction=dest = 0
+    param.decomposition=leaf
+    param.isInitial=true
+    in:in
+    out:out
+  Node id=near kind=state
+    data.entryAction=dest = 1
+    param.decomposition=leaf
+    in:in
+    out:out
+  Node id=far kind=state
+    data.entryAction=dest = 2
+    param.decomposition=leaf
+    in:in
+    out:out
+  Node id=ignore kind=state
+    data.entryAction=dest = 3
+    param.decomposition=leaf
+    in:in
+    out:out
+  Node id=j1 kind=junction_connective
+    in:in
+    out:out
+  Node id=j2 kind=junction_connective
+    in:in
+    out:out
+  Edge id=t_idle_j1 kind=transition idle:out -> j1:in label=tick
+    param.priority=1
+  Edge id=t_j1_j2 kind=transition j1:out -> j2:in label=[mode == 1]
+    param.priority=1
+  Edge id=t_j1_ignore kind=transition j1:out -> ignore:in label=[mode == 1]
+    param.priority=2
+  Edge id=t_j2_near kind=transition j2:out -> near:in label=[val < 10]
+    param.priority=1
+  Edge id=t_j2_far kind=transition j2:out -> far:in label=[val < 100]
+    param.priority=2

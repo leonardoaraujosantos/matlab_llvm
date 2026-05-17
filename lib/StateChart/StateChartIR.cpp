@@ -4,9 +4,11 @@
 
 #include <algorithm>
 #include <cctype>
+#include <functional>
 #include <ostream>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 namespace matlab::statechart {
 
@@ -239,6 +241,62 @@ public:
 private:
   DiagnosticEngine &Diag_;
 
+  // Tier-8 over/underspecification diagnostic for chart_fn_truth_table
+  // nodes (parity with Stateflow guide §8-27). Enumerates every
+  // 2^N input combination of the condition rows and reports any
+  // that match zero columns (underspecified) or more than one
+  // (overspecified, but only if the higher-priority match doesn't
+  // already cover them — we walk in column order).
+  void truthTableSpecLint(const ChartFunction &F, const SourceLocation &Loc) {
+    if (F.TruthConditions.empty()) return;
+    size_t N = F.TruthConditions.size();
+    if (N > 16) return;  // bail out — 65k combos covers normal use
+    auto matches = [&](const TruthTableColumn &Col, unsigned Combo) {
+      for (size_t I = 0; I < N; ++I) {
+        char P = I < Col.Pattern.size() ? Col.Pattern[I] : 'X';
+        if (P == 'X') continue;
+        bool Bit = (Combo >> I) & 1u;
+        bool Need = (P == 'T');
+        if (Bit != Need) return false;
+      }
+      return true;
+    };
+    std::vector<unsigned> Uncovered, Overspec;
+    for (unsigned Combo = 0; Combo < (1u << N); ++Combo) {
+      int Hit = 0;
+      for (auto &Col : F.TruthColumns) if (matches(Col, Combo)) ++Hit;
+      if (Hit == 0) Uncovered.push_back(Combo);
+      else if (Hit > 1) Overspec.push_back(Combo);
+    }
+    auto fmt = [&](unsigned Combo) {
+      std::string S;
+      for (size_t I = 0; I < N; ++I)
+        S += ((Combo >> I) & 1u) ? 'T' : 'F';
+      return S;
+    };
+    if (!Uncovered.empty()) {
+      std::string Msg = "truth-table \"" + F.Name +
+                        "\" underspecified — no decision matches " +
+                        std::to_string(Uncovered.size()) +
+                        " input combination" +
+                        (Uncovered.size() == 1 ? "" : "s") + " (e.g. " +
+                        fmt(Uncovered.front()) + ")";
+      Diag_.warning(Loc, Msg);
+    }
+    if (!Overspec.empty()) {
+      std::string Msg = "truth-table \"" + F.Name +
+                        "\" overspecified — " +
+                        std::to_string(Overspec.size()) +
+                        " input combination" +
+                        (Overspec.size() == 1 ? "" : "s") +
+                        (Overspec.size() == 1 ? " matches" : " match") +
+                        " multiple decisions (e.g. " +
+                        fmt(Overspec.front()) +
+                        " — higher-priority column wins)";
+      Diag_.warning(Loc, Msg);
+    }
+  }
+
   static JunctionKind junctionKindFromString(const std::string &K) {
     if (K == "junction_history")    return JunctionKind::History;
     if (K == "junction_entry")      return JunctionKind::Entry;
@@ -328,14 +386,31 @@ private:
         J.ParentId = N.Parent;
         J.Loc  = N.Loc;
         C.Junctions.emplace(J.Id, std::move(J));
-      } else if (N.Kind == "chart_fn_matlab") {
-        // Tier 8 — inline MATLAB-bodied chart function. The node's
-        // params carry the function body + signature; we emit it
-        // as a sibling MATLAB function in the lowering's output
-        // so action bodies can call it by name. The call-site
-        // itself isn't a state — it's purely metadata.
+      } else if (N.Kind == "chart_fn_matlab" ||
+                 N.Kind == "chart_fn_graphical" ||
+                 N.Kind == "chart_fn_truth_table") {
+        // Tier 8 — chart function call-site. All three kinds
+        // (`chart_fn_matlab`, `chart_fn_graphical`,
+        // `chart_fn_truth_table`) compile to a sibling MATLAB
+        // function in the lowering's output so action bodies can
+        // call it by name. The kinds differ only in how the body
+        // is sourced:
+        //   - `matlab`   : Body param/data is the raw MATLAB source.
+        //   - `graphical`: same — the IDE renders Body as a flowchart
+        //                  on save/load, but the on-disk form stays
+        //                  textual.
+        //   - `truth_table`: `conditions` / `decisions` / `actions`
+        //                  params carry the table; the lowering
+        //                  emits a priority-ordered if/elseif
+        //                  dispatch.
         ChartFunction F;
         F.Id = N.Id;
+        if (N.Kind == "chart_fn_matlab")
+          F.Kind = ChartFunctionKind::Matlab;
+        else if (N.Kind == "chart_fn_graphical")
+          F.Kind = ChartFunctionKind::Graphical;
+        else
+          F.Kind = ChartFunctionKind::TruthTable;
         if (auto *S = N.getParam("functionName")) F.Name = *S;
         if (F.Name.empty()) F.Name = N.Id;
         if (auto *Body = N.getData("body")) F.Body = *Body;
@@ -351,28 +426,69 @@ private:
           if (!Cur.empty()) Out.push_back(Cur);
           return Out;
         };
+        // splitSemi: each truth-table row is separated by `;`, kept
+        // verbatim (so action bodies can carry expressions with
+        // commas).
+        auto splitSemi = [](const std::string &S) {
+          std::vector<std::string> Out;
+          std::string Cur;
+          for (char Ch : S) {
+            if (Ch == ';') {
+              Out.push_back(Cur);
+              Cur.clear();
+            } else Cur += Ch;
+          }
+          if (!Cur.empty() || !Out.empty()) Out.push_back(Cur);
+          return Out;
+        };
+        // trim: drop leading + trailing whitespace.
+        auto trim = [](std::string S) {
+          while (!S.empty() && std::isspace((unsigned char)S.front()))
+            S.erase(S.begin());
+          while (!S.empty() && std::isspace((unsigned char)S.back()))
+            S.pop_back();
+          return S;
+        };
         if (auto *S = N.getParam("inputs"))  F.Inputs  = splitCsv(*S);
         if (auto *S = N.getParam("outputs")) F.Outputs = splitCsv(*S);
+        if (F.Kind == ChartFunctionKind::TruthTable) {
+          if (auto *S = N.getParam("conditions")) {
+            for (auto &Cond : splitSemi(*S)) {
+              std::string T = trim(Cond);
+              if (!T.empty()) F.TruthConditions.push_back(std::move(T));
+            }
+          }
+          // `decisions`: semicolon-separated columns, each column a
+          // string of T/F/X chars (one per condition).
+          // `actions`:   semicolon-separated, one per column.
+          std::vector<std::string> ColumnPatterns;
+          std::vector<std::string> ColumnActions;
+          if (auto *S = N.getParam("decisions"))
+            ColumnPatterns = splitSemi(*S);
+          if (auto *S = N.getParam("actions"))
+            ColumnActions = splitSemi(*S);
+          for (size_t I = 0; I < ColumnPatterns.size(); ++I) {
+            TruthTableColumn Col;
+            std::string P = trim(ColumnPatterns[I]);
+            for (char Ch : P) {
+              char Up = (char)std::toupper((unsigned char)Ch);
+              if (Up == 'T' || Up == 'F' || Up == 'X')
+                Col.Pattern.push_back(Up);
+            }
+            if (I < ColumnActions.size())
+              Col.Action = trim(ColumnActions[I]);
+            // Truncate or pad the pattern to match the condition
+            // count so the lint+lowering see consistent shapes.
+            while (Col.Pattern.size() < F.TruthConditions.size())
+              Col.Pattern.push_back('X');
+            if (Col.Pattern.size() > F.TruthConditions.size())
+              Col.Pattern.resize(F.TruthConditions.size());
+            F.TruthColumns.push_back(std::move(Col));
+          }
+          truthTableSpecLint(F, N.Loc);
+        }
         F.Loc = N.Loc;
         C.Functions.push_back(std::move(F));
-      } else if (N.Kind == "chart_fn_graphical" ||
-                 N.Kind == "chart_fn_truth_table") {
-        // Graphical functions (control-flow sub-Flow) and truth
-        // tables still need the sub-Flow inlining + over/
-        // underspecification diagnostic. Surface them as opaque
-        // atomic states for now + warn.
-        ChartState S;
-        S.Id = N.Id;
-        S.Label = N.Label;
-        S.ParentId = N.Parent;
-        S.Decomp = Decomposition::Leaf;
-        S.Atomic = true;
-        S.Loc = N.Loc;
-        Diag_.warning(N.Loc,
-                      "chart function call-site \"" + N.Id + "\" (kind \"" +
-                          N.Kind + "\") lowered as opaque atomic state — "
-                          "graphical / truth-table inlining pending");
-        C.States.emplace(S.Id, std::move(S));
       } else if (N.Kind == "comment") {
         // Plain annotation — already legal in control / signal flows.
         continue;
@@ -421,6 +537,9 @@ private:
       bag(F.Symbols.Messages);
       for (auto &N : F.Sig.Inputs)  Known.insert(N);
       for (auto &N : F.Sig.Outputs) Known.insert(N);
+      // Chart-function names — call sites in action / guard bodies
+      // reference these by `Name`, not by node id.
+      for (auto &Fn : C.Functions) Known.insert(Fn.Name);
       // MATLAB keywords + built-in identifiers the rewriter / interp
       // treat specially. Anything else encountered as an identifier
       // in an action triggers a warning.
@@ -583,7 +702,96 @@ private:
       C.Transitions.push_back(std::move(T));
     }
 
+    chartFunctionRecursionLint(C);
     return C;
+  }
+
+  // Build the chart-function call graph from each function's body
+  // (textual scan: identifier == another function's `Name`) and
+  // surface cycles via warnings. Truth-table actions are scanned
+  // the same way. Direct self-loops and longer cycles both report.
+  void chartFunctionRecursionLint(const Chart &C) {
+    if (C.Functions.empty()) return;
+    std::unordered_set<std::string> Names;
+    for (auto &F : C.Functions) Names.insert(F.Name);
+    auto scan = [&](const std::string &Src,
+                    std::unordered_set<std::string> &Out) {
+      size_t I = 0;
+      char Quote = 0;
+      while (I < Src.size()) {
+        char Ch = Src[I];
+        if (Quote) { if (Ch == Quote) Quote = 0; ++I; continue; }
+        if (Ch == '\'' || Ch == '"') { Quote = Ch; ++I; continue; }
+        if (Ch == '%') {
+          while (I < Src.size() && Src[I] != '\n') ++I;
+          continue;
+        }
+        if (std::isalpha((unsigned char)Ch) || Ch == '_') {
+          size_t S = I;
+          while (I < Src.size() &&
+                 (std::isalnum((unsigned char)Src[I]) || Src[I] == '_'))
+            ++I;
+          std::string Id = Src.substr(S, I - S);
+          if (Names.count(Id)) Out.insert(Id);
+          continue;
+        }
+        ++I;
+      }
+    };
+    std::unordered_map<std::string,
+                       std::unordered_set<std::string>> Calls;
+    for (auto &F : C.Functions) {
+      std::unordered_set<std::string> Set;
+      if (F.Kind == ChartFunctionKind::TruthTable) {
+        for (auto &Col : F.TruthColumns) scan(Col.Action, Set);
+      } else {
+        scan(F.Body, Set);
+      }
+      if (Set.count(F.Name)) {
+        Diag_.warning(F.Loc,
+                      "chart function \"" + F.Name +
+                          "\" calls itself — chart-side recursion is "
+                          "not supported by the lowering");
+      }
+      Calls[F.Name] = std::move(Set);
+    }
+    // DFS cycle-detect; report the first cycle found per function.
+    std::unordered_set<std::string> Reported;
+    std::function<bool(const std::string &,
+                       std::unordered_set<std::string> &,
+                       std::vector<std::string> &)> Dfs =
+        [&](const std::string &N,
+            std::unordered_set<std::string> &OnStack,
+            std::vector<std::string> &Path) -> bool {
+      if (OnStack.count(N)) {
+        Path.push_back(N);
+        return true;
+      }
+      OnStack.insert(N);
+      Path.push_back(N);
+      for (auto &Tgt : Calls[N]) {
+        if (Tgt == N) continue;  // self-loop already reported
+        if (Dfs(Tgt, OnStack, Path)) return true;
+      }
+      OnStack.erase(N);
+      Path.pop_back();
+      return false;
+    };
+    for (auto &F : C.Functions) {
+      if (Reported.count(F.Name)) continue;
+      std::unordered_set<std::string> OnStack;
+      std::vector<std::string> Path;
+      if (Dfs(F.Name, OnStack, Path) && Path.size() >= 2) {
+        std::string Trace;
+        for (size_t I = 0; I < Path.size(); ++I) {
+          if (I) Trace += " → ";
+          Trace += Path[I];
+        }
+        Diag_.warning(F.Loc,
+                      "chart function cycle detected: " + Trace);
+        for (auto &Step : Path) Reported.insert(Step);
+      }
+    }
   }
 };
 

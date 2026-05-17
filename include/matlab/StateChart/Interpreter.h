@@ -2,10 +2,12 @@
 
 #include "matlab/StateChart/StateChartIR.h"
 
+#include <map>
 #include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 namespace matlab::statechart {
@@ -149,6 +151,11 @@ private:
   // was last entered. `after`/`before`/`every`/`at` consult them.
   int TickCount_ = 0;
   std::unordered_map<std::string, int> EntryTimes_;
+  // Counter-style temporal: `temporalCount(event)` per (state, event)
+  // pair. Increments once per super-step in which the owner is
+  // active and the event was broadcast. Cleared on state entry. The
+  // parser looks up entries by (Interp_.actionOwner(), event-name).
+  std::map<std::pair<std::string, std::string>, int> TempCounts_;
   // Owning state id for the action currently being evaluated. Set
   // by execAction / evalGuard before invoking the Parser so the
   // temporal-operator builtins can compute (TickCount_ -
@@ -206,6 +213,11 @@ public:
     return It == EntryTimes_.end() ? 0 : It->second;
   }
   const std::string &actionOwner() const { return ActionOwner_; }
+  int tempCountOf(const std::string &State,
+                  const std::string &Event) const {
+    auto It = TempCounts_.find({State, Event});
+    return It == TempCounts_.end() ? 0 : It->second;
+  }
 private:
 };
 

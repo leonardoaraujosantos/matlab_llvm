@@ -1,0 +1,21 @@
+FlowDoc schema=matforge.flowchart version=0.2.0 entry=gate
+  settings.columnMajor=true defaultNumericType=double sourceLanguage=
+  settings.kind=state_chart
+Flow id=flow_gate kind=program name=gate sig=(lit,ready)->(open)
+  symbol.data name=lit scope=input type=double initial=0
+  symbol.data name=ready scope=input type=double initial=0
+  symbol.data name=open scope=output type=double initial=0
+  symbol.event name=step trigger=rising
+  Node id=active kind=state
+    data.duringAction=open = openGate(lit, ready)
+    param.decomposition=leaf
+    param.isInitial=true
+    in:in
+    out:out
+  Node id=fn_openGate kind=chart_fn_truth_table
+    param.actions=result = 1; result = 0; result = 0
+    param.conditions=isLit; isReady
+    param.decisions=TT; TF; FX
+    param.functionName=openGate
+    param.inputs=isLit, isReady
+    param.outputs=result

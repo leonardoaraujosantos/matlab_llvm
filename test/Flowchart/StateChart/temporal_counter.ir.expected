@@ -1,0 +1,14 @@
+ChartModel entry=sampler charts=1
+Chart sampler sig=(pressure)->(alarm) maxIter=1000
+  symbol.data name=pressure scope=input type=double initial=0
+  symbol.data name=alarm scope=output type=double initial=0
+  symbol.event name=sample trigger=rising
+  State watch decomp=leaf initial
+    .entry=alarm = 0
+  State warn decomp=leaf
+    .entry=alarm = 1
+  State fault decomp=leaf
+    .entry=alarm = 2
+  Transition t_watch_warn watch -> warn kind=outer priority=1 guard=temporalCount(sample) >= 5
+  Transition t_warn_fault warn -> fault kind=outer priority=1 guard=duration(pressure > 100) >= 3
+  Transition t_fault_watch fault -> watch kind=outer priority=1 guard=pressure < 50

@@ -1,0 +1,81 @@
+{
+  "schema": "matforge.flowchart",
+  "version": "0.2.0",
+  "entry": "router",
+  "settings": { "kind": "state_chart" },
+  "flows": [
+    {
+      "id": "flow_router",
+      "kind": "program",
+      "name": "router",
+      "signature": { "inputs": ["mode", "val"], "outputs": ["dest"] },
+      "symbols": {
+        "data": [
+          { "name": "mode", "scope": "input",  "type": "double", "initial": "0" },
+          { "name": "val",  "scope": "input",  "type": "double", "initial": "0" },
+          { "name": "dest", "scope": "output", "type": "double", "initial": "0" }
+        ],
+        "events": [
+          { "name": "tick", "trigger": "rising" }
+        ]
+      },
+      "nodes": [
+        { "id": "idle", "kind": "state",
+          "data": {
+            "entryAction": "dest = 0",
+            "params": { "decomposition": "leaf", "isInitial": "true" }
+          },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "near", "kind": "state",
+          "data": {
+            "entryAction": "dest = 1",
+            "params": { "decomposition": "leaf" }
+          },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "far", "kind": "state",
+          "data": {
+            "entryAction": "dest = 2",
+            "params": { "decomposition": "leaf" }
+          },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "ignore", "kind": "state",
+          "data": {
+            "entryAction": "dest = 3",
+            "params": { "decomposition": "leaf" }
+          },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "j1", "kind": "junction_connective",
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "j2", "kind": "junction_connective",
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } }
+      ],
+      "edges": [
+        { "id": "t_idle_j1", "kind": "transition",
+          "label": "tick",
+          "from": {"node": "idle", "port": "out"},
+          "to":   {"node": "j1",   "port": "in"},
+          "data": { "params": { "priority": "1" } } },
+        { "id": "t_j1_j2", "kind": "transition",
+          "label": "[mode == 1]",
+          "from": {"node": "j1", "port": "out"},
+          "to":   {"node": "j2", "port": "in"},
+          "data": { "params": { "priority": "1" } } },
+        { "id": "t_j1_ignore", "kind": "transition",
+          "label": "[mode == 1]",
+          "from": {"node": "j1",     "port": "out"},
+          "to":   {"node": "ignore", "port": "in"},
+          "data": { "params": { "priority": "2" } } },
+        { "id": "t_j2_near", "kind": "transition",
+          "label": "[val < 10]",
+          "from": {"node": "j2",   "port": "out"},
+          "to":   {"node": "near", "port": "in"},
+          "data": { "params": { "priority": "1" } } },
+        { "id": "t_j2_far", "kind": "transition",
+          "label": "[val < 100]",
+          "from": {"node": "j2",  "port": "out"},
+          "to":   {"node": "far", "port": "in"},
+          "data": { "params": { "priority": "2" } } }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+% mStateflow -simulate trace for chart "sampler"
+[superStepBegin iter=0]
++enter watch
+[superStepEnd iter=0 quiescent=true]
+[superStepBegin iter=0]
+[superStepEnd iter=1 quiescent=true]
+active@end: watch

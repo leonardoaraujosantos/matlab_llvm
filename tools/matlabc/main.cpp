@@ -68,6 +68,7 @@
 #include <fcntl.h>
 #include <pthread.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #endif
 #include "matlab/Sema/Resolver.h"
@@ -1460,6 +1461,24 @@ static void printHelpOverview() {
 
 /* Returns true if the line was handled as a help command (caller should
  * skip the compile pipeline for it). */
+/* REPL convenience: intercept `loadStateChart('foo.mflow')` (or the
+ * double-quoted form) so the user can drop a .mflow file straight
+ * into a REPL session without the two-step
+ *   $ matlabc -emit-matlab foo.mflow > foo.m
+ *   >> run('foo.m')
+ * dance. We shell out to the same matlabc binary (resolved via
+ * g_MatlabcBinDir captured in main()) with -emit-matlab, capture
+ * stdout, and feed the result through runReplInput so the emitted
+ * `<chart>_tick` function lands in the live REPL session.
+ *
+ * Returns the number of REPL pipeline turns consumed (0 if the line
+ * isn't a loadStateChart call; ≥1 otherwise). The caller is
+ * responsible for incrementing the REPL counter and skipping
+ * normal-line handling. */
+static int tryHandleLoadStateChart(const std::string &rawLine,
+                                   mlirgen::Context &MCtx,
+                                   int &Counter);
+
 static bool tryHandleHelp(const std::string &rawLine) {
   std::string s = trimLR(rawLine);
   /* tolerate trailing ";" (MATLAB suppression) and whitespace */
@@ -1688,6 +1707,73 @@ private:
   }
 };
 
+/* Definition for the forward decl up near tryHandleHelp(). */
+static int tryHandleLoadStateChart(const std::string &rawLine,
+                                   mlirgen::Context &MCtx,
+                                   int &Counter) {
+  std::string s = trimLR(rawLine);
+  while (!s.empty() &&
+         (s.back() == ';' || std::isspace((unsigned char)s.back())))
+    s.pop_back();
+  if (s.empty()) return 0;
+  static const std::string Prefix = "loadStateChart(";
+  if (s.size() <= Prefix.size() ||
+      s.compare(0, Prefix.size(), Prefix) != 0 ||
+      s.back() != ')')
+    return 0;
+  std::string Arg = s.substr(Prefix.size(),
+                             s.size() - Prefix.size() - 1);
+  Arg = trimLR(Arg);
+  if (Arg.size() >= 2 &&
+      ((Arg.front() == '\'' && Arg.back() == '\'') ||
+       (Arg.front() == '"'  && Arg.back() == '"')))
+    Arg = Arg.substr(1, Arg.size() - 2);
+  if (Arg.empty()) {
+    std::cerr << "loadStateChart: missing .mflow path argument\n";
+    return 1;
+  }
+  std::string Bin = g_MatlabcBinDir.empty()
+                       ? std::string("matlabc")
+                       : g_MatlabcBinDir + "/matlabc";
+  /* Quote the path defensively — spaces, single quotes, and shell
+   * metas in .mflow filenames otherwise break the popen() call. */
+  std::string Quoted;
+  Quoted.reserve(Arg.size() + 8);
+  Quoted += "'";
+  for (char Ch : Arg) {
+    if (Ch == '\'') Quoted += "'\\''";
+    else Quoted += Ch;
+  }
+  Quoted += "'";
+  std::string Cmd = Bin + " -emit-matlab " + Quoted + " 2>&1";
+  FILE *P = popen(Cmd.c_str(), "r");
+  if (!P) {
+    std::cerr << "loadStateChart: failed to invoke matlabc\n";
+    return 1;
+  }
+  std::string Captured;
+  char Buf[4096];
+  size_t N;
+  while ((N = fread(Buf, 1, sizeof(Buf), P)) > 0)
+    Captured.append(Buf, N);
+  int Rc = pclose(P);
+  if (Rc != 0) {
+    std::cerr << "loadStateChart: matlabc -emit-matlab failed (exit "
+              << WEXITSTATUS(Rc) << ")\n";
+    if (!Captured.empty()) std::cerr << Captured;
+    return 1;
+  }
+  /* Feed the captured MATLAB source through the REPL pipeline so
+   * its `<chart>_tick` (and any sibling chart functions) register
+   * in the live session. The chart-tick fn carries persistent
+   * state, so subsequent calls advance the chart in-place. */
+  (void)runReplInput(MCtx, Captured, Counter++);
+  std::cout << "loadStateChart: emitted " << Arg
+            << " — call the chart's `<name>_tick(...)` to drive it."
+            << std::endl;
+  return 1;
+}
+
 int runRepl() {
   llvm::InitializeNativeTarget();
   llvm::InitializeNativeTargetAsmPrinter();
@@ -1714,6 +1800,12 @@ int runRepl() {
     /* Help is a REPL-side UX affordance — not a real Sema builtin. Catch
      * it at the top level, before we feed the line into the pipeline. */
     if (Accum.empty() && tryHandleHelp(Line)) {
+      Editor.addHistory(Line);
+      continue;
+    }
+    /* loadStateChart('foo.mflow') is a REPL-only shortcut that wraps
+     * the two-step `matlabc -emit-matlab + run` workflow. */
+    if (Accum.empty() && tryHandleLoadStateChart(Line, MCtx, Counter)) {
       Editor.addHistory(Line);
       continue;
     }

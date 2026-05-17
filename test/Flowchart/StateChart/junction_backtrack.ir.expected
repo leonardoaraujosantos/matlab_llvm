@@ -1,0 +1,21 @@
+ChartModel entry=router charts=1
+Chart router sig=(mode,val)->(dest) maxIter=1000
+  symbol.data name=mode scope=input type=double initial=0
+  symbol.data name=val scope=input type=double initial=0
+  symbol.data name=dest scope=output type=double initial=0
+  symbol.event name=tick trigger=rising
+  State idle decomp=leaf initial
+    .entry=dest = 0
+  State near decomp=leaf
+    .entry=dest = 1
+  State far decomp=leaf
+    .entry=dest = 2
+  State ignore decomp=leaf
+    .entry=dest = 3
+  Junction j1 kind=connective
+  Junction j2 kind=connective
+  Transition t_idle_j1 idle -> j1 kind=outer priority=1 event=tick
+  Transition t_j1_j2 j1 -> j2 kind=outer priority=1 guard=mode == 1
+  Transition t_j1_ignore j1 -> ignore kind=outer priority=2 guard=mode == 1
+  Transition t_j2_near j2 -> near kind=outer priority=1 guard=val < 10
+  Transition t_j2_far j2 -> far kind=outer priority=2 guard=val < 100

@@ -107,6 +107,41 @@ struct ChartLayout {
   // junction's cond action).
   std::string OwnerStateId;
 
+  // Set to true by the rewriter whenever it passes through a non-
+  // integer numeric literal (one containing `.` or an `e`/`E`
+  // exponent). Used by the SV-target emit() to hard-error when a
+  // chart relies on float arithmetic — matlabc's SV pipeline can't
+  // pick a width for `double` without an explicit fixed-point
+  // convention, so we surface the gap up front.
+  mutable bool SawFloatLiteral = false;
+
+  // Per-state allocations for the counter-style temporal operators.
+  // The discovery pass populates these before any emit; the rewriter
+  // then substitutes `temporalCount(E)` and `duration(EXPR)` calls
+  // with reads of the persistent slot named here.
+  //
+  // For temporalCount: each (state, event) pair gets one counter slot
+  // `tc_<sane(state)>_<event>` that increments by 1 every super-step
+  // in which the state is active and the event fired.
+  //
+  // For duration: each unique (state, expr-text) gets two slots —
+  // `dur_<sane(state)>_<i>_act` (1 while expression holds) and
+  // `dur_<sane(state)>_<i>_start` (tick_count when the run began).
+  // The read returns `(dur_..._act != 0) * (tick_count - dur_..._start)`.
+  struct TempCountSlot {
+    std::string Event;     // event name
+    std::string Slot;      // persistent var name
+  };
+  struct DurationSlot {
+    std::string Expr;      // expression source text (already pre-rewrite)
+    std::string ActSlot;   // bool-valued counter active flag
+    std::string StartSlot; // tick_count snapshot
+  };
+  // state-id → ordered list of (event, slot). Order is registration order.
+  std::map<std::string, std::vector<TempCountSlot>> TempCounts;
+  // state-id → ordered list of duration slots.
+  std::map<std::string, std::vector<DurationSlot>> Durations;
+
   // Numeric code lookup.
   int codeOf(const std::string &Id) const {
     auto It = StateCode.find(Id);
@@ -202,6 +237,7 @@ public:
           Out += Lit;
           Out += ")";
         } else {
+          if (IsFloat) L_.SawFloatLiteral = true;
           Out += Lit;
         }
         continue;
@@ -287,6 +323,44 @@ public:
             I = parseTemporalEnd(Src, I);
             PrevDot = false;
             continue;
+          }
+        }
+        // Counter-style temporal: `temporalCount(EVENT)` reads the
+        // pre-allocated per-(state, event) counter slot.
+        if (!PrevDot && !L_.OwnerStateId.empty() &&
+            Id == "temporalCount") {
+          if (auto Body = parseIdArgCall(Src, I)) {
+            auto SlotIt = L_.TempCounts.find(L_.OwnerStateId);
+            if (SlotIt != L_.TempCounts.end()) {
+              bool Matched = false;
+              for (auto &Slot : SlotIt->second) {
+                if (Slot.Event != Body->Name) continue;
+                Out += Slot.Slot;
+                I = Body->Pos;
+                Matched = true;
+                break;
+              }
+              if (Matched) { PrevDot = false; continue; }
+            }
+          }
+        }
+        // Counter-style temporal: `duration(EXPR)` reads the
+        // pre-allocated per-(state, expr) duration pair.
+        if (!PrevDot && !L_.OwnerStateId.empty() && Id == "duration") {
+          if (auto Body = parseDurationCall(Src, I)) {
+            auto SlotIt = L_.Durations.find(L_.OwnerStateId);
+            if (SlotIt != L_.Durations.end()) {
+              bool Matched = false;
+              for (auto &Slot : SlotIt->second) {
+                if (Slot.Expr != Body->first) continue;
+                Out += "(" + Slot.ActSlot + " * (tick_count - " +
+                       Slot.StartSlot + "))";
+                I = Body->second;
+                Matched = true;
+                break;
+              }
+              if (Matched) { PrevDot = false; continue; }
+            }
           }
         }
 
@@ -381,6 +455,43 @@ private:
     return P + 1;
   }
 
+  // Parse a balanced `(EXPR)` starting at `Pos` (just past the
+  // call identifier). Returns the trimmed expression text plus the
+  // position one past the closing `)`. Nested parens and string
+  // literals are respected.
+  std::optional<std::pair<std::string, size_t>>
+  parseDurationCall(const std::string &Src, size_t Pos) const {
+    size_t P = Pos;
+    while (P < Src.size() && std::isspace((unsigned char)Src[P])) ++P;
+    if (P >= Src.size() || Src[P] != '(') return std::nullopt;
+    size_t Body = P + 1;
+    int Depth = 1;
+    size_t Q = Body;
+    char InQ = 0;
+    while (Q < Src.size() && Depth > 0) {
+      char C = Src[Q];
+      if (InQ) {
+        if (C == InQ) InQ = 0;
+      } else if (C == '\'' || C == '"') {
+        InQ = C;
+      } else if (C == '(') {
+        ++Depth;
+      } else if (C == ')') {
+        --Depth;
+        if (Depth == 0) break;
+      }
+      ++Q;
+    }
+    if (Depth != 0) return std::nullopt;
+    std::string Expr = Src.substr(Body, Q - Body);
+    while (!Expr.empty() && std::isspace((unsigned char)Expr.front()))
+      Expr.erase(Expr.begin());
+    while (!Expr.empty() && std::isspace((unsigned char)Expr.back()))
+      Expr.pop_back();
+    if (Expr.empty()) return std::nullopt;
+    return std::pair<std::string, size_t>{std::move(Expr), Q + 1};
+  }
+
   std::optional<int> codeOfState(const std::string &Id) const {
     auto It = L_.StateCode.find(Id);
     if (It == L_.StateCode.end()) return std::nullopt;
@@ -440,6 +551,34 @@ public:
     // would still try to type its `any` params and fail).
     if (UsesIn && Opts_.Target == LoweringTarget::Software)
       emitInHelper(OS);
+    // Chart functions (matlab + graphical + truth-table) — emitted
+    // as sibling top-level functions so action bodies can call them
+    // by name. The lowering treats all three kinds uniformly: the
+    // function source either comes from `Body` (matlab + graphical)
+    // or is synthesised from the truth-table's columns.
+    for (auto &F : C_.Functions) emitChartFunction(OS, F);
+    // SV target hard-error: float-typed charts can't be synthesised
+    // without a fixed-point convention. matlabc's SV pipeline emits
+    // verilator warnings on f64 → int casts; rather than ship that
+    // semi-broken output, reject upfront and point at the integer-
+    // typed examples. The rewriter sets `SawFloatLiteral` whenever
+    // it lets a non-integer literal through.
+    if (Opts_.Target == LoweringTarget::SystemVerilog &&
+        L_.SawFloatLiteral) {
+      Diag_.error(C_.Loc,
+                  "chart \"" + C_.Name +
+                      "\" uses non-integer numeric literals — the "
+                      "SystemVerilog lowering only supports "
+                      "integer-typed charts. Convert literals + "
+                      "symbol initials to integers, or pick a fixed-"
+                      "point convention via fi() before targeting "
+                      "synthesis. See examples/stateflow/"
+                      "traffic_light_moore.mflow / "
+                      "vending_machine_mealy.mflow / "
+                      "model_air_temperature_controller.mflow for "
+                      "verilator-clean integer-typed charts.");
+      return std::nullopt;
+    }
     // Note: state-name lookup helper omitted on purpose — it would
     // emit `name = '...'` string literals which matlabc's MATLAB→
     // LLVM lane doesn't lower. Use the header's state-code legend
@@ -447,6 +586,68 @@ public:
     // listStates request.
     R.MatlabSource = OS.str();
     return R;
+  }
+
+  void emitChartFunction(std::ostream &OS, const ChartFunction &F) {
+    if (F.Name.empty()) return;
+    OS << "\nfunction ";
+    if (F.Outputs.size() == 1) {
+      OS << F.Outputs.front();
+    } else if (F.Outputs.size() > 1) {
+      OS << "[";
+      for (size_t I = 0; I < F.Outputs.size(); ++I) {
+        if (I) OS << ", ";
+        OS << F.Outputs[I];
+      }
+      OS << "]";
+    }
+    if (!F.Outputs.empty()) OS << " = ";
+    OS << F.Name << "(";
+    for (size_t I = 0; I < F.Inputs.size(); ++I) {
+      if (I) OS << ", ";
+      OS << F.Inputs[I];
+    }
+    OS << ")\n";
+    if (F.Kind == ChartFunctionKind::TruthTable) {
+      emitTruthTableBody(OS, F, "  ");
+    } else if (!F.Body.empty()) {
+      // Body is plain MATLAB — emit verbatim, indented one level.
+      OS << "  " << F.Body;
+      if (F.Body.back() != '\n') OS << "\n";
+    } else {
+      OS << "  % empty chart function body\n";
+    }
+    OS << "end\n";
+  }
+
+  void emitTruthTableBody(std::ostream &OS, const ChartFunction &F,
+                          const std::string &Pad) {
+    if (F.TruthColumns.empty()) {
+      OS << Pad << "% empty truth table\n";
+      return;
+    }
+    bool First = true;
+    for (auto &Col : F.TruthColumns) {
+      std::string Guard;
+      bool AnyConstraint = false;
+      for (size_t I = 0; I < F.TruthConditions.size(); ++I) {
+        char P = I < Col.Pattern.size() ? Col.Pattern[I] : 'X';
+        if (P == 'X') continue;
+        if (AnyConstraint) Guard += " && ";
+        Guard += (P == 'T') ? "(" : "~(";
+        Guard += F.TruthConditions[I];
+        Guard += ")";
+        AnyConstraint = true;
+      }
+      if (!AnyConstraint) Guard = "true";
+      OS << Pad << (First ? "if " : "elseif ") << Guard << "\n";
+      First = false;
+      if (!Col.Action.empty()) {
+        OS << Pad << "  " << Col.Action;
+        if (Col.Action.back() != '\n') OS << "\n";
+      }
+    }
+    if (!First) OS << Pad << "end\n";
   }
 
   // Stateless `in(code, region_val)` helper — returns 1 when the
@@ -534,6 +735,134 @@ private:
       L_.OrChildren[S.Id] = S.ChildStateIds;
       L_.Initial[S.Id] = initialSubstate(S.Id, S.ChildStateIds);
     }
+
+    discoverTemporalCounters();
+  }
+
+  // Walk every action / guard / cond / trans / on-event body in the
+  // chart, registering temporalCount(event) + duration(expr) call
+  // sites against their owner state. The discovery must run before
+  // any rewrite so the rewriter can substitute slot reads with
+  // already-allocated names. Identifiers, parens and quotes are
+  // tracked just enough to handle nested calls + strings; this is a
+  // recogniser, not a full parser.
+  void discoverTemporalCounters() {
+    auto scanBody = [&](const std::string &Owner, const std::string &Src) {
+      if (Owner.empty() || Src.empty()) return;
+      size_t I = 0;
+      char Quote = 0;
+      while (I < Src.size()) {
+        char C = Src[I];
+        if (Quote) {
+          if (C == Quote) Quote = 0;
+          ++I; continue;
+        }
+        if (C == '\'' || C == '"') { Quote = C; ++I; continue; }
+        if (C == '%') {
+          while (I < Src.size() && Src[I] != '\n') ++I;
+          continue;
+        }
+        if (isIdStart(C)) {
+          size_t S = I;
+          while (I < Src.size() && isIdCont(Src[I])) ++I;
+          std::string Id = Src.substr(S, I - S);
+          if (Id == "temporalCount") {
+            size_t P = I;
+            while (P < Src.size() &&
+                   std::isspace((unsigned char)Src[P])) ++P;
+            if (P < Src.size() && Src[P] == '(') {
+              ++P;
+              while (P < Src.size() &&
+                     std::isspace((unsigned char)Src[P])) ++P;
+              if (P < Src.size() && isIdStart(Src[P])) {
+                size_t NS = P;
+                while (P < Src.size() && isIdCont(Src[P])) ++P;
+                std::string Ev = Src.substr(NS, P - NS);
+                if (L_.Events.count(Ev))
+                  registerTempCount(Owner, Ev);
+              }
+            }
+          } else if (Id == "duration") {
+            size_t P = I;
+            while (P < Src.size() &&
+                   std::isspace((unsigned char)Src[P])) ++P;
+            if (P < Src.size() && Src[P] == '(') {
+              size_t Body = P + 1;
+              int Depth = 1;
+              size_t Q = Body;
+              char InQ = 0;
+              while (Q < Src.size() && Depth > 0) {
+                char Cc = Src[Q];
+                if (InQ) {
+                  if (Cc == InQ) InQ = 0;
+                } else if (Cc == '\'' || Cc == '"') {
+                  InQ = Cc;
+                } else if (Cc == '(') {
+                  ++Depth;
+                } else if (Cc == ')') {
+                  --Depth;
+                  if (Depth == 0) break;
+                }
+                ++Q;
+              }
+              if (Depth == 0 && Q > Body) {
+                std::string Expr = Src.substr(Body, Q - Body);
+                // Trim whitespace.
+                while (!Expr.empty() &&
+                       std::isspace((unsigned char)Expr.front()))
+                  Expr.erase(Expr.begin());
+                while (!Expr.empty() &&
+                       std::isspace((unsigned char)Expr.back()))
+                  Expr.pop_back();
+                if (!Expr.empty()) registerDuration(Owner, Expr);
+              }
+            }
+          }
+          continue;
+        }
+        ++I;
+      }
+    };
+    auto scanState = [&](const ChartState &S) {
+      scanBody(S.Id, S.Entry.Source);
+      scanBody(S.Id, S.During.Source);
+      scanBody(S.Id, S.Exit.Source);
+      for (auto &OE : S.OnEvent) scanBody(S.Id, OE.second.Source);
+    };
+    for (auto &P : C_.States) scanState(P.second);
+    // Transitions: owner is the source state (if any). Guards and
+    // cond/trans actions are scanned under that state's scope so a
+    // duration / temporalCount in a guard binds to the source state
+    // — same convention as `after()` etc.
+    for (auto &T : C_.Transitions) {
+      if (!C_.findState(T.SourceId)) continue;
+      scanBody(T.SourceId, T.Label.Guard);
+      scanBody(T.SourceId, T.Label.CondAction);
+      scanBody(T.SourceId, T.Label.TransAction);
+    }
+  }
+
+  void registerTempCount(const std::string &State,
+                         const std::string &Event) {
+    auto &V = L_.TempCounts[State];
+    for (auto &S : V) if (S.Event == Event) return;
+    ChartLayout::TempCountSlot Slot;
+    Slot.Event = Event;
+    Slot.Slot = "tc_" + sanitize(State) + "_" + Event;
+    V.push_back(std::move(Slot));
+  }
+
+  void registerDuration(const std::string &State,
+                        const std::string &Expr) {
+    auto &V = L_.Durations[State];
+    for (auto &S : V) if (S.Expr == Expr) return;
+    ChartLayout::DurationSlot Slot;
+    Slot.Expr = Expr;
+    std::string Base = "dur_" + sanitize(State) + "_" +
+                       std::to_string(V.size());
+    Slot.ActSlot   = Base + "_act";
+    Slot.StartSlot = Base + "_start";
+    V.push_back(std::move(Slot));
   }
 
   std::string initialSubstate(const std::string &ParentId,
@@ -732,6 +1061,15 @@ private:
       OS << "  persistent t_" << sanitize(P.first) << ";\n";
     for (auto &N : L_.Locals)
       OS << "  persistent l_" << N << ";\n";
+    // Counter-style temporal slots (temporalCount + duration).
+    for (auto &P : L_.TempCounts)
+      for (auto &S : P.second)
+        OS << "  persistent " << S.Slot << ";\n";
+    for (auto &P : L_.Durations)
+      for (auto &S : P.second) {
+        OS << "  persistent " << S.ActSlot << ";\n";
+        OS << "  persistent " << S.StartSlot << ";\n";
+      }
 
     // isempty-init block: zero everything, seed locals from the
     // symbol table's `initial`, descend the initial entry chain.
@@ -744,6 +1082,14 @@ private:
         OS << "    h_" << sanitize(P.first) << " = 0;\n";
     for (auto &P : C_.States)
       OS << "    t_" << sanitize(P.first) << " = 0;\n";
+    for (auto &P : L_.TempCounts)
+      for (auto &S : P.second)
+        OS << "    " << S.Slot << " = 0;\n";
+    for (auto &P : L_.Durations)
+      for (auto &S : P.second) {
+        OS << "    " << S.ActSlot << " = 0;\n";
+        OS << "    " << S.StartSlot << " = 0;\n";
+      }
     for (auto &S : C_.Symbols.Data) {
       OS << "    l_" << S.Name << " = ";
       OS << (S.Initial.empty() ? "0" : Rewriter_.rewrite(S.Initial)) << ";\n";
@@ -767,6 +1113,13 @@ private:
 
     // Advance tick counter for temporal operators.
     OS << "  tick_count = tick_count + 1;\n";
+
+    // Counter-style temporal maintenance: once per super-step, while
+    // the owner state is active. temporalCount increments on each
+    // qualifying event broadcast; duration tracks a start-of-run
+    // tick stamp + an `active` flag that clears as soon as the
+    // tracked expression evaluates false.
+    emitTemporalMaintenance(OS, "  ");
 
     // Super-step loop. Using `while` over `for + break` because
     // matlabc's `-emit-c` lane has a bug lowering single-stmt
@@ -794,6 +1147,67 @@ private:
   bool hasDataSymbol(const std::string &Name) const {
     for (auto &S : C_.Symbols.Data) if (S.Name == Name) return true;
     return false;
+  }
+
+  // Emit maintenance for the counter-style temporal operators. Runs
+  // once per super-step (so the counters reflect the chart's
+  // pre-iteration state). For each tracked state slot:
+  //   - temporalCount: if owner active && event fired, slot++.
+  //   - duration:      if owner active && expr, then if !active set
+  //                    active=1, start=tick_count; else active=0.
+  // When the owner state is *inactive*, both kinds reset their active
+  // tracking so a re-entry starts fresh.
+  void emitTemporalMaintenance(std::ostream &OS,
+                               const std::string &Pad) {
+    if (L_.TempCounts.empty() && L_.Durations.empty()) return;
+    // Aggregate by owner state so we emit one `if active(owner)`
+    // block per state.
+    std::set<std::string> Owners;
+    for (auto &P : L_.TempCounts) Owners.insert(P.first);
+    for (auto &P : L_.Durations)  Owners.insert(P.first);
+    for (auto &Owner : Owners) {
+      auto CodeIt = L_.StateCode.find(Owner);
+      if (CodeIt == L_.StateCode.end()) continue;
+      std::string Region = regionOwner(Owner);
+      auto RIt = L_.RegionVar.find(Region);
+      if (RIt == L_.RegionVar.end()) continue;
+      OS << Pad << "if " << RIt->second << " == "
+         << codeText(CodeIt->second) << "\n";
+      // temporalCount increments.
+      auto TcIt = L_.TempCounts.find(Owner);
+      if (TcIt != L_.TempCounts.end()) {
+        for (auto &S : TcIt->second) {
+          OS << Pad << "  if ev_" << S.Event << "\n";
+          OS << Pad << "    " << S.Slot << " = " << S.Slot << " + 1;\n";
+          OS << Pad << "  end\n";
+        }
+      }
+      // duration tracking — re-emit the expression under the owner's
+      // rewrite scope so `l_*` / `ev_*` resolution works.
+      auto DurIt = L_.Durations.find(Owner);
+      if (DurIt != L_.Durations.end()) {
+        OwnerScope Sc(L_, Owner);
+        for (auto &S : DurIt->second) {
+          OS << Pad << "  if " << rewrite(S.Expr) << "\n";
+          OS << Pad << "    if " << S.ActSlot << " == 0\n";
+          OS << Pad << "      " << S.ActSlot << " = 1;\n";
+          OS << Pad << "      " << S.StartSlot << " = tick_count;\n";
+          OS << Pad << "    end\n";
+          OS << Pad << "  else\n";
+          OS << Pad << "    " << S.ActSlot << " = 0;\n";
+          OS << Pad << "  end\n";
+        }
+      }
+      OS << Pad << "else\n";
+      // Owner inactive — keep tc accumulator (matches Stateflow: the
+      // count is per-entry, reset on entry not on exit); clear
+      // duration's active flag so a future re-entry restarts.
+      if (DurIt != L_.Durations.end()) {
+        for (auto &S : DurIt->second)
+          OS << Pad << "  " << S.ActSlot << " = 0;\n";
+      }
+      OS << Pad << "end\n";
+    }
   }
 
   //===-- SV target -----------------------------------------------------===
@@ -929,6 +1343,18 @@ private:
     OS << Pad << L_.RegionVar.at(ParentRegion) << " = "
        << codeText(L_.codeOf(Sid)) << ";\n";
     OS << Pad << "t_" << sanitize(Sid) << " = tick_count;\n";
+    // Reset counter-style temporal slots for this state so a fresh
+    // entry observes temporalCount==0 and duration==0.
+    auto TcIt = L_.TempCounts.find(Sid);
+    if (TcIt != L_.TempCounts.end())
+      for (auto &Slot : TcIt->second)
+        OS << Pad << Slot.Slot << " = 0;\n";
+    auto DurIt = L_.Durations.find(Sid);
+    if (DurIt != L_.Durations.end())
+      for (auto &Slot : DurIt->second) {
+        OS << Pad << Slot.ActSlot   << " = 0;\n";
+        OS << Pad << Slot.StartSlot << " = 0;\n";
+      }
     if (!S->Entry.empty())
       OS << Pad << rewrite(S->Entry.Source) << ";\n";
     if (S->Decomp == Decomposition::Or && !S->ChildStateIds.empty()) {
@@ -1025,6 +1451,138 @@ private:
     }
   }
 
+  // A resolved root-to-state path through a connective-junction chain.
+  // Built at lowering time so the lowered MATLAB enumerates every
+  // viable terminal up front: priority is encoded as the order the
+  // paths appear in an if/elseif arm, and a path's guard is the AND
+  // of every branch's guard along the way. The elseif semantics then
+  // give us the same backtracking the C++ interpreter does — if a
+  // junction sub-chain dead-ends with all guards false, the next
+  // sibling branch at the parent is tried.
+  struct LoweredPath {
+    std::vector<std::string> Guards;            // expression strings to AND
+    std::vector<const Transition *> Branches;   // taken branches in order
+    std::string TerminalStateId;                // leaf state to enter
+  };
+
+  // Collect every root-to-state path starting at NodeId. Connective /
+  // entry / exit / default junctions fan out into one path per
+  // outgoing branch (in priority order). History junctions terminate
+  // at their parent state (the parent's HasHistory flag governs
+  // runtime dispatch inside emitEnterChain). States terminate the
+  // walk. The caller emits one if/elseif arm per returned path.
+  void enumeratePaths(const std::string &NodeId, LoweredPath &Cur,
+                      std::vector<LoweredPath> &Out, int Depth) const {
+    if (Depth > 16) return;
+    if (C_.findState(NodeId)) {
+      LoweredPath P = Cur;
+      P.TerminalStateId = NodeId;
+      Out.push_back(std::move(P));
+      return;
+    }
+    const ChartJunction *J = C_.findJunction(NodeId);
+    if (!J) return;
+    if (J->Kind == JunctionKind::History) {
+      // History terminal — enter the parent; emitEnterChain handles
+      // h_<parent> dispatch when HasHistory is set on the parent.
+      if (C_.findState(J->ParentId)) {
+        LoweredPath P = Cur;
+        P.TerminalStateId = J->ParentId;
+        Out.push_back(std::move(P));
+      }
+      return;
+    }
+    for (auto *T : outgoingFrom(NodeId)) {
+      LoweredPath Save = Cur;
+      if (!T->Label.Guard.empty())
+        Cur.Guards.push_back("(" + rewrite(T->Label.Guard) + ")");
+      Cur.Branches.push_back(T);
+      enumeratePaths(T->DestId, Cur, Out, Depth + 1);
+      Cur = Save;
+    }
+  }
+
+  std::vector<LoweredPath>
+  pathsFromJunction(const std::string &JctId) const {
+    std::vector<LoweredPath> Out;
+    LoweredPath Cur;
+    enumeratePaths(JctId, Cur, Out, 0);
+    return Out;
+  }
+
+  // Emit the exit / trans / enter sequence for one transition path:
+  //   - walk SrcId up to LCA(SrcId, leaf), exiting each level
+  //   - run T's trans action
+  //   - run each taken branch's cond + trans actions in order
+  //   - walk LCA down to leaf, entering each level
+  //   - mark fired
+  void emitCommitBody(std::ostream &OS, const Transition &T,
+                      const LoweredPath &P, const std::string &Pad,
+                      bool IsInner) {
+    const std::string &Leaf = P.TerminalStateId;
+    if (!IsInner) {
+      const ChartState *Src = C_.findState(T.SourceId);
+      std::string LCA;
+      if (Src && C_.findState(Leaf))
+        LCA = lcaOf(T.SourceId, Leaf);
+      // Exit chain (only when source is a state — junction-source
+      // transitions are entry-flow snippets with nothing to exit).
+      if (Src) {
+        std::string Cur = T.SourceId;
+        while (!Cur.empty() && Cur != LCA) {
+          emitExitChain(OS, Cur, Pad);
+          const ChartState *S = C_.findState(Cur);
+          Cur = S ? S->ParentId : std::string();
+        }
+      }
+      if (!T.Label.TransAction.empty())
+        OS << Pad << rewrite(T.Label.TransAction) << ";\n";
+      // Replay each branch's cond + trans actions, in the order the
+      // junction walk took them.
+      for (auto *B : P.Branches) {
+        if (!B->Label.CondAction.empty())
+          OS << Pad << rewrite(B->Label.CondAction) << ";\n";
+        if (!B->Label.TransAction.empty())
+          OS << Pad << rewrite(B->Label.TransAction) << ";\n";
+      }
+      // Enter chain from LCA down to leaf.
+      std::vector<std::string> EnterChain;
+      std::string Cur = Leaf;
+      while (!Cur.empty() && Cur != LCA) {
+        EnterChain.push_back(Cur);
+        const ChartState *S = C_.findState(Cur);
+        Cur = S ? S->ParentId : std::string();
+      }
+      std::reverse(EnterChain.begin(), EnterChain.end());
+      for (size_t I = 0; I + 1 < EnterChain.size(); ++I) {
+        const ChartState *S = C_.findState(EnterChain[I]);
+        if (!S) continue;
+        std::string Owner = regionOwner(EnterChain[I]);
+        OS << Pad << L_.RegionVar.at(Owner) << " = "
+           << codeText(L_.codeOf(EnterChain[I])) << ";\n";
+        OS << Pad << "t_" << sanitize(EnterChain[I])
+           << " = tick_count;\n";
+        if (!S->Entry.empty()) {
+          OwnerScope OS_(L_, EnterChain[I]);
+          OS << Pad << rewrite(S->Entry.Source) << ";\n";
+        }
+      }
+      // Deepest level — full enter (recurses into substates).
+      emitEnterChain(OS, Leaf, Pad);
+    } else {
+      // Inner — only the trans action runs (and branch actions if any).
+      if (!T.Label.TransAction.empty())
+        OS << Pad << rewrite(T.Label.TransAction) << ";\n";
+      for (auto *B : P.Branches) {
+        if (!B->Label.CondAction.empty())
+          OS << Pad << rewrite(B->Label.CondAction) << ";\n";
+        if (!B->Label.TransAction.empty())
+          OS << Pad << rewrite(B->Label.TransAction) << ";\n";
+      }
+    }
+    OS << Pad << "fired = true;\n";
+  }
+
   void emitTransition(std::ostream &OS, const Transition &T,
                       const std::string &Pad) {
     // Cond expression. Event-gated transitions read the `ev_<E>`
@@ -1042,121 +1600,64 @@ private:
     else
       Cond = "true";
 
-    OS << Pad << "if ~fired && " << Cond << "\n";
-    if (!T.Label.CondAction.empty())
-      OS << Pad << "  " << rewrite(T.Label.CondAction) << ";\n";
-
     bool IsInner = T.Kind == TransitionKind::Inner;
-    if (!IsInner) {
-      const ChartState *Src = C_.findState(T.SourceId);
-      const ChartState *Dst = C_.findState(T.DestId);
-      if (Src && Dst) {
-        std::string LCA = lcaOf(T.SourceId, T.DestId);
-        // Exit chain: walk src up to (but not including) LCA. Each
-        // step runs its exit action and clears its region slot if
-        // we're crossing an OR parent boundary.
-        std::string Cur = T.SourceId;
-        while (!Cur.empty() && Cur != LCA) {
-          emitExitChain(OS, Cur, Pad + "  ");
-          const ChartState *S = C_.findState(Cur);
-          Cur = S ? S->ParentId : std::string();
-        }
-        // Trans action.
-        if (!T.Label.TransAction.empty())
-          OS << Pad << "  " << rewrite(T.Label.TransAction) << ";\n";
-        // Enter chain: build path LCA→dst and emit shallow entry on
-        // each level above dst, then full enter at dst (which
-        // recurses into substates).
-        std::vector<std::string> EnterChain;
-        Cur = T.DestId;
-        while (!Cur.empty() && Cur != LCA) {
-          EnterChain.push_back(Cur);
-          const ChartState *S = C_.findState(Cur);
-          Cur = S ? S->ParentId : std::string();
-        }
-        std::reverse(EnterChain.begin(), EnterChain.end());
-        for (size_t I = 0; I + 1 < EnterChain.size(); ++I) {
-          const ChartState *S = C_.findState(EnterChain[I]);
-          if (!S) continue;
-          std::string Owner = regionOwner(EnterChain[I]);
-          OS << Pad << "  " << L_.RegionVar.at(Owner) << " = "
-             << codeText(L_.codeOf(EnterChain[I])) << ";\n";
-          OS << Pad << "  t_" << sanitize(EnterChain[I])
-             << " = tick_count;\n";
-          if (!S->Entry.empty()) {
-            OwnerScope OS_(L_, EnterChain[I]);
-            OS << Pad << "  " << rewrite(S->Entry.Source) << ";\n";
-          }
-        }
-        // Deepest level (dst) — full enter, recurses into substates.
-        emitEnterChain(OS, T.DestId, Pad + "  ");
-      } else if (Dst) {
-        // Source was a junction — just trans + enter.
-        if (!T.Label.TransAction.empty())
-          OS << Pad << "  " << rewrite(T.Label.TransAction) << ";\n";
-        emitEnterChain(OS, T.DestId, Pad + "  ");
-      } else {
-        // Destination is itself a junction — emit chain.
-        if (!T.Label.TransAction.empty())
-          OS << Pad << "  " << rewrite(T.Label.TransAction) << ";\n";
-        emitJunctionChain(OS, T.DestId, Pad + "  ", 0);
-      }
-    } else {
-      // Inner — only the trans action runs.
-      if (!T.Label.TransAction.empty())
-        OS << Pad << "  " << rewrite(T.Label.TransAction) << ";\n";
-    }
-    OS << Pad << "  fired = true;\n";
-    OS << Pad << "end\n";
-  }
+    const ChartState *Dst = C_.findState(T.DestId);
 
-  void emitJunctionChain(std::ostream &OS, const std::string &JctId,
-                         const std::string &Pad, int Depth) {
-    if (Depth > 16) {
-      OS << Pad << "% junction chain depth exceeded\n";
-      return;
-    }
-    const ChartJunction *J = C_.findJunction(JctId);
-    if (!J) return;
-    if (J->Kind == JunctionKind::History) {
-      const ChartState *Parent = C_.findState(J->ParentId);
-      if (!Parent) return;
-      OS << Pad << "if h_" << sanitize(J->ParentId) << " ~= 0\n";
-      for (auto &Cid : Parent->ChildStateIds) {
-        OS << Pad << "  if h_" << sanitize(J->ParentId) << " == "
-           << codeText(L_.codeOf(Cid)) << "\n";
-        emitEnterChain(OS, Cid, Pad + "    ");
-        OS << Pad << "  end\n";
+    // Build the path list. For a state-dest, the only "path" is
+    // {[], [], dst}. For a junction-dest, every viable root-to-state
+    // path is enumerated in priority order so the elseif chain below
+    // gives proper backtracking when sub-chains dead-end.
+    std::vector<LoweredPath> Paths;
+    if (Dst || IsInner) {
+      LoweredPath P;
+      P.TerminalStateId = T.DestId;
+      Paths.push_back(std::move(P));
+    } else {
+      Paths = pathsFromJunction(T.DestId);
+      if (Paths.empty()) {
+        OS << Pad << "% transition " << T.Id
+           << ": junction chain has no viable terminal — never fires\n";
+        return;
       }
-      OS << Pad << "else\n";
-      emitEnterChain(OS, L_.Initial.at(J->ParentId), Pad + "  ");
+    }
+
+    // For a single-path transition (the common state→state case) we
+    // emit the original flat form: one if-block guarded by the outer
+    // condition + cond action + commit body. For multi-path (junction
+    // chain), we emit `if ~fired && <outer>` wrapping an inner
+    // if/elseif arm-per-path so the elseif gives us backtracking.
+    if (Paths.size() == 1 && Paths[0].Branches.empty()) {
+      // Single path, no junction branches — keep flat form.
+      const auto &P = Paths.front();
+      OS << Pad << "if ~fired && " << Cond << "\n";
+      if (!T.Label.CondAction.empty())
+        OS << Pad << "  " << rewrite(T.Label.CondAction) << ";\n";
+      emitCommitBody(OS, T, P, Pad + "  ", IsInner);
       OS << Pad << "end\n";
       return;
     }
-    std::vector<const Transition *> Outs;
-    for (auto &T : C_.Transitions)
-      if (T.SourceId == JctId) Outs.push_back(&T);
-    std::stable_sort(Outs.begin(), Outs.end(),
-        [](const Transition *A, const Transition *B) {
-          return A->Priority < B->Priority;
-        });
+
+    // Multi-path: wrap in outer guard, then if/elseif over paths.
+    // T's cond action runs before any path probe so guard expressions
+    // (which may read its side effects) see the new value — matches
+    // the existing single-path behaviour.
+    OS << Pad << "if ~fired && " << Cond << "\n";
+    if (!T.Label.CondAction.empty())
+      OS << Pad << "  " << rewrite(T.Label.CondAction) << ";\n";
     bool First = true;
-    for (auto *T : Outs) {
-      std::string Cond = T->Label.Guard.empty()
-                             ? std::string("true")
-                             : "(" + rewrite(T->Label.Guard) + ")";
-      OS << Pad << (First ? "if " : "elseif ") << Cond << "\n";
+    for (auto &P : Paths) {
+      std::string PathGuard = "true";
+      if (!P.Guards.empty()) {
+        PathGuard = P.Guards.front();
+        for (size_t I = 1; I < P.Guards.size(); ++I)
+          PathGuard += " && " + P.Guards[I];
+      }
+      OS << Pad << "  " << (First ? "if " : "elseif ") << PathGuard << "\n";
       First = false;
-      if (!T->Label.CondAction.empty())
-        OS << Pad << "  " << rewrite(T->Label.CondAction) << ";\n";
-      if (!T->Label.TransAction.empty())
-        OS << Pad << "  " << rewrite(T->Label.TransAction) << ";\n";
-      if (C_.findState(T->DestId))
-        emitEnterChain(OS, T->DestId, Pad + "  ");
-      else
-        emitJunctionChain(OS, T->DestId, Pad + "  ", Depth + 1);
+      emitCommitBody(OS, T, P, Pad + "    ", IsInner);
     }
-    if (!First) OS << Pad << "end\n";
+    OS << Pad << "  end\n";
+    OS << Pad << "end\n";
   }
 
   // Stateless human-readable name-from-code helper. Useful from a

@@ -11,6 +11,7 @@ State-chart `.mflow` files mirroring three MathWorks Stateflow tutorials.
 | Lower to MIR / LLVM IR / C | `matlabc -emit-{mir,llvm,c} <(matlabc -emit-matlab <file>.mflow)` |
 | Run via C++ interpreter | `matlabc -simulate <file>.mflow` |
 | Debug + REPL via DAP | `matlabc -simulate --sim-dap <file>.mflow` |
+| One-call REPL load | `matlabc -repl` then `>> loadStateChart('<file>.mflow')` (emits + sources in one step; the chart's `<name>_tick(...)` is then callable in the live REPL session) |
 | Native execute as C | `matlabc -emit-matlab f.mflow \| matlabc -emit-c /dev/stdin > f.c && cc f.c -lm -o f && ./f` |
 | **Synthesizable SystemVerilog** | `matlabc -emit-systemverilog <file>.mflow > module.sv` |
 

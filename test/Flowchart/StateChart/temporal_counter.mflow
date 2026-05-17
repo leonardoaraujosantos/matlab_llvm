@@ -1,0 +1,60 @@
+{
+  "schema": "matforge.flowchart",
+  "version": "0.2.0",
+  "entry": "sampler",
+  "settings": { "kind": "state_chart" },
+  "flows": [
+    {
+      "id": "flow_sampler",
+      "kind": "program",
+      "name": "sampler",
+      "signature": { "inputs": ["pressure"], "outputs": ["alarm"] },
+      "symbols": {
+        "data": [
+          { "name": "pressure", "scope": "input",  "type": "double", "initial": "0" },
+          { "name": "alarm",    "scope": "output", "type": "double", "initial": "0" }
+        ],
+        "events": [
+          { "name": "sample", "trigger": "rising" }
+        ]
+      },
+      "nodes": [
+        { "id": "watch", "kind": "state",
+          "data": {
+            "entryAction": "alarm = 0",
+            "params": { "decomposition": "leaf", "isInitial": "true" }
+          },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "warn", "kind": "state",
+          "data": {
+            "entryAction": "alarm = 1",
+            "params": { "decomposition": "leaf" }
+          },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "fault", "kind": "state",
+          "data": {
+            "entryAction": "alarm = 2",
+            "params": { "decomposition": "leaf" }
+          },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } }
+      ],
+      "edges": [
+        { "id": "t_watch_warn", "kind": "transition",
+          "label": "[temporalCount(sample) >= 5]",
+          "from": {"node": "watch", "port": "out"},
+          "to":   {"node": "warn",  "port": "in"},
+          "data": { "params": { "priority": "1" } } },
+        { "id": "t_warn_fault", "kind": "transition",
+          "label": "[duration(pressure > 100) >= 3]",
+          "from": {"node": "warn",  "port": "out"},
+          "to":   {"node": "fault", "port": "in"},
+          "data": { "params": { "priority": "1" } } },
+        { "id": "t_fault_watch", "kind": "transition",
+          "label": "[pressure < 50]",
+          "from": {"node": "fault", "port": "out"},
+          "to":   {"node": "watch", "port": "in"},
+          "data": { "params": { "priority": "1" } } }
+      ]
+    }
+  ]
+}

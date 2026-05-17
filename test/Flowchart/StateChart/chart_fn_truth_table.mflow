@@ -1,0 +1,45 @@
+{
+  "schema": "matforge.flowchart",
+  "version": "0.2.0",
+  "entry": "gate",
+  "settings": { "kind": "state_chart" },
+  "flows": [
+    {
+      "id": "flow_gate",
+      "kind": "program",
+      "name": "gate",
+      "signature": { "inputs": ["lit", "ready"], "outputs": ["open"] },
+      "symbols": {
+        "data": [
+          { "name": "lit",   "scope": "input",  "type": "double", "initial": "0" },
+          { "name": "ready", "scope": "input",  "type": "double", "initial": "0" },
+          { "name": "open",  "scope": "output", "type": "double", "initial": "0" }
+        ],
+        "events": [
+          { "name": "step", "trigger": "rising" }
+        ]
+      },
+      "nodes": [
+        { "id": "active", "kind": "state",
+          "data": {
+            "duringAction": "open = openGate(lit, ready)",
+            "params": { "decomposition": "leaf", "isInitial": "true" }
+          },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+        { "id": "fn_openGate", "kind": "chart_fn_truth_table",
+          "data": {
+            "params": {
+              "functionName": "openGate",
+              "inputs": "isLit, isReady",
+              "outputs": "result",
+              "conditions": "isLit; isReady",
+              "decisions":  "TT; TF; FX",
+              "actions":    "result = 1; result = 0; result = 0"
+            }
+          },
+          "ports": { "in": [], "out": [] } }
+      ],
+      "edges": []
+    }
+  ]
+}

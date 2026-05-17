@@ -1,0 +1,8 @@
+ChartModel entry=gate charts=1
+Chart gate sig=(lit,ready)->(open) maxIter=1000
+  symbol.data name=lit scope=input type=double initial=0
+  symbol.data name=ready scope=input type=double initial=0
+  symbol.data name=open scope=output type=double initial=0
+  symbol.event name=step trigger=rising
+  State active decomp=leaf initial
+    .during=open = openGate(lit, ready)
