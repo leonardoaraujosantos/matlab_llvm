@@ -371,6 +371,16 @@ add_test(
   COMMAND ${CMAKE_SOURCE_DIR}/test/run_tests.sh $<TARGET_FILE:matlabc>
   WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test
 )
+# REPL smoke tests — headline coverage is cross-turn user-function
+# persistence (a `function ... end` defined in REPL turn N can be
+# called from turn N+1; `loadStateChart` chart_tick functions work
+# the same way). Closes the matlabc cross-unit JIT gap that affected
+# any interactive function-then-call workflow.
+add_test(
+  NAME repl-tests
+  COMMAND ${CMAKE_SOURCE_DIR}/test/Repl/run_tests.sh $<TARGET_FILE:matlabc>
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Repl
+)
 add_test(
   NAME flowchart-tests
   COMMAND ${CMAKE_SOURCE_DIR}/test/Flowchart/run_tests.sh $<TARGET_FILE:matlabc>

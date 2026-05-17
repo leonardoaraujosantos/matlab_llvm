@@ -728,6 +728,28 @@ extern "C" const char *replWorkspaceClassNameHook(const char *name,
  * (rare; falls back to no preludes in that case). */
 static std::string g_MatlabcBinDir;
 
+/* User-defined function persistence across REPL turns. The REPL
+ * accumulator always submits a `function ... end` block on its own
+ * (block depth flips back to 0 right after `end`), so the function
+ * definition lands in TU N while its call site lands in TU N+1.
+ * matlabc's resolver / type inference / monomorphisation can't link
+ * the two — the call site degrades to a workspace load + array
+ * index, the function body keeps `none`-typed args, and the JIT
+ * fails to translate either to LLVM IR.
+ *
+ * We close the gap by stashing each successfully-parsed top-level
+ * function's source verbatim. On every subsequent REPL turn, the
+ * prelude builder scans the user input for mentions of stashed
+ * names and prepends matching function sources back in. The turn
+ * compiles function + call site in the same TU — Sema refines arg
+ * types from call-site shapes (same as static `-emit-c`), the call
+ * lowers as a real `matlab.call`, and the JIT succeeds.
+ *
+ * Map: function name (lowercased? — MATLAB is case-sensitive in
+ * function names per §15-2, so we keep exact case) → source text.
+ * A redefinition in a later turn overwrites the entry. */
+static std::map<std::string, std::string> g_ReplUserFunctions;
+
 /* Build the SO / CST classdef prelude content to prepend to a REPL
  * input.  Same trigger logic as the static-input path (see
  * `userMentionsCommClasses` / `userMentionsCstClasses` below): scan
@@ -779,6 +801,27 @@ int runReplInput(mlirgen::Context &MCtx, const std::string &Src, int Id,
   if (!TU || Diag.hasErrors()) {
     onFail();
     return 1;
+  }
+
+  /* Stash every top-level function defined in this turn so a later
+   * turn that mentions its name pulls it back via buildReplPrelude.
+   * `Combined = Src + "\n" + Prelude` lays Src first, so a function
+   * defined in the user's input has Range offsets within Src; a
+   * function pulled from the prelude has offsets past `Src.size() +
+   * 1`. We skip the latter — don't re-store prelude content. */
+  if (TU) {
+    std::string_view Buf = SM.getBuffer(F);
+    size_t SrcEnd = Src.size();
+    for (Function *Fn : TU->Functions) {
+      if (!Fn || Fn->Name.empty()) continue;
+      if (Fn->Range.Begin.File != F || Fn->Range.End.File != F) continue;
+      uint32_t Beg = Fn->Range.Begin.Offset;
+      uint32_t End = Fn->Range.End.Offset;
+      if (End <= Beg || End > Buf.size()) continue;
+      if (Beg >= SrcEnd) continue;  // prelude-sourced — skip
+      g_ReplUserFunctions[std::string(Fn->Name)] =
+          std::string(Buf.substr(Beg, End - Beg));
+    }
   }
 
   SemaContext Sema;
@@ -980,6 +1023,18 @@ int runReplInput(mlirgen::Context &MCtx, const std::string &Src, int Id,
   if (mlir::failed(mlir::verify(M))) {
     std::cerr << "error: REPL MLIR verification failed after passes\n";
     return 1;
+  }
+
+  /* Function-definition-only input — turns where the user typed a
+   * `function ... end` block but no script statements. The module
+   * has func.func defs (likely `none`-typed) but no script `main`
+   * to execute. We've already stashed the function source in
+   * g_ReplUserFunctions for later turns, so there's nothing to
+   * actually do here. Skip the JIT entirely; trying to translate
+   * uncalled `none`-typed funcs would fail noisily for no benefit. */
+  {
+    bool HasScript = TU && TU->ScriptNode != nullptr;
+    if (!HasScript) return 0;
   }
 
   /* Same conversion-to-LLVM-dialect pipeline that lowerToLLVMIR runs.
@@ -1777,9 +1832,9 @@ static int tryHandleLoadStateChart(const std::string &rawLine,
    * use `matlabc -emit-c` / AOT for production drivers. */
   (void)runReplInput(MCtx, Captured, Counter++);
   std::cout << "loadStateChart: emitted " << Arg
-            << " — demo driver ran above. For programmatic drives, "
-               "emit-c the chart + a driver .m together (REPL "
-               "cross-unit calls hit matlabc's JIT gap)."
+            << " — demo driver ran above; the chart's `<name>_tick` "
+               "is now stashed in the REPL's user-function table and "
+               "can be called directly on subsequent turns."
             << std::endl;
   return 1;
 }
@@ -2164,7 +2219,6 @@ static std::string buildReplPrelude(const std::string &Src) {
   }
 
   for (auto &W : Cls) if (W.active) add(W.File);
-  if (Files.empty()) return std::string();
   std::string Out;
   for (auto &P : Files) {
     std::ifstream In(P);
@@ -2177,6 +2231,93 @@ static std::string buildReplPrelude(const std::string &Src) {
     Out += " ---\n";
     Out += Buf.str();
   }
+  /* User-defined function persistence — append the source of any
+   * stashed function whose name shows up in this turn's input. The
+   * scan is *transitive*: once a function is pulled in, its own
+   * source is scanned for further mentions, since one user function
+   * may call another. The classic case is the chart_tick's helper
+   * funcs (e.g. `gate_tick` calling `openGate`) — both need to be
+   * in the same TU. We loop until quiescence. */
+  /* Detect names redefined in the current input. A `function ... NAME(`
+   * signature should suppress that name's stashed prelude copy — otherwise
+   * the verifier sees two `func.func @NAME` and trips on "redefinition of
+   * symbol". The new definition will be re-captured by runReplInput on the
+   * way out, so future turns see the latest version. */
+  std::set<std::string> RedefinedHere;
+  {
+    size_t I = 0;
+    while ((I = Stripped.find("function", I)) != std::string::npos) {
+      bool LeftWord = (I > 0) &&
+                      (std::isalnum((unsigned char)Stripped[I-1]) ||
+                       Stripped[I-1] == '_');
+      if (LeftWord) { I += 8; continue; }
+      size_t J = I + 8;
+      /* Scan the function signature up to the first `(` for a name token.
+       * Forms supported: `function NAME(...)`, `function out = NAME(...)`,
+       * `function [a,b] = NAME(...)`. */
+      size_t Open = Stripped.find('(', J);
+      if (Open == std::string::npos) { I += 8; break; }
+      std::string Sig = Stripped.substr(J, Open - J);
+      /* Take whatever follows the last `=`, else the whole prefix. */
+      auto Eq = Sig.rfind('=');
+      std::string Tail = (Eq == std::string::npos) ? Sig
+                                                     : Sig.substr(Eq + 1);
+      /* Strip whitespace, brackets. */
+      std::string Name;
+      for (char c : Tail) {
+        if (std::isalnum((unsigned char)c) || c == '_') Name += c;
+        else if (!Name.empty()) break;
+      }
+      if (!Name.empty()) RedefinedHere.insert(Name);
+      I = Open + 1;
+    }
+  }
+  std::set<std::string> Wanted;
+  for (auto &P : g_ReplUserFunctions) {
+    if (RedefinedHere.count(P.first)) continue;
+    if (mentions(P.first.c_str())) Wanted.insert(P.first);
+  }
+  bool Grew = true;
+  while (Grew) {
+    Grew = false;
+    for (auto &P : g_ReplUserFunctions) {
+      if (Wanted.count(P.first)) continue;
+      /* Scan every already-wanted function's body for mentions. */
+      bool Hit = false;
+      auto scanBody = [&](const std::string &Body, const std::string &Name) {
+        size_t NL = Name.size();
+        size_t Pos = 0;
+        while ((Pos = Body.find(Name, Pos)) != std::string::npos) {
+          bool LeftWord = (Pos > 0) && (std::isalnum((unsigned char)Body[Pos-1]) ||
+                                          Body[Pos-1] == '_');
+          if (!LeftWord && Pos + NL < Body.size()) {
+            size_t Q = Pos + NL;
+            while (Q < Body.size() && (Body[Q] == ' ' || Body[Q] == '\t')) Q++;
+            if (Q < Body.size() && Body[Q] == '(') return true;
+          }
+          Pos += NL;
+        }
+        return false;
+      };
+      for (auto &W : Wanted) {
+        auto It = g_ReplUserFunctions.find(W);
+        if (It == g_ReplUserFunctions.end()) continue;
+        if (scanBody(It->second, P.first)) { Hit = true; break; }
+      }
+      if (Hit) { Wanted.insert(P.first); Grew = true; }
+    }
+  }
+  for (auto &Name : Wanted) {
+    auto It = g_ReplUserFunctions.find(Name);
+    if (It == g_ReplUserFunctions.end()) continue;
+    if (!Out.empty()) Out += '\n';
+    Out += "% --- repl-user-fn ";
+    Out += Name;
+    Out += " ---\n";
+    Out += It->second;
+    if (!It->second.empty() && It->second.back() != '\n') Out += '\n';
+  }
+  if (Out.empty()) return std::string();
   return Out;
 }
 int  matlab_dbg_add_breakpoint_ex(int32_t file_id, int32_t line,

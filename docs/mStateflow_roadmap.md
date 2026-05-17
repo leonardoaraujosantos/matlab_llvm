@@ -708,14 +708,16 @@ existing C++ runtime that already underpins `.m` programs.
   §6.7) for live debug + introspection.
 - **REPL shortcut**: `loadStateChart('foo.mflow')` is intercepted at
   the REPL line dispatcher (next to `tryHandleHelp`); it shells out
-  to the same matlabc binary with `-emit-matlab` and feeds the
-  output through `runReplInput` so the chart's `<name>_tick`
-  registers in the live session. The demo driver runs once; further
-  drive scripts that span REPL turns currently hit matlabc's
-  cross-unit JIT gap (see
-  [`repl_jit_cross_unit_gap.md`](repl_jit_cross_unit_gap.md) for the
-  layer-by-layer investigation + fix sketch). For programmatic
-  drives today, use `-emit-c` + an AOT driver instead.
+  to the same matlabc binary with `-emit-matlab`, feeds the output
+  through `runReplInput`, and stashes the chart's `<name>_tick`
+  function in the REPL's user-function table. Subsequent REPL turns
+  can call `<name>_tick(...)` directly — the prelude builder pulls
+  the function source back so each call-site TU sees the function
+  definition + the call together. Cross-unit user-function calls
+  (the broader matlabc gap previously documented in
+  [`repl_jit_cross_unit_gap.md`](repl_jit_cross_unit_gap.md)) were
+  closed in the same change; that doc now describes the shipped
+  fix.
 
 ### 6.6 Codegen lanes (closed)
 
@@ -1141,9 +1143,8 @@ chart-specific suites, 79 chart-specific cases).
 **Remaining backend follow-ons**: only the Tier-N+ deferrals (C
 action language, Messages with queue semantics, Mealy/Moore
 *conversion* sweeps, Atomic Subcharts for separate codegen,
-Simulink-based states, multi-chart Sequence Viewer) — plus the
-**matlabc REPL cross-unit JIT gap** documented in
-[`repl_jit_cross_unit_gap.md`](repl_jit_cross_unit_gap.md), which
-is matlabc-wide (not chart-specific) and estimated at ~1 wk for a
-proper coordinated fix across resolver / runtime workspace / JIT
-plumbing.
+Simulink-based states, multi-chart Sequence Viewer). The matlabc
+REPL cross-unit JIT gap previously listed here was closed via the
+user-function-persistence prelude — see
+[`repl_jit_cross_unit_gap.md`](repl_jit_cross_unit_gap.md) for the
+shipped design + test coverage.
