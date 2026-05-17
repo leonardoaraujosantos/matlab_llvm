@@ -14,15 +14,30 @@ workflows:
 - multiple output backends plus REPL and editor tooling
 
 Out of scope:
-- toolboxes
 - GUI APIs (interactive figures, App Designer, Live Editor inline plots,
   ginput, pan/zoom/rotate)
 - full MATLAB compatibility
 - `.mat` file compatibility
 
-Now in scope (covered by dedicated docs):
+In scope (subsets shipped, covered by dedicated docs):
 - **Plotting**: headless Cairo-backed `plot` / `bar` / `surf` / etc. with
   PNG/SVG/PDF output. See [`plotting.md`](plotting.md).
+- **Toolboxes (eleven shipped surfaces)** — earlier revisions of this
+  doc listed toolboxes as out of scope; that scope has expanded. The
+  runtime now ships practical subsets of:
+  Signal Processing ([`signal_toolbox_roadmap.md`](signal_toolbox_roadmap.md)),
+  Control System ([`control_toolbox_roadmap.md`](control_toolbox_roadmap.md)),
+  Communications ([`comm_toolbox_roadmap.md`](comm_toolbox_roadmap.md)),
+  RF ([`rf_toolbox_plan.md`](rf_toolbox_plan.md) + [`verilog_a_plan.md`](verilog_a_plan.md)),
+  Antenna ([`antenna_toolbox_roadmap.md`](antenna_toolbox_roadmap.md)),
+  Propagation Models ([`propagation_toolbox_roadmap.md`](propagation_toolbox_roadmap.md)),
+  Optimization ([`optim_toolbox_roadmap.md`](optim_toolbox_roadmap.md)),
+  Partial Differential Equation ([`pde_toolbox_roadmap.md`](pde_toolbox_roadmap.md)),
+  Symbolic Math via SymPP ([`sym.md`](sym.md) / [`symbolic_toolbox_roadmap.md`](symbolic_toolbox_roadmap.md)),
+  Fixed-Point Designer (`fi`) ([`fixed_point_toolbox_roadmap.md`](fixed_point_toolbox_roadmap.md) / [`emit_fixed_point.md`](emit_fixed_point.md)),
+  and Stateflow / mStateflow ([`mStateflow_roadmap.md`](mStateflow_roadmap.md)).
+  Apps / Live Editor / GUIs / Simulink integration for each are
+  individually carved out — see the per-toolbox roadmap.
 
 ## Reading Guide
 
@@ -125,7 +140,7 @@ Now in scope (covered by dedicated docs):
 | `single` | 🟡 | Cast builtin routes to f64 (truncate only) |
 | `int8..int64`, `uint8..uint64` | 🟡 | **`int32` + `uint8` matrix lanes shipped (Phase 1.1)**: dedicated `matlab_mat_i32` / `matlab_mat_u8` runtime descriptors with saturating arithmetic (add/sub/.*/./), round-half-away-from-zero division, `int*N + double → int*N` MATLAB rule (double scalar saturating-cast at the binop), comparisons (return logical f64 0/1), cross-lane casts (`int32(uint8_mat)` etc.), typed disp formatting, REPL cross-input typed display + binops (registry-tagged workspace slots, `MxN int32`/`MxN uint8` in DAP variable view), and Python (`mat_i32_*` numpy int32 / int64-acc) + TypeScript (`mat_i32_*` NDArray) runtime parity. Gating tests: `test/Run/int_matrix_binops.m`, `int_image_filter.m`, `int_pixel_math.m`. **Still f64-shadowed**: `int8`, `int16`, `int64`, `uint16`, `uint32`, `uint64` matrix lanes, scalar-int+matrix interaction tail, fi/typed-int interplay. Scalar typed-int casts use the f64 runtime + saturating cast on assignment. |
 | `complex` | ✅ | Imaginary literals (`2i`, `3j`), scalar + matrix arithmetic (add/sub/mul/div/matmul), mixed real+complex binops. Separate re/im planes; scalars auto-boxed to 1×1 — see [`docs/complex.md`](complex.md). |
-| `fi` (Fixed-Point Designer) | 🟡 | Phases 1–5 shipped: scalar `fi(value, signed, WL, FL)` and `fi(value, T)` / `fi(value, T, F)` constructors with literal-fold, `+ - *`, `(:)` type-preserving assignment, `Saturate`/`Wrap` overflow, all five rounding modes (`Floor`/`Nearest`/`Zero`/`Ceiling`/`Convergent`), sub-native WL (e.g. WL=12 in i16 lane), implicit `fi + double` promotion, `int(n)` / `storedInteger(n)` / `double(n)`, `bin/hex/dec` display, **fi arrays** (`fi(zeros(1,N),...)`, indexing, slicing, vector concat, `sum`/`mean`), **persistent storage** of fi arrays, `numerictype` / `fimath` first-class objects, `setfimath` / `removefimath`, `reinterpretcast`, `-emit-fixed-point-report` driver flag. Gating test: FIR filter in `test/Run/fi_filter.m`. Storage = native `int8/16/32/64`. **Still open:** function-internal fi typing across user calls (`function y = f(x)` doesn't propagate the spec), 2-D fi matrices (1-D shipped), reductions tail (`prod`/`min`/`max`/`cumsum` on fi), `fi` parfor reductions, `fipref` display preferences, slope/bias scaling, complex `fi`, 3-D fi arrays. emit-typescript: FIR test skipped (BigInt-vs-number coercion). See [`docs/emit_fixed_point.md`](emit_fixed_point.md) §10.1. |
+| `fi` (Fixed-Point Designer) | 🟡 | Phases 1–5 shipped: scalar `fi(value, signed, WL, FL)` and `fi(value, T)` / `fi(value, T, F)` constructors with literal-fold, `+ - *`, `(:)` type-preserving assignment, `Saturate`/`Wrap` overflow, all five rounding modes (`Floor`/`Nearest`/`Zero`/`Ceiling`/`Convergent`), sub-native WL (e.g. WL=12 in i16 lane), implicit `fi + double` promotion, `int(n)` / `storedInteger(n)` / `double(n)`, `bin/hex/dec` display, **fi arrays** (`fi(zeros(1,N),...)`, indexing, slicing, vector concat, `sum`/`mean`), **persistent storage** of fi arrays, `numerictype` / `fimath` first-class objects, `setfimath` / `removefimath`, `reinterpretcast`, `-emit-fixed-point-report` driver flag. Gating test: FIR filter in `test/Run/fi_filter.m`. Storage = native `int8/16/32/64`. **Still open** (Tier-6 follow-ons): function-internal fi typing across user calls (`function y = f(x)` doesn't propagate the spec — biggest UX gap), 2-D fi matrices (1-D shipped), reductions tail (`prod`/`min`/`max`/`cumsum` on fi), `fi` parfor reductions, `fipref` display preferences, slope/bias scaling, complex `fi`, 3-D fi arrays. emit-typescript: FIR test skipped (BigInt-vs-number coercion). See [`docs/fixed_point_toolbox_roadmap.md`](fixed_point_toolbox_roadmap.md) §7 (tiered compatibility plan) and [`docs/emit_fixed_point.md`](emit_fixed_point.md) §10.1 (implementation reference). |
 | N-D arrays (3-D) | 🟡 | `zeros(m,n,p)` / `ones(m,n,p)` + scalar `A(i,j,k)` read/write, `size(A, 3)`, `numel`, `ndims` |
 | N-D arrays (>3D) | ❌ | |
 | Sparse matrices | ❌ | |
@@ -137,7 +152,12 @@ Now in scope (covered by dedicated docs):
 ### Symbolic Math Toolbox (`sym` / `syms`)
 
 Opt-in via `-DMATLAB_LLVM_WITH_SYM=ON` — requires [SymPP](https://github.com/leonardoaraujosantos/SymPP).
-See [`docs/sym.md`](sym.md) for the full surface.
+See [`docs/sym.md`](sym.md) for the full user-facing surface, and
+[`docs/symbolic_toolbox_roadmap.md`](symbolic_toolbox_roadmap.md) for
+the tiered compatibility plan (Tiers 1 → 4 ✅ closed; Tier-5
+`matlabFunction` handle + AppliedFunction lifting + cell-array
+array-arg lowering + extended assumption properties is the next
+slice; Tier-6 `-emit-python` via SymPy is the multi-backend track).
 
 | Function | Status | Notes |
 |---|:-:|---|
@@ -490,7 +510,7 @@ Per-toolbox roadmap in [`comm_toolbox_roadmap.md`](comm_toolbox_roadmap.md) §2.
 
 ### Propagation Models (Communications + Antenna Toolboxes — function-form)
 
-Per-toolbox roadmap in [`comm_toolbox_roadmap.md`](comm_toolbox_roadmap.md) §3. Function-form surface — no classdef System Objects required, so this track ships in parallel with the SO-gated Comm Tier-3+ / RF / Antenna arcs. All entries live in `runtime/runtime_prop.cpp`. End-to-end demos under `examples/rf/` (Barbados PtP + ITM coverage, sector-coverage SINR, Fresnel/diffraction, pattern sampling).
+Per-toolbox roadmap in [`propagation_toolbox_roadmap.md`](propagation_toolbox_roadmap.md) (promoted to a dedicated roadmap as of 2026-05-17; previously chapter §3 of [`comm_toolbox_roadmap.md`](comm_toolbox_roadmap.md)). Function-form surface — no classdef System Objects required, so this track ships in parallel with the SO-gated Comm Tier-3+ / RF / Antenna arcs. All entries live in `runtime/runtime_prop.cpp`. End-to-end demos under `examples/rf/` (Barbados PtP + ITM coverage, sector-coverage SINR, Fresnel/diffraction, pattern sampling).
 
 | Group | Function | Status | Notes |
 |---|---|:-:|---|
@@ -505,7 +525,7 @@ Per-toolbox roadmap in [`comm_toolbox_roadmap.md`](comm_toolbox_roadmap.md) §3.
 | Mount orientation (PROP-Tier-3 §3.4.2) | `applyMountOrientation(az_w, el_w, m_az, m_tilt)` (1×2 matrix), `applyMountAz(...)` / `applyMountEl(...)` (scalars) | ✅ shipped | Scalar siblings exposed because the matrix-return form requires indexing of the 1×2 result, which the dispatch can't always retype when feeding directly into another pattern call. |
 | Multi-site coverage with directional antennas (PROP-Tier-3 §3.4.3) | `coverageGridMulti(sites, antennas, heightmap, bbox, NLat, NLon, rx_h, rx_g, model, agg, climate, q_t, q_l, q_s)` | ✅ shipped | `sites` is `[N × 6]` (lat, lon, h_m, P_W, f_Hz, n_ant). `antennas` is `[Σn_ant × 8]` (pattern code, peak gain, bw_az, bw_el, fb_or_n, mount_az, mount_tilt, _). `agg` ∈ {0 = best-server, 1 = sum-power, 2 = SINR (dB)}. Verified: two-site three-sector FSPL best-server gives 48×48 grid spanning −43 / −76 / −85 dBm; same scenario SINR yields ~41 / 7 / 0 dB. |
 | Examples | `examples/rf/coverage_barbados.m` | ✅ | Mount Hillaby ↔ Bridgetown 13.8 km PtP link, dual 22 dBi cosine-pattern dishes, Longley-Rice (climate 3 maritime subtropical, 80/99/99 reliability) → 149.5 dB path loss, −68.5 dBm at RX, 35 dB margin. Plus a 48×48 best-server coverage map from Mount Hillaby. Companion demos: `pathloss_models.m`, `fresnel_diffraction.m`, `antenna_patterns.m`, `longley_rice_link.m`, `geo_helpers.m`, `coverage_three_sector.m`, `prop_smoke.m`. README in `examples/rf/`. |
-| Carved out (deliberately deferred) | Site Viewer 3-D map, ray tracing through OSM buildings, auto-fetch SRTM/DTED/OSM tile servers, TIREM, MSI Planet I/O, animated live coverage, GPU acceleration | 🔴 | Per `comm_toolbox_roadmap.md` §3.7. |
+| Carved out (deliberately deferred) | Site Viewer 3-D map, ray tracing through OSM buildings, auto-fetch SRTM/DTED/OSM tile servers, TIREM, MSI Planet I/O, animated live coverage, GPU acceleration | 🔴 | Per [`propagation_toolbox_roadmap.md`](propagation_toolbox_roadmap.md) §8 (Site Viewer track at [`siteviewer.md`](siteviewer.md)). |
 | Classdef wrappers (PROP-Tier-1b §3.5) | `propagationModel(kind)`, `txsite(...)`, `rxsite(...)`, `pathloss(prop, rx, tx)`, `link(tx, rx)`, `coverage(tx, prop, ...)`, `los(tx, rx)`, `sigstrength(rx, tx, pm)`, `show(...)` | ✅ shipped | CamelCase classdefs (`PropagationModel`, `TxSite`, `RxSite`) with kwarg-sugar constructors — `TxSite('Latitude', 42.3, 'Longitude', -71.35, ...)` etc.  Methods dispatch through the function-form runtime.  Antenna gain is a scalar stub today (full directional patterns land with ANT-Tier-2). |
 
 ### RF Toolbox (subset)
@@ -695,7 +715,24 @@ deliberate non-goals; see "Out of scope."
 - **Interactive UI / GUIs** — no live windows, mouse picking, App Designer.
   Headless plotting (`plot`, `surf`, `bar`, ... → PNG/SVG/PDF) is shipped;
   see [`plotting.md`](plotting.md).
-- **Simulink and toolboxes** (Signal Processing, Image Processing, Control Systems, Statistics, Symbolic Math, etc.) — each is a separate MathWorks product; would require reimplementing thousands of functions.
+- **Simulink** — full block-library + simulation engine + Coder + RT
+  workshop is its own product. A practical subset ships under a
+  different name as the **mflowLink** (signal-flow `.mflow`) dialect +
+  Embedded Coder lane: see [`mflow_link_roadmap.md`](mflow_link_roadmap.md)
+  and [`embedded_coder_roadmap.md`](embedded_coder_roadmap.md). Stateflow's
+  charting / debug surface ships under **mStateflow**: see
+  [`mStateflow_roadmap.md`](mStateflow_roadmap.md).
+- **Toolboxes — apps, Live Editor tasks, deep-learning bridges**.
+  Practical subsets of Signal Processing, Control System,
+  Communications + RF + Antenna + Propagation, Optimization, PDE,
+  Symbolic Math, and Fixed-Point Designer **do** ship in the runtime —
+  see the in-scope list at the top of this doc. What stays out of
+  scope: every toolbox's interactive app surface (e.g., Filter
+  Designer, Control System Designer, PID Tuner, optimtool, Antenna
+  Designer, Smith Chart Tool, RF Budget Analyzer, PDE Modeler, Live
+  Editor tasks), MATLAB Coder UI integration, deep-learning bridges
+  (DL Toolbox / RL Toolbox), and the full SO surface for the comm
+  classes (gated on the System-Object lowering fix tracked in CST §12).
 - **MEX interop** — loading compiled `.mex` files; deep binary-ABI lock-in with MathWorks.
 - **Live Scripts** (`.mlx`) — proprietary format; use Jupyter or a documentation toolchain instead.
 - **GPU arrays** (`gpuArray`) — would require a CUDA/ROCm backend; out of scope unless specifically prioritized.
@@ -716,7 +753,7 @@ sort / linalg tail, strings, REPL, file I/O, basic OOP, tooling —
 |:-:|---|--:|---|
 | ~~1~~ | ~~Struct arrays (`s(i).x`)~~ — **shipped Phase 2** | — | Data-in-records patterns |
 | 2 | Integer runtime — `int32` + `uint8` matrix lanes complete (runtime, lowering, Python+TS, REPL+DAP). Remaining lanes (i8/i16/i64/u16/u32/u64 matrices) drop in against the same template. | ~1 week left | Image processing pixel code. (Note: 64-bit lanes already exist via fi-array work.) |
-| 2b | Fixed-Point Designer (`fi`) — Phases 1–5 shipped. **Open**: function-internal fi typing (~1 week), 2-D fi matrices (~1.5 weeks), fi parfor reductions, reductions tail. See [`emit_fixed_point.md`](emit_fixed_point.md) §10.1. | 2 weeks total | DSP simulation, hardware-faithful integer math |
+| 2b | Fixed-Point Designer (`fi`) — Tiers 1 → 5 shipped. **Open** (Tier-6): function-internal fi typing across user calls (~1 wk, biggest UX gap), 2-D fi matrices (~1.5 wk), fi parfor reductions (~1 wk), reductions tail `prod`/`min`/`max`/`cumsum`/`dot` (~3 days), TypeScript BigInt coercion (~3 days). See [`fixed_point_toolbox_roadmap.md`](fixed_point_toolbox_roadmap.md) §7 + [`emit_fixed_point.md`](emit_fixed_point.md) §10.1. | ~3 weeks total | DSP simulation, hardware-faithful integer math |
 | 3 | ~~`varargout`~~ (shipped Phase 1.2) + 3-D vector slicing (`A(:,:,k)`) | ~3 days remaining | Library-style + volumetric code |
 | 4 | Complex linalg tail (`inv` / `det` / `svd` / `eig`) | 1 week | Complete DSP / scientific code |
 | 5 | OOP value-class copy semantics — **partially shipped (Phase 3)**: copy-on-assign works; method-dispatch value semantics still requires test-corpus migration. + property validators. | ~1 week left | Modern MATLAB code |

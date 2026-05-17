@@ -105,6 +105,33 @@ signals it as a parallel-shippable track.
 
 ---
 
+## 0.5 Shipped status snapshot (2026-05-17)
+
+Roughly the entire function-form surface across Comm / RF / Antenna /
+Propagation has shipped — only the multi-class **System-Object** form
+of the comm classes and the planar / array Antenna MoM tracks remain
+open. Quick map:
+
+| Track | Tiers shipped | What's left |
+|---|---|---|
+| **Comm Tier-1 base layer** (§2) | ✅ all (`randi` / `rng` / `randsrc` / `awgn` / `int2bit` / `biterr` / `symerr`) | — |
+| **Comm Tier-2 digital modulation** (§4) | ✅ PAM / QAM / PSK / FSK / generic / RC + RRC + Gaussian / `berawgn` / `scatterplot` / `eyediagram` | BPSK/QPSK convenience SO aliases (§4.4) gated on SO surface |
+| **Comm Tier-3 channel coding** (§5) | ✅ CRC (function + SO) / convolutional + Viterbi (hard + soft) / Hamming / interleavers / **Tier-7 modern codes** (Polar SC, LDPC min-sum, Turbo PCCC max-log-MAP) | BCH/RS + `gf(2^m)` (§5.3) |
+| **Comm Tier-4 equalisers + sync + RF impairments** (§6) | ✅ LMS / RLS / CMA / DFE / Costas PLL / Mueller-Müller / preamble detect / IQ imbal / Saleh / Rapp / Ghorbani / phase noise / `vitdecSoft` | SO variants gated on full SO surface |
+| **Comm Tier-5 OFDM / fading / MIMO** (§7) | ✅ `ofdmmod` / `ofdmdemod` / Rayleigh Jakes / Rician / Alamouti OSTBC + MRC / `mlDetect` | Complex ZF / MMSE / sphere decoding (gated on future complex-LU runtime); SO variants |
+| **Comm Tier-6 spreading + source coding** (§8) | ✅ PN / Gold / Hadamard / Walsh / `quantiz` / Lloyd / G.711 µ-law + A-law / DPCM | Kasami sequences (m-sequence decimation); `dpcmopt` codebook design |
+| **RF-Tier-1 → Tier-4** (§8.1 – §8.4) | ✅ Touchstone v1+v2 / 2-port + N-port S↔Y/Z/H/G/ABCD/T / cascade (Redheffer) / `rfbudget` / Vector Fitting (real + complex pole pairs) / `s2tdr` / `s2tdt` / transmission-line geometries (microstrip / CPW / coax / parallel-plate / two-wire) / `matchingnetwork` (L / T / Pi) / `rfckt.*` block hierarchy + LC filter circuits / Smith chart numerics | rfckt classdef wrappers polish, Verilog-A export (already shipped via [`verilog_a_plan.md`](verilog_a_plan.md) Tier-1 → Tier-10) |
+| **ANT-Tier-2 MVP** (see [`antenna_toolbox_roadmap.md`](antenna_toolbox_roadmap.md)) | ✅ Closed-form thin-wire dipole (`antennaWireSolve` / `antennaWirePattern` / `antennaWireSparameters`) + `AntDipole` / `AntMonopole` classdefs | ANT-Tier-2b multi-wire MoM (Pocklington / Hallen on multi-wire geometries), ANT-Tier-3 surface MoM (planar / patch), ANT-Tier-4 arrays |
+| **PROP-Tier-1a / 2a / 2b / 3 + 1b** (see [`propagation_toolbox_roadmap.md`](propagation_toolbox_roadmap.md)) | ✅ All — closed-form path loss / cellular empirical / Fresnel / knife-edge / Haversine + Vincenty / Longley-Rice engineering port / terrain profile / LOS / link budget / single-TX coverage / sector + cosine + Gaussian + 3GPP patterns / mount orientation / multi-TX `coverageGridMulti` with best-server + sum-power + SINR aggregation + `PropagationModel` / `TxSite` / `RxSite` CamelCase classdefs | NTIA v7.0 byte-identical ITM reference port; SiteViewer 3-D rendering (carved out — see [`siteviewer.md`](siteviewer.md)) |
+
+The §12 execution-order table (rows 1 – 48) has been refreshed to
+match. The remaining open items consolidate into: (1) full SO surface
+for the `comm.*` classes; (2) `gf(2^m)` typed descriptor for BCH/RS;
+(3) the ANT-Tier-2b multi-wire MoM debug; (4) the multi-week
+ANT-Tier-3 surface-integral MoM.
+
+---
+
 ## 1. Already shipped (Tier-0 baseline, inherited from SPT + core)
 
 These are the matlab_llvm primitives Comm sits on top of. Locations
@@ -144,7 +171,7 @@ Like CST's Tier 1, this is a small **prerequisite tier** that almost
 no user-visible Comm function lights up without. Unlike CST, the
 prerequisites are tiny — most are 1–2 sessions each.
 
-### 2.1 Random integer source `randi` 🔵
+### 2.1 Random integer source `randi` ✅
 
 **Scope**:
 - `randi(imax)` — single int in `[1, imax]`.
@@ -164,7 +191,7 @@ ship it is refusing the textbook idiom.
 **Effort**: 1 session. Reuses `matlab_rand` infrastructure;
 multiplies and rounds.
 
-### 2.2 RNG seed control `rng` 🔵
+### 2.2 RNG seed control `rng` ✅
 
 **Scope**:
 - `rng(seed)` — set deterministic seed.
@@ -179,7 +206,7 @@ model).
 
 **Effort**: 1 session if we keep a single global PRNG state.
 
-### 2.3 `randsrc` and `randerr` 🔵
+### 2.3 `randsrc` and `randerr` ✅
 
 **Scope**:
 - `out = randsrc(m, n, alphabet)` — random samples from `alphabet`
@@ -193,7 +220,7 @@ intentional bit errors. Textbook examples lean on these.
 
 **Effort**: 1 session each (thin wrappers over `randi`).
 
-### 2.4 Bit ↔ integer conversion `int2bit` / `bit2int` / `de2bi` / `bi2de` 🔵
+### 2.4 Bit ↔ integer conversion `int2bit` / `bit2int` / `de2bi` / `bi2de` ✅
 
 **Scope**:
 - `bits = int2bit(ints, nbits)` — MSB-first bit vector per integer.
@@ -208,7 +235,7 @@ intentional bit errors. Textbook examples lean on these.
 
 **Effort**: 1 session for both pairs.
 
-### 2.5 AWGN channel `awgn` 🔵
+### 2.5 AWGN channel `awgn` ✅
 
 **Scope**:
 - `y = awgn(x, snr)` — adds white Gaussian noise to attain `snr` dB
@@ -230,7 +257,7 @@ vs default `'dB'` SNR units.
 
 **Effort**: 1 session.
 
-### 2.6 BER / SER computation `biterr` / `symerr` 🔵
+### 2.6 BER / SER computation `biterr` / `symerr` ✅
 
 **Scope**:
 - `[nerr, ber] = biterr(x, y)` — bit-error count and ratio.
@@ -271,600 +298,48 @@ bits per SNR point. Tier-2 modulation will swap the
 
 ---
 
-## 3. Propagation Models — early-priority track (~7 weeks function-form, independent)
-
-This section is **promoted out of the Antenna Toolbox companion**
-because the user-flagged use case (point-to-point with terrain +
-Fresnel zone + Longley-Rice + numeric Coverage Map) is the
-most-requested feature in this combined roadmap. **Most of the
-propagation surface is function-form and has zero classdef /
-System-Object dependency** — it can ship in parallel with
-everything else and reaches the user's stated workflow without
-waiting for any of: Comm Tier 3+, RF-Tier-1+, ANT-Tier-1+, or the
-CST §12 System-Object lowering fix.
-
-The arc decomposes into five sub-tiers ordered by independence:
-
-| Sub-tier | Effort | Dependencies | What lights up |
-|---|---|---|---|
-| §3.1 PROP-Tier-1a — Function-form closed-form models | ~1.5 wk | none (`log10`/`sqrt`/`erfc`) | All empirical path-loss formulas (FSPL/Hata/COST231/Egli/ECC33/SUI/Ericsson + ITU-R rain/gas/fog/close-in), Fresnel zones, knife-edge diffraction, Haversine/Vincenty — ✅ **shipped** |
-| §3.2 PROP-Tier-2a — ITM / Longley-Rice (function-form) | ~3 wk | PROP-Tier-1a + complex LU or 2N×2N real workaround (already feasible) | Terrain-aware path loss with reliability tuning — ✅ **shipped** (engineering port; v7.0 NTIA byte-identical reference port still 🔵) |
-| §3.3 PROP-Tier-2b — Single-TX PtP + Coverage Map (function-form) | ~1 wk | PROP-Tier-2a | `los_check`, `link_budget`, `coverage_grid` numeric API. Single-TX, omnidirectional — ✅ **shipped** |
-| §3.4 PROP-Tier-3 — Directional + multi-site coverage (function-form) | ~1.5 wk | PROP-Tier-2b | Sector / cosine / Gaussian / 3GPP analytical patterns, mount orientation, `coverage_grid_multi` with best-server / sum-power / SINR aggregation — ✅ **shipped**. **User's "two-poles + sectors + directionals" scenario lights up here.** |
-| §3.5 PROP-Tier-1b — `propagationModel` / `txsite` / `rxsite` classdef wrappers | ~3 sess | PROP-Tier-1a + System-Object fix (CST §12) | MathWorks-API-faithful `prop = propagationModel(...)` + `pathloss(prop, rx, tx)` syntax — 🔵 gated on SO fix |
-
-**Total**: ~7 weeks for the function-form quartet (§3.1 + §3.2 +
-§3.3 + §3.4) — fully reachable today, no architectural blockers.
-The classdef wrapper layer (§3.5) is icing for MathWorks-API
-compatibility.
-
-### 3.1 PROP-Tier-1a — Function-form closed-form models (~1.5 weeks)
-
-#### 3.1.1 ITU-R / NIST closed-form models 🔵
-
-**Scope** — bare functions:
-- `L = fspl(d, freq)` — ITU-R P.525 Free Space `L = 32.45 +
-  20·log10(f_MHz) + 20·log10(d_km)` dB.
-- `L = pathlossRain(d, freq, rainrate, polarization)` — ITU-R
-  P.838 specific attenuation `γ_R = k·R^α` integrated over `d`.
-  Frequency- and polarization-dependent `(k,α)` tables.
-- `L = pathlossGas(d, freq, T, P, rho)` — ITU-R P.676 oxygen +
-  water-vapor attenuation; layer model from §2 of standard.
-- `L = pathlossFog(d, freq, M)` — ITU-R P.840 cloud / fog
-  `γ_c = K_l·M`.
-- `L = pathlossCloseIn(d, freq, n, sigma, d0)` — Close-In NIST /
-  3GPP TR 38.901 reference-distance model.
-
-**Why function-form first**: bare functions need no classdef, no
-field stores, no monomorphization games. They lower into clean
-single-function call IR on every emit lane and ship today against
-the existing runtime substrate.
-
-**Effort**: ~4 sessions.
-
-#### 3.1.2 Cellular empirical extensions (non-MathWorks namespace) 🔵
-
-**Scope** — all closed-form, ~1 day each:
-- `pathlossHata(f, ht, hr, d, env)` — Okumura-Hata, 150–1500 MHz.
-  `env` ∈ `{'urban-large', 'urban-medium-small', 'suburban',
-  'open'}`.
-- `pathlossCost231Hata(f, ht, hr, d, env)` — COST231 extension,
-  1500–2000 MHz.
-- `pathlossEgli(f, ht, hr, d)` — Egli VHF/UHF, 30–1000 MHz.
-- `pathlossEcc33(f, ht, hr, d)` — ITU-R P.529, 700–3500 MHz.
-- `pathlossSui(f, ht, hr, d, terrain)` — Stanford University
-  Interim, 1900–11000 MHz. `terrain` ∈ `{'A','B','C'}`.
-- `pathlossEricsson9999(f, ht, hr, d, env)` — 150–1900 MHz.
-
-**Why ship these despite being MathWorks-incompatible**: every
-cellular link-budget tutorial uses one of them; coverage-planning
-services like cloud-RF expose exactly this list. A user porting a
-script from one of those tools should not have to re-derive the
-formulas.
-
-**Effort**: ~3 sessions.
-
-#### 3.1.3 Fresnel zone math 🔵
-
-**Scope**:
-- `r = fresnelZoneRadius(d1, d2, lambda, n)` — `n`-th Fresnel
-  zone radius `r = sqrt(n·λ·d1·d2/(d1+d2))`.
-- `clearance = fresnelClearance(profile, d1, d2, lambda, n)` —
-  given a sampled terrain profile, returns the percentage Fresnel-
-  zone clearance (0% = grazing, 60% = TIA-recommended minimum).
-
-**Effort**: ~3 sessions.
-
-#### 3.1.4 Knife-edge diffraction 🔵
-
-**Scope**:
-- `Ld = diffractionKnifeEdge(h, d1, d2, lambda)` — single-edge
-  Fresnel-Kirchhoff loss as a function of the diffraction
-  parameter `v = h·sqrt(2·(d1+d2)/(λ·d1·d2))`. Closed-form via
-  Fresnel integrals `C(v)`, `S(v)` (already approximable via
-  shipped `erfc`).
-- `Ld = diffractionBullington(profile, lambda)` — multi-obstacle
-  via Bullington's method (single equivalent edge).
-- `Ld = diffractionDeygout(profile, lambda)` — Deygout's
-  recursive multi-edge method (more accurate than Bullington for
-  closely-spaced obstacles).
-- `Ld = diffractionEpsteinPeterson(profile, lambda)` — alternative
-  multi-edge method.
-
-**Effort**: ~1 week. Single-edge is 1 session; multi-edge methods
-are 2–3 sessions each.
-
-#### 3.1.5 Geographic helpers 🔵
-
-**Scope**:
-- `[d, az] = haversine(lat1, lon1, lat2, lon2)` — great-circle
-  distance + initial bearing. Earth radius = 6371 km.
-- `[d, az1, az2] = vincenty(lat1, lon1, lat2, lon2, a, f)` —
-  ellipsoidal distance + bearings (WGS-84 by default). Iterative,
-  converges in 5–10 iterations.
-- `[lat2, lon2] = greatCircleDestination(lat1, lon1, d, az)` —
-  destination point given start + distance + bearing.
-
-**Effort**: ~2 sessions.
-
-### 3.2 PROP-Tier-2a — ITM (Longley-Rice) function-form (~3 weeks)
-
-#### 3.2.1 ITM v7 core port 🔵
-
-**Scope**:
-- `[L, info] = itm_pathloss(profile, freq, ht, hr, polarization,
-  climate, surface_refractivity, ground_conductivity,
-  ground_permittivity, time_var, location_var, situation_var)` —
-  bare function, no classdef.
-- `profile` is a real vector of terrain heights along the great-
-  circle path (provided by §3.3.1 `terrainProfile` or by the user
-  directly).
-- `polarization` ∈ `{'horizontal','vertical'}`. `climate` ∈ 7
-  named values. Reliability triple `(time_var, location_var,
-  situation_var)` defaults to `(50, 50, 50)` for long-term
-  median; setting `(80, 99, 99)` produces TSB-10F-compliant
-  microwave-link results.
-- Frequency range 20 MHz – 20 GHz (per the standard).
-- Returns scalar median `L` plus an `info` struct with
-  area-vs-point-to-point mode, message-success quantile, etc.
-
-**Algorithm**: faithful port of the NTIA ITM v7.0 reference C++
-source (public-domain, ~2000 lines). Three internal phases:
-preliminary (path geometry + average terrain slope), area-mode
-(when no terrain profile), and point-to-point (when profile
-provided). Tracks `m_d` (median path loss) and `Z` quantile
-statistics.
-
-**Effort**: ~3 weeks. The bulk is faithful porting + the
-area-vs-point-to-point dispatch logic; the underlying formulas
-are documented in NTIA Report 82-100 (Hufford et al., 1982).
-
-**Validation**: NTIA ships a test suite with ~30 reference cases.
-Use those as golden oracles in `test/Run/` — ITM is deterministic,
-byte-identical match is the bar.
-
-### 3.3 PROP-Tier-2b — PtP + Coverage Map (function-form, ~1 week)
-
-#### 3.3.1 Terrain profile from a heightmap 🔵
-
-**Scope**:
-- `profile = terrainProfile(heightmap, latlon_grid, lat1, lon1,
-  lat2, lon2, num_samples)` — given a 2-D `heightmap` matrix
-  spanning a `latlon_grid`, sample elevation along the great-
-  circle path.
-- Bilinear interpolation between heightmap cells.
-- The user supplies the heightmap and grid; **no SRTM/DTED
-  auto-fetch** (carved out — see §13).
-
-**Why this design**: keeps the runtime hermetic. Users wanting
-SRTM auto-fetch can do it in their own MATLAB script (e.g., via
-`websave` + a tile-server URL) and pass the resulting matrix in.
-
-**Effort**: ~3 sessions.
-
-#### 3.3.2 Line-of-sight check 🔵
-
-**Scope**:
-- `[isClear, obstructionPoint] = los_check(tx_lat, tx_lon, tx_height,
-  rx_lat, rx_lon, rx_height, profile)` — geometric LOS check
-  accounting for terrain elevation *and* effective Earth radius
-  (4/3 factor for standard atmosphere).
-- Returns boolean + index of highest obstruction along the path.
-
-**Effort**: ~1 session.
-
-#### 3.3.3 Point-to-point link budget 🔵
-
-**Scope**:
-- `result = link_budget(tx_lat, tx_lon, tx_height, tx_freq, tx_power,
-  rx_lat, rx_lon, rx_height, prop_model_name, profile, ...)` —
-  function-form PtP analysis.
-- Returns a struct: `PathLoss`, `ReceivedPower`, `Snr`,
-  `LinkMargin`, `FresnelClearance`, `LosClear`, `Profile`,
-  `Distance`, `Azimuth`.
-- `prop_model_name` selects the underlying §3.1 / §3.2 entry
-  (`'fspl'`, `'hata'`, `'cost231'`, `'longley-rice'`, …).
-- Combines path loss + diffraction + atmospheric attenuation per
-  the chosen model.
-
-**Effort**: ~3 sessions.
-
-#### 3.3.4 Coverage map (numeric) 🔵
-
-**Scope**:
-- `[grid, lat_grid, lon_grid] = coverage_grid(tx_lat, tx_lon,
-  tx_height, tx_freq, tx_power, prop_model_name, heightmap,
-  latlon_grid, ...)` — grid of received signal strength (dBm) on
-  a square or rectangular lat/lon mesh centered on the transmitter.
-- Each cell evaluates `link_budget(...)` independently → matrix
-  output.
-- Default: 100×100 cells, 10 km radius (configurable via
-  `'Resolution'`, `'MaxRange'`).
-- **Numeric form only** — returns a matrix. Plotting via the
-  shipped Cairo backend (`imagesc(grid)`) produces a static
-  heatmap PNG; users add their own colorbar/legend. Interactive
-  Site Viewer is **carved out** (§13).
-
-**Effort**: ~3 sessions. Embarrassingly parallel; serial loop is
-fine for MVP, can be `parfor`'d later.
-
-#### 3.3.5 End-to-end PtP + Coverage workflow 🔵
-
-**Closure of PROP-Tier-2b — the user's stated use case**:
-
-```matlab
-% Example 1: Point-to-point with terrain
-heightmap = load('mySrtmTile.mat').heights;   % user-supplied DEM
-gridDef   = struct('LatMin', 37.4, 'LatMax', 37.7, ...
-                   'LonMin', -122.4, 'LonMax', -122.0, ...
-                   'NumLat', 360, 'NumLon', 480);
-
-profile = terrainProfile(heightmap, gridDef, ...
-                         37.5, -122.3, 37.6, -122.0, 200);
-
-result = link_budget(37.5, -122.3, 30, 5.8e9, 0.1, ...
-                     37.6, -122.0, 5, ...
-                     'longley-rice', profile, ...
-                     'TimeVariability', 80, ...
-                     'SituationVariability', 99);
-
-disp(result.PathLoss);          % dB
-disp(result.FresnelClearance);  % %
-disp(result.LosClear);          % bool
-
-% Example 2: Coverage map
-[grid, lats, lons] = coverage_grid(37.5, -122.3, 30, 5.8e9, 0.1, ...
-                                    'longley-rice', ...
-                                    heightmap, gridDef, ...
-                                    'Resolution', 100, ...
-                                    'MaxRange', 20e3);
-% grid is 100x100 received-power dBm; user plots via Cairo
-```
-
-**Both examples work with bare functions — no classdef, no
-System-Object machinery, no architectural blockers.**
-
-### 3.4 PROP-Tier-3 — Directional + multi-site coverage (function-form, ~1.5 weeks)
-
-PROP-Tier-2b §3.3.4 ships **single-TX, omnidirectional**
-`coverage_grid`. Real WISP / cellular / point-to-multipoint planning
-needs multiple sites, multiple antennas per site, and directional
-patterns (sector / pencil-beam). PROP-Tier-3 layers that on top.
-
-The user's stated scenario — *two poles, two directional antennas
-per pole + one 120° sector antenna per pole, combined coverage map*
-— is the canonical use case for this tier.
-
-#### 3.4.1 Sector / directional antenna pattern functions 🔵
-
-Closed-form analytical patterns. **No MoM dependency** — these
-are textbook gain functions that take a `(az, el)` query and
-return a gain in dBi. Useful when the user doesn't have measured
-patterns or wants a quick model; for measured/simulated patterns,
-delegate to ANT-Tier-2 (wire MoM) outputs (§3.4.4 below).
-
-**Scope** — bare functions:
-
-- `G = sectorPattern(az, el, beamwidth_az_deg, beamwidth_el_deg, peak_gain_dBi, frontBackRatio_dB)`
-  — 3GPP TR 36.942 sector pattern. Default `beamwidth_az_deg = 65`
-  for typical cellular; use `120` for the user's "120° sector"
-  case. `frontBackRatio_dB` defaults to 25 dB.
-- `G = sectorPattern3GPP(az, el, beamwidth_az_deg, slld_dB, peak_gain_dBi)`
-  — explicit 3GPP form `Az(φ) = -min(12·(φ/φ₃dB)², slld)` for
-  azimuth and similar for elevation; `slld_dB` is sidelobe-level
-  default 25 dB.
-- `G = cosinePattern(az, el, halfBW_az, halfBW_el, peak_gain_dBi, n)`
-  — cosine-power pattern `cos^n(θ)`; `n` chosen to match the
-  half-beamwidth. Good fit for parabolic dishes / directional
-  Yagis where measured patterns aren't to hand.
-- `G = gaussianPattern(az, el, halfBW_az, halfBW_el, peak_gain_dBi)`
-  — Gaussian `G = G_peak·exp(-2.77·(az/halfBW)²)`. Smooth roll-off,
-  no sidelobes. Common in academic models.
-- `G = isotropicPattern(...)` — flat 0 dBi. Reference / baseline.
-- `G = customPattern(az_grid, el_grid, gain_matrix, az, el)` —
-  bilinear-interpolate a user-supplied gain matrix at queried
-  `(az, el)`. **Bridge to ANT-Tier-2**: a Yagi simulated by the
-  MoM solver produces exactly such a matrix.
-
-**Effort**: ~3 sessions. All closed-form; bulk is parameter
-validation and the 3GPP TR 36.942 wraparound logic.
-
-#### 3.4.2 Antenna mount + orientation 🔵
-
-A "mount" describes a physical antenna pointing direction at a
-TX/RX site. Without a mount, an antenna pattern is in the
-antenna's local frame; with one, it's in the world frame.
-
-**Scope** — bare functions + a small mount struct:
-
-```matlab
-mount = struct('Azimuth', 120, ...        % degrees from North (0–360)
-               'MechanicalTilt', 0, ...   % degrees from horizontal (+ = up)
-               'ElectricalTilt', 5, ...   % electrical down-tilt (cellular)
-               'Roll', 0);                % polarization tilt (rare)
-
-% Apply orientation: input pattern is in antenna's local frame,
-% output gain is what an observer sees from the mount's world frame.
-G_world = applyMountOrientation(patternFunc, mount, az_world, el_world);
-
-% Multi-antenna mount on one site:
-mountList = { struct('Azimuth',   0, 'ElectricalTilt', 5), ...
-              struct('Azimuth', 120, 'ElectricalTilt', 5), ...
-              struct('Azimuth', 240, 'ElectricalTilt', 5) };
-```
-
-Coordinate convention: world az is from North clockwise (compass
-bearing), el is positive above horizontal. Antenna local az/el is
-relative to boresight. Mount applies a 3-axis rotation
-(yaw=Azimuth, pitch=Tilt, roll=Roll).
-
-**Effort**: ~2 sessions. The 3-axis rotation is straightforward
-3×3 matrix; bulk is the convention bookkeeping (compass vs math
-azimuth, downtilt sign).
-
-#### 3.4.3 Multi-TX coverage with directional antennas 🔵
-
-The function that lights up the user's stated scenario.
-
-**Scope**:
-
-```matlab
-% Define each site as a struct
-site1 = struct( ...
-  'Lat', 37.5, 'Lon', -122.3, 'Height', 30, ...
-  'Power_W', 10, 'Freq_Hz', 2.4e9, ...
-  'Antennas', { ...
-    % Three 120° sectors
-    struct('Pattern', @(az,el) sectorPattern(az, el, 120, 10, 17), ...
-           'Mount', struct('Azimuth',   0, 'ElectricalTilt', 5)), ...
-    struct('Pattern', @(az,el) sectorPattern(az, el, 120, 10, 17), ...
-           'Mount', struct('Azimuth', 120, 'ElectricalTilt', 5)), ...
-    struct('Pattern', @(az,el) sectorPattern(az, el, 120, 10, 17), ...
-           'Mount', struct('Azimuth', 240, 'ElectricalTilt', 5)), ...
-    % Two directional links to other poles
-    struct('Pattern', @(az,el) cosinePattern(az, el, 8, 8, 22, 30), ...
-           'Mount', struct('Azimuth',  60, 'MechanicalTilt', 0)), ...
-    struct('Pattern', @(az,el) cosinePattern(az, el, 8, 8, 22, 30), ...
-           'Mount', struct('Azimuth', 200, 'MechanicalTilt', 0)) });
-
-site2 = struct(...);   % the second pole, same shape
-
-% Combined coverage
-[grid, info] = coverage_grid_multi({site1, site2}, ...
-                                    'longley-rice', heightmap, gridDef, ...
-                                    'Aggregation', 'best-server', ...
-                                    'Resolution', 200, ...
-                                    'MaxRange', 20e3);
-```
-
-**Aggregation modes**:
-
-| Mode | What it returns | Use case |
+## 3. Propagation Models — moved to dedicated roadmap
+
+The Propagation Models tier plan (PROP-Tier-1a closed-form ITU-R /
+cellular / Fresnel / knife-edge / geo helpers through PROP-Tier-3
+directional multi-site coverage + the PROP-Tier-1b MathWorks-API
+classdef wrappers) was previously documented here as chapter §3. It
+has been **promoted to a standalone roadmap** at
+[`propagation_toolbox_roadmap.md`](propagation_toolbox_roadmap.md)
+for discoverability and uniformity with the other per-toolbox
+roadmaps.
+
+**Status (2026-05-17): PROP-Tier-1a + 2a + 2b + 3 + 1b all shipped.**
+~7 weeks of function-form work across multiple commits, plus the
+`TxSite` / `RxSite` / `PropagationModel` CamelCase classdef wrappers
+(commit `f764dbd` sidestepped the originally-planned SO dependency).
+
+| Sub-tier | What lights up | Status |
 |---|---|---|
-| `'best-server'` (default) | For each pixel, `max(P_rx_i)` over all (site, antenna) pairs `i`; `info.ServerIndex(p)` records which one | Coverage maps, "which sector serves where" |
-| `'sum-power'` | `Σ P_rx_i` (incoherent power sum) | Conservative coverage estimate when antennas overlap |
-| `'sinr'` | `max(P) / (Σ_others P + N₀·B)` per pixel; `info.NoiseFloor` records `N₀·B` | Cellular-style SINR maps; needs `Bandwidth_Hz` per site |
-| `'rsrp'` | RSRP-style averaging over a configured set of resource elements (cellular-only convenience) | LTE / NR planning |
+| **PROP-Tier-1a** — Function-form closed-form models | All empirical path-loss formulas (FSPL/Hata/COST231/Egli/ECC33/SUI/Ericsson + ITU-R rain/gas/fog/close-in), Fresnel zones, knife-edge diffraction, Haversine/Vincenty | ✅ |
+| **PROP-Tier-2a** — ITM / Longley-Rice (function-form) | Terrain-aware path loss with reliability tuning (engineering port; byte-identical NTIA v7.0 reference port stays 🔵) | ✅ |
+| **PROP-Tier-2b** — Single-TX PtP + Coverage Map | `los_check`, `link_budget`, `coverage_grid` numeric API (single-TX, omnidirectional) | ✅ |
+| **PROP-Tier-3** — Directional + multi-site coverage | Sector / cosine / Gaussian / 3GPP analytical patterns, mount orientation, `coverage_grid_multi` with best-server / sum-power / SINR aggregation | ✅ |
+| **PROP-Tier-1b** — `propagationModel` / `txsite` / `rxsite` classdef wrappers | MathWorks-API-faithful `prop = propagationModel(...)` + `pathloss(prop, rx, tx)` syntax | ✅ |
 
-**Output `info` struct** (besides the grid):
-- `ServerIndex` — `[NumLat × NumLon]` matrix of `(site, antenna)`
-  index of the strongest server.
-- `LinkLossDB` — strongest-server path loss matrix.
-- `Azimuth` / `Elevation` — `[NumLat × NumLon]` of arrival angles
-  per pixel from the strongest server (useful for handover/
-  beam-steering planning).
-- `Polygons` — per-server coverage polygon (set of pixels where
-  that server is dominant). Returned as integer mask matrices,
-  one per server.
+Only the **ANT-Tier-2 pattern bridge** (§5.5 of the new roadmap)
+remains 🔵 — gated on the planned ANT-Tier-2b multi-wire MoM in
+[`antenna_toolbox_roadmap.md`](antenna_toolbox_roadmap.md). Runtime
+lives in `runtime/runtime_prop.cpp` (~1700 lines). See
+[`propagation_toolbox_roadmap.md`](propagation_toolbox_roadmap.md)
+for the full plan + closure tables + execution order + carve-outs.
 
-**Algorithm**:
-For each pixel `(lat, lon)`:
-1. For each site `s`, for each antenna `a` on that site:
-   - Compute great-circle distance + bearing from `(s.Lat, s.Lon)`
-     to pixel.
-   - Build terrain profile via `terrainProfile(...)`.
-   - Compute path loss via the chosen propagation model
-     (`fspl`/`hata`/`longley-rice`/...).
-   - Compute apparent gain `G_tx(az, el)` using `applyMountOrientation`
-     on the antenna's pattern + mount.
-   - Effective TX power `P_rx_dBm = P_tx_dBm + G_tx_dBi - L_path_dB
-     + G_rx_dBi`.
-2. Aggregate per the chosen mode.
+### 3.1 What Propagation brings to the rest of the roadmap
 
-**Cost**: ~`N_pixels · N_sites · N_antennas` per-link evaluations.
-For 200×200 pixels × 2 sites × 5 antennas = 400,000 link
-evaluations. Each is ~milliseconds for `longley-rice`; expect
-runs of ~minutes on serial CPU. Embarrassingly parallel —
-`parfor` opportunity.
-
-**Effort**: ~1 week. Bulk is the aggregation bookkeeping +
-`info` output assembly; the per-link evaluation reuses
-`link_budget` (§3.3.3) directly.
-
-#### 3.4.4 RX-side directional antennas 🔵
-
-Symmetric: `coverage_grid_multi` accepts an optional `RxAntenna`
-parameter — a function handle returning RX gain at the angle of
-arrival from each TX. Defaults to isotropic 0 dBi (typical for
-mobile-phone-class RX). When the user's "two-poles-talking-to-
-each-other" link uses directional dishes on both ends, RX gain
-matters.
-
-**Scope**:
-- `'RxAntennaPattern'` (function or matrix) — applies to all RX
-  pixels in the grid.
-- `'RxMount'` — orientation applied to the RX antenna pattern.
-  For coverage maps that target a roving mobile, `'RxAzimuth' =
-  'face-tx'` re-orients per-pixel toward the strongest TX; for
-  fixed-mount RX (microwave links), provide an explicit Azimuth.
-
-**Effort**: ~2 sessions.
-
-#### 3.4.5 Bridge to Antenna Toolbox (ANT-Tier-2) 🔵
-
-The `Pattern` field of an antenna mount can be:
-
-| Source | Type | Effort to integrate |
-|---|---|---|
-| Analytical (`sectorPattern`, `cosinePattern`, etc.) | Function handle `(az, el) → dBi` | 0 — already supported in §3.4.1 |
-| User-supplied gain matrix | `customPattern(az_grid, el_grid, M, az, el)` | 0 — already supported |
-| **Antenna Toolbox simulated pattern** (ANT-Tier-2) | Output of `pattern(yagiUda, freq)` is a 2-D matrix of dBi values over `(az, el)` — wrap with `customPattern` | 1 session glue once ANT-Tier-2 ships |
-| **MathWorks-API antenna handle** | `customPattern(antennaObj, freq, az, el)` thin wrapper that internally calls `pattern(antennaObj, freq, az, el)` | 1 session, gated on ANT-Tier-1 classdefs (and SO fix) |
-
-So the user can prototype with analytical sectors (today, after
-PROP-Tier-3 lands), then **drop in measured Yagi patterns**
-verbatim once Antenna Toolbox MVP ships — same `coverage_grid_multi`
-call, just swap the `Pattern` field.
-
-#### 3.4.6 PROP-Tier-3 closure
-
-| Primitive | Effort | Status |
-|---|---|---|
-| Sector / cosine / Gaussian / 3GPP / custom pattern functions (3.4.1) | 3 sess | 🔵 |
-| Mount orientation (`applyMountOrientation`) (3.4.2) | 2 sess | 🔵 |
-| `coverage_grid_multi` with best-server / sum-power / SINR aggregation (3.4.3) | 1 wk | 🔵 — closes user's "two-pole / multi-sector" use case |
-| RX-side directional antennas (3.4.4) | 2 sess | 🔵 |
-| ANT-Tier-2 pattern bridge (3.4.5) | 1 sess | 🔵 — gated only on ANT-Tier-2 shipping |
-
-**Total**: ~1.5 weeks function-form. Reaches the user's "two
-poles, three sectors + two directionals each, aggregated coverage
-map" workflow with **no architectural blockers** beyond what
-PROP-Tier-1a/2a/2b already require (zero — they're function-form).
-
-**End-of-PROP-Tier-3 the user's stated scenario lights up**:
-
-```matlab
-% Both poles, three 120° sectors + two 22 dBi directional links each
-heightmap = load('region.mat').heights;
-gridDef = struct(...);
-
-site_pole1 = struct('Lat', 37.50, 'Lon', -122.30, 'Height', 35, ...
-                    'Power_W', 5, 'Freq_Hz', 5.8e9, ...
-                    'Antennas', { sec0, sec120, sec240, dir60, dir200 });
-site_pole2 = struct('Lat', 37.55, 'Lon', -122.20, 'Height', 35, ...
-                    'Power_W', 5, 'Freq_Hz', 5.8e9, ...
-                    'Antennas', { sec0_p2, sec120_p2, sec240_p2, dir240_p2, dir60_p2 });
-
-[grid, info] = coverage_grid_multi({site_pole1, site_pole2}, ...
-                                    'longley-rice', heightmap, gridDef, ...
-                                    'Aggregation', 'best-server', ...
-                                    'Resolution', 300, 'MaxRange', 25e3);
-
-% grid: best-server received-power dBm, [300 x 300]
-% info.ServerIndex(i,j): which (site, antenna) is best at that pixel
-% Render via Cairo as a heatmap PNG; users overlay site/sector labels themselves.
-```
-
-### 3.5 PROP-Tier-1b — MathWorks-API classdef wrappers (~3 sessions, gated)
-
-Once the System-Object lowering fix lands (CST §12 / §11.1), the
-function-form surface in §3.1–§3.4 can be wrapped in MathWorks-
-faithful classdefs:
-
-- `prop = propagationModel('freespace'/'rain'/'gas'/'fog'/'close-in'/'longley-rice')`
-  — constructor returning a value classdef. Internally delegates to
-  the §3.1 / §3.2 functions.
-- `tx = txsite('Latitude', ..., 'Longitude', ..., 'AntennaHeight',
-  ..., 'TransmitterFrequency', ..., 'TransmitterPower', ...,
-  'Antenna', ...)` — value classdef holding TX site parameters.
-  Accepts an `Antenna` array for multi-antenna mounts plus a
-  `MountList` array for per-antenna orientation (delegates to
-  §3.4.2 `applyMountOrientation` internally).
-- `rx = rxsite(...)` — value classdef for RX site.
-- `L = pathloss(prop, rx, tx)` — replaces the function-form
-  `link_budget(...)`. Same numbers, MathWorks-faithful syntax.
-- `[grid, lats, lons] = coverage(tx, prop, ...)` — replaces
-  `coverage_grid(...)`. Accepts a `tx` array (vector of `txsite`)
-  and dispatches to §3.4.3 `coverage_grid_multi` for the multi-
-  site case.
-- `[isClear, ...] = los(tx, rx)` — replaces `los_check(...)`.
-- `result = link(rx, tx, prop, ...)` — replaces `link_budget(...)`.
-
-**Effort**: ~3 sessions once the System-Object fix lands. Each
-classdef is a thin parameter holder; the methods delegate
-unchanged to the function-form layer.
-
-### 3.6 PROP closure summary
-
-| Primitive | Effort | Status | SO-fix dependency |
-|---|---|---|---|
-| Closed-form ITU-R / NIST models (5) (3.1.1) | 4 sess | ✅ shipped (`fspl`, `pathlossRain`, `pathlossGas`, `pathlossFog`, `pathlossCloseIn`) | none |
-| Cellular empirical models (6) (3.1.2) | 3 sess | ✅ shipped (`pathlossHata`, `pathlossCost231`, `pathlossEgli`, `pathlossEcc33`, `pathlossSui`, `pathlossEricsson9999`) | none |
-| Fresnel zone math (3.1.3) | 3 sess | ✅ shipped (`fresnelZoneRadius`, `fresnelClearance`) | none |
-| Knife-edge diffraction (single + 3 multi-edge) (3.1.4) | 1 wk | ✅ shipped (`diffractionKnifeEdge`, `diffractionBullington`, `diffractionDeygout`) | none |
-| Haversine / Vincenty / great-circle (3.1.5) | 2 sess | ✅ shipped (`haversine`, `bearing`, `vincenty`, `greatCircleDestLat`/`Lon`) — **closes PROP-Tier-1a** | none |
-| ITM (Longley-Rice) v7 port (3.2.1) | 3 wk | ✅ shipped (engineering port: `itmPathloss(profile, freq, ht, hr, pol, climate, Ns, σ, εr, d_total, q_t, q_l, q_s)` with reliability quantile correction) — **closes PROP-Tier-2a**.  Byte-identical NTIA v7.0 reference port stays 🔵. | none |
-| Terrain profile from heightmap (3.3.1) | 3 sess | ✅ shipped (`terrainProfile`) | none |
-| `los_check` (3.3.2) | 1 sess | ✅ shipped (`losObstruction`, `losClear`) | none |
-| `link_budget` PtP (3.3.3) | 3 sess | ✅ shipped (`linkBudget` → struct of TX dBm / RX dBm / FSPL / margin) | none |
-| `coverage_grid` single-TX (3.3.4) | 3 sess | ✅ shipped (`coverageGrid` → matrix) — closes PROP-Tier-2b (single-TX, omnidirectional) | none |
-| Sector / cosine / Gaussian / 3GPP / custom pattern functions (3.4.1) | 3 sess | ✅ shipped (`sectorPattern`, `cosinePattern`, `gaussianPattern`, `isotropicPattern`) | none |
-| `applyMountOrientation` (3.4.2) | 2 sess | ✅ shipped (`applyMountAz`/`applyMountEl`/`applyMountOrientation`) | none |
-| `coverage_grid_multi` with best-server / sum-power / SINR (3.4.3) | 1 wk | ✅ shipped (`coverageGridMulti` with best-server / sum-power / SINR aggregation modes) — **closes PROP-Tier-3** | none |
-| RX-side directional (3.4.4) | 2 sess | ✅ shipped (RX antenna gain pattern applied symmetrically with TX-side gain) | none |
-| ANT-Tier-2 pattern bridge (3.4.5) | 1 sess | 🔵 — gated on ANT-Tier-2 shipping the full far-field pattern surface (closed-form dipole MVP shipped at commit `0f0894c`; multi-wire MoM still 🔵 ANT-Tier-2b) | only on ANT-Tier-2 shipping |
-| `propagationModel` / `txsite` / `rxsite` / `pathloss` / `coverage` / `los` / `link` classdef wrappers (3.5) | 3 sess | ✅ shipped (`TxSite` / `RxSite` / `PropagationModel` CamelCase classdefs with kwarg ctor sugar; `pathloss(pm, rx, tx)` / `link(tx, rx)` / `los(tx, rx)` / `coverage(tx, pm, ...)` / `sigstrength(rx, tx, pm)` / `show(...)` methods all dispatch through the §3.1–§3.4 function-form runtime) | — |
-
-**Status (2026-05-12)**: **PROP-Tier-1a + 2a + 2b + 3 are fully
-shipped**.  All sub-items in the table above bear ✅ markers; the
-function-form runtime lives in `runtime/runtime_prop.cpp` (~1400
-lines) and the classdef wrappers `TxSite` / `RxSite` /
-`PropagationModel` ship with kwarg-sugar constructors.  Only the
-ANT-Tier-2 pattern bridge (3.4.5) remains 🔵 — gated on the planned
-ANT-Tier-2b multi-wire MoM that extends today's closed-form dipole
-into the broader far-field pattern surface.
-
-**Function-form effort consumed (§3.1 + §3.2 + §3.3 + §3.4)**: ~7
-weeks across multiple commits.  **Classdef wrappers (§3.5)** shipped
-in `f764dbd` alongside the matrix-property-storage infra fix —
-the originally planned System-Object dependency was sidestepped.
-
-### 3.7 Out of scope (Propagation-specific carve-outs)
-
-- **Site Viewer** (3-D interactive map of buildings / terrain /
-  ray traces, with Cesium / OSM / DTED-tile rendering). Hard 🔴 —
-  needs Mapping Toolbox + 3-D graphics stack.
-- **Ray tracing through 3-D buildings** (`propagationModel('raytracing')`,
-  `raytrace(tx, rx, scenario)`). Needs OSM buildings + ray-vs-
-  triangle intersection + multi-bounce reflection model.
-- **Auto-fetch SRTM / DTED / OpenStreetMap tiles**. We accept
-  user-supplied heightmap matrices (§3.3.1); auto-download from
-  web tile servers is out of scope. Users can fetch tiles in
-  their own scripts and pass the matrix in.
-- **TIREM** (`propagationModel('tirem')`) — proprietary US DoD
-  propagation library; external license dependency.
-- **MSI Planet file format** (interchange with commercial RF
-  planning tools).
-- **GPU acceleration** of ray tracing or coverage-map evaluation.
-  CPU lane only; coverage-map grid evaluation is embarrassingly
-  parallel and could use `parfor` later.
-- **Multi-floor / building-aware indoor propagation**. Same
-  scenario / 3-D geometry stack as ray tracing; defer.
-- **Real-time animated coverage map** as TX moves. Static numeric
-  matrices + Cairo PNG snapshots are in scope; live animation is
-  not.
-
-### 3.8 What Propagation brings to the rest of the roadmap
-
-- **PROP → Comm**: link-budget realism. Once §3.3.3 `link_budget`
-  ships, a Comm BER simulation can be parameterized by a physical
-  path-loss + thermal-noise floor instead of an abstract SNR.
-  `awgn(x, snr)` (Comm Tier 1.5) accepts the noise floor that
-  `link_budget` predicts.
+- **PROP → Comm**: link-budget realism. `link_budget` lets a Comm
+  BER simulation be parameterized by a physical path-loss + thermal
+  noise floor instead of an abstract SNR.
 - **PROP → RF Toolbox**: `link_budget` and `rfbudget` (RF-Tier-2.3)
-  compose — RF chain budget gives noise figure / IP3 from circuit;
-  Propagation gives path loss from geometry; together they answer
-  "how much margin does the link have."
-- **PROP → Antenna Toolbox**: Antenna ANT-Tier-2 produces gain
-  patterns; Propagation §3.3.3 consumes them at TX/RX endpoints.
-  Once ANT-Tier-2 ships, the gain pattern can replace the simple
-  scalar `Gtx`/`Grx` in `link_budget`.
-
-These are all **wiring opportunities** — no new primitives are
-implied; once both sides of each bridge are shipped, the cross-
-toolbox examples light up automatically.
-
----
+  compose — circuit-side noise figure / IP3 + geometry-side path
+  loss = full link margin.
+- **PROP → Antenna Toolbox**: see
+  [`antenna_toolbox_roadmap.md`](antenna_toolbox_roadmap.md) §7 for
+  the pattern-bridge story.
 
 ## 4. Tier 2 — minimum-viable digital modulation loop (~3 weeks)
 
@@ -872,7 +347,7 @@ This is the first user-visible Comm slice: generate symbols, modulate
 them with one of the three workhorse schemes (PAM / QAM / PSK), pass
 through AWGN, demodulate, count errors. Layered on Tier 1.
 
-### 4.1 PAM — `pammod` / `pamdemod` 🔵
+### 4.1 PAM — `pammod` / `pamdemod` ✅
 
 **Scope**:
 - `y = pammod(x, M)` — `M`-PAM modulation; `x` is integers in `[0,
@@ -885,7 +360,7 @@ through AWGN, demodulate, count errors. Layered on Tier 1.
 
 **Effort**: 0.5 week (1–2 sessions).
 
-### 4.2 QAM — `qammod` / `qamdemod` 🔵
+### 4.2 QAM — `qammod` / `qamdemod` ✅
 
 **Scope**:
 - `y = qammod(x, M)` — square `M`-QAM (M = 4, 16, 64, 256, …); also
@@ -902,7 +377,7 @@ through AWGN, demodulate, count errors. Layered on Tier 1.
 the standard "L-shape minus corners" mapping table; LLR demod needs
 the per-bit max-log approximation.
 
-### 4.3 PSK — `pskmod` / `pskdemod` 🔵
+### 4.3 PSK — `pskmod` / `pskdemod` ✅
 
 **Scope**:
 - `y = pskmod(x, M)` — uniform-spaced PSK on the unit circle.
@@ -922,7 +397,7 @@ and `pskmod(x, 4, pi/4)` (QPSK with /4 offset) are the canonical
 forms. Document equivalence; do not ship dedicated builtins until
 the System-Object surface exists (§5 / §11).
 
-### 4.5 FSK — `fskmod` / `fskdemod` 🔵
+### 4.5 FSK — `fskmod` / `fskdemod` ✅
 
 **Scope**:
 - `y = fskmod(x, M, freqsep, nsamp, fs)` — continuous-phase or
@@ -934,13 +409,13 @@ the System-Object surface exists (§5 / §11).
 explicit per-sample oversampling and the demodulator's
 energy-detection variant. Defer if Tier-2 timeline tight.
 
-### 4.6 Generic `genqammod` / `genqamdemod` 🔵
+### 4.6 Generic `genqammod` / `genqamdemod` ✅
 
 User-supplied constellation. The same dispatcher many of the above
 collapse to internally; useful as a fall-through entry once the
 specific modulators ship. Effort: 0.5 week.
 
-### 4.7 Pulse shaping — `rcosdesign` 🔵
+### 4.7 Pulse shaping — `rcosdesign` ✅
 
 **Scope**:
 - `b = rcosdesign(beta, span, sps)` — root-raised-cosine FIR
@@ -957,7 +432,7 @@ tractable but tedious. Shipping `rcosdesign` is a 1-session win.
 known L'Hôpital handling at `t = 0` and `t = ±span/(4·beta)`) plus
 unit-energy normalization.
 
-### 4.8 BER reference curves — `berawgn`, `bercoding` 🔵
+### 4.8 BER reference curves — `berawgn`, `bercoding` ✅
 
 **Scope**:
 - `Pb = berawgn(EbN0, modulation, M, ...)` — closed-form BER under
@@ -977,7 +452,7 @@ unit-energy normalization.
 plus a robust `qfunc` (`Q(x) = 0.5·erfc(x/√2)` — `erfc` already
 shipped, so this is one line).
 
-### 4.9 Constellation visualization (numeric) 🔵
+### 4.9 Constellation visualization (numeric) ✅
 
 **Scope**:
 - `scatterplot(x)` — return-data form: a 1-line wrapper that
@@ -1026,7 +501,7 @@ CRC + convolutional + block coding. Sits cleanly on Tier 1 (bit
 sources). Required for any "real" comm sim — uncoded BER is rarely
 the answer.
 
-### 5.1 CRC — `comm.CRCGenerator` / `comm.CRCDetector` 🔵
+### 5.1 CRC — `comm.CRCGenerator` / `comm.CRCDetector` ✅
 
 **Scope**:
 - `g = comm.CRCGenerator('Polynomial', 'z^16 + z^12 + z^5 + 1')` —
@@ -1051,7 +526,7 @@ store lowering path as CST's `tf` (CST roadmap §12). The recorded
 verifier-mismatch bug in `LowerTensorOps.cpp:1708` blocks both
 arcs. **Fix required before any System Object lands** — see §10.
 
-### 5.2 Convolutional codes — `poly2trellis` / `convenc` / `vitdec` 🔵
+### 5.2 Convolutional codes — `poly2trellis` / `convenc` / `vitdec` ✅
 
 **Scope**:
 - `t = poly2trellis(constraintLength, polynomials)` — trellis
@@ -1073,7 +548,7 @@ three operation modes) is the bulk.
 preserve bits exactly; with random AWGN at given Eb/N0, BER must
 match `bercoding(EbN0, 'conv', 'soft', t)` reference within 0.5 dB.
 
-### 5.3 Block codes — Hamming, BCH, Reed-Solomon 🔵
+### 5.3 Block codes — Hamming, BCH, Reed-Solomon 🟡
 
 **Scope**:
 - `[parmat, genmat] = hammgen(m)` — Hamming `(2^m-1, 2^m-1-m)`
@@ -1123,7 +598,7 @@ gated on the SO lowering fix.
 Verified at SNR = 5 dB on a 64-bit message: uncoded BPSK 2 errors /
 Polar (128, 64) 0 / Turbo PCCC 0 / LDPC (6, 3) 0.
 
-### 5.5 Interleavers 🔵
+### 5.5 Interleavers ✅
 
 **Scope**:
 - `comm.BlockInterleaver(perm)` / `comm.BlockDeinterleaver`.
@@ -1157,7 +632,7 @@ curves up to convolutional + Hamming; RS / BCH coverage waits on the
 
 ## 6. Tier 4 — equalization, synchronization, RF impairments (~4 weeks)
 
-### 6.1 Adaptive equalization — LMS, RLS 🔵
+### 6.1 Adaptive equalization — LMS, RLS ✅
 
 **Scope**:
 - `comm.LinearEqualizer(...)` — adaptive LMS / RLS / CMA linear
@@ -1173,7 +648,7 @@ multiply-add chain per tap per sample); the bookkeeping is in the
 training-mode / decision-directed-mode switching and the
 convergence-detection heuristics.
 
-### 6.2 Phase / frequency synchronization 🔵
+### 6.2 Phase / frequency synchronization ✅
 
 **Scope**:
 - `comm.CarrierSynchronizer(...)` — Costas-loop-style PLL.
@@ -1184,7 +659,7 @@ convergence-detection heuristics.
 **Effort**: 2 weeks. PLL is a 5-line loop; the work is in the
 loop-filter design helpers and the System-Object state machinery.
 
-### 6.3 RF impairments 🔵
+### 6.3 RF impairments ✅
 
 **Scope**:
 - `comm.PhaseFrequencyOffset(...)` — apply phase / frequency offset.
@@ -1215,7 +690,7 @@ textbook workflows.
 
 ## 7. Tier 5 — OFDM, MIMO, fading channels (~5 weeks)
 
-### 7.1 OFDM modulation — `comm.OFDMModulator` / `comm.OFDMDemodulator` 🔵
+### 7.1 OFDM modulation — `comm.OFDMModulator` / `comm.OFDMDemodulator` ✅
 
 **Scope**:
 - `comm.OFDMModulator(FFTLength, CyclicPrefixLength, NumGuardBandCarriers, PilotIndices, ...)`.
@@ -1229,7 +704,7 @@ use OFDM at the air interface.
 **Effort**: 1.5 weeks. FFT engine is shipped; bulk is the
 subcarrier-mapping / pilot-allocation / guard-band bookkeeping.
 
-### 7.2 Fading channels — `comm.RayleighChannel` / `comm.RicianChannel` 🔵
+### 7.2 Fading channels — `comm.RayleighChannel` / `comm.RicianChannel` ✅
 
 **Scope**:
 - Rayleigh / Rician multi-path fading channels with configurable
@@ -1243,7 +718,7 @@ Gauss / flat / restricted-Jakes / rounded) is the bulk; the MIMO
 spatial correlation matrix is straightforward complex matrix
 multiply on top.
 
-### 7.3 MIMO algorithms 🔵
+### 7.3 MIMO algorithms ✅
 
 **Scope**:
 - `comm.OSTBCEncoder` / `comm.OSTBCCombiner` — Alamouti and 3/4-rate
@@ -1341,7 +816,7 @@ RF-Tier-4), independent of the Comm tier numbering in §2–§7.
 The foundation. Almost no RF Toolbox function lights up without
 these.
 
-#### 8.1.1 Network parameter classdefs 🔵
+#### 8.1.1 Network parameter classdefs ✅
 
 **Scope** — eight network parameter object types:
 - `sparameters(s, freq, z0)` — most-used; `s` is `[NumPorts ×
@@ -1364,7 +839,7 @@ field-store path that today fails verifier when monomorphization
 propagates concrete tensor types into `_set_f64` calls. Until that
 fix lands, RF Toolbox stalls at the same point Comm does.
 
-#### 8.1.2 Network parameter conversions 🔵
+#### 8.1.2 Network parameter conversions ✅
 
 **Scope** — all-to-all conversions among the seven 2-port
 representations (S, Y, Z, H, G, ABCD, T):
@@ -1383,7 +858,7 @@ implementation is mechanical.
 of each pair lands the inverse is symmetric. The 4-port mixed-mode
 splitter is the only non-trivial bit.
 
-#### 8.1.3 Touchstone file I/O 🔵
+#### 8.1.3 Touchstone file I/O ✅
 
 **Scope**:
 - `sparameters('file.s2p')` — read Touchstone v1 (s1p, s2p, s3p,
@@ -1412,7 +887,7 @@ sNp where N>2; this is a known pitfall).
 The first user-visible RF slice: take a Touchstone file, compute
 gain / stability / VSWR / cascaded NF.
 
-#### 8.2.1 Closed-form S-parameter analyses 🔵
+#### 8.2.1 Closed-form S-parameter analyses ✅
 
 **Scope**:
 - `tf = s2tf(sparobj, zs, zl, z0)` — voltage transfer function
@@ -1435,7 +910,7 @@ formulas (1–3 lines of complex arithmetic each). Bulk is the
 multi-return shape and the per-frequency output orientation
 matching MATLAB.
 
-#### 8.2.2 Cascade and port operations 🔵
+#### 8.2.2 Cascade and port operations ✅
 
 **Scope**:
 - `cascadesparams(s1, s2, ..., k)` — cascade `N` S-parameter
@@ -1451,7 +926,7 @@ piece (T-parameter chain via `s2t` → matrix multiply →
 `t2s`); `snp2smp` is the standard "Schur-complement of the
 N-port S-matrix at the terminated ports" formula.
 
-#### 8.2.3 RF budget — Friis cascade 🔵
+#### 8.2.3 RF budget — Friis cascade ✅
 
 **Scope**:
 - `b = rfbudget(stages, freq, inputpower, bandwidth)` — `stages`
@@ -1481,7 +956,7 @@ nonlinear residual; multi-week. The **linear** Friis path covers
 
 ### 9.3 RF-Tier-3 — Rational fitting + transmission lines (~3.5 weeks)
 
-#### 8.3.1 Rational fitting — `rationalfit` 🔵
+#### 8.3.1 Rational fitting — `rationalfit` ✅
 
 **Scope**:
 - `mdl = rationalfit(freq, data)` — fit measured frequency-domain
@@ -1512,7 +987,7 @@ companion matrix — uses the **non-symmetric `eig`** that already
 shipped (CST Tier-1.1 ✅, 1-return form). The state-space
 realization for `timeresp` reuses CST's `lsim_ss` (✅ shipped).
 
-#### 8.3.2 Time-domain RF — TDR / TDT 🔵
+#### 8.3.2 Time-domain RF — TDR / TDT ✅
 
 **Scope**:
 - `s2tdr(sparobj)` — Time-Domain Reflectometry response.
@@ -1522,7 +997,7 @@ realization for `timeresp` reuses CST's `lsim_ss` (✅ shipped).
 **Effort**: ~3 sessions. Wrappers over `rationalfit` + a step
 input through `timeresp`.
 
-#### 8.3.3 Transmission line objects 🔵
+#### 8.3.3 Transmission line objects ✅
 
 **Scope** — `rfckt.*` 2-port S-parameter generators
 parameterized by physical geometry:
@@ -1544,7 +1019,7 @@ dispersion tail per geometry.
 
 ### 9.4 RF-Tier-4 — Matching networks, RF circuits, Smith chart numerics (~2 weeks, stretch)
 
-#### 8.4.1 Matching network design 🔵
+#### 8.4.1 Matching network design ✅
 
 **Scope**:
 - `mn = matchingnetwork(rfobj, freq, ...)` — automatic L / T / Pi
@@ -1556,7 +1031,7 @@ dispersion tail per geometry.
 **Effort**: ~1 week. Closed-form per-topology algebra; bulk is
 the topology / impedance-direction selection logic.
 
-#### 8.4.2 RF circuit object hierarchy (subset) 🔵
+#### 8.4.2 RF circuit object hierarchy (subset) ✅
 
 **Scope** (priority order):
 - `rfckt.amplifier` — wraps S/Noise/Nonlinearity data.
@@ -1573,7 +1048,7 @@ the topology / impedance-direction selection logic.
 **Effort**: ~1 week. Each `rfckt.*` is a small classdef with an
 `analyze` method that produces S-parameters at requested freqs.
 
-#### 8.4.3 Smith chart numerics 🔵
+#### 8.4.3 Smith chart numerics ✅
 
 **Scope**:
 - `[gamma, z, y] = gamma2z(gamma, z0)` etc. — already in §8.2.2.
@@ -1651,456 +1126,55 @@ their respective tiers.
 
 ---
 
-## 10. Antenna Toolbox companion (multi-month; tiered to MVP at ~5 weeks)
+## 10. Antenna Toolbox — moved to dedicated roadmap
 
-Antenna Toolbox is **substantially heavier** than Comm or RF
-Toolbox because its core capability — Method of Moments (MoM)
-electromagnetic simulation — is itself a large numerical-methods
-project (full-wave EM solvers are typically tens of thousands of
-lines of C++ in production codes). A faithful port of the entire
-Antenna Toolbox surface is multi-month-to-year-scale work. This
-section therefore tiers aggressively: a usable **Antenna MVP**
-lands in ~5 weeks via wire-antenna MoM only; the full triangular-
-mesh / dielectric / FMM / hybrid-MoM-PO surface is staged.
+The Antenna Toolbox tier plan (ANT-Tier-1 catalog classdefs through
+ANT-Tier-5 advanced MoM-PO / FMM / mutual-coupling surfaces) was
+previously documented here as chapter §10. It has been **promoted to
+a standalone roadmap** at
+[`antenna_toolbox_roadmap.md`](antenna_toolbox_roadmap.md) for
+discoverability and uniformity with the other per-toolbox roadmaps.
 
-The arc decomposes into five internal tiers (ANT-Tier-1 through
-ANT-Tier-5).
+**Status (2026-05-17): ANT-Tier-2 MVP shipped** for the canonical
+thin-dipole case via the closed-form induced-EMF method (Balanis
+Eq. 8-60). Three runtime entries live in
+`runtime/runtime_rf.cpp` (sharing the RF TU's helpers):
 
-### 10.1 ANT-Tier-1 — Antenna catalog classdefs (no solver, ~1 week)
-
-The "shapes-only" foundation. Every antenna in the catalog has
-geometric / material parameters; before any solver lights up, the
-classdefs themselves can ship as typed property holders, mirroring
-how RF-Tier-1 ships `sparameters` before any analysis.
-
-**Scope** — priority subset of the catalog (~12 of ~80 antenna
-types in the full toolbox):
-- **Wire antennas**: `dipole`, `monopole`, `dipoleFolded`,
-  `loopCircular`, `helix`.
-- **Planar antennas**: `bowtieRounded`, `spiralEquiangular`,
-  `spiralArchimedean`.
-- **Patch antennas**: `patchMicrostrip`, `patchMicrostripCircular`,
-  `pifa` (planar inverted-F).
-- **Travelling-wave**: `yagiUda`, `vivaldi`, `hornConical`,
-  `hornRectangular`.
-- **Reflector / aperture**: `reflectorParabolic` (carved out — Tier
-  5 — needs surface-current PO/MoM-PO).
-- **Generic**: `customAntenna` (for user-supplied geometry — heavy,
-  carved out to Tier 5).
-
-**Properties per antenna**: geometry-specific (`Length`, `Width`,
-`Radius`, `ArmLengths`, `Spacing`, `NumElements`, `Tilt`,
-`TiltAxis`, etc.) plus universal (`Conductor` material,
-`Substrate` (`dielectric` material classdef), `Load`, `Tuner`).
-
-**Methods (all stubs at Tier 1, lit up at Tier 2/3)**:
-- `show(ant)` — return mesh geometry triple `(verts, edges, tris)`
-  for visualization.
-- `mesh(ant)` / `mesh(ant, 'MaxEdgeLength', λ/10)` — generate /
-  re-mesh.
-- `meshconfig(ant, 'auto'|'manual')` — mesh control.
-- `info(ant)` — print summary.
-- `numports(ant)` — feed-port count.
-- The **analysis methods** (`impedance`, `pattern`, `current`,
-  `sparameters`, `returnLoss`, `vswr`, `efficiency`, `gain`,
-  `axialRatio`, `bandwidth`, `EHfields`, `pcbStack`, `radiationpattern`)
-  are placeholders at Tier 1; they `error('not yet supported')`
-  until ANT-Tier-2.
-
-**Effort**: ~1 week. The classdefs are mechanical (each is a
-parameter holder + mesh-generator stub). Mesh generation for
-**simple wire shapes** (segments) lands here; triangular meshing
-on planar / 3-D surfaces lands at Tier 3.
-
-**Architectural prerequisite**: same System-Object lowering fix as
-Comm Tier 3 / RF-Tier-1 (CST §12 / §11.1). Antenna catalog objects
-are classdefs with field stores; same blocker.
-
-**What works at end of Tier 1**: `ant = dipole; ant.Length = 0.5;`
-plus pretty-printing in the REPL. No analysis yet.
-
-### 10.2 ANT-Tier-2 — Wire-antenna MoM solver (Antenna MVP, ~3 weeks)
-
-The first user-visible Antenna slice: **simulate a wire antenna and
-get its impedance / pattern / S-parameters**. Restricted to wire
-geometries (1-D segment mesh) — mathematically simpler than the
-2-D triangular RWG-basis surface MoM, but covers the canonical
-textbook antennas (dipole, monopole, Yagi, helix, loop, folded
-dipole).
-
-#### 9.2.1 Wire mesh + segment basis 🔵
-
-**Scope**:
-- 1-D wire segmentation along the antenna's geometric centerline.
-  Standard `Δ ≈ λ/10` rule with thin-wire approximation
-  (radius ≪ wavelength).
-- Piecewise-sinusoidal or piecewise-triangular basis functions
-  (Galerkin-style; sinusoidal is the textbook choice for thin
-  wires, triangular is simpler and almost as accurate).
-- Mesh data: segment endpoints, segment indices, wire radius per
-  segment, feed-port edges.
-
-**Effort**: ~3 sessions.
-
-#### 9.2.2 Pocklington / Hallen impedance matrix 🔵
-
-**Scope**:
-- Discretize the **Pocklington** integral equation (preferred —
-  numerically better-conditioned than Hallen for thin wires) over
-  the segments.
-- Build the complex N×N impedance matrix `Z` where `Z_ij` is the
-  mutual impedance between basis functions `i` and `j`.
-- Singularity extraction for `i = j` (self-term, log singularity in
-  the kernel).
-- Numerical integration via Gauss-Legendre quadrature on segment
-  pairs (typically 5–10 points per segment for engineering
-  accuracy).
-
-**Effort**: ~1 week. The kernel evaluation is a straightforward
-exponential integral once the singularity-extraction trick lands.
-
-#### 9.2.3 Solve `Z·I = V` and post-process 🔵
-
-**Scope**:
-- Excitation vector `V`: 1 at the feed-port edge, 0 elsewhere
-  (delta-gap source feed model).
-- Solve the complex linear system `Z·I = V`. **Needs complex LU**
-  — the existing real LU shipped (CST), complex LU is a follow-on
-  whose cost is ~0.5 wk. Or: use the existing real linear solver
-  on the 2N×2N real-equivalent system [[Re(Z), -Im(Z)]; [Im(Z),
-  Re(Z)]] · [Re(I); Im(I)] = [Re(V); Im(V)] — a 2× cost vs native
-  complex but immediately available.
-- Output current vector `I` (complex, one entry per basis function).
-- **Input impedance** at the feed: `Z_in = V_feed / I_feed`.
-- **S₁₁** for a 50 Ω port: `(Z_in − 50)/(Z_in + 50)`.
-
-**Effort**: ~3 sessions.
-
-#### 9.2.4 Far-field radiation pattern 🔵
-
-**Scope**:
-- `[E_theta, E_phi] = pattern(ant, freq, az, el)` — given solved
-  current `I` from §9.2.3, compute the far-field E-vector by the
-  radiation integral (sum of segment radiations weighted by `I`,
-  with the Sommerfeld phase factor `exp(jk·r̂·r')`).
-- Polar form via `pattern(ant, freq)` returns a 2-D `[NumEl × NumAz]`
-  matrix of total field magnitude or directivity.
-- Derived metrics: `gain(ant, freq)`, `directivity(ant, freq)`,
-  `axialRatio(ant, freq, az, el)` (linear vs circular polarization
-  measure), `efficiency(ant, freq)`.
-
-**Effort**: ~1 week. Bulk is the radiation-integral kernel; metrics
-are post-processing on the field matrix.
-
-#### 9.2.5 Frequency sweeps + RF-Toolbox bridge 🔵
-
-**Scope**:
-- `sparameters(ant, freqs)` — produce a Touchstone-compatible
-  `sparameters` object (RF-Tier-1.1!) by sweeping ANT-Tier-2 over
-  a frequency vector.
-- `returnLoss(ant, freqs)`, `vswr(ant, freqs)`, `bandwidth(ant)` —
-  derived from S₁₁(f).
-- `impedance(ant, freqs)` — array form of §9.2.3.
-
-**Why this matters**: this is the bridge between EM simulation and
-RF Toolbox. Once ANT-Tier-2 + RF-Tier-1 land together, a user can
-say `sp = sparameters(dipoleAnt, 1e9:1e7:3e9); rfwrite(sp,
-'dipole.s2p')` and feed the resulting Touchstone into an RF cascade.
-
-**Effort**: ~3 sessions. Pure orchestration over Tier-2 building
-blocks.
-
-**ANT-Tier-2 closure**: a user can model a dipole / monopole / Yagi
-/ helix / loop / folded-dipole and extract impedance, pattern, S₁₁,
-gain, VSWR, bandwidth across a frequency sweep. **This is the
-Antenna MVP.** Expect ~70% of textbook antenna problems and ~50%
-of pedagogical pattern-design problems to fit here.
-
-**Status (2026-05-12): MVP shipped — center-fed thin dipole via
-closed-form induced-EMF method (Balanis Eq. 8-60).**
-
-Three runtime entries (in `runtime/runtime_prop.cpp` since they
-share the propagation TU's helpers):
-
-- `antennaWireSolve(length_m, radius_m, n_segments, freq_Hz)` →
+- `antennaWireSolve(L, a, n_segs, freq)` →
   struct{`Zin_re`, `Zin_im`, `S11_re`, `S11_im`, `VSWR`,
-  `ReturnLoss_dB`}.
-- `antennaWirePattern(length_m, radius_m, n_segments, freq_Hz, n_theta)`
-  → struct with `Theta` column, `ETheta` (complex column),
-  `EThetaMag`, `Gain_dBi` column, `Directivity_dBi`, `Zin_re`,
-  `Zin_im`.  Closed-form sinusoidal-current radiation integral
-  `F(θ) = (cos(½kL·cosθ) − cos(½kL)) / sinθ`.
-- `antennaWireSparameters(length_m, radius_m, n_segments, freqs)`
-  → RFSparameters-shaped struct (`S11` complex column,
-  `Frequencies`, `Z0 = 50`, `NumPorts = 1`) — drops straight into
-  `touchstoneWrite` for an `.s1p` file consumable by any RF tool.
+  `ReturnLoss_dB`}
+- `antennaWirePattern(L, a, n_segs, freq, n_theta)` → far-field
+  pattern + directivity
+- `antennaWireSparameters(L, a, n_segs, freqs)` → RFSparameters-
+  shaped struct for the RF-Toolbox bridge
 
-Verified: half-wave dipole reproduces 73.08 + j42.52 Ω
-(vs textbook 73.13 + j42.55) and Directivity 2.15 dBi.
-Si / Ci special functions implemented as Taylor series for |x| < 8
-and asymptotic series for |x| ≥ 8.
+Catalog classdefs `AntDipole` + `AntMonopole` ship with `design(ant,
+freq)` + `antennaGain(ant, freq)` (textbook 2.15 / 5.15 dBi).
+Remaining 10 classdef stubs are 🔵 ANT-Tier-1 follow-on.
 
-Internal `n_segments` argument is kept in the API for forward-
-compatibility with the planned full-MoM extension to multi-wire
-geometries; today it has no effect on the closed-form solver.
+**Next slice (ANT-Tier-2b)**: multi-wire MoM for Yagi-Uda / monopole-
+over-ground / helix / loop / folded-dipole — ~3 sessions once the
+Pocklington kernel scaling is fully nailed.
 
-**Carved into a follow-on tier (ANT-Tier-2b):** general thin-wire
-MoM (Pocklington / Hallen integral with pulse / sinusoidal basis +
-Gauss-Legendre on segment pairs + the 2N×2N real-equivalent solve
-infrastructure) for arbitrary thin-wire structures — Yagi-Uda,
-folded-dipole, monopole over PEC ground (via image method), helix,
-square loop.  Estimated ~3 sessions once the kernel scaling is
-fully nailed; the closed-form MVP already unblocks the Antenna →
-RF Toolbox bridge for the dipole use case.
+**ANT-Tier-3 (planar patch / spiral MoM, ~6 wk)**, **ANT-Tier-4
+(arrays via element-pattern multiplication, ~2 wk)**, and the
+**ANT-Tier-5 advanced surface** (dielectrics / hybrid MoM-PO / FMM /
+mutual coupling) are 🔵 — see [`antenna_toolbox_roadmap.md`](antenna_toolbox_roadmap.md)
+for the full plan + execution order + carve-outs.
 
-### 10.3 ANT-Tier-3 — Triangular-mesh MoM (planar antennas, ~6 weeks)
+### 10.1 What Antenna Toolbox brings to RF, Comm, and Propagation
 
-Lifts the wire restriction to handle 2-D conducting surfaces
-(patches, planar dipoles, bowties, spirals). This is the
-**workhorse MoM** in production EM solvers and is substantially
-more code than Tier 2.
-
-#### 9.3.1 Triangular mesh generator 🔵
-
-**Scope**:
-- Discretize a planar / 3-D surface into triangles with edge length
-  ≈ λ/10. For planar shapes (patch / bowtie / spiral), this is 2-D
-  Delaunay or constrained Delaunay triangulation. For 3-D shells
-  (closed metallic surfaces), surface triangulation.
-- Mesh data: vertex coordinates, triangle vertex-index triples,
-  edge list (each edge ≤ 2 incident triangles).
-
-**Effort**: ~1 week. Constrained Delaunay is non-trivial but well-
-documented (Shewchuk's "Triangle" library is ~6000 lines of C —
-re-implementation is a focused sub-arc).
-
-#### 9.3.2 RWG basis functions 🔵
-
-**Scope**:
-- Rao-Wilton-Glisson (RWG) basis: each interior edge defines one
-  basis function spanning the two adjacent triangles, with surface
-  current density that flows across that edge.
-- Compute per-edge normalization (edge length × triangle areas).
-
-**Effort**: ~2 sessions.
-
-#### 9.3.3 Surface-integral impedance matrix 🔵
-
-**Scope**:
-- The dyadic Green's function `G(r, r')` for free space.
-- Z matrix where `Z_ij` = surface integral over triangle pair (one
-  pair per edge in the i and j basis function support) of the
-  RWG-weighted Green's-function-with-derivatives kernel.
-- Singularity extraction for self / near-self terms (Wilton et al.,
-  1984: extract the 1/R kernel analytically, integrate numerically
-  on the smooth remainder).
-- 7-point Gauss-Legendre on triangles for the smooth integrand.
-
-**Effort**: ~3 weeks. This is the largest single item in the
-Antenna roadmap; production solvers often spend years tuning the
-near-singular integration.
-
-#### 9.3.4 Patch / planar antenna properties 🔵
-
-**Scope**: same as ANT-Tier-2.4–2.5 but extended to surface
-currents on patches. `pattern`, `impedance`, `sparameters`, etc.
-
-**Effort**: ~3 sessions (mostly reuse of Tier-2 post-processing).
-
-**ANT-Tier-3 closure**: a user can model **patch antennas** (rectangular,
-circular, PIFA), **planar bowties / spirals**, **slot antennas**,
-**Yagi-Uda with finite-thickness elements**.
-
-### 10.4 ANT-Tier-4 — Antenna arrays (~2 weeks)
-
-#### 9.4.1 Array geometry classdefs 🔵
-
-**Scope**:
-- `linearArray(Element, ElementSpacing, NumElements)` — uniform
-  linear array.
-- `rectangularArray(Element, Size, ElementSpacing)` — uniform
-  rectangular array.
-- `circularArray`, `conformalArray` — circular and arbitrary-position
-  arrays.
-- `customArray` — user-supplied positions + per-element antenna types.
-
-**Effort**: ~3 sessions.
-
-#### 9.4.2 Array factor + element pattern multiplication 🔵
-
-**Scope**:
-- `pattern(arr, freq)` = `pattern(element, freq) · arrayFactor(arr,
-  freq, az, el)`.
-- Steering / weighting: `arr.PhaseShift = ...`, `arr.AmplitudeTaper
-  = ...`. Beam-steering and Taylor / Chebyshev tapers.
-- `EHfields(arr, freq, p)` — total field at point p.
-
-**Effort**: ~3 sessions. Closed-form multiplication of element
-pattern by array factor; trivial **without** mutual coupling.
-
-#### 9.4.3 Mutual coupling — defer to Tier 5 🔴
-
-Mutual coupling between array elements requires the full MoM solve
-on the entire array (not a single element + array factor) because
-adjacent elements perturb each other's currents. For closely
-spaced elements (< λ/2) this matters; for sparse arrays, the
-multiplication approximation is fine. **Carve out** the rigorous
-mutual-coupling path; ship the multiplication approximation in
-ANT-Tier-4. See §12.
-
-**ANT-Tier-4 closure**: phased-array beam steering with the
-element-pattern multiplication approximation lights up. Useful for
-pedagogical phased-array work and for first-pass beamforming
-design.
-
-### 10.5 Propagation Models — moved to §3
-
-Propagation models (FSPL, Hata, COST231-Hata, ECC33, SUI, Egli,
-Ericsson 9999, ITU-R P.838 rain / P.676 gas / P.840 fog,
-close-in NIST, ITM/Longley-Rice, knife-edge diffraction, Fresnel
-zones, Haversine / Vincenty, `txsite` / `rxsite`, `link`,
-`coverage`, terrain profile) were previously documented here as
-PROP-Tier-1 + PROP-Tier-2. They have been **promoted to top-level
-§3** to reflect their priority and the fact that the function-form
-surface is reachable without the System-Object fix that gates
-ANT-Tier-1+. See §3 for the full content.
-
-Antenna Toolbox consumes propagation models via `link(rx, tx,
-prop)` once both ANT-Tier-2 (`txsite`/`rxsite`-compatible antenna
-catalog) and §3 (propagation) ship — the bridge is documented at
-§9.10.
-
-
-### 10.6 ANT-Tier-5 — Heavy / advanced (carved out, multi-month each)
-
-Sketched for completeness; not committed. Each item below is its
-own multi-week-to-multi-month sub-arc.
-
-| Item | Scope | Effort estimate |
-|---|---|---|
-| **MoM with dielectrics** (`dielectric` material, `substrate`) | Surface-integral equations on metal-dielectric boundaries; PMCHWT formulation | ~2 months |
-| **Hybrid MoM-PO** | Couple MoM region (small antennas) with Physical Optics region (large scatterers, ground planes) | ~1.5 months |
-| **Physical Optics solver** | Surface-current induced by incident field on lit region; geometric shadow detection | ~1 month |
-| **Fast Multipole Method (FMM)** | O(N log N) acceleration for large structures via multipole-expansion + tree | ~3 months (this is a research-grade item) |
-| **Infinite ground plane** | Image-theory boundary conditions; doubles effective antenna size | ~2 weeks |
-| **Infinite array (unit-cell)** | Floquet-mode analysis for periodic structures | ~1 month |
-| **Mutual coupling (rigorous)** | Full-array MoM solve with embedded element patterns | ~3 weeks (on top of triangular MoM) |
-| **Reflector antennas** (parabolic / Cassegrain) | PO / GTD on curved reflectors | ~1.5 months |
-| **Antenna optimization** (PSO / GA / SADEA / surrogate) | Wraps the solver in an optimization loop | ~3 weeks |
-| **Photonic / metasurface** | Periodic homogenization + effective material parameters | ~2 months |
-| **PCB antenna with full layer stack** (`pcbStack`) | Multi-layer dielectric + conductor stack-up + via modeling | ~2 months |
-| **Antenna near-field** (`EHfields` near zone) | Quasi-static + reactive near-field formulas | ~1 week (small) |
-| **Polarization / axial-ratio analysis tail** | Polarization decomposition over scan angles | ~1 week |
-
-### 10.7 Out of scope at any tier (Antenna-specific carve-outs)
-
-These are flagged here and re-listed with rationale in §13.
-Propagation-specific carve-outs are at §3.6 / §13.
-
-**Antenna-specific carve-outs**:
-- **Antenna Designer app**, **Array Designer app**. Interactive Qt
-  apps; not a language feature.
-- **PCB Antenna Designer**, **Gerber export**.
-- **AI for Antennas** (DL-based rapid analysis / surrogate models).
-  Deep Learning Toolbox dependency.
-- **Real-time 3-D visualization** of currents / fields / patterns.
-  Static figures via Cairo are achievable; interactive 3-D is not.
-- **GPU acceleration** of MoM. CPU lane only.
-- **Custom antenna from photo** (computer-vision-based geometry
-  inference). Out of scope.
-
-**Propagation carve-outs** (refined — earlier "all of RF
-propagation" was too coarse; PROP-Tier-1/2 in §9.5/§9.6 are now
-**in scope**. Only the GIS + 3-D + auto-fetch parts remain
-carved):
-- **Site Viewer** (3-D interactive map of buildings / terrain /
-  ray traces, with Cesium / OSM / DTED-tile rendering). Hard 🔴 —
-  needs Mapping Toolbox + a 3-D graphics stack.
-- **Ray tracing through 3-D buildings** (`propagationModel('raytracing')`,
-  `raytrace(tx, rx, scenario)`). Needs OSM buildings + ray-vs-
-  triangle intersection + multi-bounce reflection model. Multi-week
-  arc; defer.
-- **Auto-fetch SRTM / DTED / OpenStreetMap tiles**. We accept
-  user-supplied heightmap matrices (PROP-Tier-2.2); auto-download
-  from web tile servers is out of scope. Users can fetch tiles in
-  their own scripts and pass the matrix in.
-- **TIREM** (`propagationModel('tirem')`) — proprietary US DoD
-  propagation library; external license dependency.
-- **MSI Planet file format** (interchange with commercial RF
-  planning tools).
-- **GPU acceleration** of ray tracing or coverage-map evaluation.
-  CPU lane only; coverage-map grid evaluation is embarrassingly
-  parallel and could use `parfor` later.
-- **Multi-floor / building-aware indoor propagation**. Same
-  scenario / 3-D geometry stack as ray tracing; defer.
-- **Real-time animated coverage map** as TX moves. Static numeric
-  matrices + Cairo PNG snapshots are in scope; live animation is
-  not.
-
-### 10.8 ANT-Tier closure summary
-
-| Primitive | Effort | Status |
-|---|---|---|
-| Antenna catalog classdefs (12 types) (9.1) | 1 wk | 🟡 partial — `AntDipole` + `AntMonopole` shipped with `design(ant, freq)` method + `antennaGain(ant, freq)` peak-gain dispatch (textbook 2.15 / 5.15 dBi). Remaining 10 stubs (`dipoleFolded` / `loopCircular` / `helix` / `bowtieRounded` / `spiralEquiangular` / `spiralArchimedean` / `patchMicrostrip` / `patchMicrostripCircular` / `pifa` / `yagiUda` / `vivaldi` / `hornConical` / `hornRectangular`) 🔵 |
-| Wire mesh + sinusoidal basis (9.2.1) | 3 sess | 🟡 sidestepped — the closed-form Balanis EMF path (commit `0f0894c`) doesn't need a discretized mesh; the `n_segments` argument is kept in the API for forward compatibility with the multi-wire MoM follow-on (ANT-Tier-2b 🔵). |
-| Pocklington Z matrix + singularity extraction (9.2.2) | 1 wk | 🔵 ANT-Tier-2b — gated on the kernel-scaling debug pass.  An exploratory pulse-basis / point-matching prototype shipped + reverted in favour of the closed-form path, which suffices for the canonical thin-dipole MVP. |
-| Z·I=V solve + Z_in / S₁₁ (9.2.3) | 3 sess | ✅ shipped — `antennaWireSolve(L, a, n_segs, freq)` returns `Zin_re` / `Zin_im` / `S11_re` / `S11_im` / `VSWR` / `ReturnLoss_dB`.  Closed-form induced-EMF method (Balanis Eq. 8-60a/b) with Si and Ci special functions (Taylor < 8 + asymptotic ≥ 8).  Verified at half-wave: 73.08 + j42.52 Ω vs reference 73.13 + j42.55. |
-| Far-field pattern + gain / directivity (9.2.4) | 1 wk | ✅ shipped — `antennaWirePattern(L, a, n_segs, freq, n_theta)` returns `Theta` / `ETheta` / `EThetaMag` / `Gain_dBi` / `Directivity_dBi`.  Closed-form sinusoidal-current pattern `F(θ) = (cos(½ kL · cos θ) − cos(½ kL)) / sin θ`.  Half-wave directivity = 2.15 dBi. |
-| Frequency sweep + RF-bridge `sparameters(ant, f)` (9.2.5) | 3 sess | ✅ shipped — `antennaWireSparameters(L, a, n_segs, freqs)` returns RFSparameters-shaped struct (`S11` complex col, `Frequencies`, `Z0 = 50`, `NumPorts = 1`).  Drops straight into `touchstoneWrite` for an `.s1p` Touchstone file — **closes ANT-Tier-2 / Antenna MVP** for the thin-dipole case. |
-| Multi-wire MoM (ANT-Tier-2b) | 3 sess | 🔵 follow-on — Pocklington (or Hallen) with pulse / sinusoidal basis + Gauss-Legendre on segment pairs + 2N×2N real-equivalent solve, unlocks Yagi-Uda / monopole-over-ground / helix / loop / folded-dipole geometries. |
-| Triangular mesh generator (9.3.1) | 1 wk | 🔵 |
-| RWG basis (9.3.2) | 2 sess | 🔵 |
-| Surface-integral Z matrix + singularity extraction (9.3.3) | 3 wk | 🔵 |
-| Patch / planar `pattern` / `impedance` (9.3.4) | 3 sess | 🔵 — closes ANT-Tier-3 |
-| Array geometry classdefs (9.4.1) | 3 sess | 🔵 |
-| Array factor multiplication (9.4.2) | 3 sess | 🔵 — closes ANT-Tier-4 |
-| ANT-Tier-5 items | multi-month each | 🔴 carved out |
-
-**Status (2026-05-12)**: **ANT-Tier-2 MVP shipped** for the
-canonical thin-dipole case via the closed-form induced-EMF method
-(Balanis Eq. 8-60).  Three runtime entries live in
-`runtime/runtime_prop.cpp`:
-`antennaWireSolve(L, a, n_segs, freq)` →
-struct{Zin_re, Zin_im, S11_re, S11_im, VSWR, ReturnLoss_dB};
-`antennaWirePattern(L, a, n_segs, freq, n_theta)` → far-field
-pattern + directivity; `antennaWireSparameters(L, a, n_segs, freqs)`
-→ RFSparameters-shaped struct for the RF-Toolbox bridge.
-
-**ANT-Tier-2b** (multi-wire MoM for Yagi / monopole-over-ground /
-helix / loop / folded-dipole) is the next antenna deliverable —
-~3 sessions once the Pocklington kernel scaling is nailed.
-
-**Total** (remaining work): ~7 weeks for ANT-Tier-3 + ANT-Tier-4
-(planar / patch surfaces + arrays).  Plus ~3 sessions for
-ANT-Tier-2b multi-wire MoM.  ANT-Tier-5 is multi-month per item,
-carved out.
-
-**Propagation Models** are now at top-level §3 (~6 weeks function-
-form, independently shippable). See §3 for the closure summary.
-
-### 10.9 What Antenna Toolbox brings to RF and Comm
-
-- **Antenna → RF Toolbox**: `sparameters(ant, freqs)` (§9.2.5)
-  produces a `sparameters` object that drops directly into RF
-  Toolbox cascades (§8.2.2). A user can simulate a Yagi, dump it
-  to Touchstone via `rfwrite`, and feed a vendor RF chain
-  Touchstone-vs-Touchstone — closing the loop on "design the
-  antenna and then design the chain it feeds."
-- **Antenna → Comm**: an antenna's impedance / pattern affects link
-  budget and effective channel. Once Comm Tier 5.2 (fading
-  channels) and ANT-Tier-2 land, `comm.RayleighChannel` can be
-  parameterized by an antenna's far-field gain pattern as the
-  receive aperture function.
-- **Antenna → Antenna**: mutual coupling rigor (Tier-5 carved out)
-  is the bridge between standalone antennas and large arrays —
-  but the multiplication approximation in §9.4.2 is enough for
-  most engineering design.
-
-These are wiring items, not new primitives — once both ends of the
-bridge ship in their respective tiers, the cross-toolbox examples
-light up automatically.
-
----
+- **Antenna → RF Toolbox**: `sparameters(ant, freqs)` produces a
+  `sparameters` object that drops directly into RF Toolbox cascades.
+  Closes "design the antenna and then design the chain it feeds."
+- **Antenna → Propagation**: the ANT-Tier-2 pattern function is the
+  input to the directional hook in PROP-Tier-3 — see [`propagation_toolbox_roadmap.md`](propagation_toolbox_roadmap.md)
+  §4.
+- **Antenna → Comm**: an antenna's pattern affects link budget and
+  fading-channel parameterization. Once Comm Tier 5.2 (fading
+  channels, ✅ shipped) and ANT-Tier-2 land together,
+  `comm.RayleighChannel` can be parameterized by an antenna's far-
+  field gain pattern.
 
 ## 11. REPL / Debug-side work (cross-cutting)
 
@@ -2332,50 +1406,58 @@ flagged the PtP+ITM+CoverageMap workflow as priority. Comm Tier 2+
 modulation work follows; the System-Object fix gates only the
 classdef-bearing tracks (Comm Tier 3+, RF, Antenna).
 
+**Update (2026-05-17)**: rows 1 – 36 below are now ✅ shipped (Comm
+Tier-1 → Tier-5 + Tier-6 + Tier-7 modern codes function-form + PROP
+Tier-1a/2a/2b/3 + RF Tier-1 → Tier-4). Remaining work is rows 37 – 48
+(Antenna multi-wire MoM + planar RWG MoM + arrays), the SO-form
+variants for the comm classes, and the multi-week ANT-Tier-3 surface
+integral.
+
 | Order | What | Effort | Status |
 |---|---|---|---|
-| 1 | `randi` + `rng` (Tier 1.1–1.2) | 2 sess | 🔵 |
-| 2 | `randsrc` / `randerr` / int↔bit (Tier 1.3–1.4) | 3 sess | 🔵 |
-| 3 | `awgn` + `biterr` / `symerr` (Tier 1.5–1.6) | 3 sess | 🔵 — closes Comm Tier 1 |
-| 4 | **PROP-Tier-1a function-form: ITU-R + cellular models + Fresnel + knife-edge + geo helpers** (§3.1) | 1.5 wk | 🔵 — **PRIORITY; no SO dep** |
-| 5 | **PROP-Tier-2a function-form: ITM (Longley-Rice) v7 port** (§3.2) | 3 wk | 🔵 — biggest PROP item; **no SO dep**; reuses existing complex / 2N×2N real solver |
-| 6 | **PROP-Tier-2b function-form: terrain profile + `los_check` + `link_budget` + `coverage_grid`** (§3.3) | 1 wk | 🔵 — **closes single-TX Propagation MVP**; PtP+CoverageMap (one site) lights up |
-| 7 | **PROP-Tier-3 function-form: sector / cosine / 3GPP patterns + mount orientation + `coverage_grid_multi`** (§3.4) | 1.5 wk | 🔵 — **closes Multi-Site Directional MVP**; user's two-pole + sectors + directionals scenario lights up |
-| 8 | `pammod` / `qammod` / `pskmod` (Tier 2.1–2.3) | 2 wk | 🔵 |
-| 9 | `rcosdesign` / `gaussdesign` (Tier 2.7) | 1 sess | 🔵 |
-| 10 | `berawgn` / `bercoding` (Tier 2.8) | 1 wk | 🔵 — closes Comm Tier 2 |
-| 11 | **System-Object architectural fix** (CST §12 / §11.1) | 1 wk | 🔵 — gates Comm Tier 3+, RF-Tier-1+, ANT-Tier-1+, PROP-Tier-1b classdef wrappers |
-| 12 | **PROP-Tier-1b classdef wrappers**: `propagationModel` / `txsite` / `rxsite` / `pathloss` / `link` / `coverage` / `los` (§3.4) | 3 sess | 🔵 — MathWorks-API polish on top of rows 4–6 |
-| 13 | CRC Sys Object (Tier 3.1) | 1 wk | 🔵 — validates SO machinery |
-| 14 | Convolutional + Viterbi (Tier 3.2) | 2 wk | 🔵 |
-| 15 | BCH / RS + `gf` (Tier 3.3) | 2 wk | 🔵 |
-| 16 | Interleavers (Tier 3.5) | 1 wk | 🔵 — closes Comm Tier 3 |
-| 17 | Linear / DFE equalizer (Tier 4.1) | 2 wk | 🔵 |
-| 18 | Carrier / symbol / frame sync (Tier 4.2) | 2 wk | 🔵 |
-| 19 | RF impairments (Tier 4.3) | 1 wk | 🔵 — closes Comm Tier 4 |
-| 20 | **`sparameters` + sibling classdefs (RF-Tier-1.1)** | 3 sess | 🔵 |
-| 21 | **Network parameter conversions (RF-Tier-1.2)** | 3 sess | 🔵 |
-| 22 | **Touchstone v1 read + write (RF-Tier-1.3)** | 3 sess | 🔵 — closes RF-Tier-1 |
-| 23 | **`s2tf` / `gammain` / `vswr` / `powergain` / stability (RF-Tier-2.1)** | 1 wk | 🔵 |
-| 24 | **`cascadesparams` / `snp2smp` (RF-Tier-2.2)** | 3 sess | 🔵 |
-| 25 | **`rfbudget` Friis solver (RF-Tier-2.3)** | 3 sess | 🔵 — closes RF-Tier-2 |
-| 26 | OFDM mod / demod (Comm Tier 5.1) | 1.5 wk | 🔵 |
-| 27 | Fading channels (Comm Tier 5.2) | 2 wk | 🔵 |
-| 28 | MIMO (Comm Tier 5.3) | 1.5 wk | 🔵 — closes Comm Tier 5 |
-| 29 | Spreading sequences (Comm Tier 6.1) | 1 wk | 🔵 |
-| 30 | Source coding / quantization (Comm Tier 6.2) | 1 wk | 🔵 |
-| 31 | **`rationalfit` Vector Fitting (RF-Tier-3.1)** | 2 wk | 🔵 |
-| 32 | **`s2tdr` / `s2tdt` (RF-Tier-3.2)** | 3 sess | 🔵 |
-| 33 | **Transmission line objects (RF-Tier-3.3)** | 1 wk | 🔵 — closes RF-Tier-3 |
-| 34 | **`matchingnetwork` (RF-Tier-4.1)** | 1 wk | 🔵 |
-| 35 | **`rfckt.*` hierarchy subset (RF-Tier-4.2)** | 1 wk | 🔵 |
-| 36 | **Smith chart numerics (RF-Tier-4.3)** | 3 sess | 🔵 — closes RF-Tier-4 |
-| 37 | **Antenna catalog classdefs (12 types) (ANT-Tier-1)** | 1 wk | 🔵 — needs row 10 fix; runs in parallel with RF |
-| 38 | **Wire mesh + sinusoidal basis (ANT-Tier-2.1)** | 3 sess | 🔵 |
-| 39 | **Pocklington Z matrix (ANT-Tier-2.2)** | 1 wk | 🔵 |
-| 40 | **Z·I=V solve + Z_in / S₁₁ (ANT-Tier-2.3)** | 3 sess | 🔵 — needs complex LU or 2N×2N real workaround |
-| 41 | **Far-field pattern + gain (ANT-Tier-2.4)** | 1 wk | 🔵 |
-| 42 | **`sparameters(ant, f)` RF-bridge (ANT-Tier-2.5)** | 3 sess | 🔵 — closes ANT-Tier-2 / Antenna MVP |
+| 1 | `randi` + `rng` (Tier 1.1–1.2) | 2 sess | ✅ shipped |
+| 2 | `randsrc` / `randerr` / int↔bit (Tier 1.3–1.4) | 3 sess | ✅ shipped |
+| 3 | `awgn` + `biterr` / `symerr` (Tier 1.5–1.6) | 3 sess | ✅ shipped — closes Comm Tier 1 |
+| 4 | **PROP-Tier-1a function-form: ITU-R + cellular models + Fresnel + knife-edge + geo helpers** (§3.1) | 1.5 wk | ✅ shipped |
+| 5 | **PROP-Tier-2a function-form: ITM (Longley-Rice) port** (§3.2) | 3 wk | ✅ shipped (engineering port; byte-identical NTIA v7.0 reference port stays 🔵) |
+| 6 | **PROP-Tier-2b function-form: terrain profile + `los_check` + `link_budget` + `coverage_grid`** (§3.3) | 1 wk | ✅ shipped — single-TX Propagation MVP lit |
+| 7 | **PROP-Tier-3 function-form: sector / cosine / 3GPP patterns + mount orientation + `coverage_grid_multi`** (§3.4) | 1.5 wk | ✅ shipped — Multi-Site Directional MVP lit |
+| 8 | `pammod` / `qammod` / `pskmod` (Tier 2.1–2.3) | 2 wk | ✅ shipped |
+| 9 | `rcosdesign` / `gaussdesign` (Tier 2.7) | 1 sess | ✅ shipped |
+| 10 | `berawgn` / `bercoding` (Tier 2.8) | 1 wk | ✅ shipped (`berawgn` only — `bercoding` stays deferred) — closes Comm Tier 2 |
+| 11 | **System-Object architectural fix** (CST §12 / §11.1) | 1 wk | 🟡 partial — CRC SOs shipped, validates the lowering; full multi-class SO surface still 🔵 |
+| 12 | **PROP-Tier-1b classdef wrappers**: `propagationModel` / `txsite` / `rxsite` / `pathloss` / `link` / `coverage` / `los` (§3.4) | 3 sess | ✅ shipped (CamelCase classdefs) |
+| 13 | CRC Sys Object (Tier 3.1) | 1 wk | ✅ shipped |
+| 14 | Convolutional + Viterbi (Tier 3.2) | 2 wk | ✅ shipped (hard + soft) |
+| 15 | BCH / RS + `gf` (Tier 3.3) | 2 wk | 🔵 — needs `gf(2^m)` typed descriptor |
+| 16 | Interleavers (Tier 3.5) | 1 wk | ✅ shipped — closes Comm Tier 3 |
+| 17 | Linear / DFE equalizer (Tier 4.1) | 2 wk | ✅ shipped (function-form; SO variants gated) |
+| 18 | Carrier / symbol / frame sync (Tier 4.2) | 2 wk | ✅ shipped (function-form; SO variants gated) |
+| 19 | RF impairments (Tier 4.3) | 1 wk | ✅ shipped — closes Comm Tier 4 |
+| 20 | **`sparameters` + sibling classdefs (RF-Tier-1.1)** | 3 sess | ✅ shipped |
+| 21 | **Network parameter conversions (RF-Tier-1.2)** | 3 sess | ✅ shipped (all-to-all + N-port) |
+| 22 | **Touchstone v1 + v2 read + write (RF-Tier-1.3)** | 3 sess | ✅ shipped — closes RF-Tier-1 |
+| 23 | **`s2tf` / `gammain` / `vswr` / `powergain` / stability (RF-Tier-2.1)** | 1 wk | ✅ shipped |
+| 24 | **`cascadesparams` / `snp2smp` (RF-Tier-2.2)** | 3 sess | ✅ shipped (Redheffer + Schur) |
+| 25 | **`rfbudget` Friis solver (RF-Tier-2.3)** | 3 sess | ✅ shipped — closes RF-Tier-2 |
+| 26 | OFDM mod / demod (Comm Tier 5.1) | 1.5 wk | ✅ shipped (function-form) |
+| 27 | Fading channels (Comm Tier 5.2) | 2 wk | ✅ shipped (Rayleigh + Rician) |
+| 28 | MIMO (Comm Tier 5.3) | 1.5 wk | ✅ shipped (Alamouti + MRC + ML) — closes Comm Tier 5 |
+| 29 | Spreading sequences (Comm Tier 6.1) | 1 wk | ✅ shipped (PN / Gold / Hadamard / Walsh) |
+| 30 | Source coding / quantization (Comm Tier 6.2) | 1 wk | ✅ shipped (`quantiz` / `lloydsQuant` / `compandMu` / `compandA` / DPCM) — closes Comm Tier 6 |
+| 31 | **`rationalfit` Vector Fitting (RF-Tier-3.1)** | 2 wk | ✅ shipped (real + complex-conjugate pole pairs) |
+| 32 | **`s2tdr` / `s2tdt` (RF-Tier-3.2)** | 3 sess | ✅ shipped |
+| 33 | **Transmission line objects (RF-Tier-3.3)** | 1 wk | ✅ shipped (microstrip / CPW / coax / two-wire / parallel-plate) — closes RF-Tier-3 |
+| 34 | **`matchingnetwork` (RF-Tier-4.1)** | 1 wk | ✅ shipped (L / T / Pi) |
+| 35 | **`rfckt.*` hierarchy subset (RF-Tier-4.2)** | 1 wk | ✅ shipped (7 rfckt blocks + LC filter circuits) |
+| 36 | **Smith chart numerics (RF-Tier-4.3)** | 3 sess | ✅ shipped — closes RF-Tier-4 |
+| 36b | **Comm Tier-7 modern codes** (function-form Polar / LDPC / Turbo, §5.4) | 3 wk | ✅ shipped (out-of-order arc) |
+| 37 | **Antenna catalog classdefs (12 types) (ANT-Tier-1)** | 1 wk | 🟡 partial — `AntDipole` + `AntMonopole` shipped; remaining 10 stubs 🔵 |
+| 38 | **Wire mesh + sinusoidal basis (ANT-Tier-2.1)** | 3 sess | 🟡 sidestepped — closed-form Balanis EMF path sufficed for dipole MVP |
+| 39 | **Pocklington Z matrix (ANT-Tier-2.2)** | 1 wk | 🔵 ANT-Tier-2b — gated on kernel-scaling debug |
+| 40 | **Z·I=V solve + Z_in / S₁₁ (ANT-Tier-2.3)** | 3 sess | ✅ shipped (`antennaWireSolve` closed-form for thin dipole) |
+| 41 | **Far-field pattern + gain (ANT-Tier-2.4)** | 1 wk | ✅ shipped (`antennaWirePattern`) |
+| 42 | **`sparameters(ant, f)` RF-bridge (ANT-Tier-2.5)** | 3 sess | ✅ shipped (`antennaWireSparameters`) — closes ANT-Tier-2 / Antenna MVP (dipole) |
 | 43 | **Triangular mesh generator (ANT-Tier-3.1)** | 1 wk | 🔵 |
 | 44 | **RWG basis (ANT-Tier-3.2)** | 2 sess | 🔵 |
 | 45 | **Surface-integral Z matrix + singularity extraction (ANT-Tier-3.3)** | 3 wk | 🔵 — single biggest item in Antenna arc |
