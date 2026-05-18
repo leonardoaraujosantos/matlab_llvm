@@ -345,25 +345,47 @@ std::string lowerToLLVMIR(mlir::ModuleOp M, bool EmitDebugInfo) {
     }
   }
 
-  /* Reject any leftover matlab.* dialect ops BEFORE the MLIR-to-LLVM
-   * conversion pipeline. The conversion passes (canonicalizer /
-   * scf-to-cf / cf-to-llvm / arith-to-llvm / func-to-llvm /
-   * reconcile-unrealized-casts) SIGSEGV when handed e.g.
-   * `matlab.subscript` on a `none`-typed value because they try to
-   * introspect operand types as part of legalization. Catching the
-   * unconverted ops here gives a clean diagnostic instead of a
-   * crash.
+  /* Two-stage validation around the trailing LowerScalarsToArith sweep:
    *
-   * This validator must precede the trailing LowerScalarsToArith
-   * sweep below — the greedy pattern driver in that sweep folds and
-   * canonicalises everything in the module, and dangling matlab.*
-   * ops (e.g. matlab.subscript on a none-typed value left over from
-   * an unsupported `set(handle(1), ...)` call shape) cause a
-   * use-after-free crash inside the worklist when the driver erases
-   * dead ops it can't fold. Validate first so we bail with a clean
-   * per-op diagnostic in those cases. */
-  if (mlir::failed(validateAllMatlabOpsLowered(M)))
-    return {};
+   *   1. "Dangerous" matlab.* ops — those with `none`-typed operands or
+   *      results (e.g. `matlab.subscript` on a handle returned by an
+   *      unshipped builtin) crash the greedy pattern driver inside the
+   *      sweep: it walks every op and calls `Operation::fold`, which
+   *      introspects operand types and trips a use-after-free when an
+   *      op gets folded that referenced something the driver already
+   *      erased. If any of these are present, bail BEFORE the sweep
+   *      with a per-op diagnostic.
+   *
+   *   2. "Safe" matlab.* ops (matlab.add / matlab.lt / etc. with
+   *      concrete f64 / i64 types) ARE the reason the trailing sweep
+   *      exists — upstream LowerScalarsToArith doesn't always re-attempt
+   *      patterns after an operand's defining op changes return type, so
+   *      the trailing sweep cleans them up. Run the sweep, then a full
+   *      post-sweep validator catches anything that survived. */
+  auto hasDangerousLeftovers = [](mlir::ModuleOp M) {
+    bool Dangerous = false;
+    M.walk([&](mlir::Operation *Op) {
+      if (Dangerous) return;
+      if (!Op->getName().getStringRef().starts_with("matlab.")) return;
+      auto isNoneOrPtr = [](mlir::Type T) {
+        /* `none` is the type the lowering plants when it can't infer
+         * a concrete element type — that's the crash trigger. We also
+         * include LLVM ptrs as "leave alone" because the trailing sweep
+         * is for scalar arith ops, not pointer ops. */
+        return mlir::isa<mlir::NoneType>(T);
+      };
+      for (auto V : Op->getOperands())
+        if (isNoneOrPtr(V.getType())) { Dangerous = true; return; }
+      for (auto V : Op->getResults())
+        if (isNoneOrPtr(V.getType())) { Dangerous = true; return; }
+    });
+    return Dangerous;
+  };
+
+  if (hasDangerousLeftovers(M)) {
+    if (mlir::failed(validateAllMatlabOpsLowered(M)))
+      return {};
+  }
 
   /* Final LowerScalarsToArith sweep — catches `matlab.sub` / `matlab.add`
    * / etc. ops whose operand types were refined to f64 only after the
@@ -373,6 +395,17 @@ std::string lowerToLLVMIR(mlir::ModuleOp M, bool EmitDebugInfo) {
    * single trailing sweep before LLVM conversion catches the stragglers.
    * Idempotent — no-op when nothing matches. */
   mlirgen::runLowerScalarsToArith(M);
+
+  /* Reject any leftover matlab.* dialect ops BEFORE the MLIR-to-LLVM
+   * conversion pipeline. The conversion passes (canonicalizer /
+   * scf-to-cf / cf-to-llvm / arith-to-llvm / func-to-llvm /
+   * reconcile-unrealized-casts) SIGSEGV when handed e.g.
+   * `matlab.subscript` on a `none`-typed value because they try to
+   * introspect operand types as part of legalization. Catching the
+   * unconverted ops here gives a clean diagnostic instead of a
+   * crash. */
+  if (mlir::failed(validateAllMatlabOpsLowered(M)))
+    return {};
 
   // Conversion pipeline: scf -> cf, then convert to llvm dialect.
   mlir::PassManager PM(Ctx);
