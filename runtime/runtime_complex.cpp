@@ -835,12 +835,6 @@ matlab_mat *matlab_residue_k(matlab_mat *b, matlab_mat *a) {
  * runtime entries matlab_<filt>_b / _a, mirroring the eig precedent.
  */
 
-/* Multiply complex (ar, ai) and (br, bi); store result in (rr, ri). */
-static inline void cmul2(double ar, double ai, double br, double bi,
-                         double &rr, double &ri) {
-    rr = ar * br - ai * bi;
-    ri = ar * bi + ai * br;
-}
 static inline void cdiv2(double ar, double ai, double br, double bi,
                          double &rr, double &ri) {
     double d = br * br + bi * bi;

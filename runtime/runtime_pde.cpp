@@ -3996,7 +3996,7 @@ void *matlab_pde_assemble_elast_3d_sparse(matlab_struct *mesh,
     /* Constitutive matrix — same as dense path. */
     double lam = E * nu / ((1.0 + nu) * (1.0 - 2.0 * nu));
     double mu  = E / (2.0 * (1.0 + nu));
-    double D[6][6] = {0};
+    double D[6][6] = {{0}};
     D[0][0] = lam + 2.0 * mu;  D[0][1] = lam;            D[0][2] = lam;
     D[1][0] = lam;             D[1][1] = lam + 2.0 * mu; D[1][2] = lam;
     D[2][0] = lam;             D[2][1] = lam;            D[2][2] = lam + 2.0 * mu;
@@ -4015,7 +4015,7 @@ void *matlab_pde_assemble_elast_3d_sparse(matlab_struct *mesh,
         double Vol;
         elast_compute_grad_extern(X, dN, &Vol);
         /* B (6x12). */
-        double B[6][12] = {0};
+        double B[6][12] = {{0}};
         for (int i = 0; i < 4; ++i) {
             double bx = dN[i][0], by = dN[i][1], bz = dN[i][2];
             int c = i * 3;

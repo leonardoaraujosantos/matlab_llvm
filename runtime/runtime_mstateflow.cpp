@@ -314,14 +314,14 @@ void mstateflow_event_reset(void) {
 //   <user-provided>chart_tick(&state, &inputs, &events);   // emit-c
 //   mstateflow_event_reset();
 void mstateflow_tick_begin(const char *Chart) {
-  (void)Chart;  // reserved for per-chart instrumentation.
+  static_cast<void>(Chart);  // reserved for per-chart instrumentation.
   // The DAP listener observes `superStepBegin` via the in-process
   // path; an external caller can pair this with `mstateflow_drain_*`
   // to surface the same trace.
 }
 
 void mstateflow_tick_end(const char *Chart) {
-  (void)Chart;
+  static_cast<void>(Chart);
   // Counterpart to _tick_begin — bookmark for instrumentation only.
 }
 

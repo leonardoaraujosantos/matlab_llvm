@@ -77,11 +77,11 @@ typedef struct matlab_mat3 matlab_mat3;
  * void* — callers pass either descriptor kind interchangeably. */
 static inline int mat_is_complex(const void *p) {
     if (!p) return 0;
-    return *(const uint32_t *)p == MATLAB_MAT_C_MAGIC;
+    return *reinterpret_cast<const uint32_t *>(p) == MATLAB_MAT_C_MAGIC;
 }
 static inline int mat_is_3d(const void *p) {
     if (!p) return 0;
-    return *(const uint32_t *)p == MATLAB_MAT3_MAGIC;
+    return *reinterpret_cast<const uint32_t *>(p) == MATLAB_MAT3_MAGIC;
 }
 
 /*--- Allocator helpers ---------------------------------------------------

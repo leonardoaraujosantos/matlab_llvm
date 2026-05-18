@@ -217,10 +217,10 @@ static int expand_bracket(matlab_optim_scalar_fn f, double x0,
 
 /* `x = fzero(@fn, x0)` — scalar initial-guess form. */
 double matlab_optim_fzero(void *fn_p, double x0) {
-    if (!fn_p) return (double)NAN;
-    matlab_optim_scalar_fn f = (matlab_optim_scalar_fn)fn_p;
+    if (!fn_p) return static_cast<double>(NAN);
+    matlab_optim_scalar_fn f = reinterpret_cast<matlab_optim_scalar_fn>(fn_p);
     double a, fa, b, fb;
-    if (expand_bracket(f, x0, &a, &fa, &b, &fb) != 0) return (double)NAN;
+    if (expand_bracket(f, x0, &a, &fa, &b, &fb) != 0) return static_cast<double>(NAN);
     if (fa == 0.0) return a;
     if (fb == 0.0) return b;
     return brent_root(f, a, fa, b, fb, 1.0e-12, 1.0e-14, 100);
@@ -228,17 +228,17 @@ double matlab_optim_fzero(void *fn_p, double x0) {
 
 /* `x = fzero(@fn, [a b])` — bracket form. */
 double matlab_optim_fzero_iv(void *fn_p, matlab_mat *iv) {
-    if (!fn_p || !iv) return (double)NAN;
+    if (!fn_p || !iv) return static_cast<double>(NAN);
     int64_t n = iv->rows * iv->cols;
-    if (n < 2) return (double)NAN;
-    matlab_optim_scalar_fn f = (matlab_optim_scalar_fn)fn_p;
+    if (n < 2) return static_cast<double>(NAN);
+    matlab_optim_scalar_fn f = reinterpret_cast<matlab_optim_scalar_fn>(fn_p);
     double a  = iv->data[0];
     double b  = iv->data[1];
     double fa = f(a);
     double fb = f(b);
     if (fa == 0.0) return a;
     if (fb == 0.0) return b;
-    if (fa * fb > 0.0) return (double)NAN;
+    if (fa * fb > 0.0) return static_cast<double>(NAN);
     return brent_root(f, a, fa, b, fb, 1.0e-12, 1.0e-14, 100);
 }
 
@@ -252,8 +252,8 @@ double matlab_optim_fzero_iv(void *fn_p, matlab_mat *iv) {
  * it by at least half the second-to-last step; otherwise the golden
  * step is used.  Converges super-linearly on smooth unimodal f.      */
 double matlab_optim_fminbnd(void *fn_p, double lo, double hi) {
-    if (!fn_p) return (double)NAN;
-    matlab_optim_scalar_fn f = (matlab_optim_scalar_fn)fn_p;
+    if (!fn_p) return static_cast<double>(NAN);
+    matlab_optim_scalar_fn f = reinterpret_cast<matlab_optim_scalar_fn>(fn_p);
     if (lo > hi) { double t = lo; lo = hi; hi = t; }
 
     const double C = 0.5 * (3.0 - sqrt(5.0));  /* golden ratio ≈ 0.381966 */
@@ -322,7 +322,7 @@ double matlab_optim_fminbnd(void *fn_p, double lo, double hi) {
 
 /* Evaluate a vector objective at a std::vector point. */
 static double nm_eval(matlab_optim_vector_fn f, const std::vector<double> &v) {
-    int n = (int)v.size();
+    int n = static_cast<int>(v.size());
     matlab_mat *m = mat_alloc(n, 1);
     for (int i = 0; i < n; ++i) m->data[i] = v[i];
     double r = f(m);
@@ -337,8 +337,8 @@ static double nm_eval(matlab_optim_vector_fn f, const std::vector<double> &v) {
  * coordinate is zero), matching MATLAB's fminsearch construction.    */
 matlab_mat *matlab_optim_fminsearch(void *fn_p, matlab_mat *x0) {
     if (!fn_p || !x0) return mat_alloc(0, 0);
-    matlab_optim_vector_fn f = (matlab_optim_vector_fn)fn_p;
-    int n = (int)(x0->rows * x0->cols);
+    matlab_optim_vector_fn f = reinterpret_cast<matlab_optim_vector_fn>(fn_p);
+    int n = static_cast<int>(x0->rows * x0->cols);
     if (n < 1) return mat_alloc(0, 0);
 
     /* Simplex: n+1 vertices. */
@@ -447,14 +447,14 @@ matlab_mat *matlab_optim_fminsearch(void *fn_p, matlab_mat *x0) {
  * (curvature lost to FD noise) H resets to the identity.            */
 matlab_mat *matlab_optim_fminunc(void *fn_p, matlab_mat *x0) {
     if (!fn_p || !x0) return mat_alloc(0, 0);
-    matlab_optim_vector_fn f = (matlab_optim_vector_fn)fn_p;
-    int n = (int)(x0->rows * x0->cols);
+    matlab_optim_vector_fn f = reinterpret_cast<matlab_optim_vector_fn>(fn_p);
+    int n = static_cast<int>(x0->rows * x0->cols);
     if (n < 1) return mat_alloc(0, 0);
 
     std::vector<double> x(n), g(n), gnew(n), p(n), xnew(n), s(n), y(n), Hy(n);
-    std::vector<double> H((size_t)n * n, 0.0);
+    std::vector<double> H(static_cast<size_t>(n) * n, 0.0);
     for (int i = 0; i < n; ++i) x[i] = x0->data[i];
-    for (int i = 0; i < n; ++i) H[(size_t)i * n + i] = 1.0;
+    for (int i = 0; i < n; ++i) H[static_cast<size_t>(i) * n + i] = 1.0;
 
     auto eval = [&](const std::vector<double> &v) -> double {
         return nm_eval(f, v);
@@ -486,7 +486,7 @@ matlab_mat *matlab_optim_fminunc(void *fn_p, matlab_mat *x0) {
         /* Search direction p = −H g. */
         for (int i = 0; i < n; ++i) {
             double sum = 0.0;
-            for (int j = 0; j < n; ++j) sum += H[(size_t)i * n + j] * g[j];
+            for (int j = 0; j < n; ++j) sum += H[static_cast<size_t>(i) * n + j] * g[j];
             p[i] = -sum;
         }
         double slope = 0.0;
@@ -494,7 +494,7 @@ matlab_mat *matlab_optim_fminunc(void *fn_p, matlab_mat *x0) {
         if (slope >= 0.0) {
             /* Not a descent direction — reset to steepest descent. */
             for (size_t k = 0; k < H.size(); ++k) H[k] = 0.0;
-            for (int i = 0; i < n; ++i) H[(size_t)i * n + i] = 1.0;
+            for (int i = 0; i < n; ++i) H[static_cast<size_t>(i) * n + i] = 1.0;
             for (int i = 0; i < n; ++i) p[i] = -g[i];
             slope = 0.0;
             for (int i = 0; i < n; ++i) slope += g[i] * p[i];
@@ -521,7 +521,7 @@ matlab_mat *matlab_optim_fminunc(void *fn_p, matlab_mat *x0) {
             double rho = 1.0 / sy;
             for (int i = 0; i < n; ++i) {
                 double sum = 0.0;
-                for (int j = 0; j < n; ++j) sum += H[(size_t)i * n + j] * y[j];
+                for (int j = 0; j < n; ++j) sum += H[static_cast<size_t>(i) * n + j] * y[j];
                 Hy[i] = sum;
             }
             double yHy = 0.0;
@@ -529,7 +529,7 @@ matlab_mat *matlab_optim_fminunc(void *fn_p, matlab_mat *x0) {
             double coef = rho * (rho * yHy + 1.0);
             for (int i = 0; i < n; ++i)
                 for (int j = 0; j < n; ++j)
-                    H[(size_t)i * n + j] +=
+                    H[static_cast<size_t>(i) * n + j] +=
                         -rho * (s[i] * Hy[j] + Hy[i] * s[j])
                         + coef * s[i] * s[j];
         }
@@ -568,12 +568,12 @@ static matlab_mat *linprog_core(matlab_mat *f, matlab_mat *A, matlab_mat *b,
                                 matlab_mat *Aeq, matlab_mat *beq,
                                 matlab_mat *lb, matlab_mat *ub) {
     if (mat_absent(f)) return mat_alloc(0, 0);
-    int n = (int)mat_numel(f);
+    int n = static_cast<int>(mat_numel(f));
 
     /* Lower bounds (default 0). */
     std::vector<double> L(n, 0.0);
     if (!mat_absent(lb)) {
-        if ((int)mat_numel(lb) != n) return mat_alloc(0, 0);
+        if (static_cast<int>(mat_numel(lb)) != n) return mat_alloc(0, 0);
         for (int i = 0; i < n; ++i) {
             L[i] = lb->data[i];
             if (!isfinite(L[i])) return mat_alloc(0, 0);  /* Tier-1: finite lb */
@@ -616,13 +616,13 @@ static matlab_mat *linprog_core(matlab_mat *f, matlab_mat *A, matlab_mat *b,
 
     /* A x ≤ b   →   A x' ≤ b − A L. */
     if (!mat_absent(A)) {
-        int m1 = (int)A->rows;
-        if ((int)A->cols != n || (int)mat_numel(b) != m1) return mat_alloc(0, 0);
+        int m1 = static_cast<int>(A->rows);
+        if (static_cast<int>(A->cols) != n || static_cast<int>(mat_numel(b)) != m1) return mat_alloc(0, 0);
         std::vector<double> coef(n);
         for (int i = 0; i < m1; ++i) {
             double shift = 0.0;
             for (int j = 0; j < n; ++j) {
-                coef[j] = A->data[(size_t)i * n + j];
+                coef[j] = A->data[static_cast<size_t>(i) * n + j];
                 shift += coef[j] * L[j];
             }
             add_le(coef.data(), b->data[i] - shift);
@@ -630,13 +630,13 @@ static matlab_mat *linprog_core(matlab_mat *f, matlab_mat *A, matlab_mat *b,
     }
     /* Aeq x = beq   →   Aeq x' = beq − Aeq L. */
     if (!mat_absent(Aeq)) {
-        int m2 = (int)Aeq->rows;
-        if ((int)Aeq->cols != n || (int)mat_numel(beq) != m2) return mat_alloc(0, 0);
+        int m2 = static_cast<int>(Aeq->rows);
+        if (static_cast<int>(Aeq->cols) != n || static_cast<int>(mat_numel(beq)) != m2) return mat_alloc(0, 0);
         std::vector<double> coef(n);
         for (int i = 0; i < m2; ++i) {
             double shift = 0.0;
             for (int j = 0; j < n; ++j) {
-                coef[j] = Aeq->data[(size_t)i * n + j];
+                coef[j] = Aeq->data[static_cast<size_t>(i) * n + j];
                 shift += coef[j] * L[j];
             }
             add_eq(coef.data(), beq->data[i] - shift);
@@ -644,7 +644,7 @@ static matlab_mat *linprog_core(matlab_mat *f, matlab_mat *A, matlab_mat *b,
     }
     /* Finite ub   →   x' ≤ ub − L. */
     if (!mat_absent(ub)) {
-        if ((int)mat_numel(ub) != n) return mat_alloc(0, 0);
+        if (static_cast<int>(mat_numel(ub)) != n) return mat_alloc(0, 0);
         std::vector<double> coef(n, 0.0);
         for (int i = 0; i < n; ++i) {
             double u = ub->data[i];
@@ -655,7 +655,7 @@ static matlab_mat *linprog_core(matlab_mat *f, matlab_mat *A, matlab_mat *b,
         }
     }
 
-    int R = (int)rows.size();
+    int R = static_cast<int>(rows.size());
     /* Column layout: [n structural][slacks/surplus][artificials][RHS]. */
     int nSlack = 0, nArtif = 0;
     for (auto &r : rows) {
@@ -666,12 +666,12 @@ static matlab_mat *linprog_core(matlab_mat *f, matlab_mat *A, matlab_mat *b,
     int W = n + nSlack + nArtif;  /* columns excluding RHS */
     int artBase = n + nSlack;
 
-    std::vector<double> T((size_t)R * (W + 1), 0.0);
+    std::vector<double> T(static_cast<size_t>(R) * (W + 1), 0.0);
     std::vector<int> basis(R, -1);
     int sCol = n, aCol = artBase;
     for (int i = 0; i < R; ++i) {
         Row &r = rows[i];
-        double *Trow = &T[(size_t)i * (W + 1)];
+        double *Trow = &T[static_cast<size_t>(i) * (W + 1)];
         for (int j = 0; j < n; ++j) Trow[j] = r.a[j];
         Trow[W] = r.rhs;
         if (r.kind == 0) {
@@ -704,7 +704,7 @@ static matlab_mat *linprog_core(matlab_mat *f, matlab_mat *A, matlab_mat *b,
             for (int j = 0; j < W; ++j) {
                 double z = 0.0;
                 for (int i = 0; i < R; ++i)
-                    z += cost[basis[i]] * T[(size_t)i * (W + 1) + j];
+                    z += cost[basis[i]] * T[static_cast<size_t>(i) * (W + 1) + j];
                 double rc = cost[j] - z;
                 if (rc < best) { best = rc; enter = j; }
             }
@@ -714,9 +714,9 @@ static matlab_mat *linprog_core(matlab_mat *f, matlab_mat *A, matlab_mat *b,
             int leave = -1;
             double minRatio = 0.0;
             for (int i = 0; i < R; ++i) {
-                double aij = T[(size_t)i * (W + 1) + enter];
+                double aij = T[static_cast<size_t>(i) * (W + 1) + enter];
                 if (aij > EPS) {
-                    double ratio = T[(size_t)i * (W + 1) + W] / aij;
+                    double ratio = T[static_cast<size_t>(i) * (W + 1) + W] / aij;
                     if (leave < 0 || ratio < minRatio - 1e-12) {
                         minRatio = ratio;
                         leave = i;
@@ -726,14 +726,14 @@ static matlab_mat *linprog_core(matlab_mat *f, matlab_mat *A, matlab_mat *b,
             if (leave < 0) return 1;  /* unbounded */
 
             /* Pivot on (leave, enter). */
-            double piv = T[(size_t)leave * (W + 1) + enter];
-            double *Lrow = &T[(size_t)leave * (W + 1)];
+            double piv = T[static_cast<size_t>(leave) * (W + 1) + enter];
+            double *Lrow = &T[static_cast<size_t>(leave) * (W + 1)];
             for (int j = 0; j <= W; ++j) Lrow[j] /= piv;
             for (int i = 0; i < R; ++i) {
                 if (i == leave) continue;
-                double factor = T[(size_t)i * (W + 1) + enter];
+                double factor = T[static_cast<size_t>(i) * (W + 1) + enter];
                 if (factor == 0.0) continue;
-                double *Trow = &T[(size_t)i * (W + 1)];
+                double *Trow = &T[static_cast<size_t>(i) * (W + 1)];
                 for (int j = 0; j <= W; ++j) Trow[j] -= factor * Lrow[j];
             }
             basis[leave] = enter;
@@ -750,7 +750,7 @@ static matlab_mat *linprog_core(matlab_mat *f, matlab_mat *A, matlab_mat *b,
         double infeas = 0.0;
         for (int i = 0; i < R; ++i)
             if (basis[i] >= artBase)
-                infeas += fabs(T[(size_t)i * (W + 1) + W]);
+                infeas += fabs(T[static_cast<size_t>(i) * (W + 1) + W]);
         if (infeas > 1.0e-7) return mat_alloc(0, 0);  /* infeasible */
     }
 
@@ -767,7 +767,7 @@ static matlab_mat *linprog_core(matlab_mat *f, matlab_mat *A, matlab_mat *b,
     for (int i = 0; i < R; ++i) {
         int bv = basis[i];
         if (bv >= 0 && bv < n)
-            out->data[bv] = T[(size_t)i * (W + 1) + W];
+            out->data[bv] = T[static_cast<size_t>(i) * (W + 1) + W];
     }
     for (int j = 0; j < n; ++j) out->data[j] += L[j];
     return out;
@@ -798,9 +798,9 @@ matlab_mat *matlab_optim_linprog3(matlab_mat *f, matlab_mat *A, matlab_mat *b) {
  * its bound.                                                          */
 matlab_mat *matlab_optim_lsqnonneg(matlab_mat *C, matlab_mat *d) {
     if (mat_absent(C) || mat_absent(d)) return mat_alloc(0, 0);
-    int m = (int)C->rows;
-    int n = (int)C->cols;
-    if ((int)mat_numel(d) != m) return mat_alloc(0, 0);
+    int m = static_cast<int>(C->rows);
+    int n = static_cast<int>(C->cols);
+    if (static_cast<int>(mat_numel(d)) != m) return mat_alloc(0, 0);
 
     std::vector<double> x(n, 0.0);
     std::vector<int> inP(n, 0);          /* 1 ⇒ column in passive set */
@@ -814,13 +814,13 @@ matlab_mat *matlab_optim_lsqnonneg(matlab_mat *C, matlab_mat *d) {
         /* resid = d − C x */
         for (int i = 0; i < m; ++i) {
             double s = d->data[i];
-            for (int j = 0; j < n; ++j) s -= C->data[(size_t)i * n + j] * x[j];
+            for (int j = 0; j < n; ++j) s -= C->data[static_cast<size_t>(i) * n + j] * x[j];
             resid[i] = s;
         }
         /* w = Cᵀ resid */
         for (int j = 0; j < n; ++j) {
             double s = 0.0;
-            for (int i = 0; i < m; ++i) s += C->data[(size_t)i * n + j] * resid[i];
+            for (int i = 0; i < m; ++i) s += C->data[static_cast<size_t>(i) * n + j] * resid[i];
             w[j] = s;
         }
     };
@@ -840,11 +840,11 @@ matlab_mat *matlab_optim_lsqnonneg(matlab_mat *C, matlab_mat *d) {
             /* Indices currently in the passive set. */
             std::vector<int> P;
             for (int j = 0; j < n; ++j) if (inP[j]) P.push_back(j);
-            int np = (int)P.size();
+            int np = static_cast<int>(P.size());
             if (np == 0) break;
 
             /* Normal equations (CₚᵀCₚ) z = Cₚᵀ d on the passive set. */
-            std::vector<double> M((size_t)np * np, 0.0);
+            std::vector<double> M(static_cast<size_t>(np) * np, 0.0);
             std::vector<double> rhs(np, 0.0);
             for (int a = 0; a < np; ++a) {
                 int ja = P[a];
@@ -852,12 +852,12 @@ matlab_mat *matlab_optim_lsqnonneg(matlab_mat *C, matlab_mat *d) {
                     int jb = P[bcol];
                     double s = 0.0;
                     for (int i = 0; i < m; ++i)
-                        s += C->data[(size_t)i * n + ja] * C->data[(size_t)i * n + jb];
-                    M[(size_t)a * np + bcol] = s;
+                        s += C->data[static_cast<size_t>(i) * n + ja] * C->data[static_cast<size_t>(i) * n + jb];
+                    M[static_cast<size_t>(a) * np + bcol] = s;
                 }
                 double s = 0.0;
                 for (int i = 0; i < m; ++i)
-                    s += C->data[(size_t)i * n + ja] * d->data[i];
+                    s += C->data[static_cast<size_t>(i) * n + ja] * d->data[i];
                 rhs[a] = s;
             }
             std::vector<double> z(n, 0.0);
@@ -912,8 +912,8 @@ matlab_mat *matlab_optim_lsqnonneg(matlab_mat *C, matlab_mat *d) {
  * stalls (flat derivative or divergence) it falls back to the same
  * bracket-expansion + Brent path fzero uses.                          */
 double matlab_optim_fsolve_scalar(void *fn_p, double x0) {
-    if (!fn_p) return (double)NAN;
-    matlab_optim_scalar_fn f = (matlab_optim_scalar_fn)fn_p;
+    if (!fn_p) return static_cast<double>(NAN);
+    matlab_optim_scalar_fn f = reinterpret_cast<matlab_optim_scalar_fn>(fn_p);
 
     double x = x0;
     for (int it = 0; it < 100; ++it) {
@@ -972,7 +972,7 @@ static std::vector<double> vecout_eval_raw(matlab_optim_vecout_fn f,
     free(m);
     std::vector<double> out;
     if (r) {
-        int k = (int)(r->rows * r->cols);
+        int k = static_cast<int>(r->rows * r->cols);
         out.assign(r->data, r->data + k);
         free(r->data);
         free(r);
@@ -993,7 +993,7 @@ static std::vector<double> curve_eval_raw(matlab_optim_curve_fn f,
                                           matlab_mat *xdata) {
     matlab_mat *m = mat_alloc(n, 1);
     for (int i = 0; i < n; ++i) m->data[i] = x[i];
-    int md = (int)(xdata->rows * xdata->cols);
+    int md = static_cast<int>(xdata->rows * xdata->cols);
     std::vector<double> out(md);
     for (int i = 0; i < md; ++i) out[i] = f(m, xdata->data[i]);
     free(m->data);
@@ -1026,11 +1026,11 @@ typedef std::function<double(const std::vector<double> &,
 static void inner_pbfgs(const PhiFn &phi, std::vector<double> &x,
                         const std::vector<double> &L,
                         const std::vector<double> &U, int max_iter) {
-    int n = (int)x.size();
+    int n = static_cast<int>(x.size());
     box_project(x, L, U);
     std::vector<double> g(n), gnew(n), p(n), xnew(n), s(n), y(n), Hy(n);
-    std::vector<double> H((size_t)n * n, 0.0);
-    for (int i = 0; i < n; ++i) H[(size_t)i * n + i] = 1.0;
+    std::vector<double> H(static_cast<size_t>(n) * n, 0.0);
+    for (int i = 0; i < n; ++i) H[static_cast<size_t>(i) * n + i] = 1.0;
 
     double f = phi(x, &g);
     for (int it = 0; it < max_iter; ++it) {
@@ -1046,14 +1046,14 @@ static void inner_pbfgs(const PhiFn &phi, std::vector<double> &x,
 
         for (int i = 0; i < n; ++i) {
             double sum = 0.0;
-            for (int j = 0; j < n; ++j) sum += H[(size_t)i * n + j] * g[j];
+            for (int j = 0; j < n; ++j) sum += H[static_cast<size_t>(i) * n + j] * g[j];
             p[i] = -sum;
         }
         double slope = 0.0;
         for (int i = 0; i < n; ++i) slope += g[i] * p[i];
         if (slope >= 0.0) {
             for (size_t k = 0; k < H.size(); ++k) H[k] = 0.0;
-            for (int i = 0; i < n; ++i) H[(size_t)i * n + i] = 1.0;
+            for (int i = 0; i < n; ++i) H[static_cast<size_t>(i) * n + i] = 1.0;
             for (int i = 0; i < n; ++i) p[i] = -g[i];
         }
 
@@ -1084,7 +1084,7 @@ static void inner_pbfgs(const PhiFn &phi, std::vector<double> &x,
             double rho = 1.0 / sy;
             for (int i = 0; i < n; ++i) {
                 double sum = 0.0;
-                for (int j = 0; j < n; ++j) sum += H[(size_t)i * n + j] * y[j];
+                for (int j = 0; j < n; ++j) sum += H[static_cast<size_t>(i) * n + j] * y[j];
                 Hy[i] = sum;
             }
             double yHy = 0.0;
@@ -1092,7 +1092,7 @@ static void inner_pbfgs(const PhiFn &phi, std::vector<double> &x,
             double coef = rho * (rho * yHy + 1.0);
             for (int i = 0; i < n; ++i)
                 for (int j = 0; j < n; ++j)
-                    H[(size_t)i * n + j] +=
+                    H[static_cast<size_t>(i) * n + j] +=
                         -rho * (s[i] * Hy[j] + Hy[i] * s[j])
                         + coef * s[i] * s[j];
         }
@@ -1123,25 +1123,25 @@ static std::vector<double> al_minimize(const AlObjFn &obj,
                                        const matlab_mat *Aeq, const matlab_mat *beq,
                                        const matlab_mat *lb, const matlab_mat *ub,
                                        const VecFn &nonlcon) {
-    int n = (int)x0.size();
+    int n = static_cast<int>(x0.size());
 
     std::vector<double> L(n, -INFINITY), U(n, INFINITY);
-    if (!mat_absent(lb) && (int)mat_numel(lb) == n)
+    if (!mat_absent(lb) && static_cast<int>(mat_numel(lb)) == n)
         for (int i = 0; i < n; ++i) L[i] = lb->data[i];
-    if (!mat_absent(ub) && (int)mat_numel(ub) == n)
+    if (!mat_absent(ub) && static_cast<int>(mat_numel(ub)) == n)
         for (int i = 0; i < n; ++i) U[i] = ub->data[i];
 
     /* Linear inequality / equality row counts. */
-    int mInA = (!mat_absent(A) && (int)A->cols == n) ? (int)A->rows : 0;
-    int mEq  = (!mat_absent(Aeq) && (int)Aeq->cols == n) ? (int)Aeq->rows : 0;
+    int mInA = (!mat_absent(A) && static_cast<int>(A->cols) == n) ? static_cast<int>(A->rows) : 0;
+    int mEq  = (!mat_absent(Aeq) && static_cast<int>(Aeq->cols) == n) ? static_cast<int>(Aeq->rows) : 0;
 
     std::vector<double> x = x0;
     box_project(x, L, U);
 
     /* Probe the nonlinear constraint count once. */
     int mNL = 0;
-    bool haveNL = (bool)nonlcon;
-    if (haveNL) mNL = (int)nonlcon(x).size();
+    bool haveNL = static_cast<bool>(nonlcon);
+    if (haveNL) mNL = static_cast<int>(nonlcon(x).size());
     int mIneq = mInA + mNL;
 
     std::vector<double> lambda(mEq, 0.0);   /* equality multipliers   */
@@ -1158,24 +1158,24 @@ static std::vector<double> al_minimize(const AlObjFn &obj,
         /* Linear equalities. */
         for (int i = 0; i < mEq; ++i) {
             double hi = -beq->data[i];
-            for (int j = 0; j < n; ++j) hi += Aeq->data[(size_t)i * n + j] * xv[j];
+            for (int j = 0; j < n; ++j) hi += Aeq->data[static_cast<size_t>(i) * n + j] * xv[j];
             val += lambda[i] * hi + 0.5 * mu * hi * hi;
             if (grad) {
                 double coef = lambda[i] + mu * hi;
                 for (int j = 0; j < n; ++j)
-                    (*grad)[j] += coef * Aeq->data[(size_t)i * n + j];
+                    (*grad)[j] += coef * Aeq->data[static_cast<size_t>(i) * n + j];
             }
         }
         /* Linear inequalities. */
         for (int i = 0; i < mInA; ++i) {
             double gi = -b->data[i];
-            for (int j = 0; j < n; ++j) gi += A->data[(size_t)i * n + j] * xv[j];
+            for (int j = 0; j < n; ++j) gi += A->data[static_cast<size_t>(i) * n + j] * xv[j];
             double sv = sigma[i] + mu * gi;
             if (sv > 0.0) {
                 val += (0.5 / mu) * (sv * sv - sigma[i] * sigma[i]);
                 if (grad)
                     for (int j = 0; j < n; ++j)
-                        (*grad)[j] += sv * A->data[(size_t)i * n + j];
+                        (*grad)[j] += sv * A->data[static_cast<size_t>(i) * n + j];
             } else {
                 val += (0.5 / mu) * (-sigma[i] * sigma[i]);
             }
@@ -1183,11 +1183,11 @@ static std::vector<double> al_minimize(const AlObjFn &obj,
         /* Nonlinear inequalities. */
         if (haveNL && mNL > 0) {
             std::vector<double> c = nonlcon(xv);
-            int mc = std::min((int)c.size(), mNL);
+            int mc = std::min(static_cast<int>(c.size()), mNL);
             /* Finite-difference Jacobian, only when a gradient is needed. */
             std::vector<double> Jc;
             if (grad) {
-                Jc.assign((size_t)mc * n, 0.0);
+                Jc.assign(static_cast<size_t>(mc) * n, 0.0);
                 std::vector<double> xp = xv;
                 for (int j = 0; j < n; ++j) {
                     double h = 1.0e-7 * (fabs(xv[j]) + 1.0);
@@ -1195,7 +1195,7 @@ static std::vector<double> al_minimize(const AlObjFn &obj,
                     std::vector<double> cp = nonlcon(xp);
                     xp[j] = xv[j];
                     for (int k = 0; k < mc; ++k)
-                        Jc[(size_t)k * n + j] = (cp[k] - c[k]) / h;
+                        Jc[static_cast<size_t>(k) * n + j] = (cp[k] - c[k]) / h;
                 }
             }
             for (int k = 0; k < mc; ++k) {
@@ -1205,7 +1205,7 @@ static std::vector<double> al_minimize(const AlObjFn &obj,
                     val += (0.5 / mu) * (sv * sv - sigma[idx] * sigma[idx]);
                     if (grad)
                         for (int j = 0; j < n; ++j)
-                            (*grad)[j] += sv * Jc[(size_t)k * n + j];
+                            (*grad)[j] += sv * Jc[static_cast<size_t>(k) * n + j];
                 } else {
                     val += (0.5 / mu) * (-sigma[idx] * sigma[idx]);
                 }
@@ -1224,19 +1224,19 @@ static std::vector<double> al_minimize(const AlObjFn &obj,
         double viol = 0.0;
         for (int i = 0; i < mEq; ++i) {
             double hi = -beq->data[i];
-            for (int j = 0; j < n; ++j) hi += Aeq->data[(size_t)i * n + j] * x[j];
+            for (int j = 0; j < n; ++j) hi += Aeq->data[static_cast<size_t>(i) * n + j] * x[j];
             hcur[i] = hi;
             viol = std::max(viol, fabs(hi));
         }
         for (int i = 0; i < mInA; ++i) {
             double gi = -b->data[i];
-            for (int j = 0; j < n; ++j) gi += A->data[(size_t)i * n + j] * x[j];
+            for (int j = 0; j < n; ++j) gi += A->data[static_cast<size_t>(i) * n + j] * x[j];
             gcur[i] = gi;
             viol = std::max(viol, gi);
         }
         if (haveNL && mNL > 0) {
             std::vector<double> c = nonlcon(x);
-            for (int k = 0; k < mNL && k < (int)c.size(); ++k) {
+            for (int k = 0; k < mNL && k < static_cast<int>(c.size()); ++k) {
                 gcur[mInA + k] = c[k];
                 viol = std::max(viol, c[k]);
             }
@@ -1266,17 +1266,17 @@ static std::vector<double> al_minimize(const AlObjFn &obj,
 static std::vector<double> lm_solve(const VecFn &residual,
                                     const std::vector<double> &x0,
                                     const matlab_mat *lb, const matlab_mat *ub) {
-    int n = (int)x0.size();
+    int n = static_cast<int>(x0.size());
     std::vector<double> L(n, -INFINITY), U(n, INFINITY);
-    if (!mat_absent(lb) && (int)mat_numel(lb) == n)
+    if (!mat_absent(lb) && static_cast<int>(mat_numel(lb)) == n)
         for (int i = 0; i < n; ++i) L[i] = lb->data[i];
-    if (!mat_absent(ub) && (int)mat_numel(ub) == n)
+    if (!mat_absent(ub) && static_cast<int>(mat_numel(ub)) == n)
         for (int i = 0; i < n; ++i) U[i] = ub->data[i];
 
     std::vector<double> x = x0;
     box_project(x, L, U);
     std::vector<double> r = residual(x);
-    int m = (int)r.size();
+    int m = static_cast<int>(r.size());
     if (m == 0) return x;
 
     auto sumsq = [](const std::vector<double> &v) {
@@ -1290,27 +1290,27 @@ static std::vector<double> lm_solve(const VecFn &residual,
 
     for (int it = 0; it < max_iter; ++it) {
         /* Forward-difference Jacobian J (m × n). */
-        std::vector<double> J((size_t)m * n, 0.0);
+        std::vector<double> J(static_cast<size_t>(m) * n, 0.0);
         std::vector<double> xp = x;
         for (int j = 0; j < n; ++j) {
             double h = 1.0e-7 * (fabs(x[j]) + 1.0);
             xp[j] = x[j] + h;
             std::vector<double> rp = residual(xp);
             xp[j] = x[j];
-            for (int i = 0; i < m && i < (int)rp.size(); ++i)
-                J[(size_t)i * n + j] = (rp[i] - r[i]) / h;
+            for (int i = 0; i < m && i < static_cast<int>(rp.size()); ++i)
+                J[static_cast<size_t>(i) * n + j] = (rp[i] - r[i]) / h;
         }
         /* Normal-equation pieces: JtJ (n × n), g = Jᵀr (n). */
-        std::vector<double> JtJ((size_t)n * n, 0.0), g(n, 0.0);
+        std::vector<double> JtJ(static_cast<size_t>(n) * n, 0.0), g(n, 0.0);
         for (int a = 0; a < n; ++a) {
             for (int bb = 0; bb < n; ++bb) {
                 double s = 0.0;
                 for (int i = 0; i < m; ++i)
-                    s += J[(size_t)i * n + a] * J[(size_t)i * n + bb];
-                JtJ[(size_t)a * n + bb] = s;
+                    s += J[static_cast<size_t>(i) * n + a] * J[static_cast<size_t>(i) * n + bb];
+                JtJ[static_cast<size_t>(a) * n + bb] = s;
             }
             double s = 0.0;
-            for (int i = 0; i < m; ++i) s += J[(size_t)i * n + a] * r[i];
+            for (int i = 0; i < m; ++i) s += J[static_cast<size_t>(i) * n + a] * r[i];
             g[a] = s;
         }
         double gnorm = 0.0;
@@ -1320,11 +1320,11 @@ static std::vector<double> lm_solve(const VecFn &residual,
         /* Inner loop: adjust λ until a step decreases the cost. */
         int accepted = 0;
         for (int tries = 0; tries < 30; ++tries) {
-            std::vector<double> M((size_t)n * n), rhs(n);
+            std::vector<double> M(static_cast<size_t>(n) * n), rhs(n);
             for (int a = 0; a < n; ++a) {
                 for (int bb = 0; bb < n; ++bb)
-                    M[(size_t)a * n + bb] = JtJ[(size_t)a * n + bb];
-                M[(size_t)a * n + a] += lambda * (JtJ[(size_t)a * n + a] + 1.0e-12);
+                    M[static_cast<size_t>(a) * n + bb] = JtJ[static_cast<size_t>(a) * n + bb];
+                M[static_cast<size_t>(a) * n + a] += lambda * (JtJ[static_cast<size_t>(a) * n + a] + 1.0e-12);
                 rhs[a] = -g[a];
             }
             if (solve_dense_gepp(M.data(), rhs.data(), n) != 0) {
@@ -1373,8 +1373,8 @@ matlab_mat *matlab_optim_fmincon(void *obj_p, matlab_mat *x0,
                                  matlab_mat *lb, matlab_mat *ub,
                                  void *nonlcon_p) {
     if (!obj_p || mat_absent(x0)) return mat_alloc(0, 0);
-    int n = (int)mat_numel(x0);
-    matlab_optim_vector_fn fobj = (matlab_optim_vector_fn)obj_p;
+    int n = static_cast<int>(mat_numel(x0));
+    matlab_optim_vector_fn fobj = reinterpret_cast<matlab_optim_vector_fn>(obj_p);
 
     AlObjFn obj = [fobj, n](const std::vector<double> &xv,
                             std::vector<double> *grad) -> double {
@@ -1395,7 +1395,7 @@ matlab_mat *matlab_optim_fmincon(void *obj_p, matlab_mat *x0,
 
     VecFn nonlcon;
     if (nonlcon_p) {
-        matlab_optim_vecout_fn fc = (matlab_optim_vecout_fn)nonlcon_p;
+        matlab_optim_vecout_fn fc = reinterpret_cast<matlab_optim_vecout_fn>(nonlcon_p);
         nonlcon = [fc, n](const std::vector<double> &xv) -> std::vector<double> {
             return vecout_eval_raw(fc, xv.data(), n);
         };
@@ -1420,15 +1420,15 @@ matlab_mat *matlab_optim_quadprog(matlab_mat *H, matlab_mat *fvec,
                                   matlab_mat *Aeq, matlab_mat *beq,
                                   matlab_mat *lb, matlab_mat *ub) {
     if (mat_absent(H) || mat_absent(fvec)) return mat_alloc(0, 0);
-    int n = (int)mat_numel(fvec);
-    if ((int)H->rows != n || (int)H->cols != n) return mat_alloc(0, 0);
+    int n = static_cast<int>(mat_numel(fvec));
+    if (static_cast<int>(H->rows) != n || static_cast<int>(H->cols) != n) return mat_alloc(0, 0);
 
     AlObjFn obj = [H, fvec, n](const std::vector<double> &xv,
                                std::vector<double> *grad) -> double {
         std::vector<double> Hx(n, 0.0);
         for (int i = 0; i < n; ++i) {
             double s = 0.0;
-            for (int j = 0; j < n; ++j) s += H->data[(size_t)i * n + j] * xv[j];
+            for (int j = 0; j < n; ++j) s += H->data[static_cast<size_t>(i) * n + j] * xv[j];
             Hx[i] = s;
         }
         double val = 0.0;
@@ -1458,16 +1458,16 @@ matlab_mat *matlab_optim_lsqlin(matlab_mat *C, matlab_mat *d,
                                 matlab_mat *Aeq, matlab_mat *beq,
                                 matlab_mat *lb, matlab_mat *ub) {
     if (mat_absent(C) || mat_absent(d)) return mat_alloc(0, 0);
-    int m = (int)C->rows;
-    int n = (int)C->cols;
-    if ((int)mat_numel(d) != m) return mat_alloc(0, 0);
+    int m = static_cast<int>(C->rows);
+    int n = static_cast<int>(C->cols);
+    if (static_cast<int>(mat_numel(d)) != m) return mat_alloc(0, 0);
 
     AlObjFn obj = [C, d, m, n](const std::vector<double> &xv,
                                std::vector<double> *grad) -> double {
         std::vector<double> r(m);
         for (int i = 0; i < m; ++i) {
             double s = -d->data[i];
-            for (int j = 0; j < n; ++j) s += C->data[(size_t)i * n + j] * xv[j];
+            for (int j = 0; j < n; ++j) s += C->data[static_cast<size_t>(i) * n + j] * xv[j];
             r[i] = s;
         }
         double val = 0.0;
@@ -1476,7 +1476,7 @@ matlab_mat *matlab_optim_lsqlin(matlab_mat *C, matlab_mat *d,
             grad->assign(n, 0.0);
             for (int i = 0; i < m; ++i)
                 for (int j = 0; j < n; ++j)
-                    (*grad)[j] += C->data[(size_t)i * n + j] * r[i];
+                    (*grad)[j] += C->data[static_cast<size_t>(i) * n + j] * r[i];
         }
         return val;
     };
@@ -1497,8 +1497,8 @@ matlab_mat *matlab_optim_lsqlin(matlab_mat *C, matlab_mat *d,
 matlab_mat *matlab_optim_lsqnonlin(void *fun_p, matlab_mat *x0,
                                    matlab_mat *lb, matlab_mat *ub) {
     if (!fun_p || mat_absent(x0)) return mat_alloc(0, 0);
-    int n = (int)mat_numel(x0);
-    matlab_optim_vecout_fn fr = (matlab_optim_vecout_fn)fun_p;
+    int n = static_cast<int>(mat_numel(x0));
+    matlab_optim_vecout_fn fr = reinterpret_cast<matlab_optim_vecout_fn>(fun_p);
     VecFn residual = [fr, n](const std::vector<double> &xv) -> std::vector<double> {
         return vecout_eval_raw(fr, xv.data(), n);
     };
@@ -1518,14 +1518,14 @@ matlab_mat *matlab_optim_lsqcurvefit(void *fun_p, matlab_mat *x0,
                                      matlab_mat *xdata, matlab_mat *ydata) {
     if (!fun_p || mat_absent(x0) || mat_absent(xdata) || mat_absent(ydata))
         return mat_alloc(0, 0);
-    int n = (int)mat_numel(x0);
-    int m = (int)mat_numel(ydata);
-    matlab_optim_curve_fn fc = (matlab_optim_curve_fn)fun_p;
+    int n = static_cast<int>(mat_numel(x0));
+    int m = static_cast<int>(mat_numel(ydata));
+    matlab_optim_curve_fn fc = reinterpret_cast<matlab_optim_curve_fn>(fun_p);
     VecFn residual = [fc, n, m, xdata, ydata](const std::vector<double> &xv)
         -> std::vector<double> {
         std::vector<double> yp = curve_eval_raw(fc, xv.data(), n, xdata);
         std::vector<double> r(m, 0.0);
-        for (int i = 0; i < m && i < (int)yp.size(); ++i)
+        for (int i = 0; i < m && i < static_cast<int>(yp.size()); ++i)
             r[i] = yp[i] - ydata->data[i];
         return r;
     };
@@ -1544,8 +1544,8 @@ matlab_mat *matlab_optim_lsqcurvefit(void *fun_p, matlab_mat *x0,
  * The scalar form (x0 a scalar) is handled by matlab_optim_fsolve_scalar. */
 matlab_mat *matlab_optim_fsolve(void *fun_p, matlab_mat *x0) {
     if (!fun_p || mat_absent(x0)) return mat_alloc(0, 0);
-    int n = (int)mat_numel(x0);
-    matlab_optim_vecout_fn ff = (matlab_optim_vecout_fn)fun_p;
+    int n = static_cast<int>(mat_numel(x0));
+    matlab_optim_vecout_fn ff = reinterpret_cast<matlab_optim_vecout_fn>(fun_p);
     VecFn residual = [ff, n](const std::vector<double> &xv) -> std::vector<double> {
         return vecout_eval_raw(ff, xv.data(), n);
     };
@@ -1570,7 +1570,7 @@ matlab_mat *matlab_optim_fsolve(void *fun_p, matlab_mat *x0) {
 
 /* Build a column matlab_mat from a std::vector. */
 static matlab_mat *vec_to_colmat(const std::vector<double> &v) {
-    matlab_mat *m = mat_alloc((int64_t)v.size(), 1);
+    matlab_mat *m = mat_alloc(static_cast<int64_t>(v.size()), 1);
     for (size_t i = 0; i < v.size(); ++i) m->data[i] = v[i];
     return m;
 }
@@ -1579,11 +1579,11 @@ static matlab_mat *vec_to_colmat(const std::vector<double> &v) {
  * A null / absent M yields null (still "absent"). */
 static matlab_mat *pad_cols(const matlab_mat *M, int extra) {
     if (mat_absent(M)) return NULL;
-    int m = (int)M->rows, n = (int)M->cols;
+    int m = static_cast<int>(M->rows), n = static_cast<int>(M->cols);
     matlab_mat *out = mat_alloc(m, n + extra);
     for (int i = 0; i < m; ++i)
         for (int j = 0; j < n; ++j)
-            out->data[(size_t)i * (n + extra) + j] = M->data[(size_t)i * n + j];
+            out->data[static_cast<size_t>(i) * (n + extra) + j] = M->data[static_cast<size_t>(i) * n + j];
     return out;  /* the extra columns stay zero (mat_alloc calloc's) */
 }
 
@@ -1605,21 +1605,21 @@ matlab_mat *matlab_optim_intlinprog(matlab_mat *f, matlab_mat *intcon,
                                     matlab_mat *Aeq, matlab_mat *beq,
                                     matlab_mat *lb, matlab_mat *ub) {
     if (mat_absent(f)) return mat_alloc(0, 0);
-    int n = (int)mat_numel(f);
+    int n = static_cast<int>(mat_numel(f));
 
     std::vector<int> ints;
     if (!mat_absent(intcon)) {
-        int ni = (int)mat_numel(intcon);
+        int ni = static_cast<int>(mat_numel(intcon));
         for (int i = 0; i < ni; ++i) {
-            int idx = (int)llround(intcon->data[i]) - 1;
+            int idx = static_cast<int>(llround(intcon->data[i])) - 1;
             if (idx >= 0 && idx < n) ints.push_back(idx);
         }
     }
 
     std::vector<double> L0(n, 0.0), U0(n, INFINITY);
-    if (!mat_absent(lb) && (int)mat_numel(lb) == n)
+    if (!mat_absent(lb) && static_cast<int>(mat_numel(lb)) == n)
         for (int i = 0; i < n; ++i) L0[i] = lb->data[i];
-    if (!mat_absent(ub) && (int)mat_numel(ub) == n)
+    if (!mat_absent(ub) && static_cast<int>(mat_numel(ub)) == n)
         for (int i = 0; i < n; ++i) U0[i] = ub->data[i];
 
     auto solveNode = [&](const std::vector<double> &L,
@@ -1702,8 +1702,8 @@ matlab_mat *matlab_optim_fminimax(void *fun_p, matlab_mat *x0,
                                   matlab_mat *Aeq, matlab_mat *beq,
                                   matlab_mat *lb, matlab_mat *ub) {
     if (!fun_p || mat_absent(x0)) return mat_alloc(0, 0);
-    int n = (int)mat_numel(x0);
-    matlab_optim_vecout_fn fF = (matlab_optim_vecout_fn)fun_p;
+    int n = static_cast<int>(mat_numel(x0));
+    matlab_optim_vecout_fn fF = reinterpret_cast<matlab_optim_vecout_fn>(fun_p);
 
     AlObjFn obj = [n](const std::vector<double> &z,
                       std::vector<double> *grad) -> double {
@@ -1727,12 +1727,12 @@ matlab_mat *matlab_optim_fminimax(void *fun_p, matlab_mat *x0,
     matlab_mat *Apad = pad_cols(A, 1);
     matlab_mat *Aeqpad = pad_cols(Aeq, 1);
     matlab_mat *lbpad = NULL, *ubpad = NULL;
-    if (!mat_absent(lb) && (int)mat_numel(lb) == n) {
+    if (!mat_absent(lb) && static_cast<int>(mat_numel(lb)) == n) {
         std::vector<double> v(lb->data, lb->data + n);
         v.push_back(-INFINITY);
         lbpad = vec_to_colmat(v);
     }
-    if (!mat_absent(ub) && (int)mat_numel(ub) == n) {
+    if (!mat_absent(ub) && static_cast<int>(mat_numel(ub)) == n) {
         std::vector<double> v(ub->data, ub->data + n);
         v.push_back(INFINITY);
         ubpad = vec_to_colmat(v);
@@ -1762,13 +1762,13 @@ matlab_mat *matlab_optim_fgoalattain(void *fun_p, matlab_mat *x0,
                                      matlab_mat *Aeq, matlab_mat *beq,
                                      matlab_mat *lb, matlab_mat *ub) {
     if (!fun_p || mat_absent(x0) || mat_absent(goal)) return mat_alloc(0, 0);
-    int n = (int)mat_numel(x0);
-    int m = (int)mat_numel(goal);
-    matlab_optim_vecout_fn fF = (matlab_optim_vecout_fn)fun_p;
+    int n = static_cast<int>(mat_numel(x0));
+    int m = static_cast<int>(mat_numel(goal));
+    matlab_optim_vecout_fn fF = reinterpret_cast<matlab_optim_vecout_fn>(fun_p);
 
     std::vector<double> gvec(goal->data, goal->data + m);
     std::vector<double> wvec(m, 1.0);
-    if (!mat_absent(weight) && (int)mat_numel(weight) == m)
+    if (!mat_absent(weight) && static_cast<int>(mat_numel(weight)) == m)
         for (int i = 0; i < m; ++i) wvec[i] = weight->data[i];
 
     AlObjFn obj = [n](const std::vector<double> &z,
@@ -1780,7 +1780,7 @@ matlab_mat *matlab_optim_fgoalattain(void *fun_p, matlab_mat *x0,
         -> std::vector<double> {
         std::vector<double> F = vecout_eval_raw(fF, z.data(), n);
         std::vector<double> c(m, 0.0);
-        for (int i = 0; i < m && i < (int)F.size(); ++i)
+        for (int i = 0; i < m && i < static_cast<int>(F.size()); ++i)
             c[i] = F[i] - wvec[i] * z[n] - gvec[i];
         return c;
     };
@@ -1788,7 +1788,7 @@ matlab_mat *matlab_optim_fgoalattain(void *fun_p, matlab_mat *x0,
     /* γ initial guess: the worst attainment factor at x0. */
     std::vector<double> Fx0 = vecout_eval_raw(fF, x0->data, n);
     double g0 = 0.0;
-    for (int i = 0; i < m && i < (int)Fx0.size(); ++i) {
+    for (int i = 0; i < m && i < static_cast<int>(Fx0.size()); ++i) {
         double w = (fabs(wvec[i]) > 1.0e-12) ? wvec[i] : 1.0;
         g0 = std::max(g0, (Fx0[i] - gvec[i]) / w);
     }
@@ -1799,12 +1799,12 @@ matlab_mat *matlab_optim_fgoalattain(void *fun_p, matlab_mat *x0,
     matlab_mat *Apad = pad_cols(A, 1);
     matlab_mat *Aeqpad = pad_cols(Aeq, 1);
     matlab_mat *lbpad = NULL, *ubpad = NULL;
-    if (!mat_absent(lb) && (int)mat_numel(lb) == n) {
+    if (!mat_absent(lb) && static_cast<int>(mat_numel(lb)) == n) {
         std::vector<double> v(lb->data, lb->data + n);
         v.push_back(-INFINITY);
         lbpad = vec_to_colmat(v);
     }
-    if (!mat_absent(ub) && (int)mat_numel(ub) == n) {
+    if (!mat_absent(ub) && static_cast<int>(mat_numel(ub)) == n) {
         std::vector<double> v(ub->data, ub->data + n);
         v.push_back(INFINITY);
         ubpad = vec_to_colmat(v);
@@ -1839,7 +1839,7 @@ matlab_mat *matlab_optim_coneprog(matlab_mat *f, matlab_mat *Asc,
                                   matlab_mat *beq, matlab_mat *lb,
                                   matlab_mat *ub) {
     if (mat_absent(f)) return mat_alloc(0, 0);
-    int n = (int)mat_numel(f);
+    int n = static_cast<int>(mat_numel(f));
 
     AlObjFn obj = [f, n](const std::vector<double> &x,
                          std::vector<double> *grad) -> double {
@@ -1855,14 +1855,14 @@ matlab_mat *matlab_optim_coneprog(matlab_mat *f, matlab_mat *Asc,
     double gam = mat_absent(gamma_sc) ? 0.0 : gamma_sc->data[0];
     VecFn nonlcon;
     if (!mat_absent(Asc)) {
-        int mc = (int)Asc->rows;
+        int mc = static_cast<int>(Asc->rows);
         nonlcon = [Asc, bsc, dsc, gam, n, mc](const std::vector<double> &x)
             -> std::vector<double> {
             double nrm = 0.0;
             for (int i = 0; i < mc; ++i) {
                 double r = mat_absent(bsc) ? 0.0 : bsc->data[i];
                 for (int j = 0; j < n; ++j)
-                    r += Asc->data[(size_t)i * n + j] * x[j];
+                    r += Asc->data[static_cast<size_t>(i) * n + j] * x[j];
                 nrm += r * r;
             }
             nrm = sqrt(nrm);
@@ -1894,9 +1894,9 @@ matlab_mat *matlab_optim_fseminf(void *fun_p, matlab_mat *x0,
                                  void *seminfcon_p, matlab_mat *lb,
                                  matlab_mat *ub) {
     if (!fun_p || mat_absent(x0) || !seminfcon_p) return mat_alloc(0, 0);
-    int n = (int)mat_numel(x0);
-    matlab_optim_vector_fn fobj = (matlab_optim_vector_fn)fun_p;
-    matlab_optim_curve_fn fcon = (matlab_optim_curve_fn)seminfcon_p;
+    int n = static_cast<int>(mat_numel(x0));
+    matlab_optim_vector_fn fobj = reinterpret_cast<matlab_optim_vector_fn>(fun_p);
+    matlab_optim_curve_fn fcon = reinterpret_cast<matlab_optim_curve_fn>(seminfcon_p);
 
     AlObjFn obj = [fobj, n](const std::vector<double> &x,
                             std::vector<double> *grad) -> double {
@@ -1942,7 +1942,7 @@ matlab_mat *matlab_optim_fseminf(void *fun_p, matlab_mat *x0,
         for (int i = 0; i < n; ++i) m->data[i] = x[i];
         double worstW = 0.0, worstV = -INFINITY;
         for (int g = 0; g <= GRID; ++g) {
-            double w = (double)g / GRID;
+            double w = static_cast<double>(g) / GRID;
             double v = fcon(m, w);
             if (v > worstV) { worstV = v; worstW = w; }
         }
@@ -1994,7 +1994,7 @@ static std::vector<PBNode> g_pb_nodes;
 
 static int pb_node(int kind, int a, int b, double cval, int var) {
     g_pb_nodes.push_back(PBNode{kind, a, b, cval, var});
-    return (int)g_pb_nodes.size() - 1;
+    return static_cast<int>(g_pb_nodes.size()) - 1;
 }
 
 /* --- DAG builders (each returns a node id as an f64) ------------- */
@@ -2007,41 +2007,41 @@ static int pb_node(int kind, int a, int b, double cval, int var) {
  * in variable-creation order. */
 double matlab_optim_pb_var(double is_int) {
     PBVar v;
-    v.is_int = (int)is_int;
+    v.is_int = static_cast<int>(is_int);
     v.lb = -INFINITY;
     v.ub = INFINITY;
     g_pb_vars.push_back(v);
-    return (double)pb_node(PBK_VAR, -1, -1, 0.0, (int)g_pb_vars.size() - 1);
+    return static_cast<double>(pb_node(PBK_VAR, -1, -1, 0.0, static_cast<int>(g_pb_vars.size()) - 1));
 }
 double matlab_optim_pb_const(double v) {
-    return (double)pb_node(PBK_CONST, -1, -1, v, -1);
+    return static_cast<double>(pb_node(PBK_CONST, -1, -1, v, -1));
 }
 double matlab_optim_pb_add(double a, double b) {
-    return (double)pb_node(PBK_ADD, (int)a, (int)b, 0.0, -1);
+    return static_cast<double>(pb_node(PBK_ADD, static_cast<int>(a), static_cast<int>(b), 0.0, -1));
 }
 double matlab_optim_pb_sub(double a, double b) {
-    return (double)pb_node(PBK_SUB, (int)a, (int)b, 0.0, -1);
+    return static_cast<double>(pb_node(PBK_SUB, static_cast<int>(a), static_cast<int>(b), 0.0, -1));
 }
 double matlab_optim_pb_neg(double a) {
-    return (double)pb_node(PBK_NEG, (int)a, -1, 0.0, -1);
+    return static_cast<double>(pb_node(PBK_NEG, static_cast<int>(a), -1, 0.0, -1));
 }
 double matlab_optim_pb_mul(double a, double b) {
-    return (double)pb_node(PBK_MUL, (int)a, (int)b, 0.0, -1);
+    return static_cast<double>(pb_node(PBK_MUL, static_cast<int>(a), static_cast<int>(b), 0.0, -1));
 }
 double matlab_optim_pb_div(double a, double b) {
-    return (double)pb_node(PBK_DIV, (int)a, (int)b, 0.0, -1);
+    return static_cast<double>(pb_node(PBK_DIV, static_cast<int>(a), static_cast<int>(b), 0.0, -1));
 }
 double matlab_optim_pb_pow(double a, double b) {
-    return (double)pb_node(PBK_POW, (int)a, (int)b, 0.0, -1);
+    return static_cast<double>(pb_node(PBK_POW, static_cast<int>(a), static_cast<int>(b), 0.0, -1));
 }
 double matlab_optim_pb_le(double a, double b) {
-    return (double)pb_node(PBK_LE, (int)a, (int)b, 0.0, -1);
+    return static_cast<double>(pb_node(PBK_LE, static_cast<int>(a), static_cast<int>(b), 0.0, -1));
 }
 double matlab_optim_pb_ge(double a, double b) {
-    return (double)pb_node(PBK_GE, (int)a, (int)b, 0.0, -1);
+    return static_cast<double>(pb_node(PBK_GE, static_cast<int>(a), static_cast<int>(b), 0.0, -1));
 }
 double matlab_optim_pb_eq(double a, double b) {
-    return (double)pb_node(PBK_EQ, (int)a, (int)b, 0.0, -1);
+    return static_cast<double>(pb_node(PBK_EQ, static_cast<int>(a), static_cast<int>(b), 0.0, -1));
 }
 /* --- classdef-object field readers ------------------------------ *
  * `matlab_obj` and `matlab_struct` share the leading field layout
@@ -2052,7 +2052,7 @@ double matlab_optim_pb_eq(double a, double b) {
  * `Objective` (ptr to an expression object), `Constraints` (a nested
  * struct of constraint objects), and an optional `Maximize` f64. */
 static int pb_find_field(void *o, const char *name) {
-    matlab_struct_s *s = (matlab_struct_s *)o;
+    matlab_struct_s *s = reinterpret_cast<matlab_struct_s *>(o);
     if (!s) return -1;
     for (int i = 0; i < s->nfields; ++i)
         if (s->names[i] && strcmp(s->names[i], name) == 0) return i;
@@ -2061,12 +2061,12 @@ static int pb_find_field(void *o, const char *name) {
 static double pb_field_f64(void *o, const char *name) {
     int i = pb_find_field(o, name);
     if (i < 0) return 0.0;
-    return ((matlab_struct_s *)o)->f64_vals[i];
+    return (reinterpret_cast<matlab_struct_s *>(o))->f64_vals[i];
 }
 static void *pb_field_ptr(void *o, const char *name) {
     int i = pb_find_field(o, name);
     if (i < 0) return NULL;
-    return ((matlab_struct_s *)o)->ptr_vals[i];
+    return (reinterpret_cast<matlab_struct_s *>(o))->ptr_vals[i];
 }
 
 /* Per-`solve` remap: a problem only ranges over the variables that
@@ -2079,10 +2079,10 @@ static int g_pb_nv = 0;
 
 /* Collect every variable index referenced under node `nid`. */
 static void pb_collect_vars(int nid, std::vector<char> &used) {
-    if (nid < 0 || nid >= (int)g_pb_nodes.size()) return;
+    if (nid < 0 || nid >= static_cast<int>(g_pb_nodes.size())) return;
     const PBNode &n = g_pb_nodes[nid];
     if (n.kind == PBK_VAR) {
-        if (n.var >= 0 && n.var < (int)used.size()) used[n.var] = 1;
+        if (n.var >= 0 && n.var < static_cast<int>(used.size())) used[n.var] = 1;
         return;
     }
     if (n.a >= 0) pb_collect_vars(n.a, used);
@@ -2094,11 +2094,11 @@ static void pb_collect_vars(int nid, std::vector<char> &used) {
  * `g_var_remap`).  Relation nodes (LE/GE/EQ) evaluate to the canonical
  * `g(x)` whose feasible form is `g(x) ≤ 0` (LE/GE) or `g(x) = 0` (EQ). */
 static double pb_eval(int nid, const double *x) {
-    if (nid < 0 || nid >= (int)g_pb_nodes.size()) return 0.0;
+    if (nid < 0 || nid >= static_cast<int>(g_pb_nodes.size())) return 0.0;
     const PBNode &n = g_pb_nodes[nid];
     switch (n.kind) {
         case PBK_VAR: {
-            int li = (n.var >= 0 && n.var < (int)g_var_remap.size())
+            int li = (n.var >= 0 && n.var < static_cast<int>(g_var_remap.size()))
                          ? g_var_remap[n.var] : -1;
             return (li >= 0) ? x[li] : 0.0;
         }
@@ -2122,7 +2122,7 @@ static double pb_eval(int nid, const double *x) {
  * reduce to their canonical `g(x)` form. */
 static bool pb_reduce_linear(int nid, double &c0, std::vector<double> &lin) {
     int nv = g_pb_nv;
-    if (nid < 0 || nid >= (int)g_pb_nodes.size()) return false;
+    if (nid < 0 || nid >= static_cast<int>(g_pb_nodes.size())) return false;
     const PBNode &n = g_pb_nodes[nid];
     auto allZero = [](const std::vector<double> &v) {
         for (double e : v) if (e != 0.0) return false;
@@ -2133,7 +2133,7 @@ static bool pb_reduce_linear(int nid, double &c0, std::vector<double> &lin) {
             c0 = n.cval; lin.assign(nv, 0.0); return true;
         case PBK_VAR: {
             c0 = 0.0; lin.assign(nv, 0.0);
-            int li = (n.var >= 0 && n.var < (int)g_var_remap.size())
+            int li = (n.var >= 0 && n.var < static_cast<int>(g_var_remap.size()))
                          ? g_var_remap[n.var] : -1;
             if (li >= 0) lin[li] = 1.0;
             return true;
@@ -2214,21 +2214,21 @@ matlab_mat *matlab_optim_pb_solve(void *prob_obj) {
     /* Objective node id (from prob.Objective's `Id` field). */
     int objn = -1;
     void *objExpr = pb_field_ptr(prob_obj, "Objective");
-    if (objExpr) objn = (int)pb_field_f64(objExpr, "Id");
-    int maximize = (int)pb_field_f64(prob_obj, "Maximize");
+    if (objExpr) objn = static_cast<int>(pb_field_f64(objExpr, "Id"));
+    int maximize = static_cast<int>(pb_field_f64(prob_obj, "Maximize"));
 
     /* Constraint node ids — walk the nested Constraints struct. */
     std::vector<int> consIds;
     void *consS = pb_field_ptr(prob_obj, "Constraints");
     if (consS) {
-        matlab_struct_s *cs = (matlab_struct_s *)consS;
+        matlab_struct_s *cs = reinterpret_cast<matlab_struct_s *>(consS);
         for (int i = 0; i < cs->nfields; ++i) {
             if (cs->kinds[i] == 1 && cs->ptr_vals[i]) {
                 /* a constraint object → its `Id` field is the node id */
-                consIds.push_back((int)pb_field_f64(cs->ptr_vals[i], "Id"));
+                consIds.push_back(static_cast<int>(pb_field_f64(cs->ptr_vals[i], "Id")));
             } else if (cs->kinds[i] == 0) {
                 /* a bare node-id f64 stored directly */
-                consIds.push_back((int)cs->f64_vals[i]);
+                consIds.push_back(static_cast<int>(cs->f64_vals[i]));
             }
         }
     }
@@ -2241,9 +2241,9 @@ matlab_mat *matlab_optim_pb_solve(void *prob_obj) {
     pb_collect_vars(objn, usedFlag);
     for (int cnid : consIds) pb_collect_vars(cnid, usedFlag);
     std::vector<int> usedVars;
-    for (int i = 0; i < (int)g_pb_vars.size(); ++i)
+    for (int i = 0; i < static_cast<int>(g_pb_vars.size()); ++i)
         if (usedFlag[i]) usedVars.push_back(i);
-    int nv = (int)usedVars.size();
+    int nv = static_cast<int>(usedVars.size());
     if (nv == 0) return mat_alloc(0, 0);
     g_var_remap.assign(g_pb_vars.size(), -1);
     for (int li = 0; li < nv; ++li) g_var_remap[usedVars[li]] = li;
@@ -2265,7 +2265,7 @@ matlab_mat *matlab_optim_pb_solve(void *prob_obj) {
     std::vector<int> nlIneq;
     bool allConsLinear = true;
     for (int cnid : consIds) {
-        if (cnid < 0 || cnid >= (int)g_pb_nodes.size()) continue;
+        if (cnid < 0 || cnid >= static_cast<int>(g_pb_nodes.size())) continue;
         int kind = g_pb_nodes[cnid].kind;
         double c0; std::vector<double> lin;
         if (pb_reduce_linear(cnid, c0, lin)) {
@@ -2287,7 +2287,7 @@ matlab_mat *matlab_optim_pb_solve(void *prob_obj) {
     auto rows_to_mat = [](const std::vector<std::vector<double>> &R,
                           int ncols) -> matlab_mat * {
         if (R.empty()) return NULL;
-        matlab_mat *m = mat_alloc((int64_t)R.size(), ncols);
+        matlab_mat *m = mat_alloc(static_cast<int64_t>(R.size()), ncols);
         for (size_t i = 0; i < R.size(); ++i)
             for (int j = 0; j < ncols; ++j)
                 m->data[i * ncols + j] = R[i][j];
@@ -2295,7 +2295,7 @@ matlab_mat *matlab_optim_pb_solve(void *prob_obj) {
     };
     auto vec_to_mat = [](const std::vector<double> &v) -> matlab_mat * {
         if (v.empty()) return NULL;
-        matlab_mat *m = mat_alloc((int64_t)v.size(), 1);
+        matlab_mat *m = mat_alloc(static_cast<int64_t>(v.size()), 1);
         for (size_t i = 0; i < v.size(); ++i) m->data[i] = v[i];
         return m;
     };
@@ -2325,7 +2325,7 @@ matlab_mat *matlab_optim_pb_solve(void *prob_obj) {
         std::vector<double> idx;
         for (int li = 0; li < nv; ++li)
             if (g_pb_vars[usedVars[li]].is_int)
-                idx.push_back((double)(li + 1));
+                idx.push_back(static_cast<double>(li + 1));
         matlab_mat *intcon = vec_to_mat(idx);
         matlab_mat *r = matlab_optim_intlinprog(fm, intcon, Am, bm,
                                                 Aeqm, beqm, lbc, ubc);
@@ -2408,12 +2408,12 @@ matlab_mat *matlab_optim_pb_solve_eqn(void *prob_obj) {
     std::vector<int> eqIds;
     void *eqS = pb_field_ptr(prob_obj, "Equations");
     if (eqS) {
-        matlab_struct_s *es = (matlab_struct_s *)eqS;
+        matlab_struct_s *es = reinterpret_cast<matlab_struct_s *>(eqS);
         for (int i = 0; i < es->nfields; ++i) {
             if (es->kinds[i] == 1 && es->ptr_vals[i])
-                eqIds.push_back((int)pb_field_f64(es->ptr_vals[i], "Id"));
+                eqIds.push_back(static_cast<int>(pb_field_f64(es->ptr_vals[i], "Id")));
             else if (es->kinds[i] == 0)
-                eqIds.push_back((int)es->f64_vals[i]);
+                eqIds.push_back(static_cast<int>(es->f64_vals[i]));
         }
     }
     if (eqIds.empty()) return mat_alloc(0, 0);
@@ -2422,9 +2422,9 @@ matlab_mat *matlab_optim_pb_solve_eqn(void *prob_obj) {
     std::vector<char> usedFlag(g_pb_vars.size(), 0);
     for (int eid : eqIds) pb_collect_vars(eid, usedFlag);
     std::vector<int> usedVars;
-    for (int i = 0; i < (int)g_pb_vars.size(); ++i)
+    for (int i = 0; i < static_cast<int>(g_pb_vars.size()); ++i)
         if (usedFlag[i]) usedVars.push_back(i);
-    int nv = (int)usedVars.size();
+    int nv = static_cast<int>(usedVars.size());
     if (nv == 0) return mat_alloc(0, 0);
     g_var_remap.assign(g_pb_vars.size(), -1);
     for (int li = 0; li < nv; ++li) g_var_remap[usedVars[li]] = li;

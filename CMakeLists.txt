@@ -315,6 +315,31 @@ endif()
 
 enable_testing()
 
+# --- Sanitizer support for the runtime test lane ----------------------------
+# Opt-in via -DMATLAB_LLVM_RUNTIME_ASAN=ON. When set, every
+# runtime-test-* executable is compiled with -fsanitize=address,undefined
+# so the existing runtime-tests-* ctest entries double as a sanitizer lane.
+# Recommended workflow:
+#   cmake -S . -B build-asan -DMATLAB_LLVM_RUNTIME_ASAN=ON -DMATLAB_LLVM_WITH_MLIR=OFF
+#   cmake --build build-asan
+#   ASAN_OPTIONS=abort_on_error=0 UBSAN_OPTIONS=halt_on_error=0 \
+#     ctest --test-dir build-asan -R '^runtime-tests-'
+# The MLIR frontend is excluded from this knob because it pulls LLVM
+# headers that interact badly with ASan instrumentation; the runtime
+# tests are pure C-ABI and stand alone.
+option(MATLAB_LLVM_RUNTIME_ASAN
+       "Build runtime test executables with -fsanitize=address,undefined"
+       OFF)
+set(_rt_san_flags "")
+if(MATLAB_LLVM_RUNTIME_ASAN)
+  set(_rt_san_flags
+      -fsanitize=address
+      -fsanitize=undefined
+      -fno-omit-frame-pointer
+      -fno-sanitize-recover=undefined)
+  message(STATUS "Runtime tests: AddressSanitizer + UndefinedBehaviorSanitizer enabled")
+endif()
+
 # --- Runtime unit tests -----------------------------------------------------
 # Direct C tests for runtime/matlab_runtime.c — no JIT, no MATLAB
 # frontend. Each test_*.c links the runtime TU directly. See
@@ -341,9 +366,32 @@ foreach(_rt_test IN ITEMS linalg shape rng complex reduce signal stats image mor
     target_compile_options(${_rt_target} PRIVATE ${MATLAB_LLVM_COVERAGE_FLAGS})
     target_link_options(${_rt_target}    PRIVATE ${MATLAB_LLVM_COVERAGE_FLAGS})
   endif()
+  if(MATLAB_LLVM_RUNTIME_ASAN)
+    target_compile_options(${_rt_target} PRIVATE ${_rt_san_flags})
+    target_link_options(${_rt_target}    PRIVATE ${_rt_san_flags})
+  endif()
   add_test(NAME runtime-tests-${_rt_test}
            COMMAND $<TARGET_FILE:${_rt_target}>)
+  if(MATLAB_LLVM_RUNTIME_ASAN)
+    # macOS ASan rejects detect_leaks=1; the other knobs cap the noise
+    # on UBSan findings so a single fault doesn't abort the whole test.
+    set_tests_properties(runtime-tests-${_rt_test} PROPERTIES
+      ENVIRONMENT "ASAN_OPTIONS=abort_on_error=0:check_initialization_order=1;UBSAN_OPTIONS=halt_on_error=0:print_stacktrace=1")
+  endif()
 endforeach()
+
+# --- Enforce no new C-style casts in modernised runtime TUs -----------------
+# The five new-runtime modules went through a mechanical static_cast<>
+# conversion. Lock that in with -Wold-style-cast as an error on these
+# TUs only; the legacy matlab_runtime.cpp + sibling TUs predate the
+# convention and would generate thousands of warnings if flagged.
+set_source_files_properties(
+  runtime/runtime_comm.cpp
+  runtime/runtime_optim.cpp
+  runtime/runtime_rf.cpp
+  runtime/runtime_prop.cpp
+  runtime/runtime_mstateflow.cpp
+  PROPERTIES COMPILE_OPTIONS "-Wold-style-cast;-Werror=old-style-cast")
 
 if(MATLAB_LLVM_WITH_PLOT)
   foreach(_plot_test IN ITEMS hello basic)

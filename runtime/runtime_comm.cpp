@@ -44,7 +44,7 @@ static inline double comm_uniform(void) {
     uint64_t x = matlab_rng_state;
     x ^= x << 13; x ^= x >> 7; x ^= x << 17;
     matlab_rng_state = x;
-    return (double)(x >> 11) / (double)(1ULL << 53);
+    return static_cast<double>(x >> 11) / static_cast<double>(1ULL << 53);
 }
 
 static inline double comm_normal(void) {
@@ -78,7 +78,7 @@ void matlab_comm_rng(double seed) {
      * substitute a non-zero seed identical to the original
      * boot-time constant. Mirrors the deterministic-default
      * behaviour of MATLAB's default Mersenne Twister. */
-    uint64_t s = (uint64_t)seed;
+    uint64_t s = static_cast<uint64_t>(seed);
     if (s == 0) s = 0x243f6a8885a308d3ULL;
     matlab_rng_state = s;
 }
@@ -91,8 +91,8 @@ void matlab_comm_rng_shuffle(void) {
     /* Seed from wall-clock + process-relative ticks. Not
      * cryptographic; matches MATLAB's "non-reproducible across
      * runs" semantics. */
-    uint64_t s = (uint64_t)time(NULL);
-    s ^= (uint64_t)clock();
+    uint64_t s = static_cast<uint64_t>(time(NULL));
+    s ^= static_cast<uint64_t>(clock());
     s = s * 0x9E3779B97F4A7C15ULL + 0x123456789ABCDEF0ULL;
     if (s == 0) s = 1;
     matlab_rng_state = s;
@@ -103,11 +103,11 @@ double matlab_comm_rng_get(void) {
      * bottom 11 bits of the 64-bit state, but the high 53 bits are
      * enough to reseed the xorshift kernel — its mixing
      * propagates lost entropy back in within a couple of advances. */
-    return (double)matlab_rng_state;
+    return static_cast<double>(matlab_rng_state);
 }
 
 void matlab_comm_rng_set(double state) {
-    uint64_t s = (uint64_t)state;
+    uint64_t s = static_cast<uint64_t>(state);
     if (s == 0) s = 0x243f6a8885a308d3ULL;
     matlab_rng_state = s;
 }
@@ -116,32 +116,32 @@ void matlab_comm_rng_set(double state) {
 
 /* randi(imax)            -> scalar int in [1, imax]. */
 double matlab_comm_randi_s(double imax) {
-    int64_t hi = (int64_t)imax;
+    int64_t hi = static_cast<int64_t>(imax);
     if (hi < 1) hi = 1;
-    return floor(comm_uniform() * (double)hi) + 1.0;
+    return floor(comm_uniform() * static_cast<double>(hi)) + 1.0;
 }
 
 /* randi(imax, n)         -> n x n int matrix. */
 matlab_mat *matlab_comm_randi_nn(double imax, double n) {
-    int64_t sz = (int64_t)n;
+    int64_t sz = static_cast<int64_t>(n);
     if (sz < 0) sz = 0;
-    int64_t hi = (int64_t)imax;
+    int64_t hi = static_cast<int64_t>(imax);
     if (hi < 1) hi = 1;
     matlab_mat *A = mat_alloc(sz, sz);
     for (int64_t k = 0; k < sz * sz; ++k)
-        A->data[k] = floor(comm_uniform() * (double)hi) + 1.0;
+        A->data[k] = floor(comm_uniform() * static_cast<double>(hi)) + 1.0;
     return A;
 }
 
 /* randi(imax, m, n)      -> m x n int matrix in [1, imax]. */
 matlab_mat *matlab_comm_randi_mn(double imax, double m, double n) {
-    int64_t rm = (int64_t)m, cn = (int64_t)n;
+    int64_t rm = static_cast<int64_t>(m), cn = static_cast<int64_t>(n);
     if (rm < 0) rm = 0; if (cn < 0) cn = 0;
-    int64_t hi = (int64_t)imax;
+    int64_t hi = static_cast<int64_t>(imax);
     if (hi < 1) hi = 1;
     matlab_mat *A = mat_alloc(rm, cn);
     for (int64_t k = 0; k < rm * cn; ++k)
-        A->data[k] = floor(comm_uniform() * (double)hi) + 1.0;
+        A->data[k] = floor(comm_uniform() * static_cast<double>(hi)) + 1.0;
     return A;
 }
 
@@ -152,16 +152,16 @@ matlab_mat *matlab_comm_randi_mn(double imax, double m, double n) {
  * with a tiny dispatcher in the front-end shim). */
 matlab_mat *matlab_comm_randi_range(double imin, double imax,
                                      double m, double n) {
-    int64_t rm = (int64_t)m, cn = (int64_t)n;
+    int64_t rm = static_cast<int64_t>(m), cn = static_cast<int64_t>(n);
     if (rm < 0) rm = 0; if (cn < 0) cn = 0;
-    int64_t lo = (int64_t)imin;
-    int64_t hi = (int64_t)imax;
+    int64_t lo = static_cast<int64_t>(imin);
+    int64_t hi = static_cast<int64_t>(imax);
     if (hi < lo) { int64_t t = lo; lo = hi; hi = t; }
     int64_t span = hi - lo + 1;
     if (span < 1) span = 1;
     matlab_mat *A = mat_alloc(rm, cn);
     for (int64_t k = 0; k < rm * cn; ++k)
-        A->data[k] = (double)(lo + (int64_t)floor(comm_uniform() * (double)span));
+        A->data[k] = static_cast<double>(lo + static_cast<int64_t>(floor(comm_uniform() * static_cast<double>(span))));
     return A;
 }
 
@@ -170,13 +170,13 @@ matlab_mat *matlab_comm_randi_range(double imin, double imax,
 /* randsrc(m, n, alphabet) where `alphabet` is a column vector of
  * values to sample uniformly. */
 matlab_mat *matlab_comm_randsrc(double m, double n, matlab_mat *alphabet) {
-    int64_t rm = (int64_t)m, cn = (int64_t)n;
+    int64_t rm = static_cast<int64_t>(m), cn = static_cast<int64_t>(n);
     if (rm < 0) rm = 0; if (cn < 0) cn = 0;
     matlab_mat *A = mat_alloc(rm, cn);
     if (!alphabet || alphabet->rows * alphabet->cols == 0) return A;
     int64_t na = alphabet->rows * alphabet->cols;
     for (int64_t k = 0; k < rm * cn; ++k) {
-        int64_t idx = (int64_t)floor(comm_uniform() * (double)na);
+        int64_t idx = static_cast<int64_t>(floor(comm_uniform() * static_cast<double>(na)));
         if (idx >= na) idx = na - 1;
         A->data[k] = alphabet->data[idx];
     }
@@ -188,7 +188,7 @@ matlab_mat *matlab_comm_randsrc(double m, double n, matlab_mat *alphabet) {
 matlab_mat *matlab_comm_randsrc_weighted(double m, double n,
                                           matlab_mat *alphabet,
                                           matlab_mat *probs) {
-    int64_t rm = (int64_t)m, cn = (int64_t)n;
+    int64_t rm = static_cast<int64_t>(m), cn = static_cast<int64_t>(n);
     if (rm < 0) rm = 0; if (cn < 0) cn = 0;
     matlab_mat *A = mat_alloc(rm, cn);
     if (!alphabet || !probs) return A;
@@ -223,9 +223,9 @@ matlab_mat *matlab_comm_randsrc_weighted(double m, double n,
  * `errs` ones per row, placed at uniform-random positions without
  * replacement. */
 matlab_mat *matlab_comm_randerr(double m, double n, double errs) {
-    int64_t rm = (int64_t)m, cn = (int64_t)n;
+    int64_t rm = static_cast<int64_t>(m), cn = static_cast<int64_t>(n);
     if (rm < 0) rm = 0; if (cn < 0) cn = 0;
-    int64_t e = (int64_t)errs;
+    int64_t e = static_cast<int64_t>(errs);
     if (e < 0) e = 0;
     if (e > cn) e = cn;
     matlab_mat *A = mat_alloc(rm, cn);
@@ -235,7 +235,7 @@ matlab_mat *matlab_comm_randerr(double m, double n, double errs) {
         /* Fisher-Yates partial shuffle: pull `e` indices to the
          * front, set those columns to 1.0. */
         for (int64_t k = 0; k < e; ++k) {
-            int64_t pick = k + (int64_t)floor(comm_uniform() * (double)(cn - k));
+            int64_t pick = k + static_cast<int64_t>(floor(comm_uniform() * static_cast<double>(cn - k)));
             if (pick >= cn) pick = cn - 1;
             int64_t tmp = idx[k]; idx[k] = idx[pick]; idx[pick] = tmp;
             A->data[i * cn + idx[k]] = 1.0;
@@ -253,15 +253,15 @@ matlab_mat *matlab_comm_randerr(double m, double n, double errs) {
 matlab_mat *matlab_comm_int2bit(matlab_mat *ints, double nbits) {
     if (!ints) return mat_alloc(0, 0);
     int64_t L = ints->rows * ints->cols;
-    int64_t nb = (int64_t)nbits;
+    int64_t nb = static_cast<int64_t>(nbits);
     if (nb < 1) nb = 1;
     if (nb > 53) nb = 53;
     matlab_mat *out = mat_alloc(L * nb, 1);
     for (int64_t k = 0; k < L; ++k) {
-        uint64_t v = (uint64_t)ints->data[k];
+        uint64_t v = static_cast<uint64_t>(ints->data[k]);
         for (int64_t i = 0; i < nb; ++i) {
             uint64_t bit = (v >> (nb - 1 - i)) & 1ULL;
-            out->data[k * nb + i] = (double)bit;
+            out->data[k * nb + i] = static_cast<double>(bit);
         }
     }
     return out;
@@ -271,7 +271,7 @@ matlab_mat *matlab_comm_int2bit(matlab_mat *ints, double nbits) {
 matlab_mat *matlab_comm_bit2int(matlab_mat *bits, double nbits) {
     if (!bits) return mat_alloc(0, 0);
     int64_t Nb = bits->rows * bits->cols;
-    int64_t nb = (int64_t)nbits;
+    int64_t nb = static_cast<int64_t>(nbits);
     if (nb < 1) nb = 1;
     if (nb > 53) nb = 53;
     int64_t L = Nb / nb;
@@ -279,9 +279,9 @@ matlab_mat *matlab_comm_bit2int(matlab_mat *bits, double nbits) {
     for (int64_t k = 0; k < L; ++k) {
         uint64_t v = 0;
         for (int64_t i = 0; i < nb; ++i) {
-            v = (v << 1) | (((uint64_t)bits->data[k * nb + i]) & 1ULL);
+            v = (v << 1) | ((static_cast<uint64_t>(bits->data[k * nb + i])) & 1ULL);
         }
-        out->data[k] = (double)v;
+        out->data[k] = static_cast<double>(v);
     }
     return out;
 }
@@ -293,14 +293,14 @@ matlab_mat *matlab_comm_bit2int(matlab_mat *bits, double nbits) {
 matlab_mat *matlab_comm_de2bi(matlab_mat *d, double nbits) {
     if (!d) return mat_alloc(0, 0);
     int64_t L = d->rows * d->cols;
-    int64_t nb = (int64_t)nbits;
+    int64_t nb = static_cast<int64_t>(nbits);
     if (nb < 1) nb = 1;
     if (nb > 53) nb = 53;
     matlab_mat *out = mat_alloc(L, nb);
     for (int64_t k = 0; k < L; ++k) {
-        uint64_t v = (uint64_t)d->data[k];
+        uint64_t v = static_cast<uint64_t>(d->data[k]);
         for (int64_t i = 0; i < nb; ++i) {
-            out->data[k * nb + i] = (double)((v >> i) & 1ULL);
+            out->data[k * nb + i] = static_cast<double>((v >> i) & 1ULL);
         }
     }
     return out;
@@ -317,10 +317,10 @@ matlab_mat *matlab_comm_bi2de(matlab_mat *b) {
     for (int64_t k = 0; k < L; ++k) {
         uint64_t v = 0;
         for (int64_t i = 0; i < n; ++i) {
-            uint64_t bit = ((uint64_t)b->data[k * n + i]) & 1ULL;
+            uint64_t bit = (static_cast<uint64_t>(b->data[k * n + i])) & 1ULL;
             v |= (bit << i);
         }
-        out->data[k] = (double)v;
+        out->data[k] = static_cast<double>(v);
     }
     return out;
 }
@@ -335,7 +335,7 @@ static double signal_power_real(const matlab_mat *x) {
     if (N == 0) return 0.0;
     double acc = 0.0;
     for (int64_t k = 0; k < N; ++k) acc += x->data[k] * x->data[k];
-    return acc / (double)N;
+    return acc / static_cast<double>(N);
 }
 
 static double signal_power_complex(const matlab_mat_c *x) {
@@ -345,7 +345,7 @@ static double signal_power_complex(const matlab_mat_c *x) {
     double acc = 0.0;
     for (int64_t k = 0; k < N; ++k)
         acc += x->re[k] * x->re[k] + x->im[k] * x->im[k];
-    return acc / (double)N;
+    return acc / static_cast<double>(N);
 }
 
 /* matlab_mat_c constructor exposed by runtime_complex.cpp. */
@@ -359,7 +359,7 @@ extern matlab_mat_c *mat_c_alloc(int64_t m, int64_t n);
 void *matlab_comm_awgn(void *x, double snr_dB) {
     if (!x) return NULL;
     if (mat_is_complex(x)) {
-        const matlab_mat_c *xi = (const matlab_mat_c *)x;
+        const matlab_mat_c *xi = reinterpret_cast<const matlab_mat_c *>(x);
         double sigP = signal_power_complex(xi);
         if (sigP <= 0.0) sigP = 1.0;
         double snr_lin = pow(10.0, snr_dB / 10.0);
@@ -374,7 +374,7 @@ void *matlab_comm_awgn(void *x, double snr_dB) {
         }
         return out;
     }
-    const matlab_mat *xi = (const matlab_mat *)x;
+    const matlab_mat *xi = reinterpret_cast<const matlab_mat *>(x);
     double sigP = signal_power_real(xi);
     if (sigP <= 0.0) sigP = 1.0;
     double snr_lin = pow(10.0, snr_dB / 10.0);
@@ -394,7 +394,7 @@ void *matlab_comm_awgn_p(void *x, double snr_dB, double sigpower_dBW) {
     double snr_lin = pow(10.0, snr_dB / 10.0);
     double noiseP = sigP / snr_lin;
     if (mat_is_complex(x)) {
-        const matlab_mat_c *xi = (const matlab_mat_c *)x;
+        const matlab_mat_c *xi = reinterpret_cast<const matlab_mat_c *>(x);
         double sigma = sqrt(noiseP * 0.5);
         matlab_mat_c *out = mat_c_alloc(xi->rows, xi->cols);
         int64_t N = xi->rows * xi->cols;
@@ -404,7 +404,7 @@ void *matlab_comm_awgn_p(void *x, double snr_dB, double sigpower_dBW) {
         }
         return out;
     }
-    const matlab_mat *xi = (const matlab_mat *)x;
+    const matlab_mat *xi = reinterpret_cast<const matlab_mat *>(x);
     double sigma = sqrt(noiseP);
     matlab_mat *out = mat_alloc(xi->rows, xi->cols);
     int64_t N = xi->rows * xi->cols;
@@ -423,11 +423,11 @@ double matlab_comm_biterr_count(matlab_mat *x, matlab_mat *y) {
     int64_t N = std::min(x->rows * x->cols, y->rows * y->cols);
     int64_t err = 0;
     for (int64_t k = 0; k < N; ++k) {
-        uint64_t a = (uint64_t)x->data[k] & 1ULL;
-        uint64_t b = (uint64_t)y->data[k] & 1ULL;
+        uint64_t a = static_cast<uint64_t>(x->data[k]) & 1ULL;
+        uint64_t b = static_cast<uint64_t>(y->data[k]) & 1ULL;
         if (a != b) ++err;
     }
-    return (double)err;
+    return static_cast<double>(err);
 }
 
 double matlab_comm_biterr_ratio(matlab_mat *x, matlab_mat *y) {
@@ -436,11 +436,11 @@ double matlab_comm_biterr_ratio(matlab_mat *x, matlab_mat *y) {
     if (N == 0) return 0.0;
     int64_t err = 0;
     for (int64_t k = 0; k < N; ++k) {
-        uint64_t a = (uint64_t)x->data[k] & 1ULL;
-        uint64_t b = (uint64_t)y->data[k] & 1ULL;
+        uint64_t a = static_cast<uint64_t>(x->data[k]) & 1ULL;
+        uint64_t b = static_cast<uint64_t>(y->data[k]) & 1ULL;
         if (a != b) ++err;
     }
-    return (double)err / (double)N;
+    return static_cast<double>(err) / static_cast<double>(N);
 }
 
 /* biterr(x, y, k) — input is k-bit symbols; unpack to bits first
@@ -449,34 +449,34 @@ double matlab_comm_biterr_ratio(matlab_mat *x, matlab_mat *y) {
 double matlab_comm_biterr_count_k(matlab_mat *x, matlab_mat *y, double kbits) {
     if (!x || !y) return 0.0;
     int64_t N = std::min(x->rows * x->cols, y->rows * y->cols);
-    int64_t kb = (int64_t)kbits;
+    int64_t kb = static_cast<int64_t>(kbits);
     if (kb < 1) kb = 1;
     if (kb > 53) kb = 53;
     int64_t err = 0;
     for (int64_t k = 0; k < N; ++k) {
-        uint64_t a = (uint64_t)x->data[k];
-        uint64_t b = (uint64_t)y->data[k];
+        uint64_t a = static_cast<uint64_t>(x->data[k]);
+        uint64_t b = static_cast<uint64_t>(y->data[k]);
         uint64_t d = (a ^ b) & ((kb >= 64) ? ~0ULL : ((1ULL << kb) - 1ULL));
         while (d) { err += d & 1ULL; d >>= 1; }
     }
-    return (double)err;
+    return static_cast<double>(err);
 }
 
 double matlab_comm_biterr_ratio_k(matlab_mat *x, matlab_mat *y, double kbits) {
     if (!x || !y) return 0.0;
     int64_t N = std::min(x->rows * x->cols, y->rows * y->cols);
-    int64_t kb = (int64_t)kbits;
+    int64_t kb = static_cast<int64_t>(kbits);
     if (kb < 1) kb = 1;
     if (kb > 53) kb = 53;
     if (N == 0 || kb == 0) return 0.0;
     int64_t err = 0;
     for (int64_t k = 0; k < N; ++k) {
-        uint64_t a = (uint64_t)x->data[k];
-        uint64_t b = (uint64_t)y->data[k];
+        uint64_t a = static_cast<uint64_t>(x->data[k]);
+        uint64_t b = static_cast<uint64_t>(y->data[k]);
         uint64_t d = (a ^ b) & ((kb >= 64) ? ~0ULL : ((1ULL << kb) - 1ULL));
         while (d) { err += d & 1ULL; d >>= 1; }
     }
-    return (double)err / ((double)N * (double)kb);
+    return static_cast<double>(err) / (static_cast<double>(N) * static_cast<double>(kb));
 }
 
 /* symerr(x, y) — element-wise mismatch count and ratio. */
@@ -486,7 +486,7 @@ double matlab_comm_symerr_count(matlab_mat *x, matlab_mat *y) {
     int64_t err = 0;
     for (int64_t k = 0; k < N; ++k)
         if (x->data[k] != y->data[k]) ++err;
-    return (double)err;
+    return static_cast<double>(err);
 }
 
 double matlab_comm_symerr_ratio(matlab_mat *x, matlab_mat *y) {
@@ -496,7 +496,7 @@ double matlab_comm_symerr_ratio(matlab_mat *x, matlab_mat *y) {
     int64_t err = 0;
     for (int64_t k = 0; k < N; ++k)
         if (x->data[k] != y->data[k]) ++err;
-    return (double)err / (double)N;
+    return static_cast<double>(err) / static_cast<double>(N);
 }
 
 /* ===== Tier 2 prerequisites — erfc / qfunc =============================== */
@@ -548,26 +548,26 @@ static inline int64_t pam_index_from_data(uint64_t v, int64_t M, int order) {
      * gray2bin inverse. */
     uint64_t bin = (order == 1) ? gray2bin_u(v) : v;
     if (M < 1) M = 1;
-    int64_t idx = (int64_t)(bin % (uint64_t)M);
+    int64_t idx = static_cast<int64_t>(bin % static_cast<uint64_t>(M));
     return idx;
 }
 
 static inline uint64_t pam_data_from_index(int64_t idx, int64_t M, int order) {
     if (M < 1) M = 1;
-    uint64_t bin = (uint64_t)((idx % M + M) % M);
+    uint64_t bin = static_cast<uint64_t>((idx % M + M) % M);
     return (order == 1) ? bin2gray_u(bin) : bin;
 }
 
 matlab_mat *matlab_comm_pammod(matlab_mat *x, double Md, double order) {
     if (!x) return mat_alloc(0, 0);
-    int64_t M = (int64_t)Md;
+    int64_t M = static_cast<int64_t>(Md);
     if (M < 2) M = 2;
-    int ord = (int)order;
+    int ord = static_cast<int>(order);
     int64_t N = x->rows * x->cols;
     matlab_mat *out = mat_alloc(x->rows, x->cols);
     for (int64_t k = 0; k < N; ++k) {
-        int64_t idx = pam_index_from_data((uint64_t)x->data[k], M, ord);
-        out->data[k] = (double)(2 * idx - (M - 1));
+        int64_t idx = pam_index_from_data(static_cast<uint64_t>(x->data[k]), M, ord);
+        out->data[k] = static_cast<double>(2 * idx - (M - 1));
     }
     return out;
 }
@@ -579,16 +579,16 @@ matlab_mat *matlab_comm_pammod(matlab_mat *x, double Md, double order) {
  * order=1). */
 matlab_mat *matlab_comm_pamdemod(matlab_mat *y, double Md, double order) {
     if (!y) return mat_alloc(0, 0);
-    int64_t M = (int64_t)Md;
+    int64_t M = static_cast<int64_t>(Md);
     if (M < 2) M = 2;
-    int ord = (int)order;
+    int ord = static_cast<int>(order);
     int64_t N = y->rows * y->cols;
     matlab_mat *out = mat_alloc(y->rows, y->cols);
     for (int64_t k = 0; k < N; ++k) {
         double v = y->data[k];
-        int64_t idx = (int64_t)floor((v + (double)(M - 1)) / 2.0 + 0.5);
+        int64_t idx = static_cast<int64_t>(floor((v + static_cast<double>(M - 1)) / 2.0 + 0.5));
         if (idx < 0) idx = 0; if (idx > M - 1) idx = M - 1;
-        out->data[k] = (double)pam_data_from_index(idx, M, ord);
+        out->data[k] = static_cast<double>(pam_data_from_index(idx, M, ord));
     }
     return out;
 }
@@ -605,15 +605,15 @@ extern matlab_mat_c *mat_c_alloc(int64_t m, int64_t n);
 matlab_mat_c *matlab_comm_pskmod(matlab_mat *x, double Md,
                                   double ini_phase, double order) {
     if (!x) return mat_c_alloc(0, 0);
-    int64_t M = (int64_t)Md;
+    int64_t M = static_cast<int64_t>(Md);
     if (M < 2) M = 2;
-    int ord = (int)order;
+    int ord = static_cast<int>(order);
     int64_t N = x->rows * x->cols;
     matlab_mat_c *out = mat_c_alloc(x->rows, x->cols);
-    double step = 2.0 * M_PI / (double)M;
+    double step = 2.0 * M_PI / static_cast<double>(M);
     for (int64_t k = 0; k < N; ++k) {
-        int64_t idx = pam_index_from_data((uint64_t)x->data[k], M, ord);
-        double phase = ini_phase + step * (double)idx;
+        int64_t idx = pam_index_from_data(static_cast<uint64_t>(x->data[k]), M, ord);
+        double phase = ini_phase + step * static_cast<double>(idx);
         out->re[k] = cos(phase);
         out->im[k] = sin(phase);
     }
@@ -623,20 +623,20 @@ matlab_mat_c *matlab_comm_pskmod(matlab_mat *x, double Md,
 matlab_mat *matlab_comm_pskdemod(matlab_mat_c *y, double Md,
                                   double ini_phase, double order) {
     if (!y) return mat_alloc(0, 0);
-    int64_t M = (int64_t)Md;
+    int64_t M = static_cast<int64_t>(Md);
     if (M < 2) M = 2;
-    int ord = (int)order;
+    int ord = static_cast<int>(order);
     int64_t N = y->rows * y->cols;
     matlab_mat *out = mat_alloc(y->rows, y->cols);
-    double step = 2.0 * M_PI / (double)M;
+    double step = 2.0 * M_PI / static_cast<double>(M);
     for (int64_t k = 0; k < N; ++k) {
         double phi = atan2(y->im[k], y->re[k]) - ini_phase;
         /* Wrap to [-π, π) then to [0, 2π). */
         double q = phi / step;
-        int64_t idx = (int64_t)floor(q + 0.5);
+        int64_t idx = static_cast<int64_t>(floor(q + 0.5));
         /* Modulo into [0, M). */
         idx = ((idx % M) + M) % M;
-        out->data[k] = (double)pam_data_from_index(idx, M, ord);
+        out->data[k] = static_cast<double>(pam_data_from_index(idx, M, ord));
     }
     return out;
 }
@@ -659,25 +659,25 @@ matlab_mat *matlab_comm_pskdemod(matlab_mat_c *y, double Md,
 matlab_mat_c *matlab_comm_fskmod(matlab_mat *x, double Md, double freqsep,
                                   double nsamp_d, double fs) {
     if (!x) return mat_c_alloc(0, 0);
-    int64_t M = (int64_t)Md;       if (M < 2) M = 2;
-    int64_t nsamp = (int64_t)nsamp_d; if (nsamp < 1) nsamp = 1;
+    int64_t M = static_cast<int64_t>(Md);       if (M < 2) M = 2;
+    int64_t nsamp = static_cast<int64_t>(nsamp_d); if (nsamp < 1) nsamp = 1;
     if (fs <= 0.0) fs = 1.0;
     int64_t Nsym = x->rows * x->cols;
     int64_t Nout = Nsym * nsamp;
     matlab_mat_c *out = mat_c_alloc(Nout, 1);
     double phi = 0.0;
-    double half = ((double)M - 1.0) * 0.5;
+    double half = (static_cast<double>(M) - 1.0) * 0.5;
     for (int64_t k = 0; k < Nsym; ++k) {
         double m = x->data[k];
-        if (m < 0) m = 0; else if (m > (double)(M - 1)) m = (double)(M - 1);
+        if (m < 0) m = 0; else if (m > static_cast<double>(M - 1)) m = static_cast<double>(M - 1);
         double f_off = (m - half) * freqsep;
         double dphi = 2.0 * M_PI * f_off / fs;
         for (int64_t n = 0; n < nsamp; ++n) {
-            double a = phi + dphi * (double)n;
+            double a = phi + dphi * static_cast<double>(n);
             out->re[k * nsamp + n] = cos(a);
             out->im[k * nsamp + n] = sin(a);
         }
-        phi += dphi * (double)nsamp;
+        phi += dphi * static_cast<double>(nsamp);
         /* Wrap phi to keep it bounded — accumulating over long sequences
          * otherwise loses precision. */
         if (phi > 2.0 * M_PI || phi < -2.0 * M_PI) {
@@ -691,23 +691,23 @@ matlab_mat *matlab_comm_fskdemod(matlab_mat_c *y, double Md, double freqsep,
                                   double nsamp_d, double fs,
                                   double mode_d) {
     if (!y) return mat_alloc(0, 0);
-    int64_t M = (int64_t)Md;       if (M < 2) M = 2;
-    int64_t nsamp = (int64_t)nsamp_d; if (nsamp < 1) nsamp = 1;
+    int64_t M = static_cast<int64_t>(Md);       if (M < 2) M = 2;
+    int64_t nsamp = static_cast<int64_t>(nsamp_d); if (nsamp < 1) nsamp = 1;
     if (fs <= 0.0) fs = 1.0;
-    int mode = (int)mode_d;  /* 0 = coherent, 1 = noncoherent */
-    int64_t Nout = (int64_t)(y->rows * y->cols);
+    int mode = static_cast<int>(mode_d);  /* 0 = coherent, 1 = noncoherent */
+    int64_t Nout = static_cast<int64_t>(y->rows * y->cols);
     int64_t Nsym = Nout / nsamp;
     matlab_mat *out = mat_alloc(Nsym, 1);
-    double half = ((double)M - 1.0) * 0.5;
+    double half = (static_cast<double>(M) - 1.0) * 0.5;
     /* Precompute the M reference tones for one symbol period. */
-    std::vector<double> tone_re((size_t)(M * nsamp));
-    std::vector<double> tone_im((size_t)(M * nsamp));
+    std::vector<double> tone_re(static_cast<size_t>(M * nsamp));
+    std::vector<double> tone_im(static_cast<size_t>(M * nsamp));
     for (int64_t m = 0; m < M; ++m) {
-        double f_off = ((double)m - half) * freqsep;
+        double f_off = (static_cast<double>(m) - half) * freqsep;
         double dphi = 2.0 * M_PI * f_off / fs;
         for (int64_t n = 0; n < nsamp; ++n) {
-            tone_re[(size_t)(m * nsamp + n)] = cos(dphi * (double)n);
-            tone_im[(size_t)(m * nsamp + n)] = sin(dphi * (double)n);
+            tone_re[static_cast<size_t>(m * nsamp + n)] = cos(dphi * static_cast<double>(n));
+            tone_im[static_cast<size_t>(m * nsamp + n)] = sin(dphi * static_cast<double>(n));
         }
     }
     for (int64_t k = 0; k < Nsym; ++k) {
@@ -719,15 +719,15 @@ matlab_mat *matlab_comm_fskdemod(matlab_mat_c *y, double Md, double freqsep,
                 /* Correlate: y * conj(tone). */
                 double yr = y->re[k * nsamp + n];
                 double yi = y->im[k * nsamp + n];
-                double tr = tone_re[(size_t)(m * nsamp + n)];
-                double ti = tone_im[(size_t)(m * nsamp + n)];
+                double tr = tone_re[static_cast<size_t>(m * nsamp + n)];
+                double ti = tone_im[static_cast<size_t>(m * nsamp + n)];
                 cr += yr * tr + yi * ti;
                 ci += yi * tr - yr * ti;
             }
             double score = (mode == 0) ? cr : sqrt(cr * cr + ci * ci);
             if (score > best_score) { best_score = score; best_m = m; }
         }
-        out->data[k] = (double)best_m;
+        out->data[k] = static_cast<double>(best_m);
     }
     return out;
 }
@@ -769,16 +769,16 @@ static double qam_mean_power_square(int64_t M) {
     int kx, ky;
     if (qam_axis_bits(M, &kx, &ky) != 0) return 1.0;
     int64_t Lx = 1LL << kx, Ly = 1LL << ky;
-    double Px = (double)(Lx * Lx - 1) / 3.0;
-    double Py = (double)(Ly * Ly - 1) / 3.0;
+    double Px = static_cast<double>(Lx * Lx - 1) / 3.0;
+    double Py = static_cast<double>(Ly * Ly - 1) / 3.0;
     return Px + Py;
 }
 
 matlab_mat_c *matlab_comm_qammod(matlab_mat *x, double Md,
                                   double order, double unit_avg) {
-    int64_t M = (int64_t)Md;
+    int64_t M = static_cast<int64_t>(Md);
     if (M < 2) M = 2;
-    int ord = (int)order;
+    int ord = static_cast<int>(order);
     int kx, ky;
     if (!x || qam_axis_bits(M, &kx, &ky) != 0) return mat_c_alloc(0, 0);
     int64_t Lx = 1LL << kx, Ly = 1LL << ky;
@@ -790,7 +790,7 @@ matlab_mat_c *matlab_comm_qammod(matlab_mat *x, double Md,
         if (Pavg > 0) scale = 1.0 / sqrt(Pavg);
     }
     for (int64_t k = 0; k < N; ++k) {
-        uint64_t v = (uint64_t)x->data[k];
+        uint64_t v = static_cast<uint64_t>(x->data[k]);
         /* Split bits: high kx for I, low ky for Q. */
         uint64_t hi = (v >> ky) & ((1ULL << kx) - 1);
         uint64_t lo = v & ((1ULL << ky) - 1);
@@ -798,8 +798,8 @@ matlab_mat_c *matlab_comm_qammod(matlab_mat *x, double Md,
             hi = gray2bin_u(hi);
             lo = gray2bin_u(lo);
         }
-        out->re[k] = scale * (double)(2 * (int64_t)hi - (Lx - 1));
-        out->im[k] = scale * (double)(2 * (int64_t)lo - (Ly - 1));
+        out->re[k] = scale * static_cast<double>(2 * static_cast<int64_t>(hi) - (Lx - 1));
+        out->im[k] = scale * static_cast<double>(2 * static_cast<int64_t>(lo) - (Ly - 1));
     }
     return out;
 }
@@ -808,9 +808,9 @@ matlab_mat_c *matlab_comm_qammod(matlab_mat *x, double Md,
  * the integer label (Gray-coded if order=1). */
 matlab_mat *matlab_comm_qamdemod(matlab_mat_c *y, double Md,
                                   double order, double unit_avg) {
-    int64_t M = (int64_t)Md;
+    int64_t M = static_cast<int64_t>(Md);
     if (M < 2) M = 2;
-    int ord = (int)order;
+    int ord = static_cast<int>(order);
     int kx, ky;
     if (!y || qam_axis_bits(M, &kx, &ky) != 0) return mat_alloc(0, 0);
     int64_t Lx = 1LL << kx, Ly = 1LL << ky;
@@ -824,13 +824,13 @@ matlab_mat *matlab_comm_qamdemod(matlab_mat_c *y, double Md,
     for (int64_t k = 0; k < N; ++k) {
         double re_v = scale * y->re[k];
         double im_v = scale * y->im[k];
-        int64_t i_idx = (int64_t)floor((re_v + (double)(Lx - 1)) / 2.0 + 0.5);
-        int64_t q_idx = (int64_t)floor((im_v + (double)(Ly - 1)) / 2.0 + 0.5);
+        int64_t i_idx = static_cast<int64_t>(floor((re_v + static_cast<double>(Lx - 1)) / 2.0 + 0.5));
+        int64_t q_idx = static_cast<int64_t>(floor((im_v + static_cast<double>(Ly - 1)) / 2.0 + 0.5));
         if (i_idx < 0) i_idx = 0; if (i_idx > Lx - 1) i_idx = Lx - 1;
         if (q_idx < 0) q_idx = 0; if (q_idx > Ly - 1) q_idx = Ly - 1;
-        uint64_t hi = (uint64_t)i_idx, lo = (uint64_t)q_idx;
+        uint64_t hi = static_cast<uint64_t>(i_idx), lo = static_cast<uint64_t>(q_idx);
         if (ord == 1) { hi = bin2gray_u(hi); lo = bin2gray_u(lo); }
-        out->data[k] = (double)((hi << ky) | lo);
+        out->data[k] = static_cast<double>((hi << ky) | lo);
     }
     return out;
 }
@@ -841,16 +841,16 @@ matlab_mat *matlab_comm_qamdemod_bit(matlab_mat_c *y, double Md,
                                       double order, double unit_avg) {
     matlab_mat *labels = matlab_comm_qamdemod(y, Md, order, unit_avg);
     if (!labels) return mat_alloc(0, 0);
-    int64_t M = (int64_t)Md;
+    int64_t M = static_cast<int64_t>(Md);
     int kx, ky;
     if (qam_axis_bits(M, &kx, &ky) != 0) return mat_alloc(0, 0);
     int kb = kx + ky;
     int64_t L = labels->rows * labels->cols;
     matlab_mat *bits = mat_alloc(L * kb, 1);
     for (int64_t k = 0; k < L; ++k) {
-        uint64_t v = (uint64_t)labels->data[k];
+        uint64_t v = static_cast<uint64_t>(labels->data[k]);
         for (int i = 0; i < kb; ++i) {
-            bits->data[k * kb + i] = (double)((v >> (kb - 1 - i)) & 1ULL);
+            bits->data[k * kb + i] = static_cast<double>((v >> (kb - 1 - i)) & 1ULL);
         }
     }
     free(labels->data); free(labels);
@@ -864,8 +864,8 @@ matlab_mat *matlab_comm_qamdemod_bit(matlab_mat_c *y, double Md,
 matlab_mat *matlab_comm_qamdemod_llr(matlab_mat_c *y, double Md,
                                       double order, double unit_avg,
                                       double noise_var) {
-    int64_t M = (int64_t)Md;
-    int ord = (int)order;
+    int64_t M = static_cast<int64_t>(Md);
+    int ord = static_cast<int>(order);
     int kx, ky;
     if (!y || qam_axis_bits(M, &kx, &ky) != 0) return mat_alloc(0, 0);
     int kb = kx + ky;
@@ -890,13 +890,13 @@ matlab_mat *matlab_comm_qamdemod_llr(matlab_mat_c *y, double Md,
             double max0 = -1e300, max1 = -1e300;
             uint64_t mask = 1ULL << (kb - 1 - b);
             for (int64_t s = 0; s < M; ++s) {
-                uint64_t v = (uint64_t)s;
+                uint64_t v = static_cast<uint64_t>(s);
                 uint64_t hi = (v >> ky) & ((1ULL << kx) - 1);
                 uint64_t lo = v & ((1ULL << ky) - 1);
                 uint64_t bin_hi = (ord == 1) ? gray2bin_u(hi) : hi;
                 uint64_t bin_lo = (ord == 1) ? gray2bin_u(lo) : lo;
-                double cx = (double)(2 * (int64_t)bin_hi - (Lx - 1));
-                double cy = (double)(2 * (int64_t)bin_lo - (Ly - 1));
+                double cx = static_cast<double>(2 * static_cast<int64_t>(bin_hi) - (Lx - 1));
+                double cy = static_cast<double>(2 * static_cast<int64_t>(bin_lo) - (Ly - 1));
                 double d2 = (re_v - cx) * (re_v - cx) +
                             (im_v - cy) * (im_v - cy);
                 double metric = -d2 / (2.0 * noise_var);
@@ -924,7 +924,7 @@ matlab_mat_c *matlab_comm_genqammod(matlab_mat *x, matlab_mat_c *alphabet) {
     if (Na == 0) return mat_c_alloc(0, 0);
     matlab_mat_c *out = mat_c_alloc(x->rows, x->cols);
     for (int64_t k = 0; k < N; ++k) {
-        int64_t idx = (int64_t)x->data[k];
+        int64_t idx = static_cast<int64_t>(x->data[k]);
         idx = ((idx % Na) + Na) % Na;
         out->re[k] = alphabet->re[idx];
         out->im[k] = alphabet->im[idx];
@@ -946,7 +946,7 @@ matlab_mat *matlab_comm_genqamdemod(matlab_mat_c *y, matlab_mat_c *alphabet) {
             double d2 = dr * dr + di * di;
             if (d2 < best) { best = d2; best_i = i; }
         }
-        out->data[k] = (double)best_i;
+        out->data[k] = static_cast<double>(best_i);
     }
     return out;
 }
@@ -964,15 +964,15 @@ matlab_mat *matlab_comm_genqamdemod(matlab_mat_c *y, matlab_mat_c *alphabet) {
 
 matlab_mat *matlab_comm_rcosdesign(double beta, double span,
                                     double spsd, double shape) {
-    int64_t sps = (int64_t)spsd;
-    int64_t sp  = (int64_t)span;
+    int64_t sps = static_cast<int64_t>(spsd);
+    int64_t sp  = static_cast<int64_t>(span);
     if (sps < 1) sps = 1;
     if (sp  < 1) sp  = 1;
     int64_t N = sp * sps + 1;
     matlab_mat *b = mat_alloc(N, 1);
     double Ts = 1.0;   /* symbol period; we normalise so t-axis is in symbols */
-    double dt = Ts / (double)sps;
-    int sh = (int)shape;
+    double dt = Ts / static_cast<double>(sps);
+    int sh = static_cast<int>(shape);
     double eps = 1e-12;
     for (int64_t n = 0; n < N; ++n) {
         double t = (n - (N - 1) / 2.0) * dt;
@@ -1029,15 +1029,15 @@ matlab_mat *matlab_comm_rcosdesign(double beta, double span,
  *
  * Impulse response per the standard GMSK formula. */
 matlab_mat *matlab_comm_gaussdesign(double bt, double span, double spsd) {
-    int64_t sps = (int64_t)spsd;
-    int64_t sp  = (int64_t)span;
+    int64_t sps = static_cast<int64_t>(spsd);
+    int64_t sp  = static_cast<int64_t>(span);
     if (sps < 1) sps = 1;
     if (sp  < 1) sp  = 1;
     int64_t N = sp * sps + 1;
     matlab_mat *b = mat_alloc(N, 1);
     /* α = sqrt(ln(2) / 2) / BT */
     double alpha = sqrt(log(2.0) / 2.0) / bt;
-    double dt = 1.0 / (double)sps;
+    double dt = 1.0 / static_cast<double>(sps);
     for (int64_t n = 0; n < N; ++n) {
         double t = (n - (N - 1) / 2.0) * dt;
         b->data[n] = (sqrt(M_PI) / alpha) *
@@ -1069,30 +1069,30 @@ matlab_mat *matlab_comm_gaussdesign(double bt, double span, double spsd) {
 static double q_func(double x) { return 0.5 * erfc(x / sqrt(2.0)); }
 
 double matlab_comm_berawgn_s(double ebn0_dB, double Md, double mod) {
-    int64_t M = (int64_t)Md;
+    int64_t M = static_cast<int64_t>(Md);
     if (M < 2) M = 2;
     double k = log(M) / log(2.0);
     if (k < 1.0) k = 1.0;
     double EbN0 = pow(10.0, ebn0_dB / 10.0);
-    int m = (int)mod;
+    int m = static_cast<int>(mod);
     switch (m) {
     case 0: { /* PAM */
-        double arg = sqrt(6.0 * k * EbN0 / (double)(M * M - 1));
-        return 2.0 * (double)(M - 1) / ((double)M * k) * q_func(arg);
+        double arg = sqrt(6.0 * k * EbN0 / static_cast<double>(M * M - 1));
+        return 2.0 * static_cast<double>(M - 1) / (static_cast<double>(M) * k) * q_func(arg);
     }
     case 1: { /* PSK */
         if (M == 2 || M == 4) return q_func(sqrt(2.0 * EbN0));
-        return (2.0 / k) * q_func(sqrt(2.0 * k * EbN0) * sin(M_PI / (double)M));
+        return (2.0 / k) * q_func(sqrt(2.0 * k * EbN0) * sin(M_PI / static_cast<double>(M)));
     }
     case 2: { /* QAM (square M) */
-        double c = 4.0 / k * (1.0 - 1.0 / sqrt((double)M));
-        double arg = sqrt(3.0 * k * EbN0 / (double)(M - 1));
+        double c = 4.0 / k * (1.0 - 1.0 / sqrt(static_cast<double>(M)));
+        double arg = sqrt(3.0 * k * EbN0 / static_cast<double>(M - 1));
         return c * q_func(arg);
     }
     case 3: { /* DPSK */
         if (M == 2) return 0.5 * exp(-EbN0);
         return (2.0 / k) * q_func(sqrt(2.0 * k * EbN0) *
-                                   sin(M_PI / (2.0 * (double)M)));
+                                   sin(M_PI / (2.0 * static_cast<double>(M))));
     }
     case 4: { /* FSK orthogonal coherent (binary scope) */
         return q_func(sqrt(EbN0 * k));
@@ -1138,30 +1138,30 @@ matlab_mat *matlab_comm_scatterplot(matlab_mat_c *x) {
  *     the Q channel.  MathWorks' interactive viewer renders I and Q
  *     side by side; we leave that orchestration to the caller. */
 matlab_mat *matlab_comm_eyediagram(void *x_any, double n_samples_d) {
-    int n = (int)n_samples_d;
+    int n = static_cast<int>(n_samples_d);
     if (n < 2) n = 2;
     int64_t N = 0;
     const double *src = NULL;
     if (mat_is_complex(x_any)) {
-        const matlab_mat_c *c = (const matlab_mat_c *)x_any;
+        const matlab_mat_c *c = reinterpret_cast<const matlab_mat_c *>(x_any);
         if (!c) return mat_alloc(0, 0);
         N = c->rows * c->cols;
         src = c->re;
     } else {
-        const matlab_mat *m = (const matlab_mat *)x_any;
+        const matlab_mat *m = reinterpret_cast<const matlab_mat *>(x_any);
         if (!m) return mat_alloc(0, 0);
         N = m->rows * m->cols;
         src = m->data;
     }
     if (N <= 0 || !src) return mat_alloc(0, 0);
-    int num_traces = (int)(N / n);
+    int num_traces = static_cast<int>(N / n);
     if (num_traces <= 0) return mat_alloc(0, 0);
     /* Output: n rows × num_traces cols, row-major. */
     matlab_mat *Y = mat_alloc(n, num_traces);
     for (int j = 0; j < num_traces; ++j) {
         for (int i = 0; i < n; ++i) {
-            int64_t idx = (int64_t)j * n + i;
-            Y->data[(int64_t)i * num_traces + j] = src[idx];
+            int64_t idx = static_cast<int64_t>(j) * n + i;
+            Y->data[static_cast<int64_t>(i) * num_traces + j] = src[idx];
         }
     }
     return Y;
@@ -1201,7 +1201,7 @@ static uint64_t crc_remainder(const matlab_mat *bits, int64_t N,
     uint64_t mask = (nbits >= 64) ? ~0ULL : ((1ULL << nbits) - 1ULL);
     uint64_t rem = 0;
     for (int64_t k = 0; k < N; ++k) {
-        uint64_t b = ((uint64_t)bits->data[k]) & 1ULL;
+        uint64_t b = (static_cast<uint64_t>(bits->data[k])) & 1ULL;
         uint64_t top = (rem >> (nbits - 1)) & 1ULL;
         rem = ((rem << 1) | b) & mask;
         if (top) rem ^= poly;
@@ -1219,15 +1219,15 @@ matlab_mat *matlab_comm_crc_generate(matlab_mat *bits, double poly_int_d,
                                       double nbits_d) {
     if (!bits) return mat_alloc(0, 0);
     int64_t N = bits->rows * bits->cols;
-    uint64_t poly = (uint64_t)poly_int_d;
-    int nbits = (int)nbits_d;
+    uint64_t poly = static_cast<uint64_t>(poly_int_d);
+    int nbits = static_cast<int>(nbits_d);
     if (nbits < 1) nbits = 1; if (nbits > 63) nbits = 63;
     uint64_t rem = crc_remainder(bits, N, poly, nbits);
     matlab_mat *out = mat_alloc(N + nbits, 1);
     for (int64_t k = 0; k < N; ++k) out->data[k] = bits->data[k];
     for (int i = 0; i < nbits; ++i) {
         uint64_t b = (rem >> (nbits - 1 - i)) & 1ULL;
-        out->data[N + i] = (double)b;
+        out->data[N + i] = static_cast<double>(b);
     }
     return out;
 }
@@ -1239,10 +1239,10 @@ double matlab_comm_crc_check(matlab_mat *bits, double poly_int_d,
                               double nbits_d) {
     if (!bits) return 1.0;
     int64_t N = bits->rows * bits->cols;
-    int nbits = (int)nbits_d;
+    int nbits = static_cast<int>(nbits_d);
     if (nbits < 1) nbits = 1; if (nbits > 63) nbits = 63;
     if (N <= nbits) return 1.0;
-    uint64_t poly = (uint64_t)poly_int_d;
+    uint64_t poly = static_cast<uint64_t>(poly_int_d);
     /* Recompute the CRC over the payload portion. */
     matlab_mat payload = *bits;
     payload.rows = N - nbits;
@@ -1250,7 +1250,7 @@ double matlab_comm_crc_check(matlab_mat *bits, double poly_int_d,
     uint64_t rem = crc_remainder(&payload, N - nbits, poly, nbits);
     uint64_t received = 0;
     for (int i = 0; i < nbits; ++i) {
-        uint64_t b = ((uint64_t)bits->data[N - nbits + i]) & 1ULL;
+        uint64_t b = (static_cast<uint64_t>(bits->data[N - nbits + i])) & 1ULL;
         received = (received << 1) | b;
     }
     return rem == received ? 0.0 : 1.0;
@@ -1261,7 +1261,7 @@ double matlab_comm_crc_check(matlab_mat *bits, double poly_int_d,
 matlab_mat *matlab_comm_crc_strip(matlab_mat *bits, double nbits_d) {
     if (!bits) return mat_alloc(0, 0);
     int64_t N = bits->rows * bits->cols;
-    int nbits = (int)nbits_d;
+    int nbits = static_cast<int>(nbits_d);
     if (nbits < 0) nbits = 0;
     if (N <= nbits) return mat_alloc(0, 0);
     matlab_mat *out = mat_alloc(N - nbits, 1);
@@ -1296,19 +1296,19 @@ extern void matlab_struct_set_mat(matlab_struct *s, const char *name,
  * lower bits; `input` is the new bit shifted in at the top. */
 static int conv_output_bit(uint64_t poly_mask, int K,
                             uint64_t state_in, int input) {
-    uint64_t reg = (state_in << 1) | ((uint64_t)input & 1ULL);
-    (void)K;
+    uint64_t reg = (state_in << 1) | (static_cast<uint64_t>(input) & 1ULL);
+    static_cast<void>(K);
     uint64_t masked = reg & poly_mask;
     int parity = 0;
-    while (masked) { parity ^= (int)(masked & 1ULL); masked >>= 1; }
+    while (masked) { parity ^= static_cast<int>(masked & 1ULL); masked >>= 1; }
     return parity;
 }
 
 matlab_struct *matlab_comm_poly2trellis(double Kd, matlab_mat *gens) {
-    int K = (int)Kd;
+    int K = static_cast<int>(Kd);
     if (K < 2) K = 2;
     if (K > 30) K = 30;
-    int n = gens ? (int)(gens->rows * gens->cols) : 1;
+    int n = gens ? static_cast<int>(gens->rows * gens->cols) : 1;
     if (n < 1) n = 1;
     if (n > 8) n = 8;
     int64_t S = 1LL << (K - 1);
@@ -1326,25 +1326,25 @@ matlab_struct *matlab_comm_poly2trellis(double Kd, matlab_mat *gens) {
     for (int64_t s = 0; s < S; ++s) {
         for (int u = 0; u <= 1; ++u) {
             /* Next-state is the new register with the oldest bit dropped. */
-            uint64_t reg = (((uint64_t)s) << 1) | (uint64_t)u;
-            int64_t ns = (int64_t)(reg & (uint64_t)(S - 1));
-            nextStates->data[s * 2 + u] = (double)ns;
+            uint64_t reg = ((static_cast<uint64_t>(s)) << 1) | static_cast<uint64_t>(u);
+            int64_t ns = static_cast<int64_t>(reg & static_cast<uint64_t>(S - 1));
+            nextStates->data[s * 2 + u] = static_cast<double>(ns);
             /* Compute output integer: gens[i] -> bit i. */
             int out_int = 0;
             for (int i = 0; i < n; ++i) {
-                uint64_t poly = (uint64_t)gens->data[i];
-                int bit = conv_output_bit(poly, K, (uint64_t)s, u);
+                uint64_t poly = static_cast<uint64_t>(gens->data[i]);
+                int bit = conv_output_bit(poly, K, static_cast<uint64_t>(s), u);
                 out_int |= (bit << (n - 1 - i));
             }
-            outputs->data[s * 2 + u] = (double)out_int;
+            outputs->data[s * 2 + u] = static_cast<double>(out_int);
         }
     }
     matlab_struct *t = matlab_struct_new();
     matlab_struct_set_f64(t, "numInputSymbols",  15, 2.0);
-    matlab_struct_set_f64(t, "numOutputSymbols", 16, (double)(1 << n));
-    matlab_struct_set_f64(t, "numStates",         9, (double)S);
-    matlab_struct_set_f64(t, "K",                 1, (double)K);
-    matlab_struct_set_f64(t, "n",                 1, (double)n);
+    matlab_struct_set_f64(t, "numOutputSymbols", 16, static_cast<double>(1 << n));
+    matlab_struct_set_f64(t, "numStates",         9, static_cast<double>(S));
+    matlab_struct_set_f64(t, "K",                 1, static_cast<double>(K));
+    matlab_struct_set_f64(t, "n",                 1, static_cast<double>(n));
     matlab_struct_set_mat(t, "nextStates",       10, nextStates);
     matlab_struct_set_mat(t, "outputs",           7, outputs);
     return t;
@@ -1358,8 +1358,8 @@ extern matlab_mat *matlab_struct_get_mat(matlab_struct *s, const char *name, int
  * column of message bits; output is `n * length(msg)` bits. */
 matlab_mat *matlab_comm_convenc(matlab_mat *msg, matlab_struct *trellis) {
     if (!msg || !trellis) return mat_alloc(0, 0);
-    int n = (int)matlab_struct_get_f64(trellis, "n", 1);
-    int64_t S = (int64_t)matlab_struct_get_f64(trellis, "numStates", 9);
+    int n = static_cast<int>(matlab_struct_get_f64(trellis, "n", 1));
+    int64_t S = static_cast<int64_t>(matlab_struct_get_f64(trellis, "numStates", 9));
     matlab_mat *outputs    = matlab_struct_get_mat(trellis, "outputs",      7);
     matlab_mat *nextStates = matlab_struct_get_mat(trellis, "nextStates", 10);
     if (!outputs || !nextStates || n < 1) return mat_alloc(0, 0);
@@ -1367,11 +1367,11 @@ matlab_mat *matlab_comm_convenc(matlab_mat *msg, matlab_struct *trellis) {
     matlab_mat *out = mat_alloc(L * n, 1);
     int64_t state = 0;
     for (int64_t k = 0; k < L; ++k) {
-        int u = ((int)msg->data[k]) & 1;
-        int out_int = (int)outputs->data[state * 2 + u];
+        int u = (static_cast<int>(msg->data[k])) & 1;
+        int out_int = static_cast<int>(outputs->data[state * 2 + u]);
         for (int i = 0; i < n; ++i)
-            out->data[k * n + i] = (double)((out_int >> (n - 1 - i)) & 1);
-        state = (int64_t)nextStates->data[state * 2 + u];
+            out->data[k * n + i] = static_cast<double>((out_int >> (n - 1 - i)) & 1);
+        state = static_cast<int64_t>(nextStates->data[state * 2 + u]);
         if (state < 0 || state >= S) state = 0;
     }
     return out;
@@ -1388,18 +1388,18 @@ matlab_mat *matlab_comm_convenc(matlab_mat *msg, matlab_struct *trellis) {
  */
 matlab_mat *matlab_comm_vitdec(matlab_mat *code, matlab_struct *trellis,
                                 double tblen_d, double opmode_d, double dectype_d) {
-    (void)dectype_d;     /* hard-decision only for the MVP slice */
+    static_cast<void>(dectype_d);     /* hard-decision only for the MVP slice */
     if (!code || !trellis) return mat_alloc(0, 0);
-    int n = (int)matlab_struct_get_f64(trellis, "n", 1);
-    int64_t S = (int64_t)matlab_struct_get_f64(trellis, "numStates", 9);
+    int n = static_cast<int>(matlab_struct_get_f64(trellis, "n", 1));
+    int64_t S = static_cast<int64_t>(matlab_struct_get_f64(trellis, "numStates", 9));
     matlab_mat *outputs    = matlab_struct_get_mat(trellis, "outputs",      7);
     matlab_mat *nextStates = matlab_struct_get_mat(trellis, "nextStates", 10);
     if (!outputs || !nextStates || n < 1 || S < 1) return mat_alloc(0, 0);
     int64_t total = code->rows * code->cols;
     int64_t T = total / n;
     if (T < 1) return mat_alloc(0, 0);
-    int opmode = (int)opmode_d;
-    (void)tblen_d;
+    int opmode = static_cast<int>(opmode_d);
+    static_cast<void>(tblen_d);
 
     /* Build the reverse-edge table: incoming[s] gives the (prev_state,
      * input_bit) pairs that reach state s.  For rate 1/n binary
@@ -1411,13 +1411,13 @@ matlab_mat *matlab_comm_vitdec(matlab_mat *code, matlab_struct *trellis,
     std::vector<int>     n_in   (S, 0);
     for (int64_t ps = 0; ps < S; ++ps) {
         for (int u = 0; u <= 1; ++u) {
-            int64_t ns = (int64_t)nextStates->data[ps * 2 + u];
+            int64_t ns = static_cast<int64_t>(nextStates->data[ps * 2 + u]);
             if (ns < 0 || ns >= S) continue;
             int slot = n_in[ns]++;
             if (slot >= 2) continue;
             in_prev[ns * 2 + slot] = ps;
             in_bit [ns * 2 + slot] = u;
-            in_out [ns * 2 + slot] = (int)outputs->data[ps * 2 + u];
+            in_out [ns * 2 + slot] = static_cast<int>(outputs->data[ps * 2 + u]);
         }
     }
 
@@ -1432,7 +1432,7 @@ matlab_mat *matlab_comm_vitdec(matlab_mat *code, matlab_struct *trellis,
         /* Decode the received n-tuple into an integer. */
         int rx_int = 0;
         for (int i = 0; i < n; ++i) {
-            int b = ((int)code->data[t * n + i]) & 1;
+            int b = (static_cast<int>(code->data[t * n + i])) & 1;
             rx_int |= (b << (n - 1 - i));
         }
         for (int64_t s = 0; s < S; ++s) {
@@ -1447,7 +1447,7 @@ matlab_mat *matlab_comm_vitdec(matlab_mat *code, matlab_struct *trellis,
                 int diff = rx_int ^ oi;
                 int hamming = 0;
                 while (diff) { hamming += diff & 1; diff >>= 1; }
-                double cand = pm[ps] + (double)hamming;
+                double cand = pm[ps] + static_cast<double>(hamming);
                 if (cand < best) {
                     best = cand;
                     best_bit = u;
@@ -1455,8 +1455,8 @@ matlab_mat *matlab_comm_vitdec(matlab_mat *code, matlab_struct *trellis,
                 }
             }
             pm_next[s] = best;
-            bit_dec [t * S + s] = (int8_t)best_bit;
-            prev_dec[t * S + s] = (int32_t)best_prev;
+            bit_dec [t * S + s] = static_cast<int8_t>(best_bit);
+            prev_dec[t * S + s] = static_cast<int32_t>(best_prev);
         }
         std::swap(pm, pm_next);
         for (int64_t s = 0; s < S; ++s) pm_next[s] = INF;
@@ -1474,8 +1474,8 @@ matlab_mat *matlab_comm_vitdec(matlab_mat *code, matlab_struct *trellis,
     matlab_mat *msg = mat_alloc(T, 1);
     int64_t state = end;
     for (int64_t t = T - 1; t >= 0; --t) {
-        msg->data[t] = (double)bit_dec[t * S + state];
-        state = (int64_t)prev_dec[t * S + state];
+        msg->data[t] = static_cast<double>(bit_dec[t * S + state]);
+        state = static_cast<int64_t>(prev_dec[t * S + state]);
     }
     return msg;
 }
@@ -1485,7 +1485,7 @@ matlab_mat *matlab_comm_vitdec(matlab_mat *code, matlab_struct *trellis,
  * (121).  Bridge for poly2trellis users who copy generator polys
  * straight from textbook octal notation. */
 double matlab_comm_oct2dec_s(double v) {
-    int64_t x = (int64_t)v;
+    int64_t x = static_cast<int64_t>(v);
     int64_t out = 0;
     int64_t mult = 1;
     while (x > 0) {
@@ -1494,7 +1494,7 @@ double matlab_comm_oct2dec_s(double v) {
         mult *= 8;
         x /= 10;
     }
-    return (double)out;
+    return static_cast<double>(out);
 }
 
 /* ===== §5.3 Hamming codes (binary, n = 2^m - 1) ========================== */
@@ -1505,7 +1505,7 @@ double matlab_comm_oct2dec_s(double v) {
  * `hammingGen(m)` returns G separately (so we can fit a single matrix
  * per call into the dispatch). */
 matlab_mat *matlab_comm_hammgen_parity(double md) {
-    int m = (int)md;
+    int m = static_cast<int>(md);
     if (m < 2) m = 2;
     if (m > 12) m = 12;
     int n = (1 << m) - 1;
@@ -1514,7 +1514,7 @@ matlab_mat *matlab_comm_hammgen_parity(double md) {
     for (int c = 0; c < n; ++c) {
         int v = c + 1;
         for (int r = 0; r < m; ++r) {
-            H->data[r * n + c] = (double)((v >> (m - 1 - r)) & 1);
+            H->data[r * n + c] = static_cast<double>((v >> (m - 1 - r)) & 1);
         }
     }
     return H;
@@ -1529,7 +1529,7 @@ matlab_mat *matlab_comm_hammgen_parity(double md) {
  * For simplicity we exhibit a single-block (no length padding) form
  * that requires `length(msg) == k`.  Callers can batch outside. */
 matlab_mat *matlab_comm_hamming_encode(matlab_mat *msg, double md) {
-    int m = (int)md;
+    int m = static_cast<int>(md);
     if (m < 2) m = 2; if (m > 12) m = 12;
     int n = (1 << m) - 1;
     int k = n - m;
@@ -1548,9 +1548,9 @@ matlab_mat *matlab_comm_hamming_encode(matlab_mat *msg, double md) {
         for (int j = 1; j <= n; ++j) {
             if (j == pos) continue;
             if ((j & pos) == 0) continue;
-            parity ^= (int)code->data[j - 1] & 1;
+            parity ^= static_cast<int>(code->data[j - 1]) & 1;
         }
-        code->data[pos - 1] = (double)parity;
+        code->data[pos - 1] = static_cast<double>(parity);
     }
     return code;
 }
@@ -1559,7 +1559,7 @@ matlab_mat *matlab_comm_hamming_encode(matlab_mat *msg, double md) {
  * Returns the k = n - m message bits (extracted from non-power-of-two
  * positions after correcting any single-bit error). */
 matlab_mat *matlab_comm_hamming_decode(matlab_mat *code, double md) {
-    int m = (int)md;
+    int m = static_cast<int>(md);
     if (m < 2) m = 2; if (m > 12) m = 12;
     int n = (1 << m) - 1;
     int k = n - m;
@@ -1573,13 +1573,13 @@ matlab_mat *matlab_comm_hamming_decode(matlab_mat *code, double md) {
         int parity = 0;
         for (int j = 1; j <= n; ++j) {
             if ((j & pos) == 0) continue;
-            parity ^= (int)work->data[j - 1] & 1;
+            parity ^= static_cast<int>(work->data[j - 1]) & 1;
         }
         if (parity) syndrome |= pos;
     }
     /* Correct the bit at position `syndrome` if non-zero. */
     if (syndrome >= 1 && syndrome <= n) {
-        work->data[syndrome - 1] = (double)(1 - (int)work->data[syndrome - 1]);
+        work->data[syndrome - 1] = static_cast<double>(1 - static_cast<int>(work->data[syndrome - 1]));
     }
     /* Extract message bits. */
     matlab_mat *msg = mat_alloc(k, 1);
@@ -1606,7 +1606,7 @@ matlab_mat *matlab_comm_intrlv(matlab_mat *data, matlab_mat *perm) {
     if (N != Np) return mat_alloc(0, 0);
     matlab_mat *out = mat_alloc(data->rows, data->cols);
     for (int64_t i = 0; i < N; ++i) {
-        int64_t idx = (int64_t)perm->data[i] - 1;
+        int64_t idx = static_cast<int64_t>(perm->data[i]) - 1;
         if (idx < 0 || idx >= N) idx = 0;
         out->data[i] = data->data[idx];
     }
@@ -1620,7 +1620,7 @@ matlab_mat *matlab_comm_deintrlv(matlab_mat *data, matlab_mat *perm) {
     if (N != Np) return mat_alloc(0, 0);
     matlab_mat *out = mat_alloc(data->rows, data->cols);
     for (int64_t i = 0; i < N; ++i) {
-        int64_t idx = (int64_t)perm->data[i] - 1;
+        int64_t idx = static_cast<int64_t>(perm->data[i]) - 1;
         if (idx < 0 || idx >= N) idx = 0;
         out->data[idx] = data->data[i];
     }
@@ -1649,9 +1649,9 @@ matlab_mat *matlab_comm_lms(matlab_mat *x, matlab_mat *d,
     if (!x || !d) return mat_alloc(0, 0);
     int64_t N = x->rows * x->cols;
     int64_t Nd = d->rows * d->cols;
-    int K = (int)ntaps;
+    int K = static_cast<int>(ntaps);
     if (K < 1) K = 1;
-    if (K > N) K = (int)N;
+    if (K > N) K = static_cast<int>(N);
     int64_t Lo = std::min(N, Nd);
     std::vector<double> w(K, 0.0);
     std::vector<double> buf(K, 0.0);
@@ -1677,9 +1677,9 @@ matlab_mat *matlab_comm_rls(matlab_mat *x, matlab_mat *d,
     if (!x || !d) return mat_alloc(0, 0);
     int64_t N = x->rows * x->cols;
     int64_t Nd = d->rows * d->cols;
-    int K = (int)ntaps;
+    int K = static_cast<int>(ntaps);
     if (K < 1) K = 1;
-    if (K > N) K = (int)N;
+    if (K > N) K = static_cast<int>(N);
     int64_t Lo = std::min(N, Nd);
     if (lambda <= 0.0 || lambda > 1.0) lambda = 0.99;
     if (delta <= 0.0) delta = 1.0;
@@ -1726,9 +1726,9 @@ matlab_mat *matlab_comm_rls(matlab_mat *x, matlab_mat *d,
 matlab_mat *matlab_comm_cma(matlab_mat *x, double mu, double ntaps, double R2) {
     if (!x) return mat_alloc(0, 0);
     int64_t N = x->rows * x->cols;
-    int K = (int)ntaps;
+    int K = static_cast<int>(ntaps);
     if (K < 1) K = 1;
-    if (K > N) K = (int)N;
+    if (K > N) K = static_cast<int>(N);
     std::vector<double> w(K, 0.0);
     std::vector<double> buf(K, 0.0);
     /* Centre tap initialised to 1 — standard CMA initialisation. */
@@ -1757,8 +1757,8 @@ matlab_mat *matlab_comm_dfe(matlab_mat *x, matlab_mat *d, double mu,
     if (!x || !d) return mat_alloc(0, 0);
     int64_t N = x->rows * x->cols;
     int64_t Nd = d->rows * d->cols;
-    int Kff = (int)n_ff; if (Kff < 1) Kff = 1;
-    int Kfb = (int)n_fb; if (Kfb < 0) Kfb = 0;
+    int Kff = static_cast<int>(n_ff); if (Kff < 1) Kff = 1;
+    int Kfb = static_cast<int>(n_fb); if (Kfb < 0) Kfb = 0;
     int64_t Lo = std::min(N, Nd);
     int64_t train_n = Lo / 2;
     std::vector<double> wff(Kff, 0.0);
@@ -1795,7 +1795,7 @@ matlab_mat_c *matlab_comm_costas_pll(matlab_mat_c *x, double M_psk,
                                       double loop_bw, double fs) {
     if (!x) return mat_c_alloc(0, 0);
     int64_t N = x->rows * x->cols;
-    int M = (int)M_psk;
+    int M = static_cast<int>(M_psk);
     if (M < 2) M = 2;
     if (fs <= 0.0) fs = 1.0;
     if (loop_bw <= 0.0) loop_bw = fs * 1e-3;
@@ -1841,16 +1841,16 @@ matlab_mat *matlab_comm_symbol_sync_mm(matlab_mat *x, double sps,
     int64_t N = x->rows * x->cols;
     double sps_d = sps > 1.0 ? sps : 1.0;
     if (loop_bw <= 0.0 || loop_bw >= 1.0) loop_bw = 0.05;
-    int64_t Nsym = (int64_t)((double)N / sps_d) + 1;
+    int64_t Nsym = static_cast<int64_t>(static_cast<double>(N) / sps_d) + 1;
     matlab_mat *y = mat_alloc(Nsym, 1);
     int64_t idx = 0;
     double tau = 0.0;            /* fractional time offset */
     double prev = 0.0;
     double pprev = 0.0;
     for (int64_t k = 0; k < Nsym; ++k) {
-        double pos = sps_d * (double)k + tau;
-        int64_t i0 = (int64_t)floor(pos);
-        double frac = pos - (double)i0;
+        double pos = sps_d * static_cast<double>(k) + tau;
+        int64_t i0 = static_cast<int64_t>(floor(pos));
+        double frac = pos - static_cast<double>(i0);
         if (i0 < 0) i0 = 0;
         if (i0 >= N - 1) break;
         /* Linear-interpolated sample. */
@@ -1888,7 +1888,7 @@ double matlab_comm_preamble_detect(matlab_mat *x, matlab_mat *preamble) {
         for (int64_t k = 0; k < M; ++k) acc += x->data[n + k] * preamble->data[k];
         if (acc > best) { best = acc; best_idx = n; }
     }
-    return (double)(best_idx + 1);
+    return static_cast<double>(best_idx + 1);
 }
 
 /* ----- §6.3 RF impairments ----- *
@@ -1903,7 +1903,7 @@ matlab_mat_c *matlab_comm_phase_freq_offset(matlab_mat_c *x,
     matlab_mat_c *y = mat_c_alloc(x->rows, x->cols);
     double w = 2.0 * M_PI * df_Hz / fs_Hz;
     for (int64_t n = 0; n < N; ++n) {
-        double c = cos(w * (double)n), s = sin(w * (double)n);
+        double c = cos(w * static_cast<double>(n)), s = sin(w * static_cast<double>(n));
         y->re[n] = x->re[n] * c - x->im[n] * s;
         y->im[n] = x->re[n] * s + x->im[n] * c;
     }
@@ -1941,7 +1941,7 @@ matlab_mat_c *matlab_comm_memoryless_nl(matlab_mat_c *x, double model_code,
     if (!x) return mat_c_alloc(0, 0);
     int64_t N = x->rows * x->cols;
     matlab_mat_c *y = mat_c_alloc(x->rows, x->cols);
-    int mc = (int)model_code;
+    int mc = static_cast<int>(model_code);
     for (int64_t n = 0; n < N; ++n) {
         double r = sqrt(x->re[n] * x->re[n] + x->im[n] * x->im[n]);
         double phi = atan2(x->im[n], x->re[n]);
@@ -2029,8 +2029,8 @@ extern matlab_mat_c *matlab_ifft_c(void *Aptr);
 matlab_mat_c *matlab_comm_ofdmmod(matlab_mat_c *data, double fft_len_d,
                                    double cp_len_d) {
     if (!data) return mat_c_alloc(0, 0);
-    int64_t Nfft = (int64_t)fft_len_d;
-    int64_t Lcp  = (int64_t)cp_len_d;
+    int64_t Nfft = static_cast<int64_t>(fft_len_d);
+    int64_t Lcp  = static_cast<int64_t>(cp_len_d);
     if (Nfft < 1) Nfft = 1;
     if (Lcp  < 0) Lcp  = 0;
     if (data->rows != Nfft) return mat_c_alloc(0, 0);
@@ -2051,7 +2051,7 @@ matlab_mat_c *matlab_comm_ofdmmod(matlab_mat_c *data, double fft_len_d,
             re_buf[i] = data->re[i * data->cols + k];
             im_buf[i] = data->im[i * data->cols + k];
         }
-        matlab_mat_c *T = matlab_ifft_c((void *)&col);
+        matlab_mat_c *T = matlab_ifft_c(reinterpret_cast<void *>(&col));
         int64_t base = k * (Nfft + Lcp);
         for (int64_t i = 0; i < Lcp; ++i) {
             int64_t src = Nfft - Lcp + i;
@@ -2070,8 +2070,8 @@ matlab_mat_c *matlab_comm_ofdmmod(matlab_mat_c *data, double fft_len_d,
 matlab_mat_c *matlab_comm_ofdmdemod(matlab_mat_c *samples, double fft_len_d,
                                      double cp_len_d) {
     if (!samples) return mat_c_alloc(0, 0);
-    int64_t Nfft = (int64_t)fft_len_d;
-    int64_t Lcp  = (int64_t)cp_len_d;
+    int64_t Nfft = static_cast<int64_t>(fft_len_d);
+    int64_t Lcp  = static_cast<int64_t>(cp_len_d);
     if (Nfft < 1) Nfft = 1;
     if (Lcp  < 0) Lcp  = 0;
     int64_t Lin = samples->rows * samples->cols;
@@ -2091,7 +2091,7 @@ matlab_mat_c *matlab_comm_ofdmdemod(matlab_mat_c *samples, double fft_len_d,
             re_buf[i] = samples->re[base + i];
             im_buf[i] = samples->im[base + i];
         }
-        matlab_mat_c *F = matlab_fft_c((void *)&col);
+        matlab_mat_c *F = matlab_fft_c(reinterpret_cast<void *>(&col));
         for (int64_t i = 0; i < Nfft; ++i) {
             out->re[i * Nsym + k] = F->re[i];
             out->im[i * Nsym + k] = F->im[i];
@@ -2120,13 +2120,13 @@ static void jakes_gen(double *re, double *im, int64_t N,
     for (int64_t n = 0; n < N; ++n) {
         double sr = 0.0, si = 0.0;
         for (int m = 0; m < M; ++m) {
-            double alpha = (2.0 * M_PI * (double)(m + 1) - M_PI + theta[m]) / (4.0 * (double)M);
-            double c = wd * (double)n * cos(alpha) + phi[m];
+            double alpha = (2.0 * M_PI * static_cast<double>(m + 1) - M_PI + theta[m]) / (4.0 * static_cast<double>(M));
+            double c = wd * static_cast<double>(n) * cos(alpha) + phi[m];
             sr += cos(c);
             si += sin(c);
         }
-        re[n] = sr / sqrt((double)M);
-        im[n] = si / sqrt((double)M);
+        re[n] = sr / sqrt(static_cast<double>(M));
+        im[n] = si / sqrt(static_cast<double>(M));
     }
 }
 
@@ -2137,14 +2137,14 @@ matlab_mat_c *matlab_comm_rayleigh_channel(matlab_mat_c *x, matlab_mat *delays,
                                             matlab_mat *gains_dB,
                                             double max_doppler_Hz, double fs_Hz) {
     if (!x || !delays || !gains_dB) return mat_c_alloc(0, 0);
-    int P = (int)(delays->rows * delays->cols);
-    int Pg = (int)(gains_dB->rows * gains_dB->cols);
+    int P = static_cast<int>(delays->rows * delays->cols);
+    int Pg = static_cast<int>(gains_dB->rows * gains_dB->cols);
     if (P < 1 || Pg < P) return mat_c_alloc(0, 0);
     int64_t Nin = x->rows * x->cols;
     int64_t max_delay = 0;
     std::vector<int64_t> d_int(P);
     for (int p = 0; p < P; ++p) {
-        d_int[p] = (int64_t)delays->data[p];
+        d_int[p] = static_cast<int64_t>(delays->data[p]);
         if (d_int[p] < 0) d_int[p] = 0;
         if (d_int[p] > max_delay) max_delay = d_int[p];
     }
@@ -2279,9 +2279,9 @@ matlab_mat_c *matlab_comm_ostbc_combine(matlab_mat_c *y,
  */
 matlab_mat *matlab_comm_pn_sequence(double poly_int_d, double init_int_d,
                                      double length_d, double output_mode) {
-    int64_t N = (int64_t)length_d;
+    int64_t N = static_cast<int64_t>(length_d);
     if (N < 1) N = 1;
-    uint64_t poly = (uint64_t)poly_int_d;
+    uint64_t poly = static_cast<uint64_t>(poly_int_d);
     if (poly < 3) poly = 3;
     int deg = 0;
     {
@@ -2290,7 +2290,7 @@ matlab_mat *matlab_comm_pn_sequence(double poly_int_d, double init_int_d,
         --deg;
         if (deg < 1) deg = 1;
     }
-    uint64_t state = (uint64_t)init_int_d;
+    uint64_t state = static_cast<uint64_t>(init_int_d);
     uint64_t state_mask = (deg >= 64) ? ~0ULL : ((1ULL << deg) - 1ULL);
     state &= state_mask;
     if (state == 0) state = 1;
@@ -2298,10 +2298,10 @@ matlab_mat *matlab_comm_pn_sequence(double poly_int_d, double init_int_d,
      * shift right one and conditionally XOR the high taps (above the
      * implicit leading 1). */
     matlab_mat *out = mat_alloc(N, 1);
-    int mode = (int)output_mode;
+    int mode = static_cast<int>(output_mode);
     for (int64_t i = 0; i < N; ++i) {
         uint64_t bit = state & 1ULL;
-        out->data[i] = (mode == 1) ? (1.0 - 2.0 * (double)bit) : (double)bit;
+        out->data[i] = (mode == 1) ? (1.0 - 2.0 * static_cast<double>(bit)) : static_cast<double>(bit);
         state >>= 1;
         if (bit) state ^= (poly >> 1);
         state &= state_mask;
@@ -2319,13 +2319,13 @@ matlab_mat *matlab_comm_gold_sequence(double poly1_d, double poly2_d,
                                        double length_d, double output_mode) {
     matlab_mat *a = matlab_comm_pn_sequence(poly1_d, init1_d, length_d, 0);
     matlab_mat *b = matlab_comm_pn_sequence(poly2_d, init2_d, length_d, 0);
-    int64_t N = (int64_t)length_d;
+    int64_t N = static_cast<int64_t>(length_d);
     if (N < 1) N = 1;
     matlab_mat *out = mat_alloc(N, 1);
-    int mode = (int)output_mode;
+    int mode = static_cast<int>(output_mode);
     for (int64_t i = 0; i < N; ++i) {
-        int bit = ((int)a->data[i] ^ (int)b->data[i]) & 1;
-        out->data[i] = (mode == 1) ? (1.0 - 2.0 * (double)bit) : (double)bit;
+        int bit = (static_cast<int>(a->data[i]) ^ static_cast<int>(b->data[i])) & 1;
+        out->data[i] = (mode == 1) ? (1.0 - 2.0 * static_cast<double>(bit)) : static_cast<double>(bit);
     }
     free(a->data); free(a);
     free(b->data); free(b);
@@ -2337,7 +2337,7 @@ matlab_mat *matlab_comm_gold_sequence(double poly1_d, double poly2_d,
  * codes are the rows of this matrix.  Other Hadamard orders (n = 12,
  * 20, ...) are not in scope; pass n = 1, 2, 4, 8, ... */
 matlab_mat *matlab_comm_hadamard(double n_d) {
-    int n = (int)n_d;
+    int n = static_cast<int>(n_d);
     if (n < 1) n = 1;
     /* Snap to next power of 2. */
     int p = 1;
@@ -2361,8 +2361,8 @@ matlab_mat *matlab_comm_hadamard(double n_d) {
 /* walshCode(n, k): k-th row (1-based) of the n×n Hadamard matrix. */
 matlab_mat *matlab_comm_walsh_code(double n_d, double k_d) {
     matlab_mat *H = matlab_comm_hadamard(n_d);
-    int n = (int)H->rows;
-    int k = (int)k_d - 1;
+    int n = static_cast<int>(H->rows);
+    int k = static_cast<int>(k_d) - 1;
     if (k < 0) k = 0;
     if (k >= n) k = n - 1;
     matlab_mat *out = mat_alloc(n, 1);
@@ -2392,7 +2392,7 @@ matlab_mat *matlab_comm_quantiz(matlab_mat *sig, matlab_mat *partition,
         double v = sig->data[i];
         int64_t k = 0;
         while (k < Np && v > partition->data[k]) ++k;
-        idx->data[i] = (double)k;
+        idx->data[i] = static_cast<double>(k);
     }
     return idx;
 }
@@ -2405,7 +2405,7 @@ matlab_mat *matlab_comm_quantiz_apply(matlab_mat *idx, matlab_mat *codebook) {
     int64_t Mc = codebook->rows * codebook->cols;
     matlab_mat *out = mat_alloc(N, 1);
     for (int64_t i = 0; i < N; ++i) {
-        int64_t k = (int64_t)idx->data[i];
+        int64_t k = static_cast<int64_t>(idx->data[i]);
         if (k < 0) k = 0;
         if (k >= Mc) k = Mc - 1;
         out->data[i] = codebook->data[k];
@@ -2420,10 +2420,10 @@ matlab_mat *matlab_comm_quantiz_apply(matlab_mat *idx, matlab_mat *codebook) {
 matlab_mat *matlab_comm_lloyds_quant(matlab_mat *sig, matlab_mat *init_cb,
                                       double max_iter, double tol_d) {
     if (!sig || !init_cb) return mat_alloc(0, 0);
-    int M = (int)(init_cb->rows * init_cb->cols);
+    int M = static_cast<int>(init_cb->rows * init_cb->cols);
     int64_t N = sig->rows * sig->cols;
     if (M < 1 || N < 1) return mat_alloc(0, 0);
-    int iters = (int)max_iter;
+    int iters = static_cast<int>(max_iter);
     if (iters < 1) iters = 30;
     double tol = tol_d > 0.0 ? tol_d : 1e-6;
     matlab_mat *cb = mat_alloc(M, 1);
@@ -2467,7 +2467,7 @@ matlab_mat *matlab_comm_compand_mu(matlab_mat *x, double mu_d, double V_d,
     matlab_mat *y = mat_alloc(x->rows, x->cols);
     double mu = mu_d > 0.0 ? mu_d : 255.0;
     double V  = V_d  > 0.0 ? V_d  : 1.0;
-    int dir = (int)dir_d;
+    int dir = static_cast<int>(dir_d);
     if (dir == 0) {
         double denom = log(1.0 + mu);
         for (int64_t i = 0; i < N; ++i) {
@@ -2497,7 +2497,7 @@ matlab_mat *matlab_comm_compand_a(matlab_mat *x, double A_d, double V_d,
     double V = V_d > 0.0 ? V_d : 1.0;
     double thr = V / A;
     double denom = 1.0 + log(A);
-    int dir = (int)dir_d;
+    int dir = static_cast<int>(dir_d);
     for (int64_t i = 0; i < N; ++i) {
         double v = x->data[i];
         double s = v >= 0.0 ? 1.0 : -1.0;
@@ -2540,7 +2540,7 @@ matlab_mat *matlab_comm_dpcm_encode(matlab_mat *sig, matlab_mat *partition,
         double err = sig->data[i] - recon;
         int64_t k = 0;
         while (k < Np && err > partition->data[k]) ++k;
-        idx->data[i] = (double)k;
+        idx->data[i] = static_cast<double>(k);
         recon += codebook->data[k];
     }
     return idx;
@@ -2553,7 +2553,7 @@ matlab_mat *matlab_comm_dpcm_decode(matlab_mat *idx, matlab_mat *codebook) {
     matlab_mat *out = mat_alloc(N, 1);
     double recon = 0.0;
     for (int64_t i = 0; i < N; ++i) {
-        int64_t k = (int64_t)idx->data[i];
+        int64_t k = static_cast<int64_t>(idx->data[i]);
         if (k < 0) k = 0;
         if (k >= Mc) k = Mc - 1;
         recon += codebook->data[k];
@@ -2586,7 +2586,7 @@ matlab_mat *matlab_comm_dpcm_decode(matlab_mat *idx, matlab_mat *codebook) {
  * is purely the bit-reversal-free butterfly.
  */
 matlab_mat *matlab_comm_polar_encode(matlab_mat *u, double Nd) {
-    int64_t N = (int64_t)Nd;
+    int64_t N = static_cast<int64_t>(Nd);
     if (!u || N < 1) return mat_alloc(0, 0);
     /* Round N up to next power of 2. */
     int64_t P = 1;
@@ -2595,15 +2595,15 @@ matlab_mat *matlab_comm_polar_encode(matlab_mat *u, double Nd) {
     matlab_mat *y = mat_alloc(N, 1);
     int64_t Nu = u->rows * u->cols;
     for (int64_t i = 0; i < N; ++i)
-        y->data[i] = (i < Nu) ? ((int64_t)u->data[i] & 1) : 0.0;
+        y->data[i] = (i < Nu) ? (static_cast<int64_t>(u->data[i]) & 1) : 0.0;
     /* Recursive butterfly in place: for each stage s of size 2^(s+1),
      * pair (a, b) -> (a XOR b, b). */
     for (int64_t step = 1; step < N; step <<= 1) {
         for (int64_t base = 0; base < N; base += (step << 1)) {
             for (int64_t i = 0; i < step; ++i) {
-                int a = (int)y->data[base + i] & 1;
-                int b = (int)y->data[base + step + i] & 1;
-                y->data[base + i] = (double)(a ^ b);
+                int a = static_cast<int>(y->data[base + i]) & 1;
+                int b = static_cast<int>(y->data[base + step + i]) & 1;
+                y->data[base + i] = static_cast<double>(a ^ b);
             }
         }
     }
@@ -2644,9 +2644,9 @@ static void polar_sc_rec(double *llr, double *u_hat, int *frozen,
     for (int64_t step = 1; step < H; step <<= 1) {
         for (int64_t base = 0; base < H; base += (step << 1)) {
             for (int64_t i = 0; i < step; ++i) {
-                int aa = (int)u_top_partial[base + i] & 1;
-                int bb = (int)u_top_partial[base + step + i] & 1;
-                u_top_partial[base + i] = (double)(aa ^ bb);
+                int aa = static_cast<int>(u_top_partial[base + i]) & 1;
+                int bb = static_cast<int>(u_top_partial[base + step + i]) & 1;
+                u_top_partial[base + i] = static_cast<double>(aa ^ bb);
             }
         }
     }
@@ -2664,7 +2664,7 @@ static void polar_sc_rec(double *llr, double *u_hat, int *frozen,
  * length N indicating frozen positions. */
 matlab_mat *matlab_comm_polar_sc_decode(matlab_mat *llr,
                                          matlab_mat *frozen, double Nd) {
-    int64_t N = (int64_t)Nd;
+    int64_t N = static_cast<int64_t>(Nd);
     if (!llr || !frozen || N < 1) return mat_alloc(0, 0);
     int64_t P = 1;
     while (P < N) P <<= 1;
@@ -2675,7 +2675,7 @@ matlab_mat *matlab_comm_polar_sc_decode(matlab_mat *llr,
     int64_t Nf = frozen->rows * frozen->cols;
     for (int64_t i = 0; i < N; ++i) {
         llr_buf[i] = (i < Nl) ? llr->data[i] : 0.0;
-        fz_buf [i] = (i < Nf) ? ((int)frozen->data[i] & 1) : 1;
+        fz_buf [i] = (i < Nf) ? (static_cast<int>(frozen->data[i]) & 1) : 1;
     }
     matlab_mat *u_hat = mat_alloc(N, 1);
     for (int64_t i = 0; i < N; ++i) u_hat->data[i] = 0.0;
@@ -2702,17 +2702,17 @@ matlab_mat *matlab_comm_ldpc_encode(matlab_mat *msg, matlab_mat *P) {
     matlab_mat *cw = mat_alloc(n, 1);
     /* Systematic prefix. */
     for (int64_t i = 0; i < k; ++i)
-        cw->data[i] = (int64_t)msg->data[i] & 1;
+        cw->data[i] = static_cast<int64_t>(msg->data[i]) & 1;
     /* Parity = mod(P^T · msg, 2): each parity bit j is XOR over i of
      * P[i, j] · msg[i]. */
     for (int64_t j = 0; j < m; ++j) {
         int p = 0;
         for (int64_t i = 0; i < k; ++i) {
-            int b = (int)P->data[i * Pm + j] & 1;
-            int u = (int)msg->data[i] & 1;
+            int b = static_cast<int>(P->data[i * Pm + j]) & 1;
+            int u = static_cast<int>(msg->data[i]) & 1;
             p ^= (b & u);
         }
-        cw->data[k + j] = (double)p;
+        cw->data[k + j] = static_cast<double>(p);
     }
     return cw;
 }
@@ -2730,14 +2730,14 @@ matlab_mat *matlab_comm_ldpc_decode_ms(matlab_mat *llr, matlab_mat *H,
     int64_t m = H->rows;
     int64_t Nl = llr->rows * llr->cols;
     if (Nl != n) return mat_alloc(0, 0);
-    int iters = (int)max_iter;
+    int iters = static_cast<int>(max_iter);
     if (iters < 1) iters = 1;
     /* Build edge list: list of (check, variable) pairs for each H[c, v] = 1. */
     std::vector<std::vector<int64_t>> v_to_c(n);
     std::vector<std::vector<int64_t>> c_to_v(m);
     for (int64_t c = 0; c < m; ++c) {
         for (int64_t v = 0; v < n; ++v) {
-            if (((int)H->data[c * n + v] & 1) == 1) {
+            if ((static_cast<int>(H->data[c * n + v]) & 1) == 1) {
                 v_to_c[v].push_back(c);
                 c_to_v[c].push_back(v);
             }
@@ -2756,7 +2756,7 @@ matlab_mat *matlab_comm_ldpc_decode_ms(matlab_mat *llr, matlab_mat *H,
     for (int it = 0; it < iters; ++it) {
         /* Check-node update: min-sum. */
         for (int64_t c = 0; c < m; ++c) {
-            int deg = (int)c_to_v[c].size();
+            int deg = static_cast<int>(c_to_v[c].size());
             for (int j = 0; j < deg; ++j) {
                 double prod_sign = 1.0;
                 double min_abs   = 1e300;
@@ -2766,7 +2766,7 @@ matlab_mat *matlab_comm_ldpc_decode_ms(matlab_mat *llr, matlab_mat *H,
                     /* find the edge index from v's side that points back to c */
                     int idx = -1;
                     for (size_t e = 0; e < v_to_c[v].size(); ++e)
-                        if (v_to_c[v][e] == c) { idx = (int)e; break; }
+                        if (v_to_c[v][e] == c) { idx = static_cast<int>(e); break; }
                     double L = L_vc[v][idx];
                     if (L < 0.0) prod_sign = -prod_sign;
                     double a = fabs(L);
@@ -2777,20 +2777,20 @@ matlab_mat *matlab_comm_ldpc_decode_ms(matlab_mat *llr, matlab_mat *H,
         }
         /* Variable-node update: sum + channel. */
         for (int64_t v = 0; v < n; ++v) {
-            int deg = (int)v_to_c[v].size();
+            int deg = static_cast<int>(v_to_c[v].size());
             double total = llr->data[v];
             for (int i = 0; i < deg; ++i) {
                 int64_t c = v_to_c[v][i];
                 int idx = -1;
                 for (size_t e = 0; e < c_to_v[c].size(); ++e)
-                    if (c_to_v[c][e] == v) { idx = (int)e; break; }
+                    if (c_to_v[c][e] == v) { idx = static_cast<int>(e); break; }
                 total += L_cv[c][idx];
             }
             for (int i = 0; i < deg; ++i) {
                 int64_t c = v_to_c[v][i];
                 int idx = -1;
                 for (size_t e = 0; e < c_to_v[c].size(); ++e)
-                    if (c_to_v[c][e] == v) { idx = (int)e; break; }
+                    if (c_to_v[c][e] == v) { idx = static_cast<int>(e); break; }
                 L_vc[v][i] = total - L_cv[c][idx];
             }
             out->data[v] = (total < 0.0) ? 1.0 : 0.0;
@@ -2822,14 +2822,14 @@ matlab_mat *matlab_comm_turbo_encode(matlab_mat *msg, matlab_struct *trellis,
                                       matlab_mat *perm) {
     if (!msg || !trellis || !perm) return mat_alloc(0, 0);
     int64_t k = msg->rows * msg->cols;
-    int n_out = (int)matlab_struct_get_f64(trellis, "n", 1);
+    int n_out = static_cast<int>(matlab_struct_get_f64(trellis, "n", 1));
     if (n_out < 1) n_out = 2;
     /* First encoder pass: convenc on msg. */
     matlab_mat *c1 = matlab_comm_convenc(msg, trellis);
     /* Permute msg via the interleaver. */
     matlab_mat *msg_p = mat_alloc(k, 1);
     for (int64_t i = 0; i < k; ++i) {
-        int64_t idx = (int64_t)perm->data[i] - 1;
+        int64_t idx = static_cast<int64_t>(perm->data[i]) - 1;
         if (idx < 0 || idx >= k) idx = 0;
         msg_p->data[i] = msg->data[idx];
     }
@@ -2865,11 +2865,11 @@ matlab_mat *matlab_comm_turbo_encode(matlab_mat *msg, matlab_struct *trellis,
 static void bcjr_max_log_siso(const double *llr_sys, const double *llr_p,
                                const double *La, double *Lapp,
                                matlab_struct *trellis, int64_t k) {
-    int64_t S = (int64_t)matlab_struct_get_f64(trellis, "numStates", 9);
+    int64_t S = static_cast<int64_t>(matlab_struct_get_f64(trellis, "numStates", 9));
     matlab_mat *outputs    = matlab_struct_get_mat(trellis, "outputs",      7);
     matlab_mat *nextStates = matlab_struct_get_mat(trellis, "nextStates", 10);
     if (!outputs || !nextStates || S < 1) return;
-    int n_out = (int)matlab_struct_get_f64(trellis, "n", 1);
+    int n_out = static_cast<int>(matlab_struct_get_f64(trellis, "n", 1));
     const double NEG = -1e18;
 
     /* alpha[t][s], beta[t][s] — forward / backward path metrics. */
@@ -2885,7 +2885,7 @@ static void bcjr_max_log_siso(const double *llr_sys, const double *llr_p,
      * b0 is the parity in our turbo convention (we emit parity-only,
      * dropping the systematic copy in `turboEncode`). */
     auto gamma = [&](int64_t t, int64_t sp, int u) {
-        int oi = (int)outputs->data[sp * 2 + u];
+        int oi = static_cast<int>(outputs->data[sp * 2 + u]);
         int p_bit = (oi >> (n_out - 1)) & 1;   /* high bit ≡ parity_1 in (171,133)₈ */
         /* For 3-bit and other rate forms we still take the first
          * generator's bit as the parity stream — matches how
@@ -2907,7 +2907,7 @@ static void bcjr_max_log_siso(const double *llr_sys, const double *llr_p,
             double best = NEG;
             for (int64_t sp = 0; sp < S; ++sp) {
                 for (int u = 0; u <= 1; ++u) {
-                    int64_t ns = (int64_t)nextStates->data[sp * 2 + u];
+                    int64_t ns = static_cast<int64_t>(nextStates->data[sp * 2 + u]);
                     if (ns != s) continue;
                     double cand = alpha[t][sp] + gamma(t, sp, u);
                     if (cand > best) best = cand;
@@ -2921,7 +2921,7 @@ static void bcjr_max_log_siso(const double *llr_sys, const double *llr_p,
         for (int64_t s = 0; s < S; ++s) {
             double best = NEG;
             for (int u = 0; u <= 1; ++u) {
-                int64_t ns = (int64_t)nextStates->data[s * 2 + u];
+                int64_t ns = static_cast<int64_t>(nextStates->data[s * 2 + u]);
                 if (ns < 0 || ns >= S) continue;
                 double cand = beta[t + 1][ns] + gamma(t, s, u);
                 if (cand > best) best = cand;
@@ -2934,7 +2934,7 @@ static void bcjr_max_log_siso(const double *llr_sys, const double *llr_p,
         double max0 = NEG, max1 = NEG;
         for (int64_t sp = 0; sp < S; ++sp) {
             for (int u = 0; u <= 1; ++u) {
-                int64_t ns = (int64_t)nextStates->data[sp * 2 + u];
+                int64_t ns = static_cast<int64_t>(nextStates->data[sp * 2 + u]);
                 if (ns < 0 || ns >= S) continue;
                 double m = alpha[t][sp] + gamma(t, sp, u) + beta[t + 1][ns];
                 if (u == 0) { if (m > max0) max0 = m; }
@@ -2959,18 +2959,18 @@ matlab_mat *matlab_comm_turbo_decode(matlab_mat *llr_sys, matlab_mat *llr_p1,
     if (!llr_sys || !llr_p1 || !llr_p2 || !trellis || !perm)
         return mat_alloc(0, 0);
     int64_t k = llr_sys->rows * llr_sys->cols;
-    int max_iter = (int)max_iter_d;
+    int max_iter = static_cast<int>(max_iter_d);
     if (max_iter < 1) max_iter = 4;
     /* Inverse permutation. */
     std::vector<int64_t> inv_perm(k, 0);
     for (int64_t i = 0; i < k; ++i) {
-        int64_t idx = (int64_t)perm->data[i] - 1;
+        int64_t idx = static_cast<int64_t>(perm->data[i]) - 1;
         if (idx >= 0 && idx < k) inv_perm[idx] = i;
     }
     /* Interleaved systematic LLR (used by decoder 2). */
     std::vector<double> sys_perm(k);
     for (int64_t i = 0; i < k; ++i) {
-        int64_t idx = (int64_t)perm->data[i] - 1;
+        int64_t idx = static_cast<int64_t>(perm->data[i]) - 1;
         sys_perm[i] = llr_sys->data[idx];
     }
     /* Extrinsic LLR feedback (a priori for the next half). */
@@ -2994,14 +2994,14 @@ matlab_mat *matlab_comm_turbo_decode(matlab_mat *llr_sys, matlab_mat *llr_p1,
          * La1[perm[i]-1] = Le_dec2[i]. */
         for (int64_t i = 0; i < k; ++i) {
             double Le = Lapp2[i] - sys_perm[i] - La2[i];
-            int64_t idx = (int64_t)perm->data[i] - 1;
+            int64_t idx = static_cast<int64_t>(perm->data[i]) - 1;
             La1[idx] = Le;
         }
     }
     /* Final hard decision from the combined a posteriori at decoder 2,
      * de-permuted back to natural order. */
     for (int64_t i = 0; i < k; ++i) {
-        int64_t idx = (int64_t)perm->data[i] - 1;
+        int64_t idx = static_cast<int64_t>(perm->data[i]) - 1;
         dec->data[idx] = (Lapp2[i] < 0.0) ? 1.0 : 0.0;
     }
     return dec;
@@ -3023,7 +3023,7 @@ matlab_mat *matlab_comm_ml_detect(matlab_mat_c *y, matlab_mat_c *alphabet) {
             double d2 = dr * dr + di * di;
             if (d2 < best) { best = d2; best_i = i; }
         }
-        out->data[n] = (double)best_i;
+        out->data[n] = static_cast<double>(best_i);
     }
     return out;
 }
@@ -3036,17 +3036,17 @@ matlab_mat *matlab_comm_ml_detect(matlab_mat_c *y, matlab_mat_c *alphabet) {
  * the decoded bit vector (same length as message). */
 matlab_mat *matlab_comm_vitdec_soft(matlab_mat *llr, matlab_struct *trellis,
                                      double tblen_d, double opmode_d) {
-    (void)tblen_d;
+    static_cast<void>(tblen_d);
     if (!llr || !trellis) return mat_alloc(0, 0);
-    int n = (int)matlab_struct_get_f64(trellis, "n", 1);
-    int64_t S = (int64_t)matlab_struct_get_f64(trellis, "numStates", 9);
+    int n = static_cast<int>(matlab_struct_get_f64(trellis, "n", 1));
+    int64_t S = static_cast<int64_t>(matlab_struct_get_f64(trellis, "numStates", 9));
     matlab_mat *outputs    = matlab_struct_get_mat(trellis, "outputs",      7);
     matlab_mat *nextStates = matlab_struct_get_mat(trellis, "nextStates", 10);
     if (!outputs || !nextStates || n < 1 || S < 1) return mat_alloc(0, 0);
     int64_t total = llr->rows * llr->cols;
     int64_t T = total / n;
     if (T < 1) return mat_alloc(0, 0);
-    int opmode = (int)opmode_d;
+    int opmode = static_cast<int>(opmode_d);
 
     std::vector<int64_t> in_prev(S * 2, -1);
     std::vector<int>     in_bit (S * 2, 0);
@@ -3054,13 +3054,13 @@ matlab_mat *matlab_comm_vitdec_soft(matlab_mat *llr, matlab_struct *trellis,
     std::vector<int>     n_in   (S, 0);
     for (int64_t ps = 0; ps < S; ++ps) {
         for (int u = 0; u <= 1; ++u) {
-            int64_t ns = (int64_t)nextStates->data[ps * 2 + u];
+            int64_t ns = static_cast<int64_t>(nextStates->data[ps * 2 + u]);
             if (ns < 0 || ns >= S) continue;
             int slot = n_in[ns]++;
             if (slot >= 2) continue;
             in_prev[ns * 2 + slot] = ps;
             in_bit [ns * 2 + slot] = u;
-            in_out [ns * 2 + slot] = (int)outputs->data[ps * 2 + u];
+            in_out [ns * 2 + slot] = static_cast<int>(outputs->data[ps * 2 + u]);
         }
     }
     const double NEG = -1e18;
@@ -3093,8 +3093,8 @@ matlab_mat *matlab_comm_vitdec_soft(matlab_mat *llr, matlab_struct *trellis,
                 }
             }
             pm_next[s] = best;
-            bit_dec [t * S + s] = (int8_t)best_bit;
-            prev_dec[t * S + s] = (int32_t)best_prev;
+            bit_dec [t * S + s] = static_cast<int8_t>(best_bit);
+            prev_dec[t * S + s] = static_cast<int32_t>(best_prev);
         }
         std::swap(pm, pm_next);
         for (int64_t s = 0; s < S; ++s) pm_next[s] = NEG;
@@ -3109,8 +3109,8 @@ matlab_mat *matlab_comm_vitdec_soft(matlab_mat *llr, matlab_struct *trellis,
     matlab_mat *msg = mat_alloc(T, 1);
     int64_t state = end;
     for (int64_t t = T - 1; t >= 0; --t) {
-        msg->data[t] = (double)bit_dec[t * S + state];
-        state = (int64_t)prev_dec[t * S + state];
+        msg->data[t] = static_cast<double>(bit_dec[t * S + state]);
+        state = static_cast<int64_t>(prev_dec[t * S + state]);
     }
     return msg;
 }

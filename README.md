@@ -156,6 +156,19 @@ cmake -S . -B build -G Ninja -DMATLAB_LLVM_WITH_MLIR=OFF
 cmake --build build
 ```
 
+Sanitized runtime tests (`AddressSanitizer` + `UndefinedBehaviorSanitizer`):
+
+```bash
+cmake -S . -B build-asan -G Ninja \
+    -DMATLAB_LLVM_RUNTIME_ASAN=ON -DMATLAB_LLVM_WITH_MLIR=OFF
+cmake --build build-asan
+ctest --test-dir build-asan -R '^runtime-tests-'
+```
+
+All 25 runtime tests run cleanly under ASan + UBSan; the flags
+are wired per-test via `ENVIRONMENT` so a single fault doesn't
+abort the rest of the lane.
+
 ## Common Workflows
 
 Inspect each compiler stage:

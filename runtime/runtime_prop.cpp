@@ -121,7 +121,7 @@ double matlab_prop_vincenty(double lat1, double lon1, double lat2, double lon2) 
 
 /* Destination latitude given start + distance (m) + bearing (deg). */
 double matlab_prop_dest_lat(double lat1, double lon1, double d_m, double az_deg) {
-    (void)lon1;
+    static_cast<void>(lon1);
     double p1 = deg2rad(lat1);
     double az = deg2rad(az_deg);
     double dr = d_m / R_EARTH;
@@ -225,7 +225,7 @@ double matlab_prop_pathloss_fog(double d_m, double freq_hz, double M_gm3) {
 /* Close-In NIST / 3GPP TR 38.901 reference-distance model. */
 double matlab_prop_pathloss_closein(double d_m, double freq_hz,
                                      double n, double sigma, double d0_m) {
-    (void)sigma;
+    static_cast<void>(sigma);
     if (d_m <= 0.0 || d0_m <= 0.0 || freq_hz <= 0.0) return 0.0;
     double L0 = matlab_prop_fspl(d0_m, freq_hz);
     return L0 + 10.0 * n * log10(d_m / d0_m);
@@ -351,10 +351,10 @@ double matlab_prop_fresnel_clearance(matlab_mat *profile, double h_tx,
                                       double h_rx, double d_total_m,
                                       double lambda_m, double n) {
     if (!profile || profile->rows * profile->cols < 2) return 100.0;
-    int N = (int)(profile->rows * profile->cols);
+    int N = static_cast<int>(profile->rows * profile->cols);
     double min_clear = 1.0;
     for (int i = 1; i < N - 1; ++i) {
-        double t = (double)i / (double)(N - 1);
+        double t = static_cast<double>(i) / static_cast<double>(N - 1);
         double d1 = t * d_total_m;
         double d2 = (1.0 - t) * d_total_m;
         double r_n = sqrt(n * lambda_m * d1 * d2 / d_total_m);
@@ -392,10 +392,10 @@ static void fresnel_CS(double v, double *C, double *S) {
         for (int n = 0; n < 20; ++n) {
             double twon = 2.0 * n;
             /* C: t^(4n+1)/((2n)!·(4n+1)) of (πv²/2)^(2n) */
-            double tc = pow(x, 2*n) / ((double)(2*(int)n*2-1 >= 1 ? 1 : 1));
-            (void)tc;
-            (void)term;
-            (void)twon;
+            double tc = pow(x, 2*n) / (static_cast<double>(2*static_cast<int>(n)*2-1 >= 1 ? 1 : 1));
+            static_cast<void>(tc);
+            static_cast<void>(term);
+            static_cast<void>(twon);
             break;
         }
         /* Use a direct numerical integration as a robust fallback. */
@@ -423,7 +423,7 @@ static void fresnel_CS(double v, double *C, double *S) {
         double c = cos(M_PI * va * va / 2.0);
         *C = sgn * (0.5 - f * s + g * c);
         *S = sgn * (0.5 - f * c - g * s);
-        (void)pix;
+        static_cast<void>(pix);
     }
 }
 
@@ -446,13 +446,13 @@ double matlab_prop_diff_knife_edge(double h_m, double d1_m,
 double matlab_prop_diff_bullington(matlab_mat *profile, double h_tx, double h_rx,
                                     double d_total_m, double lambda_m) {
     if (!profile || profile->rows * profile->cols < 3) return 0.0;
-    int N = (int)(profile->rows * profile->cols);
+    int N = static_cast<int>(profile->rows * profile->cols);
     double tx_z = profile->data[0] + h_tx;
     double rx_z = profile->data[N-1] + h_rx;
     /* Find steepest-up slope from TX and steepest-down slope from RX. */
     double m_tx = -1e30, m_rx = -1e30;
     for (int i = 1; i < N - 1; ++i) {
-        double xi = (double)i / (double)(N - 1) * d_total_m;
+        double xi = static_cast<double>(i) / static_cast<double>(N - 1) * d_total_m;
         double mi_tx = (profile->data[i] - tx_z) / xi;
         if (mi_tx > m_tx) m_tx = mi_tx;
         double mi_rx = (profile->data[i] - rx_z) / (d_total_m - xi);
@@ -478,7 +478,7 @@ static double deygout_recursive(const double *prof, int i0, int i1,
     double v_max = -1e30;
     int idx_max = -1;
     for (int i = i0 + 1; i < i1; ++i) {
-        double t = (double)(i - i0) / (double)(i1 - i0);
+        double t = static_cast<double>(i - i0) / static_cast<double>(i1 - i0);
         double xi = x0 + t * (x1 - x0);
         double zi_los = z0 + t * (z1 - z0);
         double h = prof[i] - zi_los;
@@ -489,7 +489,7 @@ static double deygout_recursive(const double *prof, int i0, int i1,
         if (v > v_max) { v_max = v; idx_max = i; }
     }
     if (idx_max < 0 || v_max < -0.78) return 0.0;
-    double t = (double)(idx_max - i0) / (double)(i1 - i0);
+    double t = static_cast<double>(idx_max - i0) / static_cast<double>(i1 - i0);
     double xm = x0 + t * (x1 - x0);
     double zm = prof[idx_max];
     double L_main = matlab_prop_diff_knife_edge(
@@ -504,7 +504,7 @@ static double deygout_recursive(const double *prof, int i0, int i1,
 double matlab_prop_diff_deygout(matlab_mat *profile, double h_tx, double h_rx,
                                  double d_total_m, double lambda_m) {
     if (!profile || profile->rows * profile->cols < 3) return 0.0;
-    int N = (int)(profile->rows * profile->cols);
+    int N = static_cast<int>(profile->rows * profile->cols);
     double z0 = profile->data[0]     + h_tx;
     double z1 = profile->data[N - 1] + h_rx;
     return deygout_recursive(profile->data, 0, N - 1,
@@ -554,23 +554,23 @@ double matlab_prop_itm_pathloss(matlab_mat *profile,
     if (eps_r <= 0.0) eps_r = 15.0;
     double lambda = C_LIGHT / freq_hz;
     double k = 2.0 * M_PI / lambda;
-    (void)k;
+    static_cast<void>(k);
 
     /* Effective Earth radius from surface refractivity (P.834-7). */
     double Ne_per_m = -7.32 * exp(0.005577 * Ns) * 1e-6; /* dN/dh near surface */
-    (void)Ne_per_m;
+    static_cast<void>(Ne_per_m);
     double a_eff = R_EARTH * K_EARTH_43;
 
     /* Terrain irregularity: delta_h = interdecile range of terrain heights
      * along the path. Empty profile -> flat (delta_h = 0). */
     double delta_h = 0.0;
-    int Nprof = profile ? (int)(profile->rows * profile->cols) : 0;
+    int Nprof = profile ? static_cast<int>(profile->rows * profile->cols) : 0;
     if (Nprof >= 8) {
         std::vector<double> hs(Nprof);
         for (int i = 0; i < Nprof; ++i) hs[i] = profile->data[i];
         std::sort(hs.begin(), hs.end());
-        double q10 = hs[(int)(0.10 * (Nprof - 1))];
-        double q90 = hs[(int)(0.90 * (Nprof - 1))];
+        double q10 = hs[static_cast<int>(0.10 * (Nprof - 1))];
+        double q90 = hs[static_cast<int>(0.90 * (Nprof - 1))];
         delta_h = q90 - q10;
     }
 
@@ -581,7 +581,7 @@ double matlab_prop_itm_pathloss(matlab_mat *profile,
     /* Terrain-roughness correction (Longley 1968 eq. 3.6.b). */
     double dh1 = delta_h * (1.0 - 0.8 * exp(-0.02 * dLs1 * 1e-3));
     double dh2 = delta_h * (1.0 - 0.8 * exp(-0.02 * dLs2 * 1e-3));
-    (void)dh1; (void)dh2;
+    static_cast<void>(dh1); static_cast<void>(dh2);
 
     /* Free-space reference. */
     double Lfs = matlab_prop_fspl(d_total_m, freq_hz);
@@ -712,9 +712,9 @@ static double sample_heightmap(matlab_mat *hm, double lat,
     if (fc < 0.0) fc = 0.0; if (fc > 1.0) fc = 1.0;
     double r = fr * (hm->rows - 1);
     double c = fc * (hm->cols - 1);
-    int r0 = (int)floor(r), c0 = (int)floor(c);
-    int r1 = std::min((int64_t)r0 + 1, hm->rows - 1);
-    int c1 = std::min((int64_t)c0 + 1, hm->cols - 1);
+    int r0 = static_cast<int>(floor(r)), c0 = static_cast<int>(floor(c));
+    int r1 = std::min(static_cast<int64_t>(r0) + 1, hm->rows - 1);
+    int c1 = std::min(static_cast<int64_t>(c0) + 1, hm->cols - 1);
     double tr = r - r0, tc = c - c0;
     double h00 = hm->data[r0 * hm->cols + c0];
     double h01 = hm->data[r0 * hm->cols + c1];
@@ -729,11 +729,11 @@ matlab_mat *matlab_prop_terrain_profile(matlab_mat *heightmap,
                                          double lat1, double lon1,
                                          double lat2, double lon2,
                                          double n_samples) {
-    int N = (int)n_samples;
+    int N = static_cast<int>(n_samples);
     if (N < 2) N = 2;
     matlab_mat *out = mat_alloc(N, 1);
     for (int i = 0; i < N; ++i) {
-        double t = (double)i / (double)(N - 1);
+        double t = static_cast<double>(i) / static_cast<double>(N - 1);
         double lat = lat1 + t * (lat2 - lat1);
         double lon = lon1 + t * (lon2 - lon1);
         out->data[i] = sample_heightmap(heightmap, lat,
@@ -752,13 +752,13 @@ matlab_mat *matlab_prop_terrain_profile(matlab_mat *heightmap,
 double matlab_prop_los_obstruction(matlab_mat *profile, double h_tx, double h_rx,
                                     double d_total_m) {
     if (!profile || profile->rows * profile->cols < 3) return -1.0;
-    int N = (int)(profile->rows * profile->cols);
+    int N = static_cast<int>(profile->rows * profile->cols);
     double z0 = profile->data[0]     + h_tx;
     double z1 = profile->data[N - 1] + h_rx;
     double max_block = -1e30;
     double a_eff = R_EARTH * K_EARTH_43;
     for (int i = 1; i < N - 1; ++i) {
-        double t = (double)i / (double)(N - 1);
+        double t = static_cast<double>(i) / static_cast<double>(N - 1);
         double xi = t * d_total_m;
         /* Earth-bulge correction (effective Earth). */
         double bulge = (xi * (d_total_m - xi)) / (2.0 * a_eff);
@@ -823,7 +823,7 @@ matlab_struct *matlab_prop_link_budget(
 
     double d_m = matlab_prop_haversine(tx_lat, tx_lon, rx_lat, rx_lon);
     double az  = matlab_prop_bearing  (tx_lat, tx_lon, rx_lat, rx_lon);
-    int mc = (int)model;
+    int mc = static_cast<int>(model);
     double L = path_loss_dispatch(mc, d_m, tx_freq_hz, tx_height, rx_height,
                                    profile, climate, q_time, q_loc, q_sit);
     double P_tx_dBm = 10.0 * log10(tx_power_W * 1000.0);
@@ -880,25 +880,25 @@ matlab_mat *matlab_prop_coverage_grid(
     double rx_height, double rx_gain_dBi,
     double climate, double q_time, double q_loc, double q_sit) {
 
-    int NL = (int)num_lat, NK = (int)num_lon;
+    int NL = static_cast<int>(num_lat), NK = static_cast<int>(num_lon);
     if (NL < 2) NL = 2;
     if (NK < 2) NK = 2;
     matlab_mat *out = mat_alloc(NL, NK);
     for (int i = 0; i < NL; ++i) {
         for (int j = 0; j < NK; ++j) {
-            double rx_lat = lat_min + (lat_max - lat_min) * (double)i / (double)(NL - 1);
-            double rx_lon = lon_min + (lon_max - lon_min) * (double)j / (double)(NK - 1);
+            double rx_lat = lat_min + (lat_max - lat_min) * static_cast<double>(i) / static_cast<double>(NL - 1);
+            double rx_lon = lon_min + (lon_max - lon_min) * static_cast<double>(j) / static_cast<double>(NK - 1);
             double d_m = matlab_prop_haversine(tx_lat, tx_lon, rx_lat, rx_lon);
             if (d_m < 1.0) { out->data[i * NK + j] = 0.0; continue; }
             /* Sample a coarse 32-point terrain profile for ITM. */
             matlab_mat *prof = NULL;
-            if ((int)model == 7) {
+            if (static_cast<int>(model) == 7) {
                 prof = matlab_prop_terrain_profile(heightmap, lat_min, lat_max,
                                                     lon_min, lon_max,
                                                     tx_lat, tx_lon,
                                                     rx_lat, rx_lon, 32.0);
             }
-            double L = path_loss_dispatch((int)model, d_m, tx_freq_hz,
+            double L = path_loss_dispatch(static_cast<int>(model), d_m, tx_freq_hz,
                                            tx_height, rx_height, prof,
                                            climate, q_time, q_loc, q_sit);
             if (prof) { free(prof->data); free(prof); }
@@ -965,7 +965,7 @@ double matlab_prop_pat_gaussian(double az, double el,
 
 /* Isotropic. */
 double matlab_prop_pat_isotropic(double az, double el, double gain_dBi) {
-    (void)az; (void)el;
+    static_cast<void>(az); static_cast<void>(el);
     return gain_dBi;
 }
 
@@ -991,7 +991,7 @@ matlab_mat *matlab_prop_mount_to_local(double az_world, double el_world,
  * only wants one of the two angles. */
 double matlab_prop_mount_az_local(double az_world, double el_world,
                                    double mount_az, double mount_tilt) {
-    (void)el_world; (void)mount_tilt;
+    static_cast<void>(el_world); static_cast<void>(mount_tilt);
     double az_local = az_world - mount_az;
     while (az_local >  180.0) az_local -= 360.0;
     while (az_local < -180.0) az_local += 360.0;
@@ -999,7 +999,7 @@ double matlab_prop_mount_az_local(double az_world, double el_world,
 }
 double matlab_prop_mount_el_local(double az_world, double el_world,
                                    double mount_az, double mount_tilt) {
-    (void)az_world; (void)mount_az;
+    static_cast<void>(az_world); static_cast<void>(mount_az);
     return el_world + mount_tilt;
 }
 
@@ -1060,25 +1060,25 @@ matlab_mat *matlab_prop_coverage_grid_multi(
 
     if (!sites || sites->cols < 6) return mat_alloc(0, 0);
     if (!antennas || antennas->cols < 8) return mat_alloc(0, 0);
-    int NL = (int)num_lat, NK = (int)num_lon;
+    int NL = static_cast<int>(num_lat), NK = static_cast<int>(num_lon);
     if (NL < 2) NL = 2;
     if (NK < 2) NK = 2;
-    int num_sites = (int)sites->rows;
-    int agg = (int)aggregation;
+    int num_sites = static_cast<int>(sites->rows);
+    int agg = static_cast<int>(aggregation);
     matlab_mat *out = mat_alloc(NL, NK);
 
     /* Precompute antenna start-index per site. */
     std::vector<int> ant_start(num_sites + 1, 0);
     for (int s = 0; s < num_sites; ++s)
-        ant_start[s+1] = ant_start[s] + (int)sites->data[s * sites->cols + 5];
+        ant_start[s+1] = ant_start[s] + static_cast<int>(sites->data[s * sites->cols + 5]);
 
     const double k_T_B_dBm = -114.0;  /* 1 MHz nominal */
     const double n_floor_lin = pow(10.0, k_T_B_dBm / 10.0);
 
     for (int i = 0; i < NL; ++i) {
     for (int j = 0; j < NK; ++j) {
-        double rx_lat = lat_min + (lat_max - lat_min) * (double)i / (double)(NL - 1);
-        double rx_lon = lon_min + (lon_max - lon_min) * (double)j / (double)(NK - 1);
+        double rx_lat = lat_min + (lat_max - lat_min) * static_cast<double>(i) / static_cast<double>(NL - 1);
+        double rx_lon = lon_min + (lon_max - lon_min) * static_cast<double>(j) / static_cast<double>(NK - 1);
 
         double best_P = -1e30;
         double sum_P_lin = 0.0;
@@ -1089,7 +1089,7 @@ matlab_mat *matlab_prop_coverage_grid_multi(
             const double *S = sites->data + s * sites->cols;
             double s_lat = S[0], s_lon = S[1];
             double s_h   = S[2], s_pw  = S[3], s_f   = S[4];
-            int    n_ant = (int)S[5];
+            int    n_ant = static_cast<int>(S[5]);
 
             double d_m = matlab_prop_haversine(s_lat, s_lon, rx_lat, rx_lon);
             if (d_m < 1.0) d_m = 1.0;
@@ -1098,12 +1098,12 @@ matlab_mat *matlab_prop_coverage_grid_multi(
             double el  = atan2(rx_height - s_h, d_m) * 180.0 / M_PI;
 
             matlab_mat *prof = NULL;
-            if ((int)model == 7) {
+            if (static_cast<int>(model) == 7) {
                 prof = matlab_prop_terrain_profile(
                     heightmap, lat_min, lat_max, lon_min, lon_max,
                     s_lat, s_lon, rx_lat, rx_lon, 32.0);
             }
-            double L = path_loss_dispatch((int)model, d_m, s_f,
+            double L = path_loss_dispatch(static_cast<int>(model), d_m, s_f,
                                            s_h, rx_height, prof,
                                            climate, q_time, q_loc, q_sit);
             if (prof) { free(prof->data); free(prof); }
@@ -1112,7 +1112,7 @@ matlab_mat *matlab_prop_coverage_grid_multi(
             double best_P_site = -1e30;
             for (int a = 0; a < n_ant; ++a) {
                 const double *A = antennas->data + (ant_start[s] + a) * antennas->cols;
-                int    code = (int)A[0];
+                int    code = static_cast<int>(A[0]);
                 double gain = A[1], bw_az = A[2], bw_el = A[3];
                 double fb_or_n = A[4];
                 double m_az = A[5], m_tilt = A[6];
@@ -1184,8 +1184,8 @@ static struct kind_view_ ml_str_view(struct matlab_string_s *s) {
     /* matlab_string_s layout: { char *data; int64_t len; }. */
     struct kind_view_ V;
     if (!s) { V.data = NULL; V.len = 0; return V; }
-    const char *const *pd = (const char *const *)s;
-    const int64_t *pl = (const int64_t *)((const char *)s + sizeof(void*));
+    const char *const *pd = reinterpret_cast<const char *const *>(s);
+    const int64_t *pl = reinterpret_cast<const int64_t *>(reinterpret_cast<const char *>(s) + sizeof(void*));
     V.data = *pd;
     V.len = *pl;
     return V;
@@ -1200,8 +1200,8 @@ static int ml_kind_eq(const char *a, int64_t al, const char *b) {
     int64_t bi = 0;
     int64_t ai = 0;
     while (ai < al || b[bi]) {
-        int ca = (ai < al) ? ml_to_lower((unsigned char)a[ai]) : -1;
-        int cb = b[bi] ? ml_to_lower((unsigned char)b[bi]) : -1;
+        int ca = (ai < al) ? ml_to_lower(static_cast<unsigned char>(a[ai])) : -1;
+        int cb = b[bi] ? ml_to_lower(static_cast<unsigned char>(b[bi])) : -1;
         if (ca == '-' || ca == '_' || ca == ' ') { ++ai; continue; }
         if (cb == '-' || cb == '_' || cb == ' ') { ++bi; continue; }
         if (ca != cb) return 0;
@@ -1291,7 +1291,7 @@ extern "C" double matlab_prop_dispatch_pathloss(
     fprintf(stderr,
             "warning: propagationModel: unknown kind '%.*s' — using "
             "free-space fallback\n",
-            (int)V.len, V.data ? V.data : "");
+            static_cast<int>(V.len), V.data ? V.data : "");
     return matlab_prop_fspl(d_m, freq_hz);
 }
 
@@ -1384,7 +1384,7 @@ extern "C" double matlab_prop_kind_to_model_code(matlab_string_s *kind) {
  * length).  v1 ignores it. */
 extern "C" const char *matlab_dbg_class_name(int32_t class_id, int64_t *len_out);
 extern "C" double matlab_prop_antenna_gain(matlab_obj *ant, double freq_hz) {
-    (void)freq_hz;
+    static_cast<void>(freq_hz);
     if (!ant) return 0.0;
     int64_t cn_len = 0;
     const char *cn = matlab_dbg_class_name(ant->class_id, &cn_len);
@@ -1418,7 +1418,7 @@ extern "C" double matlab_prop_sigstrength(matlab_obj *rx, matlab_obj *tx, matlab
     double rx_loss = matlab_obj_get_f64(rx, "SystemLoss", 10);
 
     matlab_string_s *kind =
-        (matlab_string_s *)matlab_obj_get_string(pm, "Kind", 4);
+        reinterpret_cast<matlab_string_s *>(matlab_obj_get_string(pm, "Kind", 4));
     double pl_dB = matlab_prop_dispatch_pathloss(
         kind, tx_lat, tx_lon, tx_h, rx_lat, rx_lon, rx_h, freq);
 
@@ -1484,8 +1484,8 @@ static double ant_si(double x) {
         double term = x;
         int n = 0;
         while (n < 60) {
-            sum += term / (double)(2 * n + 1);
-            double idx = (double)(2 * n + 2);
+            sum += term / static_cast<double>(2 * n + 1);
+            double idx = static_cast<double>(2 * n + 2);
             double next = -term * x * x / (idx * (idx + 1.0));
             if (fabs(next) < 1e-18 * fabs(sum)) { sum += next / (idx + 1.0); break; }
             term = next;
@@ -1527,8 +1527,8 @@ static double ant_ci(double x) {
         double sign = -1.0;
         for (int n = 1; n < 80; ++n) {
             xp2n *= x * x;
-            fact *= (double)(2 * n - 1) * (double)(2 * n);
-            double t = sign * xp2n / ((double)(2 * n) * fact);
+            fact *= static_cast<double>(2 * n - 1) * static_cast<double>(2 * n);
+            double t = sign * xp2n / (static_cast<double>(2 * n) * fact);
             sum += t;
             if (fabs(t) < 1e-18 * (1.0 + fabs(sum))) break;
             sign = -sign;
@@ -1552,7 +1552,6 @@ static void ant_dipole_zin(double L, double a, double freq,
     const double gamma_em = 0.5772156649015329;
     double k = 2.0 * M_PI * freq / c0;
     double kL = k * L;
-    double half_kL = 0.5 * kL;
     double s_kL = sin(kL), c_kL = cos(kL);
     double Si_kL  = ant_si(kL);
     double Si_2kL = ant_si(2.0 * kL);
@@ -1628,7 +1627,7 @@ extern "C" matlab_struct *matlab_ant_wire_pattern(double L, double a,
     double half_kL = 0.5 * k * L;
     double cos_half_kL = cos(half_kL);
 
-    int nth = (int)n_theta_d;
+    int nth = static_cast<int>(n_theta_d);
     if (nth < 16) nth = 16;
     if (nth > 4096) nth = 4096;
 
@@ -1637,10 +1636,10 @@ extern "C" matlab_struct *matlab_ant_wire_pattern(double L, double a,
     matlab_mat   *Emag  = mat_alloc(nth, 1);
     matlab_mat   *Gain  = mat_alloc(nth, 1);
 
-    std::vector<double> mag2((size_t)nth);
+    std::vector<double> mag2(static_cast<size_t>(nth));
     double Prad_int = 0.0;
     for (int t = 0; t < nth; ++t) {
-        double theta = M_PI * ((double)t + 0.5) / (double)nth;
+        double theta = M_PI * (static_cast<double>(t) + 0.5) / static_cast<double>(nth);
         Theta->data[t] = theta;
         double st = sin(theta);
         double F = 0.0;
@@ -1653,14 +1652,14 @@ extern "C" matlab_struct *matlab_ant_wire_pattern(double L, double a,
         Eth->re[t] = F;
         Eth->im[t] = 0.0;
         double m2 = F * F;
-        mag2[(size_t)t] = m2;
+        mag2[static_cast<size_t>(t)] = m2;
         Emag->data[t] = fabs(F);
-        Prad_int += m2 * st * (M_PI / (double)nth);
+        Prad_int += m2 * st * (M_PI / static_cast<double>(nth));
     }
     double peak_gain = 0.0;
     for (int t = 0; t < nth; ++t) {
         double g = (Prad_int > 1e-30)
-                 ? (2.0 * mag2[(size_t)t] / Prad_int) : 0.0;
+                 ? (2.0 * mag2[static_cast<size_t>(t)] / Prad_int) : 0.0;
         Gain->data[t] = 10.0 * log10(g + 1e-30);
         if (g > peak_gain) peak_gain = g;
     }
@@ -1670,7 +1669,7 @@ extern "C" matlab_struct *matlab_ant_wire_pattern(double L, double a,
     ant_dipole_zin(L, a, freq, &Zin_re, &Zin_im);
 
     matlab_struct_set_mat(out, "Theta",          5, Theta);
-    matlab_struct_set_mat(out, "ETheta",         6, (matlab_mat *)Eth);
+    matlab_struct_set_mat(out, "ETheta",         6, reinterpret_cast<matlab_mat *>(Eth));
     matlab_struct_set_mat(out, "EThetaMag",      9, Emag);
     matlab_struct_set_mat(out, "Gain_dBi",       8, Gain);
     matlab_struct_set_f64(out, "Directivity_dBi",15, Dir_dBi);
@@ -1683,7 +1682,7 @@ extern "C" matlab_struct *matlab_ant_wire_sparameters(double L, double a,
                                                        double /*Nsegs_d*/,
                                                        matlab_mat *freqs) {
     matlab_struct *out = matlab_struct_new();
-    int Nf = (freqs) ? (int)(freqs->rows * freqs->cols) : 0;
+    int Nf = (freqs) ? static_cast<int>(freqs->rows * freqs->cols) : 0;
     matlab_mat_c *S11 = mat_c_alloc(Nf, 1);
     matlab_mat   *F   = mat_alloc(Nf, 1);
     for (int i = 0; i < Nf; ++i) {
@@ -1696,7 +1695,7 @@ extern "C" matlab_struct *matlab_ant_wire_sparameters(double L, double a,
         S11->re[i] = S11_re;
         S11->im[i] = S11_im;
     }
-    matlab_struct_set_mat(out, "S11",         3, (matlab_mat *)S11);
+    matlab_struct_set_mat(out, "S11",         3, reinterpret_cast<matlab_mat *>(S11));
     matlab_struct_set_mat(out, "Frequencies",11, F);
     matlab_struct_set_f64(out, "Z0",          2, 50.0);
     matlab_struct_set_f64(out, "NumPorts",    8, 1.0);
