@@ -319,7 +319,7 @@ enable_testing()
 # Direct C tests for runtime/matlab_runtime.c — no JIT, no MATLAB
 # frontend. Each test_*.c links the runtime TU directly. See
 # docs/port_runtime_2_cpp.md (Phase 1).
-foreach(_rt_test IN ITEMS linalg shape rng complex reduce signal stats image more fft struct_cell fi elementwise unary fi_arrays int_arrays strings ode pde pde_io)
+foreach(_rt_test IN ITEMS linalg shape rng complex reduce signal stats image more fft struct_cell fi elementwise unary fi_arrays int_arrays strings ode pde pde_io comm optim prop rf mstateflow)
   set(_rt_target "runtime-test-${_rt_test}")
   add_executable(${_rt_target}
     test/Runtime/test_${_rt_test}.c
@@ -331,7 +331,8 @@ foreach(_rt_test IN ITEMS linalg shape rng complex reduce signal stats image mor
     runtime/runtime_rf.cpp
     runtime/runtime_pde.cpp
     runtime/runtime_sparse.cpp
-    runtime/runtime_optim.cpp)
+    runtime/runtime_optim.cpp
+    runtime/runtime_mstateflow.cpp)
   target_include_directories(${_rt_target} PRIVATE
     ${CMAKE_SOURCE_DIR}/runtime
     ${CMAKE_SOURCE_DIR}/test/Runtime)
@@ -691,6 +692,14 @@ if(MATLAB_LLVM_WITH_MLIR)
             $<TARGET_FILE:matlabc>
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/test/Debug
   )
+  # Run serially under `ctest -j*` — the DAP scenarios each spawn a
+  # matlabc subprocess and the client uses bounded 10 s timeouts on
+  # request/response handshakes. Under heavy parallel load (e.g. the
+  # 7 emit-* lanes simultaneously compiling 387 .m programs each)
+  # CPU starvation occasionally pushes individual scenarios past
+  # their timeout. Pinning this test to serial costs ~30 s but
+  # removes the flake.
+  set_tests_properties(debug-dap-tests PROPERTIES RUN_SERIAL TRUE)
   # JIT/static parity: every shape that the static -emit-* paths
   # accept must also compile cleanly through `matlabc -dap` (which
   # JITs via mlir::ExecutionEngine + DebugMode mirror calls). Covers

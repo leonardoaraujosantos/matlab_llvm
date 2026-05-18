@@ -124,7 +124,7 @@ class DapClient:
 
     # --- request / event API -------------------------------------------------
 
-    def request(self, command, arguments=None, timeout=10.0):
+    def request(self, command, arguments=None, timeout=30.0):
         with self._lock:
             seq = self._next_seq
             self._next_seq += 1
@@ -162,7 +162,7 @@ class DapClient:
                 f"{command} failed: {resp.get('message')!r}; full={resp}")
         return resp.get("body", {}) or {}
 
-    def wait_event(self, name, timeout=10.0, predicate=None):
+    def wait_event(self, name, timeout=30.0, predicate=None):
         """Block until an event with the given name arrives.
 
         If `predicate` is given, drains events from the queue until one
