@@ -45,12 +45,37 @@ struct JValue {
   std::vector<JValue> ArrVal;
   std::vector<std::pair<std::string, JValue>> ObjVal;
 
+  /* User-declared special members (defined out-of-line below). The
+   * recursive value types `vector<JValue>` / `vector<pair<string,
+   * JValue>>` make the implicit destructor / copy / move ill-formed
+   * on libstdc++ — its container destructor templates eagerly
+   * `static_assert` that the value type is destructible, which
+   * requires JValue to be complete at the point where the implicit
+   * dtor is synthesized (i.e. inside the class body). libc++ is
+   * lazier and accepts incomplete value types in vectors (C++17
+   * P0040 wording), which is why the macOS build doesn't trip this.
+   * Deferring synthesis until after the closing brace makes the
+   * struct definition itself header-only-safe again. */
+  JValue();
+  JValue(const JValue &);
+  JValue(JValue &&) noexcept;
+  JValue &operator=(const JValue &);
+  JValue &operator=(JValue &&) noexcept;
+  ~JValue();
+
   const JValue *find(std::string_view K) const {
     for (auto &P : ObjVal)
       if (P.first == K) return &P.second;
     return nullptr;
   }
 };
+
+inline JValue::JValue() = default;
+inline JValue::JValue(const JValue &) = default;
+inline JValue::JValue(JValue &&) noexcept = default;
+inline JValue &JValue::operator=(const JValue &) = default;
+inline JValue &JValue::operator=(JValue &&) noexcept = default;
+inline JValue::~JValue() = default;
 
 class JsonReader {
 public:

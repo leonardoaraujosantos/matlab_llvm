@@ -77,6 +77,7 @@
 #include "matlab/Sema/Type.h"
 #include "matlab/Sema/TypeInference.h"
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
