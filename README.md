@@ -1,5 +1,23 @@
 # matlab_llvm
 
+[![C++20](https://img.shields.io/badge/C%2B%2B-20-00599C.svg?logo=cplusplus&logoColor=white)](https://en.cppreference.com/w/cpp/20)
+[![MLIR](https://img.shields.io/badge/MLIR-LLVM_20-262D3A.svg?logo=llvm&logoColor=white)](https://mlir.llvm.org/)
+[![CMake](https://img.shields.io/badge/build-CMake_%2B_Ninja-064F8C.svg?logo=cmake&logoColor=white)](https://cmake.org/)
+[![Platform](https://img.shields.io/badge/platform-macOS_%7C_Linux-lightgrey.svg)](#quick-start)
+&nbsp;
+[![Codegen targets](https://img.shields.io/badge/codegen-LLVM_%7C_C_%7C_C%2B%2B_%7C_Python_%7C_TypeScript_%7C_SystemVerilog-7C3AED.svg)](#code-generation)
+[![Toolboxes](https://img.shields.io/badge/toolboxes-11_shipped-2EA44F.svg)](#shipped-toolboxes-in-the-runtime)
+[![Run-tests](https://img.shields.io/badge/run--tests-388_%E2%9C%93-2EA44F.svg)](test/Run)
+[![SV goldens](https://img.shields.io/badge/SV_goldens-77_%E2%9C%93-2EA44F.svg)](test/EmitSV)
+&nbsp;
+[![GitHub stars](https://img.shields.io/github/stars/leonardoaraujosantos/matlab_llvm?style=social)](https://github.com/leonardoaraujosantos/matlab_llvm/stargazers)
+[![GitHub forks](https://img.shields.io/github/forks/leonardoaraujosantos/matlab_llvm?style=social)](https://github.com/leonardoaraujosantos/matlab_llvm/network/members)
+[![Last commit](https://img.shields.io/github/last-commit/leonardoaraujosantos/matlab_llvm)](https://github.com/leonardoaraujosantos/matlab_llvm/commits/main)
+[![Open issues](https://img.shields.io/github/issues/leonardoaraujosantos/matlab_llvm)](https://github.com/leonardoaraujosantos/matlab_llvm/issues)
+[![Repo size](https://img.shields.io/github/repo-size/leonardoaraujosantos/matlab_llvm)](https://github.com/leonardoaraujosantos/matlab_llvm)
+[![Code size](https://img.shields.io/github/languages/code-size/leonardoaraujosantos/matlab_llvm)](https://github.com/leonardoaraujosantos/matlab_llvm)
+[![Top language](https://img.shields.io/github/languages/top/leonardoaraujosantos/matlab_llvm)](https://github.com/leonardoaraujosantos/matlab_llvm)
+
 `matlab_llvm` is a MATLAB compiler and tooling stack for a practical,
 tested subset of the language. It ships a full frontend, multiple code
 generation paths, a JIT-backed REPL, a formatter, and a Language Server,
