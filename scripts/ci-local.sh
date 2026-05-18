@@ -23,12 +23,14 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CMD="${1:-all}"
 
-IMAGE="matlab_llvm/ci:ubuntu-24.04-llvm23"
-# LLVM 20 (stable) lacks the `OpType::create(builder, ...)` static-method
-# convenience that the project uses; that landed in LLVM 21+ MLIR. macOS
-# builds against Homebrew's LLVM 22; apt.llvm.org on noble only ships
-# `-20` (stable) and `-23` (dev/trunk), so we pin to 23 for CI.
-LLVM_VERSION="23"
+IMAGE="matlab_llvm/ci:ubuntu-24.04-llvm22"
+# Pin to LLVM 22.1.3 — same minor as Homebrew on macOS, so the local
+# and CI builds compile against the same MLIR API surface.
+# apt.llvm.org only ships -20 (stable) and trunk for noble, so we
+# build LLVM 22 from source inside the Docker image (cached as a
+# layer, ~40 min one-time per `LLVM_TAG` bump).
+LLVM_VERSION="22"
+LLVM_TAG="llvmorg-22.1.3"
 
 # Build the toolchain image once.  The Dockerfile is generated inline
 # here so this script is self-contained; bumping LLVM_VERSION above
@@ -42,30 +44,42 @@ FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
+# ---- Layer 1: build deps (cached forever unless we add a package) -------
 RUN apt-get update -qq && \\
     apt-get install -y --no-install-recommends \\
-      wget gnupg2 ca-certificates lsb-release software-properties-common && \\
-    wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \\
-      | gpg --dearmor -o /usr/share/keyrings/llvm.gpg && \\
-    UBUNTU_CODENAME=\$(. /etc/os-release && echo "\$VERSION_CODENAME") && \\
-    # LLVM 23 currently lives in apt.llvm.org's unversioned "dev"
-    # channel (no -23 suffix yet — only -20 stable is version-pinned).
-    echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/\${UBUNTU_CODENAME}/ llvm-toolchain-\${UBUNTU_CODENAME} main" \\
-      > /etc/apt/sources.list.d/llvm.list && \\
-    apt-get update -qq && \\
-    apt-get install -y --no-install-recommends \\
-      cmake ninja-build ccache pkg-config git \\
-      clang-${LLVM_VERSION} llvm-${LLVM_VERSION}-dev \\
-      libmlir-${LLVM_VERSION}-dev mlir-${LLVM_VERSION}-tools \\
+      ca-certificates wget git \\
+      cmake ninja-build ccache pkg-config \\
+      gcc g++ \\
       libcairo2-dev \\
       libzstd-dev libcurl4-openssl-dev libedit-dev \\
+      libxml2-dev zlib1g-dev libtinfo-dev \\
       python3 python3-pip && \\
     rm -rf /var/lib/apt/lists/*
 
-ENV LLVM_DIR=/usr/lib/llvm-${LLVM_VERSION}/lib/cmake/llvm
-ENV MLIR_DIR=/usr/lib/llvm-${LLVM_VERSION}/lib/cmake/mlir
-ENV CC=clang-${LLVM_VERSION}
-ENV CXX=clang++-${LLVM_VERSION}
+# ---- Layer 2: build LLVM ${LLVM_TAG} from source ------------------------
+# Cached forever unless LLVM_TAG changes.  Builds llvm + mlir, installs
+# into /opt/llvm.  X86 + AArch64 targets so the image runs both on
+# GitHub's x86_64 runners and on M-series Macs.
+RUN git clone --depth 1 -b ${LLVM_TAG} \\
+      https://github.com/llvm/llvm-project /tmp/llvm-project && \\
+    cmake -S /tmp/llvm-project/llvm -B /tmp/llvm-build -G Ninja \\
+      -DCMAKE_BUILD_TYPE=Release \\
+      -DCMAKE_INSTALL_PREFIX=/opt/llvm \\
+      -DLLVM_ENABLE_PROJECTS="mlir" \\
+      -DLLVM_TARGETS_TO_BUILD="X86;AArch64" \\
+      -DLLVM_INSTALL_UTILS=ON \\
+      -DLLVM_BUILD_LLVM_DYLIB=ON \\
+      -DLLVM_LINK_LLVM_DYLIB=ON \\
+      -DLLVM_ENABLE_RTTI=ON \\
+      -DLLVM_ENABLE_ASSERTIONS=OFF && \\
+    cmake --build /tmp/llvm-build --target install -j && \\
+    rm -rf /tmp/llvm-project /tmp/llvm-build
+
+ENV LLVM_DIR=/opt/llvm/lib/cmake/llvm
+ENV MLIR_DIR=/opt/llvm/lib/cmake/mlir
+ENV PATH=/opt/llvm/bin:\$PATH
+ENV CC=clang
+ENV CXX=clang++
 ENV CCACHE_DIR=/ccache
 DOCKERFILE
   docker build -t "$IMAGE" "$tmpd"

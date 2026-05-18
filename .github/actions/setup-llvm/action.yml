@@ -1,0 +1,83 @@
+name: 'Set up LLVM 22 + matlabc build deps'
+description: |
+  Installs the build deps (cmake, ninja, ccache, cairo, ...) and provides
+  LLVM 22.1.3 + MLIR at /opt/llvm.  The LLVM install is cached via
+  actions/cache keyed on LLVM_TAG, so the ~40-min source build runs only
+  on first miss / version bump.
+
+  Sets the following environment variables for downstream steps:
+    LLVM_DIR  = /opt/llvm/lib/cmake/llvm
+    MLIR_DIR  = /opt/llvm/lib/cmake/mlir
+    CC        = clang
+    CXX       = clang++
+
+inputs:
+  llvm-tag:
+    description: 'LLVM source git tag (e.g. llvmorg-22.1.3).'
+    required: false
+    default: 'llvmorg-22.1.3'
+  extra-apt-packages:
+    description: 'Space-separated apt packages to install in addition to the defaults.'
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Install build dependencies
+      shell: bash
+      run: |
+        set -euxo pipefail
+        sudo apt-get update -qq
+        sudo apt-get install -y --no-install-recommends \
+          cmake ninja-build ccache pkg-config \
+          gcc g++ \
+          libcairo2-dev \
+          libzstd-dev libcurl4-openssl-dev libedit-dev \
+          libxml2-dev zlib1g-dev libtinfo-dev \
+          python3 python3-pip \
+          ${{ inputs.extra-apt-packages }}
+
+    - name: Cache /opt/llvm
+      id: llvm-cache
+      uses: actions/cache@v4
+      with:
+        # Built artefacts go in /opt/llvm; cache the whole install dir.
+        path: /opt/llvm
+        # Bump LLVM_TAG to invalidate.  Suffix with the runner OS for
+        # safety in case GitHub changes the underlying image.
+        key: llvm-${{ inputs.llvm-tag }}-${{ runner.os }}-${{ runner.arch }}
+
+    - name: Build LLVM ${{ inputs.llvm-tag }} (cache miss)
+      if: steps.llvm-cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        set -euxo pipefail
+        sudo mkdir -p /opt/llvm
+        sudo chown "$(id -u):$(id -g)" /opt/llvm
+        git clone --depth 1 -b "${{ inputs.llvm-tag }}" \
+          https://github.com/llvm/llvm-project /tmp/llvm-project
+        cmake -S /tmp/llvm-project/llvm -B /tmp/llvm-build -G Ninja \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_INSTALL_PREFIX=/opt/llvm \
+          -DLLVM_ENABLE_PROJECTS="mlir" \
+          -DLLVM_TARGETS_TO_BUILD="X86;AArch64" \
+          -DLLVM_INSTALL_UTILS=ON \
+          -DLLVM_BUILD_LLVM_DYLIB=ON \
+          -DLLVM_LINK_LLVM_DYLIB=ON \
+          -DLLVM_ENABLE_RTTI=ON \
+          -DLLVM_ENABLE_ASSERTIONS=OFF
+        cmake --build /tmp/llvm-build --target install -j$(nproc)
+        # Slim the install — strip docs and Python bindings we don't use.
+        rm -rf /opt/llvm/share/{man,doc}
+        rm -rf /tmp/llvm-project /tmp/llvm-build
+
+    - name: Export LLVM env vars
+      shell: bash
+      run: |
+        echo "LLVM_DIR=/opt/llvm/lib/cmake/llvm" >> "$GITHUB_ENV"
+        echo "MLIR_DIR=/opt/llvm/lib/cmake/mlir" >> "$GITHUB_ENV"
+        echo "PATH=/opt/llvm/bin:$PATH" >> "$GITHUB_ENV"
+        echo "CC=clang" >> "$GITHUB_ENV"
+        echo "CXX=clang++" >> "$GITHUB_ENV"
+        echo "LD_LIBRARY_PATH=/opt/llvm/lib:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"

@@ -25,42 +25,24 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  # apt.llvm.org repo channel for the LLVM/MLIR toolchain we build against.
-  LLVM_VERSION: '23'
-
 jobs:
   # -------------------------------------------------------------------------
-  # SMOKE — fast lanes that gate every PR (~5 min wall time).
-  # frontend-tests + runtime-tests + flowchart-emit-* + the new
-  # plot-handle-assign regressions.
+  # SMOKE — fast lanes that gate every PR (~5 min wall time after the
+  # first LLVM build is cached).  First run: ~45 min for the one-time
+  # LLVM 22 source build.  Subsequent runs: cache hit in ~10s, then ~5
+  # min for the matlabc compile + smoke tests.
+  #
+  # Coverage: frontend-tests + runtime-tests + flowchart-emit-* + REPL.
   # -------------------------------------------------------------------------
   smoke:
     name: Smoke (fast, every PR)
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install LLVM ${{ env.LLVM_VERSION }} + build tools
-        run: |
-          set -euxo pipefail
-          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
-            | sudo gpg --dearmor -o /usr/share/keyrings/llvm.gpg
-          UBUNTU_CODENAME=$(. /etc/os-release && echo "$VERSION_CODENAME")
-          echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/${UBUNTU_CODENAME}/ llvm-toolchain-${UBUNTU_CODENAME} main" \
-            | sudo tee /etc/apt/sources.list.d/llvm.list
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
-            cmake ninja-build ccache pkg-config \
-            clang-${LLVM_VERSION} llvm-${LLVM_VERSION}-dev libmlir-${LLVM_VERSION}-dev \
-            mlir-${LLVM_VERSION}-tools \
-            libcairo2-dev \
-            libzstd-dev libcurl4-openssl-dev libedit-dev
-          echo "LLVM_DIR=/usr/lib/llvm-${LLVM_VERSION}/lib/cmake/llvm" >> "$GITHUB_ENV"
-          echo "MLIR_DIR=/usr/lib/llvm-${LLVM_VERSION}/lib/cmake/mlir" >> "$GITHUB_ENV"
-          echo "CC=clang-${LLVM_VERSION}" >> "$GITHUB_ENV"
-          echo "CXX=clang++-${LLVM_VERSION}" >> "$GITHUB_ENV"
+      - name: Set up LLVM 22 + build deps
+        uses: ./.github/actions/setup-llvm
 
       - name: Restore ccache
         uses: actions/cache@v4
@@ -101,14 +83,14 @@ jobs:
         run: ccache -s
 
   # -------------------------------------------------------------------------
-  # FULL — heavy end-to-end lanes (~45 min wall time).
-  # Runs on every push to main, and on a PR labelled `full-ci`.
-  # Compiles every .m fixture in test/Run/, runs the binary, diffs stdout.
+  # FULL — heavy end-to-end lanes (~45 min wall time, plus the LLVM
+  # build on first miss).  Runs on push to main, scheduled, or PR
+  # labelled `full-ci` / dispatched manually.
   # -------------------------------------------------------------------------
   full:
     name: Full (run-tests + emit-c + emit-cpp)
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 120
     if: >-
       github.event_name == 'push' ||
       github.event_name == 'schedule' ||
@@ -119,25 +101,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install LLVM ${{ env.LLVM_VERSION }} + build tools
-        run: |
-          set -euxo pipefail
-          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
-            | sudo gpg --dearmor -o /usr/share/keyrings/llvm.gpg
-          UBUNTU_CODENAME=$(. /etc/os-release && echo "$VERSION_CODENAME")
-          echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/${UBUNTU_CODENAME}/ llvm-toolchain-${UBUNTU_CODENAME} main" \
-            | sudo tee /etc/apt/sources.list.d/llvm.list
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
-            cmake ninja-build ccache pkg-config \
-            clang-${LLVM_VERSION} llvm-${LLVM_VERSION}-dev libmlir-${LLVM_VERSION}-dev \
-            mlir-${LLVM_VERSION}-tools \
-            libcairo2-dev \
-            libzstd-dev libcurl4-openssl-dev libedit-dev
-          echo "LLVM_DIR=/usr/lib/llvm-${LLVM_VERSION}/lib/cmake/llvm" >> "$GITHUB_ENV"
-          echo "MLIR_DIR=/usr/lib/llvm-${LLVM_VERSION}/lib/cmake/mlir" >> "$GITHUB_ENV"
-          echo "CC=clang-${LLVM_VERSION}" >> "$GITHUB_ENV"
-          echo "CXX=clang++-${LLVM_VERSION}" >> "$GITHUB_ENV"
+      - name: Set up LLVM 22 + build deps
+        uses: ./.github/actions/setup-llvm
 
       - name: Restore ccache
         uses: actions/cache@v4
@@ -178,13 +143,13 @@ jobs:
 
   # -------------------------------------------------------------------------
   # NIGHTLY — strict-emit lanes + cocotb / verilator hardware co-simulation
-  # (~60 min wall time).  Scheduled at 04:00 UTC.  Also runnable on demand
-  # via workflow_dispatch and a PR labelled `nightly-ci`.
+  # (~60 min wall time).  Scheduled at 04:00 UTC.  Runnable on demand via
+  # workflow_dispatch and on PRs labelled `nightly-ci`.
   # -------------------------------------------------------------------------
   nightly:
     name: Nightly (strict + cocotb + verilator)
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 150
     if: >-
       github.event_name == 'schedule' ||
       (github.event_name == 'pull_request' &&
@@ -194,39 +159,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install LLVM ${{ env.LLVM_VERSION }} + verilator + cocotb deps
-        run: |
-          set -euxo pipefail
-          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
-            | sudo gpg --dearmor -o /usr/share/keyrings/llvm.gpg
-          UBUNTU_CODENAME=$(. /etc/os-release && echo "$VERSION_CODENAME")
-          echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/${UBUNTU_CODENAME}/ llvm-toolchain-${UBUNTU_CODENAME} main" \
-            | sudo tee /etc/apt/sources.list.d/llvm.list
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
-            cmake ninja-build ccache pkg-config \
-            clang-${LLVM_VERSION} llvm-${LLVM_VERSION}-dev libmlir-${LLVM_VERSION}-dev \
-            mlir-${LLVM_VERSION}-tools \
-            libcairo2-dev \
-            libzstd-dev libcurl4-openssl-dev libedit-dev \
-            verilator iverilog gtkwave \
-            python3 python3-pip python3-venv
-          echo "LLVM_DIR=/usr/lib/llvm-${LLVM_VERSION}/lib/cmake/llvm" >> "$GITHUB_ENV"
-          echo "MLIR_DIR=/usr/lib/llvm-${LLVM_VERSION}/lib/cmake/mlir" >> "$GITHUB_ENV"
-          echo "CC=clang-${LLVM_VERSION}" >> "$GITHUB_ENV"
-          echo "CXX=clang++-${LLVM_VERSION}" >> "$GITHUB_ENV"
+      - name: Set up LLVM 22 + build deps + verilator + cocotb deps
+        uses: ./.github/actions/setup-llvm
+        with:
+          extra-apt-packages: verilator iverilog gtkwave python3-venv
 
       - name: Install cocotb (Python)
         run: |
           python3 -m pip install --user --upgrade pip
           # cocotb pin avoids drift if upstream lands a breaking release.
-          # Bump intentionally when validating a newer cocotb.
           python3 -m pip install --user 'cocotb>=1.9,<2.0' cocotb-bus pytest
 
       - name: Tool versions (sanity)
         run: |
-          clang-${LLVM_VERSION} --version
-          mlir-opt-${LLVM_VERSION} --version || true
+          clang --version
+          mlir-opt --version || true
           verilator --version
           python3 -c 'import cocotb; print("cocotb", cocotb.__version__)'
 
@@ -255,7 +202,6 @@ jobs:
       - name: Build
         run: cmake --build build -j
 
-      # Re-run the smoke + full lanes so nightly is a true superset.
       - name: Smoke lanes
         run: |
           ctest --test-dir build --output-on-failure -j $(nproc) \
@@ -270,21 +216,11 @@ jobs:
           ctest --test-dir build --output-on-failure \
             -R '^run-tests-emit-(c|cpp|c-strict)$'
 
-      # SystemVerilog goldens — the 77-fixture emit-sv corpus + the
-      # ports/fail variants.  Pure text-diff lanes (no simulator
-      # needed), but skipped from smoke because they touch enough
-      # fixtures to be worth gating to nightly.
       - name: SystemVerilog goldens
         run: |
           ctest --test-dir build --output-on-failure \
             -R '^emit-sv-(tests|fail-tests|ports-tests)$'
 
-      # Hardware co-sim lane: verilator + cocotb-driven cycle-accurate
-      # SIL of the .mflow → SystemVerilog emit path.  The flowchart-emit-*
-      # tests already ran in the smoke section and exercised the EMIT
-      # side; with verilator + cocotb on PATH they now also exercise the
-      # `make sim` SIL compare.  Plus the standalone cocotb-tests
-      # lane (not matched by flowchart-emit-*).
       - name: Cocotb + verilator co-sim lanes
         run: |
           ctest --test-dir build --output-on-failure \
