@@ -191,7 +191,16 @@ at emit time with a clear error.
 
 ---
 
-## 4. Built-in functions (runtime: `runtime/matlab_runtime.c`)
+## 4. Built-in functions (runtime: 12 C++ TUs under `runtime/`)
+
+The runtime is now split across 12 `.cpp` translation units totalling
+~52 kLOC and ~1,100 exported C-ABI entries. The architecture, ABI
+conventions, and per-TU contents are documented in
+[`runtime.md`](runtime.md). The matrix below is the per-feature
+shipped / partial / missing inventory; per-toolbox tier plans live in
+the companion roadmap docs (signal / control / comm / RF / antenna /
+propagation / optim / PDE / symbolic / fixed-point / stateflow /
+Verilog-A).
 
 ### Creation & shape
 
@@ -530,7 +539,7 @@ Per-toolbox roadmap in [`propagation_toolbox_roadmap.md`](propagation_toolbox_ro
 
 ### RF Toolbox (subset)
 
-Per-toolbox plan in [`rf_toolbox_plan.md`](rf_toolbox_plan.md).  Two-commit closure arc: `44198e5` (Tier-1 + Tier-1 polish) and `56e324c` (Tier-2 generalizations).  All entries live in `runtime/runtime_rf.cpp` (~4 200 lines).  322 / 322 Run/ tests pass.
+Per-toolbox plan in [`rf_toolbox_plan.md`](rf_toolbox_plan.md).  Two-commit closure arc: `44198e5` (Tier-1 + Tier-1 polish) and `56e324c` (Tier-2 generalizations).  All entries live in `runtime/runtime_rf.cpp` (~6 100 lines).  387 / 387 Run/ tests pass.
 
 | Group | Function | Status | Notes |
 |---|---|:-:|---|
@@ -606,14 +615,14 @@ All implemented; see `docs/emit_c_cpp.md` for pipeline diagram.
 | Suite | Count | Status |
 |---|--:|:-:|
 | `frontend-tests` (Lexer, Parser, Sema, MIR, MLIR, Opt, Programs, Errors) | 77 | ✅ 77/77 |
-| `run-tests` (`-emit-llvm` + clang) | 322 | ✅ |
-| `run-tests-emit-c` (`-emit-c` + cc) | 322 | ✅ (RF Toolbox tests skip emit-C — they exercise runtime classdef wrappers + Touchstone I/O that only lower through MLIR / JIT) |
-| `run-tests-emit-cpp` (`-emit-cpp` + c++) | 322 | ✅ (RF Toolbox tests skip emit-C++ for the same reason) |
-| `run-tests-emit-c-strict` / `-cpp-strict` (-Wall -Wextra -Werror) | 322 | ✅ |
-| `run-tests-emit-python` (`-emit-python` + python3) | 322 | ✅ (RF Toolbox tests skip emit-Python; some `.stdout-python` overrides for numpy repr) |
-| `run-tests-emit-typescript` (`-emit-typescript` + bun) | 322 | ✅ (RF Toolbox tests skip emit-TypeScript; `string_concat_mixed` fixed in Phase 6.2; ~20 skipped for BigInt-vs-number coercion) |
+| `run-tests` (`-emit-llvm` + clang) | 387 | ✅ |
+| `run-tests-emit-c` (`-emit-c` + cc) | 387 | ✅ (RF Toolbox tests skip emit-C — they exercise runtime classdef wrappers + Touchstone I/O that only lower through MLIR / JIT) |
+| `run-tests-emit-cpp` (`-emit-cpp` + c++) | 387 | ✅ (RF Toolbox tests skip emit-C++ for the same reason) |
+| `run-tests-emit-c-strict` / `-cpp-strict` (-Wall -Wextra -Werror) | 387 | ✅ |
+| `run-tests-emit-python` (`-emit-python` + python3) | 387 | ✅ (RF Toolbox tests skip emit-Python; some `.stdout-python` overrides for numpy repr) |
+| `run-tests-emit-typescript` (`-emit-typescript` + bun) | 387 | ✅ (RF Toolbox tests skip emit-TypeScript; `string_concat_mixed` fixed in Phase 6.2; ~20 skipped for BigInt-vs-number coercion) |
 | `run-tests-sym` (`-emit-cpp` + SymPP, opt-in via `-DMATLAB_LLVM_WITH_SYM=ON`) | 4 | ✅ — Phase 6.2 sym_phase_a/b/b1/b2 fixtures; skip-if-missing-SymPP via rc=77 |
-| `emit-sv` golden tests + Verilator lint + Yosys synth | 76 | ✅ 76/76 |
+| `emit-sv` golden tests + Verilator lint + Yosys synth | 77 | ✅ 77/77 |
 | `emit-sv-fail` synthesizability gate diagnostics | 10 | ✅ 10/10 |
 | `emit-sv-ports` fi-spec ↔ SV declaration regression | 7 | ✅ 7/7 |
 | `emit-sv-hint` boolean-port lint hints | 2 | ✅ 2/2 |
@@ -625,7 +634,7 @@ All implemented; see `docs/emit_c_cpp.md` for pipeline diagram.
 | `flowchart-dap-tests` (`matlabc -dap` on `.mflow`: bp verify, stop, frame source) | 3 | ✅ 3/3 |
 | `flowchart-emit-mflow-tests` (`-emit-mflow` idempotency: `.m` → `.mflow` → `.m` → `.mflow` byte-identical) | 11 | ✅ 11/11 |
 
-Examples gallery: 29 programs under `examples/` exercise matrix ops,
+Examples gallery: 213 `.m` programs under `examples/` (31 top-level + dedicated subdirectories per toolbox: `examples/optim/`, `examples/comm/`, `examples/rf/`, `examples/control/`, `examples/signal/`, `examples/pde/`, `examples/plot/`, `examples/antenna/`, `examples/verilog_a/`, `examples/hdl/`, `examples/mflow/`, `examples/mflowlink/`, `examples/stateflow/`). They exercise matrix ops,
 recursion, anonymous functions, function handles, parfor, linear
 algebra, logical masks, struct/cell usage, OOP (`bank_account.m`
 — classdef with inheritance, `Dependent` properties, operator
@@ -741,86 +750,154 @@ deliberate non-goals; see "Out of scope."
 
 ---
 
-## 9. Rough "fully compatible MATLAB-subset" roadmap
+## 9. Open runway
 
-The path from today's state to running a majority of general-purpose
-MATLAB programs (not toolboxes, not GUI). Items 1–7 from the earlier
-version of this doc — dim-aware reductions, varargin / call polish,
-sort / linalg tail, strings, REPL, file I/O, basic OOP, tooling —
-**have all shipped**. The remaining runway:
+This section tracks what's still missing from the **language core** —
+the bits of MATLAB that aren't toolbox-specific. The earlier
+2024-era list (struct arrays, varargout, dim-aware reductions, sort
+/ linalg tail, strings, REPL, file I/O, basic OOP, tooling,
+`containers.Map`/`dictionary`, 2-D cells, datetime/duration/
+categorical/table) has all shipped — those items were rolled into
+the per-feature matrix above and into the
+[`port_runtime_2_cpp.md`](port_runtime_2_cpp.md) shipped log. The
+remaining language-core runway:
 
 | Priority | Item | Effort | Unlocks |
 |:-:|---|--:|---|
-| ~~1~~ | ~~Struct arrays (`s(i).x`)~~ — **shipped Phase 2** | — | Data-in-records patterns |
-| 2 | Integer runtime — `int32` + `uint8` matrix lanes complete (runtime, lowering, Python+TS, REPL+DAP). Remaining lanes (i8/i16/i64/u16/u32/u64 matrices) drop in against the same template. | ~1 week left | Image processing pixel code. (Note: 64-bit lanes already exist via fi-array work.) |
-| 2b | Fixed-Point Designer (`fi`) — Tiers 1 → 5 shipped. **Open** (Tier-6): function-internal fi typing across user calls (~1 wk, biggest UX gap), 2-D fi matrices (~1.5 wk), fi parfor reductions (~1 wk), reductions tail `prod`/`min`/`max`/`cumsum`/`dot` (~3 days), TypeScript BigInt coercion (~3 days). See [`fixed_point_toolbox_roadmap.md`](fixed_point_toolbox_roadmap.md) §7 + [`emit_fixed_point.md`](emit_fixed_point.md) §10.1. | ~3 weeks total | DSP simulation, hardware-faithful integer math |
-| 3 | ~~`varargout`~~ (shipped Phase 1.2) + 3-D vector slicing (`A(:,:,k)`) | ~3 days remaining | Library-style + volumetric code |
-| 4 | Complex linalg tail (`inv` / `det` / `svd` / `eig`) | 1 week | Complete DSP / scientific code |
-| 5 | OOP value-class copy semantics — **partially shipped (Phase 3)**: copy-on-assign works; method-dispatch value semantics still requires test-corpus migration. + property validators. | ~1 week left | Modern MATLAB code |
-| 6 | DAP user-function frames + `evaluate` | 1 week | Stepping into user functions shows their frames; watch expressions |
-| 7 | `regexp` / `regexprep` + string tail | 1–2 weeks | Text-processing scripts |
-| 8 | Full non-symmetric `eig` + `[U, S, V] = svd` | 1 week | Scientific computing |
-| 9 | MATLAB `.mat` file-format parser | 2 weeks | Real data pipelines |
-| 10 | N-dim arrays (>3D, full indexing) | 2–3 weeks | Batch dims, tensor code |
-| 11 | OOP events / listeners | 1 week | Callback-heavy code |
-| 12 | Sparse matrices | 3–4 weeks | Large-scale linalg |
-| ~~13~~ | ~~`classdef` table / datetime / categorical~~ — **shipped Phase 5.1–5.3** (timetable still pending) | ~1 week (timetable only) | Data-analysis idioms |
-| 14 | `containers.Map` / `dictionary` — **shipped Phase 4** | — | Key-value patterns |
-| 15 | 2-D cells and cell concatenation — **shipped Phase 1.3** | — | Heterogeneous data |
+| 1 | Narrower / wider int matrix lanes (i8 / i16 / i64 / u16 / u32 / u64) on top of the shipped i32/u8 template | ~1 wk | Image-processing pixel code (note: 64-bit lanes already exist via the fi-array work) |
+| 2 | 3-D vector slicing `A(:,:,k)` and the broader 3-D tensor surface (most elementwise / reduction ops reject 3-D today) | 2–3 wk | Batch dims, volumetric code, tensor code |
+| 3 | Complex linalg tail — full complex `inv` / `det` / `svd` / `eig` (real paths shipped; complex partial via 2N×2N real-equivalent fallback) | 1 wk | Complete DSP / scientific code |
+| 4 | OOP value-class method-dispatch semantics + property validators (copy-on-assign already ships) | ~1 wk | Modern MATLAB code |
+| 5 | DAP user-function frames + watch expressions inside function bodies | 1 wk | Stepping into user functions shows their frames |
+| 6 | `regexp` / `regexprep` + string tail | 1–2 wk | Text-processing scripts |
+| 7 | `[U, S, V] = svd` (full SVD with U / V; today only singular values) | 1 wk | Scientific computing |
+| 8 | MATLAB `.mat` v5 file-format parser | 2 wk | Real data pipelines |
+| 9 | OOP events / listeners | 1 wk | Callback-heavy code |
+| 10 | `timetable` (builds on shipped `table` + `datetime`) | ~1 wk | Time-series analysis |
+| 11 | System-Object lowering fix — gates the `comm.*` / RF / Antenna / Propagation classdef wrappers on the SO surface | 1 wk | Closes Comm Tier-3+, the SO-bearing rows of [`comm_toolbox_roadmap.md`](comm_toolbox_roadmap.md) §11.1 |
 
-Items 1–3 are the immediate-leverage path for generic MATLAB
-compatibility. Items 4–9 round out the "serious numeric work"
-surface. Items 10+ are larger investments whose shape depends on
-which direction the project pushes next.
+For per-toolbox follow-ons, see the dedicated roadmap docs — each
+keeps its own "next slice" list:
+
+| Toolbox | Roadmap |
+|---|---|
+| Signal Processing | [`signal_toolbox_roadmap.md`](signal_toolbox_roadmap.md) |
+| Control System | [`control_toolbox_roadmap.md`](control_toolbox_roadmap.md) |
+| Communications | [`comm_toolbox_roadmap.md`](comm_toolbox_roadmap.md) |
+| RF | [`rf_toolbox_plan.md`](rf_toolbox_plan.md) |
+| Antenna | [`antenna_toolbox_roadmap.md`](antenna_toolbox_roadmap.md) |
+| Propagation | [`propagation_toolbox_roadmap.md`](propagation_toolbox_roadmap.md) |
+| Optimization | [`optim_toolbox_roadmap.md`](optim_toolbox_roadmap.md) |
+| PDE | [`pde_toolbox_roadmap.md`](pde_toolbox_roadmap.md) |
+| Symbolic Math | [`symbolic_toolbox_roadmap.md`](symbolic_toolbox_roadmap.md) |
+| Fixed-Point Designer | [`fixed_point_toolbox_roadmap.md`](fixed_point_toolbox_roadmap.md) |
+| Stateflow / mStateflow | [`mStateflow_roadmap.md`](mStateflow_roadmap.md) |
+| Verilog-A export | [`verilog_a_plan.md`](verilog_a_plan.md) |
+| Embedded Coder (mflowLink) | [`embedded_coder_roadmap.md`](embedded_coder_roadmap.md) |
 
 ---
 
 ## 10. Summary
 
-**Where we are:** a production-quality compiler + tooling stack
-covering the scalar / dense-matrix / classdef subset of MATLAB.
+**Where we are:** a production-quality MATLAB compiler + tooling stack
++ multi-toolbox numerical library covering the scalar / dense-matrix /
+classdef / typed-int / fi / sym surface of MATLAB plus 11 shipped
+toolbox subsets.
 
-- **Three compiled backends** (LLVM IR, portable C, portable C++)
-  producing byte-identical stdout on a 172-program run-test corpus,
-  with Python and TypeScript ports tracking the same surface.
-- **JIT-backed REPL** (`matlabc -repl`) with a persistent workspace,
-  implicit display, operator-overloading / indexing / transpose all
-  auto-showing, plus `who` / `whos` / `clear`.
+### Scale
+
+- **~52,000-line C++ runtime** across **12 translation units**
+  (`matlab_runtime.cpp` + 11 `runtime_*.cpp`), ~1,100 exported C-ABI
+  entries, no BLAS / LAPACK dependency. Architecture documented in
+  [`runtime.md`](runtime.md).
+- **7 compiled / interpreted backends**:
+  LLVM IR · portable C · portable C++ · Python (numpy shim) ·
+  TypeScript (numpy_ts shim) · synthesizable SystemVerilog (ASIC,
+  Verilator lint-clean) · Verilog-A (Tier-1 → Tier-10). Plus
+  `-emit-matlab` and `-emit-mflow` source-to-source reverse-direction
+  emitters.
+- **387 `.m` execution tests** in `test/Run/`, each compiled and
+  executed across **7 emit lanes** (~2,700 build-and-execute checks).
+  **77 SystemVerilog golden fixtures** verilator-lint-clean. **39 HDL
+  examples** verified bit-exact via cocotb. **55 Stateflow chart
+  fixtures**.
+- **25 direct C-ABI runtime tests** in `test/Runtime/` with **436
+  test functions** covering every runtime TU. Regular build: **0.43 s
+  wall**. Under `MATLAB_LLVM_RUNTIME_ASAN=ON` (AddressSanitizer +
+  UndefinedBehaviorSanitizer): **2.82 s wall, 0 findings**.
+- **0 compiler warnings** under the default `-Wall -Wextra
+  -Wpedantic`. `-Wold-style-cast` + `-Werror=old-style-cast` enforced
+  on the modernised toolbox TUs.
+
+### Shipped capability
+
+- **Three compiled backends with byte-identical stdout** (LLVM IR,
+  portable C, portable C++) plus Python and TypeScript ports tracking
+  the same surface across 387 fixtures.
+- **JIT-backed REPL** (`matlabc -repl`) with persistent workspace,
+  implicit display, operator-overloading / indexing / transpose
+  auto-showing, `who` / `whos` / `clear`.
 - **Language Server** (`matlab-lsp`): diagnostics, goto-definition,
-  document outline. Works with Neovim, VS Code, Helix out of the
-  box.
-- **Source formatter** (`matlabc -format`) with attribute-aware
-  classdef output and idempotent round-trip.
-- **Debug aids**: `dbg(x)` source-located print, workspace
-  inspection, `#line` directives in emitted C/C++ so gdb / lldb
-  step the original `.m`.
+  document outline. Accepts both `.m` and `.mflow` URIs.
+- **DAP debugger** (`matlabc -dap`): line + conditional + log-point
+  breakpoints, step-into-function with full frame stack, multi-frame
+  variables inspection, `evaluate` against any frame, `setVariable`
+  via the REPL JIT.
+- **Source formatter** (`matlabc -format`): attribute-aware classdef
+  output, idempotent round-trip.
 - **OOP**: `classdef` with single inheritance, static methods,
-  operator overloading, `Dependent` properties (`get.Prop` /
-  `set.Prop`), enumerations.
-- **File I/O**: text (`fopen` / `fgetl` / `fprintf`), binary
-  (`fread` / `fwrite`), plus a custom single-matrix `save` /
-  `load` format.
-- **Linear algebra**: LU, QR, Cholesky, pseudo-inverse, norm,
-  trace, kron, symmetric eig, SVD singular values — all pure-C,
-  no BLAS / LAPACK dependency.
-- **~6500-line C runtime** (split across `matlab_runtime.cpp`,
-  `runtime_debug.cpp`, `runtime_complex.cpp`) that compiles
-  stand-alone.
-- **`containers.Map` / `dictionary`, 2-D cell arrays, struct arrays
-  (`s(i).x`), datetime / duration, categorical, table** — heterogeneous
-  data containers shipped Phases 1.3 / 2 / 4 / 5.1 / 5.2 / 5.3.
-- **Typed `int32` / `uint8` matrix lanes** (Phase 1.1) with saturating
-  arithmetic, REPL / DAP display, Python + TypeScript runtime parity.
+  operator overloading, `Dependent` properties, enumerations,
+  value-class copy-on-assign.
+- **File I/O**: text + binary, plus a custom `save` / `load` format.
+  Subset of `.mat` v5 is the next slice.
+- **Linear algebra**: full LU / QR / Cholesky / pseudo-inverse / norm
+  / trace / kron / non-symmetric `eig` (Hessenberg + Francis QR) /
+  symmetric `eig` / SVD singular values / `expm` / `hess` / `schur` /
+  Lyapunov / Riccati — all pure-C, no BLAS / LAPACK.
+- **Heterogeneous data**: `containers.Map` / `dictionary`,
+  2-D cell arrays, struct arrays (`s(i).x`), `datetime` / `duration`,
+  `categorical`, `table`.
+- **Typed integers + Fixed-Point Designer**: `int8`–`int64` /
+  `uint8`–`uint64` matrix lanes with saturating arithmetic;
+  `fi` Q-format scalar + 1-D array arithmetic with 5 rounding modes;
+  `numerictype` + `fimath` first-class objects.
 
-**Biggest gaps to a "general-purpose MATLAB replacement":** narrower /
-wider integer lanes (i8/i16/i64/u16/u32/u64 matrices — same template
-as the shipped 1.1), `timetable` (5.4), 3-D vector slicing
-(`A(:,:,k)`), full method-dispatch value-class semantics, complex
-linalg tail (`inv` / `det` / `eig` / `svd` for complex), and MATLAB
-`.mat`-format compatibility. Each is tractable; none is blocking any
-of the above.
+### Eleven shipped toolbox surfaces
 
-**Biggest architectural asks:** sparse matrices, true N-D (>3D)
-arrays, and full method-dispatch value semantics for OOP. Each is
-multi-week work and their priority depends on which direction the
-project pushes next.
+Signal Processing · Control System · Communications · RF · Antenna ·
+Propagation Models · Optimization · Partial Differential Equation ·
+Symbolic Math (opt-in via SymPP) · Fixed-Point Designer · Stateflow
+(mStateflow). Plus headless plotting (Cairo) and Verilog-A export.
+See the per-toolbox roadmap docs in §9 for each toolbox's current
+tier closure + open follow-ons.
+
+### Biggest gaps to a "general-purpose MATLAB replacement"
+
+- Narrower / wider int lanes (i8 / i16 / i64 / u16 / u32 / u64
+  matrices — same template as the shipped i32 / u8 case)
+- 3-D tensor surface (most elementwise / reduction ops reject 3-D
+  inputs today; `A(:,:,k)` slicing follows from that)
+- Complex linalg tail (full complex `inv` / `det` / `svd` / `eig`)
+- `timetable` (builds on `table` + `datetime`)
+- Full method-dispatch value-class semantics
+- MATLAB `.mat` v5 file-format compatibility
+- `regexp` / `regexprep` and the string tail
+- DAP user-function frames + watch-expression evaluation inside
+  function bodies
+
+### Biggest architectural asks
+
+- **True N-D arrays** (>3D). Multi-week, structural rather than
+  per-op work.
+- **System-Object lowering fix**. Gates the `comm.*` / RF / Antenna /
+  Propagation classdef wrappers on the SO surface; tracked in
+  [`comm_toolbox_roadmap.md`](comm_toolbox_roadmap.md) §11.1.
+- **Sparse-matrix language surface**. Sparse CSR + Krylov solvers
+  already exist in `runtime_sparse.cpp` for the PDE Toolbox; exposing
+  them as a first-class `sparse(A)` MATLAB type is the open work.
+- **Full N-D backend parity** across `-emit-python` / `-emit-typescript`
+  (the C / C++ / LLVM lanes are byte-identical; Python is best-effort
+  via numpy shim; TS least exercised).
+
+Each is multi-week work and their priority depends on which direction
+the project pushes next.
