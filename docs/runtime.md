@@ -1,463 +1,447 @@
-# Runtime — `matlab_runtime.{c,h}`
+# Runtime — Architecture & ABI Reference
 
-This document inventories every feature the runtime currently exposes to
-generated MATLAB code. The runtime is a single C translation unit
-(`runtime/matlab_runtime.c`) plus a header (`runtime/matlab_runtime.h`).
-The static `-emit-llvm` / `-emit-c` / `-emit-cpp` paths link against the
-C runtime; the JIT (REPL + DAP) runs the same compiled symbols via
-`mlir::ExecutionEngine`. Two stub mirrors —
-[`runtime/matlab_runtime.py`](../runtime/matlab_runtime.py) and
-[`runtime/matlab_runtime.ts`](../runtime/matlab_runtime.ts) — exist for
-the Python and TypeScript transpile backends; they are kept in lockstep
-with the C runtime for the operations the goldens exercise.
+The `matlab_llvm` runtime is the half of the project the JIT, the
+compiled-emit lanes, and the REPL/DAP all hand off to. It implements
+~1,100 MATLAB-visible builtins across 12 C++ translation units, with
+no BLAS/LAPACK dependency and no external maths library beyond
+`libm` (plus optional `libsympp` + GMP/MPFR for the Symbolic lane and
+optional Cairo for headless plotting).
 
-> **Source of truth.** The C header is the authoritative ABI. If the
-> Python / TS mirrors disagree, the C version wins. The matrix below
-> states which surface a feature is currently exposed on.
+Authoritative numbers (2026-05-17):
 
-## Conventions
+- **~52,000 LOC** of C++ across 12 TUs
+- **~1,100 exported `matlab_*` / `mstateflow_*` C-ABI entries**
+- **25 direct C-ABI test executables, 436 unit tests** in `test/Runtime/`
+- **0 errors / 0 warnings** under default flags; **0 findings** under
+  `-fsanitize=address,undefined`
 
-- All matrices are row-major `double` (`matlab_mat`) or row-major
-  `double` real + imag arrays (`matlab_mat_c`). Both descriptors are
-  reference-typed — the compiler passes pointers and never copies the
-  payload unless an op semantically requires it.
-- Reductions over a vector return a 1×1 matrix; over a matrix they
-  return a 1×N row (one entry per column). `sum`, `mean`, `min`, `max`,
-  `prod`, `std`, `var`, `median`, `any`, `all` all follow this rule.
-- Polymorphic complex helpers (`fft`, `fftshift`, `conj`, `real`,
-  `imag`, `angle`, `abs`) accept either a `matlab_mat *` or a
-  `matlab_mat_c *` and dispatch on a magic word in the first 4 bytes
-  of the descriptor (`MATLAB_MAT_C_MAGIC = 0xC0FFEE01`).
-- Empty/invalid inputs return a 0×0 matrix rather than raising — the
-  generated code can `isempty()`-check the result.
-- Errors that can't be encoded structurally (singular matrix, non-SPD
-  Cholesky, etc.) set the runtime error flag (`matlab_set_error`)
-  and return a sentinel value. Generated code reads it with
-  `matlab_check_error()` at the next try/catch boundary.
-
-## Type system
-
-| Descriptor | Purpose | Magic | Notes |
-|---|---|---|---|
-| `matlab_mat`     | Real row-major matrix.        | (untagged)            | Default for all double-typed values. |
-| `matlab_mat_c`   | Complex (separate re/im).     | `0xC0FFEE01`          | Returned by FFT/conj/spectral shift. |
-| `matlab_mat_i64` | `fi`-typed signed integer matrix.   | (descriptor tag)      | 64-bit lane only today. |
-| `matlab_mat_u64` | `fi`-typed unsigned integer matrix. | (descriptor tag)      | 64-bit lane only today. |
-| `matlab_struct`  | Named-field heterogeneous record.   | (descriptor tag)      | Children: f64, mat, struct. |
-| `matlab_cell`    | 1-D heterogeneous container.        | (descriptor tag)      | Indexed via `{i}` / `(i)`. |
-| `matlab_string`  | Heap-owned UTF-8 string descriptor. | (descriptor tag)      | Returned by `bin/hex/dec/sprintf/num2str`. |
-
-3-D tensors have a magic (`MATLAB_MAT3_MAGIC = 0xC0FFEE03`) and a
-`matlab_zeros3 / matlab_ones3` constructor pair, but the operator surface
-on 3-D is currently sparse — most ops will reject 3-D inputs.
+> **Authoritative compatibility surface**: the per-feature *is-it-shipped*
+> table is at [`feature_status.md`](feature_status.md). This document
+> describes runtime **architecture** — how it's organised, what each TU
+> implements, how to extend it.
 
 ---
 
-## Feature matrix
+## 1. Translation-unit map
 
-Legend: ✓ supported, — not implemented, ◇ partial (see notes).
+```mermaid
+flowchart LR
+  subgraph Core["Core numerical kernel"]
+    direction TB
+    MR[matlab_runtime.cpp<br/>~15.7 kLOC · 385 entries<br/>matrix kernels · linalg · FFT<br/>signal · stats · image · int<br/>fi · strings · structs · cells]
+    CX[runtime_complex.cpp<br/>~2.6 kLOC · 57 entries<br/>complex arith · FFT · LU]
+    DB[runtime_debug.cpp<br/>~3.1 kLOC · 75 entries<br/>DAP hooks · workspace mirror<br/>per-kind variable rendering]
+  end
 
-| Feature                  | C runtime | Python mirror | TS mirror | MATLAB builtin name |
-|---|---|---|---|---|
-| **Constructors**         |           |               |           |                     |
-| zeros / ones / eye       | ✓         | ✓             | ✓         | `zeros` / `ones` / `eye` |
-| magic                    | ✓         | ✓             | ✓         | `magic` |
-| rand / randn             | ✓         | ✓             | ✓         | `rand` / `randn` |
-| range (`a:s:b`)          | ✓         | ✓             | ✓         | colon op |
-| linspace                 | ✓         | ✓             | ✓         | `linspace` |
-| repmat                   | ✓         | ✓             | ✓         | `repmat` |
-| meshgrid / ndgrid        | ✓         | ✓             | —         | `meshgrid` / `ndgrid` (multi-return splitter) |
-| **Elementwise binary**   |           |               |           |                     |
-| `+ - .* ./ .^` (mm/ms/sm) | ✓        | ✓             | ✓         | operators |
-| `<` `<=` `>` `>=` `==` `~=` | ✓     | ✓             | ✓         | operators |
-| **Elementwise unary**    |           |               |           |                     |
-| `-`, `exp`, `log`, `sqrt`, `abs` | ✓ | ✓             | ✓         | operators / builtins |
-| `sin`/`cos`/`tan` + arc/hyperbolic | ✓ | ✓          | ✓         | `sin`, `cos`, `tan`, `asin`, ... |
-| `log2`, `log10`, `sign`  | ✓         | ✓             | ✓         | builtins |
-| `floor`/`ceil`/`round`/`fix` | ✓     | ✓             | ✓         | builtins |
-| `mod`, `rem`, `atan2`    | ✓         | ✓             | ✓         | builtins |
-| **Linear algebra**       |           |               |           |                     |
-| `*` (matmul)             | ✓         | ✓             | ✓         | `mtimes` |
-| `\` / `/` (mldivide / mrdivide) | ✓  | ✓             | ✓         | operators |
-| `inv`, `det`             | ✓         | ✓             | ✓         | builtins |
-| `transpose`, `ctranspose` (`'`, `.'`) | ✓ | ✓        | ✓         | operators |
-| `diag`, `reshape`, `kron` | ✓        | ✓             | ✓         | builtins |
-| `tril`, `triu`           | ✓         | ✓             | —         | builtins |
-| `svd`, `eig` (one- and two-return) | ✓ | ✓ stub     | ✓ stub    | builtins |
-| `qr` (`[Q,R]`), `lu` (`[L,U]`) | ✓   | ✓ stub        | ✓ stub    | builtins |
-| `chol`, `pinv`, `norm`, `trace` | ✓  | ✓             | ✓         | builtins |
-| `rank`, `cond` (from SVD) | ✓        | —             | —         | builtins |
-| `null`, `orth` (from eig / QR) | ✓   | —             | —         | builtins |
-| `matpow` (`A^n`)         | ✓         | ✓             | ✓         | `^` op |
-| **Reductions**           |           |               |           |                     |
-| `sum`, `prod`, `mean`    | ✓ (+`_dim`) | ✓           | ✓         | builtins |
-| `min`, `max` (1- and 2-arg) | ✓ (+`_mm`) | ✓          | ✓         | builtins |
-| `cumsum`, `cumprod`      | ✓ (+`_dim`) | ✓           | ✓         | builtins |
-| `std`, `var`, `median`   | ✓         | ✓             | —         | builtins |
-| `any`, `all`             | ✓         | ✓             | —         | builtins |
-| `diff` (1st-order)       | ✓         | ✓             | —         | builtin |
-| **Sort / set**           |           |               |           |                     |
-| `sort`, `sortrows`, `unique` | ✓     | ✓             | ✓         | builtins |
-| `ismember`, `setdiff`, `intersect`, `union` | ✓ | ✓ | ✓         | builtins |
-| **Shape / predicates**   |           |               |           |                     |
-| `size` (one- and two-return), `length`, `numel`, `ndims` | ✓ | ✓ | ✓ | builtins |
-| `isempty`, `isequal`     | ✓         | ✓             | ✓         | builtins |
-| `permute`, `squeeze`, `flip*`, `rot90` | ✓ | ✓        | ✓         | builtins |
-| `find`, `sub2ind`, `ind2sub` | ✓     | ✓             | ✓         | builtins |
-| **Subscripting / slicing** |          |              |           |                     |
-| `A(i)`, `A(i,j)`, `A(rows,cols)`, end keyword | ✓ | ✓  | ✓        | parser-driven |
-| `A(idx) = v` slice store (vec or scalar) | ✓ | ✓     | ✓         | parser-driven |
-| Logical-mask indexing    | ✓         | ✓             | ✓         | parser-driven |
-| `erase_rows` / `erase_cols` (`A(i,:)=[]`) | ✓ | ✓     | ✓         | parser-driven |
-| `horzcat`, `vertcat`     | ✓         | ✓             | ✓         | bracket-cat |
-| **Signal / FFT**         |           |               |           |                     |
-| `fft`, `ifft`, `fft2`, `ifft2` (real or complex in) | ✓ | ✓ | ✓ stub | builtins |
-| `fftshift`, `ifftshift`  | ✓         | ✓             | —         | builtins |
-| `conv` (1-D), `conv2` (2-D) | ✓      | ✓             | ✓         | builtins |
-| `xcorr` (full lag axis)  | ✓         | —             | —         | builtin |
-| `filter` (DF-II-T IIR/FIR) | ✓       | ✓             | —         | builtin |
-| Windows: `hamming`, `hann`, `blackman` | ✓ | —        | —         | builtins |
-| **Polynomial**           |           |               |           |                     |
-| `polyval` (Horner, elementwise) | ✓  | —             | —         | builtin |
-| `polyfit` (least squares via normal eqs) | ✓ | —     | —         | builtin |
-| `roots` (Durand-Kerner, complex out) | ✓ | —         | —         | builtin |
-| **Numerical calculus**   |           |               |           |                     |
-| `interp1` (linear, NaN out-of-range) | ✓ | —         | —         | builtin |
-| `interp2` (bilinear, NaN out-of-range) | ✓ | —       | —         | builtin |
-| `trapz(y)`, `trapz(x,y)` | ✓         | —             | —         | builtin |
-| `cumtrapz` (running, leading 0) | ✓  | —             | —         | builtin |
-| `gradient` (central diff + one-sided ends) | ✓ | —   | —         | builtin |
-| **ODE / IVP solvers**    |           |               |           |                     |
-| `ode45` (Dormand–Prince 5(4)) — scalar `y` | ✓ | ✓        | ✓         | `matlab_ode45_t`/`_y` (+ `_opts`, `_stats`) |
-| `ode45` — **vector `y`** (system of ODEs) | ✓ | ✓         | ✓         | `matlab_ode45_v_t`/`_y` (+ `_opts`, `_stats`) |
-| `ode23` (Bogacki–Shampine 3(2)) — scalar / vector | ✓ | ✓ | ✓        | `matlab_ode23_*` family |
-| `odeset` fields: `RelTol`, `AbsTol`, `MaxStep`, `InitialStep`, `Refine`, `Stats` | ✓ | ✓ | ✓ | accepted via `_opts` runtime entries; see [`ode.md`](ode.md) |
-| User-time grid `tspan = [t0 t1 … tN]`; backward `[t1 t0]`; 3-return `[t, y, stats]` | ✓ | ✓ | ✓ | |
-| Stiff (`ode15s` etc.), `Events`, `OutputFcn`, `pdepe` | — | — | —     | tracked in [`feature_status.md`](feature_status.md) |
-| **Image processing**     |           |               |           |                     |
-| `imfilter` (same-size conv2 wrapper) | ✓ | —         | —         | builtin |
-| `padarray` (zero pad, [pre_r pre_c]) | ✓ | —         | —         | builtin |
-| **Multirate signal**     |           |               |           |                     |
-| `upsample`, `downsample` | ✓         | —             | —         | builtins |
-| **Complex**              |           |               |           |                     |
-| `complex_scalar`, `mat_c_from_real`, `mat_c_from_buf` | ✓ | ✓ stub | ✓ stub | constructors |
-| `conj`, `real`, `imag`, `angle`, `abs` (polymorphic) | ✓ | ✓ | ✓ stub | builtins |
-| `+ - .* ./` (`cc`), matmul (`cc`), transpose, ctranspose | ✓ | ✓ | ✓ stub | operators |
-| **Strings**              |           |               |           |                     |
-| `sprintf`, `num2str`, `str2double` | ✓ | ✓           | ✓         | builtins |
-| `upper`, `lower`, `strtrim`, `strrep`, `strcat` | ✓ | ✓ | ✓     | builtins |
-| `startsWith`, `endsWith`, `contains` | ✓ | ✓         | ✓         | builtins |
-| `strlen`, `isstring`     | ✓         | ✓             | ✓         | builtins |
-| **I/O**                  |           |               |           |                     |
-| `disp`, `fprintf` (str, 1–4 f64 args) | ✓ | ✓        | ✓         | builtins |
-| `input`                  | ✓         | ✓             | —         | builtin |
-| `fopen`, `fclose`, `fgetl`, `feof`, `fread`, `fwrite` | ✓ | ◇ | — | builtins |
-| `save`, `load`           | ✓         | ◇             | —         | builtins; see `save_load_compat.md` |
-| **Structs / cells**      |           |               |           |                     |
-| `struct(...)`, field set/get (f64, mat, child struct) | ✓ | ✓ | ✓ | parser-driven |
-| `fieldnames`, `isstruct`, `isfield`, `rmfield` | ✓ | ✓ | ✓        | builtins |
-| `cell(...)`, `{i}`, `(i)`, `numel`, `iscell`     | ✓ | ✓ | ✓        | parser-driven |
-| **Globals / persistent** |           |               |           |                     |
-| `global x` (f64)         | ✓         | ✓             | —         | declarations |
-| `persistent x` (f64 or ptr)  | ✓     | ✓             | —         | declarations |
-| **Try / catch**          |           |               |           |                     |
-| Error flag set/get/clear | ✓         | —             | —         | `try`/`catch` lowering |
-| **Parallel**             |           |               |           |                     |
-| `parfor` dispatch + `+=` reduction | ✓ | ◇            | —         | `parfor` lowering |
-| **Fixed-Point Designer (`fi`)** |    |               |           | see `docs/emit_fixed_point.md` |
-| `fi`, `numerictype`, `fimath`, `fipref` constructors | ✓ | ◇ | —    | builtins |
-| `int`, `storedInteger`, `storedIntegerToDouble`, `reinterpretcast`, `removefimath`, `setfimath` | ✓ | ◇ | — | builtins |
-| `matlab_mat_i64` / `matlab_mat_u64` descriptors + slice/store | ✓ | — | — | parser-driven |
-| Saturation + 5 rounding modes (Floor / Nearest / Zero / Convergent / Ceiling) | ✓ | — | — | controlled by `numerictype` flags |
-| `bin(n)`, `hex(n)`, `dec(n)` renderers | ✓ | —        | —         | builtins |
-| **Bitwise**              |           |               |           |                     |
-| `bitand`, `bitor`, `bitxor`, `bitcmp`, `bitshift` | ✓ | ✓ | ✓     | builtins (also map to SV operators in HDL emit) |
-| **Debug / DAP mirrors**  |           |               |           |                     |
-| `matlab_dbg_frame_*`, `matlab_ws_*` (workspace mirror) | ✓ | — | — | inserted by `LowerTensorOps` |
-| **Function handles**     |           |               |           |                     |
-| `@name`, `@(x) ...`, captures, `(handle)(x)` | ✓ | ✓  | ✓         | parser-driven |
+  subgraph Toolboxes["Per-toolbox runtimes"]
+    direction TB
+    PDE[runtime_pde.cpp<br/>~7.0 kLOC · 111 entries<br/>FEM · sparse · STL/GLB]
+    SP[runtime_sparse.cpp<br/>~0.8 kLOC · 17 entries<br/>CSR · PCG · MINRES · GMRES]
+    RF[runtime_rf.cpp<br/>~6.1 kLOC · 85 entries<br/>S-params · cascade · VF · TL]
+    CM[runtime_comm.cpp<br/>~3.1 kLOC · 85 entries<br/>mod/demod · CRC · Viterbi<br/>LDPC · Polar · Turbo]
+    OP[runtime_optim.cpp<br/>~2.5 kLOC · 33 entries<br/>fzero · fmincon · linprog<br/>quadprog · intlinprog]
+    PR[runtime_prop.cpp<br/>~1.7 kLOC · 33 entries<br/>path loss · ITM · coverage<br/>antenna patterns + dipole]
+    SY[runtime_sym.cpp<br/>~0.8 kLOC · 95 entries<br/>SymPP bridge · sym + symmat]
+    SF[runtime_mstateflow.cpp<br/>~0.4 kLOC · 23 entries<br/>chart event queue · snapshot ring]
+    ML[runtime_mflowlink_call.cpp<br/>~0.1 kLOC · 2 entries<br/>mflowLink runner ABI]
+  end
 
----
-
-## Tier-1 builtins (added together with `conv`/`conv2`)
-
-These are the seven groups of features added in the most recent runtime
-expansion. All of them follow the existing column-wise reduction shape
-where applicable.
-
-### `filter(b, a, x)`
-Direct-form II transposed implementation of the standard difference
-equation `a(1)*y[n] = sum b[k]*x[n-k] - sum a[k+1]*y[n-k-1]`.
-
-- `b`, `a` are vectors. `a(1)` (i.e. `a->data[0]`) must be non-zero.
-- `x` may be a vector (output mirrors orientation) or a matrix (filtered
-  column-wise). 
-- The state register is reset between columns.
-- Coefficients are normalised by `a(1)` once at entry, so callers may
-  pass an unnormalised `a`.
-
-### `any(A)` / `all(A)`
-Logical reductions matching MATLAB's vector-vs-matrix shape rule.
-Treats any non-zero element as true. `all([])` is `1`.
-
-### `tril(A)` / `triu(A)`
-Lower / upper triangular extraction (no offset argument yet).
-Returns a fresh matrix; the input is not modified.
-
-### `fftshift(A)` / `ifftshift(A)`
-Circular shift that moves DC to the centre (`fftshift`) or back
-(`ifftshift`). Polymorphic — accepts a `matlab_mat *` or a
-`matlab_mat_c *` and always returns a `matlab_mat_c *` so chained
-spectra survive. Shift amount per axis: `floor((d+1)/2)` forward,
-`floor(d/2)` inverse. Singleton dims are left alone.
-
-### `std(A)` / `var(A)`
-Sample dispersion with `N-1` normalisation (matches MATLAB's default).
-`std = sqrt(var)`. Vector → 1×1, matrix → 1×N column-wise.
-
-### `median(A)`
-`qsort`-and-pick on a scratch copy. `O(n log n)` per column. The result
-shape mirrors `std`/`var`.
-
-### `diff(A)`
-First-order discrete differences. Vector input of length `n` → vector
-of length `n-1` (orientation preserved); matrix input → `(m-1) x n`
-matrix with differences down each column. Length < 2 returns 0×0.
-
-### `meshgrid(x[, y])` / `ndgrid(x[, y])`
-Coordinate matrices via two single-output runtime calls, picked up by
-the multi-return splitter in `LowerTensorOps`. The one-arg form
-re-uses `x` for both axes. `meshgrid` uses image (xy) ordering;
-`ndgrid` uses array (ij) ordering.
-
-```
-[X,Y] = meshgrid([10 20 30], [1 2]);
-%  X = [10 20 30; 10 20 30],  Y = [1 1 1; 2 2 2]
-
-[Xn,Yn] = ndgrid([10 20 30], [1 2]);
-%  Xn = [10 10; 20 20; 30 30], Yn = [1 2; 1 2; 1 2]
+  Core --> Toolboxes
+  PDE -.uses.-> SP
+  RF -.uses.-> CX
+  Toolboxes -.uses.-> CX
 ```
 
----
+**Header surface** (`runtime/*.h*`, ~2.8 kLOC):
 
-## Tier-2 builtins (signal / polynomial / numerical calculus)
-
-These were added on top of Tier 1. End-to-end demo lives in
-[`examples/tier2_demo.m`](../examples/tier2_demo.m).
-
-### `xcorr(u, v)`
-Full cross-correlation as a row vector of length `2L − 1` with
-`L = max(numel(u), numel(v))` and lag-zero at index `L` (1-based).
-The shorter input is implicitly zero-padded so the lag axis runs
-`-(L-1) .. (L-1)` from index 1 to `2L-1`.
-
-```
-xcorr([1 2 3], [1 1])   ->  [0 1 3 5 3]    % lags -2..+2
-xcorr([1 1 1], [1 1 1]) ->  [1 2 3 2 1]    % triangular autocorr
-```
-
-### `polyval(p, x)`
-Horner evaluation of `a_n x^n + a_{n-1} x^{n-1} + ... + a_0` where
-`p = [a_n, a_{n-1}, ..., a_0]` (MATLAB's highest-power-first order).
-Applied elementwise on `x`; output mirrors `x`'s shape.
-
-### `polyfit(x, y, n)`
-Least-squares polynomial fit of degree `n` via the normal equations
-on the Vandermonde matrix. Returns a row vector of length `n+1` in
-the same coefficient order as `polyval`. Uses Gaussian elimination
-with partial pivoting on the `(n+1) × (n+1)` normal matrix —
-appropriate for the small degrees the runtime targets (typically
-`n ≤ 8`). For higher degrees prefer a QR-based fit (not yet wired).
-
-### `roots(p)`
-Polynomial roots via Durand-Kerner (Weierstrass) iteration. Returns
-a complex column vector of length `deg(p)`. The iteration starts
-from `n` initial guesses on a spiral (`(0.4 + 0.9i)^k`) and
-simultaneously refines them — converges in ~10 iterations for
-well-conditioned polynomials. Leading-zero coefficients drop the
-effective degree; trailing zeros become explicit roots at the origin.
-
-```
-roots([1 -5 6])   ->  [2; 3]            % up to ~1e-40 noise on im
-roots([1  0 1])   ->  [-i; +i]          % complex conjugate pair
-```
-
-The output uses the complex descriptor (`matlab_mat_c *`), so even
-all-real-root polynomials carry a (vanishing) imaginary part. Compare
-with `abs()` if you need to filter numerical noise.
-
-### `interp1(x, y, xi)`
-1-D linear interpolation. `x` must be sorted ascending and the same
-length as `y`. The query points `xi` can be any shape; the result
-mirrors `xi`. Out-of-range `xi` produces `NaN` (MATLAB's default
-extrapolation behaviour). Uses binary search per query, so each
-lookup is `O(log n)`.
-
-### `trapz(y)`, `trapz(x, y)`
-Trapezoidal integration. The unit-spacing form sums
-`0.5*(y[0]+y[end]) + sum(y[1..end-1])`. The two-arg form uses
-`0.5 * sum((x[i+1]-x[i]) * (y[i]+y[i+1]))`. Vector input → 1×1;
-matrix input → 1×N row (one integral per column).
-
-### `cumtrapz(y)`
-Running trapezoidal integral with leading zero. Same shape as input,
-unit spacing.
-
-### `gradient(f)`
-Numerical gradient. Central differences in the interior, one-sided
-at the endpoints (`g[0] = f[1] - f[0]`, `g[end] = f[end] - f[end-1]`).
-For matrices, takes the gradient down each column (matching MATLAB's
-single-output form). Same shape as input.
-
-### Windows: `hamming(n)`, `hann(n)`, `blackman(n)`
-Standard symmetric (non-periodic) DSP windows. Each returns a column
-vector of length `n`. Coefficients:
-
-| Window     | Formula |
+| Header | Purpose |
 |---|---|
-| `hamming`  | `0.54 - 0.46 cos(2πk/(n-1))` |
-| `hann`     | `0.5 - 0.5 cos(2πk/(n-1))` |
-| `blackman` | `0.42 - 0.5 cos(2πk/(n-1)) + 0.08 cos(4πk/(n-1))` |
+| `matlab_runtime.h` (1522 LOC) | Public C ABI — every entry callable from JIT/static emit lanes |
+| `matlab_runtime.hpp` (240 LOC) | C++-side helpers (`MatPtr`, scoped-deleter wrappers) |
+| `runtime_internal.h` (262 LOC) | Private struct layouts (`matlab_mat`, `matlab_mat_c`, magic words) shared between TUs |
+| `runtime_sym.h` (414 LOC) | Symbolic-toolbox public surface (opt-in) |
+| `matlab_plot.h` (366 LOC) | Cairo plotting backend (opt-in) |
 
 ---
 
-## Tier-3 builtins (SVD-derived linalg + image-processing wrappers)
+## 2. ABI conventions
 
-These build on the existing SVD / EIG / QR / `conv2` primitives — none
-implement new core numeric kernels. End-to-end demo lives in
-[`examples/tier3_demo.m`](../examples/tier3_demo.m).
+### 2.1 Type system
 
-### `rank(A)`
-Counts singular values larger than `max(m,n) * σ_max * eps`. Same
-tolerance MATLAB uses by default. Returns a scalar.
+```mermaid
+flowchart TD
+  any[matlab_any] -.discriminated by.-> magic[4-byte magic word]
+  magic --> mat[matlab_mat<br/>real row-major]
+  magic --> mat_c["matlab_mat_c<br/>(0xC0FFEE01)<br/>complex, sep re/im"]
+  magic --> mat3["matlab_mat3<br/>(0xC0FFEE03)<br/>3-D dense (sparse)"]
+  magic --> mat_i8[matlab_mat_i8/i16/i32/i64<br/>typed signed int matrix]
+  magic --> mat_u8[matlab_mat_u8/u16/u32/u64<br/>typed unsigned int matrix]
+  magic --> fi_i64["matlab_mat_i64<br/>(also fi-typed)"]
+  magic --> fi_u64["matlab_mat_u64<br/>(also fi-typed)"]
+  magic --> mstruct[matlab_struct<br/>named-field record]
+  magic --> mcell[matlab_cell<br/>1-D / 2-D heterogeneous]
+  magic --> mstring[matlab_string<br/>UTF-8 heap-owned]
+  magic --> mdict[matlab_dict<br/>containers.Map / dictionary]
+  magic --> mdt[matlab_datetime / duration / categorical / table]
+  magic --> mobj[matlab_obj<br/>classdef instance]
+  magic --> msym["matlab_sym<br/>(kind=7, SymPP-backed)"]
+  magic --> msymmat["matlab_symmat<br/>(kind=8)"]
+```
 
-### `cond(A)`
-`σ_max / σ_min`. Returns `Inf` when the smallest singular value is
-exactly zero (rank-deficient). For `m × n` matrices the singular
-values are reported as a `min(m, n)`-long vector — `cond` consumes
-the first and last entries directly.
+- **Row-major** throughout. `data[i*cols + j]` for real, `re[]` / `im[]`
+  parallel arrays for complex.
+- **Reference-typed**: the compiler passes `T *`, never copies the
+  payload unless an op semantically requires it (e.g. shape change).
+- **Polymorphic builtins** dispatch on the magic word. `fft` /
+  `fftshift` / `conj` / `real` / `imag` / `angle` / `abs` accept
+  either `matlab_mat *` or `matlab_mat_c *`.
+- **0×0 sentinel** for empty / invalid input — generated code can
+  `isempty()`-check the result. Out-of-band errors set a flag via
+  `matlab_set_error` and return a sentinel.
 
-### `null(A)`
-Orthonormal basis for `ker(A)`, returned as an `n × (n - rank(A))`
-matrix. Computed by eigendecomposing `A' * A` (which is symmetric and
-PSD, fitting the symmetric Jacobi eig in the runtime) and selecting
-the eigenvectors whose eigenvalues are below
-`max-eig * n * eps`.
+### 2.2 Ownership model
 
-### `orth(A)`
-Orthonormal basis for `col(A)`, returned as an `m × rank(A)` matrix.
-For `m ≥ n`: columns 1…r of `qr(A).Q`. For `m < n`: eigenvectors of
-`A * A'` with positive eigenvalues. **Caveat:** the QR path is
-unpivoted Gram-Schmidt — for rank-deficient matrices where the first
-`r` columns are *not* themselves linearly independent the result will
-be wrong. Use SVD-based orthonormalisation for those cases (not yet
-exposed as a separate builtin).
+Every constructor returns a heap allocation owned by the **workspace**.
+The workspace lives for the duration of the JIT session (REPL: until
+`clear` or process exit; static-emit: until `main` returns). There's no
+reference counting — the workspace is the lifetime root.
 
-### `imfilter(A, h)`
-Apply 2-D filter `h` to image `A` with output the same size as `A`.
-Equivalent to `conv2(A, h)` cropped by `floor(size(h)/2)` on each
-side. Boundary mode is implicit zero (no replicate / symmetric / etc.
-options yet).
+```
+matlab_mat *A = mat_alloc(3, 3);   // workspace owns A
+A->data[0] = 1.0;                  // direct write OK
+                                   // no manual free needed
+```
 
-### `padarray(A, padsize)`
-Zero-pad `A` by `padsize = [pre_rows pre_cols]` (or scalar applied to
-both dims). Padding is symmetric — same amount before and after each
-dim — so output is `(m + 2*pad_r) × (n + 2*pad_c)`.
+This is why direct test code (`test/Runtime/test_*.c`) calls
+`rt_free()` explicitly — it isn't operating in a JIT session so it
+must clean up its own allocations to keep ASan happy.
 
-### `interp2(X, Y, V, Xq, Yq)`
-Bilinear interpolation. `X` is a sorted `1×N` row, `Y` is a sorted
-`M×1` column, `V` is `M×N`. `Xq` and `Yq` must have the same shape;
-output mirrors that shape. Out-of-range queries → `NaN`. Each query
-costs `O(log M + log N)` via two binary searches.
+### 2.3 Magic words
 
-### `upsample(x, n)` / `downsample(x, n)`
-Multirate primitives. `upsample` inserts `n-1` zeros between samples
-(output length `L * n`); `downsample` keeps every `n`-th sample
-starting at index 1 (output length `ceil(L / n)`). 1-D vectors only —
-matrix inputs are flattened. Output orientation mirrors the input.
+```c
+#define MATLAB_MAT_C_MAGIC  0xC0FFEE01    // complex matrix
+#define MATLAB_MAT3_MAGIC   0xC0FFEE03    // 3-D dense
+// real matlab_mat has no magic — first 4 bytes overlap data[] / rows
+```
 
----
-
-## Scalar-arg overloads (auto-boxing)
-
-Several Tier 1/2/3 builtins take ptr-typed (matrix) arguments where
-MATLAB code idiomatically passes a scalar — `conv(u, gain)`,
-`filter(b, 1, x)`, `polyval(p, 5)`, `interp1(x, y, 0.5)`, etc.
-A 1×1 literal collapses to `f64` in the lowering pipeline, so these
-calls used to miss the strict-typed dispatch slot.
-
-The dispatcher now has a second-pass scalar-promotion fallback in
-`LowerTensorOps.cpp`. After the strict match fails, it scans the
-table again, accepting f64 operands in any `'p'` slot and recording
-their indices. At call-site materialisation each f64 is wrapped via
-`matlab_mat_from_scalar(f64) -> matlab_mat *`, then passed to the
-runtime as a 1×1 matrix.
-
-The fallback is gated by an explicit allowlist
-(`AutoBoxNames` in `LowerTensorOps.cpp`) so calls like `mean(5.0)`
-still flow through the scalar-math path (`matlab_mean_s`) instead of
-becoming a 1×1 reduction. Current allowlist:
-
-`conv`, `conv2`, `filter`, `xcorr`, `polyval`, `polyfit`, `interp1`,
-`interp2`, `trapz`, `cumtrapz`, `imfilter`, `padarray`.
+`mat_is_complex(void *p)` and `mat_is_3d(void *p)` are inline header
+predicates in `runtime_internal.h` — every polymorphic builtin uses
+them at entry.
 
 ---
 
-## How a builtin reaches the runtime
+## 3. Per-TU contents
 
-Adding a new MATLAB-visible builtin requires touching three places in
-addition to writing the runtime function:
+### 3.1 Core numerical kernel
 
-1. **`lib/Sema/Resolver.cpp`** — append the spelling to the
-   `registerBuiltins()` initializer list so the name resolves at
-   binding time instead of being treated as an undefined identifier.
-2. **`lib/MLIR/Lowering.cpp`** — if the call returns a matrix descriptor,
-   add the spelling to the `PtrRet` set so the `matlab.call_builtin`
-   op carries `!llvm.ptr` instead of f64.
-3. **`lib/MLIR/Passes/LowerTensorOps.cpp`** — add a `Spec` row to the
-   dispatch table, e.g.
+#### `matlab_runtime.cpp` (15.7 kLOC, 385 entries)
+The historical foundation. Every "core" MATLAB operation lives here:
+
+| Group | Entries |
+|---|---|
+| Constructors | `zeros`, `ones`, `eye`, `magic`, `rand`, `randn`, `linspace`, `repmat`, `meshgrid`, `ndgrid`, `range` |
+| Elementwise | `+ - .* ./ .^`, comparisons, `exp`/`log`/`sqrt`/`abs`, trig + arc + hyperbolic, `floor`/`ceil`/`round`/`fix`, `mod`/`rem`/`atan2` |
+| Linalg | `*` (matmul), `\` / `/`, `inv`, `det`, `transpose`/`ctranspose`, `diag`, `reshape`, `kron`, `tril`/`triu`, `svd`, `eig` (sym + non-sym), `qr`, `lu`, `chol`, `pinv`, `norm`, `trace`, `rank`, `cond`, `null`, `orth`, `matpow` |
+| Reductions | `sum`/`prod`/`mean`/`min`/`max`/`std`/`var`/`median`/`any`/`all`/`cumsum`/`cumprod`/`diff` (vector → 1×1, matrix → 1×N row) |
+| Sort + set | `sort`, `sortrows`, `unique`, `ismember`, `setdiff`, `intersect`, `union` |
+| Shape | `size`, `length`, `numel`, `ndims`, `isempty`, `isequal`, `permute`, `squeeze`, `flip*`, `rot90`, `find`, `sub2ind`, `ind2sub` |
+| Signal | `fft`/`ifft`/`fft2`/`ifft2`, `fftshift`/`ifftshift`, `conv`/`conv2`, `xcorr`, `filter`/`filtfilt`/`sosfilt`, all 17 windows, IIR/FIR design (`butter`/`cheby1`/`cheby2`/`fir1`/`besself`), `freqz`/`impz`/`stepz`/`grpdelay`, periodogram/pwelch/cpsd/mscohere/tfestimate, multirate, waveform gens, pulse measurements |
+| Numerical calculus | `interp1`/`interp2`, `trapz`/`cumtrapz`, `gradient`, `polyval`/`polyfit`/`roots`/`poly`/`polyder`/`polyint`/`residue` |
+| ODE / PDE solvers | `ode45` / `ode23` (scalar + vector), `ode23s` (stiff Rosenbrock), `ode_events`, `pdepe` (1-D parabolic-elliptic) |
+| Image | `imfilter`, `padarray` |
+| Heterogeneous data | `struct(...)` + field accessors, `cell(...)` + `{i}`/`(i)`, `containers.Map`/`dictionary`, `datetime`, `duration`, `categorical`, `table` |
+| Typed integers | `int8`/`int16`/`int32`/`int64`/`uint8`/`uint16`/`uint32`/`uint64` matrix runtimes with saturating arith |
+| Fixed-Point Designer (`fi`) | scalar Q-format arithmetic, 5 rounding modes, `numerictype` + `fimath` first-class objects, 1-D fi arrays, persistent fi storage |
+| Strings | `sprintf`/`num2str`/`str2double`, `upper`/`lower`/`strtrim`/`strrep`/`strcat`, `startsWith`/`endsWith`/`contains` |
+| I/O | `disp`/`fprintf`, `input`, `fopen`/`fclose`/`fgetl`/`feof`/`fread`/`fwrite`, custom `save`/`load` |
+| Globals | `global` + `persistent` declarations (f64 + ptr) |
+| Try/catch | error flag set/get/clear |
+| Parallel | `parfor` fan-out + reduction |
+| Bitwise | `bitand`/`bitor`/`bitxor`/`bitcmp`/`bitshift` |
+| Function handles | `@name` / `@(x) ...` with captures |
+
+See [`feature_status.md`](feature_status.md) for the per-entry
+shipped / partial / missing matrix.
+
+#### `runtime_complex.cpp` (2.6 kLOC, 57 entries)
+- Native complex N×N LU decomposition (Doolittle, partial pivoting) —
+  ~4× faster than the 2N×2N real-equivalent path.
+- Complex elementwise `+ - .* ./`, transpose, conjugate transpose.
+- FFT / IFFT / FFT2 / IFFT2 on complex inputs.
+- Polymorphic complex dispatch helpers consumed by every toolbox.
+
+#### `runtime_debug.cpp` (3.1 kLOC, 75 entries)
+- DAP variable inspector — per-kind renderer for every workspace value
+  (matrices, structs, cells, dicts, datetime, categorical, table, sym,
+  classdef instances).
+- Workspace mirror (`matlab_ws_*`) — JIT-side persistence across REPL
+  inputs.
+- Source-line hook (`matlab_dbg_hook(file_id, line)`) — the
+  per-statement instrumentation injected by `-g`/`--debug-hooks`.
+- Per-frame locals snapshot for `stackTrace` + `scopes` + `variables`.
+
+### 3.2 Per-toolbox runtimes
+
+Each of the eight toolboxes maps to one runtime TU plus its companion
+roadmap doc:
+
+| TU | LOC | Roadmap | Highlights |
+|---|---:|---|---|
+| `runtime_pde.cpp` | 7.0k | [`pde_toolbox_roadmap.md`](pde_toolbox_roadmap.md) | 11 shipped arcs · Tier-1 → 4 · sparse CSR + Krylov · T10 quadratic tets · Lanczos shift-invert · Craig-Bampton ROM · complex-Krylov frequency response · N-component coupled PDEs · `femodel` classdef façade · STL/GLB import |
+| `runtime_sparse.cpp` | 0.8k | (PDE prereq) | CSR descriptor, PCG, MINRES, ILU(0)-preconditioned GMRES |
+| `runtime_rf.cpp` | 6.1k | [`rf_toolbox_plan.md`](rf_toolbox_plan.md) + [`verilog_a_plan.md`](verilog_a_plan.md) | Tier-1 Touchstone v1/v2 · Tier-2 N-port S↔Y/Z/H/G/ABCD/T conversions + Redheffer cascade · Tier-3 Vector Fitting (real + complex pole pairs) + `rationalfit`/`freqresp`/`passivity`/`timeresp` · Tier-4 transmission-line geometries (microstrip / CPW / coax / two-wire / parallel-plate) + matching networks (L/T/Pi) + LC filter circuits · 15 RF classdefs · Verilog-A export Tier-1 → Tier-10 |
+| `runtime_comm.cpp` | 3.1k | [`comm_toolbox_roadmap.md`](comm_toolbox_roadmap.md) | Tier-1 base (`randi`/`rng`/`int2bit`/`awgn`/`biterr`/`symerr`) · Tier-2 modulation (PAM/PSK/QAM/FSK + `berawgn`) · Tier-3 channel coding (CRC/Hamming/convolutional + Viterbi/interleavers) · Tier-4 equalisers + sync + RF impairments · Tier-5 OFDM + Rayleigh/Rician fading + Alamouti OSTBC · Tier-6 spreading + source coding · Tier-7 modern codes (Polar SC, LDPC min-sum, Turbo PCCC max-log-MAP) |
+| `runtime_optim.cpp` | 2.5k | [`optim_toolbox_roadmap.md`](optim_toolbox_roadmap.md) | T1 `fzero`/`fminbnd`/`fminsearch`/`fminunc`/`linprog`/`lsqnonneg`/`fsolve` · T2 `fmincon` SQP/IP/`quadprog`/`lsqlin`/`lsqnonlin` LM · T3 `intlinprog`/`coneprog`/`fminimax`/`fgoalattain`/`fseminf` · T4 problem-based `optimvar`/`optimproblem`/`solve` expression-DAG · T5 `eqnproblem` |
+| `runtime_prop.cpp` | 1.7k | [`propagation_toolbox_roadmap.md`](propagation_toolbox_roadmap.md) + [`antenna_toolbox_roadmap.md`](antenna_toolbox_roadmap.md) | PROP-Tier-1a (ITU-R + cellular empirical + Fresnel + knife-edge + Haversine/Vincenty) · 2a (ITM Longley-Rice) · 2b (terrain profile + LOS + `linkBudget` + `coverageGrid`) · 3 (directional patterns + mount orientation + multi-site `coverageGridMulti`) · 1b (classdef wrappers) · ANT-Tier-2 closed-form thin-wire dipole |
+| `runtime_sym.cpp` | 0.8k | [`symbolic_toolbox_roadmap.md`](symbolic_toolbox_roadmap.md) | SymPP bridge · Tier-1 core CAS (`syms`/`simplify`/`solve`/`subs`) · Tier-2 calculus + transforms + ODE/PDE · Tier-3 sym matrices + multi-eq solvers · Tier-4 assumptions + numeric solvers + IVP. Opt-in via `-DMATLAB_LLVM_WITH_SYM=ON`. |
+| `runtime_mstateflow.cpp` | 0.4k | [`mStateflow_roadmap.md`](mStateflow_roadmap.md) | DAP event queue (state-enter/exit/transition-fired/super-step boundaries/event broadcast) · bounded FIFO event queue with drop-oldest · snapshot ring (save_blob/copy/count/reset) |
+| `runtime_mflowlink_call.cpp` | 0.1k | [`mflow_link_roadmap.md`](mflow_link_roadmap.md) | mflowLink-runner ABI bridge (compiler/runtime split point) |
+
+---
+
+## 4. How a builtin call reaches the runtime
+
+```mermaid
+sequenceDiagram
+  participant M as MATLAB source<br/>(.m)
+  participant F as Frontend<br/>Lex · Parse · AST
+  participant S as Sema<br/>Resolver.cpp
+  participant L as MLIR Lowering<br/>LowerTensorOps.cpp
+  participant J as JIT / static emit
+  participant R as Runtime TU<br/>(.cpp)
+
+  M->>F: source text
+  F->>S: AST
+  S->>S: registerBuiltins() resolves name
+  S->>L: matlab.call_builtin op<br/>with !llvm.ptr or f64 result
+  L->>L: lookup Spec row<br/>("filter", "matlab_filter", 1, "pppp")
+  L->>L: scalar-promotion fallback<br/>(AutoBoxNames allowlist)
+  L->>J: emit func.call to matlab_filter
+  J->>R: invoke C-ABI entry
+  R->>R: shape check · null guard ·<br/>kernel · 0×0 sentinel on fail
+  R->>J: matlab_mat *result
+  J->>L: pointer flows as %1 : !llvm.ptr
+```
+
+### 4.1 Adding a new builtin — four touch-points
+
+1. **`lib/Sema/Resolver.cpp`** — add the spelling to `registerBuiltins()`
+   so the name resolves at binding time.
+2. **`lib/MLIR/Lowering.cpp`** — if the call returns a matrix
+   descriptor, add the spelling to the `PtrRet` set so the
+   `matlab.call_builtin` op carries `!llvm.ptr` instead of f64.
+3. **`lib/MLIR/Passes/LowerTensorOps.cpp`** — add a `Spec` row:
    `{"my_builtin", "matlab_my_builtin", 1, "pp"}` (1 = ptr return,
-   `"pp"` = two ptr args). For overloaded forms (e.g. `mean(A)` vs
-   `mean(A, dim)`) add one row per arity / type combination — the
-   first matching row wins.
-4. **Multi-return**: extend the splitter blocks at the top of
-   `rewriteBuiltinCalls()` (eig/qr/lu/size/meshgrid/ndgrid pattern)
-   and provide one runtime entry per output column.
+   `"pp"` = two ptr args). For overloaded forms add one row per
+   arity/type combo — first match wins.
+4. **Multi-return**: extend the splitter blocks in
+   `rewriteBuiltinCalls()` (the eig/qr/lu/size/meshgrid/ndgrid
+   pattern) and provide one runtime entry per output column.
 
-The Python and TypeScript mirrors are best-effort — keep them in sync
-when the goldens you care about run through those backends.
+For multi-backend parity, mirror the entry into
+`runtime/matlab_runtime.py` and `runtime/matlab_runtime.ts` — these
+are best-effort C-runtime mirrors used by `-emit-python` /
+`-emit-typescript`.
+
+### 4.2 Scalar-promotion fallback
+
+A MATLAB call like `polyval(p, 5)` passes a 1×1 scalar where the
+runtime expects `matlab_mat *`. The lowerer scans the dispatch table
+twice — strict match first, then a scalar-promotion pass that boxes
+f64 args via `matlab_mat_from_scalar`. The fallback is gated by an
+**allowlist** in `LowerTensorOps.cpp` (`AutoBoxNames`) so calls like
+`mean(5.0)` still route through `matlab_mean_s` instead of becoming
+a 1×1 reduction:
+
+```
+AutoBoxNames = { conv, conv2, filter, xcorr, polyval, polyfit,
+                 interp1, interp2, trapz, cumtrapz, imfilter,
+                 padarray, ... }
+```
+
+Adding a ptr-only builtin? Either add it to that list or rely on
+callers writing `[v]` to make the argument a 1×1 literal vector.
 
 ---
 
-## Known gaps
+## 5. Backend matrix
 
-- **`roots` numerical noise** — Durand-Kerner converges quickly but
-  leaves ~1e-40-magnitude imaginary parts on real roots. Filter with
-  `abs(imag(r)) < tol` or take `real(r)` if you need a clean
-  real-valued result. `polyfit` uses normal equations rather than QR,
-  so numerical conditioning degrades for high-degree fits (preferred
-  upgrade: route through `qr_Q` / `qr_R`).
-- **Eigendecomposition** symmetrises its input — `matlab_eig` only
-  computes eigenvalues of `(A + A')/2`. `null`/`orth` therefore work
-  via `A'A` / `AA'` (always symmetric). For non-symmetric problems
-  (e.g. classical companion-matrix `roots`) use the dedicated builtin
-  (`matlab_roots`) rather than building the companion and calling
-  `eig`.
-- **`orth` rank-deficient leading columns** — the `m ≥ n` path uses
-  unpivoted Gram-Schmidt QR. If the first `r` columns of `A` are not
-  themselves linearly independent, the truncation drops the wrong
-  ones. Robust orth needs SVD-with-V (not yet wired) or column-pivoted
-  QR (also not yet wired).
-- **3-D tensor surface** is sparse — most ops reject inputs with the
-  3-D magic. The `matlab_mat3` descriptor exists with `zeros3` /
-  `ones3` / 3-D subscripting, but the elementwise / reduction surface
-  hasn't been extended. Expanding 3-D is a structural change rather
-  than a per-op addition.
-- **Scalar promotion is allowlisted** — only the builtins in
-  `AutoBoxNames` accept scalar args via auto-box. Adding a new
-  ptr-only builtin? You'll need to add it to that list (or rely on
-  callers writing `[v]`).
-- **No `interp1` / `interp2` 'spline'** — only linear / bilinear is
-  implemented. Cubic / spline methods aren't here yet.
-- **`save` / `load`** support only a subset of the `.mat` format —
-  see [`docs/save_load_compat.md`](save_load_compat.md).
+Which runtime TUs each `-emit-*` lane needs to link against:
+
+| Backend | Core (`matlab_runtime` + `complex` + `debug`) | Per-toolbox TUs | Notes |
+|---|---|---|---|
+| `-emit-llvm` / JIT (REPL/DAP) | ✓ | ✓ all | Single-process ExecutionEngine; the JIT resolves symbols via `LLJIT`'s `DynamicLibrarySearchGenerator` |
+| `-emit-c` | ✓ | ✓ all | Caller compiles emitted source against the runtime; `-x c` works for the runtime, `-x c++` for the test harnesses |
+| `-emit-cpp` | ✓ | ✓ all | Same shape; the runtime is internally C++20 |
+| `-emit-python` | mirror in `runtime/matlab_runtime.py` | mirror in same | Best-effort numpy-backed shim; some builtins are stubs |
+| `-emit-typescript` | mirror in `runtime/matlab_runtime.ts` | mirror in same | Same shape as Python; least exercised |
+| `-emit-systemverilog` | doesn't link the runtime (synthesizable RTL has no runtime) | n/a | The `% hdl: port(...)` pragmas drive synthesis directly |
+| `-emit-matlab` / `-emit-mflow` | doesn't link the runtime (source-to-source) | n/a | |
+
+---
+
+## 6. Test infrastructure
+
+```mermaid
+flowchart LR
+  src[test/Runtime/<br/>test_*.c<br/>25 files · 436 functions · 7.8 kLOC] --> cm[CMakeLists.txt<br/>foreach _rt_test loop]
+  cm --> exes[25 runtime-test-* binaries]
+  cm -.MATLAB_LLVM_RUNTIME_ASAN=ON.-> asan[same 25 binaries<br/>under ASan + UBSan]
+  exes --> ctest[ctest -R '^runtime-tests-'<br/>0.43 s wall]
+  asan --> ctest2[ctest under sanitizers<br/>2.82 s wall]
+  ctest --> pass[25/25 green]
+  ctest2 --> pass2[25/25 green<br/>0 memory bugs found]
+```
+
+Each `test_*.c` (plain C, links the runtime TUs directly) covers one
+module:
+
+| Test exe | Functions | Module |
+|---|---:|---|
+| `runtime-tests-linalg` | 105 | matmul / inv / det / eig / SVD / expm / hess / schur / lyap / care / lqr / etc. (covers the full CST Tier-1 numeric stack) |
+| `runtime-tests-signal` | 44 | windows · polynomials · IIR/FIR design · `filter`/`filtfilt`/`sosfilt` · spectral analysis |
+| `runtime-tests-int_arrays` | 29 | int8 / i16 / i32 / i64 / u8 / u16 / u32 / u64 matrix arith with saturation |
+| `runtime-tests-stats` | 26 | mean / median / std / var / min / max / reductions |
+| `runtime-tests-prop` | 24 | path loss / Fresnel / knife-edge / Haversine / Vincenty / patterns / dipole |
+| `runtime-tests-more` | 19 | categorical / datetime / duration / table |
+| `runtime-tests-comm` | 16 | RNG / int2bit / biterr / PAM/PSK/QAM / berawgn / CRC / Hamming / interleaver / PN / Hadamard / Polar |
+| `runtime-tests-optim` | 14 | fzero / fminbnd / fminsearch / fminunc / linprog / lsqnonneg / fsolve / quadprog / lsqlin / fmincon / lsqnonlin / intlinprog |
+| `runtime-tests-fi` | 14 | Q-format arithmetic / rounding modes / saturate / wrap |
+| `runtime-tests-strings` | 14 | string + char-array + sprintf |
+| `runtime-tests-ode` | 13 | ode45 / ode23 / ode23s / ode_events / dense output |
+| `runtime-tests-mstateflow` | 13 | listener flag / drain queue / FIFO push-pop-order-capacity / snapshot ring |
+| `runtime-tests-struct_cell` | 12 | struct arrays · 2-D cells · dict |
+| `runtime-tests-unary` | 12 | sin / cos / tan / asin / acos / atan / abs / sign / exp / log |
+| `runtime-tests-fi_arrays` | 11 | 1-D fi vectors · indexing · slice · concat · persistent |
+| `runtime-tests-image` | 10 | imfilter / kernels |
+| `runtime-tests-rf` | 10 | gammaIn / VSWR / stability K / S→Y / cascade / microstrip / matchnet / rationalfit / rfbudget |
+| `runtime-tests-fft` | 9 | FFT / IFFT / FFT2 / IFFT2 |
+| `runtime-tests-complex` | 9 | complex arithmetic + dispatch |
+| `runtime-tests-reduce` | 8 | sum / mean / prod / cumsum / min / max |
+| `runtime-tests-shape` | 7 | reshape / size / numel / squeeze |
+| `runtime-tests-elementwise` | 7 | broadcasting · .* · ./ · .^ |
+| `runtime-tests-pde_io` | 4 | STL / GLB import · CSR I/O |
+| `runtime-tests-rng` | 4 | seed control / rand / randn |
+| `runtime-tests-pde` | 2 | FEM kernels (assembly · solve) |
+
+**Wall-clock** (build/ dir, serial):
+- Regular build: **0.43 s** for all 25 tests
+- ASan + UBSan build: **2.82 s** for all 25 tests
+
+Indirect coverage layers stacked on top:
+
+- `run-tests` (387 `.m` programs through the LLVM JIT lane) — exercises
+  every entry transitively
+- `run-tests-emit-c` / `-cpp` / `-c-strict` / `-cpp-strict` / `-emit-python`
+  / `-emit-typescript` — same source through 6 more emit lanes
+- `run-tests-sym` (4 tests) — SymPP-gated symbolic surface
+- `cocotb-tests` (39 HDL examples) — bit-exact SV vs Python reference
+
+### 6.1 Sanitizer lane (opt-in)
+
+```bash
+cmake -S . -B build-asan -G Ninja \
+    -DMATLAB_LLVM_RUNTIME_ASAN=ON -DMATLAB_LLVM_WITH_MLIR=OFF
+cmake --build build-asan
+ctest --test-dir build-asan -R '^runtime-tests-'
+```
+
+The `MATLAB_LLVM_RUNTIME_ASAN` CMake option adds
+`-fsanitize=address,undefined -fno-sanitize-recover=undefined` to
+every `runtime-test-*` binary and sets per-test
+`ASAN_OPTIONS=abort_on_error=0:check_initialization_order=1` +
+`UBSAN_OPTIONS=halt_on_error=0:print_stacktrace=1` so a single fault
+doesn't abort the whole lane.
+
+Current status: **25/25 tests pass under ASan+UBSan with zero
+findings** — no use-after-free, heap-buffer-overflow, signed-shift UB,
+or null deref across the full numerical surface.
+
+### 6.2 Code-quality enforcements
+
+- **`-Wold-style-cast` + `-Werror=old-style-cast`** enforced on the
+  five new toolbox TUs (`runtime_comm.cpp` / `runtime_optim.cpp` /
+  `runtime_rf.cpp` / `runtime_prop.cpp` / `runtime_mstateflow.cpp`).
+  All casts use `static_cast<>` / `reinterpret_cast<>` / `const_cast<>`
+  on those modules. Legacy `matlab_runtime.cpp` predates the
+  convention and is exempt.
+- **Default build**: `-Wall -Wextra -Wpedantic` — **zero warnings**.
+
+---
+
+## 7. Build matrix
+
+```mermaid
+flowchart TB
+  src[runtime/*.cpp<br/>~52 kLOC] --> cm[CMakeLists.txt]
+  cm --> R1["Default build<br/>(no sanitizers)"]
+  cm --> R2["RUNTIME_ASAN=ON<br/>+ASan +UBSan"]
+  cm --> R3["WITH_SYM=ON<br/>+SymPP link"]
+  cm --> R4["WITH_PLOT=ON<br/>+Cairo link"]
+  cm --> R5["COVERAGE=ON<br/>+gcov instrumentation"]
+
+  R1 --> bin1[matlabc + 25 runtime-test-*<br/>+ MLIR / LLVM passes]
+  R2 --> bin2[25 runtime-test-* under sanitizers<br/>frontend OFF by default]
+  R3 --> bin3[adds runtime_sym.cpp + libsympp link<br/>requires GMP / MPFR]
+  R4 --> bin4[Cairo backend for plot runtime]
+  R5 --> bin5[+--coverage flags for gcov sweeps]
+```
+
+| CMake option | Default | What it does |
+|---|---|---|
+| `MATLAB_LLVM_WITH_MLIR` | ON | Builds matlabc + the MLIR/LLVM lowering passes (off → frontend-only build, runtime unit tests still work) |
+| `MATLAB_LLVM_WITH_SYM` | OFF | Links `runtime_sym.cpp` and pulls SymPP / GMP / MPFR — enables Symbolic Math Toolbox |
+| `MATLAB_LLVM_WITH_PLOT` | OFF | Links `runtime/plot/*.cpp` and pulls Cairo / FreeType — enables headless plotting |
+| `MATLAB_LLVM_RUNTIME_ASAN` | OFF | Adds ASan+UBSan to runtime-test-* targets |
+| `MATLAB_LLVM_COVERAGE` | OFF | Adds gcov instrumentation |
+
+---
+
+## 8. Known gaps
+
+- **3-D tensor surface is sparse**. `matlab_mat3` exists with `zeros3` /
+  `ones3` / 3-D subscripting, but most elementwise / reduction ops
+  reject 3-D inputs. Expanding 3-D is a structural change rather than
+  per-op work.
+- **No SO classdef surface for `comm.*`**. Function-form ships for
+  every Tier-3+ Comm primitive (CRC, LDPC, Turbo, etc.) — the
+  `comm.CRCGenerator` / `comm.LDPCEncoder` / etc. System-Object
+  classdef variants are gated on the SO-lowering fix tracked in
+  [`comm_toolbox_roadmap.md`](comm_toolbox_roadmap.md) §11.1.
+- **`fi` typing across user function boundaries**. Sema doesn't
+  propagate the `numerictype` spec through user-function calls — a
+  callee sees `f64` for what the caller declared as `fi`. The
+  workaround is to re-wrap inside the helper. Tracked as Tier-6 §7.1
+  in [`fixed_point_toolbox_roadmap.md`](fixed_point_toolbox_roadmap.md).
+- **2-D fi matrices**. 1-D fi vectors ship; 2-D matrices have a
+  runtime path but no concrete tests for slice2 / matmul. Tracked as
+  Tier-6 §7.2 in the same doc.
+- **`roots` numerical noise**. Durand-Kerner leaves ~1e-40 imaginary
+  parts on real roots — filter with `abs(imag(r)) < tol` or take
+  `real(r)`.
+- **`polyfit` conditioning**. Uses normal equations rather than QR;
+  degrades for high-degree fits. For `n > 8` prefer a QR-based fit
+  (not yet wired).
+- **No SymPy / mathjs bridge** for `-emit-python` / `-emit-typescript`
+  on symbolic programs. Tier-6 of
+  [`symbolic_toolbox_roadmap.md`](symbolic_toolbox_roadmap.md).
+- **No `interp1`/`interp2` 'spline' method** — only linear / bilinear.
+- **`save`/`load`** support only a subset of the `.mat` v5 format —
+  see [`save_load_compat.md`](save_load_compat.md).
+
+---
+
+## 9. See also
+
+| Doc | Purpose |
+|---|---|
+| [`feature_status.md`](feature_status.md) | Authoritative per-entry shipped / partial / missing matrix |
+| [`roadmap.md`](roadmap.md) | Project-wide forward tracker |
+| Per-toolbox roadmaps: [`signal`](signal_toolbox_roadmap.md), [`control`](control_toolbox_roadmap.md), [`comm`](comm_toolbox_roadmap.md), [`rf`](rf_toolbox_plan.md), [`antenna`](antenna_toolbox_roadmap.md), [`propagation`](propagation_toolbox_roadmap.md), [`optim`](optim_toolbox_roadmap.md), [`pde`](pde_toolbox_roadmap.md), [`symbolic`](symbolic_toolbox_roadmap.md), [`fixed-point`](fixed_point_toolbox_roadmap.md), [`stateflow`](mStateflow_roadmap.md), [`verilog-A`](verilog_a_plan.md) | Tiered compatibility plans + shipped logs for each toolbox |
+| [`port_runtime_2_cpp.md`](port_runtime_2_cpp.md) | History of the C → C++ port that produced the current multi-TU split |
+| [`emit_c_cpp.md`](emit_c_cpp.md) / [`emit_python.md`](emit_python.md) / [`emit_systemverilog.md`](emit_systemverilog.md) | Per-backend emission docs |
+| [`emit_fixed_point.md`](emit_fixed_point.md) | Fixed-Point Designer implementation reference |
+| [`sym.md`](sym.md) | Symbolic Math user reference |
+| [`ode.md`](ode.md) | ODE/PDE solver user reference |
+| [`complex.md`](complex.md) | Complex numbers + FFT user reference |
+| [`debug.md`](debug.md) / [`repl.md`](repl.md) / [`lsp.md`](lsp.md) | Interactive tooling |
