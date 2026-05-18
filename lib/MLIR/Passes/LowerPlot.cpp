@@ -869,6 +869,11 @@ bool runLowerPlot(ModuleOp M) {
     "text", "legend",
   };
 
+  /* Calls that were rewritten to void runtime calls but whose result
+   * Value still has uses (assigned into a named variable). Erased in a
+   * post-loop sweep below — see the comment at the use site for why. */
+  llvm::SmallVector<Operation *, 8> PendingResultErase;
+
   bool Changed = false;
   for (Operation *Op : ToRewrite) {
     auto Callee = Op->getAttrOfType<StringAttr>("callee");
@@ -916,7 +921,24 @@ bool runLowerPlot(ModuleOp M) {
           emitPropSetters(Op, pos_n, H, Strings);
         }
       }
-      Op->erase();
+      /* If the original call had a result with uses (`hSurf = surf(...)`
+       * / `h = plot(...)`), the rewriters above synthesised a void
+       * runtime call and didn't replace the result. Stash these for a
+       * post-loop cleanup sweep instead of erasing in-line — erasing
+       * ops while still iterating ToRewrite can leave stale Operation
+       * pointers in MLIR's internal worklists (the trailing
+       * LowerScalarsToArith sweep then crashes in propagateLiveness
+       * with a use-after-free).
+       *
+       * Skip erasing Op itself when its result has uses; defer to the
+       * cleanup pass below. */
+      bool ResultUsed = Op->getNumResults() == 1 &&
+                        !Op->getResult(0).use_empty();
+      if (ResultUsed) {
+        PendingResultErase.push_back(Op);
+      } else {
+        Op->erase();
+      }
       Changed = true;
     } else if (pairs) {
       /* Rewrite failed — restore original operands so other passes can
@@ -926,6 +948,30 @@ bool runLowerPlot(ModuleOp M) {
       for (Value V : KeptProps) All.push_back(V);
       Op->setOperands(All);
     }
+  }
+
+  /* Now drop the use chains for calls whose result was assigned into a
+   * named variable. The user is either a `matlab.store` (file-emit
+   * top-level slot) or a `matlab.call_builtin @matlab_ws_set_*` (REPL
+   * workspace bag). Walking each pending op's result users is safe
+   * here — we're outside the ToRewrite loop, so no stale Operation
+   * pointers in any iteration. */
+  for (Operation *Op : PendingResultErase) {
+    if (Op->getNumResults() != 1) continue;
+    llvm::SmallVector<Operation *, 4> Users(
+        Op->getResult(0).getUsers().begin(),
+        Op->getResult(0).getUsers().end());
+    for (Operation *U : Users) {
+      if (isMatlabOp(U, "matlab.store")) { U->erase(); continue; }
+      if (isMatlabOp(U, "matlab.call_builtin")) {
+        auto C = U->getAttrOfType<StringAttr>("callee");
+        if (C && C.getValue().starts_with("matlab_ws_set_"))
+          U->erase();
+      }
+    }
+    /* Result should be use_empty now; safe to erase the producing op. */
+    if (Op->getResult(0).use_empty())
+      Op->erase();
   }
 
   /* After erasing call_builtin ops, three matlab.* op kinds may be left
