@@ -29,7 +29,7 @@ cp "$ROOT/examples/mflowlink/lowpass.mflow" \
 
 cd "$SCRATCH"
 
-if ! "$ROOT/runtime/build_and_run.sh" "$SCRATCH/cross_dialect.m" \
+if ! "$ROOT/runtime/scripts/build_and_run.sh" "$SCRATCH/cross_dialect.m" \
      "$SCRATCH/cd" > "$SCRATCH/build.log" 2>&1; then
   echo "FAIL build_and_run.sh exit non-zero"
   sed 's/^/  /' "$SCRATCH/build.log" | tail -20

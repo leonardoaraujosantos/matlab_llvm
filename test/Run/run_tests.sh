@@ -16,18 +16,21 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 CLANG="${CLANG:-/opt/homebrew/opt/llvm/bin/clang}"
 # Runtime is C++ since Phase 3 of docs/port_runtime_2_cpp.md — drive the
 # link line with clang++ so the .cpp is compiled as C++.
-# Phase-2 + 2.5 split: three .cpp files share private layouts via
-# runtime_internal.h. All three must appear on every link line.
+# Post-2026-05 reorganization: core runtime stays at runtime/ top
+# level, per-toolbox runtimes live under runtime/toolbox/<name>/.
+# All share private layouts via runtime_internal.h; every TU must
+# appear on every link line.
 RUNTIME_SRCS=(
   "$ROOT/runtime/matlab_runtime.cpp"
   "$ROOT/runtime/runtime_debug.cpp"
   "$ROOT/runtime/runtime_complex.cpp"
-  "$ROOT/runtime/runtime_comm.cpp"
-  "$ROOT/runtime/runtime_prop.cpp"
-  "$ROOT/runtime/runtime_rf.cpp"
-  "$ROOT/runtime/runtime_pde.cpp"
   "$ROOT/runtime/runtime_sparse.cpp"
-  "$ROOT/runtime/runtime_optim.cpp"
+  "$ROOT/runtime/toolbox/prop/runtime_prop.cpp"
+  "$ROOT/runtime/toolbox/comm/runtime_comm.cpp"
+  "$ROOT/runtime/toolbox/rf/runtime_rf.cpp"
+  "$ROOT/runtime/toolbox/pde/runtime_pde.cpp"
+  "$ROOT/runtime/toolbox/optim/runtime_optim.cpp"
+  "$ROOT/runtime/toolbox/stateflow/runtime_mstateflow.cpp"
 )
 CXX="${CXX:-${CLANG}++}"
 TESTDIR="$(cd "$(dirname "$0")" && pwd)"

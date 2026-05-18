@@ -53,8 +53,8 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 RUNTIME_MAIN="$ROOT/runtime/matlab_runtime.cpp"
 RUNTIME_DEBUG="$ROOT/runtime/runtime_debug.cpp"
 RUNTIME_COMPLEX="$ROOT/runtime/runtime_complex.cpp"
-RUNTIME_COMM="$ROOT/runtime/runtime_comm.cpp"
-RUNTIME_PROP="$ROOT/runtime/runtime_prop.cpp"
+RUNTIME_COMM="$ROOT/runtime/toolbox/comm/runtime_comm.cpp"
+RUNTIME_PROP="$ROOT/runtime/toolbox/prop/runtime_prop.cpp"
 TESTDIR="$(cd "$(dirname "$0")" && pwd)"
 
 pass=0; fail=0

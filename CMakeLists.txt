@@ -253,6 +253,10 @@ endif()
 add_executable(matlabc
   tools/matlabc/main.cpp
   tools/matlabc/MflowLinkJit.cpp)
+# Runtime TUs live under runtime/ and runtime/toolbox/<name>/ — they
+# all reference shared headers (matlab_runtime.h / runtime_internal.h)
+# via unqualified #include, so the include path needs runtime/ on it.
+target_include_directories(matlabc PRIVATE ${CMAKE_SOURCE_DIR}/runtime)
 # MatlabMIR and MatlabParse PUBLIC-link the rest transitively;
 # listing them explicitly here would duplicate them on the link line
 # (ld64 warns "ignoring duplicate libraries").
@@ -276,15 +280,15 @@ if(MATLAB_LLVM_WITH_MLIR)
     runtime/matlab_runtime.cpp
     runtime/runtime_debug.cpp
     runtime/runtime_complex.cpp
-    runtime/runtime_prop.cpp
-    runtime/runtime_comm.cpp
-    runtime/runtime_rf.cpp
-    runtime/runtime_pde.cpp
     runtime/runtime_sparse.cpp
-    runtime/runtime_optim.cpp
-    runtime/runtime_mstateflow.cpp)
+    runtime/toolbox/prop/runtime_prop.cpp
+    runtime/toolbox/comm/runtime_comm.cpp
+    runtime/toolbox/rf/runtime_rf.cpp
+    runtime/toolbox/pde/runtime_pde.cpp
+    runtime/toolbox/optim/runtime_optim.cpp
+    runtime/toolbox/stateflow/runtime_mstateflow.cpp)
   if(MATLAB_LLVM_WITH_SYM)
-    target_sources(matlabc PRIVATE runtime/runtime_sym.cpp)
+    target_sources(matlabc PRIVATE runtime/toolbox/sym/runtime_sym.cpp)
     target_link_libraries(matlabc PRIVATE SymPP::sympp)
     target_compile_definitions(matlabc PRIVATE MATLAB_LLVM_WITH_SYM=1)
   endif()
@@ -351,13 +355,13 @@ foreach(_rt_test IN ITEMS linalg shape rng complex reduce signal stats image mor
     runtime/matlab_runtime.cpp
     runtime/runtime_debug.cpp
     runtime/runtime_complex.cpp
-    runtime/runtime_prop.cpp
-    runtime/runtime_comm.cpp
-    runtime/runtime_rf.cpp
-    runtime/runtime_pde.cpp
     runtime/runtime_sparse.cpp
-    runtime/runtime_optim.cpp
-    runtime/runtime_mstateflow.cpp)
+    runtime/toolbox/prop/runtime_prop.cpp
+    runtime/toolbox/comm/runtime_comm.cpp
+    runtime/toolbox/rf/runtime_rf.cpp
+    runtime/toolbox/pde/runtime_pde.cpp
+    runtime/toolbox/optim/runtime_optim.cpp
+    runtime/toolbox/stateflow/runtime_mstateflow.cpp)
   target_include_directories(${_rt_target} PRIVATE
     ${CMAKE_SOURCE_DIR}/runtime
     ${CMAKE_SOURCE_DIR}/test/Runtime)
@@ -386,11 +390,11 @@ endforeach()
 # TUs only; the legacy matlab_runtime.cpp + sibling TUs predate the
 # convention and would generate thousands of warnings if flagged.
 set_source_files_properties(
-  runtime/runtime_comm.cpp
-  runtime/runtime_optim.cpp
-  runtime/runtime_rf.cpp
-  runtime/runtime_prop.cpp
-  runtime/runtime_mstateflow.cpp
+  runtime/toolbox/comm/runtime_comm.cpp
+  runtime/toolbox/optim/runtime_optim.cpp
+  runtime/toolbox/rf/runtime_rf.cpp
+  runtime/toolbox/prop/runtime_prop.cpp
+  runtime/toolbox/stateflow/runtime_mstateflow.cpp
   PROPERTIES COMPILE_OPTIONS "-Wold-style-cast;-Werror=old-style-cast")
 
 if(MATLAB_LLVM_WITH_PLOT)
@@ -401,11 +405,11 @@ if(MATLAB_LLVM_WITH_PLOT)
       runtime/matlab_runtime.cpp
       runtime/runtime_debug.cpp
       runtime/runtime_complex.cpp
-      runtime/runtime_prop.cpp
-      runtime/runtime_comm.cpp
-      runtime/runtime_rf.cpp
-      runtime/runtime_pde.cpp
       runtime/runtime_sparse.cpp
+      runtime/toolbox/prop/runtime_prop.cpp
+      runtime/toolbox/comm/runtime_comm.cpp
+      runtime/toolbox/rf/runtime_rf.cpp
+      runtime/toolbox/pde/runtime_pde.cpp
       ${MATLAB_PLOT_SOURCES})
     target_include_directories(${_plot_target} PRIVATE
       ${CMAKE_SOURCE_DIR}/runtime)
@@ -544,7 +548,7 @@ add_test(
 )
 # mflowLink Tier-G smoke lane — emit + compile + run + diff. Each
 # example .mflow gets emitted to a standalone C++ file via
-# `-emit-mflowlink-cpp`, built with `runtime/build_mflowlink.sh`,
+# `-emit-mflowlink-cpp`, built with `runtime/scripts/build_mflowlink.sh`,
 # and its CSV output is diffed byte-for-byte against the in-process
 # `matlabc -simulate` interpreter on the same input.
 add_test(

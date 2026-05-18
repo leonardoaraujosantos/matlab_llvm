@@ -24,26 +24,59 @@ Authoritative numbers (2026-05-17):
 
 ## 1. Translation-unit map
 
+The runtime is laid out as **core at the top level**, **per-toolbox TUs
+under `runtime/toolbox/<name>/`**, **shims under `runtime/shim/`**,
+and **build helpers under `runtime/scripts/`**:
+
+```
+runtime/
+  matlab_runtime.{cpp,h,hpp}    # core kernel
+  runtime_internal.h            # private layouts shared across TUs
+  runtime_complex.cpp           # core complex math + FFT
+  runtime_debug.cpp             # DAP/REPL infra
+  runtime_sparse.cpp            # CSR + Krylov (PDE prereq, general infra)
+  matlab_plot.h                 # plot header
+  toolbox/
+    comm/        runtime_comm.cpp + comm_class_*.m
+    rf/          runtime_rf.cpp + 14 rf_class_*.m
+    optim/       runtime_optim.cpp + optim_classdefs.m
+    pde/         runtime_pde.cpp + pde_classdefs.m
+    prop/        runtime_prop.cpp + 3 site classdefs
+    sym/         runtime_sym.cpp + runtime_sym.h
+    stateflow/   runtime_mstateflow.cpp + 2 classdef helpers
+    antenna/     2 ant_class_*.m   (runtime entries live in toolbox/prop/runtime_prop.cpp)
+    control/     cst_classdefs.m + 4 cst_class_*.m
+  mflowlink/     runtime_mflowlink_call.cpp
+  shim/          matlab_runtime.{py,ts} + numpy_ts.ts + cocotb_fi.py
+  scripts/       build_and_run.sh + build_mflowlink.sh
+  plot/          Cairo backend (c_api.cpp / cairo_render.cpp / etc.)
+```
+
 ```mermaid
 flowchart LR
-  subgraph Core["Core numerical kernel"]
+  subgraph Core["Core numerical kernel (runtime/)"]
     direction TB
     MR[matlab_runtime.cpp<br/>~15.7 kLOC · 385 entries<br/>matrix kernels · linalg · FFT<br/>signal · stats · image · int<br/>fi · strings · structs · cells]
     CX[runtime_complex.cpp<br/>~2.6 kLOC · 57 entries<br/>complex arith · FFT · LU]
     DB[runtime_debug.cpp<br/>~3.1 kLOC · 75 entries<br/>DAP hooks · workspace mirror<br/>per-kind variable rendering]
+    SP[runtime_sparse.cpp<br/>~0.8 kLOC · 17 entries<br/>CSR · PCG · MINRES · GMRES]
   end
 
-  subgraph Toolboxes["Per-toolbox runtimes"]
+  subgraph Toolboxes["Per-toolbox runtimes (runtime/toolbox/<name>/)"]
     direction TB
-    PDE[runtime_pde.cpp<br/>~7.0 kLOC · 111 entries<br/>FEM · sparse · STL/GLB]
-    SP[runtime_sparse.cpp<br/>~0.8 kLOC · 17 entries<br/>CSR · PCG · MINRES · GMRES]
-    RF[runtime_rf.cpp<br/>~6.1 kLOC · 85 entries<br/>S-params · cascade · VF · TL]
-    CM[runtime_comm.cpp<br/>~3.1 kLOC · 85 entries<br/>mod/demod · CRC · Viterbi<br/>LDPC · Polar · Turbo]
-    OP[runtime_optim.cpp<br/>~2.5 kLOC · 33 entries<br/>fzero · fmincon · linprog<br/>quadprog · intlinprog]
-    PR[runtime_prop.cpp<br/>~1.7 kLOC · 33 entries<br/>path loss · ITM · coverage<br/>antenna patterns + dipole]
-    SY[runtime_sym.cpp<br/>~0.8 kLOC · 95 entries<br/>SymPP bridge · sym + symmat]
-    SF[runtime_mstateflow.cpp<br/>~0.4 kLOC · 23 entries<br/>chart event queue · snapshot ring]
-    ML[runtime_mflowlink_call.cpp<br/>~0.1 kLOC · 2 entries<br/>mflowLink runner ABI]
+    PDE[pde/runtime_pde.cpp<br/>~7.0 kLOC · 111 entries<br/>FEM · STL/GLB]
+    RF[rf/runtime_rf.cpp<br/>~6.1 kLOC · 85 entries<br/>S-params · cascade · VF · TL]
+    CM[comm/runtime_comm.cpp<br/>~3.1 kLOC · 85 entries<br/>mod/demod · CRC · Viterbi<br/>LDPC · Polar · Turbo]
+    OP[optim/runtime_optim.cpp<br/>~2.5 kLOC · 33 entries<br/>fzero · fmincon · linprog<br/>quadprog · intlinprog]
+    PR[prop/runtime_prop.cpp<br/>~1.7 kLOC · 33 entries<br/>path loss · ITM · coverage<br/>antenna patterns + dipole]
+    SY[sym/runtime_sym.cpp<br/>~0.8 kLOC · 95 entries<br/>SymPP bridge · sym + symmat]
+    SF[stateflow/runtime_mstateflow.cpp<br/>~0.4 kLOC · 23 entries<br/>chart event queue · snapshot ring]
+  end
+
+  subgraph Other["Other runtime"]
+    ML[mflowlink/runtime_mflowlink_call.cpp<br/>~0.1 kLOC · 2 entries]
+    SH[shim/matlab_runtime.{py,ts}<br/>numpy_ts.ts + cocotb_fi.py]
+    SC[scripts/build_and_run.sh<br/>scripts/build_mflowlink.sh]
   end
 
   Core --> Toolboxes
@@ -187,15 +220,15 @@ roadmap doc:
 
 | TU | LOC | Roadmap | Highlights |
 |---|---:|---|---|
-| `runtime_pde.cpp` | 7.0k | [`pde_toolbox_roadmap.md`](pde_toolbox_roadmap.md) | 11 shipped arcs · Tier-1 → 4 · sparse CSR + Krylov · T10 quadratic tets · Lanczos shift-invert · Craig-Bampton ROM · complex-Krylov frequency response · N-component coupled PDEs · `femodel` classdef façade · STL/GLB import |
+| `toolbox/pde/runtime_pde.cpp` | 7.0k | [`pde_toolbox_roadmap.md`](pde_toolbox_roadmap.md) | 11 shipped arcs · Tier-1 → 4 · sparse CSR + Krylov · T10 quadratic tets · Lanczos shift-invert · Craig-Bampton ROM · complex-Krylov frequency response · N-component coupled PDEs · `femodel` classdef façade · STL/GLB import |
 | `runtime_sparse.cpp` | 0.8k | (PDE prereq) | CSR descriptor, PCG, MINRES, ILU(0)-preconditioned GMRES |
-| `runtime_rf.cpp` | 6.1k | [`rf_toolbox_plan.md`](rf_toolbox_plan.md) + [`verilog_a_plan.md`](verilog_a_plan.md) | Tier-1 Touchstone v1/v2 · Tier-2 N-port S↔Y/Z/H/G/ABCD/T conversions + Redheffer cascade · Tier-3 Vector Fitting (real + complex pole pairs) + `rationalfit`/`freqresp`/`passivity`/`timeresp` · Tier-4 transmission-line geometries (microstrip / CPW / coax / two-wire / parallel-plate) + matching networks (L/T/Pi) + LC filter circuits · 15 RF classdefs · Verilog-A export Tier-1 → Tier-10 |
-| `runtime_comm.cpp` | 3.1k | [`comm_toolbox_roadmap.md`](comm_toolbox_roadmap.md) | Tier-1 base (`randi`/`rng`/`int2bit`/`awgn`/`biterr`/`symerr`) · Tier-2 modulation (PAM/PSK/QAM/FSK + `berawgn`) · Tier-3 channel coding (CRC/Hamming/convolutional + Viterbi/interleavers) · Tier-4 equalisers + sync + RF impairments · Tier-5 OFDM + Rayleigh/Rician fading + Alamouti OSTBC · Tier-6 spreading + source coding · Tier-7 modern codes (Polar SC, LDPC min-sum, Turbo PCCC max-log-MAP) |
-| `runtime_optim.cpp` | 2.5k | [`optim_toolbox_roadmap.md`](optim_toolbox_roadmap.md) | T1 `fzero`/`fminbnd`/`fminsearch`/`fminunc`/`linprog`/`lsqnonneg`/`fsolve` · T2 `fmincon` SQP/IP/`quadprog`/`lsqlin`/`lsqnonlin` LM · T3 `intlinprog`/`coneprog`/`fminimax`/`fgoalattain`/`fseminf` · T4 problem-based `optimvar`/`optimproblem`/`solve` expression-DAG · T5 `eqnproblem` |
-| `runtime_prop.cpp` | 1.7k | [`propagation_toolbox_roadmap.md`](propagation_toolbox_roadmap.md) + [`antenna_toolbox_roadmap.md`](antenna_toolbox_roadmap.md) | PROP-Tier-1a (ITU-R + cellular empirical + Fresnel + knife-edge + Haversine/Vincenty) · 2a (ITM Longley-Rice) · 2b (terrain profile + LOS + `linkBudget` + `coverageGrid`) · 3 (directional patterns + mount orientation + multi-site `coverageGridMulti`) · 1b (classdef wrappers) · ANT-Tier-2 closed-form thin-wire dipole |
-| `runtime_sym.cpp` | 0.8k | [`symbolic_toolbox_roadmap.md`](symbolic_toolbox_roadmap.md) | SymPP bridge · Tier-1 core CAS (`syms`/`simplify`/`solve`/`subs`) · Tier-2 calculus + transforms + ODE/PDE · Tier-3 sym matrices + multi-eq solvers · Tier-4 assumptions + numeric solvers + IVP. Opt-in via `-DMATLAB_LLVM_WITH_SYM=ON`. |
-| `runtime_mstateflow.cpp` | 0.4k | [`mStateflow_roadmap.md`](mStateflow_roadmap.md) | DAP event queue (state-enter/exit/transition-fired/super-step boundaries/event broadcast) · bounded FIFO event queue with drop-oldest · snapshot ring (save_blob/copy/count/reset) |
-| `runtime_mflowlink_call.cpp` | 0.1k | [`mflow_link_roadmap.md`](mflow_link_roadmap.md) | mflowLink-runner ABI bridge (compiler/runtime split point) |
+| `toolbox/rf/runtime_rf.cpp` | 6.1k | [`rf_toolbox_plan.md`](rf_toolbox_plan.md) + [`verilog_a_plan.md`](verilog_a_plan.md) | Tier-1 Touchstone v1/v2 · Tier-2 N-port S↔Y/Z/H/G/ABCD/T conversions + Redheffer cascade · Tier-3 Vector Fitting (real + complex pole pairs) + `rationalfit`/`freqresp`/`passivity`/`timeresp` · Tier-4 transmission-line geometries (microstrip / CPW / coax / two-wire / parallel-plate) + matching networks (L/T/Pi) + LC filter circuits · 15 RF classdefs · Verilog-A export Tier-1 → Tier-10 |
+| `toolbox/comm/runtime_comm.cpp` | 3.1k | [`comm_toolbox_roadmap.md`](comm_toolbox_roadmap.md) | Tier-1 base (`randi`/`rng`/`int2bit`/`awgn`/`biterr`/`symerr`) · Tier-2 modulation (PAM/PSK/QAM/FSK + `berawgn`) · Tier-3 channel coding (CRC/Hamming/convolutional + Viterbi/interleavers) · Tier-4 equalisers + sync + RF impairments · Tier-5 OFDM + Rayleigh/Rician fading + Alamouti OSTBC · Tier-6 spreading + source coding · Tier-7 modern codes (Polar SC, LDPC min-sum, Turbo PCCC max-log-MAP) |
+| `toolbox/optim/runtime_optim.cpp` | 2.5k | [`optim_toolbox_roadmap.md`](optim_toolbox_roadmap.md) | T1 `fzero`/`fminbnd`/`fminsearch`/`fminunc`/`linprog`/`lsqnonneg`/`fsolve` · T2 `fmincon` SQP/IP/`quadprog`/`lsqlin`/`lsqnonlin` LM · T3 `intlinprog`/`coneprog`/`fminimax`/`fgoalattain`/`fseminf` · T4 problem-based `optimvar`/`optimproblem`/`solve` expression-DAG · T5 `eqnproblem` |
+| `toolbox/prop/runtime_prop.cpp` | 1.7k | [`propagation_toolbox_roadmap.md`](propagation_toolbox_roadmap.md) + [`antenna_toolbox_roadmap.md`](antenna_toolbox_roadmap.md) | PROP-Tier-1a (ITU-R + cellular empirical + Fresnel + knife-edge + Haversine/Vincenty) · 2a (ITM Longley-Rice) · 2b (terrain profile + LOS + `linkBudget` + `coverageGrid`) · 3 (directional patterns + mount orientation + multi-site `coverageGridMulti`) · 1b (classdef wrappers) · ANT-Tier-2 closed-form thin-wire dipole |
+| `toolbox/sym/runtime_sym.cpp` | 0.8k | [`symbolic_toolbox_roadmap.md`](symbolic_toolbox_roadmap.md) | SymPP bridge · Tier-1 core CAS (`syms`/`simplify`/`solve`/`subs`) · Tier-2 calculus + transforms + ODE/PDE · Tier-3 sym matrices + multi-eq solvers · Tier-4 assumptions + numeric solvers + IVP. Opt-in via `-DMATLAB_LLVM_WITH_SYM=ON`. |
+| `toolbox/stateflow/runtime_mstateflow.cpp` | 0.4k | [`mStateflow_roadmap.md`](mStateflow_roadmap.md) | DAP event queue (state-enter/exit/transition-fired/super-step boundaries/event broadcast) · bounded FIFO event queue with drop-oldest · snapshot ring (save_blob/copy/count/reset) |
+| `mflowlink/runtime_mflowlink_call.cpp` | 0.1k | [`mflow_link_roadmap.md`](mflow_link_roadmap.md) | mflowLink-runner ABI bridge (compiler/runtime split point) |
 
 ---
 
@@ -360,8 +393,8 @@ or null deref across the full numerical surface.
 ### 6.2 Code-quality enforcements
 
 - **`-Wold-style-cast` + `-Werror=old-style-cast`** enforced on the
-  five new toolbox TUs (`runtime_comm.cpp` / `runtime_optim.cpp` /
-  `runtime_rf.cpp` / `runtime_prop.cpp` / `runtime_mstateflow.cpp`).
+  five new toolbox TUs (`toolbox/comm/runtime_comm.cpp` / `toolbox/optim/runtime_optim.cpp` /
+  `toolbox/rf/runtime_rf.cpp` / `toolbox/prop/runtime_prop.cpp` / `toolbox/stateflow/runtime_mstateflow.cpp`).
   All casts use `static_cast<>` / `reinterpret_cast<>` / `const_cast<>`
   on those modules. Legacy `matlab_runtime.cpp` predates the
   convention and is exempt.

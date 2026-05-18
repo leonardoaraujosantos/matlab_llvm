@@ -37,7 +37,7 @@ RUNTIME_SRCS=(
   "$ROOT/runtime/matlab_runtime.cpp"
   "$ROOT/runtime/runtime_debug.cpp"
   "$ROOT/runtime/runtime_complex.cpp"
-  "$ROOT/runtime/runtime_sym.cpp"
+  "$ROOT/runtime/toolbox/sym/runtime_sym.cpp"
 )
 
 pass=0; fail=0

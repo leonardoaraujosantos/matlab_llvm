@@ -41,9 +41,9 @@ RUNTIME_SRCS=(
   "$ROOT/runtime/matlab_runtime.cpp"
   "$ROOT/runtime/runtime_debug.cpp"
   "$ROOT/runtime/runtime_complex.cpp"
-  "$ROOT/runtime/runtime_comm.cpp"
-  "$ROOT/runtime/runtime_prop.cpp"
-  "$ROOT/runtime/runtime_rf.cpp"
+  "$ROOT/runtime/toolbox/comm/runtime_comm.cpp"
+  "$ROOT/runtime/toolbox/prop/runtime_prop.cpp"
+  "$ROOT/runtime/toolbox/rf/runtime_rf.cpp"
 )
 
 # Cosim is selective: only a subset of examples have 1-in/1-out

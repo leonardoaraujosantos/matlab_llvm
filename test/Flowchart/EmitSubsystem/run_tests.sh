@@ -24,7 +24,7 @@ trap 'rm -rf "$SCRATCH"' EXIT
 # `matlab_runtime.py` ships alongside the compiler — surface it on
 # PYTHONPATH so the emitted Python's `import matlab_runtime as rt`
 # resolves to the shipped helpers (rt.sin_s / rt.abs_s / ...).
-export PYTHONPATH="$ROOT/runtime${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH="$ROOT/runtime/shim${PYTHONPATH:+:$PYTHONPATH}"
 
 pass=0; fail=0
 fails=()

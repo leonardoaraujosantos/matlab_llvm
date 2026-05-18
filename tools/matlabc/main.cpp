@@ -2083,14 +2083,29 @@ static std::string buildReplPrelude(const std::string &Src) {
     return wordHit(Name, '(', '=');
   };
   /* CST prelude classes: tf lives in cst_classdefs.m (shares
-   * cst_polyadd helpers); ss / zpk / pid / frd have per-class files. */
+   * cst_polyadd helpers); ss / zpk / pid / frd have per-class files.
+   *
+   * The 2026-05 runtime reorganization moved per-toolbox `.m` files
+   * into `runtime/toolbox/<name>/`. The candidate list below probes
+   * both the flat layout (legacy / unused) and every toolbox subdir
+   * so a single Leaf lookup finds the file wherever it lives. */
+  static const char *kToolboxDirs[] = {
+    "comm", "rf", "optim", "pde", "prop", "sym",
+    "stateflow", "antenna", "control",
+  };
   std::vector<std::string> Files;
   auto add = [&](const std::string &Leaf) {
-    std::vector<std::string> Cands = {
-      g_MatlabcBinDir + "/../runtime/" + Leaf,
-      g_MatlabcBinDir + "/runtime/" + Leaf,
-      g_MatlabcBinDir + "/../share/matlabc/runtime/" + Leaf,
-    };
+    std::vector<std::string> Cands;
+    /* Flat layout (legacy fallback + share/ install layout). */
+    Cands.push_back(g_MatlabcBinDir + "/../runtime/" + Leaf);
+    Cands.push_back(g_MatlabcBinDir + "/runtime/" + Leaf);
+    Cands.push_back(g_MatlabcBinDir + "/../share/matlabc/runtime/" + Leaf);
+    /* Per-toolbox subdirs (post-reorg layout). */
+    for (const char *Tb : kToolboxDirs) {
+      Cands.push_back(g_MatlabcBinDir + "/../runtime/toolbox/" + Tb + "/" + Leaf);
+      Cands.push_back(g_MatlabcBinDir + "/runtime/toolbox/" + std::string(Tb) + "/" + Leaf);
+      Cands.push_back(g_MatlabcBinDir + "/../share/matlabc/runtime/toolbox/" + Tb + "/" + Leaf);
+    }
     for (auto &C : Cands) {
       std::ifstream Fp(C);
       if (Fp) {
@@ -10061,6 +10076,11 @@ static int emitCocotbHarnessForDiagram(const char *Self,
     char Real[PATH_MAX];
     if (realpath(Bin.c_str(), Real)) Bin = Real;
     std::vector<std::string> Cands = {
+      /* Post-2026-05 layout: runtime/shim/. */
+      Bin + "/../runtime/shim/matlab_runtime.py",
+      Bin + "/runtime/shim/matlab_runtime.py",
+      Bin + "/../share/matlabc/runtime/shim/matlab_runtime.py",
+      /* Legacy flat layout (fallback for older installs). */
       Bin + "/../runtime/matlab_runtime.py",
       Bin + "/runtime/matlab_runtime.py",
       Bin + "/../share/matlabc/runtime/matlab_runtime.py",
@@ -10248,6 +10268,11 @@ int emitCocotbHarness(const char *Self, const Options &Opts,
     char Real[PATH_MAX];
     if (realpath(Bin.c_str(), Real)) Bin = Real;
     std::vector<std::string> Cands = {
+      /* Post-2026-05 layout: runtime/shim/. */
+      Bin + "/../runtime/shim/matlab_runtime.py",
+      Bin + "/runtime/shim/matlab_runtime.py",
+      Bin + "/../share/matlabc/runtime/shim/matlab_runtime.py",
+      /* Legacy flat layout (fallback for older installs). */
       Bin + "/../runtime/matlab_runtime.py",
       Bin + "/runtime/matlab_runtime.py",
       Bin + "/../share/matlabc/runtime/matlab_runtime.py",
@@ -10892,7 +10917,12 @@ int main(int Argc, char **Argv) {
     if (realpath(Bin.c_str(), Real)) Bin = Real;
     std::string Leaf = (ClsName == "tf") ? "cst_classdefs.m"
                                           : ("cst_class_" + ClsName + ".m");
+    /* CST classdefs live in runtime/toolbox/control/ post-2026-05. */
     std::vector<std::string> Cands = {
+      Bin + "/../runtime/toolbox/control/" + Leaf,
+      Bin + "/runtime/toolbox/control/" + Leaf,
+      Bin + "/../share/matlabc/runtime/toolbox/control/" + Leaf,
+      /* Legacy flat-layout fallback. */
       Bin + "/../runtime/" + Leaf,
       Bin + "/runtime/" + Leaf,
       Bin + "/../share/matlabc/runtime/" + Leaf,
@@ -11087,11 +11117,21 @@ int main(int Argc, char **Argv) {
     std::string Bin = (last == std::string::npos) ? "." : SelfStr.substr(0, last);
     char Real[PATH_MAX];
     if (realpath(Bin.c_str(), Real)) Bin = Real;
-    std::vector<std::string> Cands = {
-      Bin + "/../runtime/" + Leaf,
-      Bin + "/runtime/" + Leaf,
-      Bin + "/../share/matlabc/runtime/" + Leaf,
+    /* 2026-05 reorganization: probe runtime/toolbox/<name>/ subdirs
+     * before falling back to the legacy flat layout. */
+    static const char *kToolboxDirs[] = {
+      "comm", "rf", "optim", "pde", "prop", "sym",
+      "stateflow", "antenna", "control",
     };
+    std::vector<std::string> Cands;
+    for (const char *Tb : kToolboxDirs) {
+      Cands.push_back(Bin + "/../runtime/toolbox/" + Tb + "/" + Leaf);
+      Cands.push_back(Bin + "/runtime/toolbox/" + std::string(Tb) + "/" + Leaf);
+      Cands.push_back(Bin + "/../share/matlabc/runtime/toolbox/" + Tb + "/" + Leaf);
+    }
+    Cands.push_back(Bin + "/../runtime/" + Leaf);
+    Cands.push_back(Bin + "/runtime/" + Leaf);
+    Cands.push_back(Bin + "/../share/matlabc/runtime/" + Leaf);
     for (auto &C : Cands) {
       std::ifstream Fp(C);
       if (Fp) {

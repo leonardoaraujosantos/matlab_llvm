@@ -2,7 +2,7 @@
 # Tier-G smoke test for `-emit-mflowlink-cpp`.
 #
 # For each fixture .mflow, emit the C++, compile via
-# runtime/build_mflowlink.sh, run the binary, and diff its CSV
+# runtime/scripts/build_mflowlink.sh, run the binary, and diff its CSV
 # against `matlabc -simulate` (the in-process interpreter) on the
 # same input. A byte-identical match means the standalone codegen
 # lane reproduces the simulation exactly.
@@ -18,7 +18,7 @@ fi
 MATLABC="$(cd "$(dirname "$MATLABC")" && pwd)/$(basename "$MATLABC")"
 
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
-BUILDER="$ROOT/runtime/build_mflowlink.sh"
+BUILDER="$ROOT/runtime/scripts/build_mflowlink.sh"
 EX="$ROOT/examples/mflowlink"
 SCRATCH="$(mktemp -d)"
 trap 'rm -rf "$SCRATCH"' EXIT

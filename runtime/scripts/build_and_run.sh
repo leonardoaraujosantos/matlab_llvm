@@ -19,25 +19,33 @@
 #   uses the regular matlabc + the 3-file base runtime.
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-RUNTIME_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+RUNTIME_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
-# Phase-2 + 2.5 split (docs/port_runtime_2_cpp.md): runtime is three
-# .cpp files sharing private layouts via runtime_internal.h.
+# Multi-TU runtime layout (post-2026-05 reorganization):
+#   $RUNTIME_DIR/matlab_runtime.cpp    — core kernel
+#   $RUNTIME_DIR/runtime_*.cpp         — core helpers (debug/complex/sparse)
+#   $RUNTIME_DIR/toolbox/<name>/runtime_<name>.cpp
+#                                      — per-toolbox runtimes
+# See docs/runtime.md for the architecture reference.
 #
-# runtime_rf.cpp is unconditional: it has no external library
-# dependencies (unlike the Plot / Sym lanes below) and the CMake
-# static-library targets already include it unconditionally. Linking
-# it here is what lets `writeVerilogA*`, `rationalfit`,
-# `touchstoneWrite`, and the rest of the RF Toolbox surface resolve
-# when matlabc-emitted .ll references their `_matlab_rf_*` symbols.
+# All TUs are unconditional: they have no external library dependencies
+# (unlike the Plot / Sym lanes below) and the CMake static-library
+# targets already include them unconditionally. Linking them here is
+# what lets `writeVerilogA*`, `rationalfit`, `touchstoneWrite`,
+# `fmincon`, `coverageGrid`, etc. resolve when matlabc-emitted .ll
+# references their `_matlab_<toolbox>_*` symbols.
 RUNTIME_SRCS=(
   "$RUNTIME_DIR/matlab_runtime.cpp"
   "$RUNTIME_DIR/runtime_debug.cpp"
   "$RUNTIME_DIR/runtime_complex.cpp"
-  "$RUNTIME_DIR/runtime_prop.cpp"
-  "$RUNTIME_DIR/runtime_comm.cpp"
-  "$RUNTIME_DIR/runtime_rf.cpp"
+  "$RUNTIME_DIR/runtime_sparse.cpp"
+  "$RUNTIME_DIR/toolbox/prop/runtime_prop.cpp"
+  "$RUNTIME_DIR/toolbox/comm/runtime_comm.cpp"
+  "$RUNTIME_DIR/toolbox/rf/runtime_rf.cpp"
+  "$RUNTIME_DIR/toolbox/pde/runtime_pde.cpp"
+  "$RUNTIME_DIR/toolbox/optim/runtime_optim.cpp"
+  "$RUNTIME_DIR/toolbox/stateflow/runtime_mstateflow.cpp"
 )
 
 CLANG="${CLANG:-/opt/homebrew/opt/llvm/bin/clang}"
@@ -166,7 +174,7 @@ if [[ "$USES_SYM" == 1 ]]; then
     echo "       set SYMPP_PREFIX to override" >&2
     exit 2
   fi
-  RUNTIME_SRCS+=("$RUNTIME_DIR/runtime_sym.cpp")
+  RUNTIME_SRCS+=("$RUNTIME_DIR/toolbox/sym/runtime_sym.cpp")
   SYM_LINK_FLAGS=(
     -DMATLAB_LLVM_WITH_SYM=1
     "-I$SYMPP_PREFIX/include"
@@ -188,7 +196,7 @@ if [[ "$USES_MFLOWLINK" == 1 ]]; then
     echo "       (looked in $MATLABC_BUILD_DIR)" >&2
     exit 2
   fi
-  RUNTIME_SRCS+=("$RUNTIME_DIR/runtime_mflowlink_call.cpp")
+  RUNTIME_SRCS+=("$RUNTIME_DIR/mflowlink/runtime_mflowlink_call.cpp")
   MFLOWLINK_LINK_FLAGS=(
     -I"$ROOT/include"
     "$MATLABC_BUILD_DIR/libMatlabFlowchart.a"

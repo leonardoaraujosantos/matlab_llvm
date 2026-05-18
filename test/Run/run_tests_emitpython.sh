@@ -32,7 +32,7 @@ PY="${PYTHON:-python3}"
 UPDATE="${UPDATE:-0}"
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-RUNTIME_DIR="$ROOT/runtime"
+RUNTIME_DIR="$ROOT/runtime/shim"
 TESTDIR="$(cd "$(dirname "$0")" && pwd)"
 
 pass=0; fail=0; skip=0

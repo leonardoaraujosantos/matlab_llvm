@@ -42,7 +42,7 @@ ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 EX="$ROOT/examples/mflowlink/coder"
 SCRATCH="$(mktemp -d)"
 trap 'rm -rf "$SCRATCH"' EXIT
-export PYTHONPATH="$ROOT/runtime${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH="$ROOT/runtime/shim${PYTHONPATH:+:$PYTHONPATH}"
 
 pass=0; fail=0
 fails=()

@@ -2,7 +2,7 @@
 # Build a Tier-G `-emit-mflowlink-cpp`-generated simulator.
 #
 # Usage:
-#   runtime/build_mflowlink.sh <generated.cpp> [<output-binary>]
+#   runtime/scripts/build_mflowlink.sh <generated.cpp> [<output-binary>]
 #
 # Compiles the generated C++ against the matlab_llvm Flowchart static
 # libs. The resulting binary is fully self-contained: it embeds the
@@ -22,7 +22,7 @@ fi
 SRC="$1"
 OUT="${2:-${SRC%.cpp}}"
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 INC="$ROOT/include"
 LIB="$ROOT/build"
 

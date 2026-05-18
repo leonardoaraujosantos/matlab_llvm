@@ -6,16 +6,16 @@
 > current architecture, ABI conventions, and per-TU contents.
 >
 > This document is **kept as a design record** of the port itself,
-> not as the runtime reference. References to `runtime/matlab_runtime.c`
-> in the body below describe the **starting state** of the port; the
-> current location is `runtime/matlab_runtime.cpp` and the other 11
-> sibling `.cpp` files.
+> not as the runtime reference. Where the body below refers to the
+> pre-port file by its original `.c` extension, that's describing
+> the **starting state** of the port; the current location is
+> `runtime/matlab_runtime.cpp` plus 11 sibling `.cpp` files.
 
 ---
 
-Plan for migrating `runtime/matlab_runtime.cpp` (originally
-`matlab_runtime.c` — ~8200 lines after Tier-1/2/3, ~485 functions) from
-C to modern C++. The companion file
+Plan for migrating the runtime (the pre-port `runtime/matlab_runtime.c`
+— ~8200 lines after Tier-1/2/3, ~485 functions; now
+`runtime/matlab_runtime.cpp`) from C to modern C++. The companion file
 [`runtime/matlab_runtime.hpp`](../runtime/matlab_runtime.hpp) is the
 existing thin C++ wrapper exposed to the EmitC C++ path; it stays.
 
@@ -44,8 +44,9 @@ unit, and zero direct unit-test coverage.
 **Non-goals.**
 
 - **Do not change the public ABI.** The runtime is loaded into `matlabc`
-  via `target_sources(matlabc PRIVATE runtime/matlab_runtime.c)` at
-  `CMakeLists.txt:173` and JIT-emitted code resolves symbols by C name
+  via `target_sources(matlabc PRIVATE runtime/matlab_runtime.cpp …)`
+  in `CMakeLists.txt` (one entry per TU after the split) and JIT-
+  emitted code resolves symbols by C name
   through `LLJIT::DynamicLibrarySearchGenerator::GetForCurrentProcess`.
   425 call sites in `lib/MLIR/` and `lib/MIR/` reference runtime symbols
   by string literal. All public functions stay `extern "C"` with their
@@ -117,8 +118,10 @@ numbers.
 ## Phase 1 — Direct runtime unit tests (prerequisite) — **in progress**
 
 Initial cut landed alongside Phase 0. Five C harnesses live under
-`test/Runtime/`, register as CTest entries, link
-`runtime/matlab_runtime.c` directly, and run in under 2 seconds total.
+`test/Runtime/`, register as CTest entries, link the runtime TUs
+(`runtime/matlab_runtime.cpp` plus the post-split sibling `.cpp`
+files — see [`runtime.md`](runtime.md)) directly, and run in
+under 2 seconds total.
 
 **Wired in this round.**
 
@@ -152,8 +155,10 @@ former C build.
 
 The struct layouts (`rt_test_mat_layout`, `rt_test_matc_layout` in
 `test/Runtime/runtime_test.h`) deliberately mirror the runtime's
-private definitions in `runtime/matlab_runtime.c` so tests can read
-output matrices field-by-field. If the runtime layout ever changes,
+private struct layouts (now in `runtime/runtime_internal.h`,
+historically defined inside the single `matlab_runtime.c` TU) so
+tests can read output matrices field-by-field. If the runtime
+layout ever changes,
 update the shims.
 
 **Coverage delta.** Adding the 5 original unit-test suites moved line
@@ -170,8 +175,9 @@ target line coverage.
 ### Phase 1 punch list — port-touched functions
 
 The Phase 4 RAII migration only touches functions that allocate.
-Scanning `runtime/matlab_runtime.c` for `mat_alloc` / `mat_c_alloc` /
-`malloc` / `calloc` call sites yields **111 such functions**. Crossed
+Scanning the pre-split `matlab_runtime.c` (now `matlab_runtime.cpp`)
+for `mat_alloc` / `mat_c_alloc` / `malloc` / `calloc` call sites
+yielded **111 such functions** at port time. Crossed
 against the Phase 0 coverage report:
 
 | Bucket                                         | Count | What to do                                                       |
