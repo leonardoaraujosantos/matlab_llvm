@@ -1,6 +1,8 @@
 #include "matlab/Sema/Resolver.h"
 #include "matlab/Sema/Type.h"
 
+#include <algorithm>
+#include <functional>
 #include <string>
 
 namespace matlab {

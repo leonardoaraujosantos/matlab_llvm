@@ -3,6 +3,7 @@
 #include "matlab/MIR/Builder.h"
 #include "matlab/MIR/MIR.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <string>
 

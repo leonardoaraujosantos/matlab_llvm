@@ -3,6 +3,7 @@
 #include "matlab/Sema/Scope.h"
 #include "matlab/Sema/Type.h"
 
+#include <algorithm>
 #include <ostream>
 #include <string>
 

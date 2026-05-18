@@ -27,7 +27,7 @@ concurrency:
 
 env:
   # apt.llvm.org repo channel for the LLVM/MLIR toolchain we build against.
-  LLVM_VERSION: '20'
+  LLVM_VERSION: '23'
 
 jobs:
   # -------------------------------------------------------------------------
@@ -48,14 +48,15 @@ jobs:
           wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
             | sudo gpg --dearmor -o /usr/share/keyrings/llvm.gpg
           UBUNTU_CODENAME=$(. /etc/os-release && echo "$VERSION_CODENAME")
-          echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/${UBUNTU_CODENAME}/ llvm-toolchain-${UBUNTU_CODENAME}-${LLVM_VERSION} main" \
+          echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/${UBUNTU_CODENAME}/ llvm-toolchain-${UBUNTU_CODENAME} main" \
             | sudo tee /etc/apt/sources.list.d/llvm.list
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
             cmake ninja-build ccache pkg-config \
             clang-${LLVM_VERSION} llvm-${LLVM_VERSION}-dev libmlir-${LLVM_VERSION}-dev \
             mlir-${LLVM_VERSION}-tools \
-            libcairo2-dev
+            libcairo2-dev \
+            libzstd-dev libcurl4-openssl-dev libedit-dev
           echo "LLVM_DIR=/usr/lib/llvm-${LLVM_VERSION}/lib/cmake/llvm" >> "$GITHUB_ENV"
           echo "MLIR_DIR=/usr/lib/llvm-${LLVM_VERSION}/lib/cmake/mlir" >> "$GITHUB_ENV"
           echo "CC=clang-${LLVM_VERSION}" >> "$GITHUB_ENV"
@@ -124,14 +125,15 @@ jobs:
           wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
             | sudo gpg --dearmor -o /usr/share/keyrings/llvm.gpg
           UBUNTU_CODENAME=$(. /etc/os-release && echo "$VERSION_CODENAME")
-          echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/${UBUNTU_CODENAME}/ llvm-toolchain-${UBUNTU_CODENAME}-${LLVM_VERSION} main" \
+          echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/${UBUNTU_CODENAME}/ llvm-toolchain-${UBUNTU_CODENAME} main" \
             | sudo tee /etc/apt/sources.list.d/llvm.list
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
             cmake ninja-build ccache pkg-config \
             clang-${LLVM_VERSION} llvm-${LLVM_VERSION}-dev libmlir-${LLVM_VERSION}-dev \
             mlir-${LLVM_VERSION}-tools \
-            libcairo2-dev
+            libcairo2-dev \
+            libzstd-dev libcurl4-openssl-dev libedit-dev
           echo "LLVM_DIR=/usr/lib/llvm-${LLVM_VERSION}/lib/cmake/llvm" >> "$GITHUB_ENV"
           echo "MLIR_DIR=/usr/lib/llvm-${LLVM_VERSION}/lib/cmake/mlir" >> "$GITHUB_ENV"
           echo "CC=clang-${LLVM_VERSION}" >> "$GITHUB_ENV"
@@ -198,7 +200,7 @@ jobs:
           wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
             | sudo gpg --dearmor -o /usr/share/keyrings/llvm.gpg
           UBUNTU_CODENAME=$(. /etc/os-release && echo "$VERSION_CODENAME")
-          echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/${UBUNTU_CODENAME}/ llvm-toolchain-${UBUNTU_CODENAME}-${LLVM_VERSION} main" \
+          echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/${UBUNTU_CODENAME}/ llvm-toolchain-${UBUNTU_CODENAME} main" \
             | sudo tee /etc/apt/sources.list.d/llvm.list
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
@@ -206,6 +208,7 @@ jobs:
             clang-${LLVM_VERSION} llvm-${LLVM_VERSION}-dev libmlir-${LLVM_VERSION}-dev \
             mlir-${LLVM_VERSION}-tools \
             libcairo2-dev \
+            libzstd-dev libcurl4-openssl-dev libedit-dev \
             verilator iverilog gtkwave \
             python3 python3-pip python3-venv
           echo "LLVM_DIR=/usr/lib/llvm-${LLVM_VERSION}/lib/cmake/llvm" >> "$GITHUB_ENV"

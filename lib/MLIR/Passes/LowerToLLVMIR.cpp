@@ -87,13 +87,19 @@ void attachDebugInfo(mlir::ModuleOp M) {
     /* No DWARF language code for MATLAB. DW_LANG_C is the closest
      * reasonable choice; lldb / gdb just need a recognisable language
      * to enable line stepping. */
+    /* LLVM 21 reshaped the DICompileUnitAttr::get overload set:
+     *   - The (DistinctAttr, ...) overload (no MLIRContext leading arg)
+     *     gained `isDebugInfoForProfiling` between `emissionKind` and
+     *     `nameTableKind`.
+     *   - A second overload with `(MLIRContext*, recId, isRecSelf, ...)`
+     *     was added for recursive DI attrs.
+     * Use the simpler (no-Ctx) form — defaults handle the trailing
+     * `nameTableKind` / `splitDebugFilename` / `importedEntities`. */
     auto CU = mlir::LLVM::DICompileUnitAttr::get(
-        Ctx, Id, llvm::dwarf::DW_LANG_C, File,
+        Id, llvm::dwarf::DW_LANG_C, File,
         mlir::StringAttr::get(Ctx, "matlabc"),
         /*isOptimized=*/false,
-        mlir::LLVM::DIEmissionKind::LineTablesOnly,
-        mlir::LLVM::DINameTableKind::Default,
-        /*splitDebugFilename=*/mlir::StringAttr{});
+        mlir::LLVM::DIEmissionKind::LineTablesOnly);
     CUByFile[filename.str()] = CU;
     return CU;
   };
