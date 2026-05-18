@@ -94,6 +94,37 @@ if grep -q "missing.*LLVMTranslationDialectInterface" <<<"$got"; then
   echo "$got"
 fi
 
+# 5. Plot-handle assignment: `hSurf = surfc(X, Y, Z)` previously
+#    crashed the REPL JIT with status 11 (SIGSEGV) because the
+#    void-rewritten call_builtin left a dangling
+#    `matlab_ws_set_obj` user that tripped the MLIR verifier when it
+#    formatted the dangling op. The disp sentinel only prints if the
+#    statement after the surf-with-assignment compiled and ran
+#    successfully.
+run_case "plot_handle_assign_no_crash" "$(cat <<'EOF'
+[X, Y, Z] = peaks(8);
+hSurf = surfc(X, Y, Z);
+disp('SURFC_ASSIGN_OK')
+hMesh = mesh(X, Y, Z);
+disp('MESH_ASSIGN_OK')
+hSurf2 = surfl(X, Y, Z);
+disp('SURFL_ASSIGN_OK')
+exit
+EOF
+)" "SURFL_ASSIGN_OK"
+# (Cross-check: the harness pipes 2>&1, so a runtime crash would
+# leak shell "Segmentation fault" output into $got and the substring
+# check above would miss it.  Belt + braces: rerun + capture exit
+# rc, fail if non-zero.)
+got_rc="$(printf '%s\n' '[X, Y, Z] = peaks(8);' 'hSurf = surfc(X, Y, Z);' \
+                       "exit" | "$MATLABC" -repl >/dev/null 2>&1; \
+          echo $?)"
+if [[ "$got_rc" != "0" ]]; then
+  fail=$((fail+1))
+  fails+=("plot_handle_assign_no_crash (exit rc=$got_rc, expected 0)")
+  echo "FAIL  plot_handle_assign_no_crash (rc=$got_rc)"
+fi
+
 echo "----"
 echo "passed: $pass    failed: $fail"
 if (( fail > 0 )); then
