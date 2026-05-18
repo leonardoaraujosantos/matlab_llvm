@@ -1041,6 +1041,15 @@ int runReplInput(mlirgen::Context &MCtx, const std::string &Src, int Id,
    * We do it here rather than calling lowerToLLVMIR so ExecutionEngine
    * can consume the module directly instead of via an intermediate
    * textual LLVM IR round-trip. */
+  /* Reject leftover matlab.* ops before the conversion pipeline —
+   * SCFToControlFlow / FuncToLLVM / etc. SIGSEGV on them when an
+   * unrecognized call shape leaves a `matlab.subscript` /
+   * `matlab.const_char` / `matlab.undef` on a `none`-typed value
+   * chain. See the comment on validateAllMatlabOpsLowered for the
+   * cascade we're preventing. */
+  if (mlir::failed(mlirgen::validateAllMatlabOpsLowered(M)))
+    return 1;
+
   mlir::PassManager PM(&MCtx.get());
   PM.addPass(mlir::createCanonicalizerPass());
   PM.addPass(mlir::createSCFToControlFlowPass());
@@ -3525,6 +3534,12 @@ bool compileProgram() {
     if (!getenv("MATLABC_DAP_DUMP")) mlirgen::printModule(std::cerr, M);
     return false;
   }
+
+  /* Reject leftover matlab.* ops before the conversion pipeline.
+   * See the runReplInput site above for the cascade we're
+   * preventing. */
+  if (mlir::failed(mlirgen::validateAllMatlabOpsLowered(M)))
+    return false;
 
   mlir::PassManager PM(&MCtx.get());
   PM.addPass(mlir::createCanonicalizerPass());
@@ -11587,6 +11602,18 @@ int main(int Argc, char **Argv) {
       auto M = mlirgen::lowerToMLIR(MCtx, TC, Diag, *TU, &SM,
                                     /*ReplMode=*/false,
                                     /*DebugMode=*/Opts.Debug);
+      /* Sema-emitted errors (undefined name 'X', missing required
+       * arg, etc.) get collected in Diag during MIR/MLIR generation.
+       * Without this check, malformed IR with placeholder ops
+       * (matlab.undef / matlab.call_indirect to a never-defined
+       * symbol / matlab.subscript on a none-typed value) propagates
+       * through the lowering passes and SIGSEGVs the
+       * SCFToControlFlow / FuncToLLVM passes that try to introspect
+       * operand types. Bail clean here. */
+      if (Diag.hasErrors()) {
+        Diag.printAll();
+        return 1;
+      }
       if (mlir::failed(mlir::verify(M))) {
         std::cerr << "error: MLIR verification failed after lowering\n";
         return 1;

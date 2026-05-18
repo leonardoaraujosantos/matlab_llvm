@@ -225,7 +225,9 @@ Unknown names fall back to `parula`.
 | 3D filled: `isosurface`, `slice`, `streamline`, `streamtube`, `coneplot`, `streamslice` | 1–2 weeks | Volume/vector-field family. Requires marching cubes for isosurfaces. |
 | `quiver3(x, y, z, u, v, w)` | 1 session | Same painter as 2D quiver but project endpoints first. |
 | `waterfall(X, Y, Z)`, `ribbon(Y)` | 2 sessions | Both are surface-variant painters; `ribbon` builds 3D strips from 2D series. |
-| `meshc` / `surfc` (mesh / surf with contour at base) | 1 session | Compose existing mesh/surf with a contour drawn at z = z_lo. |
+| `meshc` / `surfc` (mesh / surf with contour at base) | 1 session | Compose existing mesh/surf with a contour drawn at z = z_lo. **[2026-05 in-flight slice]** |
+| `peaks(N)` demo data generator | 1 session | Closed-form 3-return `[X, Y, Z] = peaks(N)`. The canonical "draw something interesting" 3-D fixture used in every MATLAB tutorial. Pairs with `surfc` above. **[2026-05 in-flight slice]** |
+| Additional colormaps (`magma` / `inferno` / `plasma` / `cividis` / `turbo`) | 1 session | Matplotlib-parity lookup tables. Lets users porting matplotlib scripts find the colormap they expect; closes the surprise gap users hit today (we ship gray / parula / jet / viridis / hot / cool only). **[2026-05 in-flight slice]** |
 | `triplot` / `trisurf` / `trimesh` (triangulated meshes) | 1 week | Read triangle index list; painter dispatches to existing mesh/surf primitives per face. |
 | Lighting: `light`, `lighting flat/gouraud/phong`, `material shiny/dull/metal`, `camlight` | 1 week | Per-face Lambertian (flat) is essentially what `surf` does today; `gouraud`/`phong` need per-vertex normals + cairo gradient tricks. |
 | Multi-series syntax `plot(x,y1,'r-', x,y2,'b--')` | 1 session | Detect alternating (vec, vec, opt-fmt) groups in `LowerPlot`. |

@@ -9928,6 +9928,75 @@ matlab_mat *matlab_ndgrid_Y(matlab_mat *x, matlab_mat *y) {
     return Y;
 }
 
+/* peaks(N) — MATLAB's canonical 3-D demo surface. Three-return form
+ * `[X, Y, Z] = peaks(N)` produces N×N grids over [-3, 3] × [-3, 3]
+ * and evaluates the standard peaks function:
+ *
+ *   Z = 3*(1-X).^2 .* exp(-X.^2 - (Y+1).^2)
+ *     - 10*(X/5 - X.^3 - Y.^5) .* exp(-X.^2 - Y.^2)
+ *     - (1/3) * exp(-(X+1).^2 - Y.^2)
+ *
+ * Three single-return entries mirror the meshgrid / care / pade pattern
+ * — Sema's multi-return splitter picks them up by name. */
+static void peaks_grid_(int64_t n, double *xs, double *ys) {
+    if (n < 1) return;
+    if (n == 1) { xs[0] = 0.0; ys[0] = 0.0; return; }
+    double step = 6.0 / static_cast<double>(n - 1);
+    for (int64_t i = 0; i < n; ++i) {
+        xs[i] = -3.0 + step * static_cast<double>(i);
+        ys[i] = xs[i];
+    }
+}
+matlab_mat *matlab_peaks_X(double nd) {
+    int64_t n = static_cast<int64_t>(nd);
+    if (n < 1) n = 1;
+    matlab_mat *X = mat_alloc(n, n);
+    double xs[2048]; (void)xs;
+    double *xsbuf = new double[n];
+    double *ysbuf = new double[n];
+    peaks_grid_(n, xsbuf, ysbuf);
+    for (int64_t i = 0; i < n; ++i)
+        for (int64_t j = 0; j < n; ++j)
+            X->data[i * n + j] = xsbuf[j];
+    delete[] xsbuf; delete[] ysbuf;
+    return X;
+}
+matlab_mat *matlab_peaks_Y(double nd) {
+    int64_t n = static_cast<int64_t>(nd);
+    if (n < 1) n = 1;
+    matlab_mat *Y = mat_alloc(n, n);
+    double *xsbuf = new double[n];
+    double *ysbuf = new double[n];
+    peaks_grid_(n, xsbuf, ysbuf);
+    for (int64_t i = 0; i < n; ++i)
+        for (int64_t j = 0; j < n; ++j)
+            Y->data[i * n + j] = ysbuf[i];
+    delete[] xsbuf; delete[] ysbuf;
+    return Y;
+}
+matlab_mat *matlab_peaks_Z(double nd) {
+    int64_t n = static_cast<int64_t>(nd);
+    if (n < 1) n = 1;
+    matlab_mat *Z = mat_alloc(n, n);
+    double *xsbuf = new double[n];
+    double *ysbuf = new double[n];
+    peaks_grid_(n, xsbuf, ysbuf);
+    for (int64_t i = 0; i < n; ++i) {
+        double y = ysbuf[i];
+        for (int64_t j = 0; j < n; ++j) {
+            double x = xsbuf[j];
+            double t1 = 3.0 * (1.0 - x) * (1.0 - x)
+                          * exp(-x*x - (y + 1.0) * (y + 1.0));
+            double t2 = 10.0 * (x / 5.0 - x*x*x - y*y*y*y*y)
+                          * exp(-x*x - y*y);
+            double t3 = (1.0 / 3.0) * exp(-(x + 1.0) * (x + 1.0) - y*y);
+            Z->data[i * n + j] = t1 - t2 - t3;
+        }
+    }
+    delete[] xsbuf; delete[] ysbuf;
+    return Z;
+}
+
 /*=========================================================================
  * Tier-2 builtins: xcorr, polyval, polyfit, roots, interp1, trapz,
  * cumtrapz, gradient, hamming, hann, blackman.

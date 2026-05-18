@@ -191,6 +191,123 @@ void stripMatlabFuncAttrs(mlir::ModuleOp M) {
   });
 }
 
+/* Walk the module for any unconverted matlab.* dialect ops left
+ * behind after the lowering pipeline. Each one is a bug somewhere —
+ * either a builtin call with an unrecognized argument shape (e.g.
+ * `figure('Color', RGB)` with a Name-Value pair the figure builtin
+ * doesn't accept), or a runtime entry name that no LowerTensorOps
+ * Spec row matched. Without this validator the next step
+ * (translateModuleToLLVMIR / ExecutionEngine::create) emits a
+ * cryptic "missing LLVMTranslationDialectInterface registration
+ * for dialect for op: matlab.X" — and on the JIT path the
+ * subsequent failure cascades into a SIGSEGV when the broken
+ * module is reused.
+ *
+ * This function emits a user-readable diagnostic per leftover op
+ * (with source location) and returns failure so the caller can bail
+ * cleanly before LLVM translation. */
+mlir::LogicalResult validateAllMatlabOpsLowered(mlir::ModuleOp M) {
+  /* Collect leftover matlab.* ops in two buckets:
+   *   - `Calls`:   `matlab.call_builtin` (the user-actionable kind —
+   *                we know the callee name and can give a precise
+   *                "unsupported call shape" message)
+   *   - `Others`:  every other leftover (`matlab.const_char`,
+   *                `matlab.subscript`, `matlab.alloc`/`store`/`load`,
+   *                `matlab.undef`, `matlab.call_indirect`, …).
+   *                These are usually downstream consequences of the
+   *                unsupported call_builtin.
+   *
+   * The walk-and-emit-during-walk variant deadlocks / SIGSEGVs on
+   * `none`-typed operand chains because MLIR's diagnostic
+   * infrastructure tries to format the producing op and chokes on
+   * the unconvertible types. Collect first, format-as-strings
+   * second, emit through `llvm::errs()` (not `mlir::emitError`) —
+   * raw-stream output is unconditional and doesn't introspect the
+   * op. */
+  llvm::SmallVector<mlir::Operation *, 16> Calls;
+  llvm::SmallVector<mlir::Operation *, 16> Indirects;
+  llvm::SmallVector<mlir::Operation *, 16> Others;
+  M.walk([&](mlir::Operation *Op) {
+    auto Name = Op->getName().getStringRef();
+    if (!Name.starts_with("matlab.")) return;
+    if (Name == "matlab.call_builtin")
+      Calls.push_back(Op);
+    else if (Name == "matlab.call_indirect")
+      Indirects.push_back(Op);
+    else
+      Others.push_back(Op);
+  });
+  if (Calls.empty() && Indirects.empty() && Others.empty())
+    return mlir::success();
+
+  for (mlir::Operation *Op : Calls) {
+    llvm::StringRef Callee;
+    if (auto CAttr = Op->getAttrOfType<mlir::StringAttr>("callee"))
+      Callee = CAttr.getValue();
+    /* Render the source location ourselves rather than going through
+     * mlir::emitError — the latter pretty-prints the op and can
+     * recurse into none-typed operand chains. */
+    std::string LocStr;
+    {
+      llvm::raw_string_ostream OS(LocStr);
+      Op->getLoc().print(OS);
+      OS.flush();
+    }
+    llvm::errs()
+        << LocStr << ": error: unsupported call shape for built-in "
+        << "function '" << Callee << "': "
+        << Op->getNumOperands() << " argument"
+        << (Op->getNumOperands() == 1 ? "" : "s")
+        << ", " << Op->getNumResults() << " return value"
+        << (Op->getNumResults() == 1 ? "" : "s")
+        << ". The frontend recognises this call but no lowering "
+           "pattern matches its argument types — most often this "
+           "is a Name-Value pair (e.g. `figure('Color', RGB)`) "
+           "or an arity the runtime doesn't yet implement. See "
+           "docs/feature_status.md / docs/plotting.md for the "
+           "currently supported call shapes.\n";
+  }
+  for (mlir::Operation *Op : Indirects) {
+    /* `matlab.call_indirect` survives when the callee is an
+     * undefined name — Sema emits a "undefined name 'X'" diagnostic
+     * but compilation continues with a placeholder. We can't tell
+     * the callee name from the op (it's been wrapped in an
+     * `undef`), but we can at least flag the call site. */
+    std::string LocStr;
+    {
+      llvm::raw_string_ostream OS(LocStr);
+      Op->getLoc().print(OS);
+      OS.flush();
+    }
+    llvm::errs() << LocStr
+                 << ": error: indirect call to an undefined name. "
+                    "Sema reported this earlier (see stderr above for "
+                    "the offending function name); the build cannot "
+                    "lower the placeholder call to LLVM IR.\n";
+  }
+  if (!Others.empty()) {
+    /* Aggregate the downstream-leftover ops into one line — listing
+     * each individually would be noisy and they're all symptoms of
+     * the call_builtin failures above. */
+    llvm::DenseMap<llvm::StringRef, unsigned> Counts;
+    for (mlir::Operation *Op : Others)
+      Counts[Op->getName().getStringRef()]++;
+    llvm::errs() << "note: " << Others.size()
+                 << " additional unconverted matlab.* op"
+                 << (Others.size() == 1 ? "" : "s")
+                 << " left in IR (";
+    bool First = true;
+    for (auto &P : Counts) {
+      if (!First) llvm::errs() << ", ";
+      llvm::errs() << P.second << "× " << P.first;
+      First = false;
+    }
+    llvm::errs() << ") — usually downstream of the unsupported "
+                    "call shapes reported above.\n";
+  }
+  return mlir::failure();
+}
+
 std::string lowerToLLVMIR(mlir::ModuleOp M, bool EmitDebugInfo) {
   mlir::MLIRContext *Ctx = M.getContext();
 
@@ -227,6 +344,26 @@ std::string lowerToLLVMIR(mlir::ModuleOp M, bool EmitDebugInfo) {
       }
     }
   }
+
+  /* Reject any leftover matlab.* dialect ops BEFORE the MLIR-to-LLVM
+   * conversion pipeline. The conversion passes (canonicalizer /
+   * scf-to-cf / cf-to-llvm / arith-to-llvm / func-to-llvm /
+   * reconcile-unrealized-casts) SIGSEGV when handed e.g.
+   * `matlab.subscript` on a `none`-typed value because they try to
+   * introspect operand types as part of legalization. Catching the
+   * unconverted ops here gives a clean diagnostic instead of a
+   * crash.
+   *
+   * This validator must precede the trailing LowerScalarsToArith
+   * sweep below — the greedy pattern driver in that sweep folds and
+   * canonicalises everything in the module, and dangling matlab.*
+   * ops (e.g. matlab.subscript on a none-typed value left over from
+   * an unsupported `set(handle(1), ...)` call shape) cause a
+   * use-after-free crash inside the worklist when the driver erases
+   * dead ops it can't fold. Validate first so we bail with a clean
+   * per-op diagnostic in those cases. */
+  if (mlir::failed(validateAllMatlabOpsLowered(M)))
+    return {};
 
   /* Final LowerScalarsToArith sweep — catches `matlab.sub` / `matlab.add`
    * / etc. ops whose operand types were refined to f64 only after the

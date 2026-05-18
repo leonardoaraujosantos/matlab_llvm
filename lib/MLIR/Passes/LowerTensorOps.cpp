@@ -2965,6 +2965,28 @@ bool TensorLowering::rewriteBuiltinCalls() {
         continue;
       }
     }
+    /* [X, Y, Z] = peaks(N) — canonical MATLAB 3-D demo surface. Single
+     * f64 argument, three ptr returns. Splits into three single-output
+     * runtime entries mirroring the meshgrid pattern. */
+    if (NA && NA.getValue().getSExtValue() == 3 &&
+        Name == "peaks" && Call->getNumOperands() == 1 &&
+        Call->getNumResults() == 3 &&
+        Call->getOperand(0).getType() == F64) {
+      B.setInsertionPoint(Call);
+      auto Fx = rt("matlab_peaks_X", PtrTy, {F64});
+      auto Fy = rt("matlab_peaks_Y", PtrTy, {F64});
+      auto Fz = rt("matlab_peaks_Z", PtrTy, {F64});
+      SmallVector<Value, 1> CA{Call->getOperand(0)};
+      auto Cx = LLVM::CallOp::create(B, Call->getLoc(), Fx, CA);
+      auto Cy = LLVM::CallOp::create(B, Call->getLoc(), Fy, CA);
+      auto Cz = LLVM::CallOp::create(B, Call->getLoc(), Fz, CA);
+      Call->getResult(0).replaceAllUsesWith(Cx.getResult());
+      Call->getResult(1).replaceAllUsesWith(Cy.getResult());
+      Call->getResult(2).replaceAllUsesWith(Cz.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
     /* ode_events — IVP solver with event detection. 5-result form
      * `[t, y, te, ye, ie] = ode_events(@f, tspan, y0, @evt)`.
      * 4 operands: ptr (f), ptr (tspan), f64 (y0), ptr (evt).

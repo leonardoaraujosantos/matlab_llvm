@@ -121,10 +121,10 @@ bool isKnownSeriesProp(StringRef Name) {
 /* Names this pass owns. Anything else is left for downstream passes. */
 const llvm::StringSet<> &plotBuiltins() {
   static const llvm::StringSet<> S = {
-    "figure", "gcf", "close",
+    "figure", "gcf", "gca", "close",
     "plot", "plot3", "bar", "scatter", "stem", "stairs", "area",
     "errorbar", "histogram",
-    "imshow", "imagesc", "pcolor", "surf", "mesh", "contour",
+    "imshow", "imagesc", "pcolor", "surf", "surfc", "mesh", "meshc", "contour",
     "title", "xlabel", "ylabel", "zlabel", "text", "legend",
     "xline", "yline",
     "xticks", "yticks", "xticklabels", "yticklabels",
@@ -133,6 +133,17 @@ const llvm::StringSet<> &plotBuiltins() {
     "grid", "hold", "axis", "box", "xlim", "ylim", "view",
     "loglog", "semilogx", "semilogy",
     "subplot", "saveas", "print",
+    /* No-op stubs for headless mode: IDE actions + Tier-5 3-D
+     * rasterizer features (lighting / shading / materials). Scripts
+     * that include them compile and run, but the visual effects
+     * don't materialise in the Cairo PNG (per docs/plotting.md §3
+     * Tier 5). */
+    "clc",
+    "surfl", "shading", "material", "camlight", "lighting",
+    "set",
+    /* Function-form colormap getters: `magma(N)` etc. — return an
+     * N×3 RGB matrix. */
+    "magma", "inferno", "plasma", "cividis", "turbo",
     /* pdeplot3D — unstructured 3-D triangle-mesh painter. */
     "pdeplot3d", "pdeplot3D",
     "pdeplot3d_deformation", "pdeplot3d_deform_scale",
@@ -167,6 +178,22 @@ unsigned countTrailingPropPairs(Operation *Op) {
     unsigned name_idx = N - 2 - pairs * 2;
     auto S = getLiteralString(Op->getOperand(name_idx));
     if (!S || !isKnownSeriesProp(*S)) break;
+    pairs++;
+  }
+  return pairs;
+}
+
+/* Like `countTrailingPropPairs` but accepts ANY literal string as a
+ * property name — used for callees (figure / title / xlabel / ...)
+ * where we don't render the styling but want to strip the Name-Value
+ * tail so the positional remainder is a recognisable call shape. */
+unsigned countTrailingAnyPropPairs(Operation *Op) {
+  unsigned N = Op->getNumOperands();
+  unsigned pairs = 0;
+  while (N >= 2 + pairs * 2) {
+    unsigned name_idx = N - 2 - pairs * 2;
+    auto S = getLiteralString(Op->getOperand(name_idx));
+    if (!S) break;
     pairs++;
   }
   return pairs;
@@ -349,6 +376,45 @@ bool rewriteCallee(Operation *Op, StringRef Callee, Helper &H,
   if (Callee == "semilogx")       return rewriteVoidNoArg(Op, H, "matlab_semilogx");
   if (Callee == "semilogy")       return rewriteVoidNoArg(Op, H, "matlab_semilogy");
 
+  /* Headless no-ops: IDE actions + Tier-5 3-D rasterizer features.
+   * The outer driver calls `Op->erase()` on `ok == true`, so each
+   * handler just returns true to signal "handled". The script
+   * compiles + runs to completion; visual effects don't materialise
+   * in the Cairo PNG (docs/plotting.md §3 Tier 5).
+   *
+   * `clc`             — IDE clear-command-window
+   * `set`             — universal Name-Value setter (Name-Value
+   *                     plumbing arc tracked in docs/roadmap.md)
+   * `shading`         — surface shading mode (flat/interp/faceted)
+   * `material`        — material reflectivity (shiny/dull/metal)
+   * `camlight`        — camera light placement
+   * `lighting`        — lighting algorithm (flat/gouraud/phong) */
+  if (Callee == "clc" || Callee == "set" ||
+      Callee == "shading" || Callee == "material" ||
+      Callee == "camlight" || Callee == "lighting") {
+    /* All have void result by MATLAB convention; the call_builtin's
+     * `none` result has no real consumers. The driver erases. */
+    return Op->getNumResults() == 0 || Op->getResult(0).use_empty();
+  }
+  if (Callee == "surfl") {
+    /* Fall through to surf semantics — drop the lighting terms.
+     * Tier-5 lighting rendering is on the roadmap. */
+    if (N == 1) return rewriteMatArgs(Op, H, "matlab_surf1", 1);
+    if (N == 3) return rewriteMatArgs(Op, H, "matlab_surf3", 3);
+    return false;
+  }
+  /* `gca` / `magma(N)` etc.: result-producing stubs. The outer
+   * driver erases on `ok = true`, so we only succeed when the
+   * result is unused (most common: `colormap(magma(N))` where
+   * `colormap` doesn't yet accept a matrix arg, the magma result
+   * goes nowhere, and the validator reports `colormap` as the
+   * unsupported call shape upstream). */
+  if (Callee == "gca" ||
+      Callee == "magma" || Callee == "inferno" || Callee == "plasma" ||
+      Callee == "cividis" || Callee == "turbo") {
+    return Op->getNumResults() == 0 || Op->getResult(0).use_empty();
+  }
+
   // ---- close(...): close all if 'all', otherwise no-op for now. ----
   if (Callee == "close") {
     if (N == 0) return rewriteVoidNoArg(Op, H, "matlab_close_all");
@@ -395,7 +461,38 @@ bool rewriteCallee(Operation *Op, StringRef Callee, Helper &H,
   if (Callee == "xlabel") return rewriteSimpleStringArg(Op, H, S, "matlab_xlabel");
   if (Callee == "ylabel") return rewriteSimpleStringArg(Op, H, S, "matlab_ylabel");
   if (Callee == "zlabel") return rewriteSimpleStringArg(Op, H, S, "matlab_zlabel");
-  if (Callee == "colormap") return rewriteSimpleStringArg(Op, H, S, "matlab_colormap");
+  if (Callee == "colormap") {
+    /* `colormap(magma(N))` / `colormap(inferno(N))` / ... — the
+     * function-form colormap getters return an N×3 LUT, which we
+     * don't yet wire as a runtime matrix. Detect the inline pattern
+     * and call `matlab_colormap` with the colormap name as a
+     * string. The originating `magma`/etc. call is left use_empty
+     * here and cleaned up by the dead-op sweep at the bottom of
+     * `runLowerPlot`. */
+    if (N == 1) {
+      if (auto *Def = Op->getOperand(0).getDefiningOp()) {
+        if (isMatlabOp(Def, "matlab.call_builtin")) {
+          auto Sub = Def->getAttrOfType<StringAttr>("callee");
+          if (Sub) {
+            StringRef SN = Sub.getValue();
+            if (SN == "magma" || SN == "inferno" || SN == "plasma" ||
+                SN == "cividis" || SN == "turbo" || SN == "viridis" ||
+                SN == "jet" || SN == "parula" || SN == "hot" ||
+                SN == "cool" || SN == "gray") {
+              auto G = S.getOrCreate(SN);
+              H.B.setInsertionPoint(Op);
+              auto Addr = LLVM::AddressOfOp::create(
+                  H.B, L, H.PtrTy, G.getSymName());
+              H.callVoid(L, "matlab_colormap", {H.PtrTy, H.I64},
+                         {Addr, H.i64Const(L, (int64_t)SN.size())});
+              return true;
+            }
+          }
+        }
+      }
+    }
+    return rewriteSimpleStringArg(Op, H, S, "matlab_colormap");
+  }
   if (Callee == "yyaxis")   return rewriteSimpleStringArg(Op, H, S, "matlab_yyaxis");
   if (Callee == "axis" && N == 1) {
     /* String form `axis equal` / `axis off` — single string operand. */
@@ -662,6 +759,20 @@ bool rewriteCallee(Operation *Op, StringRef Callee, Helper &H,
     if (N == 3) return rewriteMatArgs(Op, H, "matlab_mesh3", 3);
     return false;
   }
+  // surfc(Z) / surfc(X, Y, Z) — surface plus a contour projected on
+  // the base plane. meshc same. Both lower to dedicated runtime
+  // entries that call the surf/mesh painter and then the contour
+  // painter at z = z_min on the same axes.
+  if (Callee == "surfc") {
+    if (N == 1) return rewriteMatArgs(Op, H, "matlab_surfc1", 1);
+    if (N == 3) return rewriteMatArgs(Op, H, "matlab_surfc3", 3);
+    return false;
+  }
+  if (Callee == "meshc") {
+    if (N == 1) return rewriteMatArgs(Op, H, "matlab_meshc1", 1);
+    if (N == 3) return rewriteMatArgs(Op, H, "matlab_meshc3", 3);
+    return false;
+  }
 
   /* pdeplot — 2-D version, accepts (nodes, triangles) or
    * (nodes, triangles, data).  pdegplot / pdemesh forward here at
@@ -744,9 +855,18 @@ bool runLowerPlot(ModuleOp M) {
    * shortened operand list, then emits the setter follow-ups. */
   static const llvm::StringSet<> AcceptsProps = {
     "plot", "plot3", "scatter", "bar", "stem", "stairs", "area",
-    "errorbar", "histogram", "surf", "mesh",
+    "errorbar", "histogram", "surf", "surfc", "mesh", "meshc",
     "imshow", "imagesc", "pcolor", "contour", "contourf",
     "quiver",
+  };
+
+  /* Non-series callees whose Name-Value tails we don't currently
+   * render but still want to accept syntactically. Trailing
+   * (string, value) pairs are stripped before the regular rewriter
+   * runs; no setters are emitted. */
+  static const llvm::StringSet<> AcceptsIgnoredProps = {
+    "figure", "title", "xlabel", "ylabel", "zlabel",
+    "text", "legend",
   };
 
   bool Changed = false;
@@ -756,9 +876,15 @@ bool runLowerPlot(ModuleOp M) {
 
     /* Strip trailing (string-literal-name, value) pairs. We do this by
      * temporarily setting fewer operands on the op, calling the regular
-     * rewriter, then restoring + emitting setters after the new call. */
-    unsigned pairs = AcceptsProps.contains(Name)
-                         ? countTrailingPropPairs(Op) : 0;
+     * rewriter, then restoring + emitting setters after the new call.
+     *
+     * `AcceptsProps`        — series-producing calls, emit setters
+     * `AcceptsIgnoredProps` — strip and drop (no setters) */
+    bool SeriesProps = AcceptsProps.contains(Name);
+    bool IgnoreProps = AcceptsIgnoredProps.contains(Name);
+    unsigned pairs = SeriesProps ? countTrailingPropPairs(Op)
+                  : IgnoreProps ? countTrailingAnyPropPairs(Op)
+                  : 0;
     unsigned full_n = Op->getNumOperands();
     unsigned pos_n  = full_n - pairs * 2;
 
@@ -773,7 +899,11 @@ bool runLowerPlot(ModuleOp M) {
       /* Emit setters after the synthesized main call. The handler set
        * the insertion point right before Op when it ran; subsequent
        * inserts go *just before* Op too. To place the setters AFTER the
-       * main call but still before Op, set IP to immediately before Op. */
+       * main call but still before Op, set IP to immediately before Op.
+       *
+       * For `AcceptsIgnoredProps` callees, the pairs were stripped but
+       * no setters are emitted — the operand restore below keeps the
+       * IR self-consistent until Op is erased. */
       if (pairs) {
         /* Restore operands so emitPropSetters can read them. */
         llvm::SmallVector<Value, 16> All(Op->getOperands().begin(),
@@ -781,8 +911,10 @@ bool runLowerPlot(ModuleOp M) {
         for (Value V : KeptProps) All.push_back(V);
         Op->setOperands(All);
 
-        H.B.setInsertionPoint(Op);
-        emitPropSetters(Op, pos_n, H, Strings);
+        if (SeriesProps) {
+          H.B.setInsertionPoint(Op);
+          emitPropSetters(Op, pos_n, H, Strings);
+        }
       }
       Op->erase();
       Changed = true;
@@ -804,17 +936,42 @@ bool runLowerPlot(ModuleOp M) {
    *   - matlab.make_handle (e.g. `saveas(gcf, 'path')` — the bare `gcf`
    *     in argument position parses as a function-handle creation; we
    *     don't consume the figure handle in saveas, so it's unused.)
-   * Erase any of these that have no users. */
-  llvm::SmallVector<Operation *, 8> DeadOps;
-  M.walk([&](Operation *Op) {
-    if ((isMatlabOp(Op, "matlab.const_str")  ||
-         isMatlabOp(Op, "matlab.const_char") ||
-         isMatlabOp(Op, "matlab.make_handle")) &&
-        Op->use_empty()) {
-      DeadOps.push_back(Op);
+   *
+   * Two extra cleanup categories:
+   *   - matlab.call_builtin to a callee in plotBuiltins() whose result
+   *     is now use_empty (typical: `colormap(magma(N))` rewrites the
+   *     colormap call to take the name string, leaving the magma
+   *     call dangling).
+   *   - matlab.subscript / matlab.load whose only consumer was a
+   *     no-op call we just erased (e.g. `set(hSurf(1), ...)`).
+   *
+   * Run the walk in a fixed-point loop so transitively-dead chains
+   * (subscript → load → alloc) get fully cleaned up. */
+  bool ChangedSweep = true;
+  while (ChangedSweep) {
+    ChangedSweep = false;
+    llvm::SmallVector<Operation *, 8> DeadOps;
+    M.walk([&](Operation *Op) {
+      if (!Op->use_empty()) return;
+      if (isMatlabOp(Op, "matlab.const_str")  ||
+          isMatlabOp(Op, "matlab.const_char") ||
+          isMatlabOp(Op, "matlab.make_handle") ||
+          isMatlabOp(Op, "matlab.subscript")  ||
+          isMatlabOp(Op, "matlab.load")) {
+        DeadOps.push_back(Op);
+        return;
+      }
+      if (isMatlabOp(Op, "matlab.call_builtin")) {
+        auto C = Op->getAttrOfType<StringAttr>("callee");
+        if (C && plotBuiltins().contains(C.getValue()))
+          DeadOps.push_back(Op);
+      }
+    });
+    for (Operation *Op : DeadOps) {
+      Op->erase();
+      ChangedSweep = true;
     }
-  });
-  for (Operation *Op : DeadOps) Op->erase();
+  }
 
   return Changed;
 }

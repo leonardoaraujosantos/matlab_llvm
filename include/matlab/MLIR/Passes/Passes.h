@@ -166,6 +166,16 @@ unsigned runOutlineParfor(mlir::ModuleOp M);
 /// gdb can step from the compiled binary into the user's `.m` file.
 std::string lowerToLLVMIR(mlir::ModuleOp M, bool EmitDebugInfo = false);
 
+/// Walk the module for any unconverted `matlab.*` dialect op left
+/// after the lowering pipeline. Emit a clean per-op diagnostic and
+/// return `failure()` so the caller can bail before
+/// `translateModuleToLLVMIR` / `ExecutionEngine::create` chokes on
+/// the broken module. Called from `lowerToLLVMIR` automatically;
+/// the JIT path (`runReplInput` / DAP) calls it directly between the
+/// LLVM-conversion pipeline and `ExecutionEngine::create`. See the
+/// comment on the definition for the cascade we're preventing.
+mlir::LogicalResult validateAllMatlabOpsLowered(mlir::ModuleOp M);
+
 /// Strip `matlab.*` arg/result attrs from every `llvm.func` op in `M`.
 /// Run after the standard LLVM-conversion pipeline (so func.func ops have
 /// already been rewritten to llvm.func) and before

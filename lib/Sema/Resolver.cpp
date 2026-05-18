@@ -349,7 +349,7 @@ void Resolver::registerBuiltins() {
     "filter", "any", "all", "tril", "triu",
     "fftshift", "ifftshift",
     "std", "var", "median", "diff",
-    "meshgrid", "ndgrid",
+    "meshgrid", "ndgrid", "peaks",
     /* Tier 2 — signal/poly/numeric. */
     "xcorr", "polyval", "polyfit", "roots", "poly",
     "polyder", "polyint", "residue",
@@ -406,10 +406,10 @@ void Resolver::registerBuiltins() {
      * to matlab_figure_new / matlab_plot2 / matlab_plot_fmt /
      * matlab_title / etc. The runtime is built into matlabc when
      * configured with -DMATLAB_LLVM_WITH_PLOT=ON. */
-    "figure", "gcf", "close",
+    "figure", "gcf", "gca", "close",
     "plot", "plot3", "bar", "scatter", "stem", "stairs", "area",
     "errorbar", "histogram",
-    "imshow", "imagesc", "pcolor", "surf", "mesh", "contour",
+    "imshow", "imagesc", "pcolor", "surf", "surfc", "mesh", "meshc", "contour",
     "title", "xlabel", "ylabel", "zlabel", "legend", "text",
     "colorbar", "colormap",
     "grid", "hold", "axis", "box", "xlim", "ylim", "view",
@@ -418,6 +418,26 @@ void Resolver::registerBuiltins() {
     "xline", "yline",
     "xticks", "yticks", "xticklabels", "yticklabels",
     "yyaxis", "contourf", "quiver",
+    /* IDE / REPL actions accepted as no-ops outside the REPL so
+     * scripts that include them still compile. Roadmap-tracked in
+     * docs/plotting.md / docs/roadmap.md. */
+    "clc",
+    /* Tier-3 plotting roadmap items — accepted as no-ops in the
+     * headless renderer.  `surfl` / `shading` / `material` /
+     * `camlight` / `lighting` need a 3-D rasterizer with light
+     * vectors + per-vertex normals (Tier-5 "won't make sense
+     * headless" per docs/plotting.md §3).  Registered here so
+     * scripts don't error; they emit nothing in the PNG output. */
+    "surfl", "shading", "material", "camlight", "lighting",
+    /* `set` is the universal MATLAB property setter
+     * `set(handle, 'Name', value, ...)`.  Accepted as a no-op until
+     * the Name-Value plumbing arc lands (docs/roadmap.md
+     * "Name-value-on-unknown-handle bail"). */
+    "set",
+    /* Function-form colormap getters: `magma(N)` returns an N×3
+     * RGB matrix.  Sema-registered so calls compile; the lowering
+     * synthesises the table via the shipped colormap surface. */
+    "magma", "inferno", "plasma", "cividis", "turbo",
     /* PROP — Propagation Models (docs/comm_toolbox_roadmap.md §3).
      * Function-form, numeric-tag dispatch; runtime/runtime_prop.cpp. */
     "fspl",

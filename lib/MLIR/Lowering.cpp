@@ -2401,6 +2401,10 @@ void Lowerer::lowerStmt(const Stmt &St) {
           else if ((CN == "meshgrid" || CN == "ndgrid") &&
                    (A.LHS.size() == 2 || A.LHS.size() == 3))
             Rtys.assign(A.LHS.size(), PtrTy);
+          /* [X, Y, Z] = peaks(N) — three N×N grids on [-3, 3]² with the
+           * canonical 3-D demo function. Scalar f64 in, 3 ptr out. */
+          else if (CN == "peaks" && A.LHS.size() == 3)
+            Rtys.assign(A.LHS.size(), PtrTy);
           /* [K, S, e] = lqr(A, B, Q, R) — K is the gain (m × n ptr),
            * S is the Riccati solution (n × n ptr), e is the closed-loop
            * spectrum (n × 1 ptr, possibly complex). Same for dlqr. */
@@ -7763,7 +7767,7 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             "filter", "any", "all", "tril", "triu",
             "fftshift", "ifftshift",
             "std", "var", "median", "diff",
-            "meshgrid", "ndgrid",
+            "meshgrid", "ndgrid", "peaks",
             "xcorr", "polyval", "polyfit", "roots", "poly",
             "polyder", "polyint", "residue",
             /* Tier-1 §2.1 — IIR lowpass design + frequency response. */

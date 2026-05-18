@@ -659,6 +659,31 @@ edge-element vector EM.
 These don't fit a single roadmap slot but get folded into other
 work as it lands:
 
+- **Sema diagnostic robustness — clean rejection of unknown builtins.**
+  Currently when a script calls an unshipped function name (e.g.
+  `peaks`, `magma`, `surfl`), Sema accepts the call, MIR/MLIR builds
+  a `matlab.call_builtin` op, and the LLVM translator chokes at the
+  end of the pipeline with `missing LLVMTranslationDialectInterface
+  registration for dialect for op: matlab.call_builtin`. The error
+  is confusing because the *real* problem (an undefined function
+  name) gets buried under translator-internal jargon, and downstream
+  ops (`matlab.subscript`, `matlab.const_char`) cascade with the
+  same message. **Fix**: reject unknown names at `Resolver.cpp` time
+  with a clean `error: undefined function 'NAME'` and stop processing
+  the rest of the script. Should cap the error cascade at one
+  diagnostic per failing name instead of generating one per
+  downstream use. **Effort**: ~2 sessions. **Status**: 🔵 in-flight
+  alongside the plotting Tier-3 slice (peaks / surfc / extra colormaps).
+- **Name-value-on-unknown-handle bail.** Related: when
+  `set(handle, 'Name', value, ...)` or `title(text, 'Name', value)`
+  is called on a handle returned by an unshipped function, the
+  multi-pair name-value lowering leaves `matlab.const_char` ops in
+  the IR that don't translate. **Fix**: if the handle is `none`-typed
+  (because the producer is unknown), short-circuit the name-value
+  pairs into a no-op so they don't leak into LLVM IR. **Effort**:
+  ~3 sessions.
+
+
 - **Test corpus growth.** Original ≥150 run-tests + 50 SV goldens target met during the data-container arc; current corpus is **248 run-tests** + **77 SV goldens**. Next milestone: ≥300 run-tests as the open SPT follow-ons (richer FIR, multitaper / STFT, strict Gustafsson `filtfilt`) and CST follow-ons (graph-style MIMO assembly via `connect`/`sumblk`/`lft`, H∞ norm, ss-form `minreal`) exercise more of the surface, and growing the SV-cocotb cycle-by-cycle lane (item #1) to cover all 39 HDL examples rather than just 8.
 - **Formatter idempotency** verified by a fixed-point CI lane
   (parse → format → parse → format → identical).

@@ -428,6 +428,30 @@ void matlab_mesh3(matlab_mat *X, matlab_mat *Y, matlab_mat *Z) {
     ax.is_3d = true;
 }
 
+/* surfc / meshc — Tier-3 plotting roadmap entry (docs/plotting.md §3).
+ * Combo of a surface (or mesh) plus a contour drawn at the base
+ * plane. Compose the existing surf/mesh + contour painters on the
+ * same axes; the painter side already supports overlay because every
+ * series shares the same axes object. */
+void matlab_surfc1(matlab_mat *Z) {
+    matlab_surf1(Z);
+    matlab_contour(Z);
+}
+void matlab_surfc3(matlab_mat *X, matlab_mat *Y, matlab_mat *Z) {
+    matlab_surf3(X, Y, Z);
+    /* Use Z alone for the contour map — the X/Y axes are already
+     * established by the surf call above. */
+    matlab_contour(Z);
+}
+void matlab_meshc1(matlab_mat *Z) {
+    matlab_mesh1(Z);
+    matlab_contour(Z);
+}
+void matlab_meshc3(matlab_mat *X, matlab_mat *Y, matlab_mat *Z) {
+    matlab_mesh3(X, Y, Z);
+    matlab_contour(Z);
+}
+
 void matlab_scatter(matlab_mat *x, matlab_mat *y) {
     Series &s = new_series(matlab_plot::current_axes(), SeriesKind::Scatter);
     copy_mat_to_vec(x, s.x);
