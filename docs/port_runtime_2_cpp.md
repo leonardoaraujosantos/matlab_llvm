@@ -1,4 +1,17 @@
-# Port Runtime to C++ — Plan
+# Port Runtime to C++ — Plan (HISTORICAL)
+
+> **STATUS: COMPLETED (2026-05-10).** The C → C++ runtime port is
+> done. The runtime is now 12 `.cpp` translation units (~52 kLOC,
+> ~1,100 exported entries) — see [`runtime.md`](runtime.md) for the
+> current architecture, ABI conventions, and per-TU contents.
+>
+> This document is **kept as a design record** of the port itself,
+> not as the runtime reference. References to `runtime/matlab_runtime.c`
+> in the body below describe the **starting state** of the port; the
+> current location is `runtime/matlab_runtime.cpp` and the other 11
+> sibling `.cpp` files.
+
+---
 
 Plan for migrating `runtime/matlab_runtime.cpp` (originally
 `matlab_runtime.c` — ~8200 lines after Tier-1/2/3, ~485 functions) from
@@ -6,8 +19,11 @@ C to modern C++. The companion file
 [`runtime/matlab_runtime.hpp`](../runtime/matlab_runtime.hpp) is the
 existing thin C++ wrapper exposed to the EmitC C++ path; it stays.
 
-This document is a **plan**, not a record. Status markers below describe
-intended state; they will be updated as work lands.
+This document was originally a **plan**. It is now kept as a design
+record of the port; the status markers below reflect the **shipped
+state** as of the 2026-05-10 cutover. The runtime has continued to
+grow since — see [`runtime.md`](runtime.md) for the post-port
+architecture.
 
 ## Status legend
 

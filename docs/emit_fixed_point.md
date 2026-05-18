@@ -585,7 +585,8 @@ most user-visible win per day:
 
 ## 12. `persistent` Runtime Extension
 
-The current `persistent` runtime in `runtime/matlab_runtime.c:3829`
+The current `persistent` runtime in `runtime/matlab_runtime.cpp`
+(grep for `Global / persistent storage`, currently ~line 13095)
 is a flat 128-slot **scalar f64 table**. The FIR example in §7.3
 needs persistent storage of an *integer array*. Two pieces of work
 land in Phase 3:
@@ -701,10 +702,10 @@ live in both.)
 | File | Change | Phase |
 |---|---|---|
 | `matlab_runtime.h` | Declare the helpers from §6.2 (`matlab_fi_sat_*`, `matlab_fi_round_*`, `matlab_fi_quantize_*`, `matlab_fi_disp_*`). | **P1** |
-| `matlab_runtime.c` | Implement those helpers. ~80 lines. Add right after the existing `matlab_int*_s` block at line 2065. | **P1** |
-| `matlab_runtime.c:3829` (persistent storage) | Generalize the 128-slot f64 table to hold typed pointers as well — see §12. | **P3** |
+| `matlab_runtime.cpp` | Implement those helpers. ~80 lines. Add right after the existing `matlab_int*_s` block (currently ~line 6278; grep for `matlab_int8_s`). | **P1** |
+| `matlab_runtime.cpp` (persistent storage; grep `Global / persistent storage`) | Generalize the 128-slot f64 table to hold typed pointers as well — see §12. | **P3** |
 | `matlab_runtime.h` (persistent extension) | New `matlab_persistent_get_ptr(id)` / `_set_ptr(id, ptr)` declarations. | **P3** |
-| `matlab_runtime.c` (typed integer matrix) | Add `matlab_mat_i64` / `matlab_mat_u64` descriptors with the same shape API as `matlab_mat`. Reductions and `disp` get integer-aware overloads. | **P3** |
+| `matlab_runtime.cpp` (typed integer matrix) | Add `matlab_mat_i64` / `matlab_mat_u64` descriptors with the same shape API as `matlab_mat`. Reductions and `disp` get integer-aware overloads. **Status (2026-05): shipped** — see `runtime.md` §3.1 typed-integer row. | **P3** |
 | `matlab_runtime.h` (typed integer matrix) | Declarations for the above. | **P3** |
 | `matlab_runtime.hpp` | Thin C++ wrappers if any (mirrors existing pattern). | **P1** |
 | `matlab_runtime.py` | Python shim with the same five helper signatures, backed by Python int / NumPy. | **P1** |

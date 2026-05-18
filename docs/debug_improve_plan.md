@@ -15,8 +15,10 @@ user-facing reference for what works today. This doc focuses on
 debug them) and what's still open.
 
 The DAP server lives in `tools/matlabc/main.cpp`, the runtime debug
-state lives in `runtime/matlab_runtime.c`, and the per-statement hook
-injection lives in `lib/MLIR/Lowering.cpp`.
+state lives in `runtime/runtime_debug.cpp` (split out from
+`matlab_runtime.cpp` during the C → C++ port; see
+[`runtime.md`](runtime.md)), and the per-statement hook injection
+lives in `lib/MLIR/Lowering.cpp`.
 
 ## Status legend
 
@@ -260,7 +262,10 @@ End-to-end smoke validation:
 ```bash
 matlabc -emit-llvm -g foo.m > foo.ll
 clang -g -c -x ir foo.ll -o foo.o
-clang -g foo.o runtime/matlab_runtime.c -o foo
+# See docs/debug.md for the full multi-TU link line; the short
+# form is to redo the build via the .c lane after fact.o is on
+# disk, or just link against every runtime/*.cpp directly.
+clang++ -g foo.o runtime/*.cpp -o foo -lm -lpthread
 lldb foo
 (lldb) breakpoint set --file foo.m --line 7
 Breakpoint 1: where = foo`main + 88 at foo.m:7:1, address = 0x...

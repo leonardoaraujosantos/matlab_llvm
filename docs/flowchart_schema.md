@@ -781,8 +781,7 @@ Compile with:
 matlabc -emit-matlab hello.mflow
 # → disp('Hello, world!');
 
-matlabc -emit-c hello.mflow > /tmp/hello.c
-cc /tmp/hello.c runtime/matlab_runtime.c -o /tmp/hello -lm && /tmp/hello
+runtime/build_and_run.sh hello.mflow   # builds + runs through the C lane
 # → Hello, world!
 ```
 

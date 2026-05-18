@@ -4,7 +4,9 @@ This document scopes bringing `save` and `load` from the current
 single-matrix custom format (`MLB1`) up to the real MATLAB API and
 on-disk format, in two phases.
 
-Today, after `runtime/matlab_runtime.c:5321`:
+Today, see `matlab_save_mat` in `runtime/matlab_runtime.cpp`
+(currently at line ~13420; grep for `matlab_save_mat` if the line
+number drifts):
 
 - `save(path, A)` takes a *value*, writes one matrix per file.
 - `B = load(path)` returns the matrix directly.

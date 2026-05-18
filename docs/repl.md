@@ -38,7 +38,7 @@ matching `end` is seen.
 
 ## Symbol resolution
 
-`matlabc` links `runtime/matlab_runtime.c` directly into its own
+`matlabc` links `runtime/matlab_runtime.cpp` directly into its own
 binary (controlled by `CMakeLists.txt`). MLIR's `ExecutionEngine`
 resolves `matlab_*` and `matlab_ws_*` symbols against the running
 process via LLJIT's default dynamic-library search generator, so no
@@ -229,7 +229,7 @@ tree-walking interpreter first, JIT second.
 
 Skip MLIR and LLVM entirely for the REPL path. Each AST node evaluates
 directly against a `Workspace` (a `std::unordered_map<std::string,
-MatlabValue>`) and calls into `runtime/matlab_runtime.c` for every
+MatlabValue>`) and calls into `runtime/matlab_runtime.cpp` for every
 primitive operation.
 
 ```
@@ -240,7 +240,7 @@ Input ──► Lexer ──► Parser (incremental) ──► Sema (REPL mode)
                                                    │
                     ┌──────────────────────────────┼──────────────────────────┐
                     ▼                              ▼                          ▼
-              Workspace                     matlab_runtime.c            Display
+              Workspace                     matlab_runtime.cpp          Display
           (name → value map)              (add/mul/matmul/...)       (echo unless ;)
 ```
 
@@ -338,7 +338,7 @@ public:
 };
 ```
 
-Runtime entry points in `runtime/matlab_runtime.c`:
+Runtime entry points in `runtime/matlab_runtime.cpp`:
 - `matlab_workspace_create / destroy`
 - `matlab_workspace_load(ws, name) -> void*`
 - `matlab_workspace_store(ws, name, value)`
@@ -441,10 +441,10 @@ block. On `Ctrl-D` / `exit` / `quit`, teardown and exit 0.
 lib/Interp/Interpreter.cpp
 lib/Interp/Display.cpp
 lib/Interp/Builtins.cpp           # dispatch table: name → fn pointer
-lib/Runtime/Workspace.cpp          # or extend runtime/matlab_runtime.c
+lib/Runtime/Workspace.cpp          # or extend runtime/matlab_runtime.cpp
 include/matlab/Interp/...
 include/matlab/Runtime/Workspace.h
-runtime/matlab_runtime.c           # + matlab_workspace_* entries
+runtime/matlab_runtime.cpp           # + matlab_workspace_* entries
 lib/Parse/                         # + parseStatement()
 lib/Sema/Resolver.cpp              # + REPL mode
 tools/matlabi/main.cpp             # or tools/matlabc/main.cpp -i flag
@@ -604,7 +604,7 @@ workspace vs. function workspace distinctions.
    No direct reuse is possible — the emitters print C/Python/SV,
    the interpreter calls runtime functions. But **the runtime itself
    is shared**. Every operation the interpreter needs is already
-   callable in `runtime/matlab_runtime.c`; we're adding very few new
+   callable in `runtime/matlab_runtime.cpp`; we're adding very few new
    entries (workspace, possibly display helpers). This is the main
    reason the interpreter is cheap: the heavy lifting (matmul,
    broadcasting, indexing) exists and is battle-tested.
@@ -630,11 +630,11 @@ workspace vs. function workspace distinctions.
 | `lib/Interp/Display.cpp` | MATLAB-style formatting for scalars, matrices, structs, cells, strings |
 | `lib/Interp/Builtins.cpp` | Name → function-pointer dispatch table for built-in functions |
 | `lib/Interp/Session.cpp` | REPL loop, prompt, multi-line buffering, tab completion, history |
-| `lib/Runtime/Workspace.cpp` | `Workspace` class; C ABI wrappers in `runtime/matlab_runtime.c` |
+| `lib/Runtime/Workspace.cpp` | `Workspace` class; C ABI wrappers in `runtime/matlab_runtime.cpp` |
 | `include/matlab/Interp/...` | Public headers |
 | `lib/Parse/Parser.cpp` | + `parseStatement(StringRef, AST::Stmt*&) -> ParseOutcome` |
 | `lib/Sema/Resolver.cpp` | + `ResolveMode::REPL` (unresolved idents → `WorkspaceRef`) |
-| `runtime/matlab_runtime.c` | + `matlab_workspace_*`, + error-flag → C++-exception bridge |
+| `runtime/matlab_runtime.cpp` | + `matlab_workspace_*`, + error-flag → C++-exception bridge |
 | `tools/matlabc/main.cpp` (or `tools/matlabi/main.cpp`) | `-i` flag or new binary entry point |
 | `test/REPL/*.mrepl` | Transcript golden tests |
 | `test/REPL/run_tests_repl.sh` | Runner: feed input, diff stdout |

@@ -14,19 +14,40 @@ Two new driver flags on `matlabc`:
 | `-emit-c`   | Self-contained `.c` source |
 | `-emit-cpp` | Self-contained `.c++` source |
 
-Both produce code that links against the existing `runtime/matlab_runtime.c`
-to form a standalone executable. No LLVM toolchain is required at the
-compile step — just a plain C or C++ compiler:
+Both produce code that links against the runtime translation units
+under `runtime/` to form a standalone executable. No LLVM toolchain
+is required at the compile step — just a plain C++ compiler (the
+runtime is C++ since the 2026-05 port; see [`runtime.md`](runtime.md)
+for the 12-TU architecture). For an end-to-end C-target build, the
+helper script `runtime/build_and_run.sh` wires up every required TU
+including the optional Symbolic / Plot lanes:
 
 ```bash
 matlabc -emit-c foo.m > foo.c
-cc foo.c runtime/matlab_runtime.c -o foo -lm -lpthread
+# minimal link line (core runtime only — bumps to more TUs if foo.m
+# uses Comm/RF/Optim/etc. — runtime/build_and_run.sh does the right
+# thing automatically):
+c++ -x c++ foo.c \
+    runtime/matlab_runtime.cpp runtime/runtime_debug.cpp \
+    runtime/runtime_complex.cpp runtime/runtime_prop.cpp \
+    runtime/runtime_comm.cpp runtime/runtime_rf.cpp \
+    runtime/runtime_pde.cpp runtime/runtime_sparse.cpp \
+    runtime/runtime_optim.cpp runtime/runtime_mstateflow.cpp \
+    -o foo -lm -lpthread
 ./foo
 ```
 
-On the full test corpus (12 `examples/` programs + 95 `test/Run/*.m`
-programs), the stdout of executables built through the C/C++ path matches
-the stdout of the LLVM path byte-for-byte. See `just test-emitc`.
+Or simply:
+
+```bash
+runtime/build_and_run.sh foo.m
+```
+
+The full test corpus (387 `test/Run/*.m` programs) is exercised
+through five `run-tests-*` lanes — `run-tests-emit-c` /
+`run-tests-emit-c-strict` / `run-tests-emit-cpp` /
+`run-tests-emit-cpp-strict` — with stdout matching the LLVM path
+byte-for-byte.
 
 ## Where in the pipeline this runs
 
@@ -89,10 +110,11 @@ Each op maps to a one-liner of C:
 
 ## Runtime ABI bridge
 
-The runtime (`runtime/matlab_runtime.c`) is plain C with typed pointer
-parameters: `matlab_disp_mat(matlab_mat *A)`, `matlab_struct_set_f64(matlab_struct *s, ...)`,
-etc. MLIR after `LowerTensorOps` uses the opaque `!llvm.ptr` for all of
-these, which we print as `void*`.
+The runtime (12 `.cpp` TUs under `runtime/`, exporting `extern "C"`
+entries) uses typed pointer parameters: `matlab_disp_mat(matlab_mat *A)`,
+`matlab_struct_set_f64(matlab_struct *s, ...)`, etc. MLIR after
+`LowerTensorOps` uses the opaque `!llvm.ptr` for all of these, which
+we print as `void*`.
 
 Mixing typed C params with `void*` callers causes C++ to reject the
 implicit cast (and emits a warning on strict C, too). Rather than
@@ -231,10 +253,10 @@ output file.
   arguments or `setjmp`-style), choose `unsigned char` for string
   literals to avoid C++11 narrowing, and decide exactly which runtime
   prototypes to emit.
-- Matches the runtime's shape. `runtime/matlab_runtime.c` is already
-  plain C with uniform `matlab_*` function calls on opaque pointers.
-  The MLIR at the snapshot point is *already* C-shaped. The emitter is
-  almost a transliteration.
+- Matches the runtime's shape. The runtime (12 `.cpp` TUs since the
+  2026-05 port) exports plain-C-ABI `matlab_*` function calls on
+  opaque pointers via `extern "C"`. The MLIR at the snapshot point is
+  *already* C-shaped. The emitter is almost a transliteration.
 - Zero new MLIR dialect dependencies. No new `find_package`, no new
   `target_link_libraries`. Keeps the build minimal.
 

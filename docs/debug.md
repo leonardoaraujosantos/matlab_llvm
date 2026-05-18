@@ -62,7 +62,13 @@ the debugger shows your `.m` source rather than the generated C.
 
 ```
 $ matlabc -emit-c -line examples/factorial.m > /tmp/fact.c
-$ cc -g /tmp/fact.c runtime/matlab_runtime.c -o /tmp/fact
+$ c++ -g -x c++ /tmp/fact.c \
+    runtime/matlab_runtime.cpp runtime/runtime_debug.cpp \
+    runtime/runtime_complex.cpp runtime/runtime_prop.cpp \
+    runtime/runtime_comm.cpp runtime/runtime_rf.cpp \
+    runtime/runtime_pde.cpp runtime/runtime_sparse.cpp \
+    runtime/runtime_optim.cpp runtime/runtime_mstateflow.cpp \
+    -o /tmp/fact -lm -lpthread
 $ lldb /tmp/fact
 (lldb) breakpoint set -f factorial.m -l 9
 ```
@@ -815,7 +821,15 @@ End-to-end:
 ```bash
 matlabc -emit-llvm -g foo.m > foo.ll
 clang -g -c -x ir foo.ll -o foo.o
-clang -g foo.o runtime/matlab_runtime.c -o foo -lm -lpthread
+# Easiest: let build_and_run.sh wire the runtime TUs in via the .c lane,
+# then keep the foo.o object on the link line:
+clang++ -g foo.o \
+    runtime/matlab_runtime.cpp runtime/runtime_debug.cpp \
+    runtime/runtime_complex.cpp runtime/runtime_prop.cpp \
+    runtime/runtime_comm.cpp runtime/runtime_rf.cpp \
+    runtime/runtime_pde.cpp runtime/runtime_sparse.cpp \
+    runtime/runtime_optim.cpp runtime/runtime_mstateflow.cpp \
+    -o foo -lm -lpthread
 lldb foo
 (lldb) breakpoint set --file foo.m --line 7
 Breakpoint 1: where = foo`main + 88 at foo.m:7:1, address = 0x...
