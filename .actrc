@@ -1,0 +1,20 @@
+# Configuration for `act` (nektos/act) — run the GitHub Actions
+# workflow locally inside Docker.  Same toolchain image as the
+# real CI: ubuntu-24.04 with the GitHub-Actions-runner overlay.
+#
+# Quick start (Docker must be running):
+#   act -j smoke          # just the smoke job
+#   act push -j full      # full job, simulating a push to main
+#   act schedule          # nightly job (also requires the cron event)
+#
+# `-P` pins the image used for `ubuntu-latest` / `ubuntu-24.04`
+# labels.  The catthehacker/ubuntu image is the de-facto choice for
+# `act` — it mirrors GitHub's hosted runners more closely than the
+# barebones ubuntu:24.04 (it ships preinstalled tools the workflow
+# expects: docker, gh, python, etc.).
+-P ubuntu-24.04=catthehacker/ubuntu:act-24.04
+-P ubuntu-latest=catthehacker/ubuntu:act-24.04
+
+# Cache action artefacts under the project dir so `act` doesn't burn
+# the user's ~/.cache/act on every iteration.
+--artifact-server-path /tmp/act-artifacts
