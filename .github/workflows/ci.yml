@@ -20,10 +20,14 @@ on:
         type: boolean
         default: false
 
-# Cancel in-flight CI when a newer commit lands on the same ref.
+# Cancel in-flight CI when a newer commit lands on the same PR — keeps
+# queue pressure low without losing coverage (latest commit always
+# finishes).  But for pushes to main, do NOT cancel: the first run may
+# be priming the LLVM 22 build cache (~40 min cold), and cancelling
+# wastes the work and leaves the cache empty for the next push.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   # -------------------------------------------------------------------------
@@ -37,7 +41,11 @@ jobs:
   smoke:
     name: Smoke (fast, every PR)
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    # First run: ~40 min for the cold LLVM 22 source build + ~5 min
+    # for the matlabc compile + smoke tests = ~50 min wall.
+    # Subsequent runs hit the cached /opt/llvm and finish in ~5 min.
+    # Keep enough headroom for the cold-cache case.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 

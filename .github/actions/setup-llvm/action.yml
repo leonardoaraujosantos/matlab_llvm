@@ -38,11 +38,10 @@ runs:
           python3 python3-pip \
           ${{ inputs.extra-apt-packages }}
 
-    - name: Cache /opt/llvm
+    - name: Restore /opt/llvm cache
       id: llvm-cache
-      uses: actions/cache@v4
+      uses: actions/cache/restore@v4
       with:
-        # Built artefacts go in /opt/llvm; cache the whole install dir.
         path: /opt/llvm
         # Bump LLVM_TAG to invalidate.  Suffix with the runner OS for
         # safety in case GitHub changes the underlying image.
@@ -71,6 +70,22 @@ runs:
         # Slim the install — strip docs and Python bindings we don't use.
         rm -rf /opt/llvm/share/{man,doc}
         rm -rf /tmp/llvm-project /tmp/llvm-build
+
+    # Save the LLVM install only when we actually built it (not on a
+    # cache hit, which already has the same content under the same
+    # key).  The dedicated `actions/cache/save@v4` runs unconditionally
+    # via `if: always()` so a partial build that hit the job timeout
+    # still seeds the cache — next run sees a hit and skips straight
+    # past the build.  Trade-off: if the build was so partial it
+    # failed cmake configure, the cache will hit but the project
+    # build will fail noisily on the missing libs; bumping LLVM_TAG
+    # forces a re-prime in that case.
+    - name: Save /opt/llvm cache
+      if: always() && steps.llvm-cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: /opt/llvm
+        key: llvm-${{ inputs.llvm-tag }}-${{ runner.os }}-${{ runner.arch }}
 
     - name: Export LLVM env vars
       shell: bash
