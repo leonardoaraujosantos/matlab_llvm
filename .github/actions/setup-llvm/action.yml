@@ -43,12 +43,31 @@ runs:
       uses: actions/cache/restore@v4
       with:
         path: /opt/llvm
-        # Bump LLVM_TAG to invalidate.  Suffix with the runner OS for
-        # safety in case GitHub changes the underlying image.
-        key: llvm-${{ inputs.llvm-tag }}-${{ runner.os }}-${{ runner.arch }}
+        # Bump LLVM_TAG or the `vN` salt to invalidate.  The salt exists
+        # so we can force a re-prime after a partial/corrupt cache (see
+        # the validation step below) without bumping the LLVM version.
+        key: llvm-${{ inputs.llvm-tag }}-v2-${{ runner.os }}-${{ runner.arch }}
+
+    # If the restore handed us a partial install (e.g. the cold build
+    # hit the job timeout and the `if: always()` save step seeded an
+    # incomplete /opt/llvm), the downstream cmake configure dies on
+    # `find_package(MLIR)`.  Detect the corruption here and demote the
+    # hit to a miss so the build step below re-primes the cache.
+    - name: Validate restored /opt/llvm
+      id: llvm-validate
+      shell: bash
+      run: |
+        if [[ "${{ steps.llvm-cache.outputs.cache-hit }}" == "true" \
+              && ! -f /opt/llvm/lib/cmake/mlir/MLIRConfig.cmake ]]; then
+          echo "Restored /opt/llvm is missing MLIRConfig.cmake — rebuilding."
+          sudo rm -rf /opt/llvm
+          echo "rebuild=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "rebuild=false" >> "$GITHUB_OUTPUT"
+        fi
 
     - name: Build LLVM ${{ inputs.llvm-tag }} (cache miss)
-      if: steps.llvm-cache.outputs.cache-hit != 'true'
+      if: steps.llvm-cache.outputs.cache-hit != 'true' || steps.llvm-validate.outputs.rebuild == 'true'
       shell: bash
       run: |
         set -euxo pipefail
@@ -71,21 +90,20 @@ runs:
         rm -rf /opt/llvm/share/{man,doc}
         rm -rf /tmp/llvm-project /tmp/llvm-build
 
-    # Save the LLVM install only when we actually built it (not on a
-    # cache hit, which already has the same content under the same
-    # key).  The dedicated `actions/cache/save@v4` runs unconditionally
-    # via `if: always()` so a partial build that hit the job timeout
-    # still seeds the cache — next run sees a hit and skips straight
-    # past the build.  Trade-off: if the build was so partial it
-    # failed cmake configure, the cache will hit but the project
-    # build will fail noisily on the missing libs; bumping LLVM_TAG
-    # forces a re-prime in that case.
+    # Save the LLVM install when we actually built it (true miss, or a
+    # validate-step rebuild after restoring a corrupt cache).  The
+    # save runs under `if: always()` so a partial build that hit the
+    # job timeout still seeds the cache — the next run can pick up
+    # where this one left off via ninja's incremental rebuild.  If
+    # the partial install is so broken that MLIRConfig.cmake is
+    # missing, the validate step above demotes the hit to a miss and
+    # forces a clean rebuild on the next run.
     - name: Save /opt/llvm cache
-      if: always() && steps.llvm-cache.outputs.cache-hit != 'true'
+      if: always() && (steps.llvm-cache.outputs.cache-hit != 'true' || steps.llvm-validate.outputs.rebuild == 'true')
       uses: actions/cache/save@v4
       with:
         path: /opt/llvm
-        key: llvm-${{ inputs.llvm-tag }}-${{ runner.os }}-${{ runner.arch }}
+        key: llvm-${{ inputs.llvm-tag }}-v2-${{ runner.os }}-${{ runner.arch }}
 
     - name: Export LLVM env vars
       shell: bash
