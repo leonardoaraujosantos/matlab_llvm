@@ -4890,6 +4890,22 @@ struct JsonV {
     std::vector<JsonV> a;
     std::vector<std::pair<std::string, JsonV>> o;
 
+    /* User-declared special members defined out-of-line below.  The
+     * recursive value types `vector<JsonV>` / `vector<pair<string,
+     * JsonV>>` make the implicit destructor ill-formed on libstdc++
+     * (its container destructor templates eagerly `static_assert`
+     * that the value type is destructible inside `~vector`, which
+     * fails because JsonV is incomplete at the point of synthesis).
+     * libc++ accepts incomplete value types lazily (C++17 P0040),
+     * which is why the macOS build doesn't trip this.  Same fix as
+     * `JValue` in lib/Flowchart/Loader.cpp. */
+    JsonV();
+    JsonV(const JsonV &);
+    JsonV(JsonV &&) noexcept;
+    JsonV &operator=(const JsonV &);
+    JsonV &operator=(JsonV &&) noexcept;
+    ~JsonV();
+
     const JsonV *find(const char *key) const {
         if (type != TObj) return nullptr;
         for (auto &kv : o) if (kv.first == key) return &kv.second;
@@ -4901,6 +4917,13 @@ struct JsonV {
     }
     double as_num(double def = 0) const { return type == TNum ? n : def; }
 };
+
+inline JsonV::JsonV() = default;
+inline JsonV::JsonV(const JsonV &) = default;
+inline JsonV::JsonV(JsonV &&) noexcept = default;
+inline JsonV &JsonV::operator=(const JsonV &) = default;
+inline JsonV &JsonV::operator=(JsonV &&) noexcept = default;
+inline JsonV::~JsonV() = default;
 
 struct JsonParser {
     const char *p;
