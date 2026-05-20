@@ -32,6 +32,7 @@ In scope (subsets shipped, covered by dedicated docs):
   Antenna ([`antenna_toolbox_roadmap.md`](antenna_toolbox_roadmap.md)),
   Propagation Models ([`propagation_toolbox_roadmap.md`](propagation_toolbox_roadmap.md)),
   Optimization ([`optim_toolbox_roadmap.md`](optim_toolbox_roadmap.md)),
+  Model Predictive Control ([`mpc_toolbox_roadmap.md`](mpc_toolbox_roadmap.md)),
   Partial Differential Equation ([`pde_toolbox_roadmap.md`](pde_toolbox_roadmap.md)),
   Symbolic Math via SymPP ([`sym.md`](sym.md) / [`symbolic_toolbox_roadmap.md`](symbolic_toolbox_roadmap.md)),
   Fixed-Point Designer (`fi`) ([`fixed_point_toolbox_roadmap.md`](fixed_point_toolbox_roadmap.md) / [`emit_fixed_point.md`](emit_fixed_point.md)),
@@ -199,7 +200,7 @@ conventions, and per-TU contents are documented in
 [`runtime.md`](runtime.md). The matrix below is the per-feature
 shipped / partial / missing inventory; per-toolbox tier plans live in
 the companion roadmap docs (signal / control / comm / RF / antenna /
-propagation / optim / PDE / symbolic / fixed-point / stateflow /
+propagation / optim / MPC / PDE / symbolic / fixed-point / stateflow /
 Verilog-A).
 
 ### Creation & shape
@@ -317,6 +318,7 @@ See [`docs/ode.md`](ode.md) for the full surface, ABI notes, and call shapes.
 | BVP (`bvp4c`, `bvp5c`), DDE (`dde23`) | ❌ | |
 | `pdepe` — 1-D parabolic-elliptic PDE via method-of-lines | ✅ | Cartesian / cylindrical / spherical (`m = 0, 1, 2`); Dirichlet, Neumann, Robin BCs; non-uniform mesh; scalar PDE. Wraps `ode23s_v` for stiff time integration. Output `sol` is N_t × N_x. See [`ode.md`](ode.md). |
 | `pdepe` extensions — multi-component systems (`npde > 1`); axis-of-symmetry `xmesh(1) = 0` for `m > 0`; `odeset` plumbed through | ❌ | Tracked in roadmap. |
+| Model Predictive Control (`mpc`, `mpcstate`, `mpcmove`, `sim`, `nlmpc`, `nlmpcmove`, explicit / adaptive / time-varying / finite-control-set variants) | ✅ | **Tiers 1 → 6 shipped** via [`mpc_toolbox_roadmap.md`](mpc_toolbox_roadmap.md). Linear MPC on a hand-coded KWIK active-set QP; output + mixed input/output constraints + ECR soft slack + output-disturbance integrator + `mpcmoveopt` run-time overrides; adaptive (`mpcmoveAdaptive`) / time-varying (`mpcmoveTV`) / gain-scheduled / LPV + the mflow `MpcMove` block (emit-c/cpp/python/SV + cocotb SIL); explicit MPC via offline grid tessellation (`generateExplicitMPC` / `mpcmoveExplicit`) + standalone `mpcActiveSetSolver` + finite-control-set `mpcmoveFinite`; nonlinear MPC (`nlmpc` / `nlmpcmove` over `fmincon` with an RK4 prediction rollout, anonymous-handle StateFcn); Tier-6 carve-down sweep (continuous-plant auto-c2d, rate bounds, MV-tracking `Wu`/`u_target`, `setEstimator`/`getEstimator`/`review`, `mpcsimopt`, reference previewing). **25 MPC tests green.** Headlines `examples/mpc/{dc_servo_mpc,paper_machine,pendulum_nlmpc,twin_rotor_nlmpc}.m` + `examples/quadrotor/`. **Carve-outs**: MPC Designer GUI, Simulink MPC block, FORCESPRO/Embotech NLP, CUDA, data-driven / passivity / C-GMRES NMPC, economic MPC, `nlmpcMultistage`, `getCodeGenerationData`, IP QP solver. |
 | 2-D / 3-D FEM (`createpde`, `femodel`, `multicuboid`, mesh generation, `solvepde`, `solve`, `pdeplot3D`, `VonMisesStress`, …) | ✅ | **11 arcs shipped** via [`pde_toolbox_roadmap.md`](pde_toolbox_roadmap.md): full Tier-1 → Tier-4 surface.  Sparse CSR infra + ILU(0)+GMRES + MINRES + PCG.  Lanczos shift-invert with mode shapes.  Modal superposition + Rayleigh damping.  T10 quadratic tets with stress recovery.  STL/GLB import (surface + volumetric via voxelize).  pdeplot / pdegplot / pdemesh / pdeplot3D.  Geometry primitives (`multicuboid` / `multicylinder` / `multisphere`) + Bey red refinement (`refineMeshBey`).  `femodel` classdef façade + legacy aliases (`solvepde`, `specifyCoefficients`, `applyBoundaryCondition`).  AnalysisType dispatch: structuralStatic / structuralTransient / structuralModal / structuralFrequency (damped via 2N×2N real-bordered + complex Krylov) / structuralTransientModal / structuralStaticNL / structuralStaticTL / thermalSteadyState (with Picard nonconstant `k(T)`) / thermalTransient / electrostatic / magnetostatic / dcConduction / harmonicElectromagnetic.  Thermal-stress coupling (`cellLoad(Temperature=…)`).  Full Craig-Bampton ROM (`pde_reduce_craig_bampton`) + modal-truncation ROM (`reduce`/`reconstructSolution`).  N-component coupled PDEs (`pde_solve_multi_n`).  **33 PDE end-to-end tests green.**  Remaining (mostly polish): full Green-Lagrange B_NL + geometric K_σ for true large-rotation elasticity, hanging-node red-green propagation, real Delaunay/TetGen mesher (today's volumetric meshing uses Kuhn 6-tet), 3-D Gouraud shading (per-triangle flat today).  PDE Modeler 2-D app + STEP import + PINN/GNN/FNO + Battery P2D explicitly carved out. |
 | Symbolic `pdsolve` family (closed-form heat / wave / 1st-order linear) | ✅ | In symbolic toolbox — see [`sym.md`](sym.md). |
 
@@ -788,6 +790,7 @@ keeps its own "next slice" list:
 | Antenna | [`antenna_toolbox_roadmap.md`](antenna_toolbox_roadmap.md) |
 | Propagation | [`propagation_toolbox_roadmap.md`](propagation_toolbox_roadmap.md) |
 | Optimization | [`optim_toolbox_roadmap.md`](optim_toolbox_roadmap.md) |
+| Model Predictive Control | [`mpc_toolbox_roadmap.md`](mpc_toolbox_roadmap.md) |
 | PDE | [`pde_toolbox_roadmap.md`](pde_toolbox_roadmap.md) |
 | Symbolic Math | [`symbolic_toolbox_roadmap.md`](symbolic_toolbox_roadmap.md) |
 | Fixed-Point Designer | [`fixed_point_toolbox_roadmap.md`](fixed_point_toolbox_roadmap.md) |

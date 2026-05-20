@@ -486,11 +486,15 @@ concrete carve-down that previously read "deferred" in the table.
 
 ### Closure verification
 
-- 23/23 MPC regression tests green: `mpc_t1_*` (5) + `mpc_t2_*` (3) +
-  `mpc_t3_*` (3) + `mpc_t4_*` (3) + `mpc_t5_*` (3) + `mpc_t6_*` (6).
+- 25/25 MPC regression tests green: `mpc_t1_*` (5) + `mpc_t2_*` (5) +
+  `mpc_t3_*` (4) + `mpc_t4_*` (3) + `mpc_t5_*` (2) + `mpc_t6_*` (6).
+  (`mpc_t5_twin_rotor` and `mpc_t6_quadrotor` were added after the
+  initial Tier-6 close — see the example inventory below.)
 - Headline demos `dc_servo_mpc.m` / `paper_machine.m` /
-  `lane_keeping_mpc.m` / `pendulum_nlmpc.m` rebuilt clean; NMPC demo's
-  RK4 update flows through the matching `mpc_t5_pendulum.stdout`.
+  `lane_keeping_mpc.m` / `pendulum_nlmpc.m` / `twin_rotor_nlmpc.m`
+  (MIMO nonlinear) + `examples/quadrotor/` (symbolic EOM + cascade
+  MPC/PID) rebuilt clean; NMPC demos' RK4 update flows through the
+  matching `mpc_t5_pendulum.stdout`.
 
 ---
 
@@ -583,6 +587,23 @@ concrete carve-down that previously read "deferred" in the table.
 ---
 
 ## 10. Verification — proposed
+
+> **Note (reconciliation with as-shipped state, 2026-05-20).** The
+> tables in §10.1 / §10.2 below are the *original pre-implementation
+> proposal* and list many candidate names that were never built (the
+> plan over-scoped the example/test inventory and predated Tier-6).
+> The authoritative as-shipped list is the §7 *Closure verification*
+> block plus what actually exists under `examples/mpc/`,
+> `examples/quadrotor/`, and `test/Run/mpc_t*.m`. As shipped:
+> **25 gating tests** across **6 tiers** — `mpc_t1_*` (5), `mpc_t2_*`
+> (5), `mpc_t3_*` (4), `mpc_t4_*` (3), `mpc_t5_*` (2: `pendulum`,
+> `twin_rotor`), `mpc_t6_*` (6). Shipped examples: `dc_servo_mpc`,
+> `paper_machine`, `lane_keeping_mpc`, `pendulum_nlmpc`,
+> `twin_rotor_nlmpc` (MIMO nonlinear) under `examples/mpc/`, the
+> symbolic-EOM cascade flight controller under `examples/quadrotor/`,
+> and `cocotb_mpc_sil.mflow` / `mpc_move_demo.mflow` under
+> `examples/mflowlink/coder/`. Treat the rows below as historical
+> intent, not a file manifest.
 
 Every tier ships two parallel deliverables: a folder of **runnable
 examples** under [`examples/mpc/`](../examples/mpc/) — one canonical

@@ -176,6 +176,36 @@ Open follow-ups carried forward (still on the roadmap):
 
 ---
 
+## Recently shipped (Model Predictive Control Toolbox arc, 2026-05-19 → 2026-05-20)
+
+A focused arc closing the practical MPC user surface across all six
+tiers, on top of the already-shipped Control System and Optimization
+toolboxes. Runtime in [`runtime/toolbox/mpc/`](../runtime/toolbox/mpc/);
+per-toolbox plan in [`mpc_toolbox_roadmap.md`](mpc_toolbox_roadmap.md);
+authoritative status in [`feature_status.md`](feature_status.md).
+
+| Phase | What | Gating tests |
+|---|---|---|
+| MPC T1 | **Linear MPC core** — `mpc` / `mpcstate` classdefs, `mpcmove`, `sim`, hand-coded KWIK active-set QP (Schmid-Biegler-Bemporad), prediction-matrix builder. Class-form `c2d` / `kalman` integration (`ss` gains a `Ts` property + 5-arg ctor). | `mpc_t1_*` (5) |
+| MPC T2 | **Constraints + disturbances** — output + mixed input/output constraints, ECR soft slack, output-disturbance integrator, MV blocking, run-time bound overrides via `mpcmoveopt`. | `mpc_t2_*` (5) |
+| MPC T3 | **Adaptive / TV / gain-scheduled / LPV** + the mflow `MpcMove` block deploying through emit-c/cpp/python/SV + cocotb SIL. | `mpc_t3_*` (4) |
+| MPC T4 | **Explicit MPC** via offline grid tessellation (zero run-time QP) + standalone `mpcActiveSetSolver` + finite-control-set MPC. | `mpc_t4_*` (3) |
+| MPC T5 | **Nonlinear MPC** — `nlmpc` / `nlmpcmove` over the shipped `fmincon` with an RK4 prediction rollout and an anonymous-handle StateFcn (SISO `pendulum` + MIMO `twin_rotor`). | `mpc_t5_*` (2) |
+| MPC T6 | **Carve-down sweep** — continuous-plant auto-c2d, rate bounds, MV-tracking (`Wu`/`u_target`, gradient + Hessian), `setEstimator`/`getEstimator`/`review`, `mpcsimopt`, reference previewing, RK4 in `nlmpcmove`. | `mpc_t6_*` (6) |
+
+**25 MPC gating tests green.** Headlines `examples/mpc/{dc_servo_mpc,
+paper_machine, pendulum_nlmpc, twin_rotor_nlmpc}.m` (SISO/MIMO × linear/
+nonlinear) + `examples/quadrotor/` (Symbolic Math Toolbox derives the
+6-DOF EOM; cascade MPC-position / PID-attitude flight controller with
+plots).
+
+> The Optimization, PDE, Symbolic Math, and Fixed-Point Designer
+> toolboxes also shipped in earlier arcs not separately logged here;
+> their status lives in [`feature_status.md`](feature_status.md) and the
+> per-toolbox roadmap docs.
+
+---
+
 ## Near-term (~1 month)
 
 ### 1. HDL Verification with CocoTB 🔵
