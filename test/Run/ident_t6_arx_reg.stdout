@@ -1,0 +1,4 @@
+plain a = -0.50
+plain Lambda = 0.00
+reg   a = -0.50
+reg Lambda = 0.50

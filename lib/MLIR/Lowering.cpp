@@ -5039,6 +5039,161 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
       if (N && N->Ref && N->Ref->Kind == BindingKind::Class &&
           N->Ref->ClassDef) {
         const ClassDef *CD = N->Ref->ClassDef;
+        /* Global Optimization Tier-6 — optimoptions(solver, 'Name', val,
+         * ...).  `optimoptions` is a classdef, so it lands here (not in
+         * the builtin block).  Allocate the zero-arg carrier shell and
+         * write the named fields (scalars via _set_f64; IntCon via
+         * _set_mat); the leading solver-name string is skipped. */
+        if (CD->Name == "optimoptions" && C.Args.size() >= 1) {
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "optimoptions__optimoptions"));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTyConst, L, {CtorCal});
+          for (size_t i = 1; i + 1 < C.Args.size(); i += 2) {
+            std::string key;
+            if (auto *CL = dynamic_cast<const CharLiteral *>(C.Args[i])) key = CL->Value;
+            else if (auto *SL = dynamic_cast<const StringLiteral *>(C.Args[i])) key = SL->Value;
+            if (key.empty()) continue;
+            bool isMat = (key == "IntCon");
+            mlir::Value Val = lowerExpr(*C.Args[i + 1]);
+            mlir::Value NameV = emitFieldNameChar(key, L);
+            mlir::NamedAttribute SetCal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, isMat ? "matlab_obj_set_mat"
+                                                   : "matlab_obj_set_f64"));
+            emitUnregOp("matlab.call_builtin", {Obj, NameV, Val},
+                        {mlir::NoneType::get(&MCtx)}, L, {SetCal});
+          }
+          return Obj;
+        }
+        /* System Identification Tier-5 — recursiveLS(np) / recursiveARX(
+         * [na nb nk]).  Alloc-then-populate via the runtime init. */
+        if ((CD->Name == "recursiveLS" || CD->Name == "recursiveARX") &&
+            C.Args.size() == 1) {
+          std::string Ctor = std::string(CD->Name) + "__" + std::string(CD->Name);
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, Ctor));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTyConst, L, {CtorCal});
+          mlir::Value Arg = lowerExpr(*C.Args[0]);
+          const char *rt = (CD->Name == "recursiveLS") ? "matlab_ident_rls_init"
+                                                        : "matlab_ident_rarx_init";
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, rt));
+          emitUnregOp("matlab.call_builtin", {Obj, Arg},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Obj;
+        }
+        /* System Identification Tier-5 — extendedKalmanFilter(x0,P0,Q,R)
+         * / unscentedKalmanFilter(...).  Allocate the zero-arg shell and
+         * populate via the runtime (alloc-then-populate, like arx). */
+        if ((CD->Name == "extendedKalmanFilter" ||
+             CD->Name == "unscentedKalmanFilter") && C.Args.size() == 4) {
+          std::string Ctor = std::string(CD->Name) + "__" + std::string(CD->Name);
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, Ctor));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTyConst, L, {CtorCal});
+          mlir::Value X0 = lowerExpr(*C.Args[0]);
+          mlir::Value P0 = lowerExpr(*C.Args[1]);
+          mlir::Value Qm = lowerExpr(*C.Args[2]);
+          mlir::Value Rm = lowerExpr(*C.Args[3]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_ident_ekf_init"));
+          emitUnregOp("matlab.call_builtin", {Obj, X0, P0, Qm, Rm},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Obj;
+        }
+        /* System Identification Tier-1.8 — ss(idpoly) / tf(idpoly)
+         * conversion.  `ss`/`tf` resolve as classes (not builtins), so
+         * this interception lives in the constructor-call path rather
+         * than the BindingKind::Builtin block above.  ss(model) builds
+         * the controllable-canonical realisation (carrying the discrete
+         * Ts); tf(model) extracts B/A (the CST tf is Ts-less). */
+        if (CD->Name == "ss" && C.Args.size() == 1 && C.Args[0]) {
+          const ClassDef *Arg0 = nullptr;
+          if (auto *AN = dynamic_cast<const NameExpr *>(C.Args[0]))
+            if (AN->Ref) Arg0 = AN->Ref->PinnedClass;
+          /* ss(idss) / ss(idgrey) — the model already is a realization;
+           * copy its A/B/C/D/Ts straight into a CST ss. */
+          if (Arg0 && (Arg0->Name == "idss" || Arg0->Name == "idgrey")) {
+            mlir::Value Model = lowerExpr(*C.Args[0]);
+            if (Model.getType() != PtrTyConst) Model.setType(PtrTyConst);
+            auto F64c = mlir::Float64Type::get(&MCtx);
+            auto callRT = [&](const char *sym) -> mlir::Value {
+              mlir::NamedAttribute Cal(
+                  mlir::StringAttr::get(&MCtx, "callee"),
+                  mlir::StringAttr::get(&MCtx, sym));
+              return emitUnreg("matlab.call_builtin", {Model}, PtrTyConst, L, {Cal});
+            };
+            mlir::Value Am = callRT("matlab_ident_ss_A");
+            mlir::Value Bm = callRT("matlab_ident_ss_B");
+            mlir::Value Cm = callRT("matlab_ident_ss_C");
+            mlir::Value Dm = callRT("matlab_ident_ss_D");
+            mlir::Value NameTs = emitFieldNameChar("Ts", L);
+            mlir::NamedAttribute TsCal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_obj_get_f64"));
+            mlir::Value Ts = emitUnreg("matlab.call_builtin", {Model, NameTs},
+                                       F64c, L, {TsCal});
+            mlir::NamedAttribute CtorCal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "ss__ss"));
+            return emitUnreg("matlab.call", {Am, Bm, Cm, Dm, Ts},
+                             PtrTyConst, L, {CtorCal});
+          }
+        }
+        if ((CD->Name == "ss" || CD->Name == "tf") && C.Args.size() == 1 &&
+            C.Args[0]) {
+          const ClassDef *Arg0 = nullptr;
+          if (auto *AN = dynamic_cast<const NameExpr *>(C.Args[0]))
+            if (AN->Ref) Arg0 = AN->Ref->PinnedClass;
+          if (Arg0 && Arg0->Name == "idpoly") {
+            mlir::Value Model = lowerExpr(*C.Args[0]);
+            if (Model.getType() != PtrTyConst) Model.setType(PtrTyConst);
+            auto F64c = mlir::Float64Type::get(&MCtx);
+            auto getMat = [&](const char *field) -> mlir::Value {
+              mlir::Value NameV = emitFieldNameChar(field, L);
+              mlir::NamedAttribute Cal(
+                  mlir::StringAttr::get(&MCtx, "callee"),
+                  mlir::StringAttr::get(&MCtx, "matlab_obj_get_mat"));
+              return emitUnreg("matlab.call_builtin", {Model, NameV},
+                               PtrTyConst, L, {Cal});
+            };
+            auto callRT = [&](const char *sym) -> mlir::Value {
+              mlir::NamedAttribute Cal(
+                  mlir::StringAttr::get(&MCtx, "callee"),
+                  mlir::StringAttr::get(&MCtx, sym));
+              return emitUnreg("matlab.call_builtin", {Model},
+                               PtrTyConst, L, {Cal});
+            };
+            if (CD->Name == "tf") {
+              mlir::Value Bp = getMat("B");
+              mlir::Value Ap = getMat("A");
+              mlir::NamedAttribute Cal(
+                  mlir::StringAttr::get(&MCtx, "callee"),
+                  mlir::StringAttr::get(&MCtx, "tf__tf"));
+              return emitUnreg("matlab.call", {Bp, Ap}, PtrTyConst, L, {Cal});
+            }
+            mlir::Value Am = callRT("matlab_ident_poly2ss_A");
+            mlir::Value Bm = callRT("matlab_ident_poly2ss_B");
+            mlir::Value Cm = callRT("matlab_ident_poly2ss_C");
+            mlir::Value Dm = callRT("matlab_ident_poly2ss_D");
+            mlir::Value NameTs = emitFieldNameChar("Ts", L);
+            mlir::NamedAttribute TsCal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_obj_get_f64"));
+            mlir::Value Ts = emitUnreg("matlab.call_builtin", {Model, NameTs},
+                                       F64c, L, {TsCal});
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "ss__ss"));
+            return emitUnreg("matlab.call", {Am, Bm, Cm, Dm, Ts},
+                             PtrTyConst, L, {Cal});
+          }
+        }
         bool HasCtor = false;
         for (const Function *Mth : CD->Methods)
           if (Mth && Mth->Name == CD->Name) { HasCtor = true; break; }
@@ -6255,6 +6410,225 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
           return V;
         };
 
+        /* ============================================================
+         * Global Optimization Toolbox Tier-1 — stochastic global
+         * solvers.  Each takes the objective as a function handle
+         * (arg 0, retyped to ptr by LowerAnonCalls); the runtime
+         * entries are 5-arg (fn, nvars/x0, lb, ub, hybrid).  We remap
+         * the MATLAB call forms and inject the hybrid flag (Tier-1
+         * always polishes with fmincon — the options-controlled
+         * HybridFcn is Tier-6).
+         * ============================================================ */
+        /* Global Optimization Tier-6 — ga with an optimoptions object.
+         * The trailing arg is the options carrier; route to the 6-arg
+         * `matlab_gads_ga_opts` runtime entry (reads PopulationSize /
+         * MaxGenerations / IntCon).  Supported call forms:
+         *   ga(fun, nvars, lb, ub, opts)                          (5-arg)
+         *   ga(fun, nvars, A, b, Aeq, beq, lb, ub, opts)          (9-arg)
+         *   ga(fun, nvars, A, b, Aeq, beq, lb, ub, nonlcon, opts) (10-arg,
+         *      the canonical full signature — nonlcon must be [] today). */
+        if (Nm == "ga" &&
+            (C.Args.size() == 5 || C.Args.size() == 9 || C.Args.size() == 10)) {
+          mlir::Value Fn = lowerExpr(*C.Args[0]);
+          if (Fn.getType() != PtrTy) Fn.setType(PtrTy);
+          mlir::Value Nv = lowerExpr(*C.Args[1]);
+          mlir::Value Lb, Ub, Opts;
+          if (C.Args.size() == 5)      { Lb = lowerExpr(*C.Args[2]); Ub = lowerExpr(*C.Args[3]); Opts = loadObj(C.Args[4]); }
+          else if (C.Args.size() == 9) { Lb = lowerExpr(*C.Args[6]); Ub = lowerExpr(*C.Args[7]); Opts = loadObj(C.Args[8]); }
+          else                         { Lb = lowerExpr(*C.Args[6]); Ub = lowerExpr(*C.Args[7]); Opts = loadObj(C.Args[9]); }
+          mlir::Value Hy = emitUnreg("matlab.const_float", {}, F64, L,
+                                     {mlir::NamedAttribute(
+                                         mlir::StringAttr::get(&MCtx, "value"),
+                                         mlir::FloatAttr::get(F64, 1.0))});
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_gads_ga_opts"));
+          return emitUnreg("matlab.call_builtin", {Fn, Nv, Lb, Ub, Hy, Opts}, PtrTy, L, {Cal});
+        }
+
+        if (Nm == "ga" || Nm == "particleswarm" || Nm == "simulannealbnd") {
+          auto f64const = [&](double v) -> mlir::Value {
+            return emitUnreg("matlab.const_float", {}, F64, L,
+                             {mlir::NamedAttribute(
+                                 mlir::StringAttr::get(&MCtx, "value"),
+                                 mlir::FloatAttr::get(F64, v))});
+          };
+          auto emptyMat = [&]() -> mlir::Value {
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_empty_mat"));
+            return emitUnreg("matlab.call_builtin", {}, PtrTy, L, {Cal});
+          };
+          mlir::Value Fn = lowerExpr(*C.Args[0]);   /* objective handle */
+          if (Fn.getType() != PtrTy) Fn.setType(PtrTy);
+          /* Matrix args (x0 / lb / ub) are lowered with plain lowerExpr
+           * (NOT loadObj's setType) — inline matrix literals must keep
+           * their tensor result type so the concat op lowers; the
+           * pde_table loose-match then coerces tensor→ptr at the call. */
+          /* Arg 1 is `nvars` (f64 scalar) for ga / particleswarm, but the
+           * `x0` start-point matrix for simulannealbnd. */
+          mlir::Value Arg1 = (C.Args.size() >= 2) ? lowerExpr(*C.Args[1])
+                                                  : f64const(1.0);
+          /* lb / ub extraction by call form. */
+          mlir::Value Lb, Ub;
+          if (Nm == "ga" && C.Args.size() == 8) {
+            Lb = lowerExpr(*C.Args[6]); Ub = lowerExpr(*C.Args[7]);   /* (fun,nvars,A,b,Aeq,beq,lb,ub) */
+          } else if (C.Args.size() == 4) {
+            Lb = lowerExpr(*C.Args[2]); Ub = lowerExpr(*C.Args[3]);   /* (fun,nvars/x0,lb,ub) */
+          } else {
+            Lb = emptyMat(); Ub = emptyMat();                        /* unbounded fallback */
+          }
+          const char *rt = (Nm == "ga") ? "matlab_gads_ga"
+                         : (Nm == "particleswarm") ? "matlab_gads_particleswarm"
+                         : "matlab_gads_simulannealbnd";
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, rt));
+          return emitUnreg("matlab.call_builtin",
+                           {Fn, Arg1, Lb, Ub, f64const(1.0)}, PtrTy, L, {Cal});
+        }
+
+        /* Global Optimization Tier-3 — patternsearch(fun, x0, A, b, Aeq,
+         * beq, lb, ub).  Deterministic direct search; x0 is a matrix
+         * start point (arg 1) and there is NO hybrid arg (the mesh
+         * refinement is the convergence).  4-arg runtime. */
+        if (Nm == "patternsearch") {
+          auto emptyMat = [&]() -> mlir::Value {
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_empty_mat"));
+            return emitUnreg("matlab.call_builtin", {}, PtrTy, L, {Cal});
+          };
+          mlir::Value Fn = lowerExpr(*C.Args[0]);
+          if (Fn.getType() != PtrTy) Fn.setType(PtrTy);
+          mlir::Value X0 = (C.Args.size() >= 2) ? lowerExpr(*C.Args[1]) : emptyMat();
+          mlir::Value Lb, Ub;
+          if (C.Args.size() == 8) {            /* (fun,x0,A,b,Aeq,beq,lb,ub) */
+            Lb = lowerExpr(*C.Args[6]); Ub = lowerExpr(*C.Args[7]);
+          } else if (C.Args.size() == 4) {     /* (fun,x0,lb,ub) */
+            Lb = lowerExpr(*C.Args[2]); Ub = lowerExpr(*C.Args[3]);
+          } else {
+            Lb = emptyMat(); Ub = emptyMat();
+          }
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_gads_patternsearch"));
+          return emitUnreg("matlab.call_builtin", {Fn, X0, Lb, Ub}, PtrTy, L, {Cal});
+        }
+
+        /* Global Optimization Tier-5 — gamultiobj / paretosearch.  Same
+         * arg shape as ga (nvars at arg 1; 8-arg `(fun,nvars,A,b,Aeq,beq,
+         * lb,ub)` / 4-arg `(fun,nvars,lb,ub)`), but the objective returns
+         * a vector (handled by the vector-objective retype) and there is
+         * NO hybrid arg.  Returns the Pareto set (k×nvars). */
+        if (Nm == "gamultiobj" || Nm == "paretosearch") {
+          auto emptyMat = [&]() -> mlir::Value {
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_empty_mat"));
+            return emitUnreg("matlab.call_builtin", {}, PtrTy, L, {Cal});
+          };
+          mlir::Value Fn = lowerExpr(*C.Args[0]);
+          if (Fn.getType() != PtrTy) Fn.setType(PtrTy);
+          mlir::Value Nv = (C.Args.size() >= 2) ? lowerExpr(*C.Args[1])
+                                                : emptyMat();   /* nvars (f64) */
+          mlir::Value Lb, Ub;
+          if (C.Args.size() == 8) { Lb = lowerExpr(*C.Args[6]); Ub = lowerExpr(*C.Args[7]); }
+          else if (C.Args.size() == 4) { Lb = lowerExpr(*C.Args[2]); Ub = lowerExpr(*C.Args[3]); }
+          else { Lb = emptyMat(); Ub = emptyMat(); }
+          const char *rt = (Nm == "gamultiobj") ? "matlab_gads_gamultiobj"
+                                                 : "matlab_gads_paretosearch";
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, rt));
+          return emitUnreg("matlab.call_builtin", {Fn, Nv, Lb, Ub}, PtrTy, L, {Cal});
+        }
+
+        /* Global Optimization Tier-4 — surrogateopt(fun, lb, ub).  No
+         * start point (samples within bounds); lb/ub are args 1,2.
+         * Injects the hybrid flag (final fmincon polish). */
+        if (Nm == "surrogateopt" && C.Args.size() == 3) {
+          auto f64c = [&](double v) -> mlir::Value {
+            return emitUnreg("matlab.const_float", {}, F64, L,
+                             {mlir::NamedAttribute(
+                                 mlir::StringAttr::get(&MCtx, "value"),
+                                 mlir::FloatAttr::get(F64, v))});
+          };
+          mlir::Value Fn = lowerExpr(*C.Args[0]);
+          if (Fn.getType() != PtrTy) Fn.setType(PtrTy);
+          mlir::Value Lb = lowerExpr(*C.Args[1]);
+          mlir::Value Ub = lowerExpr(*C.Args[2]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_gads_surrogateopt"));
+          return emitUnreg("matlab.call_builtin",
+                           {Fn, Lb, Ub, f64c(1.0)}, PtrTy, L, {Cal});
+        }
+
+        /* Global Optimization Tier-2 — createOptimProblem('fmincon',
+         * 'objective',@f,'x0',x0,'lb',lb,'ub',ub).  Scan the name-value
+         * pairs, stash the objective handle + x0/lb/ub into the runtime
+         * thread-local problem context (matlab_gads_make_problem), and
+         * return its marker.  The objective handle is lowered as a ptr
+         * (LowerAnonCalls retypes operand 0). */
+        if (Nm == "createOptimProblem") {
+          mlir::Value Obj_, X0_, Lb_, Ub_;
+          auto emptyMat2 = [&]() -> mlir::Value {
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_empty_mat"));
+            return emitUnreg("matlab.call_builtin", {}, PtrTy, L, {Cal});
+          };
+          for (size_t i = 0; i + 1 < C.Args.size(); ++i) {
+            std::string key;
+            if (auto *CL = dynamic_cast<const CharLiteral *>(C.Args[i]))
+              key = CL->Value;
+            else if (auto *SL = dynamic_cast<const StringLiteral *>(C.Args[i]))
+              key = SL->Value;
+            if (key.empty()) continue;
+            const Expr *valE = C.Args[i + 1];
+            if (key == "objective") { Obj_ = lowerExpr(*valE);
+                                      if (Obj_.getType() != PtrTy) Obj_.setType(PtrTy); }
+            else if (key == "x0")    X0_ = lowerExpr(*valE);
+            else if (key == "lb")    Lb_ = lowerExpr(*valE);
+            else if (key == "ub")    Ub_ = lowerExpr(*valE);
+          }
+          if (!Obj_) Obj_ = emptyMat2();
+          if (!X0_)  X0_  = emptyMat2();
+          if (!Lb_)  Lb_  = emptyMat2();
+          if (!Ub_)  Ub_  = emptyMat2();
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_gads_make_problem"));
+          return emitUnreg("matlab.call_builtin", {Obj_, X0_, Lb_, Ub_},
+                           PtrTy, L, {Cal});
+        }
+        /* Global Optimization Tier-2 — run(solver, problem [, k]).  The
+         * objective + bounds ride in the thread-local set by
+         * createOptimProblem; the solver object is forwarded so the
+         * runtime can read its class (MultiStart vs GlobalSearch) and
+         * branch.  Dispatching at runtime — rather than on a Sema-pinned
+         * type — makes `run` work in the line-by-line REPL too, where
+         * cross-line class pinning is not retained.  Gated to a non-string
+         * first arg so a future `run('script.m')` is not hijacked. */
+        if (Nm == "run" && C.Args.size() >= 2 &&
+            !dynamic_cast<const CharLiteral *>(C.Args[0]) &&
+            !dynamic_cast<const StringLiteral *>(C.Args[0])) {
+          auto f64c = [&](double v) -> mlir::Value {
+            return emitUnreg("matlab.const_float", {}, F64, L,
+                             {mlir::NamedAttribute(
+                                 mlir::StringAttr::get(&MCtx, "value"),
+                                 mlir::FloatAttr::get(F64, v))});
+          };
+          mlir::Value Solver = loadObj(C.Args[0]);
+          mlir::Value K = (C.Args.size() >= 3) ? lowerExpr(*C.Args[2])
+                                               : f64c(20.0);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_gads_run"));
+          return emitUnreg("matlab.call_builtin", {Solver, K}, PtrTy, L, {Cal});
+        }
+
         auto rebuildCall = [&](llvm::StringRef Callee,
                                llvm::ArrayRef<mlir::Value> Args,
                                mlir::Type ResTy) -> mlir::Value {
@@ -6780,6 +7154,382 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
               mlir::StringAttr::get(&MCtx, "matlab_mpc_sim_opt"));
           return emitUnreg("matlab.call_builtin",
                            {Obj, T, R, Opt}, PtrTy, L, {Cal});
+        }
+
+        /* ============================================================
+         * System Identification Toolbox Tier-1 — class-pinned-first-arg
+         * dispatch.  arx / ar return a fresh idpoly (allocated via the
+         * zero-arg ctor, then populated by the runtime in place — same
+         * pattern as MPC's generateExplicitMPC).  sim / predict /
+         * compare / fpe / aic key on the model class so they coexist
+         * with the identically-named MPC + CST routes above.  (tf/ss
+         * conversion of an idpoly is handled in the constructor-call
+         * path below, since `tf`/`ss` resolve as classes, not builtins,
+         * and never reach this BindingKind::Builtin-gated block.)
+         * ============================================================ */
+        /* arx(data, [na nb nk]) — QR least-squares ARX. */
+        if (Nm == "arx" && Cls0 && Cn0 == "iddata" && C.Args.size() == 2) {
+          mlir::Value Data   = loadObj(C.Args[0]);
+          mlir::Value Orders = lowerExpr(*C.Args[1]);
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "idpoly__idpoly"));
+          mlir::Value Model = emitUnreg("matlab.call", {}, PtrTy, L, {CtorCal});
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_ident_arx"));
+          emitUnregOp("matlab.call_builtin", {Model, Data, Orders},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Model;
+        }
+        /* arx(data, orders, opt) — Tier-6 regularized ARX. `opt` is an
+         * arxOptions; we read opt.Regularization off it and call the
+         * ridge variant. */
+        if (Nm == "arx" && Cls0 && Cn0 == "iddata" && C.Args.size() == 3) {
+          mlir::Value Data   = loadObj(C.Args[0]);
+          mlir::Value Orders = lowerExpr(*C.Args[1]);
+          mlir::Value Opt    = loadObj(C.Args[2]);
+          /* opt.Regularization → scalar λ. */
+          mlir::Value NameReg = emitFieldNameChar("Regularization", L);
+          mlir::NamedAttribute RegCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_obj_get_f64"));
+          mlir::Value Lam = emitUnreg("matlab.call_builtin", {Opt, NameReg},
+                                      F64, L, {RegCal});
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "idpoly__idpoly"));
+          mlir::Value Model = emitUnreg("matlab.call", {}, PtrTy, L, {CtorCal});
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_ident_arx_reg"));
+          emitUnregOp("matlab.call_builtin", {Model, Data, Orders, Lam},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Model;
+        }
+        /* getcov(model) — parameter covariance from cached Gram. */
+        if (Nm == "getcov" && Cls0 && Cn0 == "idpoly" && C.Args.size() == 1) {
+          mlir::Value Model = loadObj(C.Args[0]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_ident_getcov"));
+          return emitUnreg("matlab.call_builtin", {Model}, PtrTy, L, {Cal});
+        }
+        /* getpvec(model) — packed parameter vector. */
+        if (Nm == "getpvec" && Cls0 && Cn0 == "idpoly" && C.Args.size() == 1) {
+          mlir::Value Model = loadObj(C.Args[0]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_ident_getpvec"));
+          return emitUnreg("matlab.call_builtin", {Model}, PtrTy, L, {Cal});
+        }
+        /* setpvec(model, theta) — write parameter vector back. */
+        if (Nm == "setpvec" && Cls0 && Cn0 == "idpoly" && C.Args.size() == 2) {
+          mlir::Value Model = loadObj(C.Args[0]);
+          mlir::Value Th    = lowerExpr(*C.Args[1]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_ident_setpvec"));
+          emitUnregOp("matlab.call_builtin", {Model, Th},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Model;
+        }
+        /* ar(data, na) — Yule-Walker AR time-series estimation. */
+        if (Nm == "ar" && Cls0 && Cn0 == "iddata" && C.Args.size() == 2) {
+          mlir::Value Data = loadObj(C.Args[0]);
+          mlir::Value Na   = lowerExpr(*C.Args[1]);
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "idpoly__idpoly"));
+          mlir::Value Model = emitUnreg("matlab.call", {}, PtrTy, L, {CtorCal});
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_ident_ar"));
+          emitUnregOp("matlab.call_builtin", {Model, Data, Na},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Model;
+        }
+        /* armax/oe/bj(data, orders) — PEM estimators; same alloc-then-
+         * populate shape as arx (return a fresh idpoly). */
+        {
+          const char *pemRt = nullptr;
+          if (Nm == "armax") pemRt = "matlab_ident_armax";
+          else if (Nm == "oe") pemRt = "matlab_ident_oe";
+          else if (Nm == "bj") pemRt = "matlab_ident_bj";
+          else if (Nm == "iv4") pemRt = "matlab_ident_iv4";
+          if (pemRt && Cls0 && Cn0 == "iddata" && C.Args.size() == 2) {
+            mlir::Value Data   = loadObj(C.Args[0]);
+            mlir::Value Orders = lowerExpr(*C.Args[1]);
+            mlir::NamedAttribute CtorCal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "idpoly__idpoly"));
+            mlir::Value Model = emitUnreg("matlab.call", {}, PtrTy, L, {CtorCal});
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, pemRt));
+            emitUnregOp("matlab.call_builtin", {Model, Data, Orders},
+                        {mlir::NoneType::get(&MCtx)}, L, {Cal});
+            return Model;
+          }
+        }
+        /* etfe(data) / spa(data) — non-parametric frequency response;
+         * returns a fresh idfrd. */
+        {
+          const char *frRt = nullptr;
+          if (Nm == "etfe") frRt = "matlab_ident_etfe";
+          else if (Nm == "spa") frRt = "matlab_ident_spa";
+          if (frRt && Cls0 && Cn0 == "iddata" && C.Args.size() == 1) {
+            mlir::Value Data = loadObj(C.Args[0]);
+            mlir::NamedAttribute CtorCal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "idfrd__idfrd"));
+            mlir::Value Model = emitUnreg("matlab.call", {}, PtrTy, L, {CtorCal});
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, frRt));
+            emitUnregOp("matlab.call_builtin", {Model, Data},
+                        {mlir::NoneType::get(&MCtx)}, L, {Cal});
+            return Model;
+          }
+        }
+        /* impulseest(data, N) — non-parametric impulse response (FIR);
+         * returns a fresh idpoly (A = 1, B = Markov params). */
+        if (Nm == "impulseest" && Cls0 && Cn0 == "iddata" && C.Args.size() == 2) {
+          mlir::Value Data = loadObj(C.Args[0]);
+          mlir::Value Nl   = lowerExpr(*C.Args[1]);
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "idpoly__idpoly"));
+          mlir::Value Model = emitUnreg("matlab.call", {}, PtrTy, L, {CtorCal});
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_ident_impulseest"));
+          emitUnregOp("matlab.call_builtin", {Model, Data, Nl},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Model;
+        }
+        /* forecast(model, data, K) — K-step time-series forecast. */
+        if (Nm == "forecast" && Cls0 && Cn0 == "idpoly" && C.Args.size() == 3) {
+          mlir::Value Model = loadObj(C.Args[0]);
+          mlir::Value Data  = loadObj(C.Args[1]);
+          mlir::Value Kk    = lowerExpr(*C.Args[2]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_ident_forecast"));
+          return emitUnreg("matlab.call_builtin", {Model, Data, Kk}, PtrTy, L, {Cal});
+        }
+        /* tfest(data, np, nz) — transfer-function estimation (OE form);
+         * returns a fresh idpoly (B = num, F = den). */
+        if (Nm == "tfest" && Cls0 && Cn0 == "iddata" && C.Args.size() == 3) {
+          mlir::Value Data = loadObj(C.Args[0]);
+          mlir::Value Np   = lowerExpr(*C.Args[1]);
+          mlir::Value Nz   = lowerExpr(*C.Args[2]);
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "idpoly__idpoly"));
+          mlir::Value Model = emitUnreg("matlab.call", {}, PtrTy, L, {CtorCal});
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_ident_tfest"));
+          emitUnregOp("matlab.call_builtin", {Model, Data, Np, Nz},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Model;
+        }
+        /* n4sid/ssest(data, nx) — subspace state-space estimation;
+         * returns a fresh idss (alloc-then-populate, like arx, but the
+         * 2nd arg is a scalar model order). */
+        {
+          const char *ssRt = nullptr;
+          if (Nm == "n4sid") ssRt = "matlab_ident_n4sid";
+          else if (Nm == "ssest") ssRt = "matlab_ident_ssest";
+          if (ssRt && Cls0 && Cn0 == "iddata" && C.Args.size() == 2) {
+            mlir::Value Data = loadObj(C.Args[0]);
+            mlir::Value Nx   = lowerExpr(*C.Args[1]);
+            mlir::NamedAttribute CtorCal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "idss__idss"));
+            mlir::Value Model = emitUnreg("matlab.call", {}, PtrTy, L, {CtorCal});
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, ssRt));
+            emitUnregOp("matlab.call_builtin", {Model, Data, Nx},
+                        {mlir::NoneType::get(&MCtx)}, L, {Cal});
+            return Model;
+          }
+        }
+        /* nlgreyest(data, par0, @statefn, nx) — nonlinear grey-box; the
+         * 3rd arg is the ODE-rhs handle.  Returns idnlgrey. */
+        if (Nm == "nlgreyest" && Cls0 && Cn0 == "iddata" && C.Args.size() == 4) {
+          mlir::Value Data = loadObj(C.Args[0]);
+          mlir::Value Par0 = lowerExpr(*C.Args[1]);
+          mlir::Value Fn   = lowerExpr(*C.Args[2]);
+          mlir::Value Nx   = lowerExpr(*C.Args[3]);
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "idnlgrey__idnlgrey"));
+          mlir::Value Model = emitUnreg("matlab.call", {}, PtrTy, L, {CtorCal});
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_ident_nlgreyest"));
+          emitUnregOp("matlab.call_builtin", {Model, Data, Par0, Fn, Nx},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Model;
+        }
+        /* greyest(data, par0, @structfn, nx) — linear grey-box; the
+         * 3rd arg is the structure-function handle.  Returns idgrey. */
+        if (Nm == "greyest" && Cls0 && Cn0 == "iddata" && C.Args.size() == 4) {
+          mlir::Value Data = loadObj(C.Args[0]);
+          mlir::Value Par0 = lowerExpr(*C.Args[1]);
+          mlir::Value Fn   = lowerExpr(*C.Args[2]);
+          mlir::Value Nx   = lowerExpr(*C.Args[3]);
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "idgrey__idgrey"));
+          mlir::Value Model = emitUnreg("matlab.call", {}, PtrTy, L, {CtorCal});
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_ident_greyest"));
+          emitUnregOp("matlab.call_builtin", {Model, Data, Par0, Fn, Nx},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Model;
+        }
+        /* sim(model, u) for an idss / idgrey — state-space simulation. */
+        if (Nm == "sim" && Cls0 && (Cn0 == "idss" || Cn0 == "idgrey") &&
+            C.Args.size() == 2) {
+          mlir::Value Model = loadObj(C.Args[0]);
+          mlir::Value U     = lowerExpr(*C.Args[1]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_ident_sim_ss"));
+          return emitUnreg("matlab.call_builtin", {Model, U}, PtrTy, L, {Cal});
+        }
+        /* pe(model, data) / resid(model, data) — return matrices
+         * (prediction errors / whiteness diagnostic). */
+        if ((Nm == "pe" || Nm == "resid") && Cls0 && Cn0 == "idpoly" &&
+            C.Args.size() == 2) {
+          mlir::Value Model = loadObj(C.Args[0]);
+          mlir::Value Data  = loadObj(C.Args[1]);
+          const char *peRt = (Nm == "pe") ? "matlab_ident_pe"
+                                           : "matlab_ident_resid";
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, peRt));
+          return emitUnreg("matlab.call_builtin", {Model, Data}, PtrTy, L, {Cal});
+        }
+        /* sim(model, u) — deterministic simulation B(q)/A(q)·u. */
+        if (Nm == "sim" && Cls0 && Cn0 == "idpoly" && C.Args.size() == 2) {
+          mlir::Value Model = loadObj(C.Args[0]);
+          mlir::Value U     = lowerExpr(*C.Args[1]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_ident_sim"));
+          return emitUnreg("matlab.call_builtin", {Model, U}, PtrTy, L, {Cal});
+        }
+        /* EKF/UKF predict(obj, @StateFcn) — one filter prediction step. */
+        if (Nm == "predict" && Cls0 &&
+            (Cn0 == "extendedKalmanFilter" || Cn0 == "unscentedKalmanFilter") &&
+            C.Args.size() == 2) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value Fn  = lowerExpr(*C.Args[1]);
+          const char *rt = (Cn0 == "extendedKalmanFilter")
+                               ? "matlab_ident_ekf_predict"
+                               : "matlab_ident_ukf_predict";
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, rt));
+          return emitUnreg("matlab.call_builtin", {Obj, Fn}, PtrTy, L, {Cal});
+        }
+        /* EKF/UKF correct(obj, @MeasFcn, y) — one filter correction step. */
+        if (Nm == "correct" && Cls0 &&
+            (Cn0 == "extendedKalmanFilter" || Cn0 == "unscentedKalmanFilter") &&
+            C.Args.size() == 3) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value Fn  = lowerExpr(*C.Args[1]);
+          mlir::Value Yv  = lowerExpr(*C.Args[2]);
+          const char *rt = (Cn0 == "extendedKalmanFilter")
+                               ? "matlab_ident_ekf_correct"
+                               : "matlab_ident_ukf_correct";
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, rt));
+          return emitUnreg("matlab.call_builtin", {Obj, Fn, Yv}, PtrTy, L, {Cal});
+        }
+        /* recursiveLS step(obj, y, H) — RLS update with user regressor H. */
+        if (Nm == "step" && Cls0 && Cn0 == "recursiveLS" && C.Args.size() == 3) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value Yv  = lowerExpr(*C.Args[1]);
+          mlir::Value Hv  = lowerExpr(*C.Args[2]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_ident_rls_step"));
+          return emitUnreg("matlab.call_builtin", {Obj, Yv, Hv}, PtrTy, L, {Cal});
+        }
+        /* recursiveARX step(obj, y, u) — RLS update from buffered I/O. */
+        if (Nm == "step" && Cls0 && Cn0 == "recursiveARX" && C.Args.size() == 3) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value Yv  = lowerExpr(*C.Args[1]);
+          mlir::Value Uv  = lowerExpr(*C.Args[2]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_ident_rarx_step"));
+          return emitUnreg("matlab.call_builtin", {Obj, Yv, Uv}, PtrTy, L, {Cal});
+        }
+        /* predict(model, data [, K]) — K-step predictor (default K=1). */
+        if (Nm == "predict" && Cls0 && Cn0 == "idpoly" &&
+            (C.Args.size() == 2 || C.Args.size() == 3)) {
+          mlir::Value Model = loadObj(C.Args[0]);
+          mlir::Value Data  = loadObj(C.Args[1]);
+          mlir::Value K = (C.Args.size() == 3)
+                              ? lowerExpr(*C.Args[2])
+                              : emitUnreg("matlab.const_float", {}, F64, L,
+                                          {mlir::NamedAttribute(
+                                              mlir::StringAttr::get(&MCtx, "value"),
+                                              mlir::FloatAttr::get(F64, 1.0))});
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_ident_predict"));
+          return emitUnreg("matlab.call_builtin", {Model, Data, K}, PtrTy, L, {Cal});
+        }
+        /* compare(data, model) — NRMSE fit % (scalar).  Routes to the
+         * state-space comparator when the model arg is an idss, else the
+         * polynomial one. */
+        if (Nm == "compare" && Cls0 && Cn0 == "iddata" && C.Args.size() == 2) {
+          mlir::Value Data  = loadObj(C.Args[0]);
+          mlir::Value Model = loadObj(C.Args[1]);
+          bool modelIsSS = false;
+          if (auto *AN1 = dynamic_cast<const NameExpr *>(C.Args[1]))
+            if (AN1->Ref && AN1->Ref->PinnedClass &&
+                (AN1->Ref->PinnedClass->Name == "idss" ||
+                 AN1->Ref->PinnedClass->Name == "idgrey"))
+              modelIsSS = true;
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, modelIsSS ? "matlab_ident_compare_ss"
+                                                     : "matlab_ident_compare"));
+          return emitUnreg("matlab.call_builtin", {Data, Model}, F64, L, {Cal});
+        }
+        /* delayest(data) — estimate the input transport delay (scalar). */
+        if (Nm == "delayest" && Cls0 && Cn0 == "iddata" && C.Args.size() == 1) {
+          mlir::Value Data = loadObj(C.Args[0]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_ident_delayest"));
+          return emitUnreg("matlab.call_builtin", {Data}, F64, L, {Cal});
+        }
+        /* fpe(model) / aic(model) — quality metrics (scalar). */
+        if (Nm == "fpe" && Cls0 && Cn0 == "idpoly" && C.Args.size() == 1) {
+          mlir::Value Model = loadObj(C.Args[0]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_ident_fpe"));
+          return emitUnreg("matlab.call_builtin", {Model}, F64, L, {Cal});
+        }
+        if (Nm == "aic" && Cls0 && Cn0 == "idpoly" && C.Args.size() == 1) {
+          mlir::Value Model = loadObj(C.Args[0]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_ident_aic"));
+          return emitUnreg("matlab.call_builtin", {Model}, F64, L, {Cal});
         }
 
         /* MPC Tier-0 — kalman(sys, Qn, Rn) sys-form.  When the first

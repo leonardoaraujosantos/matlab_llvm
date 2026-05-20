@@ -22,7 +22,7 @@ Out of scope:
 In scope (subsets shipped, covered by dedicated docs):
 - **Plotting**: headless Cairo-backed `plot` / `bar` / `surf` / etc. with
   PNG/SVG/PDF output. See [`plotting.md`](plotting.md).
-- **Toolboxes (eleven shipped surfaces)** — earlier revisions of this
+- **Toolboxes (thirteen shipped surfaces)** — earlier revisions of this
   doc listed toolboxes as out of scope; that scope has expanded. The
   runtime now ships practical subsets of:
   Signal Processing ([`signal_toolbox_roadmap.md`](signal_toolbox_roadmap.md)),
@@ -33,10 +33,15 @@ In scope (subsets shipped, covered by dedicated docs):
   Propagation Models ([`propagation_toolbox_roadmap.md`](propagation_toolbox_roadmap.md)),
   Optimization ([`optim_toolbox_roadmap.md`](optim_toolbox_roadmap.md)),
   Model Predictive Control ([`mpc_toolbox_roadmap.md`](mpc_toolbox_roadmap.md)),
+  System Identification ([`ident_toolbox_roadmap.md`](ident_toolbox_roadmap.md)),
   Partial Differential Equation ([`pde_toolbox_roadmap.md`](pde_toolbox_roadmap.md)),
   Symbolic Math via SymPP ([`sym.md`](sym.md) / [`symbolic_toolbox_roadmap.md`](symbolic_toolbox_roadmap.md)),
   Fixed-Point Designer (`fi`) ([`fixed_point_toolbox_roadmap.md`](fixed_point_toolbox_roadmap.md) / [`emit_fixed_point.md`](emit_fixed_point.md)),
   and Stateflow / mStateflow ([`mStateflow_roadmap.md`](mStateflow_roadmap.md)).
+  A fourteenth — Global Optimization ([`global_optim_toolbox_roadmap.md`](global_optim_toolbox_roadmap.md))
+  — is complete (all 6 tiers: `ga` / `particleswarm` / `simulannealbnd` +
+  `MultiStart` / `GlobalSearch` / `patternsearch` / `surrogateopt` / `gamultiobj` / `paretosearch`
+  + `optimoptions('ga')` options surface + integer-constrained `ga`).
   Apps / Live Editor / GUIs / Simulink integration for each are
   individually carved out — see the per-toolbox roadmap.
 
@@ -319,6 +324,8 @@ See [`docs/ode.md`](ode.md) for the full surface, ABI notes, and call shapes.
 | `pdepe` — 1-D parabolic-elliptic PDE via method-of-lines | ✅ | Cartesian / cylindrical / spherical (`m = 0, 1, 2`); Dirichlet, Neumann, Robin BCs; non-uniform mesh; scalar PDE. Wraps `ode23s_v` for stiff time integration. Output `sol` is N_t × N_x. See [`ode.md`](ode.md). |
 | `pdepe` extensions — multi-component systems (`npde > 1`); axis-of-symmetry `xmesh(1) = 0` for `m > 0`; `odeset` plumbed through | ❌ | Tracked in roadmap. |
 | Model Predictive Control (`mpc`, `mpcstate`, `mpcmove`, `sim`, `nlmpc`, `nlmpcmove`, explicit / adaptive / time-varying / finite-control-set variants) | ✅ | **Tiers 1 → 6 shipped** via [`mpc_toolbox_roadmap.md`](mpc_toolbox_roadmap.md). Linear MPC on a hand-coded KWIK active-set QP; output + mixed input/output constraints + ECR soft slack + output-disturbance integrator + `mpcmoveopt` run-time overrides; adaptive (`mpcmoveAdaptive`) / time-varying (`mpcmoveTV`) / gain-scheduled / LPV + the mflow `MpcMove` block (emit-c/cpp/python/SV + cocotb SIL); explicit MPC via offline grid tessellation (`generateExplicitMPC` / `mpcmoveExplicit`) + standalone `mpcActiveSetSolver` + finite-control-set `mpcmoveFinite`; nonlinear MPC (`nlmpc` / `nlmpcmove` over `fmincon` with an RK4 prediction rollout, anonymous-handle StateFcn); Tier-6 carve-down sweep (continuous-plant auto-c2d, rate bounds, MV-tracking `Wu`/`u_target`, `setEstimator`/`getEstimator`/`review`, `mpcsimopt`, reference previewing). **25 MPC tests green.** Headlines `examples/mpc/{dc_servo_mpc,paper_machine,pendulum_nlmpc,twin_rotor_nlmpc}.m` + `examples/quadrotor/`. **Carve-outs**: MPC Designer GUI, Simulink MPC block, FORCESPRO/Embotech NLP, CUDA, data-driven / passivity / C-GMRES NMPC, economic MPC, `nlmpcMultistage`, `getCodeGenerationData`, IP QP solver. |
+| System Identification (`iddata`, `idpoly`, `idss`, `idfrd`, `idgrey`, `idnlgrey`, `arx` / `ar` / `armax` / `oe` / `bj` / `iv4` / `tfest` / `n4sid` / `ssest` / `greyest` / `nlgreyest` / `etfe` / `spa` / `impulseest` / `forecast` / `pe` / `resid` / `delayest`, `extendedKalmanFilter` / `unscentedKalmanFilter`, `recursiveARX` / `recursiveLS`, `arxOptions` + `getcov` / `getpvec` / `setpvec`) | ✅ | **All 6 tiers shipped** via [`ident_toolbox_roadmap.md`](ident_toolbox_roadmap.md). Backed by [`runtime/toolbox/ident/runtime_ident.cpp`](../runtime/toolbox/ident/runtime_ident.cpp) + [`runtime/toolbox/ident/ident_classdefs.m`](../runtime/toolbox/ident/ident_classdefs.m). T1 `iddata` + `arx`/`ar` (QR-LS via normal equations) + `sim`/`predict`/`compare`(NRMSE)/`goodnessOfFit`/`fpe`/`aic` + `ss`/`tf`(idpoly). T2 PEM core: `armax`/`oe`/`bj` via `lsqnonlin` with one general predictor `e=(D/C)(A·y−B/F·u)`, `iv4` instrumental-variables, `pe`/`resid` whiteness, `delayest`. T3 subspace state-space: `n4sid`/`ssest` via Ho-Kalman/ERA (block-Hankel SVD through symmetric Gram-eig since `matlab_svd` returns only singular values), `tfest`, `idss`, state-space sim/compare, `ss(idss)`. T4 non-parametric: `etfe`/`spa` → `idfrd` (real magnitude/phase columns), `impulseest`, `forecast`, **linear grey-box** `greyest`/`idgrey` (function-handle structure fn → packed continuous `[A B; C D]` + ZOH `c2d` + `lsqnonlin`). T5 heavy: **EKF/UKF** `extendedKalmanFilter`/`unscentedKalmanFilter` (the project's first dynamic Kalman filtering loop — CST `kalman` is steady-state-gain only), forgetting-factor RLS `recursiveARX`/`recursiveLS`, nonlinear grey-box `nlgreyest`. T6 polish: regularized `arx(data,orders,arxOptions)` ridge `(ΦᵀΦ+λI)⁻¹Φᵀy` + `getcov`/`getpvec`/`setpvec` parameter introspection. **20 ident tests green; 435/435 full regression clean.** Seven headlines: `examples/ident/{arx_lab_process,armax_refine,data_driven_mpc,greybox_msd,ukf_state_estimation,recursive_arx_tracking,arx_regularization}.m`. The `data_driven_mpc.m` tracer-bullet runs `ssest(z,2) → ss(idsys) → mpc(P,10,3)` end-to-end. **Open carve-downs** (consolidated index in roadmap §8b): nonlinear black-box `nlarx`/`nlhw` + mapping objects (idSigmoidNetwork/idWaveletNetwork/idTreePartition), `particleFilter`, recursive-PEM (`recursiveARMAX`/`recursiveOE`/`recursiveBJ`), estimation `Report` struct, multi-return forms, `showConfidence` uncertainty bands, other `*Options` carriers (`armaxOptions`/`oeOptions`/`bjOptions`/`ssestOptions`), Fisher-information `getcov` for PEM-fit models, `merge` multi-experiment, ARIMA/seasonal, MIMO. **Carve-outs** (per the roadmap): System Identification App + Time Series Modeler app (Chapters 23–24), Simulink blocks (Ch.22), Neural State-Space + LSTM/cascade-correlation/`narxnet` (Deep Learning dependency), ML-NLARX (Stats & ML dependency), Reduced Order Modeling chapter, C-MEX grey-box, Diagnostics & Prognostics (Predictive Maintenance overlap). |
+| Global Optimization (`ga`, `particleswarm`, `simulannealbnd`, `MultiStart`, `GlobalSearch`, `createOptimProblem`, `patternsearch`, `surrogateopt`, `gamultiobj`, `paretosearch`, `optimoptions`) | ✅ | **All 6 tiers shipped** via [`global_optim_toolbox_roadmap.md`](global_optim_toolbox_roadmap.md). Backed by [`runtime/toolbox/gads/runtime_gads.cpp`](../runtime/toolbox/gads/runtime_gads.cpp) + [`gads_classdefs.m`](../runtime/toolbox/gads/gads_classdefs.m) — an *amplifier* of the shipped Optimization Toolbox: every solver runs over the shared seeded PRNG (`rng`-reproducible) and reuses the shipped `fmincon` / `mldivide` (no external dependency). **T1**: the three derivative-free global solvers — `ga` (real-coded GA), `particleswarm` (Clerc-Kennedy PSO), `simulannealbnd` (geometric-cooling SA), each with a `fmincon` hybrid-polish step. **T2**: the multi-start meta-solvers — `createOptimProblem('fmincon',…)` (name-value scan → thread-local problem context), `MultiStart` (k fmincon restarts), `GlobalSearch` (scatter-sample + fmincon). **T3**: `patternsearch` — deterministic GPS direct search (complete 2N-basis poll, no PRNG, no hybrid), robust on nonsmooth/discontinuous objectives. **T4**: `surrogateopt` — cubic-RBF surrogate (`mldivide` coeff solve) + merit-weighted adaptive sampling, sample-efficient for expensive objectives. **T5**: multiobjective — `gamultiobj` (NSGA-II: non-dominated sort + crowding) + `paretosearch` (non-dominated archive + GPS poll), returning the Pareto set (vector-out objective). **T6** (focused carve-down sweep): `optimoptions('ga', …)` options carrier (PopulationSize / MaxGenerations) + **integer-constrained `ga`** (`IntCon`) — `ga(fun,nvars,…,opts)` routes to `matlab_gads_ga_opts`, which rounds the `IntCon` variables to the nearest feasible integer each generation and auto-skips the `fmincon` hybrid for integer problems (a shared `gads_ga_core` keeps the Tier-1 path byte-identical). Objective is the shipped `double(@fun)(x)` / vector-out handle ABI; the MATLAB call forms are remapped in the Lowering dispatch. **9 gating tests green; full regression clean.** Headlines `examples/globaloptim/rastrigin_ga.m` (`fminunc` trapped at f=16.91 → `ga`/`particleswarm` recover the global f=0 on Rastrigin) + `sixhump_multistart.m` (single solve trapped at −0.2155 → `MultiStart`/`GlobalSearch` find the global −1.0316 on the camelback) + `nonsmooth_patternsearch.m` (`fminunc` stalls at f=125 on a discontinuous staircase → `patternsearch` finds the global f=0) + `branin_surrogate.m` (`surrogateopt` finds Branin's global f=0.3979) + `pareto_front.m` (`gamultiobj`/`paretosearch` recover the full Pareto trade-off curve) + `gear_train_intga.m` (mixed-integer Sandgren gear-train: `ga` with `IntCon=[1 2 3 4]` picks integer tooth counts giving a ratio error ≈ 2.3e-11). **Tier-6 follow-ons (🔵)**: `optimoptions` for the other solvers + `HybridFcn`/`FunctionTolerance` knobs, `exitflag`/`output` multi-return, `IntCon` for `surrogateopt`, nonlinear-constraint handles, problem-based `solve` routing, `patternsearch` `PollMethod`/NUPS, parallel, the dipole cross-toolbox demo. **Carve-outs**: Optimize Live Editor Task + apps, Simulink optimization, cluster-parallel, custom-data-type genomes, GPU. |
 | 2-D / 3-D FEM (`createpde`, `femodel`, `multicuboid`, mesh generation, `solvepde`, `solve`, `pdeplot3D`, `VonMisesStress`, …) | ✅ | **11 arcs shipped** via [`pde_toolbox_roadmap.md`](pde_toolbox_roadmap.md): full Tier-1 → Tier-4 surface.  Sparse CSR infra + ILU(0)+GMRES + MINRES + PCG.  Lanczos shift-invert with mode shapes.  Modal superposition + Rayleigh damping.  T10 quadratic tets with stress recovery.  STL/GLB import (surface + volumetric via voxelize).  pdeplot / pdegplot / pdemesh / pdeplot3D.  Geometry primitives (`multicuboid` / `multicylinder` / `multisphere`) + Bey red refinement (`refineMeshBey`).  `femodel` classdef façade + legacy aliases (`solvepde`, `specifyCoefficients`, `applyBoundaryCondition`).  AnalysisType dispatch: structuralStatic / structuralTransient / structuralModal / structuralFrequency (damped via 2N×2N real-bordered + complex Krylov) / structuralTransientModal / structuralStaticNL / structuralStaticTL / thermalSteadyState (with Picard nonconstant `k(T)`) / thermalTransient / electrostatic / magnetostatic / dcConduction / harmonicElectromagnetic.  Thermal-stress coupling (`cellLoad(Temperature=…)`).  Full Craig-Bampton ROM (`pde_reduce_craig_bampton`) + modal-truncation ROM (`reduce`/`reconstructSolution`).  N-component coupled PDEs (`pde_solve_multi_n`).  **33 PDE end-to-end tests green.**  Remaining (mostly polish): full Green-Lagrange B_NL + geometric K_σ for true large-rotation elasticity, hanging-node red-green propagation, real Delaunay/TetGen mesher (today's volumetric meshing uses Kuhn 6-tet), 3-D Gouraud shading (per-triangle flat today).  PDE Modeler 2-D app + STEP import + PINN/GNN/FNO + Battery P2D explicitly carved out. |
 | Symbolic `pdsolve` family (closed-form heat / wave / 1st-order linear) | ✅ | In symbolic toolbox — see [`sym.md`](sym.md). |
 
@@ -791,6 +798,8 @@ keeps its own "next slice" list:
 | Propagation | [`propagation_toolbox_roadmap.md`](propagation_toolbox_roadmap.md) |
 | Optimization | [`optim_toolbox_roadmap.md`](optim_toolbox_roadmap.md) |
 | Model Predictive Control | [`mpc_toolbox_roadmap.md`](mpc_toolbox_roadmap.md) |
+| System Identification | [`ident_toolbox_roadmap.md`](ident_toolbox_roadmap.md) |
+| Global Optimization (all 6 tiers shipped) | [`global_optim_toolbox_roadmap.md`](global_optim_toolbox_roadmap.md) |
 | PDE | [`pde_toolbox_roadmap.md`](pde_toolbox_roadmap.md) |
 | Symbolic Math | [`symbolic_toolbox_roadmap.md`](symbolic_toolbox_roadmap.md) |
 | Fixed-Point Designer | [`fixed_point_toolbox_roadmap.md`](fixed_point_toolbox_roadmap.md) |
@@ -804,13 +813,13 @@ keeps its own "next slice" list:
 
 **Where we are:** a production-quality MATLAB compiler + tooling stack
 + multi-toolbox numerical library covering the scalar / dense-matrix /
-classdef / typed-int / fi / sym surface of MATLAB plus 11 shipped
+classdef / typed-int / fi / sym surface of MATLAB plus 13 shipped
 toolbox subsets.
 
 ### Scale
 
-- **~52,000-line C++ runtime** across **12 translation units**
-  (`matlab_runtime.cpp` + 11 `runtime_*.cpp`), ~1,100 exported C-ABI
+- **~52,000-line C++ runtime** across **14 translation units**
+  (`matlab_runtime.cpp` + 13 `runtime_*.cpp`), ~1,200 exported C-ABI
   entries, no BLAS / LAPACK dependency. Architecture documented in
   [`runtime.md`](runtime.md).
 - **7 compiled / interpreted backends**:
@@ -819,8 +828,8 @@ toolbox subsets.
   Verilator lint-clean) · Verilog-A (Tier-1 → Tier-10). Plus
   `-emit-matlab` and `-emit-mflow` source-to-source reverse-direction
   emitters.
-- **387 `.m` execution tests** in `test/Run/`, each compiled and
-  executed across **7 emit lanes** (~2,700 build-and-execute checks).
+- **435 `.m` execution tests** in `test/Run/`, each compiled and
+  executed across **7 emit lanes** (~3,000 build-and-execute checks).
   **77 SystemVerilog golden fixtures** verilator-lint-clean. **39 HDL
   examples** verified bit-exact via cocotb. **55 Stateflow chart
   fixtures**.
@@ -836,7 +845,7 @@ toolbox subsets.
 
 - **Three compiled backends with byte-identical stdout** (LLVM IR,
   portable C, portable C++) plus Python and TypeScript ports tracking
-  the same surface across 387 fixtures.
+  the same surface across 435 fixtures.
 - **JIT-backed REPL** (`matlabc -repl`) with persistent workspace,
   implicit display, operator-overloading / indexing / transpose
   auto-showing, `who` / `whos` / `clear`.
@@ -865,12 +874,13 @@ toolbox subsets.
   `fi` Q-format scalar + 1-D array arithmetic with 5 rounding modes;
   `numerictype` + `fimath` first-class objects.
 
-### Eleven shipped toolbox surfaces
+### Thirteen shipped toolbox surfaces
 
 Signal Processing · Control System · Communications · RF · Antenna ·
-Propagation Models · Optimization · Partial Differential Equation ·
-Symbolic Math (opt-in via SymPP) · Fixed-Point Designer · Stateflow
-(mStateflow). Plus headless plotting (Cairo) and Verilog-A export.
+Propagation Models · Optimization · Model Predictive Control · **System
+Identification** · Partial Differential Equation · Symbolic Math (opt-in
+via SymPP) · Fixed-Point Designer · Stateflow (mStateflow). Plus
+headless plotting (Cairo) and Verilog-A export.
 See the per-toolbox roadmap docs in §9 for each toolbox's current
 tier closure + open follow-ons.
 

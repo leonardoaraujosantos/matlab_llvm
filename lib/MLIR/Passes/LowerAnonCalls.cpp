@@ -772,7 +772,23 @@ static bool retypeAnonsForVectorObjective(ModuleOp M) {
     StringRef Name = Cn.getValue();
     unsigned nops = Call->getNumOperands();
     if ((Name == "fminsearch" || Name == "fminunc" || Name == "lsqnonlin" ||
-         Name == "fminimax" || Name == "fgoalattain") &&
+         Name == "fminimax" || Name == "fgoalattain" ||
+         /* Global Optimization Tier-1 — objective handle at operand 0,
+          * both the user-facing names and the runtime symbols (the
+          * latter after the Lowering hook has rewritten the call). */
+         Name == "ga" || Name == "particleswarm" || Name == "simulannealbnd" ||
+         Name == "patternsearch" || Name == "surrogateopt" ||
+         Name == "gamultiobj" || Name == "paretosearch" ||
+         Name == "matlab_gads_ga" || Name == "matlab_gads_ga_opts" ||
+         Name == "matlab_gads_particleswarm" ||
+         Name == "matlab_gads_simulannealbnd" ||
+         Name == "matlab_gads_patternsearch" ||
+         Name == "matlab_gads_surrogateopt" ||
+         Name == "matlab_gads_gamultiobj" ||
+         Name == "matlab_gads_paretosearch" ||
+         /* Tier-2: createOptimProblem stashes the objective handle (op 0
+          * of make_problem) into the thread-local; retype it to ptr. */
+         Name == "matlab_gads_make_problem") &&
         nops >= 1) {
       /* Single vector-argument objective / vector-residual handle. */
       Changed |= retypeAnonArg(Call->getOperand(0), 0);
@@ -809,6 +825,24 @@ static bool retypeAnonsForVectorObjective(ModuleOp M) {
       /* Same as above but at the runtime-symbol level (the call
        * site after the Tier-5 Lowering hook has run). */
       Changed |= retypeAnonArg(Call->getOperand(4), 0);
+    } else if (Name == "greyest" && nops == 4) {
+      /* Ident Tier-4: greyest(data, par0, @structfn, nx) — the
+       * structure handle's sole block arg is the parameter vector,
+       * subscripted (par(i)) in the body, so retype to ptr. */
+      Changed |= retypeAnonArg(Call->getOperand(2), 0);
+    } else if ((Name == "matlab_ident_greyest" ||
+                Name == "matlab_ident_nlgreyest") && nops == 5) {
+      /* Same at the runtime-symbol level: (nl)greyest(model, data, par0,
+       * @structfn, nx) — handle is operand 3. */
+      Changed |= retypeAnonArg(Call->getOperand(3), 0);
+    } else if ((Name == "matlab_ident_ekf_predict" ||
+                Name == "matlab_ident_ukf_predict") && nops == 2) {
+      /* EKF/UKF predict(obj, @StateFcn) — StateFcn(x) handle at op 1. */
+      Changed |= retypeAnonArg(Call->getOperand(1), 0);
+    } else if ((Name == "matlab_ident_ekf_correct" ||
+                Name == "matlab_ident_ukf_correct") && nops == 3) {
+      /* EKF/UKF correct(obj, @MeasFcn, y) — MeasFcn(x) handle at op 1. */
+      Changed |= retypeAnonArg(Call->getOperand(1), 0);
     }
   }
   return Changed;

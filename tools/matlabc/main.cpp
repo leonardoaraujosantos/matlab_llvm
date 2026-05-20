@@ -2100,7 +2100,7 @@ static std::string buildReplPrelude(const std::string &Src) {
    * both the flat layout (legacy / unused) and every toolbox subdir
    * so a single Leaf lookup finds the file wherever it lives. */
   static const char *kToolboxDirs[] = {
-    "comm", "rf", "optim", "pde", "prop", "sym",
+    "comm", "rf", "optim", "mpc", "ident", "gads", "pde", "prop", "sym",
     "stateflow", "antenna", "control",
   };
   std::vector<std::string> Files;
@@ -2207,6 +2207,53 @@ static std::string buildReplPrelude(const std::string &Src) {
     {false, "mpc",        "mpc_classdefs.m"},
     {false, "mpcstate",   "mpc_classdefs.m"},
     {false, "mpcmove",    "mpc_classdefs.m"},
+    /* System Identification Toolbox Tier-1 — umbrella
+     * `ident_classdefs.m` holds the `iddata` + `idpoly` classes; the
+     * estimator/method names (arx / ar / compare / ...) pull it in
+     * too so a follow-up REPL turn that only mentions `compare(...)`
+     * still has the classdefs in scope. */
+    {false, "iddata",     "ident_classdefs.m"},
+    {false, "idpoly",     "ident_classdefs.m"},
+    {false, "idss",       "ident_classdefs.m"},
+    {false, "idgrey",     "ident_classdefs.m"},
+    {false, "greyest",    "ident_classdefs.m"},
+    {false, "impulseest", "ident_classdefs.m"},
+    {false, "forecast",   "ident_classdefs.m"},
+    {false, "idfrd",      "ident_classdefs.m"},
+    {false, "etfe",       "ident_classdefs.m"},
+    {false, "spa",        "ident_classdefs.m"},
+    {false, "extendedKalmanFilter",  "ident_classdefs.m"},
+    {false, "unscentedKalmanFilter", "ident_classdefs.m"},
+    {false, "correct",    "ident_classdefs.m"},
+    {false, "recursiveLS",  "ident_classdefs.m"},
+    {false, "recursiveARX", "ident_classdefs.m"},
+    {false, "idnlgrey",   "ident_classdefs.m"},
+    {false, "nlgreyest",  "ident_classdefs.m"},
+    {false, "arxOptions", "ident_classdefs.m"},
+    {false, "getcov",     "ident_classdefs.m"},
+    {false, "getpvec",    "ident_classdefs.m"},
+    {false, "setpvec",    "ident_classdefs.m"},
+    {false, "n4sid",      "ident_classdefs.m"},
+    {false, "ssest",      "ident_classdefs.m"},
+    {false, "tfest",      "ident_classdefs.m"},
+    {false, "arx",        "ident_classdefs.m"},
+    {false, "ar",         "ident_classdefs.m"},
+    {false, "armax",      "ident_classdefs.m"},
+    {false, "oe",         "ident_classdefs.m"},
+    {false, "bj",         "ident_classdefs.m"},
+    {false, "iv4",        "ident_classdefs.m"},
+    {false, "delayest",   "ident_classdefs.m"},
+    {false, "compare",    "ident_classdefs.m"},
+    {false, "predict",    "ident_classdefs.m"},
+    {false, "resid",      "ident_classdefs.m"},
+    {false, "goodnessOfFit", "ident_classdefs.m"},
+    /* Global Optimization Toolbox Tier-2 — `gads_classdefs.m` holds the
+     * MultiStart + GlobalSearch solver objects.  (`run` is too generic
+     * to trigger on; the solver-object mentions pull the prelude.) */
+    {false, "MultiStart",        "gads_classdefs.m"},
+    {false, "GlobalSearch",      "gads_classdefs.m"},
+    {false, "createOptimProblem","gads_classdefs.m"},
+    {false, "optimoptions",     "gads_classdefs.m"},
     /* mStateflow Tier 4c — `mstateflow_helpers.m` exposes the small
      * MATLAB-level surface (emit / save-op / restore-op / active /
      * reset) that lets a REPL session drive a chart_tick function
@@ -11034,6 +11081,17 @@ int main(int Argc, char **Argv) {
       "mpcActiveSetSolver", "mpcmoveFinite",
       "nlmpc", "nlmpcmove",
       "mpcsimopt", "setEstimator", "getEstimator", "review",
+      /* System Identification Toolbox Tier-1 — umbrella
+       * `ident_classdefs.m` (iddata + idpoly).  Any estimator /
+       * container / method mention pulls the file in. */
+      "iddata", "idpoly", "idss", "idgrey", "n4sid", "ssest", "tfest", "greyest",
+      "impulseest", "forecast", "idfrd", "etfe", "spa",
+      "extendedKalmanFilter", "unscentedKalmanFilter", "correct",
+      "recursiveLS", "recursiveARX", "idnlgrey", "nlgreyest",
+      "arxOptions", "getcov", "getpvec", "setpvec",
+      "MultiStart", "GlobalSearch", "createOptimProblem", "optimoptions",
+      "arx", "ar", "armax", "oe", "bj",
+      "iv4", "delayest", "compare", "predict", "resid", "goodnessOfFit",
     };
     for (const char *N : Names) {
       size_t NL = std::strlen(N);
@@ -11150,6 +11208,28 @@ int main(int Argc, char **Argv) {
         ClsName == "mpcsimopt" || ClsName == "setEstimator" ||
         ClsName == "getEstimator" || ClsName == "review")
       return "mpc_classdefs.m";
+    /* System Identification Toolbox umbrella. */
+    if (ClsName == "iddata" || ClsName == "idpoly" || ClsName == "idss" ||
+        ClsName == "idgrey" || ClsName == "greyest" ||
+        ClsName == "impulseest" || ClsName == "forecast" ||
+        ClsName == "idfrd" || ClsName == "etfe" || ClsName == "spa" ||
+        ClsName == "extendedKalmanFilter" || ClsName == "unscentedKalmanFilter" ||
+        ClsName == "correct" ||
+        ClsName == "recursiveLS" || ClsName == "recursiveARX" ||
+        ClsName == "idnlgrey" || ClsName == "nlgreyest" ||
+        ClsName == "arxOptions" || ClsName == "getcov" ||
+        ClsName == "getpvec" || ClsName == "setpvec" ||
+        ClsName == "n4sid" || ClsName == "ssest" || ClsName == "tfest" ||
+        ClsName == "arx" || ClsName == "ar" ||
+        ClsName == "armax" || ClsName == "oe" || ClsName == "bj" ||
+        ClsName == "iv4" || ClsName == "delayest" ||
+        ClsName == "compare" || ClsName == "predict" ||
+        ClsName == "resid" || ClsName == "goodnessOfFit")
+      return "ident_classdefs.m";
+    /* Global Optimization Toolbox Tier-2. */
+    if (ClsName == "MultiStart" || ClsName == "GlobalSearch" ||
+        ClsName == "createOptimProblem" || ClsName == "optimoptions")
+      return "gads_classdefs.m";
     return std::string();
   };
   for (const std::string &Cls : userMentionsExtClasses(Opts.InputPath)) {
@@ -11162,7 +11242,7 @@ int main(int Argc, char **Argv) {
     /* 2026-05 reorganization: probe runtime/toolbox/<name>/ subdirs
      * before falling back to the legacy flat layout. */
     static const char *kToolboxDirs[] = {
-      "comm", "rf", "optim", "mpc", "pde", "prop", "sym",
+      "comm", "rf", "optim", "mpc", "ident", "gads", "pde", "prop", "sym",
       "stateflow", "antenna", "control",
     };
     std::vector<std::string> Cands;

@@ -31,6 +31,8 @@ RUNTIME_SRCS=(
   "$ROOT/runtime/toolbox/pde/runtime_pde.cpp"
   "$ROOT/runtime/toolbox/optim/runtime_optim.cpp"
   "$ROOT/runtime/toolbox/mpc/runtime_mpc.cpp"
+  "$ROOT/runtime/toolbox/ident/runtime_ident.cpp"
+  "$ROOT/runtime/toolbox/gads/runtime_gads.cpp"
   "$ROOT/runtime/toolbox/stateflow/runtime_mstateflow.cpp"
 )
 CXX="${CXX:-${CLANG}++}"

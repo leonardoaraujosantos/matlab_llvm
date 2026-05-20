@@ -1,0 +1,5 @@
+fminunc       f = 125.0000
+patternsearch f = 0.0000
+x1 = 2.00
+x2 = -3.00
+vvalley f = 0.5000

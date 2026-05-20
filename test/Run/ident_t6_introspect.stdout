@@ -1,0 +1,8 @@
+pvec len = 2
+pvec(1) = -0.50
+pvec(2) = 1.00
+A after = -0.70
+B after = 1.20
+cov rows = 2
+cov cols = 2
+cov11 = 0.00008

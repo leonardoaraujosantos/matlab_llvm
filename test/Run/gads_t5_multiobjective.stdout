@@ -1,0 +1,5 @@
+gamultiobj   n  = 40
+gamultiobj   lo = -1.00
+gamultiobj   hi = 1.00
+paretosearch lo = -1.00
+paretosearch hi = 1.00

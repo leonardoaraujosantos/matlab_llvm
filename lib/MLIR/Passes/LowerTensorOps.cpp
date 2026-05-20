@@ -4416,6 +4416,110 @@ bool TensorLowering::rewriteBuiltinCalls() {
         {"matlab_mpc_review", "matlab_mpc_review", PtrTy, {PtrTy}},
         {"matlab_mpc_sim_opt", "matlab_mpc_sim_opt", PtrTy,
          {PtrTy, F64, PtrTy, PtrTy}},
+        /* Global Optimization Toolbox Tier-1 — stochastic global solvers.
+         * Arg 0 is the objective-handle ptr; ga/particleswarm take nvars
+         * (f64), simulannealbnd takes x0 (ptr); last arg is the hybrid
+         * flag (f64). */
+        {"matlab_gads_ga", "matlab_gads_ga", PtrTy,
+         {PtrTy, F64, PtrTy, PtrTy, F64}},
+        /* Tier-6 — ga with an optimoptions object (6th operand = carrier ptr). */
+        {"matlab_gads_ga_opts", "matlab_gads_ga_opts", PtrTy,
+         {PtrTy, F64, PtrTy, PtrTy, F64, PtrTy}},
+        {"matlab_gads_particleswarm", "matlab_gads_particleswarm", PtrTy,
+         {PtrTy, F64, PtrTy, PtrTy, F64}},
+        {"matlab_gads_simulannealbnd", "matlab_gads_simulannealbnd", PtrTy,
+         {PtrTy, PtrTy, PtrTy, PtrTy, F64}},
+        /* Global Optimization Toolbox Tier-2 — multi-start meta-solvers.
+         * make_problem stashes (handle, x0, lb, ub) into the runtime
+         * thread-local; run reads it back (multistart takes k, global-
+         * search takes nothing). */
+        {"matlab_gads_make_problem", "matlab_gads_make_problem", PtrTy,
+         {PtrTy, PtrTy, PtrTy, PtrTy}},
+        {"matlab_gads_multistart", "matlab_gads_multistart", PtrTy, {F64}},
+        {"matlab_gads_globalsearch", "matlab_gads_globalsearch", PtrTy, {}},
+        /* run(solver, problem [,k]) — runtime-dispatched (REPL-safe). */
+        {"matlab_gads_run", "matlab_gads_run", PtrTy, {PtrTy, F64}},
+        /* Global Optimization Toolbox Tier-3 — direct search (4-arg, no
+         * hybrid; objective handle at operand 0). */
+        {"matlab_gads_patternsearch", "matlab_gads_patternsearch", PtrTy,
+         {PtrTy, PtrTy, PtrTy, PtrTy}},
+        /* Global Optimization Toolbox Tier-4 — surrogate optimization
+         * (fn, lb, ub, hybrid; objective handle at operand 0). */
+        {"matlab_gads_surrogateopt", "matlab_gads_surrogateopt", PtrTy,
+         {PtrTy, PtrTy, PtrTy, F64}},
+        /* Global Optimization Toolbox Tier-5 — multiobjective (fn, nvars,
+         * lb, ub; vector-objective handle at operand 0). */
+        {"matlab_gads_gamultiobj", "matlab_gads_gamultiobj", PtrTy,
+         {PtrTy, F64, PtrTy, PtrTy}},
+        {"matlab_gads_paretosearch", "matlab_gads_paretosearch", PtrTy,
+         {PtrTy, F64, PtrTy, PtrTy}},
+        /* System Identification Toolbox Tier-1 — loose-match dispatch.
+         * arx / ar populate a pre-allocated idpoly (result discarded).
+         * sim / predict / poly2ss return matrices; compare / fpe / aic
+         * / goodnessOfFit return scalar f64 metrics. */
+        {"matlab_ident_arx", "matlab_ident_arx", PtrTy,
+         {PtrTy, PtrTy, PtrTy}},
+        {"matlab_ident_ar", "matlab_ident_ar", PtrTy, {PtrTy, PtrTy, F64}},
+        {"matlab_ident_sim", "matlab_ident_sim", PtrTy, {PtrTy, PtrTy}},
+        {"matlab_ident_predict", "matlab_ident_predict", PtrTy,
+         {PtrTy, PtrTy, F64}},
+        {"matlab_ident_compare", "matlab_ident_compare", F64,
+         {PtrTy, PtrTy}},
+        {"matlab_ident_goodness", "matlab_ident_goodness", F64,
+         {PtrTy, PtrTy}},
+        {"goodnessOfFit", "matlab_ident_goodness", F64, {PtrTy, PtrTy}},
+        {"matlab_ident_fpe", "matlab_ident_fpe", F64, {PtrTy}},
+        {"matlab_ident_aic", "matlab_ident_aic", F64, {PtrTy}},
+        {"matlab_ident_poly2ss_A", "matlab_ident_poly2ss_A", PtrTy, {PtrTy}},
+        {"matlab_ident_poly2ss_B", "matlab_ident_poly2ss_B", PtrTy, {PtrTy}},
+        {"matlab_ident_poly2ss_C", "matlab_ident_poly2ss_C", PtrTy, {PtrTy}},
+        {"matlab_ident_poly2ss_D", "matlab_ident_poly2ss_D", PtrTy, {PtrTy}},
+        /* Tier-2 — PEM estimators (populate idpoly in place) + pe/resid. */
+        {"matlab_ident_armax", "matlab_ident_armax", PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"matlab_ident_oe",    "matlab_ident_oe",    PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"matlab_ident_bj",    "matlab_ident_bj",    PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"matlab_ident_pe",    "matlab_ident_pe",    PtrTy, {PtrTy, PtrTy}},
+        {"matlab_ident_resid", "matlab_ident_resid", PtrTy, {PtrTy, PtrTy}},
+        {"matlab_ident_iv4",   "matlab_ident_iv4",   PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"matlab_ident_delayest", "matlab_ident_delayest", F64, {PtrTy}},
+        /* Tier-3 — subspace state-space (n4sid/ssest) + ss sim/compare. */
+        {"matlab_ident_n4sid", "matlab_ident_n4sid", PtrTy, {PtrTy, PtrTy, F64}},
+        {"matlab_ident_ssest", "matlab_ident_ssest", PtrTy, {PtrTy, PtrTy, F64}},
+        {"matlab_ident_tfest", "matlab_ident_tfest", PtrTy, {PtrTy, PtrTy, F64, F64}},
+        {"matlab_ident_sim_ss", "matlab_ident_sim_ss", PtrTy, {PtrTy, PtrTy}},
+        {"matlab_ident_compare_ss", "matlab_ident_compare_ss", F64, {PtrTy, PtrTy}},
+        {"matlab_ident_ss_A", "matlab_ident_ss_A", PtrTy, {PtrTy}},
+        {"matlab_ident_ss_B", "matlab_ident_ss_B", PtrTy, {PtrTy}},
+        {"matlab_ident_ss_C", "matlab_ident_ss_C", PtrTy, {PtrTy}},
+        {"matlab_ident_ss_D", "matlab_ident_ss_D", PtrTy, {PtrTy}},
+        /* Tier-4 — grey-box (4th operand is the structure-fn handle ptr). */
+        {"matlab_ident_greyest", "matlab_ident_greyest", PtrTy,
+         {PtrTy, PtrTy, PtrTy, PtrTy, F64}},
+        {"matlab_ident_nlgreyest", "matlab_ident_nlgreyest", PtrTy,
+         {PtrTy, PtrTy, PtrTy, PtrTy, F64}},
+        {"matlab_ident_impulseest", "matlab_ident_impulseest", PtrTy,
+         {PtrTy, PtrTy, F64}},
+        {"matlab_ident_forecast", "matlab_ident_forecast", PtrTy,
+         {PtrTy, PtrTy, F64}},
+        {"matlab_ident_etfe", "matlab_ident_etfe", PtrTy, {PtrTy, PtrTy}},
+        {"matlab_ident_spa",  "matlab_ident_spa",  PtrTy, {PtrTy, PtrTy}},
+        /* Tier-5 — EKF/UKF init (R may arrive as scalar f64 → boxed) + steps. */
+        {"matlab_ident_ekf_init", "matlab_ident_ekf_init", PtrTy,
+         {PtrTy, PtrTy, PtrTy, PtrTy, PtrTy}},
+        {"matlab_ident_ekf_predict", "matlab_ident_ekf_predict", PtrTy, {PtrTy, PtrTy}},
+        {"matlab_ident_ekf_correct", "matlab_ident_ekf_correct", PtrTy, {PtrTy, PtrTy, F64}},
+        {"matlab_ident_ukf_predict", "matlab_ident_ukf_predict", PtrTy, {PtrTy, PtrTy}},
+        {"matlab_ident_ukf_correct", "matlab_ident_ukf_correct", PtrTy, {PtrTy, PtrTy, F64}},
+        /* Tier-5 — recursive RLS estimators. */
+        {"matlab_ident_rls_init",  "matlab_ident_rls_init",  PtrTy, {PtrTy, F64}},
+        {"matlab_ident_rls_step",  "matlab_ident_rls_step",  PtrTy, {PtrTy, F64, PtrTy}},
+        {"matlab_ident_rarx_init", "matlab_ident_rarx_init", PtrTy, {PtrTy, PtrTy}},
+        {"matlab_ident_rarx_step", "matlab_ident_rarx_step", PtrTy, {PtrTy, F64, F64}},
+        /* Tier-6 — regularized arx + parameter introspection. */
+        {"matlab_ident_arx_reg",  "matlab_ident_arx_reg",  PtrTy, {PtrTy, PtrTy, PtrTy, F64}},
+        {"matlab_ident_getcov",   "matlab_ident_getcov",   PtrTy, {PtrTy}},
+        {"matlab_ident_getpvec",  "matlab_ident_getpvec",  PtrTy, {PtrTy}},
+        {"matlab_ident_setpvec",  "matlab_ident_setpvec",  PtrTy, {PtrTy, PtrTy}},
       };
       bool matched = false;
       for (const auto &E : pde_table) {

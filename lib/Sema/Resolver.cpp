@@ -129,6 +129,27 @@ void Resolver::registerBuiltins() {
      * 7-arg with per-tick plant update), sim (closed-loop sim). */
     "matlab_mpc_construct", "matlab_mpc_move", "matlab_mpc_move_opt",
     "matlab_mpc_move_adaptive", "matlab_mpc_move_tv", "matlab_mpc_sim",
+    /* Global Optimization Toolbox Tier-1 — stochastic global solvers.
+     * User-facing names + the runtime symbols (the Lowering dispatch
+     * remaps the MATLAB call forms onto the 5-arg runtime entries). */
+    "ga", "particleswarm", "simulannealbnd",
+    "matlab_gads_ga", "matlab_gads_particleswarm",
+    "matlab_gads_simulannealbnd",
+    /* Global Optimization Toolbox Tier-2 — multi-start meta-solvers. */
+    "createOptimProblem", "run",
+    "matlab_gads_make_problem", "matlab_gads_multistart",
+    "matlab_gads_globalsearch",
+    /* Global Optimization Toolbox Tier-3 — direct search. */
+    "patternsearch", "matlab_gads_patternsearch",
+    /* Global Optimization Toolbox Tier-4 — surrogate optimization. */
+    "surrogateopt", "matlab_gads_surrogateopt",
+    /* Global Optimization Toolbox Tier-5 — multiobjective. */
+    "gamultiobj", "paretosearch",
+    "matlab_gads_gamultiobj", "matlab_gads_paretosearch",
+    /* Global Optimization Toolbox Tier-6 — options + integer ga. */
+    "optimoptions", "matlab_gads_ga_opts",
+    /* Tier-2 run(solver, problem) — runtime-dispatched (REPL-safe). */
+    "matlab_gads_run",
     /* MPC Tier-4 §5.4 — standalone active-set QP solver. */
     "matlab_mpc_active_set",
     /* MPC Tier-4 §5.1/5.2/5.3 — explicit MPC. */
@@ -151,6 +172,46 @@ void Resolver::registerBuiltins() {
     "review", "matlab_mpc_review",
     /* MPC Tier-6 §7.6 — sim() with mpcsimopt. */
     "matlab_mpc_sim_opt",
+    /* System Identification Toolbox Tier-1 — user-facing estimator /
+     * validation / metric names.  Dispatched in Lowering.cpp's
+     * class-pinned-first-arg path to the matlab_ident_* runtime
+     * entries when arg0 is iddata / idpoly pinned.  (`sim` is already
+     * registered above for MPC; the dispatch keys on the pinned class
+     * so the two coexist.)  The matlab_ident_* runtime symbols are
+     * registered too for the loose-match table. */
+    "arx", "ar", "predict", "compare", "goodnessOfFit", "fpe", "aic",
+    "matlab_ident_arx", "matlab_ident_ar", "matlab_ident_sim",
+    "matlab_ident_predict", "matlab_ident_compare",
+    "matlab_ident_goodness", "matlab_ident_fpe", "matlab_ident_aic",
+    "matlab_ident_poly2ss_A", "matlab_ident_poly2ss_B",
+    "matlab_ident_poly2ss_C", "matlab_ident_poly2ss_D",
+    /* Tier-2 — PEM estimators + residual analysis + IV + delay. */
+    "armax", "oe", "bj", "pe", "resid", "iv4", "delayest",
+    "matlab_ident_armax", "matlab_ident_oe", "matlab_ident_bj",
+    "matlab_ident_pe", "matlab_ident_resid",
+    "matlab_ident_iv4", "matlab_ident_delayest",
+    /* Tier-3 — subspace state-space + TF estimation. */
+    "n4sid", "ssest", "tfest",
+    "matlab_ident_n4sid", "matlab_ident_ssest", "matlab_ident_tfest",
+    "matlab_ident_sim_ss", "matlab_ident_compare_ss",
+    "matlab_ident_ss_A", "matlab_ident_ss_B",
+    "matlab_ident_ss_C", "matlab_ident_ss_D",
+    /* Tier-4 — grey-box + impulse response + forecast + spectral. */
+    "greyest", "matlab_ident_greyest",
+    "impulseest", "forecast",
+    "matlab_ident_impulseest", "matlab_ident_forecast",
+    "etfe", "spa", "matlab_ident_etfe", "matlab_ident_spa",
+    /* Tier-5 — nonlinear state estimation (EKF/UKF) + recursive RLS. */
+    "correct", "matlab_ident_ekf_init",
+    "matlab_ident_ekf_predict", "matlab_ident_ekf_correct",
+    "matlab_ident_ukf_predict", "matlab_ident_ukf_correct",
+    "matlab_ident_rls_init", "matlab_ident_rls_step",
+    "matlab_ident_rarx_init", "matlab_ident_rarx_step",
+    "nlgreyest", "matlab_ident_nlgreyest",
+    /* Tier-6 — regularized arx + parameter introspection. */
+    "getcov", "getpvec", "setpvec",
+    "matlab_ident_arx_reg", "matlab_ident_getcov",
+    "matlab_ident_getpvec", "matlab_ident_setpvec",
     /* Inverse Tustin: discrete-to-continuous. */
     "d2c_tustin",
     /* Tier 3.4 / 2.3 — gramians and state-space step response. */
@@ -1293,6 +1354,47 @@ void Resolver::resolveStmt(Stmt &St, Scope *S) {
           }
           if (NX->Name == "nlmpc") {
             if (ClassDef *C = classByName("nlmpc")) return C;
+          }
+          /* System Identification Tier-1: the `arx` / `ar` estimators
+           * return a class-pinned `idpoly`.  Without this, downstream
+           * `compare(z, m)` / `sim(m, u)` / `m.A` dispatches can't see
+           * the class pin (the classdef prelude is appended after the
+           * user script, so the generic "user function returning a
+           * pinned output" rule below can't resolve it yet). */
+          if (NX->Name == "arx" || NX->Name == "ar" ||
+              NX->Name == "armax" || NX->Name == "oe" || NX->Name == "bj" ||
+              NX->Name == "iv4" || NX->Name == "tfest" ||
+              NX->Name == "impulseest") {
+            if (ClassDef *C = classByName("idpoly")) return C;
+          }
+          /* Tier-3: n4sid / ssest return a class-pinned idss. */
+          if (NX->Name == "n4sid" || NX->Name == "ssest") {
+            if (ClassDef *C = classByName("idss")) return C;
+          }
+          /* Tier-4: greyest returns a class-pinned idgrey. */
+          if (NX->Name == "greyest") {
+            if (ClassDef *C = classByName("idgrey")) return C;
+          }
+          /* Tier-4: etfe / spa return a class-pinned idfrd. */
+          if (NX->Name == "etfe" || NX->Name == "spa") {
+            if (ClassDef *C = classByName("idfrd")) return C;
+          }
+          /* Tier-5: nlgreyest returns a class-pinned idnlgrey. */
+          if (NX->Name == "nlgreyest") {
+            if (ClassDef *C = classByName("idnlgrey")) return C;
+          }
+          /* Tier-6: arxOptions() returns a class-pinned arxOptions. */
+          if (NX->Name == "arxOptions") {
+            if (ClassDef *C = classByName("arxOptions")) return C;
+          }
+          /* Global Optim Tier-2: MultiStart() / GlobalSearch() factories
+           * return class-pinned solver objects (so run(solver,…)
+           * dispatches on the pinned class). */
+          if (NX->Name == "MultiStart") {
+            if (ClassDef *C = classByName("MultiStart")) return C;
+          }
+          if (NX->Name == "GlobalSearch") {
+            if (ClassDef *C = classByName("GlobalSearch")) return C;
           }
           /* User function whose body returns a class-pinned value —
            * propagate that pin to the caller's LHS. */
