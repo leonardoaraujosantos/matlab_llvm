@@ -8,13 +8,16 @@ classdef ss
         B
         C
         D
+        Ts
     end
     methods
-        function obj = ss(A, B, C, D)
-            % `ss(A, B, C, D)` — state-space model:
-            %   x' = A x + B u
+        function obj = ss(A, B, C, D, Ts)
+            % `ss(A, B, C, D [, Ts])` — state-space model:
+            %   x' = A x + B u    (continuous,  Ts = 0)
+            %   x⁺ = A x + B u    (discrete,    Ts > 0, period in s)
             %   y  = C x + D u
-            % All four are ordinary matrices (n×n, n×m, p×n, p×m).
+            % A,B,C,D are ordinary matrices (n×n, n×m, p×n, p×m).
+            % Ts is a scalar sample period; default 0 = continuous-time.
             % Operator overloads:
             %   ss + ss → parallel: block-diagonal A, stacked B,
             %             concatenated C, summed D.
@@ -22,6 +25,8 @@ classdef ss
             %             A = [A_a, B_a*C_b; 0, A_b], B = [B_a*D_b;
             %             B_b], C = [C_a, D_a*C_b], D = D_a*D_b.
             %   -ss     → negate output: C → -C, D → -D.
+            % All overloads preserve the LHS Ts (the operands are
+            % assumed to share a timebase).
             % `feedback(ss, ss)` is exposed via the matrix-arg
             % primitive `feedback_ss` (CST roadmap Tier 1.5) — a
             % classdef-level `feedback` overload is a follow-on.
@@ -29,6 +34,11 @@ classdef ss
             if nargin >= 2, obj.B = B; end
             if nargin >= 3, obj.C = C; end
             if nargin >= 4, obj.D = D; end
+            if nargin >= 5
+                obj.Ts = Ts;
+            else
+                obj.Ts = 0;
+            end
         end
 
         function r = plus(a, b)
@@ -44,7 +54,7 @@ classdef ss
             new_B = vertcat(a.B, b.B);
             new_C = horzcat(a.C, b.C);
             new_D = a.D + b.D;
-            r = ss(new_A, new_B, new_C, new_D);
+            r = ss(new_A, new_B, new_C, new_D, a.Ts);
         end
 
         function r = minus(a, b)
@@ -59,7 +69,7 @@ classdef ss
             new_B = vertcat(a.B, b.B);
             new_C = horzcat(a.C, -b.C);
             new_D = a.D - b.D;
-            r = ss(new_A, new_B, new_C, new_D);
+            r = ss(new_A, new_B, new_C, new_D, a.Ts);
         end
 
         function r = mtimes(a, b)
@@ -74,11 +84,11 @@ classdef ss
             new_B = vertcat(a.B * b.D, b.B);
             new_C = horzcat(a.C, a.D * b.C);
             new_D = a.D * b.D;
-            r = ss(new_A, new_B, new_C, new_D);
+            r = ss(new_A, new_B, new_C, new_D, a.Ts);
         end
 
         function r = uminus(a)
-            r = ss(a.A, a.B, -a.C, -a.D);
+            r = ss(a.A, a.B, -a.C, -a.D, a.Ts);
         end
     end
 end

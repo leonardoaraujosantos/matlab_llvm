@@ -799,6 +799,16 @@ static bool retypeAnonsForVectorObjective(ModuleOp M) {
                       mlir::isa<UnrankedTensorType>(X0Ty) ||
                       X0Ty == PtrTy;
       if (x0Vector) Changed |= retypeAnonArg(Call->getOperand(0), 0);
+    } else if (Name == "nlmpcmove" && nops == 5) {
+      /* MPC Tier-5: nlmpcmove(nlobj, x, lastu, r, @stateFn) — the
+       * StateFcn handle's sole block arg is the packed `zxu = [x; u]`
+       * column vector.  Retype so the body's `zxu(i, 1)` subscripts
+       * lower against a ptr base. */
+      Changed |= retypeAnonArg(Call->getOperand(4), 0);
+    } else if (Name == "matlab_nlmpc_move" && nops == 5) {
+      /* Same as above but at the runtime-symbol level (the call
+       * site after the Tier-5 Lowering hook has run). */
+      Changed |= retypeAnonArg(Call->getOperand(4), 0);
     }
   }
   return Changed;

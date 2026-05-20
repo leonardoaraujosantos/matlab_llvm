@@ -1,0 +1,5 @@
+explicit MPC grid: nx=2, nu=1, n_grid=5
+u_table size: 36 x 1
+u(xc=[0;0]) = 0.3357
+u(xc=[0.5;0]) = 0.0205
+u(xc=[1;0]) = -0.2946

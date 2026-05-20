@@ -1165,6 +1165,26 @@ void MflowLinkSim::evalAll(double T, const double *State, double *Deriv) {
       if (static_cast<int>(Cm.size()) >= n)
         for (int Ki = 0; Ki < n; ++Ki) Y += Cm[Ki] * State[Off + Ki];
       Out_[I] = Y;
+    } else if (K == "signal_mpc_move") {
+      /* MPC Toolbox Tier-3 §4.5 — MpcMove block.  Simulator carries
+       * a static-gain MPC approximation: `u = gain · (r - ym)`.  The
+       * full QP-solving form would link runtime_mpc.cpp into
+       * MatlabFlowchart (Tier-3b carve-down — substantial dependency
+       * chain expansion).  This block is sufficient to verify the
+       * mflow infrastructure recognises MPC as a first-class block
+       * kind, and to deploy an MPC-shaped lane-keeping demo through
+       * the existing simulate / emit-c / cocotb SIL paths. */
+      double Gain = paramD(B, "gain", 1.0);
+      double R_def = paramD(B, "r_default", 0.0);
+      double Ym = inputOf(I, "ym");
+      double Rr = 0.0;
+      /* Reference port may be omitted — fall back to r_default. */
+      bool HasRef = false;
+      for (auto &P : Inputs_[I])
+        if (P.DstPort == "r") { HasRef = true; break; }
+      if (HasRef) Rr = inputOf(I, "r");
+      else Rr = R_def;
+      Out_[I] = Gain * (Rr - Ym);
     } else if (K == "signal_scope" || K == "signal_display" ||
                K == "signal_to_workspace" || K == "signal_terminator") {
       if (OutWidth_[I] > 1) {

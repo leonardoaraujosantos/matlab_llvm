@@ -1,0 +1,64 @@
+{
+  "schema": "matforge.flowchart",
+  "version": "0.1.0",
+  "entry": "mpc_move_demo",
+  "settings": {
+    "kind": "signal_flow",
+    "solver": {
+      "type": "fixed_step",
+      "algorithm": "ode4",
+      "startTime": 0.0,
+      "stopTime": 1.0,
+      "maxStep": "0.05"
+    }
+  },
+  "flows": [
+    {
+      "id": "flow_top",
+      "kind": "program",
+      "name": "mpc_move_demo",
+      "nodes": [
+        { "id": "ref",  "kind": "signal_step",
+          "data": { "params": { "stepTime": "0.1",
+                                "initialValue": "0",
+                                "finalValue": "1.0" } },
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+
+        { "id": "mpc",  "kind": "signal_mpc_move",
+          "data": { "params": { "gain": "0.8",
+                                "r_default": "0.0" } },
+          "ports": { "in": [{"id": "ym"}, {"id": "r"}],
+                     "out": [{"id": "out"}] } },
+
+        { "id": "plant", "kind": "signal_transfer_fcn",
+          "data": { "params": { "num": "[1]",
+                                "den": "[1 1]" } },
+          "ports": { "in": [{"id": "in"}], "out": [{"id": "out"}] } },
+
+        { "id": "scope_u", "kind": "signal_scope",
+          "data": { "params": { "title": "u" } },
+          "ports": { "in": [{"id": "in"}], "out": [] } },
+        { "id": "scope_y", "kind": "signal_scope",
+          "data": { "params": { "title": "y" } },
+          "ports": { "in": [{"id": "in"}], "out": [] } }
+      ],
+      "edges": [
+        { "id": "e1", "kind": "data",
+          "from": {"node": "ref",   "port": "out"},
+          "to":   {"node": "mpc",   "port": "r"} },
+        { "id": "e2", "kind": "data",
+          "from": {"node": "plant", "port": "out"},
+          "to":   {"node": "mpc",   "port": "ym"} },
+        { "id": "e3", "kind": "data",
+          "from": {"node": "mpc",   "port": "out"},
+          "to":   {"node": "plant", "port": "in"} },
+        { "id": "e4", "kind": "data",
+          "from": {"node": "mpc",   "port": "out"},
+          "to":   {"node": "scope_u", "port": "in"} },
+        { "id": "e5", "kind": "data",
+          "from": {"node": "plant", "port": "out"},
+          "to":   {"node": "scope_y", "port": "in"} }
+      ]
+    }
+  ]
+}

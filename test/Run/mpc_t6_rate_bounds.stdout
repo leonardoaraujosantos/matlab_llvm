@@ -1,0 +1,3 @@
+u no rate bound: 0.9865
+u rate-bounded (dumax=0.3): 0.3000
+auto-c2d Ts: 0.1000 (must be 0.1)

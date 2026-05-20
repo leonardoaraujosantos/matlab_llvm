@@ -1,0 +1,67 @@
+{
+  "schema": "matforge.flowchart",
+  "version": "0.1.0",
+  "entry": "cocotb_mpc_sil",
+  "settings": {
+    "kind": "signal_flow",
+    "solver": {
+      "type": "fixed_step",
+      "algorithm": "ode4",
+      "startTime": 0.0,
+      "stopTime": 0.5,
+      "maxStep": "0.01"
+    }
+  },
+  "flows": [
+    {
+      "id": "flow_top",
+      "kind": "program",
+      "name": "cocotb_mpc_sil",
+      "nodes": [
+        { "id": "stim",  "kind": "signal_step",
+          "data": { "params": { "stepTime": "0.1",
+                                "initialValue": "0",
+                                "finalValue": "0.5" } },
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+        { "id": "mpc_dut", "kind": "signal_subsystem",
+          "data": { "flow_id": "flow_mpc" },
+          "ports": { "in": [{"id": "u1"}], "out": [{"id": "y1"}] } },
+        { "id": "scope_u", "kind": "signal_scope",
+          "data": { "params": { "title": "u" } },
+          "ports": { "in": [{"id": "in"}], "out": [] } }
+      ],
+      "edges": [
+        { "id": "e1", "kind": "data",
+          "from": {"node": "stim", "port": "out"},
+          "to":   {"node": "mpc_dut", "port": "u1"} },
+        { "id": "e2", "kind": "data",
+          "from": {"node": "mpc_dut", "port": "y1"},
+          "to":   {"node": "scope_u", "port": "in"} }
+      ]
+    },
+    {
+      "id": "flow_mpc",
+      "kind": "function",
+      "name": "flow_mpc",
+      "nodes": [
+        { "id": "in_ym", "kind": "signal_inport",
+          "data": { "params": { "port": "1" } },
+          "ports": { "in": [], "out": [{"id": "out"}] } },
+        { "id": "mpc",   "kind": "signal_mpc_move",
+          "data": { "params": { "gain": "2.0", "r_default": "1.0" } },
+          "ports": { "in": [{"id": "ym"}], "out": [{"id": "out"}] } },
+        { "id": "out_u", "kind": "signal_outport",
+          "data": { "params": { "port": "1" } },
+          "ports": { "in": [{"id": "in"}], "out": [] } }
+      ],
+      "edges": [
+        { "id": "se1", "kind": "data",
+          "from": {"node": "in_ym", "port": "out"},
+          "to":   {"node": "mpc",   "port": "ym"} },
+        { "id": "se2", "kind": "data",
+          "from": {"node": "mpc",   "port": "out"},
+          "to":   {"node": "out_u", "port": "in"} }
+      ]
+    }
+  ]
+}

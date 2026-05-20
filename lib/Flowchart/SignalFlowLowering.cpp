@@ -152,6 +152,13 @@ const KindInfo *lookupKind(const std::string &K) {
     // discrete state slot for the latched on/off bit; ZC predicate
     // flips when the input crosses either threshold rail.
     add("signal_relay",  {true, true, false, false, true,  FIM});
+    // MPC Toolbox Tier-3 §4.5 — MpcMove block.  Carries a static-
+    // gain MPC approximation in the simulator (the QP-solving form
+    // is a Tier-3b follow-up that needs runtime_mpc.cpp linked into
+    // MatlabFlowchart).  Block parameters: `gain` (the static fb
+    // gain), `r_default` (idle reference).  Two input ports (ym, r),
+    // one output port (u).
+    add("signal_mpc_move", {true, true, false, false, false, FIM});
     // Composite — handled by flattening, never reaches block construction.
     add("signal_subsystem", {true, true, true, false, false, FIM});
     add("signal_inport",    {true, true, true, false, false, FIM});

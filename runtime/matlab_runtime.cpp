@@ -5252,6 +5252,24 @@ matlab_mat *matlab_kalmd_L(matlab_mat *Ad, matlab_mat *G, matlab_mat *C,
 }
 
 /*-------------------------------------------------------------------------
+ * Sys-form Kalman dispatcher.  Lowering emits this when the user writes
+ * `kalman(sys, Qn, Rn)` with `sys` class-pinned to `ss` — the Lowering
+ * site extracts sys.A / sys.B / sys.C / sys.Ts and calls this thin
+ * wrapper.  B is reused as the noise-input matrix G (the canonical
+ * input-channel-noise assumption from MPC User's Guide §1.4).
+ *-------------------------------------------------------------------------*/
+matlab_mat *matlab_kalman_sys_L(matlab_mat *A, matlab_mat *B, matlab_mat *C,
+                                matlab_mat *Qn, matlab_mat *Rn,
+                                matlab_mat *Ts) {
+    double ts_val = 0.0;
+    if (Ts && Ts->rows > 0 && Ts->cols > 0 && Ts->data)
+        ts_val = Ts->data[0];
+    if (ts_val > 0.0)
+        return matlab_kalmd_L(A, B, C, Qn, Rn);
+    return matlab_kalman_L(A, B, C, Qn, Rn);
+}
+
+/*-------------------------------------------------------------------------
  * Steady-state Kalman covariance — the Riccati solution.
  *
  *   P = kalman_P(A, G, C, Qn, Rn) solves the dual continuous ARE:

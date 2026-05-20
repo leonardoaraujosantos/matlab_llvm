@@ -2201,6 +2201,12 @@ static std::string buildReplPrelude(const std::string &Src) {
     {false, "optimproblem",           "optim_classdefs.m"},
     {false, "OptimizationExpression", "optim_classdefs.m"},
     {false, "OptimizationProblem",    "optim_classdefs.m"},
+    /* MPC Toolbox Tier-1 — `mpc_classdefs.m` holds the `mpc` and
+     * `mpcstate` classdefs.  Any of these mentions pulls the file in
+     * (the prelude builder dedups). */
+    {false, "mpc",        "mpc_classdefs.m"},
+    {false, "mpcstate",   "mpc_classdefs.m"},
+    {false, "mpcmove",    "mpc_classdefs.m"},
     /* mStateflow Tier 4c — `mstateflow_helpers.m` exposes the small
      * MATLAB-level surface (emit / save-op / restore-op / active /
      * reset) that lets a REPL session drive a chart_tick function
@@ -11020,6 +11026,14 @@ int main(int Argc, char **Argv) {
        * optimproblem / eqnproblem factories). */
       "optimvar", "optimintvar", "optimproblem", "eqnproblem",
       "OptimizationExpression", "OptimizationProblem", "EquationProblem",
+      /* MPC Toolbox Tier-1/2/3/4 — umbrella `mpc_classdefs.m` (mpc +
+       * mpcstate + mpcmoveopt + explicitMPC classdefs + factories).
+       * Mentions of any pull in the file. */
+      "mpc", "mpcstate", "mpcmove", "mpcmoveopt",
+      "explicitMPC", "generateExplicitMPC", "mpcmoveExplicit",
+      "mpcActiveSetSolver", "mpcmoveFinite",
+      "nlmpc", "nlmpcmove",
+      "mpcsimopt", "setEstimator", "getEstimator", "review",
     };
     for (const char *N : Names) {
       size_t NL = std::strlen(N);
@@ -11124,6 +11138,18 @@ int main(int Argc, char **Argv) {
         ClsName == "OptimizationProblem" ||
         ClsName == "EquationProblem")
       return "optim_classdefs.m";
+    /* MPC Toolbox umbrella. */
+    if (ClsName == "mpc" || ClsName == "mpcstate" ||
+        ClsName == "mpcmove" || ClsName == "mpcmoveopt" ||
+        ClsName == "explicitMPC" ||
+        ClsName == "generateExplicitMPC" ||
+        ClsName == "mpcmoveExplicit" ||
+        ClsName == "mpcActiveSetSolver" ||
+        ClsName == "mpcmoveFinite" ||
+        ClsName == "nlmpc" || ClsName == "nlmpcmove" ||
+        ClsName == "mpcsimopt" || ClsName == "setEstimator" ||
+        ClsName == "getEstimator" || ClsName == "review")
+      return "mpc_classdefs.m";
     return std::string();
   };
   for (const std::string &Cls : userMentionsExtClasses(Opts.InputPath)) {
@@ -11136,7 +11162,7 @@ int main(int Argc, char **Argv) {
     /* 2026-05 reorganization: probe runtime/toolbox/<name>/ subdirs
      * before falling back to the legacy flat layout. */
     static const char *kToolboxDirs[] = {
-      "comm", "rf", "optim", "pde", "prop", "sym",
+      "comm", "rf", "optim", "mpc", "pde", "prop", "sym",
       "stateflow", "antenna", "control",
     };
     std::vector<std::string> Cands;

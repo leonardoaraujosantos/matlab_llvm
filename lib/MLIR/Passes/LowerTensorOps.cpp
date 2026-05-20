@@ -4373,6 +4373,49 @@ bool TensorLowering::rewriteBuiltinCalls() {
         {"matlab_optim_pb_solve", "matlab_optim_pb_solve", PtrTy, {PtrTy}},
         {"matlab_optim_pb_solve_eqn", "matlab_optim_pb_solve_eqn",
          PtrTy, {PtrTy}},
+        /* MPC Toolbox Tier-1 — loose-match dispatch (tolerates `none`
+         * / tensor operands via unrealized_conversion_cast) so the
+         * classdef-method-body calls work even when ym / r arrive as
+         * matrix-literal tensors or unresolved-type slots. */
+        {"matlab_mpc_construct", "matlab_mpc_construct", PtrTy,
+         {PtrTy, PtrTy, F64, F64}},
+        {"matlab_mpc_move",      "matlab_mpc_move",      PtrTy,
+         {PtrTy, PtrTy, PtrTy, PtrTy}},
+        {"matlab_mpc_sim",       "matlab_mpc_sim",       PtrTy,
+         {PtrTy, F64, PtrTy}},
+        /* MPC Tier-2 §3.7 — mpcmove with mpcmoveopt override. */
+        {"matlab_mpc_move_opt",  "matlab_mpc_move_opt",  PtrTy,
+         {PtrTy, PtrTy, PtrTy, PtrTy, PtrTy}},
+        /* MPC Tier-3 §4.1 — adaptive mpcmove with per-tick plant. */
+        {"matlab_mpc_move_adaptive", "matlab_mpc_move_adaptive", PtrTy,
+         {PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy}},
+        /* MPC Tier-3 §4.2 — time-varying mpcmove with stacked plants. */
+        {"matlab_mpc_move_tv", "matlab_mpc_move_tv", PtrTy,
+         {PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy}},
+        /* MPC Tier-4 §5.4 — standalone active-set QP.  Both the
+         * runtime-symbol name and the user-facing `mpcActiveSetSolver`
+         * alias route via the same loose-match coercion. */
+        {"matlab_mpc_active_set", "matlab_mpc_active_set", PtrTy,
+         {PtrTy, PtrTy, PtrTy, PtrTy}},
+        {"mpcActiveSetSolver",    "matlab_mpc_active_set", PtrTy,
+         {PtrTy, PtrTy, PtrTy, PtrTy}},
+        /* MPC Tier-4 §5.1/5.2/5.3 — explicit MPC. */
+        {"matlab_mpc_generate_explicit", "matlab_mpc_generate_explicit",
+         PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy, F64, PtrTy}},
+        {"matlab_mpc_move_explicit",     "matlab_mpc_move_explicit",
+         PtrTy, {PtrTy, PtrTy}},
+        {"matlab_mpc_simplify_explicit", "matlab_mpc_simplify_explicit",
+         PtrTy, {PtrTy, F64}},
+        /* MPC Tier-4 §5.7 — Finite Control Set MPC. */
+        {"matlab_mpc_move_finite", "matlab_mpc_move_finite",
+         PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy}},
+        /* MPC Tier-5 — Nonlinear MPC. */
+        {"matlab_nlmpc_move", "matlab_nlmpc_move",
+         PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy, PtrTy}},
+        /* MPC Tier-6 §7.5/7.6 — review + sim-opt. */
+        {"matlab_mpc_review", "matlab_mpc_review", PtrTy, {PtrTy}},
+        {"matlab_mpc_sim_opt", "matlab_mpc_sim_opt", PtrTy,
+         {PtrTy, F64, PtrTy, PtrTy}},
       };
       bool matched = false;
       for (const auto &E : pde_table) {
@@ -4404,6 +4447,16 @@ bool TensorLowering::rewriteBuiltinCalls() {
             auto Cast = mlir::UnrealizedConversionCastOp::create(
                 B, Call->getLoc(), PtrTy, V);
             coerced.push_back(Cast.getResult(0));
+          } else if (WantTy == PtrTy && V.getType() == F64) {
+            /* f64 → ptr: box the scalar via matlab_mat_from_scalar.
+             * Needed for matlab_mpc_* calls where SISO references
+             * (e.g. `r = [1]`) arrive as plain f64 because Sema
+             * scalar-promoted the 1×1 matrix. */
+            B.setInsertionPoint(Call);
+            auto FnBox = rt("matlab_mat_from_scalar", PtrTy, {F64});
+            auto Box = LLVM::CallOp::create(B, Call->getLoc(), FnBox,
+                                             ValueRange{V});
+            coerced.push_back(Box.getResult());
           } else {
             ok = false; break;
           }
@@ -4806,6 +4859,42 @@ bool TensorLowering::rewriteBuiltinCalls() {
        * fits into the ss(_,_,_,_) constructor call. */
       {"matlab_c2d_Ad",        "matlab_c2d_Ad",        1, "ppf"},
       {"matlab_c2d_Bd",        "matlab_c2d_Bd",        1, "ppf"},
+      /* Sys-form Kalman dispatcher — class-pinned-first-arg site in
+       * Lowering.cpp extracts A/B/C off an `ss` and passes Ts (boxed
+       * 1×1 matrix, matching the matrix-storage convention for class
+       * scalar properties).  The dispatcher unboxes and picks the
+       * continuous (Ts == 0) or discrete kernel. */
+      {"matlab_kalman_sys_L",  "matlab_kalman_sys_L",  1, "pppppp"},
+      /* MPC Toolbox Tier-1/2/3 — runtime entries called from inside
+       * `mpc_classdefs.m`.  `construct` returns a dummy empty matrix
+       * (caller discards). */
+      {"matlab_mpc_construct",     "matlab_mpc_construct",     1, "ppff"},
+      {"matlab_mpc_move",          "matlab_mpc_move",          1, "pppp"},
+      {"matlab_mpc_move_opt",      "matlab_mpc_move_opt",      1, "ppppp"},
+      {"matlab_mpc_move_adaptive", "matlab_mpc_move_adaptive", 1, "ppppppp"},
+      {"matlab_mpc_move_tv",       "matlab_mpc_move_tv",       1, "ppppppp"},
+      {"matlab_mpc_sim",           "matlab_mpc_sim",           1, "pfp"},
+      /* MPC Tier-4 §5.4 — standalone KWIK active-set QP.  User-facing
+       * `mpcActiveSetSolver(H, f, A, b)` aliases to the runtime
+       * symbol. */
+      {"matlab_mpc_active_set",    "matlab_mpc_active_set",    1, "pppp"},
+      {"mpcActiveSetSolver",       "matlab_mpc_active_set",    1, "pppp"},
+      /* MPC Tier-4 §5.1/5.2/5.3 — explicit MPC. */
+      {"matlab_mpc_generate_explicit", "matlab_mpc_generate_explicit",
+                                                                1, "ppppfp"},
+      {"matlab_mpc_move_explicit",     "matlab_mpc_move_explicit",
+                                                                1, "pp"},
+      {"matlab_mpc_simplify_explicit", "matlab_mpc_simplify_explicit",
+                                                                1, "pf"},
+      /* MPC Tier-4 §5.7 — Finite Control Set MPC. */
+      {"matlab_mpc_move_finite",       "matlab_mpc_move_finite",  1, "pppp"},
+      /* MPC Tier-5 — Nonlinear MPC.  5th arg is the function-handle
+       * void* (StateFcn). */
+      {"matlab_nlmpc_move",            "matlab_nlmpc_move",       1, "ppppp"},
+      /* MPC Tier-6 §7.5 — review() sanity diagnostic. */
+      {"matlab_mpc_review",            "matlab_mpc_review",       1, "p"},
+      /* MPC Tier-6 §7.6 — sim() with mpcsimopt override. */
+      {"matlab_mpc_sim_opt",           "matlab_mpc_sim_opt",      1, "pfpp"},
       {"matlab_feedback_ss_A", "matlab_feedback_ss_A", 1, "pppppp"},
       {"matlab_feedback_ss_B", "matlab_feedback_ss_B", 1, "pppppp"},
       {"matlab_feedback_ss_C", "matlab_feedback_ss_C", 1, "pppppp"},
@@ -5569,6 +5658,30 @@ bool TensorLowering::rewriteBuiltinCalls() {
         "norm_h2", "dcgain_ss", "stepinfo",
         /* CST Tier 4.2 — Kalman / Kalmd steady-state gains. */
         "kalman", "kalmd", "kalman_L", "kalmd_L",
+        /* MPC Tier-0 — sys-form Kalman dispatcher.  Scalar Qn / Rn
+         * (e.g. SISO `kalman(sys, [1], [1])`) need the same auto-box
+         * treatment as the matrix-form `kalman_L`. */
+        "matlab_kalman_sys_L",
+        /* MPC Tier-1 — `mpcmove(obj, st, ym, r)` and `sim(obj, T, r)`
+         * may pass scalar `ym` / `r` / 1×1 matrix-literal references
+         * (`r = [1]` is a SISO setpoint).  Same auto-box treatment so
+         * those reach the runtime as proper matlab_mat *. */
+        "matlab_mpc_move", "matlab_mpc_sim",
+        /* MPC Tier-2 §3.7 — mpcmove with override. */
+        "matlab_mpc_move_opt",
+        /* MPC Tier-3 §4.1/§4.2 — adaptive + time-varying mpcmove. */
+        "matlab_mpc_move_adaptive", "matlab_mpc_move_tv",
+        /* MPC Tier-4 §5.4 — standalone active-set QP. */
+        "matlab_mpc_active_set", "mpcActiveSetSolver",
+        /* MPC Tier-4 §5.1/5.2/5.3 — explicit MPC. */
+        "matlab_mpc_generate_explicit", "matlab_mpc_move_explicit",
+        "matlab_mpc_simplify_explicit",
+        /* MPC Tier-4 §5.7 — Finite Control Set MPC. */
+        "matlab_mpc_move_finite",
+        /* MPC Tier-5 — Nonlinear MPC. */
+        "matlab_nlmpc_move",
+        /* MPC Tier-6 §7.5/7.6 — review + sim-opt. */
+        "matlab_mpc_review", "matlab_mpc_sim_opt",
         /* CST Tier 3 — discrete-time stability + H2. */
         "isstable_d", "norm_h2_d",
         /* CST Tier 2.2 — Tustin discretisation + inverse. */

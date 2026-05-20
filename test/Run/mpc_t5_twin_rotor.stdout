@@ -1,0 +1,6 @@
+twin-rotor MIMO nlmpc: 40 steps
+pitch at k=10: 0.300  (ref 0.3)
+yaw   at k=10: 0.499  (ref 0.5)
+pitch settle  : 0.300  (ref 0.3)
+yaw settle    : 0.500  (ref 0.5)
+final rotors  : u1=1.037 u2=-0.311

@@ -281,6 +281,66 @@ PY
 }
 multi_dut_sil_smoke
 
+# MPC SIL smoke (Tier-3 §4.5/4.6/4.7): MpcMove block compiled to
+# SystemVerilog through the standard signal-flow lowering.  The
+# block carries a static-gain MPC approximation (`u = gain · (r -
+# ym)`); the SystemVerilog DUT realises that math in fixed-point.
+# The full QP-solving MPC requires runtime_mpc.cpp linked into the
+# emitted artifact (Tier-3b carve-down).
+mpc_sil_smoke() {
+  local out="$SCRATCH/mpc"
+  "$MATLABC" -emit-cocotb "$EX/cocotb_mpc_sil.mflow" \
+      --dut mpc_dut -cocotb-out="$out" >/dev/null \
+      2>"$SCRATCH/mpc.err"
+  if [[ $? -ne 0 ]]; then
+    fail=$((fail+1)); fails+=("cocotb_mpc_sil (emit failed: $(cat "$SCRATCH/mpc.err"))")
+    return
+  fi
+  for needed in flow_mpc.sv flow_mpc_ref.py \
+                test_cocotb_mpc_sil.py cocotb_fi.py Makefile; do
+    if [[ ! -f "$out/$needed" ]]; then
+      fail=$((fail+1)); fails+=("cocotb_mpc_sil ($needed missing)")
+      return
+    fi
+  done
+  # Smoke-check the Python reference matches the static-gain MPC
+  # `gain * (r_default - ym)` with gain=2.0, r_default=1.0.
+  python3 - "$out" <<'PY'
+import ast, os, sys
+out = sys.argv[1]
+ast.parse(open(os.path.join(out, "test_cocotb_mpc_sil.py")).read())
+ns = {}
+exec(open(os.path.join(out, "flow_mpc_ref.py")).read(), ns)
+assert "flow_mpc" in ns, "flow_mpc_ref.py missing flow_mpc function"
+y = ns["flow_mpc"](0.0)
+assert abs(y - 2.0) < 1e-9, f"flow_mpc(0.0) = {y}, expected 2.0"
+y = ns["flow_mpc"](0.5)
+assert abs(y - 1.0) < 1e-9, f"flow_mpc(0.5) = {y}, expected 1.0"
+PY
+  if [[ $? -ne 0 ]]; then
+    fail=$((fail+1)); fails+=("cocotb_mpc_sil (python smoke failed)")
+    return
+  fi
+  pass=$((pass+1))
+  if command -v cocotb-config >/dev/null 2>&1 && \
+     command -v verilator >/dev/null 2>&1; then
+    pushd "$out" >/dev/null
+    if make sim >"$SCRATCH/mpc.cocotb.log" 2>&1; then
+      if grep -qi "FAIL=0" "$SCRATCH/mpc.cocotb.log"; then
+        pass=$((pass+1))
+      else
+        fail=$((fail+1))
+        fails+=("cocotb_mpc_sil (cocotb run reported failures)")
+      fi
+    else
+      fail=$((fail+1))
+      fails+=("cocotb_mpc_sil (make sim non-zero exit)")
+    fi
+    popd >/dev/null
+  fi
+}
+mpc_sil_smoke
+
 echo "----"
 echo "passed: $pass    failed: $fail"
 if (( fail > 0 )); then

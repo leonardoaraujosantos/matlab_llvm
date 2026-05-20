@@ -122,6 +122,35 @@ void Resolver::registerBuiltins() {
     "isstable_d", "norm_h2_d",
     /* Tier 2.2 — continuous->discrete state-space ZOH + Tustin. */
     "c2d", "c2d_tustin",
+    /* MPC Toolbox Tier-1/2/3 — runtime-symbol builtins called from
+     * inside `mpc_classdefs.m`.  5 entries: construct (mutates the
+     * mpc obj at construction time), move (single tick), move_opt
+     * (Tier-2 5-arg with run-time overrides), move_adaptive (Tier-3
+     * 7-arg with per-tick plant update), sim (closed-loop sim). */
+    "matlab_mpc_construct", "matlab_mpc_move", "matlab_mpc_move_opt",
+    "matlab_mpc_move_adaptive", "matlab_mpc_move_tv", "matlab_mpc_sim",
+    /* MPC Tier-4 §5.4 — standalone active-set QP solver. */
+    "matlab_mpc_active_set",
+    /* MPC Tier-4 §5.1/5.2/5.3 — explicit MPC. */
+    "matlab_mpc_generate_explicit", "matlab_mpc_move_explicit",
+    "matlab_mpc_simplify_explicit",
+    /* MPC Tier-4 §5.7 — Finite Control Set MPC. */
+    "matlab_mpc_move_finite",
+    /* MPC Tier-5 — Nonlinear MPC. */
+    "matlab_nlmpc_move",
+    /* User-facing class-method names — registered as builtins so
+     * call-site `mpcmove(obj, ...)` / `sim(obj, ...)` / etc. route
+     * through class-method dispatch when `obj` is mpc-pinned. */
+    "mpcmove", "sim", "mpcmoveAdaptive", "mpcmoveTV",
+    "mpcActiveSetSolver",
+    "generateExplicitMPC", "mpcmoveExplicit", "mpcmoveFinite",
+    "nlmpcmove",
+    /* MPC Tier-6 §7.4 — estimator accessors. */
+    "setEstimator", "getEstimator",
+    /* MPC Tier-6 §7.5 — review() diagnostic. */
+    "review", "matlab_mpc_review",
+    /* MPC Tier-6 §7.6 — sim() with mpcsimopt. */
+    "matlab_mpc_sim_opt",
     /* Inverse Tustin: discrete-to-continuous. */
     "d2c_tustin",
     /* Tier 3.4 / 2.3 — gramians and state-space step response. */
@@ -1239,6 +1268,31 @@ void Resolver::resolveStmt(Stmt &St, Scope *S) {
           if (NX->Name == "eqnproblem") {
             if (ClassDef *C = classByName("EquationProblem"))
               return C;
+          }
+          /* MPC Tier-1: the `mpc(plant, p, m)` and `mpcstate(nx, nu)`
+           * factories return class-pinned instances.  Without these
+           * hooks, downstream `mpcmove(obj, ...)` / `sim(obj, ...)`
+           * dispatches in Lowering.cpp can't see the class pin and
+           * the call-builtin emit site falls through to the classdef
+           * function body — which is brittle because the formal
+           * parameter slots carry `none` types. */
+          if (NX->Name == "mpc") {
+            if (ClassDef *C = classByName("mpc")) return C;
+          }
+          if (NX->Name == "mpcstate") {
+            if (ClassDef *C = classByName("mpcstate")) return C;
+          }
+          if (NX->Name == "mpcmoveopt") {
+            if (ClassDef *C = classByName("mpcmoveopt")) return C;
+          }
+          if (NX->Name == "mpcsimopt") {
+            if (ClassDef *C = classByName("mpcsimopt")) return C;
+          }
+          if (NX->Name == "explicitMPC" || NX->Name == "generateExplicitMPC") {
+            if (ClassDef *C = classByName("explicitMPC")) return C;
+          }
+          if (NX->Name == "nlmpc") {
+            if (ClassDef *C = classByName("nlmpc")) return C;
           }
           /* User function whose body returns a class-pinned value —
            * propagate that pin to the caller's LHS. */

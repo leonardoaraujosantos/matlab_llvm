@@ -1,0 +1,13 @@
+continuous sys.Ts (default 0):
+0
+discrete sys.Ts (must equal 0.1):
+0.1
+0.904837
+0.818731
+0.095163
+0.045317
+1.000000
+0.000000
+0.000000
+explicit-ctor sys.Ts (must equal 0.05):
+0.05

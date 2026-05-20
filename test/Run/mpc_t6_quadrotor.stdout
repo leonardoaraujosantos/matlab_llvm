@@ -1,0 +1,6 @@
+quadrotor cascade: 40 MPC steps
+z at k=10 (hold 1 m): 0.987
+x at k=20: 1.078  (ref 1.079)
+y at k=20: 0.903  (ref 0.909)
+x at k=40: 1.838  (ref 1.842)
+RMS tracking error: 0.026 m

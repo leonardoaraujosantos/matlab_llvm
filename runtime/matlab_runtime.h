@@ -294,6 +294,18 @@ matlab_mat *matlab_kalman_L(matlab_mat *A, matlab_mat *G, matlab_mat *C,
 matlab_mat *matlab_kalmd_L(matlab_mat *Ad, matlab_mat *G, matlab_mat *C,
                            matlab_mat *Qn, matlab_mat *Rn);
 
+/* Sys-form Kalman dispatcher — takes A, B, C off an `ss` model and
+ * routes to the continuous- or discrete-time matrix-form kernel based
+ * on the (boxed) scalar Ts.  B serves as the noise input matrix G
+ * (the canonical input-channel-noise assumption that MPC §1.4 uses).
+ *   Ts == 0  → matlab_kalman_L(A, B, C, Qn, Rn)
+ *   Ts >  0  → matlab_kalmd_L(A, B, C, Qn, Rn)
+ * Ts is a 1×1 matlab_mat — matches the matrix-storage convention
+ * used for class scalar properties. */
+matlab_mat *matlab_kalman_sys_L(matlab_mat *A, matlab_mat *B, matlab_mat *C,
+                                matlab_mat *Qn, matlab_mat *Rn,
+                                matlab_mat *Ts);
+
 /* Steady-state Kalman covariance — Riccati solution P. Routes the
  *   [L, P] = kalman(A, G, C, Qn, Rn)
  * 2-return splitter; same shape for `kalmd` (discrete). */

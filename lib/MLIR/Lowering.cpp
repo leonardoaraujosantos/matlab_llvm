@@ -6574,12 +6574,237 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
                                        {AVal, BVal, Ts}, PtrTy, L, {CalBd});
           mlir::Value CVal = getProp(Obj, "C");
           mlir::Value DVal = getProp(Obj, "D");
+          // The 5-arg constructor stamps Ts onto the result so the
+          // returned model is correctly tagged as discrete-time.
+          // Gates MPC bring-up (`mpc(plant, Ts, …)` reads sys.Ts to
+          // decide whether to discretize internally).
           mlir::NamedAttribute CtorCal(
               mlir::StringAttr::get(&MCtx, "callee"),
               mlir::StringAttr::get(&MCtx, "ss__ss"));
           return emitUnreg("matlab.call",
-                           {Ad, Bd, CVal, DVal},
+                           {Ad, Bd, CVal, DVal, Ts},
                            PtrTy, L, {CtorCal});
+        }
+
+        /* MPC Tier-1 — `mpcmove(obj, st, ym, r)` and `sim(obj, T, r)`
+         * class-pinned-first-arg routes.  Bypass the classdef-method
+         * function call (which suffers from `none`-typed formal-
+         * parameter slots inside the body); emit the runtime entry
+         * directly with the user-supplied operand types in scope so
+         * the pde_table dispatch can resolve them. */
+        if (Nm == "mpcmove" && Cls0 && Cn0 == "mpc" && C.Args.size() == 4) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value St  = loadObj(C.Args[1]);
+          mlir::Value Ym  = lowerExpr(*C.Args[2]);
+          mlir::Value R   = lowerExpr(*C.Args[3]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_mpc_move"));
+          return emitUnreg("matlab.call_builtin",
+                           {Obj, St, Ym, R}, PtrTy, L, {Cal});
+        }
+        /* MPC Tier-2 §3.7 — 5-arg form `mpcmove(obj, st, ym, r, opt)`
+         * routes to matlab_mpc_move_opt for run-time bound overrides. */
+        if (Nm == "mpcmove" && Cls0 && Cn0 == "mpc" && C.Args.size() == 5) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value St  = loadObj(C.Args[1]);
+          mlir::Value Ym  = lowerExpr(*C.Args[2]);
+          mlir::Value R   = lowerExpr(*C.Args[3]);
+          mlir::Value Opt = loadObj(C.Args[4]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_mpc_move_opt"));
+          return emitUnreg("matlab.call_builtin",
+                           {Obj, St, Ym, R, Opt}, PtrTy, L, {Cal});
+        }
+        /* MPC Tier-3 §4.1 — adaptive MPC.  7-arg form
+         * `mpcmoveAdaptive(obj, st, A, B, C, ym, r)` rebuilds the
+         * cached prediction matrices from per-tick (A, B, C) before
+         * solving the QP.  Routes to matlab_mpc_move_adaptive. */
+        if (Nm == "mpcmoveAdaptive" && Cls0 && Cn0 == "mpc" &&
+            C.Args.size() == 7) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value St  = loadObj(C.Args[1]);
+          mlir::Value Aa  = lowerExpr(*C.Args[2]);
+          mlir::Value Bb  = lowerExpr(*C.Args[3]);
+          mlir::Value Cc  = lowerExpr(*C.Args[4]);
+          mlir::Value Ym  = lowerExpr(*C.Args[5]);
+          mlir::Value R   = lowerExpr(*C.Args[6]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_mpc_move_adaptive"));
+          return emitUnreg("matlab.call_builtin",
+                           {Obj, St, Aa, Bb, Cc, Ym, R}, PtrTy, L, {Cal});
+        }
+        /* MPC Tier-4 §5.1 — `generateExplicitMPC(mpc, x_lo, x_hi,
+         * n_grid, r)`.  Bypass the MATLAB wrapper (whose typed
+         * formal-params leak into the inner runtime call) and emit
+         * the runtime call directly.  Need to default-construct an
+         * `explicitMPC` instance first to write fields onto.  We
+         * synthesise that via the existing constructor call site. */
+        if (Nm == "generateExplicitMPC" && Cls0 && Cn0 == "mpc" &&
+            C.Args.size() == 5) {
+          mlir::Value Mpc   = loadObj(C.Args[0]);
+          mlir::Value X_lo  = lowerExpr(*C.Args[1]);
+          mlir::Value X_hi  = lowerExpr(*C.Args[2]);
+          mlir::Value Ng    = lowerExpr(*C.Args[3]);
+          mlir::Value R     = lowerExpr(*C.Args[4]);
+          /* Allocate the explicitMPC obj. */
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "explicitMPC__explicitMPC"));
+          mlir::Value Eobj = emitUnreg("matlab.call",
+                                         {}, PtrTy, L, {CtorCal});
+          mlir::NamedAttribute GenCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_mpc_generate_explicit"));
+          emitUnregOp("matlab.call_builtin",
+                      {Eobj, Mpc, X_lo, X_hi, Ng, R},
+                      {mlir::NoneType::get(&MCtx)}, L, {GenCal});
+          return Eobj;
+        }
+        /* MPC Tier-4 §5.2 — `mpcmoveExplicit(eobj, xc)`.  Bypass
+         * the wrapper for type-flow reasons. */
+        if (Nm == "mpcmoveExplicit" && Cls0 && Cn0 == "explicitMPC" &&
+            C.Args.size() == 2) {
+          mlir::Value Eobj = loadObj(C.Args[0]);
+          mlir::Value Xc   = lowerExpr(*C.Args[1]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_mpc_move_explicit"));
+          return emitUnreg("matlab.call_builtin",
+                           {Eobj, Xc}, PtrTy, L, {Cal});
+        }
+        /* MPC Tier-4 §5.7 — `mpcmoveFinite(obj, st, ym, r)`.  Routes
+         * to matlab_mpc_move_finite which enumerates over the single
+         * binary MV's two values and keeps the lower-cost branch. */
+        if (Nm == "mpcmoveFinite" && Cls0 && Cn0 == "mpc" &&
+            C.Args.size() == 4) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value St  = loadObj(C.Args[1]);
+          mlir::Value Ym  = lowerExpr(*C.Args[2]);
+          mlir::Value Rr  = lowerExpr(*C.Args[3]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_mpc_move_finite"));
+          return emitUnreg("matlab.call_builtin",
+                           {Obj, St, Ym, Rr}, PtrTy, L, {Cal});
+        }
+        /* MPC Tier-6 §7.4 — `setEstimator(obj, L)` writes obj.L =
+         * L; `getEstimator(obj)` returns obj.L.  Sugar over the
+         * direct property access pattern. */
+        if (Nm == "setEstimator" && Cls0 && Cn0 == "mpc" &&
+            C.Args.size() == 2) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value Lv  = lowerExpr(*C.Args[1]);
+          mlir::Value NameV = emitFieldNameChar("L", L);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_obj_set_mat"));
+          emitUnregOp("matlab.call_builtin", {Obj, NameV, Lv},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Obj;
+        }
+        if (Nm == "getEstimator" && Cls0 && Cn0 == "mpc" &&
+            C.Args.size() == 1) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          return getProp(Obj, "L");
+        }
+        /* MPC Tier-6 §7.5 — `review(obj)` sanity diagnostic. */
+        if (Nm == "review" && Cls0 && Cn0 == "mpc" &&
+            C.Args.size() == 1) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_mpc_review"));
+          return emitUnreg("matlab.call_builtin",
+                           {Obj}, PtrTy, L, {Cal});
+        }
+
+        /* MPC Tier-5 — `nlmpcmove(nlobj, x, lastu, r, @stateFn)`.
+         * 5th arg is the StateFcn handle.  Routes to matlab_nlmpc_move
+         * which sets up thread-local context and calls fmincon over
+         * the u-trajectory decision variable. */
+        if (Nm == "nlmpcmove" && Cls0 && Cn0 == "nlmpc" &&
+            C.Args.size() == 5) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value Xi  = lowerExpr(*C.Args[1]);
+          mlir::Value Up  = lowerExpr(*C.Args[2]);
+          mlir::Value Rr  = lowerExpr(*C.Args[3]);
+          mlir::Value Fn  = lowerExpr(*C.Args[4]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_nlmpc_move"));
+          return emitUnreg("matlab.call_builtin",
+                           {Obj, Xi, Up, Rr, Fn}, PtrTy, L, {Cal});
+        }
+        /* MPC Tier-3 §4.2 — time-varying MPC.  7-arg form
+         * `mpcmoveTV(obj, st, A_stack, B_stack, C_stack, ym, r)`
+         * builds time-varying Sx / Su / Su1 from stacked plants
+         * (block i of each stack is A_i / B_i / C_i for prediction
+         * step i transitioning to step i+1). */
+        if (Nm == "mpcmoveTV" && Cls0 && Cn0 == "mpc" &&
+            C.Args.size() == 7) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value St  = loadObj(C.Args[1]);
+          mlir::Value Aa  = lowerExpr(*C.Args[2]);
+          mlir::Value Bb  = lowerExpr(*C.Args[3]);
+          mlir::Value Cc  = lowerExpr(*C.Args[4]);
+          mlir::Value Ym  = lowerExpr(*C.Args[5]);
+          mlir::Value R   = lowerExpr(*C.Args[6]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_mpc_move_tv"));
+          return emitUnreg("matlab.call_builtin",
+                           {Obj, St, Aa, Bb, Cc, Ym, R}, PtrTy, L, {Cal});
+        }
+        if (Nm == "sim" && Cls0 && Cn0 == "mpc" && C.Args.size() == 3) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value T   = lowerExpr(*C.Args[1]);
+          mlir::Value R   = lowerExpr(*C.Args[2]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_mpc_sim"));
+          return emitUnreg("matlab.call_builtin",
+                           {Obj, T, R}, PtrTy, L, {Cal});
+        }
+        /* MPC Tier-6 §7.6 — 4-arg `sim(obj, T, r, opt)` routes to
+         * matlab_mpc_sim_opt for sim-time overrides (PlantInitialState). */
+        if (Nm == "sim" && Cls0 && Cn0 == "mpc" && C.Args.size() == 4) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value T   = lowerExpr(*C.Args[1]);
+          mlir::Value R   = lowerExpr(*C.Args[2]);
+          mlir::Value Opt = loadObj(C.Args[3]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_mpc_sim_opt"));
+          return emitUnreg("matlab.call_builtin",
+                           {Obj, T, R, Opt}, PtrTy, L, {Cal});
+        }
+
+        /* MPC Tier-0 — kalman(sys, Qn, Rn) sys-form.  When the first
+         * arg is class-pinned to `ss`, extract A / B / C / Ts and
+         * route to matlab_kalman_sys_L, which picks the continuous-
+         * or discrete-time kernel based on Ts.  B reused as the
+         * noise-input matrix G (MPC User's Guide §1.4 canonical
+         * input-channel-noise assumption). */
+        if (Nm == "kalman" && Cls0 && Cn0 == "ss" && C.Args.size() == 3) {
+          mlir::Value Obj = loadObj(C.Args[0]);
+          mlir::Value Qn  = lowerExpr(*C.Args[1]);
+          mlir::Value Rn  = lowerExpr(*C.Args[2]);
+          mlir::Value AVal = getProp(Obj, "A");
+          mlir::Value BVal = getProp(Obj, "B");
+          mlir::Value CVal = getProp(Obj, "C");
+          // Ts read as a boxed 1×1 matrix (matches matrix-storage of
+          // class scalar properties); matlab_kalman_sys_L unboxes
+          // internally to pick the continuous vs discrete kernel.
+          mlir::Value TsVal = getProp(Obj, "Ts");
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_kalman_sys_L"));
+          return emitUnreg("matlab.call_builtin",
+                           {AVal, BVal, CVal, Qn, Rn, TsVal},
+                           PtrTy, L, {Cal});
         }
 
         /* §3.6 feedback(sys1, sys2) / series(sys1, sys2) /
@@ -8235,7 +8460,18 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
                       CN == "ModalStructuralResults" ||
                       CN == "FrequencyStructuralResults" ||
                       CN == "HarmonicEMResults" ||
-                      CN == "pdeDisplacement");
+                      CN == "pdeDisplacement" ||
+                      /* MPC Toolbox Tier-1: the mpc classdef caches
+                       * Sx / Su / Su1 / H / R / L / Wy / Wdu / umin /
+                       * umax / A / B / C as matrix properties; the
+                       * scalar slots (Ts / p / m / rho_eps) flow as
+                       * f64 separately via the explicit scalar
+                       * accessors.  Tier-2 adds mpcmoveopt — its
+                       * MVMin / MVMax / OutputMin / OutputMax are
+                       * matrix-valued, the Use_* flags are scalar. */
+                      CN == "mpc" || CN == "mpcstate" ||
+                      CN == "mpcmoveopt" || CN == "mpcsimopt" ||
+                      CN == "explicitMPC" || CN == "nlmpc");
       }
       if (IsCstClass && !WantMat &&
           !mlir::isa<mlir::Float64Type>(RT)) WantMat = true;

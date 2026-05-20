@@ -112,6 +112,12 @@ const std::set<std::string> &tier1Kinds() {
       // delegates synthesisability to the existing -check-synthesizable
       // pass over the user body.
       "signal_matlab_fcn",
+      // MPC Toolbox Tier-3 §4.5/4.6 — MpcMove block.  Embedded
+      // Coder emits the static-gain MPC approximation as a single
+      // multiply-and-subtract expression `gain * (r - ym)`.  The
+      // full QP-solving MPC requires linking runtime_mpc.cpp into
+      // the generated artifact (Tier-3b carve-down).
+      "signal_mpc_move",
       // Routing-only — emit nothing, but pass through the variable
       // name from the source.
       "signal_inport",   "signal_outport",
@@ -859,6 +865,19 @@ Stmt *lowerBlock(const Node &N, const std::string &OutVar,
     auto *G = B.lit(Gain);
     auto *U = get(0);
     return B.assign(OutVar, B.fiMul(G, U));
+  }
+  if (K == "signal_mpc_move") {
+    // MPC Toolbox Tier-3 §4.5/4.6 — emit the static-gain
+    // approximation `u = gain * (r - ym)`.  Input ports are (ym, r)
+    // in declaration order; if `r` is unconnected, fall back to
+    // the `r_default` parameter.  Same simulator-side semantics.
+    double Gain = paramD(N, "gain", 1.0);
+    auto *G = B.lit(Gain);
+    auto *Ym = get(0);
+    Expr *Rr = (Ins.size() >= 2) ? get(1)
+                                  : B.lit(paramD(N, "r_default", 0.0));
+    auto *Diff = B.bin(BinOp::Sub, Rr, Ym);
+    return B.assign(OutVar, B.fiMul(G, Diff));
   }
   if (K == "signal_sum") {
     // signs string like "+-+"; default = all '+' to match the input

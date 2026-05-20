@@ -1,0 +1,16 @@
+continuous 1×1 Kalman gain L (sqrt(2) - 1):
+0.414214
+continuous 2×1 Kalman gain L (sys-form):
+    2.4641
+   0.0717968
+continuous 2×1 Kalman gain L (matrix-form, must match):
+    2.4641
+   0.0717968
+discrete sys.Ts (must be 0.1):
+0.1
+discrete 2×1 Kalman gain L (sys-form, must match kalmd_L):
+   0.495531
+   0.0122978
+discrete 2×1 Kalman gain L (matrix-form):
+   0.495531
+   0.0122978

@@ -1,0 +1,6 @@
+tick 1  u = -2.0000
+tick 1  st.Plant(1) = 1.0000 (lat. pos. after step)
+  t=0.25s  y_lat = 0.0452
+  t=0.50s  y_lat = 0.1743
+  t=1.00s  y_lat = 0.5608
+  t=3.00s  y_lat = 0.9676
