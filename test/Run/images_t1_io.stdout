@@ -1,0 +1,9 @@
+rows    16
+maxv    255
+mean2   127.50
+compl   255
+addsat  255
+absdiff 100
+hist255 128
+im2dbl  1.0000
+im2u8   255

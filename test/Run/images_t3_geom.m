@@ -1,0 +1,20 @@
+% Image Processing Tier-3 — geometric transforms.
+A = [1 2 3 4; 5 6 7 8; 9 10 11 12; 13 14 15 16];
+R = imresize(A, 0.5, 'bilinear');
+fprintf('resize  %.0fx%.0f\n', size(R, 1), size(R, 2));
+R2 = imresize(A, [2 6]);
+fprintf('resize2 %.0fx%.0f\n', size(R2, 1), size(R2, 2));
+B = imrotate(A, 90, 'nearest', 'crop');
+fprintf('rotcrop %.0fx%.0f\n', size(B, 1), size(B, 2));
+L = imrotate(A, 45);
+fprintf('rotloose %.0fx%.0f\n', size(L, 1), size(L, 2));
+C = imcrop(A, [2 2 1 1]);
+fprintf('crop    %.0f %.0f %.0f %.0f\n', C(1,1), C(1,2), C(2,1), C(2,2));
+T = imtranslate(A, [1 0]);
+fprintf('trans12 %.0f\n', T(1, 2));
+W = imwarp(A, affine2d([1 0 0; 0 1 0; 0 0 1]));
+fprintf('warpid  %.0fx%.0f v11=%.0f\n', size(W,1), size(W,2), W(1,1));
+W2 = imwarp(A, affine2d([2 0 0; 0 2 0; 0 0 1]));
+fprintf('warp2x  %.0fx%.0f\n', size(W2,1), size(W2,2));
+tf = fitgeotform2d([0 0; 1 0; 0 1], [5 7; 6 7; 5 8], 'affine');
+fprintf('fit_e=%.1f fit_f=%.1f\n', tf.T(3,1), tf.T(3,2));

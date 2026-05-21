@@ -1,0 +1,8 @@
+gsum    1.0000
+sobel11 1
+avg     0.1111
+gauss   32x32
+filt    32x32
+median  32x32
+histeq  255
+box     32x32

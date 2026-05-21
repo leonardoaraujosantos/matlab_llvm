@@ -5085,6 +5085,24 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
           }
           return Obj;
         }
+        /* Image Processing Tier-3 — affine2d(M) / projective2d(M): alloc the
+         * transform shell and write its 3×3 forward matrix T (Kind 1/2 is
+         * the ctor default). */
+        if ((CD->Name == "affine2d" || CD->Name == "projective2d") && C.Args.size() == 1) {
+          std::string Ctor = std::string(CD->Name) + "__" + std::string(CD->Name);
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, Ctor));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTyConst, L, {CtorCal});
+          mlir::Value M = lowerExpr(*C.Args[0]);
+          mlir::Value NameV = emitFieldNameChar("T", L);
+          mlir::NamedAttribute SetCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_obj_set_mat"));
+          emitUnregOp("matlab.call_builtin", {Obj, NameV, M},
+                      {mlir::NoneType::get(&MCtx)}, L, {SetCal});
+          return Obj;
+        }
         /* System Identification Tier-5 — recursiveLS(np) / recursiveARX(
          * [na nb nk]).  Alloc-then-populate via the runtime init. */
         if ((CD->Name == "recursiveLS" || CD->Name == "recursiveARX") &&
@@ -6826,6 +6844,25 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
               mlir::StringAttr::get(&MCtx, "callee"),
               mlir::StringAttr::get(&MCtx, "matlab_stats_bayesopt"));
           return emitUnreg("matlab.call_builtin", {Fn, Lb, Ub}, PtrTy, L, {Cal});
+        }
+
+        /* Image Processing Tier-3 — fitgeotform2d(moving, fixed, type):
+         * alloc an affine2d shell + least-squares populate via the runtime
+         * (the type string is materialised by the pde_table coercion). */
+        if (Nm == "fitgeotform2d" && C.Args.size() == 3) {
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "affine2d__affine2d"));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTy, L, {CtorCal});
+          mlir::Value Mv = lowerExpr(*C.Args[0]);
+          mlir::Value Fx = lowerExpr(*C.Args[1]);
+          mlir::Value Ty = lowerExpr(*C.Args[2]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_image_fitgeo_init"));
+          emitUnregOp("matlab.call_builtin", {Obj, Mv, Fx, Ty},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Obj;
         }
 
         auto rebuildCall = [&](llvm::StringRef Callee,

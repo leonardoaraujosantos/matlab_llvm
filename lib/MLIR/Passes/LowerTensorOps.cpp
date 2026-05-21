@@ -4680,6 +4680,65 @@ bool TensorLowering::rewriteBuiltinCalls() {
         {"hmmtrain",    "matlab_stats_hmmtrain",    PtrTy, {PtrTy, PtrTy, PtrTy}},
         /* Tier-6 — Bayesian optimization (objective handle at operand 0). */
         {"matlab_stats_bayesopt", "matlab_stats_bayesopt", PtrTy, {PtrTy, PtrTy, PtrTy}},
+        /* ===== Image Processing Toolbox Tier-1 + Tier-2 =====
+         * Images are double matrices (M×N) or matlab_mat3 (M×N×3); string
+         * args (filenames, fspecial/imnoise type) arrive as matlab_string*
+         * (PtrTy) and are read in the runtime.  Multi-arity via the
+         * scan-all-overloads matcher. */
+        {"imread",     "matlab_image_imread",     PtrTy, {PtrTy}},
+        {"imwrite",    "matlab_image_imwrite",    F64,   {PtrTy, PtrTy}},
+        {"checkerboard", "matlab_image_checkerboard1", PtrTy, {PtrTy}},
+        {"checkerboard", "matlab_image_checkerboard2", PtrTy, {PtrTy, PtrTy}},
+        {"checkerboard", "matlab_image_checkerboard",  PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"im2double",  "matlab_image_im2double",  PtrTy, {PtrTy}},
+        {"im2single",  "matlab_image_im2single",  PtrTy, {PtrTy}},
+        {"im2uint8",   "matlab_image_im2uint8",   PtrTy, {PtrTy}},
+        {"rgb2gray",   "matlab_image_rgb2gray",   PtrTy, {PtrTy}},
+        {"im2gray",    "matlab_image_rgb2gray",   PtrTy, {PtrTy}},
+        {"mat2gray",   "matlab_image_mat2gray",   PtrTy, {PtrTy}},
+        {"imadd",      "matlab_image_imadd",      PtrTy, {PtrTy, PtrTy}},
+        {"imsubtract", "matlab_image_imsubtract", PtrTy, {PtrTy, PtrTy}},
+        {"immultiply", "matlab_image_immultiply", PtrTy, {PtrTy, PtrTy}},
+        {"imdivide",   "matlab_image_imdivide",   PtrTy, {PtrTy, PtrTy}},
+        {"imabsdiff",  "matlab_image_imabsdiff",  PtrTy, {PtrTy, PtrTy}},
+        {"imcomplement", "matlab_image_imcomplement", PtrTy, {PtrTy}},
+        {"imlincomb",  "matlab_image_imlincomb",  PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy}},
+        {"imhist",     "matlab_image_imhist",     PtrTy, {PtrTy}},
+        {"imadjust",   "matlab_image_imadjust1",  PtrTy, {PtrTy}},
+        {"imadjust",   "matlab_image_imadjust",   PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"imadjust",   "matlab_image_imadjustg",  PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy}},
+        {"stretchlim", "matlab_image_stretchlim", PtrTy, {PtrTy}},
+        {"mean2",      "matlab_image_mean2",      F64,   {PtrTy}},
+        {"std2",       "matlab_image_std2",       F64,   {PtrTy}},
+        {"fspecial",   "matlab_image_fspecial1",  PtrTy, {PtrTy}},
+        {"fspecial",   "matlab_image_fspecial2",  PtrTy, {PtrTy, PtrTy}},
+        {"fspecial",   "matlab_image_fspecial",   PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"imgaussfilt","matlab_image_imgaussfilt1", PtrTy, {PtrTy}},
+        {"imgaussfilt","matlab_image_imgaussfilt",  PtrTy, {PtrTy, PtrTy}},
+        {"imboxfilt",  "matlab_image_imboxfilt1", PtrTy, {PtrTy}},
+        {"imboxfilt",  "matlab_image_imboxfilt",  PtrTy, {PtrTy, PtrTy}},
+        {"medfilt2",   "matlab_image_medfilt2_1", PtrTy, {PtrTy}},
+        {"medfilt2",   "matlab_image_medfilt2",   PtrTy, {PtrTy, PtrTy}},
+        {"ordfilt2",   "matlab_image_ordfilt2",   PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"stdfilt",    "matlab_image_stdfilt",    PtrTy, {PtrTy}},
+        {"rangefilt",  "matlab_image_rangefilt",  PtrTy, {PtrTy}},
+        {"histeq",     "matlab_image_histeq",     PtrTy, {PtrTy}},
+        {"adapthisteq","matlab_image_adapthisteq",PtrTy, {PtrTy}},
+        {"imsharpen",  "matlab_image_imsharpen",  PtrTy, {PtrTy}},
+        {"imhistmatch","matlab_image_imhistmatch",PtrTy, {PtrTy, PtrTy}},
+        {"imnoise",    "matlab_image_imnoise1",   PtrTy, {PtrTy}},
+        {"imnoise",    "matlab_image_imnoise2",   PtrTy, {PtrTy, PtrTy}},
+        {"imnoise",    "matlab_image_imnoise",    PtrTy, {PtrTy, PtrTy, PtrTy}},
+        /* Tier-3 — geometric transforms. */
+        {"imresize",   "matlab_image_imresize2",  PtrTy, {PtrTy, PtrTy}},
+        {"imresize",   "matlab_image_imresize",   PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"imrotate",   "matlab_image_imrotate2",  PtrTy, {PtrTy, PtrTy}},
+        {"imrotate",   "matlab_image_imrotate3",  PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"imrotate",   "matlab_image_imrotate",   PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy}},
+        {"imcrop",     "matlab_image_imcrop",     PtrTy, {PtrTy, PtrTy}},
+        {"imtranslate","matlab_image_imtranslate",PtrTy, {PtrTy, PtrTy}},
+        {"imwarp",     "matlab_image_imwarp",     PtrTy, {PtrTy, PtrTy}},
+        {"matlab_image_fitgeo_init", "matlab_image_fitgeo_init", PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy}},
         /* distribution-object methods (runtime-dispatched; scalar args boxed). */
         {"matlab_stats_pd_pdf",    "matlab_stats_pd_pdf",    PtrTy, {PtrTy, PtrTy}},
         {"matlab_stats_pd_cdf",    "matlab_stats_pd_cdf",    PtrTy, {PtrTy, PtrTy}},
@@ -4782,10 +4841,47 @@ bool TensorLowering::rewriteBuiltinCalls() {
          * since llvm.ptr and tensor share the underlying ptr ABI. */
         bool ok = true;
         SmallVector<Value, 6> coerced;
+        SmallVector<Operation *, 2> deadLits;   /* const_char ops to sweep */
         for (size_t k = 0; k < E.args.size(); ++k) {
           Value V = Call->getOperand(k);
           Type WantTy = E.args[k];
-          if (V.getType() == WantTy) {
+          /* String literal → matlab_string* — checked FIRST because a
+           * matlab.const_char result is already typed PtrTy and would
+           * otherwise be passed through as a raw global address. */
+          if (WantTy == PtrTy && isMatlabOp(V.getDefiningOp(), "matlab.const_char")) {
+            Operation *Def = V.getDefiningOp();
+            auto VA = Def->getAttrOfType<StringAttr>("value");
+            if (!VA) { ok = false; break; }
+            StringRef Text = VA.getValue();
+            LLVM::GlobalOp Found;
+            for (auto G : Mod.getOps<LLVM::GlobalOp>()) {
+              if (!G.getConstant()) continue;
+              auto Attr = mlir::dyn_cast_or_null<StringAttr>(G.getValueAttr());
+              if (Attr && Attr.getValue() == Text) { Found = G; break; }
+            }
+            if (!Found) {
+              OpBuilder::InsertionGuard IG(B);
+              B.setInsertionPointToStart(Mod.getBody());
+              auto ArrayTy = LLVM::LLVMArrayType::get(
+                  IntegerType::get(Ctx, 8), static_cast<unsigned>(Text.size()));
+              unsigned N = 0; std::string SymName;
+              do { SymName = ("__matlab_str_s" + std::to_string(N++)); }
+              while (Mod.lookupSymbol(SymName));
+              Found = LLVM::GlobalOp::create(B, Mod.getLoc(), ArrayTy,
+                  /*isConstant=*/true, LLVM::Linkage::Internal, SymName,
+                  StringAttr::get(Ctx, Text));
+            }
+            B.setInsertionPoint(Call);
+            Value Addr = LLVM::AddressOfOp::create(B, Call->getLoc(), PtrTy,
+                                                   Found.getSymName());
+            Value LenV = LLVM::ConstantOp::create(B, Call->getLoc(), I64,
+                B.getI64IntegerAttr(static_cast<int64_t>(Text.size())));
+            auto FnS = rt("matlab_string_from_literal", PtrTy, {PtrTy, I64});
+            coerced.push_back(
+                LLVM::CallOp::create(B, Call->getLoc(), FnS,
+                                     ValueRange{Addr, LenV}).getResult());
+            deadLits.push_back(Def);
+          } else if (V.getType() == WantTy) {
             coerced.push_back(V);
           } else if (WantTy == PtrTy && (isTensorLike(V.getType()) ||
                                           mlir::isa<NoneType>(V.getType()))) {
@@ -4828,6 +4924,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
          * slots to llvm.alloca, fixing up the loads too. */
         Call->getResult(0).replaceAllUsesWith(C0.getResult());
         Call->erase();
+        for (Operation *D : deadLits) if (D->use_empty()) D->erase();
         Changed = true;
         matched = true;
         break;

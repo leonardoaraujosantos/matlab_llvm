@@ -185,6 +185,18 @@ void Resolver::registerBuiltins() {
     "matlab_stats_hmm_states", "matlab_stats_hmm_logp", "matlab_stats_hmm_emis",
     /* Tier-6 — Bayesian optimization. */
     "bayesopt", "matlab_stats_bayesopt",
+    /* ===== Image Processing Toolbox Tier-1 + Tier-2 ===== */
+    "imread", "imwrite", "checkerboard",
+    "im2double", "im2single", "im2uint8", "rgb2gray", "im2gray", "mat2gray",
+    "imadd", "imsubtract", "immultiply", "imdivide", "imabsdiff",
+    "imcomplement", "imlincomb",
+    "imhist", "imadjust", "stretchlim", "mean2", "std2",
+    "fspecial", "imgaussfilt", "imboxfilt", "medfilt2", "ordfilt2",
+    "stdfilt", "rangefilt",
+    "histeq", "adapthisteq", "imsharpen", "imhistmatch", "imnoise",
+    /* Image Processing Tier-3 — geometric transforms. */
+    "imresize", "imrotate", "imcrop", "imtranslate", "imwarp", "fitgeotform2d",
+    "matlab_image_fitgeo_init",
     "matlab_stats_fitknn_init", "matlab_stats_fitnb_init", "matlab_stats_fitlda_init",
     "matlab_stats_fittree_init", "matlab_stats_fitsvm_init", "matlab_stats_fitecoc_init",
     "matlab_stats_clf_predict", "matlab_stats_confusionmat",
@@ -1442,6 +1454,10 @@ void Resolver::resolveStmt(Stmt &St, Scope *S) {
           /* Stats Tier-3: fitlm / fitglm return a class-pinned LinearModel. */
           if (NX->Name == "fitlm" || NX->Name == "fitglm") {
             if (ClassDef *C = classByName("LinearModel")) return C;
+          }
+          /* Image Tier-3: fitgeotform2d returns a class-pinned affine2d. */
+          if (NX->Name == "fitgeotform2d") {
+            if (ClassDef *C = classByName("affine2d")) return C;
           }
           /* Stats Tier-5: fitc* return a class-pinned ClassificationModel. */
           if (NX->Name == "fitcknn" || NX->Name == "fitcnb" ||
