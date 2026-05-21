@@ -1,0 +1,22 @@
+% Statistics Toolbox Tier-2 — hypothesis tests + ANOVA.
+x = [5.1 4.9 5.3 5.0 4.8 5.2 5.1 4.95 5.05 5.15];
+y = [5.4 5.6 5.2 5.5 5.7 5.3 5.5 5.45 5.6 5.35];
+[h, p] = ttest2(x, y);
+fprintf('ttest2_h    %.0f\n', h);
+fprintf('ttest2_p    %.5f\n', p);
+[h2, p2, ci, stats] = ttest2(x, y);
+fprintf('ttest2_cilo %.4f\n', ci(1));
+fprintf('ttest2_tst  %.4f\n', stats.tstat);
+fprintf('ttest2_df   %.0f\n', stats.df);
+[hv, pv] = vartest2(x, y);
+fprintf('vartest2_h  %.0f\n', hv);
+fprintf('vartest2_p  %.4f\n', pv);
+[h1, p1] = ttest(x, 5.0);
+fprintf('ttest1_p    %.4f\n', p1);
+[pr, hr] = ranksum(x, y);
+fprintf('ranksum_p   %.5f\n', pr);
+[ps, hs] = signrank(x, y);
+fprintf('signrank_p  %.5f\n', ps);
+X = [5.1 5.4 6.1; 4.9 5.6 5.9; 5.3 5.2 6.3; 5.0 5.5 6.0];
+fprintf('anova1_p    %.6f\n', anova1(X));
+fprintf('kstest_h    %.0f\n', kstest(x));

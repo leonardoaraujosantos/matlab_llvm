@@ -1,0 +1,8 @@
+mk_mu    5.0000
+mk_sigma 2.0000
+pd_pdf   0.1995
+pd_cdf   0.8413
+pd_icdf  8.9199
+fit_mu   4.9200
+fit_sig  0.3994
+fit_cdf5 0.5794

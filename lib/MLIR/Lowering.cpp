@@ -2336,6 +2336,15 @@ void Lowerer::lowerStmt(const Stmt &St) {
           /* [r, c] = size(A) — both f64. */
           if (CN == "size" && A.LHS.size() == 2)
             Rtys.assign(A.LHS.size(), F64);
+          /* [h,p,ci,stats] = ttest/ttest2/… — out0/out1 f64 (h/p), out2
+           * ci (ptr 1x2), out3 stats (ptr struct). Rank tests use the
+           * [p,h,…] order but the slot types are identical. */
+          else if ((CN == "ttest" || CN == "ttest2" || CN == "vartest2" ||
+                    CN == "ztest" || CN == "kstest" || CN == "ranksum" ||
+                    CN == "signrank" || CN == "signtest") && A.LHS.size() >= 2) {
+            for (size_t i = 0; i < A.LHS.size(); ++i)
+              Rtys[i] = (i < 2) ? mlir::Type(F64) : mlir::Type(PtrTy);
+          }
           /* [V, D] = eig / [Q, R] = qr / [L, U] = lu / [U, S, V] = svd /
            * [H, P] = hess — all ptr (matrix) results. */
           else if ((CN == "eig" || CN == "qr" || CN == "lu" ||
@@ -2344,6 +2353,16 @@ void Lowerer::lowerStmt(const Stmt &St) {
           /* [AA, BB, Q, Z] = qz(A, B) — all four ptr (matrix). */
           else if (CN == "qz" && A.LHS.size() == 4)
             Rtys.assign(A.LHS.size(), PtrTy);
+          /* [coeff,score,latent,…]=pca / [idx,C,sumd,D]=kmeans — all ptr. */
+          else if ((CN == "pca" || CN == "kmeans") && A.LHS.size() >= 2)
+            Rtys.assign(A.LHS.size(), PtrTy);
+          /* [seq,states]=hmmgenerate / [TRANS,EMIS]=hmmtrain — both ptr. */
+          else if ((CN == "hmmgenerate" || CN == "hmmtrain") && A.LHS.size() == 2)
+            Rtys.assign(A.LHS.size(), PtrTy);
+          /* [pstates,logpseq]=hmmdecode — ptr + f64. */
+          else if (CN == "hmmdecode" && A.LHS.size() == 2) {
+            Rtys[0] = PtrTy; Rtys[1] = F64;
+          }
           /* [t, y] = ode45(@f, tspan, y0) / ode23 / ode23s — all column
            * matrices. The 3-return form `[t, y, stats]` adds a struct
            * (also ptr). */
@@ -6629,6 +6648,186 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
           return emitUnreg("matlab.call_builtin", {Solver, K}, PtrTy, L, {Cal});
         }
 
+        /* ===========================================================
+         * Statistics Toolbox Tier-1 — distribution objects.
+         * =========================================================== */
+        /* Distribution name string -> code (1=Normal,2=Exponential,3=Uniform). */
+        auto distCode = [&](const Expr *E) -> double {
+          std::string s;
+          if (auto *CL = dynamic_cast<const CharLiteral *>(E)) s = CL->Value;
+          else if (auto *SL = dynamic_cast<const StringLiteral *>(E)) s = SL->Value;
+          if (s == "Exponential" || s == "exponential") return 2.0;
+          if (s == "Uniform" || s == "uniform") return 3.0;
+          return 1.0;  /* Normal default */
+        };
+        auto f64lit = [&](double v) -> mlir::Value {
+          return emitUnreg("matlab.const_float", {}, F64, L,
+                           {mlir::NamedAttribute(mlir::StringAttr::get(&MCtx, "value"),
+                                                 mlir::FloatAttr::get(F64, v))});
+        };
+        auto setObjF64 = [&](mlir::Value Obj, const char *fld, mlir::Value Val) {
+          mlir::Value NameV = emitFieldNameChar(fld, L);
+          mlir::NamedAttribute SetCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_obj_set_f64"));
+          emitUnregOp("matlab.call_builtin", {Obj, NameV, Val},
+                      {mlir::NoneType::get(&MCtx)}, L, {SetCal});
+        };
+
+        /* makedist('Normal','mu',M,'sigma',S) — alloc the ProbDistUnivParam
+         * shell and write DistCode + the named params (lower/upper alias to
+         * mu/sigma for the Uniform). */
+        if (Nm == "makedist" && C.Args.size() >= 1) {
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "ProbDistUnivParam__ProbDistUnivParam"));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTy, L, {CtorCal});
+          setObjF64(Obj, "DistCode", f64lit(distCode(C.Args[0])));
+          for (size_t i = 1; i + 1 < C.Args.size(); i += 2) {
+            std::string key;
+            if (auto *CL = dynamic_cast<const CharLiteral *>(C.Args[i])) key = CL->Value;
+            else if (auto *SL = dynamic_cast<const StringLiteral *>(C.Args[i])) key = SL->Value;
+            if (key.empty()) continue;
+            const char *fld = (key == "mu" || key == "lower")    ? "mu"
+                            : (key == "sigma" || key == "upper") ? "sigma"
+                            : nullptr;
+            if (!fld) continue;
+            setObjF64(Obj, fld, lowerExpr(*C.Args[i + 1]));
+          }
+          return Obj;
+        }
+
+        /* fitdist(x, 'Normal') — alloc the shell, then MLE-populate it via
+         * the runtime (alloc-then-populate, like idss / EKF). */
+        if (Nm == "fitdist" && C.Args.size() >= 2) {
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "ProbDistUnivParam__ProbDistUnivParam"));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTy, L, {CtorCal});
+          mlir::Value X = loadObj(C.Args[0]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_stats_fitdist_init"));
+          emitUnregOp("matlab.call_builtin", {Obj, X, f64lit(distCode(C.Args[1]))},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Obj;
+        }
+
+        /* pdf/cdf/icdf(pd, x) and random(pd, m, n) — runtime-dispatched on
+         * the distribution object's class (REPL-safe; gated to a non-string
+         * first arg so the pdf('Normal',…) name form is not hijacked). */
+        if ((Nm == "pdf" || Nm == "cdf" || Nm == "icdf" || Nm == "random") &&
+            C.Args.size() >= 2 &&
+            !dynamic_cast<const CharLiteral *>(C.Args[0]) &&
+            !dynamic_cast<const StringLiteral *>(C.Args[0])) {
+          mlir::Value Pd = loadObj(C.Args[0]);
+          const char *rt = (Nm == "pdf")  ? "matlab_stats_pd_pdf"
+                         : (Nm == "cdf")  ? "matlab_stats_pd_cdf"
+                         : (Nm == "icdf") ? "matlab_stats_pd_icdf"
+                                          : "matlab_stats_pd_random";
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, rt));
+          if (Nm == "random") {
+            mlir::Value Mm = lowerExpr(*C.Args[1]);
+            mlir::Value Nn = (C.Args.size() >= 3) ? lowerExpr(*C.Args[2]) : f64lit(1.0);
+            return emitUnreg("matlab.call_builtin", {Pd, Mm, Nn}, PtrTy, L, {Cal});
+          }
+          mlir::Value Xx = lowerExpr(*C.Args[1]);
+          return emitUnreg("matlab.call_builtin", {Pd, Xx}, PtrTy, L, {Cal});
+        }
+
+        /* Stats Tier-3 — fitlm(X,y) / fitglm(X,y,…): alloc a LinearModel
+         * shell and populate it via the runtime (OLS or logistic IRLS).
+         * The fitglm 'Distribution' name-value args are accepted-and-
+         * ignored for now (logistic/binomial is the wired link). */
+        if ((Nm == "fitlm" || Nm == "fitglm") && C.Args.size() >= 2) {
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "LinearModel__LinearModel"));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTy, L, {CtorCal});
+          mlir::Value Xd = lowerExpr(*C.Args[0]);   /* data: plain lower (inline-matrix safe) */
+          mlir::Value Yd = lowerExpr(*C.Args[1]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, Nm == "fitglm" ? "matlab_stats_fitglm_init"
+                                                          : "matlab_stats_fitlm_init"));
+          emitUnregOp("matlab.call_builtin", {Obj, Xd, Yd},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Obj;
+        }
+
+        /* Stats Tier-5 — fitcknn/fitcnb/fitcdiscr/fitctree/fitcsvm/fitcecoc:
+         * alloc a ClassificationModel shell and populate it via the runtime
+         * (each `fitc*` maps to its matlab_stats_fit*_init). */
+        if ((Nm == "fitcknn" || Nm == "fitcnb" || Nm == "fitcdiscr" ||
+             Nm == "fitctree" || Nm == "fitcsvm" || Nm == "fitcecoc") &&
+            C.Args.size() >= 2) {
+          const char *initSym =
+              (Nm == "fitcknn")   ? "matlab_stats_fitknn_init"
+            : (Nm == "fitcnb")    ? "matlab_stats_fitnb_init"
+            : (Nm == "fitcdiscr") ? "matlab_stats_fitlda_init"
+            : (Nm == "fitctree")  ? "matlab_stats_fittree_init"
+            : (Nm == "fitcsvm")   ? "matlab_stats_fitsvm_init"
+                                  : "matlab_stats_fitecoc_init";
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "ClassificationModel__ClassificationModel"));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTy, L, {CtorCal});
+          mlir::Value Xd = lowerExpr(*C.Args[0]);
+          mlir::Value Yd = lowerExpr(*C.Args[1]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, initSym));
+          emitUnregOp("matlab.call_builtin", {Obj, Xd, Yd},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Obj;
+        }
+
+        /* Stats Tier-6 — ensembles.  fitcensemble(X,y) = bagging (50 trees,
+         * all features); TreeBagger(nTrees,X,y) = random forest (featsub<0
+         * → √p in the runtime).  Both populate a ClassificationModel
+         * (ModelType 7) via matlab_stats_fitensemble_init(obj,X,y,T,fs). */
+        if ((Nm == "fitcensemble" || Nm == "TreeBagger") && C.Args.size() >= 2) {
+          bool isBagger = (Nm == "TreeBagger");
+          auto f64c = [&](double v) -> mlir::Value {
+            return emitUnreg("matlab.const_float", {}, F64, L,
+                             {mlir::NamedAttribute(mlir::StringAttr::get(&MCtx, "value"),
+                                                   mlir::FloatAttr::get(F64, v))});
+          };
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "ClassificationModel__ClassificationModel"));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTy, L, {CtorCal});
+          /* TreeBagger(nTrees, X, y): args shifted by one; featsub = -1 (√p).
+           * fitcensemble(X, y): T=50, featsub=0 (all features). */
+          mlir::Value Xd = lowerExpr(*C.Args[isBagger ? 1 : 0]);
+          mlir::Value Yd = lowerExpr(*C.Args[isBagger ? 2 : 1]);
+          mlir::Value Tn = isBagger ? lowerExpr(*C.Args[0]) : f64c(50.0);
+          if (Tn.getType() != F64) Tn = f64c(50.0);
+          mlir::Value Fs = f64c(isBagger ? -1.0 : 0.0);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_stats_fitensemble_init"));
+          emitUnregOp("matlab.call_builtin", {Obj, Xd, Yd, Tn, Fs},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Obj;
+        }
+
+        /* Stats Tier-6 — bayesopt(fun, lb, ub): GP + EI optimization over a
+         * box.  Objective handle at operand 0 (retyped to ptr by
+         * LowerAnonCalls); lb/ub plain-lowered (inline-matrix safe). */
+        if (Nm == "bayesopt" && C.Args.size() == 3) {
+          mlir::Value Fn = lowerExpr(*C.Args[0]);
+          if (Fn.getType() != PtrTy) Fn.setType(PtrTy);
+          mlir::Value Lb = lowerExpr(*C.Args[1]);
+          mlir::Value Ub = lowerExpr(*C.Args[2]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_stats_bayesopt"));
+          return emitUnreg("matlab.call_builtin", {Fn, Lb, Ub}, PtrTy, L, {Cal});
+        }
+
         auto rebuildCall = [&](llvm::StringRef Callee,
                                llvm::ArrayRef<mlir::Value> Args,
                                mlir::Type ResTy) -> mlir::Value {
@@ -7475,6 +7674,24 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
           return emitUnreg("matlab.call_builtin", {Obj, Yv, Uv}, PtrTy, L, {Cal});
         }
         /* predict(model, data [, K]) — K-step predictor (default K=1). */
+        /* Stats Tier-3 — predict(LinearModel, Xnew) on a fitlm/fitglm model. */
+        if (Nm == "predict" && Cls0 && Cn0 == "LinearModel" && C.Args.size() == 2) {
+          mlir::Value Mdl  = loadObj(C.Args[0]);
+          mlir::Value Xnew = lowerExpr(*C.Args[1]);   /* data: plain lower (inline-matrix safe) */
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_stats_lm_predict"));
+          return emitUnreg("matlab.call_builtin", {Mdl, Xnew}, PtrTy, L, {Cal});
+        }
+        /* Stats Tier-5 — predict(ClassificationModel, Xnew). */
+        if (Nm == "predict" && Cls0 && Cn0 == "ClassificationModel" && C.Args.size() == 2) {
+          mlir::Value Mdl  = loadObj(C.Args[0]);
+          mlir::Value Xnew = lowerExpr(*C.Args[1]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_stats_clf_predict"));
+          return emitUnreg("matlab.call_builtin", {Mdl, Xnew}, PtrTy, L, {Cal});
+        }
         if (Nm == "predict" && Cls0 && Cn0 == "idpoly" &&
             (C.Args.size() == 2 || C.Args.size() == 3)) {
           mlir::Value Model = loadObj(C.Args[0]);

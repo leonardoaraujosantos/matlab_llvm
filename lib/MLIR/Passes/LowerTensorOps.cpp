@@ -410,7 +410,49 @@ bool TensorLowering::rewriteLiterals() {
     }
     int64_t Rows = 0, Cols = 0;
     SmallVector<Value, 16> Elts;
-    if (!gatherLiteralElements(Op, Rows, Cols, Elts)) continue;
+    if (!gatherLiteralElements(Op, Rows, Cols, Elts)) {
+      /* Operands are not all f64 scalars — at least one is a matrix/vector
+       * (e.g. `[x1 x2]` horzcat of column vectors, or `[a; b]` vertcat).
+       * Fold the bracket concatenation via the runtime matlab_horzcat /
+       * matlab_vertcat (pairwise left-fold), boxing any scalar operands
+       * and recursing into nested concat rows. */
+      std::function<Value(Operation *)> fold = [&](Operation *C) -> Value {
+        bool isRow = isMatlabOp(C, "matlab.concat_row");
+        Value acc;
+        for (Value V : C->getOperands()) {
+          Value piece;
+          Operation *D = V.getDefiningOp();
+          if (D && (isMatlabOp(D, "matlab.concat_row") ||
+                    isMatlabOp(D, "matlab.concat_col"))) {
+            piece = fold(D);
+          } else if (V.getType() == F64) {
+            B.setInsertionPoint(Op);
+            auto Bx = rt("matlab_mat_from_scalar", PtrTy, {F64});
+            piece = LLVM::CallOp::create(B, Op->getLoc(), Bx, ValueRange{V}).getResult();
+          } else if (V.getType() == PtrTy) {
+            piece = V;
+          } else if (isTensorLike(V.getType())) {
+            B.setInsertionPoint(Op);
+            piece = mlir::UnrealizedConversionCastOp::create(B, Op->getLoc(), PtrTy, V)
+                        .getResult(0);
+          } else {
+            return Value{};
+          }
+          if (!piece) return Value{};
+          if (!acc) { acc = piece; continue; }
+          B.setInsertionPoint(Op);
+          auto Fn = rt(isRow ? "matlab_horzcat" : "matlab_vertcat", PtrTy, {PtrTy, PtrTy});
+          acc = LLVM::CallOp::create(B, Op->getLoc(), Fn, ValueRange{acc, piece}).getResult();
+        }
+        return acc;
+      };
+      Value M = fold(Op);
+      if (!M) continue;
+      Op->getResult(0).replaceAllUsesWith(M);
+      Op->erase();
+      Changed = true;
+      continue;
+    }
     B.setInsertionPoint(Op);
     Value M = materializeMat(Op->getLoc(), Rows, Cols, Elts);
     // Carry forward the user-source variable name (set by SlotPromotion
@@ -3652,6 +3694,126 @@ bool TensorLowering::rewriteBuiltinCalls() {
         continue;
       }
     }
+    /* ---- Statistics Toolbox Tier-2 hypothesis tests --------------------- *
+     * [h,p,ci,stats] = ttest/ttest2/vartest2/ztest/kstest(...)  (or the
+     * [p,h,stats] order for the rank tests).  The compute symbol (out 0)
+     * computes everything into a thread-local; the secondary outputs read
+     * it back via matlab_stats_test_{o2,ci,stats}. */
+    if (NA && (Name == "ttest" || Name == "ttest2" || Name == "vartest2" ||
+               Name == "ztest" || Name == "kstest" || Name == "ranksum" ||
+               Name == "signrank" || Name == "signtest") &&
+        Call->getNumResults() >= 2 &&
+        Call->getNumResults() == NA.getValue().getSExtValue()) {
+      int nout = static_cast<int>(Call->getNumResults());
+      int nin  = static_cast<int>(Call->getNumOperands());
+      /* compute symbol (ttest picks 1-arg vs 2-arg). */
+      std::string sym = std::string("matlab_stats_") + Name.str();
+      if (Name == "ttest" && nin == 1) sym = "matlab_stats_ttest1";
+      SmallVector<Type, 3> argTy(static_cast<size_t>(nin), PtrTy);
+      SmallVector<Value, 3> CA;
+      bool okBox = true;
+      for (int i = 0; i < nin; ++i) {
+        Value v = boxAsPtr(Call->getOperand(static_cast<unsigned>(i)));
+        if (!v) { okBox = false; break; }
+        CA.push_back(v);
+      }
+      if (okBox) {
+        B.setInsertionPoint(Call);
+        auto F0 = rt(sym, F64, argTy);
+        Call->getResult(0).replaceAllUsesWith(
+            LLVM::CallOp::create(B, Call->getLoc(), F0, CA).getResult());
+        auto F1 = rt("matlab_stats_test_o2", F64, {});
+        Call->getResult(1).replaceAllUsesWith(
+            LLVM::CallOp::create(B, Call->getLoc(), F1, ValueRange{}).getResult());
+        if (nout >= 3) {
+          auto F2 = rt("matlab_stats_test_ci", PtrTy, {});
+          Call->getResult(2).replaceAllUsesWith(
+              LLVM::CallOp::create(B, Call->getLoc(), F2, ValueRange{}).getResult());
+        }
+        if (nout >= 4) {
+          auto F3 = rt("matlab_stats_test_stats", PtrTy, {});
+          Call->getResult(3).replaceAllUsesWith(
+              LLVM::CallOp::create(B, Call->getLoc(), F3, ValueRange{}).getResult());
+        }
+        Call->erase();
+        Changed = true;
+        continue;
+      }
+    }
+
+    /* [coeff,score,latent,tsquared,explained] = pca(X) — all ptr; the
+     * compute (out 0) stashes the rest in a thread-local read by the
+     * per-output symbols (tsquared is a stub empty matrix). */
+    if (NA && Name == "pca" && Call->getNumResults() >= 2 &&
+        Call->getNumResults() == NA.getValue().getSExtValue() &&
+        Call->getNumOperands() == 1) {
+      Value X = boxAsPtr(Call->getOperand(0));
+      if (X) {
+        int nout = static_cast<int>(Call->getNumResults());
+        B.setInsertionPoint(Call);
+        const char *syms[5] = {"matlab_stats_pca", "matlab_stats_pca_score",
+                               "matlab_stats_pca_latent", "matlab_stats_pca_empty",
+                               "matlab_stats_pca_explained"};
+        for (int o = 0; o < nout && o < 5; ++o) {
+          auto Fn = rt(syms[o], PtrTy, (o == 0) ? ArrayRef<Type>{PtrTy} : ArrayRef<Type>{});
+          ValueRange ar = (o == 0) ? ValueRange{X} : ValueRange{};
+          Call->getResult(static_cast<unsigned>(o)).replaceAllUsesWith(
+              LLVM::CallOp::create(B, Call->getLoc(), Fn, ar).getResult());
+        }
+        Call->erase(); Changed = true; continue;
+      }
+    }
+    /* [idx,C,sumd,D] = kmeans(X, k) — idx + centroids + within-cluster
+     * sums + point-to-centroid distances. */
+    if (NA && Name == "kmeans" && Call->getNumResults() >= 2 &&
+        Call->getNumResults() == NA.getValue().getSExtValue() &&
+        Call->getNumOperands() == 2) {
+      Value X = boxAsPtr(Call->getOperand(0));
+      Value K = boxAsPtr(Call->getOperand(1));
+      if (X && K) {
+        int nout = static_cast<int>(Call->getNumResults());
+        B.setInsertionPoint(Call);
+        auto F0 = rt("matlab_stats_kmeans", PtrTy, {PtrTy, PtrTy});
+        Call->getResult(0).replaceAllUsesWith(
+            LLVM::CallOp::create(B, Call->getLoc(), F0, ValueRange{X, K}).getResult());
+        const char *syms[3] = {"matlab_stats_km_C", "matlab_stats_km_sumd", "matlab_stats_km_D"};
+        for (int o = 1; o < nout && o <= 3; ++o) {
+          auto Fn = rt(syms[o - 1], PtrTy, {});
+          Call->getResult(static_cast<unsigned>(o)).replaceAllUsesWith(
+              LLVM::CallOp::create(B, Call->getLoc(), Fn, ValueRange{}).getResult());
+        }
+        Call->erase(); Changed = true; continue;
+      }
+    }
+
+    /* HMM 2-output forms: [seq,states]=hmmgenerate, [pstates,logp]=
+     * hmmdecode, [TRANS,EMIS]=hmmtrain.  Out 0 computes + stashes; out 1
+     * reads the thread-local (logp is f64, the rest ptr). */
+    if (NA && (Name == "hmmgenerate" || Name == "hmmdecode" || Name == "hmmtrain") &&
+        Call->getNumResults() == 2 && NA.getValue().getSExtValue() == 2 &&
+        Call->getNumOperands() == 3) {
+      Value A0 = boxAsPtr(Call->getOperand(0));
+      Value A1 = boxAsPtr(Call->getOperand(1));
+      Value A2 = boxAsPtr(Call->getOperand(2));
+      if (A0 && A1 && A2) {
+        const char *compute = (Name == "hmmgenerate") ? "matlab_stats_hmmgenerate"
+                            : (Name == "hmmdecode")   ? "matlab_stats_hmmdecode"
+                                                      : "matlab_stats_hmmtrain";
+        bool secondF64 = (Name == "hmmdecode");
+        const char *reader = (Name == "hmmgenerate") ? "matlab_stats_hmm_states"
+                           : (Name == "hmmdecode")   ? "matlab_stats_hmm_logp"
+                                                     : "matlab_stats_hmm_emis";
+        B.setInsertionPoint(Call);
+        auto F0 = rt(compute, PtrTy, {PtrTy, PtrTy, PtrTy});
+        Call->getResult(0).replaceAllUsesWith(
+            LLVM::CallOp::create(B, Call->getLoc(), F0, ValueRange{A0, A1, A2}).getResult());
+        auto F1 = rt(reader, secondF64 ? Type(F64) : Type(PtrTy), ArrayRef<Type>{});
+        Call->getResult(1).replaceAllUsesWith(
+            LLVM::CallOp::create(B, Call->getLoc(), F1, ValueRange{}).getResult());
+        Call->erase(); Changed = true; continue;
+      }
+    }
+
     /* [z, p, k] = tf2zp(b, a). Splits into matlab_tf2zp_{z,p,k}. */
     if (NA && NA.getValue().getSExtValue() == 3 &&
         Name == "tf2zp" && Call->getNumOperands() == 2 &&
@@ -4439,6 +4601,90 @@ bool TensorLowering::rewriteBuiltinCalls() {
         {"matlab_gads_globalsearch", "matlab_gads_globalsearch", PtrTy, {}},
         /* run(solver, problem [,k]) — runtime-dispatched (REPL-safe). */
         {"matlab_gads_run", "matlab_gads_run", PtrTy, {PtrTy, F64}},
+        /* ---- Statistics and Machine Learning Toolbox Tier-1 ----
+         * pde_table keyed by the user name → matlab_stats_* symbol; all
+         * args are PtrTy so scalar literals get boxed (f64→1x1). */
+        {"prctile",  "matlab_stats_prctile",  PtrTy, {PtrTy, PtrTy}},
+        {"quantile", "matlab_stats_quantile", PtrTy, {PtrTy, PtrTy}},
+        {"iqr",      "matlab_stats_iqr",      PtrTy, {PtrTy}},
+        {"range",    "matlab_stats_range",    PtrTy, {PtrTy}},
+        {"mode",     "matlab_stats_mode",     PtrTy, {PtrTy}},
+        {"skewness", "matlab_stats_skewness", PtrTy, {PtrTy}},
+        {"kurtosis", "matlab_stats_kurtosis", PtrTy, {PtrTy}},
+        {"geomean",  "matlab_stats_geomean",  PtrTy, {PtrTy}},
+        {"harmmean", "matlab_stats_harmmean", PtrTy, {PtrTy}},
+        {"cov",      "matlab_stats_cov",      PtrTy, {PtrTy}},
+        {"corr",     "matlab_stats_corr",     PtrTy, {PtrTy}},
+        {"corrcoef", "matlab_stats_corrcoef", PtrTy, {PtrTy}},
+        /* Distributions — 1-arg (defaults) and full-parameter forms. */
+        {"normpdf",  "matlab_stats_normpdf1", PtrTy, {PtrTy}},
+        {"normpdf",  "matlab_stats_normpdf",  PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"normcdf",  "matlab_stats_normcdf1", PtrTy, {PtrTy}},
+        {"normcdf",  "matlab_stats_normcdf",  PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"norminv",  "matlab_stats_norminv1", PtrTy, {PtrTy}},
+        {"norminv",  "matlab_stats_norminv",  PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"exppdf",   "matlab_stats_exppdf",   PtrTy, {PtrTy, PtrTy}},
+        {"expcdf",   "matlab_stats_expcdf",   PtrTy, {PtrTy, PtrTy}},
+        {"expinv",   "matlab_stats_expinv",   PtrTy, {PtrTy, PtrTy}},
+        {"unifpdf",  "matlab_stats_unifpdf",  PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"unifcdf",  "matlab_stats_unifcdf",  PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"unifinv",  "matlab_stats_unifinv",  PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"normrnd",  "matlab_stats_normrnd",  PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy}},
+        {"unifrnd",  "matlab_stats_unifrnd",  PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy}},
+        {"exprnd",   "matlab_stats_exprnd",   PtrTy, {PtrTy, PtrTy, PtrTy}},
+        /* fitdist numeric cores (returned [params]; classdef populates). */
+        {"matlab_stats_fit_normal",      "matlab_stats_fit_normal",      PtrTy, {PtrTy}},
+        {"matlab_stats_fit_exponential", "matlab_stats_fit_exponential", PtrTy, {PtrTy}},
+        /* Tier-2 hypothesis tests — single-output (h or p) expression form;
+         * the multi-output [h,p,…] form is handled by the splitter above. */
+        {"ttest",    "matlab_stats_ttest1",   F64, {PtrTy}},
+        {"ttest",    "matlab_stats_ttest",    F64, {PtrTy, PtrTy}},
+        {"ttest2",   "matlab_stats_ttest2",   F64, {PtrTy, PtrTy}},
+        {"vartest2", "matlab_stats_vartest2", F64, {PtrTy, PtrTy}},
+        {"ztest",    "matlab_stats_ztest",    F64, {PtrTy, PtrTy, PtrTy}},
+        {"kstest",   "matlab_stats_kstest",   F64, {PtrTy}},
+        {"ranksum",  "matlab_stats_ranksum",  F64, {PtrTy, PtrTy}},
+        {"signrank", "matlab_stats_signrank", F64, {PtrTy, PtrTy}},
+        {"signtest", "matlab_stats_signtest", F64, {PtrTy, PtrTy}},
+        {"anova1",   "matlab_stats_anova1",   F64, {PtrTy}},
+        /* fitdist alloc-then-populate (result discarded). */
+        {"matlab_stats_fitdist_init", "matlab_stats_fitdist_init", PtrTy, {PtrTy, PtrTy, F64}},
+        /* Tier-3 regression. */
+        {"matlab_stats_fitlm_init",  "matlab_stats_fitlm_init",  PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"matlab_stats_fitglm_init", "matlab_stats_fitglm_init", PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"matlab_stats_lm_predict",  "matlab_stats_lm_predict",  PtrTy, {PtrTy, PtrTy}},
+        {"ridge",    "matlab_stats_ridge",    PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"regress",  "matlab_stats_regress",  PtrTy, {PtrTy, PtrTy}},
+        /* Tier-4 — PCA + clustering (1-output / always-matrix forms). */
+        {"pca",        "matlab_stats_pca",        PtrTy, {PtrTy}},
+        {"kmeans",     "matlab_stats_kmeans",     PtrTy, {PtrTy, PtrTy}},
+        {"pdist2",     "matlab_stats_pdist2",     PtrTy, {PtrTy, PtrTy}},
+        {"pdist",      "matlab_stats_pdist",      PtrTy, {PtrTy}},
+        {"squareform", "matlab_stats_squareform", PtrTy, {PtrTy}},
+        {"silhouette", "matlab_stats_silhouette", PtrTy, {PtrTy, PtrTy}},
+        /* Tier-5 — classification (alloc-then-populate inits + predict + confusionmat). */
+        {"matlab_stats_fitknn_init",  "matlab_stats_fitknn_init",  PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"matlab_stats_fitnb_init",   "matlab_stats_fitnb_init",   PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"matlab_stats_fitlda_init",  "matlab_stats_fitlda_init",  PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"matlab_stats_fittree_init", "matlab_stats_fittree_init", PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"matlab_stats_fitsvm_init",  "matlab_stats_fitsvm_init",  PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"matlab_stats_fitecoc_init", "matlab_stats_fitecoc_init", PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"matlab_stats_clf_predict",  "matlab_stats_clf_predict",  PtrTy, {PtrTy, PtrTy}},
+        {"confusionmat", "matlab_stats_confusionmat", PtrTy, {PtrTy, PtrTy}},
+        /* Tier-6 — ensembles. */
+        {"matlab_stats_fitensemble_init", "matlab_stats_fitensemble_init", PtrTy, {PtrTy, PtrTy, PtrTy, F64, F64}},
+        /* Tier-6 — HMM (1-output forms; multi-output via splitter). */
+        {"hmmgenerate", "matlab_stats_hmmgenerate", PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"hmmviterbi",  "matlab_stats_hmmviterbi",  PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"hmmdecode",   "matlab_stats_hmmdecode",   PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"hmmtrain",    "matlab_stats_hmmtrain",    PtrTy, {PtrTy, PtrTy, PtrTy}},
+        /* Tier-6 — Bayesian optimization (objective handle at operand 0). */
+        {"matlab_stats_bayesopt", "matlab_stats_bayesopt", PtrTy, {PtrTy, PtrTy, PtrTy}},
+        /* distribution-object methods (runtime-dispatched; scalar args boxed). */
+        {"matlab_stats_pd_pdf",    "matlab_stats_pd_pdf",    PtrTy, {PtrTy, PtrTy}},
+        {"matlab_stats_pd_cdf",    "matlab_stats_pd_cdf",    PtrTy, {PtrTy, PtrTy}},
+        {"matlab_stats_pd_icdf",   "matlab_stats_pd_icdf",   PtrTy, {PtrTy, PtrTy}},
+        {"matlab_stats_pd_random", "matlab_stats_pd_random", PtrTy, {PtrTy, PtrTy, PtrTy}},
         /* Global Optimization Toolbox Tier-3 — direct search (4-arg, no
          * hybrid; objective handle at operand 0). */
         {"matlab_gads_patternsearch", "matlab_gads_patternsearch", PtrTy,
@@ -4524,8 +4770,11 @@ bool TensorLowering::rewriteBuiltinCalls() {
       bool matched = false;
       for (const auto &E : pde_table) {
         if (Name != E.name) continue;
-        if ((size_t)Call->getNumOperands() != E.args.size()) break;
-        if (Call->getNumResults() != 1) break;
+        /* `continue` (not `break`) so a name with several entries of
+         * different arities — e.g. normcdf(x) vs normcdf(x,mu,sigma) —
+         * keeps scanning for the matching overload. */
+        if ((size_t)Call->getNumOperands() != E.args.size()) continue;
+        if (Call->getNumResults() != 1) continue;
         /* Loose match: PtrTy expected operands also accept tensor types
          * (the operand has come from a builtin whose type-inference
          * stamp is Array — still a runtime ptr at LLVM level).  We
@@ -4565,7 +4814,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
             ok = false; break;
           }
         }
-        if (!ok) break;
+        if (!ok) continue;   /* try the next same-name overload */
         B.setInsertionPoint(Call);
         auto Fn = rt(E.rt_name, E.result_ty, E.args);
         auto C0 = LLVM::CallOp::create(B, Call->getLoc(), Fn, coerced);

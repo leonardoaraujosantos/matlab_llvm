@@ -150,6 +150,44 @@ void Resolver::registerBuiltins() {
     "optimoptions", "matlab_gads_ga_opts",
     /* Tier-2 run(solver, problem) — runtime-dispatched (REPL-safe). */
     "matlab_gads_run",
+    /* Statistics and Machine Learning Toolbox Tier-1 — descriptive stats,
+     * covariance/correlation, probability distributions, and RNGs.  These
+     * are user-facing names; pde_table rewrites each to its matlab_stats_*
+     * symbol (boxing scalar args). */
+    "prctile", "quantile", "iqr", "range", "mode", "skewness", "kurtosis",
+    "geomean", "harmmean", "cov", "corr", "corrcoef",
+    "normpdf", "normcdf", "norminv", "exppdf", "expcdf", "expinv",
+    "unifpdf", "unifcdf", "unifinv",
+    "normrnd", "unifrnd", "exprnd",
+    /* Distribution objects (makedist/fitdist + pdf/cdf/icdf/random methods,
+     * runtime-dispatched on the object's class). */
+    "makedist", "fitdist", "pdf", "cdf", "icdf", "random",
+    "matlab_stats_fitdist_init", "matlab_stats_pd_pdf", "matlab_stats_pd_cdf",
+    "matlab_stats_pd_icdf", "matlab_stats_pd_random",
+    /* Tier-2 — hypothesis tests + ANOVA. */
+    "ttest", "ttest2", "vartest2", "ztest", "kstest",
+    "ranksum", "signrank", "signtest", "anova1",
+    /* Tier-3 — regression. */
+    "fitlm", "fitglm", "ridge", "regress",
+    "matlab_stats_fitlm_init", "matlab_stats_fitglm_init",
+    "matlab_stats_lm_predict", "matlab_stats_ridge", "matlab_stats_regress",
+    /* Tier-4 — PCA + clustering. */
+    "pca", "kmeans", "pdist2", "pdist", "squareform", "silhouette",
+    /* Tier-5 — classification. */
+    "fitcknn", "fitcnb", "fitcdiscr", "fitctree", "fitcsvm", "fitcecoc",
+    "confusionmat",
+    /* Tier-6 — ensembles. */
+    "fitcensemble", "TreeBagger", "matlab_stats_fitensemble_init",
+    /* Tier-6 — Hidden Markov Models. */
+    "hmmgenerate", "hmmviterbi", "hmmdecode", "hmmtrain",
+    "matlab_stats_hmmgenerate", "matlab_stats_hmmviterbi",
+    "matlab_stats_hmmdecode", "matlab_stats_hmmtrain",
+    "matlab_stats_hmm_states", "matlab_stats_hmm_logp", "matlab_stats_hmm_emis",
+    /* Tier-6 — Bayesian optimization. */
+    "bayesopt", "matlab_stats_bayesopt",
+    "matlab_stats_fitknn_init", "matlab_stats_fitnb_init", "matlab_stats_fitlda_init",
+    "matlab_stats_fittree_init", "matlab_stats_fitsvm_init", "matlab_stats_fitecoc_init",
+    "matlab_stats_clf_predict", "matlab_stats_confusionmat",
     /* MPC Tier-4 §5.4 — standalone active-set QP solver. */
     "matlab_mpc_active_set",
     /* MPC Tier-4 §5.1/5.2/5.3 — explicit MPC. */
@@ -1395,6 +1433,22 @@ void Resolver::resolveStmt(Stmt &St, Scope *S) {
           }
           if (NX->Name == "GlobalSearch") {
             if (ClassDef *C = classByName("GlobalSearch")) return C;
+          }
+          /* Stats Tier-1: makedist / fitdist return a class-pinned
+           * ProbDistUnivParam distribution object. */
+          if (NX->Name == "makedist" || NX->Name == "fitdist") {
+            if (ClassDef *C = classByName("ProbDistUnivParam")) return C;
+          }
+          /* Stats Tier-3: fitlm / fitglm return a class-pinned LinearModel. */
+          if (NX->Name == "fitlm" || NX->Name == "fitglm") {
+            if (ClassDef *C = classByName("LinearModel")) return C;
+          }
+          /* Stats Tier-5: fitc* return a class-pinned ClassificationModel. */
+          if (NX->Name == "fitcknn" || NX->Name == "fitcnb" ||
+              NX->Name == "fitcdiscr" || NX->Name == "fitctree" ||
+              NX->Name == "fitcsvm" || NX->Name == "fitcecoc" ||
+              NX->Name == "fitcensemble" || NX->Name == "TreeBagger") {
+            if (ClassDef *C = classByName("ClassificationModel")) return C;
           }
           /* User function whose body returns a class-pinned value —
            * propagate that pin to the caller's LHS. */

@@ -28,7 +28,7 @@ dependency** and reuses the shipped Optimization Toolbox (MLE / SVM dual
 analysis), and the shipped PRNG.
 
 The headline tracer-bullet (the gating example for the whole roadmap) is
-[`examples/stats/iris_classify.m`](../examples/stats/iris_classify.m):
+[`examples/stats_ml/iris_classify.m`](../examples/stats_ml/iris_classify.m):
 *the canonical Fisher-iris pipeline — load the 150×4 dataset, summarise
 it (`mean`/`std`/`corr`), reduce with `pca`, cluster with `kmeans`, then
 train + score an SVM classifier (`fitcsvm` + `predict`) with a confusion
@@ -66,10 +66,26 @@ ARX overlap), [`plotting.md`](plotting.md) (statistical visualization),
   is the **largest** single-toolbox roadmap — but each tier is
   independently shippable and demoable.
 - **Status legend**: ✅ shipped · 🟡 partial · 🔵 not started.
-  **Nothing ML-specific is shipped — every row below is 🔵.** A handful
-  of descriptive primitives already exist (`mean`/`std`/`var`/`median`,
-  `rand`/`randn`/`randi`, `rng`, `qfunc`/`erfc`, `corrcoef` is partial) —
-  noted per row.
+  **Tiers 1–5 cores shipped 2026-05-20** (`runtime/toolbox/stats/`) — Tier-1
+  descriptive + distributions + RNG + makedist/fitdist; **Tier-2**
+  hypothesis tests + one-way ANOVA (ttest/ttest2/vartest2/ztest/kstest/
+  ranksum/signrank/signtest/anova1 with [h,p,ci,stats], on hand-coded
+  t/F/χ² CDFs); **Tier-3** regression (regress/fitlm/fitglm/ridge/predict);
+  **Tier-4** PCA + clustering (pca/kmeans/pdist2/pdist/squareform/
+  silhouette); **Tier-5** classification (fitcknn/fitcnb/fitcdiscr/fitctree/
+  fitcsvm/fitcecoc + predict + confusionmat) — **the `iris_classify`
+  headline is CLOSED**; **Tier-6** ensembles (fitcensemble/TreeBagger) +
+  bayesopt (GP + EI) + Markov models (hmm*).  **All 6 tier cores shipped**
+  — the carve-downs per tier are documented follow-ons.
+  **Tier-1 core (original note):** the
+  descriptive battery (`prctile`/`quantile`/`iqr`/`range`/`mode`/
+  `skewness`/`kurtosis`/`geomean`/`harmmean`), `cov`/`corr`/`corrcoef`,
+  the Normal/Exponential/Uniform pdf/cdf/inverse families, the RNGs
+  (`normrnd`/`unifrnd`/`exprnd`), and the distribution-object workflow
+  (`makedist`/`fitdist` + `ProbDistUnivParam` with `pdf`/`cdf`/`icdf`/
+  `random`).  Pre-existing primitives reused:
+  `mean`/`std`/`var`/`median`, `rand`/`randn`/`randi`, `rng`, libc
+  `erf`/`erfc`.
 - **Data container**: most of this toolbox is **table-centric** (`fitlm`
   takes a `table` + a Wilkinson formula). The runtime **already ships
   `table`** (see `feature_status.md` §3) — Tier-3 leans on it. SISO
@@ -116,10 +132,24 @@ self-contained hand-coded routine over the shipped base.
 
 ---
 
-## 2. Tier-1 — Descriptive statistics + probability distributions + RNG 🔵
+## 2. Tier-1 — Descriptive statistics + probability distributions + RNG 🟡 (core shipped)
 
 Goal: the everyday data-summary + distribution surface. Most of MATLAB's
 "first hour with data" lives here.
+
+**Shipped 2026-05-20** (`runtime/toolbox/stats/runtime_stats.cpp` +
+`stats_classdefs.m`): the descriptive battery (1.1), `cov`/`corr`/
+`corrcoef` (1.2), the Normal/Exponential/Uniform pdf/cdf/inverse families
+(1.4–1.5, the most-used subset), the `normrnd`/`unifrnd`/`exprnd` RNGs
+(1.6), and the distribution-object workflow (1.7–1.8 for Normal/Exp/Unif:
+`makedist`/`fitdist` + `ProbDistUnivParam` `pdf`/`cdf`/`icdf`/`random`).
+Headline `examples/stats_ml/fit_normal.m`; 3 gating tests.  **Tier-1
+follow-ons (🔵):** the wider distribution library (binomial/Poisson/geo/
+gamma/Weibull/beta/lognormal/Rayleigh + t/χ²/F via `gammainc`/`betainc`),
+`grpstats`/`tabulate`/`crosstab` (1.3), `mvnrnd`/`binornd`/`poissrnd`/
+`gamrnd`/`randsample` (1.6), `mle`/`ksdensity`/`histfit` (1.8), the
+statistical-visualization plots (1.9), and `mean(pd)`/`std(pd)`
+object-reduction methods.
 
 | # | Surface | Algorithm / notes | Runtime entry |
 |---|---|---|---|
@@ -143,10 +173,24 @@ loose-match entries in `LowerTensorOps.cpp`; prelude trigger set for
 
 ---
 
-## 3. Tier-2 — Hypothesis tests + ANOVA 🔵
+## 3. Tier-2 — Hypothesis tests + ANOVA 🟡 (core shipped)
 
 Goal: the inferential-statistics battery — the second pillar of classical
 stats.
+
+**Shipped 2026-05-20** (`runtime/toolbox/stats/runtime_stats.cpp`): `ttest`
+(one-sample / paired), `ttest2` (two-sample pooled), `vartest2` (F-test),
+`ztest`, `kstest` (vs standard normal), `ranksum` (Mann-Whitney), `signrank`
+(Wilcoxon signed-rank), `signtest`, `anova1` (one-way) — all with the
+MATLAB `[h,p,ci,stats]` / `[p,h,stats]` multi-output (per-output splitter +
+thread-local result + a `stats` struct).  The p-values use hand-coded
+Student-t / F / χ² CDFs built on regularized incomplete gamma + beta
+(Numerical-Recipes series + continued fraction), which also unblock the
+wider distribution library.  Headline `examples/stats_ml/hypothesis_testing.m`.
+**Tier-2 follow-ons (🔵):** `anovan` (N-way) / `anova` object / `ranova`,
+`multcompare` (Tukey HSD), `kruskalwallis`/`friedman`, `chi2gof`/
+`lillietest`/`jbtest`/`adtest`, Welch `ttest2` (`'Vartype','unequal'`),
+`sampsizepwr`, `vartest`/`vartestn`.
 
 | # | Surface | Algorithm / notes | Runtime entry |
 |---|---|---|---|
@@ -164,10 +208,27 @@ stats.
 
 ---
 
-## 4. Tier-3 — Regression (linear / GLM / nonlinear / regularized) 🔵
+## 4. Tier-3 — Regression (linear / GLM / nonlinear / regularized) 🟡 (core shipped)
 
 Goal: the regression workhorses, both matrix-form and table+formula-form.
 Strong overlap with the shipped System Identification ARX/LS machinery.
+
+**Shipped 2026-05-20** (`runtime/toolbox/stats/runtime_stats.cpp` +
+`LinearModel` classdef): `regress(y,X)` (OLS, explicit intercept column),
+`fitlm(X,y)` (`LinearModel`: coefficient table Estimate/SE/tStat/pValue,
+R²/adjR²/RMSE, `predict`), `fitglm(X,y)` (logistic GLM via IRLS),
+`ridge(y,X,k)` (centered ridge), and `predict(mdl,Xnew)` (runtime-
+dispatched on the model class).  The OLS/IRLS cores use a Gauss-Jordan
+dense inverse + weighted normal equations.  Headlines
+`examples/stats_ml/linear_regression.m` + `glm_logistic.m`.  **This tier
+also fixed a general compiler gap**: bracket concatenation of matrix /
+column-vector operands (`[x1 x2]`, `[a; b]`) now lowers via
+`matlab_horzcat` / `matlab_vertcat` (was scalar-literals only) — essential
+for design matrices.  **Tier-3 follow-ons (🔵):** the Wilkinson-formula
+`fitlm(tbl,'y~x1+x2')` form, `stepwiselm`/`robustfit`, `lasso`/elastic-net
+(CV path), `fitnlm` (nonlinear LM), other GLM families (Poisson/gamma),
+confidence/prediction intervals (`coefCI`, `[b,bint,r,rint,stats]=regress`),
+`plotResiduals`/`anova(mdl)`.
 
 | # | Surface | Algorithm / notes | Reuses |
 |---|---|---|---|
@@ -186,9 +247,19 @@ table with interaction terms, read the coefficient table, `plotResiduals`,
 
 ---
 
-## 5. Tier-4 — Unsupervised learning (PCA + clustering) 🔵
+## 5. Tier-4 — Unsupervised learning (PCA + clustering) 🟡 (core shipped)
 
 Goal: dimensionality reduction + clustering — the exploratory-ML pillar.
+
+**Shipped 2026-05-20** (`runtime/toolbox/stats/runtime_stats.cpp`):
+`pca(X)` (`[coeff,score,latent,~,explained]` via a hand-coded symmetric
+Jacobi eigensolver of the covariance), `kmeans(X,k)` (`[idx,C,sumd,D]` via
+Lloyd + k-means++ over the shared PRNG), `pdist2`/`pdist`/`squareform`
+(euclidean), and `silhouette` (per-point + mean).  Multi-output forms ride
+the per-output splitter + thread-local pattern.  **Tier-4 follow-ons (🔵):**
+`linkage`/`cluster`/`dendrogram` (hierarchical), `gmdistribution`/`fitgmdist`
+(EM), `evalclusters` object + Calinski-Harabasz/gap criteria, `dbscan`,
+`mdscale`/`cmdscale`/`tsne`, `factoran`, non-euclidean `pdist` metrics.
 
 | # | Surface | Algorithm / notes | Reuses |
 |---|---|---|---|
@@ -206,9 +277,26 @@ Goal: dimensionality reduction + clustering — the exploratory-ML pillar.
 
 ---
 
-## 6. Tier-5 — Supervised classification (closes the headline) 🔵
+## 6. Tier-5 — Supervised classification (closes the headline) 🟡 (core shipped — HEADLINE CLOSED)
 
 Goal: the shallow-ML classifier suite — the most-requested ML surface.
+
+**Shipped 2026-05-20** (`runtime/toolbox/stats/runtime_stats.cpp` +
+`ClassificationModel` classdef): `fitcknn` (k-NN), `fitcnb` (Gaussian naive
+Bayes), `fitcdiscr` (LDA, pooled covariance), `fitctree` (hand-coded CART,
+Gini splits), `fitcsvm` (binary linear SVM, squared-hinge), `fitcecoc`
+(one-vs-one multiclass over linear SVM), `predict` (runtime-dispatched on
+the model class), and `confusionmat`.  k-NN/NB/LDA carry the training set
+and re-derive at predict; the tree and SVM carry a compact `Params` matrix.
+**🎯 The headline `examples/stats_ml/iris_classify.m` is CLOSED** —
+descriptive → `pca` → `kmeans` (silhouette) → `fitcecoc` → `predict` →
+`confusionmat` → accuracy, recovering the real Fisher-iris behaviour
+(setosa perfectly separated, versicolor/virginica overlap → ~95% accuracy).
+**Tier-5 follow-ons (🔵):** RBF/polynomial SVM kernels (linear shipped),
+`fitclinear`/`fitrsvm`/`fitrgp`, `crossval`/`cvpartition` k-fold object +
+`perfcurve` (ROC/AUC), `loss`, multi-output `[label,score,cost]=predict`,
+tree pruning/`view`, `templateSVM`/`templateTree` + the `fitc*` name-value
+surface.
 
 | # | Surface | Algorithm / notes | Reuses |
 |---|---|---|---|
@@ -222,7 +310,7 @@ Goal: the shallow-ML classifier suite — the most-requested ML surface.
 | 5.8 | regression learners | `fitrsvm`, `fitrlinear`, `fitrgp` (Gaussian-process regression) | `quadprog`, `chol` |
 
 **🎯 Headline (closes Tier-5)**:
-[`examples/stats/iris_classify.m`](../examples/stats/iris_classify.m) —
+[`examples/stats_ml/iris_classify.m`](../examples/stats_ml/iris_classify.m) —
 the full Fisher-iris pipeline: load → `mean`/`std`/`corr` summary → `pca`
 to 2-D → `kmeans` (unsupervised check) → `fitcsvm` (one-vs-one ECOC) →
 `predict` → `confusionmat` + accuracy. The descriptive → unsupervised →
@@ -230,10 +318,28 @@ supervised arc end-to-end.
 
 ---
 
-## 7. Tier-6 — Ensembles + Bayesian optimization + carve-down polish 🔵
+## 7. Tier-6 — Ensembles + Bayesian optimization + carve-down polish 🟡 (core shipped)
 
 Goal: the advanced-ML layer + the cross-tier hyperparameter optimizer +
 the deferred-options sweep.
+
+**Shipped 2026-05-20** (`runtime/toolbox/stats/runtime_stats.cpp`):
+`fitcensemble` (bagged CART trees) + `TreeBagger` (random forest =
+bootstrap + √p random feature subset per split) — `ClassificationModel`
+ModelType 7, trees concatenated into one node matrix + an `Offsets` vector,
+predict by majority vote; `bayesopt(fun, lb, ub)` (Gaussian-process
+surrogate, squared-exponential kernel, expected-improvement acquisition —
+functional form over the 1-arg objective-handle ABI); and the Markov
+models `hmmgenerate` / `hmmviterbi` / `hmmdecode` / `hmmtrain` (Viterbi +
+scaled forward-backward + Baum-Welch).  Headlines
+`examples/stats_ml/hmm_markov.m` (dishonest-casino HMM: generate → Viterbi
+→ decode → Baum-Welch recovers the parameters) + `ensemble_classify.m`
+(single tree vs bagged trees vs random forest).  **Tier-6 follow-ons (🔵):**
+boosting (`AdaBoostM1`/`LogitBoost`/`GentleBoost`; bagging shipped), OOB
+error + feature importance, the `bayesopt` `optimizableVariable`/results-
+object API + `OptimizeHyperparameters 'auto'` integration, `isolationForest`/
+`ocsvm`, feature selection (`sequentialfs`/`fscnca`/`relieff`), the `fitc*`
+name-value/`templateSVM` surface, `[label,score,cost]=predict`, `dtmc`.
 
 | # | Surface | Algorithm / notes | Reuses |
 |---|---|---|---|

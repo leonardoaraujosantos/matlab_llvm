@@ -1,0 +1,12 @@
+ttest2_h    1
+ttest2_p    0.00001
+ttest2_cilo -0.5462
+ttest2_tst  -6.0281
+ttest2_df   18
+vartest2_h  0
+vartest2_p  0.9327
+ttest1_p    0.2702
+ranksum_p   0.00029
+signrank_p  0.00805
+anova1_p    0.000055
+kstest_h    1

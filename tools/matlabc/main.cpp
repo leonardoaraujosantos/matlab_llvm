@@ -2101,7 +2101,7 @@ static std::string buildReplPrelude(const std::string &Src) {
    * so a single Leaf lookup finds the file wherever it lives. */
   static const char *kToolboxDirs[] = {
     "comm", "rf", "optim", "mpc", "ident", "gads", "pde", "prop", "sym",
-    "stateflow", "antenna", "control",
+    "stateflow", "antenna", "control", "stats",
   };
   std::vector<std::string> Files;
   auto add = [&](const std::string &Leaf) {
@@ -2254,6 +2254,22 @@ static std::string buildReplPrelude(const std::string &Src) {
     {false, "GlobalSearch",      "gads_classdefs.m"},
     {false, "createOptimProblem","gads_classdefs.m"},
     {false, "optimoptions",     "gads_classdefs.m"},
+    /* Statistics Toolbox Tier-1 distribution objects. */
+    {false, "makedist",          "stats_classdefs.m"},
+    {false, "fitdist",           "stats_classdefs.m"},
+    {false, "ProbDistUnivParam", "stats_classdefs.m"},
+    {false, "fitlm",             "stats_classdefs.m"},
+    {false, "fitglm",            "stats_classdefs.m"},
+    {false, "LinearModel",       "stats_classdefs.m"},
+    {false, "fitcknn",           "stats_classdefs.m"},
+    {false, "fitcnb",            "stats_classdefs.m"},
+    {false, "fitcdiscr",         "stats_classdefs.m"},
+    {false, "fitctree",          "stats_classdefs.m"},
+    {false, "fitcsvm",           "stats_classdefs.m"},
+    {false, "fitcecoc",          "stats_classdefs.m"},
+    {false, "ClassificationModel","stats_classdefs.m"},
+    {false, "fitcensemble",       "stats_classdefs.m"},
+    {false, "TreeBagger",         "stats_classdefs.m"},
     /* mStateflow Tier 4c — `mstateflow_helpers.m` exposes the small
      * MATLAB-level surface (emit / save-op / restore-op / active /
      * reset) that lets a REPL session drive a chart_tick function
@@ -11090,6 +11106,9 @@ int main(int Argc, char **Argv) {
       "recursiveLS", "recursiveARX", "idnlgrey", "nlgreyest",
       "arxOptions", "getcov", "getpvec", "setpvec",
       "MultiStart", "GlobalSearch", "createOptimProblem", "optimoptions",
+      "makedist", "fitdist", "ProbDistUnivParam", "fitlm", "fitglm", "LinearModel",
+      "fitcknn", "fitcnb", "fitcdiscr", "fitctree", "fitcsvm", "fitcecoc", "ClassificationModel",
+      "fitcensemble", "TreeBagger",
       "arx", "ar", "armax", "oe", "bj",
       "iv4", "delayest", "compare", "predict", "resid", "goodnessOfFit",
     };
@@ -11230,6 +11249,14 @@ int main(int Argc, char **Argv) {
     if (ClsName == "MultiStart" || ClsName == "GlobalSearch" ||
         ClsName == "createOptimProblem" || ClsName == "optimoptions")
       return "gads_classdefs.m";
+    if (ClsName == "ProbDistUnivParam" || ClsName == "makedist" ||
+        ClsName == "fitdist" || ClsName == "LinearModel" ||
+        ClsName == "fitlm" || ClsName == "fitglm" ||
+        ClsName == "ClassificationModel" || ClsName == "fitcknn" ||
+        ClsName == "fitcnb" || ClsName == "fitcdiscr" || ClsName == "fitctree" ||
+        ClsName == "fitcsvm" || ClsName == "fitcecoc" ||
+        ClsName == "fitcensemble" || ClsName == "TreeBagger")
+      return "stats_classdefs.m";
     return std::string();
   };
   for (const std::string &Cls : userMentionsExtClasses(Opts.InputPath)) {
@@ -11243,7 +11270,7 @@ int main(int Argc, char **Argv) {
      * before falling back to the legacy flat layout. */
     static const char *kToolboxDirs[] = {
       "comm", "rf", "optim", "mpc", "ident", "gads", "pde", "prop", "sym",
-      "stateflow", "antenna", "control",
+      "stateflow", "antenna", "control", "stats",
     };
     std::vector<std::string> Cands;
     for (const char *Tb : kToolboxDirs) {

@@ -1,0 +1,7 @@
+knn  1 2 3
+nb   1 2 3
+lda  1 2 3
+tree 1 2 3
+svm  1 2
+ecoc 1 2 3
+conf 4 4 4

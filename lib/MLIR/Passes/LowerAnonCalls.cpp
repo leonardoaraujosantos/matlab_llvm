@@ -786,6 +786,8 @@ static bool retypeAnonsForVectorObjective(ModuleOp M) {
          Name == "matlab_gads_surrogateopt" ||
          Name == "matlab_gads_gamultiobj" ||
          Name == "matlab_gads_paretosearch" ||
+         /* Stats Tier-6: bayesopt objective handle (operand 0). */
+         Name == "matlab_stats_bayesopt" ||
          /* Tier-2: createOptimProblem stashes the objective handle (op 0
           * of make_problem) into the thread-local; retype it to ptr. */
          Name == "matlab_gads_make_problem") &&
