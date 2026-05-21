@@ -69,7 +69,7 @@ kernels overlap), [`plotting.md`](plotting.md) (image display surface),
   T3 ~3 wk, T4 ~3.5 wk, T5 ~3.5 wk, T6 ~4 wk (~20 wk full). The single
   **new-infrastructure risk** is image **file I/O** (decoders) — see §1.
 - **Status legend**: ✅ shipped · 🟡 partial · 🔵 not started.
-  **Tiers 1–5 cores shipped (2026-05-20…21, `runtime/toolbox/images/`)** —
+  **ALL 6 TIER CORES SHIPPED (2026-05-20…21, `runtime/toolbox/images/`)** —
   Tier-1 I/O (PGM/PPM/BMP) + types + arithmetic + `imhist`/`imadjust`;
   Tier-2 filtering (`fspecial`/`imgaussfilt`/`medfilt2`/`ordfilt2`/…) +
   enhancement (`histeq`/`adapthisteq`/`imsharpen`/`imnoise`); Tier-3
@@ -78,7 +78,9 @@ kernels overlap), [`plotting.md`](plotting.md) (image display surface),
   binarization + morphology (`graythresh`/`imbinarize`/`strel`/`imerode`/
   `imdilate`/`imopen`/`imclose`/`imfill`/`edge`); Tier-5 segmentation +
   region analysis (`bwlabel`/`regionprops`/`bwareaopen`/`label2rgb`/
-  `imsegkmeans`) — **the `rice_grains` headline is closed.**  Tier-6 is 🔵.
+  `imsegkmeans`) — **the `rice_grains` headline is closed**; Tier-6
+  transforms/quality/ROI/colour/block/deblur (`dct2`/`radon`/`hough`,
+  `psnr`/`ssim`, `poly2mask`, `rgb2hsv`/`rgb2lab`, `im2col`, `deconvwnr`).
   Built on the Tier-0 base (`conv2`/`imfilter`/`padarray`/`fft2`, 3-D
   arrays).
 - **Pixel data type**: MATLAB images are `uint8` (0–255), `uint16`,
@@ -311,11 +313,29 @@ binarize → label → measure arc end-to-end.
 
 ---
 
-## 7. Tier-6 — Transforms · quality · ROI · colour · block ops 🔵
+## 7. Tier-6 — Transforms · quality · ROI · colour · block ops 🟡 (core shipped — TOOLBOX COMPLETE)
 
 Goal: the analysis-and-polish layer — frequency/geometric transforms,
 quality metrics, ROI processing, colour science, block processing, and
 deblurring.
+
+**Shipped 2026-05-21** (`runtime/toolbox/images/runtime_images.cpp`):
+transforms `dct2`/`idct2` (separable orthonormal DCT, exact round-trip),
+`radon` (line-integral sinogram), `hough` + `houghpeaks` (line accumulator
++ top-N peaks); quality `immse`/`psnr`/`ssim` (8×8 windowed); ROI
+`poly2mask` (scanline fill) + `roifilt2`; colour `rgb2hsv`/`hsv2rgb`,
+`rgb2ycbcr`/`ycbcr2rgb`, `rgb2lab`/`lab2rgb` (sRGB↔XYZ↔Lab, D65) — operate
+on whole M×N×3 images via the `img_color_apply` template; block `im2col`
+(sliding) / `col2im` (distinct); deblur `deconvwnr` (Wiener via the 2-D
+complex FFT) + `edgetaper`.  Headline `examples/images/transforms.m`
+(DCT round-trip 6e-12, colour round-trips, Hough line, Wiener restore
+PSNR 11.3→12.2 dB).  **With this tier the Image Processing Toolbox is
+core-complete across all 6 tiers.**  **Tier-6 follow-ons (🔵):** `iradon`
+(filtered back-projection), `houghlines` (struct-array of segments),
+`blockproc`/`nlfilter`/`colfilt` (function-handle-per-block ABI),
+`deconvlucy`/`deconvreg`, `regionfill`, `demosaic`, `rgb2xyz`/`rgb2ntsc`.
+*Note:* colour conversions are pipeline-only (3-D element/slice indexing
+`rgb(:,:,k)` is a separate unimplemented frontend feature).
 
 | # | Surface | Algorithm / notes | Reuses |
 |---|---|---|---|

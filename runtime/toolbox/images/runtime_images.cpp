@@ -34,6 +34,8 @@ extern "C" matlab_mat *matlab_conv2(matlab_mat *A, matlab_mat *h);
 extern "C" matlab_mat *matlab_rand(double m, double n);
 extern "C" matlab_mat *matlab_randn(double m, double n);
 extern "C" matlab_mat *matlab_stats_kmeans(matlab_mat *X, matlab_mat *kk);  /* imsegkmeans */
+extern "C" matlab_mat_c *matlab_fft2_c(void *Aptr);                          /* deconvwnr */
+extern "C" matlab_mat_c *matlab_ifft2_c(void *Aptr);
 
 /* matlab_string layout (matches runtime/matlab_runtime.cpp). */
 struct img_string_s { char *data; int64_t len; };
@@ -192,6 +194,25 @@ static void img_dims(void *A, int64_t &H, int64_t &W) {
     if (mat_is_3d(A)) { matlab_mat3 *m = reinterpret_cast<matlab_mat3 *>(A); H = m->rows; W = m->cols; }
     else { matlab_mat *m = reinterpret_cast<matlab_mat *>(A); H = m->rows; W = m->cols; }
 }
+
+/* ===== Tier-6 helpers (file scope) ====================================== */
+
+/* per-pixel colour transform over an M×N×3 slice-major image. */
+template <class F>
+static matlab_mat *img_color_apply(matlab_mat *A, F fn) {
+    if (!A || !mat_is_3d(A)) return mat_alloc(0, 0);
+    matlab_mat3 *m = reinterpret_cast<matlab_mat3 *>(A);
+    int64_t H = m->rows, W = m->cols, pl = H * W;
+    matlab_mat3 *R = mat3_alloc(H, W, 3);
+    for (int64_t i = 0; i < pl; ++i)
+        fn(m->data[i], m->data[pl + i], m->data[2 * pl + i],
+           R->data[i], R->data[pl + i], R->data[2 * pl + i]);
+    return reinterpret_cast<matlab_mat *>(R);
+}
+static double img_srgb2lin(double c) { c /= 255.0; return (c <= 0.04045) ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4); }
+static double img_lin2srgb(double c) { double v = (c <= 0.0031308) ? 12.92 * c : 1.055 * pow(c, 1.0 / 2.4) - 0.055; return img_clamp(v * 255.0, 0, 255); }
+static double img_labf(double t)  { return (t > 0.008856) ? cbrt(t) : (7.787 * t + 16.0 / 116.0); }
+static double img_labfi(double t) { double t3 = t * t * t; return (t3 > 0.008856) ? t3 : (t - 16.0 / 116.0) / 7.787; }
 
 extern "C" {
 
@@ -1171,6 +1192,306 @@ matlab_mat *matlab_image_imsegkmeans(matlab_mat *A, matlab_mat *km) {
     return R;
 }
 
+/* ===== Tier-6 — quality metrics ========================================= */
+
+double matlab_image_immse(matlab_mat *A, matlab_mat *B) {
+    if (!A || !B || !A->data || !B->data) return 0.0;
+    int64_t n = A->rows * A->cols, m = B->rows * B->cols; if (m < n) n = m;
+    double s = 0.0; for (int64_t i = 0; i < n; ++i) { double d = A->data[i] - B->data[i]; s += d * d; }
+    return n ? s / n : 0.0;
+}
+double matlab_image_psnr(matlab_mat *A, matlab_mat *B) {
+    double mse = matlab_image_immse(A, B);
+    if (mse <= 0.0) return INFINITY;
+    double peak = img_is_u8range(A->data, A->rows * A->cols) ? 255.0 : 1.0;
+    return 10.0 * log10(peak * peak / mse);
+}
+/* ssim — windowed (8×8 box) mean structural similarity. */
+double matlab_image_ssim(matlab_mat *A, matlab_mat *B) {
+    if (!A || !B || !A->data || !B->data) return 0.0;
+    int64_t H = A->rows, W = A->cols;
+    double L = img_is_u8range(A->data, H * W) ? 255.0 : 1.0;
+    double C1 = (0.01 * L) * (0.01 * L), C2 = (0.03 * L) * (0.03 * L);
+    int win = 8; double total = 0.0; int64_t cnt = 0;
+    for (int64_t i = 0; i + win <= H; i += win) for (int64_t j = 0; j + win <= W; j += win) {
+        double ma = 0, mb = 0; int64_t N = win * win;
+        for (int di = 0; di < win; ++di) for (int dj = 0; dj < win; ++dj) { ma += A->data[(i+di)*W+j+dj]; mb += B->data[(i+di)*W+j+dj]; }
+        ma /= N; mb /= N;
+        double va = 0, vb = 0, cov = 0;
+        for (int di = 0; di < win; ++di) for (int dj = 0; dj < win; ++dj) { double a = A->data[(i+di)*W+j+dj]-ma, b = B->data[(i+di)*W+j+dj]-mb; va += a*a; vb += b*b; cov += a*b; }
+        va /= (N-1); vb /= (N-1); cov /= (N-1);
+        total += ((2*ma*mb+C1)*(2*cov+C2)) / ((ma*ma+mb*mb+C1)*(va+vb+C2)); cnt++;
+    }
+    return cnt ? total / cnt : 1.0;
+}
+
+/* ===== Tier-6 — colour-space conversions (M×N×3) ======================== */
+
+matlab_mat *matlab_image_rgb2hsv(matlab_mat *A) {
+    return img_color_apply(A, [](double r, double g, double b, double &h, double &s, double &v) {
+        r /= 255; g /= 255; b /= 255;
+        double mx = std::max(r, std::max(g, b)), mn = std::min(r, std::min(g, b)), d = mx - mn;
+        v = mx; s = (mx > 0) ? d / mx : 0;
+        if (d == 0) h = 0;
+        else if (mx == r) h = fmod((g - b) / d, 6.0) / 6.0;
+        else if (mx == g) h = ((b - r) / d + 2.0) / 6.0;
+        else h = ((r - g) / d + 4.0) / 6.0;
+        if (h < 0) h += 1.0;
+    });
+}
+matlab_mat *matlab_image_hsv2rgb(matlab_mat *A) {
+    return img_color_apply(A, [](double h, double s, double v, double &r, double &g, double &b) {
+        double hh = h * 6.0; int i = static_cast<int>(floor(hh)) % 6; if (i < 0) i += 6;
+        double f = hh - floor(hh), p = v*(1-s), q = v*(1-f*s), t = v*(1-(1-f)*s);
+        double rr, gg, bb;
+        switch (i) { case 0: rr=v; gg=t; bb=p; break; case 1: rr=q; gg=v; bb=p; break;
+                     case 2: rr=p; gg=v; bb=t; break; case 3: rr=p; gg=q; bb=v; break;
+                     case 4: rr=t; gg=p; bb=v; break; default: rr=v; gg=p; bb=q; }
+        r = rr*255; g = gg*255; b = bb*255;
+    });
+}
+matlab_mat *matlab_image_rgb2ycbcr(matlab_mat *A) {
+    return img_color_apply(A, [](double r, double g, double b, double &y, double &cb, double &cr) {
+        y  = 16  + ( 65.481*r + 128.553*g +  24.966*b) / 255.0;
+        cb = 128 + (-37.797*r -  74.203*g + 112.000*b) / 255.0;
+        cr = 128 + (112.000*r -  93.786*g -  18.214*b) / 255.0;
+    });
+}
+matlab_mat *matlab_image_ycbcr2rgb(matlab_mat *A) {
+    return img_color_apply(A, [](double y, double cb, double cr, double &r, double &g, double &b) {
+        double yy = y - 16, u = cb - 128, v = cr - 128;
+        r = img_clamp(1.164*yy + 1.596*v, 0, 255);
+        g = img_clamp(1.164*yy - 0.392*u - 0.813*v, 0, 255);
+        b = img_clamp(1.164*yy + 2.017*u, 0, 255);
+    });
+}
+matlab_mat *matlab_image_rgb2lab(matlab_mat *A) {
+    return img_color_apply(A, [](double r, double g, double b, double &L, double &aa, double &bb) {
+        double rl = img_srgb2lin(r), gl = img_srgb2lin(g), bl = img_srgb2lin(b);
+        double X = (0.4124*rl + 0.3576*gl + 0.1805*bl) / 0.95047;
+        double Y = (0.2126*rl + 0.7152*gl + 0.0722*bl);
+        double Z = (0.0193*rl + 0.1192*gl + 0.9505*bl) / 1.08883;
+        double fx = img_labf(X), fy = img_labf(Y), fz = img_labf(Z);
+        L = 116*fy - 16; aa = 500*(fx - fy); bb = 200*(fy - fz);
+    });
+}
+matlab_mat *matlab_image_lab2rgb(matlab_mat *A) {
+    return img_color_apply(A, [](double L, double aa, double bb, double &r, double &g, double &b) {
+        double fy = (L + 16) / 116, fx = fy + aa / 500, fz = fy - bb / 200;
+        double X = 0.95047 * img_labfi(fx), Y = img_labfi(fy), Z = 1.08883 * img_labfi(fz);
+        double rl =  3.2406*X - 1.5372*Y - 0.4986*Z;
+        double gl = -0.9689*X + 1.8758*Y + 0.0415*Z;
+        double bl =  0.0557*X - 0.2040*Y + 1.0570*Z;
+        r = img_lin2srgb(rl); g = img_lin2srgb(gl); b = img_lin2srgb(bl);
+    });
+}
+
+/* ===== Tier-6 — transforms ============================================== */
+
+/* dct2 / idct2 — separable orthonormal DCT-II / DCT-III (2-D). */
+static matlab_mat *img_dct_axis(matlab_mat *A, bool inverse) {
+    int64_t H = A->rows, W = A->cols;
+    matlab_mat *R = mat_alloc(H, W);
+    std::vector<double> col(static_cast<size_t>(H)), out(static_cast<size_t>(H));
+    for (int64_t j = 0; j < W; ++j) {
+        for (int64_t i = 0; i < H; ++i) col[static_cast<size_t>(i)] = A->data[i * W + j];
+        for (int64_t k = 0; k < H; ++k) {
+            double acc = 0.0;
+            if (!inverse) {
+                for (int64_t n = 0; n < H; ++n) acc += col[static_cast<size_t>(n)] * cos(M_PI * (2*n + 1) * k / (2.0 * H));
+                acc *= sqrt((k == 0 ? 1.0 : 2.0) / H);
+            } else {
+                for (int64_t n = 0; n < H; ++n) { double ck = sqrt((n == 0 ? 1.0 : 2.0) / H); acc += ck * col[static_cast<size_t>(n)] * cos(M_PI * (2*k + 1) * n / (2.0 * H)); }
+            }
+            out[static_cast<size_t>(k)] = acc;
+        }
+        for (int64_t i = 0; i < H; ++i) R->data[i * W + j] = out[static_cast<size_t>(i)];
+    }
+    return R;
+}
+static matlab_mat *img_transpose(matlab_mat *A) {
+    matlab_mat *R = mat_alloc(A->cols, A->rows);
+    for (int64_t i = 0; i < A->rows; ++i) for (int64_t j = 0; j < A->cols; ++j) R->data[j * A->rows + i] = A->data[i * A->cols + j];
+    return R;
+}
+matlab_mat *matlab_image_dct2(matlab_mat *A) {
+    if (!A || !A->data) return mat_alloc(0, 0);
+    matlab_mat *c = img_dct_axis(A, false);       /* DCT over columns */
+    matlab_mat *ct = img_transpose(c);
+    matlab_mat *cr = img_dct_axis(ct, false);     /* DCT over rows */
+    return img_transpose(cr);
+}
+matlab_mat *matlab_image_idct2(matlab_mat *A) {
+    if (!A || !A->data) return mat_alloc(0, 0);
+    matlab_mat *c = img_dct_axis(A, true);
+    matlab_mat *ct = img_transpose(c);
+    matlab_mat *cr = img_dct_axis(ct, true);
+    return img_transpose(cr);
+}
+
+/* radon(A, theta) — line-integral projections; sinogram (nrho × ntheta). */
+matlab_mat *matlab_image_radon(matlab_mat *A, matlab_mat *thetam) {
+    if (!A || !A->data) return mat_alloc(0, 0);
+    int64_t H = A->rows, W = A->cols;
+    int64_t nt = thetam ? thetam->rows * thetam->cols : 0; if (nt == 0) return mat_alloc(0, 0);
+    int64_t diag = static_cast<int64_t>(ceil(sqrt(static_cast<double>(H * H + W * W)))) + 2;
+    int64_t nrho = 2 * (diag / 2) + 1;
+    double cy = (H - 1) / 2.0, cx = (W - 1) / 2.0, rho0 = (nrho - 1) / 2.0;
+    matlab_mat *R = mat_alloc(nrho, nt);
+    for (int64_t t = 0; t < nt; ++t) {
+        double th = thetam->data[t] * M_PI / 180.0, ct = cos(th), st = sin(th);
+        for (int64_t i = 0; i < H; ++i) for (int64_t j = 0; j < W; ++j) {
+            double rho = (j - cx) * ct + (i - cy) * st;
+            int64_t bin = static_cast<int64_t>(floor(rho + rho0 + 0.5));
+            if (bin >= 0 && bin < nrho) R->data[bin * nt + t] += A->data[i * W + j];
+        }
+    }
+    return R;
+}
+
+/* hough(BW) — line accumulator over theta ∈ [-90,89]°, rho ∈ [-D,D]. */
+matlab_mat *matlab_image_hough(matlab_mat *A) {
+    if (!A || !A->data) return mat_alloc(0, 0);
+    int64_t H = A->rows, W = A->cols;
+    int nt = 180; int64_t D = static_cast<int64_t>(ceil(sqrt(static_cast<double>(H*H + W*W))));
+    int64_t nrho = 2 * D + 1;
+    matlab_mat *R = mat_alloc(nrho, nt);
+    std::vector<double> cs(static_cast<size_t>(nt)), sn(static_cast<size_t>(nt));
+    for (int t = 0; t < nt; ++t) { double th = (t - 90) * M_PI / 180.0; cs[static_cast<size_t>(t)] = cos(th); sn[static_cast<size_t>(t)] = sin(th); }
+    for (int64_t i = 0; i < H; ++i) for (int64_t j = 0; j < W; ++j) {
+        if (A->data[i * W + j] == 0.0) continue;
+        for (int t = 0; t < nt; ++t) { int64_t rho = static_cast<int64_t>(floor(j * cs[static_cast<size_t>(t)] + i * sn[static_cast<size_t>(t)] + 0.5)) + D;
+            if (rho >= 0 && rho < nrho) R->data[rho * nt + t] += 1.0; }
+    }
+    return R;
+}
+/* houghpeaks(H, numpeaks) — top-N accumulator cells, [rho_idx theta_idx] 1-based. */
+matlab_mat *matlab_image_houghpeaks(matlab_mat *Hm, matlab_mat *nm) {
+    if (!Hm || !Hm->data) return mat_alloc(0, 0);
+    int np = static_cast<int>(img_sc(nm, 1)); if (np < 1) np = 1;
+    int64_t R = Hm->rows, C = Hm->cols, N = R * C;
+    std::vector<double> v(Hm->data, Hm->data + N);
+    matlab_mat *P = mat_alloc(np, 2);
+    for (int k = 0; k < np; ++k) {
+        int64_t best = 0; double bv = -1.0;
+        for (int64_t p = 0; p < N; ++p) if (v[static_cast<size_t>(p)] > bv) { bv = v[static_cast<size_t>(p)]; best = p; }
+        P->data[k * 2 + 0] = static_cast<double>(best / C + 1); P->data[k * 2 + 1] = static_cast<double>(best % C + 1);
+        /* suppress a small neighbourhood around the peak */
+        int64_t pr = best / C, pc = best % C;
+        for (int64_t dr = -2; dr <= 2; ++dr) for (int64_t dc = -2; dc <= 2; ++dc) { int64_t r = pr+dr, c = pc+dc; if (r>=0&&r<R&&c>=0&&c<C) v[static_cast<size_t>(r*C+c)] = -1.0; }
+    }
+    return P;
+}
+
+/* ===== Tier-6 — ROI ===================================================== */
+
+/* poly2mask(x, y, M, N) — scanline polygon fill → M×N binary mask. */
+matlab_mat *matlab_image_poly2mask(matlab_mat *xm, matlab_mat *ym, matlab_mat *Mm, matlab_mat *Nm) {
+    if (!xm || !ym) return mat_alloc(0, 0);
+    int64_t M = static_cast<int64_t>(img_sc(Mm, 0)), N = static_cast<int64_t>(img_sc(Nm, 0));
+    int64_t nv = xm->rows * xm->cols;
+    matlab_mat *R = mat_alloc(M, N);
+    for (int64_t row = 0; row < M; ++row) {
+        double yc = row + 1.0;                    /* 1-based pixel centre */
+        std::vector<double> xs;
+        for (int64_t k = 0; k < nv; ++k) {
+            int64_t k2 = (k + 1) % nv;
+            double y1 = ym->data[k], y2 = ym->data[k2], x1 = xm->data[k], x2 = xm->data[k2];
+            if ((y1 <= yc && y2 > yc) || (y2 <= yc && y1 > yc))
+                xs.push_back(x1 + (yc - y1) / (y2 - y1) * (x2 - x1));
+        }
+        std::sort(xs.begin(), xs.end());
+        for (size_t a = 0; a + 1 < xs.size(); a += 2)
+            for (int64_t col = static_cast<int64_t>(ceil(xs[a] - 1)); col <= static_cast<int64_t>(floor(xs[a+1] - 1)); ++col)
+                if (col >= 0 && col < N) R->data[row * N + col] = 1.0;
+    }
+    return R;
+}
+/* roifilt2(h, A, mask) — filter A with h, keep filtered values inside mask. */
+matlab_mat *matlab_image_roifilt2(matlab_mat *h, matlab_mat *A, matlab_mat *mask) {
+    if (!A || !A->data) return mat_alloc(0, 0);
+    matlab_mat *F = matlab_imfilter(A, h);
+    int64_t n = A->rows * A->cols;
+    matlab_mat *R = mat_alloc(A->rows, A->cols);
+    for (int64_t i = 0; i < n; ++i) R->data[i] = (mask && i < mask->rows * mask->cols && mask->data[i] != 0.0) ? F->data[i] : A->data[i];
+    return R;
+}
+
+/* ===== Tier-6 — block processing ======================================= */
+
+/* im2col(A, [m n]) — sliding-window columns: each m×n window → a column. */
+matlab_mat *matlab_image_im2col(matlab_mat *A, matlab_mat *bm) {
+    if (!A || !A->data || !bm || bm->rows * bm->cols < 2) return mat_alloc(0, 0);
+    int64_t H = A->rows, W = A->cols, m = static_cast<int64_t>(bm->data[0]), n = static_cast<int64_t>(bm->data[1]);
+    int64_t cols = (H - m + 1) * (W - n + 1); if (cols < 0) cols = 0;
+    matlab_mat *R = mat_alloc(m * n, cols);
+    int64_t c = 0;
+    for (int64_t j = 0; j <= W - n; ++j) for (int64_t i = 0; i <= H - m; ++i) {
+        int64_t r = 0;
+        for (int64_t dj = 0; dj < n; ++dj) for (int64_t di = 0; di < m; ++di) R->data[(r++) * cols + c] = A->data[(i+di) * W + (j+dj)];
+        c++;
+    }
+    return R;
+}
+/* col2im(B, [m n], [M N]) — distinct-block reassembly. */
+matlab_mat *matlab_image_col2im(matlab_mat *B, matlab_mat *bm, matlab_mat *sz) {
+    if (!B || !B->data || !bm || !sz) return mat_alloc(0, 0);
+    int64_t m = static_cast<int64_t>(bm->data[0]), n = static_cast<int64_t>(bm->data[1]);
+    int64_t M = static_cast<int64_t>(sz->data[0]), N = static_cast<int64_t>(sz->data[1]);
+    matlab_mat *R = mat_alloc(M, N);
+    int64_t mb = M / m, nb = N / n, blkcols = B->cols, c = 0;
+    for (int64_t bj = 0; bj < nb; ++bj) for (int64_t bi = 0; bi < mb; ++bi) {
+        int64_t r = 0;
+        for (int64_t dj = 0; dj < n; ++dj) for (int64_t di = 0; di < m; ++di) {
+            if (c < blkcols && r < B->rows) R->data[(bi*m+di) * N + (bj*n+dj)] = B->data[(r) * blkcols + c];
+            r++;
+        }
+        c++;
+    }
+    return R;
+}
+
+/* ===== Tier-6 — deblurring ============================================= */
+
+/* deconvwnr(I, psf, nsr) — Wiener deconvolution via the 2-D FFT. */
+matlab_mat *matlab_image_deconvwnr(matlab_mat *I, matlab_mat *psf, matlab_mat *nsrm) {
+    if (!I || !I->data || !psf || !psf->data) return mat_alloc(0, 0);
+    int64_t H = I->rows, W = I->cols;
+    double nsr = img_sc(nsrm, 0.0);
+    /* PSF padded to image size, centred at the origin (circular). */
+    matlab_mat *P = mat_alloc(H, W);
+    int64_t ph = psf->rows, pw = psf->cols;
+    for (int64_t i = 0; i < ph; ++i) for (int64_t j = 0; j < pw; ++j) {
+        int64_t r = ((i - ph / 2) % H + H) % H, c = ((j - pw / 2) % W + W) % W;
+        P->data[r * W + c] = psf->data[i * pw + j];
+    }
+    matlab_mat_c *FI = matlab_fft2_c(I), *FP = matlab_fft2_c(P);
+    matlab_mat_c *G = mat_c_alloc(H, W);
+    for (int64_t k = 0; k < H * W; ++k) {
+        double hr = FP->re[k], hi = FP->im[k], h2 = hr * hr + hi * hi;
+        double wr = hr / (h2 + nsr), wi = -hi / (h2 + nsr);   /* conj(H)/(|H|²+nsr) */
+        G->re[k] = wr * FI->re[k] - wi * FI->im[k];
+        G->im[k] = wr * FI->im[k] + wi * FI->re[k];
+    }
+    matlab_mat_c *out = matlab_ifft2_c(G);
+    matlab_mat *R = mat_alloc(H, W);
+    for (int64_t k = 0; k < H * W; ++k) R->data[k] = img_clamp(out->re[k], 0, 255);
+    return R;
+}
+/* edgetaper(I, psf) — blur the borders to suppress ringing (weighted blend). */
+matlab_mat *matlab_image_edgetaper(matlab_mat *I, matlab_mat *psf) {
+    if (!I || !I->data) return mat_alloc(0, 0);
+    matlab_mat *blur = matlab_imfilter(I, psf);
+    int64_t H = I->rows, W = I->cols, b = 4;
+    matlab_mat *R = mat_alloc(H, W);
+    for (int64_t i = 0; i < H; ++i) for (int64_t j = 0; j < W; ++j) {
+        double dy = std::min<double>(i, H - 1 - i), dx = std::min<double>(j, W - 1 - j);
+        double w = std::min(1.0, std::min(dy, dx) / static_cast<double>(b));
+        R->data[i * W + j] = w * I->data[i * W + j] + (1 - w) * blur->data[i * W + j];
+    }
+    return R;
+}
+
 /* ----- multi-arity wrappers (pde_table matches one arity per entry) ------ */
 matlab_mat *matlab_image_fspecial1(void *t)            { return matlab_image_fspecial(t, nullptr, nullptr); }
 matlab_mat *matlab_image_fspecial2(void *t, matlab_mat *p1) { return matlab_image_fspecial(t, p1, nullptr); }
@@ -1184,5 +1505,6 @@ matlab_mat *matlab_image_imboxfilt1(matlab_mat *A)     { return matlab_image_imb
 matlab_mat *matlab_image_strel1(void *t)               { return matlab_image_strel(t, nullptr, nullptr); }
 matlab_mat *matlab_image_strel2(void *t, matlab_mat *p1) { return matlab_image_strel(t, p1, nullptr); }
 matlab_mat *matlab_image_imfill2(matlab_mat *A, matlab_mat *opt) { (void)opt; return matlab_image_imfill(A); }
+matlab_mat *matlab_image_deconvwnr2(matlab_mat *I, matlab_mat *psf) { return matlab_image_deconvwnr(I, psf, nullptr); }
 
 }  /* extern "C" */

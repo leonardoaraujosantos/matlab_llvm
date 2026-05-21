@@ -203,6 +203,12 @@ void Resolver::registerBuiltins() {
     "imfill", "edge", "bwareaopen",
     /* Image Processing Tier-5 — segmentation + region analysis. */
     "bwlabel", "regionprops", "label2rgb", "bweuler", "imsegkmeans",
+    /* Image Processing Tier-6 — transforms/quality/ROI/colour/block/deblur. */
+    "immse", "psnr", "ssim",
+    "rgb2hsv", "hsv2rgb", "rgb2ycbcr", "ycbcr2rgb", "rgb2lab", "lab2rgb",
+    "dct2", "idct2", "radon", "hough", "houghpeaks",
+    "poly2mask", "roifilt2", "im2col", "col2im",
+    "deconvwnr", "edgetaper",
     "matlab_stats_fitknn_init", "matlab_stats_fitnb_init", "matlab_stats_fitlda_init",
     "matlab_stats_fittree_init", "matlab_stats_fitsvm_init", "matlab_stats_fitecoc_init",
     "matlab_stats_clf_predict", "matlab_stats_confusionmat",

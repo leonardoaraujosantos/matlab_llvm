@@ -59,6 +59,19 @@ Covered: `bwlabel` (8-conn) · `regionprops` (`Area`/`Centroid`/
 `Orientation`) · `bwareaopen` · `bweuler` · `label2rgb` · `imsegkmeans`
 (reuses the shipped `kmeans`).
 
+## Tier-6 (shipped) — transforms · quality · ROI · colour · block · deblur
+
+| Example | User's Guide | Notes |
+|---|---|---|
+| [`transforms.m`](transforms.m) | *Transforms / Image Deblurring / Detecting Lines with the Hough Transform* | 2-D DCT energy compaction + exact reconstruction, colour-space round-trips, Hough line detection, and Wiener `deconvwnr` restoration (PSNR before/after). |
+
+Covered: `dct2`/`idct2` (separable, exact round-trip) · `radon` · `hough`/
+`houghpeaks` · `immse`/`psnr`/`ssim` · `poly2mask`/`roifilt2` · `rgb2hsv`/
+`hsv2rgb`/`rgb2ycbcr`/`ycbcr2rgb`/`rgb2lab`/`lab2rgb` (whole-image
+pipeline; 3-D element indexing `rgb(:,:,k)` is unimplemented, so round-trips
+are checked through `rgb2gray`) · `im2col`/`col2im` · `deconvwnr` (Wiener) ·
+`edgetaper`.
+
 ## Carve-downs (documented follow-ons)
 
 T1: PNG/JPEG/TIFF decode (PGM/PPM/BMP ship; PNG needs a hand-coded
@@ -67,8 +80,10 @@ T1: PNG/JPEG/TIFF decode (PGM/PPM/BMP ship; PNG needs a hand-coded
 `imwarp` `'OutputView'`/`imref2d` sizing, `rigidtform2d`/`affinetform2d`,
 `imresize3`/3-D warp, `normxcorr2`.  See the roadmap.
 
-## Later tiers (planned)
+## Status
 
-Tier-6 transforms / quality / ROI / colour / block / deblur (`dct2`/
-`radon`/`hough` · `psnr`/`ssim` · `poly2mask`/`roifilt2` · `rgb2hsv`/
-`rgb2lab` · `blockproc` · `deconvwnr`).  See the roadmap.
+**All 6 tier cores shipped.**  Documented follow-ons (PNG/JPEG decode,
+`imfinfo`, 3-D element indexing, `watershed`/`bwdist`, `iradon`/
+`houghlines`, `blockproc`/`nlfilter`, `regionprops` struct-array,
+`activecontour`, …) are listed in
+[`docs/image_toolbox_roadmap.md`](../../docs/image_toolbox_roadmap.md).

@@ -1,0 +1,11 @@
+immse_self 0.0000
+psnr 28.13
+hsv_err 0.000
+lab_err 0.003
+hsv_size 3
+dct2_err 0.000000
+hough_peak_theta 90
+radon_size 49x3
+poly2mask 42
+im2col 16x841
+deconvwnr 32x32
