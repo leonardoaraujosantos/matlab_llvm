@@ -1,0 +1,6 @@
+graythresh 0.498
+erode  16  dilate 64  src 36
+open   36  close  36
+hole filled back to 36
+edge sum 20  canny 16
+areaopen50 0

@@ -69,13 +69,17 @@ kernels overlap), [`plotting.md`](plotting.md) (image display surface),
   T3 ~3 wk, T4 ~3.5 wk, T5 ~3.5 wk, T6 ~4 wk (~20 wk full). The single
   **new-infrastructure risk** is image **file I/O** (decoders) — see §1.
 - **Status legend**: ✅ shipped · 🟡 partial · 🔵 not started.
-  **Tiers 1–3 cores shipped 2026-05-20** (`runtime/toolbox/images/`) —
+  **Tiers 1–5 cores shipped (2026-05-20…21, `runtime/toolbox/images/`)** —
   Tier-1 I/O (PGM/PPM/BMP) + types + arithmetic + `imhist`/`imadjust`;
   Tier-2 filtering (`fspecial`/`imgaussfilt`/`medfilt2`/`ordfilt2`/…) +
   enhancement (`histeq`/`adapthisteq`/`imsharpen`/`imnoise`); Tier-3
   geometric (`imresize`/`imrotate`/`imcrop`/`imtranslate`/`imwarp` +
-  `affine2d`/`projective2d`/`imref2d` + `fitgeotform2d`).  Tiers 4–6 are
-  🔵.  Built on the Tier-0 base (`conv2`/`imfilter`/`padarray`/`fft2`, 3-D
+  `affine2d`/`projective2d`/`imref2d` + `fitgeotform2d`); Tier-4
+  binarization + morphology (`graythresh`/`imbinarize`/`strel`/`imerode`/
+  `imdilate`/`imopen`/`imclose`/`imfill`/`edge`); Tier-5 segmentation +
+  region analysis (`bwlabel`/`regionprops`/`bwareaopen`/`label2rgb`/
+  `imsegkmeans`) — **the `rice_grains` headline is closed.**  Tier-6 is 🔵.
+  Built on the Tier-0 base (`conv2`/`imfilter`/`padarray`/`fft2`, 3-D
   arrays).
 - **Pixel data type**: MATLAB images are `uint8` (0–255), `uint16`,
   `double` (0–1), `single`, or `logical` (binary masks).  The runtime's
@@ -233,10 +237,22 @@ output frame, and recover the transform from control points with
 
 ---
 
-## 5. Tier-4 — Morphology + binarization + edges 🔵
+## 5. Tier-4 — Morphology + binarization + edges 🟡 (core shipped)
 
 Goal: the binary/grayscale morphology engine + thresholding + edge
 detection — the segmentation prerequisites.
+
+**Shipped 2026-05-21** (`runtime/toolbox/images/runtime_images.cpp`):
+`graythresh` (Otsu, plateau-averaged) + `otsuthresh`, `imbinarize`
+(auto/level) + `im2bw`; `strel` (disk/square/rectangle/line → neighborhood
+mask); grayscale+binary `imerode`/`imdilate`/`imopen`/`imclose`/`imtophat`/
+`imbothat` (min/max over the SE, identity at borders); `imfill` ('holes',
+border flood-fill); `edge` (Sobel auto-threshold + **Canny** with NMS +
+hysteresis); `bwareaopen`.  Headline `examples/images/rice_grains.m`.
+**Tier-4 follow-ons (🔵):** `adaptthresh`/adaptive `imbinarize`,
+`multithresh`/`imquantize`, LoG/Roberts/Prewitt `edge` methods,
+`diamond`/`octagon`/`offsetstrel`, `bwmorph` (thin/skel/clean), grayscale
+`imreconstruct`/`imhmin`, `bwdist` (distance transform), `watershed`.
 
 | # | Surface | Algorithm / notes | Reuses |
 |---|---|---|---|
@@ -253,10 +269,28 @@ to split touching objects.
 
 ---
 
-## 6. Tier-5 — Segmentation + region analysis (closes the headline) 🔵
+## 6. Tier-5 — Segmentation + region analysis (closes the headline) 🟡 (core shipped)
 
 Goal: turn pixels into labelled objects and measure them — the analytical
 payoff.
+
+**Shipped 2026-05-21 — HEADLINE CLOSED** (`runtime/toolbox/images/
+runtime_images.cpp`): `bwlabel` (8-connectivity BFS → label matrix),
+`regionprops(L, prop)` returning the property as a matrix — `Area`,
+`Centroid`, `BoundingBox`, `Perimeter`, `EquivDiameter`, `Extent`,
+`MajorAxisLength`/`MinorAxisLength`/`Eccentricity`/`Orientation` (2nd
+central moments); `bwareaopen`, `bweuler` (objects − holes), `label2rgb`
+(→ RGB `matlab_mat3`), and **`imsegkmeans`** (reuses the shipped Stats
+`kmeans`).  A core-runtime fix landed alongside: `size`/`numel`/`ndims`/
+`length` are now **mat3-aware** (read the 3-D magic tag at runtime), so any
+RGB result — `imread` colour, `label2rgb`, RGB `imwarp` — answers
+`size(X,3)`/`ndims` correctly without Sema type-inference.  **The headline
+[`examples/images/rice_grains.m`](../examples/images/rice_grains.m) runs
+end-to-end** (illumination flattened to ~0, Otsu binarize, 40 grains
+counted, mean area reported).  **Tier-5 follow-ons (🔵):** `regionprops`
+struct-array form + `'table'`/`Solidity`/`PixelIdxList`, `bwconncomp` CC
+struct, `bwboundaries` (cell of traces), `bwareafilt`/`bwpropfilt`,
+`superpixels` (SLIC), `activecontour` (Chan-Vese), `grayconnected`.
 
 | # | Surface | Algorithm / notes | Reuses |
 |---|---|---|---|

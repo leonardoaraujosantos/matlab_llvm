@@ -41,6 +41,24 @@ bounding box, bilinear inverse-resample) · `imref2d` · `fitgeotform2d`
 (least-squares `affine`/`similarity`).  Grayscale + per-channel RGB.
 `fliplr`/`flipud`/`rot90` are shipped base ops.
 
+## Tier-4 (shipped) — binarization + morphology + edges
+
+Covered: `graythresh` (Otsu) / `otsuthresh` / `imbinarize` / `im2bw` ·
+`strel` (disk/square/rectangle/line) · `imerode`/`imdilate`/`imopen`/
+`imclose`/`imtophat`/`imbothat` (grayscale + binary) · `imfill` ('holes') ·
+`edge` (Sobel + Canny) · `bwareaopen`.
+
+## Tier-5 (shipped) — segmentation + region analysis
+
+| Example | User's Guide | Notes |
+|---|---|---|
+| 🎯 [`rice_grains.m`](rice_grains.m) | *Correct Nonuniform Illumination and Analyze Foreground Objects* (the rice.png demo) | **The toolbox headline.** Bright grains over a brightness ramp → `imopen` (disk `strel`) background estimate → `imsubtract` flatten → `imbinarize(graythresh)` → `bwlabel` → `regionprops('Area')`: counts 40 grains and reports mean grain size. |
+
+Covered: `bwlabel` (8-conn) · `regionprops` (`Area`/`Centroid`/
+`BoundingBox`/`Perimeter`/`EquivDiameter`/`Extent`/axes/`Eccentricity`/
+`Orientation`) · `bwareaopen` · `bweuler` · `label2rgb` · `imsegkmeans`
+(reuses the shipped `kmeans`).
+
 ## Carve-downs (documented follow-ons)
 
 T1: PNG/JPEG/TIFF decode (PGM/PPM/BMP ship; PNG needs a hand-coded
@@ -51,7 +69,6 @@ T1: PNG/JPEG/TIFF decode (PGM/PPM/BMP ship; PNG needs a hand-coded
 
 ## Later tiers (planned)
 
-Tier-4 morphology + binarization + edges (`imbinarize`/`edge`/`imerode`/
-`watershed`) · Tier-5 segmentation + region analysis (`bwlabel`/
-`regionprops` → the `rice_grains` headline) · Tier-6 transforms / quality /
-ROI / colour / block.  See the roadmap.
+Tier-6 transforms / quality / ROI / colour / block / deblur (`dct2`/
+`radon`/`hough` · `psnr`/`ssim` · `poly2mask`/`roifilt2` · `rgb2hsv`/
+`rgb2lab` · `blockproc` · `deconvwnr`).  See the roadmap.

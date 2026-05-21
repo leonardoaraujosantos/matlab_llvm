@@ -33,6 +33,7 @@ extern "C" matlab_mat *matlab_imfilter(matlab_mat *A, matlab_mat *h);
 extern "C" matlab_mat *matlab_conv2(matlab_mat *A, matlab_mat *h);
 extern "C" matlab_mat *matlab_rand(double m, double n);
 extern "C" matlab_mat *matlab_randn(double m, double n);
+extern "C" matlab_mat *matlab_stats_kmeans(matlab_mat *X, matlab_mat *kk);  /* imsegkmeans */
 
 /* matlab_string layout (matches runtime/matlab_runtime.cpp). */
 struct img_string_s { char *data; int64_t len; };
@@ -882,6 +883,294 @@ matlab_mat *matlab_image_fitgeo_init(matlab_obj *obj, matlab_mat *moving, matlab
     return mat_alloc(0, 0);
 }
 
+/* ===== Tier-4 — binarization + morphology =============================== */
+
+/* Otsu threshold (between-class variance) over a 256-bin histogram → [0,1]. */
+static double img_otsu(const double *hist, double total) {
+    double sum = 0.0; for (int k = 0; k < 256; ++k) sum += k * hist[k];
+    double varr[256]; for (int k = 0; k < 256; ++k) varr[k] = -1.0;
+    double sumB = 0.0, wB = 0.0, maxVar = 0.0;
+    for (int k = 0; k < 256; ++k) {
+        wB += hist[k]; if (wB == 0.0) continue;
+        double wF = total - wB; if (wF == 0.0) break;
+        sumB += k * hist[k];
+        double mB = sumB / wB, mF = (sum - sumB) / wF, var = wB * wF * (mB - mF) * (mB - mF);
+        varr[k] = var; if (var > maxVar) maxVar = var;
+    }
+    /* average the threshold over the max-variance plateau (relative tol). */
+    double thrSum = 0.0; int thrCnt = 0;
+    for (int k = 0; k < 256; ++k) if (varr[k] >= maxVar * (1.0 - 1e-9) && varr[k] >= 0.0) { thrSum += k; thrCnt++; }
+    return thrCnt ? (thrSum / thrCnt) / 255.0 : 0.0;
+}
+matlab_mat *matlab_image_graythresh_m(matlab_mat *A, double *outlevel) {
+    int64_t n = A->rows * A->cols;
+    bool norm = !img_is_u8range(A->data, n);
+    double hist[256] = {0};
+    for (int64_t i = 0; i < n; ++i) hist[static_cast<int>(img_clamp(floor((norm ? 255.0 * A->data[i] : A->data[i]) + 0.5), 0, 255))]++;
+    *outlevel = img_otsu(hist, static_cast<double>(n));
+    return nullptr;
+}
+double matlab_image_graythresh(matlab_mat *A) { double lv; matlab_image_graythresh_m(A, &lv); return lv; }
+double matlab_image_otsuthresh(matlab_mat *counts) {
+    double hist[256] = {0}; double total = 0.0;
+    int64_t n = counts ? counts->rows * counts->cols : 0;
+    for (int64_t i = 0; i < n && i < 256; ++i) { hist[i] = counts->data[i]; total += counts->data[i]; }
+    return img_otsu(hist, total);
+}
+/* imbinarize(A[, level]) — level in [0,1]; default Otsu.  Returns 0/1. */
+matlab_mat *matlab_image_imbinarize2(matlab_mat *A, matlab_mat *lvm) {
+    if (!A || !A->data) return mat_alloc(0, 0);
+    int64_t n = A->rows * A->cols;
+    bool norm = !img_is_u8range(A->data, n);
+    double lv = lvm ? img_sc(lvm, 0.5) : matlab_image_graythresh(A);
+    matlab_mat *R = mat_alloc(A->rows, A->cols);
+    for (int64_t i = 0; i < n; ++i) { double x = norm ? A->data[i] : A->data[i] / 255.0; R->data[i] = (x >= lv) ? 1.0 : 0.0; }
+    return R;
+}
+matlab_mat *matlab_image_imbinarize(matlab_mat *A) { return matlab_image_imbinarize2(A, nullptr); }
+
+/* strel(type[, p1[, p2]]) — returns the neighborhood mask (0/1 matrix). */
+matlab_mat *matlab_image_strel(void *type_s, matlab_mat *p1m, matlab_mat *p2m) {
+    std::string t = img_sstr(type_s);
+    for (char &c : t) c = static_cast<char>(tolower(c));
+    if (t == "square") { int n = static_cast<int>(img_sc(p1m, 3)); matlab_mat *K = mat_alloc(n, n); for (int64_t i = 0; i < static_cast<int64_t>(n) * n; ++i) K->data[i] = 1.0; return K; }
+    if (t == "rectangle") {
+        int m = (p1m && p1m->rows * p1m->cols >= 2) ? static_cast<int>(p1m->data[0]) : 3;
+        int n = (p1m && p1m->rows * p1m->cols >= 2) ? static_cast<int>(p1m->data[1]) : 3;
+        matlab_mat *K = mat_alloc(m, n); for (int64_t i = 0; i < static_cast<int64_t>(m) * n; ++i) K->data[i] = 1.0; return K;
+    }
+    if (t == "line") {
+        int len = static_cast<int>(img_sc(p1m, 3)); double deg = img_sc(p2m, 0.0) * M_PI / 180.0;
+        int half = len / 2; int sz = 2 * half + 1; matlab_mat *K = mat_alloc(sz, sz);
+        for (int d = -half; d <= half; ++d) { int x = static_cast<int>(floor(half + d * cos(deg) + 0.5)), y = static_cast<int>(floor(half - d * sin(deg) + 0.5));
+            if (x >= 0 && x < sz && y >= 0 && y < sz) K->data[y * sz + x] = 1.0; }
+        return K;
+    }
+    /* disk (default) */
+    int r = static_cast<int>(img_sc(p1m, 3)); int sz = 2 * r + 1; matlab_mat *K = mat_alloc(sz, sz);
+    for (int i = 0; i < sz; ++i) for (int j = 0; j < sz; ++j) { double dy = i - r, dx = j - r; if (dx * dx + dy * dy <= static_cast<double>(r) * r + r) K->data[i * sz + j] = 1.0; }
+    return K;
+}
+
+/* grayscale/binary erosion (min) / dilation (max) over an SE mask. */
+static matlab_mat *img_morph(matlab_mat *A, matlab_mat *SE, bool dilate) {
+    if (!A || !A->data) return mat_alloc(0, 0);
+    int64_t H = A->rows, W = A->cols;
+    int64_t sm = SE ? SE->rows : 3, sn = SE ? SE->cols : 3;
+    int64_t ar = (sm - 1) / 2, ac = (sn - 1) / 2;
+    matlab_mat *R = mat_alloc(H, W);
+    for (int64_t i = 0; i < H; ++i) for (int64_t j = 0; j < W; ++j) {
+        double best = dilate ? -1e300 : 1e300; bool any = false;
+        for (int64_t di = 0; di < sm; ++di) for (int64_t dj = 0; dj < sn; ++dj) {
+            if (SE && SE->data[di * sn + dj] == 0.0) continue;
+            int64_t iy = i + di - ar, ix = j + dj - ac;
+            if (iy < 0 || iy >= H || ix < 0 || ix >= W) continue;
+            double v = A->data[iy * W + ix]; best = dilate ? std::max(best, v) : std::min(best, v); any = true;
+        }
+        R->data[i * W + j] = any ? best : A->data[i * W + j];
+    }
+    return R;
+}
+matlab_mat *matlab_image_imerode(matlab_mat *A, matlab_mat *SE)  { return img_morph(A, SE, false); }
+matlab_mat *matlab_image_imdilate(matlab_mat *A, matlab_mat *SE) { return img_morph(A, SE, true); }
+matlab_mat *matlab_image_imopen(matlab_mat *A, matlab_mat *SE)   { matlab_mat *e = img_morph(A, SE, false); return img_morph(e, SE, true); }
+matlab_mat *matlab_image_imclose(matlab_mat *A, matlab_mat *SE)  { matlab_mat *d = img_morph(A, SE, true); return img_morph(d, SE, false); }
+matlab_mat *matlab_image_imtophat(matlab_mat *A, matlab_mat *SE) {
+    matlab_mat *o = matlab_image_imopen(A, SE); int64_t n = A->rows * A->cols;
+    matlab_mat *R = mat_alloc(A->rows, A->cols); for (int64_t i = 0; i < n; ++i) R->data[i] = A->data[i] - o->data[i]; return R;
+}
+matlab_mat *matlab_image_imbothat(matlab_mat *A, matlab_mat *SE) {
+    matlab_mat *c = matlab_image_imclose(A, SE); int64_t n = A->rows * A->cols;
+    matlab_mat *R = mat_alloc(A->rows, A->cols); for (int64_t i = 0; i < n; ++i) R->data[i] = c->data[i] - A->data[i]; return R;
+}
+
+/* imfill(BW,'holes') — fill background regions not connected to a border. */
+matlab_mat *matlab_image_imfill(matlab_mat *A) {
+    if (!A || !A->data) return mat_alloc(0, 0);
+    int64_t H = A->rows, W = A->cols, N = H * W;
+    std::vector<char> reach(static_cast<size_t>(N), 0);
+    std::vector<int64_t> stack;
+    auto push = [&](int64_t i, int64_t j) { if (i>=0&&i<H&&j>=0&&j<W) { int64_t p=i*W+j; if (!reach[static_cast<size_t>(p)] && A->data[p]==0.0) { reach[static_cast<size_t>(p)]=1; stack.push_back(p); } } };
+    for (int64_t j = 0; j < W; ++j) { push(0, j); push(H - 1, j); }
+    for (int64_t i = 0; i < H; ++i) { push(i, 0); push(i, W - 1); }
+    while (!stack.empty()) { int64_t p = stack.back(); stack.pop_back(); int64_t i = p / W, j = p % W; push(i-1,j); push(i+1,j); push(i,j-1); push(i,j+1); }
+    matlab_mat *R = mat_alloc(H, W);
+    for (int64_t p = 0; p < N; ++p) R->data[p] = (A->data[p] != 0.0 || !reach[static_cast<size_t>(p)]) ? 1.0 : 0.0;
+    return R;
+}
+
+/* edge(A[, method]) — sobel (default) or canny.  Returns 0/1. */
+static void img_sobel_grad(matlab_mat *A, std::vector<double> &gx, std::vector<double> &gy, int64_t H, int64_t W) {
+    gx.assign(static_cast<size_t>(H * W), 0.0); gy.assign(static_cast<size_t>(H * W), 0.0);
+    auto at = [&](int64_t i, int64_t j) { i = std::max<int64_t>(0, std::min(H - 1, i)); j = std::max<int64_t>(0, std::min(W - 1, j)); return A->data[i * W + j]; };
+    for (int64_t i = 0; i < H; ++i) for (int64_t j = 0; j < W; ++j) {
+        gx[static_cast<size_t>(i*W+j)] = (at(i-1,j+1)+2*at(i,j+1)+at(i+1,j+1)) - (at(i-1,j-1)+2*at(i,j-1)+at(i+1,j-1));
+        gy[static_cast<size_t>(i*W+j)] = (at(i+1,j-1)+2*at(i+1,j)+at(i+1,j+1)) - (at(i-1,j-1)+2*at(i-1,j)+at(i-1,j+1));
+    }
+}
+matlab_mat *matlab_image_edge(matlab_mat *A, void *method_s) {
+    if (!A || !A->data) return mat_alloc(0, 0);
+    int64_t H = A->rows, W = A->cols, N = H * W;
+    std::string m = img_sstr(method_s); for (char &c : m) c = static_cast<char>(tolower(c));
+    std::vector<double> gx, gy; img_sobel_grad(A, gx, gy, H, W);
+    std::vector<double> mag(static_cast<size_t>(N));
+    double mmax = 0.0;
+    for (int64_t p = 0; p < N; ++p) { mag[static_cast<size_t>(p)] = sqrt(gx[static_cast<size_t>(p)]*gx[static_cast<size_t>(p)] + gy[static_cast<size_t>(p)]*gy[static_cast<size_t>(p)]); mmax = std::max(mmax, mag[static_cast<size_t>(p)]); }
+    matlab_mat *R = mat_alloc(H, W);
+    if (m.find("canny") != std::string::npos) {
+        double hi = 0.4 * mmax, lo = 0.4 * hi;
+        std::vector<char> strong(static_cast<size_t>(N), 0), weak(static_cast<size_t>(N), 0);
+        for (int64_t i = 1; i < H - 1; ++i) for (int64_t j = 1; j < W - 1; ++j) {
+            int64_t p = i*W+j; double gxx = gx[static_cast<size_t>(p)], gyy = gy[static_cast<size_t>(p)], g = mag[static_cast<size_t>(p)];
+            double ang = atan2(gyy, gxx); double a = fmod(ang + M_PI, M_PI) / M_PI * 4.0; int dir = static_cast<int>(floor(a + 0.5)) & 3;
+            double n1, n2;
+            if (dir == 0) { n1 = mag[static_cast<size_t>(p-1)]; n2 = mag[static_cast<size_t>(p+1)]; }
+            else if (dir == 1) { n1 = mag[static_cast<size_t>(p-W+1)]; n2 = mag[static_cast<size_t>(p+W-1)]; }
+            else if (dir == 2) { n1 = mag[static_cast<size_t>(p-W)]; n2 = mag[static_cast<size_t>(p+W)]; }
+            else { n1 = mag[static_cast<size_t>(p-W-1)]; n2 = mag[static_cast<size_t>(p+W+1)]; }
+            if (g >= n1 && g >= n2) { if (g >= hi) strong[static_cast<size_t>(p)] = 1; else if (g >= lo) weak[static_cast<size_t>(p)] = 1; }
+        }
+        std::vector<int64_t> st; for (int64_t p = 0; p < N; ++p) if (strong[static_cast<size_t>(p)]) { R->data[p] = 1.0; st.push_back(p); }
+        while (!st.empty()) { int64_t p = st.back(); st.pop_back(); int64_t i = p/W, j = p%W;
+            for (int64_t di = -1; di <= 1; ++di) for (int64_t dj = -1; dj <= 1; ++dj) { int64_t y=i+di,x=j+dj; if (y<0||y>=H||x<0||x>=W) continue; int64_t q=y*W+x;
+                if (weak[static_cast<size_t>(q)] && R->data[q]==0.0) { R->data[q]=1.0; st.push_back(q); } } }
+        return R;
+    }
+    double thr = 0.0; for (int64_t p = 0; p < N; ++p) thr += mag[static_cast<size_t>(p)]; thr = 4.0 * thr / N;  /* sobel auto-threshold */
+    for (int64_t p = 0; p < N; ++p) R->data[p] = (mag[static_cast<size_t>(p)] >= thr) ? 1.0 : 0.0;
+    return R;
+}
+matlab_mat *matlab_image_edge1(matlab_mat *A) { return matlab_image_edge(A, nullptr); }
+
+/* ===== Tier-5 — segmentation + region analysis ========================== */
+
+/* bwlabel(BW) — 8-connectivity labels via BFS; returns the label matrix. */
+matlab_mat *matlab_image_bwlabel(matlab_mat *A) {
+    if (!A || !A->data) return mat_alloc(0, 0);
+    int64_t H = A->rows, W = A->cols;
+    matlab_mat *L = mat_alloc(H, W);
+    double lab = 0.0;
+    std::vector<int64_t> st;
+    for (int64_t s = 0; s < H * W; ++s) {
+        if (A->data[s] == 0.0 || L->data[s] != 0.0) continue;
+        lab += 1.0; L->data[s] = lab; st.clear(); st.push_back(s);
+        while (!st.empty()) { int64_t p = st.back(); st.pop_back(); int64_t i = p / W, j = p % W;
+            for (int64_t di = -1; di <= 1; ++di) for (int64_t dj = -1; dj <= 1; ++dj) {
+                if (!di && !dj) continue; int64_t y = i + di, x = j + dj; if (y<0||y>=H||x<0||x>=W) continue; int64_t q = y*W+x;
+                if (A->data[q] != 0.0 && L->data[q] == 0.0) { L->data[q] = lab; st.push_back(q); } } }
+    }
+    return L;
+}
+
+/* regionprops(L, prop) — returns the property as a matrix (N×k). */
+matlab_mat *matlab_image_regionprops(matlab_mat *L, void *prop_s) {
+    if (!L || !L->data) return mat_alloc(0, 0);
+    int64_t H = L->rows, W = L->cols;
+    int N = 0; for (int64_t p = 0; p < H * W; ++p) N = std::max(N, static_cast<int>(L->data[p]));
+    std::string pr = img_sstr(prop_s); for (char &c : pr) c = static_cast<char>(tolower(c));
+    std::vector<double> area(static_cast<size_t>(N), 0.0), sx(static_cast<size_t>(N), 0.0), sy(static_cast<size_t>(N), 0.0);
+    std::vector<double> sxx(static_cast<size_t>(N), 0.0), syy(static_cast<size_t>(N), 0.0), sxy(static_cast<size_t>(N), 0.0);
+    std::vector<double> xmin(static_cast<size_t>(N), 1e18), xmax(static_cast<size_t>(N), -1e18), ymin(static_cast<size_t>(N), 1e18), ymax(static_cast<size_t>(N), -1e18);
+    std::vector<double> perim(static_cast<size_t>(N), 0.0);
+    for (int64_t i = 0; i < H; ++i) for (int64_t j = 0; j < W; ++j) {
+        int lab = static_cast<int>(L->data[i*W+j]); if (lab < 1) continue; size_t k = static_cast<size_t>(lab - 1);
+        double x = j + 1.0, y = i + 1.0;       /* 1-based pixel coords */
+        area[k]++; sx[k] += x; sy[k] += y; sxx[k] += x*x; syy[k] += y*y; sxy[k] += x*y;
+        if (x < xmin[k]) xmin[k] = x; if (x > xmax[k]) xmax[k] = x; if (y < ymin[k]) ymin[k] = y; if (y > ymax[k]) ymax[k] = y;
+        bool border = false;
+        for (int64_t di = -1; di <= 1 && !border; ++di) for (int64_t dj = -1; dj <= 1; ++dj) { int64_t yy=i+di,xx=j+dj;
+            if (yy<0||yy>=H||xx<0||xx>=W || static_cast<int>(L->data[yy*W+xx]) != lab) { border = true; break; } }
+        if (border) perim[k] += 1.0;
+    }
+    auto emit1 = [&](const std::vector<double> &v) { matlab_mat *R = mat_alloc(N, 1); for (int i = 0; i < N; ++i) R->data[i] = v[static_cast<size_t>(i)]; return R; };
+    if (pr.find("area") != std::string::npos)       return emit1(area);
+    if (pr.find("perimeter") != std::string::npos)  return emit1(perim);
+    if (pr.find("centroid") != std::string::npos) {
+        matlab_mat *R = mat_alloc(N, 2); for (int i = 0; i < N; ++i) { R->data[i*2] = sx[static_cast<size_t>(i)]/area[static_cast<size_t>(i)]; R->data[i*2+1] = sy[static_cast<size_t>(i)]/area[static_cast<size_t>(i)]; } return R;
+    }
+    if (pr.find("boundingbox") != std::string::npos) {
+        matlab_mat *R = mat_alloc(N, 4); for (int i = 0; i < N; ++i) { R->data[i*4]=xmin[static_cast<size_t>(i)]-0.5; R->data[i*4+1]=ymin[static_cast<size_t>(i)]-0.5; R->data[i*4+2]=xmax[static_cast<size_t>(i)]-xmin[static_cast<size_t>(i)]+1; R->data[i*4+3]=ymax[static_cast<size_t>(i)]-ymin[static_cast<size_t>(i)]+1; } return R;
+    }
+    if (pr.find("equivdiameter") != std::string::npos) {
+        matlab_mat *R = mat_alloc(N, 1); for (int i = 0; i < N; ++i) R->data[i] = 2.0 * sqrt(area[static_cast<size_t>(i)] / M_PI); return R;
+    }
+    if (pr.find("extent") != std::string::npos) {
+        matlab_mat *R = mat_alloc(N, 1); for (int i = 0; i < N; ++i) { double bw=(xmax[static_cast<size_t>(i)]-xmin[static_cast<size_t>(i)]+1)*(ymax[static_cast<size_t>(i)]-ymin[static_cast<size_t>(i)]+1); R->data[i] = bw>0?area[static_cast<size_t>(i)]/bw:0; } return R;
+    }
+    /* axis lengths / eccentricity / orientation from 2nd central moments. */
+    bool wantMaj = pr.find("majoraxis") != std::string::npos, wantMin = pr.find("minoraxis") != std::string::npos;
+    bool wantEcc = pr.find("eccentric") != std::string::npos, wantOri = pr.find("orient") != std::string::npos;
+    if (wantMaj || wantMin || wantEcc || wantOri) {
+        matlab_mat *R = mat_alloc(N, 1);
+        for (int i = 0; i < N; ++i) {
+            double a = area[static_cast<size_t>(i)]; double mx = sx[static_cast<size_t>(i)]/a, my = sy[static_cast<size_t>(i)]/a;
+            double uxx = sxx[static_cast<size_t>(i)]/a - mx*mx + 1.0/12.0, uyy = syy[static_cast<size_t>(i)]/a - my*my + 1.0/12.0, uxy = sxy[static_cast<size_t>(i)]/a - mx*my;
+            double common = sqrt((uxx-uyy)*(uxx-uyy) + 4*uxy*uxy);
+            double maj = 2.0*sqrt(2.0)*sqrt(uxx+uyy+common), mn = 2.0*sqrt(2.0)*sqrt(std::max(0.0, uxx+uyy-common));
+            if (wantMaj) R->data[i] = maj;
+            else if (wantMin) R->data[i] = mn;
+            else if (wantEcc) R->data[i] = (maj>0) ? 2.0*sqrt(std::max(0.0,(maj/2)*(maj/2)-(mn/2)*(mn/2)))/maj : 0.0;
+            else R->data[i] = -atan2(2*uxy, uxx-uyy) / 2.0 * 180.0 / M_PI;
+        }
+        return R;
+    }
+    return emit1(area);   /* default */
+}
+
+/* bwareaopen(BW, P) — drop connected components smaller than P pixels. */
+matlab_mat *matlab_image_bwareaopen(matlab_mat *A, matlab_mat *Pm) {
+    matlab_mat *L = matlab_image_bwlabel(A);
+    int64_t H = A->rows, W = A->cols; int P = static_cast<int>(img_sc(Pm, 0));
+    int N = 0; for (int64_t p = 0; p < H*W; ++p) N = std::max(N, static_cast<int>(L->data[p]));
+    std::vector<int> cnt(static_cast<size_t>(N + 1), 0); for (int64_t p = 0; p < H*W; ++p) cnt[static_cast<size_t>(L->data[p])]++;
+    matlab_mat *R = mat_alloc(H, W);
+    for (int64_t p = 0; p < H*W; ++p) { int lab = static_cast<int>(L->data[p]); R->data[p] = (lab >= 1 && cnt[static_cast<size_t>(lab)] >= P) ? 1.0 : 0.0; }
+    return R;
+}
+
+/* bweuler(BW) — Euler number = #objects − #holes (8-conn objects). */
+double matlab_image_bweuler(matlab_mat *A) {
+    matlab_mat *L = matlab_image_bwlabel(A);
+    int objs = 0; for (int64_t p = 0; p < A->rows * A->cols; ++p) objs = std::max(objs, static_cast<int>(L->data[p]));
+    /* holes via imfill difference labelling */
+    matlab_mat *F = matlab_image_imfill(A);
+    int64_t holes_px = 0; for (int64_t p = 0; p < A->rows * A->cols; ++p) if (F->data[p] != 0.0 && A->data[p] == 0.0) holes_px++;
+    matlab_mat *Hd = mat_alloc(A->rows, A->cols);
+    for (int64_t p = 0; p < A->rows * A->cols; ++p) Hd->data[p] = (F->data[p] != 0.0 && A->data[p] == 0.0) ? 1.0 : 0.0;
+    matlab_mat *HL = matlab_image_bwlabel(Hd); int holes = 0; for (int64_t p = 0; p < A->rows*A->cols; ++p) holes = std::max(holes, static_cast<int>(HL->data[p]));
+    (void)holes_px;
+    return static_cast<double>(objs - holes);
+}
+
+/* label2rgb(L) — colour each label; background (0) is white.  M×N×3. */
+matlab_mat *matlab_image_label2rgb(matlab_mat *L) {
+    if (!L || !L->data) return mat_alloc(0, 0);
+    int64_t H = L->rows, W = L->cols, plane = H * W;
+    matlab_mat3 *R = mat3_alloc(H, W, 3);
+    for (int64_t p = 0; p < plane; ++p) {
+        int lab = static_cast<int>(L->data[p]);
+        if (lab == 0) { R->data[p] = 255; R->data[plane + p] = 255; R->data[2*plane + p] = 255; }
+        else { unsigned h = static_cast<unsigned>(lab) * 2654435761u;
+            R->data[p] = 60 + (h & 0xff) * 195 / 255; R->data[plane + p] = 60 + ((h >> 8) & 0xff) * 195 / 255; R->data[2*plane + p] = 60 + ((h >> 16) & 0xff) * 195 / 255; }
+    }
+    return reinterpret_cast<matlab_mat *>(R);
+}
+
+/* imsegkmeans(I, k) — k-means over pixel features; returns a label image. */
+matlab_mat *matlab_image_imsegkmeans(matlab_mat *A, matlab_mat *km) {
+    if (!A || !A->data) return mat_alloc(0, 0);
+    int64_t H, W; img_dims(A, H, W); int64_t n = H * W;
+    int ch = mat_is_3d(A) ? static_cast<int>(reinterpret_cast<matlab_mat3 *>(A)->depth) : 1;
+    matlab_mat *X = mat_alloc(n, ch);
+    if (ch == 1) { for (int64_t i = 0; i < n; ++i) X->data[i] = A->data[i]; }
+    else { matlab_mat3 *m = reinterpret_cast<matlab_mat3 *>(A); int64_t pl = H * W;
+        for (int64_t i = 0; i < n; ++i) for (int c = 0; c < ch; ++c) X->data[i * ch + c] = m->data[c * pl + i]; }
+    matlab_mat *idx = matlab_stats_kmeans(X, km);
+    matlab_mat *R = mat_alloc(H, W);
+    for (int64_t i = 0; i < n; ++i) R->data[i] = idx->data[i];
+    return R;
+}
+
 /* ----- multi-arity wrappers (pde_table matches one arity per entry) ------ */
 matlab_mat *matlab_image_fspecial1(void *t)            { return matlab_image_fspecial(t, nullptr, nullptr); }
 matlab_mat *matlab_image_fspecial2(void *t, matlab_mat *p1) { return matlab_image_fspecial(t, p1, nullptr); }
@@ -892,5 +1181,8 @@ matlab_mat *matlab_image_imnoise2(matlab_mat *A, void *t) { return matlab_image_
 matlab_mat *matlab_image_imgaussfilt1(matlab_mat *A)   { double v = 0.5; matlab_mat s; s.data = &v; s.rows = 1; s.cols = 1; return matlab_image_imgaussfilt(A, &s); }
 matlab_mat *matlab_image_medfilt2_1(matlab_mat *A)     { return matlab_image_medfilt2(A, nullptr); }
 matlab_mat *matlab_image_imboxfilt1(matlab_mat *A)     { return matlab_image_imboxfilt(A, nullptr); }
+matlab_mat *matlab_image_strel1(void *t)               { return matlab_image_strel(t, nullptr, nullptr); }
+matlab_mat *matlab_image_strel2(void *t, matlab_mat *p1) { return matlab_image_strel(t, p1, nullptr); }
+matlab_mat *matlab_image_imfill2(matlab_mat *A, matlab_mat *opt) { (void)opt; return matlab_image_imfill(A); }
 
 }  /* extern "C" */

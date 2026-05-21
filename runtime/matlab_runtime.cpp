@@ -1650,24 +1650,33 @@ matlab_mat *matlab_size(matlab_mat *A) {
 
 /* size(A, dim). dim is 1-based; 1=rows, 2=cols; any other dim returns 1. */
 double matlab_size_dim(matlab_mat *A, double dim) {
-    int64_t r, c; mat_any_shape(A, &r, &c);
     int64_t d = (int64_t)dim;
+    if (mat_is_3d(A)) {
+        matlab_mat3 *m = (matlab_mat3 *)A;
+        if (d == 1) return (double)m->rows;
+        if (d == 2) return (double)m->cols;
+        if (d == 3) return (double)m->depth;
+        return 1.0;
+    }
+    int64_t r, c; mat_any_shape(A, &r, &c);
     if (d == 1) return (double)r;
     if (d == 2) return (double)c;
     return 1.0;
 }
 
 double matlab_length(matlab_mat *A) {
+    if (mat_is_3d(A)) { matlab_mat3 *m = (matlab_mat3 *)A; int64_t mx = m->rows; if (m->cols > mx) mx = m->cols; if (m->depth > mx) mx = m->depth; return (double)mx; }
     int64_t r, c; mat_any_shape(A, &r, &c);
     if (r == 0 || c == 0) return 0.0;
     return (double)(r > c ? r : c);
 }
 
 double matlab_numel(matlab_mat *A)  {
+    if (mat_is_3d(A)) { matlab_mat3 *m = (matlab_mat3 *)A; return (double)(m->rows * m->cols * m->depth); }
     int64_t r, c; mat_any_shape(A, &r, &c);
     return (double)(r * c);
 }
-double matlab_ndims(matlab_mat *A)  { (void)A; return 2.0; }
+double matlab_ndims(matlab_mat *A)  { return mat_is_3d(A) ? 3.0 : 2.0; }
 
 /* end-of-dim for use inside subscript expressions: `end` in A(..., end, ...)
  * resolves to size(A, dim) where `dim` is the 1-based position of the

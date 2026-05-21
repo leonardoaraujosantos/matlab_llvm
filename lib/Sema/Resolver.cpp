@@ -197,6 +197,12 @@ void Resolver::registerBuiltins() {
     /* Image Processing Tier-3 — geometric transforms. */
     "imresize", "imrotate", "imcrop", "imtranslate", "imwarp", "fitgeotform2d",
     "matlab_image_fitgeo_init",
+    /* Image Processing Tier-4 — binarization + morphology. */
+    "graythresh", "otsuthresh", "imbinarize", "im2bw", "strel",
+    "imerode", "imdilate", "imopen", "imclose", "imtophat", "imbothat",
+    "imfill", "edge", "bwareaopen",
+    /* Image Processing Tier-5 — segmentation + region analysis. */
+    "bwlabel", "regionprops", "label2rgb", "bweuler", "imsegkmeans",
     "matlab_stats_fitknn_init", "matlab_stats_fitnb_init", "matlab_stats_fitlda_init",
     "matlab_stats_fittree_init", "matlab_stats_fitsvm_init", "matlab_stats_fitecoc_init",
     "matlab_stats_clf_predict", "matlab_stats_confusionmat",
