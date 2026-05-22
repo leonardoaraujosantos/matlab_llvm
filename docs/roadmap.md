@@ -580,16 +580,16 @@ just the common cases (`save('out.mat', '-v7.3')` followed by
 
 ---
 
-### 14. Toolbox stubs for symbolic / optimization 🔵
+### 14. Toolbox stubs for symbolic / optimization ✅ (superseded — shipped first-class)
 
-Single-file stubs that route to the equivalent open-source
-library (`sympy` for Symbolic Math Toolbox, `scipy.optimize`
-for Optimization Toolbox). Limited surface; just enough to make
-common textbook MATLAB programs that use these toolboxes
-compile and run.
-
-**Effort.** Small per stub; total scope depends on which
-toolbox.
+**Superseded.** This entry originally proposed thin stubs routing to
+`sympy` / `scipy.optimize`. Both shipped instead as **first-class,
+hand-coded, MathWorks-free surfaces**: Symbolic Math via SymPP (Tiers
+1 → 4, see [`symbolic_toolbox_roadmap.md`](symbolic_toolbox_roadmap.md))
+and Optimization Toolbox (Tiers 1 → 5, see
+[`optim_toolbox_roadmap.md`](optim_toolbox_roadmap.md)) — no external
+runtime dependency, full `-emit-*` participation. Sixteen toolbox
+surfaces ship today; the next candidates are in §16 below.
 
 ---
 
@@ -664,6 +664,56 @@ RF): clean.
 **Explicit carve-outs** (per project memory): PINN / GNN / FNO,
 Battery P2D, STEP import, PDE Modeler 2-D app, full 3-D Nédélec
 edge-element vector EM.
+
+---
+
+### 16. Future toolboxes — drafted compatibility roadmaps 🔵
+
+After the **sixteen shipped toolbox surfaces** (see
+[`feature_status.md`](feature_status.md) and the README's
+"Shipped Toolboxes" table), five more have **full tiered compatibility
+roadmaps drafted** — same format as the shipped ones: per-tier function
+tables, a reusable-infrastructure map, a headline tracer-bullet, the
+Compile/Execute · Debug/REPL · examples · tests breakdown, carve-outs,
+and an effort summary. They are ordered by **gain** (demand × reuse of
+the already-shipped substrate — so cost is low and payoff high):
+
+| # | Toolbox | Roadmap | Tiers · effort | Why it's cheap | Headline |
+|---|---|---|---|---|---|
+| 1 | **Curve Fitting** | [`curve_fitting_toolbox_roadmap.md`](curve_fitting_toolbox_roadmap.md) | 6 · ~9.5 wk | rides shipped `polyfit`/`polyval`/`interp1` + Optim `lsqcurvefit`/`lsqnonlin` | `census_fit.m` (`fit`→`gof`→forecast→`plot`) |
+| 2 | **Wavelet** | [`wavelet_toolbox_roadmap.md`](wavelet_toolbox_roadmap.md) | 6 · ~10.5 wk | extends Signal — `conv`/`fft`/`dct`/`fwht`/`upfirdn` + Image `psnr` + Stats `fitcsvm` | `denoise_signal.m` (`wavedec`→`wthresh`→`waverec`) |
+| 3 | **DSP System + DSP HDL** | [`dsp_toolbox_roadmap.md`](dsp_toolbox_roadmap.md) | 8 · ~18 wk | Signal filters + `fi` + the emit-SV/cocotb lane; **T1 SO model unblocks Comm/RF SO tiers** | `dsphdl_fir_stream.m` (fixed-point FIR → synthesizable SV + cocotb SIL) |
+| 4 | **Sensor Fusion and Tracking** | [`sensor_fusion_toolbox_roadmap.md`](sensor_fusion_toolbox_roadmap.md) | 6 · ~12.5 wk | **EKF/UKF cores already shipped** (Ident T5); ODE + linalg + PRNG | `imu_gps_fusion.m` (IMU+GPS → `insfilterMARG`) |
+| 5 | **Robotics System** | [`robotics_toolbox_roadmap.md`](robotics_toolbox_roadmap.md) | 6 · ~13 wk | **IK is `lsqnonlin`/`fminunc`** (Optim shipped); FK/Jacobian = linalg; URDF meshes reuse the PDE STL importer | `ik_path_trace.m` (`loadrobot`→`inverseKinematics`) |
+
+**Cross-cutting sequencing:**
+
+- **The System-Object lowering fix** — the documented blocker (a
+  tensor-typed RHS routed through `_set_f64` after monomorphization fails
+  the verifier; CST roadmap §12 / Comm roadmap §15) — is **DSP Tier-1**,
+  and it is the same fix that gates Comm Tier-3+, RF-Tier-1+, Antenna
+  classdef tiers, and the stateful filters/trackers of Sensor Fusion.
+  Landing it **once** (via DSP) unblocks all of them — the
+  highest-leverage single item across the whole queue.
+- **The `quaternion` + coordinate-transform foundation** is **shared** by
+  Sensor Fusion Tier-1 and Robotics Tier-1 — build it once across the
+  two; whichever ships first, the other reuses it.
+- **Robotics is largely shippable *without* the SO fix** — its objects
+  (`rigidBodyTree`, `inverseKinematics`, `occupancyMap`, collision
+  geometry) are built-once-then-queried, not stateful System Objects;
+  only 3 objects (`jointSpaceMotionModel`/`stateEstimatorPF`/`rateControl`)
+  touch it — so it carries the least sequencing risk.
+
+**Recommended order**: **Curve Fitting first** (near-free; ~4 wk to the
+90% `fit`/`gof`/`confint` workflow). Then either **DSP Tier-1** (to land
+the SO fix and unblock the SO-gated tiers project-wide) or the
+**Sensor-Fusion + Robotics spatial-math stack** (shared `quaternion`
+foundation; directly serves the `examples/quadrotor/` flight-control
+work and the shipped MPC/CST loops). **Wavelet** slots in any time as a
+self-contained Signal extension.
+
+These are **plans, not commitments** — each tier is independently
+shippable and demoable, and the per-toolbox docs are the source of truth.
 
 ---
 
