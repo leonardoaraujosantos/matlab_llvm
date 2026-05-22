@@ -2094,6 +2094,9 @@ SV, which is exactly how the `fa36bce` regression went unnoticed:
 ctest --test-dir build --progress -R 'run-tests|emit-sv|emitc'
 ```
 
-Avoid the full `ctest` as a quick gate locally: the `flowchart-simulate-dap-*`
-and cocotb lanes spawn external simulator / DAP subprocesses that can hang in a
-headless environment. They should carry a CTest `TIMEOUT` so they fail-fast.
+For a quick gate locally, prefer the `-R` subset above: the
+`flowchart-simulate-dap-*` and cocotb lanes spawn external simulator / DAP
+subprocesses that can hang in a headless environment. Every lane now carries a
+default `TIMEOUT=300` (a directory-scope sweep at the end of `CMakeLists.txt`,
+commit `687e58f`), so a stuck lane fail-fasts instead of freezing the whole
+`ctest` gate.

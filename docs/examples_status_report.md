@@ -382,8 +382,11 @@ progress with `--progress`):
 ctest --test-dir build --progress -R 'run-tests|emit-sv|emitc'
 ```
 
-**Do not run the full `ctest` as a quick gate here:** the `flowchart-simulate-dap-*`
-and cocotb lanes spawn external `matlabc --sim-dap` / simulator subprocesses
-that wait on DAP I/O and never terminate in this environment (a 31-min hang; a
-7-day-old stale `--sim-dap` process was found lingering). Those lanes should get
-a CTest `TIMEOUT` property so they fail-fast instead of hanging the whole gate.
+**Full `ctest` is now bounded (commit `687e58f`):** the `flowchart-simulate-dap-*`
+and cocotb lanes spawn external `matlabc --sim-dap` / simulator subprocesses that
+can wait on DAP I/O and never terminate in a headless environment (a 31-min hang
+was observed, plus a 7-day-old stale `--sim-dap` process). A directory-scope
+sweep at the end of `CMakeLists.txt` now sets `TIMEOUT=300` on every registered
+lane that doesn't already carry one, so a stuck lane fail-fasts at 300 s instead
+of freezing the whole gate (300 s > the slowest legit lane, ~112 s). The `-R`
+subset above is still the fastest day-to-day gate.
