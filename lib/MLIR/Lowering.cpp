@@ -547,6 +547,20 @@ private:
    * A(i,j,k) = v, and size(A, 3) all route to matlab_mat3 runtime
    * entries instead of the 2-D path. */
   std::unordered_set<Binding *> ThreeDBindings;
+  /* Memoized interprocedural "does this user function return a 3-D value,
+   * given which of its params are 3-D?" so `A = f(...)` marks A 3-D when
+   * f's output is 3-D (now that the func-boundary tensor->ptr fix makes the
+   * matrix result usable).  Keyed by (function, arg-3-D bitmask) so a
+   * param-dependent helper like `proc(x)=imadd(x,x)` is 3-D exactly when
+   * called with a 3-D argument.  Value: 1 = in-progress (recursion cycle
+   * guard), 2 = no, 3 = yes. */
+  std::unordered_map<const Function *,
+                     std::unordered_map<unsigned long long, int>> Func3DMemo;
+  /* True when E evaluates to a 3-D matlab_mat3, given `Set` as the set of
+   * locally-known 3-D bindings (the current fn's ThreeDBindings during
+   * lowering, or a fresh local set during funcReturns3D analysis). */
+  bool exprIsThreeD(const Expr *E, const std::unordered_set<Binding *> &Set);
+  bool funcReturns3D(const Function *F, unsigned long long Arg3DMask);
   std::string CurFnName;
   /* Declared arity of the currently-lowered function — used to fold
    * references to the `nargin` / `nargout` builtins into compile-time
@@ -664,6 +678,140 @@ bool Lowerer::isStringExpr(const Expr *E) const {
           return true;
   }
   return false;
+}
+
+/* True when E evaluates to a 3-D matlab_mat3.  `Set` is the set of bindings
+ * known to hold 3-D values in the relevant scope (the live ThreeDBindings
+ * during lowering, or a fresh local set while analysing a function body in
+ * funcReturns3D).  3-D-ness flows through arithmetic / unary ops / aliasing,
+ * the 3-D-producing builtins, and user-function returns. */
+bool Lowerer::exprIsThreeD(const Expr *E,
+                           const std::unordered_set<Binding *> &Set) {
+  if (!E) return false;
+  if (auto *C = dynamic_cast<const CallOrIndex *>(E)) {
+    auto *N = dynamic_cast<const NameExpr *>(C->Callee);
+    if (!N) return false;
+    if (C->Args.size() == 3 && N->Ref &&
+        N->Ref->Kind == BindingKind::Builtin &&
+        (N->Name == "zeros" || N->Name == "ones")) {
+      /* trailing-singleton: zeros(m,n,1) is 2-D, not 3-D */
+      if (auto *PL = dynamic_cast<const IntegerLiteral *>(C->Args[2]))
+        if (PL->Text == "1") return false;
+      return true;
+    }
+    if (N->Name == "cat" && C->Args.size() >= 2) {
+      if (auto *DimL = dynamic_cast<const IntegerLiteral *>(C->Args[0])) {
+        /* cat(3, p1, p2, …) of >=2 planes is 3-D; any cat dim whose
+         * operands are already 3-D stays 3-D. */
+        if (DimL->Text == "3" && C->Args.size() >= 3) return true;
+        for (size_t a = 1; a < C->Args.size(); ++a)
+          if (exprIsThreeD(C->Args[a], Set)) return true;
+      }
+      return false;
+    }
+    /* Tier-B shape verbs that preserve / produce 3-D.  reshape/repmat with a
+     * 3rd target dim produce a mat3 (runtime returns 2-D when that dim is 1 —
+     * *3 helpers 2-D-fall-back).  permute/ipermute/squeeze keep 3-D-ness from
+     * their input (squeeze may collapse to 2-D; the fall-back handles it). */
+    if ((N->Name == "reshape" || N->Name == "repmat") && C->Args.size() == 4)
+      return true;
+    if ((N->Name == "permute" || N->Name == "ipermute" || N->Name == "squeeze") &&
+        !C->Args.empty())
+      return exprIsThreeD(C->Args[0], Set);
+    /* Depth-preserving image arithmetic: 3-D iff the image arg is 3-D
+     * (these loop over depth and return a mat3 — runtime_images.cpp). */
+    if ((N->Name == "imadd" || N->Name == "imsubtract" ||
+         N->Name == "immultiply" || N->Name == "imdivide" ||
+         N->Name == "imabsdiff" || N->Name == "imcomplement") &&
+        !C->Args.empty())
+      return exprIsThreeD(C->Args[0], Set);
+    if (N->Name == "imlincomb" && C->Args.size() >= 2)
+      return exprIsThreeD(C->Args[1], Set);
+    /* imread may return a 2-D grayscale matrix; the matlab_mat3 runtime
+     * helpers fall back to a 2-D view so grayscale files still index/size. */
+    if (N->Name == "rgb2hsv" || N->Name == "hsv2rgb" ||
+        N->Name == "rgb2ycbcr" || N->Name == "ycbcr2rgb" ||
+        N->Name == "rgb2lab" || N->Name == "lab2rgb" ||
+        N->Name == "label2rgb" || N->Name == "imread")
+      return true;
+    /* User-defined function call: 3-D iff the function returns a 3-D value
+     * (interprocedural; memoised in funcReturns3D).  Pass which arguments
+     * are 3-D in the caller's context so a param-dependent helper (e.g.
+     * `proc(x)=imadd(x,x)`) is tracked 3-D when called with a 3-D arg. The
+     * func-boundary tensor->ptr fix makes the matrix result usable; this
+     * routes its 3-D subscripts / size / numel / ndims through the *3 helpers. */
+    if (N->Ref && N->Ref->Kind == BindingKind::Function && N->Ref->FuncDef) {
+      unsigned long long Mask = 0;
+      for (size_t i = 0; i < C->Args.size() && i < 64; ++i)
+        if (C->Args[i] && exprIsThreeD(C->Args[i], Set)) Mask |= (1ull << i);
+      return funcReturns3D(N->Ref->FuncDef, Mask);
+    }
+    return false;
+  }
+  if (auto *B = dynamic_cast<const BinaryOpExpr *>(E))
+    return exprIsThreeD(B->LHS, Set) || exprIsThreeD(B->RHS, Set);
+  if (auto *U = dynamic_cast<const UnaryOpExpr *>(E))
+    return exprIsThreeD(U->Operand, Set);
+  if (auto *N = dynamic_cast<const NameExpr *>(E))
+    return N->Ref && Set.count(N->Ref);
+  return false;
+}
+
+/* Interprocedural: does user function F return a 3-D value?  Analyse F's
+ * body once (memoised, with an in-progress cycle guard for recursion),
+ * propagating 3-D-ness through its assignments into a local set; F returns
+ * 3-D iff any of its outputs lands in that set.  Control-flow bodies are
+ * flattened (an over-approximation — safe, since the *3 helpers 2-D-fall-back
+ * when a binding flagged 3-D actually holds a 2-D value at runtime). */
+bool Lowerer::funcReturns3D(const Function *F, unsigned long long Arg3DMask) {
+  if (!F || F->OutputRefs.empty()) return false;
+  if (auto FIt = Func3DMemo.find(F); FIt != Func3DMemo.end()) {
+    if (auto MIt = FIt->second.find(Arg3DMask); MIt != FIt->second.end()) {
+      if (MIt->second == 1) return false;  /* in progress: break the cycle */
+      return MIt->second == 3;
+    }
+  }
+  Func3DMemo[F][Arg3DMask] = 1;  /* in progress (don't hold a reference —
+                                  * the recursive walk may rehash the map) */
+  std::unordered_set<Binding *> Local;
+  /* Seed the params the call site passed a 3-D argument for, so 3-D-ness
+   * flows from the arguments through the body to the outputs. */
+  for (size_t i = 0; i < F->ParamRefs.size() && i < 64; ++i)
+    if (((Arg3DMask >> i) & 1ull) && F->ParamRefs[i])
+      Local.insert(F->ParamRefs[i]);
+  std::function<void(const Block *)> walk = [&](const Block *Blk) {
+    if (!Blk) return;
+    for (const Stmt *S : Blk->Stmts) {
+      if (!S) continue;
+      if (auto *AS = dynamic_cast<const AssignStmt *>(S)) {
+        if (AS->RHS && exprIsThreeD(AS->RHS, Local))
+          for (const Expr *L : AS->LHS)
+            if (auto *LN = dynamic_cast<const NameExpr *>(L))
+              if (LN->Ref) Local.insert(LN->Ref);
+      } else if (auto *Ifs = dynamic_cast<const IfStmt *>(S)) {
+        walk(Ifs->Then);
+        for (const auto &EI : Ifs->Elseifs) walk(EI.Body);
+        walk(Ifs->Else);
+      } else if (auto *Fs = dynamic_cast<const ForStmt *>(S)) {
+        walk(Fs->Body);
+      } else if (auto *Ws = dynamic_cast<const WhileStmt *>(S)) {
+        walk(Ws->Body);
+      } else if (auto *Sw = dynamic_cast<const SwitchStmt *>(S)) {
+        for (const auto &Cse : Sw->Cases) walk(Cse.Body);
+      } else if (auto *Ts = dynamic_cast<const TryStmt *>(S)) {
+        walk(Ts->TryBody);
+        walk(Ts->CatchBody);
+      } else if (auto *Nested = dynamic_cast<const Block *>(S)) {
+        walk(Nested);
+      }
+    }
+  };
+  walk(F->Body);
+  bool R = false;
+  for (Binding *O : F->OutputRefs)
+    if (O && Local.count(O)) { R = true; break; }
+  Func3DMemo[F][Arg3DMask] = R ? 3 : 2;
+  return R;
 }
 
 mlir::Value Lowerer::emitAlloc(const Type *T, llvm::StringRef Name,
@@ -2280,75 +2428,10 @@ void Lowerer::lowerStmt(const Stmt &St) {
      * A(:,:,k) / size(A,3) route to the matlab_mat3 runtime. */
     /* Track whether the RHS produces a 3-D (matlab_mat3) value so the LHS
      * binding is registered in ThreeDBindings and its later subscripts /
-     * size / numel / ndims route through the *3 runtime helpers.  This is
-     * expression-aware (not just the literal call shapes): 3-D-ness flows
-     * through elementwise / scalar arithmetic (`ones(5,5,4)*3`), unary ops
-     * (`-A`), and aliasing (`B = A`).  Indexing a 3-D binding (`A(:,:,k)`)
-     * yields a 2-D plane, so a CallOrIndex whose callee is a plain
-     * variable is *not* 3-D — only the 3-D-producing builtins below are.
-     * (Carve-out: 3-D values returned from user functions or unlisted
-     * builtins still need Sema-level type propagation — a follow-on
-     * blocked by the func-boundary tensor→ptr gap, see any_shape_roadmap.) */
-    std::function<bool(const Expr *)> exprIsThreeD = [&](const Expr *E) -> bool {
-      if (!E) return false;
-      if (auto *C = dynamic_cast<const CallOrIndex *>(E)) {
-        auto *N = dynamic_cast<const NameExpr *>(C->Callee);
-        if (!N) return false;
-        if (C->Args.size() == 3 && N->Ref &&
-            N->Ref->Kind == BindingKind::Builtin &&
-            (N->Name == "zeros" || N->Name == "ones")) {
-          /* trailing-singleton: zeros(m,n,1) is 2-D, not 3-D */
-          if (auto *PL = dynamic_cast<const IntegerLiteral *>(C->Args[2]))
-            if (PL->Text == "1") return false;
-          return true;
-        }
-        if (N->Name == "cat" && C->Args.size() >= 2) {
-          if (auto *DimL = dynamic_cast<const IntegerLiteral *>(C->Args[0])) {
-            /* cat(3, p1, p2, …) of >=2 planes is 3-D; any cat dim whose
-             * operands are already 3-D stays 3-D. */
-            if (DimL->Text == "3" && C->Args.size() >= 3) return true;
-            for (size_t a = 1; a < C->Args.size(); ++a)
-              if (exprIsThreeD(C->Args[a])) return true;
-          }
-          return false;
-        }
-        /* Tier-B shape verbs that preserve / produce 3-D.  reshape/repmat
-         * with a 3rd target dim produce a mat3 (runtime returns 2-D when
-         * that dim is 1 — *3 helpers 2-D-fall-back).  permute/ipermute/
-         * squeeze keep 3-D-ness from their input (squeeze may collapse to
-         * 2-D at runtime; the fall-back handles it). */
-        if ((N->Name == "reshape" || N->Name == "repmat") && C->Args.size() == 4)
-          return true;
-        if ((N->Name == "permute" || N->Name == "ipermute" || N->Name == "squeeze") &&
-            !C->Args.empty())
-          return exprIsThreeD(C->Args[0]);
-        /* Depth-preserving image arithmetic: the result is 3-D iff the
-         * image argument is 3-D (these ops loop over depth and return a
-         * mat3 — see runtime_images.cpp img_binop / imcomplement). */
-        if ((N->Name == "imadd" || N->Name == "imsubtract" ||
-             N->Name == "immultiply" || N->Name == "imdivide" ||
-             N->Name == "imabsdiff" || N->Name == "imcomplement") &&
-            !C->Args.empty())
-          return exprIsThreeD(C->Args[0]);
-        if (N->Name == "imlincomb" && C->Args.size() >= 2)
-          return exprIsThreeD(C->Args[1]);
-        /* imread may return a 2-D grayscale matrix; the matlab_mat3 runtime
-         * helpers fall back to a 2-D view (mat_is_3d == false) so grayscale
-         * files still index / size correctly. */
-        return (N->Name == "rgb2hsv" || N->Name == "hsv2rgb" ||
-                N->Name == "rgb2ycbcr" || N->Name == "ycbcr2rgb" ||
-                N->Name == "rgb2lab" || N->Name == "lab2rgb" ||
-                N->Name == "label2rgb" || N->Name == "imread");
-      }
-      if (auto *B = dynamic_cast<const BinaryOpExpr *>(E))
-        return exprIsThreeD(B->LHS) || exprIsThreeD(B->RHS);
-      if (auto *U = dynamic_cast<const UnaryOpExpr *>(E))
-        return exprIsThreeD(U->Operand);
-      if (auto *N = dynamic_cast<const NameExpr *>(E))
-        return N->Ref && ThreeDBindings.count(N->Ref);
-      return false;
-    };
-    bool RhsIsThreeD = exprIsThreeD(A.RHS);
+     * size / numel / ndims route through the *3 runtime helpers.  Expression-
+     * aware (arithmetic, unary, aliasing, the 3-D-producing builtins, and —
+     * via funcReturns3D — user-function returns); see Lowerer::exprIsThreeD. */
+    bool RhsIsThreeD = exprIsThreeD(A.RHS, ThreeDBindings);
 
     /* Multi-return call: [V, D] = eig(A). If the LHS arity is > 1 and
      * the RHS is a call to a builtin that has a multi-return variant,

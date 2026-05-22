@@ -23,7 +23,7 @@ Status legend: ✅ shipped · 🟡 partial · 🔵 not started.
   plumbing. ~1–2 weeks, high blast radius. Only worth it with a concrete
   4-D use case (DL `NCHW`, RGB video, hyperspectral cubes).
 - The **"nothing broke" guarantee** is a *diff-against-`main`* discipline:
-  baseline the full suite (**468/468** after Tiers A+B), keep it green, add a
+  baseline the full suite (**471/471** after Tiers A+B + func-boundary + gap fixes), keep it green, add a
   depth/shape gating sweep, and cross-validate values against NumPy/PIL.
 
 ---
@@ -63,24 +63,11 @@ depth, courtesy of the 3-D-indexing work (see
    No descriptor above `matlab_mat3`.
 2. ~~**`cat(3,…)` caps at 3 planes.**~~ **FIXED (A1, 2026-05-22).**
    `cat(3,a,b,c,d,…)` now builds depth N via `matlab_cat3_append`.
-3. ~~**3-D tracking is syntactic, not type-based.**~~ **FIXED for
-   expressions (A2, 2026-05-22).** `A = ones(5,5,4)*3; A(1,1,4)` compiles
-   and reads `3`: `ThreeDBindings` population is now expression-aware
-   (`exprIsThreeD` — arithmetic, unary, aliasing) and `BINARY_MS`/`_SM`
-   preserve depth. *Still open — and blocked by a deeper gap:* 3-D returned
-   from a **user function** (`A = makeVol(); A(i,j,k)`) loses its 3-D-ness.
-   **Investigated 2026-05-22:** the analysis side is straightforward
-   (interprocedural `funcReturns3D` over the callee body + Sema
-   return-type propagation, prototyped and reverted), but it is blocked by
-   a **broader pre-existing limitation**: a matrix-returning *user function*
-   yields a `matlab.call` whose result stays `tensor<…>` (matching the func
-   body) and is **never lowered to `ptr`** before `LowerTensorOps` — so the
-   result can't feed *any* ptr-requiring op (`A(i,j)`, `A+1`, …), **2-D
-   included**. `LowerUserCalls` keeps tensor sigs on purpose (bodies depend
-   on per-tensor-shape inference, see its ~line 506), so the real fix is a
-   func-boundary tensor→ptr lowering for matrix returns — a large, risky
-   change deferred until prioritised. (Builtins dodge this: they return
-   `ptr` from the runtime directly.)
+3. ~~**3-D tracking is syntactic, not type-based.**~~ **FIXED (A2 +
+   func-boundary, 2026-05-22).** `A = ones(5,5,4)*3; A(1,1,4)` works
+   (expression-aware `exprIsThreeD` + depth-preserving `BINARY_MS`/`_SM`).
+   **3-D / matrix returned from a user function now works too** — see the
+   func-boundary fix in §3.1.
 4. ~~**Most elementwise/image ops are 2-D.**~~ **FIXED (A3, 2026-05-22).**
    Scalar/elementwise/unary binops (`+ - .* ./`, comparisons, `-A`) and the
    image arithmetic (`imadd`/`imsubtract`/`immultiply`/`imdivide`/
@@ -90,6 +77,27 @@ depth, courtesy of the 3-D-indexing work (see
 5. ~~**`imread` of RGBA drops alpha.**~~ **FIXED (A4, 2026-05-22).** RGBA
    PNGs now decode to depth-4 (alpha kept); `png_encode` writes RGBA too.
    (Diverges from MATLAB's RGB + separate-alpha output — documented choice.)
+6. ~~**Matrix-returning user functions are unusable.**~~ **FIXED
+   (func-boundary, 2026-05-22).** `A = f(); A(i,j[,k])` / `A+1` etc. now
+   work for 2-D and 3-D (`test/Run/fn_matrix_return.m`). See §3.1.
+
+**Pre-existing gaps surfaced + FIXED (2026-05-22)** (both were orthogonal to
+N-D — they failed identically on `main` — and are now regression-tested):
+- ~~**Variable param-bound for-loop inside a function**~~ **FIXED.**
+  `function r=f(n); for k=1:n; …; end; end` left `matlab.for` unconverted
+  because `lowerForOp`/`extractRange` ran (in the pipeline) *before* the
+  param — hence the range bound — was refined from `none` to `f64`. Fix: a
+  `RefineSlotTypes` + second `runLowerSeqLoops` after the scalar/user-call
+  fixpoint, still before `LowerTensorOps` consumes the range producer
+  (`tools/matlabc/main.cpp`). Test `test/Run/fn_with_loop.m` (scalar / 2-D /
+  3-D builds with `for k=1:n`).
+- ~~**Fewer-subscript indexing of an N-D array**~~ **FIXED.** `A(i,j)` /
+  `A(lin)` on an `M×N×P` array used to segfault (the 2-D subscript helper
+  cast the `mat3` to `matlab_mat`). `matlab_subscript1_s`/`subscript2_s` are
+  now mat3-aware: `A(lin)` is a flat slice-major linear index; `A(i,j)`
+  collapses the trailing dims into the last subscript (MATLAB's rule —
+  returns the logical element `A(i,n,k)`). Test
+  `test/Run/array_nd_subscript.m`.
 
 **Size limits.** `mat3_alloc` does `calloc(rows*cols*depth, 8)` with all
 dims `int64` — **no artificial cap; RAM-bound**. Latent (not hit in
@@ -145,6 +153,39 @@ lossless RGBA PNG roundtrip (depth-4, alpha preserved). 467/467 regression.
 Risk: low. The descriptor and indexing already support it; this removes
 the arity cap + tracking fragility. **Tier A complete; next is Tier B
 (reshape/permute/squeeze/cat-dim/reductions on 3-D).**
+
+### 3.1 Func-boundary tensor→ptr — matrix-returning user functions ✅ *(2026-05-22)*
+
+Previously a user function that returned a matrix (`function r = f()`) was
+**unusable**: the `matlab.call` result stayed `tensor<…>` (matching the func
+body, which `LowerUserCalls` keeps tensor on purpose for shape inference)
+and was never lowered to `!llvm.ptr` before `LowerTensorOps`, so `A = f();
+A(i,j)` / `A+1` left un-lowered `matlab.*` ops — for **2-D and 3-D alike**.
+
+Root cause + fix:
+- `RefineFuncSigs` already settles a func's `tensor→ptr` result type (from
+  the lowered body's `func.return`) and re-emits stale call sites — but the
+  `-emit-llvm` / `-dap` pipelines ran it **last**, with no `LowerTensorOps`
+  after, so the now-`ptr` call result never propagated into the caller's
+  slot/uses. Added a converging `LowerTensorOps ↔ RefineFuncSigs` sweep
+  after the final `RefineFuncSigs` (`tools/matlabc/main.cpp`), mirroring the
+  REPL/JIT pipeline. (`LowerUserCalls`' `canRefineTo` can't do tensor→ptr —
+  it only refines from `none` — which is why `RefineFuncSigs` is the pass
+  that settles it.)
+- **3-D routing:** interprocedural `funcReturns3D(F, argMask)` (memoised,
+  cycle-guarded) analyses the callee body so `A = makeVol(); A(i,j,k)`
+  routes through the `*3` helpers. **Argument-flow**: the call site passes a
+  bitmask of which args are 3-D, seeding the callee's params, so a
+  param-dependent helper (`proc(x)=imadd(x,x)`) is 3-D exactly when called
+  with a 3-D argument.
+
+Tests: `test/Run/fn_matrix_return.m` (2-D index/`+`/`*`, 3-D index/size/
+numel/store, cat-return, param-dependent 3-D return via arg-flow, scalar
+return unaffected) and `test/Run/fn_with_loop.m` (for-loops in functions,
+incl. variable param bounds `for k=1:n`, building scalar / 2-D / 3-D). Two
+pre-existing gaps this surfaced — variable param-bound for-loop in a function
+and fewer-subscript N-D indexing — were **fixed** (see §1) and regression-
+tested (`fn_with_loop.m`, `array_nd_subscript.m`).
 
 ---
 
@@ -220,7 +261,7 @@ The repo already has the harness; the rule is **diff against `main`**
 
 ### 6.1 Regression baseline + gate
 1. On `main`: run `test/Run/run_tests.sh` (or the fast `/tmp/fastrun.sh`) →
-   record the count (**`PASS=468 FAIL=0`** after Tiers A+B; was 465).
+   record the count (**`PASS=471 FAIL=0`** after Tiers A+B + func-boundary + gap fixes; was 465).
 2. After every change: re-run, **require the same or higher PASS, zero
    FAIL**. A drop is a regression — investigate before proceeding.
 3. Also keep the **strict no-C-cast lane** green: any modernised TU
@@ -231,9 +272,11 @@ The repo already has the harness; the rule is **diff against `main`**
 ### 6.2 Existing guards that MUST stay green
 These already exercise 2-D and 3-D paths and are the front line:
 `array3d_indexing`, `array_anyshape` (Tier A), `array_tierb` (Tier B),
-`image_rgba_roundtrip` (A4), `images_t1_io … images_t6_transforms`,
-`channel_split`, `image_png_roundtrip`, plus every numeric/linalg test
-that builds matrices. A shape change that breaks any of these is rejected.
+`fn_matrix_return` + `fn_with_loop` (§3.1 func-boundary + param-bound
+for-loops), `array_nd_subscript` (fewer-subscript N-D), `image_rgba_roundtrip`
+(A4), `images_t1_io … images_t6_transforms`, `channel_split`,
+`image_png_roundtrip`, plus every numeric/linalg test that builds matrices.
+A shape change that breaks any of these is rejected.
 
 ### 6.3 New gating tests for the change (write-to-`/tmp`-then-read style)
 - **Depth sweep (Tier A):** `zeros(m,n,N)` for `N = 1,2,4,8` → check
@@ -305,5 +348,5 @@ full set of manipulation verbs (reshape/permute/squeeze/cat/reductions/
 repmat). Defer **Tier C** (true rank-N, `matlab_matN`) until a concrete
 4-D workload (deep-learning batches, video, hyperspectral) justifies the
 pervasive change. Every tier is gated by the §6 regression discipline:
-**baseline `main`, stay at 468/468, add the shape sweep, validate values
+**baseline `main`, stay at 471/471, add the shape sweep, validate values
 against NumPy/MATLAB.**

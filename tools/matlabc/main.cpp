@@ -11926,6 +11926,16 @@ int main(int Argc, char **Argv) {
           bool B = mlirgen::runLowerUserCalls(M);
           if (!A && !B) break;
         }
+        // A param-bound for-loop inside a function (`for k = 1:n`, n a
+        // parameter) couldn't lower in the first runLowerSeqLoops above: the
+        // param — hence the range bound — was still `none`-typed then. The
+        // scalar/user-call fixpoint just refined the param to f64; refine
+        // the param's slot/loads to match and re-run seq-loop lowering so
+        // the f64 range bound now extracts. Must stay before LowerTensorOps
+        // (which consumes the matlab.range producer). Idempotent: already-
+        // lowered loops are gone, so this only catches the deferred ones.
+        mlirgen::runRefineSlotTypes(M);
+        mlirgen::runLowerSeqLoops(M);
         // Lower every tensor-producing matlab.* op to a runtime call
         // against the matrix runtime (matlab_zeros / matlab_add_mm /
         // matlab_transpose / ...). After this runs, matrix values in the
@@ -12045,6 +12055,20 @@ int main(int Argc, char **Argv) {
         mlirgen::runLowerStaticFiArrays(M);
         // Patch func.func signatures from the refined return types.
         mlirgen::runRefineFuncSigs(M);
+        // Matrix-returning user functions: RefineFuncSigs above is the only
+        // pass that settles their `tensor -> ptr` result type (LowerUserCalls'
+        // canRefineTo refuses an already-concrete tensor result, so the
+        // func.call stayed tensor through the fixpoint loops). Now that the
+        // call result is ptr, re-run LowerTensorOps so the caller's slot —
+        // fed by that call — is retyped to ptr and its `A(i,j[,k])` / `A+1`
+        // matrix uses finally lower (otherwise they survive as un-lowered
+        // matlab.subscript / matlab.add). Iterate with RefineFuncSigs so
+        // chained matrix-returning calls converge. Mirrors the REPL/JIT path.
+        for (int Iter = 0; Iter < 4; ++Iter) {
+          bool Changed = mlirgen::runLowerTensorOps(M);
+          mlirgen::runRefineFuncSigs(M);
+          if (!Changed) break;
+        }
         // After user-call refinement, any surviving matlab.alloc whose
         // result type is now a scalar primitive can be promoted to
         // llvm.alloca. This catches function-body locals that weren't

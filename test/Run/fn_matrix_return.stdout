@@ -1,0 +1,8 @@
+mk 3x3 v=42
+add v=43
+mul v=84
+vol d=4 n=16 nd=3
+vol3 v=88
+w d=3 v=20
+pv d=3 v=40
+s=7

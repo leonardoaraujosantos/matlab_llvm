@@ -6196,6 +6196,17 @@ double matlab_subscript2_s(matlab_mat *A, double i, double j) {
         if (ri < 0 || ri >= C->rows || cj < 0 || cj >= C->cols) return 0.0;
         return C->re[ri * C->cols + cj];
     }
+    /* Fewer-subscript indexing of a 3-D array: A(i,j) on M×N×P collapses the
+     * trailing dims into the last subscript (MATLAB's rule), so j spans
+     * N*P with dim 2 varying fastest.  Returns the logical element A(i,n,k)
+     * from the slice-major buffer. */
+    if (mat_is_3d(A)) {
+        matlab_mat3 *m = (matlab_mat3 *)A;
+        int64_t M = m->rows, N = m->cols, P = m->depth;
+        if (ri < 0 || ri >= M || cj < 0 || cj >= N * P) return 0.0;
+        int64_t n = cj % N, k = cj / N;
+        return m->data[k * M * N + ri * N + n];
+    }
     if (ri < 0 || ri >= A->rows || cj < 0 || cj >= A->cols) return 0.0;
     return A->data[ri * A->cols + cj];
 }
@@ -6212,6 +6223,16 @@ double matlab_subscript1_s(matlab_mat *A, double i) {
         int64_t total = C->rows * C->cols;
         if (idx < 0 || idx >= total) return 0.0;
         return C->re[idx];
+    }
+    /* Linear indexing of a 3-D array: A(lin) reads the lin-th element in the
+     * flat slice-major buffer (the project's documented order — not MATLAB's
+     * column-major; order-independent reductions like sum(A(:)) are
+     * unaffected). */
+    if (mat_is_3d(A)) {
+        matlab_mat3 *m = (matlab_mat3 *)A;
+        int64_t total = m->rows * m->cols * m->depth;
+        if (idx < 0 || idx >= total) return 0.0;
+        return m->data[idx];
     }
     int64_t total = A->rows * A->cols;
     if (idx < 0 || idx >= total) return 0.0;
