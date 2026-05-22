@@ -6571,6 +6571,22 @@ void matlab_struct_set_f64(matlab_struct *s, const char *name, int64_t len, doub
     s->ptr_vals[idx] = NULL;
 }
 
+/* stepinfo(y, t) as a struct — MATLAB's `S = stepinfo(...)` form with named
+ * fields, wrapping the 1×5 row from matlab_stepinfo
+ * ([RiseTime, SettlingTime, Overshoot, Peak, PeakTime]). */
+matlab_struct *matlab_stepinfo_struct(matlab_mat *y, matlab_mat *t) {
+    matlab_struct *s = matlab_struct_new();
+    matlab_mat *m = matlab_stepinfo(y, t);
+    if (m && m->rows * m->cols >= 5) {
+        matlab_struct_set_f64(s, "RiseTime",     8, m->data[0]);
+        matlab_struct_set_f64(s, "SettlingTime", 12, m->data[1]);
+        matlab_struct_set_f64(s, "Overshoot",    9, m->data[2]);
+        matlab_struct_set_f64(s, "Peak",         4, m->data[3]);
+        matlab_struct_set_f64(s, "PeakTime",     8, m->data[4]);
+    }
+    return s;
+}
+
 void matlab_struct_set_mat(matlab_struct *s, const char *name, int64_t len, matlab_mat *m) {
     if (!s) return;
     int32_t idx = struct_reserve(s, name, (int32_t)len);

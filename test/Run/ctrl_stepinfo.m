@@ -11,10 +11,10 @@
 t = (0:599)' * 0.01;
 y = 1 - exp(-t / 0.5);
 si = stepinfo(y, t);
-fprintf('1st-order RiseTime    = %.4f (closed form 1.0986)\n', si(1, 1));
-fprintf('1st-order SettlingTime = %.4f (closed form 1.957)\n', si(1, 2));
-fprintf('1st-order Overshoot   = %.4f (closed form 0)\n', si(1, 3));
-fprintf('1st-order Peak        = %.4f (closed form 1.0)\n', si(1, 4));
+fprintf('1st-order RiseTime    = %.4f (closed form 1.0986)\n', si.RiseTime);
+fprintf('1st-order SettlingTime = %.4f (closed form 1.957)\n', si.SettlingTime);
+fprintf('1st-order Overshoot   = %.4f (closed form 0)\n', si.Overshoot);
+fprintf('1st-order Peak        = %.4f (closed form 1.0)\n', si.Peak);
 
 % --- 2. Step response of a state-space underdamped 2nd order plant.
 % A = [0, 1; -wn^2, -2 zeta wn], wn = 5, zeta = 0.3 → expect overshoot.
@@ -29,9 +29,9 @@ dt = 0.01;
 y2 = step_ss(A, B, C, D, dt, N);
 t2 = (0:N-1)' * dt;
 si2 = stepinfo(y2, t2);
-fprintf('2nd-order RiseTime    = %.4f\n', si2(1, 1));
-fprintf('2nd-order SettlingTime = %.4f\n', si2(1, 2));
+fprintf('2nd-order RiseTime    = %.4f\n', si2.RiseTime);
+fprintf('2nd-order SettlingTime = %.4f\n', si2.SettlingTime);
 fprintf('2nd-order Overshoot   = %.4f%% (expected ~37%% for zeta=0.3)\n', ...
-        si2(1, 3));
-fprintf('2nd-order Peak        = %.4f\n', si2(1, 4));
-fprintf('2nd-order PeakTime    = %.4f\n', si2(1, 5));
+        si2.Overshoot);
+fprintf('2nd-order Peak        = %.4f\n', si2.Peak);
+fprintf('2nd-order PeakTime    = %.4f\n', si2.PeakTime);

@@ -5395,7 +5395,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"dcgain_ss",  "matlab_dcgain_ss",  1, "pppp"},
       {"dcgain_tf",  "matlab_dcgain_tf",  1, "pp"},
       {"bandwidth_tf","matlab_bandwidth_tf",0,"pp"},
-      {"stepinfo",   "matlab_stepinfo",   1, "pp"},
+      {"stepinfo",   "matlab_stepinfo_struct", 1, "pp"},
       {"kalman_L",   "matlab_kalman_L",   1, "ppppp"},
       {"kalman_P",   "matlab_kalman_P",   1, "ppppp"},
       {"kalmd_L",    "matlab_kalmd_L",    1, "ppppp"},

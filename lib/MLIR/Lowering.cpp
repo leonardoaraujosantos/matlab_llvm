@@ -2328,9 +2328,11 @@ void Lowerer::lowerStmt(const Stmt &St) {
         if (NE->Name == "table" || NE->Name == "readtable")
           RhsIsTable = true;
         /* Known struct-returning builtins. struct() is the textbook
-         * literal; linkBudget is the PROP-Tier-2b struct return.
-         * Adding more is a one-liner per future entry. */
-        if (NE->Name == "struct" || NE->Name == "linkBudget")
+         * literal; linkBudget is the PROP-Tier-2b struct return; stepinfo
+         * returns the CST step-response-metrics struct. Adding more is a
+         * one-liner per future entry. */
+        if (NE->Name == "struct" || NE->Name == "linkBudget" ||
+            NE->Name == "stepinfo")
           RhsIsStruct = true;
       }
     } else if (A.RHS && A.RHS->Kind == NodeKind::NameExpr) {
