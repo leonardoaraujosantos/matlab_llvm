@@ -15,13 +15,16 @@ This plan turns the corrected TRD into ordered, shippable phases. Every
 > **Phase 2** (`/v1/codegen/*`), a **partial Phase 3** (workspaces +
 > `/v1/files` + REPL figure capture), and **Phase 4** (`WS
 > /v1/dap/ws/{session_id}` — opaque DAP-over-WebSocket byte bridge to
-> `matlabc -dap`), and **Phase 5** (FastMCP tools mounted at `/mcp` —
-> streamable-HTTP, since SSE is deprecated). **Phase 0/8** ship as the root
-> `Dockerfile` + `docker-compose.yaml`. Run locally with `just backend-up`;
-> test with `just backend-test` (fake matlabc, no LLVM build needed). See
-> [`server/README.md`](../server/README.md). Deferred: Phase 6 (chat/RAG),
-> Phase 7 (auth/quotas/warm-pool), stateful sessions, and the dedicated
-> `/v1/plot` route.
+> `matlabc -dap`), **Phase 5** (FastMCP tools mounted at `/mcp` —
+> streamable-HTTP, since SSE is deprecated), and **Phase 6**
+> (`/v1/chat/completions`, OpenAI-compatible, grounded in a dependency-free
+> BM25 index over `docs/**/*.md`; proxies to OpenAI when a key is set, else
+> retrieval-only). **Phase 0/8** ship as the root `Dockerfile` +
+> `docker-compose.yaml`. Run locally with `just backend-up`; test with `just
+> backend-test` (fake matlabc, no LLVM build needed). See
+> [`server/README.md`](../server/README.md). Deferred: Phase 7
+> (auth/quotas/warm-pool), stateful sessions, and the dedicated `/v1/plot`
+> route.
 
 ---
 

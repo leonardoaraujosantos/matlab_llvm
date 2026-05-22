@@ -152,6 +152,26 @@ os.environ["MATLAB_BACKEND_MATLABC_BIN"] = str(_FAKE)
 os.environ["MATLAB_BACKEND_WORKSPACE_ROOT"] = str(_TMP / "ws")
 os.environ["MATLAB_BACKEND_WALL_TIMEOUT_S"] = "2"
 
+# Force the chat endpoint into offline (retrieval-only) mode and index a tiny
+# hermetic docs corpus instead of the real repo docs. Empty OPENAI_API_KEY in
+# os.environ overrides any value from server/.env.
+os.environ["OPENAI_API_KEY"] = ""
+_SRC_CTX = _TMP / "src_ctx"
+_DOCS = _SRC_CTX / "docs"
+_DOCS.mkdir(parents=True, exist_ok=True)
+(_DOCS / "optim.md").write_text(
+    "# Optimization Toolbox\n\n## fmincon\n"
+    "fmincon finds the minimum of a constrained nonlinear multivariable "
+    "function. Use it for constrained optimization with bounds and "
+    "nonlinear constraints.\n"
+)
+(_DOCS / "emit_sv.md").write_text(
+    "# SystemVerilog emission\n\n## -emit-sv\n"
+    "The -emit-systemverilog (-emit-sv) flag emits synthesizable "
+    "SystemVerilog from a .m file for ASIC/FPGA targets.\n"
+)
+os.environ["MATLAB_BACKEND_SOURCE_CONTEXT_ROOT"] = str(_SRC_CTX)
+
 
 @pytest.fixture()
 def client():

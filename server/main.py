@@ -11,10 +11,11 @@ from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI
 
+import rag
 from auth import require_auth
 from config import settings
 from mcp_tools import mcp_server
-from routers import check, codegen, dap_ws, files, repl
+from routers import chat, check, codegen, dap_ws, files, repl
 
 log = logging.getLogger("matlab_backend")
 
@@ -35,6 +36,12 @@ async def lifespan(app: FastAPI):
             "MATLAB_BACKEND_MATLABC_BIN. Routes will fail until it exists.",
             mc,
         )
+    if settings.rag_enabled:
+        try:
+            n = rag.build_default_index()
+            log.info("RAG index: %d chunks from %s/docs", n, settings.source_context_root)
+        except Exception as exc:  # never block startup on a corpus problem
+            log.warning("RAG index build failed: %s", exc)
     # Nest the MCP session-manager lifespan inside ours.
     async with mcp_app.lifespan(app):
         yield
@@ -49,7 +56,7 @@ def create_app() -> FastAPI:
     )
 
     protected = [Depends(require_auth)]
-    for module in (check, repl, codegen, files):
+    for module in (check, repl, codegen, files, chat):
         app.include_router(module.router, dependencies=protected)
     # WS bridge: auth is enforced inside the handler via a `?token=` query
     # param (browsers can't set Authorization on a WebSocket handshake).

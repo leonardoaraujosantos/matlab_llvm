@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class SessionMixin(BaseModel):
@@ -71,3 +71,20 @@ class FileListResponse(BaseModel):
 class UploadResponse(BaseModel):
     ok: bool
     file: FileInfo
+
+
+# --- /v1/chat/completions (OpenAI-compatible) ----------------------------
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+
+
+class ChatCompletionRequest(BaseModel):
+    # extra="allow" lets OpenAI params (top_p, max_tokens, ...) pass through
+    # to the upstream proxy untouched.
+    model_config = ConfigDict(extra="allow")
+
+    model: str | None = None
+    messages: list[ChatMessage]
+    stream: bool = False
+    temperature: float | None = None

@@ -72,9 +72,11 @@ COPY server/requirements.txt /app/server/requirements.txt
 RUN pip install --no-cache-dir -r /app/server/requirements.txt
 COPY server/ /app/server/
 
-# Point the server at the installed binary + the writable workspace volume.
+# Point the server at the installed binary + the writable workspace volume,
+# and the RAG corpus at the copied source context.
 ENV MATLAB_BACKEND_MATLABC_BIN=/usr/local/bin/matlabc \
-    MATLAB_BACKEND_WORKSPACE_ROOT=/workspace
+    MATLAB_BACKEND_WORKSPACE_ROOT=/workspace \
+    MATLAB_BACKEND_SOURCE_CONTEXT_ROOT=/app/source_context
 
 # Run as non-root for the untrusted-code paths.
 RUN useradd -m runner && mkdir -p /workspace && chown runner /workspace

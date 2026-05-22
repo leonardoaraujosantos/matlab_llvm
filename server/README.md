@@ -17,13 +17,22 @@ Phases implemented on this branch:
   `matlabc -dap`, opaque byte-stream passthrough, one child per connection.
 - **Phase 5** — FastMCP tools (`matlab_check/repl/codegen`, `list_files`,
   `read_file`) mounted at `/mcp` (streamable-HTTP).
+- **Phase 6** — `/v1/chat/completions` (OpenAI-compatible), grounded in a
+  dependency-free BM25 index over `docs/**/*.md`; proxies to OpenAI when a
+  key is set, else returns a retrieval-only answer.
 - **Phase 0/8** — `Dockerfile` + `docker-compose.yaml` at the repo root.
 
-Deferred: chat+RAG (Phase 6), auth/quotas/warm-pool hardening (Phase 7),
-stateful sessions, dedicated `/v1/plot`.
+Deferred: auth/quotas/warm-pool hardening (Phase 7), stateful sessions,
+dedicated `/v1/plot`.
 
 > The plan named the MCP mount `/mcp/sse`; SSE transport is deprecated in
 > MCP, so this ships modern **streamable-HTTP** at `/mcp` instead.
+
+## Secrets / `.env`
+
+The OpenAI proxy reads `OPENAI_API_KEY` (+ optional `OPENAI_BASE_URL`,
+`OPENAI_MODEL`) from the environment or a **gitignored** `server/.env`.
+Without a key, `/v1/chat/completions` runs in retrieval-only mode.
 
 ## Run it locally
 
@@ -65,6 +74,7 @@ Without `just`: `cd server && uv run uvicorn main:app` (set
 | GET  | `/v1/files/{path}` | download a file |
 | WS   | `/v1/dap/ws/{session_id}` | DAP-over-WebSocket bridge (`?program=`, `?token=`) |
 | MCP  | `/mcp` | FastMCP tools over streamable-HTTP for AI clients |
+| POST | `/v1/chat/completions` | OpenAI-compatible chat grounded in the docs (RAG) |
 
 Request bodies accept optional `user_id` / `session_id` (files endpoints take
 them as query params) which select the workspace directory.
@@ -85,6 +95,12 @@ Env vars, prefix `MATLAB_BACKEND_` (or a `.env` file). See `config.py`.
 | `OUTPUT_CAP_BYTES` | `1000000` | max captured stdout/stderr |
 | `MAX_UPLOAD_MB` | `25` | upload size cap |
 | `API_TOKEN` | `""` | bearer token; empty disables auth |
+| `SOURCE_CONTEXT_ROOT` | `<repo>` | root holding `docs/**/*.md` to index for RAG |
+| `RAG_ENABLED` | `true` | build the doc index at startup |
+| `RAG_TOP_K` | `4` | chunks retrieved per chat turn |
+| `OPENAI_API_KEY` | `""` | enables the chat proxy (bare name; from `.env` or env) |
+| `OPENAI_BASE_URL` | `https://api.openai.com/v1` | upstream chat endpoint |
+| `OPENAI_MODEL` | `gpt-4o-mini` | default model when the request omits one |
 
 > **RLIMIT_AS caveat:** it counts *virtual* address space, which over-counts
 > the large libLLVM/libMLIR mappings of a JIT process. Size it generously or
@@ -101,11 +117,12 @@ workspaces.py  per-user/session paths, traversal-safe resolve, artifact diff
 matlabc.py     async wrappers around the real matlabc CLI
 services.py    core ops shared by routers + MCP (check/repl/codegen/files)
 diagnostics.py clang-style diagnostic parsing
+rag.py         BM25 index over docs/**/*.md (dependency-free retrieval)
 models.py      request/response schemas
 auth.py        optional bearer-token dependency
 mcp_tools.py   FastMCP server + tools (not named `mcp` — would shadow the SDK)
-main.py        app factory + lifespan (+ MCP) + /healthz
-routers/       check, repl, codegen, files, dap_ws
+main.py        app factory + lifespan (+ MCP + RAG) + /healthz
+routers/       check, repl, codegen, files, dap_ws, chat
 tests/         pytest suite (fake matlabc stub in conftest.py)
 ```
 

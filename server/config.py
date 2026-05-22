@@ -10,6 +10,7 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Repo root = parent of the server/ directory this file lives in. Used to
@@ -54,6 +55,23 @@ class Settings(BaseSettings):
 
     # --- Auth (optional; empty disables, the local-dev default) ------------
     api_token: str = ""
+
+    # --- RAG / chat (Phase 6) ----------------------------------------------
+    # Root holding the docs corpus to index (`<root>/docs/**/*.md`). In the
+    # container this is /app/source_context; locally it's the repo root.
+    source_context_root: str = str(_REPO_ROOT)
+    rag_enabled: bool = True
+    rag_top_k: int = 4
+    rag_max_chunk_chars: int = 4000
+    # OpenAI proxy. Read the bare names too (compose passes OPENAI_API_KEY).
+    openai_api_key: str = Field("", validation_alias=AliasChoices("OPENAI_API_KEY", "MATLAB_BACKEND_OPENAI_API_KEY"))
+    openai_base_url: str = Field(
+        "https://api.openai.com/v1",
+        validation_alias=AliasChoices("OPENAI_BASE_URL", "MATLAB_BACKEND_OPENAI_BASE_URL"),
+    )
+    openai_model: str = Field(
+        "gpt-4o-mini", validation_alias=AliasChoices("OPENAI_MODEL", "MATLAB_BACKEND_OPENAI_MODEL")
+    )
 
     @property
     def matlabc_path(self) -> Path:
