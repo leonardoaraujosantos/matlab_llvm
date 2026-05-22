@@ -9,6 +9,9 @@ on:
       - 'docker-compose.yaml'
       - '.github/workflows/backend.yml'
   pull_request:
+    # `labeled` lets the heavy image job be run on demand via the
+    # `backend-image` label (see the image job's `if`).
+    types: [opened, synchronize, reopened, labeled]
     paths:
       - 'server/**'
       - 'Dockerfile'
