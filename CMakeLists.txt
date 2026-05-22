@@ -853,23 +853,35 @@ endif()
 #   1. Hangs: the flowchart simulate-dap / cocotb lanes spawn external simulator
 #      / DAP subprocesses that wait on I/O and can never exit in a headless
 #      environment (observed: a 31-minute hang of the full gate, plus a stale
-#      `--sim-dap` process). Bound them with a 300 s fail-fast cap.
-#   2. Thrash: the run-tests* execute lanes each recompile the runtime per
-#      fixture and saturate the CPU. Run concurrently under `-j` they thrash
-#      badly (run-tests-emit-c measured ~67 s alone vs ~663 s under -j4). Give
-#      them a shared RESOURCE_LOCK so ctest serializes them (each then runs at
-#      native speed; the light lanes still fill the gaps), plus a generous
-#      finite TIMEOUT so a genuinely stuck compile is still bounded.
+#      `--sim-dap` process). Bound every lane with a 300 s fail-fast cap.
+#   2. Thrash / starvation: many lanes are CPU-bound — the run-tests* lanes
+#      compile every fixture, and the SV/cocotb/Verilog-A lanes run
+#      Verilator / yosys / iverilog / cocotb / ADMS per fixture. Run
+#      concurrently under `-j` they thrash, and a fast lane can be *starved*
+#      past its timeout (run-tests runs ~5 s alone but timed out at 900 s while
+#      Verilator/yosys lanes hogged the CPU). Put ALL the CPU-heavy lanes under
+#      one shared RESOURCE_LOCK so ctest runs at most one at a time (each then
+#      runs at native speed; the light lanes fill the gaps), with a generous
+#      finite TIMEOUT so a genuinely stuck job is still bounded.
 set(_mlc_heavy_lanes
+    # execute / source-emit lanes (recompile the runtime per fixture)
     run-tests
     run-tests-emit-c run-tests-emit-cpp
     run-tests-emit-c-strict run-tests-emit-cpp-strict
     run-tests-emit-python run-tests-emit-typescript
-    run-tests-sym)
+    run-tests-sym
+    # external-toolchain lanes (Verilator / yosys / iverilog / cocotb / ADMS)
+    cocotb-tests
+    flowchart-emit-chart-cocotb flowchart-emit-diagram-cocotb
+    flowchart-emit-subsystem-sv-verilator
+    flowchart-emit-subsystem-sv-cosim
+    flowchart-emit-subsystem-sv-yosys
+    run-emit-va-admslint run-emit-va-cosim
+    emit-sv-tests)
 foreach(_mlc_h IN LISTS _mlc_heavy_lanes)
   if(TEST ${_mlc_h})
     set_tests_properties(${_mlc_h} PROPERTIES
-      RESOURCE_LOCK mlc_runtime_compile
+      RESOURCE_LOCK mlc_cpu_heavy
       TIMEOUT 900)
   endif()
 endforeach()
