@@ -847,3 +847,19 @@ if(MATLAB_LLVM_WITH_MLIR)
     set_tests_properties(run-tests-sym PROPERTIES SKIP_RETURN_CODE 77)
   endif()
 endif()
+
+# --- Fail-fast test timeouts ------------------------------------------------
+# Cap every registered test so a hung lane can't freeze the whole `ctest` gate.
+# The flowchart simulate-dap / cocotb lanes spawn external simulator / DAP
+# subprocesses that wait on I/O and can never exit in a headless environment
+# (observed: a 31-minute hang of the full gate, plus a stale `--sim-dap`
+# process). 300 s sits comfortably above the slowest legitimate lane
+# (run-tests-emit-c-strict, ~112 s) while bounding any hang. Only applied where
+# a test hasn't already set its own TIMEOUT.
+get_property(_mlc_all_tests DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" PROPERTY TESTS)
+foreach(_mlc_t IN LISTS _mlc_all_tests)
+  get_test_property(${_mlc_t} TIMEOUT _mlc_existing)
+  if(NOT _mlc_existing)
+    set_tests_properties(${_mlc_t} PROPERTIES TIMEOUT 300)
+  endif()
+endforeach()
