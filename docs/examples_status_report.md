@@ -87,12 +87,15 @@ Not a compiler bug.
 **Fix:** add `runtime_sym` + SymPP to the example AOT link recipe (the main
 `matlabc` binary already links them).
 
-### F. Flowchart fragments — 2 files — *not standalone-runnable*
+### F. Flowchart fragments — 2 files — *not standalone-runnable* — **RESOLVED (false positive)**
 
-| File | Issue |
-|---|---|
-| `mflowlink/cross_dialect.m` | needs `matlab_mflowlink_run` (mflowlink driver runtime); belongs to the `-emit-mflow-link-cpp` tooling |
-| `mflow/blocks/clamp.m` | a `.mflow` computed-block body fragment (leaves `matlab.*` unconverted by design) — meant to be embedded in a flowchart, not run standalone |
+Both run and are covered by flowchart CTest lanes (see the progress log below);
+the sweep mis-flagged them by linking them as plain LLVM programs.
+
+| File | Issue | How it actually runs |
+|---|---|---|
+| `mflowlink/cross_dialect.m` | needs the Flowchart libs (`mflowlink_run`) | `runtime/scripts/build_and_run.sh` detects `mflowlink_run`; tested by `test/Flowchart/CrossDialect` |
+| `mflow/blocks/clamp.m` | a custom-block `function` body, not a script | embedded via `custom_clamp.mflow`; `-emit-matlab` tested by `test/Flowchart/EmitMatlab` |
 
 ---
 
@@ -124,6 +127,7 @@ Not a compiler bug.
 | **B3** `step` honours a supplied time vector + `[y,tout]` 2-output, on ss **and tf** (new `step_ss_t`/`step_tf_t`, tf via controllable-canonical `tf2ss`). | model-object multi-return path + step dispatch | `test/Run/step_multiret.m` |
 | **scalar `^`** on the AOT path (`wn^2`) — `matlab.matpow(f64,f64)` → `matlab_pow_scalar`; `matrix^n` → `matlab_matpow`. Was a pre-existing gap (only the C/C++ emitters handled `^`). | LowerTensorOps matpow arm | `test/Run/step_multiret.m` |
 | **B2** `d2c` — ZOH discrete→continuous, the explicit-matrix inverse of c2d (`[A,B]=d2c(Ad,Bd,Ts)` via `logm`). | LowerTensorOps d2c splitter + `matlab_d2c_{A,B}` | `test/Run/d2c_roundtrip.m` |
+| **F** flowchart fragments — confirmed runnable + covered (not standalone `.m`): `cross_dialect.m` via `build_and_run.sh`; `clamp.m` custom block via `custom_clamp.mflow` emit-matlab. | n/a (false positive) | `test/Flowchart/CrossDialect`, `test/Flowchart/EmitMatlab` |
 
 ### TODO — remaining work (with real depth)
 
@@ -143,9 +147,18 @@ Original list items not yet done:
   SymPP isn't built. Both examples run via the AOT path. (To run an example
   directly: link `build/.../runtime_sym.cpp.o` + `-L<SymPP>/src -lsympp` +
   `-lgmp -lmpfr` alongside the normal runtime objects.)
-- [ ] **F — flowchart fragments** (`mflowlink/cross_dialect.m`,
-  `mflow/blocks/clamp.m`): not standalone-runnable `.m`; exercise via the
-  `-emit-mflow-link-cpp` / `.mflow` tooling.
+- [x] **F — flowchart fragments** (`mflowlink/cross_dialect.m`,
+  `mflow/blocks/clamp.m`): RESOLVED — a false positive of the standalone-`.m`
+  sweep (it linked them as plain LLVM programs). Both are runnable + already
+  covered by flowchart CTest lanes:
+  - `cross_dialect.m` runs via `runtime/scripts/build_and_run.sh` (which detects
+    `mflowlink_run` and links `libMatlabFlowchart.a` + `runtime_mflowlink_call.cpp`);
+    tested by `test/Flowchart/CrossDialect/run_tests.sh` (passes — checks the
+    logged-signal banner + the stable −0.31 scope value, tolerating the
+    near-zero noise entries).
+  - `mflow/blocks/clamp.m` is a custom-block body (a `function`, no script), used
+    by `examples/mflow/custom_clamp.mflow`; exercised via `-emit-matlab`
+    (matches `test/Flowchart/EmitMatlab/custom_path.expected`).
 - [ ] **A — HDL** (49 files): out of LLVM-execute scope (SV/cocotb targets).
 
 **Deeper blockers revealed *after* fixing each first-error** (the sweep only
