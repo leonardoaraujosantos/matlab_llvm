@@ -13,12 +13,35 @@ own directory. This is the project's canonical AOT execute path (same as
 
 ## Summary
 
+Original sweep (2026-05-22, before fixes):
+
 | Result | Count |
 |---|---|
 | **OK** (compile + link + run, exit 0) | **187 / 250** |
 | EMIT (frontend / lowering error) | 56 |
 | LINK (undefined symbols at AOT link) | 7 |
 | TIMEOUT / runtime crash | 0 |
+
+Re-sweep after this session's fixes (sym + mflowlink extras linked per the
+recipes below):
+
+| Result | Count |
+|---|---|
+| **OK** | **193 / 250** |
+| EMIT | 53 |
+| LINK | 4 |
+| TIMEOUT / runtime crash | 0 |
+
+The +6 OK are exactly the examples fixed this session: `bode_first_order`,
+`step_response_siso`, `multi_series` (plot), `symbolic_demo`,
+`quadrotor_derive_eom` (sym link), and `cross_dialect` (mflowlink link). The
+remaining non-HDL failures are all documented deeper gaps:
+**control (4)** — `lqr_double_integrator`, `kalman_tracker`, `c2d_zoh_demo`
+(gap #2, c2d/d2c on a tf object), `tf_basic` (`tf('s')` + `matpow`);
+**pde (3)** — `generateMesh`/`decsg`/`multicuboid` (gap #4);
+**`mflow/blocks/clamp.m`** — a custom-block function body (F false positive,
+runs via `custom_clamp.mflow`). The remaining **49 HDL** are out of LLVM-execute
+scope (SV/cocotb targets).
 
 **Clean folders (100% OK):** `antenna` (3), `comm` (19), `globaloptim` (7),
 `ident` (7), `images` (7), `mpc` (5), `optim` (16), `rf` (10), `signal` (10),
