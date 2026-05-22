@@ -168,12 +168,13 @@ saw the first error per file; these surfaced once it was fixed):
 
 | Example | Now blocked on | Depth |
 |---|---|---|
-| `control/bode_first_order` | `bode` 3-output `[mag,phase,wout]=bode(G,w)` + `margin` **on a `tf`** (have `margin` on `ss`) | CST feature |
-| `control/lqr_double_integrator` | `c2d(ss_obj, Ts, 'zoh')` — c2d on a model object + method string | CST feature |
-| `control/kalman_tracker` | `c2d(ss_obj, Ts, 'zoh')` (kalman 3-output now works) | CST feature |
+| `control/bode_first_order` | **RUNS** — gap #3 (bode 3-output + margin/dcgain/bandwidth on tf) done | — |
+| `control/step_response_siso` | **RUNS** — B3 step + gap #1 (stepinfo struct) done | — |
+| `control/lqr_double_integrator` | `c2d(ss_obj, Ts, 'zoh')` — c2d on a model object + method string (gap #2) | CST feature |
+| `control/kalman_tracker` | `c2d(ss_obj, Ts, 'zoh')` (kalman 3-output now works) (gap #2) | CST feature |
 | `control/tf_basic` | `tf('s')` builder + `matpow` on a tf | CST feature |
-| `control/c2d_zoh_demo` | `c2d`/`d2c` **on a tf model object** (returning a discrete/continuous tf) + `disp(tf)` display; `d2c` exists for explicit ss matrices but `c2d(tf,Ts,'zoh')` returns a non-tf today | CST feature |
-| `pde/*` (3) | `generateMesh` / `decsg` / `multicuboid` / `femodel` | PDE Toolbox |
+| `control/c2d_zoh_demo` | `c2d`/`d2c` **on a tf model object** + `disp(tf)` (gap #2); the underlying ss `d2c`/`logm` now work | CST feature |
+| `pde/*` (3) | `generateMesh` / `decsg` / `multicuboid` / `femodel` (gap #4) | PDE Toolbox |
 
 ### Known pre-existing limitations surfaced (NOT regressions, NOT yet fixed)
 
@@ -189,10 +190,11 @@ clean tree and is independent of this work:
   (builtins like `plot` do).
 - `numel()` of a cell-element-result; `struct('a',1,'b',2)` (struct name-value
   construction) — both report "unsupported call shape".
-- `matlab_logm` returns an empty matrix for a full matrix whose real Schur
-  form keeps a 2×2 block (the Francis QR doesn't split a real-eigenvalue 2×2
-  block into triangular). It works for diagonal / cleanly-deflating matrices.
-  This limits `d2c` (ZOH) to those — the diagonal/decoupled case round-trips.
+- ~~`matlab_logm` returns an empty matrix for a full matrix whose real Schur
+  form keeps a 2×2 block.~~ **FIXED** (gap #5) — `matlab_logm` now standardizes
+  real-eigenvalue 2×2 Schur blocks (Givens triangularize), so it (and `d2c`)
+  work for general real-eigenvalue matrices. Genuinely complex-eigenvalue
+  blocks are still rejected (a complex-aware log is a separate item).
 
 ---
 
@@ -203,7 +205,11 @@ remains are the *deeper, per-example chains* that only surfaced after each
 first-error fix. Each below is a concrete plan with the touch points and an
 effort/risk estimate. Suggested order (cheap→expensive): **3 → 1 → 5 → 2 → 4**.
 
-### 1. `stepinfo` as a struct (`S.RiseTime`) — *small*
+**Status:** #1, #3, #5 are **DONE** (suite 481) — `bode_first_order.m` and
+`step_response_siso.m` now run end to end, and `d2c` works for general
+real-eigenvalue systems. #2 and #4 remain.
+
+### 1. `stepinfo` as a struct (`S.RiseTime`) — *small* — DONE (21a4297... see progress log)
 
 - **Blocks:** `step_response_siso.m` (rise/settle/overshoot section).
 - **Root cause:** `matlab_stepinfo(y,t)` returns a 1×5 row `[Rise, Settle, Over,
@@ -246,7 +252,7 @@ effort/risk estimate. Suggested order (cheap→expensive): **3 → 1 → 5 → 2
 - **Risk:** touches the model-object classdefs + display; do it as the staged
   sequence above so each step is testable.
 
-### 3. `bode` 3-output + `margin` on a tf — *small–medium*
+### 3. `bode` 3-output + `margin` on a tf — *small–medium* — DONE
 
 - **Blocks:** `bode_first_order.m`.
 - **Root cause:** `bode` has 1-output (mag) and a 2-output `[mag,phase]`
@@ -273,7 +279,7 @@ effort/risk estimate. Suggested order (cheap→expensive): **3 → 1 → 5 → 2
   tetrahedral 3-D mesher with `Hmax`), and the `femodel`/`generateMesh`
   plumbing. Multi-week; sequence under the PDE roadmap, not this gap list.
 
-### 5. `matlab_logm` 2×2-real-block fix (generalizes `d2c`) — *medium (numerical)*
+### 5. `matlab_logm` 2x2-real-block fix (generalizes `d2c`) — *medium (numerical)* — DONE
 
 - **Blocks:** `d2c` on a full (non-diagonal) matrix; `logm` generally.
 - **Root cause:** `francis_qr_` leaves a 2×2 block for a pair of *real*

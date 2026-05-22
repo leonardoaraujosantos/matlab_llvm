@@ -2466,8 +2466,49 @@ matlab_mat *matlab_logm(matlab_mat *A) {
     hessenberg_inplace_(T.data(), n, U.data());
     francis_qr_(T.data(), n, U.data());
 
-    /* Validate preconditions on the Schur form. */
     const double eps = 1e-12;
+
+    /* Standardize 2×2 blocks with REAL eigenvalues into upper-triangular
+     * form.  The Francis QR can leave a pair of real eigenvalues as an
+     * undeflated 2×2 block; Parlett's recurrence below needs a (quasi-)
+     * triangular T.  For each such block apply the similarity T ← Qᵀ T Q,
+     * U ← U Q with Q's first column the eigenvector for λ — this zeroes the
+     * subdiagonal.  Genuinely complex pairs (disc < 0) are left as-is and the
+     * validation below rejects them (no real logarithm). */
+    for (int64_t i = 0; i + 1 < n; ++i) {
+        double c = T[(i + 1) * n + i];
+        double scale = std::fabs(T[i * n + i]) +
+                       std::fabs(T[(i + 1) * n + (i + 1)]) + 1.0;
+        if (std::fabs(c) <= eps * scale) continue;     /* already triangular */
+        double a = T[i * n + i], b = T[i * n + (i + 1)],
+               d = T[(i + 1) * n + (i + 1)];
+        double disc = (a - d) * (a - d) + 4.0 * b * c;
+        if (disc < 0.0) continue;                       /* complex pair */
+        double sq = std::sqrt(disc);
+        double lam = ((a + d) + (a >= d ? sq : -sq)) * 0.5;   /* an eigenvalue */
+        double v0, v1;                                  /* eigenvector for λ */
+        if (std::fabs(b) >= std::fabs(c)) { v0 = b; v1 = lam - a; }
+        else { v0 = lam - d; v1 = c; }
+        double nrm = std::hypot(v0, v1);
+        if (nrm == 0.0) continue;
+        double cs = v0 / nrm, sn = v1 / nrm;            /* Q = [[cs,-sn],[sn,cs]] */
+        for (int64_t k = 0; k < n; ++k) {               /* Qᵀ T : rows i, i+1 */
+            double ti = T[i * n + k], ti1 = T[(i + 1) * n + k];
+            T[i * n + k]       =  cs * ti + sn * ti1;
+            T[(i + 1) * n + k] = -sn * ti + cs * ti1;
+        }
+        for (int64_t k = 0; k < n; ++k) {               /* T Q + U Q : cols i, i+1 */
+            double ti = T[k * n + i], ti1 = T[k * n + (i + 1)];
+            T[k * n + i]       =  cs * ti + sn * ti1;
+            T[k * n + (i + 1)] = -sn * ti + cs * ti1;
+            double ui = U[k * n + i], ui1 = U[k * n + (i + 1)];
+            U[k * n + i]       =  cs * ui + sn * ui1;
+            U[k * n + (i + 1)] = -sn * ui + cs * ui1;
+        }
+        T[(i + 1) * n + i] = 0.0;                        /* exact zero */
+    }
+
+    /* Validate preconditions on the Schur form. */
     for (int64_t i = 0; i < n; ++i) {
         /* Subdiagonal must be (near) zero — no 2×2 quasi-triangular blocks. */
         if (i + 1 < n) {
