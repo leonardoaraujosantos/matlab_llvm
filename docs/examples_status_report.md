@@ -382,11 +382,21 @@ progress with `--progress`):
 ctest --test-dir build --progress -R 'run-tests|emit-sv|emitc'
 ```
 
-**Full `ctest` is now bounded (commit `687e58f`):** the `flowchart-simulate-dap-*`
-and cocotb lanes spawn external `matlabc --sim-dap` / simulator subprocesses that
-can wait on DAP I/O and never terminate in a headless environment (a 31-min hang
-was observed, plus a 7-day-old stale `--sim-dap` process). A directory-scope
-sweep at the end of `CMakeLists.txt` now sets `TIMEOUT=300` on every registered
-lane that doesn't already carry one, so a stuck lane fail-fasts at 300 s instead
-of freezing the whole gate (300 s > the slowest legit lane, ~112 s). The `-R`
-subset above is still the fastest day-to-day gate.
+**Full `ctest` is now bounded + thrash-free** (commits `687e58f`, `14edc75`,
+`7c4b1bc`). Two problems were addressed by a sweep at the end of `CMakeLists.txt`:
+
+- *Hangs:* the `flowchart-simulate-dap-*` / cocotb lanes spawn external
+  `matlabc --sim-dap` / simulator subprocesses that can wait on DAP I/O and never
+  terminate in a headless environment (a 31-min hang was observed, plus a stale
+  `--sim-dap` process). Every lane gets a **300 s fail-fast TIMEOUT**, so a stuck
+  lane dies at 300 s instead of freezing the gate.
+- *Thrash:* the `run-tests*` execute lanes each recompile the runtime and
+  saturate the CPU; concurrently under `-j4` they thrash (`run-tests-emit-c`
+  ~67 s alone vs ~663 s contended). They get a shared `RESOURCE_LOCK`
+  (`mlc_runtime_compile`) so ctest serializes them, plus a **900 s TIMEOUT** (the
+  slowest, `emit-c/cpp-strict`, run ~600–640 s serialized).
+
+Result: the full gate runs **green, 0 false-timeouts**, but is **~40 min** wall
+(the `emit-*-strict` lanes are ~10 min each — inherent to compiling every fixture
+through the C/C++ toolchain). For a quick gate use the `-R` subset above (~2 min)
+or `test/Run` via the fast harness.
