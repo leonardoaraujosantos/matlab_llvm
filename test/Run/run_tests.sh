@@ -83,12 +83,45 @@ for m in "$TESTDIR"/*.m; do
     # shellcheck disable=SC2207
     plot_libs=( $(pkg-config --libs cairo cairo-svg cairo-pdf) )
   fi
+  # Per-test opt-in for the Symbolic Math Toolbox (SymPP).  A
+  # `<name>.requires-sym` marker links the prebuilt WITH_SYM runtime object
+  # (build/.../runtime_sym.cpp.o — only present when the build was configured
+  # with -DMATLAB_LLVM_WITH_SYM=ON, which carries the SymPP include flags) plus
+  # libsympp and its GMP / MPFR deps.  SymPP_DIR is read from CMakeCache so it
+  # matches how matlabc itself was built.  Missing object or lib -> SKIP.
+  sym_objs=()
+  sym_libs=()
+  if [[ -e "${m%.m}.requires-sym" ]]; then
+    symo="$ROOT/build/CMakeFiles/matlabc.dir/runtime/toolbox/sym/runtime_sym.cpp.o"
+    symdir="${SYMPP_DIR:-}"
+    if [[ -z "$symdir" && -e "$ROOT/build/CMakeCache.txt" ]]; then
+      symdir="$(sed -n 's/^SymPP_DIR[^=]*=//p' "$ROOT/build/CMakeCache.txt" | head -1)"
+    fi
+    symlibdir=""
+    for sub in src lib lib64; do
+      if compgen -G "$symdir/$sub/libsympp.*" >/dev/null 2>&1; then
+        symlibdir="$symdir/$sub"; break
+      fi
+    done
+    if [[ ! -e "$symo" || -z "$symlibdir" ]]; then
+      echo "SKIP $base (requires-sym, no SymPP build)"
+      rm -f "$tmpll" "$tmpbin"; continue
+    fi
+    sym_objs=( "$symo" )
+    sym_libs=( -L"$symlibdir" -lsympp -Wl,-rpath,"$symlibdir" )
+    for gl in /opt/homebrew/lib /usr/local/lib; do
+      [[ -d "$gl" ]] && sym_libs+=( -L"$gl" -Wl,-rpath,"$gl" )
+    done
+    sym_libs+=( -lgmp -lmpfr )
+  fi
   if ! "$CXX" -DMATLAB_LLVM_WITH_PLOT=1 -Wno-override-module "$tmpll" \
               "${RUNTIME_SRCS[@]}" \
               ${plot_srcs[@]+"${plot_srcs[@]}"} \
+              ${sym_objs[@]+"${sym_objs[@]}"} \
               -I"$ROOT/runtime" \
               ${plot_cflags[@]+"${plot_cflags[@]}"} \
               ${plot_libs[@]+"${plot_libs[@]}"} \
+              ${sym_libs[@]+"${sym_libs[@]}"} \
               -o "$tmpbin" 2>/dev/null; then
     echo "FAIL $base: clang link failed"
     fail=$((fail+1))

@@ -120,6 +120,7 @@ Not a compiler bug.
 | `ssdata` / `tfdata` + **function-style class-method dispatch for multi-return** | `ss`/`tf` classdef methods + lowering | `test/Run/cst_data_extract.m` |
 | CST model-object multi-return splitters: `[kest,L,P]=kalman(sys,Qn,Rn)`, `[Gm,Pm,Wcg,Wcp]=margin(sys)` | model-object path + `matlab_margin_ss_auto` | `test/Run/cst_multiret.m` |
 | **D** cell-of-strings `{'a','b'}` (kind=3 string elements) → `legend({...})` works | `matlab_cell_set_str` + `cell_get_mat` char-code | `test/Run/cell_strings.m` |
+| **E** symbolic AOT link recipe — `.requires-sym` marker links the prebuilt `WITH_SYM` `runtime_sym.o` + `libsympp` + GMP/MPFR (skips when SymPP absent). `symbolic_demo.m` / `quadrotor_derive_eom.m` run. | `run_tests.sh` / `fastrun.sh` `.requires-sym` | `test/Run/sym_basic.m` |
 
 ### TODO — remaining work (with real depth)
 
@@ -131,9 +132,12 @@ Original list items not yet done:
 - [ ] **B3 — `step` 2-output `[y, t] = step(sys)`** (`step_response_siso.m`):
   needs the time vector as a 2nd output. Note `step(sys, t)` currently ignores
   a supplied time vector (uses default dt/N) — fix that first, then echo `t`.
-- [ ] **E — symbolic** (`symbolic_demo.m`, `quadrotor_derive_eom.m`): compile
-  fine; the **AOT link recipe** must add `runtime_sym` + the external **SymPP**
-  lib (the `matlabc` binary already links them — this is config, not a code bug).
+- [x] **E — symbolic** (`symbolic_demo.m`, `quadrotor_derive_eom.m`): DONE.
+  The `.requires-sym` test marker links the prebuilt `WITH_SYM` `runtime_sym.o`
+  + `libsympp` (SymPP_DIR read from `CMakeCache.txt`) + GMP/MPFR, skipping when
+  SymPP isn't built. Both examples run via the AOT path. (To run an example
+  directly: link `build/.../runtime_sym.cpp.o` + `-L<SymPP>/src -lsympp` +
+  `-lgmp -lmpfr` alongside the normal runtime objects.)
 - [ ] **F — flowchart fragments** (`mflowlink/cross_dialect.m`,
   `mflow/blocks/clamp.m`): not standalone-runnable `.m`; exercise via the
   `-emit-mflow-link-cpp` / `.mflow` tooling.
