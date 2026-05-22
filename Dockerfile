@@ -41,8 +41,8 @@ RUN cmake -S . -B build -G Ninja \
         -DMLIR_DIR=/usr/lib/llvm-${LLVM_VERSION}/lib/cmake/mlir \
     && cmake --build build -j
 
-# --- STAGE 2: LEAN RUNTIME ------------------------------------------------
-FROM ubuntu:24.04
+# --- STAGE 2: LEAN RUNTIME (target: production) ---------------------------
+FROM ubuntu:24.04 AS production
 ENV DEBIAN_FRONTEND=noninteractive
 ARG LLVM_VERSION=20
 
@@ -88,4 +88,6 @@ USER runner
 WORKDIR /app/server
 
 EXPOSE 8000
+HEALTHCHECK --interval=30s --timeout=30s --start-period=90s --retries=5 \
+    CMD python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz', timeout=25)"
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
