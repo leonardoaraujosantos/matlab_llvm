@@ -166,3 +166,10 @@ isolation guarantees (timeout, output cap, env scrub).
 `just backend-cov` runs the same suite with a coverage report — **92%**
 (the gaps are the `preexec` child, which runs post-fork and can't be
 instrumented, plus a few defensive error branches).
+
+`just backend-itest` runs **live-server integration tests** (`integration/`):
+it boots a real `uvicorn` subprocess and drives it over real HTTP/WS —
+check, stateful REPL, codegen, file round-trip, plot, chat, MCP-over-HTTP,
+and the DAP WebSocket bridge. It uses `build/matlabc` when present (the real
+compiler), otherwise the fake stub, so it runs anywhere. (The plot test skips
+if the real build lacks `-DMATLAB_LLVM_WITH_PLOT`.)

@@ -521,3 +521,8 @@ backend-test:
 # Backend tests with a coverage report (target: >90%).
 backend-cov:
     cd server && uv run --extra dev pytest -q --cov --cov-report=term-missing
+
+# Live-server integration tests: boot uvicorn and hit it over real HTTP/WS.
+# Uses build/matlabc when present (real compiler), else a fake stub.
+backend-itest:
+    cd server && uv run --extra dev pytest integration -q
