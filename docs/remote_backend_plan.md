@@ -12,13 +12,15 @@ This plan turns the corrected TRD into ordered, shippable phases. Every
 
 > **Implementation status (branch `feat_compiler_backend`).** The `server/`
 > tree exists with **Phase 1** (`/v1/check`, `/v1/repl`, hardened sandbox),
-> **Phase 2** (`/v1/codegen/*`), and a **partial Phase 3** (workspaces +
-> `/v1/files` + REPL figure capture). **Phase 0/8** ship as the root
-> `Dockerfile` + `docker-compose.yaml`. Run locally with `just backend-up`;
-> test with `just backend-test` (fake matlabc, no LLVM build needed). See
-> [`server/README.md`](../server/README.md). Deferred: Phase 4 (DAP-WS),
-> Phase 5 (MCP), Phase 6 (chat/RAG), Phase 7 (auth/quotas/warm-pool),
-> stateful sessions, and the dedicated `/v1/plot` route.
+> **Phase 2** (`/v1/codegen/*`), a **partial Phase 3** (workspaces +
+> `/v1/files` + REPL figure capture), and **Phase 4** (`WS
+> /v1/dap/ws/{session_id}` — opaque DAP-over-WebSocket byte bridge to
+> `matlabc -dap`). **Phase 0/8** ship as the root `Dockerfile` +
+> `docker-compose.yaml`. Run locally with `just backend-up`; test with `just
+> backend-test` (fake matlabc, no LLVM build needed). See
+> [`server/README.md`](../server/README.md). Deferred: Phase 5 (MCP),
+> Phase 6 (chat/RAG), Phase 7 (auth/quotas/warm-pool), stateful sessions,
+> and the dedicated `/v1/plot` route.
 
 ---
 

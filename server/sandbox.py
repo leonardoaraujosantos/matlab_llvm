@@ -140,3 +140,35 @@ async def run(
         stdout_truncated=so_trunc,
         stderr_truncated=se_trunc,
     )
+
+
+async def spawn(
+    argv: list[str],
+    *,
+    cwd: str | os.PathLike,
+    stdin: int = asyncio.subprocess.PIPE,
+    stdout: int = asyncio.subprocess.PIPE,
+    stderr: int = asyncio.subprocess.PIPE,
+) -> asyncio.subprocess.Process:
+    """Spawn a confined *long-lived* child (rlimits + new session + scrubbed
+    env + cwd jail) and hand back the Process for the caller to drive.
+
+    Use this for interactive sessions (DAP) where ``run``'s
+    communicate/timeout model doesn't fit. Call :func:`terminate` to kill the
+    whole process group when the session ends.
+    """
+    return await asyncio.create_subprocess_exec(
+        *argv,
+        stdin=stdin,
+        stdout=stdout,
+        stderr=stderr,
+        cwd=str(cwd),
+        env=_child_env(Path(cwd)),
+        preexec_fn=_make_preexec(),
+    )
+
+
+def terminate(proc: asyncio.subprocess.Process) -> None:
+    """SIGKILL the child's whole process group, if still running."""
+    if proc.returncode is None:
+        _kill_group(proc.pid)

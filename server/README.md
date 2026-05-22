@@ -13,10 +13,12 @@ Phases implemented on this branch:
 - **Phase 2** — `/v1/codegen/{python,typescript,c,cpp,systemverilog}`.
 - **Phase 3 (partial)** — workspaces + `/v1/files` upload/list/download and
   REPL figure-capture artifacts. (Dedicated `/v1/plot` deferred.)
+- **Phase 4** — `WS /v1/dap/ws/{session_id}`: DAP-over-WebSocket bridge to
+  `matlabc -dap`, opaque byte-stream passthrough, one child per connection.
 - **Phase 0/8** — `Dockerfile` + `docker-compose.yaml` at the repo root.
 
-Deferred: DAP-over-WebSocket (Phase 4), MCP/SSE (Phase 5), chat+RAG
-(Phase 6), auth/quotas/warm-pool hardening (Phase 7), stateful sessions.
+Deferred: MCP/SSE (Phase 5), chat+RAG (Phase 6), auth/quotas/warm-pool
+hardening (Phase 7), stateful sessions, dedicated `/v1/plot`.
 
 ## Run it locally
 
@@ -56,6 +58,7 @@ Without `just`: `cd server && uv run uvicorn main:app` (set
 | POST | `/v1/files` | multipart upload into the session workspace |
 | GET  | `/v1/files` | list the workspace tree |
 | GET  | `/v1/files/{path}` | download a file |
+| WS   | `/v1/dap/ws/{session_id}` | DAP-over-WebSocket bridge (`?program=`, `?token=`) |
 
 Request bodies accept optional `user_id` / `session_id` (files endpoints take
 them as query params) which select the workspace directory.

@@ -13,7 +13,7 @@ from fastapi import Depends, FastAPI
 
 from auth import require_auth
 from config import settings
-from routers import check, codegen, files, repl
+from routers import check, codegen, dap_ws, files, repl
 
 log = logging.getLogger("matlab_backend")
 
@@ -44,6 +44,9 @@ def create_app() -> FastAPI:
     protected = [Depends(require_auth)]
     for module in (check, repl, codegen, files):
         app.include_router(module.router, dependencies=protected)
+    # WS bridge: auth is enforced inside the handler via a `?token=` query
+    # param (browsers can't set Authorization on a WebSocket handshake).
+    app.include_router(dap_ws.router)
 
     @app.get("/healthz", tags=["meta"])
     async def healthz() -> dict:

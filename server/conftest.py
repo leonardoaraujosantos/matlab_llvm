@@ -16,7 +16,7 @@ import pytest
 # Body of the fake matlabc. Behaviour keys off marker tokens in the source
 # so individual tests can request OK / error / hang / artifact paths.
 _FAKE_BODY = r'''
-import os, sys, time
+import json, os, sys, time
 
 args = sys.argv[1:]
 EMIT = {"-emit-python": "python", "-emit-typescript": "typescript",
@@ -25,10 +25,86 @@ mode, target, infile = "check", None, None
 for a in args:
     if a == "-repl":
         mode = "repl"
+    elif a == "-dap":
+        mode = "dap"
     elif a in EMIT:
         mode, target = "emit", EMIT[a]
     elif not a.startswith("-"):
         infile = a
+
+if mode == "dap":
+    rin, rout = sys.stdin.buffer, sys.stdout.buffer
+    seq = [0]
+
+    def read_frame():
+        hdr = b""
+        while not hdr.endswith(b"\r\n\r\n"):
+            ch = rin.read(1)
+            if not ch:
+                return None
+            hdr += ch
+        length = 0
+        for ln in hdr.split(b"\r\n"):
+            if ln.lower().startswith(b"content-length:"):
+                length = int(ln.split(b":", 1)[1].strip())
+        body = b""
+        while len(body) < length:
+            c = rin.read(length - len(body))
+            if not c:
+                return None
+            body += c
+        return json.loads(body.decode("utf-8"))
+
+    def send(obj):
+        seq[0] += 1
+        obj["seq"] = seq[0]
+        b = json.dumps(obj).encode("utf-8")
+        rout.write(b"Content-Length: %d\r\n\r\n" % len(b))
+        rout.write(b)
+        rout.flush()
+
+    def respond(req, body=None):
+        send({"type": "response", "request_seq": req["seq"], "success": True,
+              "command": req["command"], "body": body or {}})
+
+    def event(name, body=None):
+        send({"type": "event", "event": name, "body": body or {}})
+
+    while True:
+        req = read_frame()
+        if req is None:
+            break
+        cmd = req.get("command")
+        if cmd == "initialize":
+            respond(req, {"supportsConfigurationDoneRequest": True})
+            event("initialized")
+        elif cmd == "setBreakpoints":
+            bps = req.get("arguments", {}).get("breakpoints", [])
+            respond(req, {"breakpoints": [{"verified": True, "line": b.get("line", 1)} for b in bps]})
+        elif cmd == "launch":
+            respond(req)
+            event("stopped", {"reason": "breakpoint", "threadId": 1, "allThreadsStopped": True})
+        elif cmd == "threads":
+            respond(req, {"threads": [{"id": 1, "name": "main"}]})
+        elif cmd == "stackTrace":
+            respond(req, {"stackFrames": [{"id": 1, "name": "main", "line": 1, "column": 1}], "totalFrames": 1})
+        elif cmd == "scopes":
+            respond(req, {"scopes": [{"name": "Locals", "variablesReference": 1000, "expensive": False}]})
+        elif cmd == "variables":
+            respond(req, {"variables": [{"name": "x", "value": "42", "variablesReference": 0}]})
+        elif cmd in ("next", "stepIn", "stepOut"):
+            respond(req)
+            event("stopped", {"reason": "step", "threadId": 1, "allThreadsStopped": True})
+        elif cmd == "continue":
+            respond(req, {"allThreadsContinued": True})
+            event("terminated")
+            break
+        elif cmd == "disconnect":
+            respond(req)
+            break
+        else:
+            respond(req)
+    sys.exit(0)
 
 if mode == "repl":
     src = sys.stdin.read()
