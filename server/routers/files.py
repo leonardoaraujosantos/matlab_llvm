@@ -12,6 +12,7 @@ import mimetypes
 from fastapi import APIRouter, File, HTTPException, Query, UploadFile, status
 from fastapi.responses import FileResponse
 
+import limits
 from config import settings
 from models import FileInfo, FileListResponse, UploadResponse
 from workspaces import list_files, resolve_in_workspace, workspace_for
@@ -38,6 +39,8 @@ async def upload(
 
     dest.parent.mkdir(parents=True, exist_ok=True)
     cap = settings.max_upload_mb * 1024 * 1024
+    quota = settings.user_quota_mb * 1024 * 1024
+    base = limits.dir_size(ws) if quota > 0 else 0
     written = 0
     with dest.open("wb") as out:
         while chunk := await file.read(_CHUNK):
@@ -46,8 +49,15 @@ async def upload(
                 out.close()
                 dest.unlink(missing_ok=True)
                 raise HTTPException(
-                    status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    413,  # Content Too Large
                     f"upload exceeds {settings.max_upload_mb} MB",
+                )
+            if quota > 0 and base + written > quota:
+                out.close()
+                dest.unlink(missing_ok=True)
+                raise HTTPException(
+                    413,  # Content Too Large
+                    f"workspace quota of {settings.user_quota_mb} MB exceeded",
                 )
             out.write(chunk)
 

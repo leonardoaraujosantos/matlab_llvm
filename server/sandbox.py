@@ -20,6 +20,7 @@ import signal
 from dataclasses import dataclass
 from pathlib import Path
 
+import limits
 from config import settings
 
 # Env vars that let matlabc find its dynamically-linked libs (libLLVM /
@@ -107,28 +108,28 @@ async def run(
     output_cap = settings.output_cap_bytes if output_cap is None else output_cap
     stdin_bytes = stdin.encode() if isinstance(stdin, str) else stdin
 
-    proc = await asyncio.create_subprocess_exec(
-        *argv,
-        stdin=asyncio.subprocess.PIPE if stdin_bytes is not None else asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        cwd=str(cwd),
-        env=_child_env(Path(cwd)),
-        preexec_fn=_make_preexec(),
-    )
-
     timed_out = False
-    try:
-        out, err = await asyncio.wait_for(
-            proc.communicate(input=stdin_bytes), timeout=timeout
+    async with limits.job_semaphore():  # global concurrency cap
+        proc = await asyncio.create_subprocess_exec(
+            *argv,
+            stdin=asyncio.subprocess.PIPE if stdin_bytes is not None else asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=str(cwd),
+            env=_child_env(Path(cwd)),
+            preexec_fn=_make_preexec(),
         )
-    except asyncio.TimeoutError:
-        timed_out = True
-        _kill_group(proc.pid)
         try:
-            out, err = await asyncio.wait_for(proc.communicate(), timeout=2.0)
-        except (asyncio.TimeoutError, ProcessLookupError):
-            out, err = b"", b""
+            out, err = await asyncio.wait_for(
+                proc.communicate(input=stdin_bytes), timeout=timeout
+            )
+        except asyncio.TimeoutError:
+            timed_out = True
+            _kill_group(proc.pid)
+            try:
+                out, err = await asyncio.wait_for(proc.communicate(), timeout=2.0)
+            except (asyncio.TimeoutError, ProcessLookupError):
+                out, err = b"", b""
 
     stdout, so_trunc = _cap(out, output_cap)
     stderr, se_trunc = _cap(err, output_cap)

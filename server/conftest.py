@@ -16,7 +16,7 @@ import pytest
 # Body of the fake matlabc. Behaviour keys off marker tokens in the source
 # so individual tests can request OK / error / hang / artifact paths.
 _FAKE_BODY = r'''
-import json, os, sys, time
+import json, os, re, sys, time
 
 args = sys.argv[1:]
 EMIT = {"-emit-python": "python", "-emit-typescript": "typescript",
@@ -107,20 +107,49 @@ if mode == "dap":
     sys.exit(0)
 
 if mode == "repl":
-    src = sys.stdin.read()
-    if "INFLOOP" in src:
-        while True:
-            time.sleep(0.2)
-    if "PLOT" in src:
-        with open(os.path.join(os.getcwd(), "figure_1.png"), "wb") as fh:
-            fh.write(b"\x89PNG\r\n\x1a\n")
-    if "ERR" in src:
-        sys.stderr.write("error: simulated repl error\n")
-        sys.exit(1)
-    for line in src.splitlines():
-        line = line.strip()
-        if line:
-            sys.stdout.write("ans = %s\n" % line)
+    # Line-by-line loop with a tiny variable store. Works for both the
+    # stateless (read-to-EOF) and stateful (persistent process) modes.
+    store = {}
+    while True:
+        raw = sys.stdin.readline()
+        if not raw:
+            break
+        s = raw.strip()
+        if not s:
+            continue
+        if "INFLOOP" in s:
+            while True:
+                time.sleep(0.2)
+        if "PLOT" in s:
+            with open(os.path.join(os.getcwd(), "figure_1.png"), "wb") as fh:
+                fh.write(b"\x89PNG\r\n\x1a\n")
+            continue
+        if "ERR" in s:
+            sys.stderr.write("error: simulated repl error\n")
+            sys.stderr.flush()
+            continue
+        m = re.match(r"^disp\((.+)\)$", s)
+        if m:
+            arg = m.group(1).strip()
+            if len(arg) >= 2 and arg[0] == "'" and arg[-1] == "'":
+                sys.stdout.write(arg[1:-1] + "\n")
+            elif arg in store:
+                sys.stdout.write(store[arg] + "\n")
+            else:
+                sys.stdout.write(arg + "\n")
+            sys.stdout.flush()
+            continue
+        m = re.match(r"^([A-Za-z_]\w*)\s*=\s*(.+)$", s)
+        if m:
+            name, val = m.group(1), m.group(2).strip()
+            silent = val.endswith(";")
+            store[name] = val.rstrip(";").strip()
+            if not silent:
+                sys.stdout.write("%s = %s\n" % (name, store[name]))
+                sys.stdout.flush()
+            continue
+        sys.stdout.write("ans = %s\n" % s)
+        sys.stdout.flush()
     sys.exit(0)
 
 src = open(infile).read() if infile else ""

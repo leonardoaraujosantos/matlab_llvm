@@ -40,7 +40,7 @@ def test_mcp_repl_and_codegen():
 
     repl, cg = _run(go())
     assert repl["ok"] is True
-    assert "ans =" in repl["stdout"]
+    assert "7" in repl["stdout"]
     assert cg["ok"] is True
     assert cg["language"] == "python"
     assert "print" in cg["code"]

@@ -15,6 +15,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
+    "pytest-cov>=5.0",
 ]
 
 # This is an application, not a distributable library: tell uv to manage a
@@ -25,3 +26,10 @@ package = false
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["."]
+omit = ["tests/*", "conftest.py", ".venv/*"]
+
+[tool.coverage.report]
+show_missing = true

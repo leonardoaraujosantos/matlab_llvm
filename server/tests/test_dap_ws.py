@@ -117,3 +117,21 @@ def test_dap_ws_missing_program_is_rejected(client):
         msg = ws.receive()
         assert msg["type"] == "websocket.close"
         assert msg.get("code") == 1008
+
+
+def test_dap_ws_path_traversal_rejected(client):
+    with client.websocket_connect("/v1/dap/ws/s?program=../../etc/passwd") as ws:
+        msg = ws.receive()
+        assert msg["type"] == "websocket.close"
+        assert msg.get("code") == 1008
+
+
+def test_dap_ws_matlabc_missing_rejected(client, monkeypatch):
+    import routers.dap_ws as dapmod
+
+    _put_program(client, "dapm")
+    monkeypatch.setattr(dapmod.settings, "matlabc_bin", "/tmp/definitely-not-here-xyz")
+    with client.websocket_connect("/v1/dap/ws/dapm?program=program.m") as ws:
+        msg = ws.receive()
+        assert msg["type"] == "websocket.close"
+        assert msg.get("code") == 1011

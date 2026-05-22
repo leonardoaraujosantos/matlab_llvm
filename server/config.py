@@ -49,6 +49,16 @@ class Settings(BaseSettings):
     # --- Uploads (Phase 3) -------------------------------------------------
     max_upload_mb: int = 25
 
+    # --- Hardening (Phase 7) -----------------------------------------------
+    max_concurrent_jobs: int = 8        # global cap on concurrent matlabc children
+    rate_limit_per_minute: int = 120    # per-client request cap (0 disables)
+    user_quota_mb: int = 200            # per-workspace disk quota (0 disables)
+
+    # --- Stateful REPL (Phase 7 / plan §11) --------------------------------
+    repl_stateful: bool = True          # keep a long-lived matlabc -repl per session
+    repl_idle_timeout_s: float = 900.0  # evict sessions idle longer than this
+    repl_evict_interval_s: float = 60.0  # background sweep cadence
+
     # --- Server bind -------------------------------------------------------
     host: str = "0.0.0.0"
     port: int = 8000

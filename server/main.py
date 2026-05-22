@@ -6,14 +6,18 @@ Run directly: ``cd server && uv run uvicorn main:app``
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI
 
 import rag
+import sessions
 from auth import require_auth
 from config import settings
+from limits import rate_limit
 from mcp_tools import mcp_server
 from routers import chat, check, codegen, dap_ws, files, repl
 
@@ -42,9 +46,17 @@ async def lifespan(app: FastAPI):
             log.info("RAG index: %d chunks from %s/docs", n, settings.source_context_root)
         except Exception as exc:  # never block startup on a corpus problem
             log.warning("RAG index build failed: %s", exc)
-    # Nest the MCP session-manager lifespan inside ours.
-    async with mcp_app.lifespan(app):
-        yield
+    # Background sweep for idle stateful REPL sessions.
+    evict_task = asyncio.create_task(sessions.eviction_loop())
+    try:
+        # Nest the MCP session-manager lifespan inside ours.
+        async with mcp_app.lifespan(app):
+            yield
+    finally:
+        evict_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await evict_task
+        await sessions.MANAGER.shutdown()
 
 
 def create_app() -> FastAPI:
@@ -55,7 +67,7 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
-    protected = [Depends(require_auth)]
+    protected = [Depends(require_auth), Depends(rate_limit)]
     for module in (check, repl, codegen, files, chat):
         app.include_router(module.router, dependencies=protected)
     # WS bridge: auth is enforced inside the handler via a `?token=` query

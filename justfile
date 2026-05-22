@@ -517,3 +517,7 @@ backend-dev PORT="8000": build
 # Run the backend test suite (fake matlabc stub — no LLVM build needed).
 backend-test:
     cd server && uv run --extra dev pytest -q
+
+# Backend tests with a coverage report (target: >90%).
+backend-cov:
+    cd server && uv run --extra dev pytest -q --cov --cov-report=term-missing

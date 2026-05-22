@@ -17,4 +17,6 @@ router = APIRouter(prefix="/v1", tags=["repl"])
 
 @router.post("/repl", response_model=ReplResponse)
 async def repl(req: ReplRequest) -> ReplResponse:
-    return ReplResponse(**await services.run_repl(req.source, req.user_id, req.session_id))
+    return ReplResponse(
+        **await services.run_repl(req.source, req.user_id, req.session_id, req.stateful)
+    )

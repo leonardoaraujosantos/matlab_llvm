@@ -20,10 +20,14 @@ Phases implemented on this branch:
 - **Phase 6** — `/v1/chat/completions` (OpenAI-compatible), grounded in a
   dependency-free BM25 index over `docs/**/*.md`; proxies to OpenAI when a
   key is set, else returns a retrieval-only answer.
+- **Phase 7** — hardening: bearer auth on all `/v1` routes, per-client rate
+  limiting, a global concurrency cap on matlabc children, and per-workspace
+  disk quotas. Plus **stateful REPL sessions** (long-lived `matlabc -repl`
+  per session so variables persist; idle-evicted).
 - **Phase 0/8** — `Dockerfile` + `docker-compose.yaml` at the repo root.
 
-Deferred: auth/quotas/warm-pool hardening (Phase 7), stateful sessions,
-dedicated `/v1/plot`.
+Deferred: warm pool + tier-2 syscall sandbox (nsjail/firejail), dedicated
+`/v1/plot`, and the CI/deploy half of Phase 8.
 
 > The plan named the MCP mount `/mcp/sse`; SSE transport is deprecated in
 > MCP, so this ships modern **streamable-HTTP** at `/mcp` instead.
@@ -95,6 +99,11 @@ Env vars, prefix `MATLAB_BACKEND_` (or a `.env` file). See `config.py`.
 | `OUTPUT_CAP_BYTES` | `1000000` | max captured stdout/stderr |
 | `MAX_UPLOAD_MB` | `25` | upload size cap |
 | `API_TOKEN` | `""` | bearer token; empty disables auth |
+| `MAX_CONCURRENT_JOBS` | `8` | global cap on concurrent matlabc children |
+| `RATE_LIMIT_PER_MINUTE` | `120` | per-client request cap (0 disables) |
+| `USER_QUOTA_MB` | `200` | per-workspace disk quota (0 disables) |
+| `REPL_STATEFUL` | `true` | keep a long-lived `matlabc -repl` per session |
+| `REPL_IDLE_TIMEOUT_S` | `900` | evict sessions idle longer than this |
 | `SOURCE_CONTEXT_ROOT` | `<repo>` | root holding `docs/**/*.md` to index for RAG |
 | `RAG_ENABLED` | `true` | build the doc index at startup |
 | `RAG_TOP_K` | `4` | chunks retrieved per chat turn |
@@ -116,6 +125,8 @@ sandbox.py     rlimit + timeout + cwd-jail + env-scrub launcher (run/spawn)
 workspaces.py  per-user/session paths, traversal-safe resolve, artifact diff
 matlabc.py     async wrappers around the real matlabc CLI
 services.py    core ops shared by routers + MCP (check/repl/codegen/files)
+sessions.py    stateful REPL session manager (long-lived matlabc -repl)
+limits.py      concurrency cap + rate limiter + disk-quota helper
 diagnostics.py clang-style diagnostic parsing
 rag.py         BM25 index over docs/**/*.md (dependency-free retrieval)
 models.py      request/response schemas
@@ -131,5 +142,10 @@ tests/         pytest suite (fake matlabc stub in conftest.py)
 `just backend-test` (or `cd server && uv run --extra dev pytest`). The suite
 uses a fake `matlabc` stub (`conftest.py`) so it runs anywhere — no compiler
 build required. It covers the routes, diagnostics, figure capture, traversal
-rejection, and the sandbox isolation guarantees (timeout, output cap, env
-scrub).
+rejection, the DAP bridge, MCP tools, RAG + chat (offline and mocked-proxy),
+stateful-session persistence/eviction, the hardening limits, and the sandbox
+isolation guarantees (timeout, output cap, env scrub).
+
+`just backend-cov` runs the same suite with a coverage report — **92%**
+(the gaps are the `preexec` child, which runs post-fork and can't be
+instrumented, plus a few defensive error branches).

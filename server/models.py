@@ -33,6 +33,9 @@ class CheckResponse(BaseModel):
 # --- /v1/repl ------------------------------------------------------------
 class ReplRequest(SessionMixin):
     source: str = Field(..., description="MATLAB source/statements to execute.")
+    stateful: bool | None = Field(
+        default=None, description="Override the server's stateful-REPL default for this call."
+    )
 
 
 class ReplResponse(BaseModel):
@@ -41,6 +44,7 @@ class ReplResponse(BaseModel):
     stderr: str = ""
     timed_out: bool = False
     truncated: bool = False
+    stateful: bool = False
     artifacts: list[str] = Field(default=[], description="New figure/file paths (download via /v1/files).")
 
 
