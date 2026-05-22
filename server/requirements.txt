@@ -4,3 +4,4 @@ fastapi>=0.110
 uvicorn[standard]>=0.29
 pydantic-settings>=2.2
 python-multipart>=0.0.9
+fastmcp>=2.0

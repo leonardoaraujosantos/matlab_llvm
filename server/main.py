@@ -13,9 +13,14 @@ from fastapi import Depends, FastAPI
 
 from auth import require_auth
 from config import settings
+from mcp_tools import mcp_server
 from routers import check, codegen, dap_ws, files, repl
 
 log = logging.getLogger("matlab_backend")
+
+# MCP streamable-HTTP sub-app, mounted at /mcp (endpoint: /mcp/). Its session
+# manager has its own lifespan that the parent app MUST run — see lifespan().
+mcp_app = mcp_server.http_app(path="/")
 
 
 @asynccontextmanager
@@ -30,7 +35,9 @@ async def lifespan(app: FastAPI):
             "MATLAB_BACKEND_MATLABC_BIN. Routes will fail until it exists.",
             mc,
         )
-    yield
+    # Nest the MCP session-manager lifespan inside ours.
+    async with mcp_app.lifespan(app):
+        yield
 
 
 def create_app() -> FastAPI:
@@ -47,6 +54,8 @@ def create_app() -> FastAPI:
     # WS bridge: auth is enforced inside the handler via a `?token=` query
     # param (browsers can't set Authorization on a WebSocket handshake).
     app.include_router(dap_ws.router)
+    # MCP tools over streamable-HTTP at /mcp/ (in-process client also works).
+    app.mount("/mcp", mcp_app)
 
     @app.get("/healthz", tags=["meta"])
     async def healthz() -> dict:

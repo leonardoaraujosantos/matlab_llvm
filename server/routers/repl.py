@@ -9,23 +9,12 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-import matlabc
+import services
 from models import ReplRequest, ReplResponse
-from workspaces import new_artifacts, snapshot, workspace_for
 
 router = APIRouter(prefix="/v1", tags=["repl"])
 
 
 @router.post("/repl", response_model=ReplResponse)
 async def repl(req: ReplRequest) -> ReplResponse:
-    ws = workspace_for(req.user_id, req.session_id)
-    before = snapshot(ws)
-    res = await matlabc.repl(req.source, ws)
-    return ReplResponse(
-        ok=res.ok,
-        stdout=res.stdout,
-        stderr=res.stderr,
-        timed_out=res.timed_out,
-        truncated=res.stdout_truncated or res.stderr_truncated,
-        artifacts=new_artifacts(ws, before),
-    )
+    return ReplResponse(**await services.run_repl(req.source, req.user_id, req.session_id))

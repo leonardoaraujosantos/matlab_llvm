@@ -15,10 +15,15 @@ Phases implemented on this branch:
   REPL figure-capture artifacts. (Dedicated `/v1/plot` deferred.)
 - **Phase 4** — `WS /v1/dap/ws/{session_id}`: DAP-over-WebSocket bridge to
   `matlabc -dap`, opaque byte-stream passthrough, one child per connection.
+- **Phase 5** — FastMCP tools (`matlab_check/repl/codegen`, `list_files`,
+  `read_file`) mounted at `/mcp` (streamable-HTTP).
 - **Phase 0/8** — `Dockerfile` + `docker-compose.yaml` at the repo root.
 
-Deferred: MCP/SSE (Phase 5), chat+RAG (Phase 6), auth/quotas/warm-pool
-hardening (Phase 7), stateful sessions, dedicated `/v1/plot`.
+Deferred: chat+RAG (Phase 6), auth/quotas/warm-pool hardening (Phase 7),
+stateful sessions, dedicated `/v1/plot`.
+
+> The plan named the MCP mount `/mcp/sse`; SSE transport is deprecated in
+> MCP, so this ships modern **streamable-HTTP** at `/mcp` instead.
 
 ## Run it locally
 
@@ -59,6 +64,7 @@ Without `just`: `cd server && uv run uvicorn main:app` (set
 | GET  | `/v1/files` | list the workspace tree |
 | GET  | `/v1/files/{path}` | download a file |
 | WS   | `/v1/dap/ws/{session_id}` | DAP-over-WebSocket bridge (`?program=`, `?token=`) |
+| MCP  | `/mcp` | FastMCP tools over streamable-HTTP for AI clients |
 
 Request bodies accept optional `user_id` / `session_id` (files endpoints take
 them as query params) which select the workspace directory.
@@ -90,14 +96,16 @@ Flat module layout (run from `server/`, top-level imports):
 
 ```
 config.py      settings (pydantic-settings)
-sandbox.py     rlimit + timeout + cwd-jail + env-scrub launcher
+sandbox.py     rlimit + timeout + cwd-jail + env-scrub launcher (run/spawn)
 workspaces.py  per-user/session paths, traversal-safe resolve, artifact diff
 matlabc.py     async wrappers around the real matlabc CLI
+services.py    core ops shared by routers + MCP (check/repl/codegen/files)
 diagnostics.py clang-style diagnostic parsing
 models.py      request/response schemas
 auth.py        optional bearer-token dependency
-main.py        app factory + lifespan + /healthz
-routers/       check, repl, codegen, files
+mcp_tools.py   FastMCP server + tools (not named `mcp` — would shadow the SDK)
+main.py        app factory + lifespan (+ MCP) + /healthz
+routers/       check, repl, codegen, files, dap_ws
 tests/         pytest suite (fake matlabc stub in conftest.py)
 ```
 
