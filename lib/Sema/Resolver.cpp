@@ -120,8 +120,9 @@ void Resolver::registerBuiltins() {
     "kalman", "kalmd", "kalman_L", "kalmd_L",
     /* Tier 3 — discrete-time companions for stability + H₂ norm. */
     "isstable_d", "norm_h2_d",
-    /* Tier 2.2 — continuous->discrete state-space ZOH + Tustin. */
-    "c2d", "c2d_tustin",
+    /* Tier 2.2 — continuous->discrete state-space ZOH + Tustin, and the
+     * ZOH discrete->continuous inverse d2c. */
+    "c2d", "c2d_tustin", "d2c",
     /* Model-data extractors — registered as builtins so function-style
      * class-method dispatch routes `ssdata(sys)` / `tfdata(G)` to the
      * ss / tf classdef methods (function-form dispatch only fires for a

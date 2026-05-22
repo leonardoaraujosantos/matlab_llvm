@@ -123,6 +123,7 @@ Not a compiler bug.
 | **E** symbolic AOT link recipe — `.requires-sym` marker links the prebuilt `WITH_SYM` `runtime_sym.o` + `libsympp` + GMP/MPFR (skips when SymPP absent). `symbolic_demo.m` / `quadrotor_derive_eom.m` run. | `run_tests.sh` / `fastrun.sh` `.requires-sym` | `test/Run/sym_basic.m` |
 | **B3** `step` honours a supplied time vector + `[y,tout]` 2-output, on ss **and tf** (new `step_ss_t`/`step_tf_t`, tf via controllable-canonical `tf2ss`). | model-object multi-return path + step dispatch | `test/Run/step_multiret.m` |
 | **scalar `^`** on the AOT path (`wn^2`) — `matlab.matpow(f64,f64)` → `matlab_pow_scalar`; `matrix^n` → `matlab_matpow`. Was a pre-existing gap (only the C/C++ emitters handled `^`). | LowerTensorOps matpow arm | `test/Run/step_multiret.m` |
+| **B2** `d2c` — ZOH discrete→continuous, the explicit-matrix inverse of c2d (`[A,B]=d2c(Ad,Bd,Ts)` via `logm`). | LowerTensorOps d2c splitter + `matlab_d2c_{A,B}` | `test/Run/d2c_roundtrip.m` |
 
 ### TODO — remaining work (with real depth)
 
@@ -156,7 +157,7 @@ saw the first error per file; these surfaced once it was fixed):
 | `control/lqr_double_integrator` | `c2d(ss_obj, Ts, 'zoh')` — c2d on a model object + method string | CST feature |
 | `control/kalman_tracker` | `c2d(ss_obj, Ts, 'zoh')` (kalman 3-output now works) | CST feature |
 | `control/tf_basic` | `tf('s')` builder + `matpow` on a tf | CST feature |
-| `control/c2d_zoh_demo` | `d2c` (above) | CST runtime |
+| `control/c2d_zoh_demo` | `c2d`/`d2c` **on a tf model object** (returning a discrete/continuous tf) + `disp(tf)` display; `d2c` exists for explicit ss matrices but `c2d(tf,Ts,'zoh')` returns a non-tf today | CST feature |
 | `pde/*` (3) | `generateMesh` / `decsg` / `multicuboid` / `femodel` | PDE Toolbox |
 
 ### Known pre-existing limitations surfaced (NOT regressions, NOT yet fixed)
@@ -173,3 +174,7 @@ clean tree and is independent of this work:
   (builtins like `plot` do).
 - `numel()` of a cell-element-result; `struct('a',1,'b',2)` (struct name-value
   construction) — both report "unsupported call shape".
+- `matlab_logm` returns an empty matrix for a full matrix whose real Schur
+  form keeps a 2×2 block (the Francis QR doesn't split a real-eigenvalue 2×2
+  block into triangular). It works for diagonal / cleanly-deflating matrices.
+  This limits `d2c` (ZOH) to those — the diagonal/decoupled case round-trips.

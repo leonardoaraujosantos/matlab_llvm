@@ -3460,6 +3460,34 @@ matlab_mat *matlab_c2d_Bd(matlab_mat *A, matlab_mat *B, double Ts) {
     return Bd;
 }
 
+/* Discrete -> continuous, the ZOH inverse of c2d (the explicit-matrix form
+ * [A, B] = d2c(Ad, Bd, Ts)).  A = logm(Ad) / Ts; the ZOH input integral is
+ * M = A^{-1}(Ad - I), so B = M^{-1} Bd.  Requires Ad to have a real matrix
+ * logarithm and M to be invertible (fails for an integrator pole at z = 1 —
+ * use the model-object path for those, a documented follow-on). */
+matlab_mat *matlab_d2c_A(matlab_mat *Ad, matlab_mat *Bd, double Ts) {
+    (void)Bd;
+    if (!Ad || Ts <= 0.0) return mat_alloc(0, 0);
+    matlab_mat *L = matlab_logm(Ad);
+    if (!L || L->rows == 0) return mat_alloc(0, 0);
+    int64_t nn = L->rows * L->cols;
+    matlab_mat *A = mat_alloc(L->rows, L->cols);
+    for (int64_t i = 0; i < nn; ++i) A->data[i] = L->data[i] / Ts;
+    return A;
+}
+
+matlab_mat *matlab_d2c_B(matlab_mat *Ad, matlab_mat *Bd, double Ts) {
+    if (!Ad || !Bd || Ts <= 0.0) return mat_alloc(0, 0);
+    matlab_mat *A = matlab_d2c_A(Ad, Bd, Ts);
+    if (!A || A->rows == 0) return mat_alloc(0, 0);
+    int64_t n = Ad->rows;
+    matlab_mat *AdmI = mat_alloc(n, n);
+    for (int64_t i = 0; i < n * n; ++i) AdmI->data[i] = Ad->data[i];
+    for (int64_t i = 0; i < n; ++i) AdmI->data[i * n + i] -= 1.0;  /* Ad - I */
+    matlab_mat *M = matlab_mldivide_mm(A, AdmI);   /* A^{-1}(Ad - I) */
+    return matlab_mldivide_mm(M, Bd);              /* M^{-1} Bd      */
+}
+
 /*-------------------------------------------------------------------------
  * Controllability / observability gramians as Lyapunov solutions.
  *

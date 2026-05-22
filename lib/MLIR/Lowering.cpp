@@ -9326,7 +9326,7 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             "balred", "balred_A", "balred_B", "balred_C", "dcgain_ss",
             "stepinfo",
             "kalman", "kalmd", "kalman_L", "kalmd_L",
-            "c2d", "c2d_tustin", "d2c_tustin", "pole",
+            "c2d", "c2d_tustin", "d2c", "d2c_tustin", "pole",
             "feedback_ss", "series_ss", "parallel_ss", "append_ss",
             "gram_c", "gram_o", "step_ss", "bode_ss", "lsim_ss", "bode_tf",
             /* §3.1 — model-object short forms (value-returning). */

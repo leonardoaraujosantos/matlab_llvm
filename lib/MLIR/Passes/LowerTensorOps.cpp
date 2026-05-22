@@ -3378,6 +3378,29 @@ bool TensorLowering::rewriteBuiltinCalls() {
       }
     }
 
+    /* [A, B] = d2c(Ad, Bd, Ts) — ZOH discrete->continuous, inverse of c2d.
+     * Same 2-ptr + scalar shape; routes to matlab_d2c_{A,B}. */
+    if (NA && NA.getValue().getSExtValue() == 2 &&
+        Name == "d2c" && Call->getNumOperands() == 3 &&
+        Call->getNumResults() == 2 &&
+        Call->getOperand(2).getType() == F64) {
+      Value V0 = boxAsPtr(Call->getOperand(0));
+      Value V1 = boxAsPtr(Call->getOperand(1));
+      if (V0 && V1) {
+        B.setInsertionPoint(Call);
+        auto Fa = rt("matlab_d2c_A", PtrTy, {PtrTy, PtrTy, F64});
+        auto Fb = rt("matlab_d2c_B", PtrTy, {PtrTy, PtrTy, F64});
+        SmallVector<Value, 3> CA{V0, V1, Call->getOperand(2)};
+        auto Ca = LLVM::CallOp::create(B, Call->getLoc(), Fa, CA);
+        auto Cb = LLVM::CallOp::create(B, Call->getLoc(), Fb, CA);
+        Call->getResult(0).replaceAllUsesWith(Ca.getResult());
+        Call->getResult(1).replaceAllUsesWith(Cb.getResult());
+        Call->erase();
+        Changed = true;
+        continue;
+      }
+    }
+
     /* [Ad, Bd] = c2d_tustin(A, B, Ts) — Tustin (bilinear) discretisation.
      * Same shape as c2d above; routes to matlab_c2d_tustin_{Ad,Bd}. */
     if (NA && NA.getValue().getSExtValue() == 2 &&
@@ -5384,6 +5407,8 @@ bool TensorLowering::rewriteBuiltinCalls() {
        * stability/eig analysis). The 2-return shape goes through the
        * dedicated splitter above. */
       {"c2d_tustin", "matlab_c2d_tustin_Ad", 1, "ppf"},
+      /* d2c (ZOH) 1-return defaults to the continuous A matrix. */
+      {"d2c",        "matlab_d2c_A",         1, "ppf"},
       /* d2c_tustin 1-return defaults to A. */
       {"d2c_tustin", "matlab_d2c_tustin_A",  1, "ppf"},
       {"gram_c",     "matlab_gram_c",     1, "pp"},
