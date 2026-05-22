@@ -848,18 +848,18 @@ if(MATLAB_LLVM_WITH_MLIR)
   endif()
 endif()
 
-# --- Test timeouts (two-tier, fail-fast) ------------------------------------
-# Cap every registered test so a hung lane can't freeze the whole `ctest` gate.
-# The flowchart simulate-dap / cocotb lanes spawn external simulator / DAP
-# subprocesses that wait on I/O and can never exit in a headless environment
-# (observed: a 31-minute hang of the full gate, plus a stale `--sim-dap`
-# process). Two tiers:
-#   * The run-tests* execute lanes recompile the runtime per fixture and, under
-#     `-j` parallel contention, legitimately run well past a few minutes — give
-#     them a generous (still finite) cap so they don't false-timeout.
-#   * Everything else gets a 300 s fail-fast cap (a stuck DAP/cocotb lane then
-#     dies at 300 s instead of freezing the gate; 300 s >> any legit non-execute
-#     lane).
+# --- Test timeouts + heavy-lane serialization (fail-fast, no thrash) --------
+# Two problems this guards against:
+#   1. Hangs: the flowchart simulate-dap / cocotb lanes spawn external simulator
+#      / DAP subprocesses that wait on I/O and can never exit in a headless
+#      environment (observed: a 31-minute hang of the full gate, plus a stale
+#      `--sim-dap` process). Bound them with a 300 s fail-fast cap.
+#   2. Thrash: the run-tests* execute lanes each recompile the runtime per
+#      fixture and saturate the CPU. Run concurrently under `-j` they thrash
+#      badly (run-tests-emit-c measured ~67 s alone vs ~663 s under -j4). Give
+#      them a shared RESOURCE_LOCK so ctest serializes them (each then runs at
+#      native speed; the light lanes still fill the gaps), plus a generous
+#      finite TIMEOUT so a genuinely stuck compile is still bounded.
 set(_mlc_heavy_lanes
     run-tests
     run-tests-emit-c run-tests-emit-cpp
@@ -868,7 +868,9 @@ set(_mlc_heavy_lanes
     run-tests-sym)
 foreach(_mlc_h IN LISTS _mlc_heavy_lanes)
   if(TEST ${_mlc_h})
-    set_tests_properties(${_mlc_h} PROPERTIES TIMEOUT 2400)
+    set_tests_properties(${_mlc_h} PROPERTIES
+      RESOURCE_LOCK mlc_runtime_compile
+      TIMEOUT 900)
   endif()
 endforeach()
 get_property(_mlc_all_tests DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" PROPERTY TESTS)
