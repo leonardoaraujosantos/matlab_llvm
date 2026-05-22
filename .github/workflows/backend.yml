@@ -51,15 +51,18 @@ jobs:
   # -------------------------------------------------------------------------
   # IMAGE — build the production Docker image (compiles matlabc against
   # apt.llvm.org LLVM, installs the server) and run the Phase-0 smoke gate
-  # against the real, containerised compiler. Heavy (~30-45 min cold), so it
-  # only runs on push to main, manual dispatch, or a `backend-image` label.
+  # against the real, containerised compiler. Heavy (~30-45 min cold).
+  #
+  # Opt-in only (manual dispatch or the `backend-image` label) — NOT on push
+  # to main — because matlabc currently fails to build on Linux/libstdc++
+  # (missing standard includes; issue #7). Re-enable the main-push trigger
+  # once #7 is fixed and the image builds green.
   # -------------------------------------------------------------------------
   image:
     name: Docker image build + smoke gate
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     if: >-
-      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'pull_request' &&
        contains(github.event.pull_request.labels.*.name, 'backend-image'))
