@@ -74,15 +74,30 @@ def test_chat_offline_grounded(http):
     assert "x_citations" in body
 
 
-def test_mcp_over_http(base_url):
+def test_mcp_over_http_with_minted_token(http, base_url):
     from fastmcp import Client
+    from fastmcp.client.auth import BearerAuth
+
+    # MCP requires a token (server runs with MCP auth on); mint one via REST.
+    token = http.post("/v1/mcp/token").json()["token"]
 
     async def go():
-        async with Client(base_url + "/mcp/") as c:
+        async with Client(base_url + "/mcp/", auth=BearerAuth(token)) as c:
             return sorted(t.name for t in await c.list_tools())
 
     names = asyncio.run(go())
     assert {"matlab_check", "matlab_repl", "matlab_codegen"} <= set(names)
+
+
+def test_mcp_over_http_rejects_without_token(base_url):
+    from fastmcp import Client
+
+    async def go():
+        async with Client(base_url + "/mcp/") as c:
+            await c.list_tools()
+
+    with pytest.raises(Exception):
+        asyncio.run(go())
 
 
 def test_dap_over_websocket(http, base_url):

@@ -86,6 +86,14 @@ class WhoAmIResponse(BaseModel):
     organization_id: str | None = None
 
 
+# --- /v1/mcp/token -------------------------------------------------------
+class McpTokenResponse(BaseModel):
+    token: str
+    token_type: str = "bearer"
+    subject: str
+    expires_at: int
+
+
 # --- /v1/plot ------------------------------------------------------------
 class PlotRequest(SessionMixin):
     source: str = Field(..., description="MATLAB plotting snippet (server appends saveas).")

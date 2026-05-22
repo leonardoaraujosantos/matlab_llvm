@@ -19,7 +19,7 @@ from auth import require_auth
 from config import settings
 from limits import rate_limit
 from mcp_tools import mcp_server
-from routers import chat, check, codegen, dap_ws, files, plot, repl, whoami
+from routers import chat, check, codegen, dap_ws, files, mcp_token, plot, repl, whoami
 
 log = logging.getLogger("matlab_backend")
 
@@ -69,7 +69,7 @@ def create_app() -> FastAPI:
     )
 
     protected = [Depends(require_auth), Depends(rate_limit)]
-    for module in (check, repl, codegen, files, chat, plot, whoami):
+    for module in (check, repl, codegen, files, chat, plot, whoami, mcp_token):
         app.include_router(module.router, dependencies=protected)
     # WS bridge: auth is enforced inside the handler via a `?token=` query
     # param (browsers can't set Authorization on a WebSocket handshake).

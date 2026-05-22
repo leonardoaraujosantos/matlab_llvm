@@ -85,6 +85,14 @@ class Settings(BaseSettings):
     auth_verify_cache_ttl_s: int = 30   # cache successful /users/me checks
     cyberdyne_timeout_s: float = 5.0
 
+    # --- MCP auth ----------------------------------------------------------
+    # When on, /mcp requires a backend-minted bearer token (POST /v1/mcp/token,
+    # itself authenticated). Tokens are stateless HMAC-signed and bound to the
+    # caller's identity.
+    mcp_require_auth: bool = False
+    mcp_token_secret: str = ""           # HMAC key; falls back to api_token / dev key
+    mcp_token_ttl_s: int = 2592000       # 30 days
+
     # --- RAG / chat (Phase 6) ----------------------------------------------
     # Root holding the docs corpus to index (`<root>/docs/**/*.md`). In the
     # container this is /app/source_context; locally it's the repo root.

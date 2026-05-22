@@ -53,6 +53,8 @@ def server(tmp_path_factory):
         "MATLAB_BACKEND_WALL_TIMEOUT_S": "15",
         "MATLAB_BACKEND_SOURCE_CONTEXT_ROOT": str(REPO_ROOT),
         "OPENAI_API_KEY": "",                      # offline, deterministic chat
+        "MATLAB_BACKEND_MCP_REQUIRE_AUTH": "1",    # /mcp requires a minted token
+        "MATLAB_BACKEND_MCP_TOKEN_SECRET": "itest-mcp-secret",
     }
     proc = subprocess.Popen(
         [sys.executable, "-m", "uvicorn", "main:app", "--host", "127.0.0.1", "--port", str(port)],

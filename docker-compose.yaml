@@ -21,6 +21,9 @@ services:
       # /api/v1/users/me). Falls back to a shared static token, then open.
       - CYBERDYNE_AUTH_URL=${CYBERDYNE_AUTH_URL:-}
       - MATLAB_BACKEND_API_TOKEN=${MATLAB_BACKEND_API_TOKEN:-}
+      # MCP auth: require a minted token on /mcp (POST /v1/mcp/token).
+      - MATLAB_BACKEND_MCP_REQUIRE_AUTH=${MATLAB_BACKEND_MCP_REQUIRE_AUTH:-}
+      - MATLAB_BACKEND_MCP_TOKEN_SECRET=${MATLAB_BACKEND_MCP_TOKEN_SECRET:-}
     ports:
       - "8000:8000"
     volumes:

@@ -63,7 +63,17 @@ Secrets load from the environment or a **gitignored** `server/.env`:
 
 `GET /v1/auth/whoami` echoes the authenticated identity. The DAP WebSocket
 authenticates via a `?token=` query param (browsers can't set `Authorization`
-on a WS handshake). MCP (`/mcp`) is not yet behind auth — a follow-on.
+on a WS handshake).
+
+### MCP auth
+
+MCP clients can't run the CyberdyneAuth login/refresh flow, so an authenticated
+caller **mints a backend token** for them: `POST /v1/mcp/token` (itself behind
+`/v1` auth) returns a stateless HMAC-signed bearer **bound to the caller's
+identity**. The MCP client presents it on `/mcp` (`Authorization: Bearer …`);
+it maps back to the same user, so MCP tools run against *that user's* workspace.
+Enable enforcement with `MCP_REQUIRE_AUTH=1` (set `MCP_TOKEN_SECRET`); when off,
+`/mcp` is open (local dev).
 
 ## Run it locally
 
@@ -105,7 +115,8 @@ Without `just`: `cd server && uv run uvicorn main:app` (set
 | GET  | `/v1/files` | list the workspace tree |
 | GET  | `/v1/files/{path}` | download a file |
 | WS   | `/v1/dap/ws/{session_id}` | DAP-over-WebSocket bridge (`?program=`, `?token=`) |
-| MCP  | `/mcp` | FastMCP tools over streamable-HTTP for AI clients |
+| POST | `/v1/mcp/token` | mint an MCP bearer token bound to the caller's identity |
+| MCP  | `/mcp` | FastMCP tools over streamable-HTTP (bearer when `MCP_REQUIRE_AUTH`) |
 | POST | `/v1/chat/completions` | OpenAI-compatible chat grounded in the docs (RAG) |
 | POST | `/v1/plot` | run a plotting snippet, stream PNG/SVG/PDF (`?format=`) |
 
@@ -130,6 +141,9 @@ Env vars, prefix `MATLAB_BACKEND_` (or a `.env` file). See `config.py`.
 | `CYBERDYNE_AUTH_URL` | `""` | enable CyberdyneAuth bearer validation (bare name) |
 | `API_TOKEN` | `""` | shared static bearer token (used if no CyberdyneAuth) |
 | `AUTH_VERIFY_CACHE_TTL_S` | `30` | cache window for `/users/me` checks |
+| `MCP_REQUIRE_AUTH` | `false` | require a minted bearer token on `/mcp` |
+| `MCP_TOKEN_SECRET` | `""` | HMAC key for MCP tokens (falls back to `API_TOKEN`) |
+| `MCP_TOKEN_TTL_S` | `2592000` | MCP token lifetime (30 days) |
 | `MAX_CONCURRENT_JOBS` | `8` | global cap on concurrent matlabc children |
 | `RATE_LIMIT_PER_MINUTE` | `120` | per-client request cap (0 disables) |
 | `USER_QUOTA_MB` | `200` | per-workspace disk quota (0 disables) |
@@ -168,9 +182,10 @@ rag.py         BM25 index over docs/**/*.md (dependency-free retrieval)
 models.py      request/response schemas
 auth.py        auth modes (cyberdyne / static token / open) + verification
 principal.py   request-scoped identity → per-user workspace isolation
-mcp_tools.py   FastMCP server + tools (not named `mcp` — would shadow the SDK)
+mcp_tools.py   FastMCP server + tools + token verifier (not named `mcp`)
+mcp_auth.py    mint/verify stateless HMAC-signed MCP bearer tokens
 main.py        app factory + lifespan (+ MCP + RAG + warm pool) + /healthz
-routers/       check, repl, codegen, files, dap_ws, chat, plot, whoami
+routers/       check, repl, codegen, files, dap_ws, chat, plot, whoami, mcp_token
 tests/         pytest suite (fake matlabc stub in conftest.py)
 ```
 
