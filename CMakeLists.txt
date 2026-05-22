@@ -848,14 +848,29 @@ if(MATLAB_LLVM_WITH_MLIR)
   endif()
 endif()
 
-# --- Fail-fast test timeouts ------------------------------------------------
+# --- Test timeouts (two-tier, fail-fast) ------------------------------------
 # Cap every registered test so a hung lane can't freeze the whole `ctest` gate.
 # The flowchart simulate-dap / cocotb lanes spawn external simulator / DAP
 # subprocesses that wait on I/O and can never exit in a headless environment
 # (observed: a 31-minute hang of the full gate, plus a stale `--sim-dap`
-# process). 300 s sits comfortably above the slowest legitimate lane
-# (run-tests-emit-c-strict, ~112 s) while bounding any hang. Only applied where
-# a test hasn't already set its own TIMEOUT.
+# process). Two tiers:
+#   * The run-tests* execute lanes recompile the runtime per fixture and, under
+#     `-j` parallel contention, legitimately run well past a few minutes — give
+#     them a generous (still finite) cap so they don't false-timeout.
+#   * Everything else gets a 300 s fail-fast cap (a stuck DAP/cocotb lane then
+#     dies at 300 s instead of freezing the gate; 300 s >> any legit non-execute
+#     lane).
+set(_mlc_heavy_lanes
+    run-tests
+    run-tests-emit-c run-tests-emit-cpp
+    run-tests-emit-c-strict run-tests-emit-cpp-strict
+    run-tests-emit-python run-tests-emit-typescript
+    run-tests-sym)
+foreach(_mlc_h IN LISTS _mlc_heavy_lanes)
+  if(TEST ${_mlc_h})
+    set_tests_properties(${_mlc_h} PROPERTIES TIMEOUT 2400)
+  endif()
+endforeach()
 get_property(_mlc_all_tests DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" PROPERTY TESTS)
 foreach(_mlc_t IN LISTS _mlc_all_tests)
   get_test_property(${_mlc_t} TIMEOUT _mlc_existing)
