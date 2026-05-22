@@ -110,6 +110,7 @@ if mode == "repl":
     # Line-by-line loop with a tiny variable store. Works for both the
     # stateless (read-to-EOF) and stateful (persistent process) modes.
     store = {}
+    nofig = False
     while True:
         raw = sys.stdin.readline()
         if not raw:
@@ -120,6 +121,22 @@ if mode == "repl":
         if "INFLOOP" in s:
             while True:
                 time.sleep(0.2)
+        if "NOFIG" in s:
+            nofig = True
+            continue
+        m = re.match(r"^saveas\(.*,\s*'([^']+)'\)\s*;?$", s)
+        if m:
+            if not nofig:
+                path = m.group(1)
+                ext = path.rsplit(".", 1)[-1].lower()
+                blob = {
+                    "png": b"\x89PNG\r\n\x1a\n",
+                    "svg": b"<svg xmlns='http://www.w3.org/2000/svg'></svg>",
+                    "pdf": b"%PDF-1.4\n%%EOF\n",
+                }.get(ext, b"x")
+                with open(path, "wb") as fh:
+                    fh.write(blob)
+            continue
         if "PLOT" in s:
             with open(os.path.join(os.getcwd(), "figure_1.png"), "wb") as fh:
                 fh.write(b"\x89PNG\r\n\x1a\n")
@@ -180,6 +197,11 @@ _FAKE.chmod(0o755)
 os.environ["MATLAB_BACKEND_MATLABC_BIN"] = str(_FAKE)
 os.environ["MATLAB_BACKEND_WORKSPACE_ROOT"] = str(_TMP / "ws")
 os.environ["MATLAB_BACKEND_WALL_TIMEOUT_S"] = "2"
+# Disable the warm pool for the API-level (TestClient) tests: each TestClient
+# spins a fresh event loop, and a global-pool worker prewarmed in one loop
+# can't be reaped in another. The pool itself is covered by the local-manager
+# unit tests in test_sessions.py.
+os.environ["MATLAB_BACKEND_WARM_POOL_SIZE"] = "0"
 
 # Force the chat endpoint into offline (retrieval-only) mode and index a tiny
 # hermetic docs corpus instead of the real repo docs. Empty OPENAI_API_KEY in
@@ -210,3 +232,22 @@ def client():
 
     with TestClient(app) as c:
         yield c
+
+
+@pytest.fixture(autouse=True)
+def _reset_global_manager():
+    """Drop any global-MANAGER state a test leaked, synchronously (killpg,
+    no await), so a child proc bound to one test's event loop is never
+    awaited in another's."""
+    yield
+    import sandbox
+    import sessions
+
+    mgr = sessions.MANAGER
+    for sess in list(mgr._sessions.values()):
+        sandbox.terminate(sess.proc)
+    mgr._sessions.clear()
+    for worker in list(mgr.pool._ready):
+        sandbox.terminate(worker.proc)
+    mgr.pool._ready.clear()
+    mgr.pool._fill_task = None

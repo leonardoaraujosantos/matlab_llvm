@@ -58,6 +58,16 @@ class Settings(BaseSettings):
     repl_stateful: bool = True          # keep a long-lived matlabc -repl per session
     repl_idle_timeout_s: float = 900.0  # evict sessions idle longer than this
     repl_evict_interval_s: float = 60.0  # background sweep cadence
+    warm_pool_size: int = 2             # pre-warmed matlabc -repl workers (0 disables)
+
+    # --- Tier-2 syscall sandbox (plan Phase 7) -----------------------------
+    # Wrap children in an OS sandbox for syscall-level isolation beyond
+    # rlimits. Linux-only; falls back to rlimit-only if the tool is missing.
+    sandbox_backend: str = "none"       # none | bwrap | firejail | nsjail
+    sandbox_allow_net: bool = False     # untrusted code gets no network by default
+
+    # --- Plot (Phase 3 / TRD F5) -------------------------------------------
+    plot_default_format: str = "png"    # png | svg | pdf
 
     # --- Server bind -------------------------------------------------------
     host: str = "0.0.0.0"

@@ -21,13 +21,24 @@ Phases implemented on this branch:
   dependency-free BM25 index over `docs/**/*.md`; proxies to OpenAI when a
   key is set, else returns a retrieval-only answer.
 - **Phase 7** — hardening: bearer auth on all `/v1` routes, per-client rate
-  limiting, a global concurrency cap on matlabc children, and per-workspace
-  disk quotas. Plus **stateful REPL sessions** (long-lived `matlabc -repl`
-  per session so variables persist; idle-evicted).
+  limiting, a global concurrency cap on matlabc children, per-workspace disk
+  quotas, **stateful REPL sessions** (long-lived `matlabc -repl` per session,
+  idle-evicted), a **warm pool** of pre-warmed workers, and a **tier-2 syscall
+  sandbox** (bubblewrap/firejail/nsjail).
+- **`/v1/plot`** — run a plotting snippet and stream back PNG/SVG/PDF.
 - **Phase 0/8** — `Dockerfile` + `docker-compose.yaml` at the repo root.
 
-Deferred: warm pool + tier-2 syscall sandbox (nsjail/firejail), dedicated
-`/v1/plot`, and the CI/deploy half of Phase 8.
+Deferred: only the CI/deploy half of Phase 8.
+
+> **Warm pool note:** matlabc has no `cd` builtin, so a pre-spawned worker
+> can't be retargeted to a session's deterministic dir. Instead a pooled
+> worker *adopts its own pool dir as the session workspace* — staged files
+> migrate in on adoption and back out on retirement. Set `WARM_POOL_SIZE=0`
+> to disable.
+
+> **Tier-2 sandbox note:** Linux-only; falls back to rlimit-only if the tool
+> is missing (e.g. on macOS dev). The container is the primary boundary; this
+> is defense-in-depth. Enable with `SANDBOX_BACKEND=bwrap`.
 
 > The plan named the MCP mount `/mcp/sse`; SSE transport is deprecated in
 > MCP, so this ships modern **streamable-HTTP** at `/mcp` instead.
@@ -79,6 +90,7 @@ Without `just`: `cd server && uv run uvicorn main:app` (set
 | WS   | `/v1/dap/ws/{session_id}` | DAP-over-WebSocket bridge (`?program=`, `?token=`) |
 | MCP  | `/mcp` | FastMCP tools over streamable-HTTP for AI clients |
 | POST | `/v1/chat/completions` | OpenAI-compatible chat grounded in the docs (RAG) |
+| POST | `/v1/plot` | run a plotting snippet, stream PNG/SVG/PDF (`?format=`) |
 
 Request bodies accept optional `user_id` / `session_id` (files endpoints take
 them as query params) which select the workspace directory.
@@ -104,6 +116,10 @@ Env vars, prefix `MATLAB_BACKEND_` (or a `.env` file). See `config.py`.
 | `USER_QUOTA_MB` | `200` | per-workspace disk quota (0 disables) |
 | `REPL_STATEFUL` | `true` | keep a long-lived `matlabc -repl` per session |
 | `REPL_IDLE_TIMEOUT_S` | `900` | evict sessions idle longer than this |
+| `WARM_POOL_SIZE` | `2` | pre-warmed `matlabc -repl` workers (0 disables) |
+| `SANDBOX_BACKEND` | `none` | tier-2 jail: `none`/`bwrap`/`firejail`/`nsjail` |
+| `SANDBOX_ALLOW_NET` | `false` | give jailed children network access |
+| `PLOT_DEFAULT_FORMAT` | `png` | default `/v1/plot` format |
 | `SOURCE_CONTEXT_ROOT` | `<repo>` | root holding `docs/**/*.md` to index for RAG |
 | `RAG_ENABLED` | `true` | build the doc index at startup |
 | `RAG_TOP_K` | `4` | chunks retrieved per chat turn |
@@ -125,15 +141,16 @@ sandbox.py     rlimit + timeout + cwd-jail + env-scrub launcher (run/spawn)
 workspaces.py  per-user/session paths, traversal-safe resolve, artifact diff
 matlabc.py     async wrappers around the real matlabc CLI
 services.py    core ops shared by routers + MCP (check/repl/codegen/files)
-sessions.py    stateful REPL session manager (long-lived matlabc -repl)
+sessions.py    stateful REPL session manager + warm pool (adoption/migration)
 limits.py      concurrency cap + rate limiter + disk-quota helper
+jail.py        tier-2 syscall sandbox wrapper (bwrap/firejail/nsjail)
 diagnostics.py clang-style diagnostic parsing
 rag.py         BM25 index over docs/**/*.md (dependency-free retrieval)
 models.py      request/response schemas
 auth.py        optional bearer-token dependency
 mcp_tools.py   FastMCP server + tools (not named `mcp` — would shadow the SDK)
-main.py        app factory + lifespan (+ MCP + RAG) + /healthz
-routers/       check, repl, codegen, files, dap_ws, chat
+main.py        app factory + lifespan (+ MCP + RAG + warm pool) + /healthz
+routers/       check, repl, codegen, files, dap_ws, chat, plot
 tests/         pytest suite (fake matlabc stub in conftest.py)
 ```
 

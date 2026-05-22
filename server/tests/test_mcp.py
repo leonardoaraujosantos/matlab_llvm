@@ -31,12 +31,16 @@ def test_mcp_lists_expected_tools():
 
 def test_mcp_repl_and_codegen():
     async def go():
+        from sessions import MANAGER
+
         async with _client() as c:
             repl = await c.call_tool("matlab_repl", {"source": "disp(7)", "session_id": "mcpsess"})
             cg = await c.call_tool(
                 "matlab_codegen", {"target": "python", "source": "y = 2;", "session_id": "mcpsess"}
             )
-            return repl.data, cg.data
+            result = repl.data, cg.data
+        await MANAGER.shutdown()  # reap the stateful session in this loop
+        return result
 
     repl, cg = _run(go())
     assert repl["ok"] is True

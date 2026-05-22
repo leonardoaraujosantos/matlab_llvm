@@ -21,13 +21,14 @@ This plan turns the corrected TRD into ordered, shippable phases. Every
 > BM25 index over `docs/**/*.md`; proxies to OpenAI when a key is set, else
 > retrieval-only), and **Phase 7** (bearer auth on all `/v1`, per-client
 > rate limiting, a global matlabc concurrency cap, per-workspace disk quotas,
-> and **stateful REPL sessions** with idle eviction). **Phase 0/8** ship as
-> the root `Dockerfile` + `docker-compose.yaml`. Run locally with `just
+> and **stateful REPL sessions** with idle eviction, a **warm pool** of
+> pre-warmed workers, and a **tier-2 syscall sandbox** bwrap/firejail/nsjail).
+> Also **`/v1/plot`** (run a snippet → stream PNG/SVG/PDF). **Phase 0/8** ship
+> as the root `Dockerfile` + `docker-compose.yaml`. Run locally with `just
 > backend-up`; test with `just backend-test` / `just backend-cov` (fake
 > matlabc, no LLVM build needed; **92% coverage**). See
-> [`server/README.md`](../server/README.md). Deferred: warm pool + tier-2
-> syscall sandbox (nsjail/firejail), the dedicated `/v1/plot` route, and the
-> CI/deploy half of Phase 8.
+> [`server/README.md`](../server/README.md). Deferred: only the CI/deploy
+> half of Phase 8.
 
 ---
 

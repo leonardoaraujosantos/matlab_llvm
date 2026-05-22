@@ -58,6 +58,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         > /etc/apt/sources.list.d/llvm.list \
     && apt-get update && apt-get install -y --no-install-recommends \
         libllvm${LLVM_VERSION} libmlir-${LLVM_VERSION} libzstd1 zlib1g libcairo2 \
+        bubblewrap \
     && rm -rf /var/lib/apt/lists/*
 
 # matlabc + the source context the codegen/RAG phases reference.
@@ -73,7 +74,9 @@ RUN pip install --no-cache-dir -r /app/server/requirements.txt
 COPY server/ /app/server/
 
 # Point the server at the installed binary + the writable workspace volume,
-# and the RAG corpus at the copied source context.
+# and the RAG corpus at the copied source context. bubblewrap is installed
+# for the tier-2 sandbox; enable it with MATLAB_BACKEND_SANDBOX_BACKEND=bwrap
+# (needs user namespaces — may require --privileged or a seccomp tweak).
 ENV MATLAB_BACKEND_MATLABC_BIN=/usr/local/bin/matlabc \
     MATLAB_BACKEND_WORKSPACE_ROOT=/workspace \
     MATLAB_BACKEND_SOURCE_CONTEXT_ROOT=/app/source_context

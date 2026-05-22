@@ -19,7 +19,7 @@ from auth import require_auth
 from config import settings
 from limits import rate_limit
 from mcp_tools import mcp_server
-from routers import chat, check, codegen, dap_ws, files, repl
+from routers import chat, check, codegen, dap_ws, files, plot, repl
 
 log = logging.getLogger("matlab_backend")
 
@@ -46,7 +46,8 @@ async def lifespan(app: FastAPI):
             log.info("RAG index: %d chunks from %s/docs", n, settings.source_context_root)
         except Exception as exc:  # never block startup on a corpus problem
             log.warning("RAG index build failed: %s", exc)
-    # Background sweep for idle stateful REPL sessions.
+    # Pre-warm the matlabc -repl pool, then start the idle-session sweep.
+    await sessions.prewarm()
     evict_task = asyncio.create_task(sessions.eviction_loop())
     try:
         # Nest the MCP session-manager lifespan inside ours.
@@ -68,7 +69,7 @@ def create_app() -> FastAPI:
     )
 
     protected = [Depends(require_auth), Depends(rate_limit)]
-    for module in (check, repl, codegen, files, chat):
+    for module in (check, repl, codegen, files, chat, plot):
         app.include_router(module.router, dependencies=protected)
     # WS bridge: auth is enforced inside the handler via a `?token=` query
     # param (browsers can't set Authorization on a WebSocket handshake).

@@ -20,6 +20,7 @@ import signal
 from dataclasses import dataclass
 from pathlib import Path
 
+import jail
 import limits
 from config import settings
 
@@ -111,7 +112,7 @@ async def run(
     timed_out = False
     async with limits.job_semaphore():  # global concurrency cap
         proc = await asyncio.create_subprocess_exec(
-            *argv,
+            *jail.wrap(argv, cwd),
             stdin=asyncio.subprocess.PIPE if stdin_bytes is not None else asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -159,7 +160,7 @@ async def spawn(
     whole process group when the session ends.
     """
     return await asyncio.create_subprocess_exec(
-        *argv,
+        *jail.wrap(argv, cwd),
         stdin=stdin,
         stdout=stdout,
         stderr=stderr,

@@ -7,6 +7,9 @@ Pydantic responses and MCP serialization can consume them directly.
 
 from __future__ import annotations
 
+import uuid
+from pathlib import Path
+
 import matlabc
 from config import settings
 from diagnostics import parse_diagnostics
@@ -19,13 +22,20 @@ from workspaces import (
     workspace_for,
 )
 
+_PLOT_EXT = ("png", "svg", "pdf")
+
+
+def resolve_workspace(user_id: str | None = None, session_id: str | None = None) -> Path:
+    """A live stateful session's bound workspace, else the deterministic one."""
+    return MANAGER.workspace_of(user_id, session_id) or workspace_for(user_id, session_id)
+
 
 def _diag_dicts(text: str) -> list[dict]:
     return [d.model_dump() for d in parse_diagnostics(text)]
 
 
 async def run_check(source: str, user_id: str | None = None, session_id: str | None = None) -> dict:
-    ws = workspace_for(user_id, session_id)
+    ws = resolve_workspace(user_id, session_id)
     res = await matlabc.check(source, ws)
     return {
         "ok": res.ok,
@@ -41,12 +51,10 @@ async def run_repl(
     session_id: str | None = None,
     stateful: bool | None = None,
 ) -> dict:
-    ws = workspace_for(user_id, session_id)
-    before = snapshot(ws)
     use_stateful = settings.repl_stateful if stateful is None else stateful
 
     if use_stateful:
-        res = await MANAGER.run_turn(user_id, session_id, ws, source, settings.wall_timeout_s)
+        res = await MANAGER.run_turn(user_id, session_id, source, settings.wall_timeout_s)
         out = res["stdout"]
         truncated = len(out.encode("utf-8")) > settings.output_cap_bytes
         if truncated:
@@ -57,10 +65,12 @@ async def run_repl(
             "stderr": "",  # merged into stdout for stateful turns
             "timed_out": res["timed_out"],
             "truncated": truncated,
-            "artifacts": new_artifacts(ws, before),
+            "artifacts": res["artifacts"],
             "stateful": True,
         }
 
+    ws = resolve_workspace(user_id, session_id)
+    before = snapshot(ws)
     res = await matlabc.repl(source, ws)
     return {
         "ok": res.ok,
@@ -80,7 +90,7 @@ async def run_codegen(
         raise ValueError(
             f"unknown target {target!r}; expected one of {sorted(matlabc.EMIT_FLAGS)}"
         )
-    ws = workspace_for(user_id, session_id)
+    ws = resolve_workspace(user_id, session_id)
     res = await matlabc.emit(target, source, ws)
     return {
         "ok": res.ok,
@@ -102,8 +112,36 @@ def read_workspace_file(
     session_id: str | None = None,
     max_bytes: int = 1_000_000,
 ) -> bytes:
-    ws = workspace_for(user_id, session_id)
+    ws = resolve_workspace(user_id, session_id)
     target = resolve_in_workspace(ws, path)  # raises ValueError on traversal
     if not target.is_file():
         raise FileNotFoundError(path)
     return target.read_bytes()[:max_bytes]
+
+
+async def run_plot(
+    source: str,
+    fmt: str = "png",
+    user_id: str | None = None,
+    session_id: str | None = None,
+) -> dict:
+    """Run a plotting snippet and save the current figure to the workspace.
+
+    A self-contained one-shot run: the server appends ``saveas(gcf, OUT)``
+    with an *absolute* OUT path, so the figure lands in the workspace
+    regardless of the child's cwd. Returns the produced file or an error.
+    """
+    if fmt not in _PLOT_EXT:
+        raise ValueError(f"unknown format {fmt!r}; expected one of {list(_PLOT_EXT)}")
+    ws = resolve_workspace(user_id, session_id)
+    out = ws / f"plot_{uuid.uuid4().hex[:12]}.{fmt}"
+    snippet = source.rstrip("\n") + f"\nsaveas(gcf, '{out}');\n"
+    res = await matlabc.repl(snippet, ws)
+    produced = out.is_file() and out.stat().st_size > 0
+    return {
+        "ok": produced and not res.timed_out,
+        "file": str(out),
+        "rel": out.name,
+        "stderr": res.stderr,
+        "timed_out": res.timed_out,
+    }

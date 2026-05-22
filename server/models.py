@@ -77,6 +77,12 @@ class UploadResponse(BaseModel):
     file: FileInfo
 
 
+# --- /v1/plot ------------------------------------------------------------
+class PlotRequest(SessionMixin):
+    source: str = Field(..., description="MATLAB plotting snippet (server appends saveas).")
+    format: str | None = Field(default=None, description="png | svg | pdf")
+
+
 # --- /v1/chat/completions (OpenAI-compatible) ----------------------------
 class ChatMessage(BaseModel):
     role: str
