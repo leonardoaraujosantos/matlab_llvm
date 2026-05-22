@@ -2560,11 +2560,18 @@ void Lowerer::lowerStmt(const Stmt &St) {
         /* [Gm, Pm, Wcg, Wcp] = margin(sys) — gain/phase margins and their
          * crossover frequencies. allmargin_ss returns the 1×4 row; split it
          * into the (scalar) outputs. */
-        if (Callee->Name == "margin" && Cn0 == "ss") {
+        if (Callee->Name == "margin" && (Cn0 == "ss" || Cn0 == "tf")) {
           mlir::Value Obj = loadObjP(C->Args[0]);
-          mlir::Value Av = getPropP(Obj, "A"), Bv = getPropP(Obj, "B"),
-                      Cv = getPropP(Obj, "C"), Dv = getPropP(Obj, "D");
-          mlir::Value Row = callRT("margin_ss_auto", {Av, Bv, Cv, Dv});
+          mlir::Value Row;
+          if (Cn0 == "tf") {
+            Row = callRT("margin_tf_auto",
+                         {getPropP(Obj, "Numerator"),
+                          getPropP(Obj, "Denominator")});
+          } else {
+            mlir::Value Av = getPropP(Obj, "A"), Bv = getPropP(Obj, "B"),
+                        Cv = getPropP(Obj, "C"), Dv = getPropP(Obj, "D");
+            Row = callRT("margin_ss_auto", {Av, Bv, Cv, Dv});
+          }
           auto F64 = mlir::Float64Type::get(&MCtx);
           for (size_t i = 0; i < A.LHS.size() && i < 4; ++i) {
             if (!A.LHS[i]) continue;
@@ -2592,6 +2599,31 @@ void Lowerer::lowerStmt(const Stmt &St) {
                         getPropP(Obj, "C"), getPropP(Obj, "D"), T});
           mlir::Value Outs[2] = {Y, T};        /* y, tout = t */
           for (size_t i = 0; i < A.LHS.size() && i < 2; ++i)
+            if (A.LHS[i]) lowerLValueStore(*A.LHS[i], Outs[i]);
+          return;
+        }
+        /* [mag, phase, wout] = bode(model, w): magnitude + phase over the
+         * frequency grid w (ss or tf), with wout echoing w. Also serves the
+         * 2-output [mag, phase] form. */
+        if (Callee->Name == "bode" && (Cn0 == "ss" || Cn0 == "tf") &&
+            C->Args.size() == 2 && C->Args[1]) {
+          mlir::Value Obj = loadObjP(C->Args[0]);
+          mlir::Value W = lowerExpr(*C->Args[1]);
+          if (W.getType() != PtrTy) W.setType(PtrTy);
+          mlir::Value Mag, Phase;
+          if (Cn0 == "tf") {
+            mlir::Value Num = getPropP(Obj, "Numerator");
+            mlir::Value Den = getPropP(Obj, "Denominator");
+            Mag   = callRT("bode_tf_mag",   {Num, Den, W});
+            Phase = callRT("bode_tf_phase", {Num, Den, W});
+          } else {
+            mlir::Value Av = getPropP(Obj, "A"), Bv = getPropP(Obj, "B"),
+                        Cv = getPropP(Obj, "C"), Dv = getPropP(Obj, "D");
+            Mag   = callRT("bode_ss_mag",   {Av, Bv, Cv, Dv, W});
+            Phase = callRT("bode_ss_phase", {Av, Bv, Cv, Dv, W});
+          }
+          mlir::Value Outs[3] = {Mag, Phase, W};   /* mag, phase, wout = w */
+          for (size_t i = 0; i < A.LHS.size() && i < 3; ++i)
             if (A.LHS[i]) lowerLValueStore(*A.LHS[i], Outs[i]);
           return;
         }
@@ -7229,19 +7261,27 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
           return rebuildCall("roots", {getProp(Obj, "Denominator")}, PtrTy);
         }
 
-        /* dcgain(sys): for ss → dcgain_ss(A, B, C, D). */
-        if (Nm == "dcgain" && Cls0 && Cn0 == "ss") {
+        /* dcgain(sys): ss → dcgain_ss(A,B,C,D); tf → dcgain_tf(num,den). */
+        if (Nm == "dcgain" && Cls0 && (Cn0 == "ss" || Cn0 == "tf")) {
           mlir::Value Obj = loadObj(C.Args[0]);
+          if (Cn0 == "tf")
+            return rebuildCall("dcgain_tf",
+                               {getProp(Obj, "Numerator"),
+                                getProp(Obj, "Denominator")}, PtrTy);
           return rebuildCall("dcgain_ss",
                              {getProp(Obj, "A"), getProp(Obj, "B"),
                               getProp(Obj, "C"), getProp(Obj, "D")},
                              PtrTy);
         }
 
-        /* bandwidth(sys): for ss → bandwidth_ss(A, B, C, D). Returns
+        /* bandwidth(sys): ss → bandwidth_ss; tf → bandwidth_tf. Returns
          * a scalar f64 (the −3 dB bandwidth in rad/s). */
-        if (Nm == "bandwidth" && Cls0 && Cn0 == "ss") {
+        if (Nm == "bandwidth" && Cls0 && (Cn0 == "ss" || Cn0 == "tf")) {
           mlir::Value Obj = loadObj(C.Args[0]);
+          if (Cn0 == "tf")
+            return rebuildCall("bandwidth_tf",
+                               {getProp(Obj, "Numerator"),
+                                getProp(Obj, "Denominator")}, F64);
           return rebuildCall("bandwidth_ss",
                              {getProp(Obj, "A"), getProp(Obj, "B"),
                               getProp(Obj, "C"), getProp(Obj, "D")},

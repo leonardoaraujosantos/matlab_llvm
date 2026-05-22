@@ -4193,6 +4193,14 @@ matlab_mat *matlab_margin_ss_auto(matlab_mat *A, matlab_mat *B,
     return matlab_allmargin_ss(A, B, C, D, w);
 }
 
+/* margin(tf) — convert num/den to controllable-canonical state space and
+ * reuse matlab_margin_ss_auto; returns the same 1×4 [Gm, Pm, Wcg, Wcp] row. */
+matlab_mat *matlab_margin_tf_auto(matlab_mat *num, matlab_mat *den) {
+    matlab_mat *A, *B, *C, *D;
+    tf2ss_ccf(num, den, &A, &B, &C, &D);
+    return matlab_margin_ss_auto(A, B, C, D);
+}
+
 /*-------------------------------------------------------------------------
  * Discrete algebraic Riccati equation.
  *
@@ -5726,6 +5734,19 @@ matlab_mat *matlab_dcgain_ss(matlab_mat *A, matlab_mat *B,
         for (int64_t j = 0; j < m; ++j)
             out->data[i * m + j] = D->data[i * m + j] - CAinvB->data[i * m + j];
     return out;
+}
+
+/* dcgain / bandwidth on a tf — convert num/den to state space and reuse the
+ * ss forms (same pattern as margin_tf_auto). */
+matlab_mat *matlab_dcgain_tf(matlab_mat *num, matlab_mat *den) {
+    matlab_mat *A, *B, *C, *D;
+    tf2ss_ccf(num, den, &A, &B, &C, &D);
+    return matlab_dcgain_ss(A, B, C, D);
+}
+double matlab_bandwidth_tf(matlab_mat *num, matlab_mat *den) {
+    matlab_mat *A, *B, *C, *D;
+    tf2ss_ccf(num, den, &A, &B, &C, &D);
+    return matlab_bandwidth_ss(A, B, C, D);
 }
 
 /*-------------------------------------------------------------------------

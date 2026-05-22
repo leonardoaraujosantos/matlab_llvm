@@ -5393,6 +5393,8 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"balred",     "matlab_balred_A",   1, "pppf"},
       {"norm_h2",    "matlab_norm_h2",    0, "ppp"},
       {"dcgain_ss",  "matlab_dcgain_ss",  1, "pppp"},
+      {"dcgain_tf",  "matlab_dcgain_tf",  1, "pp"},
+      {"bandwidth_tf","matlab_bandwidth_tf",0,"pp"},
       {"stepinfo",   "matlab_stepinfo",   1, "pp"},
       {"kalman_L",   "matlab_kalman_L",   1, "ppppp"},
       {"kalman_P",   "matlab_kalman_P",   1, "ppppp"},
@@ -5425,6 +5427,12 @@ bool TensorLowering::rewriteBuiltinCalls() {
        * for plotting). The 2-return [mag, phase] = bode_ss(...) shape
        * goes through the dedicated splitter above. */
       {"bode_ss",    "matlab_bode_ss_mag",1, "ppppp"},
+      /* Per-output bode entries for the model-object [mag,phase,wout]
+       * multi-return splitter (Lowering.cpp). */
+      {"bode_ss_mag",  "matlab_bode_ss_mag",  1, "ppppp"},
+      {"bode_ss_phase","matlab_bode_ss_phase",1, "ppppp"},
+      {"bode_tf_mag",  "matlab_bode_tf_mag",  1, "ppp"},
+      {"bode_tf_phase","matlab_bode_tf_phase",1, "ppp"},
       {"lsim_ss",    "matlab_lsim_ss",    1, "pppppf"},
       /* §3.4 follow-ons — raw complex freqresp + nyquist (re/im
        * columns) + allmargin (1×4 row). freqresp / nyquist accept
@@ -5436,6 +5444,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"nyquist_tf", "matlab_nyquist_tf", 1, "ppp"},
       {"allmargin_ss","matlab_allmargin_ss",1, "ppppp"},
       {"margin_ss_auto","matlab_margin_ss_auto",1,"pppp"},
+      {"margin_tf_auto","matlab_margin_tf_auto",1,"pp"},
       {"gain_margin","matlab_gain_margin",0, "ppppp"},
       {"phase_margin","matlab_phase_margin",0,"ppppp"},
       {"bandwidth_ss","matlab_bandwidth_ss",0,"pppp"},
