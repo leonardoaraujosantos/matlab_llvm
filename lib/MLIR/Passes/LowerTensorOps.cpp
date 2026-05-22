@@ -1160,11 +1160,12 @@ bool TensorLowering::rewriteBuiltinCalls() {
       continue;
     }
     if ((Name == "matlab_cell_set_f64" ||
-         Name == "matlab_cell_set_mat") &&
+         Name == "matlab_cell_set_mat" ||
+         Name == "matlab_cell_set_str") &&
         Call->getNumOperands() == 3 &&
         Call->getOperand(0).getType() == PtrTy &&
         Call->getOperand(1).getType() == F64) {
-      bool IsMat = Name == "matlab_cell_set_mat";
+      bool IsMat = Name != "matlab_cell_set_f64";  /* mat + str take a ptr */
       Value V = Call->getOperand(2);
       if (IsMat && V.getType() != PtrTy) continue;
       if (!IsMat && V.getType() != F64) continue;

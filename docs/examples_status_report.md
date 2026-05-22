@@ -139,12 +139,23 @@ error). The targeted examples now need these further features:
 | `control/step_response_siso` | `step` 2-output `[y,t]` multi-return | CST feature |
 | `pde/*` (3) | `generateMesh` / `decsg` / `multicuboid` / `femodel` | PDE Toolbox |
 
+Follow-up fixes (suite 474→475 green):
+
+- **CST model-object multi-return splitters** — `[kest,L,P] = kalman(sys,Qn,Rn)`
+  (kalman gain + error covariance; `kest` placeholder) and
+  `[Gm,Pm,Wcg,Wcp] = margin(sys)` (new `matlab_margin_ss_auto` builds the
+  frequency grid + reuses `allmargin_ss`). New model-object multi-return path
+  in the lowering. Test `test/Run/cst_multiret.m`. (margin on a `tf` model and
+  the kalman/c2d-on-model-object example chains remain follow-ons.)
+- **D (`legend({...})` / cell-of-strings)** — FIXED. String cell elements now
+  store with a dedicated kind=3 (`matlab_cell_set_str`); `matlab_cell_get_mat`
+  exposes them as char-code rows so `matlab_legend`'s char decoding works.
+  `examples/plot/multi_series.m` runs. Test `test/Run/cell_strings.m`.
+  (Pre-existing, separate: `m = c{i}; m(k)` — subscripting a cell-element
+  result var — doesn't lower for *any* cell element type; and `disp(c{i})`
+  routes a string element through the scalar `cell_get_f64` path.)
+
 Still deferred (deeper than a quick gap):
-- **D (`legend({...})` / cell-of-strings)** — cells don't track per-element
-  type; a string element stored via `cell_set_mat` is read back as a
-  char-matrix by `matlab_legend`. Needs cell string-element typing +
-  `matlab_legend` string support. (A naive "store as `matlab_string`" turns
-  the compile error into a `bad_alloc` — reverted.)
 - **E (symbolic)** — `symbolic_demo` / `quadrotor_derive_eom` compile fine;
   they need `runtime_sym` + the external **SymPP** lib at AOT link (the
   example link set omits them; the `matlabc` binary itself links them).

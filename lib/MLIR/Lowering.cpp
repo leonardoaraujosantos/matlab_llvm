@@ -10162,6 +10162,25 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
     auto &M = static_cast<const CellLiteral &>(E);
     auto F64 = mlir::Float64Type::get(&MCtx);
     auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+    /* A char/string literal element (`{'a', 'b'}`) becomes a matlab_string*
+     * ptr stored with cell_set_str (kind=3); cell_get_mat exposes it as a
+     * char-code row so the char-matrix consumers (legend, …) keep working.
+     * Other elements lower normally. Sets `IsStr` when a string was made. */
+    auto lowerCellElem = [&](const Expr *El, bool &IsStr) -> mlir::Value {
+      std::string Txt;
+      if (auto *CL = dynamic_cast<const CharLiteral *>(El)) { Txt = std::string(CL->Value); IsStr = true; }
+      else if (auto *SL = dynamic_cast<const StringLiteral *>(El)) { Txt = std::string(SL->Value); IsStr = true; }
+      if (IsStr) {
+        mlir::NamedAttribute VA(mlir::StringAttr::get(&MCtx, "value"),
+                                mlir::StringAttr::get(&MCtx, Txt));
+        mlir::Value Ch = emitUnreg("matlab.const_char", {},
+                                    mlir::NoneType::get(&MCtx), L, {VA});
+        mlir::NamedAttribute Cal(mlir::StringAttr::get(&MCtx, "callee"),
+                                 mlir::StringAttr::get(&MCtx, "matlab_string_from_literal"));
+        return emitUnreg("matlab.call_builtin", {Ch}, PtrTy, L, {Cal});
+      }
+      return lowerExpr(*El);
+    };
     bool TwoD = M.Rows.size() > 1;
     if (TwoD) {
       size_t Rcount = M.Rows.size();
@@ -10199,10 +10218,12 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
       return Cell;
     }
     /* 1-D path. */
-    llvm::SmallVector<mlir::Value, 8> Elems;
+    struct CellElem { mlir::Value V; bool IsStr; };
+    llvm::SmallVector<CellElem, 8> Elems;
     for (auto &R : M.Rows)
       for (const Expr *El : R)
-        if (El) Elems.push_back(lowerExpr(*El));
+        if (El) { bool S = false; mlir::Value V = lowerCellElem(El, S);
+                  Elems.push_back({V, S}); }
     mlir::Value Cnt = mlir::arith::ConstantOp::create(
         B, L, F64, mlir::FloatAttr::get(F64, (double)Elems.size()));
     mlir::NamedAttribute New(
@@ -10213,15 +10234,16 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
     for (size_t i = 0; i < Elems.size(); ++i) {
       mlir::Value Idx = mlir::arith::ConstantOp::create(
           B, L, F64, mlir::FloatAttr::get(F64, (double)(i + 1)));
-      mlir::Value V = Elems[i];
+      mlir::Value V = Elems[i].V;
       /* Tensor and ptr both route to set_mat — a literal matrix is
        * tensor-typed at lowering time and gets retyped to ptr by
-       * LowerTensorOps later. */
+       * LowerTensorOps later. A string element routes to set_str. */
       bool IsMat = V && (V.getType() == PtrTy ||
                          mlir::isa<mlir::RankedTensorType,
                                    mlir::UnrankedTensorType>(V.getType()));
-      llvm::StringRef Callee = IsMat ? "matlab_cell_set_mat"
-                                      : "matlab_cell_set_f64";
+      llvm::StringRef Callee = Elems[i].IsStr ? "matlab_cell_set_str"
+                              : IsMat          ? "matlab_cell_set_mat"
+                                               : "matlab_cell_set_f64";
       mlir::NamedAttribute Cal(
           mlir::StringAttr::get(&MCtx, "callee"),
           mlir::StringAttr::get(&MCtx, Callee));

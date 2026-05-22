@@ -13278,6 +13278,21 @@ void matlab_cell_set_mat(matlab_cell *c, double i1, matlab_mat *m) {
     c->ptr_vals[i] = m;
 }
 
+/* String-typed cell element (kind=3) — a matlab_string* pointer. Used for
+ * cell-of-strings literals (`{'a', 'b'}`); matlab_cell_get_mat exposes the
+ * stored string as a char-code row matrix so the existing char-matrix
+ * consumers (legend, char arithmetic) keep working. */
+void matlab_cell_set_str(matlab_cell *c, double i1, void *str) {
+    if (!c) return;
+    int32_t i = (int32_t)i1 - 1;
+    if (i < 0) return;
+    if (i >= c->cap) cell_grow_to(c, i + 1);
+    if (i >= c->n) c->n = i + 1;
+    c->kinds[i] = 3;
+    c->f64_vals[i] = 0.0;
+    c->ptr_vals[i] = str;
+}
+
 double matlab_cell_get_f64(matlab_cell *c, double i1) {
     if (!c) return 0.0;
     int32_t i = (int32_t)i1 - 1;
@@ -13300,6 +13315,15 @@ matlab_mat *matlab_cell_get_mat(matlab_cell *c, double i1) {
     if (c->kinds[i] == 0) {
         matlab_mat *m = mat_alloc(1, 1);
         m->data[0] = c->f64_vals[i];
+        return m;
+    }
+    if (c->kinds[i] == 3 && c->ptr_vals[i]) {
+        /* string element -> 1xN char-code row matrix */
+        auto *s = (struct matlab_string_s_fwd_ *)c->ptr_vals[i];
+        int64_t n = s->len > 0 ? s->len : 0;
+        matlab_mat *m = mat_alloc(1, n);
+        for (int64_t j = 0; j < n; ++j)
+            m->data[j] = (double)(unsigned char)s->data[j];
         return m;
     }
     return mat_alloc(0, 0);
