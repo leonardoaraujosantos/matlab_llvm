@@ -10,6 +10,26 @@ This plan turns the corrected TRD into ordered, shippable phases. Every
 `matlabc` invocation below is the real CLI verified in
 `tools/matlabc/main.cpp`.
 
+> **Implementation status (branch `feat_compiler_backend`).** The `server/`
+> tree exists with **Phase 1** (`/v1/check`, `/v1/repl`, hardened sandbox),
+> **Phase 2** (`/v1/codegen/*`), a **partial Phase 3** (workspaces +
+> `/v1/files` + REPL figure capture), and **Phase 4** (`WS
+> /v1/dap/ws/{session_id}` — opaque DAP-over-WebSocket byte bridge to
+> `matlabc -dap`), **Phase 5** (FastMCP tools mounted at `/mcp` —
+> streamable-HTTP, since SSE is deprecated), and **Phase 6**
+> (`/v1/chat/completions`, OpenAI-compatible, grounded in a dependency-free
+> BM25 index over `docs/**/*.md`; proxies to OpenAI when a key is set, else
+> retrieval-only), and **Phase 7** (bearer auth on all `/v1`, per-client
+> rate limiting, a global matlabc concurrency cap, per-workspace disk quotas,
+> and **stateful REPL sessions** with idle eviction, a **warm pool** of
+> pre-warmed workers, and a **tier-2 syscall sandbox** bwrap/firejail/nsjail).
+> Also **`/v1/plot`** (run a snippet → stream PNG/SVG/PDF). **Phase 0/8** ship
+> as the root `Dockerfile` + `docker-compose.yaml`. Run locally with `just
+> backend-up`; test with `just backend-test` / `just backend-cov` (fake
+> matlabc, no LLVM build needed; **92% coverage**). See
+> [`server/README.md`](../server/README.md). Deferred: only the CI/deploy
+> half of Phase 8.
+
 ---
 
 ## 0. Guiding constraints (from the codebase review)
@@ -20,9 +40,9 @@ These shape every phase; see TRD §7 for the evidence.
    DAP over **stdio** with `Content-Length` framing. There is no
    `lldb-dap` and no DAP socket — the network edge is a stdio↔WebSocket
    bridge we write in FastAPI.
-2. **REPL is text + stateful over stdin** (`matlabc -repl`); default
-   no-flag mode is `-check` (validate only, no execution). JSON is the
-   API layer's job.
+2. **REPL is text + stateful over stdin** (`matlabc -repl`); the default
+   mode (run with **no flag** — there is no `-check` flag) is a validate-only
+   check (no execution). JSON is the API layer's job.
 3. **`matlabc` dynamically links libLLVM/libMLIR** and (with plotting)
    Cairo — the runtime image must carry those `.so`s.
 4. **LLVM version must match the source** (20 stable floor; 22 = current
@@ -109,7 +129,8 @@ an embeddings client.
 * `matlabc.py`: helpers `check(src)`, `repl(src)`, `emit(target, src)`
   that write `src` to a temp `.m` in the workspace (or feed `-repl` over
   stdin) and shell out via `sandbox.py`.
-* `POST /v1/check` → `matlabc -check file.m`; return
+* `POST /v1/check` → `matlabc file.m` (Check is the **default** mode; there
+  is no `-check` flag — passing one errors as "unknown flag"); return
   `{ok, diagnostics[], stderr}`. **This is the only `<200ms` route.**
 * `POST /v1/repl` → drive `matlabc -repl`: write code to stdin, read
   stdout/stderr, return `{stdout, stderr, ok, artifacts[]}` (artifacts
@@ -303,7 +324,7 @@ endpoint is drop-in for an OpenAI Base URL override.
 |---|---|---|
 | LLVM/MLIR version mismatch on `apt.llvm.org` (no MLIR dev pkg for chosen v) | Med | Pin to a version with `libmlir-<v>-dev`; else copy `.so`s from builder or static-link |
 | Arbitrary-code execution abuse | High | Layered sandbox (rlimit + nsjail/container), quotas, auth — Phase 7 is not optional for public exposure |
-| JIT cold-start latency on mobile networks | Med | Warm pool; keep WS sessions alive; scope `<200ms` to `-check` only |
+| JIT cold-start latency on mobile networks | Med | Warm pool; keep WS sessions alive; scope `<200ms` to the no-flag check only |
 | Image bloat from LLVM runtime libs | Med | Slim runtime stage; consider static link or stripped `.so`s |
 | Stateful REPL memory growth / leaks per session | Med | Idle eviction, per-session memory cap, periodic worker recycle |
 | RAG context cost/quality | Low | Index docs+signatures (not raw source); cap top-k; cache embeddings |
@@ -323,3 +344,14 @@ endpoint is drop-in for an OpenAI Base URL override.
 
 > First milestone to show on an iPad: Phases 0 → 1 → 3 — type MATLAB,
 > upload a CSV, get a plot back, download the result.
+
+---
+
+## 15. Future: Learning platform (LMS)
+
+A planned data + learning layer on top of this backend — per-user data and
+files, **programming courses** (lessons + exercises), and per-user learning
+paths/scores, with code exercises **auto-graded by `matlabc`**. Decided:
+**PostgreSQL** (SQLAlchemy async + Alembic), full LMS incl. authoring, built on
+the CyberdyneAuth identity. Not started — full design, schema, API surface, and
+phased plan in [`docs/lms_roadmap.md`](lms_roadmap.md).

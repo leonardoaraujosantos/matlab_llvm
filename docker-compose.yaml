@@ -1,0 +1,51 @@
+# Coolify-ready stack (Compose v2 — no top-level `version:` key).
+#
+# Coolify's reverse proxy publishes ports; services only `expose` on the
+# compose network. Set the public domain for this service in the Coolify UI
+# (it routes the domain → the exposed :8000). For local HTTP, use
+# `just backend-up` rather than this compose.
+services:
+  backend-compiler:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    image: matlab-llvm-backend:latest
+    restart: unless-stopped
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      # Resource ceilings for the untrusted-code child processes.
+      - MATLAB_BACKEND_CPU_SECONDS=${MATLAB_BACKEND_CPU_SECONDS:-10}
+      - MATLAB_BACKEND_WALL_TIMEOUT_S=${MATLAB_BACKEND_WALL_TIMEOUT_S:-15}
+      - MATLAB_BACKEND_MEMORY_MB=${MATLAB_BACKEND_MEMORY_MB:-2048}
+      - MATLAB_BACKEND_WARM_POOL_SIZE=${MATLAB_BACKEND_WARM_POOL_SIZE:-2}
+      # Tier-2 sandbox: bwrap is installed in the image. Needs user
+      # namespaces — keep `none` unless the host/compose grants them.
+      - MATLAB_BACKEND_SANDBOX_BACKEND=${MATLAB_BACKEND_SANDBOX_BACKEND:-none}
+      # Auth: prefer CyberdyneAuth (validates bearer tokens against its
+      # /api/v1/users/me). Falls back to a shared static token, then open.
+      - CYBERDYNE_AUTH_URL=${CYBERDYNE_AUTH_URL:-https://auth.backend.coolify.cyberdynecorp.ai}
+      - MATLAB_BACKEND_API_TOKEN=${MATLAB_BACKEND_API_TOKEN:-}
+      # MCP auth: require a minted token on /mcp (POST /v1/mcp/token).
+      - MATLAB_BACKEND_MCP_REQUIRE_AUTH=${MATLAB_BACKEND_MCP_REQUIRE_AUTH:-}
+      - MATLAB_BACKEND_MCP_TOKEN_SECRET=${MATLAB_BACKEND_MCP_TOKEN_SECRET:-}
+    expose:
+      - "8000"
+    volumes:
+      - workspace_data:/workspace
+    # Defense-in-depth for arbitrary user code (plan §7 adds cap_drop,
+    # read_only rootfs, pids_limit, nsjail/per-session containers).
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz', timeout=25)"]
+      interval: 30s
+      timeout: 30s
+      # Cold-start budget: prewarming the matlabc -repl pool (real JIT init
+      # per worker) + the RAG index build can take tens of seconds on a
+      # busy Coolify build host.
+      start_period: 90s
+      retries: 5
+
+volumes:
+  workspace_data:

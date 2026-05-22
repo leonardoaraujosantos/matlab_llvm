@@ -493,3 +493,51 @@ loc:
         \( -name '*.cpp' -o -name '*.h' -o -name '*.c' -o \
            -name '*.def' -o -name '*.m' -o -name '*.sh' \) \
         | xargs wc -l | tail -1
+
+# ============================================================================
+# Remote backend (server/) — FastAPI edge over the matlabc CLI.
+# Requires `uv` (https://docs.astral.sh/uv/). See server/README.md and
+# docs/remote_backend_plan.md.
+# ============================================================================
+
+# Install backend Python deps (incl. tests) into server/.venv via uv.
+backend-install:
+    cd server && uv sync --extra dev
+
+# Enables Cairo plotting when present; the flag is sticky in the CMake cache,
+# so plain `just build` keeps it afterwards (the Docker image always has it).
+# Build matlabc with plotting for the backend (so /v1/plot works locally).
+backend-build:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if pkg-config --exists cairo 2>/dev/null; then
+        echo "cairo found — building matlabc with /v1/plot support"
+        cmake -S . -B {{BUILD_DIR}} -G Ninja -DCMAKE_BUILD_TYPE=Release -DMATLAB_LLVM_WITH_PLOT=ON
+    else
+        echo "cairo not found — /v1/plot disabled (install cairo, e.g. 'brew install cairo')"
+        cmake -S . -B {{BUILD_DIR}} -G Ninja -DCMAKE_BUILD_TYPE=Release
+    fi
+    cmake --build {{BUILD_DIR}} --target matlabc {{ if JOBS != "" { "-j " + JOBS } else { "" } }}
+
+# Build matlabc (with plotting) + serve the backend on :8000 (/docs, /healthz).
+backend-up PORT="8000": backend-build
+    cd server && MATLAB_BACKEND_MATLABC_BIN="{{justfile_directory()}}/{{BUILD_DIR}}/matlabc" \
+        uv run uvicorn main:app --host 0.0.0.0 --port {{PORT}}
+
+# Build matlabc (with plotting) + serve with auto-reload (for editing the server).
+backend-dev PORT="8000": backend-build
+    cd server && MATLAB_BACKEND_MATLABC_BIN="{{justfile_directory()}}/{{BUILD_DIR}}/matlabc" \
+        uv run uvicorn main:app --reload --host 0.0.0.0 --port {{PORT}}
+
+# Run the backend test suite (fake matlabc stub — no LLVM build needed).
+backend-test:
+    cd server && uv run --extra dev pytest -q
+
+# Backend tests with a coverage report (target: >90%).
+backend-cov:
+    cd server && uv run --extra dev pytest -q --cov --cov-report=term-missing
+
+# Live-server integration tests: boot uvicorn and hit it over real HTTP/WS.
+# Uses build/matlabc when present (real compiler), else a fake stub.
+backend-itest:
+    cd server && uv run --extra dev pytest integration -q

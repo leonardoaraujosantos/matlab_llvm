@@ -1,0 +1,115 @@
+name: Backend
+
+# Runs only when the remote backend (server/) or its container changes.
+on:
+  push:
+    paths:
+      - 'server/**'
+      - 'Dockerfile'
+      - 'docker-compose.yaml'
+      - '.github/workflows/backend.yml'
+  pull_request:
+    # `labeled` lets the heavy image job be run on demand via the
+    # `backend-image` label (see the image job's `if`).
+    types: [opened, synchronize, reopened, labeled]
+    paths:
+      - 'server/**'
+      - 'Dockerfile'
+      - 'docker-compose.yaml'
+      - '.github/workflows/backend.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: backend-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  # -------------------------------------------------------------------------
+  # TESTS — fast Python lane (no LLVM build). Unit + live-integration suites
+  # run against a fake matlabc, plus a >=90% coverage gate. ~2 min.
+  # -------------------------------------------------------------------------
+  tests:
+    name: Tests (unit + integration, fake matlabc)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Unit tests + coverage gate
+        working-directory: server
+        run: uv run --extra dev pytest -q --cov --cov-report=term-missing --cov-fail-under=90
+
+      - name: Live-server integration tests (fake matlabc)
+        working-directory: server
+        run: uv run --extra dev pytest integration -q
+
+  # -------------------------------------------------------------------------
+  # IMAGE — build the production Docker image (compiles matlabc against
+  # apt.llvm.org LLVM, installs the server) and run the Phase-0 smoke gate
+  # against the real, containerised compiler. Heavy (~30-45 min cold).
+  #
+  # Opt-in only (manual dispatch or the `backend-image` label) — NOT on push
+  # to main — because matlabc currently fails to build on Linux/libstdc++
+  # (missing standard includes; issue #7). Re-enable the main-push trigger
+  # once #7 is fixed and the image builds green.
+  # -------------------------------------------------------------------------
+  image:
+    name: Docker image build + smoke gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' &&
+       contains(github.event.pull_request.labels.*.name, 'backend-image'))
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: matlab-llvm-backend:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke — matlabc repl / emit / saveas (Phase 0 gate)
+        run: |
+          set -euo pipefail
+          echo "disp(1+1)" | docker run -i --rm --entrypoint matlabc matlab-llvm-backend:ci -repl
+          docker run --rm --entrypoint sh matlab-llvm-backend:ci -c \
+            'printf "x=[1 2;3 4]; disp(x)\n" > /tmp/a.m && matlabc -emit-python /tmp/a.m'
+          docker run --rm --entrypoint sh matlab-llvm-backend:ci -c \
+            'printf "plot([1 2 3]); saveas(gcf, '"'"'/tmp/p.png'"'"')\n" > /tmp/p.m \
+             && matlabc -repl < /tmp/p.m && test -s /tmp/p.png && echo "PNG written"'
+
+      - name: Smoke — boot container, exercise the API
+        run: |
+          set -euo pipefail
+          docker run -d --name api -p 8000:8000 matlab-llvm-backend:ci
+          for i in $(seq 1 60); do
+            curl -sf http://localhost:8000/healthz >/dev/null && break || sleep 2
+          done
+          curl -sf http://localhost:8000/healthz | tee /dev/stderr | grep -q '"status":"ok"'
+          curl -sf -X POST http://localhost:8000/v1/check \
+            -H 'content-type: application/json' -d '{"source":"x = 1 + 1;"}' | grep -q '"ok":true'
+          curl -sf -X POST http://localhost:8000/v1/repl \
+            -H 'content-type: application/json' -d '{"source":"disp(6*7)"}' | grep -q '42'
+          curl -sf -X POST http://localhost:8000/v1/codegen/python \
+            -H 'content-type: application/json' -d '{"source":"y = 2;"}' | grep -q '"ok":true'
+
+      - name: Container logs
+        if: always()
+        run: docker logs api || true
+
+      - name: Cleanup
+        if: always()
+        run: docker rm -f api || true

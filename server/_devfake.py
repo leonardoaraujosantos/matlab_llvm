@@ -1,0 +1,198 @@
+"""A fake ``matlabc`` stub for tests and live integration runs.
+
+Mimics the subset of the real CLI the backend drives (check / -repl /
+-emit-* / -dap) so the suite and the live-server integration tests run with
+no LLVM build. Behaviour keys off marker tokens in the source (INFLOOP /
+PLOT / NOFIG / ERR) so tests can request specific paths. The ``-repl`` loop
+is line-oriented with a tiny variable store and serves both the stateless
+(read-to-EOF) and stateful (persistent process) modes.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+FAKE_BODY = r'''
+import json, os, re, sys, time
+
+args = sys.argv[1:]
+EMIT = {"-emit-python": "python", "-emit-typescript": "typescript",
+        "-emit-c": "c", "-emit-cpp": "cpp", "-emit-systemverilog": "systemverilog"}
+mode, target, infile = "check", None, None
+for a in args:
+    if a == "-repl":
+        mode = "repl"
+    elif a == "-dap":
+        mode = "dap"
+    elif a in EMIT:
+        mode, target = "emit", EMIT[a]
+    elif not a.startswith("-"):
+        infile = a
+
+if mode == "dap":
+    rin, rout = sys.stdin.buffer, sys.stdout.buffer
+    seq = [0]
+
+    def read_frame():
+        hdr = b""
+        while not hdr.endswith(b"\r\n\r\n"):
+            ch = rin.read(1)
+            if not ch:
+                return None
+            hdr += ch
+        length = 0
+        for ln in hdr.split(b"\r\n"):
+            if ln.lower().startswith(b"content-length:"):
+                length = int(ln.split(b":", 1)[1].strip())
+        body = b""
+        while len(body) < length:
+            c = rin.read(length - len(body))
+            if not c:
+                return None
+            body += c
+        return json.loads(body.decode("utf-8"))
+
+    def send(obj):
+        seq[0] += 1
+        obj["seq"] = seq[0]
+        b = json.dumps(obj).encode("utf-8")
+        rout.write(b"Content-Length: %d\r\n\r\n" % len(b))
+        rout.write(b)
+        rout.flush()
+
+    def respond(req, body=None):
+        send({"type": "response", "request_seq": req["seq"], "success": True,
+              "command": req["command"], "body": body or {}})
+
+    def event(name, body=None):
+        send({"type": "event", "event": name, "body": body or {}})
+
+    while True:
+        req = read_frame()
+        if req is None:
+            break
+        cmd = req.get("command")
+        if cmd == "initialize":
+            respond(req, {"supportsConfigurationDoneRequest": True})
+            event("initialized")
+        elif cmd == "setBreakpoints":
+            bps = req.get("arguments", {}).get("breakpoints", [])
+            respond(req, {"breakpoints": [{"verified": True, "line": b.get("line", 1)} for b in bps]})
+        elif cmd == "launch":
+            respond(req)
+            event("stopped", {"reason": "breakpoint", "threadId": 1, "allThreadsStopped": True})
+        elif cmd == "threads":
+            respond(req, {"threads": [{"id": 1, "name": "main"}]})
+        elif cmd == "stackTrace":
+            respond(req, {"stackFrames": [{"id": 1, "name": "main", "line": 1, "column": 1}], "totalFrames": 1})
+        elif cmd == "scopes":
+            respond(req, {"scopes": [{"name": "Locals", "variablesReference": 1000, "expensive": False}]})
+        elif cmd == "variables":
+            respond(req, {"variables": [{"name": "x", "value": "42", "variablesReference": 0}]})
+        elif cmd in ("next", "stepIn", "stepOut"):
+            respond(req)
+            event("stopped", {"reason": "step", "threadId": 1, "allThreadsStopped": True})
+        elif cmd == "continue":
+            respond(req, {"allThreadsContinued": True})
+            event("terminated")
+            break
+        elif cmd == "disconnect":
+            respond(req)
+            break
+        else:
+            respond(req)
+    sys.exit(0)
+
+if mode == "repl":
+    store = {}
+    nofig = False
+    while True:
+        raw = sys.stdin.readline()
+        if not raw:
+            break
+        s = raw.strip()
+        if not s:
+            continue
+        if "INFLOOP" in s:
+            while True:
+                time.sleep(0.2)
+        if "NOFIG" in s:
+            nofig = True
+            continue
+        m = re.match(r"^saveas\(.*,\s*'([^']+)'\)\s*;?$", s)
+        if m:
+            if not nofig:
+                path = m.group(1)
+                ext = path.rsplit(".", 1)[-1].lower()
+                blob = {
+                    "png": b"\x89PNG\r\n\x1a\n",
+                    "svg": b"<svg xmlns='http://www.w3.org/2000/svg'></svg>",
+                    "pdf": b"%PDF-1.4\n%%EOF\n",
+                }.get(ext, b"x")
+                with open(path, "wb") as fh:
+                    fh.write(blob)
+            continue
+        if "PLOT" in s:
+            with open(os.path.join(os.getcwd(), "figure_1.png"), "wb") as fh:
+                fh.write(b"\x89PNG\r\n\x1a\n")
+            continue
+        if "ERR" in s:
+            sys.stderr.write("error: simulated repl error\n")
+            sys.stderr.flush()
+            continue
+        m = re.match(r"^disp\((.+)\)$", s)
+        if m:
+            arg = m.group(1).strip()
+            if len(arg) >= 2 and arg[0] == "'" and arg[-1] == "'":
+                sys.stdout.write(arg[1:-1] + "\n")
+            elif arg in store:
+                sys.stdout.write(store[arg] + "\n")
+            else:
+                sys.stdout.write(arg + "\n")
+            sys.stdout.flush()
+            continue
+        m = re.match(r"^([A-Za-z_]\w*)\s*=\s*(.+)$", s)
+        if m:
+            name, val = m.group(1), m.group(2).strip()
+            silent = val.endswith(";")
+            store[name] = val.rstrip(";").strip()
+            if not silent:
+                sys.stdout.write("%s = %s\n" % (name, store[name]))
+                sys.stdout.flush()
+            continue
+        sys.stdout.write("ans = %s\n" % s)
+        sys.stdout.flush()
+    sys.exit(0)
+
+src = open(infile).read() if infile else ""
+if "ERR" in src:
+    sys.stderr.write("%s:1:1: error: simulated syntax error\n" % infile)
+    sys.exit(1)
+if mode == "check":
+    sys.exit(0)
+if mode == "emit":
+    out = {
+        "python": "# generated python\nprint('hi')\n",
+        "typescript": "// generated ts\nconsole.log('hi')\n",
+        "c": "/* generated c */\nint main(void){return 0;}\n",
+        "cpp": "// generated cpp\nint main(){return 0;}\n",
+        "systemverilog": "// generated sv\nmodule m; endmodule\n",
+    }[target]
+    sys.stdout.write(out)
+    sys.exit(0)
+'''
+
+
+def write_fake(directory: str | os.PathLike | None = None) -> Path:
+    """Write the fake matlabc to ``directory`` (a temp dir if None) and return
+    its path. The shebang uses the current interpreter so it survives the
+    sandbox's scrubbed PATH."""
+    directory = Path(directory) if directory is not None else Path(tempfile.mkdtemp(prefix="mlb_fake_"))
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / "fake_matlabc"
+    path.write_text(f"#!{sys.executable}\n" + FAKE_BODY)
+    path.chmod(0o755)
+    return path
