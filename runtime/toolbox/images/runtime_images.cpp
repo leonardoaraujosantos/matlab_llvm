@@ -81,11 +81,440 @@ static int pnm_next(FILE *f) {           /* next token int, skipping ws/comments
     return v;
 }
 
+/* ===== PNG decoder (hand-coded; zlib inflate + chunk parse + unfilter) ===
+ * No libpng/zlib dependency.  inflate follows Mark Adler's puff.c reference
+ * structure (canonical Huffman, LSB-first bit reader).  Supports the common
+ * non-interlaced colour types (grayscale, RGB, palette, gray+alpha, RGBA)
+ * at bit depths 1/2/4/8/16.  Returns a matlab_mat (grayscale) or matlab_mat3
+ * (truecolor), values in [0,255]; alpha is dropped, 16-bit is scaled down. */
+
+struct PngBits {
+    const unsigned char *in; size_t inlen; size_t incnt;
+    int bitbuf; int bitcnt;
+};
+static int png_bits(PngBits &s, int need) {
+    long val = s.bitbuf;
+    while (s.bitcnt < need) {
+        if (s.incnt >= s.inlen) return -1;
+        val |= static_cast<long>(s.in[s.incnt++]) << s.bitcnt;
+        s.bitcnt += 8;
+    }
+    s.bitbuf = static_cast<int>(val >> need);
+    s.bitcnt -= need;
+    return static_cast<int>(val & ((1L << need) - 1));
+}
+struct PngHuff { std::vector<short> count; std::vector<short> symbol; };
+static void png_construct(PngHuff &h, const std::vector<short> &length, int n) {
+    h.count.assign(16, 0);
+    h.symbol.assign(static_cast<size_t>(n), 0);
+    for (int sym = 0; sym < n; ++sym) h.count[static_cast<size_t>(length[static_cast<size_t>(sym)])]++;
+    std::vector<short> offs(16, 0);
+    for (int len = 1; len < 15; ++len) offs[static_cast<size_t>(len + 1)] = static_cast<short>(offs[static_cast<size_t>(len)] + h.count[static_cast<size_t>(len)]);
+    for (int sym = 0; sym < n; ++sym)
+        if (length[static_cast<size_t>(sym)] != 0)
+            h.symbol[static_cast<size_t>(offs[static_cast<size_t>(length[static_cast<size_t>(sym)])]++)] = static_cast<short>(sym);
+}
+static int png_decode_sym(PngBits &s, const PngHuff &h) {
+    int code = 0, first = 0, index = 0;
+    for (int len = 1; len <= 15; ++len) {
+        int b = png_bits(s, 1); if (b < 0) return -1;
+        code |= b;
+        int cnt = h.count[static_cast<size_t>(len)];
+        if (code - cnt < first) return h.symbol[static_cast<size_t>(index + (code - first))];
+        index += cnt; first += cnt; first <<= 1; code <<= 1;
+    }
+    return -1;
+}
+static bool png_codes(PngBits &s, const PngHuff &lc, const PngHuff &dc, std::vector<unsigned char> &out) {
+    static const short lbase[29] = {3,4,5,6,7,8,9,10,11,13,15,17,19,23,27,31,35,43,51,59,67,83,99,115,131,163,195,227,258};
+    static const short lext[29]  = {0,0,0,0,0,0,0,0,1,1,1,1,2,2,2,2,3,3,3,3,4,4,4,4,5,5,5,5,0};
+    static const short dbase[30] = {1,2,3,4,5,7,9,13,17,25,33,49,65,97,129,193,257,385,513,769,1025,1537,2049,3073,4097,6145,8193,12289,16385,24577};
+    static const short dext[30]  = {0,0,0,0,1,1,2,2,3,3,4,4,5,5,6,6,7,7,8,8,9,9,10,10,11,11,12,12,13,13};
+    for (;;) {
+        int sym = png_decode_sym(s, lc); if (sym < 0) return false;
+        if (sym == 256) break;
+        if (sym < 256) { out.push_back(static_cast<unsigned char>(sym)); continue; }
+        sym -= 257; if (sym >= 29) return false;
+        int eb = png_bits(s, lext[sym]); if (eb < 0) return false;
+        int length = lbase[sym] + eb;
+        int dsym = png_decode_sym(s, dc); if (dsym < 0 || dsym >= 30) return false;
+        int de = png_bits(s, dext[dsym]); if (de < 0) return false;
+        int dist = dbase[dsym] + de;
+        if (static_cast<size_t>(dist) > out.size()) return false;
+        size_t from = out.size() - static_cast<size_t>(dist);
+        for (int k = 0; k < length; ++k) out.push_back(out[from + static_cast<size_t>(k)]);
+    }
+    return true;
+}
+static bool png_inflate(const unsigned char *src, size_t srclen, std::vector<unsigned char> &out) {
+    PngBits s{src, srclen, 0, 0, 0};
+    int last;
+    do {
+        last = png_bits(s, 1); if (last < 0) return false;
+        int type = png_bits(s, 2); if (type < 0) return false;
+        if (type == 0) {                                   /* stored */
+            s.bitbuf = 0; s.bitcnt = 0;
+            if (s.incnt + 4 > s.inlen) return false;
+            int len = s.in[s.incnt] | (s.in[s.incnt + 1] << 8); s.incnt += 4;
+            if (s.incnt + static_cast<size_t>(len) > s.inlen) return false;
+            for (int k = 0; k < len; ++k) out.push_back(s.in[s.incnt++]);
+        } else if (type == 1 || type == 2) {
+            PngHuff lc, dc;
+            if (type == 1) {                               /* fixed Huffman */
+                std::vector<short> ll(288), dl(30);
+                int i = 0;
+                for (; i < 144; ++i) ll[static_cast<size_t>(i)] = 8;
+                for (; i < 256; ++i) ll[static_cast<size_t>(i)] = 9;
+                for (; i < 280; ++i) ll[static_cast<size_t>(i)] = 7;
+                for (; i < 288; ++i) ll[static_cast<size_t>(i)] = 8;
+                for (int d = 0; d < 30; ++d) dl[static_cast<size_t>(d)] = 5;
+                png_construct(lc, ll, 288); png_construct(dc, dl, 30);
+            } else {                                        /* dynamic Huffman */
+                int hlit = png_bits(s, 5) + 257, hdist = png_bits(s, 5) + 1, hclen = png_bits(s, 4) + 4;
+                static const int ord[19] = {16,17,18,0,8,7,9,6,10,5,11,4,12,3,13,2,14,1,15};
+                std::vector<short> cl(19, 0);
+                for (int i = 0; i < hclen; ++i) { int v = png_bits(s, 3); if (v < 0) return false; cl[static_cast<size_t>(ord[i])] = static_cast<short>(v); }
+                PngHuff clh; png_construct(clh, cl, 19);
+                std::vector<short> lengths(static_cast<size_t>(hlit + hdist), 0);
+                int idx = 0;
+                while (idx < hlit + hdist) {
+                    int sym = png_decode_sym(s, clh); if (sym < 0) return false;
+                    if (sym < 16) lengths[static_cast<size_t>(idx++)] = static_cast<short>(sym);
+                    else if (sym == 16) { if (idx == 0) return false; int r = png_bits(s, 2) + 3; short pv = lengths[static_cast<size_t>(idx - 1)]; while (r-- && idx < hlit + hdist) lengths[static_cast<size_t>(idx++)] = pv; }
+                    else if (sym == 17) { int r = png_bits(s, 3) + 3; while (r-- && idx < hlit + hdist) lengths[static_cast<size_t>(idx++)] = 0; }
+                    else { int r = png_bits(s, 7) + 11; while (r-- && idx < hlit + hdist) lengths[static_cast<size_t>(idx++)] = 0; }
+                }
+                std::vector<short> ll(lengths.begin(), lengths.begin() + hlit);
+                std::vector<short> dl(lengths.begin() + hlit, lengths.end());
+                png_construct(lc, ll, hlit); png_construct(dc, dl, hdist);
+            }
+            if (!png_codes(s, lc, dc, out)) return false;
+        } else return false;
+    } while (!last);
+    return true;
+}
+static unsigned char png_paeth(int a, int b, int c) {
+    int p = a + b - c, pa = abs(p - a), pb = abs(p - b), pc = abs(p - c);
+    if (pa <= pb && pa <= pc) return static_cast<unsigned char>(a);
+    if (pb <= pc) return static_cast<unsigned char>(b);
+    return static_cast<unsigned char>(c);
+}
+static uint32_t png_be32(const unsigned char *p) {
+    return (static_cast<uint32_t>(p[0]) << 24) | (static_cast<uint32_t>(p[1]) << 16) |
+           (static_cast<uint32_t>(p[2]) << 8) | static_cast<uint32_t>(p[3]);
+}
+/* decode a whole PNG file buffer -> matlab_mat (gray) or matlab_mat3 (RGB). */
+static matlab_mat *png_decode(const unsigned char *f, size_t n) {
+    static const unsigned char sig[8] = {137,80,78,71,13,10,26,10};
+    if (n < 8 || memcmp(f, sig, 8) != 0) return nullptr;
+    size_t p = 8;
+    int W = 0, H = 0, depth = 0, ctype = 0, interlace = 0;
+    std::vector<unsigned char> idat, plte;
+    while (p + 8 <= n) {
+        uint32_t clen = png_be32(f + p);
+        const unsigned char *ctyp = f + p + 4;
+        const unsigned char *cdat = f + p + 8;
+        if (p + 12 + clen > n) break;
+        if (memcmp(ctyp, "IHDR", 4) == 0) {
+            W = static_cast<int>(png_be32(cdat)); H = static_cast<int>(png_be32(cdat + 4));
+            depth = cdat[8]; ctype = cdat[9]; interlace = cdat[12];
+        } else if (memcmp(ctyp, "PLTE", 4) == 0) {
+            plte.assign(cdat, cdat + clen);
+        } else if (memcmp(ctyp, "IDAT", 4) == 0) {
+            idat.insert(idat.end(), cdat, cdat + clen);
+        } else if (memcmp(ctyp, "IEND", 4) == 0) break;
+        p += 12 + clen;                                    /* len+type+data+crc */
+    }
+    if (W <= 0 || H <= 0 || interlace != 0 || idat.size() < 3) return nullptr;
+    int channels = (ctype == 0) ? 1 : (ctype == 2) ? 3 : (ctype == 3) ? 1 : (ctype == 4) ? 2 : (ctype == 6) ? 4 : 0;
+    if (channels == 0) return nullptr;
+    /* zlib stream: skip 2-byte header, inflate the rest (ignore adler32). */
+    std::vector<unsigned char> raw;
+    if (!png_inflate(idat.data() + 2, idat.size() - 2, raw)) return nullptr;
+    int bpp = (channels * depth + 7) / 8; if (bpp < 1) bpp = 1;
+    int rowbytes = (W * channels * depth + 7) / 8;
+    if (static_cast<size_t>((rowbytes + 1) * H) > raw.size()) return nullptr;
+    /* unfilter in place into a contiguous H×rowbytes buffer. */
+    std::vector<unsigned char> img(static_cast<size_t>(rowbytes) * H);
+    for (int y = 0; y < H; ++y) {
+        const unsigned char *src = raw.data() + static_cast<size_t>(y) * (rowbytes + 1);
+        int ft = src[0]; const unsigned char *line = src + 1;
+        unsigned char *cur = img.data() + static_cast<size_t>(y) * rowbytes;
+        unsigned char *prev = (y > 0) ? img.data() + static_cast<size_t>(y - 1) * rowbytes : nullptr;
+        for (int x = 0; x < rowbytes; ++x) {
+            int a = (x >= bpp) ? cur[x - bpp] : 0;
+            int b = prev ? prev[x] : 0;
+            int c = (prev && x >= bpp) ? prev[x - bpp] : 0;
+            int v = line[x];
+            if (ft == 1) v += a; else if (ft == 2) v += b; else if (ft == 3) v += (a + b) / 2; else if (ft == 4) v += png_paeth(a, b, c);
+            cur[x] = static_cast<unsigned char>(v & 0xff);
+        }
+    }
+    /* sample a channel value at pixel (y,x), scaled to [0,255]. */
+    auto sample = [&](int y, int x, int ch) -> double {
+        const unsigned char *row = img.data() + static_cast<size_t>(y) * rowbytes;
+        if (depth == 8) return row[x * channels + ch];
+        if (depth == 16) return row[(x * channels + ch) * 2];        /* high byte */
+        int bitpos = (x * channels + ch) * depth;                    /* 1/2/4-bit */
+        int byte = row[bitpos / 8];
+        int shift = 8 - depth - (bitpos % 8);
+        int val = (byte >> shift) & ((1 << depth) - 1);
+        return (ctype == 3) ? val : val * 255.0 / ((1 << depth) - 1);
+    };
+    bool gray = (ctype == 0 || ctype == 4);
+    if (gray) {
+        matlab_mat *R = mat_alloc(H, W);
+        for (int y = 0; y < H; ++y) for (int x = 0; x < W; ++x) R->data[y * W + x] = sample(y, x, 0);
+        return R;
+    }
+    /* RGBA (ctype 6) keeps its alpha as a 4th channel (depth-4); RGB and
+     * palette stay depth-3.  Downstream ops are depth-aware (Tier A3). */
+    int outch = (ctype == 6) ? 4 : 3;
+    matlab_mat3 *R = mat3_alloc(H, W, outch);
+    int64_t pl = static_cast<int64_t>(H) * W;
+    for (int y = 0; y < H; ++y) for (int x = 0; x < W; ++x) {
+        if (ctype == 3) {                                  /* palette index -> RGB */
+            int ix = static_cast<int>(sample(y, x, 0));
+            for (int cc = 0; cc < 3; ++cc) R->data[cc * pl + y * W + x] = (static_cast<size_t>(ix * 3 + cc) < plte.size()) ? plte[static_cast<size_t>(ix * 3 + cc)] : 0;
+        } else {                                            /* RGB / RGBA: all channels */
+            for (int cc = 0; cc < outch; ++cc) R->data[cc * pl + y * W + x] = sample(y, x, cc);
+        }
+    }
+    return reinterpret_cast<matlab_mat *>(R);
+}
+
+/* ----- minimal PNG encoder (store-mode deflate; lossless) -------------- */
+static uint32_t png_crc(const unsigned char *d, size_t n, uint32_t crc) {
+    crc = ~crc;
+    for (size_t i = 0; i < n; ++i) { crc ^= d[i]; for (int k = 0; k < 8; ++k) crc = (crc >> 1) ^ (0xEDB88320u & (~(crc & 1u) + 1u)); }
+    return ~crc;
+}
+static void png_put32(std::vector<unsigned char> &v, uint32_t x) {
+    v.push_back(static_cast<unsigned char>(x >> 24)); v.push_back(static_cast<unsigned char>(x >> 16));
+    v.push_back(static_cast<unsigned char>(x >> 8)); v.push_back(static_cast<unsigned char>(x));
+}
+static void png_chunk(std::vector<unsigned char> &out, const char *type, const std::vector<unsigned char> &data) {
+    png_put32(out, static_cast<uint32_t>(data.size()));
+    std::vector<unsigned char> td(type, type + 4); td.insert(td.end(), data.begin(), data.end());
+    out.insert(out.end(), td.begin(), td.end());
+    png_put32(out, png_crc(td.data(), td.size(), 0));
+}
+/* encode a matlab_mat (gray) or matlab_mat3 (RGB) to a PNG byte buffer. */
+static std::vector<unsigned char> png_encode(void *img) {
+    std::vector<unsigned char> out;
+    bool is3d = mat_is_3d(img);
+    int64_t H, W, pl = 0; const double *d; int ch;
+    if (is3d) { matlab_mat3 *m = reinterpret_cast<matlab_mat3 *>(img); H = m->rows; W = m->cols; d = m->data; pl = H * W; ch = static_cast<int>(m->depth); }
+    else      { matlab_mat *m = reinterpret_cast<matlab_mat *>(img);  H = m->rows; W = m->cols; d = m->data; ch = 1; }
+    /* colour type: 0 gray, 4 gray+alpha, 2 RGB, 6 RGBA — by channel count. */
+    int colortype = (ch == 4) ? 6 : (ch == 3) ? 2 : (ch == 2) ? 4 : 0;
+    static const unsigned char sig[8] = {137,80,78,71,13,10,26,10};
+    out.insert(out.end(), sig, sig + 8);
+    std::vector<unsigned char> ihdr;
+    png_put32(ihdr, static_cast<uint32_t>(W)); png_put32(ihdr, static_cast<uint32_t>(H));
+    ihdr.push_back(8); ihdr.push_back(static_cast<unsigned char>(colortype)); ihdr.push_back(0); ihdr.push_back(0); ihdr.push_back(0);
+    png_chunk(out, "IHDR", ihdr);
+    /* raw filtered scanlines: filter byte 0 + ch bytes per pixel. */
+    std::vector<unsigned char> raw;
+    for (int64_t y = 0; y < H; ++y) {
+        raw.push_back(0);
+        for (int64_t x = 0; x < W; ++x) for (int c = 0; c < ch; ++c) {
+            double v = is3d ? d[c * pl + y * W + x] : d[y * W + x];
+            raw.push_back(static_cast<unsigned char>(img_clamp(v + 0.5, 0, 255)));
+        }
+    }
+    /* zlib stream: header + stored deflate blocks + adler32. */
+    std::vector<unsigned char> z; z.push_back(0x78); z.push_back(0x01);
+    size_t off = 0;
+    while (off < raw.size()) {
+        size_t blk = std::min<size_t>(65535, raw.size() - off);
+        z.push_back((off + blk >= raw.size()) ? 1 : 0);     /* BFINAL, BTYPE=00 */
+        z.push_back(static_cast<unsigned char>(blk)); z.push_back(static_cast<unsigned char>(blk >> 8));
+        unsigned short nlen = static_cast<unsigned short>(~blk);
+        z.push_back(static_cast<unsigned char>(nlen)); z.push_back(static_cast<unsigned char>(nlen >> 8));
+        z.insert(z.end(), raw.begin() + off, raw.begin() + off + blk); off += blk;
+    }
+    uint32_t a = 1, b = 0; for (unsigned char c : raw) { a = (a + c) % 65521; b = (b + a) % 65521; }
+    png_put32(z, (b << 16) | a);
+    png_chunk(out, "IDAT", z);
+    png_chunk(out, "IEND", std::vector<unsigned char>());
+    return out;
+}
+
+/* ===== baseline JPEG decoder (hand-coded; JFIF / SOF0 sequential) =======
+ * No libjpeg dependency.  Supports baseline Huffman JPEG: DQT/SOF0/DHT/SOS,
+ * 4:4:4 / 4:2:2 / 4:2:0 chroma subsampling, naive 8×8 float IDCT,
+ * YCbCr→RGB.  Progressive / arithmetic coding are not supported. */
+static const int JPG_ZZ[64] = {
+    0,1,8,16,9,2,3,10,17,24,32,25,18,11,4,5,12,19,26,33,40,48,41,34,27,20,13,6,7,14,21,28,
+    35,42,49,56,57,50,43,36,29,22,15,23,30,37,44,51,58,59,52,45,38,31,39,46,53,60,61,54,47,55,62,63};
+struct JpgHuff {
+    unsigned char bits[17]; unsigned char vals[256];
+    int mincode[17], maxcode[18], valptr[17]; bool ok;
+};
+static void jpg_build(JpgHuff &h) {
+    int code = 0, k = 0; std::vector<int> sizes;
+    for (int l = 1; l <= 16; ++l) for (int i = 0; i < h.bits[l]; ++i) sizes.push_back(l);
+    sizes.push_back(0);
+    int p = 0;
+    for (int l = 1; l <= 16; ++l) {
+        if (h.bits[l] == 0) { h.maxcode[l] = -1; }
+        else { h.valptr[l] = p; h.mincode[l] = code; code += h.bits[l]; h.maxcode[l] = code - 1; p += h.bits[l]; }
+        code <<= 1;
+    }
+    h.maxcode[17] = 0x7fffffff; (void)k;
+    h.ok = true;
+}
+struct JpgBits { const unsigned char *d; size_t len, pos; uint32_t buf; int cnt; int marker; };
+static int jpg_bit(JpgBits &s) {
+    if (s.cnt == 0) {
+        if (s.pos >= s.len) { s.marker = -1; return 0; }
+        unsigned char b = s.d[s.pos++];
+        if (b == 0xFF) {
+            unsigned char b2 = (s.pos < s.len) ? s.d[s.pos] : 0;
+            if (b2 == 0) s.pos++;                 /* stuffed FF00 */
+            else { s.marker = b2; return 0; }     /* hit a marker */
+        }
+        s.buf = b; s.cnt = 8;
+    }
+    s.cnt--;
+    return (s.buf >> s.cnt) & 1;
+}
+static int jpg_bits(JpgBits &s, int n) { int v = 0; for (int i = 0; i < n; ++i) v = (v << 1) | jpg_bit(s); return v; }
+static int jpg_recv_ext(JpgBits &s, int n) {      /* receive + extend (signed) */
+    if (n == 0) return 0;
+    int v = jpg_bits(s, n);
+    if (v < (1 << (n - 1))) v += (-1 << n) + 1;
+    return v;
+}
+static int jpg_decode(JpgBits &s, const JpgHuff &h) {
+    int code = 0;
+    for (int l = 1; l <= 16; ++l) {
+        code = (code << 1) | jpg_bit(s);
+        if (h.maxcode[l] >= 0 && code <= h.maxcode[l]) return h.vals[h.valptr[l] + (code - h.mincode[l])];
+    }
+    return 0;
+}
+static void jpg_idct(double *blk) {               /* in-place 8×8 float IDCT */
+    static double C[8][8]; static bool init = false;
+    if (!init) { for (int x = 0; x < 8; ++x) for (int u = 0; u < 8; ++u) C[x][u] = cos((2*x+1)*u*M_PI/16.0) * (u == 0 ? sqrt(0.5) : 1.0); init = true; }
+    double tmp[64];
+    for (int y = 0; y < 8; ++y) for (int x = 0; x < 8; ++x) {       /* rows */
+        double sum = 0; for (int u = 0; u < 8; ++u) sum += C[x][u] * blk[y*8+u];
+        tmp[y*8+x] = sum * 0.5;
+    }
+    for (int x = 0; x < 8; ++x) for (int y = 0; y < 8; ++y) {       /* cols */
+        double sum = 0; for (int v = 0; v < 8; ++v) sum += C[y][v] * tmp[v*8+x];
+        blk[y*8+x] = sum * 0.5;
+    }
+}
+static matlab_mat *jpg_decode_file(const unsigned char *f, size_t n) {
+    if (n < 2 || f[0] != 0xFF || f[1] != 0xD8) return nullptr;
+    size_t p = 2;
+    int W = 0, H = 0, ncomp = 0, maxH = 1, maxV = 1;
+    unsigned short qt[4][64] = {{0}};
+    JpgHuff hdc[4]{}, hac[4]{};
+    struct Comp { int id, hs, vs, qsel, dcsel, acsel, pred; } comp[4]{};
+    while (p + 4 <= n) {
+        if (f[p] != 0xFF) { p++; continue; }
+        int m = f[p + 1]; p += 2;
+        if (m == 0xD9) break;                          /* EOI */
+        if (m == 0x01 || (m >= 0xD0 && m <= 0xD7)) continue;
+        int seg = (f[p] << 8) | f[p + 1]; const unsigned char *d = f + p + 2; int dl = seg - 2;
+        if (m == 0xDB) {                                /* DQT */
+            int q = 0;
+            while (q < dl) { int pq = d[q] >> 4, tq = d[q] & 15; q++;
+                for (int i = 0; i < 64; ++i) { qt[tq][i] = pq ? ((d[q] << 8) | d[q+1]) : d[q]; q += pq ? 2 : 1; } }
+        } else if (m == 0xC0 || m == 0xC1) {            /* SOF0/1 baseline */
+            H = (d[1] << 8) | d[2]; W = (d[3] << 8) | d[4]; ncomp = d[5];
+            for (int c = 0; c < ncomp; ++c) { comp[c].id = d[6+c*3]; comp[c].hs = d[7+c*3] >> 4; comp[c].vs = d[7+c*3] & 15; comp[c].qsel = d[8+c*3];
+                if (comp[c].hs > maxH) maxH = comp[c].hs; if (comp[c].vs > maxV) maxV = comp[c].vs; }
+        } else if (m == 0xC2) { return nullptr;         /* progressive: unsupported */
+        } else if (m == 0xC4) {                         /* DHT */
+            int q = 0;
+            while (q < dl) { int tc = d[q] >> 4, th = d[q] & 15; q++;
+                JpgHuff &h = tc ? hac[th] : hdc[th]; int tot = 0;
+                for (int i = 1; i <= 16; ++i) { h.bits[i] = d[q+i-1]; tot += h.bits[i]; } q += 16;
+                for (int i = 0; i < tot; ++i) h.vals[i] = d[q+i]; q += tot;
+                jpg_build(h); }
+        } else if (m == 0xDA) {                         /* SOS */
+            int ns = d[0];
+            for (int c = 0; c < ns; ++c) { int cid = d[1+c*2], tt = d[2+c*2];
+                for (int k = 0; k < ncomp; ++k) if (comp[k].id == cid) { comp[k].dcsel = tt >> 4; comp[k].acsel = tt & 15; } }
+            p += 2 + dl;                                 /* entropy data starts here */
+            /* ---- decode the entropy-coded scan ---- */
+            if (W <= 0 || H <= 0) return nullptr;
+            int mcuW = 8 * maxH, mcuH = 8 * maxV;
+            int mcx = (W + mcuW - 1) / mcuW, mcy = (H + mcuH - 1) / mcuH;
+            std::vector<std::vector<double>> plane(static_cast<size_t>(ncomp));
+            std::vector<int> pw(static_cast<size_t>(ncomp)), ph(static_cast<size_t>(ncomp));
+            for (int c = 0; c < ncomp; ++c) { pw[c] = mcx * comp[c].hs * 8; ph[c] = mcy * comp[c].vs * 8; plane[c].assign(static_cast<size_t>(pw[c]) * ph[c], 0); comp[c].pred = 0; }
+            JpgBits s{f, n, p, 0, 0, 0};
+            for (int my = 0; my < mcy; ++my) for (int mx = 0; mx < mcx; ++mx)
+                for (int c = 0; c < ncomp; ++c)
+                    for (int by = 0; by < comp[c].vs; ++by) for (int bx = 0; bx < comp[c].hs; ++bx) {
+                        double blk[64] = {0};
+                        int t = jpg_decode(s, hdc[comp[c].dcsel]); int diff = jpg_recv_ext(s, t);
+                        comp[c].pred += diff; blk[0] = comp[c].pred * qt[comp[c].qsel][0];
+                        for (int k = 1; k < 64; ) {
+                            int rs = jpg_decode(s, hac[comp[c].acsel]); int r = rs >> 4, sz = rs & 15;
+                            if (sz == 0) { if (r == 15) { k += 16; continue; } break; }
+                            k += r; if (k >= 64) break;
+                            blk[JPG_ZZ[k]] = jpg_recv_ext(s, sz) * qt[comp[c].qsel][k]; k++;
+                        }
+                        jpg_idct(blk);
+                        int ox = (mx * comp[c].hs + bx) * 8, oy = (my * comp[c].vs + by) * 8;
+                        for (int yy = 0; yy < 8; ++yy) for (int xx = 0; xx < 8; ++xx) {
+                            int px = ox + xx, py = oy + yy; if (px < pw[c] && py < ph[c]) plane[c][static_cast<size_t>(py) * pw[c] + px] = blk[yy*8+xx] + 128.0;
+                        }
+                    }
+            /* ---- upsample + colour convert into the output ---- */
+            bool gray = (ncomp == 1);
+            auto fetch = [&](int c, int x, int y) {
+                int sx = x * comp[c].hs / maxH, sy = y * comp[c].vs / maxV;
+                if (sx >= pw[c]) sx = pw[c]-1; if (sy >= ph[c]) sy = ph[c]-1;
+                return plane[c][static_cast<size_t>(sy) * pw[c] + sx];
+            };
+            if (gray) {
+                matlab_mat *R = mat_alloc(H, W);
+                for (int y = 0; y < H; ++y) for (int x = 0; x < W; ++x) R->data[y*W+x] = img_clamp(fetch(0, x, y), 0, 255);
+                return R;
+            }
+            matlab_mat3 *R = mat3_alloc(H, W, 3); int64_t pl = static_cast<int64_t>(H) * W;
+            for (int y = 0; y < H; ++y) for (int x = 0; x < W; ++x) {
+                double Y = fetch(0, x, y), Cb = fetch(1, x, y) - 128.0, Cr = fetch(2, x, y) - 128.0;
+                R->data[0*pl + y*W+x] = img_clamp(Y + 1.402*Cr, 0, 255);
+                R->data[1*pl + y*W+x] = img_clamp(Y - 0.344136*Cb - 0.714136*Cr, 0, 255);
+                R->data[2*pl + y*W+x] = img_clamp(Y + 1.772*Cb, 0, 255);
+            }
+            return reinterpret_cast<matlab_mat *>(R);
+        }
+        p += dl;
+    }
+    return nullptr;
+}
+
 /* image arithmetic binop (saturating); file scope — templates
  * can't live inside extern "C". */
 template <class F>
 static matlab_mat *img_binop(matlab_mat *A, matlab_mat *B, F f) {
     if (!A || !A->data) return mat_alloc(0, 0);
+    /* Depth-aware: a 3-D image (M×N×P) is processed over its full buffer
+     * and a fresh mat3 returned, so imadd/imsubtract/… work on truecolor
+     * (and any depth).  B may be the same-shape 3-D image or a scalar. */
+    if (mat_is_3d(A)) {
+        matlab_mat3 *A3 = reinterpret_cast<matlab_mat3 *>(A);
+        int64_t tot = A3->rows * A3->cols * A3->depth;
+        bool b3 = (B && mat_is_3d(B));
+        bool bscalar = (B && !b3 && B->rows * B->cols == 1);
+        matlab_mat3 *B3 = b3 ? reinterpret_cast<matlab_mat3 *>(B) : nullptr;
+        matlab_mat3 *R3 = mat3_alloc(A3->rows, A3->cols, A3->depth);
+        for (int64_t i = 0; i < tot; ++i) {
+            double b = B ? (b3 ? B3->data[i] : (bscalar ? B->data[0] : 0.0)) : 0.0;
+            R3->data[i] = img_clamp(f(A3->data[i], b), 0, 255);
+        }
+        return reinterpret_cast<matlab_mat *>(R3);
+    }
     int64_t n = A->rows * A->cols;
     bool bscalar = (B && B->rows * B->cols == 1);
     matlab_mat *R = mat_alloc(A->rows, A->cols);
@@ -222,6 +651,22 @@ matlab_mat *matlab_image_imread(void *path_s) {
     std::string path = img_sstr(path_s);
     FILE *f = fopen(path.c_str(), "rb");
     if (!f) return mat_alloc(0, 0);
+    /* PNG: read the whole file and hand it to the hand-coded decoder. */
+    unsigned char head[8] = {0};
+    size_t got8 = fread(head, 1, 8, f);
+    static const unsigned char pngsig[8] = {137, 80, 78, 71, 13, 10, 26, 10};
+    bool isPng = (got8 == 8 && memcmp(head, pngsig, 8) == 0);
+    bool isJpg = (got8 >= 2 && head[0] == 0xFF && head[1] == 0xD8);
+    if (isPng || isJpg) {
+        fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
+        if (sz <= 0) { fclose(f); return mat_alloc(0, 0); }
+        std::vector<unsigned char> buf(static_cast<size_t>(sz));
+        size_t rd = fread(buf.data(), 1, static_cast<size_t>(sz), f);
+        fclose(f);
+        matlab_mat *r = isPng ? png_decode(buf.data(), rd) : jpg_decode_file(buf.data(), rd);
+        return r ? r : mat_alloc(0, 0);
+    }
+    fseek(f, 0, SEEK_SET);
     char magic[2] = {0, 0};
     if (fread(magic, 1, 2, f) != 2) { fclose(f); return mat_alloc(0, 0); }
     matlab_mat *out = nullptr;
@@ -303,6 +748,10 @@ double matlab_image_imwrite(void *img, void *path_s) {
     std::string ext = img_ext_lower(path);
     FILE *f = fopen(path.c_str(), "wb");
     if (!f) return 0.0;
+    if (ext == "png") {                              /* lossless PNG (store mode) */
+        std::vector<unsigned char> buf = png_encode(img);
+        fwrite(buf.data(), 1, buf.size(), f); fclose(f); return 1.0;
+    }
     bool rgb = mat_is_3d(img);
     int64_t H, W; const double *d; int64_t plane = 0;
     if (rgb) { matlab_mat3 *m = reinterpret_cast<matlab_mat3 *>(img); H = m->rows; W = m->cols; d = m->data; plane = H * W; }
@@ -424,6 +873,14 @@ matlab_mat *matlab_image_imdivide(matlab_mat *A, matlab_mat *B)   { return img_b
 matlab_mat *matlab_image_imabsdiff(matlab_mat *A, matlab_mat *B)  { return img_binop(A, B, [](double a, double b){ return fabs(a - b); }); }
 matlab_mat *matlab_image_imcomplement(matlab_mat *A) {
     if (!A || !A->data) return mat_alloc(0, 0);
+    if (mat_is_3d(A)) {
+        matlab_mat3 *A3 = reinterpret_cast<matlab_mat3 *>(A);
+        int64_t tot = A3->rows * A3->cols * A3->depth;
+        double top = img_is_u8range(A3->data, tot) ? 255.0 : 1.0;
+        matlab_mat3 *R3 = mat3_alloc(A3->rows, A3->cols, A3->depth);
+        for (int64_t i = 0; i < tot; ++i) R3->data[i] = top - A3->data[i];
+        return reinterpret_cast<matlab_mat *>(R3);
+    }
     int64_t n = A->rows * A->cols;
     double top = img_is_u8range(A->data, n) ? 255.0 : 1.0;
     matlab_mat *R = mat_alloc(A->rows, A->cols);
@@ -433,8 +890,18 @@ matlab_mat *matlab_image_imcomplement(matlab_mat *A) {
 /* imlincomb(k1, A1, k2, A2) = k1*A1 + k2*A2 (saturated). */
 matlab_mat *matlab_image_imlincomb(matlab_mat *k1, matlab_mat *A1, matlab_mat *k2, matlab_mat *A2) {
     if (!A1 || !A1->data) return mat_alloc(0, 0);
-    int64_t n = A1->rows * A1->cols;
     double a = img_sc(k1, 1.0), b = img_sc(k2, 0.0);
+    if (mat_is_3d(A1)) {
+        matlab_mat3 *X = reinterpret_cast<matlab_mat3 *>(A1);
+        int64_t tot = X->rows * X->cols * X->depth;
+        bool y3 = (A2 && mat_is_3d(A2));
+        matlab_mat3 *Y = y3 ? reinterpret_cast<matlab_mat3 *>(A2) : nullptr;
+        matlab_mat3 *R3 = mat3_alloc(X->rows, X->cols, X->depth);
+        for (int64_t i = 0; i < tot; ++i)
+            R3->data[i] = img_clamp(a * X->data[i] + (Y ? b * Y->data[i] : 0.0), 0, 255);
+        return reinterpret_cast<matlab_mat *>(R3);
+    }
+    int64_t n = A1->rows * A1->cols;
     matlab_mat *R = mat_alloc(A1->rows, A1->cols);
     for (int64_t i = 0; i < n; ++i)
         R->data[i] = img_clamp(a * A1->data[i] + (A2 ? b * A2->data[i] : 0.0), 0, 255);

@@ -1170,11 +1170,31 @@ matlab_mat *matlab_diag(matlab_mat *A) {
     return V.release();
 }
 
+/* reshape preserves the flat element order (row-major for 2-D, slice-major
+ * for 3-D — the project's documented convention, not MATLAB's column-major).
+ * The source may be a 2-D matlab_mat or a 3-D matlab_mat3. */
 matlab_mat *matlab_reshape(matlab_mat *A, double m, double n) {
     int64_t rm = (int64_t)m, cn = (int64_t)n;
-    if (rm * cn != A->rows * A->cols) return mat_alloc(0, 0);
+    int64_t src; const double *sd;
+    if (mat_is_3d(A)) { matlab_mat3 *A3 = (matlab_mat3 *)A; src = A3->rows * A3->cols * A3->depth; sd = A3->data; }
+    else              { src = A->rows * A->cols; sd = A->data; }
+    if (rm * cn != src) return mat_alloc(0, 0);
     matlab_mat *B = mat_alloc(rm, cn);
-    memcpy(B->data, A->data, (size_t)(rm * cn) * sizeof(double));
+    memcpy(B->data, sd, (size_t)(rm * cn) * sizeof(double));
+    return B;
+}
+
+/* reshape(A, m, n, p) -> m×n×p mat3.  p==1 collapses to a 2-D matlab_mat
+ * (trailing-singleton drop, consistent with zeros(m,n,1)). */
+matlab_mat3 *matlab_reshape3(matlab_mat *A, double m, double n, double p) {
+    int64_t rm = (int64_t)m, cn = (int64_t)n, pp = (int64_t)p;
+    int64_t src; const double *sd;
+    if (mat_is_3d(A)) { matlab_mat3 *A3 = (matlab_mat3 *)A; src = A3->rows * A3->cols * A3->depth; sd = A3->data; }
+    else              { src = A->rows * A->cols; sd = A->data; }
+    if (rm * cn * pp != src) return (matlab_mat3 *)mat_alloc(0, 0);
+    if (pp == 1) { matlab_mat *B = mat_alloc(rm, cn); memcpy(B->data, sd, (size_t)(rm * cn) * sizeof(double)); return (matlab_mat3 *)B; }
+    matlab_mat3 *B = mat3_alloc(rm, cn, pp);
+    memcpy(B->data, sd, (size_t)(rm * cn * pp) * sizeof(double));
     return B;
 }
 
@@ -1199,6 +1219,28 @@ matlab_mat *matlab_repmat(matlab_mat *A, double m, double n) {
     return matlab::runtime::shape_op(nr, nc, [&](int64_t i, int64_t j) {
         return A->data[(i % am) * an + (j % an)];
     }).release();
+}
+
+/* repmat(A, [r c p]) — tile into the 3rd dim too.  A may be 2-D or 3-D;
+ * out(i,j,k) = A(i%am, j%an, k%ad).  Result depth 1 collapses to 2-D. */
+matlab_mat3 *matlab_repmat3(matlab_mat *A, double m, double n, double p) {
+    if (!A) return (matlab_mat3 *)mat_alloc(0, 0);
+    int64_t tm = (int64_t)m, tn = (int64_t)n, tp = (int64_t)p;
+    int64_t am, an, ad; const double *sd;
+    if (mat_is_3d(A)) { matlab_mat3 *A3 = (matlab_mat3 *)A; am = A3->rows; an = A3->cols; ad = A3->depth; sd = A3->data; }
+    else              { am = A->rows; an = A->cols; ad = 1; sd = A->data; }
+    int64_t nr = am * tm, nc = an * tn, nd = ad * tp, inpl = am * an;
+    if (nd == 1) {
+        matlab_mat *R = mat_alloc(nr, nc);
+        for (int64_t i = 0; i < nr; ++i) for (int64_t j = 0; j < nc; ++j)
+            R->data[i * nc + j] = sd[(i % am) * an + (j % an)];
+        return (matlab_mat3 *)R;
+    }
+    matlab_mat3 *R = mat3_alloc(nr, nc, nd);
+    int64_t opl = nr * nc;
+    for (int64_t k = 0; k < nd; ++k) for (int64_t i = 0; i < nr; ++i) for (int64_t j = 0; j < nc; ++j)
+        R->data[k * opl + i * nc + j] = sd[(k % ad) * inpl + (i % am) * an + (j % an)];
+    return R;
 }
 
 /*---------- Reductions ----------------------------------------------------
@@ -1256,8 +1298,24 @@ COLWISE_REDUCE(max, -INFINITY,  (x > acc ? x : acc),        acc)
 #define DIM_REDUCE(NAME, INIT_EXPR, UPDATE_EXPR, FINALIZE_EXPR)           \
     matlab_mat *matlab_##NAME##_dim(matlab_mat *A, double d) {            \
         if (!A) return mat_alloc(0, 0);                                    \
-        int64_t m = A->rows, n = A->cols;                                  \
         int64_t dim = (int64_t)d;                                          \
+        if (dim == 3 && mat_is_3d(A)) {  /* reduce across depth -> M×N */  \
+            matlab_mat3 *A3 = (matlab_mat3 *)A;                            \
+            int64_t mm = A3->rows, nn = A3->cols, pp = A3->depth;          \
+            int64_t pl = mm * nn;                                          \
+            matlab_mat *R = mat_alloc(mm, nn);                            \
+            for (int64_t t = 0; t < pl; ++t) {                            \
+                double acc = INIT_EXPR;                                    \
+                int64_t total = pp;                                       \
+                for (int64_t k = 0; k < pp; ++k) {                        \
+                    double x = A3->data[k * pl + t];                      \
+                    acc = UPDATE_EXPR;                                    \
+                }                                                          \
+                R->data[t] = total > 0 ? (FINALIZE_EXPR) : INIT_EXPR;     \
+            }                                                              \
+            return R;                                                      \
+        }                                                                  \
+        int64_t m = A->rows, n = A->cols;                                  \
         if (dim == 1) {                                                    \
             matlab_mat *R = mat_alloc(1, n);                               \
             for (int64_t j = 0; j < n; ++j) {                              \
@@ -1303,6 +1361,12 @@ DIM_REDUCE(min,  INFINITY,  (x < acc ? x : acc), acc)
 DIM_REDUCE(max, -INFINITY,  (x > acc ? x : acc), acc)
 
 #undef DIM_REDUCE
+
+/* max(A, [], dim) / min(A, [], dim): the MATLAB along-dim form — the empty
+ * middle arg distinguishes it from elementwise max(A, B). Ignore the empty
+ * placeholder and reduce along dim (incl. dim 3 on a mat3 -> M×N). */
+matlab_mat *matlab_max_dim3(matlab_mat *A, matlab_mat *, double d) { return matlab_max_dim(A, d); }
+matlab_mat *matlab_min_dim3(matlab_mat *A, matlab_mat *, double d) { return matlab_min_dim(A, d); }
 
 /* Cumulative scans: along dim 1 by default (or along the only axis
  * when A is a row / column vector). Output has the same shape as A. */
@@ -1508,6 +1572,18 @@ matlab_mat *matlab_sortrows(matlab_mat *A) {
 matlab_mat *matlab_horzcat(matlab_mat *A, matlab_mat *B) {
     if (!A) return B;
     if (!B) return A;
+    if (mat_is_3d(A) && mat_is_3d(B)) {            /* cat(2, …) of 3-D blocks */
+        matlab_mat3 *A3 = (matlab_mat3 *)A, *B3 = (matlab_mat3 *)B;
+        if (A3->rows != B3->rows || A3->depth != B3->depth) return (matlab_mat *)mat3_alloc(0, 0, 0);
+        int64_t m = A3->rows, na = A3->cols, nb = B3->cols, d = A3->depth, nc = na + nb;
+        matlab_mat3 *R = mat3_alloc(m, nc, d);
+        int64_t apl = m * na, bpl = m * nb, rpl = m * nc;
+        for (int64_t k = 0; k < d; ++k) for (int64_t i = 0; i < m; ++i) {
+            for (int64_t j = 0; j < na; ++j) R->data[k * rpl + i * nc + j] = A3->data[k * apl + i * na + j];
+            for (int64_t j = 0; j < nb; ++j) R->data[k * rpl + i * nc + (na + j)] = B3->data[k * bpl + i * nb + j];
+        }
+        return (matlab_mat *)R;
+    }
     if (A->rows != B->rows) return mat_alloc(0, 0);
     int64_t m = A->rows, na = A->cols, nb = B->cols;
     matlab_mat *_a = A, *_b = B;
@@ -1521,6 +1597,18 @@ matlab_mat *matlab_horzcat(matlab_mat *A, matlab_mat *B) {
 matlab_mat *matlab_vertcat(matlab_mat *A, matlab_mat *B) {
     if (!A) return B;
     if (!B) return A;
+    if (mat_is_3d(A) && mat_is_3d(B)) {            /* cat(1, …) of 3-D blocks */
+        matlab_mat3 *A3 = (matlab_mat3 *)A, *B3 = (matlab_mat3 *)B;
+        if (A3->cols != B3->cols || A3->depth != B3->depth) return (matlab_mat *)mat3_alloc(0, 0, 0);
+        int64_t n = A3->cols, ma = A3->rows, mb = B3->rows, d = A3->depth, nr = ma + mb;
+        matlab_mat3 *R = mat3_alloc(nr, n, d);
+        int64_t apl = ma * n, bpl = mb * n, rpl = nr * n;
+        for (int64_t k = 0; k < d; ++k) {
+            memcpy(R->data + k * rpl,       A3->data + k * apl, (size_t)apl * sizeof(double));
+            memcpy(R->data + k * rpl + apl, B3->data + k * bpl, (size_t)bpl * sizeof(double));
+        }
+        return (matlab_mat *)R;
+    }
     if (A->cols != B->cols) return mat_alloc(0, 0);
     int64_t n = A->cols, ma = A->rows, mb = B->rows;
     matlab::runtime::MatPtr R = matlab::runtime::make_mat(ma + mb, n);
@@ -1529,13 +1617,33 @@ matlab_mat *matlab_vertcat(matlab_mat *A, matlab_mat *B) {
     return R.release();
 }
 
-/* permute(A, [p1 p2]) for 2-D matrices. p = [1 2] is identity;
- * anything else falls back to transpose (which matches p = [2 1]).
- * Higher-rank permutations aren't modelled because we don't carry
- * N-D shape through matlab_mat. */
+/* permute(A, perm). 2-D: p=[1 2] identity, else transpose. 3-D (mat3):
+ * full index-remap for any [p1 p2 p3] (mat3 branch below; result depth-1
+ * collapses to 2-D). Rank >= 4 isn't modelled (no matlab_matN — Tier C). */
 matlab_mat *matlab_permute(matlab_mat *A, matlab_mat *perm) {
     if (!A || !perm) return mat_alloc(0, 0);
     int64_t total = perm->rows * perm->cols;
+    /* 3-D permute: out(o0,o1,o2) = in along dims perm.  Result depth 1
+     * collapses to 2-D (trailing-singleton). */
+    if (mat_is_3d(A) && total >= 3) {
+        matlab_mat3 *A3 = (matlab_mat3 *)A;
+        int64_t sz[3] = { A3->rows, A3->cols, A3->depth };
+        int p[3] = { (int)perm->data[0] - 1, (int)perm->data[1] - 1, (int)perm->data[2] - 1 };
+        for (int d = 0; d < 3; ++d) if (p[d] < 0 || p[d] > 2) return mat_alloc(0, 0);
+        int64_t osz[3] = { sz[p[0]], sz[p[1]], sz[p[2]] };
+        int64_t inpl = A3->rows * A3->cols, opl = osz[0] * osz[1];
+        double *od; matlab_mat *R2 = nullptr; matlab_mat3 *R3 = nullptr;
+        if (osz[2] == 1) { R2 = mat_alloc(osz[0], osz[1]); od = R2->data; }
+        else             { R3 = mat3_alloc(osz[0], osz[1], osz[2]); od = R3->data; }
+        for (int64_t k = 0; k < sz[2]; ++k)
+            for (int64_t i = 0; i < sz[0]; ++i)
+                for (int64_t j = 0; j < sz[1]; ++j) {
+                    int64_t idx[3] = { i, j, k };
+                    int64_t o0 = idx[p[0]], o1 = idx[p[1]], o2 = idx[p[2]];
+                    od[o2 * opl + o0 * osz[1] + o1] = A3->data[k * inpl + i * A3->cols + j];
+                }
+        return R2 ? R2 : (matlab_mat *)R3;
+    }
     int Identity = (total >= 2 &&
                     perm->data[0] == 1.0 && perm->data[1] == 2.0);
     if (Identity) {
@@ -1553,12 +1661,50 @@ matlab_mat *matlab_permute(matlab_mat *A, matlab_mat *perm) {
  * model. Keeps the name available as a syntactic identity. */
 matlab_mat *matlab_squeeze(matlab_mat *A) {
     if (!A) return mat_alloc(0, 0);
+    /* 3-D squeeze: drop singleton dims, keeping the order of the rest.
+     * m×n×1 -> m×n · 1×n×p -> n×p · m×1×p -> m×p · else unchanged. */
+    if (mat_is_3d(A)) {
+        matlab_mat3 *A3 = (matlab_mat3 *)A;
+        int64_t mm = A3->rows, nn = A3->cols, pp = A3->depth, pl = mm * nn;
+        if (pp == 1) {
+            matlab_mat *R = mat_alloc(mm, nn);
+            memcpy(R->data, A3->data, (size_t)pl * sizeof(double));
+            return R;
+        }
+        if (mm == 1) {                              /* 1×n×p -> n×p */
+            matlab_mat *R = mat_alloc(nn, pp);
+            for (int64_t j = 0; j < nn; ++j) for (int64_t k = 0; k < pp; ++k)
+                R->data[j * pp + k] = A3->data[k * pl + j];
+            return R;
+        }
+        if (nn == 1) {                              /* m×1×p -> m×p */
+            matlab_mat *R = mat_alloc(mm, pp);
+            for (int64_t i = 0; i < mm; ++i) for (int64_t k = 0; k < pp; ++k)
+                R->data[i * pp + k] = A3->data[k * pl + i];
+            return R;
+        }
+        matlab_mat3 *R = mat3_alloc(mm, nn, pp);    /* no singleton: copy */
+        memcpy(R->data, A3->data, (size_t)(mm * nn * pp) * sizeof(double));
+        return (matlab_mat *)R;
+    }
     int64_t m = A->rows, n = A->cols;
     /* Phase-5 RAII: pure copy. shape_op fits but is no faster than
      * memcpy here, so keep memcpy and just adopt MatPtr. */
     matlab::runtime::MatPtr R = matlab::runtime::make_mat(m, n);
     memcpy(R->data, A->data, (size_t)(m * n) * sizeof(double));
     return R.release();
+}
+
+/* ipermute(A, perm) = permute(A, inverse(perm)).  For a 2-element perm
+ * (2-D) the perm is self-inverse, so just delegate. */
+matlab_mat *matlab_ipermute(matlab_mat *A, matlab_mat *perm) {
+    if (!A || !perm || perm->rows * perm->cols < 3) return matlab_permute(A, perm);
+    matlab_mat *inv = mat_alloc(1, 3);
+    for (int d = 0; d < 3; ++d) {
+        int pd = (int)perm->data[d] - 1;
+        if (pd >= 0 && pd < 3) inv->data[pd] = (double)(d + 1);
+    }
+    return matlab_permute(A, inv);
 }
 
 /* Phase-5: fliplr / flipud / rot90 collapse into one-line lambdas
@@ -5741,6 +5887,15 @@ static matlab_mat_c *to_mat_c(void *p) {
     matlab_mat *matlab_##name##_mm(void *Ap, void *Bp) { \
         if (mat_is_complex(Ap) || mat_is_complex(Bp)) \
             return (matlab_mat *)matlab_##name##_cc(to_mat_c(Ap), to_mat_c(Bp)); \
+        if (mat_is_3d(Ap) && mat_is_3d(Bp)) { \
+            matlab_mat3 *A3 = (matlab_mat3 *)Ap, *B3 = (matlab_mat3 *)Bp; \
+            int64_t tot = A3->rows * A3->cols * A3->depth; \
+            matlab_mat3 *C3 = mat3_alloc(A3->rows, A3->cols, A3->depth); \
+            matlab_mat Ah = {A3->data, tot, 1}, Bh = {B3->data, tot, 1}, Ch = {C3->data, tot, 1}; \
+            matlab_mat *A = &Ah, *B = &Bh, *C = &Ch; \
+            for (int64_t k = 0; k < tot; ++k) C->data[k] = (op); \
+            return (matlab_mat *)C3; \
+        } \
         matlab_mat *A = (matlab_mat *)Ap; \
         matlab_mat *B = (matlab_mat *)Bp; \
         int64_t m = A->rows, n = A->cols; \
@@ -5749,11 +5904,24 @@ static matlab_mat_c *to_mat_c(void *p) {
         return C; \
     }
 
+/* Elementwise matrix/scalar ops are depth-aware: a matlab_mat3 operand is
+ * processed over its full rows*cols*depth buffer and a fresh mat3 is
+ * returned, so 3-D-ness survives `A*3`, `3+A`, etc.  The flat buffer is
+ * aliased as a tot×1 matlab_mat so the same `op` expression applies. */
 #define BINARY_MS(name, op) \
     matlab_mat *matlab_##name##_ms(void *Ap, double s) { \
         if (mat_is_complex(Ap)) \
             return (matlab_mat *)matlab_##name##_cc( \
                 (matlab_mat_c *)Ap, matlab_complex_scalar(s, 0)); \
+        if (mat_is_3d(Ap)) { \
+            matlab_mat3 *A3 = (matlab_mat3 *)Ap; \
+            int64_t tot = A3->rows * A3->cols * A3->depth; \
+            matlab_mat3 *C3 = mat3_alloc(A3->rows, A3->cols, A3->depth); \
+            matlab_mat Ah = {A3->data, tot, 1}, Ch = {C3->data, tot, 1}; \
+            matlab_mat *A = &Ah, *C = &Ch; \
+            for (int64_t k = 0; k < tot; ++k) C->data[k] = (op); \
+            return (matlab_mat *)C3; \
+        } \
         matlab_mat *A = (matlab_mat *)Ap; \
         int64_t m = A->rows, n = A->cols; \
         matlab_mat *C = mat_alloc(m, n); \
@@ -5766,6 +5934,15 @@ static matlab_mat_c *to_mat_c(void *p) {
         if (mat_is_complex(Ap)) \
             return (matlab_mat *)matlab_##name##_cc( \
                 matlab_complex_scalar(s, 0), (matlab_mat_c *)Ap); \
+        if (mat_is_3d(Ap)) { \
+            matlab_mat3 *A3 = (matlab_mat3 *)Ap; \
+            int64_t tot = A3->rows * A3->cols * A3->depth; \
+            matlab_mat3 *C3 = mat3_alloc(A3->rows, A3->cols, A3->depth); \
+            matlab_mat Ah = {A3->data, tot, 1}, Ch = {C3->data, tot, 1}; \
+            matlab_mat *A = &Ah, *C = &Ch; \
+            for (int64_t k = 0; k < tot; ++k) C->data[k] = (op); \
+            return (matlab_mat *)C3; \
+        } \
         matlab_mat *A = (matlab_mat *)Ap; \
         int64_t m = A->rows, n = A->cols; \
         matlab_mat *C = mat_alloc(m, n); \
@@ -5814,6 +5991,14 @@ matlab_mat *matlab_epow_sm(double s, matlab_mat *A) {
  * cleanly into logical indexing (A(A > 0), etc.). */
 #define CMP_MM(name, op) \
     matlab_mat *matlab_##name##_mm(matlab_mat *A, matlab_mat *B) { \
+        if (mat_is_3d(A) && mat_is_3d(B)) { \
+            matlab_mat3 *A3 = (matlab_mat3 *)A, *B3 = (matlab_mat3 *)B; \
+            int64_t tot = A3->rows * A3->cols * A3->depth; \
+            matlab_mat3 *C3 = mat3_alloc(A3->rows, A3->cols, A3->depth); \
+            for (int64_t k = 0; k < tot; ++k) \
+                C3->data[k] = (A3->data[k] op B3->data[k]) ? 1.0 : 0.0; \
+            return (matlab_mat *)C3; \
+        } \
         int64_t m = A->rows, n = A->cols; \
         matlab_mat *C = mat_alloc(m, n); \
         for (int64_t k = 0; k < m * n; ++k) \
@@ -5856,6 +6041,15 @@ CMP_MM(ne, !=) CMP_MS(ne, !=) CMP_SM(ne, !=)
 
 #define UNARY_M(name, expr) \
     matlab_mat *matlab_##name##_m(matlab_mat *A) { \
+        if (mat_is_3d(A)) { \
+            matlab_mat3 *A3 = (matlab_mat3 *)A; \
+            int64_t tot = A3->rows * A3->cols * A3->depth; \
+            matlab_mat3 *C3 = mat3_alloc(A3->rows, A3->cols, A3->depth); \
+            for (int64_t k = 0; k < tot; ++k) { \
+                double x = A3->data[k]; C3->data[k] = (expr); \
+            } \
+            return (matlab_mat *)C3; \
+        } \
         int64_t m = A->rows, n = A->cols; \
         matlab_mat *C = mat_alloc(m, n); \
         for (int64_t k = 0; k < m * n; ++k) { \
@@ -7569,11 +7763,21 @@ matlab_mat3 *mat3_alloc(int64_t m, int64_t n, int64_t p) {
     return A;
 }
 
+/* zeros/ones(m,n,p): a trailing singleton (p==1) collapses to a genuine
+ * 2-D matlab_mat so the result interops with every 2-D op (transpose,
+ * mldivide, …) — MATLAB drops trailing singleton dims (ndims==2). */
 matlab_mat3 *matlab_zeros3(double m, double n, double p) {
+    if ((int64_t)p == 1) return (matlab_mat3 *)mat_alloc((int64_t)m, (int64_t)n);
     return mat3_alloc((int64_t)m, (int64_t)n, (int64_t)p);
 }
 
 matlab_mat3 *matlab_ones3(double m, double n, double p) {
+    if ((int64_t)p == 1) {
+        matlab_mat *A = mat_alloc((int64_t)m, (int64_t)n);
+        int64_t total = A->rows * A->cols;
+        for (int64_t i = 0; i < total; ++i) A->data[i] = 1.0;
+        return (matlab_mat3 *)A;
+    }
     matlab_mat3 *A = mat3_alloc((int64_t)m, (int64_t)n, (int64_t)p);
     int64_t total = A->rows * A->cols * A->depth;
     for (int64_t i = 0; i < total; ++i) A->data[i] = 1.0;
@@ -7586,26 +7790,33 @@ static int64_t mat3_offset(matlab_mat3 *A, int64_t i, int64_t j, int64_t k) {
     return k * A->rows * A->cols + i * A->cols + j;
 }
 
+/* The matlab_mat3 routing helpers below are reached for any binding tracked
+ * as 3-D (zeros(m,n,3), cat(3,…), colour conversions, imread).  Because
+ * imread returns a 2-D matlab_mat for grayscale files, each helper falls
+ * back to a 2-D matlab_mat view (mat_is_3d == false) so grayscale images
+ * still index / size correctly. */
 double matlab_subscript3_s(matlab_mat3 *A, double i1, double j1, double k1) {
     if (!A) return 0.0;
-    int64_t i = (int64_t)i1 - 1;
-    int64_t j = (int64_t)j1 - 1;
-    int64_t k = (int64_t)k1 - 1;
-    if (i < 0 || i >= A->rows) return 0.0;
-    if (j < 0 || j >= A->cols) return 0.0;
-    if (k < 0 || k >= A->depth) return 0.0;
+    int64_t i = (int64_t)i1 - 1, j = (int64_t)j1 - 1, k = (int64_t)k1 - 1;
+    if (!mat_is_3d(A)) {                       /* 2-D: A(i,j,1) */
+        matlab_mat *m = (matlab_mat *)A;
+        if (k != 0 || i < 0 || i >= m->rows || j < 0 || j >= m->cols) return 0.0;
+        return m->data[i * m->cols + j];
+    }
+    if (i < 0 || i >= A->rows || j < 0 || j >= A->cols || k < 0 || k >= A->depth) return 0.0;
     return A->data[mat3_offset(A, i, j, k)];
 }
 
 void matlab_subscript3_store(matlab_mat3 *A, double i1, double j1,
                               double k1, double v) {
     if (!A) return;
-    int64_t i = (int64_t)i1 - 1;
-    int64_t j = (int64_t)j1 - 1;
-    int64_t k = (int64_t)k1 - 1;
-    if (i < 0 || i >= A->rows) return;
-    if (j < 0 || j >= A->cols) return;
-    if (k < 0 || k >= A->depth) return;
+    int64_t i = (int64_t)i1 - 1, j = (int64_t)j1 - 1, k = (int64_t)k1 - 1;
+    if (!mat_is_3d(A)) {
+        matlab_mat *m = (matlab_mat *)A;
+        if (k == 0 && i >= 0 && i < m->rows && j >= 0 && j < m->cols) m->data[i * m->cols + j] = v;
+        return;
+    }
+    if (i < 0 || i >= A->rows || j < 0 || j >= A->cols || k < 0 || k >= A->depth) return;
     A->data[mat3_offset(A, i, j, k)] = v;
 }
 
@@ -7613,6 +7824,13 @@ void matlab_subscript3_store(matlab_mat3 *A, double i1, double j1,
 matlab_mat *matlab_subscript3_slice(matlab_mat3 *A, double k1) {
     if (!A) return mat_alloc(0, 0);
     int64_t k = (int64_t)k1 - 1;
+    if (!mat_is_3d(A)) {                       /* 2-D: A(:,:,1) is the matrix */
+        matlab_mat *m = (matlab_mat *)A;
+        if (k != 0) return mat_alloc(0, 0);
+        matlab_mat *R = mat_alloc(m->rows, m->cols);
+        for (int64_t t = 0; t < m->rows * m->cols; ++t) R->data[t] = m->data[t];
+        return R;
+    }
     if (k < 0 || k >= A->depth) return mat_alloc(0, 0);
     int64_t pl = A->rows * A->cols;
     matlab_mat *R = mat_alloc(A->rows, A->cols);
@@ -7623,6 +7841,7 @@ matlab_mat *matlab_subscript3_slice(matlab_mat3 *A, double k1) {
 void matlab_subscript3_pstore_s(matlab_mat3 *A, double k1, double v) {
     if (!A) return;
     int64_t k = (int64_t)k1 - 1;
+    if (!mat_is_3d(A)) { matlab_mat *m = (matlab_mat *)A; if (k == 0) for (int64_t t = 0; t < m->rows * m->cols; ++t) m->data[t] = v; return; }
     if (k < 0 || k >= A->depth) return;
     int64_t pl = A->rows * A->cols;
     for (int64_t t = 0; t < pl; ++t) A->data[k * pl + t] = v;
@@ -7631,6 +7850,7 @@ void matlab_subscript3_pstore_s(matlab_mat3 *A, double k1, double v) {
 void matlab_subscript3_pstore_m(matlab_mat3 *A, double k1, matlab_mat *M) {
     if (!A || !M) return;
     int64_t k = (int64_t)k1 - 1;
+    if (!mat_is_3d(A)) { matlab_mat *m = (matlab_mat *)A; int64_t mn = M->rows * M->cols; if (k == 0) for (int64_t t = 0; t < m->rows * m->cols && t < mn; ++t) m->data[t] = M->data[t]; return; }
     if (k < 0 || k >= A->depth) return;
     int64_t pl = A->rows * A->cols, mn = M->rows * M->cols;
     for (int64_t t = 0; t < pl && t < mn; ++t) A->data[k * pl + t] = M->data[t];
@@ -7650,10 +7870,23 @@ matlab_mat3 *matlab_cat3_3(matlab_mat *A, matlab_mat *B, matlab_mat *C) {
     for (int64_t t = 0; t < pl; ++t) { R->data[t] = A->data[t]; R->data[pl + t] = B->data[t]; R->data[2 * pl + t] = C->data[t]; }
     return R;
 }
+/* cat(3, …) of N>2 planes: append one 2-D plane B to an existing slice-major
+ * mat3 A, returning a fresh mat3 of depth A->depth+1. The frontend folds an
+ * N-ary cat(3,p1,…,pN) into cat3_2(p1,p2) then cat3_append per remaining
+ * plane, so any depth works (no arity cap). */
+matlab_mat3 *matlab_cat3_append(matlab_mat3 *A, matlab_mat *B) {
+    if (!A) return mat3_alloc(0, 0, 0);
+    int64_t H = A->rows, W = A->cols, pl = H * W, d = A->depth;
+    matlab_mat3 *R = mat3_alloc(H, W, d + 1);
+    for (int64_t t = 0; t < pl * d; ++t) R->data[t] = A->data[t];
+    if (B) for (int64_t t = 0; t < pl; ++t) R->data[pl * d + t] = B->data[t];
+    return R;
+}
 
 double matlab_size3_dim(matlab_mat3 *A, double d) {
     if (!A) return 0.0;
     int64_t dim = (int64_t)d;
+    if (!mat_is_3d(A)) { matlab_mat *m = (matlab_mat *)A; if (dim == 1) return (double)m->rows; if (dim == 2) return (double)m->cols; return 1.0; }
     if (dim == 1) return (double)A->rows;
     if (dim == 2) return (double)A->cols;
     if (dim == 3) return (double)A->depth;
@@ -7662,11 +7895,13 @@ double matlab_size3_dim(matlab_mat3 *A, double d) {
 
 double matlab_numel3(matlab_mat3 *A) {
     if (!A) return 0.0;
+    if (!mat_is_3d(A)) { matlab_mat *m = (matlab_mat *)A; return (double)(m->rows * m->cols); }
     return (double)(A->rows * A->cols * A->depth);
 }
 
 double matlab_ndims3(matlab_mat3 *A) {
     if (!A) return 0.0;
+    if (!mat_is_3d(A)) return 2.0;
     return A->depth > 1 ? 3.0 : 2.0;
 }
 

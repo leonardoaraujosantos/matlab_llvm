@@ -133,9 +133,17 @@ hand-coded routine over the shipped base.
 Goal: get pixels into and out of the workspace and convert between the
 image types — the foundation everything else stands on.
 
-**Shipped 2026-05-20** (`runtime/toolbox/images/runtime_images.cpp`):
-`imread`/`imwrite` for **PGM/PPM/BMP** (uncompressed real formats) +
-`checkerboard` (synthetic); type conversions `im2double`/`im2single`/
+**Shipped 2026-05-20/21** (`runtime/toolbox/images/runtime_images.cpp`):
+`imread` for **PGM/PPM/BMP + real PNG + baseline JPEG** (all hand-coded, no
+libpng/libjpeg/zlib) and `imwrite` for PGM/PPM/BMP + **lossless PNG**, plus
+`checkerboard` (synthetic).  PNG decode = a puff-style zlib `inflate`
+(stored/fixed/dynamic Huffman + LZ77) + all 5 unfilter types +
+grayscale/RGB/palette/+alpha at 1/2/4/8/16-bit (exact vs PIL); JPEG decode =
+JFIF/SOF0 baseline (DQT/DHT/SOS, Huffman, dequant, 8×8 IDCT, YCbCr→RGB,
+4:4:4/4:2:2/4:2:0 upsample — within JPEG's lossy tolerance); PNG encode =
+store-mode deflate (valid output libpng/PIL read).  `imread`-results are
+tracked 3-D (truecolor) with a 2-D fallback for grayscale.  Example
+`examples/images/read_write_png.m`.  Earlier (uncompressed-only) note: type conversions `im2double`/`im2single`/
 `im2uint8`/`rgb2gray`/`im2gray`/`mat2gray`; image arithmetic `imadd`/
 `imsubtract`/`immultiply`/`imdivide`/`imabsdiff`/`imcomplement`/
 `imlincomb` (saturating to [0,255]); intensity stats `imhist`/`imadjust`
@@ -147,8 +155,8 @@ shared `pde_table` matcher now materialises single-quoted string literals
 so any pde_table builtin (`imread('f.pgm')`, `fspecial('gaussian',…)`,
 `imnoise(I,'salt & pepper')`) takes a literal filename / option string
 directly.  Headline `examples/images/basic_image.m`.  **Tier-1 follow-ons
-(🔵):** PNG/JPEG/TIFF decode (hand-coded `inflate` / baseline IDCT —
-PGM/PPM/BMP ship), `imfinfo`, DICOM/HDR, `montage`/`imtile`, indexed-image
+(🔵):** TIFF/GIF decode (PGM/PPM/BMP/PNG/JPEG now ship), progressive JPEG,
+JPEG encode, `imfinfo`, DICOM/HDR, `montage`/`imtile`, indexed-image
 conversions.
 
 | # | Surface | Algorithm / notes | Runtime entry |

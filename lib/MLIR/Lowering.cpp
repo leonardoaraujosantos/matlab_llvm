@@ -2278,24 +2278,77 @@ void Lowerer::lowerStmt(const Stmt &St) {
      * args, cat(3, …), or a builtin that always returns truecolor
      * (colour-space conversions, label2rgb).  These let A(i,j,k) /
      * A(:,:,k) / size(A,3) route to the matlab_mat3 runtime. */
-    bool RhsIsThreeD = false;
-    if (A.RHS && A.RHS->Kind == NodeKind::CallOrIndex) {
-      auto *C = static_cast<const CallOrIndex *>(A.RHS);
-      if (auto *N = dynamic_cast<const NameExpr *>(C->Callee)) {
+    /* Track whether the RHS produces a 3-D (matlab_mat3) value so the LHS
+     * binding is registered in ThreeDBindings and its later subscripts /
+     * size / numel / ndims route through the *3 runtime helpers.  This is
+     * expression-aware (not just the literal call shapes): 3-D-ness flows
+     * through elementwise / scalar arithmetic (`ones(5,5,4)*3`), unary ops
+     * (`-A`), and aliasing (`B = A`).  Indexing a 3-D binding (`A(:,:,k)`)
+     * yields a 2-D plane, so a CallOrIndex whose callee is a plain
+     * variable is *not* 3-D — only the 3-D-producing builtins below are.
+     * (Carve-out: 3-D values returned from user functions or unlisted
+     * builtins still need Sema-level type propagation — a follow-on
+     * blocked by the func-boundary tensor→ptr gap, see any_shape_roadmap.) */
+    std::function<bool(const Expr *)> exprIsThreeD = [&](const Expr *E) -> bool {
+      if (!E) return false;
+      if (auto *C = dynamic_cast<const CallOrIndex *>(E)) {
+        auto *N = dynamic_cast<const NameExpr *>(C->Callee);
+        if (!N) return false;
         if (C->Args.size() == 3 && N->Ref &&
             N->Ref->Kind == BindingKind::Builtin &&
-            (N->Name == "zeros" || N->Name == "ones"))
-          RhsIsThreeD = true;
-        else if (N->Name == "cat" && C->Args.size() >= 1) {
-          if (auto *DimL = dynamic_cast<const IntegerLiteral *>(C->Args[0]))
-            if (DimL->Text == "3") RhsIsThreeD = true;
-        } else if (N->Name == "rgb2hsv" || N->Name == "hsv2rgb" ||
-                   N->Name == "rgb2ycbcr" || N->Name == "ycbcr2rgb" ||
-                   N->Name == "rgb2lab" || N->Name == "lab2rgb" ||
-                   N->Name == "label2rgb")
-          RhsIsThreeD = true;
+            (N->Name == "zeros" || N->Name == "ones")) {
+          /* trailing-singleton: zeros(m,n,1) is 2-D, not 3-D */
+          if (auto *PL = dynamic_cast<const IntegerLiteral *>(C->Args[2]))
+            if (PL->Text == "1") return false;
+          return true;
+        }
+        if (N->Name == "cat" && C->Args.size() >= 2) {
+          if (auto *DimL = dynamic_cast<const IntegerLiteral *>(C->Args[0])) {
+            /* cat(3, p1, p2, …) of >=2 planes is 3-D; any cat dim whose
+             * operands are already 3-D stays 3-D. */
+            if (DimL->Text == "3" && C->Args.size() >= 3) return true;
+            for (size_t a = 1; a < C->Args.size(); ++a)
+              if (exprIsThreeD(C->Args[a])) return true;
+          }
+          return false;
+        }
+        /* Tier-B shape verbs that preserve / produce 3-D.  reshape/repmat
+         * with a 3rd target dim produce a mat3 (runtime returns 2-D when
+         * that dim is 1 — *3 helpers 2-D-fall-back).  permute/ipermute/
+         * squeeze keep 3-D-ness from their input (squeeze may collapse to
+         * 2-D at runtime; the fall-back handles it). */
+        if ((N->Name == "reshape" || N->Name == "repmat") && C->Args.size() == 4)
+          return true;
+        if ((N->Name == "permute" || N->Name == "ipermute" || N->Name == "squeeze") &&
+            !C->Args.empty())
+          return exprIsThreeD(C->Args[0]);
+        /* Depth-preserving image arithmetic: the result is 3-D iff the
+         * image argument is 3-D (these ops loop over depth and return a
+         * mat3 — see runtime_images.cpp img_binop / imcomplement). */
+        if ((N->Name == "imadd" || N->Name == "imsubtract" ||
+             N->Name == "immultiply" || N->Name == "imdivide" ||
+             N->Name == "imabsdiff" || N->Name == "imcomplement") &&
+            !C->Args.empty())
+          return exprIsThreeD(C->Args[0]);
+        if (N->Name == "imlincomb" && C->Args.size() >= 2)
+          return exprIsThreeD(C->Args[1]);
+        /* imread may return a 2-D grayscale matrix; the matlab_mat3 runtime
+         * helpers fall back to a 2-D view (mat_is_3d == false) so grayscale
+         * files still index / size correctly. */
+        return (N->Name == "rgb2hsv" || N->Name == "hsv2rgb" ||
+                N->Name == "rgb2ycbcr" || N->Name == "ycbcr2rgb" ||
+                N->Name == "rgb2lab" || N->Name == "lab2rgb" ||
+                N->Name == "label2rgb" || N->Name == "imread");
       }
-    }
+      if (auto *B = dynamic_cast<const BinaryOpExpr *>(E))
+        return exprIsThreeD(B->LHS) || exprIsThreeD(B->RHS);
+      if (auto *U = dynamic_cast<const UnaryOpExpr *>(E))
+        return exprIsThreeD(U->Operand);
+      if (auto *N = dynamic_cast<const NameExpr *>(E))
+        return N->Ref && ThreeDBindings.count(N->Ref);
+      return false;
+    };
+    bool RhsIsThreeD = exprIsThreeD(A.RHS);
 
     /* Multi-return call: [V, D] = eig(A). If the LHS arity is > 1 and
      * the RHS is a call to a builtin that has a multi-return variant,
@@ -6898,18 +6951,30 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
         /* cat(dim, A, B, …): dim 3 stacks 2-D planes into a matlab_mat3
          * (matlab_cat3_2 / matlab_cat3_3); dim 1/2 fold pairwise through
          * vertcat / horzcat.  `dim` must be an integer literal. */
-        if (Nm == "cat" && C.Args.size() >= 3) {
+        if (Nm == "cat" && C.Args.size() >= 2) {
           if (auto *DimL = dynamic_cast<const IntegerLiteral *>(C.Args[0])) {
             llvm::SmallVector<mlir::Value, 4> Ms;
             for (size_t a = 1; a < C.Args.size(); ++a) Ms.push_back(lowerExpr(*C.Args[a]));
+            /* cat(dim, a) of a single operand returns it unchanged — a
+             * trailing-singleton stays 2-D (no mat3 wrapper). */
+            if (Ms.size() == 1) return Ms[0];
             if (DimL->Text == "3") {
-              const char *Sym = (Ms.size() == 2) ? "matlab_cat3_2" : "matlab_cat3_3";
-              llvm::SmallVector<mlir::Value, 3> Use(Ms.begin(),
-                                                    Ms.begin() + std::min<size_t>(3, Ms.size()));
-              mlir::NamedAttribute Cal(
+              /* Fold N planes into a slice-major mat3 of depth N: cat3_2 of
+               * the first two, then append each remaining plane. No arity
+               * cap — cat(3, p1, …, pN) works for any N (Ms.size() >= 2,
+               * guaranteed by C.Args.size() >= 3). */
+              mlir::NamedAttribute Cal2(
                   mlir::StringAttr::get(&MCtx, "callee"),
-                  mlir::StringAttr::get(&MCtx, Sym));
-              return emitUnreg("matlab.call_builtin", Use, PtrTy, L, {Cal});
+                  mlir::StringAttr::get(&MCtx, "matlab_cat3_2"));
+              mlir::Value Acc =
+                  emitUnreg("matlab.call_builtin", {Ms[0], Ms[1]}, PtrTy, L, {Cal2});
+              for (size_t a = 2; a < Ms.size(); ++a) {
+                mlir::NamedAttribute CalN(
+                    mlir::StringAttr::get(&MCtx, "callee"),
+                    mlir::StringAttr::get(&MCtx, "matlab_cat3_append"));
+                Acc = emitUnreg("matlab.call_builtin", {Acc, Ms[a]}, PtrTy, L, {CalN});
+              }
+              return Acc;
             }
             const char *Sym = (DimL->Text == "1") ? "vertcat" : "horzcat";
             mlir::Value Acc = Ms[0];
@@ -9012,7 +9077,7 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             "sum", "prod", "mean", "min", "max", "cumsum", "cumprod",
             "sort", "sortrows", "unique", "ismember", "setdiff",
             "intersect", "union", "horzcat", "vertcat", "kron",
-            "chol", "pinv", "permute", "squeeze", "flip", "fliplr",
+            "chol", "pinv", "permute", "ipermute", "squeeze", "flip", "fliplr",
             "flipud", "rot90", "size", "transpose", "ctranspose",
             "diag", "reshape", "repmat", "inv", "svd", "eig", "expm", "logm", "hess",
             "schur", "qz", "lyap", "dlyap", "lyapchol",

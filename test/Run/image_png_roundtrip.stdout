@@ -1,0 +1,4 @@
+gray 16x16 maxdiff 0
+rgb 16x16x3
+chan maxdiff 0
+pix(1,1) 0 0 0

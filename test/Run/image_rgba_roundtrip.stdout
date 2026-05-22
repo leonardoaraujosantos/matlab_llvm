@@ -1,0 +1,6 @@
+built d=4
+read 16x16x4
+rgb maxdiff 0
+alpha maxdiff 0
+pix(1,1) 0 0 0
+pix(1,1) a 0

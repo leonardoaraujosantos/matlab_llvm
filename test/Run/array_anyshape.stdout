@@ -1,0 +1,24 @@
+A 2x3x4
+A n=24 d=3
+Aplanes 10 20 30
+Aplane4 40
+Z d=8 n=32 last=77
+cat4 d=4
+cat4vals 1 2 3
+cat4last 4
+cat5 d=5 last=5 n=20
+expr d=4 v=3
+sm d=4 v=11
+alias d=4 v=3
+2d 3x4
+2d n=12 d=2
+2dexpr 5 d=2
+mmadd d=3 v=14
+mmemul v=40
+neg d=3 v=-4
+cmp d=3 v=0
+imcompl d=3 c1=205 c3=105
+imadd d=3 v=255
+z1 d=2 s3=1 n=12
+z1t 4x3 d=2
+cat1 d=2 s3=1 v=5

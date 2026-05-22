@@ -11,8 +11,11 @@ or slice-major M×N×3 truecolor.  See
 | Example | User's Guide | Notes |
 |---|---|---|
 | [`basic_image.m`](basic_image.m) | *Basic Image Import, Processing, and Export* | Build a low-contrast ramp, summarise it (`mean2`/`std2`/`stretchlim`), boost contrast with `imadjust`, then `imwrite` → `imread` round-trip (max diff 0). |
+| [`read_write_png.m`](read_write_png.m) | *Importing Images* (real formats) | Write an RGB image as a real **PNG**, read it back bit-exact, then run an analysis pipeline (`rgb2gray`/`imbinarize`) on the loaded image. `imread` also decodes baseline **JPEG**. |
 
-Covered: `imread`/`imwrite` (PGM/PPM/BMP) · `checkerboard` ·
+Covered: `imread` (**PGM/PPM/BMP + real PNG + baseline JPEG**, all
+hand-coded — no libpng/libjpeg) · `imwrite` (PGM/PPM/BMP + lossless PNG) ·
+`checkerboard` ·
 `im2double`/`im2single`/`im2uint8`/`rgb2gray`/`im2gray`/`mat2gray` ·
 `imadd`/`imsubtract`/`immultiply`/`imdivide`/`imabsdiff`/`imcomplement`/
 `imlincomb` (saturating to [0,255]) · `imhist`/`imadjust`/`stretchlim`/

@@ -2836,8 +2836,10 @@ bool TensorLowering::rewriteBuiltinCalls() {
       Changed = true;
       continue;
     }
-    /* cat(3, A, B[, C]) -> matlab_cat3_{2,3} : slice-major matlab_mat3. */
-    if ((Name == "matlab_cat3_2" || Name == "matlab_cat3_3") &&
+    /* cat(3, A, B[, C]) -> matlab_cat3_{2,3} : slice-major matlab_mat3.
+     * matlab_cat3_append folds N>2 planes (append one plane to a mat3). */
+    if ((Name == "matlab_cat3_2" || Name == "matlab_cat3_3" ||
+         Name == "matlab_cat3_append") &&
         Call->getNumResults() == 1) {
       bool allp = true;
       for (auto O : Call->getOperands()) if (O.getType() != PtrTy) allp = false;
@@ -5227,8 +5229,10 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"mean",       "matlab_mean_dim",   1, "pf"},
       {"min",        "matlab_min",        1, "p"},
       {"min",        "matlab_min_mm",     1, "pp"},  /* min(A, B) elementwise */
+      {"min",        "matlab_min_dim3",   1, "ppf"}, /* min(A, [], dim) */
       {"max",        "matlab_max",        1, "p"},
       {"max",        "matlab_max_mm",     1, "pp"},  /* max(A, B) elementwise */
+      {"max",        "matlab_max_dim3",   1, "ppf"}, /* max(A, [], dim) */
       {"cumsum",     "matlab_cumsum",     1, "p"},
       {"cumsum",     "matlab_cumsum_dim", 1, "pf"},
       {"cumprod",    "matlab_cumprod",    1, "p"},
@@ -5250,6 +5254,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"chol",       "matlab_chol",       1, "p"},
       {"pinv",       "matlab_pinv",       1, "p"},
       {"permute",    "matlab_permute",    1, "pp"},
+      {"ipermute",   "matlab_ipermute",   1, "pp"},
       {"squeeze",    "matlab_squeeze",    1, "p"},
       {"flip",       "matlab_flip",       1, "p"},
       {"fliplr",     "matlab_fliplr",     1, "p"},
@@ -5270,7 +5275,9 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"ctranspose", "matlab_transpose",  1, "p"},
       {"diag",       "matlab_diag",       1, "p"},
       {"reshape",    "matlab_reshape",    1, "pff"},
+      {"reshape",    "matlab_reshape3",   1, "pfff"},  /* reshape(A,m,n,p) */
       {"repmat",     "matlab_repmat",     1, "pff"},
+      {"repmat",     "matlab_repmat3",    1, "pfff"},  /* repmat(A,r,c,p) */
       {"exp",        "matlab_exp_m",      1, "p"},
       {"log",        "matlab_log_m",      1, "p"},
       {"sin",        "matlab_sin_m",      1, "p"},

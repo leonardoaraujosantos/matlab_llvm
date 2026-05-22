@@ -1,0 +1,13 @@
+rs 2x3x4
+rsv 1 7 24
+rs2d 6x4 n=24
+sum3 2x2 v=7
+mean3 v=2.3
+max3 v=4
+min3 v=1
+perm 4x2x3
+iperm 2x3x4 eq=24
+sq 3x4 d=2
+cat1 4x2x3
+cat2 2x4x3
+rep 2x2x3 v=5
