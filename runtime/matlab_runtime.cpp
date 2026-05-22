@@ -2244,6 +2244,11 @@ double matlab_isequal(matlab_mat *A, matlab_mat *B) {
  * the limitation).
  *-------------------------------------------------------------------------*/
 
+/* Scalar `^` — a^b for plain doubles (the scalar lane of matlab.matpow). */
+double matlab_pow_scalar(double a, double b) {
+    return pow(a, b);
+}
+
 matlab_mat *matlab_matpow(matlab_mat *A, double n) {
     if (A->rows != A->cols) return mat_alloc(0, 0);
     int64_t ni = (int64_t)n;
@@ -3568,6 +3573,60 @@ matlab_mat *matlab_step_ss(matlab_mat *A, matlab_mat *B,
         for (int64_t i = 0; i < n; ++i) x[i] = xnew[i];
     }
     return y;
+}
+
+/* step(sys, t) honoring a supplied time vector: derive dt and the sample
+ * count N from the (uniform) grid t and reuse matlab_step_ss, so the result
+ * has one row per element of t. */
+matlab_mat *matlab_step_ss_t(matlab_mat *A, matlab_mat *B,
+                             matlab_mat *C, matlab_mat *D, matlab_mat *t) {
+    if (!t) return mat_alloc(0, 0);
+    int64_t N = t->rows * t->cols;
+    if (N < 2) return mat_alloc(0, 0);
+    double dt = t->data[1] - t->data[0];
+    return matlab_step_ss(A, B, C, D, dt, (double)N);
+}
+
+/* Transfer function -> controllable-canonical state space.  num / den are
+ * coefficient rows in descending powers (den[0] = leading coefficient).
+ * Produces A (n x n), B (n x 1), C (1 x n), D (1 x 1), n = deg(den). */
+static void tf2ss_ccf(matlab_mat *num, matlab_mat *den,
+                      matlab_mat **Aout, matlab_mat **Bout,
+                      matlab_mat **Cout, matlab_mat **Dout) {
+    int64_t nd = den ? den->rows * den->cols : 0;
+    int64_t nn = num ? num->rows * num->cols : 0;
+    int64_t n = nd - 1;                       /* system order */
+    if (n < 1 || den->data[0] == 0.0) {
+        *Aout = mat_alloc(0, 0); *Bout = mat_alloc(0, 0);
+        *Cout = mat_alloc(0, 0); *Dout = mat_alloc(1, 1);
+        return;
+    }
+    double a0 = den->data[0];
+    std::vector<double> a(nd), b(nd, 0.0);
+    for (int64_t i = 0; i < nd; ++i) a[i] = den->data[i] / a0;
+    for (int64_t i = 0; i < nn && (nd - nn + i) >= 0; ++i)
+        b[nd - nn + i] = num->data[i] / a0;   /* right-align numerator */
+    double d0 = b[0];                          /* direct term (proper TF) */
+    matlab_mat *Am = mat_alloc(n, n);
+    for (int64_t i = 0; i < n * n; ++i) Am->data[i] = 0.0;
+    for (int64_t i = 0; i < n - 1; ++i) Am->data[i * n + (i + 1)] = 1.0;
+    for (int64_t j = 0; j < n; ++j) Am->data[(n - 1) * n + j] = -a[nd - 1 - j];
+    matlab_mat *Bm = mat_alloc(n, 1);
+    for (int64_t i = 0; i < n; ++i) Bm->data[i] = 0.0;
+    Bm->data[n - 1] = 1.0;
+    matlab_mat *Cm = mat_alloc(1, n);
+    for (int64_t j = 0; j < n; ++j)
+        Cm->data[j] = b[nd - 1 - j] - d0 * a[nd - 1 - j];
+    matlab_mat *Dm = mat_alloc(1, 1);
+    Dm->data[0] = d0;
+    *Aout = Am; *Bout = Bm; *Cout = Cm; *Dout = Dm;
+}
+
+/* step(tf, t): convert num/den to state space, then step over the grid t. */
+matlab_mat *matlab_step_tf_t(matlab_mat *num, matlab_mat *den, matlab_mat *t) {
+    matlab_mat *A, *Bm, *Cm, *Dm;
+    tf2ss_ccf(num, den, &A, &Bm, &Cm, &Dm);
+    return matlab_step_ss_t(A, Bm, Cm, Dm, t);
 }
 
 /*-------------------------------------------------------------------------

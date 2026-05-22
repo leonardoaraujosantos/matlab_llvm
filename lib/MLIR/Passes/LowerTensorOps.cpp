@@ -5389,6 +5389,9 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"gram_c",     "matlab_gram_c",     1, "pp"},
       {"gram_o",     "matlab_gram_o",     1, "pp"},
       {"step_ss",    "matlab_step_ss",    1, "ppppff"},
+      /* step(sys, t) / step(tf, t) honouring a supplied time vector. */
+      {"step_ss_t",  "matlab_step_ss_t",  1, "ppppp"},
+      {"step_tf_t",  "matlab_step_tf_t",  1, "ppp"},
       /* §3.3 follow-ons — impulse / initial response. Same arg-shape
        * convention as step_ss; initial_ss carries x0 between (D, dt). */
       {"impulse_ss", "matlab_impulse_ss", 1, "ppppff"},
@@ -6484,7 +6487,7 @@ bool TensorLowering::rewriteBinaryOps() {
     if (Op->getNumOperands() != 2) return;
     StringRef N = Op->getName().getStringRef();
     if (N == "matlab.matmul" || N == "matlab.matdiv" ||
-        N == "matlab.matldiv") {
+        N == "matlab.matldiv" || N == "matlab.matpow") {
       Binaries.push_back(Op); return;
     }
     for (auto &S : ElemSpecs)
@@ -6498,6 +6501,24 @@ bool TensorLowering::rewriteBinaryOps() {
     Type AT = A.getType(), BT = BVal.getType();
     bool AP = AT == PtrTy, BP = BT == PtrTy;
     bool AF = AT == F64,    BF = BT == F64;
+    /* `^` (matrix power): scalar base -> libm pow (no arith pow op exists, so
+     * LowerScalarsToArith can't handle it); square-matrix base ^ scalar n ->
+     * matlab_matpow. */
+    if (ML == "matlab.matpow") {
+      B.setInsertionPoint(Op);
+      if (AF && BF) {
+        auto Pf = rt("matlab_pow_scalar", F64, {F64, F64});
+        auto NC = LLVM::CallOp::create(B, Op->getLoc(), Pf, ValueRange{A, BVal});
+        Op->getResult(0).replaceAllUsesWith(NC.getResult());
+        Op->erase(); Changed = true;
+      } else if (AP && BF) {
+        auto Pf = rt("matlab_matpow", PtrTy, {PtrTy, F64});
+        auto NC = LLVM::CallOp::create(B, Op->getLoc(), Pf, ValueRange{A, BVal});
+        Op->getResult(0).replaceAllUsesWith(NC.getResult());
+        Op->erase(); Changed = true;
+      }
+      continue;
+    }
     if (!AP && !BP) continue; // scalar-only — LowerScalarsToArith handled it
 
     B.setInsertionPoint(Op);

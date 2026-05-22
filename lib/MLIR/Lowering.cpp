@@ -2577,6 +2577,24 @@ void Lowerer::lowerStmt(const Stmt &St) {
           }
           return;
         }
+        /* [y, tout] = step(model, t): y is the response over the supplied
+         * time grid t (ss or tf), tout echoes t. */
+        if (Callee->Name == "step" && (Cn0 == "ss" || Cn0 == "tf") &&
+            C->Args.size() == 2 && C->Args[1]) {
+          mlir::Value Obj = loadObjP(C->Args[0]);
+          mlir::Value T = lowerExpr(*C->Args[1]);
+          if (T.getType() != PtrTy) T.setType(PtrTy);
+          mlir::Value Y = (Cn0 == "tf")
+              ? callRT("step_tf_t",
+                       {getPropP(Obj, "Numerator"), getPropP(Obj, "Denominator"), T})
+              : callRT("step_ss_t",
+                       {getPropP(Obj, "A"), getPropP(Obj, "B"),
+                        getPropP(Obj, "C"), getPropP(Obj, "D"), T});
+          mlir::Value Outs[2] = {Y, T};        /* y, tout = t */
+          for (size_t i = 0; i < A.LHS.size() && i < 2; ++i)
+            if (A.LHS[i]) lowerLValueStore(*A.LHS[i], Outs[i]);
+          return;
+        }
       }
       if (IsBuiltin) {
         llvm::SmallVector<mlir::Value, 4> Args;
@@ -7233,23 +7251,40 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
         /* step(sys [, dt, N]): for ss → step_ss with defaults
          * dt=0.01, N=500 if not provided. Returns y as a column
          * matrix. */
-        if (Nm == "step" && Cls0 && Cn0 == "ss") {
+        if (Nm == "step" && Cls0 && (Cn0 == "ss" || Cn0 == "tf")) {
           mlir::Value Obj = loadObj(C.Args[0]);
-          mlir::Value Dt, Nval;
-          if (C.Args.size() >= 3 && C.Args[1] && C.Args[2]) {
-            Dt = lowerExpr(*C.Args[1]);
-            Nval = lowerExpr(*C.Args[2]);
-          } else {
-            Dt = mlir::arith::ConstantOp::create(
-                B, L, F64, mlir::FloatAttr::get(F64, 0.01)).getResult();
-            Nval = mlir::arith::ConstantOp::create(
-                B, L, F64, mlir::FloatAttr::get(F64, 500.0)).getResult();
+          /* step(model, t): 2-arg form with a supplied time vector — honour
+           * it (derive dt / N from the grid in the runtime). step_*_t reads
+           * the time vector and returns one row per sample. */
+          if (C.Args.size() == 2 && C.Args[1]) {
+            mlir::Value T = lowerExpr(*C.Args[1]);
+            if (T.getType() != PtrTy) T.setType(PtrTy);
+            if (Cn0 == "tf")
+              return rebuildCall("step_tf_t",
+                                 {getProp(Obj, "Numerator"),
+                                  getProp(Obj, "Denominator"), T}, PtrTy);
+            return rebuildCall("step_ss_t",
+                               {getProp(Obj, "A"), getProp(Obj, "B"),
+                                getProp(Obj, "C"), getProp(Obj, "D"), T}, PtrTy);
           }
-          return rebuildCall("step_ss",
-                             {getProp(Obj, "A"), getProp(Obj, "B"),
-                              getProp(Obj, "C"), getProp(Obj, "D"),
-                              Dt, Nval},
-                             PtrTy);
+          /* ss-only legacy forms: step(sys) defaults, step(sys, dt, N). */
+          if (Cn0 == "ss") {
+            mlir::Value Dt, Nval;
+            if (C.Args.size() >= 3 && C.Args[1] && C.Args[2]) {
+              Dt = lowerExpr(*C.Args[1]);
+              Nval = lowerExpr(*C.Args[2]);
+            } else {
+              Dt = mlir::arith::ConstantOp::create(
+                  B, L, F64, mlir::FloatAttr::get(F64, 0.01)).getResult();
+              Nval = mlir::arith::ConstantOp::create(
+                  B, L, F64, mlir::FloatAttr::get(F64, 500.0)).getResult();
+            }
+            return rebuildCall("step_ss",
+                               {getProp(Obj, "A"), getProp(Obj, "B"),
+                                getProp(Obj, "C"), getProp(Obj, "D"),
+                                Dt, Nval},
+                               PtrTy);
+          }
         }
 
         /* lsim(sys, u, dt): for ss → lsim_ss(A, B, C, D, u, dt). */

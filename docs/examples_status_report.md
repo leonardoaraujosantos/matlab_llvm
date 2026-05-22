@@ -121,6 +121,8 @@ Not a compiler bug.
 | CST model-object multi-return splitters: `[kest,L,P]=kalman(sys,Qn,Rn)`, `[Gm,Pm,Wcg,Wcp]=margin(sys)` | model-object path + `matlab_margin_ss_auto` | `test/Run/cst_multiret.m` |
 | **D** cell-of-strings `{'a','b'}` (kind=3 string elements) → `legend({...})` works | `matlab_cell_set_str` + `cell_get_mat` char-code | `test/Run/cell_strings.m` |
 | **E** symbolic AOT link recipe — `.requires-sym` marker links the prebuilt `WITH_SYM` `runtime_sym.o` + `libsympp` + GMP/MPFR (skips when SymPP absent). `symbolic_demo.m` / `quadrotor_derive_eom.m` run. | `run_tests.sh` / `fastrun.sh` `.requires-sym` | `test/Run/sym_basic.m` |
+| **B3** `step` honours a supplied time vector + `[y,tout]` 2-output, on ss **and tf** (new `step_ss_t`/`step_tf_t`, tf via controllable-canonical `tf2ss`). | model-object multi-return path + step dispatch | `test/Run/step_multiret.m` |
+| **scalar `^`** on the AOT path (`wn^2`) — `matlab.matpow(f64,f64)` → `matlab_pow_scalar`; `matrix^n` → `matlab_matpow`. Was a pre-existing gap (only the C/C++ emitters handled `^`). | LowerTensorOps matpow arm | `test/Run/step_multiret.m` |
 
 ### TODO — remaining work (with real depth)
 
@@ -129,9 +131,11 @@ Original list items not yet done:
 - [ ] **B2 — `d2c`** (`c2d_zoh_demo.m`): inverse discretisation (needs a
   matrix-log / inverse-ZOH runtime). The `d2c_tustin` reverse map already
   exists; ZOH `d2c` does not.
-- [ ] **B3 — `step` 2-output `[y, t] = step(sys)`** (`step_response_siso.m`):
-  needs the time vector as a 2nd output. Note `step(sys, t)` currently ignores
-  a supplied time vector (uses default dt/N) — fix that first, then echo `t`.
+- [x] **B3 — `step` 2-output `[y, t] = step(sys, t)`** — DONE (ss + tf, honours
+  the time grid). `step_response_siso.m` still needs **`stepinfo` to return a
+  struct** (`S.RiseTime`): the runtime returns a 1×5 row and the existing
+  `ctrl_stepinfo.m` test reads it positionally (`si(1,1)`), so switching to a
+  struct is a convention change to make separately (would update that test).
 - [x] **E — symbolic** (`symbolic_demo.m`, `quadrotor_derive_eom.m`): DONE.
   The `.requires-sym` test marker links the prebuilt `WITH_SYM` `runtime_sym.o`
   + `libsympp` (SymPP_DIR read from `CMakeCache.txt`) + GMP/MPFR, skipping when
