@@ -34,8 +34,13 @@ WORKDIR /app
 # Coolify provides the repo as the build context — COPY it, do not clone.
 COPY . .
 # Plotting ON so mobile clients get PNG/SVG/PDF figures (Cairo backend).
+# Build with clang (the project's supported toolchain — its CI sets
+# CC=clang/CXX=clang++). gcc rejects valid clang code here, e.g.
+# `Settings Settings;` in Loader.h (-Wchanges-meaning).
 RUN cmake -S . -B build -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_C_COMPILER=clang-${LLVM_VERSION} \
+        -DCMAKE_CXX_COMPILER=clang++-${LLVM_VERSION} \
         -DMATLAB_LLVM_WITH_PLOT=ON \
         -DLLVM_DIR=/usr/lib/llvm-${LLVM_VERSION}/lib/cmake/llvm \
         -DMLIR_DIR=/usr/lib/llvm-${LLVM_VERSION}/lib/cmake/mlir \
