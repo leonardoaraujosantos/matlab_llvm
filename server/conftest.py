@@ -30,6 +30,9 @@ os.environ["MATLAB_BACKEND_WARM_POOL_SIZE"] = "0"
 # hermetic docs corpus instead of the real repo docs. Empty OPENAI_API_KEY in
 # os.environ overrides any value from server/.env.
 os.environ["OPENAI_API_KEY"] = ""
+# Default tests run in open auth mode; clear any inherited auth config.
+os.environ.pop("CYBERDYNE_AUTH_URL", None)
+os.environ.pop("MATLAB_BACKEND_API_TOKEN", None)
 _SRC_CTX = _TMP / "src_ctx"
 _DOCS = _SRC_CTX / "docs"
 _DOCS.mkdir(parents=True, exist_ok=True)

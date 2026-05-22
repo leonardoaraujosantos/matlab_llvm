@@ -17,7 +17,9 @@ services:
       # Tier-2 sandbox: bwrap is installed in the image. Needs user
       # namespaces — keep `none` unless the host/compose grants them.
       - MATLAB_BACKEND_SANDBOX_BACKEND=none
-      # Bearer token: empty = open (dev). Set before any public exposure.
+      # Auth: prefer CyberdyneAuth (validates bearer tokens against its
+      # /api/v1/users/me). Falls back to a shared static token, then open.
+      - CYBERDYNE_AUTH_URL=${CYBERDYNE_AUTH_URL:-}
       - MATLAB_BACKEND_API_TOKEN=${MATLAB_BACKEND_API_TOKEN:-}
     ports:
       - "8000:8000"

@@ -20,7 +20,8 @@ Phases implemented on this branch:
 - **Phase 6** — `/v1/chat/completions` (OpenAI-compatible), grounded in a
   dependency-free BM25 index over `docs/**/*.md`; proxies to OpenAI when a
   key is set, else returns a retrieval-only answer.
-- **Phase 7** — hardening: bearer auth on all `/v1` routes, per-client rate
+- **Phase 7** — hardening: auth on all `/v1` routes (CyberdyneAuth bearer
+  validation, or a static token), per-identity workspace isolation, per-client rate
   limiting, a global concurrency cap on matlabc children, per-workspace disk
   quotas, **stateful REPL sessions** (long-lived `matlabc -repl` per session,
   idle-evicted), a **warm pool** of pre-warmed workers, and a **tier-2 syscall
@@ -45,9 +46,24 @@ Deferred: only the CI/deploy half of Phase 8.
 
 ## Secrets / `.env`
 
-The OpenAI proxy reads `OPENAI_API_KEY` (+ optional `OPENAI_BASE_URL`,
-`OPENAI_MODEL`) from the environment or a **gitignored** `server/.env`.
-Without a key, `/v1/chat/completions` runs in retrieval-only mode.
+Secrets load from the environment or a **gitignored** `server/.env`:
+- `OPENAI_API_KEY` (+ optional `OPENAI_BASE_URL`, `OPENAI_MODEL`) for the chat
+  proxy; without it `/v1/chat/completions` runs in retrieval-only mode.
+- `CYBERDYNE_AUTH_URL` to enable token auth (see below).
+
+## Auth
+
+`auth_mode` is resolved automatically:
+
+| Mode | When | Behaviour |
+|---|---|---|
+| `cyberdyne` | `CYBERDYNE_AUTH_URL` set | Validates each `Authorization: Bearer <token>` against CyberdyneAuth's `GET /api/v1/users/me` (200 = valid; 401/403 = reject; 5xx = `503`). Successful checks are cached for `AUTH_VERIFY_CACHE_TTL_S`. The verified identity id becomes the request **principal**, so each user's workspace is isolated regardless of the `user_id` they send. |
+| `token` | `MATLAB_BACKEND_API_TOKEN` set | A single shared static bearer token. |
+| `none` | neither | Open (local-dev default). |
+
+`GET /v1/auth/whoami` echoes the authenticated identity. The DAP WebSocket
+authenticates via a `?token=` query param (browsers can't set `Authorization`
+on a WS handshake). MCP (`/mcp`) is not yet behind auth — a follow-on.
 
 ## Run it locally
 
@@ -81,6 +97,7 @@ Without `just`: `cd server && uv run uvicorn main:app` (set
 | Method | Path | Purpose |
 |---|---|---|
 | GET  | `/healthz` | liveness + matlabc presence |
+| GET  | `/v1/auth/whoami` | echo the authenticated identity (auth smoke) |
 | POST | `/v1/check` | validate-only (default matlabc mode) |
 | POST | `/v1/repl` | JIT-execute; returns stdout/stderr + figure artifacts |
 | POST | `/v1/codegen/{target}` | transpile to python/typescript/c/cpp/systemverilog |
@@ -110,7 +127,9 @@ Env vars, prefix `MATLAB_BACKEND_` (or a `.env` file). See `config.py`.
 | `WALL_TIMEOUT_S` | `20` | hard wall-clock kill |
 | `OUTPUT_CAP_BYTES` | `1000000` | max captured stdout/stderr |
 | `MAX_UPLOAD_MB` | `25` | upload size cap |
-| `API_TOKEN` | `""` | bearer token; empty disables auth |
+| `CYBERDYNE_AUTH_URL` | `""` | enable CyberdyneAuth bearer validation (bare name) |
+| `API_TOKEN` | `""` | shared static bearer token (used if no CyberdyneAuth) |
+| `AUTH_VERIFY_CACHE_TTL_S` | `30` | cache window for `/users/me` checks |
 | `MAX_CONCURRENT_JOBS` | `8` | global cap on concurrent matlabc children |
 | `RATE_LIMIT_PER_MINUTE` | `120` | per-client request cap (0 disables) |
 | `USER_QUOTA_MB` | `200` | per-workspace disk quota (0 disables) |
@@ -147,10 +166,11 @@ jail.py        tier-2 syscall sandbox wrapper (bwrap/firejail/nsjail)
 diagnostics.py clang-style diagnostic parsing
 rag.py         BM25 index over docs/**/*.md (dependency-free retrieval)
 models.py      request/response schemas
-auth.py        optional bearer-token dependency
+auth.py        auth modes (cyberdyne / static token / open) + verification
+principal.py   request-scoped identity → per-user workspace isolation
 mcp_tools.py   FastMCP server + tools (not named `mcp` — would shadow the SDK)
 main.py        app factory + lifespan (+ MCP + RAG + warm pool) + /healthz
-routers/       check, repl, codegen, files, dap_ws, chat, plot
+routers/       check, repl, codegen, files, dap_ws, chat, plot, whoami
 tests/         pytest suite (fake matlabc stub in conftest.py)
 ```
 

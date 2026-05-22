@@ -15,6 +15,7 @@ from fastapi.responses import FileResponse
 import limits
 from config import settings
 from models import FileInfo, FileListResponse, UploadResponse
+from principal import effective_user
 from workspaces import list_files, resolve_in_workspace, workspace_for
 
 router = APIRouter(prefix="/v1/files", tags=["files"])
@@ -28,7 +29,7 @@ async def upload(
     user_id: str | None = Query(default=None),
     session_id: str | None = Query(default=None),
 ) -> UploadResponse:
-    ws = workspace_for(user_id, session_id)
+    ws = workspace_for(effective_user(user_id), session_id)
     name = (file.filename or "").strip()
     if not name:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "missing filename")
@@ -71,7 +72,7 @@ async def listing(
     user_id: str | None = Query(default=None),
     session_id: str | None = Query(default=None),
 ) -> FileListResponse:
-    ws = workspace_for(user_id, session_id)
+    ws = workspace_for(effective_user(user_id), session_id)
     return FileListResponse(
         files=[FileInfo(path=e.path, size=e.size, modified=e.modified) for e in list_files(ws)]
     )
@@ -83,7 +84,7 @@ async def download(
     user_id: str | None = Query(default=None),
     session_id: str | None = Query(default=None),
 ) -> FileResponse:
-    ws = workspace_for(user_id, session_id)
+    ws = workspace_for(effective_user(user_id), session_id)
     try:
         target = resolve_in_workspace(ws, path)
     except ValueError:

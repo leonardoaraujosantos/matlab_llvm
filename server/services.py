@@ -13,6 +13,7 @@ from pathlib import Path
 import matlabc
 from config import settings
 from diagnostics import parse_diagnostics
+from principal import effective_user
 from sessions import MANAGER
 from workspaces import (
     list_files,
@@ -26,7 +27,9 @@ _PLOT_EXT = ("png", "svg", "pdf")
 
 
 def resolve_workspace(user_id: str | None = None, session_id: str | None = None) -> Path:
-    """A live stateful session's bound workspace, else the deterministic one."""
+    """A live stateful session's bound workspace, else the deterministic one.
+    The authenticated principal (if any) overrides the client-supplied id."""
+    user_id = effective_user(user_id)
     return MANAGER.workspace_of(user_id, session_id) or workspace_for(user_id, session_id)
 
 
@@ -52,6 +55,7 @@ async def run_repl(
     stateful: bool | None = None,
 ) -> dict:
     use_stateful = settings.repl_stateful if stateful is None else stateful
+    user_id = effective_user(user_id)  # isolate sessions per authenticated identity
 
     if use_stateful:
         res = await MANAGER.run_turn(user_id, session_id, source, settings.wall_timeout_s)
@@ -102,7 +106,7 @@ async def run_codegen(
 
 
 def list_workspace(user_id: str | None = None, session_id: str | None = None) -> list[dict]:
-    ws = workspace_for(user_id, session_id)
+    ws = resolve_workspace(user_id, session_id)
     return [{"path": e.path, "size": e.size, "modified": e.modified} for e in list_files(ws)]
 
 

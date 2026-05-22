@@ -16,10 +16,12 @@ import asyncio
 import json
 import logging
 
-from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconnect
 
 import sandbox
+from auth import verify_cyberdyne
 from config import settings
+from principal import effective_user, set_principal
 from workspaces import resolve_in_workspace, workspace_for
 
 log = logging.getLogger("matlab_backend.dap")
@@ -38,12 +40,25 @@ async def dap_ws(
 ) -> None:
     await websocket.accept()
 
-    # Auth via query param: browsers can't set Authorization on a WS handshake.
-    if settings.api_token and token != settings.api_token:
-        await websocket.close(code=1008, reason="unauthorized")
-        return
+    # Auth via query param (browsers can't set Authorization on a WS handshake).
+    mode = settings.auth_mode
+    if mode == "token":
+        if not token or token != settings.api_token:
+            await websocket.close(code=1008, reason="unauthorized")
+            return
+    elif mode == "cyberdyne":
+        if not token:
+            await websocket.close(code=1008, reason="unauthorized")
+            return
+        try:
+            ident = await verify_cyberdyne(token)
+        except HTTPException as exc:
+            code = 1008 if exc.status_code in (401, 403) else 1011
+            await websocket.close(code=code, reason="unauthorized")
+            return
+        set_principal(ident.id)
 
-    ws_dir = workspace_for(user_id, session_id)
+    ws_dir = workspace_for(effective_user(user_id), session_id)
     try:
         prog = resolve_in_workspace(ws_dir, program)
     except ValueError:

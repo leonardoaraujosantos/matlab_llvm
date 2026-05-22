@@ -73,8 +73,17 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8000
 
-    # --- Auth (optional; empty disables, the local-dev default) ------------
+    # --- Auth -------------------------------------------------------------
+    # Three modes, resolved by `auth_mode`:
+    #   cyberdyne  — validate bearer tokens against CyberdyneAuth (preferred)
+    #   token      — a single shared static bearer token
+    #   none       — open (local-dev default)
     api_token: str = ""
+    cyberdyne_auth_url: str = Field(
+        "", validation_alias=AliasChoices("CYBERDYNE_AUTH_URL", "MATLAB_BACKEND_CYBERDYNE_AUTH_URL")
+    )
+    auth_verify_cache_ttl_s: int = 30   # cache successful /users/me checks
+    cyberdyne_timeout_s: float = 5.0
 
     # --- RAG / chat (Phase 6) ----------------------------------------------
     # Root holding the docs corpus to index (`<root>/docs/**/*.md`). In the
@@ -92,6 +101,14 @@ class Settings(BaseSettings):
     openai_model: str = Field(
         "gpt-4o-mini", validation_alias=AliasChoices("OPENAI_MODEL", "MATLAB_BACKEND_OPENAI_MODEL")
     )
+
+    @property
+    def auth_mode(self) -> str:
+        if self.cyberdyne_auth_url:
+            return "cyberdyne"
+        if self.api_token:
+            return "token"
+        return "none"
 
     @property
     def matlabc_path(self) -> Path:

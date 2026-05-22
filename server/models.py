@@ -77,6 +77,15 @@ class UploadResponse(BaseModel):
     file: FileInfo
 
 
+# --- /v1/auth/whoami -----------------------------------------------------
+class WhoAmIResponse(BaseModel):
+    authenticated: bool
+    mode: str
+    id: str | None = None
+    email: str | None = None
+    organization_id: str | None = None
+
+
 # --- /v1/plot ------------------------------------------------------------
 class PlotRequest(SessionMixin):
     source: str = Field(..., description="MATLAB plotting snippet (server appends saveas).")
