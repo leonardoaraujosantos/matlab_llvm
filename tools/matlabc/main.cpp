@@ -12064,10 +12064,24 @@ int main(int Argc, char **Argv) {
         // matrix uses finally lower (otherwise they survive as un-lowered
         // matlab.subscript / matlab.add). Iterate with RefineFuncSigs so
         // chained matrix-returning calls converge. Mirrors the REPL/JIT path.
-        for (int Iter = 0; Iter < 4; ++Iter) {
-          bool Changed = mlirgen::runLowerTensorOps(M);
-          mlirgen::runRefineFuncSigs(M);
-          if (!Changed) break;
+        //
+        // HDL lanes are excluded: this extra LowerTensorOps round over-lowers
+        // a matrix concat like `[fi(x), delay_line(1:3)]` into a runtime
+        // matlab_mat_from_scalar call, which the SystemVerilog backend expects
+        // to still be in array form (an unpacked-array shift). The
+        // matrix-returning-function fix is a software/execute concern only.
+        bool HwLane =
+            Opts.Mode == Options::Mode::EmitSystemVerilog ||
+            Opts.Mode == Options::Mode::CheckSynthesizable ||
+            Opts.Mode == Options::Mode::EmitHardwareReport ||
+            Opts.Mode == Options::Mode::EmitCocotb ||
+            Opts.Mode == Options::Mode::EmitFiReport;
+        if (!HwLane) {
+          for (int Iter = 0; Iter < 4; ++Iter) {
+            bool Changed = mlirgen::runLowerTensorOps(M);
+            mlirgen::runRefineFuncSigs(M);
+            if (!Changed) break;
+          }
         }
         // After user-call refinement, any surviving matlab.alloc whose
         // result type is now a scalar primitive can be promoted to
