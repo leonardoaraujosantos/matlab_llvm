@@ -71,7 +71,7 @@ From the repo root (needs [`just`](https://github.com/casey/just) and
 [`uv`](https://docs.astral.sh/uv/)):
 
 ```sh
-just backend-up          # builds matlabc, serves on :8000
+just backend-up          # builds matlabc (+ Cairo plotting if present), serves :8000
 just backend-up 9000     # custom port
 just backend-dev         # same, with --reload for editing the server
 just backend-test        # test suite (fake matlabc — no LLVM build needed)

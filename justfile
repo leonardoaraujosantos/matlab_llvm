@@ -504,13 +504,28 @@ loc:
 backend-install:
     cd server && uv sync --extra dev
 
-# Build matlabc + serve the backend on :8000 (browse /docs, curl /healthz).
-backend-up PORT="8000": build
+# Enables Cairo plotting when present; the flag is sticky in the CMake cache,
+# so plain `just build` keeps it afterwards (the Docker image always has it).
+# Build matlabc with plotting for the backend (so /v1/plot works locally).
+backend-build:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if pkg-config --exists cairo 2>/dev/null; then
+        echo "cairo found — building matlabc with /v1/plot support"
+        cmake -S . -B {{BUILD_DIR}} -G Ninja -DCMAKE_BUILD_TYPE=Release -DMATLAB_LLVM_WITH_PLOT=ON
+    else
+        echo "cairo not found — /v1/plot disabled (install cairo, e.g. 'brew install cairo')"
+        cmake -S . -B {{BUILD_DIR}} -G Ninja -DCMAKE_BUILD_TYPE=Release
+    fi
+    cmake --build {{BUILD_DIR}} --target matlabc {{ if JOBS != "" { "-j " + JOBS } else { "" } }}
+
+# Build matlabc (with plotting) + serve the backend on :8000 (/docs, /healthz).
+backend-up PORT="8000": backend-build
     cd server && MATLAB_BACKEND_MATLABC_BIN="{{justfile_directory()}}/{{BUILD_DIR}}/matlabc" \
         uv run uvicorn main:app --host 0.0.0.0 --port {{PORT}}
 
-# Build matlabc + serve with auto-reload (for editing the Python server).
-backend-dev PORT="8000": build
+# Build matlabc (with plotting) + serve with auto-reload (for editing the server).
+backend-dev PORT="8000": backend-build
     cd server && MATLAB_BACKEND_MATLABC_BIN="{{justfile_directory()}}/{{BUILD_DIR}}/matlabc" \
         uv run uvicorn main:app --reload --host 0.0.0.0 --port {{PORT}}
 
