@@ -315,3 +315,75 @@ real-eigenvalue systems. #2 and #4 remain.
   separate item). Parlett's recurrence then runs on the now-triangular `T`.
 - **Payoff:** `d2c` works for general ss systems; `logm` (and `sqrtm`-style
   functions) become robust.
+
+---
+
+## HDL / SystemVerilog status (2026-05-22)
+
+The summary table counts the 49 `examples/hdl/` files as failures because the
+sweep links every `.m` as a standalone *LLVM-execute* program — the wrong lens
+for HDL. Through their actual target (`-emit-systemverilog` / `-emit-cocotb`)
+they are in good shape. The 49 split into **39 core modules + 4 testbenches
+(`test_*.m`, cocotb vector sources) + 6 synth wrappers (`*_synth.m`)**.
+
+**SystemVerilog generation — core modules: 37/39 emit, all verilator-clean.**
+
+| Check | Result |
+|---|---|
+| Core modules emitting SV | 37 / 39 |
+| `verilator --lint-only -Wall` on every emitted module | 0 warnings, 0 errors |
+| `iverilog -g2012` parse | clean |
+| `-emit-cocotb` (HW execute/debug harness) on core modules | 37 / 39 |
+
+The SV is professional and readable: signed/unsigned port widths from the
+`% hdl: port(...)` annotations, `always_comb` / `always_ff @(posedge clk or
+negedge rst_n)` with async-low reset, non-blocking `<=` in clocked / blocking
+`=` in comb, `typedef enum logic[..]` for FSM states, `unique case`, sized
+literals (`16'sd0`), and preserved source comments.
+
+`test_*.m` (cocotb vector sources) and `*_synth.m` (synthesis wrappers) are not
+standalone SV modules; they are consumed by `-emit-cocotb` / drive a top-level
+instantiation, so their standalone `-emit-systemverilog` "undefined name" is
+expected, not a defect.
+
+### Regression found + fixed: matrix-concat over-lowering on HDL lanes
+
+`fir_asic_pipelined`, `sequential_processor`, `fir_filter`, `matrix_2d_const`,
+`persistent_shift` had **regressed** — SV emit rejected them with
+`runtime call 'matlab_mat_from_scalar' has no synthesizable form` on a
+shift-register / delay-line concat like `delay_line = [fi(x), delay_line(1:3)]`.
+
+- **Bisected to `fa36bce`** (worked at `31d59bf`, broke at `fa36bce`). That
+  commit added a matrix-returning-user-function refinement round (re-run
+  `LowerTensorOps` after `RefineFuncSigs`) inside the **shared**
+  `WantFullPipeline`, which also covers the HDL lanes. On those lanes the extra
+  round over-lowered the concat into a runtime `matlab_mat_from_scalar` call,
+  whereas the SystemVerilog backend expects it in array form (an unpacked-array
+  shift: `delay_line_next[0]=x; delay_line_next[i]=delay_line[i-1]`).
+- **Fix (`013709d`)**: guard that round to non-HDL lanes (it is a
+  software/execute concern only). EmitSV back to **77/0** (golden + verilator +
+  yosys); `fn_matrix_return` (the LLVM-path matrix-returning-fn test) still
+  passes; `test/Run` 481/481. `examples/hdl/fir_asic_pipelined.m` and
+  `sequential_processor.m` emit again → core modules 39/39.
+
+### Regression testing — coverage and the gap that let this slip
+
+The SV regression test **already existed**: the gated CTest lane
+`emit-sv-tests` (`test/EmitSV/`, golden-diff + verilator lint + yosys synth, ~77
+modules) reported the 5 failures immediately. It slipped through because
+`emit-sv-tests` was **not in the fast dev loop** — `test/Run` (the LLVM-execute
+lane) was the only suite being run. SV-only regressions were therefore invisible
+between `fa36bce` and the fix. `EmitSV` is now part of `/tmp/fastrun.sh`.
+
+**Recommended fast gate** (skips the hang-prone simulation lanes, ~2 min, live
+progress with `--progress`):
+
+```
+ctest --test-dir build --progress -R 'run-tests|emit-sv|emitc'
+```
+
+**Do not run the full `ctest` as a quick gate here:** the `flowchart-simulate-dap-*`
+and cocotb lanes spawn external `matlabc --sim-dap` / simulator subprocesses
+that wait on DAP I/O and never terminate in this environment (a 31-min hang; a
+7-day-old stale `--sim-dap` process was found lingering). Those lanes should get
+a CTest `TIMEOUT` property so they fail-fast instead of hanging the whole gate.

@@ -2060,3 +2060,40 @@ Coder User's Guide PDF the user provided:
 - persistent/stateful data maps naturally to hardware storage
 - unsupported source must be diagnosed early instead of deferred to
   downstream synthesis tools
+
+## Pipeline integration: HDL lanes vs. the software lowering pipeline
+
+`-emit-systemverilog`, `-check-synthesizable`, `-emit-cocotb`, and the report
+modes all run through the same `WantFullPipeline` lowering as the software
+emitters (LLVM / C / C++ / Python / TypeScript), then hand the module to
+`emitSystemVerilog()`. The SV backend expects matrix/array values to still be
+in **array form** (e.g. a concat `[fi(x), delay_line(1:3)]` left as element
+assignments → an unpacked-array shift), *not* fully lowered to runtime matrix
+calls.
+
+Therefore **software-only lowering rounds must be guarded out of the HDL
+lanes.** Concretely, the matrix-returning-user-function refinement round in
+`tools/matlabc/main.cpp` (re-run `LowerTensorOps` after `RefineFuncSigs` so a
+function's `tensor -> ptr` result retypes the caller's slot) is wrapped in
+`if (!HwLane) { ... }`. Without that guard it over-lowers the shift-register
+concat into a `matlab_mat_from_scalar` runtime call, and the SV backend rejects
+it with `runtime call '...' has no synthesizable form`. (Regression history:
+introduced in `fa36bce`, fixed in `013709d`; see
+`docs/examples_status_report.md`.) Any new pass added to `WantFullPipeline`
+that targets the execute/software path should be similarly gated.
+
+## Regression gate
+
+The SV backend is gated by the `emit-sv-tests` CTest lane
+(`test/EmitSV/run_tests.sh`): per-fixture golden-diff **+ `verilator
+--lint-only` + yosys synth**. Run it as part of any change that touches lowering
+or the SV backend — `test/Run` (the LLVM-execute lane) alone does **not** cover
+SV, which is exactly how the `fa36bce` regression went unnoticed:
+
+```
+ctest --test-dir build --progress -R 'run-tests|emit-sv|emitc'
+```
+
+Avoid the full `ctest` as a quick gate locally: the `flowchart-simulate-dap-*`
+and cocotb lanes spawn external simulator / DAP subprocesses that can hang in a
+headless environment. They should carry a CTest `TIMEOUT` so they fail-fast.
