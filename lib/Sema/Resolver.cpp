@@ -127,6 +127,9 @@ void Resolver::registerBuiltins() {
      * ss / tf classdef methods (function-form dispatch only fires for a
      * known-builtin callee, see the dispatch in resolveExpr). */
     "ssdata", "tfdata",
+    /* margin(sys) — multi-return gain/phase-margin splitter handled in the
+     * lowering's model-object multi-return path. */
+    "margin",
     /* MPC Toolbox Tier-1/2/3 — runtime-symbol builtins called from
      * inside `mpc_classdefs.m`.  5 entries: construct (mutates the
      * mpc obj at construction time), move (single tick), move_opt

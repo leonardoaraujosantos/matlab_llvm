@@ -5371,6 +5371,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"dcgain_ss",  "matlab_dcgain_ss",  1, "pppp"},
       {"stepinfo",   "matlab_stepinfo",   1, "pp"},
       {"kalman_L",   "matlab_kalman_L",   1, "ppppp"},
+      {"kalman_P",   "matlab_kalman_P",   1, "ppppp"},
       {"kalmd_L",    "matlab_kalmd_L",    1, "ppppp"},
       /* 1-return forms default to L (the gain — most-used output). The
        * 2-return [L, P] shape goes through the splitter above. */
@@ -5405,6 +5406,7 @@ bool TensorLowering::rewriteBuiltinCalls() {
       {"nyquist_ss", "matlab_nyquist_ss", 1, "ppppp"},
       {"nyquist_tf", "matlab_nyquist_tf", 1, "ppp"},
       {"allmargin_ss","matlab_allmargin_ss",1, "ppppp"},
+      {"margin_ss_auto","matlab_margin_ss_auto",1,"pppp"},
       {"gain_margin","matlab_gain_margin",0, "ppppp"},
       {"phase_margin","matlab_phase_margin",0,"ppppp"},
       {"bandwidth_ss","matlab_bandwidth_ss",0,"pppp"},

@@ -2503,6 +2503,81 @@ void Lowerer::lowerStmt(const Stmt &St) {
           return;
         }
       }
+      /* Model-object CST multi-return splitters. A few CST functions take a
+       * model object and return several values; the single-return forms are
+       * dispatched in lowerExpr (step_ss / lsim_ss / …). Here we handle the
+       * multi-return forms by extracting the object's matrices and calling
+       * the per-output runtime entries. */
+      if (IsBuiltin && Callee && !C->Args.empty()) {
+        const ClassDef *Cls0 = nullptr;
+        if (auto *AN = dynamic_cast<const NameExpr *>(C->Args[0]))
+          if (AN->Ref) Cls0 = AN->Ref->PinnedClass;
+        llvm::StringRef Cn0 = Cls0 ? llvm::StringRef(Cls0->Name) : llvm::StringRef();
+        auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+        auto Lc = loc(A.Range);
+        auto loadObjP = [&](const Expr *X) -> mlir::Value {
+          mlir::Value V = lowerExpr(*X);
+          if (V.getType() != PtrTy) V.setType(PtrTy);
+          return V;
+        };
+        auto getPropP = [&](mlir::Value Obj, llvm::StringRef F) -> mlir::Value {
+          mlir::Value FN = emitFieldNameChar(F, Lc);
+          mlir::NamedAttribute Cal(mlir::StringAttr::get(&MCtx, "callee"),
+                                   mlir::StringAttr::get(&MCtx, "matlab_obj_get_mat"));
+          return emitUnreg("matlab.call_builtin", {Obj, FN}, PtrTy, Lc, {Cal});
+        };
+        auto boxP = [&](mlir::Value V) -> mlir::Value {
+          if (V.getType() == PtrTy) return V;
+          if (mlir::isa<mlir::Float64Type>(V.getType())) {
+            mlir::NamedAttribute Cal(mlir::StringAttr::get(&MCtx, "callee"),
+                                     mlir::StringAttr::get(&MCtx, "matlab_mat_from_scalar"));
+            return emitUnreg("matlab.call_builtin", {V}, PtrTy, Lc, {Cal});
+          }
+          V.setType(PtrTy);
+          return V;
+        };
+        auto callRT = [&](const char *Fn, llvm::ArrayRef<mlir::Value> Av) -> mlir::Value {
+          mlir::NamedAttribute Cal(mlir::StringAttr::get(&MCtx, "callee"),
+                                   mlir::StringAttr::get(&MCtx, Fn));
+          return emitUnreg("matlab.call_builtin", Av, PtrTy, Lc, {Cal});
+        };
+        /* [kest, L, P] = kalman(sys, Qn, Rn) — steady-state Kalman filter.
+         * L = kalman gain, P = error covariance; kest (the estimator ss
+         * object) is returned as the source object as a placeholder. */
+        if (Callee->Name == "kalman" && Cn0 == "ss" && C->Args.size() >= 3) {
+          mlir::Value Obj = loadObjP(C->Args[0]);
+          mlir::Value Av = getPropP(Obj, "A"), Bv = getPropP(Obj, "B"),
+                      Cv = getPropP(Obj, "C");
+          mlir::Value Qn = boxP(lowerExpr(*C->Args[1]));
+          mlir::Value Rn = boxP(lowerExpr(*C->Args[2]));
+          mlir::Value Lv = callRT("kalman_L", {Av, Bv, Cv, Qn, Rn});
+          mlir::Value Pv = callRT("kalman_P", {Av, Bv, Cv, Qn, Rn});
+          mlir::Value Outs[3] = {Obj, Lv, Pv};
+          for (size_t i = 0; i < A.LHS.size() && i < 3; ++i)
+            if (A.LHS[i]) lowerLValueStore(*A.LHS[i], Outs[i]);
+          return;
+        }
+        /* [Gm, Pm, Wcg, Wcp] = margin(sys) — gain/phase margins and their
+         * crossover frequencies. allmargin_ss returns the 1×4 row; split it
+         * into the (scalar) outputs. */
+        if (Callee->Name == "margin" && Cn0 == "ss") {
+          mlir::Value Obj = loadObjP(C->Args[0]);
+          mlir::Value Av = getPropP(Obj, "A"), Bv = getPropP(Obj, "B"),
+                      Cv = getPropP(Obj, "C"), Dv = getPropP(Obj, "D");
+          mlir::Value Row = callRT("margin_ss_auto", {Av, Bv, Cv, Dv});
+          auto F64 = mlir::Float64Type::get(&MCtx);
+          for (size_t i = 0; i < A.LHS.size() && i < 4; ++i) {
+            if (!A.LHS[i]) continue;
+            mlir::Value Idx = mlir::arith::ConstantOp::create(
+                B, Lc, F64, mlir::FloatAttr::get(F64, (double)(i + 1))).getResult();
+            mlir::NamedAttribute NI(mlir::StringAttr::get(&MCtx, "nindices"),
+                mlir::IntegerAttr::get(mlir::IntegerType::get(&MCtx, 64), 1));
+            mlir::Value S = emitUnreg("matlab.subscript", {Row, Idx}, F64, Lc, {NI});
+            lowerLValueStore(*A.LHS[i], S);
+          }
+          return;
+        }
+      }
       if (IsBuiltin) {
         llvm::SmallVector<mlir::Value, 4> Args;
         for (const Expr *Arg : C->Args)

@@ -4093,6 +4093,19 @@ matlab_mat *matlab_allmargin_ss(matlab_mat *A, matlab_mat *B,
     return out;
 }
 
+/* margin(sys) splitter helper — same 1×4 [Gm, Pm, Wcg, Wcp] row as
+ * allmargin_ss but builds its own dense log-spaced frequency grid so the
+ * `[Gm,Pm,Wcg,Wcp] = margin(sys)` lowering needs no caller-supplied w. */
+matlab_mat *matlab_margin_ss_auto(matlab_mat *A, matlab_mat *B,
+                                  matlab_mat *C, matlab_mat *D) {
+    int64_t Nf = 2000;
+    matlab_mat *w = mat_alloc(1, Nf);
+    double lo = -3.0, hi = 3.0;       /* logspace(-3, 3) rad/s */
+    for (int64_t k = 0; k < Nf; ++k)
+        w->data[k] = pow(10.0, lo + (hi - lo) * (double)k / (double)(Nf - 1));
+    return matlab_allmargin_ss(A, B, C, D, w);
+}
+
 /*-------------------------------------------------------------------------
  * Discrete algebraic Riccati equation.
  *
