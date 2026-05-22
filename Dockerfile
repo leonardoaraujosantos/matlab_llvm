@@ -11,10 +11,11 @@
 FROM ubuntu:24.04 AS builder
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Pin LLVM/MLIR to match what the source compiles against (dev uses 22; 20
-# is a safe stable floor). Ubuntu's repos lack MLIR dev pkgs for 20+, so use
-# apt.llvm.org. Override at build time: --build-arg LLVM_VERSION=22.
-ARG LLVM_VERSION=20
+# Pin LLVM/MLIR to 22 — the source uses the newer MLIR `Op::create(builder,
+# …)` API (e.g. mlir::arith::ConstantOp::create) that doesn't exist before
+# LLVM 21/22; the project's CI + dev env both use 22. Ubuntu's repos lack
+# MLIR dev pkgs, so use apt.llvm.org. Override: --build-arg LLVM_VERSION=NN.
+ARG LLVM_VERSION=22
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates gnupg wget lsb-release software-properties-common \
         cmake ninja-build git build-essential pkg-config \
@@ -49,7 +50,7 @@ RUN cmake -S . -B build -G Ninja \
 # --- STAGE 2: LEAN RUNTIME (target: production) ---------------------------
 FROM ubuntu:24.04 AS production
 ENV DEBIAN_FRONTEND=noninteractive
-ARG LLVM_VERSION=20
+ARG LLVM_VERSION=22
 
 # matlabc dynamically links libLLVM/libMLIR — install the *runtime* libs.
 # (libmlir-<v> may be libmlir-<v> or libmlirc<v> depending on the snapshot;
