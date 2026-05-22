@@ -1,0 +1,59 @@
+"""FastAPI app factory for the matlab_llvm remote backend.
+
+Run locally:  ``just backend-up``  (builds matlabc, then serves on :8000)
+Run directly: ``cd server && uv run uvicorn main:app``
+"""
+
+from __future__ import annotations
+
+import logging
+from contextlib import asynccontextmanager
+
+from fastapi import Depends, FastAPI
+
+from auth import require_auth
+from config import settings
+from routers import check, codegen, files, repl
+
+log = logging.getLogger("matlab_backend")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    settings.workspace_root_path.mkdir(parents=True, exist_ok=True)
+    mc = settings.matlabc_path
+    if mc.exists():
+        log.info("matlabc: %s", mc)
+    else:
+        log.warning(
+            "matlabc not found at %s — build it with `just build` or set "
+            "MATLAB_BACKEND_MATLABC_BIN. Routes will fail until it exists.",
+            mc,
+        )
+    yield
+
+
+def create_app() -> FastAPI:
+    app = FastAPI(
+        title="matlab_llvm remote backend",
+        version="0.1.0",
+        summary="MATLAB in your pocket — check, REPL, codegen and files over the matlabc CLI.",
+        lifespan=lifespan,
+    )
+
+    protected = [Depends(require_auth)]
+    for module in (check, repl, codegen, files):
+        app.include_router(module.router, dependencies=protected)
+
+    @app.get("/healthz", tags=["meta"])
+    async def healthz() -> dict:
+        return {
+            "status": "ok",
+            "matlabc": str(settings.matlabc_path),
+            "matlabc_present": settings.matlabc_path.exists(),
+        }
+
+    return app
+
+
+app = create_app()

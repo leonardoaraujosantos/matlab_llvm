@@ -493,3 +493,27 @@ loc:
         \( -name '*.cpp' -o -name '*.h' -o -name '*.c' -o \
            -name '*.def' -o -name '*.m' -o -name '*.sh' \) \
         | xargs wc -l | tail -1
+
+# ============================================================================
+# Remote backend (server/) — FastAPI edge over the matlabc CLI.
+# Requires `uv` (https://docs.astral.sh/uv/). See server/README.md and
+# docs/remote_backend_plan.md.
+# ============================================================================
+
+# Install backend Python deps (incl. tests) into server/.venv via uv.
+backend-install:
+    cd server && uv sync --extra dev
+
+# Build matlabc + serve the backend on :8000 (browse /docs, curl /healthz).
+backend-up PORT="8000": build
+    cd server && MATLAB_BACKEND_MATLABC_BIN="{{justfile_directory()}}/{{BUILD_DIR}}/matlabc" \
+        uv run uvicorn main:app --host 0.0.0.0 --port {{PORT}}
+
+# Build matlabc + serve with auto-reload (for editing the Python server).
+backend-dev PORT="8000": build
+    cd server && MATLAB_BACKEND_MATLABC_BIN="{{justfile_directory()}}/{{BUILD_DIR}}/matlabc" \
+        uv run uvicorn main:app --reload --host 0.0.0.0 --port {{PORT}}
+
+# Run the backend test suite (fake matlabc stub — no LLVM build needed).
+backend-test:
+    cd server && uv run --extra dev pytest -q

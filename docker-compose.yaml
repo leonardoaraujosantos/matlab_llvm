@@ -1,0 +1,39 @@
+# Compose v2 (no top-level `version:` key). Coolify-ready.
+# Single upstream port :8000 (REST now; MCP/SSE + DAP-over-WebSocket later).
+services:
+  backend-compiler:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: matlab-llvm-backend:latest
+    container_name: matlab_llvm_api
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      # Resource ceilings for the untrusted-code child processes.
+      - MATLAB_BACKEND_CPU_SECONDS=10
+      - MATLAB_BACKEND_WALL_TIMEOUT_S=15
+      - MATLAB_BACKEND_MEMORY_MB=2048
+      # Bearer token: empty = open (dev). Set before any public exposure.
+      - MATLAB_BACKEND_API_TOKEN=${MATLAB_BACKEND_API_TOKEN:-}
+    ports:
+      - "8000:8000"
+    volumes:
+      - workspace_data:/workspace
+    restart: always
+    # Defense-in-depth for arbitrary user code (plan §7 adds cap_drop,
+    # read_only rootfs, pids_limit, nsjail/per-session containers).
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test:
+        - CMD
+        - python3
+        - -c
+        - "import sys,urllib.request; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/healthz').status==200 else 1)"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  workspace_data:

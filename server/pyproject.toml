@@ -1,0 +1,26 @@
+[project]
+name = "matlab-llvm-backend"
+version = "0.1.0"
+description = "Remote backend for the matlab_llvm compiler: a FastAPI edge over the matlabc CLI (check / REPL / codegen / files)."
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "pydantic-settings>=2.2",
+    "python-multipart>=0.0.9",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "httpx>=0.27",  # required by fastapi.testclient.TestClient
+]
+
+# This is an application, not a distributable library: tell uv to manage a
+# venv from the dependencies without trying to build/install the project.
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

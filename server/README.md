@@ -1,0 +1,107 @@
+# matlab_llvm — remote backend
+
+A FastAPI edge over the `matlabc` CLI: validate, JIT-run (REPL), transpile,
+and move files in/out — "MATLAB in your pocket". Companion to
+[`docs/remote_backend_plan.md`](../docs/remote_backend_plan.md) and
+[`docs/remote_backend_trd.md`](../docs/remote_backend_trd.md).
+
+## Status
+
+Phases implemented on this branch:
+
+- **Phase 1** — `/v1/check`, `/v1/repl`, hardened sandbox launcher.
+- **Phase 2** — `/v1/codegen/{python,typescript,c,cpp,systemverilog}`.
+- **Phase 3 (partial)** — workspaces + `/v1/files` upload/list/download and
+  REPL figure-capture artifacts. (Dedicated `/v1/plot` deferred.)
+- **Phase 0/8** — `Dockerfile` + `docker-compose.yaml` at the repo root.
+
+Deferred: DAP-over-WebSocket (Phase 4), MCP/SSE (Phase 5), chat+RAG
+(Phase 6), auth/quotas/warm-pool hardening (Phase 7), stateful sessions.
+
+## Run it locally
+
+From the repo root (needs [`just`](https://github.com/casey/just) and
+[`uv`](https://docs.astral.sh/uv/)):
+
+```sh
+just backend-up          # builds matlabc, serves on :8000
+just backend-up 9000     # custom port
+just backend-dev         # same, with --reload for editing the server
+just backend-test        # test suite (fake matlabc — no LLVM build needed)
+```
+
+Then open <http://localhost:8000/docs> (Swagger UI) or:
+
+```sh
+curl localhost:8000/healthz
+curl -X POST localhost:8000/v1/check  -H 'content-type: application/json' \
+     -d '{"source":"x = 1 + 1;"}'
+curl -X POST localhost:8000/v1/repl   -H 'content-type: application/json' \
+     -d '{"source":"disp(1+1)"}'
+curl -X POST localhost:8000/v1/codegen/python -H 'content-type: application/json' \
+     -d '{"source":"y = 2;"}'
+```
+
+Without `just`: `cd server && uv run uvicorn main:app` (set
+`MATLAB_BACKEND_MATLABC_BIN` to your matlabc binary).
+
+## Endpoints
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET  | `/healthz` | liveness + matlabc presence |
+| POST | `/v1/check` | validate-only (default matlabc mode) |
+| POST | `/v1/repl` | JIT-execute; returns stdout/stderr + figure artifacts |
+| POST | `/v1/codegen/{target}` | transpile to python/typescript/c/cpp/systemverilog |
+| POST | `/v1/files` | multipart upload into the session workspace |
+| GET  | `/v1/files` | list the workspace tree |
+| GET  | `/v1/files/{path}` | download a file |
+
+Request bodies accept optional `user_id` / `session_id` (files endpoints take
+them as query params) which select the workspace directory.
+
+## Configuration
+
+Env vars, prefix `MATLAB_BACKEND_` (or a `.env` file). See `config.py`.
+
+| Var | Default | Meaning |
+|---|---|---|
+| `MATLABC_BIN` | `<repo>/build/matlabc` | path to the matlabc binary |
+| `WORKSPACE_ROOT` | `/tmp/matlab_llvm_workspaces` | per-session cwd jail root |
+| `CPU_SECONDS` | `10` | RLIMIT_CPU per child |
+| `MEMORY_MB` | `2048` | RLIMIT_AS per child (0 disables; see note) |
+| `FILE_SIZE_MB` | `64` | RLIMIT_FSIZE per child |
+| `MAX_PROCS` | `64` | RLIMIT_NPROC per child |
+| `WALL_TIMEOUT_S` | `20` | hard wall-clock kill |
+| `OUTPUT_CAP_BYTES` | `1000000` | max captured stdout/stderr |
+| `MAX_UPLOAD_MB` | `25` | upload size cap |
+| `API_TOKEN` | `""` | bearer token; empty disables auth |
+
+> **RLIMIT_AS caveat:** it counts *virtual* address space, which over-counts
+> the large libLLVM/libMLIR mappings of a JIT process. Size it generously or
+> set `0`; the container memory cgroup is the authoritative memory boundary.
+
+## Layout
+
+Flat module layout (run from `server/`, top-level imports):
+
+```
+config.py      settings (pydantic-settings)
+sandbox.py     rlimit + timeout + cwd-jail + env-scrub launcher
+workspaces.py  per-user/session paths, traversal-safe resolve, artifact diff
+matlabc.py     async wrappers around the real matlabc CLI
+diagnostics.py clang-style diagnostic parsing
+models.py      request/response schemas
+auth.py        optional bearer-token dependency
+main.py        app factory + lifespan + /healthz
+routers/       check, repl, codegen, files
+tests/         pytest suite (fake matlabc stub in conftest.py)
+```
+
+## Tests
+
+`just backend-test` (or `cd server && uv run --extra dev pytest`). The suite
+uses a fake `matlabc` stub (`conftest.py`) so it runs anywhere — no compiler
+build required. It covers the routes, diagnostics, figure capture, traversal
+rejection, and the sandbox isolation guarantees (timeout, output cap, env
+scrub).

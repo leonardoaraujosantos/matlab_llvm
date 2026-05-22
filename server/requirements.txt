@@ -1,0 +1,6 @@
+# Runtime deps for the backend (kept in sync with pyproject.toml's
+# [project.dependencies]). Used by the Docker runtime stage / pip installs.
+fastapi>=0.110
+uvicorn[standard]>=0.29
+pydantic-settings>=2.2
+python-multipart>=0.0.9
