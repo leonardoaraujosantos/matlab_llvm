@@ -108,55 +108,60 @@ Not a compiler bug.
 
 ---
 
-## Progress — fixes applied 2026-05-22 (suite 472→ green throughout)
+## Progress log — fixes applied 2026-05-22 (suite 472 → 476, green throughout)
 
-General compiler/parser fixes landed (each regression-tested):
+### DONE — general compiler/parser/runtime fixes (each has a regression test)
 
-- **`~` ignore-output in a multi-return LHS** (`[~, idx] = min(…)`) — parser
-  now accepts the `~` placeholder; the multi-return lowering skips the null
-  slot. Also fixed a **Sema null-deref** that crashed `matlabc` on any
-  `[~, …] = f()`. Bonus: **`min`/`max`/`sort` value+index second output**
-  (`[v, i] = max(A)`) via new `matlab_{min,max,sort}_idx` runtime + the
-  `TwoReturns` splitter. Test `test/Run/multiret_tilde.m`.
-- **`Name=Value` call arguments** (`f(Width=8, Name="x")`) — parsed and
-  lowered to the classic `'Name', Value` pair. (`lib/Parse/Parser.cpp`.)
-- **`ssdata` / `tfdata`** — added as `ss` / `tf` classdef methods, made
-  reachable via **function-style class-method dispatch for multi-return**
-  (`[A,B,C,D] = ssdata(sys)` → `ss.ssdata`). New general capability in the
-  multi-return lowering path. Test `test/Run/cst_data_extract.m`.
+| Fix | What it covers | Regression test |
+|---|---|---|
+| `~` ignore-output in a multi-return LHS (`[~, idx] = …`) + the **Sema null-deref** that crashed `matlabc` on *any* `[~, …] = f()` | parser null LHS slot + `Resolver.cpp` null guard | `test/Run/multiret_tilde.m` |
+| `min`/`max`/`sort` value+index 2nd output (`[v,i]=max(A)`) | `matlab_{min,max,sort}_idx` + `TwoReturns` splitter | `test/Run/multiret_tilde.m` |
+| `Name=Value` call arguments (`f(Width=8)`) → `f('Width', 8)`; `==` stays a comparison | `Parser::parseArgList` | `test/Run/name_value_args.m` |
+| `ssdata` / `tfdata` + **function-style class-method dispatch for multi-return** | `ss`/`tf` classdef methods + lowering | `test/Run/cst_data_extract.m` |
+| CST model-object multi-return splitters: `[kest,L,P]=kalman(sys,Qn,Rn)`, `[Gm,Pm,Wcg,Wcp]=margin(sys)` | model-object path + `matlab_margin_ss_auto` | `test/Run/cst_multiret.m` |
+| **D** cell-of-strings `{'a','b'}` (kind=3 string elements) → `legend({...})` works | `matlab_cell_set_str` + `cell_get_mat` char-code | `test/Run/cell_strings.m` |
 
-**Important — fixing each reported *first error* often reveals a *deeper*,
-previously-hidden blocker in the same example** (the sweep only saw the first
-error). The targeted examples now need these further features:
+### TODO — remaining work (with real depth)
+
+Original list items not yet done:
+
+- [ ] **B2 — `d2c`** (`c2d_zoh_demo.m`): inverse discretisation (needs a
+  matrix-log / inverse-ZOH runtime). The `d2c_tustin` reverse map already
+  exists; ZOH `d2c` does not.
+- [ ] **B3 — `step` 2-output `[y, t] = step(sys)`** (`step_response_siso.m`):
+  needs the time vector as a 2nd output. Note `step(sys, t)` currently ignores
+  a supplied time vector (uses default dt/N) — fix that first, then echo `t`.
+- [ ] **E — symbolic** (`symbolic_demo.m`, `quadrotor_derive_eom.m`): compile
+  fine; the **AOT link recipe** must add `runtime_sym` + the external **SymPP**
+  lib (the `matlabc` binary already links them — this is config, not a code bug).
+- [ ] **F — flowchart fragments** (`mflowlink/cross_dialect.m`,
+  `mflow/blocks/clamp.m`): not standalone-runnable `.m`; exercise via the
+  `-emit-mflow-link-cpp` / `.mflow` tooling.
+- [ ] **A — HDL** (49 files): out of LLVM-execute scope (SV/cocotb targets).
+
+**Deeper blockers revealed *after* fixing each first-error** (the sweep only
+saw the first error per file; these surfaced once it was fixed):
 
 | Example | Now blocked on | Depth |
 |---|---|---|
-| `control/bode_first_order` | `margin` (4-output gain/phase margin) | CST feature |
+| `control/bode_first_order` | `bode` 3-output `[mag,phase,wout]=bode(G,w)` + `margin` **on a `tf`** (have `margin` on `ss`) | CST feature |
 | `control/lqr_double_integrator` | `c2d(ss_obj, Ts, 'zoh')` — c2d on a model object + method string | CST feature |
-| `control/kalman_tracker` | `kalman` 3-output multi-return on a model object | CST feature |
+| `control/kalman_tracker` | `c2d(ss_obj, Ts, 'zoh')` (kalman 3-output now works) | CST feature |
 | `control/tf_basic` | `tf('s')` builder + `matpow` on a tf | CST feature |
-| `control/c2d_zoh_demo` | `d2c` (inverse discretisation — matrix log) | CST runtime |
-| `control/step_response_siso` | `step` 2-output `[y,t]` multi-return | CST feature |
+| `control/c2d_zoh_demo` | `d2c` (above) | CST runtime |
 | `pde/*` (3) | `generateMesh` / `decsg` / `multicuboid` / `femodel` | PDE Toolbox |
 
-Follow-up fixes (suite 474→475 green):
+### Known pre-existing limitations surfaced (NOT regressions, NOT yet fixed)
 
-- **CST model-object multi-return splitters** — `[kest,L,P] = kalman(sys,Qn,Rn)`
-  (kalman gain + error covariance; `kest` placeholder) and
-  `[Gm,Pm,Wcg,Wcp] = margin(sys)` (new `matlab_margin_ss_auto` builds the
-  frequency grid + reuses `allmargin_ss`). New model-object multi-return path
-  in the lowering. Test `test/Run/cst_multiret.m`. (margin on a `tf` model and
-  the kalman/c2d-on-model-object example chains remain follow-ons.)
-- **D (`legend({...})` / cell-of-strings)** — FIXED. String cell elements now
-  store with a dedicated kind=3 (`matlab_cell_set_str`); `matlab_cell_get_mat`
-  exposes them as char-code rows so `matlab_legend`'s char decoding works.
-  `examples/plot/multi_series.m` runs. Test `test/Run/cell_strings.m`.
-  (Pre-existing, separate: `m = c{i}; m(k)` — subscripting a cell-element
-  result var — doesn't lower for *any* cell element type; and `disp(c{i})`
-  routes a string element through the scalar `cell_get_f64` path.)
+These were exposed while testing the fixes above; each fails identically on a
+clean tree and is independent of this work:
 
-Still deferred (deeper than a quick gap):
-- **E (symbolic)** — `symbolic_demo` / `quadrotor_derive_eom` compile fine;
-  they need `runtime_sym` + the external **SymPP** lib at AOT link (the
-  example link set omits them; the `matlabc` binary itself links them).
-- **F (flowchart fragments)** — not standalone-runnable `.m`.
+- `m = c{i}; m(k)` — subscripting a **cell-element-result variable** does not
+  lower for *any* element type (matrix, string, scalar).
+- `disp(c{i})` routes a string element through the scalar `cell_get_f64` path
+  (prints `0`); only `cell_get_mat` consumers (e.g. legend) see the string.
+- passing a **string literal to a user function** (`f('Mode', 3)`) leaves the
+  `const_char` unconverted — so user-defined name-value handlers don't work
+  (builtins like `plot` do).
+- `numel()` of a cell-element-result; `struct('a',1,'b',2)` (struct name-value
+  construction) — both report "unsupported call shape".
