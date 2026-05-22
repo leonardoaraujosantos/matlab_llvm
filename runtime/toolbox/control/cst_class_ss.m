@@ -90,5 +90,13 @@ classdef ss
         function r = uminus(a)
             r = ss(a.A, a.B, -a.C, -a.D, a.Ts);
         end
+
+        % [A, B, C, D] = ssdata(sys) — unpack the state-space matrices.
+        function [A, B, C, D] = ssdata(obj)
+            A = obj.A;
+            B = obj.B;
+            C = obj.C;
+            D = obj.D;
+        end
     end
 end

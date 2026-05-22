@@ -781,8 +781,15 @@ Stmt *Parser::tryParseAssignOrExprStmt() {
     std::vector<Expr *> Targets;
     if (!at(TokenKind::r_square)) {
       while (true) {
-        Expr *E = parsePostfix(parsePrimary());
-        Targets.push_back(E);
+        // `~` ignore-output placeholder: `[~, idx] = min(...)`. A null LHS
+        // slot is skipped by the (multi-)assignment lowering, discarding
+        // that output.
+        if (at(TokenKind::tilde)) {
+          ++Idx;
+          Targets.push_back(nullptr);
+        } else {
+          Targets.push_back(parsePostfix(parsePrimary()));
+        }
         if (!consume(TokenKind::comma)) break;
       }
     }
@@ -1275,7 +1282,22 @@ std::vector<Expr *> Parser::parseArgList(TokenKind Closer) {
   std::vector<Expr *> Args;
   if (at(Closer)) return Args;
   while (true) {
-    Args.push_back(parseExpr());
+    // Name=Value argument syntax (R2021a+): `f(Width=8, Name="x")`. Lower to
+    // the classic `'Name', Value` pair so the existing name-value handling
+    // applies. Triggered by an identifier immediately followed by a single
+    // `=` (not `==`, which lexes as a distinct comparison token).
+    if (at(TokenKind::identifier) && peek(1).is(TokenKind::equal)) {
+      auto NameTok = take();           // identifier
+      consume(TokenKind::equal);       // '='
+      auto *CL = Ctx.make<CharLiteral>();
+      CL->Value = std::string(NameTok.Text);
+      CL->Range.Begin = NameTok.Loc;
+      CL->Range.End = NameTok.Loc;
+      Args.push_back(CL);
+      Args.push_back(parseExpr());
+    } else {
+      Args.push_back(parseExpr());
+    }
     if (!consume(TokenKind::comma)) break;
   }
   return Args;

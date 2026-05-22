@@ -3010,6 +3010,11 @@ bool TensorLowering::rewriteBuiltinCalls() {
         /* [H, P] = hess(A) — H upper Hessenberg, P orthogonal with
          * P' A P = H. Order matches MATLAB's first-output-is-H. */
         {"hess",  "matlab_hess_H",  "matlab_hess_P"},
+        /* [v, i] = min/max/sort(A) — value/sorted (output 0) + 1-based
+         * index/permutation (output 1). */
+        {"min",   "matlab_min",     "matlab_min_idx"},
+        {"max",   "matlab_max",     "matlab_max_idx"},
+        {"sort",  "matlab_sort",    "matlab_sort_idx"},
       };
       const TwoRet *T = nullptr;
       for (auto &E : TwoReturns)

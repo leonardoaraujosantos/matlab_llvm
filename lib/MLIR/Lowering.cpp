@@ -2456,6 +2456,53 @@ void Lowerer::lowerStmt(const Stmt &St) {
                       Callee->Ref->FuncDef;
       bool HasVarargout = IsUserFn && !Callee->Ref->FuncDef->Outputs.empty() &&
                           Callee->Ref->FuncDef->Outputs.back() == "varargout";
+      /* Function-style method dispatch for a multi-return call:
+       * `[a, b, …] = meth(obj, …)` where `meth` names a method of the first
+       * argument's class (e.g. `[A,B,C,D] = ssdata(sys)` -> ss.ssdata).
+       * The single-return path already does this; mirror it here so the
+       * method is invoked as a user-function multi-return (callee
+       * `ClassName__meth`, obj passed as the first parameter). */
+      if (IsBuiltin && Callee && !C->Args.empty()) {
+        const ClassDef *Cls = nullptr;
+        if (auto *AN = dynamic_cast<const NameExpr *>(C->Args[0]))
+          if (AN->Ref) Cls = AN->Ref->PinnedClass;
+        const Function *MethodFn = nullptr;
+        std::string MethodCallee;
+        for (const ClassDef *CC = Cls; CC && !MethodFn; CC = CC->Super)
+          for (const Function *Mm : CC->Methods)
+            if (Mm && Mm->Name == Callee->Name) {
+              MethodFn = Mm;
+              MethodCallee = std::string(CC->Name) + "__" + std::string(Callee->Name);
+              break;
+            }
+        if (MethodFn && !MethodFn->OutputRefs.empty()) {
+          llvm::SmallVector<mlir::Value, 4> Args;
+          for (const Expr *Arg : C->Args) if (Arg) Args.push_back(lowerExpr(*Arg));
+          auto F64 = mlir::Float64Type::get(&MCtx);
+          auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+          size_t N = std::min(A.LHS.size(), MethodFn->OutputRefs.size());
+          llvm::SmallVector<mlir::Type, 4> Rtys;
+          for (size_t i = 0; i < N; ++i) {
+            const Type *OT = MethodFn->OutputRefs[i]
+                                 ? MethodFn->OutputRefs[i]->InferredType : nullptr;
+            mlir::Type RT0 = OT ? mirTy(OT) : (mlir::Type)PtrTy;
+            if (mlir::isa<mlir::NoneType>(RT0) || mlir::isa<mlir::Float64Type>(RT0))
+              RT0 = mlir::isa<mlir::Float64Type>(RT0) ? (mlir::Type)F64 : (mlir::Type)PtrTy;
+            Rtys.push_back(RT0);
+          }
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, MethodCallee));
+          mlir::NamedAttribute NO(
+              mlir::StringAttr::get(&MCtx, "nargout"),
+              mlir::IntegerAttr::get(mlir::IntegerType::get(&MCtx, 64), (int64_t)N));
+          mlir::Operation *Op = emitUnregOp("matlab.call", Args, Rtys,
+                                             loc(A.Range), {Cal, NO});
+          for (size_t i = 0; i < N; ++i)
+            if (A.LHS[i]) lowerLValueStore(*A.LHS[i], Op->getResult(i));
+          return;
+        }
+      }
       if (IsBuiltin) {
         llvm::SmallVector<mlir::Value, 4> Args;
         for (const Expr *Arg : C->Args)

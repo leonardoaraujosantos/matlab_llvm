@@ -1460,6 +1460,65 @@ matlab_mat *matlab_sort(matlab_mat *A) {
     return R;
 }
 
+/* Index companions for the `[v, i] = min/max/sort(A)` second output.
+ * Shapes mirror matlab_min / matlab_sort: a vector reduces to a 1×1 (min/max)
+ * or sorts in place (sort); a matrix is column-wise.  Indices are 1-based. */
+#define MINMAX_IDX(NAME, BETTER)                                            \
+    matlab_mat *matlab_##NAME##_idx(matlab_mat *A) {                        \
+        if (!A) return mat_alloc(0, 0);                                     \
+        int64_t m = A->rows, n = A->cols;                                   \
+        if (m <= 1 || n == 1) {                                             \
+            int64_t total = m * n;                                          \
+            int64_t bi = 0;                                                 \
+            for (int64_t k = 1; k < total; ++k)                            \
+                if (A->data[k] BETTER A->data[bi]) bi = k;                  \
+            matlab_mat *R = mat_alloc(1, 1);                                \
+            R->data[0] = total > 0 ? (double)(bi + 1) : 0.0;               \
+            return R;                                                       \
+        }                                                                   \
+        matlab_mat *R = mat_alloc(1, n);                                   \
+        for (int64_t j = 0; j < n; ++j) {                                  \
+            int64_t bi = 0;                                                 \
+            for (int64_t i = 1; i < m; ++i)                                \
+                if (A->data[i * n + j] BETTER A->data[bi * n + j]) bi = i; \
+            R->data[j] = (double)(bi + 1);                                 \
+        }                                                                   \
+        return R;                                                           \
+    }
+MINMAX_IDX(min, <)
+MINMAX_IDX(max, >)
+#undef MINMAX_IDX
+
+/* [~, idx] = sort(A): the permutation of 1-based indices (stable, ascending),
+ * matching matlab_sort's order and shape (vector / column-wise matrix). */
+static void sort_idx_stable(const double *vals, int64_t stride, int64_t len,
+                            double *out) {
+    for (int64_t i = 0; i < len; ++i) out[i * stride] = (double)(i + 1);
+    /* stable insertion sort of the index list by vals (ascending). */
+    for (int64_t a = 1; a < len; ++a) {
+        double rv = out[a * stride];
+        double key = vals[((int64_t)rv - 1) * stride];
+        int64_t b = a - 1;
+        while (b >= 0 && vals[((int64_t)out[b * stride] - 1) * stride] > key) {
+            out[(b + 1) * stride] = out[b * stride];
+            --b;
+        }
+        out[(b + 1) * stride] = rv;
+    }
+}
+matlab_mat *matlab_sort_idx(matlab_mat *A) {
+    if (!A) return mat_alloc(0, 0);
+    int64_t m = A->rows, n = A->cols;
+    matlab_mat *R = mat_alloc(m, n);
+    if (m == 1 || n == 1) {
+        sort_idx_stable(A->data, 1, m * n, R->data);
+        return R;
+    }
+    for (int64_t j = 0; j < n; ++j)         /* column-wise (stride = n) */
+        sort_idx_stable(A->data + j, n, m, R->data + j);
+    return R;
+}
+
 matlab_mat *matlab_unique(matlab_mat *A) {
     if (!A) return mat_alloc(0, 0);
     int64_t total = A->rows * A->cols;

@@ -122,6 +122,11 @@ void Resolver::registerBuiltins() {
     "isstable_d", "norm_h2_d",
     /* Tier 2.2 — continuous->discrete state-space ZOH + Tustin. */
     "c2d", "c2d_tustin",
+    /* Model-data extractors — registered as builtins so function-style
+     * class-method dispatch routes `ssdata(sys)` / `tfdata(G)` to the
+     * ss / tf classdef methods (function-form dispatch only fires for a
+     * known-builtin callee, see the dispatch in resolveExpr). */
+    "ssdata", "tfdata",
     /* MPC Toolbox Tier-1/2/3 — runtime-symbol builtins called from
      * inside `mpc_classdefs.m`.  5 entries: construct (mutates the
      * mpc obj at construction time), move (single tick), move_opt
@@ -1343,7 +1348,8 @@ void Resolver::resolveStmt(Stmt &St, Scope *S) {
   case NodeKind::AssignStmt: {
     auto &A = static_cast<AssignStmt &>(St);
     if (A.RHS) resolveExpr(*A.RHS, S);
-    for (Expr *L : A.LHS) resolveLValue(*L, S);
+    // A null LHS slot is the `~` ignore-output placeholder (`[~, idx] = …`).
+    for (Expr *L : A.LHS) if (L) resolveLValue(*L, S);
     /* Pin the LHS variable to the class of the RHS when the RHS is a
      * direct constructor call `ClassName(args)`. Later lookups of
      * `lhs.prop` or `lhs.method(args)` then dispatch against this class

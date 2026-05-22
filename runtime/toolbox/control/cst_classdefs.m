@@ -79,6 +79,12 @@ classdef tf
             new_den = conv(a.Denominator, b.Numerator);
             r = tf(new_num, new_den);
         end
+
+        % [num, den] = tfdata(G) — unpack the numerator / denominator.
+        function [num, den] = tfdata(obj)
+            num = obj.Numerator;
+            den = obj.Denominator;
+        end
     end
 end
 
