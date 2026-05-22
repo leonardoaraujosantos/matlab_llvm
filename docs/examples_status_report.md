@@ -131,11 +131,13 @@ the sweep mis-flagged them by linking them as plain LLVM programs.
 
 ### TODO — remaining work (with real depth)
 
-Original list items not yet done:
+Original list items — all of B/C/D/E/F now done; only HDL (out of scope) and
+the deeper per-example chains (see the fix plan below) remain:
 
-- [ ] **B2 — `d2c`** (`c2d_zoh_demo.m`): inverse discretisation (needs a
-  matrix-log / inverse-ZOH runtime). The `d2c_tustin` reverse map already
-  exists; ZOH `d2c` does not.
+- [x] **B2 — `d2c`** — DONE for explicit ss matrices (`[A,B]=d2c(Ad,Bd,Ts)`,
+  ZOH inverse via `logm`). `c2d_zoh_demo.m` additionally needs c2d/d2c on a tf
+  model object — see fix plan #2; the general (full-matrix) d2c needs the
+  `logm` fix #5.
 - [x] **B3 — `step` 2-output `[y, t] = step(sys, t)`** — DONE (ss + tf, honours
   the time grid). `step_response_siso.m` still needs **`stepinfo` to return a
   struct** (`S.RiseTime`): the runtime returns a 1×5 row and the existing
@@ -191,3 +193,96 @@ clean tree and is independent of this work:
   form keeps a 2×2 block (the Francis QR doesn't split a real-eigenvalue 2×2
   block into triangular). It works for diagonal / cleanly-deflating matrices.
   This limits `d2c` (ZOH) to those — the diagonal/decoupled case round-trips.
+
+---
+
+## Fix plan for the remaining deeper gaps
+
+All of the reported B/C/D/E/F gaps are fixed (see the progress log). What
+remains are the *deeper, per-example chains* that only surfaced after each
+first-error fix. Each below is a concrete plan with the touch points and an
+effort/risk estimate. Suggested order (cheap→expensive): **3 → 1 → 5 → 2 → 4**.
+
+### 1. `stepinfo` as a struct (`S.RiseTime`) — *small*
+
+- **Blocks:** `step_response_siso.m` (rise/settle/overshoot section).
+- **Root cause:** `matlab_stepinfo(y,t)` returns a 1×5 row `[Rise, Settle, Over,
+  Peak, PeakTime]`; `S.RiseTime` is a field access on a matrix → crash. The
+  existing `test/Run/ctrl_stepinfo.m` reads it positionally (`si(1,1)`).
+- **Plan:**
+  1. Add `matlab_stepinfo_struct(y,t)` → `matlab_struct` with fields
+     `RiseTime / SettlingTime / SettlingMin / SettlingMax / Overshoot /
+     Undershoot / Peak / PeakTime` (reuse the current math +
+     `matlab_struct_new` / `matlab_struct_set_f64`).
+  2. Route `stepinfo` to the struct form and tag the result binding as a struct:
+     add `"stepinfo"` to the `RhsIsStruct` known-builtin list
+     (`lib/MLIR/Lowering.cpp` ~2334) so `S.RiseTime` lowers via
+     `matlab_struct_get_f64`.
+  3. Update `test/Run/ctrl_stepinfo.m` to read struct fields (the MATLAB-correct
+     convention).
+- **Risk:** intentionally changes `ctrl_stepinfo.m`'s expected output.
+
+### 2. `c2d` / `d2c` on a tf model object + `disp(tf)` — *large*
+
+- **Blocks:** `c2d_zoh_demo.m` (and the `c2d(ss_obj, Ts, 'zoh')` form in
+  `lqr_double_integrator.m` / `kalman_tracker.m`).
+- **Root cause:** `c2d` only dispatches `ss` with 2 args
+  (`lib/MLIR/Lowering.cpp` ~7533). `c2d(tf, Ts, 'zoh')` falls to the generic
+  builtin path and returns a non-tf, so `disp(Cd_zoh)` and everything
+  downstream break. There is no discrete-model (sample-time) representation.
+- **Plan (in order):**
+  1. **`ss2tf` runtime** (`matlab_ss2tf_num` / `_den`): state space → num/den
+     (den = `poly(eig(A))`; num = `C·adj(sI−A)·B + D`). Pairs with the existing
+     `tf2ss_ccf`.
+  2. **Sample time on the model:** add a `Ts` property to the `ss` / `tf`
+     classdefs (0 = continuous); `c2d` sets it, `d2c` clears it.
+  3. **c2d-on-model dispatch** (ss + tf), 2- and 3-arg with a method string:
+     ss → `c2d_ss` / `c2d_tustin` → rebuild ss with `Ts`; tf → `tf2ss` → c2d →
+     `ss2tf` → rebuild tf with `Ts`.
+  4. **d2c-on-model**: the inverse (needs the `logm` fix #5 for a tf with an
+     integrator pole at z = 1).
+  5. **`disp(tf)` / `disp(ss)`**: pretty-print the transfer function in the
+     s- or z-domain (extend the model-object display path).
+- **Risk:** touches the model-object classdefs + display; do it as the staged
+  sequence above so each step is testable.
+
+### 3. `bode` 3-output + `margin` on a tf — *small–medium*
+
+- **Blocks:** `bode_first_order.m`.
+- **Root cause:** `bode` has 1-output (mag) and a 2-output `[mag,phase]`
+  splitter; the 3-output `[mag,phase,wout]` form does not exist. The `margin`
+  model-object splitter handles `ss` only (`matlab_margin_ss_auto`).
+- **Plan:**
+  1. **bode 3-output:** extend the `[mag,phase]=bode` multi-return splitter
+     (LowerTensorOps) with a 3rd result `wout` = the supplied `w` (echo), or an
+     auto log-spaced grid when `w` is omitted.
+  2. **margin on tf:** in the model-object multi-return `margin` case
+     (`lib/MLIR/Lowering.cpp`), add a `tf` branch — `tf2ss` →
+     `matlab_margin_ss_auto`, or a dedicated `matlab_margin_tf_auto(num,den)`
+     (build `w`, `freqresp_tf` → |H|/phase, interpolate the crossovers, mirroring
+     `allmargin_ss`).
+
+### 4. PDE mesh builders (`generateMesh` / `decsg` / `multicuboid` / `femodel`) — *large (own roadmap)*
+
+- **Blocks:** `tuningfork_modal.m`, `poisson_disk.m`, `clamped_plate_pressure.m`.
+- **Root cause:** undefined — the `Name=Value` fix lets the calls parse, but the
+  PDE geometry/mesh subsystem isn't on this path.
+- **Plan:** this is the PDE Toolbox Tier-2 mesher tracked in
+  `docs/pde_toolbox_roadmap.md`: `decsg` (constructive-solid-geometry → 2-D
+  geometry), `multicuboid` (3-D box geometry), `generateMesh` (Delaunay 2-D /
+  tetrahedral 3-D mesher with `Hmax`), and the `femodel`/`generateMesh`
+  plumbing. Multi-week; sequence under the PDE roadmap, not this gap list.
+
+### 5. `matlab_logm` 2×2-real-block fix (generalizes `d2c`) — *medium (numerical)*
+
+- **Blocks:** `d2c` on a full (non-diagonal) matrix; `logm` generally.
+- **Root cause:** `francis_qr_` leaves a 2×2 block for a pair of *real*
+  eigenvalues, and `matlab_logm` (`runtime/matlab_runtime.cpp` ~2455) rejects
+  any non-zero subdiagonal (returns empty).
+- **Plan:** after the Schur step in `matlab_logm`, **standardize 2×2 blocks**:
+  for a block with real eigenvalues (discriminant ≥ 0) apply a Givens/Jacobi
+  rotation that zeros the subdiagonal (triangularize), updating `U`; only
+  genuinely complex pairs remain as 2×2 (flag those — a complex-aware log is a
+  separate item). Parlett's recurrence then runs on the now-triangular `T`.
+- **Payoff:** `d2c` works for general ss systems; `logm` (and `sqrtm`-style
+  functions) become robust.
