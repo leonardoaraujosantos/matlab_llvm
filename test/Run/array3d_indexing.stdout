@@ -1,0 +1,8 @@
+elem 99
+plane 4x5 v 30
+matstore 7
+cat3 3x3x3
+chans 100 150 200
+gray 140.7
+cat12 6 6
+cat3-2 2

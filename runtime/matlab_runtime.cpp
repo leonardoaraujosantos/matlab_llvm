@@ -7609,6 +7609,48 @@ void matlab_subscript3_store(matlab_mat3 *A, double i1, double j1,
     A->data[mat3_offset(A, i, j, k)] = v;
 }
 
+/* A(:, :, k) read -> the k-th M×N plane as a 2-D matrix (1-based k). */
+matlab_mat *matlab_subscript3_slice(matlab_mat3 *A, double k1) {
+    if (!A) return mat_alloc(0, 0);
+    int64_t k = (int64_t)k1 - 1;
+    if (k < 0 || k >= A->depth) return mat_alloc(0, 0);
+    int64_t pl = A->rows * A->cols;
+    matlab_mat *R = mat_alloc(A->rows, A->cols);
+    for (int64_t t = 0; t < pl; ++t) R->data[t] = A->data[k * pl + t];
+    return R;
+}
+/* A(:, :, k) = scalar  (broadcast a value across the whole plane). */
+void matlab_subscript3_pstore_s(matlab_mat3 *A, double k1, double v) {
+    if (!A) return;
+    int64_t k = (int64_t)k1 - 1;
+    if (k < 0 || k >= A->depth) return;
+    int64_t pl = A->rows * A->cols;
+    for (int64_t t = 0; t < pl; ++t) A->data[k * pl + t] = v;
+}
+/* A(:, :, k) = M  (copy a 2-D matrix into the k-th plane). */
+void matlab_subscript3_pstore_m(matlab_mat3 *A, double k1, matlab_mat *M) {
+    if (!A || !M) return;
+    int64_t k = (int64_t)k1 - 1;
+    if (k < 0 || k >= A->depth) return;
+    int64_t pl = A->rows * A->cols, mn = M->rows * M->cols;
+    for (int64_t t = 0; t < pl && t < mn; ++t) A->data[k * pl + t] = M->data[t];
+}
+/* cat(3, A, B[, C]) — stack 2-D planes into a slice-major matlab_mat3. */
+matlab_mat3 *matlab_cat3_2(matlab_mat *A, matlab_mat *B) {
+    if (!A || !B) return mat3_alloc(0, 0, 0);
+    int64_t H = A->rows, W = A->cols, pl = H * W;
+    matlab_mat3 *R = mat3_alloc(H, W, 2);
+    for (int64_t t = 0; t < pl; ++t) { R->data[t] = A->data[t]; R->data[pl + t] = B->data[t]; }
+    return R;
+}
+matlab_mat3 *matlab_cat3_3(matlab_mat *A, matlab_mat *B, matlab_mat *C) {
+    if (!A || !B || !C) return mat3_alloc(0, 0, 0);
+    int64_t H = A->rows, W = A->cols, pl = H * W;
+    matlab_mat3 *R = mat3_alloc(H, W, 3);
+    for (int64_t t = 0; t < pl; ++t) { R->data[t] = A->data[t]; R->data[pl + t] = B->data[t]; R->data[2 * pl + t] = C->data[t]; }
+    return R;
+}
+
 double matlab_size3_dim(matlab_mat3 *A, double d) {
     if (!A) return 0.0;
     int64_t dim = (int64_t)d;

@@ -334,8 +334,11 @@ core-complete across all 6 tiers.**  **Tier-6 follow-ons (🔵):** `iradon`
 (filtered back-projection), `houghlines` (struct-array of segments),
 `blockproc`/`nlfilter`/`colfilt` (function-handle-per-block ABI),
 `deconvlucy`/`deconvreg`, `regionfill`, `demosaic`, `rgb2xyz`/`rgb2ntsc`.
-*Note:* colour conversions are pipeline-only (3-D element/slice indexing
-`rgb(:,:,k)` is a separate unimplemented frontend feature).
+*Update 2026-05-21:* **3-D array indexing now wired** (general frontend
+feature) — `A(:,:,k)` plane read/store, `A(i,j,k)` element read/store, and
+`cat(3,A,B,C)` / `cat(1|2,…)` work on `matlab_mat3`, so colour images split
+/process/merge per channel (`R = rgb(:,:,1)`), not just pipeline-style.
+Example `examples/images/channel_split.m`.
 
 | # | Surface | Algorithm / notes | Reuses |
 |---|---|---|---|

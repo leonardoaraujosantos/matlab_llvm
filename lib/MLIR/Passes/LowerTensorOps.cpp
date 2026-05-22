@@ -2795,6 +2795,65 @@ bool TensorLowering::rewriteBuiltinCalls() {
       Changed = true;
       continue;
     }
+    /* A(:, :, k) = scalar  -> matlab_subscript3_pstore_s(A, k, v). */
+    if (Name == "matlab_subscript3_pstore_s" &&
+        Call->getNumOperands() == 3 &&
+        Call->getOperand(0).getType() == PtrTy &&
+        Call->getOperand(1).getType() == F64 &&
+        Call->getOperand(2).getType() == F64) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt("matlab_subscript3_pstore_s", VoidTy, {PtrTy, F64, F64});
+      LLVM::CallOp::create(B, Call->getLoc(), Fn, Call->getOperands());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+    /* A(:, :, k) = M  -> matlab_subscript3_pstore_m(A, k, M). */
+    if (Name == "matlab_subscript3_pstore_m" &&
+        Call->getNumOperands() == 3 &&
+        Call->getOperand(0).getType() == PtrTy &&
+        Call->getOperand(1).getType() == F64 &&
+        Call->getOperand(2).getType() == PtrTy) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt("matlab_subscript3_pstore_m", VoidTy, {PtrTy, F64, PtrTy});
+      LLVM::CallOp::create(B, Call->getLoc(), Fn, Call->getOperands());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+    /* A(:, :, k) read -> matlab_subscript3_slice(A, k) : 2-D plane. */
+    if (Name == "matlab_subscript3_slice" && Call->getNumOperands() == 2 &&
+        Call->getNumResults() == 1 &&
+        Call->getOperand(0).getType() == PtrTy &&
+        Call->getOperand(1).getType() == F64) {
+      B.setInsertionPoint(Call);
+      auto Fn = rt("matlab_subscript3_slice", PtrTy, {PtrTy, F64});
+      auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn, Call->getOperands());
+      if (Call->getResult(0).getType() != PtrTy) Call->getResult(0).setType(PtrTy);
+      carryName(Call, NC);
+      Call->getResult(0).replaceAllUsesWith(NC.getResult());
+      Call->erase();
+      Changed = true;
+      continue;
+    }
+    /* cat(3, A, B[, C]) -> matlab_cat3_{2,3} : slice-major matlab_mat3. */
+    if ((Name == "matlab_cat3_2" || Name == "matlab_cat3_3") &&
+        Call->getNumResults() == 1) {
+      bool allp = true;
+      for (auto O : Call->getOperands()) if (O.getType() != PtrTy) allp = false;
+      if (allp) {
+        B.setInsertionPoint(Call);
+        SmallVector<Type, 3> ats(Call->getNumOperands(), PtrTy);
+        auto Fn = rt(Name, PtrTy, ats);
+        auto NC = LLVM::CallOp::create(B, Call->getLoc(), Fn, Call->getOperands());
+        if (Call->getResult(0).getType() != PtrTy) Call->getResult(0).setType(PtrTy);
+        carryName(Call, NC);
+        Call->getResult(0).replaceAllUsesWith(NC.getResult());
+        Call->erase();
+        Changed = true;
+        continue;
+      }
+    }
     if (Name == "matlab_size3_dim" && Call->getNumOperands() == 2 &&
         Call->getNumResults() == 1 &&
         Call->getOperand(0).getType() == PtrTy &&

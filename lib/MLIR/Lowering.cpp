@@ -2274,7 +2274,10 @@ void Lowerer::lowerStmt(const Stmt &St) {
      * correctly. See Lowerer::isStringExpr. */
     bool RhsIsString = isStringExpr(A.RHS);
 
-    /* Track 3-D bindings: RHS is a call to zeros/ones with 3 args. */
+    /* Track 3-D bindings: RHS produces a matlab_mat3 — zeros/ones with 3
+     * args, cat(3, …), or a builtin that always returns truecolor
+     * (colour-space conversions, label2rgb).  These let A(i,j,k) /
+     * A(:,:,k) / size(A,3) route to the matlab_mat3 runtime. */
     bool RhsIsThreeD = false;
     if (A.RHS && A.RHS->Kind == NodeKind::CallOrIndex) {
       auto *C = static_cast<const CallOrIndex *>(A.RHS);
@@ -2282,6 +2285,14 @@ void Lowerer::lowerStmt(const Stmt &St) {
         if (C->Args.size() == 3 && N->Ref &&
             N->Ref->Kind == BindingKind::Builtin &&
             (N->Name == "zeros" || N->Name == "ones"))
+          RhsIsThreeD = true;
+        else if (N->Name == "cat" && C->Args.size() >= 1) {
+          if (auto *DimL = dynamic_cast<const IntegerLiteral *>(C->Args[0]))
+            if (DimL->Text == "3") RhsIsThreeD = true;
+        } else if (N->Name == "rgb2hsv" || N->Name == "hsv2rgb" ||
+                   N->Name == "rgb2ycbcr" || N->Name == "ycbcr2rgb" ||
+                   N->Name == "rgb2lab" || N->Name == "lab2rgb" ||
+                   N->Name == "label2rgb")
           RhsIsThreeD = true;
       }
     }
@@ -3560,17 +3571,36 @@ void Lowerer::lowerLValueStore(const Expr &LHS, mlir::Value Rhs) {
       if (Base) SubscriptCtx.pop_back();
     }
     if (Rhs) Os.push_back(Rhs);
-    /* 3-D scalar store: A(i, j, k) = v on a matlab_mat3 binding
-     * routes to matlab_subscript3_store. */
+    /* 3-D store on a matlab_mat3 binding: A(i,j,k)=v (scalar element) →
+     * matlab_subscript3_store; A(:,:,k)=v|M (whole plane) →
+     * matlab_subscript3_pstore_{s,m}. */
     if (C.Args.size() == 3 && Rhs) {
       if (auto *NE = dynamic_cast<const NameExpr *>(C.Callee))
         if (NE->Ref && ThreeDBindings.count(NE->Ref)) {
-          mlir::NamedAttribute Cal3(
-              mlir::StringAttr::get(&MCtx, "callee"),
-              mlir::StringAttr::get(&MCtx, "matlab_subscript3_store"));
-          emitUnregOp("matlab.call_builtin", Os,
-                      {mlir::NoneType::get(&MCtx)}, loc(C.Range), {Cal3});
-          return;
+          bool c0 = dynamic_cast<const ColonExpr *>(C.Args[0]) != nullptr;
+          bool c1 = dynamic_cast<const ColonExpr *>(C.Args[1]) != nullptr;
+          bool c2 = dynamic_cast<const ColonExpr *>(C.Args[2]) != nullptr;
+          if (c0 && c1 && !c2) {
+            auto PtrTy = mlir::LLVM::LLVMPointerType::get(&MCtx);
+            bool rhsMat = (Rhs.getType() == PtrTy ||
+                           mlir::isa<mlir::RankedTensorType,
+                                     mlir::UnrankedTensorType>(Rhs.getType()));
+            mlir::NamedAttribute Cal3(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, rhsMat ? "matlab_subscript3_pstore_m"
+                                                    : "matlab_subscript3_pstore_s"));
+            emitUnregOp("matlab.call_builtin", {Os[0], Os[3], Os[4]},
+                        {mlir::NoneType::get(&MCtx)}, loc(C.Range), {Cal3});
+            return;
+          }
+          if (!c0 && !c1 && !c2) {
+            mlir::NamedAttribute Cal3(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_subscript3_store"));
+            emitUnregOp("matlab.call_builtin", Os,
+                        {mlir::NoneType::get(&MCtx)}, loc(C.Range), {Cal3});
+            return;
+          }
         }
     }
     mlir::NamedAttribute Cal(
@@ -6865,6 +6895,34 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
           return Obj;
         }
 
+        /* cat(dim, A, B, …): dim 3 stacks 2-D planes into a matlab_mat3
+         * (matlab_cat3_2 / matlab_cat3_3); dim 1/2 fold pairwise through
+         * vertcat / horzcat.  `dim` must be an integer literal. */
+        if (Nm == "cat" && C.Args.size() >= 3) {
+          if (auto *DimL = dynamic_cast<const IntegerLiteral *>(C.Args[0])) {
+            llvm::SmallVector<mlir::Value, 4> Ms;
+            for (size_t a = 1; a < C.Args.size(); ++a) Ms.push_back(lowerExpr(*C.Args[a]));
+            if (DimL->Text == "3") {
+              const char *Sym = (Ms.size() == 2) ? "matlab_cat3_2" : "matlab_cat3_3";
+              llvm::SmallVector<mlir::Value, 3> Use(Ms.begin(),
+                                                    Ms.begin() + std::min<size_t>(3, Ms.size()));
+              mlir::NamedAttribute Cal(
+                  mlir::StringAttr::get(&MCtx, "callee"),
+                  mlir::StringAttr::get(&MCtx, Sym));
+              return emitUnreg("matlab.call_builtin", Use, PtrTy, L, {Cal});
+            }
+            const char *Sym = (DimL->Text == "1") ? "vertcat" : "horzcat";
+            mlir::Value Acc = Ms[0];
+            for (size_t a = 1; a < Ms.size(); ++a) {
+              mlir::NamedAttribute Cal(
+                  mlir::StringAttr::get(&MCtx, "callee"),
+                  mlir::StringAttr::get(&MCtx, Sym));
+              Acc = emitUnreg("matlab.call_builtin", {Acc, Ms[a]}, PtrTy, L, {Cal});
+            }
+            return Acc;
+          }
+        }
+
         auto rebuildCall = [&](llvm::StringRef Callee,
                                llvm::ArrayRef<mlir::Value> Args,
                                mlir::Type ResTy) -> mlir::Value {
@@ -9233,16 +9291,29 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
       }
     }
 
-    /* 3-D scalar subscript: A(i, j, k) where A is tracked as a
-     * matlab_mat3 binding routes to matlab_subscript3_s. */
+    /* 3-D subscript on a matlab_mat3 binding: A(i,j,k) scalar element →
+     * matlab_subscript3_s; A(:,:,k) whole plane → matlab_subscript3_slice
+     * (returns a 2-D matrix). */
     if (C.Args.size() == 3) {
       if (auto *NE = dynamic_cast<const NameExpr *>(C.Callee))
         if (NE->Ref && ThreeDBindings.count(NE->Ref)) {
-          auto F64 = mlir::Float64Type::get(&MCtx);
-          mlir::NamedAttribute Cal(
-              mlir::StringAttr::get(&MCtx, "callee"),
-              mlir::StringAttr::get(&MCtx, "matlab_subscript3_s"));
-          return emitUnreg("matlab.call_builtin", Idx, F64, L, {Cal});
+          bool c0 = dynamic_cast<const ColonExpr *>(C.Args[0]) != nullptr;
+          bool c1 = dynamic_cast<const ColonExpr *>(C.Args[1]) != nullptr;
+          bool c2 = dynamic_cast<const ColonExpr *>(C.Args[2]) != nullptr;
+          if (c0 && c1 && !c2) {
+            auto SlicePtr = mlir::LLVM::LLVMPointerType::get(&MCtx);
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_subscript3_slice"));
+            return emitUnreg("matlab.call_builtin", {Idx[0], Idx[3]}, SlicePtr, L, {Cal});
+          }
+          if (!c0 && !c1 && !c2) {
+            auto F64 = mlir::Float64Type::get(&MCtx);
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_subscript3_s"));
+            return emitUnreg("matlab.call_builtin", Idx, F64, L, {Cal});
+          }
         }
     }
     mlir::NamedAttribute NA(

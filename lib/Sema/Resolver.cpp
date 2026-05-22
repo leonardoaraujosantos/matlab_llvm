@@ -34,7 +34,7 @@ void Resolver::registerBuiltins() {
     "cumsum", "cumprod",
     "sort", "sortrows", "unique", "ismember",
     "setdiff", "intersect", "union",
-    "horzcat", "vertcat", "permute", "squeeze",
+    "horzcat", "vertcat", "permute", "squeeze", "cat",
     "flip", "fliplr", "flipud", "rot90",
     "sub2ind", "ind2sub", "assert",
     "mtimes", "mldivide", "mrdivide",

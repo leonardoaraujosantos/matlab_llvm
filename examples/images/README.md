@@ -67,10 +67,19 @@ Covered: `bwlabel` (8-conn) · `regionprops` (`Area`/`Centroid`/
 
 Covered: `dct2`/`idct2` (separable, exact round-trip) · `radon` · `hough`/
 `houghpeaks` · `immse`/`psnr`/`ssim` · `poly2mask`/`roifilt2` · `rgb2hsv`/
-`hsv2rgb`/`rgb2ycbcr`/`ycbcr2rgb`/`rgb2lab`/`lab2rgb` (whole-image
-pipeline; 3-D element indexing `rgb(:,:,k)` is unimplemented, so round-trips
-are checked through `rgb2gray`) · `im2col`/`col2im` · `deconvwnr` (Wiener) ·
-`edgetaper`.
+`hsv2rgb`/`rgb2ycbcr`/`ycbcr2rgb`/`rgb2lab`/`lab2rgb` · `im2col`/`col2im` ·
+`deconvwnr` (Wiener) · `edgetaper`.
+
+## 3-D arrays / per-channel RGB (shipped)
+
+| Example | Notes |
+|---|---|
+| [`channel_split.m`](channel_split.m) | Build a truecolor image with `cat(3,R,G,B)`, split channels with `rgb(:,:,k)`, boost one, and merge back. |
+
+3-D array indexing is wired as a general compiler feature: `A(:,:,k)` plane
+read/store, `A(i,j,k)` element read/store, and `cat(3,…)` / `cat(1|2,…)`
+all work on `matlab_mat3` — so colour images can be split, processed
+per channel, and recombined (not just used pipeline-style).
 
 ## Carve-downs (documented follow-ons)
 

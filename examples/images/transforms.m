@@ -2,9 +2,9 @@
 % ----------------------------------------------------------------------
 % The transform / quality / colour / deblur surface: the 2-D DCT and its
 % energy compaction, colour-space round-trips, Hough line detection, image
-% quality metrics, and Wiener deconvolution.  Colour conversions operate on
-% whole M×N×3 images (pipeline-style — element indexing of 3-D arrays is a
-% documented gap), so round-trips are checked by reducing through rgb2gray.
+% quality metrics, and Wiener deconvolution.  Colour round-trips are
+% checked by reducing through rgb2gray; per-channel access via rgb(:,:,k)
+% is also supported (see channel_split.m).
 I = checkerboard(10, 3, 3) * 255;            % 60x60
 
 % ----- 2-D DCT: energy compaction + perfect reconstruction ------------
