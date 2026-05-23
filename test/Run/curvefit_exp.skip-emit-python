@@ -1,0 +1,1 @@
+curvefit Tier-2 uses the cfit classdef + curvefit runtime (LM nonlinear fit), which the emit-* harnesses do not link (matches the Stats/Image precedent).

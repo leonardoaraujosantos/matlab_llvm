@@ -2543,6 +2543,57 @@ void Lowerer::lowerStmt(const Stmt &St) {
                                    mlir::StringAttr::get(&MCtx, Fn));
           return emitUnreg("matlab.call_builtin", Av, PtrTy, Lc, {Cal});
         };
+        /* Curve Fitting Tier-1 — [f, gof] / [f, gof, output] = fit(x,y,'polyN').
+         * Alloc a cfit, populate it, then read back the goodness-of-fit and
+         * output structs from the populated object (the reader pattern,
+         * mirroring the stats [h,p,ci,stats] split — but object-sourced). */
+        if (Callee->Name == "fit" && C->Args.size() >= 3) {
+          /* Surface fit ([sf,gof] = fit([x y], z, 'polyNM')) → sfit shell. */
+          std::string surfTag;
+          if (auto *CL = dynamic_cast<const CharLiteral *>(C->Args[2])) surfTag = CL->Value;
+          else if (auto *SL = dynamic_cast<const StringLiteral *>(C->Args[2])) surfTag = SL->Value;
+          bool isSurf = (surfTag.size() == 6 && surfTag.compare(0, 4, "poly") == 0 &&
+                         isdigit(static_cast<unsigned char>(surfTag[4])) &&
+                         isdigit(static_cast<unsigned char>(surfTag[5])));
+          const char *ctorSym = isSurf ? "sfit__sfit" : "cfit__cfit";
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, ctorSym));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTy, Lc, {CtorCal});
+          mlir::Value Xd = lowerExpr(*C->Args[0]);
+          mlir::Value Yd = lowerExpr(*C->Args[1]);
+          if (isSurf) {
+            mlir::Value Tg = lowerExpr(*C->Args[2]);
+            callRT("matlab_curvefit_fit_surface", {Obj, Xd, Yd, Tg});
+            mlir::Value Gof2  = callRT("matlab_curvefit_gof", {Obj});
+            mlir::Value Outp2 = callRT("matlab_curvefit_output", {Obj});
+            mlir::Value SOuts[3] = {Obj, Gof2, Outp2};
+            for (size_t i = 0; i < A.LHS.size() && i < 3; ++i)
+              if (A.LHS[i]) lowerLValueStore(*A.LHS[i], SOuts[i]);
+            return;
+          }
+          const ClassDef *MdlCls = nullptr;
+          if (auto *MN = dynamic_cast<const NameExpr *>(C->Args[2]))
+            if (MN->Ref) MdlCls = MN->Ref->PinnedClass;
+          if (MdlCls && llvm::StringRef(MdlCls->Name) == "fittype") {
+            mlir::Value Ft = loadObjP(C->Args[2]);
+            callRT("matlab_curvefit_fit_custom", {Obj, Xd, Yd, Ft});
+          } else {
+            mlir::Value Md = lowerExpr(*C->Args[2]);
+            if (C->Args.size() >= 4) {             /* [f,gof,…] = fit(x,y,model,opts) */
+              mlir::Value Op = loadObjP(C->Args[3]);
+              callRT("matlab_curvefit_fit_opts", {Obj, Xd, Yd, Md, Op});
+            } else {
+              callRT("matlab_curvefit_fit", {Obj, Xd, Yd, Md});   /* populate */
+            }
+          }
+          mlir::Value Gof  = callRT("matlab_curvefit_gof", {Obj});
+          mlir::Value Outp = callRT("matlab_curvefit_output", {Obj});
+          mlir::Value Outs[3] = {Obj, Gof, Outp};
+          for (size_t i = 0; i < A.LHS.size() && i < 3; ++i)
+            if (A.LHS[i]) lowerLValueStore(*A.LHS[i], Outs[i]);
+          return;
+        }
         /* [kest, L, P] = kalman(sys, Qn, Rn) — steady-state Kalman filter.
          * L = kalman gain, P = error covariance; kest (the estimator ss
          * object) is returned as the source object as a placeholder. */
@@ -5425,6 +5476,67 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
           }
           return Obj;
         }
+        /* Curve Fitting Tier-2 — fitoptions('Name', val, …).  A classdef
+         * carrier; scan name-value pairs from index 0.  StartPoint / Lower /
+         * Upper / Weights are matrices (_set_mat); Robust maps a string to a
+         * RobustCode scalar (_set_f64); Method is accepted-and-ignored. */
+        if (CD->Name == "fitoptions") {
+          auto F64 = mlir::Float64Type::get(&MCtx);
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "fitoptions__fitoptions"));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTyConst, L, {CtorCal});
+          for (size_t i = 0; i + 1 < C.Args.size(); i += 2) {
+            std::string key;
+            if (auto *CL = dynamic_cast<const CharLiteral *>(C.Args[i])) key = CL->Value;
+            else if (auto *SL = dynamic_cast<const StringLiteral *>(C.Args[i])) key = SL->Value;
+            if (key.empty() || key == "Method") continue;
+            if (key == "Robust") {
+              std::string rv;
+              if (auto *CL = dynamic_cast<const CharLiteral *>(C.Args[i + 1])) rv = CL->Value;
+              else if (auto *SL = dynamic_cast<const StringLiteral *>(C.Args[i + 1])) rv = SL->Value;
+              double code = 0.0;
+              if (rv == "Bisquare" || rv == "bisquare" || rv == "on" || rv == "On") code = 1.0;
+              else if (rv == "LAR" || rv == "lar") code = 2.0;
+              mlir::Value CodeV = emitUnreg("matlab.const_float", {}, F64, L,
+                  {mlir::NamedAttribute(mlir::StringAttr::get(&MCtx, "value"),
+                                        mlir::FloatAttr::get(F64, code))});
+              mlir::Value NameV = emitFieldNameChar("RobustCode", L);
+              mlir::NamedAttribute SetCal(mlir::StringAttr::get(&MCtx, "callee"),
+                                          mlir::StringAttr::get(&MCtx, "matlab_obj_set_f64"));
+              emitUnregOp("matlab.call_builtin", {Obj, NameV, CodeV},
+                          {mlir::NoneType::get(&MCtx)}, L, {SetCal});
+              continue;
+            }
+            bool isMat = (key == "StartPoint" || key == "Lower" ||
+                          key == "Upper" || key == "Weights");
+            mlir::Value Val = lowerExpr(*C.Args[i + 1]);
+            mlir::Value NameV = emitFieldNameChar(key, L);
+            mlir::NamedAttribute SetCal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, isMat ? "matlab_obj_set_mat"
+                                                   : "matlab_obj_set_f64"));
+            emitUnregOp("matlab.call_builtin", {Obj, NameV, Val},
+                        {mlir::NoneType::get(&MCtx)}, L, {SetCal});
+          }
+          return Obj;
+        }
+        /* Curve Fitting Tier-3 — fittype('a*exp(-b*x)+c'): alloc the custom-
+         * equation descriptor and store the equation string (const_char →
+         * matlab_string by the pde_table coercion). */
+        if (CD->Name == "fittype" && C.Args.size() == 1) {
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "fittype__fittype"));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTyConst, L, {CtorCal});
+          mlir::Value Eq = lowerExpr(*C.Args[0]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_curvefit_fittype_init"));
+          emitUnregOp("matlab.call_builtin", {Obj, Eq},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Obj;
+        }
         /* Image Processing Tier-3 — affine2d(M) / projective2d(M): alloc the
          * transform shell and write its 3×3 forward matrix T (Kind 1/2 is
          * the ctor default). */
@@ -7201,6 +7313,119 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
               mlir::StringAttr::get(&MCtx, "callee"),
               mlir::StringAttr::get(&MCtx, "matlab_image_fitgeo_init"));
           emitUnregOp("matlab.call_builtin", {Obj, Mv, Fx, Ty},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Obj;
+        }
+
+        /* Curve Fitting Tier-1 — fit(x, y, 'polyN'): alloc a cfit shell and
+         * populate it via the runtime (center-and-scale + Vandermonde LS).
+         * The model-tag string is materialised by the pde_table const_char
+         * coercion.  The single-return form (`f = fit(...)` / bare call);
+         * the [f,gof,output] multi-return form is handled in the assignment
+         * lowering. */
+        if (Nm == "fit" && C.Args.size() >= 3) {
+          /* Surface fit: a 2-digit poly tag ('poly23') → sfit + bivariate LS. */
+          std::string surfTag;
+          if (auto *CL = dynamic_cast<const CharLiteral *>(C.Args[2])) surfTag = CL->Value;
+          else if (auto *SL = dynamic_cast<const StringLiteral *>(C.Args[2])) surfTag = SL->Value;
+          bool isSurf = (surfTag.size() == 6 && surfTag.compare(0, 4, "poly") == 0 &&
+                         isdigit(static_cast<unsigned char>(surfTag[4])) &&
+                         isdigit(static_cast<unsigned char>(surfTag[5])));
+          if (isSurf) {
+            mlir::NamedAttribute SCtor(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "sfit__sfit"));
+            mlir::Value SObj = emitUnreg("matlab.call", {}, PtrTy, L, {SCtor});
+            mlir::Value XY = lowerExpr(*C.Args[0]);
+            mlir::Value Zd = lowerExpr(*C.Args[1]);
+            mlir::Value Tg = lowerExpr(*C.Args[2]);
+            mlir::NamedAttribute SCal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_curvefit_fit_surface"));
+            emitUnregOp("matlab.call_builtin", {SObj, XY, Zd, Tg},
+                        {mlir::NoneType::get(&MCtx)}, L, {SCal});
+            return SObj;
+          }
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "cfit__cfit"));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTy, L, {CtorCal});
+          mlir::Value Xd = lowerExpr(*C.Args[0]);
+          mlir::Value Yd = lowerExpr(*C.Args[1]);
+          /* Custom equation: a fittype object as the model arg routes to the
+           * finite-difference LM (matlab_curvefit_fit_custom). */
+          const ClassDef *MdlCls = nullptr;
+          if (auto *MN = dynamic_cast<const NameExpr *>(C.Args[2]))
+            if (MN->Ref) MdlCls = MN->Ref->PinnedClass;
+          if (MdlCls && llvm::StringRef(MdlCls->Name) == "fittype") {
+            mlir::Value Ft = lowerExpr(*C.Args[2]);
+            if (Ft.getType() != PtrTy) Ft.setType(PtrTy);
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_curvefit_fit_custom"));
+            emitUnregOp("matlab.call_builtin", {Obj, Xd, Yd, Ft},
+                        {mlir::NoneType::get(&MCtx)}, L, {Cal});
+            return Obj;
+          }
+          mlir::Value Md = lowerExpr(*C.Args[2]);
+          if (C.Args.size() >= 4) {                /* fit(x,y,model,opts) */
+            mlir::Value Op = lowerExpr(*C.Args[3]);
+            if (Op.getType() != PtrTy) Op.setType(PtrTy);
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_curvefit_fit_opts"));
+            emitUnregOp("matlab.call_builtin", {Obj, Xd, Yd, Md, Op},
+                        {mlir::NoneType::get(&MCtx)}, L, {Cal});
+            return Obj;
+          }
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_curvefit_fit"));
+          emitUnregOp("matlab.call_builtin", {Obj, Xd, Yd, Md},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Obj;
+        }
+
+        /* Curve Fitting Tier-6 — ppform constructors.  spline/pchip/ppmak
+         * build a fresh ppform; fnder/fnint transform one.  Each allocs the
+         * ppform shell then populates it via the runtime. */
+        if ((Nm == "spline" || Nm == "pchip") && C.Args.size() == 2) {
+          mlir::NamedAttribute Ctor(mlir::StringAttr::get(&MCtx, "callee"),
+                                    mlir::StringAttr::get(&MCtx, "ppform__ppform"));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTy, L, {Ctor});
+          mlir::Value Xd = lowerExpr(*C.Args[0]);
+          mlir::Value Yd = lowerExpr(*C.Args[1]);
+          mlir::Value Kind = emitUnreg("matlab.const_float", {}, F64, L,
+              {mlir::NamedAttribute(mlir::StringAttr::get(&MCtx, "value"),
+                                    mlir::FloatAttr::get(F64, Nm == "pchip" ? 1.0 : 0.0))});
+          mlir::NamedAttribute Cal(mlir::StringAttr::get(&MCtx, "callee"),
+                                   mlir::StringAttr::get(&MCtx, "matlab_curvefit_spline_init"));
+          emitUnregOp("matlab.call_builtin", {Obj, Xd, Yd, Kind},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Obj;
+        }
+        if (Nm == "ppmak" && C.Args.size() == 2) {
+          mlir::NamedAttribute Ctor(mlir::StringAttr::get(&MCtx, "callee"),
+                                    mlir::StringAttr::get(&MCtx, "ppform__ppform"));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTy, L, {Ctor});
+          mlir::Value Br = lowerExpr(*C.Args[0]);
+          mlir::Value Cf = lowerExpr(*C.Args[1]);
+          mlir::NamedAttribute Cal(mlir::StringAttr::get(&MCtx, "callee"),
+                                   mlir::StringAttr::get(&MCtx, "matlab_curvefit_ppmak_init"));
+          emitUnregOp("matlab.call_builtin", {Obj, Br, Cf},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Obj;
+        }
+        if ((Nm == "fnder" || Nm == "fnint") && C.Args.size() == 1) {
+          mlir::NamedAttribute Ctor(mlir::StringAttr::get(&MCtx, "callee"),
+                                    mlir::StringAttr::get(&MCtx, "ppform__ppform"));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTy, L, {Ctor});
+          mlir::Value Pp = lowerExpr(*C.Args[0]);
+          if (Pp.getType() != PtrTy) Pp.setType(PtrTy);
+          mlir::NamedAttribute Cal(mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, Nm == "fnint" ? "matlab_curvefit_fnint_init"
+                                                         : "matlab_curvefit_fnder_init"));
+          emitUnregOp("matlab.call_builtin", {Obj, Pp},
                       {mlir::NoneType::get(&MCtx)}, L, {Cal});
           return Obj;
         }
@@ -9504,9 +9729,17 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
       if (auto *NE = dynamic_cast<const NameExpr *>(C.Callee))
         if (NE->Ref && NE->Ref->PinnedClass) {
           const ClassDef *Owner = nullptr;
+          /* `step` is the System-Object idiom; `feval` is the Curve-Fitting
+           * idiom (`f(xq)` on a `cfit` evaluates the model). Whichever the
+           * pinned class defines becomes the paren-call target. */
+          const char *MethName = nullptr;
           for (const ClassDef *CC = NE->Ref->PinnedClass; CC; CC = CC->Super) {
             for (const Function *Mth : CC->Methods)
-              if (Mth && Mth->Name == "step") { Owner = CC; break; }
+              if (Mth && (Mth->Name == "step" || Mth->Name == "feval")) {
+                Owner = CC;
+                MethName = (Mth->Name == "feval") ? "feval" : "step";
+                break;
+              }
             if (Owner) break;
           }
           if (Owner) {
@@ -9515,7 +9748,7 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             llvm::SmallVector<mlir::Value, 4> Args;
             Args.push_back(Recv);
             for (const Expr *A : C.Args) if (A) Args.push_back(lowerExpr(*A));
-            std::string Callee = std::string(Owner->Name) + "__step";
+            std::string Callee = std::string(Owner->Name) + "__" + MethName;
             mlir::NamedAttribute Cal(
                 mlir::StringAttr::get(&MCtx, "callee"),
                 mlir::StringAttr::get(&MCtx, Callee));

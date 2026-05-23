@@ -1,0 +1,1 @@
+curvefit Tier-3 uses the cfit/fittype classdefs + curvefit runtime, which the emit-* harnesses do not link (matches the Stats/Image precedent).

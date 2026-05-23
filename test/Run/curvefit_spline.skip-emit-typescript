@@ -1,0 +1,1 @@
+curvefit Tier-6 uses the ppform classdef + curvefit runtime, which the emit-* harnesses do not link (matches the Stats/Image precedent).

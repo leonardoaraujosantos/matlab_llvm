@@ -1,0 +1,1 @@
+curvefit Tier-2 uses the cfit/fitoptions classdefs + curvefit runtime, which the emit-* harnesses do not link (matches the Stats/Image precedent).

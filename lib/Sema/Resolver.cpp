@@ -221,6 +221,27 @@ void Resolver::registerBuiltins() {
     "matlab_stats_fitknn_init", "matlab_stats_fitnb_init", "matlab_stats_fitlda_init",
     "matlab_stats_fittree_init", "matlab_stats_fitsvm_init", "matlab_stats_fitecoc_init",
     "matlab_stats_clf_predict", "matlab_stats_confusionmat",
+    /* ===== Curve Fitting Toolbox Tier-1 + Tier-2 + Tier-3 ===== */
+    "fit", "feval", "coeffvalues",
+    "differentiate", "integrate", "confint", "formula", "numcoeffs",
+    "matlab_curvefit_fit", "matlab_curvefit_fit_opts", "matlab_curvefit_feval",
+    "matlab_curvefit_coeffvalues", "matlab_curvefit_gof",
+    "matlab_curvefit_output", "matlab_curvefit_disp",
+    "matlab_curvefit_fittype_init", "matlab_curvefit_fit_custom",
+    "matlab_curvefit_confint", "matlab_curvefit_differentiate",
+    "matlab_curvefit_integrate", "matlab_curvefit_numcoeffs",
+    "matlab_curvefit_formula",
+    /* Tier-4 — smoothing + smoothing spline. */
+    "smooth", "csaps",
+    "matlab_curvefit_smooth1", "matlab_curvefit_smooth2", "matlab_curvefit_smooth3",
+    "matlab_curvefit_csaps",
+    /* Tier-5 — surface fitting. */
+    "matlab_curvefit_fit_surface", "matlab_curvefit_sfeval",
+    /* Tier-6 — ppform spline layer. */
+    "spline", "pchip", "ppmak", "fnval", "fnder", "fnint", "fnbrk",
+    "matlab_curvefit_spline_init", "matlab_curvefit_ppmak_init",
+    "matlab_curvefit_fnval", "matlab_curvefit_fnder_init",
+    "matlab_curvefit_fnint_init", "matlab_curvefit_fnbrk",
     /* MPC Tier-4 §5.4 — standalone active-set QP solver. */
     "matlab_mpc_active_set",
     /* MPC Tier-4 §5.1/5.2/5.3 — explicit MPC. */
@@ -1488,6 +1509,38 @@ void Resolver::resolveStmt(Stmt &St, Scope *S) {
               NX->Name == "fitcensemble" || NX->Name == "TreeBagger") {
             if (ClassDef *C = classByName("ClassificationModel")) return C;
           }
+          /* Curve Fitting Tier-1: fit(x,y,'polyN') returns a class-pinned
+           * cfit.  Without this, the LHS slot of `f = fit(...)` (and the
+           * first slot of `[f,gof] = fit(...)`) isn't pinned and the
+           * `f(xq)` / `feval(f,xq)` / `coeffvalues(f)` dispatches fail. */
+          if (NX->Name == "fit") {
+            /* A 2-digit poly tag ('poly23') in the model arg means a surface
+             * fit → sfit; anything else is a curve → cfit. */
+            bool isSurface = false;
+            if (CX->Args.size() >= 3) {
+              std::string mt;
+              if (auto *CL = dynamic_cast<CharLiteral *>(CX->Args[2])) mt = CL->Value;
+              else if (auto *SL = dynamic_cast<StringLiteral *>(CX->Args[2])) mt = SL->Value;
+              if (mt.size() == 6 && mt.compare(0, 4, "poly") == 0 &&
+                  isdigit(static_cast<unsigned char>(mt[4])) &&
+                  isdigit(static_cast<unsigned char>(mt[5])))
+                isSurface = true;
+            }
+            if (ClassDef *C = classByName(isSurface ? "sfit" : "cfit")) return C;
+          }
+          if (NX->Name == "fitoptions") {
+            if (ClassDef *C = classByName("fitoptions")) return C;
+          }
+          if (NX->Name == "fittype") {
+            if (ClassDef *C = classByName("fittype")) return C;
+          }
+          /* Curve Fitting Tier-6: spline / pchip / ppmak / fnder / fnint
+           * each yield a ppform; the pin lets fnval(pp,xx) and fnder(pp)
+           * dispatch correctly. */
+          if (NX->Name == "spline" || NX->Name == "pchip" ||
+              NX->Name == "ppmak" || NX->Name == "fnder" || NX->Name == "fnint") {
+            if (ClassDef *C = classByName("ppform")) return C;
+          }
           /* User function whose body returns a class-pinned value —
            * propagate that pin to the caller's LHS. */
           if (NX->Ref && NX->Ref->Kind == BindingKind::Function &&
@@ -1566,8 +1619,13 @@ void Resolver::resolveStmt(Stmt &St, Scope *S) {
       return nullptr;
     };
     if (ClassDef *RhsCls = pinnedOfRhs(A.RHS)) {
-      for (Expr *L : A.LHS) {
-        if (auto *LN = dynamic_cast<NameExpr *>(L)) {
+      /* Only the FIRST LHS receives the class pin.  A class factory
+       * yields its instance as output 0; any trailing outputs of a
+       * multi-return form (e.g. `[f, gof] = fit(...)` where gof is a
+       * plain struct) must not inherit the pin or their field access
+       * would mis-route through class-property dispatch. */
+      if (!A.LHS.empty()) {
+        if (auto *LN = dynamic_cast<NameExpr *>(A.LHS.front())) {
           if (LN->Ref && LN->Ref->Kind != BindingKind::Class)
             LN->Ref->PinnedClass = RhsCls;
         }

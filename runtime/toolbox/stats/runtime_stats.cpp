@@ -24,6 +24,7 @@
 #include <string.h>
 
 #include <algorithm>
+#include <array>
 #include <vector>
 
 /* RNG reuse — both run over the shared rng-seeded xorshift state. */

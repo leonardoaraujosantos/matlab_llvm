@@ -31,6 +31,7 @@
 #include <string.h>
 
 #include <algorithm>
+#include <cstring>
 #include <vector>
 
 /* Shared global PRNG state (xorshift64) — defined in matlab_runtime.cpp;

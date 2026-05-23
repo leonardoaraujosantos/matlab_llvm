@@ -401,13 +401,22 @@ object-API surface a *script* uses is in Tiers 1–6.
 
 | Tier | Scope | Effort | Net-new code | Status |
 |---|---|---|---|---|
-| T1 | fit engine + polynomial + `cfit` + gof + plot | ~1 wk | dispatcher + `cfit` + gof | 🔵 |
-| T2 | nonlinear library models + `fitoptions` | ~1.5 wk | catalogue + start-point seeds + opts carrier | 🔵 |
-| T3 | custom models + postprocessing | ~1.5 wk | equation parser + diff/int/confint/predint | 🔵 |
-| T4 | interpolation + smoothing | ~1.5 wk | `smooth` + interpolant `cfit` + `csaps`/`spaps` | 🔵 |
-| T5 | surface fitting (`sfit`) | ~1.5 wk | bivariate design + `sfit` + `tpaps` | 🔵 |
-| T6 | spline `fn*` layer + polish | ~2.5 wk | ppform/B-form + `fn*` + NURBS/Chebyshev | 🔵 |
-| **Total** | | **~9.5 wk** | | |
+| T1 | fit engine + polynomial + `cfit` + gof + plot | ~1 wk | dispatcher + `cfit` + gof | ✅ shipped |
+| T2 | nonlinear library models + `fitoptions` | ~1.5 wk | catalogue + start-point seeds + opts carrier | ✅ shipped |
+| T3 | custom models + postprocessing | ~1.5 wk | equation parser + diff/int/confint/predint | ✅ shipped (predint carved) |
+| T4 | interpolation + smoothing | ~1.5 wk | `smooth` + interpolant `cfit` + `csaps`/`spaps` | ✅ shipped (`spaps` carved) |
+| T5 | surface fitting (`sfit`) | ~1.5 wk | bivariate design + `sfit` + `tpaps` | ✅ shipped (poly surfaces; interpolant/lowess/`tpaps` carved) |
+| T6 | spline `fn*` layer + polish | ~2.5 wk | ppform/B-form + `fn*` + NURBS/Chebyshev | ✅ shipped (ppform `spline`/`pchip`/`fnval`/`fnder`/`fnint`/`fnbrk`/`ppmak`; B-form/NURBS/Chebyshev/Simulink-export carved) |
+| **Total** | | **~9.5 wk** | | **ALL 6 TIERS SHIPPED 2026-05-23 — badge 17** |
+
+**Carve-downs** (documented follow-ons, matching project precedent): rational
+`rat_nm` / logistic / Weibull library models · `predint` · custom-linear cell
+form `fittype({'1','x','x^2'})` · interpolant/lowess surfaces + `tpaps` ·
+`csape` end-conditions / `spap2`/`spapi` B-form / `spaps` / `rsmak` NURBS /
+`chbpnt` Chebyshev / `fnmin`/`fnzeros` / tensor-product / Simulink-lookup
+export. Two pre-existing Sema gaps surfaced (documented in project memory):
+mixing scalar `f(x)` with vector `feval(f,xv)` of one model forces a single
+matrix return type; `scalar*transcendental(vector)` inside a sum doesn't lower.
 
 **Recommended slice order**: T1 → T2 → T3 closes the everyday 90%
 workflow (~4 wk) and is the highest-ROI cut — at that point

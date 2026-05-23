@@ -1,0 +1,6 @@
+poly2 rsquare = 1.000000
+poly2 f(2)  = 3.0000
+poly2 f(5)  = 36.0000
+poly2 f(11) = 210.0000
+poly1 g(3)  = 19.0000
+poly1 rmse  = 0.000000
