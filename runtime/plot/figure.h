@@ -3,6 +3,7 @@
 
 #include "colormap.h"
 
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -150,8 +151,6 @@ struct Axes {
     double view_el =  30.0;
     std::string zlabel;
 };
-
-#include <memory>
 
 struct Figure {
     int id = 0;
