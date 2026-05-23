@@ -1,9 +1,18 @@
 name: 'Set up LLVM 22 + matlabc build deps'
 description: |
   Installs the build deps (cmake, ninja, ccache, cairo, ...) and provides
-  LLVM 22.1.3 + MLIR at /opt/llvm.  The LLVM install is cached via
-  actions/cache keyed on LLVM_TAG, so the ~40-min source build runs only
-  on first miss / version bump.
+  LLVM 22.1.3 + MLIR at /opt/llvm.
+
+  Resolution order for /opt/llvm (first hit wins):
+    1. Prebuilt tarball published as a GitHub Release asset by
+       .github/workflows/build-llvm-toolchain.yml
+       (toolchain-<tag>/llvm-<tag>-linux-x64.tar.zst) — ~30s download.
+       Immune to Actions-cache eviction, the 7-day expiry, the 10 GB
+       limit, and per-branch cache scoping.
+    2. actions/cache (per-branch / main scoped) — fast when warm, a
+       resilience fallback if the asset isn't published yet.
+    3. Source build from llvm-project at <tag> — the ~2h cold path, only
+       hit on a brand-new version before its tarball has been published.
 
   Sets the following environment variables for downstream steps:
     LLVM_DIR  = /opt/llvm/lib/cmake/llvm
@@ -30,7 +39,7 @@ runs:
         set -euxo pipefail
         sudo apt-get update -qq
         sudo apt-get install -y --no-install-recommends \
-          cmake ninja-build ccache pkg-config \
+          cmake ninja-build ccache pkg-config zstd \
           gcc g++ \
           libcairo2-dev \
           libzstd-dev libcurl4-openssl-dev libedit-dev \
@@ -38,36 +47,64 @@ runs:
           python3 python3-pip \
           ${{ inputs.extra-apt-packages }}
 
+    # ----- 1) Prebuilt tarball (primary, ~30s) ---------------------------
+    - name: Download prebuilt LLVM tarball (if published)
+      id: llvm-prebuilt
+      shell: bash
+      env:
+        TAG: ${{ inputs.llvm-tag }}
+        REPO: ${{ github.repository }}
+      run: |
+        set -uxo pipefail   # NB: no -e — a 404 must not abort the job.
+        url="https://github.com/${REPO}/releases/download/toolchain-${TAG}/llvm-${TAG}-linux-x64.tar.zst"
+        if curl -fSL --retry 3 --retry-delay 5 -o /tmp/llvm.tar.zst "$url"; then
+          sudo mkdir -p /opt/llvm
+          sudo chown "$(id -u):$(id -g)" /opt/llvm
+          tar -C /opt/llvm --zstd -xf /tmp/llvm.tar.zst
+          rm -f /tmp/llvm.tar.zst
+          if [[ -f /opt/llvm/lib/cmake/mlir/MLIRConfig.cmake ]]; then
+            echo "have-llvm=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Prebuilt tarball extracted but MLIRConfig.cmake missing — ignoring."
+            sudo rm -rf /opt/llvm
+            echo "have-llvm=false" >> "$GITHUB_OUTPUT"
+          fi
+        else
+          echo "No prebuilt tarball at $url — falling back to cache/source build."
+          echo "have-llvm=false" >> "$GITHUB_OUTPUT"
+        fi
+
+    # ----- 2) actions/cache (fallback) -----------------------------------
+    # Key salt v3: v2 was permanently poisoned by 206-byte empty caches
+    # that an earlier `if: always()` save step seeded from cancelled cold
+    # builds (cache keys are immutable, so the empty entry could never be
+    # overwritten).  v3 starts clean and the save step below only ever
+    # runs after a *successful* source build, so it cannot re-poison.
     - name: Restore /opt/llvm cache
       id: llvm-cache
+      if: steps.llvm-prebuilt.outputs.have-llvm != 'true'
       uses: actions/cache/restore@v4
       with:
         path: /opt/llvm
-        # Bump LLVM_TAG or the `vN` salt to invalidate.  The salt exists
-        # so we can force a re-prime after a partial/corrupt cache (see
-        # the validation step below) without bumping the LLVM version.
-        key: llvm-${{ inputs.llvm-tag }}-v2-${{ runner.os }}-${{ runner.arch }}
+        key: llvm-${{ inputs.llvm-tag }}-v3-${{ runner.os }}-${{ runner.arch }}
 
-    # If the restore handed us a partial install (e.g. the cold build
-    # hit the job timeout and the `if: always()` save step seeded an
-    # incomplete /opt/llvm), the downstream cmake configure dies on
-    # `find_package(MLIR)`.  Detect the corruption here and demote the
-    # hit to a miss so the build step below re-primes the cache.
-    - name: Validate restored /opt/llvm
+    # A restored (or prebuilt) /opt/llvm is only useful if cmake can find
+    # MLIR in it.  If not, wipe it so the source build re-primes cleanly.
+    - name: Validate /opt/llvm
       id: llvm-validate
       shell: bash
       run: |
-        if [[ "${{ steps.llvm-cache.outputs.cache-hit }}" == "true" \
-              && ! -f /opt/llvm/lib/cmake/mlir/MLIRConfig.cmake ]]; then
-          echo "Restored /opt/llvm is missing MLIRConfig.cmake — rebuilding."
-          sudo rm -rf /opt/llvm
-          echo "rebuild=true" >> "$GITHUB_OUTPUT"
+        if [[ -f /opt/llvm/lib/cmake/mlir/MLIRConfig.cmake ]]; then
+          echo "valid=true" >> "$GITHUB_OUTPUT"
         else
-          echo "rebuild=false" >> "$GITHUB_OUTPUT"
+          echo "valid=false" >> "$GITHUB_OUTPUT"
+          sudo rm -rf /opt/llvm
         fi
 
-    - name: Build LLVM ${{ inputs.llvm-tag }} (cache miss)
-      if: steps.llvm-cache.outputs.cache-hit != 'true' || steps.llvm-validate.outputs.rebuild == 'true'
+    # ----- 3) Source build (~2h cold path, last resort) ------------------
+    - name: Build LLVM ${{ inputs.llvm-tag }} (source fallback)
+      id: llvm-build
+      if: steps.llvm-validate.outputs.valid != 'true'
       shell: bash
       run: |
         set -euxo pipefail
@@ -85,25 +122,23 @@ runs:
           -DLLVM_LINK_LLVM_DYLIB=ON \
           -DLLVM_ENABLE_RTTI=ON \
           -DLLVM_ENABLE_ASSERTIONS=OFF
-        cmake --build /tmp/llvm-build --target install -j$(nproc)
-        # Slim the install — strip docs and Python bindings we don't use.
-        rm -rf /opt/llvm/share/{man,doc}
+        cmake --build /tmp/llvm-build --target install -j"$(nproc)"
+        # Slim the install — strip docs and man pages we don't use.
+        rm -rf /opt/llvm/share/man /opt/llvm/share/doc
         rm -rf /tmp/llvm-project /tmp/llvm-build
+        test -f /opt/llvm/lib/cmake/mlir/MLIRConfig.cmake
 
-    # Save the LLVM install when we actually built it (true miss, or a
-    # validate-step rebuild after restoring a corrupt cache).  The
-    # save runs under `if: always()` so a partial build that hit the
-    # job timeout still seeds the cache — the next run can pick up
-    # where this one left off via ninja's incremental rebuild.  If
-    # the partial install is so broken that MLIRConfig.cmake is
-    # missing, the validate step above demotes the hit to a miss and
-    # forces a clean rebuild on the next run.
+    # Save ONLY after a source build that actually succeeded.  Gated on
+    # success() AND the build step's own success outcome, so a cancelled
+    # or failed build can never seed (and, via key immutability, lock) an
+    # empty /opt/llvm under this key.  A prebuilt-tarball or cache hit
+    # leaves llvm-build skipped, so this no-ops there too.
     - name: Save /opt/llvm cache
-      if: always() && (steps.llvm-cache.outputs.cache-hit != 'true' || steps.llvm-validate.outputs.rebuild == 'true')
+      if: success() && steps.llvm-build.outcome == 'success'
       uses: actions/cache/save@v4
       with:
         path: /opt/llvm
-        key: llvm-${{ inputs.llvm-tag }}-v2-${{ runner.os }}-${{ runner.arch }}
+        key: llvm-${{ inputs.llvm-tag }}-v3-${{ runner.os }}-${{ runner.arch }}
 
     - name: Export LLVM env vars
       shell: bash
