@@ -31,6 +31,16 @@ void matlab_fprintf_f64_3(const char *fmt, int64_t n,
                           double a, double b, double c);
 void matlab_fprintf_f64_4(const char *fmt, int64_t n,
                           double a, double b, double c, double d);
+void matlab_fprintf_f64_5(const char *fmt, int64_t n,
+                          double a, double b, double c, double d, double e);
+void matlab_fprintf_f64_6(const char *fmt, int64_t n,
+                          double a, double b, double c, double d, double e, double f);
+void matlab_fprintf_f64_7(const char *fmt, int64_t n,
+                          double a, double b, double c, double d, double e,
+                          double f, double g);
+void matlab_fprintf_f64_8(const char *fmt, int64_t n,
+                          double a, double b, double c, double d, double e,
+                          double f, double g, double h);
 double matlab_input_num(const char *prompt, int64_t plen);
 
 /* Timing & sleep.

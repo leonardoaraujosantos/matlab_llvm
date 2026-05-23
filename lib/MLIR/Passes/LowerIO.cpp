@@ -276,7 +276,7 @@ LogicalResult rewriteDispCall(Operation *Call, OpBuilder &B,
 LogicalResult rewriteFprintfCall(Operation *Call, OpBuilder &B,
                                  StringGlobals &Strings) {
   unsigned NOps = Call->getNumOperands();
-  if (NOps < 1 || NOps > 5) return failure();
+  if (NOps < 1 || NOps > 9) return failure();   /* fmt + up to 8 trailing values */
 
   MLIRContext *Ctx = B.getContext();
   auto I64 = IntegerType::get(Ctx, 64);
@@ -363,6 +363,10 @@ LogicalResult rewriteFprintfCall(Operation *Call, OpBuilder &B,
     case 3: Name = "matlab_fprintf_f64_2"; Sig.append({F64, F64}); break;
     case 4: Name = "matlab_fprintf_f64_3"; Sig.append({F64, F64, F64}); break;
     case 5: Name = "matlab_fprintf_f64_4"; Sig.append({F64, F64, F64, F64}); break;
+    case 6: Name = "matlab_fprintf_f64_5"; Sig.append({F64, F64, F64, F64, F64}); break;
+    case 7: Name = "matlab_fprintf_f64_6"; Sig.append({F64, F64, F64, F64, F64, F64}); break;
+    case 8: Name = "matlab_fprintf_f64_7"; Sig.append({F64, F64, F64, F64, F64, F64, F64}); break;
+    case 9: Name = "matlab_fprintf_f64_8"; Sig.append({F64, F64, F64, F64, F64, F64, F64, F64}); break;
     default: return failure();
   }
   auto Fn = getOrInsertRuntimeFunc(B, M, Name, VoidTy, Sig);
