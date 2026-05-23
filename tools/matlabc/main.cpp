@@ -2101,7 +2101,7 @@ static std::string buildReplPrelude(const std::string &Src) {
    * so a single Leaf lookup finds the file wherever it lives. */
   static const char *kToolboxDirs[] = {
     "comm", "rf", "optim", "mpc", "ident", "gads", "pde", "prop", "sym",
-    "stateflow", "antenna", "control", "stats", "images",
+    "stateflow", "antenna", "control", "stats", "images", "curvefit",
   };
   std::vector<std::string> Files;
   auto add = [&](const std::string &Leaf) {
@@ -2274,6 +2274,14 @@ static std::string buildReplPrelude(const std::string &Src) {
     {false, "projective2d",      "image_classdefs.m"},
     {false, "imref2d",           "image_classdefs.m"},
     {false, "fitgeotform2d",     "image_classdefs.m"},
+    /* Curve Fitting Toolbox Tier-1 — `curvefit_classdefs.m` holds the
+     * `cfit` fitted-model object (+ `fittype` / `fitoptions` carriers).
+     * `fit` is the builtin entry; any mention pulls the umbrella in. */
+    {false, "fit",               "curvefit_classdefs.m"},
+    {false, "cfit",              "curvefit_classdefs.m"},
+    {false, "fittype",           "curvefit_classdefs.m"},
+    {false, "fitoptions",        "curvefit_classdefs.m"},
+    {false, "coeffvalues",       "curvefit_classdefs.m"},
     /* mStateflow Tier 4c — `mstateflow_helpers.m` exposes the small
      * MATLAB-level surface (emit / save-op / restore-op / active /
      * reset) that lets a REPL session drive a chart_tick function
@@ -11114,6 +11122,8 @@ int main(int Argc, char **Argv) {
       "fitcknn", "fitcnb", "fitcdiscr", "fitctree", "fitcsvm", "fitcecoc", "ClassificationModel",
       "fitcensemble", "TreeBagger",
       "affine2d", "projective2d", "imref2d", "fitgeotform2d",
+      /* Curve Fitting Toolbox Tier-1 — `curvefit_classdefs.m` umbrella. */
+      "fit", "cfit", "fittype", "fitoptions", "coeffvalues",
       "arx", "ar", "armax", "oe", "bj",
       "iv4", "delayest", "compare", "predict", "resid", "goodnessOfFit",
     };
@@ -11265,6 +11275,11 @@ int main(int Argc, char **Argv) {
     if (ClsName == "affine2d" || ClsName == "projective2d" ||
         ClsName == "imref2d" || ClsName == "fitgeotform2d")
       return "image_classdefs.m";
+    /* Curve Fitting Toolbox umbrella. */
+    if (ClsName == "fit" || ClsName == "cfit" ||
+        ClsName == "fittype" || ClsName == "fitoptions" ||
+        ClsName == "coeffvalues")
+      return "curvefit_classdefs.m";
     return std::string();
   };
   for (const std::string &Cls : userMentionsExtClasses(Opts.InputPath)) {
@@ -11278,7 +11293,7 @@ int main(int Argc, char **Argv) {
      * before falling back to the legacy flat layout. */
     static const char *kToolboxDirs[] = {
       "comm", "rf", "optim", "mpc", "ident", "gads", "pde", "prop", "sym",
-      "stateflow", "antenna", "control", "stats", "images",
+      "stateflow", "antenna", "control", "stats", "images", "curvefit",
     };
     std::vector<std::string> Cands;
     for (const char *Tb : kToolboxDirs) {

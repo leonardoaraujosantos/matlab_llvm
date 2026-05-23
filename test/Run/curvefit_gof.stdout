@@ -1,0 +1,7 @@
+sse      = 0.000000
+rmse     = 0.000000
+dfe      = 5
+rsquare  = 1.000000
+numobs   = 8
+numparam = 3
+exitflag = 1

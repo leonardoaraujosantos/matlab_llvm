@@ -291,6 +291,7 @@ if(MATLAB_LLVM_WITH_MLIR)
     runtime/toolbox/gads/runtime_gads.cpp
     runtime/toolbox/stats/runtime_stats.cpp
     runtime/toolbox/images/runtime_images.cpp
+    runtime/toolbox/curvefit/runtime_curvefit.cpp
     runtime/toolbox/stateflow/runtime_mstateflow.cpp)
   if(MATLAB_LLVM_WITH_SYM)
     target_sources(matlabc PRIVATE runtime/toolbox/sym/runtime_sym.cpp)
@@ -371,6 +372,7 @@ foreach(_rt_test IN ITEMS linalg shape rng complex reduce signal stats image mor
     runtime/toolbox/gads/runtime_gads.cpp
     runtime/toolbox/stats/runtime_stats.cpp
     runtime/toolbox/images/runtime_images.cpp
+    runtime/toolbox/curvefit/runtime_curvefit.cpp
     runtime/toolbox/stateflow/runtime_mstateflow.cpp)
   target_include_directories(${_rt_target} PRIVATE
     ${CMAKE_SOURCE_DIR}/runtime
@@ -407,6 +409,7 @@ set_source_files_properties(
   runtime/toolbox/gads/runtime_gads.cpp
   runtime/toolbox/stats/runtime_stats.cpp
   runtime/toolbox/images/runtime_images.cpp
+  runtime/toolbox/curvefit/runtime_curvefit.cpp
   runtime/toolbox/rf/runtime_rf.cpp
   runtime/toolbox/prop/runtime_prop.cpp
   runtime/toolbox/stateflow/runtime_mstateflow.cpp

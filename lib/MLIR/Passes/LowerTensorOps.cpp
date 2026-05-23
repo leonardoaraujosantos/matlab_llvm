@@ -4964,6 +4964,18 @@ bool TensorLowering::rewriteBuiltinCalls() {
         {"matlab_ident_getcov",   "matlab_ident_getcov",   PtrTy, {PtrTy}},
         {"matlab_ident_getpvec",  "matlab_ident_getpvec",  PtrTy, {PtrTy}},
         {"matlab_ident_setpvec",  "matlab_ident_setpvec",  PtrTy, {PtrTy, PtrTy}},
+        /* ===== Curve Fitting Toolbox Tier-1 =====
+         * fit/feval/coeffvalues/gof/output/disp all take the cfit object
+         * (PtrTy) as the first operand; the model-tag string ('polyN')
+         * arrives as a matlab.const_char and is coerced to matlab_string*
+         * by the WantTy==PtrTy + const_char path below. */
+        {"matlab_curvefit_fit",         "matlab_curvefit_fit",         PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy}},
+        {"matlab_curvefit_fit_opts",    "matlab_curvefit_fit_opts",    PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy, PtrTy}},
+        {"matlab_curvefit_feval",       "matlab_curvefit_feval",       PtrTy, {PtrTy, PtrTy}},
+        {"matlab_curvefit_coeffvalues", "matlab_curvefit_coeffvalues", PtrTy, {PtrTy}},
+        {"matlab_curvefit_gof",         "matlab_curvefit_gof",         PtrTy, {PtrTy}},
+        {"matlab_curvefit_output",      "matlab_curvefit_output",      PtrTy, {PtrTy}},
+        {"matlab_curvefit_disp",        "matlab_curvefit_disp",        PtrTy, {PtrTy}},
       };
       bool matched = false;
       for (const auto &E : pde_table) {

@@ -2543,6 +2543,31 @@ void Lowerer::lowerStmt(const Stmt &St) {
                                    mlir::StringAttr::get(&MCtx, Fn));
           return emitUnreg("matlab.call_builtin", Av, PtrTy, Lc, {Cal});
         };
+        /* Curve Fitting Tier-1 — [f, gof] / [f, gof, output] = fit(x,y,'polyN').
+         * Alloc a cfit, populate it, then read back the goodness-of-fit and
+         * output structs from the populated object (the reader pattern,
+         * mirroring the stats [h,p,ci,stats] split — but object-sourced). */
+        if (Callee->Name == "fit" && C->Args.size() >= 3) {
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "cfit__cfit"));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTy, Lc, {CtorCal});
+          mlir::Value Xd = lowerExpr(*C->Args[0]);
+          mlir::Value Yd = lowerExpr(*C->Args[1]);
+          mlir::Value Md = lowerExpr(*C->Args[2]);
+          if (C->Args.size() >= 4) {               /* [f,gof,…] = fit(x,y,model,opts) */
+            mlir::Value Op = loadObjP(C->Args[3]);
+            callRT("matlab_curvefit_fit_opts", {Obj, Xd, Yd, Md, Op});
+          } else {
+            callRT("matlab_curvefit_fit", {Obj, Xd, Yd, Md});   /* populate; result ignored */
+          }
+          mlir::Value Gof  = callRT("matlab_curvefit_gof", {Obj});
+          mlir::Value Outp = callRT("matlab_curvefit_output", {Obj});
+          mlir::Value Outs[3] = {Obj, Gof, Outp};
+          for (size_t i = 0; i < A.LHS.size() && i < 3; ++i)
+            if (A.LHS[i]) lowerLValueStore(*A.LHS[i], Outs[i]);
+          return;
+        }
         /* [kest, L, P] = kalman(sys, Qn, Rn) — steady-state Kalman filter.
          * L = kalman gain, P = error covariance; kest (the estimator ss
          * object) is returned as the source object as a placeholder. */
@@ -5425,6 +5450,51 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
           }
           return Obj;
         }
+        /* Curve Fitting Tier-2 — fitoptions('Name', val, …).  A classdef
+         * carrier; scan name-value pairs from index 0.  StartPoint / Lower /
+         * Upper / Weights are matrices (_set_mat); Robust maps a string to a
+         * RobustCode scalar (_set_f64); Method is accepted-and-ignored. */
+        if (CD->Name == "fitoptions") {
+          auto F64 = mlir::Float64Type::get(&MCtx);
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "fitoptions__fitoptions"));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTyConst, L, {CtorCal});
+          for (size_t i = 0; i + 1 < C.Args.size(); i += 2) {
+            std::string key;
+            if (auto *CL = dynamic_cast<const CharLiteral *>(C.Args[i])) key = CL->Value;
+            else if (auto *SL = dynamic_cast<const StringLiteral *>(C.Args[i])) key = SL->Value;
+            if (key.empty() || key == "Method") continue;
+            if (key == "Robust") {
+              std::string rv;
+              if (auto *CL = dynamic_cast<const CharLiteral *>(C.Args[i + 1])) rv = CL->Value;
+              else if (auto *SL = dynamic_cast<const StringLiteral *>(C.Args[i + 1])) rv = SL->Value;
+              double code = 0.0;
+              if (rv == "Bisquare" || rv == "bisquare" || rv == "on" || rv == "On") code = 1.0;
+              else if (rv == "LAR" || rv == "lar") code = 2.0;
+              mlir::Value CodeV = emitUnreg("matlab.const_float", {}, F64, L,
+                  {mlir::NamedAttribute(mlir::StringAttr::get(&MCtx, "value"),
+                                        mlir::FloatAttr::get(F64, code))});
+              mlir::Value NameV = emitFieldNameChar("RobustCode", L);
+              mlir::NamedAttribute SetCal(mlir::StringAttr::get(&MCtx, "callee"),
+                                          mlir::StringAttr::get(&MCtx, "matlab_obj_set_f64"));
+              emitUnregOp("matlab.call_builtin", {Obj, NameV, CodeV},
+                          {mlir::NoneType::get(&MCtx)}, L, {SetCal});
+              continue;
+            }
+            bool isMat = (key == "StartPoint" || key == "Lower" ||
+                          key == "Upper" || key == "Weights");
+            mlir::Value Val = lowerExpr(*C.Args[i + 1]);
+            mlir::Value NameV = emitFieldNameChar(key, L);
+            mlir::NamedAttribute SetCal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, isMat ? "matlab_obj_set_mat"
+                                                   : "matlab_obj_set_f64"));
+            emitUnregOp("matlab.call_builtin", {Obj, NameV, Val},
+                        {mlir::NoneType::get(&MCtx)}, L, {SetCal});
+          }
+          return Obj;
+        }
         /* Image Processing Tier-3 — affine2d(M) / projective2d(M): alloc the
          * transform shell and write its 3×3 forward matrix T (Kind 1/2 is
          * the ctor default). */
@@ -7201,6 +7271,38 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
               mlir::StringAttr::get(&MCtx, "callee"),
               mlir::StringAttr::get(&MCtx, "matlab_image_fitgeo_init"));
           emitUnregOp("matlab.call_builtin", {Obj, Mv, Fx, Ty},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Obj;
+        }
+
+        /* Curve Fitting Tier-1 — fit(x, y, 'polyN'): alloc a cfit shell and
+         * populate it via the runtime (center-and-scale + Vandermonde LS).
+         * The model-tag string is materialised by the pde_table const_char
+         * coercion.  The single-return form (`f = fit(...)` / bare call);
+         * the [f,gof,output] multi-return form is handled in the assignment
+         * lowering. */
+        if (Nm == "fit" && C.Args.size() >= 3) {
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "cfit__cfit"));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTy, L, {CtorCal});
+          mlir::Value Xd = lowerExpr(*C.Args[0]);
+          mlir::Value Yd = lowerExpr(*C.Args[1]);
+          mlir::Value Md = lowerExpr(*C.Args[2]);
+          if (C.Args.size() >= 4) {                /* fit(x,y,model,opts) */
+            mlir::Value Op = lowerExpr(*C.Args[3]);
+            if (Op.getType() != PtrTy) Op.setType(PtrTy);
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_curvefit_fit_opts"));
+            emitUnregOp("matlab.call_builtin", {Obj, Xd, Yd, Md, Op},
+                        {mlir::NoneType::get(&MCtx)}, L, {Cal});
+            return Obj;
+          }
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_curvefit_fit"));
+          emitUnregOp("matlab.call_builtin", {Obj, Xd, Yd, Md},
                       {mlir::NoneType::get(&MCtx)}, L, {Cal});
           return Obj;
         }
@@ -9504,9 +9606,17 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
       if (auto *NE = dynamic_cast<const NameExpr *>(C.Callee))
         if (NE->Ref && NE->Ref->PinnedClass) {
           const ClassDef *Owner = nullptr;
+          /* `step` is the System-Object idiom; `feval` is the Curve-Fitting
+           * idiom (`f(xq)` on a `cfit` evaluates the model). Whichever the
+           * pinned class defines becomes the paren-call target. */
+          const char *MethName = nullptr;
           for (const ClassDef *CC = NE->Ref->PinnedClass; CC; CC = CC->Super) {
             for (const Function *Mth : CC->Methods)
-              if (Mth && Mth->Name == "step") { Owner = CC; break; }
+              if (Mth && (Mth->Name == "step" || Mth->Name == "feval")) {
+                Owner = CC;
+                MethName = (Mth->Name == "feval") ? "feval" : "step";
+                break;
+              }
             if (Owner) break;
           }
           if (Owner) {
@@ -9515,7 +9625,7 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
             llvm::SmallVector<mlir::Value, 4> Args;
             Args.push_back(Recv);
             for (const Expr *A : C.Args) if (A) Args.push_back(lowerExpr(*A));
-            std::string Callee = std::string(Owner->Name) + "__step";
+            std::string Callee = std::string(Owner->Name) + "__" + MethName;
             mlir::NamedAttribute Cal(
                 mlir::StringAttr::get(&MCtx, "callee"),
                 mlir::StringAttr::get(&MCtx, Callee));
