@@ -105,10 +105,12 @@ for m in "$TESTDIR"/*.m; do
   tmpll="$(mktemp -t mlc.XXXXXX).ll"
   tmpbin="$(mktemp -t mlc.XXXXXX).out"
 
-  if ! "$MATLABC" -emit-llvm "$m" > "$tmpll" 2>/dev/null; then
+  if ! "$MATLABC" -emit-llvm "$m" > "$tmpll" 2>"$tmpll.err"; then
     echo "FAIL $base: matlabc -emit-llvm errored"
+    sed 's/^/  /' "$tmpll.err" | head -8
+    rm -f "$tmpll.err"
     fail=$((fail+1))
-    rm -f "$tmpll" "$tmpbin"; continue
+    rm -f "$tmpll" "$tmpll.err" "$tmpbin"; continue
   fi
   # Per-test opt-in for the Cairo plot runtime (precompiled objects above).
   # If the marker is present but cairo isn't available, SKIP rather than fail.
@@ -117,7 +119,7 @@ for m in "$TESTDIR"/*.m; do
   if [[ -e "${m%.m}.requires-plot" ]]; then
     if [[ "$PLOT_OK" != 1 ]]; then
       echo "SKIP $base (requires-plot, no cairo)"
-      rm -f "$tmpll" "$tmpbin"; continue
+      rm -f "$tmpll" "$tmpll.err" "$tmpbin"; continue
     fi
     plot_objs=( "${PLOT_OBJS[@]}" )
     plot_libs=( "${PLOT_LIBS[@]}" )
@@ -144,7 +146,7 @@ for m in "$TESTDIR"/*.m; do
     done
     if [[ ! -e "$symo" || -z "$symlibdir" ]]; then
       echo "SKIP $base (requires-sym, no SymPP build)"
-      rm -f "$tmpll" "$tmpbin"; continue
+      rm -f "$tmpll" "$tmpll.err" "$tmpbin"; continue
     fi
     sym_objs=( "$symo" )
     sym_libs=( -L"$symlibdir" -lsympp -Wl,-rpath,"$symlibdir" )
@@ -163,7 +165,7 @@ for m in "$TESTDIR"/*.m; do
               -o "$tmpbin" 2>/dev/null; then
     echo "FAIL $base: clang link failed"
     fail=$((fail+1))
-    rm -f "$tmpll" "$tmpbin"; continue
+    rm -f "$tmpll" "$tmpll.err" "$tmpbin"; continue
   fi
   # Run from TESTDIR so a fixture referenced by a path relative to the test
   # directory (e.g. fixtures/rf/test_amp.s2p) resolves on every platform —
@@ -171,7 +173,7 @@ for m in "$TESTDIR"/*.m; do
   got="$(cd "$TESTDIR" && "$tmpbin")" || {
     echo "FAIL $base: non-zero exit"
     fail=$((fail+1))
-    rm -f "$tmpll" "$tmpbin"; continue
+    rm -f "$tmpll" "$tmpll.err" "$tmpbin"; continue
   }
   # If a .sorted file exists alongside the .m, compare against the expected
   # output after sorting both sides (useful for parfor where iteration
@@ -195,7 +197,7 @@ for m in "$TESTDIR"/*.m; do
     echo "FAIL $base: stdout mismatch"
     "${ND[@]}" "$exp" <(printf '%s\n' "$got") | sed 's/^/  /'
   fi
-  rm -f "$tmpll" "$tmpbin"
+  rm -f "$tmpll" "$tmpll.err" "$tmpbin"
 done
 
 echo "----"
