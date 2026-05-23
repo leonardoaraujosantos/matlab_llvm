@@ -205,7 +205,9 @@ jobs:
       - name: Set up LLVM 22 + build deps + verilator + cocotb deps
         uses: ./.github/actions/setup-llvm
         with:
-          extra-apt-packages: verilator iverilog gtkwave python3-venv
+          # libgmp-dev / libmpfr-dev are SymPP's transitive deps (needed both
+          # to build SymPP and to link the symbolic examples in the sweep).
+          extra-apt-packages: verilator iverilog gtkwave python3-venv libgmp-dev libmpfr-dev
 
       - name: Install cocotb (Python)
         run: |
@@ -220,6 +222,28 @@ jobs:
           mlir-opt --version || true
           verilator --version
           python3 -c 'import cocotb; print("cocotb", cocotb.__version__)'
+
+      # Build the Symbolic Math Toolbox backend (SymPP) so the examples sweep can
+      # link + run the symbolic examples instead of SKIPping them.  Shares the
+      # SYMPP_REF cache with the full job; bump the key suffix to pull a newer SymPP.
+      - name: Restore SymPP
+        id: sympp-cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/sympp_install
+          key: sympp-${{ runner.os }}-${{ runner.arch }}-v1
+      - name: Build SymPP (if not cached)
+        if: steps.sympp-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euxo pipefail
+          git clone --depth 1 https://github.com/leonardoaraujosantos/SymPP /tmp/SymPP
+          # -DSYMPP_BUILD_TESTS=OFF skips the Catch2 FetchContent (a slow
+          # network fetch we don't need — matlabc only links libsympp).
+          cmake -S /tmp/SymPP -B /tmp/SymPP/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DSYMPP_BUILD_TESTS=OFF
+          cmake --build /tmp/SymPP/build -j"$(nproc)"
+          cmake --install /tmp/SymPP/build --prefix /tmp/sympp_install
+          test -f /tmp/sympp_install/lib/cmake/SymPP/SymPPConfig.cmake
 
       - name: Restore ccache
         uses: actions/cache@v4
@@ -240,6 +264,8 @@ jobs:
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DMATLAB_LLVM_WITH_MLIR=ON \
             -DMATLAB_LLVM_WITH_PLOT=ON \
+            -DMATLAB_LLVM_WITH_SYM=ON \
+            -DSymPP_DIR=/tmp/sympp_install/lib/cmake/SymPP \
             -DLLVM_DIR="$LLVM_DIR" \
             -DMLIR_DIR="$MLIR_DIR"
 
@@ -269,6 +295,14 @@ jobs:
         run: |
           ctest --test-dir build --output-on-failure \
             -R '^(cocotb-tests|flowchart-emit-(chart|diagram)-cocotb|flowchart-emit-subsystem-sv-(verilator|cosim))$'
+
+      # Examples sweep — compile/link/run every in-scope examples/**/*.m through
+      # the AOT path and gate on regressions vs test/Examples/known_failures.txt.
+      # Scheduled-only (this job), so it runs nightly even with no code change;
+      # the writeup lands in the Actions job summary.  SymPP is built above and
+      # WITH_SYM is on, so the symbolic examples link + run (not SKIPped).
+      - name: Examples sweep (compile/run all examples)
+        run: bash test/Examples/run_sweep.sh "$PWD/build/matlabc"
 
       - name: ccache stats
         if: always()
