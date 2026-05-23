@@ -22,9 +22,11 @@
 #include "matlab_runtime.h"
 #include "runtime_internal.h"
 
+#include <ctype.h>
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <algorithm>
