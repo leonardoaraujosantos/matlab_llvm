@@ -44,7 +44,7 @@ runs:
           libcairo2-dev \
           libzstd-dev libcurl4-openssl-dev libedit-dev \
           libxml2-dev zlib1g-dev libtinfo-dev \
-          python3 python3-pip \
+          python3 python3-pip python3-numpy \
           ${{ inputs.extra-apt-packages }}
 
     # ----- 1) Prebuilt tarball (primary, ~30s) ---------------------------

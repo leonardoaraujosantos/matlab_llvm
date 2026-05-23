@@ -37,7 +37,11 @@ if [[ "$STRICT" == "1" ]]; then
   WFLAGS=(-Wall -Wextra -Werror
           -Wno-unused-variable -Wno-unused-but-set-variable
           -Wno-unused-parameter -Wno-unused-function
-          -Wno-parentheses-equality)
+          -Wno-parentheses-equality
+          # Designated-initializer structs (e.g. matlab_dbg_state) omit
+          # zero-defaulted trailing fields on purpose; clang's -Wextra flags
+          # this under libstdc++ but it is not a real defect.
+          -Wno-missing-field-initializers)
   LABEL_SUFFIX=" strict"
 else
   WFLAGS=(-w)

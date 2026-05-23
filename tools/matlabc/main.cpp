@@ -7162,6 +7162,13 @@ int runDap(const std::string &CLIPath) {
   }
   close(Pipe[1]);
   DebuggeeOutFd = Pipe[0];
+  /* The captured stdout is now a pipe, not a tty.  glibc (Linux)
+   * full-buffers a non-tty stdout, so JIT'd `disp()` / `fprintf` output
+   * would sit in the 4 KB buffer and never reach the DAP reader until a
+   * fill or process exit — the REPL `evaluate` output events time out on
+   * Linux (macOS libc flushes more eagerly, so it passed locally).  Force
+   * line-buffering so each printed line surfaces to the pipe promptly. */
+  setvbuf(stdout, nullptr, _IOLBF, 0);
 
   /* Same redirect for stderr. The DAP server's own diagnostics still
    * need an unredirected stderr — std::cerr lines emitted before
