@@ -221,11 +221,16 @@ void Resolver::registerBuiltins() {
     "matlab_stats_fitknn_init", "matlab_stats_fitnb_init", "matlab_stats_fitlda_init",
     "matlab_stats_fittree_init", "matlab_stats_fitsvm_init", "matlab_stats_fitecoc_init",
     "matlab_stats_clf_predict", "matlab_stats_confusionmat",
-    /* ===== Curve Fitting Toolbox Tier-1 + Tier-2 ===== */
+    /* ===== Curve Fitting Toolbox Tier-1 + Tier-2 + Tier-3 ===== */
     "fit", "feval", "coeffvalues",
+    "differentiate", "integrate", "confint", "formula", "numcoeffs",
     "matlab_curvefit_fit", "matlab_curvefit_fit_opts", "matlab_curvefit_feval",
     "matlab_curvefit_coeffvalues", "matlab_curvefit_gof",
     "matlab_curvefit_output", "matlab_curvefit_disp",
+    "matlab_curvefit_fittype_init", "matlab_curvefit_fit_custom",
+    "matlab_curvefit_confint", "matlab_curvefit_differentiate",
+    "matlab_curvefit_integrate", "matlab_curvefit_numcoeffs",
+    "matlab_curvefit_formula",
     /* MPC Tier-4 §5.4 — standalone active-set QP solver. */
     "matlab_mpc_active_set",
     /* MPC Tier-4 §5.1/5.2/5.3 — explicit MPC. */
@@ -1502,6 +1507,9 @@ void Resolver::resolveStmt(Stmt &St, Scope *S) {
           }
           if (NX->Name == "fitoptions") {
             if (ClassDef *C = classByName("fitoptions")) return C;
+          }
+          if (NX->Name == "fittype") {
+            if (ClassDef *C = classByName("fittype")) return C;
           }
           /* User function whose body returns a class-pinned value —
            * propagate that pin to the caller's LHS. */

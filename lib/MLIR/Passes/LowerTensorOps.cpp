@@ -4976,6 +4976,14 @@ bool TensorLowering::rewriteBuiltinCalls() {
         {"matlab_curvefit_gof",         "matlab_curvefit_gof",         PtrTy, {PtrTy}},
         {"matlab_curvefit_output",      "matlab_curvefit_output",      PtrTy, {PtrTy}},
         {"matlab_curvefit_disp",        "matlab_curvefit_disp",        PtrTy, {PtrTy}},
+        /* Tier-3 — custom equations + postprocessing. */
+        {"matlab_curvefit_fittype_init", "matlab_curvefit_fittype_init", PtrTy, {PtrTy, PtrTy}},
+        {"matlab_curvefit_fit_custom",   "matlab_curvefit_fit_custom",   PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy}},
+        {"matlab_curvefit_confint",        "matlab_curvefit_confint",        PtrTy, {PtrTy, F64}},
+        {"matlab_curvefit_differentiate",  "matlab_curvefit_differentiate",  PtrTy, {PtrTy, PtrTy}},
+        {"matlab_curvefit_integrate",      "matlab_curvefit_integrate",      PtrTy, {PtrTy, PtrTy}},
+        {"matlab_curvefit_numcoeffs",      "matlab_curvefit_numcoeffs",      PtrTy, {PtrTy}},
+        {"matlab_curvefit_formula",        "matlab_curvefit_formula",        PtrTy, {PtrTy}},
       };
       bool matched = false;
       for (const auto &E : pde_table) {

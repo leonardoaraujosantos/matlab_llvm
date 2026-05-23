@@ -30,6 +30,8 @@ classdef cfit
         AdjRsquare
         RMSE
         Resid matrix
+        Xdata matrix
+        Expr
     end
     methods
         function obj = cfit()
@@ -46,6 +48,8 @@ classdef cfit
             obj.AdjRsquare = 0;
             obj.RMSE       = 0;
             obj.Resid      = zeros(1, 1);
+            obj.Xdata      = zeros(1, 1);
+            obj.Expr       = 0;
         end
         function y = feval(obj, xq)
             y = matlab_curvefit_feval(obj, xq);
@@ -53,8 +57,42 @@ classdef cfit
         function c = coeffvalues(obj)
             c = matlab_curvefit_coeffvalues(obj);
         end
+        function d = differentiate(obj, xq)
+            d = matlab_curvefit_differentiate(obj, xq);
+        end
+        function v = integrate(obj, xq)
+            v = matlab_curvefit_integrate(obj, xq);
+        end
+        function ci = confint(obj)
+            ci = matlab_curvefit_confint(obj, 0.95);
+        end
+        function n = numcoeffs(obj)
+            n = matlab_curvefit_numcoeffs(obj);
+        end
+        function s = formula(obj)
+            s = matlab_curvefit_formula(obj);
+        end
         function disp(obj)
             matlab_curvefit_disp(obj);
+        end
+    end
+end
+
+% fittype — Tier-3 custom-equation descriptor.  fittype('a*exp(-b*x)+c') is
+% intercepted in Lowering.cpp (constructor path) → matlab_curvefit_fittype_init
+% stores the equation string + coefficient count.  fit(x,y,ft) reads it and
+% runs the finite-difference Levenberg-Marquardt.
+classdef fittype
+    properties
+        Expr
+        NumCoeffs
+        ModelType
+    end
+    methods
+        function obj = fittype()
+            obj.Expr      = 0;
+            obj.NumCoeffs = 0;
+            obj.ModelType = 100;
         end
     end
 end

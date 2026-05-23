@@ -2554,12 +2554,20 @@ void Lowerer::lowerStmt(const Stmt &St) {
           mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTy, Lc, {CtorCal});
           mlir::Value Xd = lowerExpr(*C->Args[0]);
           mlir::Value Yd = lowerExpr(*C->Args[1]);
-          mlir::Value Md = lowerExpr(*C->Args[2]);
-          if (C->Args.size() >= 4) {               /* [f,gof,…] = fit(x,y,model,opts) */
-            mlir::Value Op = loadObjP(C->Args[3]);
-            callRT("matlab_curvefit_fit_opts", {Obj, Xd, Yd, Md, Op});
+          const ClassDef *MdlCls = nullptr;
+          if (auto *MN = dynamic_cast<const NameExpr *>(C->Args[2]))
+            if (MN->Ref) MdlCls = MN->Ref->PinnedClass;
+          if (MdlCls && llvm::StringRef(MdlCls->Name) == "fittype") {
+            mlir::Value Ft = loadObjP(C->Args[2]);
+            callRT("matlab_curvefit_fit_custom", {Obj, Xd, Yd, Ft});
           } else {
-            callRT("matlab_curvefit_fit", {Obj, Xd, Yd, Md});   /* populate; result ignored */
+            mlir::Value Md = lowerExpr(*C->Args[2]);
+            if (C->Args.size() >= 4) {             /* [f,gof,…] = fit(x,y,model,opts) */
+              mlir::Value Op = loadObjP(C->Args[3]);
+              callRT("matlab_curvefit_fit_opts", {Obj, Xd, Yd, Md, Op});
+            } else {
+              callRT("matlab_curvefit_fit", {Obj, Xd, Yd, Md});   /* populate */
+            }
           }
           mlir::Value Gof  = callRT("matlab_curvefit_gof", {Obj});
           mlir::Value Outp = callRT("matlab_curvefit_output", {Obj});
@@ -5495,6 +5503,22 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
           }
           return Obj;
         }
+        /* Curve Fitting Tier-3 — fittype('a*exp(-b*x)+c'): alloc the custom-
+         * equation descriptor and store the equation string (const_char →
+         * matlab_string by the pde_table coercion). */
+        if (CD->Name == "fittype" && C.Args.size() == 1) {
+          mlir::NamedAttribute CtorCal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "fittype__fittype"));
+          mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTyConst, L, {CtorCal});
+          mlir::Value Eq = lowerExpr(*C.Args[0]);
+          mlir::NamedAttribute Cal(
+              mlir::StringAttr::get(&MCtx, "callee"),
+              mlir::StringAttr::get(&MCtx, "matlab_curvefit_fittype_init"));
+          emitUnregOp("matlab.call_builtin", {Obj, Eq},
+                      {mlir::NoneType::get(&MCtx)}, L, {Cal});
+          return Obj;
+        }
         /* Image Processing Tier-3 — affine2d(M) / projective2d(M): alloc the
          * transform shell and write its 3×3 forward matrix T (Kind 1/2 is
          * the ctor default). */
@@ -7288,6 +7312,21 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
           mlir::Value Obj = emitUnreg("matlab.call", {}, PtrTy, L, {CtorCal});
           mlir::Value Xd = lowerExpr(*C.Args[0]);
           mlir::Value Yd = lowerExpr(*C.Args[1]);
+          /* Custom equation: a fittype object as the model arg routes to the
+           * finite-difference LM (matlab_curvefit_fit_custom). */
+          const ClassDef *MdlCls = nullptr;
+          if (auto *MN = dynamic_cast<const NameExpr *>(C.Args[2]))
+            if (MN->Ref) MdlCls = MN->Ref->PinnedClass;
+          if (MdlCls && llvm::StringRef(MdlCls->Name) == "fittype") {
+            mlir::Value Ft = lowerExpr(*C.Args[2]);
+            if (Ft.getType() != PtrTy) Ft.setType(PtrTy);
+            mlir::NamedAttribute Cal(
+                mlir::StringAttr::get(&MCtx, "callee"),
+                mlir::StringAttr::get(&MCtx, "matlab_curvefit_fit_custom"));
+            emitUnregOp("matlab.call_builtin", {Obj, Xd, Yd, Ft},
+                        {mlir::NoneType::get(&MCtx)}, L, {Cal});
+            return Obj;
+          }
           mlir::Value Md = lowerExpr(*C.Args[2]);
           if (C.Args.size() >= 4) {                /* fit(x,y,model,opts) */
             mlir::Value Op = lowerExpr(*C.Args[3]);

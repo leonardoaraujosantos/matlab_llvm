@@ -88,6 +88,15 @@ static matlab_mat *cf_rowmat(const std::vector<double> &v) {
     return m;
 }
 
+/* Deep-copy a matlab_mat (preserving shape). */
+static matlab_mat *cf_copymat(const matlab_mat *m) {
+    if (!m) return mat_alloc(0, 0);
+    matlab_mat *o = mat_alloc(m->rows, m->cols);
+    int64_t n = m->rows * m->cols;
+    for (int64_t i = 0; i < n; ++i) o->data[i] = m->data[i];
+    return o;
+}
+
 /* Parse a 'polyN' model tag → degree N (1..9).  Returns -1 if not poly. */
 static int cf_poly_degree(const std::string &tag) {
     if (tag.size() == 5 && tag.compare(0, 4, "poly") == 0) {
@@ -457,6 +466,252 @@ static void cf_fit_nonlinear(matlab_obj *obj, int id, int ncoef,
     matlab_obj_set_f64(obj, "AdjRsquare", 10, r2adj);
     matlab_obj_set_f64(obj, "RMSE", 4, rmse);
     matlab_obj_set_mat(obj, "Resid", 5, resid);
+    matlab_obj_set_mat(obj, "Xdata", 5, cf_rowmat(x));   /* for confint / differentiate */
+}
+
+/* ===== Tier-3: custom equations + fit postprocessing ===================== *
+ * Custom models (id 100) carry the user equation string; a small recursive-
+ * descent evaluator computes the value, and the LM uses a finite-difference
+ * Jacobian (no analytic derivative of an arbitrary expression).  confint
+ * needs a Student-t inverse, replicated here (the stats `stinv` is static). */
+
+extern "C" struct matlab_string_s *matlab_string_from_literal(const char *src, int64_t n);
+extern "C" void   matlab_obj_set_string(matlab_obj *o, const char *name, int64_t len, void *str);
+extern "C" void  *matlab_obj_get_string(matlab_obj *o, const char *name, int64_t len);
+
+/* --- Student-t CDF + inverse (replicated from runtime_stats stinv) ------- */
+static double cf_betacf(double a, double b, double x) {
+    const int MAXIT = 200; const double EPS = 1e-15, FPMIN = 1e-300;
+    double qab = a + b, qap = a + 1.0, qam = a - 1.0;
+    double c = 1.0, d = 1.0 - qab * x / qap;
+    if (fabs(d) < FPMIN) d = FPMIN;
+    d = 1.0 / d; double h = d;
+    for (int m = 1; m <= MAXIT; ++m) {
+        double mm = static_cast<double>(m), m2 = 2.0 * mm;
+        double aa = mm * (b - mm) * x / ((qam + m2) * (a + m2));
+        d = 1.0 + aa * d; if (fabs(d) < FPMIN) d = FPMIN;
+        c = 1.0 + aa / c; if (fabs(c) < FPMIN) c = FPMIN;
+        d = 1.0 / d; h *= d * c;
+        aa = -(a + mm) * (qab + mm) * x / ((a + m2) * (qap + m2));
+        d = 1.0 + aa * d; if (fabs(d) < FPMIN) d = FPMIN;
+        c = 1.0 + aa / c; if (fabs(c) < FPMIN) c = FPMIN;
+        d = 1.0 / d; double del = d * c; h *= del;
+        if (fabs(del - 1.0) < EPS) break;
+    }
+    return h;
+}
+static double cf_betai(double a, double b, double x) {
+    if (x <= 0.0) return 0.0;
+    if (x >= 1.0) return 1.0;
+    double bt = exp(lgamma(a + b) - lgamma(a) - lgamma(b) +
+                    a * log(x) + b * log(1.0 - x));
+    if (x < (a + 1.0) / (a + b + 2.0)) return bt * cf_betacf(a, b, x) / a;
+    return 1.0 - bt * cf_betacf(b, a, 1.0 - x) / b;
+}
+static double cf_tcdf(double t, double nu) {
+    double x = nu / (nu + t * t);
+    double ib = 0.5 * cf_betai(nu / 2.0, 0.5, x);
+    return (t > 0.0) ? 1.0 - ib : ib;
+}
+static double cf_tinv(double p, double nu) {
+    if (p <= 0.0) return -INFINITY;
+    if (p >= 1.0) return INFINITY;
+    double lo = -1e4, hi = 1e4;
+    for (int it = 0; it < 200; ++it) {
+        double mid = 0.5 * (lo + hi);
+        if (cf_tcdf(mid, nu) < p) lo = mid; else hi = mid;
+    }
+    return 0.5 * (lo + hi);
+}
+
+/* --- recursive-descent evaluator for a custom equation string ----------- */
+static bool cf_is_func(const std::string &id) {
+    static const char *F[] = {"exp", "log", "log10", "sqrt", "sin", "cos",
+                              "tan", "tanh", "abs", "sinh", "cosh", "atan", nullptr};
+    for (int i = 0; F[i]; ++i) if (id == F[i]) return true;
+    return false;
+}
+struct CfEval {
+    const char *s; size_t pos, n;
+    const std::vector<std::string> &nm; const double *vals; double xval;
+    CfEval(const std::string &src, const std::vector<std::string> &names,
+           const double *v, double x)
+        : s(src.c_str()), pos(0), n(src.size()), nm(names), vals(v), xval(x) {}
+    void skip() { while (pos < n && (s[pos] == ' ' || s[pos] == '\t')) ++pos; }
+    double parse() { return expr(); }
+    double expr() {
+        double v = term();
+        for (;;) { skip(); char c = (pos < n) ? s[pos] : '\0';
+            if (c == '+') { ++pos; v += term(); }
+            else if (c == '-') { ++pos; v -= term(); }
+            else break; }
+        return v;
+    }
+    double term() {
+        double v = powf_();
+        for (;;) { skip(); char c = (pos < n) ? s[pos] : '\0';
+            if (c == '*') { ++pos; v *= powf_(); }
+            else if (c == '/') { ++pos; v /= powf_(); }
+            else break; }
+        return v;
+    }
+    double powf_() {
+        double v = unary();
+        skip();
+        if (pos < n && (s[pos] == '^' || (s[pos] == '.' && pos + 1 < n && s[pos + 1] == '^'))) {
+            pos += (s[pos] == '.') ? 2 : 1;
+            return pow(v, powf_());
+        }
+        return v;
+    }
+    double unary() {
+        skip();
+        if (pos < n && s[pos] == '-') { ++pos; return -unary(); }
+        if (pos < n && s[pos] == '+') { ++pos; return unary(); }
+        return atom();
+    }
+    double atom() {
+        skip();
+        if (pos < n && s[pos] == '(') { ++pos; double v = expr(); skip();
+            if (pos < n && s[pos] == ')') ++pos; return v; }
+        if (pos < n && (isdigit(static_cast<unsigned char>(s[pos])) || s[pos] == '.')) {
+            char *end = nullptr; double v = strtod(s + pos, &end);
+            pos = static_cast<size_t>(end - s); return v;
+        }
+        size_t st = pos;
+        while (pos < n && (isalnum(static_cast<unsigned char>(s[pos])) || s[pos] == '_')) ++pos;
+        std::string id(s + st, s + pos);
+        skip();
+        if (pos < n && s[pos] == '(') {
+            ++pos; double a = expr(); skip(); if (pos < n && s[pos] == ')') ++pos;
+            if (id == "exp") return exp(a);   if (id == "log") return log(a);
+            if (id == "log10") return log10(a); if (id == "sqrt") return sqrt(a);
+            if (id == "sin") return sin(a);   if (id == "cos") return cos(a);
+            if (id == "tan") return tan(a);   if (id == "tanh") return tanh(a);
+            if (id == "abs") return fabs(a);  if (id == "sinh") return sinh(a);
+            if (id == "cosh") return cosh(a); if (id == "atan") return atan(a);
+            return 0.0;
+        }
+        if (id == "x") return xval;
+        if (id == "pi") return M_PI;
+        if (id == "e") return M_E;
+        for (size_t i = 0; i < nm.size(); ++i) if (nm[i] == id) return vals[i];
+        return 0.0;
+    }
+};
+static double cf_expr_eval(const std::string &src, const std::vector<std::string> &nm,
+                          const double *vals, double x) {
+    CfEval e(src, nm, vals, x); return e.parse();
+}
+/* Coefficient names = identifiers that aren't x/pi/e or a function call,
+ * collected unique + sorted (MATLAB lists coefficients alphabetically). */
+static std::vector<std::string> cf_extract_coeffs(const std::string &src) {
+    std::vector<std::string> out; size_t i = 0, n = src.size();
+    while (i < n) {
+        if (isalpha(static_cast<unsigned char>(src[i])) || src[i] == '_') {
+            size_t st = i;
+            while (i < n && (isalnum(static_cast<unsigned char>(src[i])) || src[i] == '_')) ++i;
+            std::string id = src.substr(st, i - st);
+            size_t j = i; while (j < n && (src[j] == ' ' || src[j] == '\t')) ++j;
+            bool isfn = (j < n && src[j] == '(');
+            if (!isfn && id != "x" && id != "pi" && id != "e" && !cf_is_func(id)) {
+                bool dup = false; for (const auto &c : out) if (c == id) { dup = true; break; }
+                if (!dup) out.push_back(id);
+            }
+        } else ++i;
+    }
+    std::sort(out.begin(), out.end());
+    return out;
+}
+/* Finite-difference Levenberg-Marquardt for a custom equation. */
+static void cf_lm_custom(const std::string &eqn, const std::vector<std::string> &nm,
+                         const std::vector<double> &x, const std::vector<double> &y,
+                         std::vector<double> &p) {
+    int k = static_cast<int>(p.size());
+    int64_t n = static_cast<int64_t>(x.size());
+    auto cost = [&](const std::vector<double> &pp) -> double {
+        double s = 0.0;
+        for (int64_t i = 0; i < n; ++i) {
+            double e = y[static_cast<size_t>(i)] - cf_expr_eval(eqn, nm, pp.data(), x[static_cast<size_t>(i)]);
+            s += e * e;
+        }
+        return s;
+    };
+    double lambda = 1e-3, c = cost(p);
+    for (int iter = 0; iter < 200; ++iter) {
+        std::vector<double> H(static_cast<size_t>(k * k), 0.0), g(static_cast<size_t>(k), 0.0), gr(static_cast<size_t>(k));
+        for (int64_t i = 0; i < n; ++i) {
+            double f0 = cf_expr_eval(eqn, nm, p.data(), x[static_cast<size_t>(i)]);
+            double e = y[static_cast<size_t>(i)] - f0;
+            for (int a = 0; a < k; ++a) {
+                double h = 1e-6 * (fabs(p[static_cast<size_t>(a)]) + 1e-6);
+                std::vector<double> pp = p; pp[static_cast<size_t>(a)] += h;
+                gr[static_cast<size_t>(a)] = (cf_expr_eval(eqn, nm, pp.data(), x[static_cast<size_t>(i)]) - f0) / h;
+            }
+            for (int a = 0; a < k; ++a) {
+                g[static_cast<size_t>(a)] += gr[static_cast<size_t>(a)] * e;
+                for (int bb = 0; bb < k; ++bb)
+                    H[static_cast<size_t>(a * k + bb)] += gr[static_cast<size_t>(a)] * gr[static_cast<size_t>(bb)];
+            }
+        }
+        bool improved = false;
+        for (int tries = 0; tries < 12 && !improved; ++tries) {
+            std::vector<double> A = H, dp = g;
+            for (int a = 0; a < k; ++a) A[static_cast<size_t>(a * k + a)] += lambda * (H[static_cast<size_t>(a * k + a)] + 1e-12);
+            if (!cf_solve(A, dp, k)) { lambda *= 10.0; continue; }
+            std::vector<double> pn = p;
+            for (int a = 0; a < k; ++a) pn[static_cast<size_t>(a)] += dp[static_cast<size_t>(a)];
+            double cn = cost(pn);
+            if (cn < c) { p = pn; c = cn; lambda *= 0.3; improved = true; }
+            else lambda *= 10.0;
+        }
+        if (!improved) break;
+        if (lambda > 1e12) break;
+    }
+}
+/* Read the model row of coeffs from the cfit obj into a vector. */
+static std::vector<double> cf_obj_coeffs(matlab_obj *obj) {
+    return cf_flat(matlab_obj_get_mat(obj, "Coeffs", 6));
+}
+/* Build the n×k Jacobian J[i*k+a] = ∂model/∂p_a at the stored Xdata, for any
+ * model type (poly via scaled-Vandermonde, library via grad, custom via FD). */
+static std::vector<double> cf_jacobian(matlab_obj *obj, int mtype, int &nout, int &kout) {
+    std::vector<double> p = cf_obj_coeffs(obj);
+    std::vector<double> x = cf_flat(matlab_obj_get_mat(obj, "Xdata", 5));
+    int k = static_cast<int>(p.size());
+    int64_t n = static_cast<int64_t>(x.size());
+    nout = static_cast<int>(n); kout = k;
+    std::vector<double> J(static_cast<size_t>(n) * static_cast<size_t>(k), 0.0);
+    if (mtype == 1) {                                    /* polynomial: scaled Vandermonde */
+        double mu = matlab_obj_get_f64(obj, "Mu", 2), sig = matlab_obj_get_f64(obj, "Sigma", 5);
+        if (sig == 0.0) sig = 1.0;
+        for (int64_t i = 0; i < n; ++i) {
+            double xs = (x[static_cast<size_t>(i)] - mu) / sig, xp = 1.0;
+            for (int a = k - 1; a >= 0; --a) {           /* highest power first */
+                J[static_cast<size_t>(i) * static_cast<size_t>(k) + static_cast<size_t>(a)] = xp; xp *= xs;
+            }
+        }
+    } else if (mtype >= 2 && mtype <= 8) {               /* library: analytic grad */
+        std::vector<double> gr(static_cast<size_t>(k));
+        for (int64_t i = 0; i < n; ++i) {
+            cf_model_grad(mtype, p.data(), k, x[static_cast<size_t>(i)], gr.data());
+            for (int a = 0; a < k; ++a)
+                J[static_cast<size_t>(i) * static_cast<size_t>(k) + static_cast<size_t>(a)] = gr[static_cast<size_t>(a)];
+        }
+    } else {                                             /* custom: finite difference */
+        std::string eqn = cf_sstr(matlab_obj_get_string(obj, "Expr", 4));
+        std::vector<std::string> nm = cf_extract_coeffs(eqn);
+        for (int64_t i = 0; i < n; ++i) {
+            double f0 = cf_expr_eval(eqn, nm, p.data(), x[static_cast<size_t>(i)]);
+            for (int a = 0; a < k; ++a) {
+                double h = 1e-6 * (fabs(p[static_cast<size_t>(a)]) + 1e-6);
+                std::vector<double> pp = p; pp[static_cast<size_t>(a)] += h;
+                J[static_cast<size_t>(i) * static_cast<size_t>(k) + static_cast<size_t>(a)] =
+                    (cf_expr_eval(eqn, nm, pp.data(), x[static_cast<size_t>(i)]) - f0) / h;
+            }
+        }
+    }
+    return J;
 }
 
 /* ===== public entry points (dispatched from Lowering.cpp) ================ */
@@ -541,6 +796,7 @@ matlab_mat *matlab_curvefit_fit(matlab_obj *obj, matlab_mat *x, matlab_mat *y,
     matlab_obj_set_f64(obj, "AdjRsquare", 10, r2adj);
     matlab_obj_set_f64(obj, "RMSE", 4, rmse);
     matlab_obj_set_mat(obj, "Resid", 5, resid);
+    matlab_obj_set_mat(obj, "Xdata", 5, cf_copymat(x));    /* for confint / differentiate */
     return mat_alloc(0, 0);
 }
 
@@ -578,7 +834,208 @@ matlab_mat *matlab_curvefit_feval(matlab_obj *obj, matlab_mat *xq) {
     if (!obj) return mat_alloc(0, 0);
     int mtype = static_cast<int>(matlab_obj_get_f64(obj, "ModelType", 9));
     if (mtype == 1) return cf_eval_poly(obj, xq);          /* polynomial */
-    return cf_eval_nonlinear(obj, mtype, xq);              /* exp/power/gauss */
+    if (mtype >= 2 && mtype <= 8) return cf_eval_nonlinear(obj, mtype, xq);
+    /* custom equation (id 100): evaluate the stored expression. */
+    std::string eqn = cf_sstr(matlab_obj_get_string(obj, "Expr", 4));
+    std::vector<std::string> nm = cf_extract_coeffs(eqn);
+    std::vector<double> p = cf_obj_coeffs(obj);
+    matlab_mat *out = mat_alloc(xq ? xq->rows : 1, xq ? xq->cols : 1);
+    int64_t nq = xq ? xq->rows * xq->cols : 0;
+    for (int64_t i = 0; i < nq; ++i)
+        out->data[i] = cf_expr_eval(eqn, nm, p.data(), xq->data[i]);
+    return out;
+}
+
+/* fittype('a*exp(-b*x)+c') — store the equation string + coeff count on the
+ * fittype shell.  Coeff names are re-extracted by the fitter / evaluator. */
+matlab_mat *matlab_curvefit_fittype_init(matlab_obj *ft, void *exprstr) {
+    if (!ft) return mat_alloc(0, 0);
+    std::string eqn = cf_sstr(exprstr);
+    matlab_obj_set_string(ft, "Expr", 4, exprstr);
+    matlab_obj_set_f64(ft, "NumCoeffs", 9, static_cast<double>(cf_extract_coeffs(eqn).size()));
+    matlab_obj_set_f64(ft, "ModelType", 9, 100.0);
+    return mat_alloc(0, 0);
+}
+
+/* fit(x, y, fittypeObj) — custom-equation nonlinear fit (finite-diff LM). */
+matlab_mat *matlab_curvefit_fit_custom(matlab_obj *obj, matlab_mat *x, matlab_mat *y,
+                                       matlab_obj *ft) {
+    if (!obj || !ft) return mat_alloc(0, 0);
+    std::string eqn = cf_sstr(matlab_obj_get_string(ft, "Expr", 4));
+    std::vector<std::string> nm = cf_extract_coeffs(eqn);
+    int k = static_cast<int>(nm.size());
+    if (k < 1) k = 1;
+    std::vector<double> xv = cf_flat(x), yv = cf_flat(y);
+    int64_t n = static_cast<int64_t>(xv.size() < yv.size() ? xv.size() : yv.size());
+    std::vector<double> xx(xv.begin(), xv.begin() + n), yy(yv.begin(), yv.begin() + n);
+    /* Custom equations have no closed-form start point, so multistart: run the
+     * finite-diff LM from a spread of deterministic seeds and keep the best
+     * SSE (structured all-±1 seeds first, then an LCG spread over [-5,5]). */
+    auto sse_of = [&](const std::vector<double> &pp) -> double {
+        double s = 0.0;
+        for (int64_t i = 0; i < n; ++i) {
+            double e = yy[static_cast<size_t>(i)] - cf_expr_eval(eqn, nm, pp.data(), xx[static_cast<size_t>(i)]);
+            s += e * e;
+        }
+        return s;
+    };
+    std::vector<double> p(static_cast<size_t>(k), 1.0), best;
+    double bestcost = INFINITY;
+    uint64_t rng = 0x9e3779b97f4a7c15ULL;
+    auto nextu = [&]() -> double {
+        rng = rng * 6364136223846793005ULL + 1442695040888963407ULL;
+        return static_cast<double>((rng >> 11) & 0xFFFFF) / static_cast<double>(0x100000);
+    };
+    for (int trial = 0; trial < 32; ++trial) {
+        std::vector<double> p0(static_cast<size_t>(k));
+        if (trial == 0)      for (int a = 0; a < k; ++a) p0[static_cast<size_t>(a)] = 1.0;
+        else if (trial == 1) for (int a = 0; a < k; ++a) p0[static_cast<size_t>(a)] = -1.0;
+        else                 for (int a = 0; a < k; ++a) p0[static_cast<size_t>(a)] = nextu() * 10.0 - 5.0;
+        cf_lm_custom(eqn, nm, xx, yy, p0);
+        double cst = sse_of(p0);
+        if (cst < bestcost) { bestcost = cst; best = p0; }
+    }
+    p = best.empty() ? p : best;
+
+    matlab_mat *coeffs = mat_alloc(1, k);
+    for (int a = 0; a < k; ++a) coeffs->data[a] = p[static_cast<size_t>(a)];
+    double ybar = cf_mean(yy), sse = 0.0, sst = 0.0;
+    matlab_mat *resid = mat_alloc(n, 1);
+    for (int64_t i = 0; i < n; ++i) {
+        double e = yy[static_cast<size_t>(i)] - cf_expr_eval(eqn, nm, p.data(), xx[static_cast<size_t>(i)]);
+        resid->data[i] = e; sse += e * e;
+        sst += (yy[static_cast<size_t>(i)] - ybar) * (yy[static_cast<size_t>(i)] - ybar);
+    }
+    double dfe = static_cast<double>(n - k);
+    double r2 = (sst > 0.0) ? 1.0 - sse / sst : (sse == 0.0 ? 1.0 : 0.0);
+    double r2adj = (sst > 0.0 && dfe > 0.0)
+                       ? 1.0 - (sse / dfe) / (sst / static_cast<double>(n - 1)) : r2;
+    double rmse = (dfe > 0.0) ? sqrt(sse / dfe) : 0.0;
+    matlab_obj_set_f64(obj, "ModelType", 9, 100.0);
+    matlab_obj_set_f64(obj, "Degree", 6, 0.0);
+    matlab_obj_set_mat(obj, "Coeffs", 6, coeffs);
+    matlab_obj_set_string(obj, "Expr", 4, matlab_obj_get_string(ft, "Expr", 4));
+    matlab_obj_set_f64(obj, "Mu", 2, 0.0);
+    matlab_obj_set_f64(obj, "Sigma", 5, 1.0);
+    matlab_obj_set_f64(obj, "NumObs", 6, static_cast<double>(n));
+    matlab_obj_set_f64(obj, "NumCoeffs", 9, static_cast<double>(k));
+    matlab_obj_set_f64(obj, "SSE", 3, sse);
+    matlab_obj_set_f64(obj, "Rsquare", 7, r2);
+    matlab_obj_set_f64(obj, "DFE", 3, dfe);
+    matlab_obj_set_f64(obj, "AdjRsquare", 10, r2adj);
+    matlab_obj_set_f64(obj, "RMSE", 4, rmse);
+    matlab_obj_set_mat(obj, "Resid", 5, resid);
+    matlab_obj_set_mat(obj, "Xdata", 5, cf_copymat(x));
+    return mat_alloc(0, 0);
+}
+
+/* confint(f, level) — coefficient confidence intervals (2×k: [lower; upper]).
+ * Σ = (SSE/dfe)·(JᵀJ)⁻¹; CI = b ± t_{dfe,1-α/2}·√Σ_aa. */
+matlab_mat *matlab_curvefit_confint(matlab_obj *obj, double level) {
+    if (!obj) return mat_alloc(0, 0);
+    if (level <= 0.0 || level >= 1.0) level = 0.95;
+    int mtype = static_cast<int>(matlab_obj_get_f64(obj, "ModelType", 9));
+    int n = 0, k = 0;
+    std::vector<double> J = cf_jacobian(obj, mtype, n, k);
+    std::vector<double> p = cf_obj_coeffs(obj);
+    double sse = matlab_obj_get_f64(obj, "SSE", 3);
+    double dfe = matlab_obj_get_f64(obj, "DFE", 3);
+    double s2 = (dfe > 0.0) ? sse / dfe : 0.0;
+    /* JᵀJ (k×k). */
+    std::vector<double> JtJ(static_cast<size_t>(k * k), 0.0);
+    for (int a = 0; a < k; ++a)
+        for (int b = 0; b < k; ++b) {
+            double s = 0.0;
+            for (int i = 0; i < n; ++i)
+                s += J[static_cast<size_t>(i) * static_cast<size_t>(k) + static_cast<size_t>(a)] *
+                     J[static_cast<size_t>(i) * static_cast<size_t>(k) + static_cast<size_t>(b)];
+            JtJ[static_cast<size_t>(a * k + b)] = s;
+        }
+    /* invert JᵀJ by solving against each identity column. */
+    matlab_mat *out = mat_alloc(2, k);
+    double t = (dfe > 0.0) ? cf_tinv(1.0 - (1.0 - level) / 2.0, dfe) : 0.0;
+    for (int a = 0; a < k; ++a) {
+        std::vector<double> A = JtJ, e(static_cast<size_t>(k), 0.0);
+        e[static_cast<size_t>(a)] = 1.0;
+        double se = 0.0;
+        if (cf_solve(A, e, k)) {
+            double var = s2 * e[static_cast<size_t>(a)];     /* (JᵀJ)⁻¹_aa · σ² */
+            se = (var > 0.0) ? sqrt(var) : 0.0;
+        }
+        out->data[a]     = p[static_cast<size_t>(a)] - t * se;   /* row 0: lower */
+        out->data[k + a] = p[static_cast<size_t>(a)] + t * se;   /* row 1: upper */
+    }
+    return out;
+}
+
+/* differentiate(f, xq) — derivative values at xq.  Polynomial via the
+ * coefficient derivative; everything else via a central finite difference
+ * of feval (uniform, robust, and exact-to-tolerance for smooth models). */
+matlab_mat *matlab_curvefit_differentiate(matlab_obj *obj, matlab_mat *xq) {
+    if (!obj) return mat_alloc(0, 0);
+    int64_t nq = xq ? xq->rows * xq->cols : 0;
+    matlab_mat *out = mat_alloc(xq ? xq->rows : 1, xq ? xq->cols : 1);
+    for (int64_t i = 0; i < nq; ++i) {
+        double xi = xq->data[i];
+        double h = 1e-5 * (fabs(xi) + 1.0);
+        matlab_mat xp; double dp = xi + h; xp.data = &dp; xp.rows = 1; xp.cols = 1;
+        matlab_mat xm; double dm = xi - h; xm.data = &dm; xm.rows = 1; xm.cols = 1;
+        matlab_mat *yp = matlab_curvefit_feval(obj, &xp);
+        matlab_mat *ym = matlab_curvefit_feval(obj, &xm);
+        out->data[i] = (yp->data[0] - ym->data[0]) / (2.0 * h);
+    }
+    return out;
+}
+
+/* integrate(f, xq) — cumulative integral from xq(1) via the trapezoid rule
+ * over the (assumed sorted) query grid. */
+matlab_mat *matlab_curvefit_integrate(matlab_obj *obj, matlab_mat *xq) {
+    if (!obj) return mat_alloc(0, 0);
+    int64_t nq = xq ? xq->rows * xq->cols : 0;
+    matlab_mat *yv = matlab_curvefit_feval(obj, xq);
+    matlab_mat *out = mat_alloc(xq ? xq->rows : 1, xq ? xq->cols : 1);
+    double acc = 0.0;
+    if (nq > 0) out->data[0] = 0.0;
+    for (int64_t i = 1; i < nq; ++i) {
+        double dx = xq->data[i] - xq->data[i - 1];
+        acc += 0.5 * (yv->data[i] + yv->data[i - 1]) * dx;
+        out->data[i] = acc;
+    }
+    return out;
+}
+
+/* numcoeffs(f) — the coefficient count as a 1×1. */
+matlab_mat *matlab_curvefit_numcoeffs(matlab_obj *obj) {
+    matlab_mat *m = mat_alloc(1, 1);
+    m->data[0] = obj ? matlab_obj_get_f64(obj, "NumCoeffs", 9) : 0.0;
+    return m;
+}
+
+/* formula(f) — the model formula as a char row.  Custom carries its Expr;
+ * library/poly get a canonical formula string. */
+matlab_mat *matlab_curvefit_formula(matlab_obj *obj) {
+    if (!obj) return reinterpret_cast<matlab_mat *>(matlab_string_from_literal("", 0));
+    int mtype = static_cast<int>(matlab_obj_get_f64(obj, "ModelType", 9));
+    std::string f;
+    if (mtype == 100) {
+        f = cf_sstr(matlab_obj_get_string(obj, "Expr", 4));
+    } else if (mtype == 1) {
+        int deg = static_cast<int>(matlab_obj_get_f64(obj, "Degree", 6));
+        for (int i = 0; i <= deg; ++i) {
+            int power = deg - i;
+            if (i > 0) f += " + ";
+            f += "p" + std::to_string(i + 1);
+            if (power >= 2) f += "*x^" + std::to_string(power);
+            else if (power == 1) f += "*x";
+        }
+    } else {
+        static const char *FM[9] = { "", "", "a*exp(b*x)", "a*exp(b*x)+c*exp(d*x)",
+            "a*x^b", "a*x^b+c", "a*exp(-((x-b)/c)^2)",
+            "a*sin(b*x+c)", "a0+a1*cos(w*x)+b1*sin(w*x)" };
+        f = (mtype >= 2 && mtype <= 8) ? FM[mtype] : "";
+    }
+    return reinterpret_cast<matlab_mat *>(
+        matlab_string_from_literal(f.c_str(), static_cast<int64_t>(f.size())));
 }
 
 /* coeffvalues(f) — the fitted coefficient row vector (a fresh copy). */
@@ -636,6 +1093,18 @@ matlab_mat *matlab_curvefit_disp(matlab_obj *obj) {
     int nc = c ? static_cast<int>(c->rows * c->cols) : 0;
 
     pthread_mutex_lock(&matlab_io_mutex);
+    /* Custom equation (id 100): the stored expression + named coefficients. */
+    if (mtype == 100) {
+        std::string eqn = cf_sstr(matlab_obj_get_string(obj, "Expr", 4));
+        std::vector<std::string> nm = cf_extract_coeffs(eqn);
+        printf("     General model:\n");
+        printf("       f(x) = %s\n", eqn.c_str());
+        printf("     Coefficients:\n");
+        for (size_t i = 0; i < nm.size() && static_cast<int>(i) < nc; ++i)
+            printf("       %s = %.6g\n", nm[i].c_str(), c->data[i]);
+        pthread_mutex_unlock(&matlab_io_mutex);
+        return mat_alloc(0, 0);
+    }
     /* Two-coeff exp/power families: fixed a/b/c/d names + formula. */
     if (mtype >= 2 && mtype <= 5) {
         static const char *NL_NAME[6] = { "", "", "Exp1", "Exp2", "Power1", "Power2" };
