@@ -588,6 +588,14 @@ const Type *TypeInference::visit(Expr &E, Env &Env) {
       auto It = Env.find(N.Ref);
       if (It != Env.end() && It->second) {
         T = It->second;
+      } else if (N.Ref->Kind == BindingKind::Builtin &&
+                 (N.Name == "pi" || N.Name == "eps" || N.Name == "Inf" ||
+                  N.Name == "NaN" || N.Name == "inf" || N.Name == "nan" ||
+                  N.Name == "realmin" || N.Name == "realmax")) {
+        /* Bare nullary numeric constants are scalar doubles, not handles —
+         * otherwise `pi * v` (handle * array) infers `any`, which then
+         * collapses a following sin/cos to a scalar, dropping the shape. */
+        T = TC.scalar(Dtype::Double);
       } else if (N.Ref->Kind == BindingKind::Function ||
                  N.Ref->Kind == BindingKind::Builtin) {
         T = TC.funcHandle();
@@ -1317,6 +1325,18 @@ const Type *TypeInference::visitBuiltinCall(std::string_view Name,
     if (Args.size() >= 3) N = foldInt(Args[2]);
     return TC.arrayOf(Dtype::Double,
                       N > 0 ? Shape::vector(N) : Shape::vector(-1));
+  }
+
+  /* Nullary numeric constants — typed as scalar Double.  Without this they
+   * default to `any`, which makes `pi * v` (and `2*pi*x/...`) collapse: the
+   * multiply yields `any`, and a following sin/cos then infers a scalar
+   * result, dropping the vector shape.  `Inf`/`NaN`/`eps`/realmin/realmax
+   * are scalar only in their 0-arg form (the sized forms build matrices). */
+  if (Name == "pi" ||
+      ((Name == "eps" || Name == "Inf" || Name == "NaN" ||
+        Name == "inf" || Name == "nan" ||
+        Name == "realmin" || Name == "realmax") && Args.empty())) {
+    return TC.scalar(Dtype::Double);
   }
 
   if (Name == "abs" || Name == "sqrt" || Name == "exp" ||

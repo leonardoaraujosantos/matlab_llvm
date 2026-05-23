@@ -536,6 +536,11 @@ private:
    * numel(C) / length(C) / iscell(C) can dispatch to the matlab_cell_*
    * runtime entries instead of the matrix path. */
   std::unordered_set<Binding *> CellBindings;
+  /* (struct binding, field name) pairs assigned a matrix value, so a later
+   * read `s.field` fetches via matlab_struct_get_mat (ptr) instead of
+   * defaulting to get_f64 — Sema can't specialise through struct fields, so
+   * without this `sum(s.v)` / `numel(s.v)` see a scalar and bail. */
+  std::set<std::pair<Binding *, std::string>> MatStructFields;
   /* Bindings whose current value is a matlab_string (from a "..."
    * literal or a matlab_string_concat result). Tracked so `a + b`
    * on two string operands routes to matlab_string_concat rather
@@ -4145,6 +4150,13 @@ void Lowerer::lowerLValueStore(const Expr &LHS, mlir::Value Rhs) {
     bool IsMatRhs2 = Rhs && (Rhs.getType() == PtrTy ||
                              mlir::isa<mlir::RankedTensorType,
                                        mlir::UnrankedTensorType>(Rhs.getType()));
+    /* Remember matrix-valued fields of a simple `s.field = M` so the read
+     * side fetches them as a matrix (see MatStructFields). */
+    if (auto *BN = dynamic_cast<const NameExpr *>(F.Base))
+      if (BN->Ref) {
+        if (IsMatRhs2) MatStructFields.insert({BN->Ref, std::string(F.Field)});
+        else           MatStructFields.erase({BN->Ref, std::string(F.Field)});
+      }
     llvm::StringRef Callee = IsMatRhs2 ? "matlab_struct_set_mat"
                                         : "matlab_struct_set_f64";
     mlir::NamedAttribute Cal(
@@ -4452,6 +4464,18 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
         ResTy = LHS.getType();
       } else if (LHS.getType() == MLPtr || RHS.getType() == MLPtr) {
         ResTy = MLPtr;
+      } else if (mlir::isa<mlir::RankedTensorType, mlir::UnrankedTensorType>(
+                     LHS.getType()) &&
+                 mlir::isa<mlir::Float64Type, mlir::IntegerType>(RHS.getType())) {
+        /* tensor <op> scalar — scalar broadcasts elementwise, so the result
+         * keeps the tensor shape (Sema leaves this None when the scalar side
+         * is a computed value like `2*pi`, which then poisoned sin/cos etc.). */
+        ResTy = LHS.getType();
+      } else if (mlir::isa<mlir::RankedTensorType, mlir::UnrankedTensorType>(
+                     RHS.getType()) &&
+                 mlir::isa<mlir::Float64Type, mlir::IntegerType>(LHS.getType())) {
+        /* scalar <op> tensor — symmetric broadcast. */
+        ResTy = RHS.getType();
       }
     }
     /* REPL override: workspace reads always come back as ptr (the
@@ -10171,6 +10195,12 @@ mlir::Value Lowerer::lowerExpr(const Expr &E) {
      * 1×1 transparently. */
     bool WantMat = mlir::isa<mlir::RankedTensorType,
                               mlir::UnrankedTensorType>(RT);
+    /* A field recorded as matrix-valued at its assignment reads as a matrix
+     * even when Sema left the field type open (`none`/`any`). */
+    if (!WantMat)
+      if (auto *BN = dynamic_cast<const NameExpr *>(F.Base))
+        if (BN->Ref && MatStructFields.count({BN->Ref, std::string(F.Field)}))
+          WantMat = true;
     llvm::StringRef Callee = WantMat ? "matlab_struct_get_mat"
                                       : "matlab_struct_get_f64";
     mlir::NamedAttribute Cal(

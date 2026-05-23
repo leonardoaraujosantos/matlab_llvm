@@ -83,9 +83,57 @@ void matlab_disp_mat_f64(const double *data, int64_t m, int64_t n) {
  * interpret these sequences inside the format string even when the format
  * comes from a single-quoted char literal. Returns the new length. */
 static int64_t expand_escapes(char *dst, const char *src, int64_t n) {
+    /* All callers pass a char buf[1024]; cap the expanded length so the
+     * integer-conversion rewrite below (which can grow the format) can never
+     * overrun. */
+    const int64_t CAP = 1020;
     int64_t w = 0;
-    for (int64_t i = 0; i < n; ++i) {
+    for (int64_t i = 0; i < n && w < CAP; ++i) {
         char c = src[i];
+        /* Integer conversions on a double argument.  Every numeric value in
+         * this runtime is a double, so a C `printf("%d", dbl)` would misread
+         * the bits (printing 0 / garbage).  Rewrite %d / %i / %u — preserving
+         * any flags/width — to %.0f, which prints an integer-valued double
+         * correctly (e.g. `%d` -> `%.0f`, `%5d` -> `%5.0f`).  %% and other
+         * conversions (%f/%g/%e/%s/%x/…) pass through unchanged. */
+        if (c == '%') {
+            dst[w++] = '%';
+            int64_t j = i + 1;
+            if (j < n && src[j] == '%') {            /* literal %% */
+                if (w < CAP) dst[w++] = '%';
+                i = j; continue;
+            }
+            while (j < n && w < CAP &&                /* flags */
+                   (src[j]=='-'||src[j]=='+'||src[j]==' '||src[j]=='0'||src[j]=='#'))
+                dst[w++] = src[j++];
+            while (j < n && w < CAP && src[j] >= '0' && src[j] <= '9')  /* width */
+                dst[w++] = src[j++];
+            bool hasPrec = false;
+            if (j < n && src[j] == '.') {             /* precision */
+                hasPrec = true;
+                if (w < CAP) dst[w++] = src[j++];
+                while (j < n && w < CAP && src[j] >= '0' && src[j] <= '9')
+                    dst[w++] = src[j++];
+            }
+            int64_t lm0 = j;                          /* length modifiers (held) */
+            while (j < n && (src[j]=='l'||src[j]=='h'||src[j]=='L'||
+                             src[j]=='z'||src[j]=='j'||src[j]=='t')) j++;
+            if (j < n) {
+                char conv = src[j];
+                if (conv=='d' || conv=='i' || conv=='u') {
+                    if (!hasPrec && w + 2 < CAP) { dst[w++]='.'; dst[w++]='0'; }
+                    if (w < CAP) dst[w++] = 'f';
+                } else {
+                    for (int64_t k = lm0; k < j && w < CAP; ++k) dst[w++] = src[k];
+                    if (w < CAP) dst[w++] = conv;
+                }
+                i = j;
+            } else {
+                for (int64_t k = lm0; k < j && w < CAP; ++k) dst[w++] = src[k];
+                i = j - 1;
+            }
+            continue;
+        }
         if (c != '\\' || i + 1 >= n) { dst[w++] = c; continue; }
         char e = src[++i];
         switch (e) {
@@ -2148,6 +2196,48 @@ void matlab_fprintf_f64_4(const char *fmt, int64_t n,
     int64_t len = expand_escapes(buf, fmt, n);
     buf[len] = '\0';
     printf(buf, a, b, c, d);
+}
+
+void matlab_fprintf_f64_5(const char *fmt, int64_t n,
+                          double a, double b, double c, double d, double e) {
+    if (n < 0) n = 0;
+    if (n > 1023) n = 1023;
+    char buf[1024];
+    int64_t len = expand_escapes(buf, fmt, n);
+    buf[len] = '\0';
+    printf(buf, a, b, c, d, e);
+}
+
+void matlab_fprintf_f64_6(const char *fmt, int64_t n,
+                          double a, double b, double c, double d, double e, double f) {
+    if (n < 0) n = 0;
+    if (n > 1023) n = 1023;
+    char buf[1024];
+    int64_t len = expand_escapes(buf, fmt, n);
+    buf[len] = '\0';
+    printf(buf, a, b, c, d, e, f);
+}
+
+void matlab_fprintf_f64_7(const char *fmt, int64_t n,
+                          double a, double b, double c, double d, double e,
+                          double f, double g) {
+    if (n < 0) n = 0;
+    if (n > 1023) n = 1023;
+    char buf[1024];
+    int64_t len = expand_escapes(buf, fmt, n);
+    buf[len] = '\0';
+    printf(buf, a, b, c, d, e, f, g);
+}
+
+void matlab_fprintf_f64_8(const char *fmt, int64_t n,
+                          double a, double b, double c, double d, double e,
+                          double f, double g, double h) {
+    if (n < 0) n = 0;
+    if (n > 1023) n = 1023;
+    char buf[1024];
+    int64_t len = expand_escapes(buf, fmt, n);
+    buf[len] = '\0';
+    printf(buf, a, b, c, d, e, f, g, h);
 }
 
 /* input(prompt): numeric-only subset. Prompt goes to stdout, read a double
