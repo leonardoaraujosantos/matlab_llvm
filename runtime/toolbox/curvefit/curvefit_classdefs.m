@@ -97,6 +97,67 @@ classdef fittype
     end
 end
 
+% sfit — Tier-5 surface fit result.  fit([x y], z, 'polyNM') populates this
+% shell (matlab_curvefit_fit_surface); feval(sf, xq, yq) / sf(xq, yq) evaluate
+% the bivariate polynomial.
+classdef sfit
+    properties
+        ModelType
+        DegN
+        DegM
+        Coeffs matrix
+        NumObs
+        NumCoeffs
+        SSE
+        Rsquare
+        DFE
+        AdjRsquare
+        RMSE
+    end
+    methods
+        function obj = sfit()
+            obj.ModelType  = 300;
+            obj.DegN       = 1;
+            obj.DegM       = 1;
+            obj.Coeffs     = zeros(1, 3);
+            obj.NumObs     = 0;
+            obj.NumCoeffs  = 0;
+            obj.SSE        = 0;
+            obj.Rsquare    = 0;
+            obj.DFE        = 0;
+            obj.AdjRsquare = 0;
+            obj.RMSE       = 0;
+        end
+        function z = feval(obj, xq, yq)
+            z = matlab_curvefit_sfeval(obj, xq, yq);
+        end
+        function c = coeffvalues(obj)
+            c = matlab_curvefit_coeffvalues(obj);
+        end
+    end
+end
+
+% ppform — Tier-6 piecewise-polynomial spline form.  spline/pchip/ppmak build
+% it; fnval evaluates, fnder/fnint produce new ppforms (all dispatched in
+% Lowering.cpp).  Coefs is Pieces x Order, each row highest-power-first in the
+% local coordinate (x - break).
+classdef ppform
+    properties
+        Breaks matrix
+        Coefs matrix
+        Pieces
+        Order
+    end
+    methods
+        function obj = ppform()
+            obj.Breaks = zeros(1, 2);
+            obj.Coefs  = zeros(1, 4);
+            obj.Pieces = 1;
+            obj.Order  = 4;
+        end
+    end
+end
+
 % fitoptions — Tier-2 solver-knob carrier for nonlinear fits.  Built by the
 % name-value constructor fitoptions('StartPoint',sp,'Lower',lb,'Upper',ub,
 % 'Weights',w,'Robust','Bisquare'), intercepted in Lowering.cpp (the

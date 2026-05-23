@@ -2279,9 +2279,16 @@ static std::string buildReplPrelude(const std::string &Src) {
      * `fit` is the builtin entry; any mention pulls the umbrella in. */
     {false, "fit",               "curvefit_classdefs.m"},
     {false, "cfit",              "curvefit_classdefs.m"},
+    {false, "sfit",              "curvefit_classdefs.m"},
     {false, "fittype",           "curvefit_classdefs.m"},
     {false, "fitoptions",        "curvefit_classdefs.m"},
     {false, "coeffvalues",       "curvefit_classdefs.m"},
+    {false, "ppform",            "curvefit_classdefs.m"},
+    {false, "spline",            "curvefit_classdefs.m"},
+    {false, "pchip",             "curvefit_classdefs.m"},
+    {false, "ppmak",             "curvefit_classdefs.m"},
+    {false, "fnder",             "curvefit_classdefs.m"},
+    {false, "fnint",             "curvefit_classdefs.m"},
     /* mStateflow Tier 4c — `mstateflow_helpers.m` exposes the small
      * MATLAB-level surface (emit / save-op / restore-op / active /
      * reset) that lets a REPL session drive a chart_tick function
@@ -11123,7 +11130,8 @@ int main(int Argc, char **Argv) {
       "fitcensemble", "TreeBagger",
       "affine2d", "projective2d", "imref2d", "fitgeotform2d",
       /* Curve Fitting Toolbox Tier-1 — `curvefit_classdefs.m` umbrella. */
-      "fit", "cfit", "fittype", "fitoptions", "coeffvalues",
+      "fit", "cfit", "sfit", "fittype", "fitoptions", "coeffvalues",
+      "ppform", "spline", "pchip", "ppmak", "fnder", "fnint",
       "arx", "ar", "armax", "oe", "bj",
       "iv4", "delayest", "compare", "predict", "resid", "goodnessOfFit",
     };
@@ -11276,9 +11284,11 @@ int main(int Argc, char **Argv) {
         ClsName == "imref2d" || ClsName == "fitgeotform2d")
       return "image_classdefs.m";
     /* Curve Fitting Toolbox umbrella. */
-    if (ClsName == "fit" || ClsName == "cfit" ||
+    if (ClsName == "fit" || ClsName == "cfit" || ClsName == "sfit" ||
         ClsName == "fittype" || ClsName == "fitoptions" ||
-        ClsName == "coeffvalues")
+        ClsName == "coeffvalues" || ClsName == "ppform" ||
+        ClsName == "spline" || ClsName == "pchip" || ClsName == "ppmak" ||
+        ClsName == "fnder" || ClsName == "fnint")
       return "curvefit_classdefs.m";
     return std::string();
   };

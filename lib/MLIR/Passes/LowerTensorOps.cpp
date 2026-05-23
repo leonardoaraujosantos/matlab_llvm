@@ -4984,6 +4984,24 @@ bool TensorLowering::rewriteBuiltinCalls() {
         {"matlab_curvefit_integrate",      "matlab_curvefit_integrate",      PtrTy, {PtrTy, PtrTy}},
         {"matlab_curvefit_numcoeffs",      "matlab_curvefit_numcoeffs",      PtrTy, {PtrTy}},
         {"matlab_curvefit_formula",        "matlab_curvefit_formula",        PtrTy, {PtrTy}},
+        /* Tier-4 — smooth (1-3 args) + csaps.  The method string (smooth's
+         * 3rd arg) is coerced const_char→matlab_string by the path below. */
+        {"smooth", "matlab_curvefit_smooth1", PtrTy, {PtrTy}},
+        {"smooth", "matlab_curvefit_smooth2", PtrTy, {PtrTy, PtrTy}},
+        {"smooth", "matlab_curvefit_smooth3", PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"csaps",  "matlab_curvefit_csaps",   PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy}},
+        /* Tier-5 — surface fitting. */
+        {"matlab_curvefit_fit_surface", "matlab_curvefit_fit_surface", PtrTy, {PtrTy, PtrTy, PtrTy, PtrTy}},
+        {"matlab_curvefit_sfeval",      "matlab_curvefit_sfeval",      PtrTy, {PtrTy, PtrTy, PtrTy}},
+        /* Tier-6 — ppform spline layer.  spline/pchip/ppmak/fnder/fnint are
+         * ctor-and-populate (handled in Lowering); fnval/fnbrk are plain
+         * matrix-returning builtins matched here by user name. */
+        {"matlab_curvefit_spline_init", "matlab_curvefit_spline_init", PtrTy, {PtrTy, PtrTy, PtrTy, F64}},
+        {"matlab_curvefit_ppmak_init",  "matlab_curvefit_ppmak_init",  PtrTy, {PtrTy, PtrTy, PtrTy}},
+        {"matlab_curvefit_fnder_init",  "matlab_curvefit_fnder_init",  PtrTy, {PtrTy, PtrTy}},
+        {"matlab_curvefit_fnint_init",  "matlab_curvefit_fnint_init",  PtrTy, {PtrTy, PtrTy}},
+        {"fnval", "matlab_curvefit_fnval", PtrTy, {PtrTy, PtrTy}},
+        {"fnbrk", "matlab_curvefit_fnbrk", PtrTy, {PtrTy, PtrTy}},
       };
       bool matched = false;
       for (const auto &E : pde_table) {

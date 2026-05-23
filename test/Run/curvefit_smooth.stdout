@@ -1,0 +1,4 @@
+moving m(2)=2.0000 m(5)=5.3333
+lowess l(5)=5.1452
+csaps at 2 = 3.9994
+smoothingspline at 2 = 4.0132

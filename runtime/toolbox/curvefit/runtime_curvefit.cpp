@@ -35,6 +35,7 @@
 /* Shipped numeric base reused by the fit cores. */
 extern "C" matlab_mat *matlab_polyfit(matlab_mat *x, matlab_mat *y, double n);
 extern "C" matlab_mat *matlab_polyval(matlab_mat *p, matlab_mat *x);
+extern "C" matlab_mat *matlab_sgolayfilt(matlab_mat *x, double k, double f);
 
 /* Object accessors (alloc-then-populate, class-pinned dispatch). */
 extern "C" double matlab_obj_get_f64(matlab_obj *o, const char *name, int64_t len);
@@ -714,6 +715,253 @@ static std::vector<double> cf_jacobian(matlab_obj *obj, int mtype, int &nout, in
     return J;
 }
 
+/* ===== Tier-4/6: interpolation + cubic-spline core ======================= *
+ * A self-contained interpolation kernel (linear / nearest / pchip / spline)
+ * shared by the interpolant cfit types (Tier-4), `smooth`, the smoothing
+ * spline (`csaps`), and the ppform `spline`/`fnval` family (Tier-6).  All
+ * grids are assumed sorted ascending in x. */
+
+static int cf_find_interval(const std::vector<double> &x, double xq) {
+    int n = static_cast<int>(x.size());
+    if (n < 2) return 0;
+    if (xq <= x[0]) return 0;
+    if (xq >= x[static_cast<size_t>(n - 1)]) return n - 2;
+    int lo = 0, hi = n - 1;
+    while (hi - lo > 1) {
+        int mid = (lo + hi) / 2;
+        if (x[static_cast<size_t>(mid)] <= xq) lo = mid; else hi = mid;
+    }
+    return lo;
+}
+
+/* Not-a-knot cubic-spline second derivatives M (matches MATLAB `spline`). */
+static std::vector<double> cf_spline_M(const std::vector<double> &x, const std::vector<double> &y) {
+    int n = static_cast<int>(x.size());
+    std::vector<double> M(static_cast<size_t>(n), 0.0);
+    if (n < 3) return M;
+    std::vector<double> h(static_cast<size_t>(n - 1));
+    for (int i = 0; i < n - 1; ++i) h[static_cast<size_t>(i)] = x[static_cast<size_t>(i + 1)] - x[static_cast<size_t>(i)];
+    std::vector<double> A(static_cast<size_t>(n) * static_cast<size_t>(n), 0.0), b(static_cast<size_t>(n), 0.0);
+    A[0 * static_cast<size_t>(n) + 0] = h[1];
+    A[0 * static_cast<size_t>(n) + 1] = -(h[0] + h[1]);
+    A[0 * static_cast<size_t>(n) + 2] = h[0];
+    for (int i = 1; i < n - 1; ++i) {
+        size_t r = static_cast<size_t>(i) * static_cast<size_t>(n);
+        A[r + static_cast<size_t>(i - 1)] = h[static_cast<size_t>(i - 1)];
+        A[r + static_cast<size_t>(i)]     = 2.0 * (h[static_cast<size_t>(i - 1)] + h[static_cast<size_t>(i)]);
+        A[r + static_cast<size_t>(i + 1)] = h[static_cast<size_t>(i)];
+        b[static_cast<size_t>(i)] = 6.0 * ((y[static_cast<size_t>(i + 1)] - y[static_cast<size_t>(i)]) / h[static_cast<size_t>(i)] -
+                                           (y[static_cast<size_t>(i)] - y[static_cast<size_t>(i - 1)]) / h[static_cast<size_t>(i - 1)]);
+    }
+    size_t rl = static_cast<size_t>(n - 1) * static_cast<size_t>(n);
+    A[rl + static_cast<size_t>(n - 3)] = h[static_cast<size_t>(n - 2)];
+    A[rl + static_cast<size_t>(n - 2)] = -(h[static_cast<size_t>(n - 3)] + h[static_cast<size_t>(n - 2)]);
+    A[rl + static_cast<size_t>(n - 1)] = h[static_cast<size_t>(n - 3)];
+    cf_solve(A, b, n);
+    return b;
+}
+static double cf_spline_at(const std::vector<double> &x, const std::vector<double> &y,
+                           const std::vector<double> &M, double xq) {
+    int i = cf_find_interval(x, xq);
+    double h = x[static_cast<size_t>(i + 1)] - x[static_cast<size_t>(i)];
+    if (h == 0.0) return y[static_cast<size_t>(i)];
+    double t = xq - x[static_cast<size_t>(i)], a = x[static_cast<size_t>(i + 1)] - xq;
+    return (M[static_cast<size_t>(i)] * a * a * a + M[static_cast<size_t>(i + 1)] * t * t * t) / (6.0 * h)
+         + (y[static_cast<size_t>(i)] / h - M[static_cast<size_t>(i)] * h / 6.0) * a
+         + (y[static_cast<size_t>(i + 1)] / h - M[static_cast<size_t>(i + 1)] * h / 6.0) * t;
+}
+
+/* pchip monotone-cubic Hermite slopes (Fritsch-Carlson). */
+static std::vector<double> cf_pchip_slopes(const std::vector<double> &x, const std::vector<double> &y) {
+    int n = static_cast<int>(x.size());
+    std::vector<double> d(static_cast<size_t>(n), 0.0);
+    if (n < 2) return d;
+    std::vector<double> h(static_cast<size_t>(n - 1)), del(static_cast<size_t>(n - 1));
+    for (int i = 0; i < n - 1; ++i) {
+        h[static_cast<size_t>(i)] = x[static_cast<size_t>(i + 1)] - x[static_cast<size_t>(i)];
+        del[static_cast<size_t>(i)] = (y[static_cast<size_t>(i + 1)] - y[static_cast<size_t>(i)]) / h[static_cast<size_t>(i)];
+    }
+    for (int i = 1; i < n - 1; ++i) {
+        double dl = del[static_cast<size_t>(i - 1)], dr = del[static_cast<size_t>(i)];
+        if (dl * dr > 0.0) {
+            double w1 = 2.0 * h[static_cast<size_t>(i)] + h[static_cast<size_t>(i - 1)];
+            double w2 = h[static_cast<size_t>(i)] + 2.0 * h[static_cast<size_t>(i - 1)];
+            d[static_cast<size_t>(i)] = (w1 + w2) / (w1 / dl + w2 / dr);
+        }
+    }
+    d[0] = del[0];
+    d[static_cast<size_t>(n - 1)] = del[static_cast<size_t>(n - 2)];
+    return d;
+}
+static double cf_pchip_at(const std::vector<double> &x, const std::vector<double> &y,
+                          const std::vector<double> &d, double xq) {
+    int i = cf_find_interval(x, xq);
+    double h = x[static_cast<size_t>(i + 1)] - x[static_cast<size_t>(i)];
+    if (h == 0.0) return y[static_cast<size_t>(i)];
+    double t = (xq - x[static_cast<size_t>(i)]) / h;
+    double h00 = 2.0 * t * t * t - 3.0 * t * t + 1.0, h10 = t * t * t - 2.0 * t * t + t;
+    double h01 = -2.0 * t * t * t + 3.0 * t * t,       h11 = t * t * t - t * t;
+    return h00 * y[static_cast<size_t>(i)] + h10 * h * d[static_cast<size_t>(i)]
+         + h01 * y[static_cast<size_t>(i + 1)] + h11 * h * d[static_cast<size_t>(i + 1)];
+}
+
+/* Dispatch interpolation by mode (1 linear, 2 nearest, 3 pchip, 4 spline). */
+static matlab_mat *cf_interp(int mode, const std::vector<double> &x, const std::vector<double> &y,
+                             const matlab_mat *xq) {
+    int64_t nq = xq ? xq->rows * xq->cols : 0;
+    matlab_mat *out = mat_alloc(xq ? xq->rows : 1, xq ? xq->cols : 1);
+    std::vector<double> M, d;
+    if (mode == 4) M = cf_spline_M(x, y);
+    if (mode == 3) d = cf_pchip_slopes(x, y);
+    for (int64_t q = 0; q < nq; ++q) {
+        double xv = xq->data[q], r;
+        int i = cf_find_interval(x, xv);
+        if (mode == 1) {                                  /* linear */
+            double h = x[static_cast<size_t>(i + 1)] - x[static_cast<size_t>(i)];
+            r = (h == 0.0) ? y[static_cast<size_t>(i)]
+              : y[static_cast<size_t>(i)] + (y[static_cast<size_t>(i + 1)] - y[static_cast<size_t>(i)]) * (xv - x[static_cast<size_t>(i)]) / h;
+        } else if (mode == 2) {                           /* nearest */
+            r = (xv - x[static_cast<size_t>(i)] <= x[static_cast<size_t>(i + 1)] - xv)
+              ? y[static_cast<size_t>(i)] : y[static_cast<size_t>(i + 1)];
+        } else if (mode == 3) {                           /* pchip */
+            r = cf_pchip_at(x, y, d, xv);
+        } else {                                          /* spline */
+            r = cf_spline_at(x, y, M, xv);
+        }
+        out->data[q] = r;
+    }
+    return out;
+}
+
+/* Local-regression smoother (lowess deg 1 / loess deg 2), optionally robust. */
+static std::vector<double> cf_lowess(const std::vector<double> &x, const std::vector<double> &y,
+                                     int span, int deg, bool robust) {
+    int64_t n = static_cast<int64_t>(x.size());
+    std::vector<double> out(static_cast<size_t>(n)), rw(static_cast<size_t>(n), 1.0);
+    int half = span / 2; if (half < 1) half = 1;
+    int passes = robust ? 3 : 1;
+    for (int pass = 0; pass < passes; ++pass) {
+        for (int64_t i = 0; i < n; ++i) {
+            int64_t lo = i - half, hi = i + half;
+            if (lo < 0) lo = 0; if (hi > n - 1) hi = n - 1;
+            double xi = x[static_cast<size_t>(i)], dmax = 1e-12;
+            for (int64_t j = lo; j <= hi; ++j) dmax = std::max(dmax, fabs(x[static_cast<size_t>(j)] - xi));
+            int k = deg + 1;
+            std::vector<double> A(static_cast<size_t>(k * k), 0.0), bvec(static_cast<size_t>(k), 0.0);
+            for (int64_t j = lo; j <= hi; ++j) {
+                double u = fabs(x[static_cast<size_t>(j)] - xi) / dmax;
+                double w = (u < 1.0) ? pow(1.0 - u * u * u, 3.0) : 0.0;   /* tricube */
+                w *= rw[static_cast<size_t>(j)];
+                double xp = 1.0, dx = x[static_cast<size_t>(j)] - xi;
+                std::vector<double> basis(static_cast<size_t>(k));
+                for (int a = 0; a < k; ++a) { basis[static_cast<size_t>(a)] = xp; xp *= dx; }
+                for (int a = 0; a < k; ++a) {
+                    bvec[static_cast<size_t>(a)] += w * basis[static_cast<size_t>(a)] * y[static_cast<size_t>(j)];
+                    for (int b = 0; b < k; ++b)
+                        A[static_cast<size_t>(a * k + b)] += w * basis[static_cast<size_t>(a)] * basis[static_cast<size_t>(b)];
+                }
+            }
+            if (cf_solve(A, bvec, k)) out[static_cast<size_t>(i)] = bvec[0];   /* value at dx=0 = intercept */
+            else out[static_cast<size_t>(i)] = y[static_cast<size_t>(i)];
+        }
+        if (robust && pass + 1 < passes) {                 /* bisquare reweight on residuals */
+            std::vector<double> ar(static_cast<size_t>(n));
+            for (int64_t i = 0; i < n; ++i) ar[static_cast<size_t>(i)] = fabs(y[static_cast<size_t>(i)] - out[static_cast<size_t>(i)]);
+            std::vector<double> s = ar; std::sort(s.begin(), s.end());
+            double mad = s[static_cast<size_t>(n / 2)]; double sc = (mad > 1e-12) ? 6.0 * mad : 1.0;
+            for (int64_t i = 0; i < n; ++i) {
+                double u = ar[static_cast<size_t>(i)] / sc;
+                rw[static_cast<size_t>(i)] = (u < 1.0) ? (1.0 - u * u) * (1.0 - u * u) : 0.0;
+            }
+        }
+    }
+    return out;
+}
+
+/* Reinsch cubic smoothing spline: smoothed values g at the data sites.
+ * Minimises Σ(yᵢ−gᵢ)² + λ∫g″² with λ = (1−p)/p; g is then a natural cubic
+ * spline through (x, g) for off-knot evaluation. */
+static std::vector<double> cf_smooth_spline(const std::vector<double> &x, const std::vector<double> &y,
+                                            double p) {
+    int n = static_cast<int>(x.size());
+    if (n < 3 || p >= 1.0) return y;
+    if (p < 0.0) p = 0.0;
+    double lambda = (p > 0.0) ? (1.0 - p) / p : 1e12;
+    std::vector<double> h(static_cast<size_t>(n - 1));
+    for (int i = 0; i < n - 1; ++i) h[static_cast<size_t>(i)] = x[static_cast<size_t>(i + 1)] - x[static_cast<size_t>(i)];
+    int m = n - 2;                                          /* interior knots */
+    /* Q is n×m; R is m×m tridiagonal.  Solve (R + λ QᵀQ) γ = Qᵀy, g = y − λ Q γ. */
+    auto Q = [&](int i, int j) -> double {                 /* i in [0,n), j in [0,m) */
+        int c = j + 1;                                     /* column maps to interior knot c */
+        if (i == c - 1) return 1.0 / h[static_cast<size_t>(c - 1)];
+        if (i == c)     return -(1.0 / h[static_cast<size_t>(c - 1)] + 1.0 / h[static_cast<size_t>(c)]);
+        if (i == c + 1) return 1.0 / h[static_cast<size_t>(c)];
+        return 0.0;
+    };
+    std::vector<double> A(static_cast<size_t>(m * m), 0.0), rhs(static_cast<size_t>(m), 0.0);
+    for (int j = 0; j < m; ++j) {
+        int c = j + 1;
+        for (int i = 0; i < n; ++i) rhs[static_cast<size_t>(j)] += Q(i, j) * y[static_cast<size_t>(i)];
+        for (int l = 0; l < m; ++l) {                      /* (QᵀQ)[j,l] */
+            double s = 0.0;
+            for (int i = 0; i < n; ++i) s += Q(i, j) * Q(i, l);
+            A[static_cast<size_t>(j * m + l)] += lambda * s;
+        }
+        /* R[j,j], R[j,j±1] */
+        A[static_cast<size_t>(j * m + j)] += (h[static_cast<size_t>(c - 1)] + h[static_cast<size_t>(c)]) / 3.0;
+        if (j > 0)     A[static_cast<size_t>(j * m + (j - 1))] += h[static_cast<size_t>(c - 1)] / 6.0;
+        if (j < m - 1) A[static_cast<size_t>(j * m + (j + 1))] += h[static_cast<size_t>(c)] / 6.0;
+    }
+    cf_solve(A, rhs, m);                                    /* rhs now holds γ */
+    std::vector<double> g(static_cast<size_t>(n));
+    for (int i = 0; i < n; ++i) {
+        double qg = 0.0;
+        for (int j = 0; j < m; ++j) qg += Q(i, j) * rhs[static_cast<size_t>(j)];
+        g[static_cast<size_t>(i)] = y[static_cast<size_t>(i)] - lambda * qg;
+    }
+    return g;
+}
+
+/* ===== Tier-5: surface fitting (polynomial surfaces → sfit) ============== *
+ * polyNM means degree N in x, M in y, with total degree ≤ max(N,M) — the
+ * MATLAB convention.  The bivariate design matrix is solved by the normal
+ * equations; the sfit object stores N, M and the coefficient vector. */
+
+/* Term exponents (i,j) for polyNM, in MATLAB's order (ascending total degree,
+ * then ascending j). */
+static std::vector<std::pair<int,int>> cf_surf_terms(int N, int M) {
+    std::vector<std::pair<int,int>> t;
+    int tot = (N > M) ? N : M;
+    for (int s = 0; s <= tot; ++s)
+        for (int i = s; i >= 0; --i) {
+            int j = s - i;
+            if (i <= N && j <= M) t.push_back(std::make_pair(i, j));
+        }
+    return t;
+}
+
+/* ===== Tier-6: ppform spline layer (spline / pchip / fnval / fnder / fnint) =
+ * A piecewise-polynomial (ppform) object carries Breaks (knots), a Pieces×Order
+ * Coefs matrix (each row highest-power-first in the local coordinate x−break),
+ * Pieces and Order.  fnval evaluates, fnder/fnint produce new ppforms. */
+
+static int cf_pp_piece(const std::vector<double> &br, double xq) {
+    int np = static_cast<int>(br.size()) - 1;
+    if (np < 1) return 0;
+    if (xq <= br[0]) return 0;
+    if (xq >= br[static_cast<size_t>(np)]) return np - 1;
+    int lo = 0, hi = np;
+    while (hi - lo > 1) { int m = (lo + hi) / 2; if (br[static_cast<size_t>(m)] <= xq) lo = m; else hi = m; }
+    return lo;
+}
+static double cf_pp_eval(const std::vector<double> &br, const std::vector<double> &cf,
+                         int order, double xq) {
+    int i = cf_pp_piece(br, xq);
+    double t = xq - br[static_cast<size_t>(i)], v = 0.0;
+    for (int a = 0; a < order; ++a) v = v * t + cf[static_cast<size_t>(i * order + a)];
+    return v;
+}
+
 /* ===== public entry points (dispatched from Lowering.cpp) ================ */
 
 extern "C" {
@@ -733,6 +981,50 @@ matlab_mat *matlab_curvefit_fit(matlab_obj *obj, matlab_mat *x, matlab_mat *y,
     if (nlid > 0) {
         cf_fit_nonlinear(obj, nlid, nlncoef, cf_flat(x), cf_flat(y),
                          nullptr, nullptr, nullptr, std::vector<double>(), 0);
+        return mat_alloc(0, 0);
+    }
+
+    /* Interpolant fit types (id 200): the cfit stores (x, y) + the interp
+     * mode and feval routes through the interpolation kernel. */
+    int imode = 0;
+    if (tag == "linearinterp")       imode = 1;
+    else if (tag == "nearestinterp") imode = 2;
+    else if (tag == "pchipinterp" || tag == "cubicinterp") imode = 3;
+    else if (tag == "splineinterp")  imode = 4;
+    if (imode > 0) {
+        int64_t nn = static_cast<int64_t>(cf_flat(x).size());
+        matlab_obj_set_f64(obj, "ModelType", 9, 200.0);
+        matlab_obj_set_f64(obj, "Degree", 6, static_cast<double>(imode));   /* InterpMode */
+        matlab_obj_set_mat(obj, "Xdata", 5, cf_copymat(x));
+        matlab_obj_set_mat(obj, "Coeffs", 6, cf_copymat(y));                /* stores y */
+        matlab_obj_set_f64(obj, "NumObs", 6, static_cast<double>(nn));
+        matlab_obj_set_f64(obj, "NumCoeffs", 9, static_cast<double>(nn));
+        matlab_obj_set_f64(obj, "SSE", 3, 0.0);
+        matlab_obj_set_f64(obj, "Rsquare", 7, 1.0);                         /* passes through */
+        matlab_obj_set_f64(obj, "DFE", 3, 0.0);
+        matlab_obj_set_f64(obj, "AdjRsquare", 10, 1.0);
+        matlab_obj_set_f64(obj, "RMSE", 4, 0.0);
+        return mat_alloc(0, 0);
+    }
+
+    /* Smoothing spline (id 201): Reinsch smoothing spline; the smoothed
+     * values are stored and feval interpolates them with a natural cubic. */
+    if (tag == "smoothingspline") {
+        std::vector<double> xv = cf_flat(x), yv = cf_flat(y);
+        int64_t nn = static_cast<int64_t>(xv.size() < yv.size() ? xv.size() : yv.size());
+        xv.resize(static_cast<size_t>(nn)); yv.resize(static_cast<size_t>(nn));
+        std::vector<double> g = cf_smooth_spline(xv, yv, 0.9);              /* default param */
+        double sse = 0.0;
+        for (int64_t i = 0; i < nn; ++i) { double e = yv[static_cast<size_t>(i)] - g[static_cast<size_t>(i)]; sse += e * e; }
+        matlab_obj_set_f64(obj, "ModelType", 9, 201.0);
+        matlab_obj_set_mat(obj, "Xdata", 5, cf_rowmat(xv));
+        matlab_obj_set_mat(obj, "Coeffs", 6, cf_rowmat(g));                 /* smoothed values */
+        matlab_obj_set_f64(obj, "NumObs", 6, static_cast<double>(nn));
+        matlab_obj_set_f64(obj, "NumCoeffs", 9, static_cast<double>(nn));
+        matlab_obj_set_f64(obj, "SSE", 3, sse);
+        matlab_obj_set_f64(obj, "Rsquare", 7, 0.0);
+        matlab_obj_set_f64(obj, "DFE", 3, 0.0);
+        matlab_obj_set_f64(obj, "RMSE", 4, (nn > 0) ? sqrt(sse / static_cast<double>(nn)) : 0.0);
         return mat_alloc(0, 0);
     }
 
@@ -835,6 +1127,17 @@ matlab_mat *matlab_curvefit_feval(matlab_obj *obj, matlab_mat *xq) {
     int mtype = static_cast<int>(matlab_obj_get_f64(obj, "ModelType", 9));
     if (mtype == 1) return cf_eval_poly(obj, xq);          /* polynomial */
     if (mtype >= 2 && mtype <= 8) return cf_eval_nonlinear(obj, mtype, xq);
+    if (mtype == 200) {                                    /* interpolant */
+        int imode = static_cast<int>(matlab_obj_get_f64(obj, "Degree", 6));
+        std::vector<double> xv = cf_flat(matlab_obj_get_mat(obj, "Xdata", 5));
+        std::vector<double> yv = cf_flat(matlab_obj_get_mat(obj, "Coeffs", 6));
+        return cf_interp(imode, xv, yv, xq);
+    }
+    if (mtype == 201) {                                    /* smoothing spline (cubic of g) */
+        std::vector<double> xv = cf_flat(matlab_obj_get_mat(obj, "Xdata", 5));
+        std::vector<double> gv = cf_flat(matlab_obj_get_mat(obj, "Coeffs", 6));
+        return cf_interp(4, xv, gv, xq);
+    }
     /* custom equation (id 100): evaluate the stored expression. */
     std::string eqn = cf_sstr(matlab_obj_get_string(obj, "Expr", 4));
     std::vector<std::string> nm = cf_extract_coeffs(eqn);
@@ -1166,6 +1469,266 @@ matlab_mat *matlab_curvefit_disp(matlab_obj *obj) {
         printf("       p%d = %.6g\n", i + 1, c->data[i]);
     pthread_mutex_unlock(&matlab_io_mutex);
     return mat_alloc(0, 0);
+}
+
+/* smooth(y[, span][, method]) — column smoother.  Methods: 'moving' (default,
+ * a shrinking symmetric window), 'lowess'/'loess' (local deg-1/2 regression),
+ * 'rlowess'/'rloess' (robust), 'sgolay' (Savitzky-Golay via the shipped
+ * sgolayfilt).  Index positions 1..n serve as the predictor. */
+static matlab_mat *cf_smooth_run(matlab_mat *ymat, int span, const std::string &method) {
+    std::vector<double> y = cf_flat(ymat);
+    int64_t n = static_cast<int64_t>(y.size());
+    if (span < 1) span = 5;
+    if ((span % 2) == 0) span += 1;                         /* odd window */
+    std::vector<double> out(static_cast<size_t>(n));
+    if (method.empty() || method == "moving") {
+        int half = span / 2;
+        for (int64_t i = 0; i < n; ++i) {
+            int64_t w = half;
+            if (i < w) w = i;
+            if (n - 1 - i < w) w = n - 1 - i;
+            double s = 0.0; int64_t cnt = 0;
+            for (int64_t j = i - w; j <= i + w; ++j) { s += y[static_cast<size_t>(j)]; ++cnt; }
+            out[static_cast<size_t>(i)] = (cnt > 0) ? s / static_cast<double>(cnt) : y[static_cast<size_t>(i)];
+        }
+    } else if (method == "sgolay") {
+        matlab_mat *r = matlab_sgolayfilt(ymat, 2.0, static_cast<double>(span));
+        return r ? r : cf_copymat(ymat);
+    } else {
+        std::vector<double> x(static_cast<size_t>(n));
+        for (int64_t i = 0; i < n; ++i) x[static_cast<size_t>(i)] = static_cast<double>(i + 1);
+        int deg = (method == "loess" || method == "rloess") ? 2 : 1;
+        bool rob = (method == "rlowess" || method == "rloess");
+        out = cf_lowess(x, y, span, deg, rob);
+    }
+    matlab_mat *o = mat_alloc(n, 1);
+    for (int64_t i = 0; i < n; ++i) o->data[i] = out[static_cast<size_t>(i)];
+    return o;
+}
+matlab_mat *matlab_curvefit_smooth1(matlab_mat *y) { return cf_smooth_run(y, 5, ""); }
+matlab_mat *matlab_curvefit_smooth2(matlab_mat *y, matlab_mat *span) {
+    int s = span ? static_cast<int>(span->data[0]) : 5;
+    return cf_smooth_run(y, s, "");
+}
+matlab_mat *matlab_curvefit_smooth3(matlab_mat *y, matlab_mat *span, void *method) {
+    int s = span ? static_cast<int>(span->data[0]) : 5;
+    return cf_smooth_run(y, s, cf_sstr(method));
+}
+
+/* spline(x,y) / pchip(x,y) — build a cubic ppform.  kind: 0 = not-a-knot
+ * cubic spline, 1 = pchip monotone Hermite. */
+matlab_mat *matlab_curvefit_spline_init(matlab_obj *obj, matlab_mat *x, matlab_mat *y, double kind) {
+    if (!obj) return mat_alloc(0, 0);
+    std::vector<double> xv = cf_flat(x), yv = cf_flat(y);
+    int n = static_cast<int>(xv.size() < yv.size() ? xv.size() : yv.size());
+    xv.resize(static_cast<size_t>(n)); yv.resize(static_cast<size_t>(n));
+    int np = (n >= 2) ? n - 1 : 0, order = 4;
+    matlab_mat *coefs = mat_alloc(np, order);
+    if (static_cast<int>(kind) == 1) {                  /* pchip Hermite */
+        std::vector<double> d = cf_pchip_slopes(xv, yv);
+        for (int i = 0; i < np; ++i) {
+            double h = xv[static_cast<size_t>(i + 1)] - xv[static_cast<size_t>(i)];
+            double y0 = yv[static_cast<size_t>(i)], y1 = yv[static_cast<size_t>(i + 1)];
+            double m0 = d[static_cast<size_t>(i)], m1 = d[static_cast<size_t>(i + 1)];
+            double dl = (y1 - y0) / h;
+            coefs->data[i * order + 0] = (m0 + m1 - 2.0 * dl) / (h * h);   /* c3 */
+            coefs->data[i * order + 1] = (3.0 * dl - 2.0 * m0 - m1) / h;   /* c2 */
+            coefs->data[i * order + 2] = m0;                              /* c1 */
+            coefs->data[i * order + 3] = y0;                              /* c0 */
+        }
+    } else {                                            /* not-a-knot cubic spline */
+        std::vector<double> M = cf_spline_M(xv, yv);
+        for (int i = 0; i < np; ++i) {
+            double h = xv[static_cast<size_t>(i + 1)] - xv[static_cast<size_t>(i)];
+            double y0 = yv[static_cast<size_t>(i)], y1 = yv[static_cast<size_t>(i + 1)];
+            double Mi = M[static_cast<size_t>(i)], Mj = M[static_cast<size_t>(i + 1)];
+            coefs->data[i * order + 0] = (Mj - Mi) / (6.0 * h);                       /* c3 */
+            coefs->data[i * order + 1] = Mi / 2.0;                                    /* c2 */
+            coefs->data[i * order + 2] = (y1 - y0) / h - h * (2.0 * Mi + Mj) / 6.0;   /* c1 */
+            coefs->data[i * order + 3] = y0;                                          /* c0 */
+        }
+    }
+    matlab_obj_set_mat(obj, "Breaks", 6, cf_rowmat(xv));
+    matlab_obj_set_mat(obj, "Coefs", 5, coefs);
+    matlab_obj_set_f64(obj, "Pieces", 6, static_cast<double>(np));
+    matlab_obj_set_f64(obj, "Order", 5, static_cast<double>(order));
+    return mat_alloc(0, 0);
+}
+
+/* ppmak(breaks, coefs) — build a ppform from explicit parts. */
+matlab_mat *matlab_curvefit_ppmak_init(matlab_obj *obj, matlab_mat *breaks, matlab_mat *coefs) {
+    if (!obj) return mat_alloc(0, 0);
+    std::vector<double> br = cf_flat(breaks);
+    int np = static_cast<int>(br.size()) - 1; if (np < 1) np = 1;
+    int order = (coefs && np > 0) ? static_cast<int>(coefs->rows * coefs->cols / np) : 1;
+    matlab_obj_set_mat(obj, "Breaks", 6, cf_copymat(breaks));
+    matlab_obj_set_mat(obj, "Coefs", 5, cf_copymat(coefs));
+    matlab_obj_set_f64(obj, "Pieces", 6, static_cast<double>(np));
+    matlab_obj_set_f64(obj, "Order", 5, static_cast<double>(order));
+    return mat_alloc(0, 0);
+}
+
+/* fnval(pp, xx) — evaluate the piecewise polynomial at xx. */
+matlab_mat *matlab_curvefit_fnval(matlab_obj *pp, matlab_mat *xx) {
+    if (!pp) return mat_alloc(0, 0);
+    std::vector<double> br = cf_flat(matlab_obj_get_mat(pp, "Breaks", 6));
+    std::vector<double> cf = cf_flat(matlab_obj_get_mat(pp, "Coefs", 5));
+    int order = static_cast<int>(matlab_obj_get_f64(pp, "Order", 5));
+    int64_t nq = xx ? xx->rows * xx->cols : 0;
+    matlab_mat *out = mat_alloc(xx ? xx->rows : 1, xx ? xx->cols : 1);
+    for (int64_t q = 0; q < nq; ++q) out->data[q] = cf_pp_eval(br, cf, order, xx->data[q]);
+    return out;
+}
+
+/* fnder(pp) — differentiate each piece (order drops by one). */
+matlab_mat *matlab_curvefit_fnder_init(matlab_obj *obj, matlab_obj *pp) {
+    if (!obj || !pp) return mat_alloc(0, 0);
+    matlab_mat *br = matlab_obj_get_mat(pp, "Breaks", 6);
+    std::vector<double> cf = cf_flat(matlab_obj_get_mat(pp, "Coefs", 5));
+    int order = static_cast<int>(matlab_obj_get_f64(pp, "Order", 5));
+    int np = static_cast<int>(matlab_obj_get_f64(pp, "Pieces", 6));
+    int no = (order > 1) ? order - 1 : 1;
+    matlab_mat *nc = mat_alloc(np, no);
+    for (int i = 0; i < np; ++i)
+        for (int a = 0; a < no; ++a) {                  /* d/dt of c_{a}*t^{order-1-a} */
+            double power = static_cast<double>(order - 1 - a);
+            nc->data[i * no + a] = (order > 1) ? cf[static_cast<size_t>(i * order + a)] * power : 0.0;
+        }
+    matlab_obj_set_mat(obj, "Breaks", 6, cf_copymat(br));
+    matlab_obj_set_mat(obj, "Coefs", 5, nc);
+    matlab_obj_set_f64(obj, "Pieces", 6, static_cast<double>(np));
+    matlab_obj_set_f64(obj, "Order", 5, static_cast<double>(no));
+    return mat_alloc(0, 0);
+}
+
+/* fnint(pp) — antiderivative (order rises by one), continuous across pieces. */
+matlab_mat *matlab_curvefit_fnint_init(matlab_obj *obj, matlab_obj *pp) {
+    if (!obj || !pp) return mat_alloc(0, 0);
+    std::vector<double> br = cf_flat(matlab_obj_get_mat(pp, "Breaks", 6));
+    std::vector<double> cf = cf_flat(matlab_obj_get_mat(pp, "Coefs", 5));
+    int order = static_cast<int>(matlab_obj_get_f64(pp, "Order", 5));
+    int np = static_cast<int>(matlab_obj_get_f64(pp, "Pieces", 6));
+    int no = order + 1;
+    matlab_mat *nc = mat_alloc(np, no);
+    double carry = 0.0;
+    for (int i = 0; i < np; ++i) {
+        for (int a = 0; a < order; ++a) {               /* integral of c_a*t^{order-1-a} */
+            double power = static_cast<double>(order - 1 - a);
+            nc->data[i * no + a] = cf[static_cast<size_t>(i * order + a)] / (power + 1.0);
+        }
+        nc->data[i * no + (no - 1)] = carry;            /* constant = value at left break */
+        double h = br[static_cast<size_t>(i + 1)] - br[static_cast<size_t>(i)], v = 0.0;
+        for (int a = 0; a < no; ++a) v = v * h + nc->data[i * no + a];   /* value at right break */
+        carry = v;
+    }
+    matlab_obj_set_mat(obj, "Breaks", 6, cf_rowmat(br));
+    matlab_obj_set_mat(obj, "Coefs", 5, nc);
+    matlab_obj_set_f64(obj, "Pieces", 6, static_cast<double>(np));
+    matlab_obj_set_f64(obj, "Order", 5, static_cast<double>(no));
+    return mat_alloc(0, 0);
+}
+
+/* fnbrk(pp, part) — extract a ppform part ('breaks' / 'coefs' / 'pieces' /
+ * 'order'); returns a matrix. */
+matlab_mat *matlab_curvefit_fnbrk(matlab_obj *pp, void *partstr) {
+    if (!pp) return mat_alloc(0, 0);
+    std::string part = cf_sstr(partstr);
+    if (part == "breaks") return cf_copymat(matlab_obj_get_mat(pp, "Breaks", 6));
+    if (part == "coefs" || part == "coefficients") return cf_copymat(matlab_obj_get_mat(pp, "Coefs", 5));
+    matlab_mat *m = mat_alloc(1, 1);
+    m->data[0] = (part == "order") ? matlab_obj_get_f64(pp, "Order", 5)
+                                   : matlab_obj_get_f64(pp, "Pieces", 6);
+    return m;
+}
+
+/* fit([x y], z, 'polyNM') — bivariate polynomial surface → sfit. */
+matlab_mat *matlab_curvefit_fit_surface(matlab_obj *obj, matlab_mat *xy, matlab_mat *z,
+                                        void *tagstr) {
+    if (!obj) return mat_alloc(0, 0);
+    std::string tag = cf_sstr(tagstr);
+    int N = 1, M = 1;
+    if (tag.size() == 6 && tag.compare(0, 4, "poly") == 0) { N = tag[4] - '0'; M = tag[5] - '0'; }
+    /* split the predictor columns (xy is npts×2, row-major). */
+    int64_t npts = (xy && xy->cols == 2) ? xy->rows : (xy ? xy->rows * xy->cols / 2 : 0);
+    std::vector<double> xs(static_cast<size_t>(npts)), ys(static_cast<size_t>(npts));
+    for (int64_t p = 0; p < npts; ++p) {
+        xs[static_cast<size_t>(p)] = xy->data[p * 2 + 0];
+        ys[static_cast<size_t>(p)] = xy->data[p * 2 + 1];
+    }
+    std::vector<double> zz = cf_flat(z);
+    std::vector<std::pair<int,int>> terms = cf_surf_terms(N, M);
+    int k = static_cast<int>(terms.size());
+    /* normal equations DᵀD c = Dᵀz, accumulated row-by-row. */
+    std::vector<double> A(static_cast<size_t>(k * k), 0.0), b(static_cast<size_t>(k), 0.0);
+    std::vector<double> row(static_cast<size_t>(k));
+    for (int64_t p = 0; p < npts; ++p) {
+        for (int a = 0; a < k; ++a)
+            row[static_cast<size_t>(a)] = pow(xs[static_cast<size_t>(p)], terms[static_cast<size_t>(a)].first) *
+                                          pow(ys[static_cast<size_t>(p)], terms[static_cast<size_t>(a)].second);
+        for (int a = 0; a < k; ++a) {
+            b[static_cast<size_t>(a)] += row[static_cast<size_t>(a)] * zz[static_cast<size_t>(p)];
+            for (int c = 0; c < k; ++c)
+                A[static_cast<size_t>(a * k + c)] += row[static_cast<size_t>(a)] * row[static_cast<size_t>(c)];
+        }
+    }
+    cf_solve(A, b, k);                                  /* b now holds coeffs */
+    matlab_mat *coeffs = mat_alloc(1, k);
+    for (int a = 0; a < k; ++a) coeffs->data[a] = b[static_cast<size_t>(a)];
+    /* goodness of fit. */
+    double zbar = cf_mean(zz), sse = 0.0, sst = 0.0;
+    for (int64_t p = 0; p < npts; ++p) {
+        double zh = 0.0;
+        for (int a = 0; a < k; ++a)
+            zh += b[static_cast<size_t>(a)] * pow(xs[static_cast<size_t>(p)], terms[static_cast<size_t>(a)].first) *
+                  pow(ys[static_cast<size_t>(p)], terms[static_cast<size_t>(a)].second);
+        double e = zz[static_cast<size_t>(p)] - zh;
+        sse += e * e; sst += (zz[static_cast<size_t>(p)] - zbar) * (zz[static_cast<size_t>(p)] - zbar);
+    }
+    double dfe = static_cast<double>(npts - k);
+    double r2 = (sst > 0.0) ? 1.0 - sse / sst : (sse == 0.0 ? 1.0 : 0.0);
+    matlab_obj_set_f64(obj, "ModelType", 9, 300.0);
+    matlab_obj_set_f64(obj, "DegN", 4, static_cast<double>(N));
+    matlab_obj_set_f64(obj, "DegM", 4, static_cast<double>(M));
+    matlab_obj_set_mat(obj, "Coeffs", 6, coeffs);
+    matlab_obj_set_f64(obj, "NumObs", 6, static_cast<double>(npts));
+    matlab_obj_set_f64(obj, "NumCoeffs", 9, static_cast<double>(k));
+    matlab_obj_set_f64(obj, "SSE", 3, sse);
+    matlab_obj_set_f64(obj, "Rsquare", 7, r2);
+    matlab_obj_set_f64(obj, "DFE", 3, dfe);
+    matlab_obj_set_f64(obj, "AdjRsquare", 10,
+        (sst > 0.0 && dfe > 0.0) ? 1.0 - (sse / dfe) / (sst / static_cast<double>(npts - 1)) : r2);
+    matlab_obj_set_f64(obj, "RMSE", 4, (dfe > 0.0) ? sqrt(sse / dfe) : 0.0);
+    return mat_alloc(0, 0);
+}
+
+/* feval(sf, xq, yq) / sf(xq, yq) — evaluate the fitted surface. */
+matlab_mat *matlab_curvefit_sfeval(matlab_obj *obj, matlab_mat *xq, matlab_mat *yq) {
+    if (!obj) return mat_alloc(0, 0);
+    int N = static_cast<int>(matlab_obj_get_f64(obj, "DegN", 4));
+    int M = static_cast<int>(matlab_obj_get_f64(obj, "DegM", 4));
+    std::vector<double> c = cf_obj_coeffs(obj);
+    std::vector<std::pair<int,int>> terms = cf_surf_terms(N, M);
+    int k = static_cast<int>(terms.size());
+    int64_t nq = xq ? xq->rows * xq->cols : 0;
+    matlab_mat *out = mat_alloc(xq ? xq->rows : 1, xq ? xq->cols : 1);
+    for (int64_t q = 0; q < nq; ++q) {
+        double xv = xq->data[q], yv = (yq && q < yq->rows * yq->cols) ? yq->data[q] : 0.0, s = 0.0;
+        for (int a = 0; a < k && a < static_cast<int>(c.size()); ++a)
+            s += c[static_cast<size_t>(a)] * pow(xv, terms[static_cast<size_t>(a)].first) *
+                 pow(yv, terms[static_cast<size_t>(a)].second);
+        out->data[q] = s;
+    }
+    return out;
+}
+
+/* csaps(x, y, p, xx) — cubic smoothing spline evaluated at xx. */
+matlab_mat *matlab_curvefit_csaps(matlab_mat *x, matlab_mat *y, matlab_mat *p, matlab_mat *xx) {
+    std::vector<double> xv = cf_flat(x), yv = cf_flat(y);
+    int64_t n = static_cast<int64_t>(xv.size() < yv.size() ? xv.size() : yv.size());
+    xv.resize(static_cast<size_t>(n)); yv.resize(static_cast<size_t>(n));
+    double pp = p ? p->data[0] : 0.9;
+    std::vector<double> g = cf_smooth_spline(xv, yv, pp);
+    return cf_interp(4, xv, g, xx);
 }
 
 }  /* extern "C" */
