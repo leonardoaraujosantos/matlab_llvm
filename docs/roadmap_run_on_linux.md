@@ -6,9 +6,10 @@ maintainer's macOS machine), and the **one remaining open bug**
 (`stats_t4_cluster`) with everything a contributor needs to reproduce and
 fix it on a Linux box.
 
-Status as of 2026-05-23: **12 of 13 originally-failing lanes are green**;
-`run-tests` is at **492 / 1**, the lone failure being `stats_t4_cluster`
-(a Linux-only MLIR dominance bug — see §3).
+Status as of 2026-05-23: **DONE — the full Linux ctest gate is green** (no
+skips). All 13 originally-failing lanes are fixed, including the last one,
+`stats_t4_cluster` (the MLIR dominance bug, issue #13, now resolved — see
+§3). SymPP is built in CI with the symbolic lanes running. Merged via #12.
 
 ---
 
@@ -54,10 +55,19 @@ expanded from 4 to 8 fixtures (`test/RunSym/`).
 
 ---
 
-## 3. OPEN BUG — `stats_t4_cluster` MLIR dominance failure on Linux
+## 3. RESOLVED — `stats_t4_cluster` MLIR dominance failure on Linux
 
-> Tracked as GitHub issue
-> [#13](https://github.com/leonardoaraujosantos/matlab_llvm/issues/13).
+> Was GitHub issue
+> [#13](https://github.com/leonardoaraujosantos/matlab_llvm/issues/13),
+> **fixed in `ec1d872`.** Root cause: the 5-output `pca` splitter held the
+> call operand in a non-owning `ValueRange ar = ValueRange{X}`; the
+> temporary initializer-list backing array was freed before the
+> `LLVM::CallOp::create` used it, so operand #0 was read from freed memory.
+> libc++ (macOS) left the slot intact → worked; libstdc++ (Linux)
+> clobbered it → "operand #0 does not dominate this use". Fix: hold the
+> operand in an owning `SmallVector<Value>` (clears the `-Wdangling`
+> warning at that site). Verified green on the Linux runner — no test skip.
+> The original analysis below is kept for reference.
 
 ### Symptom
 
@@ -180,6 +190,8 @@ contributor:
 - [x] strict `-Wno-missing-field-initializers`
 - [x] tolerance-aware numeric golden compare (`numdiff.py`)
 - [x] portable `rf_*` fixture paths; stable `fft_bluestein`
-- [x] SymPP built in CI + symbolic suite expanded (4 → 8)
-- [ ] **`stats_t4_cluster` MLIR dominance bug (§3)** — needs a Linux repro
+- [x] SymPP built in CI + symbolic suite expanded (4 → 11)
+- [x] **`stats_t4_cluster` MLIR dominance bug (§3)** — fixed (dangling
+      `ValueRange` in the pca splitter, `ec1d872`)
 - [ ] Fix `build-llvm-toolchain.yml` so the prebuilt tarball publishes (§5)
+      — remaining nice-to-have (CI falls back to the Actions cache today)
