@@ -1,0 +1,82 @@
+name: Build LLVM toolchain
+
+# Builds /opt/llvm (LLVM + MLIR — Release, dylib, RTTI, as matlabc needs)
+# once and publishes it as a Release asset.  The setup-llvm composite
+# action downloads that asset (~30s) instead of compiling LLVM from
+# source (~2h).  Re-run this manually only after bumping the LLVM tag;
+# CI never pays the cold source build again.
+#
+#   Actions tab -> "Build LLVM toolchain" -> Run workflow
+#
+# Produces:
+#   release tag : toolchain-<llvm-tag>           (e.g. toolchain-llvmorg-22.1.3)
+#   asset       : llvm-<llvm-tag>-linux-x64.tar.zst
+on:
+  workflow_dispatch:
+    inputs:
+      llvm-tag:
+        description: 'LLVM source git tag'
+        type: string
+        default: 'llvmorg-22.1.3'
+
+permissions:
+  contents: write   # create the release + upload the asset
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - name: Install build deps
+        run: |
+          set -euxo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build pkg-config zstd gcc g++ \
+            libzstd-dev libcurl4-openssl-dev libedit-dev \
+            libxml2-dev zlib1g-dev libtinfo-dev python3
+
+      - name: Build + install LLVM ${{ inputs.llvm-tag }}
+        run: |
+          set -euxo pipefail
+          sudo mkdir -p /opt/llvm
+          sudo chown "$(id -u):$(id -g)" /opt/llvm
+          git clone --depth 1 -b "${{ inputs.llvm-tag }}" \
+            https://github.com/llvm/llvm-project /tmp/llvm-project
+          cmake -S /tmp/llvm-project/llvm -B /tmp/llvm-build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/opt/llvm \
+            -DLLVM_ENABLE_PROJECTS="mlir" \
+            -DLLVM_TARGETS_TO_BUILD="X86;AArch64" \
+            -DLLVM_INSTALL_UTILS=ON \
+            -DLLVM_BUILD_LLVM_DYLIB=ON \
+            -DLLVM_LINK_LLVM_DYLIB=ON \
+            -DLLVM_ENABLE_RTTI=ON \
+            -DLLVM_ENABLE_ASSERTIONS=OFF
+          cmake --build /tmp/llvm-build --target install -j"$(nproc)"
+          # Slim the install — drop docs/man we never use.
+          rm -rf /opt/llvm/share/man /opt/llvm/share/doc
+          # Hard fail if the bit matlabc's cmake needs is missing.
+          test -f /opt/llvm/lib/cmake/mlir/MLIRConfig.cmake
+
+      - name: Pack tarball
+        run: |
+          set -euxo pipefail
+          tar -C /opt/llvm --zstd -cf \
+            "llvm-${{ inputs.llvm-tag }}-linux-x64.tar.zst" .
+          ls -lh "llvm-${{ inputs.llvm-tag }}-linux-x64.tar.zst"
+
+      - name: Publish as release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euxo pipefail
+          tag="toolchain-${{ inputs.llvm-tag }}"
+          asset="llvm-${{ inputs.llvm-tag }}-linux-x64.tar.zst"
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" \
+              --title "LLVM toolchain ${{ inputs.llvm-tag }}" \
+              --notes "Prebuilt LLVM + MLIR (Release, dylib, RTTI) for CI. Consumed by .github/actions/setup-llvm. Not a project release." \
+              --latest=false
+          fi
+          gh release upload "$tag" "$asset" --clobber
